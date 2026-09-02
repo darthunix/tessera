@@ -15,9 +15,9 @@
 *.so
 *.dSYM/
 .deps/
-/tests/log/
-/tests/results/
-/tests/tmp_check/
+/test/log/
+/test/results/
+/test/tmp_check*/
 regression.diffs
 regression.out
 

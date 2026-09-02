@@ -1,0 +1,14 @@
+CREATE EXTENSION tessera;
+\getenv libdir PG_LIBDIR
+\getenv dlsuffix PG_DLSUFFIX
+\set bridge_test :libdir '/tessera_bridge_test' :dlsuffix
+LOAD :'bridge_test';
+CREATE FUNCTION tessera_test_api_visible()
+RETURNS boolean
+AS :'bridge_test', 'tessera_test_api_visible'
+LANGUAGE C STRICT;
+SELECT tessera_test_api_visible() AS api_visible \gset
+\echo :api_visible
+t
+DROP FUNCTION tessera_test_api_visible();
+DROP EXTENSION tessera;

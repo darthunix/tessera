@@ -1,0 +1,4 @@
+comment = 'Bridge for batch-aware PostgreSQL executor extensions'
+default_version = '0.1'
+module_pathname = '$libdir/tessera'
+relocatable = true
