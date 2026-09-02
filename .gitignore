@@ -1,0 +1,27 @@
+# Local planning notes
+/plan-migration.txt
+
+# Build trees
+/build/
+/target/
+/compile_commands.json
+
+# C and PostgreSQL build products
+*.a
+*.bc
+*.dll
+*.dylib
+*.o
+*.so
+*.dSYM/
+.deps/
+/tests/log/
+/tests/results/
+/tests/tmp_check/
+regression.diffs
+regression.out
+
+# Editor and operating system files
+.DS_Store
+.idea/
+.vscode/
