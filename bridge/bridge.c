@@ -9,8 +9,7 @@ PG_MODULE_MAGIC;
 PGDLLEXPORT void _PG_init(void);
 
 static const TessApi tess_api = {
-	.abi_version = TESS_API_ABI_VERSION,
-	.struct_size = sizeof(TessApi),
+	TESS_ABI_INITIALIZER(TESS_API_ABI_VERSION, TessApi),
 };
 
 void

@@ -4,7 +4,7 @@ PG_CPPFLAGS = -I$(srcdir)/../include
 
 EXTENSION = tessera
 DATA = tessera--0.1.sql
-HEADERS = ../include/tessera/bridge.h
+HEADERS = ../include/tessera/abi.h ../include/tessera/bridge.h
 PG_CONFIG ?= pg_config
 PGXS := $(shell $(PG_CONFIG) --pgxs)
 include $(PGXS)

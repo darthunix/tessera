@@ -9,6 +9,8 @@
 
 #include "postgres.h"
 
+#include "tessera/abi.h"
+
 #define TESS_API_RENDEZVOUS "tessera.api.v0"
 #define TESS_API_ABI_VERSION 0
 
@@ -19,5 +21,7 @@ typedef struct TessApi
 	/* Gates access to fields appended by later compatible versions. */
 	Size		struct_size;
 } TessApi;
+
+#define TESS_API_MIN_SIZE TESS_ABI_SIZE_THROUGH(TessApi, struct_size)
 
 #endif /* TESSERA_BRIDGE_H */

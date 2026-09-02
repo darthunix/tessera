@@ -10,8 +10,16 @@ RETURNS boolean
 AS :'bridge_test', 'tessera_test_api_visible'
 LANGUAGE C STRICT;
 
+CREATE FUNCTION tessera_test_abi_helpers()
+RETURNS boolean
+AS :'bridge_test', 'tessera_test_abi_helpers'
+LANGUAGE C STRICT;
+
 SELECT tessera_test_api_visible() AS api_visible \gset
 \echo :api_visible
+SELECT tessera_test_abi_helpers() AS abi_helpers \gset
+\echo :abi_helpers
 
+DROP FUNCTION tessera_test_abi_helpers();
 DROP FUNCTION tessera_test_api_visible();
 DROP EXTENSION tessera;

@@ -27,6 +27,12 @@ it, so compatible operations can be appended without breaking an older
 provider. Operations will be added as their implementations and independent
 consumers are introduced.
 
+All public size-tagged structures follow one rule: existing fields keep their
+position, type, and meaning, while compatible fields are appended at the end.
+`TESS_ABI_HAS_FIELD` checks an appended field before use. The two initializer
+macros fill either a version-and-size header or a size-only header, so each
+module reports the structure layout against which it was compiled.
+
 Version zero is an experimental development ABI, not a compatibility promise.
 The first public release will assign a stable nonzero ABI version after the
 interfaces have been reviewed together.
