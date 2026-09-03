@@ -34,7 +34,12 @@ tessera_test_api_visible(PG_FUNCTION_ARGS)
 
 	PG_RETURN_BOOL(api != NULL &&
 					   api->abi_version == TESS_API_ABI_VERSION &&
-					   api->struct_size >= TESS_API_MIN_SIZE);
+					   api->struct_size >= TESS_API_MIN_SIZE &&
+					   api->binding_ops != NULL &&
+					   api->binding_ops->abi_version ==
+					   TESS_BINDING_OPS_ABI_VERSION &&
+					   api->binding_ops->struct_size >=
+					   TESS_BINDING_OPS_MIN_SIZE);
 }
 
 Datum

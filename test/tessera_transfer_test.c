@@ -15,16 +15,17 @@ PG_FUNCTION_INFO_V1(tessera_test_publish_freezes_request);
 
 typedef struct TestBatchData
 {
-	const TessApi *api;
+	const TessBindingOps *ops;
 	TessBinding *binding;
 	int			release_calls;
 	bool		saw_active_during_release;
 } TestBatchData;
 
-static const TessApi *
-test_api(void)
+static const TessBindingOps *
+test_binding_ops(void)
 {
 	const TessApi *api;
+	const TessBindingOps *ops;
 	void	  **rendezvous;
 
 	rendezvous = find_rendezvous_variable(TESS_API_RENDEZVOUS);
@@ -32,7 +33,12 @@ test_api(void)
 	if (api == NULL || api->abi_version != TESS_API_ABI_VERSION ||
 		api->struct_size < TESS_API_MIN_SIZE)
 		elog(ERROR, "Tessera test could not find a compatible bridge");
-	return api;
+	ops = api->binding_ops;
+	if (ops == NULL ||
+		ops->abi_version != TESS_BINDING_OPS_ABI_VERSION ||
+		ops->struct_size < TESS_BINDING_OPS_MIN_SIZE)
+		elog(ERROR, "Tessera test could not find compatible binding operations");
+	return ops;
 }
 
 static void
@@ -54,7 +60,7 @@ test_release(TessBatch *batch)
 	TestBatchData *data = batch->private_data;
 
 	data->release_calls++;
-	if (data->api != NULL && data->api->get_batch(data->binding) != NULL)
+	if (data->ops != NULL && data->ops->get_batch(data->binding) != NULL)
 		data->saw_active_during_release = true;
 }
 
@@ -65,7 +71,7 @@ static const TessBatchOps test_ops = {
 };
 
 static TessBinding *
-make_binding(const TessApi *api, TupleTableSlot **slot)
+make_binding(const TessBindingOps *ops, TupleTableSlot **slot)
 {
 	TessLayout	layout = {
 		.struct_size = sizeof(TessLayout),
@@ -74,7 +80,7 @@ make_binding(const TessApi *api, TupleTableSlot **slot)
 	};
 
 	*slot = MakeSingleTupleTableSlot(NULL, &TTSOpsVirtual);
-	return api->attach(*slot, &layout);
+	return ops->attach(*slot, &layout);
 }
 
 static TessBatch
@@ -94,7 +100,7 @@ make_batch(TestBatchData *data, uint64 *bits, int nrows,
 Datum
 tessera_test_transfer(PG_FUNCTION_ARGS)
 {
-	const TessApi *api = test_api();
+	const TessBindingOps *ops = test_binding_ops();
 	MemoryContext context;
 	MemoryContext oldcontext;
 	TupleTableSlot *slot;
@@ -114,39 +120,39 @@ tessera_test_transfer(PG_FUNCTION_ARGS)
 	context = AllocSetContextCreate(CurrentMemoryContext,
 		"Tessera transfer test", ALLOCSET_DEFAULT_SIZES);
 	oldcontext = MemoryContextSwitchTo(context);
-	binding = make_binding(api, &slot);
-	data.api = api;
+	binding = make_binding(ops, &slot);
+	data.ops = ops;
 	data.binding = binding;
-	api->set_request(binding, &request);
+	ops->set_request(binding, &request);
 	batch = make_batch(&data, &active_bits, 64, &test_ops);
 
-	api->publish_batch(binding, &batch);
-	result = api->get_batch(binding) == &batch;
-	api->release_batch(binding);
-	result = result && api->get_batch(binding) == NULL &&
+	ops->publish_batch(binding, &batch);
+	result = ops->get_batch(binding) == &batch;
+	ops->release_batch(binding);
+	result = result && ops->get_batch(binding) == NULL &&
 		data.release_calls == 1;
-	api->release_batch(binding);
-	api->release_batch(NULL);
+	ops->release_batch(binding);
+	ops->release_batch(NULL);
 	result = result && data.release_calls == 1 &&
-		api->get_batch(NULL) == NULL;
+		ops->get_batch(NULL) == NULL;
 
 	batch.rows.bits = &empty_bits;
-	api->publish_batch(binding, &batch);
-	api->release_batch(binding);
+	ops->publish_batch(binding, &batch);
+	ops->release_batch(binding);
 	result = result && data.release_calls == 2;
 
 	short_ops.struct_size = TESS_BATCH_OPS_MIN_SIZE;
 	batch.ops = &short_ops;
-	api->publish_batch(binding, &batch);
-	api->release_batch(binding);
+	ops->publish_batch(binding, &batch);
+	ops->release_batch(binding);
 	result = result && data.release_calls == 2;
 
 	batch.ops = &test_ops;
-	api->publish_batch(binding, &batch);
-	api->detach(binding);
+	ops->publish_batch(binding, &batch);
+	ops->detach(binding);
 	result = result && data.release_calls == 3 &&
 		!data.saw_active_during_release &&
-		api->find_binding(slot) == NULL;
+		ops->find(slot) == NULL;
 	ExecDropSingleTupleTableSlot(slot);
 	MemoryContextSwitchTo(oldcontext);
 	MemoryContextDelete(context);
@@ -157,13 +163,13 @@ tessera_test_transfer(PG_FUNCTION_ARGS)
 Datum
 tessera_test_invalid_batch(PG_FUNCTION_ARGS)
 {
-	const TessApi *api = test_api();
+	const TessBindingOps *ops = test_binding_ops();
 	TupleTableSlot *slot;
-	TessBinding *binding = make_binding(api, &slot);
+	TessBinding *binding = make_binding(ops, &slot);
 	TestBatchData data = {0};
 	uint64		bits = 1;
-	TessBatchOps ops = test_ops;
-	TessBatch	batch = make_batch(&data, &bits, 1, &ops);
+	TessBatchOps batch_ops = test_ops;
+	TessBatch	batch = make_batch(&data, &bits, 1, &batch_ops);
 	TessRequest request = {
 		.struct_size = sizeof(TessRequest),
 		.output_mode = TESS_OUTPUT_BATCH,
@@ -178,11 +184,11 @@ tessera_test_invalid_batch(PG_FUNCTION_ARGS)
 	else if (kind == 2)
 		batch.ops = NULL;
 	else if (kind == 3)
-		ops.abi_version++;
+		batch_ops.abi_version++;
 	else if (kind == 4)
-		ops.struct_size = 0;
+		batch_ops.struct_size = 0;
 	else if (kind == 5)
-		ops.get_datum_column = NULL;
+		batch_ops.get_datum_column = NULL;
 	else if (kind == 6)
 		batch.rows.nrows = 0;
 	else if (kind == 7)
@@ -193,37 +199,37 @@ tessera_test_invalid_batch(PG_FUNCTION_ARGS)
 	{
 		bits = UINT64CONST(3);
 		batch.rows.nrows = 2;
-		api->set_request(binding, &request);
+		ops->set_request(binding, &request);
 	}
 	else if (kind == 10)
-		api->publish_batch(binding, NULL);
+		ops->publish_batch(binding, NULL);
 	else
 		elog(ERROR, "unknown Tessera invalid-batch test");
-	api->publish_batch(binding, &batch);
+	ops->publish_batch(binding, &batch);
 	PG_RETURN_VOID();
 }
 
 Datum
 tessera_test_double_publish(PG_FUNCTION_ARGS)
 {
-	const TessApi *api = test_api();
+	const TessBindingOps *ops = test_binding_ops();
 	TupleTableSlot *slot;
-	TessBinding *binding = make_binding(api, &slot);
+	TessBinding *binding = make_binding(ops, &slot);
 	TestBatchData data = {0};
 	uint64		bits = 1;
 	TessBatch	batch = make_batch(&data, &bits, 1, &test_ops);
 
-	api->publish_batch(binding, &batch);
-	api->publish_batch(binding, &batch);
+	ops->publish_batch(binding, &batch);
+	ops->publish_batch(binding, &batch);
 	PG_RETURN_VOID();
 }
 
 Datum
 tessera_test_publish_freezes_request(PG_FUNCTION_ARGS)
 {
-	const TessApi *api = test_api();
+	const TessBindingOps *ops = test_binding_ops();
 	TupleTableSlot *slot;
-	TessBinding *binding = make_binding(api, &slot);
+	TessBinding *binding = make_binding(ops, &slot);
 	TestBatchData data = {0};
 	uint64		bits = 1;
 	TessBatch	batch = make_batch(&data, &bits, 1, &test_ops);
@@ -232,7 +238,7 @@ tessera_test_publish_freezes_request(PG_FUNCTION_ARGS)
 		.output_mode = TESS_OUTPUT_ROWS,
 	};
 
-	api->publish_batch(binding, &batch);
-	api->set_request(binding, &request);
+	ops->publish_batch(binding, &batch);
+	ops->set_request(binding, &request);
 	PG_RETURN_VOID();
 }

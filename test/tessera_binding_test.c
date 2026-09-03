@@ -16,10 +16,11 @@ PG_FUNCTION_INFO_V1(tessera_test_invalid_layout);
 PG_FUNCTION_INFO_V1(tessera_test_invalid_request);
 PG_FUNCTION_INFO_V1(tessera_test_request_after_freeze);
 
-static const TessApi *
-test_api(void)
+static const TessBindingOps *
+test_binding_ops(void)
 {
 	const TessApi *api;
+	const TessBindingOps *ops;
 	void	  **rendezvous;
 
 	rendezvous = find_rendezvous_variable(TESS_API_RENDEZVOUS);
@@ -27,13 +28,18 @@ test_api(void)
 	if (api == NULL || api->abi_version != TESS_API_ABI_VERSION ||
 		api->struct_size < TESS_API_MIN_SIZE)
 		elog(ERROR, "Tessera test could not find a compatible bridge");
-	return api;
+	ops = api->binding_ops;
+	if (ops == NULL ||
+		ops->abi_version != TESS_BINDING_OPS_ABI_VERSION ||
+		ops->struct_size < TESS_BINDING_OPS_MIN_SIZE)
+		elog(ERROR, "Tessera test could not find compatible binding operations");
+	return ops;
 }
 
 Datum
 tessera_test_binding(PG_FUNCTION_ARGS)
 {
-	const TessApi *api = test_api();
+	const TessBindingOps *ops = test_binding_ops();
 	MemoryContext context;
 	MemoryContext oldcontext;
 	TupleTableSlot *first_slot;
@@ -69,11 +75,11 @@ tessera_test_binding(PG_FUNCTION_ARGS)
 	oldcontext = MemoryContextSwitchTo(context);
 	first_slot = MakeSingleTupleTableSlot(NULL, &TTSOpsVirtual);
 	second_slot = MakeSingleTupleTableSlot(NULL, &TTSOpsVirtual);
-	first = api->attach(first_slot, &mapped);
-	second = api->attach(second_slot, &identity);
+	first = ops->attach(first_slot, &mapped);
+	second = ops->attach(second_slot, &identity);
 	target_columns[1] = 1;
 
-	api->set_request(first, &request);
+	ops->set_request(first, &request);
 	filters = bms_make_singleton(0);
 	filters = bms_add_member(filters, 65);
 	projections = bms_make_singleton(2);
@@ -82,18 +88,18 @@ tessera_test_binding(PG_FUNCTION_ARGS)
 	request.projection_columns = projections;
 	request.output_mode = TESS_OUTPUT_BATCH;
 	request.max_batch_rows = 64;
-	api->set_request(first, &request);
+	ops->set_request(first, &request);
 	filters = bms_del_member(filters, 0);
 	projections = bms_del_member(projections, 2);
 
-	stored_layout = api->get_layout(first);
-	stored_request = api->freeze_request(first);
-	default_request = api->freeze_request(second);
-	result = api->find_binding(first_slot) == first &&
-		api->find_binding(second_slot) == second &&
+	stored_layout = ops->get_layout(first);
+	stored_request = ops->freeze_request(first);
+	default_request = ops->freeze_request(second);
+	result = ops->find(first_slot) == first &&
+		ops->find(second_slot) == second &&
 		stored_layout->target_columns != target_columns &&
 		tess_layout_column(stored_layout, 1) == 2 &&
-		stored_request == api->freeze_request(first) &&
+		stored_request == ops->freeze_request(first) &&
 		stored_request->filter_columns != filters &&
 		stored_request->projection_columns != projections &&
 		bms_is_member(0, stored_request->filter_columns) &&
@@ -109,11 +115,11 @@ tessera_test_binding(PG_FUNCTION_ARGS)
 	bms_free(filters);
 	bms_free(projections);
 
-	api->detach(first);
-	result = result && api->find_binding(first_slot) == NULL &&
-		api->find_binding(second_slot) == second;
-	api->detach(second);
-	api->detach(NULL);
+	ops->detach(first);
+	result = result && ops->find(first_slot) == NULL &&
+		ops->find(second_slot) == second;
+	ops->detach(second);
+	ops->detach(NULL);
 	ExecDropSingleTupleTableSlot(first_slot);
 	ExecDropSingleTupleTableSlot(second_slot);
 	MemoryContextSwitchTo(oldcontext);
@@ -125,7 +131,7 @@ tessera_test_binding(PG_FUNCTION_ARGS)
 Datum
 tessera_test_binding_context_reset(PG_FUNCTION_ARGS)
 {
-	const TessApi *api = test_api();
+	const TessBindingOps *ops = test_binding_ops();
 	MemoryContext context;
 	MemoryContext oldcontext;
 	TupleTableSlot *slot;
@@ -139,17 +145,17 @@ tessera_test_binding_context_reset(PG_FUNCTION_ARGS)
 		"Tessera binding reset test", ALLOCSET_DEFAULT_SIZES);
 	oldcontext = MemoryContextSwitchTo(context);
 	slot = MakeSingleTupleTableSlot(NULL, &TTSOpsVirtual);
-	api->attach(slot, &layout);
+	ops->attach(slot, &layout);
 	MemoryContextSwitchTo(oldcontext);
 	MemoryContextDelete(context);
 
-	PG_RETURN_BOOL(api->find_binding(slot) == NULL);
+	PG_RETURN_BOOL(ops->find(slot) == NULL);
 }
 
 Datum
 tessera_test_duplicate_binding(PG_FUNCTION_ARGS)
 {
-	const TessApi *api = test_api();
+	const TessBindingOps *ops = test_binding_ops();
 	TupleTableSlot *slot = MakeSingleTupleTableSlot(NULL, &TTSOpsVirtual);
 	TessLayout layout = {
 		.struct_size = sizeof(TessLayout),
@@ -157,15 +163,15 @@ tessera_test_duplicate_binding(PG_FUNCTION_ARGS)
 		.ntargets = 1,
 	};
 
-	api->attach(slot, &layout);
-	api->attach(slot, &layout);
+	ops->attach(slot, &layout);
+	ops->attach(slot, &layout);
 	PG_RETURN_VOID();
 }
 
 Datum
 tessera_test_invalid_layout(PG_FUNCTION_ARGS)
 {
-	const TessApi *api = test_api();
+	const TessBindingOps *ops = test_binding_ops();
 	TupleTableSlot *slot = MakeSingleTupleTableSlot(NULL, &TTSOpsVirtual);
 	int			column = 1;
 	TessLayout layout = {
@@ -183,14 +189,14 @@ tessera_test_invalid_layout(PG_FUNCTION_ARGS)
 		layout.struct_size = 0;
 	else
 		elog(ERROR, "unknown Tessera invalid-layout test");
-	api->attach(slot, &layout);
+	ops->attach(slot, &layout);
 	PG_RETURN_VOID();
 }
 
 Datum
 tessera_test_invalid_request(PG_FUNCTION_ARGS)
 {
-	const TessApi *api = test_api();
+	const TessBindingOps *ops = test_binding_ops();
 	TupleTableSlot *slot = MakeSingleTupleTableSlot(NULL, &TTSOpsVirtual);
 	TessLayout layout = {
 		.struct_size = sizeof(TessLayout),
@@ -201,7 +207,7 @@ tessera_test_invalid_request(PG_FUNCTION_ARGS)
 		.struct_size = sizeof(TessRequest),
 		.output_mode = TESS_OUTPUT_ROWS,
 	};
-	TessBinding *binding = api->attach(slot, &layout);
+	TessBinding *binding = ops->attach(slot, &layout);
 	int32		kind = PG_GETARG_INT32(0);
 
 	if (kind == 0)
@@ -214,14 +220,14 @@ tessera_test_invalid_request(PG_FUNCTION_ARGS)
 		request.struct_size = 0;
 	else
 		elog(ERROR, "unknown Tessera invalid-request test");
-	api->set_request(binding, &request);
+	ops->set_request(binding, &request);
 	PG_RETURN_VOID();
 }
 
 Datum
 tessera_test_request_after_freeze(PG_FUNCTION_ARGS)
 {
-	const TessApi *api = test_api();
+	const TessBindingOps *ops = test_binding_ops();
 	TupleTableSlot *slot = MakeSingleTupleTableSlot(NULL, &TTSOpsVirtual);
 	TessLayout layout = {
 		.struct_size = sizeof(TessLayout),
@@ -232,9 +238,9 @@ tessera_test_request_after_freeze(PG_FUNCTION_ARGS)
 		.struct_size = sizeof(TessRequest),
 		.output_mode = TESS_OUTPUT_ROWS,
 	};
-	TessBinding *binding = api->attach(slot, &layout);
+	TessBinding *binding = ops->attach(slot, &layout);
 
-	api->freeze_request(binding);
-	api->set_request(binding, &request);
+	ops->freeze_request(binding);
+	ops->set_request(binding, &request);
 	PG_RETURN_VOID();
 }
