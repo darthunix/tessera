@@ -37,4 +37,5 @@ that the consumer imposes no limit. This field is not a pushed-down SQL
 
 Neither structure owns its pointer fields. Code that keeps a layout or
 request after the call that supplied it must copy the target map and column
-masks. The slot-binding API will perform those copies when it is added.
+masks. `TessApi.attach()` copies the layout, and `TessApi.set_request()` copies
+the request into the slot's memory context.
