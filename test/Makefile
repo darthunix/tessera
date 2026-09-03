@@ -1,5 +1,5 @@
-MODULES = tessera_bridge_test
-REGRESS = bridge
+MODULES = tessera_bridge_test tessera_row_mask_test
+REGRESS = bridge row_mask
 REGRESS_OPTS = --dlpath=$(CURDIR)
 PG_CPPFLAGS = -I$(srcdir)/../include
 NO_INSTALL = 1

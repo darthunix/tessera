@@ -1,0 +1,14 @@
+\getenv libdir PG_LIBDIR
+\getenv dlsuffix PG_DLSUFFIX
+\set row_mask_test :libdir '/tessera_row_mask_test' :dlsuffix
+LOAD :'row_mask_test';
+
+CREATE FUNCTION tessera_test_row_mask()
+RETURNS boolean
+AS :'row_mask_test', 'tessera_test_row_mask'
+LANGUAGE C STRICT;
+
+SELECT tessera_test_row_mask() AS row_mask \gset
+\echo :row_mask
+
+DROP FUNCTION tessera_test_row_mask();
