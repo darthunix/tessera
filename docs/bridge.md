@@ -10,7 +10,8 @@ The extension is named `tessera`. Creating it loads the shared library, whose
 The bridge owns only cross-extension coordination:
 
 - attaching a batch request to a tuple slot;
-- later, transferring batches and registering sources and executor nodes.
+- transferring one active batch through that slot;
+- later, registering sources and executor nodes.
 
 It will not evaluate expressions, interpret a source-native column format,
 choose scan or join algorithms, or own the physical buffers behind a batch.
@@ -51,6 +52,27 @@ The bridge copies the layout, target map, request, and column masks into
 `slot->tts_mcxt`. Explicitly call `detach` before destroying the slot. A reset
 or deletion of the slot's memory context removes the weak list entry
 automatically. Returned pointers become invalid after either event.
+
+## Active batch
+
+`publish_batch` transfers exclusive use of a `TessBatch` to a binding and
+freezes its request. A binding can hold only one active batch. The physical
+row count must obey `max_batch_rows`, while its active row mask may be empty.
+
+The consumer obtains the borrowed pointer with `get_batch`. When it is done,
+`release_batch` removes the pointer and calls the optional
+`TessBatchOps.release` operation. Releasing an empty binding is safe, and
+`detach` releases an active batch before removing the binding.
+
+These operations do not change the visible row in `TupleTableSlot`. A later
+runtime adapter will handle row materialization and the requirements of
+PostgreSQL's scalar executor interface.
+
+A slot-context reset removes only the weak lookup entry. It cannot safely
+call the batch release operation because the batch owner's context may
+already have been deleted. A producer must therefore protect external
+resources with its own memory-context callback or `ResourceOwner`. Normal
+executor cleanup should explicitly release the batch or detach the binding.
 
 ## Version zero
 

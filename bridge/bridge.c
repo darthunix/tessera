@@ -21,6 +21,7 @@ struct TessBinding
 	MemoryContextCallback cleanup;
 	TessLayout	layout;
 	TessRequest request;
+	TessBatch   *batch;
 	bool		request_frozen;
 };
 
@@ -32,6 +33,9 @@ static void set_request(TessBinding *binding, const TessRequest *request);
 static const TessLayout *get_layout(TessBinding *binding);
 static const TessRequest *freeze_request(TessBinding *binding);
 static void detach(TessBinding *binding);
+static void publish_batch(TessBinding *binding, TessBatch *batch);
+static TessBatch *get_batch(TessBinding *binding);
+static void release_batch(TessBinding *binding);
 
 static const TessApi tess_api = {
 	TESS_ABI_INITIALIZER(TESS_API_ABI_VERSION, TessApi),
@@ -41,6 +45,9 @@ static const TessApi tess_api = {
 	.get_layout = get_layout,
 	.freeze_request = freeze_request,
 	.detach = detach,
+	.publish_batch = publish_batch,
+	.get_batch = get_batch,
+	.release_batch = release_batch,
 };
 
 static void
@@ -86,6 +93,35 @@ validate_request(const TessBinding *binding, const TessRequest *request)
 							 binding->layout.ncolumns - 1);
 	if (column >= 0)
 		elog(ERROR, "Tessera projection column %d is out of range", column);
+}
+
+static void
+validate_batch(const TessBinding *binding, const TessBatch *batch)
+{
+	int			nwords;
+	int			tail_bits;
+
+	if (batch == NULL)
+		elog(ERROR, "Tessera cannot publish a null batch");
+	if (batch->abi_version != TESS_BATCH_ABI_VERSION ||
+		batch->struct_size < TESS_BATCH_MIN_SIZE)
+		elog(ERROR, "Tessera received an incompatible batch");
+	if (batch->ops == NULL ||
+		batch->ops->abi_version != TESS_BATCH_OPS_ABI_VERSION ||
+		batch->ops->struct_size < TESS_BATCH_OPS_MIN_SIZE)
+		elog(ERROR, "Tessera received incompatible batch operations");
+	if (batch->ops->get_datum_column == NULL)
+		elog(ERROR, "Tessera batch cannot provide Datum columns");
+	if (batch->rows.nrows <= 0 || batch->rows.bits == NULL)
+		elog(ERROR, "Tessera batch has an invalid row mask");
+	nwords = tess_row_mask_word_count(batch->rows.nrows);
+	tail_bits = batch->rows.nrows % 64;
+	if (tail_bits != 0 &&
+		(batch->rows.bits[nwords - 1] >> tail_bits) != 0)
+		elog(ERROR, "Tessera batch selects rows beyond its physical size");
+	if (binding->request.max_batch_rows > 0 &&
+		batch->rows.nrows > binding->request.max_batch_rows)
+		elog(ERROR, "Tessera batch exceeds the requested row limit");
 }
 
 static TessBinding *
@@ -192,10 +228,43 @@ freeze_request(TessBinding *binding)
 }
 
 static void
+publish_batch(TessBinding *binding, TessBatch *batch)
+{
+	if (binding == NULL)
+		elog(ERROR, "Tessera cannot publish to a null binding");
+	if (binding->batch != NULL)
+		elog(ERROR, "Tessera binding already has an active batch");
+	validate_batch(binding, batch);
+	binding->request_frozen = true;
+	binding->batch = batch;
+}
+
+static TessBatch *
+get_batch(TessBinding *binding)
+{
+	return binding == NULL ? NULL : binding->batch;
+}
+
+static void
+release_batch(TessBinding *binding)
+{
+	TessBatch   *batch;
+
+	if (binding == NULL || binding->batch == NULL)
+		return;
+	batch = binding->batch;
+	binding->batch = NULL;
+	if (TESS_ABI_HAS_FIELD(batch->ops, TessBatchOps, release) &&
+		batch->ops->release != NULL)
+		batch->ops->release(batch);
+}
+
+static void
 detach(TessBinding *binding)
 {
 	if (binding == NULL)
 		return;
+	release_batch(binding);
 	MemoryContextUnregisterResetCallback(binding->context,
 										 &binding->cleanup);
 	dlist_delete(&binding->link);

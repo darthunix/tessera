@@ -1,0 +1,55 @@
+CREATE EXTENSION tessera;
+\getenv libdir PG_LIBDIR
+\getenv dlsuffix PG_DLSUFFIX
+\set transfer_test :libdir '/tessera_transfer_test' :dlsuffix
+LOAD :'transfer_test';
+CREATE FUNCTION tessera_test_transfer()
+RETURNS boolean
+AS :'transfer_test', 'tessera_test_transfer'
+LANGUAGE C STRICT;
+CREATE FUNCTION tessera_test_invalid_batch(integer)
+RETURNS void
+AS :'transfer_test', 'tessera_test_invalid_batch'
+LANGUAGE C STRICT;
+CREATE FUNCTION tessera_test_double_publish()
+RETURNS void
+AS :'transfer_test', 'tessera_test_double_publish'
+LANGUAGE C STRICT;
+CREATE FUNCTION tessera_test_publish_freezes_request()
+RETURNS void
+AS :'transfer_test', 'tessera_test_publish_freezes_request'
+LANGUAGE C STRICT;
+SELECT tessera_test_transfer() AS transfer \gset
+\echo :transfer
+t
+SELECT tessera_test_invalid_batch(0);
+ERROR:  Tessera received an incompatible batch
+SELECT tessera_test_invalid_batch(1);
+ERROR:  Tessera received an incompatible batch
+SELECT tessera_test_invalid_batch(2);
+ERROR:  Tessera received incompatible batch operations
+SELECT tessera_test_invalid_batch(3);
+ERROR:  Tessera received incompatible batch operations
+SELECT tessera_test_invalid_batch(4);
+ERROR:  Tessera received incompatible batch operations
+SELECT tessera_test_invalid_batch(5);
+ERROR:  Tessera batch cannot provide Datum columns
+SELECT tessera_test_invalid_batch(6);
+ERROR:  Tessera batch has an invalid row mask
+SELECT tessera_test_invalid_batch(7);
+ERROR:  Tessera batch has an invalid row mask
+SELECT tessera_test_invalid_batch(8);
+ERROR:  Tessera batch selects rows beyond its physical size
+SELECT tessera_test_invalid_batch(9);
+ERROR:  Tessera batch exceeds the requested row limit
+SELECT tessera_test_invalid_batch(10);
+ERROR:  Tessera cannot publish a null batch
+SELECT tessera_test_double_publish();
+ERROR:  Tessera binding already has an active batch
+SELECT tessera_test_publish_freezes_request();
+ERROR:  Tessera request is already frozen
+DROP FUNCTION tessera_test_publish_freezes_request();
+DROP FUNCTION tessera_test_double_publish();
+DROP FUNCTION tessera_test_invalid_batch(integer);
+DROP FUNCTION tessera_test_transfer();
+DROP EXTENSION tessera;

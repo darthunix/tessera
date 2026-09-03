@@ -10,6 +10,7 @@
 #include "postgres.h"
 
 #include "tessera/abi.h"
+#include "tessera/batch.h"
 #include "tessera/layout.h"
 #include "tessera/request.h"
 
@@ -45,8 +46,14 @@ typedef struct TessApi
 	const TessRequest *(*freeze_request) (TessBinding *binding);
 	/* Remove a binding; a NULL binding is ignored. */
 	void		(*detach) (TessBinding *binding);
+	/* Transfer exclusive use of one batch to the binding. */
+	void		(*publish_batch) (TessBinding *binding, TessBatch *batch);
+	/* Return the active borrowed batch, or NULL. */
+	TessBatch  *(*get_batch) (TessBinding *binding);
+	/* Return the active batch to its owner; NULL and repetition are safe. */
+	void		(*release_batch) (TessBinding *binding);
 } TessApi;
 
-#define TESS_API_MIN_SIZE TESS_ABI_SIZE_THROUGH(TessApi, detach)
+#define TESS_API_MIN_SIZE TESS_ABI_SIZE_THROUGH(TessApi, release_batch)
 
 #endif /* TESSERA_BRIDGE_H */

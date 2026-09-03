@@ -1,6 +1,6 @@
 MODULES = tessera_batch_test tessera_binding_test tessera_bridge_test \
-	tessera_request_test tessera_row_mask_test
-REGRESS = batch binding bridge request row_mask
+	tessera_request_test tessera_row_mask_test tessera_transfer_test
+REGRESS = batch binding bridge request row_mask transfer
 REGRESS_OPTS = --dlpath=$(CURDIR)
 PG_CPPFLAGS = -I$(srcdir)/../include
 NO_INSTALL = 1
