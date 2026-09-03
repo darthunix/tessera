@@ -8,6 +8,8 @@ HEADERS = \
 	../include/tessera/abi.h \
 	../include/tessera/batch.h \
 	../include/tessera/bridge.h \
+	../include/tessera/layout.h \
+	../include/tessera/request.h \
 	../include/tessera/row_mask.h
 PG_CONFIG ?= pg_config
 PGXS := $(shell $(PG_CONFIG) --pgxs)
