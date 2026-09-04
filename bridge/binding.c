@@ -18,6 +18,7 @@ struct TessBinding
 	TessRequest request;
 	TessBatch   *batch;
 	bool		request_frozen;
+	bool		batch_consumed;
 };
 
 static dlist_head bindings = DLIST_STATIC_INIT(bindings);
@@ -31,6 +32,8 @@ static void publish_batch(TessBinding *binding, TessBatch *batch);
 static TessBatch *get_batch(TessBinding *binding);
 static void release_batch(TessBinding *binding);
 static void detach(TessBinding *binding);
+static void mark_consumed(TessBinding *binding);
+static bool is_consumed(TessBinding *binding);
 
 const TessBindingOps tess_binding_ops = {
 	TESS_ABI_INITIALIZER(TESS_BINDING_OPS_ABI_VERSION, TessBindingOps),
@@ -43,6 +46,8 @@ const TessBindingOps tess_binding_ops = {
 	.get_batch = get_batch,
 	.release_batch = release_batch,
 	.detach = detach,
+	.mark_consumed = mark_consumed,
+	.is_consumed = is_consumed,
 };
 
 static void
@@ -232,6 +237,7 @@ publish_batch(TessBinding *binding, TessBatch *batch)
 	validate_batch(binding, batch);
 	binding->request_frozen = true;
 	binding->batch = batch;
+	binding->batch_consumed = false;
 }
 
 static TessBatch *
@@ -249,9 +255,30 @@ release_batch(TessBinding *binding)
 		return;
 	batch = binding->batch;
 	binding->batch = NULL;
+	binding->batch_consumed = false;
 	if (TESS_ABI_HAS_FIELD(batch->ops, TessBatchOps, release) &&
 		batch->ops->release != NULL)
 		batch->ops->release(batch);
+}
+
+static void
+mark_consumed(TessBinding *binding)
+{
+	if (binding == NULL)
+		elog(ERROR, "Tessera cannot mark a null binding consumed");
+	if (binding->batch == NULL)
+		elog(ERROR, "Tessera binding has no active batch");
+	if (binding->batch_consumed)
+		elog(ERROR, "Tessera active batch is already consumed");
+	binding->batch_consumed = true;
+}
+
+static bool
+is_consumed(TessBinding *binding)
+{
+	if (binding == NULL)
+		elog(ERROR, "Tessera cannot inspect a null binding");
+	return binding->batch == NULL || binding->batch_consumed;
 }
 
 static void

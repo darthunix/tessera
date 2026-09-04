@@ -33,11 +33,12 @@ The provider must not retain the callback's `rows` or `result` pointers.
 
 The producer owns the batch and its storage. Only one node may use the batch
 at a time. `TessBindingOps.publish_batch()` transfers exclusive use to a slot
-binding, and the producer must then stop using it.
-`TessBindingOps.release_batch()` returns it to the producer and calls the
-optional `release` callback. Without that callback, the producer must need no
-separate cleanup for the batch. After release, the former consumer must not
-access the batch again.
+binding, and the producer must then stop using it. The consumer calls
+`mark_consumed()` when it no longer needs the batch. The producer may then
+call `release_batch()`, which returns control of the storage and calls the
+optional `release` callback. Cleanup may release a batch before it is marked
+consumed. Without the callback, the producer must need no separate cleanup.
+After marking a batch consumed, the former consumer must not access it again.
 
 There is no reference counting or concurrent access. A batch is local to one
 PostgreSQL backend. Parallel workers use separate batch objects.

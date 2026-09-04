@@ -15,6 +15,11 @@ RETURNS void
 AS :'transfer_test', 'tessera_test_invalid_batch'
 LANGUAGE C STRICT;
 
+CREATE FUNCTION tessera_test_invalid_consumption(integer)
+RETURNS void
+AS :'transfer_test', 'tessera_test_invalid_consumption'
+LANGUAGE C STRICT;
+
 CREATE FUNCTION tessera_test_double_publish()
 RETURNS void
 AS :'transfer_test', 'tessera_test_double_publish'
@@ -39,11 +44,17 @@ SELECT tessera_test_invalid_batch(7);
 SELECT tessera_test_invalid_batch(8);
 SELECT tessera_test_invalid_batch(9);
 SELECT tessera_test_invalid_batch(10);
+SELECT tessera_test_invalid_consumption(0);
+SELECT tessera_test_invalid_consumption(1);
+SELECT tessera_test_invalid_consumption(2);
+SELECT tessera_test_invalid_consumption(3);
+SELECT tessera_test_invalid_consumption(4);
 SELECT tessera_test_double_publish();
 SELECT tessera_test_publish_freezes_request();
 
 DROP FUNCTION tessera_test_publish_freezes_request();
 DROP FUNCTION tessera_test_double_publish();
+DROP FUNCTION tessera_test_invalid_consumption(integer);
 DROP FUNCTION tessera_test_invalid_batch(integer);
 DROP FUNCTION tessera_test_transfer();
 DROP EXTENSION tessera;

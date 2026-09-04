@@ -54,10 +54,16 @@ request selects row output, no columns, and no batch-size limit.
 freezes its request. A binding can hold only one active batch. The physical
 row count must obey `max_batch_rows`, while its active row mask may be empty.
 
-The consumer obtains the borrowed pointer with `get_batch`. When it is done,
-`release_batch` removes the pointer and calls the optional
-`TessBatchOps.release` operation. Releasing an empty binding is safe, and
-`detach` releases an active batch before removing the binding.
+The consumer obtains the borrowed pointer with `get_batch`. When it no longer
+needs the batch, it calls `mark_consumed`. This changes only the binding
+state: the batch remains attached and its storage remains valid.
+
+The producer checks `is_consumed` before replacing the batch. It then calls
+`release_batch`, which removes the pointer and calls the optional
+`TessBatchOps.release` operation. A binding without a batch is considered
+consumed. Releasing an empty binding is safe, and cleanup may release an
+unconsumed batch. `detach` releases an active batch before removing the
+binding.
 
 These operations do not change the visible row in `TupleTableSlot`. A later
 runtime adapter will handle row materialization and the requirements of

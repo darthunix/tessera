@@ -46,9 +46,13 @@ typedef struct TessBindingOps
 	void		(*release_batch) (TessBinding *binding);
 	/* Release any active batch and remove the binding; NULL is ignored. */
 	void		(*detach) (TessBinding *binding);
+	/* Mark the active batch consumed without releasing it. */
+	void		(*mark_consumed) (TessBinding *binding);
+	/* Return true when no unconsumed batch remains. */
+	bool		(*is_consumed) (TessBinding *binding);
 } TessBindingOps;
 
 #define TESS_BINDING_OPS_MIN_SIZE \
-	TESS_ABI_SIZE_THROUGH(TessBindingOps, detach)
+	TESS_ABI_SIZE_THROUGH(TessBindingOps, is_consumed)
 
 #endif /* TESSERA_BINDING_H */

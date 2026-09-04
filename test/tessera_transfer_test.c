@@ -10,6 +10,7 @@ PG_MODULE_MAGIC;
 
 PG_FUNCTION_INFO_V1(tessera_test_transfer);
 PG_FUNCTION_INFO_V1(tessera_test_invalid_batch);
+PG_FUNCTION_INFO_V1(tessera_test_invalid_consumption);
 PG_FUNCTION_INFO_V1(tessera_test_double_publish);
 PG_FUNCTION_INFO_V1(tessera_test_publish_freezes_request);
 
@@ -126,11 +127,16 @@ tessera_test_transfer(PG_FUNCTION_ARGS)
 	ops->set_request(binding, &request);
 	batch = make_batch(&data, &active_bits, 64, &test_ops);
 
+	result = ops->is_consumed(binding);
 	ops->publish_batch(binding, &batch);
-	result = ops->get_batch(binding) == &batch;
+	result = result && ops->get_batch(binding) == &batch &&
+		!ops->is_consumed(binding) && data.release_calls == 0;
+	ops->mark_consumed(binding);
+	result = result && ops->is_consumed(binding) &&
+		ops->get_batch(binding) == &batch && data.release_calls == 0;
 	ops->release_batch(binding);
 	result = result && ops->get_batch(binding) == NULL &&
-		data.release_calls == 1;
+		ops->is_consumed(binding) && data.release_calls == 1;
 	ops->release_batch(binding);
 	ops->release_batch(NULL);
 	result = result && data.release_calls == 1 &&
@@ -138,14 +144,18 @@ tessera_test_transfer(PG_FUNCTION_ARGS)
 
 	batch.rows.bits = &empty_bits;
 	ops->publish_batch(binding, &batch);
+	result = result && !ops->is_consumed(binding);
 	ops->release_batch(binding);
-	result = result && data.release_calls == 2;
+	result = result && ops->is_consumed(binding) &&
+		data.release_calls == 2;
 
 	short_ops.struct_size = TESS_BATCH_OPS_MIN_SIZE;
 	batch.ops = &short_ops;
 	ops->publish_batch(binding, &batch);
+	ops->mark_consumed(binding);
 	ops->release_batch(binding);
-	result = result && data.release_calls == 2;
+	result = result && ops->is_consumed(binding) &&
+		data.release_calls == 2;
 
 	batch.ops = &test_ops;
 	ops->publish_batch(binding, &batch);
@@ -206,6 +216,40 @@ tessera_test_invalid_batch(PG_FUNCTION_ARGS)
 	else
 		elog(ERROR, "unknown Tessera invalid-batch test");
 	ops->publish_batch(binding, &batch);
+	PG_RETURN_VOID();
+}
+
+Datum
+tessera_test_invalid_consumption(PG_FUNCTION_ARGS)
+{
+	const TessBindingOps *ops = test_binding_ops();
+	TupleTableSlot *slot;
+	TessBinding *binding = make_binding(ops, &slot);
+	TestBatchData data = {0};
+	uint64		bits = 1;
+	TessBatch	batch = make_batch(&data, &bits, 1, &test_ops);
+	int32		kind = PG_GETARG_INT32(0);
+
+	if (kind == 0)
+		ops->mark_consumed(NULL);
+	else if (kind == 1)
+		ops->mark_consumed(binding);
+	else if (kind == 2)
+	{
+		ops->publish_batch(binding, &batch);
+		ops->mark_consumed(binding);
+		ops->mark_consumed(binding);
+	}
+	else if (kind == 3)
+		(void) ops->is_consumed(NULL);
+	else if (kind == 4)
+	{
+		ops->publish_batch(binding, &batch);
+		ops->mark_consumed(binding);
+		ops->publish_batch(binding, &batch);
+	}
+	else
+		elog(ERROR, "unknown Tessera invalid-consumption test");
 	PG_RETURN_VOID();
 }
 
