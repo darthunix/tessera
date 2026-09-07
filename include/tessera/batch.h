@@ -38,7 +38,7 @@ typedef struct TessDatumColumn
 } TessDatumColumn;
 
 #define TESS_DATUM_COLUMN_MIN_SIZE \
-	TESS_ABI_SIZE_THROUGH(TessDatumColumn, nrows)
+	TESS_ABI_SIZE_INCLUDING_FIELD(TessDatumColumn, nrows)
 
 /*
  * Operations supplied by the owner of a batch's physical representation.
@@ -58,7 +58,7 @@ typedef struct TessBatchOps
 } TessBatchOps;
 
 #define TESS_BATCH_OPS_MIN_SIZE \
-	TESS_ABI_SIZE_THROUGH(TessBatchOps, get_datum_column)
+	TESS_ABI_SIZE_INCLUDING_FIELD(TessBatchOps, get_datum_column)
 
 /*
  * Format-neutral envelope for one active batch.
@@ -79,6 +79,6 @@ struct TessBatch
 };
 
 #define TESS_BATCH_MIN_SIZE \
-	TESS_ABI_SIZE_THROUGH(TessBatch, private_data)
+	TESS_ABI_SIZE_INCLUDING_FIELD(TessBatch, private_data)
 
 #endif /* TESSERA_BATCH_H */

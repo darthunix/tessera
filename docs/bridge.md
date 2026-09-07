@@ -11,7 +11,8 @@ The bridge owns only cross-extension coordination:
 
 - attaching a batch request to a tuple slot;
 - transferring one active batch through that slot;
-- later, registering sources and executor nodes.
+- registering batch sources;
+- later, registering executor nodes.
 
 It will not evaluate expressions, interpret a source-native column format,
 choose scan or join algorithms, or own the physical buffers behind a batch.
@@ -20,9 +21,20 @@ Those responsibilities belong to runtime libraries, nodes, and sources.
 ## Subsystem tables
 
 `TessApi` remains a small root containing pointers to independently versioned
-subsystem tables. Its first subsystem, `TessBindingOps`, implements the slot
-binding protocol described in [binding.md](binding.md). Future source and
-node registries will use separate tables rather than extend `TessBindingOps`.
+subsystem tables. `TessBindingOps` implements the slot binding protocol
+described in [binding.md](binding.md). `TessSourceRegistryOps` implements the
+source registry described in [source.md](source.md). A future node registry
+will use another table rather than extend either existing subsystem.
+
+The current root requires both `binding_ops` and `sources` to be non-null.
+A consumer first checks the root's ABI version and `TESS_API_MIN_SIZE`, which
+includes both fields. Before using a subsystem, it then checks that table's
+pointer, ABI version, and minimum size.
+
+Future optional fields can be appended to the root. A consumer checks
+`TESS_ABI_HAS_FIELD` before reading such a field, then validates the subsystem
+table itself. The current `sources` field does not need this separate field
+check.
 
 ## Version zero
 
@@ -34,9 +46,16 @@ an older provider.
 
 All public size-tagged structures follow one rule: existing fields keep their
 position, type, and meaning, while compatible fields are appended at the end.
-`TESS_ABI_HAS_FIELD` checks an appended field before use. The two initializer
-macros fill either a version-and-size header or a size-only header, so each
-module reports the structure layout against which it was compiled.
+
+`TESS_ABI_SIZE_INCLUDING_FIELD(type, field)` computes the size in bytes from
+the start of the structure to the end of `field`, including that field. Each
+`TESS_*_MIN_SIZE` definition selects the last required field for its structure.
+`TESS_ABI_HAS_FIELD` uses the same calculation to check whether a supplied
+structure includes a field, including an optional field, before use.
+
+The two initializer macros fill either a version-and-size header or a
+size-only header, so each module reports the structure layout against which
+it was compiled.
 
 Version zero is an experimental development ABI, not a compatibility promise.
 The first public release will assign a stable nonzero ABI version after the

@@ -4,14 +4,14 @@
 
 #include "postgres.h"
 
-/* Size of a public structure through one required field. */
-#define TESS_ABI_SIZE_THROUGH(type, field) \
+/* Size in bytes needed to include field and all preceding fields. */
+#define TESS_ABI_SIZE_INCLUDING_FIELD(type, field) \
 	(offsetof(type, field) + sizeof(((type *) 0)->field))
 
 /* True when an append-only structure supplied by another module has field. */
 #define TESS_ABI_HAS_FIELD(object, type, field) \
 	((object) != NULL && (object)->struct_size >= \
-	 TESS_ABI_SIZE_THROUGH(type, field))
+	 TESS_ABI_SIZE_INCLUDING_FIELD(type, field))
 
 /* Header for a versioned operation table defined with designated fields. */
 #define TESS_ABI_INITIALIZER(version, type) \

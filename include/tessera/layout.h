@@ -24,7 +24,7 @@ typedef struct TessLayout
 } TessLayout;
 
 #define TESS_LAYOUT_MIN_SIZE \
-	TESS_ABI_SIZE_THROUGH(TessLayout, target_columns)
+	TESS_ABI_SIZE_INCLUDING_FIELD(TessLayout, target_columns)
 
 /* Return the batch column for a zero-based plan target. */
 static inline int

@@ -11,6 +11,7 @@
 
 #include "tessera/abi.h"
 #include "tessera/binding.h"
+#include "tessera/source.h"
 
 #define TESS_API_RENDEZVOUS "tessera.api.v0"
 #define TESS_API_ABI_VERSION 0
@@ -26,10 +27,13 @@ typedef struct TessApi
 	uint32		abi_version;
 	/* Gates access to fields appended by later compatible versions. */
 	Size		struct_size;
-	/* Operations for the connection carried by one tuple slot. */
+	/* Required operations for the connection carried by one tuple slot. */
 	const TessBindingOps *binding_ops;
+	/* Required registry of batch sources from independent extensions. */
+	const TessSourceRegistryOps *sources;
 } TessApi;
 
-#define TESS_API_MIN_SIZE TESS_ABI_SIZE_THROUGH(TessApi, binding_ops)
+/* Both subsystem pointers are required in the current root. */
+#define TESS_API_MIN_SIZE TESS_ABI_SIZE_INCLUDING_FIELD(TessApi, sources)
 
 #endif /* TESSERA_BRIDGE_H */

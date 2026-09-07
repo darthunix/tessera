@@ -36,6 +36,6 @@ typedef struct TessRequest
 } TessRequest;
 
 #define TESS_REQUEST_MIN_SIZE \
-	TESS_ABI_SIZE_THROUGH(TessRequest, max_batch_rows)
+	TESS_ABI_SIZE_INCLUDING_FIELD(TessRequest, max_batch_rows)
 
 #endif /* TESSERA_REQUEST_H */

@@ -53,6 +53,6 @@ typedef struct TessBindingOps
 } TessBindingOps;
 
 #define TESS_BINDING_OPS_MIN_SIZE \
-	TESS_ABI_SIZE_THROUGH(TessBindingOps, is_consumed)
+	TESS_ABI_SIZE_INCLUDING_FIELD(TessBindingOps, is_consumed)
 
 #endif /* TESSERA_BINDING_H */
