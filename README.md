@@ -11,3 +11,6 @@ composable in the same spirit as DataFusion.
 
 Tessera currently targets PostgreSQL master and is not ready for production
 use.
+
+See the [bridge guide](docs/bridge.md) for the public C API, ownership rules,
+and a runnable example using independent producer and consumer modules.

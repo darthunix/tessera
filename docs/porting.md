@@ -67,4 +67,21 @@ before destroying the slot; cleanup is checked before the error is rethrown.
 All state is local to one test call in one backend, with no concurrent access
 or state shared between SQL statements.
 
-Source planning (2.8) and the complete bridge guide (2.11) remain separate.
+Source planning (2.8) remains separate. The bridge guide is covered below.
+
+## Step 2.11: bridge guide
+
+The [bridge guide](bridge.md) walks through the compiled modules from step
+2.10, with commands for building, installing, and running the example in a
+temporary PostgreSQL instance. It covers per-backend loading, API discovery
+and ABI validation, requests, column access, exclusive batch use, pointer
+lifetimes, and cleanup after an error.
+
+The reference contracts are in
+[include/pg_batch/bridge.h](../../pg_batch/include/pg_batch/bridge.h) and
+[include/pg_batch/batch.h](../../pg_batch/include/pg_batch/batch.h), with the
+implementation in [bridge/bridge.c](../../pg_batch/bridge/bridge.c).
+The guide documents Tessera's current behavior rather than copying the
+reference interfaces, including its separate consumption and release steps.
+This documentation step adds no API or runtime behavior; source planning
+remains scheduled with step 6.5.
