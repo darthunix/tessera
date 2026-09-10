@@ -3,9 +3,11 @@
 #define TESSERA_BRIDGE_INTERNAL_H
 
 #include "tessera/binding.h"
+#include "tessera/node.h"
 #include "tessera/source.h"
 
 extern const TessBindingOps tess_binding_ops;
+extern const TessNodeRegistryOps tess_node_registry_ops;
 extern const TessSourceRegistryOps tess_source_registry_ops;
 
 #endif /* TESSERA_BRIDGE_INTERNAL_H */

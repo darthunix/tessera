@@ -14,6 +14,7 @@ static const TessApi tess_api = {
 	TESS_ABI_INITIALIZER(TESS_API_ABI_VERSION, TessApi),
 	.binding_ops = &tess_binding_ops,
 	.sources = &tess_source_registry_ops,
+	.nodes = &tess_node_registry_ops,
 };
 
 void

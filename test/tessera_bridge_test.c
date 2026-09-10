@@ -50,7 +50,15 @@ tessera_test_api_visible(PG_FUNCTION_ARGS)
 					   api->sources->abi_version ==
 					   TESS_SOURCE_REGISTRY_OPS_ABI_VERSION &&
 					   api->sources->struct_size >=
-					   TESS_SOURCE_REGISTRY_OPS_MIN_SIZE);
+					   TESS_SOURCE_REGISTRY_OPS_MIN_SIZE &&
+					   api->nodes != NULL &&
+					   api->nodes->abi_version ==
+					   TESS_NODE_REGISTRY_OPS_ABI_VERSION &&
+					   api->nodes->struct_size >=
+					   TESS_NODE_REGISTRY_OPS_MIN_SIZE &&
+					   api->nodes->add != NULL &&
+					   api->nodes->remove != NULL &&
+					   api->nodes->find != NULL);
 }
 
 Datum
@@ -71,11 +79,14 @@ tessera_test_abi_helpers(PG_FUNCTION_ARGS)
 		value.struct_size != sizeof(value))
 		PG_RETURN_BOOL(false);
 
-	/* The current root requires sources, but still accepts later fields. */
+	/* The current root requires nodes, but still accepts later fields. */
 	api.struct_size = TESS_ABI_SIZE_INCLUDING_FIELD(TessApi, binding_ops);
 	if (api.struct_size >= TESS_API_MIN_SIZE)
 		PG_RETURN_BOOL(false);
 	api.struct_size = TESS_ABI_SIZE_INCLUDING_FIELD(TessApi, sources);
+	if (api.struct_size >= TESS_API_MIN_SIZE)
+		PG_RETURN_BOOL(false);
+	api.struct_size = TESS_ABI_SIZE_INCLUDING_FIELD(TessApi, nodes);
 	extended.base.struct_size = sizeof(extended);
 	if (api.struct_size < TESS_API_MIN_SIZE ||
 		extended.base.struct_size < TESS_API_MIN_SIZE)

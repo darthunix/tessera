@@ -12,7 +12,7 @@ The bridge owns only cross-extension coordination:
 - attaching a batch request to a tuple slot;
 - transferring one active batch through that slot;
 - registering batch sources;
-- later, registering executor nodes.
+- registering batch-producing node kinds.
 
 It will not evaluate expressions, interpret a source-native column format,
 choose scan or join algorithms, or own the physical buffers behind a batch.
@@ -23,18 +23,18 @@ Those responsibilities belong to runtime libraries, nodes, and sources.
 `TessApi` remains a small root containing pointers to independently versioned
 subsystem tables. `TessBindingOps` implements the slot binding protocol
 described in [binding.md](binding.md). `TessSourceRegistryOps` implements the
-source registry described in [source.md](source.md). A future node registry
-will use another table rather than extend either existing subsystem.
+source registry described in [source.md](source.md). `TessNodeRegistryOps`
+implements the node registry described in [node.md](node.md).
 
-The current root requires both `binding_ops` and `sources` to be non-null.
+The current root requires `binding_ops`, `sources`, and `nodes` to be non-null.
 A consumer first checks the root's ABI version and `TESS_API_MIN_SIZE`, which
-includes both fields. Before using a subsystem, it then checks that table's
-pointer, ABI version, and minimum size.
+includes all three fields. Before using a subsystem, it then checks that
+table's pointer, ABI version, and minimum size.
 
 Future optional fields can be appended to the root. A consumer checks
 `TESS_ABI_HAS_FIELD` before reading such a field, then validates the subsystem
-table itself. The current `sources` field does not need this separate field
-check.
+table itself. The current required fields are covered by `TESS_API_MIN_SIZE`
+and do not need separate field checks.
 
 ## Version zero
 

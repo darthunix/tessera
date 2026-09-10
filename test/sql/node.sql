@@ -1,0 +1,62 @@
+CREATE EXTENSION tessera;
+
+\getenv libdir PG_LIBDIR
+\getenv dlsuffix PG_DLSUFFIX
+\set node_test :libdir '/tessera_node_test' :dlsuffix
+LOAD :'node_test';
+
+CREATE FUNCTION tessera_test_node_registry()
+RETURNS boolean
+AS :'node_test', 'tessera_test_node_registry'
+LANGUAGE C STRICT;
+
+CREATE FUNCTION tessera_test_node_sizes()
+RETURNS boolean
+AS :'node_test', 'tessera_test_node_sizes'
+LANGUAGE C STRICT;
+
+CREATE FUNCTION tessera_test_node_ownership()
+RETURNS boolean
+AS :'node_test', 'tessera_test_node_ownership'
+LANGUAGE C STRICT;
+
+CREATE FUNCTION tessera_test_node_source_names()
+RETURNS boolean
+AS :'node_test', 'tessera_test_node_source_names'
+LANGUAGE C STRICT;
+
+CREATE FUNCTION tessera_test_invalid_node(integer)
+RETURNS void
+AS :'node_test', 'tessera_test_invalid_node'
+LANGUAGE C STRICT;
+
+CREATE FUNCTION tessera_test_duplicate_node()
+RETURNS void
+AS :'node_test', 'tessera_test_duplicate_node'
+LANGUAGE C STRICT;
+
+SELECT tessera_test_node_registry() AS node_registry \gset
+\echo :node_registry
+SELECT tessera_test_node_sizes() AS node_sizes \gset
+\echo :node_sizes
+SELECT tessera_test_node_ownership() AS node_ownership \gset
+\echo :node_ownership
+SELECT tessera_test_node_source_names() AS node_source_names \gset
+\echo :node_source_names
+
+\set VERBOSITY terse
+SELECT tessera_test_invalid_node(0);
+SELECT tessera_test_invalid_node(1);
+SELECT tessera_test_invalid_node(2);
+SELECT tessera_test_invalid_node(3);
+SELECT tessera_test_invalid_node(4);
+SELECT tessera_test_duplicate_node();
+\set VERBOSITY default
+
+DROP FUNCTION tessera_test_duplicate_node();
+DROP FUNCTION tessera_test_invalid_node(integer);
+DROP FUNCTION tessera_test_node_source_names();
+DROP FUNCTION tessera_test_node_ownership();
+DROP FUNCTION tessera_test_node_sizes();
+DROP FUNCTION tessera_test_node_registry();
+DROP EXTENSION tessera;

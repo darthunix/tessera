@@ -11,6 +11,7 @@
 
 #include "tessera/abi.h"
 #include "tessera/binding.h"
+#include "tessera/node.h"
 #include "tessera/source.h"
 
 #define TESS_API_RENDEZVOUS "tessera.api.v0"
@@ -31,9 +32,11 @@ typedef struct TessApi
 	const TessBindingOps *binding_ops;
 	/* Required registry of batch sources from independent extensions. */
 	const TessSourceRegistryOps *sources;
+	/* Required registry of batch-producing node kinds. */
+	const TessNodeRegistryOps *nodes;
 } TessApi;
 
-/* Both subsystem pointers are required in the current root. */
-#define TESS_API_MIN_SIZE TESS_ABI_SIZE_INCLUDING_FIELD(TessApi, sources)
+/* All subsystem pointers are required in the current root. */
+#define TESS_API_MIN_SIZE TESS_ABI_SIZE_INCLUDING_FIELD(TessApi, nodes)
 
 #endif /* TESSERA_BRIDGE_H */

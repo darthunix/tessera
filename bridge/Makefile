@@ -1,5 +1,5 @@
 MODULE_big = tessera
-OBJS = binding.o bridge.o source.o
+OBJS = binding.o bridge.o node.o source.o
 PG_CPPFLAGS = -I$(srcdir)/../include
 
 EXTENSION = tessera
@@ -10,6 +10,7 @@ HEADERS = \
 	../include/tessera/binding.h \
 	../include/tessera/bridge.h \
 	../include/tessera/layout.h \
+	../include/tessera/node.h \
 	../include/tessera/request.h \
 	../include/tessera/row_mask.h \
 	../include/tessera/source.h
