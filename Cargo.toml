@@ -10,6 +10,7 @@ license = "PostgreSQL"
 publish = false
 
 [workspace.dependencies]
+anyhow = "1.0.104"
 tessera-core = { path = "crates/tessera-core" }
 
 [workspace.lints.rust]

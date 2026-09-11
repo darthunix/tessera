@@ -17,10 +17,11 @@ and a runnable example using independent producer and consumer modules.
 
 ## Rust workspace
 
-The Rust workspace currently contains two crate skeletons:
+The Rust workspace currently contains two crates:
 
-- `tessera-core`: safe data structures and algorithms, with unsafe code
-  forbidden and no PostgreSQL dependency.
+- `tessera-core`: safe borrowed row masks (`RowMask`, `RowMaskView`) and
+  columns (`ColumnView`), with unsafe code forbidden and no PostgreSQL
+  dependency. Non-NULL masks use the same view type as row selection.
 - `tessera-capi`: a static library for the future C interface, depending on
   `tessera-core`. It does not expose C functions yet.
 
@@ -28,8 +29,9 @@ Package metadata and the minimum Rust version are defined in the root
 `Cargo.toml` and inherited by both crates. `rust-toolchain.toml` selects the
 exact compiler version, Rust 1.98.1, with rustfmt and Clippy. With rustup
 installed, these components are selected automatically; the first run may
-download missing components. `Cargo.lock` is kept in Git. There are no
-external crate dependencies.
+download missing components. `Cargo.lock` is kept in Git. Shared dependencies
+are declared in the root workspace; `tessera-core` uses `anyhow` for errors
+and results.
 
 Build and check Rust independently of PostgreSQL:
 
@@ -41,9 +43,24 @@ make rust-clean    # Remove Cargo build products
 ```
 
 The static libraries are `target/debug/libtessera_capi.a` and
-`target/release/libtessera_capi.a` on macOS and Linux. The crates do not yet
-contain algorithms or functional tests; these checks validate the workspace
-setup until implementations and their tests are added together.
+`target/release/libtessera_capi.a` on macOS and Linux. `tessera-core` has
+functional tests for masks, NULL handling, and column access, plus documentation
+examples that check borrowing rules. The C interface remains a skeleton.
+
+`RowMaskView` exposes `nrows()` for the physical size, `selected_count()` for
+the number of set bits, and `selected_indices()` for their physical indices.
+`RowMask` allows clearing rows and intersecting masks; `as_view()` borrows it
+for reading. Clearing an absent or out-of-bounds row silently does nothing.
+
+Selection and non-NULL masks are separate: an active row may contain NULL.
+`ColumnView` takes an optional `non_nulls` mask of type `RowMaskView`, with
+set bits for non-NULL values; `None` means all values are non-NULL. It borrows
+Rust values without copying them. Every position, including NULL, must be
+initialized; this is not an adapter for partially prepared Datum arrays.
+Constructors, row lookup, and intersection return `anyhow::Result` for invalid
+input. Successful operations do not allocate, but creating an error may
+allocate. See the
+[crate documentation](crates/tessera-core/src/lib.rs) for a complete example.
 
 The existing `make`, `make install`, `make installcheck`, and `make clean`
 targets remain C-only and do not require Cargo. They do not link or install
