@@ -7,9 +7,10 @@ license.workspace = true
 publish.workspace = true
 
 [lib]
-crate-type = ["staticlib"]
+crate-type = ["staticlib", "rlib"]
 
 [dependencies]
+anyhow.workspace = true
 tessera-core.workspace = true
 
 [lints]

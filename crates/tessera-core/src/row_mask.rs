@@ -1,16 +1,37 @@
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 
-use crate::bitmap::{validate_row, validate_words};
+use crate::bitmap::{validate_row, validate_words, word_count};
+
+#[derive(Clone, Copy, Debug)]
+enum Storage<'a> {
+    Words(&'a [u64]),
+    Bytes { bytes: &'a [u8], bit_offset: usize },
+}
+
+// Keep byte-window decoding out of the small word-backed hot path.
+#[inline(never)]
+fn byte_word(bytes: &[u8], bit_offset: usize, word_index: usize, nrows: usize) -> u64 {
+    let start = word_index * 8;
+    let count = (bytes.len() - start).min(8);
+    let mut data = [0; 8];
+    data[..count].copy_from_slice(&bytes[start..start + count]);
+    let mut bits = u64::from_le_bytes(data) >> bit_offset;
+    if bit_offset != 0 && bytes.len() - start > 8 {
+        bits |= u64::from(bytes[start + 8]) << (64 - bit_offset);
+    }
+    let valid = (nrows - word_index * 64).min(64);
+    bits & (u64::MAX >> (64 - valid))
+}
 
 /// A read-only, borrowed bitmap of physical rows.
 ///
 /// Set bits can represent active rows or non-NULL values. Row selection and
 /// non-NULL tracking use separate bitmaps, even though they share this view type.
 ///
-/// The least significant bit of each word represents its first row. Words
-/// beyond the required length and set padding bits are rejected. Zero rows
-/// require an empty slice. This matches `TessRowMask` bit numbering, not its
-/// C struct layout. The view neither owns nor modifies its backing words.
+/// Bits are numbered least significant first in both words and bytes.
+/// [`Self::try_new`] accepts strict `TessRowMask`-style words, not its C struct
+/// layout. [`Self::try_from_bytes`] borrows an arbitrary bit window, including
+/// sliced Arrow non-NULL masks. Neither constructor copies or owns storage.
 ///
 /// A view cannot outlive its storage:
 ///
@@ -26,14 +47,55 @@ use crate::bitmap::{validate_row, validate_words};
 #[derive(Clone, Copy, Debug)]
 pub struct RowMaskView<'a> {
     nrows: usize,
-    words: &'a [u64],
+    storage: Storage<'a>,
 }
 
 impl<'a> RowMaskView<'a> {
     /// Borrow words, rejecting an incorrect word count or nonzero padding bits.
     pub fn try_new(nrows: usize, words: &'a [u64]) -> Result<Self> {
         validate_words(nrows, words)?;
-        Ok(Self { nrows, words })
+        Ok(Self {
+            nrows,
+            storage: Storage::Words(words),
+        })
+    }
+
+    /// Borrow `nrows` bits starting at `bit_offset`, without alignment needs.
+    ///
+    /// Bits outside the window are ignored, including nonzero padding.
+    /// Overflow or a window beyond the buffer returns an error. An empty
+    /// window may start at any valid position, including the buffer's end.
+    pub fn try_from_bytes(nrows: usize, bytes: &'a [u8], bit_offset: usize) -> Result<Self> {
+        let end = bit_offset
+            .checked_add(nrows)
+            .context("bitmap bit range overflows")?;
+        ensure!(
+            end.div_ceil(8) <= bytes.len(),
+            "bitmap bit range exceeds its buffer"
+        );
+        Ok(Self {
+            nrows,
+            storage: Storage::Bytes {
+                bytes: &bytes[bit_offset / 8..end.div_ceil(8)],
+                bit_offset: bit_offset % 8,
+            },
+        })
+    }
+
+    /// Return a logical 64-row word, or `None` beyond the row count.
+    ///
+    /// The last word's padding is always zero, independent of backing format.
+    #[inline]
+    pub fn word(&self, word_index: usize) -> Option<u64> {
+        if word_index >= word_count(self.nrows) {
+            return None;
+        }
+        Some(match self.storage {
+            Storage::Words(words) => words[word_index],
+            Storage::Bytes { bytes, bit_offset } => {
+                byte_word(bytes, bit_offset, word_index, self.nrows)
+            }
+        })
     }
 
     /// Return the number of physical rows, including unselected rows.
@@ -43,16 +105,21 @@ impl<'a> RowMaskView<'a> {
 
     /// Return the number of selected rows, not the physical row count.
     pub fn selected_count(&self) -> usize {
-        self.words
-            .iter()
-            .map(|word| word.count_ones() as usize)
+        (0..word_count(self.nrows))
+            .map(|index| self.word(index).unwrap().count_ones() as usize)
             .sum()
     }
 
     /// Check a physical row, returning an error if `row >= self.nrows()`.
     pub fn contains(&self, row: usize) -> Result<bool> {
         validate_row(row, self.nrows)?;
-        Ok(self.words[row / 64] & (1_u64 << (row % 64)) != 0)
+        Ok(match self.storage {
+            Storage::Words(words) => words[row / 64] & (1_u64 << (row % 64)) != 0,
+            Storage::Bytes { bytes, bit_offset } => {
+                let bit = row + bit_offset;
+                bytes[bit / 8] & (1_u8 << (bit % 8)) != 0
+            }
+        })
     }
 
     /// Visit selected physical indices in increasing order without allocating.
@@ -60,8 +127,8 @@ impl<'a> RowMaskView<'a> {
     /// Only set bits are visited within each word. Once exhausted, the
     /// iterator keeps returning `None`.
     pub fn selected_indices(&self) -> impl Iterator<Item = usize> + '_ {
-        self.words.iter().enumerate().flat_map(|(word, &bits)| {
-            let mut remaining = bits;
+        (0..word_count(self.nrows)).flat_map(|word| {
+            let mut remaining = self.word(word).unwrap();
             std::iter::from_fn(move || {
                 if remaining == 0 {
                     return None;
@@ -76,7 +143,7 @@ impl<'a> RowMaskView<'a> {
 
 /// An exclusively borrowed row bitmap that can only remove rows.
 ///
-/// Construction validates the same invariants as [`RowMaskView`]. Successful
+/// Construction validates the invariants of [`RowMaskView::try_new`]. Successful
 /// operations do not allocate; creating an error may allocate. No operation
 /// frees or resizes the backing storage. Dropping the mask ends the borrow;
 /// changes remain in the caller's words.
@@ -119,7 +186,7 @@ impl<'a> RowMask<'a> {
     pub fn as_view(&self) -> RowMaskView<'_> {
         RowMaskView {
             nrows: self.nrows,
-            words: self.words,
+            storage: Storage::Words(self.words),
         }
     }
 
@@ -144,8 +211,8 @@ impl<'a> RowMask<'a> {
             self.nrows,
             other.nrows
         );
-        for (word, keep) in self.words.iter_mut().zip(other.words) {
-            *word &= keep;
+        for (index, word) in self.words.iter_mut().enumerate() {
+            *word &= other.word(index).unwrap();
         }
         Ok(())
     }

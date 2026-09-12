@@ -76,6 +76,65 @@ fn masks_match_boolean_model() {
 }
 
 #[test]
+fn byte_windows_match_word_masks() {
+    for nrows in [0, 1, 7, 8, 9, 63, 64, 65, 127, 128, 129, 257] {
+        for offset in 0..80 {
+            for expected in patterns(nrows) {
+                // Set all bits outside the window to catch accidental exposure.
+                let mut bytes = vec![u8::MAX; (offset + nrows).div_ceil(8) + 1];
+                for (row, &selected) in expected.iter().enumerate() {
+                    if !selected {
+                        bytes[(offset + row) / 8] &= !(1 << ((offset + row) % 8));
+                    }
+                }
+                let byte_mask = RowMaskView::try_from_bytes(nrows, &bytes, offset).unwrap();
+                assert_mask(byte_mask, &expected);
+                let mut words = words_for(&vec![true; nrows]);
+                let expected_words = words_for(&expected);
+                for (index, &word) in expected_words.iter().enumerate() {
+                    assert_eq!(byte_mask.word(index), Some(word));
+                }
+                assert_eq!(byte_mask.word(expected_words.len()), None);
+                assert_eq!(byte_mask.word(usize::MAX), None);
+                RowMask::try_new(nrows, &mut words)
+                    .unwrap()
+                    .intersect(byte_mask)
+                    .unwrap();
+                assert_eq!(words, expected_words);
+            }
+        }
+    }
+}
+
+#[test]
+fn byte_windows_validate_ranges_and_exact_buffers() {
+    for (nrows, offset) in [(0, 0), (0, 8), (1, 7), (8, 0), (7, 1)] {
+        let mask = RowMaskView::try_from_bytes(nrows, &[u8::MAX], offset).unwrap();
+        assert_eq!(mask.selected_count(), nrows);
+    }
+    assert!(RowMaskView::try_from_bytes(0, &[], 0).is_ok());
+    for (nrows, offset) in [
+        (0, 9),
+        (1, 8),
+        (9, 0),
+        (8, 1),
+        (usize::MAX, 1),
+        (1, usize::MAX),
+    ] {
+        assert!(RowMaskView::try_from_bytes(nrows, &[0], offset).is_err());
+    }
+    // A shifted full word needs nine bytes; a shorter final word must not
+    // access a ninth byte unless it is part of the validated window.
+    for offset in 0_usize..8 {
+        for nrows in 1..=129 {
+            let bytes = vec![u8::MAX; (offset + nrows).div_ceil(8)];
+            let mask = RowMaskView::try_from_bytes(nrows, &bytes, offset).unwrap();
+            assert_mask(mask, &vec![true; nrows]);
+        }
+    }
+}
+
+#[test]
 fn clear_matches_boolean_model_and_is_idempotent() {
     for nrows in sizes() {
         for mut expected in patterns(nrows) {

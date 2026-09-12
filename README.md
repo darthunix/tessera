@@ -15,90 +15,22 @@ use.
 See the [bridge guide](docs/bridge.md) for the public C API, ownership rules,
 and a runnable example using independent producer and consumer modules.
 
-## Rust workspace
+## Rust development
 
-The Rust workspace currently contains two crates:
-
-- `tessera-core`: safe borrowed row masks (`RowMask`, `RowMaskView`) and
-  columns (`ColumnView`), with unsafe code forbidden and no PostgreSQL
-  dependency. Non-NULL masks use the same view type as row selection.
-- `tessera-capi`: a static library for the future C interface, depending on
-  `tessera-core`. It does not expose C functions yet.
-
-Package metadata and the minimum Rust version are defined in the root
-`Cargo.toml` and inherited by both crates. `rust-toolchain.toml` selects the
-exact compiler version, Rust 1.98.1, with rustfmt and Clippy. With rustup
-installed, these components are selected automatically; the first run may
-download missing components. `Cargo.lock` is kept in Git. Shared dependencies
-are declared in the root workspace; `tessera-core` uses `anyhow` for errors
-and results.
-
-Build and check Rust independently of PostgreSQL:
+The Rust libraries provide batch-processing primitives and adapters for
+PostgreSQL types. They can be built and checked independently of PostgreSQL.
+Install [rustup](https://rustup.rs/); the repository selects the required
+toolchain automatically.
 
 ```sh
 make rust          # Debug build
 make rust-release  # Optimized build
 make rust-check    # Formatting, Clippy, and debug/release tests
 make rust-clean    # Remove Cargo build products
+cargo doc --workspace --no-deps --open
 ```
 
-The static libraries are `target/debug/libtessera_capi.a` and
-`target/release/libtessera_capi.a` on macOS and Linux. `tessera-core` has
-functional tests for masks, NULL handling, and column access, plus documentation
-examples that check borrowing rules. The C interface remains a skeleton.
+API details, examples, and safety requirements live in the Rust documentation.
 
-`RowMaskView` exposes `nrows()` for the physical size, `selected_count()` for
-the number of set bits, and `selected_indices()` for their physical indices.
-`RowMask` allows clearing rows and intersecting masks; `as_view()` borrows it
-for reading. Clearing an absent or out-of-bounds row silently does nothing.
-
-Selection and non-NULL masks are separate: an active row may contain NULL.
-`ColumnView` takes an optional `non_nulls` mask of type `RowMaskView`, with
-set bits for non-NULL values; `None` means all values are non-NULL. It borrows
-Rust values without copying them. Every position, including NULL, must be
-initialized; this is not an adapter for partially prepared Datum arrays.
-Constructors, row lookup, and intersection return `anyhow::Result` for invalid
-input. Successful operations do not allocate, but creating an error may
-allocate. See the
-[crate documentation](crates/tessera-core/src/lib.rs) for a complete example.
-
-The existing `make`, `make install`, `make installcheck`, and `make clean`
-targets remain C-only and do not require Cargo. They do not link or install
-the Rust library, and `make clean` leaves Cargo build products alone.
-
-## Rust safety and errors
-
-Unsafe code is limited to `tessera-capi` and future isolated SIMD modules.
-Every unsafe block must have a `SAFETY` comment explaining its invariants.
-Both crates inherit the workspace's `unsafe_op_in_unsafe_fn = "deny"` lint.
-
-Rust must not call PostgreSQL, directly or through callbacks, or retain
-`TupleTableSlot`, `MemoryContext`, or Datum pointers after returning to C.
-
-The following rules apply when the first C entry points are added:
-
-- Stack unwinding is allowed only within Rust. Both build profiles explicitly
-  use `panic = "unwind"`; overriding this with `panic = "abort"` is unsupported.
-- Entry points use `extern "C"`, not `extern "C-unwind"`. All potentially
-  panicking work must run inside `catch_unwind` within the Rust entry point.
-  A caught panic becomes an error in the future `TessStatus` interface.
-  `extern "C"` alone does not recover from a panic: an escaping panic aborts
-  the process.
-- Expected errors use `Result` and status returns, not panics. Catching a panic
-  does not undo mutations: partial outputs must not be returned, and affected
-  state must be restored or made unusable. Any `AssertUnwindSafe` use must
-  explain why state remains safe after unwinding.
-- Resource cleanup, error handling, and dropping a caught panic's payload
-  must not panic. Catching panics does not protect against aborts, memory
-  corruption, or a second panic during unwinding.
-- PostgreSQL's `ERROR` uses `siglongjmp`, not Rust unwinding, and is not caught
-  by `catch_unwind`. C may call `ereport(ERROR)` only after Rust has returned;
-  jumping over active Rust calls would bypass Rust resource cleanup.
-- The library must not replace the global panic hook or call PostgreSQL from
-  a hook. The hook runs before a panic is caught.
-
-The first real C entry point must include panic-to-status handling and a test
-that calls it from C with an injected panic. The test must verify error return,
-resource cleanup, no partial output, and safe state after failure with both
-debug and release libraries. `cargo test` alone does not verify the library's
-panic strategy because the test harness handles that setting separately.
+The existing C build, installation, and test targets remain independent of
+Cargo.

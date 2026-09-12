@@ -1,7 +1,7 @@
 use anyhow::{Result, ensure};
 
-use crate::RowMaskView;
 use crate::bitmap::validate_row;
+use crate::{ColumnReader, RowMaskView, WordValues};
 
 /// Read-only access to borrowed, initialized values and their nullness.
 ///
@@ -43,6 +43,37 @@ use crate::bitmap::validate_row;
 pub struct ColumnView<'a, T> {
     values: &'a [T],
     non_nulls: Option<RowMaskView<'a>>,
+}
+
+impl<T: Copy> ColumnReader for ColumnView<'_, T> {
+    type Value = T;
+
+    fn nrows(&self) -> usize {
+        self.nrows()
+    }
+
+    #[inline]
+    fn get(&self, row: usize) -> Result<Option<T>> {
+        Ok(self.get(row)?.copied())
+    }
+
+    #[inline]
+    fn word_values(
+        &self,
+        word_index: usize,
+        selected: u64,
+    ) -> Result<impl Iterator<Item = (usize, Option<T>)> + '_> {
+        let non_nulls = self
+            .non_nulls
+            .map_or(u64::MAX, |mask| mask.word(word_index).unwrap_or(0));
+        WordValues::try_new(
+            self.nrows(),
+            word_index,
+            selected,
+            u64::MAX,
+            move |row: usize| (non_nulls & (1 << (row % 64)) != 0).then(|| self.values[row]),
+        )
+    }
 }
 
 impl<'a, T> ColumnView<'a, T> {

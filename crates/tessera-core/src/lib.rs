@@ -7,6 +7,12 @@
 //! bypassed. Mutable row masks use exclusive borrows, while read-only views use
 //! shared borrows. No view can outlive its backing storage.
 //!
+//! [`ColumnReader`] adds typed indexed and selected reads. Its value type is
+//! chosen by each representation, not a runtime tag. [`ColumnView`] implements
+//! it for `Copy` values; its own `get` continues returning a reference.
+//! [`WordValues`] validates each selection word before invoking its reader.
+//! [`RowMaskView::try_from_bytes`] accepts offset bit windows without copying.
+//!
 //! Row selection and value nullness are independent: a selected row may be
 //! null. Separate masks use the same [`RowMaskView`] type and physical row
 //! indices, not positions in a packed selection. Constructors, row lookup,
@@ -35,7 +41,9 @@
 
 mod bitmap;
 mod column;
+mod reader;
 mod row_mask;
 
 pub use column::ColumnView;
+pub use reader::{ColumnReader, WordValues};
 pub use row_mask::{RowMask, RowMaskView};
