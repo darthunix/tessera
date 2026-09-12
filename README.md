@@ -31,6 +31,8 @@ cargo doc --workspace --no-deps --open
 ```
 
 API details, examples, and safety requirements live in the Rust documentation.
+See the [benchmark guide](crates/tessera-capi/benches/README.md) for performance
+checks.
 
 The existing C build, installation, and test targets remain independent of
 Cargo.
