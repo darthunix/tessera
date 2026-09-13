@@ -8,7 +8,7 @@ enum Storage<'a> {
     Bytes { bytes: &'a [u8], bit_offset: usize },
 }
 
-// Keep byte-window decoding out of the small word-backed hot path.
+// Keep partial and shifted byte-window decoding out of the full-word hot path.
 #[inline(never)]
 fn byte_word(bytes: &[u8], bit_offset: usize, word_index: usize, nrows: usize) -> u64 {
     let start = word_index * 8;
@@ -93,7 +93,14 @@ impl<'a> RowMaskView<'a> {
         Some(match self.storage {
             Storage::Words(words) => words[word_index],
             Storage::Bytes { bytes, bit_offset } => {
-                byte_word(bytes, bit_offset, word_index, self.nrows)
+                if bit_offset == 0 && self.nrows - word_index * 64 >= 64 {
+                    let start = word_index * 8;
+                    // A fixed-size copy permits a direct load without requiring
+                    // u64 alignment or reading beyond the validated window.
+                    u64::from_le_bytes(bytes[start..start + 8].try_into().unwrap())
+                } else {
+                    byte_word(bytes, bit_offset, word_index, self.nrows)
+                }
             }
         })
     }
@@ -199,6 +206,31 @@ impl<'a> RowMask<'a> {
         if let Some(word) = self.words.get_mut(row / 64) {
             *word &= !(1_u64 << (row % 64));
         }
+    }
+
+    /// Intersect one 64-row word, without restoring any cleared row.
+    ///
+    /// An absent word returns an error before any mutation, even when `bits`
+    /// is zero. Other words stay unchanged. Padding bits in `bits` are harmless:
+    /// intersection preserves the zero padding validated by the constructor.
+    ///
+    /// ```
+    /// use tessera_core::RowMask;
+    /// let mut words = [0b111, 1];
+    /// let mut rows = RowMask::try_new(65, &mut words)?;
+    /// rows.intersect_word(0, 0b101)?;
+    /// rows.intersect_word(1, u64::MAX)?;
+    /// assert_eq!(rows.as_view().selected_indices().collect::<Vec<_>>(), [0, 2, 64]);
+    /// # Ok::<(), anyhow::Error>(())
+    /// ```
+    #[inline]
+    pub fn intersect_word(&mut self, index: usize, bits: u64) -> Result<()> {
+        let word = self
+            .words
+            .get_mut(index)
+            .context("mask word is out of bounds")?;
+        *word &= bits;
+        Ok(())
     }
 
     /// Remove rows absent from `other`, without restoring any cleared row.

@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/tessera-core", "crates/tessera-capi"]
+members = ["crates/tessera-core", "crates/tessera-capi", "crates/tessera-kernels"]
 resolver = "3"
 
 [workspace.package]
@@ -12,6 +12,7 @@ publish = false
 [workspace.dependencies]
 anyhow = "1.0.104"
 tessera-core = { path = "crates/tessera-core" }
+tessera-kernels = { path = "crates/tessera-kernels" }
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

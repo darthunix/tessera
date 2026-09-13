@@ -66,6 +66,40 @@ fn assert_mask(mask: RowMaskView<'_>, expected: &[bool]) {
 }
 
 #[test]
+fn word_intersection_only_removes_rows_in_target_word() {
+    for nrows in sizes() {
+        for initial in patterns(nrows) {
+            let original = words_for(&initial);
+            for index in 0..original.len() {
+                for bits in [0, 1, 1 << 63, 0x5555_5555_5555_5555, u64::MAX] {
+                    let mut words = original.clone();
+                    let mut expected = initial.clone();
+                    for (row, selected) in expected.iter_mut().enumerate() {
+                        if row / 64 == index {
+                            *selected &= bits & (1 << (row % 64)) != 0;
+                        }
+                    }
+                    let mut rows = RowMask::try_new(nrows, &mut words).unwrap();
+                    rows.intersect_word(index, bits).unwrap();
+                    rows.intersect_word(index, bits).unwrap();
+                    rows.intersect_word(index, u64::MAX).unwrap();
+                    assert_mask(rows.as_view(), &expected);
+                    assert_eq!(words, words_for(&expected));
+                }
+            }
+            for index in [original.len(), usize::MAX] {
+                for bits in [0, u64::MAX] {
+                    let mut words = original.clone();
+                    let mut rows = RowMask::try_new(nrows, &mut words).unwrap();
+                    assert!(rows.intersect_word(index, bits).is_err());
+                    assert_eq!(words, original);
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn masks_match_boolean_model() {
     for nrows in sizes() {
         for expected in patterns(nrows) {
@@ -102,6 +136,31 @@ fn byte_windows_match_word_masks() {
                     .unwrap();
                 assert_eq!(words, expected_words);
             }
+        }
+    }
+}
+
+#[test]
+fn byte_words_preserve_bit_order_and_padding_at_every_byte_alignment() {
+    let pattern = [0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef];
+    for prefix in 0..8 {
+        for nrows in [57_usize, 63, 64, 65, 121, 127, 128, 129, 191, 192, 193] {
+            // No spare byte after the window: loads must not overread a short
+            // tail or expose padding when its buffer still occupies 8 bytes.
+            let storage: Vec<_> = (0..prefix + nrows.div_ceil(8))
+                .map(|index| pattern[index % pattern.len()])
+                .collect();
+            let bytes = &storage[prefix..];
+            let mask = RowMaskView::try_from_bytes(nrows, bytes, 0).unwrap();
+            let expected: Vec<_> = (0..nrows)
+                .map(|row| bytes[row / 8] & (1 << (row % 8)) != 0)
+                .collect();
+            assert_mask(mask, &expected);
+            for (index, word) in words_for(&expected).into_iter().enumerate() {
+                assert_eq!(mask.word(index), Some(word));
+            }
+            assert_eq!(mask.word(nrows.div_ceil(64)), None);
+            assert_eq!(mask.word(usize::MAX), None);
         }
     }
 }
