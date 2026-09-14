@@ -84,9 +84,17 @@ fn filter_with<C: ColumnReader<Value = i32>>(
             continue;
         }
         let mut passing = 0;
-        for (row, value) in column.word_values(index, selected)? {
-            if value.is_some_and(|value| compare(value, scalar)) {
-                passing |= 1_u64 << (row % 64);
+        if selected.is_power_of_two() {
+            // One row needs only its readiness and NULL bits, not whole mask words.
+            let row = index * 64 + selected.trailing_zeros() as usize;
+            if column.get(row)?.is_some_and(|value| compare(value, scalar)) {
+                passing = selected;
+            }
+        } else {
+            for (row, value) in column.word_values(index, selected)? {
+                if value.is_some_and(|value| compare(value, scalar)) {
+                    passing |= 1_u64 << (row % 64);
+                }
             }
         }
         rows.intersect_word(index, passing)?;

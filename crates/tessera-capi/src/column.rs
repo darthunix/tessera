@@ -13,7 +13,7 @@ fn validate_mask(nrows: usize, mask: Option<RowMaskView<'_>>) -> Result<()> {
     Ok(())
 }
 
-#[inline]
+#[inline(always)]
 fn validate_ready(nrows: usize, prepared: Option<RowMaskView<'_>>, row: usize) -> Result<()> {
     ensure!(
         row < nrows,

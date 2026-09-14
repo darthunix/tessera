@@ -118,6 +118,7 @@ impl<'a> RowMaskView<'a> {
     }
 
     /// Check a physical row, returning an error if `row >= self.nrows()`.
+    #[inline]
     pub fn contains(&self, row: usize) -> Result<bool> {
         validate_row(row, self.nrows)?;
         Ok(match self.storage {

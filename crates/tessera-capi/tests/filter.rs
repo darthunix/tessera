@@ -113,18 +113,58 @@ fn filter_agrees_across_representations_with_uninitialized_gaps_and_slices() {
 }
 
 fn assert_partial_error<C: ColumnReader<Value = i32>>(column: &C, invalid_word: usize) {
-    let mut words = [u64::MAX; 3];
-    let mut rows = RowMask::try_new(192, &mut words).unwrap();
-    assert!(filter(column, &mut rows, CompareOp::Lt, 10).is_err());
-    let mut expected = [u64::MAX; 3];
-    for (index, word) in expected.iter_mut().enumerate().take(invalid_word) {
-        *word = if index == 0 { (1 << 10) - 1 } else { 0 };
+    for selected in [u64::MAX, 1 << 10] {
+        let mut words = [selected; 3];
+        let mut rows = RowMask::try_new(192, &mut words).unwrap();
+        assert!(filter(column, &mut rows, CompareOp::Lt, 10).is_err());
+        let mut expected = [selected; 3];
+        for (index, word) in expected.iter_mut().enumerate().take(invalid_word) {
+            *word &= if index == 0 { (1 << 10) - 1 } else { 0 };
+        }
+        assert_eq!(words, expected);
     }
-    assert_eq!(words, expected);
     let mut empty = [0; 3];
     let mut rows = RowMask::try_new(192, &mut empty).unwrap();
     filter(column, &mut rows, CompareOp::Eq, 0).unwrap();
     assert_eq!(empty, [0; 3]);
+}
+
+#[test]
+fn singleton_checks_readiness_before_nullness_and_never_reads_null_values() {
+    for offset in [0, 7] {
+        for ready in [false, true] {
+            let ready_bytes = bytes_for(&[ready], offset);
+            let null_bytes = bytes_for(&[false], offset);
+            let prepared = RowMaskView::try_from_bytes(1, &ready_bytes, offset).unwrap();
+            let non_nulls = RowMaskView::try_from_bytes(1, &null_bytes, offset).unwrap();
+            let dense_values = [MaybeUninit::uninit()];
+            let datum_values = [MaybeUninit::uninit()];
+            let isnull = [if ready {
+                MaybeUninit::new(true)
+            } else {
+                MaybeUninit::uninit()
+            }];
+            // SAFETY: the only row is either unprepared or NULL; no value is required.
+            let dense = unsafe {
+                DenseInt32Column::try_new(&dense_values, Some(non_nulls), Some(prepared))
+            }
+            .unwrap();
+            // SAFETY: a prepared row has an initialized NULL flag and needs no value.
+            let datum =
+                unsafe { DatumInt32Column::try_new(&datum_values, &isnull, Some(prepared)) }
+                    .unwrap();
+            for op in OPS {
+                let mut dense_words = [1];
+                let mut datum_words = [1];
+                let mut dense_rows = RowMask::try_new(1, &mut dense_words).unwrap();
+                let mut datum_rows = RowMask::try_new(1, &mut datum_words).unwrap();
+                assert_eq!(filter(&dense, &mut dense_rows, op, 0).is_ok(), ready);
+                assert_eq!(filter(&datum, &mut datum_rows, op, 0).is_ok(), ready);
+                assert_eq!(dense_words, [u64::from(!ready)]);
+                assert_eq!(datum_words, dense_words);
+            }
+        }
+    }
 }
 
 #[test]

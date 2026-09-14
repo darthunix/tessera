@@ -76,7 +76,7 @@ impl ColumnReader for DenseInt32Column<'_> {
         self.values.len()
     }
 
-    #[inline]
+    #[inline(always)]
     fn get(&self, row: usize) -> Result<Option<i32>> {
         validate_ready(self.nrows(), self.prepared, row)?;
         if self
@@ -253,7 +253,7 @@ impl ColumnReader for DatumInt32Column<'_> {
         self.values.len()
     }
 
-    #[inline]
+    #[inline(always)]
     fn get(&self, row: usize) -> Result<Option<i32>> {
         validate_ready(self.nrows(), self.prepared, row)?;
         // SAFETY: bounds and readiness were checked above.

@@ -2,7 +2,7 @@
 
 use std::cell::Cell;
 
-use anyhow::Result;
+use anyhow::{Result, ensure};
 use tessera_core::{ColumnReader, ColumnView, RowMask, RowMaskView, WordValues};
 use tessera_kernels::int32::{CompareOp, filter};
 
@@ -49,13 +49,15 @@ fn comparisons_match_scalar_model() {
             let non_nulls =
                 (null_kind != 0).then(|| RowMaskView::try_new(nrows, &non_null_words).unwrap());
             let column = ColumnView::try_new(&values, non_nulls).unwrap();
-            for selection_kind in 0..4 {
+            for selection_kind in 0..6 {
                 let selected: Vec<_> = (0..nrows)
                     .map(|row| match selection_kind {
                         0 => false,
                         1 => true,
                         2 => row % 5 == 2,
-                        _ => row % 64 == 0 || row % 64 == 63,
+                        3 => row % 64 == 0 || row % 64 == 63,
+                        4 => row % 64 == 0,
+                        _ => row % 64 == 63,
                     })
                     .collect();
                 for op in OPS {
@@ -100,6 +102,7 @@ struct Tracked<'a> {
     nrows: usize,
     prepared: &'a [u64],
     words: Cell<usize>,
+    gets: Cell<usize>,
     reads: Cell<usize>,
 }
 
@@ -110,8 +113,15 @@ impl ColumnReader for Tracked<'_> {
         self.nrows
     }
 
-    fn get(&self, _: usize) -> Result<Option<i32>> {
-        panic!("filter must use word_values, not get")
+    fn get(&self, row: usize) -> Result<Option<i32>> {
+        self.gets.set(self.gets.get() + 1);
+        ensure!(row < self.nrows, "row is out of bounds");
+        ensure!(
+            self.prepared[row / 64] & (1 << (row % 64)) != 0,
+            "row is not prepared"
+        );
+        self.reads.set(self.reads.get() + 1);
+        Ok(Some(row as i32))
     }
 
     fn word_values(
@@ -129,25 +139,36 @@ impl ColumnReader for Tracked<'_> {
 
 #[test]
 fn reader_error_keeps_current_and_later_words_without_rollback() {
-    for invalid_word in 0..3 {
-        let mut prepared = [u64::MAX; 3];
-        prepared[invalid_word] &= !(1 << 10);
-        let column = Tracked {
-            nrows: 192,
-            prepared: &prepared,
-            words: Cell::new(0),
-            reads: Cell::new(0),
-        };
-        let mut words = [u64::MAX; 3];
-        let mut rows = RowMask::try_new(192, &mut words).unwrap();
-        assert!(filter(&column, &mut rows, CompareOp::Lt, 10).is_err());
-        let mut expected = [u64::MAX; 3];
-        for (index, word) in expected.iter_mut().enumerate().take(invalid_word) {
-            *word = if index == 0 { (1 << 10) - 1 } else { 0 };
+    for (selected, reads_per_word) in [(u64::MAX, 64), (1 << 10, 1)] {
+        for invalid_word in 0..3 {
+            let mut prepared = [u64::MAX; 3];
+            prepared[invalid_word] &= !(1 << 10);
+            let column = Tracked {
+                nrows: 192,
+                prepared: &prepared,
+                words: Cell::new(0),
+                gets: Cell::new(0),
+                reads: Cell::new(0),
+            };
+            let mut words = [selected; 3];
+            let mut rows = RowMask::try_new(192, &mut words).unwrap();
+            assert!(filter(&column, &mut rows, CompareOp::Lt, 10).is_err());
+            let mut expected = [selected; 3];
+            for (index, word) in expected.iter_mut().enumerate().take(invalid_word) {
+                *word &= if index == 0 { (1 << 10) - 1 } else { 0 };
+            }
+            assert_eq!(words, expected);
+            let singleton = selected.is_power_of_two();
+            assert_eq!(
+                column.words.get(),
+                if singleton { 0 } else { invalid_word + 1 }
+            );
+            assert_eq!(
+                column.gets.get(),
+                if singleton { invalid_word + 1 } else { 0 }
+            );
+            assert_eq!(column.reads.get(), invalid_word * reads_per_word);
         }
-        assert_eq!(words, expected);
-        assert_eq!(column.words.get(), invalid_word + 1);
-        assert_eq!(column.reads.get(), invalid_word * 64);
     }
 }
 
@@ -157,16 +178,19 @@ fn empty_words_and_unselected_unprepared_rows_are_not_read() {
         nrows: 192,
         prepared: &[0, 1, 0],
         words: Cell::new(0),
+        gets: Cell::new(0),
         reads: Cell::new(0),
     };
     let mut words = [0, 1, 0];
     let mut rows = RowMask::try_new(192, &mut words).unwrap();
     filter(&column, &mut rows, CompareOp::Eq, 64).unwrap();
-    assert_eq!(column.words.get(), 1);
+    assert_eq!(column.words.get(), 0);
+    assert_eq!(column.gets.get(), 1);
     assert_eq!(column.reads.get(), 1);
     rows.clear(64);
     filter(&column, &mut rows, CompareOp::Eq, 64).unwrap();
-    assert_eq!(column.words.get(), 1);
+    assert_eq!(column.words.get(), 0);
+    assert_eq!(column.gets.get(), 1);
     assert_eq!(column.reads.get(), 1);
     assert_eq!(words, [0; 3]);
 }
@@ -177,6 +201,7 @@ fn dimension_errors_never_read_or_mutate() {
         nrows: 65,
         prepared: &[],
         words: Cell::new(0),
+        gets: Cell::new(0),
         reads: Cell::new(0),
     };
     for nrows in [0, 1, 64, 66, 128] {
@@ -191,5 +216,6 @@ fn dimension_errors_never_read_or_mutate() {
         }
     }
     assert_eq!(column.words.get(), 0);
+    assert_eq!(column.gets.get(), 0);
     assert_eq!(column.reads.get(), 0);
 }

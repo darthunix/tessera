@@ -19,6 +19,7 @@ pub(crate) fn validate_words(nrows: usize, words: &[u64]) -> Result<()> {
     Ok(())
 }
 
+#[inline]
 pub(crate) fn validate_row(row: usize, nrows: usize) -> Result<()> {
     ensure!(
         row < nrows,
