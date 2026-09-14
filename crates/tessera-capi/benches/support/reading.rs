@@ -9,17 +9,8 @@ use anyhow::{Result, ensure};
 use tessera_core::{ColumnReader, RowMaskView};
 
 use crate::support::{
-    baseline::Definition,
     fixture::Fixture,
     reference::{self, Mask},
-    sampling::Series,
-};
-
-pub const PATHS: [&str; 4] = ["fold", "try_fold", "words", "control"];
-pub const DEFINITION: Definition = Definition {
-    name: "column_reader",
-    paths: &PATHS,
-    policy: crate::support::measurement::Policy::Strict,
 };
 
 // Every timed entry point takes the same borrowed input. It is built before
@@ -130,16 +121,7 @@ fn case(nrows: usize, pattern: &str, nulls: &str, offset: Option<usize>, partial
     let values = (0..nrows)
         .map(|row| (row as i32).wrapping_mul(7919).wrapping_sub(104729))
         .collect();
-    let mut case = Fixture::from_values(values, pattern, nulls, offset, partial);
-    case.quick = nrows == 1024
-        && matches!(
-            (pattern, nulls, offset, partial),
-            ("all", "none" | "mixed" | "all", None, false)
-                | ("sparse" | "empty", "none", None, false)
-                | ("all", "mixed", None, true)
-                | ("sparse", "mixed", Some(7), true)
-        );
-    case
+    Fixture::from_values(values, pattern, nulls, offset, partial)
 }
 
 pub fn cases() -> Vec<Fixture> {
@@ -160,34 +142,35 @@ pub fn cases() -> Vec<Fixture> {
     cases
 }
 
-// This is the original clock loop, separate from shared sample scheduling.
-fn time<C>(
-    input: &Input<'_, C>,
-    run: impl Fn(&Input<'_, C>) -> Result<i64>,
-    iterations: usize,
-) -> f64 {
-    use std::{hint::black_box, time::Instant};
-    let start = Instant::now();
-    for _ in 0..iterations {
-        black_box(run(black_box(input)).unwrap());
-    }
-    start.elapsed().as_secs_f64() * 1e9 / iterations as f64
-}
-
-pub fn measure(case: &Fixture, format: &str, series: Series<'_>) -> Result<()> {
-    match format {
-        "dense" => measure_column(&case.dense_column()?, dense_reference, case, series),
-        "datum" => measure_column(&case.datum_column()?, datum_reference, case, series),
-        _ => unreachable!("unknown column format"),
+pub fn bench(criterion: &mut criterion::Criterion) {
+    for case in cases() {
+        measure_column(
+            criterion,
+            "dense",
+            &case.dense_column().unwrap(),
+            dense_reference,
+            &case,
+        )
+        .unwrap();
+        measure_column(
+            criterion,
+            "datum",
+            &case.datum_column().unwrap(),
+            datum_reference,
+            &case,
+        )
+        .unwrap();
     }
 }
 
 fn measure_column<C: ColumnReader<Value = i32>>(
+    criterion: &mut criterion::Criterion,
+    format: &str,
     column: &C,
-    direct: impl Fn(&Input<'_, C>) -> Result<i64> + Copy,
+    direct: impl Fn(&Input<'_, C>) -> Result<i64>,
     case: &Fixture,
-    series: Series<'_>,
 ) -> Result<()> {
+    use std::hint::black_box;
     let input = Input::new(column, case);
     ensure!(
         direct(&input)? == case.expected,
@@ -205,11 +188,20 @@ fn measure_column<C: ColumnReader<Value = i32>>(
         word_sum(&input)? == case.expected,
         "word reader result differs"
     );
-    series.collect(&PATHS, |path, iterations| match path {
-        "fold" => time(&input, fold_sum, iterations),
-        "try_fold" => time(&input, iter_sum, iterations),
-        "words" => time(&input, word_sum, iterations),
-        "control" => time(&input, direct, iterations),
-        _ => unreachable!("unknown reader path"),
-    })
+    let mut group = criterion.benchmark_group(format!("column_reader/{format}/{}", case.name));
+    // Separate closures preserve static dispatch inside every measured loop.
+    group.bench_function("fold", |b| {
+        b.iter(|| black_box(fold_sum(black_box(&input)).unwrap()))
+    });
+    group.bench_function("try_fold", |b| {
+        b.iter(|| black_box(iter_sum(black_box(&input)).unwrap()))
+    });
+    group.bench_function("words", |b| {
+        b.iter(|| black_box(word_sum(black_box(&input)).unwrap()))
+    });
+    group.bench_function("reference", |b| {
+        b.iter(|| black_box(direct(black_box(&input)).unwrap()))
+    });
+    group.finish();
+    Ok(())
 }

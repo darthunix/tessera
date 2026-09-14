@@ -46,8 +46,8 @@ impl Masks {
     pub fn time_scalar<C: ColumnReader<Value = i32>>(
         &mut self,
         input: &Input<'_, C>,
-        iterations: usize,
-    ) -> f64 {
+        iterations: u64,
+    ) -> Duration {
         self.time(iterations, |this, count| {
             let nrows = this.nrows;
             let mut views: Vec<_> = this
@@ -66,8 +66,8 @@ impl Masks {
         &mut self,
         input: &Input<'_, C>,
         run: impl Fn(&Input<'_, C>, &mut [u64]) -> Result<()>,
-        iterations: usize,
-    ) -> f64 {
+        iterations: u64,
+    ) -> Duration {
         self.time(iterations, |this, count| {
             let mut views: Vec<_> = this.reset(count).collect();
             let start = Instant::now();
@@ -80,18 +80,17 @@ impl Masks {
 
     fn time(
         &mut self,
-        iterations: usize,
+        iterations: u64,
         mut run: impl FnMut(&mut Self, usize) -> Duration,
-    ) -> f64 {
-        assert!(iterations > 0);
+    ) -> Duration {
         let mut elapsed = Duration::ZERO;
         let mut remaining = iterations;
         while remaining != 0 {
-            let count = remaining.min(BLOCK_SIZE);
+            let count = remaining.min(BLOCK_SIZE as u64) as usize;
             elapsed += run(self, count);
             black_box(&self.storage);
-            remaining -= count;
+            remaining -= count as u64;
         }
-        elapsed.as_secs_f64() * 1e9 / iterations as f64
+        elapsed
     }
 }

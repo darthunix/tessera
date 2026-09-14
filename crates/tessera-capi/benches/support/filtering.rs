@@ -11,37 +11,18 @@ use tessera_core::{ColumnReader, RowMask};
 use tessera_kernels::int32::{CompareOp, filter};
 
 use crate::support::{
-    baseline::Definition,
     fixture::{Fixture, as_uninit},
-    measurement::Policy,
     reference::Mask,
-    sampling::Series,
 };
 
 #[path = "filter_timing.rs"]
 pub mod timing;
 
-pub const PATHS: [&str; 2] = ["scalar", "control"];
-pub const DEFINITION: Definition = Definition {
-    name: "filter_int32",
-    paths: &PATHS,
-    policy: Policy::Filter,
-};
-
 fn case(nrows: usize, pattern: &str, nulls: &str, offset: Option<usize>, partial: bool) -> Fixture {
     let values = (0..nrows)
         .map(|row| ((row * 37) % 101) as i32 - 50)
         .collect();
-    let mut fixture = Fixture::from_values(values, pattern, nulls, offset, partial);
-    fixture.quick = matches!(
-        (nrows, pattern, nulls, offset, partial),
-        (65, "one-per128", "none" | "mixed", Some(0), false)
-            | (1024, "all", "none" | "mixed", Some(0), false)
-            | (1024, "one-per128", "mixed", Some(0), false)
-            | (1024, "empty", "none", Some(0), false)
-            | (1024, "one-per128", "mixed", Some(7), true)
-    );
-    fixture
+    Fixture::from_values(values, pattern, nulls, offset, partial)
 }
 
 pub fn cases() -> Vec<Fixture> {
@@ -213,19 +194,33 @@ pub fn expected(fixture: &Fixture, selected: &[u64], op: CompareOp, scalar: i32)
     words
 }
 
-pub fn measure(case: &Fixture, format: &str, series: Series<'_>) -> Result<()> {
-    match format {
-        "dense" => measure_column(&case.dense_column()?, dense_reference, case, series),
-        "datum" => measure_column(&case.datum_column()?, datum_reference, case, series),
-        _ => unreachable!("unknown column format"),
+pub fn bench(criterion: &mut criterion::Criterion) {
+    for case in cases() {
+        measure_column(
+            criterion,
+            "dense",
+            &case.dense_column().unwrap(),
+            dense_reference,
+            &case,
+        )
+        .unwrap();
+        measure_column(
+            criterion,
+            "datum",
+            &case.datum_column().unwrap(),
+            datum_reference,
+            &case,
+        )
+        .unwrap();
     }
 }
 
 fn measure_column<C: ColumnReader<Value = i32>>(
+    criterion: &mut criterion::Criterion,
+    format: &str,
     column: &C,
     direct: impl Fn(&Input<'_, C>, &mut [u64]) -> Result<()> + Copy,
     case: &Fixture,
-    series: Series<'_>,
 ) -> Result<()> {
     let input = Input::new(column, case, CompareOp::Gt, 0);
     let original = case.selected.words();
@@ -240,9 +235,13 @@ fn measure_column<C: ColumnReader<Value = i32>>(
     )?;
     ensure!(actual == expected, "filter differs from scalar model");
     let mut masks = timing::Masks::new(case.values.len(), original)?;
-    series.collect(&PATHS, |path, iterations| match path {
-        "scalar" => masks.time_scalar(&input, iterations),
-        "control" => masks.time_reference(&input, direct, iterations),
-        _ => unreachable!("unknown filter path"),
-    })
+    let mut group = criterion.benchmark_group(format!("filter_int32/{format}/{}", case.name));
+    group.bench_function("scalar", |b| {
+        b.iter_custom(|iterations| masks.time_scalar(&input, iterations))
+    });
+    group.bench_function("reference", |b| {
+        b.iter_custom(|iterations| masks.time_reference(&input, direct, iterations))
+    });
+    group.finish();
+    Ok(())
 }

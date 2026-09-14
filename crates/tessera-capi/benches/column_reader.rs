@@ -3,14 +3,9 @@
 mod reading;
 mod support;
 
-fn main() -> anyhow::Result<()> {
-    support::runner::run(
-        reading::DEFINITION,
-        reading::cases(),
-        &[
-            include_str!("column_reader.rs"),
-            include_str!("support/reading.rs"),
-        ],
-        reading::measure,
-    )
+criterion::criterion_group! {
+    name = benches;
+    config = support::criterion();
+    targets = reading::bench
 }
+criterion::criterion_main!(benches);
