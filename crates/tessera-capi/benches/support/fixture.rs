@@ -1,8 +1,7 @@
 //! Deterministic inputs shared by reading/filtering and their scalar references.
 //!
 //! Build dense and Datum buffers, selection/NULL/readiness masks, and an expected
-//! sum before timing. The full matrix covers boundary sizes and mask layouts;
-//! quick cases are a representative subset, not a replacement for that matrix.
+//! sum before timing. The full matrix covers boundary sizes and mask layouts.
 //! All fixture buffers are initialized, even NULL and unprepared positions:
 //! uninitialized-buffer safety belongs to the library's correctness/Miri tests.
 //! Columns and references borrow the same allocations, not copies of the values.
@@ -61,7 +60,6 @@ impl Bitmap {
 
 pub struct Fixture {
     pub name: String,
-    pub quick: bool,
     pub values: Vec<i32>,
     pub datums: Vec<u64>,
     pub nulls: Vec<bool>,
@@ -148,7 +146,6 @@ impl Fixture {
                 offset.map_or_else(|| "words".to_owned(), |offset| format!("bytes-{offset}")),
                 if partial { "partial" } else { "ready" }
             ),
-            quick: false, // The owning benchmark chooses its diagnostic subset.
             non_nulls: (nulls != "none")
                 .then(|| Bitmap::new(&flags.iter().map(|&flag| !flag).collect::<Vec<_>>(), offset)),
             prepared: partial.then(|| Bitmap::new(&ready, offset)),
