@@ -22,3 +22,7 @@ workspace = true
 [[bench]]
 name = "column_reader"
 harness = false
+
+[[bench]]
+name = "filter_int32"
+harness = false

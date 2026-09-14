@@ -20,6 +20,17 @@ pub struct Mask<'a> {
 
 impl Mask<'_> {
     #[inline]
+    pub fn contains(self, row: usize) -> bool {
+        assert!(row < self.nrows);
+        match self.bits {
+            Bits::Words(words) => words[row / 64] & (1 << (row % 64)) != 0,
+            Bits::Bytes(bytes, offset) => {
+                bytes[(row + offset) / 8] & (1 << ((row + offset) % 8)) != 0
+            }
+        }
+    }
+
+    #[inline]
     pub fn word(self, index: usize) -> u64 {
         assert!(index < self.nrows.div_ceil(64));
         match self.bits {

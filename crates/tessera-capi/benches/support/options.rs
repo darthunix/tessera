@@ -1,41 +1,48 @@
 //! Command-line selection of full or diagnostic runs and saved comparisons.
 //!
-//! Keep quick/filtered runs from being saved as complete baselines, validate
-//! baseline names, and provide the benchmark's help text. Selection changes
+//! Keep quick/filtered runs from being saved as baselines, allow raw results
+//! in either mode, and validate names before timing. Selection changes
 //! which cases run, never the timing method or the performance limits.
 
-use super::baseline;
+use super::baseline::{self, Kind};
 use anyhow::{Context, Result, bail, ensure};
 use std::path::PathBuf;
-
-pub const HELP: &str =
-    "column_reader [--quick] [--baseline NAME] [--save-baseline NAME] [--filter TEXT]
-
-Three complete series of 15 paired samples; 3% limit. A full run takes several minutes.
-Without selection options, all 36 cases run. --quick selects 14 diagnostic cases
-with the same sampling and limits; it is not a complete performance check.
-Each sample brackets one reader with reference runs. A self-reference control
-must stay within +/-3%. Reports PASS, FAIL, or UNSTABLE for each reading path.
-Both FAIL and UNSTABLE return a nonzero exit status.
---baseline NAME also compares against a compatible full v2 saved run (3% limit).
-It can be combined with --quick and/or --filter to compare just selected cases.
---save-baseline NAME saves raw samples only for a complete PASS; never overwrites.
---filter TEXT selects matching names, within the quick subset when --quick is set.
-Neither --quick nor --filter can be combined with --save-baseline.
-Baselines live in target/column-reader-baselines. Matching CPU, OS, compiler,
-Rust flags, benchmark sources, manifests, lockfile, and case set are required.
-v1 baselines are not compatible.";
 
 #[derive(Default, Debug)]
 pub struct Options {
     pub quick: bool,
     pub previous: Option<PathBuf>,
     pub save: Option<PathBuf>,
+    pub save_results: Option<PathBuf>,
     pub filter: Option<String>,
 }
 
 impl Options {
-    pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Option<Self>> {
+    pub fn help(definition: baseline::Definition, full: usize, quick: usize) -> String {
+        format!(
+            "{} [--quick] [--filter TEXT] [--baseline NAME]
+    [--save-baseline NAME] [--save-results NAME]
+\n{full} full cases; --quick selects {quick} diagnostic cases.
+Three complete series of 15 paired samples; {} limit; control strictly +/-3%.
+FAIL and UNSTABLE exit nonzero. No retries or discarded measurements.
+--save-results saves complete selected cases, including diagnostics and failures.
+--save-baseline requires a full PASS, including comparison with --baseline.
+Both save flags may be combined. Existing files are never overwritten.
+Baselines live in target/{}; results in target/{}.
+Results cannot be used as baselines. CPU, OS, compiler, flags, benchmark sources,
+manifests, lockfile and the full case set must match. Incompatible files are
+rejected, not migrated. See benches/README.md for methodology.",
+            definition.name,
+            definition.policy,
+            definition.directory(Kind::Baseline),
+            definition.directory(Kind::Results)
+        )
+    }
+
+    pub fn parse(
+        args: impl IntoIterator<Item = String>,
+        definition: baseline::Definition,
+    ) -> Result<Option<Self>> {
         let mut result = Self::default();
         let mut args = args.into_iter();
         while let Some(arg) = args.next() {
@@ -43,15 +50,17 @@ impl Options {
                 "--bench" => {}
                 "--quick" => result.quick = true,
                 "--help" | "-h" => return Ok(None),
-                "--baseline" => {
-                    result.previous = Some(baseline::path_for(
-                        &args.next().context("missing baseline name")?,
-                    )?)
-                }
-                "--save-baseline" => {
-                    result.save = Some(baseline::path_for(
-                        &args.next().context("missing baseline name")?,
-                    )?)
+                "--baseline" | "--save-baseline" | "--save-results" => {
+                    let (destination, kind) = match arg.as_str() {
+                        "--baseline" => (&mut result.previous, Kind::Baseline),
+                        "--save-baseline" => (&mut result.save, Kind::Baseline),
+                        _ => (&mut result.save_results, Kind::Results),
+                    };
+                    *destination = Some(baseline::path_for(
+                        &args.next().context("missing saved-run name")?,
+                        definition,
+                        kind,
+                    )?);
                 }
                 "--filter" => result.filter = Some(args.next().context("missing filter")?),
                 _ => bail!("unknown argument: {arg}"),
@@ -61,10 +70,10 @@ impl Options {
             result.save.is_none() || !result.is_diagnostic(),
             "cannot save a quick or filtered baseline"
         );
-        if let Some(path) = &result.save {
+        for path in [&result.save, &result.save_results].into_iter().flatten() {
             ensure!(
                 !path.exists(),
-                "baseline already exists: {}",
+                "saved run already exists: {}",
                 path.display()
             );
         }

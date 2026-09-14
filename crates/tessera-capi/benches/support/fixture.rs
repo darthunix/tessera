@@ -1,13 +1,16 @@
-//! Deterministic inputs shared by all measured readers and the scalar reference.
+//! Deterministic inputs shared by reading/filtering and their scalar references.
 //!
 //! Build dense and Datum buffers, selection/NULL/readiness masks, and an expected
 //! sum before timing. The full matrix covers boundary sizes and mask layouts;
 //! quick cases are a representative subset, not a replacement for that matrix.
 //! All fixture buffers are initialized, even NULL and unprepared positions:
 //! uninitialized-buffer safety belongs to the library's correctness/Miri tests.
+//! Columns and references borrow the same allocations, not copies of the values.
 
 use super::reference::{Bits, Mask};
+use anyhow::Result;
 use std::mem::MaybeUninit;
+use tessera_capi::{DatumInt32Column, DenseInt32Column};
 use tessera_core::RowMaskView;
 
 pub struct Bitmap {
@@ -42,6 +45,9 @@ impl Bitmap {
             None => RowMaskView::try_new(self.nrows, &self.words).unwrap(),
         }
     }
+    pub fn words(&self) -> &[u64] {
+        &self.words
+    }
     pub fn reference(&self) -> Mask<'_> {
         Mask {
             nrows: self.nrows,
@@ -57,19 +63,55 @@ pub struct Fixture {
     pub name: String,
     pub quick: bool,
     pub values: Vec<i32>,
-    pub dense: Vec<MaybeUninit<i32>>,
     pub datums: Vec<u64>,
-    pub datum_values: Vec<MaybeUninit<u64>>,
     pub nulls: Vec<bool>,
-    pub isnull: Vec<MaybeUninit<bool>>,
     pub selected: Bitmap,
     pub prepared: Option<Bitmap>,
     pub non_nulls: Option<Bitmap>,
     pub expected: i64,
 }
 
+/// Borrow initialized values in the representation accepted by column constructors.
+pub fn as_uninit<T>(values: &[T]) -> &[MaybeUninit<T>] {
+    // SAFETY: MaybeUninit<T> has T's size and alignment, and accepts all valid T
+    // values. The shared slice keeps the original length and lifetime and cannot
+    // be used to make any value uninitialized or otherwise mutate the buffer.
+    unsafe { std::slice::from_raw_parts(values.as_ptr().cast(), values.len()) }
+}
+
 impl Fixture {
-    fn new(nrows: usize, pattern: &str, nulls: &str, offset: Option<usize>, partial: bool) -> Self {
+    pub fn dense_column(&self) -> Result<DenseInt32Column<'_>> {
+        // SAFETY: fixture buffers are initialized, immutable throughout the borrow,
+        // and outlive the returned column, including NULL and unprepared positions.
+        unsafe {
+            DenseInt32Column::try_new(
+                as_uninit(&self.values),
+                self.non_nulls.as_ref().map(Bitmap::view),
+                self.prepared.as_ref().map(Bitmap::view),
+            )
+        }
+    }
+
+    pub fn datum_column(&self) -> Result<DatumInt32Column<'_>> {
+        // SAFETY: the same fixture initialization and lifetime guarantees hold
+        // for Datum values and valid bool flags.
+        unsafe {
+            DatumInt32Column::try_new(
+                as_uninit(&self.datums),
+                as_uninit(&self.nulls),
+                self.prepared.as_ref().map(Bitmap::view),
+            )
+        }
+    }
+
+    pub fn from_values(
+        values: Vec<i32>,
+        pattern: &str,
+        nulls: &str,
+        offset: Option<usize>,
+        partial: bool,
+    ) -> Self {
+        let nrows = values.len();
         let ready: Vec<_> = (0..nrows).map(|row| !partial || row % 3 != 2).collect();
         let selected: Vec<_> = (0..nrows)
             .map(|row| {
@@ -78,6 +120,8 @@ impl Fixture {
                         "all" => true,
                         "half" => row % 2 == 0,
                         "sparse" => row % 64 == 0,
+                        "eighth" => row % 8 == 0,
+                        "one-per128" => row % 128 == 0,
                         "empty" => false,
                         _ => unreachable!(),
                     }
@@ -90,9 +134,6 @@ impl Fixture {
                 "all" => true,
                 _ => unreachable!(),
             })
-            .collect();
-        let values: Vec<_> = (0..nrows)
-            .map(|row| (row as i32).wrapping_mul(7919).wrapping_sub(104729))
             .collect();
         let datums: Vec<_> = values.iter().map(|&value| value as u64).collect();
         let expected = values
@@ -107,17 +148,7 @@ impl Fixture {
                 offset.map_or_else(|| "words".to_owned(), |offset| format!("bytes-{offset}")),
                 if partial { "partial" } else { "ready" }
             ),
-            quick: nrows == 1024
-                && matches!(
-                    (pattern, nulls, offset, partial),
-                    ("all", "none" | "mixed" | "all", None, false)
-                        | ("sparse" | "empty", "none", None, false)
-                        | ("all", "mixed", None, true)
-                        | ("sparse", "mixed", Some(7), true)
-                ),
-            dense: values.iter().copied().map(MaybeUninit::new).collect(),
-            datum_values: datums.iter().copied().map(MaybeUninit::new).collect(),
-            isnull: flags.iter().copied().map(MaybeUninit::new).collect(),
+            quick: false, // The owning benchmark chooses its diagnostic subset.
             non_nulls: (nulls != "none")
                 .then(|| Bitmap::new(&flags.iter().map(|&flag| !flag).collect::<Vec<_>>(), offset)),
             prepared: partial.then(|| Bitmap::new(&ready, offset)),
@@ -128,22 +159,4 @@ impl Fixture {
             expected,
         }
     }
-}
-
-pub fn cases() -> Vec<Fixture> {
-    let mut cases = Vec::new();
-    for nulls in ["none", "mixed"] {
-        for pattern in ["all", "half", "sparse", "empty"] {
-            cases.push(Fixture::new(1024, pattern, nulls, None, false));
-        }
-    }
-    for nrows in [0, 1, 63, 64, 65] {
-        cases.push(Fixture::new(nrows, "all", "mixed", None, false));
-    }
-    cases.push(Fixture::new(1024, "all", "all", None, false));
-    cases.push(Fixture::new(1024, "all", "mixed", None, true));
-    for (nrows, offset, pattern) in [(65, 3, "all"), (1024, 7, "all"), (1024, 7, "sparse")] {
-        cases.push(Fixture::new(nrows, pattern, "mixed", Some(offset), true));
-    }
-    cases
 }

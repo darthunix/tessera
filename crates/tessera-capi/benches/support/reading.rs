@@ -8,9 +8,18 @@
 use anyhow::{Result, ensure};
 use tessera_core::{ColumnReader, RowMaskView};
 
-use super::{
+use crate::support::{
+    baseline::Definition,
     fixture::Fixture,
     reference::{self, Mask},
+    sampling::Series,
+};
+
+pub const PATHS: [&str; 4] = ["fold", "try_fold", "words", "control"];
+pub const DEFINITION: Definition = Definition {
+    name: "column_reader",
+    paths: &PATHS,
+    policy: crate::support::measurement::Policy::Strict,
 };
 
 // Every timed entry point takes the same borrowed input. It is built before
@@ -38,11 +47,11 @@ impl<'a, C> Input<'a, C> {
             prepared: case
                 .prepared
                 .as_ref()
-                .map(super::fixture::Bitmap::reference),
+                .map(crate::support::fixture::Bitmap::reference),
             non_nulls: case
                 .non_nulls
                 .as_ref()
-                .map(super::fixture::Bitmap::reference),
+                .map(crate::support::fixture::Bitmap::reference),
         }
     }
 }
@@ -115,4 +124,92 @@ pub fn datum_reference<C>(input: &Input<'_, C>) -> Result<i64> {
         input.reference_rows,
         input.prepared,
     )
+}
+
+fn case(nrows: usize, pattern: &str, nulls: &str, offset: Option<usize>, partial: bool) -> Fixture {
+    let values = (0..nrows)
+        .map(|row| (row as i32).wrapping_mul(7919).wrapping_sub(104729))
+        .collect();
+    let mut case = Fixture::from_values(values, pattern, nulls, offset, partial);
+    case.quick = nrows == 1024
+        && matches!(
+            (pattern, nulls, offset, partial),
+            ("all", "none" | "mixed" | "all", None, false)
+                | ("sparse" | "empty", "none", None, false)
+                | ("all", "mixed", None, true)
+                | ("sparse", "mixed", Some(7), true)
+        );
+    case
+}
+
+pub fn cases() -> Vec<Fixture> {
+    let mut cases = Vec::new();
+    for nulls in ["none", "mixed"] {
+        for pattern in ["all", "half", "sparse", "empty"] {
+            cases.push(case(1024, pattern, nulls, None, false));
+        }
+    }
+    for nrows in [0, 1, 63, 64, 65] {
+        cases.push(case(nrows, "all", "mixed", None, false));
+    }
+    cases.push(case(1024, "all", "all", None, false));
+    cases.push(case(1024, "all", "mixed", None, true));
+    for (nrows, offset, pattern) in [(65, 3, "all"), (1024, 7, "all"), (1024, 7, "sparse")] {
+        cases.push(case(nrows, pattern, "mixed", Some(offset), true));
+    }
+    cases
+}
+
+// This is the original clock loop, separate from shared sample scheduling.
+fn time<C>(
+    input: &Input<'_, C>,
+    run: impl Fn(&Input<'_, C>) -> Result<i64>,
+    iterations: usize,
+) -> f64 {
+    use std::{hint::black_box, time::Instant};
+    let start = Instant::now();
+    for _ in 0..iterations {
+        black_box(run(black_box(input)).unwrap());
+    }
+    start.elapsed().as_secs_f64() * 1e9 / iterations as f64
+}
+
+pub fn measure(case: &Fixture, format: &str, series: Series<'_>) -> Result<()> {
+    match format {
+        "dense" => measure_column(&case.dense_column()?, dense_reference, case, series),
+        "datum" => measure_column(&case.datum_column()?, datum_reference, case, series),
+        _ => unreachable!("unknown column format"),
+    }
+}
+
+fn measure_column<C: ColumnReader<Value = i32>>(
+    column: &C,
+    direct: impl Fn(&Input<'_, C>) -> Result<i64> + Copy,
+    case: &Fixture,
+    series: Series<'_>,
+) -> Result<()> {
+    let input = Input::new(column, case);
+    ensure!(
+        direct(&input)? == case.expected,
+        "reference result differs from scalar model"
+    );
+    ensure!(
+        fold_sum(&input)? == case.expected,
+        "fold reader result differs"
+    );
+    ensure!(
+        iter_sum(&input)? == case.expected,
+        "try_fold reader result differs"
+    );
+    ensure!(
+        word_sum(&input)? == case.expected,
+        "word reader result differs"
+    );
+    series.collect(&PATHS, |path, iterations| match path {
+        "fold" => time(&input, fold_sum, iterations),
+        "try_fold" => time(&input, iter_sum, iterations),
+        "words" => time(&input, word_sum, iterations),
+        "control" => time(&input, direct, iterations),
+        _ => unreachable!("unknown reader path"),
+    })
 }
