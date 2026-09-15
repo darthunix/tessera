@@ -72,9 +72,11 @@ impl Bounds {
             high: self.high - old.low,
         }
     }
-    fn repeatable(self, other: Self) -> bool {
+    fn repeatable(self, other: Self, filter: bool) -> bool {
         let ratio = other.relative_to(self);
-        ratio.low >= 0.97 && ratio.high <= 1.03
+        let delta = other.difference(self);
+        (ratio.low >= 0.97 || (filter && delta.low >= -1.))
+            && (ratio.high <= 1.03 || (filter && delta.high <= 1.))
     }
     fn status(self, old: Self, filter: bool) -> Status {
         let ratio = self.relative_to(old);
@@ -249,7 +251,7 @@ pub fn print(out: &mut impl Write, runs: &[Run; 4]) -> Result<Status> {
     )?;
     writeln!(
         out,
-        "History uses absolute library times. Reference overhead is informational only."
+        "History uses absolute library times. Reference overhead and repeatability warnings do not affect status."
     )?;
     let mut status = Status::Pass;
     let mut counts = [0; 3];
@@ -273,13 +275,18 @@ pub fn print(out: &mut impl Write, runs: &[Run; 4]) -> Result<Status> {
                 ))
             })
             .collect::<Result<_>>()?;
-        let controls = [
+        let filter = entry.group.starts_with("filter_int32/");
+        let library_controls = [
             ("before-library", values[0].0, values[3].0),
             ("after-library", values[1].0, values[2].0),
+        ];
+        let reference_controls = [
             ("before-reference", values[0].1, values[3].1),
             ("after-reference", values[1].1, values[2].1),
         ];
-        let stable = controls.iter().all(|(_, a, b)| a.repeatable(*b));
+        let stable = library_controls
+            .iter()
+            .all(|(_, a, b)| a.repeatable(*b, filter));
         let old = values[0].0.envelope(values[3].0);
         let new = values[1].0.envelope(values[2].0);
         let ratio = new.relative_to(old);
@@ -287,7 +294,7 @@ pub fn print(out: &mut impl Write, runs: &[Run; 4]) -> Result<Status> {
         let ref_old = values[0].1.envelope(values[3].1);
         let ref_new = values[1].1.envelope(values[2].1);
         let outcome = if stable {
-            new.status(old, entry.group.starts_with("filter_int32/"))
+            new.status(old, filter)
         } else {
             Status::Unstable
         };
@@ -315,16 +322,30 @@ pub fn print(out: &mut impl Write, runs: &[Run; 4]) -> Result<Status> {
             new.point / ref_new.point,
             new.point - ref_new.point
         )?;
-        for (label, a, b) in controls {
-            if !a.repeatable(b) {
-                let ratio = b.relative_to(a);
-                writeln!(
-                    out,
-                    "  UNSTABLE {label}: repeat change={:+.2}% [{:+.2}%, {:+.2}%], requires [-3%, +3%]",
-                    (ratio.point - 1.) * 100.,
-                    (ratio.low - 1.) * 100.,
-                    (ratio.high - 1.) * 100.
-                )?;
+        for (controls, filter, level) in [
+            (library_controls, filter, "UNSTABLE"),
+            (reference_controls, false, "WARNING"),
+        ] {
+            for (label, a, b) in controls {
+                if !a.repeatable(b, filter) {
+                    let ratio = b.relative_to(a);
+                    let delta = b.difference(a);
+                    let allowance = if filter {
+                        "[-3%, +3%] or [-1ns, +1ns] per bound"
+                    } else {
+                        "[-3%, +3%]"
+                    };
+                    writeln!(
+                        out,
+                        "  {level} {label}: repeat change={:+.2}% [{:+.2}%, {:+.2}%] delta={:+.3}ns [{:+.3}, {:+.3}]; requires {allowance}",
+                        (ratio.point - 1.) * 100.,
+                        (ratio.low - 1.) * 100.,
+                        (ratio.high - 1.) * 100.,
+                        delta.point,
+                        delta.low,
+                        delta.high
+                    )?;
+                }
             }
         }
     }
@@ -375,10 +396,57 @@ mod tests {
             .status(exact(100.), false),
             Status::Unstable
         );
-        assert!(exact(100.).repeatable(exact(97.)));
-        assert!(exact(100.).repeatable(exact(103.)));
-        assert!(!exact(100.).repeatable(exact(104.)));
         assert_eq!(Status::Fail.combine(Status::Unstable).exit_code(), 1);
+    }
+
+    #[test]
+    fn repeatability_checks_each_bound_with_a_filter_only_ns_allowance() {
+        for filter in [false, true] {
+            for (old, new, expected) in [
+                (100., 97., true),
+                (100., 103., true),
+                (100., 96.99, false),
+                (100., 103.01, false),
+                (5., 4.5, filter),
+                (5., 5.5, filter),
+                (5., 4., filter),
+                (5., 6., filter),
+                (5., 3.99, false),
+                (5., 6.01, false),
+            ] {
+                assert_eq!(
+                    exact(old).repeatable(exact(new), filter),
+                    expected,
+                    "{old} -> {new}, filter={filter}"
+                );
+            }
+            for (low, high, expected) in [(4., 6., filter), (3.9, 5.1, false), (4.9, 6.1, false)] {
+                assert_eq!(
+                    exact(5.).repeatable(
+                        Bounds {
+                            point: 5.,
+                            low,
+                            high
+                        },
+                        filter
+                    ),
+                    expected
+                );
+            }
+        }
+        // The lower bound needs the percentage allowance; the upper needs 1 ns.
+        let before = Bounds {
+            point: 33.5,
+            low: 33.,
+            high: 34.02,
+        };
+        let after = Bounds {
+            point: 33.5,
+            low: 33.,
+            high: 34.,
+        };
+        assert!(before.repeatable(after, true));
+        assert!(!before.repeatable(after, false));
     }
 
     fn run(library: f64, reference: f64) -> Run {
@@ -448,18 +516,40 @@ mod tests {
             )?,
             Status::Unstable
         );
-        assert_eq!(
-            print(
+        for (new, expected) in [(100., Status::Pass), (120., Status::Fail)] {
+            out.clear();
+            let status = print(
                 &mut out,
                 &[
                     run(100., 100.),
-                    run(120., 100.),
-                    run(120., 110.),
-                    run(100., 100.)
-                ]
+                    run(new, 100.),
+                    run(new, 110.),
+                    run(100., 110.),
+                ],
+            )?;
+            assert_eq!(status, expected);
+            assert_eq!(status.exit_code(), expected.exit_code());
+            let output = std::str::from_utf8(&out)?;
+            assert!(output.contains("WARNING before-reference"));
+            assert!(output.contains("WARNING after-reference"));
+            assert!(!output.contains("  UNSTABLE"));
+        }
+        // A sub-nanosecond change still warns for the reference, not the filter.
+        out.clear();
+        assert_eq!(
+            print(
+                &mut out,
+                &[run(5., 5.), run(5., 5.), run(5.5, 5.5), run(5.5, 5.5)]
             )?,
-            Status::Unstable
+            Status::Pass
         );
+        assert!(std::str::from_utf8(&out)?.contains("WARNING after-reference"));
+        let missing_references = std::array::from_fn(|_| {
+            let mut run = run(100., 100.);
+            run.remove("filter_int32/case/reference");
+            run
+        });
+        assert!(print(&mut out, &missing_references).is_err());
         assert!(
             print(
                 &mut out,

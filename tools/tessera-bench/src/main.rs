@@ -1,7 +1,8 @@
-//! Compare two compatible source snapshots with Criterion, in A/B/B/A order.
+//! Compare compatible source snapshots with Criterion, in A/B/B/A order per case.
 //! Only generated files under target/bench-runs are written. No Git publishing.
 #![forbid(unsafe_code)]
 
+mod cases;
 mod report;
 mod snapshot;
 
@@ -20,7 +21,7 @@ use std::{
 
 #[derive(Parser, Debug)]
 #[command(
-    about = "Compare compatible Rust revisions with Criterion (before/after/after/before).",
+    about = "Compare compatible Rust revisions with Criterion (before/after/after/before per case).",
     after_help = "REF is a Git revision or WORKTREE. Defaults to both full benchmarks.\nFilters must retain each selected case's reference and a library path.\nExit: 0 PASS, 1 regression, 2 UNSTABLE or invalid/incomplete run.\nRun on an idle machine; results are never retried or overwritten."
 )]
 struct Options {
@@ -226,7 +227,7 @@ fn compare(repo: &Path, root: &Path, options: &Options) -> Result<u8> {
         "utility_sha256":snapshot::digest(&fs::read(std::env::current_exe()?)?),
         "bench":options.bench,
         "mode":if options.filter.is_some() {"diagnostic"} else {"full"},
-        "filter":options.filter,"order":["before1","after1","after2","before2"],
+        "filter":options.filter,"order_unit":"case","order":cases::ORDER.map(|(name, _)| name),
         "measurement":{"samples":100,"warm_up_ms":100,"measurement_ms":1000,"confidence_level":0.99,"noise_threshold":0.03}}),
     )?;
     let benches: Vec<_> = options.bench.as_deref().map_or_else(
@@ -250,8 +251,12 @@ fn compare(repo: &Path, root: &Path, options: &Options) -> Result<u8> {
                 json!({"path":binary,"sha256":snapshot::digest(&fs::read(binary)?)}),
             );
         }
-        save(&root.join(format!("{bench}-cases.json")), &expected)?;
-        binaries.push((bench, a, b, expected));
+        let cases = cases::group(bench, expected)?;
+        save(&root.join(format!("{bench}-cases.json")), &cases)?;
+        for case in &cases {
+            fs::create_dir(root.join(&case.directory))?;
+        }
+        binaries.push((a, b, cases));
     }
     save(&root.join("binaries.json"), &identities)?;
     let mut report = create(&root.join("report.txt"))?;
@@ -267,25 +272,17 @@ fn compare(repo: &Path, root: &Path, options: &Options) -> Result<u8> {
         after.revision
     )?;
     let mut outcome = report::Status::Pass;
-    for (bench, a, b, expected) in binaries {
-        let mut runs = Vec::new();
-        for (name, binary) in [
-            ("before1", &a),
-            ("after1", &b),
-            ("after2", &b),
-            ("before2", &a),
-        ] {
-            runs.push(collect(
-                binary,
-                root,
-                &format!("{bench}-{name}"),
-                &expected,
-                options.filter.as_deref(),
-            )?);
-        }
-        let runs: [report::Run; 4] = runs
-            .try_into()
-            .map_err(|_| anyhow::anyhow!("incomplete ABBA sequence"))?;
+    for (a, b, cases) in binaries {
+        let runs = cases::measure(&cases, |case, name, side| {
+            println!("Case {}: {}", case.directory, case.name);
+            collect(
+                [&a, &b][side],
+                &root.join(&case.directory),
+                name,
+                &case.paths,
+                Some(&case.filter()),
+            )
+        })?;
         let mut section = Vec::new();
         let status = report::print(&mut section, &runs)?;
         report.write_all(&section)?;
@@ -364,6 +361,33 @@ mod tests {
             serde_json::from_slice::<Value>(&fs::read(file)?)?,
             json!({"original":true})
         );
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "set TESSERA_BENCH_EXECUTABLE to a built Criterion benchmark"]
+    fn criterion_case_filters_match_listing() -> Result<()> {
+        let binary = PathBuf::from(std::env::var("TESSERA_BENCH_EXECUTABLE")?);
+        let dir = tempfile::tempdir()?;
+        let all = listing(&binary, dir.path(), None)?;
+        let subset = all
+            .iter()
+            .filter(|id| {
+                id.rsplit_once('/')
+                    .is_some_and(|(_, path)| matches!(path, "fold" | "scalar" | "reference"))
+            })
+            .cloned()
+            .collect();
+        for selected in [all, subset] {
+            for case in cases::group("test", selected)? {
+                assert_eq!(
+                    listing(&binary, dir.path(), Some(&case.filter()))?,
+                    case.paths,
+                    "{}",
+                    case.name
+                );
+            }
+        }
         Ok(())
     }
 }
