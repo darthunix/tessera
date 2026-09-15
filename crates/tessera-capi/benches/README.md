@@ -9,7 +9,8 @@ There are two benchmark programs:
 Neither measures SQL latency or requires PostgreSQL. Criterion measures time
 inside these programs. The separate
 [tessera-bench utility](../../../tools/tessera-bench/src/main.rs) builds and
-runs them to compare revisions; the utility itself is not timed.
+runs them to compare revisions; its overhead is not included in the reported
+time per operation.
 
 ## Running
 
@@ -83,6 +84,11 @@ Case 1:
 Case 2: its own complete A/B/B/A sequence, then the next case.
 ```
 
+By default, cases run one at a time (`--jobs 1`). With `--jobs N` (or `-j N`),
+up to N cases share one queue across reading and filtering. Each worker finishes
+a case's full A/B/B/A sequence before taking another case. The actual worker
+count is capped by the number of selected cases.
+
 Each operation in each run gets its own warm-up and many repeated calls.
 Criterion chooses the number of calls and collects timing samples; these are
 not just four individual calls. Reported nanoseconds are the estimated time
@@ -91,7 +97,9 @@ The current measurement settings are in [support/mod.rs](support/mod.rs).
 
 The utility's [cases.rs](../../../tools/tessera-bench/src/cases.rs) groups the
 operation names reported by Criterion and controls this order; it does not
-create column data. Runs are sequential, with no automatic retries.
+create column data. There are no automatic retries. On error, workers stop
+starting new cases and phases, wait for already running processes, and keep
+their logs; an incomplete comparison is not accepted.
 
 ## Reading the report
 
@@ -126,6 +134,10 @@ is inconclusive, not a successful check.
 
 Reports, raw measurements, logs and source snapshots are saved in a new
 `target/bench-runs/compare-*` directory for each comparison.
+`execution.json` records requested and actual parallelism and Criterion's
+thread count. `timings.json` records preparation, measurements and total time
+inside the utility, including benchmark builds but not compilation of the
+utility itself. Final report ordering does not depend on completion order.
 
 ## Shorter runs
 
@@ -136,8 +148,22 @@ operation is measured four times, so a rough timing budget is:
 selected operations (including references) x 4 x (warm-up + measurement time)
 ```
 
-Builds, analysis and process startup take additional time. To do less work,
-use `--bench` to select one program and `--filter REGEX` to select cases.
+Builds, analysis and process startup take additional time. To run the full set
+with up to eight cases at once:
+
+```sh
+cargo run --locked -p tessera-bench -- --base WORKTREE --jobs 8
+```
+
+Parallel runs may be faster, but do not isolate CPU cores: cases still compete
+for shared resources and can affect each other's timings. The utility does not
+pin processes to cores. It sets `RAYON_NUM_THREADS=1` for every benchmark child,
+even with `--jobs 1`, so Criterion's statistical analysis does not add another
+layer of parallel work. Compare stability as well as elapsed time; there is no
+guaranteed speedup.
+
+To do less work, use `--bench` to select one program and `--filter REGEX` to
+select cases.
 For example:
 
 ```sh

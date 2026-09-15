@@ -15,8 +15,10 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fs::{self, File, OpenOptions},
     io::Write,
+    num::NonZeroUsize,
     path::{Path, PathBuf},
     process::{Command, ExitCode, Stdio},
+    time::Instant,
 };
 
 #[derive(Parser, Debug)]
@@ -33,7 +35,18 @@ struct Options {
     bench: Option<String>,
     #[arg(long, value_name = "REGEX")]
     filter: Option<String>,
+    /// Maximum concurrent cases; each case keeps its own sequential ABBA order.
+    #[arg(short = 'j', long, value_name = "N", default_value = "1")]
+    jobs: NonZeroUsize,
 }
+
+struct Timing {
+    started: Instant,
+    measurement_started: Option<Instant>,
+    measurement_seconds: f64,
+}
+
+const CRITERION_THREADS: usize = 1;
 
 #[derive(Serialize, PartialEq, Eq)]
 struct Environment {
@@ -166,6 +179,7 @@ fn benchmark(executable: &Path, directory: &Path, filter: Option<&str>) -> Comma
     cmd.arg("--bench")
         .args(["--noplot", "--color", "never"])
         .env("CRITERION_HOME", directory)
+        .env("RAYON_NUM_THREADS", CRITERION_THREADS.to_string())
         .env_remove("CARGO_CRITERION_PORT");
     if let Some(filter) = filter {
         cmd.arg("--").arg(filter);
@@ -194,7 +208,8 @@ fn collect(
     fs::create_dir(&directory)?;
     let log = create(&root.join(format!("{name}.log")))?;
     println!(
-        "Measuring {name}: {} paths; log {}",
+        "Measuring {}/{name}: {} paths; log {}",
+        root.file_name().unwrap_or_default().to_string_lossy(),
         expected.len(),
         root.join(format!("{name}.log")).display()
     );
@@ -206,7 +221,7 @@ fn collect(
     report::load(&directory, expected).with_context(|| format!("invalid measurement: {name}"))
 }
 
-fn compare(repo: &Path, root: &Path, options: &Options) -> Result<u8> {
+fn compare(repo: &Path, root: &Path, options: &Options, timing: &mut Timing) -> Result<u8> {
     let before = Snapshot::capture(repo, &options.base, root.join("before"))?;
     // WORKTREE/WORKTREE captures one instant, even if files change while building.
     let after = if options.base == options.candidate {
@@ -235,7 +250,8 @@ fn compare(repo: &Path, root: &Path, options: &Options) -> Result<u8> {
         |bench| vec![bench],
     );
     // Finish every build and listing before starting any timed process.
-    let mut binaries = Vec::new();
+    let mut binaries = BTreeMap::new();
+    let mut cases = Vec::new();
     let mut identities = BTreeMap::new();
     for bench in benches {
         let a = build(&before, bench, root, "before")?;
@@ -251,14 +267,21 @@ fn compare(repo: &Path, root: &Path, options: &Options) -> Result<u8> {
                 json!({"path":binary,"sha256":snapshot::digest(&fs::read(binary)?)}),
             );
         }
-        let cases = cases::group(bench, expected)?;
-        save(&root.join(format!("{bench}-cases.json")), &cases)?;
-        for case in &cases {
+        let selected = cases::group(bench, expected)?;
+        save(&root.join(format!("{bench}-cases.json")), &selected)?;
+        for case in &selected {
             fs::create_dir(root.join(&case.directory))?;
         }
-        binaries.push((a, b, cases));
+        cases.extend(selected);
+        binaries.insert(bench.to_owned(), [a, b]);
     }
     save(&root.join("binaries.json"), &identities)?;
+    let jobs = options.jobs.get().min(cases.len());
+    save(
+        &root.join("execution.json"),
+        &json!({"requested_jobs":options.jobs.get(),"effective_jobs":jobs,
+            "criterion_threads":CRITERION_THREADS}),
+    )?;
     let mut report = create(&root.join("report.txt"))?;
     writeln!(
         report,
@@ -271,19 +294,29 @@ fn compare(repo: &Path, root: &Path, options: &Options) -> Result<u8> {
         before.revision,
         after.revision
     )?;
+    let execution = format!(
+        "Cases: requested jobs={}, effective jobs={jobs}; Criterion threads={CRITERION_THREADS}",
+        options.jobs
+    );
+    println!("{execution}");
+    writeln!(report, "{execution}")?;
+    let measurement_started = Instant::now();
+    timing.measurement_started = Some(measurement_started);
+    let measured = cases::measure(&cases, options.jobs, |case, name, side| {
+        println!("Case {}/{name}: {}", case.directory, case.name);
+        collect(
+            &binaries[&case.bench][side],
+            &root.join(&case.directory),
+            name,
+            &case.paths,
+            Some(&case.filter()),
+        )
+    });
+    timing.measurement_seconds = measurement_started.elapsed().as_secs_f64();
     let mut outcome = report::Status::Pass;
-    for (a, b, cases) in binaries {
-        let runs = cases::measure(&cases, |case, name, side| {
-            println!("Case {}: {}", case.directory, case.name);
-            collect(
-                [&a, &b][side],
-                &root.join(&case.directory),
-                name,
-                &case.paths,
-                Some(&case.filter()),
-            )
-        })?;
+    for (bench, runs) in measured? {
         let mut section = Vec::new();
+        writeln!(section, "\n{bench}")?;
         let status = report::print(&mut section, &runs)?;
         report.write_all(&section)?;
         print!("{}", String::from_utf8(section)?);
@@ -301,6 +334,11 @@ fn compare(repo: &Path, root: &Path, options: &Options) -> Result<u8> {
 }
 
 fn run(options: Options) -> Result<u8> {
+    let mut timing = Timing {
+        started: Instant::now(),
+        measurement_started: None,
+        measurement_seconds: 0.,
+    };
     let repo = PathBuf::from(text(
         Command::new("git").args(["rev-parse", "--show-toplevel"]),
     )?);
@@ -319,7 +357,23 @@ fn run(options: Options) -> Result<u8> {
             "FULL RUN"
         }
     );
-    let result = compare(&repo, &root, &options);
+    let result = compare(&repo, &root, &options, &mut timing);
+    let finished = Instant::now();
+    let preparation_seconds = timing
+        .measurement_started
+        .unwrap_or(finished)
+        .duration_since(timing.started)
+        .as_secs_f64();
+    let total_seconds = finished.duration_since(timing.started).as_secs_f64();
+    save(
+        &root.join("timings.json"),
+        &json!({"preparation_seconds":preparation_seconds,
+            "measurement_seconds":timing.measurement_seconds,"total_seconds":total_seconds}),
+    )?;
+    println!(
+        "Time: preparation={preparation_seconds:.1}s, measurements={:.1}s, total={total_seconds:.1}s",
+        timing.measurement_seconds
+    );
     if let Err(error) = &result {
         create(&root.join("error.txt"))?.write_all(format!("{error:#}\n").as_bytes())?;
     }
@@ -344,12 +398,71 @@ mod tests {
         assert!(Options::try_parse_from(["tessera-bench"]).is_err());
         let options = Options::try_parse_from(["tessera-bench", "--base", "HEAD"]).unwrap();
         assert_eq!(options.candidate, "WORKTREE");
+        assert_eq!(options.jobs.get(), 1);
         assert!(options.bench.is_none());
         assert!(
             Options::try_parse_from(["tessera-bench", "--base", "HEAD", "--bench", "unknown"])
                 .is_err()
         );
         assert!(Options::try_parse_from(["tessera-bench", "--base", "HEAD", "--quick"]).is_err());
+    }
+
+    #[test]
+    fn jobs_accept_only_positive_integers() {
+        for flag in ["--jobs", "-j"] {
+            let options =
+                Options::try_parse_from(["tessera-bench", "--base", "HEAD", flag, "8"]).unwrap();
+            assert_eq!(options.jobs.get(), 8);
+            for value in ["0", "-1", "1.5", "many", "18446744073709551616"] {
+                assert!(
+                    Options::try_parse_from(["tessera-bench", "--base", "HEAD", flag, value])
+                        .is_err()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn benchmark_commands_override_criterion_threading_without_changing_the_parent() {
+        let inherited = std::env::var_os("RAYON_NUM_THREADS");
+        let cmd = benchmark(
+            Path::new("benchmark"),
+            Path::new("measurements"),
+            Some("^case$"),
+        );
+        let env: BTreeMap<_, _> = cmd.get_envs().collect();
+        assert_eq!(
+            env[std::ffi::OsStr::new("RAYON_NUM_THREADS")],
+            Some(std::ffi::OsStr::new("1"))
+        );
+        assert_eq!(env[std::ffi::OsStr::new("CARGO_CRITERION_PORT")], None);
+        assert_eq!(std::env::var_os("RAYON_NUM_THREADS"), inherited);
+        assert_eq!(
+            cmd.get_args().collect::<Vec<_>>(),
+            ["--bench", "--noplot", "--color", "never", "--", "^case$"]
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn failed_child_is_waited_for_and_its_artifacts_are_kept() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        // An ordinary failing child, not a timed benchmark.
+        let error = collect(
+            Path::new("/usr/bin/false"),
+            dir.path(),
+            "before1",
+            &BTreeSet::new(),
+            None,
+        )
+        .err()
+        .unwrap();
+        assert!(error.to_string().contains("benchmark failed"));
+        assert!(dir.path().join("before1").is_dir());
+        assert!(dir.path().join("before1.log").is_file());
+        assert!(create(&dir.path().join("before1.log")).is_err());
+        assert!(!dir.path().join("after1").exists());
+        Ok(())
     }
     #[test]
     fn saved_files_are_never_overwritten() -> Result<()> {
