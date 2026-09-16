@@ -85,12 +85,18 @@ the raw readings of every block:
 
 ```json
 {"id":"column_reader/dense/words/1024/all/nulls-none/ready/fold","iters":50000,
- "instructions":[...10 values...],"cycles":[...],"branch_misses":[...],"branches":[...]}
+ "instructions":[...10 values...],"cycles":[...],"branch_misses":[...],"branches":[...],
+ "cpus":[[12,12],[12,15],...],"retries":0}
 ```
 
 Per-call values are the block readings divided by `iters`; they include the
-call loop and the `black_box` that keeps each result alive. Statistics and
-limits are computed by tessera-bench, not by the benchmark programs.
+call loop and the `black_box` that keeps each result alive. `cpus` records
+the CPU a block started and ended on, which explains cycle modes: the
+scheduler moves the thread between cores, and each core keeps its own
+predictor state. A block whose counters read zero is a failed counter read;
+it is repeated up to three times per operation and `retries` counts that.
+Statistics and limits are computed by tessera-bench, not by the benchmark
+programs.
 
 ## How revision comparison works
 

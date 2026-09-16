@@ -2,8 +2,11 @@
 //!
 //! Every operation is calibrated by cycles, warmed up at the chosen call
 //! count, and then measured in [`BLOCKS`] blocks of that many calls. Raw
-//! per-block readings go to a JSONL file; statistics and limits belong to
-//! tessera-bench. `--list` prints operation ids and no arguments (as under
+//! per-block readings go to a JSONL file together with the CPU each block
+//! started and ended on; statistics and limits belong to tessera-bench. A
+//! block whose counters read zero is a failed counter read, not a
+//! measurement: it is repeated a bounded number of times and the repeats are
+//! recorded. `--list` prints operation ids and no arguments (as under
 //! `cargo test --benches` or `cargo bench`) only runs the correctness checks;
 //! neither opens counters, so both work without root. `--output` needs root.
 
@@ -15,16 +18,19 @@ use std::{
     io::Write,
     path::PathBuf,
 };
-use tessera_pmu::{Counters, Reading};
+use tessera_pmu::{Counters, Reading, cpu_number};
 
 /// Measured blocks per operation.
 pub const BLOCKS: usize = 10;
+/// Zero-reading blocks are re-measured at most this many times per operation.
+const MAX_RETRIES: u32 = 3;
 /// Calls per block are chosen to spend about this many cycles per block.
 const TARGET_CYCLES: u64 = 20_000_000;
 const CALIBRATION_CALLS: u64 = 1_000;
 const MAX_CALLS: u64 = 10_000_000;
 
-/// One line of the output file: raw readings of every block.
+/// One line of the output file: raw readings of every block, the CPU each
+/// block started and ended on, and how many zero readings were repeated.
 #[derive(Serialize)]
 pub struct Record<'a> {
     pub id: &'a str,
@@ -33,6 +39,8 @@ pub struct Record<'a> {
     pub cycles: Vec<u64>,
     pub branch_misses: Vec<u64>,
     pub branches: Vec<u64>,
+    pub cpus: Vec<[usize; 2]>,
+    pub retries: u32,
 }
 
 enum Mode {
@@ -129,13 +137,25 @@ impl Runner {
                     cycles: Vec::with_capacity(BLOCKS),
                     branch_misses: Vec::with_capacity(BLOCKS),
                     branches: Vec::with_capacity(BLOCKS),
+                    cpus: Vec::with_capacity(BLOCKS),
+                    retries: 0,
                 };
                 for _ in 0..BLOCKS {
-                    let reading = run(counters, iters);
+                    let (reading, cpus) = loop {
+                        let cpu_start = cpu_number();
+                        let reading = run(counters, iters);
+                        let cpu_end = cpu_number();
+                        let failed = reading.instructions == 0 || reading.cycles == 0;
+                        if !failed || record.retries >= MAX_RETRIES {
+                            break (reading, [cpu_start, cpu_end]);
+                        }
+                        record.retries += 1;
+                    };
                     record.instructions.push(reading.instructions);
                     record.cycles.push(reading.cycles);
                     record.branch_misses.push(reading.branch_misses);
                     record.branches.push(reading.branches);
+                    record.cpus.push(cpus);
                 }
                 serde_json::to_writer(&mut *output, &record)?;
                 output.write_all(b"\n")?;
