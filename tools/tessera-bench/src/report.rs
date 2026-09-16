@@ -180,7 +180,7 @@ pub fn load(directory: &Path, expected: &BTreeSet<String>) -> Result<Run> {
         ensure!(
             matches!(
                 id.function_id.as_str(),
-                "fold" | "try_fold" | "words" | "scalar" | "reference"
+                "fold" | "words" | "scalar" | "reference"
             ),
             "unsupported measured path"
         );

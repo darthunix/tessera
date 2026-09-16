@@ -4,7 +4,9 @@ use std::mem::MaybeUninit;
 use anyhow::{Result, ensure};
 use tessera_core::{ColumnReader, RowMaskView, WordValues};
 
-use super::{DenseSelected, mask_word, selected_values, validate_mask, validate_ready};
+use super::{
+    DenseSelected, mask_word, selected_values, try_fold_words, validate_mask, validate_ready,
+};
 
 // Read one dense slot of a word whose non-NULL flags are `bits`, without a
 // branch or a data-dependent address. The slot is copied as `MaybeUninit`,
@@ -35,9 +37,8 @@ fn read_masked(values: &[MaybeUninit<i32>], row: usize, bits: u64) -> Option<i32
 /// dependency; encoded arrays such as dictionary arrays are not dense slices.
 /// Construct offset masks with [`RowMaskView::try_from_bytes`].
 ///
-/// Selected iteration chooses its NULL/readiness mode once. Without either
-/// mask, it walks validated selected indices directly. Bulk `fold` uses a
-/// dedicated loop; use `try_fold` to stop on errors returned by the consumer.
+/// [`ColumnReader::try_fold_selected`] chooses its NULL mode once and runs one
+/// loop per selection word; without a NULL mask every read is unconditional.
 ///
 /// NULL rows are read without a data-dependent branch: the slot is copied as
 /// `MaybeUninit` and a zero is selected for NULL rows before use. Consumers
@@ -134,6 +135,39 @@ impl ColumnReader for DenseInt32Column<'_> {
             prepared,
             // WordValues invokes this closure only for in-bounds, prepared rows.
             move |row: usize| read_masked(values, row, non_nulls),
+        )
+    }
+
+    #[inline]
+    fn try_fold_selected<B, F>(&self, rows: &RowMaskView<'_>, init: B, fold: F) -> Result<B>
+    where
+        F: FnMut(B, usize, Option<i32>) -> Result<B>,
+    {
+        let values = self.values;
+        if self.non_nulls.is_none() {
+            return try_fold_words(
+                self.nrows(),
+                rows,
+                self.prepared,
+                None,
+                // SAFETY: try_fold_words validates dimensions and readiness
+                // before invoking read; without NULLs every prepared row is
+                // initialized. RowMaskView supplies only in-bounds bits.
+                |row, _| Some(unsafe { values.get_unchecked(row).assume_init() }),
+                init,
+                fold,
+            );
+        }
+        try_fold_words(
+            self.nrows(),
+            rows,
+            self.prepared,
+            self.non_nulls,
+            // try_fold_words validates dimensions and readiness before
+            // invoking read; RowMaskView supplies only in-bounds bits.
+            |row, bits| read_masked(values, row, bits),
+            init,
+            fold,
         )
     }
 
@@ -289,6 +323,24 @@ impl ColumnReader for DatumInt32Column<'_> {
                 // prepared rows, after validating the entire selection word.
                 unsafe { self.read_prepared(row) }
             },
+        )
+    }
+
+    #[inline]
+    fn try_fold_selected<B, F>(&self, rows: &RowMaskView<'_>, init: B, fold: F) -> Result<B>
+    where
+        F: FnMut(B, usize, Option<i32>) -> Result<B>,
+    {
+        try_fold_words(
+            self.nrows(),
+            rows,
+            self.prepared,
+            None,
+            // SAFETY: try_fold_words validates dimensions and readiness before
+            // invoking read, and visits only in-bounds RowMaskView bits.
+            |row, _| unsafe { self.read_prepared(row) },
+            init,
+            fold,
         )
     }
 

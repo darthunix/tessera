@@ -51,7 +51,6 @@ fn assert_sums<C: ColumnReader<Value = i32>>(
 ) {
     assert_eq!(direct(input).unwrap(), expected);
     assert_eq!(reading::fold_sum(input).unwrap(), expected);
-    assert_eq!(reading::iter_sum(input).unwrap(), expected);
     assert_eq!(reading::word_sum(input).unwrap(), expected);
 }
 

@@ -1,7 +1,7 @@
 //! Timed summation kernels using each public column-reading path.
 //!
-//! Exercise bulk fold, short-circuiting try_fold, and copied-word iteration
-//! separately: their implementations and generated loops differ. The reference
+//! Exercise the early-exit fold and copied-word iteration separately: their
+//! implementations and generated loops differ. The reference
 //! wrappers receive the same prebuilt input and use the same summation rule;
 //! allocation and construction stay outside the common timing loop.
 
@@ -48,24 +48,13 @@ impl<'a, C> Input<'a, C> {
 }
 
 #[inline(never)]
-// Deliberately exercise the bulk fold implementation separately from try_fold.
-#[allow(clippy::manual_try_fold)]
 pub fn fold_sum<C: ColumnReader<Value = i32>>(input: &Input<'_, C>) -> Result<i64> {
+    // map_or keeps the accumulator free of a select on NULL rows.
     input
         .column
-        .selected_values(&input.rows)?
-        .fold(Ok(0), |sum, row| {
-            // map_or keeps the accumulator free of a select on NULL rows.
-            Ok(sum? + row?.1.map_or(0, i64::from))
+        .try_fold_selected(&input.rows, 0, |sum, _, value| {
+            Ok(sum + value.map_or(0, i64::from))
         })
-}
-
-#[inline(never)]
-pub fn iter_sum<C: ColumnReader<Value = i32>>(input: &Input<'_, C>) -> Result<i64> {
-    input
-        .column
-        .selected_values(&input.rows)?
-        .try_fold(0, |sum, row| Ok(sum + row?.1.map_or(0, i64::from)))
 }
 
 #[inline(never)]
@@ -171,10 +160,6 @@ fn measure_column<C: ColumnReader<Value = i32>>(
         "fold reader result differs"
     );
     ensure!(
-        iter_sum(&input)? == case.expected,
-        "try_fold reader result differs"
-    );
-    ensure!(
         word_sum(&input)? == case.expected,
         "word reader result differs"
     );
@@ -182,9 +167,6 @@ fn measure_column<C: ColumnReader<Value = i32>>(
     // Separate closures preserve static dispatch inside every measured loop.
     group.bench_function("fold", |b| {
         b.iter(|| black_box(fold_sum(black_box(&input)).unwrap()))
-    });
-    group.bench_function("try_fold", |b| {
-        b.iter(|| black_box(iter_sum(black_box(&input)).unwrap()))
     });
     group.bench_function("words", |b| {
         b.iter(|| black_box(word_sum(black_box(&input)).unwrap()))

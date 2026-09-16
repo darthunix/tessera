@@ -43,9 +43,9 @@ selected, a mix of NULL and non-NULL values, and all rows ready to read:
 column_reader/dense/words/1024/half/nulls-mixed/ready
 ```
 
-An operation is the function measured on those inputs. Reading measures `fold`
-and `try_fold` sums through the column iterator, a `words` sum through mask
-words, and an independent `reference` sum. Filtering measures the library's
+An operation is the function measured on those inputs. Reading measures a
+`fold` sum through `try_fold_selected`, a `words` sum through mask words, and
+an independent `reference` sum. Filtering measures the library's
 `scalar` filter and a `reference` filter. The reference is a simple separate
 implementation of the same task, not another source revision.
 
@@ -77,10 +77,10 @@ runs in A/B/B/A order. For a full reading case:
 
 ```text
 Case 1:
-  A1: fold -> try_fold -> words -> reference
-  B1: fold -> try_fold -> words -> reference
-  B2: fold -> try_fold -> words -> reference
-  A2: fold -> try_fold -> words -> reference
+  A1: fold -> words -> reference
+  B1: fold -> words -> reference
+  B2: fold -> words -> reference
+  A2: fold -> words -> reference
 Case 2: its own complete A/B/B/A sequence, then the next case.
 ```
 
@@ -104,7 +104,7 @@ their logs; an incomplete comparison is not accepted.
 ## Reading the report
 
 Each library operation gets its own status, not one status per case. For
-example, `fold` may pass while `try_fold` on the same inputs is unstable.
+example, `fold` may pass while `words` on the same inputs is unstable.
 
 First the utility checks repeatability: A1 against A2, and B1 against B2.
 Then it compares A with B, using the average of each side's two mean estimates

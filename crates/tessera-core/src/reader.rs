@@ -11,6 +11,13 @@ use crate::bitmap::word_count;
 /// Implementations return errors for out-of-bounds or unprepared rows before
 /// reading their data. Generic consumers select a value type at compile time,
 /// for example `C: ColumnReader<Value = i32>`; no dynamic dispatch is needed.
+///
+/// [`Self::try_fold_selected`] is the generic entry point for reducing one
+/// column of any value type over a selection. Several columns are combined in
+/// lockstep per selection word: for one `selected` word, the
+/// [`Self::word_values`] iterators of every column yield the same rows in the
+/// same order and can be zipped without per-row results. [`Self::get`] reads
+/// single rows.
 pub trait ColumnReader {
     /// A value or a reference borrowed from the representation's input buffers.
     /// No `Copy`, `Clone`, or `'static` bound is imposed on all representations.
@@ -32,6 +39,35 @@ pub trait ColumnReader {
         word_index: usize,
         selected: u64,
     ) -> Result<impl Iterator<Item = (usize, Option<Self::Value>)> + '_>;
+
+    /// Fold over selected rows in physical order, stopping at the first error.
+    ///
+    /// Different row counts fail immediately. Empty words are skipped; each
+    /// nonempty word gets the same readiness validation as [`Self::word_values`]
+    /// before any of its rows is read. The default implementation delegates to
+    /// that method. A reader error or an `Err` from `fold` ends the operation
+    /// and is returned; rows already folded are not rolled back. This
+    /// operation mutates no data.
+    fn try_fold_selected<B, F>(&self, rows: &RowMaskView<'_>, init: B, mut fold: F) -> Result<B>
+    where
+        F: FnMut(B, usize, Option<Self::Value>) -> Result<B>,
+    {
+        ensure!(
+            self.nrows() == rows.nrows(),
+            "column and selection row counts differ"
+        );
+        let mut acc = init;
+        for index in 0..word_count(rows.nrows()) {
+            let selected = rows.word(index).unwrap();
+            if selected == 0 {
+                continue;
+            }
+            for (row, value) in self.word_values(index, selected)? {
+                acc = fold(acc, row, value)?;
+            }
+        }
+        Ok(acc)
+    }
 
     /// Read selected rows without an upfront readiness pass or allocations.
     ///
