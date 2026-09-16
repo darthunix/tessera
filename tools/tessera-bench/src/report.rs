@@ -1,5 +1,5 @@
-//! Validate Criterion artifacts and apply project limits to its mean estimates.
-//! No resampling, outlier removal or reference normalization happens here.
+//! Per-call counter statistics from raw block readings and the project limits.
+//! No time is read anywhere; instructions decide, cycles warn.
 
 use anyhow::{Context, Result, ensure};
 use serde::Deserialize;
@@ -9,6 +9,15 @@ use std::{
     io::Write,
     path::Path,
 };
+
+/// Blocks written by the benchmark runner for every operation.
+pub const BLOCKS: usize = 10;
+/// Instructions per call may grow by at most this fraction.
+const INSTRUCTION_LIMIT: f64 = 0.01;
+/// Blocks of one process must agree on instructions per call this closely.
+const INSTRUCTION_SPREAD_LIMIT: f64 = 0.001;
+/// Cycles per call growing beyond this fraction produce a warning.
+const CYCLE_WARNING: f64 = 0.03;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Status {
@@ -43,106 +52,123 @@ impl Status {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
-pub struct Bounds {
-    pub point: f64,
-    pub low: f64,
-    pub high: f64,
+#[derive(Deserialize)]
+struct Record {
+    id: String,
+    iters: u64,
+    instructions: Vec<u64>,
+    cycles: Vec<u64>,
+    branch_misses: Vec<u64>,
+    branches: Vec<u64>,
 }
 
-impl Bounds {
-    fn envelope(self, other: Self) -> Self {
-        Self {
-            point: self.point / 2. + other.point / 2.,
-            low: self.low.min(other.low),
-            high: self.high.max(other.high),
-        }
+/// Per-call statistics of one operation: medians over blocks, and the
+/// block-to-block spread of instructions as a consistency check.
+#[derive(Clone, Copy, Debug)]
+pub struct Counts {
+    pub instructions: f64,
+    pub instructions_spread: f64,
+    pub cycles: f64,
+    pub cycles_min: f64,
+    pub cycles_max: f64,
+    pub branch_misses: f64,
+    pub branches: f64,
+}
+
+impl Counts {
+    pub fn consistent(&self) -> bool {
+        self.instructions_spread <= INSTRUCTION_SPREAD_LIMIT
     }
-    fn relative_to(self, old: Self) -> Self {
-        Self {
-            point: self.point / old.point,
-            low: self.low / old.high,
-            high: self.high / old.low,
-        }
-    }
-    fn difference(self, old: Self) -> Self {
-        Self {
-            point: self.point - old.point,
-            low: self.low - old.high,
-            high: self.high - old.low,
-        }
-    }
-    fn repeatable(self, other: Self, filter: bool) -> bool {
-        let ratio = other.relative_to(self);
-        let delta = other.difference(self);
-        (ratio.low >= 0.97 || (filter && delta.low >= -1.))
-            && (ratio.high <= 1.03 || (filter && delta.high <= 1.))
-    }
-    fn status(self, old: Self, filter: bool) -> Status {
-        let ratio = self.relative_to(old);
-        let delta = self.difference(old);
-        if ratio.high <= 1.03 || (filter && delta.high <= 1.) {
-            Status::Pass
-        } else if ratio.low > 1.03 && (!filter || delta.low > 1.) {
+    fn status(self, old: Self) -> Status {
+        if !self.consistent() || !old.consistent() {
+            Status::Unstable
+        } else if self.instructions > old.instructions * (1. + INSTRUCTION_LIMIT) {
             Status::Fail
         } else {
-            Status::Unstable
+            Status::Pass
         }
     }
-}
-
-#[derive(Deserialize)]
-struct Estimate {
-    point_estimate: f64,
-    confidence_interval: Confidence,
-}
-#[derive(Deserialize)]
-struct Confidence {
-    confidence_level: f64,
-    lower_bound: f64,
-    upper_bound: f64,
-}
-#[derive(Deserialize)]
-struct Estimates {
-    mean: Estimate,
-}
-#[derive(Deserialize)]
-struct Sample {
-    iters: Vec<f64>,
-    times: Vec<f64>,
-}
-#[derive(Deserialize)]
-struct Identity {
-    full_id: String,
-    title: String,
-    group_id: String,
-    function_id: String,
+    fn cycles_warning(self, old: Self) -> bool {
+        self.cycles > old.cycles * (1. + CYCLE_WARNING)
+    }
 }
 
 pub struct Entry {
     pub group: String,
     pub path: String,
-    pub time: Bounds,
+    pub counts: Counts,
 }
 pub type Run = BTreeMap<String, Entry>;
 
-fn json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
-    serde_json::from_slice(&fs::read(path)?).with_context(|| format!("invalid {}", path.display()))
+fn median(values: &[f64]) -> f64 {
+    let mut sorted = values.to_vec();
+    sorted.sort_by(|a, b| a.total_cmp(b));
+    let n = sorted.len();
+    if n % 2 == 1 {
+        sorted[n / 2]
+    } else {
+        (sorted[n / 2 - 1] + sorted[n / 2]) / 2.
+    }
 }
 
+fn per_call(values: &[u64], iters: u64, what: &str, id: &str) -> Result<Vec<f64>> {
+    ensure!(
+        values.len() == BLOCKS,
+        "{id}: expected {BLOCKS} {what} blocks, got {}",
+        values.len()
+    );
+    Ok(values.iter().map(|&v| v as f64 / iters as f64).collect())
+}
+
+fn counts(record: &Record) -> Result<Counts> {
+    ensure!(record.iters > 0, "{}: no calls per block", record.id);
+    let instructions = per_call(
+        &record.instructions,
+        record.iters,
+        "instruction",
+        &record.id,
+    )?;
+    let cycles = per_call(&record.cycles, record.iters, "cycle", &record.id)?;
+    let branch_misses = per_call(
+        &record.branch_misses,
+        record.iters,
+        "branch miss",
+        &record.id,
+    )?;
+    let branches = per_call(&record.branches, record.iters, "branch", &record.id)?;
+    let instructions_median = median(&instructions);
+    ensure!(
+        instructions_median > 0. && median(&cycles) > 0.,
+        "{}: zero instructions or cycles",
+        record.id
+    );
+    let (min, max) = instructions
+        .iter()
+        .fold((f64::INFINITY, 0_f64), |(min, max), &v| {
+            (min.min(v), max.max(v))
+        });
+    Ok(Counts {
+        instructions: instructions_median,
+        instructions_spread: (max - min) / instructions_median,
+        cycles: median(&cycles),
+        cycles_min: cycles.iter().copied().fold(f64::INFINITY, f64::min),
+        cycles_max: cycles.iter().copied().fold(0., f64::max),
+        branch_misses: median(&branch_misses),
+        branches: median(&branches),
+    })
+}
+
+/// Operation ids printed by `--list`, one per line. Filters select cases, not
+/// an isolated path without its scalar reference.
 pub fn listed(text: &str) -> Result<BTreeSet<String>> {
     let mut names = BTreeSet::new();
-    for line in text.lines().filter(|line| !line.trim().is_empty()) {
-        let name = line
-            .strip_suffix(": benchmark")
-            .context("unsupported Criterion listing")?;
+    for line in text.lines().map(str::trim).filter(|line| !line.is_empty()) {
         ensure!(
-            !name.is_empty() && names.insert(name.to_owned()),
-            "duplicate/empty benchmark name"
+            line.contains('/') && names.insert(line.to_owned()),
+            "duplicate or invalid benchmark name: {line}"
         );
     }
     ensure!(!names.is_empty(), "no benchmark cases matched");
-    // Filters select cases, not an isolated path without its scalar reference.
     for name in &names {
         let (group, path) = name.rsplit_once('/').context("invalid benchmark name")?;
         ensure!(
@@ -159,194 +185,127 @@ pub fn listed(text: &str) -> Result<BTreeSet<String>> {
     Ok(names)
 }
 
-pub fn load(directory: &Path, expected: &BTreeSet<String>) -> Result<Run> {
+/// Read one process's JSONL output and check that it covers exactly `expected`.
+pub fn load(path: &Path, expected: &BTreeSet<String>) -> Result<Run> {
+    let text =
+        fs::read_to_string(path).with_context(|| format!("cannot read {}", path.display()))?;
     let mut run = Run::new();
-    let mut seen = BTreeSet::new();
-    for path in crate::snapshot::files(directory)? {
-        if !path.ends_with("new/benchmark.json") {
-            continue;
-        }
-        let parent = directory.join(path.parent().unwrap());
-        let id: Identity = json(&parent.join("benchmark.json"))?;
+    for line in text.lines().filter(|line| !line.trim().is_empty()) {
+        let record: Record = serde_json::from_str(line)
+            .with_context(|| format!("invalid record in {}", path.display()))?;
         ensure!(
-            expected.contains(&id.title) && seen.insert(id.title),
-            "unexpected or duplicate benchmark: {}",
-            id.full_id
+            expected.contains(&record.id),
+            "unexpected benchmark result: {}",
+            record.id
         );
+        let (group, function) = record.id.rsplit_once('/').context("invalid benchmark id")?;
         ensure!(
-            id.full_id == format!("{}/{}", id.group_id, id.function_id),
-            "inconsistent benchmark identity"
+            matches!(function, "fold" | "words" | "scalar" | "reference"),
+            "unsupported measured path: {}",
+            record.id
         );
-        ensure!(
-            matches!(
-                id.function_id.as_str(),
-                "fold" | "words" | "scalar" | "reference"
-            ),
-            "unsupported measured path"
-        );
-        let estimate: Estimates = json(&parent.join("estimates.json"))?;
-        let ci = estimate.mean.confidence_interval;
-        let time = Bounds {
-            point: estimate.mean.point_estimate,
-            low: ci.lower_bound,
-            high: ci.upper_bound,
+        let entry = Entry {
+            group: group.to_owned(),
+            path: function.to_owned(),
+            counts: counts(&record)?,
         };
         ensure!(
-            ci.confidence_level == 0.99
-                && [time.point, time.low, time.high]
-                    .iter()
-                    .all(|v| v.is_finite() && *v > 0.)
-                && time.low <= time.point
-                && time.point <= time.high,
-            "invalid mean estimate for {}",
-            id.full_id
-        );
-        let sample: Sample = json(&parent.join("sample.json"))?;
-        ensure!(
-            sample.iters.len() == 100
-                && sample.times.len() == 100
-                && sample
-                    .iters
-                    .iter()
-                    .chain(&sample.times)
-                    .all(|v| v.is_finite() && *v > 0.),
-            "incomplete/invalid samples for {}",
-            id.full_id
-        );
-        ensure!(
-            run.insert(
-                id.full_id,
-                Entry {
-                    group: id.group_id,
-                    path: id.function_id,
-                    time
-                }
-            )
-            .is_none(),
-            "duplicate full benchmark ID"
+            run.insert(record.id.clone(), entry).is_none(),
+            "duplicate benchmark result: {}",
+            record.id
         );
     }
     ensure!(
-        !expected.is_empty() && seen == *expected,
-        "missing Criterion results: {:?}",
-        expected.difference(&seen).collect::<Vec<_>>()
+        run.keys().eq(expected.iter()),
+        "missing benchmark results: {:?}",
+        expected
+            .difference(&run.keys().cloned().collect())
+            .collect::<Vec<_>>()
     );
     Ok(run)
 }
 
-/// Runs are A1, B1, B2, A2. Bounds enclose the two independently measured
-/// intervals; they are deliberately not described as a joint 99% interval.
-pub fn print(out: &mut impl Write, runs: &[Run; 4]) -> Result<Status> {
+fn change(new: f64, old: f64) -> f64 {
+    (new / old - 1.) * 100.
+}
+
+/// Runs are before and after. Instructions per call decide the status; cycles
+/// only warn, and references are informational.
+pub fn print(out: &mut impl Write, runs: &[Run; 2]) -> Result<Status> {
     let names: Vec<_> = runs[0].keys().collect();
     ensure!(
-        !names.is_empty()
-            && runs
-                .iter()
-                .all(|run| run.keys().collect::<Vec<_>>() == names),
+        !names.is_empty() && runs[1].keys().collect::<Vec<_>>() == names,
         "run case sets differ"
     );
     writeln!(
         out,
-        "Mean times; bounds enclose both runs' Criterion 99% intervals, not a joint confidence interval."
-    )?;
-    writeln!(
-        out,
-        "History uses absolute library times. Reference overhead and repeatability warnings do not affect status."
+        "Per call, medians over {BLOCKS} blocks. FAIL: instructions +{:.0}%; WARNING: cycles +{:.0}%; UNSTABLE: blocks disagree on instructions beyond {:.1}%.",
+        INSTRUCTION_LIMIT * 100.,
+        CYCLE_WARNING * 100.,
+        INSTRUCTION_SPREAD_LIMIT * 100.
     )?;
     let mut status = Status::Pass;
     let mut counts = [0; 3];
+    let mut warnings = 0;
     for name in names {
-        let entry = &runs[0][name];
-        if entry.path == "reference" {
+        let old = &runs[0][name];
+        let new = &runs[1][name];
+        ensure!(
+            old.group == new.group && old.path == new.path,
+            "identity changed between runs"
+        );
+        if old.path == "reference" {
             continue;
         }
-        let reference = format!("{}/reference", entry.group);
-        let values: Vec<_> = runs
-            .iter()
-            .map(|run| {
-                let item = &run[name];
-                ensure!(
-                    item.group == entry.group && item.path == entry.path,
-                    "identity changed between runs"
-                );
-                Ok((
-                    item.time,
-                    run.get(&reference).context("missing reference")?.time,
-                ))
-            })
-            .collect::<Result<_>>()?;
-        let filter = entry.group.starts_with("filter_int32/");
-        let library_controls = [
-            ("before-library", values[0].0, values[3].0),
-            ("after-library", values[1].0, values[2].0),
-        ];
-        let reference_controls = [
-            ("before-reference", values[0].1, values[3].1),
-            ("after-reference", values[1].1, values[2].1),
-        ];
-        let stable = library_controls
-            .iter()
-            .all(|(_, a, b)| a.repeatable(*b, filter));
-        let old = values[0].0.envelope(values[3].0);
-        let new = values[1].0.envelope(values[2].0);
-        let ratio = new.relative_to(old);
-        let delta = new.difference(old);
-        let ref_old = values[0].1.envelope(values[3].1);
-        let ref_new = values[1].1.envelope(values[2].1);
-        let outcome = if stable {
-            new.status(old, filter)
-        } else {
-            Status::Unstable
-        };
+        let reference = format!("{}/reference", old.group);
+        let old_reference = runs[0].get(&reference).context("missing reference")?.counts;
+        let new_reference = runs[1].get(&reference).context("missing reference")?.counts;
+        let (o, n) = (old.counts, new.counts);
+        let outcome = n.status(o);
         status = status.combine(outcome);
         counts[outcome.exit_code() as usize] += 1;
         writeln!(
             out,
-            "{} {name}: before={:.3}ns after={:.3}ns change={:+.2}% [{:+.2}%, {:+.2}%] delta={:+.3}ns [{:+.3}, {:+.3}]; repeatability={}",
+            "{} {name}: instructions before={:.1} after={:.1} change={:+.2}%; cycles before={:.1} after={:.1} change={:+.2}% [{:.1}..{:.1}]; branch misses before={:.3} after={:.3} of {:.1} branches",
             outcome.label(),
-            old.point,
-            new.point,
-            (ratio.point - 1.) * 100.,
-            (ratio.low - 1.) * 100.,
-            (ratio.high - 1.) * 100.,
-            delta.point,
-            delta.low,
-            delta.high,
-            if stable { "PASS" } else { "UNSTABLE" }
+            o.instructions,
+            n.instructions,
+            change(n.instructions, o.instructions),
+            o.cycles,
+            n.cycles,
+            change(n.cycles, o.cycles),
+            n.cycles_min,
+            n.cycles_max,
+            o.branch_misses,
+            n.branch_misses,
+            n.branches,
         )?;
         writeln!(
             out,
-            "  REFERENCE before={:.3}ns after={:.3}ns; library/reference={:.3}x delta={:+.3}ns (informational)",
-            ref_old.point,
-            ref_new.point,
-            new.point / ref_new.point,
-            new.point - ref_new.point
+            "  REFERENCE instructions before={:.1} after={:.1}; library/reference={:.3}x, cycles {:.3}x (informational)",
+            old_reference.instructions,
+            new_reference.instructions,
+            n.instructions / new_reference.instructions,
+            n.cycles / new_reference.cycles,
         )?;
-        for (controls, filter, level) in [
-            (library_controls, filter, "UNSTABLE"),
-            (reference_controls, false, "WARNING"),
-        ] {
-            for (label, a, b) in controls {
-                if !a.repeatable(b, filter) {
-                    let ratio = b.relative_to(a);
-                    let delta = b.difference(a);
-                    let allowance = if filter {
-                        "[-3%, +3%] or [-1ns, +1ns] per bound"
-                    } else {
-                        "[-3%, +3%]"
-                    };
-                    writeln!(
-                        out,
-                        "  {level} {label}: repeat change={:+.2}% [{:+.2}%, {:+.2}%] delta={:+.3}ns [{:+.3}, {:+.3}]; requires {allowance}",
-                        (ratio.point - 1.) * 100.,
-                        (ratio.low - 1.) * 100.,
-                        (ratio.high - 1.) * 100.,
-                        delta.point,
-                        delta.low,
-                        delta.high
-                    )?;
-                }
+        for (label, c) in [("before", o), ("after", n)] {
+            if !c.consistent() {
+                writeln!(
+                    out,
+                    "  UNSTABLE {label}: blocks disagree on instructions per call by {:.3}%",
+                    c.instructions_spread * 100.
+                )?;
             }
+        }
+        if n.cycles_warning(o) {
+            warnings += 1;
+            writeln!(
+                out,
+                "  WARNING cycles: +{:.2}% with instructions {:+.2}% and branch misses {:+.3} per call; review layout, predictor or dependency chains",
+                change(n.cycles, o.cycles),
+                change(n.instructions, o.instructions),
+                n.branch_misses - o.branch_misses,
+            )?;
         }
     }
     ensure!(
@@ -355,7 +314,7 @@ pub fn print(out: &mut impl Write, runs: &[Run; 4]) -> Result<Status> {
     );
     writeln!(
         out,
-        "{}: {} PASS, {} FAIL, {} UNSTABLE library paths",
+        "{}: {} PASS, {} FAIL, {} UNSTABLE library paths; {warnings} cycle warnings",
         status.label(),
         counts[0],
         counts[1],
@@ -367,234 +326,142 @@ pub fn print(out: &mut impl Write, runs: &[Run; 4]) -> Result<Status> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn exact(ns: f64) -> Bounds {
-        Bounds {
-            point: ns,
-            low: ns,
-            high: ns,
+
+    fn exact(instructions: f64, cycles: f64) -> Counts {
+        Counts {
+            instructions,
+            instructions_spread: 0.,
+            cycles,
+            cycles_min: cycles,
+            cycles_max: cycles,
+            branch_misses: 0.,
+            branches: 0.,
         }
     }
 
+    fn record(id: &str, iters: u64, values: [Vec<u64>; 4]) -> String {
+        let [instructions, cycles, branch_misses, branches] = values;
+        serde_json::json!({
+            "id": id, "iters": iters, "instructions": instructions, "cycles": cycles,
+            "branch_misses": branch_misses, "branches": branches,
+        })
+        .to_string()
+    }
+
     #[test]
-    fn limits_are_inclusive_and_filter_requires_both_losses() {
-        for (old, new, filter, expected) in [
-            (100., 103., false, Status::Pass),
-            (100., 104., false, Status::Fail),
-            (5., 5.5, true, Status::Pass),
-            (5., 6., true, Status::Pass),
-            (5., 6.01, true, Status::Fail),
-            (100., 103., true, Status::Pass),
-        ] {
-            assert_eq!(exact(new).status(exact(old), filter), expected);
-        }
-        assert_eq!(
-            Bounds {
-                point: 104.,
-                low: 102.,
-                high: 106.
-            }
-            .status(exact(100.), false),
-            Status::Unstable
-        );
+    fn instructions_decide_and_the_limit_is_inclusive() {
+        assert_eq!(exact(101., 100.).status(exact(100., 100.)), Status::Pass);
+        assert_eq!(exact(101.01, 100.).status(exact(100., 100.)), Status::Fail);
+        assert_eq!(exact(50., 1000.).status(exact(100., 100.)), Status::Pass);
+        let mut inconsistent = exact(100., 100.);
+        inconsistent.instructions_spread = 0.0011;
+        assert_eq!(inconsistent.status(exact(100., 100.)), Status::Unstable);
+        assert_eq!(exact(100., 100.).status(inconsistent), Status::Unstable);
         assert_eq!(Status::Fail.combine(Status::Unstable).exit_code(), 1);
     }
 
     #[test]
-    fn repeatability_checks_each_bound_with_a_filter_only_ns_allowance() {
-        for filter in [false, true] {
-            for (old, new, expected) in [
-                (100., 97., true),
-                (100., 103., true),
-                (100., 96.99, false),
-                (100., 103.01, false),
-                (5., 4.5, filter),
-                (5., 5.5, filter),
-                (5., 4., filter),
-                (5., 6., filter),
-                (5., 3.99, false),
-                (5., 6.01, false),
-            ] {
-                assert_eq!(
-                    exact(old).repeatable(exact(new), filter),
-                    expected,
-                    "{old} -> {new}, filter={filter}"
-                );
-            }
-            for (low, high, expected) in [(4., 6., filter), (3.9, 5.1, false), (4.9, 6.1, false)] {
-                assert_eq!(
-                    exact(5.).repeatable(
-                        Bounds {
-                            point: 5.,
-                            low,
-                            high
-                        },
-                        filter
-                    ),
-                    expected
-                );
-            }
-        }
-        // The lower bound needs the percentage allowance; the upper needs 1 ns.
-        let before = Bounds {
-            point: 33.5,
-            low: 33.,
-            high: 34.02,
-        };
-        let after = Bounds {
-            point: 33.5,
-            low: 33.,
-            high: 34.,
-        };
-        assert!(before.repeatable(after, true));
-        assert!(!before.repeatable(after, false));
-    }
-
-    fn run(library: f64, reference: f64) -> Run {
-        [("scalar", library), ("reference", reference)]
-            .into_iter()
-            .map(|(path, ns)| {
-                (
-                    format!("filter_int32/case/{path}"),
-                    Entry {
-                        group: "filter_int32/case".into(),
-                        path: path.into(),
-                        time: exact(ns),
-                    },
-                )
-            })
-            .collect()
+    fn cycles_only_warn() {
+        assert!(exact(100., 103.01).cycles_warning(exact(100., 100.)));
+        assert!(!exact(100., 103.).cycles_warning(exact(100., 100.)));
+        assert_eq!(exact(100., 200.).status(exact(100., 100.)), Status::Pass);
     }
 
     #[test]
-    fn history_is_independent_of_reference_overhead_and_speed() -> Result<()> {
-        let mut out = Vec::new();
-        assert_eq!(
-            print(
-                &mut out,
-                &[
-                    run(523., 800.),
-                    run(608., 800.),
-                    run(608., 800.),
-                    run(523., 800.)
-                ]
-            )?,
-            Status::Fail
-        );
-        assert_eq!(
-            print(
-                &mut out,
-                &[
-                    run(200., 100.),
-                    run(200., 100.),
-                    run(200., 100.),
-                    run(200., 100.)
-                ]
-            )?,
-            Status::Pass
-        );
-        assert_eq!(
-            print(
-                &mut out,
-                &[
-                    run(100., 100.),
-                    run(110., 110.),
-                    run(110., 110.),
-                    run(100., 100.)
-                ]
-            )?,
-            Status::Fail
-        );
-        assert_eq!(
-            print(
-                &mut out,
-                &[
-                    run(100., 100.),
-                    run(120., 100.),
-                    run(120., 100.),
-                    run(110., 100.)
-                ]
-            )?,
-            Status::Unstable
-        );
-        for (new, expected) in [(100., Status::Pass), (120., Status::Fail)] {
-            out.clear();
-            let status = print(
-                &mut out,
-                &[
-                    run(100., 100.),
-                    run(new, 100.),
-                    run(new, 110.),
-                    run(100., 110.),
-                ],
-            )?;
-            assert_eq!(status, expected);
-            assert_eq!(status.exit_code(), expected.exit_code());
-            let output = std::str::from_utf8(&out)?;
-            assert!(output.contains("WARNING before-reference"));
-            assert!(output.contains("WARNING after-reference"));
-            assert!(!output.contains("  UNSTABLE"));
-        }
-        // A sub-nanosecond change still warns for the reference, not the filter.
-        out.clear();
-        assert_eq!(
-            print(
-                &mut out,
-                &[run(5., 5.), run(5., 5.), run(5.5, 5.5), run(5.5, 5.5)]
-            )?,
-            Status::Pass
-        );
-        assert!(std::str::from_utf8(&out)?.contains("WARNING after-reference"));
-        let missing_references = std::array::from_fn(|_| {
-            let mut run = run(100., 100.);
-            run.remove("filter_int32/case/reference");
-            run
-        });
-        assert!(print(&mut out, &missing_references).is_err());
+    fn listing_requires_references_and_library_paths() {
+        assert!(listed("a/x/fold\na/x/reference\n").is_ok());
+        assert!(listed("a/x/fold\n").is_err());
+        assert!(listed("a/x/reference\n").is_err());
+        assert!(listed("a/x/fold\na/x/fold\na/x/reference\n").is_err());
+        assert!(listed("\n").is_err());
+        assert!(listed("noslash\n").is_err());
+    }
+
+    #[test]
+    fn records_become_per_call_medians_with_spread() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("results.jsonl");
+        let mut cycles = vec![2000; BLOCKS];
+        cycles[0] = 4000;
+        fs::write(
+            &path,
+            format!(
+                "{}\n{}\n",
+                record(
+                    "b/x/fold",
+                    100,
+                    [
+                        vec![1000; BLOCKS],
+                        cycles,
+                        vec![10; BLOCKS],
+                        vec![300; BLOCKS]
+                    ]
+                ),
+                record(
+                    "b/x/reference",
+                    100,
+                    [
+                        vec![500; BLOCKS],
+                        vec![1000; BLOCKS],
+                        vec![0; BLOCKS],
+                        vec![100; BLOCKS]
+                    ]
+                ),
+            ),
+        )?;
+        let expected = BTreeSet::from(["b/x/fold".to_owned(), "b/x/reference".to_owned()]);
+        let run = load(&path, &expected)?;
+        let fold = run["b/x/fold"].counts;
+        assert_eq!(fold.instructions, 10.);
+        assert_eq!(fold.instructions_spread, 0.);
+        assert_eq!(fold.cycles, 20.);
+        assert_eq!((fold.cycles_min, fold.cycles_max), (20., 40.));
+        assert_eq!(fold.branch_misses, 0.1);
+        assert_eq!(fold.branches, 3.);
+        assert!(load(&path, &BTreeSet::from(["b/x/fold".to_owned()])).is_err());
+        let mut output = Vec::new();
+        let other = load(&path, &expected)?;
+        assert_eq!(print(&mut output, &[run, other])?, Status::Pass);
+        let text = String::from_utf8(output)?;
+        assert!(text.contains("PASS b/x/fold: instructions before=10.0 after=10.0 change=+0.00%"));
+        assert!(text.contains("library/reference=2.000x"));
         assert!(
-            print(
-                &mut out,
-                &[
-                    run(100., 100.),
-                    Run::new(),
-                    run(100., 100.),
-                    run(100., 100.)
-                ]
-            )
-            .is_err()
+            text.ends_with("PASS: 1 PASS, 0 FAIL, 0 UNSTABLE library paths; 0 cycle warnings\n")
         );
         Ok(())
     }
 
     #[test]
-    fn artifacts_require_complete_finite_samples_and_matching_identities() -> Result<()> {
-        use serde_json::json;
-        let temp = tempfile::tempdir()?;
-        let expected = listed(
-            "filter_int32/case/scalar: benchmark\nfilter_int32/case/reference: benchmark\n",
+    fn inconsistent_blocks_and_short_records_are_rejected() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("results.jsonl");
+        let only = BTreeSet::from(["b/x/fold".to_owned()]);
+        fs::write(
+            &path,
+            record(
+                "b/x/fold",
+                1,
+                [
+                    vec![1; BLOCKS - 1],
+                    vec![1; BLOCKS],
+                    vec![0; BLOCKS],
+                    vec![0; BLOCKS],
+                ],
+            ),
         )?;
-        for path in ["scalar", "reference"] {
-            let dir = temp.path().join(path).join("new");
-            fs::create_dir_all(&dir)?;
-            let name = format!("filter_int32/case/{path}");
-            fs::write(dir.join("benchmark.json"), json!({"full_id":name,"title":name,"group_id":"filter_int32/case","function_id":path}).to_string())?;
-            fs::write(dir.join("estimates.json"), json!({"mean":{"point_estimate":10.,"confidence_interval":{"confidence_level":0.99,"lower_bound":9.99,"upper_bound":10.01}}}).to_string())?;
-            fs::write(
-                dir.join("sample.json"),
-                json!({"iters":vec![100.;100],"times":vec![1000.;100]}).to_string(),
-            )?;
-        }
-        assert_eq!(load(temp.path(), &expected)?.len(), 2);
-        for bad in [
-            json!({"iters":[1.],"times":[1.]}),
-            json!({"iters":vec![1.;100],"times":vec![0.;100]}),
-        ] {
-            fs::write(temp.path().join("scalar/new/sample.json"), bad.to_string())?;
-            assert!(load(temp.path(), &expected).is_err());
-        }
-        assert!(listed("").is_err());
-        assert!(listed("case/scalar: benchmark\n").is_err());
-        assert!(listed("case/reference: benchmark\n").is_err());
-        assert!(load(temp.path(), &BTreeSet::from(["missing".to_owned()])).is_err());
+        assert!(load(&path, &only).is_err());
+        let mut drift = vec![1000; BLOCKS];
+        drift[BLOCKS - 1] = 1002;
+        fs::write(
+            &path,
+            record(
+                "b/x/fold",
+                1,
+                [drift, vec![1; BLOCKS], vec![0; BLOCKS], vec![0; BLOCKS]],
+            ),
+        )?;
+        let run = load(&path, &only)?;
+        assert!(!run["b/x/fold"].counts.consistent());
         Ok(())
     }
 }

@@ -129,7 +129,8 @@ Reports, raw readings, logs and source snapshots are saved in a new
 
 ## Shorter runs
 
-Use `--bench` to select one program and `--filter REGEX` to select cases:
+Use `--bench` to select one program and `--filter SUBSTRING` (repeatable; any
+match keeps an operation) to select cases:
 
 ```sh
 cargo run --locked -p tessera-bench -- --base HEAD \

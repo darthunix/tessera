@@ -1,4 +1,4 @@
-//! Compare compatible source snapshots with Criterion, in A/B/B/A order per case.
+//! Compare compatible source snapshots by PMU counters, one process per side per case.
 //! Only generated files under target/bench-runs are written. No Git publishing.
 #![forbid(unsafe_code)]
 
@@ -15,7 +15,6 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fs::{self, File, OpenOptions},
     io::Write,
-    num::NonZeroUsize,
     path::{Path, PathBuf},
     process::{Command, ExitCode, Stdio},
     time::Instant,
@@ -23,8 +22,8 @@ use std::{
 
 #[derive(Parser, Debug)]
 #[command(
-    about = "Compare compatible Rust revisions with Criterion (before/after/after/before per case).",
-    after_help = "REF is a Git revision or WORKTREE. Defaults to both full benchmarks.\nFilters must retain each selected case's reference and a library path.\nExit: 0 PASS, 1 regression, 2 UNSTABLE or invalid/incomplete run.\nRun on an idle machine; results are never retried or overwritten."
+    about = "Compare compatible Rust revisions by PMU counters (before/after per case).",
+    after_help = "REF is a Git revision or WORKTREE. Defaults to both full benchmarks.\nFilters are substrings of operation ids; any match keeps an operation, and every\nselected case must keep its reference and a library path.\nBenchmark processes run through `sudo -n`: run `sudo -v` first.\nExit: 0 PASS, 1 instruction regression, 2 UNSTABLE or invalid/incomplete run."
 )]
 struct Options {
     #[arg(long, value_name = "REF")]
@@ -33,11 +32,8 @@ struct Options {
     candidate: String,
     #[arg(long, value_parser = ["column_reader", "filter_int32"])]
     bench: Option<String>,
-    #[arg(long, value_name = "REGEX")]
-    filter: Option<String>,
-    /// Maximum concurrent cases; each case keeps its own sequential ABBA order.
-    #[arg(short = 'j', long, value_name = "N", default_value = "1")]
-    jobs: NonZeroUsize,
+    #[arg(long, value_name = "SUBSTRING")]
+    filter: Vec<String>,
 }
 
 struct Timing {
@@ -45,8 +41,6 @@ struct Timing {
     measurement_started: Option<Instant>,
     measurement_seconds: f64,
 }
-
-const CRITERION_THREADS: usize = 1;
 
 #[derive(Serialize, PartialEq, Eq)]
 struct Environment {
@@ -133,6 +127,22 @@ fn save(path: &Path, value: &impl Serialize) -> Result<()> {
     Ok(())
 }
 
+/// Counters need root; the credentials must already be cached by `sudo -v`.
+fn check_privileges() -> Result<()> {
+    let status = Command::new("sudo")
+        .args(["-n", "true"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .context("cannot start sudo")?;
+    ensure!(
+        status.success(),
+        "PMU counters need root: run `sudo -v` first, then retry"
+    );
+    Ok(())
+}
+
 fn build(source: &Snapshot, bench: &str, artifacts: &Path, side: &str) -> Result<PathBuf> {
     println!("Building {side}/{bench}");
     let result = Command::new("cargo")
@@ -174,54 +184,55 @@ fn build(source: &Snapshot, bench: &str, artifacts: &Path, side: &str) -> Result
     executable.context("Cargo did not produce a benchmark executable")
 }
 
-fn benchmark(executable: &Path, directory: &Path, filter: Option<&str>) -> Command {
-    let mut cmd = Command::new(executable);
-    cmd.arg("--bench")
-        .args(["--noplot", "--color", "never"])
-        .env("CRITERION_HOME", directory)
-        .env("RAYON_NUM_THREADS", CRITERION_THREADS.to_string())
-        .env_remove("CARGO_CRITERION_PORT");
-    if let Some(filter) = filter {
-        cmd.arg("--").arg(filter);
+/// A measuring command: the benchmark under `sudo -n`, writing `output`
+/// and measuring only `ids`.
+fn benchmark(
+    executable: &Path,
+    output: &Path,
+    ids: &BTreeSet<String>,
+    privileged: bool,
+) -> Command {
+    let mut cmd = if privileged {
+        let mut sudo = Command::new("sudo");
+        sudo.arg("-n").arg("--").arg(executable);
+        sudo
+    } else {
+        Command::new(executable)
+    };
+    cmd.arg("--output").arg(output);
+    for id in ids {
+        cmd.arg("--only").arg(id);
     }
+    cmd.stdin(Stdio::null());
     cmd
 }
 
-fn listing(executable: &Path, directory: &Path, filter: Option<&str>) -> Result<BTreeSet<String>> {
-    // Insert --list before the optional positional regex separator.
-    let mut cmd = benchmark(executable, directory, None);
-    cmd.arg("--list");
-    if let Some(filter) = filter {
-        cmd.arg("--").arg(filter);
-    }
-    report::listed(&text(&mut cmd)?)
+fn listing(executable: &Path) -> Result<BTreeSet<String>> {
+    report::listed(&text(Command::new(executable).arg("--list"))?)
 }
 
 fn collect(
     executable: &Path,
-    root: &Path,
+    directory: &Path,
     name: &str,
     expected: &BTreeSet<String>,
-    filter: Option<&str>,
 ) -> Result<report::Run> {
-    let directory = root.join(name);
-    fs::create_dir(&directory)?;
-    let log = create(&root.join(format!("{name}.log")))?;
-    println!(
-        "Measuring {}/{name}: {} paths; log {}",
-        root.file_name().unwrap_or_default().to_string_lossy(),
-        expected.len(),
-        root.join(format!("{name}.log")).display()
-    );
-    let status = benchmark(executable, &directory, filter)
+    let output = directory.join(format!("{name}.jsonl"));
+    let log = create(&directory.join(format!("{name}.log")))?;
+    let status = benchmark(executable, &output, expected, true)
         .stdout(Stdio::from(log.try_clone()?))
         .stderr(Stdio::from(log))
         .status()?;
-    ensure!(status.success(), "benchmark failed: {name}");
-    report::load(&directory, expected).with_context(|| format!("invalid measurement: {name}"))
+    ensure!(
+        status.success(),
+        "benchmark failed: {name}; see {}",
+        directory.join(format!("{name}.log")).display()
+    );
+    report::load(&output, expected).with_context(|| format!("invalid measurement: {name}"))
 }
 
 fn compare(repo: &Path, root: &Path, options: &Options, timing: &mut Timing) -> Result<u8> {
+    check_privileges()?;
     let before = Snapshot::capture(repo, &options.base, root.join("before"))?;
     // WORKTREE/WORKTREE captures one instant, even if files change while building.
     let after = if options.base == options.candidate {
@@ -241,26 +252,30 @@ fn compare(repo: &Path, root: &Path, options: &Options, timing: &mut Timing) -> 
         "started_unix_ms":std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_millis(),
         "utility_sha256":snapshot::digest(&fs::read(std::env::current_exe()?)?),
         "bench":options.bench,
-        "mode":if options.filter.is_some() {"diagnostic"} else {"full"},
+        "mode":if options.filter.is_empty() {"full"} else {"diagnostic"},
         "filter":options.filter,"order_unit":"case","order":cases::ORDER.map(|(name, _)| name),
-        "measurement":{"samples":100,"warm_up_ms":100,"measurement_ms":1000,"confidence_level":0.99,"noise_threshold":0.03}}),
+        "measurement":{"metric":"pmu counters per call","blocks":report::BLOCKS,
+            "instruction_limit":0.01,"cycle_warning":0.03,"instruction_spread_limit":0.001}}),
     )?;
     let benches: Vec<_> = options.bench.as_deref().map_or_else(
         || vec!["column_reader", "filter_int32"],
         |bench| vec![bench],
     );
-    // Finish every build and listing before starting any timed process.
+    // Finish every build and listing before starting any measuring process.
     let mut binaries = BTreeMap::new();
     let mut cases = Vec::new();
     let mut identities = BTreeMap::new();
     for bench in benches {
         let a = build(&before, bench, root, "before")?;
         let b = build(&after, bench, root, "after")?;
-        let expected = listing(&a, &root.join("listing-before"), options.filter.as_deref())?;
-        ensure!(
-            expected == listing(&b, &root.join("listing-after"), options.filter.as_deref())?,
-            "benchmark case sets differ"
-        );
+        let listed = listing(&a)?;
+        ensure!(listed == listing(&b)?, "benchmark case sets differ");
+        let expected = report::listed(
+            &cases::select(listed, &options.filter)
+                .into_iter()
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )?;
         for (side, binary) in [("before", &a), ("after", &b)] {
             identities.insert(
                 format!("{side}/{bench}"),
@@ -276,48 +291,48 @@ fn compare(repo: &Path, root: &Path, options: &Options, timing: &mut Timing) -> 
         binaries.insert(bench.to_owned(), [a, b]);
     }
     save(&root.join("binaries.json"), &identities)?;
-    let jobs = options.jobs.get().min(cases.len());
-    save(
-        &root.join("execution.json"),
-        &json!({"requested_jobs":options.jobs.get(),"effective_jobs":jobs,
-            "criterion_threads":CRITERION_THREADS}),
-    )?;
     let mut report = create(&root.join("report.txt"))?;
     writeln!(
         report,
         "{}; baseline={}, candidate={}",
-        if options.filter.is_some() {
-            "DIAGNOSTIC: selected cases only"
-        } else {
+        if options.filter.is_empty() {
             "FULL RUN"
+        } else {
+            "DIAGNOSTIC: selected cases only"
         },
         before.revision,
         after.revision
     )?;
-    let execution = format!(
-        "Cases: requested jobs={}, effective jobs={jobs}; Criterion threads={CRITERION_THREADS}",
-        options.jobs
-    );
-    println!("{execution}");
-    writeln!(report, "{execution}")?;
     let measurement_started = Instant::now();
     timing.measurement_started = Some(measurement_started);
-    let measured = cases::measure(&cases, options.jobs, |case, name, side| {
-        println!("Case {}/{name}: {}", case.directory, case.name);
-        collect(
-            &binaries[&case.bench][side],
-            &root.join(&case.directory),
-            name,
-            &case.paths,
-            Some(&case.filter()),
-        )
-    });
+    let mut measured: BTreeMap<String, [report::Run; 2]> = BTreeMap::new();
+    for case in &cases {
+        let runs = measured
+            .entry(case.bench.clone())
+            .or_insert_with(|| std::array::from_fn(|_| report::Run::new()));
+        for (run, (name, side)) in runs.iter_mut().zip(cases::ORDER) {
+            println!("Case {}/{name}: {}", case.directory, case.name);
+            let collected = collect(
+                &binaries[&case.bench][side],
+                &root.join(&case.directory),
+                name,
+                &case.paths,
+            )
+            .with_context(|| format!("{}: {name}", case.name))?;
+            for (id, entry) in collected {
+                ensure!(
+                    run.insert(id.clone(), entry).is_none(),
+                    "duplicate benchmark result: {id}"
+                );
+            }
+        }
+    }
     timing.measurement_seconds = measurement_started.elapsed().as_secs_f64();
     let mut outcome = report::Status::Pass;
-    for (bench, runs) in measured? {
+    for (bench, runs) in &measured {
         let mut section = Vec::new();
         writeln!(section, "\n{bench}")?;
-        let status = report::print(&mut section, &runs)?;
+        let status = report::print(&mut section, runs)?;
         report.write_all(&section)?;
         print!("{}", String::from_utf8(section)?);
         outcome = outcome.combine(status);
@@ -350,11 +365,11 @@ fn run(options: Options) -> Result<u8> {
         .keep();
     println!("Artifacts: {}", root.display());
     println!(
-        "{}; no retries, no discarded measurements. Run on an idle machine.",
-        if options.filter.is_some() {
-            "DIAGNOSTIC RUN"
-        } else {
+        "{}; no retries, no discarded measurements.",
+        if options.filter.is_empty() {
             "FULL RUN"
+        } else {
+            "DIAGNOSTIC RUN"
         }
     );
     let result = compare(&repo, &root, &options, &mut timing);
@@ -393,77 +408,58 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     #[test]
     fn cli_requires_a_baseline_and_bounds_the_selected_benchmarks() {
         assert!(Options::try_parse_from(["tessera-bench"]).is_err());
         let options = Options::try_parse_from(["tessera-bench", "--base", "HEAD"]).unwrap();
         assert_eq!(options.candidate, "WORKTREE");
-        assert_eq!(options.jobs.get(), 1);
         assert!(options.bench.is_none());
+        assert!(options.filter.is_empty());
+        let options = Options::try_parse_from([
+            "tessera-bench",
+            "--base",
+            "HEAD",
+            "--filter",
+            "/dense/",
+            "--filter",
+            "/datum/",
+        ])
+        .unwrap();
+        assert_eq!(options.filter, ["/dense/", "/datum/"]);
         assert!(
             Options::try_parse_from(["tessera-bench", "--base", "HEAD", "--bench", "unknown"])
                 .is_err()
         );
-        assert!(Options::try_parse_from(["tessera-bench", "--base", "HEAD", "--quick"]).is_err());
+        assert!(
+            Options::try_parse_from(["tessera-bench", "--base", "HEAD", "--jobs", "2"]).is_err()
+        );
     }
 
     #[test]
-    fn jobs_accept_only_positive_integers() {
-        for flag in ["--jobs", "-j"] {
-            let options =
-                Options::try_parse_from(["tessera-bench", "--base", "HEAD", flag, "8"]).unwrap();
-            assert_eq!(options.jobs.get(), 8);
-            for value in ["0", "-1", "1.5", "many", "18446744073709551616"] {
-                assert!(
-                    Options::try_parse_from(["tessera-bench", "--base", "HEAD", flag, value])
-                        .is_err()
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn benchmark_commands_override_criterion_threading_without_changing_the_parent() {
-        let inherited = std::env::var_os("RAYON_NUM_THREADS");
-        let cmd = benchmark(
-            Path::new("benchmark"),
-            Path::new("measurements"),
-            Some("^case$"),
-        );
-        let env: BTreeMap<_, _> = cmd.get_envs().collect();
-        assert_eq!(
-            env[std::ffi::OsStr::new("RAYON_NUM_THREADS")],
-            Some(std::ffi::OsStr::new("1"))
-        );
-        assert_eq!(env[std::ffi::OsStr::new("CARGO_CRITERION_PORT")], None);
-        assert_eq!(std::env::var_os("RAYON_NUM_THREADS"), inherited);
+    fn benchmark_commands_select_operations_and_can_run_under_sudo() {
+        let ids = BTreeSet::from(["b/x/fold".to_owned(), "b/x/reference".to_owned()]);
+        let cmd = benchmark(Path::new("bench"), Path::new("out.jsonl"), &ids, false);
+        assert_eq!(cmd.get_program(), "bench");
         assert_eq!(
             cmd.get_args().collect::<Vec<_>>(),
-            ["--bench", "--noplot", "--color", "never", "--", "^case$"]
+            [
+                "--output",
+                "out.jsonl",
+                "--only",
+                "b/x/fold",
+                "--only",
+                "b/x/reference"
+            ]
+        );
+        let cmd = benchmark(Path::new("bench"), Path::new("out.jsonl"), &ids, true);
+        assert_eq!(cmd.get_program(), "sudo");
+        assert_eq!(
+            cmd.get_args().take(3).collect::<Vec<_>>(),
+            ["-n", "--", "bench"]
         );
     }
 
-    #[test]
-    #[cfg(unix)]
-    fn failed_child_is_waited_for_and_its_artifacts_are_kept() -> Result<()> {
-        let dir = tempfile::tempdir()?;
-        // An ordinary failing child, not a timed benchmark.
-        let error = collect(
-            Path::new("/usr/bin/false"),
-            dir.path(),
-            "before1",
-            &BTreeSet::new(),
-            None,
-        )
-        .err()
-        .unwrap();
-        assert!(error.to_string().contains("benchmark failed"));
-        assert!(dir.path().join("before1").is_dir());
-        assert!(dir.path().join("before1.log").is_file());
-        assert!(create(&dir.path().join("before1.log")).is_err());
-        assert!(!dir.path().join("after1").exists());
-        Ok(())
-    }
     #[test]
     fn saved_files_are_never_overwritten() -> Result<()> {
         let dir = tempfile::tempdir()?;
@@ -474,33 +470,6 @@ mod tests {
             serde_json::from_slice::<Value>(&fs::read(file)?)?,
             json!({"original":true})
         );
-        Ok(())
-    }
-
-    #[test]
-    #[ignore = "set TESSERA_BENCH_EXECUTABLE to a built Criterion benchmark"]
-    fn criterion_case_filters_match_listing() -> Result<()> {
-        let binary = PathBuf::from(std::env::var("TESSERA_BENCH_EXECUTABLE")?);
-        let dir = tempfile::tempdir()?;
-        let all = listing(&binary, dir.path(), None)?;
-        let subset = all
-            .iter()
-            .filter(|id| {
-                id.rsplit_once('/')
-                    .is_some_and(|(_, path)| matches!(path, "fold" | "scalar" | "reference"))
-            })
-            .cloned()
-            .collect();
-        for selected in [all, subset] {
-            for case in cases::group("test", selected)? {
-                assert_eq!(
-                    listing(&binary, dir.path(), Some(&case.filter()))?,
-                    case.paths,
-                    "{}",
-                    case.name
-                );
-            }
-        }
         Ok(())
     }
 }

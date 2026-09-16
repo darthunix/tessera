@@ -203,7 +203,7 @@ impl Snapshot {
             .collect();
         ensure!(
             differences.is_empty(),
-            "incompatible benchmark/build files: {differences:?}; establish a new baseline after benchmark changes (legacy TSV runs are not supported)"
+            "incompatible benchmark/build files: {differences:?}; establish a new baseline after benchmark changes"
         );
         for required in [
             "Cargo.toml",
@@ -220,8 +220,8 @@ impl Snapshot {
                 self.directory
                     .join("crates/tessera-capi/benches/support/mod.rs")
             )?
-            .contains("criterion::Criterion"),
-            "legacy benchmarks are not supported; establish a Criterion baseline"
+            .contains("pub mod runner"),
+            "legacy benchmarks are not supported; establish a counter baseline"
         );
         Ok(())
     }
@@ -249,7 +249,7 @@ mod tests {
         fs::create_dir_all(repo.join("crates/tessera-capi/benches/support"))?;
         fs::write(
             repo.join("crates/tessera-capi/benches/support/mod.rs"),
-            "criterion::Criterion",
+            "pub mod runner;",
         )?;
         git(&["add", "."])?;
         git(&[
