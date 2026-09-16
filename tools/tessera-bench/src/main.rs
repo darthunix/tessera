@@ -659,7 +659,9 @@ mod tests {
         let (status, text) = summarize(&measure(&cases, &binaries, &root, 1, false)?)?;
         assert_eq!(status, report::Status::Fail);
         assert!(text.contains("FAIL reader/a/fold: instructions before=100.0 after=100.0 change=+0.00%; cycles min before=600.0 after=660.1 change=+10.02%"));
-        assert!(text.contains("  FAIL cycles: minimum +10.02% on an operation of 600 cycles"));
+        assert!(text.contains(
+            "  FAIL cycles: minimum +10.02% and median +10.02% on an operation of 600 cycles"
+        ));
         assert!(text.contains("UNSTABLE reader/b/fold:"));
         assert!(text.contains("  UNSTABLE after: 1 zero counter readings after 0 repeats"));
         assert!(text.ends_with(

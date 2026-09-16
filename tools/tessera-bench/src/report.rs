@@ -20,22 +20,30 @@ pub const INSTRUCTION_LIMIT: f64 = 0.01;
 /// instructions per call this closely.
 pub const INSTRUCTION_SPREAD_LIMIT: f64 = 0.001;
 /// Minimum cycles per call growing beyond this fraction warn, for operations
-/// of at least [`SHORT_CYCLES`] cycles per call.
+/// of at least [`SHORT_CYCLES`] cycles per call, when the median grows
+/// beyond it too: a real slowdown moves the whole distribution, while the
+/// minimum alone is one lucky block, and identical binaries have shown the
+/// minimum 3-17% apart with medians within 1.5%.
 pub const CYCLE_WARNING: f64 = 0.03;
 /// Shorter operations warn on absolute growth instead: a percentage is a
 /// fraction of a cycle there.
 pub const SHORT_CYCLES: f64 = 200.;
 pub const SHORT_CYCLE_WARNING: f64 = 4.;
 /// Minimum cycles per call growing beyond this fraction fail, for operations
-/// of at least [`CYCLE_FAIL_CYCLES`]. The minimum over all blocks of a side
-/// is the cost in the best core state seen; with three processes it stayed
-/// within 3% between identical binaries even on bistable operations.
+/// of at least [`CYCLE_FAIL_CYCLES`], when the median confirms the growth
+/// beyond [`CYCLE_WARNING`]. The minimum over all blocks of a side is the
+/// cost in the best core state seen; with three processes it stayed within
+/// 3% between identical binaries on long operations, bistable ones included.
 pub const CYCLE_FAIL: f64 = 0.10;
 pub const CYCLE_FAIL_CYCLES: f64 = 500.;
 /// An operation is bistable when the medians of its processes, or the blocks
-/// of one process, differ by more than this ratio. This is reported, not
-/// judged: it is a property of the code, and the minimum is still compared.
+/// of one process, differ by more than this ratio and by more than
+/// [`MODES_CYCLES`] cycles per call. This is reported, not judged: it is a
+/// property of the code, and the minimum is still compared.
 pub const MODES_LIMIT: f64 = 1.10;
+/// Below this spread the modes are a few cycles on a short operation, not a
+/// second cost worth fixing.
+pub const MODES_CYCLES: f64 = 10.;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Status {
@@ -126,7 +134,7 @@ impl Side {
         self.zero_blocks == 0 && self.instructions_spread <= INSTRUCTION_SPREAD_LIMIT
     }
     pub fn bistable(&self) -> bool {
-        self.modes > MODES_LIMIT
+        self.modes > MODES_LIMIT && (self.modes - 1.) * self.cycles_min > MODES_CYCLES
     }
 }
 
@@ -162,6 +170,7 @@ pub fn verdict(new: &Side, old: &Side) -> Verdict {
         Verdict::FailInstructions
     } else if old.cycles_min >= CYCLE_FAIL_CYCLES
         && new.cycles_min > old.cycles_min * (1. + CYCLE_FAIL)
+        && grew(new.cycles_median, old.cycles_median, old)
     {
         Verdict::FailCycles
     } else {
@@ -169,12 +178,19 @@ pub fn verdict(new: &Side, old: &Side) -> Verdict {
     }
 }
 
-pub fn cycles_warning(new: &Side, old: &Side) -> bool {
-    if old.cycles_min < SHORT_CYCLES {
-        new.cycles_min - old.cycles_min > SHORT_CYCLE_WARNING
+/// A statistic grew beyond the warning threshold of an operation as short as
+/// `old`'s minimum.
+fn grew(new: f64, old: f64, side: &Side) -> bool {
+    if side.cycles_min < SHORT_CYCLES {
+        new - old > SHORT_CYCLE_WARNING
     } else {
-        new.cycles_min > old.cycles_min * (1. + CYCLE_WARNING)
+        new > old * (1. + CYCLE_WARNING)
     }
+}
+
+/// The minimum and the median both grew beyond the warning threshold.
+pub fn cycles_warning(new: &Side, old: &Side) -> bool {
+    grew(new.cycles_min, old.cycles_min, old) && grew(new.cycles_median, old.cycles_median, old)
 }
 
 fn median(values: &[f64]) -> f64 {
@@ -406,7 +422,7 @@ pub fn print(out: &mut impl Write, sides: &[Aggregate; 2]) -> Result<Status> {
     );
     writeln!(
         out,
-        "Per call over {BLOCKS} blocks per process. FAIL: instructions +{:.0}%, or minimum cycles +{:.0}% on operations of at least {:.0} cycles. WARNING: minimum cycles +{:.0}% (or +{:.0} cycles below {:.0}). MODES: process medians or blocks differ by more than {:.2}x. UNSTABLE: zero readings or instructions disagreeing beyond {:.1}%.",
+        "Per call over {BLOCKS} blocks per process. FAIL: instructions +{:.0}%, or minimum cycles +{:.0}% on operations of at least {:.0} cycles. WARNING: minimum cycles +{:.0}% (or +{:.0} cycles below {:.0}). Cycle verdicts need the median to grow past the warning threshold too. MODES: process medians or blocks differ by more than {:.2}x and {:.0} cycles. UNSTABLE: zero readings or instructions disagreeing beyond {:.1}%.",
         INSTRUCTION_LIMIT * 100.,
         CYCLE_FAIL * 100.,
         CYCLE_FAIL_CYCLES,
@@ -414,6 +430,7 @@ pub fn print(out: &mut impl Write, sides: &[Aggregate; 2]) -> Result<Status> {
         SHORT_CYCLE_WARNING,
         SHORT_CYCLES,
         MODES_LIMIT,
+        MODES_CYCLES,
         INSTRUCTION_SPREAD_LIMIT * 100.
     )?;
     let mut status = Status::Pass;
@@ -507,8 +524,9 @@ pub fn print(out: &mut impl Write, sides: &[Aggregate; 2]) -> Result<Status> {
         if outcome == Verdict::FailCycles {
             writeln!(
                 out,
-                "  FAIL cycles: minimum +{:.2}% on an operation of {:.0} cycles; instructions {:+.2}%, branch misses {:+.3} per call",
+                "  FAIL cycles: minimum +{:.2}% and median +{:.2}% on an operation of {:.0} cycles; instructions {:+.2}%, branch misses {:+.3} per call",
                 change(n.cycles_min, o.cycles_min),
+                change(n.cycles_median, o.cycles_median),
                 o.cycles_min,
                 change(n.instructions, o.instructions),
                 n.branch_misses - o.branch_misses,
@@ -517,9 +535,10 @@ pub fn print(out: &mut impl Write, sides: &[Aggregate; 2]) -> Result<Status> {
             warnings += 1;
             writeln!(
                 out,
-                "  WARNING cycles: minimum {:+.2}% ({:+.1} cycles) with instructions {:+.2}% and branch misses {:+.3} per call; review layout, predictor or dependency chains",
+                "  WARNING cycles: minimum {:+.2}% ({:+.1} cycles) and median {:+.2}% with instructions {:+.2}% and branch misses {:+.3} per call; review layout, predictor or dependency chains",
                 change(n.cycles_min, o.cycles_min),
                 n.cycles_min - o.cycles_min,
+                change(n.cycles_median, o.cycles_median),
                 change(n.instructions, o.instructions),
                 n.branch_misses - o.branch_misses,
             )?;
@@ -625,6 +644,37 @@ mod tests {
         bistable.modes = 1.11;
         assert!(bistable.bistable());
         assert_eq!(verdict(&side(100., 1200.), &bistable), Verdict::FailCycles);
+        // A few cycles between modes of a short operation are not modes.
+        let mut short = side(100., 25.);
+        short.modes = 1.20;
+        assert!(!short.bistable());
+        short.cycles_min = 101.;
+        assert!(short.bistable());
+    }
+
+    #[test]
+    fn cycle_verdicts_need_the_median_to_confirm_the_minimum() {
+        // One lucky block on the old side: the minimum moves, the median does not.
+        let mut lucky = side(100., 449.);
+        lucky.cycles_median = 480.;
+        let mut later = side(100., 482.);
+        later.cycles_median = 486.;
+        assert!(!cycles_warning(&later, &lucky));
+        let mut old = side(100., 1000.);
+        old.cycles_median = 1200.;
+        let mut new = side(100., 1101.);
+        new.cycles_median = 1230.;
+        assert_eq!(verdict(&new, &old), Verdict::Pass);
+        new.cycles_median = 1236.01;
+        assert_eq!(verdict(&new, &old), Verdict::FailCycles);
+        // Short operations confirm by absolute growth as well.
+        let mut short_old = side(100., 90.);
+        short_old.cycles_median = 120.;
+        let mut short_new = side(100., 95.);
+        short_new.cycles_median = 124.;
+        assert!(!cycles_warning(&short_new, &short_old));
+        short_new.cycles_median = 124.01;
+        assert!(cycles_warning(&short_new, &short_old));
     }
 
     #[test]

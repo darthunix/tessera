@@ -182,18 +182,23 @@ top of [report.rs](../../../tools/tessera-bench/src/report.rs):
   itself is broken, not that the code is noisy.
 - `FAIL` when B needs more than 1% more instructions per call than A.
 - `FAIL cycles` when the minimum cycles per call grow by more than 10% on an
-  operation of at least 500 cycles. This catches slowdowns that instructions
-  cannot see, such as a longer dependency chain on the accumulator. The
-  minimum over the blocks of three processes stayed within 3% between
-  identical binaries on every operation, bistable ones included.
+  operation of at least 500 cycles, and the median confirms it by growing
+  more than 3%. This catches slowdowns that instructions cannot see, such as
+  a longer dependency chain on the accumulator. The minimum over the blocks
+  of three processes stayed within 3% between identical binaries on long
+  operations, bistable ones included.
 - `WARNING cycles` when the minimum cycles per call grow by more than 3%, or
   by more than 4 cycles for operations under 200 cycles, where a percentage
-  is a fraction of a cycle. Printed with the branch-miss change; layout,
-  predictor behaviour and dependency chains need a manual look.
+  is a fraction of a cycle, and the median grows by as much. A real slowdown
+  moves the whole distribution; the minimum alone is one lucky block, and
+  identical binaries have shown it 3-17% apart with medians within 1.5%.
+  Printed with the branch-miss change; layout, predictor behaviour and
+  dependency chains need a manual look.
 - `MODES` when the medians of the processes, or the blocks of one process,
-  differ by more than 1.10x: the operation has more than one cost depending
-  on core state. That is a property of the code worth fixing; the minimum
-  still compares its best mode.
+  differ by more than 1.10x and by more than 10 cycles: the operation has
+  more than one cost depending on core state. That is a property of the code
+  worth fixing; the minimum still compares its best mode. A few cycles
+  between modes of a 25-cycle operation are not worth a flag.
 - `SLOWER-WITH-FEWER-INSTRUCTIONS` marks the class of changes that save
   instructions and lose cycles.
 - `PASS` otherwise.
