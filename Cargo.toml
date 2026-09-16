@@ -1,5 +1,11 @@
 [workspace]
-members = ["crates/tessera-core", "crates/tessera-capi", "crates/tessera-kernels", "tools/tessera-bench"]
+members = [
+    "crates/tessera-core",
+    "crates/tessera-capi",
+    "crates/tessera-kernels",
+    "tools/tessera-bench",
+    "tools/tessera-pmu",
+]
 resolver = "3"
 
 [workspace.package]
@@ -19,6 +25,7 @@ sha2 = "0.10"
 tempfile = "3"
 tessera-core = { path = "crates/tessera-core" }
 tessera-kernels = { path = "crates/tessera-kernels" }
+tessera-pmu = { path = "tools/tessera-pmu" }
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

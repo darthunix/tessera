@@ -1,0 +1,15 @@
+[package]
+name = "tessera-pmu"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Per-thread PMU counters for benchmarking arbitrary code (kperf on macOS)"
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+
+[lints]
+workspace = true
