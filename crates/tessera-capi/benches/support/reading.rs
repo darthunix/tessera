@@ -55,11 +55,8 @@ pub fn fold_sum<C: ColumnReader<Value = i32>>(input: &Input<'_, C>) -> Result<i6
         .column
         .selected_values(&input.rows)?
         .fold(Ok(0), |sum, row| {
-            let mut sum = sum?;
-            if let Some(value) = row?.1 {
-                sum += i64::from(value);
-            }
-            Ok(sum)
+            // map_or keeps the accumulator free of a select on NULL rows.
+            Ok(sum? + row?.1.map_or(0, i64::from))
         })
 }
 
@@ -68,12 +65,7 @@ pub fn iter_sum<C: ColumnReader<Value = i32>>(input: &Input<'_, C>) -> Result<i6
     input
         .column
         .selected_values(&input.rows)?
-        .try_fold(0, |mut sum, row| {
-            if let Some(value) = row?.1 {
-                sum += i64::from(value);
-            }
-            Ok(sum)
-        })
+        .try_fold(0, |sum, row| Ok(sum + row?.1.map_or(0, i64::from)))
 }
 
 #[inline(never)]
@@ -89,9 +81,7 @@ pub fn word_sum<C: ColumnReader<Value = i32>>(input: &Input<'_, C>) -> Result<i6
             continue;
         }
         for (_, value) in input.column.word_values(index, selected)? {
-            if let Some(value) = value {
-                sum += i64::from(value);
-            }
+            sum += value.map_or(0, i64::from);
         }
     }
     Ok(sum)
