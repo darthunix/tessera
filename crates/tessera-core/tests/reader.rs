@@ -13,10 +13,11 @@ fn reader_supports_wide_values_and_preserves_inherent_get() {
     assert_eq!(ColumnReader::get(&column, 0).unwrap(), Some(i64::MIN));
     assert!(ColumnReader::get(&column, 3).is_err());
     let selected = RowMaskView::try_from_bytes(3, &[0b1010], 1).unwrap();
-    let result: Vec<_> = column
-        .selected_values(&selected)
-        .unwrap()
-        .collect::<Result<_>>()
+    let result = column
+        .try_fold_selected(&selected, Vec::new(), |mut values, row, value| {
+            values.push((row, value));
+            Ok(values)
+        })
         .unwrap();
     assert_eq!(result, [(0, Some(i64::MIN)), (2, Some(i64::MAX))]);
 }
@@ -57,12 +58,15 @@ fn reader_borrows_non_static_text_without_copying() {
     let strings = vec![String::from("first"), String::from("second")];
     let column = Text(&strings);
     let rows = RowMaskView::try_new(2, &[3]).unwrap();
-    for result in column.selected_values(&rows).unwrap() {
-        let (row, value) = result.unwrap();
-        let value = value.unwrap();
-        assert_eq!(value, strings[row]);
-        assert_eq!(value.as_ptr(), strings[row].as_ptr());
-    }
+    let visited = column
+        .try_fold_selected(&rows, 0, |visited, row, value| {
+            let value = value.unwrap();
+            assert_eq!(value, strings[row]);
+            assert_eq!(value.as_ptr(), strings[row].as_ptr());
+            Ok(visited + 1)
+        })
+        .unwrap();
+    assert_eq!(visited, 2);
 }
 
 struct NotCopyOrClone(i32);
@@ -113,7 +117,7 @@ impl ColumnReader for Tracked<'_> {
 }
 
 #[test]
-fn selected_iteration_checks_each_nonempty_word_once_before_reading() {
+fn selected_fold_checks_each_nonempty_word_once_before_reading() {
     for invalid_word in 0..3 {
         let mut prepared = [u64::MAX; 3];
         prepared[invalid_word] &= !(1 << 10);
@@ -124,16 +128,14 @@ fn selected_iteration_checks_each_nonempty_word_once_before_reading() {
             reads: Cell::new(0),
         };
         let rows = RowMaskView::try_new(192, &[u64::MAX; 3]).unwrap();
-        let mut iter = column.selected_values(&rows).unwrap();
-        assert_eq!(column.words.get(), 0);
-        for row in 0..invalid_word * 64 {
-            let (index, value) = iter.next().unwrap().unwrap();
-            assert_eq!(index, row);
+        let mut visited = Vec::new();
+        let result = column.try_fold_selected(&rows, (), |(), row, value| {
             assert_eq!(value.unwrap().0, row as i32);
-        }
-        assert!(iter.next().unwrap().is_err());
-        assert!(iter.next().is_none());
-        assert!(iter.next().is_none());
+            visited.push(row);
+            Ok(())
+        });
+        assert!(result.is_err());
+        assert_eq!(visited, (0..invalid_word * 64).collect::<Vec<_>>());
         assert_eq!(column.words.get(), invalid_word + 1);
         assert_eq!(column.reads.get(), invalid_word * 64);
     }
@@ -144,11 +146,18 @@ fn selected_iteration_checks_each_nonempty_word_once_before_reading() {
         reads: Cell::new(0),
     };
     let rows = RowMaskView::try_new(192, &[0, 1, 0]).unwrap();
-    assert_eq!(column.selected_values(&rows).unwrap().count(), 1);
+    let count = column
+        .try_fold_selected(&rows, 0, |count, _, _| Ok(count + 1))
+        .unwrap();
+    assert_eq!(count, 1);
     assert_eq!(column.words.get(), 1);
     assert_eq!(column.reads.get(), 1);
     let wrong = RowMaskView::try_new(1, &[1]).unwrap();
-    assert!(column.selected_values(&wrong).is_err());
+    assert!(
+        column
+            .try_fold_selected(&wrong, (), |(), _, _| Ok(()))
+            .is_err()
+    );
     assert_eq!(column.words.get(), 1);
 }
 
@@ -183,31 +192,27 @@ fn word_validation_never_calls_reader_for_invalid_requests() {
 }
 
 #[test]
-fn fold_preserves_word_validation_after_partial_consumption() {
-    for prefix in [0, 1, 63, 64, 65] {
+fn consumer_error_stops_the_fold_before_further_reads() {
+    for stop in [0, 1, 63, 64, 65] {
         let column = Tracked {
             nrows: 192,
-            prepared: &[u64::MAX, u64::MAX, 0],
+            prepared: &[u64::MAX; 3],
             words: Cell::new(0),
             reads: Cell::new(0),
         };
         let rows = RowMaskView::try_new(192, &[u64::MAX; 3]).unwrap();
-        let mut iter = column.selected_values(&rows).unwrap();
-        for row in 0..prefix {
-            assert_eq!(iter.next().unwrap().unwrap().0, row);
-        }
-        let (next, errors) = iter.fold((prefix, 0), |(next, errors), item| match item {
-            Ok((row, value)) => {
-                assert_eq!(errors, 0);
-                assert_eq!(row, next);
-                assert_eq!(value.unwrap().0, row as i32);
-                (next + 1, errors)
-            }
-            Err(_) => (next, errors + 1),
+        let mut next = 0;
+        let result = column.try_fold_selected(&rows, (), |(), row, value| {
+            assert_eq!(row, next);
+            assert_eq!(value.unwrap().0, row as i32);
+            next += 1;
+            anyhow::ensure!(row != stop, "consumer stopped");
+            Ok(())
         });
-        assert_eq!((next, errors), (128, 1));
-        assert_eq!(column.words.get(), 3);
-        assert_eq!(column.reads.get(), 128);
+        assert!(result.is_err());
+        assert_eq!(next, stop + 1);
+        assert_eq!(column.words.get(), stop / 64 + 1);
+        assert_eq!(column.reads.get(), stop + 1);
     }
 }
 

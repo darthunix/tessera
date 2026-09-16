@@ -19,9 +19,10 @@ fn collect<C: ColumnReader<Value = i32>>(
     rows: &RowMaskView<'_>,
 ) -> Vec<(usize, Option<i32>)> {
     column
-        .selected_values(rows)
-        .unwrap()
-        .collect::<Result<_>>()
+        .try_fold_selected(rows, Vec::new(), |mut values, row, value| {
+            values.push((row, value));
+            Ok(values)
+        })
         .unwrap()
 }
 
@@ -71,8 +72,8 @@ fn representations_agree_with_uninitialized_gaps() {
             let expected = collect(&column, &selection);
             assert_eq!(collect(&dense, &selection), expected);
             assert_eq!(collect(&datum, &selection), expected);
-            assert_fold_matches(&dense, &selection, &expected);
-            assert_fold_matches(&datum, &selection, &expected);
+            assert_fold_stops(&dense, &selection, &expected);
+            assert_fold_stops(&datum, &selection, &expected);
             for (row, &is_ready) in ready.iter().enumerate() {
                 if is_ready {
                     let value = ColumnReader::get(&column, row).unwrap();
@@ -91,61 +92,45 @@ fn representations_agree_with_uninitialized_gaps() {
     }
 }
 
-fn assert_error_is_fused<C: ColumnReader<Value = i32>>(
+fn assert_reader_error<C: ColumnReader<Value = i32>>(
     column: &C,
     rows: &RowMaskView<'_>,
     prior_rows: usize,
 ) {
-    let mut iter = column.selected_values(rows).unwrap();
-    for _ in 0..prior_rows {
-        assert!(iter.next().unwrap().is_ok());
-    }
-    assert!(iter.next().unwrap().is_err());
-    assert!(iter.next().is_none());
-    assert!(iter.next().is_none());
-
-    let mut iter = column.selected_values(rows).unwrap();
-    let mut visited = 0;
-    let result: Result<()> = iter.try_for_each(|item| {
-        item?;
-        visited += 1;
+    let mut visited = Vec::new();
+    let result: Result<()> = column.try_fold_selected(rows, (), |(), row, _| {
+        visited.push(row);
         Ok(())
     });
     assert!(result.is_err());
-    assert_eq!(visited, prior_rows);
-    assert!(iter.next().is_none());
-    assert!(iter.next().is_none());
-
-    let (values, errors) =
-        column
-            .selected_values(rows)
-            .unwrap()
-            .fold((0, 0), |(values, errors), item| match item {
-                Ok(_) => {
-                    assert_eq!(errors, 0, "no values may follow a readiness error");
-                    (values + 1, errors)
-                }
-                Err(_) => (values, errors + 1),
-            });
-    assert_eq!((values, errors), (prior_rows, 1));
+    assert_eq!(
+        visited.len(),
+        prior_rows,
+        "no values may follow a readiness error"
+    );
+    assert!(visited.windows(2).all(|pair| pair[0] < pair[1]));
 }
 
-fn assert_fold_matches<C: ColumnReader<Value = i32>>(
+// The fold yields exactly `expected`, and a consumer error after any prefix
+// stops it with exactly that prefix consumed, including word boundaries.
+fn assert_fold_stops<C: ColumnReader<Value = i32>>(
     column: &C,
     rows: &RowMaskView<'_>,
     expected: &[(usize, Option<i32>)],
 ) {
-    for prefix in [0, 1, 63, 64, 65] {
-        let mut iter = column.selected_values(rows).unwrap();
-        let consumed = prefix.min(expected.len());
-        for value in &expected[..consumed] {
-            assert_eq!(iter.next().unwrap().unwrap(), *value);
+    assert_eq!(collect(column, rows), expected);
+    for stop in [0, 1, 62, 63, 64, 65, 126, 127, 128, 129, 190, 191, 192] {
+        if stop >= expected.len() {
+            continue;
         }
-        let rest = iter.fold(Vec::new(), |mut values, item| {
-            values.push(item.unwrap());
-            values
+        let mut consumed = Vec::new();
+        let result = column.try_fold_selected(rows, (), |(), row, value| {
+            consumed.push((row, value));
+            anyhow::ensure!(consumed.len() <= stop, "consumer stopped");
+            Ok(())
         });
-        assert_eq!(rest, expected[consumed..]);
+        assert!(result.is_err());
+        assert_eq!(consumed, expected[..=stop]);
     }
 }
 
@@ -170,8 +155,8 @@ fn unprepared_flags_and_values_are_never_read() {
     let later_error = RowMaskView::try_new(129, &[u64::MAX, 1, 1]).unwrap();
     let first_error = RowMaskView::try_new(129, &[0, 1, 1]).unwrap();
     for (rows, prior) in [(later_error, 64), (first_error, 0)] {
-        assert_error_is_fused(&dense, &rows, prior);
-        assert_error_is_fused(&datum, &rows, prior);
+        assert_reader_error(&dense, &rows, prior);
+        assert_reader_error(&datum, &rows, prior);
     }
     for row in [64, 128] {
         assert!(dense.get(row).is_err());
@@ -221,8 +206,8 @@ fn byte_masks_and_sliced_values_preserve_row_numbering() {
             .unwrap();
     assert_eq!(collect(&dense, &selected), expected);
     assert_eq!(collect(&datum, &selected), expected);
-    assert_fold_matches(&dense, &selected, &expected);
-    assert_fold_matches(&datum, &selected, &expected);
+    assert_fold_stops(&dense, &selected, &expected);
+    assert_fold_stops(&datum, &selected, &expected);
 }
 
 #[test]
@@ -243,12 +228,12 @@ fn optional_masks_and_low_datum_bits() {
         let selected = RowMaskView::try_new(5, &[31]).unwrap();
         assert_eq!(collect(&dense, &selected), collect(&datum, &selected));
         let expected = collect(&dense, &selected);
-        assert_fold_matches(&dense, &selected, &expected);
-        assert_fold_matches(&datum, &selected, &expected);
+        assert_fold_stops(&dense, &selected, &expected);
+        assert_fold_stops(&datum, &selected, &expected);
         let bytes = RowMaskView::try_from_bytes(5, &[0b1010_0101], 2).unwrap();
         let expected = [(0, Some(i32::MIN)), (3, Some(1))];
         assert_eq!(collect(&dense, &bytes), expected);
-        assert_fold_matches(&dense, &bytes, &expected);
+        assert_fold_stops(&dense, &bytes, &expected);
         for (row, &value) in values.iter().enumerate() {
             assert_eq!(dense.get(row).unwrap(), Some(value));
             assert_eq!(datum.get(row).unwrap(), Some(value));
@@ -258,8 +243,16 @@ fn optional_masks_and_low_datum_bits() {
             assert!(datum.word_values(word, bits).is_err());
         }
         let wrong = RowMaskView::try_new(1, &[1]).unwrap();
-        assert!(dense.selected_values(&wrong).is_err());
-        assert!(datum.selected_values(&wrong).is_err());
+        assert!(
+            dense
+                .try_fold_selected(&wrong, (), |(), _, _| Ok(()))
+                .is_err()
+        );
+        assert!(
+            datum
+                .try_fold_selected(&wrong, (), |(), _, _| Ok(()))
+                .is_err()
+        );
     }
 }
 
@@ -295,20 +288,23 @@ fn constructors_validate_dimensions_without_reading_storage() {
     assert!(collect(&datum, &empty).is_empty());
 }
 
-fn assert_fold_resume<C: ColumnReader<Value = i32>>(column: &C, rows: &RowMaskView<'_>) {
-    let mut iter = column.selected_values(rows).unwrap();
-    let stopped: Result<()> = iter.try_for_each(|item| {
-        let (row, _) = item?;
+fn assert_fold_stops_at_row<C: ColumnReader<Value = i32>>(column: &C, rows: &RowMaskView<'_>) {
+    let mut visited = 0;
+    let stopped = column.try_fold_selected(rows, (), |(), row, _| {
+        visited += 1;
         anyhow::ensure!(row != 63, "consumer stopped");
         Ok(())
     });
     assert!(stopped.is_err());
-    assert_eq!(iter.next().unwrap().unwrap().0, 64);
-    assert_eq!(iter.count(), 65);
+    assert_eq!(visited, 64);
+    let count = column
+        .try_fold_selected(rows, 0, |count, _, _| Ok(count + 1))
+        .unwrap();
+    assert_eq!(count, 130);
 }
 
 #[test]
-fn bulk_iteration_can_resume_after_a_consumer_error() {
+fn bulk_fold_stops_at_a_consumer_error() {
     let values = [MaybeUninit::new(42); 130];
     let datums = [MaybeUninit::new(42_u64); 130];
     let nulls = [MaybeUninit::new(false); 130];
@@ -317,8 +313,8 @@ fn bulk_iteration_can_resume_after_a_consumer_error() {
     let dense = unsafe { DenseInt32Column::try_new(&values, None, None) }.unwrap();
     // SAFETY: all flags and Datums are initialized and non-NULL.
     let datum = unsafe { DatumInt32Column::try_new(&datums, &nulls, None) }.unwrap();
-    assert_fold_resume(&dense, &rows);
-    assert_fold_resume(&datum, &rows);
+    assert_fold_stops_at_row(&dense, &rows);
+    assert_fold_stops_at_row(&datum, &rows);
 }
 
 #[test]
@@ -333,15 +329,15 @@ fn non_nullable_prepared_column_rejects_a_whole_bad_word() {
     let good = RowMaskView::try_new(129, &[1, 1, 0]).unwrap();
     let expected = [(0, Some(42)), (64, Some(42))];
     assert_eq!(collect(&dense, &good), expected);
-    assert_fold_matches(&dense, &good, &expected);
+    assert_fold_stops(&dense, &good, &expected);
     let bad = RowMaskView::try_new(129, &[1, 3, 0]).unwrap();
-    assert_error_is_fused(&dense, &bad, 1);
+    assert_reader_error(&dense, &bad, 1);
     assert!(dense.word_values(1, 3).is_err());
     assert!(dense.get(65).is_err());
 }
 
 #[test]
-fn nullable_word_modes_preserve_rows_and_resume_inside_each_mode() {
+fn nullable_word_modes_preserve_rows_and_stop_on_consumer_error() {
     let nrows = 193;
     let non_null_words = [0, u64::MAX, 0xaaaa_aaaa_aaaa_aaaa, 0];
     let selected_words = [u64::MAX, u64::MAX, u64::MAX, 1];
@@ -371,34 +367,7 @@ fn nullable_word_modes_preserve_rows_and_resume_inside_each_mode() {
     ] {
         // SAFETY: only non-NULL positions have values, exactly as the mask says.
         let dense = unsafe { DenseInt32Column::try_new(&values, Some(non_nulls), None) }.unwrap();
-        assert_fold_matches(&dense, &rows, &expected);
-        assert_resume_in_modes(&dense, &rows, &expected);
-        assert_resume_in_modes(&datum, &rows, &expected);
-    }
-}
-
-fn assert_resume_in_modes<C: ColumnReader<Value = i32>>(
-    column: &C,
-    rows: &RowMaskView<'_>,
-    expected: &[(usize, Option<i32>)],
-) {
-    for stop in [0, 1, 62, 63, 64, 65, 126, 127, 128, 129, 190, 191, 192] {
-        let mut iter = column.selected_values(rows).unwrap();
-        let mut consumed = Vec::new();
-        let stopped = iter.try_for_each(|item| {
-            let item = item.unwrap();
-            consumed.push(item);
-            if item.0 == stop {
-                std::ops::ControlFlow::Break(())
-            } else {
-                std::ops::ControlFlow::Continue(())
-            }
-        });
-        assert!(stopped.is_break());
-        assert_eq!(consumed, expected[..=stop]);
-        let rest: Vec<_> = iter.by_ref().collect::<Result<_>>().unwrap();
-        assert_eq!(rest, expected[stop + 1..]);
-        assert!(iter.next().is_none());
-        assert!(iter.next().is_none());
+        assert_fold_stops(&dense, &rows, &expected);
+        assert_fold_stops(&datum, &rows, &expected);
     }
 }

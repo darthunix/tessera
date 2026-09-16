@@ -4,9 +4,7 @@ use std::mem::MaybeUninit;
 use anyhow::{Result, ensure};
 use tessera_core::{ColumnReader, RowMaskView, WordValues};
 
-use super::{
-    DenseSelected, mask_word, selected_values, try_fold_words, validate_mask, validate_ready,
-};
+use super::{mask_word, try_fold_words, validate_mask, validate_ready};
 
 // Read one dense slot of a word whose non-NULL flags are `bits`, without a
 // branch or a data-dependent address. The slot is copied as `MaybeUninit`,
@@ -170,51 +168,6 @@ impl ColumnReader for DenseInt32Column<'_> {
             fold,
         )
     }
-
-    #[inline]
-    fn selected_values<'a>(
-        &'a self,
-        rows: &'a RowMaskView<'_>,
-    ) -> Result<impl Iterator<Item = Result<(usize, Option<i32>)>> + 'a> {
-        let values = self.values;
-        if self.non_nulls.is_none() && self.prepared.is_none() {
-            ensure!(
-                self.nrows() == rows.nrows(),
-                "column and selection row counts differ"
-            );
-            return Ok(DenseSelected::Ready(rows.selected_indices().map(
-                move |row| {
-                    // SAFETY: the normalized selection has the column's row count,
-                    // and every row is prepared and non-NULL.
-                    Ok((
-                        row,
-                        Some(unsafe { values.get_unchecked(row).assume_init() }),
-                    ))
-                },
-            )));
-        }
-        if self.non_nulls.is_none() {
-            return Ok(DenseSelected::Plain(selected_values(
-                self.nrows(),
-                *rows,
-                self.prepared,
-                None,
-                move |row, _| {
-                    // SAFETY: the row is in bounds and prepared; there are no NULLs.
-                    Some(unsafe { values.get_unchecked(row).assume_init() })
-                },
-            )?));
-        }
-        Ok(DenseSelected::Nullable(selected_values(
-            self.nrows(),
-            *rows,
-            self.prepared,
-            self.non_nulls,
-            // selected_values validates dimensions and readiness before
-            // invoking read; RowMaskView supplies only in-bounds bits.
-            move |row, non_nulls| read_masked(values, row, non_nulls),
-        )?))
-    }
 }
 
 /// Borrowed PostgreSQL Datum storage interpreted as int4 values.
@@ -342,26 +295,5 @@ impl ColumnReader for DatumInt32Column<'_> {
             init,
             fold,
         )
-    }
-
-    #[inline]
-    fn selected_values<'a>(
-        &'a self,
-        rows: &'a RowMaskView<'_>,
-    ) -> Result<impl Iterator<Item = Result<(usize, Option<i32>)>> + 'a> {
-        let values = self.values;
-        let isnull = self.isnull;
-        selected_values(self.nrows(), *rows, self.prepared, None, move |row, _| {
-            // SAFETY: selected_values checks dimensions and readiness and
-            // visits only normalized in-bounds RowMaskView bits. The
-            // constructor guarantees initialized flags for prepared rows.
-            if unsafe { isnull.get_unchecked(row).assume_init() } {
-                None
-            } else {
-                // SAFETY: this prepared row is non-NULL, so its Datum is
-                // initialized, in addition to the bounds checked above.
-                Some(unsafe { values.get_unchecked(row).assume_init() } as i32)
-            }
-        })
     }
 }
