@@ -70,9 +70,11 @@ pub fn word_sum<C: ColumnReader<Value = i32>>(input: &Input<'_, C>) -> Result<i6
         if selected == 0 {
             continue;
         }
-        for (_, value) in input.column.word_values(index, selected)? {
-            sum += value.map_or(0, i64::from);
-        }
+        // fold is the bulk path of the word iterator, like the kernels use it.
+        sum = input
+            .column
+            .word_values(index, selected)?
+            .fold(sum, |sum, (_, value)| sum + value.map_or(0, i64::from));
     }
     Ok(sum)
 }
