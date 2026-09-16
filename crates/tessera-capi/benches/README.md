@@ -129,17 +129,18 @@ top of [report.rs](../../../tools/tessera-bench/src/report.rs):
   itself is broken, not that the code is noisy.
 - `FAIL` when B needs more than 1% more instructions per call than A.
 - `FAIL cycles` when the minimum cycles per call grow by more than 10% on an
-  operation of at least 500 cycles that runs in a single mode on both sides.
-  This catches slowdowns that instructions cannot see, such as a longer
-  dependency chain on the accumulator.
+  operation of at least 500 cycles. This catches slowdowns that instructions
+  cannot see, such as a longer dependency chain on the accumulator. The
+  minimum over the blocks of three processes stayed within 3% between
+  identical binaries on every operation, bistable ones included.
 - `WARNING cycles` when the minimum cycles per call grow by more than 3%, or
   by more than 4 cycles for operations under 200 cycles, where a percentage
   is a fraction of a cycle. Printed with the branch-miss change; layout,
   predictor behaviour and dependency chains need a manual look.
 - `MODES` when the medians of the processes, or the blocks of one process,
   differ by more than 1.10x: the operation has more than one cost depending
-  on core state. That is a property of the code worth fixing, but cycles do
-  not fail such an operation because the comparison would be a coin toss.
+  on core state. That is a property of the code worth fixing; the minimum
+  still compares its best mode.
 - `SLOWER-WITH-FEWER-INSTRUCTIONS` marks the class of changes that save
   instructions and lose cycles.
 - `PASS` otherwise.

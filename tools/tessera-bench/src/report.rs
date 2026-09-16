@@ -27,11 +27,14 @@ pub const CYCLE_WARNING: f64 = 0.03;
 pub const SHORT_CYCLES: f64 = 200.;
 pub const SHORT_CYCLE_WARNING: f64 = 4.;
 /// Minimum cycles per call growing beyond this fraction fail, for operations
-/// of at least [`CYCLE_FAIL_CYCLES`] that are single-mode on both sides.
+/// of at least [`CYCLE_FAIL_CYCLES`]. The minimum over all blocks of a side
+/// is the cost in the best core state seen; with three processes it stayed
+/// within 3% between identical binaries even on bistable operations.
 pub const CYCLE_FAIL: f64 = 0.10;
 pub const CYCLE_FAIL_CYCLES: f64 = 500.;
 /// An operation is bistable when the medians of its processes, or the blocks
-/// of one process, differ by more than this ratio.
+/// of one process, differ by more than this ratio. This is reported, not
+/// judged: it is a property of the code, and the minimum is still compared.
 pub const MODES_LIMIT: f64 = 1.10;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -158,8 +161,6 @@ pub fn verdict(new: &Side, old: &Side) -> Verdict {
     } else if new.instructions > old.instructions * (1. + INSTRUCTION_LIMIT) {
         Verdict::FailInstructions
     } else if old.cycles_min >= CYCLE_FAIL_CYCLES
-        && !old.bistable()
-        && !new.bistable()
         && new.cycles_min > old.cycles_min * (1. + CYCLE_FAIL)
     {
         Verdict::FailCycles
@@ -400,7 +401,7 @@ pub fn print(out: &mut impl Write, sides: &[Aggregate; 2]) -> Result<Status> {
     );
     writeln!(
         out,
-        "Per call over {BLOCKS} blocks per process. FAIL: instructions +{:.0}%, or minimum cycles +{:.0}% on single-mode operations of at least {:.0} cycles. WARNING: minimum cycles +{:.0}% (or +{:.0} cycles below {:.0}). MODES: process medians or blocks differ by more than {:.2}x. UNSTABLE: zero readings or instructions disagreeing beyond {:.1}%.",
+        "Per call over {BLOCKS} blocks per process. FAIL: instructions +{:.0}%, or minimum cycles +{:.0}% on operations of at least {:.0} cycles. WARNING: minimum cycles +{:.0}% (or +{:.0} cycles below {:.0}). MODES: process medians or blocks differ by more than {:.2}x. UNSTABLE: zero readings or instructions disagreeing beyond {:.1}%.",
         INSTRUCTION_LIMIT * 100.,
         CYCLE_FAIL * 100.,
         CYCLE_FAIL_CYCLES,
@@ -481,7 +482,7 @@ pub fn print(out: &mut impl Write, sides: &[Aggregate; 2]) -> Result<Status> {
         if outcome == Verdict::FailCycles {
             writeln!(
                 out,
-                "  FAIL cycles: minimum +{:.2}% on a single-mode operation of {:.0} cycles; instructions {:+.2}%, branch misses {:+.3} per call",
+                "  FAIL cycles: minimum +{:.2}% on an operation of {:.0} cycles; instructions {:+.2}%, branch misses {:+.3} per call",
                 change(n.cycles_min, o.cycles_min),
                 o.cycles_min,
                 change(n.instructions, o.instructions),
@@ -502,7 +503,7 @@ pub fn print(out: &mut impl Write, sides: &[Aggregate; 2]) -> Result<Status> {
             bistable += 1;
             writeln!(
                 out,
-                "  MODES before={:.2}x after={:.2}x: processes or blocks run in different modes; cycles do not fail this operation",
+                "  MODES before={:.2}x after={:.2}x: processes or blocks run in different modes; the minimum above is the best mode seen",
                 o.modes, n.modes
             )?;
         }
@@ -580,7 +581,7 @@ mod tests {
     }
 
     #[test]
-    fn cycles_fail_only_long_single_mode_operations() {
+    fn cycles_fail_only_long_operations_and_bistability_is_reported_not_judged() {
         assert_eq!(
             verdict(&side(100., 1100.), &side(100., 1000.)),
             Verdict::Pass
@@ -596,10 +597,8 @@ mod tests {
         assert_eq!(verdict(&side(100., 600.), &side(100., 499.)), Verdict::Pass);
         let mut bistable = side(100., 1000.);
         bistable.modes = 1.11;
-        assert_eq!(verdict(&side(100., 1200.), &bistable), Verdict::Pass);
-        let mut later = side(100., 1200.);
-        later.modes = 1.11;
-        assert_eq!(verdict(&later, &side(100., 1000.)), Verdict::Pass);
+        assert!(bistable.bistable());
+        assert_eq!(verdict(&side(100., 1200.), &bistable), Verdict::FailCycles);
     }
 
     #[test]
