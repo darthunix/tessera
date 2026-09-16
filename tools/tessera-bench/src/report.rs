@@ -1,5 +1,7 @@
-//! Per-call counter statistics from raw block readings and the project limits.
-//! No time is read anywhere; instructions decide, cycles warn.
+//! Per-call counter statistics from the raw block readings of one or more
+//! processes per side, and the project limits. No time is read anywhere:
+//! instructions decide, cycles warn and fail only for clear slowdowns of
+//! long operations that run in a single mode on both sides.
 
 use anyhow::{Context, Result, ensure};
 use serde::Deserialize;
@@ -13,11 +15,24 @@ use std::{
 /// Blocks written by the benchmark runner for every operation.
 pub const BLOCKS: usize = 10;
 /// Instructions per call may grow by at most this fraction.
-const INSTRUCTION_LIMIT: f64 = 0.01;
-/// Blocks of one process must agree on instructions per call this closely.
-const INSTRUCTION_SPREAD_LIMIT: f64 = 0.001;
-/// Cycles per call growing beyond this fraction produce a warning.
-const CYCLE_WARNING: f64 = 0.03;
+pub const INSTRUCTION_LIMIT: f64 = 0.01;
+/// Blocks of one process, and processes of one side, must agree on
+/// instructions per call this closely.
+pub const INSTRUCTION_SPREAD_LIMIT: f64 = 0.001;
+/// Minimum cycles per call growing beyond this fraction warn, for operations
+/// of at least [`SHORT_CYCLES`] cycles per call.
+pub const CYCLE_WARNING: f64 = 0.03;
+/// Shorter operations warn on absolute growth instead: a percentage is a
+/// fraction of a cycle there.
+pub const SHORT_CYCLES: f64 = 200.;
+pub const SHORT_CYCLE_WARNING: f64 = 4.;
+/// Minimum cycles per call growing beyond this fraction fail, for operations
+/// of at least [`CYCLE_FAIL_CYCLES`] that are single-mode on both sides.
+pub const CYCLE_FAIL: f64 = 0.10;
+pub const CYCLE_FAIL_CYCLES: f64 = 500.;
+/// An operation is bistable when the medians of its processes, or the blocks
+/// of one process, differ by more than this ratio.
+pub const MODES_LIMIT: f64 = 1.10;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Status {
@@ -60,45 +75,106 @@ struct Record {
     cycles: Vec<u64>,
     branch_misses: Vec<u64>,
     branches: Vec<u64>,
+    #[serde(default)]
+    cpus: Vec<[usize; 2]>,
+    #[serde(default)]
+    retries: u32,
 }
 
-/// Per-call statistics of one operation: medians over blocks, and the
-/// block-to-block spread of instructions as a consistency check.
-#[derive(Clone, Copy, Debug)]
-pub struct Counts {
+/// One process's per-call statistics of one operation.
+#[derive(Clone, Debug)]
+pub struct Process {
     pub instructions: f64,
     pub instructions_spread: f64,
-    pub cycles: f64,
-    pub cycles_min: f64,
-    pub cycles_max: f64,
+    pub cycles: Vec<f64>,
     pub branch_misses: f64,
     pub branches: f64,
+    pub cpus: BTreeSet<usize>,
+    pub retries: u32,
+    pub zero_blocks: usize,
 }
 
-impl Counts {
-    pub fn consistent(&self) -> bool {
-        self.instructions_spread <= INSTRUCTION_SPREAD_LIMIT
-    }
-    fn status(self, old: Self) -> Status {
-        if !self.consistent() || !old.consistent() {
-            Status::Unstable
-        } else if self.instructions > old.instructions * (1. + INSTRUCTION_LIMIT) {
-            Status::Fail
-        } else {
-            Status::Pass
-        }
-    }
-    fn cycles_warning(self, old: Self) -> bool {
-        self.cycles > old.cycles * (1. + CYCLE_WARNING)
-    }
-}
-
+#[derive(Clone)]
 pub struct Entry {
     pub group: String,
     pub path: String,
-    pub counts: Counts,
+    pub process: Process,
 }
 pub type Run = BTreeMap<String, Entry>;
+
+/// One side's statistics over all of its processes.
+#[derive(Clone, Debug)]
+pub struct Side {
+    pub processes: usize,
+    pub instructions: f64,
+    pub instructions_spread: f64,
+    pub cycles_min: f64,
+    pub cycles_median: f64,
+    pub modes: f64,
+    pub branch_misses: f64,
+    pub branches: f64,
+    pub cpus: BTreeSet<usize>,
+    pub retries: u32,
+    pub zero_blocks: usize,
+}
+
+impl Side {
+    pub fn consistent(&self) -> bool {
+        self.zero_blocks == 0 && self.instructions_spread <= INSTRUCTION_SPREAD_LIMIT
+    }
+    pub fn bistable(&self) -> bool {
+        self.modes > MODES_LIMIT
+    }
+}
+
+pub struct SideEntry {
+    pub group: String,
+    pub path: String,
+    pub side: Side,
+}
+pub type Aggregate = BTreeMap<String, SideEntry>;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Verdict {
+    Pass,
+    FailInstructions,
+    FailCycles,
+    Unstable,
+}
+
+impl Verdict {
+    pub fn status(self) -> Status {
+        match self {
+            Self::Pass => Status::Pass,
+            Self::FailInstructions | Self::FailCycles => Status::Fail,
+            Self::Unstable => Status::Unstable,
+        }
+    }
+}
+
+pub fn verdict(new: &Side, old: &Side) -> Verdict {
+    if !new.consistent() || !old.consistent() {
+        Verdict::Unstable
+    } else if new.instructions > old.instructions * (1. + INSTRUCTION_LIMIT) {
+        Verdict::FailInstructions
+    } else if old.cycles_min >= CYCLE_FAIL_CYCLES
+        && !old.bistable()
+        && !new.bistable()
+        && new.cycles_min > old.cycles_min * (1. + CYCLE_FAIL)
+    {
+        Verdict::FailCycles
+    } else {
+        Verdict::Pass
+    }
+}
+
+pub fn cycles_warning(new: &Side, old: &Side) -> bool {
+    if old.cycles_min < SHORT_CYCLES {
+        new.cycles_min - old.cycles_min > SHORT_CYCLE_WARNING
+    } else {
+        new.cycles_min > old.cycles_min * (1. + CYCLE_WARNING)
+    }
+}
 
 fn median(values: &[f64]) -> f64 {
     let mut sorted = values.to_vec();
@@ -111,6 +187,22 @@ fn median(values: &[f64]) -> f64 {
     }
 }
 
+fn spread(values: &[f64]) -> f64 {
+    let (min, max) = values
+        .iter()
+        .fold((f64::INFINITY, 0_f64), |(min, max), &v| {
+            (min.min(v), max.max(v))
+        });
+    let mid = median(values);
+    if mid > 0. { (max - min) / mid } else { 0. }
+}
+
+fn ratio(values: &[f64]) -> f64 {
+    let min = values.iter().copied().fold(f64::INFINITY, f64::min);
+    let max = values.iter().copied().fold(0., f64::max);
+    if min > 0. { max / min } else { f64::INFINITY }
+}
+
 fn per_call(values: &[u64], iters: u64, what: &str, id: &str) -> Result<Vec<f64>> {
     ensure!(
         values.len() == BLOCKS,
@@ -120,7 +212,7 @@ fn per_call(values: &[u64], iters: u64, what: &str, id: &str) -> Result<Vec<f64>
     Ok(values.iter().map(|&v| v as f64 / iters as f64).collect())
 }
 
-fn counts(record: &Record) -> Result<Counts> {
+fn process(record: &Record) -> Result<Process> {
     ensure!(record.iters > 0, "{}: no calls per block", record.id);
     let instructions = per_call(
         &record.instructions,
@@ -136,25 +228,20 @@ fn counts(record: &Record) -> Result<Counts> {
         &record.id,
     )?;
     let branches = per_call(&record.branches, record.iters, "branch", &record.id)?;
-    let instructions_median = median(&instructions);
-    ensure!(
-        instructions_median > 0. && median(&cycles) > 0.,
-        "{}: zero instructions or cycles",
-        record.id
-    );
-    let (min, max) = instructions
+    let zero_blocks = instructions
         .iter()
-        .fold((f64::INFINITY, 0_f64), |(min, max), &v| {
-            (min.min(v), max.max(v))
-        });
-    Ok(Counts {
-        instructions: instructions_median,
-        instructions_spread: (max - min) / instructions_median,
-        cycles: median(&cycles),
-        cycles_min: cycles.iter().copied().fold(f64::INFINITY, f64::min),
-        cycles_max: cycles.iter().copied().fold(0., f64::max),
+        .zip(&cycles)
+        .filter(|(i, c)| **i == 0. || **c == 0.)
+        .count();
+    Ok(Process {
+        instructions: median(&instructions),
+        instructions_spread: spread(&instructions),
+        cycles,
         branch_misses: median(&branch_misses),
         branches: median(&branches),
+        cpus: record.cpus.iter().flatten().copied().collect(),
+        retries: record.retries,
+        zero_blocks,
     })
 }
 
@@ -207,7 +294,7 @@ pub fn load(path: &Path, expected: &BTreeSet<String>) -> Result<Run> {
         let entry = Entry {
             group: group.to_owned(),
             path: function.to_owned(),
-            counts: counts(&record)?,
+            process: process(&record)?,
         };
         ensure!(
             run.insert(record.id.clone(), entry).is_none(),
@@ -225,60 +312,148 @@ pub fn load(path: &Path, expected: &BTreeSet<String>) -> Result<Run> {
     Ok(run)
 }
 
+/// Combine the processes of one side: instructions must agree across them,
+/// cycles are compared by their minimum, and disagreeing process medians or
+/// blocks mark the operation as bistable.
+pub fn aggregate(runs: &[Run]) -> Result<Aggregate> {
+    ensure!(!runs.is_empty(), "no processes measured");
+    let names: Vec<_> = runs[0].keys().collect();
+    ensure!(
+        runs.iter()
+            .all(|run| run.keys().collect::<Vec<_>>() == names),
+        "process case sets differ"
+    );
+    let mut aggregate = Aggregate::new();
+    for name in names {
+        let entries: Vec<_> = runs.iter().map(|run| &run[name]).collect();
+        let processes: Vec<_> = entries.iter().map(|entry| &entry.process).collect();
+        ensure!(
+            entries
+                .iter()
+                .all(|entry| entry.group == entries[0].group && entry.path == entries[0].path),
+            "identity changed between processes"
+        );
+        let instructions: Vec<_> = processes.iter().map(|p| p.instructions).collect();
+        let all_cycles: Vec<_> = processes
+            .iter()
+            .flat_map(|p| p.cycles.iter().copied())
+            .collect();
+        let process_medians: Vec<_> = processes.iter().map(|p| median(&p.cycles)).collect();
+        let within = processes
+            .iter()
+            .map(|p| ratio(&p.cycles))
+            .fold(0., f64::max);
+        let side = Side {
+            processes: processes.len(),
+            instructions: median(&instructions),
+            instructions_spread: processes
+                .iter()
+                .map(|p| p.instructions_spread)
+                .fold(spread(&instructions), f64::max),
+            cycles_min: all_cycles.iter().copied().fold(f64::INFINITY, f64::min),
+            cycles_median: median(&all_cycles),
+            modes: ratio(&process_medians).max(within),
+            branch_misses: median(
+                &processes
+                    .iter()
+                    .map(|p| p.branch_misses)
+                    .collect::<Vec<_>>(),
+            ),
+            branches: median(&processes.iter().map(|p| p.branches).collect::<Vec<_>>()),
+            cpus: processes
+                .iter()
+                .flat_map(|p| p.cpus.iter().copied())
+                .collect(),
+            retries: processes.iter().map(|p| p.retries).sum(),
+            zero_blocks: processes.iter().map(|p| p.zero_blocks).sum(),
+        };
+        aggregate.insert(
+            name.clone(),
+            SideEntry {
+                group: entries[0].group.clone(),
+                path: entries[0].path.clone(),
+                side,
+            },
+        );
+    }
+    Ok(aggregate)
+}
+
 fn change(new: f64, old: f64) -> f64 {
     (new / old - 1.) * 100.
 }
 
-/// Runs are before and after. Instructions per call decide the status; cycles
-/// only warn, and references are informational.
-pub fn print(out: &mut impl Write, runs: &[Run; 2]) -> Result<Status> {
-    let names: Vec<_> = runs[0].keys().collect();
+fn cores(cpus: &BTreeSet<usize>) -> String {
+    cpus.iter()
+        .map(usize::to_string)
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// Sides are before and after. Instructions decide; cycles fail only for
+/// long single-mode operations and warn otherwise; references inform.
+pub fn print(out: &mut impl Write, sides: &[Aggregate; 2]) -> Result<Status> {
+    let names: Vec<_> = sides[0].keys().collect();
     ensure!(
-        !names.is_empty() && runs[1].keys().collect::<Vec<_>>() == names,
+        !names.is_empty() && sides[1].keys().collect::<Vec<_>>() == names,
         "run case sets differ"
     );
     writeln!(
         out,
-        "Per call, medians over {BLOCKS} blocks. FAIL: instructions +{:.0}%; WARNING: cycles +{:.0}%; UNSTABLE: blocks disagree on instructions beyond {:.1}%.",
+        "Per call over {BLOCKS} blocks per process. FAIL: instructions +{:.0}%, or minimum cycles +{:.0}% on single-mode operations of at least {:.0} cycles. WARNING: minimum cycles +{:.0}% (or +{:.0} cycles below {:.0}). MODES: process medians or blocks differ by more than {:.2}x. UNSTABLE: zero readings or instructions disagreeing beyond {:.1}%.",
         INSTRUCTION_LIMIT * 100.,
+        CYCLE_FAIL * 100.,
+        CYCLE_FAIL_CYCLES,
         CYCLE_WARNING * 100.,
+        SHORT_CYCLE_WARNING,
+        SHORT_CYCLES,
+        MODES_LIMIT,
         INSTRUCTION_SPREAD_LIMIT * 100.
     )?;
     let mut status = Status::Pass;
     let mut counts = [0; 3];
-    let mut warnings = 0;
+    let (mut instruction_fails, mut cycle_fails, mut warnings, mut bistable) = (0, 0, 0, 0);
     for name in names {
-        let old = &runs[0][name];
-        let new = &runs[1][name];
+        let old = &sides[0][name];
+        let new = &sides[1][name];
         ensure!(
             old.group == new.group && old.path == new.path,
-            "identity changed between runs"
+            "identity changed between sides"
         );
         if old.path == "reference" {
             continue;
         }
         let reference = format!("{}/reference", old.group);
-        let old_reference = runs[0].get(&reference).context("missing reference")?.counts;
-        let new_reference = runs[1].get(&reference).context("missing reference")?.counts;
-        let (o, n) = (old.counts, new.counts);
-        let outcome = n.status(o);
-        status = status.combine(outcome);
-        counts[outcome.exit_code() as usize] += 1;
+        let old_reference = &sides[0].get(&reference).context("missing reference")?.side;
+        let new_reference = &sides[1].get(&reference).context("missing reference")?.side;
+        let (o, n) = (&old.side, &new.side);
+        let outcome = verdict(n, o);
+        status = status.combine(outcome.status());
+        counts[outcome.status().exit_code() as usize] += 1;
+        match outcome {
+            Verdict::FailInstructions => instruction_fails += 1,
+            Verdict::FailCycles => cycle_fails += 1,
+            _ => {}
+        }
         writeln!(
             out,
-            "{} {name}: instructions before={:.1} after={:.1} change={:+.2}%; cycles before={:.1} after={:.1} change={:+.2}% [{:.1}..{:.1}]; branch misses before={:.3} after={:.3} of {:.1} branches",
-            outcome.label(),
+            "{} {name}: instructions before={:.1} after={:.1} change={:+.2}%; cycles min before={:.1} after={:.1} change={:+.2}% (median {:.1}/{:.1}, modes {:.2}/{:.2}, {} processes); branch misses before={:.3} after={:.3} of {:.1} branches; cores {}",
+            outcome.status().label(),
             o.instructions,
             n.instructions,
             change(n.instructions, o.instructions),
-            o.cycles,
-            n.cycles,
-            change(n.cycles, o.cycles),
+            o.cycles_min,
             n.cycles_min,
-            n.cycles_max,
+            change(n.cycles_min, o.cycles_min),
+            o.cycles_median,
+            n.cycles_median,
+            o.modes,
+            n.modes,
+            n.processes,
             o.branch_misses,
             n.branch_misses,
             n.branches,
+            cores(&n.cpus),
         )?;
         writeln!(
             out,
@@ -286,25 +461,55 @@ pub fn print(out: &mut impl Write, runs: &[Run; 2]) -> Result<Status> {
             old_reference.instructions,
             new_reference.instructions,
             n.instructions / new_reference.instructions,
-            n.cycles / new_reference.cycles,
+            n.cycles_min / new_reference.cycles_min,
         )?;
-        for (label, c) in [("before", o), ("after", n)] {
-            if !c.consistent() {
+        for (label, side) in [("before", o), ("after", n)] {
+            if side.zero_blocks > 0 {
                 writeln!(
                     out,
-                    "  UNSTABLE {label}: blocks disagree on instructions per call by {:.3}%",
-                    c.instructions_spread * 100.
+                    "  UNSTABLE {label}: {} zero counter readings after {} repeats",
+                    side.zero_blocks, side.retries
+                )?;
+            } else if side.instructions_spread > INSTRUCTION_SPREAD_LIMIT {
+                writeln!(
+                    out,
+                    "  UNSTABLE {label}: blocks or processes disagree on instructions per call by {:.3}%",
+                    side.instructions_spread * 100.
                 )?;
             }
         }
-        if n.cycles_warning(o) {
+        if outcome == Verdict::FailCycles {
+            writeln!(
+                out,
+                "  FAIL cycles: minimum +{:.2}% on a single-mode operation of {:.0} cycles; instructions {:+.2}%, branch misses {:+.3} per call",
+                change(n.cycles_min, o.cycles_min),
+                o.cycles_min,
+                change(n.instructions, o.instructions),
+                n.branch_misses - o.branch_misses,
+            )?;
+        } else if cycles_warning(n, o) {
             warnings += 1;
             writeln!(
                 out,
-                "  WARNING cycles: +{:.2}% with instructions {:+.2}% and branch misses {:+.3} per call; review layout, predictor or dependency chains",
-                change(n.cycles, o.cycles),
+                "  WARNING cycles: minimum {:+.2}% ({:+.1} cycles) with instructions {:+.2}% and branch misses {:+.3} per call; review layout, predictor or dependency chains",
+                change(n.cycles_min, o.cycles_min),
+                n.cycles_min - o.cycles_min,
                 change(n.instructions, o.instructions),
                 n.branch_misses - o.branch_misses,
+            )?;
+        }
+        if o.bistable() || n.bistable() {
+            bistable += 1;
+            writeln!(
+                out,
+                "  MODES before={:.2}x after={:.2}x: processes or blocks run in different modes; cycles do not fail this operation",
+                o.modes, n.modes
+            )?;
+        }
+        if n.instructions < o.instructions && cycles_warning(n, o) {
+            writeln!(
+                out,
+                "  SLOWER-WITH-FEWER-INSTRUCTIONS: a longer dependency chain or worse prediction outweighs the saved instructions"
             )?;
         }
     }
@@ -314,11 +519,11 @@ pub fn print(out: &mut impl Write, runs: &[Run; 2]) -> Result<Status> {
     );
     writeln!(
         out,
-        "{}: {} PASS, {} FAIL, {} UNSTABLE library paths; {warnings} cycle warnings",
+        "{}: {} PASS, {} FAIL ({instruction_fails} instructions, {cycle_fails} cycles), {} UNSTABLE library paths; {warnings} cycle warnings; {bistable} bistable",
         status.label(),
         counts[0],
         counts[1],
-        counts[2]
+        counts[2],
     )?;
     Ok(status)
 }
@@ -327,44 +532,83 @@ pub fn print(out: &mut impl Write, runs: &[Run; 2]) -> Result<Status> {
 mod tests {
     use super::*;
 
-    fn exact(instructions: f64, cycles: f64) -> Counts {
-        Counts {
+    fn side(instructions: f64, cycles_min: f64) -> Side {
+        Side {
+            processes: 1,
             instructions,
             instructions_spread: 0.,
-            cycles,
-            cycles_min: cycles,
-            cycles_max: cycles,
+            cycles_min,
+            cycles_median: cycles_min,
+            modes: 1.,
             branch_misses: 0.,
             branches: 0.,
+            cpus: BTreeSet::new(),
+            retries: 0,
+            zero_blocks: 0,
         }
     }
 
-    fn record(id: &str, iters: u64, values: [Vec<u64>; 4]) -> String {
+    fn record(id: &str, iters: u64, values: [Vec<u64>; 4], cpus: Vec<[usize; 2]>) -> String {
         let [instructions, cycles, branch_misses, branches] = values;
         serde_json::json!({
             "id": id, "iters": iters, "instructions": instructions, "cycles": cycles,
-            "branch_misses": branch_misses, "branches": branches,
+            "branch_misses": branch_misses, "branches": branches, "cpus": cpus, "retries": 1,
         })
         .to_string()
     }
 
     #[test]
-    fn instructions_decide_and_the_limit_is_inclusive() {
-        assert_eq!(exact(101., 100.).status(exact(100., 100.)), Status::Pass);
-        assert_eq!(exact(101.01, 100.).status(exact(100., 100.)), Status::Fail);
-        assert_eq!(exact(50., 1000.).status(exact(100., 100.)), Status::Pass);
-        let mut inconsistent = exact(100., 100.);
+    fn instructions_decide_first_and_the_limit_is_inclusive() {
+        assert_eq!(verdict(&side(101., 100.), &side(100., 100.)), Verdict::Pass);
+        assert_eq!(
+            verdict(&side(101.01, 100.), &side(100., 100.)),
+            Verdict::FailInstructions
+        );
+        // An instruction regression is reported as such even with a cycle regression.
+        assert_eq!(
+            verdict(&side(102., 2000.), &side(100., 1000.)),
+            Verdict::FailInstructions
+        );
+        let mut inconsistent = side(100., 100.);
         inconsistent.instructions_spread = 0.0011;
-        assert_eq!(inconsistent.status(exact(100., 100.)), Status::Unstable);
-        assert_eq!(exact(100., 100.).status(inconsistent), Status::Unstable);
-        assert_eq!(Status::Fail.combine(Status::Unstable).exit_code(), 1);
+        assert_eq!(verdict(&inconsistent, &side(100., 100.)), Verdict::Unstable);
+        assert_eq!(verdict(&side(100., 100.), &inconsistent), Verdict::Unstable);
+        let mut zero = side(100., 100.);
+        zero.zero_blocks = 1;
+        assert_eq!(verdict(&side(100., 100.), &zero), Verdict::Unstable);
+        assert_eq!(Verdict::FailCycles.status().exit_code(), 1);
     }
 
     #[test]
-    fn cycles_only_warn() {
-        assert!(exact(100., 103.01).cycles_warning(exact(100., 100.)));
-        assert!(!exact(100., 103.).cycles_warning(exact(100., 100.)));
-        assert_eq!(exact(100., 200.).status(exact(100., 100.)), Status::Pass);
+    fn cycles_fail_only_long_single_mode_operations() {
+        assert_eq!(
+            verdict(&side(100., 1100.), &side(100., 1000.)),
+            Verdict::Pass
+        );
+        assert_eq!(
+            verdict(&side(100., 1100.01), &side(100., 1000.)),
+            Verdict::FailCycles
+        );
+        assert_eq!(
+            verdict(&side(50., 1100.01), &side(100., 1000.)),
+            Verdict::FailCycles
+        );
+        assert_eq!(verdict(&side(100., 600.), &side(100., 499.)), Verdict::Pass);
+        let mut bistable = side(100., 1000.);
+        bistable.modes = 1.11;
+        assert_eq!(verdict(&side(100., 1200.), &bistable), Verdict::Pass);
+        let mut later = side(100., 1200.);
+        later.modes = 1.11;
+        assert_eq!(verdict(&later, &side(100., 1000.)), Verdict::Pass);
+    }
+
+    #[test]
+    fn cycle_warnings_are_relative_for_long_and_absolute_for_short_operations() {
+        assert!(cycles_warning(&side(100., 1030.01), &side(100., 1000.)));
+        assert!(!cycles_warning(&side(100., 1030.), &side(100., 1000.)));
+        assert!(cycles_warning(&side(100., 30.01), &side(100., 26.)));
+        assert!(!cycles_warning(&side(100., 30.), &side(100., 26.)));
+        assert!(!cycles_warning(&side(100., 27.), &side(100., 26.)));
     }
 
     #[test]
@@ -377,12 +621,8 @@ mod tests {
         assert!(listed("noslash\n").is_err());
     }
 
-    #[test]
-    fn records_become_per_call_medians_with_spread() -> Result<()> {
-        let dir = tempfile::tempdir()?;
-        let path = dir.path().join("results.jsonl");
-        let mut cycles = vec![2000; BLOCKS];
-        cycles[0] = 4000;
+    fn write_run(dir: &Path, name: &str, fold_cycles: Vec<u64>) -> Result<Run> {
+        let path = dir.join(name);
         fs::write(
             &path,
             format!(
@@ -392,10 +632,11 @@ mod tests {
                     100,
                     [
                         vec![1000; BLOCKS],
-                        cycles,
+                        fold_cycles,
                         vec![10; BLOCKS],
                         vec![300; BLOCKS]
-                    ]
+                    ],
+                    vec![[12, 12]; BLOCKS],
                 ),
                 record(
                     "b/x/reference",
@@ -405,34 +646,65 @@ mod tests {
                         vec![1000; BLOCKS],
                         vec![0; BLOCKS],
                         vec![100; BLOCKS]
-                    ]
+                    ],
+                    vec![[15, 16]; BLOCKS],
                 ),
             ),
         )?;
-        let expected = BTreeSet::from(["b/x/fold".to_owned(), "b/x/reference".to_owned()]);
-        let run = load(&path, &expected)?;
-        let fold = run["b/x/fold"].counts;
+        load(
+            &path,
+            &BTreeSet::from(["b/x/fold".to_owned(), "b/x/reference".to_owned()]),
+        )
+    }
+
+    #[test]
+    fn processes_aggregate_into_minimum_cycles_and_modes() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let mut first = vec![2000; BLOCKS];
+        first[0] = 4000;
+        let one = write_run(dir.path(), "one.jsonl", first)?;
+        let two = write_run(dir.path(), "two.jsonl", vec![2600; BLOCKS])?;
+        assert_eq!(one["b/x/fold"].process.cpus, BTreeSet::from([12]));
+        assert_eq!(one["b/x/fold"].process.retries, 1);
+        let sides = aggregate(&[one, two])?;
+        let fold = &sides["b/x/fold"].side;
+        assert_eq!(fold.processes, 2);
         assert_eq!(fold.instructions, 10.);
         assert_eq!(fold.instructions_spread, 0.);
-        assert_eq!(fold.cycles, 20.);
-        assert_eq!((fold.cycles_min, fold.cycles_max), (20., 40.));
+        assert_eq!(fold.cycles_min, 20.);
+        // Nine blocks of 20, ten of 26 and one of 40: the median is 26.
+        assert_eq!(fold.cycles_median, 26.);
+        // Process medians 20 and 26 differ by 1.3x; blocks of the first by 2x.
+        assert_eq!(fold.modes, 2.);
+        assert!(fold.bistable());
         assert_eq!(fold.branch_misses, 0.1);
-        assert_eq!(fold.branches, 3.);
-        assert!(load(&path, &BTreeSet::from(["b/x/fold".to_owned()])).is_err());
-        let mut output = Vec::new();
-        let other = load(&path, &expected)?;
-        assert_eq!(print(&mut output, &[run, other])?, Status::Pass);
-        let text = String::from_utf8(output)?;
-        assert!(text.contains("PASS b/x/fold: instructions before=10.0 after=10.0 change=+0.00%"));
-        assert!(text.contains("library/reference=2.000x"));
-        assert!(
-            text.ends_with("PASS: 1 PASS, 0 FAIL, 0 UNSTABLE library paths; 0 cycle warnings\n")
-        );
+        assert_eq!(fold.retries, 2);
+        assert_eq!(fold.cpus, BTreeSet::from([12]));
+        let reference = &sides["b/x/reference"].side;
+        assert_eq!(reference.modes, 1.);
+        assert_eq!(reference.cpus, BTreeSet::from([15, 16]));
         Ok(())
     }
 
     #[test]
-    fn inconsistent_blocks_and_short_records_are_rejected() -> Result<()> {
+    fn report_prints_verdicts_notes_and_a_summary() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let before = aggregate(&[write_run(dir.path(), "before1.jsonl", vec![2000; BLOCKS])?])?;
+        let after = aggregate(&[write_run(dir.path(), "after1.jsonl", vec![2000; BLOCKS])?])?;
+        let mut output = Vec::new();
+        assert_eq!(print(&mut output, &[before, after])?, Status::Pass);
+        let text = String::from_utf8(output)?;
+        assert!(text.contains("PASS b/x/fold: instructions before=10.0 after=10.0 change=+0.00%; cycles min before=20.0 after=20.0"));
+        assert!(text.contains("library/reference=2.000x"));
+        assert!(text.contains("cores 12"));
+        assert!(text.ends_with(
+            "PASS: 1 PASS, 0 FAIL (0 instructions, 0 cycles), 0 UNSTABLE library paths; 0 cycle warnings; 0 bistable\n"
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn zero_readings_and_short_records_are_rejected() -> Result<()> {
         let dir = tempfile::tempdir()?;
         let path = dir.path().join("results.jsonl");
         let only = BTreeSet::from(["b/x/fold".to_owned()]);
@@ -447,21 +719,26 @@ mod tests {
                     vec![0; BLOCKS],
                     vec![0; BLOCKS],
                 ],
+                Vec::new(),
             ),
         )?;
         assert!(load(&path, &only).is_err());
-        let mut drift = vec![1000; BLOCKS];
-        drift[BLOCKS - 1] = 1002;
+        let mut zero = vec![1000; BLOCKS];
+        zero[3] = 0;
         fs::write(
             &path,
             record(
                 "b/x/fold",
                 1,
-                [drift, vec![1; BLOCKS], vec![0; BLOCKS], vec![0; BLOCKS]],
+                [vec![1000; BLOCKS], zero, vec![0; BLOCKS], vec![0; BLOCKS]],
+                Vec::new(),
             ),
         )?;
         let run = load(&path, &only)?;
-        assert!(!run["b/x/fold"].counts.consistent());
+        assert_eq!(run["b/x/fold"].process.zero_blocks, 1);
+        assert!(run["b/x/fold"].process.cpus.is_empty());
+        let side = &aggregate(&[run])?["b/x/fold"].side;
+        assert!(!side.consistent());
         Ok(())
     }
 }

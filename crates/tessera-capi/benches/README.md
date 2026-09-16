@@ -44,6 +44,8 @@ sudo -v
 cargo run --locked -p tessera-bench -- --base REF
 # Repeatability with identical sources on both sides.
 cargo run --locked -p tessera-bench -- --base WORKTREE
+# One process per side when only instructions matter (about 35 seconds).
+cargo run --locked -p tessera-bench -- --base REF --repeats 1
 ```
 
 The utility starts the benchmark processes through `sudo -n`, so `sudo -v`
@@ -106,29 +108,47 @@ and new nonignored files. The utility does not change your branch or index.
 
 For each benchmark program, the utility builds an A executable and a B
 executable from isolated source copies. Both revisions must have matching
-benchmarks, dependencies and build settings. Each case is measured by one A
-process and then one B process; instructions are deterministic, so repeated
-processes add nothing, and the whole set runs in a couple of minutes.
+benchmarks, dependencies and build settings. Each case is measured by
+`--repeats` (default 3) pairs of processes, interleaved as A1 B1 A2 B2 A3 B3,
+so that drift in core state is shared by both sides. Instructions are
+deterministic and would need one process; cycles are not: a process inherits
+the predictor state of the cores it runs on, and identical binaries have
+shown whole processes 30% apart in cycles at identical instruction counts.
+Several processes give several states, and the minimum over all their
+blocks is the operation's cost in the best state seen. The full set runs
+in about a hundred seconds.
 
 ## Reading the report
 
-Each library operation gets its own status:
+Each library operation gets its own status. The limits are constants at the
+top of [report.rs](../../../tools/tessera-bench/src/report.rs):
 
-- Instructions per call are the median over blocks. Blocks of one process
-  must agree within 0.1%; otherwise the operation is `UNSTABLE`, which means
-  counting itself is broken, not that the code is noisy.
+- Instructions per call are the median over all blocks of a side. Blocks of
+  one process and processes of one side must agree within 0.1%, and no block
+  may read zero; otherwise the operation is `UNSTABLE`, which means counting
+  itself is broken, not that the code is noisy.
 - `FAIL` when B needs more than 1% more instructions per call than A.
-- `WARNING cycles` when the median cycles per call grow by more than 3%;
-  it is printed with the branch-miss counts and does not change the exit
-  status. A cycles-only change with unchanged instructions is either code
-  layout, predictor behaviour or a longer dependency chain, and needs a
-  manual look rather than an automatic verdict.
+- `FAIL cycles` when the minimum cycles per call grow by more than 10% on an
+  operation of at least 500 cycles that runs in a single mode on both sides.
+  This catches slowdowns that instructions cannot see, such as a longer
+  dependency chain on the accumulator.
+- `WARNING cycles` when the minimum cycles per call grow by more than 3%, or
+  by more than 4 cycles for operations under 200 cycles, where a percentage
+  is a fraction of a cycle. Printed with the branch-miss change; layout,
+  predictor behaviour and dependency chains need a manual look.
+- `MODES` when the medians of the processes, or the blocks of one process,
+  differ by more than 1.10x: the operation has more than one cost depending
+  on core state. That is a property of the code worth fixing, but cycles do
+  not fail such an operation because the comparison would be a coin toss.
+- `SLOWER-WITH-FEWER-INSTRUCTIONS` marks the class of changes that save
+  instructions and lose cycles.
 - `PASS` otherwise.
 
-References show library overhead as an instruction ratio and do not affect
-statuses. Exit status is 0 when every selected operation passes (warnings
-included), 1 for any instruction regression, and 2 for inconsistent counting
-or an invalid/incomplete run.
+Every line also shows the median cycles, the modes ratio, branch misses per
+call and the cores the blocks ran on. References show library overhead as
+instruction and cycle ratios and do not affect statuses. Exit status is 0
+when every selected operation passes (warnings included), 1 for any
+regression, and 2 for inconsistent counting or an invalid/incomplete run.
 
 Reports, raw readings, logs and source snapshots are saved in a new
 `target/bench-runs/compare-*` directory for each comparison.

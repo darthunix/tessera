@@ -1,4 +1,4 @@
-//! Compare compatible source snapshots by PMU counters, one process per side per case.
+//! Compare compatible source snapshots by PMU counters, several processes per side per case.
 //! Only generated files under target/bench-runs are written. No Git publishing.
 #![forbid(unsafe_code)]
 
@@ -15,6 +15,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fs::{self, File, OpenOptions},
     io::Write,
+    num::NonZeroUsize,
     path::{Path, PathBuf},
     process::{Command, ExitCode, Stdio},
     time::Instant,
@@ -22,8 +23,8 @@ use std::{
 
 #[derive(Parser, Debug)]
 #[command(
-    about = "Compare compatible Rust revisions by PMU counters (before/after per case).",
-    after_help = "REF is a Git revision or WORKTREE. Defaults to both full benchmarks.\nFilters are substrings of operation ids; any match keeps an operation, and every\nselected case must keep its reference and a library path.\nBenchmark processes run through `sudo -n`: run `sudo -v` first.\nExit: 0 PASS, 1 instruction regression, 2 UNSTABLE or invalid/incomplete run."
+    about = "Compare compatible Rust revisions by PMU counters (before/after per case, repeated).",
+    after_help = "REF is a Git revision or WORKTREE. Defaults to both full benchmarks.\nFilters are substrings of operation ids; any match keeps an operation, and every\nselected case must keep its reference and a library path.\nEach case runs before/after --repeats times, interleaved; instructions come from any\nprocess, cycles from the minimum over all of them.\nBenchmark processes run through `sudo -n`: run `sudo -v` first.\nExit: 0 PASS, 1 regression (instructions, or cycles on long single-mode operations),\n2 UNSTABLE or invalid/incomplete run."
 )]
 struct Options {
     #[arg(long, value_name = "REF")]
@@ -34,6 +35,9 @@ struct Options {
     bench: Option<String>,
     #[arg(long, value_name = "SUBSTRING")]
     filter: Vec<String>,
+    /// Processes per side per case; instructions need one, cycles benefit from more.
+    #[arg(long, value_name = "N", default_value = "3")]
+    repeats: NonZeroUsize,
 }
 
 struct Timing {
@@ -254,8 +258,14 @@ fn compare(repo: &Path, root: &Path, options: &Options, timing: &mut Timing) -> 
         "bench":options.bench,
         "mode":if options.filter.is_empty() {"full"} else {"diagnostic"},
         "filter":options.filter,"order_unit":"case","order":cases::ORDER.map(|(name, _)| name),
+        "repeats":options.repeats.get(),
         "measurement":{"metric":"pmu counters per call","blocks":report::BLOCKS,
-            "instruction_limit":0.01,"cycle_warning":0.03,"instruction_spread_limit":0.001}}),
+            "instruction_limit":report::INSTRUCTION_LIMIT,
+            "instruction_spread_limit":report::INSTRUCTION_SPREAD_LIMIT,
+            "cycle_warning":report::CYCLE_WARNING,"short_cycles":report::SHORT_CYCLES,
+            "short_cycle_warning":report::SHORT_CYCLE_WARNING,
+            "cycle_fail":report::CYCLE_FAIL,"cycle_fail_cycles":report::CYCLE_FAIL_CYCLES,
+            "modes_limit":report::MODES_LIMIT}}),
     )?;
     let benches: Vec<_> = options.bench.as_deref().map_or_else(
         || vec!["column_reader", "filter_int32"],
@@ -305,25 +315,32 @@ fn compare(repo: &Path, root: &Path, options: &Options, timing: &mut Timing) -> 
     )?;
     let measurement_started = Instant::now();
     timing.measurement_started = Some(measurement_started);
-    let mut measured: BTreeMap<String, [report::Run; 2]> = BTreeMap::new();
+    // Repeats interleave before/after per case so that drift in core state is
+    // shared by both sides; process k of every case forms one run per side.
+    let repeats = options.repeats.get();
+    let mut measured: BTreeMap<String, [Vec<report::Run>; 2]> = BTreeMap::new();
     for case in &cases {
         let runs = measured
             .entry(case.bench.clone())
-            .or_insert_with(|| std::array::from_fn(|_| report::Run::new()));
-        for (run, (name, side)) in runs.iter_mut().zip(cases::ORDER) {
-            println!("Case {}/{name}: {}", case.directory, case.name);
-            let collected = collect(
-                &binaries[&case.bench][side],
-                &root.join(&case.directory),
-                name,
-                &case.paths,
-            )
-            .with_context(|| format!("{}: {name}", case.name))?;
-            for (id, entry) in collected {
-                ensure!(
-                    run.insert(id.clone(), entry).is_none(),
-                    "duplicate benchmark result: {id}"
-                );
+            .or_insert_with(|| std::array::from_fn(|_| vec![report::Run::new(); repeats]));
+        for repeat in 0..repeats {
+            for (name, side) in cases::ORDER {
+                let label = format!("{name}{}", repeat + 1);
+                println!("Case {}/{label}: {}", case.directory, case.name);
+                let collected = collect(
+                    &binaries[&case.bench][side],
+                    &root.join(&case.directory),
+                    &label,
+                    &case.paths,
+                )
+                .with_context(|| format!("{}: {label}", case.name))?;
+                let run = runs[side].get_mut(repeat).context("missing repeat")?;
+                for (id, entry) in collected {
+                    ensure!(
+                        run.insert(id.clone(), entry).is_none(),
+                        "duplicate benchmark result: {id}"
+                    );
+                }
             }
         }
     }
@@ -332,7 +349,8 @@ fn compare(repo: &Path, root: &Path, options: &Options, timing: &mut Timing) -> 
     for (bench, runs) in &measured {
         let mut section = Vec::new();
         writeln!(section, "\n{bench}")?;
-        let status = report::print(&mut section, runs)?;
+        let sides = [report::aggregate(&runs[0])?, report::aggregate(&runs[1])?];
+        let status = report::print(&mut section, &sides)?;
         report.write_all(&section)?;
         print!("{}", String::from_utf8(section)?);
         outcome = outcome.combine(status);
@@ -416,6 +434,17 @@ mod tests {
         assert_eq!(options.candidate, "WORKTREE");
         assert!(options.bench.is_none());
         assert!(options.filter.is_empty());
+        assert_eq!(options.repeats.get(), 3);
+        assert!(
+            Options::try_parse_from(["tessera-bench", "--base", "HEAD", "--repeats", "0"]).is_err()
+        );
+        assert_eq!(
+            Options::try_parse_from(["tessera-bench", "--base", "HEAD", "--repeats", "1"])
+                .unwrap()
+                .repeats
+                .get(),
+            1
+        );
         let options = Options::try_parse_from([
             "tessera-bench",
             "--base",
