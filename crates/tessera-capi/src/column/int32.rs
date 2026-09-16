@@ -1,9 +1,30 @@
+use std::hint::select_unpredictable;
 use std::mem::MaybeUninit;
 
 use anyhow::{Result, ensure};
 use tessera_core::{ColumnReader, RowMaskView, WordValues};
 
 use super::{DenseSelected, mask_word, selected_values, validate_mask, validate_ready};
+
+// Read one dense slot of a word whose non-NULL flags are `bits`, without a
+// branch or a data-dependent address. The slot is copied as `MaybeUninit`,
+// which is allowed even for uninitialized NULL rows, and a zero is selected
+// in its place before anything is assumed initialized. A conditional branch
+// or a selected load address here alternated between a fast and a slower
+// mode depending on per-core predictor state in the `next()`-based paths.
+#[inline(always)]
+fn read_masked(values: &[MaybeUninit<i32>], row: usize, bits: u64) -> Option<i32> {
+    let present = bits & (1 << (row % 64)) != 0;
+    // SAFETY: callers pass rows below values.len() (RowMaskView bits and
+    // WordValues rows are normalized to the row count). Copying a possibly
+    // uninitialized MaybeUninit is sound; nothing is assumed initialized yet.
+    let raw = unsafe { *values.get_unchecked(row) };
+    let slot = select_unpredictable(present, raw, MaybeUninit::new(0));
+    // SAFETY: a prepared non-NULL row is initialized by the constructor
+    // contract; for a NULL row the selected slot is the initialized zero.
+    let value = unsafe { slot.assume_init() };
+    select_unpredictable(present, Some(value), None)
+}
 
 /// Borrowed dense int32 storage with independent non-NULL and readiness masks.
 ///
@@ -17,6 +38,12 @@ use super::{DenseSelected, mask_word, selected_values, validate_mask, validate_r
 /// Selected iteration chooses its NULL/readiness mode once. Without either
 /// mask, it walks validated selected indices directly. Bulk `fold` uses a
 /// dedicated loop; use `try_fold` to stop on errors returned by the consumer.
+///
+/// NULL rows are read without a data-dependent branch: the slot is copied as
+/// `MaybeUninit` and a zero is selected for NULL rows before use. Consumers
+/// keep their loop branch-free by folding with `map_or`/`unwrap_or`; an
+/// `if let Some` around the accumulation lowers to a select on the
+/// accumulator and lengthens its dependency chain.
 #[derive(Debug)]
 pub struct DenseInt32Column<'a> {
     values: &'a [MaybeUninit<i32>],
@@ -97,24 +124,16 @@ impl ColumnReader for DenseInt32Column<'_> {
         selected: u64,
     ) -> Result<impl Iterator<Item = (usize, Option<i32>)> + '_> {
         let prepared = mask_word(self.prepared, word_index);
-        let non_nulls = self
-            .non_nulls
-            .map(|mask| mask.word(word_index).unwrap_or(0));
+        // Without a NULL mask every flag is set and the read is unconditional.
+        let non_nulls = mask_word(self.non_nulls, word_index);
         let values = self.values;
         WordValues::try_new(
             self.nrows(),
             word_index,
             selected,
             prepared,
-            move |row: usize| {
-                if non_nulls.is_some_and(|bits| bits & (1 << (row % 64)) == 0) {
-                    return None;
-                }
-                // SAFETY: WordValues invokes this closure only for in-bounds,
-                // prepared rows. Non-nullness was just checked; the constructor
-                // guarantees these values are initialized and immutable.
-                Some(unsafe { values.get_unchecked(row).assume_init() })
-            },
+            // WordValues invokes this closure only for in-bounds, prepared rows.
+            move |row: usize| read_masked(values, row, non_nulls),
         )
     }
 
@@ -157,15 +176,9 @@ impl ColumnReader for DenseInt32Column<'_> {
             *rows,
             self.prepared,
             self.non_nulls,
-            move |row, non_nulls| {
-                if non_nulls & (1 << (row % 64)) == 0 {
-                    return None;
-                }
-                // SAFETY: selected_values validates dimensions and readiness
-                // before invoking read. RowMaskView supplies only in-bounds bits;
-                // nullness was checked above. Construction guarantees initialization.
-                Some(unsafe { values.get_unchecked(row).assume_init() })
-            },
+            // selected_values validates dimensions and readiness before
+            // invoking read; RowMaskView supplies only in-bounds bits.
+            move |row, non_nulls| read_masked(values, row, non_nulls),
         )?))
     }
 }
