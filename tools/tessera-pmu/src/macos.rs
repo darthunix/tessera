@@ -17,11 +17,21 @@ use std::{
 const RTLD_LAZY: c_int = 0x1;
 const KPC_CLASS_CONFIGURABLE_MASK: u32 = 1 << 1;
 const KPC_MAX_COUNTERS: usize = 32;
+/// `kpep_config_add_event` flag: 0 counts all exception levels, 1 sets the
+/// EL0-only bit in the counter's configuration word.
+const USER_SPACE_ONLY: u32 = 1;
 
 /// Event names in the order of the fields of [`Reading`].
+///
+/// The configurable events are used instead of `FIXED_INSTRUCTIONS` and
+/// `FIXED_CYCLES` on purpose: fixed counters have no configuration word and
+/// always count every exception level, so timer interrupts and context
+/// switches inside a block would add kernel instructions. Configurable
+/// counters honour the user-space-only flag. `INST_ALL` is the fallback the
+/// kpep database itself names for the fixed instruction counter.
 const EVENTS: [&str; 4] = [
-    "FIXED_INSTRUCTIONS",
-    "FIXED_CYCLES",
+    "INST_ALL",
+    "CORE_ACTIVE_CYCLE",
     "BRANCH_MISPRED_NONSPEC",
     "INST_BRANCH",
 ];
@@ -186,9 +196,9 @@ impl Counters {
                 found == 0 && !event.is_null(),
                 "PMU event {name} is not in this CPU's kpep database (code {found})"
             );
-            // SAFETY: valid configuration and event; flags 0, no error output.
+            // SAFETY: valid configuration and event; no error bitmap output.
             check(
-                unsafe { config_add_event(config, &mut event, 0, ptr::null_mut()) },
+                unsafe { config_add_event(config, &mut event, USER_SPACE_ONLY, ptr::null_mut()) },
                 "kpep_config_add_event",
             )?;
         }

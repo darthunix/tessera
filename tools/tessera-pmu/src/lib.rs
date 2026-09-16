@@ -7,8 +7,9 @@
 //! frequency scaling; branch misses explain most cycle-only effects. Counting
 //! is per thread and survives migration between cores.
 //!
-//! Only macOS through the private kperf frameworks is implemented, and it
-//! needs root: run `sudo -v`, then start the measuring process with `sudo -n`.
+//! Only macOS through the private kperf frameworks is implemented, counting
+//! user space only, and it needs root: run `sudo -v`, then start the
+//! measuring process with `sudo -n`.
 //! [`Counters::open`] reports why counters are unavailable. There is no
 //! fallback to timing.
 //!

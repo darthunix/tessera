@@ -32,8 +32,12 @@ counters is an error, not a degraded result.
 
 The frameworks are private API. They can change between macOS versions, and
 Instruments takes the counters away while it records. Event names come from
-the `kpep` database of the running CPU (`/usr/share/kpep`); the four used
-here exist on every Apple Silicon generation so far.
+the `kpep` database of the running CPU (`/usr/share/kpep`): `INST_ALL`,
+`CORE_ACTIVE_CYCLE`, `BRANCH_MISPRED_NONSPEC` and `INST_BRANCH`, all
+configured to count user space only. The fixed instruction and cycle
+counters are not used because they cannot exclude the kernel: interrupts
+and context switches would otherwise leak a few thousand instructions into
+some blocks.
 
 This crate is tooling and is never linked into the library. It is the one
 place outside `tessera-capi` that uses `unsafe`; every block states its
