@@ -3,9 +3,6 @@
 mod filtering;
 mod support;
 
-criterion::criterion_group! {
-    name = benches;
-    config = support::criterion();
-    targets = filtering::bench
+fn main() -> anyhow::Result<()> {
+    support::runner::main(filtering::bench)
 }
-criterion::criterion_main!(benches);

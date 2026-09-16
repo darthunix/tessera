@@ -1,7 +1,7 @@
 //! Deterministic tests of the benchmark machinery, not performance measurements.
 //!
 //! Check the unchanged input matrices, scalar models and bounded mask preparation.
-//! Criterion's statistics are not reimplemented or tested here.
+//! Counter readings are not needed: block bookkeeping is checked with a fake reader.
 
 #[path = "../benches/support/filtering.rs"]
 #[allow(dead_code)]
@@ -13,7 +13,7 @@ mod reading;
 mod support;
 
 use anyhow::Result;
-use filtering::timing as filter_timing;
+use filtering::blocks as filter_blocks;
 use support::{fixture, reference};
 use tessera_core::ColumnReader;
 
@@ -240,15 +240,15 @@ fn filter_references_match_word_local_readiness_errors() {
 }
 
 #[test]
-fn timed_mask_blocks_restore_every_invocation_and_handle_empty_rows() {
+fn mask_blocks_restore_every_invocation_and_handle_empty_rows() {
     use tessera_core::RowMask;
     use tessera_kernels::int32::CompareOp;
     for nrows in [0, 1, 63, 64, 65, 1024] {
         let case = fixture::Fixture::from_values(vec![42; nrows], "all", "none", None, false);
         let column = tessera_core::ColumnView::try_new(&case.values, None).unwrap();
         let input = filtering::Input::new(&column, &case, CompareOp::Eq, 0);
-        let mut blocks = filter_timing::Masks::new(nrows, case.selected.words()).unwrap();
-        for count in [filter_timing::BLOCK_SIZE, 3, filter_timing::BLOCK_SIZE, 0] {
+        let mut blocks = filter_blocks::Masks::new(nrows, case.selected.words()).unwrap();
+        for count in [filter_blocks::BLOCK_SIZE, 3, filter_blocks::BLOCK_SIZE, 0] {
             let mut visited = 0;
             for words in blocks.reset(count) {
                 assert_eq!(words, case.selected.words());
@@ -259,27 +259,39 @@ fn timed_mask_blocks_restore_every_invocation_and_handle_empty_rows() {
             assert_eq!(visited, count);
         }
     }
-    assert!(filter_timing::Masks::new(65, &[u64::MAX]).is_err());
-    assert!(filter_timing::Masks::new(1, &[2]).is_err());
+    assert!(filter_blocks::Masks::new(65, &[u64::MAX]).is_err());
+    assert!(filter_blocks::Masks::new(1, &[2]).is_err());
 }
 
 #[test]
-fn timed_blocks_count_calls_and_restore_inputs_across_block_boundaries() {
+fn counted_blocks_count_calls_and_restore_inputs_across_block_boundaries() {
     use std::cell::Cell;
     use tessera_kernels::int32::CompareOp;
+    use tessera_pmu::Reading;
     for nrows in [0, 65] {
         let case = fixture::Fixture::from_values(vec![42; nrows], "all", "none", None, false);
         let column = case.dense_column().unwrap();
         let input = filtering::Input::new(&column, &case, CompareOp::Eq, 0);
-        let mut masks = filter_timing::Masks::new(nrows, case.selected.words()).unwrap();
+        let mut masks = filter_blocks::Masks::new(nrows, case.selected.words()).unwrap();
         for count in [
             0,
             1,
-            filter_timing::BLOCK_SIZE as u64,
-            filter_timing::BLOCK_SIZE as u64 + 3,
+            filter_blocks::BLOCK_SIZE as u64,
+            filter_blocks::BLOCK_SIZE as u64 + 3,
         ] {
+            // A fake reader advances by one instruction per read: each block
+            // contributes exactly one counted "instruction".
+            let mut reads = 0;
+            let mut read = || {
+                reads += 1;
+                Reading {
+                    instructions: reads,
+                    ..Reading::default()
+                }
+            };
             let calls = Cell::new(0);
-            masks.time_reference(
+            let reading = masks.run_reference(
+                &mut read,
                 &input,
                 |_, words| {
                     assert_eq!(words, case.selected.words());
@@ -290,7 +302,11 @@ fn timed_blocks_count_calls_and_restore_inputs_across_block_boundaries() {
                 count,
             );
             assert_eq!(calls.get(), count);
-            masks.time_scalar(&input, count);
+            assert_eq!(
+                reading.instructions,
+                count.div_ceil(filter_blocks::BLOCK_SIZE as u64)
+            );
+            masks.run_scalar(&mut read, &input, count);
         }
     }
 }

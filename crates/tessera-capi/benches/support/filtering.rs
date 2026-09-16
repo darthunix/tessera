@@ -1,8 +1,8 @@
-//! Filter fixtures, timed entry points and an independent scalar reference.
+//! Filter fixtures, measured entry points and an independent scalar reference.
 //!
-//! All timed paths borrow the same value/flag buffers. NULL checks in the
+//! All measured paths borrow the same value/flag buffers. NULL checks in the
 //! reference read individual bits, not Tessera's word decoder. Constructors,
-//! mask restoration and model checking belong outside the timed regions.
+//! mask restoration and model checking belong outside the counted regions.
 
 use std::mem::MaybeUninit;
 
@@ -13,10 +13,11 @@ use tessera_kernels::int32::{CompareOp, filter};
 use crate::support::{
     fixture::{Fixture, as_uninit},
     reference::Mask,
+    runner::Runner,
 };
 
-#[path = "filter_timing.rs"]
-pub mod timing;
+#[path = "filter_blocks.rs"]
+pub mod blocks;
 
 fn case(nrows: usize, pattern: &str, nulls: &str, offset: Option<usize>, partial: bool) -> Fixture {
     let values = (0..nrows)
@@ -194,29 +195,28 @@ pub fn expected(fixture: &Fixture, selected: &[u64], op: CompareOp, scalar: i32)
     words
 }
 
-pub fn bench(criterion: &mut criterion::Criterion) {
+pub fn bench(runner: &mut Runner) -> Result<()> {
     for case in cases() {
         measure_column(
-            criterion,
+            runner,
             "dense",
-            &case.dense_column().unwrap(),
+            &case.dense_column()?,
             dense_reference,
             &case,
-        )
-        .unwrap();
+        )?;
         measure_column(
-            criterion,
+            runner,
             "datum",
-            &case.datum_column().unwrap(),
+            &case.datum_column()?,
             datum_reference,
             &case,
-        )
-        .unwrap();
+        )?;
     }
+    Ok(())
 }
 
 fn measure_column<C: ColumnReader<Value = i32>>(
-    criterion: &mut criterion::Criterion,
+    runner: &mut Runner,
     format: &str,
     column: &C,
     direct: impl Fn(&Input<'_, C>, &mut [u64]) -> Result<()> + Copy,
@@ -234,14 +234,13 @@ fn measure_column<C: ColumnReader<Value = i32>>(
         &mut RowMask::try_new(case.values.len(), &mut actual)?,
     )?;
     ensure!(actual == expected, "filter differs from scalar model");
-    let mut masks = timing::Masks::new(case.values.len(), original)?;
-    let mut group = criterion.benchmark_group(format!("filter_int32/{format}/{}", case.name));
-    group.bench_function("scalar", |b| {
-        b.iter_custom(|iterations| masks.time_scalar(&input, iterations))
-    });
-    group.bench_function("reference", |b| {
-        b.iter_custom(|iterations| masks.time_reference(&input, direct, iterations))
-    });
-    group.finish();
+    let mut masks = blocks::Masks::new(case.values.len(), original)?;
+    let mut group = runner.group(format!("filter_int32/{format}/{}", case.name));
+    group.op_blocks("scalar", |counters, iterations| {
+        masks.run_scalar(&mut || counters.read(), &input, iterations)
+    })?;
+    group.op_blocks("reference", |counters, iterations| {
+        masks.run_reference(&mut || counters.read(), &input, direct, iterations)
+    })?;
     Ok(())
 }

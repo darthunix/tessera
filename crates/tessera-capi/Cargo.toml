@@ -14,8 +14,10 @@ anyhow.workspace = true
 tessera-core.workspace = true
 
 [dev-dependencies]
-criterion.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 tessera-kernels.workspace = true
+tessera-pmu.workspace = true
 
 [lints]
 workspace = true

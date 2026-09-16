@@ -1,11 +1,8 @@
-//! Selected-column reading: three library paths and an independent scalar sum.
+//! Selected-column reading: two library paths and an independent scalar sum.
 #[path = "support/reading.rs"]
 mod reading;
 mod support;
 
-criterion::criterion_group! {
-    name = benches;
-    config = support::criterion();
-    targets = reading::bench
+fn main() -> anyhow::Result<()> {
+    support::runner::main(reading::bench)
 }
-criterion::criterion_main!(benches);

@@ -1,9 +1,9 @@
-//! Timed summation kernels using each public column-reading path.
+//! Measured summation kernels using each public column-reading path.
 //!
 //! Exercise the early-exit fold and copied-word iteration separately: their
-//! implementations and generated loops differ. The reference
-//! wrappers receive the same prebuilt input and use the same summation rule;
-//! allocation and construction stay outside the common timing loop.
+//! implementations and generated loops differ. The reference wrappers receive
+//! the same prebuilt input and use the same summation rule; allocation and
+//! construction stay outside the counted loop.
 
 use anyhow::{Result, ensure};
 use tessera_core::{ColumnReader, RowMaskView};
@@ -11,10 +11,11 @@ use tessera_core::{ColumnReader, RowMaskView};
 use crate::support::{
     fixture::Fixture,
     reference::{self, Mask},
+    runner::Runner,
 };
 
-// Every timed entry point takes the same borrowed input. It is built before
-// timing and black-boxed once per invocation by the common timing loop.
+// Every measured entry point takes the same borrowed input. It is built before
+// counting and black-boxed once per invocation inside the counted loop.
 pub struct Input<'a, C> {
     column: &'a C,
     rows: RowMaskView<'a>,
@@ -121,29 +122,28 @@ pub fn cases() -> Vec<Fixture> {
     cases
 }
 
-pub fn bench(criterion: &mut criterion::Criterion) {
+pub fn bench(runner: &mut Runner) -> Result<()> {
     for case in cases() {
         measure_column(
-            criterion,
+            runner,
             "dense",
-            &case.dense_column().unwrap(),
+            &case.dense_column()?,
             dense_reference,
             &case,
-        )
-        .unwrap();
+        )?;
         measure_column(
-            criterion,
+            runner,
             "datum",
-            &case.datum_column().unwrap(),
+            &case.datum_column()?,
             datum_reference,
             &case,
-        )
-        .unwrap();
+        )?;
     }
+    Ok(())
 }
 
 fn measure_column<C: ColumnReader<Value = i32>>(
-    criterion: &mut criterion::Criterion,
+    runner: &mut Runner,
     format: &str,
     column: &C,
     direct: impl Fn(&Input<'_, C>) -> Result<i64>,
@@ -163,17 +163,10 @@ fn measure_column<C: ColumnReader<Value = i32>>(
         word_sum(&input)? == case.expected,
         "word reader result differs"
     );
-    let mut group = criterion.benchmark_group(format!("column_reader/{format}/{}", case.name));
+    let mut group = runner.group(format!("column_reader/{format}/{}", case.name));
     // Separate closures preserve static dispatch inside every measured loop.
-    group.bench_function("fold", |b| {
-        b.iter(|| black_box(fold_sum(black_box(&input)).unwrap()))
-    });
-    group.bench_function("words", |b| {
-        b.iter(|| black_box(word_sum(black_box(&input)).unwrap()))
-    });
-    group.bench_function("reference", |b| {
-        b.iter(|| black_box(direct(black_box(&input)).unwrap()))
-    });
-    group.finish();
+    group.op("fold", || fold_sum(black_box(&input)).unwrap())?;
+    group.op("words", || word_sum(black_box(&input)).unwrap())?;
+    group.op("reference", || direct(black_box(&input)).unwrap())?;
     Ok(())
 }

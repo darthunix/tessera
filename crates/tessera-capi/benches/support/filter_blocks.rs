@@ -1,16 +1,15 @@
-//! Bounded storage and timed blocks for a mutating filter.
+//! Bounded storage and counted blocks for a mutating filter.
 //!
 //! Each invocation gets an independent copy of the original selection. At most
-//! 4096 masks are live, regardless of calibration. Reset, view construction and
-//! validation occur before the clock starts; no masks are restored while timed.
+//! 4096 masks are live, regardless of the call count. Reset, view construction
+//! and validation occur before the counters are read; no masks are restored
+//! while counting.
 
 use super::{self as filtering, Input};
 use anyhow::Result;
-use std::{
-    hint::black_box,
-    time::{Duration, Instant},
-};
+use std::hint::black_box;
 use tessera_core::{ColumnReader, RowMask};
+use tessera_pmu::Reading;
 
 pub const BLOCK_SIZE: usize = 4096;
 
@@ -43,54 +42,59 @@ impl Masks {
             .map(move |chunk| &mut chunk[..words])
     }
 
-    pub fn time_scalar<C: ColumnReader<Value = i32>>(
+    /// Counters accumulated by `iterations` library filter calls on fresh masks.
+    pub fn run_scalar<C: ColumnReader<Value = i32>>(
         &mut self,
+        read: &mut dyn FnMut() -> Reading,
         input: &Input<'_, C>,
         iterations: u64,
-    ) -> Duration {
-        self.time(iterations, |this, count| {
+    ) -> Reading {
+        self.run(read, iterations, |this, read, count| {
             let nrows = this.nrows;
             let mut views: Vec<_> = this
                 .reset(count)
                 .map(|words| RowMask::try_new(nrows, words).unwrap())
                 .collect();
-            let start = Instant::now();
+            let start = read();
             for rows in &mut views {
                 black_box(filtering::scalar(black_box(input), black_box(rows))).unwrap();
             }
-            start.elapsed()
+            read().since(start)
         })
     }
 
-    pub fn time_reference<C>(
+    /// Counters accumulated by `iterations` reference filter calls on fresh masks.
+    pub fn run_reference<C>(
         &mut self,
+        read: &mut dyn FnMut() -> Reading,
         input: &Input<'_, C>,
         run: impl Fn(&Input<'_, C>, &mut [u64]) -> Result<()>,
         iterations: u64,
-    ) -> Duration {
-        self.time(iterations, |this, count| {
+    ) -> Reading {
+        self.run(read, iterations, |this, read, count| {
             let mut views: Vec<_> = this.reset(count).collect();
-            let start = Instant::now();
+            let start = read();
             for rows in &mut views {
                 black_box(run(black_box(input), black_box(rows))).unwrap();
             }
-            start.elapsed()
+            read().since(start)
         })
     }
 
-    fn time(
+    fn run(
         &mut self,
+        read: &mut dyn FnMut() -> Reading,
         iterations: u64,
-        mut run: impl FnMut(&mut Self, usize) -> Duration,
-    ) -> Duration {
-        let mut elapsed = Duration::ZERO;
+        mut run: impl FnMut(&mut Self, &mut dyn FnMut() -> Reading, usize) -> Reading,
+    ) -> Reading {
+        let mut total = Reading::default();
         let mut remaining = iterations;
         while remaining != 0 {
             let count = remaining.min(BLOCK_SIZE as u64) as usize;
-            elapsed += run(self, count);
+            total += run(self, read, count);
             black_box(&self.storage);
             remaining -= count as u64;
         }
-        elapsed
+        total
     }
 }

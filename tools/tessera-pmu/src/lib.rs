@@ -35,6 +35,25 @@ pub struct Reading {
     pub branches: u64,
 }
 
+impl std::ops::Add for Reading {
+    type Output = Reading;
+
+    fn add(self, other: Reading) -> Reading {
+        Reading {
+            instructions: self.instructions + other.instructions,
+            cycles: self.cycles + other.cycles,
+            branch_misses: self.branch_misses + other.branch_misses,
+            branches: self.branches + other.branches,
+        }
+    }
+}
+
+impl std::ops::AddAssign for Reading {
+    fn add_assign(&mut self, other: Reading) {
+        *self = *self + other;
+    }
+}
+
 impl Reading {
     /// Counts accumulated since `earlier`, saturating at zero per field.
     pub fn since(self, earlier: Reading) -> Reading {
@@ -135,5 +154,16 @@ mod tests {
             }
         );
         assert_eq!(earlier.since(earlier), Reading::default());
+        let mut total = earlier;
+        total += later;
+        assert_eq!(
+            total,
+            Reading {
+                instructions: 25,
+                cycles: 45,
+                branch_misses: 5,
+                branches: 13,
+            }
+        );
     }
 }
