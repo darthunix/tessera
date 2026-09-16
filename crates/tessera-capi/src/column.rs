@@ -35,6 +35,32 @@ fn mask_word(mask: Option<RowMaskView<'_>>, word_index: usize) -> u64 {
 // NULL mode once and passes a matching read closure; the loop validates each
 // nonempty word before reading it and stops at the first reader or consumer
 // error without rolling back rows already folded.
+//
+// A full word walks its 64 rows with a counted loop: one loop exit per word
+// instead of one taken branch per row, and no bit scan per row, which also
+// lets the compiler vectorize the reads. Measured on Apple M5 Pro, the cost
+// of the bit-scan loop depended on where it landed in the fetch blocks
+// (20-30% of cycles, sometimes a branch miss per word); fewer taken branches
+// per row make that layout lottery cheaper to lose.
+// Full words live in a function of their own: the vector constants the
+// compiler materializes for the counted loop are then paid per full word,
+// not at the entry of every call, where empty, sparse and partial selections
+// would carry them for nothing.
+#[inline(never)]
+fn try_fold_full_word<B, V>(
+    base: usize,
+    bits: u64,
+    read: &mut impl FnMut(usize, u64) -> Option<V>,
+    mut acc: B,
+    fold: &mut impl FnMut(B, usize, Option<V>) -> Result<B>,
+) -> Result<B> {
+    for bit in 0..64 {
+        let row = base + bit;
+        acc = fold(acc, row, read(row, bits))?;
+    }
+    Ok(acc)
+}
+
 #[inline(always)]
 fn try_fold_words<B, V>(
     nrows: usize,
@@ -60,10 +86,14 @@ fn try_fold_words<B, V>(
         );
         let bits = mask_word(non_nulls, index);
         let base = index * 64;
-        while remaining != 0 {
-            let row = base + remaining.trailing_zeros() as usize;
-            remaining &= remaining - 1;
-            acc = fold(acc, row, read(row, bits))?;
+        if remaining == u64::MAX {
+            acc = try_fold_full_word(base, bits, &mut read, acc, &mut fold)?;
+        } else {
+            while remaining != 0 {
+                let row = base + remaining.trailing_zeros() as usize;
+                remaining &= remaining - 1;
+                acc = fold(acc, row, read(row, bits))?;
+            }
         }
     }
     Ok(acc)

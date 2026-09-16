@@ -234,6 +234,39 @@ fn word_validation_checks_every_tail_bit() {
 }
 
 #[test]
+fn word_fold_matches_next_for_full_and_partial_words() {
+    for selected in [
+        u64::MAX,
+        u64::MAX >> 1,
+        0xaaaa_aaaa_aaaa_aaaa,
+        1 << 63,
+        1,
+        0,
+    ] {
+        let by_next: Vec<_> = WordValues::try_new(128, 1, selected, u64::MAX, Some)
+            .unwrap()
+            .collect();
+        let by_fold = WordValues::try_new(128, 1, selected, u64::MAX, Some)
+            .unwrap()
+            .fold(Vec::new(), |mut rows, item| {
+                rows.push(item);
+                rows
+            });
+        assert_eq!(by_fold, by_next, "selected {selected:#x}");
+        assert_eq!(by_next.len(), selected.count_ones() as usize);
+        assert!(by_next.iter().all(|(row, value)| *value == Some(*row)));
+        assert!(by_next.windows(2).all(|pair| pair[0].0 < pair[1].0));
+        let mut partial = WordValues::try_new(128, 1, selected, u64::MAX, Some).unwrap();
+        let taken: Vec<_> = partial.by_ref().take(3).collect();
+        let rest = partial.fold(Vec::new(), |mut rows, item| {
+            rows.push(item);
+            rows
+        });
+        assert_eq!([taken, rest].concat(), by_next, "selected {selected:#x}");
+    }
+}
+
+#[test]
 fn copied_word_allows_mutating_active_mask_during_iteration() {
     let values = [10, 20, 30];
     let column = ColumnView::try_new(&values, None).unwrap();

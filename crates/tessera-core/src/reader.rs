@@ -136,6 +136,46 @@ where
         self.remaining &= self.remaining - 1;
         Some((row, (self.read)(row)))
     }
+
+    /// The bulk path: a full word walks its rows with a counted loop, one
+    /// loop exit per word instead of a taken branch and a bit scan per row.
+    /// Rows already taken with `next` are not revisited.
+    #[inline]
+    fn fold<B, G>(self, mut acc: B, mut fold: G) -> B
+    where
+        G: FnMut(B, Self::Item) -> B,
+    {
+        let Self {
+            base,
+            mut remaining,
+            mut read,
+        } = self;
+        if remaining == u64::MAX {
+            acc = fold_full_word(base, &mut read, acc, &mut fold);
+        } else {
+            while remaining != 0 {
+                let row = base + remaining.trailing_zeros() as usize;
+                remaining &= remaining - 1;
+                acc = fold(acc, (row, read(row)));
+            }
+        }
+        acc
+    }
 }
 
 impl<F, V> FusedIterator for WordValues<F> where F: FnMut(usize) -> Option<V> {}
+
+// Kept out of line so that the vector setup the compiler generates for the
+// counted loop is paid per full word rather than at the entry of every caller.
+#[inline(never)]
+fn fold_full_word<B, V, F, G>(base: usize, read: &mut F, mut acc: B, fold: &mut G) -> B
+where
+    F: FnMut(usize) -> Option<V>,
+    G: FnMut(B, (usize, Option<V>)) -> B,
+{
+    for bit in 0..64 {
+        let row = base + bit;
+        acc = fold(acc, (row, read(row)));
+    }
+    acc
+}

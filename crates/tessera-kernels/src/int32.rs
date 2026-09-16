@@ -91,11 +91,15 @@ fn filter_with<C: ColumnReader<Value = i32>>(
                 passing = selected;
             }
         } else {
-            for (row, value) in column.word_values(index, selected)? {
-                if value.is_some_and(|value| compare(value, scalar)) {
-                    passing |= 1_u64 << (row % 64);
-                }
-            }
+            // fold is the word iterator's bulk path; the predicate becomes a
+            // bit so that the loop has no data-dependent branch.
+            passing =
+                column
+                    .word_values(index, selected)?
+                    .fold(passing, |passing, (row, value)| {
+                        let passes = value.is_some_and(|value| compare(value, scalar));
+                        passing | (u64::from(passes) << (row % 64))
+                    });
         }
         rows.intersect_word(index, passing)?;
     }
