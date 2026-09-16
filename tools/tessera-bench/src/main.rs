@@ -24,7 +24,7 @@ use std::{
 #[derive(Parser, Debug)]
 #[command(
     about = "Compare compatible Rust revisions by PMU counters (before/after per case, repeated).",
-    after_help = "REF is a Git revision or WORKTREE. Defaults to both full benchmarks.\nFilters are substrings of operation ids; any match keeps an operation, and every\nselected case must keep its reference and a library path.\nEach case runs before/after --repeats times, interleaved; instructions come from any\nprocess, cycles from the minimum over all of them.\nBenchmark processes run through `sudo -n`: run `sudo -v` first.\nExit: 0 PASS, 1 regression (instructions, or cycles on long single-mode operations),\n2 UNSTABLE or invalid/incomplete run."
+    after_help = "REF is a Git revision or WORKTREE. Defaults to both full benchmarks.\nFilters are substrings of operation ids; any match keeps an operation, and every\nselected case must keep its reference and a library path.\nEach case runs before/after --repeats times, interleaved; instructions come from any\nprocess, cycles from the minimum over all of them.\nBenchmark processes run through `sudo -n`: run `sudo -v` first, or allow the\nbenchmark executables without a password in sudoers (see benches/README.md).\nExit: 0 PASS, 1 regression (instructions, or cycles on long single-mode operations),\n2 UNSTABLE or invalid/incomplete run."
 )]
 struct Options {
     #[arg(long, value_name = "REF")]
@@ -131,10 +131,13 @@ fn save(path: &Path, value: &impl Serialize) -> Result<()> {
     Ok(())
 }
 
-/// Counters need root; the credentials must already be cached by `sudo -v`.
+/// Counters need root. `sudo -l` succeeds without a prompt when `sudo -v`
+/// has cached the credentials or sudoers grants the user any command without
+/// a password; the exact benchmark commands are checked again after the
+/// build, before any measurement.
 fn check_privileges() -> Result<()> {
     let status = Command::new("sudo")
-        .args(["-n", "true"])
+        .args(["-n", "-l"])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -145,6 +148,19 @@ fn check_privileges() -> Result<()> {
         "PMU counters need root: run `sudo -v` first, then retry"
     );
     Ok(())
+}
+
+/// The benchmark executable, through `sudo -n` when `privileged`.
+fn launch(executable: &Path, privileged: bool) -> Command {
+    let mut cmd = if privileged {
+        let mut sudo = Command::new("sudo");
+        sudo.arg("-n").arg("--").arg(executable);
+        sudo
+    } else {
+        Command::new(executable)
+    };
+    cmd.stdin(Stdio::null());
+    cmd
 }
 
 fn build(source: &Snapshot, bench: &str, artifacts: &Path, side: &str) -> Result<PathBuf> {
@@ -188,31 +204,25 @@ fn build(source: &Snapshot, bench: &str, artifacts: &Path, side: &str) -> Result
     executable.context("Cargo did not produce a benchmark executable")
 }
 
-/// A measuring command: the benchmark under `sudo -n`, writing `output`
-/// and measuring only `ids`.
+/// A measuring command writing `output` and measuring only `ids`.
 fn benchmark(
     executable: &Path,
     output: &Path,
     ids: &BTreeSet<String>,
     privileged: bool,
 ) -> Command {
-    let mut cmd = if privileged {
-        let mut sudo = Command::new("sudo");
-        sudo.arg("-n").arg("--").arg(executable);
-        sudo
-    } else {
-        Command::new(executable)
-    };
+    let mut cmd = launch(executable, privileged);
     cmd.arg("--output").arg(output);
     for id in ids {
         cmd.arg("--only").arg(id);
     }
-    cmd.stdin(Stdio::null());
     cmd
 }
 
-fn listing(executable: &Path) -> Result<BTreeSet<String>> {
-    report::listed(&text(Command::new(executable).arg("--list"))?)
+/// Operation ids; taken the way the measurements run, so that a missing
+/// privilege fails here rather than in the first measurement.
+fn listing(executable: &Path, privileged: bool) -> Result<BTreeSet<String>> {
+    report::listed(&text(launch(executable, privileged).arg("--list"))?)
 }
 
 fn collect(
@@ -220,10 +230,11 @@ fn collect(
     directory: &Path,
     name: &str,
     expected: &BTreeSet<String>,
+    privileged: bool,
 ) -> Result<report::Run> {
     let output = directory.join(format!("{name}.jsonl"));
     let log = create(&directory.join(format!("{name}.log")))?;
-    let status = benchmark(executable, &output, expected, true)
+    let status = benchmark(executable, &output, expected, privileged)
         .stdout(Stdio::from(log.try_clone()?))
         .stderr(Stdio::from(log))
         .status()?;
@@ -233,6 +244,69 @@ fn collect(
         directory.join(format!("{name}.log")).display()
     );
     report::load(&output, expected).with_context(|| format!("invalid measurement: {name}"))
+}
+
+/// Per benchmark program, the before and after executables.
+type Binaries = BTreeMap<String, [PathBuf; 2]>;
+/// Per benchmark program, the runs of each side: process k of every case
+/// forms run k of its side.
+type Measured = BTreeMap<String, [Vec<report::Run>; 2]>;
+
+/// Measure every case in its own directory under `root`: `repeats` pairs of
+/// processes, interleaved before/after so that drift in core state is shared
+/// by both sides.
+fn measure(
+    cases: &[cases::Case],
+    binaries: &Binaries,
+    root: &Path,
+    repeats: usize,
+    privileged: bool,
+) -> Result<Measured> {
+    let mut measured = Measured::new();
+    for case in cases {
+        let directory = root.join(&case.directory);
+        fs::create_dir(&directory)?;
+        let runs = measured
+            .entry(case.bench.clone())
+            .or_insert_with(|| std::array::from_fn(|_| vec![report::Run::new(); repeats]));
+        let executables = binaries
+            .get(&case.bench)
+            .with_context(|| format!("no executables for {}", case.bench))?;
+        for repeat in 0..repeats {
+            for (name, side) in cases::ORDER {
+                let label = format!("{name}{}", repeat + 1);
+                println!("Case {}/{label}: {}", case.directory, case.name);
+                let collected = collect(
+                    &executables[side],
+                    &directory,
+                    &label,
+                    &case.paths,
+                    privileged,
+                )
+                .with_context(|| format!("{}: {label}", case.name))?;
+                let run = runs[side].get_mut(repeat).context("missing repeat")?;
+                for (id, entry) in collected {
+                    ensure!(
+                        run.insert(id.clone(), entry).is_none(),
+                        "duplicate benchmark result: {id}"
+                    );
+                }
+            }
+        }
+    }
+    Ok(measured)
+}
+
+/// The report of every benchmark program and the combined status.
+fn summarize(measured: &Measured) -> Result<(report::Status, String)> {
+    let mut outcome = report::Status::Pass;
+    let mut text = Vec::new();
+    for (bench, runs) in measured {
+        writeln!(text, "\n{bench}")?;
+        let sides = [report::aggregate(&runs[0])?, report::aggregate(&runs[1])?];
+        outcome = outcome.combine(report::print(&mut text, &sides)?);
+    }
+    Ok((outcome, String::from_utf8(text)?))
 }
 
 fn compare(repo: &Path, root: &Path, options: &Options, timing: &mut Timing) -> Result<u8> {
@@ -272,14 +346,14 @@ fn compare(repo: &Path, root: &Path, options: &Options, timing: &mut Timing) -> 
         |bench| vec![bench],
     );
     // Finish every build and listing before starting any measuring process.
-    let mut binaries = BTreeMap::new();
+    let mut binaries = Binaries::new();
     let mut cases = Vec::new();
     let mut identities = BTreeMap::new();
     for bench in benches {
         let a = build(&before, bench, root, "before")?;
         let b = build(&after, bench, root, "after")?;
-        let listed = listing(&a)?;
-        ensure!(listed == listing(&b)?, "benchmark case sets differ");
+        let listed = listing(&a, true)?;
+        ensure!(listed == listing(&b, true)?, "benchmark case sets differ");
         let expected = report::listed(
             &cases::select(listed, &options.filter)
                 .into_iter()
@@ -294,9 +368,6 @@ fn compare(repo: &Path, root: &Path, options: &Options, timing: &mut Timing) -> 
         }
         let selected = cases::group(bench, expected)?;
         save(&root.join(format!("{bench}-cases.json")), &selected)?;
-        for case in &selected {
-            fs::create_dir(root.join(&case.directory))?;
-        }
         cases.extend(selected);
         binaries.insert(bench.to_owned(), [a, b]);
     }
@@ -315,46 +386,11 @@ fn compare(repo: &Path, root: &Path, options: &Options, timing: &mut Timing) -> 
     )?;
     let measurement_started = Instant::now();
     timing.measurement_started = Some(measurement_started);
-    // Repeats interleave before/after per case so that drift in core state is
-    // shared by both sides; process k of every case forms one run per side.
-    let repeats = options.repeats.get();
-    let mut measured: BTreeMap<String, [Vec<report::Run>; 2]> = BTreeMap::new();
-    for case in &cases {
-        let runs = measured
-            .entry(case.bench.clone())
-            .or_insert_with(|| std::array::from_fn(|_| vec![report::Run::new(); repeats]));
-        for repeat in 0..repeats {
-            for (name, side) in cases::ORDER {
-                let label = format!("{name}{}", repeat + 1);
-                println!("Case {}/{label}: {}", case.directory, case.name);
-                let collected = collect(
-                    &binaries[&case.bench][side],
-                    &root.join(&case.directory),
-                    &label,
-                    &case.paths,
-                )
-                .with_context(|| format!("{}: {label}", case.name))?;
-                let run = runs[side].get_mut(repeat).context("missing repeat")?;
-                for (id, entry) in collected {
-                    ensure!(
-                        run.insert(id.clone(), entry).is_none(),
-                        "duplicate benchmark result: {id}"
-                    );
-                }
-            }
-        }
-    }
+    let measured = measure(&cases, &binaries, root, options.repeats.get(), true)?;
     timing.measurement_seconds = measurement_started.elapsed().as_secs_f64();
-    let mut outcome = report::Status::Pass;
-    for (bench, runs) in &measured {
-        let mut section = Vec::new();
-        writeln!(section, "\n{bench}")?;
-        let sides = [report::aggregate(&runs[0])?, report::aggregate(&runs[1])?];
-        let status = report::print(&mut section, &sides)?;
-        report.write_all(&section)?;
-        print!("{}", String::from_utf8(section)?);
-        outcome = outcome.combine(status);
-    }
+    let (outcome, summary) = summarize(&measured)?;
+    report.write_all(summary.as_bytes())?;
+    print!("{summary}");
     ensure!(
         env == environment(&before.directory)?,
         "environment changed during measurement"
@@ -487,6 +523,184 @@ mod tests {
             cmd.get_args().take(3).collect::<Vec<_>>(),
             ["-n", "--", "bench"]
         );
+    }
+
+    #[test]
+    fn listings_run_like_measurements() {
+        let cmd = launch(Path::new("bench"), true);
+        assert_eq!(cmd.get_program(), "sudo");
+        assert_eq!(launch(Path::new("bench"), false).get_program(), "bench");
+    }
+
+    /// A benchmark stand-in: answers `--list` with `ids`, writes one record
+    /// per `--only` id from `records` (instructions and cycles per block, 10
+    /// calls per block), and appends every invocation to `calls.log` next to
+    /// itself. Exits with `failure` instead when it is nonzero.
+    fn fake_benchmark(
+        dir: &Path,
+        name: &str,
+        records: &[(&str, u64, [u64; report::BLOCKS])],
+        failure: i32,
+    ) -> Result<PathBuf> {
+        use std::os::unix::fs::PermissionsExt;
+        let ids: Vec<_> = records.iter().map(|(id, _, _)| *id).collect();
+        let mut script = format!(
+            "#!/bin/sh\nset -e\nprintf '%s %s\\n' \"$(basename \"$0\")\" \"$*\" >> \"$(dirname \"$0\")/calls.log\"\n[ {failure} -eq 0 ] || exit {failure}\nif [ \"$1\" = --list ]; then printf '%s\\n' {}; exit 0; fi\n[ \"$1\" = --output ] || exit 3\nout=$2\nshift 2\nwhile [ $# -gt 0 ]; do\n  case \"$2\" in\n",
+            ids.join(" ")
+        );
+        for (id, instructions, cycles) in records {
+            let record = json!({
+                "id": id, "iters": 10, "instructions": vec![*instructions; report::BLOCKS],
+                "cycles": cycles, "branch_misses": vec![0; report::BLOCKS],
+                "branches": vec![0; report::BLOCKS], "cpus": vec![[0, 0]; report::BLOCKS],
+                "retries": 0,
+            });
+            script.push_str(&format!("    {id}) echo '{record}' >> \"$out\" ;;\n"));
+        }
+        script.push_str("    *) exit 4 ;;\n  esac\n  shift 2\ndone\n");
+        let path = dir.join(name);
+        fs::write(&path, script)?;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755))?;
+        Ok(path)
+    }
+
+    fn setup(
+        dir: &Path,
+        before: &[(&str, u64, [u64; report::BLOCKS])],
+        after: &[(&str, u64, [u64; report::BLOCKS])],
+    ) -> Result<(Vec<cases::Case>, Binaries, PathBuf)> {
+        let a = fake_benchmark(dir, "before.sh", before, 0)?;
+        let b = fake_benchmark(dir, "after.sh", after, 0)?;
+        let listed = listing(&a, false)?;
+        assert_eq!(listed, listing(&b, false)?);
+        let cases = cases::group("reader", listed)?;
+        let root = dir.join("run");
+        fs::create_dir(&root)?;
+        Ok((cases, BTreeMap::from([("reader".to_owned(), [a, b])]), root))
+    }
+
+    /// Output files of the fake benchmarks, in invocation order.
+    fn calls(dir: &Path) -> Result<Vec<String>> {
+        Ok(fs::read_to_string(dir.join("calls.log"))?
+            .lines()
+            .filter(|line| !line.contains("--list"))
+            .map(|line| {
+                let output = line.split_whitespace().nth(2).unwrap();
+                Path::new(output)
+                    .strip_prefix(dir.join("run"))
+                    .unwrap()
+                    .with_extension("")
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect())
+    }
+
+    #[test]
+    fn measurements_interleave_sides_per_case_and_instructions_decide() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let steady = [2000; report::BLOCKS];
+        let before = [
+            ("reader/a/fold", 1000, steady),
+            ("reader/a/reference", 500, [1000; report::BLOCKS]),
+            ("reader/b/fold", 1000, steady),
+            ("reader/b/reference", 500, [1000; report::BLOCKS]),
+        ];
+        let mut after = before;
+        after[2].1 = 1020;
+        let (cases, binaries, root) = setup(dir.path(), &before, &after)?;
+        let measured = measure(&cases, &binaries, &root, 2, false)?;
+        assert_eq!(
+            calls(dir.path())?,
+            [
+                "reader-case-0001/before1",
+                "reader-case-0001/after1",
+                "reader-case-0001/before2",
+                "reader-case-0001/after2",
+                "reader-case-0002/before1",
+                "reader-case-0002/after1",
+                "reader-case-0002/before2",
+                "reader-case-0002/after2",
+            ]
+        );
+        assert!(root.join("reader-case-0002/after2.log").exists());
+        let runs = &measured["reader"];
+        assert_eq!(runs[0].len(), 2);
+        assert_eq!(runs[1][1]["reader/b/fold"].process.instructions, 102.);
+        let (status, text) = summarize(&measured)?;
+        assert_eq!(status, report::Status::Fail);
+        assert_eq!(status.exit_code(), 1);
+        assert!(text.starts_with("\nreader\n"));
+        assert!(text.contains("PASS reader/a/fold: instructions before=100.0 after=100.0"));
+        assert!(
+            text.contains(
+                "FAIL reader/b/fold: instructions before=100.0 after=102.0 change=+2.00%"
+            )
+        );
+        assert!(text.ends_with(
+            "FAIL: 1 PASS, 1 FAIL (1 instructions, 0 cycles), 0 UNSTABLE library paths; 0 cycle warnings; 0 bistable\n"
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn cycle_regressions_and_zero_readings_are_reported() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let before = [
+            ("reader/a/fold", 1000, [6000; report::BLOCKS]),
+            ("reader/a/reference", 500, [1000; report::BLOCKS]),
+            ("reader/b/fold", 1000, [2000; report::BLOCKS]),
+            ("reader/b/reference", 500, [1000; report::BLOCKS]),
+        ];
+        let mut after = before;
+        after[0].2 = [6601; report::BLOCKS];
+        after[2].2[4] = 0;
+        let (cases, binaries, root) = setup(dir.path(), &before, &after)?;
+        let (status, text) = summarize(&measure(&cases, &binaries, &root, 1, false)?)?;
+        assert_eq!(status, report::Status::Fail);
+        assert!(text.contains("FAIL reader/a/fold: instructions before=100.0 after=100.0 change=+0.00%; cycles min before=600.0 after=660.1 change=+10.02%"));
+        assert!(text.contains("  FAIL cycles: minimum +10.02% on an operation of 600 cycles"));
+        assert!(text.contains("UNSTABLE reader/b/fold:"));
+        assert!(text.contains("  UNSTABLE after: 1 zero counter readings after 0 repeats"));
+        assert!(text.ends_with(
+            "FAIL: 0 PASS, 1 FAIL (0 instructions, 1 cycles), 1 UNSTABLE library paths; 0 cycle warnings; 0 bistable\n"
+        ));
+        let mut only_zero = before;
+        only_zero[2].2[4] = 0;
+        let second = dir.path().join("second");
+        fs::create_dir(&second)?;
+        let (cases, binaries, root) = setup(&second, &before, &only_zero)?;
+        let (status, _) = summarize(&measure(&cases, &binaries, &root, 1, false)?)?;
+        assert_eq!(status, report::Status::Unstable);
+        assert_eq!(status.exit_code(), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn a_failing_benchmark_process_stops_the_run() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let records = [
+            ("reader/a/fold", 1000, [2000; report::BLOCKS]),
+            ("reader/a/reference", 500, [1000; report::BLOCKS]),
+        ];
+        let a = fake_benchmark(dir.path(), "before.sh", &records, 0)?;
+        let b = fake_benchmark(dir.path(), "after.sh", &records, 5)?;
+        let cases = cases::group("reader", listing(&a, false)?)?;
+        let root = dir.path().join("run");
+        fs::create_dir(&root)?;
+        let binaries = BTreeMap::from([("reader".to_owned(), [a, b])]);
+        let Err(error) = measure(&cases, &binaries, &root, 1, false) else {
+            panic!("a failing process must stop the run")
+        };
+        assert!(
+            format!("{error:#}").contains("benchmark failed: after1"),
+            "{error:#}"
+        );
+        assert_eq!(
+            calls(dir.path())?,
+            ["reader-case-0001/before1", "reader-case-0001/after1"]
+        );
+        Ok(())
     }
 
     #[test]

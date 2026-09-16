@@ -286,12 +286,8 @@ pub fn load(path: &Path, expected: &BTreeSet<String>) -> Result<Run> {
             "unexpected benchmark result: {}",
             record.id
         );
+        // Any operation name is a library path; `reference` is the reference.
         let (group, function) = record.id.rsplit_once('/').context("invalid benchmark id")?;
-        ensure!(
-            matches!(function, "fold" | "words" | "scalar" | "reference"),
-            "unsupported measured path: {}",
-            record.id
-        );
         let entry = Entry {
             group: group.to_owned(),
             path: function.to_owned(),
@@ -384,6 +380,15 @@ fn change(new: f64, old: f64) -> f64 {
     (new / old - 1.) * 100.
 }
 
+/// Rows of the case: its first all-digit path segment, when there is one.
+fn rows(group: &str) -> Option<f64> {
+    group
+        .split('/')
+        .find(|segment| !segment.is_empty() && segment.bytes().all(|b| b.is_ascii_digit()))
+        .and_then(|segment| segment.parse().ok())
+        .filter(|&rows: &f64| rows > 0.)
+}
+
 fn cores(cpus: &BTreeSet<usize>) -> String {
     cpus.iter()
         .map(usize::to_string)
@@ -464,6 +469,26 @@ pub fn print(out: &mut impl Write, sides: &[Aggregate; 2]) -> Result<Status> {
             n.instructions / new_reference.instructions,
             n.cycles_min / new_reference.cycles_min,
         )?;
+        // Rates for judging the code itself: cost per row and instructions
+        // per cycle in the best mode. Informational.
+        match rows(&old.group) {
+            Some(rows) => writeln!(
+                out,
+                "  PER ROW ({rows:.0} rows): instructions before={:.2} after={:.2}; cycles min before={:.2} after={:.2}; IPC before={:.2} after={:.2}",
+                o.instructions / rows,
+                n.instructions / rows,
+                o.cycles_min / rows,
+                n.cycles_min / rows,
+                o.instructions / o.cycles_min,
+                n.instructions / n.cycles_min,
+            )?,
+            None => writeln!(
+                out,
+                "  IPC before={:.2} after={:.2}",
+                o.instructions / o.cycles_min,
+                n.instructions / n.cycles_min,
+            )?,
+        }
         for (label, side) in [("before", o), ("after", n)] {
             if side.zero_blocks > 0 {
                 writeln!(
@@ -499,7 +524,8 @@ pub fn print(out: &mut impl Write, sides: &[Aggregate; 2]) -> Result<Status> {
                 n.branch_misses - o.branch_misses,
             )?;
         }
-        if o.bistable() || n.bistable() {
+        // A zero reading makes the modes ratio infinite; that is UNSTABLE, not modes.
+        if outcome != Verdict::Unstable && (o.bistable() || n.bistable()) {
             bistable += 1;
             writeln!(
                 out,
@@ -611,6 +637,23 @@ mod tests {
     }
 
     #[test]
+    fn rows_come_from_the_first_numeric_segment() {
+        assert_eq!(
+            rows("column_reader/dense/words/1024/all/nulls-mixed/ready"),
+            Some(1024.)
+        );
+        assert_eq!(
+            rows("filter_int32/datum/bytes-7/65/all/nulls-mixed/partial"),
+            Some(65.)
+        );
+        assert_eq!(
+            rows("column_reader/dense/words/0/all/nulls-mixed/ready"),
+            None
+        );
+        assert_eq!(rows("b/x"), None);
+    }
+
+    #[test]
     fn listing_requires_references_and_library_paths() {
         assert!(listed("a/x/fold\na/x/reference\n").is_ok());
         assert!(listed("a/x/fold\n").is_err());
@@ -695,10 +738,63 @@ mod tests {
         let text = String::from_utf8(output)?;
         assert!(text.contains("PASS b/x/fold: instructions before=10.0 after=10.0 change=+0.00%; cycles min before=20.0 after=20.0"));
         assert!(text.contains("library/reference=2.000x"));
+        assert!(text.contains("  IPC before=0.50 after=0.50\n"));
         assert!(text.contains("cores 12"));
         assert!(text.ends_with(
             "PASS: 1 PASS, 0 FAIL (0 instructions, 0 cycles), 0 UNSTABLE library paths; 0 cycle warnings; 0 bistable\n"
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn any_operation_name_is_a_library_path_and_rates_are_per_row() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("results.jsonl");
+        let ids = BTreeSet::from([
+            "r/dense/1024/all/sum-neon".to_owned(),
+            "r/dense/1024/all/reference".to_owned(),
+        ]);
+        let blocks = |instructions: u64, cycles: u64| {
+            [
+                vec![instructions; BLOCKS],
+                vec![cycles; BLOCKS],
+                vec![0; BLOCKS],
+                vec![0; BLOCKS],
+            ]
+        };
+        fs::write(
+            &path,
+            format!(
+                "{}\n{}\n",
+                record(
+                    "r/dense/1024/all/sum-neon",
+                    10,
+                    blocks(20480, 10240),
+                    Vec::new()
+                ),
+                record(
+                    "r/dense/1024/all/reference",
+                    10,
+                    blocks(40960, 40960),
+                    Vec::new()
+                ),
+            ),
+        )?;
+        let run = load(&path, &ids)?;
+        assert_eq!(run["r/dense/1024/all/sum-neon"].path, "sum-neon");
+        let sides = [aggregate(std::slice::from_ref(&run))?, aggregate(&[run])?];
+        let mut output = Vec::new();
+        assert_eq!(print(&mut output, &sides)?, Status::Pass);
+        let text = String::from_utf8(output)?;
+        assert!(
+            text.contains(
+                "PASS r/dense/1024/all/sum-neon: instructions before=2048.0 after=2048.0"
+            )
+        );
+        assert!(text.contains(
+            "  PER ROW (1024 rows): instructions before=2.00 after=2.00; cycles min before=1.00 after=1.00; IPC before=2.00 after=2.00\n"
+        ));
+        assert!(text.contains("1 PASS, 0 FAIL"));
         Ok(())
     }
 

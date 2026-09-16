@@ -25,7 +25,8 @@ explain most cycle-only differences.
 
 ## Running
 
-Counters need root. Run from the repository root:
+The benchmarks run locally on macOS with Apple silicon; Linux and CI are
+not planned. Counters need root. Run from the repository root:
 
 ```sh
 # Correctness checks of every case without counters or root.
@@ -48,9 +49,50 @@ cargo run --locked -p tessera-bench -- --base WORKTREE
 cargo run --locked -p tessera-bench -- --base REF --repeats 1
 ```
 
-The utility starts the benchmark processes through `sudo -n`, so `sudo -v`
-must have cached the credentials first; the utility itself does not run as
-root and does not change `sudoers`.
+The utility itself does not run as root. It starts every benchmark process
+through `sudo -n`, which never prompts, so the credentials must already be
+cached by `sudo -v`. The cache lasts five minutes by default and every
+benchmark process refreshes it, so a run of any length needs one `sudo -v`
+shortly before it starts. The utility checks `sudo -n -l` before building
+and lists the operations of each built executable through `sudo -n` before
+measuring, so a missing credential stops the run before the first
+measurement. If a run stopped anyway, its `report.txt` and the logs of the
+finished cases are in the run directory, and the failing case can be
+repeated with `--filter` (see below).
+
+### Without `sudo -v`
+
+Optionally, `sudoers` can allow the benchmark executables without a password.
+This is a local choice for one user on one machine; the repository ships no
+sudoers files. Note that anything placed at these paths then runs as root
+without a password, which is the same trust as a cached `sudo -v` on a
+single-user machine and more than that on a shared one. Wildcards in sudoers
+do not match `/`, so every directory level is spelled out:
+
+```sh
+sudo visudo -f /etc/sudoers.d/tessera-bench
+```
+
+```text
+# Benchmarks built by tessera-bench from source snapshots and by cargo bench.
+USER ALL=(root) NOPASSWD: /path/to/tessera/target/bench-runs/*/*/target/release/deps/column_reader-*, \
+  /path/to/tessera/target/bench-runs/*/*/target/release/deps/filter_int32-*, \
+  /path/to/tessera/target/release/deps/column_reader-*, \
+  /path/to/tessera/target/release/deps/filter_int32-*
+```
+
+With such an entry `sudo -n -l` succeeds without a password and the utility
+runs without `sudo -v`.
+
+### What the unprivileged tests cover
+
+`cargo test -p tessera-bench` runs the measurement pipeline against a
+stand-in benchmark script: interleaving of the processes, the run
+directories and logs, the statuses and exit codes for instruction and cycle
+regressions and for zero readings, and a failing benchmark process. The
+benchmark programs' own tests cover `--list`, the check mode and the block
+bookkeeping. Calibration, warm-up and the repetition of zero readings in
+the runner run only with counters, that is, only as root.
 
 ## Cases and operations
 
@@ -73,6 +115,17 @@ The `cases()` functions and measured operations are in
 Their shared [Fixture](support/fixture.rs) creates values and masks. Each input
 configuration is used with both `dense` and `datum` storage; these count as
 separate cases.
+
+### Adding an operation
+
+An operation is registered on a case's group with `Group::op(name, closure)`
+in the `measure_*` function of its module; the closure must return a value,
+which the runner black-boxes, and must not allocate or check results (do
+that once before registering, as `measure_column` does). Names are free:
+tessera-bench treats every operation as a library path except `reference`,
+and every group must register a `reference`. A new operation, like any
+change under `benches/`, makes the benchmark incompatible with earlier
+revisions: commit it first, then compare later changes against that commit.
 
 Library operations and references within a case use the same input buffers.
 Setup, allocation and correctness checks are outside the counted regions.
@@ -147,9 +200,13 @@ top of [report.rs](../../../tools/tessera-bench/src/report.rs):
 
 Every line also shows the median cycles, the modes ratio, branch misses per
 call and the cores the blocks ran on. References show library overhead as
-instruction and cycle ratios and do not affect statuses. Exit status is 0
-when every selected operation passes (warnings included), 1 for any
-regression, and 2 for inconsistent counting or an invalid/incomplete run.
+instruction and cycle ratios and do not affect statuses. `PER ROW` divides
+instructions and minimum cycles by the case's row count (the first numeric
+segment of the id) and shows instructions per cycle in the best mode; for
+cases without rows only the IPC is shown. These rates are for judging the
+code, not the change. Exit status is 0 when every selected operation passes
+(warnings included), 1 for any regression, and 2 for inconsistent counting
+or an invalid/incomplete run.
 
 Reports, raw readings, logs and source snapshots are saved in a new
 `target/bench-runs/compare-*` directory for each comparison.
