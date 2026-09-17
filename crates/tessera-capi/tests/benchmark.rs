@@ -57,7 +57,7 @@ fn assert_sums<C: ColumnReader<Value = i32>>(
 #[test]
 fn reference_matches_scalar_model_and_bitmap_views() {
     let cases = reading::cases();
-    assert_eq!(cases.len() * 2, 36);
+    assert_eq!(cases.len() * 2, 40);
     for case in cases {
         let rows = case.selected.reference();
         let prepared = case.prepared.as_ref().map(fixture::Bitmap::reference);
@@ -109,6 +109,8 @@ fn reader_cases_are_fixed() {
             "words/64/all/nulls-mixed/ready",
             "words/65/all/nulls-mixed/ready",
             "words/1024/all/nulls-all/ready",
+            "words/1024/all/nulls-random/ready",
+            "words/1024/random/nulls-random/ready",
             "words/1024/all/nulls-mixed/partial",
             "bytes-3/65/all/nulls-mixed/partial",
             "bytes-7/1024/all/nulls-mixed/partial",
@@ -120,7 +122,7 @@ fn reader_cases_are_fixed() {
 #[test]
 fn filter_cases_are_fixed() {
     let cases = filtering::cases();
-    assert_eq!(cases.len() * 2, 48);
+    assert_eq!(cases.len() * 2, 52);
     let names: Vec<_> = cases.iter().map(|case| case.name.as_str()).collect();
     assert_eq!(
         names,
@@ -146,6 +148,8 @@ fn filter_cases_are_fixed() {
             "bytes-0/63/all/nulls-mixed/ready",
             "bytes-0/64/all/nulls-mixed/ready",
             "words/1024/all/nulls-all/ready",
+            "words/1024/all/nulls-random/ready",
+            "words/1024/random/nulls-random/ready",
             "words/1024/all/nulls-mixed/partial",
             "bytes-7/1024/all/nulls-mixed/partial",
             "bytes-7/1024/one-per128/nulls-mixed/partial",
