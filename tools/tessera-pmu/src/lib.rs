@@ -3,8 +3,11 @@
 //! Instructions retired are deterministic for a fixed input: they depend
 //! neither on the core a thread happens to run on, nor on its frequency, nor
 //! on predictor state. That gives nanosecond-scale operations a metric with
-//! real resolution, which wall time lacks. Cycles are wall time without
-//! frequency scaling; branch misses explain most cycle-only effects. Counting
+//! real resolution, which wall time lacks. Cycles are core clock periods
+//! spent on the thread in user space: the same work costs the same cycles at
+//! any core frequency as long as it stays in the core and L1 (memory latency
+//! is fixed in nanoseconds, not cycles), and they exclude time off the core
+//! and in the kernel. Branch misses explain most cycle-only effects. Counting
 //! is per thread and survives migration between cores.
 //!
 //! Only macOS through the private kperf frameworks is implemented, counting
@@ -28,7 +31,8 @@ mod macos;
 pub struct Reading {
     /// Retired instructions.
     pub instructions: u64,
-    /// Core clock cycles.
+    /// Core clock cycles while the thread ran in user space
+    /// (`CORE_ACTIVE_CYCLE` on macOS).
     pub cycles: u64,
     /// Architecturally executed branches that were mispredicted.
     pub branch_misses: u64,

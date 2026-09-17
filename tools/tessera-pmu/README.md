@@ -6,8 +6,11 @@ instructions, core cycles, mispredicted branches and retired branches.
 Instructions retired are deterministic for a fixed input. They do not depend
 on the core a thread runs on, on its frequency, or on branch predictor state,
 so they give nanosecond-scale operations a metric with real resolution, which
-wall time does not have. Cycles are wall time without frequency scaling.
-Branch misses explain most cycle-only differences. Counting is per thread and
+wall time does not have. Cycles are core clock periods spent on the thread
+in user space: the same work costs the same cycles at any core frequency as
+long as it stays in the core and L1 (memory latency is fixed in nanoseconds,
+not cycles), and they exclude time off the core and in the kernel. Branch
+misses explain most cycle-only differences. Counting is per thread and
 survives migration between cores.
 
 ```rust

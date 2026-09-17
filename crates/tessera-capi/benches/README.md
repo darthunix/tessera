@@ -20,7 +20,10 @@ state, which is where the wall-time noise of these benchmarks came from:
 threads hop between cores about 70 times per second, and a loop's cost then
 depends on the predictor state each core has accumulated. Nanosecond-scale
 operations have no wall-time resolution at all: 3% of 3 ns is a fraction of
-a cycle. Cycles are wall time without frequency scaling, and branch misses
+a cycle. Cycles are core clock periods spent on the thread in user space:
+the same work costs the same cycles at any core frequency as long as it
+stays in the core and L1 (memory latency is fixed in nanoseconds, not
+cycles), and they exclude time off the core and in the kernel. Branch misses
 explain most cycle-only differences.
 
 ## Running
