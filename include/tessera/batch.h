@@ -27,7 +27,10 @@ typedef struct TessBatch TessBatch;
  * This result structure is governed by the TessBatchOps ABI. A size header is
  * enough to append fields without giving the result a separate ABI version.
  * The caller initializes struct_size. The provider preserves it and fills the
- * remaining fields. isnull has one bool per row; it is not a bitmap.
+ * remaining fields. isnull has one bool per row; it is not a bitmap. A
+ * requested NULL row holds an initialized Datum of no meaning (PostgreSQL
+ * slots store 0); readers may load it and must not interpret it. Unrequested
+ * rows may be uninitialized.
  */
 typedef struct TessDatumColumn
 {

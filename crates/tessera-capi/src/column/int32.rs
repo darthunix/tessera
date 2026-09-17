@@ -7,22 +7,18 @@ use tessera_core::{ColumnReader, RowMaskView, WordValues};
 use super::{mask_word, try_fold_words, validate_mask, validate_ready};
 
 // Read one dense slot of a word whose non-NULL flags are `bits`, without a
-// branch or a data-dependent address. The slot is copied as `MaybeUninit`,
-// which is allowed even for uninitialized NULL rows, and a zero is selected
-// in its place before anything is assumed initialized. A conditional branch
-// or a selected load address here alternated between a fast and a slower
-// mode depending on per-core predictor state in the `next()`-based paths.
+// branch or a data-dependent address: the slot is loaded unconditionally
+// (a prepared row is initialized even when NULL) and the NULL bit selects
+// the result. A conditional branch or a selected load address here
+// alternated between a fast and a slower mode depending on per-core
+// predictor state in the `next()`-based paths.
 #[inline(always)]
 fn read_masked(values: &[MaybeUninit<i32>], row: usize, bits: u64) -> Option<i32> {
     let present = bits & (1 << (row % 64)) != 0;
-    // SAFETY: callers pass rows below values.len() (RowMaskView bits and
-    // WordValues rows are normalized to the row count). Copying a possibly
-    // uninitialized MaybeUninit is sound; nothing is assumed initialized yet.
-    let raw = unsafe { *values.get_unchecked(row) };
-    let slot = select_unpredictable(present, raw, MaybeUninit::new(0));
-    // SAFETY: a prepared non-NULL row is initialized by the constructor
-    // contract; for a NULL row the selected slot is the initialized zero.
-    let value = unsafe { slot.assume_init() };
+    // SAFETY: callers pass only prepared rows below values.len() (RowMaskView
+    // bits and WordValues rows are normalized to the row count), and the
+    // constructor contract initializes every prepared row, NULL or not.
+    let value = unsafe { values.get_unchecked(row).assume_init() };
     select_unpredictable(present, Some(value), None)
 }
 
@@ -38,11 +34,11 @@ fn read_masked(values: &[MaybeUninit<i32>], row: usize, bits: u64) -> Option<i32
 /// [`ColumnReader::try_fold_selected`] chooses its NULL mode once and runs one
 /// loop per selection word; without a NULL mask every read is unconditional.
 ///
-/// NULL rows are read without a data-dependent branch: the slot is copied as
-/// `MaybeUninit` and a zero is selected for NULL rows before use. Consumers
-/// keep their loop branch-free by folding with `map_or`/`unwrap_or`; an
-/// `if let Some` around the accumulation lowers to a select on the
-/// accumulator and lengthens its dependency chain.
+/// NULL rows are read without a data-dependent branch: the slot is loaded
+/// unconditionally and the NULL bit selects the result. Consumers keep their
+/// loop branch-free by folding with `map_or`/`unwrap_or`; an `if let Some`
+/// around the accumulation lowers to a select on the accumulator and
+/// lengthens its dependency chain.
 #[derive(Debug)]
 pub struct DenseInt32Column<'a> {
     values: &'a [MaybeUninit<i32>],
@@ -54,12 +50,14 @@ impl<'a> DenseInt32Column<'a> {
     /// Borrow dense values, rejecting masks with different physical row counts.
     ///
     /// Without `non_nulls`, all prepared rows are non-NULL. Without `prepared`,
-    /// every row is prepared. A prepared NULL row need not have a value.
+    /// every row is prepared. A prepared NULL row holds an initialized value
+    /// of no meaning; unprepared rows may be uninitialized.
     ///
     /// # Safety
     ///
-    /// Every prepared, non-NULL row must contain an initialized `i32`. Buffers
-    /// and masks must remain alive and immutable for `'a`, including against
+    /// Every prepared row must contain an initialized `i32`, NULL rows
+    /// included (their value is arbitrary and never exposed). Buffers and
+    /// masks must remain alive and immutable for `'a`, including against
     /// changes through C aliases. `prepared` must describe actual readiness,
     /// not a changing active-row selection. Raw slices must first satisfy
     /// Rust's alignment, allocation, and lifetime requirements; borrow them as
@@ -186,13 +184,15 @@ impl<'a> DatumInt32Column<'a> {
     /// Borrow Datum values and NULL flags, rejecting mismatched dimensions.
     ///
     /// Without `prepared`, every row is prepared. Both buffers may contain
-    /// uninitialized unprepared rows; NULL rows need no initialized value.
+    /// uninitialized unprepared rows; a prepared NULL row holds an initialized
+    /// Datum of no meaning, as PostgreSQL slots provide.
     ///
     /// # Safety
     ///
     /// Every prepared row must have an initialized, valid Rust `bool` in
-    /// `isnull`. Each prepared non-NULL row must have an initialized `u64`
-    /// encoding PostgreSQL int4. Buffers and masks must remain alive and
+    /// `isnull` and an initialized `u64` in `values`; for a non-NULL row the
+    /// `u64` encodes PostgreSQL int4, for a NULL row it is arbitrary and
+    /// never exposed. Buffers and masks must remain alive and
     /// immutable for `'a`, including against C aliases. `prepared` describes
     /// actual readiness, not a changing active selection. Raw slices must
     /// satisfy Rust's alignment, allocation, and lifetime requirements and
@@ -231,18 +231,17 @@ impl<'a> DatumInt32Column<'a> {
         })
     }
 
-    /// Read only a row already checked by get or WordValues.
+    /// Read only a row already checked by get or WordValues, without a
+    /// data-dependent branch: flag and Datum are loaded unconditionally and
+    /// the flag selects the result, so random NULLs cost no mispredictions.
     #[inline]
     unsafe fn read_prepared(&self, row: usize) -> Option<i32> {
         // SAFETY: the caller established bounds and readiness; construction
-        // guarantees a valid initialized bool for every such row.
-        if unsafe { self.isnull.get_unchecked(row).assume_init() } {
-            None
-        } else {
-            // SAFETY: this prepared row is also non-NULL, so construction
-            // guarantees an initialized Datum. The cast matches DatumGetInt32.
-            Some(unsafe { self.values.get_unchecked(row).assume_init() } as i32)
-        }
+        // guarantees a valid initialized bool and an initialized Datum for
+        // every prepared row. The cast matches DatumGetInt32.
+        let null = unsafe { self.isnull.get_unchecked(row).assume_init() };
+        let value = unsafe { self.values.get_unchecked(row).assume_init() } as i32;
+        select_unpredictable(null, None, Some(value))
     }
 }
 

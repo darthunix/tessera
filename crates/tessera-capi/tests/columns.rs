@@ -46,10 +46,14 @@ fn representations_agree_with_uninitialized_gaps() {
             for row in 0..nrows {
                 if ready[row] {
                     isnull[row].write(!non_null[row]);
-                    if non_null[row] {
-                        dense_values[row].write(values[row]);
-                        datum_values[row].write(values[row] as u64);
-                    }
+                    // NULL rows hold an initialized value of no meaning.
+                    let (dense, datum) = if non_null[row] {
+                        (values[row], values[row] as u64)
+                    } else {
+                        (0x5a5a_5a5a, 0xdead_beef_dead_beef)
+                    };
+                    dense_values[row].write(dense);
+                    datum_values[row].write(datum);
                 }
             }
             let ready_words = words_for(&ready);
@@ -59,8 +63,8 @@ fn representations_agree_with_uninitialized_gaps() {
             let non_nulls = RowMaskView::try_new(nrows, &non_null_words).unwrap();
             let selection = RowMaskView::try_new(nrows, &selected_words).unwrap();
             let column = ColumnView::try_new(&values, Some(non_nulls)).unwrap();
-            // SAFETY: only prepared non-NULL positions require values, and
-            // only prepared positions require flags. Those were initialized.
+            // SAFETY: every prepared position has a value and a flag; only
+            // unprepared gaps are uninitialized.
             let dense = unsafe {
                 DenseInt32Column::try_new(&dense_values, Some(non_nulls), Some(prepared))
             }
@@ -136,19 +140,21 @@ fn assert_fold_stops<C: ColumnReader<Value = i32>>(
 
 #[test]
 fn unprepared_flags_and_values_are_never_read() {
-    let dense_values = [MaybeUninit::uninit(); 129];
-    let datum_values = [MaybeUninit::uninit(); 129];
+    let mut dense_values = [MaybeUninit::uninit(); 129];
+    let mut datum_values = [MaybeUninit::uninit(); 129];
     let mut isnull = [MaybeUninit::uninit(); 129];
-    for value in &mut isnull[..64] {
-        value.write(true);
+    for row in 0..64 {
+        isnull[row].write(true);
+        dense_values[row].write(-1);
+        datum_values[row].write(u64::MAX);
     }
     let prepared = RowMaskView::try_new(129, &[u64::MAX, 0, 0]).unwrap();
     let non_nulls = RowMaskView::try_new(129, &[0, u64::MAX, 1]).unwrap();
-    // SAFETY: all prepared rows are NULL; no values need initialization.
+    // SAFETY: the prepared rows are NULL and hold initialized placeholders.
     let dense =
         unsafe { DenseInt32Column::try_new(&dense_values, Some(non_nulls), Some(prepared)) }
             .unwrap();
-    // SAFETY: every prepared flag is initialized to true. Other storage may
+    // SAFETY: every prepared flag and Datum is initialized. Other storage may
     // be uninitialized and must not be read, even when selected by mistake.
     let datum =
         unsafe { DatumInt32Column::try_new(&datum_values, &isnull, Some(prepared)) }.unwrap();
@@ -187,20 +193,20 @@ fn byte_masks_and_sliced_values_preserve_row_numbering() {
         isnull[physical].write(is_null);
         if is_null {
             non_null_bytes[physical / 8] &= !bit;
-        } else {
-            values[physical].write(row as i32);
-            datums[physical].write(row as u64);
         }
+        // Prepared rows are initialized whether NULL or not.
+        values[physical].write(if is_null { i32::MIN } else { row as i32 });
+        datums[physical].write(if is_null { u64::MAX } else { row as u64 });
         expected.push((row, (!is_null).then_some(row as i32)));
     }
     let prepared = RowMaskView::try_from_bytes(nrows, &prepared_bytes, offset).unwrap();
     let non_nulls = RowMaskView::try_from_bytes(nrows, &non_null_bytes, offset).unwrap();
     let selected = RowMaskView::try_from_bytes(nrows, &selected_bytes, offset).unwrap();
-    // SAFETY: initialized precisely the prepared non-NULL dense values.
+    // SAFETY: initialized precisely the prepared rows; gaps are unprepared.
     let dense =
         unsafe { DenseInt32Column::try_new(&values[offset..], Some(non_nulls), Some(prepared)) }
             .unwrap();
-    // SAFETY: initialized prepared flags and prepared non-NULL Datums.
+    // SAFETY: initialized the flags and Datums of every prepared row.
     let datum =
         unsafe { DatumInt32Column::try_new(&datums[offset..], &isnull[offset..], Some(prepared)) }
             .unwrap();
@@ -348,9 +354,10 @@ fn nullable_word_modes_preserve_rows_and_stop_on_consumer_error() {
     let mut non_null_bytes = vec![0xff; (nrows + 7).div_ceil(8)];
     for row in 0..nrows {
         let non_null = non_null_words[row / 64] & (1 << (row % 64)) != 0;
+        // Every row is prepared, so NULL rows hold placeholders.
+        values[row].write(if non_null { row as i32 } else { -7 });
+        datums[row].write(if non_null { row as u64 } else { 7 });
         if non_null {
-            values[row].write(row as i32);
-            datums[row].write(row as u64);
             nulls[row].write(false);
         } else {
             let physical = row + 7;
@@ -359,13 +366,13 @@ fn nullable_word_modes_preserve_rows_and_stop_on_consumer_error() {
         expected.push((row, non_null.then_some(row as i32)));
     }
     let rows = RowMaskView::try_new(nrows, &selected_words).unwrap();
-    // SAFETY: every flag is initialized, and every non-NULL Datum is initialized.
+    // SAFETY: every flag and every Datum is initialized.
     let datum = unsafe { DatumInt32Column::try_new(&datums, &nulls, None) }.unwrap();
     for non_nulls in [
         RowMaskView::try_new(nrows, &non_null_words).unwrap(),
         RowMaskView::try_from_bytes(nrows, &non_null_bytes, 7).unwrap(),
     ] {
-        // SAFETY: only non-NULL positions have values, exactly as the mask says.
+        // SAFETY: every row is initialized; the mask says which are NULL.
         let dense = unsafe { DenseInt32Column::try_new(&values, Some(non_nulls), None) }.unwrap();
         assert_fold_stops(&dense, &rows, &expected);
         assert_fold_stops(&datum, &rows, &expected);

@@ -18,8 +18,11 @@ may materialize more rows as an optimization.
 
 The caller initializes `TessDatumColumn.struct_size`. The callback fills
 `values`, `isnull`, and `nrows` without changing that size. Both arrays use
-physical row numbers. `isnull` contains one `bool` per row and is not a bitmap;
-`values[row]` is undefined when `isnull[row]` is true.
+physical row numbers. `isnull` contains one `bool` per row and is not a bitmap.
+When `isnull[row]` is true for a requested row, `values[row]` is initialized
+but meaningless (PostgreSQL slots store `0`): readers may load it, as vector
+code loading several rows at once does, and must not interpret it. Rows the
+provider did not materialize may be uninitialized.
 
 `TessColumnPurpose` tells the provider whether the values are needed for a
 filter or a later projection. It may affect preparation strategy but never the

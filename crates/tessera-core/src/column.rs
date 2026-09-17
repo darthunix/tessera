@@ -13,8 +13,8 @@ use crate::{ColumnReader, RowMaskView, WordValues};
 /// The optional `non_nulls` mask is a [`RowMaskView`] with set bits for
 /// non-NULL values. Without this mask, every value is non-NULL.
 ///
-/// This is not an adapter for `TessDatumColumn`: its NULL or unrequested
-/// positions may be uninitialized. Such storage cannot be borrowed as `&[T]`.
+/// This is not an adapter for `TessDatumColumn`: its unrequested positions
+/// may be uninitialized, and such storage cannot be borrowed as `&[T]`.
 ///
 /// A column cannot outlive its values:
 ///
