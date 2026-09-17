@@ -25,9 +25,11 @@ pub enum CompareOp {
 
 /// Keep selected, non-NULL rows satisfying `column op scalar`.
 ///
-/// Row indices remain physical; removed rows are never restored. Only selected
-/// rows in nonempty words are read. Column values and their masks are borrowed
-/// without copying or mutation; `rows` is borrowed exclusively. There are no
+/// Row indices remain physical; removed rows are never restored. Only nonempty
+/// words are read: a full, fully prepared word whose storage the reader
+/// exposes is compared whole (vector code on AArch64), any other word only at
+/// its selected rows. Column values and their masks are borrowed without
+/// copying or mutation; `rows` is borrowed exclusively. There are no
 /// allocations on success and no alignment requirements beyond those of the
 /// supplied reader and row mask. The operation is chosen once per call.
 ///
@@ -63,18 +65,19 @@ pub fn filter<C: ColumnReader<Value = i32>>(
         "column and selection row counts differ"
     );
     match op {
-        CompareOp::Eq => filter_with(column, rows, scalar, |a, b| a == b),
-        CompareOp::Ne => filter_with(column, rows, scalar, |a, b| a != b),
-        CompareOp::Lt => filter_with(column, rows, scalar, |a, b| a < b),
-        CompareOp::Le => filter_with(column, rows, scalar, |a, b| a <= b),
-        CompareOp::Gt => filter_with(column, rows, scalar, |a, b| a > b),
-        CompareOp::Ge => filter_with(column, rows, scalar, |a, b| a >= b),
+        CompareOp::Eq => filter_with(column, rows, op, scalar, |a, b| a == b),
+        CompareOp::Ne => filter_with(column, rows, op, scalar, |a, b| a != b),
+        CompareOp::Lt => filter_with(column, rows, op, scalar, |a, b| a < b),
+        CompareOp::Le => filter_with(column, rows, op, scalar, |a, b| a <= b),
+        CompareOp::Gt => filter_with(column, rows, op, scalar, |a, b| a > b),
+        CompareOp::Ge => filter_with(column, rows, op, scalar, |a, b| a >= b),
     }
 }
 
 fn filter_with<C: ColumnReader<Value = i32>>(
     column: &C,
     rows: &mut RowMask<'_>,
+    op: CompareOp,
     scalar: i32,
     compare: impl Fn(i32, i32) -> bool,
 ) -> Result<()> {
@@ -83,25 +86,59 @@ fn filter_with<C: ColumnReader<Value = i32>>(
         if selected == 0 {
             continue;
         }
-        let mut passing = 0;
-        if selected.is_power_of_two() {
+        let passing = if selected.is_power_of_two() {
             // One row needs only its readiness and NULL bits, not whole mask words.
             let row = index * 64 + selected.trailing_zeros() as usize;
             if column.get(row)?.is_some_and(|value| compare(value, scalar)) {
-                passing = selected;
+                selected
+            } else {
+                0
             }
+        } else if let Some(passing) = bulk_passing(column, index, op, scalar) {
+            // The whole word compared at once; intersecting keeps the selection.
+            passing
         } else {
             // fold is the word iterator's bulk path; the predicate becomes a
             // bit so that the loop has no data-dependent branch.
-            passing =
-                column
-                    .word_values(index, selected)?
-                    .fold(passing, |passing, (row, value)| {
-                        let passes = value.is_some_and(|value| compare(value, scalar));
-                        passing | (u64::from(passes) << (row % 64))
-                    });
-        }
+            column
+                .word_values(index, selected)?
+                .fold(0, |passing, (row, value)| {
+                    let passes = value.is_some_and(|value| compare(value, scalar));
+                    passing | (u64::from(passes) << (row % 64))
+                })
+        };
         rows.intersect_word(index, passing)?;
     }
     Ok(())
+}
+
+/// The passing rows of a full prepared word compared with vector code, or
+/// `None` where the reader exposes no storage for it or no vector code
+/// exists (other targets, Miri): the word then takes the row path.
+#[cfg(all(target_arch = "aarch64", not(miri)))]
+fn bulk_passing<C: ColumnReader<Value = i32>>(
+    column: &C,
+    index: usize,
+    op: CompareOp,
+    scalar: i32,
+) -> Option<u64> {
+    use tessera_core::WordBlock;
+    Some(match column.word_block(index)? {
+        WordBlock::Dense { values, non_nulls } => {
+            crate::simd::filter_dense(values, scalar, op) & non_nulls
+        }
+        WordBlock::Datum { values, isnull } => {
+            crate::simd::filter_datum(values, isnull, scalar, op)
+        }
+    })
+}
+
+#[cfg(not(all(target_arch = "aarch64", not(miri))))]
+fn bulk_passing<C: ColumnReader<Value = i32>>(
+    _column: &C,
+    _index: usize,
+    _op: CompareOp,
+    _scalar: i32,
+) -> Option<u64> {
+    None
 }

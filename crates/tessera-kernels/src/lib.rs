@@ -11,7 +11,13 @@
 //! not roll back previously completed words; callers must discard a partial
 //! selection after failure. This crate does not introduce a C entry point or
 //! catch panics. The future C boundary remains responsible for panic handling.
+//!
+//! Full prepared words of representations that expose their storage
+//! ([`tessera_core::WordBlock`]) are compared with vector code on AArch64;
+//! everything else takes the row paths. `unsafe` is denied crate-wide and
+//! allowed only in the isolated [`simd`] module, for vector loads.
 
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
 
 pub mod int32;
+mod simd;

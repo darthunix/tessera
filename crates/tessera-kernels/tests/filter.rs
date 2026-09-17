@@ -37,6 +37,95 @@ fn words_for(flags: &[bool]) -> Vec<u64> {
     words
 }
 
+/// The same values without bulk storage: every word takes the row path.
+struct RowsOnly<'a>(ColumnView<'a, i32>);
+
+impl ColumnReader for RowsOnly<'_> {
+    type Value = i32;
+    fn nrows(&self) -> usize {
+        self.0.nrows()
+    }
+    fn get(&self, row: usize) -> Result<Option<i32>> {
+        ColumnReader::get(&self.0, row)
+    }
+    fn word_values(
+        &self,
+        word_index: usize,
+        selected: u64,
+    ) -> Result<impl Iterator<Item = (usize, Option<i32>)> + '_> {
+        self.0.word_values(word_index, selected)
+    }
+}
+
+/// xorshift64*, fixed seed: the same data on every run.
+fn random(state: &mut u64) -> u64 {
+    *state ^= *state >> 12;
+    *state ^= *state << 25;
+    *state ^= *state >> 27;
+    state.wrapping_mul(0x2545_F491_4F6C_DD1D)
+}
+
+#[test]
+fn bulk_words_agree_with_the_row_path_on_random_data() {
+    let mut state = 0x9E37_79B9_7F4A_7C15;
+    let nrows = 4 * 64 + 17;
+    let values: Vec<i32> = (0..nrows)
+        .map(|_| {
+            let draw = random(&mut state);
+            if draw.is_multiple_of(4) {
+                VALUES[(draw >> 8) as usize % VALUES.len()]
+            } else {
+                (draw >> 8) as i32 % 100
+            }
+        })
+        .collect();
+    let non_null: Vec<bool> = (0..nrows)
+        .map(|_| !random(&mut state).is_multiple_of(4))
+        .collect();
+    let non_null_words = words_for(&non_null);
+    for masked in [false, true] {
+        let non_nulls = masked.then(|| RowMaskView::try_new(nrows, &non_null_words).unwrap());
+        let column = ColumnView::try_new(&values, non_nulls).unwrap();
+        let rows_only = RowsOnly(ColumnView::try_new(&values, non_nulls).unwrap());
+        for op in OPS {
+            for scalar in [i32::MIN, -100, -99, -1, 0, 1, 42, 98, 99, i32::MAX] {
+                let selected: Vec<bool> = (0..nrows)
+                    .map(|_| random(&mut state).is_multiple_of(2))
+                    .collect();
+                let mut bulk = words_for(&selected);
+                let mut rows = words_for(&selected);
+                filter(
+                    &column,
+                    &mut RowMask::try_new(nrows, &mut bulk).unwrap(),
+                    op,
+                    scalar,
+                )
+                .unwrap();
+                filter(
+                    &rows_only,
+                    &mut RowMask::try_new(nrows, &mut rows).unwrap(),
+                    op,
+                    scalar,
+                )
+                .unwrap();
+                assert_eq!(bulk, rows, "{op:?} {scalar} masked={masked}");
+                let expected: Vec<_> = (0..nrows)
+                    .map(|row| {
+                        selected[row]
+                            && (!masked || non_null[row])
+                            && compare(values[row], op, scalar)
+                    })
+                    .collect();
+                assert_eq!(
+                    bulk,
+                    words_for(&expected),
+                    "{op:?} {scalar} masked={masked}"
+                );
+            }
+        }
+    }
+}
+
 #[test]
 fn comparisons_match_scalar_model() {
     for nrows in [0, 1, 63, 64, 65, 1024] {
