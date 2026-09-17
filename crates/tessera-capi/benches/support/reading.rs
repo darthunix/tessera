@@ -117,6 +117,8 @@ pub fn cases() -> Vec<Fixture> {
         cases.push(case(nrows, "all", "mixed", None, false));
     }
     cases.push(case(1024, "all", "all", None, false));
+    cases.push(case(1024, "all", "random", None, false));
+    cases.push(case(1024, "random", "random", None, false));
     cases.push(case(1024, "all", "mixed", None, true));
     for (nrows, offset, pattern) in [(65, 3, "all"), (1024, 7, "all"), (1024, 7, "sparse")] {
         cases.push(case(nrows, pattern, "mixed", Some(offset), true));

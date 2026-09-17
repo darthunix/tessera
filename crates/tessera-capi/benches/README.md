@@ -119,6 +119,12 @@ Their shared [Fixture](support/fixture.rs) creates values and masks. Each input
 configuration is used with both `dense` and `datum` storage; these count as
 separate cases.
 
+Regular patterns such as `half`, `sparse` and `nulls-mixed` are periodic, and
+a branch predictor learns them perfectly, so they hide what a data-dependent
+branch costs. The `random` selection (every second row on average) and
+`nulls-random` flags (30% NULL) come from a fixed-seed generator and show
+that cost; the two kinds of cases are meant to be read together.
+
 ### Adding an operation
 
 An operation is registered on a case's group with `Group::op(name, closure)`

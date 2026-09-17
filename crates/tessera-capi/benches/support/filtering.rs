@@ -39,6 +39,8 @@ pub fn cases() -> Vec<Fixture> {
         cases.push(case(nrows, "all", "mixed", Some(0), false));
     }
     cases.push(case(1024, "all", "all", None, false));
+    cases.push(case(1024, "all", "random", None, false));
+    cases.push(case(1024, "random", "random", None, false));
     cases.push(case(1024, "all", "mixed", None, true));
     cases.push(case(1024, "all", "mixed", Some(7), true));
     cases.push(case(1024, "one-per128", "mixed", Some(7), true));

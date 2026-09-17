@@ -5,12 +5,38 @@
 //! All fixture buffers are initialized, even NULL and unprepared positions:
 //! uninitialized-buffer safety belongs to the library's correctness/Miri tests.
 //! Columns and references borrow the same allocations, not copies of the values.
+//!
+//! Regular patterns (`half`, `sparse`, `nulls-mixed`) are what a branch
+//! predictor learns perfectly, so they hide the cost of data-dependent
+//! branches; the `random` selection and `nulls-random` flags come from a
+//! fixed-seed generator and show it.
 
 use super::reference::{Bits, Mask};
 use anyhow::Result;
 use std::mem::MaybeUninit;
 use tessera_capi::{DatumInt32Column, DenseInt32Column};
 use tessera_core::RowMaskView;
+
+/// xorshift64*: deterministic, and its high bits are well mixed.
+struct Random(u64);
+
+impl Random {
+    fn seeded(nrows: usize) -> Self {
+        Self(0x9E37_79B9_7F4A_7C15 ^ (nrows as u64).wrapping_mul(0xD1B5_4A32_D192_ED03) | 1)
+    }
+    fn next(&mut self) -> u64 {
+        let mut x = self.0;
+        x ^= x >> 12;
+        x ^= x << 25;
+        x ^= x >> 27;
+        self.0 = x;
+        x.wrapping_mul(0x2545_F491_4F6C_DD1D)
+    }
+    /// True with probability `percent`/100.
+    fn chance(&mut self, percent: u64) -> bool {
+        (self.next() >> 32) % 100 < percent
+    }
+}
 
 pub struct Bitmap {
     nrows: usize,
@@ -110,6 +136,7 @@ impl Fixture {
         partial: bool,
     ) -> Self {
         let nrows = values.len();
+        let mut random = Random::seeded(nrows);
         let ready: Vec<_> = (0..nrows).map(|row| !partial || row % 3 != 2).collect();
         let selected: Vec<_> = (0..nrows)
             .map(|row| {
@@ -121,6 +148,7 @@ impl Fixture {
                         "eighth" => row % 8 == 0,
                         "one-per128" => row % 128 == 0,
                         "empty" => false,
+                        "random" => random.chance(50),
                         _ => unreachable!(),
                     }
             })
@@ -130,6 +158,7 @@ impl Fixture {
                 "none" => false,
                 "mixed" => row % 5 == 1,
                 "all" => true,
+                "random" => random.chance(30),
                 _ => unreachable!(),
             })
             .collect();
