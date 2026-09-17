@@ -2,7 +2,85 @@ use std::mem::MaybeUninit;
 
 use anyhow::Result;
 use tessera_capi::{DatumInt32Column, DenseInt32Column};
-use tessera_core::{ColumnReader, ColumnView, RowMaskView};
+use tessera_core::{ColumnReader, ColumnView, RowMaskView, WordBlock};
+
+#[test]
+fn word_blocks_need_a_full_prepared_word_and_agree_with_get() {
+    let nrows = 200;
+    let mut dense_values = vec![MaybeUninit::uninit(); nrows];
+    let mut datum_values = vec![MaybeUninit::uninit(); nrows];
+    let mut isnull = vec![MaybeUninit::uninit(); nrows];
+    // Word 1 has an unprepared row; words 0 and 2 are fully prepared.
+    let prepared_words = [u64::MAX, !(1 << 9), u64::MAX, 0xff];
+    let non_null_words = [0x0f0f_0f0f_0f0f_0f0f, u64::MAX, 0, 0xff];
+    for row in 0..nrows {
+        if prepared_words[row / 64] & (1 << (row % 64)) == 0 {
+            continue;
+        }
+        let non_null = non_null_words[row / 64] & (1 << (row % 64)) != 0;
+        isnull[row].write(!non_null);
+        dense_values[row].write(if non_null { row as i32 } else { -1 });
+        datum_values[row].write(if non_null { row as u64 } else { u64::MAX });
+    }
+    let prepared = RowMaskView::try_new(nrows, &prepared_words).unwrap();
+    let non_nulls = RowMaskView::try_new(nrows, &non_null_words).unwrap();
+    // SAFETY: every prepared row has a value and a flag; gaps are unprepared.
+    let dense =
+        unsafe { DenseInt32Column::try_new(&dense_values, Some(non_nulls), Some(prepared)) }
+            .unwrap();
+    // SAFETY: the same initialization holds for Datums and flags.
+    let datum =
+        unsafe { DatumInt32Column::try_new(&datum_values, &isnull, Some(prepared)) }.unwrap();
+    for index in [0, 2] {
+        let Some(WordBlock::Dense { values, non_nulls }) = dense.word_block(index) else {
+            panic!("dense word {index} has a block");
+        };
+        assert_eq!(non_nulls, non_null_words[index]);
+        let Some(WordBlock::Datum {
+            values: datums,
+            isnull: flags,
+        }) = datum.word_block(index)
+        else {
+            panic!("datum word {index} has a block");
+        };
+        for bit in 0..64 {
+            let row = index * 64 + bit;
+            let expected = dense.get(row).unwrap();
+            assert_eq!(datum.get(row).unwrap(), expected);
+            assert_eq!(flags[bit], expected.is_none());
+            if let Some(value) = expected {
+                assert_eq!(values[bit], value);
+                assert_eq!(datums[bit] as i32, value);
+            } else {
+                // NULL slots are readable placeholders, never interpreted.
+                assert_eq!(values[bit], -1);
+                assert_eq!(datums[bit], u64::MAX);
+            }
+        }
+    }
+    // An unprepared row, the tail word and a word past the end have no block.
+    for index in [1, 3, 4, usize::MAX] {
+        assert!(dense.word_block(index).is_none(), "dense word {index}");
+        assert!(datum.word_block(index).is_none(), "datum word {index}");
+    }
+    // Without masks, every full word is a block with all rows non-NULL.
+    let values: Vec<_> = (0..64).map(MaybeUninit::new).collect();
+    let flags = vec![MaybeUninit::new(false); 64];
+    let datums: Vec<_> = (0..64).map(|v| MaybeUninit::new(v as u64)).collect();
+    // SAFETY: all rows are initialized and non-NULL.
+    let dense = unsafe { DenseInt32Column::try_new(&values, None, None) }.unwrap();
+    // SAFETY: all flags and Datums are initialized.
+    let datum = unsafe { DatumInt32Column::try_new(&datums, &flags, None) }.unwrap();
+    assert!(matches!(
+        dense.word_block(0),
+        Some(WordBlock::Dense {
+            non_nulls: u64::MAX,
+            ..
+        })
+    ));
+    assert!(matches!(datum.word_block(0), Some(WordBlock::Datum { .. })));
+    assert!(dense.word_block(1).is_none());
+}
 
 fn words_for(flags: &[bool]) -> Vec<u64> {
     let mut words = vec![0; flags.len().div_ceil(64)];

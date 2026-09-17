@@ -17,7 +17,9 @@ use crate::bitmap::word_count;
 /// lockstep per selection word: for one `selected` word, the
 /// [`Self::word_values`] iterators of every column yield the same rows in the
 /// same order and can be zipped without per-row results. [`Self::get`] reads
-/// single rows.
+/// single rows. [`Self::word_block`] exposes the storage of one full,
+/// fully prepared word to kernels that process rows in bulk; representations
+/// without such storage return `None` and are served by the row paths.
 pub trait ColumnReader {
     /// A value or a reference borrowed from the representation's input buffers.
     /// No `Copy`, `Clone`, or `'static` bound is imposed on all representations.
@@ -39,6 +41,19 @@ pub trait ColumnReader {
         word_index: usize,
         selected: u64,
     ) -> Result<impl Iterator<Item = (usize, Option<Self::Value>)> + '_>;
+
+    /// Storage of one full, fully prepared word for bulk kernels.
+    ///
+    /// `None` when the representation has no bulk storage, the word is the
+    /// short tail or out of range, or any of its rows is unprepared; callers
+    /// then fall back to [`Self::word_values`]. A returned block covers exactly
+    /// the word's 64 rows; NULL rows hold initialized values of no meaning that
+    /// must not be interpreted. The selection is not applied: the caller masks
+    /// its own result. This operation reads no row data.
+    fn word_block(&self, word_index: usize) -> Option<WordBlock<'_, Self::Value>> {
+        let _ = word_index;
+        None
+    }
 
     /// Fold over selected rows in physical order, stopping at the first error.
     ///
@@ -68,6 +83,24 @@ pub trait ColumnReader {
         }
         Ok(acc)
     }
+}
+
+/// The storage of one full, fully prepared 64-row word, in physical order.
+///
+/// Bulk kernels read it directly instead of through [`WordValues`]. Rows are
+/// `base..base + 64` of the word; a NULL row's value is initialized but
+/// meaningless and must not be interpreted. The value type `T` says how a
+/// value is read, not what a `Datum` is: a Datum block encodes `T` in the low
+/// bits of each `u64`, as the representation defines.
+#[derive(Debug, Clone, Copy)]
+pub enum WordBlock<'a, T> {
+    /// One value per row; bit `i` of `non_nulls` set means row `i` is non-NULL.
+    Dense { values: &'a [T; 64], non_nulls: u64 },
+    /// PostgreSQL Datum storage with one NULL flag per row.
+    Datum {
+        values: &'a [u64; 64],
+        isnull: &'a [bool; 64],
+    },
 }
 
 /// A validated, allocation-free iterator over one selection word.

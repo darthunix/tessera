@@ -45,5 +45,5 @@ mod reader;
 mod row_mask;
 
 pub use column::ColumnView;
-pub use reader::{ColumnReader, WordValues};
+pub use reader::{ColumnReader, WordBlock, WordValues};
 pub use row_mask::{RowMask, RowMaskView};

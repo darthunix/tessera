@@ -2,9 +2,38 @@ use std::hint::select_unpredictable;
 use std::mem::MaybeUninit;
 
 use anyhow::{Result, ensure};
-use tessera_core::{ColumnReader, RowMaskView, WordValues};
+use tessera_core::{ColumnReader, RowMaskView, WordBlock, WordValues};
 
 use super::{mask_word, try_fold_words, validate_mask, validate_ready};
+
+/// The rows of a full word whose every row is prepared, as a slice of 64
+/// initialized slots; `None` for the tail word, an out-of-range word, or a
+/// word with an unprepared row.
+#[inline]
+fn prepared_word<'a, T>(
+    values: &'a [MaybeUninit<T>],
+    prepared: Option<RowMaskView<'_>>,
+    word_index: usize,
+) -> Option<&'a [MaybeUninit<T>; 64]> {
+    if mask_word(prepared, word_index) != u64::MAX {
+        return None;
+    }
+    let base = word_index.checked_mul(64)?;
+    values.get(base..base.checked_add(64)?)?.try_into().ok()
+}
+
+/// View 64 slots of prepared rows as initialized values.
+///
+/// # Safety
+///
+/// Every slot must be initialized; the constructor contracts guarantee this
+/// for prepared rows, and `prepared_word` returns only fully prepared words.
+#[inline]
+unsafe fn assume_word<T>(slots: &[MaybeUninit<T>; 64]) -> &[T; 64] {
+    // SAFETY: MaybeUninit<T> has T's layout, and the caller guarantees every
+    // slot is initialized; the borrow keeps the storage alive and immutable.
+    unsafe { &*slots.as_ptr().cast::<[T; 64]>() }
+}
 
 // Read one dense slot of a word whose non-NULL flags are `bits`, without a
 // branch or a data-dependent address: the slot is loaded unconditionally
@@ -166,6 +195,16 @@ impl ColumnReader for DenseInt32Column<'_> {
             fold,
         )
     }
+
+    #[inline]
+    fn word_block(&self, word_index: usize) -> Option<WordBlock<'_, i32>> {
+        let slots = prepared_word(self.values, self.prepared, word_index)?;
+        Some(WordBlock::Dense {
+            // SAFETY: every row of this word is prepared, hence initialized.
+            values: unsafe { assume_word(slots) },
+            non_nulls: mask_word(self.non_nulls, word_index),
+        })
+    }
 }
 
 /// Borrowed PostgreSQL Datum storage interpreted as int4 values.
@@ -294,5 +333,17 @@ impl ColumnReader for DatumInt32Column<'_> {
             init,
             fold,
         )
+    }
+
+    #[inline]
+    fn word_block(&self, word_index: usize) -> Option<WordBlock<'_, i32>> {
+        let values = prepared_word(self.values, self.prepared, word_index)?;
+        let isnull = prepared_word(self.isnull, self.prepared, word_index)?;
+        // SAFETY: every row of this word is prepared, so both its Datum and
+        // its flag are initialized by the constructor contract.
+        Some(WordBlock::Datum {
+            values: unsafe { assume_word(values) },
+            isnull: unsafe { assume_word(isnull) },
+        })
     }
 }

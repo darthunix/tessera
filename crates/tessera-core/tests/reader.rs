@@ -3,7 +3,60 @@
 use std::cell::Cell;
 
 use anyhow::{Context, Result};
-use tessera_core::{ColumnReader, ColumnView, RowMask, RowMaskView, WordValues};
+use tessera_core::{ColumnReader, ColumnView, RowMask, RowMaskView, WordBlock, WordValues};
+
+#[test]
+fn word_blocks_cover_full_words_and_default_to_none() {
+    let values: Vec<i32> = (0..130).collect();
+    let non_null_words = [0xf0f0_f0f0_f0f0_f0f0, u64::MAX, 3];
+    let non_nulls = RowMaskView::try_new(130, &non_null_words).unwrap();
+    let column = ColumnView::try_new(&values, Some(non_nulls)).unwrap();
+    for index in 0..2 {
+        let Some(WordBlock::Dense {
+            values: block,
+            non_nulls,
+        }) = column.word_block(index)
+        else {
+            panic!("full word {index} has a block");
+        };
+        assert_eq!(block, &values[index * 64..(index + 1) * 64]);
+        assert_eq!(non_nulls, non_null_words[index]);
+    }
+    // The short tail and words past the end have no block.
+    assert!(column.word_block(2).is_none());
+    assert!(column.word_block(3).is_none());
+    assert!(column.word_block(usize::MAX).is_none());
+    // Without a NULL mask every row of a block is non-NULL.
+    let plain = ColumnView::try_new(&values[..64], None).unwrap();
+    assert!(matches!(
+        plain.word_block(0),
+        Some(WordBlock::Dense {
+            non_nulls: u64::MAX,
+            ..
+        })
+    ));
+    // Representations without bulk storage keep the default.
+    struct Rows(usize);
+    impl ColumnReader for Rows {
+        type Value = i32;
+        fn nrows(&self) -> usize {
+            self.0
+        }
+        fn get(&self, row: usize) -> Result<Option<i32>> {
+            Ok(Some(row as i32))
+        }
+        fn word_values(
+            &self,
+            word_index: usize,
+            selected: u64,
+        ) -> Result<impl Iterator<Item = (usize, Option<i32>)> + '_> {
+            WordValues::try_new(self.0, word_index, selected, u64::MAX, |row| {
+                Some(row as i32)
+            })
+        }
+    }
+    assert!(Rows(128).word_block(0).is_none());
+}
 
 #[test]
 fn reader_supports_wide_values_and_preserves_inherent_get() {

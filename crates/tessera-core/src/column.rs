@@ -1,7 +1,7 @@
 use anyhow::{Result, ensure};
 
 use crate::bitmap::validate_row;
-use crate::{ColumnReader, RowMaskView, WordValues};
+use crate::{ColumnReader, RowMaskView, WordBlock, WordValues};
 
 /// Read-only access to borrowed, initialized values and their nullness.
 ///
@@ -73,6 +73,21 @@ impl<T: Copy> ColumnReader for ColumnView<'_, T> {
             u64::MAX,
             move |row: usize| (non_nulls & (1 << (row % 64)) != 0).then(|| self.values[row]),
         )
+    }
+
+    /// Every row is prepared and initialized, so every full word is a block.
+    #[inline]
+    fn word_block(&self, word_index: usize) -> Option<WordBlock<'_, T>> {
+        let base = word_index.checked_mul(64)?;
+        let values = self
+            .values
+            .get(base..base.checked_add(64)?)?
+            .try_into()
+            .ok()?;
+        let non_nulls = self
+            .non_nulls
+            .map_or(u64::MAX, |mask| mask.word(word_index).unwrap_or(0));
+        Some(WordBlock::Dense { values, non_nulls })
     }
 }
 
