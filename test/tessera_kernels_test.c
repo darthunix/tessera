@@ -11,6 +11,7 @@ PG_MODULE_MAGIC;
 PG_FUNCTION_INFO_V1(tessera_test_kernels_layout);
 PG_FUNCTION_INFO_V1(tessera_test_kernels_filter);
 PG_FUNCTION_INFO_V1(tessera_test_kernels_errors);
+PG_FUNCTION_INFO_V1(tessera_test_kernels_aggregates);
 PG_FUNCTION_INFO_V1(tessera_test_kernels_panic);
 PG_FUNCTION_INFO_V1(tessera_test_kernels_report);
 
@@ -167,6 +168,79 @@ tessera_test_kernels_errors(PG_FUNCTION_ARGS)
 	if (tess_int4_filter(&column, NULL, &rows, TESS_CMP_GT, 0,
 						 &status) != TESS_OK ||
 		status.code != TESS_ERROR_PANIC)
+		PG_RETURN_BOOL(false);
+
+	PG_RETURN_BOOL(true);
+}
+
+Datum
+tessera_test_kernels_aggregates(PG_FUNCTION_ARGS)
+{
+	Datum		values[NROWS];
+	bool		isnull[NROWS];
+	uint64		words[NWORDS];
+	TessDatumColumn column;
+	TessRowMask rows = {NROWS, words};
+	TessStatus	status = TESS_STRUCT_INITIALIZER(TessStatus);
+	int64		count = 0;
+	int64		sum = 0;
+	int32		least = PG_INT32_MAX;
+	int32		greatest = PG_INT32_MIN;
+	int64		got_count = -1;
+	int64		got_sum = -1;
+	int32		got_min = -1;
+	int32		got_max = -1;
+	bool		sum_null = true;
+	bool		min_null = true;
+	bool		max_null = true;
+	int			row;
+
+	fill(values, isnull, words);
+	init_column(&column, values, isnull);
+	for (row = 0; row < NROWS; row++)
+	{
+		bool		chosen = (words[row / 64] &
+							  (UINT64CONST(1) << (row % 64))) != 0;
+
+		if (chosen && !isnull[row])
+		{
+			int32		value = DatumGetInt32(values[row]);
+
+			count++;
+			sum += value;
+			least = Min(least, value);
+			greatest = Max(greatest, value);
+		}
+	}
+	if (tess_int4_count(&column, NULL, &rows, &got_count, &status) != TESS_OK ||
+		tess_int4_sum(&column, NULL, &rows, &sum_null, &got_sum,
+					  &status) != TESS_OK ||
+		tess_int4_min(&column, NULL, &rows, &min_null, &got_min,
+					  &status) != TESS_OK ||
+		tess_int4_max(&column, NULL, &rows, &max_null, &got_max,
+					  &status) != TESS_OK ||
+		got_count != count || got_sum != sum || got_min != least ||
+		got_max != greatest || sum_null || min_null || max_null)
+		PG_RETURN_BOOL(false);
+
+	/* Without selected rows: count 0, the rest NULL. */
+	memset(words, 0, sizeof(words));
+	if (tess_int4_count(&column, NULL, &rows, &got_count, NULL) != TESS_OK ||
+		tess_int4_sum(&column, NULL, &rows, &sum_null, &got_sum,
+					  NULL) != TESS_OK ||
+		tess_int4_min(&column, NULL, &rows, &min_null, &got_min,
+					  NULL) != TESS_OK ||
+		tess_int4_max(&column, NULL, &rows, &max_null, &got_max,
+					  NULL) != TESS_OK ||
+		got_count != 0 || !sum_null || !min_null || !max_null)
+		PG_RETURN_BOOL(false);
+
+	/* A dimension error writes no result. */
+	column.nrows = NROWS - 1;
+	got_count = 7;
+	if (tess_int4_count(&column, NULL, &rows, &got_count,
+						&status) != TESS_ERROR_INVALID_ARGUMENT ||
+		got_count != 7)
 		PG_RETURN_BOOL(false);
 
 	PG_RETURN_BOOL(true);

@@ -109,4 +109,39 @@ extern TessStatusCode tess_int4_filter(const TessDatumColumn *column,
 									   int32 scalar,
 									   TessStatus *status);
 
+/* The number of selected non-NULL values. */
+extern TessStatusCode tess_int4_count(const TessDatumColumn *column,
+									  const TessRowMask *prepared,
+									  const TessRowMask *rows,
+									  int64 *count,
+									  TessStatus *status);
+
+/*
+ * The int8 sum of the selected non-NULL values; without any, isnull is set
+ * and sum is 0. The sum of one batch cannot overflow; adding batches may,
+ * which the caller checks.
+ */
+extern TessStatusCode tess_int4_sum(const TessDatumColumn *column,
+									const TessRowMask *prepared,
+									const TessRowMask *rows,
+									bool *isnull,
+									int64 *sum,
+									TessStatus *status);
+
+/* The least selected non-NULL value; without any, isnull is set. */
+extern TessStatusCode tess_int4_min(const TessDatumColumn *column,
+									const TessRowMask *prepared,
+									const TessRowMask *rows,
+									bool *isnull,
+									int32 *value,
+									TessStatus *status);
+
+/* The greatest selected non-NULL value; without any, isnull is set. */
+extern TessStatusCode tess_int4_max(const TessDatumColumn *column,
+									const TessRowMask *prepared,
+									const TessRowMask *rows,
+									bool *isnull,
+									int32 *value,
+									TessStatus *status);
+
 #endif							/* TESSERA_KERNELS_H */

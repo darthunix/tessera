@@ -4,8 +4,11 @@
 
 use std::ptr;
 
-use tessera_capi::c::{Code, DatumColumn, Mask, Status, tess_int4_filter, tess_kernels_test_panic};
-use tessera_capi::c::{tess_kernels_abi_version, tess_kernels_layout};
+use tessera_capi::c::{
+    Code, DatumColumn, Mask, Status, tess_int4_count, tess_int4_filter, tess_int4_max,
+    tess_int4_min, tess_int4_sum, tess_kernels_abi_version, tess_kernels_layout,
+    tess_kernels_test_panic,
+};
 
 /// A column of `nrows` int4 Datums with every fifth row NULL, and the
 /// selection words of every row but each third.
@@ -199,6 +202,162 @@ fn invalid_arguments_leave_the_mask_alone() {
     };
     assert_eq!(code, Code::InvalidArgument);
     assert_eq!(fixture.words, original);
+}
+
+#[test]
+fn aggregates_match_a_scalar_loop_and_are_null_without_rows() {
+    let mut fixture = Fixture::new(200);
+    let (mut count, mut sum, mut least, mut greatest) = (0, 0, i32::MAX, i32::MIN);
+    for row in 0..200 {
+        let selected = fixture.words[row / 64] & (1 << (row % 64)) != 0;
+        if selected && !fixture.isnull[row] {
+            let value = fixture.values[row] as i32;
+            count += 1;
+            sum += i64::from(value);
+            least = least.min(value);
+            greatest = greatest.max(value);
+        }
+    }
+    let column = fixture.column();
+    let rows = fixture.mask();
+    let mut status = Status::new();
+    let (mut got_count, mut got_sum, mut got_min, mut got_max) = (-1, -1, -1, -1);
+    let (mut sum_null, mut min_null, mut max_null) = (true, true, true);
+    // SAFETY: local buffers of the declared sizes.
+    unsafe {
+        let column = &raw const column;
+        let rows = &raw const rows;
+        assert_eq!(
+            tess_int4_count(
+                column,
+                ptr::null(),
+                rows,
+                &raw mut got_count,
+                &raw mut status
+            ),
+            Code::Ok
+        );
+        assert_eq!(
+            tess_int4_sum(
+                column,
+                ptr::null(),
+                rows,
+                &raw mut sum_null,
+                &raw mut got_sum,
+                &raw mut status
+            ),
+            Code::Ok
+        );
+        assert_eq!(
+            tess_int4_min(
+                column,
+                ptr::null(),
+                rows,
+                &raw mut min_null,
+                &raw mut got_min,
+                &raw mut status
+            ),
+            Code::Ok
+        );
+        assert_eq!(
+            tess_int4_max(
+                column,
+                ptr::null(),
+                rows,
+                &raw mut max_null,
+                &raw mut got_max,
+                &raw mut status
+            ),
+            Code::Ok
+        );
+    }
+    assert_eq!(
+        (got_count, got_sum, got_min, got_max),
+        (count, sum, least, greatest)
+    );
+    assert_eq!((sum_null, min_null, max_null), (false, false, false));
+    // Without selected rows: count 0, the rest NULL.
+    fixture.words.iter_mut().for_each(|word| *word = 0);
+    let column = fixture.column();
+    let rows = fixture.mask();
+    // SAFETY: as above.
+    unsafe {
+        let column = &raw const column;
+        let rows = &raw const rows;
+        assert_eq!(
+            tess_int4_count(
+                column,
+                ptr::null(),
+                rows,
+                &raw mut got_count,
+                ptr::null_mut()
+            ),
+            Code::Ok
+        );
+        assert_eq!(
+            tess_int4_sum(
+                column,
+                ptr::null(),
+                rows,
+                &raw mut sum_null,
+                &raw mut got_sum,
+                ptr::null_mut()
+            ),
+            Code::Ok
+        );
+        assert_eq!(
+            tess_int4_min(
+                column,
+                ptr::null(),
+                rows,
+                &raw mut min_null,
+                &raw mut got_min,
+                ptr::null_mut()
+            ),
+            Code::Ok
+        );
+        assert_eq!(
+            tess_int4_max(
+                column,
+                ptr::null(),
+                rows,
+                &raw mut max_null,
+                &raw mut got_max,
+                ptr::null_mut()
+            ),
+            Code::Ok
+        );
+    }
+    assert_eq!((got_count, got_sum, got_min, got_max), (0, 0, 0, 0));
+    assert_eq!((sum_null, min_null, max_null), (true, true, true));
+    // A dimension error writes no result.
+    let mut column = fixture.column();
+    column.nrows = 199;
+    got_count = 7;
+    // SAFETY: rejected before any read.
+    let code = unsafe {
+        tess_int4_count(
+            &raw const column,
+            ptr::null(),
+            &raw const rows,
+            &raw mut got_count,
+            &raw mut status,
+        )
+    };
+    assert_eq!(code, Code::InvalidArgument);
+    assert_eq!(got_count, 7);
+    // SAFETY: a null result pointer is rejected before any read.
+    let code = unsafe {
+        tess_int4_sum(
+            &raw const column,
+            ptr::null(),
+            &raw const rows,
+            ptr::null_mut(),
+            &raw mut got_sum,
+            &raw mut status,
+        )
+    };
+    assert_eq!(code, Code::InvalidArgument);
 }
 
 #[test]

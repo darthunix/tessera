@@ -86,3 +86,10 @@ inside a kernel.
 - `tess_int4_filter(column, prepared, rows, op, scalar, status)`: keep in
   `rows` the selected rows whose non-NULL value satisfies `value op scalar`;
   NULL never satisfies a comparison.
+- `tess_int4_count(column, prepared, rows, count, status)`: the number of
+  selected non-NULL values, as `count(column)`.
+- `tess_int4_sum(column, prepared, rows, isnull, sum, status)`: the int8
+  sum of the selected non-NULL values, NULL without any; one batch's sum
+  cannot overflow, the caller checks the running total across batches.
+- `tess_int4_min` and `tess_int4_max(column, prepared, rows, isnull, value,
+  status)`: the least or greatest selected non-NULL value, NULL without any.
