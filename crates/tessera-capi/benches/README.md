@@ -1,10 +1,12 @@
 # Column benchmarks
 
-There are two benchmark programs:
+There are three benchmark programs:
 
 - [column_reader](column_reader.rs) reads and sums selected, non-NULL values
-  from dense and PostgreSQL Datum storage.
+  from dense and PostgreSQL Datum storage through the reader API.
 - [filter_int32](filter_int32.rs) filters values from the same representations.
+- [aggregate_int32](aggregate_int32.rs) runs the `sum`, `min` and `count`
+  kernels over the reading cases.
 
 Neither measures SQL latency or requires PostgreSQL. They measure PMU
 counters, not time: retired instructions, core cycles, mispredicted branches
@@ -110,8 +112,9 @@ column_reader/dense/words/1024/half/nulls-mixed/ready
 An operation is the function measured on those inputs. Reading measures a
 `fold` sum through `try_fold_selected`, a `words` sum through mask words, and
 an independent `reference` sum. Filtering measures the library's `scalar`
-filter and a `reference` filter. The reference is a simple separate
-implementation of the same task, not another source revision.
+filter and a `reference` filter. Aggregating measures the `sum`, `min` and
+`count` kernels and the same `reference` sum as reading. The reference is a
+simple separate implementation of the same task, not another source revision.
 
 The `cases()` functions and measured operations are in
 [reading.rs](support/reading.rs) and [filtering.rs](support/filtering.rs).

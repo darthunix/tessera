@@ -3,6 +3,9 @@
 //! Check the unchanged input matrices, scalar models and bounded mask preparation.
 //! Counter readings are not needed: block bookkeeping is checked with a fake reader.
 
+#[path = "../benches/support/aggregating.rs"]
+#[allow(dead_code)]
+mod aggregating;
 #[path = "../benches/support/filtering.rs"]
 #[allow(dead_code)]
 mod filtering;
@@ -86,6 +89,25 @@ fn reference_matches_scalar_model_and_bitmap_views() {
             case.expected,
         );
     }
+}
+
+#[test]
+fn aggregate_kernels_match_the_fixture_model_on_every_case() -> Result<()> {
+    for case in reading::cases() {
+        let dense = case.dense_column()?;
+        aggregating::check(&reading::Input::new(&dense, &case), &case)?;
+        let datum = case.datum_column()?;
+        aggregating::check(&reading::Input::new(&datum, &case), &case)?;
+        // The model itself: the selected non-NULL values in row order.
+        let present = aggregating::present(&case);
+        assert_eq!(
+            present.iter().map(|&v| i64::from(v)).sum::<i64>(),
+            case.expected,
+            "{}",
+            case.name
+        );
+    }
+    Ok(())
 }
 
 #[test]

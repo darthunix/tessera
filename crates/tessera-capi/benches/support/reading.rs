@@ -17,8 +17,8 @@ use crate::support::{
 // Every measured entry point takes the same borrowed input. It is built before
 // counting and black-boxed once per invocation inside the counted loop.
 pub struct Input<'a, C> {
-    column: &'a C,
-    rows: RowMaskView<'a>,
+    pub column: &'a C,
+    pub rows: RowMaskView<'a>,
     values: &'a [i32],
     datums: &'a [u64],
     nulls: &'a [bool],

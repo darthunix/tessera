@@ -31,7 +31,7 @@ struct Options {
     base: String,
     #[arg(long, value_name = "REF", default_value = "WORKTREE")]
     candidate: String,
-    #[arg(long, value_parser = ["column_reader", "filter_int32"])]
+    #[arg(long, value_parser = ["column_reader", "filter_int32", "aggregate_int32"])]
     bench: Option<String>,
     #[arg(long, value_name = "SUBSTRING")]
     filter: Vec<String>,
@@ -342,7 +342,7 @@ fn compare(repo: &Path, root: &Path, options: &Options, timing: &mut Timing) -> 
             "modes_limit":report::MODES_LIMIT}}),
     )?;
     let benches: Vec<_> = options.bench.as_deref().map_or_else(
-        || vec!["column_reader", "filter_int32"],
+        || vec!["column_reader", "filter_int32", "aggregate_int32"],
         |bench| vec![bench],
     );
     // Finish every build and listing before starting any measuring process.
