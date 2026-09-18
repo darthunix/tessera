@@ -37,3 +37,7 @@ harness = false
 [[bench]]
 name = "arith_int32"
 harness = false
+
+[[bench]]
+name = "hash_int32"
+harness = false

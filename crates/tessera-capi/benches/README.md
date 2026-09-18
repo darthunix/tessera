@@ -1,6 +1,6 @@
 # Column benchmarks
 
-There are four benchmark programs:
+There are five benchmark programs:
 
 - [column_reader](column_reader.rs) reads and sums selected, non-NULL values
   from dense and PostgreSQL Datum storage through the reader API.
@@ -9,6 +9,8 @@ There are four benchmark programs:
   kernels over the reading cases.
 - [arith_int32](arith_int32.rs) computes `x + 7`, `x * 7`, `x / 7` and
   `x + x` into a result column over the reading cases.
+- [hash_int32](hash_int32.rs) hashes one and two keys into a hash column
+  and a valid mask over the reading cases.
 
 Neither measures SQL latency or requires PostgreSQL. They measure PMU
 counters, not time: retired instructions, core cycles, mispredicted branches
@@ -118,8 +120,11 @@ filter and a `reference` filter. Aggregating measures the `sum`, `min` and
 `count` kernels and the same `reference` sum as reading. Arithmetic measures
 `add_scalar`, `mul_scalar`, `div_scalar`, `mod_scalar` and `add_column`
 writing a result column, and a `reference` scalar loop computing `x + 7` with
-checked arithmetic. The reference is a simple separate implementation of the same
-task, not another source revision.
+checked arithmetic. Hashing measures `hash` (one key, NULL rows rejected),
+`hash_group` (NULL as a group key), `two_keys` (`hash` then `hash_next` with
+the same column) and a `reference` scalar loop hashing one key. The
+reference is a simple separate implementation of the same task, not another
+source revision.
 
 The `cases()` functions and measured operations are in
 [reading.rs](support/reading.rs) and [filtering.rs](support/filtering.rs).

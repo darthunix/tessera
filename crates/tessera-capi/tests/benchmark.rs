@@ -12,6 +12,9 @@ mod arithmetic;
 #[path = "../benches/support/filtering.rs"]
 #[allow(dead_code)]
 mod filtering;
+#[path = "../benches/support/hashing.rs"]
+#[allow(dead_code)]
+mod hashing;
 #[path = "../benches/support/reading.rs"]
 #[allow(dead_code)]
 mod reading;
@@ -127,6 +130,25 @@ fn arithmetic_kernels_match_the_fixture_model_on_every_case() -> Result<()> {
             &reading::Input::new(&datum, &case),
             &case,
             arithmetic::datum_reference,
+        )?;
+    }
+    Ok(())
+}
+
+#[test]
+fn hash_kernels_match_the_fixture_model_on_every_case() -> Result<()> {
+    for case in reading::cases() {
+        let dense = case.dense_column()?;
+        hashing::check(
+            &reading::Input::new(&dense, &case),
+            &case,
+            hashing::dense_reference,
+        )?;
+        let datum = case.datum_column()?;
+        hashing::check(
+            &reading::Input::new(&datum, &case),
+            &case,
+            hashing::datum_reference,
         )?;
     }
     Ok(())
