@@ -14,8 +14,8 @@ mod status;
 pub use column::DatumColumn;
 pub use int32::{
     tess_int4_arith_columns, tess_int4_arith_scalar, tess_int4_arith_scalar_left, tess_int4_count,
-    tess_int4_filter, tess_int4_max, tess_int4_min, tess_int4_sum, tess_kernels_abi_version,
-    tess_kernels_layout, tess_kernels_test_panic,
+    tess_int4_filter, tess_int4_hash, tess_int4_hash_next, tess_int4_max, tess_int4_min,
+    tess_int4_sum, tess_kernels_abi_version, tess_kernels_layout, tess_kernels_test_panic,
 };
 pub use mask::Mask;
 pub use status::{Code, MESSAGE_SIZE, Status};

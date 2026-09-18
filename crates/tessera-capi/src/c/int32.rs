@@ -6,7 +6,7 @@ use std::slice;
 
 use anyhow::{Context, Result, bail, ensure};
 use tessera_core::{RowMask, RowMaskView};
-use tessera_kernels::int32::{self, ArithOp, CompareOp};
+use tessera_kernels::int32::{self, ArithOp, CompareOp, NullKeys};
 
 use super::column::DatumColumn;
 use super::mask::Mask;
@@ -224,6 +224,96 @@ pub unsafe extern "C" fn tess_int4_arith_columns(
             int32::arith_columns(op, &left, &right, &rows, values, &mut non_nulls)
         })
     }
+}
+
+/// The result buffers of a hash entry point: `hashes` has the row count of
+/// `valid`.
+///
+/// # Safety
+///
+/// `valid` must point to a valid mask and `hashes` to as many initialized,
+/// writable `u32` slots as it has rows; nothing else may access either for
+/// `'a`.
+unsafe fn hash_outputs<'a>(
+    hashes: *mut u32,
+    valid: *mut Mask,
+) -> Result<(&'a mut [u32], RowMask<'a>)> {
+    // SAFETY: the caller's contract, for `'a`.
+    unsafe {
+        let valid = valid.as_mut().context("a null valid mask")?.mask()?;
+        let nrows = valid.as_view().nrows();
+        let hashes = if nrows == 0 {
+            &mut [][..]
+        } else {
+            ensure!(!hashes.is_null(), "a null hash buffer");
+            slice::from_raw_parts_mut(hashes, nrows)
+        };
+        Ok((hashes, valid))
+    }
+}
+
+/// `tess_int4_hash`: hash the first key of the selected rows into `hashes`
+/// and set `valid`.
+///
+/// # Safety
+///
+/// As for [`inputs`] and [`hash_outputs`]; `status` as for every entry
+/// point.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tess_int4_hash(
+    column: *const DatumColumn,
+    prepared: *const Mask,
+    rows: *const Mask,
+    nulls: c_uint,
+    hashes: *mut u32,
+    valid: *mut Mask,
+    status: *mut Status,
+) -> Code {
+    // SAFETY: the caller's contract.
+    unsafe {
+        guard(status, || {
+            let nulls = null_keys(nulls)?;
+            let (column, rows) = inputs(column, prepared, rows)?;
+            let (hashes, mut valid) = hash_outputs(hashes, valid)?;
+            int32::hash(&column, &rows, nulls, hashes, &mut valid)
+        })
+    }
+}
+
+/// `tess_int4_hash_next`: fold the next key into the hashes of the rows in
+/// `valid`, narrowing it.
+///
+/// # Safety
+///
+/// As for [`reader`] and [`hash_outputs`]; `status` as for every entry
+/// point.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tess_int4_hash_next(
+    column: *const DatumColumn,
+    prepared: *const Mask,
+    nulls: c_uint,
+    hashes: *mut u32,
+    valid: *mut Mask,
+    status: *mut Status,
+) -> Code {
+    // SAFETY: the caller's contract.
+    unsafe {
+        guard(status, || {
+            let nulls = null_keys(nulls)?;
+            let column = reader(column, prepared)?;
+            let (hashes, mut valid) = hash_outputs(hashes, valid)?;
+            int32::hash_next(&column, nulls, hashes, &mut valid)
+        })
+    }
+}
+
+/// A `TessNullKeys` value.
+fn null_keys(nulls: c_uint) -> Result<NullKeys> {
+    Ok(match nulls {
+        0 => NullKeys::Reject,
+        1 => NullKeys::Group,
+        _ => bail!("unknown NULL key policy {nulls}"),
+    })
 }
 
 /// A `TessArithOp` value.

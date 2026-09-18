@@ -104,3 +104,12 @@ inside a kernel.
   are unspecified and need no initialization, and words without selected
   rows get a cleared `non_nulls` word. Overflow reports `22003`, a zero
   divisor `22012`; `MIN / -1` is out of range and `x % -1` is 0.
+- `tess_int4_hash(column, prepared, rows, nulls, hashes, valid, status)`
+  and `tess_int4_hash_next(column, prepared, nulls, hashes, valid, status)`:
+  the 32-bit key hashes of pg_batch (`murmurhash32`, further keys folded in
+  with `hash_combine` in call order). The first key takes the selection and
+  sets `valid`; each next key takes `valid` as its selection and narrows
+  it, never reading a rejected row. `TESS_NULL_KEYS_REJECT` drops a row
+  with a NULL key (joins); `TESS_NULL_KEYS_GROUP` hashes NULL as one fixed
+  key (grouping). `hashes` has the batch's row count and any contents;
+  rows outside `valid` are unspecified.

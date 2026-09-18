@@ -6,9 +6,11 @@ use std::ptr;
 
 use tessera_capi::c::{
     Code, DatumColumn, Mask, Status, tess_int4_arith_columns, tess_int4_arith_scalar,
-    tess_int4_arith_scalar_left, tess_int4_count, tess_int4_filter, tess_int4_max, tess_int4_min,
-    tess_int4_sum, tess_kernels_abi_version, tess_kernels_layout, tess_kernels_test_panic,
+    tess_int4_arith_scalar_left, tess_int4_count, tess_int4_filter, tess_int4_hash,
+    tess_int4_hash_next, tess_int4_max, tess_int4_min, tess_int4_sum, tess_kernels_abi_version,
+    tess_kernels_layout, tess_kernels_test_panic,
 };
+use tessera_kernels::int32::{hash_combine, murmurhash32};
 
 /// A column of `nrows` int4 Datums with every fifth row NULL, and the
 /// selection words of every row but each third.
@@ -520,6 +522,95 @@ fn arithmetic_writes_results_and_reports_postgresql_codes() {
     assert_eq!(code, Code::Ok);
     assert_eq!(result_words, [0b110]);
     assert_eq!((values[1], values[2]), (0, 0));
+}
+
+#[test]
+fn hashes_follow_pg_batch_and_the_null_policy() {
+    // Keys 1, NULL, 42 selected; murmurhash32(1) is 0x514e28b7.
+    let (datums, isnull, selected) = small(&[1, 7, 42], &[false, true, false]);
+    let column = DatumColumn {
+        struct_size: size_of::<DatumColumn>(),
+        values: datums.as_ptr(),
+        isnull: isnull.as_ptr(),
+        nrows: 3,
+    };
+    let mut selection = [selected];
+    let rows = Mask {
+        nrows: 3,
+        bits: selection.as_mut_ptr(),
+    };
+    let mut hashes = [0xdead_beef_u32; 3];
+    let mut valid_words = [0];
+    let mut valid = Mask {
+        nrows: 3,
+        bits: valid_words.as_mut_ptr(),
+    };
+    let mut status = Status::new();
+    for (policy, expected_valid, null_hash) in [(0, 0b101, None), (1, 0b111, Some(0x92ca_2f0e))] {
+        // SAFETY: local buffers of the declared sizes.
+        let code = unsafe {
+            tess_int4_hash(
+                &raw const column,
+                ptr::null(),
+                &raw const rows,
+                policy,
+                hashes.as_mut_ptr(),
+                &raw mut valid,
+                &raw mut status,
+            )
+        };
+        assert_eq!(code, Code::Ok, "policy {policy}");
+        assert_eq!(valid_words, [expected_valid]);
+        assert_eq!(hashes[0], 0x514e_28b7);
+        assert_eq!(hashes[2], murmurhash32(42));
+        if let Some(null_hash) = null_hash {
+            assert_eq!(hashes[1], null_hash);
+        }
+        // The same column as a second key.
+        // SAFETY: as above.
+        let code = unsafe {
+            tess_int4_hash_next(
+                &raw const column,
+                ptr::null(),
+                policy,
+                hashes.as_mut_ptr(),
+                &raw mut valid,
+                &raw mut status,
+            )
+        };
+        assert_eq!(code, Code::Ok, "policy {policy}");
+        assert_eq!(valid_words, [expected_valid]);
+        assert_eq!(hashes[0], hash_combine(murmurhash32(1), murmurhash32(1)));
+        if let Some(null_hash) = null_hash {
+            assert_eq!(hashes[1], hash_combine(null_hash, null_hash));
+        }
+    }
+    // An unknown policy and a null hash buffer are rejected.
+    // SAFETY: rejected before any read.
+    let code = unsafe {
+        tess_int4_hash(
+            &raw const column,
+            ptr::null(),
+            &raw const rows,
+            2,
+            hashes.as_mut_ptr(),
+            &raw mut valid,
+            &raw mut status,
+        )
+    };
+    assert_eq!(code, Code::InvalidArgument);
+    // SAFETY: as above.
+    let code = unsafe {
+        tess_int4_hash_next(
+            &raw const column,
+            ptr::null(),
+            0,
+            ptr::null_mut(),
+            &raw mut valid,
+            &raw mut status,
+        )
+    };
+    assert_eq!(code, Code::InvalidArgument);
 }
 
 #[test]

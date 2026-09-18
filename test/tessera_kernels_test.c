@@ -13,6 +13,7 @@ PG_FUNCTION_INFO_V1(tessera_test_kernels_filter);
 PG_FUNCTION_INFO_V1(tessera_test_kernels_errors);
 PG_FUNCTION_INFO_V1(tessera_test_kernels_aggregates);
 PG_FUNCTION_INFO_V1(tessera_test_kernels_arithmetic);
+PG_FUNCTION_INFO_V1(tessera_test_kernels_hashes);
 PG_FUNCTION_INFO_V1(tessera_test_kernels_panic);
 PG_FUNCTION_INFO_V1(tessera_test_kernels_report);
 
@@ -345,6 +346,58 @@ tessera_test_kernels_arithmetic(PG_FUNCTION_ARGS)
 							   small_results, &small_non_nulls,
 							   &status) != TESS_OK ||
 		small_word != 5 || small_results[0] != 0 || small_results[2] != 0)
+		PG_RETURN_BOOL(false);
+
+	PG_RETURN_BOOL(true);
+}
+
+/* PostgreSQL's hash_combine, for the expected two-key hashes. */
+static uint32
+combine(uint32 a, uint32 b)
+{
+	a ^= b + 0x9e3779b9 + (a << 6) + (a >> 2);
+	return a;
+}
+
+Datum
+tessera_test_kernels_hashes(PG_FUNCTION_ARGS)
+{
+	Datum		values[3];
+	bool		isnull[3];
+	TessDatumColumn column;
+	uint64		selection = 7;
+	TessRowMask rows = {3, &selection};
+	uint32		hashes[3] = {0xdeadbeef, 0xdeadbeef, 0xdeadbeef};
+	uint64		valid_word = 0;
+	TessRowMask valid = {3, &valid_word};
+	TessStatus	status = TESS_STRUCT_INITIALIZER(TessStatus);
+	const uint32 hash_of_1 = 0x514e28b7;
+	const uint32 hash_of_42 = 0x087fcd5c;
+	const uint32 null_hash = 0x92ca2f0e;
+
+	/* Keys 1, NULL, 42: known murmurhash32 values from PostgreSQL. */
+	init_small(&column, values, isnull, 1, 7, 42, true);
+	if (tess_int4_hash(&column, NULL, &rows, TESS_NULL_KEYS_REJECT, hashes,
+					   &valid, &status) != TESS_OK ||
+		valid_word != 5 || hashes[0] != hash_of_1 || hashes[2] != hash_of_42 ||
+		tess_int4_hash_next(&column, NULL, TESS_NULL_KEYS_REJECT, hashes,
+							&valid, &status) != TESS_OK ||
+		valid_word != 5 || hashes[0] != combine(hash_of_1, hash_of_1) ||
+		hashes[2] != combine(hash_of_42, hash_of_42))
+		PG_RETURN_BOOL(false);
+
+	/* Under the group policy NULL is a key with a fixed hash. */
+	if (tess_int4_hash(&column, NULL, &rows, TESS_NULL_KEYS_GROUP, hashes,
+					   &valid, &status) != TESS_OK ||
+		valid_word != 7 || hashes[1] != null_hash ||
+		tess_int4_hash_next(&column, NULL, TESS_NULL_KEYS_GROUP, hashes,
+							&valid, &status) != TESS_OK ||
+		valid_word != 7 || hashes[1] != combine(null_hash, null_hash))
+		PG_RETURN_BOOL(false);
+
+	/* An unknown policy is rejected. */
+	if (tess_int4_hash(&column, NULL, &rows, (TessNullKeys) 2, hashes,
+					   &valid, &status) != TESS_ERROR_INVALID_ARGUMENT)
 		PG_RETURN_BOOL(false);
 
 	PG_RETURN_BOOL(true);

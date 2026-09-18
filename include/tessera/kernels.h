@@ -89,6 +89,15 @@ typedef enum TessArithOp
 	TESS_ARITH_MOD = 4
 } TessArithOp;
 
+/* What a NULL key does to its row when hashing. */
+typedef enum TessNullKeys
+{
+	/* The row leaves the valid mask: a NULL key matches nothing in a join. */
+	TESS_NULL_KEYS_REJECT = 0,
+	/* The row stays and NULL hashes as a fixed key: NULLs form one group. */
+	TESS_NULL_KEYS_GROUP = 1
+} TessNullKeys;
+
 /* Sizes and offsets the Rust side was built with, for layout checks. */
 typedef enum TessLayoutKind
 {
@@ -196,5 +205,31 @@ extern TessStatusCode tess_int4_arith_columns(TessArithOp op,
 											  int32 *values,
 											  TessRowMask *non_nulls,
 											  TessStatus *status);
+
+/*
+ * Hash the first key of the selected rows: hashes[row] receives
+ * murmurhash32 of the row's int4 value (32 bits, as pg_batch) and valid
+ * receives the selection narrowed by the NULL policy. hashes has the
+ * batch's row count and any contents; rows outside valid are unspecified.
+ */
+extern TessStatusCode tess_int4_hash(const TessDatumColumn *column,
+									 const TessRowMask *prepared,
+									 const TessRowMask *rows,
+									 TessNullKeys nulls,
+									 uint32 *hashes,
+									 TessRowMask *valid,
+									 TessStatus *status);
+
+/*
+ * Fold the next key into the hashes of the rows in valid with
+ * hash_combine, narrowing valid by the NULL policy; a row rejected by an
+ * earlier key is not read. Keys fold in call order.
+ */
+extern TessStatusCode tess_int4_hash_next(const TessDatumColumn *column,
+										  const TessRowMask *prepared,
+										  TessNullKeys nulls,
+										  uint32 *hashes,
+										  TessRowMask *valid,
+										  TessStatus *status);
 
 #endif							/* TESSERA_KERNELS_H */
