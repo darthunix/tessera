@@ -203,11 +203,7 @@ where
     }
 
     /// Every word row by row.
-    fn rows(
-        &self,
-        output: Output<'_, '_, '_, '_>,
-        evaluate: &dyn Fn(i32, i32) -> Result<i32, ArithmeticError>,
-    ) -> Result<()> {
+    fn rows<E: Evaluate>(&self, output: Output<'_, '_, '_, '_>, evaluate: &E) -> Result<()> {
         let rows = output.rows;
         let mut output = output;
         for index in 0..rows.nrows().div_ceil(64) {
@@ -220,12 +216,12 @@ where
     /// One word row by row. The three operand shapes give three loops of
     /// one body; two columns are zipped word by word, which the trait
     /// guarantees to yield the same rows in the same order.
-    fn word(
+    fn word<E: Evaluate>(
         &self,
         index: usize,
         selected: u64,
         output: &mut Output<'_, '_, '_, '_>,
-        evaluate: &dyn Fn(i32, i32) -> Result<i32, ArithmeticError>,
+        evaluate: &E,
     ) -> Result<()> {
         if selected == 0 {
             return output.non_nulls.set_word(index, 0);
@@ -329,22 +325,64 @@ where
                 || (!selected.is_power_of_two() && selected.count_ones() >= BULK_MIN_ROWS))
                 && operands.blocks(0).is_some()
         });
-    with_op(op, |evaluate| {
-        if whole_words {
-            bulk(op, &operands, output, evaluate)
-        } else {
-            operands.rows(output, evaluate)
-        }
-    })
+    // The operation is chosen once; each arm's closure is inlined into its
+    // own loops, unlike a trait object, which called per row.
+    match op {
+        ArithOp::Add => execute(op, &operands, output, whole_words, &|a: i32, b: i32| {
+            a.checked_add(b).ok_or(ArithmeticError::IntegerOutOfRange)
+        }),
+        ArithOp::Sub => execute(op, &operands, output, whole_words, &|a: i32, b: i32| {
+            a.checked_sub(b).ok_or(ArithmeticError::IntegerOutOfRange)
+        }),
+        ArithOp::Mul => execute(op, &operands, output, whole_words, &|a: i32, b: i32| {
+            a.checked_mul(b).ok_or(ArithmeticError::IntegerOutOfRange)
+        }),
+        ArithOp::Div => execute(op, &operands, output, whole_words, &|a: i32, b: i32| {
+            if b == 0 {
+                Err(ArithmeticError::DivisionByZero)
+            } else {
+                a.checked_div(b).ok_or(ArithmeticError::IntegerOutOfRange)
+            }
+        }),
+        ArithOp::Mod => execute(op, &operands, output, whole_words, &|a: i32, b: i32| {
+            if b == 0 {
+                Err(ArithmeticError::DivisionByZero)
+            } else {
+                Ok(a.wrapping_rem(b))
+            }
+        }),
+    }
+}
+
+/// One int4 operation on two non-NULL values.
+trait Evaluate: Fn(i32, i32) -> Result<i32, ArithmeticError> {}
+impl<F: Fn(i32, i32) -> Result<i32, ArithmeticError>> Evaluate for F {}
+
+fn execute<L, R, E: Evaluate>(
+    op: ArithOp,
+    operands: &Operands<'_, L, R>,
+    output: Output<'_, '_, '_, '_>,
+    whole_words: bool,
+    evaluate: &E,
+) -> Result<()>
+where
+    L: ColumnReader<Value = i32>,
+    R: ColumnReader<Value = i32>,
+{
+    if whole_words {
+        bulk(op, operands, output, evaluate)
+    } else {
+        operands.rows(output, evaluate)
+    }
 }
 
 /// Whole words where every column operand exposes them, rows elsewhere.
 #[inline(never)]
-fn bulk<L, R>(
+fn bulk<L, R, E: Evaluate>(
     op: ArithOp,
     operands: &Operands<'_, L, R>,
     output: Output<'_, '_, '_, '_>,
-    evaluate: &dyn Fn(i32, i32) -> Result<i32, ArithmeticError>,
+    evaluate: &E,
 ) -> Result<()>
 where
     L: ColumnReader<Value = i32>,
@@ -372,15 +410,13 @@ where
             ArithOp::Sub => bulk_op::sub(lhs, rhs, present, out),
             ArithOp::Mul => bulk_op::mul(lhs, rhs, present, out),
             ArithOp::Div | ArithOp::Mod => {
-                // No vector division: lane by lane from the blocks, with a
-                // placeholder for absent lanes so that nothing branches.
-                for (lane, slot) in out.iter_mut().enumerate() {
-                    let (a, b) = if present & (1 << lane) != 0 {
-                        (lhs.lane(lane), rhs.lane(lane))
-                    } else {
-                        (0, 1)
-                    };
-                    slot.write(evaluate(a, b)?);
+                // No vector division: the present lanes one by one from the
+                // blocks; a division is too dear to spend on absent lanes.
+                let mut lanes = present;
+                while lanes != 0 {
+                    let lane = lanes.trailing_zeros() as usize;
+                    lanes &= lanes - 1;
+                    out[lane].write(evaluate(lhs.lane(lane), rhs.lane(lane))?);
                 }
                 false
             }
@@ -415,32 +451,6 @@ mod bulk_op {
     }
 }
 
-/// Choose the operation once and run `body` with it.
-fn with_op<T>(
-    op: ArithOp,
-    body: impl FnOnce(&dyn Fn(i32, i32) -> Result<i32, ArithmeticError>) -> T,
-) -> T {
-    match op {
-        ArithOp::Add => body(&|a, b| a.checked_add(b).ok_or(ArithmeticError::IntegerOutOfRange)),
-        ArithOp::Sub => body(&|a, b| a.checked_sub(b).ok_or(ArithmeticError::IntegerOutOfRange)),
-        ArithOp::Mul => body(&|a, b| a.checked_mul(b).ok_or(ArithmeticError::IntegerOutOfRange)),
-        ArithOp::Div => body(&|a, b| {
-            if b == 0 {
-                Err(ArithmeticError::DivisionByZero)
-            } else {
-                a.checked_div(b).ok_or(ArithmeticError::IntegerOutOfRange)
-            }
-        }),
-        ArithOp::Mod => body(&|a, b| {
-            if b == 0 {
-                Err(ArithmeticError::DivisionByZero)
-            } else {
-                Ok(a.wrapping_rem(b))
-            }
-        }),
-    }
-}
-
 /// The result buffers and the selection they follow.
 struct Output<'r, 'v, 'm, 'w> {
     rows: &'r RowMaskView<'r>,
@@ -452,12 +462,7 @@ impl Output<'_, '_, '_, '_> {
     /// One word's selected rows: a NULL row gets a placeholder computed
     /// from `(0, 1)`, which no operation rejects, so that the loop has no
     /// branch on nullness; only the error check branches, and it never goes.
-    fn word<I>(
-        &mut self,
-        index: usize,
-        pairs: I,
-        evaluate: &dyn Fn(i32, i32) -> Result<i32, ArithmeticError>,
-    ) -> Result<()>
+    fn word<I, E: Evaluate>(&mut self, index: usize, pairs: I, evaluate: &E) -> Result<()>
     where
         I: Iterator<Item = (usize, Option<(i32, i32)>)>,
     {
