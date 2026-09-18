@@ -103,9 +103,13 @@ pub fn hash<C: ColumnReader<Value = i32>>(
     hashes: &mut [u32],
     valid: &mut RowMask<'_>,
 ) -> Result<()> {
+    ensure!(
+        rows.nrows() == valid.as_view().nrows(),
+        "selection and mask row counts differ"
+    );
     run(
         column,
-        Some(rows),
+        rows,
         nulls,
         hashes,
         valid,
@@ -126,7 +130,15 @@ pub fn hash_next<C: ColumnReader<Value = i32>>(
     hashes: &mut [u32],
     valid: &mut RowMask<'_>,
 ) -> Result<()> {
-    run(column, None, nulls, hashes, valid, hash_combine, Step::Next)
+    run(
+        column,
+        &Valid,
+        nulls,
+        hashes,
+        valid,
+        hash_combine,
+        Step::Next,
+    )
 }
 
 /// Which key of the chain a call hashes: the whole-word form of the fold.
@@ -136,13 +148,37 @@ enum Step {
     Next,
 }
 
-/// Check the dimensions, choose the strategy by the first word, and run.
-/// The selection comes from `rows` for the first key and from `valid`
-/// itself for the next ones. The fold is chosen once per call and inlined
-/// into the row loop; `step` is its whole-word form.
-fn run<C, F>(
+/// Where a call's selection words come from: a type, not a runtime choice,
+/// so that each instance of the loops reads its source directly.
+trait Selection {
+    fn word(&self, valid: &RowMask<'_>, index: usize) -> u64;
+}
+
+/// The first key selects from the caller's rows.
+impl Selection for RowMaskView<'_> {
+    #[inline(always)]
+    fn word(&self, _: &RowMask<'_>, index: usize) -> u64 {
+        RowMaskView::word(self, index).unwrap()
+    }
+}
+
+/// The next keys select from the valid mask itself.
+struct Valid;
+
+impl Selection for Valid {
+    #[inline(always)]
+    fn word(&self, valid: &RowMask<'_>, index: usize) -> u64 {
+        valid.as_view().word(index).unwrap()
+    }
+}
+
+/// Check the dimensions, choose the strategy by the first word, and run:
+/// whole words out of line, rows here, where the row loop knows the
+/// hashes' length and pays no bounds check per row. The fold is chosen once
+/// per call and inlined into the row loop; `step` is its whole-word form.
+fn run<C, F, S>(
     column: &C,
-    rows: Option<&RowMaskView<'_>>,
+    selection: &S,
     nulls: NullKeys,
     hashes: &mut [u32],
     valid: &mut RowMask<'_>,
@@ -152,56 +188,27 @@ fn run<C, F>(
 where
     C: ColumnReader<Value = i32>,
     F: Fn(u32, u32) -> u32,
+    S: Selection,
 {
     let nrows = valid.as_view().nrows();
     ensure!(
-        column.nrows() == nrows
-            && hashes.len() == nrows
-            && rows.is_none_or(|rows| rows.nrows() == nrows),
+        column.nrows() == nrows && hashes.len() == nrows,
         "column, hashes and mask row counts differ"
     );
     let reject = nulls == NullKeys::Reject;
     // The first word decides, as for the arithmetic.
     let whole_words = cfg!(all(target_arch = "aarch64", not(miri))) && nrows >= 64 && {
-        let selected = selection(rows, valid, 0);
+        let selected = selection.word(valid, 0);
         (selected == u64::MAX
             || (!selected.is_power_of_two() && selected.count_ones() >= BULK_MIN_ROWS))
             && block(column, 0).is_some()
     };
     if whole_words {
-        bulk(column, rows, reject, step, hashes, valid, &fold)
-    } else {
-        by_rows(column, rows, reject, hashes, valid, &fold)
+        return bulk(column, selection, reject, step, hashes, valid, &fold);
     }
-}
-
-/// The selection word of the first key's rows or of the valid mask.
-#[inline(always)]
-fn selection(rows: Option<&RowMaskView<'_>>, valid: &RowMask<'_>, index: usize) -> u64 {
-    match rows {
-        Some(rows) => rows.word(index),
-        None => valid.as_view().word(index),
-    }
-    .unwrap()
-}
-
-/// Every word row by row. Out of line, like the whole-word loop.
-#[inline(never)]
-fn by_rows<C, F>(
-    column: &C,
-    rows: Option<&RowMaskView<'_>>,
-    reject: bool,
-    hashes: &mut [u32],
-    valid: &mut RowMask<'_>,
-    fold: &F,
-) -> Result<()>
-where
-    C: ColumnReader<Value = i32>,
-    F: Fn(u32, u32) -> u32,
-{
-    for index in 0..valid.as_view().nrows().div_ceil(64) {
-        let selected = selection(rows, valid, index);
-        let present = word(column, index, selected, reject, hashes, fold)?;
+    for index in 0..nrows.div_ceil(64) {
+        let selected = selection.word(valid, index);
+        let present = word(column, index, selected, reject, hashes, &fold)?;
         valid.set_word(index, present)?;
     }
     Ok(())
@@ -209,9 +216,9 @@ where
 
 /// Whole words where the column exposes them, rows elsewhere.
 #[inline(never)]
-fn bulk<C, F>(
+fn bulk<C, F, S>(
     column: &C,
-    rows: Option<&RowMaskView<'_>>,
+    selection: &S,
     reject: bool,
     step: Step,
     hashes: &mut [u32],
@@ -221,9 +228,10 @@ fn bulk<C, F>(
 where
     C: ColumnReader<Value = i32>,
     F: Fn(u32, u32) -> u32,
+    S: Selection,
 {
     for index in 0..valid.as_view().nrows().div_ceil(64) {
-        let selected = selection(rows, valid, index);
+        let selected = selection.word(valid, index);
         if selected == 0 || selected.is_power_of_two() {
             let present = word(column, index, selected, reject, hashes, fold)?;
             valid.set_word(index, present)?;
