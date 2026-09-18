@@ -1,8 +1,28 @@
 #![forbid(unsafe_code)]
 
 use anyhow::Result;
-use tessera_core::{ColumnView, RowMaskView};
+use tessera_core::{ColumnReader, ColumnView, RowMaskView};
 use tessera_kernels::int32::{count, max, min, sum};
+
+/// The same values without bulk storage: every call takes the row path.
+struct RowsOnly<'a>(ColumnView<'a, i32>);
+
+impl ColumnReader for RowsOnly<'_> {
+    type Value = i32;
+    fn nrows(&self) -> usize {
+        self.0.nrows()
+    }
+    fn get(&self, row: usize) -> Result<Option<i32>> {
+        ColumnReader::get(&self.0, row)
+    }
+    fn word_values(
+        &self,
+        word_index: usize,
+        selected: u64,
+    ) -> Result<impl Iterator<Item = (usize, Option<i32>)> + '_> {
+        self.0.word_values(word_index, selected)
+    }
+}
 
 const VALUES: [i32; 7] = [i32::MIN, -42, -1, 0, 1, 42, i32::MAX];
 
@@ -95,6 +115,55 @@ fn aggregates_match_the_model_on_random_data() -> Result<()> {
                 )?;
             }
         }
+    }
+    Ok(())
+}
+
+#[test]
+fn bulk_words_agree_with_the_row_path() -> Result<()> {
+    let mut state = 0x2545_F491_4F6C_DD1D;
+    let nrows = 5 * 64 + 9;
+    let values: Vec<i32> = (0..nrows)
+        .map(|_| {
+            let draw = random(&mut state);
+            if draw.is_multiple_of(5) {
+                VALUES[(draw >> 8) as usize % VALUES.len()]
+            } else {
+                (draw >> 8) as i32
+            }
+        })
+        .collect();
+    let non_null: Vec<bool> = (0..nrows)
+        .map(|_| !random(&mut state).is_multiple_of(4))
+        .collect();
+    let non_null_words = words_for(&non_null);
+    let non_nulls = RowMaskView::try_new(nrows, &non_null_words)?;
+    let column = ColumnView::try_new(&values, Some(non_nulls))?;
+    let rows_only = RowsOnly(ColumnView::try_new(&values, Some(non_nulls))?);
+    // A full first word puts the call on the whole-word path; the later
+    // words range from full to sparse, single-row and empty.
+    let mut selected: Vec<bool> = (0..nrows)
+        .map(|row| match row / 64 {
+            0 | 1 => true,
+            2 => random(&mut state).is_multiple_of(2),
+            3 => row % 64 == 17,
+            4 => false,
+            _ => row % 3 == 0,
+        })
+        .collect();
+    for pass in 0..2 {
+        if pass == 1 {
+            // Every word NULL-free rows only: the unmasked kernels.
+            selected = (0..nrows).map(|row| non_null[row]).collect();
+        }
+        let words = words_for(&selected);
+        let rows = RowMaskView::try_new(nrows, &words)?;
+        assert_eq!(count(&column, &rows)?, count(&rows_only, &rows)?);
+        assert_eq!(sum(&column, &rows)?, sum(&rows_only, &rows)?);
+        assert_eq!(min(&column, &rows)?, min(&rows_only, &rows)?);
+        assert_eq!(max(&column, &rows)?, max(&rows_only, &rows)?);
+        let expected = model(&values, &selected, &non_null);
+        assert_aggregates(&column, &rows, &expected, "mixed words")?;
     }
     Ok(())
 }
