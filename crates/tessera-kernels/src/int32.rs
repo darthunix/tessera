@@ -154,7 +154,9 @@ fn filter_rows<C: ColumnReader<Value = i32>>(
 /// Every multi-row word from `first` on compared whole; the tail word and
 /// any word the reader refuses take the row path out of line. Once a call
 /// is here, a word of even a few rows is cheaper whole than through that
-/// call.
+/// call. Out of line so that the row loop, inlined into the entry with the
+/// leading words, keeps the shape it had before the whole-word path existed.
+#[inline(never)]
 fn filter_bulk<C: ColumnReader<Value = i32>>(
     column: &C,
     rows: &mut RowMask<'_>,
