@@ -218,10 +218,11 @@ where
 
     /// One word row by row. The three operand shapes give three loops of
     /// one body; two columns are zipped word by word, which the trait
-    /// guarantees to yield the same rows in the same order. Always inlined:
-    /// the shape is a constant at every call site once the callers are
-    /// inlined, and as a call it cost a sparse selection thirty
-    /// instructions per word.
+    /// guarantees to yield the same rows in the same order. A NULL row is
+    /// computed from a placeholder pair that no operation rejects, so that
+    /// the loop has no branch on nullness; only the error check branches,
+    /// and it never goes. The pair is built from two scalars, not an
+    /// `Option` of a tuple, which the compiler kept on the stack.
     #[inline(always)]
     fn word<E: Evaluate>(
         &self,
@@ -233,28 +234,36 @@ where
         if selected == 0 {
             return output.non_nulls.set_word(index, 0);
         }
+        let mut present = 0;
         match self {
-            Self::ColumnScalar(left, scalar) => output.word(
-                index,
-                left.word_values(index, selected)?
-                    .map(|(row, value)| (row, value.map(|a| (a, *scalar)))),
-                evaluate,
-            ),
-            Self::ScalarColumn(scalar, right) => output.word(
-                index,
-                right
+            Self::ColumnScalar(left, scalar) => {
+                for (row, value) in left.word_values(index, selected)? {
+                    let some = value.is_some();
+                    let b = if some { *scalar } else { 1 };
+                    output.values[row].write(evaluate(value.unwrap_or(0), b)?);
+                    present |= u64::from(some) << (row % 64);
+                }
+            }
+            Self::ScalarColumn(scalar, right) => {
+                for (row, value) in right.word_values(index, selected)? {
+                    let some = value.is_some();
+                    output.values[row].write(evaluate(*scalar, value.unwrap_or(1))?);
+                    present |= u64::from(some) << (row % 64);
+                }
+            }
+            Self::Columns(left, right) => {
+                let pairs = left
                     .word_values(index, selected)?
-                    .map(|(row, value)| (row, value.map(|b| (*scalar, b)))),
-                evaluate,
-            ),
-            Self::Columns(left, right) => output.word(
-                index,
-                left.word_values(index, selected)?
-                    .zip(right.word_values(index, selected)?)
-                    .map(|((row, a), (_, b))| (row, a.zip(b))),
-                evaluate,
-            ),
+                    .zip(right.word_values(index, selected)?);
+                for ((row, a), (_, b)) in pairs {
+                    let some = a.is_some() && b.is_some();
+                    let b = if some { b.unwrap_or(1) } else { 1 };
+                    output.values[row].write(evaluate(a.unwrap_or(0), b)?);
+                    present |= u64::from(some) << (row % 64);
+                }
+            }
         }
+        output.non_nulls.set_word(index, present)
     }
 
     /// The whole-word operands of `index` with the non-NULL rows of the
@@ -463,23 +472,4 @@ struct Output<'r, 'v, 'm, 'w> {
     rows: &'r RowMaskView<'r>,
     values: &'v mut [MaybeUninit<i32>],
     non_nulls: &'m mut RowMask<'w>,
-}
-
-impl Output<'_, '_, '_, '_> {
-    /// One word's selected rows: a NULL row gets a placeholder computed
-    /// from `(0, 1)`, which no operation rejects, so that the loop has no
-    /// branch on nullness; only the error check branches, and it never goes.
-    #[inline(always)]
-    fn word<I, E: Evaluate>(&mut self, index: usize, pairs: I, evaluate: &E) -> Result<()>
-    where
-        I: Iterator<Item = (usize, Option<(i32, i32)>)>,
-    {
-        let mut present = 0;
-        for (row, pair) in pairs {
-            let (a, b) = pair.unwrap_or((0, 1));
-            self.values[row].write(evaluate(a, b)?);
-            present |= u64::from(pair.is_some()) << (row % 64);
-        }
-        self.non_nulls.set_word(index, present)
-    }
 }
