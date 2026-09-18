@@ -116,9 +116,9 @@ An operation is the function measured on those inputs. Reading measures a
 an independent `reference` sum. Filtering measures the library's `scalar`
 filter and a `reference` filter. Aggregating measures the `sum`, `min` and
 `count` kernels and the same `reference` sum as reading. Arithmetic measures
-`add_scalar`, `mul_scalar`, `div_scalar` and `add_column` writing a result
-column, and a `reference` scalar loop computing `x + 7` with checked
-arithmetic. The reference is a simple separate implementation of the same
+`add_scalar`, `mul_scalar`, `div_scalar`, `mod_scalar` and `add_column`
+writing a result column, and a `reference` scalar loop computing `x + 7` with
+checked arithmetic. The reference is a simple separate implementation of the same
 task, not another source revision.
 
 The `cases()` functions and measured operations are in

@@ -97,6 +97,22 @@ pub fn div_scalar<C: ColumnReader<Value = i32>>(
 }
 
 #[inline(never)]
+pub fn mod_scalar<C: ColumnReader<Value = i32>>(
+    input: &Input<'_, C>,
+    out: &mut Output,
+) -> Result<()> {
+    let (values, mut mask) = out.parts()?;
+    int32::arith_scalar(
+        ArithOp::Mod,
+        input.column,
+        SCALAR,
+        &input.rows,
+        values,
+        &mut mask,
+    )
+}
+
+#[inline(never)]
 pub fn add_column<C: ColumnReader<Value = i32>>(
     input: &Input<'_, C>,
     out: &mut Output,
@@ -220,6 +236,8 @@ pub fn check<C: ColumnReader<Value = i32>>(
     check_op(case, &out, "mul_scalar", |x| x.checked_mul(SCALAR))?;
     div_scalar(input, &mut out)?;
     check_op(case, &out, "div_scalar", |x| Some(x / SCALAR))?;
+    mod_scalar(input, &mut out)?;
+    check_op(case, &out, "mod_scalar", |x| Some(x % SCALAR))?;
     add_column(input, &mut out)?;
     check_op(case, &out, "add_column", |x| x.checked_add(x))?;
     Ok(())
@@ -265,6 +283,9 @@ fn measure_column<C: ColumnReader<Value = i32>>(
     })?;
     group.op("div_scalar", || {
         div_scalar(black_box(&input), &mut out).unwrap()
+    })?;
+    group.op("mod_scalar", || {
+        mod_scalar(black_box(&input), &mut out).unwrap()
     })?;
     group.op("add_column", || {
         add_column(black_box(&input), &mut out).unwrap()
