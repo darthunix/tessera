@@ -49,7 +49,7 @@ pub fn mul(lhs: Side<'_>, rhs: Side<'_>, mask: u64, out: &mut [MaybeUninit<i32>;
 
 /// `lhs / divisor` into every lane of `out`; no lane can fail.
 #[inline]
-pub fn div(lhs: Side<'_>, divisor: Divisor, out: &mut [MaybeUninit<i32>; 64]) {
+pub fn div(lhs: Side<'_>, divisor: &Divisor, out: &mut [MaybeUninit<i32>; 64]) {
     const { assert!(cfg!(target_feature = "neon")) }
     // SAFETY: as in add.
     unsafe { div_lanes(lhs, divisor, out) }
@@ -57,7 +57,7 @@ pub fn div(lhs: Side<'_>, divisor: Divisor, out: &mut [MaybeUninit<i32>; 64]) {
 
 /// `lhs % divisor` into every lane of `out`; no lane can fail.
 #[inline]
-pub fn rem(lhs: Side<'_>, divisor: Divisor, out: &mut [MaybeUninit<i32>; 64]) {
+pub fn rem(lhs: Side<'_>, divisor: &Divisor, out: &mut [MaybeUninit<i32>; 64]) {
     const { assert!(cfg!(target_feature = "neon")) }
     // SAFETY: as in add.
     unsafe { rem_lanes(lhs, divisor, out) }
@@ -96,13 +96,13 @@ fn mul_lanes(lhs: Side<'_>, rhs: Side<'_>, mask: u64, out: &mut [MaybeUninit<i32
 }
 
 #[target_feature(enable = "neon")]
-fn div_lanes(lhs: Side<'_>, divisor: Divisor, out: &mut [MaybeUninit<i32>; 64]) {
+fn div_lanes(lhs: Side<'_>, divisor: &Divisor, out: &mut [MaybeUninit<i32>; 64]) {
     let multiplier = Multiplier::new(divisor);
     map(lhs, out, |n| multiplier.quotient(n))
 }
 
 #[target_feature(enable = "neon")]
-fn rem_lanes(lhs: Side<'_>, divisor: Divisor, out: &mut [MaybeUninit<i32>; 64]) {
+fn rem_lanes(lhs: Side<'_>, divisor: &Divisor, out: &mut [MaybeUninit<i32>; 64]) {
     let multiplier = Multiplier::new(divisor);
     map(lhs, out, |n| {
         vmlsq_n_s32(n, multiplier.quotient(n), divisor.value)
@@ -121,7 +121,7 @@ struct Multiplier {
 impl Multiplier {
     #[inline]
     #[target_feature(enable = "neon")]
-    fn new(divisor: Divisor) -> Self {
+    fn new(divisor: &Divisor) -> Self {
         Self {
             magic: divisor.magic,
             bias: vdupq_n_s32(divisor.bias),
@@ -279,9 +279,9 @@ mod tests {
                 let remainders = dense.map(|n| divisor.remainder(n));
                 for lhs in [Side::Dense(&dense), Side::Datum(&datums)] {
                     let mut out = [MaybeUninit::uninit(); 64];
-                    div(lhs, divisor, &mut out);
+                    div(lhs, &divisor, &mut out);
                     assert_eq!(written(&out), quotients, "{d}");
-                    rem(lhs, divisor, &mut out);
+                    rem(lhs, &divisor, &mut out);
                     assert_eq!(written(&out), remainders, "{d}");
                 }
             }
