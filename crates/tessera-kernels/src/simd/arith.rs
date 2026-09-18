@@ -13,14 +13,14 @@
 
 use core::arch::aarch64::{
     int32x4_t, uint32x4_t, vaddq_s32, vandq_s32, vandq_u32, vceqq_s32, vceqq_s64, vcombine_u32,
-    vdupq_n_s32, vdupq_n_u32, veorq_s32, vget_low_s32, vld1q_s32, vmaxvq_u32, vmlsq_n_s32,
-    vmovl_high_s32, vmovl_s32, vmovn_u64, vmull_high_n_s32, vmull_high_s32, vmull_n_s32, vmull_s32,
-    vmulq_s32, vmvnq_u32, vorrq_u32, vqaddq_s32, vqsubq_s32, vreinterpretq_s32_s64, vshlq_s32,
-    vshrq_n_s32, vst1q_s32, vsubq_s32, vuzp2q_s32,
+    vdupq_n_s32, vdupq_n_u32, veorq_s32, vget_low_s32, vmaxvq_u32, vmlsq_n_s32, vmovl_high_s32,
+    vmovl_s32, vmovn_u64, vmull_high_n_s32, vmull_high_s32, vmull_n_s32, vmull_s32, vmulq_s32,
+    vmvnq_u32, vorrq_u32, vqaddq_s32, vqsubq_s32, vreinterpretq_s32_s64, vshlq_s32, vshrq_n_s32,
+    vst1q_s32, vsubq_s32, vuzp2q_s32,
 };
 use std::mem::MaybeUninit;
 
-use super::{byte_weights, lane_masks, load_datums};
+use super::{byte_weights, datum, dense, lane_masks};
 use crate::int32::{Divisor, Side};
 
 /// `lhs + rhs` into `out`; true when a masked lane overflowed.
@@ -192,20 +192,6 @@ fn dispatch(
         (Side::Scalar(a), Side::Datum(b)) => apply(mask, out, &op, scalar(a), datum(b)),
         (Side::Scalar(_), Side::Scalar(_)) => unreachable!("two scalar operands"),
     }
-}
-
-#[inline]
-#[target_feature(enable = "neon")]
-fn dense(values: &[i32; 64]) -> impl Fn(usize) -> int32x4_t + '_ {
-    // SAFETY: `group` is below 16, so the four lanes read end within the array.
-    move |group| unsafe { vld1q_s32(values.as_ptr().add(group * 4)) }
-}
-
-#[inline]
-#[target_feature(enable = "neon")]
-fn datum(values: &[u64; 64]) -> impl Fn(usize) -> int32x4_t + '_ {
-    // SAFETY: `group` is below 16.
-    move |group| unsafe { load_datums(values, group) }
 }
 
 #[inline]

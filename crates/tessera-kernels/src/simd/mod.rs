@@ -17,11 +17,13 @@
 mod aggregate;
 mod arith;
 mod filter;
+mod hash;
 
 use core::arch::aarch64::{
     int32x4_t, uint8x8_t, uint32x4_t, vaddv_u8, vandq_u8, vceqzq_u8, vdup_n_u8, vget_high_s16,
-    vget_high_u8, vget_low_s16, vget_low_u8, vld1_u8, vld1q_u8, vld1q_u64, vmovl_s8, vmovl_s16,
-    vreinterpret_s8_u8, vreinterpretq_s32_u64, vreinterpretq_u32_s32, vtst_u8, vuzp1q_s32,
+    vget_high_u8, vget_low_s16, vget_low_u8, vld1_u8, vld1q_s32, vld1q_u8, vld1q_u64, vmovl_s8,
+    vmovl_s16, vreinterpret_s8_u8, vreinterpretq_s32_u64, vreinterpretq_u32_s32, vtst_u8,
+    vuzp1q_s32,
 };
 
 pub use aggregate::{
@@ -29,6 +31,7 @@ pub use aggregate::{
 };
 pub use arith::{add, div, mul, rem, sub};
 pub use filter::{filter_datum, filter_dense};
+pub use hash::{combine, combine_nulls, hash, hash_nulls};
 
 /// Bit weights of the four lanes of each group in a 16-row quarter.
 const LANE_WEIGHTS: [[u32; 4]; 4] = [
@@ -87,6 +90,22 @@ fn lane_masks(bits: u8, weights: uint8x8_t) -> (uint32x4_t, uint32x4_t) {
         vreinterpretq_u32_s32(vmovl_s16(vget_low_s16(halves))),
         vreinterpretq_u32_s32(vmovl_s16(vget_high_s16(halves))),
     )
+}
+
+/// A loader of the four int4 values of each group of a dense block.
+#[inline]
+#[target_feature(enable = "neon")]
+fn dense(values: &[i32; 64]) -> impl Fn(usize) -> int32x4_t + '_ {
+    // SAFETY: `group` is below 16, so the four lanes read end within the array.
+    move |group| unsafe { vld1q_s32(values.as_ptr().add(group * 4)) }
+}
+
+/// A loader of the four int4 values of each group of a Datum block.
+#[inline]
+#[target_feature(enable = "neon")]
+fn datum(values: &[u64; 64]) -> impl Fn(usize) -> int32x4_t + '_ {
+    // SAFETY: `group` is below 16.
+    move |group| unsafe { load_datums(values, group) }
 }
 
 /// Four int4 values from four Datums: the low half of each, kept by uzp1.

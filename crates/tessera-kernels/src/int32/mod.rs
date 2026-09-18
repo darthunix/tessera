@@ -10,7 +10,7 @@ mod aggregate;
 mod arith;
 pub(crate) mod divisor;
 mod filter;
-mod hash;
+pub(crate) mod hash;
 
 pub use aggregate::{count, max, min, sum};
 pub(crate) use arith::Side;

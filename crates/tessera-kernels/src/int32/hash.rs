@@ -23,12 +23,21 @@
 //! and the buffer may be reused across batches. Dimension errors fail before
 //! any mutation; a reader error leaves the hashes and the mask partly
 //! updated, to be discarded.
+//!
+//! When the first word of the selection is full or selects at least a dozen
+//! rows and the column exposes its storage, the call hashes whole words with
+//! vector code on AArch64: every lane of the word, NULL lanes included (they
+//! get the group key under the group policy and meaningless values, outside
+//! the valid mask, under rejection). Single-row words, the tail and refused
+//! words go row by row; every other call reads every word row by row.
 
 use anyhow::{Result, ensure};
-use tessera_core::{ColumnReader, RowMask, RowMaskView};
+use tessera_core::{ColumnReader, RowMask, RowMaskView, WordBlock};
+
+use super::{BULK_MIN_ROWS, Side};
 
 /// What a NULL key hashes as under [`NullKeys::Group`], before finalizing.
-const NULL_KEY: u32 = 0x9e37_79b9;
+pub(crate) const NULL_KEY: u32 = 0x9e37_79b9;
 
 /// What a NULL key does to its row.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -94,7 +103,15 @@ pub fn hash<C: ColumnReader<Value = i32>>(
     hashes: &mut [u32],
     valid: &mut RowMask<'_>,
 ) -> Result<()> {
-    run(column, Some(rows), nulls, hashes, valid, |_, key| key)
+    run(
+        column,
+        Some(rows),
+        nulls,
+        hashes,
+        valid,
+        |_, key| key,
+        Step::First,
+    )
 }
 
 /// Fold the next key into the hashes of the valid rows, narrowing `valid`
@@ -109,12 +126,20 @@ pub fn hash_next<C: ColumnReader<Value = i32>>(
     hashes: &mut [u32],
     valid: &mut RowMask<'_>,
 ) -> Result<()> {
-    run(column, None, nulls, hashes, valid, hash_combine)
+    run(column, None, nulls, hashes, valid, hash_combine, Step::Next)
 }
 
-/// Every word row by row: the selection comes from `rows` for the first key
-/// and from `valid` itself for the next ones. The fold is chosen once per
-/// call and inlined into the loop.
+/// Which key of the chain a call hashes: the whole-word form of the fold.
+#[derive(Clone, Copy)]
+enum Step {
+    First,
+    Next,
+}
+
+/// Check the dimensions, choose the strategy by the first word, and run.
+/// The selection comes from `rows` for the first key and from `valid`
+/// itself for the next ones. The fold is chosen once per call and inlined
+/// into the row loop; `step` is its whole-word form.
 fn run<C, F>(
     column: &C,
     rows: Option<&RowMaskView<'_>>,
@@ -122,6 +147,7 @@ fn run<C, F>(
     hashes: &mut [u32],
     valid: &mut RowMask<'_>,
     fold: F,
+    step: Step,
 ) -> Result<()>
 where
     C: ColumnReader<Value = i32>,
@@ -135,16 +161,142 @@ where
         "column, hashes and mask row counts differ"
     );
     let reject = nulls == NullKeys::Reject;
-    for index in 0..nrows.div_ceil(64) {
-        let selected = match rows {
-            Some(rows) => rows.word(index),
-            None => valid.as_view().word(index),
-        }
-        .unwrap();
-        let present = word(column, index, selected, reject, hashes, &fold)?;
+    // The first word decides, as for the arithmetic.
+    let whole_words = cfg!(all(target_arch = "aarch64", not(miri))) && nrows >= 64 && {
+        let selected = selection(rows, valid, 0);
+        (selected == u64::MAX
+            || (!selected.is_power_of_two() && selected.count_ones() >= BULK_MIN_ROWS))
+            && block(column, 0).is_some()
+    };
+    if whole_words {
+        bulk(column, rows, reject, step, hashes, valid, &fold)
+    } else {
+        by_rows(column, rows, reject, hashes, valid, &fold)
+    }
+}
+
+/// The selection word of the first key's rows or of the valid mask.
+#[inline(always)]
+fn selection(rows: Option<&RowMaskView<'_>>, valid: &RowMask<'_>, index: usize) -> u64 {
+    match rows {
+        Some(rows) => rows.word(index),
+        None => valid.as_view().word(index),
+    }
+    .unwrap()
+}
+
+/// Every word row by row. Out of line, like the whole-word loop.
+#[inline(never)]
+fn by_rows<C, F>(
+    column: &C,
+    rows: Option<&RowMaskView<'_>>,
+    reject: bool,
+    hashes: &mut [u32],
+    valid: &mut RowMask<'_>,
+    fold: &F,
+) -> Result<()>
+where
+    C: ColumnReader<Value = i32>,
+    F: Fn(u32, u32) -> u32,
+{
+    for index in 0..valid.as_view().nrows().div_ceil(64) {
+        let selected = selection(rows, valid, index);
+        let present = word(column, index, selected, reject, hashes, fold)?;
         valid.set_word(index, present)?;
     }
     Ok(())
+}
+
+/// Whole words where the column exposes them, rows elsewhere.
+#[inline(never)]
+fn bulk<C, F>(
+    column: &C,
+    rows: Option<&RowMaskView<'_>>,
+    reject: bool,
+    step: Step,
+    hashes: &mut [u32],
+    valid: &mut RowMask<'_>,
+    fold: &F,
+) -> Result<()>
+where
+    C: ColumnReader<Value = i32>,
+    F: Fn(u32, u32) -> u32,
+{
+    for index in 0..valid.as_view().nrows().div_ceil(64) {
+        let selected = selection(rows, valid, index);
+        if selected == 0 || selected.is_power_of_two() {
+            let present = word(column, index, selected, reject, hashes, fold)?;
+            valid.set_word(index, present)?;
+            continue;
+        }
+        let Some((keys, non_null)) = block(column, index) else {
+            let present = word(column, index, selected, reject, hashes, fold)?;
+            valid.set_word(index, present)?;
+            continue;
+        };
+        let base = index * 64;
+        let out: &mut [u32; 64] = (&mut hashes[base..base + 64])
+            .try_into()
+            .expect("a whole-word block implies a full word");
+        let present = if reject {
+            match step {
+                Step::First => bulk_op::hash(keys, out),
+                Step::Next => bulk_op::combine(keys, out),
+            }
+            selected & non_null
+        } else {
+            match step {
+                Step::First => bulk_op::hash_nulls(keys, non_null, out),
+                Step::Next => bulk_op::combine_nulls(keys, non_null, out),
+            }
+            selected
+        };
+        valid.set_word(index, present)?;
+    }
+    Ok(())
+}
+
+/// The storage of a whole word with its non-NULL rows, when exposed.
+#[cfg(all(target_arch = "aarch64", not(miri)))]
+fn block<C: ColumnReader<Value = i32>>(column: &C, index: usize) -> Option<(Side<'_>, u64)> {
+    Some(match column.word_block(index)? {
+        WordBlock::Dense { values, non_nulls } => (Side::Dense(values), non_nulls),
+        WordBlock::Datum { values, isnull } => {
+            (Side::Datum(values), crate::simd::non_null_bits(isnull))
+        }
+    })
+}
+
+#[cfg(not(all(target_arch = "aarch64", not(miri))))]
+fn block<C: ColumnReader<Value = i32>>(column: &C, index: usize) -> Option<(Side<'_>, u64)> {
+    let _ = (column, index);
+    None
+}
+
+#[cfg(all(target_arch = "aarch64", not(miri)))]
+use crate::simd as bulk_op;
+
+/// Without vector code no call takes the whole-word path; these keep the
+/// callers compiling and are never reached.
+#[cfg(not(all(target_arch = "aarch64", not(miri))))]
+mod bulk_op {
+    use super::Side;
+
+    pub fn hash(_: Side<'_>, _: &mut [u32; 64]) {
+        unreachable!("no whole-word kernels on this target")
+    }
+
+    pub fn hash_nulls(_: Side<'_>, _: u64, _: &mut [u32; 64]) {
+        unreachable!("no whole-word kernels on this target")
+    }
+
+    pub fn combine(_: Side<'_>, _: &mut [u32; 64]) {
+        unreachable!("no whole-word kernels on this target")
+    }
+
+    pub fn combine_nulls(_: Side<'_>, _: u64, _: &mut [u32; 64]) {
+        unreachable!("no whole-word kernels on this target")
+    }
 }
 
 /// One word row by row, without a branch on nullness: a NULL row hashes

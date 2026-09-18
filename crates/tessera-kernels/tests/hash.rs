@@ -243,7 +243,9 @@ fn a_rejected_row_is_not_read_by_later_keys() -> Result<()> {
         if let Some(expected) = expected[row] {
             assert_eq!(hashes[row], expected, "row {row}");
         }
-        if !selected[row] {
+        // The whole-word path writes every lane of the first word; the
+        // tail goes row by row and leaves unselected rows alone.
+        if !selected[row] && row >= 64 {
             assert_eq!(hashes[row], SENTINEL, "row {row}");
         }
     }
@@ -313,6 +315,91 @@ fn random_keys_match_the_model_in_both_policies() -> Result<()> {
                         assert_eq!(hashes[row], expected, "{nrows} {nulls:?} row {row}");
                     }
                 }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The same values without bulk storage: every call takes the row path.
+struct RowsOnly<'a>(&'a ColumnView<'a, i32>);
+
+impl ColumnReader for RowsOnly<'_> {
+    type Value = i32;
+    fn nrows(&self) -> usize {
+        self.0.nrows()
+    }
+    fn get(&self, row: usize) -> Result<Option<i32>> {
+        ColumnReader::get(self.0, row)
+    }
+    fn word_values(
+        &self,
+        word_index: usize,
+        selected: u64,
+    ) -> Result<impl Iterator<Item = (usize, Option<i32>)> + '_> {
+        self.0.word_values(word_index, selected)
+    }
+}
+
+#[test]
+fn whole_words_agree_with_the_row_path() -> Result<()> {
+    let mut state = 0x2545_F491_4F6C_DD1D_u64;
+    let nrows = 4 * 64 + 11;
+    let columns: Vec<(Vec<i32>, Vec<bool>)> = (0..3)
+        .map(|_| {
+            let values = (0..nrows)
+                .map(|_| (random(&mut state) >> 32) as i32)
+                .collect();
+            let non_null = (0..nrows)
+                .map(|_| !random(&mut state).is_multiple_of(4))
+                .collect();
+            (values, non_null)
+        })
+        .collect();
+    // A full first word puts the call on the whole-word path; later words
+    // range from full to sparse, single-row and empty, then the tail.
+    let selected: Vec<bool> = (0..nrows)
+        .map(|row| match row / 64 {
+            0 => true,
+            1 => random(&mut state).is_multiple_of(2),
+            2 => row % 64 == 5,
+            3 => false,
+            _ => row % 2 == 0,
+        })
+        .collect();
+    let words = words_for(&selected);
+    let rows = RowMaskView::try_new(nrows, &words)?;
+    for nulls in [NullKeys::Reject, NullKeys::Group] {
+        let mut whole = vec![SENTINEL; nrows];
+        let mut whole_words = vec![0; nrows.div_ceil(64)];
+        let mut whole_valid = RowMask::try_new(nrows, &mut whole_words)?;
+        let mut by_rows = vec![SENTINEL; nrows];
+        let mut by_rows_words = vec![0; nrows.div_ceil(64)];
+        let mut by_rows_valid = RowMask::try_new(nrows, &mut by_rows_words)?;
+        for (index, (values, non_null)) in columns.iter().enumerate() {
+            let non_null_words = words_for(non_null);
+            let column =
+                ColumnView::try_new(values, Some(RowMaskView::try_new(nrows, &non_null_words)?))?;
+            if index == 0 {
+                hash(&column, &rows, nulls, &mut whole, &mut whole_valid)?;
+                hash(
+                    &RowsOnly(&column),
+                    &rows,
+                    nulls,
+                    &mut by_rows,
+                    &mut by_rows_valid,
+                )?;
+            } else {
+                hash_next(&column, nulls, &mut whole, &mut whole_valid)?;
+                hash_next(&RowsOnly(&column), nulls, &mut by_rows, &mut by_rows_valid)?;
+            }
+            assert_eq!(
+                mask_words(&whole_valid),
+                mask_words(&by_rows_valid),
+                "{nulls:?}"
+            );
+            for row in whole_valid.as_view().selected_indices() {
+                assert_eq!(whole[row], by_rows[row], "{nulls:?} key {index} row {row}");
             }
         }
     }

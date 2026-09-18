@@ -18,9 +18,9 @@
 //! handling.
 //!
 //! Full prepared words of representations that expose their storage
-//! ([`tessera_core::WordBlock`]) are compared, aggregated and computed with
-//! vector code on AArch64, division by a scalar included; everything else
-//! takes the row paths. `unsafe` is denied crate-wide and
+//! ([`tessera_core::WordBlock`]) are compared, aggregated, computed and
+//! hashed with vector code on AArch64, division by a scalar included;
+//! everything else takes the row paths. `unsafe` is denied crate-wide and
 //! allowed only in the isolated [`simd`] module, for vector loads.
 
 #![deny(unsafe_code)]
