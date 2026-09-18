@@ -9,16 +9,23 @@ enum Storage<'a> {
 }
 
 // Keep partial and shifted byte-window decoding out of the full-word hot path.
+// A shifted word inside the buffer is two fixed-size loads; only the last
+// bytes of the buffer are copied byte by byte.
 #[inline(never)]
 fn byte_word(bytes: &[u8], bit_offset: usize, word_index: usize, nrows: usize) -> u64 {
-    let start = word_index * 8;
-    let count = (bytes.len() - start).min(8);
-    let mut data = [0; 8];
-    data[..count].copy_from_slice(&bytes[start..start + count]);
-    let mut bits = u64::from_le_bytes(data) >> bit_offset;
-    if bit_offset != 0 && bytes.len() - start > 8 {
-        bits |= u64::from(bytes[start + 8]) << (64 - bit_offset);
-    }
+    let window = &bytes[word_index * 8..];
+    let bits = if let Some(nine) = window.get(..9) {
+        let low = u64::from_le_bytes(nine[..8].try_into().unwrap());
+        if bit_offset == 0 {
+            low
+        } else {
+            (low >> bit_offset) | (u64::from(nine[8]) << (64 - bit_offset))
+        }
+    } else {
+        let mut data = [0; 8];
+        data[..window.len()].copy_from_slice(window);
+        u64::from_le_bytes(data) >> bit_offset
+    };
     let valid = (nrows - word_index * 64).min(64);
     bits & (u64::MAX >> (64 - valid))
 }

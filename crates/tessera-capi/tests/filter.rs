@@ -91,9 +91,19 @@ fn representations_match_the_scalar_model_on_bulk_and_row_words() {
         // SAFETY: the same holds for Datums and flags.
         let datum = unsafe { DatumInt32Column::try_new(&datum_values, &isnull, prepared) }.unwrap();
         for op in OPS {
-            for scalar in [i32::MIN, -50, -1, 0, 1, 25, 49, i32::MAX] {
+            for (scalar, density) in [
+                (i32::MIN, 2),
+                (-50, 2),
+                (-1, 8),
+                (0, 2),
+                (1, 5),
+                (25, 2),
+                (49, 6),
+                (i32::MAX, 2),
+            ] {
+                // Denser selections take the bulk path, sparser ones the rows.
                 let selected: Vec<bool> = (0..nrows)
-                    .map(|row| ready[row] && random(&mut state).is_multiple_of(2))
+                    .map(|row| ready[row] && random(&mut state).is_multiple_of(density))
                     .collect();
                 let expected: Vec<bool> = (0..nrows)
                     .map(|row| selected[row] && non_null[row] && compare(values[row], op, scalar))

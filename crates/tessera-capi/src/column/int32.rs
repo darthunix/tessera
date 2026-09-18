@@ -6,18 +6,15 @@ use tessera_core::{ColumnReader, RowMaskView, WordBlock, WordValues};
 
 use super::{mask_word, try_fold_words, validate_mask, validate_ready};
 
-/// The rows of a full word whose every row is prepared, as a slice of 64
-/// initialized slots; `None` for the tail word, an out-of-range word, or a
-/// word with an unprepared row.
+/// Whether every row of the word is prepared (an absent word is not).
 #[inline]
-fn prepared_word<'a, T>(
-    values: &'a [MaybeUninit<T>],
-    prepared: Option<RowMaskView<'_>>,
-    word_index: usize,
-) -> Option<&'a [MaybeUninit<T>; 64]> {
-    if mask_word(prepared, word_index) != u64::MAX {
-        return None;
-    }
+fn fully_prepared(prepared: Option<RowMaskView<'_>>, word_index: usize) -> bool {
+    mask_word(prepared, word_index) == u64::MAX
+}
+
+/// The 64 slots of a full word; `None` for the tail or an out-of-range word.
+#[inline]
+fn word_slots<T>(values: &[MaybeUninit<T>], word_index: usize) -> Option<&[MaybeUninit<T>; 64]> {
     let base = word_index.checked_mul(64)?;
     values.get(base..base.checked_add(64)?)?.try_into().ok()
 }
@@ -198,7 +195,10 @@ impl ColumnReader for DenseInt32Column<'_> {
 
     #[inline]
     fn word_block(&self, word_index: usize) -> Option<WordBlock<'_, i32>> {
-        let slots = prepared_word(self.values, self.prepared, word_index)?;
+        if !fully_prepared(self.prepared, word_index) {
+            return None;
+        }
+        let slots = word_slots(self.values, word_index)?;
         Some(WordBlock::Dense {
             // SAFETY: every row of this word is prepared, hence initialized.
             values: unsafe { assume_word(slots) },
@@ -337,8 +337,11 @@ impl ColumnReader for DatumInt32Column<'_> {
 
     #[inline]
     fn word_block(&self, word_index: usize) -> Option<WordBlock<'_, i32>> {
-        let values = prepared_word(self.values, self.prepared, word_index)?;
-        let isnull = prepared_word(self.isnull, self.prepared, word_index)?;
+        if !fully_prepared(self.prepared, word_index) {
+            return None;
+        }
+        let values = word_slots(self.values, word_index)?;
+        let isnull = word_slots(self.isnull, word_index)?;
         // SAFETY: every row of this word is prepared, so both its Datum and
         // its flag are initialized by the constructor contract.
         Some(WordBlock::Datum {

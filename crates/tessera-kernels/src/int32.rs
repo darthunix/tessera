@@ -74,6 +74,11 @@ pub fn filter<C: ColumnReader<Value = i32>>(
     }
 }
 
+/// Selected rows from which comparing the whole word pays: on an M5 Pro a
+/// word costs 19 cycles dense and 27 cycles Datum against about 2.5 cycles
+/// per selected row on the row path.
+const BULK_MIN_ROWS: u32 = 12;
+
 fn filter_with<C: ColumnReader<Value = i32>>(
     column: &C,
     rows: &mut RowMask<'_>,
@@ -94,7 +99,9 @@ fn filter_with<C: ColumnReader<Value = i32>>(
             } else {
                 0
             }
-        } else if let Some(passing) = bulk_passing(column, index, op, scalar) {
+        } else if selected.count_ones() >= BULK_MIN_ROWS
+            && let Some(passing) = bulk_passing(column, index, op, scalar)
+        {
             // The whole word compared at once; intersecting keeps the selection.
             passing
         } else {
@@ -116,6 +123,7 @@ fn filter_with<C: ColumnReader<Value = i32>>(
 /// `None` where the reader exposes no storage for it or no vector code
 /// exists (other targets, Miri): the word then takes the row path.
 #[cfg(all(target_arch = "aarch64", not(miri)))]
+#[inline]
 fn bulk_passing<C: ColumnReader<Value = i32>>(
     column: &C,
     index: usize,
@@ -134,6 +142,7 @@ fn bulk_passing<C: ColumnReader<Value = i32>>(
 }
 
 #[cfg(not(all(target_arch = "aarch64", not(miri))))]
+#[inline]
 fn bulk_passing<C: ColumnReader<Value = i32>>(
     _column: &C,
     _index: usize,
