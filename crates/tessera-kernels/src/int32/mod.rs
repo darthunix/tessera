@@ -1,6 +1,7 @@
 //! Signed int32 kernels without PostgreSQL type dispatch: comparisons
-//! ([`filter`]), aggregates ([`count`], [`sum`], [`min`], [`max`]) and
-//! arithmetic ([`arith_scalar`], [`arith_scalar_left`], [`arith_columns`]).
+//! ([`filter`]), aggregates ([`count`], [`sum`], [`min`], [`max`]),
+//! arithmetic ([`arith_scalar`], [`arith_scalar_left`], [`arith_columns`])
+//! and key hashes ([`hash`], [`hash_next`]).
 //!
 //! A physical int32 representation does not select PostgreSQL semantics:
 //! the future caller must choose kernels by logical type and operation.
@@ -9,12 +10,14 @@ mod aggregate;
 mod arith;
 pub(crate) mod divisor;
 mod filter;
+mod hash;
 
 pub use aggregate::{count, max, min, sum};
 pub(crate) use arith::Side;
 pub use arith::{ArithOp, ArithmeticError, arith_columns, arith_scalar, arith_scalar_left};
 pub(crate) use divisor::Divisor;
 pub use filter::filter;
+pub use hash::{NullKeys, hash, hash_combine, hash_next, murmurhash32};
 
 /// A comparison of a column value on the left with a non-NULL scalar on the right.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

@@ -9,8 +9,9 @@
 //! [`int32::filter`] implements scalar comparisons, [`int32::count`],
 //! [`int32::sum`], [`int32::min`] and [`int32::max`] the aggregates and
 //! [`int32::arith_scalar`] and its siblings the arithmetic with PostgreSQL's
-//! error codes, all
-//! through [`tessera_core::ColumnReader`], independently of physical storage.
+//! error codes, and [`int32::hash`] and [`int32::hash_next`] the key hashes
+//! of joins and grouping, all through [`tessera_core::ColumnReader`],
+//! independently of physical storage.
 //! Errors do not roll back previously completed words; callers must discard a
 //! partial selection after failure. This crate does not introduce a C entry
 //! point or catch panics. The future C boundary remains responsible for panic
