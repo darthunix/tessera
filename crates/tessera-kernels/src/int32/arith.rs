@@ -197,15 +197,6 @@ where
     L: ColumnReader<Value = i32>,
     R: ColumnReader<Value = i32>,
 {
-    /// The right operand prepared for division by multiplication, when it
-    /// is a scalar of magnitude at least two.
-    fn scalar_divisor(&self) -> Option<Divisor> {
-        match self {
-            Self::ColumnScalar(_, d) => Divisor::new(*d),
-            _ => None,
-        }
-    }
-
     fn column_rows(&self) -> [Option<usize>; 2] {
         match self {
             Self::ColumnScalar(left, _) => [Some(left.nrows()), None],
@@ -353,57 +344,32 @@ where
                 || (!selected.is_power_of_two() && selected.count_ones() >= BULK_MIN_ROWS))
                 && operands.blocks(0).is_some()
         });
-    // The operations are chosen once: each arm's closures, one per row and
-    // one per whole word, are inlined into their own loops, unlike a trait
-    // object or a match per word, which cost every row or word.
+    // The operation is chosen once; each arm's closure is inlined into its
+    // own loops, unlike a trait object, which called per row.
     match op {
-        ArithOp::Add => execute(
-            &operands,
-            output,
-            whole_words,
-            &|a: i32, b: i32| a.checked_add(b).ok_or(ArithmeticError::IntegerOutOfRange),
-            &mut |lhs, rhs, present, out| Ok(bulk_op::add(lhs, rhs, present, out)),
-        ),
-        ArithOp::Sub => execute(
-            &operands,
-            output,
-            whole_words,
-            &|a: i32, b: i32| a.checked_sub(b).ok_or(ArithmeticError::IntegerOutOfRange),
-            &mut |lhs, rhs, present, out| Ok(bulk_op::sub(lhs, rhs, present, out)),
-        ),
-        ArithOp::Mul => execute(
-            &operands,
-            output,
-            whole_words,
-            &|a: i32, b: i32| a.checked_mul(b).ok_or(ArithmeticError::IntegerOutOfRange),
-            &mut |lhs, rhs, present, out| Ok(bulk_op::mul(lhs, rhs, present, out)),
-        ),
-        ArithOp::Div => divide(
-            &operands,
-            output,
-            whole_words,
-            &|a: i32, b: i32| {
-                if b == 0 {
-                    Err(ArithmeticError::DivisionByZero)
-                } else {
-                    a.checked_div(b).ok_or(ArithmeticError::IntegerOutOfRange)
-                }
-            },
-            bulk_op::div,
-        ),
-        ArithOp::Mod => divide(
-            &operands,
-            output,
-            whole_words,
-            &|a: i32, b: i32| {
-                if b == 0 {
-                    Err(ArithmeticError::DivisionByZero)
-                } else {
-                    Ok(a.wrapping_rem(b))
-                }
-            },
-            bulk_op::rem,
-        ),
+        ArithOp::Add => execute(op, &operands, output, whole_words, &|a: i32, b: i32| {
+            a.checked_add(b).ok_or(ArithmeticError::IntegerOutOfRange)
+        }),
+        ArithOp::Sub => execute(op, &operands, output, whole_words, &|a: i32, b: i32| {
+            a.checked_sub(b).ok_or(ArithmeticError::IntegerOutOfRange)
+        }),
+        ArithOp::Mul => execute(op, &operands, output, whole_words, &|a: i32, b: i32| {
+            a.checked_mul(b).ok_or(ArithmeticError::IntegerOutOfRange)
+        }),
+        ArithOp::Div => execute(op, &operands, output, whole_words, &|a: i32, b: i32| {
+            if b == 0 {
+                Err(ArithmeticError::DivisionByZero)
+            } else {
+                a.checked_div(b).ok_or(ArithmeticError::IntegerOutOfRange)
+            }
+        }),
+        ArithOp::Mod => execute(op, &operands, output, whole_words, &|a: i32, b: i32| {
+            if b == 0 {
+                Err(ArithmeticError::DivisionByZero)
+            } else {
+                Ok(a.wrapping_rem(b))
+            }
+        }),
     }
 }
 
@@ -411,85 +377,31 @@ where
 trait Evaluate: Fn(i32, i32) -> Result<i32, ArithmeticError> {}
 impl<F: Fn(i32, i32) -> Result<i32, ArithmeticError>> Evaluate for F {}
 
-/// One whole word of an operation on the blocks: every lane into the output
-/// word, true when a present lane overflowed.
-trait WholeWord: FnMut(Side<'_>, Side<'_>, u64, &mut [MaybeUninit<i32>; 64]) -> Result<bool> {}
-impl<F: FnMut(Side<'_>, Side<'_>, u64, &mut [MaybeUninit<i32>; 64]) -> Result<bool>> WholeWord
-    for F
-{
-}
-
-fn execute<L, R, E: Evaluate, W: WholeWord>(
+fn execute<L, R, E: Evaluate>(
+    op: ArithOp,
     operands: &Operands<'_, L, R>,
     output: Output<'_, '_, '_, '_>,
     whole_words: bool,
     evaluate: &E,
-    whole: &mut W,
 ) -> Result<()>
 where
     L: ColumnReader<Value = i32>,
     R: ColumnReader<Value = i32>,
 {
     if whole_words {
-        bulk(operands, output, evaluate, whole)
+        bulk(op, operands, output, evaluate)
     } else {
         operands.rows(output, evaluate)
     }
 }
 
-/// `/` and `%`: whole words by multiplication through `vector` for a
-/// scalar divisor of magnitude at least two, lane by lane through
-/// `evaluate` otherwise (a column, zero or ±1). The divisor is prepared at
-/// the first word with rows to divide, so that a selection of NULLs
-/// prepares nothing, and a word without such rows computes nothing: a
-/// division is too dear to spend on absent lanes, and a whole word of them
-/// is a NULL column.
-fn divide<L, R, E, V>(
-    operands: &Operands<'_, L, R>,
-    output: Output<'_, '_, '_, '_>,
-    whole_words: bool,
-    evaluate: &E,
-    vector: V,
-) -> Result<()>
-where
-    L: ColumnReader<Value = i32>,
-    R: ColumnReader<Value = i32>,
-    E: Evaluate,
-    V: Fn(Side<'_>, &Divisor, &mut [MaybeUninit<i32>; 64]),
-{
-    let mut divisor: Option<Option<Divisor>> = None;
-    execute(
-        operands,
-        output,
-        whole_words,
-        evaluate,
-        &mut |lhs, rhs, present, out| {
-            if present == 0 {
-                return Ok(false);
-            }
-            match &*divisor.get_or_insert_with(|| operands.scalar_divisor()) {
-                Some(divisor) => vector(lhs, divisor, out),
-                None => {
-                    let mut lanes = present;
-                    while lanes != 0 {
-                        let lane = lanes.trailing_zeros() as usize;
-                        lanes &= lanes - 1;
-                        out[lane].write(evaluate(lhs.lane(lane), rhs.lane(lane))?);
-                    }
-                }
-            }
-            Ok(false)
-        },
-    )
-}
-
 /// Whole words where every column operand exposes them, rows elsewhere.
 #[inline(never)]
-fn bulk<L, R, E: Evaluate, W: WholeWord>(
+fn bulk<L, R, E: Evaluate>(
+    op: ArithOp,
     operands: &Operands<'_, L, R>,
     output: Output<'_, '_, '_, '_>,
     evaluate: &E,
-    whole: &mut W,
 ) -> Result<()>
 where
     L: ColumnReader<Value = i32>,
@@ -497,6 +409,14 @@ where
 {
     let rows = output.rows;
     let mut output = output;
+    // A scalar divisor of magnitude at least two divides by multiplication;
+    // it is prepared once per call, before the loop: state changed inside
+    // the loop reshaped it for every operation, and the compiler folds the
+    // match below by the constant operation of each instance.
+    let divisor = match (op, operands) {
+        (ArithOp::Div | ArithOp::Mod, Operands::ColumnScalar(_, d)) => Divisor::new(*d),
+        _ => None,
+    };
     for index in 0..rows.nrows().div_ceil(64) {
         let selected = rows.word(index).unwrap();
         if selected == 0 || selected.is_power_of_two() {
@@ -512,10 +432,38 @@ where
         let out: &mut [MaybeUninit<i32>; 64] = (&mut output.values[base..base + 64])
             .try_into()
             .expect("a whole-word operand implies a full word");
-        ensure!(
-            !whole(lhs, rhs, present, out)?,
-            ArithmeticError::IntegerOutOfRange
-        );
+        // A word without rows to divide divides nothing: a division is too
+        // dear to spend on absent lanes, and a whole word of them is a NULL
+        // column.
+        let overflow = match (op, &divisor) {
+            (ArithOp::Add, _) => bulk_op::add(lhs, rhs, present, out),
+            (ArithOp::Sub, _) => bulk_op::sub(lhs, rhs, present, out),
+            (ArithOp::Mul, _) => bulk_op::mul(lhs, rhs, present, out),
+            (ArithOp::Div, Some(divisor)) => {
+                if present != 0 {
+                    bulk_op::div(lhs, divisor, out);
+                }
+                false
+            }
+            (ArithOp::Mod, Some(divisor)) => {
+                if present != 0 {
+                    bulk_op::rem(lhs, divisor, out);
+                }
+                false
+            }
+            (ArithOp::Div | ArithOp::Mod, None) => {
+                // No vector division by a column, zero or ±1: the present
+                // lanes one by one from the blocks.
+                let mut lanes = present;
+                while lanes != 0 {
+                    let lane = lanes.trailing_zeros() as usize;
+                    lanes &= lanes - 1;
+                    out[lane].write(evaluate(lhs.lane(lane), rhs.lane(lane))?);
+                }
+                false
+            }
+        };
+        ensure!(!overflow, ArithmeticError::IntegerOutOfRange);
         output.non_nulls.set_word(index, present)?;
     }
     Ok(())
