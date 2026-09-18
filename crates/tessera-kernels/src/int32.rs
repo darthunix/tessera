@@ -89,9 +89,11 @@ fn filter_with<C: ColumnReader<Value = i32>>(
     compare: impl Fn(i32, i32) -> bool,
 ) -> Result<()> {
     let nrows = rows.as_view().nrows();
+    let full_words = nrows / 64;
     // Bulk attempts end at the first full word the reader refuses: it has no
     // bulk storage, or this batch is partly prepared, and asking again for
-    // every word would cost a readiness decode each time.
+    // every word would cost a readiness decode each time. The tail word is
+    // never asked.
     let mut bulk = true;
     for index in 0..nrows.div_ceil(64) {
         let selected = rows.as_view().word(index).unwrap();
@@ -108,14 +110,26 @@ fn filter_with<C: ColumnReader<Value = i32>>(
             }
         } else {
             let mut passing = None;
-            if bulk && selected.count_ones() >= BULK_MIN_ROWS {
+            if bulk
+                && index < full_words
+                && (selected == u64::MAX || selected.count_ones() >= BULK_MIN_ROWS)
+            {
                 passing = bulk_passing(column, index, op, scalar);
-                bulk = passing.is_some() || (index + 1) * 64 > nrows;
+                bulk = passing.is_some();
             }
             match passing {
                 // The whole word compared at once; intersecting keeps the selection.
                 Some(passing) => passing,
-                None => row_passing(column, index, selected, scalar, &compare)?,
+                // The row path stays in this loop: as a function of its own it
+                // decoded the masks anew for every word, which the loop hoists.
+                // fold is the word iterator's bulk path; the predicate becomes a
+                // bit so that the loop has no data-dependent branch.
+                None => column
+                    .word_values(index, selected)?
+                    .fold(0, |passing, (row, value)| {
+                        let passes = value.is_some_and(|value| compare(value, scalar));
+                        passing | (u64::from(passes) << (row % 64))
+                    }),
             }
         };
         rows.intersect_word(index, passing)?;
@@ -123,30 +137,11 @@ fn filter_with<C: ColumnReader<Value = i32>>(
     Ok(())
 }
 
-/// The selected rows of one word compared one by one. Out of line so that
-/// its loop keeps its own registers: inlined next to the bulk path it lost
-/// about one instruction per row to spills.
-#[inline(never)]
-fn row_passing<C: ColumnReader<Value = i32>>(
-    column: &C,
-    index: usize,
-    selected: u64,
-    scalar: i32,
-    compare: &impl Fn(i32, i32) -> bool,
-) -> Result<u64> {
-    // fold is the word iterator's bulk path; the predicate becomes a bit so
-    // that the loop has no data-dependent branch.
-    Ok(column
-        .word_values(index, selected)?
-        .fold(0, |passing, (row, value)| {
-            let passes = value.is_some_and(|value| compare(value, scalar));
-            passing | (u64::from(passes) << (row % 64))
-        }))
-}
-
 /// The passing rows of a full prepared word compared with vector code, or
 /// `None` where the reader exposes no storage for it or no vector code
-/// exists (other targets, Miri): the word then takes the row path.
+/// exists (other targets, Miri): the word then takes the row path. Out of
+/// line: inlined, its vector call spilled the loop's registers around every
+/// word.
 #[cfg(all(target_arch = "aarch64", not(miri)))]
 #[inline(never)]
 fn bulk_passing<C: ColumnReader<Value = i32>>(
