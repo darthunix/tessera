@@ -1,10 +1,12 @@
 //! The int4 entry points.
 
 use std::ffi::c_uint;
+use std::mem::MaybeUninit;
+use std::slice;
 
-use anyhow::{Context, Result, bail};
-use tessera_core::RowMaskView;
-use tessera_kernels::int32::{self, CompareOp};
+use anyhow::{Context, Result, bail, ensure};
+use tessera_core::{RowMask, RowMaskView};
+use tessera_kernels::int32::{self, ArithOp, CompareOp};
 
 use super::column::DatumColumn;
 use super::mask::Mask;
@@ -76,13 +78,31 @@ pub unsafe extern "C" fn tess_int4_filter(
     }
 }
 
-/// The column reader and the selection of a read-only entry point.
+/// The reader of a column argument.
 ///
 /// # Safety
 ///
 /// `column` must point to a valid `TessDatumColumn` satisfying
 /// [`DatumColumn::int32`]'s contract with `prepared` (null or valid) as its
-/// readiness, and `rows` to a valid mask; all valid and unchanged for `'a`.
+/// readiness, both valid and unchanged for `'a`.
+unsafe fn reader<'a>(
+    column: *const DatumColumn,
+    prepared: *const Mask,
+) -> Result<DatumInt32Column<'a>> {
+    // SAFETY: the caller's contract, for `'a`.
+    unsafe {
+        let column = column.as_ref().context("a null column")?;
+        let prepared = Mask::view_optional(prepared)?;
+        column.int32(prepared)
+    }
+}
+
+/// The column reader and the selection of an entry point.
+///
+/// # Safety
+///
+/// As for [`reader`], and `rows` must point to a valid mask, unchanged
+/// for `'a`.
 unsafe fn inputs<'a>(
     column: *const DatumColumn,
     prepared: *const Mask,
@@ -90,12 +110,132 @@ unsafe fn inputs<'a>(
 ) -> Result<(DatumInt32Column<'a>, RowMaskView<'a>)> {
     // SAFETY: the caller's contract, for `'a`.
     unsafe {
-        let column = column.as_ref().context("a null column")?;
-        let prepared = Mask::view_optional(prepared)?;
-        let column = column.int32(prepared)?;
+        let column = reader(column, prepared)?;
         let rows = rows.as_ref().context("a null row mask")?.view()?;
         Ok((column, rows))
     }
+}
+
+/// The result buffers of an arithmetic entry point: `values` has the row
+/// count of `non_nulls`.
+///
+/// # Safety
+///
+/// `non_nulls` must point to a valid mask and `values` to as many writable
+/// int4 slots as it has rows, possibly uninitialized; nothing else may
+/// access either for `'a`.
+unsafe fn outputs<'a>(
+    values: *mut i32,
+    non_nulls: *mut Mask,
+) -> Result<(&'a mut [MaybeUninit<i32>], RowMask<'a>)> {
+    // SAFETY: the caller's contract, for `'a`.
+    unsafe {
+        let non_nulls = non_nulls.as_mut().context("a null result mask")?.mask()?;
+        let nrows = non_nulls.as_view().nrows();
+        let values = if nrows == 0 {
+            &mut [][..]
+        } else {
+            ensure!(!values.is_null(), "a null result buffer");
+            slice::from_raw_parts_mut(values.cast::<MaybeUninit<i32>>(), nrows)
+        };
+        Ok((values, non_nulls))
+    }
+}
+
+/// `tess_int4_arith_scalar`: `column op scalar` into a dense result.
+///
+/// # Safety
+///
+/// As for [`inputs`] and [`outputs`]; `status` as for every entry point.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tess_int4_arith_scalar(
+    op: c_uint,
+    column: *const DatumColumn,
+    scalar: i32,
+    prepared: *const Mask,
+    rows: *const Mask,
+    values: *mut i32,
+    non_nulls: *mut Mask,
+    status: *mut Status,
+) -> Code {
+    // SAFETY: the caller's contract.
+    unsafe {
+        guard(status, || {
+            let op = arith_op(op)?;
+            let (column, rows) = inputs(column, prepared, rows)?;
+            let (values, mut non_nulls) = outputs(values, non_nulls)?;
+            int32::arith_scalar(op, &column, scalar, &rows, values, &mut non_nulls)
+        })
+    }
+}
+
+/// `tess_int4_arith_scalar_left`: `scalar op column` into a dense result.
+///
+/// # Safety
+///
+/// As for [`tess_int4_arith_scalar`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tess_int4_arith_scalar_left(
+    op: c_uint,
+    scalar: i32,
+    column: *const DatumColumn,
+    prepared: *const Mask,
+    rows: *const Mask,
+    values: *mut i32,
+    non_nulls: *mut Mask,
+    status: *mut Status,
+) -> Code {
+    // SAFETY: the caller's contract.
+    unsafe {
+        guard(status, || {
+            let op = arith_op(op)?;
+            let (column, rows) = inputs(column, prepared, rows)?;
+            let (values, mut non_nulls) = outputs(values, non_nulls)?;
+            int32::arith_scalar_left(op, scalar, &column, &rows, values, &mut non_nulls)
+        })
+    }
+}
+
+/// `tess_int4_arith_columns`: `left op right` row by row into a dense
+/// result.
+///
+/// # Safety
+///
+/// As for [`tess_int4_arith_scalar`], for both columns.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tess_int4_arith_columns(
+    op: c_uint,
+    left: *const DatumColumn,
+    left_prepared: *const Mask,
+    right: *const DatumColumn,
+    right_prepared: *const Mask,
+    rows: *const Mask,
+    values: *mut i32,
+    non_nulls: *mut Mask,
+    status: *mut Status,
+) -> Code {
+    // SAFETY: the caller's contract.
+    unsafe {
+        guard(status, || {
+            let op = arith_op(op)?;
+            let (left, rows) = inputs(left, left_prepared, rows)?;
+            let right = reader(right, right_prepared)?;
+            let (values, mut non_nulls) = outputs(values, non_nulls)?;
+            int32::arith_columns(op, &left, &right, &rows, values, &mut non_nulls)
+        })
+    }
+}
+
+/// A `TessArithOp` value.
+fn arith_op(op: c_uint) -> Result<ArithOp> {
+    Ok(match op {
+        0 => ArithOp::Add,
+        1 => ArithOp::Sub,
+        2 => ArithOp::Mul,
+        3 => ArithOp::Div,
+        4 => ArithOp::Mod,
+        _ => bail!("unknown arithmetic operation {op}"),
+    })
 }
 
 /// `tess_int4_count`: the number of selected non-NULL values.

@@ -12,6 +12,7 @@ PG_FUNCTION_INFO_V1(tessera_test_kernels_layout);
 PG_FUNCTION_INFO_V1(tessera_test_kernels_filter);
 PG_FUNCTION_INFO_V1(tessera_test_kernels_errors);
 PG_FUNCTION_INFO_V1(tessera_test_kernels_aggregates);
+PG_FUNCTION_INFO_V1(tessera_test_kernels_arithmetic);
 PG_FUNCTION_INFO_V1(tessera_test_kernels_panic);
 PG_FUNCTION_INFO_V1(tessera_test_kernels_report);
 
@@ -241,6 +242,109 @@ tessera_test_kernels_aggregates(PG_FUNCTION_ARGS)
 	if (tess_int4_count(&column, NULL, &rows, &got_count,
 						&status) != TESS_ERROR_INVALID_ARGUMENT ||
 		got_count != 7)
+		PG_RETURN_BOOL(false);
+
+	PG_RETURN_BOOL(true);
+}
+
+/* A three-row column for the arithmetic cases. */
+static void
+init_small(TessDatumColumn *column, Datum *values, bool *isnull,
+		   int32 first, int32 second, int32 third, bool second_null)
+{
+	values[0] = Int32GetDatum(first);
+	values[1] = Int32GetDatum(second);
+	values[2] = Int32GetDatum(third);
+	isnull[0] = false;
+	isnull[1] = second_null;
+	isnull[2] = false;
+	column->struct_size = sizeof(TessDatumColumn);
+	column->values = values;
+	column->isnull = isnull;
+	column->nrows = 3;
+}
+
+Datum
+tessera_test_kernels_arithmetic(PG_FUNCTION_ARGS)
+{
+	Datum		values[NROWS];
+	bool		isnull[NROWS];
+	uint64		words[NWORDS];
+	int32		results[NROWS];
+	/* Output masks are row masks too: no bits beyond the rows on entry. */
+	uint64		result_words[NWORDS] = {0};
+	TessDatumColumn column;
+	TessRowMask rows = {NROWS, words};
+	TessRowMask non_nulls = {NROWS, result_words};
+	TessStatus	status = TESS_STRUCT_INITIALIZER(TessStatus);
+	Datum		small_values[3];
+	bool		small_nulls[3];
+	uint64		small_selection = 7;
+	TessRowMask small_rows = {3, &small_selection};
+	int32		small_results[3];
+	uint64		small_word = 0;
+	TessRowMask small_non_nulls = {3, &small_word};
+	int			row;
+
+	/* x + 7 over the fixture, against a scalar loop. */
+	fill(values, isnull, words);
+	init_column(&column, values, isnull);
+	if (tess_int4_arith_scalar(TESS_ARITH_ADD, &column, 7, NULL, &rows,
+							   results, &non_nulls, &status) != TESS_OK)
+		PG_RETURN_BOOL(false);
+	for (row = 0; row < NROWS; row++)
+	{
+		bool		chosen = (words[row / 64] &
+							  (UINT64CONST(1) << (row % 64))) != 0;
+		bool		present = (result_words[row / 64] &
+							   (UINT64CONST(1) << (row % 64))) != 0;
+
+		if (present != (chosen && !isnull[row]))
+			PG_RETURN_BOOL(false);
+		if (present && results[row] != DatumGetInt32(values[row]) + 7)
+			PG_RETURN_BOOL(false);
+	}
+
+	/* 100 - x and x * x with a NULL in the middle row. */
+	init_small(&column, small_values, small_nulls, 10, 20, 30, true);
+	if (tess_int4_arith_scalar_left(TESS_ARITH_SUB, 100, &column, NULL,
+									&small_rows, small_results,
+									&small_non_nulls, &status) != TESS_OK ||
+		small_word != 5 || small_results[0] != 90 || small_results[2] != 70)
+		PG_RETURN_BOOL(false);
+	if (tess_int4_arith_columns(TESS_ARITH_MUL, &column, NULL, &column, NULL,
+								&small_rows, small_results, &small_non_nulls,
+								&status) != TESS_OK ||
+		small_word != 5 || small_results[0] != 100 ||
+		small_results[2] != 900)
+		PG_RETURN_BOOL(false);
+
+	/* PostgreSQL's error codes. */
+	init_small(&column, small_values, small_nulls, PG_INT32_MAX,
+			   PG_INT32_MIN, 1, false);
+	if (tess_int4_arith_scalar(TESS_ARITH_ADD, &column, 1, NULL, &small_rows,
+							   small_results, &small_non_nulls,
+							   &status) != TESS_ERROR_INTEGER_OUT_OF_RANGE ||
+		strcmp(status.sqlstate, "22003") != 0 ||
+		tess_int4_arith_scalar(TESS_ARITH_DIV, &column, 0, NULL, &small_rows,
+							   small_results, &small_non_nulls,
+							   &status) != TESS_ERROR_DIVISION_BY_ZERO ||
+		strcmp(status.sqlstate, "22012") != 0 ||
+		tess_int4_arith_scalar(TESS_ARITH_DIV, &column, -1, NULL, &small_rows,
+							   small_results, &small_non_nulls,
+							   &status) != TESS_ERROR_INTEGER_OUT_OF_RANGE ||
+		tess_int4_arith_scalar((TessArithOp) 7, &column, 1, NULL, &small_rows,
+							   small_results, &small_non_nulls,
+							   &status) != TESS_ERROR_INVALID_ARGUMENT)
+		PG_RETURN_BOOL(false);
+
+	/* A NULL operand never fails, and x % -1 is 0. */
+	init_small(&column, small_values, small_nulls, 1, PG_INT32_MIN,
+			   PG_INT32_MAX, true);
+	if (tess_int4_arith_scalar(TESS_ARITH_MOD, &column, -1, NULL, &small_rows,
+							   small_results, &small_non_nulls,
+							   &status) != TESS_OK ||
+		small_word != 5 || small_results[0] != 0 || small_results[2] != 0)
 		PG_RETURN_BOOL(false);
 
 	PG_RETURN_BOOL(true);

@@ -19,6 +19,10 @@ CREATE FUNCTION tessera_test_kernels_aggregates()
 RETURNS boolean
 AS :'kernels_test', 'tessera_test_kernels_aggregates'
 LANGUAGE C STRICT;
+CREATE FUNCTION tessera_test_kernels_arithmetic()
+RETURNS boolean
+AS :'kernels_test', 'tessera_test_kernels_arithmetic'
+LANGUAGE C STRICT;
 CREATE FUNCTION tessera_test_kernels_panic()
 RETURNS boolean
 AS :'kernels_test', 'tessera_test_kernels_panic'
@@ -36,6 +40,8 @@ SELECT tessera_test_kernels_errors() AS errors \gset
 \echo :errors
 SELECT tessera_test_kernels_aggregates() AS aggregates \gset
 \echo :aggregates
+SELECT tessera_test_kernels_arithmetic() AS arithmetic \gset
+\echo :arithmetic
 SELECT tessera_test_kernels_panic() AS panic \gset
 \echo :panic
 SELECT tessera_test_kernels_report();
@@ -44,5 +50,6 @@ DROP FUNCTION tessera_test_kernels_layout();
 DROP FUNCTION tessera_test_kernels_filter();
 DROP FUNCTION tessera_test_kernels_errors();
 DROP FUNCTION tessera_test_kernels_aggregates();
+DROP FUNCTION tessera_test_kernels_arithmetic();
 DROP FUNCTION tessera_test_kernels_panic();
 DROP FUNCTION tessera_test_kernels_report();

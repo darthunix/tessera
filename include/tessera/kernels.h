@@ -23,8 +23,9 @@
  *
  * Buffers must not alias: a mutable mask or array passed to a call must not
  * overlap prepared, the column's arrays, or another mutable argument, and
- * the column must not change during the call. Every mask has the column's
- * row count and no bits set beyond it. After a failure the mutable outputs
+ * the column must not change during the call. Every mask, result masks
+ * included, has the column's row count and no bits set beyond it on entry;
+ * the row bits of a result mask may hold anything. After a failure the mutable outputs
  * of the call hold unspecified values and must not be used; results
  * returned through plain pointers are written only on success.
  */
@@ -75,6 +76,18 @@ typedef enum TessCompareOp
 	TESS_CMP_GT = 4,
 	TESS_CMP_GE = 5
 } TessCompareOp;
+
+/* A binary int4 operation with PostgreSQL's semantics and error codes. */
+typedef enum TessArithOp
+{
+	TESS_ARITH_ADD = 0,
+	TESS_ARITH_SUB = 1,
+	TESS_ARITH_MUL = 2,
+	/* Truncating toward zero; MIN / -1 is out of range. */
+	TESS_ARITH_DIV = 3,
+	/* With the dividend's sign; x % -1 is 0. */
+	TESS_ARITH_MOD = 4
+} TessArithOp;
 
 /* Sizes and offsets the Rust side was built with, for layout checks. */
 typedef enum TessLayoutKind
@@ -143,5 +156,45 @@ extern TessStatusCode tess_int4_max(const TessDatumColumn *column,
 									bool *isnull,
 									int32 *value,
 									TessStatus *status);
+
+/*
+ * Arithmetic into a dense int4 result: for every word with selected rows,
+ * non_nulls gets the selected rows whose operands are non-NULL and values
+ * gets their results (a NULL row an initialized placeholder); words without
+ * selected rows get a cleared non_nulls word; rows outside the selection
+ * are unspecified and may stay uninitialized, so values needs no
+ * initialization. Overflow fails with TESS_ERROR_INTEGER_OUT_OF_RANGE and a
+ * zero divisor with TESS_ERROR_DIVISION_BY_ZERO; a NULL operand never fails.
+ * After a failure values and non_nulls are unspecified.
+ */
+extern TessStatusCode tess_int4_arith_scalar(TessArithOp op,
+											 const TessDatumColumn *column,
+											 int32 scalar,
+											 const TessRowMask *prepared,
+											 const TessRowMask *rows,
+											 int32 *values,
+											 TessRowMask *non_nulls,
+											 TessStatus *status);
+
+/* scalar op column, for the operations where the order matters. */
+extern TessStatusCode tess_int4_arith_scalar_left(TessArithOp op,
+												  int32 scalar,
+												  const TessDatumColumn *column,
+												  const TessRowMask *prepared,
+												  const TessRowMask *rows,
+												  int32 *values,
+												  TessRowMask *non_nulls,
+												  TessStatus *status);
+
+/* left op right row by row; a NULL on either side makes a NULL. */
+extern TessStatusCode tess_int4_arith_columns(TessArithOp op,
+											  const TessDatumColumn *left,
+											  const TessRowMask *left_prepared,
+											  const TessDatumColumn *right,
+											  const TessRowMask *right_prepared,
+											  const TessRowMask *rows,
+											  int32 *values,
+											  TessRowMask *non_nulls,
+											  TessStatus *status);
 
 #endif							/* TESSERA_KERNELS_H */

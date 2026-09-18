@@ -49,7 +49,8 @@ freed, or allocated. Within one call, a mutable argument (the mask a filter
 narrows, a result array, a result mask) must not overlap `prepared`, the
 column's arrays, or another mutable argument, and the column must not
 change. Every mask carries the column's row count and has no bits set
-beyond it; a violated rule is an error, not undefined behavior, wherever the
+beyond it on entry, result masks included (their row bits may hold
+anything); a violated rule is an error, not undefined behavior, wherever the
 library can detect it (dimensions, null pointers, padding bits), and
 undefined behavior where it cannot (overlap, dangling pointers).
 
@@ -93,3 +94,13 @@ inside a kernel.
   cannot overflow, the caller checks the running total across batches.
 - `tess_int4_min` and `tess_int4_max(column, prepared, rows, isnull, value,
   status)`: the least or greatest selected non-NULL value, NULL without any.
+- `tess_int4_arith_scalar(op, column, scalar, prepared, rows, values,
+  non_nulls, status)`, `tess_int4_arith_scalar_left(op, scalar, column, …)`
+  and `tess_int4_arith_columns(op, left, left_prepared, right,
+  right_prepared, rows, values, non_nulls, status)`: `+`, `-`, `*`, `/`
+  and `%` with PostgreSQL's semantics into a dense int4 result. For every
+  word with selected rows, `non_nulls` receives the selected rows whose
+  operands are non-NULL and `values` their results; other rows of `values`
+  are unspecified and need no initialization, and words without selected
+  rows get a cleared `non_nulls` word. Overflow reports `22003`, a zero
+  divisor `22012`; `MIN / -1` is out of range and `x % -1` is 0.

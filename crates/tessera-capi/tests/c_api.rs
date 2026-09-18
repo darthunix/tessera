@@ -5,9 +5,9 @@
 use std::ptr;
 
 use tessera_capi::c::{
-    Code, DatumColumn, Mask, Status, tess_int4_count, tess_int4_filter, tess_int4_max,
-    tess_int4_min, tess_int4_sum, tess_kernels_abi_version, tess_kernels_layout,
-    tess_kernels_test_panic,
+    Code, DatumColumn, Mask, Status, tess_int4_arith_columns, tess_int4_arith_scalar,
+    tess_int4_arith_scalar_left, tess_int4_count, tess_int4_filter, tess_int4_max, tess_int4_min,
+    tess_int4_sum, tess_kernels_abi_version, tess_kernels_layout, tess_kernels_test_panic,
 };
 
 /// A column of `nrows` int4 Datums with every fifth row NULL, and the
@@ -358,6 +358,168 @@ fn aggregates_match_a_scalar_loop_and_are_null_without_rows() {
         )
     };
     assert_eq!(code, Code::InvalidArgument);
+}
+
+/// A small column and its selection for the arithmetic tests.
+fn small(values: &[i32], isnull: &[bool]) -> (Vec<u64>, Vec<bool>, u64) {
+    let datums = values.iter().map(|&v| i64::from(v) as u64).collect();
+    let selected = (1u64 << values.len()) - 1;
+    (datums, isnull.to_vec(), selected)
+}
+
+#[test]
+fn arithmetic_writes_results_and_reports_postgresql_codes() {
+    let mut fixture = Fixture::new(200);
+    let column = fixture.column();
+    let rows = fixture.mask();
+    let mut values = vec![i32::MIN; 200];
+    let mut result_words = vec![0; 4];
+    let mut non_nulls = Mask {
+        nrows: 200,
+        bits: result_words.as_mut_ptr(),
+    };
+    let mut status = Status::new();
+    // SAFETY: local buffers of the declared sizes, aliased by nothing else.
+    let code = unsafe {
+        tess_int4_arith_scalar(
+            0,
+            &raw const column,
+            7,
+            ptr::null(),
+            &raw const rows,
+            values.as_mut_ptr(),
+            &raw mut non_nulls,
+            &raw mut status,
+        )
+    };
+    assert_eq!(code, Code::Ok);
+    for row in 0..200 {
+        let selected = fixture.words[row / 64] & (1 << (row % 64)) != 0;
+        let present = result_words[row / 64] & (1 << (row % 64)) != 0;
+        assert_eq!(present, selected && !fixture.isnull[row], "row {row}");
+        if present {
+            assert_eq!(values[row], fixture.values[row] as i32 + 7, "row {row}");
+        }
+    }
+    // scalar - column and column + column on a small column with a NULL.
+    let (datums, isnull, selected) = small(&[10, 20, 30], &[false, true, false]);
+    let column = DatumColumn {
+        struct_size: size_of::<DatumColumn>(),
+        values: datums.as_ptr(),
+        isnull: isnull.as_ptr(),
+        nrows: 3,
+    };
+    let mut selection = [selected];
+    let rows = Mask {
+        nrows: 3,
+        bits: selection.as_mut_ptr(),
+    };
+    let mut values = [0; 3];
+    let mut result_words = [0];
+    let mut non_nulls = Mask {
+        nrows: 3,
+        bits: result_words.as_mut_ptr(),
+    };
+    // SAFETY: as above.
+    let code = unsafe {
+        tess_int4_arith_scalar_left(
+            1,
+            100,
+            &raw const column,
+            ptr::null(),
+            &raw const rows,
+            values.as_mut_ptr(),
+            &raw mut non_nulls,
+            &raw mut status,
+        )
+    };
+    assert_eq!(code, Code::Ok);
+    assert_eq!(result_words, [0b101]);
+    assert_eq!((values[0], values[2]), (90, 70));
+    // SAFETY: as above; the column is both operands.
+    let code = unsafe {
+        tess_int4_arith_columns(
+            2,
+            &raw const column,
+            ptr::null(),
+            &raw const column,
+            ptr::null(),
+            &raw const rows,
+            values.as_mut_ptr(),
+            &raw mut non_nulls,
+            &raw mut status,
+        )
+    };
+    assert_eq!(code, Code::Ok);
+    assert_eq!(result_words, [0b101]);
+    assert_eq!((values[0], values[2]), (100, 900));
+    // PostgreSQL's error codes.
+    let (datums, isnull, selected) = small(&[i32::MAX, i32::MIN, 1], &[false, false, false]);
+    let column = DatumColumn {
+        struct_size: size_of::<DatumColumn>(),
+        values: datums.as_ptr(),
+        isnull: isnull.as_ptr(),
+        nrows: 3,
+    };
+    let mut selection = [selected];
+    let rows = Mask {
+        nrows: 3,
+        bits: selection.as_mut_ptr(),
+    };
+    for (op, scalar, expected, sqlstate) in [
+        (0, 1, Code::IntegerOutOfRange, "22003"),
+        (3, 0, Code::DivisionByZero, "22012"),
+        (4, 0, Code::DivisionByZero, "22012"),
+        (3, -1, Code::IntegerOutOfRange, "22003"),
+        (7, 1, Code::InvalidArgument, "XX000"),
+    ] {
+        // SAFETY: as above.
+        let code = unsafe {
+            tess_int4_arith_scalar(
+                op,
+                &raw const column,
+                scalar,
+                ptr::null(),
+                &raw const rows,
+                values.as_mut_ptr(),
+                &raw mut non_nulls,
+                &raw mut status,
+            )
+        };
+        assert_eq!(code, expected, "op {op} scalar {scalar}");
+        assert_eq!(status.code, expected);
+        assert_eq!(status.sqlstate(), sqlstate, "op {op} scalar {scalar}");
+        assert!(!status.message().is_empty());
+    }
+    // A NULL operand never fails; x % -1 is 0.
+    let (datums, isnull, selected) = small(&[i32::MIN, i32::MAX, 5], &[true, false, false]);
+    let column = DatumColumn {
+        struct_size: size_of::<DatumColumn>(),
+        values: datums.as_ptr(),
+        isnull: isnull.as_ptr(),
+        nrows: 3,
+    };
+    let mut selection = [selected];
+    let rows = Mask {
+        nrows: 3,
+        bits: selection.as_mut_ptr(),
+    };
+    // SAFETY: as above.
+    let code = unsafe {
+        tess_int4_arith_scalar(
+            4,
+            &raw const column,
+            -1,
+            ptr::null(),
+            &raw const rows,
+            values.as_mut_ptr(),
+            &raw mut non_nulls,
+            &raw mut status,
+        )
+    };
+    assert_eq!(code, Code::Ok);
+    assert_eq!(result_words, [0b110]);
+    assert_eq!((values[1], values[2]), (0, 0));
 }
 
 #[test]
