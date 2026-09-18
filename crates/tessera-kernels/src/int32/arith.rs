@@ -203,6 +203,7 @@ where
     }
 
     /// Every word row by row.
+    #[inline]
     fn rows<E: Evaluate>(&self, output: Output<'_, '_, '_, '_>, evaluate: &E) -> Result<()> {
         let rows = output.rows;
         let mut output = output;
@@ -215,7 +216,11 @@ where
 
     /// One word row by row. The three operand shapes give three loops of
     /// one body; two columns are zipped word by word, which the trait
-    /// guarantees to yield the same rows in the same order.
+    /// guarantees to yield the same rows in the same order. Always inlined:
+    /// the shape is a constant at every call site once the callers are
+    /// inlined, and as a call it cost a sparse selection thirty
+    /// instructions per word.
+    #[inline(always)]
     fn word<E: Evaluate>(
         &self,
         index: usize,
@@ -462,6 +467,7 @@ impl Output<'_, '_, '_, '_> {
     /// One word's selected rows: a NULL row gets a placeholder computed
     /// from `(0, 1)`, which no operation rejects, so that the loop has no
     /// branch on nullness; only the error check branches, and it never goes.
+    #[inline(always)]
     fn word<I, E: Evaluate>(&mut self, index: usize, pairs: I, evaluate: &E) -> Result<()>
     where
         I: Iterator<Item = (usize, Option<(i32, i32)>)>,
