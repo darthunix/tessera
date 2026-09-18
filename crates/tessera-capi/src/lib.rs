@@ -1,9 +1,11 @@
 //! The boundary between Tessera's Rust implementation and its C callers.
 //!
-//! This crate produces a static library but does not expose C functions yet.
 //! On macOS and Linux, Cargo builds `target/debug/libtessera_capi.a` or
-//! `target/release/libtessera_capi.a`. A Rust library is also built for Rust
-//! consumers and tests. The C build does not yet link or install these libraries.
+//! `target/release/libtessera_capi.a`, which C links statically; a Rust
+//! library is also built for Rust consumers and tests. The C entry points
+//! are the [`c`] module, declared in `include/tessera/kernels.h` and
+//! documented for C callers in `docs/kernels.md`: kernels over Datum
+//! columns and row masks, each returning a status instead of raising.
 //!
 //! # Borrowed column adapters
 //!
@@ -29,7 +31,7 @@
 //! Rust must not call PostgreSQL, directly or through callbacks, or retain
 //! `TupleTableSlot`, `MemoryContext`, or Datum pointers after returning to C.
 //!
-//! The following rules apply when the first C entry points are added:
+//! The following rules apply to the C entry points:
 //!
 //! - Stack unwinding is allowed only within Rust. Both build profiles explicitly
 //!   use `panic = "unwind"`; overriding this with `panic = "abort"` is unsupported.
@@ -51,11 +53,13 @@
 //! - The library must not replace the global panic hook or call PostgreSQL from
 //!   a hook. The hook runs before a panic is caught.
 //!
-//! The first real C entry point must include panic-to-status handling and a test
-//! that calls it from C with an injected panic. The test must verify error return,
-//! resource cleanup, no partial output, and safe state after failure with both
-//! debug and release libraries. `cargo test` alone does not verify the library's
-//! panic strategy because the test harness handles that setting separately.
+//! Every entry point runs under [`c`]'s guard, which turns an error or a
+//! caught panic into a status. `tess_kernels_test_panic` raises a panic on
+//! purpose; the C test module `test/tessera_kernels_test.c` calls it with
+//! both the debug and the release library and checks the error return, the
+//! untouched outputs and a successful call afterwards. `cargo test` alone
+//! does not verify the library's panic strategy because the test harness
+//! handles that setting separately.
 //!
 //! # Checking uninitialized-buffer access
 //!
@@ -68,6 +72,7 @@
 //! cargo +nightly miri test -p tessera-core --test reader --locked
 //! ```
 
+pub mod c;
 mod column;
 
 pub use column::{DatumInt32Column, DenseInt32Column};
