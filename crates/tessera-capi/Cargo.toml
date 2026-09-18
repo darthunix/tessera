@@ -33,3 +33,7 @@ harness = false
 [[bench]]
 name = "aggregate_int32"
 harness = false
+
+[[bench]]
+name = "arith_int32"
+harness = false

@@ -19,12 +19,12 @@ use crate::support::{
 pub struct Input<'a, C> {
     pub column: &'a C,
     pub rows: RowMaskView<'a>,
-    values: &'a [i32],
-    datums: &'a [u64],
-    nulls: &'a [bool],
-    reference_rows: Mask<'a>,
-    prepared: Option<Mask<'a>>,
-    non_nulls: Option<Mask<'a>>,
+    pub values: &'a [i32],
+    pub datums: &'a [u64],
+    pub nulls: &'a [bool],
+    pub reference_rows: Mask<'a>,
+    pub prepared: Option<Mask<'a>>,
+    pub non_nulls: Option<Mask<'a>>,
 }
 
 impl<'a, C> Input<'a, C> {

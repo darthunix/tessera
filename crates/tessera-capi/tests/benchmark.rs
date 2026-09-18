@@ -6,6 +6,9 @@
 #[path = "../benches/support/aggregating.rs"]
 #[allow(dead_code)]
 mod aggregating;
+#[path = "../benches/support/arithmetic.rs"]
+#[allow(dead_code)]
+mod arithmetic;
 #[path = "../benches/support/filtering.rs"]
 #[allow(dead_code)]
 mod filtering;
@@ -106,6 +109,25 @@ fn aggregate_kernels_match_the_fixture_model_on_every_case() -> Result<()> {
             "{}",
             case.name
         );
+    }
+    Ok(())
+}
+
+#[test]
+fn arithmetic_kernels_match_the_fixture_model_on_every_case() -> Result<()> {
+    for case in reading::cases() {
+        let dense = case.dense_column()?;
+        arithmetic::check(
+            &reading::Input::new(&dense, &case),
+            &case,
+            arithmetic::dense_reference,
+        )?;
+        let datum = case.datum_column()?;
+        arithmetic::check(
+            &reading::Input::new(&datum, &case),
+            &case,
+            arithmetic::datum_reference,
+        )?;
     }
     Ok(())
 }
