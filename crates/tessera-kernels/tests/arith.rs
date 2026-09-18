@@ -397,6 +397,9 @@ fn whole_words_agree_with_the_row_path() -> Result<()> {
         for shape in [
             Shape::ColumnScalar(&left_column, 3),
             Shape::ColumnScalar(&left_column, -7),
+            Shape::ColumnScalar(&left_column, 2),
+            Shape::ColumnScalar(&left_column, -4),
+            Shape::ColumnScalar(&left_column, 641),
             Shape::ScalarColumn(1_000_000, &right_column),
             Shape::Columns(&left_column, &right_column),
         ] {
@@ -422,6 +425,67 @@ fn whole_words_agree_with_the_row_path() -> Result<()> {
             }
         }
     }
+    Ok(())
+}
+
+/// Division by a scalar on whole words multiplies by a prepared reciprocal;
+/// the dividends where a wrong multiplier shows are the extremes, and the
+/// divisors 0 and ±1 keep their checks.
+#[test]
+fn division_by_scalars_agrees_on_whole_words_with_extremes() -> Result<()> {
+    const EXTREMES: [i32; 8] = [i32::MIN, i32::MIN + 1, -1, 0, 1, i32::MAX - 1, i32::MAX, -7];
+    let mut state = 0x2545_F491_4F6C_DD1D_u64;
+    let nrows = 2 * 64 + 9;
+    let values: Vec<i32> = (0..nrows)
+        .map(|row| {
+            if row % 3 == 0 {
+                EXTREMES[row / 3 % EXTREMES.len()]
+            } else {
+                (random(&mut state) >> 32) as i32
+            }
+        })
+        .collect();
+    let non_null: Vec<bool> = (0..nrows).map(|row| row % 11 != 4).collect();
+    let non_null_words = words_for(&non_null);
+    let column = ColumnView::try_new(&values, Some(RowMaskView::try_new(nrows, &non_null_words)?))?;
+    // A full first word puts the call on the whole-word path.
+    let selected: Vec<bool> = (0..nrows).map(|row| row < 64 || row % 5 != 0).collect();
+    let words = words_for(&selected);
+    let rows = RowMaskView::try_new(nrows, &words)?;
+    for op in [ArithOp::Div, ArithOp::Mod] {
+        for scalar in [
+            2,
+            -2,
+            3,
+            -7,
+            4,
+            -4,
+            641,
+            1 << 30,
+            i32::MIN,
+            i32::MAX,
+            1,
+            -1,
+            0,
+        ] {
+            let shape = Shape::ColumnScalar(&column, scalar);
+            let expected: Vec<Option<Result<i32, ArithmeticError>>> = (0..nrows)
+                .map(|row| (selected[row] && non_null[row]).then(|| model(op, values[row], scalar)))
+                .collect();
+            check(op, run(op, shape, &rows), &expected);
+            check(op, run_rows(op, shape, &rows), &expected);
+        }
+    }
+    let failure = run(ArithOp::Div, Shape::ColumnScalar(&column, -1), &rows).unwrap_err();
+    assert_eq!(
+        arithmetic_error(&failure),
+        Some(ArithmeticError::IntegerOutOfRange)
+    );
+    let failure = run(ArithOp::Mod, Shape::ColumnScalar(&column, 0), &rows).unwrap_err();
+    assert_eq!(
+        arithmetic_error(&failure),
+        Some(ArithmeticError::DivisionByZero)
+    );
     Ok(())
 }
 

@@ -7,11 +7,13 @@
 
 mod aggregate;
 mod arith;
+pub(crate) mod divisor;
 mod filter;
 
 pub use aggregate::{count, max, min, sum};
 pub(crate) use arith::Side;
 pub use arith::{ArithOp, ArithmeticError, arith_columns, arith_scalar, arith_scalar_left};
+pub(crate) use divisor::Divisor;
 pub use filter::filter;
 
 /// A comparison of a column value on the left with a non-NULL scalar on the right.

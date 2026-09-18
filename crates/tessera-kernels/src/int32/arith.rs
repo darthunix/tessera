@@ -23,10 +23,13 @@
 //! When the first word of the selection is full, selects at least a dozen
 //! rows and every column operand exposes its storage, the call computes
 //! whole words: `+`, `-` and `*` with vector code on AArch64 (overflow
-//! detected per lane and reported once per word), `/` and `%` lane by lane
-//! from the blocks, since NEON has no integer division. Single-row words,
-//! the tail and refused words are read row by row; every other call reads
-//! every word row by row through the word iterators.
+//! detected per lane and reported once per word); `/` and `%` by a scalar
+//! divisor of magnitude at least two with a multiplier prepared once per
+//! call (`Divisor`), applied to every lane by vector code and unable to
+//! fail; other divisions lane by lane from the blocks, since NEON has no
+//! integer division. Single-row words, the tail and refused words are read
+//! row by row; every other call reads every word row by row through the
+//! word iterators.
 
 use std::fmt;
 use std::mem::MaybeUninit;
@@ -34,7 +37,7 @@ use std::mem::MaybeUninit;
 use anyhow::{Result, ensure};
 use tessera_core::{ColumnReader, RowMask, RowMaskView, WordBlock};
 
-use super::BULK_MIN_ROWS;
+use super::{BULK_MIN_ROWS, Divisor};
 
 /// A binary int4 operation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -406,6 +409,12 @@ where
 {
     let rows = output.rows;
     let mut output = output;
+    // A scalar divisor of magnitude at least two divides by multiplication;
+    // it is prepared once per call, and only for calls that get here.
+    let divisor = match (op, operands) {
+        (ArithOp::Div | ArithOp::Mod, Operands::ColumnScalar(_, d)) => Divisor::new(*d),
+        _ => None,
+    };
     for index in 0..rows.nrows().div_ceil(64) {
         let selected = rows.word(index).unwrap();
         if selected == 0 || selected.is_power_of_two() {
@@ -421,13 +430,22 @@ where
         let out: &mut [MaybeUninit<i32>; 64] = (&mut output.values[base..base + 64])
             .try_into()
             .expect("a whole-word operand implies a full word");
-        let overflow = match op {
-            ArithOp::Add => bulk_op::add(lhs, rhs, present, out),
-            ArithOp::Sub => bulk_op::sub(lhs, rhs, present, out),
-            ArithOp::Mul => bulk_op::mul(lhs, rhs, present, out),
-            ArithOp::Div | ArithOp::Mod => {
-                // No vector division: the present lanes one by one from the
-                // blocks; a division is too dear to spend on absent lanes.
+        let overflow = match (op, divisor) {
+            (ArithOp::Add, _) => bulk_op::add(lhs, rhs, present, out),
+            (ArithOp::Sub, _) => bulk_op::sub(lhs, rhs, present, out),
+            (ArithOp::Mul, _) => bulk_op::mul(lhs, rhs, present, out),
+            (ArithOp::Div, Some(divisor)) => {
+                bulk_op::div(lhs, divisor, out);
+                false
+            }
+            (ArithOp::Mod, Some(divisor)) => {
+                bulk_op::rem(lhs, divisor, out);
+                false
+            }
+            (ArithOp::Div | ArithOp::Mod, None) => {
+                // No vector division by a column, zero or ±1: the present
+                // lanes one by one from the blocks; a division is too dear
+                // to spend on absent lanes.
                 let mut lanes = present;
                 while lanes != 0 {
                     let lane = lanes.trailing_zeros() as usize;
@@ -452,9 +470,17 @@ use crate::simd as bulk_op;
 mod bulk_op {
     use std::mem::MaybeUninit;
 
-    use super::Side;
+    use super::{Divisor, Side};
 
     pub fn add(_: Side<'_>, _: Side<'_>, _: u64, _: &mut [MaybeUninit<i32>; 64]) -> bool {
+        unreachable!("no whole-word kernels on this target")
+    }
+
+    pub fn div(_: Side<'_>, _: Divisor, _: &mut [MaybeUninit<i32>; 64]) {
+        unreachable!("no whole-word kernels on this target")
+    }
+
+    pub fn rem(_: Side<'_>, _: Divisor, _: &mut [MaybeUninit<i32>; 64]) {
         unreachable!("no whole-word kernels on this target")
     }
 
