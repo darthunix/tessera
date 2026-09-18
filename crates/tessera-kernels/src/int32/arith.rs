@@ -202,8 +202,10 @@ where
         }
     }
 
-    /// Every word row by row.
-    #[inline]
+    /// Every word row by row. Out of line, like the whole-word loop: sharing
+    /// a function with the other path's call cost this loop registers, and
+    /// with them 5-20% of its instructions.
+    #[inline(never)]
     fn rows<E: Evaluate>(&self, output: Output<'_, '_, '_, '_>, evaluate: &E) -> Result<()> {
         let rows = output.rows;
         let mut output = output;
