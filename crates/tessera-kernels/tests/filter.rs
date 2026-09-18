@@ -88,9 +88,21 @@ fn bulk_words_agree_with_the_row_path_on_random_data() {
         let column = ColumnView::try_new(&values, non_nulls).unwrap();
         let rows_only = RowsOnly(ColumnView::try_new(&values, non_nulls).unwrap());
         for op in OPS {
-            for scalar in [i32::MIN, -100, -99, -1, 0, 1, 42, 98, 99, i32::MAX] {
+            for (scalar, density) in [
+                (i32::MIN, 2),
+                (-100, 8),
+                (-99, 2),
+                (-1, 16),
+                (0, 2),
+                (1, 3),
+                (42, 2),
+                (98, 8),
+                (99, 2),
+                (i32::MAX, 5),
+            ] {
+                // Dense selections take the whole-word loop, sparse ones the rows.
                 let selected: Vec<bool> = (0..nrows)
-                    .map(|_| random(&mut state).is_multiple_of(2))
+                    .map(|_| random(&mut state).is_multiple_of(density))
                     .collect();
                 let mut bulk = words_for(&selected);
                 let mut rows = words_for(&selected);

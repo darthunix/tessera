@@ -26,11 +26,11 @@ pub enum CompareOp {
 /// Keep selected, non-NULL rows satisfying `column op scalar`.
 ///
 /// Row indices remain physical; removed rows are never restored. Only nonempty
-/// words are read: a full, fully prepared word whose storage the reader
-/// exposes is compared whole (vector code on AArch64) when at least a dozen
-/// of its rows are selected, any other word only at its selected rows. The
-/// first full word a reader refuses ends the whole-word attempts for the
-/// call. Column values and their masks are borrowed without
+/// words are read. When the first word with several selected rows is full,
+/// selects at least a dozen rows and the reader exposes its storage, every
+/// multi-row word of the call is compared whole (vector code on AArch64) and
+/// only the tail word or a word the reader refuses is read at its selected
+/// rows; otherwise every word is. Column values and their masks are borrowed without
 /// copying or mutation; `rows` is borrowed exclusively. There are no
 /// allocations on success and no alignment requirements beyond those of the
 /// supplied reader and row mask. The operation is chosen once per call.
@@ -76,9 +76,10 @@ pub fn filter<C: ColumnReader<Value = i32>>(
     }
 }
 
-/// Selected rows from which comparing the whole word pays: on an M5 Pro a
-/// word costs 19 cycles dense and 27 cycles Datum against about 2.5 cycles
-/// per selected row on the row path.
+/// Selected rows in the first multi-row word from which whole-word
+/// comparisons pay for the call: on an M5 Pro a word costs 19 cycles dense
+/// and 27 cycles Datum against about 2.5 cycles per selected row on the row
+/// path.
 const BULK_MIN_ROWS: u32 = 12;
 
 fn filter_with<C: ColumnReader<Value = i32>>(
@@ -88,53 +89,124 @@ fn filter_with<C: ColumnReader<Value = i32>>(
     scalar: i32,
     compare: impl Fn(i32, i32) -> bool,
 ) -> Result<()> {
-    let nrows = rows.as_view().nrows();
-    let full_words = nrows / 64;
-    // Bulk attempts end at the first full word the reader refuses: it has no
-    // bulk storage, or this batch is partly prepared, and asking again for
-    // every word would cost a readiness decode each time. The tail word is
-    // never asked.
-    let mut bulk = true;
-    for index in 0..nrows.div_ceil(64) {
+    let view = rows.as_view();
+    let nrows = view.nrows();
+    // The first word with several selected rows decides the strategy for the
+    // whole call: whole-word comparisons when it is dense and the reader
+    // exposes its storage, rows otherwise. Selectivity is roughly uniform
+    // within a batch, and a partly prepared batch or a reader without bulk
+    // storage refuses its first word as it would refuse the others. Deciding
+    // once keeps both loops free of per-word bookkeeping, which cost more
+    // than the decision on every layout tried.
+    let bulk = cfg!(all(target_arch = "aarch64", not(miri)))
+        && (0..nrows.div_ceil(64))
+            .map(|index| (index, view.word(index).unwrap()))
+            .find(|&(_, selected)| selected != 0 && !selected.is_power_of_two())
+            .is_some_and(|(index, selected)| {
+                index < nrows / 64
+                    && (selected == u64::MAX || selected.count_ones() >= BULK_MIN_ROWS)
+                    && column.word_block(index).is_some()
+            });
+    if bulk {
+        filter_bulk(column, rows, op, scalar, &compare)
+    } else {
+        filter_rows(column, rows, scalar, &compare)
+    }
+}
+
+/// Every word at its selected rows; the loop hoists the mask decoding.
+fn filter_rows<C: ColumnReader<Value = i32>>(
+    column: &C,
+    rows: &mut RowMask<'_>,
+    scalar: i32,
+    compare: &impl Fn(i32, i32) -> bool,
+) -> Result<()> {
+    for index in 0..rows.as_view().nrows().div_ceil(64) {
         let selected = rows.as_view().word(index).unwrap();
         if selected == 0 {
             continue;
         }
         let passing = if selected.is_power_of_two() {
-            // One row needs only its readiness and NULL bits, not whole mask words.
-            let row = index * 64 + selected.trailing_zeros() as usize;
-            if column.get(row)?.is_some_and(|value| compare(value, scalar)) {
-                selected
-            } else {
-                0
-            }
+            single_passing(column, index, selected, scalar, compare)?
         } else {
-            let mut passing = None;
-            if bulk
-                && index < full_words
-                && (selected == u64::MAX || selected.count_ones() >= BULK_MIN_ROWS)
-            {
-                passing = bulk_passing(column, index, op, scalar);
-                bulk = passing.is_some();
-            }
-            match passing {
-                // The whole word compared at once; intersecting keeps the selection.
-                Some(passing) => passing,
-                // The row path stays in this loop: as a function of its own it
-                // decoded the masks anew for every word, which the loop hoists.
-                // fold is the word iterator's bulk path; the predicate becomes a
-                // bit so that the loop has no data-dependent branch.
-                None => column
-                    .word_values(index, selected)?
-                    .fold(0, |passing, (row, value)| {
-                        let passes = value.is_some_and(|value| compare(value, scalar));
-                        passing | (u64::from(passes) << (row % 64))
-                    }),
-            }
+            // fold is the word iterator's bulk path; the predicate becomes a
+            // bit so that the loop has no data-dependent branch.
+            column
+                .word_values(index, selected)?
+                .fold(0, |passing, (row, value)| {
+                    let passes = value.is_some_and(|value| compare(value, scalar));
+                    passing | (u64::from(passes) << (row % 64))
+                })
         };
         rows.intersect_word(index, passing)?;
     }
     Ok(())
+}
+
+/// Every multi-row word compared whole; the tail word and any word the
+/// reader refuses take the row path out of line. Once a call is here, a word
+/// of even a few rows is cheaper whole than through that call.
+fn filter_bulk<C: ColumnReader<Value = i32>>(
+    column: &C,
+    rows: &mut RowMask<'_>,
+    op: CompareOp,
+    scalar: i32,
+    compare: &impl Fn(i32, i32) -> bool,
+) -> Result<()> {
+    for index in 0..rows.as_view().nrows().div_ceil(64) {
+        let selected = rows.as_view().word(index).unwrap();
+        if selected == 0 {
+            continue;
+        }
+        let passing = if selected.is_power_of_two() {
+            single_passing(column, index, selected, scalar, compare)?
+        } else if let Some(passing) = bulk_passing(column, index, op, scalar) {
+            // Intersecting keeps the selection.
+            passing
+        } else {
+            row_passing(column, index, selected, scalar, compare)?
+        };
+        rows.intersect_word(index, passing)?;
+    }
+    Ok(())
+}
+
+/// One row needs only its readiness and NULL bits, not whole mask words.
+#[inline(always)]
+fn single_passing<C: ColumnReader<Value = i32>>(
+    column: &C,
+    index: usize,
+    selected: u64,
+    scalar: i32,
+    compare: &impl Fn(i32, i32) -> bool,
+) -> Result<u64> {
+    let row = index * 64 + selected.trailing_zeros() as usize;
+    Ok(
+        if column.get(row)?.is_some_and(|value| compare(value, scalar)) {
+            selected
+        } else {
+            0
+        },
+    )
+}
+
+/// The selected rows of one word compared one by one, for the words the
+/// whole-word loop cannot compare. Out of line so that its loop does not
+/// share registers with that loop.
+#[inline(never)]
+fn row_passing<C: ColumnReader<Value = i32>>(
+    column: &C,
+    index: usize,
+    selected: u64,
+    scalar: i32,
+    compare: &impl Fn(i32, i32) -> bool,
+) -> Result<u64> {
+    Ok(column
+        .word_values(index, selected)?
+        .fold(0, |passing, (row, value)| {
+            let passes = value.is_some_and(|value| compare(value, scalar));
+            passing | (u64::from(passes) << (row % 64))
+        }))
 }
 
 /// The passing rows of a full prepared word compared with vector code, or
