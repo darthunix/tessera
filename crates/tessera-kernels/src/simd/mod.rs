@@ -23,7 +23,9 @@ use core::arch::aarch64::{
     vreinterpret_s8_u8, vreinterpretq_s32_u64, vreinterpretq_u32_s32, vtst_u8, vuzp1q_s32,
 };
 
-pub use aggregate::{max_datum, max_dense, min_datum, min_dense, sum_datum, sum_dense};
+pub use aggregate::{
+    count_datum, max_datum, max_dense, min_datum, min_dense, sum_datum, sum_dense,
+};
 pub use filter::{filter_datum, filter_dense};
 
 /// Bit weights of the four lanes of each group in a 16-row quarter.
@@ -37,6 +39,7 @@ const LANE_WEIGHTS: [[u32; 4]; 4] = [
 const BYTE_WEIGHTS: [u8; 16] = [1, 2, 4, 8, 16, 32, 64, 128, 1, 2, 4, 8, 16, 32, 64, 128];
 
 /// Rows of a Datum block whose flag is false, as bits in row order.
+#[inline]
 pub fn non_null_bits(isnull: &[bool; 64]) -> u64 {
     const { assert!(cfg!(target_feature = "neon")) }
     // SAFETY: NEON is enabled for this compilation (asserted above), so the

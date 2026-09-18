@@ -8,14 +8,16 @@
 //! `bigint out of range`. [`min`] and [`max`] are `None` without a non-NULL
 //! row.
 //!
-//! When the first nonempty word of the selection is full, selects at least a
-//! dozen rows and the reader exposes its storage, the call aggregates whole
-//! words (vector code on AArch64) and reads only single-row words, the tail
-//! and refused words row by row. Otherwise it reads through
+//! When the first word of the selection is full, selects at least a dozen
+//! rows and the reader exposes its storage, the call aggregates whole words
+//! (vector code on AArch64) and reads only single-row words, the tail and
+//! refused words row by row. Otherwise it reads through
 //! [`ColumnReader::try_fold_selected`]: the representation chooses its NULL
-//! mode once and walks full words with a counted loop. Either way a NULL row
-//! contributes an identity value rather than a branch, so the accumulator's
-//! dependency chain stays short.
+//! mode once and walks full words with a counted loop. Only the first word is
+//! consulted: selectivity is roughly uniform within a batch, and scanning for
+//! a first nonempty word cost an empty selection almost as much as reading
+//! it. Either way a NULL row contributes an identity value rather than a
+//! branch, so the accumulator's dependency chain stays short.
 
 use anyhow::Result;
 use tessera_core::{ColumnReader, RowMaskView, WordBlock};
@@ -158,9 +160,8 @@ pub fn max<C: ColumnReader<Value = i32>>(
 }
 
 /// Run one aggregate: `fold` takes a row's value, `block` a whole word with
-/// its selection. The first nonempty word decides the strategy for the call,
-/// as in the filter; deciding once keeps the loops free of per-word
-/// bookkeeping.
+/// its selection. The first word decides the strategy for the call; deciding
+/// once keeps the loops free of per-word bookkeeping.
 fn aggregate<C: ColumnReader<Value = i32>, B: Copy>(
     column: &C,
     rows: &RowMaskView<'_>,
@@ -168,16 +169,13 @@ fn aggregate<C: ColumnReader<Value = i32>, B: Copy>(
     mut fold: impl FnMut(B, Option<i32>) -> B,
     block: impl for<'a> FnMut(B, WordBlock<'a, i32>, u64) -> B,
 ) -> Result<B> {
-    let nrows = rows.nrows();
     let bulk = cfg!(all(target_arch = "aarch64", not(miri)))
-        && (0..nrows.div_ceil(64))
-            .map(|index| (index, rows.word(index).unwrap()))
-            .find(|&(_, selected)| selected != 0)
-            .is_some_and(|(index, selected)| {
-                index < nrows / 64
-                    && (selected == u64::MAX || selected.count_ones() >= BULK_MIN_ROWS)
-                    && column.word_block(index).is_some()
-            });
+        && rows.nrows() >= 64
+        && rows.word(0).is_some_and(|selected| {
+            (selected == u64::MAX
+                || (!selected.is_power_of_two() && selected.count_ones() >= BULK_MIN_ROWS))
+                && column.word_block(0).is_some()
+        });
     if bulk {
         aggregate_bulk(column, rows, init, fold, block)
     } else {
@@ -216,7 +214,8 @@ fn aggregate_bulk<C: ColumnReader<Value = i32>, B: Copy>(
 }
 
 /// Whole-word kernels: the present rows of a word are its selected non-NULL
-/// rows, and each kernel returns their count with its result.
+/// rows, and each kernel returns their count with its result. Inlined into
+/// the generic loop so that the block stays in registers.
 #[cfg(all(target_arch = "aarch64", not(miri)))]
 mod bulk {
     use tessera_core::WordBlock;
@@ -231,10 +230,15 @@ mod bulk {
         }
     }
 
+    #[inline]
     pub fn count(block: WordBlock<'_, i32>, selected: u64) -> usize {
-        present(&block, selected).count_ones() as usize
+        match block {
+            WordBlock::Dense { non_nulls, .. } => (selected & non_nulls).count_ones() as usize,
+            WordBlock::Datum { isnull, .. } => simd::count_datum(isnull, selected),
+        }
     }
 
+    #[inline]
     pub fn sum(block: WordBlock<'_, i32>, selected: u64) -> (usize, i64) {
         let mask = present(&block, selected);
         let total = match block {
@@ -244,6 +248,7 @@ mod bulk {
         (mask.count_ones() as usize, total)
     }
 
+    #[inline]
     pub fn min(block: WordBlock<'_, i32>, selected: u64) -> (usize, i32) {
         let mask = present(&block, selected);
         let least = match block {
@@ -253,6 +258,7 @@ mod bulk {
         (mask.count_ones() as usize, least)
     }
 
+    #[inline]
     pub fn max(block: WordBlock<'_, i32>, selected: u64) -> (usize, i32) {
         let mask = present(&block, selected);
         let greatest = match block {

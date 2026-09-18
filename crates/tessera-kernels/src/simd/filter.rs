@@ -10,6 +10,7 @@ use crate::int32::CompareOp;
 
 /// Rows of a dense block whose value satisfies `value op scalar`, as bits in
 /// row order. NULL rows compare like any other and are masked by the caller.
+#[inline]
 pub fn filter_dense(values: &[i32; 64], scalar: i32, op: CompareOp) -> u64 {
     const { assert!(cfg!(target_feature = "neon")) }
     // SAFETY: NEON is enabled for this compilation (asserted above), so the
@@ -19,6 +20,7 @@ pub fn filter_dense(values: &[i32; 64], scalar: i32, op: CompareOp) -> u64 {
 
 /// Rows of a Datum block whose int4 value satisfies `value op scalar` and
 /// whose flag is not NULL, as bits in row order.
+#[inline]
 pub fn filter_datum(values: &[u64; 64], isnull: &[bool; 64], scalar: i32, op: CompareOp) -> u64 {
     const { assert!(cfg!(target_feature = "neon")) }
     // SAFETY: as in filter_dense.
