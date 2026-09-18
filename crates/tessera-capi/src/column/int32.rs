@@ -193,7 +193,9 @@ impl ColumnReader for DenseInt32Column<'_> {
         )
     }
 
-    #[inline]
+    // Always inlined: returned through memory, the block costs its caller a
+    // call and a copy per word, as much as a third of the vector compare.
+    #[inline(always)]
     fn word_block(&self, word_index: usize) -> Option<WordBlock<'_, i32>> {
         if !fully_prepared(self.prepared, word_index) {
             return None;
@@ -335,7 +337,7 @@ impl ColumnReader for DatumInt32Column<'_> {
         )
     }
 
-    #[inline]
+    #[inline(always)]
     fn word_block(&self, word_index: usize) -> Option<WordBlock<'_, i32>> {
         if !fully_prepared(self.prepared, word_index) {
             return None;

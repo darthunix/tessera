@@ -89,39 +89,47 @@ fn filter_with<C: ColumnReader<Value = i32>>(
     scalar: i32,
     compare: impl Fn(i32, i32) -> bool,
 ) -> Result<()> {
-    let view = rows.as_view();
-    let nrows = view.nrows();
-    // The first word with several selected rows decides the strategy for the
-    // whole call: whole-word comparisons when it is dense and the reader
+    let nrows = rows.as_view().nrows();
+    // Leading empty and single-row words are handled here; the first word
+    // with several selected rows decides the strategy for the rest of the
+    // call: whole-word comparisons when it is full, dense and the reader
     // exposes its storage, rows otherwise. Selectivity is roughly uniform
     // within a batch, and a partly prepared batch or a reader without bulk
     // storage refuses its first word as it would refuse the others. Deciding
     // once keeps both loops free of per-word bookkeeping, which cost more
     // than the decision on every layout tried.
-    let bulk = cfg!(all(target_arch = "aarch64", not(miri)))
-        && (0..nrows.div_ceil(64))
-            .map(|index| (index, view.word(index).unwrap()))
-            .find(|&(_, selected)| selected != 0 && !selected.is_power_of_two())
-            .is_some_and(|(index, selected)| {
-                index < nrows / 64
-                    && (selected == u64::MAX || selected.count_ones() >= BULK_MIN_ROWS)
-                    && column.word_block(index).is_some()
-            });
-    if bulk {
-        filter_bulk(column, rows, op, scalar, &compare)
-    } else {
-        filter_rows(column, rows, scalar, &compare)
+    for index in 0..nrows.div_ceil(64) {
+        let selected = rows.as_view().word(index).unwrap();
+        if selected == 0 {
+            continue;
+        }
+        if !selected.is_power_of_two() {
+            let bulk = cfg!(all(target_arch = "aarch64", not(miri)))
+                && index < nrows / 64
+                && (selected == u64::MAX || selected.count_ones() >= BULK_MIN_ROWS)
+                && column.word_block(index).is_some();
+            return if bulk {
+                filter_bulk(column, rows, index, op, scalar, &compare)
+            } else {
+                filter_rows(column, rows, index, scalar, &compare)
+            };
+        }
+        let passing = single_passing(column, index, selected, scalar, &compare)?;
+        rows.intersect_word(index, passing)?;
     }
+    Ok(())
 }
 
-/// Every word at its selected rows; the loop hoists the mask decoding.
+/// Every word from `first` on at its selected rows; the loop hoists the
+/// mask decoding.
 fn filter_rows<C: ColumnReader<Value = i32>>(
     column: &C,
     rows: &mut RowMask<'_>,
+    first: usize,
     scalar: i32,
     compare: &impl Fn(i32, i32) -> bool,
 ) -> Result<()> {
-    for index in 0..rows.as_view().nrows().div_ceil(64) {
+    for index in first..rows.as_view().nrows().div_ceil(64) {
         let selected = rows.as_view().word(index).unwrap();
         if selected == 0 {
             continue;
@@ -143,17 +151,19 @@ fn filter_rows<C: ColumnReader<Value = i32>>(
     Ok(())
 }
 
-/// Every multi-row word compared whole; the tail word and any word the
-/// reader refuses take the row path out of line. Once a call is here, a word
-/// of even a few rows is cheaper whole than through that call.
+/// Every multi-row word from `first` on compared whole; the tail word and
+/// any word the reader refuses take the row path out of line. Once a call
+/// is here, a word of even a few rows is cheaper whole than through that
+/// call.
 fn filter_bulk<C: ColumnReader<Value = i32>>(
     column: &C,
     rows: &mut RowMask<'_>,
+    first: usize,
     op: CompareOp,
     scalar: i32,
     compare: &impl Fn(i32, i32) -> bool,
 ) -> Result<()> {
-    for index in 0..rows.as_view().nrows().div_ceil(64) {
+    for index in first..rows.as_view().nrows().div_ceil(64) {
         let selected = rows.as_view().word(index).unwrap();
         if selected == 0 {
             continue;
