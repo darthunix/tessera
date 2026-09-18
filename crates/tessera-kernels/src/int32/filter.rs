@@ -1,27 +1,9 @@
-//! Signed int32 comparisons, without SIMD or PostgreSQL type dispatch.
-//!
-//! A physical int32 representation does not select PostgreSQL semantics:
-//! the future caller must choose kernels by logical type and operation.
+//! Comparisons of selected int4 values with a scalar, narrowing a row mask.
 
 use anyhow::{Result, ensure};
 use tessera_core::{ColumnReader, RowMask};
 
-/// A comparison of a column value on the left with a non-NULL scalar on the right.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum CompareOp {
-    /// Equal (`=`).
-    Eq,
-    /// Not equal (`!=`).
-    Ne,
-    /// Less than (`<`).
-    Lt,
-    /// Less than or equal (`<=`).
-    Le,
-    /// Greater than (`>`).
-    Gt,
-    /// Greater than or equal (`>=`).
-    Ge,
-}
+use super::{BULK_MIN_ROWS, CompareOp};
 
 /// Keep selected, non-NULL rows satisfying `column op scalar`.
 ///
@@ -75,12 +57,6 @@ pub fn filter<C: ColumnReader<Value = i32>>(
         CompareOp::Ge => filter_with(column, rows, op, scalar, |a, b| a >= b),
     }
 }
-
-/// Selected rows in the first multi-row word from which whole-word
-/// comparisons pay for the call: on an M5 Pro a word costs 19 cycles dense
-/// and 27 cycles Datum against about 2.5 cycles per selected row on the row
-/// path.
-const BULK_MIN_ROWS: u32 = 12;
 
 fn filter_with<C: ColumnReader<Value = i32>>(
     column: &C,
