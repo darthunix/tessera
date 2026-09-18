@@ -27,8 +27,10 @@ pub enum CompareOp {
 ///
 /// Row indices remain physical; removed rows are never restored. Only nonempty
 /// words are read: a full, fully prepared word whose storage the reader
-/// exposes is compared whole (vector code on AArch64), any other word only at
-/// its selected rows. Column values and their masks are borrowed without
+/// exposes is compared whole (vector code on AArch64) when at least a dozen
+/// of its rows are selected, any other word only at its selected rows. The
+/// first full word a reader refuses ends the whole-word attempts for the
+/// call. Column values and their masks are borrowed without
 /// copying or mutation; `rows` is borrowed exclusively. There are no
 /// allocations on success and no alignment requirements beyond those of the
 /// supplied reader and row mask. The operation is chosen once per call.
@@ -86,7 +88,12 @@ fn filter_with<C: ColumnReader<Value = i32>>(
     scalar: i32,
     compare: impl Fn(i32, i32) -> bool,
 ) -> Result<()> {
-    for index in 0..rows.as_view().nrows().div_ceil(64) {
+    let nrows = rows.as_view().nrows();
+    // Bulk attempts end at the first full word the reader refuses: it has no
+    // bulk storage, or this batch is partly prepared, and asking again for
+    // every word would cost a readiness decode each time.
+    let mut bulk = true;
+    for index in 0..nrows.div_ceil(64) {
         let selected = rows.as_view().word(index).unwrap();
         if selected == 0 {
             continue;
@@ -99,31 +106,49 @@ fn filter_with<C: ColumnReader<Value = i32>>(
             } else {
                 0
             }
-        } else if selected.count_ones() >= BULK_MIN_ROWS
-            && let Some(passing) = bulk_passing(column, index, op, scalar)
-        {
-            // The whole word compared at once; intersecting keeps the selection.
-            passing
         } else {
-            // fold is the word iterator's bulk path; the predicate becomes a
-            // bit so that the loop has no data-dependent branch.
-            column
-                .word_values(index, selected)?
-                .fold(0, |passing, (row, value)| {
-                    let passes = value.is_some_and(|value| compare(value, scalar));
-                    passing | (u64::from(passes) << (row % 64))
-                })
+            let mut passing = None;
+            if bulk && selected.count_ones() >= BULK_MIN_ROWS {
+                passing = bulk_passing(column, index, op, scalar);
+                bulk = passing.is_some() || (index + 1) * 64 > nrows;
+            }
+            match passing {
+                // The whole word compared at once; intersecting keeps the selection.
+                Some(passing) => passing,
+                None => row_passing(column, index, selected, scalar, &compare)?,
+            }
         };
         rows.intersect_word(index, passing)?;
     }
     Ok(())
 }
 
+/// The selected rows of one word compared one by one. Out of line so that
+/// its loop keeps its own registers: inlined next to the bulk path it lost
+/// about one instruction per row to spills.
+#[inline(never)]
+fn row_passing<C: ColumnReader<Value = i32>>(
+    column: &C,
+    index: usize,
+    selected: u64,
+    scalar: i32,
+    compare: &impl Fn(i32, i32) -> bool,
+) -> Result<u64> {
+    // fold is the word iterator's bulk path; the predicate becomes a bit so
+    // that the loop has no data-dependent branch.
+    Ok(column
+        .word_values(index, selected)?
+        .fold(0, |passing, (row, value)| {
+            let passes = value.is_some_and(|value| compare(value, scalar));
+            passing | (u64::from(passes) << (row % 64))
+        }))
+}
+
 /// The passing rows of a full prepared word compared with vector code, or
 /// `None` where the reader exposes no storage for it or no vector code
 /// exists (other targets, Miri): the word then takes the row path.
 #[cfg(all(target_arch = "aarch64", not(miri)))]
-#[inline]
+#[inline(never)]
 fn bulk_passing<C: ColumnReader<Value = i32>>(
     column: &C,
     index: usize,
@@ -142,7 +167,7 @@ fn bulk_passing<C: ColumnReader<Value = i32>>(
 }
 
 #[cfg(not(all(target_arch = "aarch64", not(miri))))]
-#[inline]
+#[inline(never)]
 fn bulk_passing<C: ColumnReader<Value = i32>>(
     _column: &C,
     _index: usize,
