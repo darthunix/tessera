@@ -241,6 +241,37 @@ impl<'a> RowMask<'a> {
         Ok(())
     }
 
+    /// Replace one 64-row word; this is the one operation that can restore
+    /// rows, for masks a kernel produces rather than narrows.
+    ///
+    /// An absent word or set padding bits in `bits` return an error before
+    /// any mutation. Other words stay unchanged.
+    ///
+    /// ```
+    /// use tessera_core::RowMask;
+    /// let mut words = [0, 0];
+    /// let mut rows = RowMask::try_new(65, &mut words)?;
+    /// rows.set_word(0, 0b101)?;
+    /// rows.set_word(1, 1)?;
+    /// assert!(rows.set_word(1, 0b10).is_err());
+    /// assert_eq!(rows.as_view().selected_indices().collect::<Vec<_>>(), [0, 2, 64]);
+    /// # Ok::<(), anyhow::Error>(())
+    /// ```
+    #[inline]
+    pub fn set_word(&mut self, index: usize, bits: u64) -> Result<()> {
+        let word = self
+            .words
+            .get_mut(index)
+            .context("mask word is out of bounds")?;
+        let valid = (self.nrows - index * 64).min(64);
+        ensure!(
+            valid == 64 || bits >> valid == 0,
+            "mask word has set padding bits"
+        );
+        *word = bits;
+        Ok(())
+    }
+
     /// Remove rows absent from `other`, without restoring any cleared row.
     ///
     /// Different physical row counts return an error before any mutation.

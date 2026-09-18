@@ -1,13 +1,16 @@
 //! Signed int32 kernels without PostgreSQL type dispatch: comparisons
-//! ([`filter`]) and aggregates ([`count`], [`sum`], [`min`], [`max`]).
+//! ([`filter`]), aggregates ([`count`], [`sum`], [`min`], [`max`]) and
+//! arithmetic ([`arith_scalar`], [`arith_scalar_left`], [`arith_columns`]).
 //!
 //! A physical int32 representation does not select PostgreSQL semantics:
 //! the future caller must choose kernels by logical type and operation.
 
 mod aggregate;
+mod arith;
 mod filter;
 
 pub use aggregate::{count, max, min, sum};
+pub use arith::{ArithOp, ArithmeticError, arith_columns, arith_scalar, arith_scalar_left};
 pub use filter::filter;
 
 /// A comparison of a column value on the left with a non-NULL scalar on the right.
