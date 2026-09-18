@@ -197,6 +197,15 @@ where
     L: ColumnReader<Value = i32>,
     R: ColumnReader<Value = i32>,
 {
+    /// The right operand prepared for division by multiplication, when it
+    /// is a scalar of magnitude at least two.
+    fn scalar_divisor(&self) -> Option<Divisor> {
+        match self {
+            Self::ColumnScalar(_, d) => Divisor::new(*d),
+            _ => None,
+        }
+    }
+
     fn column_rows(&self) -> [Option<usize>; 2] {
         match self {
             Self::ColumnScalar(left, _) => [Some(left.nrows()), None],
@@ -409,12 +418,10 @@ where
 {
     let rows = output.rows;
     let mut output = output;
-    // A scalar divisor of magnitude at least two divides by multiplication;
-    // it is prepared once per call, and only for calls that get here.
-    let divisor = match (op, operands) {
-        (ArithOp::Div | ArithOp::Mod, Operands::ColumnScalar(_, d)) => Divisor::new(*d),
-        _ => None,
-    };
+    // A scalar divisor of magnitude at least two divides by multiplication.
+    // It is prepared once, at the first word with rows to divide, so that a
+    // selection of NULLs prepares nothing.
+    let mut divisor: Option<Option<Divisor>> = None;
     for index in 0..rows.nrows().div_ceil(64) {
         let selected = rows.word(index).unwrap();
         if selected == 0 || selected.is_power_of_two() {
@@ -430,27 +437,28 @@ where
         let out: &mut [MaybeUninit<i32>; 64] = (&mut output.values[base..base + 64])
             .try_into()
             .expect("a whole-word operand implies a full word");
-        let overflow = match (op, divisor) {
-            (ArithOp::Add, _) => bulk_op::add(lhs, rhs, present, out),
-            (ArithOp::Sub, _) => bulk_op::sub(lhs, rhs, present, out),
-            (ArithOp::Mul, _) => bulk_op::mul(lhs, rhs, present, out),
-            (ArithOp::Div, Some(divisor)) => {
-                bulk_op::div(lhs, divisor, out);
-                false
-            }
-            (ArithOp::Mod, Some(divisor)) => {
-                bulk_op::rem(lhs, divisor, out);
-                false
-            }
-            (ArithOp::Div | ArithOp::Mod, None) => {
-                // No vector division by a column, zero or ±1: the present
-                // lanes one by one from the blocks; a division is too dear
-                // to spend on absent lanes.
-                let mut lanes = present;
-                while lanes != 0 {
-                    let lane = lanes.trailing_zeros() as usize;
-                    lanes &= lanes - 1;
-                    out[lane].write(evaluate(lhs.lane(lane), rhs.lane(lane))?);
+        let overflow = match op {
+            ArithOp::Add => bulk_op::add(lhs, rhs, present, out),
+            ArithOp::Sub => bulk_op::sub(lhs, rhs, present, out),
+            ArithOp::Mul => bulk_op::mul(lhs, rhs, present, out),
+            // A word without rows to divide computes nothing: a division is
+            // too dear to spend on absent lanes, and a whole word of them
+            // is a NULL column.
+            ArithOp::Div | ArithOp::Mod if present == 0 => false,
+            ArithOp::Div | ArithOp::Mod => {
+                match *divisor.get_or_insert_with(|| operands.scalar_divisor()) {
+                    Some(divisor) if op == ArithOp::Div => bulk_op::div(lhs, divisor, out),
+                    Some(divisor) => bulk_op::rem(lhs, divisor, out),
+                    None => {
+                        // No vector division by a column, zero or ±1: the
+                        // present lanes one by one from the blocks.
+                        let mut lanes = present;
+                        while lanes != 0 {
+                            let lane = lanes.trailing_zeros() as usize;
+                            lanes &= lanes - 1;
+                            out[lane].write(evaluate(lhs.lane(lane), rhs.lane(lane))?);
+                        }
+                    }
                 }
                 false
             }

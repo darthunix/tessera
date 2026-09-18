@@ -445,37 +445,48 @@ fn division_by_scalars_agrees_on_whole_words_with_extremes() -> Result<()> {
             }
         })
         .collect();
-    let non_null: Vec<bool> = (0..nrows).map(|row| row % 11 != 4).collect();
-    let non_null_words = words_for(&non_null);
-    let column = ColumnView::try_new(&values, Some(RowMaskView::try_new(nrows, &non_null_words)?))?;
     // A full first word puts the call on the whole-word path.
     let selected: Vec<bool> = (0..nrows).map(|row| row < 64 || row % 5 != 0).collect();
     let words = words_for(&selected);
     let rows = RowMaskView::try_new(nrows, &words)?;
-    for op in [ArithOp::Div, ArithOp::Mod] {
-        for scalar in [
-            2,
-            -2,
-            3,
-            -7,
-            4,
-            -4,
-            641,
-            1 << 30,
-            i32::MIN,
-            i32::MAX,
-            1,
-            -1,
-            0,
-        ] {
-            let shape = Shape::ColumnScalar(&column, scalar);
-            let expected: Vec<Option<Result<i32, ArithmeticError>>> = (0..nrows)
-                .map(|row| (selected[row] && non_null[row]).then(|| model(op, values[row], scalar)))
-                .collect();
-            check(op, run(op, shape, &rows), &expected);
-            check(op, run_rows(op, shape, &rows), &expected);
+    // Scattered NULLs, and a first word of nothing but NULLs, which divides
+    // nothing and leaves the divisor to be prepared at the second word.
+    let patterns: [fn(usize) -> bool; 2] = [|row| row % 11 != 4, |row| row >= 64 && row % 11 != 4];
+    for pattern in patterns {
+        let non_null: Vec<bool> = (0..nrows).map(pattern).collect();
+        let non_null_words = words_for(&non_null);
+        let column =
+            ColumnView::try_new(&values, Some(RowMaskView::try_new(nrows, &non_null_words)?))?;
+        for op in [ArithOp::Div, ArithOp::Mod] {
+            for scalar in [
+                2,
+                -2,
+                3,
+                -7,
+                4,
+                -4,
+                641,
+                1 << 30,
+                i32::MIN,
+                i32::MAX,
+                1,
+                -1,
+                0,
+            ] {
+                let shape = Shape::ColumnScalar(&column, scalar);
+                let expected: Vec<Option<Result<i32, ArithmeticError>>> = (0..nrows)
+                    .map(|row| {
+                        (selected[row] && non_null[row]).then(|| model(op, values[row], scalar))
+                    })
+                    .collect();
+                check(op, run(op, shape, &rows), &expected);
+                check(op, run_rows(op, shape, &rows), &expected);
+            }
         }
     }
+    let non_null: Vec<bool> = (0..nrows).map(patterns[0]).collect();
+    let non_null_words = words_for(&non_null);
+    let column = ColumnView::try_new(&values, Some(RowMaskView::try_new(nrows, &non_null_words)?))?;
     let failure = run(ArithOp::Div, Shape::ColumnScalar(&column, -1), &rows).unwrap_err();
     assert_eq!(
         arithmetic_error(&failure),
