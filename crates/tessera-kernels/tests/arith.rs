@@ -3,10 +3,30 @@
 use std::mem::MaybeUninit;
 
 use anyhow::Result;
-use tessera_core::{ColumnView, RowMask, RowMaskView};
+use tessera_core::{ColumnReader, ColumnView, RowMask, RowMaskView};
 use tessera_kernels::int32::{
     ArithOp, ArithmeticError, arith_columns, arith_scalar, arith_scalar_left,
 };
+
+/// The same values without bulk storage: every call takes the row path.
+struct RowsOnly<'a>(&'a ColumnView<'a, i32>);
+
+impl ColumnReader for RowsOnly<'_> {
+    type Value = i32;
+    fn nrows(&self) -> usize {
+        self.0.nrows()
+    }
+    fn get(&self, row: usize) -> Result<Option<i32>> {
+        ColumnReader::get(self.0, row)
+    }
+    fn word_values(
+        &self,
+        word_index: usize,
+        selected: u64,
+    ) -> Result<impl Iterator<Item = (usize, Option<i32>)> + '_> {
+        self.0.word_values(word_index, selected)
+    }
+}
 
 const OPS: [ArithOp; 5] = [
     ArithOp::Add,
@@ -313,6 +333,145 @@ fn check(
         }
         (first_error, outcome) => panic!("{op:?}: model {first_error:?}, kernel {outcome:?}"),
     }
+}
+
+/// Run one shape on plain row-path readers, for comparison with the
+/// whole-word path of `ColumnView`.
+fn run_rows(op: ArithOp, shape: Shape<'_>, rows: &RowMaskView<'_>) -> Result<(Vec<i32>, Vec<u64>)> {
+    let nrows = rows.nrows();
+    let mut values = vec![MaybeUninit::new(SENTINEL); nrows];
+    let mut words = vec![0; nrows.div_ceil(64)];
+    let mut mask = RowMask::try_new(nrows, &mut words)?;
+    match shape {
+        Shape::ColumnScalar(column, scalar) => {
+            arith_scalar(op, &RowsOnly(column), scalar, rows, &mut values, &mut mask)?;
+        }
+        Shape::ScalarColumn(scalar, column) => {
+            arith_scalar_left(op, scalar, &RowsOnly(column), rows, &mut values, &mut mask)?;
+        }
+        Shape::Columns(left, right) => {
+            arith_columns(
+                op,
+                &RowsOnly(left),
+                &RowsOnly(right),
+                rows,
+                &mut values,
+                &mut mask,
+            )?;
+        }
+    }
+    Ok((values.iter().map(written).collect(), words))
+}
+
+#[test]
+fn whole_words_agree_with_the_row_path() -> Result<()> {
+    let mut state = 0x2545_F491_4F6C_DD1D;
+    let nrows = 4 * 64 + 11;
+    let left: Vec<i32> = (0..nrows)
+        .map(|_| (random(&mut state) >> 8) as i32 % 40_000)
+        .collect();
+    let right: Vec<i32> = (0..nrows)
+        .map(|_| (random(&mut state) >> 8) as i32 % 30 - 15)
+        .collect();
+    let non_null: Vec<bool> = (0..nrows)
+        .map(|_| !random(&mut state).is_multiple_of(5))
+        .collect();
+    let non_null_words = words_for(&non_null);
+    let left_column =
+        ColumnView::try_new(&left, Some(RowMaskView::try_new(nrows, &non_null_words)?))?;
+    let right_column = ColumnView::try_new(&right, None)?;
+    // A full first word puts the call on the whole-word path; later words
+    // range from full to sparse, single-row and empty, then the tail.
+    let selected: Vec<bool> = (0..nrows)
+        .map(|row| match row / 64 {
+            0 => true,
+            1 => random(&mut state).is_multiple_of(2),
+            2 => row % 64 == 5,
+            3 => false,
+            _ => row % 2 == 0,
+        })
+        .collect();
+    let words = words_for(&selected);
+    let rows = RowMaskView::try_new(nrows, &words)?;
+    for op in OPS {
+        for shape in [
+            Shape::ColumnScalar(&left_column, 3),
+            Shape::ColumnScalar(&left_column, -7),
+            Shape::ScalarColumn(1_000_000, &right_column),
+            Shape::Columns(&left_column, &right_column),
+        ] {
+            let whole = run(op, shape, &rows);
+            let by_rows = run_rows(op, shape, &rows);
+            match (whole, by_rows) {
+                (Ok((values, words)), Ok((row_values, row_words))) => {
+                    assert_eq!(words, row_words, "{op:?}");
+                    let non_nulls = RowMaskView::try_new(nrows, &words)?;
+                    for row in non_nulls.selected_indices() {
+                        assert_eq!(values[row], row_values[row], "{op:?} row {row}");
+                    }
+                }
+                (Err(whole), Err(by_rows)) => {
+                    assert_eq!(
+                        arithmetic_error(&whole),
+                        arithmetic_error(&by_rows),
+                        "{op:?}"
+                    );
+                    assert!(arithmetic_error(&whole).is_some(), "{op:?}");
+                }
+                (whole, by_rows) => panic!("{op:?}: whole {whole:?}, rows {by_rows:?}"),
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn overflow_in_null_or_unselected_lanes_is_not_an_error() -> Result<()> {
+    // Word 0 is full of extremes in its NULL rows; word 1 is not selected.
+    let values: Vec<i32> = (0..128)
+        .map(|row| if row % 2 == 0 { 3 } else { i32::MAX })
+        .collect();
+    let non_null: Vec<bool> = (0..128).map(|row| row % 2 == 0 || row >= 64).collect();
+    let non_null_words = words_for(&non_null);
+    let column = ColumnView::try_new(&values, Some(RowMaskView::try_new(128, &non_null_words)?))?;
+    let all = RowMaskView::try_new(128, &[u64::MAX, 0])?;
+    for op in [ArithOp::Add, ArithOp::Sub, ArithOp::Mul] {
+        let (out, words) = run(op, Shape::ColumnScalar(&column, 7), &all)?;
+        assert_eq!(words, [non_null_words[0], 0], "{op:?}");
+        assert_eq!(out[0], model(op, 3, 7)?, "{op:?}");
+        assert_eq!(out[2], model(op, 3, 7)?, "{op:?}");
+    }
+    // Overflow in a selected non-NULL lane of a whole word is reported.
+    let second = RowMaskView::try_new(128, &[u64::MAX, u64::MAX])?;
+    for op in [ArithOp::Add, ArithOp::Mul] {
+        let failure = run(op, Shape::ColumnScalar(&column, 7), &second).unwrap_err();
+        assert_eq!(
+            arithmetic_error(&failure),
+            Some(ArithmeticError::IntegerOutOfRange),
+            "{op:?}"
+        );
+    }
+    assert_eq!(
+        arithmetic_error(
+            &run(ArithOp::Sub, Shape::ScalarColumn(-7, &column), &second).unwrap_err()
+        ),
+        Some(ArithmeticError::IntegerOutOfRange)
+    );
+    // A zero divisor in a NULL lane of a whole word does not divide.
+    let divisors: Vec<i32> = (0..128)
+        .map(|row| if row % 2 == 0 { 2 } else { 0 })
+        .collect();
+    let divisor =
+        ColumnView::try_new(&divisors, Some(RowMaskView::try_new(128, &non_null_words)?))?;
+    let (out, words) = run(ArithOp::Div, Shape::Columns(&column, &divisor), &all)?;
+    assert_eq!(words, [non_null_words[0], 0]);
+    assert_eq!(out[0], 1);
+    let failure = run(ArithOp::Mod, Shape::ScalarColumn(9, &divisor), &second).unwrap_err();
+    assert_eq!(
+        arithmetic_error(&failure),
+        Some(ArithmeticError::DivisionByZero)
+    );
+    Ok(())
 }
 
 #[test]

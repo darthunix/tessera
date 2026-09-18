@@ -19,12 +19,22 @@
 //! and may stay uninitialized, and words without selected rows have their
 //! `non_nulls` word cleared. The result reads as a `DenseInt32Column` with
 //! the selection as its readiness mask.
+//!
+//! When the first word of the selection is full, selects at least a dozen
+//! rows and every column operand exposes its storage, the call computes
+//! whole words: `+`, `-` and `*` with vector code on AArch64 (overflow
+//! detected per lane and reported once per word), `/` and `%` lane by lane
+//! from the blocks, since NEON has no integer division. Single-row words,
+//! the tail and refused words are read row by row; every other call reads
+//! every word row by row through the word iterators.
 
 use std::fmt;
 use std::mem::MaybeUninit;
 
 use anyhow::{Result, ensure};
-use tessera_core::{ColumnReader, RowMask, RowMaskView};
+use tessera_core::{ColumnReader, RowMask, RowMaskView, WordBlock};
+
+use super::BULK_MIN_ROWS;
 
 /// A binary int4 operation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -110,17 +120,8 @@ pub fn arith_scalar<C: ColumnReader<Value = i32>>(
     values: &mut [MaybeUninit<i32>],
     non_nulls: &mut RowMask<'_>,
 ) -> Result<()> {
-    let output = Output::new(rows, values, non_nulls, &[column.nrows()])?;
-    with_op(op, |evaluate| {
-        output.evaluate(
-            |index, selected| {
-                Ok(column
-                    .word_values(index, selected)?
-                    .map(move |(row, value)| (row, value.map(|a| (a, scalar)))))
-            },
-            evaluate,
-        )
-    })
+    let operands: Operands<'_, C, C> = Operands::ColumnScalar(column, scalar);
+    run(op, operands, rows, values, non_nulls)
 }
 
 /// Compute `scalar op column`, for the operations where the order matters.
@@ -136,17 +137,8 @@ pub fn arith_scalar_left<C: ColumnReader<Value = i32>>(
     values: &mut [MaybeUninit<i32>],
     non_nulls: &mut RowMask<'_>,
 ) -> Result<()> {
-    let output = Output::new(rows, values, non_nulls, &[column.nrows()])?;
-    with_op(op, |evaluate| {
-        output.evaluate(
-            |index, selected| {
-                Ok(column
-                    .word_values(index, selected)?
-                    .map(move |(row, value)| (row, value.map(|b| (scalar, b)))))
-            },
-            evaluate,
-        )
-    })
+    let operands: Operands<'_, C, C> = Operands::ScalarColumn(scalar, column);
+    run(op, operands, rows, values, non_nulls)
 }
 
 /// Compute `left op right` row by row for two columns of the batch; a NULL
@@ -167,20 +159,260 @@ where
     L: ColumnReader<Value = i32>,
     R: ColumnReader<Value = i32>,
 {
-    let output = Output::new(rows, values, non_nulls, &[left.nrows(), right.nrows()])?;
-    with_op(op, |evaluate| {
-        output.evaluate(
-            // The word iterators of two columns yield the same rows in the
-            // same order for one selection word.
-            |index, selected| {
-                Ok(left
+    run(op, Operands::Columns(left, right), rows, values, non_nulls)
+}
+
+/// A whole-word operand: the storage of a full prepared word, or a constant.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Side<'a> {
+    Dense(&'a [i32; 64]),
+    Datum(&'a [u64; 64]),
+    Scalar(i32),
+}
+
+impl Side<'_> {
+    /// One lane as int4; a Datum's low 32 bits, as `DatumGetInt32`.
+    #[inline(always)]
+    fn lane(self, lane: usize) -> i32 {
+        match self {
+            Self::Dense(values) => values[lane],
+            Self::Datum(values) => values[lane] as i32,
+            Self::Scalar(value) => value,
+        }
+    }
+}
+
+/// The operands of one call.
+enum Operands<'a, L, R> {
+    ColumnScalar(&'a L, i32),
+    ScalarColumn(i32, &'a R),
+    Columns(&'a L, &'a R),
+}
+
+impl<L, R> Operands<'_, L, R>
+where
+    L: ColumnReader<Value = i32>,
+    R: ColumnReader<Value = i32>,
+{
+    fn column_rows(&self) -> [Option<usize>; 2] {
+        match self {
+            Self::ColumnScalar(left, _) => [Some(left.nrows()), None],
+            Self::ScalarColumn(_, right) => [None, Some(right.nrows())],
+            Self::Columns(left, right) => [Some(left.nrows()), Some(right.nrows())],
+        }
+    }
+
+    /// Every word row by row.
+    fn rows(
+        &self,
+        output: Output<'_, '_, '_, '_>,
+        evaluate: &dyn Fn(i32, i32) -> Result<i32, ArithmeticError>,
+    ) -> Result<()> {
+        let rows = output.rows;
+        let mut output = output;
+        for index in 0..rows.nrows().div_ceil(64) {
+            let selected = rows.word(index).unwrap();
+            self.word(index, selected, &mut output, evaluate)?;
+        }
+        Ok(())
+    }
+
+    /// One word row by row. The three operand shapes give three loops of
+    /// one body; two columns are zipped word by word, which the trait
+    /// guarantees to yield the same rows in the same order.
+    fn word(
+        &self,
+        index: usize,
+        selected: u64,
+        output: &mut Output<'_, '_, '_, '_>,
+        evaluate: &dyn Fn(i32, i32) -> Result<i32, ArithmeticError>,
+    ) -> Result<()> {
+        if selected == 0 {
+            return output.non_nulls.set_word(index, 0);
+        }
+        match self {
+            Self::ColumnScalar(left, scalar) => output.word(
+                index,
+                left.word_values(index, selected)?
+                    .map(|(row, value)| (row, value.map(|a| (a, *scalar)))),
+                evaluate,
+            ),
+            Self::ScalarColumn(scalar, right) => output.word(
+                index,
+                right
                     .word_values(index, selected)?
+                    .map(|(row, value)| (row, value.map(|b| (*scalar, b)))),
+                evaluate,
+            ),
+            Self::Columns(left, right) => output.word(
+                index,
+                left.word_values(index, selected)?
                     .zip(right.word_values(index, selected)?)
-                    .map(|((row, a), (_, b))| (row, a.zip(b))))
-            },
-            evaluate,
-        )
+                    .map(|((row, a), (_, b))| (row, a.zip(b))),
+                evaluate,
+            ),
+        }
+    }
+
+    /// The whole-word operands of `index` with the non-NULL rows of the
+    /// column operands, when every column operand exposes the word.
+    #[cfg(all(target_arch = "aarch64", not(miri)))]
+    fn blocks(&self, index: usize) -> Option<(Side<'_>, Side<'_>, u64)> {
+        fn side(block: WordBlock<'_, i32>) -> (Side<'_>, u64) {
+            match block {
+                WordBlock::Dense { values, non_nulls } => (Side::Dense(values), non_nulls),
+                WordBlock::Datum { values, isnull } => {
+                    (Side::Datum(values), crate::simd::non_null_bits(isnull))
+                }
+            }
+        }
+        Some(match self {
+            Self::ColumnScalar(left, scalar) => {
+                let (lhs, present) = side(left.word_block(index)?);
+                (lhs, Side::Scalar(*scalar), present)
+            }
+            Self::ScalarColumn(scalar, right) => {
+                let (rhs, present) = side(right.word_block(index)?);
+                (Side::Scalar(*scalar), rhs, present)
+            }
+            Self::Columns(left, right) => {
+                let (lhs, left_present) = side(left.word_block(index)?);
+                let (rhs, right_present) = side(right.word_block(index)?);
+                (lhs, rhs, left_present & right_present)
+            }
+        })
+    }
+
+    #[cfg(not(all(target_arch = "aarch64", not(miri))))]
+    fn blocks(&self, _index: usize) -> Option<(Side<'_>, Side<'_>, u64)> {
+        None
+    }
+}
+
+/// Check the dimensions, choose the operation and the strategy, and run.
+fn run<L, R>(
+    op: ArithOp,
+    operands: Operands<'_, L, R>,
+    rows: &RowMaskView<'_>,
+    values: &mut [MaybeUninit<i32>],
+    non_nulls: &mut RowMask<'_>,
+) -> Result<()>
+where
+    L: ColumnReader<Value = i32>,
+    R: ColumnReader<Value = i32>,
+{
+    let nrows = rows.nrows();
+    ensure!(
+        values.len() == nrows && non_nulls.as_view().nrows() == nrows,
+        "result and selection row counts differ"
+    );
+    ensure!(
+        operands
+            .column_rows()
+            .into_iter()
+            .flatten()
+            .all(|count| count == nrows),
+        "column and selection row counts differ"
+    );
+    let output = Output {
+        rows,
+        values,
+        non_nulls,
+    };
+    // The first word decides, as for the aggregates: selectivity is roughly
+    // uniform within a batch, and a partly prepared batch refuses its first
+    // word as it would the rest.
+    let whole_words = cfg!(all(target_arch = "aarch64", not(miri)))
+        && nrows >= 64
+        && rows.word(0).is_some_and(|selected| {
+            (selected == u64::MAX
+                || (!selected.is_power_of_two() && selected.count_ones() >= BULK_MIN_ROWS))
+                && operands.blocks(0).is_some()
+        });
+    with_op(op, |evaluate| {
+        if whole_words {
+            bulk(op, &operands, output, evaluate)
+        } else {
+            operands.rows(output, evaluate)
+        }
     })
+}
+
+/// Whole words where every column operand exposes them, rows elsewhere.
+#[inline(never)]
+fn bulk<L, R>(
+    op: ArithOp,
+    operands: &Operands<'_, L, R>,
+    output: Output<'_, '_, '_, '_>,
+    evaluate: &dyn Fn(i32, i32) -> Result<i32, ArithmeticError>,
+) -> Result<()>
+where
+    L: ColumnReader<Value = i32>,
+    R: ColumnReader<Value = i32>,
+{
+    let rows = output.rows;
+    let mut output = output;
+    for index in 0..rows.nrows().div_ceil(64) {
+        let selected = rows.word(index).unwrap();
+        if selected == 0 || selected.is_power_of_two() {
+            operands.word(index, selected, &mut output, evaluate)?;
+            continue;
+        }
+        let Some((lhs, rhs, non_null)) = operands.blocks(index) else {
+            operands.word(index, selected, &mut output, evaluate)?;
+            continue;
+        };
+        let present = selected & non_null;
+        let base = index * 64;
+        let out: &mut [MaybeUninit<i32>; 64] = (&mut output.values[base..base + 64])
+            .try_into()
+            .expect("a whole-word operand implies a full word");
+        let overflow = match op {
+            ArithOp::Add => bulk_op::add(lhs, rhs, present, out),
+            ArithOp::Sub => bulk_op::sub(lhs, rhs, present, out),
+            ArithOp::Mul => bulk_op::mul(lhs, rhs, present, out),
+            ArithOp::Div | ArithOp::Mod => {
+                // No vector division: lane by lane from the blocks, with a
+                // placeholder for absent lanes so that nothing branches.
+                for (lane, slot) in out.iter_mut().enumerate() {
+                    let (a, b) = if present & (1 << lane) != 0 {
+                        (lhs.lane(lane), rhs.lane(lane))
+                    } else {
+                        (0, 1)
+                    };
+                    slot.write(evaluate(a, b)?);
+                }
+                false
+            }
+        };
+        ensure!(!overflow, ArithmeticError::IntegerOutOfRange);
+        output.non_nulls.set_word(index, present)?;
+    }
+    Ok(())
+}
+
+#[cfg(all(target_arch = "aarch64", not(miri)))]
+use crate::simd as bulk_op;
+
+/// Without vector code no call takes the whole-word path; these keep the
+/// callers compiling and are never reached.
+#[cfg(not(all(target_arch = "aarch64", not(miri))))]
+mod bulk_op {
+    use std::mem::MaybeUninit;
+
+    use super::Side;
+
+    pub fn add(_: Side<'_>, _: Side<'_>, _: u64, _: &mut [MaybeUninit<i32>; 64]) -> bool {
+        unreachable!("no whole-word kernels on this target")
+    }
+
+    pub fn sub(_: Side<'_>, _: Side<'_>, _: u64, _: &mut [MaybeUninit<i32>; 64]) -> bool {
+        unreachable!("no whole-word kernels on this target")
+    }
+
+    pub fn mul(_: Side<'_>, _: Side<'_>, _: u64, _: &mut [MaybeUninit<i32>; 64]) -> bool {
+        unreachable!("no whole-word kernels on this target")
+    }
 }
 
 /// Choose the operation once and run `body` with it.
@@ -216,60 +448,25 @@ struct Output<'r, 'v, 'm, 'w> {
     non_nulls: &'m mut RowMask<'w>,
 }
 
-impl<'r, 'v, 'm, 'w> Output<'r, 'v, 'm, 'w> {
-    /// Check every dimension before anything is written.
-    fn new(
-        rows: &'r RowMaskView<'r>,
-        values: &'v mut [MaybeUninit<i32>],
-        non_nulls: &'m mut RowMask<'w>,
-        column_rows: &[usize],
-    ) -> Result<Self> {
-        let nrows = rows.nrows();
-        ensure!(
-            values.len() == nrows && non_nulls.as_view().nrows() == nrows,
-            "result and selection row counts differ"
-        );
-        ensure!(
-            column_rows.iter().all(|&count| count == nrows),
-            "column and selection row counts differ"
-        );
-        Ok(Self {
-            rows,
-            values,
-            non_nulls,
-        })
-    }
-
-    /// Every selected row: a NULL row gets a placeholder computed from
-    /// `(0, 1)`, which no operation rejects, so that the loop has no branch
-    /// on nullness; only the error check branches, and it never goes.
-    fn evaluate<I>(
-        self,
-        mut pairs: impl FnMut(usize, u64) -> Result<I>,
+impl Output<'_, '_, '_, '_> {
+    /// One word's selected rows: a NULL row gets a placeholder computed
+    /// from `(0, 1)`, which no operation rejects, so that the loop has no
+    /// branch on nullness; only the error check branches, and it never goes.
+    fn word<I>(
+        &mut self,
+        index: usize,
+        pairs: I,
         evaluate: &dyn Fn(i32, i32) -> Result<i32, ArithmeticError>,
     ) -> Result<()>
     where
         I: Iterator<Item = (usize, Option<(i32, i32)>)>,
     {
-        let Self {
-            rows,
-            values,
-            non_nulls,
-        } = self;
-        for index in 0..rows.nrows().div_ceil(64) {
-            let selected = rows.word(index).unwrap();
-            if selected == 0 {
-                non_nulls.set_word(index, 0)?;
-                continue;
-            }
-            let mut present = 0;
-            for (row, pair) in pairs(index, selected)? {
-                let (a, b) = pair.unwrap_or((0, 1));
-                values[row].write(evaluate(a, b)?);
-                present |= u64::from(pair.is_some()) << (row % 64);
-            }
-            non_nulls.set_word(index, present)?;
+        let mut present = 0;
+        for (row, pair) in pairs {
+            let (a, b) = pair.unwrap_or((0, 1));
+            self.values[row].write(evaluate(a, b)?);
+            present |= u64::from(pair.is_some()) << (row % 64);
         }
-        Ok(())
+        self.non_nulls.set_word(index, present)
     }
 }

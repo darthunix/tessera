@@ -15,6 +15,7 @@
 #![allow(unsafe_code)]
 
 mod aggregate;
+mod arith;
 mod filter;
 
 use core::arch::aarch64::{
@@ -26,6 +27,7 @@ use core::arch::aarch64::{
 pub use aggregate::{
     count_datum, max_datum, max_dense, min_datum, min_dense, sum_datum, sum_dense,
 };
+pub use arith::{add, mul, sub};
 pub use filter::{filter_datum, filter_dense};
 
 /// Bit weights of the four lanes of each group in a 16-row quarter.
