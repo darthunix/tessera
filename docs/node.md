@@ -126,8 +126,9 @@ batch. End and rescan paths both clear outputs.
 ### Parameters and paths
 
 Batch paths are never parameterized: planning rejects relations with
-`lateral_relids` and paths with `param_info`, so a batch node is never the
-inner side of a nested loop. Execution `Param`s reach a node only as scalars
+`lateral_relids` and paths with `param_info`, and the runtime's path helper
+refuses a parameterized template, so a batch node is never the inner side
+of a nested loop. Execution `Param`s reach a node only as scalars
 inside compiled expressions, which the int4 expression compiler evaluates
 through `ExprState`; a changed parameter affects the node only through
 rescan.

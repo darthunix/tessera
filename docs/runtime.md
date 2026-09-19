@@ -202,3 +202,37 @@ so that a plan cached by an older module revision is rejected instead of
 misread. `tess_plan_data_kind` returns a record's kind, or `NULL` without an
 error for a list that is not a record, which lets a node tell its own paths
 from other custom paths.
+
+## Building paths
+
+A node module owns its planner hooks, path selection and costs. The
+helpers in `tessera/planner.h` only build the `CustomPath` the same way for
+every batch node, so that other nodes recognize a batch path. Start from
+the core path whose planner properties the node keeps, with the cost
+already adjusted by the node:
+
+```c
+TessPathConfig config = TESS_STRUCT_INITIALIZER(TessPathConfig);
+Path template = *seqscan_path;
+
+template.total_cost *= 0.9;
+config.template_path = &template;
+config.methods = &my_path_methods;
+config.node = &my_node;
+config.children = list_make1(seqscan_path);
+config.expressions = list_make1(limit_count);
+config.flags = CUSTOMPATH_SUPPORT_PROJECTION;
+add_path(rel, (Path *) tess_path_create(&config));
+```
+
+`tess_path_create` copies rows, costs, path keys and parallel properties
+from the template, and refuses a parameterized one, since a batch path is
+never the inner side of a nested loop. `node` is the registered kind of
+node that owns the path; the helper stores its name, `expressions` and
+`node_data` through the plan-data codec. `tess_path_node` returns that node
+for a path built here and `NULL` for any other path, including a custom
+path of another provider, which is how a node tells a batch child from a
+row-producing one. `tess_path_get_info` reads the stored expressions and
+data back in `PlanCustomPath`, and `tess_path_matches` recognizes a node's
+own paths by their methods. Never `copyObject` a path: PostgreSQL does not
+copy path nodes, and neither does this library.

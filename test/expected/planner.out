@@ -1,0 +1,41 @@
+CREATE EXTENSION tessera;
+\getenv libdir PG_LIBDIR
+\getenv dlsuffix PG_DLSUFFIX
+\set planner_test :libdir '/tessera_planner_test' :dlsuffix
+LOAD :'planner_test';
+CREATE FUNCTION tessera_test_planner_paths()
+RETURNS boolean
+AS :'planner_test', 'tessera_test_planner_paths'
+LANGUAGE C STRICT;
+CREATE FUNCTION tessera_test_planner_errors(integer)
+RETURNS void
+AS :'planner_test', 'tessera_test_planner_errors'
+LANGUAGE C STRICT;
+SELECT tessera_test_planner_paths() AS paths \gset
+\echo :paths
+t
+\set VERBOSITY terse
+SELECT tessera_test_planner_errors(0);
+ERROR:  Tessera received an incompatible path configuration
+SELECT tessera_test_planner_errors(1);
+ERROR:  Tessera path requires a template and methods
+SELECT tessera_test_planner_errors(2);
+ERROR:  Tessera path requires a template and methods
+SELECT tessera_test_planner_errors(3);
+ERROR:  Tessera path requires a registered node
+SELECT tessera_test_planner_errors(4);
+ERROR:  Tessera path cannot be parameterized
+SELECT tessera_test_planner_errors(5);
+ERROR:  Tessera path received an invalid child
+SELECT tessera_test_planner_errors(6);
+ERROR:  Tessera received malformed tessera.path plan data
+SELECT tessera_test_planner_errors(7);
+ERROR:  Tessera received an incompatible path result
+SELECT tessera_test_planner_errors(8);
+ERROR:  Tessera expected a custom path
+SELECT tessera_test_planner_errors(9);
+ERROR:  Tessera node "tessera.planner_removed" is not registered
+\set VERBOSITY default
+DROP FUNCTION tessera_test_planner_errors(integer);
+DROP FUNCTION tessera_test_planner_paths();
+DROP EXTENSION tessera;

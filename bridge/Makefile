@@ -14,6 +14,7 @@ HEADERS = \
 	../include/tessera/layout.h \
 	../include/tessera/node.h \
 	../include/tessera/plan.h \
+	../include/tessera/planner.h \
 	../include/tessera/request.h \
 	../include/tessera/row_mask.h \
 	../include/tessera/runtime.h \
