@@ -8,6 +8,7 @@ PG_MODULE_MAGIC;
 
 PG_FUNCTION_INFO_V1(tessera_test_api_visible);
 PG_FUNCTION_INFO_V1(tessera_test_abi_helpers);
+PG_FUNCTION_INFO_V1(tessera_test_settings);
 
 typedef struct TessTestOps
 {
@@ -63,7 +64,22 @@ tessera_test_api_visible(PG_FUNCTION_ARGS)
 					   api->functions->abi_version ==
 					   TESS_FUNCTION_REGISTRY_OPS_ABI_VERSION &&
 					   api->functions->struct_size >=
-					   TESS_FUNCTION_REGISTRY_OPS_MIN_SIZE);
+					   TESS_FUNCTION_REGISTRY_OPS_MIN_SIZE &&
+					   api->settings != NULL &&
+					   api->settings->abi_version ==
+					   TESS_SETTINGS_ABI_VERSION &&
+					   api->settings->struct_size >=
+					   TESS_SETTINGS_MIN_SIZE &&
+					   api->settings->enable != NULL);
+}
+
+/* The value of tessera.enable as every module sees it. */
+Datum
+tessera_test_settings(PG_FUNCTION_ARGS)
+{
+	const TessApi *api = *find_rendezvous_variable(TESS_API_RENDEZVOUS);
+
+	PG_RETURN_BOOL(*api->settings->enable);
 }
 
 Datum
@@ -84,7 +100,7 @@ tessera_test_abi_helpers(PG_FUNCTION_ARGS)
 		value.struct_size != sizeof(value))
 		PG_RETURN_BOOL(false);
 
-	/* The current root requires functions, but still accepts later fields. */
+	/* The current root requires settings, but still accepts later fields. */
 	api.struct_size = TESS_ABI_SIZE_INCLUDING_FIELD(TessApi, binding_ops);
 	if (api.struct_size >= TESS_API_MIN_SIZE)
 		PG_RETURN_BOOL(false);
@@ -95,6 +111,9 @@ tessera_test_abi_helpers(PG_FUNCTION_ARGS)
 	if (api.struct_size >= TESS_API_MIN_SIZE)
 		PG_RETURN_BOOL(false);
 	api.struct_size = TESS_ABI_SIZE_INCLUDING_FIELD(TessApi, functions);
+	if (api.struct_size >= TESS_API_MIN_SIZE)
+		PG_RETURN_BOOL(false);
+	api.struct_size = TESS_ABI_SIZE_INCLUDING_FIELD(TessApi, settings);
 	extended.base.struct_size = sizeof(extended);
 	if (api.struct_size < TESS_API_MIN_SIZE ||
 		extended.base.struct_size < TESS_API_MIN_SIZE)

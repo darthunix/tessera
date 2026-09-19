@@ -116,12 +116,18 @@ source registry described in [source.md](source.md). `TessNodeRegistryOps`
 implements the node registry described in [node.md](node.md).
 `TessFunctionRegistryOps` implements the registry of batch implementations of
 PostgreSQL functions described in [function.md](function.md).
+`TessSettings` publishes borrowed, read-only pointers to the bridge's
+configuration variables: `enable` is the GUC `tessera.enable`, the switch
+every planner hook checks (see [node.md](node.md)). The bridge defines the
+variables because a GUC can be defined once per backend while several
+independent modules read it; the prefix `tessera` is reserved, so a
+misspelled parameter is an error rather than a placeholder.
 
-The current root requires `binding_ops`, `sources`, `nodes` and `functions`
-to be non-null. A consumer first checks the root's ABI version and
-`TESS_API_MIN_SIZE`, which includes all four fields. Before using a
-subsystem, it then checks that table's pointer, ABI version, and minimum
-size.
+The current root requires `binding_ops`, `sources`, `nodes`, `functions`
+and `settings` to be non-null. A consumer first checks the root's ABI
+version and `TESS_API_MIN_SIZE`, which includes all five fields. Before
+using a subsystem, it then checks that table's pointer, ABI version, and
+minimum size.
 
 Future optional fields can be appended to the root. A consumer checks
 `TESS_ABI_HAS_FIELD` before reading such a field, then validates the subsystem

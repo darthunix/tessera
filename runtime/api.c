@@ -33,6 +33,13 @@ tess_runtime_api(void)
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("incompatible Tessera binding operations")));
+	if (api->settings == NULL ||
+		api->settings->abi_version != TESS_SETTINGS_ABI_VERSION ||
+		api->settings->struct_size < TESS_SETTINGS_MIN_SIZE ||
+		api->settings->enable == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("incompatible Tessera settings")));
 	cached_api = api;
 	return api;
 }

@@ -166,10 +166,12 @@ with loom models and TLA+ specifications of the protocols.
 
 ### The enable switch
 
-The module that installs the planner hooks defines the GUC `tessera.enable`,
-boolean and on by default. Every hook first calls the hook it replaced, then
-checks the GUC, and only then adds paths. Other GUCs are added only with a
-measurement that justifies them.
+The bridge defines the GUC `tessera.enable`, boolean and on by default, and
+publishes its value through `api->settings->enable`. Every hook first calls
+the hook it replaced, then checks the switch, and only then adds paths. A
+node module never defines `tessera.enable` itself: several independent
+modules install hooks, and a GUC can be defined once per backend. Other
+GUCs are added only with a measurement that justifies them.
 
 ### Memory
 
@@ -217,7 +219,8 @@ counterpart exists.
   `BeginCustomScan`.
 - Declare `parallel_safe` and `parallel_aware` truthfully; keep shared state
   in DSM behind the callbacks and release it from `ShutdownCustomScan`.
-- Check `tessera.enable` in every hook, after calling the previous hook.
+- Check `*api->settings->enable` in every hook, after calling the previous
+  hook.
 - Keep per-batch memory in a per-batch context; allocate nothing per row.
 - Serve row-wise parents or reject them at planning.
 - Raise `ERROR` only after every Rust call has returned.

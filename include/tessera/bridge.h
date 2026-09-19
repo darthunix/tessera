@@ -17,6 +17,23 @@
 
 #define TESS_API_RENDEZVOUS "tessera.api.v0"
 #define TESS_API_ABI_VERSION 0
+#define TESS_SETTINGS_ABI_VERSION 0
+
+/*
+ * Borrowed, read-only pointers to the bridge's configuration variables.
+ * The bridge defines them, since a GUC can be defined once per backend
+ * while several independent modules read it; see docs/node.md.
+ */
+typedef struct TessSettings
+{
+	uint32		abi_version;
+	Size		struct_size;
+	/* tessera.enable: planner hooks add batch paths only while true. */
+	const bool *enable;
+} TessSettings;
+
+#define TESS_SETTINGS_MIN_SIZE \
+	TESS_ABI_SIZE_INCLUDING_FIELD(TessSettings, enable)
 
 /*
  * Root of the backend-local APIs shared by Tessera extensions.
@@ -37,9 +54,11 @@ typedef struct TessApi
 	const TessNodeRegistryOps *nodes;
 	/* Required registry of batch implementations of PostgreSQL functions. */
 	const TessFunctionRegistryOps *functions;
+	/* Required configuration variables shared by every module. */
+	const TessSettings *settings;
 } TessApi;
 
 /* All subsystem pointers are required in the current root. */
-#define TESS_API_MIN_SIZE TESS_ABI_SIZE_INCLUDING_FIELD(TessApi, functions)
+#define TESS_API_MIN_SIZE TESS_ABI_SIZE_INCLUDING_FIELD(TessApi, settings)
 
 #endif /* TESSERA_BRIDGE_H */
