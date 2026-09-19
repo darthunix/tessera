@@ -40,10 +40,14 @@ description is rejected: a wrong ABI version or size, an invalid `funcid`, a
 missing `evaluate`, an unknown kind or result format, or a non-strict
 function.
 
-Built-in int4 functions are registered by the module that links the Rust
-kernels; the description does not depend on the argument types, so
-implementations for other types and from other extensions use the same
-structure.
+Built-in int4 functions are registered by the kernels module
+`tessera_kernels` (`kernels/`), which links the Rust kernels statically and
+registers `int4eq`, `int4ne`, `int4lt`, `int4le`, `int4gt`, `int4ge` as
+predicates and `int4pl`, `int4mi`, `int4mul`, `int4div`, `int4mod` as values
+with `TESS_RESULT_INT32` when loaded; load the bridge first, then
+`LOAD 'tessera_kernels'`. The description does not depend on the argument
+types, so implementations for other types and from other extensions use
+the same structure.
 
 ## What a description promises
 
