@@ -114,11 +114,14 @@ subsystem tables. `TessBindingOps` implements the slot binding protocol
 described in [binding.md](binding.md). `TessSourceRegistryOps` implements the
 source registry described in [source.md](source.md). `TessNodeRegistryOps`
 implements the node registry described in [node.md](node.md).
+`TessFunctionRegistryOps` implements the registry of batch implementations of
+PostgreSQL functions described in [function.md](function.md).
 
-The current root requires `binding_ops`, `sources`, and `nodes` to be non-null.
-A consumer first checks the root's ABI version and `TESS_API_MIN_SIZE`, which
-includes all three fields. Before using a subsystem, it then checks that
-table's pointer, ABI version, and minimum size.
+The current root requires `binding_ops`, `sources`, `nodes` and `functions`
+to be non-null. A consumer first checks the root's ABI version and
+`TESS_API_MIN_SIZE`, which includes all four fields. Before using a
+subsystem, it then checks that table's pointer, ABI version, and minimum
+size.
 
 Future optional fields can be appended to the root. A consumer checks
 `TESS_ABI_HAS_FIELD` before reading such a field, then validates the subsystem

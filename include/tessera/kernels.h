@@ -7,13 +7,14 @@
 #include "tessera/abi.h"
 #include "tessera/batch.h"
 #include "tessera/row_mask.h"
+#include "tessera/status.h"
 
 /*
  * The kernels are implemented in Rust (crates/tessera-capi) and linked as a
  * static library. Every entry point reads a column as PostgreSQL Datum
  * values with NULL flags (TessDatumColumn), reads or narrows row masks, and
- * returns a status: it never raises ERROR, so the caller reports the status
- * with ereport after the call returns. See docs/kernels.md.
+ * returns a status (tessera/status.h): it never raises ERROR, so the caller
+ * reports the status with ereport after the call returns. See docs/kernels.md.
  *
  * prepared names the mask the column was obtained with (every row in it is
  * initialized, a NULL row by a placeholder); NULL means the whole column is
@@ -31,40 +32,6 @@
  */
 
 #define TESS_KERNELS_ABI_VERSION 0
-
-/* The outcome of an entry point; the same value is stored in TessStatus. */
-typedef enum TessStatusCode
-{
-	TESS_OK = 0,
-	/* A dimension, pointer, mask or operation argument is invalid. */
-	TESS_ERROR_INVALID_ARGUMENT = 1,
-	/* SQLSTATE 22003: an int4 result does not fit. */
-	TESS_ERROR_INTEGER_OUT_OF_RANGE = 2,
-	/* SQLSTATE 22012: a zero divisor. */
-	TESS_ERROR_DIVISION_BY_ZERO = 3,
-	/* A Rust panic was caught; the library remains usable. */
-	TESS_ERROR_PANIC = 4
-} TessStatusCode;
-
-#define TESS_STATUS_MESSAGE_SIZE 120
-
-/*
- * Details of an outcome. The caller initializes struct_size with
- * TESS_STRUCT_INITIALIZER; an entry point fills the other fields, leaving a
- * NULL or undersized status alone. sqlstate is a five-character code with a
- * terminator ("XX000" for invalid arguments and panics), message a
- * NUL-terminated text; both are empty on success.
- */
-typedef struct TessStatus
-{
-	Size		struct_size;
-	TessStatusCode code;
-	char		sqlstate[6];
-	char		message[TESS_STATUS_MESSAGE_SIZE];
-} TessStatus;
-
-#define TESS_STATUS_MIN_SIZE \
-	TESS_ABI_SIZE_INCLUDING_FIELD(TessStatus, message)
 
 /* A comparison of column values with a scalar on the right. */
 typedef enum TessCompareOp

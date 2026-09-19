@@ -11,6 +11,7 @@
 
 #include "tessera/abi.h"
 #include "tessera/binding.h"
+#include "tessera/function.h"
 #include "tessera/node.h"
 #include "tessera/source.h"
 
@@ -34,9 +35,11 @@ typedef struct TessApi
 	const TessSourceRegistryOps *sources;
 	/* Required registry of batch-producing node kinds. */
 	const TessNodeRegistryOps *nodes;
+	/* Required registry of batch implementations of PostgreSQL functions. */
+	const TessFunctionRegistryOps *functions;
 } TessApi;
 
 /* All subsystem pointers are required in the current root. */
-#define TESS_API_MIN_SIZE TESS_ABI_SIZE_INCLUDING_FIELD(TessApi, nodes)
+#define TESS_API_MIN_SIZE TESS_ABI_SIZE_INCLUDING_FIELD(TessApi, functions)
 
 #endif /* TESSERA_BRIDGE_H */

@@ -1,5 +1,5 @@
 MODULE_big = tessera
-OBJS = binding.o bridge.o node.o source.o
+OBJS = binding.o bridge.o function.o node.o source.o
 PG_CPPFLAGS = -I$(srcdir)/../include
 
 EXTENSION = tessera
@@ -9,12 +9,14 @@ HEADERS = \
 	../include/tessera/batch.h \
 	../include/tessera/binding.h \
 	../include/tessera/bridge.h \
+	../include/tessera/function.h \
 	../include/tessera/kernels.h \
 	../include/tessera/layout.h \
 	../include/tessera/node.h \
 	../include/tessera/request.h \
 	../include/tessera/row_mask.h \
-	../include/tessera/source.h
+	../include/tessera/source.h \
+	../include/tessera/status.h
 PG_CONFIG ?= pg_config
 PGXS := $(shell $(PG_CONFIG) --pgxs)
 include $(PGXS)

@@ -15,6 +15,7 @@ static const TessApi tess_api = {
 	.binding_ops = &tess_binding_ops,
 	.sources = &tess_source_registry_ops,
 	.nodes = &tess_node_registry_ops,
+	.functions = &tess_function_registry_ops,
 };
 
 void
