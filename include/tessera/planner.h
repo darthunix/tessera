@@ -81,7 +81,9 @@ typedef enum TessLayoutPolicy
 	 */
 	TESS_LAYOUT_DENSE,
 	/* The layout the node supplies. */
-	TESS_LAYOUT_EXPLICIT
+	TESS_LAYOUT_EXPLICIT,
+	/* Keep one batch child's layout: a pass-through with the same targets. */
+	TESS_LAYOUT_PRESERVE_CHILD
 } TessLayoutPolicy;
 
 /* Complete description of the CustomScan returned by PlanCustomPath. */
@@ -96,13 +98,18 @@ typedef struct TessPlanConfig
 	const List *qual;
 	const List *expressions;
 	const Node *node_data;
-	/* custom_scan_tlist, what the scan tuple contains; NULL: the plan's own. */
+	/*
+	 * custom_scan_tlist, what the scan tuple contains. NULL takes the
+	 * preserved child's target list, or otherwise the plan's own.
+	 */
 	const List *scan_targetlist;
 	Index		scanrelid;
+	/* Which child to preserve, for TESS_LAYOUT_PRESERVE_CHILD. */
+	int			layout_child;
 } TessPlanConfig;
 
 #define TESS_PLAN_CONFIG_MIN_SIZE \
-	TESS_ABI_SIZE_INCLUDING_FIELD(TessPlanConfig, scanrelid)
+	TESS_ABI_SIZE_INCLUDING_FIELD(TessPlanConfig, layout_child)
 
 /*
  * Build the plan of a path built here, in PlanCustomPath. Costs and relids
@@ -110,6 +117,25 @@ typedef struct TessPlanConfig
  */
 extern Plan *tess_plan_create(CustomPath *path, List *targetlist,
 							  List *child_plans, const TessPlanConfig *config);
+
+/* One child seen while PlanCustomPath builds the plan. */
+typedef struct TessPlanChild
+{
+	Size		struct_size;
+	Path	   *path;
+	Plan	   *plan;
+	/* NULL when the child produces ordinary rows. */
+	const TessNode *node;
+	/* Valid when node is not NULL; the map is allocated for the caller. */
+	TessLayout	layout;
+} TessPlanChild;
+
+#define TESS_PLAN_CHILD_MIN_SIZE \
+	TESS_ABI_SIZE_INCLUDING_FIELD(TessPlanChild, layout)
+
+/* Describe one child; true when it is a batch node. */
+extern bool tess_plan_child(const CustomPath *path, const List *child_plans,
+							int index, TessPlanChild *result);
 
 /* What a plan built here carries, read in BeginCustomScan. */
 typedef struct TessPlanInfo

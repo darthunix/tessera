@@ -150,7 +150,7 @@ check_plan_config(const TessPlanConfig *config)
 	if (config->methods == NULL)
 		elog(ERROR, "Tessera plan requires scan methods");
 	if (config->layout_policy < TESS_LAYOUT_DENSE ||
-		config->layout_policy > TESS_LAYOUT_EXPLICIT)
+		config->layout_policy > TESS_LAYOUT_PRESERVE_CHILD)
 		elog(ERROR, "Tessera plan received an invalid layout policy");
 	if (config->layout_policy == TESS_LAYOUT_EXPLICIT &&
 		config->explicit_layout == NULL)
@@ -169,6 +169,25 @@ check_children(const CustomPath *path, const List *child_plans)
 		if (plan == NULL)
 			elog(ERROR, "Tessera received an invalid child plan");
 	}
+}
+
+bool
+tess_plan_child(const CustomPath *path, const List *child_plans, int index,
+				TessPlanChild *result)
+{
+	if (result == NULL || result->struct_size < TESS_PLAN_CHILD_MIN_SIZE)
+		elog(ERROR, "Tessera received an incompatible plan child result");
+	check_children(path, child_plans);
+	if (index < 0 || index >= list_length(child_plans))
+		elog(ERROR, "Tessera plan child index %d is out of range", index);
+	result->path = list_nth(path->custom_paths, index);
+	result->plan = list_nth(child_plans, index);
+	result->node = tess_path_node(result->path);
+	result->layout = (TessLayout) TESS_STRUCT_INITIALIZER(TessLayout);
+	if (result->node == NULL)
+		return false;
+	tess_plan_get_layout(result->plan, &result->layout);
+	return true;
 }
 
 Plan *
@@ -202,6 +221,16 @@ tess_plan_create(CustomPath *path, List *targetlist, List *child_plans,
 		case TESS_LAYOUT_EXPLICIT:
 			copy_layout(config->explicit_layout, &layout);
 			break;
+		case TESS_LAYOUT_PRESERVE_CHILD:
+			{
+				TessPlanChild child = TESS_STRUCT_INITIALIZER(TessPlanChild);
+
+				if (!tess_plan_child(path, child_plans, config->layout_child,
+									 &child))
+					elog(ERROR, "Tessera cannot preserve the layout of a row-producing child");
+				layout = child.layout;
+				break;
+			}
 	}
 	if (layout.ntargets != list_length(targetlist))
 		elog(ERROR, "Tessera output layout does not match its target list");
@@ -211,6 +240,9 @@ tess_plan_create(CustomPath *path, List *targetlist, List *child_plans,
 									 layout.target_columns[target]);
 	if (config->scan_targetlist != NIL)
 		scan_targetlist = copyObject(config->scan_targetlist);
+	else if (config->layout_policy == TESS_LAYOUT_PRESERVE_CHILD)
+		scan_targetlist = copyObject(((Plan *)
+			list_nth(child_plans, config->layout_child))->targetlist);
 	else
 		scan_targetlist = copyObject(targetlist);
 
@@ -266,7 +298,7 @@ tess_plan_get_info(const CustomScan *scan, TessPlanInfo *result)
 	}
 	layout_policy = tess_plan_read_int(reader, "layout_policy");
 	if (layout_policy < TESS_LAYOUT_DENSE ||
-		layout_policy > TESS_LAYOUT_EXPLICIT)
+		layout_policy > TESS_LAYOUT_PRESERVE_CHILD)
 		elog(ERROR, "Tessera plan received an invalid layout policy");
 	result->layout = (TessLayout) TESS_STRUCT_INITIALIZER(TessLayout);
 	result->layout.ncolumns = tess_plan_read_int(reader, "ncolumns");

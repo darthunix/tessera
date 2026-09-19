@@ -267,16 +267,22 @@ which children are batch nodes, the output layout and `node_data` through
 the plan-data codec. PostgreSQL copies costs and relids from the path
 afterwards.
 
-The output layout has two policies. `TESS_LAYOUT_DENSE` publishes one
+The output layout has three policies. `TESS_LAYOUT_DENSE` publishes one
 column per entry of the final target list; it is derived again whenever the
 plan is read, because a node with `CUSTOMPATH_SUPPORT_PROJECTION` gets its
 target list replaced after `PlanCustomPath` returns, which then receives an
 empty list. `TESS_LAYOUT_EXPLICIT` copies the layout the node supplies.
+`TESS_LAYOUT_PRESERVE_CHILD` keeps the layout of the batch child at
+`layout_child`, for a pass-through node whose target list is the child's;
+a row-producing child there is an error. `tess_plan_child` describes one
+child the same way for a node's own planning: its path, plan, the
+registered node or `NULL` for ordinary rows, and the batch child's layout.
 
 A node without a scan relation (`scanrelid` 0) describes its scan tuple in
 `scan_targetlist`, usually its child's target list; the executor evaluates
-the final target list against that tuple. `NULL` keeps the plan's own target
-list, for a node whose scan tuple is its output. Qualifiers and expressions
+the final target list against that tuple. `NULL` takes the preserved
+child's target list, or otherwise the plan's own, for a node whose scan
+tuple is its output. Qualifiers and expressions
 are never inferred: set them to exactly what the executor evaluates. A
 wrapper around a complete child path passes no clauses, since the child
 already enforces them.

@@ -206,6 +206,12 @@ SELECT tessera_test_planner_errors(22);
 ERROR:  Tessera plan layout does not match its target list
 SELECT tessera_test_planner_errors(23);
 ERROR:  Tessera received an incompatible output layout
+SELECT tessera_test_planner_errors(24);
+ERROR:  Tessera received an incompatible plan child result
+SELECT tessera_test_planner_errors(25);
+ERROR:  Tessera plan child index 1 is out of range
+SELECT tessera_test_planner_errors(26);
+ERROR:  Tessera cannot preserve the layout of a row-producing child
 \set VERBOSITY default
 DROP FUNCTION tessera_test_planner_errors(integer);
 DROP FUNCTION tessera_test_planner_plans();

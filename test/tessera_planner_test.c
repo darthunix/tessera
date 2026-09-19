@@ -329,14 +329,14 @@ make_plan_config(TessLayoutPolicy policy)
 
 /* True when the info describes a batch child followed by a row child. */
 static bool
-check_children(const Plan *plan)
+check_children(const Plan *plan, int ncolumns)
 {
 	TessPlanInfo info = TESS_STRUCT_INITIALIZER(TessPlanInfo);
 
 	tess_plan_get_info(castNode(CustomScan, plan), &info);
 	return info.nchildren == 2 && info.child_names[0] != NULL &&
 		strcmp(info.child_names[0], test_node.name) == 0 &&
-		info.child_names[1] == NULL && info.layout.ncolumns == 2 &&
+		info.child_names[1] == NULL && info.layout.ncolumns == ncolumns &&
 		list_length(castNode(CustomScan, plan)->custom_plans) == 2;
 }
 
@@ -412,8 +412,33 @@ tessera_test_planner_plans(PG_FUNCTION_ARGS)
 	config = make_plan_config(TESS_LAYOUT_DENSE);
 	plan = tess_plan_create(parent, tlist, list_make2(batch_child, row_child),
 							&config);
-	result &= check_children(plan) && check_children(copyObject(plan)) &&
-		check_children(stringToNode(nodeToString(plan)));
+	result &= check_children(plan, 2) && check_children(copyObject(plan), 2) &&
+		check_children(stringToNode(nodeToString(plan)), 2);
+
+	/* A parent inspects its children and may keep a batch child's layout. */
+	{
+		TessPlanChild child = TESS_STRUCT_INITIALIZER(TessPlanChild);
+		List	   *plans = list_make2(batch_child, row_child);
+
+		result &= tess_plan_child(parent, plans, 0, &child) &&
+			child.path == (Path *) path && child.plan == batch_child &&
+			child.node == &test_node && child.layout.ncolumns == 3 &&
+			child.layout.ntargets == 2 && child.layout.target_columns[0] == 2;
+		result &= !tess_plan_child(parent, plans, 1, &child) &&
+			child.path == lsecond(parent->custom_paths) &&
+			child.plan == (Plan *) row_child && child.node == NULL &&
+			child.layout.ncolumns == 0 && child.layout.target_columns == NULL;
+		config = make_plan_config(TESS_LAYOUT_PRESERVE_CHILD);
+		config.layout_child = 0;
+		plan = tess_plan_create(parent, tlist, plans, &config);
+		scan = castNode(CustomScan, plan);
+		tess_plan_get_layout(plan, &layout);
+		result &= layout.ncolumns == 3 && layout.ntargets == 2 &&
+			layout.target_columns[0] == 2 && layout.target_columns[1] == 0 &&
+			list_length(scan->custom_scan_tlist) == 2 &&
+			scan->custom_scan_tlist != batch_child->targetlist &&
+			check_children(plan, 3);
+	}
 	PG_RETURN_BOOL(result);
 }
 
@@ -553,6 +578,29 @@ tessera_test_planner_errors(PG_FUNCTION_ARGS)
 													  &plan_config), &result);
 				break;
 			}
+		case 24:
+			{
+				TessPlanChild child = TESS_STRUCT_INITIALIZER(TessPlanChild);
+
+				child.struct_size = 1;
+				tess_plan_child(tess_path_create(&config), NIL, 0, &child);
+				break;
+			}
+		case 25:
+			{
+				TessPlanChild child = TESS_STRUCT_INITIALIZER(TessPlanChild);
+
+				config.children = list_make1(make_template());
+				tess_plan_child(tess_path_create(&config),
+								list_make1(makeNode(SeqScan)), 1, &child);
+				break;
+			}
+		case 26:
+			config.children = list_make1(make_template());
+			plan_config = make_plan_config(TESS_LAYOUT_PRESERVE_CHILD);
+			tess_plan_create(tess_path_create(&config), tlist,
+							 list_make1(makeNode(SeqScan)), &plan_config);
+			break;
 		default:
 			elog(ERROR, "unknown error case %d", kind);
 	}
