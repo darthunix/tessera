@@ -96,9 +96,12 @@ way. The rules follow pg_batch's nodes (`nodes/*.c`, `runtime/*.c` and
 A node is a `CustomScan` with `CustomPathMethods`, `CustomScanMethods` and
 `CustomExecMethods`. `ExecProcNode` returns a `TupleTableSlot` attached to
 the bridge: when the parent requested batch output, the slot carries the
-published batch; otherwise the node returns one row per call. Plan data
-travels in typed, `copyObject()`-compatible private lists through the named
-plan-data codec.
+published batch; otherwise the node returns one row per call. A batch node
+attaches its binding to `ps_ResultTupleSlot` in `BeginCustomScan`; a parent
+finds the request binding there. A node that forwards its child's batch
+returns that child's slot, and a parent looks up the binding of whatever
+slot it receives. Plan data travels in typed, `copyObject()`-compatible
+private lists through the named plan-data codec.
 
 ### EXPLAIN and EXPLAIN ANALYZE
 
@@ -207,6 +210,8 @@ counterpart exists.
 
 - Publish batches through the shared output helper; never touch
   instrumentation directly.
+- Bind `ps_ResultTupleSlot` in `BeginCustomScan`; read children through the
+  shared input helper.
 - Rescan in the fixed order; clear outputs in both end and rescan paths.
 - Leave backward scan and mark/restore undeclared; check the flags in
   `BeginCustomScan`.

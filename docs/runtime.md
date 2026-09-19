@@ -115,3 +115,39 @@ must precede destroying the slot.
 
 `tess_runtime_api()` returns the bridge's API, validated once per backend;
 the bridge must be loaded first (`CREATE EXTENSION tessera`).
+
+## Reading batches from a child
+
+`TessInput` is the input side of a node over one batch-producing child.
+The node creates it in `BeginCustomScan` after `ExecInitNode` of the child,
+whose result slot then carries the binding, and sends its request before
+the first fetch:
+
+```c
+child = ExecInitNode(outerPlan(cscan), estate, eflags);
+input = tess_input_create(estate->es_query_cxt, child);
+request.filter_columns = ...;
+request.output_mode = TESS_OUTPUT_BATCH;
+tess_input_set_request(input, &request);
+```
+
+Each cycle fetches a batch, works on it and finishes it; `NULL` ends the
+input:
+
+```c
+while ((batch = tess_input_next(input)) != NULL)
+{
+    ... clear rows, read columns ...
+    tess_input_finish(input);
+}
+```
+
+`next` refuses while the previous batch is unfinished, unless a forwarding
+parent finished it directly through the bridge. A child that forwards its
+own child's batch returns that child's slot; the input finds the binding of
+whatever slot it receives and caches it by slot pointer. The batch belongs
+to the child, which releases it when it publishes the next one or ends.
+
+Rescan follows the node contract: the node clears its own output, finishes
+its input, calls `ExecReScan` on the child, and then `tess_input_rescan`,
+which forgets the cached slot and binding.

@@ -125,4 +125,44 @@ extern void tess_output_clear(TessOutput *output);
 /* Clear and detach the binding; the output is unusable afterwards. */
 extern void tess_output_end(TessOutput *output);
 
+/*
+ * The input side of a node over one batch-producing child. The child's
+ * request is configured through the binding of its result slot, which a
+ * batch node attaches in BeginCustomScan; batches come from ExecProcNode,
+ * through the binding of whatever slot the child returns, so a node that
+ * forwards its own child's batch may return that child's slot. The input
+ * owns neither the child nor the batches. See docs/runtime.md.
+ */
+typedef struct TessInput TessInput;
+
+/* Wrap an initialized child; its result slot must carry a binding. */
+extern TessInput *tess_input_create(MemoryContext parent_context, PlanState *child);
+
+/* The child's logical layout, owned by the bridge. */
+extern const TessLayout *tess_input_layout(TessInput *input);
+
+/* The binding through which the child's request is configured. */
+extern TessBinding *tess_input_binding(TessInput *input);
+
+/* Send the request; only before the child publishes its first batch. */
+extern void tess_input_set_request(TessInput *input, const TessRequest *request);
+
+/*
+ * Fetch the child's next batch, or NULL at the end of its input. The
+ * previous batch must have been finished. The batch belongs to the child.
+ */
+extern TessBatch *tess_input_next(TessInput *input);
+
+/* The slot that carried the active batch, or NULL. */
+extern TupleTableSlot *tess_input_slot(TessInput *input);
+
+/* Whether the active batch has been marked consumed; error without one. */
+extern bool tess_input_finished(TessInput *input);
+
+/* Mark the active batch consumed, unless a forwarding parent already did. */
+extern void tess_input_finish(TessInput *input);
+
+/* Forget cached and active pointers after the caller rescanned the child. */
+extern void tess_input_rescan(TessInput *input);
+
 #endif							/* TESSERA_RUNTIME_H */
