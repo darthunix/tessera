@@ -13,6 +13,7 @@ HEADERS = \
 	../include/tessera/kernels.h \
 	../include/tessera/layout.h \
 	../include/tessera/node.h \
+	../include/tessera/plan.h \
 	../include/tessera/request.h \
 	../include/tessera/row_mask.h \
 	../include/tessera/runtime.h \

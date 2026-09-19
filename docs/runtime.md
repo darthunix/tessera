@@ -1,8 +1,8 @@
 # Runtime library
 
 `libtessera_runtime.a` (`runtime/`) holds the helpers a batch node needs
-beyond the bridge's contract: building batches from rows, and later the
-node's output and input sides, the plan-data codec and the unary node
+beyond the bridge's contract: building batches from rows, the node's output
+and input sides, the named plan-data codec, and later the unary node
 helper. It is a static library, installed next to the bridge in
 `pkglibdir` with its header `tessera/runtime.h`; a node module links it
 rather than calling through the bridge, so the bridge stays a small contract
@@ -151,3 +151,54 @@ to the child, which releases it when it publishes the next one or ends.
 Rescan follows the node contract: the node clears its own output, finishes
 its input, calls `ExecReScan` on the child, and then `tess_input_rescan`,
 which forgets the cached slot and binding.
+
+## Named plan data
+
+A `CustomPath` and a `CustomScan` carry a node's private data in
+`custom_private`, a `List` that PostgreSQL copies with `copyObject` for
+cached plans and serializes with `nodeToString` for parallel workers. The
+codec in `tessera/plan.h` stores that data as named, typed fields behind a
+record kind and version, so that a node reads back exactly what it wrote
+and never silently ignores a field. A path's or plan's private data is
+written once, when the path or plan is created:
+
+```c
+List *
+make_limit_data(Node *offset, Node *count)
+{
+    TessPlanWriter *writer = tess_plan_writer_create("my.limit", 1);
+
+    tess_plan_write_node(writer, "offset", offset);
+    tess_plan_write_node(writer, "count", count);
+    tess_plan_write_int(writer, "scan_direction", 1);
+    return tess_plan_writer_finish(writer);
+}
+```
+
+and read back with the same kind and version, in any order:
+
+```c
+TessPlanReader *reader = tess_plan_reader_create(scan->custom_private,
+                                                 "my.limit", 1);
+
+direction = tess_plan_read_int(reader, "scan_direction");
+offset = tess_plan_read_node(reader, "offset");
+count = tess_plan_read_node(reader, "count");
+tess_plan_reader_finish(reader);
+```
+
+Fields hold an `int`, a string, a node (copied, `NULL` allowed), a `List`
+of nodes, an `IntList`, or a `Bitmapset` stored as the list of its members.
+Values are copied when written; a reader returns borrowed pointers into the
+record, except a bitmap, which is rebuilt.
+
+The writer refuses an empty name, a duplicate name, a `NULL` string, a list
+of the wrong kind and any write after `finish`. The reader refuses data
+without the header, another kind, another version, a malformed or duplicate
+field, a missing field, a field of another type and a field read twice;
+`finish` raises an error naming the first field that was never read.
+Increment the record version when required fields or their meaning change,
+so that a plan cached by an older module revision is rejected instead of
+misread. `tess_plan_data_kind` returns a record's kind, or `NULL` without an
+error for a list that is not a record, which lets a node tell its own paths
+from other custom paths.
