@@ -66,3 +66,52 @@ descriptor, a column count outside `1..natts`, a capacity below one, an
 append after finishing or into a full builder, a slot with fewer
 attributes than columns, and a column request out of range or with an
 undersized result structure.
+
+## Publishing batches and serving rows
+
+`TessOutput` is the output side of a node: a virtual slot bound to the
+bridge. The node creates it in `BeginCustomScan` on its result slot, with
+the layout that maps every slot attribute to a batch column (extra batch
+columns for resjunk targets are allowed), and passes its `PlanState` so
+that the helper can adjust the instrumentation the executor allocates
+after `Begin`:
+
+```c
+output = tess_output_create(estate->es_query_cxt, &node->ss.ps,
+                            node->ss.ps.ps_ResultTupleSlot, &layout);
+```
+
+The parent configures the request through `tess_output_binding`; the node
+reads it, frozen, with `tess_output_request`. Each `ExecProcNode` of a node
+that owns batch storage then goes:
+
+```c
+tess_output_release(output);            /* the parent finished the last batch */
+tess_builder_reset(builder);
+... fill ...
+batch = tess_builder_finish(builder, InvalidOid);
+if (batch == NULL)
+    return NULL;                        /* end of input */
+return tess_output_publish(output, batch);
+```
+
+`publish` shows the batch's first selected row in the slot, so the slot is
+never empty for a parent; a batch with no selected rows cannot be published,
+the node skips it. A batch-aware parent finds the binding through the slot
+and reads the batch; it marks the batch consumed when done, and the node's
+next `release` or `publish` returns the storage, refusing while the batch
+is unconsumed. A row-wise parent sees one row per call: the node walks the
+selection with `tess_row_mask_next`, shows each row with
+`tess_output_select`, and marks the batch consumed itself with
+`tess_output_finish` before fetching the next.
+
+In batch mode one `ExecProcNode` call returns the whole batch, which the
+executor's instrumentation counts as one row; `publish` therefore adds the
+batch's other selected rows to `instrument->tuplecount`, so `EXPLAIN
+ANALYZE` reports the rows a batch node produced. In row mode nothing is
+adjusted. `tess_output_clear` releases an active batch, finished or not, for
+the end and rescan paths; `tess_output_end` also detaches the binding and
+must precede destroying the slot.
+
+`tess_runtime_api()` returns the bridge's API, validated once per backend;
+the bridge must be loaded first (`CREATE EXTENSION tessera`).

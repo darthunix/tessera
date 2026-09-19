@@ -7,7 +7,7 @@ PGXS := $(shell $(PG_CONFIG) --pgxs)
 include $(PGXS)
 
 RUNTIME_LIB = libtessera_runtime.a
-OBJS = builder.o
+OBJS = api.o builder.o output.o
 override CFLAGS += $(CFLAGS_SL) $(CFLAGS_SL_MODULE)
 EXTRA_CLEAN = $(RUNTIME_LIB) $(OBJS)
 

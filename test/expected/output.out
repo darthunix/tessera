@@ -1,0 +1,51 @@
+CREATE EXTENSION tessera;
+\getenv libdir PG_LIBDIR
+\getenv dlsuffix PG_DLSUFFIX
+\set output_test :libdir '/tessera_output_test' :dlsuffix
+LOAD :'output_test';
+CREATE FUNCTION tessera_test_output_rows()
+RETURNS boolean
+AS :'output_test', 'tessera_test_output_rows'
+LANGUAGE C STRICT;
+CREATE FUNCTION tessera_test_output_batch()
+RETURNS boolean
+AS :'output_test', 'tessera_test_output_batch'
+LANGUAGE C STRICT;
+CREATE FUNCTION tessera_test_output_layout()
+RETURNS boolean
+AS :'output_test', 'tessera_test_output_layout'
+LANGUAGE C STRICT;
+CREATE FUNCTION tessera_test_output_errors(integer)
+RETURNS void
+AS :'output_test', 'tessera_test_output_errors'
+LANGUAGE C STRICT;
+SELECT tessera_test_output_rows() AS rows \gset
+\echo :rows
+t
+SELECT tessera_test_output_batch() AS batch \gset
+\echo :batch
+t
+SELECT tessera_test_output_layout() AS layout \gset
+\echo :layout
+t
+\set VERBOSITY terse
+SELECT tessera_test_output_errors(0);
+ERROR:  Tessera output requires a virtual slot
+SELECT tessera_test_output_errors(1);
+ERROR:  Tessera output layout describes 1 targets but the slot has 2 attributes
+SELECT tessera_test_output_errors(2);
+ERROR:  Tessera output target 2 has no batch column
+SELECT tessera_test_output_errors(3);
+ERROR:  Tessera parent requested a new batch too early
+SELECT tessera_test_output_errors(4);
+ERROR:  Tessera output row 1 is not selected
+SELECT tessera_test_output_errors(5);
+ERROR:  Tessera output cannot publish an empty selection
+SELECT tessera_test_output_errors(6);
+ERROR:  Tessera parent requested a new batch too early
+\set VERBOSITY default
+DROP FUNCTION tessera_test_output_errors(integer);
+DROP FUNCTION tessera_test_output_layout();
+DROP FUNCTION tessera_test_output_batch();
+DROP FUNCTION tessera_test_output_rows();
+DROP EXTENSION tessera;

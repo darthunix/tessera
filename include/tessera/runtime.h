@@ -6,9 +6,19 @@
 
 #include "access/tupdesc.h"
 #include "executor/tuptable.h"
+#include "nodes/execnodes.h"
 
 #include "tessera/abi.h"
 #include "tessera/batch.h"
+#include "tessera/binding.h"
+#include "tessera/bridge.h"
+
+/*
+ * The bridge's API, validated once per backend: the root's version and size
+ * and the binding operations. The bridge must already be loaded (CREATE
+ * EXTENSION tessera); otherwise this raises ERROR.
+ */
+extern const TessApi *tess_runtime_api(void);
 
 /*
  * A builder collects rows from tuple slots into an owned column-major Datum
@@ -60,5 +70,59 @@ extern void tess_builder_append_slot(TessBuilder *builder, TupleTableSlot *slot)
  * columns stay valid until reset; finishing again returns the same batch.
  */
 extern TessBatch *tess_builder_finish(TessBuilder *builder, Oid table_oid);
+
+/*
+ * The output side of a node: a virtual slot bound to the bridge through
+ * which batches are published to a batch-aware parent and rows are served
+ * to an ordinary one. Publishing shows the batch's first selected row in
+ * the slot, so the slot is never empty for a parent; a batch-aware parent
+ * finds the binding through the slot and reads the batch, a row-wise one
+ * gets further rows with tess_output_select. In batch mode publishing
+ * adds the batch's other rows to the node's instrumentation, since one
+ * ExecProcNode call returns them all. See docs/runtime.md.
+ */
+typedef struct TessOutput TessOutput;
+
+/*
+ * Bind slot, which must be virtual, with layout: every slot attribute must
+ * map to a batch column. ps may be NULL; it supplies the instrumentation
+ * the executor allocates after BeginCustomScan.
+ */
+extern TessOutput *tess_output_create(MemoryContext parent_context,
+									  PlanState *ps, TupleTableSlot *slot,
+									  const TessLayout *layout);
+
+/* The binding through which a parent configures this node's request. */
+extern TessBinding *tess_output_binding(TessOutput *output);
+
+/* Freeze and return the request. */
+extern const TessRequest *tess_output_request(TessOutput *output);
+
+/*
+ * Return the previous batch to its owner once the parent finished it; an
+ * unfinished batch is an error. Call before reusing the batch's storage.
+ */
+extern void tess_output_release(TessOutput *output);
+
+/*
+ * Publish a batch with at least one selected row and return the slot
+ * showing its first selected row. Releases the previous batch first.
+ */
+extern TupleTableSlot *tess_output_publish(TessOutput *output, TessBatch *batch);
+
+/* Show another selected row of the active batch for a row-wise parent. */
+extern TupleTableSlot *tess_output_select(TessOutput *output, int row);
+
+/* Mark the active batch consumed on behalf of a row-wise parent; repeatable. */
+extern void tess_output_finish(TessOutput *output);
+
+/* True when no unconsumed batch remains. */
+extern bool tess_output_finished(TessOutput *output);
+
+/* Release any active batch, finished or not, and clear the slot: end, rescan. */
+extern void tess_output_clear(TessOutput *output);
+
+/* Clear and detach the binding; the output is unusable afterwards. */
+extern void tess_output_end(TessOutput *output);
 
 #endif							/* TESSERA_RUNTIME_H */
