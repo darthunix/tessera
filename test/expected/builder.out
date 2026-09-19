@@ -1,0 +1,45 @@
+\getenv libdir PG_LIBDIR
+\getenv dlsuffix PG_DLSUFFIX
+\set builder_test :libdir '/tessera_builder_test' :dlsuffix
+LOAD :'builder_test';
+CREATE FUNCTION tessera_test_builder_byval()
+RETURNS boolean
+AS :'builder_test', 'tessera_test_builder_byval'
+LANGUAGE C STRICT;
+CREATE FUNCTION tessera_test_builder_columns()
+RETURNS boolean
+AS :'builder_test', 'tessera_test_builder_columns'
+LANGUAGE C STRICT;
+CREATE FUNCTION tessera_test_builder_errors(integer)
+RETURNS void
+AS :'builder_test', 'tessera_test_builder_errors'
+LANGUAGE C STRICT;
+SELECT tessera_test_builder_byval() AS byval \gset
+\echo :byval
+t
+SELECT tessera_test_builder_columns() AS columns \gset
+\echo :columns
+t
+\set VERBOSITY terse
+SELECT tessera_test_builder_errors(0);
+ERROR:  Tessera builder requires a memory context and tuple descriptor
+SELECT tessera_test_builder_errors(1);
+ERROR:  Tessera builder column count is out of range
+SELECT tessera_test_builder_errors(2);
+ERROR:  Tessera builder column count is out of range
+SELECT tessera_test_builder_errors(3);
+ERROR:  Tessera builder capacity must be positive
+SELECT tessera_test_builder_errors(4);
+ERROR:  cannot append to a finished Tessera builder
+SELECT tessera_test_builder_errors(5);
+ERROR:  Tessera builder is full
+SELECT tessera_test_builder_errors(6);
+ERROR:  Tessera builder column is out of range
+SELECT tessera_test_builder_errors(7);
+ERROR:  Tessera builder received an incompatible column request
+SELECT tessera_test_builder_errors(8);
+ERROR:  Tessera builder input has too few columns
+\set VERBOSITY default
+DROP FUNCTION tessera_test_builder_errors(integer);
+DROP FUNCTION tessera_test_builder_columns();
+DROP FUNCTION tessera_test_builder_byval();

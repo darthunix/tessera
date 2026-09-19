@@ -1,4 +1,4 @@
-SUBDIRS = bridge kernels test
+SUBDIRS = bridge kernels runtime test
 PG_CONFIG ?= pg_config
 CARGO ?= cargo
 
@@ -18,6 +18,7 @@ clean:
 install:
 	$(MAKE) -C bridge PG_CONFIG="$(PG_CONFIG)" install
 	$(MAKE) -C kernels PG_CONFIG="$(PG_CONFIG)" install
+	$(MAKE) -C runtime PG_CONFIG="$(PG_CONFIG)" install
 
 installcheck: all
 	$(MAKE) -C test PG_CONFIG="$(PG_CONFIG)" installcheck

@@ -15,6 +15,7 @@ HEADERS = \
 	../include/tessera/node.h \
 	../include/tessera/request.h \
 	../include/tessera/row_mask.h \
+	../include/tessera/runtime.h \
 	../include/tessera/source.h \
 	../include/tessera/status.h
 PG_CONFIG ?= pg_config
