@@ -7,6 +7,10 @@ CREATE FUNCTION tessera_test_planner_paths()
 RETURNS boolean
 AS :'planner_test', 'tessera_test_planner_paths'
 LANGUAGE C STRICT;
+CREATE FUNCTION tessera_test_planner_plans()
+RETURNS boolean
+AS :'planner_test', 'tessera_test_planner_plans'
+LANGUAGE C STRICT;
 CREATE FUNCTION tessera_test_planner_errors(integer)
 RETURNS void
 AS :'planner_test', 'tessera_test_planner_errors'
@@ -14,6 +18,145 @@ LANGUAGE C STRICT;
 SELECT tessera_test_planner_paths() AS paths \gset
 \echo :paths
 t
+SELECT tessera_test_planner_plans() AS plans \gset
+\echo :plans
+t
+-- The module's hook wraps the sequential scan of every planner_* table in
+-- a forwarding node whose plan is built by the helpers.
+CREATE TABLE planner_t (a int, b text);
+INSERT INTO planner_t SELECT i, 'row' || i FROM generate_series(1, 5) AS i;
+CREATE TABLE other_t (a int);
+INSERT INTO other_t VALUES (1);
+EXPLAIN (COSTS OFF) SELECT a, b FROM planner_t WHERE a > 1;
+             QUERY PLAN             
+------------------------------------
+ Custom Scan (tessera_planner_test)
+   Node: tessera.planner_test
+   Layout Columns: 2
+   ->  Seq Scan on planner_t
+         Filter: (a > 1)
+(5 rows)
+
+SELECT a, b FROM planner_t WHERE a > 1;
+ a |  b   
+---+------
+ 2 | row2
+ 3 | row3
+ 4 | row4
+ 5 | row5
+(4 rows)
+
+-- The projection PostgreSQL installs after PlanCustomPath changes the layout.
+EXPLAIN (COSTS OFF) SELECT a + 1 AS next FROM planner_t;
+             QUERY PLAN             
+------------------------------------
+ Custom Scan (tessera_planner_test)
+   Node: tessera.planner_test
+   Layout Columns: 1
+   ->  Seq Scan on planner_t
+(4 rows)
+
+SELECT a + 1 AS next FROM planner_t;
+ next 
+------
+    2
+    3
+    4
+    5
+    6
+(5 rows)
+
+EXPLAIN (COSTS OFF) SELECT a FROM other_t;
+     QUERY PLAN      
+---------------------
+ Seq Scan on other_t
+(1 row)
+
+-- A cached plan copies the private data.
+PREPARE counted AS SELECT count(*) FROM planner_t WHERE a > $1;
+EXECUTE counted(1);
+ count 
+-------
+     4
+(1 row)
+
+EXECUTE counted(2);
+ count 
+-------
+     3
+(1 row)
+
+EXECUTE counted(3);
+ count 
+-------
+     2
+(1 row)
+
+EXECUTE counted(4);
+ count 
+-------
+     1
+(1 row)
+
+EXECUTE counted(5);
+ count 
+-------
+     0
+(1 row)
+
+EXECUTE counted(0);
+ count 
+-------
+     5
+(1 row)
+
+EXPLAIN (COSTS OFF) EXECUTE counted(0);
+                QUERY PLAN                
+------------------------------------------
+ Aggregate
+   ->  Custom Scan (tessera_planner_test)
+         Node: tessera.planner_test
+         Layout Columns: 0
+         ->  Seq Scan on planner_t
+               Filter: (a > $1)
+(6 rows)
+
+DEALLOCATE counted;
+-- A parallel worker reads the plan back from its text form.
+SET debug_parallel_query = on;
+EXPLAIN (COSTS OFF) SELECT a, b FROM planner_t WHERE a > 1;
+                QUERY PLAN                
+------------------------------------------
+ Gather
+   Workers Planned: 1
+   Single Copy: true
+   ->  Custom Scan (tessera_planner_test)
+         Node: tessera.planner_test
+         Layout Columns: 2
+         ->  Seq Scan on planner_t
+               Filter: (a > 1)
+(8 rows)
+
+SELECT a, b FROM planner_t WHERE a > 1;
+ a |  b   
+---+------
+ 2 | row2
+ 3 | row3
+ 4 | row4
+ 5 | row5
+(4 rows)
+
+RESET debug_parallel_query;
+SET tessera.enable = off;
+EXPLAIN (COSTS OFF) SELECT a, b FROM planner_t WHERE a > 1;
+      QUERY PLAN       
+-----------------------
+ Seq Scan on planner_t
+   Filter: (a > 1)
+(2 rows)
+
+RESET tessera.enable;
+DROP TABLE planner_t, other_t;
 \set VERBOSITY terse
 SELECT tessera_test_planner_errors(0);
 ERROR:  Tessera received an incompatible path configuration
@@ -35,7 +178,36 @@ SELECT tessera_test_planner_errors(8);
 ERROR:  Tessera expected a custom path
 SELECT tessera_test_planner_errors(9);
 ERROR:  Tessera node "tessera.planner_removed" is not registered
+SELECT tessera_test_planner_errors(10);
+ERROR:  Tessera received an incompatible plan configuration
+SELECT tessera_test_planner_errors(11);
+ERROR:  Tessera plan requires scan methods
+SELECT tessera_test_planner_errors(12);
+ERROR:  Tessera plan received an invalid layout policy
+SELECT tessera_test_planner_errors(13);
+ERROR:  Tessera plan requires an explicit output layout
+SELECT tessera_test_planner_errors(14);
+ERROR:  Tessera output layout does not match its target list
+SELECT tessera_test_planner_errors(15);
+ERROR:  Tessera layout maps target 0 to an invalid column 5
+SELECT tessera_test_planner_errors(16);
+ERROR:  Tessera path and plan child counts differ
+SELECT tessera_test_planner_errors(17);
+ERROR:  Tessera received an invalid child plan
+SELECT tessera_test_planner_errors(18);
+ERROR:  Tessera received malformed tessera.path plan data
+SELECT tessera_test_planner_errors(19);
+ERROR:  Tessera expected a custom plan
+SELECT tessera_test_planner_errors(20);
+ERROR:  Tessera received malformed tessera.plan plan data
+SELECT tessera_test_planner_errors(21);
+ERROR:  Tessera received an incompatible plan result
+SELECT tessera_test_planner_errors(22);
+ERROR:  Tessera plan layout does not match its target list
+SELECT tessera_test_planner_errors(23);
+ERROR:  Tessera received an incompatible output layout
 \set VERBOSITY default
 DROP FUNCTION tessera_test_planner_errors(integer);
+DROP FUNCTION tessera_test_planner_plans();
 DROP FUNCTION tessera_test_planner_paths();
 DROP EXTENSION tessera;

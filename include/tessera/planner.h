@@ -72,4 +72,65 @@ typedef struct TessPathInfo
 /* Read the path's data; the pointers are borrowed from the path. */
 extern void tess_path_get_info(const CustomPath *path, TessPathInfo *result);
 
+/* How a plan describes the columns of the batches it publishes. */
+typedef enum TessLayoutPolicy
+{
+	/*
+	 * One column per entry of the final target list, including a projection
+	 * that PostgreSQL installs after PlanCustomPath returns.
+	 */
+	TESS_LAYOUT_DENSE,
+	/* The layout the node supplies. */
+	TESS_LAYOUT_EXPLICIT
+} TessLayoutPolicy;
+
+/* Complete description of the CustomScan returned by PlanCustomPath. */
+typedef struct TessPlanConfig
+{
+	Size		struct_size;
+	const CustomScanMethods *methods;
+	TessLayoutPolicy layout_policy;
+	/* Copied, for TESS_LAYOUT_EXPLICIT. */
+	const TessLayout *explicit_layout;
+	/* Exactly what the executor evaluates; nothing is added implicitly. */
+	const List *qual;
+	const List *expressions;
+	const Node *node_data;
+	/* custom_scan_tlist, what the scan tuple contains; NULL: the plan's own. */
+	const List *scan_targetlist;
+	Index		scanrelid;
+} TessPlanConfig;
+
+#define TESS_PLAN_CONFIG_MIN_SIZE \
+	TESS_ABI_SIZE_INCLUDING_FIELD(TessPlanConfig, scanrelid)
+
+/*
+ * Build the plan of a path built here, in PlanCustomPath. Costs and relids
+ * are copied from the path by PostgreSQL afterwards.
+ */
+extern Plan *tess_plan_create(CustomPath *path, List *targetlist,
+							  List *child_plans, const TessPlanConfig *config);
+
+/* What a plan built here carries, read in BeginCustomScan. */
+typedef struct TessPlanInfo
+{
+	Size		struct_size;
+	const TessNode *node;
+	int			nchildren;
+	/* A NULL entry is a child that produces ordinary rows. */
+	const char **child_names;
+	/* Derived from the final target list for TESS_LAYOUT_DENSE. */
+	TessLayout	layout;
+	Node	   *node_data;
+} TessPlanInfo;
+
+#define TESS_PLAN_INFO_MIN_SIZE \
+	TESS_ABI_SIZE_INCLUDING_FIELD(TessPlanInfo, node_data)
+
+/* The names and the layout's map are allocated for the caller. */
+extern void tess_plan_get_info(const CustomScan *scan, TessPlanInfo *result);
+
+/* The layout of a plan built here; the map is allocated for the caller. */
+extern void tess_plan_get_layout(const Plan *plan, TessLayout *result);
+
 #endif							/* TESSERA_PLANNER_H */

@@ -236,3 +236,69 @@ row-producing one. `tess_path_get_info` reads the stored expressions and
 data back in `PlanCustomPath`, and `tess_path_matches` recognizes a node's
 own paths by their methods. Never `copyObject` a path: PostgreSQL does not
 copy path nodes, and neither does this library.
+
+## Building plans
+
+`PlanCustomPath` turns the path into a `CustomScan` the same way for every
+batch node:
+
+```c
+static Plan *
+plan_custom_path(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
+                 List *tlist, List *clauses, List *custom_plans)
+{
+    TessPathInfo path = TESS_STRUCT_INITIALIZER(TessPathInfo);
+    TessPlanConfig config = TESS_STRUCT_INITIALIZER(TessPlanConfig);
+    Plan *child = linitial(custom_plans);
+
+    tess_path_get_info(best_path, &path);
+    config.methods = &my_scan_methods;
+    config.layout_policy = TESS_LAYOUT_DENSE;
+    config.scan_targetlist = child->targetlist;
+    config.expressions = path.expressions;
+    return tess_plan_create(best_path, tlist, custom_plans, &config);
+}
+```
+
+`tess_plan_create` sets the methods, the path's flags, `scanrelid`, and
+copies of the target list, `qual`, `expressions` (as `custom_exprs`) and
+`scan_targetlist` (as `custom_scan_tlist`), and records the owning node,
+which children are batch nodes, the output layout and `node_data` through
+the plan-data codec. PostgreSQL copies costs and relids from the path
+afterwards.
+
+The output layout has two policies. `TESS_LAYOUT_DENSE` publishes one
+column per entry of the final target list; it is derived again whenever the
+plan is read, because a node with `CUSTOMPATH_SUPPORT_PROJECTION` gets its
+target list replaced after `PlanCustomPath` returns, which then receives an
+empty list. `TESS_LAYOUT_EXPLICIT` copies the layout the node supplies.
+
+A node without a scan relation (`scanrelid` 0) describes its scan tuple in
+`scan_targetlist`, usually its child's target list; the executor evaluates
+the final target list against that tuple. `NULL` keeps the plan's own target
+list, for a node whose scan tuple is its output. Qualifiers and expressions
+are never inferred: set them to exactly what the executor evaluates. A
+wrapper around a complete child path passes no clauses, since the child
+already enforces them.
+
+`BeginCustomScan` reads the plan once:
+
+```c
+TessPlanInfo plan = TESS_STRUCT_INITIALIZER(TessPlanInfo);
+
+tess_plan_get_info(cscan, &plan);
+input = tess_input_create(estate->es_query_cxt, child);
+output = tess_output_create(estate->es_query_cxt, &css->ss.ps, slot,
+                            &plan.layout);
+```
+
+`child_names` holds the registered name of each batch child and `NULL` for
+a child that produces ordinary rows. `tess_plan_get_layout` returns the
+layout alone, for a parent reading a child's plan. Both allocate the names
+and the layout's map for the caller.
+
+Register the scan methods with `RegisterCustomScanMethods` in `_PG_init`: a
+parallel worker reads the plan back from its text form and finds the methods
+by name. The [planner test](../test/tessera_planner_test.c) is a complete
+forwarding node built this way, with a `set_rel_pathlist` hook that calls
+the previous hook, checks `tessera.enable` and wraps a sequential scan.
