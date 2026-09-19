@@ -201,6 +201,9 @@ detach(binding)
 destroy slot and remaining test state
 ```
 
+A plan node that publishes batches follows the same sequence and, beyond
+it, the [obligations of every batch node](node.md#obligations-of-every-batch-node).
+
 ### Prepare the connection
 
 In `producer_run_case`, the producer creates a virtual tuple slot with an
