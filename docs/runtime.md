@@ -2,8 +2,8 @@
 
 `libtessera_runtime.a` (`runtime/`) holds the helpers a batch node needs
 beyond the bridge's contract: building batches from rows, the node's output
-and input sides, the named plan-data codec, and later the unary node
-helper. It is a static library, installed next to the bridge in
+and input sides, the named plan-data codec, the path and plan helpers, and
+later the unary node helper. It is a static library, installed next to the bridge in
 `pkglibdir` with its header `tessera/runtime.h`; a node module links it
 rather than calling through the bridge, so the bridge stays a small contract
 and the helpers can change with the nodes that use them:
