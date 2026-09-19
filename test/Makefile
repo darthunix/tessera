@@ -15,6 +15,9 @@ PG_CONFIG ?= pg_config
 PGXS := $(shell $(PG_CONFIG) --pgxs)
 include $(PGXS)
 
+# Every module is rebuilt when a public header changes.
+$(MODULES:%=%.o): $(wildcard $(srcdir)/../include/tessera/*.h)
+
 # The kernels test links the Rust static library directly.
 include $(srcdir)/../rust.mk
 

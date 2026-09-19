@@ -100,7 +100,7 @@ tessera_test_output_rows(PG_FUNCTION_ARGS)
 	TessBatch  *batch;
 	bool		result;
 
-	ps->instrument = InstrAlloc(INSTRUMENT_ROWS);
+	ps->instrument = InstrAllocNode(INSTRUMENT_ROWS, false);
 	output = tess_output_create(CurrentMemoryContext, ps, slot, &layout);
 	binding = tess_output_binding(output);
 	result = binding != NULL && ops->find(slot) == binding &&
@@ -157,7 +157,7 @@ tessera_test_output_batch(PG_FUNCTION_ARGS)
 	TessDatumColumn column = TESS_STRUCT_INITIALIZER(TessDatumColumn);
 	bool		result;
 
-	ps->instrument = InstrAlloc(INSTRUMENT_ROWS);
+	ps->instrument = InstrAllocNode(INSTRUMENT_ROWS, false);
 	output = tess_output_create(CurrentMemoryContext, ps, slot, &layout);
 	request.output_mode = TESS_OUTPUT_BATCH;
 	ops->set_request(tess_output_binding(output), &request);
