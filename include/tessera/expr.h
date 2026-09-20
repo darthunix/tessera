@@ -7,6 +7,9 @@
 #include "nodes/execnodes.h"
 #include "nodes/primnodes.h"
 
+#include "tessera/batch.h"
+#include "tessera/row_mask.h"
+
 /*
  * A batch expression is a PostgreSQL expression over at most one column
  * of a batch: a Var, Const and Param scalars, and calls of functions that
@@ -38,5 +41,24 @@ extern TessExpr *tess_expr_compile_value(Node *node, PlanState *parent,
 
 /* The batch column the expression reads, or -1 for a scalar expression. */
 extern int tess_expr_input_column(const TessExpr *expr);
+
+/*
+ * Bind to a batch for its selected rows; results are computed on the
+ * first request and kept until the next bind. Scalars are evaluated in
+ * econtext at every computation, so a changed Param takes effect after a
+ * rebind.
+ */
+extern void tess_expr_bind(TessExpr *expr, TessBatch *batch,
+						   ExprContext *econtext, TessColumnPurpose purpose);
+
+/*
+ * The results over the batch's selected rows, as the batch contract's
+ * Datum column: one slot per batch row, NULL flags set, borrowed until
+ * the next bind. A failed function call raises its SQLSTATE and message.
+ */
+extern const TessDatumColumn *tess_expr_get_column(TessExpr *expr);
+
+/* The selected rows whose result is not NULL. */
+extern const TessRowMask *tess_expr_non_nulls(TessExpr *expr);
 
 #endif							/* TESSERA_EXPR_H */

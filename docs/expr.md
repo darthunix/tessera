@@ -2,7 +2,7 @@
 
 `tessera/expr.h` compiles a PostgreSQL expression over one batch column into
 a chain of calls of the functions the [function registry](function.md)
-implements. It is the
+implements, and evaluates it over a batch's selected rows. It is the
 deliberately small language shared by the batch nodes: a filter node
 applies the batchable prefix of a scan's qualifiers with it, a projection
 computes columns with it, an aggregate feeds its argument through it. There
@@ -34,7 +34,7 @@ does not know, is left to the row-wise executor. `tess_expr_supports_value`
 decides this at planning time, without executor state, with the same rules
 the compiler enforces.
 
-## Compiling
+## Compiling and evaluating
 
 A node compiles its expressions in `BeginCustomScan`, in the query's memory
 context, with a callback that maps a Var to a batch column of the node's
@@ -51,7 +51,36 @@ expr = tess_expr_compile_value(node, &css->ss.ps, resolve_column, layout);
 column = tess_expr_input_column(expr);   /* -1 for a scalar expression */
 ```
 
+Per batch, the node binds the expression and asks for the results:
+
+```c
+tess_expr_bind(expr, batch, econtext, TESS_COLUMN_FOR_PROJECTION);
+column = tess_expr_get_column(expr);
+non_nulls = tess_expr_non_nulls(expr);
+```
+
+The result is the batch contract's Datum column, one slot per batch row
+with NULL flags set for the selected rows, and the mask of the selected
+rows whose result is not NULL; both are borrowed until the next bind. The
+results are computed once per bind: scalars are evaluated in the expression
+context at that point, so a Param changed by a rescan takes effect at the
+next batch. The purpose says whether the input column is read while
+filtering or for the output, as the batch contract distinguishes.
+
+Evaluation walks the chain from the column outward. Every call takes the
+batch's selected rows; a strict function leaves NULL rows out of its
+`non_nulls`, and the compiler turns that mask into the NULL flags of the
+next call's column, so NULL flows through the chain as it does through the
+row-wise executor. A NULL scalar makes the whole step NULL without a call.
+Implementations that return `TESS_RESULT_INT32` write int32 results, which
+the compiler widens into the Datum column between steps; that costs one
+pass over the selected rows per step, and native column formats will remove
+it later. A failed call raises its SQLSTATE and message after the call has
+returned, as every kernel error is reported.
+
 ## Errors
 
-An unsupported expression and a Var the resolver cannot map are errors at
-compilation.
+An unsupported expression, a Var the resolver cannot map, and a result
+request before any bind are errors at compile or first use. A division by
+zero or an out-of-range result surfaces as the function's own error,
+`22012` or `22003`, at evaluation.

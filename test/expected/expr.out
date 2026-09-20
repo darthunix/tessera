@@ -8,6 +8,10 @@ CREATE FUNCTION tessera_test_expr_supports()
 RETURNS boolean
 AS :'expr_test', 'tessera_test_expr_supports'
 LANGUAGE C STRICT;
+CREATE FUNCTION tessera_test_expr_values()
+RETURNS boolean
+AS :'expr_test', 'tessera_test_expr_values'
+LANGUAGE C STRICT;
 CREATE FUNCTION tessera_test_expr_errors(integer)
 RETURNS void
 AS :'expr_test', 'tessera_test_expr_errors'
@@ -15,12 +19,22 @@ LANGUAGE C STRICT;
 SELECT tessera_test_expr_supports() AS supports \gset
 \echo :supports
 t
+SELECT tessera_test_expr_values() AS values \gset
+\echo :values
+t
 \set VERBOSITY terse
 SELECT tessera_test_expr_errors(0);
 ERROR:  Tessera received an unsupported batch expression
 SELECT tessera_test_expr_errors(1);
 ERROR:  Tessera expression input column is unavailable
+SELECT tessera_test_expr_errors(2);
+ERROR:  Tessera expression is not bound to a batch
+SELECT tessera_test_expr_errors(3);
+ERROR:  division by zero
+SELECT tessera_test_expr_errors(4);
+ERROR:  integer out of range
 \set VERBOSITY default
 DROP FUNCTION tessera_test_expr_errors(integer);
+DROP FUNCTION tessera_test_expr_values();
 DROP FUNCTION tessera_test_expr_supports();
 DROP EXTENSION tessera;

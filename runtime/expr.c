@@ -3,6 +3,7 @@
 #include "executor/executor.h"
 #include "nodes/nodeFuncs.h"
 #include "utils/lsyscache.h"
+#include "utils/memutils.h"
 
 #include "tessera/expr.h"
 #include "tessera/function.h"
@@ -29,6 +30,21 @@ struct TessExpr
 	ExprState  *scalar_value;
 	Step	   *steps;
 	int			nsteps;
+	/* The bound batch. */
+	TessBatch  *batch;
+	ExprContext *econtext;
+	TessColumnPurpose purpose;
+	/* Two sets of scratch arrays: the steps alternate between them. */
+	int			capacity;
+	Datum	   *values[2];
+	bool	   *isnull[2];
+	int32	   *ints[2];
+	uint64	   *bits[2];
+	/* The results, valid while ready. */
+	TessDatumColumn result;
+	TessRowMask non_nulls;
+	bool		ready;
+	TessStatus	status;
 };
 
 static Node *
@@ -271,6 +287,7 @@ tess_expr_compile_value(Node *node, PlanState *parent,
 	expr = palloc0_object(TessExpr);
 	expr->context = CurrentMemoryContext;
 	expr->column = -1;
+	expr->status = (TessStatus) TESS_STRUCT_INITIALIZER(TessStatus);
 	compile_value(expr, node, parent, resolve, context);
 	return expr;
 }
@@ -279,4 +296,196 @@ int
 tess_expr_input_column(const TessExpr *expr)
 {
 	return expr->column;
+}
+
+void
+tess_expr_bind(TessExpr *expr, TessBatch *batch, ExprContext *econtext,
+			   TessColumnPurpose purpose)
+{
+	if (batch == NULL || econtext == NULL)
+		elog(ERROR, "Tessera expression requires a batch and an expression context");
+	expr->batch = batch;
+	expr->econtext = econtext;
+	expr->purpose = purpose;
+	expr->ready = false;
+}
+
+/* Scratch for nrows rows; values stay initialized as placeholders. */
+static void
+ensure_capacity(TessExpr *expr, int nrows)
+{
+	MemoryContext oldcontext;
+	int			nwords = tess_row_mask_word_count(nrows);
+
+	if (expr->capacity >= nrows)
+		return;
+	oldcontext = MemoryContextSwitchTo(expr->context);
+	for (int set = 0; set < 2; set++)
+	{
+		if (expr->values[set] != NULL)
+		{
+			pfree(expr->values[set]);
+			pfree(expr->isnull[set]);
+			pfree(expr->ints[set]);
+			pfree(expr->bits[set]);
+		}
+		expr->values[set] = palloc0_array(Datum, nrows);
+		expr->isnull[set] = palloc0_array(bool, nrows);
+		expr->ints[set] = palloc0_array(int32, nrows);
+		expr->bits[set] = palloc0_array(uint64, nwords);
+	}
+	expr->capacity = nrows;
+	MemoryContextSwitchTo(oldcontext);
+}
+
+static void
+report(const TessExpr *expr)
+{
+	const char *sqlstate = expr->status.sqlstate;
+
+	ereport(ERROR,
+			(errcode(MAKE_SQLSTATE(sqlstate[0], sqlstate[1], sqlstate[2],
+								   sqlstate[3], sqlstate[4])),
+			 errmsg("%s", expr->status.message)));
+}
+
+/* Broadcast one scalar, or its NULL, over the selected rows into a set. */
+static void
+fill_scalar(TessExpr *expr, int set, Datum value, bool isnull)
+{
+	const TessRowMask *rows = &expr->batch->rows;
+	int			row = -1;
+
+	memset(expr->bits[set], 0,
+		   sizeof(uint64) * tess_row_mask_word_count(rows->nrows));
+	while ((row = tess_row_mask_next(rows, row)) >= 0)
+	{
+		expr->values[set][row] = isnull ? (Datum) 0 : value;
+		expr->isnull[set][row] = isnull;
+		if (!isnull)
+			expr->bits[set][row / 64] |= UINT64CONST(1) << (row % 64);
+	}
+}
+
+/* Turn a step's results into the next column: Datums and NULL flags. */
+static void
+finish_step(TessExpr *expr, int set, TessResultFormat format)
+{
+	const TessRowMask *rows = &expr->batch->rows;
+	TessRowMask non_nulls = {rows->nrows, expr->bits[set]};
+	int			row = -1;
+
+	while ((row = tess_row_mask_next(rows, row)) >= 0)
+	{
+		bool		present = tess_row_mask_contains(&non_nulls, row);
+
+		if (present && format == TESS_RESULT_INT32)
+			expr->values[set][row] = Int32GetDatum(expr->ints[set][row]);
+		expr->isnull[set][row] = !present;
+	}
+}
+
+const TessDatumColumn *
+tess_expr_get_column(TessExpr *expr)
+{
+	TessBatch  *batch = expr->batch;
+	TessDatumColumn current = TESS_STRUCT_INITIALIZER(TessDatumColumn);
+	uint64	   *current_bits;
+	int			nrows;
+
+	if (batch == NULL)
+		elog(ERROR, "Tessera expression is not bound to a batch");
+	if (expr->ready)
+		return &expr->result;
+	nrows = batch->rows.nrows;
+	ensure_capacity(expr, nrows);
+	if (expr->column >= 0)
+	{
+		int			row = -1;
+
+		batch->ops->get_datum_column(batch, expr->column, &batch->rows,
+									 expr->purpose, &current);
+		if (current.values == NULL || current.isnull == NULL ||
+			current.nrows != nrows)
+			elog(ERROR, "Tessera batch returned an invalid column");
+		/* The input's non-NULL rows, for a chain without steps. */
+		current_bits = expr->bits[1];
+		memset(current_bits, 0,
+			   sizeof(uint64) * tess_row_mask_word_count(nrows));
+		while ((row = tess_row_mask_next(&batch->rows, row)) >= 0)
+			if (!current.isnull[row])
+				current_bits[row / 64] |= UINT64CONST(1) << (row % 64);
+	}
+	else
+	{
+		bool		isnull;
+		Datum		value = ExecEvalExprSwitchContext(expr->scalar_value,
+													  expr->econtext, &isnull);
+
+		fill_scalar(expr, 1, value, isnull);
+		current.values = expr->values[1];
+		current.isnull = expr->isnull[1];
+		current.nrows = nrows;
+		current_bits = expr->bits[1];
+	}
+	for (int index = 0; index < expr->nsteps; index++)
+	{
+		Step	   *step = &expr->steps[index];
+		int			set = index % 2;
+		TessFunctionArg args[MAX_ARGS];
+		TessFunctionCall call = TESS_STRUCT_INITIALIZER(TessFunctionCall);
+		TessRowMask non_nulls = {nrows, expr->bits[set]};
+		bool		scalar_null = false;
+
+		for (int position = 0; position < step->nargs; position++)
+		{
+			args[position] = (TessFunctionArg)
+				TESS_STRUCT_INITIALIZER(TessFunctionArg);
+			if (position == step->column_arg)
+				args[position].column = &current;
+			else
+			{
+				bool		isnull;
+
+				args[position].scalar =
+					ExecEvalExprSwitchContext(step->scalars[position],
+											  expr->econtext, &isnull);
+				scalar_null |= isnull;
+			}
+		}
+		if (scalar_null)
+			fill_scalar(expr, set, (Datum) 0, true);
+		else
+		{
+			call.function = step->function;
+			call.nargs = step->nargs;
+			call.args = args;
+			call.inputcollid = step->inputcollid;
+			call.rows = &batch->rows;
+			call.values = step->function->result_format == TESS_RESULT_INT32 ?
+				(void *) expr->ints[set] : (void *) expr->values[set];
+			call.non_nulls = &non_nulls;
+			call.context = expr->context;
+			call.status = &expr->status;
+			if (step->function->evaluate(&call) != TESS_OK)
+				report(expr);
+			finish_step(expr, set, step->function->result_format);
+		}
+		current.values = expr->values[set];
+		current.isnull = expr->isnull[set];
+		current.nrows = nrows;
+		current_bits = expr->bits[set];
+	}
+	expr->result = current;
+	expr->non_nulls.nrows = nrows;
+	expr->non_nulls.bits = current_bits;
+	expr->ready = true;
+	return &expr->result;
+}
+
+const TessRowMask *
+tess_expr_non_nulls(TessExpr *expr)
+{
+	(void) tess_expr_get_column(expr);
+	return &expr->non_nulls;
 }
