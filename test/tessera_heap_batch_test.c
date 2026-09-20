@@ -7,6 +7,8 @@
 #include "access/tableam.h"
 #include "executor/tuptable.h"
 #include "fmgr.h"
+#include "storage/bufmgr.h"
+#include "storage/bufpage.h"
 #include "utils/builtins.h"
 #include "utils/snapmgr.h"
 
@@ -26,14 +28,18 @@ check(int number, bool holds)
 	return holds;
 }
 
+/* A heap batch taking its descriptor from the first slot, or from desc. */
 static TessHeapBatch *
-make_heap(int ncolumns, int capacity)
+make_heap(int ncolumns, int capacity, TupleDesc desc)
 {
 	TessHeapBatchConfig config = TESS_STRUCT_INITIALIZER(TessHeapBatchConfig);
 
 	config.parent_context = CurrentMemoryContext;
 	config.ncolumns = ncolumns;
 	config.capacity = capacity;
+	config.tuple_desc = desc;
+	config.first_non_guaranteed_attr = desc == NULL ? 0 :
+		desc->firstNonGuaranteedAttr;
 	return tess_heap_batch_create(&config);
 }
 
@@ -87,18 +93,55 @@ row_holds(const TessDatumColumn *column, int row, int attnum)
 }
 
 /*
- * One batch of 64 rows from the relation's scan, kept as tuples: columns
- * deformed on request and only for the requested rows, values valid after
- * the scan left their pages, a copied row, and the release of the pins.
+ * Fill the batch with the relation's first rows, from the scan's slots or
+ * as tuples rebuilt from the page items the slots point at, and keep
+ * scanning so that the scan leaves the batch's pages. Returns the rows
+ * scanned.
  */
-Datum
-tessera_test_heap_batch(PG_FUNCTION_ARGS)
+static int
+fill(TessHeapBatch *heap, Relation rel, bool by_tuple)
 {
-	Oid			relid = PG_GETARG_OID(0);
-	Relation	rel = table_open(relid, AccessShareLock);
 	TupleTableSlot *slot = table_slot_create(rel, NULL);
 	TableScanDesc scan = table_beginscan(rel, GetActiveSnapshot(), 0, NULL, 0);
-	TessHeapBatch *heap = make_heap(3, 64);
+	int			scanned = 0;
+
+	while (table_scan_getnextslot(scan, ForwardScanDirection, slot))
+	{
+		BufferHeapTupleTableSlot *bslot = (BufferHeapTupleTableSlot *) slot;
+
+		if (!tess_heap_batch_is_full(heap))
+		{
+			if (by_tuple)
+			{
+				Page		page = BufferGetPage(bslot->buffer);
+				OffsetNumber offset = ItemPointerGetOffsetNumber(&bslot->base.tuple->t_self);
+				ItemId		item = PageGetItemId(page, offset);
+				HeapTupleData tuple;
+
+				tuple.t_len = ItemIdGetLength(item);
+				tuple.t_data = (HeapTupleHeader) PageGetItem(page, item);
+				tuple.t_self = bslot->base.tuple->t_self;
+				tuple.t_tableOid = RelationGetRelid(rel);
+				tess_heap_batch_append_tuple(heap, &tuple, bslot->buffer);
+			}
+			else
+				tess_heap_batch_append_slot(heap, slot);
+		}
+		scanned++;
+	}
+	table_endscan(scan);
+	ExecDropSingleTupleTableSlot(slot);
+	return scanned;
+}
+
+/*
+ * A batch of 64 rows: columns deformed on request and only for the
+ * requested rows, cursors resumed and restarted, values valid after the
+ * scan left their pages, and the release of the pins.
+ */
+static bool
+verify(TessHeapBatch *heap, Oid relid, int base)
+{
 	const TessHeapBatchStats *stats = tess_heap_batch_stats(heap);
 	TessBatch  *batch;
 	TessDatumColumn column;
@@ -106,18 +149,9 @@ tessera_test_heap_batch(PG_FUNCTION_ARGS)
 	uint64		bits[1];
 	bool		result = true;
 	bool		holds;
-	int			scanned = 0;
 
-	/* Keep scanning past the batch so the scan leaves the first pages. */
-	while (table_scan_getnextslot(scan, ForwardScanDirection, slot))
-	{
-		if (!tess_heap_batch_is_full(heap))
-			tess_heap_batch_append_slot(heap, slot);
-		scanned++;
-	}
-	result &= check(1, scanned > 64 && tess_heap_batch_is_full(heap));
 	batch = tess_heap_batch_finish(heap, relid);
-	result &= check(2, batch != NULL && batch->rows.nrows == 64 &&
+	result &= check(base + 1, batch != NULL && batch->rows.nrows == 64 &&
 		tess_row_mask_count(&batch->rows) == 64 && batch->table_oid == relid &&
 		stats->deformed_datums == 0 && stats->copied_tuples == 0);
 
@@ -127,14 +161,15 @@ tessera_test_heap_batch(PG_FUNCTION_ARGS)
 	holds = stats->deformed_datums == 32;
 	for (int row = 0; row < 64; row += 2)
 		holds &= row_holds(&column, row, 1);
-	result &= check(3, holds);
+	result &= check(base + 2, holds);
 	get_column(batch, 0, &batch->rows, &column);
 	holds = stats->deformed_datums == 64;
 	for (int row = 0; row < 64; row++)
 		holds &= row_holds(&column, row, 1);
-	result &= check(4, holds);
+	result &= check(base + 3, holds);
 	get_column(batch, 0, &batch->rows, &column);
-	result &= check(5, stats->deformed_datums == 64 && stats->restarted_datums == 0);
+	result &= check(base + 4, stats->deformed_datums == 64 &&
+		stats->restarted_datums == 0);
 
 	/* The bigint behind the text resumes each row's cursor past the text. */
 	mask = parity_mask(64, 1, bits);
@@ -142,25 +177,47 @@ tessera_test_heap_batch(PG_FUNCTION_ARGS)
 	holds = stats->deformed_datums == 96 && stats->restarted_datums == 0;
 	for (int row = 1; row < 64; row += 2)
 		holds &= row_holds(&column, row, 3);
-	result &= check(6, holds);
+	result &= check(base + 5, holds);
 	/* The text before those cursors restarts them; the others resume. */
 	get_column(batch, 1, &batch->rows, &column);
 	holds = stats->deformed_datums == 160 && stats->restarted_datums == 32;
 	for (int row = 0; row < 64; row++)
 		holds &= row_holds(&column, row, 2);
-	result &= check(7, holds);
+	result &= check(base + 6, holds);
 	/* Values point into pages the scan has long left. */
-	result &= check(8, row_holds(&column, 0, 2) && row_holds(&column, 1, 2));
+	result &= check(base + 7, row_holds(&column, 0, 2) && row_holds(&column, 1, 2));
 
 	batch->ops->release(batch);
 	tess_heap_batch_reset(heap);
-	result &= check(9, tess_heap_batch_finish(heap, relid) == NULL);
+	result &= check(base + 8, tess_heap_batch_finish(heap, relid) == NULL);
+	return result;
+}
 
-	/* A row from a virtual slot is copied as a tuple. */
+Datum
+tessera_test_heap_batch(PG_FUNCTION_ARGS)
+{
+	Oid			relid = PG_GETARG_OID(0);
+	Relation	rel = table_open(relid, AccessShareLock);
+	TessHeapBatch *heap;
+	TessBatch  *batch;
+	TessDatumColumn column;
+	bool		result = true;
+
+	/* From the scan's slots, the descriptor taken from the first one. */
+	heap = make_heap(3, 64, NULL);
+	result &= check(1, fill(heap, rel, false) > 64 && tess_heap_batch_is_full(heap));
+	result &= verify(heap, relid, 1);
+	/* As tuples rebuilt from page items, the descriptor configured. */
+	heap = make_heap(3, 64, RelationGetDescr(rel));
+	result &= check(10, fill(heap, rel, true) > 64 && tess_heap_batch_is_full(heap));
+	result &= verify(heap, relid, 10);
+
+	/* A row from a virtual slot, and a tuple without a page, are copied. */
 	{
 		TupleTableSlot *virtual = MakeSingleTupleTableSlot(RelationGetDescr(rel),
 														   &TTSOpsVirtual);
-		TessHeapBatch *other = make_heap(3, 4);
+		TessHeapBatch *other = make_heap(3, 4, NULL);
+		HeapTuple	tuple;
 
 		ExecClearTuple(virtual);
 		virtual->tts_values[0] = Int32GetDatum(7);
@@ -171,17 +228,19 @@ tessera_test_heap_batch(PG_FUNCTION_ARGS)
 		virtual->tts_isnull[2] = false;
 		ExecStoreVirtualTuple(virtual);
 		tess_heap_batch_append_slot(other, virtual);
+		tuple = ExecCopySlotHeapTuple(virtual);
 		ExecClearTuple(virtual);
+		tess_heap_batch_append_tuple(other, tuple, InvalidBuffer);
+		heap_freetuple(tuple);
 		batch = tess_heap_batch_finish(other, relid);
 		get_column(batch, 1, &batch->rows, &column);
-		result &= check(10, batch->rows.nrows == 1 &&
-			tess_heap_batch_stats(other)->copied_tuples == 1 &&
-			strcmp(text_to_cstring(DatumGetTextPP(column.values[0])), "copied") == 0);
+		result &= check(20, batch->rows.nrows == 2 &&
+			tess_heap_batch_stats(other)->copied_tuples == 2 &&
+			strcmp(text_to_cstring(DatumGetTextPP(column.values[0])), "copied") == 0 &&
+			strcmp(text_to_cstring(DatumGetTextPP(column.values[1])), "copied") == 0);
 		batch->ops->release(batch);
 		ExecDropSingleTupleTableSlot(virtual);
 	}
-	table_endscan(scan);
-	ExecDropSingleTupleTableSlot(slot);
 	table_close(rel, AccessShareLock);
 	PG_RETURN_BOOL(result);
 }
@@ -194,10 +253,11 @@ tessera_test_heap_batch_errors(PG_FUNCTION_ARGS)
 	Relation	rel = table_open(relid, AccessShareLock);
 	TupleTableSlot *slot = table_slot_create(rel, NULL);
 	TableScanDesc scan = table_beginscan(rel, GetActiveSnapshot(), 0, NULL, 0);
-	TessHeapBatch *heap = make_heap(3, 2);
+	TessHeapBatch *heap = make_heap(3, 2, NULL);
 	TessBatch  *batch;
 	TessDatumColumn column = TESS_STRUCT_INITIALIZER(TessDatumColumn);
 	TessRowMask foreign = {5, NULL};
+	HeapTupleData tuple = {0};
 
 	while (!tess_heap_batch_is_full(heap) &&
 		   table_scan_getnextslot(scan, ForwardScanDirection, slot))
@@ -216,6 +276,9 @@ tessera_test_heap_batch_errors(PG_FUNCTION_ARGS)
 			batch = tess_heap_batch_finish(heap, relid);
 			batch->ops->get_datum_column(batch, 0, &foreign,
 										 TESS_COLUMN_FOR_FILTER, &column);
+			break;
+		case 3:
+			tess_heap_batch_append_tuple(make_heap(3, 2, NULL), &tuple, InvalidBuffer);
 			break;
 		default:
 			elog(ERROR, "unknown error case %d", kind);

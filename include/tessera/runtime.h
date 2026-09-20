@@ -89,10 +89,18 @@ typedef struct TessHeapBatchConfig
 	Size		struct_size;
 	/* Owns the batch and its arrays. */
 	MemoryContext parent_context;
-	/* Columns of the batch: the leading attributes of the slots appended. */
+	/* Columns of the batch: the leading attributes of the tuples appended. */
 	int			ncolumns;
 	/* Rows in one batch; more than 64 is allowed. */
 	int			capacity;
+	/*
+	 * The tuples' descriptor and the number of leading attributes every
+	 * tuple has present, non-NULL and by value (the descriptor's
+	 * firstNonGuaranteedAttr, or 0). NULL takes both from the first slot
+	 * appended; tuples appended directly need them here.
+	 */
+	TupleDesc	tuple_desc;
+	int			first_non_guaranteed_attr;
 } TessHeapBatchConfig;
 
 #define TESS_HEAP_BATCH_CONFIG_MIN_SIZE \
@@ -128,6 +136,15 @@ extern bool tess_heap_batch_is_full(const TessHeapBatch *batch);
  */
 extern void tess_heap_batch_append_slot(TessHeapBatch *batch,
 										TupleTableSlot *slot);
+
+/*
+ * Append one tuple by its header: a reference into the page of buffer,
+ * which the batch pins, or a copy when buffer is invalid. The descriptor
+ * must be known, from the configuration or an earlier slot.
+ */
+extern void tess_heap_batch_append_tuple(TessHeapBatch *batch,
+										 const HeapTupleData *tuple,
+										 Buffer buffer);
 
 /*
  * Finish the batch and return it, or NULL without rows. The batch stays

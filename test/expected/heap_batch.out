@@ -31,6 +31,8 @@ SELECT tessera_test_heap_batch_errors(1, 'heap_batch_t');
 ERROR:  Tessera heap batch column is out of range
 SELECT tessera_test_heap_batch_errors(2, 'heap_batch_t');
 ERROR:  Tessera heap batch received a row mask of another batch
+SELECT tessera_test_heap_batch_errors(3, 'heap_batch_t');
+ERROR:  Tessera heap batch needs a descriptor before tuples
 \set VERBOSITY default
 DROP TABLE heap_batch_t;
 DROP FUNCTION tessera_test_heap_batch_errors(integer, regclass);

@@ -27,6 +27,7 @@ SELECT tessera_test_heap_batch('heap_batch_t') AS heap_batch \gset
 SELECT tessera_test_heap_batch_errors(0, 'heap_batch_t');
 SELECT tessera_test_heap_batch_errors(1, 'heap_batch_t');
 SELECT tessera_test_heap_batch_errors(2, 'heap_batch_t');
+SELECT tessera_test_heap_batch_errors(3, 'heap_batch_t');
 \set VERBOSITY default
 
 DROP TABLE heap_batch_t;

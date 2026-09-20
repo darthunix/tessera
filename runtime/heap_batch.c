@@ -1,5 +1,6 @@
 #include "postgres.h"
 
+#include "access/htup_details.h"
 #include "executor/tuptable.h"
 #include "storage/bufmgr.h"
 #include "utils/memutils.h"
@@ -146,12 +147,54 @@ tess_heap_batch_create(const TessHeapBatchConfig *config)
 	heap->selection = MemoryContextAlloc(context, sizeof(uint64) * heap->nwords);
 	heap->copies = AllocSetContextCreate(context, "Tessera heap batch copies",
 										 ALLOCSET_DEFAULT_SIZES);
+	if (TESS_ABI_HAS_FIELD(config, TessHeapBatchConfig, first_non_guaranteed_attr) &&
+		config->tuple_desc != NULL)
+	{
+		if (config->tuple_desc->natts < config->ncolumns)
+			elog(ERROR, "Tessera heap batch descriptor has too few columns");
+		if (config->first_non_guaranteed_attr < 0 ||
+			config->first_non_guaranteed_attr > config->tuple_desc->natts)
+			elog(ERROR, "Tessera heap batch guaranteed prefix is out of range");
+		heap->tuple_desc = config->tuple_desc;
+		heap->first_non_guaranteed = config->first_non_guaranteed_attr;
+	}
 	heap->batch.abi_version = TESS_BATCH_ABI_VERSION;
 	heap->batch.struct_size = sizeof(TessBatch);
 	heap->batch.ops = &heap_ops;
 	heap->batch.private_data = heap;
 	tess_heap_batch_reset(heap);
 	return heap;
+}
+
+/* Keep a row: the tuple header, and a pin on its page once per page. */
+static void
+keep_tuple(TessHeapBatch *heap, const HeapTupleData *tuple, Buffer buffer)
+{
+	int			row = heap->nrows;
+
+	if (unlikely(heap->sealed))
+		elog(ERROR, "cannot append to a finished Tessera heap batch");
+	if (unlikely(row >= heap->capacity))
+		elog(ERROR, "Tessera heap batch is full");
+	if (BufferIsValid(buffer))
+	{
+		heap->tuples[row] = *tuple;
+		if (heap->npins == 0 || heap->pins[heap->npins - 1] != buffer)
+		{
+			IncrBufferRefCount(buffer);
+			heap->pins[heap->npins++] = buffer;
+		}
+	}
+	else
+	{
+		MemoryContext oldcontext = MemoryContextSwitchTo(heap->copies);
+
+		heap->tuples[row] = *heap_copytuple((HeapTuple) tuple);
+		MemoryContextSwitchTo(oldcontext);
+		heap->stats.copied_tuples++;
+	}
+	tess_deform_cursor_init(&heap->cursors[row]);
+	heap->nrows = row + 1;
 }
 
 void
@@ -175,13 +218,8 @@ tess_heap_batch_is_full(const TessHeapBatch *heap)
 void
 tess_heap_batch_append_slot(TessHeapBatch *heap, TupleTableSlot *slot)
 {
-	int			row = heap->nrows;
 	BufferHeapTupleTableSlot *bslot = (BufferHeapTupleTableSlot *) slot;
 
-	if (unlikely(heap->sealed))
-		elog(ERROR, "cannot append to a finished Tessera heap batch");
-	if (unlikely(row >= heap->capacity))
-		elog(ERROR, "Tessera heap batch is full");
 	if (heap->tuple_desc == NULL)
 	{
 		if (slot->tts_tupleDescriptor->natts < heap->ncolumns)
@@ -191,26 +229,34 @@ tess_heap_batch_append_slot(TessHeapBatch *heap, TupleTableSlot *slot)
 	}
 	else if (slot->tts_tupleDescriptor != heap->tuple_desc)
 		elog(ERROR, "Tessera heap batch input changed its descriptor");
+	/* The slot's tuple header is overwritten by the next fetch. */
 	if (TTS_IS_BUFFERTUPLE(slot) && BufferIsValid(bslot->buffer))
-	{
-		/* The slot's tuple header is overwritten by the next fetch. */
-		heap->tuples[row] = *bslot->base.tuple;
-		if (heap->npins == 0 || heap->pins[heap->npins - 1] != bslot->buffer)
-		{
-			IncrBufferRefCount(bslot->buffer);
-			heap->pins[heap->npins++] = bslot->buffer;
-		}
-	}
+		keep_tuple(heap, bslot->base.tuple, bslot->buffer);
 	else
 	{
-		MemoryContext oldcontext = MemoryContextSwitchTo(heap->copies);
+		int			row = heap->nrows;
+		MemoryContext oldcontext;
 
+		if (unlikely(heap->sealed))
+			elog(ERROR, "cannot append to a finished Tessera heap batch");
+		if (unlikely(row >= heap->capacity))
+			elog(ERROR, "Tessera heap batch is full");
+		oldcontext = MemoryContextSwitchTo(heap->copies);
 		heap->tuples[row] = *ExecCopySlotHeapTuple(slot);
 		MemoryContextSwitchTo(oldcontext);
 		heap->stats.copied_tuples++;
+		tess_deform_cursor_init(&heap->cursors[row]);
+		heap->nrows = row + 1;
 	}
-	tess_deform_cursor_init(&heap->cursors[row]);
-	heap->nrows = row + 1;
+}
+
+void
+tess_heap_batch_append_tuple(TessHeapBatch *heap, const HeapTupleData *tuple,
+							 Buffer buffer)
+{
+	if (heap->tuple_desc == NULL)
+		elog(ERROR, "Tessera heap batch needs a descriptor before tuples");
+	keep_tuple(heap, tuple, buffer);
 }
 
 TessBatch *
