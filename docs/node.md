@@ -87,7 +87,8 @@ not pass an old pointer to `remove` after freeing its object.
 
 ## Obligations of every batch node
 
-A kind of node registered here is a `CustomScan` provider. Beyond the
+A kind of node registered here is a `CustomScan` provider; Tessera's own
+nodes live in the nodes module ([nodes.md](nodes.md)). Beyond the
 registry, every batch node in Tessera keeps the rules below, so that the
 shared runtime helpers can rely on them and every node is tested the same
 way. The rules follow pg_batch's nodes (`nodes/*.c`, `runtime/*.c` and

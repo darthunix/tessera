@@ -170,7 +170,7 @@ tessera_test_builder_errors(PG_FUNCTION_ARGS)
 	if (kind == 0)
 		config.parent_context = NULL;
 	else if (kind == 1)
-		config.ncolumns = 0;
+		config.ncolumns = -1;
 	else if (kind == 2)
 		config.ncolumns = 4;
 	else if (kind == 3)

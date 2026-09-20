@@ -58,7 +58,7 @@ tess_builder_create(const TessBuilderConfig *config)
 		config->struct_size < TESS_BUILDER_CONFIG_MIN_SIZE ||
 		config->parent_context == NULL || config->tuple_desc == NULL)
 		elog(ERROR, "Tessera builder requires a memory context and tuple descriptor");
-	if (config->ncolumns <= 0 || config->ncolumns > config->tuple_desc->natts)
+	if (config->ncolumns < 0 || config->ncolumns > config->tuple_desc->natts)
 		elog(ERROR, "Tessera builder column count is out of range");
 	if (config->capacity <= 0)
 		elog(ERROR, "Tessera builder capacity must be positive");

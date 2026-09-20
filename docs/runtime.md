@@ -47,6 +47,8 @@ batch = tess_builder_finish(builder, InvalidOid);   /* NULL without rows */
 `append_slot` materializes the leading `ncolumns` attributes of the slot
 with `slot_getsomeattrs`, which works for every kind of slot: a virtual slot
 is already deformed, a heap or minimal-tuple slot deforms just that prefix.
+A builder with zero columns only counts rows, for a parent that needs no
+values, as a scan under `count(*)` does.
 Pass-by-reference values are copied into the builder's own memory context,
 because a slot's values point into the tuple's memory, which the child's
 next call may free; so the slot may be cleared or reused right after the
@@ -62,7 +64,7 @@ bridge does when the next batch is published. Finishing again returns the
 same batch; `is_full` is true after `capacity` rows or after finishing.
 
 Errors are raised with `ERROR`: a configuration without a context or
-descriptor, a column count outside `1..natts`, a capacity below one, an
+descriptor, a column count outside `0..natts`, a capacity below one, an
 append after finishing or into a full builder, a slot with fewer
 attributes than columns, and a column request out of range or with an
 undersized result structure.
