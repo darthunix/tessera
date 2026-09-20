@@ -30,6 +30,7 @@ typedef int (*TessExprResolveVar) (const Var *var, void *context);
  * relation; otherwise every Var must belong to relid.
  */
 extern bool tess_expr_supports_value(Node *node, Index relid);
+extern bool tess_expr_supports_filter(Node *node, Index relid);
 
 /*
  * Compile in the caller's memory context; parent supplies the Params. The
@@ -38,6 +39,14 @@ extern bool tess_expr_supports_value(Node *node, Index relid);
 extern TessExpr *tess_expr_compile_value(Node *node, PlanState *parent,
 										 TessExprResolveVar resolve,
 										 void *context);
+
+/*
+ * A filter is a value expression under a registered predicate with a
+ * scalar; it must satisfy tess_expr_supports_filter.
+ */
+extern TessExpr *tess_expr_compile_filter(Node *node, PlanState *parent,
+										  TessExprResolveVar resolve,
+										  void *context);
 
 /* The batch column the expression reads, or -1 for a scalar expression. */
 extern int tess_expr_input_column(const TessExpr *expr);
@@ -60,5 +69,12 @@ extern const TessDatumColumn *tess_expr_get_column(TessExpr *expr);
 
 /* The selected rows whose result is not NULL. */
 extern const TessRowMask *tess_expr_non_nulls(TessExpr *expr);
+
+/*
+ * Narrow the bound batch's row mask in place to the selected rows where
+ * the filter is true; a NULL value or scalar makes it false. The value
+ * is computed over the selection as it was before.
+ */
+extern void tess_expr_apply_filter(TessExpr *expr);
 
 #endif							/* TESSERA_EXPR_H */

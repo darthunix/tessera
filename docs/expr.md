@@ -78,9 +78,35 @@ pass over the selected rows per step, and native column formats will remove
 it later. A failed call raises its SQLSTATE and message after the call has
 returned, as every kernel error is reported.
 
+## Filters
+
+A filter is a boolean call of a function the registry implements as a
+`TESS_FUNCTION_PREDICATE`, over one supported value with the column and
+one scalar: `a > 5`, `a + 1 > 5`, `7 < a`. `tess_expr_supports_filter`
+recognizes it at planning time; `tess_expr_compile_filter` compiles the
+value chain and the predicate; and per batch, after a bind,
+`tess_expr_apply_filter` narrows the batch's row mask in place to the
+selected rows where the predicate is true:
+
+```c
+tess_expr_bind(filter, batch, econtext, TESS_COLUMN_FOR_FILTER);
+tess_expr_apply_filter(filter);
+```
+
+The value is computed over the selection as it stands, the predicate
+clears the rows where it is false or the value is NULL, and a NULL scalar
+clears every selected row, as a strict predicate would. Filters compose by
+applying one after another to the same batch; each sees the rows the
+previous ones kept. A predicate that does not accept any shape takes the
+column first, so `7 < a` is compiled through the operator's commutator
+from the catalog into `a > 7`; without a commutator whose function is
+implemented, the filter is not supported. What a filter cannot express,
+`AND`, `OR`, `NOT`, `IS NULL`, a boolean column, a comparison of two
+columns, stays with `ExecQual` over the rows that survive.
+
 ## Errors
 
-An unsupported expression, a Var the resolver cannot map, and a result
-request before any bind are errors at compile or first use. A division by
-zero or an out-of-range result surfaces as the function's own error,
-`22012` or `22003`, at evaluation.
+An unsupported expression, a Var the resolver cannot map, a result request
+before any bind and a filter applied through a value expression are errors
+at compile or first use. A division by zero or an out-of-range result
+surfaces as the function's own error, `22012` or `22003`, at evaluation.

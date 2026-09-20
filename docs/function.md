@@ -3,7 +3,7 @@
 A `TessFunction` describes a batch implementation of one PostgreSQL function:
 a callback that computes the function over a whole batch, with the same
 values and the same errors as the function itself. Consumers such as the
-expression compiler look implementations up by the function's OID, the
+[expression compiler](expr.md) look implementations up by the function's OID, the
 `funcid` of a `FuncExpr` or the `opfuncid` of an `OpExpr`, and evaluate
 whatever they find over the batch; everything else stays row by row through
 `ExecEvalExpr`. The registry is a subsystem of the bridge (`TessApi.functions`,

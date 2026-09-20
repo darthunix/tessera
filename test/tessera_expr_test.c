@@ -21,6 +21,7 @@ PG_MODULE_MAGIC;
 
 PG_FUNCTION_INFO_V1(tessera_test_expr_supports);
 PG_FUNCTION_INFO_V1(tessera_test_expr_values);
+PG_FUNCTION_INFO_V1(tessera_test_expr_filters);
 PG_FUNCTION_INFO_V1(tessera_test_expr_errors);
 
 /* Expression trees built by hand, as the planner would hand them over. */
@@ -160,6 +161,17 @@ tessera_test_expr_supports(PG_FUNCTION_ARGS)
 	result &= check(16, !tess_expr_supports_value((Node *) other, 1));
 	outer->varlevelsup = 1;
 	result &= check(17, !tess_expr_supports_value((Node *) outer, 0));
+	/* Filters: a registered predicate over one column value and a scalar. */
+	result &= check(18, tess_expr_supports_filter(op(">", a(), int4(5)), 0));
+	result &= check(19, tess_expr_supports_filter(op("<", int4(7), a()), 1));
+	result &= check(20, tess_expr_supports_filter(op(">", op("+", a(), int4(1)), int4(5)), 0));
+	result &= check(21, !tess_expr_supports_filter(op(">", a(), int4(5)), 2));
+	result &= check(22, !tess_expr_supports_filter(a(), 0));
+	result &= check(23, !tess_expr_supports_filter(op("<", int4(1), int4(2)), 0));
+	result &= check(24, !tess_expr_supports_filter(op("+", a(), int4(1)), 0));
+	result &= check(25, !tess_expr_supports_filter(op("=", a(), var(2, INT4OID)), 0));
+	result &= check(26, !tess_expr_supports_filter((Node *) make_andclause(list_make2(op(">", a(), int4(5)), op("<", a(), int4(9)))), 0));
+	result &= check(27, !tess_expr_supports_filter(op("=", var(3, TEXTOID), (Node *) makeConst(TEXTOID, -1, DEFAULT_COLLATION_OID, -1, CStringGetTextDatum("x"), false, false)), 0));
 	PG_RETURN_BOOL(result);
 }
 
@@ -253,6 +265,68 @@ tessera_test_expr_values(PG_FUNCTION_ARGS)
 	PG_RETURN_BOOL(result);
 }
 
+/* Apply a filter compiled from node to a fresh batch of 70 rows. */
+static TessBatch *
+filtered(Node *node, ExprContext *econtext)
+{
+	TessBatch  *batch = make_batch(70);
+	TessExpr   *expr = tess_expr_compile_filter(node, NULL, resolve, NULL);
+
+	tess_expr_bind(expr, batch, econtext, TESS_COLUMN_FOR_FILTER);
+	tess_expr_apply_filter(expr);
+	return batch;
+}
+
+Datum
+tessera_test_expr_filters(PG_FUNCTION_ARGS)
+{
+	ExprContext *econtext = CreateStandaloneExprContext();
+	TessBatch  *batch;
+	TessBatch  *other;
+	TessExpr   *expr;
+	bool		result = true;
+
+	/* a % 7 = 0 keeps the multiples of 7 that are not NULL. */
+	batch = filtered(op("=", op("%", a(), int4(7)), int4(0)), econtext);
+	result &= check(201, tess_row_mask_count(&batch->rows) == 8 &&
+		tess_row_mask_contains(&batch->rows, 6) &&
+		!tess_row_mask_contains(&batch->rows, 0) &&
+		!tess_row_mask_contains(&batch->rows, 34));
+	/* a + 1 > 5: a value chain under the predicate. */
+	batch = filtered(op(">", op("+", a(), int4(1)), int4(5)), econtext);
+	result &= check(202, tess_row_mask_count(&batch->rows) == 52 &&
+		!tess_row_mask_contains(&batch->rows, 3) &&
+		!tess_row_mask_contains(&batch->rows, 4) &&
+		tess_row_mask_contains(&batch->rows, 5));
+	/* 7 < a through the commutator equals a > 7. */
+	batch = filtered(op("<", int4(7), a()), econtext);
+	other = filtered(op(">", a(), int4(7)), econtext);
+	result &= check(203, tess_row_mask_count(&batch->rows) == 50 &&
+		batch->rows.bits[0] == other->rows.bits[0] &&
+		batch->rows.bits[1] == other->rows.bits[1]);
+	/* A second filter narrows the selection further, in place. */
+	expr = tess_expr_compile_filter(op("=", op("%", a(), int4(7)), int4(0)), NULL, resolve, NULL);
+	tess_expr_bind(expr, batch, econtext, TESS_COLUMN_FOR_FILTER);
+	tess_expr_apply_filter(expr);
+	result &= check(204, tess_row_mask_count(&batch->rows) == 7 &&
+		!tess_row_mask_contains(&batch->rows, 6) &&
+		tess_row_mask_contains(&batch->rows, 13));
+	/* A NULL scalar clears the selection. */
+	batch = filtered(op(">", a(), null_int4()), econtext);
+	result &= check(205, tess_row_mask_count(&batch->rows) == 0);
+	/* The value under the filter is available, over the narrowed rows. */
+	batch = filtered(op(">", a(), int4(60)), econtext);
+	expr = tess_expr_compile_filter(op("<", int4(65), op("+", a(), int4(1))), NULL, resolve, NULL);
+	tess_expr_bind(expr, batch, econtext, TESS_COLUMN_FOR_FILTER);
+	tess_expr_apply_filter(expr);
+	result &= check(206, tess_row_mask_count(&batch->rows) == 4 &&
+		tess_row_mask_contains(&batch->rows, 65) &&
+		!tess_row_mask_contains(&batch->rows, 63) &&
+		tess_row_mask_count(tess_expr_non_nulls(expr)) == 4 &&
+		DatumGetInt32(tess_expr_get_column(expr)->values[65]) == 67);
+	PG_RETURN_BOOL(result);
+}
+
 Datum
 tessera_test_expr_errors(PG_FUNCTION_ARGS)
 {
@@ -282,6 +356,14 @@ tessera_test_expr_errors(PG_FUNCTION_ARGS)
 			expr = tess_expr_compile_value(op("*", a(), int4(2000000000)), NULL, resolve, NULL);
 			tess_expr_bind(expr, batch, econtext, TESS_COLUMN_FOR_PROJECTION);
 			tess_expr_get_column(expr);
+			break;
+		case 5:
+			expr = tess_expr_compile_value(a(), NULL, resolve, NULL);
+			tess_expr_bind(expr, batch, econtext, TESS_COLUMN_FOR_FILTER);
+			tess_expr_apply_filter(expr);
+			break;
+		case 6:
+			tess_expr_compile_filter(op("+", a(), int4(1)), NULL, resolve, NULL);
 			break;
 		default:
 			elog(ERROR, "unknown error case %d", kind);

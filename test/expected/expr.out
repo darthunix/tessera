@@ -12,6 +12,10 @@ CREATE FUNCTION tessera_test_expr_values()
 RETURNS boolean
 AS :'expr_test', 'tessera_test_expr_values'
 LANGUAGE C STRICT;
+CREATE FUNCTION tessera_test_expr_filters()
+RETURNS boolean
+AS :'expr_test', 'tessera_test_expr_filters'
+LANGUAGE C STRICT;
 CREATE FUNCTION tessera_test_expr_errors(integer)
 RETURNS void
 AS :'expr_test', 'tessera_test_expr_errors'
@@ -21,6 +25,9 @@ SELECT tessera_test_expr_supports() AS supports \gset
 t
 SELECT tessera_test_expr_values() AS values \gset
 \echo :values
+t
+SELECT tessera_test_expr_filters() AS filters \gset
+\echo :filters
 t
 \set VERBOSITY terse
 SELECT tessera_test_expr_errors(0);
@@ -33,8 +40,13 @@ SELECT tessera_test_expr_errors(3);
 ERROR:  division by zero
 SELECT tessera_test_expr_errors(4);
 ERROR:  integer out of range
+SELECT tessera_test_expr_errors(5);
+ERROR:  Tessera expression is not a filter
+SELECT tessera_test_expr_errors(6);
+ERROR:  Tessera received an unsupported batch filter
 \set VERBOSITY default
 DROP FUNCTION tessera_test_expr_errors(integer);
+DROP FUNCTION tessera_test_expr_filters();
 DROP FUNCTION tessera_test_expr_values();
 DROP FUNCTION tessera_test_expr_supports();
 DROP EXTENSION tessera;

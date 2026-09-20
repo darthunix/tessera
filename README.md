@@ -18,7 +18,9 @@ session, and a runnable example using independent producer and consumer
 modules, and
 the [node guide](docs/node.md) for the node registry and what every batch
 node must do. The [function guide](docs/function.md) describes how batch
-implementations of PostgreSQL functions are registered and called, and the
+implementations of PostgreSQL functions are registered and called, the
+[expression guide](docs/expr.md) how a node evaluates expressions and
+filters over a batch through them, and the
 [runtime guide](docs/runtime.md) the static library a node links for
 building and passing batches. The [nodes guide](docs/nodes.md) describes the
 module of Tessera's own batch nodes, starting with `TessPack`, and the

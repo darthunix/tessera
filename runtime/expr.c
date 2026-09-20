@@ -1,5 +1,6 @@
 #include "postgres.h"
 
+#include "catalog/pg_type_d.h"
 #include "executor/executor.h"
 #include "nodes/nodeFuncs.h"
 #include "utils/lsyscache.h"
@@ -30,6 +31,9 @@ struct TessExpr
 	ExprState  *scalar_value;
 	Step	   *steps;
 	int			nsteps;
+	/* The predicate over the chain's result, when the expression is a filter. */
+	bool		filter;
+	Step		predicate;
 	/* The bound batch. */
 	TessBatch  *batch;
 	ExprContext *econtext;
@@ -46,6 +50,8 @@ struct TessExpr
 	bool		ready;
 	TessStatus	status;
 };
+
+static bool analyze_value(Node *node, Index relid, int *nvars);
 
 static Node *
 strip_relabel(Node *node)
@@ -133,6 +139,48 @@ commuted(Oid opno, Oid inputcollid, TessFunctionKind kind)
 }
 
 /*
+ * Whether every argument is a supported value, how many Vars they hold
+ * in total and which argument carries the column.
+ */
+static bool
+analyze_args(List *args, Index relid, int *nvars, int *column_arg)
+{
+	int			index = 0;
+
+	*nvars = 0;
+	*column_arg = -1;
+	if (list_length(args) < 1 || list_length(args) > MAX_ARGS)
+		return false;
+	foreach_ptr(Node, arg, args)
+	{
+		int			arg_vars;
+
+		if (!analyze_value(arg, relid, &arg_vars))
+			return false;
+		if (arg_vars == 1)
+		{
+			if (*nvars == 1)
+				return false;
+			*column_arg = index;
+		}
+		*nvars += arg_vars;
+		index++;
+	}
+	return true;
+}
+
+/* Whether the column may sit at column_arg of a call of function. */
+static bool
+shape_fits(const TessFunction *function, int column_arg, int nargs,
+		   Oid opno, Oid inputcollid)
+{
+	if (column_arg == 0 || (function->flags & TESS_FUNCTION_ANY_SHAPE) != 0)
+		return true;
+	return nargs == 2 &&
+		commuted(opno, inputcollid, function->kind) != NULL;
+}
+
+/*
  * Whether node is a supported value expression, and how many Vars it has.
  * The column, when there is one, must be the first argument of every call
  * that takes it, unless the implementation accepts any shape or the
@@ -145,9 +193,7 @@ analyze_value(Node *node, Index relid, int *nvars)
 	List	   *args;
 	Oid			opno;
 	Oid			inputcollid;
-	int			vars = 0;
-	int			column_arg = -1;
-	int			index = 0;
+	int			column_arg;
 
 	node = strip_relabel(node);
 	if (node == NULL)
@@ -164,29 +210,35 @@ analyze_value(Node *node, Index relid, int *nvars)
 	}
 	function = call_of(node, &args, &opno, &inputcollid);
 	if (!usable(function, inputcollid, TESS_FUNCTION_VALUE) ||
-		list_length(args) < 1 || list_length(args) > MAX_ARGS)
+		!analyze_args(args, relid, nvars, &column_arg))
 		return false;
-	foreach_ptr(Node, arg, args)
-	{
-		int			arg_vars;
+	return *nvars == 0 ||
+		shape_fits(function, column_arg, list_length(args), opno, inputcollid);
+}
 
-		if (!analyze_value(arg, relid, &arg_vars))
-			return false;
-		if (arg_vars == 1)
-		{
-			if (vars == 1)
-				return false;
-			column_arg = index;
-		}
-		vars += arg_vars;
-		index++;
-	}
-	*nvars = vars;
-	if (vars == 1 && column_arg != 0 &&
-		(function->flags & TESS_FUNCTION_ANY_SHAPE) == 0)
-		return list_length(args) == 2 &&
-			commuted(opno, inputcollid, TESS_FUNCTION_VALUE) != NULL;
-	return true;
+/*
+ * Whether node is a supported filter: a boolean call of a registered
+ * predicate over one column value and one scalar, the column first or
+ * moved first through the commutator.
+ */
+static bool
+analyze_filter(Node *node, Index relid, int *column_arg)
+{
+	const TessFunction *function;
+	List	   *args;
+	Oid			opno;
+	Oid			inputcollid;
+	int			nvars;
+
+	node = strip_relabel(node);
+	if (node == NULL || exprType(node) != BOOLOID)
+		return false;
+	function = call_of(node, &args, &opno, &inputcollid);
+	if (!usable(function, inputcollid, TESS_FUNCTION_PREDICATE) ||
+		list_length(args) != 2 ||
+		!analyze_args(args, relid, &nvars, column_arg) || nvars != 1)
+		return false;
+	return shape_fits(function, *column_arg, 2, opno, inputcollid);
 }
 
 bool
@@ -197,20 +249,24 @@ tess_expr_supports_value(Node *node, Index relid)
 	return analyze_value(node, relid, &nvars);
 }
 
-/* Append the call of node, whose column argument was compiled already. */
-static void
-append_step(TessExpr *expr, Node *node, int column_arg, PlanState *parent)
+bool
+tess_expr_supports_filter(Node *node, Index relid)
 {
-	Step	   *step;
+	int			column_arg;
+
+	return analyze_filter(node, relid, &column_arg);
+}
+
+/* Set up the call of node, whose column argument was compiled already. */
+static void
+init_step(Step *step, Node *node, int column_arg, PlanState *parent)
+{
 	List	   *args;
 	Oid			opno;
 	Oid			inputcollid;
 	const TessFunction *function = call_of(node, &args, &opno, &inputcollid);
 	int			index = 0;
 
-	expr->steps = expr->steps == NULL ? palloc0_array(Step, 1) :
-		repalloc0_array(expr->steps, Step, expr->nsteps, expr->nsteps + 1);
-	step = &expr->steps[expr->nsteps++];
 	step->function = function;
 	step->inputcollid = inputcollid;
 	step->nargs = list_length(args);
@@ -235,6 +291,14 @@ append_step(TessExpr *expr, Node *node, int column_arg, PlanState *parent)
 }
 
 static void
+append_step(TessExpr *expr, Node *node, int column_arg, PlanState *parent)
+{
+	expr->steps = expr->steps == NULL ? palloc0_array(Step, 1) :
+		repalloc0_array(expr->steps, Step, expr->nsteps, expr->nsteps + 1);
+	init_step(&expr->steps[expr->nsteps++], node, column_arg, parent);
+}
+
+static void
 compile_value(TessExpr *expr, Node *node, PlanState *parent,
 			  TessExprResolveVar resolve, void *context)
 {
@@ -242,8 +306,7 @@ compile_value(TessExpr *expr, Node *node, PlanState *parent,
 	Oid			opno;
 	Oid			inputcollid;
 	int			nvars;
-	int			column_arg = -1;
-	int			index = 0;
+	int			column_arg;
 
 	node = strip_relabel(node);
 	if (IsA(node, Var))
@@ -261,34 +324,54 @@ compile_value(TessExpr *expr, Node *node, PlanState *parent,
 		return;
 	}
 	call_of(node, &args, &opno, &inputcollid);
-	foreach_ptr(Node, arg, args)
-	{
-		int			arg_vars;
-
-		(void) analyze_value(arg, 0, &arg_vars);
-		if (arg_vars == 1)
-			column_arg = index;
-		index++;
-	}
+	(void) analyze_args(args, 0, &nvars, &column_arg);
 	compile_value(expr, list_nth(args, column_arg), parent, resolve, context);
 	append_step(expr, node, column_arg, parent);
+}
+
+static TessExpr *
+new_expr(Node *node, TessExprResolveVar resolve)
+{
+	TessExpr   *expr;
+
+	if (node == NULL || resolve == NULL)
+		elog(ERROR, "Tessera expression requires a node and a column resolver");
+	expr = palloc0_object(TessExpr);
+	expr->context = CurrentMemoryContext;
+	expr->column = -1;
+	expr->status = (TessStatus) TESS_STRUCT_INITIALIZER(TessStatus);
+	return expr;
 }
 
 TessExpr *
 tess_expr_compile_value(Node *node, PlanState *parent,
 						TessExprResolveVar resolve, void *context)
 {
-	TessExpr   *expr;
+	TessExpr   *expr = new_expr(node, resolve);
 
-	if (node == NULL || resolve == NULL)
-		elog(ERROR, "Tessera expression requires a node and a column resolver");
 	if (!tess_expr_supports_value(node, 0))
 		elog(ERROR, "Tessera received an unsupported batch expression");
-	expr = palloc0_object(TessExpr);
-	expr->context = CurrentMemoryContext;
-	expr->column = -1;
-	expr->status = (TessStatus) TESS_STRUCT_INITIALIZER(TessStatus);
 	compile_value(expr, node, parent, resolve, context);
+	return expr;
+}
+
+TessExpr *
+tess_expr_compile_filter(Node *node, PlanState *parent,
+						 TessExprResolveVar resolve, void *context)
+{
+	TessExpr   *expr = new_expr(node, resolve);
+	List	   *args;
+	Oid			opno;
+	Oid			inputcollid;
+	int			column_arg;
+
+	if (!analyze_filter(node, 0, &column_arg))
+		elog(ERROR, "Tessera received an unsupported batch filter");
+	node = strip_relabel(node);
+	call_of(node, &args, &opno, &inputcollid);
+	compile_value(expr, list_nth(args, column_arg), parent, resolve, context);
+	init_step(&expr->predicate, node, column_arg, parent);
+	expr->filter = true;
 	return expr;
 }
 
@@ -385,6 +468,52 @@ finish_step(TessExpr *expr, int set, TessResultFormat format)
 	}
 }
 
+/* The call's arguments: the column and the scalars; true when one is NULL. */
+static bool
+build_args(TessExpr *expr, const Step *step, const TessDatumColumn *column,
+		   TessFunctionArg *args)
+{
+	bool		scalar_null = false;
+
+	for (int position = 0; position < step->nargs; position++)
+	{
+		args[position] = (TessFunctionArg)
+			TESS_STRUCT_INITIALIZER(TessFunctionArg);
+		if (position == step->column_arg)
+			args[position].column = column;
+		else
+		{
+			bool		isnull;
+
+			args[position].scalar =
+				ExecEvalExprSwitchContext(step->scalars[position],
+										  expr->econtext, &isnull);
+			scalar_null |= isnull;
+		}
+	}
+	return scalar_null;
+}
+
+/* Run one step over the selected rows; a failure is raised here. */
+static void
+call_step(TessExpr *expr, const Step *step, const TessFunctionArg *args,
+		  void *values, TessRowMask *non_nulls)
+{
+	TessFunctionCall call = TESS_STRUCT_INITIALIZER(TessFunctionCall);
+
+	call.function = step->function;
+	call.nargs = step->nargs;
+	call.args = args;
+	call.inputcollid = step->inputcollid;
+	call.rows = &expr->batch->rows;
+	call.values = values;
+	call.non_nulls = non_nulls;
+	call.context = expr->context;
+	call.status = &expr->status;
+	if (step->function->evaluate(&call) != TESS_OK)
+		report(expr);
+}
+
 const TessDatumColumn *
 tess_expr_get_column(TessExpr *expr)
 {
@@ -433,42 +562,16 @@ tess_expr_get_column(TessExpr *expr)
 		Step	   *step = &expr->steps[index];
 		int			set = index % 2;
 		TessFunctionArg args[MAX_ARGS];
-		TessFunctionCall call = TESS_STRUCT_INITIALIZER(TessFunctionCall);
 		TessRowMask non_nulls = {nrows, expr->bits[set]};
-		bool		scalar_null = false;
 
-		for (int position = 0; position < step->nargs; position++)
-		{
-			args[position] = (TessFunctionArg)
-				TESS_STRUCT_INITIALIZER(TessFunctionArg);
-			if (position == step->column_arg)
-				args[position].column = &current;
-			else
-			{
-				bool		isnull;
-
-				args[position].scalar =
-					ExecEvalExprSwitchContext(step->scalars[position],
-											  expr->econtext, &isnull);
-				scalar_null |= isnull;
-			}
-		}
-		if (scalar_null)
+		if (build_args(expr, step, &current, args))
 			fill_scalar(expr, set, (Datum) 0, true);
 		else
 		{
-			call.function = step->function;
-			call.nargs = step->nargs;
-			call.args = args;
-			call.inputcollid = step->inputcollid;
-			call.rows = &batch->rows;
-			call.values = step->function->result_format == TESS_RESULT_INT32 ?
-				(void *) expr->ints[set] : (void *) expr->values[set];
-			call.non_nulls = &non_nulls;
-			call.context = expr->context;
-			call.status = &expr->status;
-			if (step->function->evaluate(&call) != TESS_OK)
-				report(expr);
+			call_step(expr, step, args,
+					  step->function->result_format == TESS_RESULT_INT32 ?
+					  (void *) expr->ints[set] : (void *) expr->values[set],
+					  &non_nulls);
 			finish_step(expr, set, step->function->result_format);
 		}
 		current.values = expr->values[set];
@@ -488,4 +591,28 @@ tess_expr_non_nulls(TessExpr *expr)
 {
 	(void) tess_expr_get_column(expr);
 	return &expr->non_nulls;
+}
+
+void
+tess_expr_apply_filter(TessExpr *expr)
+{
+	const TessDatumColumn *column;
+	TessFunctionArg args[MAX_ARGS];
+
+	if (!expr->filter)
+		elog(ERROR, "Tessera expression is not a filter");
+	column = tess_expr_get_column(expr);
+	if (build_args(expr, &expr->predicate, column, args))
+	{
+		/* A NULL scalar makes the strict predicate false everywhere. */
+		TessRowMask *rows = &expr->batch->rows;
+		int			nwords = tess_row_mask_word_count(rows->nrows);
+
+		if (nwords > 0)
+			memset(rows->bits, 0, sizeof(uint64) * nwords);
+	}
+	else
+		call_step(expr, &expr->predicate, args, NULL, NULL);
+	/* The value was computed over the wider selection. */
+	expr->ready = false;
 }

@@ -2,8 +2,8 @@
 
 `libtessera_runtime.a` (`runtime/`) holds the helpers a batch node needs
 beyond the bridge's contract: building batches from rows, the node's output
-and input sides, the unary node helper over both, the named plan-data codec
-and the path and plan helpers. It is a static library, installed next to the bridge in
+and input sides, the unary node helper over both, the named plan-data codec,
+the path and plan helpers, and the batch expression compiler. It is a static library, installed next to the bridge in
 `pkglibdir` with its header `tessera/runtime.h`; a node module links it
 rather than calling through the bridge, so the bridge stays a small contract
 and the helpers can change with the nodes that use them:
@@ -391,3 +391,12 @@ parallel worker reads the plan back from its text form and finds the methods
 by name. The [planner test](../test/tessera_planner_test.c) is a complete
 forwarding node built this way, with a `set_rel_pathlist` hook that calls
 the previous hook, checks `tessera.enable` and wraps a sequential scan.
+
+## Batch expressions
+
+`tessera/expr.h` compiles a PostgreSQL expression over one batch column
+into a chain of calls of the functions the registry implements, and
+evaluates it over a batch's selected rows as a value column or as a filter
+that narrows the row mask in place. The [expression guide](expr.md)
+describes the language, what the planner checks and what a node does per
+batch.
