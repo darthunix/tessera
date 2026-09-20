@@ -1,0 +1,355 @@
+CREATE EXTENSION tessera;
+LOAD 'tessera_nodes';
+LOAD 'tessera_limit';
+CREATE TABLE filter_t (a int, b int, c text);
+INSERT INTO filter_t
+SELECT CASE WHEN i % 7 = 0 THEN NULL ELSE i END, i % 10, 'r' || i
+FROM generate_series(1, 200) AS i;
+-- The rows of a query with Tessera on, once they equal the rows with it off.
+CREATE FUNCTION filter_same(query text) RETURNS text
+LANGUAGE plpgsql AS $$
+DECLARE
+    with_tessera text[];
+    without_tessera text[];
+    wrapped text := format('SELECT array_agg(q::text ORDER BY q::text) FROM (%s) AS q', query);
+BEGIN
+    PERFORM set_config('tessera.enable', 'on', true);
+    EXECUTE wrapped INTO with_tessera;
+    PERFORM set_config('tessera.enable', 'off', true);
+    EXECUTE wrapped INTO without_tessera;
+    IF with_tessera IS DISTINCT FROM without_tessera THEN
+        RETURN format('MISMATCH on %s off %s', with_tessera, without_tessera);
+    END IF;
+    RETURN with_tessera::text;
+END
+$$;
+-- Without the kernels module the registry knows no predicate: no batch path.
+EXPLAIN (COSTS OFF) SELECT a FROM filter_t WHERE a > 100;
+      QUERY PLAN      
+----------------------
+ Seq Scan on filter_t
+   Filter: (a > 100)
+(2 rows)
+
+LOAD 'tessera_kernels';
+-- The clauses move from the scan to the node.
+EXPLAIN (COSTS OFF) SELECT a FROM filter_t WHERE a > 100 AND b < 5;
+               QUERY PLAN                
+-----------------------------------------
+ Custom Scan (TessFilter) on filter_t
+   Batch Filter: ((a > 100) AND (b < 5))
+   ->  Custom Scan (TessPack)
+         ->  Seq Scan on filter_t
+(4 rows)
+
+SELECT filter_same($$SELECT count(*), sum(a) FROM filter_t WHERE a > 100 AND b < 5$$);
+  filter_same  
+---------------
+ {"(44,6568)"}
+(1 row)
+
+-- Every comparison, a chain, the commutator, the unary minus.
+SELECT filter_same($$SELECT count(*) FROM filter_t WHERE a = 50$$);
+ filter_same 
+-------------
+ {(1)}
+(1 row)
+
+SELECT filter_same($$SELECT count(*) FROM filter_t WHERE a <> 50$$);
+ filter_same 
+-------------
+ {(171)}
+(1 row)
+
+SELECT filter_same($$SELECT count(*) FROM filter_t WHERE a < 3$$);
+ filter_same 
+-------------
+ {(2)}
+(1 row)
+
+SELECT filter_same($$SELECT count(*) FROM filter_t WHERE a <= 3$$);
+ filter_same 
+-------------
+ {(3)}
+(1 row)
+
+SELECT filter_same($$SELECT count(*) FROM filter_t WHERE a >= 198$$);
+ filter_same 
+-------------
+ {(3)}
+(1 row)
+
+SELECT filter_same($$SELECT count(*) FROM filter_t WHERE a > 198$$);
+ filter_same 
+-------------
+ {(2)}
+(1 row)
+
+SELECT filter_same($$SELECT count(*) FROM filter_t WHERE (a + 1) * 2 > 300$$);
+ filter_same 
+-------------
+ {(44)}
+(1 row)
+
+SELECT filter_same($$SELECT count(*) FROM filter_t WHERE 100 < a$$);
+ filter_same 
+-------------
+ {(86)}
+(1 row)
+
+SELECT filter_same($$SELECT a FROM filter_t WHERE -a > -10$$);
+            filter_same            
+-----------------------------------
+ {(1),(2),(3),(4),(5),(6),(8),(9)}
+(1 row)
+
+-- A column the clauses need but the query does not: the scan below adds it.
+EXPLAIN (VERBOSE, COSTS OFF) SELECT c FROM filter_t WHERE a > 195;
+                 QUERY PLAN                  
+---------------------------------------------
+ Custom Scan (TessFilter) on public.filter_t
+   Output: c
+   Batch Filter: (filter_t.a > 195)
+   ->  Custom Scan (TessPack)
+         Output: c, a
+         ->  Seq Scan on public.filter_t
+               Output: c, a
+(7 rows)
+
+SELECT c FROM filter_t WHERE a > 195 ORDER BY c;
+  c   
+------
+ r197
+ r198
+ r199
+ r200
+(4 rows)
+
+-- No column at all.
+SELECT filter_same($$SELECT count(*) FROM filter_t WHERE b > 5$$);
+ filter_same 
+-------------
+ {(80)}
+(1 row)
+
+-- A projection above the node, since the node computes none.
+EXPLAIN (COSTS OFF) SELECT a + 1 FROM filter_t WHERE a > 197;
+                 QUERY PLAN                 
+--------------------------------------------
+ Result
+   ->  Custom Scan (TessFilter) on filter_t
+         Batch Filter: (a > 197)
+         ->  Custom Scan (TessPack)
+               ->  Seq Scan on filter_t
+(5 rows)
+
+SELECT a + 1 FROM filter_t WHERE a > 197;
+ ?column? 
+----------
+      199
+      200
+      201
+(3 rows)
+
+-- More than one batch, batches left without rows, rows removed by count.
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+SELECT a FROM filter_t WHERE a > 100;
+                            QUERY PLAN                            
+------------------------------------------------------------------
+ Custom Scan (TessFilter) on filter_t (actual rows=86.00 loops=1)
+   Batch Filter: (a > 100)
+   ->  Custom Scan (TessPack) (actual rows=200.00 loops=1)
+         Batch Size: 64
+         Batches: 4
+         ->  Seq Scan on filter_t (actual rows=200.00 loops=1)
+(6 rows)
+
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+SELECT a FROM filter_t WHERE a > 1000;
+                           QUERY PLAN                            
+-----------------------------------------------------------------
+ Custom Scan (TessFilter) on filter_t (actual rows=0.00 loops=1)
+   Batch Filter: (a > 1000)
+   ->  Custom Scan (TessPack) (actual rows=200.00 loops=1)
+         Batch Size: 64
+         Batches: 4
+         ->  Seq Scan on filter_t (actual rows=200.00 loops=1)
+(6 rows)
+
+-- A parameter, also NULL, through a generic plan.
+SET plan_cache_mode = force_generic_plan;
+PREPARE above(int) AS SELECT count(*) FROM filter_t WHERE a > $1;
+EXPLAIN (COSTS OFF) EXECUTE above(150);
+                 QUERY PLAN                 
+--------------------------------------------
+ Aggregate
+   ->  Custom Scan (TessFilter) on filter_t
+         Batch Filter: (a > $1)
+         ->  Custom Scan (TessPack)
+               ->  Seq Scan on filter_t
+(5 rows)
+
+EXECUTE above(150);
+ count 
+-------
+    43
+(1 row)
+
+EXECUTE above(NULL);
+ count 
+-------
+     0
+(1 row)
+
+-- A pseudoconstant clause gates the scan: the node stays away.
+PREPARE gated(int) AS SELECT count(*) FROM filter_t WHERE a > 150 AND $1 > 0;
+EXPLAIN (COSTS OFF) EXECUTE gated(1);
+            QUERY PLAN             
+-----------------------------------
+ Aggregate
+   ->  Result
+         One-Time Filter: ($1 > 0)
+         ->  Seq Scan on filter_t
+               Filter: (a > 150)
+(5 rows)
+
+EXECUTE gated(1);
+ count 
+-------
+    43
+(1 row)
+
+DEALLOCATE above;
+DEALLOCATE gated;
+RESET plan_cache_mode;
+-- A rescan with a changed parameter: a correlated subquery.
+EXPLAIN (COSTS OFF)
+SELECT o.a, (SELECT count(*) FROM filter_t AS i WHERE i.a > o.a) AS above
+FROM filter_t AS o WHERE o.a > 197 ORDER BY o.a;
+                         QUERY PLAN                         
+------------------------------------------------------------
+ Sort
+   Sort Key: o.a
+   ->  Result
+         ->  Custom Scan (TessFilter) on filter_t o
+               Batch Filter: (o.a > 197)
+               ->  Custom Scan (TessPack)
+                     ->  Seq Scan on filter_t o
+         SubPlan expr_1
+           ->  Aggregate
+                 ->  Custom Scan (TessFilter) on filter_t i
+                       Batch Filter: (i.a > o.a)
+                       ->  Custom Scan (TessPack)
+                             ->  Seq Scan on filter_t i
+(13 rows)
+
+SELECT o.a, (SELECT count(*) FROM filter_t AS i WHERE i.a > o.a) AS above
+FROM filter_t AS o WHERE o.a > 197 ORDER BY o.a;
+  a  | above 
+-----+-------
+ 198 |     2
+ 199 |     1
+ 200 |     0
+(3 rows)
+
+-- A batch parent above: the limit node stops the input early.
+EXPLAIN (COSTS OFF) SELECT a FROM filter_t WHERE a > 100 LIMIT 3;
+                 QUERY PLAN                 
+--------------------------------------------
+ Custom Scan (TessLimit)
+   ->  Custom Scan (TessFilter) on filter_t
+         Batch Filter: (a > 100)
+         ->  Custom Scan (TessPack)
+               ->  Seq Scan on filter_t
+(5 rows)
+
+SELECT a FROM filter_t WHERE a > 100 LIMIT 3;
+  a  
+-----
+ 101
+ 102
+ 103
+(3 rows)
+
+-- Two filtered relations in a join.
+SELECT filter_same($$SELECT count(*) FROM filter_t AS x JOIN filter_t AS y ON x.a = y.b WHERE x.a > 5 AND y.b > 5$$);
+ filter_same 
+-------------
+ {(60)}
+(1 row)
+
+-- The clauses keep the planner's order: the guard comes first.
+SELECT filter_same($$SELECT count(*) FROM filter_t WHERE a <> 5 AND 10 / (a - 5) > 0$$);
+ filter_same 
+-------------
+ {(8)}
+(1 row)
+
+\set VERBOSITY terse
+SELECT count(*) FROM filter_t WHERE 10 / (a - 5) > 0;
+ERROR:  division by zero
+SET tessera.enable = off;
+SELECT count(*) FROM filter_t WHERE 10 / (a - 5) > 0;
+ERROR:  division by zero
+RESET tessera.enable;
+\set VERBOSITY default
+-- A parallel worker runs the node from the plan's text form.
+SET debug_parallel_query = on;
+EXPLAIN (COSTS OFF) SELECT count(*) FROM filter_t WHERE a > 100;
+                    QUERY PLAN                    
+--------------------------------------------------
+ Gather
+   Workers Planned: 1
+   Single Copy: true
+   ->  Aggregate
+         ->  Custom Scan (TessFilter) on filter_t
+               Batch Filter: (a > 100)
+               ->  Custom Scan (TessPack)
+                     ->  Seq Scan on filter_t
+(8 rows)
+
+SELECT count(*) FROM filter_t WHERE a > 100;
+ count 
+-------
+    86
+(1 row)
+
+RESET debug_parallel_query;
+-- A scrollable cursor: the planner adds Material above the node.
+BEGIN;
+DECLARE c SCROLL CURSOR FOR SELECT a FROM filter_t WHERE a > 195;
+FETCH 2 FROM c;
+  a  
+-----
+ 197
+ 198
+(2 rows)
+
+FETCH BACKWARD 1 FROM c;
+  a  
+-----
+ 197
+(1 row)
+
+COMMIT;
+-- Only a SELECT gets the node.
+EXPLAIN (COSTS OFF) UPDATE filter_t SET b = 0 WHERE a > 190;
+         QUERY PLAN         
+----------------------------
+ Update on filter_t
+   ->  Seq Scan on filter_t
+         Filter: (a > 190)
+(3 rows)
+
+SET tessera.enable = off;
+EXPLAIN (COSTS OFF) SELECT a FROM filter_t WHERE a > 100;
+      QUERY PLAN      
+----------------------
+ Seq Scan on filter_t
+   Filter: (a > 100)
+(2 rows)
+
+RESET tessera.enable;
+DROP FUNCTION filter_same(text);
+DROP TABLE filter_t;
+DROP EXTENSION tessera;
