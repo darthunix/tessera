@@ -40,19 +40,76 @@ after the bridge, and after the nodes module when ordinary children should
 be packed; without a pack node it adds no paths. The
 [node-writing guide](writing-a-node.md) walks through it.
 
+## TessHeapScan
+
+`TessHeapScan` reads a plain heap table in batches for a batch-aware
+parent, in place of the pack node over the core's sequential scan, which
+returned every row through `ExecProcNode` into a slot. The chain of the
+first queries is therefore `TessHeapScan → TessFilter → parent`.
+
+### Planning
+
+The node publishes `scan_rows`: a path over a sequential scan of a plain
+heap table (`RELKIND_RELATION`, the heap access method, no inheritance, no
+sampling) whose targets are its columns. `tess_batch_scan_path` builds it
+for a parent that evaluates the relation's clauses itself, as the filter
+does, and `tess_batch_input_path` prefers it to the pack node for a
+relation without clauses. A pseudoconstant clause keeps both helpers
+away: the planner would gate every scan of the relation with a `Result`
+between the parent and the node. The path copies the scan's costs and
+parallel safety (the node is not parallel-aware; a single-copy `Gather`
+runs it whole in one worker) and estimates every row of the relation,
+since the node evaluates no clause. `PlanCustomPath` builds an explicit
+layout with every attribute of the relation a batch column, dropped ones
+included, and each target mapped to its column; `scanrelid` names the
+relation, which the executor opens and closes.
+
+### Execution
+
+The scan is begun at the first execution, with the query's snapshot, once
+the parent's request is frozen; a request for rows is an error. Each
+batch comes from one page: the node lets the core's scan bring the next
+page in, prune it and decide which tuples are visible, with one
+`heap_getnextslot` call per page, and takes the page's visible tuples
+straight from the scan's list into a heap batch (`TessHeapBatch`,
+[runtime.md](runtime.md)), up to the batch size, resuming on the next call
+with the rest of the page; before moving on, it sets the scan's position
+past the page so that the core fetches another. The batch pins the page
+until it is released, so a column is deformed only when a consumer asks
+for it, for the rows it asks for, and by-reference values, external
+TOAST pointers included, are read from the page as a slot would give them.
+A scan the core does not run in page mode, which a non-MVCC snapshot
+would give, is read one tuple at a time through the same batch. Rescan
+clears the output and restarts the scan; a bound from a limit above stops
+the scan after as many rows. Backward scan and mark/restore are refused,
+as for every batch node.
+
+`EXPLAIN` shows `Batch Size` once executed and, with `ANALYZE`, the
+`Batches`, the `Pages` read, the `Deformed Datums` and the `Restarted
+Datums`; the row counts are corrected by the output helper.
+
+### Tests
+
+The filter and limit suites run through the scan; the filter suite adds a
+table with dead tuples and an aborted insert, a page with more visible
+tuples than a batch, values stored outside the page, a column missing
+from older tuples, and a clause the planner folds away.
+
 ## TessPack
 
 `TessPack` turns the rows of an ordinary child into batches. It is the
 boundary between PostgreSQL's row-wise plans and Tessera's batch nodes, so
 that a batch parent can stand above any core path without a patch to
-PostgreSQL; a scan that produces batches natively replaces it later.
+PostgreSQL. Above a plain heap table `TessHeapScan` takes its place; the
+pack remains for any other child: a sort, an aggregate, a scan the heap
+scan refuses.
 
 ### Planning
 
 A parent never creates the pack path directly. It asks
-`tess_batch_input_path` for a batch child over the path it has, and the
-helper calls the `wrap_rows` callback the pack node registers under
-`tessera.pack`. The pack path copies its child's planner properties: rows,
+`tess_batch_input_path` for a batch child over the path it has, and when
+no node reads the relation natively the helper calls the `wrap_rows`
+callback the pack node registers under `tessera.pack`. The pack path copies its child's planner properties: rows,
 costs, path keys and parallel safety. There is no cost model yet, so the
 path costs exactly what its child costs. The pack path exists only as a
 child of a batch parent; the module adds it to no path list.

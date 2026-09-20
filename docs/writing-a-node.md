@@ -62,8 +62,10 @@ path it replaces or stands above. `tess_path_create` copies rows, costs,
 path keys and parallel properties from the template, refuses a
 parameterized one, and records the node's name and data. A batch parent
 gets a batch child over any path from `tess_batch_input_path`: the path
-itself when it is a batch path, otherwise the pack node's path over it, or
-`NULL` when nothing can be done, in which case the hook adds no path:
+itself when it is a batch path, the heap scan node's path for a sequential
+scan of a plain heap table without clauses, otherwise the pack node's path
+over it, or `NULL` when nothing can be done, in which case the hook adds no
+path:
 
 ```c
 static CustomPath *

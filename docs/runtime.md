@@ -95,6 +95,11 @@ while (!tess_heap_batch_is_full(heap))
 batch = tess_heap_batch_finish(heap, InvalidOid);
 ```
 
+A scan that reads pages itself appends tuples by their headers with
+`tess_heap_batch_append_tuple`, pinning their page or copying a tuple given
+without one, and supplies the descriptor and the guaranteed prefix in the
+configuration instead of a first slot.
+
 Deformation resumes: every row keeps a `TessDeformCursor`
 (`tessera/heap_deform.h`), the attributes passed so far and the byte
 offset in the tuple data, and `tess_deform_advance` moves it to one target
@@ -348,10 +353,16 @@ copy path nodes, and neither does this library.
 
 A batch parent may stand above any core path: `tess_batch_input_path`
 returns a batch path over the path it is given, the path itself when it is
-one, and otherwise the pack node's path over it, through the `wrap_rows`
-callback the pack node registers under `TESS_PACK_NODE_NAME`. It returns
-`NULL` for a parameterized path or when no pack node is loaded, and the
-parent then adds no path:
+one, the heap scan node's path (through the `scan_rows` callback registered
+under `TESS_HEAP_SCAN_NODE_NAME`) when the path is a sequential scan of a
+plain heap table without clauses, and otherwise the pack node's path over
+it, through the `wrap_rows` callback registered under `TESS_PACK_NODE_NAME`.
+A parent that evaluates the relation's clauses itself, as the filter node
+does, asks `tess_batch_scan_path` for the native scan first. Both return
+`NULL` for a parameterized path, for a relation with a pseudoconstant clause
+(the planner gates every scan of it with a `Result` the parent could not
+read through), or when no node kind takes it, and the parent then adds no
+path:
 
 ```c
 Path *child = tess_batch_input_path(root, copy_of_seqscan);

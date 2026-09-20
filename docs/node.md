@@ -5,10 +5,11 @@ kinds of batch-producing nodes by stable name. A `TessNode` describes a kind
 of node, not the state of one query execution: its identity, and optional
 planning and execution callbacks as trailing fields. `wrap_rows` is
 published by the pack node so that a batch parent in any module can stand
-above any core path (see [runtime.md](runtime.md), "Building paths");
-`set_tuple_bound` lets a node kind take the bound a limit above passes
-down, as `ExecSetTupleBound` tells the core nodes, and forward it to its
-child.
+above any core path, and `scan_rows` by the heap scan node so that such a
+parent reads a plain heap table in batches without the pack (see
+[runtime.md](runtime.md), "Building paths"); `set_tuple_bound` lets a node
+kind take the bound a limit above passes down, as `ExecSetTupleBound`
+tells the core nodes, and forward it to its child.
 
 ## Finding the registry
 
