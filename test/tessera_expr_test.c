@@ -216,6 +216,12 @@ tessera_test_expr_values(PG_FUNCTION_ARGS)
 		row_is(column, non_nulls, 68, false, 210) &&
 		row_is(column, non_nulls, 64, true, 0) &&
 		tess_row_mask_count(non_nulls) == 56);
+	/* A shorter batch after a longer one: no stale bits past its rows. */
+	tess_expr_bind(expr, small, econtext, TESS_COLUMN_FOR_PROJECTION);
+	column = tess_expr_get_column(expr);
+	non_nulls = tess_expr_non_nulls(expr);
+	result &= check(111, column->nrows == 5 && row_is(column, non_nulls, 3, false, 15) &&
+		row_is(column, non_nulls, 4, true, 0) && tess_row_mask_count(non_nulls) == 4);
 
 	/* The column on the right: 100 - a; unary minus. */
 	expr = tess_expr_compile_value(op("-", int4(100), a()), NULL, resolve, NULL);

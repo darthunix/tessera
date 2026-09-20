@@ -501,6 +501,10 @@ call_step(TessExpr *expr, const Step *step, const TessFunctionArg *args,
 {
 	TessFunctionCall call = TESS_STRUCT_INITIALIZER(TessFunctionCall);
 
+	/* A shorter batch than the last leaves stale bits past its rows. */
+	if (non_nulls != NULL)
+		memset(non_nulls->bits, 0,
+			   sizeof(uint64) * tess_row_mask_word_count(non_nulls->nrows));
 	call.function = step->function;
 	call.nargs = step->nargs;
 	call.args = args;
