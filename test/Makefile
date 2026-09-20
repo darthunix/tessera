@@ -1,11 +1,12 @@
 MODULES = tessera_batch_test tessera_binding_test tessera_bridge_test \
-	tessera_builder_test tessera_consumer_test tessera_function_test \
+	tessera_builder_test tessera_consumer_test tessera_expr_test \
+	tessera_function_test \
 	tessera_input_test tessera_kernels_test tessera_kernels_module_test \
 	tessera_node_test tessera_output_test tessera_pack_test \
 	tessera_plan_test tessera_planner_test tessera_producer_test \
 	tessera_request_test tessera_row_mask_test tessera_source_test \
 	tessera_transfer_test tessera_unary_test
-REGRESS = batch binding bridge builder function input kernels \
+REGRESS = batch binding bridge builder expr function input kernels \
 	kernels_module limit modules node output pack plan planner request \
 	row_mask source transfer unary
 REGRESS_OPTS = --dlpath=$(CURDIR)
@@ -43,4 +44,6 @@ tessera_planner_test$(DLSUFFIX): tessera_planner_test.o $(RUNTIME_LIB)
 tessera_pack_test$(DLSUFFIX): tessera_pack_test.o $(RUNTIME_LIB)
 	$(CC) $(CFLAGS) $< $(RUNTIME_LIB) $(LDFLAGS) $(LDFLAGS_SL) -bundle $(BE_DLLLIBS) -o $@
 tessera_unary_test$(DLSUFFIX): tessera_unary_test.o $(RUNTIME_LIB)
+	$(CC) $(CFLAGS) $< $(RUNTIME_LIB) $(LDFLAGS) $(LDFLAGS_SL) -bundle $(BE_DLLLIBS) -o $@
+tessera_expr_test$(DLSUFFIX): tessera_expr_test.o $(RUNTIME_LIB)
 	$(CC) $(CFLAGS) $< $(RUNTIME_LIB) $(LDFLAGS) $(LDFLAGS_SL) -bundle $(BE_DLLLIBS) -o $@

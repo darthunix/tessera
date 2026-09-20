@@ -9,6 +9,7 @@ HEADERS = \
 	../include/tessera/batch.h \
 	../include/tessera/binding.h \
 	../include/tessera/bridge.h \
+	../include/tessera/expr.h \
 	../include/tessera/function.h \
 	../include/tessera/kernels.h \
 	../include/tessera/layout.h \
