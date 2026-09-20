@@ -12,8 +12,11 @@ query down, and where it can, does it speed one up.
   above a scan, a count without a filter, a sorted limit. The ratio of
   Tessera on to off measures the cost of the batch boundary itself; it
   should stay close to one.
-- **win**: filters and aggregates over large tables, where a ratio below
-  one is expected once a native batch scan exists. Arrives with that scan.
+- **win** (`win.sql`): filters over large tables with a count above them,
+  through `TessFilter` above a pack node; aggregates join it with the
+  aggregate node. A ratio below one is expected once a native batch scan
+  exists; until then the pack node deforms rows one at a time and the
+  family records the cost that scan has to beat, not a failure.
 - **oltp**: short prepared-statement queries, `pgbench -S`, where the
   planner hooks and the loaded modules must not slow down queries that
   never use a batch node. Arrives when more than one hook is installed.
@@ -46,8 +49,8 @@ bench/pg/run.sh stop           # stop and delete the cluster
 ```
 
 `PG_CONFIG` selects the PostgreSQL build; `PGPORT` the port. The cluster's
-`postgresql.conf` preloads `tessera, tessera_nodes, tessera_limit` in every
-session and sets `shared_buffers = 2GB`.
+`postgresql.conf` preloads `tessera, tessera_nodes, tessera_kernels,
+tessera_limit` in every session and sets `shared_buffers = 2GB`.
 
 ## Results
 

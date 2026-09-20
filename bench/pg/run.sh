@@ -19,7 +19,7 @@ setup)
     rm -rf "$DATA"
     "$BIN/initdb" -D "$DATA" -A trust > "$RUNS/initdb.log" 2>&1
     cat >> "$DATA/postgresql.conf" <<CONF
-session_preload_libraries = 'tessera, tessera_nodes, tessera_limit'
+session_preload_libraries = 'tessera, tessera_nodes, tessera_kernels, tessera_limit'
 shared_buffers = 2GB
 jit = off
 max_parallel_workers_per_gather = 0
@@ -42,7 +42,8 @@ measure)
         echo "status:"; git -C "$ROOT" status --short
         echo "sha256:"
         shasum -a 256 "$LIB/tessera.dylib" "$LIB/tessera_nodes.dylib" \
-            "$LIB/tessera_limit.dylib" "$LIB/libtessera_runtime.a" "$BIN/postgres"
+            "$LIB/tessera_kernels.dylib" "$LIB/tessera_limit.dylib" \
+            "$LIB/libtessera_runtime.a" "$BIN/postgres"
     } > "$OUT/source.txt"
     { pmset -g batt 2>/dev/null | head -2; date; } > "$OUT/power.txt"
     (cd "$OUT" && "$BIN/psql" -X -f "$HERE/$FAMILY.sql" > run.log 2>&1)
