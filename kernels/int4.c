@@ -24,6 +24,7 @@ typedef struct Int4Function
 
 static TessStatusCode compare_evaluate(TessFunctionCall *call);
 static TessStatusCode arith_evaluate(TessFunctionCall *call);
+static TessStatusCode negate_evaluate(TessFunctionCall *call);
 
 #define INT4_COMPARE(oid, code) \
 	{{TESS_ABI_INITIALIZER(TESS_FUNCTION_ABI_VERSION, TessFunction), \
@@ -40,6 +41,14 @@ static TessStatusCode arith_evaluate(TessFunctionCall *call);
 	  TESS_FUNCTION_ANY_SHAPE, \
 	  .evaluate = arith_evaluate}, (code)}
 
+/* Unary minus: the one argument is the column. */
+#define INT4_NEGATE(oid) \
+	{{TESS_ABI_INITIALIZER(TESS_FUNCTION_ABI_VERSION, TessFunction), \
+	  .funcid = (oid), .kind = TESS_FUNCTION_VALUE, \
+	  .result_format = TESS_RESULT_INT32, \
+	  .flags = TESS_FUNCTION_STRICT | TESS_FUNCTION_COLLATION_INSENSITIVE, \
+	  .evaluate = negate_evaluate}, TESS_ARITH_SUB}
+
 static const Int4Function int4_functions[] = {
 	INT4_COMPARE(F_INT4EQ, TESS_CMP_EQ),
 	INT4_COMPARE(F_INT4NE, TESS_CMP_NE),
@@ -52,6 +61,7 @@ static const Int4Function int4_functions[] = {
 	INT4_ARITH(F_INT4MUL, TESS_ARITH_MUL),
 	INT4_ARITH(F_INT4DIV, TESS_ARITH_DIV),
 	INT4_ARITH(F_INT4MOD, TESS_ARITH_MOD),
+	INT4_NEGATE(F_INT4UM),
 };
 
 /* The operation of the description a call names. */
@@ -129,6 +139,22 @@ arith_evaluate(TessFunctionCall *call)
 										   call->rows, (int32 *) call->values,
 										   call->non_nulls, call->status);
 	return invalid(call, "int4 arithmetic needs a column argument");
+}
+
+/* -x is 0 - x, including the overflow of the smallest value. */
+static TessStatusCode
+negate_evaluate(TessFunctionCall *call)
+{
+	if (call == NULL || call->struct_size < TESS_FUNCTION_CALL_MIN_SIZE ||
+		call->nargs != 1 || call->args == NULL ||
+		call->args[0].struct_size < TESS_FUNCTION_ARG_MIN_SIZE)
+		return invalid(call, "int4 negation takes one argument");
+	if (call->args[0].column == NULL)
+		return invalid(call, "int4 negation takes a column");
+	return tess_int4_arith_scalar_left(TESS_ARITH_SUB, 0, call->args[0].column,
+									   call->args[0].prepared, call->rows,
+									   (int32 *) call->values, call->non_nulls,
+									   call->status);
 }
 
 void
