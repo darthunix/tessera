@@ -69,6 +69,48 @@ append after finishing or into a full builder, a slot with fewer
 attributes than columns, and a column request out of range or with an
 undersized result structure.
 
+## Keeping heap tuples
+
+`TessHeapBatch` is the provider for a child that returns buffer heap tuple
+slots, as a sequential scan without projection does. Instead of copying
+columns it keeps each row as a tuple header pointing into its page, pins
+the page once per batch with `IncrBufferRefCount` until the batch is
+released, and deforms a column only when a consumer asks for it through
+`get_datum_column`, for the rows the mask names that were not deformed
+before; a row from any other slot is copied as a tuple into a per-batch
+context. The batch therefore exposes `release`, which drops the pins, and
+by-reference values point into the tuples until then:
+
+```c
+TessHeapBatchConfig config = TESS_STRUCT_INITIALIZER(TessHeapBatchConfig);
+
+config.parent_context = estate->es_query_cxt;
+config.ncolumns = ncolumns;
+config.capacity = 64;
+heap = tess_heap_batch_create(&config);
+...
+tess_heap_batch_reset(heap);
+while (!tess_heap_batch_is_full(heap))
+    tess_heap_batch_append_slot(heap, ExecProcNode(child));   /* not NULL */
+batch = tess_heap_batch_finish(heap, InvalidOid);
+```
+
+Deformation resumes: every row keeps a `TessDeformCursor`
+(`tessera/heap_deform.h`), the attributes passed so far and the byte
+offset in the tuple data, and `tess_deform_advance` moves it to one target
+attribute without materializing the ones in between, through cached
+offsets while they hold and by walking past the first variable-length or
+NULL attribute; a column before a row's cursor is deformed from the row's
+start with a local cursor and counted as restarted. The cursor is the
+deformation of PostgreSQL's own slots reduced to one target and made
+resumable, ported from pg_batch; it relies only on public inline helpers,
+so PostgreSQL is not patched. A tuple shorter than the descriptor yields
+the missing value, as a slot does. `tess_heap_batch_stats` gives the
+deformed and restarted values and the copied rows for `EXPLAIN`. The
+guaranteed prefix (`tts_first_nonguaranteed` of the first slot) and the
+descriptor are taken from the slots appended, so a node needs no
+descriptor of its own.
+
 ## Publishing batches and serving rows
 
 `TessOutput` is the output side of a node: a virtual slot bound to the
@@ -97,12 +139,15 @@ if (batch == NULL)
 return tess_output_publish(output, batch);
 ```
 
-`publish` shows the batch's first selected row in the slot, so the slot is
-never empty for a parent; a batch with no selected rows cannot be published,
-the node skips it. A batch-aware parent finds the binding through the slot
-and reads the batch; it marks the batch consumed when done, and the node's
-next `release` or `publish` returns the storage, refusing while the batch
-is unconsumed. A row-wise parent sees one row per call: the node walks the
+`publish` leaves the slot non-empty, so a parent never sees the end of the
+input by mistake: in row mode it shows the batch's first selected row, in
+batch mode an all-NULL row, since a batch-aware parent reads the batch
+through the binding and never looks at the slot's values, which would cost
+a lazy provider the whole first row of every batch. A batch with no
+selected rows cannot be published, the node skips it. A batch-aware parent
+finds the binding through the slot and reads the batch; it marks the batch
+consumed when done, and the node's next `release` or `publish` returns the
+storage, refusing while the batch is unconsumed. A row-wise parent sees one row per call: the node walks the
 selection with `tess_row_mask_next`, shows each row with
 `tess_output_select`, and marks the batch consumed itself with
 `tess_output_finish` before fetching the next.

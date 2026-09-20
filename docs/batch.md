@@ -30,7 +30,9 @@ values returned.
 
 The returned arrays, including pass-by-reference Datum values, remain valid
 until the batch is released. Views of several columns may be used together.
-The provider must not retain the callback's `rows` or `result` pointers.
+The provider must not retain the callback's `rows` or `result` pointers. A
+provider may keep by-reference values in buffer pages it has pinned and
+drop the pins in its `release` callback, as the runtime's heap batch does.
 
 ## Ownership
 

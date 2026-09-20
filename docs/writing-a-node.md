@@ -188,12 +188,14 @@ while the scan below reads the clauses' columns too. See
 
 A node that builds a new physical batch, changes the column layout or has
 several children uses the output and input helpers directly: the builder
-turns rows into an owned column-major batch, the output publishes batches
+turns rows into an owned column-major batch, the heap batch keeps a scan's
+buffer tuples and deforms columns on request, the output publishes batches
 and serves rows to an ordinary parent, and one input per batch child sends
 the request and fetches. The pack node (`nodes/pack.c`) is the model: it
-binds its result slot in `BeginCustomScan`, creates the builder at the
-first execution once the parent's request is frozen, and publishes each
-batch through the output helper, which corrects the instrumentation.
+binds its result slot in `BeginCustomScan`, creates the provider at the
+first execution once the parent's request is frozen and the child's first
+slot is known, and publishes each batch through the output helper, which
+corrects the instrumentation.
 
 ## Testing and measuring
 

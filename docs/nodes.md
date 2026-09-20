@@ -57,39 +57,60 @@ costs, path keys and parallel safety. There is no cost model yet, so the
 path costs exactly what its child costs. The pack path exists only as a
 child of a batch parent; the module adds it to no path list.
 
-`PlanCustomPath` builds the scan with the dense layout, the child's target
-list as the scan target list and no qualifier of its own: the child was
-planned with its exact target list, so child attribute N is target N, and
-the relation's clauses are already evaluated by the child. A pack path is
-never parameterized, since the path helper refuses such a template.
+When the child is a sequential scan of a plain table whose targets are all
+columns of it, `wrap_rows` plans the scan with the relation's physical
+target list (`build_physical_tlist`): the executor then finds nothing to
+project and the scan returns its buffer tuple slot. The pack's own target
+list stays the one its parent gave it, so a parent that preserves the
+pack's layout keeps working, and `PlanCustomPath` builds an explicit layout
+with every relation column as a batch column and each target mapped to its
+column. A table with dropped or missing columns, whose scan must project,
+or any other child keeps its own target list, and the plan uses the dense
+layout: the child was planned with its exact target list, so child
+attribute N is target N. In both cases the pack has no qualifier of its
+own: the relation's clauses are evaluated by the child, or taken over by a
+filter above. A pack path is never parameterized, since the path helper
+refuses such a template.
 
 ### Execution
 
 `BeginCustomScan` reads the plan, initializes the child and binds the
-result slot through the output helper. The builder is created at the first
-execution, once the parent's request is frozen: PostgreSQL initializes the
-plan top-down, so the parent sends its request only after the pack node's
-`BeginCustomScan` has bound the slot. The batch size is the request's
-`max_batch_rows` capped at 64 rows, or 64 when the request leaves it open.
-A request for rows is an error: the pack node serves batch-aware parents
-only, and a row-wise parent never plans one.
+result slot through the output helper. The batch provider is created at
+the first execution, once the parent's request is frozen and the child's
+first slot is known: PostgreSQL initializes the plan top-down, so the
+parent sends its request only after the pack node's `BeginCustomScan` has
+bound the slot. A buffer tuple slot gets a heap batch (`TessHeapBatch`,
+[runtime.md](runtime.md)): the rows are kept as tuple headers pointing
+into their pages, which stay pinned until the batch is released, and a
+column is deformed only when a consumer asks for it, for the rows it asks
+for, resuming each row from where an earlier request stopped. So a
+filter's batch clause deforms its column for every row, its residual and
+the columns a parent reads only for the rows that survived, and nothing
+is copied. Any other slot gets the builder, which copies every column of
+every row. The batch size is the request's `max_batch_rows` capped at 64
+rows, or 64 when the request leaves it open. A request for rows is an
+error: the pack node serves batch-aware parents only, and a row-wise
+parent never plans one.
 
-Each execution first returns the previous batch to the builder, which is an
-error while the parent has not finished it, then fills up to the batch size
-from the child and publishes the batch; once the child is exhausted, it
-publishes the remaining rows and afterwards returns nothing. Every column
-is materialized: the request's column masks are not used until lazy
-projection arrives. Rescan clears the output, rescans the child and starts
-a fresh batch. The node is parallel-safe whenever its child is and keeps no
-shared state. When the parent bounds the rows it needs, through the node
-kind's `set_tuple_bound` callback, the pack node forwards the bound to its
-child and pulls no more rows than that, so a sort below stays a top-N sort
-and the last batch may be short.
+Each execution first returns the previous batch to its provider, which is
+an error while the parent has not finished it, then fills up to the batch
+size from the child and publishes the batch; once the child is exhausted,
+it publishes the remaining rows and afterwards returns nothing. The
+request's column masks are still not read: laziness comes from the
+consumers' own column requests. Rescan clears the output, rescans the
+child and starts a fresh batch. The node is parallel-safe whenever its
+child is and keeps no shared state. When the parent bounds the rows it
+needs, through the node kind's `set_tuple_bound` callback, the pack node
+forwards the bound to its child and pulls no more rows than that, so a
+sort below stays a top-N sort and the last batch may be short.
 
-`EXPLAIN` shows `Batch Size` once the node has executed, since the size
-follows the parent's request, and with `ANALYZE` the number of `Batches`;
-the row counts are corrected by the output helper, so the node reports the
-rows it packed.
+`EXPLAIN` shows `Batch Size` and `Rows Kept As` (`heap tuples` or
+`copies`) once the node has executed, since both follow the parent's
+request and the child's slot, and with `ANALYZE` the number of `Batches`
+and, for kept tuples, the `Deformed Datums`, the `Restarted Datums`
+(values before a row's cursor, deformed from the row's start) and any
+`Copied Tuples` from slots without a page; the row counts are corrected by
+the output helper, so the node reports the rows it packed.
 
 ### Tests
 

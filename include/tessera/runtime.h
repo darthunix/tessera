@@ -140,12 +140,13 @@ extern const TessHeapBatchStats *tess_heap_batch_stats(const TessHeapBatch *batc
 /*
  * The output side of a node: a virtual slot bound to the bridge through
  * which batches are published to a batch-aware parent and rows are served
- * to an ordinary one. Publishing shows the batch's first selected row in
- * the slot, so the slot is never empty for a parent; a batch-aware parent
- * finds the binding through the slot and reads the batch, a row-wise one
- * gets further rows with tess_output_select. In batch mode publishing
- * adds the batch's other rows to the node's instrumentation, since one
- * ExecProcNode call returns them all. See docs/runtime.md.
+ * to an ordinary one. Publishing leaves the slot non-empty: in row mode it
+ * shows the batch's first selected row, in batch mode an all-NULL row, as
+ * a batch-aware parent finds the binding through the slot and reads the
+ * batch there; a row-wise one gets further rows with tess_output_select.
+ * In batch mode publishing adds the batch's other rows to the node's
+ * instrumentation, since one ExecProcNode call returns them all. See
+ * docs/runtime.md.
  */
 typedef struct TessOutput TessOutput;
 
@@ -171,8 +172,9 @@ extern const TessRequest *tess_output_request(TessOutput *output);
 extern void tess_output_release(TessOutput *output);
 
 /*
- * Publish a batch with at least one selected row and return the slot
- * showing its first selected row. Releases the previous batch first.
+ * Publish a batch with at least one selected row and return the slot,
+ * non-empty: showing the first selected row in row mode, all NULL in
+ * batch mode. Releases the previous batch first.
  */
 extern TupleTableSlot *tess_output_publish(TessOutput *output, TessBatch *batch);
 
