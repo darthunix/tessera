@@ -10,6 +10,11 @@ all: $(SUBDIRS)
 $(SUBDIRS):
 	$(MAKE) -C $@ PG_CONFIG="$(PG_CONFIG)"
 
+# Modules link the runtime archive and the tests link it and the Rust
+# library, so a parallel make must build those first.
+nodes: runtime
+test: runtime kernels nodes
+
 clean:
 	@for dir in $(SUBDIRS); do \
 		$(MAKE) -C $$dir PG_CONFIG="$(PG_CONFIG)" clean || exit; \
