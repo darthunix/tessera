@@ -85,6 +85,25 @@ FROM filter_t AS o WHERE o.a > 197 ORDER BY o.a;
 EXPLAIN (COSTS OFF) SELECT a FROM filter_t WHERE a > 100 LIMIT 3;
 SELECT a FROM filter_t WHERE a > 100 LIMIT 3;
 
+-- Clauses from the first unsupported one on stay row-wise, in the
+-- planner's order, over the rows the batch clauses kept.
+EXPLAIN (COSTS OFF) SELECT a FROM filter_t WHERE a > 100 AND c = 'r150';
+SELECT filter_same($$SELECT a FROM filter_t WHERE a > 100 AND c = 'r150'$$);
+-- The planner orders the text comparison after the cheaper int4 one.
+EXPLAIN (COSTS OFF) SELECT a FROM filter_t WHERE c = 'r150' AND a > 100;
+-- A null test costs nothing and comes first: the node is not offered.
+EXPLAIN (COSTS OFF) SELECT a FROM filter_t WHERE a > 100 AND c IS NOT NULL;
+-- An expensive clause moves behind a cheap batch one.
+CREATE FUNCTION filter_slow(x int) RETURNS boolean
+LANGUAGE plpgsql COST 1000 AS $$ BEGIN RETURN x % 2 = 0; END $$;
+EXPLAIN (COSTS OFF) SELECT a FROM filter_t WHERE filter_slow(a) AND a > 190;
+SELECT filter_same($$SELECT a FROM filter_t WHERE filter_slow(a) AND a > 190$$);
+DROP FUNCTION filter_slow(int);
+-- Rows removed by each part, and a column only the row-wise clause reads.
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+SELECT a FROM filter_t WHERE a > 100 AND c <> 'r150';
+SELECT filter_same($$SELECT count(*) FROM filter_t WHERE a > 100 AND c <> 'r150'$$);
+
 -- Two filtered relations in a join.
 SELECT filter_same($$SELECT count(*) FROM filter_t AS x JOIN filter_t AS y ON x.a = y.b WHERE x.a > 5 AND y.b > 5$$);
 

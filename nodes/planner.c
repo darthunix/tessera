@@ -16,8 +16,9 @@
 /*
  * The planner side of TessFilter: a path over a base relation whose
  * clauses the node takes away from the sequential scan below the pack
- * node, so that the scan produces every row and the node filters them by
- * batches. See docs/nodes.md.
+ * node, so that the scan produces every row and the node filters them:
+ * the leading clauses the expression compiler supports by batches, the
+ * rest row by row, in the planner's order. See docs/nodes.md.
  */
 
 /* The path costs a fraction of the scan's: there is no cost model yet. */
@@ -51,22 +52,48 @@ relation_supported(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte)
 }
 
 /*
- * Whether the node can take every clause of the relation. A pseudoconstant
- * clause makes the planner wrap each scan of the relation in a gating
- * Result, which the plan would then find in place of its children.
+ * The clause the planner evaluates first: order_qual_clauses sorts by
+ * cost within security levels, a cheap leakproof clause counting as level
+ * zero, and keeps the order of equals. NULL with a pseudoconstant clause:
+ * it makes the planner wrap each scan of the relation in a gating Result,
+ * which the plan would then find in place of its children.
  */
-static bool
-clauses_supported(RelOptInfo *rel)
+static RestrictInfo *
+first_clause(PlannerInfo *root, RelOptInfo *rel)
 {
-	if (rel->baserestrictinfo == NIL)
-		return false;
+	RestrictInfo *first = NULL;
+	Cost		first_cost = 0;
+	Index		first_level = 0;
+
 	foreach_ptr(RestrictInfo, rinfo, rel->baserestrictinfo)
 	{
-		if (rinfo->pseudoconstant ||
-			!tess_expr_supports_filter((Node *) rinfo->clause, rel->relid))
-			return false;
+		QualCost	cost;
+		Index		level;
+
+		if (rinfo->pseudoconstant)
+			return NULL;
+		cost_qual_eval_node(&cost, (Node *) rinfo, root);
+		level = rinfo->leakproof && cost.per_tuple < 10 * cpu_operator_cost ?
+			0 : rinfo->security_level;
+		if (first == NULL || level < first_level ||
+			(level == first_level && cost.per_tuple < first_cost))
+		{
+			first = rinfo;
+			first_level = level;
+			first_cost = cost.per_tuple;
+		}
 	}
-	return true;
+	return first;
+}
+
+/* Whether the node has batch work: the first clause is a batch filter. */
+static bool
+clauses_supported(PlannerInfo *root, RelOptInfo *rel)
+{
+	RestrictInfo *first = first_clause(root, rel);
+
+	return first != NULL &&
+		tess_expr_supports_filter((Node *) first->clause, rel->relid);
 }
 
 /*
@@ -101,7 +128,7 @@ set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
 	if (previous_set_rel_pathlist_hook != NULL)
 		previous_set_rel_pathlist_hook(root, rel, rti, rte);
 	if (!*tess_runtime_api()->settings->enable ||
-		!relation_supported(root, rel, rte) || !clauses_supported(rel))
+		!relation_supported(root, rel, rte) || !clauses_supported(root, rel))
 		return;
 	foreach_ptr(Path, path, rel->pathlist)
 	{
@@ -173,16 +200,29 @@ filter_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 	TessPlanChild child = TESS_STRUCT_INITIALIZER(TessPlanChild);
 	TessLayout	layout = TESS_STRUCT_INITIALIZER(TessLayout);
 	List	   *actual = extract_actual_clauses(clauses, false);
+	List	   *prefix = NIL;
+	List	   *residual = NIL;
 
 	if (!tess_plan_child(best_path, custom_plans, 0, &child) ||
 		!IsA(child.plan, CustomScan))
 		elog(ERROR, "TessFilter expected a batch child");
 	take_clauses((CustomScan *) child.plan, actual);
+	/* The clauses arrive in evaluation order; the first unsupported one ends the batch prefix. */
+	foreach_ptr(Node, clause, actual)
+	{
+		if (residual == NIL && tess_expr_supports_filter(clause, rel->relid))
+			prefix = lappend(prefix, clause);
+		else
+			residual = lappend(residual, clause);
+	}
+	if (prefix == NIL)
+		elog(ERROR, "TessFilter found no batch clause first in the planner's order");
 	map_targets(&layout, tlist, &child);
 	config.methods = &tess_filter_scan_methods;
 	config.layout_policy = TESS_LAYOUT_EXPLICIT;
 	config.explicit_layout = &layout;
-	config.expressions = actual;
+	config.qual = residual;
+	config.expressions = prefix;
 	config.scan_targetlist = child.plan->targetlist;
 	config.scanrelid = rel->relid;
 	return tess_plan_create(best_path, tlist, custom_plans, &config);
