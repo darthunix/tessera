@@ -126,6 +126,34 @@ SELECT count(*) FROM filter_temp WHERE a > 90 AND c <> 'r95';
 SELECT filter_same($$SELECT c FROM filter_temp WHERE a > 90 AND c <> 'r95'$$);
 DROP TABLE filter_temp;
 
+-- The scan reads pages itself: a page with more visible tuples than a batch
+-- gives several batches, and dead tuples never reach a batch.
+CREATE TABLE filter_dead AS SELECT i AS a FROM generate_series(1, 300) AS i;
+DELETE FROM filter_dead WHERE a % 3 = 0;
+BEGIN;
+SAVEPOINT aborted;
+INSERT INTO filter_dead SELECT i FROM generate_series(1000, 1099) AS i;
+ROLLBACK TO aborted;
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+SELECT count(*) FROM filter_dead WHERE a > 0;
+SELECT filter_same($$SELECT count(*), sum(a) FROM filter_dead WHERE a > 150$$);
+COMMIT;
+DROP TABLE filter_dead;
+-- Values stored outside the page reach the residual and the parent.
+CREATE TABLE filter_toast (a int, t text);
+ALTER TABLE filter_toast ALTER COLUMN t SET STORAGE EXTERNAL;
+INSERT INTO filter_toast SELECT i, repeat(chr(96 + i), 5000) FROM generate_series(1, 20) AS i;
+SELECT filter_same($$SELECT a, length(t), left(t, 1) FROM filter_toast WHERE a > 15 AND t <> 'x'$$);
+DROP TABLE filter_toast;
+-- A column added with a default is missing from older tuples.
+CREATE TABLE filter_missing AS SELECT i AS a FROM generate_series(1, 100) AS i;
+ALTER TABLE filter_missing ADD COLUMN m int DEFAULT 5;
+INSERT INTO filter_missing VALUES (101, 7);
+SELECT filter_same($$SELECT sum(m), count(*) FROM filter_missing WHERE a > 90 AND m > 0$$);
+DROP TABLE filter_missing;
+-- A clause the planner folds away leaves no scan at all.
+EXPLAIN (COSTS OFF) SELECT count(*) FROM filter_t WHERE a > 100 AND false;
+
 -- Two filtered relations in a join.
 SELECT filter_same($$SELECT count(*) FROM filter_t AS x JOIN filter_t AS y ON x.a = y.b WHERE x.a > 5 AND y.b > 5$$);
 

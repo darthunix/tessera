@@ -34,13 +34,12 @@ EXPLAIN (COSTS OFF) SELECT a FROM filter_t WHERE a > 100;
 LOAD 'tessera_kernels';
 -- The clauses move from the scan to the node.
 EXPLAIN (COSTS OFF) SELECT a FROM filter_t WHERE a > 100 AND b < 5;
-               QUERY PLAN                
------------------------------------------
+                  QUERY PLAN                  
+----------------------------------------------
  Custom Scan (TessFilter) on filter_t
    Batch Filter: ((a > 100) AND (b < 5))
-   ->  Custom Scan (TessPack)
-         ->  Seq Scan on filter_t
-(4 rows)
+   ->  Custom Scan (TessHeapScan) on filter_t
+(3 rows)
 
 SELECT filter_same($$SELECT count(*), sum(a) FROM filter_t WHERE a > 100 AND b < 5$$);
   filter_same  
@@ -105,16 +104,14 @@ SELECT filter_same($$SELECT a FROM filter_t WHERE -a > -10$$);
 
 -- A column the clauses need but the query does not: the scan below adds it.
 EXPLAIN (VERBOSE, COSTS OFF) SELECT c FROM filter_t WHERE a > 195;
-                 QUERY PLAN                  
----------------------------------------------
+                     QUERY PLAN                      
+-----------------------------------------------------
  Custom Scan (TessFilter) on public.filter_t
    Output: c
    Batch Filter: (filter_t.a > 195)
-   ->  Custom Scan (TessPack)
+   ->  Custom Scan (TessHeapScan) on public.filter_t
          Output: c, a
-         ->  Seq Scan on public.filter_t
-               Output: a, b, c
-(7 rows)
+(5 rows)
 
 SELECT c FROM filter_t WHERE a > 195 ORDER BY c;
   c   
@@ -134,14 +131,13 @@ SELECT filter_same($$SELECT count(*) FROM filter_t WHERE b > 5$$);
 
 -- A projection above the node, since the node computes none.
 EXPLAIN (COSTS OFF) SELECT a + 1 FROM filter_t WHERE a > 197;
-                 QUERY PLAN                 
---------------------------------------------
+                     QUERY PLAN                     
+----------------------------------------------------
  Result
    ->  Custom Scan (TessFilter) on filter_t
          Batch Filter: (a > 197)
-         ->  Custom Scan (TessPack)
-               ->  Seq Scan on filter_t
-(5 rows)
+         ->  Custom Scan (TessHeapScan) on filter_t
+(4 rows)
 
 SELECT a + 1 FROM filter_t WHERE a > 197;
  ?column? 
@@ -154,54 +150,41 @@ SELECT a + 1 FROM filter_t WHERE a > 197;
 -- More than one batch, batches left without rows, rows removed by count.
 EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT a FROM filter_t WHERE a > 100;
-                            QUERY PLAN                            
-------------------------------------------------------------------
+                                QUERY PLAN                                 
+---------------------------------------------------------------------------
  Custom Scan (TessFilter) on filter_t (actual rows=86.00 loops=1)
    Batch Filter: (a > 100)
    Rows Removed by Batch Filter: 114
    Input Batches: 4
    Input Rows: 200
    Output Rows: 86
-   ->  Custom Scan (TessPack) (actual rows=200.00 loops=1)
-         Batch Size: 64
-         Rows Kept As: heap tuples
-         Batches: 4
-         Deformed Datums: 200
-         Restarted Datums: 0
-         ->  Seq Scan on filter_t (actual rows=200.00 loops=1)
-(13 rows)
+   ->  Custom Scan (TessHeapScan) on filter_t (actual rows=200.00 loops=1)
+(7 rows)
 
 EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT a FROM filter_t WHERE a > 1000;
-                           QUERY PLAN                            
------------------------------------------------------------------
+                                QUERY PLAN                                 
+---------------------------------------------------------------------------
  Custom Scan (TessFilter) on filter_t (actual rows=0.00 loops=1)
    Batch Filter: (a > 1000)
    Rows Removed by Batch Filter: 200
    Input Batches: 4
    Input Rows: 200
    Output Rows: 0
-   ->  Custom Scan (TessPack) (actual rows=200.00 loops=1)
-         Batch Size: 64
-         Rows Kept As: heap tuples
-         Batches: 4
-         Deformed Datums: 200
-         Restarted Datums: 0
-         ->  Seq Scan on filter_t (actual rows=200.00 loops=1)
-(13 rows)
+   ->  Custom Scan (TessHeapScan) on filter_t (actual rows=200.00 loops=1)
+(7 rows)
 
 -- A parameter, also NULL, through a generic plan.
 SET plan_cache_mode = force_generic_plan;
 PREPARE above(int) AS SELECT count(*) FROM filter_t WHERE a > $1;
 EXPLAIN (COSTS OFF) EXECUTE above(150);
-                 QUERY PLAN                 
---------------------------------------------
+                     QUERY PLAN                     
+----------------------------------------------------
  Aggregate
    ->  Custom Scan (TessFilter) on filter_t
          Batch Filter: (a > $1)
-         ->  Custom Scan (TessPack)
-               ->  Seq Scan on filter_t
-(5 rows)
+         ->  Custom Scan (TessHeapScan) on filter_t
+(4 rows)
 
 EXECUTE above(150);
  count 
@@ -240,22 +223,20 @@ RESET plan_cache_mode;
 EXPLAIN (COSTS OFF)
 SELECT o.a, (SELECT count(*) FROM filter_t AS i WHERE i.a > o.a) AS above
 FROM filter_t AS o WHERE o.a > 197 ORDER BY o.a;
-                         QUERY PLAN                         
-------------------------------------------------------------
+                             QUERY PLAN                             
+--------------------------------------------------------------------
  Sort
    Sort Key: o.a
    ->  Result
          ->  Custom Scan (TessFilter) on filter_t o
                Batch Filter: (o.a > 197)
-               ->  Custom Scan (TessPack)
-                     ->  Seq Scan on filter_t o
+               ->  Custom Scan (TessHeapScan) on filter_t o
          SubPlan expr_1
            ->  Aggregate
                  ->  Custom Scan (TessFilter) on filter_t i
                        Batch Filter: (i.a > o.a)
-                       ->  Custom Scan (TessPack)
-                             ->  Seq Scan on filter_t i
-(13 rows)
+                       ->  Custom Scan (TessHeapScan) on filter_t i
+(11 rows)
 
 SELECT o.a, (SELECT count(*) FROM filter_t AS i WHERE i.a > o.a) AS above
 FROM filter_t AS o WHERE o.a > 197 ORDER BY o.a;
@@ -268,14 +249,13 @@ FROM filter_t AS o WHERE o.a > 197 ORDER BY o.a;
 
 -- A batch parent above: the limit node stops the input early.
 EXPLAIN (COSTS OFF) SELECT a FROM filter_t WHERE a > 100 LIMIT 3;
-                 QUERY PLAN                 
---------------------------------------------
+                     QUERY PLAN                     
+----------------------------------------------------
  Custom Scan (TessLimit)
    ->  Custom Scan (TessFilter) on filter_t
          Batch Filter: (a > 100)
-         ->  Custom Scan (TessPack)
-               ->  Seq Scan on filter_t
-(5 rows)
+         ->  Custom Scan (TessHeapScan) on filter_t
+(4 rows)
 
 SELECT a FROM filter_t WHERE a > 100 LIMIT 3;
   a  
@@ -288,14 +268,13 @@ SELECT a FROM filter_t WHERE a > 100 LIMIT 3;
 -- Clauses from the first unsupported one on stay row-wise, in the
 -- planner's order, over the rows the batch clauses kept.
 EXPLAIN (COSTS OFF) SELECT a FROM filter_t WHERE a > 100 AND c = 'r150';
-              QUERY PLAN              
---------------------------------------
+                  QUERY PLAN                  
+----------------------------------------------
  Custom Scan (TessFilter) on filter_t
    Filter: (c = 'r150'::text)
    Batch Filter: (a > 100)
-   ->  Custom Scan (TessPack)
-         ->  Seq Scan on filter_t
-(5 rows)
+   ->  Custom Scan (TessHeapScan) on filter_t
+(4 rows)
 
 SELECT filter_same($$SELECT a FROM filter_t WHERE a > 100 AND c = 'r150'$$);
  filter_same 
@@ -305,14 +284,13 @@ SELECT filter_same($$SELECT a FROM filter_t WHERE a > 100 AND c = 'r150'$$);
 
 -- The planner orders the text comparison after the cheaper int4 one.
 EXPLAIN (COSTS OFF) SELECT a FROM filter_t WHERE c = 'r150' AND a > 100;
-              QUERY PLAN              
---------------------------------------
+                  QUERY PLAN                  
+----------------------------------------------
  Custom Scan (TessFilter) on filter_t
    Filter: (c = 'r150'::text)
    Batch Filter: (a > 100)
-   ->  Custom Scan (TessPack)
-         ->  Seq Scan on filter_t
-(5 rows)
+   ->  Custom Scan (TessHeapScan) on filter_t
+(4 rows)
 
 -- A null test costs nothing and comes first: the node is not offered.
 EXPLAIN (COSTS OFF) SELECT a FROM filter_t WHERE a > 100 AND c IS NOT NULL;
@@ -326,14 +304,13 @@ EXPLAIN (COSTS OFF) SELECT a FROM filter_t WHERE a > 100 AND c IS NOT NULL;
 CREATE FUNCTION filter_slow(x int) RETURNS boolean
 LANGUAGE plpgsql COST 1000 AS $$ BEGIN RETURN x % 2 = 0; END $$;
 EXPLAIN (COSTS OFF) SELECT a FROM filter_t WHERE filter_slow(a) AND a > 190;
-              QUERY PLAN              
---------------------------------------
+                  QUERY PLAN                  
+----------------------------------------------
  Custom Scan (TessFilter) on filter_t
    Filter: filter_slow(a)
    Batch Filter: (a > 190)
-   ->  Custom Scan (TessPack)
-         ->  Seq Scan on filter_t
-(5 rows)
+   ->  Custom Scan (TessHeapScan) on filter_t
+(4 rows)
 
 SELECT filter_same($$SELECT a FROM filter_t WHERE filter_slow(a) AND a > 190$$);
         filter_same        
@@ -345,8 +322,8 @@ DROP FUNCTION filter_slow(int);
 -- Rows removed by each part, and a column only the row-wise clause reads.
 EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT a FROM filter_t WHERE a > 100 AND c <> 'r150';
-                            QUERY PLAN                            
-------------------------------------------------------------------
+                                QUERY PLAN                                 
+---------------------------------------------------------------------------
  Custom Scan (TessFilter) on filter_t (actual rows=85.00 loops=1)
    Filter: (c <> 'r150'::text)
    Rows Removed by Filter: 115
@@ -356,14 +333,8 @@ SELECT a FROM filter_t WHERE a > 100 AND c <> 'r150';
    Input Batches: 4
    Input Rows: 200
    Output Rows: 85
-   ->  Custom Scan (TessPack) (actual rows=200.00 loops=1)
-         Batch Size: 64
-         Rows Kept As: heap tuples
-         Batches: 4
-         Deformed Datums: 286
-         Restarted Datums: 0
-         ->  Seq Scan on filter_t (actual rows=200.00 loops=1)
-(16 rows)
+   ->  Custom Scan (TessHeapScan) on filter_t (actual rows=200.00 loops=1)
+(10 rows)
 
 SELECT filter_same($$SELECT count(*) FROM filter_t WHERE a > 100 AND c <> 'r150'$$);
  filter_same 
@@ -375,8 +346,8 @@ SELECT filter_same($$SELECT count(*) FROM filter_t WHERE a > 100 AND c <> 'r150'
 -- for every row, the residual its column for the rows that survived.
 EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT count(*) FROM filter_t WHERE a > 100 AND c <> 'r150';
-                               QUERY PLAN                               
-------------------------------------------------------------------------
+                                   QUERY PLAN                                    
+---------------------------------------------------------------------------------
  Aggregate (actual rows=1.00 loops=1)
    ->  Custom Scan (TessFilter) on filter_t (actual rows=85.00 loops=1)
          Filter: (c <> 'r150'::text)
@@ -387,34 +358,22 @@ SELECT count(*) FROM filter_t WHERE a > 100 AND c <> 'r150';
          Input Batches: 4
          Input Rows: 200
          Output Rows: 85
-         ->  Custom Scan (TessPack) (actual rows=200.00 loops=1)
-               Batch Size: 64
-               Rows Kept As: heap tuples
-               Batches: 4
-               Deformed Datums: 286
-               Restarted Datums: 0
-               ->  Seq Scan on filter_t (actual rows=200.00 loops=1)
-(17 rows)
+         ->  Custom Scan (TessHeapScan) on filter_t (actual rows=200.00 loops=1)
+(11 rows)
 
 -- A column the query returns is deformed for the rows served.
 EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT b FROM filter_t WHERE a > 190;
-                           QUERY PLAN                            
------------------------------------------------------------------
+                                QUERY PLAN                                 
+---------------------------------------------------------------------------
  Custom Scan (TessFilter) on filter_t (actual rows=9.00 loops=1)
    Batch Filter: (a > 190)
    Rows Removed by Batch Filter: 191
    Input Batches: 4
    Input Rows: 200
    Output Rows: 9
-   ->  Custom Scan (TessPack) (actual rows=200.00 loops=1)
-         Batch Size: 64
-         Rows Kept As: heap tuples
-         Batches: 4
-         Deformed Datums: 209
-         Restarted Datums: 0
-         ->  Seq Scan on filter_t (actual rows=200.00 loops=1)
-(13 rows)
+   ->  Custom Scan (TessHeapScan) on filter_t (actual rows=200.00 loops=1)
+(7 rows)
 
 -- A table with a dropped column is scanned with a projection: rows are copied.
 CREATE TABLE filter_dropped (a int, x int, b int);
@@ -422,8 +381,8 @@ INSERT INTO filter_dropped SELECT i, i, i FROM generate_series(1, 100) AS i;
 ALTER TABLE filter_dropped DROP COLUMN x;
 EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT count(*) FROM filter_dropped WHERE a > 90;
-                                  QUERY PLAN                                  
-------------------------------------------------------------------------------
+                                      QUERY PLAN                                       
+---------------------------------------------------------------------------------------
  Aggregate (actual rows=1.00 loops=1)
    ->  Custom Scan (TessFilter) on filter_dropped (actual rows=10.00 loops=1)
          Batch Filter: (a > 90)
@@ -431,12 +390,8 @@ SELECT count(*) FROM filter_dropped WHERE a > 90;
          Input Batches: 2
          Input Rows: 100
          Output Rows: 10
-         ->  Custom Scan (TessPack) (actual rows=100.00 loops=1)
-               Batch Size: 64
-               Rows Kept As: copies
-               Batches: 2
-               ->  Seq Scan on filter_dropped (actual rows=100.00 loops=1)
-(12 rows)
+         ->  Custom Scan (TessHeapScan) on filter_dropped (actual rows=100.00 loops=1)
+(8 rows)
 
 SELECT filter_same($$SELECT sum(b) FROM filter_dropped WHERE a > 90$$);
  filter_same 
@@ -449,8 +404,8 @@ DROP TABLE filter_dropped;
 CREATE TEMP TABLE filter_temp AS SELECT i AS a, 'r' || i AS c FROM generate_series(1, 100) AS i;
 EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT count(*) FROM filter_temp WHERE a > 90 AND c <> 'r95';
-                                QUERY PLAN                                
---------------------------------------------------------------------------
+                                     QUERY PLAN                                     
+------------------------------------------------------------------------------------
  Aggregate (actual rows=1.00 loops=1)
    ->  Custom Scan (TessFilter) on filter_temp (actual rows=9.00 loops=1)
          Filter: (c <> 'r95'::text)
@@ -461,14 +416,8 @@ SELECT count(*) FROM filter_temp WHERE a > 90 AND c <> 'r95';
          Input Batches: 2
          Input Rows: 100
          Output Rows: 9
-         ->  Custom Scan (TessPack) (actual rows=100.00 loops=1)
-               Batch Size: 64
-               Rows Kept As: heap tuples
-               Batches: 2
-               Deformed Datums: 110
-               Restarted Datums: 0
-               ->  Seq Scan on filter_temp (actual rows=100.00 loops=1)
-(17 rows)
+         ->  Custom Scan (TessHeapScan) on filter_temp (actual rows=100.00 loops=1)
+(11 rows)
 
 SELECT filter_same($$SELECT c FROM filter_temp WHERE a > 90 AND c <> 'r95'$$);
                        filter_same                        
@@ -477,6 +426,68 @@ SELECT filter_same($$SELECT c FROM filter_temp WHERE a > 90 AND c <> 'r95'$$);
 (1 row)
 
 DROP TABLE filter_temp;
+-- The scan reads pages itself: a page with more visible tuples than a batch
+-- gives several batches, and dead tuples never reach a batch.
+CREATE TABLE filter_dead AS SELECT i AS a FROM generate_series(1, 300) AS i;
+DELETE FROM filter_dead WHERE a % 3 = 0;
+BEGIN;
+SAVEPOINT aborted;
+INSERT INTO filter_dead SELECT i FROM generate_series(1000, 1099) AS i;
+ROLLBACK TO aborted;
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+SELECT count(*) FROM filter_dead WHERE a > 0;
+                                     QUERY PLAN                                     
+------------------------------------------------------------------------------------
+ Aggregate (actual rows=1.00 loops=1)
+   ->  Custom Scan (TessFilter) on filter_dead (actual rows=200.00 loops=1)
+         Batch Filter: (a > 0)
+         Rows Removed by Batch Filter: 0
+         Input Batches: 4
+         Input Rows: 200
+         Output Rows: 200
+         ->  Custom Scan (TessHeapScan) on filter_dead (actual rows=200.00 loops=1)
+(8 rows)
+
+SELECT filter_same($$SELECT count(*), sum(a) FROM filter_dead WHERE a > 150$$);
+   filter_same   
+-----------------
+ {"(100,22500)"}
+(1 row)
+
+COMMIT;
+DROP TABLE filter_dead;
+-- Values stored outside the page reach the residual and the parent.
+CREATE TABLE filter_toast (a int, t text);
+ALTER TABLE filter_toast ALTER COLUMN t SET STORAGE EXTERNAL;
+INSERT INTO filter_toast SELECT i, repeat(chr(96 + i), 5000) FROM generate_series(1, 20) AS i;
+SELECT filter_same($$SELECT a, length(t), left(t, 1) FROM filter_toast WHERE a > 15 AND t <> 'x'$$);
+                               filter_same                               
+-------------------------------------------------------------------------
+ {"(16,5000,p)","(17,5000,q)","(18,5000,r)","(19,5000,s)","(20,5000,t)"}
+(1 row)
+
+DROP TABLE filter_toast;
+-- A column added with a default is missing from older tuples.
+CREATE TABLE filter_missing AS SELECT i AS a FROM generate_series(1, 100) AS i;
+ALTER TABLE filter_missing ADD COLUMN m int DEFAULT 5;
+INSERT INTO filter_missing VALUES (101, 7);
+SELECT filter_same($$SELECT sum(m), count(*) FROM filter_missing WHERE a > 90 AND m > 0$$);
+ filter_same 
+-------------
+ {"(57,11)"}
+(1 row)
+
+DROP TABLE filter_missing;
+-- A clause the planner folds away leaves no scan at all.
+EXPLAIN (COSTS OFF) SELECT count(*) FROM filter_t WHERE a > 100 AND false;
+             QUERY PLAN             
+------------------------------------
+ Aggregate
+   ->  Result
+         Replaces: Scan on filter_t
+         One-Time Filter: false
+(4 rows)
+
 -- Two filtered relations in a join.
 SELECT filter_same($$SELECT count(*) FROM filter_t AS x JOIN filter_t AS y ON x.a = y.b WHERE x.a > 5 AND y.b > 5$$);
  filter_same 
@@ -502,17 +513,16 @@ RESET tessera.enable;
 -- A parallel worker runs the node from the plan's text form.
 SET debug_parallel_query = on;
 EXPLAIN (COSTS OFF) SELECT count(*) FROM filter_t WHERE a > 100;
-                    QUERY PLAN                    
---------------------------------------------------
+                        QUERY PLAN                        
+----------------------------------------------------------
  Gather
    Workers Planned: 1
    Single Copy: true
    ->  Aggregate
          ->  Custom Scan (TessFilter) on filter_t
                Batch Filter: (a > 100)
-               ->  Custom Scan (TessPack)
-                     ->  Seq Scan on filter_t
-(8 rows)
+               ->  Custom Scan (TessHeapScan) on filter_t
+(7 rows)
 
 SELECT count(*) FROM filter_t WHERE a > 100;
  count 
