@@ -64,9 +64,12 @@ SELECT a FROM pack_t;
    Child Request: filter {} projection {0} max 0
    ->  Custom Scan (TessPack) (actual rows=100.00 loops=1)
          Batch Size: 64
+         Rows Kept As: heap tuples
          Batches: 2
+         Deformed Datums: 100
+         Restarted Datums: 0
          ->  Seq Scan on pack_t (actual rows=100.00 loops=1)
-(11 rows)
+(14 rows)
 
 SET pack_test.batch_rows = 10;
 EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
@@ -82,9 +85,12 @@ SELECT a FROM pack_t;
    Child Request: filter {} projection {0} max 10
    ->  Custom Scan (TessPack) (actual rows=100.00 loops=1)
          Batch Size: 10
+         Rows Kept As: heap tuples
          Batches: 10
+         Deformed Datums: 100
+         Restarted Datums: 0
          ->  Seq Scan on pack_t (actual rows=100.00 loops=1)
-(11 rows)
+(14 rows)
 
 SET pack_test.batch_rows = 200;
 EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
@@ -100,9 +106,12 @@ SELECT a FROM pack_t;
    Child Request: filter {} projection {0} max 200
    ->  Custom Scan (TessPack) (actual rows=100.00 loops=1)
          Batch Size: 64
+         Rows Kept As: heap tuples
          Batches: 2
+         Deformed Datums: 100
+         Restarted Datums: 0
          ->  Seq Scan on pack_t (actual rows=100.00 loops=1)
-(11 rows)
+(14 rows)
 
 SET pack_test.batch_rows = 7;
 SELECT count(*), sum(a) FROM pack_t;
@@ -145,9 +154,12 @@ SELECT a FROM pack_t LIMIT 3;
          Child Request: filter {} projection {0} max 0
          ->  Custom Scan (TessPack) (actual rows=64.00 loops=1)
                Batch Size: 64
+               Rows Kept As: heap tuples
                Batches: 1
+               Deformed Datums: 64
+               Restarted Datums: 0
                ->  Seq Scan on pack_t (actual rows=64.00 loops=1)
-(12 rows)
+(15 rows)
 
 SELECT a FROM pack_t LIMIT 3;
  a 
@@ -175,11 +187,14 @@ FROM generate_series(1, 3) AS g;
                  Child Request: filter {} projection {} max 0
                  ->  Custom Scan (TessPack) (actual rows=2.00 loops=3)
                        Batch Size: 64
+                       Rows Kept As: heap tuples
                        Batches: 1
+                       Deformed Datums: 0
+                       Restarted Datums: 0
                        ->  Seq Scan on pack_t p (actual rows=2.00 loops=3)
                              Filter: (a <= g.g)
                              Rows Removed by Filter: 98
-(16 rows)
+(19 rows)
 
 SELECT g, (SELECT count(*) FROM pack_t AS p WHERE p.a <= g) AS n
 FROM generate_series(1, 3) AS g;
@@ -263,9 +278,12 @@ SELECT count(a) FROM pack_t;
                Child Request: filter {0} projection {0} max 32
                ->  Custom Scan (TessPack) (actual rows=100.00 loops=1)
                      Batch Size: 32
+                     Rows Kept As: heap tuples
                      Batches: 4
+                     Deformed Datums: 100
+                     Restarted Datums: 0
                      ->  Seq Scan on pack_t (actual rows=100.00 loops=1)
-(18 rows)
+(21 rows)
 
 SELECT count(a), sum(a) FROM pack_t;
  count | sum  
@@ -303,9 +321,12 @@ SELECT a FROM pack_t;
          Child Request: filter {0} projection {0} max 32
          ->  Custom Scan (TessPack) (actual rows=100.00 loops=1)
                Batch Size: 32
+               Rows Kept As: heap tuples
                Batches: 4
+               Deformed Datums: 100
+               Restarted Datums: 0
                ->  Seq Scan on pack_t (actual rows=100.00 loops=1)
-(17 rows)
+(20 rows)
 
 -- The trim node stops after its first batch with rows.
 SET pack_test.trim = 80;
@@ -330,9 +351,12 @@ SELECT count(a) FROM pack_t;
                Child Request: filter {0} projection {0} max 32
                ->  Custom Scan (TessPack) (actual rows=32.00 loops=1)
                      Batch Size: 32
+                     Rows Kept As: heap tuples
                      Batches: 1
+                     Deformed Datums: 32
+                     Restarted Datums: 0
                      ->  Seq Scan on pack_t (actual rows=32.00 loops=1)
-(18 rows)
+(21 rows)
 
 SELECT count(a), max(a) FROM pack_t;
  count | max 
@@ -363,11 +387,14 @@ SELECT a, b FROM pack_t WHERE a > 45;
          Child Request: filter {0} projection {0 1} max 10
          ->  Custom Scan (TessPack) (actual rows=55.00 loops=1)
                Batch Size: 10
+               Rows Kept As: heap tuples
                Batches: 6
+               Deformed Datums: 60
+               Restarted Datums: 0
                ->  Seq Scan on pack_t (actual rows=55.00 loops=1)
                      Filter: (a > 45)
                      Rows Removed by Filter: 45
-(19 rows)
+(22 rows)
 
 RESET pack_test.batch_rows;
 RESET pack_test.trim;

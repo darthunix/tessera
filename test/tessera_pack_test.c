@@ -69,12 +69,12 @@ sink_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 {
 	TessPathInfo info = TESS_STRUCT_INITIALIZER(TessPathInfo);
 	TessPlanConfig config = TESS_STRUCT_INITIALIZER(TessPlanConfig);
-	Plan	   *child = linitial(custom_plans);
 
+	/* A pass-through keeps its child's layout, whatever its columns. */
 	tess_path_get_info(best_path, &info);
 	config.methods = &sink_scan_methods;
-	config.layout_policy = TESS_LAYOUT_DENSE;
-	config.scan_targetlist = child->targetlist;
+	config.layout_policy = TESS_LAYOUT_PRESERVE_CHILD;
+	config.layout_child = 0;
 	config.node_data = info.node_data;
 	return tess_plan_create(best_path, tlist, custom_plans, &config);
 }

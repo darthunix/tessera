@@ -3,6 +3,10 @@
 #include "commands/explain.h"
 #include "commands/explain_format.h"
 #include "executor/executor.h"
+#include "nodes/makefuncs.h"
+#include "optimizer/cost.h"
+#include "optimizer/plancat.h"
+#include "optimizer/tlist.h"
 
 #include "tessera/runtime.h"
 
@@ -12,9 +16,14 @@
  * TessPack turns the rows of an ordinary child into batches for a
  * batch-aware parent. The parent creates the path through
  * tess_batch_input_path, so the node never stands under a row-wise one;
- * a request for rows is an error at the first execution. Every column is
- * materialized: the request's column masks are not used yet. See
- * docs/nodes.md.
+ * a request for rows is an error at the first execution.
+ *
+ * Above a sequential scan of a plain table the pack plans the scan with
+ * the relation's physical target list, so that it returns its buffer
+ * tuple slot without projecting, and keeps the tuples in a heap batch
+ * that deforms a column only when a consumer asks for it, for the rows
+ * asked for. Above any other child, or a scan the executor projects, the
+ * builder copies every column of every row. See docs/nodes.md.
  */
 #define PACK_BATCH_ROWS 64
 
@@ -23,8 +32,10 @@ typedef struct PackState
 	CustomScanState css;
 	PlanState  *child;
 	TessOutput *output;
-	/* Created at the first execution, once the parent's request is frozen. */
+	TessLayout	layout;
+	/* One of the two is created at the first execution, by the first slot. */
 	TessBuilder *builder;
+	TessHeapBatch *heap;
 	const TessRequest *request;
 	int			capacity;
 	/* The child returned its last row. */
@@ -65,16 +76,53 @@ static const CustomExecMethods pack_exec_methods = {
 	.ExplainCustomScan = pack_explain,
 };
 
+/*
+ * The scan's physical target list when the child is a sequential scan of
+ * a plain table whose targets are all columns of it: planned with that
+ * list the scan returns its buffer tuple slot without projecting. NIL for
+ * any other child, or a table with dropped or missing columns.
+ */
+static List *
+physical_targets(PlannerInfo *root, const Path *child)
+{
+	RelOptInfo *rel = child->parent;
+
+	/* A stand-in path of a test has neither a relation nor a target. */
+	if (root == NULL || rel == NULL || child->pathtarget == NULL ||
+		child->pathtype != T_SeqScan || rel->reloptkind != RELOPT_BASEREL ||
+		rel->rtekind != RTE_RELATION)
+		return NIL;
+	foreach_ptr(Expr, expr, child->pathtarget->exprs)
+	{
+		Var		   *var = (Var *) expr;
+
+		if (!IsA(expr, Var) || var->varno != rel->relid ||
+			var->varattno <= 0 || var->varlevelsup != 0)
+			return NIL;
+	}
+	return build_physical_tlist(root, rel);
+}
+
 /* The path costs what its child costs: there is no cost model yet. */
 static CustomPath *
 pack_wrap_rows(PlannerInfo *root, Path *child)
 {
 	TessPathConfig config = TESS_STRUCT_INITIALIZER(TessPathConfig);
+	List	   *physical = physical_targets(root, child);
+	Path	   *scan = child;
 
+	if (physical != NIL)
+	{
+		/* The caller's path keeps its target: the pack's own is that one. */
+		scan = makeNode(Path);
+		*scan = *child;
+		scan->pathtarget = create_pathtarget(root, physical);
+		config.node_data = (Node *) makeInteger(1);
+	}
 	config.template_path = child;
 	config.methods = &pack_path_methods;
 	config.node = &tess_pack_node;
-	config.children = list_make1(child);
+	config.children = list_make1(scan);
 	return tess_path_create(&config);
 }
 
@@ -100,19 +148,43 @@ static Plan *
 pack_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 		  List *tlist, List *clauses, List *custom_plans)
 {
+	TessPathInfo info = TESS_STRUCT_INITIALIZER(TessPathInfo);
 	TessPlanConfig config = TESS_STRUCT_INITIALIZER(TessPlanConfig);
+	TessLayout	layout = TESS_STRUCT_INITIALIZER(TessLayout);
 	Plan	   *child = linitial(custom_plans);
 
-	/*
-	 * The child was planned with its exact target list, from the same path
-	 * target as this node's, so child attribute N is target N. The clauses
-	 * are the relation's, which the child already evaluates.
-	 */
-	if (list_length(tlist) != list_length(child->targetlist))
-		elog(ERROR, "Tessera pack target list does not match its child");
+	tess_path_get_info(best_path, &info);
 	config.methods = &tess_pack_scan_methods;
-	config.layout_policy = TESS_LAYOUT_DENSE;
 	config.scan_targetlist = child->targetlist;
+	if (info.node_data != NULL)
+	{
+		/* Every relation column is a batch column; the targets map to them. */
+		int		   *map = palloc_array(int, list_length(tlist));
+		int			target = 0;
+
+		foreach_ptr(TargetEntry, entry, tlist)
+		{
+			if (!IsA(entry->expr, Var))
+				elog(ERROR, "Tessera pack target is not a column");
+			map[target++] = ((Var *) entry->expr)->varattno - 1;
+		}
+		layout.ncolumns = list_length(child->targetlist);
+		layout.ntargets = list_length(tlist);
+		layout.target_columns = map;
+		config.layout_policy = TESS_LAYOUT_EXPLICIT;
+		config.explicit_layout = &layout;
+	}
+	else
+	{
+		/*
+		 * The child was planned with its exact target list, from the same
+		 * path target as this node's, so child attribute N is target N.
+		 * The clauses are the relation's, which the child already evaluates.
+		 */
+		if (list_length(tlist) != list_length(child->targetlist))
+			elog(ERROR, "Tessera pack target list does not match its child");
+		config.layout_policy = TESS_LAYOUT_DENSE;
+	}
 	return tess_plan_create(best_path, tlist, custom_plans, &config);
 }
 
@@ -142,6 +214,7 @@ pack_begin(CustomScanState *css, EState *estate, int eflags)
 		elog(ERROR, "Tessera pack received a foreign plan");
 	state->child = ExecInitNode(linitial(cscan->custom_plans), estate, eflags);
 	css->custom_ps = list_make1(state->child);
+	state->layout = info.layout;
 	state->output = tess_output_create(estate->es_query_cxt, &css->ss.ps,
 									   css->ss.ps.ps_ResultTupleSlot,
 									   &info.layout);
@@ -156,6 +229,35 @@ pack_freeze_request(PackState *state)
 	state->capacity = state->request->max_batch_rows > 0 ?
 		Min(state->request->max_batch_rows, PACK_BATCH_ROWS) :
 		PACK_BATCH_ROWS;
+	if (state->request->output_mode != TESS_OUTPUT_BATCH)
+		elog(ERROR, "Tessera pack requires a batch-aware parent");
+}
+
+/* The provider for this scan: kept tuples for a scan's buffer slot. */
+static void
+pack_create_provider(PackState *state, TupleTableSlot *slot)
+{
+	MemoryContext context = state->css.ss.ps.state->es_query_cxt;
+
+	if (TTS_IS_BUFFERTUPLE(slot))
+	{
+		TessHeapBatchConfig config = TESS_STRUCT_INITIALIZER(TessHeapBatchConfig);
+
+		config.parent_context = context;
+		config.ncolumns = state->layout.ncolumns;
+		config.capacity = state->capacity;
+		state->heap = tess_heap_batch_create(&config);
+	}
+	else
+	{
+		TessBuilderConfig config = TESS_STRUCT_INITIALIZER(TessBuilderConfig);
+
+		config.parent_context = context;
+		config.tuple_desc = ExecGetResultType(state->child);
+		config.ncolumns = state->layout.ncolumns;
+		config.capacity = state->capacity;
+		state->builder = tess_builder_create(&config);
+	}
 }
 
 static TupleTableSlot *
@@ -165,19 +267,8 @@ pack_exec(CustomScanState *css)
 	TessBatch  *batch;
 	int			limit;
 
-	if (state->builder == NULL)
-	{
-		TessBuilderConfig config = TESS_STRUCT_INITIALIZER(TessBuilderConfig);
-
-		config.parent_context = css->ss.ps.state->es_query_cxt;
-		config.tuple_desc = ExecGetResultType(state->child);
-		config.ncolumns = css->ss.ps.ps_ResultTupleSlot->tts_tupleDescriptor->natts;
+	if (state->request == NULL)
 		pack_freeze_request(state);
-		config.capacity = state->capacity;
-		if (state->request->output_mode != TESS_OUTPUT_BATCH)
-			elog(ERROR, "Tessera pack requires a batch-aware parent");
-		state->builder = tess_builder_create(&config);
-	}
 	/* Refuses while the parent has not finished the previous batch. */
 	tess_output_release(state->output);
 	if (state->exhausted)
@@ -190,8 +281,11 @@ pack_exec(CustomScanState *css)
 			return NULL;
 		limit = (int) Min((int64) limit, state->tuples_needed - state->produced);
 	}
-	tess_builder_reset(state->builder);
-	while (limit > 0 && !tess_builder_is_full(state->builder))
+	if (state->heap != NULL)
+		tess_heap_batch_reset(state->heap);
+	else if (state->builder != NULL)
+		tess_builder_reset(state->builder);
+	while (limit > 0)
 	{
 		TupleTableSlot *slot = ExecProcNode(state->child);
 
@@ -200,10 +294,20 @@ pack_exec(CustomScanState *css)
 			state->exhausted = true;
 			break;
 		}
-		tess_builder_append_slot(state->builder, slot);
+		if (state->heap == NULL && state->builder == NULL)
+			pack_create_provider(state, slot);
+		if (state->heap != NULL)
+			tess_heap_batch_append_slot(state->heap, slot);
+		else
+			tess_builder_append_slot(state->builder, slot);
 		limit--;
 	}
-	batch = tess_builder_finish(state->builder, InvalidOid);
+	if (state->heap != NULL)
+		batch = tess_heap_batch_finish(state->heap, InvalidOid);
+	else if (state->builder != NULL)
+		batch = tess_builder_finish(state->builder, InvalidOid);
+	else
+		batch = NULL;
 	if (batch == NULL)
 		return NULL;
 	state->produced += tess_row_mask_count(&batch->rows);
@@ -240,6 +344,19 @@ pack_explain(CustomScanState *css, List *ancestors, ExplainState *es)
 	/* The parent's request, and so the size, is known once executed. */
 	if (state->request != NULL)
 		ExplainPropertyInteger("Batch Size", NULL, state->capacity, es);
-	if (es->analyze)
-		ExplainPropertyInteger("Batches", NULL, state->batches, es);
+	if (state->heap != NULL || state->builder != NULL)
+		ExplainPropertyText("Rows Kept As",
+							state->heap != NULL ? "heap tuples" : "copies", es);
+	if (!es->analyze)
+		return;
+	ExplainPropertyInteger("Batches", NULL, state->batches, es);
+	if (state->heap != NULL)
+	{
+		const TessHeapBatchStats *stats = tess_heap_batch_stats(state->heap);
+
+		ExplainPropertyInteger("Deformed Datums", NULL, stats->deformed_datums, es);
+		ExplainPropertyInteger("Restarted Datums", NULL, stats->restarted_datums, es);
+		if (stats->copied_tuples > 0)
+			ExplainPropertyInteger("Copied Tuples", NULL, stats->copied_tuples, es);
+	}
 }

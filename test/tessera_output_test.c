@@ -165,8 +165,10 @@ tessera_test_output_batch(PG_FUNCTION_ARGS)
 	/* The producer narrows its own batch to rows 0 and 2 before publishing. */
 	batch = make_batch(builder, input, 0);
 	batch->rows.bits[0] = 5;
+	/* In batch mode the slot is non-empty but shows no row. */
 	result = tess_output_publish(output, batch) == slot &&
-		shows(slot, 1, false, "one") && ps->instrument->tuplecount == 1;
+		!TupIsNull(slot) && slot->tts_isnull[0] && slot->tts_isnull[1] &&
+		ps->instrument->tuplecount == 1;
 
 	/* A batch-aware parent reads the batch through the binding. */
 	batch = ops->get_batch(tess_output_binding(output));

@@ -136,15 +136,27 @@ tess_output_publish(TessOutput *output, TessBatch *batch)
 		elog(ERROR, "Tessera output cannot publish an empty selection");
 	recycle(output, true);
 	output->ops->publish_batch(output->binding, batch);
-	select_row(output, batch, first);
-	/*
-	 * A batch-aware parent gets the whole batch from one ExecProcNode call,
-	 * which the executor's instrumentation counts as one row.
-	 */
 	request = output->ops->freeze_request(output->binding);
-	if (request->output_mode == TESS_OUTPUT_BATCH &&
-		output->ps != NULL && output->ps->instrument != NULL)
-		output->ps->instrument->tuplecount += tess_row_mask_count(&batch->rows) - 1;
+	if (request->output_mode == TESS_OUTPUT_BATCH)
+	{
+		/*
+		 * A batch-aware parent reads the batch through the binding and never
+		 * looks at the slot's values, which would cost a lazy provider the
+		 * whole first row; the slot only has to be non-empty. One
+		 * ExecProcNode call carries the whole batch, which the executor's
+		 * instrumentation counts as one row.
+		 */
+		TupleTableSlot *slot = output->slot;
+
+		ExecClearTuple(slot);
+		memset(slot->tts_isnull, true, slot->tts_tupleDescriptor->natts);
+		slot->tts_tableOid = batch->table_oid;
+		ExecStoreVirtualTuple(slot);
+		if (output->ps != NULL && output->ps->instrument != NULL)
+			output->ps->instrument->tuplecount += tess_row_mask_count(&batch->rows) - 1;
+	}
+	else
+		select_row(output, batch, first);
 	return output->slot;
 }
 

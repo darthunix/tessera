@@ -104,6 +104,28 @@ EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT a FROM filter_t WHERE a > 100 AND c <> 'r150';
 SELECT filter_same($$SELECT count(*) FROM filter_t WHERE a > 100 AND c <> 'r150'$$);
 
+-- The pack node keeps the scan's tuples: a batch clause deforms its column
+-- for every row, the residual its column for the rows that survived.
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+SELECT count(*) FROM filter_t WHERE a > 100 AND c <> 'r150';
+-- A column the query returns is deformed for the rows served.
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+SELECT b FROM filter_t WHERE a > 190;
+-- A table with a dropped column is scanned with a projection: rows are copied.
+CREATE TABLE filter_dropped (a int, x int, b int);
+INSERT INTO filter_dropped SELECT i, i, i FROM generate_series(1, 100) AS i;
+ALTER TABLE filter_dropped DROP COLUMN x;
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+SELECT count(*) FROM filter_dropped WHERE a > 90;
+SELECT filter_same($$SELECT sum(b) FROM filter_dropped WHERE a > 90$$);
+DROP TABLE filter_dropped;
+-- A temporary table lives in local buffers.
+CREATE TEMP TABLE filter_temp AS SELECT i AS a, 'r' || i AS c FROM generate_series(1, 100) AS i;
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+SELECT count(*) FROM filter_temp WHERE a > 90 AND c <> 'r95';
+SELECT filter_same($$SELECT c FROM filter_temp WHERE a > 90 AND c <> 'r95'$$);
+DROP TABLE filter_temp;
+
 -- Two filtered relations in a join.
 SELECT filter_same($$SELECT count(*) FROM filter_t AS x JOIN filter_t AS y ON x.a = y.b WHERE x.a > 5 AND y.b > 5$$);
 
