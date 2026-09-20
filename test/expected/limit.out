@@ -1,0 +1,257 @@
+CREATE EXTENSION tessera;
+LOAD 'tessera_limit';
+CREATE TABLE limit_t (a int, b text);
+INSERT INTO limit_t
+SELECT i, CASE WHEN i % 10 = 0 THEN NULL ELSE 'row' || i END
+FROM generate_series(1, 100) AS i;
+CREATE TABLE limit_empty (a int);
+-- Without a pack node loaded the hook adds no path: the core node stays.
+EXPLAIN (COSTS OFF) SELECT a FROM limit_t LIMIT 3;
+        QUERY PLAN         
+---------------------------
+ Limit
+   ->  Seq Scan on limit_t
+(2 rows)
+
+LOAD 'tessera_nodes';
+EXPLAIN (COSTS OFF) SELECT a FROM limit_t LIMIT 3;
+           QUERY PLAN            
+---------------------------------
+ Custom Scan (TessLimit)
+   ->  Custom Scan (TessPack)
+         ->  Seq Scan on limit_t
+(3 rows)
+
+SELECT a, b FROM limit_t LIMIT 3;
+ a |  b   
+---+------
+ 1 | row1
+ 2 | row2
+ 3 | row3
+(3 rows)
+
+SELECT a, b FROM limit_t LIMIT 3 OFFSET 98;
+  a  |   b   
+-----+-------
+  99 | row99
+ 100 | 
+(2 rows)
+
+SELECT a FROM limit_t OFFSET 95;
+  a  
+-----
+  96
+  97
+  98
+  99
+ 100
+(5 rows)
+
+SELECT count(*) FROM (SELECT a FROM limit_t LIMIT ALL) AS s;
+ count 
+-------
+   100
+(1 row)
+
+SELECT count(*) FROM (SELECT a FROM limit_t LIMIT NULL) AS s;
+ count 
+-------
+   100
+(1 row)
+
+-- A count of zero stops before the first batch is read.
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+SELECT a FROM limit_t LIMIT 0;
+                     QUERY PLAN                     
+----------------------------------------------------
+ Custom Scan (TessLimit) (actual rows=0.00 loops=1)
+   Input Batches: 0
+   Input Rows: 0
+   Output Rows: 0
+   ->  Custom Scan (TessPack) (never executed)
+         Batches: 0
+         ->  Seq Scan on limit_t (never executed)
+(7 rows)
+
+-- More than one batch, with NULL values passing through.
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+SELECT a FROM limit_t LIMIT 70;
+                         QUERY PLAN                          
+-------------------------------------------------------------
+ Custom Scan (TessLimit) (actual rows=70.00 loops=1)
+   Input Batches: 2
+   Input Rows: 70
+   Output Rows: 70
+   ->  Custom Scan (TessPack) (actual rows=70.00 loops=1)
+         Batch Size: 64
+         Batches: 2
+         ->  Seq Scan on limit_t (actual rows=70.00 loops=1)
+(8 rows)
+
+SELECT count(*), count(b), sum(a) FROM (SELECT a, b FROM limit_t LIMIT 70) AS s;
+ count | count | sum  
+-------+-------+------
+    70 |    63 | 2485
+(1 row)
+
+-- WITH TIES stays with the core node.
+EXPLAIN (COSTS OFF)
+SELECT a FROM limit_t ORDER BY a FETCH FIRST 3 ROWS WITH TIES;
+           QUERY PLAN            
+---------------------------------
+ Limit
+   ->  Sort
+         Sort Key: a
+         ->  Seq Scan on limit_t
+(4 rows)
+
+-- The bound reaches the sort below the pack node: a top-N sort.
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+SELECT a FROM limit_t ORDER BY a DESC LIMIT 3;
+                             QUERY PLAN                             
+--------------------------------------------------------------------
+ Custom Scan (TessLimit) (actual rows=3.00 loops=1)
+   Input Batches: 1
+   Input Rows: 3
+   Output Rows: 3
+   ->  Custom Scan (TessPack) (actual rows=3.00 loops=1)
+         Batch Size: 64
+         Batches: 1
+         ->  Sort (actual rows=3.00 loops=1)
+               Sort Key: a DESC
+               Sort Method: top-N heapsort  Memory: 25kB
+               ->  Seq Scan on limit_t (actual rows=100.00 loops=1)
+(11 rows)
+
+SELECT a FROM limit_t ORDER BY a DESC LIMIT 3;
+  a  
+-----
+ 100
+  99
+  98
+(3 rows)
+
+-- A parameter is re-evaluated on every rescan.
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+SELECT g, (SELECT count(*) FROM (SELECT a FROM limit_t LIMIT g) AS s) AS n
+FROM generate_series(1, 3) AS g;
+                                QUERY PLAN                                
+--------------------------------------------------------------------------
+ Function Scan on generate_series g (actual rows=3.00 loops=1)
+   SubPlan expr_1
+     ->  Aggregate (actual rows=1.00 loops=3)
+           ->  Custom Scan (TessLimit) (actual rows=2.00 loops=3)
+                 Input Batches: 1
+                 Input Rows: 3
+                 Output Rows: 3
+                 ->  Custom Scan (TessPack) (actual rows=2.00 loops=3)
+                       Batch Size: 64
+                       Batches: 1
+                       ->  Seq Scan on limit_t (actual rows=2.00 loops=3)
+(11 rows)
+
+SELECT g, (SELECT count(*) FROM (SELECT a FROM limit_t LIMIT g) AS s) AS n
+FROM generate_series(1, 3) AS g;
+ g | n 
+---+---
+ 1 | 1
+ 2 | 2
+ 3 | 3
+(3 rows)
+
+PREPARE limited(int) AS SELECT a FROM limit_t LIMIT $1;
+EXECUTE limited(2);
+ a 
+---
+ 1
+ 2
+(2 rows)
+
+EXECUTE limited(5);
+ a 
+---
+ 1
+ 2
+ 3
+ 4
+ 5
+(5 rows)
+
+DEALLOCATE limited;
+-- A scrollable cursor: the planner adds Material above the node.
+BEGIN;
+DECLARE c SCROLL CURSOR FOR SELECT a FROM limit_t LIMIT 5;
+FETCH 2 FROM c;
+ a 
+---
+ 1
+ 2
+(2 rows)
+
+FETCH BACKWARD 1 FROM c;
+ a 
+---
+ 1
+(1 row)
+
+COMMIT;
+-- A parallel worker runs the node from the plan's text form.
+SET debug_parallel_query = on;
+EXPLAIN (COSTS OFF) SELECT a FROM limit_t WHERE a > 90 LIMIT 3;
+              QUERY PLAN               
+---------------------------------------
+ Gather
+   Workers Planned: 1
+   Single Copy: true
+   ->  Custom Scan (TessLimit)
+         ->  Custom Scan (TessPack)
+               ->  Seq Scan on limit_t
+                     Filter: (a > 90)
+(7 rows)
+
+SELECT a FROM limit_t WHERE a > 90 LIMIT 3;
+ a  
+----
+ 91
+ 92
+ 93
+(3 rows)
+
+RESET debug_parallel_query;
+-- An empty child.
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+SELECT a FROM limit_empty LIMIT 3;
+                           QUERY PLAN                           
+----------------------------------------------------------------
+ Custom Scan (TessLimit) (actual rows=0.00 loops=1)
+   Input Batches: 0
+   Input Rows: 0
+   Output Rows: 0
+   ->  Custom Scan (TessPack) (actual rows=0.00 loops=1)
+         Batch Size: 64
+         Batches: 0
+         ->  Seq Scan on limit_empty (actual rows=0.00 loops=1)
+(8 rows)
+
+SELECT a FROM limit_empty LIMIT 3;
+ a 
+---
+(0 rows)
+
+SET tessera.enable = off;
+EXPLAIN (COSTS OFF) SELECT a FROM limit_t LIMIT 3;
+        QUERY PLAN         
+---------------------------
+ Limit
+   ->  Seq Scan on limit_t
+(2 rows)
+
+RESET tessera.enable;
+\set VERBOSITY terse
+SELECT a FROM limit_t LIMIT -1;
+ERROR:  LIMIT must not be negative
+SELECT a FROM limit_t OFFSET -1;
+ERROR:  OFFSET must not be negative
+\set VERBOSITY default
+DROP TABLE limit_t, limit_empty;
+DROP EXTENSION tessera;
