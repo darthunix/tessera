@@ -23,7 +23,7 @@ implementations of PostgreSQL functions are registered and called, the
 filters over a batch through them, and the
 [runtime guide](docs/runtime.md) the static library a node links for
 building and passing batches. The [nodes guide](docs/nodes.md) describes the
-module of Tessera's own batch nodes, starting with `TessPack`, and the
+module of Tessera's own batch nodes, `TessPack` and `TessFilter`, and the
 [node-writing guide](docs/writing-a-node.md) walks through building a node
 of your own on the example of `TessLimit`.
 

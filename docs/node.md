@@ -203,8 +203,10 @@ row-wise path allocates nothing.
 A node either serves a parent that is not batch-aware, through the shared
 output helper's row view of one selected row per call, or rejects such a
 plan while planning. In the first chain the aggregate node serves a row-wise
-parent, since it returns rows anyway; the pack and filter nodes reject one,
-as pg_batch's pack and projection nodes do.
+parent, since it returns rows anyway, and so does the filter node: a hook
+on a base relation cannot see the parent, and the unary helper serves rows
+for free. The pack node rejects one, as pg_batch's pack node does; a batch
+parent always creates it.
 
 ### Errors
 

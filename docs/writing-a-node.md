@@ -176,6 +176,14 @@ may have changed, and raises the core node's errors for negative values.
 helper's statistics give the batches and rows read and the rows kept. The
 node never touches instrumentation itself.
 
+`TessFilter` (`nodes/filter.c`, `nodes/planner.c`) is the second node on
+the helper and the first with a `set_rel_pathlist` hook: it takes the
+clauses of a base relation, applies the leading ones the expression
+compiler supports as batch filters and the rest row by row through
+`ExecQual`, and keeps the relation's target through an explicit layout
+while the scan below reads the clauses' columns too. See
+[nodes.md](nodes.md) for how it takes the clauses away from the scan.
+
 ## Nodes that create batches
 
 A node that builds a new physical batch, changes the column layout or has
@@ -193,6 +201,8 @@ Each node ships the regression tests listed in [node.md](node.md): a
 batch-aware parent and a row-wise one, an empty selection, batches of fewer
 and of more than 64 rows, rescan, an early stop by a limit above, NULL
 values, `EXPLAIN ANALYZE` with correct row counts, and lifecycle errors.
-`test/sql/limit.sql` is the model; it needs no test module. Performance is
+`test/sql/limit.sql` is the model; it needs no test module, and
+`test/sql/filter.sql` shows how to compare a node's rows with the core's
+through one function that runs a query with `tessera.enable` on and off. Performance is
 measured with the PostgreSQL-level benchmarks in `bench/pg/`, with
 `tessera.enable` on and off in one session.
