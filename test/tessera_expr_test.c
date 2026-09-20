@@ -268,6 +268,15 @@ tessera_test_expr_values(PG_FUNCTION_ARGS)
 		!tess_row_mask_contains(non_nulls, 1) &&
 		row_is(column, non_nulls, 2, false, 4) &&
 		tess_row_mask_count(non_nulls) == 54);
+	/* A bare column's mask over the narrowed selection, built on request. */
+	expr = tess_expr_compile_value(a(), NULL, resolve, NULL);
+	tess_expr_bind(expr, batch, econtext, TESS_COLUMN_FOR_FILTER);
+	non_nulls = tess_expr_non_nulls(expr);
+	result &= check(112, !tess_row_mask_contains(non_nulls, 0) &&
+		tess_row_mask_contains(non_nulls, 2) &&
+		!tess_row_mask_contains(non_nulls, 4) &&
+		tess_row_mask_count(non_nulls) == 54 &&
+		tess_expr_non_nulls(expr) == non_nulls);
 	PG_RETURN_BOOL(result);
 }
 

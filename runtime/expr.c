@@ -48,6 +48,8 @@ struct TessExpr
 	TessDatumColumn result;
 	TessRowMask non_nulls;
 	bool		ready;
+	/* A bare column's mask is built when asked for: a filter never asks. */
+	bool		non_nulls_pending;
 	TessStatus	status;
 };
 
@@ -534,20 +536,13 @@ tess_expr_get_column(TessExpr *expr)
 	ensure_capacity(expr, nrows);
 	if (expr->column >= 0)
 	{
-		int			row = -1;
-
 		batch->ops->get_datum_column(batch, expr->column, &batch->rows,
 									 expr->purpose, &current);
 		if (current.values == NULL || current.isnull == NULL ||
 			current.nrows != nrows)
 			elog(ERROR, "Tessera batch returned an invalid column");
-		/* The input's non-NULL rows, for a chain without steps. */
-		current_bits = expr->bits[1];
-		memset(current_bits, 0,
-			   sizeof(uint64) * tess_row_mask_word_count(nrows));
-		while ((row = tess_row_mask_next(&batch->rows, row)) >= 0)
-			if (!current.isnull[row])
-				current_bits[row / 64] |= UINT64CONST(1) << (row % 64);
+		/* The input's non-NULL rows are not counted unless asked for. */
+		current_bits = NULL;
 	}
 	else
 	{
@@ -586,6 +581,7 @@ tess_expr_get_column(TessExpr *expr)
 	expr->result = current;
 	expr->non_nulls.nrows = nrows;
 	expr->non_nulls.bits = current_bits;
+	expr->non_nulls_pending = current_bits == NULL;
 	expr->ready = true;
 	return &expr->result;
 }
@@ -594,6 +590,19 @@ const TessRowMask *
 tess_expr_non_nulls(TessExpr *expr)
 {
 	(void) tess_expr_get_column(expr);
+	if (expr->non_nulls_pending)
+	{
+		const TessRowMask *rows = &expr->batch->rows;
+		uint64	   *bits = expr->bits[1];
+		int			row = -1;
+
+		memset(bits, 0, sizeof(uint64) * tess_row_mask_word_count(rows->nrows));
+		while ((row = tess_row_mask_next(rows, row)) >= 0)
+			if (!expr->result.isnull[row])
+				bits[row / 64] |= UINT64CONST(1) << (row % 64);
+		expr->non_nulls.bits = bits;
+		expr->non_nulls_pending = false;
+	}
 	return &expr->non_nulls;
 }
 

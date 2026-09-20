@@ -62,8 +62,9 @@ non_nulls = tess_expr_non_nulls(expr);
 
 The result is the batch contract's Datum column, one slot per batch row
 with NULL flags set for the selected rows, and the mask of the selected
-rows whose result is not NULL; both are borrowed until the next bind. The
-results are computed once per bind: scalars are evaluated in the expression
+rows whose result is not NULL; both are borrowed until the next bind. For
+a bare column the mask is built when first asked for, since a filter over
+the column never needs it. The results are computed once per bind: scalars are evaluated in the expression
 context at that point, so a Param changed by a rescan takes effect at the
 next batch. The purpose says whether the input column is read while
 filtering or for the output, as the batch contract distinguishes.
