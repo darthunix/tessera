@@ -7,15 +7,20 @@
 #include "executor/instrument.h"
 #include "fmgr.h"
 #include "nodes/extensible.h"
+#include "nodes/makefuncs.h"
 #include "utils/builtins.h"
 #include "utils/memutils.h"
 
+#include "tessera/planner.h"
 #include "tessera/runtime.h"
 
 PG_MODULE_MAGIC;
 
+PGDLLEXPORT void _PG_init(void);
+
 PG_FUNCTION_INFO_V1(tessera_test_unary_batches);
 PG_FUNCTION_INFO_V1(tessera_test_unary_rows);
+PG_FUNCTION_INFO_V1(tessera_test_unary_bound);
 PG_FUNCTION_INFO_V1(tessera_test_unary_errors);
 
 /*
@@ -354,6 +359,121 @@ tessera_test_unary_rows(PG_FUNCTION_ARGS)
 		slot_shows(tess_unary_exec(unary), 3);
 	tess_unary_end(unary);
 	tess_output_end(child->output);
+	PG_RETURN_BOOL(result);
+}
+
+/* Integer Vars of one relation, as many as requested. */
+static List *
+make_targetlist(int natts)
+{
+	List	   *targetlist = NIL;
+
+	for (int attno = 1; attno <= natts; attno++)
+	{
+		Var		   *var = makeVar(1, attno, INT4OID, -1, InvalidOid, 0);
+
+		targetlist = lappend(targetlist,
+							 makeTargetEntry((Expr *) var, attno, "c", false));
+	}
+	return targetlist;
+}
+
+/*
+ * A node kind that takes tuple bounds: it records the bound and forwards
+ * it to its only child, as a pass-through node does. Its state is a bare
+ * custom scan state whose plan the plan helpers built, so that the unary
+ * helper recognizes the kind, and whose child is a bare sort state, so
+ * that the bound's arrival shows.
+ */
+static int64 recorded_bound = -2;
+
+static void
+bound_node_set_tuple_bound(CustomScanState *css, int64 tuples_needed)
+{
+	recorded_bound = tuples_needed;
+	ExecSetTupleBound(tuples_needed, linitial(css->custom_ps));
+}
+
+static const TessNode bound_node = {
+	TESS_ABI_INITIALIZER(TESS_NODE_ABI_VERSION, TessNode),
+	.name = "tessera.unary_test",
+	.set_tuple_bound = bound_node_set_tuple_bound,
+};
+
+static const CustomPathMethods bound_path_methods = {
+	.CustomName = "tessera_unary_test",
+};
+
+static const CustomScanMethods bound_scan_methods = {
+	.CustomName = "tessera_unary_test",
+};
+
+void
+_PG_init(void)
+{
+	tess_runtime_api()->nodes->add(&bound_node);
+}
+
+static CustomScanState *
+make_bound_child(SortState *sort)
+{
+	Path	   *template = makeNode(Path);
+	TessPathConfig path_config = TESS_STRUCT_INITIALIZER(TessPathConfig);
+	TessPlanConfig config = TESS_STRUCT_INITIALIZER(TessPlanConfig);
+	TessLayout	layout = TESS_STRUCT_INITIALIZER(TessLayout);
+	List	   *tlist = make_targetlist(2);
+	CustomScanState *child = makeNode(CustomScanState);
+
+	template->pathtype = T_SeqScan;
+	path_config.template_path = template;
+	path_config.methods = &bound_path_methods;
+	path_config.node = &bound_node;
+	path_config.children = list_make1(template);
+	config.methods = &bound_scan_methods;
+	config.layout_policy = TESS_LAYOUT_DENSE;
+	config.scan_targetlist = tlist;
+	child->ss.ps.plan = tess_plan_create(tess_path_create(&path_config), tlist,
+										 list_make1(makeNode(Sort)), &config);
+	child->custom_ps = list_make1(sort);
+	child->ss.ps.ps_ResultTupleSlot = MakeSingleTupleTableSlot(make_desc(), &TTSOpsVirtual);
+	layout.ncolumns = 2;
+	layout.ntargets = 2;
+	tess_output_create(CurrentMemoryContext, &child->ss.ps,
+					   child->ss.ps.ps_ResultTupleSlot, &layout);
+	return child;
+}
+
+Datum
+tessera_test_unary_bound(PG_FUNCTION_ARGS)
+{
+	SortState  *sort = makeNode(SortState);
+	CustomScanState *bounded = make_bound_child(sort);
+	CustomScanState *node = make_node(make_desc());
+	FakeChild  *plain = make_child(true);
+	TessLayout	layout = TESS_STRUCT_INITIALIZER(TessLayout);
+	TessUnaryConfig config = TESS_STRUCT_INITIALIZER(TessUnaryConfig);
+	TessUnary  *unary;
+	bool		result;
+
+	layout.ncolumns = 2;
+	layout.ntargets = 2;
+	config.parent_context = CurrentMemoryContext;
+	config.node = node;
+	config.child = &bounded->ss.ps;
+	config.layout = &layout;
+	unary = tess_unary_create(&config);
+	/* The node kind's callback takes the bound and forwards it to the sort. */
+	tess_unary_set_tuple_bound(unary, 5);
+	result = recorded_bound == 5 && sort->bounded && sort->bound == 5;
+	tess_unary_set_tuple_bound(unary, -1);
+	result &= recorded_bound == -1 && !sort->bounded;
+	/* A child of no such kind goes to ExecSetTupleBound: nothing happens. */
+	recorded_bound = -2;
+	config.node = make_node(make_desc());
+	config.child = &plain->css.ss.ps;
+	unary = tess_unary_create(&config);
+	tess_unary_set_tuple_bound(unary, 5);
+	result &= recorded_bound == -2 && !sort->bounded;
 	PG_RETURN_BOOL(result);
 }
 

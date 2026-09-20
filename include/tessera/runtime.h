@@ -232,6 +232,14 @@ extern const TessUnaryStats *tess_unary_stats(TessUnary *unary);
 extern void tess_unary_stop(TessUnary *unary);
 
 /*
+ * Tell the child how many rows the node needs at most, or -1 for no bound,
+ * as ExecSetTupleBound does: a batch child whose node kind takes bounds
+ * receives it through its callback and forwards it below, so a sort under
+ * a limit stays a top-N sort; any other child goes to ExecSetTupleBound.
+ */
+extern void tess_unary_set_tuple_bound(TessUnary *unary, int64 tuples_needed);
+
+/*
  * The node's ExecCustomScan: the child's slot with the next batch for a
  * batch-aware parent, the node's slot with the next row for an ordinary
  * one, or NULL at the end.

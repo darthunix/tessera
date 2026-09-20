@@ -4,6 +4,8 @@
 #include "executor/instrument.h"
 #include "utils/memutils.h"
 
+#include "tessera/plan.h"
+#include "tessera/planner.h"
 #include "tessera/runtime.h"
 
 struct TessUnary
@@ -103,6 +105,39 @@ void
 tess_unary_stop(TessUnary *unary)
 {
 	unary->stopped = true;
+}
+
+void
+tess_unary_set_tuple_bound(TessUnary *unary, int64 tuples_needed)
+{
+	PlanState  *child = unary->child;
+	CustomScan *scan;
+	TessPlanInfo info = TESS_STRUCT_INITIALIZER(TessPlanInfo);
+	const char *kind;
+	const TessNode *node;
+
+	/* A batch node built by the plan helpers may take the bound itself. */
+	if (IsA(child, CustomScanState) && child->plan != NULL &&
+		IsA(child->plan, CustomScan))
+	{
+		scan = (CustomScan *) child->plan;
+		kind = tess_plan_data_kind(scan->custom_private);
+		if (kind != NULL && strcmp(kind, "tessera.plan") == 0)
+		{
+			tess_plan_get_info(scan, &info);
+			node = info.node;
+			pfree(info.child_names);
+			if (info.layout.target_columns != NULL)
+				pfree((void *) info.layout.target_columns);
+			if (TESS_ABI_HAS_FIELD(node, TessNode, set_tuple_bound) &&
+				node->set_tuple_bound != NULL)
+			{
+				node->set_tuple_bound((CustomScanState *) child, tuples_needed);
+				return;
+			}
+		}
+	}
+	ExecSetTupleBound(tuples_needed, child);
 }
 
 /* Derive the child's request from the parent's and the node's own. */

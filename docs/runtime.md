@@ -203,6 +203,14 @@ so a node needs no row-wise code of its own. `tess_unary_stop` ends the
 input early, as a limit does once it is satisfied; execution then returns
 `NULL`.
 
+A node that needs only the first rows, such as a limit, tells the child
+so with `tess_unary_set_tuple_bound`, the helper's form of
+`ExecSetTupleBound`: a batch child whose node kind takes bounds (the
+optional `set_tuple_bound` callback of its `TessNode`) receives it and
+forwards it below, as the pack node does, so a sort under the limit stays a
+top-N sort and the pack node pulls no more rows than the bound; any other
+child goes to `ExecSetTupleBound` itself.
+
 `tess_unary_rescan` performs the node contract's whole rescan order: it
 clears the node's output, finishes the input, rescans the child, resets the
 input and the helper's counters. `tess_unary_end` detaches the node's

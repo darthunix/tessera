@@ -64,7 +64,10 @@ publishes the remaining rows and afterwards returns nothing. Every column
 is materialized: the request's column masks are not used until lazy
 projection arrives. Rescan clears the output, rescans the child and starts
 a fresh batch. The node is parallel-safe whenever its child is and keeps no
-shared state.
+shared state. When the parent bounds the rows it needs, through the node
+kind's `set_tuple_bound` callback, the pack node forwards the bound to its
+child and pulls no more rows than that, so a sort below stays a top-N sort
+and the last batch may be short.
 
 `EXPLAIN` shows `Batch Size` once the node has executed, since the size
 follows the parent's request, and with `ANALYZE` the number of `Batches`;

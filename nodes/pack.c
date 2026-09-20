@@ -29,6 +29,9 @@ typedef struct PackState
 	int			capacity;
 	/* The child returned its last row. */
 	bool		exhausted;
+	/* Rows the parent needs at most in this scan, or -1; rows given so far. */
+	int64		tuples_needed;
+	int64		produced;
 	uint64		batches;
 } PackState;
 
@@ -75,10 +78,22 @@ pack_wrap_rows(PlannerInfo *root, Path *child)
 	return tess_path_create(&config);
 }
 
+/* The parent needs at most tuples_needed rows: pull no more, and tell
+ * the child, so that a sort below stays a top-N sort. */
+static void
+pack_set_tuple_bound(CustomScanState *css, int64 tuples_needed)
+{
+	PackState  *state = (PackState *) css;
+
+	state->tuples_needed = tuples_needed < 0 ? -1 : tuples_needed;
+	ExecSetTupleBound(tuples_needed, state->child);
+}
+
 const TessNode tess_pack_node = {
 	TESS_ABI_INITIALIZER(TESS_NODE_ABI_VERSION, TessNode),
 	.name = TESS_PACK_NODE_NAME,
 	.wrap_rows = pack_wrap_rows,
+	.set_tuple_bound = pack_set_tuple_bound,
 };
 
 static Plan *
@@ -130,6 +145,7 @@ pack_begin(CustomScanState *css, EState *estate, int eflags)
 	state->output = tess_output_create(estate->es_query_cxt, &css->ss.ps,
 									   css->ss.ps.ps_ResultTupleSlot,
 									   &info.layout);
+	state->tuples_needed = -1;
 }
 
 /* Freeze the parent's request; the batch size follows from it. */
@@ -147,6 +163,7 @@ pack_exec(CustomScanState *css)
 {
 	PackState  *state = (PackState *) css;
 	TessBatch  *batch;
+	int			limit;
 
 	if (state->builder == NULL)
 	{
@@ -165,8 +182,16 @@ pack_exec(CustomScanState *css)
 	tess_output_release(state->output);
 	if (state->exhausted)
 		return NULL;
+	/* A bounded parent never gets more rows than it asked for. */
+	limit = state->capacity;
+	if (state->tuples_needed >= 0)
+	{
+		if (state->produced >= state->tuples_needed)
+			return NULL;
+		limit = (int) Min((int64) limit, state->tuples_needed - state->produced);
+	}
 	tess_builder_reset(state->builder);
-	while (!tess_builder_is_full(state->builder))
+	while (limit > 0 && !tess_builder_is_full(state->builder))
 	{
 		TupleTableSlot *slot = ExecProcNode(state->child);
 
@@ -176,10 +201,12 @@ pack_exec(CustomScanState *css)
 			break;
 		}
 		tess_builder_append_slot(state->builder, slot);
+		limit--;
 	}
 	batch = tess_builder_finish(state->builder, InvalidOid);
 	if (batch == NULL)
 		return NULL;
+	state->produced += tess_row_mask_count(&batch->rows);
 	state->batches++;
 	return tess_output_publish(state->output, batch);
 }
@@ -201,6 +228,7 @@ pack_rescan(CustomScanState *css)
 	tess_output_clear(state->output);
 	ExecReScan(state->child);
 	state->exhausted = false;
+	state->produced = 0;
 	state->batches = 0;
 }
 

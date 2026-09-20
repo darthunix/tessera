@@ -3,9 +3,12 @@
 The node registry lets independently built extensions register and find
 kinds of batch-producing nodes by stable name. A `TessNode` describes a kind
 of node, not the state of one query execution: its identity, and optional
-planning callbacks as trailing fields. The first is `wrap_rows`, which the
-pack node publishes so that a batch parent in any module can stand above
-any core path (see [runtime.md](runtime.md), "Building paths").
+planning and execution callbacks as trailing fields. `wrap_rows` is
+published by the pack node so that a batch parent in any module can stand
+above any core path (see [runtime.md](runtime.md), "Building paths");
+`set_tuple_bound` lets a node kind take the bound a limit above passes
+down, as `ExecSetTupleBound` tells the core nodes, and forward it to its
+child.
 
 ## Finding the registry
 
@@ -150,7 +153,10 @@ join, and `Material` strips those flags from its child, so a batch node
 never sees `EXEC_FLAG_BACKWARD` or `EXEC_FLAG_MARK`. A node still checks the
 two flags in `BeginCustomScan` and raises `ERROR` on them, as a guard against
 a planner defect. `EXEC_FLAG_REWIND` is supported through rescan.
-`ExecSetTupleBound` is optional and up to the node; a limit node uses it.
+`ExecSetTupleBound` is optional and up to the node; a limit node calls the
+unary helper's form of it, which reaches a batch child through the node
+kind's `set_tuple_bound` callback, and a pass-through node like the pack
+node forwards the bound and pulls no more rows than it.
 
 ### Parallel execution
 

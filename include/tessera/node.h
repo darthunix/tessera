@@ -4,6 +4,7 @@
 
 #include "postgres.h"
 
+#include "nodes/execnodes.h"
 #include "nodes/pathnodes.h"
 
 #include "tessera/abi.h"
@@ -33,6 +34,13 @@ typedef struct TessNode
 	 * it, and the runtime's tess_batch_input_path calls it.
 	 */
 	CustomPath *(*wrap_rows) (PlannerInfo *root, Path *child);
+	/*
+	 * Optional: the node above needs at most tuples_needed rows from this
+	 * node's execution, or -1 for no bound, as ExecSetTupleBound tells the
+	 * core nodes. A node that passes rows through forwards the bound to its
+	 * child; the unary helper calls it for a node's child.
+	 */
+	void		(*set_tuple_bound) (CustomScanState *node, int64 tuples_needed);
 } TessNode;
 
 #define TESS_NODE_MIN_SIZE \
