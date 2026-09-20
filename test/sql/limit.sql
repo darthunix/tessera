@@ -46,6 +46,15 @@ EXECUTE limited(2);
 EXECUTE limited(5);
 DEALLOCATE limited;
 
+-- A pseudoconstant clause gates the scan with a Result the node could not
+-- read through: the core limit stays.
+SET plan_cache_mode = force_generic_plan;
+PREPARE gated(int) AS SELECT a FROM limit_t WHERE $1 > 0 LIMIT 3;
+EXPLAIN (COSTS OFF) EXECUTE gated(1);
+EXECUTE gated(1);
+DEALLOCATE gated;
+RESET plan_cache_mode;
+
 -- A scrollable cursor: the planner adds Material above the node.
 BEGIN;
 DECLARE c SCROLL CURSOR FOR SELECT a FROM limit_t LIMIT 5;

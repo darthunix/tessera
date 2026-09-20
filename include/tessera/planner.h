@@ -75,13 +75,28 @@ extern void tess_path_get_info(const CustomPath *path, TessPathInfo *result);
 /* The registered node kind that turns rows into batches. */
 #define TESS_PACK_NODE_NAME "tessera.pack"
 
+/* The registered node kind that reads a heap relation in batches. */
+#define TESS_HEAP_SCAN_NODE_NAME "tessera.heap_scan"
+
 /*
- * A batch path over any path: the path itself when it is one, otherwise the
- * pack node's path over it, so that a batch parent can stand above any core
- * path. NULL when the path is parameterized or no pack node is registered;
- * the caller then adds no path.
+ * A batch path over any path: the path itself when it is one, a batch scan
+ * of its relation when the path is a sequential scan of a relation without
+ * clauses and a node kind reads batches natively, otherwise the pack node's
+ * path over it, so that a batch parent can stand above any core path. NULL
+ * when the path is parameterized, when a pseudoconstant clause makes the
+ * planner gate every scan of the relation with a Result the parent could
+ * not read through, or when no pack node is registered; the caller then
+ * adds no path.
  */
 extern Path *tess_batch_input_path(PlannerInfo *root, Path *path);
+
+/*
+ * A batch scan of the relation a sequential scan path reads, evaluating
+ * none of the relation's clauses, for a parent that evaluates them itself.
+ * NULL when the path is not such a scan, is parameterized, is gated as
+ * above, or no node kind takes it.
+ */
+extern Path *tess_batch_scan_path(PlannerInfo *root, Path *path);
 
 /* How a plan describes the columns of the batches it publishes. */
 typedef enum TessLayoutPolicy

@@ -41,6 +41,13 @@ typedef struct TessNode
 	 * child; the unary helper calls it for a node's child.
 	 */
 	void		(*set_tuple_bound) (CustomScanState *node, int64 tuples_needed);
+	/*
+	 * Optional: build this kind's path reading the relation of a
+	 * sequential scan path in batches, evaluating none of the relation's
+	 * clauses, or NULL when the kind cannot. The heap scan node publishes
+	 * it, and the runtime's tess_batch_scan_path calls it.
+	 */
+	CustomPath *(*scan_rows) (PlannerInfo *root, Path *path);
 } TessNode;
 
 #define TESS_NODE_MIN_SIZE \

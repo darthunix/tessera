@@ -49,6 +49,15 @@ static const TessNode unregistered_node = {
 	.name = "tessera.planner_unregistered",
 };
 
+static CustomPath *scan_rows(PlannerInfo *root, Path *path);
+
+/* A stand-in for a node that reads a relation in batches. */
+static const TessNode scan_node = {
+	TESS_ABI_INITIALIZER(TESS_NODE_ABI_VERSION, TessNode),
+	.name = TESS_HEAP_SCAN_NODE_NAME,
+	.scan_rows = scan_rows,
+};
+
 static Node *create_scan_state(CustomScan *cscan);
 
 static const CustomScanMethods scan_methods = {
@@ -214,6 +223,7 @@ void
 _PG_init(void)
 {
 	tess_runtime_api()->nodes->add(&test_node);
+	tess_runtime_api()->nodes->add(&scan_node);
 	RegisterCustomScanMethods(&scan_methods);
 	previous_set_rel_pathlist_hook = set_rel_pathlist_hook;
 	set_rel_pathlist_hook = set_rel_pathlist;
@@ -231,6 +241,17 @@ make_template(void)
 	path->total_cost = 20;
 	path->parallel_safe = true;
 	return path;
+}
+
+static CustomPath *
+scan_rows(PlannerInfo *root, Path *path)
+{
+	TessPathConfig config = TESS_STRUCT_INITIALIZER(TessPathConfig);
+
+	config.template_path = path;
+	config.methods = &path_methods;
+	config.node = &scan_node;
+	return tess_path_create(&config);
 }
 
 static TessPathConfig
@@ -288,6 +309,33 @@ tessera_test_planner_paths(PG_FUNCTION_ARGS)
 	/* Without a pack node loaded, only a batch path is a batch input. */
 	result &= tess_batch_input_path(NULL, &path->path) == &path->path &&
 		tess_batch_input_path(NULL, template) == NULL;
+	/* A scan node reads a relation without clauses; a gated one, nothing. */
+	{
+		PlannerInfo *root = makeNode(PlannerInfo);
+		RelOptInfo *rel = makeNode(RelOptInfo);
+		RestrictInfo *rinfo = makeNode(RestrictInfo);
+		Path	   *scan;
+
+		rel->reloptkind = RELOPT_BASEREL;
+		rel->relid = 1;
+		rel->rtekind = RTE_RELATION;
+		template->parent = rel;
+		scan = tess_batch_input_path(root, template);
+		result &= scan != NULL && tess_path_node(scan) == &scan_node &&
+			((CustomPath *) scan)->custom_paths == NIL && scan->rows == 10 &&
+			tess_batch_scan_path(root, template) != NULL &&
+			tess_batch_scan_path(root, &path->path) == NULL;
+		/* With clauses the input is a pack (none loaded); a parent taking
+		 * the clauses still gets the scan. */
+		rel->baserestrictinfo = list_make1(rinfo);
+		result &= tess_batch_input_path(root, template) == NULL &&
+			tess_batch_scan_path(root, template) != NULL;
+		rinfo->pseudoconstant = true;
+		root->hasPseudoConstantQuals = true;
+		result &= tess_batch_input_path(root, template) == NULL &&
+			tess_batch_scan_path(root, template) == NULL;
+		template->parent = NULL;
+	}
 	tess_path_get_info(path, &info);
 	result &= info.node == &test_node &&
 		list_length(info.expressions) == 1 &&

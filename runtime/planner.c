@@ -106,6 +106,47 @@ tess_path_get_info(const CustomPath *path, TessPathInfo *result)
 	tess_plan_reader_finish(reader);
 }
 
+/*
+ * Whether the planner will gate every scan of the path's relation with a
+ * Result for a pseudoconstant clause: it stands between a batch parent
+ * and its child, which the parent cannot read through.
+ */
+static bool
+gated(PlannerInfo *root, const Path *path)
+{
+	if (root == NULL || path->parent == NULL || !root->hasPseudoConstantQuals)
+		return false;
+	foreach_ptr(RestrictInfo, rinfo, path->parent->baserestrictinfo)
+	{
+		if (rinfo->pseudoconstant)
+			return true;
+	}
+	return false;
+}
+
+Path *
+tess_batch_scan_path(PlannerInfo *root, Path *path)
+{
+	const TessNode *scan;
+	CustomPath *built;
+
+	if (path == NULL)
+		elog(ERROR, "Tessera batch scan requires a path");
+	if (path->pathtype != T_SeqScan || path->param_info != NULL ||
+		gated(root, path))
+		return NULL;
+	scan = tess_runtime_api()->nodes->find(TESS_HEAP_SCAN_NODE_NAME);
+	if (scan == NULL || !TESS_ABI_HAS_FIELD(scan, TessNode, scan_rows) ||
+		scan->scan_rows == NULL)
+		return NULL;
+	built = scan->scan_rows(root, path);
+	if (built == NULL)
+		return NULL;
+	if (tess_path_node(&built->path) != scan)
+		elog(ERROR, "Tessera batch scan node returned a foreign path");
+	return &built->path;
+}
+
 Path *
 tess_batch_input_path(PlannerInfo *root, Path *path)
 {
@@ -116,8 +157,16 @@ tess_batch_input_path(PlannerInfo *root, Path *path)
 		elog(ERROR, "Tessera batch input requires a path");
 	if (tess_path_node(path) != NULL)
 		return path;
-	if (path->param_info != NULL)
+	if (path->param_info != NULL || gated(root, path))
 		return NULL;
+	/* A relation without clauses is read natively when a node kind can. */
+	if (path->parent != NULL && path->parent->baserestrictinfo == NIL)
+	{
+		Path	   *scan = tess_batch_scan_path(root, path);
+
+		if (scan != NULL)
+			return scan;
+	}
 	pack = tess_runtime_api()->nodes->find(TESS_PACK_NODE_NAME);
 	if (pack == NULL || !TESS_ABI_HAS_FIELD(pack, TessNode, wrap_rows) ||
 		pack->wrap_rows == NULL)
