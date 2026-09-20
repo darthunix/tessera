@@ -97,9 +97,11 @@ clauses_supported(PlannerInfo *root, RelOptInfo *rel)
 }
 
 /*
- * The batch input over a copy of the scan: add_path frees the core path
+ * The batch child over a copy of the scan: add_path frees the core path
  * the node's path dominates. The scan reads the clauses' columns as well
- * as the relation's targets, since the node evaluates the clauses.
+ * as the relation's targets, since the node evaluates the clauses. A node
+ * that reads the relation in batches natively evaluates no clause and
+ * comes first; otherwise the pack node stands over the core scan.
  */
 static Path *
 make_child_path(PlannerInfo *root, RelOptInfo *rel, const Path *seqscan)
@@ -107,13 +109,15 @@ make_child_path(PlannerInfo *root, RelOptInfo *rel, const Path *seqscan)
 	Path	   *copy = makeNode(Path);
 	PathTarget *target = copy_pathtarget(rel->reltarget);
 	List	   *clauses = extract_actual_clauses(rel->baserestrictinfo, false);
+	Path	   *child;
 
 	*copy = *seqscan;
 	add_new_columns_to_pathtarget(target,
 								  pull_var_clause((Node *) clauses,
 												  PVC_RECURSE_PLACEHOLDERS));
 	copy->pathtarget = set_pathtarget_cost_width(root, target);
-	return tess_batch_input_path(root, copy);
+	child = tess_batch_scan_path(root, copy);
+	return child != NULL ? child : tess_batch_input_path(root, copy);
 }
 
 static void
@@ -206,7 +210,14 @@ filter_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 	if (!tess_plan_child(best_path, custom_plans, 0, &child) ||
 		!IsA(child.plan, CustomScan))
 		elog(ERROR, "TessFilter expected a batch child");
-	take_clauses((CustomScan *) child.plan, actual);
+	/* A native scan was planned without the clauses; a core scan had them. */
+	if (strcmp(child.node->name, TESS_HEAP_SCAN_NODE_NAME) == 0)
+	{
+		if (child.plan->qual != NIL)
+			elog(ERROR, "TessFilter expected a scan without clauses");
+	}
+	else
+		take_clauses((CustomScan *) child.plan, actual);
 	/* The clauses arrive in evaluation order; the first unsupported one ends the batch prefix. */
 	foreach_ptr(Node, clause, actual)
 	{

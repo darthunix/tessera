@@ -258,6 +258,8 @@ sink_set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
 					  RangeTblEntry *rte)
 {
 	const char *name;
+	const TessNode *pack;
+	CustomPath *wrapped;
 	Path	   *seqscan = NULL;
 	Path	   *copy;
 	Path	   *child;
@@ -285,9 +287,12 @@ sink_set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
 	/* add_path frees the dominated core path; the wrapped child is a copy. */
 	copy = makeNode(Path);
 	*copy = *seqscan;
-	child = tess_batch_input_path(root, copy);
-	if (child == NULL)
+	/* The pack node itself: a batch input may prefer a native scan. */
+	pack = tess_runtime_api()->nodes->find(TESS_PACK_NODE_NAME);
+	if (pack == NULL || !TESS_ABI_HAS_FIELD(pack, TessNode, wrap_rows) ||
+		pack->wrap_rows == NULL || (wrapped = pack->wrap_rows(root, copy)) == NULL)
 		return;
+	child = &wrapped->path;
 	template = *seqscan;
 	template.total_cost *= 0.5;
 	if (trim_rows >= 0)
