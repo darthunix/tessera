@@ -11,6 +11,7 @@ HEADERS = \
 	../include/tessera/bridge.h \
 	../include/tessera/expr.h \
 	../include/tessera/function.h \
+	../include/tessera/heap_deform.h \
 	../include/tessera/kernels.h \
 	../include/tessera/layout.h \
 	../include/tessera/node.h \
