@@ -72,6 +72,72 @@ extern void tess_builder_append_slot(TessBuilder *builder, TupleTableSlot *slot)
 extern TessBatch *tess_builder_finish(TessBuilder *builder, Oid table_oid);
 
 /*
+ * A heap batch keeps the heap tuples of up to capacity rows instead of
+ * copying their columns: a row appended from a buffer heap tuple slot is
+ * kept as a reference into its page, which stays pinned until the batch
+ * is released, and a row from any other slot is copied as a tuple. A
+ * column is deformed only when a consumer asks for it and only for the
+ * rows it asks for, resuming each row from where an earlier request
+ * stopped (see tessera/heap_deform.h); by-reference values point into
+ * the tuples. The batch exposes get_datum_column and release. See
+ * docs/runtime.md.
+ */
+typedef struct TessHeapBatch TessHeapBatch;
+
+typedef struct TessHeapBatchConfig
+{
+	Size		struct_size;
+	/* Owns the batch and its arrays. */
+	MemoryContext parent_context;
+	/* Columns of the batch: the leading attributes of the slots appended. */
+	int			ncolumns;
+	/* Rows in one batch; more than 64 is allowed. */
+	int			capacity;
+} TessHeapBatchConfig;
+
+#define TESS_HEAP_BATCH_CONFIG_MIN_SIZE \
+	TESS_ABI_SIZE_INCLUDING_FIELD(TessHeapBatchConfig, capacity)
+
+typedef struct TessHeapBatchStats
+{
+	/* Values deformed on request. */
+	uint64		deformed_datums;
+	/* Of those, values before a row's cursor, deformed from the row's start. */
+	uint64		restarted_datums;
+	/* Rows copied as tuples, from slots without a pinned page. */
+	uint64		copied_tuples;
+} TessHeapBatchStats;
+
+/* Allocate an empty heap batch in the configured context. */
+extern TessHeapBatch *tess_heap_batch_create(const TessHeapBatchConfig *config);
+
+/*
+ * Drop the previous rows and start an empty batch. The caller must first
+ * take a previously returned batch off its slot binding, which releases
+ * it; a batch never released is released here.
+ */
+extern void tess_heap_batch_reset(TessHeapBatch *batch);
+
+/* True after capacity rows were appended or the batch was finished. */
+extern bool tess_heap_batch_is_full(const TessHeapBatch *batch);
+
+/*
+ * Append one row: a reference into the page of a buffer heap tuple slot,
+ * or a copy of any other slot's tuple. The slot's descriptor is the
+ * batch's from the first row on; the slot may be reused afterwards.
+ */
+extern void tess_heap_batch_append_slot(TessHeapBatch *batch,
+										TupleTableSlot *slot);
+
+/*
+ * Finish the batch and return it, or NULL without rows. The batch stays
+ * valid until it is released; finishing again returns the same batch.
+ */
+extern TessBatch *tess_heap_batch_finish(TessHeapBatch *batch, Oid table_oid);
+
+extern const TessHeapBatchStats *tess_heap_batch_stats(const TessHeapBatch *batch);
+
+/*
  * The output side of a node: a virtual slot bound to the bridge through
  * which batches are published to a batch-aware parent and rows are served
  * to an ordinary one. Publishing shows the batch's first selected row in
