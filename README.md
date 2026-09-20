@@ -13,7 +13,9 @@ Tessera currently targets PostgreSQL master and is not ready for production
 use.
 
 See the [bridge guide](docs/bridge.md) for the public C API, ownership rules,
-and a runnable example using independent producer and consumer modules, and
+how a running installation preloads the bridge and the modules in every
+session, and a runnable example using independent producer and consumer
+modules, and
 the [node guide](docs/node.md) for the node registry and what every batch
 node must do. The [function guide](docs/function.md) describes how batch
 implementations of PostgreSQL functions are registered and called, and the

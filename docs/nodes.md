@@ -4,8 +4,16 @@
 links the runtime library statically and, when loaded, registers its node
 kinds in the bridge's node registry and its scan methods with PostgreSQL.
 It installs no planner hook of its own: the pack node below is created by
-batch parents, and the nodes that add paths themselves come later. Load it
-after the bridge; loading it without the bridge is an error:
+batch parents, and the nodes that add paths themselves come later. It is
+loaded after the bridge; loading it without the bridge is an error. A
+running installation preloads both in every session (see
+[bridge.md](bridge.md)):
+
+```
+session_preload_libraries = 'tessera, tessera_nodes, tessera_kernels'
+```
+
+Tests and one-off sessions load them by hand instead:
 
 ```sql
 CREATE EXTENSION tessera;

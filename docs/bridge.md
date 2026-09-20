@@ -96,6 +96,21 @@ there; an explicit SQL load is:
 LOAD '$libdir/tessera';
 ```
 
+The recommended arrangement for a running installation is to preload the
+bridge and the modules in every session from `postgresql.conf`:
+
+```
+session_preload_libraries = 'tessera, tessera_nodes, tessera_kernels'
+```
+
+The bridge comes first: the initialization of the node and kernel modules
+requires it, and the list is loaded in order. Every backend then has the
+bridge, the registries and the modules from the start of its session.
+`CREATE EXTENSION tessera` remains the one-time action in a database, and
+the way tests and one-off sessions load the bridge; it does not replace the
+preload. `shared_preload_libraries` works as well but is not required, since
+Tessera reserves no shared memory at startup.
+
 `CREATE EXTENSION IF NOT EXISTS tessera` is not a substitute when the
 extension already exists: its creation script will not run again. Loading
 the same library again in an already initialized backend is safe.
