@@ -2,8 +2,8 @@
 
 `libtessera_runtime.a` (`runtime/`) holds the helpers a batch node needs
 beyond the bridge's contract: building batches from rows, the node's output
-and input sides, the named plan-data codec, the path and plan helpers, and
-later the unary node helper. It is a static library, installed next to the bridge in
+and input sides, the unary node helper over both, the named plan-data codec
+and the path and plan helpers. It is a static library, installed next to the bridge in
 `pkglibdir` with its header `tessera/runtime.h`; a node module links it
 rather than calling through the bridge, so the bridge stays a small contract
 and the helpers can change with the nodes that use them:
@@ -153,6 +153,56 @@ to the child, which releases it when it publishes the next one or ends.
 Rescan follows the node contract: the node clears its own output, finishes
 its input, calls `ExecReScan` on the child, and then `tess_input_rescan`,
 which forgets the cached slot and binding.
+
+## Unary nodes
+
+`TessUnary` joins the output and input sides for the common node with one
+batch child that only removes rows from the child's batches: a limit, a
+filter. A node that builds a new physical batch, changes the column layout
+or has several children uses the output and input helpers directly.
+
+The node initializes its child, keeps it in `custom_ps` and creates the
+helper in `BeginCustomScan`:
+
+```c
+child = ExecInitNode(linitial(cscan->custom_plans), estate, eflags);
+css->custom_ps = list_make1(child);
+config.parent_context = estate->es_query_cxt;
+config.node = css;
+config.child = child;
+config.layout = &plan.layout;
+config.filter_columns = columns_read_while_processing;
+config.process = trim_batch;
+config.private_data = state;
+unary = tess_unary_create(&config);
+```
+
+`create` binds the node's result slot, which is where the parent sends its
+request, and wraps the child, which must be a batch node. Nothing is ever
+published through the node's own binding: a batch can be on one binding
+only, and the child's batches stay on the child's.
+
+The first execution derives the child's request from the parent's, frozen
+at that point, and the node's own: the filter and projection columns are
+the unions of both, the batch limit is the smaller of the two nonzero
+limits, and the child is always asked for batches. The node's layout must
+have the child's number of columns, since batches pass through unchanged.
+`tess_unary_child_request` returns what was sent.
+
+Each fetch takes the child's next batch, hands it to `process`, which
+clears rows from the mask and returns how many remain, counts the removed
+rows as filtered in the node's instrumentation, and skips a batch left
+without rows. For a batch-aware parent, execution returns the child's slot
+with the batch: the parent finds the binding of that slot and finishes the
+batch there, and the helper adds the batch's other rows to the node's
+instrumentation, since one call returned them all. `tess_unary_stop` ends
+the input early, as a limit does once it is satisfied; execution then
+returns `NULL`.
+
+`tess_unary_rescan` performs the node contract's whole rescan order: it
+clears the node's output, finishes the input, rescans the child, resets the
+input and the helper's counters. `tess_unary_end` detaches the node's
+binding; the node ends the child itself.
 
 ## Named plan data
 

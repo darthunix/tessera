@@ -1,0 +1,220 @@
+#include "postgres.h"
+
+#include "executor/executor.h"
+#include "executor/instrument.h"
+#include "utils/memutils.h"
+
+#include "tessera/runtime.h"
+
+struct TessUnary
+{
+	CustomScanState *node;
+	PlanState  *child;
+	/* The node's request binding; nothing is ever published through it. */
+	TessOutput *output;
+	TessInput  *input;
+	TessLayout	layout;
+	Bitmapset  *filter_columns;
+	Bitmapset  *projection_columns;
+	int			max_rows;
+	TessUnaryProcess process;
+	void	   *private_data;
+	/* Both frozen at the first execution. */
+	const TessRequest *request;
+	const TessRequest *child_request;
+	TessBatch  *active_batch;
+	int			next_row;
+	bool		stopped;
+	TessUnaryStats stats;
+};
+
+TessUnary *
+tess_unary_create(const TessUnaryConfig *config)
+{
+	TessUnary  *unary;
+	MemoryContext oldcontext;
+
+	if (config == NULL || config->struct_size < TESS_UNARY_CONFIG_MIN_SIZE)
+		elog(ERROR, "Tessera received an incompatible unary configuration");
+	if (config->parent_context == NULL || config->node == NULL ||
+		config->child == NULL || config->layout == NULL ||
+		config->layout->struct_size < TESS_LAYOUT_MIN_SIZE)
+		elog(ERROR, "Tessera unary node requires a context, node, child and layout");
+	if (config->max_rows < 0)
+		elog(ERROR, "Tessera unary node batch limit must not be negative");
+	unary = MemoryContextAllocZero(config->parent_context, sizeof(*unary));
+	unary->node = config->node;
+	unary->child = config->child;
+	unary->max_rows = config->max_rows;
+	unary->process = config->process;
+	unary->private_data = config->private_data;
+	unary->next_row = -1;
+	oldcontext = MemoryContextSwitchTo(config->parent_context);
+	unary->filter_columns = bms_copy(config->filter_columns);
+	unary->projection_columns = bms_copy(config->projection_columns);
+	unary->layout = *config->layout;
+	if (config->layout->target_columns != NULL)
+	{
+		int		   *columns = palloc_array(int, config->layout->ntargets);
+
+		memcpy(columns, config->layout->target_columns,
+			   sizeof(*columns) * config->layout->ntargets);
+		unary->layout.target_columns = columns;
+	}
+	MemoryContextSwitchTo(oldcontext);
+	unary->output = tess_output_create(config->parent_context,
+									   &config->node->ss.ps,
+									   config->node->ss.ps.ps_ResultTupleSlot,
+									   config->layout);
+	unary->input = tess_input_create(config->parent_context, config->child);
+	return unary;
+}
+
+PlanState *
+tess_unary_child(TessUnary *unary)
+{
+	return unary->child;
+}
+
+const TessRequest *
+tess_unary_request(TessUnary *unary)
+{
+	return unary->request;
+}
+
+const TessRequest *
+tess_unary_child_request(TessUnary *unary)
+{
+	return unary->child_request;
+}
+
+const TessUnaryStats *
+tess_unary_stats(TessUnary *unary)
+{
+	return &unary->stats;
+}
+
+void
+tess_unary_stop(TessUnary *unary)
+{
+	unary->stopped = true;
+}
+
+/* Derive the child's request from the parent's and the node's own. */
+static void
+forward_request(TessUnary *unary)
+{
+	const TessBindingOps *ops = tess_runtime_api()->binding_ops;
+	const TessLayout *child_layout = tess_input_layout(unary->input);
+	TessRequest request = TESS_STRUCT_INITIALIZER(TessRequest);
+	Bitmapset  *filter;
+	Bitmapset  *projection;
+	int			max_rows = unary->max_rows;
+
+	unary->request = tess_output_request(unary->output);
+	if (child_layout->ncolumns != unary->layout.ncolumns)
+		elog(ERROR, "Tessera unary node cannot pass %d columns through as %d",
+			 child_layout->ncolumns, unary->layout.ncolumns);
+	if (unary->request->output_mode != TESS_OUTPUT_BATCH)
+		elog(ERROR, "Tessera unary node cannot serve a row-wise parent yet");
+	filter = bms_union(unary->filter_columns, unary->request->filter_columns);
+	projection = bms_union(unary->projection_columns,
+						   unary->request->projection_columns);
+	if (unary->request->max_batch_rows > 0)
+		max_rows = max_rows == 0 ? unary->request->max_batch_rows :
+			Min(max_rows, unary->request->max_batch_rows);
+	/* The child is always consumed as whole batches. */
+	request.filter_columns = filter;
+	request.projection_columns = projection;
+	request.output_mode = TESS_OUTPUT_BATCH;
+	request.max_batch_rows = max_rows;
+	tess_input_set_request(unary->input, &request);
+	unary->child_request = ops->freeze_request(tess_input_binding(unary->input));
+	bms_free(filter);
+	bms_free(projection);
+}
+
+/* Make the next batch with rows active, or return false at the end. */
+static bool
+fetch_batch(TessUnary *unary)
+{
+	for (;;)
+	{
+		TessBatch  *batch;
+		int			rows;
+		int			kept;
+
+		if (unary->stopped)
+			return false;
+		batch = tess_input_next(unary->input);
+		if (batch == NULL)
+			return false;
+		rows = tess_row_mask_count(&batch->rows);
+		unary->stats.input_batches++;
+		unary->stats.input_rows += rows;
+		kept = rows;
+		if (unary->process != NULL)
+		{
+			kept = unary->process(unary->private_data, batch, rows);
+			if (kept != tess_row_mask_count(&batch->rows))
+				elog(ERROR, "Tessera unary node process returned a wrong row count");
+		}
+		InstrCountFiltered1(unary->node, rows - kept);
+		if (kept == 0)
+		{
+			tess_input_finish(unary->input);
+			continue;
+		}
+		unary->stats.output_rows += kept;
+		unary->active_batch = batch;
+		unary->next_row = tess_row_mask_next(&batch->rows, -1);
+		return true;
+	}
+}
+
+/* Forward the child's slot: the parent reads and finishes the batch there. */
+static TupleTableSlot *
+exec_batch(TessUnary *unary)
+{
+	PlanState  *ps = &unary->node->ss.ps;
+
+	if (!fetch_batch(unary))
+	{
+		unary->active_batch = NULL;
+		return NULL;
+	}
+	/* One call returns the whole batch, which the executor counts as one. */
+	if (ps->instrument != NULL)
+		ps->instrument->tuplecount +=
+			tess_row_mask_count(&unary->active_batch->rows) - 1;
+	return tess_input_slot(unary->input);
+}
+
+TupleTableSlot *
+tess_unary_exec(TessUnary *unary)
+{
+	if (unary->request == NULL)
+		forward_request(unary);
+	return exec_batch(unary);
+}
+
+void
+tess_unary_end(TessUnary *unary)
+{
+	tess_output_end(unary->output);
+}
+
+void
+tess_unary_rescan(TessUnary *unary)
+{
+	tess_output_clear(unary->output);
+	ExecClearTuple(unary->node->ss.ps.ps_ResultTupleSlot);
+	if (unary->active_batch != NULL)
+		tess_input_finish(unary->input);
+	ExecReScan(unary->child);
+	tess_input_rescan(unary->input);
+	unary->active_batch = NULL;
+	unary->next_row = -1;
+	unary->stopped = false;
+	MemSet(&unary->stats, 0, sizeof(unary->stats));
+}

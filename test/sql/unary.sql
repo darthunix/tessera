@@ -1,0 +1,33 @@
+CREATE EXTENSION tessera;
+
+\getenv libdir PG_LIBDIR
+\getenv dlsuffix PG_DLSUFFIX
+\set unary_test :libdir '/tessera_unary_test' :dlsuffix
+LOAD :'unary_test';
+
+CREATE FUNCTION tessera_test_unary_batches()
+RETURNS boolean
+AS :'unary_test', 'tessera_test_unary_batches'
+LANGUAGE C STRICT;
+
+CREATE FUNCTION tessera_test_unary_errors(integer)
+RETURNS void
+AS :'unary_test', 'tessera_test_unary_errors'
+LANGUAGE C STRICT;
+
+SELECT tessera_test_unary_batches() AS batches \gset
+\echo :batches
+
+\set VERBOSITY terse
+SELECT tessera_test_unary_errors(0);
+SELECT tessera_test_unary_errors(1);
+SELECT tessera_test_unary_errors(2);
+SELECT tessera_test_unary_errors(3);
+SELECT tessera_test_unary_errors(4);
+SELECT tessera_test_unary_errors(5);
+SELECT tessera_test_unary_errors(6);
+\set VERBOSITY default
+
+DROP FUNCTION tessera_test_unary_errors(integer);
+DROP FUNCTION tessera_test_unary_batches();
+DROP EXTENSION tessera;
