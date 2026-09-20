@@ -106,6 +106,28 @@ tess_path_get_info(const CustomPath *path, TessPathInfo *result)
 	tess_plan_reader_finish(reader);
 }
 
+Path *
+tess_batch_input_path(PlannerInfo *root, Path *path)
+{
+	const TessNode *pack;
+	CustomPath *wrapped;
+
+	if (path == NULL)
+		elog(ERROR, "Tessera batch input requires a path");
+	if (tess_path_node(path) != NULL)
+		return path;
+	if (path->param_info != NULL)
+		return NULL;
+	pack = tess_runtime_api()->nodes->find(TESS_PACK_NODE_NAME);
+	if (pack == NULL || !TESS_ABI_HAS_FIELD(pack, TessNode, wrap_rows) ||
+		pack->wrap_rows == NULL)
+		return NULL;
+	wrapped = pack->wrap_rows(root, path);
+	if (wrapped == NULL || tess_path_node(&wrapped->path) != pack)
+		elog(ERROR, "Tessera pack node returned a foreign path");
+	return &wrapped->path;
+}
+
 static void
 check_layout(const TessLayout *layout)
 {

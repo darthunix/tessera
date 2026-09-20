@@ -72,6 +72,17 @@ typedef struct TessPathInfo
 /* Read the path's data; the pointers are borrowed from the path. */
 extern void tess_path_get_info(const CustomPath *path, TessPathInfo *result);
 
+/* The registered node kind that turns rows into batches. */
+#define TESS_PACK_NODE_NAME "tessera.pack"
+
+/*
+ * A batch path over any path: the path itself when it is one, otherwise the
+ * pack node's path over it, so that a batch parent can stand above any core
+ * path. NULL when the path is parameterized or no pack node is registered;
+ * the caller then adds no path.
+ */
+extern Path *tess_batch_input_path(PlannerInfo *root, Path *path);
+
 /* How a plan describes the columns of the batches it publishes. */
 typedef enum TessLayoutPolicy
 {

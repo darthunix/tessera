@@ -237,6 +237,25 @@ data back in `PlanCustomPath`, and `tess_path_matches` recognizes a node's
 own paths by their methods. Never `copyObject` a path: PostgreSQL does not
 copy path nodes, and neither does this library.
 
+A batch parent may stand above any core path: `tess_batch_input_path`
+returns a batch path over the path it is given, the path itself when it is
+one, and otherwise the pack node's path over it, through the `wrap_rows`
+callback the pack node registers under `TESS_PACK_NODE_NAME`. It returns
+`NULL` for a parameterized path or when no pack node is loaded, and the
+parent then adds no path:
+
+```c
+Path *child = tess_batch_input_path(root, copy_of_seqscan);
+
+if (child == NULL)
+    return;
+config.children = list_make1(child);
+```
+
+A parent that adds its path to the same relation as the child copies the
+child first (`*copy = *seqscan`): `add_path` frees a core path that the new
+path dominates, and the wrapped child must outlive it.
+
 ## Building plans
 
 `PlanCustomPath` turns the path into a `CustomScan` the same way for every

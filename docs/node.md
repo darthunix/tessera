@@ -2,9 +2,10 @@
 
 The node registry lets independently built extensions register and find
 kinds of batch-producing nodes by stable name. A `TessNode` describes a kind
-of node, not the state of one query execution. It currently contains only
-identity; planning and execution interfaces will be added with the first
-real node consumer, `TessPack`.
+of node, not the state of one query execution: its identity, and optional
+planning callbacks as trailing fields. The first is `wrap_rows`, which the
+pack node publishes so that a batch parent in any module can stand above
+any core path (see [runtime.md](runtime.md), "Building paths").
 
 ## Finding the registry
 
@@ -50,7 +51,8 @@ Names are nonempty, case-sensitive, and unique among nodes in one PostgreSQL
 backend. Registering the same pointer again is safe. Another description with
 the same name is an error. A null description, incompatible ABI version or
 size, or a null or empty registration name is also an error. Descriptions
-with additional trailing fields are accepted.
+with additional trailing fields are accepted; a consumer checks an optional
+callback such as `wrap_rows` with `TESS_ABI_HAS_FIELD` before calling it.
 
 Source and node names belong to separate registries. A source and a node may
 use the same name; changing one registry does not affect the other. Each

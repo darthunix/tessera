@@ -148,9 +148,9 @@ and validation in `consumer_binding_ops`. API discovery uses `postgres.h`,
 `fmgr.h`, and `tessera/bridge.h`.
 
 Keep the validated operation table for subsequent calls; do not repeat API
-discovery for each row or batch. The source and node registries currently
-describe identities, not planning or execution callbacks. Their usage is
-covered in [source.md](source.md) and [node.md](node.md).
+discovery for each row or batch. The source registry describes identities;
+a node description may also carry optional planning callbacks. Their usage
+is covered in [source.md](source.md) and [node.md](node.md).
 
 ## Version zero
 

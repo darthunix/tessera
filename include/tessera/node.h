@@ -4,6 +4,8 @@
 
 #include "postgres.h"
 
+#include "nodes/pathnodes.h"
+
 #include "tessera/abi.h"
 
 #define TESS_NODE_ABI_VERSION 0
@@ -17,14 +19,20 @@
  * structure or name string. The structure and name string must remain valid
  * and unchanged from add until remove returns. The provider must ensure that
  * all consumers have finished using their borrowed pointers before remove,
- * then may free its allocations. Planning and execution interfaces will be
- * added with the first executor consumer.
+ * then may free its allocations. Planning callbacks are optional trailing
+ * fields: a consumer checks them with TESS_ABI_HAS_FIELD.
  */
 typedef struct TessNode
 {
 	uint32		abi_version;
 	Size		struct_size;
 	const char *name;
+	/*
+	 * Optional: build this kind's path over a child path that returns
+	 * ordinary rows, or NULL when the kind cannot. The pack node publishes
+	 * it, and the runtime's tess_batch_input_path calls it.
+	 */
+	CustomPath *(*wrap_rows) (PlannerInfo *root, Path *child);
 } TessNode;
 
 #define TESS_NODE_MIN_SIZE \

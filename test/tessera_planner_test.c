@@ -285,6 +285,9 @@ tessera_test_planner_paths(PG_FUNCTION_ARGS)
 	result &= tess_path_node(&path->path) == &test_node &&
 		tess_path_node(template) == NULL && tess_path_node(NULL) == NULL &&
 		tess_path_node(&make_foreign_path()->path) == NULL;
+	/* Without a pack node loaded, only a batch path is a batch input. */
+	result &= tess_batch_input_path(NULL, &path->path) == &path->path &&
+		tess_batch_input_path(NULL, template) == NULL;
 	tess_path_get_info(path, &info);
 	result &= info.node == &test_node &&
 		list_length(info.expressions) == 1 &&
