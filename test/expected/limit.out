@@ -68,7 +68,9 @@ SELECT a FROM limit_t LIMIT 0;
    Input Rows: 0
    Output Rows: 0
    ->  Custom Scan (TessHeapScan) on limit_t (never executed)
-(5 rows)
+         Batches: 0
+         Pages: 0
+(7 rows)
 
 -- More than one batch, with NULL values passing through.
 EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
@@ -80,7 +82,12 @@ SELECT a FROM limit_t LIMIT 70;
    Input Rows: 70
    Output Rows: 70
    ->  Custom Scan (TessHeapScan) on limit_t (actual rows=70.00 loops=1)
-(5 rows)
+         Batch Size: 64
+         Batches: 2
+         Pages: 1
+         Deformed Datums: 70
+         Restarted Datums: 0
+(10 rows)
 
 SELECT count(*), count(b), sum(a) FROM (SELECT a, b FROM limit_t LIMIT 70) AS s;
  count | count | sum  
@@ -247,7 +254,12 @@ SELECT a FROM limit_empty LIMIT 3;
    Input Rows: 0
    Output Rows: 0
    ->  Custom Scan (TessHeapScan) on limit_empty (actual rows=0.00 loops=1)
-(5 rows)
+         Batch Size: 64
+         Batches: 0
+         Pages: 0
+         Deformed Datums: 0
+         Restarted Datums: 0
+(10 rows)
 
 SELECT a FROM limit_empty LIMIT 3;
  a 

@@ -4,6 +4,8 @@
 #include "access/relscan.h"
 #include "access/table.h"
 #include "access/tableam.h"
+#include "commands/explain.h"
+#include "commands/explain_format.h"
 #include "executor/executor.h"
 #include "optimizer/optimizer.h"
 #include "parser/parsetree.h"
@@ -39,6 +41,8 @@ typedef struct HeapScanState
 	TessHeapBatch *heap;
 	const TessRequest *request;
 	int			capacity;
+	/* The scan collects a page's visible tuples; otherwise one at a time. */
+	bool		pagemode;
 	bool		page_active;
 	/* The next entry of the page's visible tuples to take. */
 	int			page_cursor;
@@ -59,6 +63,8 @@ static void heap_scan_begin(CustomScanState *css, EState *estate, int eflags);
 static TupleTableSlot *heap_scan_exec(CustomScanState *css);
 static void heap_scan_end(CustomScanState *css);
 static void heap_scan_rescan(CustomScanState *css);
+static void heap_scan_explain(CustomScanState *css, List *ancestors,
+							  ExplainState *es);
 
 static const CustomPathMethods heap_scan_path_methods = {
 	.CustomName = "TessHeapScan",
@@ -76,6 +82,7 @@ static const CustomExecMethods heap_scan_exec_methods = {
 	.ExecCustomScan = heap_scan_exec,
 	.EndCustomScan = heap_scan_end,
 	.ReScanCustomScan = heap_scan_rescan,
+	.ExplainCustomScan = heap_scan_explain,
 };
 
 /* The parent needs at most tuples_needed rows: read no more than that. */
@@ -227,9 +234,8 @@ heap_scan_start(HeapScanState *state)
 	if (ScanRelIsReadOnly(&state->css.ss))
 		flags |= SO_HINT_REL_READ_ONLY;
 	state->scan = table_beginscan(rel, estate->es_snapshot, 0, NULL, flags);
-	/* Cleared for a non-MVCC snapshot, which no query plan uses. */
-	if ((state->scan->rs_flags & SO_ALLOW_PAGEMODE) == 0)
-		elog(ERROR, "TessHeapScan requires a scan in page mode");
+	/* Cleared for a non-MVCC snapshot: then one tuple at a time. */
+	state->pagemode = (state->scan->rs_flags & SO_ALLOW_PAGEMODE) != 0;
 	config.parent_context = estate->es_query_cxt;
 	config.ncolumns = state->layout.ncolumns;
 	config.capacity = state->capacity;
@@ -315,16 +321,33 @@ heap_scan_exec(CustomScanState *css)
 	}
 	tess_heap_batch_reset(state->heap);
 	hscan = (HeapScanDesc) state->scan;
-	/* A batch takes the rows of one page, never of two. */
-	if (!state->page_active || state->page_cursor >= hscan->rs_ntuples)
+	if (state->pagemode)
 	{
-		if (!next_page(state))
+		/* A batch takes the rows of one page, never of two. */
+		if (!state->page_active || state->page_cursor >= hscan->rs_ntuples)
 		{
-			state->exhausted = true;
-			return NULL;
+			if (!next_page(state))
+			{
+				state->exhausted = true;
+				return NULL;
+			}
+		}
+		fill_from_page(state, limit);
+	}
+	else
+	{
+		while (limit > 0 && !tess_heap_batch_is_full(state->heap))
+		{
+			if (!heap_getnextslot(state->scan, ForwardScanDirection,
+								  state->landing))
+			{
+				state->exhausted = true;
+				break;
+			}
+			tess_heap_batch_append_slot(state->heap, state->landing);
+			limit--;
 		}
 	}
-	fill_from_page(state, limit);
 	batch = tess_heap_batch_finish(state->heap,
 								   RelationGetRelid(css->ss.ss_currentRelation));
 	if (batch == NULL)
@@ -361,4 +384,25 @@ heap_scan_rescan(CustomScanState *css)
 	state->produced = 0;
 	state->batches = 0;
 	state->pages = 0;
+}
+
+static void
+heap_scan_explain(CustomScanState *css, List *ancestors, ExplainState *es)
+{
+	HeapScanState *state = (HeapScanState *) css;
+
+	/* The parent's request, and so the size, is known once executed. */
+	if (state->request != NULL)
+		ExplainPropertyInteger("Batch Size", NULL, state->capacity, es);
+	if (!es->analyze)
+		return;
+	ExplainPropertyInteger("Batches", NULL, state->batches, es);
+	ExplainPropertyInteger("Pages", NULL, state->pages, es);
+	if (state->heap != NULL)
+	{
+		const TessHeapBatchStats *stats = tess_heap_batch_stats(state->heap);
+
+		ExplainPropertyInteger("Deformed Datums", NULL, stats->deformed_datums, es);
+		ExplainPropertyInteger("Restarted Datums", NULL, stats->restarted_datums, es);
+	}
 }
