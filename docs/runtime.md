@@ -195,9 +195,13 @@ rows as filtered in the node's instrumentation, and skips a batch left
 without rows. For a batch-aware parent, execution returns the child's slot
 with the batch: the parent finds the binding of that slot and finishes the
 batch there, and the helper adds the batch's other rows to the node's
-instrumentation, since one call returned them all. `tess_unary_stop` ends
-the input early, as a limit does once it is satisfied; execution then
-returns `NULL`.
+instrumentation, since one call returned them all. For an ordinary parent,
+the helper serves the batch's rows one per call from the node's own slot:
+it adds the batch column of every slot attribute to the child's projection
+request, reads those columns once per batch and copies one row at a time,
+so a node needs no row-wise code of its own. `tess_unary_stop` ends the
+input early, as a limit does once it is satisfied; execution then returns
+`NULL`.
 
 `tess_unary_rescan` performs the node contract's whole rescan order: it
 clears the node's output, finishes the input, rescans the child, resets the

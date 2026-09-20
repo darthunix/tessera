@@ -132,18 +132,14 @@ pack_begin(CustomScanState *css, EState *estate, int eflags)
 									   &info.layout);
 }
 
-/* The batch size, known once the parent's request is frozen. */
-static int
-pack_capacity(PackState *state)
+/* Freeze the parent's request; the batch size follows from it. */
+static void
+pack_freeze_request(PackState *state)
 {
-	if (state->request == NULL)
-	{
-		state->request = tess_output_request(state->output);
-		state->capacity = state->request->max_batch_rows > 0 ?
-			Min(state->request->max_batch_rows, PACK_BATCH_ROWS) :
-			PACK_BATCH_ROWS;
-	}
-	return state->capacity;
+	state->request = tess_output_request(state->output);
+	state->capacity = state->request->max_batch_rows > 0 ?
+		Min(state->request->max_batch_rows, PACK_BATCH_ROWS) :
+		PACK_BATCH_ROWS;
 }
 
 static TupleTableSlot *
@@ -159,7 +155,8 @@ pack_exec(CustomScanState *css)
 		config.parent_context = css->ss.ps.state->es_query_cxt;
 		config.tuple_desc = ExecGetResultType(state->child);
 		config.ncolumns = css->ss.ps.ps_ResultTupleSlot->tts_tupleDescriptor->natts;
-		config.capacity = pack_capacity(state);
+		pack_freeze_request(state);
+		config.capacity = state->capacity;
 		if (state->request->output_mode != TESS_OUTPUT_BATCH)
 			elog(ERROR, "Tessera pack requires a batch-aware parent");
 		state->builder = tess_builder_create(&config);
@@ -212,7 +209,9 @@ pack_explain(CustomScanState *css, List *ancestors, ExplainState *es)
 {
 	PackState  *state = (PackState *) css;
 
-	ExplainPropertyInteger("Batch Size", NULL, pack_capacity(state), es);
+	/* The parent's request, and so the size, is known once executed. */
+	if (state->request != NULL)
+		ExplainPropertyInteger("Batch Size", NULL, state->capacity, es);
 	if (es->analyze)
 		ExplainPropertyInteger("Batches", NULL, state->batches, es);
 }

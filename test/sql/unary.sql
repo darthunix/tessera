@@ -10,6 +10,11 @@ RETURNS boolean
 AS :'unary_test', 'tessera_test_unary_batches'
 LANGUAGE C STRICT;
 
+CREATE FUNCTION tessera_test_unary_rows()
+RETURNS boolean
+AS :'unary_test', 'tessera_test_unary_rows'
+LANGUAGE C STRICT;
+
 CREATE FUNCTION tessera_test_unary_errors(integer)
 RETURNS void
 AS :'unary_test', 'tessera_test_unary_errors'
@@ -17,6 +22,8 @@ LANGUAGE C STRICT;
 
 SELECT tessera_test_unary_batches() AS batches \gset
 \echo :batches
+SELECT tessera_test_unary_rows() AS rows \gset
+\echo :rows
 
 \set VERBOSITY terse
 SELECT tessera_test_unary_errors(0);
@@ -26,8 +33,10 @@ SELECT tessera_test_unary_errors(3);
 SELECT tessera_test_unary_errors(4);
 SELECT tessera_test_unary_errors(5);
 SELECT tessera_test_unary_errors(6);
+SELECT tessera_test_unary_errors(7);
 \set VERBOSITY default
 
 DROP FUNCTION tessera_test_unary_errors(integer);
+DROP FUNCTION tessera_test_unary_rows();
 DROP FUNCTION tessera_test_unary_batches();
 DROP EXTENSION tessera;

@@ -22,9 +22,9 @@ EXPLAIN (COSTS OFF) SELECT a, b FROM pack_t WHERE a > 90;
            QUERY PLAN            
 ---------------------------------
  Custom Scan (tessera_pack_sink)
+   Role: sink
    Requested Rows: 0
    ->  Custom Scan (TessPack)
-         Batch Size: 64
          ->  Seq Scan on pack_t
                Filter: (a > 90)
 (6 rows)
@@ -56,13 +56,17 @@ SELECT a FROM pack_t;
                           QUERY PLAN                          
 --------------------------------------------------------------
  Custom Scan (tessera_pack_sink) (actual rows=100.00 loops=1)
+   Role: sink
    Requested Rows: 0
-   Batches Received: 2
+   Input Batches: 2
+   Input Rows: 100
+   Output Rows: 100
+   Child Request: filter {} projection {0} max 0
    ->  Custom Scan (TessPack) (actual rows=100.00 loops=1)
          Batch Size: 64
          Batches: 2
          ->  Seq Scan on pack_t (actual rows=100.00 loops=1)
-(7 rows)
+(11 rows)
 
 SET pack_test.batch_rows = 10;
 EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
@@ -70,13 +74,17 @@ SELECT a FROM pack_t;
                           QUERY PLAN                          
 --------------------------------------------------------------
  Custom Scan (tessera_pack_sink) (actual rows=100.00 loops=1)
+   Role: sink
    Requested Rows: 10
-   Batches Received: 10
+   Input Batches: 10
+   Input Rows: 100
+   Output Rows: 100
+   Child Request: filter {} projection {0} max 10
    ->  Custom Scan (TessPack) (actual rows=100.00 loops=1)
          Batch Size: 10
          Batches: 10
          ->  Seq Scan on pack_t (actual rows=100.00 loops=1)
-(7 rows)
+(11 rows)
 
 SET pack_test.batch_rows = 200;
 EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
@@ -84,13 +92,17 @@ SELECT a FROM pack_t;
                           QUERY PLAN                          
 --------------------------------------------------------------
  Custom Scan (tessera_pack_sink) (actual rows=100.00 loops=1)
+   Role: sink
    Requested Rows: 200
-   Batches Received: 2
+   Input Batches: 2
+   Input Rows: 100
+   Output Rows: 100
+   Child Request: filter {} projection {0} max 200
    ->  Custom Scan (TessPack) (actual rows=100.00 loops=1)
          Batch Size: 64
          Batches: 2
          ->  Seq Scan on pack_t (actual rows=100.00 loops=1)
-(7 rows)
+(11 rows)
 
 SET pack_test.batch_rows = 7;
 SELECT count(*), sum(a) FROM pack_t;
@@ -106,13 +118,17 @@ SELECT a FROM pack_empty;
                           QUERY PLAN                           
 ---------------------------------------------------------------
  Custom Scan (tessera_pack_sink) (actual rows=0.00 loops=1)
+   Role: sink
    Requested Rows: 0
-   Batches Received: 0
+   Input Batches: 0
+   Input Rows: 0
+   Output Rows: 0
+   Child Request: filter {} projection {0} max 0
    ->  Custom Scan (TessPack) (actual rows=0.00 loops=1)
          Batch Size: 64
          Batches: 0
          ->  Seq Scan on pack_empty (actual rows=0.00 loops=1)
-(7 rows)
+(11 rows)
 
 -- A limit above stops after the first batch.
 EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
@@ -121,13 +137,17 @@ SELECT a FROM pack_t LIMIT 3;
 ------------------------------------------------------------------
  Limit (actual rows=3.00 loops=1)
    ->  Custom Scan (tessera_pack_sink) (actual rows=3.00 loops=1)
+         Role: sink
          Requested Rows: 0
-         Batches Received: 1
+         Input Batches: 1
+         Input Rows: 64
+         Output Rows: 64
+         Child Request: filter {} projection {0} max 0
          ->  Custom Scan (TessPack) (actual rows=64.00 loops=1)
                Batch Size: 64
                Batches: 1
                ->  Seq Scan on pack_t (actual rows=64.00 loops=1)
-(8 rows)
+(12 rows)
 
 SELECT a FROM pack_t LIMIT 3;
  a 
@@ -147,15 +167,19 @@ FROM generate_series(1, 3) AS g;
    SubPlan expr_1
      ->  Aggregate (actual rows=1.00 loops=3)
            ->  Custom Scan (tessera_pack_sink) (actual rows=2.00 loops=3)
+                 Role: sink
                  Requested Rows: 0
-                 Batches Received: 1
+                 Input Batches: 1
+                 Input Rows: 3
+                 Output Rows: 3
+                 Child Request: filter {} projection {} max 0
                  ->  Custom Scan (TessPack) (actual rows=2.00 loops=3)
                        Batch Size: 64
                        Batches: 1
                        ->  Seq Scan on pack_t p (actual rows=2.00 loops=3)
                              Filter: (a <= g.g)
                              Rows Removed by Filter: 98
-(12 rows)
+(16 rows)
 
 SELECT g, (SELECT count(*) FROM pack_t AS p WHERE p.a <= g) AS n
 FROM generate_series(1, 3) AS g;
@@ -193,9 +217,9 @@ EXPLAIN (COSTS OFF) SELECT a FROM pack_t WHERE a > 98;
    Workers Planned: 1
    Single Copy: true
    ->  Custom Scan (tessera_pack_sink)
+         Role: sink
          Requested Rows: 0
          ->  Custom Scan (TessPack)
-               Batch Size: 64
                ->  Seq Scan on pack_t
                      Filter: (a > 98)
 (9 rows)
@@ -215,6 +239,138 @@ EXPLAIN (COSTS OFF) SELECT a FROM pack_t;
 (1 row)
 
 RESET tessera.enable;
+-- A trim node between the sink and the pack node keeps the rows whose
+-- first column is at most the setting: the unary helper forwards the
+-- merged request and skips a batch left without rows.
+SET pack_test.trim = 50;
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+SELECT count(a) FROM pack_t;
+                               QUERY PLAN                                
+-------------------------------------------------------------------------
+ Aggregate (actual rows=1.00 loops=1)
+   ->  Custom Scan (tessera_pack_sink) (actual rows=50.00 loops=1)
+         Role: sink
+         Requested Rows: 0
+         Input Batches: 2
+         Input Rows: 50
+         Output Rows: 50
+         Child Request: filter {} projection {0} max 0
+         ->  Custom Scan (tessera_pack_sink) (actual rows=50.00 loops=1)
+               Role: trim
+               Input Batches: 4
+               Input Rows: 100
+               Output Rows: 50
+               Child Request: filter {0} projection {0} max 32
+               ->  Custom Scan (TessPack) (actual rows=100.00 loops=1)
+                     Batch Size: 32
+                     Batches: 4
+                     ->  Seq Scan on pack_t (actual rows=100.00 loops=1)
+(18 rows)
+
+SELECT count(a), sum(a) FROM pack_t;
+ count | sum  
+-------+------
+    50 | 1275
+(1 row)
+
+SELECT a, b FROM pack_t WHERE a > 45;
+ a  |   b   
+----+-------
+ 46 | row46
+ 47 | row47
+ 48 | row48
+ 49 | row49
+ 50 | 
+(5 rows)
+
+SET pack_test.trim = 0;
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+SELECT a FROM pack_t;
+                            QUERY PLAN                             
+-------------------------------------------------------------------
+ Custom Scan (tessera_pack_sink) (actual rows=0.00 loops=1)
+   Role: sink
+   Requested Rows: 0
+   Input Batches: 0
+   Input Rows: 0
+   Output Rows: 0
+   Child Request: filter {} projection {0} max 0
+   ->  Custom Scan (tessera_pack_sink) (actual rows=0.00 loops=1)
+         Role: trim
+         Input Batches: 4
+         Input Rows: 100
+         Output Rows: 0
+         Child Request: filter {0} projection {0} max 32
+         ->  Custom Scan (TessPack) (actual rows=100.00 loops=1)
+               Batch Size: 32
+               Batches: 4
+               ->  Seq Scan on pack_t (actual rows=100.00 loops=1)
+(17 rows)
+
+-- The trim node stops after its first batch with rows.
+SET pack_test.trim = 80;
+SET pack_test.stop = on;
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+SELECT count(a) FROM pack_t;
+                               QUERY PLAN                                
+-------------------------------------------------------------------------
+ Aggregate (actual rows=1.00 loops=1)
+   ->  Custom Scan (tessera_pack_sink) (actual rows=32.00 loops=1)
+         Role: sink
+         Requested Rows: 0
+         Input Batches: 1
+         Input Rows: 32
+         Output Rows: 32
+         Child Request: filter {} projection {0} max 0
+         ->  Custom Scan (tessera_pack_sink) (actual rows=32.00 loops=1)
+               Role: trim
+               Input Batches: 1
+               Input Rows: 32
+               Output Rows: 32
+               Child Request: filter {0} projection {0} max 32
+               ->  Custom Scan (TessPack) (actual rows=32.00 loops=1)
+                     Batch Size: 32
+                     Batches: 1
+                     ->  Seq Scan on pack_t (actual rows=32.00 loops=1)
+(18 rows)
+
+SELECT count(a), max(a) FROM pack_t;
+ count | max 
+-------+-----
+    32 |  32
+(1 row)
+
+RESET pack_test.stop;
+-- The smaller batch limit of the sink and the trim node reaches the pack.
+SET pack_test.trim = 50;
+SET pack_test.batch_rows = 10;
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+SELECT a, b FROM pack_t WHERE a > 45;
+                            QUERY PLAN                            
+------------------------------------------------------------------
+ Custom Scan (tessera_pack_sink) (actual rows=5.00 loops=1)
+   Role: sink
+   Requested Rows: 10
+   Input Batches: 1
+   Input Rows: 5
+   Output Rows: 5
+   Child Request: filter {} projection {0 1} max 10
+   ->  Custom Scan (tessera_pack_sink) (actual rows=5.00 loops=1)
+         Role: trim
+         Input Batches: 6
+         Input Rows: 55
+         Output Rows: 5
+         Child Request: filter {0} projection {0 1} max 10
+         ->  Custom Scan (TessPack) (actual rows=55.00 loops=1)
+               Batch Size: 10
+               Batches: 6
+               ->  Seq Scan on pack_t (actual rows=55.00 loops=1)
+                     Filter: (a > 45)
+                     Rows Removed by Filter: 45
+(19 rows)
+
+RESET pack_test.batch_rows;
+RESET pack_test.trim;
 -- A parent that asks for rows cannot stand above the pack node.
 SET pack_test.rows_mode = on;
 \set VERBOSITY terse

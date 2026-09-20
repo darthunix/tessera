@@ -223,7 +223,8 @@ counterpart exists.
 - Register `CustomScanMethods` in `_PG_init`; build paths and plans through
   the runtime helpers.
 - Bind `ps_ResultTupleSlot` in `BeginCustomScan`; read children through the
-  shared input helper.
+  shared input helper, or stand on the unary helper when the node only
+  removes rows from one child's batches.
 - Rescan in the fixed order; clear outputs in both end and rescan paths.
 - Leave backward scan and mark/restore undeclared; check the flags in
   `BeginCustomScan`.

@@ -58,20 +58,25 @@ projection arrives. Rescan clears the output, rescans the child and starts
 a fresh batch. The node is parallel-safe whenever its child is and keeps no
 shared state.
 
-`EXPLAIN` shows `Batch Size`, and with `ANALYZE` the number of `Batches`;
+`EXPLAIN` shows `Batch Size` once the node has executed, since the size
+follows the parent's request, and with `ANALYZE` the number of `Batches`;
 the row counts are corrected by the output helper, so the node reports the
 rows it packed.
 
 ### Tests
 
 The [pack test](../test/tessera_pack_test.c) is a stand-in for a
-batch-aware parent, the sink: its hook wraps the sequential scan of every
-table named `pack_*` through `tess_batch_input_path`, its `BeginCustomScan`
-requests batches through the input helper, and its execution returns the
-rows of each batch one by one, as the unary node helper will. The SQL
-scenario shows the plan and its rows with NULL values, batch sizes
-following the request and the cap, an empty child, an early stop by a
-limit above, rescan through a correlated subplan, a scrollable cursor that
-PostgreSQL serves through Material, a parallel worker, the enable switch
-and the error of a parent asking for rows. The GUC `pack_test.batch_rows`
-sets the requested batch size and `pack_test.rows_mode` asks for rows.
+batch-aware parent built on the unary helper: its hook wraps the sequential
+scan of every table named `pack_*` through `tess_batch_input_path` and puts
+the sink above it, which serves the rows of the batches to the executor.
+With `pack_test.trim` set, a trim node of the same kind stands between
+them: it keeps the rows whose first column is at most the setting, forwards
+the pack node's batches to the sink, and shows the request the helper
+derived. The SQL scenario shows the plan and its rows with NULL values,
+batch sizes following the request and the cap, an empty child, an early
+stop by a limit above, rescan through a correlated subplan, a scrollable
+cursor that PostgreSQL serves through Material, a parallel worker, the
+enable switch, the trim node removing rows and skipping emptied batches,
+stopping after its first batch and passing the smaller batch limit down,
+and the error of a parent asking for rows. The GUCs `pack_test.batch_rows`,
+`pack_test.trim`, `pack_test.stop` and `pack_test.rows_mode` drive it.

@@ -22,6 +22,8 @@ struct TessUnary
 	/* Both frozen at the first execution. */
 	const TessRequest *request;
 	const TessRequest *child_request;
+	/* Row mode: the batch column of every slot attribute, per batch. */
+	TessDatumColumn *columns;
 	TessBatch  *active_batch;
 	int			next_row;
 	bool		stopped;
@@ -67,6 +69,9 @@ tess_unary_create(const TessUnaryConfig *config)
 									   config->node->ss.ps.ps_ResultTupleSlot,
 									   config->layout);
 	unary->input = tess_input_create(config->parent_context, config->child);
+	unary->columns = MemoryContextAllocZero(config->parent_context,
+											mul_size(sizeof(TessDatumColumn),
+													 config->layout->ntargets));
 	return unary;
 }
 
@@ -115,11 +120,18 @@ forward_request(TessUnary *unary)
 	if (child_layout->ncolumns != unary->layout.ncolumns)
 		elog(ERROR, "Tessera unary node cannot pass %d columns through as %d",
 			 child_layout->ncolumns, unary->layout.ncolumns);
-	if (unary->request->output_mode != TESS_OUTPUT_BATCH)
-		elog(ERROR, "Tessera unary node cannot serve a row-wise parent yet");
 	filter = bms_union(unary->filter_columns, unary->request->filter_columns);
 	projection = bms_union(unary->projection_columns,
 						   unary->request->projection_columns);
+	if (unary->request->output_mode == TESS_OUTPUT_ROWS)
+	{
+		/* Rows are served from the batch column of every slot attribute. */
+		int			natts = unary->node->ss.ps.ps_ResultTupleSlot->tts_tupleDescriptor->natts;
+
+		for (int attribute = 0; attribute < natts; attribute++)
+			projection = bms_add_member(projection,
+										tess_layout_column(&unary->layout, attribute));
+	}
 	if (unary->request->max_batch_rows > 0)
 		max_rows = max_rows == 0 ? unary->request->max_batch_rows :
 			Min(max_rows, unary->request->max_batch_rows);
@@ -132,6 +144,27 @@ forward_request(TessUnary *unary)
 	unary->child_request = ops->freeze_request(tess_input_binding(unary->input));
 	bms_free(filter);
 	bms_free(projection);
+}
+
+/* Row mode: the column of every slot attribute, for the whole batch. */
+static void
+fetch_columns(TessUnary *unary, TessBatch *batch)
+{
+	int			natts = unary->node->ss.ps.ps_ResultTupleSlot->tts_tupleDescriptor->natts;
+
+	for (int attribute = 0; attribute < natts; attribute++)
+	{
+		TessDatumColumn *column = &unary->columns[attribute];
+
+		*column = (TessDatumColumn) TESS_STRUCT_INITIALIZER(TessDatumColumn);
+		batch->ops->get_datum_column(batch,
+									 tess_layout_column(&unary->layout, attribute),
+									 &batch->rows, TESS_COLUMN_FOR_PROJECTION,
+									 column);
+		if (column->values == NULL || column->isnull == NULL ||
+			column->nrows != batch->rows.nrows)
+			elog(ERROR, "Tessera batch returned an invalid column");
+	}
 }
 
 /* Make the next batch with rows active, or return false at the end. */
@@ -165,6 +198,8 @@ fetch_batch(TessUnary *unary)
 			tess_input_finish(unary->input);
 			continue;
 		}
+		if (unary->request->output_mode == TESS_OUTPUT_ROWS)
+			fetch_columns(unary, batch);
 		unary->stats.output_rows += kept;
 		unary->active_batch = batch;
 		unary->next_row = tess_row_mask_next(&batch->rows, -1);
@@ -190,12 +225,45 @@ exec_batch(TessUnary *unary)
 	return tess_input_slot(unary->input);
 }
 
+/* Serve the rows of each batch from the node's own slot. */
+static TupleTableSlot *
+exec_rows(TessUnary *unary)
+{
+	TupleTableSlot *slot = unary->node->ss.ps.ps_ResultTupleSlot;
+	int			natts = slot->tts_tupleDescriptor->natts;
+
+	for (;;)
+	{
+		int			row;
+
+		if (unary->active_batch == NULL && !fetch_batch(unary))
+			return NULL;
+		if (unary->next_row < 0)
+		{
+			tess_input_finish(unary->input);
+			unary->active_batch = NULL;
+			continue;
+		}
+		row = unary->next_row;
+		unary->next_row = tess_row_mask_next(&unary->active_batch->rows, row);
+		ExecClearTuple(slot);
+		for (int attribute = 0; attribute < natts; attribute++)
+		{
+			slot->tts_values[attribute] = unary->columns[attribute].values[row];
+			slot->tts_isnull[attribute] = unary->columns[attribute].isnull[row];
+		}
+		slot->tts_tableOid = unary->active_batch->table_oid;
+		return ExecStoreVirtualTuple(slot);
+	}
+}
+
 TupleTableSlot *
 tess_unary_exec(TessUnary *unary)
 {
 	if (unary->request == NULL)
 		forward_request(unary);
-	return exec_batch(unary);
+	return unary->request->output_mode == TESS_OUTPUT_BATCH ?
+		exec_batch(unary) : exec_rows(unary);
 }
 
 void

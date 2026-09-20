@@ -72,6 +72,32 @@ SET tessera.enable = off;
 EXPLAIN (COSTS OFF) SELECT a FROM pack_t;
 RESET tessera.enable;
 
+-- A trim node between the sink and the pack node keeps the rows whose
+-- first column is at most the setting: the unary helper forwards the
+-- merged request and skips a batch left without rows.
+SET pack_test.trim = 50;
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+SELECT count(a) FROM pack_t;
+SELECT count(a), sum(a) FROM pack_t;
+SELECT a, b FROM pack_t WHERE a > 45;
+SET pack_test.trim = 0;
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+SELECT a FROM pack_t;
+-- The trim node stops after its first batch with rows.
+SET pack_test.trim = 80;
+SET pack_test.stop = on;
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+SELECT count(a) FROM pack_t;
+SELECT count(a), max(a) FROM pack_t;
+RESET pack_test.stop;
+-- The smaller batch limit of the sink and the trim node reaches the pack.
+SET pack_test.trim = 50;
+SET pack_test.batch_rows = 10;
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+SELECT a, b FROM pack_t WHERE a > 45;
+RESET pack_test.batch_rows;
+RESET pack_test.trim;
+
 -- A parent that asks for rows cannot stand above the pack node.
 SET pack_test.rows_mode = on;
 \set VERBOSITY terse

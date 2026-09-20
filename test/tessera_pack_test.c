@@ -7,7 +7,9 @@
 #include "commands/explain_format.h"
 #include "executor/executor.h"
 #include "fmgr.h"
+#include "lib/stringinfo.h"
 #include "nodes/makefuncs.h"
+#include "nodes/value.h"
 #include "optimizer/pathnode.h"
 #include "optimizer/paths.h"
 #include "utils/guc.h"
@@ -23,26 +25,30 @@ PGDLLEXPORT void _PG_init(void);
 PG_FUNCTION_INFO_V1(tessera_test_pack_paths);
 
 /*
- * A stand-in for a batch-aware parent: the sink wraps the sequential scan
- * of every table named pack_* in the pack node through the batch-input
- * helper, requests batches through the input helper and returns their
- * rows one by one, as the unary node helper will.
+ * A stand-in for a batch-aware parent on the unary helper. The hook wraps
+ * the sequential scan of every table named pack_* in the pack node through
+ * the batch-input helper and puts the sink above it, which serves the rows
+ * of the batches to the executor. With pack_test.trim set, a trim node of
+ * the same kind stands between them: it keeps the rows whose first column
+ * is at most the setting, and shows the request the helper forwarded.
  */
+#define ROLE_SINK 0
+#define ROLE_TRIM 1
+#define TRIM_BATCH_ROWS 32
+
 typedef struct SinkState
 {
 	CustomScanState css;
-	PlanState  *child;
-	TessInput  *input;
-	const TessLayout *layout;
-	TessBatch  *batch;
-	/* One per result attribute, for the active batch. */
-	TessDatumColumn *columns;
-	int			row;
-	uint64		batches;
+	int			role;
+	TessUnary  *unary;
+	/* With pack_test.rows_mode, the sink asks the child for rows itself. */
+	TessInput  *rows_input;
 } SinkState;
 
 static int	batch_rows = 0;
 static bool rows_mode = false;
+static int	trim_rows = -1;
+static bool stop_after_first = false;
 static set_rel_pathlist_hook_type previous_set_rel_pathlist_hook = NULL;
 
 static const TessNode sink_node = {
@@ -61,12 +67,15 @@ static Plan *
 sink_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 		  List *tlist, List *clauses, List *custom_plans)
 {
+	TessPathInfo info = TESS_STRUCT_INITIALIZER(TessPathInfo);
 	TessPlanConfig config = TESS_STRUCT_INITIALIZER(TessPlanConfig);
 	Plan	   *child = linitial(custom_plans);
 
+	tess_path_get_info(best_path, &info);
 	config.methods = &sink_scan_methods;
 	config.layout_policy = TESS_LAYOUT_DENSE;
 	config.scan_targetlist = child->targetlist;
+	config.node_data = info.node_data;
 	return tess_plan_create(best_path, tlist, custom_plans, &config);
 }
 
@@ -75,83 +84,104 @@ static const CustomPathMethods sink_path_methods = {
 	.PlanCustomPath = sink_plan,
 };
 
+static CustomPath *
+make_sink_path(const Path *template, Path *child, int role)
+{
+	TessPathConfig config = TESS_STRUCT_INITIALIZER(TessPathConfig);
+
+	config.template_path = template;
+	config.methods = &sink_path_methods;
+	config.node = &sink_node;
+	config.children = list_make1(child);
+	config.node_data = (Node *) makeInteger(role);
+	return tess_path_create(&config);
+}
+
+/* Keep the rows whose first column is at most the trim setting. */
+static int
+trim_batch(void *private_data, TessBatch *batch, int rows)
+{
+	SinkState  *state = private_data;
+	TessDatumColumn column = TESS_STRUCT_INITIALIZER(TessDatumColumn);
+	int			row = -1;
+	int			kept = 0;
+
+	batch->ops->get_datum_column(batch, 0, &batch->rows,
+								 TESS_COLUMN_FOR_FILTER, &column);
+	while ((row = tess_row_mask_next(&batch->rows, row)) >= 0)
+	{
+		if (column.isnull[row] || DatumGetInt32(column.values[row]) > trim_rows)
+			tess_row_mask_clear(&batch->rows, row);
+		else
+			kept++;
+	}
+	if (kept > 0 && stop_after_first)
+		tess_unary_stop(state->unary);
+	return kept;
+}
+
 static void
 sink_begin(CustomScanState *css, EState *estate, int eflags)
 {
 	SinkState  *state = (SinkState *) css;
 	CustomScan *cscan = castNode(CustomScan, css->ss.ps.plan);
 	TessPlanInfo info = TESS_STRUCT_INITIALIZER(TessPlanInfo);
-	TessRequest request = TESS_STRUCT_INITIALIZER(TessRequest);
-	int			natts = css->ss.ps.ps_ResultTupleSlot->tts_tupleDescriptor->natts;
+	TessUnaryConfig config = TESS_STRUCT_INITIALIZER(TessUnaryConfig);
+	PlanState  *child;
 
 	tess_plan_get_info(cscan, &info);
 	if (info.nchildren != 1 || info.child_names[0] == NULL ||
-		strcmp(info.child_names[0], TESS_PACK_NODE_NAME) != 0)
-		elog(ERROR, "Tessera pack sink expected a pack child");
-	state->child = ExecInitNode(linitial(cscan->custom_plans), estate, eflags);
-	css->custom_ps = list_make1(state->child);
-	state->input = tess_input_create(estate->es_query_cxt, state->child);
-	request.output_mode = rows_mode ? TESS_OUTPUT_ROWS : TESS_OUTPUT_BATCH;
-	request.max_batch_rows = batch_rows;
-	tess_input_set_request(state->input, &request);
-	state->layout = tess_input_layout(state->input);
-	if (state->layout->ntargets != natts)
-		elog(ERROR, "Tessera pack sink layout does not match its slot");
-	state->columns = palloc0_array(TessDatumColumn, natts);
-	state->row = -1;
+		info.node_data == NULL || !IsA(info.node_data, Integer))
+		elog(ERROR, "Tessera pack sink expected a batch child and a role");
+	state->role = intVal(info.node_data);
+	child = ExecInitNode(linitial(cscan->custom_plans), estate, eflags);
+	css->custom_ps = list_make1(child);
+	if (state->role == ROLE_SINK && rows_mode)
+	{
+		TessRequest request = TESS_STRUCT_INITIALIZER(TessRequest);
+
+		state->rows_input = tess_input_create(estate->es_query_cxt, child);
+		request.output_mode = TESS_OUTPUT_ROWS;
+		tess_input_set_request(state->rows_input, &request);
+		return;
+	}
+	config.parent_context = estate->es_query_cxt;
+	config.node = css;
+	config.child = child;
+	config.layout = &info.layout;
+	if (state->role == ROLE_TRIM)
+	{
+		config.filter_columns = bms_make_singleton(0);
+		config.max_rows = TRIM_BATCH_ROWS;
+		config.process = trim_batch;
+		config.private_data = state;
+	}
+	else
+		config.max_rows = batch_rows;
+	state->unary = tess_unary_create(&config);
 }
 
 static TupleTableSlot *
 sink_exec(CustomScanState *css)
 {
 	SinkState  *state = (SinkState *) css;
-	TupleTableSlot *slot = css->ss.ps.ps_ResultTupleSlot;
-	int			natts = slot->tts_tupleDescriptor->natts;
 
-	for (;;)
+	if (state->rows_input != NULL)
 	{
-		int			row;
-
-		if (state->batch == NULL)
-		{
-			state->batch = tess_input_next(state->input);
-			if (state->batch == NULL)
-				return NULL;
-			state->batches++;
-			state->row = -1;
-			for (int i = 0; i < natts; i++)
-			{
-				state->columns[i] = (TessDatumColumn)
-					TESS_STRUCT_INITIALIZER(TessDatumColumn);
-				state->batch->ops->get_datum_column(state->batch,
-													tess_layout_column(state->layout, i),
-													&state->batch->rows,
-													TESS_COLUMN_FOR_PROJECTION,
-													&state->columns[i]);
-			}
-		}
-		row = tess_row_mask_next(&state->batch->rows, state->row);
-		if (row < 0)
-		{
-			tess_input_finish(state->input);
-			state->batch = NULL;
-			continue;
-		}
-		state->row = row;
-		ExecClearTuple(slot);
-		for (int i = 0; i < natts; i++)
-		{
-			slot->tts_values[i] = state->columns[i].values[row];
-			slot->tts_isnull[i] = state->columns[i].isnull[row];
-		}
-		return ExecStoreVirtualTuple(slot);
+		tess_input_next(state->rows_input);
+		return NULL;
 	}
+	return tess_unary_exec(state->unary);
 }
 
 static void
 sink_end(CustomScanState *css)
 {
-	ExecEndNode(((SinkState *) css)->child);
+	SinkState  *state = (SinkState *) css;
+
+	if (state->unary != NULL)
+		tess_unary_end(state->unary);
+	ExecEndNode(linitial(css->custom_ps));
 }
 
 static void
@@ -159,24 +189,49 @@ sink_rescan(CustomScanState *css)
 {
 	SinkState  *state = (SinkState *) css;
 
-	if (state->batch != NULL)
-	{
-		tess_input_finish(state->input);
-		state->batch = NULL;
-	}
-	ExecReScan(state->child);
-	tess_input_rescan(state->input);
-	state->batches = 0;
+	if (state->unary != NULL)
+		tess_unary_rescan(state->unary);
+	else
+		ExecReScan(linitial(css->custom_ps));
+}
+
+static void
+append_mask(StringInfo text, const char *label, const Bitmapset *mask)
+{
+	int			member = -1;
+
+	appendStringInfo(text, "%s {", label);
+	while ((member = bms_next_member(mask, member)) >= 0)
+		appendStringInfo(text, "%s%d", text->data[text->len - 1] == '{' ? "" : " ",
+						 member);
+	appendStringInfoString(text, "} ");
 }
 
 static void
 sink_explain(CustomScanState *css, List *ancestors, ExplainState *es)
 {
 	SinkState  *state = (SinkState *) css;
+	const TessUnaryStats *stats;
+	const TessRequest *request;
+	StringInfoData text;
 
-	ExplainPropertyInteger("Requested Rows", NULL, batch_rows, es);
-	if (es->analyze)
-		ExplainPropertyInteger("Batches Received", NULL, state->batches, es);
+	ExplainPropertyText("Role", state->role == ROLE_TRIM ? "trim" : "sink", es);
+	if (state->role == ROLE_SINK)
+		ExplainPropertyInteger("Requested Rows", NULL, batch_rows, es);
+	if (!es->analyze || state->unary == NULL)
+		return;
+	stats = tess_unary_stats(state->unary);
+	ExplainPropertyInteger("Input Batches", NULL, stats->input_batches, es);
+	ExplainPropertyInteger("Input Rows", NULL, stats->input_rows, es);
+	ExplainPropertyInteger("Output Rows", NULL, stats->output_rows, es);
+	request = tess_unary_child_request(state->unary);
+	if (request == NULL)
+		return;
+	initStringInfo(&text);
+	append_mask(&text, "filter", request->filter_columns);
+	append_mask(&text, "projection", request->projection_columns);
+	appendStringInfo(&text, "max %d", request->max_batch_rows);
+	ExplainPropertyText("Child Request", text.data, es);
 }
 
 static const CustomExecMethods sink_exec_methods = {
@@ -202,7 +257,6 @@ static void
 sink_set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
 					  RangeTblEntry *rte)
 {
-	TessPathConfig config = TESS_STRUCT_INITIALIZER(TessPathConfig);
 	const char *name;
 	Path	   *seqscan = NULL;
 	Path	   *copy;
@@ -236,11 +290,9 @@ sink_set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
 		return;
 	template = *seqscan;
 	template.total_cost *= 0.5;
-	config.template_path = &template;
-	config.methods = &sink_path_methods;
-	config.node = &sink_node;
-	config.children = list_make1(child);
-	add_path(rel, (Path *) tess_path_create(&config));
+	if (trim_rows >= 0)
+		child = (Path *) make_sink_path(&template, child, ROLE_TRIM);
+	add_path(rel, (Path *) make_sink_path(&template, child, ROLE_SINK));
 }
 
 void
@@ -258,6 +310,14 @@ _PG_init(void)
 							 "Request rows instead of batches.",
 							 NULL, &rows_mode, false, PGC_USERSET, 0,
 							 NULL, NULL, NULL);
+	DefineCustomIntVariable("pack_test.trim",
+							"Keep rows whose first column is at most this; -1 adds no trim node.",
+							NULL, &trim_rows, -1, -1, 1000, PGC_USERSET, 0,
+							NULL, NULL, NULL);
+	DefineCustomBoolVariable("pack_test.stop",
+							 "Stop the trim node after its first batch with rows.",
+							 NULL, &stop_after_first, false, PGC_USERSET, 0,
+							 NULL, NULL, NULL);
 	previous_set_rel_pathlist_hook = set_rel_pathlist_hook;
 	set_rel_pathlist_hook = sink_set_rel_pathlist;
 }
@@ -268,7 +328,6 @@ tessera_test_pack_paths(PG_FUNCTION_ARGS)
 {
 	const TessApi *api = tess_runtime_api();
 	const TessNode *pack = api->nodes->find(TESS_PACK_NODE_NAME);
-	TessPathConfig config = TESS_STRUCT_INITIALIZER(TessPathConfig);
 	Path	   *rows = makeNode(Path);
 	Path	   *wrapped;
 	CustomPath *batch;
@@ -286,10 +345,7 @@ tessera_test_pack_paths(PG_FUNCTION_ARGS)
 		list_length(((CustomPath *) wrapped)->custom_paths) == 1 &&
 		linitial(((CustomPath *) wrapped)->custom_paths) == rows;
 	/* A batch path is its own batch input. */
-	config.template_path = rows;
-	config.methods = &sink_path_methods;
-	config.node = &sink_node;
-	batch = tess_path_create(&config);
+	batch = make_sink_path(rows, rows, ROLE_SINK);
 	result &= tess_batch_input_path(NULL, &batch->path) == &batch->path;
 	/* A parameterized path has no batch input. */
 	rows->param_info = makeNode(ParamPathInfo);

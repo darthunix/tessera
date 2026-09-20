@@ -15,6 +15,7 @@
 PG_MODULE_MAGIC;
 
 PG_FUNCTION_INFO_V1(tessera_test_unary_batches);
+PG_FUNCTION_INFO_V1(tessera_test_unary_rows);
 PG_FUNCTION_INFO_V1(tessera_test_unary_errors);
 
 /*
@@ -282,6 +283,80 @@ tessera_test_unary_batches(PG_FUNCTION_ARGS)
 	PG_RETURN_BOOL(result);
 }
 
+/* True when the node's slot shows the given row: c, then a. */
+static bool
+slot_shows(TupleTableSlot *slot, int a)
+{
+	char		expected[16];
+
+	snprintf(expected, sizeof(expected), "row%d", a);
+	if (slot == NULL || TupIsNull(slot) || slot->tts_isnull[1] ||
+		DatumGetInt32(slot->tts_values[1]) != a)
+		return false;
+	if (a % 3 == 0)
+		return slot->tts_isnull[0];
+	return !slot->tts_isnull[0] &&
+		strcmp(text_to_cstring(DatumGetTextPP(slot->tts_values[0])),
+			   expected) == 0;
+}
+
+Datum
+tessera_test_unary_rows(PG_FUNCTION_ARGS)
+{
+	FakeChild  *child = make_child(true);
+	TupleDesc	desc = CreateTemplateTupleDesc(2);
+	CustomScanState *node;
+	TessLayout	layout = TESS_STRUCT_INITIALIZER(TessLayout);
+	TessUnaryConfig config;
+	const TessRequest *child_request;
+	const TessUnaryStats *stats;
+	TessUnary  *unary;
+	TupleTableSlot *slot;
+	int			map[2] = {1, 0};
+	int			both[2] = {0, 1};
+	bool		result;
+
+	/* The node shows the child's columns in the other order. */
+	TupleDescInitEntry(desc, 1, "c", TEXTOID, -1, 0);
+	TupleDescInitEntry(desc, 2, "a", INT4OID, -1, 0);
+	node = make_node(desc);
+	layout.ncolumns = 2;
+	layout.ntargets = 2;
+	layout.target_columns = map;
+	config = make_config(node, child, &layout);
+	config.max_rows = 2;
+	unary = tess_unary_create(&config);
+
+	/* Without a request from the parent, rows are served two per batch. */
+	slot = tess_unary_exec(unary);
+	child_request = tess_unary_child_request(unary);
+	stats = tess_unary_stats(unary);
+	result = slot == node->ss.ps.ps_ResultTupleSlot && slot_shows(slot, 1) &&
+		child_request->output_mode == TESS_OUTPUT_BATCH &&
+		child_request->max_batch_rows == 2 &&
+		bms_is_empty(child_request->filter_columns) &&
+		mask_equals(child_request->projection_columns, 2, both) &&
+		tess_unary_request(unary)->output_mode == TESS_OUTPUT_ROWS &&
+		node->ss.ps.instrument->tuplecount == 0 && stats->input_batches == 1;
+	result &= slot_shows(tess_unary_exec(unary), 2) && stats->input_batches == 1;
+	result &= slot_shows(tess_unary_exec(unary), 3) && stats->input_batches == 2;
+	result &= slot_shows(tess_unary_exec(unary), 4);
+	result &= slot_shows(tess_unary_exec(unary), 5) && stats->input_batches == 3;
+	result &= tess_unary_exec(unary) == NULL && tess_unary_exec(unary) == NULL &&
+		stats->input_rows == 5 && stats->output_rows == 5;
+
+	/* A rescan in the middle of a batch starts over. */
+	tess_unary_rescan(unary);
+	result &= slot_shows(tess_unary_exec(unary), 1);
+	tess_unary_rescan(unary);
+	result &= slot_shows(tess_unary_exec(unary), 1) &&
+		slot_shows(tess_unary_exec(unary), 2) &&
+		slot_shows(tess_unary_exec(unary), 3);
+	tess_unary_end(unary);
+	tess_output_end(child->output);
+	PG_RETURN_BOOL(result);
+}
+
 static int
 return_wrong_count(void *private_data, TessBatch *batch, int rows)
 {
@@ -299,6 +374,7 @@ tessera_test_unary_errors(PG_FUNCTION_ARGS)
 	TessUnaryConfig config;
 	TessRequest request = TESS_STRUCT_INITIALIZER(TessRequest);
 	TessUnary  *unary;
+	int			unmapped[2] = {-1, 0};
 
 	layout.ncolumns = 2;
 	layout.ntargets = 2;
@@ -306,6 +382,11 @@ tessera_test_unary_errors(PG_FUNCTION_ARGS)
 	request.output_mode = TESS_OUTPUT_BATCH;
 	switch (kind)
 	{
+		case 7:
+			/* The output helper checks every attribute's column. */
+			layout.target_columns = unmapped;
+			tess_unary_create(&config);
+			break;
 		case 0:
 			config.struct_size = 1;
 			tess_unary_create(&config);
