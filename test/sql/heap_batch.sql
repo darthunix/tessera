@@ -13,6 +13,11 @@ RETURNS void
 AS :'heap_batch_test', 'tessera_test_heap_batch_errors'
 LANGUAGE C STRICT;
 
+CREATE FUNCTION tessera_test_heap_batch_nulls(regclass)
+RETURNS boolean
+AS :'heap_batch_test', 'tessera_test_heap_batch_nulls'
+LANGUAGE C STRICT;
+
 -- Wide rows, so that one batch of 64 rows spans several pages.
 CREATE TABLE heap_batch_t (a int, b text, c bigint);
 INSERT INTO heap_batch_t
@@ -22,6 +27,15 @@ SELECT count(DISTINCT (ctid::text::point)[0]) > 4 AS pages FROM heap_batch_t;
 
 SELECT tessera_test_heap_batch('heap_batch_t') AS heap_batch \gset
 \echo :heap_batch
+
+-- By-value columns at cached offsets, with NULLs moving the second one.
+CREATE TABLE heap_batch_n (a int, b int);
+INSERT INTO heap_batch_n
+SELECT CASE WHEN i % 5 = 0 THEN NULL ELSE i END, i * 2
+FROM generate_series(1, 100) AS i;
+SELECT tessera_test_heap_batch_nulls('heap_batch_n') AS heap_batch_nulls \gset
+\echo :heap_batch_nulls
+DROP TABLE heap_batch_n;
 
 \set VERBOSITY terse
 SELECT tessera_test_heap_batch_errors(0, 'heap_batch_t');
@@ -33,5 +47,6 @@ SELECT tessera_test_heap_batch_errors(5, 'heap_batch_t');
 \set VERBOSITY default
 
 DROP TABLE heap_batch_t;
+DROP FUNCTION tessera_test_heap_batch_nulls(regclass);
 DROP FUNCTION tessera_test_heap_batch_errors(integer, regclass);
 DROP FUNCTION tessera_test_heap_batch(regclass);

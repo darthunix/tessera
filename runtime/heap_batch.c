@@ -59,7 +59,78 @@ deform(TessHeapBatch *heap, int column, int row)
 		value = getmissingattr(heap->tuple_desc, attnum, &isnull);
 	heap->values[offset] = isnull ? (Datum) 0 : value;
 	heap->isnull[offset] = isnull;
-	heap->stats.deformed_datums++;
+}
+
+/*
+ * A by-value column at a cached offset: in a tuple that has the attribute
+ * and no NULL up to it, the value lies at that offset, and is read there
+ * in a plain loop with the width fixed per call; the arrays are locals, so
+ * the stores do not make the compiler reload the batch's fields. Such a
+ * read leaves the row's cursor alone: a later column starts from the
+ * cached offsets anyway. A tuple with a NULL among the attributes up to
+ * this one, or too short for it, goes through the cursor.
+ */
+static pg_always_inline void
+deform_cached_width(TessHeapBatch *heap, int column, const TessRowMask *rows,
+					const uint64 *deformed, int nwords, int offset, int attlen)
+{
+	const HeapTupleData *tuples = heap->tuples;
+	Datum	   *values = &heap->values[(Size) column * heap->capacity];
+	bool	   *isnull = &heap->isnull[(Size) column * heap->capacity];
+	int			upto = column + 1;
+
+	for (int word = 0; word < nwords; word++)
+	{
+		uint64		pending = rows->bits[word] & ~deformed[word];
+
+		while (pending != 0)
+		{
+			int			row = word * 64 + pg_rightmost_one_pos64(pending);
+			HeapTupleHeader tup = tuples[row].t_data;
+			bool		cached = HeapTupleHeaderGetNatts(tup) >= upto &&
+				(!HeapTupleHasNulls(&tuples[row]) ||
+				 first_null_attr(tup->t_bits, upto) == upto);
+
+			if (likely(cached))
+			{
+				const char *tp = (const char *) tup + tup->t_hoff + offset;
+
+				values[row] = fetch_att_noerr(tp, true, attlen);
+				isnull[row] = false;
+			}
+			else
+				deform(heap, column, row);
+			pending &= pending - 1;
+		}
+	}
+}
+
+static void
+deform_cached(TessHeapBatch *heap, int column, const TessRowMask *rows,
+			  const uint64 *deformed, int nwords)
+{
+	const CompactAttribute *cattr = &heap->tuple_desc->compact_attrs[column];
+	int			offset = cattr->attcacheoff;
+
+	Assert(offset >= 0 && cattr->attbyval);
+	switch (cattr->attlen)
+	{
+		case 1:
+			deform_cached_width(heap, column, rows, deformed, nwords, offset, 1);
+			break;
+		case 2:
+			deform_cached_width(heap, column, rows, deformed, nwords, offset, 2);
+			break;
+		case 4:
+			deform_cached_width(heap, column, rows, deformed, nwords, offset, 4);
+			break;
+		case 8:
+			deform_cached_width(heap, column, rows, deformed, nwords, offset, 8);
+			break;
+		default:
+			elog(ERROR, "Tessera heap batch attribute %d is by value with length %d",
+				 column + 1, cattr->attlen);
+	}
 }
 
 static void
@@ -68,6 +139,8 @@ heap_get_datum_column(TessBatch *batch, int column, const TessRowMask *rows,
 {
 	TessHeapBatch *heap = batch->private_data;
 	uint64	   *deformed;
+	int			nwords;
+	uint64		count = 0;
 
 	if (result == NULL || result->struct_size < TESS_DATUM_COLUMN_MIN_SIZE)
 		elog(ERROR, "Tessera heap batch received an incompatible column request");
@@ -76,17 +149,29 @@ heap_get_datum_column(TessBatch *batch, int column, const TessRowMask *rows,
 	if (rows == NULL || rows->nrows != batch->rows.nrows)
 		elog(ERROR, "Tessera heap batch received a row mask of another batch");
 	deformed = &heap->deformed[(Size) column * heap->nwords];
-	for (int word = 0; word < tess_row_mask_word_count(rows->nrows); word++)
+	nwords = tess_row_mask_word_count(rows->nrows);
+	if (column < heap->tuple_desc->firstNonCachedOffsetAttr &&
+		heap->tuple_desc->compact_attrs[column].attbyval)
+		deform_cached(heap, column, rows, deformed, nwords);
+	else
 	{
-		uint64		pending = rows->bits[word] & ~deformed[word];
-
-		while (pending != 0)
+		for (int word = 0; word < nwords; word++)
 		{
-			deform(heap, column, word * 64 + pg_rightmost_one_pos64(pending));
-			pending &= pending - 1;
+			uint64		pending = rows->bits[word] & ~deformed[word];
+
+			while (pending != 0)
+			{
+				deform(heap, column, word * 64 + pg_rightmost_one_pos64(pending));
+				pending &= pending - 1;
+			}
 		}
+	}
+	for (int word = 0; word < nwords; word++)
+	{
+		count += pg_popcount64(rows->bits[word] & ~deformed[word]);
 		deformed[word] |= rows->bits[word];
 	}
+	heap->stats.deformed_datums += count;
 	result->values = &heap->values[(Size) column * heap->capacity];
 	result->isnull = &heap->isnull[(Size) column * heap->capacity];
 	result->nrows = batch->rows.nrows;

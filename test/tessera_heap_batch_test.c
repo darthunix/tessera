@@ -19,6 +19,7 @@ PG_MODULE_MAGIC;
 
 PG_FUNCTION_INFO_V1(tessera_test_heap_batch);
 PG_FUNCTION_INFO_V1(tessera_test_heap_batch_errors);
+PG_FUNCTION_INFO_V1(tessera_test_heap_batch_nulls);
 
 /* An expectation, reported by number on failure. */
 static bool
@@ -243,6 +244,23 @@ tessera_test_heap_batch(PG_FUNCTION_ARGS)
 		tess_heap_batch_is_full(heap));
 	result &= verify(heap, relid, 30);
 
+	/* A by-value column is read at its cached offset and never restarts. */
+	heap = make_heap(3, 64, RelationGetDescr(rel));
+	fill(heap, rel, FILL_PAGES, 64);
+	batch = tess_heap_batch_finish(heap, relid);
+	get_column(batch, 2, &batch->rows, &column);
+	get_column(batch, 0, &batch->rows, &column);
+	{
+		const TessHeapBatchStats *stats = tess_heap_batch_stats(heap);
+		bool		holds = stats->deformed_datums == 128 &&
+			stats->restarted_datums == 0;
+
+		for (int row = 0; row < 64; row++)
+			holds &= row_holds(&column, row, 1);
+		result &= check(40, holds);
+	}
+	batch->ops->release(batch);
+
 	/* A row from a virtual slot, and a tuple without a page, are copied. */
 	{
 		TupleTableSlot *virtual = MakeSingleTupleTableSlot(RelationGetDescr(rel),
@@ -272,6 +290,43 @@ tessera_test_heap_batch(PG_FUNCTION_ARGS)
 		batch->ops->release(batch);
 		ExecDropSingleTupleTableSlot(virtual);
 	}
+	table_close(rel, AccessShareLock);
+	PG_RETURN_BOOL(result);
+}
+
+/*
+ * By-value columns at cached offsets in a relation (a int, b int) whose a
+ * is NULL in every fifth row: a NULL moves the attributes behind it, so
+ * such rows go through the cursor for b, and a itself is NULL there.
+ */
+Datum
+tessera_test_heap_batch_nulls(PG_FUNCTION_ARGS)
+{
+	Oid			relid = PG_GETARG_OID(0);
+	Relation	rel = table_open(relid, AccessShareLock);
+	TessHeapBatch *heap = make_heap(2, 64, NULL);
+	const TessHeapBatchStats *stats = tess_heap_batch_stats(heap);
+	TessBatch  *batch;
+	TessDatumColumn column;
+	bool		result = true;
+	bool		holds;
+
+	fill(heap, rel, FILL_SLOTS, 64);
+	batch = tess_heap_batch_finish(heap, relid);
+	get_column(batch, 1, &batch->rows, &column);
+	holds = stats->deformed_datums == 64 && stats->restarted_datums == 0;
+	for (int row = 0; row < 64; row++)
+		holds &= !column.isnull[row] &&
+			DatumGetInt32(column.values[row]) == (row + 1) * 2;
+	result &= check(50, holds);
+	get_column(batch, 0, &batch->rows, &column);
+	/* The rows with a NULL took the cursor for b and restart it for a. */
+	holds = stats->deformed_datums == 128 && stats->restarted_datums == 12;
+	for (int row = 0; row < 64; row++)
+		holds &= (row + 1) % 5 == 0 ? column.isnull[row] :
+			!column.isnull[row] && DatumGetInt32(column.values[row]) == row + 1;
+	result &= check(51, holds);
+	batch->ops->release(batch);
 	table_close(rel, AccessShareLock);
 	PG_RETURN_BOOL(result);
 }

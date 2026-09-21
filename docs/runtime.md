@@ -109,7 +109,12 @@ offset in the tuple data, and `tess_deform_advance` moves it to one target
 attribute without materializing the ones in between, through cached
 offsets while they hold and by walking past the first variable-length or
 NULL attribute; a column before a row's cursor is deformed from the row's
-start with a local cursor and counted as restarted. The cursor is the
+start with a local cursor and counted as restarted. A by-value column at
+a cached offset is read at that offset in a plain loop with the width
+fixed per call, for the rows whose tuple has the attribute and no NULL
+before it, leaving their cursors alone, since a later column starts from
+the cached offsets anyway; such reads are never counted as restarted, and
+the other rows go through the cursor. The cursor is the
 deformation of PostgreSQL's own slots reduced to one target and made
 resumable, ported from pg_batch; it relies only on public inline helpers,
 so PostgreSQL is not patched. A tuple shorter than the descriptor yields
