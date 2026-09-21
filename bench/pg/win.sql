@@ -97,6 +97,10 @@ SELECT pg_temp.measure_pair('count_all',
 SELECT pg_temp.measure_pair('four_dense',
     'SELECT count(*), count(c1), sum(c1), min(c1), max(c1) FROM bench_narrow WHERE c1 > 100',
     :repetitions);
+-- An argument over two columns: a chain with a column operand, evaluated
+-- by the aggregate node through the projection provider.
+SELECT pg_temp.measure_pair('two_columns',
+    'SELECT sum(c1 + c2) FROM bench_narrow WHERE c1 > 1000000', :repetitions);
 
 \copy timings TO 'timings.csv' CSV HEADER
 
@@ -126,6 +130,7 @@ EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE on_mi
 EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE on_mixed_text;
 EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE on_count_all;
 EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE on_four_dense;
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE on_two_columns;
 SET tessera.enable = off;
 EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE off_nothing;
 EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE off_sparse;
@@ -139,5 +144,6 @@ EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE off_m
 EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE off_mixed_text;
 EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE off_count_all;
 EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE off_four_dense;
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE off_two_columns;
 \o
 DEALLOCATE ALL;
