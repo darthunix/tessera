@@ -1,5 +1,6 @@
 #include "postgres.h"
 
+#include "access/parallel.h"
 #include "catalog/pg_aggregate.h"
 #include "catalog/pg_type_d.h"
 #include "commands/explain.h"
@@ -8,11 +9,13 @@
 #include "executor/executor.h"
 #include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
+#include "optimizer/cost.h"
 #include "optimizer/optimizer.h"
 #include "optimizer/pathnode.h"
 #include "optimizer/clauses.h"
 #include "optimizer/planner.h"
 #include "optimizer/tlist.h"
+#include "storage/shm_toc.h"
 #include "utils/fmgroids.h"
 #include "utils/regproc.h"
 
@@ -34,6 +37,16 @@
 #define AGG_COST_FACTOR 0.9
 /* A batch with at most this many survivors is gathered for one call later. */
 #define AGG_GATHER_ROWS 8
+
+/* The counters every participant of a parallel plan shares. */
+enum
+{
+	AGG_BATCHES,
+	AGG_ROWS,
+	AGG_CALLS,
+	AGG_COMPUTED,
+	AGG_NCOUNTERS
+};
 
 /* How the partials of an aggregate combine, and what an empty input gives. */
 typedef enum AggKind
@@ -75,9 +88,13 @@ typedef struct TessAggState
 	TessStatus	status;
 	/* The row was returned; the next call ends the scan. */
 	bool		done;
+	/* Under a Gather: the values as they are, for the Finalize Aggregate. */
+	bool		partial;
 	uint64		batches;
 	uint64		rows;
 	uint64		calls;
+	/* The counters of every participant, in a parallel plan. */
+	TessSharedStats *stats;
 } TessAggState;
 
 static const CustomExecMethods agg_exec_methods;
@@ -121,11 +138,12 @@ aggregate_argument(const Aggref *agg)
 }
 
 /*
- * Whether the node computes this aggregate: a plain call of an aggregate
- * the node combines and the registry implements over batches, with no
- * argument for count(*) or one int4 expression the projection provider
- * computes, by a chain or row by row; a subplan in it would need fixing
- * against the scan tuple, which the arguments do not go through.
+ * Whether the node computes this aggregate: a plain call, whole or the
+ * partial one of a parallel plan, of an aggregate the node combines and
+ * the registry implements over batches, with no argument for count(*) or
+ * one int4 expression the projection provider computes, by a chain or
+ * row by row; a subplan in it would need fixing against the scan tuple,
+ * which the arguments do not go through.
  */
 static bool
 aggregate_supported(const Aggref *agg)
@@ -134,7 +152,8 @@ aggregate_supported(const Aggref *agg)
 	Node	   *argument;
 
 	if (agg->agglevelsup != 0 || agg->aggkind != AGGKIND_NORMAL ||
-		agg->aggsplit != AGGSPLIT_SIMPLE || agg->aggorder != NIL ||
+		(agg->aggsplit != AGGSPLIT_SIMPLE &&
+		 agg->aggsplit != AGGSPLIT_INITIAL_SERIAL) || agg->aggorder != NIL ||
 		agg->aggdistinct != NIL || agg->aggfilter != NULL ||
 		agg->aggdirectargs != NIL || agg->aggvariadic ||
 		aggregate_kind(agg->aggfnoid) < 0)
@@ -171,20 +190,18 @@ arguments_available(const List *aggregates, const Path *child)
 }
 
 /*
- * The distinct aggregates of the query's target and HAVING as a flat
- * target list, the scan tuple of the node, when every one is supported;
- * NIL otherwise. Expressions above the aggregates are left to the plan's
- * projection and qual over that tuple.
+ * The distinct aggregates of the expressions as a flat target list, the
+ * scan tuple of the node, when every one is supported; NIL otherwise.
+ * Expressions above the aggregates are left to the plan's projection and
+ * qual over that tuple.
  */
 static List *
-collect_aggregates(PlannerInfo *root, RelOptInfo *output_rel)
+collect_aggregates(Node *expressions)
 {
 	List	   *tlist = NIL;
 	List	   *found;
 
-	found = pull_var_clause((Node *) list_make2(output_rel->reltarget->exprs,
-												root->parse->havingQual),
-							PVC_INCLUDE_AGGREGATES);
+	found = pull_var_clause(expressions, PVC_INCLUDE_AGGREGATES);
 	foreach_ptr(Node, node, found)
 	{
 		if (!IsA(node, Aggref) || !aggregate_supported((Aggref *) node))
@@ -205,17 +222,119 @@ query_supported(PlannerInfo *root, RelOptInfo *input_rel, RelOptInfo *output_rel
 		output_rel->reloptkind == RELOPT_UPPER_REL && !IS_DUMMY_REL(input_rel);
 }
 
+/* The core's plain aggregate paths of the list with this split. */
+static List *
+aggregate_templates(const List *pathlist, AggSplit aggsplit)
+{
+	List	   *templates = NIL;
+
+	foreach_ptr(Path, path, pathlist)
+	{
+		if (IsA(path, AggPath) &&
+			((AggPath *) path)->aggstrategy == AGG_PLAIN &&
+			((AggPath *) path)->aggsplit == aggsplit)
+			templates = lappend(templates, path);
+	}
+	return templates;
+}
+
+/*
+ * The node's path in place of the core's aggregate path: the same planner
+ * properties and rows, a lower cost, the batch child over the core path's
+ * input and the aggregates it computes. NULL when the input cannot be
+ * read in batches or lacks an argument's column.
+ */
+static CustomPath *
+make_agg_path(PlannerInfo *root, const AggPath *agg, List *aggregates)
+{
+	TessPathConfig config = TESS_STRUCT_INITIALIZER(TessPathConfig);
+	Path	   *child = tess_batch_input_path(root, agg->subpath);
+	Path		template;
+
+	if (child == NULL || !arguments_available(aggregates, child))
+		return NULL;
+	template = agg->path;
+	template.total_cost *= AGG_COST_FACTOR;
+	config.template_path = &template;
+	config.methods = &agg_path_methods;
+	config.node = &tess_agg_node;
+	config.children = list_make1(child);
+	config.expressions = aggregates;
+	return tess_path_create(&config);
+}
+
+/*
+ * The partially grouped relation of the grouped one, when the core built
+ * partial aggregate paths for it; PostgreSQL passes it to no hook.
+ */
+static RelOptInfo *
+partial_grouping_rel(PlannerInfo *root, RelOptInfo *grouped_rel)
+{
+	foreach_ptr(RelOptInfo, rel, root->upper_rels[UPPERREL_PARTIAL_GROUP_AGG])
+	{
+		if (bms_equal(rel->relids, grouped_rel->relids))
+			return rel->partial_pathlist != NIL ? rel : NULL;
+	}
+	return NULL;
+}
+
+/*
+ * The node in place of the core's partial aggregate under a Gather.
+ * PostgreSQL offers extensions no hook for the partially grouped relation
+ * and builds the Gather and the Finalize Aggregate before it calls this
+ * one, so the node builds the whole stack for each of the core's partial
+ * aggregate paths: its own partial path over the batch child, with the
+ * partial aggregates as its targets, the core's Gather over it and the
+ * core's Finalize Aggregate over that, which combines the participants'
+ * values and applies HAVING. The path is parallel-aware for the counters
+ * the node shares; the child divides the work.
+ */
+static void
+create_partial_paths(PlannerInfo *root, RelOptInfo *grouped_rel,
+					 GroupPathExtraData *extra)
+{
+	RelOptInfo *partial_rel = partial_grouping_rel(root, grouped_rel);
+	List	   *aggregates;
+
+	if (partial_rel == NULL || extra == NULL || !extra->partial_costs_set)
+		return;
+	aggregates = collect_aggregates((Node *) partial_rel->reltarget->exprs);
+	if (aggregates == NIL)
+		return;
+	foreach_ptr(AggPath, agg, aggregate_templates(partial_rel->partial_pathlist,
+												  AGGSPLIT_INITIAL_SERIAL))
+	{
+		CustomPath *partial = make_agg_path(root, agg, aggregates);
+		GatherPath *gather;
+		AggPath    *final;
+		double		rows;
+
+		if (partial == NULL || !partial->path.parallel_safe ||
+			partial->path.parallel_workers <= 0)
+			continue;
+		partial->path.parallel_aware = true;
+		rows = compute_gather_rows(&partial->path);
+		gather = create_gather_path(root, partial_rel, &partial->path,
+									partial->path.pathtarget, NULL, &rows);
+		final = create_agg_path(root, grouped_rel, &gather->path,
+								grouped_rel->reltarget, AGG_PLAIN,
+								AGGSPLIT_FINAL_DESERIAL, NIL,
+								(List *) extra->havingQual,
+								&extra->agg_final_costs, 1.0);
+		add_path(grouped_rel, &final->path);
+	}
+}
+
 /*
  * The node's path in place of each of the core's plain aggregate paths
- * whose input can be read in batches: the same planner properties and
- * rows, a lower cost, the batch child and the aggregates it computes.
+ * whose input can be read in batches, and the parallel stack in place of
+ * each partial one.
  */
 static void
 create_upper_paths(PlannerInfo *root, UpperRelationKind stage,
 				   RelOptInfo *input_rel, RelOptInfo *output_rel, void *extra)
 {
 	List	   *aggregates;
-	List	   *templates = NIL;
 
 	if (previous_create_upper_paths_hook != NULL)
 		previous_create_upper_paths_hook(root, stage, input_rel, output_rel,
@@ -224,34 +343,20 @@ create_upper_paths(PlannerInfo *root, UpperRelationKind stage,
 		stage != UPPERREL_GROUP_AGG ||
 		!query_supported(root, input_rel, output_rel))
 		return;
-	aggregates = collect_aggregates(root, output_rel);
+	aggregates = collect_aggregates((Node *) list_make2(output_rel->reltarget->exprs,
+														root->parse->havingQual));
 	if (aggregates == NIL)
 		return;
 	/* add_path changes the list: the candidates are taken first. */
-	foreach_ptr(Path, path, output_rel->pathlist)
+	foreach_ptr(AggPath, agg, aggregate_templates(output_rel->pathlist,
+												  AGGSPLIT_SIMPLE))
 	{
-		if (IsA(path, AggPath) &&
-			((AggPath *) path)->aggstrategy == AGG_PLAIN &&
-			((AggPath *) path)->aggsplit == AGGSPLIT_SIMPLE)
-			templates = lappend(templates, path);
-	}
-	foreach_ptr(AggPath, agg, templates)
-	{
-		TessPathConfig config = TESS_STRUCT_INITIALIZER(TessPathConfig);
-		Path	   *child = tess_batch_input_path(root, agg->subpath);
-		Path		template;
+		CustomPath *path = make_agg_path(root, agg, aggregates);
 
-		if (child == NULL || !arguments_available(aggregates, child))
-			continue;
-		template = agg->path;
-		template.total_cost *= AGG_COST_FACTOR;
-		config.template_path = &template;
-		config.methods = &agg_path_methods;
-		config.node = &tess_agg_node;
-		config.children = list_make1(child);
-		config.expressions = aggregates;
-		add_path(output_rel, (Path *) tess_path_create(&config));
+		if (path != NULL)
+			add_path(output_rel, &path->path);
 	}
+	create_partial_paths(root, output_rel, (GroupPathExtraData *) extra);
 }
 
 /*
@@ -302,9 +407,10 @@ collect_params(Node *node, List **params)
 /*
  * The scan tuple is the aggregates themselves, so that the planner turns
  * the targets and HAVING into references to it; the child's columns stay
- * hidden. HAVING is the plan's qual, as it is the core aggregate's. The
- * private data carries one argument per aggregate, a NULL constant for
- * count(*).
+ * hidden. HAVING is the plan's qual, as it is the core aggregate's, except
+ * for the partial aggregates of a parallel plan, whose Finalize Aggregate
+ * applies it. The private data carries one argument per aggregate, a NULL
+ * constant for count(*).
  */
 static Plan *
 agg_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
@@ -315,10 +421,13 @@ agg_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 	TessPlanChild child = TESS_STRUCT_INITIALIZER(TessPlanChild);
 	List	   *arguments = NIL;
 	List	   *params = NIL;
+	bool		partial;
 
 	tess_path_get_info(best_path, &info);
 	if (!tess_plan_child(best_path, custom_plans, 0, &child))
 		elog(ERROR, "TessAgg expected a batch child");
+	partial = DO_AGGSPLIT_SKIPFINAL(((Aggref *) linitial_node(TargetEntry,
+															   info.expressions)->expr)->aggsplit);
 	foreach_ptr(TargetEntry, entry, info.expressions)
 	{
 		Node	   *argument = aggregate_argument((Aggref *) entry->expr);
@@ -330,7 +439,7 @@ agg_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 	collect_params((Node *) arguments, &params);
 	config.methods = &tess_agg_scan_methods;
 	config.layout_policy = TESS_LAYOUT_DENSE;
-	config.qual = (List *) root->parse->havingQual;
+	config.qual = partial ? NIL : (List *) root->parse->havingQual;
 	config.expressions = params;
 	config.scan_targetlist = info.expressions;
 	config.scanrelid = 0;
@@ -376,6 +485,8 @@ agg_begin(CustomScanState *css, EState *estate, int eflags)
 		Aggref	   *agg = castNode(Aggref, entry->expr);
 		AggValue   *value = &state->values[index++];
 
+		/* The partial values are the whole ones' types: nothing to convert. */
+		state->partial = DO_AGGSPLIT_SKIPFINAL(agg->aggsplit);
 		value->kind = aggregate_kind(agg->aggfnoid);
 		value->function = tess_runtime_api()->functions->find(agg->aggfnoid);
 		if (value->kind < 0 || value->function == NULL ||
@@ -663,6 +774,8 @@ agg_end(CustomScanState *css)
 {
 	TessAggState *state = (TessAggState *) css;
 
+	if (state->stats != NULL)
+		tess_shared_stats_end(state->stats);
 	tess_output_end(state->output);
 	ExecEndNode(state->child);
 }
@@ -692,23 +805,101 @@ agg_rescan(CustomScanState *css)
 	state->calls = 0;
 }
 
+/* This participant's counters. */
 static void
-agg_explain(CustomScanState *css, List *ancestors, ExplainState *es)
+agg_counters(TessAggState *state, uint64 *values)
 {
-	TessAggState *state = (TessAggState *) css;
-
-	if (!es->analyze)
-		return;
-	ExplainPropertyInteger("Input Batches", NULL, state->batches, es);
-	ExplainPropertyInteger("Input Rows", NULL, state->rows, es);
-	ExplainPropertyInteger("Kernel Calls", NULL, state->calls, es);
+	memset(values, 0, AGG_NCOUNTERS * sizeof(uint64));
+	values[AGG_BATCHES] = state->batches;
+	values[AGG_ROWS] = state->rows;
+	values[AGG_CALLS] = state->calls;
 	if (state->projection != NULL)
 	{
 		const TessProjectionStats *computed = tess_projection_stats(state->projection);
 
-		ExplainPropertyInteger("Computed Datums", NULL,
-							   computed->chain_datums + computed->row_datums, es);
+		values[AGG_COMPUTED] = computed->chain_datums + computed->row_datums;
 	}
+}
+
+/* The totals of every participant in a parallel plan, else the node's own. */
+static void
+agg_explain(CustomScanState *css, List *ancestors, ExplainState *es)
+{
+	TessAggState *state = (TessAggState *) css;
+	const uint64 *totals = NULL;
+	uint64		own[AGG_NCOUNTERS];
+
+	if (state->partial)
+		ExplainPropertyText("Partial Mode", "Partial", es);
+	if (!es->analyze)
+		return;
+	if (state->stats != NULL)
+		totals = tess_shared_stats_totals(state->stats);
+	if (totals == NULL)
+	{
+		agg_counters(state, own);
+		totals = own;
+	}
+	ExplainPropertyInteger("Input Batches", NULL, totals[AGG_BATCHES], es);
+	ExplainPropertyInteger("Input Rows", NULL, totals[AGG_ROWS], es);
+	ExplainPropertyInteger("Kernel Calls", NULL, totals[AGG_CALLS], es);
+	if (state->projection != NULL)
+		ExplainPropertyInteger("Computed Datums", NULL, totals[AGG_COMPUTED], es);
+}
+
+/*
+ * A parallel plan: the node shares only its counters, in the rows of its
+ * chunk; the child divides the work and the Finalize Aggregate above the
+ * Gather combines the participants' values.
+ */
+static Size
+agg_estimate_dsm(CustomScanState *css, ParallelContext *pcxt)
+{
+	return tess_shared_stats_estimate(AGG_NCOUNTERS, pcxt->nworkers);
+}
+
+static void
+agg_initialize_dsm(CustomScanState *css, ParallelContext *pcxt,
+				   void *coordinate)
+{
+	TessAggState *state = (TessAggState *) css;
+
+	/* A Gather a limit above shut down sets up anew when rescanned. */
+	if (state->stats != NULL)
+		tess_shared_stats_end(state->stats);
+	state->stats = tess_shared_stats_init(css->ss.ps.state->es_query_cxt,
+										  coordinate, AGG_NCOUNTERS,
+										  pcxt->nworkers, pcxt->seg);
+}
+
+static void
+agg_reinitialize_dsm(CustomScanState *css, ParallelContext *pcxt,
+					 void *coordinate)
+{
+	TessAggState *state = (TessAggState *) css;
+
+	tess_shared_stats_reset(state->stats);
+}
+
+static void
+agg_initialize_worker(CustomScanState *css, shm_toc *toc, void *coordinate)
+{
+	TessAggState *state = (TessAggState *) css;
+
+	state->stats = tess_shared_stats_attach(css->ss.ps.state->es_query_cxt,
+											coordinate, ParallelWorkerNumber + 1);
+}
+
+static void
+agg_shutdown(CustomScanState *css)
+{
+	TessAggState *state = (TessAggState *) css;
+	uint64		values[AGG_NCOUNTERS];
+
+	if (state->stats == NULL)
+		return;
+	agg_counters(state, values);
+	tess_shared_stats_store(state->stats, values);
 }
 
 static const CustomExecMethods agg_exec_methods = {
@@ -718,6 +909,11 @@ static const CustomExecMethods agg_exec_methods = {
 	.EndCustomScan = agg_end,
 	.ReScanCustomScan = agg_rescan,
 	.ExplainCustomScan = agg_explain,
+	.EstimateDSMCustomScan = agg_estimate_dsm,
+	.InitializeDSMCustomScan = agg_initialize_dsm,
+	.ReInitializeDSMCustomScan = agg_reinitialize_dsm,
+	.InitializeWorkerCustomScan = agg_initialize_worker,
+	.ShutdownCustomScan = agg_shutdown,
 };
 
 static Node *

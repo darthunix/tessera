@@ -370,8 +370,8 @@ enable switch, acts on the grouping stage of the main grouping relation
 for a query with aggregates and no `GROUP BY`, grouping sets or window
 functions, over an input that is not known to be empty. It collects the
 aggregates of the target and `HAVING` and accepts them when every one is a
-plain call, without `DISTINCT`, `ORDER BY` or `FILTER` and not split for
-partial aggregation, of an aggregate the node combines and the
+plain call, without `DISTINCT`, `ORDER BY` or `FILTER`, whole or the
+partial one of a parallel plan, of an aggregate the node combines and the
 [function registry](function.md) implements over batches (kind
 `TESS_FUNCTION_AGGREGATE`, registered by the kernels module), with an
 int4 argument without a subplan whose columns, and no placeholder, the
@@ -389,6 +389,26 @@ aggregates; their parameters alone go through `custom_exprs`, so that the
 planner counts them among the plan's and a node above that rescans its
 child only for a changed parameter of its own, a sort in a correlated
 subquery, does rescan the node.
+
+The hook also puts the node under a `Gather`, in place of the core's
+partial aggregate, when the core built partial aggregate paths for the
+query: PostgreSQL calls no hook for the partially grouped relation and
+builds the `Gather` and the `Finalize Aggregate` before it calls this
+one, so the hook finds that relation itself and, for each of its partial
+aggregate paths, builds the whole stack: the node's partial path over the
+batch child of the core path's input (a partial `TessFilter`, a
+clause-free scan through `TessHeapScan`, anything else through
+`TessPack`), with the partial aggregates of that relation's target as its
+scan tuple, the core's `Gather` over it and the core's
+`Finalize Aggregate` over that, which combines the participants' values
+with the aggregates' combine functions and applies `HAVING`; `add_path`
+decides against the core's stack and the node's serial path. The partial
+path is parallel-aware for the counters the node shares, and the plan's
+qualifier is empty, since `HAVING` belongs to the `Finalize Aggregate`.
+The partial values are the whole ones' types, int8 for `count` and
+`sum`, int4 for `min` and `max`, so the node computes them as it computes
+the whole ones, and a participant without rows gives a count of 0 and
+NULL otherwise, which the strict combine functions skip.
 
 ### Execution
 
@@ -412,11 +432,20 @@ the row is published as a one-row batch: a batch-aware parent such as
 `TessLimit` reads the batch, an ordinary parent the row. The next call
 returns nothing. Rescan passes changed parameters on to the child, since
 the core does that for outer and inner plans only, and resets the values.
-The node forwards no tuple bound, as the core's aggregate does not.
+The node forwards no tuple bound, as the core's aggregate does not. Under
+a `Gather` every participant runs the node over its share of the child's
+batches and sends its one row of partial values up the tuple queue; the
+node shares only its counters (`TessSharedStats`,
+[runtime.md](runtime.md)): the leader lays their rows out in the node's
+chunk, a worker attaches to its own, each stores its counters when the
+executor shuts the node down after the plan's last row, and the leader
+shows the totals.
 
-`EXPLAIN` shows `HAVING` as the core's `Filter`; with `ANALYZE`, the
-batches and rows read from the child, the batch function calls, and the
-`Computed Datums` of the arguments, by chains and row by row together.
+`EXPLAIN` shows `HAVING` as the core's `Filter` and `Partial Mode:
+Partial` under a `Gather`; with `ANALYZE`, the batches and rows read from
+the child, the batch function calls, and the `Computed Datums` of the
+arguments, by chains and row by row together, summed over the
+participants of a parallel plan.
 
 ### Tests
 
@@ -431,4 +460,10 @@ also with a hash aggregate under pack; a limit above reading the node's
 batch; a scrollable cursor; a single-copy `Gather`; the overflow of a
 chain; and the core keeping `DISTINCT` and `FILTER` in the aggregate,
 `GROUP BY`, a window function, an empty relation, another argument type,
-a cast, `avg`, the switch off and the kernels module absent.
+a cast, `avg`, the switch off and the kernels module absent. The parallel
+suite (`test/sql/parallel.sql`) runs the node under a `Gather` with two
+workers: the five aggregates with and without a clause, chains and
+row-wise arguments, expressions above, `HAVING` true and false,
+participants without rows, the leader not taking part, a generic plan's
+parameter in an argument, the `Gather` rescanned in a join, and an
+aggregate the node leaves to the core's partial aggregate.

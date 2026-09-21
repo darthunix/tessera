@@ -102,6 +102,36 @@ EXPLAIN (COSTS OFF) SELECT a FROM parallel_t WHERE a > 4990 ORDER BY a;
 SELECT parallel_same($$SELECT a FROM parallel_t WHERE a > 4990 ORDER BY a$$);
 -- An error raised in a worker reaches the client.
 SELECT a + 2147483647 FROM parallel_t WHERE a > 4990;
+-- The partial aggregate in every participant, the core's Finalize Aggregate
+-- combining their values above the Gather; without clauses, over the scan.
+EXPLAIN (COSTS OFF)
+SELECT count(*), count(a), sum(a), min(a), max(b) FROM parallel_t WHERE a > 100;
+SELECT parallel_same($$SELECT count(*), count(a), sum(a), min(a), max(b) FROM parallel_t WHERE a > 100$$);
+EXPLAIN (COSTS OFF) SELECT count(*), sum(a) FROM parallel_t;
+SELECT parallel_same($$SELECT count(*), sum(a) FROM parallel_t$$);
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+SELECT sum(a) FROM parallel_t WHERE a > 100;
+-- Chains and row-wise expressions as arguments, expressions above, HAVING.
+SELECT parallel_same($$SELECT sum(a + b), max(a * 2), min(-a), sum(CASE WHEN b > 5 THEN a ELSE 0 END)
+    FROM parallel_t WHERE a > 100$$);
+SELECT parallel_same($$SELECT sum(a) / count(*) AS mean, count(*) + 1 FROM parallel_t WHERE a > 100$$);
+SELECT parallel_same($$SELECT sum(a) FROM parallel_t WHERE a > 100 HAVING count(*) > 100$$);
+SELECT parallel_same($$SELECT sum(a) FROM parallel_t WHERE a > 100 HAVING count(*) > 100000$$);
+-- Participants without rows: a count of zero and NULL values to combine.
+SELECT parallel_same($$SELECT count(*), sum(a), min(a), max(a) FROM parallel_t WHERE a < 5$$);
+SELECT parallel_same($$SELECT count(*), sum(a), min(a), max(a) FROM parallel_t WHERE a > 1000000$$);
+-- The leader does not take part: the aggregate's rows are the workers' alone.
+SET parallel_leader_participation = off;
+SELECT plan_property($$SELECT count(*) FROM parallel_t WHERE a > 100$$, 'TessAgg', 'Input Rows') AS agg_rows;
+SELECT parallel_same($$SELECT count(*), sum(a) FROM parallel_t WHERE a > 100$$);
+RESET parallel_leader_participation;
+-- A parameter of a generic plan in an argument.
+PREPARE shifted(int) AS SELECT sum(a + $1) FROM parallel_t WHERE a > 4990;
+SET plan_cache_mode = force_generic_plan;
+EXECUTE shifted(1);
+EXECUTE shifted(1000);
+RESET plan_cache_mode;
+DEALLOCATE shifted;
 -- An aggregate the node does not compute: the core's partial aggregate over the rows.
 EXPLAIN (COSTS OFF) SELECT count(c), count(*) FROM parallel_t WHERE a > 100;
 SELECT parallel_same($$SELECT count(c), count(*) FROM parallel_t WHERE a > 100$$);

@@ -181,17 +181,15 @@ RIGHT JOIN (VALUES (1), (2)) AS v(x) ON true;
 ---------------------------------------------------------------------------------------------------------------
  Nested Loop Left Join (actual rows=2.00 loops=1)
    ->  Values Scan on "*VALUES*" (actual rows=2.00 loops=1)
-   ->  Custom Scan (TessAgg) (actual rows=1.00 loops=2)
-         Input Batches: 1
-         Input Rows: 2
-         Kernel Calls: 1
-         ->  Custom Scan (TessPack) (actual rows=2.00 loops=2)
-               Batch Size: 64
-               Rows Kept As: copies
-               Batches: 1
-               ->  Gather (actual rows=2.00 loops=2)
-                     Workers Planned: 2
-                     Workers Launched: 2
+   ->  Finalize Aggregate (actual rows=1.00 loops=2)
+         ->  Gather (actual rows=3.00 loops=2)
+               Workers Planned: 2
+               Workers Launched: 2
+               ->  Parallel Custom Scan (TessAgg) (actual rows=1.00 loops=6)
+                     Partial Mode: Partial
+                     Input Batches: 1
+                     Input Rows: 2
+                     Kernel Calls: 1
                      ->  Parallel Custom Scan (TessFilter) on parallel_t (actual rows=0.67 loops=6)
                            Batch Filter: (parallel_t.a > 4997)
                            Rows Removed by Batch Filter: 1666
@@ -204,7 +202,7 @@ RIGHT JOIN (VALUES (1), (2)) AS v(x) ON true;
                                  Pages: 28
                                  Deformed Datums: 10000
                                  Restarted Datums: 0
-(25 rows)
+(23 rows)
 
 SELECT parallel_same($$SELECT x, n FROM (SELECT count(*) AS n FROM parallel_t WHERE a > 4997) AS ss
 RIGHT JOIN (VALUES (1), (2)) AS v(x) ON true$$);
@@ -276,11 +274,12 @@ EXPLAIN (COSTS OFF) EXECUTE above(4990);
  Finalize Aggregate
    ->  Gather
          Workers Planned: 2
-         ->  Partial Aggregate
+         ->  Parallel Custom Scan (TessAgg)
+               Partial Mode: Partial
                ->  Parallel Custom Scan (TessFilter) on parallel_t
                      Batch Filter: (a > $1)
                      ->  Parallel Custom Scan (TessHeapScan) on parallel_t
-(7 rows)
+(8 rows)
 
 EXECUTE above(4990);
  count | min  
@@ -318,6 +317,144 @@ SELECT parallel_same($$SELECT a FROM parallel_t WHERE a > 4990 ORDER BY a$$);
 -- An error raised in a worker reaches the client.
 SELECT a + 2147483647 FROM parallel_t WHERE a > 4990;
 ERROR:  integer out of range
+-- The partial aggregate in every participant, the core's Finalize Aggregate
+-- combining their values above the Gather; without clauses, over the scan.
+EXPLAIN (COSTS OFF)
+SELECT count(*), count(a), sum(a), min(a), max(b) FROM parallel_t WHERE a > 100;
+                                QUERY PLAN                                 
+---------------------------------------------------------------------------
+ Finalize Aggregate
+   ->  Gather
+         Workers Planned: 2
+         ->  Parallel Custom Scan (TessAgg)
+               Partial Mode: Partial
+               ->  Parallel Custom Scan (TessFilter) on parallel_t
+                     Batch Filter: (a > 100)
+                     ->  Parallel Custom Scan (TessHeapScan) on parallel_t
+(8 rows)
+
+SELECT parallel_same($$SELECT count(*), count(a), sum(a), min(a), max(b) FROM parallel_t WHERE a > 100$$);
+         parallel_same          
+--------------------------------
+ {"(4200,4200,10711400,101,9)"}
+(1 row)
+
+EXPLAIN (COSTS OFF) SELECT count(*), sum(a) FROM parallel_t;
+                             QUERY PLAN                              
+---------------------------------------------------------------------
+ Finalize Aggregate
+   ->  Gather
+         Workers Planned: 2
+         ->  Parallel Custom Scan (TessAgg)
+               Partial Mode: Partial
+               ->  Parallel Custom Scan (TessHeapScan) on parallel_t
+(6 rows)
+
+SELECT parallel_same($$SELECT count(*), sum(a) FROM parallel_t$$);
+    parallel_same    
+---------------------
+ {"(5000,10715715)"}
+(1 row)
+
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+SELECT sum(a) FROM parallel_t WHERE a > 100;
+                                               QUERY PLAN                                                
+---------------------------------------------------------------------------------------------------------
+ Finalize Aggregate (actual rows=1.00 loops=1)
+   ->  Gather (actual rows=3.00 loops=1)
+         Workers Planned: 2
+         Workers Launched: 2
+         ->  Parallel Custom Scan (TessAgg) (actual rows=1.00 loops=3)
+               Partial Mode: Partial
+               Input Batches: 81
+               Input Rows: 4200
+               Kernel Calls: 81
+               Computed Datums: 4200
+               ->  Parallel Custom Scan (TessFilter) on parallel_t (actual rows=1400.00 loops=3)
+                     Batch Filter: (a > 100)
+                     Rows Removed by Batch Filter: 267
+                     Input Batches: 82
+                     Input Rows: 5000
+                     Output Rows: 4200
+                     ->  Parallel Custom Scan (TessHeapScan) on parallel_t (actual rows=1666.67 loops=3)
+                           Batch Size: 64
+                           Batches: 82
+                           Pages: 28
+                           Deformed Datums: 5000
+                           Restarted Datums: 0
+(22 rows)
+
+-- Chains and row-wise expressions as arguments, expressions above, HAVING.
+SELECT parallel_same($$SELECT sum(a + b), max(a * 2), min(-a), sum(CASE WHEN b > 5 THEN a ELSE 0 END)
+    FROM parallel_t WHERE a > 100$$);
+           parallel_same            
+------------------------------------
+ {"(10730300,10000,-5000,4287500)"}
+(1 row)
+
+SELECT parallel_same($$SELECT sum(a) / count(*) AS mean, count(*) + 1 FROM parallel_t WHERE a > 100$$);
+  parallel_same  
+-----------------
+ {"(2550,4201)"}
+(1 row)
+
+SELECT parallel_same($$SELECT sum(a) FROM parallel_t WHERE a > 100 HAVING count(*) > 100$$);
+ parallel_same 
+---------------
+ {(10711400)}
+(1 row)
+
+SELECT parallel_same($$SELECT sum(a) FROM parallel_t WHERE a > 100 HAVING count(*) > 100000$$);
+ parallel_same 
+---------------
+ 
+(1 row)
+
+-- Participants without rows: a count of zero and NULL values to combine.
+SELECT parallel_same($$SELECT count(*), sum(a), min(a), max(a) FROM parallel_t WHERE a < 5$$);
+ parallel_same  
+----------------
+ {"(4,10,1,4)"}
+(1 row)
+
+SELECT parallel_same($$SELECT count(*), sum(a), min(a), max(a) FROM parallel_t WHERE a > 1000000$$);
+ parallel_same 
+---------------
+ {"(0,,,)"}
+(1 row)
+
+-- The leader does not take part: the aggregate's rows are the workers' alone.
+SET parallel_leader_participation = off;
+SELECT plan_property($$SELECT count(*) FROM parallel_t WHERE a > 100$$, 'TessAgg', 'Input Rows') AS agg_rows;
+ agg_rows 
+----------
+ 4200
+(1 row)
+
+SELECT parallel_same($$SELECT count(*), sum(a) FROM parallel_t WHERE a > 100$$);
+    parallel_same    
+---------------------
+ {"(4200,10711400)"}
+(1 row)
+
+RESET parallel_leader_participation;
+-- A parameter of a generic plan in an argument.
+PREPARE shifted(int) AS SELECT sum(a + $1) FROM parallel_t WHERE a > 4990;
+SET plan_cache_mode = force_generic_plan;
+EXECUTE shifted(1);
+  sum  
+-------
+ 39974
+(1 row)
+
+EXECUTE shifted(1000);
+  sum  
+-------
+ 47966
+(1 row)
+
+RESET plan_cache_mode;
+DEALLOCATE shifted;
 -- An aggregate the node does not compute: the core's partial aggregate over the rows.
 EXPLAIN (COSTS OFF) SELECT count(c), count(*) FROM parallel_t WHERE a > 100;
                                 QUERY PLAN                                 
