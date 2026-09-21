@@ -57,23 +57,61 @@ static int
 trim_batch(void *private_data, TessBatch *batch, int rows)
 {
 	TessLimitState *state = private_data;
-	int			row = -1;
+	TessRowMask *mask = &batch->rows;
+	int			nwords = tess_row_mask_word_count(mask->nrows);
 	int			kept = 0;
 
-	while ((row = tess_row_mask_next(&batch->rows, row)) >= 0)
+	/*
+	 * Whole words at a time: a word the offset still covers is cleared, a
+	 * word past the count is cleared, a word the count still covers is
+	 * kept, and only a word the offset or the count ends in is walked row
+	 * by row.
+	 */
+	for (int word = 0; word < nwords; word++)
 	{
-		if (state->offset_remaining > 0)
+		uint64		bits = mask->bits[word];
+		int			present;
+
+		if (bits == 0)
+			continue;
+		present = pg_popcount64(bits);
+		if (state->offset_remaining >= present)
 		{
-			tess_row_mask_clear(&batch->rows, row);
-			state->offset_remaining--;
+			mask->bits[word] = 0;
+			state->offset_remaining -= present;
+			continue;
 		}
-		else if (!state->no_count && state->count_remaining == 0)
-			tess_row_mask_clear(&batch->rows, row);
-		else
+		if (!state->no_count && state->count_remaining == 0)
+		{
+			mask->bits[word] = 0;
+			continue;
+		}
+		if (state->offset_remaining == 0 &&
+			(state->no_count || state->count_remaining >= present))
 		{
 			if (!state->no_count)
-				state->count_remaining--;
-			kept++;
+				state->count_remaining -= present;
+			kept += present;
+			continue;
+		}
+		while (bits != 0)
+		{
+			uint64		bit = bits & (~bits + 1);
+
+			if (state->offset_remaining > 0)
+			{
+				mask->bits[word] &= ~bit;
+				state->offset_remaining--;
+			}
+			else if (!state->no_count && state->count_remaining == 0)
+				mask->bits[word] &= ~bit;
+			else
+			{
+				if (!state->no_count)
+					state->count_remaining--;
+				kept++;
+			}
+			bits &= bits - 1;
 		}
 	}
 	if (!state->no_count && state->count_remaining == 0)
