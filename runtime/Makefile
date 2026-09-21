@@ -2,23 +2,27 @@
 # and tests link. Built with the PostgreSQL flags of PG_CONFIG.
 PG_CPPFLAGS = -I$(srcdir)/../include
 
+# Set before PGXS is read: its clean rule takes EXTRA_CLEAN as it is read,
+# and a later definition never reaches it. The list is not OBJS, which PGXS
+# would take for a module's objects and, with LLVM, build bitcode for.
+RUNTIME_LIB = libtessera_runtime.a
+RUNTIME_OBJS = api.o builder.o expr.o heap_batch.o input.o output.o plan.o planner.o \
+	project.o shared_stats.o unary.o
+EXTRA_CLEAN = $(RUNTIME_LIB) $(RUNTIME_OBJS)
+
 PG_CONFIG ?= pg_config
 PGXS := $(shell $(PG_CONFIG) --pgxs)
 include $(PGXS)
 
-RUNTIME_LIB = libtessera_runtime.a
-OBJS = api.o builder.o expr.o heap_batch.o input.o output.o plan.o planner.o project.o \
-	shared_stats.o unary.o
 override CFLAGS += $(CFLAGS_SL) $(CFLAGS_SL_MODULE)
-EXTRA_CLEAN = $(RUNTIME_LIB) $(OBJS)
 
 all: $(RUNTIME_LIB)
 
-$(RUNTIME_LIB): $(OBJS)
+$(RUNTIME_LIB): $(RUNTIME_OBJS)
 	rm -f $@
 	$(AR) $(AROPT) $@ $^
 
-$(OBJS): $(wildcard $(srcdir)/../include/tessera/*.h)
+$(RUNTIME_OBJS): $(wildcard $(srcdir)/../include/tessera/*.h)
 
 install: install-runtime
 
