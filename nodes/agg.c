@@ -32,6 +32,8 @@
  * make. See docs/nodes.md.
  */
 #define AGG_COST_FACTOR 0.9
+/* A batch with at most this many survivors is gathered for one call later. */
+#define AGG_GATHER_ROWS 8
 
 /* How the partials of an aggregate combine, and what an empty input gives. */
 typedef enum AggKind
@@ -48,6 +50,10 @@ typedef struct AggValue
 	const TessFunction *function;
 	/* The argument over the child's batch, or NULL for count(*). */
 	TessExpr   *expr;
+	/* The argument's values of sparse batches, a column of their own. */
+	Datum	   *gathered_values;
+	bool	   *gathered_isnull;
+	int			ngathered;
 	int64		total;
 	int32		extreme;
 	bool		has_value;
@@ -68,6 +74,7 @@ typedef struct TessAggState
 	bool		done;
 	uint64		batches;
 	uint64		rows;
+	uint64		calls;
 } TessAggState;
 
 static const CustomExecMethods agg_exec_methods;
@@ -357,6 +364,8 @@ agg_begin(CustomScanState *css, EState *estate, int eflags)
 			if (tess_expr_input_column(value->expr) >= 0)
 				projection = bms_add_member(projection,
 											tess_expr_input_column(value->expr));
+			value->gathered_values = palloc_array(Datum, 64);
+			value->gathered_isnull = palloc_array(bool, 64);
 		}
 	}
 	/* Whole batches; the arguments' columns only for the surviving rows. */
@@ -384,9 +393,16 @@ report(const TessStatus *status)
 			 errmsg("%s", status->message)));
 }
 
-/* Add one batch's partial of the aggregate to its running value. */
+/*
+ * One call of the aggregate's batch function over a column, or over rows
+ * alone for count(*); the partial joins the running value. No readiness
+ * mask: the column's rows are all initialized memory (tessera/batch.h),
+ * and a mask would keep the kernel off its vector path for every word the
+ * selection does not fill.
+ */
 static void
-accumulate(TessAggState *state, AggValue *value, TessBatch *batch)
+evaluate(TessAggState *state, AggValue *value, const TessDatumColumn *column,
+		 TessRowMask *rows)
 {
 	TessFunctionCall call = TESS_STRUCT_INITIALIZER(TessFunctionCall);
 	TessFunctionArg arg = TESS_STRUCT_INITIALIZER(TessFunctionArg);
@@ -395,24 +411,18 @@ accumulate(TessAggState *state, AggValue *value, TessBatch *batch)
 	Datum		partial = (Datum) 0;
 
 	call.function = value->function;
-	if (value->expr != NULL)
+	if (column != NULL)
 	{
-		/*
-		 * No readiness mask: the column's rows are all initialized memory
-		 * (tessera/batch.h), and a mask would keep the kernel off its vector
-		 * path for every word the selection does not fill.
-		 */
-		tess_expr_bind(value->expr, batch, state->css.ss.ps.ps_ExprContext,
-					   TESS_COLUMN_FOR_PROJECTION);
-		arg.column = tess_expr_get_column(value->expr);
+		arg.column = column;
 		call.nargs = 1;
 		call.args = &arg;
 	}
-	call.rows = &batch->rows;
+	call.rows = rows;
 	call.values = &partial;
 	call.non_nulls = &present;
 	call.context = CurrentMemoryContext;
 	call.status = &state->status;
+	state->calls++;
 	if (value->function->evaluate(&call) != TESS_OK)
 		report(&state->status);
 	if ((word & 1) == 0)
@@ -439,6 +449,60 @@ accumulate(TessAggState *state, AggValue *value, TessBatch *batch)
 	value->has_value = true;
 }
 
+/* The gathered values as a column with every row selected, in one call. */
+static void
+flush_gathered(TessAggState *state, AggValue *value)
+{
+	TessDatumColumn column = TESS_STRUCT_INITIALIZER(TessDatumColumn);
+	uint64		word;
+	TessRowMask rows = {value->ngathered, &word};
+
+	if (value->ngathered == 0)
+		return;
+	column.values = value->gathered_values;
+	column.isnull = value->gathered_isnull;
+	column.nrows = value->ngathered;
+	word = value->ngathered == 64 ? UINT64_MAX :
+		(UINT64CONST(1) << value->ngathered) - 1;
+	evaluate(state, value, &column, &rows);
+	value->ngathered = 0;
+}
+
+/*
+ * Add one batch to the aggregate: its partial through the batch function,
+ * or, for a batch with few survivors, their values gathered into a column
+ * of the aggregate's own, since a call costs more than the rows it would
+ * sum; the column is evaluated when it fills or the input ends.
+ */
+static void
+accumulate(TessAggState *state, AggValue *value, TessBatch *batch, int nrows)
+{
+	const TessDatumColumn *column;
+	int			row = -1;
+
+	if (value->expr == NULL)
+	{
+		evaluate(state, value, NULL, &batch->rows);
+		return;
+	}
+	tess_expr_bind(value->expr, batch, state->css.ss.ps.ps_ExprContext,
+				   TESS_COLUMN_FOR_PROJECTION);
+	column = tess_expr_get_column(value->expr);
+	if (nrows > AGG_GATHER_ROWS)
+	{
+		evaluate(state, value, column, &batch->rows);
+		return;
+	}
+	while ((row = tess_row_mask_next(&batch->rows, row)) >= 0)
+	{
+		if (value->ngathered == 64)
+			flush_gathered(state, value);
+		value->gathered_values[value->ngathered] = column->values[row];
+		value->gathered_isnull[value->ngathered] = column->isnull[row];
+		value->ngathered++;
+	}
+}
+
 /* Read every batch of the child into the running values. */
 static void
 drain(TessAggState *state)
@@ -449,7 +513,7 @@ drain(TessAggState *state)
 		int			rows;
 
 		if (batch == NULL)
-			return;
+			break;
 		rows = tess_row_mask_count(&batch->rows);
 		state->batches++;
 		state->rows += rows;
@@ -457,10 +521,12 @@ drain(TessAggState *state)
 		{
 			ResetExprContext(state->css.ss.ps.ps_ExprContext);
 			for (int index = 0; index < state->nvalues; index++)
-				accumulate(state, &state->values[index], batch);
+				accumulate(state, &state->values[index], batch, rows);
 		}
 		tess_input_finish(state->input);
 	}
+	for (int index = 0; index < state->nvalues; index++)
+		flush_gathered(state, &state->values[index]);
 }
 
 /* The one result row: the aggregates in the scan slot. */
@@ -551,10 +617,12 @@ agg_rescan(CustomScanState *css)
 	{
 		state->values[index].total = 0;
 		state->values[index].has_value = false;
+		state->values[index].ngathered = 0;
 	}
 	state->done = false;
 	state->batches = 0;
 	state->rows = 0;
+	state->calls = 0;
 }
 
 static void
@@ -566,6 +634,7 @@ agg_explain(CustomScanState *css, List *ancestors, ExplainState *es)
 		return;
 	ExplainPropertyInteger("Input Batches", NULL, state->batches, es);
 	ExplainPropertyInteger("Input Rows", NULL, state->rows, es);
+	ExplainPropertyInteger("Kernel Calls", NULL, state->calls, es);
 }
 
 static const CustomExecMethods agg_exec_methods = {

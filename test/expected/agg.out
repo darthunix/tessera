@@ -172,6 +172,13 @@ SELECT agg_same($$SELECT sum(a), min(a) FROM agg_t WHERE a IS NULL$$);
  {"(,)"}
 (1 row)
 
+-- Survivors too few to fill a gathered column are evaluated at the end.
+SELECT agg_same($$SELECT count(a), sum(a), min(a), max(a), count(*) FROM agg_t WHERE a % 50 = 0$$);
+       agg_same        
+-----------------------
+ {"(6,1050,50,300,6)"}
+(1 row)
+
 SELECT agg_same($$SELECT sum(a + 1), min(-a), max(a % 7), count(a * 2), sum(100 - a) FROM agg_t WHERE a > 200$$);
            agg_same           
 ------------------------------
@@ -247,6 +254,7 @@ SELECT sum(b) FROM agg_t WHERE a > 290;
  Custom Scan (TessAgg) (actual rows=1.00 loops=1)
    Input Batches: 1
    Input Rows: 9
+   Kernel Calls: 1
    ->  Custom Scan (TessFilter) on agg_t (actual rows=9.00 loops=1)
          Batch Filter: (a > 290)
          Rows Removed by Batch Filter: 291
@@ -259,7 +267,7 @@ SELECT sum(b) FROM agg_t WHERE a > 290;
                Pages: 2
                Deformed Datums: 309
                Restarted Datums: 0
-(15 rows)
+(16 rows)
 
 -- An error in the argument is the chain's.
 SELECT sum(a + 2147483647) FROM agg_t;
@@ -302,6 +310,7 @@ SELECT count(*) FROM agg_wide WHERE a % 3 = 0;
  Custom Scan (TessAgg) (actual rows=1.00 loops=1)
    Input Batches: 67
    Input Rows: 333
+   Kernel Calls: 67
    ->  Custom Scan (TessFilter) on agg_wide (actual rows=333.00 loops=1)
          Batch Filter: ((a % 3) = 0)
          Rows Removed by Batch Filter: 667
@@ -314,7 +323,37 @@ SELECT count(*) FROM agg_wide WHERE a % 3 = 0;
                Pages: 67
                Deformed Datums: 1000
                Restarted Datums: 0
-(15 rows)
+(16 rows)
+
+-- Few survivors per batch are gathered into one call per 64: 333 rows over
+-- 67 batches make six calls of the sum, the last over the 13 left.
+SELECT agg_same($$SELECT sum(a), min(a), max(a), count(a) FROM agg_wide WHERE a % 3 = 0$$);
+        agg_same        
+------------------------
+ {"(166833,3,999,333)"}
+(1 row)
+
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+SELECT sum(a) FROM agg_wide WHERE a % 3 = 0;
+                                    QUERY PLAN                                    
+----------------------------------------------------------------------------------
+ Custom Scan (TessAgg) (actual rows=1.00 loops=1)
+   Input Batches: 67
+   Input Rows: 333
+   Kernel Calls: 6
+   ->  Custom Scan (TessFilter) on agg_wide (actual rows=333.00 loops=1)
+         Batch Filter: ((a % 3) = 0)
+         Rows Removed by Batch Filter: 667
+         Input Batches: 67
+         Input Rows: 1000
+         Output Rows: 333
+         ->  Custom Scan (TessHeapScan) on agg_wide (actual rows=1000.00 loops=1)
+               Batch Size: 64
+               Batches: 67
+               Pages: 67
+               Deformed Datums: 1000
+               Restarted Datums: 0
+(16 rows)
 
 DROP TABLE agg_wide;
 -- A join below: pack turns its rows into batches.

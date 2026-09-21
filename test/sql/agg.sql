@@ -58,6 +58,8 @@ SELECT agg_same($$SELECT count(a), sum(a), min(a), max(a), count(*) FROM agg_t W
 SELECT agg_same($$SELECT count(a), sum(a), min(a), max(a), count(*) FROM agg_t$$);
 SELECT agg_same($$SELECT count(a), sum(a), min(a), max(a), count(*) FROM agg_t WHERE a > 1000000$$);
 SELECT agg_same($$SELECT sum(a), min(a) FROM agg_t WHERE a IS NULL$$);
+-- Survivors too few to fill a gathered column are evaluated at the end.
+SELECT agg_same($$SELECT count(a), sum(a), min(a), max(a), count(*) FROM agg_t WHERE a % 50 = 0$$);
 SELECT agg_same($$SELECT sum(a + 1), min(-a), max(a % 7), count(a * 2), sum(100 - a) FROM agg_t WHERE a > 200$$);
 SELECT agg_same($$SELECT sum(a) / count(*) AS mean, sum(a)::numeric / 2 AS half FROM agg_t WHERE a > 200$$);
 SELECT agg_same($$SELECT sum(x.a), max(y.b) FROM agg_t AS x JOIN agg_t AS y ON x.b = y.b WHERE x.a > 295$$);
@@ -90,6 +92,11 @@ SELECT i AS a, repeat('x', 500) AS pad FROM generate_series(1, 1000) AS i;
 SELECT agg_same($$SELECT count(*) FROM agg_wide WHERE a % 3 = 0$$);
 EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT count(*) FROM agg_wide WHERE a % 3 = 0;
+-- Few survivors per batch are gathered into one call per 64: 333 rows over
+-- 67 batches make six calls of the sum, the last over the 13 left.
+SELECT agg_same($$SELECT sum(a), min(a), max(a), count(a) FROM agg_wide WHERE a % 3 = 0$$);
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+SELECT sum(a) FROM agg_wide WHERE a % 3 = 0;
 DROP TABLE agg_wide;
 
 -- A join below: pack turns its rows into batches.
