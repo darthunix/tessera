@@ -75,9 +75,10 @@ batch's selected rows; a strict function leaves NULL rows out of its
 next call's column, so NULL flows through the chain as it does through the
 row-wise executor. A NULL scalar makes the whole step NULL without a call.
 Implementations that return `TESS_RESULT_INT32` write int32 results, which
-the compiler widens into the Datum column between steps; that costs one
-pass over the selected rows per step, and native column formats will remove
-it later. A failed call raises its SQLSTATE and message after the call has
+the compiler widens into the Datum column between steps; that pass goes
+word by word over the batch's rows, writing every row of a word with
+selected rows, so that it vectorizes, and native column formats would
+remove it altogether. A failed call raises its SQLSTATE and message after the call has
 returned, as every kernel error is reported.
 
 ## Filters

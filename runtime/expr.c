@@ -452,21 +452,38 @@ fill_scalar(TessExpr *expr, int set, Datum value, bool isnull)
 	}
 }
 
-/* Turn a step's results into the next column: Datums and NULL flags. */
+/*
+ * Turn a step's results into the next column: Datums and NULL flags, word
+ * by word over the batch's rows rather than row by row over the selected
+ * ones. Every row of a word with selected rows is written: the value is
+ * widened without a condition and the flag comes from the mask's bit, so
+ * a row the step left out gets a placeholder and NULL, which is allowed in
+ * the chain's own scratch arrays and lets the compiler vectorize.
+ */
 static void
 finish_step(TessExpr *expr, int set, TessResultFormat format)
 {
 	const TessRowMask *rows = &expr->batch->rows;
-	TessRowMask non_nulls = {rows->nrows, expr->bits[set]};
-	int			row = -1;
+	int			nrows = rows->nrows;
+	int			nwords = tess_row_mask_word_count(nrows);
+	const uint64 *present = expr->bits[set];
+	Datum	   *values = expr->values[set];
+	bool	   *isnull = expr->isnull[set];
+	const int32 *ints = expr->ints[set];
 
-	while ((row = tess_row_mask_next(rows, row)) >= 0)
+	for (int word = 0; word < nwords; word++)
 	{
-		bool		present = tess_row_mask_contains(&non_nulls, row);
+		int			first = word * 64;
+		int			count = Min(64, nrows - first);
+		uint64		bits = present[word];
 
-		if (present && format == TESS_RESULT_INT32)
-			expr->values[set][row] = Int32GetDatum(expr->ints[set][row]);
-		expr->isnull[set][row] = !present;
+		if (rows->bits[word] == 0)
+			continue;
+		if (format == TESS_RESULT_INT32)
+			for (int i = 0; i < count; i++)
+				values[first + i] = Int32GetDatum(ints[first + i]);
+		for (int i = 0; i < count; i++)
+			isnull[first + i] = ((bits >> i) & 1) == 0;
 	}
 }
 
