@@ -434,6 +434,13 @@ A parent that adds its path to the same relation as the child copies the
 child first (`*copy = *seqscan`): `add_path` frees a core path that the new
 path dominates, and the wrapped child must outlive it.
 
+The pack node sees through a subquery scan: a `SubqueryScanPath` without
+clauses, whose targets are columns of the subquery and whose subquery is
+planned as a batch path, gets a pack that forwards the batches of the plan
+under the scan instead of packing its rows (see `TessPack` in
+[nodes.md](nodes.md)), so that a subquery with `LIMIT`, which the planner
+cannot pull up, does not break a batch chain into rows.
+
 ## Building plans
 
 `PlanCustomPath` turns the path into a `CustomScan` the same way for every

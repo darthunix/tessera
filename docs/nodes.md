@@ -141,6 +141,18 @@ own: the relation's clauses are evaluated by the child, or taken over by a
 filter above. A pack path is never parameterized, since the path helper
 refuses such a template.
 
+When the child is a subquery scan without clauses, whose targets are all
+columns of the subquery and whose subquery is planned as a batch path,
+`wrap_rows` marks the path for forwarding: the pack packs nothing and
+hands the batches of the plan under the subquery scan to its parent.
+PostgreSQL keeps the subquery scan in the plan for the subquery's range
+table, unless the scan is trivial, in which case it drops it after
+planning and the pack's child is the batch node itself. The explicit
+layout `PlanCustomPath` builds from the subplan's layout, mapping every
+target to the column of the subplan's target of the same number, holds
+either way. A subquery scan with a clause of its own, or over a subquery
+whose plan is not a batch path, is packed as any other child.
+
 ### Execution
 
 `BeginCustomScan` reads the plan, initializes the child and binds the
@@ -173,8 +185,18 @@ needs, through the node kind's `set_tuple_bound` callback, the pack node
 forwards the bound to its child and pulls no more rows than that, so a
 sort below stays a top-N sort and the last batch may be short.
 
+When forwarding, the node stands on the unary helper without a process
+callback: the batch source is the subquery scan's subplan, or the child
+itself when the planner dropped the scan; the parent's request reaches the
+source through the layout's map, the source's slot is returned as the
+node's, and a rescan goes through the subquery scan, which is how a
+changed parameter reaches the subquery's plan. The subquery scan itself is
+never executed, and `EXPLAIN ANALYZE` shows it so. A bound from a limit
+above reaches the source's node kind.
+
 `EXPLAIN` shows `Batch Size` and `Rows Kept As` (`heap tuples` or
-`copies`) once the node has executed, since both follow the parent's
+`copies`, or `forwarded batches` with the number of `Batches` forwarded
+under `ANALYZE`) once the node has executed, since both follow the parent's
 request and the child's slot, and with `ANALYZE` the number of `Batches`
 and, for kept tuples, the `Deformed Datums`, the `Restarted Datums`
 (values before a row's cursor, deformed from the row's start) and any
@@ -183,7 +205,12 @@ the output helper, so the node reports the rows it packed.
 
 ### Tests
 
-The [pack test](../test/tessera_pack_test.c) is a stand-in for a
+The `forward` suite covers the pass-through: an aggregate and a limit above
+a subquery with `LIMIT` or `OFFSET`, with the subquery scan kept or dropped,
+targets that are not the subquery's first column, a bound from the limit
+above, a correlated subquery rescanned with a changed parameter, a sort under
+the subquery's limit, a clause of the scan's own, an empty result, and the
+same rows with Tessera off. The [pack test](../test/tessera_pack_test.c) is a stand-in for a
 batch-aware parent built on the unary helper: its hook wraps the sequential
 scan of every table named `pack_*` through `tess_batch_input_path` and puts
 the sink above it, which serves the rows of the batches to the executor.

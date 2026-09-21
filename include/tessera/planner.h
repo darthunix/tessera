@@ -82,7 +82,9 @@ extern void tess_path_get_info(const CustomPath *path, TessPathInfo *result);
  * A batch path over any path: the path itself when it is one, a batch scan
  * of its relation when the path is a sequential scan of a relation without
  * clauses and a node kind reads batches natively, otherwise the pack node's
- * path over it, so that a batch parent can stand above any core path. NULL
+ * path over it, so that a batch parent can stand above any core path; the
+ * pack node forwards the batches of a subquery scan without clauses whose
+ * subquery is planned as a batch path, instead of packing its rows. NULL
  * when the path is parameterized, when a pseudoconstant clause makes the
  * planner gate every scan of the relation with a Result the parent could
  * not read through, or when no pack node is registered; the caller then

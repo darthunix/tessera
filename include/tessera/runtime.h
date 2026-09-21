@@ -374,6 +374,12 @@ typedef struct TessUnaryConfig
 	 * the projection's wrapper of each batch instead of the child's slot.
 	 */
 	TessProjection *projection;
+	/*
+	 * The plan node the executor rescans, when the batch child is reached
+	 * through it: a subquery scan whose subplan is the batch child. NULL
+	 * rescans the batch child itself.
+	 */
+	PlanState  *rescan_child;
 } TessUnaryConfig;
 
 #define TESS_UNARY_CONFIG_MIN_SIZE \

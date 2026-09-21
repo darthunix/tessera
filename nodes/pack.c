@@ -8,6 +8,7 @@
 #include "optimizer/plancat.h"
 #include "optimizer/tlist.h"
 
+#include "tessera/plan.h"
 #include "tessera/runtime.h"
 
 #include "internal.h"
@@ -23,14 +24,24 @@
  * tuple slot without projecting, and keeps the tuples in a heap batch
  * that deforms a column only when a consumer asks for it, for the rows
  * asked for. Above any other child, or a scan the executor projects, the
- * builder copies every column of every row. See docs/nodes.md.
+ * builder copies every column of every row. Above a subquery scan without
+ * clauses whose subquery is planned as a batch path, the pack packs
+ * nothing: it forwards the batches of the plan under the subquery scan,
+ * which the planner keeps for the subquery's range table but the pack
+ * never executes. See docs/nodes.md.
  */
 #define PACK_BATCH_ROWS 64
+
+/* The path's data: how the pack stands above its child. */
+#define PACK_PHYSICAL_TARGETS 1
+#define PACK_FORWARD 2
 
 typedef struct PackState
 {
 	CustomScanState css;
 	PlanState  *child;
+	/* Forwarding: the unary helper reads the batches under the child. */
+	TessUnary  *unary;
 	TessOutput *output;
 	TessLayout	layout;
 	/* One of the two is created at the first execution, by the first slot. */
@@ -103,6 +114,32 @@ physical_targets(PlannerInfo *root, const Path *child)
 	return build_physical_tlist(root, rel);
 }
 
+/*
+ * Whether the child is a subquery scan the pack sees through: no clauses
+ * of its own, targets that are columns of the subquery, and a subquery
+ * whose chosen path is a batch path, so that its batches can be forwarded.
+ */
+static bool
+forwardable(const Path *child)
+{
+	const SubqueryScanPath *scan = (const SubqueryScanPath *) child;
+	RelOptInfo *rel = child->parent;
+
+	if (!IsA(child, SubqueryScanPath) || rel == NULL ||
+		rel->baserestrictinfo != NIL || child->pathtarget == NULL ||
+		tess_path_node(scan->subpath) == NULL)
+		return false;
+	foreach_ptr(Expr, expr, child->pathtarget->exprs)
+	{
+		Var		   *var = (Var *) expr;
+
+		if (!IsA(expr, Var) || var->varno != rel->relid ||
+			var->varattno <= 0 || var->varlevelsup != 0)
+			return false;
+	}
+	return true;
+}
+
 /* The path costs what its child costs: there is no cost model yet. */
 static CustomPath *
 pack_wrap_rows(PlannerInfo *root, Path *child)
@@ -111,13 +148,15 @@ pack_wrap_rows(PlannerInfo *root, Path *child)
 	List	   *physical = physical_targets(root, child);
 	Path	   *scan = child;
 
-	if (physical != NIL)
+	if (forwardable(child))
+		config.node_data = (Node *) makeInteger(PACK_FORWARD);
+	else if (physical != NIL)
 	{
 		/* The caller's path keeps its target: the pack's own is that one. */
 		scan = makeNode(Path);
 		*scan = *child;
 		scan->pathtarget = create_pathtarget(root, physical);
-		config.node_data = (Node *) makeInteger(1);
+		config.node_data = (Node *) makeInteger(PACK_PHYSICAL_TARGETS);
 	}
 	config.template_path = child;
 	config.methods = &pack_path_methods;
@@ -134,7 +173,10 @@ pack_set_tuple_bound(CustomScanState *css, int64 tuples_needed)
 	PackState  *state = (PackState *) css;
 
 	state->tuples_needed = tuples_needed < 0 ? -1 : tuples_needed;
-	ExecSetTupleBound(tuples_needed, state->child);
+	if (state->unary != NULL)
+		tess_unary_set_tuple_bound(state->unary, tuples_needed);
+	else
+		ExecSetTupleBound(tuples_needed, state->child);
 }
 
 const TessNode tess_pack_node = {
@@ -156,7 +198,41 @@ pack_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 	tess_path_get_info(best_path, &info);
 	config.methods = &tess_pack_scan_methods;
 	config.scan_targetlist = child->targetlist;
-	if (info.node_data != NULL)
+	if (info.node_data != NULL && intVal(info.node_data) == PACK_FORWARD)
+	{
+		/*
+		 * The batches are the subplan's: every one of its columns is a
+		 * batch column, and a target, a column of the subquery, maps to the
+		 * column of the subplan's target of that number.
+		 */
+		SubqueryScan *scan = castNode(SubqueryScan, child);
+		Plan	   *subplan = scan->subplan;
+		TessLayout	forwarded = TESS_STRUCT_INITIALIZER(TessLayout);
+		int		   *map = palloc_array(int, list_length(tlist));
+		int			target = 0;
+		const char *kind = IsA(subplan, CustomScan) ?
+			tess_plan_data_kind(((CustomScan *) subplan)->custom_private) : NULL;
+
+		if (kind == NULL || strcmp(kind, "tessera.plan") != 0)
+			elog(ERROR, "Tessera pack cannot forward the batches of a foreign plan");
+		tess_plan_get_layout(subplan, &forwarded);
+		foreach_ptr(TargetEntry, entry, tlist)
+		{
+			Var		   *var = (Var *) entry->expr;
+
+			if (!IsA(var, Var) || var->varattno < 1 ||
+				var->varattno > forwarded.ntargets)
+				elog(ERROR, "Tessera pack target is not a column of the subquery");
+			map[target++] = tess_layout_column(&forwarded, var->varattno - 1);
+		}
+		layout.ncolumns = forwarded.ncolumns;
+		layout.ntargets = list_length(tlist);
+		layout.target_columns = map;
+		config.layout_policy = TESS_LAYOUT_EXPLICIT;
+		config.explicit_layout = &layout;
+		config.node_data = info.node_data;
+	}
+	else if (info.node_data != NULL)
 	{
 		/* Every relation column is a batch column; the targets map to them. */
 		int		   *map = palloc_array(int, list_length(tlist));
@@ -215,10 +291,31 @@ pack_begin(CustomScanState *css, EState *estate, int eflags)
 	state->child = ExecInitNode(linitial(cscan->custom_plans), estate, eflags);
 	css->custom_ps = list_make1(state->child);
 	state->layout = info.layout;
+	state->tuples_needed = -1;
+	if (info.node_data != NULL && intVal(info.node_data) == PACK_FORWARD)
+	{
+		/*
+		 * The batch source is the plan under the subquery scan, or the child
+		 * itself once the planner dropped a trivial subquery scan; the
+		 * subquery scan, never executed, is still what a rescan goes
+		 * through, so that changed parameters reach the subquery's plan.
+		 */
+		TessUnaryConfig config = TESS_STRUCT_INITIALIZER(TessUnaryConfig);
+		PlanState  *source = state->child;
+
+		if (IsA(source, SubqueryScanState))
+			source = ((SubqueryScanState *) source)->subplan;
+		config.parent_context = estate->es_query_cxt;
+		config.node = css;
+		config.child = source;
+		config.rescan_child = state->child;
+		config.layout = &info.layout;
+		state->unary = tess_unary_create(&config);
+		return;
+	}
 	state->output = tess_output_create(estate->es_query_cxt, &css->ss.ps,
 									   css->ss.ps.ps_ResultTupleSlot,
 									   &info.layout);
-	state->tuples_needed = -1;
 }
 
 /* Freeze the parent's request; the batch size follows from it. */
@@ -267,6 +364,18 @@ pack_exec(CustomScanState *css)
 	TessBatch  *batch;
 	int			limit;
 
+	if (state->unary != NULL)
+	{
+		TupleTableSlot *slot = tess_unary_exec(state->unary);
+
+		if (state->request == NULL)
+		{
+			state->request = tess_unary_request(state->unary);
+			if (state->request->output_mode != TESS_OUTPUT_BATCH)
+				elog(ERROR, "Tessera pack requires a batch-aware parent");
+		}
+		return slot;
+	}
 	if (state->request == NULL)
 		pack_freeze_request(state);
 	/* Refuses while the parent has not finished the previous batch. */
@@ -320,7 +429,10 @@ pack_end(CustomScanState *css)
 {
 	PackState  *state = (PackState *) css;
 
-	tess_output_end(state->output);
+	if (state->unary != NULL)
+		tess_unary_end(state->unary);
+	else
+		tess_output_end(state->output);
 	ExecEndNode(state->child);
 }
 
@@ -329,6 +441,11 @@ pack_rescan(CustomScanState *css)
 {
 	PackState  *state = (PackState *) css;
 
+	if (state->unary != NULL)
+	{
+		tess_unary_rescan(state->unary);
+		return;
+	}
 	tess_output_clear(state->output);
 	/* The core passes changed parameters to outer and inner plans only. */
 	if (css->ss.ps.chgParam != NULL)
@@ -344,6 +461,15 @@ pack_explain(CustomScanState *css, List *ancestors, ExplainState *es)
 {
 	PackState  *state = (PackState *) css;
 
+	if (state->unary != NULL)
+	{
+		ExplainPropertyText("Rows Kept As", "forwarded batches", es);
+		if (es->analyze)
+			ExplainPropertyInteger("Batches", NULL,
+								   tess_unary_stats(state->unary)->input_batches,
+								   es);
+		return;
+	}
 	/* The parent's request, and so the size, is known once executed. */
 	if (state->request != NULL)
 		ExplainPropertyInteger("Batch Size", NULL, state->capacity, es);

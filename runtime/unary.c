@@ -12,6 +12,8 @@ struct TessUnary
 {
 	CustomScanState *node;
 	PlanState  *child;
+	/* Rescanned instead of the child, which it reaches. */
+	PlanState  *rescan_child;
 	/* The node's request binding; nothing is ever published through it. */
 	TessOutput *output;
 	TessInput  *input;
@@ -56,6 +58,10 @@ tess_unary_create(const TessUnaryConfig *config)
 	unary->private_data = config->private_data;
 	if (TESS_ABI_HAS_FIELD(config, TessUnaryConfig, projection))
 		unary->projection = config->projection;
+	unary->rescan_child = config->child;
+	if (TESS_ABI_HAS_FIELD(config, TessUnaryConfig, rescan_child) &&
+		config->rescan_child != NULL)
+		unary->rescan_child = config->rescan_child;
 	unary->next_row = -1;
 	oldcontext = MemoryContextSwitchTo(config->parent_context);
 	unary->filter_columns = bms_copy(config->filter_columns);
@@ -350,8 +356,8 @@ tess_unary_rescan(TessUnary *unary)
 		tess_input_finish(unary->input);
 	/* The core passes changed parameters to outer and inner plans only. */
 	if (unary->node->ss.ps.chgParam != NULL)
-		UpdateChangedParamSet(unary->child, unary->node->ss.ps.chgParam);
-	ExecReScan(unary->child);
+		UpdateChangedParamSet(unary->rescan_child, unary->node->ss.ps.chgParam);
+	ExecReScan(unary->rescan_child);
 	tess_input_rescan(unary->input);
 	unary->active_batch = NULL;
 	unary->next_row = -1;
