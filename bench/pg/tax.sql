@@ -76,6 +76,14 @@ SELECT pg_temp.measure_pair('wide_limit',
 SELECT pg_temp.measure_pair('mixed_limit',
     'SELECT count(b) FROM (SELECT b FROM bench_mixed LIMIT 400000) AS s',
     :repetitions);
+-- Computed targets under a limit: two int4 chains the filter computes for
+-- the rows served, and a text expression computed row by row.
+SELECT pg_temp.measure_pair('limit_expr',
+    'SELECT sum(x + y) FROM (SELECT c1 + 1 AS x, c2 * 2 AS y FROM bench_narrow WHERE c1 > 100 LIMIT 1000000) AS s',
+    :repetitions);
+SELECT pg_temp.measure_pair('limit_text',
+    'SELECT count(x) FROM (SELECT b || ''x'' AS x FROM bench_mixed WHERE a > 250000 LIMIT 100000) AS s',
+    :repetitions);
 
 \copy timings TO 'timings.csv' CSV HEADER
 
@@ -100,6 +108,8 @@ EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE on_of
 EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE on_sort_limit;
 EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE on_wide_limit;
 EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE on_mixed_limit;
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE on_limit_expr;
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE on_limit_text;
 SET tessera.enable = off;
 EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE off_limit_1;
 EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE off_limit_1000;
@@ -108,5 +118,7 @@ EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE off_o
 EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE off_sort_limit;
 EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE off_wide_limit;
 EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE off_mixed_limit;
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE off_limit_expr;
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE off_limit_text;
 \o
 DEALLOCATE ALL;
