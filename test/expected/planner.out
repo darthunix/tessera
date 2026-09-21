@@ -212,6 +212,10 @@ SELECT tessera_test_planner_errors(25);
 ERROR:  Tessera plan child index 1 is out of range
 SELECT tessera_test_planner_errors(26);
 ERROR:  Tessera cannot preserve the layout of a row-producing child
+SELECT tessera_test_planner_errors(27);
+ERROR:  Tessera scan tuple layout does not match its scan target list
+SELECT tessera_test_planner_errors(28);
+ERROR:  Tessera plan can use the relation as its scan tuple only when projected over a relation
 \set VERBOSITY default
 DROP FUNCTION tessera_test_planner_errors(integer);
 DROP FUNCTION tessera_test_planner_plans();

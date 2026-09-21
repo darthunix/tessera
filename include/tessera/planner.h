@@ -109,7 +109,16 @@ typedef enum TessLayoutPolicy
 	/* The layout the node supplies. */
 	TESS_LAYOUT_EXPLICIT,
 	/* Keep one batch child's layout: a pass-through with the same targets. */
-	TESS_LAYOUT_PRESERVE_CHILD
+	TESS_LAYOUT_PRESERVE_CHILD,
+	/*
+	 * Derived from the final target list whenever the plan is read, for a
+	 * node with CUSTOMPATH_SUPPORT_PROJECTION: the node supplies the layout
+	 * of its scan tuple (the batch columns of the scan_targetlist entries,
+	 * or of the relation's attributes without one), a target that is one of
+	 * those maps to its column, and every other target is a computed column
+	 * after the scan tuple's, listed in TessPlanInfo.computed.
+	 */
+	TESS_LAYOUT_PROJECTED
 } TessLayoutPolicy;
 
 /* Complete description of the CustomScan returned by PlanCustomPath. */
@@ -118,7 +127,7 @@ typedef struct TessPlanConfig
 	Size		struct_size;
 	const CustomScanMethods *methods;
 	TessLayoutPolicy layout_policy;
-	/* Copied, for TESS_LAYOUT_EXPLICIT. */
+	/* Copied, for TESS_LAYOUT_EXPLICIT; the scan tuple's, for TESS_LAYOUT_PROJECTED. */
 	const TessLayout *explicit_layout;
 	/* Exactly what the executor evaluates; nothing is added implicitly. */
 	const List *qual;
@@ -132,6 +141,12 @@ typedef struct TessPlanConfig
 	Index		scanrelid;
 	/* Which child to preserve, for TESS_LAYOUT_PRESERVE_CHILD. */
 	int			layout_child;
+	/*
+	 * PROJECTED over a relation: the relation's row is the scan tuple, with
+	 * no custom_scan_tlist, and the scan tuple layout has one target per
+	 * attribute.
+	 */
+	bool		scan_tuple_is_relation;
 } TessPlanConfig;
 
 #define TESS_PLAN_CONFIG_MIN_SIZE \
@@ -171,9 +186,14 @@ typedef struct TessPlanInfo
 	int			nchildren;
 	/* A NULL entry is a child that produces ordinary rows. */
 	const char **child_names;
-	/* Derived from the final target list for TESS_LAYOUT_DENSE. */
+	/* Derived from the final target list for DENSE and PROJECTED. */
 	TessLayout	layout;
 	Node	   *node_data;
+	/*
+	 * PROJECTED: the target entries the node computes, in the order of
+	 * their columns after the scan tuple's; borrowed from the plan.
+	 */
+	List	   *computed;
 } TessPlanInfo;
 
 #define TESS_PLAN_INFO_MIN_SIZE \

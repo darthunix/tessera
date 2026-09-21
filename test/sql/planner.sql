@@ -85,6 +85,8 @@ SELECT tessera_test_planner_errors(23);
 SELECT tessera_test_planner_errors(24);
 SELECT tessera_test_planner_errors(25);
 SELECT tessera_test_planner_errors(26);
+SELECT tessera_test_planner_errors(27);
+SELECT tessera_test_planner_errors(28);
 \set VERBOSITY default
 
 DROP FUNCTION tessera_test_planner_errors(integer);

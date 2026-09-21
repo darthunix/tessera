@@ -2,6 +2,7 @@
 
 #include "nodes/makefuncs.h"
 #include "nodes/value.h"
+#include "optimizer/tlist.h"
 
 #include "tessera/plan.h"
 #include "tessera/planner.h"
@@ -221,9 +222,10 @@ check_plan_config(const TessPlanConfig *config)
 	if (config->methods == NULL)
 		elog(ERROR, "Tessera plan requires scan methods");
 	if (config->layout_policy < TESS_LAYOUT_DENSE ||
-		config->layout_policy > TESS_LAYOUT_PRESERVE_CHILD)
+		config->layout_policy > TESS_LAYOUT_PROJECTED)
 		elog(ERROR, "Tessera plan received an invalid layout policy");
-	if (config->layout_policy == TESS_LAYOUT_EXPLICIT &&
+	if ((config->layout_policy == TESS_LAYOUT_EXPLICIT ||
+		 config->layout_policy == TESS_LAYOUT_PROJECTED) &&
 		config->explicit_layout == NULL)
 		elog(ERROR, "Tessera plan requires an explicit output layout");
 }
@@ -290,6 +292,7 @@ tess_plan_create(CustomPath *path, List *targetlist, List *child_plans,
 			layout.ntargets = layout.ncolumns;
 			break;
 		case TESS_LAYOUT_EXPLICIT:
+		case TESS_LAYOUT_PROJECTED:
 			copy_layout(config->explicit_layout, &layout);
 			break;
 		case TESS_LAYOUT_PRESERVE_CHILD:
@@ -303,19 +306,36 @@ tess_plan_create(CustomPath *path, List *targetlist, List *child_plans,
 				break;
 			}
 	}
-	if (layout.ntargets != list_length(targetlist))
-		elog(ERROR, "Tessera output layout does not match its target list");
-	for (int target = 0; layout.target_columns != NULL &&
-		 target < layout.ntargets; target++)
-		target_columns = lappend_int(target_columns,
-									 layout.target_columns[target]);
-	if (config->scan_targetlist != NIL)
+	if (TESS_ABI_HAS_FIELD(config, TessPlanConfig, scan_tuple_is_relation) &&
+		config->scan_tuple_is_relation)
+	{
+		/* The relation's row is the scan tuple: no custom_scan_tlist. */
+		if (config->scanrelid == 0 || config->scan_targetlist != NIL ||
+			config->layout_policy != TESS_LAYOUT_PROJECTED)
+			elog(ERROR, "Tessera plan can use the relation as its scan tuple only when projected over a relation");
+		scan_targetlist = NIL;
+	}
+	else if (config->scan_targetlist != NIL)
 		scan_targetlist = copyObject(config->scan_targetlist);
 	else if (config->layout_policy == TESS_LAYOUT_PRESERVE_CHILD)
 		scan_targetlist = copyObject(((Plan *)
 			list_nth(child_plans, config->layout_child))->targetlist);
 	else
 		scan_targetlist = copyObject(targetlist);
+	/* A projected plan's targets are derived when it is read: the layout
+	 * stored is its scan tuple's, one target per scan tuple entry. */
+	if (config->layout_policy == TESS_LAYOUT_PROJECTED)
+	{
+		if (scan_targetlist != NIL &&
+			layout.ntargets != list_length(scan_targetlist))
+			elog(ERROR, "Tessera scan tuple layout does not match its scan target list");
+	}
+	else if (layout.ntargets != list_length(targetlist))
+		elog(ERROR, "Tessera output layout does not match its target list");
+	for (int target = 0; layout.target_columns != NULL &&
+		 target < layout.ntargets; target++)
+		target_columns = lappend_int(target_columns,
+									 layout.target_columns[target]);
 
 	scan = makeNode(CustomScan);
 	scan->methods = config->methods;
@@ -337,6 +357,68 @@ tess_plan_create(CustomPath *path, List *targetlist, List *child_plans,
 	tess_plan_write_node(writer, "node_data", config->node_data);
 	scan->custom_private = tess_plan_writer_finish(writer);
 	return &scan->scan.plan;
+}
+
+/*
+ * The batch column a target of a projected plan reads from the scan
+ * tuple, or -1 for a target the node computes. With a scan target list,
+ * the target is one of its entries, by position (INDEX_VAR after setrefs)
+ * or by equality before; without one, the scan tuple is the relation's
+ * row and the target is a column of it.
+ */
+static int
+scan_tuple_column(const CustomScan *scan, const TessLayout *tuple, Node *expr)
+{
+	int			entry = -1;
+
+	if (scan->custom_scan_tlist != NIL)
+	{
+		TargetEntry *found;
+
+		if (IsA(expr, Var) && ((Var *) expr)->varno == INDEX_VAR)
+			entry = ((Var *) expr)->varattno - 1;
+		else if ((found = tlist_member((Expr *) expr, scan->custom_scan_tlist)) != NULL)
+			entry = found->resno - 1;
+	}
+	else if (IsA(expr, Var) && ((Var *) expr)->varno == scan->scan.scanrelid)
+		entry = ((Var *) expr)->varattno - 1;
+	if (entry < 0 || entry >= tuple->ntargets)
+		return -1;
+	return tess_layout_column(tuple, entry);
+}
+
+/*
+ * The final layout of a projected plan from its final target list: the
+ * stored layout describes the scan tuple; a target that is a column of it
+ * maps there, the others become computed columns after the scan tuple's.
+ */
+static void
+derive_projected_layout(const CustomScan *scan, TessPlanInfo *result)
+{
+	TessLayout	tuple = result->layout;
+	List	   *targets = scan->scan.plan.targetlist;
+	int			ntargets = list_length(targets);
+	int		   *map = ntargets > 0 ? palloc_array(int, ntargets) : NULL;
+	int			ncomputed = 0;
+	int			target = 0;
+
+	foreach_ptr(TargetEntry, entry, targets)
+	{
+		int			column = scan_tuple_column(scan, &tuple, (Node *) entry->expr);
+
+		if (column < 0)
+		{
+			column = tuple.ncolumns + ncomputed++;
+			if (TESS_ABI_HAS_FIELD(result, TessPlanInfo, computed))
+				result->computed = lappend(result->computed, entry);
+		}
+		map[target++] = column;
+	}
+	if (tuple.target_columns != NULL)
+		pfree((void *) tuple.target_columns);
+	result->layout.ncolumns = tuple.ncolumns + ncomputed;
+	result->layout.ntargets = ntargets;
+	result->layout.target_columns = map;
 }
 
 void
@@ -369,7 +451,7 @@ tess_plan_get_info(const CustomScan *scan, TessPlanInfo *result)
 	}
 	layout_policy = tess_plan_read_int(reader, "layout_policy");
 	if (layout_policy < TESS_LAYOUT_DENSE ||
-		layout_policy > TESS_LAYOUT_PRESERVE_CHILD)
+		layout_policy > TESS_LAYOUT_PROJECTED)
 		elog(ERROR, "Tessera plan received an invalid layout policy");
 	result->layout = (TessLayout) TESS_STRUCT_INITIALIZER(TessLayout);
 	result->layout.ncolumns = tess_plan_read_int(reader, "ncolumns");
@@ -392,6 +474,8 @@ tess_plan_get_info(const CustomScan *scan, TessPlanInfo *result)
 		elog(ERROR, "Tessera identity layout carries a target map");
 	result->node_data = tess_plan_read_node(reader, "node_data");
 	tess_plan_reader_finish(reader);
+	if (TESS_ABI_HAS_FIELD(result, TessPlanInfo, computed))
+		result->computed = NIL;
 	if (layout_policy == TESS_LAYOUT_DENSE)
 	{
 		/* PostgreSQL may replace a projection after PlanCustomPath. */
@@ -401,6 +485,8 @@ tess_plan_get_info(const CustomScan *scan, TessPlanInfo *result)
 		result->layout.ntargets = result->layout.ncolumns;
 		result->layout.target_columns = NULL;
 	}
+	else if (layout_policy == TESS_LAYOUT_PROJECTED)
+		derive_projected_layout(scan, result);
 	check_layout(&result->layout);
 	if (result->layout.ntargets != list_length(scan->scan.plan.targetlist))
 		elog(ERROR, "Tessera plan layout does not match its target list");

@@ -453,6 +453,92 @@ tessera_test_planner_plans(PG_FUNCTION_ARGS)
 	result &= layout.ncolumns == 3 && layout.ntargets == 3 &&
 		layout.target_columns == NULL;
 
+	/*
+	 * A projected layout describes the scan tuple and derives the targets
+	 * whenever the plan is read: a target that is a scan tuple entry, by
+	 * equality before setrefs or by INDEX_VAR after, maps to that entry's
+	 * column; any other target is a computed column after the scan tuple's.
+	 */
+	{
+		TessPlanInfo projected = TESS_STRUCT_INITIALIZER(TessPlanInfo);
+		Const	   *one = makeConst(INT4OID, -1, InvalidOid, 4,
+								   Int32GetDatum(1), false, true);
+		Var		   *first = makeVar(1, 1, INT4OID, -1, InvalidOid, 0);
+		Var		   *second = makeVar(1, 2, INT4OID, -1, InvalidOid, 0);
+		Node	   *sum = (Node *) make_opclause(551, INT4OID, false,
+												  (Expr *) first, (Expr *) one,
+												  InvalidOid, InvalidOid);
+		List	   *targets;
+
+		map[0] = 2;
+		map[1] = 0;
+		config = make_plan_config(TESS_LAYOUT_PROJECTED);
+		config.explicit_layout = &explicit;
+		config.scan_targetlist = tlist;
+		plan = tess_plan_create(path, NIL, NIL, &config);
+		scan = castNode(CustomScan, plan);
+		tess_plan_get_info(scan, &projected);
+		result &= plan->targetlist == NIL &&
+			list_length(scan->custom_scan_tlist) == 2 &&
+			projected.layout.ncolumns == 3 && projected.layout.ntargets == 0 &&
+			projected.computed == NIL;
+		/* The projection PostgreSQL installs: b, a + 1, a, 1. */
+		targets = list_make4(makeTargetEntry((Expr *) second, 1, "b", false),
+							 makeTargetEntry((Expr *) sum, 2, "next", false),
+							 makeTargetEntry((Expr *) first, 3, "a", false),
+							 makeTargetEntry((Expr *) one, 4, "one", true));
+		plan->targetlist = targets;
+		projected = (TessPlanInfo) TESS_STRUCT_INITIALIZER(TessPlanInfo);
+		tess_plan_get_info(scan, &projected);
+		result &= projected.layout.ncolumns == 5 && projected.layout.ntargets == 4 &&
+			projected.layout.target_columns[0] == 0 &&
+			projected.layout.target_columns[1] == 3 &&
+			projected.layout.target_columns[2] == 2 &&
+			projected.layout.target_columns[3] == 4 &&
+			list_length(projected.computed) == 2 &&
+			linitial(projected.computed) == lsecond(targets) &&
+			lsecond(projected.computed) == lfourth(targets);
+		/* After setrefs the Vars of the scan tuple are INDEX_VAR entries. */
+		second->varno = INDEX_VAR;
+		first->varno = INDEX_VAR;
+		projected = (TessPlanInfo) TESS_STRUCT_INITIALIZER(TessPlanInfo);
+		tess_plan_get_info(scan, &projected);
+		result &= projected.layout.ncolumns == 5 &&
+			projected.layout.target_columns[0] == 0 &&
+			projected.layout.target_columns[1] == 3 &&
+			projected.layout.target_columns[2] == 2 &&
+			list_length(projected.computed) == 2;
+		/* A reader without the computed field still gets the layout. */
+		projected = (TessPlanInfo) TESS_STRUCT_INITIALIZER(TessPlanInfo);
+		projected.struct_size = TESS_PLAN_INFO_MIN_SIZE;
+		tess_plan_get_info(scan, &projected);
+		result &= projected.layout.ncolumns == 5;
+		/* Over a relation the row itself is the scan tuple: four columns. */
+		first->varno = 1;
+		second->varno = 1;
+		explicit.ncolumns = 4;
+		explicit.ntargets = 4;
+		explicit.target_columns = NULL;
+		config.scan_targetlist = NIL;
+		config.scanrelid = 1;
+		config.scan_tuple_is_relation = true;
+		plan = tess_plan_create(path, NIL, NIL, &config);
+		scan = castNode(CustomScan, plan);
+		plan->targetlist = targets;
+		projected = (TessPlanInfo) TESS_STRUCT_INITIALIZER(TessPlanInfo);
+		tess_plan_get_info(scan, &projected);
+		result &= scan->custom_scan_tlist == NIL && scan->scan.scanrelid == 1 &&
+			projected.layout.ncolumns == 6 && projected.layout.ntargets == 4 &&
+			projected.layout.target_columns[0] == 1 &&
+			projected.layout.target_columns[1] == 4 &&
+			projected.layout.target_columns[2] == 0 &&
+			projected.layout.target_columns[3] == 5 &&
+			list_length(projected.computed) == 2;
+		explicit.ncolumns = 3;
+		explicit.ntargets = 2;
+		explicit.target_columns = map;
+	}
+
 	/* Children are recorded by kind, through a cached-plan copy and a
 	 * parallel worker's text round trip alike. */
 	row_child = makeNode(SeqScan);
@@ -651,6 +737,17 @@ tessera_test_planner_errors(PG_FUNCTION_ARGS)
 			plan_config = make_plan_config(TESS_LAYOUT_PRESERVE_CHILD);
 			tess_plan_create(tess_path_create(&config), tlist,
 							 list_make1(makeNode(SeqScan)), &plan_config);
+			break;
+		case 27:
+			/* A projected scan tuple layout with one target for two entries. */
+			plan_config.layout_policy = TESS_LAYOUT_PROJECTED;
+			plan_config.scan_targetlist = tlist;
+			tess_plan_create(tess_path_create(&config), NIL, NIL, &plan_config);
+			break;
+		case 28:
+			plan_config.layout_policy = TESS_LAYOUT_PROJECTED;
+			plan_config.scan_tuple_is_relation = true;
+			tess_plan_create(tess_path_create(&config), NIL, NIL, &plan_config);
 			break;
 		default:
 			elog(ERROR, "unknown error case %d", kind);

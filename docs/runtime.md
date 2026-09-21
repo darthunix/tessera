@@ -414,14 +414,24 @@ which children are batch nodes, the output layout and `node_data` through
 the plan-data codec. PostgreSQL copies costs and relids from the path
 afterwards.
 
-The output layout has three policies. `TESS_LAYOUT_DENSE` publishes one
+The output layout has four policies. `TESS_LAYOUT_DENSE` publishes one
 column per entry of the final target list; it is derived again whenever the
 plan is read, because a node with `CUSTOMPATH_SUPPORT_PROJECTION` gets its
 target list replaced after `PlanCustomPath` returns, which then receives an
 empty list. `TESS_LAYOUT_EXPLICIT` copies the layout the node supplies.
 `TESS_LAYOUT_PRESERVE_CHILD` keeps the layout of the batch child at
 `layout_child`, for a pass-through node whose target list is the child's;
-a row-producing child there is an error. `tess_plan_child` describes one
+a row-producing child there is an error. `TESS_LAYOUT_PROJECTED` is for a
+node with `CUSTOMPATH_SUPPORT_PROJECTION` whose batches have more columns
+than its targets: the node supplies the layout of its scan tuple, one
+target per `scan_targetlist` entry, or per attribute of the relation with
+`scan_tuple_is_relation` (then the plan has no `custom_scan_tlist`); the
+final targets are derived whenever the plan is read, a target that is a
+scan tuple entry (equal to it before setrefs, an `INDEX_VAR` after; a
+column of the relation in the relation mode) maps to that entry's column,
+and every other target is a computed column after the scan tuple's, listed
+in `TessPlanInfo.computed` for the node to evaluate (see "Computing
+columns on demand" below). `tess_plan_child` describes one
 child the same way for a node's own planning: its path, plan, the
 registered node or `NULL` for ordinary rows, and the batch child's layout.
 
