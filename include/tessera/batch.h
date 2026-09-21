@@ -30,7 +30,11 @@ typedef struct TessBatch TessBatch;
  * remaining fields. isnull has one bool per row; it is not a bitmap. A
  * requested NULL row holds an initialized Datum of no meaning (PostgreSQL
  * slots store 0); readers may load it and must not interpret it. Unrequested
- * rows may be uninitialized.
+ * rows hold values of no meaning too: Tessera's providers allocate their
+ * arrays zeroed and leave stale values behind, so every row is initialized
+ * memory and a consumer passes the kernels no readiness mask; a provider
+ * that leaves rows uninitialized must say so before a consumer may rely on
+ * it (no such provider exists yet).
  */
 typedef struct TessDatumColumn
 {

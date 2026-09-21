@@ -34,13 +34,17 @@ sizes and offsets the library was built with, for a check at load time.
 
 ## Readiness: the `prepared` mask
 
-The batch contract lets a provider leave unrequested rows of a Datum column
-uninitialized. Kernels read whole 64-row words on their vector paths, so
-they must know which rows are initialized: `prepared` is the mask the column
-was obtained with, and `NULL` says the whole column is initialized. Rows a
-kernel selects must lie within `prepared`; otherwise the call fails with
-`TESS_ERROR_INVALID_ARGUMENT` before reading them. A NULL row within
-`prepared` holds a placeholder value, as PostgreSQL slots provide.
+Kernels read whole 64-row words on their vector paths, so they must know
+which rows are initialized: `prepared` is the mask of the rows that are, and
+`NULL` says the whole column is. Rows a kernel selects must lie within
+`prepared`; otherwise the call fails with `TESS_ERROR_INVALID_ARGUMENT`
+before reading them. A NULL row within `prepared` holds a placeholder value,
+as PostgreSQL slots provide. With a mask, a word is taken by the vector path
+only when every one of its 64 rows is prepared; other words go row by row
+with a readiness check per row, about three times the instructions. The
+batch contract (`tessera/batch.h`) has Tessera's providers initialize whole
+columns, so the consumers pass `NULL`; the mask is for a provider that
+declares uninitialized rows.
 
 ## Ownership and aliasing
 

@@ -62,6 +62,8 @@ typedef struct TessAggState
 	TessBuilder *builder;
 	AggValue   *values;
 	int			nvalues;
+	/* Written by a batch function on failure only. */
+	TessStatus	status;
 	/* The row was returned; the next call ends the scan. */
 	bool		done;
 	uint64		batches;
@@ -335,6 +337,7 @@ agg_begin(CustomScanState *css, EState *estate, int eflags)
 	state->input = tess_input_create(estate->es_query_cxt, state->child);
 	state->nvalues = list_length(cscan->custom_scan_tlist);
 	state->values = palloc0_array(AggValue, state->nvalues);
+	state->status = (TessStatus) TESS_STRUCT_INITIALIZER(TessStatus);
 	foreach_ptr(TargetEntry, entry, cscan->custom_scan_tlist)
 	{
 		Aggref	   *agg = castNode(Aggref, entry->expr);
@@ -387,7 +390,6 @@ accumulate(TessAggState *state, AggValue *value, TessBatch *batch)
 {
 	TessFunctionCall call = TESS_STRUCT_INITIALIZER(TessFunctionCall);
 	TessFunctionArg arg = TESS_STRUCT_INITIALIZER(TessFunctionArg);
-	TessStatus	status = TESS_STRUCT_INITIALIZER(TessStatus);
 	uint64		word = 0;
 	TessRowMask present = {1, &word};
 	Datum		partial = (Datum) 0;
@@ -395,11 +397,14 @@ accumulate(TessAggState *state, AggValue *value, TessBatch *batch)
 	call.function = value->function;
 	if (value->expr != NULL)
 	{
-		/* The value over the batch's rows, so those rows are prepared. */
+		/*
+		 * No readiness mask: the column's rows are all initialized memory
+		 * (tessera/batch.h), and a mask would keep the kernel off its vector
+		 * path for every word the selection does not fill.
+		 */
 		tess_expr_bind(value->expr, batch, state->css.ss.ps.ps_ExprContext,
 					   TESS_COLUMN_FOR_PROJECTION);
 		arg.column = tess_expr_get_column(value->expr);
-		arg.prepared = &batch->rows;
 		call.nargs = 1;
 		call.args = &arg;
 	}
@@ -407,9 +412,9 @@ accumulate(TessAggState *state, AggValue *value, TessBatch *batch)
 	call.values = &partial;
 	call.non_nulls = &present;
 	call.context = CurrentMemoryContext;
-	call.status = &status;
+	call.status = &state->status;
 	if (value->function->evaluate(&call) != TESS_OK)
-		report(&status);
+		report(&state->status);
 	if ((word & 1) == 0)
 		return;
 	switch (value->kind)
