@@ -310,10 +310,13 @@ worker, a scrollable cursor, an `UPDATE`, and the switch off.
 batches of a batch child and returns the one result row, in place of the
 core's plain `Aggregate`, which would receive the child's rows one at a
 time: `TessHeapScan → TessFilter → TessAgg → parent`. It handles
-`count(*)` and `count`, `sum`, `min` and `max` of an int4 column or of a
-chain the [expression compiler](expr.md) accepts over one, with constants
-and parameters; expressions above the aggregates and `HAVING` are left to
-the plan's own projection and qualifier over the aggregates.
+`count(*)` and `count`, `sum`, `min` and `max` of any int4 expression over
+the child's columns, computed through the projection provider: a column or
+a chain the [expression compiler](expr.md) accepts, with constants and
+parameters, by the chain over the batch, anything else row by row (see
+"Computing columns on demand" in [runtime.md](runtime.md)); expressions
+above the aggregates and `HAVING` are left to the plan's own projection
+and qualifier over the aggregates.
 
 ### Planning
 
@@ -326,8 +329,8 @@ plain call, without `DISTINCT`, `ORDER BY` or `FILTER` and not split for
 partial aggregation, of an aggregate the node combines and the
 [function registry](function.md) implements over batches (kind
 `TESS_FUNCTION_AGGREGATE`, registered by the kernels module), with an
-argument the compiler supports whose columns the batch child's target
-has. For each of the core's plain aggregate paths whose input can be read
+int4 argument without a subplan whose columns, and no placeholder, the
+batch child's target has. For each of the core's plain aggregate paths whose input can be read
 in batches (`tess_batch_input_path`: a batch path as it is, a clause-free
 sequential scan through `TessHeapScan`, anything else through `TessPack`),
 the node's path takes the core path as its template at nine tenths of its
@@ -335,19 +338,25 @@ cost with the batch child, and `add_path` decides. `PlanCustomPath` makes
 the distinct aggregates the scan tuple, `custom_scan_tlist` without a
 relation, so that the planner turns the targets and `HAVING` into
 references to it, and keeps one batch column per target. The arguments
-travel in the private data with their columns resolved against the
-child's target list, since `custom_exprs` would be fixed against the scan
-tuple of aggregates.
+travel in the private data with their columns resolved to the child's
+targets, since `custom_exprs` would be fixed against the scan tuple of
+aggregates; their parameters alone go through `custom_exprs`, so that the
+planner counts them among the plan's and a node above that rescans its
+child only for a changed parameter of its own, a sort in a correlated
+subquery, does rescan the node.
 
 ### Execution
 
-`BeginCustomScan` compiles the arguments, finds each aggregate's batch
+`BeginCustomScan` creates a projection over the child's target list with
+the arguments as its computed columns, finds each aggregate's batch
 function, asks the child for whole batches with the arguments' columns as
 projection columns, so that a lazy provider deforms them for the surviving
 rows only, and stands on the output helper over the result slot with a
-one-row builder. The first execution reads every batch of the child: each
-argument is bound to the batch, its column and the batch's rows go to the
-batch function, and the partial it returns joins the running value, by
+one-row builder. The first execution reads every batch of the child: the
+batch is wrapped, each argument's computed column, a chain over the
+batch's rows or the executor's expression row by row, and the batch's
+rows go to the batch function, the wrapper is released, and the partial
+the function returns joins the running value, by
 int8 addition checked for overflow (`bigint out of range`, as the core's
 `int8inc`; the core's `int4_sum` does not check, which differs only past
 four billion rows) for `count` and `sum`, by comparison for `min` and
@@ -361,7 +370,8 @@ the core does that for outer and inner plans only, and resets the values.
 The node forwards no tuple bound, as the core's aggregate does not.
 
 `EXPLAIN` shows `HAVING` as the core's `Filter`; with `ANALYZE`, the
-batches and rows read from the child.
+batches and rows read from the child, the batch function calls, and the
+`Computed Datums` of the arguments, by chains and row by row together.
 
 ### Tests
 

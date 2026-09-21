@@ -255,6 +255,7 @@ SELECT sum(b) FROM agg_t WHERE a > 290;
    Input Batches: 1
    Input Rows: 9
    Kernel Calls: 1
+   Computed Datums: 9
    ->  Custom Scan (TessFilter) on agg_t (actual rows=9.00 loops=1)
          Batch Filter: (a > 290)
          Rows Removed by Batch Filter: 291
@@ -267,11 +268,112 @@ SELECT sum(b) FROM agg_t WHERE a > 290;
                Pages: 2
                Deformed Datums: 309
                Restarted Datums: 0
-(16 rows)
+(17 rows)
 
 -- An error in the argument is the chain's.
 SELECT sum(a + 2147483647) FROM agg_t;
 ERROR:  integer out of range
+-- Any int4 expression is an argument: a chain over one column as before,
+-- anything else row by row, both through the projection provider.
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+SELECT sum(a + b), max(a * b), min(CASE WHEN a > 295 THEN b ELSE a END), sum(a + 1)
+FROM agg_t WHERE a > 290;
+                                  QUERY PLAN                                  
+------------------------------------------------------------------------------
+ Custom Scan (TessAgg) (actual rows=1.00 loops=1)
+   Input Batches: 1
+   Input Rows: 9
+   Kernel Calls: 4
+   Computed Datums: 36
+   ->  Custom Scan (TessFilter) on agg_t (actual rows=9.00 loops=1)
+         Batch Filter: (a > 290)
+         Rows Removed by Batch Filter: 291
+         Input Batches: 5
+         Input Rows: 300
+         Output Rows: 9
+         ->  Custom Scan (TessHeapScan) on agg_t (actual rows=300.00 loops=1)
+               Batch Size: 64
+               Batches: 5
+               Pages: 2
+               Deformed Datums: 309
+               Restarted Datums: 0
+(17 rows)
+
+SELECT agg_same($$SELECT sum(a + b), max(a * b), min(CASE WHEN a > 295 THEN b ELSE a END), sum(a + 1), count(length(c)) FROM agg_t WHERE a > 290$$);
+         agg_same         
+--------------------------
+ {"(2702,2691,0,2670,9)"}
+(1 row)
+
+SELECT agg_same($$SELECT sum(a + b), count(a * b), max(b - a) FROM agg_t$$);
+     agg_same      
+-------------------
+ {"(39988,258,0)"}
+(1 row)
+
+SELECT agg_same($$SELECT sum(a + b), min(a * b) FROM agg_t WHERE a % 50 = 0$$);
+   agg_same   
+--------------
+ {"(1050,0)"}
+(1 row)
+
+SELECT agg_same($$SELECT sum(a + b) FROM agg_t WHERE a > 100 HAVING sum(a + b) > 1000$$);
+ agg_same  
+-----------
+ {(35288)}
+(1 row)
+
+SELECT agg_same($$SELECT sum(a + b) FROM agg_t WHERE a > 100 HAVING sum(a + b) > 100000$$);
+ agg_same 
+----------
+ 
+(1 row)
+
+-- The rows are computed once per batch and the error is the executor's.
+SELECT sum(a / (b - 5)) FROM agg_t WHERE a > 290;
+ERROR:  division by zero
+SELECT sum(a * b + 2147483647) FROM agg_t WHERE a > 290;
+ERROR:  integer out of range
+-- A sort above the node in a correlated subquery rescans it only when it
+-- sees the parameter as the node's: the arguments' parameters are shown.
+SELECT o.b,
+       (SELECT s FROM (SELECT sum(i.a + i.b * o.b) AS s FROM agg_t AS i WHERE i.a < 50) AS x
+        ORDER BY s) AS shifted
+FROM (VALUES (1), (2), (3)) AS o(b);
+ b | shifted 
+---+---------
+ 1 |    1218
+ 2 |    1407
+ 3 |    1596
+(3 rows)
+
+SELECT agg_same($$SELECT o.b, (SELECT s FROM (SELECT sum(i.a + i.b * o.b) AS s FROM agg_t AS i WHERE i.a < 50) AS x ORDER BY s) FROM (VALUES (1), (2), (3)) AS o(b)$$);
+              agg_same              
+------------------------------------
+ {"(1,1218)","(2,1407)","(3,1596)"}
+(1 row)
+
+-- Two computed columns of the subquery's filter, added by the node above
+-- the forwarded batches of its limit.
+EXPLAIN (COSTS OFF)
+SELECT sum(x + y) FROM (SELECT a + 1 AS x, b * 2 AS y FROM agg_t WHERE a > 100 LIMIT 50) AS s;
+                         QUERY PLAN                          
+-------------------------------------------------------------
+ Custom Scan (TessAgg)
+   ->  Custom Scan (TessPack)
+         Rows Kept As: forwarded batches
+         ->  Custom Scan (TessLimit)
+               ->  Custom Scan (TessFilter) on agg_t
+                     Batch Filter: (agg_t.a > 100)
+                     ->  Custom Scan (TessHeapScan) on agg_t
+(7 rows)
+
+SELECT agg_same($$SELECT sum(x + y), max(x) FROM (SELECT a + 1 AS x, b * 2 AS y FROM agg_t WHERE a > 100 LIMIT 50) AS s$$);
+    agg_same    
+----------------
+ {"(6975,159)"}
+(1 row)
+
 -- Left to the core: another type, a cast, avg.
 EXPLAIN (COSTS OFF) SELECT count(c) FROM agg_t;
        QUERY PLAN        
@@ -341,6 +443,7 @@ SELECT sum(a) FROM agg_wide WHERE a % 3 = 0;
    Input Batches: 67
    Input Rows: 333
    Kernel Calls: 6
+   Computed Datums: 333
    ->  Custom Scan (TessFilter) on agg_wide (actual rows=333.00 loops=1)
          Batch Filter: ((a % 3) = 0)
          Rows Removed by Batch Filter: 667
@@ -353,7 +456,7 @@ SELECT sum(a) FROM agg_wide WHERE a % 3 = 0;
                Pages: 67
                Deformed Datums: 1000
                Restarted Datums: 0
-(16 rows)
+(17 rows)
 
 DROP TABLE agg_wide;
 -- A join below: pack turns its rows into batches.

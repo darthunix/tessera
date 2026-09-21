@@ -82,6 +82,31 @@ EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT sum(b) FROM agg_t WHERE a > 290;
 -- An error in the argument is the chain's.
 SELECT sum(a + 2147483647) FROM agg_t;
+-- Any int4 expression is an argument: a chain over one column as before,
+-- anything else row by row, both through the projection provider.
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+SELECT sum(a + b), max(a * b), min(CASE WHEN a > 295 THEN b ELSE a END), sum(a + 1)
+FROM agg_t WHERE a > 290;
+SELECT agg_same($$SELECT sum(a + b), max(a * b), min(CASE WHEN a > 295 THEN b ELSE a END), sum(a + 1), count(length(c)) FROM agg_t WHERE a > 290$$);
+SELECT agg_same($$SELECT sum(a + b), count(a * b), max(b - a) FROM agg_t$$);
+SELECT agg_same($$SELECT sum(a + b), min(a * b) FROM agg_t WHERE a % 50 = 0$$);
+SELECT agg_same($$SELECT sum(a + b) FROM agg_t WHERE a > 100 HAVING sum(a + b) > 1000$$);
+SELECT agg_same($$SELECT sum(a + b) FROM agg_t WHERE a > 100 HAVING sum(a + b) > 100000$$);
+-- The rows are computed once per batch and the error is the executor's.
+SELECT sum(a / (b - 5)) FROM agg_t WHERE a > 290;
+SELECT sum(a * b + 2147483647) FROM agg_t WHERE a > 290;
+-- A sort above the node in a correlated subquery rescans it only when it
+-- sees the parameter as the node's: the arguments' parameters are shown.
+SELECT o.b,
+       (SELECT s FROM (SELECT sum(i.a + i.b * o.b) AS s FROM agg_t AS i WHERE i.a < 50) AS x
+        ORDER BY s) AS shifted
+FROM (VALUES (1), (2), (3)) AS o(b);
+SELECT agg_same($$SELECT o.b, (SELECT s FROM (SELECT sum(i.a + i.b * o.b) AS s FROM agg_t AS i WHERE i.a < 50) AS x ORDER BY s) FROM (VALUES (1), (2), (3)) AS o(b)$$);
+-- Two computed columns of the subquery's filter, added by the node above
+-- the forwarded batches of its limit.
+EXPLAIN (COSTS OFF)
+SELECT sum(x + y) FROM (SELECT a + 1 AS x, b * 2 AS y FROM agg_t WHERE a > 100 LIMIT 50) AS s;
+SELECT agg_same($$SELECT sum(x + y), max(x) FROM (SELECT a + 1 AS x, b * 2 AS y FROM agg_t WHERE a > 100 LIMIT 50) AS s$$);
 -- Left to the core: another type, a cast, avg.
 EXPLAIN (COSTS OFF) SELECT count(c) FROM agg_t;
 EXPLAIN (COSTS OFF) SELECT sum(a::bigint) FROM agg_t;

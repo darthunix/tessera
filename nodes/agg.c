@@ -10,12 +10,12 @@
 #include "nodes/nodeFuncs.h"
 #include "optimizer/optimizer.h"
 #include "optimizer/pathnode.h"
+#include "optimizer/clauses.h"
 #include "optimizer/planner.h"
 #include "optimizer/tlist.h"
 #include "utils/fmgroids.h"
 #include "utils/regproc.h"
 
-#include "tessera/expr.h"
 #include "tessera/function.h"
 #include "tessera/runtime.h"
 
@@ -48,8 +48,8 @@ typedef struct AggValue
 {
 	AggKind		kind;
 	const TessFunction *function;
-	/* The argument over the child's batch, or NULL for count(*). */
-	TessExpr   *expr;
+	/* The argument's computed column of the projection, or -1 for count(*). */
+	int			computed;
 	/* The argument's values of sparse batches, a column of their own. */
 	Datum	   *gathered_values;
 	bool	   *gathered_isnull;
@@ -66,6 +66,9 @@ typedef struct TessAggState
 	TessInput  *input;
 	TessOutput *output;
 	TessBuilder *builder;
+	/* The arguments as computed columns after the child's; NULL without any. */
+	TessProjection *projection;
+	TessLayout	child_layout;
 	AggValue   *values;
 	int			nvalues;
 	/* Written by a batch function on failure only. */
@@ -120,8 +123,9 @@ aggregate_argument(const Aggref *agg)
 /*
  * Whether the node computes this aggregate: a plain call of an aggregate
  * the node combines and the registry implements over batches, with no
- * argument for count(*) or one int4 batch expression, a column or a
- * chain of registered calls over it.
+ * argument for count(*) or one int4 expression the projection provider
+ * computes, by a chain or row by row; a subplan in it would need fixing
+ * against the scan tuple, which the arguments do not go through.
  */
 static bool
 aggregate_supported(const Aggref *agg)
@@ -142,21 +146,24 @@ aggregate_supported(const Aggref *agg)
 		return agg->aggstar && agg->args == NIL;
 	argument = aggregate_argument(agg);
 	return list_length(agg->args) == 1 && exprType(argument) == INT4OID &&
-		tess_expr_supports_value(argument, 0);
+		!contain_subplans(argument);
 }
 
-/* Whether the child's target has every column the arguments read. */
+/*
+ * Whether the child's target has every column the arguments read; a
+ * placeholder would stay one in the private data, so none is accepted.
+ */
 static bool
 arguments_available(const List *aggregates, const Path *child)
 {
 	foreach_ptr(TargetEntry, entry, aggregates)
 	{
 		Node	   *argument = aggregate_argument((Aggref *) entry->expr);
-		List	   *vars = pull_var_clause(argument, 0);
+		List	   *vars = pull_var_clause(argument, PVC_INCLUDE_PLACEHOLDERS);
 
-		foreach_ptr(Var, var, vars)
+		foreach_ptr(Node, var, vars)
 		{
-			if (!list_member(child->pathtarget->exprs, var))
+			if (!IsA(var, Var) || !list_member(child->pathtarget->exprs, var))
 				return false;
 		}
 	}
@@ -248,10 +255,11 @@ create_upper_paths(PlannerInfo *root, UpperRelationKind stage,
 }
 
 /*
- * An argument's column of the child's batch as a Var of INDEX_VAR: the
- * arguments cannot go through custom_exprs, which the planner would fix
- * against the scan tuple of aggregates, so they travel in the private
- * data with their column resolved here.
+ * An argument's column as a Var of INDEX_VAR naming the child's target,
+ * which the projection maps to its batch column through the child's
+ * layout: the arguments cannot go through custom_exprs, which the planner
+ * would fix against the scan tuple of aggregates, so they travel in the
+ * private data with their targets resolved here.
  */
 static Node *
 resolve_argument(Node *node, TessPlanChild *child)
@@ -262,15 +270,33 @@ resolve_argument(Node *node, TessPlanChild *child)
 	{
 		Var		   *var = (Var *) node;
 		TargetEntry *found = tlist_member((Expr *) var, child->plan->targetlist);
-		int			column = found == NULL ? -1 :
-			tess_layout_column(&child->layout, found->resno - 1);
 
-		if (column < 0)
+		if (found == NULL ||
+			tess_layout_column(&child->layout, found->resno - 1) < 0)
 			elog(ERROR, "TessAgg argument is missing from its child");
-		return (Node *) makeVar(INDEX_VAR, column + 1, var->vartype,
+		return (Node *) makeVar(INDEX_VAR, found->resno, var->vartype,
 								var->vartypmod, var->varcollid, 0);
 	}
 	return expression_tree_mutator(node, resolve_argument, child);
+}
+
+/*
+ * The parameters of the arguments, which the planner must see in
+ * custom_exprs to count them among the plan's: a node above that
+ * rescans its child only when its parameters changed would otherwise
+ * keep a stale result.
+ */
+static bool
+collect_params(Node *node, List **params)
+{
+	if (node == NULL)
+		return false;
+	if (IsA(node, Param))
+	{
+		*params = lappend(*params, node);
+		return false;
+	}
+	return expression_tree_walker(node, collect_params, params);
 }
 
 /*
@@ -288,6 +314,7 @@ agg_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 	TessPlanConfig config = TESS_STRUCT_INITIALIZER(TessPlanConfig);
 	TessPlanChild child = TESS_STRUCT_INITIALIZER(TessPlanChild);
 	List	   *arguments = NIL;
+	List	   *params = NIL;
 
 	tess_path_get_info(best_path, &info);
 	if (!tess_plan_child(best_path, custom_plans, 0, &child))
@@ -300,20 +327,15 @@ agg_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 							(Node *) makeNullConst(INT4OID, -1, InvalidOid) :
 							resolve_argument(copyObject(argument), &child));
 	}
+	collect_params((Node *) arguments, &params);
 	config.methods = &tess_agg_scan_methods;
 	config.layout_policy = TESS_LAYOUT_DENSE;
 	config.qual = (List *) root->parse->havingQual;
+	config.expressions = params;
 	config.scan_targetlist = info.expressions;
 	config.scanrelid = 0;
 	config.node_data = (Node *) arguments;
 	return tess_plan_create(best_path, tlist, custom_plans, &config);
-}
-
-/* An argument's Var names its batch column directly. */
-static int
-resolve_column(const Var *var, void *context)
-{
-	return var->varno == INDEX_VAR ? var->varattno - 1 : -1;
 }
 
 static void
@@ -325,7 +347,9 @@ agg_begin(CustomScanState *css, EState *estate, int eflags)
 	TessRequest request = TESS_STRUCT_INITIALIZER(TessRequest);
 	TessBuilderConfig builder = TESS_STRUCT_INITIALIZER(TessBuilderConfig);
 	TupleTableSlot *result = css->ss.ps.ps_ResultTupleSlot;
+	Plan	   *child_plan = linitial(cscan->custom_plans);
 	Bitmapset  *projection = NULL;
+	List	   *computed = NIL;
 	List	   *arguments;
 	int			index = 0;
 
@@ -339,9 +363,11 @@ agg_begin(CustomScanState *css, EState *estate, int eflags)
 		arguments == NIL ||
 		list_length(arguments) != list_length(cscan->custom_scan_tlist))
 		elog(ERROR, "TessAgg received a foreign plan");
-	state->child = ExecInitNode(linitial(cscan->custom_plans), estate, eflags);
+	state->child = ExecInitNode(child_plan, estate, eflags);
 	css->custom_ps = list_make1(state->child);
 	state->input = tess_input_create(estate->es_query_cxt, state->child);
+	state->child_layout = (TessLayout) TESS_STRUCT_INITIALIZER(TessLayout);
+	tess_plan_get_layout(child_plan, &state->child_layout);
 	state->nvalues = list_length(cscan->custom_scan_tlist);
 	state->values = palloc0_array(AggValue, state->nvalues);
 	state->status = (TessStatus) TESS_STRUCT_INITIALIZER(TessStatus);
@@ -356,17 +382,44 @@ agg_begin(CustomScanState *css, EState *estate, int eflags)
 			value->function->kind != TESS_FUNCTION_AGGREGATE)
 			elog(ERROR, "TessAgg has no batch implementation of %s",
 				 format_procedure(agg->aggfnoid));
+		value->computed = -1;
 		if (agg->args != NIL)
 		{
-			value->expr = tess_expr_compile_value(list_nth(arguments, index - 1),
-												  &css->ss.ps, resolve_column,
-												  NULL);
-			if (tess_expr_input_column(value->expr) >= 0)
-				projection = bms_add_member(projection,
-											tess_expr_input_column(value->expr));
+			Node	   *argument = list_nth(arguments, index - 1);
+			List	   *vars = pull_var_clause(argument, 0);
+
+			value->computed = list_length(computed);
+			computed = lappend(computed,
+							   makeTargetEntry((Expr *) argument,
+											   value->computed + 1, NULL, false));
+			foreach_ptr(Var, var, vars)
+			{
+				int			column = var->varno == INDEX_VAR ?
+					tess_layout_column(&state->child_layout, var->varattno - 1) : -1;
+
+				if (column < 0)
+					elog(ERROR, "TessAgg argument names no column of its child");
+				projection = bms_add_member(projection, column);
+			}
 			value->gathered_values = palloc_array(Datum, 64);
 			value->gathered_isnull = palloc_array(bool, 64);
 		}
+	}
+	if (computed != NIL)
+	{
+		/* The arguments are computed columns over the child's target list. */
+		TessProjectionConfig config = TESS_STRUCT_INITIALIZER(TessProjectionConfig);
+
+		config.parent_context = estate->es_query_cxt;
+		config.parent = &css->ss.ps;
+		config.econtext = css->ss.ps.ps_ExprContext;
+		config.scan_slot = ExecInitExtraTupleSlot(estate,
+												  ExecTypeFromTL(child_plan->targetlist),
+												  &TTSOpsVirtual);
+		config.scan_tuple = &state->child_layout;
+		config.base_columns = state->child_layout.ncolumns;
+		config.computed = computed;
+		state->projection = tess_projection_create(&config);
 	}
 	/* Whole batches; the arguments' columns only for the surviving rows. */
 	request.projection_columns = projection;
@@ -472,22 +525,28 @@ flush_gathered(TessAggState *state, AggValue *value)
  * Add one batch to the aggregate: its partial through the batch function,
  * or, for a batch with few survivors, their values gathered into a column
  * of the aggregate's own, since a call costs more than the rows it would
- * sum; the column is evaluated when it fills or the input ends.
+ * sum; the column is evaluated when it fills or the input ends. The batch
+ * is the projection's wrapper, which computes the argument's column.
  */
 static void
 accumulate(TessAggState *state, AggValue *value, TessBatch *batch, int nrows)
 {
-	const TessDatumColumn *column;
+	TessDatumColumn computed = TESS_STRUCT_INITIALIZER(TessDatumColumn);
+	const TessDatumColumn *column = &computed;
 	int			row = -1;
 
-	if (value->expr == NULL)
+	if (value->computed < 0)
 	{
 		evaluate(state, value, NULL, &batch->rows);
 		return;
 	}
-	tess_expr_bind(value->expr, batch, state->css.ss.ps.ps_ExprContext,
-				   TESS_COLUMN_FOR_PROJECTION);
-	column = tess_expr_get_column(value->expr);
+	batch->ops->get_datum_column(batch,
+								 state->child_layout.ncolumns + value->computed,
+								 &batch->rows, TESS_COLUMN_FOR_PROJECTION,
+								 &computed);
+	if (computed.values == NULL || computed.isnull == NULL ||
+		computed.nrows != batch->rows.nrows)
+		elog(ERROR, "Tessera projection returned an invalid column");
 	if (nrows > AGG_GATHER_ROWS)
 	{
 		evaluate(state, value, column, &batch->rows);
@@ -519,9 +578,15 @@ drain(TessAggState *state)
 		state->rows += rows;
 		if (rows > 0)
 		{
+			TessBatch  *input = batch;
+
 			ResetExprContext(state->css.ss.ps.ps_ExprContext);
+			if (state->projection != NULL)
+				input = tess_projection_wrap(state->projection, batch);
 			for (int index = 0; index < state->nvalues; index++)
-				accumulate(state, &state->values[index], batch, rows);
+				accumulate(state, &state->values[index], input, rows);
+			if (state->projection != NULL)
+				input->ops->release(input);
 		}
 		tess_input_finish(state->input);
 	}
@@ -608,6 +673,8 @@ agg_rescan(CustomScanState *css)
 	TessAggState *state = (TessAggState *) css;
 
 	tess_output_clear(state->output);
+	if (state->projection != NULL)
+		tess_projection_reset(state->projection);
 	/* The core passes changed parameters to outer and inner plans only. */
 	if (css->ss.ps.chgParam != NULL)
 		UpdateChangedParamSet(state->child, css->ss.ps.chgParam);
@@ -635,6 +702,13 @@ agg_explain(CustomScanState *css, List *ancestors, ExplainState *es)
 	ExplainPropertyInteger("Input Batches", NULL, state->batches, es);
 	ExplainPropertyInteger("Input Rows", NULL, state->rows, es);
 	ExplainPropertyInteger("Kernel Calls", NULL, state->calls, es);
+	if (state->projection != NULL)
+	{
+		const TessProjectionStats *computed = tess_projection_stats(state->projection);
+
+		ExplainPropertyInteger("Computed Datums", NULL,
+							   computed->chain_datums + computed->row_datums, es);
+	}
 }
 
 static const CustomExecMethods agg_exec_methods = {
