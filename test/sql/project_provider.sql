@@ -25,6 +25,7 @@ SELECT tessera_test_project_errors(1);
 SELECT tessera_test_project_errors(2);
 SELECT tessera_test_project_errors(3);
 SELECT tessera_test_project_errors(4);
+SELECT tessera_test_project_errors(5);
 \set VERBOSITY default
 
 DROP FUNCTION tessera_test_project_errors(integer);

@@ -25,7 +25,9 @@ ERROR:  Tessera projection still wraps a batch
 SELECT tessera_test_project_errors(3);
 ERROR:  Tessera projection wraps no batch
 SELECT tessera_test_project_errors(4);
-ERROR:  Tessera projection computes batch expressions only
+ERROR:  division by zero
+SELECT tessera_test_project_errors(5);
+ERROR:  Tessera projection reads scan tuple attribute 5 without a batch column
 \set VERBOSITY default
 DROP FUNCTION tessera_test_project_errors(integer);
 DROP FUNCTION tessera_test_project_columns();

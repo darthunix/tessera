@@ -1,15 +1,31 @@
 #include "postgres.h"
 
 #include "executor/executor.h"
+#include "nodes/nodeFuncs.h"
+#include "optimizer/optimizer.h"
+#include "port/pg_bitutils.h"
+#include "utils/datum.h"
+#include "utils/lsyscache.h"
 #include "utils/memutils.h"
 
 #include "tessera/expr.h"
 #include "tessera/runtime.h"
 
-/* One computed column: a batch chain over the child's columns. */
+/* One computed column: a batch chain, or the executor's expression. */
 typedef struct Computed
 {
 	TessExpr   *chain;
+	ExprState  *state;
+	/* Scan tuple attributes the expression reads, and their base columns. */
+	int		   *atts;
+	int		   *columns;
+	int			natts;
+	int16		typlen;
+	bool		typbyval;
+	/* Results by physical row; done marks the rows computed row by row. */
+	Datum	   *values;
+	bool	   *isnull;
+	uint64	   *done;
 	bool		chain_done;
 } Computed;
 
@@ -24,6 +40,7 @@ struct TessProjection
 	int			base_columns;
 	Computed   *computed;
 	int			ncomputed;
+	int			capacity;
 	TessProjectionStats stats;
 };
 
@@ -50,16 +67,39 @@ static const TessBatchOps projection_ops = {
 	.release = projection_release,
 };
 
-
-/* Compile one target; the executor's row-wise path follows. */
+/* Compile one target: a chain when the compiler takes it, else the executor. */
 static void
 init_computed(Computed *computed, Node *expr, const TessProjectionConfig *config)
 {
-	if (!tess_expr_supports_value(expr, 0))
-		elog(ERROR, "Tessera projection computes batch expressions only");
-	computed->chain = tess_expr_compile_value(expr, config->parent,
-											  resolve_scan_var,
-											  (void *) config->scan_tuple);
+	List	   *vars = pull_var_clause(expr, 0);
+	int			natts = 0;
+
+	if (tess_expr_supports_value(expr, 0))
+		computed->chain = tess_expr_compile_value(expr, config->parent,
+												  resolve_scan_var,
+												  (void *) config->scan_tuple);
+	else
+		computed->state = ExecInitExpr((Expr *) expr, config->parent);
+	computed->atts = palloc_array(int, list_length(vars) + 1);
+	computed->columns = palloc_array(int, list_length(vars) + 1);
+	foreach_ptr(Var, var, vars)
+	{
+		int			column = resolve_scan_var(var, (void *) config->scan_tuple);
+		int			index;
+
+		if (column < 0)
+			elog(ERROR, "Tessera projection reads scan tuple attribute %d without a batch column",
+				 var->varattno);
+		for (index = 0; index < natts && computed->atts[index] != var->varattno - 1; index++)
+			;
+		if (index == natts)
+		{
+			computed->atts[natts] = var->varattno - 1;
+			computed->columns[natts++] = column;
+		}
+	}
+	computed->natts = natts;
+	get_typlenbyval(exprType(expr), &computed->typlen, &computed->typbyval);
 }
 
 TessProjection *
@@ -93,6 +133,33 @@ tess_projection_create(const TessProjectionConfig *config)
 	return projection;
 }
 
+/* Result arrays for nrows rows of every computed column. */
+static void
+ensure_capacity(TessProjection *projection, int nrows)
+{
+	MemoryContext parent = GetMemoryChunkContext(projection);
+
+	if (projection->capacity >= nrows)
+		return;
+	for (int index = 0; index < projection->ncomputed; index++)
+	{
+		Computed   *computed = &projection->computed[index];
+
+		if (computed->chain != NULL)
+			continue;
+		if (computed->values != NULL)
+		{
+			pfree(computed->values);
+			pfree(computed->isnull);
+			pfree(computed->done);
+		}
+		computed->values = MemoryContextAllocZero(parent, sizeof(Datum) * nrows);
+		computed->isnull = MemoryContextAllocZero(parent, sizeof(bool) * nrows);
+		computed->done = MemoryContextAllocZero(parent,
+												sizeof(uint64) * tess_row_mask_word_count(nrows));
+	}
+	projection->capacity = nrows;
+}
 
 TessBatch *
 tess_projection_wrap(TessProjection *projection, TessBatch *child)
@@ -101,8 +168,16 @@ tess_projection_wrap(TessProjection *projection, TessBatch *child)
 		elog(ERROR, "Tessera projection cannot wrap a null batch");
 	if (projection->child != NULL)
 		elog(ERROR, "Tessera projection still wraps a batch");
+	ensure_capacity(projection, child->rows.nrows);
 	for (int index = 0; index < projection->ncomputed; index++)
-		projection->computed[index].chain_done = false;
+	{
+		Computed   *computed = &projection->computed[index];
+
+		computed->chain_done = false;
+		if (computed->done != NULL)
+			memset(computed->done, 0,
+				   sizeof(uint64) * tess_row_mask_word_count(child->rows.nrows));
+	}
 	projection->child = child;
 	/* The rows are the child's: a consumer narrowing them narrows both. */
 	projection->batch.rows = child->rows;
@@ -130,6 +205,69 @@ compute_chain(TessProjection *projection, Computed *computed,
 	result->isnull = column->isnull;
 }
 
+/* The executor's expression over the requested rows not computed yet. */
+static void
+compute_rows(TessProjection *projection, Computed *computed,
+			 const TessRowMask *rows, TessDatumColumn *result)
+{
+	TupleTableSlot *slot = projection->scan_slot;
+	ExprContext *econtext = projection->econtext;
+	TessDatumColumn *inputs = palloc_array(TessDatumColumn, computed->natts);
+	int			nwords = tess_row_mask_word_count(rows->nrows);
+	bool		pending = false;
+
+	for (int word = 0; word < nwords; word++)
+		pending |= (rows->bits[word] & ~computed->done[word]) != 0;
+	if (!pending)
+	{
+		pfree(inputs);
+		return;
+	}
+	for (int index = 0; index < computed->natts; index++)
+	{
+		inputs[index] = (TessDatumColumn) TESS_STRUCT_INITIALIZER(TessDatumColumn);
+		projection->child->ops->get_datum_column(projection->child,
+												 computed->columns[index], rows,
+												 TESS_COLUMN_FOR_PROJECTION,
+												 &inputs[index]);
+	}
+	ExecClearTuple(slot);
+	memset(slot->tts_isnull, true, slot->tts_tupleDescriptor->natts);
+	ExecStoreVirtualTuple(slot);
+	econtext->ecxt_scantuple = slot;
+	ResetExprContext(econtext);
+	for (int word = 0; word < nwords; word++)
+	{
+		uint64		todo = rows->bits[word] & ~computed->done[word];
+
+		while (todo != 0)
+		{
+			int			row = word * 64 + pg_rightmost_one_pos64(todo);
+			Datum		value;
+			bool		isnull;
+
+			for (int index = 0; index < computed->natts; index++)
+			{
+				slot->tts_values[computed->atts[index]] = inputs[index].values[row];
+				slot->tts_isnull[computed->atts[index]] = inputs[index].isnull[row];
+			}
+			value = ExecEvalExprSwitchContext(computed->state, econtext, &isnull);
+			if (!isnull && !computed->typbyval)
+			{
+				MemoryContext oldcontext = MemoryContextSwitchTo(projection->context);
+
+				value = datumCopy(value, false, computed->typlen);
+				MemoryContextSwitchTo(oldcontext);
+			}
+			computed->values[row] = isnull ? (Datum) 0 : value;
+			computed->isnull[row] = isnull;
+			projection->stats.row_datums++;
+			todo &= todo - 1;
+		}
+		computed->done[word] |= rows->bits[word];
+	}
+	pfree(inputs);
+}
 
 static void
 projection_get_datum_column(TessBatch *batch, int column,
@@ -154,7 +292,14 @@ projection_get_datum_column(TessBatch *batch, int column,
 		return;
 	}
 	computed = &projection->computed[column - projection->base_columns];
-	compute_chain(projection, computed, purpose, result);
+	if (computed->chain != NULL)
+		compute_chain(projection, computed, purpose, result);
+	else
+	{
+		compute_rows(projection, computed, rows, result);
+		result->values = computed->values;
+		result->isnull = computed->isnull;
+	}
 	result->nrows = batch->rows.nrows;
 }
 

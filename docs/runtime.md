@@ -157,8 +157,20 @@ a limit above that narrows the wrapper before asking narrows what the
 chain computes. A released wrapper releases the child; the next
 `tess_projection_wrap` takes the next batch, and `tess_projection_reset`
 forgets one at a rescan. `tess_projection_stats` counts the values
-computed for `EXPLAIN`. Any other target is not computed yet: the row-wise
-path through the executor follows.
+computed for `EXPLAIN`.
+
+Any other target, a text expression, a cast, a `CASE`, a function, is
+computed row by row by the executor: `ExecInitExpr` at creation, and per
+request the scan tuple slot is filled, for each row asked for and not
+computed yet, with only the attributes the expression reads, fetched from
+the child for those rows, `ExecEvalExprSwitchContext` evaluates it, and a
+by-reference result is copied into the projection's own context, which
+lives until the wrapper is released. The rows computed are remembered per
+column, so a filter above and the projection never compute a row twice,
+and an expression that fails, a division by zero at some row, fails only
+when a consumer asks for that row, as the core's `Result` would evaluating
+output rows only. The per-tuple memory of the expression context is reset
+at the start of every such request.
 
 ## Publishing batches and serving rows
 
