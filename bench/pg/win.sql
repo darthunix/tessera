@@ -7,8 +7,13 @@
 \else
 \set repetitions 31
 \endif
+\if :{?workers}
+\else
+\set workers 0
+\endif
 SET jit = off;
-SET max_parallel_workers_per_gather = 0;
+-- Parallel workers per Gather, for both modes; none unless asked for.
+SET max_parallel_workers_per_gather = :workers;
 
 CREATE TEMP TABLE timings
 (

@@ -1,8 +1,9 @@
 #!/bin/sh
 # PostgreSQL-level benchmarks: a temporary cluster with the Tessera modules
 # preloaded, a data set, and one family of queries measured with Tessera
-# on and off. See README.md. Run from the repository root:
-#   bench/pg/run.sh setup | measure <family> | stop
+# on and off, serially or with parallel workers in both modes. See
+# README.md. Run from the repository root:
+#   bench/pg/run.sh setup | measure <family> [workers] | stop
 set -eu
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 HERE=$ROOT/bench/pg
@@ -32,13 +33,19 @@ CONF
     ;;
 measure)
     FAMILY=$2
+    WORKERS=${3:-0}
     ID=$(LC_ALL=C tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 6)
-    OUT=$RUNS/pg-$FAMILY-$ID
+    if [ "$WORKERS" -gt 0 ]; then
+        OUT=$RUNS/pg-$FAMILY-w$WORKERS-$ID
+    else
+        OUT=$RUNS/pg-$FAMILY-$ID
+    fi
     mkdir -p "$OUT/source"
     cp "$HERE/README.md" "$OUT/protocol.md"
     cp "$HERE/setup.sql" "$HERE/$FAMILY.sql" "$OUT/source/"
     {
         echo "HEAD $(git -C "$ROOT" rev-parse HEAD)"
+        echo "workers $WORKERS"
         echo "status:"; git -C "$ROOT" status --short
         echo "sha256:"
         shasum -a 256 "$LIB/tessera.dylib" "$LIB/tessera_nodes.dylib" \
@@ -46,7 +53,8 @@ measure)
             "$LIB/libtessera_runtime.a" "$BIN/postgres"
     } > "$OUT/source.txt"
     { pmset -g batt 2>/dev/null | head -2; date; } > "$OUT/power.txt"
-    (cd "$OUT" && "$BIN/psql" -X -f "$HERE/$FAMILY.sql" > run.log 2>&1)
+    (cd "$OUT" && "$BIN/psql" -X -v workers="$WORKERS" -f "$HERE/$FAMILY.sql" \
+        > run.log 2>&1)
     cat "$OUT/summary.txt"
     echo "results: $OUT"
     ;;
@@ -55,7 +63,7 @@ stop)
     rm -rf "$DATA"
     ;;
 *)
-    echo "usage: $0 setup | measure <family> | stop" >&2
+    echo "usage: $0 setup | measure <family> [workers] | stop" >&2
     exit 2
     ;;
 esac

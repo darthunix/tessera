@@ -30,8 +30,10 @@ executed five times as a warm-up and then 31 times, each timed with
 median and the 10th and 90th percentiles, and the on/off ratio of the
 minimum and of the median. Each statement is prepared twice, once per
 mode, because a prepared statement is planned at its first execution and
-cached. `jit` is off, parallel query is off, autovacuum is off, the tables
-are warm in `shared_buffers`. The machine is idle and the power source is
+cached. `jit` is off, autovacuum is off, the tables are warm in
+`shared_buffers`. Parallel query is off unless a number of workers per
+`Gather` is given; then both modes run with it, and the on plan must show
+the batch nodes under the `Gather` with that many workers launched. The machine is idle and the power source is
 recorded; nothing is retried or discarded, and a bad run is kept and
 explained. The plans of both modes are recorded with `EXPLAIN ANALYZE`
 and checked by eye: the on plan must contain the batch nodes, the off plan
@@ -45,6 +47,8 @@ of `pg_config` (`make install`):
 ```sh
 bench/pg/run.sh setup          # temporary cluster on port 5433 with data
 bench/pg/run.sh measure tax    # one family; writes target/bench-runs/pg-tax-<id>/
+bench/pg/run.sh measure win 2  # the same with two parallel workers per Gather
+                               # in both modes; writes pg-win-w2-<id>/
 bench/pg/run.sh stop           # stop and delete the cluster
 ```
 
@@ -56,8 +60,8 @@ tessera_limit` in every session and sets `shared_buffers = 2GB`.
 
 Each measurement gets a directory under `target/bench-runs/` (ignored by
 git) with `protocol.md` (this file's rules at the time), `source/` (the SQL
-that ran), `source.txt` (the revision, the working tree's status and the
-hashes of the installed libraries and `postgres`), `power.txt`,
+that ran), `source.txt` (the revision, the number of workers, the working tree's
+status and the hashes of the installed libraries and `postgres`), `power.txt`,
 `timings.csv` (every sample), `summary.txt` (the table) and `plans.txt`.
 Write `comparison.md` by hand: what was measured, the table with ratios,
 observations, and what the numbers mean for the tolerance of the family;
