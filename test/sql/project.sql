@@ -34,6 +34,8 @@ SELECT project_same($$SELECT a + 1 AS next, b, c || '!' AS shout FROM project_t 
 SELECT project_same($$SELECT -a AS neg, a * 2 + b AS mix, length(c) AS len,
     CASE WHEN a > 198 THEN 'big' ELSE 'small' END AS size, a::bigint * 3 AS wide
     FROM project_t WHERE a > 190$$);
+-- A second column in a chain is a step's operand: computed over the batch.
+SELECT project_same($$SELECT a + b AS s, (a + 1) * b AS p, b - a AS d FROM project_t WHERE a > 190$$);
 -- Plain columns keep the plan they had.
 EXPLAIN (COSTS OFF) SELECT a, c FROM project_t WHERE a > 195;
 -- A limit above narrows the rows before the columns are computed.

@@ -145,8 +145,15 @@ tessera_test_expr_supports(PG_FUNCTION_ARGS)
 	result &= check(6, tess_expr_supports_value(op("-", int4(100), a()), 0));
 	result &= check(7, tess_expr_supports_value(op("+", int4(1), int4(2)), 0));
 	result &= check(8, tess_expr_supports_value(int4(5), 0));
+	/* A second column as a step's operand, bare; not inside an expression. */
+	result &= check(9, tess_expr_supports_value(op("+", a(), var(2, INT4OID)), 0));
+	result &= check(28, tess_expr_supports_value(op("*", op("+", a(), int4(1)), var(2, INT4OID)), 0));
+	result &= check(29, tess_expr_supports_value(op("-", var(2, INT4OID), a()), 0));
+	result &= check(30, tess_expr_supports_value(op("+", op("+", a(), var(2, INT4OID)), var(2, INT4OID)), 0));
+	result &= check(31, tess_expr_supports_value(op("-", a(), op("*", var(2, INT4OID), int4(2))), 0));
+	result &= check(33, !tess_expr_supports_value(op("+", op("+", a(), int4(1)), op("*", var(2, INT4OID), int4(2))), 0));
+	result &= check(32, tess_expr_supports_filter(op(">", op("+", a(), var(2, INT4OID)), int4(5)), 0));
 	/* Unsupported values. */
-	result &= check(9, !tess_expr_supports_value(op("+", a(), var(2, INT4OID)), 0));
 	result &= check(10, !tess_expr_supports_value(op("+", a(), (Node *) makeConst(INT8OID, -1, InvalidOid, 8, Int64GetDatum(1), false, true)), 0));
 	result &= check(11, !tess_expr_supports_value(op("=", var(3, TEXTOID), (Node *) makeConst(TEXTOID, -1, DEFAULT_COLLATION_OID, -1, CStringGetTextDatum("x"), false, false)), 0));
 	result &= check(12, !tess_expr_supports_value(op(">", a(), int4(5)), 0));
@@ -257,6 +264,43 @@ tessera_test_expr_values(PG_FUNCTION_ARGS)
 	result &= check(109, row_is(column, tess_expr_non_nulls(expr), 0, true, 0) &&
 		tess_row_mask_count(tess_expr_non_nulls(expr)) == 0);
 
+	/* A second column as an operand: a + b, b - a, (a + 1) * b; a NULL on
+	 * either side makes a NULL. */
+	expr = tess_expr_compile_value(op("+", a(), var(2, INT4OID)), NULL, resolve, NULL);
+	result &= check(113, tess_expr_input_column(expr) == 0);
+	tess_expr_bind(expr, batch, econtext, TESS_COLUMN_FOR_PROJECTION);
+	column = tess_expr_get_column(expr);
+	non_nulls = tess_expr_non_nulls(expr);
+	result &= check(114, row_is(column, non_nulls, 0, false, 3) &&
+		row_is(column, non_nulls, 4, true, 0) &&
+		row_is(column, non_nulls, 68, false, 207) &&
+		tess_row_mask_count(non_nulls) == 56);
+	expr = tess_expr_compile_value(op("-", var(2, INT4OID), a()), NULL, resolve, NULL);
+	result &= check(115, tess_expr_input_column(expr) == 1);
+	tess_expr_bind(expr, batch, econtext, TESS_COLUMN_FOR_PROJECTION);
+	column = tess_expr_get_column(expr);
+	non_nulls = tess_expr_non_nulls(expr);
+	result &= check(116, row_is(column, non_nulls, 1, false, 2) &&
+		row_is(column, non_nulls, 4, true, 0) &&
+		tess_row_mask_count(non_nulls) == 56);
+	expr = tess_expr_compile_value(op("*", op("+", a(), int4(1)), var(2, INT4OID)), NULL, resolve, NULL);
+	tess_expr_bind(expr, batch, econtext, TESS_COLUMN_FOR_PROJECTION);
+	column = tess_expr_get_column(expr);
+	non_nulls = tess_expr_non_nulls(expr);
+	result &= check(117, row_is(column, non_nulls, 2, false, 24) &&
+		row_is(column, non_nulls, 68, false, 9660) &&
+		tess_row_mask_count(non_nulls) == 56);
+	/* The bare column becomes the operand when the other side is a chain,
+	 * keeping its side: a - b * 2. */
+	expr = tess_expr_compile_value(op("-", a(), op("*", var(2, INT4OID), int4(2))), NULL, resolve, NULL);
+	result &= check(118, tess_expr_input_column(expr) == 1);
+	tess_expr_bind(expr, batch, econtext, TESS_COLUMN_FOR_PROJECTION);
+	column = tess_expr_get_column(expr);
+	non_nulls = tess_expr_non_nulls(expr);
+	result &= check(119, row_is(column, non_nulls, 1, false, -6) &&
+		row_is(column, non_nulls, 4, true, 0) &&
+		tess_row_mask_count(non_nulls) == 56);
+
 	/* Only the selected rows are computed. */
 	tess_row_mask_clear(&batch->rows, 0);
 	tess_row_mask_clear(&batch->rows, 1);
@@ -339,6 +383,12 @@ tessera_test_expr_filters(PG_FUNCTION_ARGS)
 		!tess_row_mask_contains(&batch->rows, 63) &&
 		tess_row_mask_count(tess_expr_non_nulls(expr)) == 4 &&
 		DatumGetInt32(tess_expr_get_column(expr)->values[65]) == 67);
+	/* a + b > 10: the other column as the step's operand. */
+	batch = filtered(op(">", op("+", a(), var(2, INT4OID)), int4(10)), econtext);
+	result &= check(207, tess_row_mask_count(&batch->rows) == 53 &&
+		tess_row_mask_contains(&batch->rows, 3) &&
+		!tess_row_mask_contains(&batch->rows, 2) &&
+		!tess_row_mask_contains(&batch->rows, 4));
 	PG_RETURN_BOOL(result);
 }
 
@@ -353,7 +403,7 @@ tessera_test_expr_errors(PG_FUNCTION_ARGS)
 	switch (kind)
 	{
 		case 0:
-			tess_expr_compile_value(op("+", a(), var(2, INT4OID)), NULL, resolve, NULL);
+			tess_expr_compile_value(op("+", op("+", a(), int4(1)), op("*", var(2, INT4OID), int4(2))), NULL, resolve, NULL);
 			break;
 		case 1:
 			tess_expr_compile_value(a(), NULL, resolve_none, NULL);

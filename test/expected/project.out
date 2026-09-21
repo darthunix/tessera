@@ -50,6 +50,13 @@ SELECT project_same($$SELECT -a AS neg, a * 2 + b AS mix, length(c) AS len,
  {"(-191,383,4,small,573)","(-192,386,4,small,576)","(-193,389,4,small,579)","(-194,392,4,small,582)","(-195,395,4,small,585)","(-197,401,4,small,591)","(-198,404,4,small,594)","(-199,407,4,big,597)","(-200,400,4,big,600)"}
 (1 row)
 
+-- A second column in a chain is a step's operand: computed over the batch.
+SELECT project_same($$SELECT a + b AS s, (a + 1) * b AS p, b - a AS d FROM project_t WHERE a > 190$$);
+                                                                        project_same                                                                         
+-------------------------------------------------------------------------------------------------------------------------------------------------------------
+ {"(192,192,-190)","(194,386,-190)","(196,582,-190)","(198,780,-190)","(200,0,-200)","(200,980,-190)","(204,1386,-190)","(206,1592,-190)","(208,1800,-190)"}
+(1 row)
+
 -- Plain columns keep the plan they had.
 EXPLAIN (COSTS OFF) SELECT a, c FROM project_t WHERE a > 195;
                   QUERY PLAN                   

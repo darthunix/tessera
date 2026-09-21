@@ -15,8 +15,11 @@ arranges the calls in the order the tree dictates.
 
 An expression is supported when it is built from
 
-- at most one `Var` (of the current relation: `varlevelsup` 0, an ordinary
-  attribute, and, when a relation is given, that relation);
+- one `Var` (of the current relation: `varlevelsup` 0, an ordinary
+  attribute, and, when a relation is given, that relation) as the column
+  the chain starts from, and, in a call whose implementation accepts any
+  shape, a second bare `Var` as the call's other argument, an operand
+  read from the batch for that step (`a + b`, `(a + 1) * b`, `b - a`);
 - `Const` and `Param` scalars, external or execution parameters;
 - calls, `OpExpr` or `FuncExpr`, whose function the registry implements as
   a `TESS_FUNCTION_VALUE` that is strict and either insensitive to the
@@ -30,8 +33,9 @@ arithmetic accepts any shape; `7 < a` becomes `a > 7`. A scalar argument
 may be an expression of its own without a Var; the executor evaluates it
 whole. An expression with no Var at all is a scalar broadcast over the
 rows. `RelabelType` is transparent. Everything else, `AND`, `OR`, `NOT`,
-`CASE`, `COALESCE`, `IS NULL`, a second column, a function the registry
-does not know, is left to the row-wise executor. `tess_expr_supports_value`
+`CASE`, `COALESCE`, `IS NULL`, a second column inside an expression of
+its own (`a + b * 2`), a function the registry does not know, is left to
+the row-wise executor. `tess_expr_supports_value`
 decides this at planning time, without executor state, with the same rules
 the compiler enforces.
 

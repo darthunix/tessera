@@ -195,13 +195,15 @@ filter_begin(CustomScanState *css, EState *estate, int eflags)
 	state->filters = palloc_array(TessExpr *, state->nfilters);
 	foreach_ptr(Node, clause, cscan->custom_exprs)
 	{
-		TessExpr   *expr = tess_expr_compile_filter(clause, &css->ss.ps,
-													resolve_column,
-													&state->child_layout);
+		List	   *vars = pull_var_clause(clause, 0);
 
-		state->filters[index++] = expr;
-		filter_columns = bms_add_member(filter_columns,
-										tess_expr_input_column(expr));
+		state->filters[index++] = tess_expr_compile_filter(clause, &css->ss.ps,
+														   resolve_column,
+														   &state->child_layout);
+		/* Every column the chain reads, an operand of a step included. */
+		foreach_ptr(Var, var, vars)
+			filter_columns = bms_add_member(filter_columns,
+											resolve_column(var, &state->child_layout));
 	}
 	if (css->ss.ps.qual != NULL)
 		prepare_residual(state, cscan, &filter_columns);

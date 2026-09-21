@@ -44,6 +44,10 @@ SELECT filter_same($$SELECT count(*) FROM filter_t WHERE a > 198$$);
 SELECT filter_same($$SELECT count(*) FROM filter_t WHERE (a + 1) * 2 > 300$$);
 SELECT filter_same($$SELECT count(*) FROM filter_t WHERE 100 < a$$);
 SELECT filter_same($$SELECT a FROM filter_t WHERE -a > -10$$);
+-- Two columns in the chain: the other column is an operand of the step.
+EXPLAIN (COSTS OFF) SELECT a FROM filter_t WHERE a + b > 200;
+SELECT filter_same($$SELECT a, b FROM filter_t WHERE a + b > 200$$);
+SELECT filter_same($$SELECT count(*) FROM filter_t WHERE b - a < -190$$);
 
 -- A column the clauses need but the query does not: the scan below adds it.
 EXPLAIN (VERBOSE, COSTS OFF) SELECT c FROM filter_t WHERE a > 195;

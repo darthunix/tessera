@@ -102,6 +102,27 @@ SELECT filter_same($$SELECT a FROM filter_t WHERE -a > -10$$);
  {(1),(2),(3),(4),(5),(6),(8),(9)}
 (1 row)
 
+-- Two columns in the chain: the other column is an operand of the step.
+EXPLAIN (COSTS OFF) SELECT a FROM filter_t WHERE a + b > 200;
+                  QUERY PLAN                  
+----------------------------------------------
+ Custom Scan (TessFilter) on filter_t
+   Batch Filter: ((a + b) > 200)
+   ->  Custom Scan (TessHeapScan) on filter_t
+(3 rows)
+
+SELECT filter_same($$SELECT a, b FROM filter_t WHERE a + b > 200$$);
+           filter_same           
+---------------------------------
+ {"(197,7)","(198,8)","(199,9)"}
+(1 row)
+
+SELECT filter_same($$SELECT count(*) FROM filter_t WHERE b - a < -190$$);
+ filter_same 
+-------------
+ {(1)}
+(1 row)
+
 -- A column the clauses need but the query does not: the scan below adds it.
 EXPLAIN (VERBOSE, COSTS OFF) SELECT c FROM filter_t WHERE a > 195;
                      QUERY PLAN                      
