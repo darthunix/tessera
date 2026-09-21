@@ -52,7 +52,7 @@ first queries is therefore `TessHeapScan → TessFilter → parent`.
 
 The node publishes `scan_rows`: a path over a sequential scan of a plain
 heap table (`RELKIND_RELATION`, the heap access method, no inheritance, no
-sampling) whose targets are its columns. `tess_batch_scan_path` builds it
+sampling) whose targets are its columns or expressions over them. `tess_batch_scan_path` builds it
 for a parent that evaluates the relation's clauses itself, as the filter
 does, and `tess_batch_input_path` prefers it to the pack node for a
 relation without clauses. A pseudoconstant clause keeps both helpers
@@ -60,9 +60,15 @@ away: the planner would gate every scan of the relation with a `Result`
 between the parent and the node. The path copies the scan's costs and
 parallel safety (the node is not parallel-aware; a single-copy `Gather`
 runs it whole in one worker) and estimates every row of the relation,
-since the node evaluates no clause. `PlanCustomPath` builds an explicit
-layout with every attribute of the relation a batch column, dropped ones
-included, and each target mapped to its column; `scanrelid` names the
+since the node evaluates no clause, and declares that the node projects:
+a batch parent asked for a projection above a sequential scan takes the
+scan node with the projection's target (`tess_batch_input_path`), and
+PostgreSQL installs a projection it needs into the node's target list
+instead of a `Result` above it. `PlanCustomPath` builds the projected
+layout over the relation's row as the scan tuple, every attribute a batch
+column, dropped ones included, and the targets are derived when the plan
+is read, a column of the relation mapping to its column and any other
+target becoming a computed column after them; `scanrelid` names the
 relation, which the executor opens and closes.
 
 ### Execution
@@ -80,14 +86,19 @@ until it is released, so a column is deformed only when a consumer asks
 for it, for the rows it asks for, and by-reference values, external
 TOAST pointers included, are read from the page as a slot would give them.
 A scan the core does not run in page mode, which a non-MVCC snapshot
-would give, is read one tuple at a time through the same batch. Rescan
-clears the output and restarts the scan; a bound from a limit above stops
-the scan after as many rows. Backward scan and mark/restore are refused,
-as for every batch node.
+would give, is read one tuple at a time through the same batch. Computed
+targets are the projection provider's ([runtime.md](runtime.md)): the
+node wraps each heap batch before publishing it, and the provider
+computes a column when a consumer asks, for the rows asked for, by a
+batch chain or row by row over the relation's row in the scan tuple slot.
+Rescan clears the output and restarts the scan; a bound from a limit
+above stops the scan after as many rows. Backward scan and mark/restore
+are refused, as for every batch node.
 
 `EXPLAIN` shows `Batch Size` once executed and, with `ANALYZE`, the
-`Batches`, the `Pages` read, the `Deformed Datums` and the `Restarted
-Datums`; the row counts are corrected by the output helper.
+`Batches`, the `Pages` read, the `Deformed Datums`, the `Restarted
+Datums` and, with computed targets, the `Computed Datums`; the row counts
+are corrected by the output helper.
 
 ### Tests
 
@@ -224,8 +235,10 @@ each target to the child's column and hides the rest. The clauses arrive
 in the planner's order; the leading run the compiler supports becomes the
 batch prefix in `custom_exprs`, the rest the plan's qualifier, so a cheap
 guard stays in front of the division it protects and a security qualifier
-in front of what it hides. The node computes no projection: PostgreSQL
-puts a `Result` above it when the query needs one.
+in front of what it hides. The node declares that it projects: PostgreSQL
+installs a projection the query needs into the node's target list instead
+of a `Result` above it, and the plan's layout is the projected one over
+the child's target list as the scan tuple, derived when the plan is read.
 
 ### Execution
 
@@ -238,12 +251,16 @@ previous ones left, and the row-wise clauses, when there are any, run over
 the survivors: their columns are fetched with the narrowed mask, each row
 is shown to `ExecQual` through the scan tuple slot, and a false result
 clears the row's bit. A batch-aware parent receives the child's slot with
-the whole batch; an ordinary parent receives rows through the helper. The
-node forwards no tuple bound, since it removes rows.
+the whole batch; an ordinary parent receives rows through the helper. With
+computed targets the helper publishes the projection provider's wrapper of
+each batch instead ([runtime.md](runtime.md)), which computes a column
+when a consumer asks, for the rows asked for: a limit above narrows the
+rows first. The node forwards no tuple bound, since it removes rows.
 
 `EXPLAIN` shows the batch prefix as `Batch Filter` and the rest as the
 core's `Filter`; with `ANALYZE`, the rows removed by each part, per loop,
-and the helper's batches and rows. The core's `Rows Removed by Filter`
+the helper's batches and rows and, with computed targets, the `Computed
+Datums`. The core's `Rows Removed by Filter`
 counts both parts, since the helper reports every row the node removes.
 
 ### Tests

@@ -107,9 +107,14 @@ published batch; otherwise the node returns one row per call. A batch node
 attaches its binding to `ps_ResultTupleSlot` in `BeginCustomScan`; a parent
 finds the request binding there. A node that forwards its child's batch
 returns that child's slot, and a parent looks up the binding of whatever
-slot it receives. The module registers its `CustomScanMethods` with
-`RegisterCustomScanMethods` in `_PG_init`, so that a parallel worker can
-read the plan back. Paths are built with `tess_path_create` and plans with
+slot it receives. A node that declares `CUSTOMPATH_SUPPORT_PROJECTION`
+learns its targets in `BeginCustomScan`, since PostgreSQL installs a
+projection after `PlanCustomPath` returns: it plans with the projected
+layout and computes the targets that are not columns of its scan tuple
+through the projection provider, for the rows a consumer asks for (see
+[runtime.md](runtime.md)). The module registers its `CustomScanMethods`
+with `RegisterCustomScanMethods` in `_PG_init`, so that a parallel worker
+can read the plan back. Paths are built with `tess_path_create` and plans with
 `tess_plan_create` (see [runtime.md](runtime.md)), which is how another
 node recognizes a batch child; plan data travels in typed,
 `copyObject()`-compatible private lists through the named plan-data codec.

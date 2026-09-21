@@ -161,13 +161,25 @@ tess_batch_input_path(PlannerInfo *root, Path *path)
 	 * is the node's to compute: the node takes the target and stands in for
 	 * the projection path, which would otherwise hide it behind a Result.
 	 */
-	if (IsA(path, ProjectionPath) && ((ProjectionPath *) path)->dummypp &&
-		tess_path_node(((ProjectionPath *) path)->subpath) != NULL)
+	if (IsA(path, ProjectionPath) && ((ProjectionPath *) path)->dummypp)
 	{
 		ProjectionPath *projection = (ProjectionPath *) path;
+		Path	   *subpath = projection->subpath;
 
-		projection->subpath->pathtarget = projection->path.pathtarget;
-		path = projection->subpath;
+		if (tess_path_node(subpath) != NULL)
+		{
+			subpath->pathtarget = projection->path.pathtarget;
+			path = subpath;
+		}
+		else if (subpath->pathtype == T_SeqScan && subpath->param_info == NULL)
+		{
+			/* A native scan may compute it too; the core path is left alone. */
+			Path	   *copy = makeNode(Path);
+
+			*copy = *subpath;
+			copy->pathtarget = projection->path.pathtarget;
+			path = copy;
+		}
 	}
 	if (tess_path_node(path) != NULL)
 		return path;

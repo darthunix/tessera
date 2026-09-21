@@ -163,6 +163,46 @@ SELECT project_same($$SELECT a * 2 AS twice, c FROM project_t WHERE a > 190 AND 
  {"(382,r191)","(384,r192)","(386,r193)","(388,r194)","(394,r197)","(396,r198)","(398,r199)","(400,r200)"}
 (1 row)
 
+-- The scan itself computes the targets of a query without clauses.
+EXPLAIN (COSTS OFF, VERBOSE)
+SELECT a * 2 AS twice, c || '!' AS shout FROM project_t LIMIT 3;
+                      QUERY PLAN                      
+------------------------------------------------------
+ Custom Scan (TessLimit)
+   Output: ((a * 2)), ((c || '!'::text))
+   ->  Custom Scan (TessHeapScan) on public.project_t
+         Output: (a * 2), (c || '!'::text)
+(4 rows)
+
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+SELECT a * 2 AS twice, c || '!' AS shout FROM project_t LIMIT 3;
+                                QUERY PLAN                                
+--------------------------------------------------------------------------
+ Custom Scan (TessLimit) (actual rows=3.00 loops=1)
+   Input Batches: 1
+   Input Rows: 3
+   Output Rows: 3
+   ->  Custom Scan (TessHeapScan) on project_t (actual rows=3.00 loops=1)
+         Batch Size: 64
+         Batches: 1
+         Pages: 1
+         Deformed Datums: 6
+         Restarted Datums: 0
+         Computed Datums: 6
+(11 rows)
+
+SELECT project_same($$SELECT a * 2 AS twice, c || '!' AS shout FROM project_t LIMIT 3$$);
+          project_same           
+---------------------------------
+ {"(2,r1!)","(4,r2!)","(6,r3!)"}
+(1 row)
+
+SELECT project_same($$SELECT count(*) FROM (SELECT a + b AS s FROM project_t LIMIT 150) AS q WHERE s > 100$$);
+ project_same 
+--------------
+ {(46)}
+(1 row)
+
 -- A set-returning function stays above the node.
 EXPLAIN (COSTS OFF) SELECT generate_series(1, a - 197) FROM project_t WHERE a > 197;
                      QUERY PLAN                      

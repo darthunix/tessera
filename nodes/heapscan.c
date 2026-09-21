@@ -39,6 +39,10 @@ typedef struct HeapScanState
 	/* Begun at the first execution. */
 	TableScanDesc scan;
 	TessHeapBatch *heap;
+	/* The targets PostgreSQL asks the node to compute, or NULL. */
+	TessProjection *projection;
+	/* The relation's row as the scan tuple: attribute n is column n. */
+	TessLayout	relation;
 	const TessRequest *request;
 	int			capacity;
 	/* The scan collects a page's visible tuples; otherwise one at a time. */
@@ -103,8 +107,8 @@ const TessNode tess_heap_scan_node = {
 
 /*
  * Whether the path is a sequential scan of a plain heap table whose
- * targets are all columns of it. A stand-in path of a test has neither a
- * relation nor a target.
+ * targets are columns of it or expressions over them, which the node
+ * computes. A stand-in path of a test has neither a relation nor a target.
  */
 static bool
 plain_heap_scan(PlannerInfo *root, const Path *path)
@@ -122,12 +126,13 @@ plain_heap_scan(PlannerInfo *root, const Path *path)
 	if (rte->relkind != RELKIND_RELATION || rte->inh ||
 		rte->tablesample != NULL)
 		return false;
-	foreach_ptr(Expr, expr, path->pathtarget->exprs)
+	foreach_ptr(Var, var, pull_var_clause((Node *) path->pathtarget->exprs,
+										  PVC_RECURSE_AGGREGATES |
+										  PVC_RECURSE_WINDOWFUNCS |
+										  PVC_RECURSE_PLACEHOLDERS))
 	{
-		Var		   *var = (Var *) expr;
-
-		if (!IsA(expr, Var) || var->varno != rel->relid ||
-			var->varattno <= 0 || var->varlevelsup != 0)
+		if (var->varno != rel->relid || var->varattno <= 0 ||
+			var->varlevelsup != 0)
 			return false;
 	}
 	/* The planner holds the lock; the executor reads pages as the heap AM. */
@@ -149,37 +154,33 @@ heap_scan_rows(PlannerInfo *root, Path *path)
 	config.template_path = path;
 	config.methods = &heap_scan_path_methods;
 	config.node = &tess_heap_scan_node;
+	/* Expressions in the targets are computed over the batches. */
+	config.flags = CUSTOMPATH_SUPPORT_PROJECTION;
 	scan = tess_path_create(&config);
 	/* Every row of the relation comes out: the node evaluates no clause. */
 	scan->path.rows = clamp_row_est(path->parent->tuples);
 	return scan;
 }
 
-/* Every relation column is a batch column; the targets map to them. */
+/*
+ * Every relation column is a batch column and the relation's row is the
+ * scan tuple; the targets, PostgreSQL's projection among them, are derived
+ * from it when the plan is read.
+ */
 static Plan *
 heap_scan_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 			   List *tlist, List *clauses, List *custom_plans)
 {
 	TessPlanConfig config = TESS_STRUCT_INITIALIZER(TessPlanConfig);
 	TessLayout	layout = TESS_STRUCT_INITIALIZER(TessLayout);
-	int		   *map = NULL;
-	int			target = 0;
 
-	if (tlist != NIL)
-		map = palloc_array(int, list_length(tlist));
-	foreach_ptr(TargetEntry, entry, tlist)
-	{
-		if (!IsA(entry->expr, Var))
-			elog(ERROR, "TessHeapScan target is not a column");
-		map[target++] = ((Var *) entry->expr)->varattno - 1;
-	}
 	layout.ncolumns = rel->max_attr;
-	layout.ntargets = list_length(tlist);
-	layout.target_columns = map;
+	layout.ntargets = rel->max_attr;
 	config.methods = &tess_heap_scan_scan_methods;
-	config.layout_policy = TESS_LAYOUT_EXPLICIT;
+	config.layout_policy = TESS_LAYOUT_PROJECTED;
 	config.explicit_layout = &layout;
 	config.scanrelid = rel->relid;
+	config.scan_tuple_is_relation = true;
 	return tess_plan_create(best_path, tlist, custom_plans, &config);
 }
 
@@ -206,9 +207,26 @@ heap_scan_begin(CustomScanState *css, EState *estate, int eflags)
 		elog(ERROR, "TessHeapScan supports neither backward scan nor mark/restore");
 	tess_plan_get_info(cscan, &info);
 	if (info.node != &tess_heap_scan_node || info.nchildren != 0 ||
-		rel == NULL || info.layout.ncolumns != RelationGetDescr(rel)->natts)
+		rel == NULL || cscan->custom_scan_tlist != NIL ||
+		info.layout.ncolumns < RelationGetDescr(rel)->natts)
 		elog(ERROR, "TessHeapScan received a foreign plan");
 	state->layout = info.layout;
+	state->relation = (TessLayout) TESS_STRUCT_INITIALIZER(TessLayout);
+	state->relation.ncolumns = RelationGetDescr(rel)->natts;
+	state->relation.ntargets = RelationGetDescr(rel)->natts;
+	if (info.computed != NIL)
+	{
+		TessProjectionConfig projection = TESS_STRUCT_INITIALIZER(TessProjectionConfig);
+
+		projection.parent_context = estate->es_query_cxt;
+		projection.parent = &css->ss.ps;
+		projection.econtext = css->ss.ps.ps_ExprContext;
+		projection.scan_slot = css->ss.ss_ScanTupleSlot;
+		projection.scan_tuple = &state->relation;
+		projection.base_columns = state->relation.ncolumns;
+		projection.computed = info.computed;
+		state->projection = tess_projection_create(&projection);
+	}
 	state->output = tess_output_create(estate->es_query_cxt, &css->ss.ps,
 									   css->ss.ps.ps_ResultTupleSlot,
 									   &info.layout);
@@ -237,7 +255,7 @@ heap_scan_start(HeapScanState *state)
 	/* Cleared for a non-MVCC snapshot: then one tuple at a time. */
 	state->pagemode = (state->scan->rs_flags & SO_ALLOW_PAGEMODE) != 0;
 	config.parent_context = estate->es_query_cxt;
-	config.ncolumns = state->layout.ncolumns;
+	config.ncolumns = state->relation.ncolumns;
 	config.capacity = state->capacity;
 	config.tuple_desc = RelationGetDescr(rel);
 	config.first_non_guaranteed_attr = RelationGetDescr(rel)->firstNonGuaranteedAttr;
@@ -347,6 +365,8 @@ heap_scan_exec(CustomScanState *css)
 		return NULL;
 	state->produced += tess_row_mask_count(&batch->rows);
 	state->batches++;
+	if (state->projection != NULL)
+		batch = tess_projection_wrap(state->projection, batch);
 	return tess_output_publish(state->output, batch);
 }
 
@@ -356,6 +376,9 @@ heap_scan_end(CustomScanState *css)
 	HeapScanState *state = (HeapScanState *) css;
 
 	tess_output_end(state->output);
+	/* The pins of a batch a projection wrapped are the node's to drop. */
+	if (state->heap != NULL)
+		tess_heap_batch_reset(state->heap);
 	ExecClearTuple(state->landing);
 	if (state->scan != NULL)
 		table_endscan(state->scan);
@@ -368,6 +391,10 @@ heap_scan_rescan(CustomScanState *css)
 	HeapScanState *state = (HeapScanState *) css;
 
 	tess_output_clear(state->output);
+	if (state->projection != NULL)
+		tess_projection_reset(state->projection);
+	if (state->heap != NULL)
+		tess_heap_batch_reset(state->heap);
 	ExecClearTuple(state->landing);
 	if (state->scan != NULL)
 		table_rescan(state->scan, NULL);
@@ -397,5 +424,12 @@ heap_scan_explain(CustomScanState *css, List *ancestors, ExplainState *es)
 
 		ExplainPropertyInteger("Deformed Datums", NULL, stats->deformed_datums, es);
 		ExplainPropertyInteger("Restarted Datums", NULL, stats->restarted_datums, es);
+	}
+	if (state->projection != NULL)
+	{
+		const TessProjectionStats *computed = tess_projection_stats(state->projection);
+
+		ExplainPropertyInteger("Computed Datums", NULL,
+							   computed->chain_datums + computed->row_datums, es);
 	}
 }

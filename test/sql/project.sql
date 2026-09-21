@@ -60,6 +60,13 @@ FROM project_t AS o WHERE o.a > 197 ORDER BY 1;
 -- clause with a computed target.
 SELECT project_same($$SELECT c || '!' AS shout, a FROM project_t WHERE a > 190 ORDER BY 1$$);
 SELECT project_same($$SELECT a * 2 AS twice, c FROM project_t WHERE a > 190 AND c <> 'r195'$$);
+-- The scan itself computes the targets of a query without clauses.
+EXPLAIN (COSTS OFF, VERBOSE)
+SELECT a * 2 AS twice, c || '!' AS shout FROM project_t LIMIT 3;
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+SELECT a * 2 AS twice, c || '!' AS shout FROM project_t LIMIT 3;
+SELECT project_same($$SELECT a * 2 AS twice, c || '!' AS shout FROM project_t LIMIT 3$$);
+SELECT project_same($$SELECT count(*) FROM (SELECT a + b AS s FROM project_t LIMIT 150) AS q WHERE s > 100$$);
 -- A set-returning function stays above the node.
 EXPLAIN (COSTS OFF) SELECT generate_series(1, a - 197) FROM project_t WHERE a > 197;
 SELECT project_same($$SELECT generate_series(1, a - 197) AS n FROM project_t WHERE a > 197$$);
