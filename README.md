@@ -29,6 +29,70 @@ and the
 [node-writing guide](docs/writing-a-node.md) walks through building a node
 of your own on the example of `TessLimit`.
 
+## Getting started
+
+Tessera builds against a PostgreSQL master installation with server headers,
+PGXS and `pg_config`; it needs a C compiler, `make` and
+[rustup](https://rustup.rs/), since `make` builds the kernels' Rust library
+through Cargo with the toolchain the repository selects.
+
+1. Build and install into that PostgreSQL, from the repository root:
+
+   ```sh
+   export PG_CONFIG=/path/to/postgresql/bin/pg_config
+   make
+   make install
+   ```
+
+   This installs the bridge with its extension files, the kernels, the
+   runtime static library with the public headers, the nodes module and the
+   example limit node. Clean and rebuild when switching installations.
+
+2. Get a server that loads the modules in every session. Either add the
+   preload line to your cluster's `postgresql.conf` and start it:
+
+   ```
+   session_preload_libraries = 'tessera, tessera_nodes, tessera_kernels, tessera_limit'
+   ```
+
+   (the bridge first, since the modules need it; `tessera_limit` is the
+   example node and optional), or let the benchmark runner create a
+   temporary cluster on port 5433 with that line and three tables of 2 M,
+   250 k and 500 k rows:
+
+   ```sh
+   bench/pg/run.sh setup
+   psql -h /tmp -p 5433 postgres
+   bench/pg/run.sh stop       # afterwards: stops and deletes the cluster
+   ```
+
+3. In a database, create the extension once (the benchmark cluster has it
+   already), then look at a plan:
+
+   ```sql
+   CREATE EXTENSION tessera;
+   EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+   SELECT count(*), sum(c1) FROM bench_narrow WHERE c1 > 1000000;
+   ```
+
+   The plan reads `TessAgg → TessFilter → TessHeapScan`, each node with its
+   batch counters: batches, pages, deformed and computed datums, kernel
+   calls. `SET tessera.enable = off` gives the core's plan for comparison.
+   With `max_parallel_workers_per_gather` above zero, on a table larger than
+   8 MB, the same query runs in every worker under a `Gather`:
+   `Finalize Aggregate → Gather → Parallel Custom Scan (TessAgg) → …`. What
+   the nodes handle today (one table, int4 filters as batch chains with the
+   rest row by row, `count`, `sum`, `min` and `max` over int4, a limit) is
+   in the [nodes guide](docs/nodes.md).
+
+4. Run the regression tests, thirty suites, against a running server
+   (`PGPORT` and `PGHOST` in the environment) or in a temporary instance,
+   as the [bridge guide](docs/bridge.md) shows:
+
+   ```sh
+   make installcheck
+   ```
+
 ## Rust development
 
 The Rust libraries provide batch-processing primitives and adapters for

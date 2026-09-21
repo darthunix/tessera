@@ -68,7 +68,7 @@ errors returns `t`. See the [expected output](../test/expected/modules.out).
 The runner stops its server after the run and leaves results and logs under
 `$TESS_TEST_TMP/results`, including `regression.diffs` on a mismatch.
 
-To run all nine scenarios, use another fresh directory and omit `REGRESS`:
+To run every suite, use another fresh directory and omit `REGRESS`:
 
 ```sh
 TESS_ALL_TEST_TMP=$(mktemp -d)
@@ -100,11 +100,12 @@ The recommended arrangement for a running installation is to preload the
 bridge and the modules in every session from `postgresql.conf`:
 
 ```
-session_preload_libraries = 'tessera, tessera_nodes, tessera_kernels'
+session_preload_libraries = 'tessera, tessera_nodes, tessera_kernels, tessera_limit'
 ```
 
 The bridge comes first: the initialization of the node and kernel modules
-requires it, and the list is loaded in order. Every backend then has the
+requires it, and the list is loaded in order; `tessera_limit`, the example
+node, is optional. Every backend then has the
 bridge, the registries and the modules from the start of its session.
 `CREATE EXTENSION tessera` remains the one-time action in a database, and
 the way tests and one-off sessions load the bridge; it does not replace the
