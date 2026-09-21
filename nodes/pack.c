@@ -330,6 +330,9 @@ pack_rescan(CustomScanState *css)
 	PackState  *state = (PackState *) css;
 
 	tess_output_clear(state->output);
+	/* The core passes changed parameters to outer and inner plans only. */
+	if (css->ss.ps.chgParam != NULL)
+		UpdateChangedParamSet(state->child, css->ss.ps.chgParam);
 	ExecReScan(state->child);
 	state->exhausted = false;
 	state->produced = 0;

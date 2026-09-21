@@ -71,6 +71,10 @@ RESET plan_cache_mode;
 DEALLOCATE shifted;
 SELECT o.b, (SELECT max(i.a + o.b) FROM agg_t AS i WHERE i.a < 50) AS shifted
 FROM agg_t AS o WHERE o.a < 3 ORDER BY 1;
+-- A hash aggregate under pack in a rescanned subquery must see the changed
+-- parameter, or it reuses its table: the batch nodes pass it on themselves.
+SELECT o.a, (SELECT count(*) FROM (SELECT b FROM agg_t AS i WHERE i.a < o.a GROUP BY b) AS s) AS groups
+FROM agg_t AS o WHERE o.a < 5 ORDER BY 1;
 -- The argument's column is deformed for the surviving rows only.
 EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT sum(b) FROM agg_t WHERE a > 290;

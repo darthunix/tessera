@@ -314,6 +314,9 @@ tess_unary_rescan(TessUnary *unary)
 	ExecClearTuple(unary->node->ss.ps.ps_ResultTupleSlot);
 	if (unary->active_batch != NULL)
 		tess_input_finish(unary->input);
+	/* The core passes changed parameters to outer and inner plans only. */
+	if (unary->node->ss.ps.chgParam != NULL)
+		UpdateChangedParamSet(unary->child, unary->node->ss.ps.chgParam);
 	ExecReScan(unary->child);
 	tess_input_rescan(unary->input);
 	unary->active_batch = NULL;
