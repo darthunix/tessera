@@ -40,11 +40,15 @@ validate_function(const TessFunction *function)
 	if (function->evaluate == NULL)
 		elog(ERROR, "Tessera function must have an evaluate callback");
 	if (function->kind != TESS_FUNCTION_PREDICATE &&
-		function->kind != TESS_FUNCTION_VALUE)
+		function->kind != TESS_FUNCTION_VALUE &&
+		function->kind != TESS_FUNCTION_AGGREGATE)
 		elog(ERROR, "Tessera function has an unknown kind");
 	if (function->result_format != TESS_RESULT_DATUM &&
 		function->result_format != TESS_RESULT_INT32)
 		elog(ERROR, "Tessera function has an unknown result format");
+	if (function->kind == TESS_FUNCTION_AGGREGATE &&
+		function->result_format != TESS_RESULT_DATUM)
+		elog(ERROR, "Tessera aggregate must produce a Datum");
 	if ((function->flags & TESS_FUNCTION_STRICT) == 0)
 		elog(ERROR, "Tessera function must be strict");
 }

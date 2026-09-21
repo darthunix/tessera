@@ -25,6 +25,17 @@ typedef struct Int4Function
 static TessStatusCode compare_evaluate(TessFunctionCall *call);
 static TessStatusCode arith_evaluate(TessFunctionCall *call);
 static TessStatusCode negate_evaluate(TessFunctionCall *call);
+static TessStatusCode aggregate_evaluate(TessFunctionCall *call);
+
+/* The aggregate an AGGREGATE description computes. */
+typedef enum Int4Aggregate
+{
+	INT4_AGG_COUNT_ROWS,		/* count(*): the selected rows */
+	INT4_AGG_COUNT,				/* count(x): the selected non-NULL values */
+	INT4_AGG_SUM,
+	INT4_AGG_MIN,
+	INT4_AGG_MAX
+} Int4Aggregate;
 
 #define INT4_COMPARE(oid, code) \
 	{{TESS_ABI_INITIALIZER(TESS_FUNCTION_ABI_VERSION, TessFunction), \
@@ -49,6 +60,14 @@ static TessStatusCode negate_evaluate(TessFunctionCall *call);
 	  .flags = TESS_FUNCTION_STRICT | TESS_FUNCTION_COLLATION_INSENSITIVE, \
 	  .evaluate = negate_evaluate}, TESS_ARITH_SUB}
 
+/* A partial aggregate over one batch, a Datum of the transition type. */
+#define INT4_AGGREGATE(oid, code) \
+	{{TESS_ABI_INITIALIZER(TESS_FUNCTION_ABI_VERSION, TessFunction), \
+	  .funcid = (oid), .kind = TESS_FUNCTION_AGGREGATE, \
+	  .result_format = TESS_RESULT_DATUM, \
+	  .flags = TESS_FUNCTION_STRICT | TESS_FUNCTION_COLLATION_INSENSITIVE, \
+	  .evaluate = aggregate_evaluate}, (code)}
+
 static const Int4Function int4_functions[] = {
 	INT4_COMPARE(F_INT4EQ, TESS_CMP_EQ),
 	INT4_COMPARE(F_INT4NE, TESS_CMP_NE),
@@ -62,6 +81,11 @@ static const Int4Function int4_functions[] = {
 	INT4_ARITH(F_INT4DIV, TESS_ARITH_DIV),
 	INT4_ARITH(F_INT4MOD, TESS_ARITH_MOD),
 	INT4_NEGATE(F_INT4UM),
+	INT4_AGGREGATE(F_COUNT_, INT4_AGG_COUNT_ROWS),
+	INT4_AGGREGATE(F_COUNT_ANY, INT4_AGG_COUNT),
+	INT4_AGGREGATE(F_SUM_INT4, INT4_AGG_SUM),
+	INT4_AGGREGATE(F_MIN_INT4, INT4_AGG_MIN),
+	INT4_AGGREGATE(F_MAX_INT4, INT4_AGG_MAX),
 };
 
 /* The operation of the description a call names. */
@@ -155,6 +179,78 @@ negate_evaluate(TessFunctionCall *call)
 									   call->args[0].prepared, call->rows,
 									   (int32 *) call->values, call->non_nulls,
 									   call->status);
+}
+
+/*
+ * count(*) over the selection, or one of the column aggregates: the partial
+ * goes into the call's one Datum, its presence into the one-row mask.
+ */
+static TessStatusCode
+aggregate_evaluate(TessFunctionCall *call)
+{
+	const TessFunctionArg *arg;
+	Datum	   *result;
+	bool		isnull = false;
+	TessStatusCode code = TESS_OK;
+
+	if (call == NULL || call->struct_size < TESS_FUNCTION_CALL_MIN_SIZE ||
+		call->rows == NULL || call->values == NULL ||
+		call->non_nulls == NULL || call->non_nulls->nrows != 1 ||
+		call->non_nulls->bits == NULL)
+		return invalid(call, "an int4 aggregate needs a Datum and a mask of one row");
+	result = call->values;
+	if (operation(call) == INT4_AGG_COUNT_ROWS)
+	{
+		if (call->nargs != 0)
+			return invalid(call, "count(*) takes no argument");
+		*result = Int64GetDatum((int64) tess_row_mask_count(call->rows));
+		call->non_nulls->bits[0] = 1;
+		return TESS_OK;
+	}
+	if (call->nargs != 1 || call->args == NULL ||
+		call->args[0].struct_size < TESS_FUNCTION_ARG_MIN_SIZE ||
+		call->args[0].column == NULL)
+		return invalid(call, "an int4 aggregate takes one column");
+	arg = &call->args[0];
+	switch (operation(call))
+	{
+		case INT4_AGG_COUNT:
+			{
+				int64		count = 0;
+
+				code = tess_int4_count(arg->column, arg->prepared, call->rows,
+									   &count, call->status);
+				*result = Int64GetDatum(count);
+				break;
+			}
+		case INT4_AGG_SUM:
+			{
+				int64		sum = 0;
+
+				code = tess_int4_sum(arg->column, arg->prepared, call->rows,
+									 &isnull, &sum, call->status);
+				*result = Int64GetDatum(sum);
+				break;
+			}
+		case INT4_AGG_MIN:
+		case INT4_AGG_MAX:
+			{
+				int32		value = 0;
+
+				code = operation(call) == INT4_AGG_MIN ?
+					tess_int4_min(arg->column, arg->prepared, call->rows,
+								  &isnull, &value, call->status) :
+					tess_int4_max(arg->column, arg->prepared, call->rows,
+								  &isnull, &value, call->status);
+				*result = Int32GetDatum(value);
+				break;
+			}
+		default:
+			return invalid(call, "unknown int4 aggregate");
+	}
+	if (code == TESS_OK)
+		call->non_nulls->bits[0] = isnull ? 0 : 1;
+	return code;
 }
 
 void

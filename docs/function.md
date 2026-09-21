@@ -43,8 +43,10 @@ function.
 Built-in int4 functions are registered by the kernels module
 `tessera_kernels` (`kernels/`), which links the Rust kernels statically and
 registers `int4eq`, `int4ne`, `int4lt`, `int4le`, `int4gt`, `int4ge` as
-predicates and `int4pl`, `int4mi`, `int4mul`, `int4div`, `int4mod` and the
-unary `int4um` as values with `TESS_RESULT_INT32` when loaded; load the bridge first, then
+predicates, `int4pl`, `int4mi`, `int4mul`, `int4div`, `int4mod` and the
+unary `int4um` as values with `TESS_RESULT_INT32`, and `count(*)`,
+`count(int4)`, `sum(int4)`, `min(int4)` and `max(int4)` as aggregates, by
+the aggregate's own OID, when loaded; load the bridge first, then
 `LOAD 'tessera_kernels'`, or preload both through `session_preload_libraries`
 as [bridge.md](bridge.md) recommends. The description does not depend on the argument
 types, so implementations for other types and from other extensions use
@@ -82,6 +84,14 @@ the function's kind:
   `result_format`, and names those rows in `non_nulls`; other slots are
   unspecified and need no initialization. With `TESS_RESULT_DATUM`,
   by-reference values are allocated in the call's `context`.
+- `TESS_FUNCTION_AGGREGATE` computes a partial aggregate over the selected
+  rows of the batch, with no argument for `count(*)` or one column: one
+  Datum of the aggregate's transition type into `values`, and the only bit
+  of `non_nulls`, a mask of one row, when the partial is not NULL, which
+  `sum`, `min` and `max` are without a contributing row. Strict means that
+  NULL rows are left out, as with a strict transition function. The
+  consumer combines the partials of the batches itself, checking overflow
+  where PostgreSQL would.
 
 The columns are the batch contract's mandatory Datum representation; the
 kernels read it directly, and native column interfaces will extend

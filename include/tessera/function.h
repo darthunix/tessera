@@ -32,7 +32,14 @@ typedef enum TessFunctionKind
 	/* A boolean: keeps in the call's rows the selected rows where it is true. */
 	TESS_FUNCTION_PREDICATE = 0,
 	/* A column of the function's result type with a non-NULL mask. */
-	TESS_FUNCTION_VALUE = 1
+	TESS_FUNCTION_VALUE = 1,
+	/*
+	 * A partial aggregate over the selected rows of one batch: one value of
+	 * the aggregate's transition type, or NULL without a contributing row.
+	 * The consumer combines the partials of the batches; strict means that
+	 * NULL rows are left out, as with a strict transition function.
+	 */
+	TESS_FUNCTION_AGGREGATE = 2
 } TessFunctionKind;
 
 /* How a VALUE implementation stores its result column. */
@@ -76,7 +83,10 @@ typedef struct TessFunction TessFunction;
  * One evaluation over a batch. The consumer fills every field it uses and
  * initializes struct_size; the implementation reads the arguments and
  * writes the outputs of its kind. After a failure the mutable outputs are
- * unspecified; results are complete only on TESS_OK.
+ * unspecified; results are complete only on TESS_OK. An AGGREGATE takes no
+ * argument (count(*)) or one column, writes its partial as one Datum into
+ * values, and sets the only bit of non_nulls, a mask of one row, when the
+ * partial is not NULL.
  */
 typedef struct TessFunctionCall
 {
@@ -87,9 +97,15 @@ typedef struct TessFunctionCall
 	Oid			inputcollid;
 	/* The selected rows; a PREDICATE narrows the mask in place. */
 	TessRowMask *rows;
-	/* VALUE: the result array in the function's format, one slot per batch row. */
+	/*
+	 * VALUE: the result array in the function's format, one slot per batch
+	 * row. AGGREGATE: one Datum, the partial.
+	 */
 	void	   *values;
-	/* VALUE: the rows whose result was written and is non-NULL. */
+	/*
+	 * VALUE: the rows whose result was written and is non-NULL. AGGREGATE: a
+	 * mask of one row, set when the partial is not NULL.
+	 */
 	TessRowMask *non_nulls;
 	/* VALUE with TESS_RESULT_DATUM: where by-reference results are allocated. */
 	MemoryContext context;
@@ -109,7 +125,7 @@ struct TessFunction
 {
 	uint32		abi_version;
 	Size		struct_size;
-	/* The pg_proc function this implementation is equivalent to. */
+	/* The pg_proc function this implementation is equivalent to; an aggregate's aggfnoid. */
 	Oid			funcid;
 	TessFunctionKind kind;
 	TessResultFormat result_format;

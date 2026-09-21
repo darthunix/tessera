@@ -17,6 +17,7 @@ PG_FUNCTION_INFO_V1(tessera_test_kernels_module_registry);
 PG_FUNCTION_INFO_V1(tessera_test_kernels_module_arithmetic);
 PG_FUNCTION_INFO_V1(tessera_test_kernels_module_predicate);
 PG_FUNCTION_INFO_V1(tessera_test_kernels_module_errors);
+PG_FUNCTION_INFO_V1(tessera_test_kernels_module_aggregates);
 
 static const TessFunctionRegistryOps *
 registry(void)
@@ -231,6 +232,109 @@ tessera_test_kernels_module_predicate(PG_FUNCTION_ARGS)
 	if (evaluate(functions->find(get_opcode(greater)), column_arg(&c),
 				 scalar_arg(25), &selection, NULL, &non_nulls,
 				 &status) != TESS_OK || selection != 4)
+		PG_RETURN_BOOL(false);
+	PG_RETURN_BOOL(true);
+}
+
+/* A partial aggregate over the selected rows of the three-row column. */
+static TessStatusCode
+aggregate(const TessFunction *function, const TessFunctionArg *arg, int nargs,
+		  uint64 selection, Datum *result, bool *isnull, TessRowMask *present,
+		  TessStatus *status)
+{
+	TessRowMask rows = {3, &selection};
+	TessFunctionCall call = TESS_STRUCT_INITIALIZER(TessFunctionCall);
+	TessStatusCode code;
+
+	*present->bits = 0;
+	call.function = function;
+	call.nargs = nargs;
+	call.args = arg;
+	call.inputcollid = InvalidOid;
+	call.rows = &rows;
+	call.values = result;
+	call.non_nulls = present;
+	call.context = CurrentMemoryContext;
+	call.status = status;
+	code = function->evaluate(&call);
+	*isnull = (*present->bits & 1) == 0;
+	return code;
+}
+
+Datum
+tessera_test_kernels_module_aggregates(PG_FUNCTION_ARGS)
+{
+	const TessFunctionRegistryOps *functions = registry();
+	const Oid	aggregates[] = {F_COUNT_, F_COUNT_ANY, F_SUM_INT4, F_MIN_INT4,
+	F_MAX_INT4};
+	Column		c;
+	TessFunctionArg arg;
+	uint64		word;
+	TessRowMask present = {1, &word};
+	TessRowMask wide = {3, &word};
+	Datum		result;
+	bool		isnull;
+	TessStatus	status = TESS_STRUCT_INITIALIZER(TessStatus);
+	int			i;
+
+	for (i = 0; i < lengthof(aggregates); i++)
+	{
+		const TessFunction *function = functions->find(aggregates[i]);
+
+		if (function == NULL || function->funcid != aggregates[i] ||
+			function->kind != TESS_FUNCTION_AGGREGATE ||
+			function->result_format != TESS_RESULT_DATUM ||
+			(function->flags & TESS_FUNCTION_STRICT) == 0 ||
+			function->evaluate == NULL)
+			PG_RETURN_BOOL(false);
+	}
+	init_column(&c, 10, 20, 30, true);
+	arg = column_arg(&c);
+	/* All three rows: count(*) counts the NULL row, the others skip it. */
+	if (aggregate(functions->find(F_COUNT_), NULL, 0, 7, &result, &isnull,
+				  &present, &status) != TESS_OK ||
+		isnull || DatumGetInt64(result) != 3 ||
+		aggregate(functions->find(F_COUNT_ANY), &arg, 1, 7, &result, &isnull,
+				  &present, &status) != TESS_OK ||
+		isnull || DatumGetInt64(result) != 2 ||
+		aggregate(functions->find(F_SUM_INT4), &arg, 1, 7, &result, &isnull,
+				  &present, &status) != TESS_OK ||
+		isnull || DatumGetInt64(result) != 40 ||
+		aggregate(functions->find(F_MIN_INT4), &arg, 1, 7, &result, &isnull,
+				  &present, &status) != TESS_OK ||
+		isnull || DatumGetInt32(result) != 10 ||
+		aggregate(functions->find(F_MAX_INT4), &arg, 1, 7, &result, &isnull,
+				  &present, &status) != TESS_OK ||
+		isnull || DatumGetInt32(result) != 30)
+		PG_RETURN_BOOL(false);
+	/* Only the NULL row selected: counts are 0, the rest NULL. */
+	if (aggregate(functions->find(F_COUNT_), NULL, 0, 2, &result, &isnull,
+				  &present, &status) != TESS_OK ||
+		isnull || DatumGetInt64(result) != 1 ||
+		aggregate(functions->find(F_COUNT_ANY), &arg, 1, 2, &result, &isnull,
+				  &present, &status) != TESS_OK ||
+		isnull || DatumGetInt64(result) != 0 ||
+		aggregate(functions->find(F_SUM_INT4), &arg, 1, 2, &result, &isnull,
+				  &present, &status) != TESS_OK || !isnull ||
+		aggregate(functions->find(F_MIN_INT4), &arg, 1, 2, &result, &isnull,
+				  &present, &status) != TESS_OK || !isnull ||
+		aggregate(functions->find(F_MAX_INT4), &arg, 1, 2, &result, &isnull,
+				  &present, &status) != TESS_OK || !isnull)
+		PG_RETURN_BOOL(false);
+	/* Nothing selected. */
+	if (aggregate(functions->find(F_COUNT_), NULL, 0, 0, &result, &isnull,
+				  &present, &status) != TESS_OK ||
+		isnull || DatumGetInt64(result) != 0 ||
+		aggregate(functions->find(F_SUM_INT4), &arg, 1, 0, &result, &isnull,
+				  &present, &status) != TESS_OK || !isnull)
+		PG_RETURN_BOOL(false);
+	/* Wrong shapes: an argument to count(*), none to sum, a wide mask. */
+	if (aggregate(functions->find(F_COUNT_), &arg, 1, 7, &result, &isnull,
+				  &present, &status) != TESS_ERROR_INVALID_ARGUMENT ||
+		aggregate(functions->find(F_SUM_INT4), NULL, 0, 7, &result, &isnull,
+				  &present, &status) != TESS_ERROR_INVALID_ARGUMENT ||
+		aggregate(functions->find(F_SUM_INT4), &arg, 1, 7, &result, &isnull,
+				  &wide, &status) != TESS_ERROR_INVALID_ARGUMENT)
 		PG_RETURN_BOOL(false);
 	PG_RETURN_BOOL(true);
 }
