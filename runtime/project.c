@@ -303,13 +303,12 @@ projection_get_datum_column(TessBatch *batch, int column,
 	result->nrows = batch->rows.nrows;
 }
 
+/* The child's batch is the node's to finish: the wrapper only forgets it. */
 static void
 projection_release(TessBatch *batch)
 {
 	TessProjection *projection = batch->private_data;
 
-	if (projection->child != NULL && projection->child->ops->release != NULL)
-		projection->child->ops->release(projection->child);
 	projection->child = NULL;
 	MemoryContextReset(projection->context);
 }

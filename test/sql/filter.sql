@@ -50,7 +50,7 @@ EXPLAIN (VERBOSE, COSTS OFF) SELECT c FROM filter_t WHERE a > 195;
 SELECT c FROM filter_t WHERE a > 195 ORDER BY c;
 -- No column at all.
 SELECT filter_same($$SELECT count(*) FROM filter_t WHERE b > 5$$);
--- A projection above the node, since the node computes none.
+-- The node computes the projection itself.
 EXPLAIN (COSTS OFF) SELECT a + 1 FROM filter_t WHERE a > 197;
 SELECT a + 1 FROM filter_t WHERE a > 197;
 

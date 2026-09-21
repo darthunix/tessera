@@ -129,15 +129,14 @@ SELECT filter_same($$SELECT count(*) FROM filter_t WHERE b > 5$$);
  {(80)}
 (1 row)
 
--- A projection above the node, since the node computes none.
+-- The node computes the projection itself.
 EXPLAIN (COSTS OFF) SELECT a + 1 FROM filter_t WHERE a > 197;
-                     QUERY PLAN                     
-----------------------------------------------------
- Result
-   ->  Custom Scan (TessFilter) on filter_t
-         Batch Filter: (a > 197)
-         ->  Custom Scan (TessHeapScan) on filter_t
-(4 rows)
+                  QUERY PLAN                  
+----------------------------------------------
+ Custom Scan (TessFilter) on filter_t
+   Batch Filter: (a > 197)
+   ->  Custom Scan (TessHeapScan) on filter_t
+(3 rows)
 
 SELECT a + 1 FROM filter_t WHERE a > 197;
  ?column? 
@@ -237,16 +236,15 @@ FROM filter_t AS o WHERE o.a > 197 ORDER BY o.a;
 --------------------------------------------------------------------
  Sort
    Sort Key: o.a
-   ->  Result
-         ->  Custom Scan (TessFilter) on filter_t o
-               Batch Filter: (o.a > 197)
-               ->  Custom Scan (TessHeapScan) on filter_t o
+   ->  Custom Scan (TessFilter) on filter_t o
+         Batch Filter: (o.a > 197)
+         ->  Custom Scan (TessHeapScan) on filter_t o
          SubPlan expr_1
            ->  Custom Scan (TessAgg)
                  ->  Custom Scan (TessFilter) on filter_t i
                        Batch Filter: (i.a > o.a)
                        ->  Custom Scan (TessHeapScan) on filter_t i
-(11 rows)
+(10 rows)
 
 SELECT o.a, (SELECT count(*) FROM filter_t AS i WHERE i.a > o.a) AS above
 FROM filter_t AS o WHERE o.a > 197 ORDER BY o.a;

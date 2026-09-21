@@ -9,7 +9,7 @@ MODULES = tessera_batch_test tessera_binding_test tessera_bridge_test \
 	tessera_transfer_test tessera_unary_test
 REGRESS = agg batch binding bridge builder expr filter function heap_batch \
 	heap_deform input kernels kernels_module limit modules node output \
-	pack plan planner project_provider request row_mask source transfer unary
+	pack plan planner project project_provider request row_mask source transfer unary
 REGRESS_OPTS = --dlpath=$(CURDIR)
 PG_CPPFLAGS = -I$(srcdir)/../include
 NO_INSTALL = 1

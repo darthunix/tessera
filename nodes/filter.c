@@ -31,6 +31,8 @@ typedef struct FilterState
 	int		   *residual_atts;
 	int			nresidual;
 	TessDatumColumn *columns;
+	/* The targets PostgreSQL asks the node to compute, or NULL. */
+	TessProjection *projection;
 	uint64		batch_removed;
 	uint64		residual_removed;
 } FilterState;
@@ -203,6 +205,20 @@ filter_begin(CustomScanState *css, EState *estate, int eflags)
 	}
 	if (css->ss.ps.qual != NULL)
 		prepare_residual(state, cscan, &filter_columns);
+	if (info.computed != NIL)
+	{
+		TessProjectionConfig projection = TESS_STRUCT_INITIALIZER(TessProjectionConfig);
+
+		/* The scan tuple is the child's target list, as the child maps it. */
+		projection.parent_context = estate->es_query_cxt;
+		projection.parent = &css->ss.ps;
+		projection.econtext = css->ss.ps.ps_ExprContext;
+		projection.scan_slot = css->ss.ss_ScanTupleSlot;
+		projection.scan_tuple = &state->child_layout;
+		projection.base_columns = state->child_layout.ncolumns;
+		projection.computed = info.computed;
+		state->projection = tess_projection_create(&projection);
+	}
 	config.parent_context = estate->es_query_cxt;
 	config.node = css;
 	config.child = child;
@@ -210,6 +226,7 @@ filter_begin(CustomScanState *css, EState *estate, int eflags)
 	config.filter_columns = filter_columns;
 	config.process = filter_batch;
 	config.private_data = state;
+	config.projection = state->projection;
 	state->unary = tess_unary_create(&config);
 }
 
@@ -273,4 +290,11 @@ filter_explain(CustomScanState *css, List *ancestors, ExplainState *es)
 	ExplainPropertyInteger("Input Batches", NULL, stats->input_batches, es);
 	ExplainPropertyInteger("Input Rows", NULL, stats->input_rows, es);
 	ExplainPropertyInteger("Output Rows", NULL, stats->output_rows, es);
+	if (state->projection != NULL)
+	{
+		const TessProjectionStats *computed = tess_projection_stats(state->projection);
+
+		ExplainPropertyInteger("Computed Datums", NULL,
+							   computed->chain_datums + computed->row_datums, es);
+	}
 }

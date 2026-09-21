@@ -154,9 +154,9 @@ its batch chain over the batch's selected rows the first time a consumer
 asks for it, once per batch, and the chain's own result column is handed
 out without a copy. The wrapper shares the child's row mask, so a filter or
 a limit above that narrows the wrapper before asking narrows what the
-chain computes. A released wrapper releases the child; the next
-`tess_projection_wrap` takes the next batch, and `tess_projection_reset`
-forgets one at a rescan. `tess_projection_stats` counts the values
+chain computes. A released wrapper forgets the child, which stays the
+node's to finish through its input; the next `tess_projection_wrap` takes
+the next batch, and `tess_projection_reset` forgets one at a rescan. `tess_projection_stats` counts the values
 computed for `EXPLAIN`.
 
 Any other target, a text expression, a cast, a `CASE`, a function, is

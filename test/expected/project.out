@@ -1,0 +1,194 @@
+CREATE EXTENSION tessera;
+LOAD 'tessera_nodes';
+LOAD 'tessera_limit';
+LOAD 'tessera_kernels';
+-- The same result with Tessera on and off, as text.
+CREATE FUNCTION project_same(query text) RETURNS text
+LANGUAGE plpgsql AS $$
+DECLARE
+    with_tessera text[];
+    without_tessera text[];
+    wrapped text := format('SELECT array_agg(q::text ORDER BY q::text) FROM (%s) AS q', query);
+BEGIN
+    PERFORM set_config('tessera.enable', 'on', true);
+    EXECUTE wrapped INTO with_tessera;
+    PERFORM set_config('tessera.enable', 'off', true);
+    EXECUTE wrapped INTO without_tessera;
+    IF with_tessera IS DISTINCT FROM without_tessera THEN
+        RETURN format('MISMATCH on %s off %s', with_tessera, without_tessera);
+    END IF;
+    RETURN with_tessera::text;
+END $$;
+CREATE TABLE project_t (a int, b int, c text);
+INSERT INTO project_t
+SELECT CASE WHEN i % 7 = 0 THEN NULL ELSE i END, i % 10, 'r' || i
+FROM generate_series(1, 200) AS i;
+-- The filter computes the expressions of its targets: no Result above it.
+EXPLAIN (COSTS OFF, VERBOSE)
+SELECT a + 1 AS next, b, c || '!' AS shout FROM project_t WHERE a > 195;
+                      QUERY PLAN                      
+------------------------------------------------------
+ Custom Scan (TessFilter) on public.project_t
+   Output: (a + 1), b, (c || '!'::text)
+   Batch Filter: (project_t.a > 195)
+   ->  Custom Scan (TessHeapScan) on public.project_t
+         Output: a, b, c
+(5 rows)
+
+SELECT project_same($$SELECT a + 1 AS next, b, c || '!' AS shout FROM project_t WHERE a > 195$$);
+                           project_same                            
+-------------------------------------------------------------------
+ {"(198,7,r197!)","(199,8,r198!)","(200,9,r199!)","(201,0,r200!)"}
+(1 row)
+
+-- Chains and row-wise expressions: NULL arguments, a CASE, a cast, a function.
+SELECT project_same($$SELECT -a AS neg, a * 2 + b AS mix, length(c) AS len,
+    CASE WHEN a > 198 THEN 'big' ELSE 'small' END AS size, a::bigint * 3 AS wide
+    FROM project_t WHERE a > 190$$);
+                                                                                                          project_same                                                                                                          
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ {"(-191,383,4,small,573)","(-192,386,4,small,576)","(-193,389,4,small,579)","(-194,392,4,small,582)","(-195,395,4,small,585)","(-197,401,4,small,591)","(-198,404,4,small,594)","(-199,407,4,big,597)","(-200,400,4,big,600)"}
+(1 row)
+
+-- Plain columns keep the plan they had.
+EXPLAIN (COSTS OFF) SELECT a, c FROM project_t WHERE a > 195;
+                  QUERY PLAN                   
+-----------------------------------------------
+ Custom Scan (TessFilter) on project_t
+   Batch Filter: (a > 195)
+   ->  Custom Scan (TessHeapScan) on project_t
+(3 rows)
+
+-- A limit above narrows the rows before the columns are computed.
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+SELECT a + 1 AS next, c || '!' AS shout FROM project_t WHERE a > 100 LIMIT 3;
+                                    QUERY PLAN                                    
+----------------------------------------------------------------------------------
+ Custom Scan (TessLimit) (actual rows=3.00 loops=1)
+   Input Batches: 1
+   Input Rows: 24
+   Output Rows: 3
+   ->  Custom Scan (TessFilter) on project_t (actual rows=24.00 loops=1)
+         Batch Filter: (a > 100)
+         Rows Removed by Batch Filter: 104
+         Input Batches: 2
+         Input Rows: 128
+         Output Rows: 24
+         Computed Datums: 6
+         ->  Custom Scan (TessHeapScan) on project_t (actual rows=128.00 loops=1)
+               Batch Size: 64
+               Batches: 2
+               Pages: 1
+               Deformed Datums: 131
+               Restarted Datums: 0
+(17 rows)
+
+SELECT a + 1 AS next, c || '!' AS shout FROM project_t WHERE a > 100 LIMIT 3;
+ next | shout 
+------+-------
+  102 | r101!
+  103 | r102!
+  104 | r103!
+(3 rows)
+
+-- An expression failing on a row the filter removed does not fail: a chain,
+-- then a row-wise expression; both fail when the row survives.
+SELECT project_same($$SELECT 100 / (a - 50) AS ratio FROM project_t WHERE a > 50 AND a < 55$$);
+      project_same      
+------------------------
+ {(100),(25),(33),(50)}
+(1 row)
+
+SELECT 100 / (a - 50) AS ratio FROM project_t WHERE a > 48 AND a < 52;
+ERROR:  division by zero
+SELECT project_same($$SELECT 1.0 / (a - 50) AS ratio FROM project_t WHERE a > 50 AND a < 53$$);
+                    project_same                     
+-----------------------------------------------------
+ {(0.50000000000000000000),(1.00000000000000000000)}
+(1 row)
+
+SELECT 1.0 / (a - 50) AS ratio FROM project_t WHERE a > 49 AND a < 52;
+ERROR:  division by zero
+-- A parameter in a computed column, and a rescan with another value.
+PREPARE shifted(int) AS SELECT a + $1 AS shifted FROM project_t WHERE a > 197;
+SET plan_cache_mode = force_generic_plan;
+EXPLAIN (COSTS OFF, VERBOSE) EXECUTE shifted(1);
+                      QUERY PLAN                      
+------------------------------------------------------
+ Custom Scan (TessFilter) on public.project_t
+   Output: (a + $1)
+   Batch Filter: (project_t.a > 197)
+   ->  Custom Scan (TessHeapScan) on public.project_t
+         Output: a
+(5 rows)
+
+EXECUTE shifted(1);
+ shifted 
+---------
+     199
+     200
+     201
+(3 rows)
+
+EXECUTE shifted(1000);
+ shifted 
+---------
+    1198
+    1199
+    1200
+(3 rows)
+
+RESET plan_cache_mode;
+DEALLOCATE shifted;
+SELECT o.a, (SELECT i.a + o.b FROM project_t AS i WHERE i.a > 190 ORDER BY 1 LIMIT 1) AS least
+FROM project_t AS o WHERE o.a > 197 ORDER BY 1;
+  a  | least 
+-----+-------
+ 198 |   199
+ 199 |   200
+ 200 |   191
+(3 rows)
+
+-- A row-wise expression through a sort above, and the row-wise residual
+-- clause with a computed target.
+SELECT project_same($$SELECT c || '!' AS shout, a FROM project_t WHERE a > 190 ORDER BY 1$$);
+                                                          project_same                                                           
+---------------------------------------------------------------------------------------------------------------------------------
+ {"(r191!,191)","(r192!,192)","(r193!,193)","(r194!,194)","(r195!,195)","(r197!,197)","(r198!,198)","(r199!,199)","(r200!,200)"}
+(1 row)
+
+SELECT project_same($$SELECT a * 2 AS twice, c FROM project_t WHERE a > 190 AND c <> 'r195'$$);
+                                               project_same                                                
+-----------------------------------------------------------------------------------------------------------
+ {"(382,r191)","(384,r192)","(386,r193)","(388,r194)","(394,r197)","(396,r198)","(398,r199)","(400,r200)"}
+(1 row)
+
+-- A set-returning function stays above the node.
+EXPLAIN (COSTS OFF) SELECT generate_series(1, a - 197) FROM project_t WHERE a > 197;
+                     QUERY PLAN                      
+-----------------------------------------------------
+ ProjectSet
+   ->  Custom Scan (TessFilter) on project_t
+         Batch Filter: (a > 197)
+         ->  Custom Scan (TessHeapScan) on project_t
+(4 rows)
+
+SELECT project_same($$SELECT generate_series(1, a - 197) AS n FROM project_t WHERE a > 197$$);
+       project_same        
+---------------------------
+ {(1),(1),(1),(2),(2),(3)}
+(1 row)
+
+-- The switch off.
+SET tessera.enable = off;
+EXPLAIN (COSTS OFF) SELECT a + 1 FROM project_t WHERE a > 195;
+      QUERY PLAN       
+-----------------------
+ Seq Scan on project_t
+   Filter: (a > 195)
+(2 rows)
+
+RESET tessera.enable;
+DROP TABLE project_t;
+DROP FUNCTION project_same(text);
+DROP EXTENSION tessera;

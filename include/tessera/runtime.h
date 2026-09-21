@@ -211,8 +211,9 @@ typedef struct TessProjectionStats
 extern TessProjection *tess_projection_create(const TessProjectionConfig *config);
 
 /*
- * Wrap a batch: the wrapper is valid until it is released, which releases
- * the child; the previous wrapper must have been released.
+ * Wrap a batch: the wrapper is valid until it is released, when it forgets
+ * the child, which stays the node's to finish; the previous wrapper must
+ * have been released.
  */
 extern TessBatch *tess_projection_wrap(TessProjection *projection,
 									   TessBatch *child);
@@ -363,6 +364,11 @@ typedef struct TessUnaryConfig
 	/* NULL keeps every row. */
 	TessUnaryProcess process;
 	void	   *private_data;
+	/*
+	 * Computed columns after the child's, or NULL: the helper publishes
+	 * the projection's wrapper of each batch instead of the child's slot.
+	 */
+	TessProjection *projection;
 } TessUnaryConfig;
 
 #define TESS_UNARY_CONFIG_MIN_SIZE \

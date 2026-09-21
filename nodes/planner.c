@@ -153,6 +153,8 @@ set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
 	config.methods = &filter_path_methods;
 	config.node = &tess_filter_node;
 	config.children = list_make1(child);
+	/* Expressions in the targets are computed over the batches. */
+	config.flags = CUSTOMPATH_SUPPORT_PROJECTION;
 	add_path(rel, (Path *) tess_path_create(&config));
 }
 
@@ -174,25 +176,21 @@ take_clauses(CustomScan *pack, List *clauses)
 	scan->qual = NIL;
 }
 
-/* The node's targets among the child's columns; the rest stay hidden. */
+/*
+ * The scan tuple is the child's target list: entry k is the child's
+ * column of its target k. The node's own targets, PostgreSQL's projection
+ * among them, are derived from it when the plan is read.
+ */
 static void
-map_targets(TessLayout *layout, List *tlist, const TessPlanChild *child)
+map_scan_tuple(TessLayout *layout, const TessPlanChild *child)
 {
-	int		   *map = NULL;
-	int			target = 0;
+	int			ntargets = list_length(child->plan->targetlist);
+	int		   *map = ntargets > 0 ? palloc_array(int, ntargets) : NULL;
 
 	layout->ncolumns = child->layout.ncolumns;
-	layout->ntargets = list_length(tlist);
-	if (layout->ntargets > 0)
-		map = palloc_array(int, layout->ntargets);
-	foreach_ptr(TargetEntry, entry, tlist)
-	{
-		TargetEntry *found = tlist_member(entry->expr, child->plan->targetlist);
-
-		if (found == NULL)
-			elog(ERROR, "TessFilter target is missing from its child");
-		map[target++] = tess_layout_column(&child->layout, found->resno - 1);
-	}
+	layout->ntargets = ntargets;
+	for (int target = 0; target < ntargets; target++)
+		map[target] = tess_layout_column(&child->layout, target);
 	layout->target_columns = map;
 }
 
@@ -228,9 +226,9 @@ filter_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 	}
 	if (prefix == NIL)
 		elog(ERROR, "TessFilter found no batch clause first in the planner's order");
-	map_targets(&layout, tlist, &child);
+	map_scan_tuple(&layout, &child);
 	config.methods = &tess_filter_scan_methods;
-	config.layout_policy = TESS_LAYOUT_EXPLICIT;
+	config.layout_policy = TESS_LAYOUT_PROJECTED;
 	config.explicit_layout = &layout;
 	config.qual = residual;
 	config.expressions = prefix;

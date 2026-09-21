@@ -26,6 +26,8 @@ struct TessUnary
 	const TessRequest *child_request;
 	/* Row mode: the batch column of every slot attribute, per batch. */
 	TessDatumColumn *columns;
+	/* Computed columns: the active batch is then the projection's wrapper. */
+	TessProjection *projection;
 	TessBatch  *active_batch;
 	int			next_row;
 	bool		stopped;
@@ -52,6 +54,8 @@ tess_unary_create(const TessUnaryConfig *config)
 	unary->max_rows = config->max_rows;
 	unary->process = config->process;
 	unary->private_data = config->private_data;
+	if (TESS_ABI_HAS_FIELD(config, TessUnaryConfig, projection))
+		unary->projection = config->projection;
 	unary->next_row = -1;
 	oldcontext = MemoryContextSwitchTo(config->parent_context);
 	unary->filter_columns = bms_copy(config->filter_columns);
@@ -152,7 +156,9 @@ forward_request(TessUnary *unary)
 	int			max_rows = unary->max_rows;
 
 	unary->request = tess_output_request(unary->output);
-	if (child_layout->ncolumns != unary->layout.ncolumns)
+	if (unary->projection == NULL ?
+		child_layout->ncolumns != unary->layout.ncolumns :
+		child_layout->ncolumns > unary->layout.ncolumns)
 		elog(ERROR, "Tessera unary node cannot pass %d columns through as %d",
 			 child_layout->ncolumns, unary->layout.ncolumns);
 	filter = bms_union(unary->filter_columns, unary->request->filter_columns);
@@ -166,6 +172,12 @@ forward_request(TessUnary *unary)
 		for (int attribute = 0; attribute < natts; attribute++)
 			projection = bms_add_member(projection,
 										tess_layout_column(&unary->layout, attribute));
+	}
+	/* The computed columns are the node's, not the child's. */
+	for (int column = child_layout->ncolumns; column < unary->layout.ncolumns; column++)
+	{
+		filter = bms_del_member(filter, column);
+		projection = bms_del_member(projection, column);
 	}
 	if (unary->request->max_batch_rows > 0)
 		max_rows = max_rows == 0 ? unary->request->max_batch_rows :
@@ -214,6 +226,12 @@ fetch_batch(TessUnary *unary)
 
 		if (unary->stopped)
 			return false;
+		/* The parent finished the wrapper; the child's batch ends with it. */
+		if (unary->projection != NULL && unary->active_batch != NULL)
+		{
+			tess_input_finish(unary->input);
+			unary->active_batch = NULL;
+		}
 		batch = tess_input_next(unary->input);
 		if (batch == NULL)
 			return false;
@@ -233,6 +251,8 @@ fetch_batch(TessUnary *unary)
 			tess_input_finish(unary->input);
 			continue;
 		}
+		if (unary->projection != NULL)
+			batch = tess_projection_wrap(unary->projection, batch);
 		if (unary->request->output_mode == TESS_OUTPUT_ROWS)
 			fetch_columns(unary, batch);
 		unary->stats.output_rows += kept;
@@ -242,17 +262,26 @@ fetch_batch(TessUnary *unary)
 	}
 }
 
-/* Forward the child's slot: the parent reads and finishes the batch there. */
+/*
+ * Forward the child's slot: the parent reads and finishes the batch there.
+ * With computed columns, publish the wrapper through the node's own slot
+ * instead; the parent finishes it there, and the child's batch when the
+ * next one is fetched.
+ */
 static TupleTableSlot *
 exec_batch(TessUnary *unary)
 {
 	PlanState  *ps = &unary->node->ss.ps;
 
+	if (unary->projection != NULL)
+		tess_output_release(unary->output);
 	if (!fetch_batch(unary))
 	{
 		unary->active_batch = NULL;
 		return NULL;
 	}
+	if (unary->projection != NULL)
+		return tess_output_publish(unary->output, unary->active_batch);
 	/* One call returns the whole batch, which the executor counts as one. */
 	if (ps->instrument != NULL)
 		ps->instrument->tuplecount +=
@@ -275,6 +304,9 @@ exec_rows(TessUnary *unary)
 			return NULL;
 		if (unary->next_row < 0)
 		{
+			/* Served in full: the wrapper's copies go with it. */
+			if (unary->projection != NULL)
+				unary->active_batch->ops->release(unary->active_batch);
 			tess_input_finish(unary->input);
 			unary->active_batch = NULL;
 			continue;
@@ -312,6 +344,8 @@ tess_unary_rescan(TessUnary *unary)
 {
 	tess_output_clear(unary->output);
 	ExecClearTuple(unary->node->ss.ps.ps_ResultTupleSlot);
+	if (unary->projection != NULL)
+		tess_projection_reset(unary->projection);
 	if (unary->active_batch != NULL)
 		tess_input_finish(unary->input);
 	/* The core passes changed parameters to outer and inner plans only. */
