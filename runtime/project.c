@@ -4,7 +4,7 @@
 #include "nodes/nodeFuncs.h"
 #include "optimizer/optimizer.h"
 #include "port/pg_bitutils.h"
-#include "utils/datum.h"
+#include "utils/expandeddatum.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
 
@@ -19,9 +19,9 @@ typedef struct Computed
 	/* Scan tuple attributes the expression reads, and their base columns. */
 	int		   *atts;
 	int		   *columns;
+	TessDatumColumn *inputs;
 	int			natts;
 	int16		typlen;
-	bool		typbyval;
 	/* Results by physical row; done marks the rows computed row by row. */
 	Datum	   *values;
 	bool	   *isnull;
@@ -33,9 +33,14 @@ struct TessProjection
 {
 	TessBatch	batch;
 	TessBatch  *child;
-	/* By-reference results of the wrapped batch; reset when it is released. */
-	MemoryContext context;
+	/* Evaluates the chains' scalars. */
 	ExprContext *econtext;
+	/*
+	 * Evaluates the row-wise expressions: its per-tuple memory holds their
+	 * results and scratch for the wrapped batch, reset when it is released.
+	 */
+	ExprContext *row_econtext;
+	MemoryContext context;
 	TupleTableSlot *scan_slot;
 	int			base_columns;
 	Computed   *computed;
@@ -98,8 +103,9 @@ init_computed(Computed *computed, Node *expr, const TessProjectionConfig *config
 			computed->columns[natts++] = column;
 		}
 	}
+	computed->inputs = palloc_array(TessDatumColumn, natts + 1);
 	computed->natts = natts;
-	get_typlenbyval(exprType(expr), &computed->typlen, &computed->typbyval);
+	computed->typlen = get_typlen(exprType(expr));
 }
 
 TessProjection *
@@ -115,10 +121,18 @@ tess_projection_create(const TessProjectionConfig *config)
 	if (config->base_columns < 0 || config->computed == NIL)
 		elog(ERROR, "Tessera projection requires base columns and computed targets");
 	projection = MemoryContextAllocZero(config->parent_context, sizeof(*projection));
-	projection->context = AllocSetContextCreate(config->parent_context,
-												"Tessera projection values",
-												ALLOCSET_DEFAULT_SIZES);
 	projection->econtext = config->econtext;
+	if (config->parent != NULL)
+		projection->row_econtext = CreateExprContext(config->parent->state);
+	else
+	{
+		MemoryContext oldcontext = MemoryContextSwitchTo(config->parent_context);
+
+		projection->row_econtext = CreateStandaloneExprContext();
+		MemoryContextSwitchTo(oldcontext);
+	}
+	projection->row_econtext->ecxt_scantuple = config->scan_slot;
+	projection->context = projection->row_econtext->ecxt_per_tuple_memory;
 	projection->scan_slot = config->scan_slot;
 	projection->base_columns = config->base_columns;
 	projection->ncomputed = list_length(config->computed);
@@ -205,24 +219,27 @@ compute_chain(TessProjection *projection, Computed *computed,
 	result->isnull = column->isnull;
 }
 
-/* The executor's expression over the requested rows not computed yet. */
+/*
+ * The executor's expression over the requested rows not computed yet. It
+ * is evaluated in the projection's per-batch memory, so a by-reference
+ * result is handed out as it is, without a copy, and lives until the
+ * wrapper is released; a result that is a read-write expanded object is
+ * made read-only, as the executor's projection makes its results.
+ */
 static void
 compute_rows(TessProjection *projection, Computed *computed,
 			 const TessRowMask *rows, TessDatumColumn *result)
 {
 	TupleTableSlot *slot = projection->scan_slot;
-	ExprContext *econtext = projection->econtext;
-	TessDatumColumn *inputs = palloc_array(TessDatumColumn, computed->natts);
+	ExprContext *econtext = projection->row_econtext;
+	TessDatumColumn *inputs = computed->inputs;
 	int			nwords = tess_row_mask_word_count(rows->nrows);
 	bool		pending = false;
 
 	for (int word = 0; word < nwords; word++)
 		pending |= (rows->bits[word] & ~computed->done[word]) != 0;
 	if (!pending)
-	{
-		pfree(inputs);
 		return;
-	}
 	for (int index = 0; index < computed->natts; index++)
 	{
 		inputs[index] = (TessDatumColumn) TESS_STRUCT_INITIALIZER(TessDatumColumn);
@@ -234,8 +251,6 @@ compute_rows(TessProjection *projection, Computed *computed,
 	ExecClearTuple(slot);
 	memset(slot->tts_isnull, true, slot->tts_tupleDescriptor->natts);
 	ExecStoreVirtualTuple(slot);
-	econtext->ecxt_scantuple = slot;
-	ResetExprContext(econtext);
 	for (int word = 0; word < nwords; word++)
 	{
 		uint64		todo = rows->bits[word] & ~computed->done[word];
@@ -252,13 +267,8 @@ compute_rows(TessProjection *projection, Computed *computed,
 				slot->tts_isnull[computed->atts[index]] = inputs[index].isnull[row];
 			}
 			value = ExecEvalExprSwitchContext(computed->state, econtext, &isnull);
-			if (!isnull && !computed->typbyval)
-			{
-				MemoryContext oldcontext = MemoryContextSwitchTo(projection->context);
-
-				value = datumCopy(value, false, computed->typlen);
-				MemoryContextSwitchTo(oldcontext);
-			}
+			if (!isnull && computed->typlen == -1)
+				value = MakeExpandedObjectReadOnly(value, isnull, -1);
 			computed->values[row] = isnull ? (Datum) 0 : value;
 			computed->isnull[row] = isnull;
 			projection->stats.row_datums++;
@@ -266,7 +276,6 @@ compute_rows(TessProjection *projection, Computed *computed,
 		}
 		computed->done[word] |= rows->bits[word];
 	}
-	pfree(inputs);
 }
 
 static void

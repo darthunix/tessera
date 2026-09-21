@@ -185,7 +185,12 @@ typedef struct TessProjectionConfig
 	MemoryContext parent_context;
 	/* Compiles the expressions and supplies their Params; NULL in a test. */
 	PlanState  *parent;
-	/* Evaluates the expressions; its per-tuple memory is reset per call. */
+	/*
+	 * Evaluates the chains' scalars. The row-wise expressions get an
+	 * expression context of their own, from the parent's executor state,
+	 * whose per-tuple memory holds their results until the wrapper is
+	 * released.
+	 */
 	ExprContext *econtext;
 	/* The scan tuple slot, virtual, that the row-wise path fills. */
 	TupleTableSlot *scan_slot;

@@ -257,8 +257,8 @@ tessera_test_project_columns(PG_FUNCTION_ARGS)
 						strcmp(text_to_cstring(DatumGetTextPP(column.values[1])), "r2x") == 0);
 		get_column(batch, 3, &batch->rows, &column);
 		result &= check(10, stats->row_datums == 70);
-		/* Another column's computation resets the per-tuple memory; the
-		 * copies of the first survive. */
+		/* Another column's computation shares the batch's memory; the
+		 * first column's results survive it. */
 		get_column(batch, 4, &batch->rows, &column);
 		holds = stats->row_datums == 140;
 		for (int row = 0; row < 70; row++)

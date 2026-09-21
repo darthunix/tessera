@@ -163,14 +163,16 @@ Any other target, a text expression, a cast, a `CASE`, a function, is
 computed row by row by the executor: `ExecInitExpr` at creation, and per
 request the scan tuple slot is filled, for each row asked for and not
 computed yet, with only the attributes the expression reads, fetched from
-the child for those rows, `ExecEvalExprSwitchContext` evaluates it, and a
-by-reference result is copied into the projection's own context, which
-lives until the wrapper is released. The rows computed are remembered per
-column, so a filter above and the projection never compute a row twice,
-and an expression that fails, a division by zero at some row, fails only
-when a consumer asks for that row, as the core's `Result` would evaluating
-output rows only. The per-tuple memory of the expression context is reset
-at the start of every such request.
+the child for those rows, and `ExecEvalExprSwitchContext` evaluates it in
+an expression context of the projection's own, whose per-tuple memory is
+the wrapped batch's: a by-reference result is handed out without a copy
+and lives until the wrapper is released, when that memory is reset, and a
+read-write expanded object is made read-only, as the executor's projection
+makes its results. The rows computed are remembered per column, so a
+filter above and the projection never compute a row twice, and an
+expression that fails, a division by zero at some row, fails only when a
+consumer asks for that row, as the core's `Result` would evaluating output
+rows only.
 
 ## Publishing batches and serving rows
 
