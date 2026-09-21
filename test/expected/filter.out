@@ -190,7 +190,7 @@ PREPARE above(int) AS SELECT count(*) FROM filter_t WHERE a > $1;
 EXPLAIN (COSTS OFF) EXECUTE above(150);
                      QUERY PLAN                     
 ----------------------------------------------------
- Aggregate
+ Custom Scan (TessAgg)
    ->  Custom Scan (TessFilter) on filter_t
          Batch Filter: (a > $1)
          ->  Custom Scan (TessHeapScan) on filter_t
@@ -242,7 +242,7 @@ FROM filter_t AS o WHERE o.a > 197 ORDER BY o.a;
                Batch Filter: (o.a > 197)
                ->  Custom Scan (TessHeapScan) on filter_t o
          SubPlan expr_1
-           ->  Aggregate
+           ->  Custom Scan (TessAgg)
                  ->  Custom Scan (TessFilter) on filter_t i
                        Batch Filter: (i.a > o.a)
                        ->  Custom Scan (TessHeapScan) on filter_t i
@@ -363,7 +363,9 @@ EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT count(*) FROM filter_t WHERE a > 100 AND c <> 'r150';
                                    QUERY PLAN                                    
 ---------------------------------------------------------------------------------
- Aggregate (actual rows=1.00 loops=1)
+ Custom Scan (TessAgg) (actual rows=1.00 loops=1)
+   Input Batches: 3
+   Input Rows: 85
    ->  Custom Scan (TessFilter) on filter_t (actual rows=85.00 loops=1)
          Filter: (c <> 'r150'::text)
          Rows Removed by Filter: 115
@@ -379,7 +381,7 @@ SELECT count(*) FROM filter_t WHERE a > 100 AND c <> 'r150';
                Pages: 2
                Deformed Datums: 286
                Restarted Datums: 0
-(16 rows)
+(18 rows)
 
 -- A column the query returns is deformed for the rows served.
 EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
@@ -408,7 +410,9 @@ EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT count(*) FROM filter_dropped WHERE a > 90;
                                       QUERY PLAN                                       
 ---------------------------------------------------------------------------------------
- Aggregate (actual rows=1.00 loops=1)
+ Custom Scan (TessAgg) (actual rows=1.00 loops=1)
+   Input Batches: 1
+   Input Rows: 10
    ->  Custom Scan (TessFilter) on filter_dropped (actual rows=10.00 loops=1)
          Batch Filter: (a > 90)
          Rows Removed by Batch Filter: 90
@@ -421,7 +425,7 @@ SELECT count(*) FROM filter_dropped WHERE a > 90;
                Pages: 1
                Deformed Datums: 100
                Restarted Datums: 0
-(13 rows)
+(15 rows)
 
 SELECT filter_same($$SELECT sum(b) FROM filter_dropped WHERE a > 90$$);
  filter_same 
@@ -436,7 +440,9 @@ EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT count(*) FROM filter_temp WHERE a > 90 AND c <> 'r95';
                                      QUERY PLAN                                     
 ------------------------------------------------------------------------------------
- Aggregate (actual rows=1.00 loops=1)
+ Custom Scan (TessAgg) (actual rows=1.00 loops=1)
+   Input Batches: 1
+   Input Rows: 9
    ->  Custom Scan (TessFilter) on filter_temp (actual rows=9.00 loops=1)
          Filter: (c <> 'r95'::text)
          Rows Removed by Filter: 91
@@ -452,7 +458,7 @@ SELECT count(*) FROM filter_temp WHERE a > 90 AND c <> 'r95';
                Pages: 1
                Deformed Datums: 110
                Restarted Datums: 0
-(16 rows)
+(18 rows)
 
 SELECT filter_same($$SELECT c FROM filter_temp WHERE a > 90 AND c <> 'r95'$$);
                        filter_same                        
@@ -473,7 +479,9 @@ EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT count(*) FROM filter_dead WHERE a > 0;
                                      QUERY PLAN                                     
 ------------------------------------------------------------------------------------
- Aggregate (actual rows=1.00 loops=1)
+ Custom Scan (TessAgg) (actual rows=1.00 loops=1)
+   Input Batches: 4
+   Input Rows: 200
    ->  Custom Scan (TessFilter) on filter_dead (actual rows=200.00 loops=1)
          Batch Filter: (a > 0)
          Rows Removed by Batch Filter: 0
@@ -486,7 +494,7 @@ SELECT count(*) FROM filter_dead WHERE a > 0;
                Pages: 2
                Deformed Datums: 200
                Restarted Datums: 0
-(13 rows)
+(15 rows)
 
 SELECT filter_same($$SELECT count(*), sum(a) FROM filter_dead WHERE a > 150$$);
    filter_same   
@@ -558,7 +566,7 @@ EXPLAIN (COSTS OFF) SELECT count(*) FROM filter_t WHERE a > 100;
  Gather
    Workers Planned: 1
    Single Copy: true
-   ->  Aggregate
+   ->  Custom Scan (TessAgg)
          ->  Custom Scan (TessFilter) on filter_t
                Batch Filter: (a > 100)
                ->  Custom Scan (TessHeapScan) on filter_t

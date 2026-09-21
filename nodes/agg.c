@@ -1,9 +1,15 @@
 #include "postgres.h"
 
+#include "catalog/pg_aggregate.h"
 #include "commands/explain.h"
 #include "commands/explain_format.h"
 #include "common/int.h"
 #include "executor/executor.h"
+#include "nodes/nodeFuncs.h"
+#include "optimizer/optimizer.h"
+#include "optimizer/pathnode.h"
+#include "optimizer/planner.h"
+#include "optimizer/tlist.h"
 #include "utils/fmgroids.h"
 #include "utils/regproc.h"
 
@@ -20,8 +26,9 @@
  * computed per batch by the registered batch function of its aggregate
  * (tessera/function.h, kind TESS_FUNCTION_AGGREGATE) and the partials are
  * combined here, with the overflow check the core's transition would
- * make. The planner side follows. See docs/nodes.md.
+ * make. See docs/nodes.md.
  */
+#define AGG_COST_FACTOR 0.9
 
 /* How the partials of an aggregate combine, and what an empty input gives. */
 typedef enum AggKind
@@ -53,6 +60,16 @@ typedef struct TessAggState
 } TessAggState;
 
 static const CustomExecMethods agg_exec_methods;
+static create_upper_paths_hook_type previous_create_upper_paths_hook = NULL;
+
+static Plan *agg_plan(PlannerInfo *root, RelOptInfo *rel,
+					  CustomPath *best_path, List *tlist, List *clauses,
+					  List *custom_plans);
+
+static const CustomPathMethods agg_path_methods = {
+	.CustomName = "TessAgg",
+	.PlanCustomPath = agg_plan,
+};
 
 /* The kind of a supported aggregate, or -1: the node knows how to combine these. */
 static int
@@ -65,6 +82,136 @@ aggregate_kind(Oid aggfnoid)
 		default:
 			return -1;
 	}
+}
+
+/*
+ * Whether the node computes this aggregate: a plain call of an aggregate
+ * the node combines and the registry implements over batches, with no
+ * argument for count(*).
+ */
+static bool
+aggregate_supported(const Aggref *agg)
+{
+	const TessFunction *function;
+
+	if (agg->agglevelsup != 0 || agg->aggkind != AGGKIND_NORMAL ||
+		agg->aggsplit != AGGSPLIT_SIMPLE || agg->aggorder != NIL ||
+		agg->aggdistinct != NIL || agg->aggfilter != NULL ||
+		agg->aggdirectargs != NIL || agg->aggvariadic ||
+		aggregate_kind(agg->aggfnoid) < 0)
+		return false;
+	function = tess_runtime_api()->functions->find(agg->aggfnoid);
+	if (function == NULL || function->kind != TESS_FUNCTION_AGGREGATE)
+		return false;
+	return agg->aggstar && agg->args == NIL;
+}
+
+/*
+ * The distinct aggregates of the query's target and HAVING as a flat
+ * target list, the scan tuple of the node, when every one is supported;
+ * NIL otherwise. Expressions above the aggregates are left to the plan's
+ * projection and qual over that tuple.
+ */
+static List *
+collect_aggregates(PlannerInfo *root, RelOptInfo *output_rel)
+{
+	List	   *tlist = NIL;
+	List	   *found;
+
+	found = pull_var_clause((Node *) list_make2(output_rel->reltarget->exprs,
+												root->parse->havingQual),
+							PVC_INCLUDE_AGGREGATES);
+	foreach_ptr(Node, node, found)
+	{
+		if (!IsA(node, Aggref) || !aggregate_supported((Aggref *) node))
+			return NIL;
+		tlist = add_to_flat_tlist(tlist, list_make1(node));
+	}
+	return tlist;
+}
+
+/* The queries the node handles: plain aggregation of a single result row. */
+static bool
+query_supported(PlannerInfo *root, RelOptInfo *input_rel, RelOptInfo *output_rel)
+{
+	Query	   *parse = root->parse;
+
+	return parse->hasAggs && parse->groupClause == NIL &&
+		parse->groupingSets == NIL && !parse->hasWindowFuncs &&
+		output_rel->reloptkind == RELOPT_UPPER_REL && !IS_DUMMY_REL(input_rel);
+}
+
+/*
+ * The node's path in place of each of the core's plain aggregate paths
+ * whose input can be read in batches: the same planner properties and
+ * rows, a lower cost, the batch child and the aggregates it computes.
+ */
+static void
+create_upper_paths(PlannerInfo *root, UpperRelationKind stage,
+				   RelOptInfo *input_rel, RelOptInfo *output_rel, void *extra)
+{
+	List	   *aggregates;
+	List	   *templates = NIL;
+
+	if (previous_create_upper_paths_hook != NULL)
+		previous_create_upper_paths_hook(root, stage, input_rel, output_rel,
+										 extra);
+	if (!*tess_runtime_api()->settings->enable ||
+		stage != UPPERREL_GROUP_AGG ||
+		!query_supported(root, input_rel, output_rel))
+		return;
+	aggregates = collect_aggregates(root, output_rel);
+	if (aggregates == NIL)
+		return;
+	/* add_path changes the list: the candidates are taken first. */
+	foreach_ptr(Path, path, output_rel->pathlist)
+	{
+		if (IsA(path, AggPath) &&
+			((AggPath *) path)->aggstrategy == AGG_PLAIN &&
+			((AggPath *) path)->aggsplit == AGGSPLIT_SIMPLE)
+			templates = lappend(templates, path);
+	}
+	foreach_ptr(AggPath, agg, templates)
+	{
+		TessPathConfig config = TESS_STRUCT_INITIALIZER(TessPathConfig);
+		Path	   *child = tess_batch_input_path(root, agg->subpath);
+		Path		template;
+
+		if (child == NULL)
+			continue;
+		template = agg->path;
+		template.total_cost *= AGG_COST_FACTOR;
+		config.template_path = &template;
+		config.methods = &agg_path_methods;
+		config.node = &tess_agg_node;
+		config.children = list_make1(child);
+		config.expressions = aggregates;
+		add_path(output_rel, (Path *) tess_path_create(&config));
+	}
+}
+
+/*
+ * The scan tuple is the aggregates themselves, so that the planner turns
+ * the targets and HAVING into references to it; the child's columns stay
+ * hidden. HAVING is the plan's qual, as it is the core aggregate's.
+ */
+static Plan *
+agg_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
+		 List *tlist, List *clauses, List *custom_plans)
+{
+	TessPathInfo info = TESS_STRUCT_INITIALIZER(TessPathInfo);
+	TessPlanConfig config = TESS_STRUCT_INITIALIZER(TessPlanConfig);
+	TessPlanChild child = TESS_STRUCT_INITIALIZER(TessPlanChild);
+
+	tess_path_get_info(best_path, &info);
+	if (!tess_plan_child(best_path, custom_plans, 0, &child))
+		elog(ERROR, "TessAgg expected a batch child");
+	config.methods = &tess_agg_scan_methods;
+	config.layout_policy = TESS_LAYOUT_DENSE;
+	config.qual = (List *) root->parse->havingQual;
+	config.scan_targetlist = info.expressions;
+	config.scanrelid = 0;
+	return tess_plan_create(best_path, tlist, custom_plans, &config);
 }
 
 static void
@@ -203,10 +350,16 @@ result_row(TessAggState *state)
 	return ExecStoreVirtualTuple(scan);
 }
 
+/*
+ * The result row, once: the aggregates in the scan slot, HAVING over
+ * them, and the plan's projection when the targets are not the bare
+ * aggregates, as the executor set it up for the scan tuple.
+ */
 static TupleTableSlot *
 agg_exec(CustomScanState *css)
 {
 	TessAggState *state = (TessAggState *) css;
+	ExprContext *econtext = css->ss.ps.ps_ExprContext;
 	TupleTableSlot *row;
 	TessBatch  *batch;
 
@@ -219,7 +372,12 @@ agg_exec(CustomScanState *css)
 	}
 	drain(state);
 	state->done = true;
-	row = ExecCopySlot(css->ss.ps.ps_ResultTupleSlot, result_row(state));
+	ResetExprContext(econtext);
+	econtext->ecxt_scantuple = result_row(state);
+	if (css->ss.ps.qual != NULL && !ExecQual(css->ss.ps.qual, econtext))
+		return NULL;
+	row = css->ss.ps.ps_ProjInfo != NULL ? ExecProject(css->ss.ps.ps_ProjInfo) :
+		ExecCopySlot(css->ss.ps.ps_ResultTupleSlot, econtext->ecxt_scantuple);
 	tess_builder_reset(state->builder);
 	tess_builder_append_slot(state->builder, row);
 	batch = tess_builder_finish(state->builder, InvalidOid);
@@ -295,3 +453,10 @@ const TessNode tess_agg_node = {
 	TESS_ABI_INITIALIZER(TESS_NODE_ABI_VERSION, TessNode),
 	.name = TESS_AGG_NODE_NAME,
 };
+
+void
+tess_agg_planner_init(void)
+{
+	previous_create_upper_paths_hook = create_upper_paths_hook;
+	create_upper_paths_hook = create_upper_paths;
+}

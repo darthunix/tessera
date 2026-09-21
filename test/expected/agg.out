@@ -1,0 +1,333 @@
+CREATE EXTENSION tessera;
+LOAD 'tessera_nodes';
+LOAD 'tessera_limit';
+-- The same result with Tessera on and off, as text.
+CREATE FUNCTION agg_same(query text) RETURNS text
+LANGUAGE plpgsql AS $$
+DECLARE
+    with_tessera text[];
+    without_tessera text[];
+    wrapped text := format('SELECT array_agg(q::text ORDER BY q::text) FROM (%s) AS q', query);
+BEGIN
+    PERFORM set_config('tessera.enable', 'on', true);
+    EXECUTE wrapped INTO with_tessera;
+    PERFORM set_config('tessera.enable', 'off', true);
+    EXECUTE wrapped INTO without_tessera;
+    IF with_tessera IS DISTINCT FROM without_tessera THEN
+        RETURN format('MISMATCH on %s off %s', with_tessera, without_tessera);
+    END IF;
+    RETURN with_tessera::text;
+END $$;
+-- Several batches; a is NULL in every seventh row.
+CREATE TABLE agg_t (a int, b int, c text);
+INSERT INTO agg_t
+SELECT CASE WHEN i % 7 = 0 THEN NULL ELSE i END, i % 10, 'r' || i
+FROM generate_series(1, 300) AS i;
+-- Without the kernels module no aggregate is registered: the core aggregates.
+EXPLAIN (COSTS OFF) SELECT count(*) FROM agg_t;
+       QUERY PLAN        
+-------------------------
+ Aggregate
+   ->  Seq Scan on agg_t
+(2 rows)
+
+LOAD 'tessera_kernels';
+-- The node above the native scan, above the filter, above pack.
+EXPLAIN (COSTS OFF) SELECT count(*) FROM agg_t;
+                QUERY PLAN                 
+-------------------------------------------
+ Custom Scan (TessAgg)
+   ->  Custom Scan (TessHeapScan) on agg_t
+(2 rows)
+
+EXPLAIN (COSTS OFF) SELECT count(*) FROM agg_t WHERE a > 100;
+                   QUERY PLAN                    
+-------------------------------------------------
+ Custom Scan (TessAgg)
+   ->  Custom Scan (TessFilter) on agg_t
+         Batch Filter: (a > 100)
+         ->  Custom Scan (TessHeapScan) on agg_t
+(4 rows)
+
+EXPLAIN (COSTS OFF) SELECT count(*) FROM agg_t WHERE c <> 'r5';
+               QUERY PLAN                
+-----------------------------------------
+ Custom Scan (TessAgg)
+   ->  Custom Scan (TessPack)
+         ->  Seq Scan on agg_t
+               Filter: (c <> 'r5'::text)
+(4 rows)
+
+SELECT agg_same($$SELECT count(*) FROM agg_t$$);
+ agg_same 
+----------
+ {(300)}
+(1 row)
+
+SELECT agg_same($$SELECT count(*) FROM agg_t WHERE a > 100$$);
+ agg_same 
+----------
+ {(172)}
+(1 row)
+
+SELECT agg_same($$SELECT count(*) FROM agg_t WHERE c <> 'r5'$$);
+ agg_same 
+----------
+ {(299)}
+(1 row)
+
+-- The same aggregate twice is one column of the scan tuple; expressions
+-- above the aggregates are the plan's projection over that tuple.
+SELECT agg_same($$SELECT count(*), count(*) FROM agg_t WHERE a > 290$$);
+ agg_same  
+-----------
+ {"(9,9)"}
+(1 row)
+
+EXPLAIN (COSTS OFF, VERBOSE) SELECT count(*) + 1 AS above, count(*)::int AS narrow FROM agg_t;
+                    QUERY PLAN                     
+---------------------------------------------------
+ Custom Scan (TessAgg)
+   Output: ((count(*)) + 1), ((count(*)))::integer
+   ->  Custom Scan (TessHeapScan) on public.agg_t
+(3 rows)
+
+SELECT agg_same($$SELECT count(*) + 1 AS above, count(*)::int AS narrow, count(*) > 100 AS many FROM agg_t$$);
+    agg_same     
+-----------------
+ {"(301,300,t)"}
+(1 row)
+
+-- HAVING is the plan's qual over the aggregates: a true and a false one.
+EXPLAIN (COSTS OFF) SELECT count(*) FROM agg_t WHERE a > 100 HAVING count(*) > 100;
+                   QUERY PLAN                    
+-------------------------------------------------
+ Custom Scan (TessAgg)
+   Filter: ((count(*)) > 100)
+   ->  Custom Scan (TessFilter) on agg_t
+         Batch Filter: (a > 100)
+         ->  Custom Scan (TessHeapScan) on agg_t
+(5 rows)
+
+SELECT agg_same($$SELECT count(*) FROM agg_t WHERE a > 100 HAVING count(*) > 100$$);
+ agg_same 
+----------
+ {(172)}
+(1 row)
+
+SELECT agg_same($$SELECT count(*) FROM agg_t WHERE a > 100 HAVING count(*) > 1000$$);
+ agg_same 
+----------
+ 
+(1 row)
+
+SELECT count(*) FROM agg_t WHERE a > 100 HAVING count(*) > 1000;
+ count 
+-------
+(0 rows)
+
+-- Nothing survives the filter.
+SELECT agg_same($$SELECT count(*) FROM agg_t WHERE a > 1000000$$);
+ agg_same 
+----------
+ {(0)}
+(1 row)
+
+-- Pages and batches: wide rows make the scan pin many pages.
+CREATE TABLE agg_wide AS
+SELECT i AS a, repeat('x', 500) AS pad FROM generate_series(1, 1000) AS i;
+SELECT agg_same($$SELECT count(*) FROM agg_wide WHERE a % 3 = 0$$);
+ agg_same 
+----------
+ {(333)}
+(1 row)
+
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+SELECT count(*) FROM agg_wide WHERE a % 3 = 0;
+                                    QUERY PLAN                                    
+----------------------------------------------------------------------------------
+ Custom Scan (TessAgg) (actual rows=1.00 loops=1)
+   Input Batches: 67
+   Input Rows: 333
+   ->  Custom Scan (TessFilter) on agg_wide (actual rows=333.00 loops=1)
+         Batch Filter: ((a % 3) = 0)
+         Rows Removed by Batch Filter: 667
+         Input Batches: 67
+         Input Rows: 1000
+         Output Rows: 333
+         ->  Custom Scan (TessHeapScan) on agg_wide (actual rows=1000.00 loops=1)
+               Batch Size: 64
+               Batches: 67
+               Pages: 67
+               Deformed Datums: 1000
+               Restarted Datums: 0
+(15 rows)
+
+DROP TABLE agg_wide;
+-- A join below: pack turns its rows into batches.
+EXPLAIN (COSTS OFF)
+SELECT count(*) FROM agg_t AS x JOIN agg_t AS y ON x.b = y.b WHERE x.a > 295;
+                             QUERY PLAN                              
+---------------------------------------------------------------------
+ Custom Scan (TessAgg)
+   ->  Custom Scan (TessPack)
+         ->  Hash Join
+               Hash Cond: (y.b = x.b)
+               ->  Seq Scan on agg_t y
+               ->  Hash
+                     ->  Custom Scan (TessFilter) on agg_t x
+                           Batch Filter: (x.a > 295)
+                           ->  Custom Scan (TessHeapScan) on agg_t x
+(9 rows)
+
+SELECT agg_same($$SELECT count(*) FROM agg_t AS x JOIN agg_t AS y ON x.b = y.b WHERE x.a > 295$$);
+ agg_same 
+----------
+ {(150)}
+(1 row)
+
+-- A limit above reads the node's batch.
+EXPLAIN (COSTS OFF) SELECT count(*) FROM agg_t LIMIT 1;
+                   QUERY PLAN                    
+-------------------------------------------------
+ Custom Scan (TessLimit)
+   ->  Custom Scan (TessAgg)
+         ->  Custom Scan (TessHeapScan) on agg_t
+(3 rows)
+
+SELECT count(*) FROM agg_t LIMIT 1;
+ count 
+-------
+   300
+(1 row)
+
+-- Rescans: a correlated subquery, then a prepared statement with a generic plan.
+SELECT o.a, (SELECT count(*) FROM agg_t AS i WHERE i.a > o.a) AS above
+FROM agg_t AS o WHERE o.a > 296 ORDER BY 1;
+  a  | above 
+-----+-------
+ 297 |     3
+ 298 |     2
+ 299 |     1
+ 300 |     0
+(4 rows)
+
+PREPARE above(int) AS SELECT count(*) FROM agg_t WHERE a > $1;
+SET plan_cache_mode = force_generic_plan;
+EXPLAIN (COSTS OFF) EXECUTE above(150);
+                   QUERY PLAN                    
+-------------------------------------------------
+ Custom Scan (TessAgg)
+   ->  Custom Scan (TessFilter) on agg_t
+         Batch Filter: (a > $1)
+         ->  Custom Scan (TessHeapScan) on agg_t
+(4 rows)
+
+EXECUTE above(150);
+ count 
+-------
+   129
+(1 row)
+
+EXECUTE above(299);
+ count 
+-------
+     1
+(1 row)
+
+RESET plan_cache_mode;
+DEALLOCATE above;
+-- A scrollable cursor gets a Material above the node.
+BEGIN;
+DECLARE agg_cursor SCROLL CURSOR FOR SELECT count(*) FROM agg_t WHERE a > 100;
+FETCH ALL FROM agg_cursor;
+ count 
+-------
+   172
+(1 row)
+
+FETCH BACKWARD ALL FROM agg_cursor;
+ count 
+-------
+   172
+(1 row)
+
+COMMIT;
+-- Under a single-copy Gather.
+SET debug_parallel_query = on;
+EXPLAIN (COSTS OFF) SELECT count(*) FROM agg_t WHERE a > 100;
+                      QUERY PLAN                       
+-------------------------------------------------------
+ Gather
+   Workers Planned: 1
+   Single Copy: true
+   ->  Custom Scan (TessAgg)
+         ->  Custom Scan (TessFilter) on agg_t
+               Batch Filter: (a > 100)
+               ->  Custom Scan (TessHeapScan) on agg_t
+(7 rows)
+
+SELECT count(*) FROM agg_t WHERE a > 100;
+ count 
+-------
+   172
+(1 row)
+
+RESET debug_parallel_query;
+-- Left to the core: DISTINCT and FILTER in the aggregate, GROUP BY, a
+-- window function, an empty relation, and the switch.
+EXPLAIN (COSTS OFF) SELECT count(DISTINCT a) FROM agg_t;
+          QUERY PLAN           
+-------------------------------
+ Aggregate
+   ->  Sort
+         Sort Key: a
+         ->  Seq Scan on agg_t
+(4 rows)
+
+EXPLAIN (COSTS OFF) SELECT count(*) FILTER (WHERE a > 100) FROM agg_t;
+       QUERY PLAN        
+-------------------------
+ Aggregate
+   ->  Seq Scan on agg_t
+(2 rows)
+
+EXPLAIN (COSTS OFF) SELECT b, count(*) FROM agg_t GROUP BY b;
+       QUERY PLAN        
+-------------------------
+ HashAggregate
+   Group Key: b
+   ->  Seq Scan on agg_t
+(3 rows)
+
+EXPLAIN (COSTS OFF) SELECT count(*) OVER () FROM agg_t LIMIT 1;
+             QUERY PLAN              
+-------------------------------------
+ Custom Scan (TessLimit)
+   ->  Custom Scan (TessPack)
+         ->  WindowAgg
+               Window: w1 AS ()
+               ->  Seq Scan on agg_t
+(5 rows)
+
+EXPLAIN (COSTS OFF) SELECT count(*) FROM agg_t WHERE false;
+           QUERY PLAN            
+---------------------------------
+ Aggregate
+   ->  Result
+         Replaces: Scan on agg_t
+         One-Time Filter: false
+(4 rows)
+
+SET tessera.enable = off;
+EXPLAIN (COSTS OFF) SELECT count(*) FROM agg_t;
+       QUERY PLAN        
+-------------------------
+ Aggregate
+   ->  Seq Scan on agg_t
+(2 rows)
+
+RESET tessera.enable;
+DROP TABLE agg_t;
+DROP FUNCTION agg_same(text);
+DROP EXTENSION tessera;

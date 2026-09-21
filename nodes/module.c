@@ -14,8 +14,8 @@ PGDLLEXPORT void _PG_init(void);
  * The module registers its node kinds and scan methods. The pack and heap
  * scan nodes are created by batch parents and need no hook; the filter
  * node offers its path to base relations through the set_rel_pathlist
- * hook; the aggregate node is registered for the planner side that
- * follows.
+ * hook, the aggregate node to the grouping stage through the
+ * create_upper_paths hook.
  */
 void
 _PG_init(void)
@@ -32,4 +32,5 @@ _PG_init(void)
 	tess_filter_planner_init();
 	RegisterCustomScanMethods(&tess_agg_scan_methods);
 	api->nodes->add(&tess_agg_node);
+	tess_agg_planner_init();
 }

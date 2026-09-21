@@ -21,5 +21,6 @@ extern void tess_filter_planner_init(void);
 
 extern const TessNode tess_agg_node;
 extern const CustomScanMethods tess_agg_scan_methods;
+extern void tess_agg_planner_init(void);
 
 #endif							/* TESSERA_NODES_INTERNAL_H */
