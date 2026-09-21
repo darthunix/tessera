@@ -434,22 +434,29 @@ report(const TessExpr *expr)
 			 errmsg("%s", expr->status.message)));
 }
 
-/* Broadcast one scalar, or its NULL, over the selected rows into a set. */
+/*
+ * Broadcast one scalar, or its NULL, into a set: every row of the batch is
+ * written, as finish_step writes every row of a word, so that the fill is
+ * a plain loop and two block copies; the non-NULL mask is the batch's
+ * selected rows, or empty for a NULL.
+ */
 static void
 fill_scalar(TessExpr *expr, int set, Datum value, bool isnull)
 {
 	const TessRowMask *rows = &expr->batch->rows;
-	int			row = -1;
+	int			nrows = rows->nrows;
+	Size		mask_size = sizeof(uint64) * tess_row_mask_word_count(nrows);
+	Datum	   *values = expr->values[set];
 
-	memset(expr->bits[set], 0,
-		   sizeof(uint64) * tess_row_mask_word_count(rows->nrows));
-	while ((row = tess_row_mask_next(rows, row)) >= 0)
-	{
-		expr->values[set][row] = isnull ? (Datum) 0 : value;
-		expr->isnull[set][row] = isnull;
-		if (!isnull)
-			expr->bits[set][row / 64] |= UINT64CONST(1) << (row % 64);
-	}
+	if (isnull)
+		value = (Datum) 0;
+	for (int row = 0; row < nrows; row++)
+		values[row] = value;
+	memset(expr->isnull[set], isnull, nrows);
+	if (isnull || mask_size == 0)
+		memset(expr->bits[set], 0, mask_size);
+	else
+		memcpy(expr->bits[set], rows->bits, mask_size);
 }
 
 /*
