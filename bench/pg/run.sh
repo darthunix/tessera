@@ -1,9 +1,10 @@
 #!/bin/sh
 # PostgreSQL-level benchmarks: a temporary cluster with the Tessera modules
 # preloaded, a data set, and one family of queries measured with Tessera
-# on and off, serially or with parallel workers in both modes. See
-# README.md. Run from the repository root:
-#   bench/pg/run.sh setup | measure <family> [workers] | stop
+# on and off, serially or with parallel workers in both modes, over the
+# data set at its base size or a multiple of it. See README.md. Run from
+# the repository root:
+#   bench/pg/run.sh setup [scale] | measure <family> [workers] | stop
 set -eu
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 HERE=$ROOT/bench/pg
@@ -16,12 +17,13 @@ export PGPORT=${PGPORT:-5433} PGHOST=/tmp PGDATABASE=postgres
 
 case "$1" in
 setup)
+    SCALE=${2:-1}
     mkdir -p "$RUNS"
     rm -rf "$DATA"
     "$BIN/initdb" -D "$DATA" -A trust > "$RUNS/initdb.log" 2>&1
     cat >> "$DATA/postgresql.conf" <<CONF
 session_preload_libraries = 'tessera, tessera_nodes, tessera_kernels, tessera_limit'
-shared_buffers = 2GB
+shared_buffers = ${SHARED_BUFFERS:-2GB}
 jit = off
 max_parallel_workers_per_gather = 0
 autovacuum = off
@@ -29,7 +31,7 @@ track_io_timing = off
 CONF
     "$BIN/pg_ctl" -D "$DATA" -l "$RUNS/server.log" -o "-p $PGPORT -k /tmp" -w start
     "$BIN/psql" -X -c "CREATE EXTENSION IF NOT EXISTS tessera"
-    "$BIN/psql" -X -f "$HERE/setup.sql"
+    "$BIN/psql" -X -v scale="$SCALE" -f "$HERE/setup.sql"
     ;;
 measure)
     FAMILY=$2
@@ -46,6 +48,8 @@ measure)
     {
         echo "HEAD $(git -C "$ROOT" rev-parse HEAD)"
         echo "workers $WORKERS"
+        echo "scale $("$BIN/psql" -X -tAc 'SELECT scale FROM bench_scale')"
+        echo "shared_buffers $("$BIN/psql" -X -tAc 'SHOW shared_buffers')"
         echo "status:"; git -C "$ROOT" status --short
         echo "sha256:"
         shasum -a 256 "$LIB/tessera.dylib" "$LIB/tessera_nodes.dylib" \
@@ -63,7 +67,7 @@ stop)
     rm -rf "$DATA"
     ;;
 *)
-    echo "usage: $0 setup | measure <family> [workers] | stop" >&2
+    echo "usage: $0 setup [scale] | measure <family> [workers] | stop" >&2
     exit 2
     ;;
 esac

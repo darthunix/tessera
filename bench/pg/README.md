@@ -50,18 +50,25 @@ bench/pg/run.sh measure tax    # one family; writes target/bench-runs/pg-tax-<id
 bench/pg/run.sh measure win 2  # the same with two parallel workers per Gather
                                # in both modes; writes pg-win-w2-<id>/
 bench/pg/run.sh stop           # stop and delete the cluster
+SHARED_BUFFERS=4GB bench/pg/run.sh setup 10   # ten times the rows, larger buffers
 ```
 
 `PG_CONFIG` selects the PostgreSQL build; `PGPORT` the port. The cluster's
 `postgresql.conf` preloads `tessera, tessera_nodes, tessera_kernels,
-tessera_limit` in every session and sets `shared_buffers = 2GB`.
+tessera_limit` in every session and sets `shared_buffers` to `SHARED_BUFFERS`,
+2GB by default. `setup` takes a multiplier of the base row counts (2 M narrow,
+250 k wide, 500 k mixed), stored in the table `bench_scale`; the win family
+multiplies its selection constants by it, so that every case keeps its
+selectivity, while the tax family's LIMIT constants are the cases themselves
+and it runs at the base size only.
 
 ## Results
 
 Each measurement gets a directory under `target/bench-runs/` (ignored by
 git) with `protocol.md` (this file's rules at the time), `source/` (the SQL
-that ran), `source.txt` (the revision, the number of workers, the working tree's
-status and the hashes of the installed libraries and `postgres`), `power.txt`,
+that ran), `source.txt` (the revision, the number of workers, the data multiplier and
+`shared_buffers`, the working tree's status and the hashes of the installed
+libraries and `postgres`), `power.txt`,
 `timings.csv` (every sample), `summary.txt` (the table) and `plans.txt`.
 Write `comparison.md` by hand: what was measured, the table with ratios,
 observations, and what the numbers mean for the tolerance of the family;

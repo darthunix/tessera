@@ -14,6 +14,8 @@
 SET jit = off;
 -- Parallel workers per Gather, for both modes; none unless asked for.
 SET max_parallel_workers_per_gather = :workers;
+-- The data set's multiplier: the constants below keep their selectivity.
+SELECT scale FROM bench_scale \gset
 
 CREATE TEMP TABLE timings
 (
@@ -69,31 +71,37 @@ SELECT pg_temp.measure_pair('nothing',
 SELECT pg_temp.measure_pair('sparse',
     'SELECT count(*) FROM bench_narrow WHERE c1 % 1000 = 0', :repetitions);
 SELECT pg_temp.measure_pair('half',
-    'SELECT count(*) FROM bench_narrow WHERE c1 <= 1000000 AND c2 > 0',
+    format('SELECT count(*) FROM bench_narrow WHERE c1 <= %s AND c2 > 0',
+           1000000 * :scale),
     :repetitions);
 SELECT pg_temp.measure_pair('dense',
-    'SELECT count(*) FROM bench_narrow WHERE c1 > 100 AND c2 < 1500000',
+    format('SELECT count(*) FROM bench_narrow WHERE c1 > 100 AND c2 < %s',
+           1500000 * :scale),
     :repetitions);
 -- A value chain under the predicate.
 SELECT pg_temp.measure_pair('expr',
-    'SELECT count(*) FROM bench_narrow WHERE (c1 + 3) * 2 < 2000000',
+    format('SELECT count(*) FROM bench_narrow WHERE (c1 + 3) * 2 < %s',
+           2000000 * :scale),
     :repetitions);
 -- A projected column the filter does not read.
 SELECT pg_temp.measure_pair('sum_sparse',
     'SELECT sum(c3) FROM bench_narrow WHERE c1 % 100 = 0', :repetitions);
 -- A row-wise residual behind the batch clause.
 SELECT pg_temp.measure_pair('residual',
-    'SELECT count(*) FROM bench_narrow WHERE c1 > 1000000 AND c2::bigint < 1500001',
+    format('SELECT count(*) FROM bench_narrow WHERE c1 > %s AND c2::bigint < %s',
+           1000000 * :scale, 1500000 * :scale + 1),
     :repetitions);
 -- A wide table, where deforming the row dominates.
 SELECT pg_temp.measure_pair('wide',
     'SELECT count(*) FROM bench_wide WHERE c2 + 1 < 1000', :repetitions);
 -- Two int4 clauses over a table with text columns; a text residual.
 SELECT pg_temp.measure_pair('mixed',
-    'SELECT count(*) FROM bench_mixed WHERE a > 250000 AND d < 400000',
+    format('SELECT count(*) FROM bench_mixed WHERE a > %s AND d < %s',
+           250000 * :scale, 400000 * :scale),
     :repetitions);
 SELECT pg_temp.measure_pair('mixed_text',
-    'SELECT count(*) FROM bench_mixed WHERE a > 250000 AND b <> ''x''',
+    format('SELECT count(*) FROM bench_mixed WHERE a > %s AND b <> ''x''',
+           250000 * :scale),
     :repetitions);
 -- Aggregates over batches: a count without a filter, and four kernels
 -- over one column behind a filter that keeps most rows.
@@ -105,7 +113,8 @@ SELECT pg_temp.measure_pair('four_dense',
 -- An argument over two columns: a chain with a column operand, evaluated
 -- by the aggregate node through the projection provider.
 SELECT pg_temp.measure_pair('two_columns',
-    'SELECT sum(c1 + c2) FROM bench_narrow WHERE c1 > 1000000', :repetitions);
+    format('SELECT sum(c1 + c2) FROM bench_narrow WHERE c1 > %s', 1000000 * :scale),
+    :repetitions);
 
 \copy timings TO 'timings.csv' CSV HEADER
 
