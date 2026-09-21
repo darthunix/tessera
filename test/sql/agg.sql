@@ -49,6 +49,37 @@ SELECT agg_same($$SELECT count(*) FROM agg_t WHERE a > 100 HAVING count(*) > 100
 SELECT count(*) FROM agg_t WHERE a > 100 HAVING count(*) > 1000;
 -- Nothing survives the filter.
 SELECT agg_same($$SELECT count(*) FROM agg_t WHERE a > 1000000$$);
+
+-- Aggregates of a column: count skips its NULLs, sum, min and max are
+-- NULL without a value; the argument may be a chain over the column.
+EXPLAIN (COSTS OFF, VERBOSE)
+SELECT count(a), sum(a), min(a), max(a), count(*) FROM agg_t WHERE b > 5;
+SELECT agg_same($$SELECT count(a), sum(a), min(a), max(a), count(*) FROM agg_t WHERE b > 5$$);
+SELECT agg_same($$SELECT count(a), sum(a), min(a), max(a), count(*) FROM agg_t$$);
+SELECT agg_same($$SELECT count(a), sum(a), min(a), max(a), count(*) FROM agg_t WHERE a > 1000000$$);
+SELECT agg_same($$SELECT sum(a), min(a) FROM agg_t WHERE a IS NULL$$);
+SELECT agg_same($$SELECT sum(a + 1), min(-a), max(a % 7), count(a * 2), sum(100 - a) FROM agg_t WHERE a > 200$$);
+SELECT agg_same($$SELECT sum(a) / count(*) AS mean, sum(a)::numeric / 2 AS half FROM agg_t WHERE a > 200$$);
+SELECT agg_same($$SELECT sum(x.a), max(y.b) FROM agg_t AS x JOIN agg_t AS y ON x.b = y.b WHERE x.a > 295$$);
+-- A parameter in the argument, and a rescan with a changed one.
+PREPARE shifted(int) AS SELECT sum(a + $1), count(a) FROM agg_t WHERE a > 290;
+SET plan_cache_mode = force_generic_plan;
+EXPLAIN (COSTS OFF, VERBOSE) EXECUTE shifted(1);
+EXECUTE shifted(1);
+EXECUTE shifted(1000);
+RESET plan_cache_mode;
+DEALLOCATE shifted;
+SELECT o.b, (SELECT max(i.a + o.b) FROM agg_t AS i WHERE i.a < 50) AS shifted
+FROM agg_t AS o WHERE o.a < 3 ORDER BY 1;
+-- The argument's column is deformed for the surviving rows only.
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+SELECT sum(b) FROM agg_t WHERE a > 290;
+-- An error in the argument is the chain's.
+SELECT sum(a + 2147483647) FROM agg_t;
+-- Left to the core: another type, a cast, avg.
+EXPLAIN (COSTS OFF) SELECT count(c) FROM agg_t;
+EXPLAIN (COSTS OFF) SELECT sum(a::bigint) FROM agg_t;
+EXPLAIN (COSTS OFF) SELECT avg(a) FROM agg_t;
 -- Pages and batches: wide rows make the scan pin many pages.
 CREATE TABLE agg_wide AS
 SELECT i AS a, repeat('x', 500) AS pad FROM generate_series(1, 1000) AS i;

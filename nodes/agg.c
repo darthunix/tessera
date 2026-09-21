@@ -1,10 +1,12 @@
 #include "postgres.h"
 
 #include "catalog/pg_aggregate.h"
+#include "catalog/pg_type_d.h"
 #include "commands/explain.h"
 #include "commands/explain_format.h"
 #include "common/int.h"
 #include "executor/executor.h"
+#include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
 #include "optimizer/optimizer.h"
 #include "optimizer/pathnode.h"
@@ -13,6 +15,7 @@
 #include "utils/fmgroids.h"
 #include "utils/regproc.h"
 
+#include "tessera/expr.h"
 #include "tessera/function.h"
 #include "tessera/runtime.h"
 
@@ -34,13 +37,19 @@
 typedef enum AggKind
 {
 	AGG_COUNT,					/* int8 sum of the partials, 0 without any */
+	AGG_SUM,					/* int8 sum of the partials, NULL without any */
+	AGG_MIN,					/* the least int4 partial, NULL without any */
+	AGG_MAX						/* the greatest int4 partial, NULL without any */
 } AggKind;
 
 typedef struct AggValue
 {
 	AggKind		kind;
 	const TessFunction *function;
+	/* The argument over the child's batch, or NULL for count(*). */
+	TessExpr   *expr;
 	int64		total;
+	int32		extreme;
 	bool		has_value;
 } AggValue;
 
@@ -78,21 +87,38 @@ aggregate_kind(Oid aggfnoid)
 	switch (aggfnoid)
 	{
 		case F_COUNT_:
+		case F_COUNT_ANY:
 			return AGG_COUNT;
+		case F_SUM_INT4:
+			return AGG_SUM;
+		case F_MIN_INT4:
+			return AGG_MIN;
+		case F_MAX_INT4:
+			return AGG_MAX;
 		default:
 			return -1;
 	}
 }
 
+/* The aggregated argument, or NULL for count(*). */
+static Node *
+aggregate_argument(const Aggref *agg)
+{
+	return agg->args == NIL ? NULL :
+		(Node *) ((TargetEntry *) linitial(agg->args))->expr;
+}
+
 /*
  * Whether the node computes this aggregate: a plain call of an aggregate
  * the node combines and the registry implements over batches, with no
- * argument for count(*).
+ * argument for count(*) or one int4 batch expression, a column or a
+ * chain of registered calls over it.
  */
 static bool
 aggregate_supported(const Aggref *agg)
 {
 	const TessFunction *function;
+	Node	   *argument;
 
 	if (agg->agglevelsup != 0 || agg->aggkind != AGGKIND_NORMAL ||
 		agg->aggsplit != AGGSPLIT_SIMPLE || agg->aggorder != NIL ||
@@ -103,7 +129,29 @@ aggregate_supported(const Aggref *agg)
 	function = tess_runtime_api()->functions->find(agg->aggfnoid);
 	if (function == NULL || function->kind != TESS_FUNCTION_AGGREGATE)
 		return false;
-	return agg->aggstar && agg->args == NIL;
+	if (agg->aggfnoid == F_COUNT_)
+		return agg->aggstar && agg->args == NIL;
+	argument = aggregate_argument(agg);
+	return list_length(agg->args) == 1 && exprType(argument) == INT4OID &&
+		tess_expr_supports_value(argument, 0);
+}
+
+/* Whether the child's target has every column the arguments read. */
+static bool
+arguments_available(const List *aggregates, const Path *child)
+{
+	foreach_ptr(TargetEntry, entry, aggregates)
+	{
+		Node	   *argument = aggregate_argument((Aggref *) entry->expr);
+		List	   *vars = pull_var_clause(argument, 0);
+
+		foreach_ptr(Var, var, vars)
+		{
+			if (!list_member(child->pathtarget->exprs, var))
+				return false;
+		}
+	}
+	return true;
 }
 
 /*
@@ -177,7 +225,7 @@ create_upper_paths(PlannerInfo *root, UpperRelationKind stage,
 		Path	   *child = tess_batch_input_path(root, agg->subpath);
 		Path		template;
 
-		if (child == NULL)
+		if (child == NULL || !arguments_available(aggregates, child))
 			continue;
 		template = agg->path;
 		template.total_cost *= AGG_COST_FACTOR;
@@ -191,9 +239,37 @@ create_upper_paths(PlannerInfo *root, UpperRelationKind stage,
 }
 
 /*
+ * An argument's column of the child's batch as a Var of INDEX_VAR: the
+ * arguments cannot go through custom_exprs, which the planner would fix
+ * against the scan tuple of aggregates, so they travel in the private
+ * data with their column resolved here.
+ */
+static Node *
+resolve_argument(Node *node, TessPlanChild *child)
+{
+	if (node == NULL)
+		return NULL;
+	if (IsA(node, Var))
+	{
+		Var		   *var = (Var *) node;
+		TargetEntry *found = tlist_member((Expr *) var, child->plan->targetlist);
+		int			column = found == NULL ? -1 :
+			tess_layout_column(&child->layout, found->resno - 1);
+
+		if (column < 0)
+			elog(ERROR, "TessAgg argument is missing from its child");
+		return (Node *) makeVar(INDEX_VAR, column + 1, var->vartype,
+								var->vartypmod, var->varcollid, 0);
+	}
+	return expression_tree_mutator(node, resolve_argument, child);
+}
+
+/*
  * The scan tuple is the aggregates themselves, so that the planner turns
  * the targets and HAVING into references to it; the child's columns stay
- * hidden. HAVING is the plan's qual, as it is the core aggregate's.
+ * hidden. HAVING is the plan's qual, as it is the core aggregate's. The
+ * private data carries one argument per aggregate, a NULL constant for
+ * count(*).
  */
 static Plan *
 agg_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
@@ -202,16 +278,33 @@ agg_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 	TessPathInfo info = TESS_STRUCT_INITIALIZER(TessPathInfo);
 	TessPlanConfig config = TESS_STRUCT_INITIALIZER(TessPlanConfig);
 	TessPlanChild child = TESS_STRUCT_INITIALIZER(TessPlanChild);
+	List	   *arguments = NIL;
 
 	tess_path_get_info(best_path, &info);
 	if (!tess_plan_child(best_path, custom_plans, 0, &child))
 		elog(ERROR, "TessAgg expected a batch child");
+	foreach_ptr(TargetEntry, entry, info.expressions)
+	{
+		Node	   *argument = aggregate_argument((Aggref *) entry->expr);
+
+		arguments = lappend(arguments, argument == NULL ?
+							(Node *) makeNullConst(INT4OID, -1, InvalidOid) :
+							resolve_argument(copyObject(argument), &child));
+	}
 	config.methods = &tess_agg_scan_methods;
 	config.layout_policy = TESS_LAYOUT_DENSE;
 	config.qual = (List *) root->parse->havingQual;
 	config.scan_targetlist = info.expressions;
 	config.scanrelid = 0;
+	config.node_data = (Node *) arguments;
 	return tess_plan_create(best_path, tlist, custom_plans, &config);
+}
+
+/* An argument's Var names its batch column directly. */
+static int
+resolve_column(const Var *var, void *context)
+{
+	return var->varno == INDEX_VAR ? var->varattno - 1 : -1;
 }
 
 static void
@@ -223,14 +316,19 @@ agg_begin(CustomScanState *css, EState *estate, int eflags)
 	TessRequest request = TESS_STRUCT_INITIALIZER(TessRequest);
 	TessBuilderConfig builder = TESS_STRUCT_INITIALIZER(TessBuilderConfig);
 	TupleTableSlot *result = css->ss.ps.ps_ResultTupleSlot;
+	Bitmapset  *projection = NULL;
+	List	   *arguments;
 	int			index = 0;
 
 	/* The planner puts Material above a batch subtree for these. */
 	if (eflags & (EXEC_FLAG_BACKWARD | EXEC_FLAG_MARK))
 		elog(ERROR, "TessAgg supports neither backward scan nor mark/restore");
 	tess_plan_get_info(cscan, &info);
+	arguments = (List *) info.node_data;
 	if (info.node != &tess_agg_node || info.nchildren != 1 ||
-		info.child_names[0] == NULL || cscan->custom_scan_tlist == NIL)
+		info.child_names[0] == NULL || cscan->custom_scan_tlist == NIL ||
+		arguments == NIL ||
+		list_length(arguments) != list_length(cscan->custom_scan_tlist))
 		elog(ERROR, "TessAgg received a foreign plan");
 	state->child = ExecInitNode(linitial(cscan->custom_plans), estate, eflags);
 	css->custom_ps = list_make1(state->child);
@@ -248,8 +346,18 @@ agg_begin(CustomScanState *css, EState *estate, int eflags)
 			value->function->kind != TESS_FUNCTION_AGGREGATE)
 			elog(ERROR, "TessAgg has no batch implementation of %s",
 				 format_procedure(agg->aggfnoid));
+		if (agg->args != NIL)
+		{
+			value->expr = tess_expr_compile_value(list_nth(arguments, index - 1),
+												  &css->ss.ps, resolve_column,
+												  NULL);
+			if (tess_expr_input_column(value->expr) >= 0)
+				projection = bms_add_member(projection,
+											tess_expr_input_column(value->expr));
+		}
 	}
-	/* Whole batches; no column is needed for count(*). */
+	/* Whole batches; the arguments' columns only for the surviving rows. */
+	request.projection_columns = projection;
 	request.output_mode = TESS_OUTPUT_BATCH;
 	tess_input_set_request(state->input, &request);
 	builder.parent_context = estate->es_query_cxt;
@@ -278,13 +386,23 @@ static void
 accumulate(TessAggState *state, AggValue *value, TessBatch *batch)
 {
 	TessFunctionCall call = TESS_STRUCT_INITIALIZER(TessFunctionCall);
+	TessFunctionArg arg = TESS_STRUCT_INITIALIZER(TessFunctionArg);
 	TessStatus	status = TESS_STRUCT_INITIALIZER(TessStatus);
 	uint64		word = 0;
 	TessRowMask present = {1, &word};
 	Datum		partial = (Datum) 0;
 
 	call.function = value->function;
-	call.nargs = 0;
+	if (value->expr != NULL)
+	{
+		/* The value over the batch's rows, so those rows are prepared. */
+		tess_expr_bind(value->expr, batch, state->css.ss.ps.ps_ExprContext,
+					   TESS_COLUMN_FOR_PROJECTION);
+		arg.column = tess_expr_get_column(value->expr);
+		arg.prepared = &batch->rows;
+		call.nargs = 1;
+		call.args = &arg;
+	}
 	call.rows = &batch->rows;
 	call.values = &partial;
 	call.non_nulls = &present;
@@ -297,11 +415,20 @@ accumulate(TessAggState *state, AggValue *value, TessBatch *batch)
 	switch (value->kind)
 	{
 		case AGG_COUNT:
+		case AGG_SUM:
 			if (pg_add_s64_overflow(value->total, DatumGetInt64(partial),
 									&value->total))
 				ereport(ERROR,
 						(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
 						 errmsg("bigint out of range")));
+			break;
+		case AGG_MIN:
+			if (!value->has_value || DatumGetInt32(partial) < value->extreme)
+				value->extreme = DatumGetInt32(partial);
+			break;
+		case AGG_MAX:
+			if (!value->has_value || DatumGetInt32(partial) > value->extreme)
+				value->extreme = DatumGetInt32(partial);
 			break;
 	}
 	value->has_value = true;
@@ -322,8 +449,11 @@ drain(TessAggState *state)
 		state->batches++;
 		state->rows += rows;
 		if (rows > 0)
+		{
+			ResetExprContext(state->css.ss.ps.ps_ExprContext);
 			for (int index = 0; index < state->nvalues; index++)
 				accumulate(state, &state->values[index], batch);
+		}
 		tess_input_finish(state->input);
 	}
 }
@@ -339,11 +469,19 @@ result_row(TessAggState *state)
 	{
 		AggValue   *value = &state->values[index];
 
+		scan->tts_isnull[index] = !value->has_value;
 		switch (value->kind)
 		{
 			case AGG_COUNT:
 				scan->tts_values[index] = Int64GetDatum(value->total);
 				scan->tts_isnull[index] = false;
+				break;
+			case AGG_SUM:
+				scan->tts_values[index] = Int64GetDatum(value->total);
+				break;
+			case AGG_MIN:
+			case AGG_MAX:
+				scan->tts_values[index] = Int32GetDatum(value->extreme);
 				break;
 		}
 	}

@@ -133,6 +133,147 @@ SELECT agg_same($$SELECT count(*) FROM agg_t WHERE a > 1000000$$);
  {(0)}
 (1 row)
 
+-- Aggregates of a column: count skips its NULLs, sum, min and max are
+-- NULL without a value; the argument may be a chain over the column.
+EXPLAIN (COSTS OFF, VERBOSE)
+SELECT count(a), sum(a), min(a), max(a), count(*) FROM agg_t WHERE b > 5;
+                           QUERY PLAN                           
+----------------------------------------------------------------
+ Custom Scan (TessAgg)
+   Output: (count(a)), (sum(a)), (min(a)), (max(a)), (count(*))
+   ->  Custom Scan (TessFilter) on public.agg_t
+         Output: a
+         Batch Filter: (agg_t.b > 5)
+         ->  Custom Scan (TessHeapScan) on public.agg_t
+               Output: a, b
+(7 rows)
+
+SELECT agg_same($$SELECT count(a), sum(a), min(a), max(a), count(*) FROM agg_t WHERE b > 5$$);
+         agg_same          
+---------------------------
+ {"(103,15773,6,299,120)"}
+(1 row)
+
+SELECT agg_same($$SELECT count(a), sum(a), min(a), max(a), count(*) FROM agg_t$$);
+         agg_same          
+---------------------------
+ {"(258,38829,1,300,300)"}
+(1 row)
+
+SELECT agg_same($$SELECT count(a), sum(a), min(a), max(a), count(*) FROM agg_t WHERE a > 1000000$$);
+   agg_same   
+--------------
+ {"(0,,,,0)"}
+(1 row)
+
+SELECT agg_same($$SELECT sum(a), min(a) FROM agg_t WHERE a IS NULL$$);
+ agg_same 
+----------
+ {"(,)"}
+(1 row)
+
+SELECT agg_same($$SELECT sum(a + 1), min(-a), max(a % 7), count(a * 2), sum(100 - a) FROM agg_t WHERE a > 200$$);
+           agg_same           
+------------------------------
+ {"(21657,-300,6,86,-12971)"}
+(1 row)
+
+SELECT agg_same($$SELECT sum(a) / count(*) AS mean, sum(a)::numeric / 2 AS half FROM agg_t WHERE a > 200$$);
+             agg_same             
+----------------------------------
+ {"(250,10785.5000000000000000)"}
+(1 row)
+
+SELECT agg_same($$SELECT sum(x.a), max(y.b) FROM agg_t AS x JOIN agg_t AS y ON x.b = y.b WHERE x.a > 295$$);
+   agg_same    
+---------------
+ {"(44700,9)"}
+(1 row)
+
+-- A parameter in the argument, and a rescan with a changed one.
+PREPARE shifted(int) AS SELECT sum(a + $1), count(a) FROM agg_t WHERE a > 290;
+SET plan_cache_mode = force_generic_plan;
+EXPLAIN (COSTS OFF, VERBOSE) EXECUTE shifted(1);
+                       QUERY PLAN                       
+--------------------------------------------------------
+ Custom Scan (TessAgg)
+   Output: (sum((a + $1))), (count(a))
+   ->  Custom Scan (TessFilter) on public.agg_t
+         Output: a
+         Batch Filter: (agg_t.a > 290)
+         ->  Custom Scan (TessHeapScan) on public.agg_t
+               Output: a
+(7 rows)
+
+EXECUTE shifted(1);
+ sum  | count 
+------+-------
+ 2670 |     9
+(1 row)
+
+EXECUTE shifted(1000);
+  sum  | count 
+-------+-------
+ 11661 |     9
+(1 row)
+
+RESET plan_cache_mode;
+DEALLOCATE shifted;
+SELECT o.b, (SELECT max(i.a + o.b) FROM agg_t AS i WHERE i.a < 50) AS shifted
+FROM agg_t AS o WHERE o.a < 3 ORDER BY 1;
+ b | shifted 
+---+---------
+ 1 |      49
+ 2 |      50
+(2 rows)
+
+-- The argument's column is deformed for the surviving rows only.
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+SELECT sum(b) FROM agg_t WHERE a > 290;
+                                  QUERY PLAN                                  
+------------------------------------------------------------------------------
+ Custom Scan (TessAgg) (actual rows=1.00 loops=1)
+   Input Batches: 1
+   Input Rows: 9
+   ->  Custom Scan (TessFilter) on agg_t (actual rows=9.00 loops=1)
+         Batch Filter: (a > 290)
+         Rows Removed by Batch Filter: 291
+         Input Batches: 5
+         Input Rows: 300
+         Output Rows: 9
+         ->  Custom Scan (TessHeapScan) on agg_t (actual rows=300.00 loops=1)
+               Batch Size: 64
+               Batches: 5
+               Pages: 2
+               Deformed Datums: 309
+               Restarted Datums: 0
+(15 rows)
+
+-- An error in the argument is the chain's.
+SELECT sum(a + 2147483647) FROM agg_t;
+ERROR:  integer out of range
+-- Left to the core: another type, a cast, avg.
+EXPLAIN (COSTS OFF) SELECT count(c) FROM agg_t;
+       QUERY PLAN        
+-------------------------
+ Aggregate
+   ->  Seq Scan on agg_t
+(2 rows)
+
+EXPLAIN (COSTS OFF) SELECT sum(a::bigint) FROM agg_t;
+       QUERY PLAN        
+-------------------------
+ Aggregate
+   ->  Seq Scan on agg_t
+(2 rows)
+
+EXPLAIN (COSTS OFF) SELECT avg(a) FROM agg_t;
+       QUERY PLAN        
+-------------------------
+ Aggregate
+   ->  Seq Scan on agg_t
+(2 rows)
+
 -- Pages and batches: wide rows make the scan pin many pages.
 CREATE TABLE agg_wide AS
 SELECT i AS a, repeat('x', 500) AS pad FROM generate_series(1, 1000) AS i;
