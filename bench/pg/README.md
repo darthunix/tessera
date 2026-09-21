@@ -12,11 +12,11 @@ query down, and where it can, does it speed one up.
   above a scan, a count without a filter, a sorted limit. The ratio of
   Tessera on to off measures the cost of the batch boundary itself; it
   should stay close to one.
-- **win** (`win.sql`): filters over large tables with a count above them,
-  through `TessFilter` above a pack node; aggregates join it with the
-  aggregate node. A ratio below one is expected once a native batch scan
-  exists; until then the pack node deforms rows one at a time and the
-  family records the cost that scan has to beat, not a failure.
+- **win** (`win.sql`): filters over large tables with aggregates above
+  them, through `TessAgg` above `TessFilter` above `TessHeapScan`, and two
+  aggregate cases without a filter or with four aggregates over one
+  column. A ratio below one is the win; each run is compared with the
+  previous one.
 - **oltp**: short prepared-statement queries, `pgbench -S`, where the
   planner hooks and the loaded modules must not slow down queries that
   never use a batch node. Arrives when more than one hook is installed.

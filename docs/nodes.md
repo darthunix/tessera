@@ -3,9 +3,10 @@
 `tessera_nodes` (`nodes/`) is the module of Tessera's own batch nodes. It
 links the runtime library statically and, when loaded, registers its node
 kinds in the bridge's node registry and its scan methods with PostgreSQL.
-The pack node below is created by batch parents and needs no hook; the
-filter node offers its path to base relations through the module's
-`set_rel_pathlist` hook. It is loaded after the bridge; loading it without
+The pack and heap scan nodes below are created by batch parents and need
+no hook; the filter node offers its path to base relations through the
+module's `set_rel_pathlist` hook, the aggregate node to the grouping stage
+through its `create_upper_paths` hook. It is loaded after the bridge; loading it without
 the bridge is an error. A
 running installation preloads both in every session (see
 [bridge.md](bridge.md)):
@@ -258,3 +259,77 @@ expensive predicate behind a cheaper int4 clause, a null test that keeps
 the node away, the separate removal counts, a join of two filtered
 relations, the planner's order in front of a division by zero, a parallel
 worker, a scrollable cursor, an `UPDATE`, and the switch off.
+
+## TessAgg
+
+`TessAgg` computes the aggregates of a query without `GROUP BY` over the
+batches of a batch child and returns the one result row, in place of the
+core's plain `Aggregate`, which would receive the child's rows one at a
+time: `TessHeapScan → TessFilter → TessAgg → parent`. It handles
+`count(*)` and `count`, `sum`, `min` and `max` of an int4 column or of a
+chain the [expression compiler](expr.md) accepts over one, with constants
+and parameters; expressions above the aggregates and `HAVING` are left to
+the plan's own projection and qualifier over the aggregates.
+
+### Planning
+
+The module's `create_upper_paths` hook, after the hook it replaced and the
+enable switch, acts on the grouping stage of the main grouping relation
+for a query with aggregates and no `GROUP BY`, grouping sets or window
+functions, over an input that is not known to be empty. It collects the
+aggregates of the target and `HAVING` and accepts them when every one is a
+plain call, without `DISTINCT`, `ORDER BY` or `FILTER` and not split for
+partial aggregation, of an aggregate the node combines and the
+[function registry](function.md) implements over batches (kind
+`TESS_FUNCTION_AGGREGATE`, registered by the kernels module), with an
+argument the compiler supports whose columns the batch child's target
+has. For each of the core's plain aggregate paths whose input can be read
+in batches (`tess_batch_input_path`: a batch path as it is, a clause-free
+sequential scan through `TessHeapScan`, anything else through `TessPack`),
+the node's path takes the core path as its template at nine tenths of its
+cost with the batch child, and `add_path` decides. `PlanCustomPath` makes
+the distinct aggregates the scan tuple, `custom_scan_tlist` without a
+relation, so that the planner turns the targets and `HAVING` into
+references to it, and keeps one batch column per target. The arguments
+travel in the private data with their columns resolved against the
+child's target list, since `custom_exprs` would be fixed against the scan
+tuple of aggregates.
+
+### Execution
+
+`BeginCustomScan` compiles the arguments, finds each aggregate's batch
+function, asks the child for whole batches with the arguments' columns as
+projection columns, so that a lazy provider deforms them for the surviving
+rows only, and stands on the output helper over the result slot with a
+one-row builder. The first execution reads every batch of the child: each
+argument is bound to the batch, its column and the batch's rows go to the
+batch function, and the partial it returns joins the running value, by
+int8 addition checked for overflow (`bigint out of range`, as the core's
+`int8inc`; the core's `int4_sum` does not check, which differs only past
+four billion rows) for `count` and `sum`, by comparison for `min` and
+`max`; `sum`, `min` and `max` stay NULL without a contributing row, `count`
+is 0. The row is built in the scan slot, `HAVING` is evaluated over it, the
+plan's projection runs when the targets are not the bare aggregates, and
+the row is published as a one-row batch: a batch-aware parent such as
+`TessLimit` reads the batch, an ordinary parent the row. The next call
+returns nothing. Rescan passes changed parameters on to the child, since
+the core does that for outer and inner plans only, and resets the values.
+The node forwards no tuple bound, as the core's aggregate does not.
+
+`EXPLAIN` shows `HAVING` as the core's `Filter`; with `ANALYZE`, the
+batches and rows read from the child.
+
+### Tests
+
+`test/sql/agg.sql` compares the results of every query with Tessera on and
+off through one function: the node above the native scan, above the
+filter and above pack over a filtered scan and over a join; the same
+aggregate twice, expressions above the aggregates, `HAVING` true and
+false; the four column aggregates with `count(*)` over a filtered table,
+the whole table, nothing and a column of NULLs; chains and a parameter
+in the argument with a generic plan re-executed; a correlated subquery,
+also with a hash aggregate under pack; a limit above reading the node's
+batch; a scrollable cursor; a single-copy `Gather`; the overflow of a
+chain; and the core keeping `DISTINCT` and `FILTER` in the aggregate,
+`GROUP BY`, a window function, an empty relation, another argument type,
+a cast, `avg`, the switch off and the kernels module absent.

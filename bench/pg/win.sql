@@ -1,8 +1,7 @@
--- The win family: filters over large tables, with count above them. With
--- Tessera on, TessFilter stands above a pack node above the sequential
--- scan and serves rows to the core aggregate; with it off, the scan
--- filters. A ratio below one is expected once a native batch scan exists;
--- until then the family records the cost that scan has to beat.
+-- The win family: filters over large tables, with aggregates above them.
+-- With Tessera on, TessAgg stands above TessFilter above TessHeapScan;
+-- with it off, the scan filters and the core aggregates. A ratio below
+-- one is the win; the family records it against its previous run.
 \set ON_ERROR_STOP on
 \if :{?repetitions}
 \else
@@ -91,6 +90,13 @@ SELECT pg_temp.measure_pair('mixed',
 SELECT pg_temp.measure_pair('mixed_text',
     'SELECT count(*) FROM bench_mixed WHERE a > 250000 AND b <> ''x''',
     :repetitions);
+-- Aggregates over batches: a count without a filter, and four kernels
+-- over one column behind a filter that keeps most rows.
+SELECT pg_temp.measure_pair('count_all',
+    'SELECT count(*) FROM bench_narrow', :repetitions);
+SELECT pg_temp.measure_pair('four_dense',
+    'SELECT count(*), count(c1), sum(c1), min(c1), max(c1) FROM bench_narrow WHERE c1 > 100',
+    :repetitions);
 
 \copy timings TO 'timings.csv' CSV HEADER
 
@@ -118,6 +124,8 @@ EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE on_re
 EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE on_wide;
 EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE on_mixed;
 EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE on_mixed_text;
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE on_count_all;
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE on_four_dense;
 SET tessera.enable = off;
 EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE off_nothing;
 EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE off_sparse;
@@ -129,5 +137,7 @@ EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE off_r
 EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE off_wide;
 EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE off_mixed;
 EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE off_mixed_text;
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE off_count_all;
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE off_four_dense;
 \o
 DEALLOCATE ALL;
