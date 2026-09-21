@@ -1,6 +1,7 @@
 #include "postgres.h"
 
 #include "access/heapam.h"
+#include "access/parallel.h"
 #include "access/relscan.h"
 #include "access/table.h"
 #include "access/tableam.h"
@@ -12,6 +13,7 @@
 #include "pgstat.h"
 #include "storage/bufmgr.h"
 #include "storage/bufpage.h"
+#include "storage/shm_toc.h"
 #include "utils/rel.h"
 
 #include "tessera/runtime.h"
@@ -25,9 +27,24 @@
  * tuples as heap batches, up to 64 rows each, that pin the page and
  * deform a column only when a consumer asks for it. The node evaluates no
  * clause: a filter above takes the relation's clauses, or the relation
- * has none. See docs/nodes.md.
+ * has none. Under a Gather, the participants share the core's parallel
+ * scan descriptor, which hands each of them its own pages, and the
+ * leader reports the counters of all of them. See docs/nodes.md.
  */
 #define HEAP_SCAN_BATCH_ROWS 64
+
+/* The counters every participant of a parallel scan shares. */
+enum
+{
+	HEAP_SCAN_RAN,
+	HEAP_SCAN_CAPACITY,
+	HEAP_SCAN_BATCHES,
+	HEAP_SCAN_PAGES,
+	HEAP_SCAN_DEFORMED,
+	HEAP_SCAN_RESTARTED,
+	HEAP_SCAN_COMPUTED,
+	HEAP_SCAN_NCOUNTERS
+};
 
 typedef struct HeapScanState
 {
@@ -36,8 +53,10 @@ typedef struct HeapScanState
 	TessLayout	layout;
 	/* The slot the core's scan returns its page's first tuple in. */
 	TupleTableSlot *landing;
-	/* Begun at the first execution. */
+	/* Begun in the shared memory callbacks, or at the first execution. */
 	TableScanDesc scan;
+	/* The counters of every participant, in a parallel plan. */
+	TessSharedStats *stats;
 	TessHeapBatch *heap;
 	/* The targets PostgreSQL asks the node to compute, or NULL. */
 	TessProjection *projection;
@@ -69,6 +88,14 @@ static void heap_scan_end(CustomScanState *css);
 static void heap_scan_rescan(CustomScanState *css);
 static void heap_scan_explain(CustomScanState *css, List *ancestors,
 							  ExplainState *es);
+static Size heap_scan_estimate_dsm(CustomScanState *css, ParallelContext *pcxt);
+static void heap_scan_initialize_dsm(CustomScanState *css, ParallelContext *pcxt,
+									 void *coordinate);
+static void heap_scan_reinitialize_dsm(CustomScanState *css,
+									   ParallelContext *pcxt, void *coordinate);
+static void heap_scan_initialize_worker(CustomScanState *css, shm_toc *toc,
+										void *coordinate);
+static void heap_scan_shutdown(CustomScanState *css);
 
 static const CustomPathMethods heap_scan_path_methods = {
 	.CustomName = "TessHeapScan",
@@ -87,6 +114,11 @@ static const CustomExecMethods heap_scan_exec_methods = {
 	.EndCustomScan = heap_scan_end,
 	.ReScanCustomScan = heap_scan_rescan,
 	.ExplainCustomScan = heap_scan_explain,
+	.EstimateDSMCustomScan = heap_scan_estimate_dsm,
+	.InitializeDSMCustomScan = heap_scan_initialize_dsm,
+	.ReInitializeDSMCustomScan = heap_scan_reinitialize_dsm,
+	.InitializeWorkerCustomScan = heap_scan_initialize_worker,
+	.ShutdownCustomScan = heap_scan_shutdown,
 };
 
 /* The parent needs at most tuples_needed rows: read no more than that. */
@@ -142,12 +174,33 @@ plain_heap_scan(PlannerInfo *root, const Path *path)
 	return heap;
 }
 
-/* The path costs what the scan costs: there is no cost model yet. */
+/* The core's get_parallel_divisor: the share of one participant. */
+static double
+parallel_divisor(const Path *path)
+{
+	double		divisor = path->parallel_workers;
+
+	if (parallel_leader_participation)
+	{
+		double		leader_contribution = 1.0 - 0.3 * path->parallel_workers;
+
+		if (leader_contribution > 0)
+			divisor += leader_contribution;
+	}
+	return divisor;
+}
+
+/*
+ * The path costs what the scan costs: there is no cost model yet. A
+ * partial scan's path is parallel-aware, as the template is, and gives
+ * each participant its share of the rows.
+ */
 static CustomPath *
 heap_scan_rows(PlannerInfo *root, Path *path)
 {
 	TessPathConfig config = TESS_STRUCT_INITIALIZER(TessPathConfig);
 	CustomPath *scan;
+	double		rows = path->parent->tuples;
 
 	if (!plain_heap_scan(root, path))
 		return NULL;
@@ -158,7 +211,9 @@ heap_scan_rows(PlannerInfo *root, Path *path)
 	config.flags = CUSTOMPATH_SUPPORT_PROJECTION;
 	scan = tess_path_create(&config);
 	/* Every row of the relation comes out: the node evaluates no clause. */
-	scan->path.rows = clamp_row_est(path->parent->tuples);
+	if (path->parallel_workers > 0)
+		rows /= parallel_divisor(path);
+	scan->path.rows = clamp_row_est(rows);
 	return scan;
 }
 
@@ -234,14 +289,13 @@ heap_scan_begin(CustomScanState *css, EState *estate, int eflags)
 	state->tuples_needed = -1;
 }
 
-/* Freeze the parent's request, begin the scan and create the provider. */
+/* Freeze the parent's request and create the provider. */
 static void
 heap_scan_start(HeapScanState *state)
 {
 	EState	   *estate = state->css.ss.ps.state;
 	Relation	rel = state->css.ss.ss_currentRelation;
 	TessHeapBatchConfig config = TESS_STRUCT_INITIALIZER(TessHeapBatchConfig);
-	uint32		flags = SO_NONE;
 
 	state->request = tess_output_request(state->output);
 	state->capacity = state->request->max_batch_rows > 0 ?
@@ -249,17 +303,40 @@ heap_scan_start(HeapScanState *state)
 		HEAP_SCAN_BATCH_ROWS;
 	if (state->request->output_mode != TESS_OUTPUT_BATCH)
 		elog(ERROR, "TessHeapScan requires a batch-aware parent");
-	if (ScanRelIsReadOnly(&state->css.ss))
-		flags |= SO_HINT_REL_READ_ONLY;
-	state->scan = table_beginscan(rel, estate->es_snapshot, 0, NULL, flags);
-	/* Cleared for a non-MVCC snapshot: then one tuple at a time. */
-	state->pagemode = (state->scan->rs_flags & SO_ALLOW_PAGEMODE) != 0;
 	config.parent_context = estate->es_query_cxt;
 	config.ncolumns = state->relation.ncolumns;
 	config.capacity = state->capacity;
 	config.tuple_desc = RelationGetDescr(rel);
 	config.first_non_guaranteed_attr = RelationGetDescr(rel)->firstNonGuaranteedAttr;
 	state->heap = tess_heap_batch_create(&config);
+}
+
+static uint32
+heap_scan_flags(HeapScanState *state)
+{
+	return ScanRelIsReadOnly(&state->css.ss) ? SO_HINT_REL_READ_ONLY : SO_NONE;
+}
+
+/* Take the scan the core began: serial, or a participant's parallel one. */
+static void
+begin_scan(HeapScanState *state, TableScanDesc scan)
+{
+	state->scan = scan;
+	/* Cleared for a non-MVCC snapshot: then one tuple at a time. */
+	state->pagemode = (scan->rs_flags & SO_ALLOW_PAGEMODE) != 0;
+}
+
+/* Drop the batch's pins and the landing slot's, then the scan. */
+static void
+end_scan(HeapScanState *state)
+{
+	if (state->heap != NULL)
+		tess_heap_batch_reset(state->heap);
+	ExecClearTuple(state->landing);
+	if (state->scan != NULL)
+		table_endscan(state->scan);
+	state->scan = NULL;
+	state->page_active = false;
 }
 
 /*
@@ -316,6 +393,15 @@ heap_scan_exec(CustomScanState *css)
 
 	if (state->request == NULL)
 		heap_scan_start(state);
+	/* Without a parallel scan from the callbacks, a serial one. */
+	if (state->scan == NULL)
+	{
+		EState	   *estate = css->ss.ps.state;
+
+		begin_scan(state, table_beginscan(css->ss.ss_currentRelation,
+										  estate->es_snapshot, 0, NULL,
+										  heap_scan_flags(state)));
+	}
 	if (!ScanDirectionIsForward(css->ss.ps.state->es_direction))
 		elog(ERROR, "TessHeapScan supports only forward scans");
 	/* Refuses while the parent has not finished the previous batch. */
@@ -375,13 +461,11 @@ heap_scan_end(CustomScanState *css)
 {
 	HeapScanState *state = (HeapScanState *) css;
 
+	if (state->stats != NULL)
+		tess_shared_stats_end(state->stats);
 	tess_output_end(state->output);
 	/* The pins of a batch a projection wrapped are the node's to drop. */
-	if (state->heap != NULL)
-		tess_heap_batch_reset(state->heap);
-	ExecClearTuple(state->landing);
-	if (state->scan != NULL)
-		table_endscan(state->scan);
+	end_scan(state);
 	/* The relation is closed by the executor. */
 }
 
@@ -406,30 +490,151 @@ heap_scan_rescan(CustomScanState *css)
 	state->pages = 0;
 }
 
+/* This participant's counters; a node that never ran counts nothing. */
 static void
-heap_scan_explain(CustomScanState *css, List *ancestors, ExplainState *es)
+heap_scan_counters(HeapScanState *state, uint64 *values)
 {
-	HeapScanState *state = (HeapScanState *) css;
-
-	/* The parent's request, and so the size, is known once executed. */
-	if (state->request != NULL)
-		ExplainPropertyInteger("Batch Size", NULL, state->capacity, es);
-	if (!es->analyze)
-		return;
-	ExplainPropertyInteger("Batches", NULL, state->batches, es);
-	ExplainPropertyInteger("Pages", NULL, state->pages, es);
+	memset(values, 0, HEAP_SCAN_NCOUNTERS * sizeof(uint64));
+	values[HEAP_SCAN_RAN] = state->request != NULL;
+	values[HEAP_SCAN_CAPACITY] = state->request != NULL ? state->capacity : 0;
+	values[HEAP_SCAN_BATCHES] = state->batches;
+	values[HEAP_SCAN_PAGES] = state->pages;
 	if (state->heap != NULL)
 	{
 		const TessHeapBatchStats *stats = tess_heap_batch_stats(state->heap);
 
-		ExplainPropertyInteger("Deformed Datums", NULL, stats->deformed_datums, es);
-		ExplainPropertyInteger("Restarted Datums", NULL, stats->restarted_datums, es);
+		values[HEAP_SCAN_DEFORMED] = stats->deformed_datums;
+		values[HEAP_SCAN_RESTARTED] = stats->restarted_datums;
 	}
 	if (state->projection != NULL)
 	{
 		const TessProjectionStats *computed = tess_projection_stats(state->projection);
 
-		ExplainPropertyInteger("Computed Datums", NULL,
-							   computed->chain_datums + computed->row_datums, es);
+		values[HEAP_SCAN_COMPUTED] = computed->chain_datums + computed->row_datums;
 	}
+}
+
+/* The totals of every participant in a parallel plan, else the node's own. */
+static void
+heap_scan_explain(CustomScanState *css, List *ancestors, ExplainState *es)
+{
+	HeapScanState *state = (HeapScanState *) css;
+	const uint64 *totals = NULL;
+	uint64		own[HEAP_SCAN_NCOUNTERS];
+
+	if (state->stats != NULL)
+		totals = tess_shared_stats_totals(state->stats);
+	if (totals == NULL)
+	{
+		heap_scan_counters(state, own);
+		totals = own;
+	}
+	/* The parent's request, and so the size, is known once executed. */
+	if (totals[HEAP_SCAN_RAN] > 0)
+		ExplainPropertyInteger("Batch Size", NULL,
+							   totals[HEAP_SCAN_CAPACITY] / totals[HEAP_SCAN_RAN], es);
+	if (!es->analyze)
+		return;
+	ExplainPropertyInteger("Batches", NULL, totals[HEAP_SCAN_BATCHES], es);
+	ExplainPropertyInteger("Pages", NULL, totals[HEAP_SCAN_PAGES], es);
+	if (totals[HEAP_SCAN_RAN] > 0)
+	{
+		ExplainPropertyInteger("Deformed Datums", NULL, totals[HEAP_SCAN_DEFORMED], es);
+		ExplainPropertyInteger("Restarted Datums", NULL, totals[HEAP_SCAN_RESTARTED], es);
+	}
+	if (state->projection != NULL)
+		ExplainPropertyInteger("Computed Datums", NULL, totals[HEAP_SCAN_COMPUTED], es);
+}
+
+/*
+ * A parallel plan: the participants share the core's parallel scan
+ * descriptor, which hands each of them its own pages, followed by the
+ * rows of their counters, in the node's chunk of the query's shared
+ * memory. The leader lays the chunk out and begins its scan before its
+ * first execution; a worker attaches to it. The node's own rescan leaves
+ * the shared descriptor to the leader's reinitialization, which the
+ * Gather runs before it launches the workers again.
+ */
+static ParallelTableScanDesc
+shared_scan(void *coordinate)
+{
+	return (ParallelTableScanDesc)
+		((char *) coordinate + tess_shared_stats_size(coordinate));
+}
+
+static Size
+heap_scan_estimate_dsm(CustomScanState *css, ParallelContext *pcxt)
+{
+	EState	   *estate = css->ss.ps.state;
+
+	return add_size(tess_shared_stats_estimate(HEAP_SCAN_NCOUNTERS, pcxt->nworkers),
+					table_parallelscan_estimate(css->ss.ss_currentRelation,
+												estate->es_snapshot));
+}
+
+static void
+heap_scan_initialize_dsm(CustomScanState *css, ParallelContext *pcxt,
+						 void *coordinate)
+{
+	HeapScanState *state = (HeapScanState *) css;
+	EState	   *estate = css->ss.ps.state;
+	Relation	rel = css->ss.ss_currentRelation;
+	ParallelTableScanDesc pscan;
+
+	/* A Gather a limit above shut down sets up anew when rescanned. */
+	end_scan(state);
+	if (state->stats != NULL)
+		tess_shared_stats_end(state->stats);
+	state->stats = tess_shared_stats_init(estate->es_query_cxt, coordinate,
+										  HEAP_SCAN_NCOUNTERS, pcxt->nworkers,
+										  pcxt->seg);
+	pscan = shared_scan(coordinate);
+	table_parallelscan_initialize(rel, pscan, estate->es_snapshot);
+	begin_scan(state, table_beginscan_parallel(rel, pscan, heap_scan_flags(state)));
+}
+
+static void
+heap_scan_reinitialize_dsm(CustomScanState *css, ParallelContext *pcxt,
+						   void *coordinate)
+{
+	HeapScanState *state = (HeapScanState *) css;
+
+	table_parallelscan_reinitialize(css->ss.ss_currentRelation,
+									shared_scan(coordinate));
+	tess_shared_stats_reset(state->stats);
+}
+
+static void
+heap_scan_initialize_worker(CustomScanState *css, shm_toc *toc,
+							void *coordinate)
+{
+	HeapScanState *state = (HeapScanState *) css;
+	EState	   *estate = css->ss.ps.state;
+	Relation	rel = css->ss.ss_currentRelation;
+
+	state->stats = tess_shared_stats_attach(estate->es_query_cxt, coordinate,
+											ParallelWorkerNumber + 1);
+	begin_scan(state, table_beginscan_parallel(rel, shared_scan(coordinate),
+											   heap_scan_flags(state)));
+}
+
+/*
+ * After the plan's last row, in every participant: the counters into the
+ * shared rows, and the parallel scan's descriptor, which refers to the
+ * shared memory, ended while that is mapped. A serial scan stays: the
+ * executor shuts a plan down after every partial run of it too.
+ */
+static void
+heap_scan_shutdown(CustomScanState *css)
+{
+	HeapScanState *state = (HeapScanState *) css;
+	uint64		values[HEAP_SCAN_NCOUNTERS];
+
+	if (state->stats != NULL)
+	{
+		heap_scan_counters(state, values);
+		tess_shared_stats_store(state->stats, values);
+	}
+	if (state->scan != NULL && state->scan->rs_parallel != NULL)
+		end_scan(state);
 }

@@ -120,34 +120,13 @@ make_child_path(PlannerInfo *root, RelOptInfo *rel, const Path *seqscan)
 	return child != NULL ? child : tess_batch_input_path(root, copy);
 }
 
-static void
-set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
-				 RangeTblEntry *rte)
+/* The node's path over the child, with the scan's properties and rows. */
+static CustomPath *
+make_filter_path(RelOptInfo *rel, const Path *seqscan, Path *child)
 {
 	TessPathConfig config = TESS_STRUCT_INITIALIZER(TessPathConfig);
-	Path	   *seqscan = NULL;
-	Path	   *child;
-	Path		template;
+	Path		template = *seqscan;
 
-	if (previous_set_rel_pathlist_hook != NULL)
-		previous_set_rel_pathlist_hook(root, rel, rti, rte);
-	if (!*tess_runtime_api()->settings->enable ||
-		!relation_supported(root, rel, rte) || !clauses_supported(root, rel))
-		return;
-	foreach_ptr(Path, path, rel->pathlist)
-	{
-		if (path->pathtype == T_SeqScan && path->param_info == NULL)
-		{
-			seqscan = path;
-			break;
-		}
-	}
-	if (seqscan == NULL)
-		return;
-	child = make_child_path(root, rel, seqscan);
-	if (child == NULL)
-		return;
-	template = *seqscan;
 	template.total_cost *= FILTER_COST_FACTOR;
 	config.template_path = &template;
 	config.methods = &filter_path_methods;
@@ -155,7 +134,60 @@ set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
 	config.children = list_make1(child);
 	/* Expressions in the targets are computed over the batches. */
 	config.flags = CUSTOMPATH_SUPPORT_PROJECTION;
-	add_path(rel, (Path *) tess_path_create(&config));
+	return tess_path_create(&config);
+}
+
+/* The unparameterized sequential scan of the list, or NULL. */
+static Path *
+find_seqscan(const List *pathlist)
+{
+	foreach_ptr(Path, path, pathlist)
+	{
+		if (path->pathtype == T_SeqScan && path->param_info == NULL)
+			return path;
+	}
+	return NULL;
+}
+
+/*
+ * The node's path in place of the sequential scan, and a partial one in
+ * place of the parallel sequential scan, so that a Gather above runs the
+ * node in every participant over that participant's share of the pages;
+ * the partial path keeps the core scan's number of workers and rows per
+ * participant.
+ */
+static void
+set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
+				 RangeTblEntry *rte)
+{
+	Path	   *seqscan;
+	Path	   *partial;
+	Path	   *child;
+
+	if (previous_set_rel_pathlist_hook != NULL)
+		previous_set_rel_pathlist_hook(root, rel, rti, rte);
+	if (!*tess_runtime_api()->settings->enable ||
+		!relation_supported(root, rel, rte) || !clauses_supported(root, rel))
+		return;
+	seqscan = find_seqscan(rel->pathlist);
+	if (seqscan == NULL)
+		return;
+	child = make_child_path(root, rel, seqscan);
+	if (child == NULL)
+		return;
+	add_path(rel, (Path *) make_filter_path(rel, seqscan, child));
+	partial = find_seqscan(rel->partial_pathlist);
+	if (partial == NULL || !partial->parallel_aware || !rel->consider_parallel)
+		return;
+	child = make_child_path(root, rel, partial);
+	if (child != NULL)
+	{
+		CustomPath *path = make_filter_path(rel, partial, child);
+
+		/* The child divides the work; the node keeps no shared state. */
+		path->path.parallel_aware = false;
+		add_partial_path(rel, &path->path);
+	}
 }
 
 /*

@@ -110,6 +110,16 @@ tess_shared_stats_init(MemoryContext parent_context, void *coordinate,
 	return stats;
 }
 
+Size
+tess_shared_stats_size(const void *coordinate)
+{
+	const SharedRows *shared = coordinate;
+
+	if (coordinate == NULL || shared->ncounters <= 0 || shared->nslots <= 0)
+		elog(ERROR, "Tessera shared counters were not laid out");
+	return MAXALIGN(rows_size(shared->ncounters, shared->nslots));
+}
+
 TessSharedStats *
 tess_shared_stats_attach(MemoryContext parent_context, void *coordinate,
 						 int slot)

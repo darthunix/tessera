@@ -167,15 +167,26 @@ node forwards the bound and pulls no more rows than it.
 ### Parallel execution
 
 This contract does not restrict parallel execution; it requires honest
-declarations. Every path states `parallel_safe` and `parallel_aware`
-truthfully: a node without shared state above a parallel-safe child is
-parallel-safe. Shared state exists only in DSM or DSA, through the full set
-of callbacks (`EstimateDSMCustomScan`, `InitializeDSMCustomScan`,
+declarations. A node offers a partial path built from the core's partial
+path as its template, so that `parallel_safe` and the number of workers
+are the core's and the rows are one participant's share; a node without
+shared state above a parallel-safe child is parallel-safe. `parallel_aware`
+is set only on a path whose node installs the full set of shared memory
+callbacks (`EstimateDSMCustomScan`, `InitializeDSMCustomScan`,
 `ReInitializeDSMCustomScan`, `InitializeWorkerCustomScan`,
-`ShutdownCustomScan`). Objects that refer to DSM are released from
-`ShutdownCustomScan`, while the mapping still exists; `EndCustomScan` is only
-a fallback for execution without DSM. A parallel batch subtree runs under
-one `Gather` and contains no scalar boundary between batch nodes. The model
+`ShutdownCustomScan`), whether for work it divides among the participants,
+as the heap scan's shared page handout, or only for the counters it sums
+over them through `TessSharedStats` ([runtime.md](runtime.md)), since
+PostgreSQL calls those callbacks of a custom scan only then; a node above
+a parallel child that installs none clears the flag, as the pack node
+does. Shared state exists only in DSM or DSA, in the node's chunk keyed by
+its plan node id. Objects that refer to DSM are released from
+`ShutdownCustomScan`, while the mapping still exists, and nothing a serial
+run still needs is ended there, since the executor shuts a plan down after
+a partial run of it too; `EndCustomScan` is only a fallback for execution
+without DSM. A node begun in the callbacks falls back to serial work when
+it is executed without them. A parallel batch subtree runs under one
+`Gather` and contains no scalar boundary between batch nodes. The model
 is pg_batch's parallel hash join: immutable column-major build chunks in
 DSA, a shared atomic bucket array filled with compare-and-swap, and a spill
 with one file namespace per participant and partition, followed by a
@@ -226,7 +237,8 @@ operations. No Rust frame is on the stack when `ERROR` is raised.
 Each node comes with regression tests of a batch-aware parent and a
 row-wise parent, or the planning-time rejection of one; an empty selection;
 batches of fewer and of more than 64 rows; rescan; an early stop by a limit
-above the node; NULL values; `EXPLAIN ANALYZE` with correct row counts; and
+above the node; NULL values; `EXPLAIN ANALYZE` with correct row counts; a
+parallel plan with two workers, when the node offers a partial path; and
 lifecycle errors. Hot paths are benchmarked against pg_batch where a
 counterpart exists.
 
@@ -242,8 +254,10 @@ counterpart exists.
 - Rescan in the fixed order; clear outputs in both end and rescan paths.
 - Leave backward scan and mark/restore undeclared; check the flags in
   `BeginCustomScan`.
-- Declare `parallel_safe` and `parallel_aware` truthfully; keep shared state
-  in DSM behind the callbacks and release it from `ShutdownCustomScan`.
+- Build partial paths from the core's partial paths; declare
+  `parallel_aware` only with the five callbacks, sum counters through
+  `TessSharedStats`, and release what refers to DSM from
+  `ShutdownCustomScan`.
 - Check `*api->settings->enable` in every hook, after calling the previous
   hook.
 - Keep per-batch memory in a per-batch context; allocate nothing per row.

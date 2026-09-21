@@ -445,7 +445,11 @@ add_path(rel, (Path *) tess_path_create(&config));
 
 `tess_path_create` copies rows, costs, path keys and parallel properties
 from the template, and refuses a parameterized one, since a batch path is
-never the inner side of a nested loop. `node` is the registered kind of
+never the inner side of a nested loop. A partial path is built the same
+way from the core's partial path, whose number of workers and rows per
+participant come along; a node that installs no shared memory callbacks
+clears `parallel_aware` afterwards, and the helpers below over a partial
+core path give a partial batch path. `node` is the registered kind of
 node that owns the path; the helper stores its name, `expressions` and
 `node_data` through the plan-data codec. `tess_path_node` returns that node
 for a path built here and `NULL` for any other path, including a custom

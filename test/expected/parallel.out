@@ -1,0 +1,349 @@
+CREATE EXTENSION tessera;
+LOAD 'tessera_nodes';
+LOAD 'tessera_kernels';
+-- The same result with Tessera on and off, as text; each side plans afresh.
+CREATE FUNCTION parallel_same(query text) RETURNS text
+LANGUAGE plpgsql AS $$
+DECLARE
+    with_tessera text[];
+    without_tessera text[];
+    wrapped text := format('SELECT array_agg(q::text ORDER BY q::text) FROM (%s) AS q', query);
+BEGIN
+    PERFORM set_config('tessera.enable', 'on', true);
+    EXECUTE wrapped INTO with_tessera;
+    PERFORM set_config('tessera.enable', 'off', true);
+    EXECUTE wrapped INTO without_tessera;
+    IF with_tessera IS DISTINCT FROM without_tessera THEN
+        RETURN format('MISMATCH on %s off %s', with_tessera, without_tessera);
+    END IF;
+    RETURN with_tessera::text;
+END $$;
+-- A property of one node of the plan that ran, as the leader reports it.
+CREATE FUNCTION plan_property(query text, provider text, name text) RETURNS text
+LANGUAGE plpgsql AS $$
+DECLARE
+    plan jsonb;
+BEGIN
+    EXECUTE format('EXPLAIN (ANALYZE, FORMAT JSON, TIMING OFF, SUMMARY OFF, BUFFERS OFF, COSTS OFF) %s', query)
+        INTO plan;
+    RETURN jsonb_path_query_first(plan,
+        format('$[0]."Plan".** ? (@."Custom Plan Provider" == $p).%I', name)::jsonpath,
+        jsonb_build_object('p', provider))::text;
+END $$;
+CREATE TABLE parallel_t (a int, b int, c text);
+INSERT INTO parallel_t
+SELECT CASE WHEN i % 7 = 0 THEN NULL ELSE i END, i % 10, 'r' || i
+FROM generate_series(1, 5000) AS i;
+ANALYZE parallel_t;
+SELECT pg_relation_size('parallel_t') / current_setting('block_size')::int AS pages \gset
+-- Two workers even for a small table, in both modes.
+SET max_parallel_workers_per_gather = 2;
+SET parallel_setup_cost = 0;
+SET parallel_tuple_cost = 0;
+SET min_parallel_table_scan_size = 0;
+-- The partial path: the node in every participant over its share of the pages.
+EXPLAIN (COSTS OFF) SELECT a, b FROM parallel_t WHERE a > 4990;
+                          QUERY PLAN                           
+---------------------------------------------------------------
+ Gather
+   Workers Planned: 2
+   ->  Custom Scan (TessFilter) on parallel_t
+         Batch Filter: (a > 4990)
+         ->  Parallel Custom Scan (TessHeapScan) on parallel_t
+(5 rows)
+
+SELECT parallel_same($$SELECT a, b FROM parallel_t WHERE a > 4990$$);
+                                       parallel_same                                       
+-------------------------------------------------------------------------------------------
+ {"(4992,2)","(4993,3)","(4994,4)","(4995,5)","(4996,6)","(4997,7)","(4999,9)","(5000,0)"}
+(1 row)
+
+-- A row-wise residual clause and computed targets, in the workers too.
+SELECT parallel_same($$SELECT a, c FROM parallel_t WHERE a > 4990 AND c <> 'r4995'$$);
+                                               parallel_same                                                
+------------------------------------------------------------------------------------------------------------
+ {"(4992,r4992)","(4993,r4993)","(4994,r4994)","(4996,r4996)","(4997,r4997)","(4999,r4999)","(5000,r5000)"}
+(1 row)
+
+EXPLAIN (COSTS OFF) SELECT a + 1 AS next, c || '!' AS shout FROM parallel_t WHERE a > 4990;
+                          QUERY PLAN                           
+---------------------------------------------------------------
+ Gather
+   Workers Planned: 2
+   ->  Custom Scan (TessFilter) on parallel_t
+         Batch Filter: (a > 4990)
+         ->  Parallel Custom Scan (TessHeapScan) on parallel_t
+(5 rows)
+
+SELECT parallel_same($$SELECT a + 1 AS next, c || '!' AS shout FROM parallel_t WHERE a > 4990$$);
+                                                           parallel_same                                                           
+-----------------------------------------------------------------------------------------------------------------------------------
+ {"(4993,r4992!)","(4994,r4993!)","(4995,r4994!)","(4996,r4995!)","(4997,r4996!)","(4998,r4997!)","(5000,r4999!)","(5001,r5000!)"}
+(1 row)
+
+-- Every page is read once across the participants: the leader sums their pages.
+SELECT plan_property($$SELECT a FROM parallel_t WHERE a > 0$$, 'TessHeapScan', 'Pages')::int = :pages AS all_pages;
+ all_pages 
+-----------
+ t
+(1 row)
+
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+SELECT a FROM parallel_t WHERE a > 4990;
+                                         QUERY PLAN                                          
+---------------------------------------------------------------------------------------------
+ Gather (actual rows=8.00 loops=1)
+   Workers Planned: 2
+   Workers Launched: 2
+   ->  Custom Scan (TessFilter) on parallel_t (actual rows=2.67 loops=3)
+         Batch Filter: (a > 4990)
+         Rows Removed by Batch Filter: 1664
+         Input Batches: 82
+         Input Rows: 5000
+         Output Rows: 8
+         ->  Parallel Custom Scan (TessHeapScan) on parallel_t (actual rows=1666.67 loops=3)
+               Batch Size: 64
+               Batches: 82
+               Pages: 28
+               Deformed Datums: 5000
+               Restarted Datums: 0
+(15 rows)
+
+-- Workers planned but not launched: the leader reads every page alone.
+SET max_parallel_workers = 0;
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+SELECT a FROM parallel_t WHERE a > 4990;
+                                         QUERY PLAN                                          
+---------------------------------------------------------------------------------------------
+ Gather (actual rows=8.00 loops=1)
+   Workers Planned: 2
+   Workers Launched: 0
+   ->  Custom Scan (TessFilter) on parallel_t (actual rows=8.00 loops=1)
+         Batch Filter: (a > 4990)
+         Rows Removed by Batch Filter: 4992
+         Input Batches: 82
+         Input Rows: 5000
+         Output Rows: 8
+         ->  Parallel Custom Scan (TessHeapScan) on parallel_t (actual rows=5000.00 loops=1)
+               Batch Size: 64
+               Batches: 82
+               Pages: 28
+               Deformed Datums: 5000
+               Restarted Datums: 0
+(15 rows)
+
+SELECT plan_property($$SELECT a FROM parallel_t WHERE a > 0$$, 'TessHeapScan', 'Pages')::int = :pages AS all_pages;
+ all_pages 
+-----------
+ t
+(1 row)
+
+SELECT parallel_same($$SELECT a, b FROM parallel_t WHERE a > 4990$$);
+                                       parallel_same                                       
+-------------------------------------------------------------------------------------------
+ {"(4992,2)","(4993,3)","(4994,4)","(4995,5)","(4996,6)","(4997,7)","(4999,9)","(5000,0)"}
+(1 row)
+
+RESET max_parallel_workers;
+-- The leader does not take part: the workers' counters alone make the totals.
+SET parallel_leader_participation = off;
+SELECT plan_property($$SELECT a FROM parallel_t WHERE a > 0$$, 'TessHeapScan', 'Pages')::int = :pages AS all_pages;
+ all_pages 
+-----------
+ t
+(1 row)
+
+SELECT plan_property($$SELECT a FROM parallel_t WHERE a > 0$$, 'TessHeapScan', 'Batch Size') AS batch_size;
+ batch_size 
+------------
+ 64
+(1 row)
+
+SELECT parallel_same($$SELECT a, b FROM parallel_t WHERE a > 4990$$);
+                                       parallel_same                                       
+-------------------------------------------------------------------------------------------
+ {"(4992,2)","(4993,3)","(4994,4)","(4995,5)","(4996,6)","(4997,7)","(4999,9)","(5000,0)"}
+(1 row)
+
+RESET parallel_leader_participation;
+-- A Gather rescanned in a join: the shared page handout starts over.
+SET enable_material = off;
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+SELECT x, n FROM (SELECT count(*) AS n FROM parallel_t WHERE a > 4997) AS ss
+RIGHT JOIN (VALUES (1), (2)) AS v(x) ON true;
+                                                  QUERY PLAN                                                   
+---------------------------------------------------------------------------------------------------------------
+ Nested Loop Left Join (actual rows=2.00 loops=1)
+   ->  Values Scan on "*VALUES*" (actual rows=2.00 loops=1)
+   ->  Custom Scan (TessAgg) (actual rows=1.00 loops=2)
+         Input Batches: 1
+         Input Rows: 2
+         Kernel Calls: 1
+         ->  Custom Scan (TessPack) (actual rows=2.00 loops=2)
+               Batch Size: 64
+               Rows Kept As: copies
+               Batches: 1
+               ->  Gather (actual rows=2.00 loops=2)
+                     Workers Planned: 2
+                     Workers Launched: 2
+                     ->  Custom Scan (TessFilter) on parallel_t (actual rows=0.67 loops=6)
+                           Batch Filter: (parallel_t.a > 4997)
+                           Rows Removed by Batch Filter: 1666
+                           Input Batches: 82
+                           Input Rows: 5000
+                           Output Rows: 2
+                           ->  Parallel Custom Scan (TessHeapScan) on parallel_t (actual rows=1666.67 loops=6)
+                                 Batch Size: 64
+                                 Batches: 82
+                                 Pages: 28
+                                 Deformed Datums: 10000
+                                 Restarted Datums: 0
+(25 rows)
+
+SELECT parallel_same($$SELECT x, n FROM (SELECT count(*) AS n FROM parallel_t WHERE a > 4997) AS ss
+RIGHT JOIN (VALUES (1), (2)) AS v(x) ON true$$);
+   parallel_same   
+-------------------
+ {"(1,2)","(2,2)"}
+(1 row)
+
+-- A limit above the Gather stops it early, and a rescan sets it up anew.
+EXPLAIN (COSTS OFF) SELECT count(*) FROM (SELECT a FROM parallel_t WHERE a > 100 LIMIT 3) AS s;
+                                      QUERY PLAN                                       
+---------------------------------------------------------------------------------------
+ Custom Scan (TessAgg)
+   ->  Custom Scan (TessPack)
+         ->  Subquery Scan on s
+               ->  Limit
+                     ->  Gather
+                           Workers Planned: 2
+                           ->  Custom Scan (TessFilter) on parallel_t
+                                 Batch Filter: (parallel_t.a > 100)
+                                 ->  Parallel Custom Scan (TessHeapScan) on parallel_t
+(9 rows)
+
+SELECT count(*) FROM (SELECT a FROM parallel_t WHERE a > 100 LIMIT 3) AS s;
+ count 
+-------
+     3
+(1 row)
+
+SELECT plan_property($$SELECT a FROM parallel_t WHERE a > 100 LIMIT 3$$, 'TessHeapScan', 'Pages')::int
+    BETWEEN 1 AND :pages AS some_pages;
+ some_pages 
+------------
+ t
+(1 row)
+
+EXPLAIN (COSTS OFF)
+SELECT x, n FROM (SELECT count(*) AS n FROM (SELECT a FROM parallel_t WHERE a > 4997 LIMIT 2) AS l) AS ss
+RIGHT JOIN (VALUES (1), (2)) AS v(x) ON true;
+                                         QUERY PLAN                                          
+---------------------------------------------------------------------------------------------
+ Nested Loop Left Join
+   ->  Values Scan on "*VALUES*"
+   ->  Custom Scan (TessAgg)
+         ->  Custom Scan (TessPack)
+               ->  Subquery Scan on l
+                     ->  Limit
+                           ->  Gather
+                                 Workers Planned: 2
+                                 ->  Custom Scan (TessFilter) on parallel_t
+                                       Batch Filter: (parallel_t.a > 4997)
+                                       ->  Parallel Custom Scan (TessHeapScan) on parallel_t
+(11 rows)
+
+SELECT parallel_same($$SELECT x, n FROM (SELECT count(*) AS n FROM (SELECT a FROM parallel_t WHERE a > 4997 LIMIT 2) AS l) AS ss
+RIGHT JOIN (VALUES (1), (2)) AS v(x) ON true$$);
+   parallel_same   
+-------------------
+ {"(1,2)","(2,2)"}
+(1 row)
+
+RESET enable_material;
+-- A parameter of a generic plan reaches the workers.
+PREPARE above(int) AS SELECT count(*), min(a) FROM parallel_t WHERE a > $1;
+SET plan_cache_mode = force_generic_plan;
+EXPLAIN (COSTS OFF) EXECUTE above(4990);
+                                QUERY PLAN                                 
+---------------------------------------------------------------------------
+ Finalize Aggregate
+   ->  Gather
+         Workers Planned: 2
+         ->  Partial Aggregate
+               ->  Custom Scan (TessFilter) on parallel_t
+                     Batch Filter: (a > $1)
+                     ->  Parallel Custom Scan (TessHeapScan) on parallel_t
+(7 rows)
+
+EXECUTE above(4990);
+ count | min  
+-------+------
+     8 | 4992
+(1 row)
+
+EXECUTE above(10);
+ count | min 
+-------+-----
+  4277 |  11
+(1 row)
+
+RESET plan_cache_mode;
+DEALLOCATE above;
+-- An order above the Gather.
+EXPLAIN (COSTS OFF) SELECT a FROM parallel_t WHERE a > 4990 ORDER BY a;
+                             QUERY PLAN                              
+---------------------------------------------------------------------
+ Sort
+   Sort Key: a
+   ->  Gather
+         Workers Planned: 2
+         ->  Custom Scan (TessFilter) on parallel_t
+               Batch Filter: (a > 4990)
+               ->  Parallel Custom Scan (TessHeapScan) on parallel_t
+(7 rows)
+
+SELECT parallel_same($$SELECT a FROM parallel_t WHERE a > 4990 ORDER BY a$$);
+                       parallel_same                       
+-----------------------------------------------------------
+ {(4992),(4993),(4994),(4995),(4996),(4997),(4999),(5000)}
+(1 row)
+
+-- An error raised in a worker reaches the client.
+SELECT a + 2147483647 FROM parallel_t WHERE a > 4990;
+ERROR:  integer out of range
+-- An aggregate the node does not compute: the core's partial aggregate over the rows.
+EXPLAIN (COSTS OFF) SELECT count(c), count(*) FROM parallel_t WHERE a > 100;
+                                QUERY PLAN                                 
+---------------------------------------------------------------------------
+ Finalize Aggregate
+   ->  Gather
+         Workers Planned: 2
+         ->  Partial Aggregate
+               ->  Custom Scan (TessFilter) on parallel_t
+                     Batch Filter: (a > 100)
+                     ->  Parallel Custom Scan (TessHeapScan) on parallel_t
+(7 rows)
+
+SELECT parallel_same($$SELECT count(c), count(*) FROM parallel_t WHERE a > 100$$);
+  parallel_same  
+-----------------
+ {"(4200,4200)"}
+(1 row)
+
+-- The switch off.
+SET tessera.enable = off;
+EXPLAIN (COSTS OFF) SELECT a, b FROM parallel_t WHERE a > 4990;
+              QUERY PLAN               
+---------------------------------------
+ Gather
+   Workers Planned: 2
+   ->  Parallel Seq Scan on parallel_t
+         Filter: (a > 4990)
+(4 rows)
+
+RESET tessera.enable;
+DROP TABLE parallel_t;
+DROP FUNCTION parallel_same(text);
+DROP FUNCTION plan_property(text, text, text);
+DROP EXTENSION tessera;

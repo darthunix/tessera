@@ -58,9 +58,12 @@ does, and `tess_batch_input_path` prefers it to the pack node for a
 relation without clauses. A pseudoconstant clause keeps both helpers
 away: the planner would gate every scan of the relation with a `Result`
 between the parent and the node. The path copies the scan's costs and
-parallel safety (the node is not parallel-aware; a single-copy `Gather`
-runs it whole in one worker) and estimates every row of the relation,
-since the node evaluates no clause, and declares that the node projects:
+parallel properties: over the core's partial sequential scan it is
+parallel-aware with that scan's number of workers, since the node shares
+the core's page handout and its counters, and estimates each
+participant's share of the relation's rows by the core's divisor; over
+the serial scan it estimates every row of the relation, since the node
+evaluates no clause. It declares that the node projects:
 a batch parent asked for a projection above a sequential scan takes the
 scan node with the projection's target (`tess_batch_input_path`), and
 PostgreSQL installs a projection it needs into the node's target list
@@ -73,9 +76,15 @@ relation, which the executor opens and closes.
 
 ### Execution
 
-The scan is begun at the first execution, with the query's snapshot, once
-the parent's request is frozen; a request for rows is an error. Each
-batch comes from one page: the node lets the core's scan bring the next
+The parent's request is frozen at the first execution, and a request
+for rows is an error. The scan is begun with the query's snapshot: in a
+serial plan at that first execution; under a `Gather`, in the shared
+memory callbacks, where the leader lays out the core's parallel scan
+descriptor and the rows of the participants' counters
+(`TessSharedStats`, [runtime.md](runtime.md)) in the node's chunk and
+begins its scan before its first execution, and each worker attaches to
+both. The descriptor hands every participant its own pages, so the page
+loop below is the same in both plans. Each batch comes from one page: the node lets the core's scan bring the next
 page in, prune it and decide which tuples are visible, with one
 `heap_getnextslot` call per page, and takes the page's visible tuples
 straight from the scan's list into a heap batch (`TessHeapBatch`,
@@ -91,21 +100,37 @@ targets are the projection provider's ([runtime.md](runtime.md)): the
 node wraps each heap batch before publishing it, and the provider
 computes a column when a consumer asks, for the rows asked for, by a
 batch chain or row by row over the relation's row in the scan tuple slot.
-Rescan clears the output and restarts the scan; a bound from a limit
+Rescan clears the output and restarts the scan; the shared handout of a
+parallel scan starts over in the leader's reinitialization, which the
+`Gather` runs before it launches the workers again. A bound from a limit
 above stops the scan after as many rows. Backward scan and mark/restore
-are refused, as for every batch node.
+are refused, as for every batch node. When the executor shuts the node
+down after the plan's last row, in the leader and in every worker, the
+node stores its counters into its row and ends a parallel scan, whose
+descriptor refers to the shared memory, while that is mapped; a serial
+scan stays, since the executor shuts a plan down after a partial run of
+it too, and a `Gather` a limit above stopped sets the node up anew when
+it is rescanned.
 
 `EXPLAIN` shows `Batch Size` once executed and, with `ANALYZE`, the
 `Batches`, the `Pages` read, the `Deformed Datums`, the `Restarted
 Datums` and, with computed targets, the `Computed Datums`; the row counts
-are corrected by the output helper.
+are corrected by the output helper. In a parallel plan the leader shows
+the totals over every participant, summed once the workers have
+finished, so the `Pages` of a whole scan equal the relation's pages.
 
 ### Tests
 
 The filter and limit suites run through the scan; the filter suite adds a
 table with dead tuples and an aborted insert, a page with more visible
 tuples than a batch, values stored outside the page, a column missing
-from older tuples, and a clause the planner folds away.
+from older tuples, and a clause the planner folds away. The parallel
+suite (`test/sql/parallel.sql`) runs it under a `Gather` with two workers,
+compares every result with Tessera off, checks that the participants'
+pages add up to the relation's, with workers planned but not launched
+and with the leader not taking part, rescans the `Gather` in a join,
+stops it early with a limit and rescans it then, and passes a generic
+plan's parameter and a worker's error through.
 
 ## TessPack
 
@@ -122,8 +147,10 @@ A parent never creates the pack path directly. It asks
 `tess_batch_input_path` for a batch child over the path it has, and when
 no node reads the relation natively the helper calls the `wrap_rows`
 callback the pack node registers under `tessera.pack`. The pack path copies its child's planner properties: rows,
-costs, path keys and parallel safety. There is no cost model yet, so the
-path costs exactly what its child costs. The pack path exists only as a
+costs, path keys, parallel safety and number of workers, and clears
+parallel awareness: over a parallel scan of the core each participant
+packs its own rows, and the node shares nothing. There is no cost model
+yet, so the path costs exactly what its child costs. The pack path exists only as a
 child of a batch parent; the module adds it to no path list.
 
 When the child is a sequential scan of a plain table whose targets are all
@@ -249,7 +276,15 @@ security level, a cheap leakproof clause counting as level zero, the first
 of equals. With a non-parameterized sequential scan in the path list, the
 hook adds a path over a batch input over a copy of that scan, at nine
 tenths of the scan's cost: there is no cost model yet, and the node is
-expected to lose until the native scan arrives (see `bench/pg/`).
+expected to lose until the native scan arrives (see `bench/pg/`). When
+the relation may be scanned in parallel, the hook adds a partial path the
+same way over the core's partial sequential scan, so that a `Gather`
+above runs the node in every participant over that participant's share
+of the pages: the path keeps the core scan's number of workers and rows
+per participant, and is not parallel-aware, since the scan below divides
+the work and the node shares nothing; without a `Gather` of its own, an
+aggregate above the relation gets the core's partial aggregate over the
+node's rows in each worker.
 
 Two things make the node possible before that scan. The planner gives
 every scan of the relation its clauses, so `PlanCustomPath` takes them
@@ -302,7 +337,9 @@ comparison, the planner's reordering of a text comparison and of an
 expensive predicate behind a cheaper int4 clause, a null test that keeps
 the node away, the separate removal counts, a join of two filtered
 relations, the planner's order in front of a division by zero, a parallel
-worker, a scrollable cursor, an `UPDATE`, and the switch off.
+worker, a scrollable cursor, an `UPDATE`, and the switch off. The
+parallel suite runs the node under a `Gather` with two workers (see
+TessHeapScan).
 
 ## TessAgg
 

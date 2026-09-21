@@ -447,6 +447,9 @@ extern TessSharedStats *tess_shared_stats_init(MemoryContext parent_context,
 											   int ncounters, int nworkers,
 											   dsm_segment *segment);
 
+/* The bytes the rows laid out in the chunk take: what follows them starts there. */
+extern Size tess_shared_stats_size(const void *coordinate);
+
 /*
  * A worker, in InitializeWorkerCustomScan: its row of the leader's chunk,
  * slot ParallelWorkerNumber + 1.

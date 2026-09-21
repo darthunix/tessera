@@ -147,6 +147,7 @@ pack_wrap_rows(PlannerInfo *root, Path *child)
 	TessPathConfig config = TESS_STRUCT_INITIALIZER(TessPathConfig);
 	List	   *physical = physical_targets(root, child);
 	Path	   *scan = child;
+	CustomPath *path;
 
 	if (forwardable(child))
 		config.node_data = (Node *) makeInteger(PACK_FORWARD);
@@ -162,7 +163,10 @@ pack_wrap_rows(PlannerInfo *root, Path *child)
 	config.methods = &pack_path_methods;
 	config.node = &tess_pack_node;
 	config.children = list_make1(scan);
-	return tess_path_create(&config);
+	path = tess_path_create(&config);
+	/* Over a parallel scan, each participant packs its own rows: no shared state. */
+	path->path.parallel_aware = false;
+	return path;
 }
 
 /* The parent needs at most tuples_needed rows: pull no more, and tell
