@@ -324,6 +324,52 @@ clears the node's output, finishes the input, rescans the child, resets the
 input and the helper's counters. `tess_unary_end` detaches the node's
 binding; the node ends the child itself.
 
+## Counters over parallel participants
+
+A node's counters (batches, pages, kernel calls) live in its backend, and
+`EXPLAIN ANALYZE` reads the leader's node: in a parallel query the
+workers' counts would be lost, while PostgreSQL sums its own
+instrumentation over the workers. `TessSharedStats` lays out one row of
+counters per participant in the node's chunk of the query's shared memory,
+the leader's row first, so that the leader can report the totals.
+
+PostgreSQL calls the shared memory callbacks of a custom scan only for a
+plan marked parallel-aware, so a node with such counters declares its
+partial path parallel-aware, whether or not it shares anything else, and
+installs the five callbacks:
+
+```c
+/* EstimateDSMCustomScan */
+return tess_shared_stats_estimate(NCOUNTERS, pcxt->nworkers);
+/* InitializeDSMCustomScan */
+state->stats = tess_shared_stats_init(estate->es_query_cxt, coordinate,
+                                      NCOUNTERS, pcxt->nworkers, pcxt->seg);
+/* ReInitializeDSMCustomScan */
+tess_shared_stats_reset(state->stats);
+/* InitializeWorkerCustomScan */
+state->stats = tess_shared_stats_attach(estate->es_query_cxt, coordinate,
+                                        ParallelWorkerNumber + 1);
+/* ShutdownCustomScan */
+tess_shared_stats_store(state->stats, values);
+```
+
+A node with other shared state, such as a parallel scan descriptor, puts
+the rows after it in the same chunk and adds the estimate to its size.
+
+Every participant stores its counters into its row when its node shuts
+down, which the executor does after the last row of a plan, in the leader
+and in every worker. The leader sums the rows into a backend-local array
+when the segment is detached: the `Gather` above waits for every worker to
+finish before it destroys the segment, and when a limit above the `Gather`
+stops it early, the leader detaches its ends of the tuple queues first,
+which ends the workers' plans normally, so the totals are complete either
+way. When the leader's node ends while the rows are still mapped, as the
+children of a `Gather` end before it destroys the segment, `end` sums them
+then and cancels the callback. `EXPLAIN` prints the totals when
+`tess_shared_stats_totals` returns them and the node's own counters
+otherwise, in a serial plan. A rescan of the `Gather` reinitializes the
+chunk and zeroes every row.
+
 ## Named plan data
 
 A `CustomPath` and a `CustomScan` carry a node's private data in
