@@ -1,10 +1,12 @@
 #include "postgres.h"
 
+#include "access/parallel.h"
 #include "commands/explain.h"
 #include "commands/explain_format.h"
 #include "executor/executor.h"
 #include "nodes/makefuncs.h"
 #include "optimizer/optimizer.h"
+#include "storage/shm_toc.h"
 #include "utils/ruleutils.h"
 
 #include "tessera/expr.h"
@@ -16,8 +18,22 @@
  * TessFilter stands on the unary helper: it applies the relation's
  * clauses to each batch of its child, the leading ones compiled as batch
  * filters and the rest row by row over the rows those kept, and passes
- * the batch on with the rows that remain. See docs/nodes.md.
+ * the batch on with the rows that remain. Under a Gather, the leader
+ * reports the counters of every participant. See docs/nodes.md.
  */
+
+/* The counters every participant of a parallel plan shares. */
+enum
+{
+	FILTER_BATCH_REMOVED,
+	FILTER_RESIDUAL_REMOVED,
+	FILTER_INPUT_BATCHES,
+	FILTER_INPUT_ROWS,
+	FILTER_OUTPUT_ROWS,
+	FILTER_COMPUTED,
+	FILTER_NCOUNTERS
+};
+
 typedef struct FilterState
 {
 	CustomScanState css;
@@ -35,6 +51,8 @@ typedef struct FilterState
 	TessProjection *projection;
 	uint64		batch_removed;
 	uint64		residual_removed;
+	/* The counters of every participant, in a parallel plan. */
+	TessSharedStats *stats;
 } FilterState;
 
 static void filter_begin(CustomScanState *css, EState *estate, int eflags);
@@ -43,6 +61,14 @@ static void filter_end(CustomScanState *css);
 static void filter_rescan(CustomScanState *css);
 static void filter_explain(CustomScanState *css, List *ancestors,
 						   ExplainState *es);
+static Size filter_estimate_dsm(CustomScanState *css, ParallelContext *pcxt);
+static void filter_initialize_dsm(CustomScanState *css, ParallelContext *pcxt,
+								  void *coordinate);
+static void filter_reinitialize_dsm(CustomScanState *css, ParallelContext *pcxt,
+									void *coordinate);
+static void filter_initialize_worker(CustomScanState *css, shm_toc *toc,
+									 void *coordinate);
+static void filter_shutdown(CustomScanState *css);
 
 static const CustomExecMethods filter_exec_methods = {
 	.CustomName = "TessFilter",
@@ -51,6 +77,11 @@ static const CustomExecMethods filter_exec_methods = {
 	.EndCustomScan = filter_end,
 	.ReScanCustomScan = filter_rescan,
 	.ExplainCustomScan = filter_explain,
+	.EstimateDSMCustomScan = filter_estimate_dsm,
+	.InitializeDSMCustomScan = filter_initialize_dsm,
+	.ReInitializeDSMCustomScan = filter_reinitialize_dsm,
+	.InitializeWorkerCustomScan = filter_initialize_worker,
+	.ShutdownCustomScan = filter_shutdown,
 };
 
 const TessNode tess_filter_node = {
@@ -245,6 +276,8 @@ filter_end(CustomScanState *css)
 {
 	FilterState *state = (FilterState *) css;
 
+	if (state->stats != NULL)
+		tess_shared_stats_end(state->stats);
 	tess_unary_end(state->unary);
 	ExecEndNode(linitial(css->custom_ps));
 }
@@ -267,7 +300,30 @@ show_removed(const char *label, uint64 removed, CustomScanState *css,
 							 removed / css->ss.ps.instrument->nloops, 0, es);
 }
 
-/* The batch clauses, as the core shows a scan's qualifiers. */
+/* This participant's counters. */
+static void
+filter_counters(FilterState *state, uint64 *values)
+{
+	const TessUnaryStats *stats = tess_unary_stats(state->unary);
+
+	memset(values, 0, FILTER_NCOUNTERS * sizeof(uint64));
+	values[FILTER_BATCH_REMOVED] = state->batch_removed;
+	values[FILTER_RESIDUAL_REMOVED] = state->residual_removed;
+	values[FILTER_INPUT_BATCHES] = stats->input_batches;
+	values[FILTER_INPUT_ROWS] = stats->input_rows;
+	values[FILTER_OUTPUT_ROWS] = stats->output_rows;
+	if (state->projection != NULL)
+	{
+		const TessProjectionStats *computed = tess_projection_stats(state->projection);
+
+		values[FILTER_COMPUTED] = computed->chain_datums + computed->row_datums;
+	}
+}
+
+/*
+ * The batch clauses, as the core shows a scan's qualifiers; the totals of
+ * every participant in a parallel plan, else the node's own.
+ */
 static void
 filter_explain(CustomScanState *css, List *ancestors, ExplainState *es)
 {
@@ -275,7 +331,8 @@ filter_explain(CustomScanState *css, List *ancestors, ExplainState *es)
 	CustomScan *cscan = castNode(CustomScan, css->ss.ps.plan);
 	List	   *context;
 	bool		useprefix = es->rtable_size > 1 || es->verbose;
-	const TessUnaryStats *stats;
+	const uint64 *totals = NULL;
+	uint64		own[FILTER_NCOUNTERS];
 
 	context = set_deparse_context_plan(es->deparse_cxt, css->ss.ps.plan,
 									   ancestors);
@@ -284,19 +341,77 @@ filter_explain(CustomScanState *css, List *ancestors, ExplainState *es)
 										   context, useprefix, false), es);
 	if (!es->analyze)
 		return;
-	show_removed("Rows Removed by Batch Filter", state->batch_removed, css, es);
-	if (cscan->scan.plan.qual != NIL)
-		show_removed("Rows Removed by Residual Filter", state->residual_removed,
-					 css, es);
-	stats = tess_unary_stats(state->unary);
-	ExplainPropertyInteger("Input Batches", NULL, stats->input_batches, es);
-	ExplainPropertyInteger("Input Rows", NULL, stats->input_rows, es);
-	ExplainPropertyInteger("Output Rows", NULL, stats->output_rows, es);
-	if (state->projection != NULL)
+	if (state->stats != NULL)
+		totals = tess_shared_stats_totals(state->stats);
+	if (totals == NULL)
 	{
-		const TessProjectionStats *computed = tess_projection_stats(state->projection);
-
-		ExplainPropertyInteger("Computed Datums", NULL,
-							   computed->chain_datums + computed->row_datums, es);
+		filter_counters(state, own);
+		totals = own;
 	}
+	show_removed("Rows Removed by Batch Filter", totals[FILTER_BATCH_REMOVED],
+				 css, es);
+	if (cscan->scan.plan.qual != NIL)
+		show_removed("Rows Removed by Residual Filter",
+					 totals[FILTER_RESIDUAL_REMOVED], css, es);
+	ExplainPropertyInteger("Input Batches", NULL, totals[FILTER_INPUT_BATCHES], es);
+	ExplainPropertyInteger("Input Rows", NULL, totals[FILTER_INPUT_ROWS], es);
+	ExplainPropertyInteger("Output Rows", NULL, totals[FILTER_OUTPUT_ROWS], es);
+	if (state->projection != NULL)
+		ExplainPropertyInteger("Computed Datums", NULL, totals[FILTER_COMPUTED], es);
+}
+
+/*
+ * A parallel plan: the node shares only its counters, in the rows of its
+ * chunk; the child divides the work. The leader lays the rows out, a
+ * worker attaches to its own, and each stores its counters when the
+ * executor shuts the node down after the plan's last row.
+ */
+static Size
+filter_estimate_dsm(CustomScanState *css, ParallelContext *pcxt)
+{
+	return tess_shared_stats_estimate(FILTER_NCOUNTERS, pcxt->nworkers);
+}
+
+static void
+filter_initialize_dsm(CustomScanState *css, ParallelContext *pcxt,
+					  void *coordinate)
+{
+	FilterState *state = (FilterState *) css;
+
+	/* A Gather a limit above shut down sets up anew when rescanned. */
+	if (state->stats != NULL)
+		tess_shared_stats_end(state->stats);
+	state->stats = tess_shared_stats_init(css->ss.ps.state->es_query_cxt,
+										  coordinate, FILTER_NCOUNTERS,
+										  pcxt->nworkers, pcxt->seg);
+}
+
+static void
+filter_reinitialize_dsm(CustomScanState *css, ParallelContext *pcxt,
+						void *coordinate)
+{
+	FilterState *state = (FilterState *) css;
+
+	tess_shared_stats_reset(state->stats);
+}
+
+static void
+filter_initialize_worker(CustomScanState *css, shm_toc *toc, void *coordinate)
+{
+	FilterState *state = (FilterState *) css;
+
+	state->stats = tess_shared_stats_attach(css->ss.ps.state->es_query_cxt,
+											coordinate, ParallelWorkerNumber + 1);
+}
+
+static void
+filter_shutdown(CustomScanState *css)
+{
+	FilterState *state = (FilterState *) css;
+	uint64		values[FILTER_NCOUNTERS];
+
+	if (state->stats == NULL)
+		return;
+	filter_counters(state, values);
+	tess_shared_stats_store(state->stats, values);
 }

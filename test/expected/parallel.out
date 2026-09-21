@@ -47,7 +47,7 @@ EXPLAIN (COSTS OFF) SELECT a, b FROM parallel_t WHERE a > 4990;
 ---------------------------------------------------------------
  Gather
    Workers Planned: 2
-   ->  Custom Scan (TessFilter) on parallel_t
+   ->  Parallel Custom Scan (TessFilter) on parallel_t
          Batch Filter: (a > 4990)
          ->  Parallel Custom Scan (TessHeapScan) on parallel_t
 (5 rows)
@@ -70,7 +70,7 @@ EXPLAIN (COSTS OFF) SELECT a + 1 AS next, c || '!' AS shout FROM parallel_t WHER
 ---------------------------------------------------------------
  Gather
    Workers Planned: 2
-   ->  Custom Scan (TessFilter) on parallel_t
+   ->  Parallel Custom Scan (TessFilter) on parallel_t
          Batch Filter: (a > 4990)
          ->  Parallel Custom Scan (TessHeapScan) on parallel_t
 (5 rows)
@@ -95,7 +95,7 @@ SELECT a FROM parallel_t WHERE a > 4990;
  Gather (actual rows=8.00 loops=1)
    Workers Planned: 2
    Workers Launched: 2
-   ->  Custom Scan (TessFilter) on parallel_t (actual rows=2.67 loops=3)
+   ->  Parallel Custom Scan (TessFilter) on parallel_t (actual rows=2.67 loops=3)
          Batch Filter: (a > 4990)
          Rows Removed by Batch Filter: 1664
          Input Batches: 82
@@ -118,7 +118,7 @@ SELECT a FROM parallel_t WHERE a > 4990;
  Gather (actual rows=8.00 loops=1)
    Workers Planned: 2
    Workers Launched: 0
-   ->  Custom Scan (TessFilter) on parallel_t (actual rows=8.00 loops=1)
+   ->  Parallel Custom Scan (TessFilter) on parallel_t (actual rows=8.00 loops=1)
          Batch Filter: (a > 4990)
          Rows Removed by Batch Filter: 4992
          Input Batches: 82
@@ -159,6 +159,12 @@ SELECT plan_property($$SELECT a FROM parallel_t WHERE a > 0$$, 'TessHeapScan', '
  64
 (1 row)
 
+SELECT plan_property($$SELECT a FROM parallel_t WHERE a > 0$$, 'TessFilter', 'Input Rows') AS filter_rows;
+ filter_rows 
+-------------
+ 5000
+(1 row)
+
 SELECT parallel_same($$SELECT a, b FROM parallel_t WHERE a > 4990$$);
                                        parallel_same                                       
 -------------------------------------------------------------------------------------------
@@ -186,7 +192,7 @@ RIGHT JOIN (VALUES (1), (2)) AS v(x) ON true;
                ->  Gather (actual rows=2.00 loops=2)
                      Workers Planned: 2
                      Workers Launched: 2
-                     ->  Custom Scan (TessFilter) on parallel_t (actual rows=0.67 loops=6)
+                     ->  Parallel Custom Scan (TessFilter) on parallel_t (actual rows=0.67 loops=6)
                            Batch Filter: (parallel_t.a > 4997)
                            Rows Removed by Batch Filter: 1666
                            Input Batches: 82
@@ -217,7 +223,7 @@ EXPLAIN (COSTS OFF) SELECT count(*) FROM (SELECT a FROM parallel_t WHERE a > 100
                ->  Limit
                      ->  Gather
                            Workers Planned: 2
-                           ->  Custom Scan (TessFilter) on parallel_t
+                           ->  Parallel Custom Scan (TessFilter) on parallel_t
                                  Batch Filter: (parallel_t.a > 100)
                                  ->  Parallel Custom Scan (TessHeapScan) on parallel_t
 (9 rows)
@@ -248,7 +254,7 @@ RIGHT JOIN (VALUES (1), (2)) AS v(x) ON true;
                      ->  Limit
                            ->  Gather
                                  Workers Planned: 2
-                                 ->  Custom Scan (TessFilter) on parallel_t
+                                 ->  Parallel Custom Scan (TessFilter) on parallel_t
                                        Batch Filter: (parallel_t.a > 4997)
                                        ->  Parallel Custom Scan (TessHeapScan) on parallel_t
 (11 rows)
@@ -271,7 +277,7 @@ EXPLAIN (COSTS OFF) EXECUTE above(4990);
    ->  Gather
          Workers Planned: 2
          ->  Partial Aggregate
-               ->  Custom Scan (TessFilter) on parallel_t
+               ->  Parallel Custom Scan (TessFilter) on parallel_t
                      Batch Filter: (a > $1)
                      ->  Parallel Custom Scan (TessHeapScan) on parallel_t
 (7 rows)
@@ -298,7 +304,7 @@ EXPLAIN (COSTS OFF) SELECT a FROM parallel_t WHERE a > 4990 ORDER BY a;
    Sort Key: a
    ->  Gather
          Workers Planned: 2
-         ->  Custom Scan (TessFilter) on parallel_t
+         ->  Parallel Custom Scan (TessFilter) on parallel_t
                Batch Filter: (a > 4990)
                ->  Parallel Custom Scan (TessHeapScan) on parallel_t
 (7 rows)
@@ -320,7 +326,7 @@ EXPLAIN (COSTS OFF) SELECT count(c), count(*) FROM parallel_t WHERE a > 100;
    ->  Gather
          Workers Planned: 2
          ->  Partial Aggregate
-               ->  Custom Scan (TessFilter) on parallel_t
+               ->  Parallel Custom Scan (TessFilter) on parallel_t
                      Batch Filter: (a > 100)
                      ->  Parallel Custom Scan (TessHeapScan) on parallel_t
 (7 rows)

@@ -281,10 +281,11 @@ the relation may be scanned in parallel, the hook adds a partial path the
 same way over the core's partial sequential scan, so that a `Gather`
 above runs the node in every participant over that participant's share
 of the pages: the path keeps the core scan's number of workers and rows
-per participant, and is not parallel-aware, since the scan below divides
-the work and the node shares nothing; without a `Gather` of its own, an
-aggregate above the relation gets the core's partial aggregate over the
-node's rows in each worker.
+per participant, and is parallel-aware, as the template is, since the
+node shares its counters (`EXPLAIN` prefixes it with `Parallel`); the
+scan below divides the work. Without a `Gather` of its own, an aggregate
+above the relation gets the core's partial aggregate over the node's rows
+in each worker.
 
 Two things make the node possible before that scan. The planner gives
 every scan of the relation its clauses, so `PlanCustomPath` takes them
@@ -319,11 +320,18 @@ each batch instead ([runtime.md](runtime.md)), which computes a column
 when a consumer asks, for the rows asked for: a limit above narrows the
 rows first. The node forwards no tuple bound, since it removes rows.
 
+In a parallel plan the node shares only its counters: the leader lays
+their rows out in the node's chunk (`TessSharedStats`,
+[runtime.md](runtime.md)), a worker attaches to its own, each stores its
+counters when the executor shuts the node down after the plan's last
+row, and the leader shows the totals.
+
 `EXPLAIN` shows the batch prefix as `Batch Filter` and the rest as the
 core's `Filter`; with `ANALYZE`, the rows removed by each part, per loop,
 the helper's batches and rows and, with computed targets, the `Computed
-Datums`. The core's `Rows Removed by Filter`
-counts both parts, since the helper reports every row the node removes.
+Datums`, summed over the participants of a parallel plan. The core's
+`Rows Removed by Filter` counts both parts, since the helper reports
+every row the node removes.
 
 ### Tests
 

@@ -68,6 +68,7 @@ RESET max_parallel_workers;
 SET parallel_leader_participation = off;
 SELECT plan_property($$SELECT a FROM parallel_t WHERE a > 0$$, 'TessHeapScan', 'Pages')::int = :pages AS all_pages;
 SELECT plan_property($$SELECT a FROM parallel_t WHERE a > 0$$, 'TessHeapScan', 'Batch Size') AS batch_size;
+SELECT plan_property($$SELECT a FROM parallel_t WHERE a > 0$$, 'TessFilter', 'Input Rows') AS filter_rows;
 SELECT parallel_same($$SELECT a, b FROM parallel_t WHERE a > 4990$$);
 RESET parallel_leader_participation;
 -- A Gather rescanned in a join: the shared page handout starts over.

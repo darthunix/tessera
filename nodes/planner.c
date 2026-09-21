@@ -154,7 +154,7 @@ find_seqscan(const List *pathlist)
  * place of the parallel sequential scan, so that a Gather above runs the
  * node in every participant over that participant's share of the pages;
  * the partial path keeps the core scan's number of workers and rows per
- * participant.
+ * participant, and is parallel-aware for the counters the node shares.
  */
 static void
 set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
@@ -180,14 +180,12 @@ set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
 	if (partial == NULL || !partial->parallel_aware || !rel->consider_parallel)
 		return;
 	child = make_child_path(root, rel, partial);
+	/*
+	 * Parallel-aware as the template is: the child divides the work, and
+	 * the node shares its counters, which takes the callbacks.
+	 */
 	if (child != NULL)
-	{
-		CustomPath *path = make_filter_path(rel, partial, child);
-
-		/* The child divides the work; the node keeps no shared state. */
-		path->path.parallel_aware = false;
-		add_partial_path(rel, &path->path);
-	}
+		add_partial_path(rel, (Path *) make_filter_path(rel, partial, child));
 }
 
 /*
