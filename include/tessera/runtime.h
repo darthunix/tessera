@@ -147,6 +147,16 @@ extern void tess_heap_batch_append_tuple(TessHeapBatch *batch,
 										 Buffer buffer);
 
 /*
+ * Append n tuples of the page of buffer, which the batch pins once, by
+ * their line pointers: the visible tuples of a page as a scan lists them.
+ * The descriptor must be known; n rows must fit.
+ */
+extern void tess_heap_batch_append_page(TessHeapBatch *batch, Buffer buffer,
+										BlockNumber block,
+										const OffsetNumber *offsets, int n,
+										Oid table_oid);
+
+/*
  * Finish the batch and return it, or NULL without rows. The batch stays
  * valid until it is released; finishing again returns the same batch.
  */

@@ -273,24 +273,17 @@ fill_from_page(HeapScanState *state, int limit)
 {
 	HeapScanDesc hscan = (HeapScanDesc) state->scan;
 	Relation	rel = state->css.ss.ss_currentRelation;
-	Page		page = BufferGetPage(hscan->rs_cbuf);
 	int			nrows = Min(limit, hscan->rs_ntuples - state->page_cursor);
 
-	for (int index = 0; index < nrows; index++)
+	tess_heap_batch_append_page(state->heap, hscan->rs_cbuf, hscan->rs_cblock,
+								hscan->rs_vistuples + state->page_cursor, nrows,
+								RelationGetRelid(rel));
+	/* As pgstat_count_heap_getnext; the core counted the page's first tuple. */
+	if (pgstat_should_count_relation(rel))
 	{
-		int			entry = state->page_cursor + index;
-		OffsetNumber offset = hscan->rs_vistuples[entry];
-		ItemId		item = PageGetItemId(page, offset);
-		HeapTupleData tuple;
-
-		tuple.t_len = ItemIdGetLength(item);
-		tuple.t_data = (HeapTupleHeader) PageGetItem(page, item);
-		ItemPointerSet(&tuple.t_self, hscan->rs_cblock, offset);
-		tuple.t_tableOid = RelationGetRelid(rel);
-		tess_heap_batch_append_tuple(state->heap, &tuple, hscan->rs_cbuf);
-		/* The core counted the page's first visible tuple itself. */
-		if (entry > 0)
-			pgstat_count_heap_getnext(rel);
+		Assert(rel->pgstat_info->kind == PGSTAT_KIND_RELATION);
+		rel->pgstat_info->tab.counts.tuples_returned +=
+			state->page_cursor > 0 ? nrows : nrows - 1;
 	}
 	state->page_cursor += nrows;
 }

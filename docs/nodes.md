@@ -72,8 +72,8 @@ batch comes from one page: the node lets the core's scan bring the next
 page in, prune it and decide which tuples are visible, with one
 `heap_getnextslot` call per page, and takes the page's visible tuples
 straight from the scan's list into a heap batch (`TessHeapBatch`,
-[runtime.md](runtime.md)), up to the batch size, resuming on the next call
-with the rest of the page; before moving on, it sets the scan's position
+[runtime.md](runtime.md)) in one call, up to the batch size, resuming on
+the next call with the rest of the page; before moving on, it sets the scan's position
 past the page so that the core fetches another. The batch pins the page
 until it is released, so a column is deformed only when a consumer asks
 for it, for the rows it asks for, and by-reference values, external

@@ -33,6 +33,10 @@ SELECT tessera_test_heap_batch_errors(2, 'heap_batch_t');
 ERROR:  Tessera heap batch received a row mask of another batch
 SELECT tessera_test_heap_batch_errors(3, 'heap_batch_t');
 ERROR:  Tessera heap batch needs a descriptor before tuples
+SELECT tessera_test_heap_batch_errors(4, 'heap_batch_t');
+ERROR:  Tessera heap batch is full
+SELECT tessera_test_heap_batch_errors(5, 'heap_batch_t');
+ERROR:  Tessera heap batch needs a pinned page
 \set VERBOSITY default
 DROP TABLE heap_batch_t;
 DROP FUNCTION tessera_test_heap_batch_errors(integer, regclass);

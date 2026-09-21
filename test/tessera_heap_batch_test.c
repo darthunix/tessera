@@ -2,6 +2,7 @@
 
 #include <string.h>
 
+#include "access/heapam.h"
 #include "access/relscan.h"
 #include "access/table.h"
 #include "access/tableam.h"
@@ -92,26 +93,49 @@ row_holds(const TessDatumColumn *column, int row, int attnum)
 	}
 }
 
+typedef enum FillMode
+{
+	FILL_SLOTS,
+	FILL_TUPLES,
+	FILL_PAGES
+} FillMode;
+
 /*
- * Fill the batch with the relation's first rows, from the scan's slots or
- * as tuples rebuilt from the page items the slots point at, and keep
- * scanning so that the scan leaves the batch's pages. Returns the rows
- * scanned.
+ * Fill the batch with the relation's first rows, from the scan's slots,
+ * as tuples rebuilt from the page items the slots point at, or page by
+ * page from the scan's list of visible tuples as the scan node does, and
+ * keep scanning so that the scan leaves the batch's pages. Returns the
+ * rows scanned.
  */
 static int
-fill(TessHeapBatch *heap, Relation rel, bool by_tuple)
+fill(TessHeapBatch *heap, Relation rel, FillMode mode, int capacity)
 {
 	TupleTableSlot *slot = table_slot_create(rel, NULL);
 	TableScanDesc scan = table_beginscan(rel, GetActiveSnapshot(), 0, NULL, 0);
+	HeapScanDesc hscan = (HeapScanDesc) scan;
 	int			scanned = 0;
+	int			room = capacity;
 
 	while (table_scan_getnextslot(scan, ForwardScanDirection, slot))
 	{
 		BufferHeapTupleTableSlot *bslot = (BufferHeapTupleTableSlot *) slot;
 
+		if (mode == FILL_PAGES)
+		{
+			/* The first tuple of a page: take the page's list, skip the rest. */
+			int			n = Min(room, hscan->rs_ntuples);
+
+			tess_heap_batch_append_page(heap, bslot->buffer, hscan->rs_cblock,
+										hscan->rs_vistuples, n,
+										RelationGetRelid(rel));
+			room -= n;
+			scanned += hscan->rs_ntuples;
+			hscan->rs_cindex = hscan->rs_ntuples - 1;
+			continue;
+		}
 		if (!tess_heap_batch_is_full(heap))
 		{
-			if (by_tuple)
+			if (mode == FILL_TUPLES)
 			{
 				Page		page = BufferGetPage(bslot->buffer);
 				OffsetNumber offset = ItemPointerGetOffsetNumber(&bslot->base.tuple->t_self);
@@ -205,12 +229,19 @@ tessera_test_heap_batch(PG_FUNCTION_ARGS)
 
 	/* From the scan's slots, the descriptor taken from the first one. */
 	heap = make_heap(3, 64, NULL);
-	result &= check(1, fill(heap, rel, false) > 64 && tess_heap_batch_is_full(heap));
+	result &= check(1, fill(heap, rel, FILL_SLOTS, 64) > 64 &&
+		tess_heap_batch_is_full(heap));
 	result &= verify(heap, relid, 1);
 	/* As tuples rebuilt from page items, the descriptor configured. */
 	heap = make_heap(3, 64, RelationGetDescr(rel));
-	result &= check(10, fill(heap, rel, true) > 64 && tess_heap_batch_is_full(heap));
+	result &= check(10, fill(heap, rel, FILL_TUPLES, 64) > 64 &&
+		tess_heap_batch_is_full(heap));
 	result &= verify(heap, relid, 10);
+	/* Page by page from the scan's list, the last page taken in part. */
+	heap = make_heap(3, 64, RelationGetDescr(rel));
+	result &= check(30, fill(heap, rel, FILL_PAGES, 64) > 64 &&
+		tess_heap_batch_is_full(heap));
+	result &= verify(heap, relid, 30);
 
 	/* A row from a virtual slot, and a tuple without a page, are copied. */
 	{
@@ -279,6 +310,19 @@ tessera_test_heap_batch_errors(PG_FUNCTION_ARGS)
 			break;
 		case 3:
 			tess_heap_batch_append_tuple(make_heap(3, 2, NULL), &tuple, InvalidBuffer);
+			break;
+		case 4:
+			tess_heap_batch_append_page(make_heap(3, 2, RelationGetDescr(rel)),
+										((BufferHeapTupleTableSlot *) slot)->buffer,
+										((HeapScanDesc) scan)->rs_cblock,
+										((HeapScanDesc) scan)->rs_vistuples, 3,
+										relid);
+			break;
+		case 5:
+			tess_heap_batch_append_page(make_heap(3, 2, RelationGetDescr(rel)),
+										InvalidBuffer, 0,
+										((HeapScanDesc) scan)->rs_vistuples, 1,
+										relid);
 			break;
 		default:
 			elog(ERROR, "unknown error case %d", kind);

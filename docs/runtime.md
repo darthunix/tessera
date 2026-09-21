@@ -95,10 +95,13 @@ while (!tess_heap_batch_is_full(heap))
 batch = tess_heap_batch_finish(heap, InvalidOid);
 ```
 
-A scan that reads pages itself appends tuples by their headers with
-`tess_heap_batch_append_tuple`, pinning their page or copying a tuple given
-without one, and supplies the descriptor and the guaranteed prefix in the
-configuration instead of a first slot.
+A scan that reads pages itself appends the visible tuples of a page in one
+call with `tess_heap_batch_append_page`, by their line pointers, which
+pins the page once and fills the rows in a plain loop; single tuples go
+by their headers through `tess_heap_batch_append_tuple`, pinning their
+page or copying a tuple given without one. Such a scan supplies the
+descriptor and the guaranteed prefix in the configuration instead of a
+first slot.
 
 Deformation resumes: every row keeps a `TessDeformCursor`
 (`tessera/heap_deform.h`), the attributes passed so far and the byte

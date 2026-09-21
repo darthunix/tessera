@@ -166,6 +166,17 @@ tess_heap_batch_create(const TessHeapBatchConfig *config)
 	return heap;
 }
 
+/* Pin a page for the batch, once per page: rows of a page come together. */
+static inline void
+pin_page(TessHeapBatch *heap, Buffer buffer)
+{
+	if (heap->npins == 0 || heap->pins[heap->npins - 1] != buffer)
+	{
+		IncrBufferRefCount(buffer);
+		heap->pins[heap->npins++] = buffer;
+	}
+}
+
 /* Keep a row: the tuple header, and a pin on its page once per page. */
 static void
 keep_tuple(TessHeapBatch *heap, const HeapTupleData *tuple, Buffer buffer)
@@ -179,11 +190,7 @@ keep_tuple(TessHeapBatch *heap, const HeapTupleData *tuple, Buffer buffer)
 	if (BufferIsValid(buffer))
 	{
 		heap->tuples[row] = *tuple;
-		if (heap->npins == 0 || heap->pins[heap->npins - 1] != buffer)
-		{
-			IncrBufferRefCount(buffer);
-			heap->pins[heap->npins++] = buffer;
-		}
+		pin_page(heap, buffer);
 	}
 	else
 	{
@@ -257,6 +264,50 @@ tess_heap_batch_append_tuple(TessHeapBatch *heap, const HeapTupleData *tuple,
 	if (heap->tuple_desc == NULL)
 		elog(ERROR, "Tessera heap batch needs a descriptor before tuples");
 	keep_tuple(heap, tuple, buffer);
+}
+
+/*
+ * The rows of one page in one call: the checks and the pin once, then a
+ * plain loop over the line pointers into the batch's arrays. The page's
+ * fields are read into locals first, so that the stores do not make the
+ * compiler reload them.
+ */
+void
+tess_heap_batch_append_page(TessHeapBatch *heap, Buffer buffer,
+							BlockNumber block, const OffsetNumber *offsets,
+							int n, Oid table_oid)
+{
+	int			first = heap->nrows;
+	Page		page;
+	HeapTupleData *tuples;
+	TessDeformCursor *cursors;
+
+	if (heap->tuple_desc == NULL)
+		elog(ERROR, "Tessera heap batch needs a descriptor before tuples");
+	if (unlikely(heap->sealed))
+		elog(ERROR, "cannot append to a finished Tessera heap batch");
+	if (n < 0 || first + n > heap->capacity)
+		elog(ERROR, "Tessera heap batch is full");
+	if (!BufferIsValid(buffer))
+		elog(ERROR, "Tessera heap batch needs a pinned page");
+	if (n == 0)
+		return;
+	pin_page(heap, buffer);
+	page = BufferGetPage(buffer);
+	tuples = heap->tuples + first;
+	cursors = heap->cursors + first;
+	for (int index = 0; index < n; index++)
+	{
+		OffsetNumber offset = offsets[index];
+		ItemId		item = PageGetItemId(page, offset);
+
+		tuples[index].t_len = ItemIdGetLength(item);
+		tuples[index].t_data = (HeapTupleHeader) PageGetItem(page, item);
+		ItemPointerSet(&tuples[index].t_self, block, offset);
+		tuples[index].t_tableOid = table_oid;
+		tess_deform_cursor_init(&cursors[index]);
+	}
+	heap->nrows = first + n;
 }
 
 TessBatch *
