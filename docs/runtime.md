@@ -124,6 +124,42 @@ guaranteed prefix (`tts_first_nonguaranteed` of the first slot) and the
 descriptor are taken from the slots appended, so a node needs no
 descriptor of its own.
 
+## Computing columns on demand
+
+`TessProjection` gives a batch computed columns: a wrapper around a child's
+batch whose columns come first, with one more column per computed target,
+evaluated when a consumer asks for it and for the rows it asks for. It is
+how a node with `CUSTOMPATH_SUPPORT_PROJECTION` publishes the expressions
+PostgreSQL installs in its target list (see `TESS_LAYOUT_PROJECTED` under
+"Building plans"):
+
+```c
+TessProjectionConfig config = TESS_STRUCT_INITIALIZER(TessProjectionConfig);
+
+config.parent_context = estate->es_query_cxt;
+config.parent = &css->ss.ps;
+config.econtext = css->ss.ps.ps_ExprContext;
+config.scan_slot = css->ss.ss_ScanTupleSlot;
+config.scan_tuple = &scan_tuple_layout;
+config.base_columns = child_layout.ncolumns;
+config.computed = info.computed;
+projection = tess_projection_create(&config);
+...
+batch = tess_projection_wrap(projection, child_batch);
+```
+
+A target the [expression compiler](expr.md) accepts, a column and
+registered calls over it with constants and parameters, is computed by
+its batch chain over the batch's selected rows the first time a consumer
+asks for it, once per batch, and the chain's own result column is handed
+out without a copy. The wrapper shares the child's row mask, so a filter or
+a limit above that narrows the wrapper before asking narrows what the
+chain computes. A released wrapper releases the child; the next
+`tess_projection_wrap` takes the next batch, and `tess_projection_reset`
+forgets one at a rescan. `tess_projection_stats` counts the values
+computed for `EXPLAIN`. Any other target is not computed yet: the row-wise
+path through the executor follows.
+
 ## Publishing batches and serving rows
 
 `TessOutput` is the output side of a node: a virtual slot bound to the
