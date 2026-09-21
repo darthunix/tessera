@@ -17,6 +17,15 @@ query down, and where it can, does it speed one up.
   aggregate cases without a filter or with four aggregates over one
   column. A ratio below one is the win; each run is compared with the
   previous one.
+- **probe** (`probe.sql`): where the time of a parallel query goes. A
+  table of 28 pages under a `Gather`, serially and with one and two
+  workers, with and without the leader taking part: all its time is the
+  fixed cost of launching and finishing the workers, and any difference
+  between the modes is the batch nodes' own. Then `count_all` and `dense`
+  of the win family with one, two and four workers, `mixed` and `wide`
+  with two, and the plans of both modes with `EXPLAIN VERBOSE`, which
+  shows every worker's time and rows under each node. Run with
+  `measure probe 2`; the workers of each case are set in the file.
 - **oltp**: short prepared-statement queries, `pgbench -S`, where the
   planner hooks and the loaded modules must not slow down queries that
   never use a batch node. Arrives when more than one hook is installed.
