@@ -101,7 +101,9 @@ pub(super) unsafe fn guard(status: *mut Status, body: impl FnOnce() -> Result<()
         Ok(Err(error)) => match error.downcast_ref::<ArithmeticError>() {
             Some(arithmetic) => (
                 match arithmetic {
-                    ArithmeticError::IntegerOutOfRange => Code::IntegerOutOfRange,
+                    ArithmeticError::IntegerOutOfRange | ArithmeticError::BigintOutOfRange => {
+                        Code::IntegerOutOfRange
+                    }
                     ArithmeticError::DivisionByZero => Code::DivisionByZero,
                 },
                 arithmetic.sqlstate(),

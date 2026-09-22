@@ -46,6 +46,8 @@ pub enum ArithOp {
 pub enum ArithmeticError {
     /// SQLSTATE 22003: an int4 result does not fit.
     IntegerOutOfRange,
+    /// SQLSTATE 22003: an int8 result does not fit.
+    BigintOutOfRange,
     /// SQLSTATE 22012: a zero divisor.
     DivisionByZero,
 }
@@ -54,7 +56,7 @@ impl ArithmeticError {
     /// The five-character SQLSTATE of the error.
     pub fn sqlstate(self) -> &'static str {
         match self {
-            Self::IntegerOutOfRange => "22003",
+            Self::IntegerOutOfRange | Self::BigintOutOfRange => "22003",
             Self::DivisionByZero => "22012",
         }
     }
@@ -64,6 +66,7 @@ impl fmt::Display for ArithmeticError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             Self::IntegerOutOfRange => "integer out of range",
+            Self::BigintOutOfRange => "bigint out of range",
             Self::DivisionByZero => "division by zero",
         })
     }
