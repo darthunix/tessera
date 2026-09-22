@@ -7,7 +7,8 @@ use std::ptr;
 use tessera_capi::c::{
     Code, DatumColumn, Mask, Status, tess_int4_arith_columns, tess_int4_arith_scalar,
     tess_int4_arith_scalar_left, tess_int4_count, tess_int4_filter, tess_int4_hash,
-    tess_int4_hash_next, tess_int4_max, tess_int4_min, tess_int4_sum, tess_int8_filter,
+    tess_int4_hash_next, tess_int4_max, tess_int4_min, tess_int4_sum, tess_int8_arith_columns,
+    tess_int8_arith_scalar, tess_int8_arith_scalar_left, tess_int8_filter,
     tess_kernels_abi_version, tess_kernels_layout, tess_kernels_test_panic,
 };
 use tessera_kernels::int32::{hash_combine, murmurhash32};
@@ -600,6 +601,164 @@ fn arithmetic_writes_results_and_reports_postgresql_codes() {
     assert_eq!(code, Code::Ok);
     assert_eq!(result_words, [0b110]);
     assert_eq!((values[1], values[2]), (0, 0));
+}
+
+#[test]
+fn int8_arithmetic_writes_whole_results_and_reports_bigint_codes() {
+    let mut fixture = int8_fixture(200);
+    let column = fixture.column();
+    let rows = fixture.mask();
+    let mut values = vec![i64::MIN; 200];
+    let mut result_words = vec![0; 4];
+    let mut non_nulls = Mask {
+        nrows: 200,
+        bits: result_words.as_mut_ptr(),
+    };
+    let mut status = Status::new();
+    // SAFETY: local buffers of the declared sizes, aliased by nothing else.
+    let code = unsafe {
+        tess_int8_arith_scalar(
+            0,
+            &raw const column,
+            1 << 40,
+            ptr::null(),
+            &raw const rows,
+            values.as_mut_ptr(),
+            &raw mut non_nulls,
+            &raw mut status,
+        )
+    };
+    assert_eq!(code, Code::Ok);
+    for row in 0..200 {
+        let selected = fixture.words[row / 64] & (1 << (row % 64)) != 0;
+        let present = result_words[row / 64] & (1 << (row % 64)) != 0;
+        assert_eq!(present, selected && !fixture.isnull[row], "row {row}");
+        if present {
+            assert_eq!(
+                values[row],
+                fixture.values[row] as i64 + (1 << 40),
+                "row {row}"
+            );
+        }
+    }
+    // scalar - column and column * column on a small column with a NULL.
+    let datums: Vec<u64> = [10_i64 << 20, 20 << 20, 30 << 20]
+        .iter()
+        .map(|&v| v as u64)
+        .collect();
+    let isnull = [false, true, false];
+    let column = DatumColumn {
+        struct_size: size_of::<DatumColumn>(),
+        values: datums.as_ptr(),
+        isnull: isnull.as_ptr(),
+        nrows: 3,
+    };
+    let mut selection = [0b111];
+    let rows = Mask {
+        nrows: 3,
+        bits: selection.as_mut_ptr(),
+    };
+    let mut values = [0_i64; 3];
+    let mut result_words = [0];
+    let mut non_nulls = Mask {
+        nrows: 3,
+        bits: result_words.as_mut_ptr(),
+    };
+    // SAFETY: as above.
+    let code = unsafe {
+        tess_int8_arith_scalar_left(
+            1,
+            100 << 20,
+            &raw const column,
+            ptr::null(),
+            &raw const rows,
+            values.as_mut_ptr(),
+            &raw mut non_nulls,
+            &raw mut status,
+        )
+    };
+    assert_eq!(code, Code::Ok);
+    assert_eq!(result_words, [0b101]);
+    assert_eq!((values[0], values[2]), (90 << 20, 70 << 20));
+    // SAFETY: as above; the column is both operands.
+    let code = unsafe {
+        tess_int8_arith_columns(
+            2,
+            &raw const column,
+            ptr::null(),
+            &raw const column,
+            ptr::null(),
+            &raw const rows,
+            values.as_mut_ptr(),
+            &raw mut non_nulls,
+            &raw mut status,
+        )
+    };
+    assert_eq!(code, Code::Ok);
+    assert_eq!(result_words, [0b101]);
+    assert_eq!((values[0], values[2]), (100 << 40, 900 << 40));
+    // PostgreSQL's codes and messages for bigint.
+    let datums = [i64::MAX as u64, i64::MIN as u64, 1];
+    let isnull = [false, false, false];
+    let column = DatumColumn {
+        struct_size: size_of::<DatumColumn>(),
+        values: datums.as_ptr(),
+        isnull: isnull.as_ptr(),
+        nrows: 3,
+    };
+    // SAFETY: as above.
+    let code = unsafe {
+        tess_int8_arith_scalar(
+            0,
+            &raw const column,
+            1,
+            ptr::null(),
+            &raw const rows,
+            values.as_mut_ptr(),
+            &raw mut non_nulls,
+            &raw mut status,
+        )
+    };
+    assert_eq!(code, Code::IntegerOutOfRange);
+    assert_eq!(status.sqlstate(), "22003");
+    assert_eq!(status.message(), "bigint out of range");
+    for (op, scalar, code, sqlstate) in [
+        (3, 0, Code::DivisionByZero, "22012"),
+        (3, -1, Code::IntegerOutOfRange, "22003"),
+        (7, 1, Code::InvalidArgument, "XX000"),
+    ] {
+        // SAFETY: as above.
+        let got = unsafe {
+            tess_int8_arith_scalar(
+                op,
+                &raw const column,
+                scalar,
+                ptr::null(),
+                &raw const rows,
+                values.as_mut_ptr(),
+                &raw mut non_nulls,
+                &raw mut status,
+            )
+        };
+        assert_eq!(got, code, "op {op} scalar {scalar}");
+        assert_eq!(status.sqlstate(), sqlstate, "op {op} scalar {scalar}");
+    }
+    // x % -1 is 0 for every value, i64::MIN included.
+    // SAFETY: as above.
+    let code = unsafe {
+        tess_int8_arith_scalar(
+            4,
+            &raw const column,
+            -1,
+            ptr::null(),
+            &raw const rows,
+            values.as_mut_ptr(),
+            &raw mut non_nulls,
+            &raw mut status,
+        )
+    };
+    assert_eq!(code, Code::Ok);
+    assert_eq!((result_words, values), ([0b111], [0, 0, 0]));
 }
 
 #[test]

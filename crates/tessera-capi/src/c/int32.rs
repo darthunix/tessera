@@ -317,7 +317,7 @@ fn null_keys(nulls: c_uint) -> Result<NullKeys> {
 }
 
 /// A `TessArithOp` value.
-fn arith_op(op: c_uint) -> Result<ArithOp> {
+pub(super) fn arith_op(op: c_uint) -> Result<ArithOp> {
     Ok(match op {
         0 => ArithOp::Add,
         1 => ArithOp::Sub,

@@ -9,6 +9,9 @@ mod aggregating;
 #[path = "../benches/support/arithmetic.rs"]
 #[allow(dead_code)]
 mod arithmetic;
+#[path = "../benches/support/arithmetic64.rs"]
+#[allow(dead_code)]
+mod arithmetic64;
 #[path = "../benches/support/filtering.rs"]
 #[allow(dead_code)]
 mod filtering;
@@ -134,6 +137,31 @@ fn arithmetic_kernels_match_the_fixture_model_on_every_case() -> Result<()> {
             &reading::Input::new(&datum, &case),
             &case,
             arithmetic::datum_reference,
+        )?;
+    }
+    Ok(())
+}
+
+#[test]
+fn arithmetic64_kernels_match_the_fixture_model_on_every_case() -> Result<()> {
+    let int32: Vec<_> = reading::cases().into_iter().map(|case| case.name).collect();
+    let names: Vec<_> = arithmetic64::cases()
+        .into_iter()
+        .map(|case| case.name)
+        .collect();
+    assert_eq!(names, int32);
+    for case in arithmetic64::cases() {
+        let dense = case.dense_column()?;
+        arithmetic64::check(
+            &arithmetic64::Input::new(&dense, &case),
+            &case,
+            arithmetic64::dense_reference,
+        )?;
+        let datum = case.datum_column()?;
+        arithmetic64::check(
+            &arithmetic64::Input::new(&datum, &case),
+            &case,
+            arithmetic64::datum_reference,
         )?;
     }
     Ok(())

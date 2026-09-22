@@ -213,4 +213,38 @@ extern TessStatusCode tess_int8_filter(const TessDatumColumn *column,
 									   int64 scalar,
 									   TessStatus *status);
 
+/*
+ * Arithmetic into a dense int8 result, as tess_int4_arith_scalar and its
+ * siblings: overflow fails with TESS_ERROR_INTEGER_OUT_OF_RANGE (SQLSTATE
+ * 22003, "bigint out of range"), a zero divisor with
+ * TESS_ERROR_DIVISION_BY_ZERO, MIN / -1 is out of range and x % -1 is 0.
+ */
+extern TessStatusCode tess_int8_arith_scalar(TessArithOp op,
+											 const TessDatumColumn *column,
+											 int64 scalar,
+											 const TessRowMask *prepared,
+											 const TessRowMask *rows,
+											 int64 *values,
+											 TessRowMask *non_nulls,
+											 TessStatus *status);
+
+extern TessStatusCode tess_int8_arith_scalar_left(TessArithOp op,
+												  int64 scalar,
+												  const TessDatumColumn *column,
+												  const TessRowMask *prepared,
+												  const TessRowMask *rows,
+												  int64 *values,
+												  TessRowMask *non_nulls,
+												  TessStatus *status);
+
+extern TessStatusCode tess_int8_arith_columns(TessArithOp op,
+											  const TessDatumColumn *left,
+											  const TessRowMask *left_prepared,
+											  const TessDatumColumn *right,
+											  const TessRowMask *right_prepared,
+											  const TessRowMask *rows,
+											  int64 *values,
+											  TessRowMask *non_nulls,
+											  TessStatus *status);
+
 #endif							/* TESSERA_KERNELS_H */
