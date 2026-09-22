@@ -6,8 +6,10 @@
 //! The rules of the boundary are in the crate documentation; the C-side
 //! contract, in `docs/kernels.md`.
 
+mod args;
 mod column;
 mod int32;
+mod int64;
 mod mask;
 mod status;
 
@@ -17,5 +19,6 @@ pub use int32::{
     tess_int4_filter, tess_int4_hash, tess_int4_hash_next, tess_int4_max, tess_int4_min,
     tess_int4_sum, tess_kernels_abi_version, tess_kernels_layout, tess_kernels_test_panic,
 };
+pub use int64::tess_int8_filter;
 pub use mask::Mask;
 pub use status::{Code, MESSAGE_SIZE, Status};

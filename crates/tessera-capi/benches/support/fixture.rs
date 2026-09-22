@@ -14,8 +14,36 @@
 use super::reference::{Bits, Mask};
 use anyhow::Result;
 use std::mem::MaybeUninit;
-use tessera_capi::{DatumInt32Column, DenseInt32Column};
+use tessera_capi::{DatumIntColumn, DenseIntColumn, FromDatum};
 use tessera_core::RowMaskView;
+
+/// A value a fixture holds: the int4 or int8 of a Datum, in both
+/// representations.
+pub trait FixtureValue: FromDatum {
+    /// The Datum PostgreSQL makes of the value (sign-extended, as
+    /// Int32GetDatum and Int64GetDatum do).
+    fn datum(self) -> u64;
+    /// The value widened for sums.
+    fn wide(self) -> i64;
+}
+
+impl FixtureValue for i32 {
+    fn datum(self) -> u64 {
+        self as i64 as u64
+    }
+    fn wide(self) -> i64 {
+        i64::from(self)
+    }
+}
+
+impl FixtureValue for i64 {
+    fn datum(self) -> u64 {
+        self as u64
+    }
+    fn wide(self) -> i64 {
+        self
+    }
+}
 
 /// xorshift64*: deterministic, and its high bits are well mixed.
 struct Random(u64);
@@ -84,9 +112,10 @@ impl Bitmap {
     }
 }
 
-pub struct Fixture {
+/// The inputs of one case; int4 unless a width is named.
+pub struct Fixture<T = i32> {
     pub name: String,
-    pub values: Vec<i32>,
+    pub values: Vec<T>,
     pub datums: Vec<u64>,
     pub nulls: Vec<bool>,
     pub selected: Bitmap,
@@ -103,12 +132,12 @@ pub fn as_uninit<T>(values: &[T]) -> &[MaybeUninit<T>] {
     unsafe { std::slice::from_raw_parts(values.as_ptr().cast(), values.len()) }
 }
 
-impl Fixture {
-    pub fn dense_column(&self) -> Result<DenseInt32Column<'_>> {
+impl<T: FixtureValue> Fixture<T> {
+    pub fn dense_column(&self) -> Result<DenseIntColumn<'_, T>> {
         // SAFETY: fixture buffers are initialized, immutable throughout the borrow,
         // and outlive the returned column, including NULL and unprepared positions.
         unsafe {
-            DenseInt32Column::try_new(
+            DenseIntColumn::try_new(
                 as_uninit(&self.values),
                 self.non_nulls.as_ref().map(Bitmap::view),
                 self.prepared.as_ref().map(Bitmap::view),
@@ -116,11 +145,11 @@ impl Fixture {
         }
     }
 
-    pub fn datum_column(&self) -> Result<DatumInt32Column<'_>> {
+    pub fn datum_column(&self) -> Result<DatumIntColumn<'_, T>> {
         // SAFETY: the same fixture initialization and lifetime guarantees hold
         // for Datum values and valid bool flags.
         unsafe {
-            DatumInt32Column::try_new(
+            DatumIntColumn::try_new(
                 as_uninit(&self.datums),
                 as_uninit(&self.nulls),
                 self.prepared.as_ref().map(Bitmap::view),
@@ -129,7 +158,7 @@ impl Fixture {
     }
 
     pub fn from_values(
-        values: Vec<i32>,
+        values: Vec<T>,
         pattern: &str,
         nulls: &str,
         offset: Option<usize>,
@@ -162,13 +191,14 @@ impl Fixture {
                 _ => unreachable!(),
             })
             .collect();
-        let datums: Vec<_> = values.iter().map(|&value| value as u64).collect();
+        let datums: Vec<_> = values.iter().map(|&value| value.datum()).collect();
         let expected = values
             .iter()
             .enumerate()
             .filter(|&(row, _)| selected[row] && !flags[row])
-            .map(|(_, &value)| i64::from(value))
-            .sum();
+            .map(|(_, &value)| value.wide())
+            // Wrapping: an int8 fixture may hold both extremes.
+            .fold(0, i64::wrapping_add);
         Self {
             name: format!(
                 "{}/{nrows}/{pattern}/nulls-{nulls}/{}",

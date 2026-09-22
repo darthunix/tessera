@@ -7,8 +7,8 @@ use std::ptr;
 use tessera_capi::c::{
     Code, DatumColumn, Mask, Status, tess_int4_arith_columns, tess_int4_arith_scalar,
     tess_int4_arith_scalar_left, tess_int4_count, tess_int4_filter, tess_int4_hash,
-    tess_int4_hash_next, tess_int4_max, tess_int4_min, tess_int4_sum, tess_kernels_abi_version,
-    tess_kernels_layout, tess_kernels_test_panic,
+    tess_int4_hash_next, tess_int4_max, tess_int4_min, tess_int4_sum, tess_int8_filter,
+    tess_kernels_abi_version, tess_kernels_layout, tess_kernels_test_panic,
 };
 use tessera_kernels::int32::{hash_combine, murmurhash32};
 
@@ -145,6 +145,84 @@ fn filter_narrows_the_mask_and_reports_success() {
         "{}",
         status.message()
     );
+}
+
+/// The int4 fixture's values shifted past the int4 range, as int8 Datums:
+/// a 32-bit read would see zeros and keep no row.
+fn int8_fixture(nrows: usize) -> Fixture {
+    let mut fixture = Fixture::new(nrows);
+    fixture.values = fixture
+        .values
+        .iter()
+        .map(|&datum| ((datum as i32 as i64) << 33) as u64)
+        .collect();
+    fixture
+}
+
+#[test]
+fn int8_filter_reads_whole_datums() {
+    let mut fixture = int8_fixture(200);
+    let expected = Fixture::new(200).expected_words();
+    let column = fixture.column();
+    let mut rows = fixture.mask();
+    let mut status = Status::new();
+    // SAFETY: local buffers of the declared sizes, aliased by nothing else.
+    let code = unsafe {
+        tess_int8_filter(
+            &raw const column,
+            ptr::null(),
+            &raw mut rows,
+            4,
+            0,
+            &raw mut status,
+        )
+    };
+    assert_eq!(code, Code::Ok);
+    assert_eq!(status.code, Code::Ok);
+    assert_eq!(fixture.words, expected);
+    // A scalar beyond the int4 range keeps only the values above it.
+    let mut fixture = int8_fixture(200);
+    let column = fixture.column();
+    let mut rows = fixture.mask();
+    // SAFETY: as above.
+    let code = unsafe {
+        tess_int8_filter(
+            &raw const column,
+            ptr::null(),
+            &raw mut rows,
+            4,
+            400 << 33,
+            ptr::null_mut(),
+        )
+    };
+    assert_eq!(code, Code::Ok);
+    let kept: Vec<usize> = (0..200)
+        .filter(|row| fixture.words[row / 64] & (1 << (row % 64)) != 0)
+        .collect();
+    assert!(!kept.is_empty());
+    for row in 0..200 {
+        let selected = row % 3 != 1 && row % 5 != 0;
+        let above = (fixture.values[row] as i64) > (400 << 33);
+        assert_eq!(kept.contains(&row), selected && above, "{row}");
+    }
+    // An unknown operation is an error that leaves the mask alone.
+    let mut fixture = int8_fixture(200);
+    let original = fixture.words.clone();
+    let column = fixture.column();
+    let mut rows = fixture.mask();
+    // SAFETY: as above.
+    let code = unsafe {
+        tess_int8_filter(
+            &raw const column,
+            ptr::null(),
+            &raw mut rows,
+            6,
+            0,
+            &raw mut status,
+        )
+    };
+    assert_eq!(code, Code::InvalidArgument);
+    assert_eq!(fixture.words, original);
 }
 
 #[test]

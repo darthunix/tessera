@@ -31,6 +31,10 @@ name = "filter_int32"
 harness = false
 
 [[bench]]
+name = "filter_int64"
+harness = false
+
+[[bench]]
 name = "aggregate_int32"
 harness = false
 

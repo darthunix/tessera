@@ -11,6 +11,10 @@ CREATE FUNCTION tessera_test_kernels_filter()
 RETURNS boolean
 AS :'kernels_test', 'tessera_test_kernels_filter'
 LANGUAGE C STRICT;
+CREATE FUNCTION tessera_test_kernels_filter_int8()
+RETURNS boolean
+AS :'kernels_test', 'tessera_test_kernels_filter_int8'
+LANGUAGE C STRICT;
 CREATE FUNCTION tessera_test_kernels_errors()
 RETURNS boolean
 AS :'kernels_test', 'tessera_test_kernels_errors'
@@ -40,6 +44,8 @@ SELECT tessera_test_kernels_layout() AS layout \gset
 \echo :layout
 SELECT tessera_test_kernels_filter() AS filter \gset
 \echo :filter
+SELECT tessera_test_kernels_filter_int8() AS filter_int8 \gset
+\echo :filter_int8
 SELECT tessera_test_kernels_errors() AS errors \gset
 \echo :errors
 SELECT tessera_test_kernels_aggregates() AS aggregates \gset
@@ -54,6 +60,7 @@ SELECT tessera_test_kernels_report();
 
 DROP FUNCTION tessera_test_kernels_layout();
 DROP FUNCTION tessera_test_kernels_filter();
+DROP FUNCTION tessera_test_kernels_filter_int8();
 DROP FUNCTION tessera_test_kernels_errors();
 DROP FUNCTION tessera_test_kernels_aggregates();
 DROP FUNCTION tessera_test_kernels_arithmetic();

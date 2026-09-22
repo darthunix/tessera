@@ -43,7 +43,7 @@ impl Masks {
     }
 
     /// Counters accumulated by `iterations` library filter calls on fresh masks.
-    pub fn run_scalar<C: ColumnReader<Value = i32>>(
+    pub fn run_scalar<C: ColumnReader<Value = super::Value>>(
         &mut self,
         read: &mut dyn FnMut() -> Reading,
         input: &Input<'_, C>,

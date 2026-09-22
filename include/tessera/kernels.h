@@ -199,4 +199,18 @@ extern TessStatusCode tess_int4_hash_next(const TessDatumColumn *column,
 										  TessRowMask *valid,
 										  TessStatus *status);
 
+/*
+ * The int8 family: the same kernels over columns whose Datum holds an
+ * int8 (the whole word, as DatumGetInt64 reads it), with int64 scalars,
+ * values and results.
+ */
+
+/* Keep in rows only the selected rows whose non-NULL int8 value satisfies `value op scalar`. */
+extern TessStatusCode tess_int8_filter(const TessDatumColumn *column,
+									   const TessRowMask *prepared,
+									   TessRowMask *rows,
+									   TessCompareOp op,
+									   int64 scalar,
+									   TessStatus *status);
+
 #endif							/* TESSERA_KERNELS_H */

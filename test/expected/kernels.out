@@ -10,6 +10,10 @@ CREATE FUNCTION tessera_test_kernels_filter()
 RETURNS boolean
 AS :'kernels_test', 'tessera_test_kernels_filter'
 LANGUAGE C STRICT;
+CREATE FUNCTION tessera_test_kernels_filter_int8()
+RETURNS boolean
+AS :'kernels_test', 'tessera_test_kernels_filter_int8'
+LANGUAGE C STRICT;
 CREATE FUNCTION tessera_test_kernels_errors()
 RETURNS boolean
 AS :'kernels_test', 'tessera_test_kernels_errors'
@@ -40,6 +44,9 @@ t
 SELECT tessera_test_kernels_filter() AS filter \gset
 \echo :filter
 t
+SELECT tessera_test_kernels_filter_int8() AS filter_int8 \gset
+\echo :filter_int8
+t
 SELECT tessera_test_kernels_errors() AS errors \gset
 \echo :errors
 t
@@ -59,6 +66,7 @@ SELECT tessera_test_kernels_report();
 ERROR:  injected panic
 DROP FUNCTION tessera_test_kernels_layout();
 DROP FUNCTION tessera_test_kernels_filter();
+DROP FUNCTION tessera_test_kernels_filter_int8();
 DROP FUNCTION tessera_test_kernels_errors();
 DROP FUNCTION tessera_test_kernels_aggregates();
 DROP FUNCTION tessera_test_kernels_arithmetic();

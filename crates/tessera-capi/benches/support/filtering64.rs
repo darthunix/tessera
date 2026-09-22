@@ -1,4 +1,5 @@
-//! Filter fixtures, measured entry points and an independent scalar reference.
+//! Filter fixtures, measured entry points and an independent scalar
+//! reference for the int64 family, mirroring `filtering.rs`.
 //!
 //! All measured paths borrow the same value/flag buffers. NULL checks in the
 //! reference read individual bits, not Tessera's word decoder. Constructors,
@@ -8,7 +9,7 @@ use std::mem::MaybeUninit;
 
 use anyhow::{Result, ensure};
 use tessera_core::{ColumnReader, RowMask};
-use tessera_kernels::int32::{CompareOp, filter};
+use tessera_kernels::int64::{CompareOp, filter};
 
 use crate::support::{
     fixture::{Fixture, as_uninit},
@@ -20,16 +21,24 @@ use crate::support::{
 pub mod blocks;
 
 /// The value type of this family, for the shared block runner.
-pub type Value = i32;
+pub type Value = i64;
 
-fn case(nrows: usize, pattern: &str, nulls: &str, offset: Option<usize>, partial: bool) -> Fixture {
+fn case(
+    nrows: usize,
+    pattern: &str,
+    nulls: &str,
+    offset: Option<usize>,
+    partial: bool,
+) -> Fixture<i64> {
+    // The int32 values shifted past the int4 range, so that the compare
+    // decides on the high half of every Datum.
     let values = (0..nrows)
-        .map(|row| ((row * 37) % 101) as i32 - 50)
+        .map(|row| (((row * 37) % 101) as i64 - 50) << 33)
         .collect();
     Fixture::from_values(values, pattern, nulls, offset, partial)
 }
 
-pub fn cases() -> Vec<Fixture> {
+pub fn cases() -> Vec<Fixture<i64>> {
     let mut cases = Vec::new();
     for nrows in [65, 1024] {
         for pattern in ["all", "eighth", "one-per128", "empty"] {
@@ -53,17 +62,17 @@ pub fn cases() -> Vec<Fixture> {
 /// No timed path owns data or retains a borrow beyond its call.
 pub struct Input<'a, C> {
     column: &'a C,
-    dense: &'a [MaybeUninit<i32>],
+    dense: &'a [MaybeUninit<i64>],
     datums: &'a [MaybeUninit<u64>],
     isnull: &'a [MaybeUninit<bool>],
     prepared: Option<Mask<'a>>,
     non_nulls: Option<Mask<'a>>,
     pub op: CompareOp,
-    pub scalar: i32,
+    pub scalar: i64,
 }
 
 impl<'a, C> Input<'a, C> {
-    pub fn new(column: &'a C, fixture: &'a Fixture, op: CompareOp, scalar: i32) -> Self {
+    pub fn new(column: &'a C, fixture: &'a Fixture<i64>, op: CompareOp, scalar: i64) -> Self {
         Self {
             column,
             dense: as_uninit(&fixture.values),
@@ -78,7 +87,7 @@ impl<'a, C> Input<'a, C> {
 }
 
 #[inline(never)]
-pub fn scalar<C: ColumnReader<Value = i32>>(
+pub fn scalar<C: ColumnReader<Value = i64>>(
     input: &Input<'_, C>,
     rows: &mut RowMask<'_>,
 ) -> Result<()> {
@@ -93,8 +102,8 @@ fn reference(
     words: &mut [u64],
     prepared: Option<Mask<'_>>,
     op: CompareOp,
-    scalar: i32,
-    read: impl Fn(usize) -> Option<i32>,
+    scalar: i64,
+    read: impl Fn(usize) -> Option<i64>,
 ) -> Result<()> {
     ensure!(words.len() == nrows.div_ceil(64), "word count differs");
     match op {
@@ -112,9 +121,9 @@ fn reference_with(
     nrows: usize,
     words: &mut [u64],
     prepared: Option<Mask<'_>>,
-    scalar: i32,
-    read: impl Fn(usize) -> Option<i32>,
-    compare: impl Fn(i32, i32) -> bool,
+    scalar: i64,
+    read: impl Fn(usize) -> Option<i64>,
+    compare: impl Fn(i64, i64) -> bool,
 ) -> Result<()> {
     for (index, word) in words.iter_mut().enumerate() {
         let mut selected = *word;
@@ -177,12 +186,12 @@ pub fn datum_reference<C>(input: &Input<'_, C>, words: &mut [u64]) -> Result<()>
                 return None;
             }
             // SAFETY: the same initialized fixture supplies a prepared non-NULL value.
-            Some(unsafe { input.datums[row].assume_init() } as i32)
+            Some(unsafe { input.datums[row].assume_init() } as i64)
         },
     )
 }
 
-pub fn expected(fixture: &Fixture, selected: &[u64], op: CompareOp, scalar: i32) -> Vec<u64> {
+pub fn expected(fixture: &Fixture<i64>, selected: &[u64], op: CompareOp, scalar: i64) -> Vec<u64> {
     let mut words = vec![0; fixture.values.len().div_ceil(64)];
     for (row, &value) in fixture.values.iter().enumerate() {
         let passes = match op {
@@ -220,12 +229,12 @@ pub fn bench(runner: &mut Runner) -> Result<()> {
     Ok(())
 }
 
-fn measure_column<C: ColumnReader<Value = i32>>(
+fn measure_column<C: ColumnReader<Value = i64>>(
     runner: &mut Runner,
     format: &str,
     column: &C,
     direct: impl Fn(&Input<'_, C>, &mut [u64]) -> Result<()> + Copy,
-    case: &Fixture,
+    case: &Fixture<i64>,
 ) -> Result<()> {
     let input = Input::new(column, case, CompareOp::Gt, 0);
     let original = case.selected.words();
@@ -240,7 +249,7 @@ fn measure_column<C: ColumnReader<Value = i32>>(
     )?;
     ensure!(actual == expected, "filter differs from scalar model");
     let mut masks = blocks::Masks::new(case.values.len(), original)?;
-    let mut group = runner.group(format!("filter_int32/{format}/{}", case.name));
+    let mut group = runner.group(format!("filter_int64/{format}/{}", case.name));
     group.op_blocks("scalar", |counters, iterations| {
         masks.run_scalar(&mut || counters.read(), &input, iterations)
     })?;

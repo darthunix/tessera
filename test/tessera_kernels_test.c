@@ -10,6 +10,7 @@ PG_MODULE_MAGIC;
 
 PG_FUNCTION_INFO_V1(tessera_test_kernels_layout);
 PG_FUNCTION_INFO_V1(tessera_test_kernels_filter);
+PG_FUNCTION_INFO_V1(tessera_test_kernels_filter_int8);
 PG_FUNCTION_INFO_V1(tessera_test_kernels_errors);
 PG_FUNCTION_INFO_V1(tessera_test_kernels_aggregates);
 PG_FUNCTION_INFO_V1(tessera_test_kernels_arithmetic);
@@ -53,6 +54,38 @@ expected_rows(const Datum *values, const bool *isnull,
 							  (UINT64CONST(1) << (row % 64))) != 0;
 
 		if (chosen && !isnull[row] && DatumGetInt32(values[row]) > 0)
+			expected[row / 64] |= UINT64CONST(1) << (row % 64);
+	}
+}
+
+/*
+ * The int4 column's values shifted past the int4 range as int8 Datums: a
+ * 32-bit read would see zeros and keep no row.
+ */
+static void
+fill_int8(Datum *values, bool *isnull, uint64 *words)
+{
+	int			row;
+
+	fill(values, isnull, words);
+	for (row = 0; row < NROWS; row++)
+		values[row] = Int64GetDatum(((int64) DatumGetInt32(values[row])) << 33);
+}
+
+/* The rows a "> scalar" filter keeps over int8 values, by a scalar loop. */
+static void
+expected_rows_int8(const Datum *values, const bool *isnull,
+				   const uint64 *selected, int64 scalar, uint64 *expected)
+{
+	int			row;
+
+	memset(expected, 0, NWORDS * sizeof(uint64));
+	for (row = 0; row < NROWS; row++)
+	{
+		bool		chosen = (selected[row / 64] &
+							  (UINT64CONST(1) << (row % 64))) != 0;
+
+		if (chosen && !isnull[row] && DatumGetInt64(values[row]) > scalar)
 			expected[row / 64] |= UINT64CONST(1) << (row % 64);
 	}
 }
@@ -121,6 +154,52 @@ tessera_test_kernels_filter(PG_FUNCTION_ARGS)
 	memcpy(prepared_words, words, sizeof(words));
 	prepared_words[0] &= ~(UINT64CONST(1) << 2);
 	if (tess_int4_filter(&column, &prepared, &rows, TESS_CMP_GT, 0,
+						 &status) != TESS_ERROR_INVALID_ARGUMENT ||
+		status.code != TESS_ERROR_INVALID_ARGUMENT ||
+		strstr(status.message, "unprepared") == NULL)
+		PG_RETURN_BOOL(false);
+
+	PG_RETURN_BOOL(true);
+}
+
+Datum
+tessera_test_kernels_filter_int8(PG_FUNCTION_ARGS)
+{
+	Datum		values[NROWS];
+	bool		isnull[NROWS];
+	uint64		words[NWORDS];
+	uint64		expected[NWORDS];
+	uint64		prepared_words[NWORDS];
+	TessDatumColumn column;
+	TessRowMask rows = {NROWS, words};
+	TessRowMask prepared = {NROWS, prepared_words};
+	TessStatus	status = TESS_STRUCT_INITIALIZER(TessStatus);
+
+	fill_int8(values, isnull, words);
+	init_column(&column, values, isnull);
+
+	/* Whole Datums: the same rows as the int4 column's "> 0". */
+	expected_rows_int8(values, isnull, words, 0, expected);
+	if (tess_int8_filter(&column, NULL, &rows, TESS_CMP_GT, 0,
+						 &status) != TESS_OK ||
+		status.code != TESS_OK ||
+		memcmp(words, expected, sizeof(words)) != 0)
+		PG_RETURN_BOOL(false);
+
+	/* A scalar beyond the int4 range, with a readiness mask. */
+	fill_int8(values, isnull, words);
+	memcpy(prepared_words, words, sizeof(words));
+	expected_rows_int8(values, isnull, words, ((int64) 400) << 33, expected);
+	if (tess_int8_filter(&column, &prepared, &rows, TESS_CMP_GT,
+						 ((int64) 400) << 33, NULL) != TESS_OK ||
+		memcmp(words, expected, sizeof(words)) != 0)
+		PG_RETURN_BOOL(false);
+
+	/* A selected row outside the readiness mask is an error. */
+	fill_int8(values, isnull, words);
+	memcpy(prepared_words, words, sizeof(words));
+	prepared_words[0] &= ~(UINT64CONST(1) << 2);
+	if (tess_int8_filter(&column, &prepared, &rows, TESS_CMP_GT, 0,
 						 &status) != TESS_ERROR_INVALID_ARGUMENT ||
 		status.code != TESS_ERROR_INVALID_ARGUMENT ||
 		strstr(status.message, "unprepared") == NULL)

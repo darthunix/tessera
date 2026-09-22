@@ -11,7 +11,8 @@
 //! [`int32::arith_scalar`] and its siblings the arithmetic with PostgreSQL's
 //! error codes, and [`int32::hash`] and [`int32::hash_next`] the key hashes
 //! of joins and grouping, all through [`tessera_core::ColumnReader`],
-//! independently of physical storage.
+//! independently of physical storage; [`int64`] mirrors the family for
+//! int8, kernel by kernel, with the vocabulary of [`ops`] shared.
 //! Errors do not roll back previously completed words; callers must discard a
 //! partial selection after failure. This crate does not introduce a C entry
 //! point or catch panics. The future C boundary remains responsible for panic
@@ -26,5 +27,6 @@
 #![deny(unsafe_code)]
 
 pub mod int32;
+pub mod int64;
 pub mod ops;
 mod simd;

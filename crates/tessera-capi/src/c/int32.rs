@@ -468,7 +468,7 @@ unsafe fn extreme(
 }
 
 /// A `TessCompareOp` value.
-fn compare_op(op: c_uint) -> Result<CompareOp> {
+pub(super) fn compare_op(op: c_uint) -> Result<CompareOp> {
     Ok(match op {
         0 => CompareOp::Eq,
         1 => CompareOp::Ne,

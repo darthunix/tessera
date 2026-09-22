@@ -12,6 +12,10 @@ mod arithmetic;
 #[path = "../benches/support/filtering.rs"]
 #[allow(dead_code)]
 mod filtering;
+#[path = "../benches/support/filtering64.rs"]
+// The block runner is included by each filter family for its value type.
+#[allow(dead_code, clippy::duplicate_mod)]
+mod filtering64;
 #[path = "../benches/support/hashing.rs"]
 #[allow(dead_code)]
 mod hashing;
@@ -271,6 +275,77 @@ fn filter_references_match_both_readers_and_independent_model() {
         let datum = case.datum_column().unwrap();
         assert_filter_model(&dense, &case, filtering::dense_reference);
         assert_filter_model(&datum, &case, filtering::datum_reference);
+    }
+}
+
+#[test]
+fn filter64_cases_mirror_the_int32_cases() {
+    let names: Vec<_> = filtering64::cases()
+        .into_iter()
+        .map(|case| case.name)
+        .collect();
+    let int32: Vec<_> = filtering::cases()
+        .into_iter()
+        .map(|case| case.name)
+        .collect();
+    assert_eq!(names, int32);
+    for case in filtering64::cases() {
+        assert!(
+            case.values
+                .iter()
+                .all(|&value| value == 0 || value.abs() > i64::from(i32::MAX))
+        );
+    }
+}
+
+fn assert_filter64_model<C: ColumnReader<Value = i64>>(
+    column: &C,
+    case: &fixture::Fixture<i64>,
+    reference: impl Fn(&filtering64::Input<'_, C>, &mut [u64]) -> Result<()>,
+) {
+    use tessera_core::RowMask;
+    use tessera_kernels::int64::CompareOp;
+    for op in [
+        CompareOp::Eq,
+        CompareOp::Ne,
+        CompareOp::Lt,
+        CompareOp::Le,
+        CompareOp::Gt,
+        CompareOp::Ge,
+    ] {
+        for scalar in [i64::MIN, -1 << 33, -1, 0, 1, 1 << 33, i64::MAX] {
+            let input = filtering64::Input::new(column, case, op, scalar);
+            let original = case.selected.words();
+            let expected = filtering64::expected(case, original, op, scalar);
+            let mut direct = original.to_vec();
+            reference(&input, &mut direct).unwrap();
+            assert_eq!(direct, expected);
+            let mut actual = original.to_vec();
+            let mut mask = RowMask::try_new(case.values.len(), &mut actual).unwrap();
+            filtering64::scalar(&input, &mut mask).unwrap();
+            filtering64::scalar(&input, &mut mask).unwrap();
+            assert_eq!(actual, expected);
+        }
+    }
+}
+
+#[test]
+fn filter64_references_match_both_readers_and_independent_model() {
+    let mut cases = filtering64::cases();
+    for nulls in ["none", "mixed"] {
+        cases.push(fixture::Fixture::from_values(
+            vec![i64::MIN, i64::MAX, -1, 0, 1, 1 << 40, -(1 << 40)],
+            "all",
+            nulls,
+            Some(7),
+            false,
+        ));
+    }
+    for case in cases {
+        let dense = case.dense_column().unwrap();
+        let datum = case.datum_column().unwrap();
+        assert_filter64_model(&dense, &case, filtering64::dense_reference);
+        assert_filter64_model(&datum, &case, filtering64::datum_reference);
     }
 }
 

@@ -7,7 +7,7 @@ use std::slice;
 use anyhow::{Context, Result, ensure};
 use tessera_core::RowMaskView;
 
-use crate::DatumInt32Column;
+use crate::{DatumInt32Column, DatumInt64Column, DatumIntColumn, FromDatum};
 
 /// `TessDatumColumn` from `tessera/batch.h`: borrowed Datum values and NULL
 /// flags indexed by physical row.
@@ -28,17 +28,18 @@ impl DatumColumn {
     /// The size through `nrows` (`TESS_DATUM_COLUMN_MIN_SIZE`).
     pub const MIN_SIZE: usize = offset_of!(DatumColumn, nrows) + size_of::<c_int>();
 
-    /// Read the column as int4 with `prepared` as its readiness.
+    /// Read the column as integers of one width with `prepared` as its
+    /// readiness.
     ///
     /// # Safety
     ///
     /// `values` and `isnull` must point to `nrows` elements that stay valid
     /// and unchanged for the borrow, initialized for every row of
     /// `prepared` (every row, without it), with valid `bool` flags there.
-    pub unsafe fn int32<'a>(
+    pub unsafe fn ints<'a, T: FromDatum>(
         &'a self,
         prepared: Option<RowMaskView<'a>>,
-    ) -> Result<DatumInt32Column<'a>> {
+    ) -> Result<DatumIntColumn<'a, T>> {
         ensure!(
             self.struct_size >= Self::MIN_SIZE,
             "a Datum column is smaller than its required fields"
@@ -62,7 +63,33 @@ impl DatumColumn {
         };
         // SAFETY: the caller guarantees initialized values and valid flags
         // for every prepared row, and immutable buffers for the borrow.
-        unsafe { DatumInt32Column::try_new(values, isnull, prepared) }
+        unsafe { DatumIntColumn::try_new(values, isnull, prepared) }
+    }
+
+    /// Read the column as int4 with `prepared` as its readiness.
+    ///
+    /// # Safety
+    ///
+    /// As for [`DatumColumn::ints`].
+    pub unsafe fn int32<'a>(
+        &'a self,
+        prepared: Option<RowMaskView<'a>>,
+    ) -> Result<DatumInt32Column<'a>> {
+        // SAFETY: the caller's contract.
+        unsafe { self.ints(prepared) }
+    }
+
+    /// Read the column as int8 with `prepared` as its readiness.
+    ///
+    /// # Safety
+    ///
+    /// As for [`DatumColumn::ints`].
+    pub unsafe fn int64<'a>(
+        &'a self,
+        prepared: Option<RowMaskView<'a>>,
+    ) -> Result<DatumInt64Column<'a>> {
+        // SAFETY: the caller's contract.
+        unsafe { self.ints(prepared) }
     }
 }
 
