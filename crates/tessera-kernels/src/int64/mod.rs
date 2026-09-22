@@ -14,3 +14,9 @@ mod filter;
 pub use filter::filter;
 
 pub use crate::ops::CompareOp;
+
+/// Selected rows in the first multi-row word from which whole-word kernels
+/// pay for the call: on an M5 Pro an int8 word costs 24 cycles dense and
+/// 29 cycles Datum (compare-ZxCFic) against about 2.4 cycles per selected
+/// row on the row path, the same break-even as the int4 word.
+pub(crate) const BULK_MIN_ROWS: u32 = 12;

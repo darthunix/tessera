@@ -17,6 +17,7 @@
 mod aggregate;
 mod arith;
 mod filter;
+mod filter64;
 mod hash;
 
 use core::arch::aarch64::{
@@ -31,6 +32,7 @@ pub use aggregate::{
 };
 pub use arith::{add, div, mul, rem, sub};
 pub use filter::{filter_datum, filter_dense};
+pub use filter64::{filter_datum64, filter_dense64};
 pub use hash::{combine, combine_nulls, hash, hash_nulls};
 
 /// Bit weights of the four lanes of each group in a 16-row quarter.
