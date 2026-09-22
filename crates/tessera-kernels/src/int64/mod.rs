@@ -11,9 +11,11 @@
 //! and operation, and a Datum holds an int8 as its whole word.
 
 mod arith;
+mod divisor;
 mod filter;
 
 pub use arith::{arith_columns, arith_scalar, arith_scalar_left};
+pub(crate) use divisor::Divisor;
 pub use filter::filter;
 
 pub use crate::ops::{ArithOp, ArithmeticError, CompareOp};
