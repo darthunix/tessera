@@ -13,6 +13,7 @@ PG_FUNCTION_INFO_V1(tessera_test_kernels_filter);
 PG_FUNCTION_INFO_V1(tessera_test_kernels_filter_int8);
 PG_FUNCTION_INFO_V1(tessera_test_kernels_errors);
 PG_FUNCTION_INFO_V1(tessera_test_kernels_aggregates);
+PG_FUNCTION_INFO_V1(tessera_test_kernels_aggregates_int8);
 PG_FUNCTION_INFO_V1(tessera_test_kernels_arithmetic);
 PG_FUNCTION_INFO_V1(tessera_test_kernels_arithmetic_int8);
 PG_FUNCTION_INFO_V1(tessera_test_kernels_hashes);
@@ -360,6 +361,77 @@ init_small_int8(TessDatumColumn *column, Datum *values, bool *isnull,
 	column->values = values;
 	column->isnull = isnull;
 	column->nrows = 3;
+}
+
+Datum
+tessera_test_kernels_aggregates_int8(PG_FUNCTION_ARGS)
+{
+	Datum		values[NROWS];
+	bool		isnull[NROWS];
+	uint64		words[NWORDS];
+	TessDatumColumn column;
+	TessRowMask rows = {NROWS, words};
+	TessStatus	status = TESS_STRUCT_INITIALIZER(TessStatus);
+	int64		count = 0;
+	int64		least = PG_INT64_MAX;
+	int64		greatest = PG_INT64_MIN;
+	int64		got_count = -1;
+	int64		got_min = -1;
+	int64		got_max = -1;
+	bool		min_null = true;
+	bool		max_null = true;
+	int			row;
+
+	fill_int8(values, isnull, words);
+	init_column(&column, values, isnull);
+	for (row = 0; row < NROWS; row++)
+	{
+		bool		chosen = (words[row / 64] &
+							  (UINT64CONST(1) << (row % 64))) != 0;
+
+		if (chosen && !isnull[row])
+		{
+			int64		value = DatumGetInt64(values[row]);
+
+			count++;
+			least = Min(least, value);
+			greatest = Max(greatest, value);
+		}
+	}
+	if (tess_count(&column, NULL, &rows, &got_count, &status) != TESS_OK ||
+		tess_int8_min(&column, NULL, &rows, &min_null, &got_min,
+					  &status) != TESS_OK ||
+		tess_int8_max(&column, NULL, &rows, &max_null, &got_max,
+					  &status) != TESS_OK ||
+		got_count != count || got_min != least || got_max != greatest ||
+		min_null || max_null)
+		PG_RETURN_BOOL(false);
+
+	/* The count reads flags alone: the same over the int4 Datums. */
+	fill(values, isnull, words);
+	if (tess_count(&column, NULL, &rows, &got_count, &status) != TESS_OK ||
+		got_count != count)
+		PG_RETURN_BOOL(false);
+
+	/* Without selected rows: count 0, the extremes NULL. */
+	memset(words, 0, sizeof(words));
+	if (tess_count(&column, NULL, &rows, &got_count, NULL) != TESS_OK ||
+		tess_int8_min(&column, NULL, &rows, &min_null, &got_min,
+					  NULL) != TESS_OK ||
+		tess_int8_max(&column, NULL, &rows, &max_null, &got_max,
+					  NULL) != TESS_OK ||
+		got_count != 0 || !min_null || !max_null)
+		PG_RETURN_BOOL(false);
+
+	/* A dimension error writes no result. */
+	column.nrows = NROWS - 1;
+	got_count = 7;
+	if (tess_count(&column, NULL, &rows, &got_count,
+				   &status) != TESS_ERROR_INVALID_ARGUMENT ||
+		got_count != 7)
+		PG_RETURN_BOOL(false);
+
+	PG_RETURN_BOOL(true);
 }
 
 Datum

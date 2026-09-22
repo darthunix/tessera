@@ -77,6 +77,6 @@ pub mod c;
 mod column;
 
 pub use column::{
-    DatumInt32Column, DatumInt64Column, DatumIntColumn, DenseInt32Column, DenseInt64Column,
-    DenseIntColumn, FromDatum,
+    DatumInt32Column, DatumInt64Column, DatumIntColumn, DatumNullsColumn, DenseInt32Column,
+    DenseInt64Column, DenseIntColumn, FromDatum,
 };

@@ -35,6 +35,13 @@ impl FromDatum for i64 {
     }
 }
 
+/// No width at all: the column reads its NULL flags and no value, which is
+/// what a count needs of a column of any type.
+impl FromDatum for () {
+    #[inline(always)]
+    fn from_datum(_: u64) -> Self {}
+}
+
 /// Whether every row of the word is prepared (an absent word is not).
 #[inline]
 fn fully_prepared(prepared: Option<RowMaskView<'_>>, word_index: usize) -> bool {
@@ -264,6 +271,9 @@ pub type DatumInt32Column<'a> = DatumIntColumn<'a, i32>;
 
 /// Datum storage read as int8.
 pub type DatumInt64Column<'a> = DatumIntColumn<'a, i64>;
+
+/// Datum storage of any type read for its NULL flags alone.
+pub type DatumNullsColumn<'a> = DatumIntColumn<'a, ()>;
 
 impl<'a, T: FromDatum> DatumIntColumn<'a, T> {
     /// Borrow Datum values and NULL flags, rejecting mismatched dimensions.

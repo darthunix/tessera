@@ -23,6 +23,10 @@ CREATE FUNCTION tessera_test_kernels_aggregates()
 RETURNS boolean
 AS :'kernels_test', 'tessera_test_kernels_aggregates'
 LANGUAGE C STRICT;
+CREATE FUNCTION tessera_test_kernels_aggregates_int8()
+RETURNS boolean
+AS :'kernels_test', 'tessera_test_kernels_aggregates_int8'
+LANGUAGE C STRICT;
 CREATE FUNCTION tessera_test_kernels_arithmetic()
 RETURNS boolean
 AS :'kernels_test', 'tessera_test_kernels_arithmetic'
@@ -54,6 +58,8 @@ SELECT tessera_test_kernels_errors() AS errors \gset
 \echo :errors
 SELECT tessera_test_kernels_aggregates() AS aggregates \gset
 \echo :aggregates
+SELECT tessera_test_kernels_aggregates_int8() AS aggregates_int8 \gset
+\echo :aggregates_int8
 SELECT tessera_test_kernels_arithmetic() AS arithmetic \gset
 \echo :arithmetic
 SELECT tessera_test_kernels_arithmetic_int8() AS arithmetic_int8 \gset
@@ -69,6 +75,7 @@ DROP FUNCTION tessera_test_kernels_filter();
 DROP FUNCTION tessera_test_kernels_filter_int8();
 DROP FUNCTION tessera_test_kernels_errors();
 DROP FUNCTION tessera_test_kernels_aggregates();
+DROP FUNCTION tessera_test_kernels_aggregates_int8();
 DROP FUNCTION tessera_test_kernels_arithmetic();
 DROP FUNCTION tessera_test_kernels_arithmetic_int8();
 DROP FUNCTION tessera_test_kernels_hashes();

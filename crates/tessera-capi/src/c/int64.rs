@@ -2,7 +2,8 @@
 
 use std::ffi::c_uint;
 
-use anyhow::Context;
+use anyhow::{Context, Result};
+use tessera_core::RowMaskView;
 use tessera_kernels::int64;
 
 use super::args::{inputs, outputs, reader};
@@ -10,6 +11,7 @@ use super::column::DatumColumn;
 use super::int32::{arith_op, compare_op};
 use super::mask::Mask;
 use super::status::{Code, Status, guard};
+use crate::DatumInt64Column;
 
 /// `tess_int8_filter`: keep in `rows` the selected rows whose non-NULL
 /// value satisfies `value op scalar`.
@@ -122,6 +124,91 @@ pub unsafe extern "C" fn tess_int8_arith_columns(
             let right = reader::<i64>(right, right_prepared)?;
             let (values, mut non_nulls) = outputs(values, non_nulls)?;
             int64::arith_columns(op, &left, &right, &rows, values, &mut non_nulls)
+        })
+    }
+}
+
+/// `tess_int8_min`: the least selected non-NULL value, NULL without any.
+///
+/// # Safety
+///
+/// As for [`inputs`]; `isnull` and `value` must be writable; `status` as
+/// for every entry point.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tess_int8_min(
+    column: *const DatumColumn,
+    prepared: *const Mask,
+    rows: *const Mask,
+    isnull: *mut bool,
+    value: *mut i64,
+    status: *mut Status,
+) -> Code {
+    // SAFETY: the caller's contract.
+    unsafe {
+        extreme(
+            column,
+            prepared,
+            rows,
+            isnull,
+            value,
+            status,
+            |column, rows| int64::min(column, rows),
+        )
+    }
+}
+
+/// `tess_int8_max`: the greatest selected non-NULL value, NULL without any.
+///
+/// # Safety
+///
+/// As for [`tess_int8_min`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tess_int8_max(
+    column: *const DatumColumn,
+    prepared: *const Mask,
+    rows: *const Mask,
+    isnull: *mut bool,
+    value: *mut i64,
+    status: *mut Status,
+) -> Code {
+    // SAFETY: the caller's contract.
+    unsafe {
+        extreme(
+            column,
+            prepared,
+            rows,
+            isnull,
+            value,
+            status,
+            |column, rows| int64::max(column, rows),
+        )
+    }
+}
+
+/// The shape of `tess_int8_min` and `tess_int8_max`.
+///
+/// # Safety
+///
+/// As for [`tess_int8_min`].
+unsafe fn extreme(
+    column: *const DatumColumn,
+    prepared: *const Mask,
+    rows: *const Mask,
+    isnull: *mut bool,
+    value: *mut i64,
+    status: *mut Status,
+    kernel: fn(&DatumInt64Column<'_>, &RowMaskView<'_>) -> Result<Option<i64>>,
+) -> Code {
+    // SAFETY: the caller's contract.
+    unsafe {
+        guard(status, || {
+            let null = isnull.as_mut().context("a null flag")?;
+            let out = value.as_mut().context("a null result")?;
+            let (column, rows) = inputs::<i64>(column, prepared, rows)?;
+            let found = kernel(&column, &rows)?;
+            *null = found.is_none();
+            *out = found.unwrap_or(0);
+            Ok(())
         })
     }
 }

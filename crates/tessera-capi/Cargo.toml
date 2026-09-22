@@ -49,3 +49,7 @@ harness = false
 [[bench]]
 name = "arith_int64"
 harness = false
+
+[[bench]]
+name = "aggregate_int64"
+harness = false

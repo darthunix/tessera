@@ -6,6 +6,9 @@
 #[path = "../benches/support/aggregating.rs"]
 #[allow(dead_code)]
 mod aggregating;
+#[path = "../benches/support/aggregating64.rs"]
+#[allow(dead_code)]
+mod aggregating64;
 #[path = "../benches/support/arithmetic.rs"]
 #[allow(dead_code)]
 mod arithmetic;
@@ -25,6 +28,9 @@ mod hashing;
 #[path = "../benches/support/reading.rs"]
 #[allow(dead_code)]
 mod reading;
+#[path = "../benches/support/reading64.rs"]
+#[allow(dead_code)]
+mod reading64;
 #[path = "../benches/support/mod.rs"]
 mod support;
 
@@ -145,24 +151,39 @@ fn arithmetic_kernels_match_the_fixture_model_on_every_case() -> Result<()> {
 #[test]
 fn arithmetic64_kernels_match_the_fixture_model_on_every_case() -> Result<()> {
     let int32: Vec<_> = reading::cases().into_iter().map(|case| case.name).collect();
-    let names: Vec<_> = arithmetic64::cases()
+    let names: Vec<_> = reading64::cases()
         .into_iter()
         .map(|case| case.name)
         .collect();
     assert_eq!(names, int32);
-    for case in arithmetic64::cases() {
+    for case in reading64::cases() {
         let dense = case.dense_column()?;
         arithmetic64::check(
-            &arithmetic64::Input::new(&dense, &case),
+            &reading64::Input::new(&dense, &case),
             &case,
             arithmetic64::dense_reference,
         )?;
         let datum = case.datum_column()?;
         arithmetic64::check(
-            &arithmetic64::Input::new(&datum, &case),
+            &reading64::Input::new(&datum, &case),
             &case,
             arithmetic64::datum_reference,
         )?;
+    }
+    Ok(())
+}
+
+#[test]
+fn aggregate64_kernels_match_the_fixture_model_on_every_case() -> Result<()> {
+    for case in reading64::cases() {
+        let dense = case.dense_column()?;
+        let input = reading64::Input::new(&dense, &case);
+        assert_eq!(reading64::dense_reference(&input)?, case.expected);
+        aggregating64::check(&input, &case)?;
+        let datum = case.datum_column()?;
+        let input = reading64::Input::new(&datum, &case);
+        assert_eq!(reading64::datum_reference(&input)?, case.expected);
+        aggregating64::check(&input, &case)?;
     }
     Ok(())
 }

@@ -7,7 +7,7 @@ use std::slice;
 use anyhow::{Context, Result, ensure};
 use tessera_core::RowMaskView;
 
-use crate::{DatumInt32Column, DatumInt64Column, DatumIntColumn, FromDatum};
+use crate::{DatumInt32Column, DatumInt64Column, DatumIntColumn, DatumNullsColumn, FromDatum};
 
 /// `TessDatumColumn` from `tessera/batch.h`: borrowed Datum values and NULL
 /// flags indexed by physical row.
@@ -88,6 +88,20 @@ impl DatumColumn {
         &'a self,
         prepared: Option<RowMaskView<'a>>,
     ) -> Result<DatumInt64Column<'a>> {
+        // SAFETY: the caller's contract.
+        unsafe { self.ints(prepared) }
+    }
+
+    /// Read the column's NULL flags alone, whatever its type, with
+    /// `prepared` as its readiness.
+    ///
+    /// # Safety
+    ///
+    /// As for [`DatumColumn::ints`].
+    pub unsafe fn nulls<'a>(
+        &'a self,
+        prepared: Option<RowMaskView<'a>>,
+    ) -> Result<DatumNullsColumn<'a>> {
         // SAFETY: the caller's contract.
         unsafe { self.ints(prepared) }
     }

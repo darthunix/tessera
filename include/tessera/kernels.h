@@ -247,4 +247,30 @@ extern TessStatusCode tess_int8_arith_columns(TessArithOp op,
 											  TessRowMask *non_nulls,
 											  TessStatus *status);
 
+/*
+ * The number of selected non-NULL rows of a column of any type: only the
+ * NULL flags are read, so a count needs no width.
+ */
+extern TessStatusCode tess_count(const TessDatumColumn *column,
+								 const TessRowMask *prepared,
+								 const TessRowMask *rows,
+								 int64 *count,
+								 TessStatus *status);
+
+/* The least selected non-NULL int8 value; without any, isnull is set. */
+extern TessStatusCode tess_int8_min(const TessDatumColumn *column,
+									const TessRowMask *prepared,
+									const TessRowMask *rows,
+									bool *isnull,
+									int64 *value,
+									TessStatus *status);
+
+/* The greatest selected non-NULL int8 value; without any, isnull is set. */
+extern TessStatusCode tess_int8_max(const TessDatumColumn *column,
+									const TessRowMask *prepared,
+									const TessRowMask *rows,
+									bool *isnull,
+									int64 *value,
+									TessStatus *status);
+
 #endif							/* TESSERA_KERNELS_H */

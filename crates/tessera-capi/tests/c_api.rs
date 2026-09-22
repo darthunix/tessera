@@ -5,11 +5,11 @@
 use std::ptr;
 
 use tessera_capi::c::{
-    Code, DatumColumn, Mask, Status, tess_int4_arith_columns, tess_int4_arith_scalar,
+    Code, DatumColumn, Mask, Status, tess_count, tess_int4_arith_columns, tess_int4_arith_scalar,
     tess_int4_arith_scalar_left, tess_int4_count, tess_int4_filter, tess_int4_hash,
     tess_int4_hash_next, tess_int4_max, tess_int4_min, tess_int4_sum, tess_int8_arith_columns,
-    tess_int8_arith_scalar, tess_int8_arith_scalar_left, tess_int8_filter,
-    tess_kernels_abi_version, tess_kernels_layout, tess_kernels_test_panic,
+    tess_int8_arith_scalar, tess_int8_arith_scalar_left, tess_int8_filter, tess_int8_max,
+    tess_int8_min, tess_kernels_abi_version, tess_kernels_layout, tess_kernels_test_panic,
 };
 use tessera_kernels::int32::{hash_combine, murmurhash32};
 
@@ -759,6 +759,133 @@ fn int8_arithmetic_writes_whole_results_and_reports_bigint_codes() {
     };
     assert_eq!(code, Code::Ok);
     assert_eq!((result_words, values), ([0b111], [0, 0, 0]));
+}
+
+#[test]
+fn int8_extremes_and_the_count_of_any_type_match_a_scalar_loop() {
+    let mut fixture = int8_fixture(200);
+    let (mut count, mut least, mut greatest) = (0, i64::MAX, i64::MIN);
+    for row in 0..200 {
+        let selected = fixture.words[row / 64] & (1 << (row % 64)) != 0;
+        if selected && !fixture.isnull[row] {
+            let value = fixture.values[row] as i64;
+            count += 1;
+            least = least.min(value);
+            greatest = greatest.max(value);
+        }
+    }
+    let column = fixture.column();
+    let rows = fixture.mask();
+    let mut status = Status::new();
+    let (mut got_count, mut got_min, mut got_max) = (-1, -1, -1);
+    let (mut min_null, mut max_null) = (true, true);
+    // SAFETY: local buffers of the declared sizes.
+    unsafe {
+        let column = &raw const column;
+        let rows = &raw const rows;
+        assert_eq!(
+            tess_count(
+                column,
+                ptr::null(),
+                rows,
+                &raw mut got_count,
+                &raw mut status
+            ),
+            Code::Ok
+        );
+        assert_eq!(
+            tess_int8_min(
+                column,
+                ptr::null(),
+                rows,
+                &raw mut min_null,
+                &raw mut got_min,
+                &raw mut status
+            ),
+            Code::Ok
+        );
+        assert_eq!(
+            tess_int8_max(
+                column,
+                ptr::null(),
+                rows,
+                &raw mut max_null,
+                &raw mut got_max,
+                &raw mut status
+            ),
+            Code::Ok
+        );
+    }
+    assert_eq!((got_count, got_min, got_max), (count, least, greatest));
+    assert_eq!((min_null, max_null), (false, false));
+    // The count reads flags alone: the Datums may hold anything, such as
+    // pointers of a by-reference type.
+    let pointers: Vec<u64> = (0..200)
+        .map(|row| 0xdead_beef_0000 + row as u64 * 8)
+        .collect();
+    let column = DatumColumn {
+        struct_size: size_of::<DatumColumn>(),
+        values: pointers.as_ptr(),
+        isnull: fixture.isnull.as_ptr(),
+        nrows: 200,
+    };
+    let rows = fixture.mask();
+    // SAFETY: as above.
+    let code = unsafe {
+        tess_count(
+            &raw const column,
+            ptr::null(),
+            &raw const rows,
+            &raw mut got_count,
+            &raw mut status,
+        )
+    };
+    assert_eq!(code, Code::Ok);
+    assert_eq!(got_count, count);
+    // Without selected rows: count 0, the extremes NULL.
+    let mut fixture = int8_fixture(200);
+    fixture.words.iter_mut().for_each(|word| *word = 0);
+    let column = fixture.column();
+    let rows = fixture.mask();
+    // SAFETY: as above.
+    unsafe {
+        let column = &raw const column;
+        let rows = &raw const rows;
+        assert_eq!(
+            tess_count(
+                column,
+                ptr::null(),
+                rows,
+                &raw mut got_count,
+                ptr::null_mut()
+            ),
+            Code::Ok
+        );
+        assert_eq!(
+            tess_int8_min(
+                column,
+                ptr::null(),
+                rows,
+                &raw mut min_null,
+                &raw mut got_min,
+                ptr::null_mut()
+            ),
+            Code::Ok
+        );
+        assert_eq!(
+            tess_int8_max(
+                column,
+                ptr::null(),
+                rows,
+                &raw mut max_null,
+                &raw mut got_max,
+                ptr::null_mut()
+            ),
+            Code::Ok
+        );
+    }
+    assert_eq!((got_count, got_min, got_max), (0, 0, 0));
+    assert_eq!((min_null, max_null), (true, true));
 }
 
 #[test]
