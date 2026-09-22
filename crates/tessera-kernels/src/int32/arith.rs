@@ -31,58 +31,13 @@
 //! row by row; every other call reads every word row by row through the
 //! word iterators.
 
-use std::fmt;
 use std::mem::MaybeUninit;
 
 use anyhow::{Result, ensure};
 use tessera_core::{ColumnReader, RowMask, RowMaskView, WordBlock};
 
 use super::{BULK_MIN_ROWS, Divisor};
-
-/// A binary int4 operation.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ArithOp {
-    /// `+`
-    Add,
-    /// `-`
-    Sub,
-    /// `*`
-    Mul,
-    /// `/`, truncating toward zero.
-    Div,
-    /// `%`, with the dividend's sign.
-    Mod,
-}
-
-/// An arithmetic failure with the SQLSTATE PostgreSQL reports for it.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ArithmeticError {
-    /// SQLSTATE 22003: an int4 result does not fit.
-    IntegerOutOfRange,
-    /// SQLSTATE 22012: a zero divisor.
-    DivisionByZero,
-}
-
-impl ArithmeticError {
-    /// The five-character SQLSTATE of the error.
-    pub fn sqlstate(self) -> &'static str {
-        match self {
-            Self::IntegerOutOfRange => "22003",
-            Self::DivisionByZero => "22012",
-        }
-    }
-}
-
-impl fmt::Display for ArithmeticError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            Self::IntegerOutOfRange => "integer out of range",
-            Self::DivisionByZero => "division by zero",
-        })
-    }
-}
-
-impl std::error::Error for ArithmeticError {}
+use crate::ops::{ArithOp, ArithmeticError};
 
 /// Compute `column op scalar` for the selected rows into `values` and
 /// `non_nulls`.

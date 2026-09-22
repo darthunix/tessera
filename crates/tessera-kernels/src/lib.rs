@@ -26,4 +26,5 @@
 #![deny(unsafe_code)]
 
 pub mod int32;
+pub mod ops;
 mod simd;

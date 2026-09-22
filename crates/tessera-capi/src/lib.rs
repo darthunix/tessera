@@ -9,8 +9,9 @@
 //!
 //! # Borrowed column adapters
 //!
-//! [`DenseInt32Column`] and [`DatumInt32Column`] borrow possibly uninitialized
-//! storage. Their unsafe constructors check dimensions; callers must guarantee
+//! [`DenseIntColumn`] and [`DatumIntColumn`], named by width as
+//! [`DenseInt32Column`], [`DatumInt32Column`], [`DenseInt64Column`] and
+//! [`DatumInt64Column`], borrow possibly uninitialized storage. Their unsafe constructors check dimensions; callers must guarantee
 //! initialization and immutable storage as specified in each constructor's
 //! safety contract. Subsequent [`tessera_core::ColumnReader`] operations check
 //! readiness before exposing values. The adapters neither call PostgreSQL nor
@@ -75,4 +76,7 @@
 pub mod c;
 mod column;
 
-pub use column::{DatumInt32Column, DenseInt32Column};
+pub use column::{
+    DatumInt32Column, DatumInt64Column, DatumIntColumn, DenseInt32Column, DenseInt64Column,
+    DenseIntColumn, FromDatum,
+};

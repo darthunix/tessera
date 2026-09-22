@@ -1,6 +1,9 @@
-mod int32;
+mod ints;
 
-pub use int32::{DatumInt32Column, DenseInt32Column};
+pub use ints::{
+    DatumInt32Column, DatumInt64Column, DatumIntColumn, DenseInt32Column, DenseInt64Column,
+    DenseIntColumn, FromDatum,
+};
 
 use anyhow::{Result, ensure};
 use tessera_core::RowMaskView;

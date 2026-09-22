@@ -1,10 +1,39 @@
+use std::fmt::Debug;
 use std::hint::select_unpredictable;
+use std::marker::PhantomData;
 use std::mem::MaybeUninit;
 
 use anyhow::{Result, ensure};
 use tessera_core::{ColumnReader, RowMaskView, WordBlock, WordValues};
 
 use super::{mask_word, try_fold_words, validate_mask, validate_ready};
+
+/// A signed integer read from the bits of a PostgreSQL Datum, as the
+/// `DatumGetInt32` and `DatumGetInt64` macros read them.
+///
+/// The targeted PostgreSQL master defines Datum as `uint64_t`, even on
+/// 32-bit targets: int4 is the low 32 bits and int8 the whole word. The
+/// width is a physical fact, not a declaration of PostgreSQL semantics;
+/// other logical types of these widths need an interpretation of their own,
+/// chosen by the caller.
+pub trait FromDatum: Copy + Debug + 'static {
+    /// The value the Datum encodes.
+    fn from_datum(datum: u64) -> Self;
+}
+
+impl FromDatum for i32 {
+    #[inline(always)]
+    fn from_datum(datum: u64) -> Self {
+        datum as i32
+    }
+}
+
+impl FromDatum for i64 {
+    #[inline(always)]
+    fn from_datum(datum: u64) -> Self {
+        datum as i64
+    }
+}
 
 /// Whether every row of the word is prepared (an absent word is not).
 #[inline]
@@ -39,7 +68,7 @@ unsafe fn assume_word<T>(slots: &[MaybeUninit<T>; 64]) -> &[T; 64] {
 // alternated between a fast and a slower mode depending on per-core
 // predictor state in the `next()`-based paths.
 #[inline(always)]
-fn read_masked(values: &[MaybeUninit<i32>], row: usize, bits: u64) -> Option<i32> {
+fn read_masked<T: Copy>(values: &[MaybeUninit<T>], row: usize, bits: u64) -> Option<T> {
     let present = bits & (1 << (row % 64)) != 0;
     // SAFETY: callers pass only prepared rows below values.len() (RowMaskView
     // bits and WordValues rows are normalized to the row count), and the
@@ -48,7 +77,8 @@ fn read_masked(values: &[MaybeUninit<i32>], row: usize, bits: u64) -> Option<i32
     select_unpredictable(present, Some(value), None)
 }
 
-/// Borrowed dense int32 storage with independent non-NULL and readiness masks.
+/// Borrowed dense integer storage with independent non-NULL and readiness
+/// masks; [`DenseInt32Column`] and [`DenseInt64Column`] name its widths.
 ///
 /// This is a physical format, not a declaration of PostgreSQL type semantics.
 /// Sliced inputs use a sliced values buffer and correspondingly offset masks.
@@ -66,13 +96,19 @@ fn read_masked(values: &[MaybeUninit<i32>], row: usize, bits: u64) -> Option<i32
 /// around the accumulation lowers to a select on the accumulator and
 /// lengthens its dependency chain.
 #[derive(Debug)]
-pub struct DenseInt32Column<'a> {
-    values: &'a [MaybeUninit<i32>],
+pub struct DenseIntColumn<'a, T> {
+    values: &'a [MaybeUninit<T>],
     non_nulls: Option<RowMaskView<'a>>,
     prepared: Option<RowMaskView<'a>>,
 }
 
-impl<'a> DenseInt32Column<'a> {
+/// Dense int32 storage.
+pub type DenseInt32Column<'a> = DenseIntColumn<'a, i32>;
+
+/// Dense int64 storage.
+pub type DenseInt64Column<'a> = DenseIntColumn<'a, i64>;
+
+impl<'a, T: Copy + Debug> DenseIntColumn<'a, T> {
     /// Borrow dense values, rejecting masks with different physical row counts.
     ///
     /// Without `non_nulls`, all prepared rows are non-NULL. Without `prepared`,
@@ -81,7 +117,7 @@ impl<'a> DenseInt32Column<'a> {
     ///
     /// # Safety
     ///
-    /// Every prepared row must contain an initialized `i32`, NULL rows
+    /// Every prepared row must contain an initialized value, NULL rows
     /// included (their value is arbitrary and never exposed). Buffers and
     /// masks must remain alive and immutable for `'a`, including against
     /// changes through C aliases. `prepared` must describe actual readiness,
@@ -105,7 +141,7 @@ impl<'a> DenseInt32Column<'a> {
     /// assert_eq!(column.get(0).unwrap(), Some(42));
     /// ```
     pub unsafe fn try_new(
-        values: &'a [MaybeUninit<i32>],
+        values: &'a [MaybeUninit<T>],
         non_nulls: Option<RowMaskView<'a>>,
         prepared: Option<RowMaskView<'a>>,
     ) -> Result<Self> {
@@ -119,15 +155,15 @@ impl<'a> DenseInt32Column<'a> {
     }
 }
 
-impl ColumnReader for DenseInt32Column<'_> {
-    type Value = i32;
+impl<T: Copy + Debug> ColumnReader for DenseIntColumn<'_, T> {
+    type Value = T;
 
     fn nrows(&self) -> usize {
         self.values.len()
     }
 
     #[inline(always)]
-    fn get(&self, row: usize) -> Result<Option<i32>> {
+    fn get(&self, row: usize) -> Result<Option<T>> {
         validate_ready(self.nrows(), self.prepared, row)?;
         if self
             .non_nulls
@@ -145,7 +181,7 @@ impl ColumnReader for DenseInt32Column<'_> {
         &self,
         word_index: usize,
         selected: u64,
-    ) -> Result<impl Iterator<Item = (usize, Option<i32>)> + '_> {
+    ) -> Result<impl Iterator<Item = (usize, Option<T>)> + '_> {
         let prepared = mask_word(self.prepared, word_index);
         // Without a NULL mask every flag is set and the read is unconditional.
         let non_nulls = mask_word(self.non_nulls, word_index);
@@ -163,7 +199,7 @@ impl ColumnReader for DenseInt32Column<'_> {
     #[inline]
     fn try_fold_selected<B, F>(&self, rows: &RowMaskView<'_>, init: B, fold: F) -> Result<B>
     where
-        F: FnMut(B, usize, Option<i32>) -> Result<B>,
+        F: FnMut(B, usize, Option<T>) -> Result<B>,
     {
         let values = self.values;
         if self.non_nulls.is_none() {
@@ -196,7 +232,7 @@ impl ColumnReader for DenseInt32Column<'_> {
     // Always inlined: returned through memory, the block costs its caller a
     // call and a copy per word, as much as a third of the vector compare.
     #[inline(always)]
-    fn word_block(&self, word_index: usize) -> Option<WordBlock<'_, i32>> {
+    fn word_block(&self, word_index: usize) -> Option<WordBlock<'_, T>> {
         if !fully_prepared(self.prepared, word_index) {
             return None;
         }
@@ -209,19 +245,27 @@ impl ColumnReader for DenseInt32Column<'_> {
     }
 }
 
-/// Borrowed PostgreSQL Datum storage interpreted as int4 values.
+/// Borrowed PostgreSQL Datum storage interpreted as integers of one width;
+/// [`DatumInt32Column`] and [`DatumInt64Column`] name the widths.
 ///
-/// The targeted PostgreSQL master defines Datum as `uint64_t`, even on 32-bit
-/// targets. Conversion takes its low 32 bits, matching `DatumGetInt32`.
+/// The interpretation is [`FromDatum`]'s: int4 from the low 32 bits of
+/// each Datum, int8 from the whole word, as PostgreSQL's macros read them.
 /// Other logical PostgreSQL types require their own compatible interpretation.
 #[derive(Debug)]
-pub struct DatumInt32Column<'a> {
+pub struct DatumIntColumn<'a, T> {
     values: &'a [MaybeUninit<u64>],
     isnull: &'a [MaybeUninit<bool>],
     prepared: Option<RowMaskView<'a>>,
+    width: PhantomData<T>,
 }
 
-impl<'a> DatumInt32Column<'a> {
+/// Datum storage read as int4.
+pub type DatumInt32Column<'a> = DatumIntColumn<'a, i32>;
+
+/// Datum storage read as int8.
+pub type DatumInt64Column<'a> = DatumIntColumn<'a, i64>;
+
+impl<'a, T: FromDatum> DatumIntColumn<'a, T> {
     /// Borrow Datum values and NULL flags, rejecting mismatched dimensions.
     ///
     /// Without `prepared`, every row is prepared. Both buffers may contain
@@ -232,13 +276,13 @@ impl<'a> DatumInt32Column<'a> {
     ///
     /// Every prepared row must have an initialized, valid Rust `bool` in
     /// `isnull` and an initialized `u64` in `values`; for a non-NULL row the
-    /// `u64` encodes PostgreSQL int4, for a NULL row it is arbitrary and
-    /// never exposed. Buffers and masks must remain alive and
-    /// immutable for `'a`, including against C aliases. `prepared` describes
-    /// actual readiness, not a changing active selection. Raw slices must
-    /// satisfy Rust's alignment, allocation, and lifetime requirements and
-    /// must use `MaybeUninit` for potentially uninitialized storage. No borrow
-    /// may survive the eventual enclosing call from C.
+    /// `u64` encodes a PostgreSQL integer of the column's width, for a NULL
+    /// row it is arbitrary and never exposed. Buffers and masks must remain
+    /// alive and immutable for `'a`, including against C aliases. `prepared`
+    /// describes actual readiness, not a changing active selection. Raw
+    /// slices must satisfy Rust's alignment, allocation, and lifetime
+    /// requirements and must use `MaybeUninit` for potentially uninitialized
+    /// storage. No borrow may survive the eventual enclosing call from C.
     ///
     /// A view cannot outlive its source:
     ///
@@ -269,6 +313,7 @@ impl<'a> DatumInt32Column<'a> {
             values,
             isnull,
             prepared,
+            width: PhantomData,
         })
     }
 
@@ -276,25 +321,25 @@ impl<'a> DatumInt32Column<'a> {
     /// data-dependent branch: flag and Datum are loaded unconditionally and
     /// the flag selects the result, so random NULLs cost no mispredictions.
     #[inline]
-    unsafe fn read_prepared(&self, row: usize) -> Option<i32> {
+    unsafe fn read_prepared(&self, row: usize) -> Option<T> {
         // SAFETY: the caller established bounds and readiness; construction
         // guarantees a valid initialized bool and an initialized Datum for
-        // every prepared row. The cast matches DatumGetInt32.
+        // every prepared row. The conversion is the PostgreSQL macro's.
         let null = unsafe { self.isnull.get_unchecked(row).assume_init() };
-        let value = unsafe { self.values.get_unchecked(row).assume_init() } as i32;
+        let value = T::from_datum(unsafe { self.values.get_unchecked(row).assume_init() });
         select_unpredictable(null, None, Some(value))
     }
 }
 
-impl ColumnReader for DatumInt32Column<'_> {
-    type Value = i32;
+impl<T: FromDatum> ColumnReader for DatumIntColumn<'_, T> {
+    type Value = T;
 
     fn nrows(&self) -> usize {
         self.values.len()
     }
 
     #[inline(always)]
-    fn get(&self, row: usize) -> Result<Option<i32>> {
+    fn get(&self, row: usize) -> Result<Option<T>> {
         validate_ready(self.nrows(), self.prepared, row)?;
         // SAFETY: bounds and readiness were checked above.
         Ok(unsafe { self.read_prepared(row) })
@@ -305,7 +350,7 @@ impl ColumnReader for DatumInt32Column<'_> {
         &self,
         word_index: usize,
         selected: u64,
-    ) -> Result<impl Iterator<Item = (usize, Option<i32>)> + '_> {
+    ) -> Result<impl Iterator<Item = (usize, Option<T>)> + '_> {
         WordValues::try_new(
             self.nrows(),
             word_index,
@@ -322,7 +367,7 @@ impl ColumnReader for DatumInt32Column<'_> {
     #[inline]
     fn try_fold_selected<B, F>(&self, rows: &RowMaskView<'_>, init: B, fold: F) -> Result<B>
     where
-        F: FnMut(B, usize, Option<i32>) -> Result<B>,
+        F: FnMut(B, usize, Option<T>) -> Result<B>,
     {
         try_fold_words(
             self.nrows(),
@@ -338,7 +383,7 @@ impl ColumnReader for DatumInt32Column<'_> {
     }
 
     #[inline(always)]
-    fn word_block(&self, word_index: usize) -> Option<WordBlock<'_, i32>> {
+    fn word_block(&self, word_index: usize) -> Option<WordBlock<'_, T>> {
         if !fully_prepared(self.prepared, word_index) {
             return None;
         }
