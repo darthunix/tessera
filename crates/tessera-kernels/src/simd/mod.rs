@@ -15,6 +15,7 @@
 #![allow(unsafe_code)]
 
 mod aggregate;
+mod aggregate64;
 mod arith;
 mod arith64;
 mod filter;
@@ -31,6 +32,7 @@ use core::arch::aarch64::{
 pub use aggregate::{
     count_datum, max_datum, max_dense, min_datum, min_dense, sum_datum, sum_dense,
 };
+pub use aggregate64::{max_datum64, max_dense64, min_datum64, min_dense64};
 pub use arith::{add, div, mul, rem, sub};
 pub use arith64::{add64, sub64};
 pub use filter::{filter_datum, filter_dense};
