@@ -40,17 +40,28 @@ description is rejected: a wrong ABI version or size, an invalid `funcid`, a
 missing `evaluate`, an unknown kind or result format, or a non-strict
 function.
 
-Built-in int4 functions are registered by the kernels module
+Built-in integer functions are registered by the kernels module
 `tessera_kernels` (`kernels/`), which links the Rust kernels statically and
-registers `int4eq`, `int4ne`, `int4lt`, `int4le`, `int4gt`, `int4ge` as
-predicates, `int4pl`, `int4mi`, `int4mul`, `int4div`, `int4mod` and the
-unary `int4um` as values with `TESS_RESULT_INT32`, and `count(*)`,
-`count(int4)`, `sum(int4)`, `min(int4)` and `max(int4)` as aggregates, by
-the aggregate's own OID, when loaded; load the bridge first, then
-`LOAD 'tessera_kernels'`, or preload both through `session_preload_libraries`
-as [bridge.md](bridge.md) recommends. The description does not depend on the argument
-types, so implementations for other types and from other extensions use
-the same structure.
+registers, when loaded: for int4, `int4eq`, `int4ne`, `int4lt`, `int4le`,
+`int4gt`, `int4ge` as predicates, `int4pl`, `int4mi`, `int4mul`, `int4div`,
+`int4mod` and the unary `int4um` as values with `TESS_RESULT_INT32`; for
+int8, the six comparisons `int8eq` … `int8ge`, the six of a bigint column
+with an integer scalar (`int84eq` … `int84ge`, the scalar widened), the
+six of an integer column with a bigint scalar (`int48eq` … `int48ge`, a
+scalar within the int4 range compared as int4, one beyond it a constant
+answer for every non-NULL value; also what `100 < c8` commutes into),
+`int8pl`, `int8mi`, `int8mul`, `int8div`, `int8mod` in every shape and
+`int84pl`, `int84mi`, `int84mul`, `int84div` with the column first, the
+unary `int8um`, and the cast `int8(int4)`, all as values with
+`TESS_RESULT_DATUM`, since an int8 is its Datum; and `count(*)`,
+`count(any)`, `sum(int4)`, `min(int4)`, `max(int4)`, `min(int8)` and
+`max(int8)` as aggregates, by the aggregate's own OID. The mixed arithmetic
+with the integer on the left (`int48pl` and its siblings) is left to the
+core: an int8 kernel must not read an int4 Datum as a whole word. Load the
+bridge first, then `LOAD 'tessera_kernels'`, or preload both through
+`session_preload_libraries` as [bridge.md](bridge.md) recommends. The
+description does not depend on the argument types, so implementations for
+other types and from other extensions use the same structure.
 
 ## What a description promises
 

@@ -64,7 +64,7 @@ undefined behavior where it cannot (overlap, dangling pointers).
 |---|---|---|
 | `TESS_OK` | empty | Success; `message` is empty. |
 | `TESS_ERROR_INVALID_ARGUMENT` | `XX000` | Dimensions, pointers, masks or the operation are invalid, or a selected row is unprepared. |
-| `TESS_ERROR_INTEGER_OUT_OF_RANGE` | `22003` | An int4 result does not fit. |
+| `TESS_ERROR_INTEGER_OUT_OF_RANGE` | `22003` | An int4 or int8 result does not fit (`integer out of range`, `bigint out of range`). |
 | `TESS_ERROR_DIVISION_BY_ZERO` | `22012` | A zero divisor. |
 | `TESS_ERROR_PANIC` | `XX000` | A Rust panic was caught; `message` holds its text. |
 
@@ -117,3 +117,24 @@ inside a kernel.
   with a NULL key (joins); `TESS_NULL_KEYS_GROUP` hashes NULL as one fixed
   key (grouping). `hashes` has the batch's row count and any contents;
   rows outside `valid` are unspecified.
+
+The int8 family reads a column whose Datums hold an int8, the whole word
+as `DatumGetInt64`, with int64 scalars, values and results; an int8 is its
+Datum, so an int8 result column is a Datum column:
+
+- `tess_int8_filter(column, prepared, rows, op, scalar, status)`: as
+  `tess_int4_filter` over int8 values.
+- `tess_count(column, prepared, rows, count, status)`: the number of
+  selected non-NULL rows of a column of any type, from its NULL flags
+  alone; a count needs no width.
+- `tess_int8_min` and `tess_int8_max(column, prepared, rows, isnull, value,
+  status)`: the least or greatest selected non-NULL int8 value, NULL
+  without any. There is no `tess_int8_sum`: PostgreSQL sums bigint into
+  numeric.
+- `tess_int8_arith_scalar`, `tess_int8_arith_scalar_left` and
+  `tess_int8_arith_columns`: as the int4 ones into a dense int8 result,
+  overflow reported as `22003` with `bigint out of range`.
+- `tess_int4_to_int8(column, prepared, rows, values, non_nulls, status)`:
+  the selected int4 values widened into int8 Datums, with the output
+  contract of the arithmetic; the cast `int8(int4)` as a kernel, so that a
+  chain over an int4 column continues with the int8 operators.

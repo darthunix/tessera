@@ -29,7 +29,7 @@ An expression is supported when it is built from
 The column must be the first argument of every call that takes it unless
 the implementation accepts any shape, or the call is an operator whose
 commutator's function is implemented: `100 - a` is fine because the int4
-arithmetic accepts any shape; `7 < a` becomes `a > 7`. A scalar argument
+and int8 arithmetic accept any shape; `7 < a` becomes `a > 7`. A scalar argument
 may be an expression of its own without a Var; the executor evaluates it
 whole. An expression with no Var at all is a scalar broadcast over the
 rows. `RelabelType` is transparent. Everything else, `AND`, `OR`, `NOT`,
@@ -82,7 +82,10 @@ Implementations that return `TESS_RESULT_INT32` write int32 results, which
 the compiler widens into the Datum column between steps; that pass goes
 word by word over the batch's rows, writing every row of a word with
 selected rows, so that it vectorizes, and native column formats would
-remove it altogether. A failed call raises its SQLSTATE and message after the call has
+remove it altogether. The int8 kernels return `TESS_RESULT_DATUM` and write
+their int64 results into the Datum column directly, since an int8 is its
+Datum; the cast `int8(int4)` is such a step, so `c4::bigint * 3 > 570` is a
+chain of the cast, the mixed multiplication and the mixed comparison. A failed call raises its SQLSTATE and message after the call has
 returned, as every kernel error is reported.
 
 ## Filters

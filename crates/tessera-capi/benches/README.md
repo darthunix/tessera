@@ -11,6 +11,12 @@ There are five benchmark programs:
   `x + x` into a result column over the reading cases.
 - [hash_int32](hash_int32.rs) hashes one and two keys into a hash column
   and a valid mask over the reading cases.
+- [filter_int64](filter_int64.rs), [arith_int64](arith_int64.rs) and
+  [aggregate_int64](aggregate_int64.rs) mirror the int32 targets for the
+  int8 kernels over values past the int4 range (`min`, `max` and `count`
+  for the aggregates: there is no int8 sum).
+- [cast_int32](cast_int32.rs) widens int4 values into int8 Datums over the
+  reading cases.
 
 Neither measures SQL latency or requires PostgreSQL. They measure PMU
 counters, not time: retired instructions, core cycles, mispredicted branches

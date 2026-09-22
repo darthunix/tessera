@@ -81,9 +81,10 @@ through Cargo with the toolchain the repository selects.
    With `max_parallel_workers_per_gather` above zero, on a table larger than
    8 MB, the same query runs in every worker under a `Gather`:
    `Finalize Aggregate → Gather → Parallel Custom Scan (TessAgg) → …`. What
-   the nodes handle today (one table, int4 filters as batch chains with the
-   rest row by row, `count`, `sum`, `min` and `max` over int4, a limit) is
-   in the [nodes guide](docs/nodes.md).
+   the nodes handle today (one table, int4 and int8 filters as batch chains
+   with the rest row by row, `count` over any type, `sum` over int4, `min`
+   and `max` over int4 and int8, a limit) is in the
+   [nodes guide](docs/nodes.md).
 
 4. Run the regression tests, thirty suites, against a running server
    (`PGPORT` and `PGHOST` in the environment) or in a temporary instance,

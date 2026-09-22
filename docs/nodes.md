@@ -355,8 +355,9 @@ TessHeapScan).
 batches of a batch child and returns the one result row, in place of the
 core's plain `Aggregate`, which would receive the child's rows one at a
 time: `TessHeapScan → TessFilter → TessAgg → parent`. It handles
-`count(*)` and `count`, `sum`, `min` and `max` of any int4 expression over
-the child's columns, computed through the projection provider: a column or
+`count(*)`, `count` of an expression of any type, `sum` of an int4
+expression and `min` and `max` of an int4 or int8 expression over the
+child's columns, computed through the projection provider: a column or
 a chain the [expression compiler](expr.md) accepts, with constants and
 parameters, by the chain over the batch, anything else row by row (see
 "Computing columns on demand" in [runtime.md](runtime.md)); expressions
@@ -374,8 +375,9 @@ plain call, without `DISTINCT`, `ORDER BY` or `FILTER`, whole or the
 partial one of a parallel plan, of an aggregate the node combines and the
 [function registry](function.md) implements over batches (kind
 `TESS_FUNCTION_AGGREGATE`, registered by the kernels module), with an
-int4 argument without a subplan whose columns, and no placeholder, the
-batch child's target has. For each of the core's plain aggregate paths whose input can be read
+int4 or int8 argument (any type for `count`, which reads NULL flags
+alone) without a subplan whose columns, and no placeholder, the batch
+child's target has. For each of the core's plain aggregate paths whose input can be read
 in batches (`tess_batch_input_path`: a batch path as it is, a clause-free
 sequential scan through `TessHeapScan`, anything else through `TessPack`),
 the node's path takes the core path as its template at nine tenths of its
@@ -406,8 +408,8 @@ decides against the core's stack and the node's serial path. The partial
 path is parallel-aware for the counters the node shares, and the plan's
 qualifier is empty, since `HAVING` belongs to the `Finalize Aggregate`.
 The partial values are the whole ones' types, int8 for `count` and
-`sum`, int4 for `min` and `max`, so the node computes them as it computes
-the whole ones, and a participant without rows gives a count of 0 and
+`sum`, the argument's for `min` and `max`, so the node computes them as it
+computes the whole ones, and a participant without rows gives a count of 0 and
 NULL otherwise, which the strict combine functions skip.
 
 ### Execution
@@ -424,8 +426,8 @@ rows go to the batch function, the wrapper is released, and the partial
 the function returns joins the running value, by
 int8 addition checked for overflow (`bigint out of range`, as the core's
 `int8inc`; the core's `int4_sum` does not check, which differs only past
-four billion rows) for `count` and `sum`, by comparison for `min` and
-`max`; `sum`, `min` and `max` stay NULL without a contributing row, `count`
+four billion rows) for `count` and `sum`, by comparison, as int4 or int8
+after the aggregate's transition type, for `min` and `max`; `sum`, `min` and `max` stay NULL without a contributing row, `count`
 is 0. The row is built in the scan slot, `HAVING` is evaluated over it, the
 plan's projection runs when the targets are not the bare aggregates, and
 the row is published as a one-row batch: a batch-aware parent such as
@@ -458,9 +460,13 @@ the whole table, nothing and a column of NULLs; chains and a parameter
 in the argument with a generic plan re-executed; a correlated subquery,
 also with a hash aggregate under pack; a limit above reading the node's
 batch; a scrollable cursor; a single-copy `Gather`; the overflow of a
-chain; and the core keeping `DISTINCT` and `FILTER` in the aggregate,
-`GROUP BY`, a window function, an empty relation, another argument type,
-a cast, `avg`, the switch off and the kernels module absent. The parallel
+chain; `count` of a text column; a bigint column with `min`, `max` and
+`count`, the filter and the argument chains through the mixed operators
+of bigint with an integer constant, the cast of an int4 column as an
+argument, the bigint extremes under a single-copy `Gather` and the
+overflow of a bigint chain; and the core keeping `DISTINCT` and `FILTER`
+in the aggregate, `GROUP BY`, a window function, an empty relation,
+`sum` over bigint, `avg`, the switch off and the kernels module absent. The parallel
 suite (`test/sql/parallel.sql`) runs the node under a `Gather` with two
 workers: the five aggregates with and without a clause, chains and
 row-wise arguments, expressions above, `HAVING` true and false,
