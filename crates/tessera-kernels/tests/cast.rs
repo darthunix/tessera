@@ -105,16 +105,23 @@ fn widening_keeps_the_sign_and_the_nulls_on_every_shape_of_word() -> Result<()> 
         let words = words_for(&selected);
         let rows = RowMaskView::try_new(nrows, &words)?;
         let (out, present) = run(&column, &rows)?;
-        assert_eq!(run(&rows_only, &rows)?, (out.clone(), present.clone()));
+        let (by_rows, rows_present) = run(&rows_only, &rows)?;
         let expected_present: Vec<bool> = (0..nrows)
             .map(|row| selected[row] && (!masked || non_null[row]))
             .collect();
         assert_eq!(present, words_for(&expected_present), "masked {masked}");
+        assert_eq!(rows_present, present, "masked {masked}");
+        // Rows outside the selection are unspecified: the whole-word path
+        // fills its placeholders, the row path leaves them alone.
         for row in 0..nrows {
             if expected_present[row] {
                 assert_eq!(out[row], i64::from(values[row]), "row {row}");
+                assert_eq!(by_rows[row], out[row], "row {row}");
             } else if !selected[row] {
-                assert_eq!(out[row], SENTINEL, "unselected row {row} is not written");
+                assert_eq!(
+                    by_rows[row], SENTINEL,
+                    "unselected row {row} on the row path"
+                );
             }
         }
     }

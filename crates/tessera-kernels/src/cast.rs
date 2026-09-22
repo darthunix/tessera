@@ -7,14 +7,20 @@
 //! values of those rows, a NULL row gets an initialized placeholder, rows
 //! outside the selection are unspecified and may stay uninitialized, and
 //! words without selected rows have their `non_nulls` word cleared. An
-//! int8 is its Datum, so the result is a column of Datums as well. Every
-//! word is read through the word iterators; the whole-word path follows,
-//! measured against this one.
+//! int8 is its Datum, so the result is a column of Datums as well.
+//!
+//! When the first word of the selection is full, selects at least a dozen
+//! rows and the reader exposes its storage, the call widens whole words
+//! (vector code on AArch64) and reads only single-row words, the tail and
+//! refused words row by row; otherwise every word is read through the
+//! word iterators.
 
 use std::mem::MaybeUninit;
 
 use anyhow::{Result, ensure};
 use tessera_core::{ColumnReader, RowMask, RowMaskView};
+
+use crate::int32::BULK_MIN_ROWS;
 
 /// Widen the selected int4 values into `values` and `non_nulls`.
 ///
@@ -58,19 +64,119 @@ pub fn int4_to_int8<C: ColumnReader<Value = i32>>(
         column.nrows() == nrows,
         "column and selection row counts differ"
     );
-    for index in 0..nrows.div_ceil(64) {
+    // The first word decides, as for the other kernels.
+    let bulk = cfg!(all(target_arch = "aarch64", not(miri)))
+        && nrows >= 64
+        && rows.word(0).is_some_and(|selected| {
+            (selected == u64::MAX
+                || (!selected.is_power_of_two() && selected.count_ones() >= BULK_MIN_ROWS))
+                && column.word_block(0).is_some()
+        });
+    if bulk {
+        widen_bulk(column, rows, values, non_nulls)
+    } else {
+        widen_rows(column, rows, values, non_nulls)
+    }
+}
+
+/// Every word row by row.
+fn widen_rows<C: ColumnReader<Value = i32>>(
+    column: &C,
+    rows: &RowMaskView<'_>,
+    values: &mut [MaybeUninit<i64>],
+    non_nulls: &mut RowMask<'_>,
+) -> Result<()> {
+    for index in 0..rows.nrows().div_ceil(64) {
         let selected = rows.word(index).unwrap();
-        if selected == 0 {
-            non_nulls.set_word(index, 0)?;
-            continue;
-        }
-        let mut present = 0;
-        for (row, value) in column.word_values(index, selected)? {
-            // A NULL row gets a placeholder without a branch on nullness.
-            values[row].write(i64::from(value.unwrap_or(0)));
-            present |= u64::from(value.is_some()) << (row % 64);
-        }
+        non_nulls.set_word(index, word_rows(column, index, selected, values)?)?;
+    }
+    Ok(())
+}
+
+/// One word row by row: the present bits of its selected rows.
+#[inline(always)]
+fn word_rows<C: ColumnReader<Value = i32>>(
+    column: &C,
+    index: usize,
+    selected: u64,
+    values: &mut [MaybeUninit<i64>],
+) -> Result<u64> {
+    if selected == 0 {
+        return Ok(0);
+    }
+    let mut present = 0;
+    for (row, value) in column.word_values(index, selected)? {
+        // A NULL row gets a placeholder without a branch on nullness.
+        values[row].write(i64::from(value.unwrap_or(0)));
+        present |= u64::from(value.is_some()) << (row % 64);
+    }
+    Ok(present)
+}
+
+/// Whole words where the reader exposes them, rows elsewhere.
+#[inline(never)]
+fn widen_bulk<C: ColumnReader<Value = i32>>(
+    column: &C,
+    rows: &RowMaskView<'_>,
+    values: &mut [MaybeUninit<i64>],
+    non_nulls: &mut RowMask<'_>,
+) -> Result<()> {
+    for index in 0..rows.nrows().div_ceil(64) {
+        let selected = rows.word(index).unwrap();
+        let present = if selected == 0 || selected.is_power_of_two() {
+            word_rows(column, index, selected, values)?
+        } else if let Some(block) = column.word_block(index) {
+            let base = index * 64;
+            let out: &mut [MaybeUninit<i64>; 64] = (&mut values[base..base + 64])
+                .try_into()
+                .expect("a whole-word operand implies a full word");
+            bulk::widen(block, selected, out)
+        } else {
+            word_rows(column, index, selected, values)?
+        };
         non_nulls.set_word(index, present)?;
     }
     Ok(())
+}
+
+/// The whole-word kernel: every lane widened, and the present bits of the
+/// selected non-NULL rows returned.
+#[cfg(all(target_arch = "aarch64", not(miri)))]
+mod bulk {
+    use std::mem::MaybeUninit;
+
+    use tessera_core::WordBlock;
+
+    use crate::simd;
+
+    #[inline]
+    pub fn widen(
+        block: WordBlock<'_, i32>,
+        selected: u64,
+        out: &mut [MaybeUninit<i64>; 64],
+    ) -> u64 {
+        match block {
+            WordBlock::Dense { values, non_nulls } => {
+                simd::widen_dense(values, out);
+                selected & non_nulls
+            }
+            WordBlock::Datum { values, isnull } => {
+                simd::widen_datum(values, out);
+                selected & simd::non_null_bits(isnull)
+            }
+        }
+    }
+}
+
+/// Without vector code no call takes the whole-word path; this keeps the
+/// callers compiling and is never reached.
+#[cfg(not(all(target_arch = "aarch64", not(miri))))]
+mod bulk {
+    use std::mem::MaybeUninit;
+
+    use tessera_core::WordBlock;
+
+    pub fn widen(_: WordBlock<'_, i32>, _: u64, _: &mut [MaybeUninit<i64>; 64]) -> u64 {
+        unreachable!("no whole-word kernels on this target")
+    }
 }

@@ -18,6 +18,7 @@ mod aggregate;
 mod aggregate64;
 mod arith;
 mod arith64;
+mod cast;
 mod filter;
 mod filter64;
 mod hash;
@@ -35,6 +36,7 @@ pub use aggregate::{
 pub use aggregate64::{max_datum64, max_dense64, min_datum64, min_dense64};
 pub use arith::{add, div, mul, rem, sub};
 pub use arith64::{add64, sub64};
+pub use cast::{widen_datum, widen_dense};
 pub use filter::{filter_datum, filter_dense};
 pub use filter64::{filter_datum64, filter_dense64};
 pub use hash::{combine, combine_nulls, hash, hash_nulls};
