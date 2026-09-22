@@ -374,14 +374,21 @@ SELECT agg_same($$SELECT sum(x + y), max(x) FROM (SELECT a + 1 AS x, b * 2 AS y 
  {"(6975,159)"}
 (1 row)
 
--- Left to the core: another type, a cast, avg.
+-- count reads no value: any argument type, text included.
 EXPLAIN (COSTS OFF) SELECT count(c) FROM agg_t;
-       QUERY PLAN        
--------------------------
- Aggregate
-   ->  Seq Scan on agg_t
+                QUERY PLAN                 
+-------------------------------------------
+ Custom Scan (TessAgg)
+   ->  Custom Scan (TessHeapScan) on agg_t
 (2 rows)
 
+SELECT agg_same($$SELECT count(c), count(a), count(*) FROM agg_t WHERE b > 5$$);
+     agg_same      
+-------------------
+ {"(120,103,120)"}
+(1 row)
+
+-- Left to the core: sum over bigint (numeric), avg.
 EXPLAIN (COSTS OFF) SELECT sum(a::bigint) FROM agg_t;
        QUERY PLAN        
 -------------------------
@@ -396,6 +403,91 @@ EXPLAIN (COSTS OFF) SELECT avg(a) FROM agg_t;
    ->  Seq Scan on agg_t
 (2 rows)
 
+-- A bigint column: min and max over int8, the filter and the argument
+-- chains through the mixed operators of bigint with an integer constant,
+-- and the cast of an int4 column as an argument.
+CREATE TABLE agg8_t (a bigint, b int, c text);
+INSERT INTO agg8_t
+SELECT CASE WHEN i % 7 = 0 THEN NULL ELSE i * 4294967296 + i END, i % 10, 'r' || i
+FROM generate_series(1, 300) AS i;
+EXPLAIN (COSTS OFF, VERBOSE)
+SELECT min(a), max(a), count(a), count(*) FROM agg8_t WHERE a > 100;
+                       QUERY PLAN                        
+---------------------------------------------------------
+ Custom Scan (TessAgg)
+   Output: (min(a)), (max(a)), (count(a)), (count(*))
+   ->  Custom Scan (TessFilter) on public.agg8_t
+         Output: a
+         Batch Filter: (agg8_t.a > 100)
+         ->  Custom Scan (TessHeapScan) on public.agg8_t
+               Output: a
+(7 rows)
+
+SELECT agg_same($$SELECT min(a), max(a), count(a), count(*) FROM agg8_t WHERE a > 100$$);
+                agg_same                
+----------------------------------------
+ {"(4294967297,1288490189100,258,258)"}
+(1 row)
+
+SELECT agg_same($$SELECT min(a), max(a), count(a) FROM agg8_t$$);
+              agg_same              
+------------------------------------
+ {"(4294967297,1288490189100,258)"}
+(1 row)
+
+SELECT agg_same($$SELECT min(a), max(a) FROM agg8_t WHERE a > 4294967296 * 400$$);
+ agg_same 
+----------
+ {"(,)"}
+(1 row)
+
+SELECT agg_same($$SELECT min(a + 1), max(a * 2), min(-a), max(a % 7), min(b::bigint * 3) FROM agg8_t WHERE a > 4294967296 * 290$$);
+                       agg_same                       
+------------------------------------------------------
+ {"(1245540516131,2576980378200,-1288490189100,6,0)"}
+(1 row)
+
+SELECT agg_same($$SELECT min(a), max(a) FROM agg8_t WHERE a % 50 = 0$$);
+             agg_same             
+----------------------------------
+ {"(214748364850,1288490189100)"}
+(1 row)
+
+-- The bigint extremes in the partial mode of a parallel plan.
+SET debug_parallel_query = on;
+EXPLAIN (COSTS OFF) SELECT min(a), max(a), count(c) FROM agg8_t WHERE a > 100;
+                       QUERY PLAN                       
+--------------------------------------------------------
+ Gather
+   Workers Planned: 1
+   Single Copy: true
+   ->  Custom Scan (TessAgg)
+         ->  Custom Scan (TessFilter) on agg8_t
+               Batch Filter: (a > 100)
+               ->  Custom Scan (TessHeapScan) on agg8_t
+(7 rows)
+
+SELECT min(a), max(a), count(c) FROM agg8_t WHERE a > 100;
+    min     |      max      | count 
+------------+---------------+-------
+ 4294967297 | 1288490189100 |   258
+(1 row)
+
+RESET debug_parallel_query;
+-- An overflow in the argument chain is the chain's.
+SELECT max(a * 4294967296) FROM agg8_t;
+ERROR:  bigint out of range
+-- Left to the core: sum over bigint.
+EXPLAIN (COSTS OFF) SELECT sum(a) FROM agg8_t WHERE a > 100;
+                    QUERY PLAN                    
+--------------------------------------------------
+ Aggregate
+   ->  Custom Scan (TessFilter) on agg8_t
+         Batch Filter: (a > 100)
+         ->  Custom Scan (TessHeapScan) on agg8_t
+(4 rows)
+
+DROP TABLE agg8_t;
 -- Pages and batches: wide rows make the scan pin many pages.
 CREATE TABLE agg_wide AS
 SELECT i AS a, repeat('x', 500) AS pad FROM generate_series(1, 1000) AS i;

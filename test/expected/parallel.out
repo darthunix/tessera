@@ -462,11 +462,12 @@ EXPLAIN (COSTS OFF) SELECT count(c), count(*) FROM parallel_t WHERE a > 100;
  Finalize Aggregate
    ->  Gather
          Workers Planned: 2
-         ->  Partial Aggregate
+         ->  Parallel Custom Scan (TessAgg)
+               Partial Mode: Partial
                ->  Parallel Custom Scan (TessFilter) on parallel_t
                      Batch Filter: (a > 100)
                      ->  Parallel Custom Scan (TessHeapScan) on parallel_t
-(7 rows)
+(8 rows)
 
 SELECT parallel_same($$SELECT count(c), count(*) FROM parallel_t WHERE a > 100$$);
   parallel_same  

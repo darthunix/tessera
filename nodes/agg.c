@@ -53,8 +53,8 @@ typedef enum AggKind
 {
 	AGG_COUNT,					/* int8 sum of the partials, 0 without any */
 	AGG_SUM,					/* int8 sum of the partials, NULL without any */
-	AGG_MIN,					/* the least int4 partial, NULL without any */
-	AGG_MAX						/* the greatest int4 partial, NULL without any */
+	AGG_MIN,					/* the least partial, NULL without any */
+	AGG_MAX						/* the greatest partial, NULL without any */
 } AggKind;
 
 typedef struct AggValue
@@ -68,7 +68,9 @@ typedef struct AggValue
 	bool	   *gathered_isnull;
 	int			ngathered;
 	int64		total;
-	int32		extreme;
+	/* The extreme so far, int4 or int8 as the aggregate's transition type. */
+	int64		extreme;
+	bool		wide;
 	bool		has_value;
 } AggValue;
 
@@ -121,8 +123,10 @@ aggregate_kind(Oid aggfnoid)
 		case F_SUM_INT4:
 			return AGG_SUM;
 		case F_MIN_INT4:
+		case F_MIN_INT8:
 			return AGG_MIN;
 		case F_MAX_INT4:
+		case F_MAX_INT8:
 			return AGG_MAX;
 		default:
 			return -1;
@@ -140,10 +144,12 @@ aggregate_argument(const Aggref *agg)
 /*
  * Whether the node computes this aggregate: a plain call, whole or the
  * partial one of a parallel plan, of an aggregate the node combines and
- * the registry implements over batches, with no argument for count(*) or
- * one int4 expression the projection provider computes, by a chain or
- * row by row; a subplan in it would need fixing against the scan tuple,
- * which the arguments do not go through.
+ * the registry implements over batches, with no argument for count(*),
+ * one expression of any type for count (the count reads NULL flags
+ * alone) or one int4 or int8 expression for the others, which the
+ * projection provider computes by a chain or row by row; a subplan in it
+ * would need fixing against the scan tuple, which the arguments do not go
+ * through.
  */
 static bool
 aggregate_supported(const Aggref *agg)
@@ -164,8 +170,10 @@ aggregate_supported(const Aggref *agg)
 	if (agg->aggfnoid == F_COUNT_)
 		return agg->aggstar && agg->args == NIL;
 	argument = aggregate_argument(agg);
-	return list_length(agg->args) == 1 && exprType(argument) == INT4OID &&
-		!contain_subplans(argument);
+	if (list_length(agg->args) != 1 || contain_subplans(argument))
+		return false;
+	return agg->aggfnoid == F_COUNT_ANY || exprType(argument) == INT4OID ||
+		exprType(argument) == INT8OID;
 }
 
 /*
@@ -488,6 +496,7 @@ agg_begin(CustomScanState *css, EState *estate, int eflags)
 		/* The partial values are the whole ones' types: nothing to convert. */
 		state->partial = DO_AGGSPLIT_SKIPFINAL(agg->aggsplit);
 		value->kind = aggregate_kind(agg->aggfnoid);
+		value->wide = agg->aggtranstype == INT8OID;
 		value->function = tess_runtime_api()->functions->find(agg->aggfnoid);
 		if (value->kind < 0 || value->function == NULL ||
 			value->function->kind != TESS_FUNCTION_AGGREGATE)
@@ -602,13 +611,17 @@ evaluate(TessAggState *state, AggValue *value, const TessDatumColumn *column,
 						 errmsg("bigint out of range")));
 			break;
 		case AGG_MIN:
-			if (!value->has_value || DatumGetInt32(partial) < value->extreme)
-				value->extreme = DatumGetInt32(partial);
-			break;
 		case AGG_MAX:
-			if (!value->has_value || DatumGetInt32(partial) > value->extreme)
-				value->extreme = DatumGetInt32(partial);
-			break;
+			{
+				int64		found = value->wide ? DatumGetInt64(partial) :
+					(int64) DatumGetInt32(partial);
+
+				if (!value->has_value ||
+					(value->kind == AGG_MIN ? found < value->extreme :
+					 found > value->extreme))
+					value->extreme = found;
+				break;
+			}
 	}
 	value->has_value = true;
 }
@@ -728,7 +741,9 @@ result_row(TessAggState *state)
 				break;
 			case AGG_MIN:
 			case AGG_MAX:
-				scan->tts_values[index] = Int32GetDatum(value->extreme);
+				scan->tts_values[index] = value->wide ?
+					Int64GetDatum(value->extreme) :
+					Int32GetDatum((int32) value->extreme);
 				break;
 		}
 	}

@@ -107,10 +107,37 @@ SELECT agg_same($$SELECT o.b, (SELECT s FROM (SELECT sum(i.a + i.b * o.b) AS s F
 EXPLAIN (COSTS OFF)
 SELECT sum(x + y) FROM (SELECT a + 1 AS x, b * 2 AS y FROM agg_t WHERE a > 100 LIMIT 50) AS s;
 SELECT agg_same($$SELECT sum(x + y), max(x) FROM (SELECT a + 1 AS x, b * 2 AS y FROM agg_t WHERE a > 100 LIMIT 50) AS s$$);
--- Left to the core: another type, a cast, avg.
+-- count reads no value: any argument type, text included.
 EXPLAIN (COSTS OFF) SELECT count(c) FROM agg_t;
+SELECT agg_same($$SELECT count(c), count(a), count(*) FROM agg_t WHERE b > 5$$);
+-- Left to the core: sum over bigint (numeric), avg.
 EXPLAIN (COSTS OFF) SELECT sum(a::bigint) FROM agg_t;
 EXPLAIN (COSTS OFF) SELECT avg(a) FROM agg_t;
+
+-- A bigint column: min and max over int8, the filter and the argument
+-- chains through the mixed operators of bigint with an integer constant,
+-- and the cast of an int4 column as an argument.
+CREATE TABLE agg8_t (a bigint, b int, c text);
+INSERT INTO agg8_t
+SELECT CASE WHEN i % 7 = 0 THEN NULL ELSE i * 4294967296 + i END, i % 10, 'r' || i
+FROM generate_series(1, 300) AS i;
+EXPLAIN (COSTS OFF, VERBOSE)
+SELECT min(a), max(a), count(a), count(*) FROM agg8_t WHERE a > 100;
+SELECT agg_same($$SELECT min(a), max(a), count(a), count(*) FROM agg8_t WHERE a > 100$$);
+SELECT agg_same($$SELECT min(a), max(a), count(a) FROM agg8_t$$);
+SELECT agg_same($$SELECT min(a), max(a) FROM agg8_t WHERE a > 4294967296 * 400$$);
+SELECT agg_same($$SELECT min(a + 1), max(a * 2), min(-a), max(a % 7), min(b::bigint * 3) FROM agg8_t WHERE a > 4294967296 * 290$$);
+SELECT agg_same($$SELECT min(a), max(a) FROM agg8_t WHERE a % 50 = 0$$);
+-- The bigint extremes in the partial mode of a parallel plan.
+SET debug_parallel_query = on;
+EXPLAIN (COSTS OFF) SELECT min(a), max(a), count(c) FROM agg8_t WHERE a > 100;
+SELECT min(a), max(a), count(c) FROM agg8_t WHERE a > 100;
+RESET debug_parallel_query;
+-- An overflow in the argument chain is the chain's.
+SELECT max(a * 4294967296) FROM agg8_t;
+-- Left to the core: sum over bigint.
+EXPLAIN (COSTS OFF) SELECT sum(a) FROM agg8_t WHERE a > 100;
+DROP TABLE agg8_t;
 -- Pages and batches: wide rows make the scan pin many pages.
 CREATE TABLE agg_wide AS
 SELECT i AS a, repeat('x', 500) AS pad FROM generate_series(1, 1000) AS i;

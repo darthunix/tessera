@@ -11,6 +11,7 @@
 #include "nodes/nodeFuncs.h"
 #include "nodes/value.h"
 #include "utils/builtins.h"
+#include "utils/fmgroids.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
 
@@ -153,8 +154,15 @@ tessera_test_expr_supports(PG_FUNCTION_ARGS)
 	result &= check(31, tess_expr_supports_value(op("-", a(), op("*", var(2, INT4OID), int4(2))), 0));
 	result &= check(33, !tess_expr_supports_value(op("+", op("+", a(), int4(1)), op("*", var(2, INT4OID), int4(2))), 0));
 	result &= check(32, tess_expr_supports_filter(op(">", op("+", a(), var(2, INT4OID)), int4(5)), 0));
-	/* Unsupported values. */
+	/* A bigint column with a bigint or an integer scalar, and the cast. */
+	result &= check(34, tess_expr_supports_value(op("+", var(4, INT8OID), (Node *) makeConst(INT8OID, -1, InvalidOid, 8, Int64GetDatum(1), false, true)), 0));
+	result &= check(35, tess_expr_supports_value(op("*", var(4, INT8OID), int4(2)), 0));
+	result &= check(36, tess_expr_supports_filter(op("<", var(4, INT8OID), int4(5)), 0));
+	result &= check(37, tess_expr_supports_filter(op("<", int4(5), var(4, INT8OID)), 0));
+	result &= check(38, tess_expr_supports_filter(op(">", (Node *) makeFuncExpr(F_INT8_INT4, INT8OID, list_make1(a()), InvalidOid, InvalidOid, COERCE_IMPLICIT_CAST), int4(5)), 0));
+	/* Unsupported values: the integer on the left of a mixed operator. */
 	result &= check(10, !tess_expr_supports_value(op("+", a(), (Node *) makeConst(INT8OID, -1, InvalidOid, 8, Int64GetDatum(1), false, true)), 0));
+	result &= check(39, !tess_expr_supports_value(op("+", int4(1), var(4, INT8OID)), 0));
 	result &= check(11, !tess_expr_supports_value(op("=", var(3, TEXTOID), (Node *) makeConst(TEXTOID, -1, DEFAULT_COLLATION_OID, -1, CStringGetTextDatum("x"), false, false)), 0));
 	result &= check(12, !tess_expr_supports_value(op(">", a(), int4(5)), 0));
 	result &= check(13, !tess_expr_supports_value((Node *) make_andclause(list_make2(op(">", a(), int4(5)), op("<", a(), int4(9)))), 0));

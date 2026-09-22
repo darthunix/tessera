@@ -637,6 +637,128 @@ EXPLAIN (COSTS OFF) SELECT a FROM filter_t WHERE a > 100;
 (2 rows)
 
 RESET tessera.enable;
+-- A bigint column: the comparison of bigint with an integer constant and
+-- with a bigint one, the commutator with the constant on the left, unary
+-- minus, and the cast of an int4 column as a chain step. Two columns of
+-- different widths stay a residual.
+CREATE TABLE filter8_t (a bigint, b int);
+INSERT INTO filter8_t
+SELECT CASE WHEN i % 7 = 0 THEN NULL ELSE i * 4294967296 + i END, i % 10
+FROM generate_series(1, 200) AS i;
+EXPLAIN (COSTS OFF) SELECT a FROM filter8_t WHERE a > 100;
+                  QUERY PLAN                   
+-----------------------------------------------
+ Custom Scan (TessFilter) on filter8_t
+   Batch Filter: (a > 100)
+   ->  Custom Scan (TessHeapScan) on filter8_t
+(3 rows)
+
+SELECT filter_same($$SELECT a FROM filter8_t WHERE a > 4294967296 * 195$$);
+                                 filter_same                                  
+------------------------------------------------------------------------------
+ {(837518622915),(846108557509),(850403524806),(854698492103),(858993459400)}
+(1 row)
+
+SELECT filter_same($$SELECT a FROM filter8_t WHERE a < 100$$);
+ filter_same 
+-------------
+ 
+(1 row)
+
+SELECT filter_same($$SELECT a FROM filter8_t WHERE 4294967296 * 195 < a$$);
+                                 filter_same                                  
+------------------------------------------------------------------------------
+ {(837518622915),(846108557509),(850403524806),(854698492103),(858993459400)}
+(1 row)
+
+SELECT filter_same($$SELECT a FROM filter8_t WHERE 100 < a AND a < 4294967296 * 3$$);
+         filter_same         
+-----------------------------
+ {(4294967297),(8589934594)}
+(1 row)
+
+SELECT filter_same($$SELECT a FROM filter8_t WHERE -a < -(4294967296 * 195)$$);
+                                 filter_same                                  
+------------------------------------------------------------------------------
+ {(837518622915),(846108557509),(850403524806),(854698492103),(858993459400)}
+(1 row)
+
+SELECT filter_same($$SELECT a FROM filter8_t WHERE (a + 1) * 2 > 4294967296 * 390$$);
+                                 filter_same                                  
+------------------------------------------------------------------------------
+ {(837518622915),(846108557509),(850403524806),(854698492103),(858993459400)}
+(1 row)
+
+SELECT filter_same($$SELECT a FROM filter8_t WHERE a % 7 = 3$$);
+                                                                                                                                                                                                                   filter_same                                                                                                                                                                                                                   
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ {(128849018910),(158913789989),(188978561068),(219043332147),(249108103226),(279172874305),(309237645384),(339302416463),(369367187542),(38654705673),(399431958621),(429496729700),(459561500779),(489626271858),(519691042937),(549755814016),(579820585095),(609885356174),(639950127253),(670014898332),(68719476752),(700079669411),(730144440490),(760209211569),(790273982648),(820338753727),(850403524806),(8589934594),(98784247831)}
+(1 row)
+
+SELECT filter_same($$SELECT a FROM filter8_t WHERE a / 4294967296 = 100$$);
+   filter_same    
+------------------
+ {(429496729700)}
+(1 row)
+
+EXPLAIN (COSTS OFF) SELECT a FROM filter8_t WHERE a + b > 4294967296 * 195;
+                  QUERY PLAN                  
+----------------------------------------------
+ Seq Scan on filter8_t
+   Filter: ((a + b) > '837518622720'::bigint)
+(2 rows)
+
+SELECT filter_same($$SELECT a FROM filter8_t WHERE a + b > 4294967296 * 195$$);
+                                 filter_same                                  
+------------------------------------------------------------------------------
+ {(837518622915),(846108557509),(850403524806),(854698492103),(858993459400)}
+(1 row)
+
+EXPLAIN (COSTS OFF) SELECT a FROM filter_t WHERE a::bigint * 3 > 570;
+                  QUERY PLAN                  
+----------------------------------------------
+ Custom Scan (TessFilter) on filter_t
+   Batch Filter: (((a)::bigint * 3) > 570)
+   ->  Custom Scan (TessHeapScan) on filter_t
+(3 rows)
+
+SELECT filter_same($$SELECT a FROM filter_t WHERE a::bigint * 3 > 570$$);
+                       filter_same                       
+---------------------------------------------------------
+ {(191),(192),(193),(194),(195),(197),(198),(199),(200)}
+(1 row)
+
+SELECT filter_same($$SELECT a FROM filter_t WHERE a::bigint < 5 OR a::bigint > 195$$);
+                filter_same                
+-------------------------------------------
+ {(1),(197),(198),(199),(2),(200),(3),(4)}
+(1 row)
+
+-- An integer column against a bigint constant beyond its range.
+EXPLAIN (COSTS OFF) SELECT a FROM filter_t WHERE a < 5000000000;
+                  QUERY PLAN                  
+----------------------------------------------
+ Custom Scan (TessFilter) on filter_t
+   Batch Filter: (a < '5000000000'::bigint)
+   ->  Custom Scan (TessHeapScan) on filter_t
+(3 rows)
+
+SELECT filter_same($$SELECT a FROM filter_t WHERE a < 5000000000 AND a > -5000000000 AND a > 195$$);
+        filter_same        
+---------------------------
+ {(197),(198),(199),(200)}
+(1 row)
+
+SELECT filter_same($$SELECT a FROM filter_t WHERE a > 5000000000 OR 5000000000 < a$$);
+ filter_same 
+-------------
+ 
+(1 row)
+
+-- An overflow in a bigint chain is reported as bigint's.
+SELECT a FROM filter8_t WHERE a * 4294967296 > 1;
+ERROR:  bigint out of range
+DROP TABLE filter8_t;
 DROP FUNCTION filter_same(text);
 DROP TABLE filter_t;
 DROP EXTENSION tessera;

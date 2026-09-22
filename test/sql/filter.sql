@@ -190,6 +190,37 @@ SET tessera.enable = off;
 EXPLAIN (COSTS OFF) SELECT a FROM filter_t WHERE a > 100;
 RESET tessera.enable;
 
+-- A bigint column: the comparison of bigint with an integer constant and
+-- with a bigint one, the commutator with the constant on the left, unary
+-- minus, and the cast of an int4 column as a chain step. Two columns of
+-- different widths stay a residual.
+CREATE TABLE filter8_t (a bigint, b int);
+INSERT INTO filter8_t
+SELECT CASE WHEN i % 7 = 0 THEN NULL ELSE i * 4294967296 + i END, i % 10
+FROM generate_series(1, 200) AS i;
+EXPLAIN (COSTS OFF) SELECT a FROM filter8_t WHERE a > 100;
+SELECT filter_same($$SELECT a FROM filter8_t WHERE a > 4294967296 * 195$$);
+SELECT filter_same($$SELECT a FROM filter8_t WHERE a < 100$$);
+SELECT filter_same($$SELECT a FROM filter8_t WHERE 4294967296 * 195 < a$$);
+SELECT filter_same($$SELECT a FROM filter8_t WHERE 100 < a AND a < 4294967296 * 3$$);
+SELECT filter_same($$SELECT a FROM filter8_t WHERE -a < -(4294967296 * 195)$$);
+SELECT filter_same($$SELECT a FROM filter8_t WHERE (a + 1) * 2 > 4294967296 * 390$$);
+SELECT filter_same($$SELECT a FROM filter8_t WHERE a % 7 = 3$$);
+SELECT filter_same($$SELECT a FROM filter8_t WHERE a / 4294967296 = 100$$);
+EXPLAIN (COSTS OFF) SELECT a FROM filter8_t WHERE a + b > 4294967296 * 195;
+SELECT filter_same($$SELECT a FROM filter8_t WHERE a + b > 4294967296 * 195$$);
+EXPLAIN (COSTS OFF) SELECT a FROM filter_t WHERE a::bigint * 3 > 570;
+SELECT filter_same($$SELECT a FROM filter_t WHERE a::bigint * 3 > 570$$);
+SELECT filter_same($$SELECT a FROM filter_t WHERE a::bigint < 5 OR a::bigint > 195$$);
+-- An integer column against a bigint constant beyond its range.
+EXPLAIN (COSTS OFF) SELECT a FROM filter_t WHERE a < 5000000000;
+SELECT filter_same($$SELECT a FROM filter_t WHERE a < 5000000000 AND a > -5000000000 AND a > 195$$);
+SELECT filter_same($$SELECT a FROM filter_t WHERE a > 5000000000 OR 5000000000 < a$$);
+-- An overflow in a bigint chain is reported as bigint's.
+SELECT a FROM filter8_t WHERE a * 4294967296 > 1;
+DROP TABLE filter8_t;
+
 DROP FUNCTION filter_same(text);
+
 DROP TABLE filter_t;
 DROP EXTENSION tessera;
