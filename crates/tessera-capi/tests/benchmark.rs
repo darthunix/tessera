@@ -15,6 +15,9 @@ mod arithmetic;
 #[path = "../benches/support/arithmetic64.rs"]
 #[allow(dead_code)]
 mod arithmetic64;
+#[path = "../benches/support/casting.rs"]
+#[allow(dead_code)]
+mod casting;
 #[path = "../benches/support/filtering.rs"]
 #[allow(dead_code)]
 mod filtering;
@@ -184,6 +187,25 @@ fn aggregate64_kernels_match_the_fixture_model_on_every_case() -> Result<()> {
         let input = reading64::Input::new(&datum, &case);
         assert_eq!(reading64::datum_reference(&input)?, case.expected);
         aggregating64::check(&input, &case)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn widening_matches_the_fixture_on_every_case() -> Result<()> {
+    for case in reading::cases() {
+        let dense = case.dense_column()?;
+        casting::check(
+            &reading::Input::new(&dense, &case),
+            &case,
+            casting::dense_reference,
+        )?;
+        let datum = case.datum_column()?;
+        casting::check(
+            &reading::Input::new(&datum, &case),
+            &case,
+            casting::datum_reference,
+        )?;
     }
     Ok(())
 }

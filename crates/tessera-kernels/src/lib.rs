@@ -13,7 +13,8 @@
 //! of joins and grouping, all through [`tessera_core::ColumnReader`],
 //! independently of physical storage; [`int64`] mirrors the family for
 //! int8, kernel by kernel, with the vocabulary of [`ops`] shared, and
-//! [`count::count`] counts non-NULL rows of any type.
+//! [`count::count`] counts non-NULL rows of any type and
+//! [`cast::int4_to_int8`] widens int4 values into an int8 column.
 //! Errors do not roll back previously completed words; callers must discard a
 //! partial selection after failure. This crate does not introduce a C entry
 //! point or catch panics. The future C boundary remains responsible for panic
@@ -27,6 +28,7 @@
 
 #![deny(unsafe_code)]
 
+pub mod cast;
 pub mod count;
 pub mod int32;
 pub mod int64;

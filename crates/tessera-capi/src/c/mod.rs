@@ -7,6 +7,7 @@
 //! contract, in `docs/kernels.md`.
 
 mod args;
+mod cast;
 mod column;
 mod count;
 mod int32;
@@ -14,6 +15,7 @@ mod int64;
 mod mask;
 mod status;
 
+pub use cast::tess_int4_to_int8;
 pub use column::DatumColumn;
 pub use count::tess_count;
 pub use int32::{

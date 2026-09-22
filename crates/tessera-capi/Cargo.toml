@@ -53,3 +53,7 @@ harness = false
 [[bench]]
 name = "aggregate_int64"
 harness = false
+
+[[bench]]
+name = "cast_int32"
+harness = false

@@ -16,6 +16,7 @@ PG_FUNCTION_INFO_V1(tessera_test_kernels_aggregates);
 PG_FUNCTION_INFO_V1(tessera_test_kernels_aggregates_int8);
 PG_FUNCTION_INFO_V1(tessera_test_kernels_arithmetic);
 PG_FUNCTION_INFO_V1(tessera_test_kernels_arithmetic_int8);
+PG_FUNCTION_INFO_V1(tessera_test_kernels_cast);
 PG_FUNCTION_INFO_V1(tessera_test_kernels_hashes);
 PG_FUNCTION_INFO_V1(tessera_test_kernels_panic);
 PG_FUNCTION_INFO_V1(tessera_test_kernels_report);
@@ -612,6 +613,49 @@ tessera_test_kernels_arithmetic_int8(PG_FUNCTION_ARGS)
 							   small_results, &small_non_nulls,
 							   &status) != TESS_OK ||
 		small_word != 5 || small_results[0] != 0 || small_results[2] != 0)
+		PG_RETURN_BOOL(false);
+
+	PG_RETURN_BOOL(true);
+}
+
+Datum
+tessera_test_kernels_cast(PG_FUNCTION_ARGS)
+{
+	Datum		values[NROWS];
+	bool		isnull[NROWS];
+	uint64		words[NWORDS];
+	Datum		results[NROWS];
+	uint64		result_words[NWORDS] = {0};
+	TessDatumColumn column;
+	TessRowMask rows = {NROWS, words};
+	TessRowMask non_nulls = {NROWS, result_words};
+	TessStatus	status = TESS_STRUCT_INITIALIZER(TessStatus);
+	int			row;
+
+	/* Every selected non-NULL int4 becomes its int8 Datum. */
+	fill(values, isnull, words);
+	init_column(&column, values, isnull);
+	if (tess_int4_to_int8(&column, NULL, &rows, results, &non_nulls,
+						  &status) != TESS_OK)
+		PG_RETURN_BOOL(false);
+	for (row = 0; row < NROWS; row++)
+	{
+		bool		chosen = (words[row / 64] &
+							  (UINT64CONST(1) << (row % 64))) != 0;
+		bool		present = (result_words[row / 64] &
+							   (UINT64CONST(1) << (row % 64))) != 0;
+
+		if (present != (chosen && !isnull[row]))
+			PG_RETURN_BOOL(false);
+		if (present &&
+			DatumGetInt64(results[row]) != (int64) DatumGetInt32(values[row]))
+			PG_RETURN_BOOL(false);
+	}
+
+	/* A dimension error writes nothing. */
+	column.nrows = NROWS - 1;
+	if (tess_int4_to_int8(&column, NULL, &rows, results, &non_nulls,
+						  &status) != TESS_ERROR_INVALID_ARGUMENT)
 		PG_RETURN_BOOL(false);
 
 	PG_RETURN_BOOL(true);

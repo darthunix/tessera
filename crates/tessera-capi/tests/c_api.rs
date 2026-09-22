@@ -7,9 +7,10 @@ use std::ptr;
 use tessera_capi::c::{
     Code, DatumColumn, Mask, Status, tess_count, tess_int4_arith_columns, tess_int4_arith_scalar,
     tess_int4_arith_scalar_left, tess_int4_count, tess_int4_filter, tess_int4_hash,
-    tess_int4_hash_next, tess_int4_max, tess_int4_min, tess_int4_sum, tess_int8_arith_columns,
-    tess_int8_arith_scalar, tess_int8_arith_scalar_left, tess_int8_filter, tess_int8_max,
-    tess_int8_min, tess_kernels_abi_version, tess_kernels_layout, tess_kernels_test_panic,
+    tess_int4_hash_next, tess_int4_max, tess_int4_min, tess_int4_sum, tess_int4_to_int8,
+    tess_int8_arith_columns, tess_int8_arith_scalar, tess_int8_arith_scalar_left, tess_int8_filter,
+    tess_int8_max, tess_int8_min, tess_kernels_abi_version, tess_kernels_layout,
+    tess_kernels_test_panic,
 };
 use tessera_kernels::int32::{hash_combine, murmurhash32};
 
@@ -886,6 +887,62 @@ fn int8_extremes_and_the_count_of_any_type_match_a_scalar_loop() {
     }
     assert_eq!((got_count, got_min, got_max), (0, 0, 0));
     assert_eq!((min_null, max_null), (true, true));
+}
+
+#[test]
+fn widening_writes_int8_datums_of_the_selected_values() {
+    let mut fixture = Fixture::new(200);
+    let column = fixture.column();
+    let rows = fixture.mask();
+    let mut values = vec![u64::MAX; 200];
+    let mut result_words = vec![0; 4];
+    let mut non_nulls = Mask {
+        nrows: 200,
+        bits: result_words.as_mut_ptr(),
+    };
+    let mut status = Status::new();
+    // SAFETY: local buffers of the declared sizes, aliased by nothing else.
+    let code = unsafe {
+        tess_int4_to_int8(
+            &raw const column,
+            ptr::null(),
+            &raw const rows,
+            values.as_mut_ptr(),
+            &raw mut non_nulls,
+            &raw mut status,
+        )
+    };
+    assert_eq!(code, Code::Ok);
+    for row in 0..200 {
+        let selected = fixture.words[row / 64] & (1 << (row % 64)) != 0;
+        let present = result_words[row / 64] & (1 << (row % 64)) != 0;
+        assert_eq!(present, selected && !fixture.isnull[row], "row {row}");
+        if present {
+            // The int8 Datum is the sign-extended int4 value.
+            assert_eq!(
+                values[row] as i64,
+                i64::from(fixture.values[row] as i32),
+                "row {row}"
+            );
+        }
+    }
+    // A dimension error writes nothing.
+    let mut column = fixture.column();
+    column.nrows = 199;
+    let before = values.clone();
+    // SAFETY: rejected before any write.
+    let code = unsafe {
+        tess_int4_to_int8(
+            &raw const column,
+            ptr::null(),
+            &raw const rows,
+            values.as_mut_ptr(),
+            &raw mut non_nulls,
+            &raw mut status,
+        )
+    };
+    assert_eq!(code, Code::InvalidArgument);
+    assert_eq!(values, before);
 }
 
 #[test]

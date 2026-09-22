@@ -273,4 +273,17 @@ extern TessStatusCode tess_int8_max(const TessDatumColumn *column,
 									int64 *value,
 									TessStatus *status);
 
+/*
+ * The selected int4 values widened into int8 Datums, with the output
+ * contract of the arithmetic: non_nulls gets the selected rows whose value
+ * is non-NULL and values gets their int8 Datums; a NULL row an initialized
+ * placeholder, rows outside the selection unspecified.
+ */
+extern TessStatusCode tess_int4_to_int8(const TessDatumColumn *column,
+										const TessRowMask *prepared,
+										const TessRowMask *rows,
+										Datum *values,
+										TessRowMask *non_nulls,
+										TessStatus *status);
+
 #endif							/* TESSERA_KERNELS_H */
