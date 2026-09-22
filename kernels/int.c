@@ -6,10 +6,13 @@
  *
  * An int8 is its Datum: the int8 kernels write int64 values straight into
  * a Datum column, so their results are TESS_RESULT_DATUM. The mixed
- * operators of bigint against an integer constant (int84eq, int84pl and
- * their siblings) widen the int4 scalar and run the int8 kernel; the mixed
- * operators with the int4 on the left are not registered, since an int8
- * kernel must not read an int4 Datum as a whole word.
+ * comparisons of bigint against an integer constant (int84eq and its
+ * siblings) widen the int4 scalar and run the int8 kernel; the mixed
+ * comparisons of an integer column against a bigint constant (int48eq and
+ * its siblings, also what `100 < c8` commutes into) run the int4 kernel
+ * against the constant clamped into the int4 range, since an int8 kernel
+ * must not read an int4 Datum as a whole word; the mixed arithmetic with
+ * the integer on the left is left to the core.
  */
 #include "postgres.h"
 
@@ -36,6 +39,7 @@ static TessStatusCode negate_evaluate(TessFunctionCall *call);
 static TessStatusCode aggregate_evaluate(TessFunctionCall *call);
 static TessStatusCode compare8_evaluate(TessFunctionCall *call);
 static TessStatusCode compare84_evaluate(TessFunctionCall *call);
+static TessStatusCode compare48_evaluate(TessFunctionCall *call);
 static TessStatusCode arith8_evaluate(TessFunctionCall *call);
 static TessStatusCode arith84_evaluate(TessFunctionCall *call);
 static TessStatusCode negate8_evaluate(TessFunctionCall *call);
@@ -117,6 +121,13 @@ static const Function functions[] = {
 	COMPARE(F_INT84LE, TESS_CMP_LE, compare84_evaluate),
 	COMPARE(F_INT84GT, TESS_CMP_GT, compare84_evaluate),
 	COMPARE(F_INT84GE, TESS_CMP_GE, compare84_evaluate),
+	/* integer column against a bigint scalar */
+	COMPARE(F_INT48EQ, TESS_CMP_EQ, compare48_evaluate),
+	COMPARE(F_INT48NE, TESS_CMP_NE, compare48_evaluate),
+	COMPARE(F_INT48LT, TESS_CMP_LT, compare48_evaluate),
+	COMPARE(F_INT48LE, TESS_CMP_LE, compare48_evaluate),
+	COMPARE(F_INT48GT, TESS_CMP_GT, compare48_evaluate),
+	COMPARE(F_INT48GE, TESS_CMP_GE, compare48_evaluate),
 	VALUE(F_INT8PL, TESS_ARITH_ADD, TESS_RESULT_DATUM, TESS_FUNCTION_ANY_SHAPE,
 		  arith8_evaluate),
 	VALUE(F_INT8MI, TESS_ARITH_SUB, TESS_RESULT_DATUM, TESS_FUNCTION_ANY_SHAPE,
@@ -258,6 +269,56 @@ compare84_evaluate(TessFunctionCall *call)
 							call->rows, (TessCompareOp) operation(call),
 							(int64) DatumGetInt32(call->args[1].scalar),
 							call->status);
+}
+
+/*
+ * An integer column against a bigint scalar: a scalar within the int4
+ * range compares as int4; one beyond it makes the comparison constant for
+ * every non-NULL value, which the int4 kernel expresses as a comparison
+ * every value satisfies (>= the least int4) or none does (< the least).
+ */
+static TessStatusCode
+compare48_evaluate(TessFunctionCall *call)
+{
+	TessCompareOp op;
+	int64		scalar;
+	int32		narrow;
+
+	if (!valid_call(call))
+		return invalid(call, "an int4 comparison takes two arguments");
+	if (call->args[0].column == NULL || call->args[1].column != NULL)
+		return invalid(call, "an int4 comparison takes a column and a scalar");
+	op = (TessCompareOp) operation(call);
+	scalar = DatumGetInt64(call->args[1].scalar);
+	if (scalar > PG_INT32_MAX || scalar < PG_INT32_MIN)
+	{
+		bool		above = scalar > PG_INT32_MAX;
+		bool		all;
+
+		switch (op)
+		{
+			case TESS_CMP_NE:
+				all = true;
+				break;
+			case TESS_CMP_LT:
+			case TESS_CMP_LE:
+				all = above;
+				break;
+			case TESS_CMP_GT:
+			case TESS_CMP_GE:
+				all = !above;
+				break;
+			default:
+				all = false;
+				break;
+		}
+		op = all ? TESS_CMP_GE : TESS_CMP_LT;
+		narrow = PG_INT32_MIN;
+	}
+	else
+		narrow = (int32) scalar;
+	return tess_int4_filter(call->args[0].column, call->args[0].prepared,
+							call->rows, op, narrow, call->status);
 }
 
 /* Any shape but two scalars, into a column of int8 Datums. */

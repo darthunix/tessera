@@ -471,9 +471,38 @@ tessera_test_kernels_module_int8(PG_FUNCTION_ARGS)
 			function->result_format != TESS_RESULT_DATUM)
 			PG_RETURN_BOOL(false);
 	}
-	/* The mixed operators with the integer on the left are left to the core. */
-	if (functions->find(F_INT48PL) != NULL || functions->find(F_INT48LT) != NULL)
+	/* The mixed arithmetic with the integer on the left is left to the core. */
+	if (functions->find(F_INT48PL) != NULL || functions->find(F_INT48MUL) != NULL)
 		PG_RETURN_BOOL(false);
+	/* An integer column against a bigint scalar: within the int4 range as
+	 * int4, beyond it constant for every non-NULL value. */
+	init_column(&c, 10, 20, 30, true);
+	selection = 7;
+	if (evaluate(functions->find(F_INT48LT), column_arg(&c), scalar_arg8(25),
+				 &selection, NULL, &non_nulls, &status) != TESS_OK ||
+		selection != 1)
+		PG_RETURN_BOOL(false);
+	selection = 7;
+	if (evaluate(functions->find(F_INT48LT), column_arg(&c),
+				 scalar_arg8(((int64) 5) << 32), &selection, NULL, &non_nulls,
+				 &status) != TESS_OK || selection != 5)
+		PG_RETURN_BOOL(false);
+	selection = 7;
+	if (evaluate(functions->find(F_INT48GE), column_arg(&c),
+				 scalar_arg8(((int64) 5) << 32), &selection, NULL, &non_nulls,
+				 &status) != TESS_OK || selection != 0)
+		PG_RETURN_BOOL(false);
+	selection = 7;
+	if (evaluate(functions->find(F_INT48NE), column_arg(&c),
+				 scalar_arg8(-(((int64) 5) << 32)), &selection, NULL, &non_nulls,
+				 &status) != TESS_OK || selection != 5)
+		PG_RETURN_BOOL(false);
+	selection = 7;
+	if (evaluate(functions->find(F_INT48EQ), column_arg(&c),
+				 scalar_arg8(-(((int64) 5) << 32)), &selection, NULL, &non_nulls,
+				 &status) != TESS_OK || selection != 0)
+		PG_RETURN_BOOL(false);
+	selection = 7;
 
 	/* x + 2^40 over int8 values past the int4 range, x * x, 100 * 2^33 - x. */
 	init_column8(&c, 10 * big, 20 * big, 30 * big, true);
@@ -519,7 +548,7 @@ tessera_test_kernels_module_int8(PG_FUNCTION_ARGS)
 	less = OpernameGetOprid(list_make1(makeString("<")), INT4OID, INT8OID);
 	greater = get_commutator(less);
 	if (!OidIsValid(less) || !OidIsValid(greater) ||
-		functions->find(get_opcode(less)) != NULL ||
+		functions->find(get_opcode(less)) != functions->find(F_INT48LT) ||
 		functions->find(get_opcode(greater)) != functions->find(F_INT84GT))
 		PG_RETURN_BOOL(false);
 	/* 25 < x keeps both non-NULL rows; the NULL row never matches. */
