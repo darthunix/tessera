@@ -1,6 +1,7 @@
 //! Signed int64 kernels without PostgreSQL type dispatch: comparisons
-//! ([`filter`]) and arithmetic ([`arith_scalar`], [`arith_scalar_left`],
-//! [`arith_columns`]); the aggregates follow.
+//! ([`filter`]), arithmetic ([`arith_scalar`], [`arith_scalar_left`],
+//! [`arith_columns`]) and aggregates ([`count`], [`min`], [`max`]; no sum,
+//! which PostgreSQL computes in numeric).
 //!
 //! The family mirrors [`crate::int32`] kernel by kernel rather than sharing
 //! a generic implementation over the lane type: the shape of every int32
@@ -10,15 +11,18 @@
 //! select PostgreSQL semantics: the caller chooses kernels by logical type
 //! and operation, and a Datum holds an int8 as its whole word.
 
+mod aggregate;
 mod arith;
 mod divisor;
 mod filter;
 
+pub use aggregate::{max, min};
 pub(crate) use arith::Side;
 pub use arith::{arith_columns, arith_scalar, arith_scalar_left};
 pub(crate) use divisor::Divisor;
 pub use filter::filter;
 
+pub use crate::count::count;
 pub use crate::ops::{ArithOp, ArithmeticError, CompareOp};
 
 /// Selected rows in the first multi-row word from which whole-word kernels
