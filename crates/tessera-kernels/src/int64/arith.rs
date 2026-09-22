@@ -22,10 +22,12 @@
 //!
 //! When the first word of the selection is full, selects at least a dozen
 //! rows and every column operand exposes its storage, the call computes
-//! whole words from the blocks: `/` and `%` by a scalar divisor of
-//! magnitude at least two through a multiplier prepared once per call
-//! (`Divisor`), unable to fail; the other operations lane by lane over the
-//! present lanes, with their checks. Single-row words, the tail and refused
+//! whole words from the blocks: `+` and `-` with vector code on AArch64
+//! (overflow detected per lane and reported once per word); `/` and `%` by
+//! a scalar divisor of magnitude at least two through a multiplier
+//! prepared once per call (`Divisor`), unable to fail; `*` and the other
+//! divisions lane by lane over the present lanes, with their checks, since
+//! NEON has no 64-bit multiply. Single-row words, the tail and refused
 //! words are read row by row; every other call reads every word row by row
 //! through the word iterators.
 
@@ -367,6 +369,14 @@ where
             .expect("a whole-word operand implies a full word");
         let mut lanes = present;
         match (op, &divisor) {
+            (ArithOp::Add, _) => {
+                let overflow = bulk_op::add64(lhs, rhs, present, out);
+                ensure!(!overflow, ArithmeticError::BigintOutOfRange);
+            }
+            (ArithOp::Sub, _) => {
+                let overflow = bulk_op::sub64(lhs, rhs, present, out);
+                ensure!(!overflow, ArithmeticError::BigintOutOfRange);
+            }
             (ArithOp::Div, Some(divisor)) => {
                 while lanes != 0 {
                     let lane = lanes.trailing_zeros() as usize;
@@ -392,6 +402,26 @@ where
         output.non_nulls.set_word(index, present)?;
     }
     Ok(())
+}
+
+#[cfg(all(target_arch = "aarch64", not(miri)))]
+use crate::simd as bulk_op;
+
+/// Without vector code no call takes the whole-word path; these keep the
+/// callers compiling and are never reached.
+#[cfg(not(all(target_arch = "aarch64", not(miri))))]
+mod bulk_op {
+    use std::mem::MaybeUninit;
+
+    use super::Side;
+
+    pub fn add64(_: Side<'_>, _: Side<'_>, _: u64, _: &mut [MaybeUninit<i64>; 64]) -> bool {
+        unreachable!("no whole-word kernels on this target")
+    }
+
+    pub fn sub64(_: Side<'_>, _: Side<'_>, _: u64, _: &mut [MaybeUninit<i64>; 64]) -> bool {
+        unreachable!("no whole-word kernels on this target")
+    }
 }
 
 /// The result buffers and the selection they follow.

@@ -14,6 +14,7 @@ mod arith;
 mod divisor;
 mod filter;
 
+pub(crate) use arith::Side;
 pub use arith::{arith_columns, arith_scalar, arith_scalar_left};
 pub(crate) use divisor::Divisor;
 pub use filter::filter;
