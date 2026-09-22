@@ -18,6 +18,7 @@ PG_FUNCTION_INFO_V1(tessera_test_kernels_module_arithmetic);
 PG_FUNCTION_INFO_V1(tessera_test_kernels_module_predicate);
 PG_FUNCTION_INFO_V1(tessera_test_kernels_module_errors);
 PG_FUNCTION_INFO_V1(tessera_test_kernels_module_aggregates);
+PG_FUNCTION_INFO_V1(tessera_test_kernels_module_int8);
 
 static const TessFunctionRegistryOps *
 registry(void)
@@ -59,6 +60,16 @@ init_column(Column *c, int32 first, int32 second, int32 third, bool second_null)
 	c->column.nrows = 3;
 }
 
+/* The same three rows as int8 Datums. */
+static void
+init_column8(Column *c, int64 first, int64 second, int64 third, bool second_null)
+{
+	init_column(c, 0, 0, 0, second_null);
+	c->values[0] = Int64GetDatum(first);
+	c->values[1] = Int64GetDatum(second);
+	c->values[2] = Int64GetDatum(third);
+}
+
 static TessFunctionArg
 column_arg(const Column *c)
 {
@@ -77,10 +88,19 @@ scalar_arg(int32 value)
 	return arg;
 }
 
+static TessFunctionArg
+scalar_arg8(int64 value)
+{
+	TessFunctionArg arg = TESS_STRUCT_INITIALIZER(TessFunctionArg);
+
+	arg.scalar = Int64GetDatum(value);
+	return arg;
+}
+
 /* Evaluate a call of one or two arguments over all three rows. */
 static TessStatusCode
 evaluate_args(const TessFunction *function, TessFunctionArg *args, int nargs,
-			  uint64 *selection, int32 *values, uint64 *non_null_word,
+			  uint64 *selection, void *values, uint64 *non_null_word,
 			  TessStatus *status)
 {
 	TessRowMask rows = {3, selection};
@@ -101,7 +121,7 @@ evaluate_args(const TessFunction *function, TessFunctionArg *args, int nargs,
 
 static TessStatusCode
 evaluate(const TessFunction *function, TessFunctionArg left,
-		 TessFunctionArg right, uint64 *selection, int32 *values,
+		 TessFunctionArg right, uint64 *selection, void *values,
 		 uint64 *non_null_word, TessStatus *status)
 {
 	TessFunctionArg args[2] = {left, right};
@@ -112,7 +132,7 @@ evaluate(const TessFunction *function, TessFunctionArg left,
 
 static TessStatusCode
 evaluate_one(const TessFunction *function, TessFunctionArg arg,
-			 uint64 *selection, int32 *values, uint64 *non_null_word,
+			 uint64 *selection, void *values, uint64 *non_null_word,
 			 TessStatus *status)
 {
 	return evaluate_args(function, &arg, 1, selection, values, non_null_word,
@@ -161,7 +181,8 @@ tessera_test_kernels_module_registry(PG_FUNCTION_ARGS)
 			(negate->flags & TESS_FUNCTION_ANY_SHAPE) != 0)
 			PG_RETURN_BOOL(false);
 	}
-	PG_RETURN_BOOL(functions->find(F_INT8PL) == NULL);
+	/* A function no module registers. */
+	PG_RETURN_BOOL(functions->find(F_FLOAT8PL) == NULL);
 }
 
 Datum
@@ -383,6 +404,170 @@ tessera_test_kernels_module_errors(PG_FUNCTION_ARGS)
 		evaluate_one(functions->find(F_INT4UM), scalar_arg(1),
 					 &selection, values, &non_nulls,
 					 &status) != TESS_ERROR_INVALID_ARGUMENT)
+		PG_RETURN_BOOL(false);
+	PG_RETURN_BOOL(true);
+}
+
+/* The int8 family: registrations, the mixed operators and the cast. */
+Datum
+tessera_test_kernels_module_int8(PG_FUNCTION_ARGS)
+{
+	const TessFunctionRegistryOps *functions = registry();
+	const Oid	predicates[] = {F_INT8EQ, F_INT8NE, F_INT8LT, F_INT8LE, F_INT8GT,
+	F_INT8GE, F_INT84EQ, F_INT84NE, F_INT84LT, F_INT84LE, F_INT84GT, F_INT84GE};
+	const Oid	values[] = {F_INT8PL, F_INT8MI, F_INT8MUL, F_INT8DIV, F_INT8MOD};
+	const Oid	mixed[] = {F_INT84PL, F_INT84MI, F_INT84MUL, F_INT84DIV,
+	F_INT8UM, F_INT8_INT4};
+	const Oid	aggregates[] = {F_MIN_INT8, F_MAX_INT8};
+	const int64 big = ((int64) 1) << 40;
+	Column		c;
+	TessFunctionArg arg;
+	uint64		selection = 7;
+	uint64		non_nulls = 0;
+	uint64		word;
+	TessRowMask present = {1, &word};
+	int64		results[3];
+	Datum		datums[3];
+	Datum		result;
+	bool		isnull;
+	TessStatus	status = TESS_STRUCT_INITIALIZER(TessStatus);
+	Oid			less;
+	Oid			greater;
+	int			i;
+
+	for (i = 0; i < lengthof(predicates); i++)
+	{
+		const TessFunction *function = functions->find(predicates[i]);
+
+		if (function == NULL || function->kind != TESS_FUNCTION_PREDICATE ||
+			(function->flags & TESS_FUNCTION_STRICT) == 0 ||
+			(function->flags & TESS_FUNCTION_ANY_SHAPE) != 0)
+			PG_RETURN_BOOL(false);
+	}
+	for (i = 0; i < lengthof(values); i++)
+	{
+		const TessFunction *function = functions->find(values[i]);
+
+		if (function == NULL || function->kind != TESS_FUNCTION_VALUE ||
+			function->result_format != TESS_RESULT_DATUM ||
+			(function->flags & TESS_FUNCTION_ANY_SHAPE) == 0)
+			PG_RETURN_BOOL(false);
+	}
+	/* The mixed operators, the negation and the cast keep the column first. */
+	for (i = 0; i < lengthof(mixed); i++)
+	{
+		const TessFunction *function = functions->find(mixed[i]);
+
+		if (function == NULL || function->kind != TESS_FUNCTION_VALUE ||
+			function->result_format != TESS_RESULT_DATUM ||
+			(function->flags & TESS_FUNCTION_ANY_SHAPE) != 0)
+			PG_RETURN_BOOL(false);
+	}
+	for (i = 0; i < lengthof(aggregates); i++)
+	{
+		const TessFunction *function = functions->find(aggregates[i]);
+
+		if (function == NULL || function->kind != TESS_FUNCTION_AGGREGATE ||
+			function->result_format != TESS_RESULT_DATUM)
+			PG_RETURN_BOOL(false);
+	}
+	/* The mixed operators with the integer on the left are left to the core. */
+	if (functions->find(F_INT48PL) != NULL || functions->find(F_INT48LT) != NULL)
+		PG_RETURN_BOOL(false);
+
+	/* x + 2^40 over int8 values past the int4 range, x * x, 100 * 2^33 - x. */
+	init_column8(&c, 10 * big, 20 * big, 30 * big, true);
+	if (evaluate(functions->find(F_INT8PL), column_arg(&c), scalar_arg8(big),
+				 &selection, results, &non_nulls, &status) != TESS_OK ||
+		non_nulls != 5 || results[0] != 11 * big || results[2] != 31 * big)
+		PG_RETURN_BOOL(false);
+	if (evaluate(functions->find(F_INT8MI), scalar_arg8(100 * big),
+				 column_arg(&c), &selection, results, &non_nulls,
+				 &status) != TESS_OK ||
+		non_nulls != 5 || results[0] != 90 * big || results[2] != 70 * big)
+		PG_RETURN_BOOL(false);
+	/* x * x over values whose squares fit. */
+	init_column8(&c, 10 << 20, 20 << 20, 30 << 20, true);
+	if (evaluate(functions->find(F_INT8MUL), column_arg(&c), column_arg(&c),
+				 &selection, results, &non_nulls, &status) != TESS_OK ||
+		non_nulls != 5 || results[0] != (((int64) 100) << 40) ||
+		results[2] != (((int64) 900) << 40))
+		PG_RETURN_BOOL(false);
+	/* Mixed: x / 7 with an integer scalar, and the column must come first. */
+	init_column8(&c, 10 * big, 20, 30 * big + 3, true);
+	if (evaluate(functions->find(F_INT84DIV), column_arg(&c), scalar_arg(7),
+				 &selection, results, &non_nulls, &status) != TESS_OK ||
+		non_nulls != 5 || results[0] != (10 * big) / 7 ||
+		results[2] != (30 * big + 3) / 7 ||
+		evaluate(functions->find(F_INT84PL), scalar_arg(7), column_arg(&c),
+				 &selection, results, &non_nulls,
+				 &status) != TESS_ERROR_INVALID_ARGUMENT)
+		PG_RETURN_BOOL(false);
+	/* -x */
+	if (evaluate_one(functions->find(F_INT8UM), column_arg(&c),
+					 &selection, results, &non_nulls, &status) != TESS_OK ||
+		non_nulls != 5 || results[0] != -10 * big || results[2] != -30 * big - 3)
+		PG_RETURN_BOOL(false);
+	/* Predicates: x < 25 * 2^40 as int8, and 25 < x through the commutator
+	 * of the mixed operator with the integer on the left. */
+	init_column8(&c, 10 * big, 20 * big, 30 * big, true);
+	selection = 7;
+	if (evaluate(functions->find(F_INT8LT), column_arg(&c), scalar_arg8(25 * big),
+				 &selection, NULL, &non_nulls, &status) != TESS_OK ||
+		selection != 1)
+		PG_RETURN_BOOL(false);
+	less = OpernameGetOprid(list_make1(makeString("<")), INT4OID, INT8OID);
+	greater = get_commutator(less);
+	if (!OidIsValid(less) || !OidIsValid(greater) ||
+		functions->find(get_opcode(less)) != NULL ||
+		functions->find(get_opcode(greater)) != functions->find(F_INT84GT))
+		PG_RETURN_BOOL(false);
+	/* 25 < x keeps both non-NULL rows; the NULL row never matches. */
+	selection = 7;
+	if (evaluate(functions->find(get_opcode(greater)), column_arg(&c),
+				 scalar_arg(25), &selection, NULL, &non_nulls,
+				 &status) != TESS_OK || selection != 5)
+		PG_RETURN_BOOL(false);
+	selection = 7;
+	if (evaluate(functions->find(F_INT84LT), column_arg(&c), scalar_arg(25),
+				 &selection, NULL, &non_nulls, &status) != TESS_OK ||
+		selection != 0)
+		PG_RETURN_BOOL(false);
+	/* The cast: int4 Datums widened into int8 Datums. */
+	init_column(&c, PG_INT32_MIN, 20, PG_INT32_MAX, true);
+	selection = 7;
+	if (evaluate_one(functions->find(F_INT8_INT4), column_arg(&c),
+					 &selection, datums, &non_nulls, &status) != TESS_OK ||
+		non_nulls != 5 || DatumGetInt64(datums[0]) != PG_INT32_MIN ||
+		DatumGetInt64(datums[2]) != PG_INT32_MAX)
+		PG_RETURN_BOOL(false);
+	/* Aggregates over int8, and the count over them. */
+	init_column8(&c, 10 * big, 20 * big, 30 * big, true);
+	arg = column_arg(&c);
+	if (aggregate(functions->find(F_MIN_INT8), &arg, 1, 7, &result, &isnull,
+				  &present, &status) != TESS_OK ||
+		isnull || DatumGetInt64(result) != 10 * big ||
+		aggregate(functions->find(F_MAX_INT8), &arg, 1, 7, &result, &isnull,
+				  &present, &status) != TESS_OK ||
+		isnull || DatumGetInt64(result) != 30 * big ||
+		aggregate(functions->find(F_COUNT_ANY), &arg, 1, 7, &result, &isnull,
+				  &present, &status) != TESS_OK ||
+		isnull || DatumGetInt64(result) != 2 ||
+		aggregate(functions->find(F_MIN_INT8), &arg, 1, 2, &result, &isnull,
+				  &present, &status) != TESS_OK || !isnull)
+		PG_RETURN_BOOL(false);
+	/* Errors: bigint out of range, and a zero divisor. */
+	init_column8(&c, PG_INT64_MIN, 20, 30, false);
+	selection = 7;
+	if (evaluate_one(functions->find(F_INT8UM), column_arg(&c),
+					 &selection, results, &non_nulls,
+					 &status) != TESS_ERROR_INTEGER_OUT_OF_RANGE ||
+		strcmp(status.sqlstate, "22003") != 0 ||
+		strcmp(status.message, "bigint out of range") != 0 ||
+		evaluate(functions->find(F_INT84DIV), column_arg(&c), scalar_arg(0),
+				 &selection, results, &non_nulls,
+				 &status) != TESS_ERROR_DIVISION_BY_ZERO ||
+		strcmp(status.sqlstate, "22012") != 0)
 		PG_RETURN_BOOL(false);
 	PG_RETURN_BOOL(true);
 }

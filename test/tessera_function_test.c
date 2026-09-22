@@ -21,7 +21,7 @@ noop_evaluate(TessFunctionCall *call)
 /* Descriptions for functions no real module registers in these tests. */
 static const TessFunction function_one = {
 	TESS_ABI_INITIALIZER(TESS_FUNCTION_ABI_VERSION, TessFunction),
-	.funcid = F_INT8PL,
+	.funcid = F_FLOAT8PL,
 	.kind = TESS_FUNCTION_VALUE,
 	.result_format = TESS_RESULT_DATUM,
 	.flags = TESS_FUNCTION_STRICT | TESS_FUNCTION_ANY_SHAPE,
@@ -30,7 +30,7 @@ static const TessFunction function_one = {
 
 static const TessFunction function_two = {
 	TESS_ABI_INITIALIZER(TESS_FUNCTION_ABI_VERSION, TessFunction),
-	.funcid = F_INT8MI,
+	.funcid = F_FLOAT8MI,
 	.kind = TESS_FUNCTION_PREDICATE,
 	.result_format = TESS_RESULT_DATUM,
 	.flags = TESS_FUNCTION_STRICT,
