@@ -23,8 +23,11 @@
 //! Full prepared words of representations that expose their storage
 //! ([`tessera_core::WordBlock`]) are compared, aggregated, computed and
 //! hashed with vector code on AArch64, division by a scalar included;
-//! everything else takes the row paths. `unsafe` is denied crate-wide and
-//! allowed only in the isolated [`simd`] module, for vector loads.
+//! everything else takes the row paths. [`table`] is a hash table in a
+//! region of memory the caller owns, for joins and grouping, addressed by
+//! offsets so that the same bytes serve local and shared memory. `unsafe`
+//! is denied crate-wide and allowed only in two isolated modules: [`simd`],
+//! for vector loads, and [`table`], for the region over raw pointers.
 
 #![deny(unsafe_code)]
 
@@ -34,3 +37,4 @@ pub mod int32;
 pub mod int64;
 pub mod ops;
 mod simd;
+pub mod table;
