@@ -320,24 +320,13 @@ impl<'r, R: Region> Access<'r, R> {
                 Some(_) => {}
             }
         }
-        let mut filled = 0;
-        if let Some(payload) = payload {
-            let (full, rem) = payload.as_chunks::<8>();
-            let (head, rest) = tail.split_at_mut(full.len());
-            copy_words(head, full);
-            filled = full.len();
-            if let Some((slot, _)) = rest.split_first_mut()
-                && !rem.is_empty()
-            {
-                let mut last = [0; 8];
-                for (to, from) in last.iter_mut().zip(rem) {
-                    *to = *from;
-                }
-                *slot = last;
-                filled += 1;
-            }
+        if T > 0 {
+            // A known shape whose payload did not fit it: a payload of a
+            // partial last word. Kept out of the row loop.
+            write_tail_cold(tail, payload);
+        } else {
+            write_tail(tail, payload);
         }
-        zero_words(&mut tail[filled..]);
     }
 
     /// The key count of a record.
@@ -376,6 +365,38 @@ impl<'r, R: Region> Access<'r, R> {
         self.region.fetch_add_u64(NRECORDS, added as u64);
         self.nrecords += added as u64;
     }
+}
+
+/// Write a record's words after its keys: the payload, a partial last
+/// word padded with zeros, then zeros up to the record's end.
+#[inline(always)]
+fn write_tail(tail: &mut [[u8; 8]], payload: Option<&[u8]>) {
+    let mut filled = 0;
+    if let Some(payload) = payload {
+        let (full, rem) = payload.as_chunks::<8>();
+        let (head, rest) = tail.split_at_mut(full.len());
+        copy_words(head, full);
+        filled = full.len();
+        if let Some((slot, _)) = rest.split_first_mut()
+            && !rem.is_empty()
+        {
+            let mut last = [0; 8];
+            for (to, from) in last.iter_mut().zip(rem) {
+                *to = *from;
+            }
+            *slot = last;
+            filled += 1;
+        }
+    }
+    zero_words(&mut tail[filled..]);
+}
+
+/// [`write_tail`] out of line, for the shapes whose common case is
+/// written inline: its calls would make the row loop save its registers.
+#[cold]
+#[inline(never)]
+fn write_tail_cold(tail: &mut [[u8; 8]], payload: Option<&[u8]>) {
+    write_tail(tail, payload);
 }
 
 /// Words a record copies with plain stores before a call to `memcpy` or
