@@ -4,9 +4,27 @@ use anyhow::{Result, ensure};
 use tessera_core::{RowMask, RowMaskView};
 
 use super::header::Layout;
-use super::keys::{KeySource, WordKeys};
+use super::keys::{KeySource, WordKeys, slot_buffer};
 use super::record::Access;
 use super::region::Region;
+
+/// Call `$f` specialized for the common shapes of a table: one or two
+/// keys, one or two words after them; 0 stands for any other count, read
+/// from the layout at run time.
+macro_rules! shaped {
+    ($nkeys:expr, $tail:expr, $f:ident($($arg:expr),* $(,)?)) => {
+        match ($nkeys, $tail) {
+            (1, 1) => $f::<_, _, 1, 1>($($arg),*),
+            (1, 2) => $f::<_, _, 1, 2>($($arg),*),
+            (1, _) => $f::<_, _, 1, 0>($($arg),*),
+            (2, 1) => $f::<_, _, 2, 1>($($arg),*),
+            (2, 2) => $f::<_, _, 2, 2>($($arg),*),
+            (2, _) => $f::<_, _, 2, 0>($($arg),*),
+            _ => $f::<_, _, 0, 0>($($arg),*),
+        }
+    };
+}
+pub(super) use shaped;
 
 /// Reject a batch whose keys or buffers do not match the table and the
 /// mask, before anything is read or changed.
@@ -52,8 +70,31 @@ pub(super) fn insert<R: Region, K: KeySource + ?Sized>(
             payload.len()
         );
     }
+    shaped!(
+        layout.nkeys,
+        layout.tail_words(),
+        insert_rows(region, layout, hashes, keys, payload, pending, offsets)
+    )
+}
+
+/// The rows of [`insert`] for a table of `N` keys and `T` words after
+/// them, 0 for either when it is not one of the specialized shapes.
+#[inline(never)]
+fn insert_rows<R: Region, K: KeySource + ?Sized, const N: usize, const T: usize>(
+    region: &R,
+    layout: &Layout,
+    hashes: &[u32],
+    keys: &K,
+    payload: Option<&[u8]>,
+    pending: &mut RowMask<'_>,
+    offsets: &mut [u32],
+) -> Result<usize> {
+    // Made here, not passed in, so that its fields stay in registers.
     let mut access = Access::new(region, layout);
-    let mut word_keys = WordKeys::new(layout.nkeys);
+    let nrows = pending.as_view().nrows();
+    let payload_size = access.payload_size();
+    let mut buffer = slot_buffer();
+    let mut word_keys = WordKeys::new(&mut buffer, access.nkeys());
     let mut inserted = 0;
     for index in 0..nrows.div_ceil(64) {
         let selected = pending.as_view().word(index).unwrap();
@@ -78,8 +119,11 @@ pub(super) fn insert<R: Region, K: KeySource + ?Sized>(
             let row_payload = payload.map(|payload| unsafe {
                 payload.get_unchecked(row * payload_size..(row + 1) * payload_size)
             });
-            access.write(byte, hashes[row], &word_keys, bit, row_payload);
-            access.push(offset, byte, hashes[row]);
+            let hash = hashes[row];
+            // SAFETY: `byte` starts the `slot`-th of the `count` records
+            // just reserved; the buffer and the shape are this table's.
+            unsafe { access.write::<N, T>(byte, hash, &word_keys, bit, row_payload) };
+            access.push(offset, byte, hash);
             offsets[row] = offset;
             done |= 1 << bit;
         }
@@ -111,8 +155,30 @@ pub(super) fn probe<R: Region, K: KeySource + ?Sized>(
         "the result mask has {} rows, the batch {nrows}",
         found.as_view().nrows()
     );
+    shaped!(
+        layout.nkeys,
+        0,
+        probe_rows(region, layout, hashes, keys, rows, matches, found)
+    )
+}
+
+/// The rows of [`probe`] for a table of `N` keys, 0 when it is not one of
+/// the specialized counts; `T` is unused.
+#[inline(never)]
+fn probe_rows<R: Region, K: KeySource + ?Sized, const N: usize, const T: usize>(
+    region: &R,
+    layout: &Layout,
+    hashes: &[u32],
+    keys: &K,
+    rows: &RowMaskView<'_>,
+    matches: &mut [u32],
+    found: &mut RowMask<'_>,
+) -> Result<()> {
+    // Made here, not passed in, so that its fields stay in registers.
     let mut access = Access::new(region, layout);
-    let mut word_keys = WordKeys::new(layout.nkeys);
+    let nrows = rows.nrows();
+    let mut buffer = slot_buffer();
+    let mut word_keys = WordKeys::new(&mut buffer, access.nkeys());
     for index in 0..nrows.div_ceil(64) {
         let selected = rows.word(index).unwrap();
         let mut hits = 0;
@@ -125,7 +191,11 @@ pub(super) fn probe<R: Region, K: KeySource + ?Sized>(
                 let row = index * 64 + bit;
                 let hash = hashes[row];
                 let head = access.head(hash);
-                let offset = access.find(head, hash, |record| word_keys.equal(bit, record))?;
+                // SAFETY: the records are this table's, whose key count
+                // the buffer was made for and `N` is 0 or.
+                let offset = access.find(head, hash, |record| unsafe {
+                    word_keys.equal::<N>(bit, record)
+                })?;
                 if offset != 0 {
                     matches[row] = offset;
                     hits |= 1 << bit;

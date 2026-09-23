@@ -104,6 +104,13 @@ pub(super) struct Layout {
     pub kinds: [KeyKind; MAX_KEYS],
 }
 
+impl Layout {
+    /// The 8-byte words of a record after its keys: payload and padding.
+    pub(super) fn tail_words(&self) -> usize {
+        self.record_size / 8 - RECORD_HEADER / 8 - self.nkeys
+    }
+}
+
 /// Bytes a region needs for a table of `capacity` records: the header,
 /// the records and the buckets, a multiple of 8.
 pub fn region_size(config: &TableConfig<'_>, capacity: u64) -> Result<usize> {

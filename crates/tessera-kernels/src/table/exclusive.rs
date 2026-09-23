@@ -9,9 +9,9 @@
 use anyhow::{Result, ensure};
 use tessera_core::RowMask;
 
-use super::batch::check;
+use super::batch::{check, shaped};
 use super::header::{CHUNK_USED, HEADER_SIZE, Header, KEY_SLOT, Layout, RECORD_HEADER};
-use super::keys::{KeySource, WordKeys};
+use super::keys::{KeySource, WordKeys, slot_buffer};
 use super::record::Access;
 use super::region::Region;
 
@@ -57,8 +57,30 @@ pub(super) fn find_or_insert<R: Region, K: KeySource + ?Sized>(
         "the inserted mask has {} rows, the batch {nrows}",
         inserted.as_view().nrows()
     );
+    shaped!(
+        layout.nkeys,
+        layout.tail_words(),
+        resolve_rows(region, layout, hashes, keys, pending, offsets, inserted)
+    )
+}
+
+/// The rows of [`find_or_insert`] for a table of `N` keys and `T` words
+/// after them, 0 for either when it is not one of the specialized shapes.
+#[inline(never)]
+fn resolve_rows<R: Region, K: KeySource + ?Sized, const N: usize, const T: usize>(
+    region: &R,
+    layout: &Layout,
+    hashes: &[u32],
+    keys: &K,
+    pending: &mut RowMask<'_>,
+    offsets: &mut [u32],
+    inserted: &mut RowMask<'_>,
+) -> Result<usize> {
+    // Made here, not passed in, so that its fields stay in registers.
     let mut access = Access::new(region, layout);
-    let mut word_keys = WordKeys::new(layout.nkeys);
+    let nrows = pending.as_view().nrows();
+    let mut buffer = slot_buffer();
+    let mut word_keys = WordKeys::new(&mut buffer, access.nkeys());
     let mut resolved = 0;
     let mut full = false;
     for index in 0..nrows.div_ceil(64) {
@@ -74,7 +96,11 @@ pub(super) fn find_or_insert<R: Region, K: KeySource + ?Sized>(
                 let row = index * 64 + bit;
                 let hash = hashes[row];
                 let head = access.head(hash);
-                let found = access.find(head, hash, |record| word_keys.equal(bit, record))?;
+                // SAFETY: the records are this table's, whose key count the
+                // buffer was made for and `N` is 0 or.
+                let found = access.find(head, hash, |record| unsafe {
+                    word_keys.equal::<N>(bit, record)
+                })?;
                 offsets[row] = match found {
                     0 => {
                         let Some((byte, _)) = access.reserve(1) else {
@@ -82,7 +108,9 @@ pub(super) fn find_or_insert<R: Region, K: KeySource + ?Sized>(
                             break;
                         };
                         let offset = (byte / 8) as u32;
-                        access.write(byte, hash, &word_keys, bit, None);
+                        // SAFETY: `byte` starts the record just reserved;
+                        // the buffer and the shape are this table's.
+                        unsafe { access.write::<N, T>(byte, hash, &word_keys, bit, None) };
                         access.push(offset, byte, hash);
                         access.count(1);
                         created |= 1 << bit;

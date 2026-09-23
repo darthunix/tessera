@@ -260,13 +260,20 @@ impl<'r, R: Region> Access<'r, R> {
     }
 
     /// Write a reserved record from row `bit` of a word's keys; `payload`
-    /// is the row's payload, `None` for zeros.
+    /// is the row's payload, `None` for zeros. `N` is the key count and
+    /// `T` the words after the keys (payload and padding) when the caller
+    /// knows them, 0 to take them from the layout.
     ///
     /// Everything past the header is written in 8-byte words: the key
     /// slots, then the payload and its padding up to the record size, so
     /// that a payload of a few bytes costs a store or two, not a call.
+    ///
+    /// # Safety
+    ///
+    /// `byte` starts a record this operation reserved; `keys` was made for
+    /// this table's key count; `N` and `T` are 0 or this table's.
     #[inline(always)]
-    pub(super) fn write(
+    pub(super) unsafe fn write<const N: usize, const T: usize>(
         &self,
         byte: usize,
         hash: u32,
@@ -274,7 +281,10 @@ impl<'r, R: Region> Access<'r, R> {
         bit: usize,
         payload: Option<&[u8]>,
     ) {
-        let (record_size, nkeys) = (self.record_size, self.nkeys);
+        let record_size = self.record_size;
+        let nkeys = if N > 0 { N } else { self.nkeys };
+        debug_assert!(nkeys == self.nkeys);
+        debug_assert!(T == 0 || T == record_size / 8 - RECORD_HEADER / 8 - nkeys);
         // SAFETY: the record was reserved by this operation and is not
         // published yet, so nothing else reads or writes its bytes; a
         // reservation ends at most at the buckets' offset, in the region.
@@ -290,7 +300,25 @@ impl<'r, R: Region> Access<'r, R> {
         header[1] = second.try_into().unwrap();
         let (slots, tail) = rest.split_at_mut(nkeys);
         for (key, slot) in slots.iter_mut().enumerate() {
-            *slot = keys.key(key, bit).to_ne_bytes();
+            // SAFETY: `key < nkeys`, the buffer's key count.
+            *slot = unsafe { keys.key(key, bit) }.to_ne_bytes();
+        }
+        if T > 0
+            && let Some(tail) = tail.first_chunk_mut::<T>()
+        {
+            match payload.map(<[u8]>::as_chunks::<8>) {
+                None => {
+                    *tail = [[0; 8]; T];
+                    return;
+                }
+                Some((full, [])) => {
+                    if let Some(full) = full.first_chunk::<T>() {
+                        *tail = *full;
+                        return;
+                    }
+                }
+                Some(_) => {}
+            }
         }
         let mut filled = 0;
         if let Some(payload) = payload {
@@ -310,6 +338,18 @@ impl<'r, R: Region> Access<'r, R> {
             }
         }
         zero_words(&mut tail[filled..]);
+    }
+
+    /// The key count of a record.
+    #[inline(always)]
+    pub(super) fn nkeys(&self) -> usize {
+        self.nkeys
+    }
+
+    /// Bytes of payload per record.
+    #[inline(always)]
+    pub(super) fn payload_size(&self) -> usize {
+        self.payload_size
     }
 
     /// Publish a written record as the newest of its bucket.

@@ -148,40 +148,43 @@ where
     }
 }
 
+/// Storage for the slots of a word's keys: made uninitialized on the
+/// caller's stack, where it stays, and lent to [`WordKeys`].
+pub(super) type SlotBuffer = [MaybeUninit<[i64; 64]>; MAX_KEYS];
+
+/// An uninitialized slot buffer; making it costs nothing.
+#[inline(always)]
+pub(super) fn slot_buffer() -> SlotBuffer {
+    [const { MaybeUninit::uninit() }; MAX_KEYS]
+}
+
 /// The keys of one word in the table's form.
 ///
-/// Only the slots of the table's keys are initialized, when the buffer is
-/// made: zeroing all [`MAX_KEYS`] of them, 8 KiB, cost more than a short
-/// batch's rows.
-pub(super) struct WordKeys {
-    slots: [MaybeUninit<[i64; 64]>; MAX_KEYS],
-    nkeys: usize,
+/// The slots live in a [`SlotBuffer`] the caller keeps in place, and only
+/// the table's keys are initialized: a buffer owned by value was copied
+/// whole, 8 KiB, whenever it moved, and zeroing all [`MAX_KEYS`] of them
+/// cost more than a short batch's rows.
+pub(super) struct WordKeys<'a> {
+    slots: &'a mut [[i64; 64]],
     null_bits: [u32; 64],
 }
 
-impl WordKeys {
-    /// A buffer for `nkeys` keys, at most [`MAX_KEYS`] (the header checked).
-    #[inline]
-    pub(super) fn new(nkeys: usize) -> Self {
-        let nkeys = nkeys.min(MAX_KEYS);
-        let mut slots = [const { MaybeUninit::uninit() }; MAX_KEYS];
-        for slot in &mut slots[..nkeys] {
+impl<'a> WordKeys<'a> {
+    /// Keys of `nkeys` columns, at most [`MAX_KEYS`] (the header checked),
+    /// in `buffer`.
+    #[inline(always)]
+    pub(super) fn new(buffer: &'a mut SlotBuffer, nkeys: usize) -> Self {
+        let slots = &mut buffer[..nkeys.min(MAX_KEYS)];
+        for slot in slots.iter_mut() {
             slot.write([0; 64]);
         }
+        // SAFETY: every array of `slots` was just written, and
+        // `MaybeUninit<T>` has `T`'s layout.
+        let slots = unsafe { &mut *(core::ptr::from_mut(slots) as *mut [[i64; 64]]) };
         Self {
             slots,
-            nkeys,
             null_bits: [0; 64],
         }
-    }
-
-    /// The initialized slots, one array per key.
-    #[inline(always)]
-    fn keys(&self) -> &[[i64; 64]] {
-        let slots = &self.slots[..self.nkeys];
-        // SAFETY: `new` wrote the first `nkeys` arrays, and nothing makes
-        // them uninitialized again; `MaybeUninit<T>` has `T`'s layout.
-        unsafe { &*(core::ptr::from_ref(slots) as *const [[i64; 64]]) }
     }
 
     /// Load the keys of the selected rows of one word.
@@ -193,9 +196,7 @@ impl WordKeys {
         selected: u64,
     ) -> Result<()> {
         self.null_bits = [0; 64];
-        for (key, slot) in self.slots[..self.nkeys].iter_mut().enumerate() {
-            // SAFETY: as in `keys`: the first `nkeys` arrays are written.
-            let slots = unsafe { slot.assume_init_mut() };
+        for (key, slots) in self.slots.iter_mut().enumerate() {
             let mut nulls = selected & !keys.word(key, index, selected, slots)?;
             while nulls != 0 {
                 self.null_bits[nulls.trailing_zeros() as usize] |= 1 << key;
@@ -211,20 +212,35 @@ impl WordKeys {
         self.null_bits[bit & 63]
     }
 
-    /// Slot `key` of row `bit`.
+    /// Slot `key` of row `bit`, with `key` below the buffer's key count.
+    ///
+    /// # Safety
+    ///
+    /// `key` is below the `nkeys` the buffer was made for.
     #[inline(always)]
-    pub(super) fn key(&self, key: usize, bit: usize) -> i64 {
-        self.keys()[key][bit & 63]
+    pub(super) unsafe fn key(&self, key: usize, bit: usize) -> i64 {
+        debug_assert!(key < self.slots.len());
+        // SAFETY: `key < nkeys`, the slots' length, by the caller's contract.
+        unsafe { self.slots.get_unchecked(key)[bit & 63] }
     }
 
-    /// Whether row `bit` has the null bits and keys of a record.
-    #[inline]
-    pub(super) fn equal(&self, bit: usize, record: &View<'_>) -> bool {
+    /// Whether row `bit` has the null bits and keys of a record; `N` is
+    /// the key count when the caller knows it, 0 for this buffer's.
+    ///
+    /// # Safety
+    ///
+    /// The record belongs to a table of this buffer's key count, and `N`
+    /// is 0 or that count.
+    #[inline(always)]
+    pub(super) unsafe fn equal<const N: usize>(&self, bit: usize, record: &View<'_>) -> bool {
+        let nkeys = if N > 0 { N } else { self.slots.len() };
+        let keys = record.keys();
+        debug_assert!(keys.len() == self.slots.len() && nkeys == self.slots.len());
         record.null_bits() == self.null_bits[bit & 63]
-            && record
-                .keys()
-                .iter()
-                .zip(self.keys())
-                .all(|(&key, slots)| key == slots[bit & 63])
+            && (0..nkeys).all(|key| {
+                // SAFETY: `key < nkeys`, the record's key count and this
+                // buffer's, by the caller's contract.
+                unsafe { *keys.get_unchecked(key) == self.key(key, bit) }
+            })
     }
 }
