@@ -193,7 +193,8 @@ with one file namespace per participant and partition, followed by a
 barrier and single-owner partition claims. Structures in shared memory that
 Rust maintains follow rules of their own: memory allocated by C, offsets
 instead of pointers, atomics through raw pointers, no allocation in Rust,
-with loom models and TLA+ specifications of the protocols.
+with loom models and TLA+ specifications of the protocols; the hash table
+of joins and grouping ([table guide](table.md)) is built that way.
 
 ### The enable switch
 

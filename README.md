@@ -25,7 +25,8 @@ filters over a batch through them, and the
 building and passing batches. The [nodes guide](docs/nodes.md) describes the
 module of Tessera's own batch nodes, `TessHeapScan`, `TessPack`,
 `TessFilter` and `TessAgg`, serial and under PostgreSQL's parallel query,
-and the
+the [table guide](docs/table.md) the hash table of joins and grouping in a
+region of memory a node owns, and the
 [node-writing guide](docs/writing-a-node.md) walks through building a node
 of your own on the example of `TessLimit`.
 

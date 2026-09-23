@@ -9,6 +9,11 @@ the caller's `TessStatus`. It never raises `ERROR`: PostgreSQL's error
 mechanism jumps over stack frames, and Rust frames must unwind, so the
 caller reports the status after the call returns.
 
+The same library exports the hash table of joins and grouping, declared
+in `include/tessera/table.h` and described in the [table
+guide](table.md): its calls take a region of memory the caller owns and
+follow the same status rules.
+
 ## Calling an entry point
 
 ```c
@@ -49,7 +54,8 @@ declares uninitialized rows.
 ## Ownership and aliasing
 
 Entry points borrow everything and own nothing: no buffer is retained,
-freed, or allocated. Within one call, a mutable argument (the mask a filter
+freed, or allocated (the table's region is the caller's too, handed to
+every call). Within one call, a mutable argument (the mask a filter
 narrows, a result array, a result mask) must not overlap `prepared`, the
 column's arrays, or another mutable argument, and the column must not
 change. Every mask carries the column's row count and has no bits set
