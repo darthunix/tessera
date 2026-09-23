@@ -15,6 +15,7 @@ use anyhow::Result;
 use tessera_core::ColumnReader;
 
 use super::header::MAX_KEYS;
+use super::record::View;
 
 /// The keys of a batch, one word at a time.
 pub trait KeySource {
@@ -112,5 +113,15 @@ impl WordKeys {
     /// The `nkeys` slots of row `bit`, in key order.
     pub(super) fn keys(&self, bit: usize, nkeys: usize) -> impl Iterator<Item = i64> + '_ {
         self.slots[..nkeys].iter().map(move |slots| slots[bit])
+    }
+
+    /// Whether row `bit` has the null bits and keys of a record.
+    pub(super) fn equal(&self, bit: usize, record: &View<'_>) -> bool {
+        record.null_bits() == self.null_bits[bit]
+            && record
+                .keys()
+                .iter()
+                .zip(&self.slots)
+                .all(|(&key, slots)| key == slots[bit])
     }
 }

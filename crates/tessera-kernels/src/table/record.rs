@@ -47,6 +47,10 @@ impl<'r> View<'r> {
         self.field(HASH)
     }
 
+    pub(super) fn next(&self) -> u32 {
+        self.field(NEXT)
+    }
+
     pub(super) fn null_bits(&self) -> u32 {
         self.field(NULL_BITS)
     }
@@ -148,6 +152,38 @@ impl<'r, R: Region> Access<'r, R> {
     /// The byte offset of the bucket of a hash.
     fn bucket(&self, hash: u32) -> usize {
         self.layout.buckets_offset + (hash >> self.layout.bucket_shift) as usize * 4
+    }
+
+    /// The newest record of the bucket of a hash, 0 for none.
+    pub(super) fn head(&self, hash: u32) -> u32 {
+        self.region.load_u32(self.bucket(hash))
+    }
+
+    /// Walk the chain from `offset` to the first record with `hash` that
+    /// `matches`; a chain longer than the record count is corrupt.
+    pub(super) fn find(
+        &mut self,
+        mut offset: u32,
+        hash: u32,
+        mut matches: impl FnMut(&View<'r>) -> bool,
+    ) -> Result<Option<u32>> {
+        let mut steps = 0;
+        while offset != 0 {
+            if steps == self.nrecords {
+                self.refresh();
+                ensure!(
+                    steps < self.nrecords,
+                    "table chain is longer than its record count"
+                );
+            }
+            steps += 1;
+            let view = self.locate(offset)?;
+            if view.hash() == hash && matches(&view) {
+                return Ok(Some(offset));
+            }
+            offset = view.next();
+        }
+        Ok(None)
     }
 
     /// Reserve room for up to `wanted` records: the byte offset of the

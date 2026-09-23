@@ -27,7 +27,8 @@
 //!
 //! [`Table`] is the access several participants may share: inserting
 //! ([`Table::insert`], which always adds a record, so equal keys chain) or
-//! probing (to follow), not both at a time.
+//! probing ([`Table::probe`] for the first record with a row's hash and
+//! keys, [`Table::next_match`] for the ones after it), not both at a time.
 //! [`TableMut`] is the access of one writer, which alone may change
 //! records, walk them or grow the region. A batch brings its hashes, its
 //! keys through a [`KeySource`] and a row mask, and gets record offsets
@@ -64,8 +65,17 @@
 //! table.insert(&hashes, &keys[..], Some(&payload), &mut mask, &mut offsets)?;
 //! assert_eq!(pending, [0], "every row found room");
 //!
-//! assert_eq!(table.stats().records, 3);
-//! assert_eq!(table.record(offsets[1])?.payload, 2u64.to_ne_bytes());
+//! // The first row's key has two records; the second row's has one.
+//! let mut hits = [0];
+//! let mut matches = [0; 3];
+//! let mut found = RowMask::try_new(3, &mut hits)?;
+//! table.probe(&hashes, &keys[..], &RowMaskView::try_new(3, &[0b011])?, &mut matches, &mut found)?;
+//! assert_eq!(hits, [0b011]);
+//! assert_eq!(table.record(matches[0])?.payload, 3u64.to_ne_bytes());
+//! let mut more = RowMask::try_new(3, &mut hits)?;
+//! table.next_match(&matches, &RowMaskView::try_new(3, &[0b011])?, &mut offsets, &mut more)?;
+//! assert_eq!(hits, [0b001]);
+//! assert_eq!(table.record(offsets[0])?.payload, 1u64.to_ne_bytes());
 //! # Ok::<(), anyhow::Error>(())
 //! ```
 #![allow(unsafe_code)]
@@ -80,7 +90,7 @@ use core::marker::PhantomData;
 use core::ops::Deref;
 
 use anyhow::{Result, ensure};
-use tessera_core::RowMask;
+use tessera_core::{RowMask, RowMaskView};
 
 use header::{CHUNK_USED, HEADER_SIZE, Header, Layout, NRECORDS};
 pub use header::{FORMAT_VERSION, KeyKind, MAX_KEYS, TableConfig, region_size};
@@ -204,6 +214,43 @@ impl<'a> Table<'a> {
             pending,
             offsets,
         )
+    }
+
+    /// Find the newest record with the hash, null bits and keys of each
+    /// row of `rows`: `matches[row]` receives its offset and `found` the
+    /// rows that have one, as a mask this call produces. Older records
+    /// with the same keys follow through [`Table::next_match`].
+    pub fn probe<K: KeySource + ?Sized>(
+        &self,
+        hashes: &[u32],
+        keys: &K,
+        rows: &RowMaskView<'_>,
+        matches: &mut [u32],
+        found: &mut RowMask<'_>,
+    ) -> Result<()> {
+        batch::probe(
+            &self.region,
+            &self.layout,
+            hashes,
+            keys,
+            rows,
+            matches,
+            found,
+        )
+    }
+
+    /// For each row of `rows`, find the record after `current[row]` with
+    /// the same hash, null bits and keys: `next[row]` receives its offset
+    /// and `found` the rows that have one. `current` holds record offsets
+    /// from a probe or an earlier call.
+    pub fn next_match(
+        &self,
+        current: &[u32],
+        rows: &RowMaskView<'_>,
+        next: &mut [u32],
+        found: &mut RowMask<'_>,
+    ) -> Result<()> {
+        batch::next_match(&self.region, &self.layout, current, rows, next, found)
     }
 
     /// The record at an offset a call of this table returned.
