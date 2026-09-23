@@ -195,6 +195,41 @@ impl Header {
         })
     }
 
+    /// The header after growing from `old_len` to `new_len` bytes: the
+    /// bucket count that [`region_size`] would give the records that fit
+    /// beside the buckets (the largest power of two below four times
+    /// them, at least the floor), fewer if the used part leaves no room
+    /// for them, and the buckets at the new end.
+    pub(super) fn grown(&self, old_len: usize, new_len: usize) -> Result<Self> {
+        ensure!(
+            new_len.is_multiple_of(8) && new_len >= old_len,
+            "a table grows to a multiple of 8 bytes of at least its {old_len}"
+        );
+        let used = usize::try_from(self.chunk_used).unwrap_or(usize::MAX);
+        let record_size = (self.record_size as usize).max(1);
+        let free = new_len - HEADER_SIZE;
+        let mut nbuckets = bucket_count((free / record_size) as u64);
+        loop {
+            let room = free.saturating_sub(nbuckets as usize * 4) / record_size;
+            let fits = nbuckets as usize * 4 + used <= new_len;
+            if u64::from(nbuckets) <= MIN_BUCKETS || (fits && room * 4 > nbuckets as usize) {
+                break;
+            }
+            nbuckets /= 2;
+        }
+        ensure!(
+            nbuckets as usize * 4 + used <= new_len,
+            "a table of {used} used bytes does not fit {new_len} bytes with its buckets"
+        );
+        Ok(Self {
+            region_len: new_len as u64,
+            buckets_offset: (new_len - nbuckets as usize * 4) as u64,
+            nbuckets,
+            bucket_shift: bucket_shift(nbuckets),
+            ..*self
+        })
+    }
+
     /// Read the header at the start of a region.
     pub(super) fn load<R: Region>(region: &R) -> Self {
         let mut kinds = [0; MAX_KEYS];

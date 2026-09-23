@@ -56,7 +56,7 @@ impl<'r> View<'r> {
     }
 
     /// The length the record claims, in bytes.
-    fn len(&self) -> usize {
+    pub(super) fn len(&self) -> usize {
         self.field(LEN) as usize * 8
     }
 

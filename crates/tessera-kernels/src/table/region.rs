@@ -19,6 +19,9 @@ use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 /// Bytes a table reads and writes by offset.
 pub(super) trait Region {
+    /// The number of addressable bytes.
+    fn len(&self) -> usize;
+
     /// Read a 32-bit word with acquire ordering.
     fn load_u32(&self, offset: usize) -> u32;
 
@@ -110,6 +113,10 @@ impl RawRegion {
 }
 
 impl Region for RawRegion {
+    fn len(&self) -> usize {
+        self.len
+    }
+
     fn load_u32(&self, offset: usize) -> u32 {
         self.atomic_u32(offset).load(Ordering::Acquire)
     }

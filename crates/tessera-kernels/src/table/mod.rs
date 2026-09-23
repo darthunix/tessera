@@ -29,10 +29,13 @@
 //! ([`Table::insert`], which always adds a record, so equal keys chain) or
 //! probing ([`Table::probe`] for the first record with a row's hash and
 //! keys, [`Table::next_match`] for the ones after it), not both at a time.
-//! [`TableMut`] is the access of one writer, which alone may change
-//! records, walk them or grow the region. A batch brings its hashes, its
-//! keys through a [`KeySource`] and a row mask, and gets record offsets
-//! back. Every call attaches anew and checks the whole header; every
+//! [`TableMut`] is the access of one writer, which alone may give rows
+//! the record of their keys, creating it when there is none
+//! ([`TableMut::find_or_insert`], for grouping), change a payload in
+//! place ([`TableMut::payload_mut`]), walk the records in insertion order
+//! ([`TableMut::scan`]) or grow the region ([`TableMut::grow`]). A batch
+//! brings its hashes, its keys through a [`KeySource`] and a row mask, and
+//! gets record offsets back. Every call attaches anew and checks the whole header; every
 //! offset is checked before it is followed, and a chain is walked at most
 //! as many steps as there are records, so a corrupt region is an error,
 //! never a hang or an access past the buffer. Dimension errors come before
@@ -81,6 +84,7 @@
 #![allow(unsafe_code)]
 
 mod batch;
+mod exclusive;
 mod header;
 mod keys;
 mod record;
@@ -92,6 +96,7 @@ use core::ops::Deref;
 use anyhow::{Result, ensure};
 use tessera_core::{RowMask, RowMaskView};
 
+pub use exclusive::Cursor;
 use header::{CHUNK_USED, HEADER_SIZE, Header, Layout, NRECORDS};
 pub use header::{FORMAT_VERSION, KeyKind, MAX_KEYS, TableConfig, region_size};
 pub use keys::{KeySource, normalize_word};
@@ -320,6 +325,54 @@ impl<'a> TableMut<'a> {
         let len = words.len() * 8;
         // SAFETY: as for `create_in`.
         unsafe { Self::attach_mut(words.as_mut_ptr().cast(), len) }
+    }
+
+    /// Give each row of `pending` the record of its keys, creating one
+    /// with a zero payload where none exists, in row order, until the
+    /// table has no room for a new one: resolved rows leave `pending` and
+    /// get their record offsets in `offsets`, the rows whose record this
+    /// call created form `inserted`, and the count resolved is returned.
+    /// Rows left pending need a larger region.
+    pub fn find_or_insert<K: KeySource + ?Sized>(
+        &mut self,
+        hashes: &[u32],
+        keys: &K,
+        pending: &mut RowMask<'_>,
+        offsets: &mut [u32],
+        inserted: &mut RowMask<'_>,
+    ) -> Result<usize> {
+        exclusive::find_or_insert(
+            &self.0.region,
+            &self.0.layout,
+            hashes,
+            keys,
+            pending,
+            offsets,
+            inserted,
+        )
+    }
+
+    /// The payload of the record at an offset, to change in place.
+    pub fn payload_mut(&mut self, offset: u32) -> Result<&mut [u8]> {
+        exclusive::payload_mut(&self.0.region, &self.0.layout, offset)
+    }
+
+    /// Visit the records from `cursor` on, in insertion order, as many as
+    /// `out` holds: their offsets fill `out`, the count is returned and
+    /// the cursor moves past them; 0 means the walk is over.
+    pub fn scan(&self, cursor: &mut Cursor, out: &mut [u32]) -> Result<usize> {
+        exclusive::scan(&self.0.region, &self.0.layout, cursor, out)
+    }
+
+    /// Grow the table to the first `new_len` bytes of its region, after
+    /// the caller made the region that large with the used bytes intact
+    /// (`repalloc`, or a copy into a new region): the buckets are rebuilt
+    /// at the new end for the records that could now fit, and records and
+    /// their offsets stay as they were. `new_len` is a multiple of 8, at
+    /// least the old length and at most the region's.
+    pub fn grow(&mut self, new_len: usize) -> Result<()> {
+        self.0.layout = exclusive::grow(&self.0.region, &self.0.layout, new_len)?;
+        Ok(())
     }
 }
 

@@ -10,7 +10,7 @@ use super::region::Region;
 
 /// Reject a batch whose keys or buffers do not match the table and the
 /// mask, before anything is read or changed.
-fn check<K: KeySource + ?Sized>(
+pub(super) fn check<K: KeySource + ?Sized>(
     layout: &Layout,
     keys: &K,
     nrows: usize,
