@@ -12,8 +12,8 @@ use std::slice;
 use anyhow::{Context, Result, bail, ensure};
 use tessera_core::ColumnReader;
 use tessera_kernels::table::{
-    FORMAT_VERSION, HEADER_SIZE, KeyKind, KeySource, MAX_KEYS, Table, TableConfig, TableMut,
-    VERSION_OFFSET, normalize_word, region_size,
+    Cursor, FORMAT_VERSION, HEADER_SIZE, KeyKind, KeySource, MAX_KEYS, Table, TableConfig,
+    TableMut, VERSION_OFFSET, normalize_word, region_size,
 };
 
 use super::column::DatumColumn;
@@ -495,6 +495,121 @@ pub unsafe extern "C" fn tess_table_record(
             Ok(())
         })
     }
+}
+
+/// `tess_table_find_or_insert`: give each pending row the record of its
+/// keys, creating one where none exists.
+///
+/// # Safety
+///
+/// `region` as for [`TableMut::attach_mut`] during the call; `keys` as
+/// for [`table_keys`]; `pending` and `inserted` must point to valid masks
+/// that nothing else accesses, with the batch's rows; `hashes` must hold
+/// a hash per row and `offsets` a writable slot per row; `status` as for
+/// every entry point.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tess_table_find_or_insert(
+    region: *mut u8,
+    len: usize,
+    hashes: *const u32,
+    nkeys: c_int,
+    keys: *const TableKey,
+    pending: *mut Mask,
+    offsets: *mut u32,
+    inserted: *mut Mask,
+    status: *mut Status,
+) -> Code {
+    // SAFETY: the caller's contract.
+    unsafe {
+        guard(status, || {
+            let mut table = TableMut::attach_mut(region, len)?;
+            let keys = table_keys(nkeys, keys)?;
+            let mut pending = pending.as_mut().context("a null pending mask")?.mask()?;
+            let mut inserted = inserted.as_mut().context("a null inserted mask")?.mask()?;
+            let nrows = pending.as_view().nrows();
+            let hashes = values(hashes, nrows, "hashes")?;
+            let offsets = slots(offsets, nrows, "offsets")?;
+            table
+                .find_or_insert(hashes, &keys, &mut pending, offsets, &mut inserted)
+                .map(drop)
+        })
+    }
+}
+
+/// `tess_table_payload`: the payload of a record, to change in place.
+///
+/// # Safety
+///
+/// `region` as for [`TableMut::attach_mut`] during the call and until the
+/// caller is done with the pointer it receives; `payload` must be null or
+/// writable; `status` as for every entry point.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tess_table_payload(
+    region: *mut u8,
+    len: usize,
+    offset: u32,
+    payload: *mut *mut u8,
+    status: *mut Status,
+) -> Code {
+    // SAFETY: the caller's contract.
+    unsafe {
+        guard(status, || {
+            let mut table = TableMut::attach_mut(region, len)?;
+            let bytes = table.payload_mut(offset)?.as_mut_ptr();
+            *payload.as_mut().context("a null payload pointer")? = bytes;
+            Ok(())
+        })
+    }
+}
+
+/// `tess_table_scan`: the next records in insertion order.
+///
+/// # Safety
+///
+/// `region` as for [`TableMut::attach_mut`] during the call; `cursor` and
+/// `count` must be null or writable; `offsets` must hold `capacity`
+/// writable slots; `status` as for every entry point.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tess_table_scan(
+    region: *mut u8,
+    len: usize,
+    cursor: *mut u64,
+    offsets: *mut u32,
+    capacity: c_int,
+    count: *mut c_int,
+    status: *mut Status,
+) -> Code {
+    // SAFETY: the caller's contract.
+    unsafe {
+        guard(status, || {
+            let table = TableMut::attach_mut(region, len)?;
+            let raw = cursor.as_mut().context("a null cursor")?;
+            let mut cursor = if *raw == 0 {
+                Cursor::start()
+            } else {
+                Cursor::from_raw(*raw)
+            };
+            let capacity = usize::try_from(capacity).context("a negative capacity")?;
+            let out = slots(offsets, capacity, "offsets")?;
+            let visited = table.scan(&mut cursor, out)?;
+            *raw = cursor.raw();
+            *count.as_mut().context("a null count")? = visited as c_int;
+            Ok(())
+        })
+    }
+}
+
+/// `tess_table_grow`: grow the table to the whole region.
+///
+/// # Safety
+///
+/// `region` as for [`TableMut::attach_mut`] during the call, the first
+/// bytes of it holding what the table held; `status` as for every entry
+/// point.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tess_table_grow(region: *mut u8, len: usize, status: *mut Status) -> Code {
+    // SAFETY: the caller's contract.
+    unsafe { guard(status, || TableMut::attach_mut(region, len)?.grow(len)) }
 }
 
 #[cfg(test)]

@@ -210,4 +210,64 @@ extern TessStatusCode tess_table_record(const void *region,
 										TessTableRecord *record,
 										TessStatus *status);
 
+/*
+ * What one writer alone may do, with no other call over the region at the
+ * same time: grouping resolves rows to the record of their keys and
+ * changes payloads in place, output walks the records, and a full table
+ * grows.
+ */
+
+/*
+ * Give each row of pending the record of its keys, creating one with a
+ * zero payload where none exists, in row order, until the table has no
+ * room for a new one: resolved rows leave pending and get their record
+ * offsets in offsets; the rows whose record this call created form
+ * inserted, a mask this call fills whole. Rows left pending need a larger
+ * region.
+ */
+extern TessStatusCode tess_table_find_or_insert(void *region,
+												Size len,
+												const uint32 *hashes,
+												int nkeys,
+												const TessTableKey *keys,
+												TessRowMask *pending,
+												uint32 *offsets,
+												TessRowMask *inserted,
+												TessStatus *status);
+
+/*
+ * The payload of the record at an offset, to change in place: payload_size
+ * bytes valid until the region moves or the table grows.
+ */
+extern TessStatusCode tess_table_payload(void *region,
+										 Size len,
+										 uint32 offset,
+										 uint8 **payload,
+										 TessStatus *status);
+
+/*
+ * Visit the records from the cursor on, in insertion order, up to capacity
+ * of them: their offsets fill offsets, count receives how many, and the
+ * cursor moves past them. The caller starts the cursor at 0; a count of 0
+ * means the walk is over.
+ */
+extern TessStatusCode tess_table_scan(void *region,
+									  Size len,
+									  uint64 *cursor,
+									  uint32 *offsets,
+									  int capacity,
+									  int *count,
+									  TessStatus *status);
+
+/*
+ * Grow the table to the len bytes at region, after the caller made the
+ * region that large with its used bytes intact (repalloc, or a copy into
+ * a new region): the buckets are rebuilt at the new end for the records
+ * that could now fit, and records and their offsets stay as they were.
+ * len is a multiple of 8 of at least the old length.
+ */
+extern TessStatusCode tess_table_grow(void *region,
+									  Size len,
+									  TessStatus *status);
+
 #endif							/* TESSERA_TABLE_H */

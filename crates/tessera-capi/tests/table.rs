@@ -6,8 +6,9 @@ use std::ptr;
 use anyhow::Result;
 use tessera_capi::c::{
     Code, DatumColumn, Mask, Status, TableKey, TableRecord, TableStats, tess_int4_hash,
-    tess_table_attach, tess_table_create, tess_table_format_version, tess_table_insert,
-    tess_table_layout, tess_table_next_match, tess_table_probe, tess_table_record, tess_table_size,
+    tess_table_attach, tess_table_create, tess_table_find_or_insert, tess_table_format_version,
+    tess_table_grow, tess_table_insert, tess_table_layout, tess_table_next_match,
+    tess_table_payload, tess_table_probe, tess_table_record, tess_table_scan, tess_table_size,
     tess_table_stats,
 };
 use tessera_core::{ColumnView, RowMask, RowMaskView};
@@ -415,4 +416,196 @@ fn key_copy(key: &TableKey) -> TableKey {
         column: key.column,
         prepared: key.prepared,
     }
+}
+
+#[test]
+fn the_writer_entry_points_round_trip() -> Result<()> {
+    let values: Vec<u64> = (0..100_i64).map(|row| (row % 10) as u64).collect();
+    let isnull = [false; 100];
+    let column = DatumColumn {
+        struct_size: size_of::<DatumColumn>(),
+        values: values.as_ptr(),
+        isnull: isnull.as_ptr(),
+        nrows: 100,
+    };
+    let key = TableKey {
+        kind: 1,
+        column: &raw const column,
+        prepared: ptr::null(),
+    };
+    let hashes: Vec<u32> = values
+        .iter()
+        .map(|&value| int32::murmurhash32(value as u32))
+        .collect();
+    let kinds = [1_u32];
+    let mut status = Status::new();
+    let mut size = 0;
+    let all = [u64::MAX, (1 << 36) - 1];
+    // SAFETY: local buffers of the declared sizes, aliased by nothing else,
+    // throughout this test.
+    unsafe {
+        // A region for four records fills up; a walk sees them in order.
+        let code = tess_table_size(1, kinds.as_ptr(), 8, 4, &raw mut size, &raw mut status);
+        assert_eq!(code, Code::Ok);
+        let mut region = vec![0_u64; size / 8];
+        let base = region.as_mut_ptr().cast::<u8>();
+        let code = tess_table_create(base, size, 1, kinds.as_ptr(), 8, 4, &raw mut status);
+        assert_eq!(code, Code::Ok, "{}", status.message());
+        let mut pending_words = all;
+        let mut pending = Mask {
+            nrows: 100,
+            bits: pending_words.as_mut_ptr(),
+        };
+        let mut inserted_words = [0; 2];
+        let mut inserted = Mask {
+            nrows: 100,
+            bits: inserted_words.as_mut_ptr(),
+        };
+        let mut offsets = vec![0; 100];
+        let code = tess_table_find_or_insert(
+            base,
+            size,
+            hashes.as_ptr(),
+            1,
+            &raw const key,
+            &raw mut pending,
+            offsets.as_mut_ptr(),
+            &raw mut inserted,
+            &raw mut status,
+        );
+        assert_eq!(code, Code::Ok, "{}", status.message());
+        assert_eq!(
+            pending_words,
+            [u64::MAX << 4, (1 << 36) - 1],
+            "four keys got records"
+        );
+        assert_eq!(inserted_words, [0b1111, 0]);
+        let mut cursor = 0;
+        let mut walked = [0; 8];
+        let mut count = 0;
+        let code = tess_table_scan(
+            base,
+            size,
+            &raw mut cursor,
+            walked.as_mut_ptr(),
+            8,
+            &raw mut count,
+            &raw mut status,
+        );
+        assert_eq!((code, count), (Code::Ok, 4));
+        assert_eq!(walked[..4], offsets[..4]);
+        assert_ne!(cursor, 0);
+        let code = tess_table_scan(
+            base,
+            size,
+            &raw mut cursor,
+            walked.as_mut_ptr(),
+            8,
+            &raw mut count,
+            &raw mut status,
+        );
+        assert_eq!((code, count), (Code::Ok, 0));
+
+        // Grown to a region for a hundred, the rest resolve to ten records,
+        // and payloads change in place.
+        let code = tess_table_size(1, kinds.as_ptr(), 8, 100, &raw mut size, &raw mut status);
+        assert_eq!(code, Code::Ok);
+        region.resize(size / 8, 0);
+        let base = region.as_mut_ptr().cast::<u8>();
+        let code = tess_table_grow(base, size, &raw mut status);
+        assert_eq!(code, Code::Ok, "{}", status.message());
+        let code = tess_table_find_or_insert(
+            base,
+            size,
+            hashes.as_ptr(),
+            1,
+            &raw const key,
+            &raw mut pending,
+            offsets.as_mut_ptr(),
+            &raw mut inserted,
+            &raw mut status,
+        );
+        assert_eq!(code, Code::Ok, "{}", status.message());
+        assert_eq!(pending_words, [0, 0]);
+        assert_eq!(inserted_words, [0b11_1111_0000, 0], "keys 4 to 9 are new");
+        for row in 0..100 {
+            assert_eq!(offsets[row], offsets[row % 10]);
+            let mut payload: *mut u8 = ptr::null_mut();
+            let code =
+                tess_table_payload(base, size, offsets[row], &raw mut payload, &raw mut status);
+            assert_eq!(code, Code::Ok);
+            let counter = payload.cast::<u64>();
+            counter.write_unaligned(counter.read_unaligned() + row as u64);
+        }
+        let mut record = TableRecord {
+            struct_size: size_of::<TableRecord>(),
+            hash: 0,
+            null_bits: 0,
+            keys: ptr::null(),
+            payload: ptr::null(),
+            payload_size: 0,
+        };
+        for (key, &offset) in offsets[..10].iter().enumerate() {
+            let code = tess_table_record(base, size, offset, &raw mut record, &raw mut status);
+            assert_eq!(code, Code::Ok);
+            let sum = u64::from_ne_bytes(*record.payload.cast::<[u8; 8]>());
+            assert_eq!(
+                sum,
+                (0..100).filter(|row| row % 10 == key).sum::<usize>() as u64
+            );
+        }
+        let mut stats = TableStats {
+            struct_size: size_of::<TableStats>(),
+            records: 0,
+            buckets: 0,
+            bytes_used: 0,
+            region_len: 0,
+        };
+        assert_eq!(
+            tess_table_stats(base, size, &raw mut stats, &raw mut status),
+            Code::Ok
+        );
+        assert_eq!((stats.records, stats.region_len), (10, size as u64));
+        let mut cursor = 0;
+        let mut all_offsets = [0; 16];
+        let code = tess_table_scan(
+            base,
+            size,
+            &raw mut cursor,
+            all_offsets.as_mut_ptr(),
+            16,
+            &raw mut count,
+            &raw mut status,
+        );
+        assert_eq!((code, count), (Code::Ok, 10));
+        assert_eq!(all_offsets[..10], offsets[..10]);
+
+        // Errors: a cursor inside a record, no shrinking, a bad offset.
+        let mut cursor = 100;
+        let code = tess_table_scan(
+            base,
+            size,
+            &raw mut cursor,
+            all_offsets.as_mut_ptr(),
+            16,
+            &raw mut count,
+            &raw mut status,
+        );
+        assert_eq!(code, Code::InvalidArgument);
+        assert_eq!(
+            tess_table_grow(base, size - 8, &raw mut status),
+            Code::InvalidArgument
+        );
+        let mut payload: *mut u8 = ptr::null_mut();
+        let code = tess_table_payload(
+            base,
+            size,
+            offsets[0] + 1,
+            &raw mut payload,
+            &raw mut status,
+        );
+        assert_eq!(code, Code::InvalidArgument);
+        drop(region);
+    }
+    Ok(())
 }
