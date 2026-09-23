@@ -8,7 +8,7 @@
 //! reserved, unpublished bytes and published by a compare-and-swap of its
 //! bucket's head, after which it never changes.
 
-use anyhow::{Result, ensure};
+use anyhow::Result;
 
 use super::header::{CHUNK_USED, HEADER_SIZE, KEY_SLOT, Layout, NRECORDS, RECORD_HEADER};
 use super::keys::WordKeys;
@@ -124,9 +124,15 @@ impl<'r, R: Region> Access<'r, R> {
         self.record_size
     }
 
+    /// Read the counters again. The end of the record area is clamped to
+    /// the buckets' offset, which attachment checked against the region:
+    /// whatever the shared bytes say later, a record found below it lies
+    /// within the region, which the unchecked accesses rely on.
     #[inline]
     fn refresh(&mut self) {
-        self.used = self.region.load_u64(CHUNK_USED) as usize;
+        let used = self.region.load_u64(CHUNK_USED);
+        self.used =
+            usize::try_from(used).map_or(self.buckets_offset, |used| used.min(self.buckets_offset));
         self.nrecords = self.region.load_u64(NRECORDS);
     }
 
@@ -144,16 +150,14 @@ impl<'r, R: Region> Access<'r, R> {
             // A record published since the counters were read lies past
             // them: read again before calling the region corrupt.
             self.refresh();
-            ensure!(
-                self.in_records(byte),
-                "table record offset {offset} lies outside the records"
-            );
+            if !self.in_records(byte) {
+                return Err(outside(offset));
+            }
         }
         let view = self.view(byte);
-        ensure!(
-            view.len() == self.record_size,
-            "table record offset {offset} does not start a record"
-        );
+        if view.len() != self.record_size {
+            return Err(misplaced(offset));
+        }
         Ok(view)
     }
 
@@ -162,8 +166,9 @@ impl<'r, R: Region> Access<'r, R> {
     fn view(&self, byte: usize) -> View<'r> {
         let (nkeys, payload_size) = (self.nkeys, self.payload_size);
         // SAFETY: a located record is published and never written again,
-        // and its bytes lie among the records, below the buckets.
-        let bytes = unsafe { self.region.bytes(byte, self.record_size) };
+        // and its bytes lie among the records, below the used mark, which
+        // is at most the buckets' offset and so within the region.
+        let bytes = unsafe { self.region.bytes_in(byte, self.record_size) };
         // SAFETY: the header checked that the record size is the 16 bytes
         // of the record header, 8 per key and the payload, rounded up, so
         // the three parts lie within `bytes`; the record starts at a
@@ -191,7 +196,10 @@ impl<'r, R: Region> Access<'r, R> {
     /// The newest record of the bucket of a hash, 0 for none.
     #[inline]
     pub(super) fn head(&self, hash: u32) -> u32 {
-        self.region.load_u32(self.bucket(hash))
+        // SAFETY: `hash >> bucket_shift` is below the bucket count, since
+        // the shift leaves as many bits as the count's logarithm, and the
+        // bucket array was checked to lie within the region.
+        unsafe { self.region.load_u32_in(self.bucket(hash)) }
     }
 
     /// Walk the chain from `offset` to the first record with `hash` that
@@ -209,10 +217,9 @@ impl<'r, R: Region> Access<'r, R> {
         while offset != 0 {
             if steps == self.nrecords {
                 self.refresh();
-                ensure!(
-                    steps < self.nrecords,
-                    "table chain is longer than its record count"
-                );
+                if steps >= self.nrecords {
+                    return Err(cycle());
+                }
             }
             steps += 1;
             let view = self.locate(offset)?;
@@ -245,7 +252,9 @@ impl<'r, R: Region> Access<'r, R> {
                     self.used = end;
                     return Some((start, count));
                 }
-                Err(found) => self.used = found as usize,
+                // Clamped as in `refresh`: a used mark past the buckets
+                // leaves no room.
+                Err(found) => self.used = (found as usize).min(self.buckets_offset),
             }
         }
     }
@@ -267,8 +276,9 @@ impl<'r, R: Region> Access<'r, R> {
     ) {
         let (record_size, nkeys) = (self.record_size, self.nkeys);
         // SAFETY: the record was reserved by this operation and is not
-        // published yet, so nothing else reads or writes its bytes.
-        let bytes = unsafe { self.region.bytes_mut(byte, record_size) };
+        // published yet, so nothing else reads or writes its bytes; a
+        // reservation ends at most at the buckets' offset, in the region.
+        let bytes = unsafe { self.region.bytes_mut_in(byte, record_size) };
         let (words, _) = bytes.as_chunks_mut::<8>();
         let mut fields = [0; RECORD_HEADER];
         fields[HASH..HASH + 4].copy_from_slice(&hash.to_ne_bytes());
@@ -306,12 +316,16 @@ impl<'r, R: Region> Access<'r, R> {
     #[inline]
     pub(super) fn push(&self, offset: u32, byte: usize, hash: u32) {
         let bucket = self.bucket(hash);
-        let mut head = self.region.load_u32(bucket);
-        loop {
-            self.region.store_u32(byte + NEXT, head);
-            match self.region.cas_u32(bucket, head, offset) {
-                Ok(_) => return,
-                Err(found) => head = found,
+        // SAFETY: the bucket lies in the bucket array, as in `head`, and
+        // the next field in the record this operation reserved.
+        unsafe {
+            let mut head = self.region.load_u32_in(bucket);
+            loop {
+                self.region.store_u32_in(byte + NEXT, head);
+                match self.region.cas_u32_in(bucket, head, offset) {
+                    Ok(_) => return,
+                    Err(found) => head = found,
+                }
             }
         }
     }
@@ -372,4 +386,26 @@ fn zero_words(dst: &mut [[u8; 8]]) {
     if n > 3 {
         dst[3] = [0; 8];
     }
+}
+
+/// The error of a record offset outside the records, kept out of the
+/// loops that walk chains.
+#[cold]
+#[inline(never)]
+fn outside(offset: u32) -> anyhow::Error {
+    anyhow::anyhow!("table record offset {offset} lies outside the records")
+}
+
+/// The error of an offset that does not start a record.
+#[cold]
+#[inline(never)]
+fn misplaced(offset: u32) -> anyhow::Error {
+    anyhow::anyhow!("table record offset {offset} does not start a record")
+}
+
+/// The error of a chain longer than the record count.
+#[cold]
+#[inline(never)]
+fn cycle() -> anyhow::Error {
+    anyhow::anyhow!("table chain is longer than its record count")
 }

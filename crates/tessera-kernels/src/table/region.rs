@@ -30,10 +30,6 @@ pub(super) trait Region {
     /// Write a 32-bit word with release ordering.
     fn store_u32(&self, offset: usize, value: u32);
 
-    /// Replace a 32-bit word if it still holds `current`: `Ok` with the
-    /// value replaced, `Err` with the value found (acquire-release).
-    fn cas_u32(&self, offset: usize, current: u32, new: u32) -> Result<u32, u32>;
-
     /// Read a 64-bit word with acquire ordering.
     fn load_u64(&self, offset: usize) -> u64;
 
@@ -46,14 +42,6 @@ pub(super) trait Region {
     /// Add to a 64-bit word (acquire-release) and return its previous value.
     fn fetch_add_u64(&self, offset: usize, delta: u64) -> u64;
 
-    /// Borrow `len` bytes at `offset` for reading.
-    ///
-    /// # Safety
-    ///
-    /// Nothing writes these bytes while the slice lives: the range holds a
-    /// published record, or the caller has exclusive use of the region.
-    unsafe fn bytes(&self, offset: usize, len: usize) -> &[u8];
-
     /// Borrow `len` bytes at `offset` for writing.
     ///
     /// # Safety
@@ -63,6 +51,47 @@ pub(super) trait Region {
     /// use of the region.
     #[allow(clippy::mut_from_ref)]
     unsafe fn bytes_mut(&self, offset: usize, len: usize) -> &mut [u8];
+
+    /// [`Self::load_u32`] without the bounds check.
+    ///
+    /// # Safety
+    ///
+    /// `offset + 4` is within [`Self::len`], as the validated layout
+    /// proves for a bucket or a reserved record.
+    unsafe fn load_u32_in(&self, offset: usize) -> u32;
+
+    /// [`Self::store_u32`] without the bounds check.
+    ///
+    /// # Safety
+    ///
+    /// As [`Self::load_u32_in`].
+    unsafe fn store_u32_in(&self, offset: usize, value: u32);
+
+    /// Replace a 32-bit word if it still holds `current`, without the
+    /// bounds check: `Ok` with the value replaced, `Err` with the value
+    /// found (acquire-release).
+    ///
+    /// # Safety
+    ///
+    /// As [`Self::load_u32_in`].
+    unsafe fn cas_u32_in(&self, offset: usize, current: u32, new: u32) -> Result<u32, u32>;
+
+    /// Borrow `len` bytes at `offset` for reading, without the bounds check.
+    ///
+    /// # Safety
+    ///
+    /// Nothing writes these bytes while the slice lives (the range holds a
+    /// published record, or the caller has exclusive use of the region),
+    /// and `offset + len` is within [`Self::len`].
+    unsafe fn bytes_in(&self, offset: usize, len: usize) -> &[u8];
+
+    /// [`Self::bytes_mut`] without the bounds check.
+    ///
+    /// # Safety
+    ///
+    /// As [`Self::bytes_mut`], and `offset + len` is within [`Self::len`].
+    #[allow(clippy::mut_from_ref)]
+    unsafe fn bytes_mut_in(&self, offset: usize, len: usize) -> &mut [u8];
 }
 
 /// A region over the caller's memory.
@@ -93,6 +122,18 @@ impl RawRegion {
         let end = offset.checked_add(size).expect("region offset overflows");
         assert!(end <= self.len, "region access past its end");
         // SAFETY: `offset` is within the `len` bytes the constructor promised.
+        unsafe { self.base.add(offset) }
+    }
+
+    /// The address at `offset`, which the caller proved in bounds.
+    ///
+    /// # Safety
+    ///
+    /// `offset + size` is within the `len` bytes of the region.
+    #[inline(always)]
+    unsafe fn at_in(&self, offset: usize, size: usize) -> *mut u8 {
+        debug_assert!(offset.checked_add(size).is_some_and(|end| end <= self.len));
+        // SAFETY: the caller's contract.
         unsafe { self.base.add(offset) }
     }
 
@@ -135,12 +176,6 @@ impl Region for RawRegion {
     }
 
     #[inline]
-    fn cas_u32(&self, offset: usize, current: u32, new: u32) -> Result<u32, u32> {
-        self.atomic_u32(offset)
-            .compare_exchange(current, new, Ordering::AcqRel, Ordering::Acquire)
-    }
-
-    #[inline]
     fn load_u64(&self, offset: usize) -> u64 {
         self.atomic_u64(offset).load(Ordering::Acquire)
     }
@@ -162,18 +197,49 @@ impl Region for RawRegion {
     }
 
     #[inline]
-    unsafe fn bytes(&self, offset: usize, len: usize) -> &[u8] {
-        let address = self.at(offset, len);
-        // SAFETY: the range is in bounds, and the caller promises that nothing
-        // writes it while the slice lives.
-        unsafe { core::slice::from_raw_parts(address, len) }
-    }
-
-    #[inline]
     unsafe fn bytes_mut(&self, offset: usize, len: usize) -> &mut [u8] {
         let address = self.at(offset, len);
         // SAFETY: the range is in bounds, and the caller promises that nothing
         // else reads or writes it while the slice lives.
         unsafe { core::slice::from_raw_parts_mut(address, len) }
+    }
+
+    #[inline(always)]
+    unsafe fn load_u32_in(&self, offset: usize) -> u32 {
+        // SAFETY: in bounds by the caller's contract; aligned and accessed
+        // only atomically as for `atomic_u32`.
+        unsafe { AtomicU32::from_ptr(self.at_in(offset, 4).cast()) }.load(Ordering::Acquire)
+    }
+
+    #[inline(always)]
+    unsafe fn store_u32_in(&self, offset: usize, value: u32) {
+        // SAFETY: as for `load_u32_in`.
+        unsafe { AtomicU32::from_ptr(self.at_in(offset, 4).cast()) }
+            .store(value, Ordering::Release);
+    }
+
+    #[inline(always)]
+    unsafe fn cas_u32_in(&self, offset: usize, current: u32, new: u32) -> Result<u32, u32> {
+        // SAFETY: as for `load_u32_in`.
+        unsafe { AtomicU32::from_ptr(self.at_in(offset, 4).cast()) }.compare_exchange(
+            current,
+            new,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        )
+    }
+
+    #[inline(always)]
+    unsafe fn bytes_in(&self, offset: usize, len: usize) -> &[u8] {
+        // SAFETY: in bounds by the caller's contract, which also promises
+        // that nothing writes the range while the slice lives.
+        unsafe { core::slice::from_raw_parts(self.at_in(offset, len), len) }
+    }
+
+    #[inline(always)]
+    unsafe fn bytes_mut_in(&self, offset: usize, len: usize) -> &mut [u8] {
+        // SAFETY: in bounds by the caller's contract, which also promises
+        // that nothing else accesses the range while the slice lives.
+        unsafe { core::slice::from_raw_parts_mut(self.at_in(offset, len), len) }
     }
 }
