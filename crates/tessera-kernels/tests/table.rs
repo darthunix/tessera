@@ -420,16 +420,14 @@ fn equal_keys_chain_through_next_match() -> Result<()> {
         let rows = RowMaskView::try_new(10, &rows_words)?;
         let mut more_words = [0];
         let mut more = RowMask::try_new(10, &mut more_words)?;
-        let mut next = vec![0; 10];
-        table.next_match(&current, &rows, &mut next, &mut more)?;
+        table.next_match(&mut current, &rows, &mut more)?;
         let rows = rows_of(&more.as_view());
         if rows.is_empty() {
             break;
         }
         for &key in &rows {
-            chains[key].push(next[key]);
+            chains[key].push(current[key]);
         }
-        current = next;
         rows_words = vec![more_words[0]];
     }
     for (key, chain) in chains.iter().enumerate() {
@@ -485,9 +483,10 @@ fn a_null_key_groups_apart_from_the_value_it_hashes_like() -> Result<()> {
     assert_eq!((null.null_bits, null.keys), (1, &[0][..]));
     let mut more_words = [0];
     let mut more = RowMask::try_new(2, &mut more_words)?;
-    let mut next = [0; 2];
-    table.next_match(&matches, &rows, &mut next, &mut more)?;
+    let mut next = matches.clone();
+    table.next_match(&mut next, &rows, &mut more)?;
     assert_eq!(more_words, [0], "neither has a second record");
+    assert_eq!(next, matches, "offsets without a next record stay");
 
     let mut rejected_words = [0b11];
     let mut rejected = RowMask::try_new(2, &mut rejected_words)?;
@@ -699,14 +698,10 @@ fn dimension_errors_come_before_any_change() -> Result<()> {
     );
     assert!(
         table
-            .next_match(&matches[..69], &rows, &mut offsets, &mut found)
+            .next_match(&mut offsets[..69], &rows, &mut found)
             .is_err()
     );
-    assert!(
-        table
-            .next_match(&matches, &rows, &mut offsets, &mut short)
-            .is_err()
-    );
+    assert!(table.next_match(&mut offsets, &rows, &mut short).is_err());
     let mut pending = RowMask::try_new(70, &mut pending_words)?;
     assert_eq!(
         table.insert(
@@ -1005,8 +1000,7 @@ fn growing_keeps_records_and_their_offsets() -> Result<()> {
         let rows = RowMaskView::try_new(30, &rows_words)?;
         let mut more_words = [0];
         let mut more = RowMask::try_new(30, &mut more_words)?;
-        let mut next = vec![0; 30];
-        table.next_match(&current, &rows, &mut next, &mut more)?;
+        table.next_match(&mut current, &rows, &mut more)?;
         let hits = rows_of(&more.as_view());
         if hits.is_empty() {
             break;
@@ -1014,7 +1008,6 @@ fn growing_keeps_records_and_their_offsets() -> Result<()> {
         for key in hits {
             chain_lengths[key] += 1;
         }
-        current = next;
         rows_words = vec![more_words[0]];
     }
     assert_eq!(

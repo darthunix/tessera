@@ -5,7 +5,10 @@
 //! library is also built for Rust consumers and tests. The C entry points
 //! are the [`c`] module, declared in `include/tessera/kernels.h` and
 //! documented for C callers in `docs/kernels.md`: kernels over Datum
-//! columns and row masks, each returning a status instead of raising.
+//! columns and row masks, each returning a status instead of raising; and
+//! in `include/tessera/table.h`, the hash table in a region the caller
+//! owns ([`tessera_kernels::table`]), whose calls take the region as a
+//! pointer and a length and keep nothing between them.
 //!
 //! # Borrowed column adapters
 //!
@@ -70,6 +73,7 @@
 //!
 //! ```sh
 //! cargo +nightly miri test -p tessera-capi --test columns --locked
+//! cargo +nightly miri test -p tessera-capi --test table --locked
 //! cargo +nightly miri test -p tessera-core --test reader --locked
 //! ```
 

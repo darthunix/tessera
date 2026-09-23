@@ -30,8 +30,10 @@ const MAX_BUCKETS: u64 = 1 << 31;
 pub(super) const RECORD_HEADER: usize = 16;
 /// Bytes of one key slot.
 pub(super) const KEY_SLOT: usize = 8;
-/// Bytes of the header.
-pub(super) const HEADER_SIZE: usize = size_of::<Header>();
+/// Bytes of the header, where the first record starts.
+pub const HEADER_SIZE: usize = size_of::<Header>();
+/// Byte offset of the format version in the header.
+pub const VERSION_OFFSET: usize = offset_of!(Header, version);
 /// Offset of the first free byte of the record area.
 pub(super) const CHUNK_USED: usize = offset_of!(Header, chunk_used);
 /// Offset of the record count.

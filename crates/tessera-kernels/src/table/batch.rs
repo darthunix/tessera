@@ -139,20 +139,19 @@ pub(super) fn probe<R: Region, K: KeySource + ?Sized>(
     Ok(())
 }
 
-/// For each row of `rows`, the record after `current[row]` in its chain
-/// with the same hash and keys: `next[row]` gets its offset and `found`
-/// the rows that have one.
+/// For each row of `rows`, replace `offsets[row]` by the record after it
+/// in its chain with the same hash and keys; `found` gets the rows that
+/// have one, and the others keep their offset.
 pub(super) fn next_match<R: Region>(
     region: &R,
     layout: &Layout,
-    current: &[u32],
+    offsets: &mut [u32],
     rows: &RowMaskView<'_>,
-    next: &mut [u32],
     found: &mut RowMask<'_>,
 ) -> Result<()> {
     let nrows = rows.nrows();
     ensure!(
-        current.len() == nrows && next.len() == nrows && found.as_view().nrows() == nrows,
+        offsets.len() == nrows && found.as_view().nrows() == nrows,
         "the offsets, mask and result of the batch have different row counts"
     );
     let mut access = Access::new(region, layout);
@@ -163,13 +162,13 @@ pub(super) fn next_match<R: Region>(
             let bit = bits.trailing_zeros() as usize;
             bits &= bits - 1;
             let row = index * 64 + bit;
-            let record = access.locate(current[row])?;
+            let record = access.locate(offsets[row])?;
             let (hash, null_bits, keys) = (record.hash(), record.null_bits(), record.keys());
             let after = access.find(record.next(), hash, |other| {
                 other.null_bits() == null_bits && other.keys() == keys
             })?;
             if let Some(offset) = after {
-                next[row] = offset;
+                offsets[row] = offset;
                 hits |= 1 << bit;
             }
         }

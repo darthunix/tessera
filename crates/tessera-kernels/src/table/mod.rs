@@ -76,9 +76,9 @@
 //! assert_eq!(hits, [0b011]);
 //! assert_eq!(table.record(matches[0])?.payload, 3u64.to_ne_bytes());
 //! let mut more = RowMask::try_new(3, &mut hits)?;
-//! table.next_match(&matches, &RowMaskView::try_new(3, &[0b011])?, &mut offsets, &mut more)?;
+//! table.next_match(&mut matches, &RowMaskView::try_new(3, &[0b011])?, &mut more)?;
 //! assert_eq!(hits, [0b001]);
-//! assert_eq!(table.record(offsets[0])?.payload, 1u64.to_ne_bytes());
+//! assert_eq!(table.record(matches[0])?.payload, 1u64.to_ne_bytes());
 //! # Ok::<(), anyhow::Error>(())
 //! ```
 #![allow(unsafe_code)]
@@ -97,8 +97,10 @@ use anyhow::{Result, ensure};
 use tessera_core::{RowMask, RowMaskView};
 
 pub use exclusive::Cursor;
-use header::{CHUNK_USED, HEADER_SIZE, Header, Layout, NRECORDS};
-pub use header::{FORMAT_VERSION, KeyKind, MAX_KEYS, TableConfig, region_size};
+use header::{CHUNK_USED, Header, Layout, NRECORDS};
+pub use header::{
+    FORMAT_VERSION, HEADER_SIZE, KeyKind, MAX_KEYS, TableConfig, VERSION_OFFSET, region_size,
+};
 pub use keys::{KeySource, normalize_word};
 use record::Access;
 pub use record::Record;
@@ -244,18 +246,17 @@ impl<'a> Table<'a> {
         )
     }
 
-    /// For each row of `rows`, find the record after `current[row]` with
-    /// the same hash, null bits and keys: `next[row]` receives its offset
-    /// and `found` the rows that have one. `current` holds record offsets
-    /// from a probe or an earlier call.
+    /// For each row of `rows`, replace `offsets[row]`, a record offset
+    /// from a probe or an earlier call, by the offset of the next record
+    /// in its chain with the same hash, null bits and keys; `found`
+    /// receives the rows that have one, and the others keep their offset.
     pub fn next_match(
         &self,
-        current: &[u32],
+        offsets: &mut [u32],
         rows: &RowMaskView<'_>,
-        next: &mut [u32],
         found: &mut RowMask<'_>,
     ) -> Result<()> {
-        batch::next_match(&self.region, &self.layout, current, rows, next, found)
+        batch::next_match(&self.region, &self.layout, offsets, rows, found)
     }
 
     /// The record at an offset a call of this table returned.

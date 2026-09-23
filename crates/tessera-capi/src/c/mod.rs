@@ -1,4 +1,5 @@
-//! The C entry points, declared in `include/tessera/kernels.h`.
+//! The C entry points, declared in `include/tessera/kernels.h` and
+//! `include/tessera/table.h`.
 //!
 //! Every entry point takes its inputs as the C structures of the batch
 //! contract ([`DatumColumn`], [`Mask`]), runs a kernel under a panic guard,
@@ -14,6 +15,7 @@ mod int32;
 mod int64;
 mod mask;
 mod status;
+mod table;
 
 pub use cast::tess_int4_to_int8;
 pub use column::DatumColumn;
@@ -29,3 +31,8 @@ pub use int64::{
 };
 pub use mask::Mask;
 pub use status::{Code, MESSAGE_SIZE, Status};
+pub use table::{
+    TableKey, TableKeys, TableRecord, TableStats, tess_table_attach, tess_table_create,
+    tess_table_format_version, tess_table_insert, tess_table_layout, tess_table_next_match,
+    tess_table_probe, tess_table_record, tess_table_size, tess_table_stats,
+};
