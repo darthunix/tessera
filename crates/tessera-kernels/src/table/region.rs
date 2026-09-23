@@ -25,11 +25,29 @@ pub(super) trait Region {
     /// Write a 32-bit word with release ordering.
     fn store_u32(&self, offset: usize, value: u32);
 
+    /// Replace a 32-bit word if it still holds `current`: `Ok` with the
+    /// value replaced, `Err` with the value found (acquire-release).
+    fn cas_u32(&self, offset: usize, current: u32, new: u32) -> Result<u32, u32>;
+
     /// Read a 64-bit word with acquire ordering.
     fn load_u64(&self, offset: usize) -> u64;
 
     /// Write a 64-bit word with release ordering.
     fn store_u64(&self, offset: usize, value: u64);
+
+    /// Replace a 64-bit word if it still holds `current`, as [`Self::cas_u32`].
+    fn cas_u64(&self, offset: usize, current: u64, new: u64) -> Result<u64, u64>;
+
+    /// Add to a 64-bit word (acquire-release) and return its previous value.
+    fn fetch_add_u64(&self, offset: usize, delta: u64) -> u64;
+
+    /// Borrow `len` bytes at `offset` for reading.
+    ///
+    /// # Safety
+    ///
+    /// Nothing writes these bytes while the slice lives: the range holds a
+    /// published record, or the caller has exclusive use of the region.
+    unsafe fn bytes(&self, offset: usize, len: usize) -> &[u8];
 
     /// Borrow `len` bytes at `offset` for writing.
     ///
@@ -100,12 +118,33 @@ impl Region for RawRegion {
         self.atomic_u32(offset).store(value, Ordering::Release);
     }
 
+    fn cas_u32(&self, offset: usize, current: u32, new: u32) -> Result<u32, u32> {
+        self.atomic_u32(offset)
+            .compare_exchange(current, new, Ordering::AcqRel, Ordering::Acquire)
+    }
+
     fn load_u64(&self, offset: usize) -> u64 {
         self.atomic_u64(offset).load(Ordering::Acquire)
     }
 
     fn store_u64(&self, offset: usize, value: u64) {
         self.atomic_u64(offset).store(value, Ordering::Release);
+    }
+
+    fn cas_u64(&self, offset: usize, current: u64, new: u64) -> Result<u64, u64> {
+        self.atomic_u64(offset)
+            .compare_exchange(current, new, Ordering::AcqRel, Ordering::Acquire)
+    }
+
+    fn fetch_add_u64(&self, offset: usize, delta: u64) -> u64 {
+        self.atomic_u64(offset).fetch_add(delta, Ordering::AcqRel)
+    }
+
+    unsafe fn bytes(&self, offset: usize, len: usize) -> &[u8] {
+        let address = self.at(offset, len);
+        // SAFETY: the range is in bounds, and the caller promises that nothing
+        // writes it while the slice lives.
+        unsafe { core::slice::from_raw_parts(address, len) }
     }
 
     unsafe fn bytes_mut(&self, offset: usize, len: usize) -> &mut [u8] {

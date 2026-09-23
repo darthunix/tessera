@@ -25,15 +25,18 @@
 //! newest record hashed into it. Hashes come from [`crate::int32::hash`]
 //! and [`crate::int32::hash_next`], which decide what NULL keys do.
 //!
-//! [`Table`] is the access several participants may share, inserting or
-//! probing, not both at a time; [`TableMut`] is the access of one writer,
-//! which alone may change records, walk them or grow the region. Every
-//! call attaches anew and checks the whole header; every offset is checked
-//! before it is followed, and a chain is walked at most as many steps as
-//! there are records, so a corrupt region is an error, never a hang or an
-//! access past the buffer. A full table is not an error: an insertion
-//! leaves the rows without room in its mask for the caller to retry after
-//! growing.
+//! [`Table`] is the access several participants may share: inserting
+//! ([`Table::insert`], which always adds a record, so equal keys chain) or
+//! probing (to follow), not both at a time.
+//! [`TableMut`] is the access of one writer, which alone may change
+//! records, walk them or grow the region. A batch brings its hashes, its
+//! keys through a [`KeySource`] and a row mask, and gets record offsets
+//! back. Every call attaches anew and checks the whole header; every
+//! offset is checked before it is followed, and a chain is walked at most
+//! as many steps as there are records, so a corrupt region is an error,
+//! never a hang or an access past the buffer. Dimension errors come before
+//! any change. A full table is not an error: an insertion leaves the rows
+//! without room in its mask for the caller to retry after growing.
 //!
 //! This is the second module of the crate allowed `unsafe`, for the region
 //! over raw pointers and atomics on it; see [`region`]. Tests build tables
@@ -48,20 +51,42 @@
 //! let table = TableMut::create_in(&mut words, &config, 100)?;
 //! assert_eq!(table.stats().records, 0);
 //! assert_eq!(table.key_kinds(), &[KeyKind::Int32]);
+//!
+//! // Three rows with keys 7, 8 and 7, hashed by the int4 kernel's formula.
+//! use tessera_core::{ColumnView, RowMask, RowMaskView};
+//! use tessera_kernels::int32::murmurhash32;
+//! let keys = [ColumnView::try_new(&[7, 8, 7], None)?];
+//! let hashes: Vec<u32> = [7, 8, 7].map(|key: i32| murmurhash32(key as u32)).into();
+//! let payload = [1u64, 2, 3].map(u64::to_ne_bytes).concat();
+//! let mut pending = [0b111];
+//! let mut offsets = [0; 3];
+//! let mut mask = RowMask::try_new(3, &mut pending)?;
+//! table.insert(&hashes, &keys[..], Some(&payload), &mut mask, &mut offsets)?;
+//! assert_eq!(pending, [0], "every row found room");
+//!
+//! assert_eq!(table.stats().records, 3);
+//! assert_eq!(table.record(offsets[1])?.payload, 2u64.to_ne_bytes());
 //! # Ok::<(), anyhow::Error>(())
 //! ```
 #![allow(unsafe_code)]
 
+mod batch;
 mod header;
+mod keys;
+mod record;
 mod region;
 
 use core::marker::PhantomData;
 use core::ops::Deref;
 
 use anyhow::{Result, ensure};
+use tessera_core::RowMask;
 
 use header::{CHUNK_USED, HEADER_SIZE, Header, Layout, NRECORDS};
 pub use header::{FORMAT_VERSION, KeyKind, MAX_KEYS, TableConfig, region_size};
+pub use keys::{KeySource, normalize_word};
+use record::Access;
+pub use record::Record;
 use region::{RawRegion, Region};
 
 /// What a table holds, for planning and EXPLAIN.
@@ -153,6 +178,39 @@ impl<'a> Table<'a> {
             bytes_used: self.region.load_u64(CHUNK_USED) + buckets * 4,
             region_len: self.layout.region_len as u64,
         }
+    }
+
+    /// Insert the rows of `pending` as new records, in row order, until
+    /// the table has no room: each row inserted leaves `pending` and gets
+    /// the offset of its record in `offsets`; the count inserted is
+    /// returned, and rows still pending need a larger region. `hashes` has
+    /// one hash per physical row, `keys` the table's keys, `payload` the
+    /// payload of every physical row one after another or `None` for
+    /// zeros. Equal keys make separate records.
+    pub fn insert<K: KeySource + ?Sized>(
+        &self,
+        hashes: &[u32],
+        keys: &K,
+        payload: Option<&[u8]>,
+        pending: &mut RowMask<'_>,
+        offsets: &mut [u32],
+    ) -> Result<usize> {
+        batch::insert(
+            &self.region,
+            &self.layout,
+            hashes,
+            keys,
+            payload,
+            pending,
+            offsets,
+        )
+    }
+
+    /// The record at an offset a call of this table returned.
+    pub fn record(&self, offset: u32) -> Result<Record<'_>> {
+        Ok(Access::new(&self.region, &self.layout)
+            .locate(offset)?
+            .record())
     }
 }
 
