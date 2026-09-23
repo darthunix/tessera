@@ -39,27 +39,33 @@ pub(super) struct View<'r> {
 }
 
 impl<'r> View<'r> {
+    #[inline]
     fn field(&self, at: usize) -> u32 {
         u32::from_ne_bytes(self.bytes[at..at + 4].try_into().unwrap())
     }
 
+    #[inline]
     pub(super) fn hash(&self) -> u32 {
         self.field(HASH)
     }
 
+    #[inline]
     pub(super) fn next(&self) -> u32 {
         self.field(NEXT)
     }
 
+    #[inline]
     pub(super) fn null_bits(&self) -> u32 {
         self.field(NULL_BITS)
     }
 
     /// The length the record claims, in bytes.
+    #[inline]
     pub(super) fn len(&self) -> usize {
         self.field(LEN) as usize * 8
     }
 
+    #[inline]
     pub(super) fn keys(&self) -> &'r [i64] {
         let bytes: &'r [u8] = self.bytes;
         let slots = &bytes[RECORD_HEADER..RECORD_HEADER + self.nkeys * KEY_SLOT];
@@ -70,12 +76,14 @@ impl<'r> View<'r> {
         unsafe { core::slice::from_raw_parts(slots.as_ptr().cast::<i64>(), self.nkeys) }
     }
 
+    #[inline]
     pub(super) fn payload(&self) -> &'r [u8] {
         let bytes: &'r [u8] = self.bytes;
         let start = RECORD_HEADER + self.nkeys * KEY_SLOT;
         &bytes[start..start + self.payload_size]
     }
 
+    #[inline]
     pub(super) fn record(&self) -> Record<'r> {
         Record {
             hash: self.hash(),
@@ -96,6 +104,7 @@ pub(super) struct Access<'r, R> {
 }
 
 impl<'r, R: Region> Access<'r, R> {
+    #[inline]
     pub(super) fn new(region: &'r R, layout: &'r Layout) -> Self {
         let mut access = Self {
             region,
@@ -107,17 +116,20 @@ impl<'r, R: Region> Access<'r, R> {
         access
     }
 
+    #[inline]
     fn refresh(&mut self) {
         self.used = self.region.load_u64(CHUNK_USED) as usize;
         self.nrecords = self.region.load_u64(NRECORDS);
     }
 
+    #[inline]
     fn in_records(&self, byte: usize) -> bool {
         byte >= HEADER_SIZE && byte + self.layout.record_size <= self.used
     }
 
     /// The record at `offset`, which must lie among the records published
     /// so far and claim the table's record length.
+    #[inline]
     pub(super) fn locate(&mut self, offset: u32) -> Result<View<'r>> {
         let byte = offset as usize * 8;
         if !self.in_records(byte) {
@@ -138,6 +150,7 @@ impl<'r, R: Region> Access<'r, R> {
     }
 
     /// The published record at a byte offset that `locate` accepted.
+    #[inline]
     fn view(&self, byte: usize) -> View<'r> {
         // SAFETY: a located record is published and never written again,
         // and its bytes lie among the records, below the buckets.
@@ -150,11 +163,13 @@ impl<'r, R: Region> Access<'r, R> {
     }
 
     /// The byte offset of the bucket of a hash.
+    #[inline]
     fn bucket(&self, hash: u32) -> usize {
         self.layout.buckets_offset + (hash >> self.layout.bucket_shift) as usize * 4
     }
 
     /// The newest record of the bucket of a hash, 0 for none.
+    #[inline]
     pub(super) fn head(&self, hash: u32) -> u32 {
         self.region.load_u32(self.bucket(hash))
     }
@@ -188,6 +203,7 @@ impl<'r, R: Region> Access<'r, R> {
 
     /// Reserve room for up to `wanted` records: the byte offset of the
     /// first and how many fit, or `None` when none does.
+    #[inline]
     pub(super) fn reserve(&mut self, wanted: usize) -> Option<(usize, usize)> {
         let record_size = self.layout.record_size;
         loop {
@@ -212,6 +228,7 @@ impl<'r, R: Region> Access<'r, R> {
     }
 
     /// Write a reserved record; `payload` is `None` for zeros.
+    #[inline]
     pub(super) fn write(
         &self,
         byte: usize,
@@ -224,16 +241,18 @@ impl<'r, R: Region> Access<'r, R> {
         // SAFETY: the record was reserved by this operation and is not
         // published yet, so nothing else reads or writes its bytes.
         let bytes = unsafe { self.region.bytes_mut(byte, record_size) };
-        bytes[HASH..HASH + 4].copy_from_slice(&hash.to_ne_bytes());
-        bytes[NEXT..NEXT + 4].copy_from_slice(&0_u32.to_ne_bytes());
-        bytes[NULL_BITS..NULL_BITS + 4].copy_from_slice(&null_bits.to_ne_bytes());
-        bytes[LEN..LEN + 4].copy_from_slice(&((record_size / 8) as u32).to_ne_bytes());
-        let mut at = RECORD_HEADER;
-        for key in keys {
-            bytes[at..at + KEY_SLOT].copy_from_slice(&key.to_ne_bytes());
-            at += KEY_SLOT;
+        let (header, rest) = bytes.split_at_mut(RECORD_HEADER);
+        let mut fields = [0; RECORD_HEADER];
+        fields[HASH..HASH + 4].copy_from_slice(&hash.to_ne_bytes());
+        fields[NEXT..NEXT + 4].copy_from_slice(&0_u32.to_ne_bytes());
+        fields[NULL_BITS..NULL_BITS + 4].copy_from_slice(&null_bits.to_ne_bytes());
+        fields[LEN..LEN + 4].copy_from_slice(&((record_size / 8) as u32).to_ne_bytes());
+        header.copy_from_slice(&fields);
+        let (slots, rest) = rest.split_at_mut(self.layout.nkeys * KEY_SLOT);
+        for (slot, key) in slots.as_chunks_mut::<KEY_SLOT>().0.iter_mut().zip(keys) {
+            *slot = key.to_ne_bytes();
         }
-        let (area, padding) = bytes[at..].split_at_mut(self.layout.payload_size);
+        let (area, padding) = rest.split_at_mut(self.layout.payload_size);
         match payload {
             Some(payload) => area.copy_from_slice(payload),
             None => area.fill(0),
@@ -242,6 +261,7 @@ impl<'r, R: Region> Access<'r, R> {
     }
 
     /// Publish a written record as the newest of its bucket.
+    #[inline]
     pub(super) fn push(&self, offset: u32, byte: usize, hash: u32) {
         let bucket = self.bucket(hash);
         let mut head = self.region.load_u32(bucket);
@@ -255,6 +275,7 @@ impl<'r, R: Region> Access<'r, R> {
     }
 
     /// Count records published.
+    #[inline]
     pub(super) fn count(&mut self, added: usize) {
         self.region.fetch_add_u64(NRECORDS, added as u64);
         self.nrecords += added as u64;

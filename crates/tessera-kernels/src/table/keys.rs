@@ -33,6 +33,7 @@ pub trait KeySource {
 }
 
 /// Fill the slots of one word from a column, as [`KeySource::word`] asks.
+#[inline]
 pub fn normalize_word<C, V>(
     column: &C,
     index: usize,
@@ -79,6 +80,7 @@ pub(super) struct WordKeys {
 }
 
 impl WordKeys {
+    #[inline]
     pub(super) fn new() -> Self {
         Self {
             slots: [[0; 64]; MAX_KEYS],
@@ -87,6 +89,7 @@ impl WordKeys {
     }
 
     /// Load the `nkeys` keys of the selected rows of one word.
+    #[inline]
     pub(super) fn load<K: KeySource + ?Sized>(
         &mut self,
         keys: &K,
@@ -106,16 +109,19 @@ impl WordKeys {
     }
 
     /// The bits of the keys of row `bit` that are NULL.
+    #[inline]
     pub(super) fn null_bits(&self, bit: usize) -> u32 {
         self.null_bits[bit]
     }
 
     /// The `nkeys` slots of row `bit`, in key order.
+    #[inline]
     pub(super) fn keys(&self, bit: usize, nkeys: usize) -> impl Iterator<Item = i64> + '_ {
         self.slots[..nkeys].iter().map(move |slots| slots[bit])
     }
 
     /// Whether row `bit` has the null bits and keys of a record.
+    #[inline]
     pub(super) fn equal(&self, bit: usize, record: &View<'_>) -> bool {
         record.null_bits() == self.null_bits[bit]
             && record

@@ -13,7 +13,9 @@
 //!
 //! Offsets are validated against the header by the table before any call,
 //! so a violation here is a bug: the methods assert it instead of returning
-//! an error.
+//! an error. Every method is marked for inlining: the table's loops are
+//! generic and instantiated in the crate that calls them, where a plain
+//! method of this crate would stay a call per row.
 
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
@@ -79,12 +81,14 @@ impl RawRegion {
     /// for as long as the region is used, and during that time the bytes are
     /// accessed only through tables over this region, in one process or in
     /// several, each with a mapping of its own.
+    #[inline]
     pub(super) unsafe fn new(base: *mut u8, len: usize) -> Self {
         debug_assert!(base.addr().is_multiple_of(8));
         Self { base, len }
     }
 
     /// The address of `size` bytes at `offset`, both checked.
+    #[inline]
     fn at(&self, offset: usize, size: usize) -> *mut u8 {
         let end = offset.checked_add(size).expect("region offset overflows");
         assert!(end <= self.len, "region access past its end");
@@ -93,6 +97,7 @@ impl RawRegion {
     }
 
     /// The 32-bit atomic at `offset`, which must be a multiple of 4.
+    #[inline]
     fn atomic_u32(&self, offset: usize) -> &AtomicU32 {
         let address = self.at(offset, 4);
         debug_assert!(address.addr().is_multiple_of(4));
@@ -104,6 +109,7 @@ impl RawRegion {
     }
 
     /// The 64-bit atomic at `offset`, which must be a multiple of 8.
+    #[inline]
     fn atomic_u64(&self, offset: usize) -> &AtomicU64 {
         let address = self.at(offset, 8);
         debug_assert!(address.addr().is_multiple_of(8));
@@ -113,40 +119,49 @@ impl RawRegion {
 }
 
 impl Region for RawRegion {
+    #[inline]
     fn len(&self) -> usize {
         self.len
     }
 
+    #[inline]
     fn load_u32(&self, offset: usize) -> u32 {
         self.atomic_u32(offset).load(Ordering::Acquire)
     }
 
+    #[inline]
     fn store_u32(&self, offset: usize, value: u32) {
         self.atomic_u32(offset).store(value, Ordering::Release);
     }
 
+    #[inline]
     fn cas_u32(&self, offset: usize, current: u32, new: u32) -> Result<u32, u32> {
         self.atomic_u32(offset)
             .compare_exchange(current, new, Ordering::AcqRel, Ordering::Acquire)
     }
 
+    #[inline]
     fn load_u64(&self, offset: usize) -> u64 {
         self.atomic_u64(offset).load(Ordering::Acquire)
     }
 
+    #[inline]
     fn store_u64(&self, offset: usize, value: u64) {
         self.atomic_u64(offset).store(value, Ordering::Release);
     }
 
+    #[inline]
     fn cas_u64(&self, offset: usize, current: u64, new: u64) -> Result<u64, u64> {
         self.atomic_u64(offset)
             .compare_exchange(current, new, Ordering::AcqRel, Ordering::Acquire)
     }
 
+    #[inline]
     fn fetch_add_u64(&self, offset: usize, delta: u64) -> u64 {
         self.atomic_u64(offset).fetch_add(delta, Ordering::AcqRel)
     }
 
+    #[inline]
     unsafe fn bytes(&self, offset: usize, len: usize) -> &[u8] {
         let address = self.at(offset, len);
         // SAFETY: the range is in bounds, and the caller promises that nothing
@@ -154,6 +169,7 @@ impl Region for RawRegion {
         unsafe { core::slice::from_raw_parts(address, len) }
     }
 
+    #[inline]
     unsafe fn bytes_mut(&self, offset: usize, len: usize) -> &mut [u8] {
         let address = self.at(offset, len);
         // SAFETY: the range is in bounds, and the caller promises that nothing
