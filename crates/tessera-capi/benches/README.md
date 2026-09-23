@@ -17,6 +17,10 @@ There are five benchmark programs:
   for the aggregates: there is no int8 sum).
 - [cast_int32](cast_int32.rs) widens int4 values into int8 Datums over the
   reading cases.
+- [table_int32](table_int32.rs) builds the hash table of section 5 over
+  the reading cases as one int4 key per row: insertion into a fresh
+  region, probes that hit and probes that miss, and grouping's
+  find-or-insert, against a chained table with plain stores.
 
 Neither measures SQL latency or requires PostgreSQL. They measure PMU
 counters, not time: retired instructions, core cycles, mispredicted branches

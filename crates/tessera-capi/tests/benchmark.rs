@@ -36,6 +36,9 @@ mod reading;
 mod reading64;
 #[path = "../benches/support/mod.rs"]
 mod support;
+#[path = "../benches/support/tabling.rs"]
+#[allow(dead_code)]
+mod tabling;
 
 use anyhow::Result;
 use filtering::blocks as filter_blocks;

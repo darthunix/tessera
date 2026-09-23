@@ -57,3 +57,7 @@ harness = false
 [[bench]]
 name = "cast_int32"
 harness = false
+
+[[bench]]
+name = "table_int32"
+harness = false
