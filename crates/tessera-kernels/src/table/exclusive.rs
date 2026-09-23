@@ -83,14 +83,7 @@ pub(super) fn find_or_insert<R: Region, K: KeySource + ?Sized>(
                             break;
                         };
                         let offset = (byte / 8) as u32;
-                        let null_bits = word_keys.null_bits(bit);
-                        access.write(
-                            byte,
-                            hash,
-                            null_bits,
-                            word_keys.keys(bit, layout.nkeys),
-                            None,
-                        );
+                        access.write(byte, hash, &word_keys, bit, None);
                         access.push(offset, byte, hash);
                         access.count(1);
                         created |= 1 << bit;

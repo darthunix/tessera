@@ -76,8 +76,8 @@ pub(super) fn insert<R: Region, K: KeySource + ?Sized>(
             access.write(
                 byte,
                 hashes[row],
-                word_keys.null_bits(bit),
-                word_keys.keys(bit, layout.nkeys),
+                &word_keys,
+                bit,
                 payload.map(|payload| &payload[row * payload_size..(row + 1) * payload_size]),
             );
             access.push(offset, byte, hashes[row]);

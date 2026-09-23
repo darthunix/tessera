@@ -111,23 +111,23 @@ impl WordKeys {
     /// The bits of the keys of row `bit` that are NULL.
     #[inline]
     pub(super) fn null_bits(&self, bit: usize) -> u32 {
-        self.null_bits[bit]
+        self.null_bits[bit & 63]
     }
 
-    /// The `nkeys` slots of row `bit`, in key order.
-    #[inline]
-    pub(super) fn keys(&self, bit: usize, nkeys: usize) -> impl Iterator<Item = i64> + '_ {
-        self.slots[..nkeys].iter().map(move |slots| slots[bit])
+    /// Slot `key` of row `bit`.
+    #[inline(always)]
+    pub(super) fn key(&self, key: usize, bit: usize) -> i64 {
+        self.slots[key][bit & 63]
     }
 
     /// Whether row `bit` has the null bits and keys of a record.
     #[inline]
     pub(super) fn equal(&self, bit: usize, record: &View<'_>) -> bool {
-        record.null_bits() == self.null_bits[bit]
+        record.null_bits() == self.null_bits[bit & 63]
             && record
                 .keys()
                 .iter()
                 .zip(&self.slots)
-                .all(|(&key, slots)| key == slots[bit])
+                .all(|(&key, slots)| key == slots[bit & 63])
     }
 }
