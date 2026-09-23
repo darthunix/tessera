@@ -101,7 +101,7 @@ use header::{CHUNK_USED, Header, Layout, NRECORDS};
 pub use header::{
     FORMAT_VERSION, HEADER_SIZE, KeyKind, MAX_KEYS, TableConfig, VERSION_OFFSET, region_size,
 };
-pub use keys::{KeySource, normalize_word};
+pub use keys::{KeySource, KeyValue, normalize_word};
 use record::Access;
 pub use record::Record;
 use region::{RawRegion, Region};

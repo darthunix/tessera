@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 
 use anyhow::Result;
-use tessera_core::{ColumnView, RowMask, RowMaskView};
+use tessera_core::{ColumnReader, ColumnView, RowMask, RowMaskView};
 use tessera_kernels::int32::{self, NullKeys, hash_combine, murmurhash32};
 use tessera_kernels::table::{
     Cursor, FORMAT_VERSION, KeyKind, KeySource, MAX_KEYS, TableConfig, TableMut, normalize_word,
@@ -1056,5 +1056,96 @@ fn growing_a_table_whose_records_crowd_the_buckets_halves_them() -> Result<()> {
     assert_eq!(table.stats().buckets, 1024, "the floor stays");
     let (found, _) = probe_all(&table, &hashes, &keys[..])?;
     assert_eq!(found.len(), 3);
+    Ok(())
+}
+
+/// A xorshift generator for test values.
+fn random(state: &mut u64) -> u64 {
+    *state ^= *state >> 12;
+    *state ^= *state << 25;
+    *state ^= *state >> 27;
+    state.wrapping_mul(0x2545_F491_4F6C_DD1D)
+}
+
+/// A column that hides its storage, so that every word goes row by row.
+struct RowsOnly<C>(C);
+
+impl<C: ColumnReader> ColumnReader for RowsOnly<C> {
+    type Value = C::Value;
+
+    fn nrows(&self) -> usize {
+        self.0.nrows()
+    }
+
+    fn get(&self, row: usize) -> Result<Option<C::Value>> {
+        self.0.get(row)
+    }
+
+    fn word_values(
+        &self,
+        word_index: usize,
+        selected: u64,
+    ) -> Result<impl Iterator<Item = (usize, Option<C::Value>)> + '_> {
+        self.0.word_values(word_index, selected)
+    }
+}
+
+#[test]
+fn whole_words_normalize_like_rows() -> Result<()> {
+    let mut state = 0x1234_5678_9abc_def1;
+    for nrows in [64, 65, 130, 200] {
+        let values: Vec<i32> = (0..nrows).map(|_| random(&mut state) as i32).collect();
+        let mut non_nulls = all_rows(nrows);
+        for (index, word) in non_nulls.iter_mut().enumerate() {
+            *word &= random(&mut state) | 1 << (index % 64);
+        }
+        let dense = ColumnView::try_new(&values, Some(RowMaskView::try_new(nrows, &non_nulls)?))?;
+        let rows = RowsOnly(ColumnView::try_new(
+            &values,
+            Some(RowMaskView::try_new(nrows, &non_nulls)?),
+        )?);
+        for index in 0..nrows.div_ceil(64) {
+            let width = (nrows - index * 64).min(64);
+            let full = if width == 64 {
+                u64::MAX
+            } else {
+                (1 << width) - 1
+            };
+            for selected in [
+                full,
+                full & 0x5555_5555_5555_5555,
+                full & 0x8000_0000_0000_0001,
+            ] {
+                let (mut from_block, mut from_rows) = ([7; 64], [7; 64]);
+                let block_bits = normalize_word(&dense, index, selected, &mut from_block)?;
+                let row_bits = normalize_word(&rows, index, selected, &mut from_rows)?;
+                assert_eq!(block_bits, row_bits, "{nrows} rows, word {index}");
+                for bit in (0..64).filter(|bit| selected >> bit & 1 != 0) {
+                    assert_eq!(from_block[bit], from_rows[bit], "{nrows} rows, row {bit}");
+                    if row_bits >> bit & 1 == 0 {
+                        assert_eq!(from_block[bit], 0, "a NULL key is 0");
+                    }
+                }
+            }
+        }
+        // Both paths build tables that answer alike.
+        let hashes: Vec<u32> = values.iter().map(|&value| hash_i32(value)).collect();
+        let mut first = words_for(&ONE_INT4, nrows as u64)?;
+        let mut second = words_for(&ONE_INT4, nrows as u64)?;
+        let offsets = insert_all(
+            &TableMut::create_in(&mut first, &ONE_INT4, nrows as u64)?,
+            &hashes,
+            &[dense][..],
+            None,
+        )?;
+        let other = insert_all(
+            &TableMut::create_in(&mut second, &ONE_INT4, nrows as u64)?,
+            &hashes,
+            &[rows][..],
+            None,
+        )?;
+        assert_eq!(offsets, other);
+        assert_eq!(first, second, "the regions are byte for byte the same");
+    }
     Ok(())
 }

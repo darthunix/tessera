@@ -58,7 +58,7 @@ pub(super) fn find_or_insert<R: Region, K: KeySource + ?Sized>(
         inserted.as_view().nrows()
     );
     let mut access = Access::new(region, layout);
-    let mut word_keys = WordKeys::new();
+    let mut word_keys = WordKeys::new(layout.nkeys);
     let mut resolved = 0;
     let mut full = false;
     for index in 0..nrows.div_ceil(64) {
@@ -66,7 +66,7 @@ pub(super) fn find_or_insert<R: Region, K: KeySource + ?Sized>(
         let mut done = 0;
         let mut created = 0;
         if selected != 0 && !full {
-            word_keys.load(keys, layout.nkeys, index, selected)?;
+            word_keys.load(keys, index, selected)?;
             let mut bits = selected;
             while bits != 0 {
                 let bit = bits.trailing_zeros() as usize;

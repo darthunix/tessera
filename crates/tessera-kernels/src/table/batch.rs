@@ -53,14 +53,14 @@ pub(super) fn insert<R: Region, K: KeySource + ?Sized>(
         );
     }
     let mut access = Access::new(region, layout);
-    let mut word_keys = WordKeys::new();
+    let mut word_keys = WordKeys::new(layout.nkeys);
     let mut inserted = 0;
     for index in 0..nrows.div_ceil(64) {
         let selected = pending.as_view().word(index).unwrap();
         if selected == 0 {
             continue;
         }
-        word_keys.load(keys, layout.nkeys, index, selected)?;
+        word_keys.load(keys, index, selected)?;
         let wanted = selected.count_ones() as usize;
         let Some((start, count)) = access.reserve(wanted) else {
             break;
@@ -112,12 +112,12 @@ pub(super) fn probe<R: Region, K: KeySource + ?Sized>(
         found.as_view().nrows()
     );
     let mut access = Access::new(region, layout);
-    let mut word_keys = WordKeys::new();
+    let mut word_keys = WordKeys::new(layout.nkeys);
     for index in 0..nrows.div_ceil(64) {
         let selected = rows.word(index).unwrap();
         let mut hits = 0;
         if selected != 0 {
-            word_keys.load(keys, layout.nkeys, index, selected)?;
+            word_keys.load(keys, index, selected)?;
             let mut bits = selected;
             while bits != 0 {
                 let bit = bits.trailing_zeros() as usize;

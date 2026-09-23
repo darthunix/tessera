@@ -118,7 +118,13 @@ fn round_trip<K: tessera_kernels::table::KeySource + ?Sized>(
 
 #[test]
 fn datum_and_dense_keys_build_the_same_table() -> Result<()> {
-    for nrows in [1, 64, 130] {
+    // Miri interprets every row; the largest batch only adds time there.
+    let sizes: &[usize] = if cfg!(miri) {
+        &[1, 64, 65, 130]
+    } else {
+        &[1, 64, 65, 130, 1024]
+    };
+    for &nrows in sizes {
         let keys = Keys::new(nrows);
         for nulls in [NullKeys::Reject, NullKeys::Group] {
             let (hashes, valid) = keys.hashes(nulls)?;
@@ -606,6 +612,40 @@ fn the_writer_entry_points_round_trip() -> Result<()> {
         );
         assert_eq!(code, Code::InvalidArgument);
         drop(region);
+    }
+    Ok(())
+}
+
+#[test]
+fn datum_words_normalize_like_rows_under_partial_readiness() -> Result<()> {
+    use tessera_kernels::table::normalize_word;
+    for nrows in [64, 130] {
+        let keys = Keys::new(nrows);
+        let column = keys.column();
+        // Every row prepared except one in each word: those words go row
+        // by row, the fully prepared ones whole.
+        let mut prepared = keys.all_rows();
+        prepared[0] &= !(1 << 3);
+        let prepared_view = RowMaskView::try_new(nrows, &prepared)?;
+        // SAFETY: the buffers hold `nrows` initialized values and flags
+        // that outlive both readers.
+        let (whole, partial) = unsafe { (column.int32(None)?, column.int32(Some(prepared_view))?) };
+        for (index, &selected) in prepared.iter().enumerate() {
+            let (mut from_whole, mut from_partial) = ([7; 64], [7; 64]);
+            let whole_bits = normalize_word(&whole, index, selected, &mut from_whole)?;
+            let partial_bits = normalize_word(&partial, index, selected, &mut from_partial)?;
+            assert_eq!(whole_bits, partial_bits, "{nrows} rows, word {index}");
+            for bit in (0..64).filter(|bit| selected >> bit & 1 != 0) {
+                assert_eq!(from_whole[bit], from_partial[bit]);
+                let row = index * 64 + bit;
+                let expected = if keys.isnull[row] {
+                    0
+                } else {
+                    i64::from(keys.values[row])
+                };
+                assert_eq!(from_whole[bit], expected, "row {row}");
+            }
+        }
     }
     Ok(())
 }
