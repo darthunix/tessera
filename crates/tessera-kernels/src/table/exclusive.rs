@@ -76,8 +76,7 @@ pub(super) fn find_or_insert<R: Region, K: KeySource + ?Sized>(
                 let head = access.head(hash);
                 let found = access.find(head, hash, |record| word_keys.equal(bit, record))?;
                 offsets[row] = match found {
-                    Some(offset) => offset,
-                    None => {
+                    0 => {
                         let Some((byte, _)) = access.reserve(1) else {
                             full = true;
                             break;
@@ -89,6 +88,7 @@ pub(super) fn find_or_insert<R: Region, K: KeySource + ?Sized>(
                         created |= 1 << bit;
                         offset
                     }
+                    offset => offset,
                 };
                 done |= 1 << bit;
                 resolved += 1;

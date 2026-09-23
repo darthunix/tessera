@@ -71,15 +71,14 @@ pub(super) fn insert<R: Region, K: KeySource + ?Sized>(
             let bit = bits.trailing_zeros() as usize;
             bits &= bits - 1;
             let row = index * 64 + bit;
-            let byte = start + slot * layout.record_size;
+            let byte = start + slot * access.record_size();
             let offset = (byte / 8) as u32;
-            access.write(
-                byte,
-                hashes[row],
-                &word_keys,
-                bit,
-                payload.map(|payload| &payload[row * payload_size..(row + 1) * payload_size]),
-            );
+            // SAFETY: the payload was checked to hold `payload_size` bytes
+            // for each of the `nrows` rows, and `row` is below `nrows`.
+            let row_payload = payload.map(|payload| unsafe {
+                payload.get_unchecked(row * payload_size..(row + 1) * payload_size)
+            });
+            access.write(byte, hashes[row], &word_keys, bit, row_payload);
             access.push(offset, byte, hashes[row]);
             offsets[row] = offset;
             done |= 1 << bit;
@@ -126,9 +125,8 @@ pub(super) fn probe<R: Region, K: KeySource + ?Sized>(
                 let row = index * 64 + bit;
                 let hash = hashes[row];
                 let head = access.head(hash);
-                if let Some(offset) =
-                    access.find(head, hash, |record| word_keys.equal(bit, record))?
-                {
+                let offset = access.find(head, hash, |record| word_keys.equal(bit, record))?;
+                if offset != 0 {
                     matches[row] = offset;
                     hits |= 1 << bit;
                 }
@@ -167,8 +165,8 @@ pub(super) fn next_match<R: Region>(
             let after = access.find(record.next(), hash, |other| {
                 other.null_bits() == null_bits && other.keys() == keys
             })?;
-            if let Some(offset) = after {
-                offsets[row] = offset;
+            if after != 0 {
+                offsets[row] = after;
                 hits |= 1 << bit;
             }
         }

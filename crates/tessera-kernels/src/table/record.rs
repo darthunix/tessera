@@ -86,24 +86,42 @@ impl<'r> View<'r> {
 
 /// Record-level access during one operation, with the counters as read at
 /// its start.
+///
+/// The fields of the layout the loops need are copied in, not borrowed,
+/// so that they stay in registers across the row loops instead of being
+/// reloaded through a reference on every row.
 pub(super) struct Access<'r, R> {
     region: &'r R,
-    layout: &'r Layout,
+    buckets_offset: usize,
+    bucket_shift: u32,
+    record_size: usize,
+    payload_size: usize,
+    nkeys: usize,
     used: usize,
     nrecords: u64,
 }
 
 impl<'r, R: Region> Access<'r, R> {
     #[inline]
-    pub(super) fn new(region: &'r R, layout: &'r Layout) -> Self {
+    pub(super) fn new(region: &'r R, layout: &Layout) -> Self {
         let mut access = Self {
             region,
-            layout,
+            buckets_offset: layout.buckets_offset,
+            bucket_shift: layout.bucket_shift,
+            record_size: layout.record_size,
+            payload_size: layout.payload_size,
+            nkeys: layout.nkeys,
             used: 0,
             nrecords: 0,
         };
         access.refresh();
         access
+    }
+
+    /// Bytes of a record.
+    #[inline(always)]
+    pub(super) fn record_size(&self) -> usize {
+        self.record_size
     }
 
     #[inline]
@@ -114,7 +132,7 @@ impl<'r, R: Region> Access<'r, R> {
 
     #[inline]
     fn in_records(&self, byte: usize) -> bool {
-        byte >= HEADER_SIZE && byte + self.layout.record_size <= self.used
+        byte >= HEADER_SIZE && byte + self.record_size <= self.used
     }
 
     /// The record at `offset`, which must lie among the records published
@@ -133,7 +151,7 @@ impl<'r, R: Region> Access<'r, R> {
         }
         let view = self.view(byte);
         ensure!(
-            view.len() == self.layout.record_size,
+            view.len() == self.record_size,
             "table record offset {offset} does not start a record"
         );
         Ok(view)
@@ -142,10 +160,10 @@ impl<'r, R: Region> Access<'r, R> {
     /// The published record at a byte offset that `locate` accepted.
     #[inline(always)]
     fn view(&self, byte: usize) -> View<'r> {
-        let (nkeys, payload_size) = (self.layout.nkeys, self.layout.payload_size);
+        let (nkeys, payload_size) = (self.nkeys, self.payload_size);
         // SAFETY: a located record is published and never written again,
         // and its bytes lie among the records, below the buckets.
-        let bytes = unsafe { self.region.bytes(byte, self.layout.record_size) };
+        let bytes = unsafe { self.region.bytes(byte, self.record_size) };
         // SAFETY: the header checked that the record size is the 16 bytes
         // of the record header, 8 per key and the payload, rounded up, so
         // the three parts lie within `bytes`; the record starts at a
@@ -167,7 +185,7 @@ impl<'r, R: Region> Access<'r, R> {
     /// The byte offset of the bucket of a hash.
     #[inline]
     fn bucket(&self, hash: u32) -> usize {
-        self.layout.buckets_offset + (hash >> self.layout.bucket_shift) as usize * 4
+        self.buckets_offset + (hash >> self.bucket_shift) as usize * 4
     }
 
     /// The newest record of the bucket of a hash, 0 for none.
@@ -177,13 +195,16 @@ impl<'r, R: Region> Access<'r, R> {
     }
 
     /// Walk the chain from `offset` to the first record with `hash` that
-    /// `matches`; a chain longer than the record count is corrupt.
+    /// `matches` and return its offset, 0 for none (a record never lies at
+    /// 0, the header does); a chain longer than the record count is
+    /// corrupt.
+    #[inline(always)]
     pub(super) fn find(
         &mut self,
         mut offset: u32,
         hash: u32,
         mut matches: impl FnMut(&View<'r>) -> bool,
-    ) -> Result<Option<u32>> {
+    ) -> Result<u32> {
         let mut steps = 0;
         while offset != 0 {
             if steps == self.nrecords {
@@ -196,20 +217,20 @@ impl<'r, R: Region> Access<'r, R> {
             steps += 1;
             let view = self.locate(offset)?;
             if view.hash() == hash && matches(&view) {
-                return Ok(Some(offset));
+                return Ok(offset);
             }
             offset = view.next();
         }
-        Ok(None)
+        Ok(0)
     }
 
     /// Reserve room for up to `wanted` records: the byte offset of the
     /// first and how many fit, or `None` when none does.
     #[inline]
     pub(super) fn reserve(&mut self, wanted: usize) -> Option<(usize, usize)> {
-        let record_size = self.layout.record_size;
+        let record_size = self.record_size;
         loop {
-            let room = self.layout.buckets_offset.saturating_sub(self.used) / record_size;
+            let room = self.buckets_offset.saturating_sub(self.used) / record_size;
             let count = wanted.min(room);
             if count == 0 {
                 return None;
@@ -244,7 +265,7 @@ impl<'r, R: Region> Access<'r, R> {
         bit: usize,
         payload: Option<&[u8]>,
     ) {
-        let (record_size, nkeys) = (self.layout.record_size, self.layout.nkeys);
+        let (record_size, nkeys) = (self.record_size, self.nkeys);
         // SAFETY: the record was reserved by this operation and is not
         // published yet, so nothing else reads or writes its bytes.
         let bytes = unsafe { self.region.bytes_mut(byte, record_size) };
