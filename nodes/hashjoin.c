@@ -329,6 +329,8 @@ insert_batch(TessHashJoinState *state, TessBatch *batch)
 	int			count;
 
 	reserve_rows(state, nrows);
+	/* A shorter batch than the last: no bits past its rows may remain. */
+	memset(state->valid_bits, 0, sizeof(uint64) * nwords);
 	valid = (TessRowMask) {nrows, state->valid_bits};
 	pending = (TessRowMask) {nrows, state->pending_bits};
 	child_column(batch, state->inner_key, &batch->rows, TESS_COLUMN_FOR_FILTER,
@@ -473,12 +475,16 @@ static bool
 probe_batch(TessHashJoinState *state, TessBatch *batch)
 {
 	int			nrows = batch->rows.nrows;
+	int			nwords = tess_row_mask_word_count(nrows);
 	TessRowMask valid;
 	TessRowMask found;
 	TessDatumColumn keys;
 	TessTableKey key = {0};
 
 	reserve_rows(state, nrows);
+	/* A shorter batch than the last: no bits past its rows may remain. */
+	memset(state->valid_bits, 0, sizeof(uint64) * nwords);
+	memset(state->round_bits, 0, sizeof(uint64) * nwords);
 	valid = (TessRowMask) {nrows, state->valid_bits};
 	found = (TessRowMask) {nrows, state->round_bits};
 	child_column(batch, state->outer_key, &batch->rows, TESS_COLUMN_FOR_FILTER,

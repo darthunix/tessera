@@ -6,7 +6,8 @@ kinds in the bridge's node registry and its scan methods with PostgreSQL.
 The pack and heap scan nodes below are created by batch parents and need
 no hook; the filter node offers its path to base relations through the
 module's `set_rel_pathlist` hook, the aggregate node to the grouping stage
-through its `create_upper_paths` hook. It is loaded after the bridge; loading it without
+through its `create_upper_paths` hook, the hash join node to joins
+through its `set_join_pathlist` hook. It is loaded after the bridge; loading it without
 the bridge is an error. A
 running installation preloads both in every session (see
 [bridge.md](bridge.md)):
@@ -453,7 +454,7 @@ participants of a parallel plan.
 
 `test/sql/agg.sql` compares the results of every query with Tessera on and
 off through one function: the node above the native scan, above the
-filter and above pack over a filtered scan and over a join; the same
+filter, above pack over a filtered scan and above the hash join; the same
 aggregate twice, expressions above the aggregates, `HAVING` true and
 false; the four column aggregates with `count(*)` over a filtered table,
 the whole table, nothing and a column of NULLs; chains and a parameter
@@ -473,3 +474,88 @@ row-wise arguments, expressions above, `HAVING` true and false,
 participants without rows, the leader not taking part, a generic plan's
 parameter in an argument, the `Gather` rescanned in a join, and an
 aggregate the node leaves to the core's partial aggregate.
+
+## TessHashJoin
+
+`TessHashJoin` joins two batch children on one equality of integer keys,
+in place of the core's `Hash Join`: it builds the rows of the inner child
+into the hash table of [table.md](table.md) and probes it with the
+batches of the outer child, so that neither side is handed over one row
+at a time and a batch parent such as `TessAgg` reads the joined rows as
+batches. The table and the key hashes are the Rust kernels', which the
+node calls through the bridge's kernel registry (see
+[bridge.md](bridge.md)): the node module links no Rust, and without the
+`tessera_kernels` module there is no path.
+
+### Planning
+
+The module's `set_join_pathlist` hook offers the path for an inner join
+whose only clause is `int4eq`, `int8eq`, `int48eq` or `int84eq` between a
+column of each side, when the join's target is plain columns and at most
+64 of them are the inner side's. Both keys go into the table as 8-byte
+values and an int8 inside the int4 range hashes as the int4, so every
+combination of the two types uses one table. The children are batch
+paths over the sides' cheapest paths (`tess_batch_input_path`: a native
+scan, a batch path as it is, or pack over anything else). The hook is
+called for both orders of the sides, and as in the core the inner side is
+the one built, so the cost decides which side that is. The template is
+the core's hash join of the same inputs (`initial_cost_hashjoin` and
+`create_hashjoin_path`, not added), at nine tenths of its cost; its
+disabled count comes along, and like the core the hook offers nothing
+when hash joins are disabled. The node keeps the whole table in memory
+and does not split it into batches, so there is no path when the core
+would split the inner side, or when the node's own estimate of the table
+(a record of 32 bytes and a word per inner column, the columns' width,
+the buckets) exceeds `hash_mem`.
+
+The plan's scan tuple is the join's columns, the outer side's first, and
+both keys, which the join clause in `custom_exprs` refers to; the node's
+targets are columns of it (`TESS_LAYOUT_PROJECTED`). The plan data
+records each column's side and its column in that child's batches, the
+key's column and kind on each side, whether the inner side is unique and
+the planner's estimate of its rows.
+
+### Execution
+
+At its first execution the node derives both children's requests from
+its parent's: the outer columns asked for come from the outer batches,
+the inner ones are kept in the table, and each side gives its key first.
+It then reads every inner batch, hashes the key with the NULL policy of
+a join (a NULL key never matches) and inserts the rows. A record's
+payload is a word of the NULL bits of the kept inner columns and a Datum
+per column; a by-reference value is copied into the node's memory, where
+it lives as long as the table. The table starts at the planner's
+estimate of the inner rows; when it is full, `repalloc` doubles the
+region, the table rebuilds its buckets and the rows left pending go in.
+An empty inner side ends the scan without reading the outer child.
+
+Each outer batch is then hashed and probed. The rows that found a record
+are a round: the node publishes its own batch with the outer batch's
+physical rows and the round's rows selected. An outer column of that
+batch is the outer batch's own column, passed through without a copy; an
+inner column is gathered from the round's records with
+`tess_table_gather` when a parent first asks for it, the NULL bits once
+per round. A key held by several inner rows has as many records, and
+`tess_table_next_match` gives the next round from the node's own copy of
+the round's rows, since a parent may narrow the published mask; a unique
+inner side has no second round. The outer batch stays active until its
+last round is finished. A row-wise parent is served from the round's
+columns row by row. The node scans forward only: a scrollable cursor
+gets a `Material` above it. A rescan builds the table again only when
+the inner child has changed parameters, as the core's hash join decides,
+and otherwise probes the same table with the rescanned outer child.
+
+### Tests
+
+`test/sql/join.sql` compares the rows of every join with Tessera on and
+off through one function: counts and sums under `TessAgg`, which reads
+the join's batches without pack; rows to the client with columns of both
+sides, NULLs and text of the inner side; the keys as targets and no
+target at all; int8 keys past the int4 range and an int4 key against an
+int8 one both ways; three inner rows per key, duplicates on both sides
+and NULL keys on both; a side of fewer than 64 rows, an empty side on
+either side, a join over a join; an inner side much larger than the
+planner's estimate, which makes the table grow; a top-N sort and a limit
+above the node, and a scrollable cursor through `Material`. It also shows
+the core's plan without the kernels module, for a left join, a second
+join clause, a text key, hash joins disabled and the switch off.

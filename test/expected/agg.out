@@ -551,21 +551,18 @@ SELECT sum(a) FROM agg_wide WHERE a % 3 = 0;
 (17 rows)
 
 DROP TABLE agg_wide;
--- A join below: pack turns its rows into batches.
+-- A join below: the hash join publishes batches, no pack between.
 EXPLAIN (COSTS OFF)
 SELECT count(*) FROM agg_t AS x JOIN agg_t AS y ON x.b = y.b WHERE x.a > 295;
-                             QUERY PLAN                              
----------------------------------------------------------------------
+                       QUERY PLAN                        
+---------------------------------------------------------
  Custom Scan (TessAgg)
-   ->  Custom Scan (TessPack)
-         ->  Hash Join
-               Hash Cond: (y.b = x.b)
-               ->  Seq Scan on agg_t y
-               ->  Hash
-                     ->  Custom Scan (TessFilter) on agg_t x
-                           Batch Filter: (x.a > 295)
-                           ->  Custom Scan (TessHeapScan) on agg_t x
-(9 rows)
+   ->  Custom Scan (TessHashJoin)
+         ->  Custom Scan (TessHeapScan) on agg_t y
+         ->  Custom Scan (TessFilter) on agg_t x
+               Batch Filter: (x.a > 295)
+               ->  Custom Scan (TessHeapScan) on agg_t x
+(6 rows)
 
 SELECT agg_same($$SELECT count(*) FROM agg_t AS x JOIN agg_t AS y ON x.b = y.b WHERE x.a > 295$$);
  agg_same 

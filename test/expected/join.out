@@ -1,0 +1,344 @@
+CREATE EXTENSION tessera;
+LOAD 'tessera_nodes';
+LOAD 'tessera_limit';
+-- The rows of a query with the batch nodes and without them, sorted.
+CREATE FUNCTION join_same(query text) RETURNS text
+LANGUAGE plpgsql AS $$
+DECLARE
+    with_tessera text[];
+    without_tessera text[];
+    wrapped text := format('SELECT array_agg(q::text ORDER BY q::text) FROM (%s) AS q', query);
+BEGIN
+    PERFORM set_config('tessera.enable', 'on', true);
+    EXECUTE wrapped INTO with_tessera;
+    PERFORM set_config('tessera.enable', 'off', true);
+    EXECUTE wrapped INTO without_tessera;
+    IF with_tessera IS DISTINCT FROM without_tessera THEN
+        RETURN format('MISMATCH on %s off %s', with_tessera, without_tessera);
+    END IF;
+    RETURN coalesce(array_length(with_tessera, 1), 0) || ' rows, hash ' ||
+           md5(coalesce(with_tessera::text, ''));
+END $$;
+-- A dimension with a unique key, int8 copies of it and values past the
+-- int4 range; a fact table whose keys repeat, miss and are NULL; a table
+-- with three rows per key and NULL keys; a small one and an empty one.
+CREATE TABLE jd (id int PRIMARY KEY, id8 bigint, big bigint, label text, n int);
+INSERT INTO jd
+SELECT g, g, g::bigint << 33, 'd' || g, CASE WHEN g % 5 = 0 THEN NULL ELSE g * 10 END
+FROM generate_series(1, 300) AS g;
+CREATE TABLE jf (fk int, fk8 bigint, fk_big bigint, v int, note text);
+INSERT INTO jf
+SELECT fk, fk, fk::bigint << 33, g, 'f' || g
+FROM generate_series(1, 1000) AS g,
+     LATERAL (SELECT CASE WHEN g % 9 = 0 THEN NULL ELSE (g * 37) % 350 + 1 END AS fk) AS key;
+CREATE TABLE jdup (k int, w int, t text);
+INSERT INTO jdup
+SELECT CASE WHEN g % 13 = 0 THEN NULL ELSE g % 50 + 1 END, g, 't' || g
+FROM generate_series(1, 150) AS g;
+CREATE TABLE jsmall (k int, s text);
+INSERT INTO jsmall SELECT g * 7, 's' || g FROM generate_series(1, 10) AS g;
+CREATE TABLE jempty (k int, e text);
+ANALYZE jd, jf, jdup, jsmall, jempty;
+-- The core's merge and nested-loop joins stay out of the comparisons.
+SET enable_mergejoin = off;
+SET enable_nestloop = off;
+-- Without the kernels there is no path.
+EXPLAIN (COSTS OFF) SELECT count(*) FROM jf JOIN jd ON jf.fk = jd.id;
+             QUERY PLAN             
+------------------------------------
+ Aggregate
+   ->  Hash Join
+         Hash Cond: (jf.fk = jd.id)
+         ->  Seq Scan on jf
+         ->  Hash
+               ->  Seq Scan on jd
+(6 rows)
+
+LOAD 'tessera_kernels';
+-- An aggregate reads the join's batches, with no pack between them.
+EXPLAIN (COSTS OFF) SELECT count(*) FROM jf JOIN jd ON jf.fk = jd.id;
+                  QUERY PLAN                  
+----------------------------------------------
+ Custom Scan (TessAgg)
+   ->  Custom Scan (TessHashJoin)
+         ->  Custom Scan (TessHeapScan) on jf
+         ->  Custom Scan (TessHeapScan) on jd
+(4 rows)
+
+SELECT join_same($$SELECT count(*) FROM jf JOIN jd ON jf.fk = jd.id$$);
+                   join_same                   
+-----------------------------------------------
+ 1 rows, hash 3b62d492c2af12110ff3fef1da9ba5ec
+(1 row)
+
+SELECT join_same($$SELECT sum(jd.n), count(jd.n), sum(jf.v) FROM jf JOIN jd ON jf.fk = jd.id$$);
+                   join_same                   
+-----------------------------------------------
+ 1 rows, hash d65d82d5856c921eb54f54bf6579bacc
+(1 row)
+
+-- Rows to the client: columns of both sides, NULLs and text of the inner.
+EXPLAIN (COSTS OFF) SELECT jf.v, jf.note, jd.label, jd.n FROM jf JOIN jd ON jf.fk = jd.id;
+               QUERY PLAN               
+----------------------------------------
+ Custom Scan (TessHashJoin)
+   ->  Custom Scan (TessHeapScan) on jf
+   ->  Custom Scan (TessHeapScan) on jd
+(3 rows)
+
+SELECT join_same($$SELECT jf.v, jf.note, jd.label, jd.n FROM jf JOIN jd ON jf.fk = jd.id$$);
+                    join_same                    
+-------------------------------------------------
+ 764 rows, hash 59bc10a7bdf7e4cb9dab73b2ac109062
+(1 row)
+
+-- The keys themselves as targets, and no target at all.
+SELECT join_same($$SELECT jf.fk, jd.id FROM jf JOIN jd ON jf.fk = jd.id$$);
+                    join_same                    
+-------------------------------------------------
+ 764 rows, hash 2059b3af8be8870d36bc4bc9a13e6873
+(1 row)
+
+SELECT join_same($$SELECT 1 FROM jf JOIN jd ON jf.fk = jd.id$$);
+                    join_same                    
+-------------------------------------------------
+ 764 rows, hash 019a5cb3bb680dfaa6e7cccdd1f9e68b
+(1 row)
+
+-- int8 keys past the int4 range; an int4 key against an int8 one, both ways.
+EXPLAIN (COSTS OFF) SELECT count(*) FROM jf JOIN jd ON jf.fk_big = jd.big;
+                  QUERY PLAN                  
+----------------------------------------------
+ Custom Scan (TessAgg)
+   ->  Custom Scan (TessHashJoin)
+         ->  Custom Scan (TessHeapScan) on jf
+         ->  Custom Scan (TessHeapScan) on jd
+(4 rows)
+
+SELECT join_same($$SELECT jf.v, jd.big FROM jf JOIN jd ON jf.fk_big = jd.big$$);
+                    join_same                    
+-------------------------------------------------
+ 764 rows, hash 3b23e44cbeb7b84d6ec12c67d7076ed0
+(1 row)
+
+SELECT join_same($$SELECT jf.v, jd.id8 FROM jf JOIN jd ON jf.fk = jd.id8$$);
+                    join_same                    
+-------------------------------------------------
+ 764 rows, hash fa1d4a536c417b036359eca4258d4695
+(1 row)
+
+SELECT join_same($$SELECT jf.fk8, jd.label FROM jf JOIN jd ON jf.fk8 = jd.id$$);
+                    join_same                    
+-------------------------------------------------
+ 764 rows, hash ccac6507c37faeb660935c9774c6cc3e
+(1 row)
+
+-- Three records per key: rounds; duplicates on both sides; NULL keys.
+EXPLAIN (COSTS OFF) SELECT jf.v, jdup.w FROM jf JOIN jdup ON jf.fk = jdup.k;
+                QUERY PLAN                
+------------------------------------------
+ Custom Scan (TessHashJoin)
+   ->  Custom Scan (TessHeapScan) on jf
+   ->  Custom Scan (TessHeapScan) on jdup
+(3 rows)
+
+SELECT join_same($$SELECT jf.v, jdup.w, jdup.t FROM jf JOIN jdup ON jf.fk = jdup.k$$);
+                    join_same                    
+-------------------------------------------------
+ 357 rows, hash af55769873910776b0ab78fd22818ecd
+(1 row)
+
+SELECT join_same($$SELECT count(*), sum(jdup.w) FROM jf JOIN jdup ON jf.fk = jdup.k$$);
+                   join_same                   
+-----------------------------------------------
+ 1 rows, hash e3a2f24ad2298151dccce0abf4e44f73
+(1 row)
+
+SELECT join_same($$SELECT a.w, b.w FROM jdup a JOIN jdup b ON a.k = b.k$$);
+                    join_same                    
+-------------------------------------------------
+ 395 rows, hash 6b85d67af725d71d2c37fc3acc8aa2ef
+(1 row)
+
+-- A side of fewer than 64 rows, an empty side, a join over a join.
+SELECT join_same($$SELECT jsmall.s, jd.label FROM jsmall JOIN jd ON jsmall.k = jd.id$$);
+                   join_same                    
+------------------------------------------------
+ 10 rows, hash 7b8698154b9a09216d0be4a374dd609a
+(1 row)
+
+SELECT join_same($$SELECT jf.v, jempty.e FROM jf JOIN jempty ON jf.fk = jempty.k$$);
+                   join_same                   
+-----------------------------------------------
+ 0 rows, hash d41d8cd98f00b204e9800998ecf8427e
+(1 row)
+
+SELECT join_same($$SELECT jempty.e, jd.label FROM jempty JOIN jd ON jempty.k = jd.id$$);
+                   join_same                   
+-----------------------------------------------
+ 0 rows, hash d41d8cd98f00b204e9800998ecf8427e
+(1 row)
+
+EXPLAIN (COSTS OFF)
+SELECT count(*) FROM jf JOIN jd ON jf.fk = jd.id JOIN jdup ON jd.id = jdup.k;
+                      QUERY PLAN                      
+------------------------------------------------------
+ Custom Scan (TessAgg)
+   ->  Custom Scan (TessHashJoin)
+         ->  Custom Scan (TessHeapScan) on jf
+         ->  Custom Scan (TessHashJoin)
+               ->  Custom Scan (TessHeapScan) on jdup
+               ->  Custom Scan (TessHeapScan) on jd
+(6 rows)
+
+SELECT join_same($$SELECT jf.v, jd.label, jdup.w FROM jf JOIN jd ON jf.fk = jd.id JOIN jdup ON jd.id = jdup.k$$);
+                    join_same                    
+-------------------------------------------------
+ 357 rows, hash a0ab62388283a8ae0d21b2ffe91e22c2
+(1 row)
+
+-- A build side larger than the planner thinks: the table grows.
+CREATE TABLE jgrow (k int, g int);
+ANALYZE jgrow;
+INSERT INTO jgrow SELECT g % 400, g FROM generate_series(1, 20000) AS g;
+SELECT join_same($$SELECT count(*), sum(jgrow.g) FROM jsmall JOIN jgrow ON jsmall.k = jgrow.k$$);
+                   join_same                   
+-----------------------------------------------
+ 1 rows, hash 2da6524d5cd5cadf6d3558750b76cc3f
+(1 row)
+
+SELECT join_same($$SELECT count(*), sum(jgrow.g) FROM jd JOIN jgrow ON jd.id = jgrow.k$$);
+                   join_same                   
+-----------------------------------------------
+ 1 rows, hash 25072202dd6d62eae6bf836326a9bff9
+(1 row)
+
+-- Row-wise parents: a sort, a limit, a scrollable cursor.
+EXPLAIN (COSTS OFF)
+SELECT jf.v, jd.label FROM jf JOIN jd ON jf.fk = jd.id ORDER BY jf.v DESC LIMIT 5;
+                        QUERY PLAN                        
+----------------------------------------------------------
+ Custom Scan (TessLimit)
+   ->  Custom Scan (TessPack)
+         ->  Sort
+               Sort Key: jf.v DESC
+               ->  Custom Scan (TessHashJoin)
+                     ->  Custom Scan (TessHeapScan) on jf
+                     ->  Custom Scan (TessHeapScan) on jd
+(7 rows)
+
+SELECT jf.v, jd.label FROM jf JOIN jd ON jf.fk = jd.id ORDER BY jf.v DESC LIMIT 5;
+  v   | label 
+------+-------
+ 1000 | d251
+  998 | d177
+  997 | d140
+  996 | d103
+  995 | d66
+(5 rows)
+
+SELECT join_same($$SELECT jf.v, jd.label FROM jf JOIN jd ON jf.fk = jd.id LIMIT 1000$$);
+                    join_same                    
+-------------------------------------------------
+ 764 rows, hash 502cdcf2660012b6fa7901734864d9a6
+(1 row)
+
+-- A scrollable cursor puts Material above the node, which scans forward only.
+EXPLAIN (COSTS OFF) DECLARE c SCROLL CURSOR FOR
+SELECT jf.v, jd.label FROM jf JOIN jd ON jf.fk = jd.id;
+                  QUERY PLAN                  
+----------------------------------------------
+ Materialize
+   ->  Custom Scan (TessHashJoin)
+         ->  Custom Scan (TessHeapScan) on jf
+         ->  Custom Scan (TessHeapScan) on jd
+(4 rows)
+
+BEGIN;
+DECLARE c SCROLL CURSOR FOR
+SELECT jf.v, jd.label FROM jf JOIN jd ON jf.fk = jd.id;
+FETCH 3 FROM c;
+ v | label 
+---+-------
+ 1 | d38
+ 2 | d75
+ 3 | d112
+(3 rows)
+
+FETCH BACKWARD 2 FROM c;
+ v | label 
+---+-------
+ 2 | d75
+ 1 | d38
+(2 rows)
+
+COMMIT;
+-- No path: another join type, a second clause, another key type, the
+-- core's hash join disabled, the batch nodes off.
+EXPLAIN (COSTS OFF) SELECT count(jd.id) FROM jf LEFT JOIN jd ON jf.fk = jd.id;
+                QUERY PLAN                
+------------------------------------------
+ Custom Scan (TessAgg)
+   ->  Custom Scan (TessPack)
+         ->  Hash Left Join
+               Hash Cond: (jf.fk = jd.id)
+               ->  Seq Scan on jf
+               ->  Hash
+                     ->  Seq Scan on jd
+(7 rows)
+
+EXPLAIN (COSTS OFF) SELECT count(*) FROM jf JOIN jd ON jf.fk = jd.id AND jf.v > jd.n;
+                QUERY PLAN                
+------------------------------------------
+ Custom Scan (TessAgg)
+   ->  Custom Scan (TessPack)
+         ->  Hash Join
+               Hash Cond: (jf.fk = jd.id)
+               Join Filter: (jf.v > jd.n)
+               ->  Seq Scan on jf
+               ->  Hash
+                     ->  Seq Scan on jd
+(8 rows)
+
+EXPLAIN (COSTS OFF) SELECT count(*) FROM jf JOIN jd ON jf.note = jd.label;
+                  QUERY PLAN                   
+-----------------------------------------------
+ Custom Scan (TessAgg)
+   ->  Custom Scan (TessPack)
+         ->  Hash Join
+               Hash Cond: (jf.note = jd.label)
+               ->  Seq Scan on jf
+               ->  Hash
+                     ->  Seq Scan on jd
+(7 rows)
+
+SET enable_hashjoin = off;
+EXPLAIN (COSTS OFF) SELECT count(*) FROM jf JOIN jd ON jf.fk = jd.id;
+                      QUERY PLAN                       
+-------------------------------------------------------
+ Custom Scan (TessAgg)
+   ->  Custom Scan (TessPack)
+         ->  Nested Loop
+               Disabled: true
+               ->  Seq Scan on jf
+               ->  Index Only Scan using jd_pkey on jd
+                     Index Cond: (id = jf.fk)
+(7 rows)
+
+RESET enable_hashjoin;
+SET tessera.enable = off;
+EXPLAIN (COSTS OFF) SELECT count(*) FROM jf JOIN jd ON jf.fk = jd.id;
+             QUERY PLAN             
+------------------------------------
+ Aggregate
+   ->  Hash Join
+         Hash Cond: (jf.fk = jd.id)
+         ->  Seq Scan on jf
+         ->  Hash
+               ->  Seq Scan on jd
+(6 rows)
+
+RESET tessera.enable;
+DROP TABLE jd, jf, jdup, jsmall, jempty, jgrow;
+DROP FUNCTION join_same(text);
+DROP EXTENSION tessera;

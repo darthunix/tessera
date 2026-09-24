@@ -15,7 +15,8 @@ PGDLLEXPORT void _PG_init(void);
  * scan nodes are created by batch parents and need no hook; the filter
  * node offers its path to base relations through the set_rel_pathlist
  * hook, the aggregate node to the grouping stage through the
- * create_upper_paths hook.
+ * create_upper_paths hook, the hash join node to joins through the
+ * set_join_pathlist hook.
  */
 void
 _PG_init(void)
@@ -35,4 +36,5 @@ _PG_init(void)
 	tess_agg_planner_init();
 	RegisterCustomScanMethods(&tess_hash_join_scan_methods);
 	api->nodes->add(&tess_hash_join_node);
+	tess_hash_join_planner_init();
 }

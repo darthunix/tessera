@@ -151,7 +151,7 @@ EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT sum(a) FROM agg_wide WHERE a % 3 = 0;
 DROP TABLE agg_wide;
 
--- A join below: pack turns its rows into batches.
+-- A join below: the hash join publishes batches, no pack between.
 EXPLAIN (COSTS OFF)
 SELECT count(*) FROM agg_t AS x JOIN agg_t AS y ON x.b = y.b WHERE x.a > 295;
 SELECT agg_same($$SELECT count(*) FROM agg_t AS x JOIN agg_t AS y ON x.b = y.b WHERE x.a > 295$$);

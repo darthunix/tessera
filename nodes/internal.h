@@ -30,5 +30,6 @@ extern void tess_agg_planner_init(void);
 
 extern const TessNode tess_hash_join_node;
 extern const CustomScanMethods tess_hash_join_scan_methods;
+extern void tess_hash_join_planner_init(void);
 
 #endif							/* TESSERA_NODES_INTERNAL_H */
