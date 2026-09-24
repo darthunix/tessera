@@ -140,6 +140,42 @@ FETCH 3 FROM c;
 FETCH BACKWARD 2 FROM c;
 COMMIT;
 
+-- Under a Gather: the outer side divided among the participants, the
+-- inner side built by each. The counters are the participants' totals.
+CREATE FUNCTION join_property(query text, name text) RETURNS text
+LANGUAGE plpgsql AS $$
+DECLARE
+    plan jsonb;
+BEGIN
+    EXECUTE format('EXPLAIN (ANALYZE, FORMAT JSON, TIMING OFF, SUMMARY OFF, BUFFERS OFF, COSTS OFF) %s', query)
+        INTO plan;
+    RETURN jsonb_path_query_first(plan,
+        format('$[0]."Plan".** ? (@."Custom Plan Provider" == "TessHashJoin").%I', name)::jsonpath)::text;
+END $$;
+CREATE TABLE jbig AS SELECT g % 350 + 1 AS fk, g AS v FROM generate_series(1, 20000) AS g;
+ANALYZE jbig;
+SET max_parallel_workers_per_gather = 2;
+SET parallel_setup_cost = 0;
+SET parallel_tuple_cost = 0;
+SET min_parallel_table_scan_size = 0;
+-- The core's shared table divides the build among the participants and
+-- costs less than a table in each; the node's shared table comes later.
+SET enable_parallel_hash = off;
+EXPLAIN (COSTS OFF) SELECT count(*), sum(jd.n) FROM jbig JOIN jd ON jbig.fk = jd.id;
+SELECT join_same($$SELECT count(*), sum(jd.n), sum(jbig.v) FROM jbig JOIN jd ON jbig.fk = jd.id$$);
+SELECT join_same($$SELECT jbig.v, jd.label FROM jbig JOIN jd ON jbig.fk = jd.id$$);
+SELECT join_same($$SELECT count(*), sum(jdup.w) FROM jbig JOIN jdup ON jbig.fk = jdup.k$$);
+SELECT join_property($$SELECT count(*) FROM jbig JOIN jd ON jbig.fk = jd.id$$, 'Probe Rows') AS probe_rows,
+       join_property($$SELECT count(*) FROM jbig JOIN jd ON jbig.fk = jd.id$$, 'Matches') AS matches;
+SET parallel_leader_participation = off;
+SELECT join_same($$SELECT count(*), sum(jd.n), sum(jbig.v) FROM jbig JOIN jd ON jbig.fk = jd.id$$);
+RESET parallel_leader_participation;
+RESET max_parallel_workers_per_gather;
+RESET parallel_setup_cost;
+RESET parallel_tuple_cost;
+RESET min_parallel_table_scan_size;
+RESET enable_parallel_hash;
+
 -- No path: another join type, a second clause, another key type, the
 -- core's hash join disabled, the batch nodes off.
 EXPLAIN (COSTS OFF) SELECT count(jd.id) FROM jf LEFT JOIN jd ON jf.fk = jd.id;
@@ -152,7 +188,8 @@ SET tessera.enable = off;
 EXPLAIN (COSTS OFF) SELECT count(*) FROM jf JOIN jd ON jf.fk = jd.id;
 RESET tessera.enable;
 
-DROP TABLE jd, jf, jdup, jsmall, jempty, jgrow;
+DROP TABLE jd, jf, jdup, jsmall, jempty, jgrow, jbig;
+DROP FUNCTION join_property(text, text);
 DROP FUNCTION join_explain(text);
 DROP FUNCTION join_many();
 DROP FUNCTION join_same(text);

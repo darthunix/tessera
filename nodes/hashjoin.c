@@ -1,5 +1,6 @@
 #include "postgres.h"
 
+#include "access/parallel.h"
 #include "commands/explain.h"
 #include "commands/explain_format.h"
 #include "executor/executor.h"
@@ -8,6 +9,7 @@
 #include "utils/datum.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
+#include "storage/shm_toc.h"
 #include "utils/ruleutils.h"
 
 #include "tessera/kernel_ops.h"
@@ -32,6 +34,22 @@
 #define JOIN_MAX_PAYLOAD 64
 /* Rows of the buffers before the first batch shows its size. */
 #define JOIN_INITIAL_ROWS 64
+
+/* The counters every participant of a parallel plan shares. */
+enum
+{
+	JOIN_BUILDS,
+	JOIN_BUILD_ROWS,
+	/* Summed over the builds; EXPLAIN shows the mean. */
+	JOIN_BUCKETS,
+	JOIN_GROWS,
+	JOIN_PROBE_ROWS,
+	JOIN_MATCHES,
+	/* The participant's peak bytes, and what of them exceeded hash_mem. */
+	JOIN_MEMORY,
+	JOIN_OVERRUN,
+	JOIN_NCOUNTERS
+};
 
 /* Which child a column of the scan tuple comes from. */
 typedef enum JoinSide
@@ -123,20 +141,14 @@ typedef struct TessHashJoinState
 	/* Written by a kernel on failure only. */
 	TessStatus	status;
 
-	uint64		build_batches;
-	/* The rows of the current table, and of every table built. */
+	/* The rows of the current table. */
 	uint64		build_rows;
-	uint64		build_rows_total;
-	uint64		probe_batches;
-	uint64		probe_rows;
-	uint64		matches;
-	uint64		rounds;
-	uint64		builds;
-	uint64		grows;
-	/* The bucket count of the last table built. */
-	uint64		buckets;
+	/* This participant's counters; the memory ones are set when read. */
+	uint64		counters[JOIN_NCOUNTERS];
 	/* The most memory the table and the copies took, in bytes. */
 	Size		peak_memory;
+	/* The counters of every participant, in a parallel plan. */
+	TessSharedStats *stats;
 } TessHashJoinState;
 
 static const CustomExecMethods join_exec_methods;
@@ -277,7 +289,7 @@ grow_table(TessHashJoinState *state)
 	state->region_len = len * 2;
 	check(state, state->kernels->table_grow(state->region, state->region_len,
 											&state->status));
-	state->grows++;
+	state->counters[JOIN_GROWS]++;
 	note_memory(state);
 }
 
@@ -364,7 +376,7 @@ insert_batch(TessHashJoinState *state, TessBatch *batch)
 		grow_table(state);
 	}
 	state->build_rows += count;
-	state->build_rows_total += count;
+	state->counters[JOIN_BUILD_ROWS] += count;
 	note_memory(state);
 }
 
@@ -380,7 +392,6 @@ build_table(TessHashJoinState *state)
 
 		if (batch == NULL)
 			break;
-		state->build_batches++;
 		if (tess_row_mask_count(&batch->rows) > 0)
 			insert_batch(state, batch);
 		tess_input_finish(state->inner_input);
@@ -392,9 +403,9 @@ build_table(TessHashJoinState *state)
 		check(state, state->kernels->table_stats(state->region,
 												 state->region_len, &stats,
 												 &state->status));
-		state->buckets = stats.buckets;
+		state->counters[JOIN_BUCKETS] += stats.buckets;
 	}
-	state->builds++;
+	state->counters[JOIN_BUILDS]++;
 	state->built = true;
 }
 
@@ -480,8 +491,7 @@ start_round(TessHashJoinState *state)
 	state->batch.rows.bits = state->published_bits;
 	state->nulls_gathered = false;
 	memset(state->gathered, 0, sizeof(bool) * Max(state->npayload, 1));
-	state->matches += tess_row_mask_count(&round);
-	state->rounds++;
+	state->counters[JOIN_MATCHES] += tess_row_mask_count(&round);
 }
 
 /*
@@ -558,8 +568,7 @@ next_round(TessHashJoinState *state)
 		batch = tess_input_next(state->outer_input);
 		if (batch == NULL)
 			return false;
-		state->probe_batches++;
-		state->probe_rows += tess_row_mask_count(&batch->rows);
+		state->counters[JOIN_PROBE_ROWS] += tess_row_mask_count(&batch->rows);
 		if (!probe_batch(state, batch))
 		{
 			tess_input_finish(state->outer_input);
@@ -828,6 +837,8 @@ join_end(CustomScanState *css)
 {
 	TessHashJoinState *state = (TessHashJoinState *) css;
 
+	if (state->stats != NULL)
+		tess_shared_stats_end(state->stats);
 	tess_output_end(state->output);
 	ExecEndNode(state->outer);
 	ExecEndNode(state->inner);
@@ -869,11 +880,24 @@ join_rescan(CustomScanState *css)
 	tess_input_rescan(state->outer_input);
 }
 
+/* This participant's counters, the memory ones as of now. */
+static void
+join_counters(TessHashJoinState *state, uint64 *values)
+{
+	Size		limit = get_hash_memory_limit();
+
+	memcpy(values, state->counters, sizeof(state->counters));
+	values[JOIN_MEMORY] = state->peak_memory;
+	values[JOIN_OVERRUN] = state->peak_memory > limit ?
+		state->peak_memory - limit : 0;
+}
+
 /*
- * The join clause; with ANALYZE, the table and the rows through it. The
- * memory is the most the table and the copies of inner values took, and
- * Overrun what of it exceeded hash_mem: the node keeps the whole inner
- * side in memory rather than spilling it.
+ * The join clause; with ANALYZE, the table and the rows through it, the
+ * totals of every participant in a parallel plan, each of which builds a
+ * table of its own. The memory is the most the tables and the copies of
+ * inner values took, and Overrun what of it exceeded hash_mem: the node
+ * keeps the whole inner side in memory rather than spilling it.
  */
 static void
 join_explain(CustomScanState *css, List *ancestors, ExplainState *es)
@@ -882,7 +906,8 @@ join_explain(CustomScanState *css, List *ancestors, ExplainState *es)
 	CustomScan *cscan = castNode(CustomScan, css->ss.ps.plan);
 	bool		useprefix = es->rtable_size > 1 || es->verbose;
 	List	   *context;
-	Size		limit = get_hash_memory_limit();
+	const uint64 *totals = NULL;
+	uint64		own[JOIN_NCOUNTERS];
 
 	context = set_deparse_context_plan(es->deparse_cxt, css->ss.ps.plan,
 									   ancestors);
@@ -891,17 +916,82 @@ join_explain(CustomScanState *css, List *ancestors, ExplainState *es)
 										   context, useprefix, false), es);
 	if (!es->analyze)
 		return;
-	ExplainPropertyInteger("Buckets", NULL, state->buckets, es);
+	if (state->stats != NULL)
+		totals = tess_shared_stats_totals(state->stats);
+	if (totals == NULL)
+	{
+		join_counters(state, own);
+		totals = own;
+	}
+	ExplainPropertyInteger("Buckets", NULL,
+						   totals[JOIN_BUILDS] > 0 ?
+						   totals[JOIN_BUCKETS] / totals[JOIN_BUILDS] : 0, es);
 	ExplainPropertyInteger("Memory Usage", "kB",
-						   (state->peak_memory + 1023) / 1024, es);
-	if (state->peak_memory > limit)
+						   (totals[JOIN_MEMORY] + 1023) / 1024, es);
+	if (totals[JOIN_OVERRUN] > 0)
 		ExplainPropertyInteger("Overrun", "kB",
-							   (state->peak_memory - limit + 1023) / 1024, es);
-	ExplainPropertyInteger("Builds", NULL, state->builds, es);
-	ExplainPropertyInteger("Build Rows", NULL, state->build_rows_total, es);
-	ExplainPropertyInteger("Table Grows", NULL, state->grows, es);
-	ExplainPropertyInteger("Probe Rows", NULL, state->probe_rows, es);
-	ExplainPropertyInteger("Matches", NULL, state->matches, es);
+							   (totals[JOIN_OVERRUN] + 1023) / 1024, es);
+	ExplainPropertyInteger("Builds", NULL, totals[JOIN_BUILDS], es);
+	ExplainPropertyInteger("Build Rows", NULL, totals[JOIN_BUILD_ROWS], es);
+	ExplainPropertyInteger("Table Grows", NULL, totals[JOIN_GROWS], es);
+	ExplainPropertyInteger("Probe Rows", NULL, totals[JOIN_PROBE_ROWS], es);
+	ExplainPropertyInteger("Matches", NULL, totals[JOIN_MATCHES], es);
+}
+
+/*
+ * A parallel plan: the outer child divides the rows, and every
+ * participant builds the whole inner side into a table of its own, as the
+ * core's hash join without a shared table does. The node shares only its
+ * counters, in the rows of its chunk.
+ */
+static Size
+join_estimate_dsm(CustomScanState *css, ParallelContext *pcxt)
+{
+	return tess_shared_stats_estimate(JOIN_NCOUNTERS, pcxt->nworkers);
+}
+
+static void
+join_initialize_dsm(CustomScanState *css, ParallelContext *pcxt,
+					void *coordinate)
+{
+	TessHashJoinState *state = (TessHashJoinState *) css;
+
+	/* A Gather a limit above shut down sets up anew when rescanned. */
+	if (state->stats != NULL)
+		tess_shared_stats_end(state->stats);
+	state->stats = tess_shared_stats_init(css->ss.ps.state->es_query_cxt,
+										  coordinate, JOIN_NCOUNTERS,
+										  pcxt->nworkers, pcxt->seg);
+}
+
+static void
+join_reinitialize_dsm(CustomScanState *css, ParallelContext *pcxt,
+					  void *coordinate)
+{
+	TessHashJoinState *state = (TessHashJoinState *) css;
+
+	tess_shared_stats_reset(state->stats);
+}
+
+static void
+join_initialize_worker(CustomScanState *css, shm_toc *toc, void *coordinate)
+{
+	TessHashJoinState *state = (TessHashJoinState *) css;
+
+	state->stats = tess_shared_stats_attach(css->ss.ps.state->es_query_cxt,
+											coordinate, ParallelWorkerNumber + 1);
+}
+
+static void
+join_shutdown(CustomScanState *css)
+{
+	TessHashJoinState *state = (TessHashJoinState *) css;
+	uint64		values[JOIN_NCOUNTERS];
+
+	if (state->stats == NULL)
+		return;
+	join_counters(state, values);
+	tess_shared_stats_store(state->stats, values);
 }
 
 static Node *
@@ -921,6 +1011,11 @@ static const CustomExecMethods join_exec_methods = {
 	.EndCustomScan = join_end,
 	.ReScanCustomScan = join_rescan,
 	.ExplainCustomScan = join_explain,
+	.EstimateDSMCustomScan = join_estimate_dsm,
+	.InitializeDSMCustomScan = join_initialize_dsm,
+	.ReInitializeDSMCustomScan = join_reinitialize_dsm,
+	.InitializeWorkerCustomScan = join_initialize_worker,
+	.ShutdownCustomScan = join_shutdown,
 };
 
 const CustomScanMethods tess_hash_join_scan_methods = {

@@ -238,6 +238,28 @@ join_pathlist(PlannerInfo *root, RelOptInfo *joinrel, RelOptInfo *outerrel,
 						  inner_path);
 	if (path != NULL)
 		add_path(joinrel, &path->path);
+
+	/*
+	 * Under a Gather: the outer side's cheapest partial path divides the
+	 * rows, and every participant builds the whole inner side, as the
+	 * core's hash join without a shared table does, from the cheapest
+	 * inner path a worker may run. The path is parallel-aware for the
+	 * counters the node shares.
+	 */
+	if (!joinrel->consider_parallel || outerrel->partial_pathlist == NIL ||
+		!bms_is_empty(joinrel->lateral_relids))
+		return;
+	if (!inner_path->parallel_safe)
+		inner_path = get_cheapest_parallel_safe_total_inner(innerrel->pathlist);
+	if (inner_path == NULL)
+		return;
+	path = make_join_path(root, joinrel, extra, &key, ninner,
+						  linitial(outerrel->partial_pathlist), inner_path);
+	if (path == NULL || !path->path.parallel_safe ||
+		path->path.parallel_workers <= 0)
+		return;
+	path->path.parallel_aware = true;
+	add_partial_path(joinrel, &path->path);
 }
 
 /* The target entry of a child's plan that is this column, or NULL. */

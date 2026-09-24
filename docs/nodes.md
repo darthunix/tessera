@@ -508,6 +508,15 @@ would split the inner side, or when the node's own estimate of the table
 (a record of 32 bytes and a word per inner column, the columns' width,
 the buckets) exceeds `hash_mem`.
 
+Under a `Gather` the hook also offers a partial path: the outer side's
+cheapest partial path divides the rows, and every participant builds the
+whole inner side from the cheapest inner path a worker may run, as the
+core's hash join without a shared table does; the template is that
+join's cost. The core's parallel hash join, whose shared table divides
+the build, usually costs less; a shared table of the node's own is item
+5.5 of the plan. The partial path is parallel-aware only for the
+counters the participants share through `TessSharedStats`.
+
 The plan's scan tuple is the join's columns, the outer side's first, and
 both keys, which the join clause in `custom_exprs` refers to; the node's
 targets are columns of it (`TESS_LAYOUT_PROJECTED`). The plan data
@@ -553,7 +562,9 @@ in memory, and a table larger than the planner expected is kept rather
 than split), `Builds`, the tables built over the rescans, `Build Rows`,
 the inner rows inserted into them, `Table Grows`, the doublings of the
 region, `Probe Rows`, the outer rows probed, and `Matches`, the joined
-rows over every round.
+rows over every round. Under a `Gather` the counters are the totals of
+every participant, and the bucket count is the mean over the tables
+built.
 
 ### Tests
 
@@ -572,6 +583,10 @@ one with rounds and of an inner side of 20000 rows estimated at 10, which grows
 past a small `work_mem`; correlated subqueries whose parameter is on the
 inner side, which builds the table for every outer row, and on the outer
 side, which builds it once; and a generic plan executed with two
-parameters. It also shows
+parameters. Under a `Gather` with two workers, the core's shared hash
+table disabled, it compares an aggregate over the node's partial path,
+rows through the `Gather`, rounds, and the leader not taking part, and
+checks that the rows probed and the matches are the totals of every
+participant. It also shows
 the core's plan without the kernels module, for a left join, a second
 join clause, a text key, hash joins disabled and the switch off.
