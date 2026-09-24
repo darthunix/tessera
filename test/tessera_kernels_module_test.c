@@ -19,6 +19,7 @@ PG_FUNCTION_INFO_V1(tessera_test_kernels_module_predicate);
 PG_FUNCTION_INFO_V1(tessera_test_kernels_module_errors);
 PG_FUNCTION_INFO_V1(tessera_test_kernels_module_aggregates);
 PG_FUNCTION_INFO_V1(tessera_test_kernels_module_int8);
+PG_FUNCTION_INFO_V1(tessera_test_kernels_module_table);
 
 static const TessFunctionRegistryOps *
 registry(void)
@@ -598,5 +599,208 @@ tessera_test_kernels_module_int8(PG_FUNCTION_ARGS)
 				 &status) != TESS_ERROR_DIVISION_BY_ZERO ||
 		strcmp(status.sqlstate, "22012") != 0)
 		PG_RETURN_BOOL(false);
+	PG_RETURN_BOOL(true);
+}
+
+/* The kernel operations the module installed, checked as a node checks them. */
+static const TessKernelOps *
+kernel_ops(void)
+{
+	void	  **rendezvous = find_rendezvous_variable(TESS_API_RENDEZVOUS);
+	const TessApi *api = *rendezvous;
+	const TessKernelOps *ops;
+
+	if (api == NULL || !TESS_ABI_HAS_FIELD(api, TessApi, kernels) ||
+		api->kernels == NULL ||
+		api->kernels->abi_version != TESS_KERNEL_REGISTRY_OPS_ABI_VERSION ||
+		api->kernels->struct_size < TESS_KERNEL_REGISTRY_OPS_MIN_SIZE)
+		elog(ERROR, "Tessera test could not find a compatible kernel registry");
+	ops = api->kernels->get();
+	if (ops == NULL || ops->abi_version != TESS_KERNEL_OPS_ABI_VERSION ||
+		ops->struct_size < TESS_KERNEL_OPS_MIN_SIZE ||
+		ops->table_format_version != TESS_TABLE_FORMAT_VERSION)
+		elog(ERROR, "Tessera test found no compatible kernels");
+	return ops;
+}
+
+#define TABLE_ROWS 64
+
+/* A column of 64 keys, row % modulo, as int4 or int8 Datums. */
+static void
+init_keys(TessDatumColumn *column, Datum *values, bool *isnull, int modulo,
+		  bool int8)
+{
+	int			row;
+
+	for (row = 0; row < TABLE_ROWS; row++)
+	{
+		values[row] = int8 ? Int64GetDatum(row % modulo) :
+			Int32GetDatum(row % modulo);
+		isnull[row] = false;
+	}
+	column->struct_size = sizeof(TessDatumColumn);
+	column->values = values;
+	column->isnull = isnull;
+	column->nrows = TABLE_ROWS;
+}
+
+/*
+ * The whole life of a table through the installed operations alone, as a
+ * node module that does not link the kernels would run it: build from
+ * int8 keys in a region too small, grow it by repalloc, probe with int4
+ * keys, walk the chains, gather the payload, scan, then group.
+ */
+/* Raise the step of the table cycle that failed, with the kernel's message. */
+pg_noreturn static void
+cycle_failed(const char *step, const TessStatus *status)
+{
+	elog(ERROR, "table cycle failed at %s: %s", step, status->message);
+	pg_unreachable();
+}
+
+Datum
+tessera_test_kernels_module_table(PG_FUNCTION_ARGS)
+{
+	const TessKernelOps *ops = kernel_ops();
+	TessStatus	status = TESS_STRUCT_INITIALIZER(TessStatus);
+	TessTableKeyKind kind = TESS_TABLE_KEY_INT8;
+	Datum		build_values[TABLE_ROWS];
+	Datum		probe_values[TABLE_ROWS];
+	Datum		group_values[TABLE_ROWS];
+	bool		isnull[TABLE_ROWS];
+	TessDatumColumn build_column;
+	TessDatumColumn probe_column;
+	TessDatumColumn group_column;
+	TessTableKey key = {.kind = TESS_TABLE_KEY_INT8, .column = &build_column};
+	uint32		hashes[TABLE_ROWS];
+	uint32		offsets[TABLE_ROWS];
+	uint32		matches[TABLE_ROWS];
+	uint64		payload[TABLE_ROWS];
+	Datum		gathered[TABLE_ROWS];
+	uint64		all = ~UINT64CONST(0);
+	uint64		valid_word = 0;
+	uint64		pending_word;
+	uint64		found_word = 0;
+	uint64		inserted_word = 0;
+	TessRowMask all_rows = {TABLE_ROWS, &all};
+	TessRowMask valid = {TABLE_ROWS, &valid_word};
+	TessRowMask pending = {TABLE_ROWS, &pending_word};
+	TessRowMask found = {TABLE_ROWS, &found_word};
+	TessRowMask inserted = {TABLE_ROWS, &inserted_word};
+	TessTableStats stats = TESS_STRUCT_INITIALIZER(TessTableStats);
+	TessTableRecord record = TESS_STRUCT_INITIALIZER(TessTableRecord);
+	Size		small;
+	Size		size;
+	void	   *region;
+	uint64		cursor = 0;
+	int			count = 0;
+	uint8	   *state;
+	int			row;
+
+	/* Build: 64 rows, keys 0..15 as int8, the row number as payload. */
+	init_keys(&build_column, build_values, isnull, 16, true);
+	for (row = 0; row < TABLE_ROWS; row++)
+		payload[row] = row;
+	if (ops->int8_hash(&build_column, NULL, &all_rows, TESS_NULL_KEYS_REJECT,
+					   hashes, &valid, &status) != TESS_OK ||
+		valid_word != all ||
+		ops->table_size(1, &kind, 8, 16, &small, &status) != TESS_OK ||
+		ops->table_size(1, &kind, 8, TABLE_ROWS + 16, &size, &status) != TESS_OK ||
+		small >= size)
+		cycle_failed("build: hash and size", &status);
+	region = palloc0(small);
+	pending_word = all;
+	if (ops->table_create(region, small, 1, &kind, 8, 16, &status) != TESS_OK ||
+		ops->table_insert(region, small, hashes, 1, &key, (uint8 *) payload,
+						  &pending, offsets, &status) != TESS_OK ||
+		pending_word == 0)
+		cycle_failed("build: first insertion", &status);
+
+	/*
+	 * The rows left pending go in after growth, which also leaves room
+	 * for the records grouping adds below; offsets stay valid.
+	 */
+	region = repalloc(region, size);
+	memset((char *) region + small, 0, size - small);
+	if (ops->table_grow(region, size, &status) != TESS_OK ||
+		ops->table_insert(region, size, hashes, 1, &key, (uint8 *) payload,
+						  &pending, offsets, &status) != TESS_OK ||
+		pending_word != 0 ||
+		ops->table_stats(region, size, &stats, &status) != TESS_OK ||
+		stats.records != TABLE_ROWS || stats.region_len != size)
+		cycle_failed("growth and second insertion", &status);
+
+	/*
+	 * Probe with the same keys as int4: an int8 in the int4 range hashes
+	 * as the int4, so every row finds the newest record of its key, and
+	 * the payload names a row with that key.
+	 */
+	init_keys(&probe_column, probe_values, isnull, 16, false);
+	key.kind = TESS_TABLE_KEY_INT4;
+	key.column = &probe_column;
+	if (ops->int4_hash(&probe_column, NULL, &all_rows, TESS_NULL_KEYS_REJECT,
+					   hashes, &valid, &status) != TESS_OK ||
+		ops->table_probe(region, size, hashes, 1, &key, &valid, matches,
+						 &found, &status) != TESS_OK ||
+		found_word != all ||
+		ops->table_gather(region, size, matches, &found, 0, gathered,
+						  &status) != TESS_OK)
+		cycle_failed("probe with int4 keys", &status);
+	for (row = 0; row < TABLE_ROWS; row++)
+	{
+		if (DatumGetUInt64(gathered[row]) % 16 != row % 16 ||
+			ops->table_record(region, size, matches[row], &record,
+							  &status) != TESS_OK ||
+			record.keys[0] != row % 16)
+			cycle_failed("gathered payload or record", &status);
+	}
+
+	/* Four records per key: three more steps down every chain. */
+	for (count = 0; count < 3; count++)
+	{
+		valid_word = found_word;
+		if (ops->table_next_match(region, size, matches, &valid, &found,
+								  &status) != TESS_OK ||
+			found_word != all)
+			cycle_failed("chain step", &status);
+	}
+	valid_word = found_word;
+	if (ops->table_next_match(region, size, matches, &valid, &found,
+							  &status) != TESS_OK ||
+		found_word != 0)
+		cycle_failed("chain end", &status);
+
+	/* A scan visits every record once. */
+	if (ops->table_scan(region, size, &cursor, offsets, TABLE_ROWS, &count,
+						&status) != TESS_OK || count != TABLE_ROWS ||
+		ops->table_scan(region, size, &cursor, offsets, TABLE_ROWS, &count,
+						&status) != TESS_OK || count != 0)
+		cycle_failed("scan", &status);
+
+	/*
+	 * Grouping, in row order: keys 0..19 find the records of 0..15, rows 16
+	 * to 19 create one record each and rows 36 to 39 find those; a payload
+	 * set in place is read back through another row's offset.
+	 */
+	init_keys(&group_column, group_values, isnull, 20, false);
+	key.column = &group_column;
+	pending_word = all;
+	if (ops->int4_hash(&group_column, NULL, &all_rows, TESS_NULL_KEYS_GROUP,
+					   hashes, &valid, &status) != TESS_OK ||
+		ops->table_find_or_insert(region, size, hashes, 1, &key, &pending,
+								  offsets, &inserted, &status) != TESS_OK ||
+		pending_word != 0 || inserted_word != (UINT64CONST(0xf) << 16) ||
+		offsets[37] != offsets[17])
+		cycle_failed("grouping", &status);
+	if (ops->table_payload(region, size, offsets[17], &state, &status) != TESS_OK)
+		cycle_failed("payload in place", &status);
+	memset(state, 0x5a, 8);
+	if (ops->table_record(region, size, offsets[37], &record,
+						  &status) != TESS_OK ||
+		record.payload[7] != 0x5a ||
+		ops->table_stats(region, size, &stats, &status) != TESS_OK ||
+		stats.records != TABLE_ROWS + 4)
+		cycle_failed("payload read back", &status);
+	pfree(region);
 	PG_RETURN_BOOL(true);
 }

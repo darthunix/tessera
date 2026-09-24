@@ -1,5 +1,5 @@
 MODULE_big = tessera_kernels
-OBJS = int.o
+OBJS = int.o table.o
 PG_CPPFLAGS = -I$(srcdir)/../include
 
 PG_CONFIG ?= pg_config
@@ -11,4 +11,4 @@ include $(srcdir)/../rust.mk
 SHLIB_LINK += $(RUST_LIB)
 $(shlib): $(RUST_LIB)
 
-$(OBJS): $(wildcard $(srcdir)/../include/tessera/*.h)
+$(OBJS): $(srcdir)/internal.h $(wildcard $(srcdir)/../include/tessera/*.h)

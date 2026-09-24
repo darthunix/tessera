@@ -57,8 +57,10 @@ unary `int8um`, and the cast `int8(int4)`, all as values with
 `count(any)`, `sum(int4)`, `min(int4)`, `max(int4)`, `min(int8)` and
 `max(int8)` as aggregates, by the aggregate's own OID. The mixed arithmetic
 with the integer on the left (`int48pl` and its siblings) is left to the
-core: an int8 kernel must not read an int4 Datum as a whole word. Load the
-bridge first, then `LOAD 'tessera_kernels'`, or preload both through
+core: an int8 kernel must not read an int4 Datum as a whole word. The
+module also installs the key hashes and the hash table in the bridge's
+kernel registry, for nodes that do not link the kernels (see
+[bridge.md](bridge.md)). Load the bridge first, then `LOAD 'tessera_kernels'`, or preload both through
 `session_preload_libraries` as [bridge.md](bridge.md) recommends. The
 description does not depend on the argument types, so implementations for
 other types and from other extensions use the same structure.

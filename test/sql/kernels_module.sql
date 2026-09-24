@@ -36,6 +36,11 @@ RETURNS boolean
 AS :'module_test', 'tessera_test_kernels_module_int8'
 LANGUAGE C STRICT;
 
+CREATE FUNCTION tessera_test_kernels_module_table()
+RETURNS boolean
+AS :'module_test', 'tessera_test_kernels_module_table'
+LANGUAGE C STRICT;
+
 SELECT tessera_test_kernels_module_registry() AS registry \gset
 \echo :registry
 SELECT tessera_test_kernels_module_arithmetic() AS arithmetic \gset
@@ -48,7 +53,10 @@ SELECT tessera_test_kernels_module_aggregates() AS aggregates \gset
 \echo :aggregates
 SELECT tessera_test_kernels_module_int8() AS int8 \gset
 \echo :int8
+SELECT tessera_test_kernels_module_table() AS table_ops \gset
+\echo :table_ops
 
+DROP FUNCTION tessera_test_kernels_module_table();
 DROP FUNCTION tessera_test_kernels_module_int8();
 DROP FUNCTION tessera_test_kernels_module_aggregates();
 DROP FUNCTION tessera_test_kernels_module_errors();

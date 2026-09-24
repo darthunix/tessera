@@ -1,7 +1,8 @@
 /*
  * The built-in integer kernels as batch functions: this module links the
  * Rust kernels and registers them in the bridge's function registry when
- * loaded, for int4 and int8 alike. Load the bridge first (CREATE EXTENSION
+ * loaded, for int4 and int8 alike, and installs the key hashes and the
+ * hash table in the bridge's kernel registry (table.c). Load the bridge first (CREATE EXTENSION
  * tessera), then LOAD 'tessera_kernels'.
  *
  * An int8 is its Datum: the int8 kernels write int64 values straight into
@@ -21,6 +22,8 @@
 
 #include "tessera/bridge.h"
 #include "tessera/kernels.h"
+
+#include "internal.h"
 
 PG_MODULE_MAGIC;
 
@@ -507,10 +510,21 @@ _PG_init(void)
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("incompatible Tessera function registry")));
-	if (tess_kernels_abi_version() != TESS_KERNELS_ABI_VERSION)
+	if (tess_kernels_abi_version() != TESS_KERNELS_ABI_VERSION ||
+		tess_table_format_version() != TESS_TABLE_FORMAT_VERSION)
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("incompatible Tessera kernels library")));
+	/* A bridge without a kernel registry predates the nodes that use it. */
+	if (TESS_ABI_HAS_FIELD(api, TessApi, kernels) && api->kernels != NULL)
+	{
+		if (api->kernels->abi_version != TESS_KERNEL_REGISTRY_OPS_ABI_VERSION ||
+			api->kernels->struct_size < TESS_KERNEL_REGISTRY_OPS_MIN_SIZE)
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("incompatible Tessera kernel registry")));
+		api->kernels->set(&tess_kernel_ops);
+	}
 	for (i = 0; i < lengthof(functions); i++)
 		api->functions->add(&functions[i].function);
 }
