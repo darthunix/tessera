@@ -19,7 +19,7 @@
 
 /*
  * The planner of TessHashJoin: through set_join_pathlist_hook it offers
- * the node for an inner join whose only clause is an equality of an int4
+ * the node for an inner join whose clauses are all equalities of an int4
  * or int8 column of each side, with a cost below the core's hash join of
  * the same inputs, which serves as the template. The children are batch
  * paths over the sides' cheapest paths. See docs/nodes.md.
@@ -39,15 +39,17 @@ static const CustomPathMethods join_path_methods = {
 	.PlanCustomPath = join_plan,
 };
 
-/* The join clause and its key on each side. */
-typedef struct JoinKey
+/* The join clauses: each one's column on each side and its kind there. */
+typedef struct JoinKeys
 {
-	RestrictInfo *rinfo;
-	Var		   *outer;
-	Var		   *inner;
-	TessTableKeyKind outer_kind;
-	TessTableKeyKind inner_kind;
-} JoinKey;
+	int			nkeys;
+	List	   *rinfos;
+	List	   *clauses;
+	List	   *outer;
+	List	   *inner;
+	List	   *outer_kinds;
+	List	   *inner_kinds;
+} JoinKeys;
 
 /* The table's kind of a key of this type, or false for another type. */
 static bool
@@ -70,22 +72,22 @@ plain_var(Node *node)
 }
 
 /*
- * The join's only clause, when it is an integer equality of a column of
- * each side: int4 and int8 in any combination, since the table keeps both
- * as 8-byte keys and an int8 in the int4 range hashes as the int4.
+ * One clause as a key, when it is an integer equality of a column of each
+ * side: int4 and int8 in any combination, since the table keeps both as
+ * 8-byte keys and an int8 in the int4 range hashes as the int4.
  */
 static bool
-find_key(List *restrictlist, RelOptInfo *outerrel, RelOptInfo *innerrel,
-		 JoinKey *key)
+add_key(RestrictInfo *rinfo, RelOptInfo *outerrel, RelOptInfo *innerrel,
+		JoinKeys *keys)
 {
-	RestrictInfo *rinfo;
 	OpExpr	   *op;
 	Node	   *left;
 	Node	   *right;
+	Var		   *outer;
+	Var		   *inner;
+	TessTableKeyKind outer_kind;
+	TessTableKeyKind inner_kind;
 
-	if (list_length(restrictlist) != 1)
-		return false;
-	rinfo = linitial_node(RestrictInfo, restrictlist);
 	if (rinfo->pseudoconstant || !rinfo->can_join ||
 		!OidIsValid(rinfo->hashjoinoperator) || !IsA(rinfo->clause, OpExpr))
 		return false;
@@ -101,20 +103,47 @@ find_key(List *restrictlist, RelOptInfo *outerrel, RelOptInfo *innerrel,
 	if (bms_is_subset(rinfo->left_relids, outerrel->relids) &&
 		bms_is_subset(rinfo->right_relids, innerrel->relids))
 	{
-		key->outer = (Var *) left;
-		key->inner = (Var *) right;
+		outer = (Var *) left;
+		inner = (Var *) right;
 	}
 	else if (bms_is_subset(rinfo->left_relids, innerrel->relids) &&
 			 bms_is_subset(rinfo->right_relids, outerrel->relids))
 	{
-		key->outer = (Var *) right;
-		key->inner = (Var *) left;
+		outer = (Var *) right;
+		inner = (Var *) left;
 	}
 	else
 		return false;
-	key->rinfo = rinfo;
-	return key_kind(key->outer->vartype, &key->outer_kind) &&
-		key_kind(key->inner->vartype, &key->inner_kind);
+	if (!key_kind(outer->vartype, &outer_kind) ||
+		!key_kind(inner->vartype, &inner_kind))
+		return false;
+	keys->rinfos = lappend(keys->rinfos, rinfo);
+	keys->clauses = lappend(keys->clauses, rinfo->clause);
+	keys->outer = lappend(keys->outer, outer);
+	keys->inner = lappend(keys->inner, inner);
+	keys->outer_kinds = lappend_int(keys->outer_kinds, outer_kind);
+	keys->inner_kinds = lappend_int(keys->inner_kinds, inner_kind);
+	keys->nkeys++;
+	return true;
+}
+
+/*
+ * The join's clauses as keys, when every one of them is a key, at most as
+ * many as the table takes.
+ */
+static bool
+find_keys(List *restrictlist, RelOptInfo *outerrel, RelOptInfo *innerrel,
+		  JoinKeys *keys)
+{
+	memset(keys, 0, sizeof(*keys));
+	if (restrictlist == NIL || list_length(restrictlist) > TESS_TABLE_MAX_KEYS)
+		return false;
+	foreach_node(RestrictInfo, rinfo, restrictlist)
+	{
+		if (!add_key(rinfo, outerrel, innerrel, keys))
+			return false;
+	}
+	return true;
 }
 
 /*
@@ -123,10 +152,10 @@ find_key(List *restrictlist, RelOptInfo *outerrel, RelOptInfo *innerrel,
  * inner columns of the target and the inner key.
  */
 static bool
-target_supported(RelOptInfo *joinrel, RelOptInfo *innerrel, const JoinKey *key,
+target_supported(RelOptInfo *joinrel, RelOptInfo *innerrel, const JoinKeys *keys,
 				 int *ninner)
 {
-	bool		inner_key = false;
+	Bitmapset  *inner_keys = NULL;
 
 	*ninner = 0;
 	foreach_ptr(Node, expr, joinrel->reltarget->exprs)
@@ -139,11 +168,15 @@ target_supported(RelOptInfo *joinrel, RelOptInfo *innerrel, const JoinKey *key,
 		if (!bms_is_member(var->varno, innerrel->relids))
 			continue;
 		(*ninner)++;
-		inner_key |= var->varno == key->inner->varno &&
-			var->varattno == key->inner->varattno;
+		foreach_node(Var, key, keys->inner)
+		{
+			if (var->varno == key->varno && var->varattno == key->varattno)
+				inner_keys = bms_add_member(inner_keys,
+											foreach_current_index(key));
+		}
 	}
-	if (!inner_key)
-		(*ninner)++;
+	/* Keys outside the target are columns of the scan tuple too. */
+	*ninner += keys->nkeys - bms_num_members(inner_keys);
 	return *ninner <= JOIN_MAX_INNER_COLUMNS;
 }
 
@@ -154,14 +187,14 @@ target_supported(RelOptInfo *joinrel, RelOptInfo *innerrel, const JoinKey *key,
  * the records.
  */
 static double
-table_bytes(Path *inner, int ninner)
+table_bytes(Path *inner, int nkeys, int ninner)
 {
 	double		rows = Max(inner->rows, 1.0);
 	double		buckets = 1024;
 
 	while (buckets < 2 * rows)
 		buckets *= 2;
-	return rows * (16 + 8 + 8 * (1 + ninner) + inner->pathtarget->width) +
+	return rows * (16 + 8 * nkeys + 8 * (1 + ninner) + inner->pathtarget->width) +
 		buckets * 4;
 }
 
@@ -173,12 +206,12 @@ table_bytes(Path *inner, int ninner)
  */
 static CustomPath *
 make_join_path(PlannerInfo *root, RelOptInfo *joinrel,
-			   JoinPathExtraData *extra, const JoinKey *key, int ninner,
+			   JoinPathExtraData *extra, const JoinKeys *keys, int ninner,
 			   Path *outer_path, Path *inner_path)
 {
 	TessPathConfig config = TESS_STRUCT_INITIALIZER(TessPathConfig);
 	JoinCostWorkspace workspace;
-	List	   *hashclauses = list_make1(key->rinfo);
+	List	   *hashclauses = keys->rinfos;
 	HashPath   *template;
 	Path	   *outer;
 	Path	   *inner;
@@ -186,15 +219,16 @@ make_join_path(PlannerInfo *root, RelOptInfo *joinrel,
 	initial_cost_hashjoin(root, &workspace, JOIN_INNER, hashclauses,
 						  outer_path, inner_path, extra, false);
 	if (workspace.numbatches > 1 ||
-		table_bytes(inner_path, ninner) > (double) get_hash_memory_limit())
+		table_bytes(inner_path, keys->nkeys, ninner) > (double) get_hash_memory_limit())
 		return NULL;
 	outer = tess_batch_input_path(root, outer_path);
 	inner = tess_batch_input_path(root, inner_path);
 	if (outer == NULL || inner == NULL)
 		return NULL;
 	/* The core's clause sides, which its costing reads. */
-	key->rinfo->outer_is_left = bms_is_subset(key->rinfo->left_relids,
-											  outer_path->parent->relids);
+	foreach_node(RestrictInfo, rinfo, keys->rinfos)
+		rinfo->outer_is_left = bms_is_subset(rinfo->left_relids,
+											 outer_path->parent->relids);
 	template = create_hashjoin_path(root, joinrel, JOIN_INNER, &workspace,
 									extra, outer_path, inner_path, false,
 									extra->restrictlist, NULL, hashclauses);
@@ -203,11 +237,11 @@ make_join_path(PlannerInfo *root, RelOptInfo *joinrel,
 	config.methods = &join_path_methods;
 	config.node = &tess_hash_join_node;
 	config.children = list_make2(outer, inner);
-	config.expressions = list_make3(key->rinfo->clause, key->outer, key->inner);
-	config.node_data = (Node *) list_make4_int(key->outer_kind, key->inner_kind,
-											   extra->inner_unique ? 1 : 0,
-											   (int) Min(inner_path->rows,
-														 (double) PG_INT32_MAX));
+	config.expressions = list_make3(keys->clauses, keys->outer, keys->inner);
+	config.node_data = (Node *) list_make3(keys->outer_kinds, keys->inner_kinds,
+										   list_make2_int(extra->inner_unique ? 1 : 0,
+														  (int) Min(inner_path->rows,
+																	(double) PG_INT32_MAX)));
 	return tess_path_create(&config);
 }
 
@@ -216,7 +250,7 @@ join_pathlist(PlannerInfo *root, RelOptInfo *joinrel, RelOptInfo *outerrel,
 			  RelOptInfo *innerrel, JoinType jointype,
 			  JoinPathExtraData *extra)
 {
-	JoinKey		key;
+	JoinKeys	keys;
 	int			ninner;
 	Path	   *outer_path = outerrel->cheapest_total_path;
 	Path	   *inner_path = innerrel->cheapest_total_path;
@@ -228,13 +262,13 @@ join_pathlist(PlannerInfo *root, RelOptInfo *joinrel, RelOptInfo *outerrel,
 	/* The core offers no hash join either without PGS_HASHJOIN. */
 	if (!*tess_runtime_api()->settings->enable || jointype != JOIN_INNER ||
 		(extra->pgs_mask & PGS_HASHJOIN) == 0 ||
-		!find_key(extra->restrictlist, outerrel, innerrel, &key) ||
-		!target_supported(joinrel, innerrel, &key, &ninner) ||
+		!find_keys(extra->restrictlist, outerrel, innerrel, &keys) ||
+		!target_supported(joinrel, innerrel, &keys, &ninner) ||
 		outer_path == NULL || inner_path == NULL ||
 		PATH_REQ_OUTER(outer_path) != NULL || PATH_REQ_OUTER(inner_path) != NULL ||
 		tess_runtime_kernels() == NULL)
 		return;
-	path = make_join_path(root, joinrel, extra, &key, ninner, outer_path,
+	path = make_join_path(root, joinrel, extra, &keys, ninner, outer_path,
 						  inner_path);
 	if (path != NULL)
 		add_path(joinrel, &path->path);
@@ -253,7 +287,7 @@ join_pathlist(PlannerInfo *root, RelOptInfo *joinrel, RelOptInfo *outerrel,
 		inner_path = get_cheapest_parallel_safe_total_inner(innerrel->pathlist);
 	if (inner_path == NULL)
 		return;
-	path = make_join_path(root, joinrel, extra, &key, ninner,
+	path = make_join_path(root, joinrel, extra, &keys, ninner,
 						  linitial(outerrel->partial_pathlist), inner_path);
 	if (path == NULL || !path->path.parallel_safe ||
 		path->path.parallel_workers <= 0)
@@ -322,9 +356,11 @@ join_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 	TessLayout	layout = TESS_STRUCT_INITIALIZER(TessLayout);
 	TessPlanWriter *writer;
 	List	   *data;
-	Node	   *clause;
-	Var		   *outer_key;
-	Var		   *inner_key;
+	List	   *hash_clauses;
+	List	   *outer_keys;
+	List	   *inner_keys;
+	List	   *outer_columns = NIL;
+	List	   *inner_columns = NIL;
 	Relids		outer_relids;
 	List	   *scan = NIL;
 	List	   *sides = NIL;
@@ -335,17 +371,17 @@ join_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 		!tess_plan_child(best_path, custom_plans, 1, &inner) ||
 		list_length(info.expressions) != 3)
 		elog(ERROR, "TessHashJoin expected two batch children");
-	clause = linitial(info.expressions);
-	outer_key = lsecond_node(Var, info.expressions);
-	inner_key = lthird_node(Var, info.expressions);
+	hash_clauses = linitial(info.expressions);
+	outer_keys = lsecond(info.expressions);
+	inner_keys = lthird(info.expressions);
 	data = (List *) info.node_data;
 	outer_relids = outer.path->parent->relids;
 	for (int side = 0; side < 2; side++)
 	{
 		List	   *wanted = list_copy(tlist);
 
-		wanted = lappend(wanted, makeTargetEntry((Expr *) (side == 0 ? outer_key : inner_key),
-												 0, NULL, true));
+		foreach_node(Var, key, side == 0 ? outer_keys : inner_keys)
+			wanted = lappend(wanted, makeTargetEntry((Expr *) key, 0, NULL, true));
 		foreach_ptr(TargetEntry, entry, wanted)
 		{
 			Var		   *var = (Var *) entry->expr;
@@ -370,18 +406,22 @@ join_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 									 TESS_HASH_JOIN_DATA_VERSION);
 	tess_plan_write_int_list(writer, "sides", sides);
 	tess_plan_write_int_list(writer, "child_columns", columns);
-	tess_plan_write_int(writer, "outer_key", child_column(&outer, outer_key));
-	tess_plan_write_int(writer, "inner_key", child_column(&inner, inner_key));
-	tess_plan_write_int(writer, "outer_kind", linitial_int(data));
-	tess_plan_write_int(writer, "inner_kind", lsecond_int(data));
-	tess_plan_write_int(writer, "inner_unique", lthird_int(data));
-	tess_plan_write_int(writer, "inner_rows", lfourth_int(data));
+	foreach_node(Var, key, outer_keys)
+		outer_columns = lappend_int(outer_columns, child_column(&outer, key));
+	foreach_node(Var, key, inner_keys)
+		inner_columns = lappend_int(inner_columns, child_column(&inner, key));
+	tess_plan_write_int_list(writer, "outer_keys", outer_columns);
+	tess_plan_write_int_list(writer, "inner_keys", inner_columns);
+	tess_plan_write_int_list(writer, "outer_kinds", linitial(data));
+	tess_plan_write_int_list(writer, "inner_kinds", lsecond(data));
+	tess_plan_write_int(writer, "inner_unique", linitial_int(lthird(data)));
+	tess_plan_write_int(writer, "inner_rows", lsecond_int(lthird(data)));
 
 	config.methods = &tess_hash_join_scan_methods;
 	config.layout_policy = TESS_LAYOUT_PROJECTED;
 	config.explicit_layout = &layout;
 	config.qual = NIL;
-	config.expressions = list_make1(clause);
+	config.expressions = hash_clauses;
 	config.node_data = (Node *) tess_plan_writer_finish(writer);
 	config.scan_targetlist = scan;
 	config.scanrelid = 0;

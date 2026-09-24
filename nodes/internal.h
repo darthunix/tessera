@@ -11,7 +11,7 @@
 
 /* The plan data of TessHashJoin, written by its planner. */
 #define TESS_HASH_JOIN_DATA "tessera.hash_join"
-#define TESS_HASH_JOIN_DATA_VERSION 1
+#define TESS_HASH_JOIN_DATA_VERSION 2
 
 extern const TessNode tess_pack_node;
 extern const CustomScanMethods tess_pack_scan_methods;

@@ -489,7 +489,7 @@ aggregate the node leaves to the core's partial aggregate.
 
 ## TessHashJoin
 
-`TessHashJoin` joins two batch children on one equality of integer keys,
+`TessHashJoin` joins two batch children on equalities of integer keys,
 in place of the core's `Hash Join`: it builds the rows of the inner child
 into the hash table of [table.md](table.md) and probes it with the
 batches of the outer child, so that neither side is handed over one row
@@ -502,11 +502,12 @@ node calls through the bridge's kernel registry (see
 ### Planning
 
 The module's `set_join_pathlist` hook offers the path for an inner join
-whose only clause is `int4eq`, `int8eq`, `int48eq` or `int84eq` between a
-column of each side, when the join's target is plain columns and at most
-64 of them are the inner side's. Both keys go into the table as 8-byte
-values and an int8 inside the int4 range hashes as the int4, so every
-combination of the two types uses one table. The children are batch
+whose clauses, at most 16, are all `int4eq`, `int8eq`, `int48eq` or
+`int84eq` between a column of each side, when the join's target is plain
+columns and at most 64 of them and the inner keys are the inner side's.
+Each clause is a key of the table; keys go into it as 8-byte values and
+an int8 inside the int4 range hashes as the int4, so every combination
+of the two types uses one table. The children are batch
 paths over the sides' cheapest paths (`tess_batch_input_path`: a native
 scan, a batch path as it is, or pack over anything else). The hook is
 called for both orders of the sides, and as in the core the inner side is
@@ -517,8 +518,8 @@ disabled count comes along, and like the core the hook offers nothing
 when hash joins are disabled. The node keeps the whole table in memory
 and does not split it into batches, so there is no path when the core
 would split the inner side, or when the node's own estimate of the table
-(a record of 32 bytes and a word per inner column, the columns' width,
-the buckets) exceeds `hash_mem`.
+(a record of 24 bytes, a word per key and per inner column, the
+columns' width, the buckets) exceeds `hash_mem`.
 
 Under a `Gather` the hook also offers a partial path: the outer side's
 cheapest partial path divides the rows, and every participant builds the
@@ -530,19 +531,20 @@ the build, usually costs less; a shared table of the node's own is item
 counters the participants share through `TessSharedStats`.
 
 The plan's scan tuple is the join's columns, the outer side's first, and
-both keys, which the join clause in `custom_exprs` refers to; the node's
-targets are columns of it (`TESS_LAYOUT_PROJECTED`). The plan data
-records each column's side and its column in that child's batches, the
-key's column and kind on each side, whether the inner side is unique and
+the keys of both sides, which the join clauses in `custom_exprs` refer
+to; the node's targets are columns of it (`TESS_LAYOUT_PROJECTED`). The
+plan data records each column's side and its column in that child's
+batches, each key's column and kind on each side, whether the inner side is unique and
 the planner's estimate of its rows.
 
 ### Execution
 
 At its first execution the node derives both children's requests from
 its parent's: the outer columns asked for come from the outer batches,
-the inner ones are kept in the table, and each side gives its key first.
-It then reads every inner batch, hashes the key with the NULL policy of
-a join (a NULL key never matches) and inserts the rows with
+the inner ones are kept in the table, and each side gives its keys
+first. It then reads every inner batch, hashes the keys in order, each
+further key folded into the first one's hash, with the NULL policy of a
+join (a NULL in any key never matches) and inserts the rows with
 `tess_table_insert_grouped`, which puts a key's records next to each
 other in their chain and reports the rows whose key was there already;
 the node counts them. A record's payload is a word of the NULL bits of
@@ -593,7 +595,9 @@ off through one function: counts and sums under `TessAgg`, which reads
 the join's batches without pack; rows to the client with columns of both
 sides, NULLs and text of the inner side; the keys as targets and no
 target at all; int8 keys past the int4 range and an int4 key against an
-int8 one both ways; three inner rows per key, duplicates on both sides
+int8 one both ways; two keys, with NULLs in the second, an int8 key next
+to an int4 one, three keys, and composite keys with duplicates under an
+aggregate and as rows; three inner rows per key, duplicates on both sides
 and NULL keys on both; compact batches under an aggregate, with NULLs in
 an outer column, and a text outer column that keeps the rounds; a side
 of fewer than 64 rows, an empty side on

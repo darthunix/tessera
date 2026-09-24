@@ -39,9 +39,10 @@ CREATE TABLE jd (id int PRIMARY KEY, id8 bigint, big bigint, label text, n int);
 INSERT INTO jd
 SELECT g, g, g::bigint << 33, 'd' || g, CASE WHEN g % 5 = 0 THEN NULL ELSE g * 10 END
 FROM generate_series(1, 300) AS g;
-CREATE TABLE jf (fk int, fk8 bigint, fk_big bigint, v int, note text, m int);
+CREATE TABLE jf (fk int, fk8 bigint, fk_big bigint, v int, note text, m int, fk10 int);
 INSERT INTO jf
-SELECT fk, fk, fk::bigint << 33, g, 'f' || g, CASE WHEN g % 5 = 0 THEN NULL ELSE g END
+SELECT fk, fk, fk::bigint << 33, g, 'f' || g, CASE WHEN g % 5 = 0 THEN NULL ELSE g END,
+       fk * 10 + g % 2
 FROM generate_series(1, 1000) AS g,
      LATERAL (SELECT CASE WHEN g % 9 = 0 THEN NULL ELSE (g * 37) % 350 + 1 END AS fk) AS key;
 CREATE TABLE jdup (k int, w int, t text);
@@ -89,6 +90,20 @@ SELECT join_same($$SELECT a.w, b.w FROM jdup a JOIN jdup b ON a.k = b.k$$);
 SELECT join_explain($$SELECT count(jf.m), sum(jf.m), sum(jdup.w) FROM jf JOIN jdup ON jf.fk = jdup.k$$);
 SELECT join_same($$SELECT count(jf.m), sum(jf.m), sum(jdup.w) FROM jf JOIN jdup ON jf.fk = jdup.k$$);
 SELECT join_same($$SELECT count(jf.note), max(jdup.w) FROM jf JOIN jdup ON jf.fk = jdup.k$$);
+
+-- Several keys: two int4 ones, NULL in the second on the inner side; an
+-- int8 key next to an int4 one; three keys; composite keys with
+-- duplicates, under an aggregate (compact batches) and as rows.
+EXPLAIN (COSTS OFF) SELECT count(*) FROM jf JOIN jd ON jf.fk = jd.id AND jf.fk10 = jd.n;
+SELECT join_same($$SELECT jf.v, jd.label FROM jf JOIN jd ON jf.fk = jd.id AND jf.fk10 = jd.n$$);
+SELECT join_same($$SELECT jf.note, jd.n FROM jf JOIN jd ON jf.fk8 = jd.id AND jf.fk10 = jd.n$$);
+SELECT join_same($$SELECT count(*) FROM jf JOIN jd ON jf.fk = jd.id AND jf.fk8 = jd.id8 AND jf.fk_big = jd.big$$);
+CREATE TABLE jpair (k int, j int, w int);
+INSERT INTO jpair SELECT g % 10, g % 3, g FROM generate_series(1, 150) AS g;
+ANALYZE jpair;
+EXPLAIN (COSTS OFF) SELECT sum(b.w) FROM jpair a JOIN jpair b ON a.k = b.k AND a.j = b.j;
+SELECT join_same($$SELECT count(*), sum(a.w), sum(b.w) FROM jpair a JOIN jpair b ON a.k = b.k AND a.j = b.j$$);
+SELECT join_same($$SELECT a.w, b.w FROM jpair a JOIN jpair b ON a.k = b.k AND a.j = b.j$$);
 
 -- A side of fewer than 64 rows, an empty side, a join over a join.
 SELECT join_same($$SELECT jsmall.s, jd.label FROM jsmall JOIN jd ON jsmall.k = jd.id$$);
@@ -195,7 +210,7 @@ SET tessera.enable = off;
 EXPLAIN (COSTS OFF) SELECT count(*) FROM jf JOIN jd ON jf.fk = jd.id;
 RESET tessera.enable;
 
-DROP TABLE jd, jf, jdup, jsmall, jempty, jgrow, jbig;
+DROP TABLE jd, jf, jdup, jsmall, jempty, jgrow, jbig, jpair;
 DROP FUNCTION join_property(text, text);
 DROP FUNCTION join_explain(text);
 DROP FUNCTION join_many();

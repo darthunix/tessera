@@ -5,6 +5,7 @@
 #include "commands/explain_format.h"
 #include "executor/executor.h"
 #include "miscadmin.h"
+#include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
 #include "utils/datum.h"
 #include "utils/lsyscache.h"
@@ -19,7 +20,7 @@
 #include "internal.h"
 
 /*
- * TessHashJoin joins two batch children on one equality of integer keys.
+ * TessHashJoin joins two batch children on equalities of integer keys.
  * It builds the rows of the inner child into the hash table of the Rust
  * kernels (tessera/table.h), which it reaches through the bridge's kernel
  * registry, and probes the table with the batches of the outer child. A
@@ -83,10 +84,15 @@ typedef struct TessHashJoinState
 	/* Per scan tuple column: 1 + its payload word, or 0 when not kept. */
 	int		   *payload_words;
 	/* The key's column in each child's batches, and its kind there. */
-	int			outer_key;
-	int			inner_key;
-	TessTableKeyKind outer_kind;
-	TessTableKeyKind inner_kind;
+	/* The keys: each one's column in each child's batches, and its kind there. */
+	int			nkeys;
+	int			outer_keys[TESS_TABLE_MAX_KEYS];
+	int			inner_keys[TESS_TABLE_MAX_KEYS];
+	TessTableKeyKind outer_kinds[TESS_TABLE_MAX_KEYS];
+	TessTableKeyKind inner_kinds[TESS_TABLE_MAX_KEYS];
+	/* The key columns of the batch being inserted or probed. */
+	TessDatumColumn key_columns[TESS_TABLE_MAX_KEYS];
+	TessTableKey table_keys[TESS_TABLE_MAX_KEYS];
 	/* Every outer row matches at most one inner row: no second round. */
 	bool		inner_unique;
 	/* The planner's estimate of the inner rows, the table's first capacity. */
@@ -195,21 +201,42 @@ check(TessHashJoinState *state, TessStatusCode code)
 		tess_status_report(&state->status);
 }
 
-/* The first key's hashes of the selected rows, under the join's NULL policy. */
-static void
-hash_keys(TessHashJoinState *state, TessTableKeyKind kind,
-		  const TessDatumColumn *keys, const TessRowMask *rows,
-		  TessRowMask *valid)
-{
-	TessStatusCode (*hash) (const TessDatumColumn *, const TessRowMask *,
-							const TessRowMask *, TessNullKeys, uint32 *,
-							TessRowMask *, TessStatus *);
+static void child_column(TessBatch *batch, int column, const TessRowMask *rows,
+						 TessColumnPurpose purpose, TessDatumColumn *result);
 
-	hash = kind == TESS_TABLE_KEY_INT8 ? state->kernels->int8_hash :
-		state->kernels->int4_hash;
-	/* An equality with NULL is never true: NULL keys leave the rows. */
-	check(state, hash(keys, NULL, rows, TESS_NULL_KEYS_REJECT, state->hashes,
-					  valid, &state->status));
+/*
+ * The keys of a batch of one side: each key column, read for the selected
+ * rows and hashed in key order, the first key's hash folding in the
+ * others'; valid gets the rows whose keys are all non-NULL, since an
+ * equality with NULL is never true. The table's keys point at the columns.
+ */
+static void
+batch_keys(TessHashJoinState *state, TessBatch *batch, const int *columns,
+		   const TessTableKeyKind *kinds, TessRowMask *valid)
+{
+	for (int key = 0; key < state->nkeys; key++)
+	{
+		TessDatumColumn *keys = &state->key_columns[key];
+		bool		int8 = kinds[key] == TESS_TABLE_KEY_INT8;
+
+		child_column(batch, columns[key], key == 0 ? &batch->rows : valid,
+					 TESS_COLUMN_FOR_FILTER, keys);
+		if (key == 0)
+			check(state, (int8 ? state->kernels->int8_hash :
+						  state->kernels->int4_hash) (keys, NULL, &batch->rows,
+													  TESS_NULL_KEYS_REJECT,
+													  state->hashes, valid,
+													  &state->status));
+		else
+			check(state, (int8 ? state->kernels->int8_hash_next :
+						  state->kernels->int4_hash_next) (keys, NULL,
+														   TESS_NULL_KEYS_REJECT,
+														   state->hashes, valid,
+														   &state->status));
+		state->table_keys[key].kind = kinds[key];
+		state->table_keys[key].column = keys;
+		state->table_keys[key].prepared = NULL;
+	}
 }
 
 /* A column of a child's batch, checked. */
@@ -292,19 +319,20 @@ note_memory(TessHashJoinState *state)
 static void
 create_table(TessHashJoinState *state)
 {
-	TessTableKeyKind kind = state->inner_kind;
 	Size		payload_size = sizeof(uint64) * (1 + state->npayload);
 	uint64		capacity = Max(state->inner_rows, JOIN_INITIAL_ROWS);
 	Size		size;
 
 	MemoryContextReset(state->table_context);
 	MemoryContextReset(state->values_context);
-	check(state, state->kernels->table_size(1, &kind, payload_size, capacity,
+	check(state, state->kernels->table_size(state->nkeys, state->inner_kinds,
+											payload_size, capacity,
 											&size, &state->status));
 	state->region = MemoryContextAllocExtended(state->table_context, size,
 											   MCXT_ALLOC_HUGE | MCXT_ALLOC_ZERO);
 	state->region_len = size;
-	check(state, state->kernels->table_create(state->region, size, 1, &kind,
+	check(state, state->kernels->table_create(state->region, size, state->nkeys,
+											  state->inner_kinds,
 											  payload_size, capacity,
 											  &state->status));
 	note_memory(state);
@@ -384,8 +412,6 @@ insert_batch(TessHashJoinState *state, TessBatch *batch)
 	TessRowMask valid;
 	TessRowMask pending;
 	TessRowMask duplicates;
-	TessDatumColumn keys;
-	TessTableKey key = {0};
 	int			count;
 
 	reserve_rows(state, nrows);
@@ -395,16 +421,12 @@ insert_batch(TessHashJoinState *state, TessBatch *batch)
 	valid = (TessRowMask) {nrows, state->valid_bits};
 	pending = (TessRowMask) {nrows, state->pending_bits};
 	duplicates = (TessRowMask) {nrows, state->duplicate_bits};
-	child_column(batch, state->inner_key, &batch->rows, TESS_COLUMN_FOR_FILTER,
-				 &keys);
-	hash_keys(state, state->inner_kind, &keys, &batch->rows, &valid);
+	batch_keys(state, batch, state->inner_keys, state->inner_kinds, &valid);
 	count = tess_row_mask_count(&valid);
 	if (count == 0)
 		return;
 	fill_payload(state, batch, &valid);
 	memcpy(state->pending_bits, state->valid_bits, sizeof(uint64) * nwords);
-	key.kind = state->inner_kind;
-	key.column = &keys;
 	for (;;)
 	{
 		/*
@@ -413,8 +435,9 @@ insert_batch(TessHashJoinState *state, TessBatch *batch)
 		 */
 		check(state, state->kernels->table_insert_grouped(state->region,
 														  state->region_len,
-														  state->hashes, 1,
-														  &key,
+														  state->hashes,
+														  state->nkeys,
+														  state->table_keys,
 														  (const uint8 *) state->payload,
 														  &pending,
 														  state->offsets,
@@ -578,8 +601,6 @@ probe_batch(TessHashJoinState *state, TessBatch *batch)
 	int			nwords = tess_row_mask_word_count(nrows);
 	TessRowMask valid;
 	TessRowMask found;
-	TessDatumColumn keys;
-	TessTableKey key = {0};
 
 	reserve_rows(state, nrows);
 	/* A shorter batch than the last: no bits past its rows may remain. */
@@ -587,15 +608,12 @@ probe_batch(TessHashJoinState *state, TessBatch *batch)
 	memset(state->round_bits, 0, sizeof(uint64) * nwords);
 	valid = (TessRowMask) {nrows, state->valid_bits};
 	found = (TessRowMask) {nrows, state->round_bits};
-	child_column(batch, state->outer_key, &batch->rows, TESS_COLUMN_FOR_FILTER,
-				 &keys);
-	hash_keys(state, state->outer_kind, &keys, &batch->rows, &valid);
+	batch_keys(state, batch, state->outer_keys, state->outer_kinds, &valid);
 	if (tess_row_mask_count(&valid) == 0)
 		return false;
-	key.kind = state->outer_kind;
-	key.column = &keys;
 	check(state, state->kernels->table_probe(state->region, state->region_len,
-											 state->hashes, 1, &key, &valid,
+											 state->hashes, state->nkeys,
+											 state->table_keys, &valid,
 											 state->offsets, &found,
 											 &state->status));
 	return tess_row_mask_count(&found) > 0;
@@ -819,10 +837,15 @@ send_requests(TessHashJoinState *state)
 								   request->projection_columns);
 	Bitmapset  *outer_columns = NULL;
 	Bitmapset  *inner_columns = NULL;
-	Bitmapset  *outer_key = bms_make_singleton(state->outer_key);
-	Bitmapset  *inner_key = bms_make_singleton(state->inner_key);
+	Bitmapset  *outer_key = NULL;
+	Bitmapset  *inner_key = NULL;
 	int			column = -1;
 
+	for (int key = 0; key < state->nkeys; key++)
+	{
+		outer_key = bms_add_member(outer_key, state->outer_keys[key]);
+		inner_key = bms_add_member(inner_key, state->inner_keys[key]);
+	}
 	if (request->output_mode == TESS_OUTPUT_ROWS)
 	{
 		int			natts = state->css.ss.ps.ps_ResultTupleSlot->tts_tupleDescriptor->natts;
@@ -850,7 +873,7 @@ send_requests(TessHashJoinState *state)
 		state->payload_columns[state->npayload] = column;
 		state->payload_words[column] = ++state->npayload;
 	}
-	/* The key before any other column, then the rows that survive it. */
+	/* The keys before any other column, then the rows that survive them. */
 	outer_request.filter_columns = outer_key;
 	outer_request.projection_columns = outer_columns;
 	outer_request.output_mode = TESS_OUTPUT_BATCH;
@@ -874,24 +897,37 @@ read_node_data(TessHashJoinState *state, const List *data)
 													 TESS_HASH_JOIN_DATA_VERSION);
 	List	   *sides = tess_plan_read_int_list(reader, "sides");
 	List	   *columns = tess_plan_read_int_list(reader, "child_columns");
+	List	   *outer_keys = tess_plan_read_int_list(reader, "outer_keys");
+	List	   *inner_keys = tess_plan_read_int_list(reader, "inner_keys");
+	List	   *outer_kinds = tess_plan_read_int_list(reader, "outer_kinds");
+	List	   *inner_kinds = tess_plan_read_int_list(reader, "inner_kinds");
 	ListCell   *side;
 	ListCell   *column;
 	int			index = 0;
 
-	state->outer_key = tess_plan_read_int(reader, "outer_key");
-	state->inner_key = tess_plan_read_int(reader, "inner_key");
-	state->outer_kind = tess_plan_read_int(reader, "outer_kind");
-	state->inner_kind = tess_plan_read_int(reader, "inner_kind");
 	state->inner_unique = tess_plan_read_int(reader, "inner_unique") != 0;
 	state->inner_rows = tess_plan_read_int(reader, "inner_rows");
 	tess_plan_reader_finish(reader);
+	state->nkeys = list_length(outer_keys);
 	if (list_length(sides) != state->ncolumns ||
 		list_length(columns) != state->ncolumns ||
-		(state->outer_kind != TESS_TABLE_KEY_INT4 &&
-		 state->outer_kind != TESS_TABLE_KEY_INT8) ||
-		(state->inner_kind != TESS_TABLE_KEY_INT4 &&
-		 state->inner_kind != TESS_TABLE_KEY_INT8))
+		state->nkeys < 1 || state->nkeys > TESS_TABLE_MAX_KEYS ||
+		list_length(inner_keys) != state->nkeys ||
+		list_length(outer_kinds) != state->nkeys ||
+		list_length(inner_kinds) != state->nkeys)
 		elog(ERROR, "TessHashJoin received foreign plan data");
+	for (int key = 0; key < state->nkeys; key++)
+	{
+		state->outer_keys[key] = list_nth_int(outer_keys, key);
+		state->inner_keys[key] = list_nth_int(inner_keys, key);
+		state->outer_kinds[key] = list_nth_int(outer_kinds, key);
+		state->inner_kinds[key] = list_nth_int(inner_kinds, key);
+		if ((state->outer_kinds[key] != TESS_TABLE_KEY_INT4 &&
+			 state->outer_kinds[key] != TESS_TABLE_KEY_INT8) ||
+			(state->inner_kinds[key] != TESS_TABLE_KEY_INT4 &&
+			 state->inner_kinds[key] != TESS_TABLE_KEY_INT8))
+			elog(ERROR, "TessHashJoin received foreign plan data");
+	}
 	state->sides = palloc_array(int, state->ncolumns);
 	state->child_columns = palloc_array(int, state->ncolumns);
 	forboth(side, sides, column, columns)
@@ -1107,7 +1143,7 @@ join_explain(CustomScanState *css, List *ancestors, ExplainState *es)
 	context = set_deparse_context_plan(es->deparse_cxt, css->ss.ps.plan,
 									   ancestors);
 	ExplainPropertyText("Hash Cond",
-						deparse_expression((Node *) linitial(cscan->custom_exprs),
+						deparse_expression((Node *) make_ands_explicit(cscan->custom_exprs),
 										   context, useprefix, false), es);
 	if (!es->analyze)
 		return;
