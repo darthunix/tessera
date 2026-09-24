@@ -93,12 +93,39 @@ typedef struct TessHashJoinState
 	uint64	   *pending_bits;
 	/* The payload of every row of an inner batch, one after another. */
 	uint64	   *payload;
+	/* The rows of the current round, and a copy next_match reads. */
+	uint64	   *round_bits;
+	uint64	   *next_bits;
+	/* The published batch's mask, which the parent may narrow. */
+	uint64	   *published_bits;
+	/* Per row of the round: its record's NULL bits, then each kept column. */
+	Datum	   *null_words;
+	Datum	  **inner_values;
+	bool	  **inner_isnull;
+	/* What this round already gathered from the records. */
+	bool		nulls_gathered;
+	bool	   *gathered;
+
+	/* The outer batch whose rounds are being published, or NULL. */
+	TessBatch  *outer_batch;
+	/* The batch this node publishes: the outer rows of one round. */
+	TessBatch	batch;
+	/* Row mode: the column of every slot attribute, and the next row. */
+	TessDatumColumn *columns;
+	int			next_row;
+	bool		serving;
+	/* Nothing is left to return. */
+	bool		done;
 
 	/* Written by a kernel on failure only. */
 	TessStatus	status;
 
 	uint64		build_batches;
 	uint64		build_rows;
+	uint64		probe_batches;
+	uint64		probe_rows;
+	uint64		matches;
+	uint64		rounds;
 	uint64		builds;
 	uint64		grows;
 	/* The most memory the table and the copies took, in bytes. */
@@ -162,6 +189,15 @@ reserve_rows(TessHashJoinState *state, int nrows)
 		pfree(state->valid_bits);
 		pfree(state->pending_bits);
 		pfree(state->payload);
+		pfree(state->round_bits);
+		pfree(state->next_bits);
+		pfree(state->published_bits);
+		pfree(state->null_words);
+		for (int word = 0; word < state->npayload; word++)
+		{
+			pfree(state->inner_values[word]);
+			pfree(state->inner_isnull[word]);
+		}
 	}
 	state->hashes = MemoryContextAllocZero(context, sizeof(uint32) * nrows);
 	state->offsets = MemoryContextAllocZero(context, sizeof(uint32) * nrows);
@@ -170,6 +206,18 @@ reserve_rows(TessHashJoinState *state, int nrows)
 	state->payload = MemoryContextAllocZero(context,
 											mul_size(sizeof(uint64) * nrows,
 													 1 + state->npayload));
+	state->round_bits = MemoryContextAllocZero(context, sizeof(uint64) * nwords);
+	state->next_bits = MemoryContextAllocZero(context, sizeof(uint64) * nwords);
+	state->published_bits = MemoryContextAllocZero(context, sizeof(uint64) * nwords);
+	state->null_words = MemoryContextAllocZero(context, sizeof(Datum) * nrows);
+	/* Zeroed: rows outside a round are initialized memory, as batches promise. */
+	for (int word = 0; word < state->npayload; word++)
+	{
+		state->inner_values[word] = MemoryContextAllocZero(context,
+														   sizeof(Datum) * nrows);
+		state->inner_isnull[word] = MemoryContextAllocZero(context,
+														   sizeof(bool) * nrows);
+	}
 	state->capacity = nrows;
 }
 
@@ -332,6 +380,243 @@ build_table(TessHashJoinState *state)
 }
 
 /*
+ * The inner column kept in payload word `word`, for the rows of the
+ * round: the records' NULL bits once per round, then the column's word.
+ * A parent asks with a subset of the round's rows, which the whole round
+ * covers.
+ */
+static void
+gather_inner(TessHashJoinState *state, int word)
+{
+	TessRowMask round = {state->batch.rows.nrows, state->round_bits};
+	int			row = -1;
+
+	if (!state->nulls_gathered)
+	{
+		check(state, state->kernels->table_gather(state->region,
+												  state->region_len,
+												  state->offsets, &round, 0,
+												  state->null_words,
+												  &state->status));
+		state->nulls_gathered = true;
+	}
+	if (state->gathered[word])
+		return;
+	check(state, state->kernels->table_gather(state->region, state->region_len,
+											  state->offsets, &round,
+											  sizeof(uint64) * (1 + word),
+											  state->inner_values[word],
+											  &state->status));
+	while ((row = tess_row_mask_next(&round, row)) >= 0)
+		state->inner_isnull[word][row] =
+			(DatumGetUInt64(state->null_words[row]) >> word) & 1;
+	state->gathered[word] = true;
+}
+
+/*
+ * A column of the published batch: an outer column is the outer batch's
+ * own, an inner one is gathered from the round's records.
+ */
+static void
+join_get_column(TessBatch *batch, int column, const TessRowMask *rows,
+				TessColumnPurpose purpose, TessDatumColumn *result)
+{
+	TessHashJoinState *state = (TessHashJoinState *) batch->private_data;
+	int			word;
+
+	if (column < 0 || column >= state->ncolumns)
+		elog(ERROR, "TessHashJoin has no column %d", column);
+	if (state->sides[column] == JOIN_SIDE_OUTER)
+	{
+		TessBatch  *outer = state->outer_batch;
+
+		outer->ops->get_datum_column(outer, state->child_columns[column], rows,
+									 purpose, result);
+		return;
+	}
+	word = state->payload_words[column];
+	if (word == 0)
+		elog(ERROR, "TessHashJoin column %d was not requested", column);
+	gather_inner(state, word - 1);
+	result->values = state->inner_values[word - 1];
+	result->isnull = state->inner_isnull[word - 1];
+	result->nrows = batch->rows.nrows;
+}
+
+static const TessBatchOps join_batch_ops = {
+	TESS_ABI_INITIALIZER(TESS_BATCH_OPS_ABI_VERSION, TessBatchOps),
+	.get_datum_column = join_get_column,
+};
+
+/* Make the round's rows the published batch's selection. */
+static void
+start_round(TessHashJoinState *state)
+{
+	int			nrows = state->outer_batch->rows.nrows;
+	TessRowMask round = {nrows, state->round_bits};
+
+	memcpy(state->published_bits, state->round_bits,
+		   sizeof(uint64) * tess_row_mask_word_count(nrows));
+	state->batch.rows.nrows = nrows;
+	state->batch.rows.bits = state->published_bits;
+	state->nulls_gathered = false;
+	memset(state->gathered, 0, sizeof(bool) * Max(state->npayload, 1));
+	state->matches += tess_row_mask_count(&round);
+	state->rounds++;
+}
+
+/*
+ * Probe the table with one outer batch: the rows whose key found a record
+ * become the first round. False when none did.
+ */
+static bool
+probe_batch(TessHashJoinState *state, TessBatch *batch)
+{
+	int			nrows = batch->rows.nrows;
+	TessRowMask valid;
+	TessRowMask found;
+	TessDatumColumn keys;
+	TessTableKey key = {0};
+
+	reserve_rows(state, nrows);
+	valid = (TessRowMask) {nrows, state->valid_bits};
+	found = (TessRowMask) {nrows, state->round_bits};
+	child_column(batch, state->outer_key, &batch->rows, TESS_COLUMN_FOR_FILTER,
+				 &keys);
+	hash_keys(state, state->outer_kind, &keys, &batch->rows, &valid);
+	if (tess_row_mask_count(&valid) == 0)
+		return false;
+	key.kind = state->outer_kind;
+	key.column = &keys;
+	check(state, state->kernels->table_probe(state->region, state->region_len,
+											 state->hashes, 1, &key, &valid,
+											 state->offsets, &found,
+											 &state->status));
+	return tess_row_mask_count(&found) > 0;
+}
+
+/*
+ * The next round: the next record of each row of the current round, as
+ * long as some row has one; then the first round of the next outer batch
+ * that matches. False at the end of the outer input.
+ */
+static bool
+next_round(TessHashJoinState *state)
+{
+	for (;;)
+	{
+		TessBatch  *batch;
+
+		if (state->outer_batch != NULL)
+		{
+			int			nrows = state->outer_batch->rows.nrows;
+
+			if (!state->inner_unique)
+			{
+				TessRowMask rows = {nrows, state->next_bits};
+				TessRowMask found = {nrows, state->round_bits};
+
+				memcpy(state->next_bits, state->round_bits,
+					   sizeof(uint64) * tess_row_mask_word_count(nrows));
+				check(state, state->kernels->table_next_match(state->region,
+															  state->region_len,
+															  state->offsets,
+															  &rows, &found,
+															  &state->status));
+				if (tess_row_mask_count(&found) > 0)
+				{
+					start_round(state);
+					return true;
+				}
+			}
+			tess_input_finish(state->outer_input);
+			state->outer_batch = NULL;
+		}
+		batch = tess_input_next(state->outer_input);
+		if (batch == NULL)
+			return false;
+		state->probe_batches++;
+		state->probe_rows += tess_row_mask_count(&batch->rows);
+		if (!probe_batch(state, batch))
+		{
+			tess_input_finish(state->outer_input);
+			continue;
+		}
+		state->outer_batch = batch;
+		start_round(state);
+		return true;
+	}
+}
+
+/* Publish each round to a batch-aware parent, which finishes it there. */
+static TupleTableSlot *
+exec_batches(TessHashJoinState *state)
+{
+	tess_output_release(state->output);
+	if (!next_round(state))
+	{
+		state->done = true;
+		return NULL;
+	}
+	return tess_output_publish(state->output, &state->batch);
+}
+
+/* Row mode: the column of every slot attribute, for the whole round. */
+static void
+fetch_columns(TessHashJoinState *state)
+{
+	int			natts = state->css.ss.ps.ps_ResultTupleSlot->tts_tupleDescriptor->natts;
+
+	for (int attribute = 0; attribute < natts; attribute++)
+	{
+		TessDatumColumn *column = &state->columns[attribute];
+
+		*column = (TessDatumColumn) TESS_STRUCT_INITIALIZER(TessDatumColumn);
+		join_get_column(&state->batch, tess_layout_column(&state->layout, attribute),
+						&state->batch.rows, TESS_COLUMN_FOR_PROJECTION, column);
+		if (column->values == NULL || column->isnull == NULL ||
+			column->nrows != state->batch.rows.nrows)
+			elog(ERROR, "Tessera batch returned an invalid column");
+	}
+}
+
+/* Serve the rows of each round from the node's own slot. */
+static TupleTableSlot *
+exec_rows(TessHashJoinState *state)
+{
+	TupleTableSlot *slot = state->css.ss.ps.ps_ResultTupleSlot;
+	int			natts = slot->tts_tupleDescriptor->natts;
+	int			row;
+
+	for (;;)
+	{
+		if (!state->serving)
+		{
+			if (!next_round(state))
+			{
+				state->done = true;
+				return NULL;
+			}
+			fetch_columns(state);
+			state->next_row = tess_row_mask_next(&state->batch.rows, -1);
+			state->serving = true;
+		}
+		if (state->next_row >= 0)
+			break;
+		state->serving = false;
+	}
+	row = state->next_row;
+	state->next_row = tess_row_mask_next(&state->batch.rows, row);
+	ExecClearTuple(slot);
+	for (int attribute = 0; attribute < natts; attribute++)
+	{
+		slot->tts_values[attribute] = state->columns[attribute].values[row];
+		slot->tts_isnull[attribute] = state->columns[attribute].isnull[row];
+	}
+	return ExecStoreVirtualTuple(slot);
+}
+
+/*
  * The children's requests, from the parent's: the outer columns asked for
  * come from the outer batches, the inner ones are kept in the payload, and
  * each child also gives its key. A row-wise parent reads every column of
@@ -387,6 +672,9 @@ send_requests(TessHashJoinState *state)
 	inner_request.projection_columns = inner_columns;
 	inner_request.output_mode = TESS_OUTPUT_BATCH;
 	tess_input_set_request(state->inner_input, &inner_request);
+	state->inner_values = palloc0_array(Datum *, Max(state->npayload, 1));
+	state->inner_isnull = palloc0_array(bool *, Max(state->npayload, 1));
+	state->gathered = palloc0_array(bool, Max(state->npayload, 1));
 	state->request = request;
 }
 
@@ -480,6 +768,15 @@ join_begin(CustomScanState *css, EState *estate, int eflags)
 												  "TessHashJoin values",
 												  ALLOCSET_DEFAULT_SIZES);
 	state->status = (TessStatus) TESS_STRUCT_INITIALIZER(TessStatus);
+	state->batch = (TessBatch) {
+		TESS_ABI_INITIALIZER(TESS_BATCH_ABI_VERSION, TessBatch),
+	};
+	state->batch.table_oid = InvalidOid;
+	state->batch.ops = &join_batch_ops;
+	state->batch.private_data = state;
+	state->columns = palloc0_array(TessDatumColumn,
+								   Max(css->ss.ps.ps_ResultTupleSlot->tts_tupleDescriptor->natts, 1));
+	state->next_row = -1;
 }
 
 static TupleTableSlot *
@@ -487,12 +784,20 @@ join_exec(CustomScanState *css)
 {
 	TessHashJoinState *state = (TessHashJoinState *) css;
 
+	if (state->done)
+		return NULL;
 	if (state->request == NULL)
 		send_requests(state);
 	if (!state->built)
 		build_table(state);
-	elog(ERROR, "TessHashJoin cannot probe its table yet");
-	return NULL;
+	/* Nothing to match: the outer child is never read, as in the core. */
+	if (state->build_rows == 0)
+	{
+		state->done = true;
+		return NULL;
+	}
+	return state->request->output_mode == TESS_OUTPUT_BATCH ?
+		exec_batches(state) : exec_rows(state);
 }
 
 static void
@@ -518,6 +823,12 @@ join_rescan(CustomScanState *css)
 	TessHashJoinState *state = (TessHashJoinState *) css;
 
 	tess_output_clear(state->output);
+	ExecClearTuple(css->ss.ps.ps_ResultTupleSlot);
+	/* The rescan forgets the outer batch with the child's other state. */
+	state->outer_batch = NULL;
+	state->serving = false;
+	state->next_row = -1;
+	state->done = false;
 	if (css->ss.ps.chgParam != NULL)
 	{
 		UpdateChangedParamSet(state->outer, css->ss.ps.chgParam);
