@@ -95,7 +95,7 @@ fn transform(
 /// mask is given), its hash, `f` of that and the previous hash, stored.
 #[inline]
 #[target_feature(enable = "neon")]
-fn groups(
+pub(super) fn groups(
     load: impl Fn(usize) -> core::arch::aarch64::int32x4_t,
     non_nulls: Option<u64>,
     out: &mut [u32; 64],

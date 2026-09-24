@@ -13,14 +13,18 @@
 //! with [`hash_combine`]; NULL keys follow [`NullKeys`] as for int4, a NULL
 //! under the group policy hashing like the int4 group key.
 //!
-//! The contract of [`hash`] and [`hash_next`] is that of the int4 kernels:
+//! Whole words of storage the column exposes are hashed with vector code
+//! on AArch64, chosen by the first word as for the int4 kernels; other
+//! words go row by row. The contract of [`hash`] and [`hash_next`] is that
+//! of the int4 kernels:
 //! `hashes` has the batch's row count and rows outside the valid mask hold
 //! unspecified values; dimension errors come before any change, and a
 //! reader error leaves the outputs partly written.
 
 use anyhow::{Result, ensure};
-use tessera_core::{ColumnReader, RowMask, RowMaskView};
+use tessera_core::{ColumnReader, RowMask, RowMaskView, WordBlock};
 
+use super::{BULK_MIN_ROWS, Side};
 use crate::int32::hash::NULL_KEY;
 pub use crate::int32::hash::{NullKeys, hash_combine, murmurhash32};
 
@@ -69,7 +73,15 @@ pub fn hash<C: ColumnReader<Value = i64>>(
         rows.nrows() == valid.as_view().nrows(),
         "selection and mask row counts differ"
     );
-    run(column, rows, nulls, hashes, valid, |_, key| key)
+    run(
+        column,
+        rows,
+        nulls,
+        hashes,
+        valid,
+        |_, key| key,
+        Step::First,
+    )
 }
 
 /// Fold the next key into the hashes of the valid rows, narrowing `valid`
@@ -84,7 +96,15 @@ pub fn hash_next<C: ColumnReader<Value = i64>>(
     hashes: &mut [u32],
     valid: &mut RowMask<'_>,
 ) -> Result<()> {
-    run(column, &Valid, nulls, hashes, valid, hash_combine)
+    run(
+        column,
+        &Valid,
+        nulls,
+        hashes,
+        valid,
+        hash_combine,
+        Step::Next,
+    )
 }
 
 /// Where a call's selection words come from: a type, not a runtime choice,
@@ -111,8 +131,16 @@ impl Selection for Valid {
     }
 }
 
-/// Check the dimensions and hash word by word, in the function that knows
-/// the hashes' length, so that the row loop pays no bounds check per row.
+/// Which key of the chain a call hashes: the whole-word form of the fold.
+#[derive(Clone, Copy)]
+enum Step {
+    First,
+    Next,
+}
+
+/// Check the dimensions, choose the strategy by the first word, and run:
+/// whole words out of line, rows here, where the row loop knows the
+/// hashes' length and pays no bounds check per row.
 fn run<C, F, S>(
     column: &C,
     selection: &S,
@@ -120,6 +148,7 @@ fn run<C, F, S>(
     hashes: &mut [u32],
     valid: &mut RowMask<'_>,
     fold_hash: F,
+    step: Step,
 ) -> Result<()>
 where
     C: ColumnReader<Value = i64>,
@@ -132,12 +161,115 @@ where
         "column, hashes and mask row counts differ"
     );
     let reject = nulls == NullKeys::Reject;
+    // The first word decides, as for the int4 hashes.
+    let whole_words = cfg!(all(target_arch = "aarch64", not(miri))) && nrows >= 64 && {
+        let selected = selection.word(valid, 0);
+        (selected == u64::MAX
+            || (!selected.is_power_of_two() && selected.count_ones() >= BULK_MIN_ROWS))
+            && block(column, 0).is_some()
+    };
+    if whole_words {
+        return bulk(column, selection, reject, step, hashes, valid, &fold_hash);
+    }
     for index in 0..nrows.div_ceil(64) {
         let selected = selection.word(valid, index);
         let present = word(column, index, selected, reject, hashes, &fold_hash)?;
         valid.set_word(index, present)?;
     }
     Ok(())
+}
+
+/// Whole words where the column exposes them, rows elsewhere.
+#[inline(never)]
+fn bulk<C, F, S>(
+    column: &C,
+    selection: &S,
+    reject: bool,
+    step: Step,
+    hashes: &mut [u32],
+    valid: &mut RowMask<'_>,
+    fold_hash: &F,
+) -> Result<()>
+where
+    C: ColumnReader<Value = i64>,
+    F: Fn(u32, u32) -> u32,
+    S: Selection,
+{
+    for index in 0..valid.as_view().nrows().div_ceil(64) {
+        let selected = selection.word(valid, index);
+        if selected == 0 || selected.is_power_of_two() {
+            let present = word(column, index, selected, reject, hashes, fold_hash)?;
+            valid.set_word(index, present)?;
+            continue;
+        }
+        let Some((keys, non_null)) = block(column, index) else {
+            let present = word(column, index, selected, reject, hashes, fold_hash)?;
+            valid.set_word(index, present)?;
+            continue;
+        };
+        let base = index * 64;
+        let out: &mut [u32; 64] = (&mut hashes[base..base + 64])
+            .try_into()
+            .expect("a whole-word block implies a full word");
+        let present = if reject {
+            match step {
+                Step::First => bulk_op::hash64(keys, out),
+                Step::Next => bulk_op::combine64(keys, out),
+            }
+            selected & non_null
+        } else {
+            match step {
+                Step::First => bulk_op::hash_nulls64(keys, non_null, out),
+                Step::Next => bulk_op::combine_nulls64(keys, non_null, out),
+            }
+            selected
+        };
+        valid.set_word(index, present)?;
+    }
+    Ok(())
+}
+
+/// The storage of a whole word with its non-NULL rows, when exposed.
+#[cfg(all(target_arch = "aarch64", not(miri)))]
+fn block<C: ColumnReader<Value = i64>>(column: &C, index: usize) -> Option<(Side<'_>, u64)> {
+    Some(match column.word_block(index)? {
+        WordBlock::Dense { values, non_nulls } => (Side::Dense(values), non_nulls),
+        WordBlock::Datum { values, isnull } => {
+            (Side::Datum(values), crate::simd::non_null_bits(isnull))
+        }
+    })
+}
+
+#[cfg(not(all(target_arch = "aarch64", not(miri))))]
+fn block<C: ColumnReader<Value = i64>>(column: &C, index: usize) -> Option<(Side<'_>, u64)> {
+    let _ = (column, index);
+    None
+}
+
+#[cfg(all(target_arch = "aarch64", not(miri)))]
+use crate::simd as bulk_op;
+
+/// Without vector code no call takes the whole-word path; these keep the
+/// callers compiling and are never reached.
+#[cfg(not(all(target_arch = "aarch64", not(miri))))]
+mod bulk_op {
+    use super::Side;
+
+    pub fn hash64(_: Side<'_>, _: &mut [u32; 64]) {
+        unreachable!("no whole-word kernels on this target")
+    }
+
+    pub fn hash_nulls64(_: Side<'_>, _: u64, _: &mut [u32; 64]) {
+        unreachable!("no whole-word kernels on this target")
+    }
+
+    pub fn combine64(_: Side<'_>, _: &mut [u32; 64]) {
+        unreachable!("no whole-word kernels on this target")
+    }
+
+    pub fn combine_nulls64(_: Side<'_>, _: u64, _: &mut [u32; 64]) {
+        unreachable!("no whole-word kernels on this target")
+    }
 }
 
 /// One word row by row, without a branch on nullness: a NULL row hashes

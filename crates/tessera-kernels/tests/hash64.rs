@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 
 use anyhow::Result;
-use tessera_core::{ColumnView, RowMask, RowMaskView};
+use tessera_core::{ColumnReader, ColumnView, RowMask, RowMaskView};
 use tessera_kernels::{int32, int64};
 
 /// The hash of a NULL key under the group policy: `murmurhash32(0x9e3779b9)`.
@@ -227,6 +227,96 @@ fn further_keys_combine_in_order() -> Result<()> {
             model_murmur(model_fold(second[row])),
         );
         assert_eq!(hashes[row], expected, "row {row}");
+    }
+    Ok(())
+}
+
+/// The same values without bulk storage: every call takes the row path.
+struct RowsOnly<'a>(&'a ColumnView<'a, i64>);
+
+impl ColumnReader for RowsOnly<'_> {
+    type Value = i64;
+    fn nrows(&self) -> usize {
+        self.0.nrows()
+    }
+    fn get(&self, row: usize) -> Result<Option<i64>> {
+        ColumnReader::get(self.0, row)
+    }
+    fn word_values(
+        &self,
+        word_index: usize,
+        selected: u64,
+    ) -> Result<impl Iterator<Item = (usize, Option<i64>)> + '_> {
+        self.0.word_values(word_index, selected)
+    }
+}
+
+/// The packed words of a flag per row.
+fn words_for(flags: &[bool]) -> Vec<u64> {
+    let mut words = vec![0; flags.len().div_ceil(64)];
+    for (row, _) in flags.iter().enumerate().filter(|(_, flag)| **flag) {
+        words[row / 64] |= 1 << (row % 64);
+    }
+    words
+}
+
+#[test]
+fn whole_words_agree_with_the_row_path() -> Result<()> {
+    let mut state = 0x2545_f491_4f6c_dd1d_u64;
+    let nrows = 4 * 64 + 11;
+    let columns: Vec<(Vec<i64>, Vec<bool>)> = (0..3)
+        .map(|_| {
+            let values = values(&mut state, nrows)[..nrows].to_vec();
+            let non_null = (0..nrows)
+                .map(|_| !random(&mut state).is_multiple_of(4))
+                .collect();
+            (values, non_null)
+        })
+        .collect();
+    // A full first word puts the call on the whole-word path; later words
+    // range from full to sparse, single-row and empty, then the tail.
+    let selected: Vec<bool> = (0..nrows)
+        .map(|row| match row / 64 {
+            0 => true,
+            1 => random(&mut state).is_multiple_of(2),
+            2 => row % 64 == 5,
+            3 => false,
+            _ => row % 2 == 0,
+        })
+        .collect();
+    let words = words_for(&selected);
+    let rows = RowMaskView::try_new(nrows, &words)?;
+    for nulls in [int64::NullKeys::Reject, int64::NullKeys::Group] {
+        let mut whole = vec![0x5a5a_5a5a; nrows];
+        let mut whole_words = vec![0; nrows.div_ceil(64)];
+        let mut by_rows = vec![0x5a5a_5a5a; nrows];
+        let mut by_rows_words = vec![0; nrows.div_ceil(64)];
+        for (index, (values, non_null)) in columns.iter().enumerate() {
+            let non_null_words = words_for(non_null);
+            let column =
+                ColumnView::try_new(values, Some(RowMaskView::try_new(nrows, &non_null_words)?))?;
+            let mut whole_valid = RowMask::try_new(nrows, &mut whole_words)?;
+            let mut by_rows_valid = RowMask::try_new(nrows, &mut by_rows_words)?;
+            if index == 0 {
+                int64::hash(&column, &rows, nulls, &mut whole, &mut whole_valid)?;
+                int64::hash(
+                    &RowsOnly(&column),
+                    &rows,
+                    nulls,
+                    &mut by_rows,
+                    &mut by_rows_valid,
+                )?;
+            } else {
+                int64::hash_next(&column, nulls, &mut whole, &mut whole_valid)?;
+                int64::hash_next(&RowsOnly(&column), nulls, &mut by_rows, &mut by_rows_valid)?;
+            }
+            assert_eq!(whole_words, by_rows_words, "{nulls:?} key {index}");
+            for row in 0..nrows {
+                if whole_words[row / 64] >> (row % 64) & 1 == 1 {
+                    assert_eq!(whole[row], by_rows[row], "{nulls:?} key {index} row {row}");
+                }
+            }
+        }
     }
     Ok(())
 }
