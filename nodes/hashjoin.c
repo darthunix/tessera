@@ -53,6 +53,8 @@ enum
 	JOIN_OVERRUN,
 	/* Batches of pairs copied one after another: compact mode. */
 	JOIN_COMPACT_BATCHES,
+	/* Pairs the residual join clauses removed. */
+	JOIN_FILTER_REMOVED,
 	JOIN_NCOUNTERS
 };
 
@@ -171,6 +173,9 @@ typedef struct TessHashJoinState
 	TessDatumColumn *columns;
 	int			next_row;
 	bool		serving;
+	/* The residual join clauses over the pairs, or NULL; the scan tuple's layout. */
+	TessQual   *qual;
+	TessLayout	scan_layout;
 	/* Nothing is left to return. */
 	bool		done;
 	bool		compact_decided;
@@ -753,12 +758,36 @@ more:
 	return true;
 }
 
+/*
+ * The next batch of pairs, a round or a compact batch, with the residual
+ * join clauses applied: a batch they leave empty is skipped. The clauses
+ * narrow the published selection only; a round's own rows stay whole for
+ * the next round. False at the end.
+ */
+static bool
+next_output(TessHashJoinState *state)
+{
+	ExprContext *econtext = state->css.ss.ps.ps_ExprContext;
+
+	for (;;)
+	{
+		if (state->compact ? !fill_compact(state) : !next_round(state))
+			return false;
+		if (state->qual == NULL)
+			return true;
+		ResetExprContext(econtext);
+		if (tess_qual_apply(state->qual, &state->batch, econtext,
+							tess_row_mask_count(&state->batch.rows)) > 0)
+			return true;
+	}
+}
+
 /* Publish each round to a batch-aware parent, which finishes it there. */
 static TupleTableSlot *
 exec_batches(TessHashJoinState *state)
 {
 	tess_output_release(state->output);
-	if (state->compact ? !fill_compact(state) : !next_round(state))
+	if (!next_output(state))
 	{
 		state->done = true;
 		return NULL;
@@ -797,7 +826,7 @@ exec_rows(TessHashJoinState *state)
 	{
 		if (!state->serving)
 		{
-			if (!next_round(state))
+			if (!next_output(state))
 			{
 				state->done = true;
 				return NULL;
@@ -846,6 +875,9 @@ send_requests(TessHashJoinState *state)
 		outer_key = bms_add_member(outer_key, state->outer_keys[key]);
 		inner_key = bms_add_member(inner_key, state->inner_keys[key]);
 	}
+	/* The residual clauses read their columns of the pairs too. */
+	if (state->qual != NULL)
+		needed = bms_add_members(needed, tess_qual_columns(state->qual));
 	if (request->output_mode == TESS_OUTPUT_ROWS)
 	{
 		int			natts = state->css.ss.ps.ps_ResultTupleSlot->tts_tupleDescriptor->natts;
@@ -995,6 +1027,22 @@ join_begin(CustomScanState *css, EState *estate, int eflags)
 	state->values_context = AllocSetContextCreate(estate->es_query_cxt,
 												  "TessHashJoin values",
 												  ALLOCSET_DEFAULT_SIZES);
+	/* Row by row: a residual join clause compares columns of both sides. */
+	state->scan_layout = (TessLayout) TESS_STRUCT_INITIALIZER(TessLayout);
+	state->scan_layout.ncolumns = state->ncolumns;
+	state->scan_layout.ntargets = state->ncolumns;
+	/* custom_exprs: the key clauses, then the residual ones. */
+	if (list_length(cscan->custom_exprs) > state->nkeys)
+	{
+		TessQualConfig qual = TESS_STRUCT_INITIALIZER(TessQualConfig);
+
+		qual.parent_context = estate->es_query_cxt;
+		qual.parent = &css->ss.ps;
+		qual.row_clauses = list_copy_tail(cscan->custom_exprs, state->nkeys);
+		qual.scan_slot = css->ss.ss_ScanTupleSlot;
+		qual.scan_tuple = &state->scan_layout;
+		state->qual = tess_qual_create(&qual);
+	}
 	state->status = (TessStatus) TESS_STRUCT_INITIALIZER(TessStatus);
 	state->batch = (TessBatch) {
 		TESS_ABI_INITIALIZER(TESS_BATCH_ABI_VERSION, TessBatch),
@@ -1118,6 +1166,12 @@ join_counters(TessHashJoinState *state, uint64 *values)
 	Size		limit = get_hash_memory_limit();
 
 	memcpy(values, state->counters, sizeof(state->counters));
+	if (state->qual != NULL)
+	{
+		const TessQualStats *removed = tess_qual_stats(state->qual);
+
+		values[JOIN_FILTER_REMOVED] = removed->batch_removed + removed->row_removed;
+	}
 	values[JOIN_MEMORY] = state->peak_memory;
 	values[JOIN_OVERRUN] = state->peak_memory > limit ?
 		state->peak_memory - limit : 0;
@@ -1143,8 +1197,14 @@ join_explain(CustomScanState *css, List *ancestors, ExplainState *es)
 	context = set_deparse_context_plan(es->deparse_cxt, css->ss.ps.plan,
 									   ancestors);
 	ExplainPropertyText("Hash Cond",
-						deparse_expression((Node *) make_ands_explicit(cscan->custom_exprs),
+						deparse_expression((Node *) make_ands_explicit(list_copy_head(cscan->custom_exprs,
+																					  state->nkeys)),
 										   context, useprefix, false), es);
+	if (state->qual != NULL)
+		ExplainPropertyText("Join Filter",
+							deparse_expression((Node *) make_ands_explicit(list_copy_tail(cscan->custom_exprs,
+																						  state->nkeys)),
+											   context, useprefix, false), es);
 	if (!es->analyze)
 		return;
 	if (state->stats != NULL)
@@ -1167,6 +1227,9 @@ join_explain(CustomScanState *css, List *ancestors, ExplainState *es)
 	ExplainPropertyInteger("Table Grows", NULL, totals[JOIN_GROWS], es);
 	ExplainPropertyInteger("Probe Rows", NULL, totals[JOIN_PROBE_ROWS], es);
 	ExplainPropertyInteger("Matches", NULL, totals[JOIN_MATCHES], es);
+	if (state->qual != NULL)
+		ExplainPropertyInteger("Rows Removed by Join Filter", NULL,
+							   totals[JOIN_FILTER_REMOVED], es);
 	if (totals[JOIN_COMPACT_BATCHES] > 0)
 		ExplainPropertyInteger("Compact Batches", NULL,
 							   totals[JOIN_COMPACT_BATCHES], es);

@@ -502,10 +502,13 @@ node calls through the bridge's kernel registry (see
 ### Planning
 
 The module's `set_join_pathlist` hook offers the path for an inner join
-whose clauses, at most 16, are all `int4eq`, `int8eq`, `int48eq` or
-`int84eq` between a column of each side, when the join's target is plain
-columns and at most 64 of them and the inner keys are the inner side's.
-Each clause is a key of the table; keys go into it as 8-byte values and
+with at least one `int4eq`, `int8eq`, `int48eq` or `int84eq` between a
+column of each side, when the join's target is plain columns and at most
+64 of them, the inner keys and the inner columns of the residual clauses
+are the inner side's. Each such clause, up to 16, is a key of the table;
+the others are residual clauses, evaluated over the joined rows, when
+they read plain columns only (no placeholder) and are not
+pseudoconstant; keys go into it as 8-byte values and
 an int8 inside the int4 range hashes as the int4, so every combination
 of the two types uses one table. The children are batch
 paths over the sides' cheapest paths (`tess_batch_input_path`: a native
@@ -531,8 +534,9 @@ the build, usually costs less; a shared table of the node's own is item
 counters the participants share through `TessSharedStats`.
 
 The plan's scan tuple is the join's columns, the outer side's first, and
-the keys of both sides, which the join clauses in `custom_exprs` refer
-to; the node's targets are columns of it (`TESS_LAYOUT_PROJECTED`). The
+the keys of both sides and the residual clauses' columns, which the
+clauses in `custom_exprs`, the keys' first and the residual ones after
+them, refer to; the node's targets are columns of it (`TESS_LAYOUT_PROJECTED`). The
 plan data records each column's side and its column in that child's
 batches, each key's column and kind on each side, whether the inner side is unique and
 the planner's estimate of its rows.
@@ -565,7 +569,11 @@ NULL bits once per round, only when a column asked for holds a NULL
 somewhere in the table. A key held by several inner rows has as many
 records, and `tess_table_next_in_group` gives the next round in one step
 per row from the node's own copy of the round's rows, since a parent may
-narrow the published mask. There is no second round when the planner
+narrow the published mask. The residual clauses are applied row by row
+through `TessQual` (see [runtime.md](runtime.md)) to each round or
+compact batch before it is published: they narrow the published
+selection only, the round's own rows staying whole for the next round,
+and a batch they leave empty is skipped. There is no second round when the planner
 knows the inner side unique or the build met no duplicate key: walking a
 chain to find that a key has no other record cost as much as the probe
 itself. The outer batch stays active until its
@@ -575,7 +583,8 @@ gets a `Material` above it. A rescan builds the table again only when
 the inner child has changed parameters, as the core's hash join decides,
 and otherwise probes the same table with the rescanned outer child.
 
-`EXPLAIN` shows the join clause as `Hash Cond`. With `ANALYZE` it adds
+`EXPLAIN` shows the key clauses as `Hash Cond` and the residual ones as
+`Join Filter`. With `ANALYZE` it adds
 the bucket count of the last table built, `Memory Usage`, the most the
 table and the copies of inner values took, `Overrun`, what of it
 exceeded `hash_mem` (shown only then: the node keeps the whole inner side
@@ -583,7 +592,7 @@ in memory, and a table larger than the planner expected is kept rather
 than split), `Builds`, the tables built over the rescans, `Build Rows`,
 the inner rows inserted into them, `Table Grows`, the doublings of the
 region, `Probe Rows`, the outer rows probed, and `Matches`, the joined
-rows over every round, and `Compact Batches`, the batches of copied
+rows over every round, `Rows Removed by Join Filter`, and `Compact Batches`, the batches of copied
 pairs, when there are any. Under a `Gather` the counters are the totals of
 every participant, and the bucket count is the mean over the tables
 built.
@@ -597,7 +606,10 @@ sides, NULLs and text of the inner side; the keys as targets and no
 target at all; int8 keys past the int4 range and an int4 key against an
 int8 one both ways; two keys, with NULLs in the second, an int8 key next
 to an int4 one, three keys, and composite keys with duplicates under an
-aggregate and as rows; three inner rows per key, duplicates on both sides
+aggregate and as rows; residual clauses over int4 columns of both sides
+with NULLs, text, an OR over both sides, with rounds and compact
+batches, a text equality next to the key and a parameter of an outer
+query; three inner rows per key, duplicates on both sides
 and NULL keys on both; compact batches under an aggregate, with NULLs in
 an outer column, and a text outer column that keeps the rounds; a side
 of fewer than 64 rows, an empty side on
@@ -614,5 +626,5 @@ table disabled, it compares an aggregate over the node's partial path,
 rows through the `Gather`, rounds, and the leader not taking part, and
 checks that the rows probed and the matches are the totals of every
 participant. It also shows
-the core's plan without the kernels module, for a left join, a second
-join clause, a text key, hash joins disabled and the switch off.
+the core's plan without the kernels module, for a left join, clauses
+without an integer key, a text key, hash joins disabled and the switch off.

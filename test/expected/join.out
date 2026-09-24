@@ -278,6 +278,102 @@ SELECT join_same($$SELECT a.w, b.w FROM jpair a JOIN jpair b ON a.k = b.k AND a.
  750 rows, hash d2953a719201b27d7657f213608550d4
 (1 row)
 
+-- Residual join clauses over the pairs: int4 columns of both sides with
+-- NULLs, text, an OR over both sides, with rounds and compact batches, a
+-- text equality next to the key, and a parameter of an outer query.
+EXPLAIN (COSTS OFF) SELECT count(*) FROM jf JOIN jd ON jf.fk = jd.id AND jf.v > jd.n;
+                  QUERY PLAN                  
+----------------------------------------------
+ Custom Scan (TessAgg)
+   ->  Custom Scan (TessHashJoin)
+         Hash Cond: (jd.id = jf.fk)
+         Join Filter: (jf.v > jd.n)
+         ->  Custom Scan (TessHeapScan) on jf
+         ->  Custom Scan (TessHeapScan) on jd
+(6 rows)
+
+SELECT join_same($$SELECT jf.v, jd.n FROM jf JOIN jd ON jf.fk = jd.id AND jf.v > jd.n$$);
+                   join_same                    
+------------------------------------------------
+ 99 rows, hash d6297ca48701098aa828c9d2c8f43b4f
+(1 row)
+
+SELECT join_same($$SELECT count(*), sum(jd.n) FROM jf JOIN jd ON jf.fk = jd.id AND jf.v > jd.n$$);
+                   join_same                   
+-----------------------------------------------
+ 1 rows, hash 21f11868ce6e76de5c437349578592e4
+(1 row)
+
+SELECT join_same($$SELECT jf.note, jd.label FROM jf JOIN jd ON jf.fk = jd.id AND jf.note > jd.label$$);
+                    join_same                    
+-------------------------------------------------
+ 764 rows, hash f87615867c292aebf623e7e8472c710e
+(1 row)
+
+SELECT join_same($$SELECT jf.v, jd.id FROM jf JOIN jd ON jf.fk = jd.id AND (jf.v > 900 OR jd.n < 100)$$);
+                   join_same                    
+------------------------------------------------
+ 96 rows, hash 44478479aad34f18214b1e24f8373afe
+(1 row)
+
+SELECT join_explain($$SELECT count(*), sum(jdup.w) FROM jf JOIN jdup ON jf.fk = jdup.k AND jf.v > jdup.w$$);
+                                join_explain                                 
+-----------------------------------------------------------------------------
+ Custom Scan (TessAgg) (actual rows=1.00 loops=1)
+   Input Batches: 6
+   Input Rows: 324
+   Kernel Calls: 12
+   Computed Datums: 324
+   ->  Custom Scan (TessHashJoin) (actual rows=324.00 loops=1)
+         Hash Cond: (jf.fk = jdup.k)
+         Join Filter: (jf.v > jdup.w)
+         Buckets: 1024
+         Memory Usage: N kB
+         Builds: 1
+         Build Rows: 139
+         Table Grows: 0
+         Probe Rows: 1000
+         Matches: 357
+         Rows Removed by Join Filter: 33
+         Compact Batches: 6
+         ->  Custom Scan (TessHeapScan) on jf (actual rows=1000.00 loops=1)
+               Batch Size: 64
+               Batches: 18
+               Pages: 9
+               Deformed Datums: 2000
+               Restarted Datums: 0
+         ->  Custom Scan (TessHeapScan) on jdup (actual rows=150.00 loops=1)
+               Batch Size: 64
+               Batches: 3
+               Pages: 1
+               Deformed Datums: 289
+               Restarted Datums: 0
+(29 rows)
+
+SELECT join_same($$SELECT count(*), sum(jdup.w), sum(jf.m) FROM jf JOIN jdup ON jf.fk = jdup.k AND jf.v > jdup.w$$);
+                   join_same                   
+-----------------------------------------------
+ 1 rows, hash 780446ecd16f7736a029a1fc92156feb
+(1 row)
+
+SELECT join_same($$SELECT jf.v, jdup.w FROM jf JOIN jdup ON jf.fk = jdup.k AND jf.v > jdup.w$$);
+                    join_same                    
+-------------------------------------------------
+ 324 rows, hash f971c2af3146105563034903d6847801
+(1 row)
+
+SELECT join_same($$SELECT jf.v, jd.label FROM jf JOIN jd ON jf.fk = jd.id AND jf.note = jd.label$$);
+                   join_same                   
+-----------------------------------------------
+ 0 rows, hash d41d8cd98f00b204e9800998ecf8427e
+(1 row)
+
+SELECT join_same($$SELECT jsmall.k, (SELECT count(*) FROM jf JOIN jdup ON jf.fk = jdup.k AND jf.v - jdup.w > jsmall.k) FROM jsmall$$);
+                   join_same                    
+------------------------------------------------
+ 10 rows, hash 509ba6b74dc0068e6ae5ca68a0920629
+(1 row)
+
 -- A side of fewer than 64 rows, an empty side, a join over a join.
 SELECT join_same($$SELECT jsmall.s, jd.label FROM jsmall JOIN jd ON jsmall.k = jd.id$$);
                    join_same                    
@@ -688,7 +784,7 @@ RESET parallel_setup_cost;
 RESET parallel_tuple_cost;
 RESET min_parallel_table_scan_size;
 RESET enable_parallel_hash;
--- No path: another join type, a second clause, another key type, the
+-- No path: another join type, clauses without an integer key, another key type, the
 -- core's hash join disabled, the batch nodes off.
 EXPLAIN (COSTS OFF) SELECT count(jd.id) FROM jf LEFT JOIN jd ON jf.fk = jd.id;
                 QUERY PLAN                
@@ -702,13 +798,13 @@ EXPLAIN (COSTS OFF) SELECT count(jd.id) FROM jf LEFT JOIN jd ON jf.fk = jd.id;
                      ->  Seq Scan on jd
 (7 rows)
 
-EXPLAIN (COSTS OFF) SELECT count(*) FROM jf JOIN jd ON jf.fk = jd.id AND jf.v > jd.n;
-                QUERY PLAN                
-------------------------------------------
+EXPLAIN (COSTS OFF) SELECT count(*) FROM jf JOIN jd ON jf.v > jd.n AND jf.note = jd.label;
+                  QUERY PLAN                   
+-----------------------------------------------
  Custom Scan (TessAgg)
    ->  Custom Scan (TessPack)
          ->  Hash Join
-               Hash Cond: (jf.fk = jd.id)
+               Hash Cond: (jf.note = jd.label)
                Join Filter: (jf.v > jd.n)
                ->  Seq Scan on jf
                ->  Hash

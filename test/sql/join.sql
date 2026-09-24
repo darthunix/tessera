@@ -105,6 +105,20 @@ EXPLAIN (COSTS OFF) SELECT sum(b.w) FROM jpair a JOIN jpair b ON a.k = b.k AND a
 SELECT join_same($$SELECT count(*), sum(a.w), sum(b.w) FROM jpair a JOIN jpair b ON a.k = b.k AND a.j = b.j$$);
 SELECT join_same($$SELECT a.w, b.w FROM jpair a JOIN jpair b ON a.k = b.k AND a.j = b.j$$);
 
+-- Residual join clauses over the pairs: int4 columns of both sides with
+-- NULLs, text, an OR over both sides, with rounds and compact batches, a
+-- text equality next to the key, and a parameter of an outer query.
+EXPLAIN (COSTS OFF) SELECT count(*) FROM jf JOIN jd ON jf.fk = jd.id AND jf.v > jd.n;
+SELECT join_same($$SELECT jf.v, jd.n FROM jf JOIN jd ON jf.fk = jd.id AND jf.v > jd.n$$);
+SELECT join_same($$SELECT count(*), sum(jd.n) FROM jf JOIN jd ON jf.fk = jd.id AND jf.v > jd.n$$);
+SELECT join_same($$SELECT jf.note, jd.label FROM jf JOIN jd ON jf.fk = jd.id AND jf.note > jd.label$$);
+SELECT join_same($$SELECT jf.v, jd.id FROM jf JOIN jd ON jf.fk = jd.id AND (jf.v > 900 OR jd.n < 100)$$);
+SELECT join_explain($$SELECT count(*), sum(jdup.w) FROM jf JOIN jdup ON jf.fk = jdup.k AND jf.v > jdup.w$$);
+SELECT join_same($$SELECT count(*), sum(jdup.w), sum(jf.m) FROM jf JOIN jdup ON jf.fk = jdup.k AND jf.v > jdup.w$$);
+SELECT join_same($$SELECT jf.v, jdup.w FROM jf JOIN jdup ON jf.fk = jdup.k AND jf.v > jdup.w$$);
+SELECT join_same($$SELECT jf.v, jd.label FROM jf JOIN jd ON jf.fk = jd.id AND jf.note = jd.label$$);
+SELECT join_same($$SELECT jsmall.k, (SELECT count(*) FROM jf JOIN jdup ON jf.fk = jdup.k AND jf.v - jdup.w > jsmall.k) FROM jsmall$$);
+
 -- A side of fewer than 64 rows, an empty side, a join over a join.
 SELECT join_same($$SELECT jsmall.s, jd.label FROM jsmall JOIN jd ON jsmall.k = jd.id$$);
 SELECT join_same($$SELECT jf.v, jempty.e FROM jf JOIN jempty ON jf.fk = jempty.k$$);
@@ -198,10 +212,10 @@ RESET parallel_tuple_cost;
 RESET min_parallel_table_scan_size;
 RESET enable_parallel_hash;
 
--- No path: another join type, a second clause, another key type, the
+-- No path: another join type, clauses without an integer key, another key type, the
 -- core's hash join disabled, the batch nodes off.
 EXPLAIN (COSTS OFF) SELECT count(jd.id) FROM jf LEFT JOIN jd ON jf.fk = jd.id;
-EXPLAIN (COSTS OFF) SELECT count(*) FROM jf JOIN jd ON jf.fk = jd.id AND jf.v > jd.n;
+EXPLAIN (COSTS OFF) SELECT count(*) FROM jf JOIN jd ON jf.v > jd.n AND jf.note = jd.label;
 EXPLAIN (COSTS OFF) SELECT count(*) FROM jf JOIN jd ON jf.note = jd.label;
 SET enable_hashjoin = off;
 EXPLAIN (COSTS OFF) SELECT count(*) FROM jf JOIN jd ON jf.fk = jd.id;

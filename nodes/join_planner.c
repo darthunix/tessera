@@ -19,8 +19,9 @@
 
 /*
  * The planner of TessHashJoin: through set_join_pathlist_hook it offers
- * the node for an inner join whose clauses are all equalities of an int4
- * or int8 column of each side, with a cost below the core's hash join of
+ * the node for an inner join with an equality of an int4 or int8 column
+ * of each side, the others such keys too or residual clauses over the
+ * joined rows, with a cost below the core's hash join of
  * the same inputs, which serves as the template. The children are batch
  * paths over the sides' cheapest paths. See docs/nodes.md.
  */
@@ -49,6 +50,8 @@ typedef struct JoinKeys
 	List	   *inner;
 	List	   *outer_kinds;
 	List	   *inner_kinds;
+	/* The other clauses, evaluated over the joined rows. */
+	List	   *residual;
 } JoinKeys;
 
 /* The table's kind of a key of this type, or false for another type. */
@@ -128,22 +131,44 @@ add_key(RestrictInfo *rinfo, RelOptInfo *outerrel, RelOptInfo *innerrel,
 }
 
 /*
- * The join's clauses as keys, when every one of them is a key, at most as
- * many as the table takes.
+ * A residual clause the node evaluates over the joined rows: one reading
+ * plain columns of the query level, no placeholder, and no pseudoconstant,
+ * which the planner gates the whole join with instead.
+ */
+static bool
+residual_supported(RestrictInfo *rinfo)
+{
+	if (rinfo->pseudoconstant)
+		return false;
+	foreach_ptr(Node, node, pull_var_clause((Node *) rinfo->clause,
+											PVC_INCLUDE_PLACEHOLDERS))
+	{
+		if (!plain_var(node))
+			return false;
+	}
+	return true;
+}
+
+/*
+ * The join's clauses: its integer equalities between the sides as keys,
+ * as many as the table takes, and the others as residual clauses. There
+ * must be a key.
  */
 static bool
 find_keys(List *restrictlist, RelOptInfo *outerrel, RelOptInfo *innerrel,
 		  JoinKeys *keys)
 {
 	memset(keys, 0, sizeof(*keys));
-	if (restrictlist == NIL || list_length(restrictlist) > TESS_TABLE_MAX_KEYS)
-		return false;
 	foreach_node(RestrictInfo, rinfo, restrictlist)
 	{
-		if (!add_key(rinfo, outerrel, innerrel, keys))
+		if (keys->nkeys < TESS_TABLE_MAX_KEYS &&
+			add_key(rinfo, outerrel, innerrel, keys))
+			continue;
+		if (!residual_supported(rinfo))
 			return false;
+		keys->residual = lappend(keys->residual, rinfo->clause);
 	}
-	return true;
+	return keys->nkeys > 0;
 }
 
 /*
@@ -177,6 +202,12 @@ target_supported(RelOptInfo *joinrel, RelOptInfo *innerrel, const JoinKeys *keys
 	}
 	/* Keys outside the target are columns of the scan tuple too. */
 	*ninner += keys->nkeys - bms_num_members(inner_keys);
+	/* So are the residual clauses' inner columns, counted generously. */
+	foreach_node(Var, var, pull_var_clause((Node *) keys->residual, 0))
+	{
+		if (bms_is_member(var->varno, innerrel->relids))
+			(*ninner)++;
+	}
 	return *ninner <= JOIN_MAX_INNER_COLUMNS;
 }
 
@@ -237,7 +268,8 @@ make_join_path(PlannerInfo *root, RelOptInfo *joinrel,
 	config.methods = &join_path_methods;
 	config.node = &tess_hash_join_node;
 	config.children = list_make2(outer, inner);
-	config.expressions = list_make3(keys->clauses, keys->outer, keys->inner);
+	config.expressions = list_make4(keys->clauses, keys->outer, keys->inner,
+									keys->residual);
 	config.node_data = (Node *) list_make3(keys->outer_kinds, keys->inner_kinds,
 										   list_make2_int(extra->inner_unique ? 1 : 0,
 														  (int) Min(inner_path->rows,
@@ -340,10 +372,9 @@ scan_has(List *scan, const Var *var)
 }
 
 /*
- * The scan tuple is the join's columns, the outer side's first, and the
- * keys, which the join clause in custom_exprs refers to; the node's
- * targets are columns of it. Each entry is a column of one child's
- * batches, which the plan data records.
+ * The scan tuple is the join's columns, the outer side's first, then the
+ * keys and the residual clauses' columns, which custom_exprs refers to; the node's targets are columns of it. Each entry is a column
+ * of one child's batches, which the plan data records.
  */
 static Plan *
 join_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
@@ -359,6 +390,7 @@ join_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 	List	   *hash_clauses;
 	List	   *outer_keys;
 	List	   *inner_keys;
+	List	   *residual;
 	List	   *outer_columns = NIL;
 	List	   *inner_columns = NIL;
 	Relids		outer_relids;
@@ -369,11 +401,12 @@ join_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 	tess_path_get_info(best_path, &info);
 	if (!tess_plan_child(best_path, custom_plans, 0, &outer) ||
 		!tess_plan_child(best_path, custom_plans, 1, &inner) ||
-		list_length(info.expressions) != 3)
+		list_length(info.expressions) != 4)
 		elog(ERROR, "TessHashJoin expected two batch children");
 	hash_clauses = linitial(info.expressions);
 	outer_keys = lsecond(info.expressions);
 	inner_keys = lthird(info.expressions);
+	residual = lfourth(info.expressions);
 	data = (List *) info.node_data;
 	outer_relids = outer.path->parent->relids;
 	for (int side = 0; side < 2; side++)
@@ -382,6 +415,9 @@ join_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 
 		foreach_node(Var, key, side == 0 ? outer_keys : inner_keys)
 			wanted = lappend(wanted, makeTargetEntry((Expr *) key, 0, NULL, true));
+		/* The residual clauses' columns, which the qual refers to. */
+		foreach_node(Var, var, pull_var_clause((Node *) residual, 0))
+			wanted = lappend(wanted, makeTargetEntry((Expr *) var, 0, NULL, true));
 		foreach_ptr(TargetEntry, entry, wanted)
 		{
 			Var		   *var = (Var *) entry->expr;
@@ -420,8 +456,12 @@ join_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 	config.methods = &tess_hash_join_scan_methods;
 	config.layout_policy = TESS_LAYOUT_PROJECTED;
 	config.explicit_layout = &layout;
+	/*
+	 * The key clauses, then the residual ones: the node shows and applies
+	 * both, and a plan qual would also be shown by EXPLAIN as a filter.
+	 */
 	config.qual = NIL;
-	config.expressions = hash_clauses;
+	config.expressions = list_concat_copy(hash_clauses, residual);
 	config.node_data = (Node *) tess_plan_writer_finish(writer);
 	config.scan_targetlist = scan;
 	config.scanrelid = 0;
