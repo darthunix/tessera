@@ -175,7 +175,19 @@ columns of the subquery and whose subquery is planned as a batch path,
 hands the batches of the plan under the subquery scan to its parent.
 PostgreSQL keeps the subquery scan in the plan for the subquery's range
 table, unless the scan is trivial, in which case it drops it after
-planning and the pack's child is the batch node itself. The explicit
+planning and the pack's child is the batch node itself.
+
+A batch-aware parent over a table with duplicate keys gets compact
+batches instead, when every outer column it asked for is passed by
+value: the node copies the pairs of the rounds one after another into
+batches of 64 rows, each outer column's value copied from the round's
+outer batch and each pair's record kept, and gathers the inner columns
+from those records. Published over the outer batch, a key with four
+records would give four batches with a quarter of their rows selected,
+each paying the whole cost of a batch in the parent. A copied value must
+outlive its outer batch, which a by-reference one would not; and without
+duplicates a round is dense enough that copying the outer columns costs
+more than it saves. The explicit
 layout `PlanCustomPath` builds from the subplan's layout, mapping every
 target to the column of the subplan's target of the same number, holds
 either way. A subquery scan with a clause of its own, or over a subquery
@@ -569,7 +581,8 @@ in memory, and a table larger than the planner expected is kept rather
 than split), `Builds`, the tables built over the rescans, `Build Rows`,
 the inner rows inserted into them, `Table Grows`, the doublings of the
 region, `Probe Rows`, the outer rows probed, and `Matches`, the joined
-rows over every round. Under a `Gather` the counters are the totals of
+rows over every round, and `Compact Batches`, the batches of copied
+pairs, when there are any. Under a `Gather` the counters are the totals of
 every participant, and the bucket count is the mean over the tables
 built.
 
@@ -581,7 +594,9 @@ the join's batches without pack; rows to the client with columns of both
 sides, NULLs and text of the inner side; the keys as targets and no
 target at all; int8 keys past the int4 range and an int4 key against an
 int8 one both ways; three inner rows per key, duplicates on both sides
-and NULL keys on both; a side of fewer than 64 rows, an empty side on
+and NULL keys on both; compact batches under an aggregate, with NULLs in
+an outer column, and a text outer column that keeps the rounds; a side
+of fewer than 64 rows, an empty side on
 either side, a join over a join; an inner side much larger than the
 planner's estimate, which makes the table grow; a top-N sort and a limit
 above the node, and a scrollable cursor through `Material`. With

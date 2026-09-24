@@ -21,6 +21,17 @@ BEGIN
            md5(coalesce(with_tessera::text, ''));
 END $$;
 
+-- EXPLAIN ANALYZE with the memory masked, since it depends on the allocator.
+CREATE FUNCTION join_explain(query text) RETURNS SETOF text
+LANGUAGE plpgsql AS $$
+DECLARE
+    line text;
+BEGIN
+    FOR line IN EXECUTE 'EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) ' || query LOOP
+        RETURN NEXT regexp_replace(line, '(Memory Usage|Overrun): \d+ kB', '\1: N kB');
+    END LOOP;
+END $$;
+
 -- A dimension with a unique key, int8 copies of it and values past the
 -- int4 range; a fact table whose keys repeat, miss and are NULL; a table
 -- with three rows per key and NULL keys; a small one and an empty one.
@@ -28,9 +39,9 @@ CREATE TABLE jd (id int PRIMARY KEY, id8 bigint, big bigint, label text, n int);
 INSERT INTO jd
 SELECT g, g, g::bigint << 33, 'd' || g, CASE WHEN g % 5 = 0 THEN NULL ELSE g * 10 END
 FROM generate_series(1, 300) AS g;
-CREATE TABLE jf (fk int, fk8 bigint, fk_big bigint, v int, note text);
+CREATE TABLE jf (fk int, fk8 bigint, fk_big bigint, v int, note text, m int);
 INSERT INTO jf
-SELECT fk, fk, fk::bigint << 33, g, 'f' || g
+SELECT fk, fk, fk::bigint << 33, g, 'f' || g, CASE WHEN g % 5 = 0 THEN NULL ELSE g END
 FROM generate_series(1, 1000) AS g,
      LATERAL (SELECT CASE WHEN g % 9 = 0 THEN NULL ELSE (g * 37) % 350 + 1 END AS fk) AS key;
 CREATE TABLE jdup (k int, w int, t text);
@@ -72,6 +83,12 @@ EXPLAIN (COSTS OFF) SELECT jf.v, jdup.w FROM jf JOIN jdup ON jf.fk = jdup.k;
 SELECT join_same($$SELECT jf.v, jdup.w, jdup.t FROM jf JOIN jdup ON jf.fk = jdup.k$$);
 SELECT join_same($$SELECT count(*), sum(jdup.w) FROM jf JOIN jdup ON jf.fk = jdup.k$$);
 SELECT join_same($$SELECT a.w, b.w FROM jdup a JOIN jdup b ON a.k = b.k$$);
+-- Under an aggregate, the pairs of the rounds are copied into full batches
+-- (compact mode): outer columns by value, NULLs among them; a text outer
+-- column keeps the rounds over the outer batches.
+SELECT join_explain($$SELECT count(jf.m), sum(jf.m), sum(jdup.w) FROM jf JOIN jdup ON jf.fk = jdup.k$$);
+SELECT join_same($$SELECT count(jf.m), sum(jf.m), sum(jdup.w) FROM jf JOIN jdup ON jf.fk = jdup.k$$);
+SELECT join_same($$SELECT count(jf.note), max(jdup.w) FROM jf JOIN jdup ON jf.fk = jdup.k$$);
 
 -- A side of fewer than 64 rows, an empty side, a join over a join.
 SELECT join_same($$SELECT jsmall.s, jd.label FROM jsmall JOIN jd ON jsmall.k = jd.id$$);
@@ -88,16 +105,6 @@ INSERT INTO jgrow SELECT g % 400, g FROM generate_series(1, 20000) AS g;
 SELECT join_same($$SELECT count(*), sum(jgrow.g) FROM jsmall JOIN jgrow ON jsmall.k = jgrow.k$$);
 SELECT join_same($$SELECT count(*), sum(jgrow.g) FROM jd JOIN jgrow ON jd.id = jgrow.k$$);
 
--- EXPLAIN ANALYZE with the memory masked, since it depends on the allocator.
-CREATE FUNCTION join_explain(query text) RETURNS SETOF text
-LANGUAGE plpgsql AS $$
-DECLARE
-    line text;
-BEGIN
-    FOR line IN EXECUTE 'EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) ' || query LOOP
-        RETURN NEXT regexp_replace(line, '(Memory Usage|Overrun): \d+ kB', '\1: N kB');
-    END LOOP;
-END $$;
 SELECT join_explain($$SELECT count(*) FROM jf JOIN jd ON jf.fk = jd.id$$);
 -- Rounds: every match of a key with three records counts.
 SELECT join_explain($$SELECT sum(jdup.w) FROM jf JOIN jdup ON jf.fk = jdup.k$$);

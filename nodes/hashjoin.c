@@ -34,6 +34,8 @@
 #define JOIN_MAX_PAYLOAD 64
 /* Rows of the buffers before the first batch shows its size. */
 #define JOIN_INITIAL_ROWS 64
+/* Rows of a compact batch: the pairs of several rounds, one after another. */
+#define JOIN_COMPACT_ROWS 64
 
 /* The counters every participant of a parallel plan shares. */
 enum
@@ -48,6 +50,8 @@ enum
 	/* The participant's peak bytes, and what of them exceeded hash_mem. */
 	JOIN_MEMORY,
 	JOIN_OVERRUN,
+	/* Batches of pairs copied one after another: compact mode. */
+	JOIN_COMPACT_BATCHES,
 	JOIN_NCOUNTERS
 };
 
@@ -128,6 +132,31 @@ typedef struct TessHashJoinState
 	bool		nulls_gathered;
 	bool	   *gathered;
 
+	/* The records and rows the published batch reads: a round's or a compact batch's. */
+	uint32	   *current_offsets;
+	uint64	   *current_bits;
+
+	/*
+	 * Compact mode, for a table with duplicate keys: the pairs of the
+	 * rounds are copied one after another into batches of
+	 * JOIN_COMPACT_ROWS rows, the outer columns by value, the inner ones
+	 * gathered from the pairs' records, instead of publishing every round
+	 * over the outer batch's rows with a quarter of them selected.
+	 */
+	bool		compact;
+	/* The outer scan columns the parent asked for, all passed by value. */
+	int			nouter;
+	int		   *outer_columns;
+	/* Per scan column: its values in the compact batch; outer ones only. */
+	Datum	  **compact_values;
+	bool	  **compact_isnull;
+	uint32		compact_offsets[JOIN_COMPACT_ROWS];
+	uint64		compact_bits[1];
+	/* The round being copied: its rows not yet copied, its outer columns. */
+	bool		round_open;
+	uint64	   *taken_bits;
+	TessDatumColumn *round_columns;
+
 	/* The outer batch whose rounds are being published, or NULL. */
 	TessBatch  *outer_batch;
 	/* The batch this node publishes: the outer rows of one round. */
@@ -138,6 +167,7 @@ typedef struct TessHashJoinState
 	bool		serving;
 	/* Nothing is left to return. */
 	bool		done;
+	bool		compact_decided;
 
 	/* Written by a kernel on failure only. */
 	TessStatus	status;
@@ -216,6 +246,7 @@ reserve_rows(TessHashJoinState *state, int nrows)
 		pfree(state->round_bits);
 		pfree(state->next_bits);
 		pfree(state->published_bits);
+		pfree(state->taken_bits);
 		pfree(state->null_words);
 		for (int word = 0; word < state->npayload; word++)
 		{
@@ -234,6 +265,7 @@ reserve_rows(TessHashJoinState *state, int nrows)
 	state->round_bits = MemoryContextAllocZero(context, sizeof(uint64) * nwords);
 	state->next_bits = MemoryContextAllocZero(context, sizeof(uint64) * nwords);
 	state->published_bits = MemoryContextAllocZero(context, sizeof(uint64) * nwords);
+	state->taken_bits = MemoryContextAllocZero(context, sizeof(uint64) * nwords);
 	state->null_words = MemoryContextAllocZero(context, sizeof(Datum) * nrows);
 	/* Zeroed: rows outside a round are initialized memory, as batches promise. */
 	for (int word = 0; word < state->npayload; word++)
@@ -404,6 +436,8 @@ static void
 build_table(TessHashJoinState *state)
 {
 	create_table(state);
+	/* Another table, maybe with other duplicates: decide compact mode again. */
+	state->compact_decided = false;
 	state->build_rows = 0;
 	state->duplicates = 0;
 	state->null_columns = 0;
@@ -443,7 +477,7 @@ build_table(TessHashJoinState *state)
 static void
 gather_inner(TessHashJoinState *state, int word)
 {
-	TessRowMask round = {state->batch.rows.nrows, state->round_bits};
+	TessRowMask round = {state->batch.rows.nrows, state->current_bits};
 	bool		nullable = (state->null_columns >> word) & 1;
 	int			row = -1;
 
@@ -454,13 +488,13 @@ gather_inner(TessHashJoinState *state, int word)
 	{
 		check(state, state->kernels->table_gather(state->region,
 												  state->region_len,
-												  state->offsets, &round, 0,
+												  state->current_offsets, &round, 0,
 												  state->null_words,
 												  &state->status));
 		state->nulls_gathered = true;
 	}
 	check(state, state->kernels->table_gather(state->region, state->region_len,
-											  state->offsets, &round,
+											  state->current_offsets, &round,
 											  sizeof(uint64) * (1 + word),
 											  state->inner_values[word],
 											  &state->status));
@@ -484,6 +518,15 @@ join_get_column(TessBatch *batch, int column, const TessRowMask *rows,
 
 	if (column < 0 || column >= state->ncolumns)
 		elog(ERROR, "TessHashJoin has no column %d", column);
+	if (state->sides[column] == JOIN_SIDE_OUTER && state->compact)
+	{
+		if (state->compact_values[column] == NULL)
+			elog(ERROR, "TessHashJoin column %d was not requested", column);
+		result->values = state->compact_values[column];
+		result->isnull = state->compact_isnull[column];
+		result->nrows = batch->rows.nrows;
+		return;
+	}
 	if (state->sides[column] == JOIN_SIDE_OUTER)
 	{
 		TessBatch  *outer = state->outer_batch;
@@ -517,6 +560,8 @@ start_round(TessHashJoinState *state)
 		   sizeof(uint64) * tess_row_mask_word_count(nrows));
 	state->batch.rows.nrows = nrows;
 	state->batch.rows.bits = state->published_bits;
+	state->current_offsets = state->offsets;
+	state->current_bits = state->round_bits;
 	state->nulls_gathered = false;
 	memset(state->gathered, 0, sizeof(bool) * Max(state->npayload, 1));
 	state->counters[JOIN_MATCHES] += tess_row_mask_count(&round);
@@ -609,12 +654,93 @@ next_round(TessHashJoinState *state)
 	}
 }
 
+/*
+ * Fill a compact batch with the pairs of the rounds, from where the last
+ * one stopped: the record of each pair, and the outer columns copied by
+ * value from the round's outer batch, fetched once per round. False when
+ * no pair is left.
+ */
+static bool
+fill_compact(TessHashJoinState *state)
+{
+	int			count = 0;
+
+	while (count < JOIN_COMPACT_ROWS)
+	{
+		int			nrows;
+		int			nwords;
+
+		if (!state->round_open)
+		{
+			if (!next_round(state))
+				break;
+			nrows = state->outer_batch->rows.nrows;
+			memcpy(state->taken_bits, state->round_bits,
+				   sizeof(uint64) * tess_row_mask_word_count(nrows));
+			for (int index = 0; index < state->nouter; index++)
+			{
+				int			column = state->outer_columns[index];
+
+				child_column(state->outer_batch, state->child_columns[column],
+							 &state->outer_batch->rows,
+							 TESS_COLUMN_FOR_PROJECTION,
+							 &state->round_columns[index]);
+			}
+			state->round_open = true;
+		}
+		nrows = state->outer_batch->rows.nrows;
+		nwords = tess_row_mask_word_count(nrows);
+		for (int index = 0; index < nwords && count < JOIN_COMPACT_ROWS; index++)
+		{
+			uint64		bits = state->taken_bits[index];
+
+			while (bits != 0 && count < JOIN_COMPACT_ROWS)
+			{
+				int			row = index * 64 + pg_rightmost_one_pos64(bits);
+
+				bits &= bits - 1;
+				state->compact_offsets[count] = state->offsets[row];
+				for (int column = 0; column < state->nouter; column++)
+				{
+					int			scan = state->outer_columns[column];
+
+					state->compact_values[scan][count] =
+						state->round_columns[column].values[row];
+					state->compact_isnull[scan][count] =
+						state->round_columns[column].isnull[row];
+				}
+				count++;
+			}
+			state->taken_bits[index] = bits;
+		}
+		/* A round copied whole: the next call of next_round advances. */
+		for (int index = 0; index < nwords; index++)
+			if (state->taken_bits[index] != 0)
+				goto more;
+		state->round_open = false;
+more:
+		;
+	}
+	if (count == 0)
+		return false;
+	state->compact_bits[0] = count == 64 ? ~UINT64CONST(0) :
+		(UINT64CONST(1) << count) - 1;
+	state->counters[JOIN_COMPACT_BATCHES]++;
+	state->batch.rows.nrows = JOIN_COMPACT_ROWS;
+	state->batch.rows.bits = state->compact_bits;
+	state->current_offsets = state->compact_offsets;
+	state->current_bits = state->compact_bits;
+	state->nulls_gathered = false;
+	memset(state->gathered, 0, sizeof(bool) * Max(state->npayload, 1));
+	return true;
+}
+
 /* Publish each round to a batch-aware parent, which finishes it there. */
 static TupleTableSlot *
 exec_batches(TessHashJoinState *state)
 {
 	tess_output_release(state->output);
-	if (!next_round(state))
+	if (state->compact ? !fill_compact(state) : !next_round(state))
 	{
 		state->done = true;
 		return NULL;
@@ -714,6 +840,7 @@ send_requests(TessHashJoinState *state)
 		{
 			outer_columns = bms_add_member(outer_columns,
 										   state->child_columns[column]);
+			state->outer_columns[state->nouter++] = column;
 			continue;
 		}
 		if (state->npayload == JOIN_MAX_PAYLOAD)
@@ -811,6 +938,10 @@ join_begin(CustomScanState *css, EState *estate, int eflags)
 		index++;
 	}
 	state->payload_words = palloc0_array(int, state->ncolumns);
+	state->outer_columns = palloc0_array(int, state->ncolumns);
+	state->compact_values = palloc0_array(Datum *, state->ncolumns);
+	state->compact_isnull = palloc0_array(bool *, state->ncolumns);
+	state->round_columns = palloc0_array(TessDatumColumn, Max(state->ncolumns, 1));
 	state->payload_columns = palloc0_array(int, JOIN_MAX_PAYLOAD);
 
 	state->outer = ExecInitNode(linitial(cscan->custom_plans), estate, eflags);
@@ -840,6 +971,38 @@ join_begin(CustomScanState *css, EState *estate, int eflags)
 	state->next_row = -1;
 }
 
+/*
+ * Compact mode for a batch-aware parent over a table with duplicate keys,
+ * when every outer column asked for is passed by value: a copied value
+ * must outlive the outer batch.
+ */
+static void
+decide_compact(TessHashJoinState *state)
+{
+	MemoryContext context = state->css.ss.ps.state->es_query_cxt;
+
+	state->compact_decided = true;
+	state->compact = false;
+	if (state->request->output_mode != TESS_OUTPUT_BATCH ||
+		state->inner_unique || state->duplicates == 0)
+		return;
+	for (int index = 0; index < state->nouter; index++)
+		if (!state->typbyvals[state->outer_columns[index]])
+			return;
+	for (int index = 0; index < state->nouter; index++)
+	{
+		int			column = state->outer_columns[index];
+
+		if (state->compact_values[column] != NULL)
+			continue;
+		state->compact_values[column] =
+			MemoryContextAllocZero(context, sizeof(Datum) * JOIN_COMPACT_ROWS);
+		state->compact_isnull[column] =
+			MemoryContextAllocZero(context, sizeof(bool) * JOIN_COMPACT_ROWS);
+	}
+	state->compact = true;
+}
+
 static TupleTableSlot *
 join_exec(CustomScanState *css)
 {
@@ -857,6 +1020,8 @@ join_exec(CustomScanState *css)
 		state->done = true;
 		return NULL;
 	}
+	if (!state->compact_decided)
+		decide_compact(state);
 	return state->request->output_mode == TESS_OUTPUT_BATCH ?
 		exec_batches(state) : exec_rows(state);
 }
@@ -889,6 +1054,7 @@ join_rescan(CustomScanState *css)
 	ExecClearTuple(css->ss.ps.ps_ResultTupleSlot);
 	/* The rescan forgets the outer batch with the child's other state. */
 	state->outer_batch = NULL;
+	state->round_open = false;
 	state->serving = false;
 	state->next_row = -1;
 	state->done = false;
@@ -965,6 +1131,9 @@ join_explain(CustomScanState *css, List *ancestors, ExplainState *es)
 	ExplainPropertyInteger("Table Grows", NULL, totals[JOIN_GROWS], es);
 	ExplainPropertyInteger("Probe Rows", NULL, totals[JOIN_PROBE_ROWS], es);
 	ExplainPropertyInteger("Matches", NULL, totals[JOIN_MATCHES], es);
+	if (totals[JOIN_COMPACT_BATCHES] > 0)
+		ExplainPropertyInteger("Compact Batches", NULL,
+							   totals[JOIN_COMPACT_BATCHES], es);
 }
 
 /*
