@@ -1023,6 +1023,26 @@
   (join_same); 4) EXPLAIN (Hash Cond; Buckets, Memory Usage, Build Rows, Probe Rows, Matches, Table Grows, Overrun,
   Builds) и тесты повторного запуска; 5) частичный путь (outer частичный, inner строится в каждом участнике) и
   TessSharedStats. Прогоны join, win, tax — пользователем после коммита 3 и в конце серии.
+  Сделано, серия 3 (2026-09-24, a1509e2…b14f26c): семейство join в bench/pg; nodes/hashjoin.c и nodes/join_planner.c.
+  Путь: set_join_pathlist_hook, JOIN_INNER с единственным условием int4eq/int8eq/int48eq/int84eq над голыми Var, цель —
+  только Var (не больше 64 колонок inner), ядра установлены, PGS_HASHJOIN в маске; шаблон initial_cost_hashjoin +
+  create_hashjoin_path × 0,9 (disabled_nodes из шаблона); ворота numbatches > 1 и оценка таблицы > hash_mem. Дети —
+  tess_batch_input_path над cheapest_total_path сторон. План: скан-список — Var цели (outer первыми) и оба ключа,
+  custom_exprs — условие, PROJECTED; данные плана — сторона и колонка ребёнка каждой записи, ключи, виды, inner_unique,
+  оценка строк inner. Исполнение: запросы детям из запроса родителя при первом выполнении (в нагрузке только
+  запрошенные колонки inner), построение с ростом repalloc_huge + table_grow, раунды next_match по своей копии маски
+  раунда, колонки outer ссылкой, inner через table_gather по требованию (NULL-биты раз за раунд), построчная выдача,
+  пустая build-сторона не читает outer, повторный запуск с перестройкой только при chgParam у inner. Ошибка по ходу:
+  маски-выходы ядер надо обнулять перед вызовом — после длинной пачки короткая оставляла биты за nrows, ядра их
+  отвергают. EXPLAIN: Hash Cond; Buckets (среднее по построениям), Memory Usage, Overrun (только если есть), Builds,
+  Build Rows, Table Grows, Probe Rows, Matches. Частичный путь: outer — cheapest partial, inner — cheapest parallel-safe
+  total (get_cheapest_parallel_safe_total_inner: при parallel_setup_cost = 0 cheapest total у inner — сам Gather),
+  таблица в каждом участнике, счётчики через TessSharedStats. Parallel Hash ядра (общая таблица) дешевле нашей
+  таблицы в каждом участнике — в тесте enable_parallel_hash = off; своя общая таблица — 5.5. Тест join.sql (33 набора):
+  ключи int4/int8/смешанные, NULL-ключи, дубликаты, пустые и малые стороны, соединение над соединением, рост и Overrun
+  при work_mem 64 kB (функция ROWS 10 на 20000 строк), построчные родители, курсор через Material, повторные запуски,
+  два воркера; в agg.sql соединение теперь TessHashJoin без TessPack. Грубо (не замер): fk_count 33 мс против 125 мс
+  у ядра. Прогоны join, win, tax — за пользователем.
   3. Групповой агрегат в памяти. TessAgg с GROUP BY над таблицей 5.1: ключи int4/int8, затем char(1)/text байтами
   (Q1: l_returnflag, l_linestatus); состояния агрегатов 4.14 (count/sum/min/max int4/int8; numeric — после 8.3) в
   полезной нагрузке записи; выдача групп пачками обходом таблицы, порядок не обещается (pathkeys нет); HAVING как
