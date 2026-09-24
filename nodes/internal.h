@@ -7,6 +7,11 @@
 
 #define TESS_FILTER_NODE_NAME "tessera.filter"
 #define TESS_AGG_NODE_NAME "tessera.agg"
+#define TESS_HASH_JOIN_NODE_NAME "tessera.hash_join"
+
+/* The plan data of TessHashJoin, written by its planner. */
+#define TESS_HASH_JOIN_DATA "tessera.hash_join"
+#define TESS_HASH_JOIN_DATA_VERSION 1
 
 extern const TessNode tess_pack_node;
 extern const CustomScanMethods tess_pack_scan_methods;
@@ -22,5 +27,8 @@ extern void tess_filter_planner_init(void);
 extern const TessNode tess_agg_node;
 extern const CustomScanMethods tess_agg_scan_methods;
 extern void tess_agg_planner_init(void);
+
+extern const TessNode tess_hash_join_node;
+extern const CustomScanMethods tess_hash_join_scan_methods;
 
 #endif							/* TESSERA_NODES_INTERNAL_H */

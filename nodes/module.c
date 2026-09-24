@@ -33,4 +33,6 @@ _PG_init(void)
 	RegisterCustomScanMethods(&tess_agg_scan_methods);
 	api->nodes->add(&tess_agg_node);
 	tess_agg_planner_init();
+	RegisterCustomScanMethods(&tess_hash_join_scan_methods);
+	api->nodes->add(&tess_hash_join_node);
 }
