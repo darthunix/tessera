@@ -1,6 +1,6 @@
 # Column benchmarks
 
-There are five benchmark programs:
+The benchmark programs:
 
 - [column_reader](column_reader.rs) reads and sums selected, non-NULL values
   from dense and PostgreSQL Datum storage through the reader API.
@@ -21,6 +21,12 @@ There are five benchmark programs:
   the reading cases as one int4 key per row: insertion into a fresh
   region, probes that hit and probes that miss, and grouping's
   find-or-insert, against a chained table with plain stores.
+- [table_large](table_large.rs) probes a table of 4 Mi records, far
+  larger than the caches, with batches of distinct keys taken in turn
+  from a ring, so that buckets and records come from memory: probes that
+  hit, probes that miss and find-or-insert against the same plain chained
+  table. Every key has a bucket of its own, so every call does the same
+  work and the instruction counts are exact.
 
 Neither measures SQL latency or requires PostgreSQL. They measure PMU
 counters, not time: retired instructions, core cycles, mispredicted branches

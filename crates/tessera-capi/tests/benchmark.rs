@@ -39,6 +39,9 @@ mod support;
 #[path = "../benches/support/tabling.rs"]
 #[allow(dead_code)]
 mod tabling;
+#[path = "../benches/support/tabling_large.rs"]
+#[allow(dead_code)]
+mod tabling_large;
 
 use anyhow::Result;
 use filtering::blocks as filter_blocks;
@@ -528,4 +531,17 @@ fn counted_blocks_count_calls_and_restore_inputs_across_block_boundaries() {
             masks.run_scalar(&mut read, &input, count);
         }
     }
+}
+
+#[test]
+fn large_table_keys_have_buckets_of_their_own() -> Result<()> {
+    let mut setup = tabling_large::Setup::new()?;
+    let keys = &setup.keys;
+    assert_eq!(keys.present.len(), tabling_large::RECORDS);
+    assert_eq!(keys.absent.len(), tabling_large::RECORDS);
+    let mut seen = std::collections::HashSet::new();
+    for &key in keys.present.iter().chain(&keys.absent) {
+        assert!(seen.insert(key), "key {key} is present and absent or twice");
+    }
+    tabling_large::check(&mut setup)
 }
