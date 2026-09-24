@@ -1,5 +1,5 @@
 MODULE_big = tessera
-OBJS = binding.o bridge.o function.o node.o source.o
+OBJS = binding.o bridge.o function.o kernel.o node.o source.o
 PG_CPPFLAGS = -I$(srcdir)/../include
 
 EXTENSION = tessera
@@ -12,6 +12,7 @@ HEADERS = \
 	../include/tessera/expr.h \
 	../include/tessera/function.h \
 	../include/tessera/heap_deform.h \
+	../include/tessera/kernel_ops.h \
 	../include/tessera/kernels.h \
 	../include/tessera/layout.h \
 	../include/tessera/node.h \

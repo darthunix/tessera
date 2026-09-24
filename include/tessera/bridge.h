@@ -12,6 +12,7 @@
 #include "tessera/abi.h"
 #include "tessera/binding.h"
 #include "tessera/function.h"
+#include "tessera/kernel_ops.h"
 #include "tessera/node.h"
 #include "tessera/source.h"
 
@@ -56,6 +57,11 @@ typedef struct TessApi
 	const TessFunctionRegistryOps *functions;
 	/* Required configuration variables shared by every module. */
 	const TessSettings *settings;
+	/*
+	 * Optional (check TESS_ABI_HAS_FIELD): the registry of the kernels
+	 * table, which the module linking the Rust kernels installs.
+	 */
+	const TessKernelRegistryOps *kernels;
 } TessApi;
 
 /* All subsystem pointers are required in the current root. */

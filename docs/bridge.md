@@ -132,6 +132,18 @@ source registry described in [source.md](source.md). `TessNodeRegistryOps`
 implements the node registry described in [node.md](node.md).
 `TessFunctionRegistryOps` implements the registry of batch implementations of
 PostgreSQL functions described in [function.md](function.md).
+`TessKernelRegistryOps` holds the one table of Rust kernel operations
+(`TessKernelOps`, `tessera/kernel_ops.h`) of a backend: the key hashes and
+the hash table of [table.md](table.md), which only the `tessera_kernels`
+module links. That module installs the table with `set` when it is
+loaded; a node module reads it with `get`, through
+`tess_runtime_kernels()` (see [runtime.md](runtime.md)), and calls the
+entry points by pointer with the prototypes and contracts of
+`tessera/kernels.h` and `tessera/table.h`. `set` validates the table (its
+version, size and every operation) and refuses a second table while one
+is installed; `clear` removes the given table only. The table also names
+the region format it was built for, which the runtime compares with its
+own.
 `TessSettings` publishes borrowed, read-only pointers to the bridge's
 configuration variables: `enable` is the GUC `tessera.enable`, the switch
 every planner hook checks (see [node.md](node.md)). The bridge defines the
@@ -145,9 +157,11 @@ version and `TESS_API_MIN_SIZE`, which includes all five fields. Before
 using a subsystem, it then checks that table's pointer, ABI version, and
 minimum size.
 
-Future optional fields can be appended to the root. A consumer checks
+Optional fields are appended to the root. A consumer checks
 `TESS_ABI_HAS_FIELD` before reading such a field, then validates the subsystem
-table itself. The current required fields are covered by `TESS_API_MIN_SIZE`
+table itself. `kernels`, the kernel registry, is the first optional field:
+a bridge built before it lacks the field, and a consumer then behaves as if
+no kernels were installed. The current required fields are covered by `TESS_API_MIN_SIZE`
 and do not need separate field checks.
 
 After loading the bridge, the [producer example](../test/tessera_producer_test.c)

@@ -119,6 +119,13 @@ tessera_test_abi_helpers(PG_FUNCTION_ARGS)
 		extended.base.struct_size < TESS_API_MIN_SIZE)
 		PG_RETURN_BOOL(false);
 
+	/* The kernel registry is optional: a minimal root lacks it. */
+	if (TESS_ABI_HAS_FIELD(&api, TessApi, kernels))
+		PG_RETURN_BOOL(false);
+	api.struct_size = sizeof(TessApi);
+	if (!TESS_ABI_HAS_FIELD(&api, TessApi, kernels))
+		PG_RETURN_BOOL(false);
+
 	ops.struct_size = TESS_ABI_SIZE_INCLUDING_FIELD(TessTestOps, required);
 	PG_RETURN_BOOL(TESS_ABI_HAS_FIELD(&ops, TessTestOps, required) &&
 					   !TESS_ABI_HAS_FIELD(&ops, TessTestOps, optional));

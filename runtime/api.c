@@ -43,3 +43,48 @@ tess_runtime_api(void)
 	cached_api = api;
 	return api;
 }
+
+const TessKernelOps *
+tess_runtime_kernels(void)
+{
+	const TessApi *api = tess_runtime_api();
+	const TessKernelRegistryOps *registry;
+	const TessKernelOps *ops;
+
+	if (!TESS_ABI_HAS_FIELD(api, TessApi, kernels) || api->kernels == NULL)
+		return NULL;
+	registry = api->kernels;
+	if (registry->abi_version != TESS_KERNEL_REGISTRY_OPS_ABI_VERSION ||
+		registry->struct_size < TESS_KERNEL_REGISTRY_OPS_MIN_SIZE)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("incompatible Tessera kernel registry")));
+	ops = registry->get();
+	if (ops == NULL)
+		return NULL;
+	if (ops->abi_version != TESS_KERNEL_OPS_ABI_VERSION ||
+		ops->struct_size < TESS_KERNEL_OPS_MIN_SIZE ||
+		ops->table_format_version != TESS_TABLE_FORMAT_VERSION)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("incompatible Tessera kernels"),
+				 errdetail("Expected version %u, at least %zu bytes and "
+						   "table format %u, got version %u, %zu bytes and "
+						   "table format %u.",
+						   TESS_KERNEL_OPS_ABI_VERSION, TESS_KERNEL_OPS_MIN_SIZE,
+						   TESS_TABLE_FORMAT_VERSION, ops->abi_version,
+						   ops->struct_size, ops->table_format_version)));
+	return ops;
+}
+
+void
+tess_status_report(const TessStatus *status)
+{
+	const char *sqlstate = status->sqlstate;
+
+	ereport(ERROR,
+			(errcode(MAKE_SQLSTATE(sqlstate[0], sqlstate[1], sqlstate[2],
+								   sqlstate[3], sqlstate[4])),
+			 errmsg("%s", status->message)));
+	pg_unreachable();
+}

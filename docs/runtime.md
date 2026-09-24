@@ -226,6 +226,17 @@ must precede destroying the slot.
 `tess_runtime_api()` returns the bridge's API, validated once per backend;
 the bridge must be loaded first (`CREATE EXTENSION tessera`).
 
+`tess_runtime_kernels()` returns the operations of the Rust kernels
+(`tessera/kernel_ops.h`) that the `tessera_kernels` module installed in
+the bridge, or `NULL` when it is not loaded in this backend. It raises
+`ERROR` for a table built against another ABI version or table format,
+and is not cached, because the kernels module may be loaded after the
+node; a planner hook asks before it offers a path that needs them, and
+the executor asks again. A node module thus calls the hashes and the hash
+table (`docs/table.md`) without linking Rust. `tess_status_report(status)`
+raises the `ERROR` a failed kernel call stored in its `TessStatus`, with
+its SQLSTATE and message, after the call returned.
+
 ## Reading batches from a child
 
 `TessInput` is the input side of a node over one batch-producing child.

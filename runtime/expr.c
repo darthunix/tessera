@@ -471,17 +471,6 @@ ensure_capacity(TessExpr *expr, int nrows)
 	MemoryContextSwitchTo(oldcontext);
 }
 
-static void
-report(const TessExpr *expr)
-{
-	const char *sqlstate = expr->status.sqlstate;
-
-	ereport(ERROR,
-			(errcode(MAKE_SQLSTATE(sqlstate[0], sqlstate[1], sqlstate[2],
-								   sqlstate[3], sqlstate[4])),
-			 errmsg("%s", expr->status.message)));
-}
-
 /*
  * Broadcast one scalar, or its NULL, into a set: every row of the batch is
  * written, as finish_step writes every row of a word, so that the fill is
@@ -591,7 +580,7 @@ call_step(TessExpr *expr, const Step *step, const TessFunctionArg *args,
 	call.context = expr->context;
 	call.status = &expr->status;
 	if (step->function->evaluate(&call) != TESS_OK)
-		report(expr);
+		tess_status_report(&expr->status);
 }
 
 const TessDatumColumn *

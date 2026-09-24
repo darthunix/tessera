@@ -554,18 +554,6 @@ agg_begin(CustomScanState *css, EState *estate, int eflags)
 									   result, &info.layout);
 }
 
-/* Raise a batch function's failure as the error it names. */
-static void
-report(const TessStatus *status)
-{
-	const char *sqlstate = status->sqlstate;
-
-	ereport(ERROR,
-			(errcode(MAKE_SQLSTATE(sqlstate[0], sqlstate[1], sqlstate[2],
-								   sqlstate[3], sqlstate[4])),
-			 errmsg("%s", status->message)));
-}
-
 /*
  * One call of the aggregate's batch function over a column, or over rows
  * alone for count(*); the partial joins the running value. No readiness
@@ -597,7 +585,7 @@ evaluate(TessAggState *state, AggValue *value, const TessDatumColumn *column,
 	call.status = &state->status;
 	state->calls++;
 	if (value->function->evaluate(&call) != TESS_OK)
-		report(&state->status);
+		tess_status_report(&state->status);
 	if ((word & 1) == 0)
 		return;
 	switch (value->kind)
