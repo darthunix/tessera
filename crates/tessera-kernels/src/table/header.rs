@@ -239,28 +239,31 @@ impl Header {
         })
     }
 
-    /// Read the header at the start of a region.
+    /// Read the header at the start of a region: the counters with acquire
+    /// ordering, since insertions in other processes move them; the other
+    /// fields change only under one writer, before the table is shared,
+    /// and are read without ordering.
     pub(super) fn load<R: Region>(region: &R) -> Self {
         let mut kinds = [0; MAX_KEYS];
         let base = offset_of!(Header, kinds);
-        kinds[..8].copy_from_slice(&region.load_u64(base).to_ne_bytes());
-        kinds[8..].copy_from_slice(&region.load_u64(base + 8).to_ne_bytes());
+        kinds[..8].copy_from_slice(&region.load_u64_relaxed(base).to_ne_bytes());
+        kinds[8..].copy_from_slice(&region.load_u64_relaxed(base + 8).to_ne_bytes());
         Self {
-            magic: region.load_u64(offset_of!(Header, magic)),
-            version: region.load_u32(offset_of!(Header, version)),
-            header_size: region.load_u32(offset_of!(Header, header_size)),
-            region_len: region.load_u64(offset_of!(Header, region_len)),
-            buckets_offset: region.load_u64(offset_of!(Header, buckets_offset)),
+            magic: region.load_u64_relaxed(offset_of!(Header, magic)),
+            version: region.load_u32_relaxed(offset_of!(Header, version)),
+            header_size: region.load_u32_relaxed(offset_of!(Header, header_size)),
+            region_len: region.load_u64_relaxed(offset_of!(Header, region_len)),
+            buckets_offset: region.load_u64_relaxed(offset_of!(Header, buckets_offset)),
             chunk_used: region.load_u64(CHUNK_USED),
             nrecords: region.load_u64(NRECORDS),
-            nbuckets: region.load_u32(offset_of!(Header, nbuckets)),
-            bucket_shift: region.load_u32(offset_of!(Header, bucket_shift)),
-            record_size: region.load_u32(offset_of!(Header, record_size)),
-            payload_size: region.load_u32(offset_of!(Header, payload_size)),
-            nkeys: region.load_u32(offset_of!(Header, nkeys)),
-            flags: region.load_u32(offset_of!(Header, flags)),
+            nbuckets: region.load_u32_relaxed(offset_of!(Header, nbuckets)),
+            bucket_shift: region.load_u32_relaxed(offset_of!(Header, bucket_shift)),
+            record_size: region.load_u32_relaxed(offset_of!(Header, record_size)),
+            payload_size: region.load_u32_relaxed(offset_of!(Header, payload_size)),
+            nkeys: region.load_u32_relaxed(offset_of!(Header, nkeys)),
+            flags: region.load_u32_relaxed(offset_of!(Header, flags)),
             kinds,
-            reserved: region.load_u64(offset_of!(Header, reserved)),
+            reserved: region.load_u64_relaxed(offset_of!(Header, reserved)),
         }
     }
 
@@ -290,7 +293,80 @@ impl Header {
 
     /// Check every field against the format and the `len` bytes given, and
     /// return the layout the table works with.
+    ///
+    /// Every call of the table checks the header, so the checks run as
+    /// plain comparisons; the messages are built only when one fails, by
+    /// the same checks in [`Self::explain`], kept out of line.
+    #[inline]
     pub(super) fn validate(&self, len: usize) -> Result<Layout> {
+        match self.layout_if_valid(len) {
+            Some(layout) => Ok(layout),
+            None => Err(self.invalid(len)),
+        }
+    }
+
+    /// The layout when every check of [`Self::explain`] passes.
+    #[inline]
+    fn layout_if_valid(&self, len: usize) -> Option<Layout> {
+        let region_len = usize::try_from(self.region_len).ok()?;
+        let nkeys = self.nkeys as usize;
+        let payload_size = self.payload_size as usize;
+        let nbuckets = self.nbuckets;
+        let buckets_offset = usize::try_from(self.buckets_offset).ok()?;
+        let buckets_end = buckets_offset.checked_add(nbuckets as usize * 4)?;
+        let chunk_used = usize::try_from(self.chunk_used).ok()?;
+        let fixed = self.magic == MAGIC
+            && self.version == FORMAT_VERSION
+            && self.header_size as usize == HEADER_SIZE
+            && self.flags == 0
+            && region_len <= len
+            && region_len.is_multiple_of(8)
+            && region_len >= HEADER_SIZE
+            && (1..=MAX_KEYS).contains(&nkeys);
+        if !fixed {
+            return None;
+        }
+        let mut kinds = [KeyKind::Int32; MAX_KEYS];
+        for (slot, &code) in kinds.iter_mut().zip(&self.kinds).take(nkeys) {
+            *slot = KeyKind::from_code(code)?;
+        }
+        let valid = self.record_size == record_size(nkeys, payload_size).ok()?
+            && nbuckets.is_power_of_two()
+            && u64::from(nbuckets) >= MIN_BUCKETS
+            && self.bucket_shift == bucket_shift(nbuckets)
+            && buckets_offset.is_multiple_of(8)
+            && buckets_end <= region_len
+            && chunk_used <= buckets_offset
+            && chunk_used.is_multiple_of(8)
+            && chunk_used >= HEADER_SIZE
+            && self
+                .nrecords
+                .checked_mul(u64::from(self.record_size))
+                .is_some_and(|used| used <= (chunk_used - HEADER_SIZE) as u64);
+        valid.then_some(Layout {
+            region_len,
+            buckets_offset,
+            nbuckets,
+            bucket_shift: self.bucket_shift,
+            record_size: self.record_size as usize,
+            payload_size,
+            nkeys,
+            kinds,
+        })
+    }
+
+    /// The error of a header the fast checks refused.
+    #[cold]
+    #[inline(never)]
+    fn invalid(&self, len: usize) -> anyhow::Error {
+        match self.explain(len) {
+            Err(error) => error,
+            Ok(_) => anyhow::anyhow!("the table header is inconsistent"),
+        }
+    }
+
+    /// The checks of [`Self::validate`], each with its message.
+    fn explain(&self, len: usize) -> Result<Layout> {
         ensure!(self.magic == MAGIC, "the region does not hold a table");
         ensure!(
             self.version == FORMAT_VERSION,

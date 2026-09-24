@@ -24,11 +24,15 @@ pub(super) trait Region {
     /// The number of addressable bytes.
     fn len(&self) -> usize;
 
-    /// Read a 32-bit word with acquire ordering.
-    fn load_u32(&self, offset: usize) -> u32;
-
     /// Write a 32-bit word with release ordering.
     fn store_u32(&self, offset: usize, value: u32);
+
+    /// Read a 32-bit word without ordering: for fields no participant
+    /// changes while the table is shared, written before it was.
+    fn load_u32_relaxed(&self, offset: usize) -> u32;
+
+    /// Read a 64-bit word without ordering, as [`Self::load_u32_relaxed`].
+    fn load_u64_relaxed(&self, offset: usize) -> u64;
 
     /// Read a 64-bit word with acquire ordering.
     fn load_u64(&self, offset: usize) -> u64;
@@ -170,8 +174,13 @@ impl Region for RawRegion {
     }
 
     #[inline]
-    fn load_u32(&self, offset: usize) -> u32 {
-        self.atomic_u32(offset).load(Ordering::Acquire)
+    fn load_u32_relaxed(&self, offset: usize) -> u32 {
+        self.atomic_u32(offset).load(Ordering::Relaxed)
+    }
+
+    #[inline]
+    fn load_u64_relaxed(&self, offset: usize) -> u64 {
+        self.atomic_u64(offset).load(Ordering::Relaxed)
     }
 
     #[inline]

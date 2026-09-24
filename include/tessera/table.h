@@ -177,10 +177,11 @@ extern TessStatusCode tess_table_insert(void *region,
 										TessStatus *status);
 
 /*
- * Find the newest record with the hash, NULL bits and keys of each row of
- * rows: matches[row] receives its offset and found, a mask this call
- * fills whole, the rows that have one. Older records with the same keys
- * follow through tess_table_next_match.
+ * Find the first record of its chain with the hash, NULL bits and keys of
+ * each row of rows: matches[row] receives its offset and found, a mask
+ * this call fills whole, the rows that have one. The other records with
+ * the same keys follow through tess_table_next_match, or
+ * tess_table_next_in_group in a table filled by grouped insertion.
  */
 extern TessStatusCode tess_table_probe(const void *region,
 									   Size len,
@@ -220,6 +221,20 @@ extern TessStatusCode tess_table_gather(const void *region,
 										Datum *values,
 										TessStatus *status);
 
+/*
+ * For each row of rows, replace offsets[row] by the record right after it
+ * in its chain when that one has the same hash, NULL bits and keys, and
+ * put the row in found; the others keep their offset. In a table filled
+ * by tess_table_insert_grouped this is the key's next record, in one step
+ * instead of tess_table_next_match's walk down the chain.
+ */
+extern TessStatusCode tess_table_next_in_group(const void *region,
+											   Size len,
+											   uint32 *offsets,
+											   const TessRowMask *rows,
+											   TessRowMask *found,
+											   TessStatus *status);
+
 /* The record at an offset a call of this table returned. */
 extern TessStatusCode tess_table_record(const void *region,
 										Size len,
@@ -250,6 +265,26 @@ extern TessStatusCode tess_table_find_or_insert(void *region,
 												TessRowMask *pending,
 												uint32 *offsets,
 												TessRowMask *inserted,
+												TessStatus *status);
+
+/*
+ * Insert the rows of pending as tess_table_insert does, but each right
+ * after a record with the same keys when the table holds one, so that a
+ * key's records lie next to each other and tess_table_next_in_group steps
+ * through them; duplicates, a mask this call fills whole, receives the
+ * rows whose keys were there already, from an earlier call or an earlier
+ * row. A lookup per row, and one writer: not for a table several
+ * processes build at once.
+ */
+extern TessStatusCode tess_table_insert_grouped(void *region,
+												Size len,
+												const uint32 *hashes,
+												int nkeys,
+												const TessTableKey *keys,
+												const uint8 *payload,
+												TessRowMask *pending,
+												uint32 *offsets,
+												TessRowMask *duplicates,
 												TessStatus *status);
 
 /*

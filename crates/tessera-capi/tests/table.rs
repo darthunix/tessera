@@ -8,8 +8,9 @@ use tessera_capi::c::{
     Code, DatumColumn, Mask, Status, TableKey, TableRecord, TableStats, tess_int4_hash,
     tess_int8_hash, tess_table_attach, tess_table_create, tess_table_find_or_insert,
     tess_table_format_version, tess_table_gather, tess_table_grow, tess_table_insert,
-    tess_table_layout, tess_table_next_match, tess_table_payload, tess_table_probe,
-    tess_table_record, tess_table_scan, tess_table_size, tess_table_stats,
+    tess_table_insert_grouped, tess_table_layout, tess_table_next_in_group, tess_table_next_match,
+    tess_table_payload, tess_table_probe, tess_table_record, tess_table_scan, tess_table_size,
+    tess_table_stats,
 };
 use tessera_core::{ColumnView, RowMask, RowMaskView};
 use tessera_kernels::int32::{self, NullKeys};
@@ -812,6 +813,99 @@ fn int4_keys_find_the_records_of_int8_keys() -> Result<()> {
         assert_eq!(found_words, [0x5555_5555_5555_5555]);
         for row in (0..64).step_by(2) {
             assert_eq!(matches[row], offsets[row], "row {row}");
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn grouped_insertion_steps_through_a_key_in_one_call_each() -> Result<()> {
+    // Keys row % 16 over 64 rows: four records per key.
+    let datums: Vec<u64> = (0..64_u64).map(|row| row % 16).collect();
+    let isnull = [false; 64];
+    let column = DatumColumn {
+        struct_size: size_of::<DatumColumn>(),
+        values: datums.as_ptr(),
+        isnull: isnull.as_ptr(),
+        nrows: 64,
+    };
+    let key = TableKey {
+        kind: 1,
+        column: &raw const column,
+        prepared: ptr::null(),
+    };
+    let kinds = [1_u32];
+    let payload: Vec<u8> = (0..64_u64).flat_map(|row| row.to_ne_bytes()).collect();
+    let mut status = Status::new();
+    let mut size = 0;
+    // SAFETY: local buffers of the declared sizes, aliased by nothing else.
+    unsafe {
+        let code = tess_table_size(1, kinds.as_ptr(), 8, 64, &raw mut size, &raw mut status);
+        assert_eq!(code, Code::Ok, "{}", status.message());
+        let mut region = vec![0_u64; size / 8];
+        let base = region.as_mut_ptr().cast::<u8>();
+        let code = tess_table_create(base, size, 1, kinds.as_ptr(), 8, 64, &raw mut status);
+        assert_eq!(code, Code::Ok, "{}", status.message());
+        let (hashes, _) = hash_column(&column, 1, 64);
+        let mut pending_words = [u64::MAX];
+        let mut pending = Mask {
+            nrows: 64,
+            bits: pending_words.as_mut_ptr(),
+        };
+        let mut duplicate_words = [0];
+        let mut duplicates = Mask {
+            nrows: 64,
+            bits: duplicate_words.as_mut_ptr(),
+        };
+        let mut offsets = vec![0; 64];
+        let code = tess_table_insert_grouped(
+            base,
+            size,
+            hashes.as_ptr(),
+            1,
+            &raw const key,
+            payload.as_ptr(),
+            &raw mut pending,
+            offsets.as_mut_ptr(),
+            &raw mut duplicates,
+            &raw mut status,
+        );
+        assert_eq!(code, Code::Ok, "{}", status.message());
+        assert_eq!(pending_words, [0]);
+        assert_eq!(
+            duplicate_words,
+            [u64::MAX << 16],
+            "the first row of each key is new"
+        );
+
+        // From each key's first row: three more records, one step each.
+        let mut current = offsets.clone();
+        let mut rows_words = [0xffff];
+        for step in 0..4 {
+            let rows = Mask {
+                nrows: 64,
+                bits: rows_words.as_mut_ptr(),
+            };
+            let mut found_words = [0];
+            let mut found = Mask {
+                nrows: 64,
+                bits: found_words.as_mut_ptr(),
+            };
+            let code = tess_table_next_in_group(
+                base,
+                size,
+                current.as_mut_ptr(),
+                &raw const rows,
+                &raw mut found,
+                &raw mut status,
+            );
+            assert_eq!(code, Code::Ok, "{}", status.message());
+            assert_eq!(
+                found_words,
+                [if step < 3 { 0xffff } else { 0 }],
+                "step {step}"
+            );
+            rows_words = found_words;
         }
     }
     Ok(())

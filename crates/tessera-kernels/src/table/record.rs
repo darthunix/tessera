@@ -89,6 +89,13 @@ impl<'r> View<'r> {
     }
 }
 
+/// Whether two records hold the same key slots, compared slot by slot: a
+/// slice comparison would call memcmp for the one or two slots a key has.
+#[inline(always)]
+pub(super) fn same_keys(a: &[i64], b: &[i64]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x == y)
+}
+
 /// Record-level access during one operation, with the counters as read at
 /// its start.
 ///
@@ -244,7 +251,7 @@ impl<'r, R: Region> Access<'r, R> {
         self.buckets_offset + (hash >> self.bucket_shift) as usize * 4
     }
 
-    /// The newest record of the bucket of a hash, 0 for none.
+    /// The first record of the chain of a hash's bucket, 0 for none.
     #[inline]
     pub(super) fn head(&self, hash: u32) -> u32 {
         // SAFETY: `hash >> bucket_shift` is below the bucket count, since
@@ -392,7 +399,7 @@ impl<'r, R: Region> Access<'r, R> {
         self.payload_size
     }
 
-    /// Publish a written record as the newest of its bucket.
+    /// Publish a written record as the first of its bucket's chain.
     #[inline]
     pub(super) fn push(&self, offset: u32, byte: usize, hash: u32) {
         let bucket = self.bucket(hash);
@@ -407,6 +414,27 @@ impl<'r, R: Region> Access<'r, R> {
                     Err(found) => head = found,
                 }
             }
+        }
+    }
+
+    /// Publish a written record right after a published one with the same
+    /// hash and keys, so that the records of a key stay next to each other
+    /// in their chain.
+    ///
+    /// # Safety
+    ///
+    /// The caller has the region to itself; `byte` starts a record this
+    /// operation reserved and wrote, and `after` is a record it located.
+    #[inline]
+    pub(super) unsafe fn link_after(&self, after: u32, byte: usize, offset: u32) {
+        let after_next = after as usize * 8 + NEXT;
+        // SAFETY: both next fields lie in records within the record area,
+        // below the buckets and so within the region; nothing else reads
+        // or writes the region meanwhile.
+        unsafe {
+            let next = self.region.load_u32_in(after_next);
+            self.region.store_u32_in(byte + NEXT, next);
+            self.region.store_u32_in(after_next, offset);
         }
     }
 

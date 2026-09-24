@@ -1275,3 +1275,181 @@ fn gather_reads_one_payload_word_of_each_selected_match() -> Result<()> {
     assert!(table.gather(&inside, &rows, 0, &mut out).is_err());
     Ok(())
 }
+
+/// Insert rows by grouped insertion, returning the duplicates' rows.
+fn insert_grouped_rows(
+    table: &mut TableMut<'_>,
+    hashes: &[u32],
+    keys: &[ColumnView<'_, i32>],
+    payload: &[u8],
+    rows: &[usize],
+    offsets: &mut [u32],
+) -> Result<Vec<usize>> {
+    let nrows = hashes.len();
+    let mut pending_words = vec![0; nrows.div_ceil(64)];
+    for &row in rows {
+        pending_words[row / 64] |= 1 << (row % 64);
+    }
+    let mut pending = RowMask::try_new(nrows, &mut pending_words)?;
+    // Every row set: the call fills the mask whole.
+    let mut duplicate_words = all_rows(nrows);
+    let mut duplicates = RowMask::try_new(nrows, &mut duplicate_words)?;
+    let inserted = table.insert_grouped(
+        hashes,
+        keys,
+        Some(payload),
+        &mut pending,
+        offsets,
+        &mut duplicates,
+    )?;
+    assert_eq!(inserted, rows.len());
+    assert_eq!(pending.as_view().selected_count(), 0);
+    Ok(rows_of(&duplicates.as_view()))
+}
+
+#[test]
+fn grouped_records_of_a_key_lie_together() -> Result<()> {
+    // Ten keys, ten rows each, all in one bucket: one hash for every row,
+    // so each key's group lies among the other keys' records.
+    let values: Vec<i32> = (0..100).map(|row| (row * 7) % 10).collect();
+    let keys = [ColumnView::try_new(&values, None)?];
+    let hashes = vec![0x1234_5678; 100];
+    let payload = payload_for(100);
+    let mut words = words_for(&ONE_INT4, 100)?;
+    let mut table = TableMut::create_in(&mut words, &ONE_INT4, 100)?;
+    let mut offsets = vec![0; 100];
+    // Two calls: the second finds the first's keys for whole words at once.
+    let first: Vec<usize> = (0..30).collect();
+    let second: Vec<usize> = (30..100).collect();
+    let duplicates =
+        insert_grouped_rows(&mut table, &hashes, &keys, &payload, &first, &mut offsets)?;
+    assert_eq!(
+        duplicates,
+        (10..30).collect::<Vec<_>>(),
+        "a key's first row is new"
+    );
+    let duplicates =
+        insert_grouped_rows(&mut table, &hashes, &keys, &payload, &second, &mut offsets)?;
+    assert_eq!(duplicates, second, "every key was there already");
+
+    // From the probe's record, the group gives every row of the key, one
+    // step each, and ends where the next key begins.
+    let (found, matches) = probe_all(&table, &hashes, &keys[..])?;
+    assert_eq!(found.len(), 100);
+    let mut seen = [0; 10];
+    for key in 0..10 {
+        let mut offset = matches[key];
+        loop {
+            let record = table.record(offset)?;
+            let row = u64::from_ne_bytes(record.payload.try_into().unwrap()) / 10;
+            assert_eq!(values[row as usize], values[key]);
+            seen[values[key] as usize] += 1;
+            let mut offsets = [offset];
+            let rows = [1];
+            let mut next_words = [0];
+            let mut next = RowMask::try_new(1, &mut next_words)?;
+            table.next_in_group(&mut offsets, &RowMaskView::try_new(1, &rows)?, &mut next)?;
+            if next_words[0] == 0 {
+                break;
+            }
+            offset = offsets[0];
+        }
+    }
+    assert_eq!(seen, [10; 10], "each group holds the ten rows of its key");
+    Ok(())
+}
+
+#[test]
+fn grouped_insertion_stops_when_full_and_survives_growth() -> Result<()> {
+    let values: Vec<i32> = (0..200).map(|row| row % 7).collect();
+    let keys = [ColumnView::try_new(&values, None)?];
+    let hashes: Vec<u32> = values.iter().map(|&value| hash_i32(value)).collect();
+    let payload = payload_for(200);
+    // Room for fewer records than rows: the rest stay pending.
+    let mut words = words_for(&ONE_INT4, 64)?;
+    let mut table = TableMut::create_in(&mut words, &ONE_INT4, 64)?;
+    let mut pending_words = all_rows(200);
+    let mut pending = RowMask::try_new(200, &mut pending_words)?;
+    let mut duplicate_words = all_rows(200);
+    let mut duplicates = RowMask::try_new(200, &mut duplicate_words)?;
+    let mut offsets = vec![0; 200];
+    let inserted = table.insert_grouped(
+        &hashes,
+        &keys[..],
+        Some(&payload),
+        &mut pending,
+        &mut offsets,
+        &mut duplicates,
+    )?;
+    assert!(inserted < 200 && inserted > 7, "{inserted} of 200");
+    assert_eq!(pending.as_view().selected_count(), 200 - inserted);
+    let duplicate_rows = rows_of(&duplicates.as_view());
+    assert_eq!(
+        duplicate_rows.len(),
+        inserted - 7,
+        "the first row of each key is new"
+    );
+    assert!(duplicate_rows.iter().all(|&row| row < inserted));
+
+    // The rest after growth, which keeps each key's records together.
+    let mut grown_words = words.clone();
+    grown_words.resize(region_size(&ONE_INT4, 400)?.div_ceil(8), 0);
+    let grown_len = grown_words.len() * 8;
+    let mut table = TableMut::exclusive(&mut grown_words)?;
+    table.grow(grown_len)?;
+    let inserted_after = table.insert_grouped(
+        &hashes,
+        &keys[..],
+        Some(&payload),
+        &mut pending,
+        &mut offsets,
+        &mut duplicates,
+    )?;
+    assert_eq!(inserted + inserted_after, 200);
+    assert_eq!(
+        rows_of(&duplicates.as_view()).len(),
+        inserted_after,
+        "every key was there already"
+    );
+
+    // next_match walks the chain and finds the same next records, and
+    // each key has as many as rows.
+    let (_, matches) = probe_all(
+        &table,
+        &hashes[..7],
+        &[ColumnView::try_new(&values[..7], None)?][..],
+    )?;
+    for (key, &first) in matches.iter().enumerate() {
+        let mut by_group = vec![first];
+        let mut by_chain = vec![first];
+        let mut records = 1;
+        loop {
+            let rows = [1];
+            let view = RowMaskView::try_new(1, &rows)?;
+            let mut group_words = [0];
+            let mut chain_words = [0];
+            table.next_in_group(
+                &mut by_group,
+                &view,
+                &mut RowMask::try_new(1, &mut group_words)?,
+            )?;
+            table.next_match(
+                &mut by_chain,
+                &view,
+                &mut RowMask::try_new(1, &mut chain_words)?,
+            )?;
+            assert_eq!(
+                (group_words, by_group[0]),
+                (chain_words, by_chain[0]),
+                "key {key}"
+            );
+            if group_words[0] == 0 {
+                break;
+            }
+            records += 1;
+        }
+        let rows = values.iter().filter(|&&value| value == values[key]).count();
+        assert_eq!(records, rows, "key {key}");
+    }
+    Ok(())
+}

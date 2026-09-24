@@ -1,5 +1,6 @@
-//! The batch operations: insertion, probing, the next match of a row and
-//! the gathering of a payload word.
+//! The batch operations: insertion, probing, the next match of a row (in
+//! any table, or within a group of a grouped one) and the gathering of a
+//! payload word.
 
 use core::mem::MaybeUninit;
 
@@ -8,7 +9,7 @@ use tessera_core::{RowMask, RowMaskView};
 
 use super::header::Layout;
 use super::keys::{KeySource, WordKeys, slot_buffer};
-use super::record::Access;
+use super::record::{Access, same_keys};
 use super::region::Region;
 
 /// Call `$f` specialized for the common shapes of a table: one or two
@@ -351,7 +352,7 @@ pub(super) fn next_match<R: Region>(
             let record = access.locate(offsets[row])?;
             let (hash, null_bits, keys) = (record.hash(), record.null_bits(), record.keys());
             let after = access.find(record.next(), hash, |other| {
-                other.null_bits() == null_bits && other.keys() == keys
+                other.null_bits() == null_bits && same_keys(other.keys(), keys)
             })?;
             if after != 0 {
                 offsets[row] = after;
@@ -396,6 +397,50 @@ pub(super) fn gather<R: Region>(
             word.copy_from_slice(&payload[at..at + 8]);
             out[row] = u64::from_ne_bytes(word);
         }
+    }
+    Ok(())
+}
+
+/// For each row of `rows`, the record right after `offsets[row]` in its
+/// chain when it has the same hash, null bits and keys: the next record of
+/// the key in a table built by grouped insertion, where they lie next to
+/// each other. `found` gets the rows that have one, and the others keep
+/// their offset.
+pub(super) fn next_in_group<R: Region>(
+    region: &R,
+    layout: &Layout,
+    offsets: &mut [u32],
+    rows: &RowMaskView<'_>,
+    found: &mut RowMask<'_>,
+) -> Result<()> {
+    let nrows = rows.nrows();
+    ensure!(
+        offsets.len() == nrows && found.as_view().nrows() == nrows,
+        "the offsets, mask and result of the batch have different row counts"
+    );
+    let mut access = Access::new(region, layout);
+    for index in 0..nrows.div_ceil(64) {
+        let mut bits = rows.word(index).unwrap();
+        let mut hits = 0;
+        while bits != 0 {
+            let bit = bits.trailing_zeros() as usize;
+            bits &= bits - 1;
+            let row = index * 64 + bit;
+            let record = access.locate(offsets[row])?;
+            let next = record.next();
+            if next == 0 {
+                continue;
+            }
+            let other = access.locate(next)?;
+            if other.hash() == record.hash()
+                && other.null_bits() == record.null_bits()
+                && same_keys(other.keys(), record.keys())
+            {
+                offsets[row] = next;
+                hits |= 1 << bit;
+            }
+        }
+        found.set_word(index, hits)?;
     }
     Ok(())
 }

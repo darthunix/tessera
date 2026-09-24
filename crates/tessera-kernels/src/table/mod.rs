@@ -22,7 +22,7 @@
 //! grouping's aggregate states. A bucket is the high bits of the hash;
 //! there are a power of two of them, at least 1024 and at least twice the
 //! capacity the table was created for, each holding the offset of the
-//! newest record hashed into it. Hashes come from [`crate::int32::hash`],
+//! first record of its chain. Hashes come from [`crate::int32::hash`],
 //! [`crate::int64::hash`] and their `hash_next`, which decide what NULL
 //! keys do.
 //!
@@ -33,7 +33,9 @@
 //! for a payload word of each match), not both at a time.
 //! [`TableMut`] is the access of one writer, which alone may give rows
 //! the record of their keys, creating it when there is none
-//! ([`TableMut::find_or_insert`], for grouping), change a payload in
+//! ([`TableMut::find_or_insert`], for grouping), insert records next to
+//! those of the same keys ([`TableMut::insert_grouped`], for a join,
+//! whose rounds then step with [`Table::next_in_group`]), change a payload in
 //! place ([`TableMut::payload_mut`]), walk the records in insertion order
 //! ([`TableMut::scan`]) or grow the region ([`TableMut::grow`]). A batch
 //! brings its hashes, its keys through a [`KeySource`] and a row mask, and
@@ -226,10 +228,12 @@ impl<'a> Table<'a> {
         )
     }
 
-    /// Find the newest record with the hash, null bits and keys of each
-    /// row of `rows`: `matches[row]` receives its offset and `found` the
-    /// rows that have one, as a mask this call produces. Older records
-    /// with the same keys follow through [`Table::next_match`].
+    /// Find the first record of its chain with the hash, null bits and
+    /// keys of each row of `rows`: `matches[row]` receives its offset and
+    /// `found` the rows that have one, as a mask this call produces. The
+    /// other records with the same keys follow through
+    /// [`Table::next_match`], or [`Table::next_in_group`] in a table
+    /// filled by [`TableMut::insert_grouped`].
     pub fn probe<K: KeySource + ?Sized>(
         &self,
         hashes: &[u32],
@@ -275,6 +279,20 @@ impl<'a> Table<'a> {
         out: &mut [u64],
     ) -> Result<()> {
         batch::gather(&self.region, &self.layout, offsets, rows, at, out)
+    }
+
+    /// For each row of `rows`, replace `offsets[row]` by the record right
+    /// after it when that one has the same hash, null bits and keys, and
+    /// put the row in `found`; other rows keep their offset. In a table
+    /// filled by [`TableMut::insert_grouped`] this is the next record of
+    /// the key, found in one step instead of a walk down the chain.
+    pub fn next_in_group(
+        &self,
+        offsets: &mut [u32],
+        rows: &RowMaskView<'_>,
+        found: &mut RowMask<'_>,
+    ) -> Result<()> {
+        batch::next_in_group(&self.region, &self.layout, offsets, rows, found)
     }
 
     /// The record at an offset a call of this table returned.
@@ -368,6 +386,34 @@ impl<'a> TableMut<'a> {
             pending,
             offsets,
             inserted,
+        )
+    }
+
+    /// Insert the rows of `pending` as [`Table::insert`] does, but each
+    /// right after a record with the same keys when the table holds one,
+    /// so that a key's records lie next to each other and
+    /// [`Table::next_in_group`] steps through them; `duplicates` receives
+    /// the rows whose keys were there already. A lookup per row, and one
+    /// writer: the parallel build of a shared table uses
+    /// [`Table::insert`].
+    pub fn insert_grouped<K: KeySource + ?Sized>(
+        &mut self,
+        hashes: &[u32],
+        keys: &K,
+        payload: Option<&[u8]>,
+        pending: &mut RowMask<'_>,
+        offsets: &mut [u32],
+        duplicates: &mut RowMask<'_>,
+    ) -> Result<usize> {
+        exclusive::insert_grouped(
+            &self.0.region,
+            &self.0.layout,
+            hashes,
+            keys,
+            payload,
+            pending,
+            offsets,
+            duplicates,
         )
     }
 

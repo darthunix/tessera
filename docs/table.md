@@ -31,7 +31,7 @@ The region is aligned to 8 (`palloc` and DSA allocations are). It holds:
 - the record area, filled upward from the header;
 - the bucket array at the end of the region: a power of two of 32-bit
   slots, at least 1024 and at least twice the capacity the table was
-  created for, each holding the offset of the newest record hashed into it.
+  created for, each holding the offset of the first record of its chain.
 
 Buckets sit at the end so that growth is `repalloc` followed by
 `tess_table_grow`: the records stay where they are and the buckets are
@@ -91,15 +91,20 @@ leaves `pending` and gets the offset of its record in `offsets`;
 with the same mask.
 
 `tess_table_probe(region, len, hashes, nkeys, keys, &rows, matches,
-&found, &status)` finds, for each row of `rows`, the newest record with
-its hash, NULL bits and keys: `matches[row]` gets the offset and `found`,
+&found, &status)` finds, for each row of `rows`, the first record of its
+chain with its hash, NULL bits and keys: `matches[row]` gets the offset and `found`,
 a mask the call fills whole, the rows that have one. Keys are compared
 whole: the hash alone cannot decide, since under the group policy a NULL
 key hashes like the value `0x9e3779b9`, and int8 keys have no bijection.
 Equal keys have separate records, so `tess_table_next_match(region, len,
 offsets, &rows, &found, &status)` replaces each row's offset in place by
 the next record of its chain with the same keys, until `found` is empty:
-a join walks the chains of a whole batch of probe rows at a time.
+a join walks the chains of a whole batch of probe rows at a time. A table
+filled by `tess_table_insert_grouped` (below) keeps a key's records next
+to each other, and `tess_table_next_in_group(region, len, offsets, &rows,
+&found, &status)` steps to the next one by looking at the record right
+after a row's own only: one step, where `tess_table_next_match` walks the
+rest of the chain to find that no other record of the key is there.
 
 `tess_table_gather(region, len, offsets, &rows, at, values, &status)`
 reads, for each row of `rows`, the 8 bytes at byte `at` of the payload of
@@ -123,6 +128,14 @@ call over it at the same time:
   keys, creating one with a zero payload where none exists, in row order,
   until no new record fits; `inserted` receives the rows whose record the
   call created, so the caller initializes their aggregate states;
+- `tess_table_insert_grouped(region, len, hashes, nkeys, keys, payload,
+  &pending, offsets, &duplicates, &status)` inserts the rows as
+  `tess_table_insert` does, but each right after a record with the same
+  keys when the table holds one, so that a key's records lie together in
+  their chain; `duplicates`, which the call fills whole, receives the rows
+  whose keys were there already. It looks every row up, which is why it
+  belongs to one writer: a join builds its table with it, and a table
+  without duplicates needs no second round at all;
 - `tess_table_payload(region, len, offset, &payload, &status)` hands out a
   payload to change in place;
 - `tess_table_scan(region, len, &cursor, offsets, capacity, &count,
@@ -133,7 +146,8 @@ call over it at the same time:
   into a new region): the table takes the whole new length, keeps its
   records and their offsets, and rebuilds the buckets at the new end for
   the records that could now fit, with the bucket count `tess_table_size`
-  would have chosen for them.
+  would have chosen for them; a record goes right after an earlier one
+  with the same keys, so the records of a key stay together.
 
 A walk reads every record below the used mark, which an insertion in
 flight would have reserved but not written; that is why it belongs to the

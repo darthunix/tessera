@@ -1,5 +1,6 @@
 //! What one writer alone may do: find or create the record of a key,
-//! change payloads, walk the records and grow the region.
+//! insert records next to those of the same key, change payloads, walk
+//! the records and grow the region.
 //!
 //! These need the region to itself: a record found may be updated in
 //! place, a walk reads every record below the used mark, which an
@@ -12,7 +13,7 @@ use tessera_core::RowMask;
 use super::batch::{Lanes, VERTICAL_MIN_ROWS, check, probe_word, shaped};
 use super::header::{CHUNK_USED, HEADER_SIZE, Header, KEY_SLOT, Layout, RECORD_HEADER};
 use super::keys::{KeySource, WordKeys, slot_buffer};
-use super::record::Access;
+use super::record::{Access, same_keys};
 use super::region::Region;
 
 /// Where a walk over the records stands: the byte offset of the next
@@ -156,6 +157,151 @@ fn resolve_rows<
     Ok(resolved)
 }
 
+/// Insert the rows of `pending` as new records, in row order, until the
+/// table has no room, each right after a record with the same keys when
+/// there is one, so that the records of a key lie next to each other in
+/// their chain: inserted rows leave `pending` and get their offsets in
+/// `offsets`, and the rows whose keys the table already held, from an
+/// earlier call or an earlier row, form `duplicates`.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn insert_grouped<R: Region, K: KeySource + ?Sized>(
+    region: &R,
+    layout: &Layout,
+    hashes: &[u32],
+    keys: &K,
+    payload: Option<&[u8]>,
+    pending: &mut RowMask<'_>,
+    offsets: &mut [u32],
+    duplicates: &mut RowMask<'_>,
+) -> Result<usize> {
+    let nrows = pending.as_view().nrows();
+    check(layout, keys, nrows, hashes.len(), offsets.len())?;
+    ensure!(
+        duplicates.as_view().nrows() == nrows,
+        "the duplicates mask has {} rows, the batch {nrows}",
+        duplicates.as_view().nrows()
+    );
+    if let Some(payload) = payload {
+        ensure!(
+            nrows.checked_mul(layout.payload_size) == Some(payload.len()),
+            "the payload has {} bytes, not {} per row of {nrows}",
+            payload.len(),
+            layout.payload_size
+        );
+    }
+    shaped!(
+        layout.nkeys,
+        layout.tail_words(),
+        group_rows(
+            region, layout, hashes, keys, payload, pending, offsets, duplicates
+        )
+    )
+}
+
+/// The rows of [`insert_grouped`] for a table of `N` keys and `T` words
+/// after them, 0 for either when it is not one of the specialized shapes.
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+fn group_rows<R: Region, K: KeySource + ?Sized, const N: usize, const T: usize, const L: usize>(
+    region: &R,
+    layout: &Layout,
+    hashes: &[u32],
+    keys: &K,
+    payload: Option<&[u8]>,
+    pending: &mut RowMask<'_>,
+    offsets: &mut [u32],
+    duplicates: &mut RowMask<'_>,
+) -> Result<usize> {
+    // Made here, not passed in, so that its fields stay in registers.
+    let mut access = Access::new(region, layout);
+    let nrows = pending.as_view().nrows();
+    let payload_size = access.payload_size();
+    let mut buffer = slot_buffer::<L>();
+    let mut word_keys = WordKeys::new(&mut buffer, access.nkeys());
+    let mut lanes = Lanes::new();
+    let mut inserted = 0;
+    // Filled whole: rows the call does not reach are no duplicates.
+    for index in 0..nrows.div_ceil(64) {
+        duplicates.set_word(index, 0)?;
+    }
+    for index in 0..nrows.div_ceil(64) {
+        let selected = pending.as_view().word(index).unwrap();
+        if selected == 0 {
+            continue;
+        }
+        word_keys.load(keys, index, selected)?;
+        let base = index * 64;
+        let end = nrows.min(base + 64);
+        // The keys the table held before the word are found for the whole
+        // word at once; the others are looked up in row order, so that a
+        // row finds the record an earlier row of the word created.
+        let mut known = 0;
+        if selected.count_ones() >= VERTICAL_MIN_ROWS {
+            known = probe_word::<R, N>(
+                &mut access,
+                &word_keys,
+                &hashes[base..end],
+                selected,
+                &mut offsets[base..end],
+                &mut lanes,
+            )?;
+        }
+        let wanted = selected.count_ones() as usize;
+        let Some((start, count)) = access.reserve(wanted) else {
+            break;
+        };
+        let mut bits = selected;
+        let mut done = 0;
+        let mut repeated = 0;
+        for slot in 0..count {
+            let bit = bits.trailing_zeros() as usize;
+            bits &= bits - 1;
+            let row = base + bit;
+            let hash = hashes[row];
+            let found = if known >> bit & 1 != 0 {
+                offsets[row]
+            } else {
+                let head = access.head(hash);
+                // SAFETY: the records are this table's, whose key count the
+                // buffer was made for and `N` is 0 or.
+                access.find(head, hash, |record| unsafe {
+                    word_keys.equal::<N>(bit, record)
+                })?
+            };
+            let byte = start + slot * access.record_size();
+            let offset = (byte / 8) as u32;
+            // SAFETY: the payload was checked to hold `payload_size` bytes
+            // for each of the `nrows` rows, and `row` is below `nrows`.
+            let row_payload = payload.map(|payload| unsafe {
+                payload.get_unchecked(row * payload_size..(row + 1) * payload_size)
+            });
+            // SAFETY: `byte` starts the `slot`-th of the `count` records
+            // just reserved; the buffer and the shape are this table's.
+            unsafe { access.write::<N, T>(byte, hash, &word_keys, bit, row_payload) };
+            if found == 0 {
+                access.push(offset, byte, hash);
+            } else {
+                // SAFETY: the writer has the region to itself; `found` was
+                // located by this operation, `byte` written just above.
+                unsafe { access.link_after(found, byte, offset) };
+                repeated |= 1 << bit;
+            }
+            // Counted at once: a lookup of a later row may walk this
+            // record, and a walk longer than the count is corrupt.
+            access.count(1);
+            offsets[row] = offset;
+            done |= 1 << bit;
+        }
+        pending.intersect_word(index, !done)?;
+        duplicates.set_word(index, repeated)?;
+        inserted += count;
+        if count < wanted {
+            break;
+        }
+    }
+    Ok(inserted)
+}
+
 /// The payload of a record, to change in place.
 ///
 /// The exclusive borrow comes from the writer's `&mut TableMut`, which
@@ -221,11 +367,27 @@ pub(super) fn grow<R: Region>(region: &R, layout: &Layout, new_len: usize) -> Re
     let used = region.load_u64(CHUNK_USED) as usize;
     let mut access = Access::new(region, &grown);
     let mut byte = HEADER_SIZE;
+    // Each record goes after an earlier one with the same keys when there
+    // is one, so that the records of a key lie next to each other as
+    // grouped insertion left them, and next_in_group still steps through
+    // them; a key's first record goes first in its bucket's chain.
     while byte < used {
         let offset = (byte / 8) as u32;
         let record = access.locate(offset)?;
         let (hash, len) = (record.hash(), record.len());
-        access.push(offset, byte, hash);
+        let (null_bits, keys) = (record.null_bits(), record.keys());
+        let head = access.head(hash);
+        let same = access.find(head, hash, |other| {
+            other.null_bits() == null_bits && same_keys(other.keys(), keys)
+        })?;
+        if same == 0 {
+            access.push(offset, byte, hash);
+        } else {
+            // SAFETY: the writer has the region to itself; `same` was
+            // located by the walk just above, and the record at `byte`
+            // is written and holds its keys.
+            unsafe { access.link_after(same, byte, offset) };
+        }
         byte += len;
     }
     Ok(grown)

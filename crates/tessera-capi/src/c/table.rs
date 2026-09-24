@@ -6,7 +6,7 @@
 //! table through [`TableKeys`].
 
 use std::ffi::{c_int, c_uint};
-use std::mem::offset_of;
+use std::mem::{MaybeUninit, offset_of};
 use std::slice;
 
 use anyhow::{Context, Result, bail, ensure};
@@ -86,11 +86,35 @@ enum KeyColumn<'a> {
 }
 
 /// The keys of a batch, as `TessTableKey`s decode to.
-#[derive(Debug)]
+///
+/// Decoded in place by [`table_keys`] into a value the entry point holds on
+/// its stack: the slots for every possible key take a kilobyte, which a
+/// value returned from a function would copy on every call. The first
+/// `nkeys` slots are initialized.
 pub struct TableKeys<'a> {
-    columns: [Option<KeyColumn<'a>>; MAX_KEYS],
+    columns: [MaybeUninit<KeyColumn<'a>>; MAX_KEYS],
     nkeys: usize,
     nrows: usize,
+}
+
+impl TableKeys<'_> {
+    /// No keys yet.
+    fn empty() -> Self {
+        Self {
+            columns: [const { MaybeUninit::uninit() }; MAX_KEYS],
+            nkeys: 0,
+            nrows: 0,
+        }
+    }
+}
+
+impl core::fmt::Debug for TableKeys<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("TableKeys")
+            .field("nkeys", &self.nkeys)
+            .field("nrows", &self.nrows)
+            .finish_non_exhaustive()
+    }
 }
 
 impl KeySource for TableKeys<'_> {
@@ -103,7 +127,9 @@ impl KeySource for TableKeys<'_> {
     }
 
     fn word(&self, key: usize, index: usize, selected: u64, out: &mut [i64; 64]) -> Result<u64> {
-        match self.columns[key].as_ref().expect("a key below nkeys") {
+        assert!(key < self.nkeys, "a key below nkeys");
+        // SAFETY: the first `nkeys` slots are initialized.
+        match unsafe { self.columns[key].assume_init_ref() } {
             KeyColumn::Int32(column) => normalize_word(column, index, selected, out),
             KeyColumn::Int64(column) => normalize_word(column, index, selected, out),
         }
@@ -158,14 +184,18 @@ unsafe fn key_kinds(nkeys: c_int, kinds: *const c_uint) -> Result<([KeyKind; MAX
     Ok((result, nkeys))
 }
 
-/// The keys of a batch.
+/// Decode the keys of a batch into `result`, which starts empty.
 ///
 /// # Safety
 ///
 /// `keys` must point to `nkeys` `TessTableKey`s whose columns satisfy
 /// [`DatumColumn::ints`]'s contract with their `prepared` masks, all valid
 /// and unchanged for `'a`.
-unsafe fn table_keys<'a>(nkeys: c_int, keys: *const TableKey) -> Result<TableKeys<'a>> {
+unsafe fn table_keys<'a>(
+    nkeys: c_int,
+    keys: *const TableKey,
+    result: &mut TableKeys<'a>,
+) -> Result<()> {
     let nkeys = usize::try_from(nkeys).unwrap_or(usize::MAX);
     ensure!(
         (1..=MAX_KEYS).contains(&nkeys),
@@ -174,9 +204,8 @@ unsafe fn table_keys<'a>(nkeys: c_int, keys: *const TableKey) -> Result<TableKey
     ensure!(!keys.is_null(), "null keys");
     // SAFETY: the caller's contract, for `'a`.
     let keys = unsafe { slice::from_raw_parts(keys, nkeys) };
-    let mut columns = [const { None }; MAX_KEYS];
     let mut nrows = 0;
-    for (index, (slot, key)) in columns.iter_mut().zip(keys).enumerate() {
+    for (index, key) in keys.iter().enumerate() {
         // SAFETY: the caller's contract, for `'a`.
         let (column, prepared) = unsafe {
             (
@@ -201,13 +230,11 @@ unsafe fn table_keys<'a>(nkeys: c_int, keys: *const TableKey) -> Result<TableKey
             "key {index} has {column_rows} rows, the first key {nrows}"
         );
         nrows = column_rows;
-        *slot = Some(column);
+        result.columns[index].write(column);
+        result.nkeys = index + 1;
     }
-    Ok(TableKeys {
-        columns,
-        nkeys,
-        nrows,
-    })
+    result.nrows = nrows;
+    Ok(())
 }
 
 /// `nrows` values at `pointer`, empty when there are none.
@@ -375,7 +402,8 @@ pub unsafe extern "C" fn tess_table_insert(
     unsafe {
         guard(status, || {
             let table = Table::attach(region, len)?;
-            let keys = table_keys(nkeys, keys)?;
+            let mut decoded = TableKeys::empty();
+            table_keys(nkeys, keys, &mut decoded)?;
             let mut pending = pending.as_mut().context("a null pending mask")?.mask()?;
             let nrows = pending.as_view().nrows();
             let hashes = values(hashes, nrows, "hashes")?;
@@ -389,7 +417,7 @@ pub unsafe extern "C" fn tess_table_insert(
                 Some(values(payload, bytes, "payload")?)
             };
             table
-                .insert(hashes, &keys, payload, &mut pending, offsets)
+                .insert(hashes, &decoded, payload, &mut pending, offsets)
                 .map(drop)
         })
     }
@@ -420,13 +448,14 @@ pub unsafe extern "C" fn tess_table_probe(
     unsafe {
         guard(status, || {
             let table = Table::attach(region.cast_mut(), len)?;
-            let keys = table_keys(nkeys, keys)?;
+            let mut decoded = TableKeys::empty();
+            table_keys(nkeys, keys, &mut decoded)?;
             let rows = rows.as_ref().context("a null row mask")?.view()?;
             let mut found = found.as_mut().context("a null result mask")?.mask()?;
             let nrows = rows.nrows();
             let hashes = values(hashes, nrows, "hashes")?;
             let matches = slots(matches, nrows, "matches")?;
-            table.probe(hashes, &keys, &rows, matches, &mut found)
+            table.probe(hashes, &decoded, &rows, matches, &mut found)
         })
     }
 }
@@ -493,6 +522,33 @@ pub unsafe extern "C" fn tess_table_gather(
     }
 }
 
+/// `tess_table_next_in_group`: step each row to the record right after
+/// its own when that one has the same keys.
+///
+/// # Safety
+///
+/// As for [`tess_table_next_match`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tess_table_next_in_group(
+    region: *const u8,
+    len: usize,
+    offsets: *mut u32,
+    rows: *const Mask,
+    found: *mut Mask,
+    status: *mut Status,
+) -> Code {
+    // SAFETY: the caller's contract.
+    unsafe {
+        guard(status, || {
+            let table = Table::attach(region.cast_mut(), len)?;
+            let rows = rows.as_ref().context("a null row mask")?.view()?;
+            let mut found = found.as_mut().context("a null result mask")?.mask()?;
+            let offsets = slots(offsets, rows.nrows(), "offsets")?;
+            table.next_in_group(offsets, &rows, &mut found)
+        })
+    }
+}
+
 /// `tess_table_record`: the record at an offset.
 ///
 /// # Safety
@@ -554,14 +610,75 @@ pub unsafe extern "C" fn tess_table_find_or_insert(
     unsafe {
         guard(status, || {
             let mut table = TableMut::attach_mut(region, len)?;
-            let keys = table_keys(nkeys, keys)?;
+            let mut decoded = TableKeys::empty();
+            table_keys(nkeys, keys, &mut decoded)?;
             let mut pending = pending.as_mut().context("a null pending mask")?.mask()?;
             let mut inserted = inserted.as_mut().context("a null inserted mask")?.mask()?;
             let nrows = pending.as_view().nrows();
             let hashes = values(hashes, nrows, "hashes")?;
             let offsets = slots(offsets, nrows, "offsets")?;
             table
-                .find_or_insert(hashes, &keys, &mut pending, offsets, &mut inserted)
+                .find_or_insert(hashes, &decoded, &mut pending, offsets, &mut inserted)
+                .map(drop)
+        })
+    }
+}
+
+/// `tess_table_insert_grouped`: insert each pending row right after a
+/// record with the same keys, when the table holds one.
+///
+/// # Safety
+///
+/// `region` as for [`TableMut::attach_mut`] during the call; `keys` as
+/// for [`table_keys`]; `pending` and `duplicates` must point to valid
+/// masks that nothing else accesses, with the batch's rows; `hashes` must
+/// hold a hash per row, `offsets` a writable slot per row, and `payload`
+/// be null or hold the payload of every row; `status` as for every entry
+/// point.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tess_table_insert_grouped(
+    region: *mut u8,
+    len: usize,
+    hashes: *const u32,
+    nkeys: c_int,
+    keys: *const TableKey,
+    payload: *const u8,
+    pending: *mut Mask,
+    offsets: *mut u32,
+    duplicates: *mut Mask,
+    status: *mut Status,
+) -> Code {
+    // SAFETY: the caller's contract.
+    unsafe {
+        guard(status, || {
+            let mut table = TableMut::attach_mut(region, len)?;
+            let mut decoded = TableKeys::empty();
+            table_keys(nkeys, keys, &mut decoded)?;
+            let mut pending = pending.as_mut().context("a null pending mask")?.mask()?;
+            let mut duplicates = duplicates
+                .as_mut()
+                .context("a null duplicates mask")?
+                .mask()?;
+            let nrows = pending.as_view().nrows();
+            let hashes = values(hashes, nrows, "hashes")?;
+            let offsets = slots(offsets, nrows, "offsets")?;
+            let payload = if payload.is_null() {
+                None
+            } else {
+                let bytes = nrows
+                    .checked_mul(table.payload_size())
+                    .context("the payload does not fit in memory")?;
+                Some(values(payload, bytes, "payload")?)
+            };
+            table
+                .insert_grouped(
+                    hashes,
+                    &decoded,
+                    payload,
+                    &mut pending,
+                    offsets,
+                    &mut duplicates,
+                )
                 .map(drop)
         })
     }

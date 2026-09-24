@@ -154,10 +154,28 @@ typedef struct TessKernelOps
 	TessStatusCode (*table_grow) (void *region,
 								  Size len,
 								  TessStatus *status);
+	/* tess_table_insert_grouped */
+	TessStatusCode (*table_insert_grouped) (void *region,
+											Size len,
+											const uint32 *hashes,
+											int nkeys,
+											const TessTableKey *keys,
+											const uint8 *payload,
+											TessRowMask *pending,
+											uint32 *offsets,
+											TessRowMask *duplicates,
+											TessStatus *status);
+	/* tess_table_next_in_group */
+	TessStatusCode (*table_next_in_group) (const void *region,
+										   Size len,
+										   uint32 *offsets,
+										   const TessRowMask *rows,
+										   TessRowMask *found,
+										   TessStatus *status);
 } TessKernelOps;
 
 #define TESS_KERNEL_OPS_MIN_SIZE \
-	TESS_ABI_SIZE_INCLUDING_FIELD(TessKernelOps, table_grow)
+	TESS_ABI_SIZE_INCLUDING_FIELD(TessKernelOps, table_next_in_group)
 
 /*
  * The registry of the kernels: one table per backend, installed by the

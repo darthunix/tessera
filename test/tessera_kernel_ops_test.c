@@ -34,6 +34,8 @@ static const TessKernelOps kernels = {
 	.table_payload = tess_table_payload,
 	.table_scan = tess_table_scan,
 	.table_grow = tess_table_grow,
+	.table_insert_grouped = tess_table_insert_grouped,
+	.table_next_in_group = tess_table_next_in_group,
 };
 
 static const TessKernelRegistryOps *
