@@ -87,6 +87,7 @@ mod batch;
 mod exclusive;
 mod header;
 mod keys;
+mod lanes;
 mod record;
 mod region;
 

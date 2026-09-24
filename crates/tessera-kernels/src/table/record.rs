@@ -145,6 +145,16 @@ impl<'r, R: Region> Access<'r, R> {
     /// so far and claim the table's record length.
     #[inline(always)]
     pub(super) fn locate(&mut self, offset: u32) -> Result<View<'r>> {
+        self.place(offset)?;
+        // SAFETY: `place` just accepted the offset.
+        unsafe { self.open(offset) }
+    }
+
+    /// The byte offset of the record at `offset`, which must lie among the
+    /// records published so far; the first half of [`Self::locate`], which
+    /// reads nothing of the record, so that a caller can prefetch it.
+    #[inline(always)]
+    pub(super) fn place(&mut self, offset: u32) -> Result<usize> {
         let byte = offset as usize * 8;
         if !self.in_records(byte) {
             // A record published since the counters were read lies past
@@ -154,11 +164,47 @@ impl<'r, R: Region> Access<'r, R> {
                 return Err(outside(offset));
             }
         }
-        let view = self.view(byte);
+        Ok(byte)
+    }
+
+    /// The record at `offset`, which must claim the table's record length;
+    /// the second half of [`Self::locate`].
+    ///
+    /// # Safety
+    ///
+    /// [`Self::place`] accepted `offset` during this operation.
+    #[inline(always)]
+    pub(super) unsafe fn open(&self, offset: u32) -> Result<View<'r>> {
+        let view = self.view(offset as usize * 8);
         if view.len() != self.record_size {
             return Err(misplaced(offset));
         }
         Ok(view)
+    }
+
+    /// Hint that the bucket of a hash will be read soon.
+    #[inline(always)]
+    pub(super) fn prefetch_bucket(&self, hash: u32) {
+        self.region.prefetch(self.bucket(hash));
+    }
+
+    /// Hint that the record at a byte offset will be read soon.
+    #[inline(always)]
+    pub(super) fn prefetch_record(&self, byte: usize) {
+        self.region.prefetch(byte);
+    }
+
+    /// Check that `steps` steps down a chain stay within the record count:
+    /// a longer chain is corrupt.
+    #[inline(always)]
+    pub(super) fn check_steps(&mut self, steps: u64) -> Result<()> {
+        if steps >= self.nrecords {
+            self.refresh();
+            if steps >= self.nrecords {
+                return Err(cycle());
+            }
+        }
+        Ok(())
     }
 
     /// The published record at a byte offset that `locate` accepted.

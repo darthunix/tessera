@@ -5,6 +5,7 @@ use tessera_core::{RowMask, RowMaskView};
 
 use super::header::Layout;
 use super::keys::{KeySource, WordKeys, slot_buffer};
+use super::lanes;
 use super::record::Access;
 use super::region::Region;
 
@@ -180,10 +181,23 @@ fn probe_rows<R: Region, K: KeySource + ?Sized, const N: usize, const T: usize, 
     let nrows = rows.nrows();
     let mut buffer = slot_buffer::<L>();
     let mut word_keys = WordKeys::new(&mut buffer, access.nkeys());
+    let mut lanes = Lanes::<L>::new();
     for index in 0..nrows.div_ceil(64) {
         let selected = rows.word(index).unwrap();
         let mut hits = 0;
-        if selected != 0 {
+        if selected.count_ones() >= VERTICAL_MIN_ROWS {
+            word_keys.load(keys, index, selected)?;
+            let base = index * 64;
+            let end = nrows.min(base + 64);
+            hits = probe_word::<R, N, L>(
+                &mut access,
+                &word_keys,
+                &hashes[base..end],
+                selected,
+                &mut matches[base..end],
+                &mut lanes,
+            )?;
+        } else if selected != 0 {
             word_keys.load(keys, index, selected)?;
             let mut bits = selected;
             while bits != 0 {
@@ -206,6 +220,120 @@ fn probe_rows<R: Region, K: KeySource + ?Sized, const N: usize, const T: usize, 
         found.set_word(index, hits)?;
     }
     Ok(())
+}
+
+/// Rows of a word from which a probe goes vertically, phase by phase over
+/// the word, rather than row by row: fewer rows do not pay for phases
+/// that run over all 64.
+const VERTICAL_MIN_ROWS: u32 = 8;
+
+/// The per-row arrays of a word's vertical probe, indexed by row within
+/// the word; `L` arrays of candidate keys.
+struct Lanes<const L: usize> {
+    hash: [u32; 64],
+    current: [u32; 64],
+    next: [u32; 64],
+    candidate_hash: [u32; 64],
+    candidate_nulls: [u32; 64],
+    candidate_keys: [[i64; 64]; L],
+}
+
+impl<const L: usize> Lanes<L> {
+    #[inline(always)]
+    fn new() -> Self {
+        Self {
+            hash: [0; 64],
+            current: [0; 64],
+            next: [0; 64],
+            candidate_hash: [0; 64],
+            candidate_nulls: [0; 64],
+            candidate_keys: [[0; 64]; L],
+        }
+    }
+}
+
+/// The rows of `bits`, lowest first.
+#[inline(always)]
+fn rows_of(mut bits: u64) -> impl Iterator<Item = usize> {
+    core::iter::from_fn(move || {
+        (bits != 0).then(|| {
+            let bit = bits.trailing_zeros() as usize;
+            bits &= bits - 1;
+            bit
+        })
+    })
+}
+
+/// Probe the `selected` rows of one word phase by phase: every row's bucket
+/// is hinted to the cache, then every head read; while rows remain, every
+/// candidate record is checked and hinted, then every candidate's hash,
+/// null bits and keys gathered and compared with the rows' as whole
+/// arrays; matching rows get their offset in `matches`, the others move
+/// down their chains. The loads of different rows are independent and in
+/// flight together, which a row-by-row walk, with its longer path per row,
+/// allows for fewer rows at a time. The answer is the row-by-row one: each
+/// row gets the first record of its chain with its hash, null bits and
+/// keys. Returns the rows found.
+#[inline(always)]
+fn probe_word<R: Region, const N: usize, const L: usize>(
+    access: &mut Access<'_, R>,
+    word_keys: &WordKeys<'_>,
+    hashes: &[u32],
+    selected: u64,
+    matches: &mut [u32],
+    lanes: &mut Lanes<L>,
+) -> Result<u64> {
+    let nkeys = if N > 0 { N } else { access.nkeys() };
+    for bit in rows_of(selected) {
+        let hash = hashes[bit];
+        lanes.hash[bit] = hash;
+        access.prefetch_bucket(hash);
+    }
+    let mut pending = 0;
+    for bit in rows_of(selected) {
+        let head = access.head(lanes.hash[bit]);
+        lanes.current[bit] = head;
+        pending |= u64::from(head != 0) << bit;
+    }
+    let mut hits = 0;
+    let mut steps = 0;
+    while pending != 0 {
+        access.check_steps(steps)?;
+        steps += 1;
+        for bit in rows_of(pending) {
+            let byte = access.place(lanes.current[bit])?;
+            access.prefetch_record(byte);
+        }
+        for bit in rows_of(pending) {
+            // SAFETY: `place` accepted every offset of `pending` above.
+            let record = unsafe { access.open(lanes.current[bit]) }?;
+            lanes.candidate_hash[bit] = record.hash();
+            lanes.candidate_nulls[bit] = record.null_bits();
+            lanes.next[bit] = record.next();
+            let keys = record.keys();
+            for (slot, key) in lanes.candidate_keys[..nkeys].iter_mut().zip(keys) {
+                slot[bit] = *key;
+            }
+        }
+        let mut found = pending
+            & lanes::eq_mask_u32(&lanes.candidate_hash, &lanes.hash)
+            & lanes::eq_mask_u32(&lanes.candidate_nulls, word_keys.null_bits_all());
+        for (key, candidates) in lanes.candidate_keys[..nkeys].iter().enumerate() {
+            found &= lanes::eq_mask_i64(candidates, word_keys.slots(key));
+        }
+        for bit in rows_of(found) {
+            matches[bit] = lanes.current[bit];
+        }
+        hits |= found;
+        let rest = pending & !found;
+        pending = 0;
+        for bit in rows_of(rest) {
+            let next = lanes.next[bit];
+            lanes.current[bit] = next;
+            pending |= u64::from(next != 0) << bit;
+        }
+    }
+    Ok(hits)
 }
 
 /// For each row of `rows`, replace `offsets[row]` by the record after it

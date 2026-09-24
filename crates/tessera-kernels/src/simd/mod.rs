@@ -22,6 +22,7 @@ mod cast;
 mod filter;
 mod filter64;
 mod hash;
+mod table;
 
 use core::arch::aarch64::{
     int32x4_t, uint8x8_t, uint32x4_t, vaddv_u8, vandq_u8, vceqzq_u8, vdup_n_u8, vget_high_s16,
@@ -40,6 +41,7 @@ pub use cast::{widen_datum, widen_dense};
 pub use filter::{filter_datum, filter_dense};
 pub use filter64::{filter_datum64, filter_dense64};
 pub use hash::{combine, combine_nulls, hash, hash_nulls};
+pub use table::prefetch;
 
 /// Bit weights of the four lanes of each group in a 16-row quarter.
 const LANE_WEIGHTS: [[u32; 4]; 4] = [

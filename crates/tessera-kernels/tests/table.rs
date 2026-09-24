@@ -1149,3 +1149,72 @@ fn whole_words_normalize_like_rows() -> Result<()> {
     }
     Ok(())
 }
+
+/// Probe `rows` of a batch in one call: the rows found and their matches.
+fn probe_rows(
+    table: &TableMut<'_>,
+    hashes: &[u32],
+    keys: &[ColumnView<'_, i32>],
+    rows: &[u64],
+) -> Result<(Vec<u64>, Vec<u32>)> {
+    let nrows = hashes.len();
+    let view = RowMaskView::try_new(nrows, rows)?;
+    let mut found_words = vec![0; nrows.div_ceil(64)];
+    let mut found = RowMask::try_new(nrows, &mut found_words)?;
+    let mut matches = vec![0; nrows];
+    table.probe(hashes, keys, &view, &mut matches, &mut found)?;
+    Ok((found_words, matches))
+}
+
+#[test]
+fn a_word_probed_at_once_answers_as_rows_probed_alone() -> Result<()> {
+    // Three thousand records over 1024 buckets: chains of about three,
+    // with equal keys and equal hashes of different rows in them.
+    let values: Vec<i32> = (0..3000).map(|row| row % 1700).collect();
+    let keys = [ColumnView::try_new(&values, None)?];
+    let hashes: Vec<u32> = values.iter().map(|&value| hash_i32(value)).collect();
+    let mut words = words_for(&ONE_INT4, 3000)?;
+    let table = TableMut::create_in(&mut words, &ONE_INT4, 3000)?;
+    insert_all(&table, &hashes, &keys[..], None)?;
+    let mut state = 0x0bad_5eed;
+    let probe_values: Vec<i32> = (0..500)
+        .map(|_| (random(&mut state) % 2000) as i32)
+        .collect();
+    let probe_keys = [ColumnView::try_new(&probe_values, None)?];
+    let probe_hashes: Vec<u32> = probe_values.iter().map(|&value| hash_i32(value)).collect();
+    let all = all_rows(500);
+    let (found, matches) = probe_rows(&table, &probe_hashes, &probe_keys, &all)?;
+    for row in 0..500 {
+        let mut one = vec![0; all.len()];
+        one[row / 64] = 1 << (row % 64);
+        let (alone, alone_matches) = probe_rows(&table, &probe_hashes, &probe_keys, &one)?;
+        let hit = alone[row / 64] >> (row % 64) & 1;
+        assert_eq!(found[row / 64] >> (row % 64) & 1, hit, "row {row}");
+        if hit == 1 {
+            assert_eq!(matches[row], alone_matches[row], "row {row}");
+        }
+    }
+    assert!(found.iter().map(|word| word.count_ones()).sum::<u32>() > 300);
+    Ok(())
+}
+
+#[test]
+fn a_word_probed_at_once_detects_a_cycle() -> Result<()> {
+    let values: Vec<i32> = (0..64).collect();
+    let keys = [ColumnView::try_new(&values, None)?];
+    let hashes: Vec<u32> = values.iter().map(|&value| hash_i32(value)).collect();
+    let mut words = words_for(&ONE_INT4, 64)?;
+    let offsets = {
+        let table = TableMut::create_in(&mut words, &ONE_INT4, 64)?;
+        insert_all(&table, &hashes, &keys[..], None)?
+    };
+    // The record of key 0 chains to itself; absent keys with the same
+    // hashes walk the cycle in the whole-word path.
+    set_u32(&mut words, offsets[0] as usize * 8 + 4, offsets[0]);
+    let absent = [999; 64];
+    let absent_keys = [ColumnView::try_new(&absent, None)?];
+    let table = TableMut::exclusive(&mut words)?;
+    let error = probe_rows(&table, &hashes, &absent_keys, &all_rows(64)).unwrap_err();
+    assert!(error.to_string().contains("longer"), "{error}");
+    Ok(())
+}

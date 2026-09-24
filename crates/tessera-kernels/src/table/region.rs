@@ -60,6 +60,10 @@ pub(super) trait Region {
     /// proves for a bucket or a reserved record.
     unsafe fn load_u32_in(&self, offset: usize) -> u32;
 
+    /// Hint that the cache line at `offset` will be read soon. Any offset
+    /// is allowed: a hint neither faults nor changes anything observable.
+    fn prefetch(&self, offset: usize);
+
     /// [`Self::store_u32`] without the bounds check.
     ///
     /// # Safety
@@ -202,6 +206,11 @@ impl Region for RawRegion {
         // SAFETY: the range is in bounds, and the caller promises that nothing
         // else reads or writes it while the slice lives.
         unsafe { core::slice::from_raw_parts_mut(address, len) }
+    }
+
+    #[inline(always)]
+    fn prefetch(&self, offset: usize) {
+        super::lanes::prefetch(self.base.wrapping_add(offset));
     }
 
     #[inline(always)]
