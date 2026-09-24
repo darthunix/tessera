@@ -975,6 +975,20 @@
   по замеру на table_large (группы miss/occupied). Позже тот же фильтр можно передавать в скан probe-стороны.
   Тесты: join_same против ядра (NULL-ключи, пустая build-сторона, дубликаты, остаток,
   semi/anti/outer, повторный запуск), планы; критерий — Q3, Q5, Q10 с TessFilter под обеими сторонами.
+  План (утверждён 2026-09-24), шесть серий: 1) хэш int8 — свёртка как hashint8 PostgreSQL (lo ^ (v ≥ 0 ? hi : ~hi),
+  затем murmurhash32), так что int8 в диапазоне int4 хэшируется как int4 и смешанные соединения int4 = int8 идут
+  через одну таблицу; построчный путь, NEON с приёмкой PMU, tess_int8_hash/_next; 2) ядра в мосте (решение
+  пользователя: новая подсистема моста, модуль узлов остаётся без Cargo) — tess_table_gather (слово нагрузки для
+  пачки строк за вызов), include/tessera/kernel_ops.h (TessKernelOps с хэшами и операциями таблицы,
+  TessKernelRegistryOps set/clear/get), необязательное поле TessApi.kernels, bridge/kernel.c, tess_runtime_kernels(),
+  tess_status_report(); модуль ядер устанавливает таблицу в _PG_init, узлы берут её лениво; 3) TessHashJoin, INNER по
+  одному ключу int4/int8: семейство join в bench/pg первым коммитом (приёмка до 8.1 — решение пользователя),
+  исполнитель (построение в регионе контекста узла, by-ref копии, рост; раунды выдачи: пачка пар выровнена с внешней
+  пачкой, внешние колонки ссылкой, внутренние из нагрузки по требованию), планировщик (set_join_pathlist_hook,
+  шаблон create_hashjoin_path × 0,9, ворота hash_mem), EXPLAIN и повторный запуск, частичный путь со счётчиками
+  TessSharedStats; 4) несколько ключей, TessQual из TessFilter, остаток, проекция над парами, компактный режим при
+  перекосе; 5) SEMI/ANTI и LEFT; 6) Bloom-фильтр. По умолчанию: путь и над TessPack (сузить по замеру), переполнение
+  hash_mem — Overrun.
   3. Групповой агрегат в памяти. TessAgg с GROUP BY над таблицей 5.1: ключи int4/int8, затем char(1)/text байтами
   (Q1: l_returnflag, l_linestatus); состояния агрегатов 4.14 (count/sum/min/max int4/int8; numeric — после 8.3) в
   полезной нагрузке записи; выдача групп пачками обходом таблицы, порядок не обещается (pathkeys нет); HAVING как
