@@ -257,6 +257,29 @@ extern TessStatusCode tess_count(const TessDatumColumn *column,
 								 int64 *count,
 								 TessStatus *status);
 
+/*
+ * Key hashes over int8 columns, as tess_int4_hash and tess_int4_hash_next:
+ * the value is folded to 32 bits as PostgreSQL's hashint8 folds it (low
+ * half xor high half, the high half inverted for negative values) before
+ * murmurhash32. An int8 inside the int4 range hashes exactly like the int4
+ * of the same value, so int4 and int8 keys of one join or grouping share a
+ * table, and the calls of both families chain in any order.
+ */
+extern TessStatusCode tess_int8_hash(const TessDatumColumn *column,
+									 const TessRowMask *prepared,
+									 const TessRowMask *rows,
+									 TessNullKeys nulls,
+									 uint32 *hashes,
+									 TessRowMask *valid,
+									 TessStatus *status);
+
+extern TessStatusCode tess_int8_hash_next(const TessDatumColumn *column,
+										  const TessRowMask *prepared,
+										  TessNullKeys nulls,
+										  uint32 *hashes,
+										  TessRowMask *valid,
+										  TessStatus *status);
+
 /* The least selected non-NULL int8 value; without any, isnull is set. */
 extern TessStatusCode tess_int8_min(const TessDatumColumn *column,
 									const TessRowMask *prepared,

@@ -6,10 +6,10 @@ use std::ptr;
 use anyhow::Result;
 use tessera_capi::c::{
     Code, DatumColumn, Mask, Status, TableKey, TableRecord, TableStats, tess_int4_hash,
-    tess_table_attach, tess_table_create, tess_table_find_or_insert, tess_table_format_version,
-    tess_table_grow, tess_table_insert, tess_table_layout, tess_table_next_match,
-    tess_table_payload, tess_table_probe, tess_table_record, tess_table_scan, tess_table_size,
-    tess_table_stats,
+    tess_int8_hash, tess_table_attach, tess_table_create, tess_table_find_or_insert,
+    tess_table_format_version, tess_table_grow, tess_table_insert, tess_table_layout,
+    tess_table_next_match, tess_table_payload, tess_table_probe, tess_table_record,
+    tess_table_scan, tess_table_size, tess_table_stats,
 };
 use tessera_core::{ColumnView, RowMask, RowMaskView};
 use tessera_kernels::int32::{self, NullKeys};
@@ -645,6 +645,142 @@ fn datum_words_normalize_like_rows_under_partial_readiness() -> Result<()> {
                 };
                 assert_eq!(from_whole[bit], expected, "row {row}");
             }
+        }
+    }
+    Ok(())
+}
+
+/// Hash a Datum column of `nrows` rows, none NULL, all selected, with the
+/// entry point of its kind: the hashes and the valid mask.
+///
+/// # Safety
+///
+/// `column` holds `nrows` Datums of the kind.
+unsafe fn hash_column(column: &DatumColumn, kind: u32, nrows: usize) -> (Vec<u32>, Vec<u64>) {
+    let mut rows_words = vec![u64::MAX; nrows.div_ceil(64)];
+    let rows = Mask {
+        nrows: nrows as i32,
+        bits: rows_words.as_mut_ptr(),
+    };
+    let mut hashes = vec![0; nrows];
+    let mut valid_words = vec![0; nrows.div_ceil(64)];
+    let mut valid = Mask {
+        nrows: nrows as i32,
+        bits: valid_words.as_mut_ptr(),
+    };
+    let mut status = Status::new();
+    let hash = if kind == 1 {
+        tess_int4_hash
+    } else {
+        tess_int8_hash
+    };
+    // SAFETY: the caller's contract; local buffers of the declared sizes.
+    let code = unsafe {
+        hash(
+            column,
+            ptr::null(),
+            &raw const rows,
+            0,
+            hashes.as_mut_ptr(),
+            &raw mut valid,
+            &raw mut status,
+        )
+    };
+    assert_eq!(code, Code::Ok, "{}", status.message());
+    (hashes, valid_words)
+}
+
+#[test]
+fn int4_keys_find_the_records_of_int8_keys() -> Result<()> {
+    // Build rows: even rows inside the int4 range, odd rows past it. An odd
+    // row's value `row << 33` folds to `2 * row`, the hash of probe row
+    // `2 * row + 32`, which must still find only its own record: keys are
+    // compared whole.
+    let built: Vec<i64> = (0..64_i64)
+        .map(|row| if row % 2 == 0 { row - 32 } else { row << 33 })
+        .collect();
+    let built_datums: Vec<u64> = built.iter().map(|&value| value as u64).collect();
+    // Probe rows: int4 values row - 32, so an even row finds its twin.
+    let probed_datums: Vec<u64> = (0..64_i64).map(|row| (row - 32) as u64).collect();
+    let isnull = [false; 64];
+    let column = |datums: &[u64]| DatumColumn {
+        struct_size: size_of::<DatumColumn>(),
+        values: datums.as_ptr(),
+        isnull: isnull.as_ptr(),
+        nrows: 64,
+    };
+    let (built_column, probed_column) = (column(&built_datums), column(&probed_datums));
+    let kinds = [2_u32];
+    let mut status = Status::new();
+    let mut size = 0;
+    // SAFETY: local buffers of the declared sizes, aliased by nothing else.
+    unsafe {
+        let code = tess_table_size(1, kinds.as_ptr(), 0, 64, &raw mut size, &raw mut status);
+        assert_eq!(code, Code::Ok, "{}", status.message());
+        let mut region = vec![0_u64; size / 8];
+        let base = region.as_mut_ptr().cast::<u8>();
+        let code = tess_table_create(base, size, 1, kinds.as_ptr(), 0, 64, &raw mut status);
+        assert_eq!(code, Code::Ok, "{}", status.message());
+
+        let (built_hashes, mut pending_words) = hash_column(&built_column, 2, 64);
+        let built_key = TableKey {
+            kind: 2,
+            column: &raw const built_column,
+            prepared: ptr::null(),
+        };
+        let mut pending = Mask {
+            nrows: 64,
+            bits: pending_words.as_mut_ptr(),
+        };
+        let mut offsets = vec![0; 64];
+        let code = tess_table_insert(
+            base,
+            size,
+            built_hashes.as_ptr(),
+            1,
+            &raw const built_key,
+            ptr::null(),
+            &raw mut pending,
+            offsets.as_mut_ptr(),
+            &raw mut status,
+        );
+        assert_eq!(code, Code::Ok, "{}", status.message());
+        assert_eq!(pending_words, [0]);
+
+        let (probed_hashes, mut rows_words) = hash_column(&probed_column, 1, 64);
+        for row in (0..64).step_by(2) {
+            assert_eq!(probed_hashes[row], built_hashes[row], "row {row}");
+        }
+        let probed_key = TableKey {
+            kind: 1,
+            column: &raw const probed_column,
+            prepared: ptr::null(),
+        };
+        let rows = Mask {
+            nrows: 64,
+            bits: rows_words.as_mut_ptr(),
+        };
+        let mut found_words = [0];
+        let mut found = Mask {
+            nrows: 64,
+            bits: found_words.as_mut_ptr(),
+        };
+        let mut matches = vec![0; 64];
+        let code = tess_table_probe(
+            base,
+            size,
+            probed_hashes.as_ptr(),
+            1,
+            &raw const probed_key,
+            &raw const rows,
+            matches.as_mut_ptr(),
+            &raw mut found,
+            &raw mut status,
+        );
+        assert_eq!(code, Code::Ok, "{}", status.message());
+        assert_eq!(found_words, [0x5555_5555_5555_5555]);
+        for row in (0..64).step_by(2) {
+            assert_eq!(matches[row], offsets[row], "row {row}");
         }
     }
     Ok(())

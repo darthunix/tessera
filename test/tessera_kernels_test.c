@@ -666,7 +666,10 @@ tessera_test_kernels_hashes(PG_FUNCTION_ARGS)
 {
 	Datum		values[3];
 	bool		isnull[3];
+	Datum		values8[3];
+	bool		isnull8[3];
 	TessDatumColumn column;
+	TessDatumColumn column8;
 	uint64		selection = 7;
 	TessRowMask rows = {3, &selection};
 	uint32		hashes[3] = {0xdeadbeef, 0xdeadbeef, 0xdeadbeef};
@@ -700,6 +703,38 @@ tessera_test_kernels_hashes(PG_FUNCTION_ARGS)
 	/* An unknown policy is rejected. */
 	if (tess_int4_hash(&column, NULL, &rows, (TessNullKeys) 2, hashes,
 					   &valid, &status) != TESS_ERROR_INVALID_ARGUMENT)
+		PG_RETURN_BOOL(false);
+
+	/*
+	 * int8 keys fold as hashint8 before murmurhash32: 2^40 folds to 256,
+	 * -5000000000 to 0xd5fa0e01.
+	 */
+	init_small_int8(&column8, values8, isnull8, 1, INT64CONST(1) << 40,
+					INT64CONST(-5000000000), false);
+	if (tess_int8_hash(&column8, NULL, &rows, TESS_NULL_KEYS_REJECT, hashes,
+					   &valid, &status) != TESS_OK ||
+		valid_word != 7 || hashes[0] != hash_of_1 ||
+		hashes[1] != 0x4570315f || hashes[2] != 0x548638f0)
+		PG_RETURN_BOOL(false);
+
+	/*
+	 * An int8 inside the int4 range hashes as the int4, so the families
+	 * chain: int4 keys 1, NULL, 42 then int8 keys 1, NULL, 42 give the
+	 * hashes of two int4 keys.
+	 */
+	init_small_int8(&column8, values8, isnull8, 1, 7, 42, true);
+	if (tess_int4_hash(&column, NULL, &rows, TESS_NULL_KEYS_REJECT, hashes,
+					   &valid, &status) != TESS_OK ||
+		tess_int8_hash_next(&column8, NULL, TESS_NULL_KEYS_REJECT, hashes,
+							&valid, &status) != TESS_OK ||
+		valid_word != 5 || hashes[0] != combine(hash_of_1, hash_of_1) ||
+		hashes[2] != combine(hash_of_42, hash_of_42))
+		PG_RETURN_BOOL(false);
+	if (tess_int8_hash(&column8, NULL, &rows, TESS_NULL_KEYS_GROUP, hashes,
+					   &valid, &status) != TESS_OK ||
+		valid_word != 7 || hashes[1] != null_hash ||
+		tess_int8_hash_next(&column8, NULL, (TessNullKeys) 2, hashes,
+							&valid, &status) != TESS_ERROR_INVALID_ARGUMENT)
 		PG_RETURN_BOOL(false);
 
 	PG_RETURN_BOOL(true);

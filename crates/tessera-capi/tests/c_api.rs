@@ -9,8 +9,8 @@ use tessera_capi::c::{
     tess_int4_arith_scalar_left, tess_int4_count, tess_int4_filter, tess_int4_hash,
     tess_int4_hash_next, tess_int4_max, tess_int4_min, tess_int4_sum, tess_int4_to_int8,
     tess_int8_arith_columns, tess_int8_arith_scalar, tess_int8_arith_scalar_left, tess_int8_filter,
-    tess_int8_max, tess_int8_min, tess_kernels_abi_version, tess_kernels_layout,
-    tess_kernels_test_panic,
+    tess_int8_hash, tess_int8_hash_next, tess_int8_max, tess_int8_min, tess_kernels_abi_version,
+    tess_kernels_layout, tess_kernels_test_panic,
 };
 use tessera_kernels::int32::{hash_combine, murmurhash32};
 
@@ -1032,6 +1032,90 @@ fn hashes_follow_pg_batch_and_the_null_policy() {
         )
     };
     assert_eq!(code, Code::InvalidArgument);
+}
+
+#[test]
+fn int8_hashes_fold_as_hashint8_and_chain_with_int4() {
+    // murmurhash32 of the folds: 1, 2^40 -> 256, -5000000000 -> 0xd5fa0e01.
+    let values = [1_i64, 1 << 40, -5_000_000_000];
+    let datums = values.map(|value| value as u64);
+    let isnull = [false; 3];
+    let column = DatumColumn {
+        struct_size: size_of::<DatumColumn>(),
+        values: datums.as_ptr(),
+        isnull: isnull.as_ptr(),
+        nrows: 3,
+    };
+    let mut selection = [0b111];
+    let rows = Mask {
+        nrows: 3,
+        bits: selection.as_mut_ptr(),
+    };
+    let mut hashes = [0xdead_beef_u32; 3];
+    let mut valid_words = [0];
+    let mut valid = Mask {
+        nrows: 3,
+        bits: valid_words.as_mut_ptr(),
+    };
+    let mut status = Status::new();
+    // SAFETY: local buffers of the declared sizes.
+    let code = unsafe {
+        tess_int8_hash(
+            &raw const column,
+            ptr::null(),
+            &raw const rows,
+            0,
+            hashes.as_mut_ptr(),
+            &raw mut valid,
+            &raw mut status,
+        )
+    };
+    assert_eq!(code, Code::Ok);
+    assert_eq!(hashes, [0x514e_28b7, 0x4570_315f, 0x5486_38f0]);
+    // An int4 first key and the same values as an int8 second key hash
+    // as two int4 keys.
+    let (int4_datums, int4_isnull, _) = small(&[1, 7, 42], &[false, false, false]);
+    let int4_column = DatumColumn {
+        struct_size: size_of::<DatumColumn>(),
+        values: int4_datums.as_ptr(),
+        isnull: int4_isnull.as_ptr(),
+        nrows: 3,
+    };
+    let int8_datums = [1_u64, 7, 42];
+    let int8_column = DatumColumn {
+        values: int8_datums.as_ptr(),
+        ..int4_column
+    };
+    // SAFETY: as above.
+    let (first, next) = unsafe {
+        (
+            tess_int4_hash(
+                &raw const int4_column,
+                ptr::null(),
+                &raw const rows,
+                0,
+                hashes.as_mut_ptr(),
+                &raw mut valid,
+                &raw mut status,
+            ),
+            tess_int8_hash_next(
+                &raw const int8_column,
+                ptr::null(),
+                0,
+                hashes.as_mut_ptr(),
+                &raw mut valid,
+                &raw mut status,
+            ),
+        )
+    };
+    assert_eq!((first, next), (Code::Ok, Code::Ok));
+    assert_eq!(valid_words, [0b111]);
+    for (row, key) in [1_u32, 7, 42].into_iter().enumerate() {
+        assert_eq!(
+            hashes[row],
+            hash_combine(murmurhash32(key), murmurhash32(key))
+        );
+    }
 }
 
 #[test]

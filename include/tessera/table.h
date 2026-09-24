@@ -23,8 +23,10 @@
  * status, never a crash or a hang. See docs/table.md.
  *
  * Records are addressed by 32-bit offsets in units of 8 bytes; 0 is none.
- * A batch brings its hashes (from tess_int4_hash and tess_int4_hash_next,
- * which apply the NULL policy), its keys as Datum columns and a row mask.
+ * A batch brings its hashes (from tess_int4_hash, tess_int8_hash and their
+ * _next forms, which apply the NULL policy), its keys as Datum columns and
+ * a row mask. An int8 inside the int4 range hashes as the int4, so int4
+ * and int8 key columns meet in one table.
  * A full table is not an error: tess_table_insert leaves the rows it had
  * no room for in the pending mask, and the caller grows the region.
  *

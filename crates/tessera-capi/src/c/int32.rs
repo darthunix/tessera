@@ -234,7 +234,7 @@ pub unsafe extern "C" fn tess_int4_arith_columns(
 /// `valid` must point to a valid mask and `hashes` to as many initialized,
 /// writable `u32` slots as it has rows; nothing else may access either for
 /// `'a`.
-unsafe fn hash_outputs<'a>(
+pub(super) unsafe fn hash_outputs<'a>(
     hashes: *mut u32,
     valid: *mut Mask,
 ) -> Result<(&'a mut [u32], RowMask<'a>)> {
@@ -308,7 +308,7 @@ pub unsafe extern "C" fn tess_int4_hash_next(
 }
 
 /// A `TessNullKeys` value.
-fn null_keys(nulls: c_uint) -> Result<NullKeys> {
+pub(super) fn null_keys(nulls: c_uint) -> Result<NullKeys> {
     Ok(match nulls {
         0 => NullKeys::Reject,
         1 => NullKeys::Group,

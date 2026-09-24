@@ -27,7 +27,7 @@ pub use int32::{
 };
 pub use int64::{
     tess_int8_arith_columns, tess_int8_arith_scalar, tess_int8_arith_scalar_left, tess_int8_filter,
-    tess_int8_max, tess_int8_min,
+    tess_int8_hash, tess_int8_hash_next, tess_int8_max, tess_int8_min,
 };
 pub use mask::Mask;
 pub use status::{Code, MESSAGE_SIZE, Status};

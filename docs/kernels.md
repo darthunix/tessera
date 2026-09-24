@@ -140,6 +140,14 @@ Datum, so an int8 result column is a Datum column:
 - `tess_int8_arith_scalar`, `tess_int8_arith_scalar_left` and
   `tess_int8_arith_columns`: as the int4 ones into a dense int8 result,
   overflow reported as `22003` with `bigint out of range`.
+- `tess_int8_hash(column, prepared, rows, nulls, hashes, valid, status)`
+  and `tess_int8_hash_next(column, prepared, nulls, hashes, valid,
+  status)`: as the int4 hashes, with the value folded to 32 bits as
+  PostgreSQL's `hashint8` folds it (the low half xor the high half, the
+  high half inverted for a negative value) before `murmurhash32`. An int8
+  inside the int4 range hashes exactly like the int4 of the same value, so
+  the two families chain in any order and an int4 key and an int8 key of
+  one join share a table; equal hashes never prove int8 keys equal.
 - `tess_int4_to_int8(column, prepared, rows, values, non_nulls, status)`:
   the selected int4 values widened into int8 Datums, with the output
   contract of the arithmetic; the cast `int8(int4)` as a kernel, so that a

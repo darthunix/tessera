@@ -8,7 +8,7 @@ use tessera_kernels::int64;
 
 use super::args::{inputs, outputs, reader};
 use super::column::DatumColumn;
-use super::int32::{arith_op, compare_op};
+use super::int32::{arith_op, compare_op, hash_outputs, null_keys};
 use super::mask::Mask;
 use super::status::{Code, Status, guard};
 use crate::DatumInt64Column;
@@ -124,6 +124,62 @@ pub unsafe extern "C" fn tess_int8_arith_columns(
             let right = reader::<i64>(right, right_prepared)?;
             let (values, mut non_nulls) = outputs(values, non_nulls)?;
             int64::arith_columns(op, &left, &right, &rows, values, &mut non_nulls)
+        })
+    }
+}
+
+/// `tess_int8_hash`: hash the first int8 key of the selected rows into
+/// `hashes` and set `valid`, as `tess_int4_hash` with PostgreSQL's
+/// `hashint8` fold.
+///
+/// # Safety
+///
+/// As for [`inputs`] and [`hash_outputs`]; `status` as for every entry
+/// point.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tess_int8_hash(
+    column: *const DatumColumn,
+    prepared: *const Mask,
+    rows: *const Mask,
+    nulls: c_uint,
+    hashes: *mut u32,
+    valid: *mut Mask,
+    status: *mut Status,
+) -> Code {
+    // SAFETY: the caller's contract.
+    unsafe {
+        guard(status, || {
+            let nulls = null_keys(nulls)?;
+            let (column, rows) = inputs::<i64>(column, prepared, rows)?;
+            let (hashes, mut valid) = hash_outputs(hashes, valid)?;
+            int64::hash(&column, &rows, nulls, hashes, &mut valid)
+        })
+    }
+}
+
+/// `tess_int8_hash_next`: fold the next int8 key into the hashes of the
+/// rows in `valid`, narrowing it.
+///
+/// # Safety
+///
+/// As for [`reader`] and [`hash_outputs`]; `status` as for every entry
+/// point.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tess_int8_hash_next(
+    column: *const DatumColumn,
+    prepared: *const Mask,
+    nulls: c_uint,
+    hashes: *mut u32,
+    valid: *mut Mask,
+    status: *mut Status,
+) -> Code {
+    // SAFETY: the caller's contract.
+    unsafe {
+        guard(status, || {
+            let nulls = null_keys(nulls)?;
+            let column = reader::<i64>(column, prepared)?;
+            let (hashes, mut valid) = hash_outputs(hashes, valid)?;
+            int64::hash_next(&column, nulls, hashes, &mut valid)
         })
     }
 }

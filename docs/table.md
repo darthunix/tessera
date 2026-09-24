@@ -71,12 +71,15 @@ the format and the structures with what the library was built with.
 ## A batch in and out
 
 A batch brings three things: its hashes, one `uint32` per physical row,
-from `tess_int4_hash` and `tess_int4_hash_next`, which also apply the
-NULL policy (`TESS_NULL_KEYS_REJECT` drops NULL keys from the mask, for
-joins; `TESS_NULL_KEYS_GROUP` keeps them as a key of their own, for
-grouping); its keys, one `TessTableKey` per key of the table, a Datum
+from `tess_int4_hash`, `tess_int8_hash` and their `_next` forms, which
+also apply the NULL policy (`TESS_NULL_KEYS_REJECT` drops NULL keys from
+the mask, for joins; `TESS_NULL_KEYS_GROUP` keeps them as a key of their
+own, for grouping); its keys, one `TessTableKey` per key of the table, a Datum
 column read by its kind with the readiness mask of the batch contract;
-and a row mask.
+and a row mask. An int8 inside the int4 range hashes as the int4 and
+both are stored as 8-byte slots, so an int4 key column may insert into or
+probe a table whose records came from int8 keys, as a join of an int4
+column with an int8 one does.
 
 `tess_table_insert(region, len, hashes, nkeys, keys, payload, &pending,
 offsets, &status)` inserts the rows of `pending` in row order, always as
