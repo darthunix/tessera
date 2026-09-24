@@ -1,7 +1,8 @@
 //! Signed int64 kernels without PostgreSQL type dispatch: comparisons
 //! ([`filter`]), arithmetic ([`arith_scalar`], [`arith_scalar_left`],
-//! [`arith_columns`]) and aggregates ([`count`], [`min`], [`max`]; no sum,
-//! which PostgreSQL computes in numeric).
+//! [`arith_columns`]), aggregates ([`count`], [`min`], [`max`]; no sum,
+//! which PostgreSQL computes in numeric) and key hashes ([`hash`],
+//! [`hash_next`]), which agree with the int4 hashes on the int4 range.
 //!
 //! The family mirrors [`crate::int32`] kernel by kernel rather than sharing
 //! a generic implementation over the lane type: the shape of every int32
@@ -15,12 +16,14 @@ mod aggregate;
 mod arith;
 mod divisor;
 mod filter;
+mod hash;
 
 pub use aggregate::{max, min};
 pub(crate) use arith::Side;
 pub use arith::{arith_columns, arith_scalar, arith_scalar_left};
 pub(crate) use divisor::Divisor;
 pub use filter::filter;
+pub use hash::{NullKeys, fold, hash, hash_combine, hash_next, murmurhash32};
 
 pub use crate::count::count;
 pub use crate::ops::{ArithOp, ArithmeticError, CompareOp};
