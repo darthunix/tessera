@@ -3,7 +3,7 @@
 //! targets and Miri), in the manner of the hash kernels' `bulk_op`.
 
 #[cfg(all(target_arch = "aarch64", not(miri)))]
-pub(super) use crate::simd::prefetch;
+pub(super) use crate::simd::{eq_mask_i64, eq_mask_u32, prefetch};
 
 /// A prefetch hint where none is implemented: nothing.
 #[cfg(not(all(target_arch = "aarch64", not(miri))))]
@@ -11,6 +11,7 @@ pub(super) use crate::simd::prefetch;
 pub(super) fn prefetch(_address: *const u8) {}
 
 /// Bit `i` set where `a[i] == b[i]`.
+#[cfg(not(all(target_arch = "aarch64", not(miri))))]
 #[inline(always)]
 pub(super) fn eq_mask_u32(a: &[u32; 64], b: &[u32; 64]) -> u64 {
     let mut mask = 0;
@@ -21,6 +22,7 @@ pub(super) fn eq_mask_u32(a: &[u32; 64], b: &[u32; 64]) -> u64 {
 }
 
 /// Bit `i` set where `a[i] == b[i]`.
+#[cfg(not(all(target_arch = "aarch64", not(miri))))]
 #[inline(always)]
 pub(super) fn eq_mask_i64(a: &[i64; 64], b: &[i64; 64]) -> u64 {
     let mut mask = 0;
@@ -31,7 +33,7 @@ pub(super) fn eq_mask_i64(a: &[i64; 64], b: &[i64; 64]) -> u64 {
 }
 
 /// The operations against a scalar model, whichever implementation the
-/// target compiles.
+/// target compiles: the NEON one here, the AVX2 one when it exists.
 #[cfg(test)]
 mod tests {
     use super::{eq_mask_i64, eq_mask_u32};
