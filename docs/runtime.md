@@ -584,6 +584,24 @@ by name. The [planner test](../test/tessera_planner_test.c) is a complete
 forwarding node built this way, with a `set_rel_pathlist` hook that calls
 the previous hook, checks `tessera.enable` and wraps a sequential scan.
 
+## Clauses over batches
+
+`TessQual` applies a node's clauses to its batches, as TessFilter and
+TessHashJoin do. `tess_qual_create` takes the clauses in two lists: the
+ones `tess_expr_supports_filter` accepted, compiled for whole batches with
+the [expression compiler](expr.md) and applied first, in order; and the
+others, compiled with `ExecInitQual` and evaluated row by row over the
+rows the first ones kept. Each clause's `Var` is an attribute of the
+node's scan tuple, and the configuration's `scan_tuple` layout gives the
+batch column of each attribute. For the row-wise clauses the helper
+shows each row in the configured virtual scan slot, with the attributes
+the clauses read taken from the batch's columns; the other attributes
+stay NULL and nothing is allocated per row. `tess_qual_columns` is the
+set of batch columns the clauses read, for the request to the producer;
+`tess_qual_apply(qual, batch, econtext, rows)` narrows the batch's
+selection and returns the rows kept, the caller having reset the
+expression context; `tess_qual_stats` counts the rows each part removed.
+
 ## Batch expressions
 
 `tessera/expr.h` compiles a PostgreSQL expression over one batch column

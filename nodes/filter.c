@@ -9,7 +9,6 @@
 #include "storage/shm_toc.h"
 #include "utils/ruleutils.h"
 
-#include "tessera/expr.h"
 #include "tessera/runtime.h"
 
 #include "internal.h"
@@ -40,17 +39,10 @@ typedef struct FilterState
 	TessUnary  *unary;
 	/* The child's layout, which the clauses' columns refer to. */
 	TessLayout	child_layout;
-	/* The batch clauses, in the planner's order. */
-	TessExpr  **filters;
-	int			nfilters;
-	/* The scan tuple attributes the row-wise clauses read, and their columns. */
-	int		   *residual_atts;
-	int			nresidual;
-	TessDatumColumn *columns;
+	/* The batch clauses, then the row-wise ones. */
+	TessQual   *qual;
 	/* The targets PostgreSQL asks the node to compute, or NULL. */
 	TessProjection *projection;
-	uint64		batch_removed;
-	uint64		residual_removed;
 	/* The counters of every participant, in a parallel plan. */
 	TessSharedStats *stats;
 } FilterState;
@@ -99,105 +91,15 @@ tess_filter_create_state(CustomScan *cscan)
 	return (Node *) state;
 }
 
-/* A Var of the scan tuple is a position in the child's target list. */
-static int
-resolve_column(const Var *var, void *context)
-{
-	return tess_layout_column((const TessLayout *) context, var->varattno - 1);
-}
-
-/*
- * The row-wise clauses over the rows the batch clauses kept: each row is
- * shown to ExecQual through the scan tuple slot, whose attributes the
- * clauses read come from the batch's columns; nothing is allocated.
- */
-static int
-apply_residual(FilterState *state, TessBatch *batch, int kept)
-{
-	ExprContext *econtext = state->css.ss.ps.ps_ExprContext;
-	TupleTableSlot *slot = state->css.ss.ss_ScanTupleSlot;
-	int			row = -1;
-
-	for (int index = 0; index < state->nresidual; index++)
-	{
-		int			column = tess_layout_column(&state->child_layout,
-												state->residual_atts[index]);
-
-		batch->ops->get_datum_column(batch, column, &batch->rows,
-									 TESS_COLUMN_FOR_FILTER,
-									 &state->columns[index]);
-	}
-	ExecClearTuple(slot);
-	ExecStoreVirtualTuple(slot);
-	econtext->ecxt_scantuple = slot;
-	while ((row = tess_row_mask_next(&batch->rows, row)) >= 0)
-	{
-		for (int index = 0; index < state->nresidual; index++)
-		{
-			int			att = state->residual_atts[index];
-
-			slot->tts_values[att] = state->columns[index].values[row];
-			slot->tts_isnull[att] = state->columns[index].isnull[row];
-		}
-		if (!ExecQual(state->css.ss.ps.qual, econtext))
-		{
-			tess_row_mask_clear(&batch->rows, row);
-			kept--;
-		}
-	}
-	return kept;
-}
-
 /* Apply the clauses in order, each over the rows the previous ones left. */
 static int
 filter_batch(void *private_data, TessBatch *batch, int rows)
 {
 	FilterState *state = private_data;
-	ExprContext *econtext = state->css.ss.ps.ps_ExprContext;
-	int			kept = rows;
-	int			batch_kept;
 
-	ResetExprContext(econtext);
-	for (int index = 0; index < state->nfilters && kept > 0; index++)
-	{
-		tess_expr_bind(state->filters[index], batch, econtext,
-					   TESS_COLUMN_FOR_FILTER);
-		tess_expr_apply_filter(state->filters[index]);
-		kept = tess_row_mask_count(&batch->rows);
-	}
-	batch_kept = kept;
-	state->batch_removed += rows - batch_kept;
-	if (state->css.ss.ps.qual != NULL && kept > 0)
-		kept = apply_residual(state, batch, kept);
-	state->residual_removed += batch_kept - kept;
-	return kept;
-}
-
-/* The scan tuple attributes the row-wise clauses read, each once. */
-static void
-prepare_residual(FilterState *state, CustomScan *cscan,
-				 Bitmapset **filter_columns)
-{
-	TupleTableSlot *slot = state->css.ss.ss_ScanTupleSlot;
-	Bitmapset  *atts = NULL;
-	int			att = -1;
-	int			index = 0;
-
-	foreach_ptr(Var, var, pull_var_clause((Node *) cscan->scan.plan.qual, 0))
-		atts = bms_add_member(atts, var->varattno - 1);
-	state->nresidual = bms_num_members(atts);
-	state->residual_atts = palloc_array(int, state->nresidual);
-	state->columns = palloc_array(TessDatumColumn, state->nresidual);
-	while ((att = bms_next_member(atts, att)) >= 0)
-	{
-		state->residual_atts[index] = att;
-		state->columns[index++] = (TessDatumColumn)
-			TESS_STRUCT_INITIALIZER(TessDatumColumn);
-		*filter_columns = bms_add_member(*filter_columns,
-										 tess_layout_column(&state->child_layout, att));
-	}
-	/* The attributes the clauses do not read are never looked at. */
-	memset(slot->tts_isnull, true, slot->tts_tupleDescriptor->natts);
+	ResetExprContext(state->css.ss.ps.ps_ExprContext);
+	return tess_qual_apply(state->qual, batch, state->css.ss.ps.ps_ExprContext,
+						   rows);
 }
 
 static void
@@ -207,9 +109,8 @@ filter_begin(CustomScanState *css, EState *estate, int eflags)
 	CustomScan *cscan = castNode(CustomScan, css->ss.ps.plan);
 	TessPlanInfo info = TESS_STRUCT_INITIALIZER(TessPlanInfo);
 	TessUnaryConfig config = TESS_STRUCT_INITIALIZER(TessUnaryConfig);
-	Bitmapset  *filter_columns = NULL;
+	TessQualConfig qual = TESS_STRUCT_INITIALIZER(TessQualConfig);
 	PlanState  *child;
-	int			index = 0;
 
 	/* The planner puts Material above a batch subtree for these. */
 	if (eflags & (EXEC_FLAG_BACKWARD | EXEC_FLAG_MARK))
@@ -222,22 +123,14 @@ filter_begin(CustomScanState *css, EState *estate, int eflags)
 	css->custom_ps = list_make1(child);
 	state->child_layout = (TessLayout) TESS_STRUCT_INITIALIZER(TessLayout);
 	tess_plan_get_layout(child->plan, &state->child_layout);
-	state->nfilters = list_length(cscan->custom_exprs);
-	state->filters = palloc_array(TessExpr *, state->nfilters);
-	foreach_ptr(Node, clause, cscan->custom_exprs)
-	{
-		List	   *vars = pull_var_clause(clause, 0);
-
-		state->filters[index++] = tess_expr_compile_filter(clause, &css->ss.ps,
-														   resolve_column,
-														   &state->child_layout);
-		/* Every column the chain reads, an operand of a step included. */
-		foreach_ptr(Var, var, vars)
-			filter_columns = bms_add_member(filter_columns,
-											resolve_column(var, &state->child_layout));
-	}
-	if (css->ss.ps.qual != NULL)
-		prepare_residual(state, cscan, &filter_columns);
+	/* The scan tuple is the child's target list, as the child maps it. */
+	qual.parent_context = estate->es_query_cxt;
+	qual.parent = &css->ss.ps;
+	qual.batch_clauses = cscan->custom_exprs;
+	qual.row_clauses = cscan->scan.plan.qual;
+	qual.scan_slot = css->ss.ss_ScanTupleSlot;
+	qual.scan_tuple = &state->child_layout;
+	state->qual = tess_qual_create(&qual);
 	if (info.computed != NIL)
 	{
 		TessProjectionConfig projection = TESS_STRUCT_INITIALIZER(TessProjectionConfig);
@@ -256,7 +149,7 @@ filter_begin(CustomScanState *css, EState *estate, int eflags)
 	config.node = css;
 	config.child = child;
 	config.layout = &info.layout;
-	config.filter_columns = filter_columns;
+	config.filter_columns = tess_qual_columns(state->qual);
 	config.process = filter_batch;
 	config.private_data = state;
 	config.projection = state->projection;
@@ -305,10 +198,11 @@ static void
 filter_counters(FilterState *state, uint64 *values)
 {
 	const TessUnaryStats *stats = tess_unary_stats(state->unary);
+	const TessQualStats *removed = tess_qual_stats(state->qual);
 
 	memset(values, 0, FILTER_NCOUNTERS * sizeof(uint64));
-	values[FILTER_BATCH_REMOVED] = state->batch_removed;
-	values[FILTER_RESIDUAL_REMOVED] = state->residual_removed;
+	values[FILTER_BATCH_REMOVED] = removed->batch_removed;
+	values[FILTER_RESIDUAL_REMOVED] = removed->row_removed;
 	values[FILTER_INPUT_BATCHES] = stats->input_batches;
 	values[FILTER_INPUT_ROWS] = stats->input_rows;
 	values[FILTER_OUTPUT_ROWS] = stats->output_rows;

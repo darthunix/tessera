@@ -247,6 +247,58 @@ extern void tess_projection_reset(TessProjection *projection);
 extern const TessProjectionStats *tess_projection_stats(const TessProjection *projection);
 
 /*
+ * Clauses over a node's batches: a prefix the expression compiler takes
+ * for whole batches (tessera/expr.h), applied first and in order, then
+ * the others row by row through ExecQual, each row shown in the scan slot
+ * with the attributes the clauses read taken from the batch's columns. A
+ * clause's Var is an attribute of the scan tuple, which the scan tuple
+ * layout maps to a batch column. Applying narrows the batch's selection.
+ * See docs/runtime.md.
+ */
+typedef struct TessQual TessQual;
+
+typedef struct TessQualConfig
+{
+	Size		struct_size;
+	/* Owns the qual and its compiled clauses. */
+	MemoryContext parent_context;
+	/* The node: supplies Params and compiles the row-wise clauses. */
+	PlanState  *parent;
+	/* Clauses tess_expr_supports_filter accepted, in evaluation order. */
+	List	   *batch_clauses;
+	/* The others, evaluated row by row over the rows the first ones keep. */
+	List	   *row_clauses;
+	/* A virtual slot of the scan tuple, for the row-wise clauses. */
+	TupleTableSlot *scan_slot;
+	/* The batch column of each scan tuple attribute. */
+	const TessLayout *scan_tuple;
+} TessQualConfig;
+
+#define TESS_QUAL_CONFIG_MIN_SIZE \
+	TESS_ABI_SIZE_INCLUDING_FIELD(TessQualConfig, scan_tuple)
+
+typedef struct TessQualStats
+{
+	/* Rows the batch clauses removed, and the row-wise ones after them. */
+	uint64		batch_removed;
+	uint64		row_removed;
+} TessQualStats;
+
+extern TessQual *tess_qual_create(const TessQualConfig *config);
+
+/* The batch columns the clauses read, for the request to the producer. */
+extern const Bitmapset *tess_qual_columns(const TessQual *qual);
+
+/*
+ * Keep in the batch's selection, of rows rows, the rows every clause
+ * holds for, and return their count. The caller resets econtext.
+ */
+extern int	tess_qual_apply(TessQual *qual, TessBatch *batch,
+							ExprContext *econtext, int rows);
+
+extern const TessQualStats *tess_qual_stats(const TessQual *qual);
+
+/*
  * The output side of a node: a virtual slot bound to the bridge through
  * which batches are published to a batch-aware parent and rows are served
  * to an ordinary one. Publishing leaves the slot non-empty: in row mode it

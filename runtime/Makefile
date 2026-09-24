@@ -7,7 +7,7 @@ PG_CPPFLAGS = -I$(srcdir)/../include
 # would take for a module's objects and, with LLVM, build bitcode for.
 RUNTIME_LIB = libtessera_runtime.a
 RUNTIME_OBJS = api.o builder.o expr.o heap_batch.o input.o output.o plan.o planner.o \
-	project.o shared_stats.o unary.o
+	project.o qual.o shared_stats.o unary.o
 EXTRA_CLEAN = $(RUNTIME_LIB) $(RUNTIME_OBJS)
 
 PG_CONFIG ?= pg_config
