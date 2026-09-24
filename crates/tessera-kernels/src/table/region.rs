@@ -36,7 +36,7 @@ pub(super) trait Region {
     /// Write a 64-bit word with release ordering.
     fn store_u64(&self, offset: usize, value: u64);
 
-    /// Replace a 64-bit word if it still holds `current`, as [`Self::cas_u32`].
+    /// Replace a 64-bit word if it still holds `current`: `Ok` with the value replaced, `Err` with the value found (acquire-release).
     fn cas_u64(&self, offset: usize, current: u64, new: u64) -> Result<u64, u64>;
 
     /// Add to a 64-bit word (acquire-release) and return its previous value.

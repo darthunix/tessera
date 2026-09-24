@@ -16,7 +16,6 @@ use core::mem::MaybeUninit;
 use anyhow::Result;
 use tessera_core::{ColumnReader, WordBlock};
 
-use super::header::MAX_KEYS;
 use super::record::View;
 
 /// The keys of a batch, one word at a time.
@@ -150,19 +149,24 @@ where
 
 /// Storage for the slots of a word's keys: made uninitialized on the
 /// caller's stack, where it stays, and lent to [`WordKeys`].
-pub(super) type SlotBuffer = [MaybeUninit<[i64; 64]>; MAX_KEYS];
+///
+/// `L` arrays of 64 slots: the key count of a specialized shape, or
+/// [`MAX_KEYS`](super::MAX_KEYS) for any count. A shape's own length keeps the loop's
+/// stack frame small; a frame of 8 KiB is probed page by page on every
+/// call, which a call of no rows pays in full.
+pub(super) type SlotBuffer<const L: usize> = [MaybeUninit<[i64; 64]>; L];
 
 /// An uninitialized slot buffer; making it costs nothing.
 #[inline(always)]
-pub(super) fn slot_buffer() -> SlotBuffer {
-    [const { MaybeUninit::uninit() }; MAX_KEYS]
+pub(super) fn slot_buffer<const L: usize>() -> SlotBuffer<L> {
+    [const { MaybeUninit::uninit() }; L]
 }
 
 /// The keys of one word in the table's form.
 ///
 /// The slots live in a [`SlotBuffer`] the caller keeps in place, and only
 /// the table's keys are initialized: a buffer owned by value was copied
-/// whole, 8 KiB, whenever it moved, and zeroing all [`MAX_KEYS`] of them
+/// whole, 8 KiB, whenever it moved, and zeroing all [`MAX_KEYS`](super::MAX_KEYS) of them
 /// cost more than a short batch's rows.
 pub(super) struct WordKeys<'a> {
     slots: &'a mut [[i64; 64]],
@@ -170,11 +174,12 @@ pub(super) struct WordKeys<'a> {
 }
 
 impl<'a> WordKeys<'a> {
-    /// Keys of `nkeys` columns, at most [`MAX_KEYS`] (the header checked),
-    /// in `buffer`.
+    /// Keys of `nkeys` columns in `buffer`, which holds at least as many
+    /// arrays (the header checked `nkeys` against [`MAX_KEYS`](super::MAX_KEYS), and a
+    /// specialized shape's buffer has its key count).
     #[inline(always)]
-    pub(super) fn new(buffer: &'a mut SlotBuffer, nkeys: usize) -> Self {
-        let slots = &mut buffer[..nkeys.min(MAX_KEYS)];
+    pub(super) fn new(buffer: &'a mut [MaybeUninit<[i64; 64]>], nkeys: usize) -> Self {
+        let slots = &mut buffer[..nkeys];
         for slot in slots.iter_mut() {
             slot.write([0; 64]);
         }

@@ -67,7 +67,13 @@ pub(super) fn find_or_insert<R: Region, K: KeySource + ?Sized>(
 /// The rows of [`find_or_insert`] for a table of `N` keys and `T` words
 /// after them, 0 for either when it is not one of the specialized shapes.
 #[inline(never)]
-fn resolve_rows<R: Region, K: KeySource + ?Sized, const N: usize, const T: usize>(
+fn resolve_rows<
+    R: Region,
+    K: KeySource + ?Sized,
+    const N: usize,
+    const T: usize,
+    const L: usize,
+>(
     region: &R,
     layout: &Layout,
     hashes: &[u32],
@@ -79,7 +85,7 @@ fn resolve_rows<R: Region, K: KeySource + ?Sized, const N: usize, const T: usize
     // Made here, not passed in, so that its fields stay in registers.
     let mut access = Access::new(region, layout);
     let nrows = pending.as_view().nrows();
-    let mut buffer = slot_buffer();
+    let mut buffer = slot_buffer::<L>();
     let mut word_keys = WordKeys::new(&mut buffer, access.nkeys());
     let mut resolved = 0;
     let mut full = false;

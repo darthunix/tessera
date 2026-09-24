@@ -10,17 +10,18 @@ use super::region::Region;
 
 /// Call `$f` specialized for the common shapes of a table: one or two
 /// keys, one or two words after them; 0 stands for any other count, read
-/// from the layout at run time.
+/// from the layout at run time. The last parameter is the length of the
+/// key slot buffer: the key count, or the maximum for any count.
 macro_rules! shaped {
     ($nkeys:expr, $tail:expr, $f:ident($($arg:expr),* $(,)?)) => {
         match ($nkeys, $tail) {
-            (1, 1) => $f::<_, _, 1, 1>($($arg),*),
-            (1, 2) => $f::<_, _, 1, 2>($($arg),*),
-            (1, _) => $f::<_, _, 1, 0>($($arg),*),
-            (2, 1) => $f::<_, _, 2, 1>($($arg),*),
-            (2, 2) => $f::<_, _, 2, 2>($($arg),*),
-            (2, _) => $f::<_, _, 2, 0>($($arg),*),
-            _ => $f::<_, _, 0, 0>($($arg),*),
+            (1, 1) => $f::<_, _, 1, 1, 1>($($arg),*),
+            (1, 2) => $f::<_, _, 1, 2, 1>($($arg),*),
+            (1, _) => $f::<_, _, 1, 0, 1>($($arg),*),
+            (2, 1) => $f::<_, _, 2, 1, 2>($($arg),*),
+            (2, 2) => $f::<_, _, 2, 2, 2>($($arg),*),
+            (2, _) => $f::<_, _, 2, 0, 2>($($arg),*),
+            _ => $f::<_, _, 0, 0, { $crate::table::MAX_KEYS }>($($arg),*),
         }
     };
 }
@@ -80,7 +81,7 @@ pub(super) fn insert<R: Region, K: KeySource + ?Sized>(
 /// The rows of [`insert`] for a table of `N` keys and `T` words after
 /// them, 0 for either when it is not one of the specialized shapes.
 #[inline(never)]
-fn insert_rows<R: Region, K: KeySource + ?Sized, const N: usize, const T: usize>(
+fn insert_rows<R: Region, K: KeySource + ?Sized, const N: usize, const T: usize, const L: usize>(
     region: &R,
     layout: &Layout,
     hashes: &[u32],
@@ -93,7 +94,7 @@ fn insert_rows<R: Region, K: KeySource + ?Sized, const N: usize, const T: usize>
     let mut access = Access::new(region, layout);
     let nrows = pending.as_view().nrows();
     let payload_size = access.payload_size();
-    let mut buffer = slot_buffer();
+    let mut buffer = slot_buffer::<L>();
     let mut word_keys = WordKeys::new(&mut buffer, access.nkeys());
     let mut inserted = 0;
     for index in 0..nrows.div_ceil(64) {
@@ -165,7 +166,7 @@ pub(super) fn probe<R: Region, K: KeySource + ?Sized>(
 /// The rows of [`probe`] for a table of `N` keys, 0 when it is not one of
 /// the specialized counts; `T` is unused.
 #[inline(never)]
-fn probe_rows<R: Region, K: KeySource + ?Sized, const N: usize, const T: usize>(
+fn probe_rows<R: Region, K: KeySource + ?Sized, const N: usize, const T: usize, const L: usize>(
     region: &R,
     layout: &Layout,
     hashes: &[u32],
@@ -177,7 +178,7 @@ fn probe_rows<R: Region, K: KeySource + ?Sized, const N: usize, const T: usize>(
     // Made here, not passed in, so that its fields stay in registers.
     let mut access = Access::new(region, layout);
     let nrows = rows.nrows();
-    let mut buffer = slot_buffer();
+    let mut buffer = slot_buffer::<L>();
     let mut word_keys = WordKeys::new(&mut buffer, access.nkeys());
     for index in 0..nrows.div_ceil(64) {
         let selected = rows.word(index).unwrap();
