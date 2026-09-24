@@ -540,6 +540,12 @@ fn large_table_keys_have_buckets_of_their_own() -> Result<()> {
     assert_eq!(keys.present.len(), tabling_large::RECORDS);
     assert_eq!(keys.absent.len(), tabling_large::RECORDS);
     assert_eq!(keys.occupied.len(), tabling_large::RECORDS);
+    let mut inserted = keys.inserted.clone();
+    let mut present = keys.present.clone();
+    assert_ne!(inserted, present, "probes take another order");
+    inserted.sort_unstable();
+    present.sort_unstable();
+    assert_eq!(inserted, present, "the same keys");
     let mut seen = std::collections::HashSet::new();
     for &key in keys
         .present

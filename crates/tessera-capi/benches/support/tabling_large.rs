@@ -59,11 +59,15 @@ fn random(state: &mut u64) -> u64 {
     state.wrapping_mul(0x2545_F491_4F6C_DD1D)
 }
 
-/// The keys: `present` with a bucket each, in random order; as many
-/// `absent` keys whose buckets are empty; and as many `occupied` absent
-/// keys whose buckets hold one record of another key, which a probe reads
-/// before it knows the key is not there.
+/// The keys: `inserted`, with a bucket each, in the order the table
+/// receives them; `present`, the same keys in another random order, for
+/// probes, so that a batch's records lie scattered as a join's build rows
+/// do, not side by side as they were inserted; as many `absent` keys whose
+/// buckets are empty; and as many `occupied` absent keys whose buckets hold
+/// one record of another key, which a probe reads before it knows the key
+/// is not there.
 pub struct Keys {
+    pub inserted: Vec<i32>,
     pub present: Vec<i32>,
     pub absent: Vec<i32>,
     pub occupied: Vec<i32>,
@@ -96,12 +100,14 @@ impl Keys {
             candidate += 1;
         }
         let mut state = 0x9e37_79b9_7f4a_7c15;
-        for keys in [&mut present, &mut absent, &mut occupied] {
+        let mut inserted = present.clone();
+        for keys in [&mut inserted, &mut present, &mut absent, &mut occupied] {
             for i in (1..keys.len()).rev() {
                 keys.swap(i, (random(&mut state) % (i as u64 + 1)) as usize);
             }
         }
         Self {
+            inserted,
             present,
             absent,
             occupied,
@@ -187,6 +193,7 @@ impl Setup {
         let hashes =
             |keys: &[i32]| -> Vec<u32> { keys.iter().map(|&k| murmurhash32(k as u32)).collect() };
         let present_hashes = hashes(&keys.present);
+        let inserted_hashes = hashes(&keys.inserted);
         let absent_hashes = hashes(&keys.absent);
         let occupied_hashes = hashes(&keys.occupied);
         let mut words = vec![0; region_size(&CONFIG, RECORDS as u64)?.div_ceil(8)];
@@ -199,11 +206,11 @@ impl Setup {
             let mut offsets = vec![0; BATCH];
             for batch in 0..BATCHES {
                 let rows = batch * BATCH..(batch + 1) * BATCH;
-                let column = [ColumnView::try_new(&keys.present[rows.clone()], None)?];
+                let column = [ColumnView::try_new(&keys.inserted[rows.clone()], None)?];
                 let mut pending_words = [u64::MAX; BATCH / 64];
                 let mut pending = RowMask::try_new(BATCH, &mut pending_words)?;
                 table.insert(
-                    &present_hashes[rows],
+                    &inserted_hashes[rows],
                     &column[..],
                     None,
                     &mut pending,
@@ -215,7 +222,7 @@ impl Setup {
                 );
             }
         }
-        let reference = Reference::new(&keys.present);
+        let reference = Reference::new(&keys.inserted);
         Ok(Self {
             words,
             keys,
