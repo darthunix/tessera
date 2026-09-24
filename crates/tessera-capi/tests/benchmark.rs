@@ -28,6 +28,9 @@ mod filtering64;
 #[path = "../benches/support/hashing.rs"]
 #[allow(dead_code)]
 mod hashing;
+#[path = "../benches/support/hashing64.rs"]
+#[allow(dead_code)]
+mod hashing64;
 #[path = "../benches/support/reading.rs"]
 #[allow(dead_code)]
 mod reading;
@@ -230,6 +233,25 @@ fn hash_kernels_match_the_fixture_model_on_every_case() -> Result<()> {
             &reading::Input::new(&datum, &case),
             &case,
             hashing::datum_reference,
+        )?;
+    }
+    Ok(())
+}
+
+#[test]
+fn hash64_kernels_match_the_fixture_model_on_every_case() -> Result<()> {
+    for case in reading64::cases() {
+        let dense = case.dense_column()?;
+        hashing64::check(
+            &reading64::Input::new(&dense, &case),
+            &case,
+            hashing64::dense_reference,
+        )?;
+        let datum = case.datum_column()?;
+        hashing64::check(
+            &reading64::Input::new(&datum, &case),
+            &case,
+            hashing64::datum_reference,
         )?;
     }
     Ok(())

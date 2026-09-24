@@ -14,7 +14,9 @@ The benchmark programs:
 - [filter_int64](filter_int64.rs), [arith_int64](arith_int64.rs) and
   [aggregate_int64](aggregate_int64.rs) mirror the int32 targets for the
   int8 kernels over values past the int4 range (`min`, `max` and `count`
-  for the aggregates: there is no int8 sum).
+  for the aggregates: there is no int8 sum), and
+  [hash_int64](hash_int64.rs) the hash target with PostgreSQL's
+  `hashint8` fold.
 - [cast_int32](cast_int32.rs) widens int4 values into int8 Datums over the
   reading cases.
 - [table_int32](table_int32.rs) builds the hash table of section 5 over
