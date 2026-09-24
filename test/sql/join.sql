@@ -88,6 +88,43 @@ INSERT INTO jgrow SELECT g % 400, g FROM generate_series(1, 20000) AS g;
 SELECT join_same($$SELECT count(*), sum(jgrow.g) FROM jsmall JOIN jgrow ON jsmall.k = jgrow.k$$);
 SELECT join_same($$SELECT count(*), sum(jgrow.g) FROM jd JOIN jgrow ON jd.id = jgrow.k$$);
 
+-- EXPLAIN ANALYZE with the memory masked, since it depends on the allocator.
+CREATE FUNCTION join_explain(query text) RETURNS SETOF text
+LANGUAGE plpgsql AS $$
+DECLARE
+    line text;
+BEGIN
+    FOR line IN EXECUTE 'EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) ' || query LOOP
+        RETURN NEXT regexp_replace(line, '(Memory Usage|Overrun): \d+ kB', '\1: N kB');
+    END LOOP;
+END $$;
+SELECT join_explain($$SELECT count(*) FROM jf JOIN jd ON jf.fk = jd.id$$);
+-- Rounds: every match of a key with three records counts.
+SELECT join_explain($$SELECT sum(jdup.w) FROM jf JOIN jdup ON jf.fk = jdup.k$$);
+-- An inner side the planner thinks small: the table grows past hash_mem,
+-- and is kept and reported, not split.
+CREATE FUNCTION join_many() RETURNS SETOF int LANGUAGE sql ROWS 10
+AS 'SELECT generate_series(1, 20000)';
+SET work_mem = '64kB';
+SELECT join_explain($$SELECT count(*) FROM jf JOIN join_many() AS m(k) ON jf.v = m.k$$);
+SELECT join_same($$SELECT count(*), sum(m.k) FROM jf JOIN join_many() AS m(k) ON jf.v = m.k$$);
+RESET work_mem;
+
+-- Rescans: a parameter of the inner side builds the table again, one of
+-- the outer side probes the same table.
+SELECT join_explain($$SELECT jsmall.k, (SELECT count(*) FROM jf JOIN jdup ON jf.fk = jdup.k WHERE jdup.w > jsmall.k) FROM jsmall$$);
+SELECT join_same($$SELECT jsmall.k, (SELECT count(*) FROM jf JOIN jdup ON jf.fk = jdup.k WHERE jdup.w > jsmall.k) FROM jsmall$$);
+SELECT join_explain($$SELECT jsmall.k, (SELECT count(*) FROM jf JOIN jdup ON jf.fk = jdup.k WHERE jf.v > jsmall.k * 10) FROM jsmall$$);
+SELECT join_same($$SELECT jsmall.k, (SELECT count(*) FROM jf JOIN jdup ON jf.fk = jdup.k WHERE jf.v > jsmall.k * 10) FROM jsmall$$);
+-- A generic plan executed again with another parameter.
+SET plan_cache_mode = force_generic_plan;
+PREPARE joined(int) AS SELECT count(*), sum(jdup.w) FROM jf JOIN jdup ON jf.fk = jdup.k WHERE jf.v > $1;
+EXECUTE joined(100);
+EXECUTE joined(900);
+DEALLOCATE joined;
+RESET plan_cache_mode;
+SELECT count(*), sum(jdup.w) FROM jf JOIN jdup ON jf.fk = jdup.k WHERE jf.v > 900;
+
 -- Row-wise parents: a sort, a limit, a scrollable cursor.
 EXPLAIN (COSTS OFF)
 SELECT jf.v, jd.label FROM jf JOIN jd ON jf.fk = jd.id ORDER BY jf.v DESC LIMIT 5;
@@ -116,5 +153,7 @@ EXPLAIN (COSTS OFF) SELECT count(*) FROM jf JOIN jd ON jf.fk = jd.id;
 RESET tessera.enable;
 
 DROP TABLE jd, jf, jdup, jsmall, jempty, jgrow;
+DROP FUNCTION join_explain(text);
+DROP FUNCTION join_many();
 DROP FUNCTION join_same(text);
 DROP EXTENSION tessera;

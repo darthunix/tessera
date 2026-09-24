@@ -1,11 +1,14 @@
 #include "postgres.h"
 
+#include "commands/explain.h"
+#include "commands/explain_format.h"
 #include "executor/executor.h"
 #include "miscadmin.h"
 #include "nodes/nodeFuncs.h"
 #include "utils/datum.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
+#include "utils/ruleutils.h"
 
 #include "tessera/kernel_ops.h"
 #include "tessera/plan.h"
@@ -121,13 +124,17 @@ typedef struct TessHashJoinState
 	TessStatus	status;
 
 	uint64		build_batches;
+	/* The rows of the current table, and of every table built. */
 	uint64		build_rows;
+	uint64		build_rows_total;
 	uint64		probe_batches;
 	uint64		probe_rows;
 	uint64		matches;
 	uint64		rounds;
 	uint64		builds;
 	uint64		grows;
+	/* The bucket count of the last table built. */
+	uint64		buckets;
 	/* The most memory the table and the copies took, in bytes. */
 	Size		peak_memory;
 } TessHashJoinState;
@@ -357,6 +364,7 @@ insert_batch(TessHashJoinState *state, TessBatch *batch)
 		grow_table(state);
 	}
 	state->build_rows += count;
+	state->build_rows_total += count;
 	note_memory(state);
 }
 
@@ -376,6 +384,15 @@ build_table(TessHashJoinState *state)
 		if (tess_row_mask_count(&batch->rows) > 0)
 			insert_batch(state, batch);
 		tess_input_finish(state->inner_input);
+	}
+	if (state->build_rows > 0)
+	{
+		TessTableStats stats = TESS_STRUCT_INITIALIZER(TessTableStats);
+
+		check(state, state->kernels->table_stats(state->region,
+												 state->region_len, &stats,
+												 &state->status));
+		state->buckets = stats.buckets;
 	}
 	state->builds++;
 	state->built = true;
@@ -852,6 +869,41 @@ join_rescan(CustomScanState *css)
 	tess_input_rescan(state->outer_input);
 }
 
+/*
+ * The join clause; with ANALYZE, the table and the rows through it. The
+ * memory is the most the table and the copies of inner values took, and
+ * Overrun what of it exceeded hash_mem: the node keeps the whole inner
+ * side in memory rather than spilling it.
+ */
+static void
+join_explain(CustomScanState *css, List *ancestors, ExplainState *es)
+{
+	TessHashJoinState *state = (TessHashJoinState *) css;
+	CustomScan *cscan = castNode(CustomScan, css->ss.ps.plan);
+	bool		useprefix = es->rtable_size > 1 || es->verbose;
+	List	   *context;
+	Size		limit = get_hash_memory_limit();
+
+	context = set_deparse_context_plan(es->deparse_cxt, css->ss.ps.plan,
+									   ancestors);
+	ExplainPropertyText("Hash Cond",
+						deparse_expression((Node *) linitial(cscan->custom_exprs),
+										   context, useprefix, false), es);
+	if (!es->analyze)
+		return;
+	ExplainPropertyInteger("Buckets", NULL, state->buckets, es);
+	ExplainPropertyInteger("Memory Usage", "kB",
+						   (state->peak_memory + 1023) / 1024, es);
+	if (state->peak_memory > limit)
+		ExplainPropertyInteger("Overrun", "kB",
+							   (state->peak_memory - limit + 1023) / 1024, es);
+	ExplainPropertyInteger("Builds", NULL, state->builds, es);
+	ExplainPropertyInteger("Build Rows", NULL, state->build_rows_total, es);
+	ExplainPropertyInteger("Table Grows", NULL, state->grows, es);
+	ExplainPropertyInteger("Probe Rows", NULL, state->probe_rows, es);
+	ExplainPropertyInteger("Matches", NULL, state->matches, es);
+}
+
 static Node *
 join_create_state(CustomScan *cscan)
 {
@@ -868,6 +920,7 @@ static const CustomExecMethods join_exec_methods = {
 	.ExecCustomScan = join_exec,
 	.EndCustomScan = join_end,
 	.ReScanCustomScan = join_rescan,
+	.ExplainCustomScan = join_explain,
 };
 
 const CustomScanMethods tess_hash_join_scan_methods = {

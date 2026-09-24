@@ -545,6 +545,16 @@ gets a `Material` above it. A rescan builds the table again only when
 the inner child has changed parameters, as the core's hash join decides,
 and otherwise probes the same table with the rescanned outer child.
 
+`EXPLAIN` shows the join clause as `Hash Cond`. With `ANALYZE` it adds
+the bucket count of the last table built, `Memory Usage`, the most the
+table and the copies of inner values took, `Overrun`, what of it
+exceeded `hash_mem` (shown only then: the node keeps the whole inner side
+in memory, and a table larger than the planner expected is kept rather
+than split), `Builds`, the tables built over the rescans, `Build Rows`,
+the inner rows inserted into them, `Table Grows`, the doublings of the
+region, `Probe Rows`, the outer rows probed, and `Matches`, the joined
+rows over every round.
+
 ### Tests
 
 `test/sql/join.sql` compares the rows of every join with Tessera on and
@@ -556,6 +566,12 @@ int8 one both ways; three inner rows per key, duplicates on both sides
 and NULL keys on both; a side of fewer than 64 rows, an empty side on
 either side, a join over a join; an inner side much larger than the
 planner's estimate, which makes the table grow; a top-N sort and a limit
-above the node, and a scrollable cursor through `Material`. It also shows
+above the node, and a scrollable cursor through `Material`. With
+`EXPLAIN ANALYZE`, the memory masked, it shows the counters of a join, of
+one with rounds and of an inner side of 20000 rows estimated at 10, which grows
+past a small `work_mem`; correlated subqueries whose parameter is on the
+inner side, which builds the table for every outer row, and on the outer
+side, which builds it once; and a generic plan executed with two
+parameters. It also shows
 the core's plan without the kernels module, for a left join, a second
 join clause, a text key, hash joins disabled and the switch off.

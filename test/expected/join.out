@@ -61,9 +61,10 @@ EXPLAIN (COSTS OFF) SELECT count(*) FROM jf JOIN jd ON jf.fk = jd.id;
 ----------------------------------------------
  Custom Scan (TessAgg)
    ->  Custom Scan (TessHashJoin)
+         Hash Cond: (jd.id = jf.fk)
          ->  Custom Scan (TessHeapScan) on jf
          ->  Custom Scan (TessHeapScan) on jd
-(4 rows)
+(5 rows)
 
 SELECT join_same($$SELECT count(*) FROM jf JOIN jd ON jf.fk = jd.id$$);
                    join_same                   
@@ -82,9 +83,10 @@ EXPLAIN (COSTS OFF) SELECT jf.v, jf.note, jd.label, jd.n FROM jf JOIN jd ON jf.f
                QUERY PLAN               
 ----------------------------------------
  Custom Scan (TessHashJoin)
+   Hash Cond: (jd.id = jf.fk)
    ->  Custom Scan (TessHeapScan) on jf
    ->  Custom Scan (TessHeapScan) on jd
-(3 rows)
+(4 rows)
 
 SELECT join_same($$SELECT jf.v, jf.note, jd.label, jd.n FROM jf JOIN jd ON jf.fk = jd.id$$);
                     join_same                    
@@ -111,9 +113,10 @@ EXPLAIN (COSTS OFF) SELECT count(*) FROM jf JOIN jd ON jf.fk_big = jd.big;
 ----------------------------------------------
  Custom Scan (TessAgg)
    ->  Custom Scan (TessHashJoin)
+         Hash Cond: (jf.fk_big = jd.big)
          ->  Custom Scan (TessHeapScan) on jf
          ->  Custom Scan (TessHeapScan) on jd
-(4 rows)
+(5 rows)
 
 SELECT join_same($$SELECT jf.v, jd.big FROM jf JOIN jd ON jf.fk_big = jd.big$$);
                     join_same                    
@@ -138,9 +141,10 @@ EXPLAIN (COSTS OFF) SELECT jf.v, jdup.w FROM jf JOIN jdup ON jf.fk = jdup.k;
                 QUERY PLAN                
 ------------------------------------------
  Custom Scan (TessHashJoin)
+   Hash Cond: (jf.fk = jdup.k)
    ->  Custom Scan (TessHeapScan) on jf
    ->  Custom Scan (TessHeapScan) on jdup
-(3 rows)
+(4 rows)
 
 SELECT join_same($$SELECT jf.v, jdup.w, jdup.t FROM jf JOIN jdup ON jf.fk = jdup.k$$);
                     join_same                    
@@ -185,11 +189,13 @@ SELECT count(*) FROM jf JOIN jd ON jf.fk = jd.id JOIN jdup ON jd.id = jdup.k;
 ------------------------------------------------------
  Custom Scan (TessAgg)
    ->  Custom Scan (TessHashJoin)
+         Hash Cond: (jd.id = jf.fk)
          ->  Custom Scan (TessHeapScan) on jf
          ->  Custom Scan (TessHashJoin)
+               Hash Cond: (jd.id = jdup.k)
                ->  Custom Scan (TessHeapScan) on jdup
                ->  Custom Scan (TessHeapScan) on jd
-(6 rows)
+(8 rows)
 
 SELECT join_same($$SELECT jf.v, jd.label, jdup.w FROM jf JOIN jd ON jf.fk = jd.id JOIN jdup ON jd.id = jdup.k$$);
                     join_same                    
@@ -213,6 +219,233 @@ SELECT join_same($$SELECT count(*), sum(jgrow.g) FROM jd JOIN jgrow ON jd.id = j
  1 rows, hash 25072202dd6d62eae6bf836326a9bff9
 (1 row)
 
+-- EXPLAIN ANALYZE with the memory masked, since it depends on the allocator.
+CREATE FUNCTION join_explain(query text) RETURNS SETOF text
+LANGUAGE plpgsql AS $$
+DECLARE
+    line text;
+BEGIN
+    FOR line IN EXECUTE 'EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) ' || query LOOP
+        RETURN NEXT regexp_replace(line, '(Memory Usage|Overrun): \d+ kB', '\1: N kB');
+    END LOOP;
+END $$;
+SELECT join_explain($$SELECT count(*) FROM jf JOIN jd ON jf.fk = jd.id$$);
+                                join_explain                                
+----------------------------------------------------------------------------
+ Custom Scan (TessAgg) (actual rows=1.00 loops=1)
+   Input Batches: 17
+   Input Rows: 764
+   Kernel Calls: 17
+   ->  Custom Scan (TessHashJoin) (actual rows=764.00 loops=1)
+         Hash Cond: (jd.id = jf.fk)
+         Buckets: 1024
+         Memory Usage: N kB
+         Builds: 1
+         Build Rows: 300
+         Table Grows: 0
+         Probe Rows: 1000
+         Matches: 764
+         ->  Custom Scan (TessHeapScan) on jf (actual rows=1000.00 loops=1)
+               Batch Size: 64
+               Batches: 17
+               Pages: 8
+               Deformed Datums: 1000
+               Restarted Datums: 0
+         ->  Custom Scan (TessHeapScan) on jd (actual rows=300.00 loops=1)
+               Batch Size: 64
+               Batches: 6
+               Pages: 3
+               Deformed Datums: 300
+               Restarted Datums: 0
+(25 rows)
+
+-- Rounds: every match of a key with three records counts.
+SELECT join_explain($$SELECT sum(jdup.w) FROM jf JOIN jdup ON jf.fk = jdup.k$$);
+                                join_explain                                 
+-----------------------------------------------------------------------------
+ Custom Scan (TessAgg) (actual rows=1.00 loops=1)
+   Input Batches: 51
+   Input Rows: 357
+   Kernel Calls: 21
+   Computed Datums: 357
+   ->  Custom Scan (TessHashJoin) (actual rows=357.00 loops=1)
+         Hash Cond: (jf.fk = jdup.k)
+         Buckets: 1024
+         Memory Usage: N kB
+         Builds: 1
+         Build Rows: 139
+         Table Grows: 0
+         Probe Rows: 1000
+         Matches: 357
+         ->  Custom Scan (TessHeapScan) on jf (actual rows=1000.00 loops=1)
+               Batch Size: 64
+               Batches: 17
+               Pages: 8
+               Deformed Datums: 1000
+               Restarted Datums: 0
+         ->  Custom Scan (TessHeapScan) on jdup (actual rows=150.00 loops=1)
+               Batch Size: 64
+               Batches: 3
+               Pages: 1
+               Deformed Datums: 289
+               Restarted Datums: 0
+(26 rows)
+
+-- An inner side the planner thinks small: the table grows past hash_mem,
+-- and is kept and reported, not split.
+CREATE FUNCTION join_many() RETURNS SETOF int LANGUAGE sql ROWS 10
+AS 'SELECT generate_series(1, 20000)';
+SET work_mem = '64kB';
+SELECT join_explain($$SELECT count(*) FROM jf JOIN join_many() AS m(k) ON jf.v = m.k$$);
+                                 join_explain                                  
+-------------------------------------------------------------------------------
+ Custom Scan (TessAgg) (actual rows=1.00 loops=1)
+   Input Batches: 17
+   Input Rows: 1000
+   Kernel Calls: 17
+   ->  Custom Scan (TessHashJoin) (actual rows=1000.00 loops=1)
+         Hash Cond: (jf.v = m.k)
+         Buckets: 131072
+         Memory Usage: N kB
+         Overrun: N kB
+         Builds: 1
+         Build Rows: 20000
+         Table Grows: 8
+         Probe Rows: 1000
+         Matches: 1000
+         ->  Custom Scan (TessHeapScan) on jf (actual rows=1000.00 loops=1)
+               Batch Size: 64
+               Batches: 17
+               Pages: 8
+               Deformed Datums: 1000
+               Restarted Datums: 0
+         ->  Custom Scan (TessPack) (actual rows=20000.00 loops=1)
+               Batch Size: 64
+               Rows Kept As: copies
+               Batches: 313
+               ->  Function Scan on join_many m (actual rows=20000.00 loops=1)
+(25 rows)
+
+SELECT join_same($$SELECT count(*), sum(m.k) FROM jf JOIN join_many() AS m(k) ON jf.v = m.k$$);
+                   join_same                   
+-----------------------------------------------
+ 1 rows, hash 7309d08bff53e09ed9d92b847eebe47d
+(1 row)
+
+RESET work_mem;
+-- Rescans: a parameter of the inner side builds the table again, one of
+-- the outer side probes the same table.
+SELECT join_explain($$SELECT jsmall.k, (SELECT count(*) FROM jf JOIN jdup ON jf.fk = jdup.k WHERE jdup.w > jsmall.k) FROM jsmall$$);
+                                        join_explain                                        
+--------------------------------------------------------------------------------------------
+ Seq Scan on jsmall (actual rows=10.00 loops=1)
+   SubPlan expr_1
+     ->  Custom Scan (TessAgg) (actual rows=1.00 loops=10)
+           Input Batches: 34
+           Input Rows: 191
+           Kernel Calls: 34
+           ->  Custom Scan (TessHashJoin) (actual rows=264.00 loops=10)
+                 Hash Cond: (jf.fk = jdup.k)
+                 Buckets: 1024
+                 Memory Usage: N kB
+                 Builds: 10
+                 Build Rows: 1030
+                 Table Grows: 10
+                 Probe Rows: 10000
+                 Matches: 2640
+                 ->  Custom Scan (TessHeapScan) on jf (actual rows=1000.00 loops=10)
+                       Batch Size: 64
+                       Batches: 17
+                       Pages: 8
+                       Deformed Datums: 10000
+                       Restarted Datums: 0
+                 ->  Custom Scan (TessFilter) on jdup (actual rows=111.50 loops=10)
+                       Batch Filter: (jdup.w > jsmall.k)
+                       Rows Removed by Batch Filter: 38
+                       Input Batches: 3
+                       Input Rows: 150
+                       Output Rows: 80
+                       ->  Custom Scan (TessHeapScan) on jdup (actual rows=150.00 loops=10)
+                             Batch Size: 64
+                             Batches: 3
+                             Pages: 1
+                             Deformed Datums: 2615
+                             Restarted Datums: 85
+(33 rows)
+
+SELECT join_same($$SELECT jsmall.k, (SELECT count(*) FROM jf JOIN jdup ON jf.fk = jdup.k WHERE jdup.w > jsmall.k) FROM jsmall$$);
+                   join_same                    
+------------------------------------------------
+ 10 rows, hash e393d288bb04efe77e36a7504380a997
+(1 row)
+
+SELECT join_explain($$SELECT jsmall.k, (SELECT count(*) FROM jf JOIN jdup ON jf.fk = jdup.k WHERE jf.v > jsmall.k * 10) FROM jsmall$$);
+                                       join_explain                                        
+-------------------------------------------------------------------------------------------
+ Seq Scan on jsmall (actual rows=10.00 loops=1)
+   SubPlan expr_1
+     ->  Custom Scan (TessAgg) (actual rows=1.00 loops=10)
+           Input Batches: 15
+           Input Rows: 104
+           Kernel Calls: 15
+           ->  Custom Scan (TessHashJoin) (actual rows=216.50 loops=10)
+                 Hash Cond: (jf.fk = jdup.k)
+                 Buckets: 1024
+                 Memory Usage: N kB
+                 Builds: 1
+                 Build Rows: 139
+                 Table Grows: 0
+                 Probe Rows: 6150
+                 Matches: 2165
+                 ->  Custom Scan (TessFilter) on jf (actual rows=615.00 loops=10)
+                       Batch Filter: (jf.v > (jsmall.k * 10))
+                       Rows Removed by Batch Filter: 385
+                       Input Batches: 17
+                       Input Rows: 1000
+                       Output Rows: 300
+                       ->  Custom Scan (TessHeapScan) on jf (actual rows=1000.00 loops=10)
+                             Batch Size: 64
+                             Batches: 17
+                             Pages: 8
+                             Deformed Datums: 16150
+                             Restarted Datums: 687
+                 ->  Custom Scan (TessHeapScan) on jdup (actual rows=150.00 loops=1)
+                       Batch Size: 64
+                       Batches: 3
+                       Pages: 1
+                       Deformed Datums: 150
+                       Restarted Datums: 0
+(33 rows)
+
+SELECT join_same($$SELECT jsmall.k, (SELECT count(*) FROM jf JOIN jdup ON jf.fk = jdup.k WHERE jf.v > jsmall.k * 10) FROM jsmall$$);
+                   join_same                    
+------------------------------------------------
+ 10 rows, hash daaae7ff8d071cb7aa3a86d40e95ec6b
+(1 row)
+
+-- A generic plan executed again with another parameter.
+SET plan_cache_mode = force_generic_plan;
+PREPARE joined(int) AS SELECT count(*), sum(jdup.w) FROM jf JOIN jdup ON jf.fk = jdup.k WHERE jf.v > $1;
+EXECUTE joined(100);
+ count |  sum  
+-------+-------
+   315 | 23663
+(1 row)
+
+EXECUTE joined(900);
+ count | sum  
+-------+------
+    30 | 2294
+(1 row)
+
+DEALLOCATE joined;
+RESET plan_cache_mode;
+SELECT count(*), sum(jdup.w) FROM jf JOIN jdup ON jf.fk = jdup.k WHERE jf.v > 900;
+ count | sum  
+-------+------
+    30 | 2294
+(1 row)
+
 -- Row-wise parents: a sort, a limit, a scrollable cursor.
 EXPLAIN (COSTS OFF)
 SELECT jf.v, jd.label FROM jf JOIN jd ON jf.fk = jd.id ORDER BY jf.v DESC LIMIT 5;
@@ -223,9 +456,10 @@ SELECT jf.v, jd.label FROM jf JOIN jd ON jf.fk = jd.id ORDER BY jf.v DESC LIMIT 
          ->  Sort
                Sort Key: jf.v DESC
                ->  Custom Scan (TessHashJoin)
+                     Hash Cond: (jd.id = jf.fk)
                      ->  Custom Scan (TessHeapScan) on jf
                      ->  Custom Scan (TessHeapScan) on jd
-(7 rows)
+(8 rows)
 
 SELECT jf.v, jd.label FROM jf JOIN jd ON jf.fk = jd.id ORDER BY jf.v DESC LIMIT 5;
   v   | label 
@@ -250,9 +484,10 @@ SELECT jf.v, jd.label FROM jf JOIN jd ON jf.fk = jd.id;
 ----------------------------------------------
  Materialize
    ->  Custom Scan (TessHashJoin)
+         Hash Cond: (jd.id = jf.fk)
          ->  Custom Scan (TessHeapScan) on jf
          ->  Custom Scan (TessHeapScan) on jd
-(4 rows)
+(5 rows)
 
 BEGIN;
 DECLARE c SCROLL CURSOR FOR
@@ -340,5 +575,7 @@ EXPLAIN (COSTS OFF) SELECT count(*) FROM jf JOIN jd ON jf.fk = jd.id;
 
 RESET tessera.enable;
 DROP TABLE jd, jf, jdup, jsmall, jempty, jgrow;
+DROP FUNCTION join_explain(text);
+DROP FUNCTION join_many();
 DROP FUNCTION join_same(text);
 DROP EXTENSION tessera;

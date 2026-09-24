@@ -558,11 +558,12 @@ SELECT count(*) FROM agg_t AS x JOIN agg_t AS y ON x.b = y.b WHERE x.a > 295;
 ---------------------------------------------------------
  Custom Scan (TessAgg)
    ->  Custom Scan (TessHashJoin)
+         Hash Cond: (x.b = y.b)
          ->  Custom Scan (TessHeapScan) on agg_t y
          ->  Custom Scan (TessFilter) on agg_t x
                Batch Filter: (x.a > 295)
                ->  Custom Scan (TessHeapScan) on agg_t x
-(6 rows)
+(7 rows)
 
 SELECT agg_same($$SELECT count(*) FROM agg_t AS x JOIN agg_t AS y ON x.b = y.b WHERE x.a > 295$$);
  agg_same 
