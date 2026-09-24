@@ -211,18 +211,6 @@ impl<'a> WordKeys<'a> {
         Ok(())
     }
 
-    /// The null bits of every row of the word, indexed by row.
-    #[inline(always)]
-    pub(super) fn null_bits_all(&self) -> &[u32; 64] {
-        &self.null_bits
-    }
-
-    /// Slot `key` of every row of the word, indexed by row.
-    #[inline(always)]
-    pub(super) fn slots(&self, key: usize) -> &[i64; 64] {
-        &self.slots[key]
-    }
-
     /// The bits of the keys of row `bit` that are NULL.
     #[inline]
     pub(super) fn null_bits(&self, bit: usize) -> u32 {

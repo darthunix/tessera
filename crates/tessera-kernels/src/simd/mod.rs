@@ -41,7 +41,7 @@ pub use cast::{widen_datum, widen_dense};
 pub use filter::{filter_datum, filter_dense};
 pub use filter64::{filter_datum64, filter_dense64};
 pub use hash::{combine, combine_nulls, hash, hash_nulls};
-pub use table::{eq_mask_i64, eq_mask_u32, prefetch};
+pub use table::prefetch;
 
 /// Bit weights of the four lanes of each group in a 16-row quarter.
 const LANE_WEIGHTS: [[u32; 4]; 4] = [

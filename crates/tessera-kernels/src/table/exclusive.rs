@@ -87,7 +87,7 @@ fn resolve_rows<
     let nrows = pending.as_view().nrows();
     let mut buffer = slot_buffer::<L>();
     let mut word_keys = WordKeys::new(&mut buffer, access.nkeys());
-    let mut lanes = Lanes::<L>::new();
+    let mut lanes = Lanes::new();
     let mut resolved = 0;
     let mut full = false;
     for index in 0..nrows.div_ceil(64) {
@@ -103,7 +103,7 @@ fn resolve_rows<
             if selected.count_ones() >= VERTICAL_MIN_ROWS {
                 let base = index * 64;
                 let end = nrows.min(base + 64);
-                known = probe_word::<R, N, L>(
+                known = probe_word::<R, N>(
                     &mut access,
                     &word_keys,
                     &hashes[base..end],
