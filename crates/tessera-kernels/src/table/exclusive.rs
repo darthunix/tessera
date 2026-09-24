@@ -9,7 +9,7 @@
 use anyhow::{Result, ensure};
 use tessera_core::RowMask;
 
-use super::batch::{check, shaped};
+use super::batch::{Lanes, VERTICAL_MIN_ROWS, check, probe_word, shaped};
 use super::header::{CHUNK_USED, HEADER_SIZE, Header, KEY_SLOT, Layout, RECORD_HEADER};
 use super::keys::{KeySource, WordKeys, slot_buffer};
 use super::record::Access;
@@ -87,6 +87,7 @@ fn resolve_rows<
     let nrows = pending.as_view().nrows();
     let mut buffer = slot_buffer::<L>();
     let mut word_keys = WordKeys::new(&mut buffer, access.nkeys());
+    let mut lanes = Lanes::<L>::new();
     let mut resolved = 0;
     let mut full = false;
     for index in 0..nrows.div_ceil(64) {
@@ -95,10 +96,31 @@ fn resolve_rows<
         let mut created = 0;
         if selected != 0 && !full {
             word_keys.load(keys, index, selected)?;
+            // Rows whose record exists are found for the whole word at
+            // once; the others then go in row order, so that a row finds
+            // the record an earlier row of the word created.
+            let mut known = 0;
+            if selected.count_ones() >= VERTICAL_MIN_ROWS {
+                let base = index * 64;
+                let end = nrows.min(base + 64);
+                known = probe_word::<R, N, L>(
+                    &mut access,
+                    &word_keys,
+                    &hashes[base..end],
+                    selected,
+                    &mut offsets[base..end],
+                    &mut lanes,
+                )?;
+            }
             let mut bits = selected;
             while bits != 0 {
                 let bit = bits.trailing_zeros() as usize;
                 bits &= bits - 1;
+                if known >> bit & 1 != 0 {
+                    done |= 1 << bit;
+                    resolved += 1;
+                    continue;
+                }
                 let row = index * 64 + bit;
                 let hash = hashes[row];
                 let head = access.head(hash);

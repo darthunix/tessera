@@ -225,11 +225,11 @@ fn probe_rows<R: Region, K: KeySource + ?Sized, const N: usize, const T: usize, 
 /// Rows of a word from which a probe goes vertically, phase by phase over
 /// the word, rather than row by row: fewer rows do not pay for phases
 /// that run over all 64.
-const VERTICAL_MIN_ROWS: u32 = 8;
+pub(super) const VERTICAL_MIN_ROWS: u32 = 8;
 
 /// The per-row arrays of a word's vertical probe, indexed by row within
 /// the word; `L` arrays of candidate keys.
-struct Lanes<const L: usize> {
+pub(super) struct Lanes<const L: usize> {
     hash: [u32; 64],
     current: [u32; 64],
     next: [u32; 64],
@@ -240,7 +240,7 @@ struct Lanes<const L: usize> {
 
 impl<const L: usize> Lanes<L> {
     #[inline(always)]
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         Self {
             hash: [0; 64],
             current: [0; 64],
@@ -275,7 +275,7 @@ fn rows_of(mut bits: u64) -> impl Iterator<Item = usize> {
 /// row gets the first record of its chain with its hash, null bits and
 /// keys. Returns the rows found.
 #[inline(always)]
-fn probe_word<R: Region, const N: usize, const L: usize>(
+pub(super) fn probe_word<R: Region, const N: usize, const L: usize>(
     access: &mut Access<'_, R>,
     word_keys: &WordKeys<'_>,
     hashes: &[u32],
