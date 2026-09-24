@@ -205,6 +205,7 @@ tessera_test_table_cycle(PG_FUNCTION_ARGS)
 	uint32		offsets[NROWS];
 	uint32		matches[NROWS];
 	uint32		chain[NROWS];
+	Datum		gathered[NROWS];
 	TessTableStats stats;
 	TessRowMask valid_rows = {NROWS, pending};
 	TessRowMask found_mask = {NROWS, found};
@@ -260,6 +261,32 @@ tessera_test_table_cycle(PG_FUNCTION_ARGS)
 	}
 	if (twins != 160)
 		PG_RETURN_BOOL(false);
+
+	/*
+	 * The payload word of every match in one call: the row that inserted
+	 * it, which holds the same key; other rows keep their values, and a
+	 * word past the payload is refused.
+	 */
+	for (row = 0; row < NROWS; row++)
+		gathered[row] = (Datum) -1;
+	if (tess_table_gather(region, size, matches, &valid_rows, 0, gathered,
+						  &status) != TESS_OK ||
+		tess_table_gather(region, size, matches, &valid_rows, 1, gathered,
+						  &status) != TESS_ERROR_INVALID_ARGUMENT)
+		PG_RETURN_BOOL(false);
+	for (row = 0; row < NROWS; row++)
+	{
+		if (!has_bit(batch->valid, row))
+		{
+			if (gathered[row] != (Datum) -1)
+				PG_RETURN_BOOL(false);
+			continue;
+		}
+		if (gathered[row] >= NROWS ||
+			DatumGetInt32(batch->values[gathered[row]]) !=
+			DatumGetInt32(batch->values[row]))
+			PG_RETURN_BOOL(false);
+	}
 
 	/* Keys nobody inserted find nothing. */
 	if (!prepare(absent, TESS_NULL_KEYS_REJECT, 1000, false) ||

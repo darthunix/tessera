@@ -22,13 +22,15 @@
 //! grouping's aggregate states. A bucket is the high bits of the hash;
 //! there are a power of two of them, at least 1024 and at least twice the
 //! capacity the table was created for, each holding the offset of the
-//! newest record hashed into it. Hashes come from [`crate::int32::hash`]
-//! and [`crate::int32::hash_next`], which decide what NULL keys do.
+//! newest record hashed into it. Hashes come from [`crate::int32::hash`],
+//! [`crate::int64::hash`] and their `hash_next`, which decide what NULL
+//! keys do.
 //!
 //! [`Table`] is the access several participants may share: inserting
 //! ([`Table::insert`], which always adds a record, so equal keys chain) or
 //! probing ([`Table::probe`] for the first record with a row's hash and
-//! keys, [`Table::next_match`] for the ones after it), not both at a time.
+//! keys, [`Table::next_match`] for the ones after it, [`Table::gather`]
+//! for a payload word of each match), not both at a time.
 //! [`TableMut`] is the access of one writer, which alone may give rows
 //! the record of their keys, creating it when there is none
 //! ([`TableMut::find_or_insert`], for grouping), change a payload in
@@ -258,6 +260,21 @@ impl<'a> Table<'a> {
         found: &mut RowMask<'_>,
     ) -> Result<()> {
         batch::next_match(&self.region, &self.layout, offsets, rows, found)
+    }
+
+    /// For each row of `rows`, the 8 bytes at byte `at` of the payload of
+    /// the record at `offsets[row]` into `out[row]`, native-endian: one
+    /// word of a batch's matches per call, such as a Datum of the build
+    /// row a join keeps there. `at + 8` must be within the payload; rows
+    /// outside `rows` keep their values in `out`.
+    pub fn gather(
+        &self,
+        offsets: &[u32],
+        rows: &RowMaskView<'_>,
+        at: usize,
+        out: &mut [u64],
+    ) -> Result<()> {
+        batch::gather(&self.region, &self.layout, offsets, rows, at, out)
     }
 
     /// The record at an offset a call of this table returned.

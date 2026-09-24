@@ -1,4 +1,5 @@
-//! The batch operations: insertion, probing and the next match of a row.
+//! The batch operations: insertion, probing, the next match of a row and
+//! the gathering of a payload word.
 
 use core::mem::MaybeUninit;
 
@@ -358,6 +359,43 @@ pub(super) fn next_match<R: Region>(
             }
         }
         found.set_word(index, hits)?;
+    }
+    Ok(())
+}
+
+/// For each row of `rows`, the 8 bytes at byte `at` of the payload of the
+/// record at `offsets[row]` into `out[row]`; other rows of `out` keep
+/// their values.
+pub(super) fn gather<R: Region>(
+    region: &R,
+    layout: &Layout,
+    offsets: &[u32],
+    rows: &RowMaskView<'_>,
+    at: usize,
+    out: &mut [u64],
+) -> Result<()> {
+    let nrows = rows.nrows();
+    ensure!(
+        offsets.len() == nrows && out.len() == nrows,
+        "the offsets, mask and output of the batch have different row counts"
+    );
+    ensure!(
+        at.checked_add(8)
+            .is_some_and(|end| end <= layout.payload_size),
+        "a payload word at byte {at} is past the payload of {} bytes",
+        layout.payload_size
+    );
+    let mut access = Access::new(region, layout);
+    for index in 0..nrows.div_ceil(64) {
+        let mut bits = rows.word(index).unwrap();
+        while bits != 0 {
+            let row = index * 64 + bits.trailing_zeros() as usize;
+            bits &= bits - 1;
+            let payload = access.locate(offsets[row])?.payload();
+            let mut word = [0; 8];
+            word.copy_from_slice(&payload[at..at + 8]);
+            out[row] = u64::from_ne_bytes(word);
+        }
     }
     Ok(())
 }

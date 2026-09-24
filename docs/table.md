@@ -101,6 +101,14 @@ offsets, &rows, &found, &status)` replaces each row's offset in place by
 the next record of its chain with the same keys, until `found` is empty:
 a join walks the chains of a whole batch of probe rows at a time.
 
+`tess_table_gather(region, len, offsets, &rows, at, values, &status)`
+reads, for each row of `rows`, the 8 bytes at byte `at` of the payload of
+the record at `offsets[row]` into `values[row]`; other rows keep their
+values, and `at + 8` must lie within the payload. A join keeps the Datums
+of its build row as payload words and fetches one column of a batch of
+matches per call, with one check of the header, where a call per row
+would check it per row.
+
 `tess_table_record(region, len, offset, &record, &status)` exposes a
 record's hash, NULL bits, key slots and payload as pointers into the
 region, valid until the region moves or the table grows.

@@ -7,9 +7,9 @@ use anyhow::Result;
 use tessera_capi::c::{
     Code, DatumColumn, Mask, Status, TableKey, TableRecord, TableStats, tess_int4_hash,
     tess_int8_hash, tess_table_attach, tess_table_create, tess_table_find_or_insert,
-    tess_table_format_version, tess_table_grow, tess_table_insert, tess_table_layout,
-    tess_table_next_match, tess_table_payload, tess_table_probe, tess_table_record,
-    tess_table_scan, tess_table_size, tess_table_stats,
+    tess_table_format_version, tess_table_gather, tess_table_grow, tess_table_insert,
+    tess_table_layout, tess_table_next_match, tess_table_payload, tess_table_probe,
+    tess_table_record, tess_table_scan, tess_table_size, tess_table_stats,
 };
 use tessera_core::{ColumnView, RowMask, RowMaskView};
 use tessera_kernels::int32::{self, NullKeys};
@@ -296,6 +296,37 @@ fn the_entry_points_round_trip() -> Result<()> {
             let stored = u64::from_ne_bytes(*record.payload.cast::<[u8; 8]>());
             assert_eq!(keys.values[stored as usize], keys.values[row]);
         }
+
+        // The payload word of every match in one call; a word past the
+        // payload is refused.
+        let mut gathered = vec![u64::MAX; 100];
+        let code = tess_table_gather(
+            base,
+            size,
+            matches.as_ptr(),
+            &raw const valid_view,
+            0,
+            gathered.as_mut_ptr(),
+            &raw mut status,
+        );
+        assert_eq!(code, Code::Ok, "{}", status.message());
+        for (row, &word) in gathered.iter().enumerate() {
+            if valid_rows.contains(&row) {
+                assert_eq!(keys.values[word as usize], keys.values[row], "row {row}");
+            } else {
+                assert_eq!(word, u64::MAX, "row {row}");
+            }
+        }
+        let code = tess_table_gather(
+            base,
+            size,
+            matches.as_ptr(),
+            &raw const valid_view,
+            1,
+            gathered.as_mut_ptr(),
+            &raw mut status,
+        );
+        assert_eq!(code, Code::InvalidArgument);
 
         // The second record of each key, in place; then no third.
         let mut chain = matches.clone();

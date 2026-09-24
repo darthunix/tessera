@@ -1218,3 +1218,60 @@ fn a_word_probed_at_once_detects_a_cycle() -> Result<()> {
     assert!(error.to_string().contains("longer"), "{error}");
     Ok(())
 }
+
+#[test]
+fn gather_reads_one_payload_word_of_each_selected_match() -> Result<()> {
+    let config = TableConfig {
+        keys: &[KeyKind::Int32],
+        payload_size: 16,
+    };
+    let nrows = 100;
+    let values: Vec<i32> = (0..nrows as i32).collect();
+    let keys = [ColumnView::try_new(&values, None)?];
+    let hashes: Vec<u32> = values.iter().map(|&value| hash_i32(value)).collect();
+    // Payload words: the row times ten, then the row plus a million.
+    let payload: Vec<u8> = (0..nrows as u64)
+        .flat_map(|row| [row * 10, row + 1_000_000])
+        .flat_map(u64::to_ne_bytes)
+        .collect();
+    let mut words = words_for(&config, nrows as u64)?;
+    let table = TableMut::create_in(&mut words, &config, nrows as u64)?;
+    insert_all(&table, &hashes, &keys[..], Some(&payload))?;
+    let (_, matches) = probe_all(&table, &hashes, &keys[..])?;
+
+    // Every third row, across both words of the batch.
+    let selected: Vec<u64> = (0..2)
+        .map(|index| {
+            (0..64)
+                .filter(|bit| (index * 64 + bit) % 3 == 0 && index * 64 + bit < nrows)
+                .fold(0, |word, bit| word | 1 << bit)
+        })
+        .collect();
+    let rows = RowMaskView::try_new(nrows, &selected)?;
+    for (at, expected) in [
+        (0, &(|row: u64| row * 10) as &dyn Fn(u64) -> u64),
+        (8, &|row: u64| row + 1_000_000),
+    ] {
+        let mut out = vec![u64::MAX; nrows];
+        table.gather(&matches, &rows, at, &mut out)?;
+        for (row, &value) in out.iter().enumerate() {
+            let wanted = if row % 3 == 0 {
+                expected(row as u64)
+            } else {
+                u64::MAX
+            };
+            assert_eq!(value, wanted, "word at {at}, row {row}");
+        }
+    }
+
+    // A word past the payload, short buffers and a bad offset are errors.
+    let mut out = vec![0; nrows];
+    assert!(table.gather(&matches, &rows, 9, &mut out).is_err());
+    assert!(table.gather(&matches, &rows, usize::MAX, &mut out).is_err());
+    assert!(table.gather(&matches[1..], &rows, 0, &mut out).is_err());
+    assert!(table.gather(&matches, &rows, 0, &mut out[1..]).is_err());
+    let mut inside = matches.clone();
+    inside[0] += 1;
+    assert!(table.gather(&inside, &rows, 0, &mut out).is_err());
+    Ok(())
+}

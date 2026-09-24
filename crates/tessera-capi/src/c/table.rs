@@ -462,6 +462,37 @@ pub unsafe extern "C" fn tess_table_next_match(
     }
 }
 
+/// `tess_table_gather`: one payload word of each selected row's record.
+///
+/// # Safety
+///
+/// `region` as for [`Table::attach`] during the call; `rows` must point
+/// to a valid mask; `offsets` must hold an initialized offset per row and
+/// `out` an initialized, writable word per row that nothing else
+/// accesses; `status` as for every entry point.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tess_table_gather(
+    region: *const u8,
+    len: usize,
+    offsets: *const u32,
+    rows: *const Mask,
+    at: usize,
+    out: *mut u64,
+    status: *mut Status,
+) -> Code {
+    // SAFETY: the caller's contract.
+    unsafe {
+        guard(status, || {
+            let table = Table::attach(region.cast_mut(), len)?;
+            let rows = rows.as_ref().context("a null row mask")?.view()?;
+            let nrows = rows.nrows();
+            let offsets = values(offsets, nrows, "offsets")?;
+            let out = slots(out, nrows, "results")?;
+            table.gather(offsets, &rows, at, out)
+        })
+    }
+}
+
 /// `tess_table_record`: the record at an offset.
 ///
 /// # Safety

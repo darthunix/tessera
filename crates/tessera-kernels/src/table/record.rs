@@ -73,6 +73,11 @@ impl<'r> View<'r> {
         self.keys
     }
 
+    #[inline(always)]
+    pub(super) fn payload(&self) -> &'r [u8] {
+        self.payload
+    }
+
     #[inline]
     pub(super) fn record(&self) -> Record<'r> {
         Record {
