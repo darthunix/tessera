@@ -539,8 +539,14 @@ fn large_table_keys_have_buckets_of_their_own() -> Result<()> {
     let keys = &setup.keys;
     assert_eq!(keys.present.len(), tabling_large::RECORDS);
     assert_eq!(keys.absent.len(), tabling_large::RECORDS);
+    assert_eq!(keys.occupied.len(), tabling_large::RECORDS);
     let mut seen = std::collections::HashSet::new();
-    for &key in keys.present.iter().chain(&keys.absent) {
+    for &key in keys
+        .present
+        .iter()
+        .chain(&keys.absent)
+        .chain(&keys.occupied)
+    {
         assert!(seen.insert(key), "key {key} is present and absent or twice");
     }
     tabling_large::check(&mut setup)

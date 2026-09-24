@@ -13,7 +13,9 @@
 //! chosen so that each has a bucket of its own (every chain is one
 //! record long), and the absent keys fall into empty buckets. `probe_hit`
 //! and `find_or_insert` look present keys up (the latter creates
-//! nothing), `probe_miss` absent ones, each against `reference`, a chained
+//! nothing), `probe_miss` absent ones, both into empty buckets and, in the
+//! `occupied` group, into buckets holding one record of another key, which
+//! the probe must read to reject; each against `reference`, a chained
 //! table of the same shape with plain stores built from the same keys.
 //! A debug build, which only checks the model, uses a small table.
 
@@ -57,11 +59,14 @@ fn random(state: &mut u64) -> u64 {
     state.wrapping_mul(0x2545_F491_4F6C_DD1D)
 }
 
-/// The keys: `present` with a bucket each, in random order, and as many
-/// `absent` keys whose buckets are empty.
+/// The keys: `present` with a bucket each, in random order; as many
+/// `absent` keys whose buckets are empty; and as many `occupied` absent
+/// keys whose buckets hold one record of another key, which a probe reads
+/// before it knows the key is not there.
 pub struct Keys {
     pub present: Vec<i32>,
     pub absent: Vec<i32>,
+    pub occupied: Vec<i32>,
 }
 
 impl Keys {
@@ -78,19 +83,29 @@ impl Keys {
             candidate += 1;
         }
         let mut absent = Vec::with_capacity(RECORDS);
-        while absent.len() < RECORDS {
-            if !used[bucket(murmurhash32(candidate as u32))] {
-                absent.push(candidate);
+        let mut occupied = Vec::with_capacity(RECORDS);
+        while absent.len() < RECORDS || occupied.len() < RECORDS {
+            let into = if used[bucket(murmurhash32(candidate as u32))] {
+                &mut occupied
+            } else {
+                &mut absent
+            };
+            if into.len() < RECORDS {
+                into.push(candidate);
             }
             candidate += 1;
         }
         let mut state = 0x9e37_79b9_7f4a_7c15;
-        for keys in [&mut present, &mut absent] {
+        for keys in [&mut present, &mut absent, &mut occupied] {
             for i in (1..keys.len()).rev() {
                 keys.swap(i, (random(&mut state) % (i as u64 + 1)) as usize);
             }
         }
-        Self { present, absent }
+        Self {
+            present,
+            absent,
+            occupied,
+        }
     }
 }
 
@@ -157,6 +172,7 @@ pub struct Setup {
     pub keys: Keys,
     pub present_hashes: Vec<u32>,
     pub absent_hashes: Vec<u32>,
+    pub occupied_hashes: Vec<u32>,
     pub reference: Reference,
     pub all: [u64; BATCH / 64],
     pub found: [u64; BATCH / 64],
@@ -172,6 +188,7 @@ impl Setup {
             |keys: &[i32]| -> Vec<u32> { keys.iter().map(|&k| murmurhash32(k as u32)).collect() };
         let present_hashes = hashes(&keys.present);
         let absent_hashes = hashes(&keys.absent);
+        let occupied_hashes = hashes(&keys.occupied);
         let mut words = vec![0; region_size(&CONFIG, RECORDS as u64)?.div_ceil(8)];
         {
             let table = TableMut::create_in(&mut words, &CONFIG, RECORDS as u64)?;
@@ -204,6 +221,7 @@ impl Setup {
             keys,
             present_hashes,
             absent_hashes,
+            occupied_hashes,
             reference,
             all: [u64::MAX; BATCH / 64],
             found: [0; BATCH / 64],
@@ -214,17 +232,43 @@ impl Setup {
     }
 }
 
-/// Probe batch `batch` of present or absent keys.
+/// Which keys a probe batch takes.
+#[derive(Clone, Copy)]
+pub enum Kind {
+    Present,
+    Absent,
+    Occupied,
+}
+
+impl Setup {
+    /// The keys and hashes of batch `batch` of a kind.
+    pub fn batch(&self, kind: Kind, batch: usize) -> (&[i32], &[u32]) {
+        let rows = batch * BATCH..(batch + 1) * BATCH;
+        match kind {
+            Kind::Present => (&self.keys.present[rows.clone()], &self.present_hashes[rows]),
+            Kind::Absent => (&self.keys.absent[rows.clone()], &self.absent_hashes[rows]),
+            Kind::Occupied => (
+                &self.keys.occupied[rows.clone()],
+                &self.occupied_hashes[rows],
+            ),
+        }
+    }
+}
+
+/// Probe batch `batch` of a kind of keys.
 #[inline(never)]
-pub fn probe(setup: &mut Setup, batch: usize, present: bool) -> Result<()> {
+pub fn probe(setup: &mut Setup, batch: usize, kind: Kind) -> Result<()> {
     let rows = batch * BATCH..(batch + 1) * BATCH;
-    let (keys, hashes) = if present {
-        (
+    let (keys, hashes) = match kind {
+        Kind::Present => (
             &setup.keys.present[rows.clone()],
             &setup.present_hashes[rows],
-        )
-    } else {
-        (&setup.keys.absent[rows.clone()], &setup.absent_hashes[rows])
+        ),
+        Kind::Absent => (&setup.keys.absent[rows.clone()], &setup.absent_hashes[rows]),
+        Kind::Occupied => (
+            &setup.keys.occupied[rows.clone()],
+            &setup.occupied_hashes[rows],
+        ),
     };
     let column = [ColumnView::try_new(keys, None)?];
     let table = TableMut::exclusive(&mut setup.words)?;
@@ -260,7 +304,7 @@ pub fn resolve(setup: &mut Setup, batch: usize) -> Result<()> {
 /// absent keys are not found, and the reference agrees.
 pub fn check(setup: &mut Setup) -> Result<()> {
     for batch in 0..BATCHES {
-        probe(setup, batch, true)?;
+        probe(setup, batch, Kind::Present)?;
         ensure!(
             setup.found == [u64::MAX; BATCH / 64],
             "batch {batch}: a present key missed"
@@ -280,10 +324,15 @@ pub fn check(setup: &mut Setup) -> Result<()> {
             setup.pending == [0; BATCH / 64] && setup.inserted == [0; BATCH / 64],
             "batch {batch}: find_or_insert created a record"
         );
-        probe(setup, batch, false)?;
+        probe(setup, batch, Kind::Absent)?;
         ensure!(
             setup.found == [0; BATCH / 64],
             "batch {batch}: an absent key hit"
+        );
+        probe(setup, batch, Kind::Occupied)?;
+        ensure!(
+            setup.found == [0; BATCH / 64],
+            "batch {batch}: an absent key in an occupied bucket hit"
         );
         let rows = batch * BATCH..(batch + 1) * BATCH;
         ensure!(
@@ -299,6 +348,11 @@ pub fn check(setup: &mut Setup) -> Result<()> {
                 .probe(&setup.absent_hashes[rows.clone()], &setup.keys.absent[rows])
                 == 0,
             "batch {batch}: the reference hit an absent key"
+        );
+        let (keys, hashes) = setup.batch(Kind::Occupied, batch);
+        ensure!(
+            setup.reference.probe(hashes, keys) == 0,
+            "batch {batch}: the reference hit an absent key in an occupied bucket"
         );
     }
     let table = TableMut::exclusive(&mut setup.words)?;
@@ -324,7 +378,7 @@ pub fn bench(runner: &mut Runner) -> Result<()> {
     let mut group = runner.group(format!("table_large/dense/{RECORDS}/hit"));
     group.op("probe_hit", || {
         let batch = advance(&mut cursor);
-        probe(black_box(&mut setup), batch, true).unwrap()
+        probe(black_box(&mut setup), batch, Kind::Present).unwrap()
     })?;
     group.op("find_or_insert", || {
         let batch = advance(&mut cursor);
@@ -342,7 +396,7 @@ pub fn bench(runner: &mut Runner) -> Result<()> {
     let mut group = runner.group(format!("table_large/dense/{RECORDS}/miss"));
     group.op("probe_miss", || {
         let batch = advance(&mut cursor);
-        probe(black_box(&mut setup), batch, false).unwrap()
+        probe(black_box(&mut setup), batch, Kind::Absent).unwrap()
     })?;
     group.op("reference", || {
         let batch = advance(&mut cursor);
@@ -351,6 +405,17 @@ pub fn bench(runner: &mut Runner) -> Result<()> {
         setup
             .reference
             .probe(&setup.absent_hashes[rows.clone()], &setup.keys.absent[rows])
+    })?;
+    let mut group = runner.group(format!("table_large/dense/{RECORDS}/occupied"));
+    group.op("probe_miss", || {
+        let batch = advance(&mut cursor);
+        probe(black_box(&mut setup), batch, Kind::Occupied).unwrap()
+    })?;
+    group.op("reference", || {
+        let batch = advance(&mut cursor);
+        let setup = black_box(&setup);
+        let (keys, hashes) = setup.batch(Kind::Occupied, batch);
+        setup.reference.probe(hashes, keys)
     })?;
     Ok(())
 }
