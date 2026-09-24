@@ -17,6 +17,17 @@ query down, and where it can, does it speed one up.
   aggregate cases without a filter or with four aggregates over one
   column. A ratio below one is the win; each run is compared with the
   previous one.
+- **join** (`join.sql`): equi-joins over one integer key between a fact
+  table of 2 M rows and a dimension of 100 k, or a table with four rows
+  per key: a count, a column of either side, int8 keys past the int4
+  range and an int4 key against an int8 one, a dimension filtered to one
+  key in a hundred and a key that matches nothing, a top-N sort above the
+  join and a join over a join. With Tessera on, `TessHashJoin` builds the
+  inner side and probes it with batches of the outer side, under `TessAgg`
+  where the query aggregates; with it off, the core's `Hash Join`. A ratio
+  below one is the win. `plan_time` plans a join of four relations
+  without running it, 100 plans per sample, and reports the mean: the
+  cost of the join hook, which must stay close to one.
 - **probe** (`probe.sql`): where the time of a parallel query goes. A
   table of 28 pages under a `Gather`, serially and with one and two
   workers, with and without the leader taking part: all its time is the
@@ -66,8 +77,9 @@ SHARED_BUFFERS=4GB bench/pg/run.sh setup 10   # ten times the rows, larger buffe
 `postgresql.conf` preloads `tessera, tessera_nodes, tessera_kernels,
 tessera_limit` in every session and sets `shared_buffers` to `SHARED_BUFFERS`,
 2GB by default. `setup` takes a multiplier of the base row counts (2 M narrow,
-250 k wide, 500 k mixed), stored in the table `bench_scale`; the win family
-multiplies its selection constants by it, so that every case keeps its
+250 k wide, 500 k mixed, 100 k dimension, 2 M fact, 100 k with duplicate
+keys), stored in the table `bench_scale`; the win and join families
+multiply their selection constants and key ranges by it, so that every case keeps its
 selectivity, while the tax family's LIMIT constants are the cases themselves
 and it runs at the base size only.
 
