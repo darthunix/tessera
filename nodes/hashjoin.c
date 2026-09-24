@@ -112,9 +112,10 @@ typedef struct TessHashJoinState
 	uint32	   *offsets;
 	uint64	   *valid_bits;
 	uint64	   *pending_bits;
+	uint64	   *duplicate_bits;
 	/* The payload of every row of an inner batch, one after another. */
 	uint64	   *payload;
-	/* The rows of the current round, and a copy next_match reads. */
+	/* The rows of the current round, and a copy the next step reads. */
 	uint64	   *round_bits;
 	uint64	   *next_bits;
 	/* The published batch's mask, which the parent may narrow. */
@@ -141,8 +142,11 @@ typedef struct TessHashJoinState
 	/* Written by a kernel on failure only. */
 	TessStatus	status;
 
-	/* The rows of the current table. */
+	/* The rows of the current table, and those whose key it held already. */
 	uint64		build_rows;
+	uint64		duplicates;
+	/* Bit w: payload column w holds a NULL somewhere in the table. */
+	uint64		null_columns;
 	/* This participant's counters; the memory ones are set when read. */
 	uint64		counters[JOIN_NCOUNTERS];
 	/* The most memory the table and the copies took, in bytes. */
@@ -207,6 +211,7 @@ reserve_rows(TessHashJoinState *state, int nrows)
 		pfree(state->offsets);
 		pfree(state->valid_bits);
 		pfree(state->pending_bits);
+		pfree(state->duplicate_bits);
 		pfree(state->payload);
 		pfree(state->round_bits);
 		pfree(state->next_bits);
@@ -222,6 +227,7 @@ reserve_rows(TessHashJoinState *state, int nrows)
 	state->offsets = MemoryContextAllocZero(context, sizeof(uint32) * nrows);
 	state->valid_bits = MemoryContextAllocZero(context, sizeof(uint64) * nwords);
 	state->pending_bits = MemoryContextAllocZero(context, sizeof(uint64) * nwords);
+	state->duplicate_bits = MemoryContextAllocZero(context, sizeof(uint64) * nwords);
 	state->payload = MemoryContextAllocZero(context,
 											mul_size(sizeof(uint64) * nrows,
 													 1 + state->npayload));
@@ -306,6 +312,7 @@ fill_payload(TessHashJoinState *state, TessBatch *batch, const TessRowMask *vali
 
 	while ((row = tess_row_mask_next(valid, row)) >= 0)
 		state->payload[row * width] = 0;
+	/* The columns' NULL bits, gathered below for the whole table. */
 	for (int word = 0; word < state->npayload; word++)
 	{
 		int			scan_column = state->payload_columns[word];
@@ -326,6 +333,7 @@ fill_payload(TessHashJoinState *state, TessBatch *batch, const TessRowMask *vali
 			{
 				record[0] |= UINT64CONST(1) << word;
 				record[1 + word] = 0;
+				state->null_columns |= UINT64CONST(1) << word;
 			}
 			else
 				record[1 + word] = byval ? values.values[row] :
@@ -343,6 +351,7 @@ insert_batch(TessHashJoinState *state, TessBatch *batch)
 	int			nwords = tess_row_mask_word_count(nrows);
 	TessRowMask valid;
 	TessRowMask pending;
+	TessRowMask duplicates;
 	TessDatumColumn keys;
 	TessTableKey key = {0};
 	int			count;
@@ -350,8 +359,10 @@ insert_batch(TessHashJoinState *state, TessBatch *batch)
 	reserve_rows(state, nrows);
 	/* A shorter batch than the last: no bits past its rows may remain. */
 	memset(state->valid_bits, 0, sizeof(uint64) * nwords);
+	memset(state->duplicate_bits, 0, sizeof(uint64) * nwords);
 	valid = (TessRowMask) {nrows, state->valid_bits};
 	pending = (TessRowMask) {nrows, state->pending_bits};
+	duplicates = (TessRowMask) {nrows, state->duplicate_bits};
 	child_column(batch, state->inner_key, &batch->rows, TESS_COLUMN_FOR_FILTER,
 				 &keys);
 	hash_keys(state, state->inner_kind, &keys, &batch->rows, &valid);
@@ -364,12 +375,20 @@ insert_batch(TessHashJoinState *state, TessBatch *batch)
 	key.column = &keys;
 	for (;;)
 	{
-		check(state, state->kernels->table_insert(state->region,
-												  state->region_len,
-												  state->hashes, 1, &key,
-												  (const uint8 *) state->payload,
-												  &pending, state->offsets,
-												  &state->status));
+		/*
+		 * A key's records next to each other: the rounds step from one to
+		 * the next, and a table without duplicates has no second round.
+		 */
+		check(state, state->kernels->table_insert_grouped(state->region,
+														  state->region_len,
+														  state->hashes, 1,
+														  &key,
+														  (const uint8 *) state->payload,
+														  &pending,
+														  state->offsets,
+														  &duplicates,
+														  &state->status));
+		state->duplicates += tess_row_mask_count(&duplicates);
 		if (tess_row_mask_count(&pending) == 0)
 			break;
 		/* The table is full: the rows left pending go in after growth. */
@@ -386,6 +405,12 @@ build_table(TessHashJoinState *state)
 {
 	create_table(state);
 	state->build_rows = 0;
+	state->duplicates = 0;
+	state->null_columns = 0;
+	/* A column without NULLs is never gathered for them: no flag may stay set. */
+	if (state->inner_isnull != NULL && state->capacity > 0)
+		for (int word = 0; word < state->npayload; word++)
+			memset(state->inner_isnull[word], 0, sizeof(bool) * state->capacity);
 	for (;;)
 	{
 		TessBatch  *batch = tess_input_next(state->inner_input);
@@ -419,9 +444,13 @@ static void
 gather_inner(TessHashJoinState *state, int word)
 {
 	TessRowMask round = {state->batch.rows.nrows, state->round_bits};
+	bool		nullable = (state->null_columns >> word) & 1;
 	int			row = -1;
 
-	if (!state->nulls_gathered)
+	if (state->gathered[word])
+		return;
+	/* A column no inner row left NULL keeps its flags false. */
+	if (nullable && !state->nulls_gathered)
 	{
 		check(state, state->kernels->table_gather(state->region,
 												  state->region_len,
@@ -430,16 +459,15 @@ gather_inner(TessHashJoinState *state, int word)
 												  &state->status));
 		state->nulls_gathered = true;
 	}
-	if (state->gathered[word])
-		return;
 	check(state, state->kernels->table_gather(state->region, state->region_len,
 											  state->offsets, &round,
 											  sizeof(uint64) * (1 + word),
 											  state->inner_values[word],
 											  &state->status));
-	while ((row = tess_row_mask_next(&round, row)) >= 0)
-		state->inner_isnull[word][row] =
-			(DatumGetUInt64(state->null_words[row]) >> word) & 1;
+	if (nullable)
+		while ((row = tess_row_mask_next(&round, row)) >= 0)
+			state->inner_isnull[word][row] =
+				(DatumGetUInt64(state->null_words[row]) >> word) & 1;
 	state->gathered[word] = true;
 }
 
@@ -544,18 +572,19 @@ next_round(TessHashJoinState *state)
 		{
 			int			nrows = state->outer_batch->rows.nrows;
 
-			if (!state->inner_unique)
+			/* Without duplicates no row has a next record. */
+			if (!state->inner_unique && state->duplicates > 0)
 			{
 				TessRowMask rows = {nrows, state->next_bits};
 				TessRowMask found = {nrows, state->round_bits};
 
 				memcpy(state->next_bits, state->round_bits,
 					   sizeof(uint64) * tess_row_mask_word_count(nrows));
-				check(state, state->kernels->table_next_match(state->region,
-															  state->region_len,
-															  state->offsets,
-															  &rows, &found,
-															  &state->status));
+				check(state, state->kernels->table_next_in_group(state->region,
+																 state->region_len,
+																 state->offsets,
+																 &rows, &found,
+																 &state->status));
 				if (tess_row_mask_count(&found) > 0)
 				{
 					start_round(state);

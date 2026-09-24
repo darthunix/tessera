@@ -530,10 +530,13 @@ At its first execution the node derives both children's requests from
 its parent's: the outer columns asked for come from the outer batches,
 the inner ones are kept in the table, and each side gives its key first.
 It then reads every inner batch, hashes the key with the NULL policy of
-a join (a NULL key never matches) and inserts the rows. A record's
-payload is a word of the NULL bits of the kept inner columns and a Datum
-per column; a by-reference value is copied into the node's memory, where
-it lives as long as the table. The table starts at the planner's
+a join (a NULL key never matches) and inserts the rows with
+`tess_table_insert_grouped`, which puts a key's records next to each
+other in their chain and reports the rows whose key was there already;
+the node counts them. A record's payload is a word of the NULL bits of
+the kept inner columns and a Datum per column; a by-reference value is
+copied into the node's memory, where it lives as long as the table. The
+node also notes which kept columns hold a NULL at all. The table starts at the planner's
 estimate of the inner rows; when it is full, `repalloc` doubles the
 region, the table rebuilds its buckets and the rows left pending go in.
 An empty inner side ends the scan without reading the outer child.
@@ -543,11 +546,15 @@ are a round: the node publishes its own batch with the outer batch's
 physical rows and the round's rows selected. An outer column of that
 batch is the outer batch's own column, passed through without a copy; an
 inner column is gathered from the round's records with
-`tess_table_gather` when a parent first asks for it, the NULL bits once
-per round. A key held by several inner rows has as many records, and
-`tess_table_next_match` gives the next round from the node's own copy of
-the round's rows, since a parent may narrow the published mask; a unique
-inner side has no second round. The outer batch stays active until its
+`tess_table_gather` when a parent first asks for it, and the records'
+NULL bits once per round, only when a column asked for holds a NULL
+somewhere in the table. A key held by several inner rows has as many
+records, and `tess_table_next_in_group` gives the next round in one step
+per row from the node's own copy of the round's rows, since a parent may
+narrow the published mask. There is no second round when the planner
+knows the inner side unique or the build met no duplicate key: walking a
+chain to find that a key has no other record cost as much as the probe
+itself. The outer batch stays active until its
 last round is finished. A row-wise parent is served from the round's
 columns row by row. The node scans forward only: a scrollable cursor
 gets a `Material` above it. A rescan builds the table again only when
