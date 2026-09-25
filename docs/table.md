@@ -238,9 +238,9 @@ reads it whole. Every access to a record's bytes is announced to loom
 first, so a read not ordered after the writing is reported; a test with
 relaxed bucket heads checks that the model does report it. The model
 found that counting the records after publishing them let such a probe
-call a chain corrupt. The TLA+ specification of the
-build-barrier-probe protocol comes with the parallel join (plan item
-5.5).
+call a chain corrupt. The phases of a shared build (insertion, growth,
+the barrier, probing) come with the parallel join (plan item 5.5) as a
+state machine in Rust, checked under loom the same way.
 
 ## Ownership and errors
 
