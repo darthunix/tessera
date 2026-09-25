@@ -365,7 +365,7 @@ pub(super) fn grow<R: Region>(region: &R, layout: &Layout, new_len: usize) -> Re
     header.store(region);
     // SAFETY: the caller has the region to itself, so nothing else reads
     // or writes the buckets while they are cleared.
-    unsafe { region.bytes_mut(grown.buckets_offset, grown.nbuckets as usize * 4) }.fill(0);
+    unsafe { region.zero_u32(grown.buckets_offset, grown.nbuckets as usize) };
     let used = region.load_u64(CHUNK_USED) as usize;
     let mut access = Access::new(region, &grown);
     let mut byte = HEADER_SIZE;

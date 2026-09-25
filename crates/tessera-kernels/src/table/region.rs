@@ -11,13 +11,34 @@
 //! trait is the seam for a model region under loom, and grows with the
 //! operations the table needs.
 //!
+//! The orderings live in [`order`], which the loom model in `loom.rs`
+//! shares, so that the model checks the orderings this code runs with.
+//!
 //! Offsets are validated against the header by the table before any call,
 //! so a violation here is a bug: the methods assert it instead of returning
 //! an error. Every method is marked for inlining: the table's loops are
 //! generic and instantiated in the crate that calls them, where a plain
 //! method of this crate would stay a call per row.
 
-use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU64};
+
+/// The orderings of the region's atomic operations, by method.
+pub(super) mod order {
+    use core::sync::atomic::Ordering;
+
+    /// Fields no participant changes while the table is shared.
+    pub(in super::super) const RELAXED: Ordering = Ordering::Relaxed;
+    /// Reads of counters, bucket heads and next fields.
+    pub(in super::super) const LOAD: Ordering = Ordering::Acquire;
+    /// Writes of header fields and next fields.
+    pub(in super::super) const STORE: Ordering = Ordering::Release;
+    /// A compare-and-swap: of the used mark or of a bucket head.
+    pub(in super::super) const CAS: Ordering = Ordering::AcqRel;
+    /// A compare-and-swap that failed and returns the value found.
+    pub(in super::super) const CAS_FAILED: Ordering = Ordering::Acquire;
+    /// An addition to the record count.
+    pub(in super::super) const ADD: Ordering = Ordering::AcqRel;
+}
 
 /// Bytes a table reads and writes by offset.
 pub(super) trait Region {
@@ -55,6 +76,14 @@ pub(super) trait Region {
     /// use of the region.
     #[allow(clippy::mut_from_ref)]
     unsafe fn bytes_mut(&self, offset: usize, len: usize) -> &mut [u8];
+
+    /// Clear `count` 32-bit words from `offset`, a multiple of 4.
+    ///
+    /// # Safety
+    ///
+    /// Nothing else reads or writes these words meanwhile: the caller has
+    /// exclusive use of the region.
+    unsafe fn zero_u32(&self, offset: usize, count: usize);
 
     /// [`Self::load_u32`] without the bounds check.
     ///
@@ -175,38 +204,38 @@ impl Region for RawRegion {
 
     #[inline]
     fn load_u32_relaxed(&self, offset: usize) -> u32 {
-        self.atomic_u32(offset).load(Ordering::Relaxed)
+        self.atomic_u32(offset).load(order::RELAXED)
     }
 
     #[inline]
     fn load_u64_relaxed(&self, offset: usize) -> u64 {
-        self.atomic_u64(offset).load(Ordering::Relaxed)
+        self.atomic_u64(offset).load(order::RELAXED)
     }
 
     #[inline]
     fn store_u32(&self, offset: usize, value: u32) {
-        self.atomic_u32(offset).store(value, Ordering::Release);
+        self.atomic_u32(offset).store(value, order::STORE);
     }
 
     #[inline]
     fn load_u64(&self, offset: usize) -> u64 {
-        self.atomic_u64(offset).load(Ordering::Acquire)
+        self.atomic_u64(offset).load(order::LOAD)
     }
 
     #[inline]
     fn store_u64(&self, offset: usize, value: u64) {
-        self.atomic_u64(offset).store(value, Ordering::Release);
+        self.atomic_u64(offset).store(value, order::STORE);
     }
 
     #[inline]
     fn cas_u64(&self, offset: usize, current: u64, new: u64) -> Result<u64, u64> {
         self.atomic_u64(offset)
-            .compare_exchange(current, new, Ordering::AcqRel, Ordering::Acquire)
+            .compare_exchange(current, new, order::CAS, order::CAS_FAILED)
     }
 
     #[inline]
     fn fetch_add_u64(&self, offset: usize, delta: u64) -> u64 {
-        self.atomic_u64(offset).fetch_add(delta, Ordering::AcqRel)
+        self.atomic_u64(offset).fetch_add(delta, order::ADD)
     }
 
     #[inline]
@@ -215,6 +244,12 @@ impl Region for RawRegion {
         // SAFETY: the range is in bounds, and the caller promises that nothing
         // else reads or writes it while the slice lives.
         unsafe { core::slice::from_raw_parts_mut(address, len) }
+    }
+
+    #[inline]
+    unsafe fn zero_u32(&self, offset: usize, count: usize) {
+        // SAFETY: the caller has the region to itself.
+        unsafe { self.bytes_mut(offset, count * 4) }.fill(0);
     }
 
     #[inline(always)]
@@ -226,14 +261,13 @@ impl Region for RawRegion {
     unsafe fn load_u32_in(&self, offset: usize) -> u32 {
         // SAFETY: in bounds by the caller's contract; aligned and accessed
         // only atomically as for `atomic_u32`.
-        unsafe { AtomicU32::from_ptr(self.at_in(offset, 4).cast()) }.load(Ordering::Acquire)
+        unsafe { AtomicU32::from_ptr(self.at_in(offset, 4).cast()) }.load(order::LOAD)
     }
 
     #[inline(always)]
     unsafe fn store_u32_in(&self, offset: usize, value: u32) {
         // SAFETY: as for `load_u32_in`.
-        unsafe { AtomicU32::from_ptr(self.at_in(offset, 4).cast()) }
-            .store(value, Ordering::Release);
+        unsafe { AtomicU32::from_ptr(self.at_in(offset, 4).cast()) }.store(value, order::STORE);
     }
 
     #[inline(always)]
@@ -242,8 +276,8 @@ impl Region for RawRegion {
         unsafe { AtomicU32::from_ptr(self.at_in(offset, 4).cast()) }.compare_exchange(
             current,
             new,
-            Ordering::AcqRel,
-            Ordering::Acquire,
+            order::CAS,
+            order::CAS_FAILED,
         )
     }
 

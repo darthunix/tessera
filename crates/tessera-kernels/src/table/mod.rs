@@ -147,6 +147,22 @@ impl<'a> Deref for TableMut<'a> {
     }
 }
 
+/// Write the header of a new table for `capacity` records and clear its
+/// buckets; the layout is returned.
+///
+/// # Safety
+///
+/// The caller has the region to itself, so nothing else reads or writes
+/// it meanwhile.
+unsafe fn init<R: Region>(region: &R, config: &TableConfig<'_>, capacity: u64) -> Result<Layout> {
+    let header = Header::new(config, capacity, region.len())?;
+    let layout = header.validate(region.len())?;
+    header.store(region);
+    // SAFETY: the caller's contract.
+    unsafe { region.zero_u32(layout.buckets_offset, layout.nbuckets as usize) };
+    Ok(layout)
+}
+
 /// Reject a region that could not hold a header.
 fn check_region(region: *mut u8, len: usize) -> Result<()> {
     ensure!(
@@ -351,14 +367,10 @@ impl<'a> TableMut<'a> {
         capacity: u64,
     ) -> Result<Self> {
         check_region(region, len)?;
-        let header = Header::new(config, capacity, len)?;
-        let layout = header.validate(len)?;
         // SAFETY: the caller's contract.
         let region = unsafe { RawRegion::new(region, len) };
-        header.store(&region);
-        // SAFETY: the caller has the region to itself, so nothing else reads
-        // or writes the buckets while they are cleared.
-        unsafe { region.bytes_mut(layout.buckets_offset, layout.nbuckets as usize * 4) }.fill(0);
+        // SAFETY: the caller has the region to itself.
+        let layout = unsafe { init(&region, config, capacity) }?;
         Ok(Self(Table {
             region,
             layout,
