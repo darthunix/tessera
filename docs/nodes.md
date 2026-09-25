@@ -584,8 +584,11 @@ selected, each paying the whole cost of a batch in the parent. A
 by-reference value points into its outer batch, which goes before the
 compact batch does, so it is copied into a memory context the node
 resets before it fills the next compact batch, once the parent has
-released the previous one. Without duplicates a round is dense enough
-that copying the outer columns costs more than it saves. The outer batch stays active until its
+released the previous one. A round with at least half its rows selected,
+met while nothing is copied yet, goes out as it is: copying it would
+only cost, and a by-reference value the most. Without duplicates a round
+is dense enough that copying the outer columns costs more than it
+saves. The outer batch stays active until its
 last round is finished. A row-wise parent is served from the round's
 columns row by row. The node scans forward only: a scrollable cursor
 gets a `Material` above it. A rescan builds the table again only when

@@ -38,6 +38,8 @@
 #define JOIN_INITIAL_ROWS 64
 /* Rows of a compact batch: the pairs of several rounds, one after another. */
 #define JOIN_COMPACT_ROWS 64
+/* A round with at least this many rows is published as it is, not copied. */
+#define JOIN_DENSE_ROUND 32
 
 /* The counters every participant of a parallel plan shares. */
 enum
@@ -143,6 +145,8 @@ typedef struct TessHashJoinState
 
 	/* The copies of the compact batch's by-reference outer values. */
 	MemoryContext compact_context;
+	/* The published batch is a compact one, not a round over the outer batch. */
+	bool		output_compact;
 	/* The records and rows the published batch reads: a round's or a compact batch's. */
 	uint32	   *current_offsets;
 	uint64	   *current_bits;
@@ -553,7 +557,7 @@ join_get_column(TessBatch *batch, int column, const TessRowMask *rows,
 
 	if (column < 0 || column >= state->ncolumns)
 		elog(ERROR, "TessHashJoin has no column %d", column);
-	if (state->sides[column] == JOIN_SIDE_OUTER && state->compact)
+	if (state->sides[column] == JOIN_SIDE_OUTER && state->output_compact)
 	{
 		if (state->compact_values[column] == NULL)
 			elog(ERROR, "TessHashJoin column %d was not requested", column);
@@ -686,7 +690,7 @@ next_round(TessHashJoinState *state)
 
 /*
  * Fill a compact batch with the pairs of the rounds, from where the last
- * one stopped: the record of each pair, and the outer columns copied by
+ * one stopped, or give a dense round to publish as it is: the record of each pair, and the outer columns copied by
  * value from the round's outer batch, fetched once per round. False when
  * no pair is left.
  */
@@ -708,6 +712,17 @@ fill_compact(TessHashJoinState *state)
 			if (!next_round(state))
 				break;
 			nrows = state->outer_batch->rows.nrows;
+			/*
+			 * A dense round, met with nothing copied yet, goes out as it is:
+			 * copying it would only cost, a by-reference value most.
+			 */
+			if (count == 0 &&
+				tess_row_mask_count(&(TessRowMask) {nrows, state->round_bits}) >=
+				JOIN_DENSE_ROUND)
+			{
+				state->output_compact = false;
+				return true;
+			}
 			memcpy(state->taken_bits, state->round_bits,
 				   sizeof(uint64) * tess_row_mask_word_count(nrows));
 			for (int index = 0; index < state->nouter; index++)
@@ -769,6 +784,7 @@ more:
 	}
 	if (count == 0)
 		return false;
+	state->output_compact = true;
 	state->compact_bits[0] = count == 64 ? ~UINT64CONST(0) :
 		(UINT64CONST(1) << count) - 1;
 	state->counters[JOIN_COMPACT_BATCHES]++;

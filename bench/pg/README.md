@@ -19,7 +19,7 @@ query down, and where it can, does it speed one up.
   previous one.
 - **join** (`join.sql`): equi-joins over one integer key between a fact
   table of 2 M rows and a dimension of 100 k, or a table with four rows
-  per key: a count, a column of either side, int8 keys past the int4
+  per key (also with a text outer column): a count, a column of either side, int8 keys past the int4
   range and an int4 key against an int8 one, two keys and a residual join
   clause over columns of both sides, a dimension filtered to one key in a
   hundred and a key that matches nothing, a top-N sort above the
