@@ -256,9 +256,10 @@ and the error of a parent asking for rows. The GUCs `pack_test.batch_rows`,
 
 ## TessFilter
 
-`TessFilter` applies the clauses of a base relation to batches: the leading
-clauses the [expression compiler](expr.md) supports run as batch filters
-over the function registry, the rest row by row over the rows those kept.
+`TessFilter` applies the clauses of a base relation to batches in the
+planner's order: those the [expression compiler](expr.md) supports run as
+batch filters over the function registry, the others row by row, each over
+the rows the ones before it kept.
 It is the first node of the chain that does work on batches, and until a
 native batch scan exists it stands above a pack node above the sequential
 scan: `Seq Scan → TessPack → TessFilter → parent`.
@@ -296,25 +297,27 @@ clauses need but the query does not are absent from the relation's target,
 so the scan below is planned with a target extended by them, while the
 node keeps the relation's own target through an explicit layout that maps
 each target to the child's column and hides the rest. The clauses arrive
-in the planner's order; the leading run the compiler supports becomes the
-batch prefix in `custom_exprs`, the rest the plan's qualifier, so a cheap
-guard stays in front of the division it protects and a security qualifier
-in front of what it hides. The node declares that it projects: PostgreSQL
+in the planner's order and keep it: those the compiler supports go into
+`custom_exprs`, the others into the plan's qualifier, and the plan data
+records for each clause in turn which kind it is, so a cheap guard stays
+in front of the division it protects and a security qualifier in front of
+what it hides, whichever of them runs in batches. The node declares that it projects: PostgreSQL
 installs a projection the query needs into the node's target list instead
 of a `Result` above it, and the plan's layout is the projected one over
 the child's target list as the scan tuple, derived when the plan is read.
 
 ### Execution
 
-`BeginCustomScan` compiles the batch prefix against the child's layout,
+`BeginCustomScan` compiles the batch clauses against the child's layout,
 since PostgreSQL rewrites the clauses to reference the scan tuple, which is
 the child's target list, and stands on the unary helper with the clauses'
 columns as its filter columns. Per batch, the expression context is reset
-once, each batch clause is bound and applied in order over the rows the
-previous ones left, and the row-wise clauses, when there are any, run over
-the survivors: their columns are fetched with the narrowed mask, each row
-is shown to `ExecQual` through the scan tuple slot, and a false result
-clears the row's bit. A batch-aware parent receives the child's slot with
+once and the clauses are applied through `TessQual`
+([runtime.md](runtime.md)) in the recorded order, each over the rows the
+previous ones left: a batch clause is bound and applied to the mask, and a
+run of row-wise clauses fetches its columns with the narrowed mask, shows
+each row to `ExecQual` through the scan tuple slot, and clears the bit of
+a row it rejects. A batch-aware parent receives the child's slot with
 the whole batch; an ordinary parent receives rows through the helper. With
 computed targets the helper publishes the projection provider's wrapper of
 each batch instead ([runtime.md](runtime.md)), which computes a column
@@ -327,8 +330,8 @@ their rows out in the node's chunk (`TessSharedStats`,
 counters when the executor shuts the node down after the plan's last
 row, and the leader shows the totals.
 
-`EXPLAIN` shows the batch prefix as `Batch Filter` and the rest as the
-core's `Filter`; with `ANALYZE`, the rows removed by each part, per loop,
+`EXPLAIN` shows the batch clauses as `Batch Filter` and the others as the
+core's `Filter`, each in the planner's order; with `ANALYZE`, the rows removed by each part, per loop,
 the helper's batches and rows and, with computed targets, the `Computed
 Datums`, summed over the participants of a parallel plan. The core's
 `Rows Removed by Filter` counts both parts, since the helper reports
@@ -345,7 +348,9 @@ clause, a correlated subquery, the limit node above, a residual text
 comparison, the planner's reordering of a text comparison and of an
 expensive predicate behind a cheaper int4 clause, a null test that keeps
 the node away, the separate removal counts, a join of two filtered
-relations, the planner's order in front of a division by zero, a parallel
+relations, the planner's order in front of a division by zero, a batch
+clause after a row-wise guard, a row-wise clause between batch ones, a
+policy's row-wise guard before a cheaper user division, a parallel
 worker, a scrollable cursor, an `UPDATE`, and the switch off. The
 parallel suite runs the node under a `Gather` with two workers (see
 TessHeapScan).
@@ -496,7 +501,10 @@ column of each side, when the join's target is plain columns and at most
 are the inner side's. Each such clause, up to 16, is a key of the table;
 the others are residual clauses, evaluated over the joined rows, when
 they read plain columns only (no placeholder) and are not
-pseudoconstant; keys go into it as 8-byte values and
+pseudoconstant, in the order the core's hash join evaluates them:
+`order_qual_clauses` is private, so the hook sorts them with the same
+key as for `TessFilter`, and a guard runs before the division it
+protects whichever of them runs in batches; keys go into it as 8-byte values and
 an int8 inside the int4 range hashes as the int4, so every combination
 of the two types uses one table. The children are batch
 paths over the sides' cheapest paths (`tess_batch_input_path`: a native
@@ -534,7 +542,8 @@ otherwise; the scan tuple takes its columns from the join's target,
 since PostgreSQL plans a projecting node without a target list
 (`TESS_LAYOUT_PROJECTED`). The
 plan data records each column's side and its column in that child's
-batches, each key's column and kind on each side, whether the inner side is unique and
+batches, each key's column and kind on each side, for each residual
+clause in turn whether it runs in batches, whether the inner side is unique and
 the planner's estimate of its rows.
 
 ### Execution
@@ -568,7 +577,7 @@ per row from the node's own copy of the round's rows, since a parent may
 narrow the published mask. The residual clauses are applied through
 `TessQual` (see [runtime.md](runtime.md)), those the expression compiler
 takes, such as `f.f1 > d.d1 * 10`, a column against a chain over the
-other side, in batches and the others row by row, to each round or
+other side, in batches and the others row by row, in their order, to each round or
 compact batch before it is published: they narrow the published
 selection only, the round's own rows staying whole for the next round,
 and a batch they leave empty is skipped. There is no second round when the planner
@@ -622,7 +631,8 @@ int8 one both ways; two keys, with NULLs in the second, an int8 key next
 to an int4 one, three keys, and composite keys with duplicates under an
 aggregate and as rows; targets above the join in another order than the
 join's and expressions over both sides, as rows, under a sort, with
-rounds and a residual clause; residual clauses over int4 columns of both sides
+rounds and a residual clause; a row-wise guard over both sides before a
+batch division, in either written order; residual clauses over int4 columns of both sides
 with NULLs, text, an OR over both sides, with rounds and compact
 batches, a text equality next to the key and a parameter of an outer
 query; three inner rows per key, duplicates on both sides

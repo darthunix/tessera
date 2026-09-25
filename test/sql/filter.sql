@@ -89,8 +89,8 @@ FROM filter_t AS o WHERE o.a > 197 ORDER BY o.a;
 EXPLAIN (COSTS OFF) SELECT a FROM filter_t WHERE a > 100 LIMIT 3;
 SELECT a FROM filter_t WHERE a > 100 LIMIT 3;
 
--- Clauses from the first unsupported one on stay row-wise, in the
--- planner's order, over the rows the batch clauses kept.
+-- Each clause runs in batches if the compiler takes it, else row-wise,
+-- in the planner's order, over the rows the clauses before it kept.
 EXPLAIN (COSTS OFF) SELECT a FROM filter_t WHERE a > 100 AND c = 'r150';
 SELECT filter_same($$SELECT a FROM filter_t WHERE a > 100 AND c = 'r150'$$);
 -- The planner orders the text comparison after the cheaper int4 one.
@@ -169,6 +169,26 @@ SET tessera.enable = off;
 SELECT count(*) FROM filter_t WHERE 10 / (a - 5) > 0;
 RESET tessera.enable;
 \set VERBOSITY default
+-- A batch clause after a row-wise one: the guard, which the compiler does
+-- not take, still runs before the division.
+EXPLAIN (COSTS OFF) SELECT count(*) FROM filter_t WHERE a > 0 AND b IS DISTINCT FROM 0 AND 10 / b > 1;
+SELECT filter_same($$SELECT count(*) FROM filter_t WHERE a > 0 AND b IS DISTINCT FROM 0 AND 10 / b > 1$$);
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+SELECT a FROM filter_t WHERE a > 100 AND c <> 'r150' AND b < 5;
+SELECT filter_same($$SELECT a FROM filter_t WHERE a > 100 AND c <> 'r150' AND b < 5$$);
+-- A policy's clauses come before the user's, whatever their costs: the
+-- cheaper division waits for the policy's row-wise guard.
+CREATE TABLE filter_rls AS SELECT i AS a, i % 10 AS b FROM generate_series(1, 200) AS i;
+ALTER TABLE filter_rls ENABLE ROW LEVEL SECURITY;
+CREATE POLICY filter_rls_visible ON filter_rls USING (a > 0 AND b * 1 + 0 IS DISTINCT FROM 0);
+CREATE ROLE regress_tessera_rls;
+GRANT SELECT ON filter_rls TO regress_tessera_rls;
+SET ROLE regress_tessera_rls;
+EXPLAIN (COSTS OFF) SELECT count(*) FROM filter_rls WHERE 10 / b > 1;
+SELECT filter_same($$SELECT count(*), sum(a) FROM filter_rls WHERE 10 / b > 1$$);
+RESET ROLE;
+DROP TABLE filter_rls;
+DROP ROLE regress_tessera_rls;
 
 -- A parallel worker runs the node from the plan's text form.
 SET debug_parallel_query = on;

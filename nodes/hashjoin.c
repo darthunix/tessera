@@ -101,7 +101,8 @@ typedef struct TessHashJoinState
 	/* Every outer row matches at most one inner row: no second round. */
 	bool		inner_unique;
 	/* The residual clauses after the keys that run in batches, first. */
-	int			nbatch_residual;
+	/* Per residual clause in evaluation order: whether it runs in batches. */
+	List	   *residual_batch;
 	/* The planner's estimate of the inner rows, the table's first capacity. */
 	int			inner_rows;
 	/* The types of the scan tuple columns, for copying inner values. */
@@ -984,6 +985,25 @@ send_requests(TessHashJoinState *state)
 	state->request = request;
 }
 
+/* The residual clauses that run in batches and the others, each in evaluation order. */
+static void
+split_residual(const TessHashJoinState *state, List *residual, List **batch,
+			   List **rows)
+{
+	ListCell   *clause;
+	ListCell   *flag;
+
+	*batch = NIL;
+	*rows = NIL;
+	forboth(clause, residual, flag, state->residual_batch)
+	{
+		if (lfirst_int(flag) != 0)
+			*batch = lappend(*batch, lfirst(clause));
+		else
+			*rows = lappend(*rows, lfirst(clause));
+	}
+}
+
 /* The plan's own data, written by the planner (join_planner.c). */
 static void
 read_node_data(TessHashJoinState *state, const List *data)
@@ -1000,7 +1020,7 @@ read_node_data(TessHashJoinState *state, const List *data)
 	ListCell   *column;
 	int			index = 0;
 
-	state->nbatch_residual = tess_plan_read_int(reader, "batch_residual");
+	state->residual_batch = tess_plan_read_int_list(reader, "residual_batch");
 	state->inner_unique = tess_plan_read_int(reader, "inner_unique") != 0;
 	state->inner_rows = tess_plan_read_int(reader, "inner_rows");
 	tess_plan_reader_finish(reader);
@@ -1102,10 +1122,12 @@ join_begin(CustomScanState *css, EState *estate, int eflags)
 
 		List	   *residual = list_copy_tail(cscan->custom_exprs, state->nkeys);
 
+		if (list_length(state->residual_batch) != list_length(residual))
+			elog(ERROR, "TessHashJoin received a foreign plan");
 		qual.parent_context = estate->es_query_cxt;
 		qual.parent = &css->ss.ps;
-		qual.batch_clauses = list_copy_head(residual, state->nbatch_residual);
-		qual.row_clauses = list_copy_tail(residual, state->nbatch_residual);
+		split_residual(state, residual, &qual.batch_clauses, &qual.row_clauses);
+		qual.order = state->residual_batch;
 		qual.scan_slot = css->ss.ss_ScanTupleSlot;
 		qual.scan_tuple = &state->scan_layout;
 		state->qual = tess_qual_create(&qual);
@@ -1289,10 +1311,12 @@ join_explain(CustomScanState *css, List *ancestors, ExplainState *es)
 										   context, useprefix, false), es);
 	if (state->qual != NULL)
 	{
-		/* The residual clauses the compiler took in batches, then the others. */
+		/* The residual clauses the compiler took in batches, and the others. */
 		List	   *residual = list_copy_tail(cscan->custom_exprs, state->nkeys);
-		List	   *batch = list_copy_head(residual, state->nbatch_residual);
-		List	   *rows = list_copy_tail(residual, state->nbatch_residual);
+		List	   *batch;
+		List	   *rows;
+
+		split_residual(state, residual, &batch, &rows);
 
 		if (batch != NIL)
 			ExplainPropertyText("Batch Join Filter",

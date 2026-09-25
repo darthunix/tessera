@@ -587,11 +587,18 @@ the previous hook, checks `tessera.enable` and wraps a sequential scan.
 ## Clauses over batches
 
 `TessQual` applies a node's clauses to its batches, as TessFilter and
-TessHashJoin do. `tess_qual_create` takes the clauses in two lists: the
-ones `tess_expr_supports_filter` accepted, compiled for whole batches with
-the [expression compiler](expr.md) and applied first, in order; and the
-others, compiled with `ExecInitQual` and evaluated row by row over the
-rows the first ones kept. Each clause's `Var` is an attribute of the
+TessHashJoin do, in the planner's order, each over the rows the ones
+before it kept. `tess_qual_create` takes the clauses in two lists, each in
+that order: the ones `tess_expr_supports_filter` accepted, compiled for
+whole batches with the [expression compiler](expr.md); and the others,
+compiled with `ExecInitQual` and evaluated row by row. The configuration's
+`order`, an integer list, interleaves them: 1 takes the next batch clause,
+0 the next row-wise one. Clauses of one kind next to each other form a
+stage, and the row-wise ones of a stage share one `ExprState`. Keeping the
+order matters for errors and for security: a guard such as `b IS DISTINCT
+FROM 0` that the compiler does not take still runs before the batch
+division `10 / b > 1` it protects, and a policy's clause before the
+user's. Each clause's `Var` is an attribute of the
 node's scan tuple, and the configuration's `scan_tuple` layout gives the
 batch column of each attribute. For the row-wise clauses the helper
 shows each row in the configured virtual scan slot, with the attributes
@@ -600,7 +607,7 @@ stay NULL and nothing is allocated per row. `tess_qual_columns` is the
 set of batch columns the clauses read, for the request to the producer;
 `tess_qual_apply(qual, batch, econtext, rows)` narrows the batch's
 selection and returns the rows kept, the caller having reset the
-expression context; `tess_qual_stats` counts the rows each part removed.
+expression context; `tess_qual_stats` counts the rows the batch stages and the row-wise ones removed.
 
 ## Batch expressions
 

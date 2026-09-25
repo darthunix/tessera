@@ -4,8 +4,7 @@
 a chain of calls of the functions the [function registry](function.md)
 implements, and evaluates it over a batch's selected rows. It is the
 deliberately small language shared by the batch nodes: `TessFilter`
-([nodes.md](nodes.md)) applies the batchable prefix of a relation's clauses
-with it, a projection computes columns with it, an aggregate feeds its
+([nodes.md](nodes.md)) applies the batchable clauses of a relation with it, a projection computes columns with it, an aggregate feeds its
 argument through it. There
 is no intermediate representation of its own: the expression tree is the
 planner's, the operations are the registry's, and the compiler only

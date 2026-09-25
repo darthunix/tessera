@@ -9,9 +9,14 @@
 #define TESS_AGG_NODE_NAME "tessera.agg"
 #define TESS_HASH_JOIN_NODE_NAME "tessera.hash_join"
 
-/* The plan data of TessHashJoin, written by its planner. */
+/* The plan data of TessFilter and TessHashJoin, written by their planners. */
+#define TESS_FILTER_DATA "tessera.filter"
+#define TESS_FILTER_DATA_VERSION 1
 #define TESS_HASH_JOIN_DATA "tessera.hash_join"
-#define TESS_HASH_JOIN_DATA_VERSION 3
+#define TESS_HASH_JOIN_DATA_VERSION 4
+
+/* Clauses (RestrictInfos) in the order the planner evaluates a plan's quals. */
+extern List *tess_order_clauses(PlannerInfo *root, List *rinfos);
 
 extern const TessNode tess_pack_node;
 extern const CustomScanMethods tess_pack_scan_methods;

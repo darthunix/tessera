@@ -9,14 +9,16 @@
 #include "storage/shm_toc.h"
 #include "utils/ruleutils.h"
 
+#include "tessera/plan.h"
 #include "tessera/runtime.h"
 
 #include "internal.h"
 
 /*
  * TessFilter stands on the unary helper: it applies the relation's
- * clauses to each batch of its child, the leading ones compiled as batch
- * filters and the rest row by row over the rows those kept, and passes
+ * clauses to each batch of its child in the planner's order, those the
+ * compiler takes as batch filters and the others row by row, each over
+ * the rows the ones before it kept, and passes
  * the batch on with the rows that remain. Under a Gather, the leader
  * reports the counters of every participant. See docs/nodes.md.
  */
@@ -91,7 +93,7 @@ tess_filter_create_state(CustomScan *cscan)
 	return (Node *) state;
 }
 
-/* Apply the clauses in order, each over the rows the previous ones left. */
+/* Apply the clauses in the planner's order, each over the rows the previous ones left. */
 static int
 filter_batch(void *private_data, TessBatch *batch, int rows)
 {
@@ -110,6 +112,7 @@ filter_begin(CustomScanState *css, EState *estate, int eflags)
 	TessPlanInfo info = TESS_STRUCT_INITIALIZER(TessPlanInfo);
 	TessUnaryConfig config = TESS_STRUCT_INITIALIZER(TessUnaryConfig);
 	TessQualConfig qual = TESS_STRUCT_INITIALIZER(TessQualConfig);
+	TessPlanReader *reader;
 	PlanState  *child;
 
 	/* The planner puts Material above a batch subtree for these. */
@@ -123,6 +126,10 @@ filter_begin(CustomScanState *css, EState *estate, int eflags)
 	css->custom_ps = list_make1(child);
 	state->child_layout = (TessLayout) TESS_STRUCT_INITIALIZER(TessLayout);
 	tess_plan_get_layout(child->plan, &state->child_layout);
+	reader = tess_plan_reader_create((List *) info.node_data, TESS_FILTER_DATA,
+									 TESS_FILTER_DATA_VERSION);
+	qual.order = tess_plan_read_int_list(reader, "order");
+	tess_plan_reader_finish(reader);
 	/* The scan tuple is the child's target list, as the child maps it. */
 	qual.parent_context = estate->es_query_cxt;
 	qual.parent = &css->ss.ps;

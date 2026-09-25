@@ -180,9 +180,9 @@ node never touches instrumentation itself.
 
 `TessFilter` (`nodes/filter.c`, `nodes/planner.c`) is the second node on
 the helper and the first with a `set_rel_pathlist` hook: it takes the
-clauses of a base relation, applies the leading ones the expression
-compiler supports as batch filters and the rest row by row through
-`ExecQual`, and keeps the relation's target through an explicit layout
+clauses of a base relation, applies those the expression compiler
+supports as batch filters and the others row by row through `ExecQual`,
+in the planner's order, and keeps the relation's target through an explicit layout
 while the scan below reads the clauses' columns too. See
 [nodes.md](nodes.md) for how it takes the clauses away from the scan.
 

@@ -152,13 +152,16 @@ residual_supported(RestrictInfo *rinfo)
 
 /*
  * The join's clauses: its integer equalities between the sides as keys,
- * as many as the table takes, and the others as residual clauses. There
- * must be a key.
+ * as many as the table takes, and the others as residual clauses, in the
+ * order the core's hash join evaluates them, which sorts the join's
+ * clauses by cost within security levels. There must be a key.
  */
 static bool
-find_keys(List *restrictlist, RelOptInfo *outerrel, RelOptInfo *innerrel,
-		  JoinKeys *keys)
+find_keys(PlannerInfo *root, List *restrictlist, RelOptInfo *outerrel,
+		  RelOptInfo *innerrel, JoinKeys *keys)
 {
+	List	   *residual = NIL;
+
 	memset(keys, 0, sizeof(*keys));
 	foreach_node(RestrictInfo, rinfo, restrictlist)
 	{
@@ -167,8 +170,10 @@ find_keys(List *restrictlist, RelOptInfo *outerrel, RelOptInfo *innerrel,
 			continue;
 		if (!residual_supported(rinfo))
 			return false;
-		keys->residual = lappend(keys->residual, rinfo->clause);
+		residual = lappend(residual, rinfo);
 	}
+	foreach_node(RestrictInfo, rinfo, tess_order_clauses(root, residual))
+		keys->residual = lappend(keys->residual, rinfo->clause);
 	return keys->nkeys > 0;
 }
 
@@ -297,7 +302,7 @@ join_pathlist(PlannerInfo *root, RelOptInfo *joinrel, RelOptInfo *outerrel,
 	/* The core offers no hash join either without PGS_HASHJOIN. */
 	if (!*tess_runtime_api()->settings->enable || jointype != JOIN_INNER ||
 		(extra->pgs_mask & PGS_HASHJOIN) == 0 ||
-		!find_keys(extra->restrictlist, outerrel, innerrel, &keys) ||
+		!find_keys(root, extra->restrictlist, outerrel, innerrel, &keys) ||
 		!target_supported(joinrel, innerrel, &keys, &ninner) ||
 		outer_path == NULL || inner_path == NULL ||
 		PATH_REQ_OUTER(outer_path) != NULL || PATH_REQ_OUTER(inner_path) != NULL ||
@@ -394,8 +399,7 @@ join_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 	List	   *outer_keys;
 	List	   *inner_keys;
 	List	   *residual;
-	List	   *batch_residual = NIL;
-	List	   *row_residual = NIL;
+	List	   *residual_batch = NIL;
 	List	   *outer_columns = NIL;
 	List	   *inner_columns = NIL;
 	Relids		outer_relids;
@@ -412,14 +416,10 @@ join_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 	outer_keys = lsecond(info.expressions);
 	inner_keys = lthird(info.expressions);
 	residual = lfourth(info.expressions);
-	/* A clause over one column value and a column or a scalar runs in batches. */
+	/* In evaluation order, each in batches if the compiler takes it, else by rows. */
 	foreach_ptr(Node, clause, residual)
-	{
-		if (tess_expr_supports_filter(clause, 0))
-			batch_residual = lappend(batch_residual, clause);
-		else
-			row_residual = lappend(row_residual, clause);
-	}
+		residual_batch = lappend_int(residual_batch,
+									 tess_expr_supports_filter(clause, 0) ? 1 : 0);
 	data = (List *) info.node_data;
 	outer_relids = outer.path->parent->relids;
 	for (int side = 0; side < 2; side++)
@@ -473,7 +473,7 @@ join_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 	tess_plan_write_int_list(writer, "inner_keys", inner_columns);
 	tess_plan_write_int_list(writer, "outer_kinds", linitial(data));
 	tess_plan_write_int_list(writer, "inner_kinds", lsecond(data));
-	tess_plan_write_int(writer, "batch_residual", list_length(batch_residual));
+	tess_plan_write_int_list(writer, "residual_batch", residual_batch);
 	tess_plan_write_int(writer, "inner_unique", linitial_int(lthird(data)));
 	tess_plan_write_int(writer, "inner_rows", lsecond_int(lthird(data)));
 
@@ -481,13 +481,12 @@ join_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 	config.layout_policy = TESS_LAYOUT_PROJECTED;
 	config.explicit_layout = &layout;
 	/*
-	 * The key clauses, then the residual ones, those the expression
-	 * compiler takes for whole batches first: the node shows and applies
-	 * them all, and a plan qual would also be shown by EXPLAIN as a filter.
+	 * The key clauses, then the residual ones in evaluation order: the
+	 * node shows and applies them all, and a plan qual would also be shown
+	 * by EXPLAIN as a filter.
 	 */
 	config.qual = NIL;
-	config.expressions = list_concat(list_concat_copy(hash_clauses, batch_residual),
-									 row_residual);
+	config.expressions = list_concat_copy(hash_clauses, residual);
 	config.node_data = (Node *) tess_plan_writer_finish(writer);
 	config.scan_targetlist = scan;
 	config.scanrelid = 0;

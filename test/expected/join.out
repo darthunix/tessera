@@ -461,6 +461,41 @@ SELECT join_same($$SELECT jf.fk8, jd.n FROM jf JOIN jd ON jf.fk = jd.id AND jd.n
  609 rows, hash e608946f2abdc1f704724ca2dc2ecf76
 (1 row)
 
+-- The residual clauses in the core's order, by cost: the guard, row-wise,
+-- before the division in batches, however they are written; without the
+-- guard the division fails.
+CREATE TABLE jguard AS
+SELECT g AS k, CASE WHEN g % 4 = 0 THEN g ELSE g % 3 END AS d FROM generate_series(1, 300) AS g;
+ANALYZE jguard;
+EXPLAIN (COSTS OFF) SELECT count(*) FROM jguard JOIN jd ON jguard.k = jd.id AND 1000 / (jd.id - jguard.d) > 5 AND jd.id IS DISTINCT FROM jguard.d;
+                          QUERY PLAN                          
+--------------------------------------------------------------
+ Custom Scan (TessAgg)
+   ->  Custom Scan (TessHashJoin)
+         Hash Cond: (jd.id = jguard.k)
+         Batch Join Filter: ((1000 / (jd.id - jguard.d)) > 5)
+         Join Filter: (jd.id IS DISTINCT FROM jguard.d)
+         ->  Custom Scan (TessHeapScan) on jguard
+         ->  Custom Scan (TessHeapScan) on jd
+(7 rows)
+
+SELECT join_same($$SELECT jguard.d, jd.id FROM jguard JOIN jd ON jguard.k = jd.id AND 1000 / (jd.id - jguard.d) > 5 AND jd.id IS DISTINCT FROM jguard.d$$);
+                    join_same                    
+-------------------------------------------------
+ 124 rows, hash 908292bf36de94de7f0d76d74a2e5c2c
+(1 row)
+
+SELECT join_same($$SELECT jguard.d, jd.id FROM jguard JOIN jd ON jguard.k = jd.id AND jd.id IS DISTINCT FROM jguard.d AND 1000 / (jd.id - jguard.d) > 5$$);
+                    join_same                    
+-------------------------------------------------
+ 124 rows, hash 908292bf36de94de7f0d76d74a2e5c2c
+(1 row)
+
+\set VERBOSITY terse
+SELECT count(*) FROM jguard JOIN jd ON jguard.k = jd.id AND 1000 / (jd.id - jguard.d) > 5;
+ERROR:  division by zero
+\set VERBOSITY default
+DROP TABLE jguard;
 -- Targets above the join are the node's: columns in another order than
 -- the join's, which needs no Result under an aggregate, and expressions
 -- over both sides, computed over the pairs, as rows, under a sort, with

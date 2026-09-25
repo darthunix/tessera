@@ -129,6 +129,19 @@ SELECT join_same($$SELECT jf.v, jd.n FROM jf JOIN jd ON jf.fk = jd.id AND jf.v >
 SELECT join_same($$SELECT count(*), sum(jd.n) FROM jf JOIN jd ON jf.fk = jd.id AND jf.v * 10 >= jd.n$$);
 SELECT join_same($$SELECT jf.v, jd.id8 FROM jf JOIN jd ON jf.fk = jd.id AND jf.v > jd.id8 * 3$$);
 SELECT join_same($$SELECT jf.fk8, jd.n FROM jf JOIN jd ON jf.fk = jd.id AND jd.n <> jf.fk8$$);
+-- The residual clauses in the core's order, by cost: the guard, row-wise,
+-- before the division in batches, however they are written; without the
+-- guard the division fails.
+CREATE TABLE jguard AS
+SELECT g AS k, CASE WHEN g % 4 = 0 THEN g ELSE g % 3 END AS d FROM generate_series(1, 300) AS g;
+ANALYZE jguard;
+EXPLAIN (COSTS OFF) SELECT count(*) FROM jguard JOIN jd ON jguard.k = jd.id AND 1000 / (jd.id - jguard.d) > 5 AND jd.id IS DISTINCT FROM jguard.d;
+SELECT join_same($$SELECT jguard.d, jd.id FROM jguard JOIN jd ON jguard.k = jd.id AND 1000 / (jd.id - jguard.d) > 5 AND jd.id IS DISTINCT FROM jguard.d$$);
+SELECT join_same($$SELECT jguard.d, jd.id FROM jguard JOIN jd ON jguard.k = jd.id AND jd.id IS DISTINCT FROM jguard.d AND 1000 / (jd.id - jguard.d) > 5$$);
+\set VERBOSITY terse
+SELECT count(*) FROM jguard JOIN jd ON jguard.k = jd.id AND 1000 / (jd.id - jguard.d) > 5;
+\set VERBOSITY default
+DROP TABLE jguard;
 
 -- Targets above the join are the node's: columns in another order than
 -- the join's, which needs no Result under an aggregate, and expressions

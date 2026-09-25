@@ -9,6 +9,7 @@
 #include "optimizer/tlist.h"
 
 #include "tessera/expr.h"
+#include "tessera/plan.h"
 #include "tessera/runtime.h"
 
 #include "internal.h"
@@ -52,38 +53,71 @@ relation_supported(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte)
 }
 
 /*
- * The clause the planner evaluates first: order_qual_clauses sorts by
- * cost within security levels, a cheap leakproof clause counting as level
- * zero, and keeps the order of equals. NULL with a pseudoconstant clause:
- * it makes the planner wrap each scan of the relation in a gating Result,
- * which the plan would then find in place of its children.
+ * The clauses in the order the planner evaluates them, as its static
+ * order_qual_clauses sorts a plan's quals: by cost within security
+ * levels, a cheap leakproof clause counting as level zero, equals in
+ * their order; an insertion sort, which keeps them so.
+ */
+List *
+tess_order_clauses(PlannerInfo *root, List *rinfos)
+{
+	int			count = list_length(rinfos);
+	RestrictInfo **items;
+	Cost	   *costs;
+	Index	   *levels;
+	List	   *ordered = NIL;
+	int			index = 0;
+
+	if (count <= 1)
+		return list_copy(rinfos);
+	items = palloc_array(RestrictInfo *, count);
+	costs = palloc_array(Cost, count);
+	levels = palloc_array(Index, count);
+	foreach_node(RestrictInfo, rinfo, rinfos)
+	{
+		QualCost	cost;
+		Cost		item_cost;
+		Index		item_level;
+		int			at = index;
+
+		cost_qual_eval_node(&cost, (Node *) rinfo, root);
+		item_cost = cost.per_tuple;
+		item_level = rinfo->leakproof && item_cost < 10 * cpu_operator_cost ?
+			0 : rinfo->security_level;
+		while (at > 0 && (levels[at - 1] > item_level ||
+						  (levels[at - 1] == item_level && costs[at - 1] > item_cost)))
+		{
+			items[at] = items[at - 1];
+			costs[at] = costs[at - 1];
+			levels[at] = levels[at - 1];
+			at--;
+		}
+		items[at] = rinfo;
+		costs[at] = item_cost;
+		levels[at] = item_level;
+		index++;
+	}
+	for (index = 0; index < count; index++)
+		ordered = lappend(ordered, items[index]);
+	return ordered;
+}
+
+/*
+ * The clause the planner evaluates first. NULL with a pseudoconstant
+ * clause: it makes the planner wrap each scan of the relation in a gating
+ * Result, which the plan would then find in place of its children.
  */
 static RestrictInfo *
 first_clause(PlannerInfo *root, RelOptInfo *rel)
 {
-	RestrictInfo *first = NULL;
-	Cost		first_cost = 0;
-	Index		first_level = 0;
-
 	foreach_ptr(RestrictInfo, rinfo, rel->baserestrictinfo)
 	{
-		QualCost	cost;
-		Index		level;
-
 		if (rinfo->pseudoconstant)
 			return NULL;
-		cost_qual_eval_node(&cost, (Node *) rinfo, root);
-		level = rinfo->leakproof && cost.per_tuple < 10 * cpu_operator_cost ?
-			0 : rinfo->security_level;
-		if (first == NULL || level < first_level ||
-			(level == first_level && cost.per_tuple < first_cost))
-		{
-			first = rinfo;
-			first_level = level;
-			first_cost = cost.per_tuple;
-		}
 	}
-	return first;
+	if (rel->baserestrictinfo == NIL)
+		return NULL;
+	return linitial(tess_order_clauses(root, rel->baserestrictinfo));
 }
 
 /* Whether the node has batch work: the first clause is a batch filter. */
@@ -232,8 +266,10 @@ filter_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 	TessPlanChild child = TESS_STRUCT_INITIALIZER(TessPlanChild);
 	TessLayout	layout = TESS_STRUCT_INITIALIZER(TessLayout);
 	List	   *actual = extract_actual_clauses(clauses, false);
-	List	   *prefix = NIL;
+	List	   *batch_clauses = NIL;
 	List	   *residual = NIL;
+	List	   *order = NIL;
+	TessPlanWriter *writer;
 
 	if (!tess_plan_child(best_path, custom_plans, 0, &child) ||
 		!IsA(child.plan, CustomScan))
@@ -246,22 +282,32 @@ filter_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 	}
 	else
 		take_clauses((CustomScan *) child.plan, actual);
-	/* The clauses arrive in evaluation order; the first unsupported one ends the batch prefix. */
+	/*
+	 * The clauses arrive in evaluation order and keep it: each runs in
+	 * batches if the compiler takes it, else by rows, and the plan data
+	 * records which in turn.
+	 */
 	foreach_ptr(Node, clause, actual)
 	{
-		if (residual == NIL && tess_expr_supports_filter(clause, rel->relid))
-			prefix = lappend(prefix, clause);
+		bool		batch = tess_expr_supports_filter(clause, rel->relid);
+
+		if (batch)
+			batch_clauses = lappend(batch_clauses, clause);
 		else
 			residual = lappend(residual, clause);
+		order = lappend_int(order, batch ? 1 : 0);
 	}
-	if (prefix == NIL)
+	if (order == NIL || linitial_int(order) == 0)
 		elog(ERROR, "TessFilter found no batch clause first in the planner's order");
+	writer = tess_plan_writer_create(TESS_FILTER_DATA, TESS_FILTER_DATA_VERSION);
+	tess_plan_write_int_list(writer, "order", order);
 	map_scan_tuple(&layout, &child);
 	config.methods = &tess_filter_scan_methods;
 	config.layout_policy = TESS_LAYOUT_PROJECTED;
 	config.explicit_layout = &layout;
 	config.qual = residual;
-	config.expressions = prefix;
+	config.expressions = batch_clauses;
+	config.node_data = (Node *) tess_plan_writer_finish(writer);
 	config.scan_targetlist = child.plan->targetlist;
 	config.scanrelid = rel->relid;
 	return tess_plan_create(best_path, tlist, custom_plans, &config);

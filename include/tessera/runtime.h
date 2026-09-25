@@ -247,13 +247,14 @@ extern void tess_projection_reset(TessProjection *projection);
 extern const TessProjectionStats *tess_projection_stats(const TessProjection *projection);
 
 /*
- * Clauses over a node's batches: a prefix the expression compiler takes
- * for whole batches (tessera/expr.h), applied first and in order, then
- * the others row by row through ExecQual, each row shown in the scan slot
- * with the attributes the clauses read taken from the batch's columns. A
- * clause's Var is an attribute of the scan tuple, which the scan tuple
- * layout maps to a batch column. Applying narrows the batch's selection.
- * See docs/runtime.md.
+ * Clauses over a node's batches, applied in the planner's order, each
+ * over the rows the ones before it kept: those the expression compiler
+ * takes for whole batches (tessera/expr.h) as batch filters, the others
+ * row by row through ExecQual, each row shown in the scan slot with the
+ * attributes the clauses read taken from the batch's columns. Clauses of
+ * one kind in a row form a stage. A clause's Var is an attribute of the
+ * scan tuple, which the scan tuple layout maps to a batch column.
+ * Applying narrows the batch's selection. See docs/runtime.md.
  */
 typedef struct TessQual TessQual;
 
@@ -266,20 +267,25 @@ typedef struct TessQualConfig
 	PlanState  *parent;
 	/* Clauses tess_expr_supports_filter accepted, in evaluation order. */
 	List	   *batch_clauses;
-	/* The others, evaluated row by row over the rows the first ones keep. */
+	/* The others, in evaluation order. */
 	List	   *row_clauses;
 	/* A virtual slot of the scan tuple, for the row-wise clauses. */
 	TupleTableSlot *scan_slot;
 	/* The batch column of each scan tuple attribute. */
 	const TessLayout *scan_tuple;
+	/*
+	 * The evaluation order of all the clauses, an IntList: 1 takes the
+	 * next batch clause, 0 the next row-wise one.
+	 */
+	List	   *order;
 } TessQualConfig;
 
 #define TESS_QUAL_CONFIG_MIN_SIZE \
-	TESS_ABI_SIZE_INCLUDING_FIELD(TessQualConfig, scan_tuple)
+	TESS_ABI_SIZE_INCLUDING_FIELD(TessQualConfig, order)
 
 typedef struct TessQualStats
 {
-	/* Rows the batch clauses removed, and the row-wise ones after them. */
+	/* Rows the batch clauses removed, and the row-wise ones. */
 	uint64		batch_removed;
 	uint64		row_removed;
 } TessQualStats;
