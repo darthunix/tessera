@@ -25,7 +25,14 @@ An expression is supported when it is built from
 - calls, `OpExpr` or `FuncExpr`, whose function the registry implements as
   a `TESS_FUNCTION_VALUE` that is strict and either insensitive to the
   input collation or given none, with one or two arguments that are
-  themselves supported.
+  themselves supported;
+- calls of an equivalent ([function.md](function.md)), such as
+  `int48pl(a, b8)`: the compiler replaces the call by the function it
+  stands for over the cast arguments, `int8pl(int8(a), b8)`, before
+  anything else, so the cast of a column is a step of its own and the cast
+  of a constant is folded once. The replacement has no operator, so its
+  function must accept the column where it lands, as the int8 functions,
+  of any shape, do.
 
 The column must be the first argument of every call that takes it unless
 the implementation accepts any shape, or the call is an operator whose

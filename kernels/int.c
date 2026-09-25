@@ -6,20 +6,16 @@
  * tessera), then LOAD 'tessera_kernels'.
  *
  * An int8 is its Datum: the int8 kernels write int64 values straight into
- * a Datum column, so their results are TESS_RESULT_DATUM. The mixed
- * comparisons of bigint against an integer constant (int84eq and its
- * siblings) widen the int4 scalar and run the int8 kernel; the mixed
- * comparisons of an integer column against a bigint constant (int48eq and
- * its siblings, also what `100 < c8` commutes into) run the int4 kernel
- * against the constant clamped into the int4 range, since an int8 kernel
- * must not read an int4 Datum as a whole word; the mixed arithmetic with
- * the integer on the left is left to the core.
+ * a Datum column, so their results are TESS_RESULT_DATUM. The functions
+ * over an int4 and an int8 (int84eq, int48pl and their siblings) are
+ * equivalents: the int8 function over the int4 argument cast by int8(int4),
+ * which the consumer compiles as a step of its own, since an int8 kernel
+ * must not read an int4 Datum as a whole word.
  */
 #include "postgres.h"
 
 #include "fmgr.h"
 #include "utils/fmgroids.h"
-#include "utils/memutils.h"
 
 #include "tessera/bridge.h"
 #include "tessera/kernels.h"
@@ -42,10 +38,7 @@ static TessStatusCode arith_evaluate(TessFunctionCall *call);
 static TessStatusCode negate_evaluate(TessFunctionCall *call);
 static TessStatusCode aggregate_evaluate(TessFunctionCall *call);
 static TessStatusCode compare8_evaluate(TessFunctionCall *call);
-static TessStatusCode compare84_evaluate(TessFunctionCall *call);
-static TessStatusCode compare48_evaluate(TessFunctionCall *call);
 static TessStatusCode arith8_evaluate(TessFunctionCall *call);
-static TessStatusCode arith84_evaluate(TessFunctionCall *call);
 static TessStatusCode negate8_evaluate(TessFunctionCall *call);
 static TessStatusCode cast_evaluate(TessFunctionCall *call);
 
@@ -81,6 +74,17 @@ typedef enum Aggregate
 	  .flags = TESS_FUNCTION_STRICT | TESS_FUNCTION_COLLATION_INSENSITIVE | \
 	  (extra), \
 	  .evaluate = (fn)}, (code)}
+
+/*
+ * A function over an int4 and an int8: the int8 function target over the
+ * arguments, the int4 one widened by the cast given for it.
+ */
+#define EQUIVALENT(oid, target, cast0, cast1) \
+	{{TESS_ABI_INITIALIZER(TESS_FUNCTION_ABI_VERSION, TessFunction), \
+	  .funcid = (oid), .kind = TESS_FUNCTION_EQUIVALENT, \
+	  .result_format = TESS_RESULT_DATUM, \
+	  .flags = TESS_FUNCTION_STRICT | TESS_FUNCTION_COLLATION_INSENSITIVE, \
+	  .equivalent = (target), .arg_casts = {(cast0), (cast1)}}, 0}
 
 /* A partial aggregate over one batch, a Datum of the transition type. */
 #define AGGREGATE(oid, code) \
@@ -122,20 +126,19 @@ static const Function functions[] = {
 	COMPARE(F_INT8LE, TESS_CMP_LE, compare8_evaluate),
 	COMPARE(F_INT8GT, TESS_CMP_GT, compare8_evaluate),
 	COMPARE(F_INT8GE, TESS_CMP_GE, compare8_evaluate),
-	/* bigint against an integer scalar */
-	COMPARE(F_INT84EQ, TESS_CMP_EQ, compare84_evaluate),
-	COMPARE(F_INT84NE, TESS_CMP_NE, compare84_evaluate),
-	COMPARE(F_INT84LT, TESS_CMP_LT, compare84_evaluate),
-	COMPARE(F_INT84LE, TESS_CMP_LE, compare84_evaluate),
-	COMPARE(F_INT84GT, TESS_CMP_GT, compare84_evaluate),
-	COMPARE(F_INT84GE, TESS_CMP_GE, compare84_evaluate),
-	/* integer column against a bigint scalar */
-	COMPARE(F_INT48EQ, TESS_CMP_EQ, compare48_evaluate),
-	COMPARE(F_INT48NE, TESS_CMP_NE, compare48_evaluate),
-	COMPARE(F_INT48LT, TESS_CMP_LT, compare48_evaluate),
-	COMPARE(F_INT48LE, TESS_CMP_LE, compare48_evaluate),
-	COMPARE(F_INT48GT, TESS_CMP_GT, compare48_evaluate),
-	COMPARE(F_INT48GE, TESS_CMP_GE, compare48_evaluate),
+	/* bigint against an integer, an integer against bigint */
+	EQUIVALENT(F_INT84EQ, F_INT8EQ, InvalidOid, F_INT8_INT4),
+	EQUIVALENT(F_INT84NE, F_INT8NE, InvalidOid, F_INT8_INT4),
+	EQUIVALENT(F_INT84LT, F_INT8LT, InvalidOid, F_INT8_INT4),
+	EQUIVALENT(F_INT84LE, F_INT8LE, InvalidOid, F_INT8_INT4),
+	EQUIVALENT(F_INT84GT, F_INT8GT, InvalidOid, F_INT8_INT4),
+	EQUIVALENT(F_INT84GE, F_INT8GE, InvalidOid, F_INT8_INT4),
+	EQUIVALENT(F_INT48EQ, F_INT8EQ, F_INT8_INT4, InvalidOid),
+	EQUIVALENT(F_INT48NE, F_INT8NE, F_INT8_INT4, InvalidOid),
+	EQUIVALENT(F_INT48LT, F_INT8LT, F_INT8_INT4, InvalidOid),
+	EQUIVALENT(F_INT48LE, F_INT8LE, F_INT8_INT4, InvalidOid),
+	EQUIVALENT(F_INT48GT, F_INT8GT, F_INT8_INT4, InvalidOid),
+	EQUIVALENT(F_INT48GE, F_INT8GE, F_INT8_INT4, InvalidOid),
 	VALUE(F_INT8PL, TESS_ARITH_ADD, TESS_RESULT_DATUM, TESS_FUNCTION_ANY_SHAPE,
 		  arith8_evaluate),
 	VALUE(F_INT8MI, TESS_ARITH_SUB, TESS_RESULT_DATUM, TESS_FUNCTION_ANY_SHAPE,
@@ -146,12 +149,15 @@ static const Function functions[] = {
 		  arith8_evaluate),
 	VALUE(F_INT8MOD, TESS_ARITH_MOD, TESS_RESULT_DATUM, TESS_FUNCTION_ANY_SHAPE,
 		  arith8_evaluate),
-	/* bigint column with an integer scalar: the column stays first; there
-	 * is no int84mod, the core casts the operand instead */
-	VALUE(F_INT84PL, TESS_ARITH_ADD, TESS_RESULT_DATUM, 0, arith84_evaluate),
-	VALUE(F_INT84MI, TESS_ARITH_SUB, TESS_RESULT_DATUM, 0, arith84_evaluate),
-	VALUE(F_INT84MUL, TESS_ARITH_MUL, TESS_RESULT_DATUM, 0, arith84_evaluate),
-	VALUE(F_INT84DIV, TESS_ARITH_DIV, TESS_RESULT_DATUM, 0, arith84_evaluate),
+	/* there is no int84mod or int48mod: the core casts the operand instead */
+	EQUIVALENT(F_INT84PL, F_INT8PL, InvalidOid, F_INT8_INT4),
+	EQUIVALENT(F_INT84MI, F_INT8MI, InvalidOid, F_INT8_INT4),
+	EQUIVALENT(F_INT84MUL, F_INT8MUL, InvalidOid, F_INT8_INT4),
+	EQUIVALENT(F_INT84DIV, F_INT8DIV, InvalidOid, F_INT8_INT4),
+	EQUIVALENT(F_INT48PL, F_INT8PL, F_INT8_INT4, InvalidOid),
+	EQUIVALENT(F_INT48MI, F_INT8MI, F_INT8_INT4, InvalidOid),
+	EQUIVALENT(F_INT48MUL, F_INT8MUL, F_INT8_INT4, InvalidOid),
+	EQUIVALENT(F_INT48DIV, F_INT8DIV, F_INT8_INT4, InvalidOid),
 	VALUE(F_INT8UM, TESS_ARITH_SUB, TESS_RESULT_DATUM, 0, negate8_evaluate),
 	/* int8(int4): the cast, a column of int8 Datums */
 	VALUE(F_INT8_INT4, 0, TESS_RESULT_DATUM, 0, cast_evaluate),
@@ -208,51 +214,6 @@ flip(TessCompareOp op)
 		default:
 			return op;
 	}
-}
-
-/*
- * An int4 column widened into int8 Datums, for a comparison with an int8
- * column: kept in memory of the module that grows with the batches.
- */
-static const TessDatumColumn *
-widen(TessFunctionCall *call, const TessFunctionArg *arg)
-{
-	static Datum *values = NULL;
-	static uint64 *words = NULL;
-	static bool *isnull = NULL;
-	static int	capacity = 0;
-	static TessDatumColumn widened;
-	int			nrows = arg->column->nrows;
-	TessRowMask non_nulls;
-
-	if (nrows > capacity)
-	{
-		int			nwords = tess_row_mask_word_count(nrows);
-
-		if (values != NULL)
-		{
-			pfree(values);
-			pfree(words);
-			pfree(isnull);
-		}
-		values = MemoryContextAllocZero(TopMemoryContext, sizeof(Datum) * nrows);
-		words = MemoryContextAllocZero(TopMemoryContext, sizeof(uint64) * nwords);
-		isnull = MemoryContextAllocZero(TopMemoryContext, sizeof(bool) * nrows);
-		capacity = nrows;
-	}
-	non_nulls.nrows = nrows;
-	non_nulls.bits = words;
-	memset(words, 0, sizeof(uint64) * tess_row_mask_word_count(nrows));
-	if (tess_int4_to_int8(arg->column, arg->prepared, call->rows, values,
-						  &non_nulls, call->status) != TESS_OK)
-		return NULL;
-	for (int row = 0; row < nrows; row++)
-		isnull[row] = !tess_row_mask_contains(&non_nulls, row);
-	widened = (TessDatumColumn) TESS_STRUCT_INITIALIZER(TessDatumColumn);
-	widened.values = values;
-	widened.isnull = isnull;
-	widened.nrows = nrows;
-	return &widened;
 }
 
 /* int4 against int4, in any shape. */
@@ -357,125 +318,6 @@ compare8_evaluate(TessFunctionCall *call)
 	return invalid(call, "an int8 comparison needs a column argument");
 }
 
-static TessStatusCode compare_narrow(TessFunctionCall *call,
-									 const TessFunctionArg *column,
-									 TessCompareOp op, int64 scalar);
-
-/*
- * A bigint against an integer: a column with a scalar that widens, an
- * integer column against a bigint scalar as below, or two columns, the
- * integer one widened.
- */
-static TessStatusCode
-compare84_evaluate(TessFunctionCall *call)
-{
-	const TessFunctionArg *left;
-	const TessFunctionArg *right;
-	TessCompareOp op;
-
-	if (!valid_call(call))
-		return invalid(call, "an int8 comparison takes two arguments");
-	left = &call->args[0];
-	right = &call->args[1];
-	op = (TessCompareOp) operation(call);
-	if (left->column != NULL && right->column != NULL)
-	{
-		const TessDatumColumn *widened = widen(call, right);
-
-		if (widened == NULL)
-			return call->status->code;
-		return tess_int8_compare_columns(left->column, left->prepared,
-										 widened, NULL, call->rows, op,
-										 call->status);
-	}
-	if (left->column != NULL)
-		return tess_int8_filter(left->column, left->prepared, call->rows, op,
-								(int64) DatumGetInt32(right->scalar),
-								call->status);
-	if (right->column != NULL)
-		return compare_narrow(call, right, flip(op), DatumGetInt64(left->scalar));
-	return invalid(call, "an int8 comparison needs a column argument");
-}
-
-/*
- * An integer column against a bigint scalar: a scalar within the int4
- * range compares as int4; one beyond it makes the comparison constant for
- * every non-NULL value, which the int4 kernel expresses as a comparison
- * every value satisfies (>= the least int4) or none does (< the least).
- */
-static TessStatusCode
-compare_narrow(TessFunctionCall *call, const TessFunctionArg *column,
-			   TessCompareOp op, int64 scalar)
-{
-	int32		narrow;
-
-	if (scalar > PG_INT32_MAX || scalar < PG_INT32_MIN)
-	{
-		bool		above = scalar > PG_INT32_MAX;
-		bool		all;
-
-		switch (op)
-		{
-			case TESS_CMP_NE:
-				all = true;
-				break;
-			case TESS_CMP_LT:
-			case TESS_CMP_LE:
-				all = above;
-				break;
-			case TESS_CMP_GT:
-			case TESS_CMP_GE:
-				all = !above;
-				break;
-			default:
-				all = false;
-				break;
-		}
-		op = all ? TESS_CMP_GE : TESS_CMP_LT;
-		narrow = PG_INT32_MIN;
-	}
-	else
-		narrow = (int32) scalar;
-	return tess_int4_filter(column->column, column->prepared, call->rows, op,
-							narrow, call->status);
-}
-
-/*
- * An integer against a bigint: an integer column with a bigint scalar as
- * above, a bigint column with an integer scalar that widens, or two
- * columns, the integer one widened.
- */
-static TessStatusCode
-compare48_evaluate(TessFunctionCall *call)
-{
-	const TessFunctionArg *left;
-	const TessFunctionArg *right;
-	TessCompareOp op;
-
-	if (!valid_call(call))
-		return invalid(call, "an int4 comparison takes two arguments");
-	left = &call->args[0];
-	right = &call->args[1];
-	op = (TessCompareOp) operation(call);
-	if (left->column != NULL && right->column != NULL)
-	{
-		const TessDatumColumn *widened = widen(call, left);
-
-		if (widened == NULL)
-			return call->status->code;
-		return tess_int8_compare_columns(widened, NULL, right->column,
-										 right->prepared, call->rows, op,
-										 call->status);
-	}
-	if (left->column != NULL)
-		return compare_narrow(call, left, op, DatumGetInt64(right->scalar));
-	if (right->column != NULL)
-		return tess_int8_filter(right->column, right->prepared, call->rows,
-								flip(op), (int64) DatumGetInt32(left->scalar),
-								call->status);
-	return invalid(call, "an int4 comparison needs a column argument");
-}
-
 /* Any shape but two scalars, into a column of int8 Datums. */
 static TessStatusCode
 arith8_evaluate(TessFunctionCall *call)
@@ -506,22 +348,6 @@ arith8_evaluate(TessFunctionCall *call)
 										   call->rows, (int64 *) call->values,
 										   call->non_nulls, call->status);
 	return invalid(call, "int8 arithmetic needs a column argument");
-}
-
-/* A bigint column with an integer scalar on the right, which widens. */
-static TessStatusCode
-arith84_evaluate(TessFunctionCall *call)
-{
-	if (!valid_call(call))
-		return invalid(call, "int8 arithmetic takes two arguments");
-	if (call->args[0].column == NULL || call->args[1].column != NULL)
-		return invalid(call, "mixed int8 arithmetic takes a column and a scalar");
-	return tess_int8_arith_scalar((TessArithOp) operation(call),
-								  call->args[0].column,
-								  (int64) DatumGetInt32(call->args[1].scalar),
-								  call->args[0].prepared, call->rows,
-								  (int64 *) call->values, call->non_nulls,
-								  call->status);
 }
 
 /* -x is 0 - x over int8 values, including the overflow of the smallest. */

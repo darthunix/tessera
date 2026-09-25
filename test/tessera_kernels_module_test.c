@@ -265,8 +265,6 @@ tessera_test_kernels_module_predicate(PG_FUNCTION_ARGS)
 	{
 		/* Two columns: 10, NULL, 30 against 15, 20, 30. */
 		Column		d;
-		Column		wide;
-		TessFunctionArg bigint;
 
 		init_column(&d, 15, 20, 30, false);
 		selection = 7;
@@ -278,25 +276,6 @@ tessera_test_kernels_module_predicate(PG_FUNCTION_ARGS)
 		if (evaluate(functions->find(F_INT4EQ), column_arg(&c), column_arg(&d),
 					 &selection, NULL, &non_nulls, &status) != TESS_OK ||
 			selection != 4)
-			PG_RETURN_BOOL(false);
-		/* int4 against int8 columns, either way: the int4 one widens. */
-		init_column8(&wide, 15, 20, ((int64) 1) << 40, false);
-		bigint = column_arg(&wide);
-		selection = 7;
-		if (evaluate(functions->find(F_INT48LT), column_arg(&c), bigint,
-					 &selection, NULL, &non_nulls, &status) != TESS_OK ||
-			selection != 5)
-			PG_RETURN_BOOL(false);
-		selection = 7;
-		if (evaluate(functions->find(F_INT84GT), bigint, column_arg(&c),
-					 &selection, NULL, &non_nulls, &status) != TESS_OK ||
-			selection != 5)
-			PG_RETURN_BOOL(false);
-		/* A bigint scalar on the left of an integer column, past its range. */
-		selection = 7;
-		if (evaluate(functions->find(F_INT84GT), scalar_arg8(((int64) 1) << 40),
-					 column_arg(&c), &selection, NULL, &non_nulls,
-					 &status) != TESS_OK || selection != 5)
 			PG_RETURN_BOOL(false);
 	}
 	PG_RETURN_BOOL(true);
@@ -459,10 +438,31 @@ tessera_test_kernels_module_int8(PG_FUNCTION_ARGS)
 {
 	const TessFunctionRegistryOps *functions = registry();
 	const Oid	predicates[] = {F_INT8EQ, F_INT8NE, F_INT8LT, F_INT8LE, F_INT8GT,
-	F_INT8GE, F_INT84EQ, F_INT84NE, F_INT84LT, F_INT84LE, F_INT84GT, F_INT84GE};
+	F_INT8GE};
 	const Oid	values[] = {F_INT8PL, F_INT8MI, F_INT8MUL, F_INT8DIV, F_INT8MOD};
-	const Oid	mixed[] = {F_INT84PL, F_INT84MI, F_INT84MUL, F_INT84DIV,
-	F_INT8UM, F_INT8_INT4};
+	const Oid	mixed[] = {F_INT8UM, F_INT8_INT4};
+	/* Each function over an int4 and an int8: its int8 function and casts. */
+	const Oid	equivalents[][4] = {
+		{F_INT84EQ, F_INT8EQ, InvalidOid, F_INT8_INT4},
+		{F_INT84NE, F_INT8NE, InvalidOid, F_INT8_INT4},
+		{F_INT84LT, F_INT8LT, InvalidOid, F_INT8_INT4},
+		{F_INT84LE, F_INT8LE, InvalidOid, F_INT8_INT4},
+		{F_INT84GT, F_INT8GT, InvalidOid, F_INT8_INT4},
+		{F_INT84GE, F_INT8GE, InvalidOid, F_INT8_INT4},
+		{F_INT48EQ, F_INT8EQ, F_INT8_INT4, InvalidOid},
+		{F_INT48NE, F_INT8NE, F_INT8_INT4, InvalidOid},
+		{F_INT48LT, F_INT8LT, F_INT8_INT4, InvalidOid},
+		{F_INT48LE, F_INT8LE, F_INT8_INT4, InvalidOid},
+		{F_INT48GT, F_INT8GT, F_INT8_INT4, InvalidOid},
+		{F_INT48GE, F_INT8GE, F_INT8_INT4, InvalidOid},
+		{F_INT84PL, F_INT8PL, InvalidOid, F_INT8_INT4},
+		{F_INT84MI, F_INT8MI, InvalidOid, F_INT8_INT4},
+		{F_INT84MUL, F_INT8MUL, InvalidOid, F_INT8_INT4},
+		{F_INT84DIV, F_INT8DIV, InvalidOid, F_INT8_INT4},
+		{F_INT48PL, F_INT8PL, F_INT8_INT4, InvalidOid},
+		{F_INT48MI, F_INT8MI, F_INT8_INT4, InvalidOid},
+		{F_INT48MUL, F_INT8MUL, F_INT8_INT4, InvalidOid},
+		{F_INT48DIV, F_INT8DIV, F_INT8_INT4, InvalidOid}};
 	const Oid	aggregates[] = {F_MIN_INT8, F_MAX_INT8};
 	const int64 big = ((int64) 1) << 40;
 	Column		c;
@@ -498,7 +498,7 @@ tessera_test_kernels_module_int8(PG_FUNCTION_ARGS)
 			(function->flags & TESS_FUNCTION_ANY_SHAPE) == 0)
 			PG_RETURN_BOOL(false);
 	}
-	/* The mixed operators, the negation and the cast keep the column first. */
+	/* The negation and the cast keep the column first. */
 	for (i = 0; i < lengthof(mixed); i++)
 	{
 		const TessFunction *function = functions->find(mixed[i]);
@@ -516,37 +516,19 @@ tessera_test_kernels_module_int8(PG_FUNCTION_ARGS)
 			function->result_format != TESS_RESULT_DATUM)
 			PG_RETURN_BOOL(false);
 	}
-	/* The mixed arithmetic with the integer on the left is left to the core. */
-	if (functions->find(F_INT48PL) != NULL || functions->find(F_INT48MUL) != NULL)
-		PG_RETURN_BOOL(false);
-	/* An integer column against a bigint scalar: within the int4 range as
-	 * int4, beyond it constant for every non-NULL value. */
-	init_column(&c, 10, 20, 30, true);
-	selection = 7;
-	if (evaluate(functions->find(F_INT48LT), column_arg(&c), scalar_arg8(25),
-				 &selection, NULL, &non_nulls, &status) != TESS_OK ||
-		selection != 1)
-		PG_RETURN_BOOL(false);
-	selection = 7;
-	if (evaluate(functions->find(F_INT48LT), column_arg(&c),
-				 scalar_arg8(((int64) 5) << 32), &selection, NULL, &non_nulls,
-				 &status) != TESS_OK || selection != 5)
-		PG_RETURN_BOOL(false);
-	selection = 7;
-	if (evaluate(functions->find(F_INT48GE), column_arg(&c),
-				 scalar_arg8(((int64) 5) << 32), &selection, NULL, &non_nulls,
-				 &status) != TESS_OK || selection != 0)
-		PG_RETURN_BOOL(false);
-	selection = 7;
-	if (evaluate(functions->find(F_INT48NE), column_arg(&c),
-				 scalar_arg8(-(((int64) 5) << 32)), &selection, NULL, &non_nulls,
-				 &status) != TESS_OK || selection != 5)
-		PG_RETURN_BOOL(false);
-	selection = 7;
-	if (evaluate(functions->find(F_INT48EQ), column_arg(&c),
-				 scalar_arg8(-(((int64) 5) << 32)), &selection, NULL, &non_nulls,
-				 &status) != TESS_OK || selection != 0)
-		PG_RETURN_BOOL(false);
+	/* The functions over an int4 and an int8 are equivalents, no callback. */
+	for (i = 0; i < lengthof(equivalents); i++)
+	{
+		const TessFunction *function = functions->find(equivalents[i][0]);
+
+		if (function == NULL || function->kind != TESS_FUNCTION_EQUIVALENT ||
+			function->struct_size < TESS_FUNCTION_EQUIVALENT_MIN_SIZE ||
+			function->evaluate != NULL ||
+			function->equivalent != equivalents[i][1] ||
+			function->arg_casts[0] != equivalents[i][2] ||
+			function->arg_casts[1] != equivalents[i][3])
+			PG_RETURN_BOOL(false);
+	}
 	selection = 7;
 
 	/* x + 2^40 over int8 values past the int4 range, x * x, 100 * 2^33 - x. */
@@ -567,23 +549,14 @@ tessera_test_kernels_module_int8(PG_FUNCTION_ARGS)
 		non_nulls != 5 || results[0] != (((int64) 100) << 40) ||
 		results[2] != (((int64) 900) << 40))
 		PG_RETURN_BOOL(false);
-	/* Mixed: x / 7 with an integer scalar, and the column must come first. */
-	init_column8(&c, 10 * big, 20, 30 * big + 3, true);
-	if (evaluate(functions->find(F_INT84DIV), column_arg(&c), scalar_arg(7),
-				 &selection, results, &non_nulls, &status) != TESS_OK ||
-		non_nulls != 5 || results[0] != (10 * big) / 7 ||
-		results[2] != (30 * big + 3) / 7 ||
-		evaluate(functions->find(F_INT84PL), scalar_arg(7), column_arg(&c),
-				 &selection, results, &non_nulls,
-				 &status) != TESS_ERROR_INVALID_ARGUMENT)
-		PG_RETURN_BOOL(false);
 	/* -x */
+	init_column8(&c, 10 * big, 20, 30 * big + 3, true);
 	if (evaluate_one(functions->find(F_INT8UM), column_arg(&c),
 					 &selection, results, &non_nulls, &status) != TESS_OK ||
 		non_nulls != 5 || results[0] != -10 * big || results[2] != -30 * big - 3)
 		PG_RETURN_BOOL(false);
-	/* Predicates: x < 25 * 2^40 as int8, and 25 < x through the commutator
-	 * of the mixed operator with the integer on the left. */
+	/* Predicates: x < 25 * 2^40 as int8; the mixed operator with the
+	 * integer on the left commutes into another equivalent. */
 	init_column8(&c, 10 * big, 20 * big, 30 * big, true);
 	selection = 7;
 	if (evaluate(functions->find(F_INT8LT), column_arg(&c), scalar_arg8(25 * big),
@@ -595,17 +568,6 @@ tessera_test_kernels_module_int8(PG_FUNCTION_ARGS)
 	if (!OidIsValid(less) || !OidIsValid(greater) ||
 		functions->find(get_opcode(less)) != functions->find(F_INT48LT) ||
 		functions->find(get_opcode(greater)) != functions->find(F_INT84GT))
-		PG_RETURN_BOOL(false);
-	/* 25 < x keeps both non-NULL rows; the NULL row never matches. */
-	selection = 7;
-	if (evaluate(functions->find(get_opcode(greater)), column_arg(&c),
-				 scalar_arg(25), &selection, NULL, &non_nulls,
-				 &status) != TESS_OK || selection != 5)
-		PG_RETURN_BOOL(false);
-	selection = 7;
-	if (evaluate(functions->find(F_INT84LT), column_arg(&c), scalar_arg(25),
-				 &selection, NULL, &non_nulls, &status) != TESS_OK ||
-		selection != 0)
 		PG_RETURN_BOOL(false);
 	/* The cast: int4 Datums widened into int8 Datums. */
 	init_column(&c, PG_INT32_MIN, 20, PG_INT32_MAX, true);
@@ -638,7 +600,7 @@ tessera_test_kernels_module_int8(PG_FUNCTION_ARGS)
 					 &status) != TESS_ERROR_INTEGER_OUT_OF_RANGE ||
 		strcmp(status.sqlstate, "22003") != 0 ||
 		strcmp(status.message, "bigint out of range") != 0 ||
-		evaluate(functions->find(F_INT84DIV), column_arg(&c), scalar_arg(0),
+		evaluate(functions->find(F_INT8DIV), column_arg(&c), scalar_arg8(0),
 				 &selection, results, &non_nulls,
 				 &status) != TESS_ERROR_DIVISION_BY_ZERO ||
 		strcmp(status.sqlstate, "22012") != 0)

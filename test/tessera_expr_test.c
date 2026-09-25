@@ -169,9 +169,11 @@ tessera_test_expr_supports(PG_FUNCTION_ARGS)
 	result &= check(36, tess_expr_supports_filter(op("<", var(4, INT8OID), int4(5)), 0));
 	result &= check(37, tess_expr_supports_filter(op("<", int4(5), var(4, INT8OID)), 0));
 	result &= check(38, tess_expr_supports_filter(op(">", (Node *) makeFuncExpr(F_INT8_INT4, INT8OID, list_make1(a()), InvalidOid, InvalidOid, COERCE_IMPLICIT_CAST), int4(5)), 0));
-	/* Unsupported values: the integer on the left of a mixed operator. */
-	result &= check(10, !tess_expr_supports_value(op("+", a(), (Node *) makeConst(INT8OID, -1, InvalidOid, 8, Int64GetDatum(1), false, true)), 0));
-	result &= check(39, !tess_expr_supports_value(op("+", int4(1), var(4, INT8OID)), 0));
+	/* The integer on the left of a mixed operator: an equivalent, cast. */
+	result &= check(10, tess_expr_supports_value(op("+", a(), (Node *) makeConst(INT8OID, -1, InvalidOid, 8, Int64GetDatum(1), false, true)), 0));
+	result &= check(39, tess_expr_supports_value(op("+", int4(1), var(4, INT8OID)), 0));
+	result &= check(42, tess_expr_supports_value(op("*", a(), var(4, INT8OID)), 0));
+	result &= check(43, tess_expr_supports_filter(op("<", a(), var(4, INT8OID)), 0));
 	result &= check(11, !tess_expr_supports_value(op("=", var(3, TEXTOID), (Node *) makeConst(TEXTOID, -1, DEFAULT_COLLATION_OID, -1, CStringGetTextDatum("x"), false, false)), 0));
 	result &= check(12, !tess_expr_supports_value(op(">", a(), int4(5)), 0));
 	result &= check(13, !tess_expr_supports_value((Node *) make_andclause(list_make2(op(">", a(), int4(5)), op("<", a(), int4(9)))), 0));
@@ -357,6 +359,17 @@ tessera_test_expr_values(PG_FUNCTION_ARGS)
 	result &= check(124, column->nrows == 5 && row_is(column, non_nulls, 3, false, 80) &&
 		tess_row_mask_count(non_nulls) == 4);
 
+	/* a + 5::bigint, int48pl: int8pl over a cast to int8, the constant folded. */
+	expr = tess_expr_compile_value(op("+", a(), (Node *) makeConst(INT8OID, -1, InvalidOid, 8, Int64GetDatum(5), false, true)), NULL, resolve, NULL);
+	result &= check(125, tess_expr_input_column(expr) == 0);
+	tess_expr_bind(expr, batch, econtext, TESS_COLUMN_FOR_PROJECTION);
+	column = tess_expr_get_column(expr);
+	non_nulls = tess_expr_non_nulls(expr);
+	result &= check(126, DatumGetInt64(column->values[0]) == 6 &&
+		DatumGetInt64(column->values[68]) == 74 &&
+		column->isnull[4] && !tess_row_mask_contains(non_nulls, 4) &&
+		tess_row_mask_count(non_nulls) == 56);
+
 	/* Only the selected rows are computed. */
 	tess_row_mask_clear(&batch->rows, 0);
 	tess_row_mask_clear(&batch->rows, 1);
@@ -453,6 +466,11 @@ tessera_test_expr_filters(PG_FUNCTION_ARGS)
 	tess_expr_bind(expr, batch, econtext, TESS_COLUMN_FOR_FILTER);
 	tess_expr_apply_filter(expr);
 	result &= check(211, tess_row_mask_count(&batch->rows) == 48);
+	/* a < 5000000000::bigint, int48lt beyond the int4 range: every non-NULL
+	 * row, through int8lt over a cast. */
+	batch = filtered(op("<", a(), (Node *) makeConst(INT8OID, -1, InvalidOid, 8, Int64GetDatum(INT64CONST(5000000000)), false, true)), econtext);
+	result &= check(212, tess_row_mask_count(&batch->rows) == 56 &&
+		!tess_row_mask_contains(&batch->rows, 4));
 	/* a + b > 10: the other column as the step's operand. */
 	batch = filtered(op(">", op("+", a(), var(2, INT4OID)), int4(10)), econtext);
 	result &= check(207, tess_row_mask_count(&batch->rows) == 53 &&

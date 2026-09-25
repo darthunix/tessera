@@ -213,7 +213,7 @@ RESET tessera.enable;
 -- A bigint column: the comparison of bigint with an integer constant and
 -- with a bigint one, the commutator with the constant on the left, unary
 -- minus, and the cast of an int4 column as a chain step. Two columns of
--- different widths stay a residual.
+-- different widths run in batches, the int4 one cast.
 CREATE TABLE filter8_t (a bigint, b int);
 INSERT INTO filter8_t
 SELECT CASE WHEN i % 7 = 0 THEN NULL ELSE i * 4294967296 + i END, i % 10
@@ -251,6 +251,16 @@ SELECT filter_same($$SELECT a FROM filter_t WHERE a::bigint < 5 OR a::bigint > 1
 EXPLAIN (COSTS OFF) SELECT a FROM filter_t WHERE a < 5000000000;
 SELECT filter_same($$SELECT a FROM filter_t WHERE a < 5000000000 AND a > -5000000000 AND a > 195$$);
 SELECT filter_same($$SELECT a FROM filter_t WHERE a > 5000000000 OR 5000000000 < a$$);
+-- Functions over an int4 and an int8 in any shape: the int4 side is cast
+-- to int8 as a step of its own; the errors are int8's.
+EXPLAIN (COSTS OFF) SELECT a FROM filter8_t WHERE b + a > 4294967296 * 100;
+SELECT filter_same($$SELECT b + a, a - b, b * a / 7 FROM filter8_t WHERE b + a > 4294967296 * 100$$);
+SELECT filter_same($$SELECT a / b FROM filter8_t WHERE b <> 0 AND a / b > 4294967296 * 20$$);
+SELECT filter_same($$SELECT a FROM filter8_t WHERE b * 4294967296 * 10 < a - b$$);
+\set VERBOSITY terse
+SELECT count(*) FROM filter8_t WHERE a / b > 0;
+SELECT count(*) FROM filter8_t WHERE b * a * 4294967296 > 0;
+\set VERBOSITY default
 -- An overflow in a bigint chain is reported as bigint's.
 SELECT a FROM filter8_t WHERE a * 4294967296 > 1;
 DROP TABLE filter8_t;

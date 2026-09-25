@@ -129,6 +129,7 @@ SELECT join_same($$SELECT jf.v, jd.n FROM jf JOIN jd ON jf.fk = jd.id AND jf.v >
 SELECT join_same($$SELECT count(*), sum(jd.n) FROM jf JOIN jd ON jf.fk = jd.id AND jf.v * 10 >= jd.n$$);
 SELECT join_same($$SELECT jf.v, jd.id8 FROM jf JOIN jd ON jf.fk = jd.id AND jf.v > jd.id8 * 3$$);
 SELECT join_same($$SELECT jf.fk8, jd.n FROM jf JOIN jd ON jf.fk = jd.id AND jd.n <> jf.fk8$$);
+SELECT join_same($$SELECT jf.v + jd.id8, jd.id8 - jf.v FROM jf JOIN jd ON jf.fk = jd.id AND jf.v + jd.id8 > 500$$);
 -- The residual clauses in the core's order, by cost: the guard, row-wise,
 -- before the division in batches, however they are written; without the
 -- guard the division fails.

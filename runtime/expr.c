@@ -3,7 +3,9 @@
 #include "catalog/pg_type_d.h"
 #include "executor/executor.h"
 #include "miscadmin.h"
+#include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
+#include "optimizer/optimizer.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
 
@@ -121,6 +123,50 @@ call_of(Node *node, List **args, Oid *opno, Oid *inputcollid)
 	return NULL;
 }
 
+/*
+ * The node with a call of an equivalent (a cross-type function such as
+ * int48pl) replaced by the call it stands for: the equivalent function
+ * over the arguments cast as the description says, a cast of a constant
+ * folded here, once. Any other node as it is, without RelabelType.
+ */
+static Node *
+expand(Node *node)
+{
+	const TessFunction *function;
+	List	   *args;
+	List	   *cast_args = NIL;
+	Oid			opno;
+	Oid			inputcollid;
+	int			index = 0;
+
+	node = strip_relabel(node);
+	if (node == NULL)
+		return NULL;
+	function = call_of(node, &args, &opno, &inputcollid);
+	if (function == NULL || function->kind != TESS_FUNCTION_EQUIVALENT ||
+		function->struct_size < TESS_FUNCTION_EQUIVALENT_MIN_SIZE ||
+		list_length(args) > TESS_FUNCTION_MAX_ARGS)
+		return node;
+	foreach_ptr(Node, arg, args)
+	{
+		Oid			cast = function->arg_casts[index++];
+		Node	   *cast_arg = arg;
+
+		if (OidIsValid(cast))
+		{
+			cast_arg = (Node *) makeFuncExpr(cast, get_func_rettype(cast),
+											 list_make1(arg), InvalidOid,
+											 InvalidOid, COERCE_IMPLICIT_CAST);
+			if (IsA(strip_relabel(arg), Const))
+				cast_arg = eval_const_expressions(NULL, cast_arg);
+		}
+		cast_args = lappend(cast_args, cast_arg);
+	}
+	return (Node *) makeFuncExpr(function->equivalent, exprType(node), cast_args,
+								 exprCollation(node), inputcollid,
+								 COERCE_EXPLICIT_CALL);
+}
+
 /* Strict, insensitive to the collation or given none, of the kind wanted. */
 static bool
 usable(const TessFunction *function, Oid inputcollid, TessFunctionKind kind)
@@ -225,7 +271,7 @@ analyze_value(Node *node, Index relid, int *nvars)
 	int			column_operand;
 
 	check_stack_depth();
-	node = strip_relabel(node);
+	node = expand(node);
 	if (node == NULL)
 		return false;
 	if (IsA(node, Var))
@@ -266,7 +312,7 @@ analyze_filter(Node *node, Index relid, int *column_arg, int *column_operand)
 	Oid			inputcollid;
 	int			nvars;
 
-	node = strip_relabel(node);
+	node = expand(node);
 	if (node == NULL || exprType(node) != BOOLOID)
 		return false;
 	function = call_of(node, &args, &opno, &inputcollid);
@@ -370,7 +416,7 @@ compile_value(TessExpr *expr, Node *node, PlanState *parent,
 	int			column_operand;
 
 	check_stack_depth();
-	node = strip_relabel(node);
+	node = expand(node);
 	if (IsA(node, Var))
 	{
 		expr->column = resolve((const Var *) node, context);
@@ -431,7 +477,7 @@ tess_expr_compile_filter(Node *node, PlanState *parent,
 
 	if (!analyze_filter(node, 0, &column_arg, &column_operand))
 		elog(ERROR, "Tessera received an unsupported batch filter");
-	node = strip_relabel(node);
+	node = expand(node);
 	call_of(node, &args, &opno, &inputcollid);
 	compile_value(expr, list_nth(args, column_arg), parent, resolve, context);
 	init_step(&expr->predicate, node, column_arg, column_operand, parent,

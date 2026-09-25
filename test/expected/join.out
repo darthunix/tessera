@@ -460,6 +460,12 @@ SELECT join_same($$SELECT jf.fk8, jd.n FROM jf JOIN jd ON jf.fk = jd.id AND jd.n
  609 rows, hash e608946f2abdc1f704724ca2dc2ecf76
 (1 row)
 
+SELECT join_same($$SELECT jf.v + jd.id8, jd.id8 - jf.v FROM jf JOIN jd ON jf.fk = jd.id AND jf.v + jd.id8 > 500$$);
+                    join_same                    
+-------------------------------------------------
+ 498 rows, hash 249268ad2064bfc05ffe24da5d268bec
+(1 row)
+
 -- The residual clauses in the core's order, by cost: the guard, row-wise,
 -- before the division in batches, however they are written; without the
 -- guard the division fails.
