@@ -78,6 +78,38 @@ pub unsafe extern "C" fn tess_int4_filter(
     }
 }
 
+/// `tess_int4_compare_columns`: keep in `rows` the selected rows where both
+/// columns are non-NULL and `left op right`.
+///
+/// # Safety
+///
+/// `left` and `right` must point to valid `TessDatumColumn`s satisfying
+/// [`DatumColumn::int32`]'s contract with their readiness masks (null or
+/// valid); `rows` must point to a valid mask that nothing else accesses
+/// during the call; `status` as for every entry point.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tess_int4_compare_columns(
+    left: *const DatumColumn,
+    left_prepared: *const Mask,
+    right: *const DatumColumn,
+    right_prepared: *const Mask,
+    rows: *mut Mask,
+    op: c_uint,
+    status: *mut Status,
+) -> Code {
+    // SAFETY: the caller's status contract.
+    unsafe {
+        guard(status, || {
+            let op = compare_op(op)?;
+            let left = reader(left, left_prepared)?;
+            let right = reader(right, right_prepared)?;
+            let rows = rows.as_mut().context("a null row mask")?;
+            let mut rows = rows.mask()?;
+            int32::compare_columns(&left, &right, &mut rows, op)
+        })
+    }
+}
+
 /// The reader of a column argument.
 ///
 /// # Safety

@@ -92,7 +92,10 @@ returned, as every kernel error is reported.
 
 A filter is a boolean call of a function the registry implements as a
 `TESS_FUNCTION_PREDICATE`, over one supported value with the column and
-one scalar: `a > 5`, `a + 1 > 5`, `7 < a`. `tess_expr_supports_filter`
+either one scalar or one bare column of the batch, the operand: `a > 5`,
+`a + 1 > 5`, `7 < a`, `a > b`, `a > b * 20`. An operand needs a
+predicate of any shape, as the built-in comparisons are; the operand is
+read whole and a NULL on either side clears the row. `tess_expr_supports_filter`
 recognizes it at planning time; `tess_expr_compile_filter` compiles the
 value chain and the predicate; and per batch, after a bind,
 `tess_expr_apply_filter` narrows the batch's row mask in place to the
@@ -112,7 +115,8 @@ column first, so `7 < a` is compiled through the operator's commutator
 from the catalog into `a > 7`; without a commutator whose function is
 implemented, the filter is not supported. What a filter cannot express,
 `AND`, `OR`, `NOT`, `IS NULL`, a boolean column, a comparison of two
-columns, stays with `ExecQual` over the rows that survive.
+computed sides such as `a + 1 > b * 2`, stays with `ExecQual` over the
+rows that survive.
 
 ## Errors
 

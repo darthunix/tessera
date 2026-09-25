@@ -336,7 +336,7 @@ EXPLAIN (COSTS OFF) SELECT count(*) FROM jf JOIN jd ON jf.fk = jd.id AND jf.v > 
  Custom Scan (TessAgg)
    ->  Custom Scan (TessHashJoin)
          Hash Cond: (jd.id = jf.fk)
-         Join Filter: (jf.v > jd.n)
+         Batch Join Filter: (jf.v > jd.n)
          ->  Custom Scan (TessHeapScan) on jf
          ->  Custom Scan (TessHeapScan) on jd
 (6 rows)
@@ -375,7 +375,7 @@ SELECT join_explain($$SELECT count(*), sum(jdup.w) FROM jf JOIN jdup ON jf.fk = 
    Computed Datums: 324
    ->  Custom Scan (TessHashJoin) (actual rows=324.00 loops=1)
          Hash Cond: (jf.fk = jdup.k)
-         Join Filter: (jf.v > jdup.w)
+         Batch Join Filter: (jf.v > jdup.w)
          Buckets: 1024
          Memory Usage: N kB
          Builds: 1
@@ -421,6 +421,44 @@ SELECT join_same($$SELECT jsmall.k, (SELECT count(*) FROM jf JOIN jdup ON jf.fk 
                    join_same                    
 ------------------------------------------------
  10 rows, hash 509ba6b74dc0068e6ae5ca68a0920629
+(1 row)
+
+-- In batches: a column against a chain over the other side, int4 against
+-- int8 columns; by rows: a chain on both sides, beside a batch one.
+EXPLAIN (COSTS OFF) SELECT count(*) FROM jf JOIN jd ON jf.fk = jd.id AND jf.v > jd.n * 2 AND jf.v + 1 < jd.n * 3;
+                   QUERY PLAN                   
+------------------------------------------------
+ Custom Scan (TessAgg)
+   ->  Custom Scan (TessHashJoin)
+         Hash Cond: (jd.id = jf.fk)
+         Batch Join Filter: (jf.v > (jd.n * 2))
+         Join Filter: ((jf.v + 1) < (jd.n * 3))
+         ->  Custom Scan (TessHeapScan) on jf
+         ->  Custom Scan (TessHeapScan) on jd
+(7 rows)
+
+SELECT join_same($$SELECT jf.v, jd.n FROM jf JOIN jd ON jf.fk = jd.id AND jf.v > jd.n * 2 AND jf.v + 1 < jd.n * 3$$);
+                   join_same                    
+------------------------------------------------
+ 18 rows, hash 15b2f5fe67b74be78a1ec98702b64717
+(1 row)
+
+SELECT join_same($$SELECT count(*), sum(jd.n) FROM jf JOIN jd ON jf.fk = jd.id AND jf.v * 10 >= jd.n$$);
+                   join_same                   
+-----------------------------------------------
+ 1 rows, hash 02a0ebcfa0d982d4b7ea2bb0da7673a3
+(1 row)
+
+SELECT join_same($$SELECT jf.v, jd.id8 FROM jf JOIN jd ON jf.fk = jd.id AND jf.v > jd.id8 * 3$$);
+                    join_same                    
+-------------------------------------------------
+ 419 rows, hash 5e4b57c29555bc699440a2cd8d41687d
+(1 row)
+
+SELECT join_same($$SELECT jf.fk8, jd.n FROM jf JOIN jd ON jf.fk = jd.id AND jd.n <> jf.fk8$$);
+                    join_same                    
+-------------------------------------------------
+ 609 rows, hash e608946f2abdc1f704724ca2dc2ecf76
 (1 row)
 
 -- Targets above the join are the node's: columns in another order than

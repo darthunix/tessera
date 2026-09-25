@@ -98,6 +98,18 @@ extern TessStatusCode tess_int4_filter(const TessDatumColumn *column,
 									   int32 scalar,
 									   TessStatus *status);
 
+/*
+ * Keep in rows only the selected rows where both int4 columns are non-NULL
+ * and `left op right`, each column read with its own readiness mask.
+ */
+extern TessStatusCode tess_int4_compare_columns(const TessDatumColumn *left,
+												const TessRowMask *left_prepared,
+												const TessDatumColumn *right,
+												const TessRowMask *right_prepared,
+												TessRowMask *rows,
+												TessCompareOp op,
+												TessStatus *status);
+
 /* The number of selected non-NULL values. */
 extern TessStatusCode tess_int4_count(const TessDatumColumn *column,
 									  const TessRowMask *prepared,
@@ -212,6 +224,15 @@ extern TessStatusCode tess_int8_filter(const TessDatumColumn *column,
 									   TessCompareOp op,
 									   int64 scalar,
 									   TessStatus *status);
+
+/* As tess_int4_compare_columns, over two int8 columns. */
+extern TessStatusCode tess_int8_compare_columns(const TessDatumColumn *left,
+												const TessRowMask *left_prepared,
+												const TessDatumColumn *right,
+												const TessRowMask *right_prepared,
+												TessRowMask *rows,
+												TessCompareOp op,
+												TessStatus *status);
 
 /*
  * Arithmetic into a dense int8 result, as tess_int4_arith_scalar and its

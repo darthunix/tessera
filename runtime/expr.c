@@ -248,18 +248,19 @@ analyze_value(Node *node, Index relid, int *nvars)
 
 /*
  * Whether node is a supported filter: a boolean call of a registered
- * predicate over one column value and one scalar, the column first or
- * moved first through the commutator.
+ * predicate over one column value and either a scalar or a bare column of
+ * the batch, the operand, which the predicate must accept in any shape;
+ * with a scalar the column comes first or moves first through the
+ * commutator.
  */
 static bool
-analyze_filter(Node *node, Index relid, int *column_arg)
+analyze_filter(Node *node, Index relid, int *column_arg, int *column_operand)
 {
 	const TessFunction *function;
 	List	   *args;
 	Oid			opno;
 	Oid			inputcollid;
 	int			nvars;
-	int			column_operand;
 
 	node = strip_relabel(node);
 	if (node == NULL || exprType(node) != BOOLOID)
@@ -267,8 +268,10 @@ analyze_filter(Node *node, Index relid, int *column_arg)
 	function = call_of(node, &args, &opno, &inputcollid);
 	if (!usable(function, inputcollid, TESS_FUNCTION_PREDICATE) ||
 		list_length(args) != 2 ||
-		!analyze_args(args, relid, &nvars, column_arg, &column_operand) ||
-		nvars != 1)
+		!analyze_args(args, relid, &nvars, column_arg, column_operand) ||
+		nvars < 1)
+		return false;
+	if (*column_operand >= 0 && (function->flags & TESS_FUNCTION_ANY_SHAPE) == 0)
 		return false;
 	return shape_fits(function, *column_arg, 2, opno, inputcollid);
 }
@@ -285,8 +288,9 @@ bool
 tess_expr_supports_filter(Node *node, Index relid)
 {
 	int			column_arg;
+	int			column_operand;
 
-	return analyze_filter(node, relid, &column_arg);
+	return analyze_filter(node, relid, &column_arg, &column_operand);
 }
 
 /*
@@ -414,13 +418,15 @@ tess_expr_compile_filter(Node *node, PlanState *parent,
 	Oid			opno;
 	Oid			inputcollid;
 	int			column_arg;
+	int			column_operand;
 
-	if (!analyze_filter(node, 0, &column_arg))
+	if (!analyze_filter(node, 0, &column_arg, &column_operand))
 		elog(ERROR, "Tessera received an unsupported batch filter");
 	node = strip_relabel(node);
 	call_of(node, &args, &opno, &inputcollid);
 	compile_value(expr, list_nth(args, column_arg), parent, resolve, context);
-	init_step(&expr->predicate, node, column_arg, -1, parent, resolve, context);
+	init_step(&expr->predicate, node, column_arg, column_operand, parent,
+			  resolve, context);
 	expr->filter = true;
 	return expr;
 }
@@ -559,6 +565,20 @@ build_args(TessExpr *expr, const Step *step, const TessDatumColumn *column,
 	return scalar_null;
 }
 
+/* A step's column operand, read whole; the call leaves its NULLs out. */
+static void
+fetch_operand(TessExpr *expr, Step *step)
+{
+	TessBatch  *batch = expr->batch;
+
+	step->operand = (TessDatumColumn) TESS_STRUCT_INITIALIZER(TessDatumColumn);
+	batch->ops->get_datum_column(batch, step->operand_column, &batch->rows,
+								 expr->purpose, &step->operand);
+	if (step->operand.values == NULL || step->operand.isnull == NULL ||
+		step->operand.nrows != batch->rows.nrows)
+		elog(ERROR, "Tessera batch returned an invalid column");
+}
+
 /* Run one step over the selected rows; a failure is raised here. */
 static void
 call_step(TessExpr *expr, const Step *step, const TessFunctionArg *args,
@@ -627,15 +647,7 @@ tess_expr_get_column(TessExpr *expr)
 		TessRowMask non_nulls = {nrows, expr->bits[set]};
 
 		if (step->column_operand >= 0)
-		{
-			/* The operand is read whole; the call leaves its NULLs out. */
-			step->operand = (TessDatumColumn) TESS_STRUCT_INITIALIZER(TessDatumColumn);
-			batch->ops->get_datum_column(batch, step->operand_column, &batch->rows,
-										 expr->purpose, &step->operand);
-			if (step->operand.values == NULL || step->operand.isnull == NULL ||
-				step->operand.nrows != nrows)
-				elog(ERROR, "Tessera batch returned an invalid column");
-		}
+			fetch_operand(expr, step);
 		if (build_args(expr, step, &current, args))
 			fill_scalar(expr, set, (Datum) 0, true);
 		else
@@ -688,6 +700,8 @@ tess_expr_apply_filter(TessExpr *expr)
 	if (!expr->filter)
 		elog(ERROR, "Tessera expression is not a filter");
 	column = tess_expr_get_column(expr);
+	if (expr->predicate.column_operand >= 0)
+		fetch_operand(expr, &expr->predicate);
 	if (build_args(expr, &expr->predicate, column, args))
 	{
 		/* A NULL scalar makes the strict predicate false everywhere. */

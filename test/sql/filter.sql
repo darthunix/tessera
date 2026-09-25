@@ -209,6 +209,13 @@ SELECT filter_same($$SELECT a FROM filter8_t WHERE a % 7 = 3$$);
 SELECT filter_same($$SELECT a FROM filter8_t WHERE a / 4294967296 = 100$$);
 EXPLAIN (COSTS OFF) SELECT a FROM filter8_t WHERE a + b > 4294967296 * 195;
 SELECT filter_same($$SELECT a FROM filter8_t WHERE a + b > 4294967296 * 195$$);
+-- Two columns of the table in batches: a column against a chain, NULLs in
+-- either, int4 against int8.
+EXPLAIN (COSTS OFF) SELECT a FROM filter_t WHERE a > b * 20;
+SELECT filter_same($$SELECT a, b FROM filter_t WHERE a > b * 20$$);
+SELECT filter_same($$SELECT a, b FROM filter_t WHERE b = a$$);
+SELECT filter_same($$SELECT a FROM filter8_t WHERE a < b$$);
+SELECT filter_same($$SELECT a FROM filter8_t WHERE b * 4294967296 <= a$$);
 EXPLAIN (COSTS OFF) SELECT a FROM filter_t WHERE a::bigint * 3 > 570;
 SELECT filter_same($$SELECT a FROM filter_t WHERE a::bigint * 3 > 570$$);
 SELECT filter_same($$SELECT a FROM filter_t WHERE a::bigint < 5 OR a::bigint > 195$$);

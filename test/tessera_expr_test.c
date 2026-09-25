@@ -184,7 +184,10 @@ tessera_test_expr_supports(PG_FUNCTION_ARGS)
 	result &= check(22, !tess_expr_supports_filter(a(), 0));
 	result &= check(23, !tess_expr_supports_filter(op("<", int4(1), int4(2)), 0));
 	result &= check(24, !tess_expr_supports_filter(op("+", a(), int4(1)), 0));
-	result &= check(25, !tess_expr_supports_filter(op("=", a(), var(2, INT4OID)), 0));
+	/* A column operand of any shape; not two computed sides. */
+	result &= check(25, tess_expr_supports_filter(op("=", a(), var(2, INT4OID)), 0));
+	result &= check(208, tess_expr_supports_filter(op(">", var(2, INT4OID), op("*", a(), int4(10))), 0));
+	result &= check(209, !tess_expr_supports_filter(op(">", op("+", var(2, INT4OID), int4(1)), op("*", a(), int4(10))), 0));
 	result &= check(26, !tess_expr_supports_filter((Node *) make_andclause(list_make2(op(">", a(), int4(5)), op("<", a(), int4(9)))), 0));
 	result &= check(27, !tess_expr_supports_filter(op("=", var(3, TEXTOID), (Node *) makeConst(TEXTOID, -1, DEFAULT_COLLATION_OID, -1, CStringGetTextDatum("x"), false, false)), 0));
 	PG_RETURN_BOOL(result);

@@ -43,7 +43,8 @@ function.
 Built-in integer functions are registered by the kernels module
 `tessera_kernels` (`kernels/`), which links the Rust kernels statically and
 registers, when loaded: for int4, `int4eq`, `int4ne`, `int4lt`, `int4le`,
-`int4gt`, `int4ge` as predicates, `int4pl`, `int4mi`, `int4mul`, `int4div`,
+`int4gt`, `int4ge` as predicates of any shape (a column with a scalar on
+either side, or two columns), `int4pl`, `int4mi`, `int4mul`, `int4div`,
 `int4mod` and the unary `int4um` as values with `TESS_RESULT_INT32`; for
 int8, the six comparisons `int8eq` … `int8ge`, the six of a bigint column
 with an integer scalar (`int84eq` … `int84ge`, the scalar widened), the

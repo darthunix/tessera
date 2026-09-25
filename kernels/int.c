@@ -19,6 +19,7 @@
 
 #include "fmgr.h"
 #include "utils/fmgroids.h"
+#include "utils/memutils.h"
 
 #include "tessera/bridge.h"
 #include "tessera/kernels.h"
@@ -60,12 +61,16 @@ typedef enum Aggregate
 	AGG_MAX_INT8
 } Aggregate;
 
-/* A comparison of a column with a scalar; the consumer puts the column first. */
+/*
+ * A comparison in any shape: a column with a scalar on either side, or two
+ * columns, which a join's residual clause compares.
+ */
 #define COMPARE(oid, code, fn) \
 	{{TESS_ABI_INITIALIZER(TESS_FUNCTION_ABI_VERSION, TessFunction), \
 	  .funcid = (oid), .kind = TESS_FUNCTION_PREDICATE, \
 	  .result_format = TESS_RESULT_DATUM, \
-	  .flags = TESS_FUNCTION_STRICT | TESS_FUNCTION_COLLATION_INSENSITIVE, \
+	  .flags = TESS_FUNCTION_STRICT | TESS_FUNCTION_COLLATION_INSENSITIVE | \
+	  TESS_FUNCTION_ANY_SHAPE, \
 	  .evaluate = (fn)}, (code)}
 
 /* A value function of the given result format and extra flags. */
@@ -186,17 +191,95 @@ valid_call(const TessFunctionCall *call)
 		call->args[1].struct_size >= TESS_FUNCTION_ARG_MIN_SIZE;
 }
 
-/* column op scalar: the consumer puts the column first. */
+/* The comparison with its sides swapped: scalar op column as column op' scalar. */
+static TessCompareOp
+flip(TessCompareOp op)
+{
+	switch (op)
+	{
+		case TESS_CMP_LT:
+			return TESS_CMP_GT;
+		case TESS_CMP_LE:
+			return TESS_CMP_GE;
+		case TESS_CMP_GT:
+			return TESS_CMP_LT;
+		case TESS_CMP_GE:
+			return TESS_CMP_LE;
+		default:
+			return op;
+	}
+}
+
+/*
+ * An int4 column widened into int8 Datums, for a comparison with an int8
+ * column: kept in memory of the module that grows with the batches.
+ */
+static const TessDatumColumn *
+widen(TessFunctionCall *call, const TessFunctionArg *arg)
+{
+	static Datum *values = NULL;
+	static uint64 *words = NULL;
+	static bool *isnull = NULL;
+	static int	capacity = 0;
+	static TessDatumColumn widened;
+	int			nrows = arg->column->nrows;
+	TessRowMask non_nulls;
+
+	if (nrows > capacity)
+	{
+		int			nwords = tess_row_mask_word_count(nrows);
+
+		if (values != NULL)
+		{
+			pfree(values);
+			pfree(words);
+			pfree(isnull);
+		}
+		values = MemoryContextAllocZero(TopMemoryContext, sizeof(Datum) * nrows);
+		words = MemoryContextAllocZero(TopMemoryContext, sizeof(uint64) * nwords);
+		isnull = MemoryContextAllocZero(TopMemoryContext, sizeof(bool) * nrows);
+		capacity = nrows;
+	}
+	non_nulls.nrows = nrows;
+	non_nulls.bits = words;
+	memset(words, 0, sizeof(uint64) * tess_row_mask_word_count(nrows));
+	if (tess_int4_to_int8(arg->column, arg->prepared, call->rows, values,
+						  &non_nulls, call->status) != TESS_OK)
+		return NULL;
+	for (int row = 0; row < nrows; row++)
+		isnull[row] = !tess_row_mask_contains(&non_nulls, row);
+	widened = (TessDatumColumn) TESS_STRUCT_INITIALIZER(TessDatumColumn);
+	widened.values = values;
+	widened.isnull = isnull;
+	widened.nrows = nrows;
+	return &widened;
+}
+
+/* int4 against int4, in any shape. */
 static TessStatusCode
 compare_evaluate(TessFunctionCall *call)
 {
+	const TessFunctionArg *left;
+	const TessFunctionArg *right;
+	TessCompareOp op;
+
 	if (!valid_call(call))
 		return invalid(call, "an int4 comparison takes two arguments");
-	if (call->args[0].column == NULL || call->args[1].column != NULL)
-		return invalid(call, "an int4 comparison takes a column and a scalar");
-	return tess_int4_filter(call->args[0].column, call->args[0].prepared,
-							call->rows, (TessCompareOp) operation(call),
-							DatumGetInt32(call->args[1].scalar), call->status);
+	left = &call->args[0];
+	right = &call->args[1];
+	op = (TessCompareOp) operation(call);
+	if (left->column != NULL && right->column != NULL)
+		return tess_int4_compare_columns(left->column, left->prepared,
+										 right->column, right->prepared,
+										 call->rows, op, call->status);
+	if (left->column != NULL)
+		return tess_int4_filter(left->column, left->prepared, call->rows, op,
+								DatumGetInt32(right->scalar), call->status);
+	if (right->column != NULL)
+		return tess_int4_filter(right->column, right->prepared, call->rows,
+								flip(op), DatumGetInt32(left->scalar),
+								call->status);
+	return invalid(call, "an int4 comparison needs a column argument");
 }
 
 /* Any shape but two scalars, which the consumer folds itself. */
@@ -251,27 +334,67 @@ negate_evaluate(TessFunctionCall *call)
 static TessStatusCode
 compare8_evaluate(TessFunctionCall *call)
 {
+	const TessFunctionArg *left;
+	const TessFunctionArg *right;
+	TessCompareOp op;
+
 	if (!valid_call(call))
 		return invalid(call, "an int8 comparison takes two arguments");
-	if (call->args[0].column == NULL || call->args[1].column != NULL)
-		return invalid(call, "an int8 comparison takes a column and a scalar");
-	return tess_int8_filter(call->args[0].column, call->args[0].prepared,
-							call->rows, (TessCompareOp) operation(call),
-							DatumGetInt64(call->args[1].scalar), call->status);
+	left = &call->args[0];
+	right = &call->args[1];
+	op = (TessCompareOp) operation(call);
+	if (left->column != NULL && right->column != NULL)
+		return tess_int8_compare_columns(left->column, left->prepared,
+										 right->column, right->prepared,
+										 call->rows, op, call->status);
+	if (left->column != NULL)
+		return tess_int8_filter(left->column, left->prepared, call->rows, op,
+								DatumGetInt64(right->scalar), call->status);
+	if (right->column != NULL)
+		return tess_int8_filter(right->column, right->prepared, call->rows,
+								flip(op), DatumGetInt64(left->scalar),
+								call->status);
+	return invalid(call, "an int8 comparison needs a column argument");
 }
 
-/* A bigint column against an integer scalar: the scalar widens. */
+static TessStatusCode compare_narrow(TessFunctionCall *call,
+									 const TessFunctionArg *column,
+									 TessCompareOp op, int64 scalar);
+
+/*
+ * A bigint against an integer: a column with a scalar that widens, an
+ * integer column against a bigint scalar as below, or two columns, the
+ * integer one widened.
+ */
 static TessStatusCode
 compare84_evaluate(TessFunctionCall *call)
 {
+	const TessFunctionArg *left;
+	const TessFunctionArg *right;
+	TessCompareOp op;
+
 	if (!valid_call(call))
 		return invalid(call, "an int8 comparison takes two arguments");
-	if (call->args[0].column == NULL || call->args[1].column != NULL)
-		return invalid(call, "an int8 comparison takes a column and a scalar");
-	return tess_int8_filter(call->args[0].column, call->args[0].prepared,
-							call->rows, (TessCompareOp) operation(call),
-							(int64) DatumGetInt32(call->args[1].scalar),
-							call->status);
+	left = &call->args[0];
+	right = &call->args[1];
+	op = (TessCompareOp) operation(call);
+	if (left->column != NULL && right->column != NULL)
+	{
+		const TessDatumColumn *widened = widen(call, right);
+
+		if (widened == NULL)
+			return call->status->code;
+		return tess_int8_compare_columns(left->column, left->prepared,
+										 widened, NULL, call->rows, op,
+										 call->status);
+	}
+	if (left->column != NULL)
+		return tess_int8_filter(left->column, left->prepared, call->rows, op,
+								(int64) DatumGetInt32(right->scalar),
+								call->status);
+	if (right->column != NULL)
+		return compare_narrow(call, right, flip(op), DatumGetInt64(left->scalar));
+	return invalid(call, "an int8 comparison needs a column argument");
 }
 
 /*
@@ -281,18 +404,11 @@ compare84_evaluate(TessFunctionCall *call)
  * every value satisfies (>= the least int4) or none does (< the least).
  */
 static TessStatusCode
-compare48_evaluate(TessFunctionCall *call)
+compare_narrow(TessFunctionCall *call, const TessFunctionArg *column,
+			   TessCompareOp op, int64 scalar)
 {
-	TessCompareOp op;
-	int64		scalar;
 	int32		narrow;
 
-	if (!valid_call(call))
-		return invalid(call, "an int4 comparison takes two arguments");
-	if (call->args[0].column == NULL || call->args[1].column != NULL)
-		return invalid(call, "an int4 comparison takes a column and a scalar");
-	op = (TessCompareOp) operation(call);
-	scalar = DatumGetInt64(call->args[1].scalar);
 	if (scalar > PG_INT32_MAX || scalar < PG_INT32_MIN)
 	{
 		bool		above = scalar > PG_INT32_MAX;
@@ -320,8 +436,44 @@ compare48_evaluate(TessFunctionCall *call)
 	}
 	else
 		narrow = (int32) scalar;
-	return tess_int4_filter(call->args[0].column, call->args[0].prepared,
-							call->rows, op, narrow, call->status);
+	return tess_int4_filter(column->column, column->prepared, call->rows, op,
+							narrow, call->status);
+}
+
+/*
+ * An integer against a bigint: an integer column with a bigint scalar as
+ * above, a bigint column with an integer scalar that widens, or two
+ * columns, the integer one widened.
+ */
+static TessStatusCode
+compare48_evaluate(TessFunctionCall *call)
+{
+	const TessFunctionArg *left;
+	const TessFunctionArg *right;
+	TessCompareOp op;
+
+	if (!valid_call(call))
+		return invalid(call, "an int4 comparison takes two arguments");
+	left = &call->args[0];
+	right = &call->args[1];
+	op = (TessCompareOp) operation(call);
+	if (left->column != NULL && right->column != NULL)
+	{
+		const TessDatumColumn *widened = widen(call, left);
+
+		if (widened == NULL)
+			return call->status->code;
+		return tess_int8_compare_columns(widened, NULL, right->column,
+										 right->prepared, call->rows, op,
+										 call->status);
+	}
+	if (left->column != NULL)
+		return compare_narrow(call, left, op, DatumGetInt64(right->scalar));
+	if (right->column != NULL)
+		return tess_int8_filter(right->column, right->prepared, call->rows,
+								flip(op), (int64) DatumGetInt32(left->scalar),
+								call->status);
+	return invalid(call, "an int4 comparison needs a column argument");
 }
 
 /* Any shape but two scalars, into a column of int8 Datums. */

@@ -11,6 +11,7 @@
 #include "optimizer/restrictinfo.h"
 #include "utils/fmgroids.h"
 
+#include "tessera/expr.h"
 #include "tessera/kernel_ops.h"
 #include "tessera/plan.h"
 #include "tessera/runtime.h"
@@ -393,6 +394,8 @@ join_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 	List	   *outer_keys;
 	List	   *inner_keys;
 	List	   *residual;
+	List	   *batch_residual = NIL;
+	List	   *row_residual = NIL;
 	List	   *outer_columns = NIL;
 	List	   *inner_columns = NIL;
 	Relids		outer_relids;
@@ -409,6 +412,14 @@ join_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 	outer_keys = lsecond(info.expressions);
 	inner_keys = lthird(info.expressions);
 	residual = lfourth(info.expressions);
+	/* A clause over one column value and a column or a scalar runs in batches. */
+	foreach_ptr(Node, clause, residual)
+	{
+		if (tess_expr_supports_filter(clause, 0))
+			batch_residual = lappend(batch_residual, clause);
+		else
+			row_residual = lappend(row_residual, clause);
+	}
 	data = (List *) info.node_data;
 	outer_relids = outer.path->parent->relids;
 	for (int side = 0; side < 2; side++)
@@ -462,6 +473,7 @@ join_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 	tess_plan_write_int_list(writer, "inner_keys", inner_columns);
 	tess_plan_write_int_list(writer, "outer_kinds", linitial(data));
 	tess_plan_write_int_list(writer, "inner_kinds", lsecond(data));
+	tess_plan_write_int(writer, "batch_residual", list_length(batch_residual));
 	tess_plan_write_int(writer, "inner_unique", linitial_int(lthird(data)));
 	tess_plan_write_int(writer, "inner_rows", lsecond_int(lthird(data)));
 
@@ -469,11 +481,13 @@ join_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 	config.layout_policy = TESS_LAYOUT_PROJECTED;
 	config.explicit_layout = &layout;
 	/*
-	 * The key clauses, then the residual ones: the node shows and applies
-	 * both, and a plan qual would also be shown by EXPLAIN as a filter.
+	 * The key clauses, then the residual ones, those the expression
+	 * compiler takes for whole batches first: the node shows and applies
+	 * them all, and a plan qual would also be shown by EXPLAIN as a filter.
 	 */
 	config.qual = NIL;
-	config.expressions = list_concat_copy(hash_clauses, residual);
+	config.expressions = list_concat(list_concat_copy(hash_clauses, batch_residual),
+									 row_residual);
 	config.node_data = (Node *) tess_plan_writer_finish(writer);
 	config.scan_targetlist = scan;
 	config.scanrelid = 0;

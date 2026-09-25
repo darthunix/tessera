@@ -43,6 +43,36 @@ pub unsafe extern "C" fn tess_int8_filter(
     }
 }
 
+/// `tess_int8_compare_columns`: keep in `rows` the selected rows where both
+/// int8 columns are non-NULL and `left op right`.
+///
+/// # Safety
+///
+/// As for [`super::int32::tess_int4_compare_columns`], with columns
+/// satisfying [`DatumColumn::int64`]'s contract.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tess_int8_compare_columns(
+    left: *const DatumColumn,
+    left_prepared: *const Mask,
+    right: *const DatumColumn,
+    right_prepared: *const Mask,
+    rows: *mut Mask,
+    op: c_uint,
+    status: *mut Status,
+) -> Code {
+    // SAFETY: the caller's status contract.
+    unsafe {
+        guard(status, || {
+            let op = compare_op(op)?;
+            let left = reader::<i64>(left, left_prepared)?;
+            let right = reader::<i64>(right, right_prepared)?;
+            let rows = rows.as_mut().context("a null row mask")?;
+            let mut rows = rows.mask()?;
+            int64::compare_columns(&left, &right, &mut rows, op)
+        })
+    }
+}
+
 /// `tess_int8_arith_scalar`: `column op scalar` into a dense int8 result.
 ///
 /// # Safety

@@ -21,13 +21,15 @@ pub use cast::tess_int4_to_int8;
 pub use column::DatumColumn;
 pub use count::tess_count;
 pub use int32::{
-    tess_int4_arith_columns, tess_int4_arith_scalar, tess_int4_arith_scalar_left, tess_int4_count,
-    tess_int4_filter, tess_int4_hash, tess_int4_hash_next, tess_int4_max, tess_int4_min,
-    tess_int4_sum, tess_kernels_abi_version, tess_kernels_layout, tess_kernels_test_panic,
+    tess_int4_arith_columns, tess_int4_arith_scalar, tess_int4_arith_scalar_left,
+    tess_int4_compare_columns, tess_int4_count, tess_int4_filter, tess_int4_hash,
+    tess_int4_hash_next, tess_int4_max, tess_int4_min, tess_int4_sum, tess_kernels_abi_version,
+    tess_kernels_layout, tess_kernels_test_panic,
 };
 pub use int64::{
-    tess_int8_arith_columns, tess_int8_arith_scalar, tess_int8_arith_scalar_left, tess_int8_filter,
-    tess_int8_hash, tess_int8_hash_next, tess_int8_max, tess_int8_min,
+    tess_int8_arith_columns, tess_int8_arith_scalar, tess_int8_arith_scalar_left,
+    tess_int8_compare_columns, tess_int8_filter, tess_int8_hash, tess_int8_hash_next,
+    tess_int8_max, tess_int8_min,
 };
 pub use mask::Mask;
 pub use status::{Code, MESSAGE_SIZE, Status};

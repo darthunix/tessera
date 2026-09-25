@@ -565,8 +565,10 @@ NULL bits once per round, only when a column asked for holds a NULL
 somewhere in the table. A key held by several inner rows has as many
 records, and `tess_table_next_in_group` gives the next round in one step
 per row from the node's own copy of the round's rows, since a parent may
-narrow the published mask. The residual clauses are applied row by row
-through `TessQual` (see [runtime.md](runtime.md)) to each round or
+narrow the published mask. The residual clauses are applied through
+`TessQual` (see [runtime.md](runtime.md)), those the expression compiler
+takes, such as `f.f1 > d.d1 * 10`, a column against a chain over the
+other side, in batches and the others row by row, to each round or
 compact batch before it is published: they narrow the published
 selection only, the round's own rows staying whole for the next round,
 and a batch they leave empty is skipped. There is no second round when the planner
@@ -595,8 +597,8 @@ gets a `Material` above it. A rescan builds the table again only when
 the inner child has changed parameters, as the core's hash join decides,
 and otherwise probes the same table with the rescanned outer child.
 
-`EXPLAIN` shows the key clauses as `Hash Cond` and the residual ones as
-`Join Filter`. With `ANALYZE` it adds
+`EXPLAIN` shows the key clauses as `Hash Cond`, the residual ones that run
+in batches as `Batch Join Filter` and the others as `Join Filter`. With `ANALYZE` it adds
 the bucket count of the last table built, `Memory Usage`, the most the
 table and the copies of inner values took, `Overrun`, what of it
 exceeded `hash_mem` (shown only then: the node keeps the whole inner side

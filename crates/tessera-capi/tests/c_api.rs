@@ -6,10 +6,11 @@ use std::ptr;
 
 use tessera_capi::c::{
     Code, DatumColumn, Mask, Status, tess_count, tess_int4_arith_columns, tess_int4_arith_scalar,
-    tess_int4_arith_scalar_left, tess_int4_count, tess_int4_filter, tess_int4_hash,
-    tess_int4_hash_next, tess_int4_max, tess_int4_min, tess_int4_sum, tess_int4_to_int8,
-    tess_int8_arith_columns, tess_int8_arith_scalar, tess_int8_arith_scalar_left, tess_int8_filter,
-    tess_int8_hash, tess_int8_hash_next, tess_int8_max, tess_int8_min, tess_kernels_abi_version,
+    tess_int4_arith_scalar_left, tess_int4_compare_columns, tess_int4_count, tess_int4_filter,
+    tess_int4_hash, tess_int4_hash_next, tess_int4_max, tess_int4_min, tess_int4_sum,
+    tess_int4_to_int8, tess_int8_arith_columns, tess_int8_arith_scalar,
+    tess_int8_arith_scalar_left, tess_int8_compare_columns, tess_int8_filter, tess_int8_hash,
+    tess_int8_hash_next, tess_int8_max, tess_int8_min, tess_kernels_abi_version,
     tess_kernels_layout, tess_kernels_test_panic,
 };
 use tessera_kernels::int32::{hash_combine, murmurhash32};
@@ -1149,4 +1150,93 @@ fn a_panic_becomes_a_status_and_the_library_stays_usable() {
     assert_eq!(code, Code::Ok);
     assert_eq!(status.code, Code::Ok);
     assert_eq!(fixture.words, expected);
+}
+
+#[test]
+fn column_comparisons_over_datum_storage_match_a_model() {
+    // Whole words and a tail, NULLs on both sides, values that tie often.
+    let nrows = 200_usize;
+    let left: Vec<i64> = (0..nrows as i64).map(|row| (row * 7) % 11 - 5).collect();
+    let right: Vec<i64> = (0..nrows as i64).map(|row| (row * 5) % 11 - 5).collect();
+    let left_null: Vec<bool> = (0..nrows).map(|row| row % 9 == 0).collect();
+    let right_null: Vec<bool> = (0..nrows).map(|row| row % 13 == 0).collect();
+    let selected: Vec<u64> = vec![u64::MAX, u64::MAX, 0x5555_5555_5555_5555, (1 << 8) - 1];
+    for (wide, scale) in [(false, 1_i64), (true, 1_i64 << 40)] {
+        let datums = |values: &[i64]| -> Vec<u64> {
+            values
+                .iter()
+                .map(|&value| {
+                    if wide {
+                        (value * scale) as u64
+                    } else {
+                        i64::from(value as i32) as u64
+                    }
+                })
+                .collect()
+        };
+        let (left_datums, right_datums) = (datums(&left), datums(&right));
+        let column = |values: &Vec<u64>, isnull: &Vec<bool>| DatumColumn {
+            struct_size: size_of::<DatumColumn>(),
+            values: values.as_ptr(),
+            isnull: isnull.as_ptr(),
+            nrows: nrows as i32,
+        };
+        let (lhs, rhs) = (
+            column(&left_datums, &left_null),
+            column(&right_datums, &right_null),
+        );
+        for op in 0..6_u32 {
+            let mut words = selected.clone();
+            let mut rows = Mask {
+                nrows: nrows as i32,
+                bits: words.as_mut_ptr(),
+            };
+            let mut status = Status::new();
+            // SAFETY: local columns and masks of the declared sizes.
+            let code = unsafe {
+                if wide {
+                    tess_int8_compare_columns(
+                        &raw const lhs,
+                        ptr::null(),
+                        &raw const rhs,
+                        ptr::null(),
+                        &raw mut rows,
+                        op,
+                        &raw mut status,
+                    )
+                } else {
+                    tess_int4_compare_columns(
+                        &raw const lhs,
+                        ptr::null(),
+                        &raw const rhs,
+                        ptr::null(),
+                        &raw mut rows,
+                        op,
+                        &raw mut status,
+                    )
+                }
+            };
+            assert_eq!(code, Code::Ok, "{}", status.message());
+            for row in 0..nrows {
+                let (a, b) = (left[row], right[row]);
+                let holds = match op {
+                    0 => a == b,
+                    1 => a != b,
+                    2 => a < b,
+                    3 => a <= b,
+                    4 => a > b,
+                    _ => a >= b,
+                };
+                let kept = selected[row / 64] >> (row % 64) & 1 == 1
+                    && !left_null[row]
+                    && !right_null[row]
+                    && holds;
+                assert_eq!(
+                    words[row / 64] >> (row % 64) & 1 == 1,
+                    kept,
+                    "wide {wide} op {op} row {row}"
+                );
+            }
+        }
+    }
 }

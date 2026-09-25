@@ -100,6 +100,8 @@ typedef struct TessHashJoinState
 	TessTableKey table_keys[TESS_TABLE_MAX_KEYS];
 	/* Every outer row matches at most one inner row: no second round. */
 	bool		inner_unique;
+	/* The residual clauses after the keys that run in batches, first. */
+	int			nbatch_residual;
 	/* The planner's estimate of the inner rows, the table's first capacity. */
 	int			inner_rows;
 	/* The types of the scan tuple columns, for copying inner values. */
@@ -998,6 +1000,7 @@ read_node_data(TessHashJoinState *state, const List *data)
 	ListCell   *column;
 	int			index = 0;
 
+	state->nbatch_residual = tess_plan_read_int(reader, "batch_residual");
 	state->inner_unique = tess_plan_read_int(reader, "inner_unique") != 0;
 	state->inner_rows = tess_plan_read_int(reader, "inner_rows");
 	tess_plan_reader_finish(reader);
@@ -1088,7 +1091,7 @@ join_begin(CustomScanState *css, EState *estate, int eflags)
 	state->values_context = AllocSetContextCreate(estate->es_query_cxt,
 												  "TessHashJoin values",
 												  ALLOCSET_DEFAULT_SIZES);
-	/* Row by row: a residual join clause compares columns of both sides. */
+	/* The residual clauses: those the compiler took in batches, then by rows. */
 	state->scan_layout = (TessLayout) TESS_STRUCT_INITIALIZER(TessLayout);
 	state->scan_layout.ncolumns = state->ncolumns;
 	state->scan_layout.ntargets = state->ncolumns;
@@ -1097,9 +1100,12 @@ join_begin(CustomScanState *css, EState *estate, int eflags)
 	{
 		TessQualConfig qual = TESS_STRUCT_INITIALIZER(TessQualConfig);
 
+		List	   *residual = list_copy_tail(cscan->custom_exprs, state->nkeys);
+
 		qual.parent_context = estate->es_query_cxt;
 		qual.parent = &css->ss.ps;
-		qual.row_clauses = list_copy_tail(cscan->custom_exprs, state->nkeys);
+		qual.batch_clauses = list_copy_head(residual, state->nbatch_residual);
+		qual.row_clauses = list_copy_tail(residual, state->nbatch_residual);
 		qual.scan_slot = css->ss.ss_ScanTupleSlot;
 		qual.scan_tuple = &state->scan_layout;
 		state->qual = tess_qual_create(&qual);
@@ -1282,10 +1288,21 @@ join_explain(CustomScanState *css, List *ancestors, ExplainState *es)
 																					  state->nkeys)),
 										   context, useprefix, false), es);
 	if (state->qual != NULL)
-		ExplainPropertyText("Join Filter",
-							deparse_expression((Node *) make_ands_explicit(list_copy_tail(cscan->custom_exprs,
-																						  state->nkeys)),
-											   context, useprefix, false), es);
+	{
+		/* The residual clauses the compiler took in batches, then the others. */
+		List	   *residual = list_copy_tail(cscan->custom_exprs, state->nkeys);
+		List	   *batch = list_copy_head(residual, state->nbatch_residual);
+		List	   *rows = list_copy_tail(residual, state->nbatch_residual);
+
+		if (batch != NIL)
+			ExplainPropertyText("Batch Join Filter",
+								deparse_expression((Node *) make_ands_explicit(batch),
+												   context, useprefix, false), es);
+		if (rows != NIL)
+			ExplainPropertyText("Join Filter",
+								deparse_expression((Node *) make_ands_explicit(rows),
+												   context, useprefix, false), es);
+	}
 	if (!es->analyze)
 		return;
 	if (state->stats != NULL)

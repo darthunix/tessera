@@ -153,10 +153,11 @@ tessera_test_kernels_module_registry(PG_FUNCTION_ARGS)
 	{
 		const TessFunction *function = functions->find(predicates[i]);
 
+		/* Comparisons take a column and a scalar on either side, or two columns. */
 		if (function == NULL || function->funcid != predicates[i] ||
 			function->kind != TESS_FUNCTION_PREDICATE ||
 			(function->flags & TESS_FUNCTION_STRICT) == 0 ||
-			(function->flags & TESS_FUNCTION_ANY_SHAPE) != 0 ||
+			(function->flags & TESS_FUNCTION_ANY_SHAPE) == 0 ||
 			function->evaluate == NULL)
 			PG_RETURN_BOOL(false);
 	}
@@ -255,6 +256,49 @@ tessera_test_kernels_module_predicate(PG_FUNCTION_ARGS)
 				 scalar_arg(25), &selection, NULL, &non_nulls,
 				 &status) != TESS_OK || selection != 4)
 		PG_RETURN_BOOL(false);
+	/* A scalar on the left: 25 > x keeps the first row. */
+	selection = 7;
+	if (evaluate(functions->find(F_INT4GT), scalar_arg(25), column_arg(&c),
+				 &selection, NULL, &non_nulls, &status) != TESS_OK ||
+		selection != 1)
+		PG_RETURN_BOOL(false);
+	{
+		/* Two columns: 10, NULL, 30 against 15, 20, 30. */
+		Column		d;
+		Column		wide;
+		TessFunctionArg bigint;
+
+		init_column(&d, 15, 20, 30, false);
+		selection = 7;
+		if (evaluate(functions->find(F_INT4LT), column_arg(&c), column_arg(&d),
+					 &selection, NULL, &non_nulls, &status) != TESS_OK ||
+			selection != 1)
+			PG_RETURN_BOOL(false);
+		selection = 7;
+		if (evaluate(functions->find(F_INT4EQ), column_arg(&c), column_arg(&d),
+					 &selection, NULL, &non_nulls, &status) != TESS_OK ||
+			selection != 4)
+			PG_RETURN_BOOL(false);
+		/* int4 against int8 columns, either way: the int4 one widens. */
+		init_column8(&wide, 15, 20, ((int64) 1) << 40, false);
+		bigint = column_arg(&wide);
+		selection = 7;
+		if (evaluate(functions->find(F_INT48LT), column_arg(&c), bigint,
+					 &selection, NULL, &non_nulls, &status) != TESS_OK ||
+			selection != 5)
+			PG_RETURN_BOOL(false);
+		selection = 7;
+		if (evaluate(functions->find(F_INT84GT), bigint, column_arg(&c),
+					 &selection, NULL, &non_nulls, &status) != TESS_OK ||
+			selection != 5)
+			PG_RETURN_BOOL(false);
+		/* A bigint scalar on the left of an integer column, past its range. */
+		selection = 7;
+		if (evaluate(functions->find(F_INT84GT), scalar_arg8(((int64) 1) << 40),
+					 column_arg(&c), &selection, NULL, &non_nulls,
+					 &status) != TESS_OK || selection != 5)
+			PG_RETURN_BOOL(false);
+	}
 	PG_RETURN_BOOL(true);
 }
 
@@ -379,12 +423,12 @@ tessera_test_kernels_module_errors(PG_FUNCTION_ARGS)
 		status.code != TESS_ERROR_DIVISION_BY_ZERO ||
 		strcmp(status.sqlstate, "22012") != 0)
 		PG_RETURN_BOOL(false);
-	/* A comparison of two columns is not supported. */
-	if (evaluate(functions->find(F_INT4EQ), column_arg(&c), column_arg(&c),
+	/* A comparison needs a column: two scalars are refused. */
+	if (evaluate(functions->find(F_INT4EQ), scalar_arg(1), scalar_arg(1),
 				 &selection, NULL, &non_nulls,
 				 &status) != TESS_ERROR_INVALID_ARGUMENT ||
 		status.code != TESS_ERROR_INVALID_ARGUMENT ||
-		strstr(status.message, "scalar") == NULL)
+		strstr(status.message, "column") == NULL)
 		PG_RETURN_BOOL(false);
 	/* Two scalars are folded by the consumer, not evaluated. */
 	if (evaluate(functions->find(F_INT4PL), scalar_arg(1), scalar_arg(2),
@@ -442,7 +486,7 @@ tessera_test_kernels_module_int8(PG_FUNCTION_ARGS)
 
 		if (function == NULL || function->kind != TESS_FUNCTION_PREDICATE ||
 			(function->flags & TESS_FUNCTION_STRICT) == 0 ||
-			(function->flags & TESS_FUNCTION_ANY_SHAPE) != 0)
+			(function->flags & TESS_FUNCTION_ANY_SHAPE) == 0)
 			PG_RETURN_BOOL(false);
 	}
 	for (i = 0; i < lengthof(values); i++)
