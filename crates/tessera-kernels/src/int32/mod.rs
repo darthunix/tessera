@@ -8,6 +8,7 @@
 
 mod aggregate;
 mod arith;
+mod compare;
 pub(crate) mod divisor;
 mod filter;
 pub(crate) mod hash;
@@ -16,6 +17,7 @@ pub use crate::ops::{ArithOp, ArithmeticError, CompareOp};
 pub use aggregate::{count, max, min, sum};
 pub(crate) use arith::Side;
 pub use arith::{arith_columns, arith_scalar, arith_scalar_left};
+pub use compare::compare_columns;
 pub(crate) use divisor::Divisor;
 pub use filter::filter;
 pub use hash::{NullKeys, hash, hash_combine, hash_next, murmurhash32};

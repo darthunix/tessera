@@ -14,6 +14,7 @@
 
 mod aggregate;
 mod arith;
+mod compare;
 mod divisor;
 mod filter;
 mod hash;
@@ -21,6 +22,7 @@ mod hash;
 pub use aggregate::{max, min};
 pub(crate) use arith::Side;
 pub use arith::{arith_columns, arith_scalar, arith_scalar_left};
+pub use compare::compare_columns;
 pub(crate) use divisor::Divisor;
 pub use filter::filter;
 pub use hash::{NullKeys, fold, hash, hash_combine, hash_next, murmurhash32};
