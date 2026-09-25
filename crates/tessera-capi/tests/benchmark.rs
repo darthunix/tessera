@@ -18,6 +18,9 @@ mod arithmetic64;
 #[path = "../benches/support/casting.rs"]
 #[allow(dead_code)]
 mod casting;
+#[path = "../benches/support/comparing.rs"]
+#[allow(dead_code)]
+mod comparing;
 #[path = "../benches/support/filtering.rs"]
 #[allow(dead_code)]
 mod filtering;
@@ -578,4 +581,30 @@ fn large_table_keys_have_buckets_of_their_own() -> Result<()> {
         assert!(seen.insert(key), "key {key} is present and absent or twice");
     }
     tabling_large::check(&mut setup)
+}
+
+#[test]
+fn column_comparisons_match_the_model_on_every_case() -> Result<()> {
+    for pair in comparing::cases() {
+        let [left, right] = &pair;
+        for op in [
+            tessera_kernels::int32::CompareOp::Lt,
+            tessera_kernels::int32::CompareOp::Eq,
+            tessera_kernels::int32::CompareOp::Ge,
+        ] {
+            let (l, r) = (left.dense_column()?, right.dense_column()?);
+            comparing::check(
+                &comparing::input(&l, &r, &pair, op),
+                &pair,
+                comparing::dense_reference,
+            )?;
+            let (l, r) = (left.datum_column()?, right.datum_column()?);
+            comparing::check(
+                &comparing::input(&l, &r, &pair, op),
+                &pair,
+                comparing::datum_reference,
+            )?;
+        }
+    }
+    Ok(())
 }

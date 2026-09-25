@@ -5,6 +5,9 @@ The benchmark programs:
 - [column_reader](column_reader.rs) reads and sums selected, non-NULL values
   from dense and PostgreSQL Datum storage through the reader API.
 - [filter_int32](filter_int32.rs) filters values from the same representations.
+- [compare_int32](compare_int32.rs) keeps the rows where one int4 column
+  is less than another, both dense or both Datum, with NULLs in each,
+  against an independent scalar loop.
 - [aggregate_int32](aggregate_int32.rs) runs the `sum`, `min` and `count`
   kernels over the reading cases.
 - [arith_int32](arith_int32.rs) computes `x + 7`, `x * 7`, `x / 7` and

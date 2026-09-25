@@ -31,7 +31,7 @@ struct Options {
     base: String,
     #[arg(long, value_name = "REF", default_value = "WORKTREE")]
     candidate: String,
-    #[arg(long, value_parser = ["column_reader", "filter_int32", "aggregate_int32", "arith_int32", "hash_int32", "filter_int64", "arith_int64", "aggregate_int64", "hash_int64", "cast_int32", "table_int32", "table_large"])]
+    #[arg(long, value_parser = ["column_reader", "filter_int32", "compare_int32", "aggregate_int32", "arith_int32", "hash_int32", "filter_int64", "arith_int64", "aggregate_int64", "hash_int64", "cast_int32", "table_int32", "table_large"])]
     bench: Option<String>,
     #[arg(long, value_name = "SUBSTRING")]
     filter: Vec<String>,
@@ -346,6 +346,7 @@ fn compare(repo: &Path, root: &Path, options: &Options, timing: &mut Timing) -> 
             vec![
                 "column_reader",
                 "filter_int32",
+                "compare_int32",
                 "aggregate_int32",
                 "arith_int32",
                 "hash_int32",
