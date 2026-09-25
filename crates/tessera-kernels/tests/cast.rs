@@ -4,7 +4,8 @@ use std::mem::MaybeUninit;
 
 use anyhow::Result;
 use tessera_core::{ColumnReader, ColumnView, RowMask, RowMaskView};
-use tessera_kernels::cast::int4_to_int8;
+use tessera_kernels::cast::{int4_to_int8, int8_to_int4};
+use tessera_kernels::ops::ArithmeticError;
 
 /// The same values without bulk storage: every call takes the row path.
 struct RowsOnly<'a>(&'a ColumnView<'a, i32>);
@@ -145,5 +146,75 @@ fn dimension_errors_come_before_any_mutation() -> Result<()> {
     assert!(int4_to_int8(&short_column, &rows, &mut out, &mut mask).is_err());
     assert_eq!(mask.as_view().selected_count(), 0);
     assert!(out.iter().all(|slot| written(slot) == SENTINEL));
+    Ok(())
+}
+
+#[allow(unsafe_code)]
+fn written32(slot: &MaybeUninit<i32>) -> i32 {
+    // SAFETY: every slot was created initialized and the kernel only
+    // overwrites slots with initialized values.
+    unsafe { slot.assume_init() }
+}
+
+fn narrow(values: &[i64], nulls: &[bool], selected: &[bool]) -> Result<(Vec<i32>, Vec<u64>)> {
+    let nrows = values.len();
+    let non_null: Vec<bool> = nulls.iter().map(|null| !null).collect();
+    let non_null_words = words_for(&non_null);
+    let column = ColumnView::try_new(values, Some(RowMaskView::try_new(nrows, &non_null_words)?))?;
+    let selection = words_for(selected);
+    let rows = RowMaskView::try_new(nrows, &selection)?;
+    let mut out = vec![MaybeUninit::new(0x5a5a_5a5a); nrows];
+    let mut words = vec![0; nrows.div_ceil(64)];
+    int8_to_int4(
+        &column,
+        &rows,
+        &mut out,
+        &mut RowMask::try_new(nrows, &mut words)?,
+    )?;
+    Ok((out.iter().map(written32).collect(), words))
+}
+
+#[test]
+fn narrowing_keeps_every_int4_value_and_the_nulls() -> Result<()> {
+    let nrows = 2 * 64 + 5;
+    let edges = [i64::from(i32::MIN), -1, 0, 1, i64::from(i32::MAX)];
+    let values: Vec<i64> = (0..nrows).map(|row| edges[row % edges.len()]).collect();
+    // A NULL placeholder outside the int4 range never counts.
+    let nulls: Vec<bool> = (0..nrows).map(|row| row % 7 == 3).collect();
+    let values: Vec<i64> = values
+        .iter()
+        .zip(&nulls)
+        .map(|(&value, &null)| if null { 1 << 40 } else { value })
+        .collect();
+    let selected: Vec<bool> = (0..nrows).map(|row| row % 3 != 1).collect();
+    let (out, words) = narrow(&values, &nulls, &selected)?;
+    for row in 0..nrows {
+        let present = words[row / 64] >> (row % 64) & 1 == 1;
+        assert_eq!(present, selected[row] && !nulls[row], "row {row}");
+        if present {
+            assert_eq!(i64::from(out[row]), values[row], "row {row}");
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn narrowing_fails_on_a_selected_value_past_the_int4_range() -> Result<()> {
+    for past in [
+        i64::from(i32::MAX) + 1,
+        i64::from(i32::MIN) - 1,
+        i64::MAX,
+        i64::MIN,
+    ] {
+        let values = [1, past, 2];
+        // Left out of the selection, the value is never read.
+        assert!(narrow(&values, &[false; 3], &[true, false, true]).is_ok());
+        let error = narrow(&values, &[false; 3], &[true; 3]).unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<ArithmeticError>().copied(),
+            Some(ArithmeticError::IntegerOutOfRange),
+            "{past}"
+        );
+    }
     Ok(())
 }

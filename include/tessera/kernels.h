@@ -330,4 +330,17 @@ extern TessStatusCode tess_int4_to_int8(const TessDatumColumn *column,
 										TessRowMask *non_nulls,
 										TessStatus *status);
 
+/*
+ * The selected int8 values narrowed into int32 values, with the same
+ * output contract; a selected non-NULL value outside the int4 range fails
+ * with TESS_ERROR_INTEGER_OUT_OF_RANGE, 22003 "integer out of range", as
+ * the cast int4(bigint).
+ */
+extern TessStatusCode tess_int8_to_int4(const TessDatumColumn *column,
+										const TessRowMask *prepared,
+										const TessRowMask *rows,
+										int32 *values,
+										TessRowMask *non_nulls,
+										TessStatus *status);
+
 #endif							/* TESSERA_KERNELS_H */

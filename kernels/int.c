@@ -41,6 +41,7 @@ static TessStatusCode compare8_evaluate(TessFunctionCall *call);
 static TessStatusCode arith8_evaluate(TessFunctionCall *call);
 static TessStatusCode negate8_evaluate(TessFunctionCall *call);
 static TessStatusCode cast_evaluate(TessFunctionCall *call);
+static TessStatusCode narrow_evaluate(TessFunctionCall *call);
 
 /* The aggregate an AGGREGATE description computes. */
 typedef enum Aggregate
@@ -161,6 +162,8 @@ static const Function functions[] = {
 	VALUE(F_INT8UM, TESS_ARITH_SUB, TESS_RESULT_DATUM, 0, negate8_evaluate),
 	/* int8(int4): the cast, a column of int8 Datums */
 	VALUE(F_INT8_INT4, 0, TESS_RESULT_DATUM, 0, cast_evaluate),
+	/* int4(int8): the explicit cast, 22003 past the int4 range */
+	VALUE(F_INT4_INT8, 0, TESS_RESULT_INT32, 0, narrow_evaluate),
 	AGGREGATE(F_MIN_INT8, AGG_MIN_INT8),
 	AGGREGATE(F_MAX_INT8, AGG_MAX_INT8),
 };
@@ -379,6 +382,21 @@ cast_evaluate(TessFunctionCall *call)
 	return tess_int4_to_int8(call->args[0].column, call->args[0].prepared,
 							 call->rows, call->values, call->non_nulls,
 							 call->status);
+}
+
+/* int4(int8): the int8 column narrowed into int32 values. */
+static TessStatusCode
+narrow_evaluate(TessFunctionCall *call)
+{
+	if (call == NULL || call->struct_size < TESS_FUNCTION_CALL_MIN_SIZE ||
+		call->nargs != 1 || call->args == NULL ||
+		call->args[0].struct_size < TESS_FUNCTION_ARG_MIN_SIZE)
+		return invalid(call, "the cast to int4 takes one argument");
+	if (call->args[0].column == NULL)
+		return invalid(call, "the cast to int4 takes a column");
+	return tess_int8_to_int4(call->args[0].column, call->args[0].prepared,
+							 call->rows, (int32 *) call->values,
+							 call->non_nulls, call->status);
 }
 
 /*

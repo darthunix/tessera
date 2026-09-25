@@ -577,6 +577,25 @@ tessera_test_kernels_module_int8(PG_FUNCTION_ARGS)
 		non_nulls != 5 || DatumGetInt64(datums[0]) != PG_INT32_MIN ||
 		DatumGetInt64(datums[2]) != PG_INT32_MAX)
 		PG_RETURN_BOOL(false);
+	/* The cast back: int8 values narrowed, and 22003 past the int4 range. */
+	{
+		int32		narrow[3];
+
+		init_column8(&c, PG_INT32_MIN, 20, PG_INT32_MAX, true);
+		selection = 7;
+		if (functions->find(F_INT4_INT8) == NULL ||
+			functions->find(F_INT4_INT8)->result_format != TESS_RESULT_INT32 ||
+			evaluate_one(functions->find(F_INT4_INT8), column_arg(&c),
+						 &selection, narrow, &non_nulls, &status) != TESS_OK ||
+			non_nulls != 5 || narrow[0] != PG_INT32_MIN || narrow[2] != PG_INT32_MAX)
+			PG_RETURN_BOOL(false);
+		init_column8(&c, big, 20, 30, false);
+		if (evaluate_one(functions->find(F_INT4_INT8), column_arg(&c),
+						 &selection, narrow, &non_nulls,
+						 &status) != TESS_ERROR_INTEGER_OUT_OF_RANGE ||
+			strcmp(status.message, "integer out of range") != 0)
+			PG_RETURN_BOOL(false);
+	}
 	/* Aggregates over int8, and the count over them. */
 	init_column8(&c, 10 * big, 20 * big, 30 * big, true);
 	arg = column_arg(&c);

@@ -1,4 +1,5 @@
-//! Widening of int4 values to int8, as PostgreSQL's `int8(int4)` cast.
+//! Widening of int4 values to int8, as PostgreSQL's `int8(int4)` cast, and
+//! narrowing of int8 values to int4, as its `int4(int8)` cast.
 //!
 //! Every selected non-NULL value is sign-extended into a dense int8
 //! result in the caller's buffers, with the output contract of the
@@ -21,6 +22,7 @@ use anyhow::{Result, ensure};
 use tessera_core::{ColumnReader, RowMask, RowMaskView};
 
 use crate::int32::BULK_MIN_ROWS;
+use crate::ops::ArithmeticError;
 
 /// Widen the selected int4 values into `values` and `non_nulls`.
 ///
@@ -111,6 +113,74 @@ fn word_rows<C: ColumnReader<Value = i32>>(
         present |= u64::from(value.is_some()) << (row % 64);
     }
     Ok(present)
+}
+
+/// Narrow the selected int8 values into `values` and `non_nulls`, with the
+/// output contract of [`int4_to_int8`]; a selected non-NULL value outside
+/// the int4 range fails the call.
+///
+/// Row by row: the cast serves an explicit `bigint_column::int`, not the
+/// functions over an int4 and an int8, which widen instead.
+///
+/// # Errors
+///
+/// Different row counts fail before any mutation. A reader error and
+/// [`ArithmeticError::IntegerOutOfRange`] (SQLSTATE 22003, "integer out of
+/// range", as PostgreSQL reports the cast) fail the call with the outputs
+/// unspecified. Empty selections are valid.
+///
+/// ```
+/// use std::mem::MaybeUninit;
+/// use tessera_core::{ColumnView, RowMask, RowMaskView};
+/// use tessera_kernels::cast::int8_to_int4;
+///
+/// let values = [i64::from(i32::MIN), -1, 1 << 40, i64::from(i32::MAX)];
+/// let column = ColumnView::try_new(&values, None)?;
+/// let rows = RowMaskView::try_new(4, &[0b1011])?;
+/// let mut out = [MaybeUninit::uninit(); 4];
+/// let mut words = [0];
+/// int8_to_int4(&column, &rows, &mut out, &mut RowMask::try_new(4, &mut words)?)?;
+/// assert_eq!(words, [0b1011]);
+/// // SAFETY: the mask marks the rows the kernel wrote.
+/// assert_eq!(unsafe { out[3].assume_init() }, i32::MAX);
+/// // The row past the int4 range fails once it is selected.
+/// let all = RowMaskView::try_new(4, &[0b1111])?;
+/// assert!(int8_to_int4(&column, &all, &mut out, &mut RowMask::try_new(4, &mut words)?).is_err());
+/// # Ok::<(), anyhow::Error>(())
+/// ```
+pub fn int8_to_int4<C: ColumnReader<Value = i64>>(
+    column: &C,
+    rows: &RowMaskView<'_>,
+    values: &mut [MaybeUninit<i32>],
+    non_nulls: &mut RowMask<'_>,
+) -> Result<()> {
+    let nrows = rows.nrows();
+    ensure!(
+        values.len() == nrows && non_nulls.as_view().nrows() == nrows,
+        "result and selection row counts differ"
+    );
+    ensure!(
+        column.nrows() == nrows,
+        "column and selection row counts differ"
+    );
+    for index in 0..nrows.div_ceil(64) {
+        let selected = rows.word(index).unwrap();
+        let mut present = 0;
+        if selected != 0 {
+            for (row, value) in column.word_values(index, selected)? {
+                let narrow = match value {
+                    Some(value) => {
+                        i32::try_from(value).map_err(|_| ArithmeticError::IntegerOutOfRange)?
+                    }
+                    None => 0,
+                };
+                values[row].write(narrow);
+                present |= u64::from(value.is_some()) << (row % 64);
+            }
+        }
+        non_nulls.set_word(index, present)?;
+    }
+    Ok(())
 }
 
 /// Whole words where the reader exposes them, rows elsewhere.

@@ -17,7 +17,7 @@ mod mask;
 mod status;
 mod table;
 
-pub use cast::tess_int4_to_int8;
+pub use cast::{tess_int4_to_int8, tess_int8_to_int4};
 pub use column::DatumColumn;
 pub use count::tess_count;
 pub use int32::{

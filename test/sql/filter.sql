@@ -261,6 +261,12 @@ SELECT filter_same($$SELECT a FROM filter8_t WHERE b * 4294967296 * 10 < a - b$$
 SELECT count(*) FROM filter8_t WHERE a / b > 0;
 SELECT count(*) FROM filter8_t WHERE b * a * 4294967296 > 0;
 \set VERBOSITY default
+-- The explicit cast of a bigint to an integer, and its error past the range.
+EXPLAIN (COSTS OFF) SELECT a FROM filter8_t WHERE (a % 4294967296)::int > 100;
+SELECT filter_same($$SELECT (a % 4294967296)::int + 1 FROM filter8_t WHERE (a % 4294967296)::int > 100$$);
+\set VERBOSITY terse
+SELECT count(*) FROM filter8_t WHERE a::int > 0;
+\set VERBOSITY default
 -- An overflow in a bigint chain is reported as bigint's.
 SELECT a FROM filter8_t WHERE a * 4294967296 > 1;
 DROP TABLE filter8_t;

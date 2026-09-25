@@ -81,7 +81,8 @@ either side, or two columns), `int4pl`, `int4mi`, `int4mul`, `int4div`,
 int8, the six comparisons `int8eq` … `int8ge`, `int8pl`, `int8mi`,
 `int8mul`, `int8div`, `int8mod` in every shape, the unary `int8um`, and the
 cast `int8(int4)`, all as values with `TESS_RESULT_DATUM`, since an int8
-is its Datum; the functions over an int4 and an int8 (`int84eq` …
+is its Datum; the cast `int4(int8)` as a value with `TESS_RESULT_INT32`,
+failing with 22003 past the int4 range; the functions over an int4 and an int8 (`int84eq` …
 `int84ge`, `int48eq` … `int48ge`, `int84pl`, `int84mi`, `int84mul`,
 `int84div`, `int48pl`, `int48mi`, `int48mul`, `int48div`) as equivalents of
 the int8 function with the int4 argument cast by `int8(int4)`, since an

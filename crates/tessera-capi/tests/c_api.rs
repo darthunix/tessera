@@ -10,7 +10,7 @@ use tessera_capi::c::{
     tess_int4_hash, tess_int4_hash_next, tess_int4_max, tess_int4_min, tess_int4_sum,
     tess_int4_to_int8, tess_int8_arith_columns, tess_int8_arith_scalar,
     tess_int8_arith_scalar_left, tess_int8_compare_columns, tess_int8_filter, tess_int8_hash,
-    tess_int8_hash_next, tess_int8_max, tess_int8_min, tess_kernels_abi_version,
+    tess_int8_hash_next, tess_int8_max, tess_int8_min, tess_int8_to_int4, tess_kernels_abi_version,
     tess_kernels_layout, tess_kernels_test_panic,
 };
 use tessera_kernels::int32::{hash_combine, murmurhash32};
@@ -944,6 +944,52 @@ fn widening_writes_int8_datums_of_the_selected_values() {
     };
     assert_eq!(code, Code::InvalidArgument);
     assert_eq!(values, before);
+}
+
+#[test]
+fn narrowing_writes_int4_values_and_fails_past_the_range() {
+    let wide = [i64::from(i32::MIN), 7, i64::from(i32::MAX), 1 << 40];
+    let datums: Vec<u64> = wide.iter().map(|&value| value as u64).collect();
+    let isnull = [false, true, false, false];
+    let column = DatumColumn {
+        struct_size: size_of::<DatumColumn>(),
+        values: datums.as_ptr(),
+        isnull: isnull.as_ptr(),
+        nrows: 4,
+    };
+    let mut values = [0i32; 4];
+    let mut result_words = [0u64];
+    let mut non_nulls = Mask {
+        nrows: 4,
+        bits: result_words.as_mut_ptr(),
+    };
+    let mut status = Status::new();
+    for (selected, expected) in [(0b0111u64, Code::Ok), (0b1111, Code::IntegerOutOfRange)] {
+        let mut selection = [selected];
+        let rows = Mask {
+            nrows: 4,
+            bits: selection.as_mut_ptr(),
+        };
+        // SAFETY: local buffers of the declared sizes, aliased by nothing else.
+        let code = unsafe {
+            tess_int8_to_int4(
+                &raw const column,
+                ptr::null(),
+                &raw const rows,
+                values.as_mut_ptr(),
+                &raw mut non_nulls,
+                &raw mut status,
+            )
+        };
+        assert_eq!(code, expected);
+        if code == Code::Ok {
+            // The row past the range is not selected; the NULL row is absent.
+            assert_eq!(result_words[0], 0b0101);
+            assert_eq!((values[0], values[2]), (i32::MIN, i32::MAX));
+        }
+    }
+    assert_eq!(status.sqlstate(), "22003");
+    assert_eq!(status.message(), "integer out of range");
 }
 
 #[test]

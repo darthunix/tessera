@@ -658,6 +658,43 @@ tessera_test_kernels_cast(PG_FUNCTION_ARGS)
 						  &status) != TESS_ERROR_INVALID_ARGUMENT)
 		PG_RETURN_BOOL(false);
 
+	/* Narrowed back, every selected non-NULL int8 is its int4 again. */
+	{
+		int32		narrow[NROWS];
+
+		for (row = 0; row < NROWS; row++)
+			results[row] = Int64GetDatum((int64) DatumGetInt32(values[row]));
+		init_column(&column, results, isnull);
+		memset(result_words, 0, sizeof(result_words));
+		if (tess_int8_to_int4(&column, NULL, &rows, narrow, &non_nulls,
+							  &status) != TESS_OK)
+			PG_RETURN_BOOL(false);
+		for (row = 0; row < NROWS; row++)
+		{
+			bool		chosen = (words[row / 64] &
+								  (UINT64CONST(1) << (row % 64))) != 0;
+			bool		present = (result_words[row / 64] &
+								   (UINT64CONST(1) << (row % 64))) != 0;
+
+			if (present != (chosen && !isnull[row]) ||
+				(present && narrow[row] != DatumGetInt32(values[row])))
+				PG_RETURN_BOOL(false);
+		}
+		/* A selected value past the int4 range fails as the cast does. */
+		for (row = 0; row < NROWS; row++)
+		{
+			if ((words[row / 64] & (UINT64CONST(1) << (row % 64))) != 0 &&
+				!isnull[row])
+				break;
+		}
+		results[row] = Int64GetDatum(((int64) PG_INT32_MAX) + 1);
+		if (tess_int8_to_int4(&column, NULL, &rows, narrow, &non_nulls,
+							  &status) != TESS_ERROR_INTEGER_OUT_OF_RANGE ||
+			strcmp(status.sqlstate, "22003") != 0 ||
+			strcmp(status.message, "integer out of range") != 0)
+			PG_RETURN_BOOL(false);
+	}
+
 	PG_RETURN_BOOL(true);
 }
 

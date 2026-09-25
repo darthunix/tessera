@@ -156,3 +156,9 @@ Datum, so an int8 result column is a Datum column:
   the selected int4 values widened into int8 Datums, with the output
   contract of the arithmetic; the cast `int8(int4)` as a kernel, so that a
   chain over an int4 column continues with the int8 operators.
+- `tess_int8_to_int4(column, prepared, rows, values, non_nulls, status)`:
+  the selected int8 values narrowed into int32 values, with the same
+  output contract; a selected value outside the int4 range fails with
+  22003, "integer out of range", as the cast `int4(bigint)` does. It
+  serves an explicit cast only, row by row: the functions over an int4 and
+  an int8 widen instead ([function.md](function.md)).
