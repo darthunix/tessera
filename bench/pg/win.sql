@@ -142,13 +142,14 @@ SELECT pg_temp.measure_pair('case_filter',
     format('SELECT count(*) FROM bench_narrow WHERE CASE WHEN c1 < %s THEN c2 ELSE c3 END %% 2 = 0',
            1000000 * :scale),
     :repetitions);
--- GROUP BY over a table of groups: ten groups, a hundred thousand, and a
--- thousand over a filter that keeps half the rows.
+-- GROUP BY over a table of groups: ten groups of an expression with
+-- statistics (setup.sql), a hundred thousand of a foreign key column, and
+-- a thousand over a filter that keeps half the rows.
 SELECT pg_temp.measure_pair('group_few',
     'SELECT c1 % 10, count(*), sum(c2) FROM bench_narrow GROUP BY 1',
     :repetitions);
 SELECT pg_temp.measure_pair('group_many',
-    'SELECT c1 % 100000, count(*), max(c3) FROM bench_narrow GROUP BY 1',
+    'SELECT fk, count(*), max(f1) FROM bench_fact GROUP BY fk',
     :repetitions);
 SELECT pg_temp.measure_pair('group_filter',
     format('SELECT c2 %% 1000, count(*), sum(c3) FROM bench_narrow WHERE c1 > %s GROUP BY 1',

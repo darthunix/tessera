@@ -61,6 +61,12 @@ CREATE TABLE bench_dup AS
 SELECT g % (25000 * :scale) + 1 AS k, g AS v
 FROM generate_series(1, 100000 * :scale) AS g;
 
+-- The grouping cases of the win family group by expressions: statistics
+-- on them give the planner the number of groups, which it would otherwise
+-- take from the unique column underneath.
+CREATE STATISTICS bench_narrow_c1_mod10 ON (c1 % 10) FROM bench_narrow;
+CREATE STATISTICS bench_narrow_c2_mod1000 ON (c2 % 1000) FROM bench_narrow;
+
 VACUUM (ANALYZE) bench_narrow;
 VACUUM (ANALYZE) bench_wide;
 VACUUM (ANALYZE) bench_mixed;
