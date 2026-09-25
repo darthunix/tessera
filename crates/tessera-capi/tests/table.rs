@@ -6,11 +6,11 @@ use std::ptr;
 use anyhow::Result;
 use tessera_capi::c::{
     Code, DatumColumn, Mask, Status, TableKey, TableRecord, TableStats, tess_int4_hash,
-    tess_int8_hash, tess_table_attach, tess_table_create, tess_table_find_or_insert,
-    tess_table_format_version, tess_table_gather, tess_table_grow, tess_table_insert,
-    tess_table_insert_grouped, tess_table_layout, tess_table_next_in_group, tess_table_next_match,
-    tess_table_payload, tess_table_probe, tess_table_record, tess_table_scan, tess_table_size,
-    tess_table_stats,
+    tess_int8_hash, tess_table_accumulate, tess_table_attach, tess_table_create,
+    tess_table_find_or_insert, tess_table_format_version, tess_table_gather, tess_table_gather_key,
+    tess_table_grow, tess_table_insert, tess_table_insert_grouped, tess_table_layout,
+    tess_table_next_in_group, tess_table_next_match, tess_table_payload, tess_table_probe,
+    tess_table_record, tess_table_scan, tess_table_size, tess_table_stats,
 };
 use tessera_core::{ColumnView, RowMask, RowMaskView};
 use tessera_kernels::int32::{self, NullKeys};
@@ -454,6 +454,150 @@ fn key_copy(key: &TableKey) -> TableKey {
         column: key.column,
         prepared: key.prepared,
     }
+}
+
+#[test]
+fn grouped_states_accumulate_through_the_entry_points() -> Result<()> {
+    // Keys row % 10 over 100 rows; the payload is a flags word and a sum.
+    let values: Vec<u64> = (0..100_i64).map(|row| (row % 10) as u64).collect();
+    let isnull = [false; 100];
+    let column = DatumColumn {
+        struct_size: size_of::<DatumColumn>(),
+        values: values.as_ptr(),
+        isnull: isnull.as_ptr(),
+        nrows: 100,
+    };
+    let key = TableKey {
+        kind: 1,
+        column: &raw const column,
+        prepared: ptr::null(),
+    };
+    let hashes: Vec<u32> = values
+        .iter()
+        .map(|&value| int32::murmurhash32(value as u32))
+        .collect();
+    let kinds = [1_u32];
+    let mut status = Status::new();
+    let mut size = 0;
+    let mut all = [u64::MAX, (1 << 36) - 1];
+    // SAFETY: local buffers of the declared sizes, aliased by nothing else,
+    // throughout this test.
+    unsafe {
+        let code = tess_table_size(1, kinds.as_ptr(), 16, 16, &raw mut size, &raw mut status);
+        assert_eq!(code, Code::Ok);
+        let mut region = vec![0_u64; size / 8];
+        let base = region.as_mut_ptr().cast::<u8>();
+        let code = tess_table_create(base, size, 1, kinds.as_ptr(), 16, 16, &raw mut status);
+        assert_eq!(code, Code::Ok, "{}", status.message());
+        let mut pending_words = all;
+        let mut pending = Mask {
+            nrows: 100,
+            bits: pending_words.as_mut_ptr(),
+        };
+        let mut inserted_words = [0; 2];
+        let mut inserted = Mask {
+            nrows: 100,
+            bits: inserted_words.as_mut_ptr(),
+        };
+        let mut offsets = vec![0; 100];
+        let code = tess_table_find_or_insert(
+            base,
+            size,
+            hashes.as_ptr(),
+            1,
+            &raw const key,
+            &raw mut pending,
+            offsets.as_mut_ptr(),
+            &raw mut inserted,
+            &raw mut status,
+        );
+        assert_eq!(code, Code::Ok, "{}", status.message());
+        let rows = Mask {
+            nrows: 100,
+            bits: all.as_mut_ptr(),
+        };
+        // sum(int4) at byte 8, its flag bit 3 in the word at byte 0.
+        let code = tess_table_accumulate(
+            base,
+            size,
+            offsets.as_ptr(),
+            &raw const rows,
+            3,
+            &raw const column,
+            ptr::null(),
+            8,
+            0,
+            3,
+            &raw mut status,
+        );
+        assert_eq!(code, Code::Ok, "{}", status.message());
+        let mut first_ten = [0x3ff_u64];
+        let groups = Mask {
+            nrows: 10,
+            bits: first_ten.as_mut_ptr(),
+        };
+        let mut sums = [0_u64; 10];
+        let mut flags = [0_u64; 10];
+        let mut keys = [u64::MAX; 10];
+        let mut nulls = [true; 10];
+        assert_eq!(
+            tess_table_gather(
+                base,
+                size,
+                offsets.as_ptr(),
+                &raw const groups,
+                8,
+                sums.as_mut_ptr(),
+                &raw mut status
+            ),
+            Code::Ok
+        );
+        assert_eq!(
+            tess_table_gather(
+                base,
+                size,
+                offsets.as_ptr(),
+                &raw const groups,
+                0,
+                flags.as_mut_ptr(),
+                &raw mut status
+            ),
+            Code::Ok
+        );
+        let code = tess_table_gather_key(
+            base,
+            size,
+            offsets.as_ptr(),
+            &raw const groups,
+            0,
+            keys.as_mut_ptr(),
+            nulls.as_mut_ptr(),
+            &raw mut status,
+        );
+        assert_eq!(code, Code::Ok, "{}", status.message());
+        for group in 0..10 {
+            assert_eq!(keys[group], group as u64);
+            assert!(!nulls[group]);
+            assert_eq!(sums[group], 10 * group as u64);
+            assert_eq!(flags[group], 1 << 3);
+        }
+        // An unknown operation is refused.
+        let code = tess_table_accumulate(
+            base,
+            size,
+            offsets.as_ptr(),
+            &raw const rows,
+            99,
+            &raw const column,
+            ptr::null(),
+            8,
+            0,
+            3,
+            &raw mut status,
+        );
+        assert_eq!(code, Code::InvalidArgument);
+    }
+    Ok(())
 }
 
 #[test]

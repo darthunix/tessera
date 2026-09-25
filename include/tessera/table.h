@@ -287,6 +287,59 @@ extern TessStatusCode tess_table_insert_grouped(void *region,
 												TessRowMask *duplicates,
 												TessStatus *status);
 
+/* How tess_table_accumulate folds a row into an aggregate state. */
+typedef enum TessTableAccumulate
+{
+	/* count(*): +1 per row, no column. */
+	TESS_TABLE_COUNT_ROWS = 1,
+	/* count(x): +1 per non-NULL value, the column's NULL flags alone. */
+	TESS_TABLE_COUNT = 2,
+	/* sum(int4): an int8 sum; past its range 22003 "bigint out of range". */
+	TESS_TABLE_SUM_INT4 = 3,
+	TESS_TABLE_MIN_INT4 = 4,
+	TESS_TABLE_MAX_INT4 = 5,
+	TESS_TABLE_MIN_INT8 = 6,
+	TESS_TABLE_MAX_INT8 = 7
+} TessTableAccumulate;
+
+/*
+ * Fold each selected row of rows into the aggregate state of its record,
+ * the offset in offsets from tess_table_find_or_insert: the int8 at byte
+ * value_at of the payload. Counts add one; a sum, a minimum or a maximum
+ * takes the row's non-NULL value, the first one also setting bit
+ * flag_bit of the word at byte flags_at, so a state without it has seen
+ * no value and stands for NULL. Rows go in row order, so an overflow
+ * fails where the row-wise transition would. column (with prepared as its
+ * readiness) is NULL for count(*). Both words are 8-byte aligned within
+ * the payload. One writer, as for the other grouping calls.
+ */
+extern TessStatusCode tess_table_accumulate(void *region,
+											Size len,
+											const uint32 *offsets,
+											const TessRowMask *rows,
+											TessTableAccumulate op,
+											const TessDatumColumn *column,
+											const TessRowMask *prepared,
+											Size value_at,
+											Size flags_at,
+											uint32 flag_bit,
+											TessStatus *status);
+
+/*
+ * For each row of rows, key `key` of the record at offsets[row]: its
+ * Datum into values[row] (an int4 key sign-extended, as Int32GetDatum
+ * makes it) and whether it is NULL into isnull[row]; rows outside rows
+ * keep their values.
+ */
+extern TessStatusCode tess_table_gather_key(const void *region,
+											Size len,
+											const uint32 *offsets,
+											const TessRowMask *rows,
+											int key,
+											Datum *values,
+											bool *isnull,
+											TessStatus *status);
+
 /*
  * The payload of the record at an offset, to change in place: payload_size
  * bytes valid until the region moves or the table grows.

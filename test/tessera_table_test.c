@@ -394,6 +394,43 @@ tessera_test_table_groups(PG_FUNCTION_ARGS)
 		count_bits(pending) != 0 || count_bits(inserted) != 0 ||
 		!stats_of(region, size, &stats) || stats.records != 10)
 		PG_RETURN_BOOL(false);
+
+	/*
+	 * count(*) and count(x) of every row into the first payload word, then
+	 * the keys of the ten groups by their offsets.
+	 */
+	{
+		TessRowMask all = {NROWS, batch->all};
+		uint64		first_ten = 0x3ff;
+		TessRowMask groups = {10, &first_ten};
+		Datum		keys[10];
+		bool		nulls[10];
+
+		if (tess_table_accumulate(region, size, offsets, &all, TESS_TABLE_COUNT_ROWS,
+								  NULL, NULL, 0, 0, 0, &status) != TESS_OK ||
+			tess_table_accumulate(region, size, offsets, &all, TESS_TABLE_COUNT,
+								  &batch->column, NULL, 0, 0, 0, &status) != TESS_OK ||
+			tess_table_gather_key(region, size, offsets, &groups, 0, keys, nulls,
+								  &status) != TESS_OK)
+			PG_RETURN_BOOL(false);
+		for (key = 0; key < 10; key++)
+		{
+			uint64		sum;
+
+			if (tess_table_record(region, size, offsets[key], &record,
+								  &status) != TESS_OK)
+				PG_RETURN_BOOL(false);
+			memcpy(&sum, record.payload, sizeof(sum));
+			if (sum != 20 * (uint64) key + 1940 || DatumGetInt32(keys[key]) != key ||
+				nulls[key])
+				PG_RETURN_BOOL(false);
+		}
+		/* A word past the payload is refused. */
+		if (tess_table_accumulate(region, size, offsets, &all, TESS_TABLE_COUNT_ROWS,
+								  NULL, NULL, 8, 0, 0,
+								  &status) != TESS_ERROR_INVALID_ARGUMENT)
+			PG_RETURN_BOOL(false);
+	}
 	pfree(region);
 	pfree(batch);
 	PG_RETURN_BOOL(true);

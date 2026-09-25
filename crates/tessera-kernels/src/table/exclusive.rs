@@ -8,7 +8,9 @@
 //! rewrites the header and the buckets.
 
 use anyhow::{Result, ensure};
-use tessera_core::RowMask;
+use tessera_core::{ColumnReader, RowMask, RowMaskView};
+
+use crate::ops::ArithmeticError;
 
 use super::batch::{Lanes, VERTICAL_MIN_ROWS, check, probe_word, shaped};
 use super::header::{CHUNK_USED, HEADER_SIZE, Header, KEY_SLOT, Layout, RECORD_HEADER};
@@ -391,4 +393,201 @@ pub(super) fn grow<R: Region>(region: &R, layout: &Layout, new_len: usize) -> Re
         byte += len;
     }
     Ok(grown)
+}
+
+/// How an aggregate's state in a payload takes a row's value.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Fold {
+    /// The sum, as an `i64`; an overflow fails with
+    /// [`ArithmeticError::BigintOutOfRange`], as PostgreSQL's transition.
+    Sum,
+    /// The least value.
+    Min,
+    /// The greatest value.
+    Max,
+}
+
+/// Where an aggregate keeps its state in a payload: an `i64` at byte
+/// `value_at`, and whether it has seen a value as bit `flag_bit` of the
+/// `u64` at byte `flags_at`, which several aggregates may share.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Slot {
+    pub value_at: usize,
+    pub flags_at: usize,
+    pub flag_bit: u32,
+}
+
+/// Reject offsets, a mask or payload words that do not fit the table.
+fn check_accumulate(layout: &Layout, offsets: usize, nrows: usize, words: &[usize]) -> Result<()> {
+    ensure!(
+        offsets == nrows,
+        "the offsets and mask of the batch have different row counts"
+    );
+    for &at in words {
+        ensure!(
+            at.is_multiple_of(8)
+                && at
+                    .checked_add(8)
+                    .is_some_and(|end| end <= layout.payload_size),
+            "a payload word at byte {at} is past the payload of {} bytes",
+            layout.payload_size
+        );
+    }
+    Ok(())
+}
+
+/// The payload of the record at `offset`, to change in place.
+#[inline(always)]
+fn payload_at<'r, R: Region>(
+    access: &mut Access<'r, R>,
+    region: &'r R,
+    layout: &Layout,
+    offset: u32,
+) -> Result<&'r mut [u8]> {
+    access.locate(offset)?;
+    let start = offset as usize * 8 + RECORD_HEADER + layout.nkeys * KEY_SLOT;
+    // SAFETY: the caller has the region to itself, and the payload lies
+    // within a record that `locate` accepted; the slice is dropped before
+    // the next row's is made.
+    Ok(unsafe { region.bytes_mut(start, layout.payload_size) })
+}
+
+#[inline(always)]
+fn read_word(payload: &[u8], at: usize) -> u64 {
+    let mut word = [0; 8];
+    word.copy_from_slice(&payload[at..at + 8]);
+    u64::from_ne_bytes(word)
+}
+
+#[inline(always)]
+fn write_word(payload: &mut [u8], at: usize, value: u64) {
+    payload[at..at + 8].copy_from_slice(&value.to_ne_bytes());
+}
+
+/// Add one, as an `i64` at byte `at`, to the payload of each selected
+/// row's record: `count(*)`.
+pub(super) fn count_rows<R: Region>(
+    region: &R,
+    layout: &Layout,
+    offsets: &[u32],
+    rows: &RowMaskView<'_>,
+    at: usize,
+) -> Result<()> {
+    let nrows = rows.nrows();
+    check_accumulate(layout, offsets.len(), nrows, &[at])?;
+    let mut access = Access::new(region, layout);
+    for index in 0..nrows.div_ceil(64) {
+        let mut bits = rows.word(index).unwrap();
+        while bits != 0 {
+            let row = index * 64 + bits.trailing_zeros() as usize;
+            bits &= bits - 1;
+            let payload = payload_at(&mut access, region, layout, offsets[row])?;
+            let count = (read_word(payload, at) as i64)
+                .checked_add(1)
+                .ok_or(ArithmeticError::BigintOutOfRange)?;
+            write_word(payload, at, count as u64);
+        }
+    }
+    Ok(())
+}
+
+/// Add one, as an `i64` at byte `at`, for each selected row whose value
+/// is not NULL: `count(x)`, which reads the NULL flags alone.
+pub(super) fn count_values<R: Region, C: ColumnReader + ?Sized>(
+    region: &R,
+    layout: &Layout,
+    offsets: &[u32],
+    rows: &RowMaskView<'_>,
+    column: &C,
+    at: usize,
+) -> Result<()> {
+    let nrows = rows.nrows();
+    check_accumulate(layout, offsets.len(), nrows, &[at])?;
+    ensure!(
+        column.nrows() == nrows,
+        "column and selection row counts differ"
+    );
+    let mut access = Access::new(region, layout);
+    for index in 0..nrows.div_ceil(64) {
+        let selected = rows.word(index).unwrap();
+        if selected == 0 {
+            continue;
+        }
+        for (row, value) in column.word_values(index, selected)? {
+            if value.is_none() {
+                continue;
+            }
+            let payload = payload_at(&mut access, region, layout, offsets[row])?;
+            let count = (read_word(payload, at) as i64)
+                .checked_add(1)
+                .ok_or(ArithmeticError::BigintOutOfRange)?;
+            write_word(payload, at, count as u64);
+        }
+    }
+    Ok(())
+}
+
+/// Fold each selected row's non-NULL value into the state at `slot` of
+/// its record's payload: the first value marks the state as seen, so a
+/// group without one stays NULL, as PostgreSQL's strict transitions.
+/// Rows go in row order, so an overflow fails where the row-wise sum
+/// would.
+pub(super) fn fold<R: Region, C, V>(
+    region: &R,
+    layout: &Layout,
+    offsets: &[u32],
+    rows: &RowMaskView<'_>,
+    column: &C,
+    fold: Fold,
+    slot: Slot,
+) -> Result<()>
+where
+    C: ColumnReader<Value = V> + ?Sized,
+    V: Into<i64> + Copy,
+{
+    let nrows = rows.nrows();
+    check_accumulate(
+        layout,
+        offsets.len(),
+        nrows,
+        &[slot.value_at, slot.flags_at],
+    )?;
+    ensure!(
+        slot.flag_bit < 64,
+        "flag bit {} is past a word",
+        slot.flag_bit
+    );
+    ensure!(
+        column.nrows() == nrows,
+        "column and selection row counts differ"
+    );
+    let flag = 1u64 << slot.flag_bit;
+    let mut access = Access::new(region, layout);
+    for index in 0..nrows.div_ceil(64) {
+        let selected = rows.word(index).unwrap();
+        if selected == 0 {
+            continue;
+        }
+        for (row, value) in column.word_values(index, selected)? {
+            let Some(value) = value else { continue };
+            let value: i64 = value.into();
+            let payload = payload_at(&mut access, region, layout, offsets[row])?;
+            let flags = read_word(payload, slot.flags_at);
+            let state = read_word(payload, slot.value_at) as i64;
+            let next = if flags & flag == 0 {
+                value
+            } else {
+                match fold {
+                    Fold::Sum => state
+                        .checked_add(value)
+                        .ok_or(ArithmeticError::BigintOutOfRange)?,
+                    Fold::Min => state.min(value),
+                    Fold::Max => state.max(value),
+                }
+            };
+            write_word(payload, slot.value_at, next as u64);
+            write_word(payload, slot.flags_at, flags | flag);
+        }
+    }
+    Ok(())
 }

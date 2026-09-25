@@ -444,3 +444,41 @@ pub(super) fn next_in_group<R: Region>(
     }
     Ok(())
 }
+
+/// For each row of `rows`, key `key` of the record at `offsets[row]` into
+/// `values[row]` as the bits of its slot, an int4 sign-extended as its
+/// Datum is, and whether it is NULL into `nulls[row]`; other rows keep
+/// their values.
+pub(super) fn gather_key<R: Region>(
+    region: &R,
+    layout: &Layout,
+    offsets: &[u32],
+    rows: &RowMaskView<'_>,
+    key: usize,
+    values: &mut [u64],
+    nulls: &mut [bool],
+) -> Result<()> {
+    let nrows = rows.nrows();
+    ensure!(
+        offsets.len() == nrows && values.len() == nrows && nulls.len() == nrows,
+        "the offsets, mask and output of the batch have different row counts"
+    );
+    ensure!(
+        key < layout.nkeys,
+        "key {key} is past the table's {} keys",
+        layout.nkeys
+    );
+    let mut access = Access::new(region, layout);
+    for index in 0..nrows.div_ceil(64) {
+        let mut bits = rows.word(index).unwrap();
+        while bits != 0 {
+            let row = index * 64 + bits.trailing_zeros() as usize;
+            bits &= bits - 1;
+            let record = access.locate(offsets[row])?;
+            let null = (record.null_bits() >> key) & 1 == 1;
+            values[row] = if null { 0 } else { record.keys()[key] as u64 };
+            nulls[row] = null;
+        }
+    }
+    Ok(())
+}

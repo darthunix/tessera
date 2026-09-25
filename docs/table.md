@@ -114,6 +114,12 @@ of its build row as payload words and fetches one column of a batch of
 matches per call, with one check of the header, where a call per row
 would check it per row.
 
+`tess_table_gather_key(region, len, offsets, &rows, key, values, isnull,
+&status)` reads key `key` of each row's record the same way, as its Datum
+(an int4 key sign-extended, as `Int32GetDatum` makes it) and its NULL flag
+from the record's NULL bits: a grouped aggregate returns its groups' keys
+with it.
+
 `tess_table_record(region, len, offset, &record, &status)` exposes a
 record's hash, NULL bits, key slots and payload as pointers into the
 region, valid until the region moves or the table grows.
@@ -138,6 +144,17 @@ call over it at the same time:
   without duplicates needs no second round at all;
 - `tess_table_payload(region, len, offset, &payload, &status)` hands out a
   payload to change in place;
+- `tess_table_accumulate(region, len, offsets, &rows, op, column, prepared,
+  value_at, flags_at, flag_bit, &status)` folds each selected row into the
+  aggregate state of its record, the offsets `tess_table_find_or_insert`
+  gave: `count(*)` and `count(x)` add one to the int8 at byte `value_at`;
+  `sum(int4)`, `min` and `max` of int4 or int8 take the row's non-NULL
+  value, the first one also setting bit `flag_bit` of the word at byte
+  `flags_at`, so a state without the bit has seen no value and stands for
+  NULL. The rows of a batch go in row order, several of one group in turn,
+  so a sum past the int8 range fails with 22003 "bigint out of range"
+  where the row-wise transition would; one check of the header per batch,
+  as for `tess_table_gather`;
 - `tess_table_scan(region, len, &cursor, offsets, capacity, &count,
   &status)` visits the records in insertion order, up to `capacity` per
   call, from a cursor the caller starts at 0 and keeps between calls; a

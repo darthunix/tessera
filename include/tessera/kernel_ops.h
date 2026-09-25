@@ -172,10 +172,31 @@ typedef struct TessKernelOps
 										   const TessRowMask *rows,
 										   TessRowMask *found,
 										   TessStatus *status);
+	/* tess_table_accumulate */
+	TessStatusCode (*table_accumulate) (void *region,
+										Size len,
+										const uint32 *offsets,
+										const TessRowMask *rows,
+										TessTableAccumulate op,
+										const TessDatumColumn *column,
+										const TessRowMask *prepared,
+										Size value_at,
+										Size flags_at,
+										uint32 flag_bit,
+										TessStatus *status);
+	/* tess_table_gather_key */
+	TessStatusCode (*table_gather_key) (const void *region,
+										Size len,
+										const uint32 *offsets,
+										const TessRowMask *rows,
+										int key,
+										Datum *values,
+										bool *isnull,
+										TessStatus *status);
 } TessKernelOps;
 
 #define TESS_KERNEL_OPS_MIN_SIZE \
-	TESS_ABI_SIZE_INCLUDING_FIELD(TessKernelOps, table_next_in_group)
+	TESS_ABI_SIZE_INCLUDING_FIELD(TessKernelOps, table_gather_key)
 
 /*
  * The registry of the kernels: one table per backend, installed by the

@@ -3,9 +3,10 @@
 use anyhow::Result;
 use tessera_core::{ColumnReader, ColumnView, RowMask, RowMaskView};
 use tessera_kernels::int32::{self, NullKeys, hash_combine, murmurhash32};
+use tessera_kernels::ops::ArithmeticError;
 use tessera_kernels::table::{
-    Cursor, FORMAT_VERSION, KeyKind, KeySource, MAX_KEYS, TableConfig, TableMut, normalize_word,
-    region_size,
+    Cursor, FORMAT_VERSION, Fold, KeyKind, KeySource, MAX_KEYS, Slot, TableConfig, TableMut,
+    normalize_word, region_size,
 };
 
 /// Bytes of the header, as the format fixes it.
@@ -1451,5 +1452,171 @@ fn grouped_insertion_stops_when_full_and_survives_growth() -> Result<()> {
         let rows = values.iter().filter(|&&value| value == values[key]).count();
         assert_eq!(records, rows, "key {key}");
     }
+    Ok(())
+}
+
+/// The state of one group in the model of a grouped aggregate.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct GroupModel {
+    rows: i64,
+    values: i64,
+    sum: Option<i64>,
+    min4: Option<i64>,
+    max8: Option<i64>,
+}
+
+#[test]
+fn grouped_states_follow_a_row_by_row_model() -> Result<()> {
+    // Payload: flags, count(*), count(x), sum(x), min(x) of int4, max(y) of int8.
+    const FLAGS_AT: usize = 0;
+    let config = TableConfig {
+        keys: &[KeyKind::Int32],
+        payload_size: 48,
+    };
+    let nrows = 200;
+    let keys: Vec<i32> = (0..nrows).map(|row| (row as i32 * 7) % 13 - 6).collect();
+    let key_present: Vec<bool> = (0..nrows).map(|row| row % 11 != 4).collect();
+    let xs: Vec<i32> = (0..nrows).map(|row| (row as i32 * 31) % 97 - 48).collect();
+    let x_present: Vec<bool> = (0..nrows).map(|row| row % 5 != 2).collect();
+    let ys: Vec<i64> = (0..nrows).map(|row| (row as i64 - 100) << 33).collect();
+    let words_of = |flags: &[bool]| -> Vec<u64> {
+        let mut words = vec![0; flags.len().div_ceil(64)];
+        for (row, &flag) in flags.iter().enumerate() {
+            words[row / 64] |= u64::from(flag) << (row % 64);
+        }
+        words
+    };
+    let key_words = words_of(&key_present);
+    let x_words = words_of(&x_present);
+    let key_column = [ColumnView::try_new(
+        &keys,
+        Some(RowMaskView::try_new(nrows, &key_words)?),
+    )?];
+    let x_column = ColumnView::try_new(&xs, Some(RowMaskView::try_new(nrows, &x_words)?))?;
+    let y_column = ColumnView::try_new(&ys, None)?;
+    let hashes: Vec<u32> = (0..nrows)
+        .map(|row| {
+            if key_present[row] {
+                hash_i32(keys[row])
+            } else {
+                0x9e37_79b9
+            }
+        })
+        .collect();
+    let mut words = words_for(&config, 64)?;
+    let mut table = TableMut::create_in(&mut words, &config, 64)?;
+    let (offsets, _) = resolve_all(&mut table, &hashes, &key_column[..])?;
+    // Two batches over the same rows: the first and the second half.
+    for half in 0..2 {
+        let selected: Vec<bool> = (0..nrows)
+            .map(|row| (row < nrows / 2) == (half == 0))
+            .collect();
+        let selection = words_of(&selected);
+        let rows = RowMaskView::try_new(nrows, &selection)?;
+        table.count_rows(&offsets, &rows, 8)?;
+        table.count_values(&offsets, &rows, &x_column, 16)?;
+        let slot = |value_at, flag_bit| Slot {
+            value_at,
+            flags_at: FLAGS_AT,
+            flag_bit,
+        };
+        table.fold(&offsets, &rows, &x_column, Fold::Sum, slot(24, 0))?;
+        table.fold(&offsets, &rows, &x_column, Fold::Min, slot(32, 1))?;
+        table.fold(&offsets, &rows, &y_column, Fold::Max, slot(40, 2))?;
+    }
+    let mut model: std::collections::HashMap<Option<i32>, GroupModel> = Default::default();
+    for row in 0..nrows {
+        let group = model
+            .entry(key_present[row].then_some(keys[row]))
+            .or_default();
+        group.rows += 1;
+        if x_present[row] {
+            let x = i64::from(xs[row]);
+            group.values += 1;
+            group.sum = Some(group.sum.unwrap_or(0) + x);
+            group.min4 = Some(group.min4.map_or(x, |m| m.min(x)));
+        }
+        group.max8 = Some(group.max8.map_or(ys[row], |m| m.max(ys[row])));
+    }
+    let groups = scan_all(&table, 7)?;
+    assert_eq!(groups.len(), model.len());
+    let all = all_rows(groups.len());
+    let rows = RowMaskView::try_new(groups.len(), &all)?;
+    let mut key_values = vec![0; groups.len()];
+    let mut key_nulls = vec![false; groups.len()];
+    table.gather_key(&groups, &rows, 0, &mut key_values, &mut key_nulls)?;
+    let mut fields = [(); 6].map(|_| vec![0u64; groups.len()]);
+    for (index, field) in fields.iter_mut().enumerate() {
+        table.gather(&groups, &rows, index * 8, field)?;
+    }
+    for group in 0..groups.len() {
+        let key = (!key_nulls[group]).then_some(key_values[group] as i64 as i32);
+        assert_eq!(
+            key_values[group] as i64,
+            key.map_or(0, i64::from),
+            "the int4 key is sign-extended"
+        );
+        let flags = fields[0][group];
+        let state =
+            |bit: u32, field: usize| (flags >> bit & 1 == 1).then_some(fields[field][group] as i64);
+        let found = GroupModel {
+            rows: fields[1][group] as i64,
+            values: fields[2][group] as i64,
+            sum: state(0, 3),
+            min4: state(1, 4),
+            max8: state(2, 5),
+        };
+        assert_eq!(Some(&found), model.get(&key), "group {key:?}");
+    }
+    Ok(())
+}
+
+#[test]
+fn a_sum_past_the_bigint_range_fails_and_arguments_are_checked() -> Result<()> {
+    let config = TableConfig {
+        keys: &[KeyKind::Int64],
+        payload_size: 16,
+    };
+    let keys = [ColumnView::try_new(&[-5i64, -5, 1 << 40], None)?];
+    let hashes: Vec<u32> = [-5i64, -5, 1 << 40].map(hash_i64).into();
+    let mut words = words_for(&config, 8)?;
+    let mut table = TableMut::create_in(&mut words, &config, 8)?;
+    let (offsets, created) = resolve_all(&mut table, &hashes, &keys[..])?;
+    assert_eq!(created, vec![0, 2]);
+    let all = all_rows(3);
+    let rows = RowMaskView::try_new(3, &all)?;
+    let slot = Slot {
+        value_at: 8,
+        flags_at: 0,
+        flag_bit: 0,
+    };
+    let big = ColumnView::try_new(&[i64::MAX, 1, 0], None)?;
+    let error = table
+        .fold(&offsets, &rows, &big, Fold::Sum, slot)
+        .unwrap_err();
+    assert_eq!(
+        error.downcast_ref::<ArithmeticError>().copied(),
+        Some(ArithmeticError::BigintOutOfRange)
+    );
+    // The int8 keys come back whole, a negative one too.
+    let mut values = vec![0; 3];
+    let mut nulls = vec![true; 3];
+    table.gather_key(&offsets, &rows, 0, &mut values, &mut nulls)?;
+    assert_eq!(values, [(-5i64) as u64, (-5i64) as u64, 1 << 40]);
+    assert_eq!(nulls, [false; 3]);
+    // Words past the payload, a flag past a word, a key past the keys.
+    assert!(table.count_rows(&offsets, &rows, 16).is_err());
+    assert!(table.count_rows(&offsets, &rows, 3).is_err());
+    let past = Slot {
+        flag_bit: 64,
+        ..slot
+    };
+    assert!(table.fold(&offsets, &rows, &big, Fold::Min, past).is_err());
+    assert!(
+        table
+            .gather_key(&offsets, &rows, 1, &mut values, &mut nulls)
+            .is_err()
+    );
+    assert!(table.count_rows(&offsets[..2], &rows, 8).is_err());
     Ok(())
 }

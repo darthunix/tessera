@@ -99,9 +99,9 @@ use core::marker::PhantomData;
 use core::ops::Deref;
 
 use anyhow::{Result, ensure};
-use tessera_core::{RowMask, RowMaskView};
+use tessera_core::{ColumnReader, RowMask, RowMaskView};
 
-pub use exclusive::Cursor;
+pub use exclusive::{Cursor, Fold, Slot};
 use header::{CHUNK_USED, Header, Layout, NRECORDS};
 pub use header::{
     FORMAT_VERSION, HEADER_SIZE, KeyKind, MAX_KEYS, TableConfig, VERSION_OFFSET, region_size,
@@ -295,6 +295,29 @@ impl<'a> Table<'a> {
         batch::next_in_group(&self.region, &self.layout, offsets, rows, found)
     }
 
+    /// For each row of `rows`, key `key` of the record at `offsets[row]`:
+    /// its slot's bits into `values[row]` (an int4 sign-extended, as its
+    /// Datum is, 0 for a NULL) and whether it is NULL into `nulls[row]`.
+    /// Rows outside `rows` keep their values.
+    pub fn gather_key(
+        &self,
+        offsets: &[u32],
+        rows: &RowMaskView<'_>,
+        key: usize,
+        values: &mut [u64],
+        nulls: &mut [bool],
+    ) -> Result<()> {
+        batch::gather_key(
+            &self.region,
+            &self.layout,
+            offsets,
+            rows,
+            key,
+            values,
+            nulls,
+        )
+    }
+
     /// The record at an offset a call of this table returned.
     pub fn record(&self, offset: u32) -> Result<Record<'_>> {
         Ok(Access::new(&self.region, &self.layout)
@@ -420,6 +443,52 @@ impl<'a> TableMut<'a> {
     /// The payload of the record at an offset, to change in place.
     pub fn payload_mut(&mut self, offset: u32) -> Result<&mut [u8]> {
         exclusive::payload_mut(&self.0.region, &self.0.layout, offset)
+    }
+
+    /// Add one to the `i64` at byte `at` of the payload of each selected
+    /// row's record: `count(*)` of a grouped aggregate, whose rows hold
+    /// the offsets [`TableMut::find_or_insert`] gave them.
+    pub fn count_rows(&mut self, offsets: &[u32], rows: &RowMaskView<'_>, at: usize) -> Result<()> {
+        exclusive::count_rows(&self.0.region, &self.0.layout, offsets, rows, at)
+    }
+
+    /// Add one to the `i64` at byte `at` for each selected row whose
+    /// value in `column` is not NULL: `count(x)`.
+    pub fn count_values<C: ColumnReader + ?Sized>(
+        &mut self,
+        offsets: &[u32],
+        rows: &RowMaskView<'_>,
+        column: &C,
+        at: usize,
+    ) -> Result<()> {
+        exclusive::count_values(&self.0.region, &self.0.layout, offsets, rows, column, at)
+    }
+
+    /// Fold each selected row's non-NULL value into the aggregate state
+    /// at `slot` of its record's payload, in row order; the state's flag
+    /// marks that it has a value. A sum that overflows an `i64` fails
+    /// with [`crate::ops::ArithmeticError::BigintOutOfRange`].
+    pub fn fold<C, V>(
+        &mut self,
+        offsets: &[u32],
+        rows: &RowMaskView<'_>,
+        column: &C,
+        fold: Fold,
+        slot: Slot,
+    ) -> Result<()>
+    where
+        C: ColumnReader<Value = V> + ?Sized,
+        V: Into<i64> + Copy,
+    {
+        exclusive::fold(
+            &self.0.region,
+            &self.0.layout,
+            offsets,
+            rows,
+            column,
+            fold,
+            slot,
+        )
     }
 
     /// Visit the records from `cursor` on, in insertion order, as many as

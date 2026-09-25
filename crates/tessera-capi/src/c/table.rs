@@ -12,10 +12,11 @@ use std::slice;
 use anyhow::{Context, Result, bail, ensure};
 use tessera_core::ColumnReader;
 use tessera_kernels::table::{
-    Cursor, FORMAT_VERSION, HEADER_SIZE, KeyKind, KeySource, MAX_KEYS, Table, TableConfig,
-    TableMut, VERSION_OFFSET, normalize_word, region_size,
+    Cursor, FORMAT_VERSION, Fold, HEADER_SIZE, KeyKind, KeySource, MAX_KEYS, Slot, Table,
+    TableConfig, TableMut, VERSION_OFFSET, normalize_word, region_size,
 };
 
+use super::args::reader;
 use super::column::DatumColumn;
 use super::mask::Mask;
 use super::status::{Code, Status, guard};
@@ -758,6 +759,115 @@ pub unsafe extern "C" fn tess_table_scan(
 pub unsafe extern "C" fn tess_table_grow(region: *mut u8, len: usize, status: *mut Status) -> Code {
     // SAFETY: the caller's contract.
     unsafe { guard(status, || TableMut::attach_mut(region, len)?.grow(len)) }
+}
+
+/// `TessTableAccumulate`: how `tess_table_accumulate` updates a state.
+const ACCUMULATE_COUNT_ROWS: c_uint = 1;
+const ACCUMULATE_COUNT: c_uint = 2;
+const ACCUMULATE_SUM_INT4: c_uint = 3;
+const ACCUMULATE_MIN_INT4: c_uint = 4;
+const ACCUMULATE_MAX_INT4: c_uint = 5;
+const ACCUMULATE_MIN_INT8: c_uint = 6;
+const ACCUMULATE_MAX_INT8: c_uint = 7;
+
+/// `tess_table_accumulate`: fold each selected row into the aggregate
+/// state of its record's payload.
+///
+/// # Safety
+///
+/// `region` as for [`TableMut::attach_mut`] during the call; `rows` must
+/// point to a valid mask; `offsets` must hold an initialized offset per
+/// row; `column` is ignored for `count(*)` and otherwise must satisfy
+/// [`DatumColumn::ints`]'s contract with `prepared` as its readiness;
+/// `status` as for every entry point.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tess_table_accumulate(
+    region: *mut u8,
+    len: usize,
+    offsets: *const u32,
+    rows: *const Mask,
+    op: c_uint,
+    column: *const DatumColumn,
+    prepared: *const Mask,
+    value_at: usize,
+    flags_at: usize,
+    flag_bit: c_uint,
+    status: *mut Status,
+) -> Code {
+    // SAFETY: the caller's contract.
+    unsafe {
+        guard(status, || {
+            let mut table = TableMut::attach_mut(region, len)?;
+            let rows = rows.as_ref().context("a null row mask")?.view()?;
+            let offsets = values(offsets, rows.nrows(), "offsets")?;
+            let slot = Slot {
+                value_at,
+                flags_at,
+                flag_bit,
+            };
+            match op {
+                ACCUMULATE_COUNT_ROWS => table.count_rows(offsets, &rows, value_at),
+                ACCUMULATE_COUNT => {
+                    let column = reader::<()>(column, prepared)?;
+                    table.count_values(offsets, &rows, &column, value_at)
+                }
+                ACCUMULATE_SUM_INT4 | ACCUMULATE_MIN_INT4 | ACCUMULATE_MAX_INT4 => {
+                    let column = reader::<i32>(column, prepared)?;
+                    let fold = match op {
+                        ACCUMULATE_SUM_INT4 => Fold::Sum,
+                        ACCUMULATE_MIN_INT4 => Fold::Min,
+                        _ => Fold::Max,
+                    };
+                    table.fold(offsets, &rows, &column, fold, slot)
+                }
+                ACCUMULATE_MIN_INT8 | ACCUMULATE_MAX_INT8 => {
+                    let column = reader::<i64>(column, prepared)?;
+                    let fold = if op == ACCUMULATE_MIN_INT8 {
+                        Fold::Min
+                    } else {
+                        Fold::Max
+                    };
+                    table.fold(offsets, &rows, &column, fold, slot)
+                }
+                other => bail!("unknown accumulation {other}"),
+            }
+        })
+    }
+}
+
+/// `tess_table_gather_key`: one key of each selected row's record, as its
+/// Datum and NULL flag.
+///
+/// # Safety
+///
+/// `region` as for [`Table::attach`] during the call; `rows` must point
+/// to a valid mask; `offsets` must hold an initialized offset per row,
+/// `values` a writable Datum and `isnull` a writable flag per row that
+/// nothing else accesses; `status` as for every entry point.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tess_table_gather_key(
+    region: *const u8,
+    len: usize,
+    offsets: *const u32,
+    rows: *const Mask,
+    key: c_int,
+    values_out: *mut u64,
+    isnull: *mut bool,
+    status: *mut Status,
+) -> Code {
+    // SAFETY: the caller's contract.
+    unsafe {
+        guard(status, || {
+            let table = Table::attach(region.cast_mut(), len)?;
+            let rows = rows.as_ref().context("a null row mask")?.view()?;
+            let nrows = rows.nrows();
+            let offsets = values(offsets, nrows, "offsets")?;
+            let out = slots(values_out, nrows, "results")?;
+            let nulls = slots(isnull, nrows, "NULL flags")?;
+            let key = usize::try_from(key).context("a negative key")?;
+            table.gather_key(offsets, &rows, key, out, nulls)
+        })
+    }
 }
 
 #[cfg(test)]

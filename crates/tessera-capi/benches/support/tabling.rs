@@ -130,6 +130,29 @@ pub fn resolve_all<K: KeySource>(setup: &mut Setup, keys: &K) -> Result<()> {
     Ok(())
 }
 
+/// Add one to the first payload word of every valid row's record, the
+/// offsets of the last resolution: `count(*)` of a grouped aggregate.
+#[inline(never)]
+pub fn count_all(setup: &mut Setup) -> Result<()> {
+    let nrows = setup.hashes.len();
+    let mut table = TableMut::exclusive(&mut setup.words)?;
+    let rows = RowMaskView::try_new(nrows, &setup.valid)?;
+    table.count_rows(&setup.offsets, &rows, 0)
+}
+
+/// The same scatter with plain stores: a counter per record offset.
+#[inline(never)]
+pub fn reference_count(counts: &mut [u64], setup: &Setup) {
+    for (index, &word) in setup.valid.iter().enumerate() {
+        let mut bits = word;
+        while bits != 0 {
+            let row = index * 64 + bits.trailing_zeros() as usize;
+            bits &= bits - 1;
+            counts[setup.offsets[row] as usize] += 1;
+        }
+    }
+}
+
 /// A record of the reference table.
 #[derive(Clone, Copy, Default)]
 struct Entry {
@@ -366,6 +389,14 @@ fn measure_column<C: ColumnReader<Value = i32>>(
     })?;
     group.op("reference", || {
         reference_probe(&reference, black_box(&setup), &hashes, key_of)
+    })?;
+    // Grouping: count(*) into the records the resolution gave the rows,
+    // against the same scatter into a plain array by offset.
+    resolve_all(&mut setup, &keys)?;
+    let mut counts = vec![0_u64; setup.words.len()];
+    group.op("count_rows", || count_all(black_box(&mut setup)).unwrap())?;
+    group.op("reference_count", || {
+        reference_count(&mut counts, black_box(&setup))
     })?;
     Ok(())
 }

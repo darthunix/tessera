@@ -28,4 +28,6 @@ const TessKernelOps tess_kernel_ops = {
 	.table_grow = tess_table_grow,
 	.table_insert_grouped = tess_table_insert_grouped,
 	.table_next_in_group = tess_table_next_in_group,
+	.table_accumulate = tess_table_accumulate,
+	.table_gather_key = tess_table_gather_key,
 };
