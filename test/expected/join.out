@@ -1481,6 +1481,105 @@ SELECT join_property($$SELECT count(*) FROM jprobe JOIN jbuild ON jprobe.k = jbu
  t
 (1 row)
 
+-- A shared table: where the core may use a Parallel Hash, the inner
+-- side's partial path divides the build among the participants into one
+-- table in the query's shared memory.
+SET enable_parallel_hash = on;
+EXPLAIN (COSTS OFF) SELECT count(*), sum(jbuild.w) FROM jprobe JOIN jbuild ON jprobe.k = jbuild.k;
+                              QUERY PLAN                               
+-----------------------------------------------------------------------
+ Finalize Aggregate
+   ->  Gather
+         Workers Planned: 2
+         ->  Parallel Custom Scan (TessAgg)
+               Partial Mode: Partial
+               ->  Parallel Custom Scan (TessHashJoin)
+                     Hash Cond: (jprobe.k = jbuild.k)
+                     ->  Parallel Custom Scan (TessHeapScan) on jprobe
+                     ->  Parallel Custom Scan (TessHeapScan) on jbuild
+(9 rows)
+
+SELECT join_same($$SELECT count(*), sum(jbuild.w), sum(jprobe.v) FROM jprobe JOIN jbuild ON jprobe.k = jbuild.k$$);
+                   join_same                   
+-----------------------------------------------
+ 1 rows, hash 118ad35e4d7738d9b78f53aa692ef31d
+(1 row)
+
+SELECT join_same($$SELECT jprobe.v, jbuild.w FROM jprobe JOIN jbuild ON jprobe.k = jbuild.k$$);
+                    join_same                    
+-------------------------------------------------
+ 198 rows, hash 5856c1c14adafd0509113bbf5a675a53
+(1 row)
+
+SELECT join_same($$SELECT count(*), sum(jprobe.v) FROM jprobe WHERE EXISTS (SELECT 1 FROM jbuild WHERE jbuild.k = jprobe.k)$$);
+                   join_same                   
+-----------------------------------------------
+ 1 rows, hash 54d966e93bd1da9e8e84afdf20118052
+(1 row)
+
+SELECT join_same($$SELECT count(*), sum(jprobe.v) FROM jprobe WHERE NOT EXISTS (SELECT 1 FROM jbuild WHERE jbuild.k = jprobe.k)$$);
+                   join_same                   
+-----------------------------------------------
+ 1 rows, hash 8641ae42b30194e539434992596ad8d1
+(1 row)
+
+SELECT join_same($$SELECT count(*), count(jbuild.w), sum(jprobe.v) FROM jprobe LEFT JOIN jbuild ON jprobe.k = jbuild.k$$);
+                   join_same                   
+-----------------------------------------------
+ 1 rows, hash 4c7c7ffc285ce9c86724da09991670a9
+(1 row)
+
+-- Duplicate keys: the next record of a key is found down its chain.
+EXPLAIN (COSTS OFF) SELECT count(*), sum(jgrow.g) FROM jbig JOIN jgrow ON jbig.fk = jgrow.k;
+                              QUERY PLAN                              
+----------------------------------------------------------------------
+ Finalize Aggregate
+   ->  Gather
+         Workers Planned: 2
+         ->  Parallel Custom Scan (TessAgg)
+               Partial Mode: Partial
+               ->  Parallel Custom Scan (TessHashJoin)
+                     Hash Cond: (jbig.fk = jgrow.k)
+                     ->  Parallel Custom Scan (TessHeapScan) on jgrow
+                     ->  Parallel Custom Scan (TessHeapScan) on jbig
+(9 rows)
+
+SELECT join_same($$SELECT count(*), sum(jgrow.g), sum(jbig.v) FROM jbig JOIN jgrow ON jbig.fk = jgrow.k$$);
+                   join_same                   
+-----------------------------------------------
+ 1 rows, hash 1f6009742b55bb66d271dad5028003d1
+(1 row)
+
+SELECT join_same($$SELECT jbig.v, jgrow.g FROM jbig JOIN jgrow ON jbig.fk = jgrow.k WHERE jbig.v < 200$$);
+                    join_same                     
+--------------------------------------------------
+ 9950 rows, hash 483e966f10d19470eea05b83051f6095
+(1 row)
+
+SELECT join_property($$SELECT count(*) FROM jbig JOIN jgrow ON jbig.fk = jgrow.k$$, 'Builds') AS builds,
+       join_property($$SELECT count(*) FROM jbig JOIN jgrow ON jbig.fk = jgrow.k$$, 'Table Grows') AS grows,
+       join_property($$SELECT count(*) FROM jbig JOIN jgrow ON jbig.fk = jgrow.k$$, 'Build Rows') AS build_rows;
+ builds | grows | build_rows 
+--------+-------+------------
+ 1      | 1     | 20000
+(1 row)
+
+SET parallel_leader_participation = off;
+SELECT join_same($$SELECT count(*), sum(jbuild.w), sum(jprobe.v) FROM jprobe JOIN jbuild ON jprobe.k = jbuild.k$$);
+                   join_same                   
+-----------------------------------------------
+ 1 rows, hash 118ad35e4d7738d9b78f53aa692ef31d
+(1 row)
+
+RESET parallel_leader_participation;
+-- A rescan of the Gather builds the shared table anew.
+SELECT join_same($$SELECT jsmall.k, (SELECT count(*) FROM jprobe JOIN jbuild ON jprobe.k = jbuild.k WHERE jbuild.w > jsmall.k * 100) FROM jsmall$$);
+                   join_same                    
+------------------------------------------------
+ 10 rows, hash c085776e4f1c0762a2781a0a3eca9e93
+(1 row)
+
+RESET enable_parallel_hash;
 RESET max_parallel_workers_per_gather;
 RESET parallel_setup_cost;
 RESET parallel_tuple_cost;

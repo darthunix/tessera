@@ -604,10 +604,19 @@ Under a `Gather` the hook also offers a partial path: the outer side's
 cheapest partial path divides the rows, and every participant builds the
 whole inner side from the cheapest inner path a worker may run, as the
 core's hash join without a shared table does; the template is that
-join's cost. The core's parallel hash join, whose shared table divides
-the build, usually costs less; a shared table of the node's own is item
-5.5 of the plan. The partial path is parallel-aware only for the
-counters the participants share through `TessSharedStats`.
+join's cost. The partial path is parallel-aware for the counters the
+participants share through `TessSharedStats`.
+
+Where the core may use a Parallel Hash (`enable_parallel_hash`), the hook
+offers a second partial path with a shared table: the inner side's
+partial path divides the build among the participants too, into one
+table in the query's dynamic shared memory; its template is the core's
+Parallel Hash join, and the table may take every participant's
+`hash_mem`, as the core's does. A record's payload must not hold a
+pointer into one participant's memory, so the path needs every inner
+column of the join's target and clauses to be passed by value; with a
+by-reference one only the path with a table in each participant
+remains. The cheaper of the two wins.
 
 The plan's scan tuple is the join's columns, the outer side's first, and
 the keys of both sides and the residual clauses' columns, which the
@@ -623,8 +632,9 @@ since PostgreSQL plans a projecting node without a target list
 (`TESS_LAYOUT_PROJECTED`). The
 plan data records each column's side and its column in that child's
 batches, each key's column and kind on each side, for each residual
-clause in turn whether it runs in batches, whether the inner side is unique and
-the planner's estimate of its rows.
+clause in turn whether it runs in batches, whether the inner side is unique,
+the planner's estimate of its rows and whether the table is shared
+(version 6).
 
 ### Execution
 
@@ -685,6 +695,28 @@ columns row by row. The node scans forward only: a scrollable cursor
 gets a `Material` above it. A rescan builds the table again only when
 the inner child has changed parameters, as the core's hash join decides,
 and otherwise probes the same table with the rescanned outer child.
+
+With a shared table the node keeps, in its chunk of the query's DSM, the
+build's `Barrier`, the table's region in the query's dynamic shared
+memory and the build's counters, and steps its participant through the
+phases of `tess_build_step` (see [table.md](table.md)): the elected one
+creates the table sized by the planner's estimate; every participant
+inserts the inner batches its partial scan hands it with
+`tess_table_insert`, stages the rows a full table has no room for into
+256 kB buffers of shared memory with `tess_table_stage`, and reports
+them; when some were staged, the elected one copies the header and the
+records into a region for every record and grows the table there, and
+each participant adds its buffers with `tess_table_insert_staged`. The
+barrier's waits stay in the node, since they may raise an error. Then
+every participant probes the one table; its chains are not grouped, so
+the next record of a key is found by `tess_table_next_match`, rounds go
+over the outer batch, since the duplicates are not known, and there is
+no compact mode. Each participant leaves at shutdown or at a rescan, and
+the last one to leave frees the table; a rescan of the `Gather` builds
+anew. A worker that attaches once the build is over only probes, and one
+that attaches after the last one left returns nothing. Without a DSM (a
+`Gather` that launched no workers) the node builds a table of its own
+from the whole inner side, which its partial scan then reads alone.
 
 A semi or anti join marks the rows of each outer batch that have a pair
 passing the join clauses: without such clauses the rows the probe found,
@@ -786,4 +818,8 @@ left join, one whose probe rows all find a key builds none, nor does a
 build side of 300 rows, and an inner side with a parameter builds one
 per table; the rows of inner, semi, anti and left joins through the
 filter are compared, and under the `Gather` an inner and an anti join,
-where the participants build at least one filter.
+where the participants build at least one filter. With `enable_parallel_hash` on, the
+shared table: inner, semi, anti and left joins compared with the core,
+duplicate keys, an inner side past the estimate whose table grows, the
+leader not taking part, and a rescan of the `Gather` from a correlated
+subquery.

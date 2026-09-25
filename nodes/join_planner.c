@@ -10,6 +10,7 @@
 #include "optimizer/paths.h"
 #include "optimizer/restrictinfo.h"
 #include "utils/fmgroids.h"
+#include "utils/lsyscache.h"
 
 #include "tessera/expr.h"
 #include "tessera/kernel_ops.h"
@@ -264,7 +265,7 @@ table_bytes(Path *inner, int nkeys, int ninner)
 static CustomPath *
 make_join_path(PlannerInfo *root, RelOptInfo *joinrel, JoinType jointype,
 			   JoinPathExtraData *extra, const JoinKeys *keys, int ninner,
-			   Path *outer_path, Path *inner_path)
+			   Path *outer_path, Path *inner_path, bool shared)
 {
 	TessPathConfig config = TESS_STRUCT_INITIALIZER(TessPathConfig);
 	JoinCostWorkspace workspace;
@@ -273,10 +274,15 @@ make_join_path(PlannerInfo *root, RelOptInfo *joinrel, JoinType jointype,
 	Path	   *outer;
 	Path	   *inner;
 
+	double		memory_limit = (double) get_hash_memory_limit();
+
+	/* A shared table may take every participant's hash_mem, as the core's. */
+	if (shared)
+		memory_limit *= outer_path->parallel_workers + 1;
 	initial_cost_hashjoin(root, &workspace, jointype, hashclauses,
-						  outer_path, inner_path, extra, false);
+						  outer_path, inner_path, extra, shared);
 	if (workspace.numbatches > 1 ||
-		table_bytes(inner_path, keys->nkeys, ninner) > (double) get_hash_memory_limit())
+		table_bytes(inner_path, keys->nkeys, ninner) > memory_limit)
 		return NULL;
 	outer = tess_batch_input_path(root, outer_path);
 	inner = tess_batch_input_path(root, inner_path);
@@ -287,7 +293,7 @@ make_join_path(PlannerInfo *root, RelOptInfo *joinrel, JoinType jointype,
 		rinfo->outer_is_left = bms_is_subset(rinfo->left_relids,
 											 outer_path->parent->relids);
 	template = create_hashjoin_path(root, joinrel, jointype, &workspace,
-									extra, outer_path, inner_path, false,
+									extra, outer_path, inner_path, shared,
 									extra->restrictlist, NULL, hashclauses);
 	template->jpath.path.total_cost *= JOIN_COST_FACTOR;
 	config.template_path = &template->jpath.path;
@@ -299,11 +305,28 @@ make_join_path(PlannerInfo *root, RelOptInfo *joinrel, JoinType jointype,
 	config.expressions = list_make5(keys->clauses, keys->outer, keys->inner,
 									keys->residual, keys->filters);
 	config.node_data = (Node *) list_make3(keys->outer_kinds, keys->inner_kinds,
-										   list_make3_int(extra->inner_unique ? 1 : 0,
+										   list_make4_int(extra->inner_unique ? 1 : 0,
 														  (int) Min(inner_path->rows,
 																	(double) PG_INT32_MAX),
-														  (int) jointype));
+														  (int) jointype,
+														  shared ? 1 : 0));
 	return tess_path_create(&config);
+}
+
+/* Every inner column of the join's target and clauses is passed by value. */
+static bool
+inner_by_value(RelOptInfo *joinrel, RelOptInfo *innerrel, const JoinKeys *keys)
+{
+	List	   *vars = list_concat(pull_var_clause((Node *) joinrel->reltarget->exprs, 0),
+								   pull_var_clause((Node *) list_make2(keys->residual,
+																	   keys->filters), 0));
+
+	foreach_node(Var, var, vars)
+	{
+		if (bms_is_member(var->varno, innerrel->relids) && !get_typbyval(var->vartype))
+			return false;
+	}
+	return true;
 }
 
 static void
@@ -339,7 +362,7 @@ join_pathlist(PlannerInfo *root, RelOptInfo *joinrel, RelOptInfo *outerrel,
 		tess_runtime_kernels() == NULL)
 		return;
 	path = make_join_path(root, joinrel, jointype, extra, &keys, ninner,
-						  outer_path, inner_path);
+						  outer_path, inner_path, false);
 	if (path != NULL)
 		add_path(joinrel, &path->path);
 
@@ -358,13 +381,33 @@ join_pathlist(PlannerInfo *root, RelOptInfo *joinrel, RelOptInfo *outerrel,
 	if (inner_path == NULL)
 		return;
 	path = make_join_path(root, joinrel, jointype, extra, &keys, ninner,
-						  linitial(outerrel->partial_pathlist), inner_path);
+						  linitial(outerrel->partial_pathlist), inner_path, false);
+	if (path != NULL && path->path.parallel_safe && path->path.parallel_workers > 0)
+	{
+		path->path.parallel_aware = true;
+		add_partial_path(joinrel, &path->path);
+	}
+
+	/*
+	 * A shared table, where the core offers a Parallel Hash: the inner
+	 * side's partial path divides the build among the participants too,
+	 * into one table in the query's shared memory. Its payload must not
+	 * hold a pointer into one participant's memory, so the kept inner
+	 * columns are passed by value.
+	 */
+	if (!enable_parallel_hash || innerrel->partial_pathlist == NIL ||
+		!inner_by_value(joinrel, innerrel, &keys))
+		return;
+	path = make_join_path(root, joinrel, jointype, extra, &keys, ninner,
+						  linitial(outerrel->partial_pathlist),
+						  linitial(innerrel->partial_pathlist), true);
 	if (path == NULL || !path->path.parallel_safe ||
 		path->path.parallel_workers <= 0)
 		return;
 	path->path.parallel_aware = true;
 	add_partial_path(joinrel, &path->path);
 }
+
 
 /* The target entry of a child's plan that is this column, or NULL. */
 static TargetEntry *
@@ -548,6 +591,8 @@ join_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 	tess_plan_write_int(writer, "jointype", lthird_int(lthird(data)));
 	tess_plan_write_int(writer, "inner_unique", linitial_int(lthird(data)));
 	tess_plan_write_int(writer, "inner_rows", lsecond_int(lthird(data)));
+	tess_plan_write_int(writer, "shared", list_length(lthird(data)) > 3 ?
+						lfourth_int(lthird(data)) : 0);
 
 	config.methods = &tess_hash_join_scan_methods;
 	config.layout_policy = TESS_LAYOUT_PROJECTED;

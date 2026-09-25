@@ -11,7 +11,10 @@
 #include "utils/datum.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
+#include "storage/barrier.h"
 #include "storage/shm_toc.h"
+#include "utils/dsa.h"
+#include "utils/wait_event.h"
 #include "utils/ruleutils.h"
 
 #include "tessera/kernel_ops.h"
@@ -72,6 +75,26 @@ enum
 	JOIN_BLOOM_REMOVED,
 	JOIN_NCOUNTERS
 };
+
+/*
+ * A shared build (plan data "shared"): one table in the query's dynamic
+ * shared memory, which every participant inserts its share of the inner
+ * side into, in phases the build barrier separates (see
+ * tessera/table.h, TESS_BUILD_*). Rows a full table has no room for wait
+ * in staging buffers of this size, as records.
+ */
+#define JOIN_STAGING_WORDS (256 * 1024 / 8)
+
+/* The part of the node's DSM chunk a shared build uses, before the counters. */
+typedef struct JoinShared
+{
+	Barrier		build;
+	/* The table's region and its length, set by the elected participant. */
+	dsa_pointer region;
+	Size		region_len;
+	/* The rows staged and the NULL columns, as tess_build_report adds them. */
+	uint64		counters[TESS_BUILD_COUNTER_WORDS];
+} JoinShared;
 
 /* Which child a column of the scan tuple comes from. */
 typedef enum JoinSide
@@ -252,6 +275,25 @@ typedef struct TessHashJoinState
 	Size		peak_memory;
 	/* The counters of every participant, in a parallel plan. */
 	TessSharedStats *stats;
+
+	/*
+	 * A shared build: the plan asks for one; the shared state in the DSM
+	 * chunk, NULL when the plan runs without one (a Gather that launched
+	 * no workers), and then the node builds a table of its own; this
+	 * participant, whether it is attached to the build barrier, and its
+	 * staging buffers with their used bytes.
+	 */
+	bool		shared_mode;
+	JoinShared *shared;
+	/* The query's shared memory, kept for leaving after the Gather let go of it. */
+	dsa_area   *area;
+	TessBuildParticipant participant;
+	bool		participating;
+	int			nstaged;
+	int			staged_capacity;
+	dsa_pointer *staged;
+	Size	   *staged_used;
+	uint64		staged_rows;
 } TessHashJoinState;
 
 static const CustomExecMethods join_exec_methods;
@@ -568,6 +610,385 @@ build_table(TessHashJoinState *state)
 }
 
 /*
+ * The next record of each row's key: one step in a table grouped by
+ * insertion, a walk down the chain in a shared table, whose participants
+ * inserted without grouping.
+ */
+static TessStatusCode
+next_record(TessHashJoinState *state, const TessRowMask *rows, TessRowMask *found)
+{
+	if (state->shared != NULL)
+		return state->kernels->table_next_match(state->region, state->region_len,
+												state->offsets, rows, found,
+												&state->status);
+	return state->kernels->table_next_in_group(state->region, state->region_len,
+											   state->offsets, rows, found,
+											   &state->status);
+}
+
+/*
+ * The query's dynamic shared memory, where a shared build keeps its
+ * table: the Gather installs it only while it runs the plan, so it is
+ * kept for leaving the build and freeing the table at shutdown, as the
+ * core's parallel hash join keeps it.
+ */
+static dsa_area *
+query_dsa(TessHashJoinState *state)
+{
+	dsa_area   *area = state->css.ss.ps.state->es_query_dsa;
+
+	if (area != NULL)
+		state->area = area;
+	if (state->area == NULL)
+		elog(ERROR, "TessHashJoin found no shared memory for its shared table");
+	return state->area;
+}
+
+/* The shared table as the elected participant last published it. */
+static void
+attach_shared_table(TessHashJoinState *state)
+{
+	state->region = dsa_get_address(query_dsa(state), state->shared->region);
+	state->region_len = state->shared->region_len;
+}
+
+/* ALLOCATE: an empty shared table sized for the planner's estimate. */
+static void
+allocate_shared_table(TessHashJoinState *state)
+{
+	Size		payload_size = sizeof(uint64) * (1 + state->npayload);
+	uint64		capacity = Max(state->inner_rows, JOIN_INITIAL_ROWS);
+	dsa_area   *area = query_dsa(state);
+	TessTableStats stats = TESS_STRUCT_INITIALIZER(TessTableStats);
+	dsa_pointer region;
+	Size		size;
+
+	check(state, state->kernels->table_size(state->nkeys, state->inner_kinds,
+											payload_size, capacity,
+											&size, &state->status));
+	region = dsa_allocate_extended(area, size, DSA_ALLOC_HUGE | DSA_ALLOC_ZERO);
+	check(state, state->kernels->table_create(dsa_get_address(area, region), size,
+											  state->nkeys, state->inner_kinds,
+											  payload_size, capacity,
+											  &state->status));
+	state->shared->region = region;
+	state->shared->region_len = size;
+	attach_shared_table(state);
+	check(state, state->kernels->table_stats(state->region, state->region_len,
+											 &stats, &state->status));
+	state->counters[JOIN_BUILDS]++;
+	state->counters[JOIN_BUCKETS] += stats.buckets;
+}
+
+/* A new staging buffer in shared memory, the last one being full. */
+static void
+add_staging_buffer(TessHashJoinState *state)
+{
+	if (state->nstaged == state->staged_capacity)
+	{
+		MemoryContext context = state->css.ss.ps.state->es_query_cxt;
+		int			capacity = Max(state->staged_capacity * 2, 8);
+
+		if (state->staged == NULL)
+		{
+			state->staged = MemoryContextAlloc(context, sizeof(dsa_pointer) * capacity);
+			state->staged_used = MemoryContextAlloc(context, sizeof(Size) * capacity);
+		}
+		else
+		{
+			state->staged = repalloc(state->staged, sizeof(dsa_pointer) * capacity);
+			state->staged_used = repalloc(state->staged_used, sizeof(Size) * capacity);
+		}
+		state->staged_capacity = capacity;
+	}
+	state->staged[state->nstaged] = dsa_allocate(query_dsa(state),
+												 sizeof(uint64) * JOIN_STAGING_WORDS);
+	state->staged_used[state->nstaged] = 0;
+	state->nstaged++;
+}
+
+/*
+ * BUILD: insert the rows of one inner batch into the shared table; the
+ * rows it has no room for wait in staging buffers.
+ */
+static void
+insert_shared_batch(TessHashJoinState *state, TessBatch *batch)
+{
+	int			nrows = batch->rows.nrows;
+	int			nwords = tess_row_mask_word_count(nrows);
+	TessRowMask valid;
+	TessRowMask pending;
+	int			count;
+	int			left;
+
+	reserve_rows(state, nrows);
+	memset(state->valid_bits, 0, sizeof(uint64) * nwords);
+	valid = (TessRowMask) {nrows, state->valid_bits};
+	pending = (TessRowMask) {nrows, state->pending_bits};
+	batch_keys(state, batch, state->inner_keys, state->inner_kinds, &valid);
+	count = tess_row_mask_count(&valid);
+	if (count == 0)
+		return;
+	fill_payload(state, batch, &valid);
+	memcpy(state->pending_bits, state->valid_bits, sizeof(uint64) * nwords);
+	check(state, state->kernels->table_insert(state->region, state->region_len,
+											  state->hashes, state->nkeys,
+											  state->table_keys,
+											  (const uint8 *) state->payload,
+											  &pending, state->offsets,
+											  &state->status));
+	left = tess_row_mask_count(&pending);
+	state->staged_rows += left;
+	while (left > 0)
+	{
+		bool		fresh = state->nstaged == 0;
+		int			before = left;
+
+		if (fresh)
+			add_staging_buffer(state);
+		check(state, state->kernels->table_stage(state->region, state->region_len,
+												 dsa_get_address(query_dsa(state),
+																 state->staged[state->nstaged - 1]),
+												 JOIN_STAGING_WORDS,
+												 &state->staged_used[state->nstaged - 1],
+												 state->hashes, state->nkeys,
+												 state->table_keys,
+												 (const uint8 *) state->payload,
+												 &pending, &state->status));
+		left = tess_row_mask_count(&pending);
+		if (left == before)
+		{
+			/* The last buffer is full; a fresh one takes a record at least. */
+			if (fresh)
+				elog(ERROR, "TessHashJoin cannot stage a row of its table");
+			add_staging_buffer(state);
+		}
+	}
+	state->build_rows += count;
+	state->counters[JOIN_BUILD_ROWS] += count;
+}
+
+/* BUILD: this participant's share of the inner side, then its report. */
+static void
+build_shared_inner(TessHashJoinState *state)
+{
+	attach_shared_table(state);
+	for (;;)
+	{
+		TessBatch  *batch = tess_input_next(state->inner_input);
+
+		if (batch == NULL)
+			break;
+		if (tess_row_mask_count(&batch->rows) > 0)
+			insert_shared_batch(state, batch);
+		tess_input_finish(state->inner_input);
+	}
+	check(state, state->kernels->build_report(state->shared->counters,
+											  state->staged_rows,
+											  state->null_columns,
+											  &state->status));
+}
+
+/*
+ * GROW: copy the header and the records into a region for every record,
+ * staged ones included, and grow the table there.
+ */
+static void
+grow_shared_table(TessHashJoinState *state)
+{
+	Size		payload_size = sizeof(uint64) * (1 + state->npayload);
+	dsa_area   *area = query_dsa(state);
+	TessTableStats before = TESS_STRUCT_INITIALIZER(TessTableStats);
+	TessTableStats after = TESS_STRUCT_INITIALIZER(TessTableStats);
+	uint64		staged;
+	uint64		nulls;
+	dsa_pointer grown;
+	char	   *target;
+	Size		size;
+
+	attach_shared_table(state);
+	check(state, state->kernels->build_totals(state->shared->counters, &staged,
+											  &nulls, &state->status));
+	check(state, state->kernels->table_stats(state->region, state->region_len,
+											 &before, &state->status));
+	check(state, state->kernels->table_size(state->nkeys, state->inner_kinds,
+											payload_size, before.records + staged,
+											&size, &state->status));
+	grown = dsa_allocate_extended(area, size, DSA_ALLOC_HUGE);
+	target = dsa_get_address(area, grown);
+	/* The header and the records; the buckets are rebuilt at the new end. */
+	memcpy(target, state->region, before.bytes_used - before.buckets * 4);
+	check(state, state->kernels->table_grow(target, size, &state->status));
+	dsa_free(area, state->shared->region);
+	state->shared->region = grown;
+	state->shared->region_len = size;
+	attach_shared_table(state);
+	check(state, state->kernels->table_stats(state->region, state->region_len,
+											 &after, &state->status));
+	state->counters[JOIN_GROWS]++;
+	state->counters[JOIN_BUCKETS] += after.buckets - before.buckets;
+}
+
+/* LINK: add this participant's staged rows to the grown table. */
+static void
+link_staged_rows(TessHashJoinState *state)
+{
+	dsa_area   *area = query_dsa(state);
+
+	attach_shared_table(state);
+	for (int buffer = 0; buffer < state->nstaged; buffer++)
+	{
+		Size		consumed = 0;
+
+		check(state, state->kernels->table_insert_staged(state->region,
+														 state->region_len,
+														 dsa_get_address(area,
+																		 state->staged[buffer]),
+														 state->staged_used[buffer],
+														 &consumed,
+														 &state->status));
+		if (consumed != state->staged_used[buffer])
+			elog(ERROR, "TessHashJoin shared table has no room for its staged rows");
+		dsa_free(area, state->staged[buffer]);
+	}
+	state->nstaged = 0;
+	state->staged_rows = 0;
+}
+
+/* Free the shared table, as the last participant to leave or at a rescan. */
+static void
+free_shared_table(TessHashJoinState *state)
+{
+	if (DsaPointerIsValid(state->shared->region))
+	{
+		dsa_free(query_dsa(state), state->shared->region);
+		state->shared->region = InvalidDsaPointer;
+	}
+	state->region = NULL;
+	state->region_len = 0;
+}
+
+/*
+ * Step through the shared build's phases until probing starts: the node
+ * performs each action the participant returns, and the build barrier's
+ * waits stay here, since they may raise an error.
+ */
+static void
+build_shared(TessHashJoinState *state)
+{
+	uint32		reply = 0;
+
+	for (int word = 0; word < state->npayload; word++)
+		if (!state->typbyvals[state->payload_columns[word]])
+			elog(ERROR, "TessHashJoin cannot share a by-reference inner column");
+	state->compact_decided = false;
+	state->build_rows = 0;
+	state->duplicates = 0;
+	state->null_columns = 0;
+	state->staged_rows = 0;
+	state->nstaged = 0;
+	state->participating = true;
+	for (;;)
+	{
+		uint32		action;
+
+		check(state, state->kernels->build_step(&state->participant,
+												state->shared->counters, reply,
+												&action, &state->status));
+		reply = 0;
+		switch (action)
+		{
+			case TESS_BUILD_ATTACH:
+				reply = BarrierAttach(&state->shared->build);
+				break;
+			case TESS_BUILD_ARRIVE_AND_WAIT:
+				reply = BarrierArriveAndWait(&state->shared->build,
+											 PG_WAIT_EXTENSION) ? 1 : 0;
+				break;
+			case TESS_BUILD_DO_ALLOCATE:
+				allocate_shared_table(state);
+				break;
+			case TESS_BUILD_DO_BUILD:
+				build_shared_inner(state);
+				break;
+			case TESS_BUILD_DO_GROW:
+				grow_shared_table(state);
+				break;
+			case TESS_BUILD_DO_LINK:
+				link_staged_rows(state);
+				break;
+			case TESS_BUILD_DO_PROBE:
+				{
+					TessTableStats stats = TESS_STRUCT_INITIALIZER(TessTableStats);
+					uint64		staged;
+
+					attach_shared_table(state);
+					check(state, state->kernels->table_stats(state->region,
+															 state->region_len,
+															 &stats, &state->status));
+					check(state, state->kernels->build_totals(state->shared->counters,
+															  &staged,
+															  &state->null_columns,
+															  &state->status));
+					/* The whole table's rows; its duplicates are unknown. */
+					state->build_rows = stats.records;
+					state->duplicates = state->inner_unique ? 0 : 1;
+					state->built = true;
+					return;
+				}
+			case TESS_BUILD_DETACH:
+				BarrierDetach(&state->shared->build);
+				break;
+			case TESS_BUILD_DONE:
+				/* Attached after the last one left: nothing is left to probe. */
+				state->participating = false;
+				state->build_rows = 0;
+				state->built = true;
+				state->done = true;
+				return;
+			default:
+				elog(ERROR, "TessHashJoin got build action %u out of order", action);
+		}
+	}
+}
+
+/* Leave a shared build after probing; the last one to leave frees the table. */
+static void
+leave_shared(TessHashJoinState *state)
+{
+	uint32		reply = 0;
+
+	if (!state->participating)
+		return;
+	for (;;)
+	{
+		uint32		action;
+
+		check(state, state->kernels->build_step(&state->participant,
+												state->shared->counters, reply,
+												&action, &state->status));
+		reply = 0;
+		switch (action)
+		{
+			case TESS_BUILD_ARRIVE_AND_DETACH:
+				reply = BarrierArriveAndDetach(&state->shared->build) ? 1 : 0;
+				break;
+			case TESS_BUILD_DO_FREE:
+				free_shared_table(state);
+				state->participating = false;
+				return;
+			case TESS_BUILD_DONE:
+				state->participating = false;
+				state->region = NULL;
+				state->region_len = 0;
+				return;
+			default:
+				elog(ERROR, "TessHashJoin got build action %u out of order", action);
+		}
+	}
+}
+
+/*
  * The inner column kept in payload word `word`, for the rows of the
  * round: the records' NULL bits once per round, then the column's word.
  * A parent asks with a subset of the round's rows, which the whole round
@@ -712,6 +1133,12 @@ start_null_round(TessHashJoinState *state)
 static void
 decide_bloom(TessHashJoinState *state, uint64 rows, uint64 found)
 {
+	/* A shared table's filter comes with its own decision. */
+	if (state->shared != NULL)
+	{
+		state->bloom_decided = true;
+		return;
+	}
 	state->sample_rows += rows;
 	state->sample_found += found;
 	if (state->sample_rows < JOIN_BLOOM_SAMPLE)
@@ -813,11 +1240,7 @@ next_round(TessHashJoinState *state)
 
 				memcpy(state->next_bits, state->round_bits,
 					   sizeof(uint64) * tess_row_mask_word_count(nrows));
-				check(state, state->kernels->table_next_in_group(state->region,
-																 state->region_len,
-																 state->offsets,
-																 &rows, &found,
-																 &state->status));
+				check(state, next_record(state, &rows, &found));
 				if (tess_row_mask_count(&found) > 0)
 				{
 					start_round(state);
@@ -1062,11 +1485,7 @@ next_matches(TessHashJoinState *state)
 					}
 					if (left == 0)
 						break;
-					check(state, state->kernels->table_next_in_group(state->region,
-																	 state->region_len,
-																	 state->offsets,
-																	 &rest, &round,
-																	 &state->status));
+					check(state, next_record(state, &rest, &round));
 					if (tess_row_mask_count(&round) == 0)
 						break;
 				}
@@ -1339,6 +1758,7 @@ read_node_data(TessHashJoinState *state, const List *data)
 	state->jointype = (JoinType) tess_plan_read_int(reader, "jointype");
 	state->inner_unique = tess_plan_read_int(reader, "inner_unique") != 0;
 	state->inner_rows = tess_plan_read_int(reader, "inner_rows");
+	state->shared_mode = tess_plan_read_int(reader, "shared") != 0;
 	tess_plan_reader_finish(reader);
 	state->nkeys = list_length(outer_keys);
 	if (list_length(sides) != state->ncolumns ||
@@ -1518,6 +1938,8 @@ decide_compact(TessHashJoinState *state)
 	 */
 	if (state->request->output_mode != TESS_OUTPUT_BATCH ||
 		state->inner_unique || state->duplicates == 0 ||
+		/* A shared table's duplicates are unknown: rounds over the batch. */
+		state->shared != NULL ||
 		state->jointype == JOIN_SEMI || state->jointype == JOIN_ANTI ||
 		(state->jointype == JOIN_LEFT && state->qual != NULL))
 		return;
@@ -1550,7 +1972,14 @@ join_exec(CustomScanState *css)
 	if (state->request == NULL)
 		send_requests(state);
 	if (!state->built)
-		build_table(state);
+	{
+		if (state->shared != NULL)
+			build_shared(state);
+		else
+			build_table(state);
+		if (state->done)
+			return NULL;
+	}
 	/*
 	 * Nothing to match: the outer child is never read, as in the core,
 	 * unless its rows go out without a match (LEFT, ANTI).
@@ -1609,7 +2038,13 @@ join_rescan(CustomScanState *css)
 		UpdateChangedParamSet(state->outer, css->ss.ps.chgParam);
 		UpdateChangedParamSet(state->inner, css->ss.ps.chgParam);
 	}
-	if (state->inner->chgParam != NULL)
+	/*
+	 * A shared table goes with its build, which starts anew with the
+	 * rescan's workers; the leader leaves the one it took part in.
+	 */
+	if (state->shared != NULL)
+		leave_shared(state);
+	if (state->inner->chgParam != NULL || state->shared != NULL)
 	{
 		/* The inner child rescans at its next execution. */
 		tess_input_rescan(state->inner_input);
@@ -1742,10 +2177,33 @@ join_explain(CustomScanState *css, List *ancestors, ExplainState *es)
  * core's hash join without a shared table does. The node shares only its
  * counters, in the rows of its chunk.
  */
+/* The bytes of the chunk a shared build takes before the counters. */
+static Size
+shared_size(TessHashJoinState *state)
+{
+	return state->shared_mode ? MAXALIGN(sizeof(JoinShared)) : 0;
+}
+
+/* A shared build's state before any participant attaches. */
+static void
+init_shared(TessHashJoinState *state)
+{
+	BarrierInit(&state->shared->build, 0);
+	state->shared->region = InvalidDsaPointer;
+	state->shared->region_len = 0;
+	check(state, state->kernels->build_counters_init(state->shared->counters,
+													 &state->status));
+	memset(&state->participant, 0, sizeof(state->participant));
+	state->participating = false;
+}
+
 static Size
 join_estimate_dsm(CustomScanState *css, ParallelContext *pcxt)
 {
-	return tess_shared_stats_estimate(JOIN_NCOUNTERS, pcxt->nworkers);
+	TessHashJoinState *state = (TessHashJoinState *) css;
+
+	return add_size(shared_size(state),
+					tess_shared_stats_estimate(JOIN_NCOUNTERS, pcxt->nworkers));
 }
 
 static void
@@ -1754,20 +2212,37 @@ join_initialize_dsm(CustomScanState *css, ParallelContext *pcxt,
 {
 	TessHashJoinState *state = (TessHashJoinState *) css;
 
+	if (state->shared_mode)
+	{
+		state->shared = coordinate;
+		init_shared(state);
+	}
 	/* A Gather a limit above shut down sets up anew when rescanned. */
 	if (state->stats != NULL)
 		tess_shared_stats_end(state->stats);
 	state->stats = tess_shared_stats_init(css->ss.ps.state->es_query_cxt,
-										  coordinate, JOIN_NCOUNTERS,
-										  pcxt->nworkers, pcxt->seg);
+										  (char *) coordinate + shared_size(state),
+										  JOIN_NCOUNTERS, pcxt->nworkers, pcxt->seg);
 }
 
+/*
+ * Before a rescan's workers start: the leader leaves a build it still
+ * takes part in, and the table, which a participant that stopped early
+ * may have left behind, is freed; the next execution builds anew.
+ */
 static void
 join_reinitialize_dsm(CustomScanState *css, ParallelContext *pcxt,
 					  void *coordinate)
 {
 	TessHashJoinState *state = (TessHashJoinState *) css;
 
+	if (state->shared != NULL)
+	{
+		leave_shared(state);
+		free_shared_table(state);
+		init_shared(state);
+		state->built = false;
+	}
 	tess_shared_stats_reset(state->stats);
 }
 
@@ -1776,8 +2251,11 @@ join_initialize_worker(CustomScanState *css, shm_toc *toc, void *coordinate)
 {
 	TessHashJoinState *state = (TessHashJoinState *) css;
 
+	if (state->shared_mode)
+		state->shared = coordinate;
 	state->stats = tess_shared_stats_attach(css->ss.ps.state->es_query_cxt,
-											coordinate, ParallelWorkerNumber + 1);
+											(char *) coordinate + shared_size(state),
+											ParallelWorkerNumber + 1);
 }
 
 static void
@@ -1786,6 +2264,8 @@ join_shutdown(CustomScanState *css)
 	TessHashJoinState *state = (TessHashJoinState *) css;
 	uint64		values[JOIN_NCOUNTERS];
 
+	if (state->shared != NULL)
+		leave_shared(state);
 	if (state->stats == NULL)
 		return;
 	join_counters(state, values);
