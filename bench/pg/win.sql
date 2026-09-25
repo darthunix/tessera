@@ -115,6 +115,15 @@ SELECT pg_temp.measure_pair('four_dense',
 SELECT pg_temp.measure_pair('two_columns',
     format('SELECT sum(c1 + c2) FROM bench_narrow WHERE c1 > %s', 1000000 * :scale),
     :repetitions);
+-- Two computed sides: the comparison's operand and the argument's are
+-- expressions of their own, computed over the batch; half the rows pass.
+SELECT pg_temp.measure_pair('tree',
+    format('SELECT count(*) FROM bench_narrow WHERE (c1 + 1) * 2 < (c2 + 3) * 3 - %s',
+           1000000 * :scale + 10),
+    :repetitions);
+SELECT pg_temp.measure_pair('tree_sum',
+    'SELECT sum(((c1 % 1000) + 1) * ((c2 % 1000) + 1)) FROM bench_narrow',
+    :repetitions);
 
 \copy timings TO 'timings.csv' CSV HEADER
 
