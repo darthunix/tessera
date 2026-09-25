@@ -2,6 +2,7 @@
 
 #include "catalog/pg_type_d.h"
 #include "executor/executor.h"
+#include "miscadmin.h"
 #include "nodes/nodeFuncs.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
@@ -19,10 +20,12 @@ typedef struct Step
 	Oid			inputcollid;
 	int			nargs;
 	int			column_arg;
-	/* An argument that is another column of the batch, or -1; its column. */
+	/*
+	 * An argument that is another value over the batch, or -1: a bare
+	 * column or an expression of its own, computed over the same rows.
+	 */
 	int			column_operand;
-	int			operand_column;
-	TessDatumColumn operand;
+	TessExpr   *operand;
 	/* The other arguments, evaluated per computation. */
 	ExprState  *scalars[MAX_ARGS];
 } Step;
@@ -147,9 +150,9 @@ commuted(Oid opno, Oid inputcollid, TessFunctionKind kind)
 /*
  * Whether every argument is a supported value, how many of them hold a
  * column, which argument carries the chain's column and which, if any,
- * is a bare column of the batch as the call's other operand: of two
- * arguments with columns one must be a bare Var, the operand, and the
- * other continues the chain.
+ * is the call's other operand over the batch, compiled as an expression
+ * of its own: a bare Var when one side is, so that the chain follows the
+ * computed side, else the second argument.
  */
 static bool
 analyze_args(List *args, Index relid, int *nvars, int *column_arg,
@@ -184,7 +187,7 @@ analyze_args(List *args, Index relid, int *nvars, int *column_arg,
 				*column_arg = index;
 			}
 			else
-				return false;
+				*column_operand = index;
 			(*nvars)++;
 		}
 		index++;
@@ -208,7 +211,8 @@ shape_fits(const TessFunction *function, int column_arg, int nargs,
  * column (nvars 1) or is a scalar (0). The column, when there is one,
  * must be the first argument of every call that takes it, unless the
  * implementation accepts any shape or the operator commutes into one
- * that does; a column operand needs an implementation of any shape.
+ * that does; an operand over the batch, a column or an expression,
+ * needs an implementation of any shape.
  */
 static bool
 analyze_value(Node *node, Index relid, int *nvars)
@@ -220,6 +224,7 @@ analyze_value(Node *node, Index relid, int *nvars)
 	int			column_arg;
 	int			column_operand;
 
+	check_stack_depth();
 	node = strip_relabel(node);
 	if (node == NULL)
 		return false;
@@ -248,10 +253,9 @@ analyze_value(Node *node, Index relid, int *nvars)
 
 /*
  * Whether node is a supported filter: a boolean call of a registered
- * predicate over one column value and either a scalar or a bare column of
- * the batch, the operand, which the predicate must accept in any shape;
- * with a scalar the column comes first or moves first through the
- * commutator.
+ * predicate over one value and either a scalar or another value over the
+ * batch, the operand, which the predicate must accept in any shape; with
+ * a scalar the column comes first or moves first through the commutator.
  */
 static bool
 analyze_filter(Node *node, Index relid, int *column_arg, int *column_operand)
@@ -293,9 +297,14 @@ tess_expr_supports_filter(Node *node, Index relid)
 	return analyze_filter(node, relid, &column_arg, &column_operand);
 }
 
+static TessExpr *new_expr(Node *node, TessExprResolveVar resolve);
+static void compile_value(TessExpr *expr, Node *node, PlanState *parent,
+						  TessExprResolveVar resolve, void *context);
+
 /*
  * Set up the call of node, whose column argument was compiled already;
- * a column operand is resolved to its batch column here.
+ * the operand, when there is one, is compiled here as an expression of
+ * its own.
  */
 static void
 init_step(Step *step, Node *node, int column_arg, int column_operand,
@@ -312,14 +321,13 @@ init_step(Step *step, Node *node, int column_arg, int column_operand,
 	step->nargs = list_length(args);
 	step->column_arg = column_arg;
 	step->column_operand = column_operand;
-	step->operand_column = -1;
+	step->operand = NULL;
 	if (column_operand >= 0)
 	{
-		const Var  *var = (const Var *) strip_relabel(list_nth(args, column_operand));
+		Node	   *operand = list_nth(args, column_operand);
 
-		step->operand_column = resolve(var, context);
-		if (step->operand_column < 0)
-			elog(ERROR, "Tessera expression operand column is unavailable");
+		step->operand = new_expr(operand, resolve);
+		compile_value(step->operand, operand, parent, resolve, context);
 	}
 	if (column_arg != 0 && (function->flags & TESS_FUNCTION_ANY_SHAPE) == 0)
 	{
@@ -361,6 +369,7 @@ compile_value(TessExpr *expr, Node *node, PlanState *parent,
 	int			column_arg;
 	int			column_operand;
 
+	check_stack_depth();
 	node = strip_relabel(node);
 	if (IsA(node, Var))
 	{
@@ -447,6 +456,11 @@ tess_expr_bind(TessExpr *expr, TessBatch *batch, ExprContext *econtext,
 	expr->econtext = econtext;
 	expr->purpose = purpose;
 	expr->ready = false;
+	for (int index = 0; index < expr->nsteps; index++)
+		if (expr->steps[index].operand != NULL)
+			tess_expr_bind(expr->steps[index].operand, batch, econtext, purpose);
+	if (expr->filter && expr->predicate.operand != NULL)
+		tess_expr_bind(expr->predicate.operand, batch, econtext, purpose);
 }
 
 /* Scratch for nrows rows; values stay initialized as placeholders. */
@@ -537,9 +551,12 @@ finish_step(TessExpr *expr, int set, TessResultFormat format)
 	}
 }
 
-/* The call's arguments: the column and the scalars; true when one is NULL. */
+/*
+ * The call's arguments: the column, the operand computed over the current
+ * selection, and the scalars; true when a scalar is NULL.
+ */
 static bool
-build_args(TessExpr *expr, const Step *step, const TessDatumColumn *column,
+build_args(TessExpr *expr, Step *step, const TessDatumColumn *column,
 		   TessFunctionArg *args)
 {
 	bool		scalar_null = false;
@@ -551,7 +568,11 @@ build_args(TessExpr *expr, const Step *step, const TessDatumColumn *column,
 		if (position == step->column_arg)
 			args[position].column = column;
 		else if (position == step->column_operand)
-			args[position].column = &step->operand;
+		{
+			/* The selection may have narrowed since the operand was computed. */
+			step->operand->ready = false;
+			args[position].column = tess_expr_get_column(step->operand);
+		}
 		else
 		{
 			bool		isnull;
@@ -563,20 +584,6 @@ build_args(TessExpr *expr, const Step *step, const TessDatumColumn *column,
 		}
 	}
 	return scalar_null;
-}
-
-/* A step's column operand, read whole; the call leaves its NULLs out. */
-static void
-fetch_operand(TessExpr *expr, Step *step)
-{
-	TessBatch  *batch = expr->batch;
-
-	step->operand = (TessDatumColumn) TESS_STRUCT_INITIALIZER(TessDatumColumn);
-	batch->ops->get_datum_column(batch, step->operand_column, &batch->rows,
-								 expr->purpose, &step->operand);
-	if (step->operand.values == NULL || step->operand.isnull == NULL ||
-		step->operand.nrows != batch->rows.nrows)
-		elog(ERROR, "Tessera batch returned an invalid column");
 }
 
 /* Run one step over the selected rows; a failure is raised here. */
@@ -646,8 +653,6 @@ tess_expr_get_column(TessExpr *expr)
 		TessFunctionArg args[MAX_ARGS];
 		TessRowMask non_nulls = {nrows, expr->bits[set]};
 
-		if (step->column_operand >= 0)
-			fetch_operand(expr, step);
 		if (build_args(expr, step, &current, args))
 			fill_scalar(expr, set, (Datum) 0, true);
 		else
@@ -700,8 +705,6 @@ tess_expr_apply_filter(TessExpr *expr)
 	if (!expr->filter)
 		elog(ERROR, "Tessera expression is not a filter");
 	column = tess_expr_get_column(expr);
-	if (expr->predicate.column_operand >= 0)
-		fetch_operand(expr, &expr->predicate);
 	if (build_args(expr, &expr->predicate, column, args))
 	{
 		/* A NULL scalar makes the strict predicate false everywhere. */

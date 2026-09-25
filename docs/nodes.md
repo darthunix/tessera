@@ -350,7 +350,8 @@ expensive predicate behind a cheaper int4 clause, a null test that keeps
 the node away, the separate removal counts, a join of two filtered
 relations, the planner's order in front of a division by zero, a batch
 clause after a row-wise guard, a row-wise clause between batch ones, a
-policy's row-wise guard before a cheaper user division, a parallel
+policy's row-wise guard before a cheaper user division, two computed
+sides of a comparison and of a sum's argument, a parallel
 worker, a scrollable cursor, an `UPDATE`, and the switch off. The
 parallel suite runs the node under a `Gather` with two workers (see
 TessHeapScan).

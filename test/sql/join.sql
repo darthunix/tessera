@@ -122,8 +122,8 @@ SELECT join_same($$SELECT count(*), sum(jdup.w), sum(jf.m) FROM jf JOIN jdup ON 
 SELECT join_same($$SELECT jf.v, jdup.w FROM jf JOIN jdup ON jf.fk = jdup.k AND jf.v > jdup.w$$);
 SELECT join_same($$SELECT jf.v, jd.label FROM jf JOIN jd ON jf.fk = jd.id AND jf.note = jd.label$$);
 SELECT join_same($$SELECT jsmall.k, (SELECT count(*) FROM jf JOIN jdup ON jf.fk = jdup.k AND jf.v - jdup.w > jsmall.k) FROM jsmall$$);
--- In batches: a column against a chain over the other side, int4 against
--- int8 columns; by rows: a chain on both sides, beside a batch one.
+-- In batches: a column against a chain over the other side, a chain on
+-- both sides, int4 against int8 columns.
 EXPLAIN (COSTS OFF) SELECT count(*) FROM jf JOIN jd ON jf.fk = jd.id AND jf.v > jd.n * 2 AND jf.v + 1 < jd.n * 3;
 SELECT join_same($$SELECT jf.v, jd.n FROM jf JOIN jd ON jf.fk = jd.id AND jf.v > jd.n * 2 AND jf.v + 1 < jd.n * 3$$);
 SELECT join_same($$SELECT count(*), sum(jd.n) FROM jf JOIN jd ON jf.fk = jd.id AND jf.v * 10 >= jd.n$$);

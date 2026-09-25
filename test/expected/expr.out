@@ -44,6 +44,10 @@ SELECT tessera_test_expr_errors(5);
 ERROR:  Tessera expression is not a filter
 SELECT tessera_test_expr_errors(6);
 ERROR:  Tessera received an unsupported batch filter
+SELECT tessera_test_expr_errors(7);
+ERROR:  division by zero
+SELECT tessera_test_expr_errors(8);
+ERROR:  Tessera expression input column is unavailable
 \set VERBOSITY default
 DROP FUNCTION tessera_test_expr_errors(integer);
 DROP FUNCTION tessera_test_expr_filters();

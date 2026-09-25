@@ -236,6 +236,14 @@ SELECT filter_same($$SELECT a, b FROM filter_t WHERE a > b * 20$$);
 SELECT filter_same($$SELECT a, b FROM filter_t WHERE b = a$$);
 SELECT filter_same($$SELECT a FROM filter8_t WHERE a < b$$);
 SELECT filter_same($$SELECT a FROM filter8_t WHERE b * 4294967296 <= a$$);
+-- Two computed sides, the second an expression of its own over the batch;
+-- a guard before a division inside it; a sum over both.
+EXPLAIN (COSTS OFF) SELECT a FROM filter_t WHERE (a + 1) * (b + 2) > 300;
+SELECT filter_same($$SELECT a, b FROM filter_t WHERE (a + 1) * (b + 2) > 300$$);
+SELECT filter_same($$SELECT a, b FROM filter_t WHERE a + 1 > b * 2$$);
+SELECT filter_same($$SELECT count(*) FROM filter_t WHERE a > 0 AND b IS DISTINCT FROM 0 AND a + 1 > 10 / b * 2$$);
+SELECT filter_same($$SELECT sum((a + 1) * (b + 2)), count(*) FROM filter_t WHERE a > 100$$);
+SELECT filter_same($$SELECT a FROM filter8_t WHERE a + 1 > b::bigint * 4294967296 * 20$$);
 EXPLAIN (COSTS OFF) SELECT a FROM filter_t WHERE a::bigint * 3 > 570;
 SELECT filter_same($$SELECT a FROM filter_t WHERE a::bigint * 3 > 570$$);
 SELECT filter_same($$SELECT a FROM filter_t WHERE a::bigint < 5 OR a::bigint > 195$$);

@@ -11,11 +11,13 @@
 #include "tessera/row_mask.h"
 
 /*
- * A batch expression is a PostgreSQL expression over at most one column
- * of a batch: a Var, Const and Param scalars, and calls of functions that
- * the function registry implements (see docs/function.md), nested so that
- * one column flows through a chain of calls. Nothing else: no general
- * intermediate representation, no AND or OR, no non-strict functions. A
+ * A batch expression is a PostgreSQL expression over columns of a batch:
+ * Vars, Const and Param scalars, and calls of functions that the function
+ * registry implements (see docs/function.md), nested so that a column
+ * flows through a chain of calls, a call's other argument being a scalar
+ * or a value over the batch compiled as an expression of its own. Nothing
+ * else: no general intermediate representation, no AND or OR, no
+ * non-strict functions. A
  * value expression yields a column of results with a mask of the non-NULL
  * rows; a filter is a registered predicate applied to such a value and a
  * scalar, narrowing the batch's row mask in place. See docs/expr.md.
@@ -42,7 +44,7 @@ extern TessExpr *tess_expr_compile_value(Node *node, PlanState *parent,
 
 /*
  * A filter is a value expression under a registered predicate with a
- * scalar; it must satisfy tess_expr_supports_filter.
+ * scalar or another value; it must satisfy tess_expr_supports_filter.
  */
 extern TessExpr *tess_expr_compile_filter(Node *node, PlanState *parent,
 										  TessExprResolveVar resolve,

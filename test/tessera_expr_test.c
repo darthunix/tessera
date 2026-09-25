@@ -119,6 +119,13 @@ resolve_none(const Var *v, void *context)
 	return -1;
 }
 
+/* Only the first column is available. */
+static int
+resolve_second_none(const Var *v, void *context)
+{
+	return v->varattno == 1 ? 0 : -1;
+}
+
 /* An expectation of the supports test, reported by number on failure. */
 static bool
 check(int number, bool holds)
@@ -152,7 +159,9 @@ tessera_test_expr_supports(PG_FUNCTION_ARGS)
 	result &= check(29, tess_expr_supports_value(op("-", var(2, INT4OID), a()), 0));
 	result &= check(30, tess_expr_supports_value(op("+", op("+", a(), var(2, INT4OID)), var(2, INT4OID)), 0));
 	result &= check(31, tess_expr_supports_value(op("-", a(), op("*", var(2, INT4OID), int4(2))), 0));
-	result &= check(33, !tess_expr_supports_value(op("+", op("+", a(), int4(1)), op("*", var(2, INT4OID), int4(2))), 0));
+	/* Two computed sides: the second is an operand of its own. */
+	result &= check(33, tess_expr_supports_value(op("+", op("+", a(), int4(1)), op("*", var(2, INT4OID), int4(2))), 0));
+	result &= check(40, tess_expr_supports_value(op("*", op("+", a(), int4(1)), op("+", var(2, INT4OID), op("*", a(), int4(2)))), 0));
 	result &= check(32, tess_expr_supports_filter(op(">", op("+", a(), var(2, INT4OID)), int4(5)), 0));
 	/* A bigint column with a bigint or an integer scalar, and the cast. */
 	result &= check(34, tess_expr_supports_value(op("+", var(4, INT8OID), (Node *) makeConst(INT8OID, -1, InvalidOid, 8, Int64GetDatum(1), false, true)), 0));
@@ -169,6 +178,8 @@ tessera_test_expr_supports(PG_FUNCTION_ARGS)
 	coalesce->coalescetype = INT4OID;
 	coalesce->args = list_make2(a(), int4(0));
 	result &= check(14, !tess_expr_supports_value((Node *) coalesce, 0));
+	/* Something unsupported inside an operand rejects the whole. */
+	result &= check(41, !tess_expr_supports_value(op("*", op("+", a(), int4(1)), (Node *) coalesce), 0));
 	null_test->arg = (Expr *) a();
 	null_test->nulltesttype = IS_NULL;
 	result &= check(15, !tess_expr_supports_value((Node *) null_test, 0));
@@ -184,10 +195,10 @@ tessera_test_expr_supports(PG_FUNCTION_ARGS)
 	result &= check(22, !tess_expr_supports_filter(a(), 0));
 	result &= check(23, !tess_expr_supports_filter(op("<", int4(1), int4(2)), 0));
 	result &= check(24, !tess_expr_supports_filter(op("+", a(), int4(1)), 0));
-	/* A column operand of any shape; not two computed sides. */
+	/* A column operand of any shape, bare or computed. */
 	result &= check(25, tess_expr_supports_filter(op("=", a(), var(2, INT4OID)), 0));
 	result &= check(208, tess_expr_supports_filter(op(">", var(2, INT4OID), op("*", a(), int4(10))), 0));
-	result &= check(209, !tess_expr_supports_filter(op(">", op("+", var(2, INT4OID), int4(1)), op("*", a(), int4(10))), 0));
+	result &= check(209, tess_expr_supports_filter(op(">", op("+", var(2, INT4OID), int4(1)), op("*", a(), int4(10))), 0));
 	result &= check(26, !tess_expr_supports_filter((Node *) make_andclause(list_make2(op(">", a(), int4(5)), op("<", a(), int4(9)))), 0));
 	result &= check(27, !tess_expr_supports_filter(op("=", var(3, TEXTOID), (Node *) makeConst(TEXTOID, -1, DEFAULT_COLLATION_OID, -1, CStringGetTextDatum("x"), false, false)), 0));
 	PG_RETURN_BOOL(result);
@@ -312,6 +323,40 @@ tessera_test_expr_values(PG_FUNCTION_ARGS)
 		row_is(column, non_nulls, 4, true, 0) &&
 		tess_row_mask_count(non_nulls) == 56);
 
+	/* Two computed sides, (a + 1) * (b + 2); a NULL on the left side. */
+	expr = tess_expr_compile_value(op("*", op("+", a(), int4(1)), op("+", var(2, INT4OID), int4(2))), NULL, resolve, NULL);
+	result &= check(120, tess_expr_input_column(expr) == 0);
+	tess_expr_bind(expr, batch, econtext, TESS_COLUMN_FOR_PROJECTION);
+	column = tess_expr_get_column(expr);
+	non_nulls = tess_expr_non_nulls(expr);
+	result &= check(121, row_is(column, non_nulls, 0, false, 8) &&
+		row_is(column, non_nulls, 4, true, 0) &&
+		row_is(column, non_nulls, 68, false, 9800) &&
+		tess_row_mask_count(non_nulls) == 56);
+	/* The NULL on the right side: (b + 1) * (a + 1). */
+	expr = tess_expr_compile_value(op("*", op("+", var(2, INT4OID), int4(1)), op("+", a(), int4(1))), NULL, resolve, NULL);
+	tess_expr_bind(expr, batch, econtext, TESS_COLUMN_FOR_PROJECTION);
+	column = tess_expr_get_column(expr);
+	non_nulls = tess_expr_non_nulls(expr);
+	result &= check(122, row_is(column, non_nulls, 1, false, 15) &&
+		row_is(column, non_nulls, 9, true, 0) &&
+		tess_row_mask_count(non_nulls) == 56);
+	/* An operand with an operand: (a + 1) * (b + a * 2). */
+	expr = tess_expr_compile_value(op("*", op("+", a(), int4(1)), op("+", var(2, INT4OID), op("*", a(), int4(2)))), NULL, resolve, NULL);
+	tess_expr_bind(expr, batch, econtext, TESS_COLUMN_FOR_PROJECTION);
+	column = tess_expr_get_column(expr);
+	non_nulls = tess_expr_non_nulls(expr);
+	result &= check(123, row_is(column, non_nulls, 0, false, 8) &&
+		row_is(column, non_nulls, 2, false, 48) &&
+		row_is(column, non_nulls, 4, true, 0) &&
+		tess_row_mask_count(non_nulls) == 56);
+	/* The same expression rebound to a shorter batch. */
+	tess_expr_bind(expr, small, econtext, TESS_COLUMN_FOR_PROJECTION);
+	column = tess_expr_get_column(expr);
+	non_nulls = tess_expr_non_nulls(expr);
+	result &= check(124, column->nrows == 5 && row_is(column, non_nulls, 3, false, 80) &&
+		tess_row_mask_count(non_nulls) == 4);
+
 	/* Only the selected rows are computed. */
 	tess_row_mask_clear(&batch->rows, 0);
 	tess_row_mask_clear(&batch->rows, 1);
@@ -394,6 +439,20 @@ tessera_test_expr_filters(PG_FUNCTION_ARGS)
 		!tess_row_mask_contains(&batch->rows, 63) &&
 		tess_row_mask_count(tess_expr_non_nulls(expr)) == 4 &&
 		DatumGetInt32(tess_expr_get_column(expr)->values[65]) == 67);
+	/* (a + 1) > (b - 60), two computed sides: a < 61; the value is
+	 * recomputed over the narrowed rows, the operand with it. */
+	batch = make_batch(70);
+	expr = tess_expr_compile_filter(op(">", op("+", a(), int4(1)), op("-", var(2, INT4OID), int4(60))), NULL, resolve, NULL);
+	tess_expr_bind(expr, batch, econtext, TESS_COLUMN_FOR_FILTER);
+	tess_expr_apply_filter(expr);
+	result &= check(210, tess_row_mask_count(&batch->rows) == 48 &&
+		tess_row_mask_contains(&batch->rows, 58) &&
+		!tess_row_mask_contains(&batch->rows, 60) &&
+		!tess_row_mask_contains(&batch->rows, 4) &&
+		tess_row_mask_count(tess_expr_non_nulls(expr)) == 48);
+	tess_expr_bind(expr, batch, econtext, TESS_COLUMN_FOR_FILTER);
+	tess_expr_apply_filter(expr);
+	result &= check(211, tess_row_mask_count(&batch->rows) == 48);
 	/* a + b > 10: the other column as the step's operand. */
 	batch = filtered(op(">", op("+", a(), var(2, INT4OID)), int4(10)), econtext);
 	result &= check(207, tess_row_mask_count(&batch->rows) == 53 &&
@@ -414,7 +473,13 @@ tessera_test_expr_errors(PG_FUNCTION_ARGS)
 	switch (kind)
 	{
 		case 0:
-			tess_expr_compile_value(op("+", op("+", a(), int4(1)), op("*", var(2, INT4OID), int4(2))), NULL, resolve, NULL);
+			{
+				CoalesceExpr *coalesce = makeNode(CoalesceExpr);
+
+				coalesce->coalescetype = INT4OID;
+				coalesce->args = list_make2(a(), int4(0));
+				tess_expr_compile_value(op("*", op("+", a(), int4(1)), (Node *) coalesce), NULL, resolve, NULL);
+			}
 			break;
 		case 1:
 			tess_expr_compile_value(a(), NULL, resolve_none, NULL);
@@ -440,6 +505,16 @@ tessera_test_expr_errors(PG_FUNCTION_ARGS)
 			break;
 		case 6:
 			tess_expr_compile_filter(op("+", a(), int4(1)), NULL, resolve, NULL);
+			break;
+		case 7:
+			/* A failure inside an operand: (a + 1) * (b / 0). */
+			expr = tess_expr_compile_value(op("*", op("+", a(), int4(1)), op("/", var(2, INT4OID), int4(0))), NULL, resolve, NULL);
+			tess_expr_bind(expr, batch, econtext, TESS_COLUMN_FOR_PROJECTION);
+			tess_expr_get_column(expr);
+			break;
+		case 8:
+			/* An operand whose column is unavailable. */
+			tess_expr_compile_value(op("*", op("+", a(), int4(1)), op("+", var(2, INT4OID), int4(1))), NULL, resolve_second_none, NULL);
 			break;
 		default:
 			elog(ERROR, "unknown error case %d", kind);

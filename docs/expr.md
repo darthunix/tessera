@@ -1,7 +1,7 @@
 # Batch expressions
 
-`tessera/expr.h` compiles a PostgreSQL expression over one batch column into
-a chain of calls of the functions the [function registry](function.md)
+`tessera/expr.h` compiles a PostgreSQL expression over batch columns into
+chains of calls of the functions the [function registry](function.md)
 implements, and evaluates it over a batch's selected rows. It is the
 deliberately small language shared by the batch nodes: `TessFilter`
 ([nodes.md](nodes.md)) applies the batchable clauses of a relation with it, a projection computes columns with it, an aggregate feeds its
@@ -14,11 +14,13 @@ arranges the calls in the order the tree dictates.
 
 An expression is supported when it is built from
 
-- one `Var` (of the current relation: `varlevelsup` 0, an ordinary
-  attribute, and, when a relation is given, that relation) as the column
-  the chain starts from, and, in a call whose implementation accepts any
-  shape, a second bare `Var` as the call's other argument, an operand
-  read from the batch for that step (`a + b`, `(a + 1) * b`, `b - a`);
+- `Var`s (of the current relation: `varlevelsup` 0, an ordinary
+  attribute, and, when a relation is given, that relation): one is the
+  column the chain starts from, and a call whose implementation accepts
+  any shape may take a second value over the batch as its other argument,
+  the operand, which is a supported expression of its own: a bare column
+  (`a + b`, `(a + 1) * b`, `b - a`) or a computed one (`(a + 1) * (b + 2)`,
+  `a - b * 2`, `(a + 1) * (b + a * 2)`), so an expression is a tree;
 - `Const` and `Param` scalars, external or execution parameters;
 - calls, `OpExpr` or `FuncExpr`, whose function the registry implements as
   a `TESS_FUNCTION_VALUE` that is strict and either insensitive to the
@@ -32,9 +34,9 @@ and int8 arithmetic accept any shape; `7 < a` becomes `a > 7`. A scalar argument
 may be an expression of its own without a Var; the executor evaluates it
 whole. An expression with no Var at all is a scalar broadcast over the
 rows. `RelabelType` is transparent. Everything else, `AND`, `OR`, `NOT`,
-`CASE`, `COALESCE`, `IS NULL`, a second column inside an expression of
-its own (`a + b * 2`), a function the registry does not know, is left to
-the row-wise executor. `tess_expr_supports_value`
+`CASE`, `COALESCE`, `IS NULL`, a function the registry does not know,
+anywhere in the tree, is left to the row-wise executor for the whole
+expression. `tess_expr_supports_value`
 decides this at planning time, without executor state, with the same rules
 the compiler enforces.
 
@@ -72,7 +74,11 @@ context at that point and broadcast over the batch's rows word by word, so a
 Param changed by a rescan takes effect at the next batch. The purpose says whether the input column is read while
 filtering or for the output, as the batch contract distinguishes.
 
-Evaluation walks the chain from the column outward. Every call takes the
+Evaluation walks the chain from the column outward; a step with an
+operand first computes the operand, a chain of its own with its own
+scratch arrays, over the same selected rows (a bare column is read from
+the batch without a copy), then calls the implementation over the two
+columns. Every call takes the
 batch's selected rows; a strict function leaves NULL rows out of its
 `non_nulls`, and the compiler turns that mask into the NULL flags of the
 next call's column, so NULL flows through the chain as it does through the
@@ -91,10 +97,11 @@ returned, as every kernel error is reported.
 
 A filter is a boolean call of a function the registry implements as a
 `TESS_FUNCTION_PREDICATE`, over one supported value with the column and
-either one scalar or one bare column of the batch, the operand: `a > 5`,
-`a + 1 > 5`, `7 < a`, `a > b`, `a > b * 20`. An operand needs a
-predicate of any shape, as the built-in comparisons are; the operand is
-read whole and a NULL on either side clears the row. `tess_expr_supports_filter`
+either one scalar or another value over the batch, the operand: `a > 5`,
+`a + 1 > 5`, `7 < a`, `a > b`, `a > b * 20`, `a + 1 > b * 2`. An operand
+needs a predicate of any shape, as the built-in comparisons are; the
+operand is computed over the same selection and a NULL on either side
+clears the row. `tess_expr_supports_filter`
 recognizes it at planning time; `tess_expr_compile_filter` compiles the
 value chain and the predicate; and per batch, after a bind,
 `tess_expr_apply_filter` narrows the batch's row mask in place to the
@@ -113,9 +120,8 @@ previous ones kept. A predicate that does not accept any shape takes the
 column first, so `7 < a` is compiled through the operator's commutator
 from the catalog into `a > 7`; without a commutator whose function is
 implemented, the filter is not supported. What a filter cannot express,
-`AND`, `OR`, `NOT`, `IS NULL`, a boolean column, a comparison of two
-computed sides such as `a + 1 > b * 2`, stays with `ExecQual` over the
-rows that survive.
+`AND`, `OR`, `NOT`, `IS NULL`, a boolean column, stays with `ExecQual`
+over the rows that survive.
 
 ## Errors
 
@@ -123,3 +129,8 @@ An unsupported expression, a Var the resolver cannot map, a result request
 before any bind and a filter applied through a value expression are errors
 at compile or first use. A division by zero or an out-of-range result
 surfaces as the function's own error, `22012` or `22003`, at evaluation.
+The rows that fail are the executor's: a strict function's arguments are
+evaluated for every row it sees, here over every selected row. With
+failures on different rows the error reported may differ, since the
+compiler computes one call over the whole batch before the next, and the
+executor one row after another.
