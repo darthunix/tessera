@@ -178,17 +178,67 @@ FETCH ALL FROM agg_cursor;
 FETCH BACKWARD ALL FROM agg_cursor;
 COMMIT;
 
+-- GROUP BY: each row finds the record of its keys in a table, whose
+-- payload holds the group's states; NULL keys form one group; the groups
+-- go out in batches, to a row-wise parent one by one.
+CREATE FUNCTION agg_explain(query text) RETURNS SETOF text
+LANGUAGE plpgsql AS $$
+DECLARE
+    line text;
+BEGIN
+    FOR line IN EXECUTE 'EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) ' || query LOOP
+        RETURN NEXT regexp_replace(line, '(Memory Usage|Overrun): \d+ kB', '\1: N kB');
+    END LOOP;
+END $$;
+EXPLAIN (COSTS OFF) SELECT b, count(*), sum(a), min(a), max(a) FROM agg_t GROUP BY b;
+SELECT agg_explain($$SELECT b, count(*), sum(a) FROM agg_t WHERE a > 100 GROUP BY b$$);
+SELECT agg_same($$SELECT b, count(*), count(a), sum(a), min(a), max(a) FROM agg_t GROUP BY b$$);
+EXPLAIN (VERBOSE, COSTS OFF) SELECT a % 10, count(*), sum(b) FROM agg_t GROUP BY a % 10;
+SELECT agg_same($$SELECT a % 10, count(*), sum(b) FROM agg_t GROUP BY a % 10$$);
+SELECT agg_same($$SELECT a % 10 + 1, sum(b) * 2, max(a) - min(a) FROM agg_t GROUP BY a % 10$$);
+SELECT agg_same($$SELECT b, a % 3, count(*), min(a) FROM agg_t GROUP BY b, a % 3$$);
+SELECT agg_same($$SELECT b, count(*) FROM agg_t WHERE a > 100 GROUP BY b HAVING sum(a) > 3000$$);
+SELECT agg_same($$SELECT b FROM agg_t GROUP BY b$$);
+SELECT agg_same($$SELECT 1 AS one, count(*) FROM agg_t GROUP BY b$$);
+SELECT agg_same($$SELECT b, count(*) FROM agg_t WHERE a < 0 GROUP BY b$$);
+SELECT agg_same($$SELECT count(*), sum(a) FROM agg_t GROUP BY b / 100$$);
+-- int8 keys and int8 extremes.
+SELECT agg_same($$SELECT a::bigint * 4294967296 AS k, max(a::bigint * 3), min(b::bigint) FROM agg_t GROUP BY 1$$);
+-- Over a join, and in a rescanned subquery with a parameter.
+SELECT agg_same($$SELECT x.b, count(*), sum(y.a) FROM agg_t AS x JOIN agg_t AS y ON x.a = y.a GROUP BY x.b$$);
+SELECT o.b, (SELECT max(s) FROM (SELECT i.b, sum(i.a) AS s FROM agg_t AS i WHERE i.a < o.a * 10 GROUP BY i.b) AS q) AS most
+FROM agg_t AS o WHERE o.a < 4 ORDER BY 1;
+-- Many groups: the planner expects few, the table grows; a sort above
+-- reads the groups row by row.
+CREATE TABLE agg_many (k int, v int);
+ANALYZE agg_many;
+INSERT INTO agg_many SELECT g, g % 7 FROM generate_series(1, 200000) AS g;
+SELECT agg_explain($$SELECT k % 100000, sum(v) FROM agg_many GROUP BY k % 100000$$);
+SELECT agg_same($$SELECT count(*), sum(s), min(s), max(s) FROM (SELECT k % 100000 AS g, sum(v) AS s FROM agg_many GROUP BY k % 100000) AS q$$);
+SELECT k, sum(v) FROM agg_many GROUP BY k ORDER BY sum(v) DESC, k LIMIT 3;
+DROP TABLE agg_many;
+-- Left to the core: grouping sets, a text key, a column the primary key
+-- makes functionally dependent, and hash aggregation disabled.
+EXPLAIN (COSTS OFF) SELECT b, count(*) FROM agg_t GROUP BY GROUPING SETS ((b), ());
+EXPLAIN (COSTS OFF) SELECT c, count(*) FROM agg_t GROUP BY c;
+CREATE TABLE agg_pk (id int PRIMARY KEY, label text);
+EXPLAIN (COSTS OFF) SELECT id, label, count(*) FROM agg_pk GROUP BY id;
+DROP TABLE agg_pk;
+SET enable_hashagg = off;
+EXPLAIN (COSTS OFF) SELECT b, count(*) FROM agg_t GROUP BY b;
+RESET enable_hashagg;
+DROP FUNCTION agg_explain(text);
+
 -- Under a single-copy Gather.
 SET debug_parallel_query = on;
 EXPLAIN (COSTS OFF) SELECT count(*) FROM agg_t WHERE a > 100;
 SELECT count(*) FROM agg_t WHERE a > 100;
 RESET debug_parallel_query;
 
--- Left to the core: DISTINCT and FILTER in the aggregate, GROUP BY, a
--- window function, an empty relation, and the switch.
+-- Left to the core: DISTINCT and FILTER in the aggregate, a window
+-- function, an empty relation, and the switch.
 EXPLAIN (COSTS OFF) SELECT count(DISTINCT a) FROM agg_t;
 EXPLAIN (COSTS OFF) SELECT count(*) FILTER (WHERE a > 100) FROM agg_t;
-EXPLAIN (COSTS OFF) SELECT b, count(*) FROM agg_t GROUP BY b;
 EXPLAIN (COSTS OFF) SELECT count(*) OVER () FROM agg_t LIMIT 1;
 EXPLAIN (COSTS OFF) SELECT count(*) FROM agg_t WHERE false;
 SET tessera.enable = off;

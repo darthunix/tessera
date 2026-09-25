@@ -10,6 +10,8 @@
 #define TESS_HASH_JOIN_NODE_NAME "tessera.hash_join"
 
 /* The plan data of TessFilter and TessHashJoin, written by their planners. */
+#define TESS_AGG_DATA "tessera.agg"
+#define TESS_AGG_DATA_VERSION 1
 #define TESS_FILTER_DATA "tessera.filter"
 #define TESS_FILTER_DATA_VERSION 1
 #define TESS_HASH_JOIN_DATA "tessera.hash_join"
