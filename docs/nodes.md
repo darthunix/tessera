@@ -444,7 +444,13 @@ qualifier is empty, since `HAVING` belongs to the `Finalize Aggregate`.
 The partial values are the whole ones' types, int8 for `count` and
 `sum`, the argument's for `min` and `max`, so the node computes them as it
 computes the whole ones, and a participant without rows gives a count of 0 and
-NULL otherwise, which the strict combine functions skip.
+NULL otherwise, which the strict combine functions skip. With `GROUP BY`
+the stack is the same over the core's partial hashed aggregate paths:
+each participant keeps a table of its own groups, and the core's
+`Finalize HashAggregate` over the `Gather` merges them with the
+combine functions and applies `HAVING`; its estimate of the groups is
+taken from the core's grouped paths, since the grouped relation's rows
+are set only after the hook.
 
 ### Execution
 
@@ -539,7 +545,9 @@ workers: the five aggregates with and without a clause, chains and
 row-wise arguments, expressions above, `HAVING` true and false,
 participants without rows, the leader not taking part, a generic plan's
 parameter in an argument, the `Gather` rescanned in a join, and an
-aggregate the node leaves to the core's partial aggregate.
+aggregate the node leaves to the core's partial aggregate; and groups
+under the `Gather` with a filter, an expression key with `HAVING`, the
+leader not taking part.
 
 ## TessHashJoin
 

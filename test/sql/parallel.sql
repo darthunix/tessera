@@ -132,6 +132,15 @@ EXECUTE shifted(1);
 EXECUTE shifted(1000);
 RESET plan_cache_mode;
 DEALLOCATE shifted;
+-- GROUP BY under a Gather: a table of groups in each participant, the
+-- core's Finalize HashAggregate merging them and applying HAVING.
+EXPLAIN (COSTS OFF) SELECT b, count(*), sum(a), min(a), max(a) FROM parallel_t WHERE a > 100 GROUP BY b;
+SELECT parallel_same($$SELECT b, count(*), sum(a), min(a), max(a) FROM parallel_t WHERE a > 100 GROUP BY b$$);
+SELECT parallel_same($$SELECT a % 7, count(*), count(a) FROM parallel_t GROUP BY a % 7 HAVING count(*) > 100$$);
+SELECT plan_property($$SELECT b, sum(a) FROM parallel_t GROUP BY b$$, 'TessAgg', 'Groups') AS groups;
+SET parallel_leader_participation = off;
+SELECT parallel_same($$SELECT b, sum(a) FROM parallel_t GROUP BY b$$);
+RESET parallel_leader_participation;
 -- An aggregate the node does not compute: the core's partial aggregate over the rows.
 EXPLAIN (COSTS OFF) SELECT count(c), count(*) FROM parallel_t WHERE a > 100;
 SELECT parallel_same($$SELECT count(c), count(*) FROM parallel_t WHERE a > 100$$);

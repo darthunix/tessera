@@ -448,27 +448,30 @@ partial_grouping_rel(PlannerInfo *root, RelOptInfo *grouped_rel)
  * aggregate paths: its own partial path over the batch child, with the
  * partial aggregates as its targets, the core's Gather over it and the
  * core's Finalize Aggregate over that, which combines the participants'
- * values and applies HAVING. The path is parallel-aware for the counters
- * the node shares; the child divides the work.
+ * values and applies HAVING. With GROUP BY each participant keeps a table
+ * of its own groups and the core's Finalize HashAggregate merges them.
+ * The path is parallel-aware for the counters the node shares; the child
+ * divides the work.
  */
 static void
 create_partial_paths(PlannerInfo *root, RelOptInfo *grouped_rel,
-					 GroupPathExtraData *extra, List *keys)
+					 GroupPathExtraData *extra, List *keys, double groups)
 {
 	RelOptInfo *partial_rel = partial_grouping_rel(root, grouped_rel);
-	List	   *tlist = NIL;
+	List	   *tlist = keys != NIL ? add_to_flat_tlist(NIL, keys) : NIL;
+	AggStrategy strategy = keys != NIL ? AGG_HASHED : AGG_PLAIN;
 
 	if (partial_rel == NULL || extra == NULL || !extra->partial_costs_set ||
-		keys != NIL)
+		(keys != NIL && groups <= 0))
 		return;
-	if (!collect_aggregates((Node *) partial_rel->reltarget->exprs, NIL, &tlist) ||
-		tlist == NIL)
+	if (!collect_aggregates((Node *) partial_rel->reltarget->exprs, keys, &tlist) ||
+		list_length(tlist) == list_length(keys))
 		return;
 	foreach_ptr(AggPath, agg, aggregate_templates(partial_rel->partial_pathlist,
-												  AGG_PLAIN,
+												  strategy,
 												  AGGSPLIT_INITIAL_SERIAL))
 	{
-		CustomPath *partial = make_agg_path(root, agg, tlist, 0);
+		CustomPath *partial = make_agg_path(root, agg, tlist, list_length(keys));
 		GatherPath *gather;
 		AggPath    *final;
 		double		rows;
@@ -480,11 +483,14 @@ create_partial_paths(PlannerInfo *root, RelOptInfo *grouped_rel,
 		rows = compute_gather_rows(&partial->path);
 		gather = create_gather_path(root, partial_rel, &partial->path,
 									partial->path.pathtarget, NULL, &rows);
+		/* With GROUP BY the core's Finalize HashAggregate merges the groups. */
 		final = create_agg_path(root, grouped_rel, &gather->path,
-								grouped_rel->reltarget, AGG_PLAIN,
-								AGGSPLIT_FINAL_DESERIAL, NIL,
+								grouped_rel->reltarget, strategy,
+								AGGSPLIT_FINAL_DESERIAL,
+								keys != NIL ? root->processed_groupClause : NIL,
 								(List *) extra->havingQual,
-								&extra->agg_final_costs, 1.0);
+								&extra->agg_final_costs,
+								keys != NIL ? groups : 1.0);
 		add_path(grouped_rel, &final->path);
 	}
 }
@@ -501,6 +507,7 @@ create_upper_paths(PlannerInfo *root, UpperRelationKind stage,
 	List	   *keys = NIL;
 	List	   *tlist = NIL;
 	AggStrategy strategy = AGG_PLAIN;
+	double		groups = 0;
 
 	if (previous_create_upper_paths_hook != NULL)
 		previous_create_upper_paths_hook(root, stage, input_rel, output_rel,
@@ -533,7 +540,15 @@ create_upper_paths(PlannerInfo *root, UpperRelationKind stage,
 		if (path != NULL)
 			add_path(output_rel, &path->path);
 	}
-	create_partial_paths(root, output_rel, (GroupPathExtraData *) extra, keys);
+	/*
+	 * The planner's estimate of the groups, for a Finalize HashAggregate:
+	 * the rows of the core's grouped paths, the relation's own being set
+	 * only after this hook.
+	 */
+	foreach_ptr(Path, path, output_rel->pathlist)
+		groups = Max(groups, path->rows);
+	create_partial_paths(root, output_rel, (GroupPathExtraData *) extra, keys,
+						 groups);
 }
 
 /*
