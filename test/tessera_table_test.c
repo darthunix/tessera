@@ -12,11 +12,15 @@ PG_MODULE_MAGIC;
 PG_FUNCTION_INFO_V1(tessera_test_table_layout);
 PG_FUNCTION_INFO_V1(tessera_test_table_cycle);
 PG_FUNCTION_INFO_V1(tessera_test_table_groups);
-PG_FUNCTION_INFO_V1(tessera_test_table_grow);
+PG_FUNCTION_INFO_V1(tessera_test_table_regrow);
 PG_FUNCTION_INFO_V1(tessera_test_table_errors);
 
 #define NROWS 200
 #define NWORDS 4
+
+/* Chunks of 64 records of 32 bytes: the valid rows of a batch take three. */
+#define CHUNK_LEN (TESS_TABLE_CHUNK_HEADER + 64 * 32)
+#define MAX_TEST_CHUNKS 8
 
 static const TessTableKeyKind one_int4[1] = {TESS_TABLE_KEY_INT4};
 
@@ -88,74 +92,145 @@ prepare(Batch *batch, TessNullKeys nulls, int shift, bool grouped)
 						  &valid, &status) == TESS_OK;
 }
 
-/* A region for capacity records of one int4 key and an 8-byte payload. */
-static void *
-make_region(uint64 capacity, Size *size)
+/*
+ * A table of one int4 key and an 8-byte payload: its index, its chunks in
+ * palloc'd memory, and for each chunk the byte linking has reached.
+ */
+typedef struct Table
+{
+	TessTableRef ref;
+	void	   *chunks[MAX_TEST_CHUNKS];
+	Size		lens[MAX_TEST_CHUNKS];
+	Size		linked[MAX_TEST_CHUNKS];
+} Table;
+
+/* An empty table whose index is sized for capacity records. */
+static Table *
+make_table(uint64 capacity)
 {
 	TessStatus	status = TESS_STRUCT_INITIALIZER(TessStatus);
-	void	   *region;
+	Table	   *table = palloc0(sizeof(Table));
 
-	if (tess_table_size(1, one_int4, 8, capacity, size, &status) != TESS_OK)
+	if (tess_table_size(1, one_int4, 8, capacity, &table->ref.index_len,
+						&status) != TESS_OK)
 		return NULL;
-	region = palloc(*size);
-	if (tess_table_create(region, *size, 1, one_int4, 8, capacity,
-						  &status) != TESS_OK)
+	table->ref.index = palloc(table->ref.index_len);
+	table->ref.chunks = table->chunks;
+	table->ref.chunk_lens = table->lens;
+	if (tess_table_create(table->ref.index, table->ref.index_len, 1, one_int4,
+						  8, capacity, &status) != TESS_OK)
 		return NULL;
-	return region;
+	return table;
+}
+
+/* Add an empty chunk of len bytes. */
+static bool
+add_chunk(Table *table, Size len)
+{
+	TessStatus	status = TESS_STRUCT_INITIALIZER(TessStatus);
+	int			chunk = table->ref.nchunks;
+
+	if (chunk == MAX_TEST_CHUNKS)
+		return false;
+	table->chunks[chunk] = palloc(len);
+	table->lens[chunk] = len;
+	table->linked[chunk] = TESS_TABLE_CHUNK_HEADER;
+	if (tess_table_chunk_init(table->chunks[chunk], len, &status) != TESS_OK)
+		return false;
+	table->ref.nchunks++;
+	return true;
+}
+
+static void
+free_table(Table *table)
+{
+	int			chunk;
+
+	for (chunk = 0; chunk < table->ref.nchunks; chunk++)
+		pfree(table->chunks[chunk]);
+	pfree(table->ref.index);
+	pfree(table);
 }
 
 /*
- * Insert the rows of pending with their row numbers as payload; the rows
- * still pending afterwards, or -1 on an error.
+ * Append the rows of pending with their row numbers as payload, adding
+ * chunks of CHUNK_LEN bytes as they fill, and link them, grouped or not:
+ * true when every row went in. *duplicates, unless NULL, receives the
+ * linked records whose keys were there already.
  */
-static int
-insert_batch(void *region, Size size, Batch *batch, uint64 *pending_words,
-			 uint32 *offsets)
+static bool
+insert_batch(Table *table, Batch *batch, uint64 *pending_words,
+			 uint32 *offsets, bool grouped, uint64 *duplicates)
 {
 	TessRowMask pending = {NROWS, pending_words};
 	TessStatus	status = TESS_STRUCT_INITIALIZER(TessStatus);
+	int			chunk;
 
-	if (tess_table_insert(region, size, batch->hashes, 1, &batch->key,
-						  (const uint8 *) batch->payload, &pending, offsets,
-						  &status) != TESS_OK)
-		return -1;
-	return count_bits(pending_words);
+	if (duplicates != NULL)
+		*duplicates = 0;
+	for (;;)
+	{
+		if (table->ref.nchunks == 0 && !add_chunk(table, CHUNK_LEN))
+			return false;
+		if (tess_table_append(&table->ref, table->ref.nchunks - 1, 8,
+							  batch->hashes, 1, &batch->key,
+							  (const uint8 *) batch->payload, &pending,
+							  offsets, &status) != TESS_OK)
+			return false;
+		if (count_bits(pending_words) == 0)
+			break;
+		if (!add_chunk(table, CHUNK_LEN))
+			return false;
+	}
+	for (chunk = 0; chunk < table->ref.nchunks; chunk++)
+	{
+		uint64		repeated = 0;
+
+		if (grouped ?
+			tess_table_link_grouped(&table->ref, chunk, &table->linked[chunk],
+									NULL, &repeated, &status) != TESS_OK :
+			tess_table_link(&table->ref, chunk, &table->linked[chunk], NULL,
+							&status) != TESS_OK)
+			return false;
+		if (duplicates != NULL)
+			*duplicates += repeated;
+	}
+	return true;
 }
 
 /* Probe the valid rows of a batch. */
 static bool
-probe_batch(const void *region, Size size, const Batch *batch,
-			uint64 *found_words, uint32 *matches)
+probe_batch(const Table *table, const Batch *batch, uint64 *found_words,
+			uint32 *matches)
 {
 	TessRowMask rows = {NROWS, (uint64 *) batch->valid};
 	TessRowMask found = {NROWS, found_words};
 	TessStatus	status = TESS_STRUCT_INITIALIZER(TessStatus);
 
 	memset(found_words, 0, NWORDS * sizeof(uint64));
-	return tess_table_probe(region, size, batch->hashes, 1, &batch->key,
+	return tess_table_probe(&table->ref, batch->hashes, 1, &batch->key,
 							&rows, matches, &found, &status) == TESS_OK;
 }
 
 static bool
-stats_of(const void *region, Size size, TessTableStats *stats)
+stats_of(const Table *table, TessTableStats *stats)
 {
 	TessStatus	status = TESS_STRUCT_INITIALIZER(TessStatus);
 
 	stats->struct_size = sizeof(TessTableStats);
-	return tess_table_stats(region, size, stats, &status) == TESS_OK;
+	return tess_table_stats(&table->ref, stats, &status) == TESS_OK;
 }
 
 /* The record at an offset holds the key of a row and the payload of one with that key. */
 static bool
-record_matches(const void *region, Size size, const Batch *batch,
-			   int row, uint32 offset)
+record_matches(const Table *table, const Batch *batch, int row, uint32 offset)
 {
 	TessTableRecord record;
 	TessStatus	status = TESS_STRUCT_INITIALIZER(TessStatus);
 	uint64		stored;
 
 	record.struct_size = sizeof(TessTableRecord);
-	if (tess_table_record(region, size, offset, &record, &status) != TESS_OK ||
+	if (tess_table_record(&table->ref, offset, &record, &status) != TESS_OK ||
 		record.hash != batch->hashes[row] ||
 		record.payload_size != 8)
 		return false;
@@ -171,15 +246,15 @@ record_matches(const void *region, Size size, const Batch *batch,
 
 /*
  * A participant alone at its barrier, which elects it at every phase, and
- * whose build stages three rows: the actions it steps through.
+ * whose build takes two chunks and appends three records: the actions it
+ * steps through.
  */
 static bool
 build_alone(void)
 {
 	static const uint32 expected[] = {
-		TESS_BUILD_ATTACH, TESS_BUILD_ARRIVE_AND_WAIT, TESS_BUILD_DO_ALLOCATE,
-		TESS_BUILD_ARRIVE_AND_WAIT, TESS_BUILD_DO_BUILD,
-		TESS_BUILD_ARRIVE_AND_WAIT, TESS_BUILD_DO_GROW,
+		TESS_BUILD_ATTACH, TESS_BUILD_DO_BUILD,
+		TESS_BUILD_ARRIVE_AND_WAIT, TESS_BUILD_DO_SIZE,
 		TESS_BUILD_ARRIVE_AND_WAIT, TESS_BUILD_DO_LINK,
 		TESS_BUILD_ARRIVE_AND_WAIT, TESS_BUILD_DO_PROBE,
 		TESS_BUILD_ARRIVE_AND_DETACH, TESS_BUILD_DO_FREE
@@ -187,9 +262,10 @@ build_alone(void)
 	TessBuildParticipant participant = {0};
 	TessStatus	status = TESS_STRUCT_INITIALIZER(TessStatus);
 	uint64		counters[TESS_BUILD_COUNTER_WORDS];
-	uint64		staged;
+	uint64		records;
 	uint64		nulls;
-	uint32		phase = TESS_BUILD_ELECT;
+	uint64		chunks;
+	uint32		phase = TESS_BUILD_BUILD;
 	uint32		reply = 0;
 	int			step;
 
@@ -212,14 +288,23 @@ build_alone(void)
 			phase++;
 			reply = 1;
 		}
-		else if (action == TESS_BUILD_DO_BUILD &&
-				 tess_build_report(counters, 3, 0x5, &status) != TESS_OK)
-			return false;
+		else if (action == TESS_BUILD_DO_BUILD)
+		{
+			uint64		first;
+			uint64		second;
+
+			if (tess_build_take_chunk(counters, &first, &status) != TESS_OK ||
+				tess_build_take_chunk(counters, &second, &status) != TESS_OK ||
+				first != 0 || second != 1 ||
+				tess_build_report(counters, 3, 0x5, &status) != TESS_OK)
+				return false;
+		}
 		else if (action == TESS_BUILD_ARRIVE_AND_DETACH)
 			reply = 1;
 	}
-	return tess_build_totals(counters, &staged, &nulls, &status) == TESS_OK &&
-		staged == 3 && nulls == 0x5;
+	return tess_build_totals(counters, &records, &nulls, &chunks,
+							 &status) == TESS_OK &&
+		records == 3 && nulls == 0x5 && chunks == 2;
 }
 
 Datum
@@ -241,6 +326,10 @@ tessera_test_table_layout(PG_FUNCTION_ARGS)
 				   sizeof(TessTableRecord) &&
 				   tess_table_layout(TESS_TABLE_LAYOUT_RECORD_PAYLOAD_OFFSET) ==
 				   offsetof(TessTableRecord, payload) &&
+				   tess_table_layout(TESS_TABLE_LAYOUT_REF_SIZE) ==
+				   sizeof(TessTableRef) &&
+				   tess_table_layout(TESS_TABLE_LAYOUT_REF_NCHUNKS_OFFSET) ==
+				   offsetof(TessTableRef, nchunks) &&
 				   tess_table_layout((TessTableLayoutKind) 99) == 0);
 }
 
@@ -254,8 +343,8 @@ tessera_test_table_cycle(PG_FUNCTION_ARGS)
 {
 	Batch	   *batch = palloc(sizeof(Batch));
 	Batch	   *absent = palloc(sizeof(Batch));
-	uint64		pending[NWORDS];
-	uint64		found[NWORDS];
+	uint64		pending[NWORDS] = {0};
+	uint64		found[NWORDS] = {0};
 	uint32		offsets[NROWS];
 	uint32		matches[NROWS];
 	uint32		chain[NROWS];
@@ -264,44 +353,45 @@ tessera_test_table_cycle(PG_FUNCTION_ARGS)
 	TessRowMask valid_rows = {NROWS, pending};
 	TessRowMask found_mask = {NROWS, found};
 	TessStatus	status = TESS_STRUCT_INITIALIZER(TessStatus);
-	Size		size;
-	void	   *region;
+	Table	   *table;
 	int			row;
 	int			twins = 0;
 
 	if (!prepare(batch, TESS_NULL_KEYS_REJECT, 0, false) ||
 		count_bits(batch->valid) != 160)
 		PG_RETURN_BOOL(false);
-	region = make_region(NROWS, &size);
-	if (region == NULL ||
-		tess_table_attach(region, size, &status) != TESS_OK ||
-		!stats_of(region, size, &stats) || stats.records != 0 ||
-		stats.region_len != size)
+	table = make_table(NROWS);
+	if (table == NULL ||
+		tess_table_attach(&table->ref, &status) != TESS_OK ||
+		!stats_of(table, &stats) || stats.records != 0 ||
+		stats.region_len != table->ref.index_len)
 		PG_RETURN_BOOL(false);
 
+	/* 160 records of 32 bytes take three chunks of 64. */
 	memcpy(pending, batch->valid, sizeof(pending));
-	if (insert_batch(region, size, batch, pending, offsets) != 0 ||
-		!stats_of(region, size, &stats) || stats.records != 160 ||
+	if (!insert_batch(table, batch, pending, offsets, false, NULL) ||
+		table->ref.nchunks != 3 ||
+		!stats_of(table, &stats) || stats.records != 160 ||
 		stats.buckets != 1024 ||
-		stats.bytes_used != 96 + 160 * 32 + 1024 * 4)
+		stats.bytes_used != 96 + 1024 * 4)
 		PG_RETURN_BOOL(false);
 
-	if (!probe_batch(region, size, batch, found, matches) ||
+	if (!probe_batch(table, batch, found, matches) ||
 		memcmp(found, batch->valid, sizeof(found)) != 0)
 		PG_RETURN_BOOL(false);
 	for (row = 0; row < NROWS; row++)
 	{
 		if (!has_bit(batch->valid, row))
 			continue;
-		if (!record_matches(region, size, batch, row, offsets[row]) ||
-			!record_matches(region, size, batch, row, matches[row]))
+		if (!record_matches(table, batch, row, offsets[row]) ||
+			!record_matches(table, batch, row, matches[row]))
 			PG_RETURN_BOOL(false);
 	}
 
 	/* Every value is held by several rows: each has a next record. */
 	memcpy(chain, matches, sizeof(chain));
 	memcpy(pending, batch->valid, sizeof(pending));
-	if (tess_table_next_match(region, size, chain, &valid_rows, &found_mask,
+	if (tess_table_next_match(&table->ref, chain, &valid_rows, &found_mask,
 							  &status) != TESS_OK)
 		PG_RETURN_BOOL(false);
 	for (row = 0; row < NROWS; row++)
@@ -310,7 +400,7 @@ tessera_test_table_cycle(PG_FUNCTION_ARGS)
 			continue;
 		twins++;
 		if (chain[row] == matches[row] ||
-			!record_matches(region, size, batch, row, chain[row]))
+			!record_matches(table, batch, row, chain[row]))
 			PG_RETURN_BOOL(false);
 	}
 	if (twins != 160)
@@ -323,9 +413,9 @@ tessera_test_table_cycle(PG_FUNCTION_ARGS)
 	 */
 	for (row = 0; row < NROWS; row++)
 		gathered[row] = (Datum) -1;
-	if (tess_table_gather(region, size, matches, &valid_rows, 0, gathered,
+	if (tess_table_gather(&table->ref, matches, &valid_rows, 0, gathered,
 						  &status) != TESS_OK ||
-		tess_table_gather(region, size, matches, &valid_rows, 1, gathered,
+		tess_table_gather(&table->ref, matches, &valid_rows, 1, gathered,
 						  &status) != TESS_ERROR_INVALID_ARGUMENT)
 		PG_RETURN_BOOL(false);
 	for (row = 0; row < NROWS; row++)
@@ -344,27 +434,58 @@ tessera_test_table_cycle(PG_FUNCTION_ARGS)
 
 	/* Keys nobody inserted find nothing. */
 	if (!prepare(absent, TESS_NULL_KEYS_REJECT, 1000, false) ||
-		!probe_batch(region, size, absent, found, matches) ||
+		!probe_batch(table, absent, found, matches) ||
 		count_bits(found) != 0)
 		PG_RETURN_BOOL(false);
-	pfree(region);
+	free_table(table);
 
 	/* Under the group policy the NULL rows are keys of their own. */
 	if (!prepare(batch, TESS_NULL_KEYS_GROUP, 0, false) ||
 		count_bits(batch->valid) != NROWS)
 		PG_RETURN_BOOL(false);
-	region = make_region(NROWS, &size);
+	table = make_table(NROWS);
 	memcpy(pending, batch->valid, sizeof(pending));
-	if (region == NULL ||
-		insert_batch(region, size, batch, pending, offsets) != 0 ||
-		!stats_of(region, size, &stats) || stats.records != NROWS ||
-		!probe_batch(region, size, batch, found, matches) ||
+	if (table == NULL ||
+		!insert_batch(table, batch, pending, offsets, false, NULL) ||
+		!stats_of(table, &stats) || stats.records != NROWS ||
+		!probe_batch(table, batch, found, matches) ||
 		count_bits(found) != NROWS)
 		PG_RETURN_BOOL(false);
 	for (row = 0; row < NROWS; row++)
-		if (!record_matches(region, size, batch, row, matches[row]))
+		if (!record_matches(table, batch, row, matches[row]))
 			PG_RETURN_BOOL(false);
-	pfree(region);
+	free_table(table);
+
+	/*
+	 * Linked grouped, a key's records follow each other: the first row of
+	 * each of the ten keys is new, and from it next_in_group steps through
+	 * the other nineteen.
+	 */
+	if (!prepare(batch, TESS_NULL_KEYS_GROUP, 0, true))
+		PG_RETURN_BOOL(false);
+	table = make_table(NROWS);
+	memcpy(pending, batch->all, sizeof(pending));
+	{
+		uint64		duplicates;
+		uint64		first_ten[NWORDS] = {0x3ff};
+		TessRowMask rows = {NROWS, first_ten};
+		int			step;
+
+		if (table == NULL ||
+			!insert_batch(table, batch, pending, offsets, true, &duplicates) ||
+			duplicates != NROWS - 10)
+			PG_RETURN_BOOL(false);
+		memcpy(chain, offsets, sizeof(chain));
+		for (step = 0; step < 20; step++)
+		{
+			if (tess_table_next_in_group(&table->ref, chain, &rows, &found_mask,
+										 &status) != TESS_OK ||
+				count_bits(found) != (step < 19 ? 10 : 0))
+				PG_RETURN_BOOL(false);
+			memcpy(first_ten, found, sizeof(first_ten));
+		}
+	}
+	free_table(table);
 	pfree(batch);
 	pfree(absent);
 	PG_RETURN_BOOL(true);
@@ -378,8 +499,8 @@ Datum
 tessera_test_table_groups(PG_FUNCTION_ARGS)
 {
 	Batch	   *batch = palloc(sizeof(Batch));
-	uint64		pending[NWORDS];
-	uint64		inserted[NWORDS];
+	uint64		pending[NWORDS] = {0};
+	uint64		inserted[NWORDS] = {0};
 	uint32		offsets[NROWS];
 	uint32		walked[64];
 	TessRowMask pending_mask = {NROWS, pending};
@@ -388,23 +509,22 @@ tessera_test_table_groups(PG_FUNCTION_ARGS)
 	TessTableRecord record;
 	TessStatus	status = TESS_STRUCT_INITIALIZER(TessStatus);
 	uint64		cursor = 0;
-	Size		size;
-	void	   *region;
+	Table	   *table;
 	int			count;
 	int			row;
 	int			key;
 
 	if (!prepare(batch, TESS_NULL_KEYS_GROUP, 0, true))
 		PG_RETURN_BOOL(false);
-	region = make_region(20, &size);
+	table = make_table(20);
 	memcpy(pending, batch->all, sizeof(pending));
-	if (region == NULL ||
-		tess_table_find_or_insert(region, size, batch->hashes, 1, &batch->key,
+	if (table == NULL || !add_chunk(table, CHUNK_LEN) ||
+		tess_table_find_or_insert(&table->ref, 0, batch->hashes, 1, &batch->key,
 								  &pending_mask, offsets, &inserted_mask,
 								  &status) != TESS_OK ||
 		count_bits(pending) != 0 || inserted[0] != 0x3ff ||
 		count_bits(inserted) != 10 ||
-		!stats_of(region, size, &stats) || stats.records != 10)
+		!stats_of(table, &stats) || stats.records != 10)
 		PG_RETURN_BOOL(false);
 	for (row = 0; row < NROWS; row++)
 	{
@@ -412,7 +532,7 @@ tessera_test_table_groups(PG_FUNCTION_ARGS)
 		uint64		counter;
 
 		if (offsets[row] != offsets[row % 10] ||
-			tess_table_payload(region, size, offsets[row], &payload,
+			tess_table_payload(&table->ref, offsets[row], &payload,
 							   &status) != TESS_OK)
 			PG_RETURN_BOOL(false);
 		memcpy(&counter, payload, sizeof(counter));
@@ -424,7 +544,7 @@ tessera_test_table_groups(PG_FUNCTION_ARGS)
 	{
 		uint64		sum;
 
-		if (tess_table_record(region, size, offsets[key], &record,
+		if (tess_table_record(&table->ref, offsets[key], &record,
 							  &status) != TESS_OK || record.keys[0] != key)
 			PG_RETURN_BOOL(false);
 		memcpy(&sum, record.payload, sizeof(sum));
@@ -433,20 +553,20 @@ tessera_test_table_groups(PG_FUNCTION_ARGS)
 	}
 
 	/* The walk: the ten records in insertion order, then nothing. */
-	if (tess_table_scan(region, size, &cursor, walked, 64, &count,
+	if (tess_table_scan(&table->ref, &cursor, walked, 64, &count,
 						&status) != TESS_OK || count != 10 ||
 		memcmp(walked, offsets, 10 * sizeof(uint32)) != 0 ||
-		tess_table_scan(region, size, &cursor, walked, 64, &count,
+		tess_table_scan(&table->ref, &cursor, walked, 64, &count,
 						&status) != TESS_OK || count != 0)
 		PG_RETURN_BOOL(false);
 
 	/* A second pass creates nothing. */
 	memcpy(pending, batch->all, sizeof(pending));
-	if (tess_table_find_or_insert(region, size, batch->hashes, 1, &batch->key,
+	if (tess_table_find_or_insert(&table->ref, 0, batch->hashes, 1, &batch->key,
 								  &pending_mask, offsets, &inserted_mask,
 								  &status) != TESS_OK ||
 		count_bits(pending) != 0 || count_bits(inserted) != 0 ||
-		!stats_of(region, size, &stats) || stats.records != 10)
+		!stats_of(table, &stats) || stats.records != 10)
 		PG_RETURN_BOOL(false);
 
 	/*
@@ -460,18 +580,18 @@ tessera_test_table_groups(PG_FUNCTION_ARGS)
 		Datum		keys[10];
 		bool		nulls[10];
 
-		if (tess_table_accumulate(region, size, offsets, &all, TESS_TABLE_COUNT_ROWS,
+		if (tess_table_accumulate(&table->ref, offsets, &all, TESS_TABLE_COUNT_ROWS,
 								  NULL, NULL, 0, 0, 0, &status) != TESS_OK ||
-			tess_table_accumulate(region, size, offsets, &all, TESS_TABLE_COUNT,
+			tess_table_accumulate(&table->ref, offsets, &all, TESS_TABLE_COUNT,
 								  &batch->column, NULL, 0, 0, 0, &status) != TESS_OK ||
-			tess_table_gather_key(region, size, offsets, &groups, 0, keys, nulls,
+			tess_table_gather_key(&table->ref, offsets, &groups, 0, keys, nulls,
 								  &status) != TESS_OK)
 			PG_RETURN_BOOL(false);
 		for (key = 0; key < 10; key++)
 		{
 			uint64		sum;
 
-			if (tess_table_record(region, size, offsets[key], &record,
+			if (tess_table_record(&table->ref, offsets[key], &record,
 								  &status) != TESS_OK)
 				PG_RETURN_BOOL(false);
 			memcpy(&sum, record.payload, sizeof(sum));
@@ -489,7 +609,7 @@ tessera_test_table_groups(PG_FUNCTION_ARGS)
 			if (tess_table_bloom_words(10, &nwords, &status) != TESS_OK || nwords != 4)
 				PG_RETURN_BOOL(false);
 			filter = palloc0(sizeof(uint64) * nwords);
-			if (tess_table_bloom(region, size, filter, nwords, &status) != TESS_OK ||
+			if (tess_table_bloom(&table->ref, filter, nwords, &status) != TESS_OK ||
 				tess_bloom_probe(filter, nwords, batch->hashes, &all, &passed_mask,
 								 &status) != TESS_OK ||
 				count_bits(passed) != NROWS ||
@@ -518,9 +638,9 @@ tessera_test_table_groups(PG_FUNCTION_ARGS)
 				tess_bloom_shared_probe(filter, nwords, batch->hashes, &all,
 										&passed_mask,
 										&status) != TESS_ERROR_INVALID_ARGUMENT ||
-				tess_table_try_build_bloom(region, size, filter, nwords, &built,
+				tess_table_try_build_bloom(&table->ref, filter, nwords, &built,
 										   &status) != TESS_OK || !built ||
-				tess_table_try_build_bloom(region, size, filter, nwords, &built,
+				tess_table_try_build_bloom(&table->ref, filter, nwords, &built,
 										   &status) != TESS_OK || built ||
 				tess_bloom_shared_ready(filter, nwords, &ready, &status) != TESS_OK ||
 				!ready ||
@@ -530,197 +650,213 @@ tessera_test_table_groups(PG_FUNCTION_ARGS)
 				PG_RETURN_BOOL(false);
 		}
 		/* A word past the payload is refused. */
-		if (tess_table_accumulate(region, size, offsets, &all, TESS_TABLE_COUNT_ROWS,
+		if (tess_table_accumulate(&table->ref, offsets, &all, TESS_TABLE_COUNT_ROWS,
 								  NULL, NULL, 8, 0, 0,
 								  &status) != TESS_ERROR_INVALID_ARGUMENT)
 			PG_RETURN_BOOL(false);
 	}
-	pfree(region);
+	free_table(table);
 	pfree(batch);
 	PG_RETURN_BOOL(true);
 }
 
 /*
- * A region for 16 records takes 16 rows and leaves the rest pending;
- * repalloc and tess_table_grow make room for them all.
+ * A table outgrows its index: find_or_insert stops at half the buckets,
+ * tess_table_regrow builds a larger index over the same chunks, and the
+ * records keep their references.
  */
 Datum
-tessera_test_table_grow(PG_FUNCTION_ARGS)
+tessera_test_table_regrow(PG_FUNCTION_ARGS)
 {
 	Batch	   *batch = palloc(sizeof(Batch));
-	uint64		pending[NWORDS];
-	uint64		found[NWORDS];
+	uint64		pending[NWORDS] = {0};
+	uint64		inserted[NWORDS] = {0};
+	uint64		found[NWORDS] = {0};
 	uint32		offsets[NROWS];
 	uint32		matches[NROWS];
 	uint32		walked[64];
+	TessRowMask pending_mask = {NROWS, pending};
+	TessRowMask inserted_mask = {NROWS, inserted};
 	TessTableStats stats;
+	TessTableRecord record;
 	TessStatus	status = TESS_STRUCT_INITIALIZER(TessStatus);
 	uint64		cursor = 0;
-	Size		size;
-	Size		grown;
-	void	   *region;
+	Table	   *table;
+	void	   *old_index;
+	void	   *index;
+	Size		len;
 	int			count;
 	int			total = 0;
 	int			row;
 
-	if (!prepare(batch, TESS_NULL_KEYS_REJECT, 0, false))
-		PG_RETURN_BOOL(false);
-	region = make_region(16, &size);
-	memcpy(pending, batch->valid, sizeof(pending));
-	if (region == NULL ||
-		insert_batch(region, size, batch, pending, offsets) != 160 - 16 ||
-		!stats_of(region, size, &stats) || stats.records != 16 ||
-		stats.bytes_used != stats.region_len)
-		PG_RETURN_BOOL(false);
-
-	if (tess_table_size(1, one_int4, 8, 512, &grown, &status) != TESS_OK)
-		PG_RETURN_BOOL(false);
-	region = repalloc(region, grown);
-	if (tess_table_grow(region, grown, &status) != TESS_OK ||
-		!stats_of(region, grown, &stats) || stats.records != 16 ||
-		stats.region_len != grown || stats.buckets != 1024)
-		PG_RETURN_BOOL(false);
-	if (insert_batch(region, grown, batch, pending, offsets) != 0 ||
-		!stats_of(region, grown, &stats) || stats.records != 160 ||
-		!probe_batch(region, grown, batch, found, matches) ||
-		memcmp(found, batch->valid, sizeof(found)) != 0)
+	/* Every row a key of its own under the group policy: 200 groups. */
+	if (!prepare(batch, TESS_NULL_KEYS_GROUP, 0, false))
 		PG_RETURN_BOOL(false);
 	for (row = 0; row < NROWS; row++)
-		if (has_bit(batch->valid, row) &&
-			!record_matches(region, grown, batch, row, offsets[row]))
+	{
+		batch->values[row] = Int32GetDatum(row);
+		batch->isnull[row] = false;
+	}
+	{
+		TessRowMask rows = {NROWS, batch->all};
+		TessRowMask valid = {NROWS, batch->valid};
+
+		if (tess_int4_hash(&batch->column, NULL, &rows, TESS_NULL_KEYS_GROUP,
+						   batch->hashes, &valid, &status) != TESS_OK)
+			PG_RETURN_BOOL(false);
+	}
+
+	/* An index of 1024 buckets takes 512 records; here all 200 fit. */
+	table = make_table(16);
+	memcpy(pending, batch->all, sizeof(pending));
+	if (table == NULL || !add_chunk(table, TESS_TABLE_MAX_CHUNK_LEN) ||
+		tess_table_find_or_insert(&table->ref, 0, batch->hashes, 1, &batch->key,
+								  &pending_mask, offsets, &inserted_mask,
+								  &status) != TESS_OK ||
+		count_bits(pending) != 0 || count_bits(inserted) != NROWS ||
+		!stats_of(table, &stats) || stats.records != NROWS ||
+		stats.buckets != 1024)
+		PG_RETURN_BOOL(false);
+
+	/* A larger index, the same records at the same references. */
+	if (tess_table_size(1, one_int4, 8, 4096, &len, &status) != TESS_OK)
+		PG_RETURN_BOOL(false);
+	index = palloc(len);
+	if (tess_table_regrow(&table->ref, index, len, 4096, &status) != TESS_OK)
+		PG_RETURN_BOOL(false);
+	old_index = table->ref.index;
+	table->ref.index = index;
+	table->ref.index_len = len;
+	pfree(old_index);
+	if (!stats_of(table, &stats) || stats.records != NROWS ||
+		stats.region_len != len || stats.buckets != 8192 ||
+		!probe_batch(table, batch, found, matches) ||
+		memcmp(found, batch->all, sizeof(found)) != 0 ||
+		memcmp(matches, offsets, sizeof(matches)) != 0)
+		PG_RETURN_BOOL(false);
+	record.struct_size = sizeof(TessTableRecord);
+	for (row = 0; row < NROWS; row++)
+		if (tess_table_record(&table->ref, offsets[row], &record,
+							  &status) != TESS_OK ||
+			record.hash != batch->hashes[row] || record.keys[0] != row)
 			PG_RETURN_BOOL(false);
 	do
 	{
-		if (tess_table_scan(region, grown, &cursor, walked, 64, &count,
+		if (tess_table_scan(&table->ref, &cursor, walked, 64, &count,
 							&status) != TESS_OK)
 			PG_RETURN_BOOL(false);
 		total += count;
 	} while (count > 0);
-	if (total != 160 ||
-		tess_table_grow(region, grown - 8, &status) != TESS_ERROR_INVALID_ARGUMENT)
+
+	/* A short index and fewer buckets are refused. */
+	index = palloc(len);
+	if (total != NROWS ||
+		tess_table_regrow(&table->ref, index, len - 8, 4096,
+						  &status) != TESS_ERROR_INVALID_ARGUMENT ||
+		tess_table_regrow(&table->ref, index, len, 16,
+						  &status) != TESS_ERROR_INVALID_ARGUMENT)
 		PG_RETURN_BOOL(false);
-	pfree(region);
-
-	/*
-	 * The rows the full table had no room for, staged into buffers of 40
-	 * records of 32 bytes, then added after the table grew.
-	 */
-	{
-		uint64	   *buffers[4];
-		Size		used[4];
-		TessRowMask pending_mask = {NROWS, pending};
-		int			nbuffers = 0;
-		int			buffer;
-
-		region = make_region(16, &size);
-		memcpy(pending, batch->valid, sizeof(pending));
-		if (region == NULL ||
-			insert_batch(region, size, batch, pending, offsets) != 160 - 16)
-			PG_RETURN_BOOL(false);
-		while (count_bits(pending) > 0)
-		{
-			if (nbuffers == 4)
-				PG_RETURN_BOOL(false);
-			buffers[nbuffers] = palloc(40 * 32);
-			used[nbuffers] = 0;
-			if (tess_table_stage(region, size, buffers[nbuffers], 40 * 4,
-								 &used[nbuffers], batch->hashes, 1, &batch->key,
-								 (const uint8 *) batch->payload, &pending_mask,
-								 &status) != TESS_OK)
-				PG_RETURN_BOOL(false);
-			nbuffers++;
-		}
-		if (nbuffers != 4 || used[3] != 24 * 32)
-			PG_RETURN_BOOL(false);
-		region = repalloc(region, grown);
-		if (tess_table_grow(region, grown, &status) != TESS_OK)
-			PG_RETURN_BOOL(false);
-		for (buffer = 0; buffer < nbuffers; buffer++)
-		{
-			Size		consumed = 0;
-
-			if (tess_table_insert_staged(region, grown, buffers[buffer], used[buffer],
-										 &consumed, &status) != TESS_OK ||
-				consumed != used[buffer])
-				PG_RETURN_BOOL(false);
-		}
-		if (!stats_of(region, grown, &stats) || stats.records != 160 ||
-			!probe_batch(region, grown, batch, found, matches) ||
-			memcmp(found, batch->valid, sizeof(found)) != 0)
-			PG_RETURN_BOOL(false);
-		for (row = 0; row < NROWS; row++)
-			if (has_bit(batch->valid, row) &&
-				!record_matches(region, grown, batch, row, matches[row]))
-				PG_RETURN_BOOL(false);
-	}
-	pfree(region);
+	pfree(index);
+	free_table(table);
 	pfree(batch);
 	PG_RETURN_BOOL(true);
 }
 
 /*
- * Garbage, a foreign version, a misaligned or short region, the wrong key
- * count or kind and undersized structures are statuses, and the table
- * works after a caught panic.
+ * Garbage, a foreign version, a misaligned or short index, a reference or
+ * chunk past the chunks, the wrong key count or kind and undersized
+ * structures are statuses, and the table works after a caught panic.
  */
 Datum
 tessera_test_table_errors(PG_FUNCTION_ARGS)
 {
 	Batch	   *batch = palloc(sizeof(Batch));
-	uint64		pending[NWORDS];
-	uint64		found[NWORDS];
+	uint64		pending[NWORDS] = {0};
+	uint64		found[NWORDS] = {0};
 	uint32		offsets[NROWS];
 	uint32		matches[NROWS];
 	TessTableKey two[2];
 	TessTableKey odd;
 	TessRowMask rows = {NROWS, batch->valid};
 	TessRowMask found_mask = {NROWS, found};
+	TessRowMask pending_mask = {NROWS, pending};
 	TessTableStats stats;
 	TessTableRecord record;
 	TessStatus	status = TESS_STRUCT_INITIALIZER(TessStatus);
+	TessTableRef other;
 	void	   *zeros = palloc0(4096);
 	uint32	   *version;
 	uint64		cursor = 4;
 	Size		size;
-	void	   *region;
+	Table	   *table;
 	int			count;
+	int			last = NROWS - 1;
 
-	if (tess_table_attach(zeros, 4096, &status) != TESS_ERROR_INVALID_ARGUMENT ||
+	other.index = zeros;
+	other.index_len = 4096;
+	other.chunks = NULL;
+	other.chunk_lens = NULL;
+	other.nchunks = 0;
+	if (tess_table_attach(&other, &status) != TESS_ERROR_INVALID_ARGUMENT ||
 		strstr(status.message, "does not hold a table") == NULL ||
 		strcmp(status.sqlstate, "XX000") != 0)
 		PG_RETURN_BOOL(false);
 
 	if (!prepare(batch, TESS_NULL_KEYS_REJECT, 0, false))
 		PG_RETURN_BOOL(false);
-	region = make_region(NROWS, &size);
+	table = make_table(NROWS);
 	memcpy(pending, batch->valid, sizeof(pending));
-	if (region == NULL ||
-		insert_batch(region, size, batch, pending, offsets) != 0)
+	if (table == NULL ||
+		!insert_batch(table, batch, pending, offsets, false, NULL))
 		PG_RETURN_BOOL(false);
+	size = table->ref.index_len;
 
-	version = (uint32 *) ((char *) region +
+	version = (uint32 *) ((char *) table->ref.index +
 						  tess_table_layout(TESS_TABLE_LAYOUT_VERSION_OFFSET));
 	*version = TESS_TABLE_FORMAT_VERSION + 1;
-	if (tess_table_attach(region, size, &status) != TESS_ERROR_INVALID_ARGUMENT ||
+	if (tess_table_attach(&table->ref, &status) != TESS_ERROR_INVALID_ARGUMENT ||
 		strstr(status.message, "version") == NULL)
 		PG_RETURN_BOOL(false);
 	*version = TESS_TABLE_FORMAT_VERSION;
-	if (tess_table_attach(region, size, &status) != TESS_OK ||
-		tess_table_attach((char *) region + 4, size - 4,
+	other = table->ref;
+	other.index = (char *) table->ref.index + 4;
+	other.index_len = size - 4;
+	if (tess_table_attach(&table->ref, &status) != TESS_OK ||
+		tess_table_attach(&other, &status) != TESS_ERROR_INVALID_ARGUMENT)
+		PG_RETURN_BOOL(false);
+	other = table->ref;
+	other.index_len = size - 8;
+	if (tess_table_attach(&other, &status) != TESS_ERROR_INVALID_ARGUMENT ||
+		tess_table_attach(NULL, &status) != TESS_ERROR_INVALID_ARGUMENT)
+		PG_RETURN_BOOL(false);
+
+	/*
+	 * The last valid row lies in the third chunk: a view of two chunks
+	 * refuses its reference, and appending to a chunk past them fails.
+	 */
+	while (!has_bit(batch->valid, last))
+		last--;
+	other = table->ref;
+	other.nchunks = 2;
+	record.struct_size = sizeof(TessTableRecord);
+	memcpy(pending, batch->valid, sizeof(pending));
+	if (tess_table_record(&other, offsets[last], &record,
 						  &status) != TESS_ERROR_INVALID_ARGUMENT ||
-		tess_table_attach(region, size - 8,
+		tess_table_append(&other, 2, 8, batch->hashes, 1, &batch->key, NULL,
+						  &pending_mask, offsets,
 						  &status) != TESS_ERROR_INVALID_ARGUMENT ||
-		tess_table_attach(NULL, size, &status) != TESS_ERROR_INVALID_ARGUMENT)
+		tess_table_chunk_init((char *) zeros + 4, 64,
+							  &status) != TESS_ERROR_INVALID_ARGUMENT)
 		PG_RETURN_BOOL(false);
 
 	two[0] = batch->key;
 	two[1] = batch->key;
 	odd = batch->key;
 	odd.kind = (TessTableKeyKind) 3;
-	if (tess_table_probe(region, size, batch->hashes, 2, two, &rows, matches,
+	if (tess_table_probe(&table->ref, batch->hashes, 2, two, &rows, matches,
 						 &found_mask, &status) != TESS_ERROR_INVALID_ARGUMENT ||
 		strstr(status.message, "keys") == NULL ||
-		tess_table_probe(region, size, batch->hashes, 1, &odd, &rows, matches,
+		tess_table_probe(&table->ref, batch->hashes, 1, &odd, &rows, matches,
 						 &found_mask, &status) != TESS_ERROR_INVALID_ARGUMENT ||
 		tess_table_size(1, &odd.kind, 8, 1, &size,
 						&status) != TESS_ERROR_INVALID_ARGUMENT)
@@ -728,22 +864,22 @@ tessera_test_table_errors(PG_FUNCTION_ARGS)
 
 	stats.struct_size = 8;
 	record.struct_size = 8;
-	if (tess_table_stats(region, size, &stats,
+	if (tess_table_stats(&table->ref, &stats,
 						 &status) != TESS_ERROR_INVALID_ARGUMENT ||
-		tess_table_record(region, size, offsets[1], &record,
+		tess_table_record(&table->ref, offsets[1], &record,
 						  &status) != TESS_ERROR_INVALID_ARGUMENT ||
-		tess_table_record(region, size, 0, &record,
+		tess_table_record(&table->ref, 0, &record,
 						  &status) != TESS_ERROR_INVALID_ARGUMENT ||
-		tess_table_scan(region, size, &cursor, matches, 1, &count,
+		tess_table_scan(&table->ref, &cursor, matches, 1, &count,
 						&status) != TESS_ERROR_INVALID_ARGUMENT)
 		PG_RETURN_BOOL(false);
 
 	/* The library works after a caught panic. */
 	if (tess_kernels_test_panic(&status) != TESS_ERROR_PANIC ||
-		!probe_batch(region, size, batch, found, matches) ||
+		!probe_batch(table, batch, found, matches) ||
 		memcmp(found, batch->valid, sizeof(found)) != 0)
 		PG_RETURN_BOOL(false);
-	pfree(region);
+	free_table(table);
 	pfree(zeros);
 	pfree(batch);
 	PG_RETURN_BOOL(true);

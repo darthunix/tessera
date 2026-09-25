@@ -201,7 +201,8 @@ SELECT join_same($$SELECT count(*) FROM jf WHERE EXISTS (SELECT 1 FROM jempty WH
 SELECT join_same($$SELECT jsmall.k, (SELECT count(jdup.w) FROM jf LEFT JOIN jdup ON jf.fk = jdup.k AND jdup.w > jsmall.k) FROM jsmall$$);
 SELECT join_same($$SELECT jsmall.k, (SELECT count(*) FROM jf WHERE NOT EXISTS (SELECT 1 FROM jdup WHERE jdup.k = jf.fk AND jdup.w > jsmall.k)) FROM jsmall$$);
 
--- A build side larger than the planner thinks: the table grows.
+-- A build side larger than the planner thinks: the records go on into
+-- more chunks, and the index is made for as many as were read.
 CREATE TABLE jgrow (k int, g int);
 ANALYZE jgrow;
 INSERT INTO jgrow SELECT g % 400, g FROM generate_series(1, 20000) AS g;
@@ -211,7 +212,7 @@ SELECT join_same($$SELECT count(*), sum(jgrow.g) FROM jd JOIN jgrow ON jd.id = j
 SELECT join_explain($$SELECT count(*) FROM jf JOIN jd ON jf.fk = jd.id$$);
 -- Rounds: every match of a key with three records counts.
 SELECT join_explain($$SELECT sum(jdup.w) FROM jf JOIN jdup ON jf.fk = jdup.k$$);
--- An inner side the planner thinks small: the table grows past hash_mem,
+-- An inner side the planner thinks small: the table goes past hash_mem,
 -- and is kept and reported, not split.
 CREATE FUNCTION join_many() RETURNS SETOF int LANGUAGE sql ROWS 10
 AS 'SELECT generate_series(1, 20000)';
@@ -325,10 +326,10 @@ SELECT join_same($$SELECT count(*), count(jbuild.w), sum(jprobe.v) FROM jprobe L
 EXPLAIN (COSTS OFF) SELECT count(*), sum(jgrow.g) FROM jbig JOIN jgrow ON jbig.fk = jgrow.k;
 SELECT join_same($$SELECT count(*), sum(jgrow.g), sum(jbig.v) FROM jbig JOIN jgrow ON jbig.fk = jgrow.k$$);
 SELECT join_same($$SELECT jbig.v, jgrow.g FROM jbig JOIN jgrow ON jbig.fk = jgrow.k WHERE jbig.v < 200$$);
+-- The planner expects no rows of jgrow: the participants append them all
+-- to chunks of their own, and the index is made once, for all of them.
 SELECT join_property($$SELECT count(*) FROM jbig JOIN jgrow ON jbig.fk = jgrow.k$$, 'Builds') AS builds,
-       join_property($$SELECT count(*) FROM jbig JOIN jgrow ON jbig.fk = jgrow.k$$, 'Table Grows') AS grows,
-       join_property($$SELECT count(*) FROM jbig JOIN jgrow ON jbig.fk = jgrow.k$$, 'Build Rows') AS build_rows;
-SELECT join_property($$SELECT count(*) FROM jbig JOIN jgrow ON jbig.fk = jgrow.k$$, 'Overflow Rows') AS overflow,
+       join_property($$SELECT count(*) FROM jbig JOIN jgrow ON jbig.fk = jgrow.k$$, 'Build Rows') AS build_rows,
        join_property($$SELECT count(*) FROM jbig JOIN jgrow ON jbig.fk = jgrow.k$$, 'Buckets') AS buckets;
 SET parallel_leader_participation = off;
 SELECT join_same($$SELECT count(*), sum(jbuild.w), sum(jprobe.v) FROM jprobe JOIN jbuild ON jprobe.k = jbuild.k$$);
@@ -360,12 +361,13 @@ SELECT join_same($$SELECT count(*), sum(jref.n), count(jref.t), sum(length(jref.
 SELECT join_same($$SELECT jrefprobe.v, jref.n, jref.t FROM jrefprobe LEFT JOIN jref ON jrefprobe.k = jref.k WHERE jrefprobe.v % 97 = 0$$);
 EXPLAIN (COSTS OFF) SELECT count(*), sum(length(big.t)) FROM jrefprobe JOIN (SELECT k, CASE WHEN k % 500 = 0 THEN repeat(t, 20) ELSE t END AS t FROM jref) AS big ON jrefprobe.k = big.k;
 SELECT join_same($$SELECT count(*), sum(length(big.t)) FROM jrefprobe JOIN (SELECT k, CASE WHEN k % 500 = 0 THEN repeat(t, 20) ELSE t END AS t FROM jref) AS big ON jrefprobe.k = big.k$$);
--- A table that grows keeps its values, which stay where they are.
+-- A table larger than the planner thinks keeps its values where they
+-- are, and its index is made for every row.
 CREATE TABLE jrefgrow (k int, t text);
 ANALYZE jrefgrow;
 INSERT INTO jrefgrow SELECT g % 400, 'g' || g FROM generate_series(1, 20000) AS g;
 SELECT join_same($$SELECT count(*), max(jrefgrow.t), sum(length(jrefgrow.t)) FROM jbig JOIN jrefgrow ON jbig.fk = jrefgrow.k$$);
-SELECT join_property($$SELECT count(*), max(jrefgrow.t) FROM jbig JOIN jrefgrow ON jbig.fk = jrefgrow.k$$, 'Table Grows') AS grows;
+SELECT join_property($$SELECT count(*), max(jrefgrow.t) FROM jbig JOIN jrefgrow ON jbig.fk = jrefgrow.k$$, 'Buckets') AS buckets;
 -- A rescan of the Gather frees the blocks and fills new ones.
 SELECT join_same($$SELECT jsmall.k, (SELECT max(jref.t) FROM jrefprobe JOIN jref ON jrefprobe.k = jref.k WHERE jref.k > jsmall.k * 1000) FROM jsmall$$);
 -- A rescan of the Gather builds the shared table anew.

@@ -475,13 +475,16 @@ the row is published as a one-row batch: a batch-aware parent such as
 returns nothing.
 
 With `GROUP BY` the keys are the projection's first computed columns and
-the table lives in a memory context of its own, created at the first
-execution for the planner's estimate of the groups (256 at least). Per
+the table lives in a memory context of its own, its index created at the
+first execution for the planner's estimate of the groups (256 at least)
+and its records in chunks, the first of 64 kB and the others of 1 MB. Per
 batch the keys are hashed in key order with NULL as a key of its own
 (`TESS_NULL_KEYS_GROUP`), so rows with NULL keys form one group, and
 `tess_table_find_or_insert` gives each row the record of its group,
-creating it with a zero payload; the rows left pending when the table is
-full go in after the region doubles (`repalloc` and `tess_table_grow`).
+creating it with a zero payload in the last chunk; the rows left pending
+go into another chunk when that one is full, or, when the groups reached
+half the buckets, after `tess_table_regrow` made an index for twice the
+groups over the same chunks, the records staying where they are.
 Each aggregate then folds the batch into the records' states with
 `tess_table_accumulate`, one call per aggregate and batch: `count(*)`
 and `count(x)` add one, `sum`, `min` and `max` take the non-NULL values
@@ -537,7 +540,7 @@ NULL keys as one group, two keys, expressions over the keys and the
 aggregates, `HAVING` over a filter, grouping without aggregates, a
 constant target, an empty input, one group, int8 keys and extremes, a
 grouping over the hash join and in a rescanned subquery, 100 000 groups
-against an estimate of 200 (the table grows), a sort above reading the
+against an estimate of 200 (the index is made anew), a sort above reading the
 groups row by row; and the core keeping grouping sets, a text key, a
 functionally dependent column and a disabled hash aggregation. The parallel
 suite (`test/sql/parallel.sql`) runs the node under a `Gather` with two
@@ -639,16 +642,19 @@ its parent's: the outer columns asked for come from the outer batches,
 the inner ones are kept in the table, and each side gives its keys
 first. It then reads every inner batch, hashes the keys in order, each
 further key folded into the first one's hash, with the NULL policy of a
-join (a NULL in any key never matches) and inserts the rows with
-`tess_table_insert_grouped`, which puts a key's records next to each
-other in their chain and reports the rows whose key was there already;
-the node counts them. A record's payload is a word of the NULL bits of
-the kept inner columns and a Datum per column; a by-reference value is
-copied into the node's memory, where it lives as long as the table. The
-node also notes which kept columns hold a NULL at all. The table starts at the planner's
-estimate of the inner rows; when it is full, `repalloc` doubles the
-region, the table rebuilds its buckets and the rows left pending go in.
-An empty inner side ends the scan without reading the outer child.
+join (a NULL in any key never matches) and appends the rows as records
+to chunks with `tess_table_append`, the first chunk of 64 kB and the
+others of 1 MB, adding one when the last is full. A record's payload is
+a word of the NULL bits of the kept inner columns and a Datum per
+column; a by-reference value is copied into the node's memory, where it
+lives as long as the table. The node also notes which kept columns hold
+a NULL at all. Once the inner side is read, the node makes the index for
+exactly the rows appended and links every chunk with
+`tess_table_link_grouped`, which puts a key's records next to each
+other in their chain and counts the records whose key was there
+already. No estimate sizes anything and nothing is copied: an inner side
+larger than the planner thought takes more chunks. An empty inner side
+ends the scan without reading the outer child.
 
 Each outer batch is then hashed and probed. The rows that found a record
 are a round: the node publishes its own batch with the outer batch's
@@ -693,16 +699,17 @@ the inner child has changed parameters, as the core's hash join decides,
 and otherwise probes the same table with the rescanned outer child.
 
 With a shared table the node keeps, in its chunk of the query's DSM, the
-build's `Barrier`, the table's region in the query's dynamic shared
-memory and the build's counters, and steps its participant through the
-phases of `tess_build_step` (see [table.md](table.md)): the elected one
-creates the table sized by the planner's estimate; every participant
-inserts the inner batches its partial scan hands it with
-`tess_table_insert`, stages the rows a full table has no room for into
-256 kB buffers of shared memory with `tess_table_stage`, and reports
-them; when some were staged, the elected one copies the header and the
-records into a region for every record and grows the table there, and
-each participant adds its buffers with `tess_table_insert_staged`. A
+build's `Barrier`, the build's counters and the table's index, chunk
+directory and lists in the query's dynamic shared memory, and steps its
+participant through the phases of `tess_build_step` (see
+[table.md](table.md)): every participant appends the inner batches its
+partial scan hands it to chunks of its own in dynamic shared memory,
+each numbered by `tess_build_take_chunk` and entered in the table's list
+under a spinlock, and reports its records; the elected one makes the
+index for exactly the records appended and the directory of the chunks'
+`dsa_pointer`s by number, from which every participant maps their
+bases; each participant links its own chunks with `tess_table_link`.
+Nothing is copied and the table never grows. A
 by-reference inner value cannot be a pointer into one participant's
 memory: each participant copies its rows' values into 64 kB blocks of
 the query's dynamic shared memory (a value larger than a quarter of one
@@ -767,17 +774,15 @@ table and the copies of inner values took, `Overrun`, what of it
 exceeded `hash_mem` (shown only then: the node keeps the whole inner side
 in memory, and a table larger than the planner expected is kept rather
 than split), `Builds`, the tables built over the rescans, `Build Rows`,
-the inner rows inserted into them, `Table Grows`, the doublings of the
-region, `Probe Rows`, the outer rows probed, and `Matches`, the joined
+the inner rows inserted into them, `Chunks`, the chunks of their
+records, `Probe Rows`, the outer rows probed, and `Matches`, the joined
 rows over every round, `Rows Removed by Join Filter` and `Rows Removed by
 Filter`, and `Compact Batches`, the batches of copied
 pairs, when there are any, and `Bloom Filters`, the filters built, with
 `Rows Removed by Bloom Filter`, the valid probe rows they rejected, when
-one was built, and `Overflow Rows`, the inner rows a full shared table
-had no room for until it grew, when there were any; with a shared table
-`Builds` counts the one build, and `Memory Usage` the table and filter
-of the participant that allocated or grew them and each participant's
-staging buffers. Under a `Gather` the counters are the totals of
+one was built; with a shared table `Builds` counts the one build, and
+`Memory Usage` each participant's chunks and value blocks, and the index
+and filter of the elected one. Under a `Gather` the counters are the totals of
 every participant, and the bucket count is the mean over the tables
 built.
 
@@ -803,10 +808,10 @@ an outer column, and with text outer columns under an aggregate and a
 limit; a side
 of fewer than 64 rows, an empty side on
 either side, a join over a join; an inner side much larger than the
-planner's estimate, which makes the table grow; a top-N sort and a limit
+planner's estimate, which takes more chunks; a top-N sort and a limit
 above the node, and a scrollable cursor through `Material`. With
 `EXPLAIN ANALYZE`, the memory masked, it shows the counters of a join, of
-one with rounds and of an inner side of 20000 rows estimated at 10, which grows
+one with rounds and of an inner side of 20000 rows estimated at 10, which goes
 past a small `work_mem`; correlated subqueries whose parameter is on the
 inner side, which builds the table for every outer row, and on the outer
 side, which builds it once; and a generic plan executed with two
@@ -832,10 +837,10 @@ per table; the rows of inner, semi, anti and left joins through the
 filter are compared, and under the `Gather` an inner and an anti join,
 where the participants build at least one filter. With `enable_parallel_hash` on, the
 shared table: inner, semi, anti and left joins compared with the core,
-duplicate keys, an inner side past the estimate whose table grows, the
-leader not taking part, a rescan of the `Gather` from a correlated
-subquery, the counters of the growth (one build, the overflow, the
-buckets), one shared Bloom filter built for all, and by-reference inner
+duplicate keys, an inner side past the estimate, the leader not taking
+part, a rescan of the `Gather` from a correlated subquery, the counters
+of that build (one build, every row, an index sized for them all), one
+shared Bloom filter built for all, and by-reference inner
 columns: text in the target and in a join clause, numeric and text with
 NULLs over many value blocks under inner and left joins, a table with
-text that grows, and a rescan that frees the blocks and fills new ones.
+text past the estimate, and a rescan that frees the blocks and fills new ones.

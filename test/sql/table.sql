@@ -15,9 +15,9 @@ CREATE FUNCTION tessera_test_table_groups()
 RETURNS boolean
 AS :'table_test', 'tessera_test_table_groups'
 LANGUAGE C STRICT;
-CREATE FUNCTION tessera_test_table_grow()
+CREATE FUNCTION tessera_test_table_regrow()
 RETURNS boolean
-AS :'table_test', 'tessera_test_table_grow'
+AS :'table_test', 'tessera_test_table_regrow'
 LANGUAGE C STRICT;
 CREATE FUNCTION tessera_test_table_errors()
 RETURNS boolean
@@ -30,13 +30,13 @@ SELECT tessera_test_table_cycle() AS cycle \gset
 \echo :cycle
 SELECT tessera_test_table_groups() AS groups \gset
 \echo :groups
-SELECT tessera_test_table_grow() AS grow \gset
-\echo :grow
+SELECT tessera_test_table_regrow() AS regrow \gset
+\echo :regrow
 SELECT tessera_test_table_errors() AS errors \gset
 \echo :errors
 
 DROP FUNCTION tessera_test_table_layout();
 DROP FUNCTION tessera_test_table_cycle();
 DROP FUNCTION tessera_test_table_groups();
-DROP FUNCTION tessera_test_table_grow();
+DROP FUNCTION tessera_test_table_regrow();
 DROP FUNCTION tessera_test_table_errors();

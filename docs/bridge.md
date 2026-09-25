@@ -142,7 +142,7 @@ entry points by pointer with the prototypes and contracts of
 `tessera/kernels.h` and `tessera/table.h`. `set` validates the table (its
 version, size and every operation) and refuses a second table while one
 is installed; `clear` removes the given table only. The table also names
-the region format it was built for, which the runtime compares with its
+the table format it was built for, which the runtime compares with its
 own.
 `TessSettings` publishes borrowed, read-only pointers to the bridge's
 configuration variables: `enable` is the GUC `tessera.enable`, the switch

@@ -60,7 +60,8 @@ enum
 	JOIN_BUILD_ROWS,
 	/* Summed over the builds; EXPLAIN shows the mean. */
 	JOIN_BUCKETS,
-	JOIN_GROWS,
+	/* The chunks of the records, summed over the builds. */
+	JOIN_CHUNKS,
 	JOIN_PROBE_ROWS,
 	JOIN_MATCHES,
 	/* The participant's peak bytes, and what of them exceeded hash_mem. */
@@ -74,19 +75,36 @@ enum
 	/* Bloom filters built, and the valid probe rows they rejected. */
 	JOIN_BLOOM_FILTERS,
 	JOIN_BLOOM_REMOVED,
-	/* Inner rows a full shared table had no room for, staged until it grew. */
-	JOIN_OVERFLOW_ROWS,
 	JOIN_NCOUNTERS
 };
 
 /*
- * A shared build (plan data "shared"): one table in the query's dynamic
- * shared memory, which every participant inserts its share of the inner
- * side into, in phases the build barrier separates (see
- * tessera/table.h, TESS_BUILD_*). Rows a full table has no room for wait
- * in staging buffers of this size, as records.
+ * The table's records lie in chunks the node allocates: the first of a
+ * table, or of a participant of a shared build, of JOIN_FIRST_CHUNK
+ * bytes, so that a small inner side takes little, and the others of the
+ * most a chunk may have. Records never move; the index is made once the
+ * inner side is read, for exactly its rows.
  */
-#define JOIN_STAGING_WORDS (256 * 1024 / 8)
+#define JOIN_FIRST_CHUNK (64 * 1024)
+#define JOIN_CHUNK_LEN TESS_TABLE_MAX_CHUNK_LEN
+
+/*
+ * A shared build (plan data "shared"): one table in the query's dynamic
+ * shared memory, in phases the build barrier separates (see
+ * tessera/table.h, TESS_BUILD_*). Every participant appends its share of
+ * the inner side to chunks of its own, each after a header that enters
+ * it in the table's list under the number the build counters gave it;
+ * the elected one then makes the index and the directory of the chunks
+ * by number, and every participant links its own chunks.
+ */
+typedef struct JoinChunk
+{
+	dsa_pointer next;
+	uint64		number;
+	Size		len;
+} JoinChunk;
+
+#define JOIN_CHUNK_HEADER MAXALIGN(sizeof(JoinChunk))
 
 /*
  * A shared table's by-reference inner values live in blocks of the
@@ -108,16 +126,23 @@ typedef struct JoinValueBlock
 typedef struct JoinShared
 {
 	Barrier		build;
-	/* The table's region and its length, set by the elected participant. */
-	dsa_pointer region;
-	Size		region_len;
-	/* The rows staged and the NULL columns, as tess_build_report adds them. */
+	/*
+	 * The index, and the directory of the chunks: nchunks dsa_pointers to
+	 * their bases by number, then their lengths; set by the elected
+	 * participant.
+	 */
+	dsa_pointer index;
+	Size		index_len;
+	dsa_pointer directory;
+	int			nchunks;
+	/* The records appended, the NULL columns and the chunks numbered. */
 	uint64		counters[TESS_BUILD_COUNTER_WORDS];
 	/* The shared Bloom filter, sized with the table; one participant builds it. */
 	dsa_pointer filter;
 	Size		filter_words;
-	/* Every block of by-reference values, under the lock. */
-	slock_t		values_lock;
+	/* Every chunk and every block of by-reference values, under the lock. */
+	slock_t		lock;
+	dsa_pointer chunks;
 	dsa_pointer values;
 } JoinShared;
 
@@ -183,11 +208,18 @@ typedef struct TessHashJoinState
 	int			npayload;
 	int		   *payload_columns;
 
-	/* The table's region, and the copies of by-reference inner values. */
+	/*
+	 * The table: its index and chunks, with the chunks' bases and lengths
+	 * in this process, room for chunk_slots of them, and the bytes they
+	 * take together; the copies of by-reference inner values.
+	 */
 	MemoryContext table_context;
 	MemoryContext values_context;
-	char	   *region;
-	Size		region_len;
+	TessTableRef table;
+	void	  **chunk_bases;
+	Size	   *chunk_lens;
+	int			chunk_slots;
+	Size		table_bytes;
 	bool		built;
 	/*
 	 * The Bloom filter of the table's keys, or NULL; whether the first
@@ -209,7 +241,6 @@ typedef struct TessHashJoinState
 	uint32	   *offsets;
 	uint64	   *valid_bits;
 	uint64	   *pending_bits;
-	uint64	   *duplicate_bits;
 	/* The payload of every row of an inner batch, one after another. */
 	uint64	   *payload;
 	/* The rows of the current round, and a copy the next step reads. */
@@ -308,8 +339,9 @@ typedef struct TessHashJoinState
 	 * A shared build: the plan asks for one; the shared state in the DSM
 	 * chunk, NULL when the plan runs without one (a Gather that launched
 	 * no workers), and then the node builds a table of its own; this
-	 * participant, whether it is attached to the build barrier, and its
-	 * staging buffers with their used bytes.
+	 * participant, whether it is attached to the build barrier, the chunk
+	 * it appends to, the numbers of its chunks and their bytes, and the
+	 * records it appended.
 	 */
 	bool		shared_mode;
 	JoinShared *shared;
@@ -317,11 +349,13 @@ typedef struct TessHashJoinState
 	dsa_area   *area;
 	TessBuildParticipant participant;
 	bool		participating;
-	int			nstaged;
-	int			staged_capacity;
-	dsa_pointer *staged;
-	Size	   *staged_used;
-	uint64		staged_rows;
+	void	   *own_base;
+	Size		own_len;
+	int		   *own_chunks;
+	int			nown;
+	int			own_slots;
+	Size		own_bytes;
+	uint64		appended;
 	/* The block this participant copies by-reference values into, and its bytes. */
 	dsa_pointer value_block;
 	Size		value_used;
@@ -405,7 +439,6 @@ reserve_rows(TessHashJoinState *state, int nrows)
 		pfree(state->offsets);
 		pfree(state->valid_bits);
 		pfree(state->pending_bits);
-		pfree(state->duplicate_bits);
 		pfree(state->payload);
 		pfree(state->round_bits);
 		pfree(state->next_bits);
@@ -425,7 +458,6 @@ reserve_rows(TessHashJoinState *state, int nrows)
 	state->offsets = MemoryContextAllocZero(context, sizeof(uint32) * nrows);
 	state->valid_bits = MemoryContextAllocZero(context, sizeof(uint64) * nwords);
 	state->pending_bits = MemoryContextAllocZero(context, sizeof(uint64) * nwords);
-	state->duplicate_bits = MemoryContextAllocZero(context, sizeof(uint64) * nwords);
 	state->payload = MemoryContextAllocZero(context,
 											mul_size(sizeof(uint64) * nrows,
 													 1 + state->npayload));
@@ -453,20 +485,42 @@ reserve_rows(TessHashJoinState *state, int nrows)
 static void
 note_memory(TessHashJoinState *state)
 {
-	Size		memory = state->region_len + sizeof(uint64) * state->bloom_words +
+	Size		memory = state->table_bytes + sizeof(uint64) * state->bloom_words +
 		MemoryContextMemAllocated(state->values_context, true);
 
 	state->peak_memory = Max(state->peak_memory, memory);
 }
 
-/* An empty table in a new region, sized for the planner's estimate. */
+/* Room for the bases and lengths of nchunks chunks in this process. */
+static void
+reserve_chunks(TessHashJoinState *state, int nchunks)
+{
+	MemoryContext context = state->css.ss.ps.state->es_query_cxt;
+	int			slots = Max(state->chunk_slots, 16);
+
+	if (nchunks <= state->chunk_slots)
+		return;
+	while (slots < nchunks)
+		slots *= 2;
+	if (state->chunk_bases == NULL)
+	{
+		state->chunk_bases = MemoryContextAlloc(context, sizeof(void *) * slots);
+		state->chunk_lens = MemoryContextAlloc(context, sizeof(Size) * slots);
+	}
+	else
+	{
+		state->chunk_bases = repalloc(state->chunk_bases, sizeof(void *) * slots);
+		state->chunk_lens = repalloc(state->chunk_lens, sizeof(Size) * slots);
+	}
+	state->chunk_slots = slots;
+	state->table.chunks = state->chunk_bases;
+	state->table.chunk_lens = state->chunk_lens;
+}
+
+/* An empty table with no index yet, for a build that appends first. */
 static void
 create_table(TessHashJoinState *state)
 {
-	Size		payload_size = sizeof(uint64) * (1 + state->npayload);
-	uint64		capacity = Max(state->inner_rows, JOIN_INITIAL_ROWS);
-	Size		size;
-
 	MemoryContextReset(state->table_context);
 	MemoryContextReset(state->values_context);
 	/* A new table: decide on its filter again. */
@@ -475,37 +529,76 @@ create_table(TessHashJoinState *state)
 	state->bloom_decided = false;
 	state->sample_rows = 0;
 	state->sample_found = 0;
-	check(state, state->kernels->table_size(state->nkeys, state->inner_kinds,
-											payload_size, capacity,
-											&size, &state->status));
-	state->region = MemoryContextAllocExtended(state->table_context, size,
-											   MCXT_ALLOC_HUGE | MCXT_ALLOC_ZERO);
-	state->region_len = size;
-	check(state, state->kernels->table_create(state->region, size, state->nkeys,
-											  state->inner_kinds,
-											  payload_size, capacity,
-											  &state->status));
+	state->table.index = NULL;
+	state->table.index_len = 0;
+	state->table.nchunks = 0;
+	state->table_bytes = 0;
+	reserve_chunks(state, 1);
 	note_memory(state);
 }
 
-/*
- * Twice the region: repalloc keeps the records where they are, and the
- * table rebuilds its buckets at the new end.
- */
+/* Another chunk for the serial table, the last one being full. */
 static void
-grow_table(TessHashJoinState *state)
+add_table_chunk(TessHashJoinState *state)
 {
-	Size		len = state->region_len;
+	int			chunk = state->table.nchunks;
+	Size		len = chunk == 0 ? JOIN_FIRST_CHUNK : JOIN_CHUNK_LEN;
+	void	   *base;
 
-	if (len > MaxAllocHugeSize / 2)
+	if (chunk == TESS_TABLE_MAX_CHUNKS)
 		ereport(ERROR,
 				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
-				 errmsg("TessHashJoin hash table cannot grow past %zu bytes", len)));
-	state->region = repalloc_huge(state->region, len * 2);
-	state->region_len = len * 2;
-	check(state, state->kernels->table_grow(state->region, state->region_len,
-											&state->status));
-	state->counters[JOIN_GROWS]++;
+				 errmsg("TessHashJoin hash table cannot hold more than %d chunks",
+						TESS_TABLE_MAX_CHUNKS)));
+	reserve_chunks(state, chunk + 1);
+	base = MemoryContextAlloc(state->table_context, len);
+	check(state, state->kernels->table_chunk_init(base, len, &state->status));
+	state->chunk_bases[chunk] = base;
+	state->chunk_lens[chunk] = len;
+	state->table.nchunks++;
+	state->table_bytes += len;
+	state->counters[JOIN_CHUNKS]++;
+}
+
+/*
+ * The index for the records appended, made once the inner side is read,
+ * and the records linked into it, those of a key next to each other: the
+ * rounds step from one to the next, and a table without duplicates has
+ * no second round.
+ */
+static void
+index_table(TessHashJoinState *state)
+{
+	Size		payload_size = sizeof(uint64) * (1 + state->npayload);
+	uint64		capacity = Max(state->build_rows, JOIN_INITIAL_ROWS);
+	TessTableStats stats = TESS_STRUCT_INITIALIZER(TessTableStats);
+	Size		size;
+
+	check(state, state->kernels->table_size(state->nkeys, state->inner_kinds,
+											payload_size, capacity,
+											&size, &state->status));
+	state->table.index = MemoryContextAllocExtended(state->table_context, size,
+													MCXT_ALLOC_HUGE);
+	state->table.index_len = size;
+	check(state, state->kernels->table_create(state->table.index, size,
+											  state->nkeys, state->inner_kinds,
+											  payload_size, capacity,
+											  &state->status));
+	state->table_bytes += size;
+	for (int chunk = 0; chunk < state->table.nchunks; chunk++)
+	{
+		Size		from = TESS_TABLE_CHUNK_HEADER;
+		uint64		duplicates;
+
+		check(state, state->kernels->table_link_grouped(&state->table, chunk,
+														&from, NULL,
+														&duplicates,
+														&state->status));
+		state->duplicates += duplicates;
+	}
+	check(state, state->kernels->table_stats(&state->table, &stats,
+											 &state->status));
+	state->counters[JOIN_BUCKETS] += stats.buckets;
 	note_memory(state);
 }
 
@@ -520,10 +613,10 @@ new_value_block(TessHashJoinState *state, Size size)
 											  DSA_ALLOC_HUGE);
 	JoinValueBlock *header = dsa_get_address(area, block);
 
-	SpinLockAcquire(&state->shared->values_lock);
+	SpinLockAcquire(&state->shared->lock);
 	header->next = state->shared->values;
 	state->shared->values = block;
-	SpinLockRelease(&state->shared->values_lock);
+	SpinLockRelease(&state->shared->lock);
 	state->value_bytes = add_size(state->value_bytes, add_size(JOIN_VALUE_HEADER, size));
 	return block;
 }
@@ -616,51 +709,78 @@ fill_payload(TessHashJoinState *state, TessBatch *batch, const TessRowMask *vali
 	}
 }
 
-/* Insert the rows of one inner batch, growing the region until they fit. */
-static void
-insert_batch(TessHashJoinState *state, TessBatch *batch)
+/*
+ * Append the pending rows of an inner batch to chunk `chunk` of table:
+ * false when it had room for none of them.
+ */
+static bool
+append_rows(TessHashJoinState *state, const TessTableRef *table, int chunk,
+			TessRowMask *pending)
+{
+	int			before = tess_row_mask_count(pending);
+
+	check(state, state->kernels->table_append(table, chunk,
+											  sizeof(uint64) * (1 + state->npayload),
+											  state->hashes, state->nkeys,
+											  state->table_keys,
+											  (const uint8 *) state->payload,
+											  pending, state->offsets,
+											  &state->status));
+	return tess_row_mask_count(pending) < before;
+}
+
+/*
+ * The valid rows of an inner batch, with their payload filled, into
+ * pending: their count.
+ */
+static int
+prepare_inner(TessHashJoinState *state, TessBatch *batch, TessRowMask *pending)
 {
 	int			nrows = batch->rows.nrows;
 	int			nwords = tess_row_mask_word_count(nrows);
 	TessRowMask valid;
-	TessRowMask pending;
-	TessRowMask duplicates;
 	int			count;
 
 	reserve_rows(state, nrows);
 	/* A shorter batch than the last: no bits past its rows may remain. */
 	memset(state->valid_bits, 0, sizeof(uint64) * nwords);
-	memset(state->duplicate_bits, 0, sizeof(uint64) * nwords);
 	valid = (TessRowMask) {nrows, state->valid_bits};
-	pending = (TessRowMask) {nrows, state->pending_bits};
-	duplicates = (TessRowMask) {nrows, state->duplicate_bits};
+	*pending = (TessRowMask) {nrows, state->pending_bits};
 	batch_keys(state, batch, state->inner_keys, state->inner_kinds, &valid);
 	count = tess_row_mask_count(&valid);
 	if (count == 0)
-		return;
+		return 0;
 	fill_payload(state, batch, &valid);
 	memcpy(state->pending_bits, state->valid_bits, sizeof(uint64) * nwords);
+	return count;
+}
+
+/* Append the rows of one inner batch, adding chunks until they fit. */
+static void
+insert_batch(TessHashJoinState *state, TessBatch *batch)
+{
+	TessRowMask pending;
+	int			count = prepare_inner(state, batch, &pending);
+	bool		fresh = false;
+
+	if (count == 0)
+		return;
+	if (state->table.nchunks == 0)
+	{
+		add_table_chunk(state);
+		fresh = true;
+	}
 	for (;;)
 	{
-		/*
-		 * A key's records next to each other: the rounds step from one to
-		 * the next, and a table without duplicates has no second round.
-		 */
-		check(state, state->kernels->table_insert_grouped(state->region,
-														  state->region_len,
-														  state->hashes,
-														  state->nkeys,
-														  state->table_keys,
-														  (const uint8 *) state->payload,
-														  &pending,
-														  state->offsets,
-														  &duplicates,
-														  &state->status));
-		state->duplicates += tess_row_mask_count(&duplicates);
+		bool		appended = append_rows(state, &state->table,
+										   state->table.nchunks - 1, &pending);
+
 		if (tess_row_mask_count(&pending) == 0)
 			break;
-		/* The table is full: the rows left pending go in after growth. */
-		grow_table(state);
+		if (!appended && fresh)
+			elog(ERROR, "TessHashJoin cannot fit a row of its table in a chunk");
+		add_table_chunk(state);
+		fresh = true;
 	}
 	state->build_rows += count;
 	state->counters[JOIN_BUILD_ROWS] += count;
@@ -691,15 +811,7 @@ build_table(TessHashJoinState *state)
 			insert_batch(state, batch);
 		tess_input_finish(state->inner_input);
 	}
-	if (state->build_rows > 0)
-	{
-		TessTableStats stats = TESS_STRUCT_INITIALIZER(TessTableStats);
-
-		check(state, state->kernels->table_stats(state->region,
-												 state->region_len, &stats,
-												 &state->status));
-		state->counters[JOIN_BUCKETS] += stats.buckets;
-	}
+	index_table(state);
 	state->counters[JOIN_BUILDS]++;
 	state->built = true;
 }
@@ -713,12 +825,10 @@ static TessStatusCode
 next_record(TessHashJoinState *state, const TessRowMask *rows, TessRowMask *found)
 {
 	if (state->shared != NULL)
-		return state->kernels->table_next_match(state->region, state->region_len,
-												state->offsets, rows, found,
-												&state->status);
-	return state->kernels->table_next_in_group(state->region, state->region_len,
-											   state->offsets, rows, found,
-											   &state->status);
+		return state->kernels->table_next_match(&state->table, state->offsets,
+												rows, found, &state->status);
+	return state->kernels->table_next_in_group(&state->table, state->offsets,
+											   rows, found, &state->status);
 }
 
 /*
@@ -739,12 +849,29 @@ query_dsa(TessHashJoinState *state)
 	return state->area;
 }
 
-/* The shared table as the elected participant last published it. */
+/*
+ * The shared table as the elected participant published it: its index,
+ * and the bases of its chunks in this process, from the directory.
+ */
 static void
 attach_shared_table(TessHashJoinState *state)
 {
-	state->region = dsa_get_address(query_dsa(state), state->shared->region);
-	state->region_len = state->shared->region_len;
+	dsa_area   *area = query_dsa(state);
+	int			nchunks = state->shared->nchunks;
+	dsa_pointer *bases;
+	Size	   *lens;
+
+	state->table.index = dsa_get_address(area, state->shared->index);
+	state->table.index_len = state->shared->index_len;
+	reserve_chunks(state, Max(nchunks, 1));
+	bases = dsa_get_address(area, state->shared->directory);
+	lens = (Size *) (bases + nchunks);
+	for (int chunk = 0; chunk < nchunks; chunk++)
+	{
+		state->chunk_bases[chunk] = dsa_get_address(area, bases[chunk]);
+		state->chunk_lens[chunk] = lens[chunk];
+	}
+	state->table.nchunks = nchunks;
 }
 
 /*
@@ -777,133 +904,95 @@ note_shared_memory(TessHashJoinState *state, Size bytes)
 	state->peak_memory = Max(state->peak_memory, bytes);
 }
 
-/* ALLOCATE: an empty shared table sized for the planner's estimate. */
+/*
+ * BUILD: another chunk of this participant's, the last one being full:
+ * numbered by the build counters and entered in the table's list.
+ */
 static void
-allocate_shared_table(TessHashJoinState *state)
+add_own_chunk(TessHashJoinState *state)
 {
-	Size		payload_size = sizeof(uint64) * (1 + state->npayload);
-	uint64		capacity = Max(state->inner_rows, JOIN_INITIAL_ROWS);
 	dsa_area   *area = query_dsa(state);
-	TessTableStats stats = TESS_STRUCT_INITIALIZER(TessTableStats);
-	dsa_pointer region;
-	Size		size;
+	Size		len = state->nown == 0 ? JOIN_FIRST_CHUNK : JOIN_CHUNK_LEN;
+	uint64		number;
+	dsa_pointer block;
+	JoinChunk  *header;
 
-	check(state, state->kernels->table_size(state->nkeys, state->inner_kinds,
-											payload_size, capacity,
-											&size, &state->status));
-	region = dsa_allocate_extended(area, size, DSA_ALLOC_HUGE | DSA_ALLOC_ZERO);
-	check(state, state->kernels->table_create(dsa_get_address(area, region), size,
-											  state->nkeys, state->inner_kinds,
-											  payload_size, capacity,
-											  &state->status));
-	state->shared->region = region;
-	state->shared->region_len = size;
-	attach_shared_table(state);
-	check(state, state->kernels->table_stats(state->region, state->region_len,
-											 &stats, &state->status));
-	allocate_shared_filter(state, capacity);
-	note_shared_memory(state, size);
-	state->counters[JOIN_BUILDS]++;
-	state->counters[JOIN_BUCKETS] += stats.buckets;
-}
-
-/* A new staging buffer in shared memory, the last one being full. */
-static void
-add_staging_buffer(TessHashJoinState *state)
-{
-	if (state->nstaged == state->staged_capacity)
+	check(state, state->kernels->build_take_chunk(state->shared->counters, &number,
+												  &state->status));
+	if (number >= TESS_TABLE_MAX_CHUNKS)
+		ereport(ERROR,
+				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+				 errmsg("TessHashJoin hash table cannot hold more than %d chunks",
+						TESS_TABLE_MAX_CHUNKS)));
+	if (state->nown == state->own_slots)
 	{
 		MemoryContext context = state->css.ss.ps.state->es_query_cxt;
-		int			capacity = Max(state->staged_capacity * 2, 8);
+		int			slots = Max(state->own_slots * 2, 8);
 
-		if (state->staged == NULL)
-		{
-			state->staged = MemoryContextAlloc(context, sizeof(dsa_pointer) * capacity);
-			state->staged_used = MemoryContextAlloc(context, sizeof(Size) * capacity);
-		}
-		else
-		{
-			state->staged = repalloc(state->staged, sizeof(dsa_pointer) * capacity);
-			state->staged_used = repalloc(state->staged_used, sizeof(Size) * capacity);
-		}
-		state->staged_capacity = capacity;
+		state->own_chunks = state->own_chunks == NULL ?
+			MemoryContextAlloc(context, sizeof(int) * slots) :
+			repalloc(state->own_chunks, sizeof(int) * slots);
+		state->own_slots = slots;
 	}
-	state->staged[state->nstaged] = dsa_allocate(query_dsa(state),
-												 sizeof(uint64) * JOIN_STAGING_WORDS);
-	state->staged_used[state->nstaged] = 0;
-	state->nstaged++;
+	block = dsa_allocate_extended(area, JOIN_CHUNK_HEADER + len, DSA_ALLOC_HUGE);
+	header = dsa_get_address(area, block);
+	header->number = number;
+	header->len = len;
+	state->own_base = (char *) header + JOIN_CHUNK_HEADER;
+	state->own_len = len;
+	check(state, state->kernels->table_chunk_init(state->own_base, len,
+												  &state->status));
+	SpinLockAcquire(&state->shared->lock);
+	header->next = state->shared->chunks;
+	state->shared->chunks = block;
+	SpinLockRelease(&state->shared->lock);
+	state->own_chunks[state->nown++] = (int) number;
+	state->own_bytes += JOIN_CHUNK_HEADER + len;
+	state->counters[JOIN_CHUNKS]++;
 }
 
 /*
- * BUILD: insert the rows of one inner batch into the shared table; the
- * rows it has no room for wait in staging buffers.
+ * BUILD: append the rows of one inner batch to this participant's
+ * chunks, adding chunks until they fit. The index is not made yet: the
+ * table seen here is the one chunk appended to.
  */
 static void
 insert_shared_batch(TessHashJoinState *state, TessBatch *batch)
 {
-	int			nrows = batch->rows.nrows;
-	int			nwords = tess_row_mask_word_count(nrows);
-	TessRowMask valid;
 	TessRowMask pending;
-	int			count;
-	int			left;
+	int			count = prepare_inner(state, batch, &pending);
+	bool		fresh = false;
 
-	reserve_rows(state, nrows);
-	memset(state->valid_bits, 0, sizeof(uint64) * nwords);
-	valid = (TessRowMask) {nrows, state->valid_bits};
-	pending = (TessRowMask) {nrows, state->pending_bits};
-	batch_keys(state, batch, state->inner_keys, state->inner_kinds, &valid);
-	count = tess_row_mask_count(&valid);
 	if (count == 0)
 		return;
-	fill_payload(state, batch, &valid);
-	memcpy(state->pending_bits, state->valid_bits, sizeof(uint64) * nwords);
-	check(state, state->kernels->table_insert(state->region, state->region_len,
-											  state->hashes, state->nkeys,
-											  state->table_keys,
-											  (const uint8 *) state->payload,
-											  &pending, state->offsets,
-											  &state->status));
-	left = tess_row_mask_count(&pending);
-	state->staged_rows += left;
-	state->counters[JOIN_OVERFLOW_ROWS] += left;
-	while (left > 0)
+	if (state->nown == 0)
 	{
-		bool		fresh = state->nstaged == 0;
-		int			before = left;
-
-		if (fresh)
-			add_staging_buffer(state);
-		check(state, state->kernels->table_stage(state->region, state->region_len,
-												 dsa_get_address(query_dsa(state),
-																 state->staged[state->nstaged - 1]),
-												 JOIN_STAGING_WORDS,
-												 &state->staged_used[state->nstaged - 1],
-												 state->hashes, state->nkeys,
-												 state->table_keys,
-												 (const uint8 *) state->payload,
-												 &pending, &state->status));
-		left = tess_row_mask_count(&pending);
-		if (left == before)
-		{
-			/* The last buffer is full; a fresh one takes a record at least. */
-			if (fresh)
-				elog(ERROR, "TessHashJoin cannot stage a row of its table");
-			add_staging_buffer(state);
-		}
+		add_own_chunk(state);
+		fresh = true;
 	}
+	for (;;)
+	{
+		TessTableRef own = {NULL, 0, &state->own_base, &state->own_len, 1};
+		bool		appended = append_rows(state, &own, 0, &pending);
+
+		if (tess_row_mask_count(&pending) == 0)
+			break;
+		if (!appended && fresh)
+			elog(ERROR, "TessHashJoin cannot fit a row of its table in a chunk");
+		add_own_chunk(state);
+		fresh = true;
+	}
+	state->appended += count;
 	state->build_rows += count;
 	state->counters[JOIN_BUILD_ROWS] += count;
 	state->peak_memory = Max(state->peak_memory,
-							 add_size(sizeof(uint64) * JOIN_STAGING_WORDS * state->nstaged,
-									  state->value_bytes));
+							 add_size(state->own_bytes, state->value_bytes));
 }
 
 /* BUILD: this participant's share of the inner side, then its report. */
 static void
 build_shared_inner(TessHashJoinState *state)
 {
-	attach_shared_table(state);
 	for (;;)
 	{
 		TessBatch  *batch = tess_input_next(state->inner_input);
@@ -915,88 +1004,113 @@ build_shared_inner(TessHashJoinState *state)
 		tess_input_finish(state->inner_input);
 	}
 	check(state, state->kernels->build_report(state->shared->counters,
-											  state->staged_rows,
+											  state->appended,
 											  state->null_columns,
 											  &state->status));
 }
 
 /*
- * GROW: copy the header and the records into a region for every record,
- * staged ones included, and grow the table there.
+ * SIZE: the index for exactly the records appended, the directory of the
+ * chunks by number, and the filter, as the elected participant.
  */
 static void
-grow_shared_table(TessHashJoinState *state)
+size_shared_table(TessHashJoinState *state)
 {
 	Size		payload_size = sizeof(uint64) * (1 + state->npayload);
 	dsa_area   *area = query_dsa(state);
-	TessTableStats before = TESS_STRUCT_INITIALIZER(TessTableStats);
-	TessTableStats after = TESS_STRUCT_INITIALIZER(TessTableStats);
-	uint64		staged;
+	TessTableStats stats = TESS_STRUCT_INITIALIZER(TessTableStats);
+	uint64		records;
 	uint64		nulls;
-	dsa_pointer grown;
-	char	   *target;
+	uint64		nchunks;
+	uint64		capacity;
+	dsa_pointer *bases;
+	Size	   *lens;
+	dsa_pointer block;
 	Size		size;
 
-	attach_shared_table(state);
-	check(state, state->kernels->build_totals(state->shared->counters, &staged,
-											  &nulls, &state->status));
-	check(state, state->kernels->table_stats(state->region, state->region_len,
-											 &before, &state->status));
+	check(state, state->kernels->build_totals(state->shared->counters, &records,
+											  &nulls, &nchunks, &state->status));
+	capacity = Max(records, JOIN_INITIAL_ROWS);
 	check(state, state->kernels->table_size(state->nkeys, state->inner_kinds,
-											payload_size, before.records + staged,
+											payload_size, capacity,
 											&size, &state->status));
-	grown = dsa_allocate_extended(area, size, DSA_ALLOC_HUGE);
-	target = dsa_get_address(area, grown);
-	/* The header and the records; the buckets are rebuilt at the new end. */
-	memcpy(target, state->region, before.bytes_used - before.buckets * 4);
-	check(state, state->kernels->table_grow(target, size, &state->status));
-	dsa_free(area, state->shared->region);
-	/* Both regions were held at once, during the copy. */
-	note_shared_memory(state, add_size(state->shared->region_len, size));
-	state->shared->region = grown;
-	state->shared->region_len = size;
-	allocate_shared_filter(state, before.records + staged);
+	state->shared->index = dsa_allocate_extended(area, size, DSA_ALLOC_HUGE);
+	state->shared->index_len = size;
+	check(state, state->kernels->table_create(dsa_get_address(area, state->shared->index),
+											  size, state->nkeys, state->inner_kinds,
+											  payload_size, capacity,
+											  &state->status));
+	/* The directory: every chunk under the number it took, none left out. */
+	state->shared->directory =
+		dsa_allocate_extended(area,
+							  mul_size(Max(nchunks, 1), sizeof(dsa_pointer) + sizeof(Size)),
+							  DSA_ALLOC_ZERO);
+	bases = dsa_get_address(area, state->shared->directory);
+	lens = (Size *) (bases + nchunks);
+	for (block = state->shared->chunks; DsaPointerIsValid(block);)
+	{
+		JoinChunk  *header = dsa_get_address(area, block);
+
+		if (header->number >= nchunks || lens[header->number] != 0)
+			elog(ERROR, "TessHashJoin found chunk %llu out of the directory",
+				 (unsigned long long) header->number);
+		bases[header->number] = block + JOIN_CHUNK_HEADER;
+		lens[header->number] = header->len;
+		block = header->next;
+	}
+	for (uint64 chunk = 0; chunk < nchunks; chunk++)
+		if (lens[chunk] == 0)
+			elog(ERROR, "TessHashJoin is missing chunk %llu of its table",
+				 (unsigned long long) chunk);
+	state->shared->nchunks = (int) nchunks;
 	attach_shared_table(state);
-	check(state, state->kernels->table_stats(state->region, state->region_len,
-											 &after, &state->status));
-	state->counters[JOIN_GROWS]++;
-	state->counters[JOIN_BUCKETS] += after.buckets - before.buckets;
+	check(state, state->kernels->table_stats(&state->table, &stats,
+											 &state->status));
+	allocate_shared_filter(state, capacity);
+	note_shared_memory(state, add_size(size, add_size(state->own_bytes,
+													  state->value_bytes)));
+	state->counters[JOIN_BUILDS]++;
+	state->counters[JOIN_BUCKETS] += stats.buckets;
 }
 
-/* LINK: add this participant's staged rows to the grown table. */
+/* LINK: this participant's own chunks into the index. */
 static void
-link_staged_rows(TessHashJoinState *state)
+link_own_chunks(TessHashJoinState *state)
 {
-	dsa_area   *area = query_dsa(state);
-
 	attach_shared_table(state);
-	for (int buffer = 0; buffer < state->nstaged; buffer++)
+	for (int own = 0; own < state->nown; own++)
 	{
-		Size		consumed = 0;
+		Size		from = TESS_TABLE_CHUNK_HEADER;
 
-		check(state, state->kernels->table_insert_staged(state->region,
-														 state->region_len,
-														 dsa_get_address(area,
-																		 state->staged[buffer]),
-														 state->staged_used[buffer],
-														 &consumed,
-														 &state->status));
-		if (consumed != state->staged_used[buffer])
-			elog(ERROR, "TessHashJoin shared table has no room for its staged rows");
-		dsa_free(area, state->staged[buffer]);
+		check(state, state->kernels->table_link(&state->table, state->own_chunks[own],
+												&from, NULL, &state->status));
 	}
-	state->nstaged = 0;
-	state->staged_rows = 0;
+	state->nown = 0;
 }
 
 /* Free the shared table, as the last participant to leave or at a rescan. */
 static void
 free_shared_table(TessHashJoinState *state)
 {
-	if (DsaPointerIsValid(state->shared->region))
+	if (DsaPointerIsValid(state->shared->index))
 	{
-		dsa_free(query_dsa(state), state->shared->region);
-		state->shared->region = InvalidDsaPointer;
+		dsa_free(query_dsa(state), state->shared->index);
+		state->shared->index = InvalidDsaPointer;
+		state->shared->index_len = 0;
+	}
+	if (DsaPointerIsValid(state->shared->directory))
+	{
+		dsa_free(query_dsa(state), state->shared->directory);
+		state->shared->directory = InvalidDsaPointer;
+		state->shared->nchunks = 0;
+	}
+	while (DsaPointerIsValid(state->shared->chunks))
+	{
+		dsa_pointer block = state->shared->chunks;
+
+		state->shared->chunks =
+			((JoinChunk *) dsa_get_address(query_dsa(state), block))->next;
+		dsa_free(query_dsa(state), block);
 	}
 	while (DsaPointerIsValid(state->shared->values))
 	{
@@ -1014,8 +1128,9 @@ free_shared_table(TessHashJoinState *state)
 	}
 	state->bloom = NULL;
 	state->bloom_words = 0;
-	state->region = NULL;
-	state->region_len = 0;
+	state->table.index = NULL;
+	state->table.index_len = 0;
+	state->table.nchunks = 0;
 }
 
 /*
@@ -1035,8 +1150,11 @@ build_shared(TessHashJoinState *state)
 	state->build_rows = 0;
 	state->duplicates = 0;
 	state->null_columns = 0;
-	state->staged_rows = 0;
-	state->nstaged = 0;
+	state->own_base = NULL;
+	state->own_len = 0;
+	state->nown = 0;
+	state->own_bytes = 0;
+	state->appended = 0;
 	state->participating = true;
 	/* This build's filter: decided again by this participant's batches. */
 	state->bloom = NULL;
@@ -1063,33 +1181,28 @@ build_shared(TessHashJoinState *state)
 				reply = BarrierArriveAndWait(&state->shared->build,
 											 PG_WAIT_EXTENSION) ? 1 : 0;
 				break;
-			case TESS_BUILD_DO_ALLOCATE:
-				allocate_shared_table(state);
-				break;
 			case TESS_BUILD_DO_BUILD:
 				build_shared_inner(state);
 				break;
-			case TESS_BUILD_DO_GROW:
-				grow_shared_table(state);
+			case TESS_BUILD_DO_SIZE:
+				size_shared_table(state);
 				break;
 			case TESS_BUILD_DO_LINK:
-				link_staged_rows(state);
+				link_own_chunks(state);
 				break;
 			case TESS_BUILD_DO_PROBE:
 				{
-					TessTableStats stats = TESS_STRUCT_INITIALIZER(TessTableStats);
-					uint64		staged;
+					uint64		records;
+					uint64		nchunks;
 
 					attach_shared_table(state);
-					check(state, state->kernels->table_stats(state->region,
-															 state->region_len,
-															 &stats, &state->status));
 					check(state, state->kernels->build_totals(state->shared->counters,
-															  &staged,
+															  &records,
 															  &state->null_columns,
+															  &nchunks,
 															  &state->status));
 					/* The whole table's rows; its duplicates are unknown. */
-					state->build_rows = stats.records;
+					state->build_rows = records;
 					state->duplicates = state->inner_unique ? 0 : 1;
 					state->built = true;
 					return;
@@ -1137,8 +1250,9 @@ leave_shared(TessHashJoinState *state)
 				return;
 			case TESS_BUILD_DONE:
 				state->participating = false;
-				state->region = NULL;
-				state->region_len = 0;
+				state->table.index = NULL;
+				state->table.index_len = 0;
+				state->table.nchunks = 0;
 				return;
 			default:
 				elog(ERROR, "TessHashJoin got build action %u out of order", action);
@@ -1164,14 +1278,13 @@ gather_inner(TessHashJoinState *state, int word)
 	/* A column no inner row left NULL keeps its flags false. */
 	if (nullable && !state->nulls_gathered)
 	{
-		check(state, state->kernels->table_gather(state->region,
-												  state->region_len,
+		check(state, state->kernels->table_gather(&state->table,
 												  state->current_offsets, &round, 0,
 												  state->null_words,
 												  &state->status));
 		state->nulls_gathered = true;
 	}
-	check(state, state->kernels->table_gather(state->region, state->region_len,
+	check(state, state->kernels->table_gather(&state->table,
 											  state->current_offsets, &round,
 											  sizeof(uint64) * (1 + word),
 											  state->inner_values[word],
@@ -1322,8 +1435,7 @@ decide_bloom(TessHashJoinState *state, uint64 rows, uint64 found)
 		state->bloom = dsa_get_address(query_dsa(state), state->shared->filter);
 		state->bloom_words = state->shared->filter_words;
 		state->bloom_shared = true;
-		check(state, state->kernels->table_try_build_bloom(state->region,
-														   state->region_len,
+		check(state, state->kernels->table_try_build_bloom(&state->table,
 														   state->bloom,
 														   state->bloom_words,
 														   &built, &state->status));
@@ -1338,7 +1450,7 @@ decide_bloom(TessHashJoinState *state, uint64 rows, uint64 found)
 											  mul_size(sizeof(uint64),
 													   state->bloom_words),
 											  MCXT_ALLOC_HUGE);
-	check(state, state->kernels->table_bloom(state->region, state->region_len,
+	check(state, state->kernels->table_bloom(&state->table,
 											 state->bloom, state->bloom_words,
 											 &state->status));
 	state->counters[JOIN_BLOOM_FILTERS]++;
@@ -1398,7 +1510,7 @@ probe_batch(TessHashJoinState *state, TessBatch *batch)
 			return false;
 		valid = passed;
 	}
-	check(state, state->kernels->table_probe(state->region, state->region_len,
+	check(state, state->kernels->table_probe(&state->table,
 											 state->hashes, state->nkeys,
 											 state->table_keys, &valid,
 											 state->offsets, &found,
@@ -2346,7 +2458,7 @@ join_explain(CustomScanState *css, List *ancestors, ExplainState *es)
 							   (totals[JOIN_OVERRUN] + 1023) / 1024, es);
 	ExplainPropertyInteger("Builds", NULL, totals[JOIN_BUILDS], es);
 	ExplainPropertyInteger("Build Rows", NULL, totals[JOIN_BUILD_ROWS], es);
-	ExplainPropertyInteger("Table Grows", NULL, totals[JOIN_GROWS], es);
+	ExplainPropertyInteger("Chunks", NULL, totals[JOIN_CHUNKS], es);
 	ExplainPropertyInteger("Probe Rows", NULL, totals[JOIN_PROBE_ROWS], es);
 	ExplainPropertyInteger("Matches", NULL, totals[JOIN_MATCHES], es);
 	if (state->qual != NULL)
@@ -2358,9 +2470,6 @@ join_explain(CustomScanState *css, List *ancestors, ExplainState *es)
 	if (totals[JOIN_COMPACT_BATCHES] > 0)
 		ExplainPropertyInteger("Compact Batches", NULL,
 							   totals[JOIN_COMPACT_BATCHES], es);
-	if (totals[JOIN_OVERFLOW_ROWS] > 0)
-		ExplainPropertyInteger("Overflow Rows", NULL,
-							   totals[JOIN_OVERFLOW_ROWS], es);
 	if (totals[JOIN_BLOOM_FILTERS] > 0)
 	{
 		ExplainPropertyInteger("Bloom Filters", NULL,
@@ -2388,11 +2497,14 @@ static void
 init_shared(TessHashJoinState *state)
 {
 	BarrierInit(&state->shared->build, 0);
-	state->shared->region = InvalidDsaPointer;
-	state->shared->region_len = 0;
+	state->shared->index = InvalidDsaPointer;
+	state->shared->index_len = 0;
+	state->shared->directory = InvalidDsaPointer;
+	state->shared->nchunks = 0;
 	state->shared->filter = InvalidDsaPointer;
 	state->shared->filter_words = 0;
-	SpinLockInit(&state->shared->values_lock);
+	SpinLockInit(&state->shared->lock);
+	state->shared->chunks = InvalidDsaPointer;
 	state->shared->values = InvalidDsaPointer;
 	check(state, state->kernels->build_counters_init(state->shared->counters,
 													 &state->status));

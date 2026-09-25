@@ -73,7 +73,7 @@ typedef struct TessKernelOps
 								  Size *size,
 								  TessStatus *status);
 	/* tess_table_create */
-	TessStatusCode (*table_create) (void *region,
+	TessStatusCode (*table_create) (void *index,
 									Size len,
 									int nkeys,
 									const TessTableKeyKind *kinds,
@@ -81,13 +81,16 @@ typedef struct TessKernelOps
 									uint64 capacity,
 									TessStatus *status);
 	/* tess_table_stats */
-	TessStatusCode (*table_stats) (const void *region,
-								   Size len,
+	TessStatusCode (*table_stats) (const TessTableRef *table,
 								   TessTableStats *stats,
 								   TessStatus *status);
-	/* tess_table_insert */
-	TessStatusCode (*table_insert) (void *region,
-									Size len,
+	/* tess_table_chunk_init */
+	TessStatusCode (*table_chunk_init) (void *base, Size len,
+										TessStatus *status);
+	/* tess_table_append */
+	TessStatusCode (*table_append) (const TessTableRef *table,
+									int chunk,
+									Size payload_size,
 									const uint32 *hashes,
 									int nkeys,
 									const TessTableKey *keys,
@@ -95,9 +98,21 @@ typedef struct TessKernelOps
 									TessRowMask *pending,
 									uint32 *offsets,
 									TessStatus *status);
+	/* tess_table_link */
+	TessStatusCode (*table_link) (const TessTableRef *table,
+								  int chunk,
+								  Size *from,
+								  uint64 *linked,
+								  TessStatus *status);
+	/* tess_table_link_grouped */
+	TessStatusCode (*table_link_grouped) (const TessTableRef *table,
+										  int chunk,
+										  Size *from,
+										  uint64 *linked,
+										  uint64 *duplicates,
+										  TessStatus *status);
 	/* tess_table_probe */
-	TessStatusCode (*table_probe) (const void *region,
-								   Size len,
+	TessStatusCode (*table_probe) (const TessTableRef *table,
 								   const uint32 *hashes,
 								   int nkeys,
 								   const TessTableKey *keys,
@@ -106,29 +121,26 @@ typedef struct TessKernelOps
 								   TessRowMask *found,
 								   TessStatus *status);
 	/* tess_table_next_match */
-	TessStatusCode (*table_next_match) (const void *region,
-										Size len,
+	TessStatusCode (*table_next_match) (const TessTableRef *table,
 										uint32 *offsets,
 										const TessRowMask *rows,
 										TessRowMask *found,
 										TessStatus *status);
 	/* tess_table_gather */
-	TessStatusCode (*table_gather) (const void *region,
-									Size len,
+	TessStatusCode (*table_gather) (const TessTableRef *table,
 									const uint32 *offsets,
 									const TessRowMask *rows,
 									Size at,
 									Datum *values,
 									TessStatus *status);
 	/* tess_table_record */
-	TessStatusCode (*table_record) (const void *region,
-									Size len,
+	TessStatusCode (*table_record) (const TessTableRef *table,
 									uint32 offset,
 									TessTableRecord *record,
 									TessStatus *status);
 	/* tess_table_find_or_insert */
-	TessStatusCode (*table_find_or_insert) (void *region,
-											Size len,
+	TessStatusCode (*table_find_or_insert) (const TessTableRef *table,
+											int chunk,
 											const uint32 *hashes,
 											int nkeys,
 											const TessTableKey *keys,
@@ -137,44 +149,31 @@ typedef struct TessKernelOps
 											TessRowMask *inserted,
 											TessStatus *status);
 	/* tess_table_payload */
-	TessStatusCode (*table_payload) (void *region,
-									 Size len,
+	TessStatusCode (*table_payload) (const TessTableRef *table,
 									 uint32 offset,
 									 uint8 **payload,
 									 TessStatus *status);
 	/* tess_table_scan */
-	TessStatusCode (*table_scan) (void *region,
-								  Size len,
+	TessStatusCode (*table_scan) (const TessTableRef *table,
 								  uint64 *cursor,
 								  uint32 *offsets,
 								  int capacity,
 								  int *count,
 								  TessStatus *status);
-	/* tess_table_grow */
-	TessStatusCode (*table_grow) (void *region,
-								  Size len,
-								  TessStatus *status);
-	/* tess_table_insert_grouped */
-	TessStatusCode (*table_insert_grouped) (void *region,
-											Size len,
-											const uint32 *hashes,
-											int nkeys,
-											const TessTableKey *keys,
-											const uint8 *payload,
-											TessRowMask *pending,
-											uint32 *offsets,
-											TessRowMask *duplicates,
-											TessStatus *status);
+	/* tess_table_regrow */
+	TessStatusCode (*table_regrow) (const TessTableRef *table,
+									void *index,
+									Size len,
+									uint64 capacity,
+									TessStatus *status);
 	/* tess_table_next_in_group */
-	TessStatusCode (*table_next_in_group) (const void *region,
-										   Size len,
+	TessStatusCode (*table_next_in_group) (const TessTableRef *table,
 										   uint32 *offsets,
 										   const TessRowMask *rows,
 										   TessRowMask *found,
 										   TessStatus *status);
 	/* tess_table_accumulate */
-	TessStatusCode (*table_accumulate) (void *region,
-										Size len,
+	TessStatusCode (*table_accumulate) (const TessTableRef *table,
 										const uint32 *offsets,
 										const TessRowMask *rows,
 										TessTableAccumulate op,
@@ -185,8 +184,7 @@ typedef struct TessKernelOps
 										uint32 flag_bit,
 										TessStatus *status);
 	/* tess_table_gather_key */
-	TessStatusCode (*table_gather_key) (const void *region,
-										Size len,
+	TessStatusCode (*table_gather_key) (const TessTableRef *table,
 										const uint32 *offsets,
 										const TessRowMask *rows,
 										int key,
@@ -197,7 +195,7 @@ typedef struct TessKernelOps
 	TessStatusCode (*table_bloom_words) (uint64 records, Size *nwords,
 										 TessStatus *status);
 	/* tess_table_bloom */
-	TessStatusCode (*table_bloom) (const void *region, Size len,
+	TessStatusCode (*table_bloom) (const TessTableRef *table,
 								   uint64 *words, Size nwords,
 								   TessStatus *status);
 	/* tess_bloom_probe */
@@ -206,19 +204,6 @@ typedef struct TessKernelOps
 								   const TessRowMask *rows,
 								   TessRowMask *found,
 								   TessStatus *status);
-	/* tess_table_stage */
-	TessStatusCode (*table_stage) (const void *region, Size len,
-								   uint64 *buffer, Size nwords, Size *used,
-								   const uint32 *hashes, int nkeys,
-								   const TessTableKey *keys,
-								   const uint8 *payload,
-								   TessRowMask *pending,
-								   TessStatus *status);
-	/* tess_table_insert_staged */
-	TessStatusCode (*table_insert_staged) (void *region, Size len,
-										   const uint64 *buffer, Size used,
-										   Size *consumed,
-										   TessStatus *status);
 	/* tess_bloom_shared_words */
 	TessStatusCode (*bloom_shared_words) (uint64 records, Size *nwords,
 										  TessStatus *status);
@@ -226,7 +211,7 @@ typedef struct TessKernelOps
 	TessStatusCode (*bloom_shared_init) (uint64 *words, Size nwords,
 										 TessStatus *status);
 	/* tess_table_try_build_bloom */
-	TessStatusCode (*table_try_build_bloom) (const void *region, Size len,
+	TessStatusCode (*table_try_build_bloom) (const TessTableRef *table,
 											 uint64 *words, Size nwords,
 											 bool *built,
 											 TessStatus *status);
@@ -244,11 +229,15 @@ typedef struct TessKernelOps
 	TessStatusCode (*build_counters_init) (uint64 *counters,
 										   TessStatus *status);
 	/* tess_build_report */
-	TessStatusCode (*build_report) (uint64 *counters, uint64 staged,
+	TessStatusCode (*build_report) (uint64 *counters, uint64 records,
 									uint64 null_columns, TessStatus *status);
+	/* tess_build_take_chunk */
+	TessStatusCode (*build_take_chunk) (uint64 *counters, uint64 *number,
+										TessStatus *status);
 	/* tess_build_totals */
-	TessStatusCode (*build_totals) (uint64 *counters, uint64 *staged,
-									uint64 *null_columns, TessStatus *status);
+	TessStatusCode (*build_totals) (uint64 *counters, uint64 *records,
+									uint64 *null_columns, uint64 *chunks,
+									TessStatus *status);
 	/* tess_build_step */
 	TessStatusCode (*build_step) (TessBuildParticipant *participant,
 								  uint64 *counters, uint32 reply,

@@ -786,7 +786,7 @@ SELECT agg_explain($$SELECT k % 100000, sum(v) FROM agg_many GROUP BY k % 100000
    Kernel Calls: 3540
    Computed Datums: 400000
    Groups: 100000
-   Table Grows: 9
+   Table Grows: 8
    Memory Usage: N kB
    ->  Custom Scan (TessHeapScan) on agg_many (actual rows=200000.00 loops=1)
          Batch Size: 64

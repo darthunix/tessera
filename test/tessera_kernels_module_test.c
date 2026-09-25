@@ -649,6 +649,7 @@ kernel_ops(void)
 }
 
 #define TABLE_ROWS 64
+#define TABLE_CHUNKS 5
 
 /* A column of 64 keys, row % modulo, as int4 or int8 Datums. */
 static void
@@ -671,9 +672,10 @@ init_keys(TessDatumColumn *column, Datum *values, bool *isnull, int modulo,
 
 /*
  * The whole life of a table through the installed operations alone, as a
- * node module that does not link the kernels would run it: build from
- * int8 keys in a region too small, grow it by repalloc, probe with int4
- * keys, walk the chains, gather the payload, scan, then group.
+ * node module that does not link the kernels would run it: append int8
+ * keys to chunks of sixteen records as they fill, link them into an
+ * index, make a new index over the same chunks, probe with int4 keys,
+ * walk the chains, gather the payload, scan, then group.
  */
 /* Raise the step of the table cycle that failed, with the kernel's message. */
 pg_noreturn static void
@@ -714,13 +716,17 @@ tessera_test_kernels_module_table(PG_FUNCTION_ARGS)
 	TessRowMask inserted = {TABLE_ROWS, &inserted_word};
 	TessTableStats stats = TESS_STRUCT_INITIALIZER(TessTableStats);
 	TessTableRecord record = TESS_STRUCT_INITIALIZER(TessTableRecord);
+	void	   *bases[TABLE_CHUNKS];
+	Size		lens[TABLE_CHUNKS];
+	TessTableRef table = {NULL, 0, bases, lens, 0};
 	Size		small;
 	Size		size;
-	void	   *region;
+	void	   *index;
 	uint64		cursor = 0;
 	int			count = 0;
 	uint8	   *state;
 	int			row;
+	int			chunk;
 
 	/* Build: 64 rows, keys 0..15 as int8, the row number as payload. */
 	init_keys(&build_column, build_values, isnull, 16, true);
@@ -730,30 +736,55 @@ tessera_test_kernels_module_table(PG_FUNCTION_ARGS)
 					   hashes, &valid, &status) != TESS_OK ||
 		valid_word != all ||
 		ops->table_size(1, &kind, 8, 16, &small, &status) != TESS_OK ||
-		ops->table_size(1, &kind, 8, TABLE_ROWS + 16, &size, &status) != TESS_OK ||
+		ops->table_size(1, &kind, 8, TABLE_ROWS * 16, &size, &status) != TESS_OK ||
 		small >= size)
 		cycle_failed("build: hash and size", &status);
-	region = palloc0(small);
-	pending_word = all;
-	if (ops->table_create(region, small, 1, &kind, 8, 16, &status) != TESS_OK ||
-		ops->table_insert(region, small, hashes, 1, &key, (uint8 *) payload,
-						  &pending, offsets, &status) != TESS_OK ||
-		pending_word == 0)
-		cycle_failed("build: first insertion", &status);
 
-	/*
-	 * The rows left pending go in after growth, which also leaves room
-	 * for the records grouping adds below; offsets stay valid.
-	 */
-	region = repalloc(region, size);
-	memset((char *) region + small, 0, size - small);
-	if (ops->table_grow(region, size, &status) != TESS_OK ||
-		ops->table_insert(region, size, hashes, 1, &key, (uint8 *) payload,
-						  &pending, offsets, &status) != TESS_OK ||
-		pending_word != 0 ||
-		ops->table_stats(region, size, &stats, &status) != TESS_OK ||
-		stats.records != TABLE_ROWS || stats.region_len != size)
-		cycle_failed("growth and second insertion", &status);
+	/* Sixteen records a chunk: four chunks, one more left for grouping. */
+	pending_word = all;
+	for (chunk = 0; chunk < TABLE_CHUNKS; chunk++)
+	{
+		lens[chunk] = TESS_TABLE_CHUNK_HEADER + 16 * 32;
+		bases[chunk] = palloc(lens[chunk]);
+		if (ops->table_chunk_init(bases[chunk], lens[chunk], &status) != TESS_OK)
+			cycle_failed("build: chunk", &status);
+		table.nchunks++;
+		if (pending_word != 0 &&
+			ops->table_append(&table, chunk, 8, hashes, 1, &key, (uint8 *) payload,
+							  &pending, offsets, &status) != TESS_OK)
+			cycle_failed("build: append", &status);
+	}
+	if (pending_word != 0)
+		cycle_failed("build: room", &status);
+
+	/* An index for sixteen records, the chunks linked into it. */
+	table.index = palloc(small);
+	table.index_len = small;
+	if (ops->table_create(table.index, small, 1, &kind, 8, 16, &status) != TESS_OK)
+		cycle_failed("build: index", &status);
+	for (chunk = 0; chunk < TABLE_CHUNKS; chunk++)
+	{
+		Size		from = TESS_TABLE_CHUNK_HEADER;
+		uint64		linked;
+
+		if (ops->table_link(&table, chunk, &from, &linked, &status) != TESS_OK ||
+			linked != (chunk < 4 ? 16 : 0))
+			cycle_failed("build: link", &status);
+	}
+
+	/* A larger index over the same chunks: the records keep their offsets. */
+	index = palloc(size);
+	if (ops->table_regrow(&table, index, size, TABLE_ROWS * 16, &status) != TESS_OK)
+		cycle_failed("regrow", &status);
+	pfree(table.index);
+	table.index = index;
+	table.index_len = size;
+	if (ops->table_stats(&table, &stats, &status) != TESS_OK ||
+		stats.records != TABLE_ROWS || stats.region_len != size ||
+		ops->table_record(&table, offsets[TABLE_ROWS - 1], &record,
+						  &status) != TESS_OK ||
+		record.keys[0] != (TABLE_ROWS - 1) % 16)
+		cycle_failed("records after regrow", &status);
 
 	/*
 	 * Probe with the same keys as int4: an int8 in the int4 range hashes
@@ -765,16 +796,16 @@ tessera_test_kernels_module_table(PG_FUNCTION_ARGS)
 	key.column = &probe_column;
 	if (ops->int4_hash(&probe_column, NULL, &all_rows, TESS_NULL_KEYS_REJECT,
 					   hashes, &valid, &status) != TESS_OK ||
-		ops->table_probe(region, size, hashes, 1, &key, &valid, matches,
+		ops->table_probe(&table, hashes, 1, &key, &valid, matches,
 						 &found, &status) != TESS_OK ||
 		found_word != all ||
-		ops->table_gather(region, size, matches, &found, 0, gathered,
+		ops->table_gather(&table, matches, &found, 0, gathered,
 						  &status) != TESS_OK)
 		cycle_failed("probe with int4 keys", &status);
 	for (row = 0; row < TABLE_ROWS; row++)
 	{
 		if (DatumGetUInt64(gathered[row]) % 16 != row % 16 ||
-			ops->table_record(region, size, matches[row], &record,
+			ops->table_record(&table, matches[row], &record,
 							  &status) != TESS_OK ||
 			record.keys[0] != row % 16)
 			cycle_failed("gathered payload or record", &status);
@@ -784,48 +815,52 @@ tessera_test_kernels_module_table(PG_FUNCTION_ARGS)
 	for (count = 0; count < 3; count++)
 	{
 		valid_word = found_word;
-		if (ops->table_next_match(region, size, matches, &valid, &found,
+		if (ops->table_next_match(&table, matches, &valid, &found,
 								  &status) != TESS_OK ||
 			found_word != all)
 			cycle_failed("chain step", &status);
 	}
 	valid_word = found_word;
-	if (ops->table_next_match(region, size, matches, &valid, &found,
+	if (ops->table_next_match(&table, matches, &valid, &found,
 							  &status) != TESS_OK ||
 		found_word != 0)
 		cycle_failed("chain end", &status);
 
 	/* A scan visits every record once. */
-	if (ops->table_scan(region, size, &cursor, offsets, TABLE_ROWS, &count,
+	if (ops->table_scan(&table, &cursor, offsets, TABLE_ROWS, &count,
 						&status) != TESS_OK || count != TABLE_ROWS ||
-		ops->table_scan(region, size, &cursor, offsets, TABLE_ROWS, &count,
+		ops->table_scan(&table, &cursor, offsets, TABLE_ROWS, &count,
 						&status) != TESS_OK || count != 0)
 		cycle_failed("scan", &status);
 
 	/*
-	 * Grouping, in row order: keys 0..19 find the records of 0..15, rows 16
-	 * to 19 create one record each and rows 36 to 39 find those; a payload
-	 * set in place is read back through another row's offset.
+	 * Grouping, in row order, into the fifth chunk: keys 0..19 find the
+	 * records of 0..15, rows 16 to 19 create one record each and rows 36
+	 * to 39 find those; a payload set in place is read back through
+	 * another row's offset.
 	 */
 	init_keys(&group_column, group_values, isnull, 20, false);
 	key.column = &group_column;
 	pending_word = all;
 	if (ops->int4_hash(&group_column, NULL, &all_rows, TESS_NULL_KEYS_GROUP,
 					   hashes, &valid, &status) != TESS_OK ||
-		ops->table_find_or_insert(region, size, hashes, 1, &key, &pending,
-								  offsets, &inserted, &status) != TESS_OK ||
+		ops->table_find_or_insert(&table, TABLE_CHUNKS - 1, hashes, 1, &key,
+								  &pending, offsets, &inserted,
+								  &status) != TESS_OK ||
 		pending_word != 0 || inserted_word != (UINT64CONST(0xf) << 16) ||
 		offsets[37] != offsets[17])
 		cycle_failed("grouping", &status);
-	if (ops->table_payload(region, size, offsets[17], &state, &status) != TESS_OK)
+	if (ops->table_payload(&table, offsets[17], &state, &status) != TESS_OK)
 		cycle_failed("payload in place", &status);
 	memset(state, 0x5a, 8);
-	if (ops->table_record(region, size, offsets[37], &record,
+	if (ops->table_record(&table, offsets[37], &record,
 						  &status) != TESS_OK ||
 		record.payload[7] != 0x5a ||
-		ops->table_stats(region, size, &stats, &status) != TESS_OK ||
+		ops->table_stats(&table, &stats, &status) != TESS_OK ||
 		stats.records != TABLE_ROWS + 4)
 		cycle_failed("payload read back", &status);
-	pfree(region);
+	for (chunk = 0; chunk < TABLE_CHUNKS; chunk++)
+		pfree(bases[chunk]);
+	pfree(table.index);
 	PG_RETURN_BOOL(true);
 }

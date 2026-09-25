@@ -34,20 +34,21 @@ validate_kernels(const TessKernelOps *ops)
 	if (ops->int4_hash == NULL || ops->int4_hash_next == NULL ||
 		ops->int8_hash == NULL || ops->int8_hash_next == NULL ||
 		ops->table_size == NULL || ops->table_create == NULL ||
-		ops->table_stats == NULL || ops->table_insert == NULL ||
-		ops->table_probe == NULL || ops->table_next_match == NULL ||
-		ops->table_gather == NULL || ops->table_record == NULL ||
-		ops->table_find_or_insert == NULL || ops->table_payload == NULL ||
-		ops->table_scan == NULL || ops->table_grow == NULL ||
-		ops->table_insert_grouped == NULL || ops->table_next_in_group == NULL ||
+		ops->table_stats == NULL || ops->table_chunk_init == NULL ||
+		ops->table_append == NULL || ops->table_link == NULL ||
+		ops->table_link_grouped == NULL || ops->table_probe == NULL ||
+		ops->table_next_match == NULL || ops->table_gather == NULL ||
+		ops->table_record == NULL || ops->table_find_or_insert == NULL ||
+		ops->table_payload == NULL || ops->table_scan == NULL ||
+		ops->table_regrow == NULL || ops->table_next_in_group == NULL ||
 		ops->table_accumulate == NULL || ops->table_gather_key == NULL ||
 		ops->table_bloom_words == NULL || ops->table_bloom == NULL ||
-		ops->bloom_probe == NULL || ops->table_stage == NULL ||
-		ops->table_insert_staged == NULL || ops->bloom_shared_words == NULL ||
+		ops->bloom_probe == NULL || ops->bloom_shared_words == NULL ||
 		ops->bloom_shared_init == NULL || ops->table_try_build_bloom == NULL ||
 		ops->bloom_shared_ready == NULL || ops->bloom_shared_probe == NULL ||
 		ops->build_counters_init == NULL || ops->build_report == NULL ||
-		ops->build_totals == NULL || ops->build_step == NULL)
+		ops->build_take_chunk == NULL || ops->build_totals == NULL ||
+		ops->build_step == NULL)
 		elog(ERROR, "Tessera kernels must provide every operation");
 }
 

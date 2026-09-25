@@ -192,7 +192,7 @@ SELECT join_explain($$SELECT count(jf.m), sum(jf.m), sum(jdup.w) FROM jf JOIN jd
          Memory Usage: N kB
          Builds: 1
          Build Rows: 139
-         Table Grows: 0
+         Chunks: 1
          Probe Rows: 1000
          Matches: 357
          Compact Batches: 6
@@ -230,7 +230,7 @@ SELECT join_explain($$SELECT count(jf.note), max(jdup.w) FROM jf JOIN jdup ON jf
          Memory Usage: N kB
          Builds: 1
          Build Rows: 139
-         Table Grows: 0
+         Chunks: 1
          Probe Rows: 1000
          Matches: 357
          Compact Batches: 6
@@ -380,7 +380,7 @@ SELECT join_explain($$SELECT count(*), sum(jdup.w) FROM jf JOIN jdup ON jf.fk = 
          Memory Usage: N kB
          Builds: 1
          Build Rows: 139
-         Table Grows: 0
+         Chunks: 1
          Probe Rows: 1000
          Matches: 357
          Rows Removed by Join Filter: 33
@@ -735,7 +735,7 @@ SELECT join_explain($$SELECT count(*), count(jdup.w), sum(jdup.w) FROM jf LEFT J
          Memory Usage: N kB
          Builds: 1
          Build Rows: 139
-         Table Grows: 0
+         Chunks: 1
          Probe Rows: 1000
          Matches: 357
          Compact Batches: 18
@@ -830,7 +830,8 @@ SELECT join_same($$SELECT jsmall.k, (SELECT count(*) FROM jf WHERE NOT EXISTS (S
  10 rows, hash 9932f3730a581284a38168d4d0362ee3
 (1 row)
 
--- A build side larger than the planner thinks: the table grows.
+-- A build side larger than the planner thinks: the records go on into
+-- more chunks, and the index is made for as many as were read.
 CREATE TABLE jgrow (k int, g int);
 ANALYZE jgrow;
 INSERT INTO jgrow SELECT g % 400, g FROM generate_series(1, 20000) AS g;
@@ -859,7 +860,7 @@ SELECT join_explain($$SELECT count(*) FROM jf JOIN jd ON jf.fk = jd.id$$);
          Memory Usage: N kB
          Builds: 1
          Build Rows: 300
-         Table Grows: 0
+         Chunks: 1
          Probe Rows: 1000
          Matches: 764
          ->  Custom Scan (TessHeapScan) on jf (actual rows=1000.00 loops=1)
@@ -891,7 +892,7 @@ SELECT join_explain($$SELECT sum(jdup.w) FROM jf JOIN jdup ON jf.fk = jdup.k$$);
          Memory Usage: N kB
          Builds: 1
          Build Rows: 139
-         Table Grows: 0
+         Chunks: 1
          Probe Rows: 1000
          Matches: 357
          Compact Batches: 6
@@ -909,7 +910,7 @@ SELECT join_explain($$SELECT sum(jdup.w) FROM jf JOIN jdup ON jf.fk = jdup.k$$);
                Restarted Datums: 0
 (27 rows)
 
--- An inner side the planner thinks small: the table grows past hash_mem,
+-- An inner side the planner thinks small: the table goes past hash_mem,
 -- and is kept and reported, not split.
 CREATE FUNCTION join_many() RETURNS SETOF int LANGUAGE sql ROWS 10
 AS 'SELECT generate_series(1, 20000)';
@@ -923,12 +924,12 @@ SELECT join_explain($$SELECT count(*) FROM jf JOIN join_many() AS m(k) ON jf.v =
    Kernel Calls: 18
    ->  Custom Scan (TessHashJoin) (actual rows=1000.00 loops=1)
          Hash Cond: (jf.v = m.k)
-         Buckets: 131072
+         Buckets: 65536
          Memory Usage: N kB
          Overrun: N kB
          Builds: 1
          Build Rows: 20000
-         Table Grows: 8
+         Chunks: 2
          Probe Rows: 1000
          Matches: 1000
          ->  Custom Scan (TessHeapScan) on jf (actual rows=1000.00 loops=1)
@@ -968,7 +969,7 @@ SELECT join_explain($$SELECT jsmall.k, (SELECT count(*) FROM jf JOIN jdup ON jf.
                  Memory Usage: N kB
                  Builds: 10
                  Build Rows: 1030
-                 Table Grows: 10
+                 Chunks: 10
                  Probe Rows: 10000
                  Matches: 2640
                  Compact Batches: 46
@@ -1013,7 +1014,7 @@ SELECT join_explain($$SELECT jsmall.k, (SELECT count(*) FROM jf JOIN jdup ON jf.
                  Memory Usage: N kB
                  Builds: 1
                  Build Rows: 139
-                 Table Grows: 0
+                 Chunks: 1
                  Probe Rows: 6150
                  Matches: 2165
                  Compact Batches: 39
@@ -1088,7 +1089,7 @@ SELECT join_explain($$SELECT count(*), sum(jbuild.w) FROM jprobe JOIN jbuild ON 
          Memory Usage: N kB
          Builds: 1
          Build Rows: 5000
-         Table Grows: 0
+         Chunks: 2
          Probe Rows: 20000
          Matches: 198
          Bloom Filters: 1
@@ -1127,7 +1128,7 @@ SELECT join_explain($$SELECT count(*) FROM jprobe WHERE NOT EXISTS (SELECT 1 FRO
          Memory Usage: N kB
          Builds: 1
          Build Rows: 5000
-         Table Grows: 0
+         Chunks: 2
          Probe Rows: 20000
          Matches: 0
          Bloom Filters: 1
@@ -1173,7 +1174,7 @@ SELECT join_explain($$SELECT count(*), count(jbuild.w) FROM jprobe LEFT JOIN jbu
          Memory Usage: N kB
          Builds: 1
          Build Rows: 5000
-         Table Grows: 0
+         Chunks: 2
          Probe Rows: 20000
          Matches: 198
          Bloom Filters: 1
@@ -1219,7 +1220,7 @@ SELECT join_explain($$SELECT count(*), sum(jbuild.w) FROM jhit JOIN jbuild ON jh
          Memory Usage: N kB
          Builds: 1
          Build Rows: 5000
-         Table Grows: 0
+         Chunks: 2
          Probe Rows: 20000
          Matches: 20000
          ->  Custom Scan (TessHeapScan) on jhit (actual rows=20000.00 loops=1)
@@ -1250,7 +1251,7 @@ SELECT join_explain($$SELECT count(*) FROM jprobe JOIN jd ON jprobe.k = jd.id$$)
          Memory Usage: N kB
          Builds: 1
          Build Rows: 300
-         Table Grows: 0
+         Chunks: 1
          Probe Rows: 20000
          Matches: 297
          ->  Custom Scan (TessHeapScan) on jprobe (actual rows=20000.00 loops=1)
@@ -1283,7 +1284,7 @@ SELECT join_explain($$SELECT jsmall.k, (SELECT count(*) FROM jprobe JOIN jbuild 
                  Memory Usage: N kB
                  Builds: 10
                  Build Rows: 49615
-                 Table Grows: 20
+                 Chunks: 20
                  Probe Rows: 200000
                  Matches: 1595
                  Bloom Filters: 10
@@ -1558,19 +1559,14 @@ SELECT join_same($$SELECT jbig.v, jgrow.g FROM jbig JOIN jgrow ON jbig.fk = jgro
  9950 rows, hash 483e966f10d19470eea05b83051f6095
 (1 row)
 
+-- The planner expects no rows of jgrow: the participants append them all
+-- to chunks of their own, and the index is made once, for all of them.
 SELECT join_property($$SELECT count(*) FROM jbig JOIN jgrow ON jbig.fk = jgrow.k$$, 'Builds') AS builds,
-       join_property($$SELECT count(*) FROM jbig JOIN jgrow ON jbig.fk = jgrow.k$$, 'Table Grows') AS grows,
-       join_property($$SELECT count(*) FROM jbig JOIN jgrow ON jbig.fk = jgrow.k$$, 'Build Rows') AS build_rows;
- builds | grows | build_rows 
---------+-------+------------
- 1      | 1     | 20000
-(1 row)
-
-SELECT join_property($$SELECT count(*) FROM jbig JOIN jgrow ON jbig.fk = jgrow.k$$, 'Overflow Rows') AS overflow,
+       join_property($$SELECT count(*) FROM jbig JOIN jgrow ON jbig.fk = jgrow.k$$, 'Build Rows') AS build_rows,
        join_property($$SELECT count(*) FROM jbig JOIN jgrow ON jbig.fk = jgrow.k$$, 'Buckets') AS buckets;
- overflow | buckets 
-----------+---------
- 1        | 65536
+ builds | build_rows | buckets 
+--------+------------+---------
+ 1      | 20000      | 65536
 (1 row)
 
 SET parallel_leader_participation = off;
@@ -1688,7 +1684,8 @@ SELECT join_same($$SELECT count(*), sum(length(big.t)) FROM jrefprobe JOIN (SELE
  1 rows, hash ea0e8991177620cd9d01d8be275e6d0b
 (1 row)
 
--- A table that grows keeps its values, which stay where they are.
+-- A table larger than the planner thinks keeps its values where they
+-- are, and its index is made for every row.
 CREATE TABLE jrefgrow (k int, t text);
 ANALYZE jrefgrow;
 INSERT INTO jrefgrow SELECT g % 400, 'g' || g FROM generate_series(1, 20000) AS g;
@@ -1698,10 +1695,10 @@ SELECT join_same($$SELECT count(*), max(jrefgrow.t), sum(length(jrefgrow.t)) FRO
  1 rows, hash 7a8f3416f88ed818b1bd034415696793
 (1 row)
 
-SELECT join_property($$SELECT count(*), max(jrefgrow.t) FROM jbig JOIN jrefgrow ON jbig.fk = jrefgrow.k$$, 'Table Grows') AS grows;
- grows 
--------
- 1
+SELECT join_property($$SELECT count(*), max(jrefgrow.t) FROM jbig JOIN jrefgrow ON jbig.fk = jrefgrow.k$$, 'Buckets') AS buckets;
+ buckets 
+---------
+ 65536
 (1 row)
 
 -- A rescan of the Gather frees the blocks and fills new ones.

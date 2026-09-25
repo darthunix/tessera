@@ -25,7 +25,10 @@ static const TessKernelOps kernels = {
 	.table_size = tess_table_size,
 	.table_create = tess_table_create,
 	.table_stats = tess_table_stats,
-	.table_insert = tess_table_insert,
+	.table_chunk_init = tess_table_chunk_init,
+	.table_append = tess_table_append,
+	.table_link = tess_table_link,
+	.table_link_grouped = tess_table_link_grouped,
 	.table_probe = tess_table_probe,
 	.table_next_match = tess_table_next_match,
 	.table_gather = tess_table_gather,
@@ -33,16 +36,13 @@ static const TessKernelOps kernels = {
 	.table_find_or_insert = tess_table_find_or_insert,
 	.table_payload = tess_table_payload,
 	.table_scan = tess_table_scan,
-	.table_grow = tess_table_grow,
-	.table_insert_grouped = tess_table_insert_grouped,
+	.table_regrow = tess_table_regrow,
 	.table_next_in_group = tess_table_next_in_group,
 	.table_accumulate = tess_table_accumulate,
 	.table_gather_key = tess_table_gather_key,
 	.table_bloom_words = tess_table_bloom_words,
 	.table_bloom = tess_table_bloom,
 	.bloom_probe = tess_bloom_probe,
-	.table_stage = tess_table_stage,
-	.table_insert_staged = tess_table_insert_staged,
 	.bloom_shared_words = tess_bloom_shared_words,
 	.bloom_shared_init = tess_bloom_shared_init,
 	.table_try_build_bloom = tess_table_try_build_bloom,
@@ -50,6 +50,7 @@ static const TessKernelOps kernels = {
 	.bloom_shared_probe = tess_bloom_shared_probe,
 	.build_counters_init = tess_build_counters_init,
 	.build_report = tess_build_report,
+	.build_take_chunk = tess_build_take_chunk,
 	.build_totals = tess_build_totals,
 	.build_step = tess_build_step,
 };
@@ -141,7 +142,7 @@ tessera_test_second_kernels(PG_FUNCTION_ARGS)
 }
 
 /*
- * The registry accepts a table built for another region format, since
+ * The registry accepts a table built for another table format, since
  * only its users know the format they need: the runtime refuses it.
  */
 Datum

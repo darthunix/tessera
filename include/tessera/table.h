@@ -1,4 +1,4 @@
-/* C entry points of the Rust hash table in a region the caller owns. */
+/* C entry points of the Rust hash table in memory the caller owns. */
 #ifndef TESSERA_TABLE_H
 #define TESSERA_TABLE_H
 
@@ -10,37 +10,52 @@
 #include "tessera/status.h"
 
 /*
- * The table (crates/tessera-kernels, module table) lives in a region of
- * memory the caller allocates and passes to every call as a pointer and a
- * length: palloc'd memory of a serial plan, grown with repalloc, or dynamic
- * shared memory of a parallel one. Rust keeps nothing between calls and
- * allocates nothing: everything in the region is addressed by offsets from
- * its start, so the bytes survive a move and mean the same in every
- * process. The region must be aligned to 8; tess_table_size says how many
- * bytes a capacity needs, tess_table_create lays the table out over all
- * the bytes given, and every other call attaches anew, checking the whole
- * header, and checks every offset it follows, so a corrupt region is a
- * status, never a crash or a hang. See docs/table.md.
+ * The table (crates/tessera-kernels, module table) is an index and the
+ * chunks its records lie in, all memory the caller allocates: palloc'd in
+ * a serial plan, dynamic shared memory in a parallel one. Every call gets
+ * a TessTableRef: the index's address and length, and the addresses and
+ * lengths of the chunks in this process, by number. Rust keeps nothing
+ * between calls and allocates nothing: a record is addressed by its chunk
+ * number and its place in the chunk, so the bytes mean the same in every
+ * process whatever address a chunk has there. Every block must be aligned
+ * to 8; tess_table_size says how many bytes an index for a capacity
+ * needs, tess_table_create lays the index out, tess_table_chunk_init
+ * makes a block an empty chunk, and every other call attaches anew,
+ * checking the whole header, and checks every reference it follows, so a
+ * corrupt table is a status, never a crash or a hang. See docs/table.md.
  *
- * Records are addressed by 32-bit offsets in units of 8 bytes; 0 is none.
+ * Records are addressed by 32-bit references: a chunk number and a place
+ * in units of 8 bytes; 0 is none. Records never move: a chunk fills and
+ * the caller adds another, and when the records outgrow the buckets only
+ * the index is made anew over the same chunks (tess_table_regrow).
  * A batch brings its hashes (from tess_int4_hash, tess_int8_hash and their
  * _next forms, which apply the NULL policy), its keys as Datum columns and
  * a row mask. An int8 inside the int4 range hashes as the int4, so int4
  * and int8 key columns meet in one table.
- * A full table is not an error: tess_table_insert leaves the rows it had
- * no room for in the pending mask, and the caller grows the region.
  *
- * Insertions may run in several processes at once over shared memory, and
- * so may probes, but not both at a time. Every status rule of
- * tessera/kernels.h applies: outputs are unspecified after a failure, and
- * the caller reports the status with ereport after the call returns.
+ * Building has two steps: tess_table_append writes rows as records into a
+ * chunk, without the index, and tess_table_link puts them into the
+ * buckets. Several processes may append to chunks of their own and link
+ * them at once over shared memory, and several may probe, but not both at
+ * a time. Every status rule of tessera/kernels.h applies: outputs are
+ * unspecified after a failure, and the caller reports the status with
+ * ereport after the call returns.
  */
 
-/* The format of the region this header describes. */
-#define TESS_TABLE_FORMAT_VERSION 1
+/* The format of the table this header describes. */
+#define TESS_TABLE_FORMAT_VERSION 2
 
 /* The most keys a record holds. */
 #define TESS_TABLE_MAX_KEYS 16
+
+/*
+ * Chunks: at most TESS_TABLE_MAX_CHUNKS of at most TESS_TABLE_MAX_CHUNK_LEN
+ * bytes each, a multiple of 8; the first TESS_TABLE_CHUNK_HEADER bytes of a
+ * chunk count the bytes it uses.
+ */
+#define TESS_TABLE_MAX_CHUNKS 32768
+#define TESS_TABLE_MAX_CHUNK_LEN (1024 * 1024)
+#define TESS_TABLE_CHUNK_HEADER 8
 
 /* What a key column holds; every key takes an 8-byte slot in a record. */
 typedef enum TessTableKeyKind
@@ -63,6 +78,20 @@ typedef struct TessTableKey
 	const TessRowMask *prepared;
 } TessTableKey;
 
+/*
+ * A table as this process sees it: the index, and the chunks by number.
+ * index is NULL where a call uses only chunks (tess_table_append).
+ */
+typedef struct TessTableRef
+{
+	void	   *index;
+	Size		index_len;
+	/* nchunks addresses and lengths, chunk k at chunks[k]. */
+	void	   *const *chunks;
+	const Size *chunk_lens;
+	int			nchunks;
+} TessTableRef;
+
 /* Counts of a table, for planning and EXPLAIN; the caller sets struct_size. */
 typedef struct TessTableStats
 {
@@ -71,9 +100,9 @@ typedef struct TessTableStats
 	uint64		records;
 	/* Buckets of the table. */
 	uint64		buckets;
-	/* Bytes in use: the header, the records and the buckets. */
+	/* Bytes of the index in use: the header and the buckets. */
 	uint64		bytes_used;
-	/* Bytes of the region the table was created or grown over. */
+	/* Bytes of the index the table was created or regrown in. */
 	uint64		region_len;
 } TessTableStats;
 
@@ -82,8 +111,7 @@ typedef struct TessTableStats
 
 /*
  * A record as the table exposes it; the caller sets struct_size. keys and
- * payload point into the region and stay valid until the region moves or
- * the table grows.
+ * payload point into the record's chunk and stay valid as long as it.
  */
 typedef struct TessTableRecord
 {
@@ -112,19 +140,21 @@ typedef enum TessTableLayoutKind
 	TESS_TABLE_LAYOUT_STATS_SIZE = 4,
 	TESS_TABLE_LAYOUT_STATS_REGION_LEN_OFFSET = 5,
 	TESS_TABLE_LAYOUT_RECORD_SIZE = 6,
-	TESS_TABLE_LAYOUT_RECORD_PAYLOAD_OFFSET = 7
+	TESS_TABLE_LAYOUT_RECORD_PAYLOAD_OFFSET = 7,
+	TESS_TABLE_LAYOUT_REF_SIZE = 8,
+	TESS_TABLE_LAYOUT_REF_NCHUNKS_OFFSET = 9
 } TessTableLayoutKind;
 
-/* The region format the library writes and accepts; must equal the header's. */
+/* The table format the library writes and accepts; must equal the header's. */
 extern uint32 tess_table_format_version(void);
 
 /* The size or offset for a kind, or 0 for an unknown one. */
 extern Size tess_table_layout(TessTableLayoutKind kind);
 
 /*
- * The bytes a region needs for a table of nkeys keys of the given kinds,
- * a payload of payload_size bytes per record and capacity records: the
- * header, the records and the buckets, a multiple of 8.
+ * The bytes the index of a table of nkeys keys of the given kinds, a
+ * payload of payload_size bytes per record and capacity records needs:
+ * the header and the buckets, a multiple of 8.
  */
 extern TessStatusCode tess_table_size(int nkeys,
 									  const TessTableKeyKind *kinds,
@@ -134,11 +164,12 @@ extern TessStatusCode tess_table_size(int nkeys,
 									  TessStatus *status);
 
 /*
- * Create an empty table for capacity records in the len bytes at region,
- * a multiple of 8 of at least tess_table_size; all of them are used, so a
- * larger region holds more records.
+ * Create the index of an empty table for capacity records in the len
+ * bytes at index, a multiple of 8 of at least tess_table_size. A table
+ * holds more records than its capacity, in more chunks, but a lookup
+ * grows slower past it; tess_table_regrow makes a larger index.
  */
-extern TessStatusCode tess_table_create(void *region,
+extern TessStatusCode tess_table_create(void *index,
 										Size len,
 										int nkeys,
 										const TessTableKeyKind *kinds,
@@ -146,28 +177,33 @@ extern TessStatusCode tess_table_create(void *region,
 										uint64 capacity,
 										TessStatus *status);
 
-/* Check that the len bytes at region hold a table of this format. */
-extern TessStatusCode tess_table_attach(const void *region,
-										Size len,
+/* Check that table is a table of this format. */
+extern TessStatusCode tess_table_attach(const TessTableRef *table,
 										TessStatus *status);
 
 /* The counts of the table as of now. */
-extern TessStatusCode tess_table_stats(const void *region,
-									   Size len,
+extern TessStatusCode tess_table_stats(const TessTableRef *table,
 									   TessTableStats *stats,
 									   TessStatus *status);
 
+/* Make the len bytes at base, aligned to 8, an empty chunk. */
+extern TessStatusCode tess_table_chunk_init(void *base, Size len,
+											TessStatus *status);
+
 /*
- * Insert the rows of pending as new records, in row order, until the
- * table has no room: each row inserted leaves pending and gets the offset
- * of its record in offsets (one slot per row of the batch); rows still
- * pending need a larger region. hashes has one hash per row; keys are the
- * table's nkeys keys; payload is the payload of every row one after
- * another (payload_size bytes each, as the table was created), or NULL
- * for zeros. Equal keys make separate records.
+ * Append the rows of pending as records to chunk `chunk` of table, in row
+ * order, as long as whole records fit: each row appended leaves pending
+ * and gets the reference of its record in offsets (one slot per row of
+ * the batch); rows still pending need another chunk. hashes has one hash
+ * per row; keys are the table's nkeys keys, of its kinds; payload is the
+ * payload of every row one after another (payload_size bytes each, as
+ * the table has), or NULL for zeros. The index is not read, so a shared
+ * build appends before there is one; the records are not found until
+ * linked. The caller is the chunk's one writer.
  */
-extern TessStatusCode tess_table_insert(void *region,
-										Size len,
+extern TessStatusCode tess_table_append(const TessTableRef *table,
+										int chunk,
+										Size payload_size,
 										const uint32 *hashes,
 										int nkeys,
 										const TessTableKey *keys,
@@ -177,14 +213,40 @@ extern TessStatusCode tess_table_insert(void *region,
 										TessStatus *status);
 
 /*
+ * Link the records of chunk `chunk` from byte *from on into the buckets
+ * and move *from past them; *linked (unless NULL) receives how many.
+ * *from starts at TESS_TABLE_CHUNK_HEADER. Equal keys make separate
+ * records. Several processes may link chunks of their own at once.
+ */
+extern TessStatusCode tess_table_link(const TessTableRef *table,
+									  int chunk,
+									  Size *from,
+									  uint64 *linked,
+									  TessStatus *status);
+
+/*
+ * As tess_table_link, but each record right after one with the same keys
+ * when the table holds one, so that a key's records lie next to each
+ * other in its chain and tess_table_next_in_group steps through them;
+ * *duplicates (unless NULL) receives how many linked records had keys
+ * the table held already. A lookup per record, and one writer: not for a
+ * table several processes build at once.
+ */
+extern TessStatusCode tess_table_link_grouped(const TessTableRef *table,
+											  int chunk,
+											  Size *from,
+											  uint64 *linked,
+											  uint64 *duplicates,
+											  TessStatus *status);
+
+/*
  * Find the first record of its chain with the hash, NULL bits and keys of
  * each row of rows: matches[row] receives its offset and found, a mask
  * this call fills whole, the rows that have one. The other records with
  * the same keys follow through tess_table_next_match, or
- * tess_table_next_in_group in a table filled by grouped insertion.
+ * tess_table_next_in_group in a table linked by tess_table_link_grouped.
  */
-extern TessStatusCode tess_table_probe(const void *region,
-									   Size len,
+extern TessStatusCode tess_table_probe(const TessTableRef *table,
 									   const uint32 *hashes,
 									   int nkeys,
 									   const TessTableKey *keys,
@@ -199,8 +261,7 @@ extern TessStatusCode tess_table_probe(const void *region,
  * same hash, NULL bits and keys; found receives the rows that have one,
  * and the others keep their offset.
  */
-extern TessStatusCode tess_table_next_match(const void *region,
-											Size len,
+extern TessStatusCode tess_table_next_match(const TessTableRef *table,
 											uint32 *offsets,
 											const TessRowMask *rows,
 											TessRowMask *found,
@@ -213,8 +274,7 @@ extern TessStatusCode tess_table_next_match(const void *region,
  * check of the header for the batch. at + 8 must be within the payload;
  * rows outside rows keep their values.
  */
-extern TessStatusCode tess_table_gather(const void *region,
-										Size len,
+extern TessStatusCode tess_table_gather(const TessTableRef *table,
 										const uint32 *offsets,
 										const TessRowMask *rows,
 										Size at,
@@ -224,67 +284,46 @@ extern TessStatusCode tess_table_gather(const void *region,
 /*
  * For each row of rows, replace offsets[row] by the record right after it
  * in its chain when that one has the same hash, NULL bits and keys, and
- * put the row in found; the others keep their offset. In a table filled
- * by tess_table_insert_grouped this is the key's next record, in one step
+ * put the row in found; the others keep their offset. In a table linked
+ * by tess_table_link_grouped this is the key's next record, in one step
  * instead of tess_table_next_match's walk down the chain.
  */
-extern TessStatusCode tess_table_next_in_group(const void *region,
-											   Size len,
+extern TessStatusCode tess_table_next_in_group(const TessTableRef *table,
 											   uint32 *offsets,
 											   const TessRowMask *rows,
 											   TessRowMask *found,
 											   TessStatus *status);
 
 /* The record at an offset a call of this table returned. */
-extern TessStatusCode tess_table_record(const void *region,
-										Size len,
+extern TessStatusCode tess_table_record(const TessTableRef *table,
 										uint32 offset,
 										TessTableRecord *record,
 										TessStatus *status);
 
 /*
- * What one writer alone may do, with no other call over the region at the
+ * What one writer alone may do, with no other call over the table at the
  * same time: grouping resolves rows to the record of their keys and
- * changes payloads in place, output walks the records, and a full table
- * grows.
+ * changes payloads in place, output walks the records, and the index is
+ * made anew.
  */
 
 /*
  * Give each row of pending the record of its keys, creating one with a
- * zero payload where none exists, in row order, until the table has no
- * room for a new one: resolved rows leave pending and get their record
- * offsets in offsets; the rows whose record this call created form
- * inserted, a mask this call fills whole. Rows left pending need a larger
- * region.
+ * zero payload in chunk `chunk` where none exists, in row order, until the
+ * chunk is full or the records reach half the buckets: resolved rows
+ * leave pending and get their record references in offsets; the rows
+ * whose record this call created form inserted, a mask this call fills
+ * whole. Rows left pending need another chunk or, when the stats show
+ * records at half the buckets, a larger index (tess_table_regrow).
  */
-extern TessStatusCode tess_table_find_or_insert(void *region,
-												Size len,
+extern TessStatusCode tess_table_find_or_insert(const TessTableRef *table,
+												int chunk,
 												const uint32 *hashes,
 												int nkeys,
 												const TessTableKey *keys,
 												TessRowMask *pending,
 												uint32 *offsets,
 												TessRowMask *inserted,
-												TessStatus *status);
-
-/*
- * Insert the rows of pending as tess_table_insert does, but each right
- * after a record with the same keys when the table holds one, so that a
- * key's records lie next to each other and tess_table_next_in_group steps
- * through them; duplicates, a mask this call fills whole, receives the
- * rows whose keys were there already, from an earlier call or an earlier
- * row. A lookup per row, and one writer: not for a table several
- * processes build at once.
- */
-extern TessStatusCode tess_table_insert_grouped(void *region,
-												Size len,
-												const uint32 *hashes,
-												int nkeys,
-												const TessTableKey *keys,
-												const uint8 *payload,
-												TessRowMask *pending,
-												uint32 *offsets,
-												TessRowMask *duplicates,
 												TessStatus *status);
 
 /* How tess_table_accumulate folds a row into an aggregate state. */
@@ -313,8 +352,7 @@ typedef enum TessTableAccumulate
  * readiness) is NULL for count(*). Both words are 8-byte aligned within
  * the payload. One writer, as for the other grouping calls.
  */
-extern TessStatusCode tess_table_accumulate(void *region,
-											Size len,
+extern TessStatusCode tess_table_accumulate(const TessTableRef *table,
 											const uint32 *offsets,
 											const TessRowMask *rows,
 											TessTableAccumulate op,
@@ -331,8 +369,7 @@ extern TessStatusCode tess_table_accumulate(void *region,
  * makes it) and whether it is NULL into isnull[row]; rows outside rows
  * keep their values.
  */
-extern TessStatusCode tess_table_gather_key(const void *region,
-											Size len,
+extern TessStatusCode tess_table_gather_key(const TessTableRef *table,
 											const uint32 *offsets,
 											const TessRowMask *rows,
 											int key,
@@ -344,7 +381,7 @@ extern TessStatusCode tess_table_gather_key(const void *region,
  * A Bloom filter of a table's records, which a join checks a batch of
  * probe rows against before it looks them up: a row the filter rejects
  * has no record with its hash. The filter is a buffer of words the caller
- * owns, a power of two of them, with no address inside, like the region.
+ * owns, a power of two of them, with no address inside, like the index.
  * Each hash sets four bits of one word; at 16 bits per record about one
  * absent key in a hundred gets through. See docs/table.md.
  */
@@ -355,9 +392,9 @@ extern TessStatusCode tess_table_bloom_words(uint64 records, Size *nwords,
 
 /*
  * Clear the nwords words at words and set the bits of every record of the
- * table: no insertion may run at the same time, as for a walk.
+ * table's chunks: no append may run at the same time, as for a walk.
  */
-extern TessStatusCode tess_table_bloom(const void *region, Size len,
+extern TessStatusCode tess_table_bloom(const TessTableRef *table,
 									   uint64 *words, Size nwords,
 									   TessStatus *status);
 
@@ -371,37 +408,6 @@ extern TessStatusCode tess_bloom_probe(const uint64 *words, Size nwords,
 									   const TessRowMask *rows,
 									   TessRowMask *found,
 									   TessStatus *status);
-
-/*
- * A shared build (plan item 5.5) keeps the rows a full table had no room
- * for in staging buffers of the participant's, as the table's records,
- * and adds them once the table has grown. tess_table_stage writes the
- * pending rows as records into the nwords words at buffer from byte *used
- * on, as long as whole records fit, and moves *used past them; written
- * rows leave pending, and the rest wait for another buffer. keys, hashes
- * and payload are as for tess_table_insert.
- */
-extern TessStatusCode tess_table_stage(const void *region, Size len,
-									   uint64 *buffer, Size nwords,
-									   Size *used,
-									   const uint32 *hashes,
-									   int nkeys,
-									   const TessTableKey *keys,
-									   const uint8 *payload,
-									   TessRowMask *pending,
-									   TessStatus *status);
-
-/*
- * Add the records of the first used bytes of buffer, from byte *consumed
- * on, as long as the table has room, and move *consumed past them: they
- * are counted, copied in and published as tess_table_insert does its
- * rows, so it may run with other insertions.
- */
-extern TessStatusCode tess_table_insert_staged(void *region, Size len,
-											   const uint64 *buffer,
-											   Size used,
-											   Size *consumed,
-											   TessStatus *status);
 
 /*
  * A shared Bloom filter, next to a shared table: a state word (none,
@@ -422,9 +428,9 @@ extern TessStatusCode tess_bloom_shared_init(uint64 *words, Size nwords,
 /*
  * Build the shared filter from the table's records unless another
  * participant has claimed it: *built is true for the one that did. No
- * insertion may run at the same time.
+ * append may run at the same time.
  */
-extern TessStatusCode tess_table_try_build_bloom(const void *region, Size len,
+extern TessStatusCode tess_table_try_build_bloom(const TessTableRef *table,
 												 uint64 *words, Size nwords,
 												 bool *built,
 												 TessStatus *status);
@@ -449,13 +455,11 @@ extern TessStatusCode tess_bloom_shared_probe(uint64 *words, Size nwords,
  * error. The phases, in the barrier's numbering, and the actions follow;
  * see docs/table.md.
  */
-#define TESS_BUILD_ELECT		0
-#define TESS_BUILD_ALLOCATE		1
-#define TESS_BUILD_BUILD		2
-#define TESS_BUILD_GROW			3
-#define TESS_BUILD_LINK			4
-#define TESS_BUILD_PROBE		5
-#define TESS_BUILD_FREE			6
+#define TESS_BUILD_BUILD		0
+#define TESS_BUILD_SIZE			1
+#define TESS_BUILD_LINK			2
+#define TESS_BUILD_PROBE		3
+#define TESS_BUILD_FREE			4
 
 typedef enum TessBuildAction
 {
@@ -463,24 +467,28 @@ typedef enum TessBuildAction
 	TESS_BUILD_ATTACH = 1,
 	/* BarrierArriveAndWait, and pass whether it elected this participant. */
 	TESS_BUILD_ARRIVE_AND_WAIT = 2,
-	/* Create the table sized by the estimate and clear the filter. */
-	TESS_BUILD_DO_ALLOCATE = 3,
-	/* Insert this participant's share, stage the rest, report both. */
-	TESS_BUILD_DO_BUILD = 4,
-	/* Copy the table into a region for every record and grow it. */
-	TESS_BUILD_DO_GROW = 5,
-	/* Add this participant's staged rows. */
-	TESS_BUILD_DO_LINK = 6,
+	/*
+	 * Append this participant's share of the inner side to chunks of its
+	 * own, numbered by tess_build_take_chunk, and report the records.
+	 */
+	TESS_BUILD_DO_BUILD = 3,
+	/*
+	 * Create the index for every record appended, clear the filter and
+	 * publish the chunks' directory, as the elected one.
+	 */
+	TESS_BUILD_DO_SIZE = 4,
+	/* Link this participant's own chunks into the index. */
+	TESS_BUILD_DO_LINK = 5,
 	/* Probe; step again once done. */
-	TESS_BUILD_DO_PROBE = 7,
+	TESS_BUILD_DO_PROBE = 6,
 	/* BarrierArriveAndDetach, and pass whether it was the last. */
-	TESS_BUILD_ARRIVE_AND_DETACH = 8,
+	TESS_BUILD_ARRIVE_AND_DETACH = 7,
 	/* BarrierDetach. */
-	TESS_BUILD_DETACH = 9,
+	TESS_BUILD_DETACH = 8,
 	/* Free the table, as the last to leave. */
-	TESS_BUILD_DO_FREE = 10,
+	TESS_BUILD_DO_FREE = 9,
 	/* Nothing is left to do. */
-	TESS_BUILD_DONE = 11
+	TESS_BUILD_DONE = 10
 } TessBuildAction;
 
 /* A participant's own state: zeroed before its first step. */
@@ -491,24 +499,32 @@ typedef struct TessBuildParticipant
 	uint32		elected;
 } TessBuildParticipant;
 
-/* The words of a build's shared counters: rows staged, NULL columns. */
-#define TESS_BUILD_COUNTER_WORDS 2
+/*
+ * The words of a build's shared counters: records appended, NULL columns,
+ * chunks numbered.
+ */
+#define TESS_BUILD_COUNTER_WORDS 3
 
 /* Clear a build's counters, before any participant attaches. */
 extern TessStatusCode tess_build_counters_init(uint64 *counters,
 											   TessStatus *status);
 
 /*
- * Add what a participant's build staged and the payload words it saw a
- * NULL in, before it arrives at the barrier.
+ * Add the records a participant's build appended and the payload words it
+ * saw a NULL in, before it arrives at the barrier.
  */
-extern TessStatusCode tess_build_report(uint64 *counters, uint64 staged,
+extern TessStatusCode tess_build_report(uint64 *counters, uint64 records,
 										uint64 null_columns,
 										TessStatus *status);
 
+/* The number of a new chunk, unique among the build's participants. */
+extern TessStatusCode tess_build_take_chunk(uint64 *counters, uint64 *number,
+											TessStatus *status);
+
 /* The totals of every participant, once the build is over. */
-extern TessStatusCode tess_build_totals(uint64 *counters, uint64 *staged,
+extern TessStatusCode tess_build_totals(uint64 *counters, uint64 *records,
 										uint64 *null_columns,
+										uint64 *chunks,
 										TessStatus *status);
 
 /*
@@ -522,23 +538,21 @@ extern TessStatusCode tess_build_step(TessBuildParticipant *participant,
 									  uint32 *action, TessStatus *status);
 
 /*
- * The payload of the record at an offset, to change in place: payload_size
- * bytes valid until the region moves or the table grows.
+ * The payload of the record at a reference, to change in place:
+ * payload_size bytes valid as long as the record's chunk.
  */
-extern TessStatusCode tess_table_payload(void *region,
-										 Size len,
+extern TessStatusCode tess_table_payload(const TessTableRef *table,
 										 uint32 offset,
 										 uint8 **payload,
 										 TessStatus *status);
 
 /*
- * Visit the records from the cursor on, in insertion order, up to capacity
- * of them: their offsets fill offsets, count receives how many, and the
- * cursor moves past them. The caller starts the cursor at 0; a count of 0
- * means the walk is over.
+ * Visit the records from the cursor on, chunk by chunk in the order they
+ * were appended, up to capacity of them: their references fill offsets,
+ * count receives how many, and the cursor moves past them. The caller
+ * starts the cursor at 0; a count of 0 means the walk is over.
  */
-extern TessStatusCode tess_table_scan(void *region,
-									  Size len,
+extern TessStatusCode tess_table_scan(const TessTableRef *table,
 									  uint64 *cursor,
 									  uint32 *offsets,
 									  int capacity,
@@ -546,14 +560,15 @@ extern TessStatusCode tess_table_scan(void *region,
 									  TessStatus *status);
 
 /*
- * Grow the table to the len bytes at region, after the caller made the
- * region that large with its used bytes intact (repalloc, or a copy into
- * a new region): the buckets are rebuilt at the new end for the records
- * that could now fit, and records and their offsets stay as they were.
- * len is a multiple of 8 of at least the old length.
+ * Move the table to a new index of len bytes at index, for capacity
+ * records (tess_table_size), over the same chunks: the buckets are filled
+ * anew from the records, which stay where they are, and the old index is
+ * no longer the table's. A capacity with fewer buckets is refused.
  */
-extern TessStatusCode tess_table_grow(void *region,
-									  Size len,
-									  TessStatus *status);
+extern TessStatusCode tess_table_regrow(const TessTableRef *table,
+										void *index,
+										Size len,
+										uint64 capacity,
+										TessStatus *status);
 
 #endif							/* TESSERA_TABLE_H */

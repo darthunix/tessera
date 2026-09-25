@@ -127,8 +127,15 @@ typedef struct TessAggState
 	TessTableKeyKind kinds[TESS_TABLE_MAX_KEYS];
 	const TessKernelOps *kernels;
 	MemoryContext table_context;
-	void	   *region;
-	Size		region_len;
+	/*
+	 * The table: its index and chunks, the chunks' bases and lengths with
+	 * room for chunk_slots of them, and the bytes they take together.
+	 */
+	TessTableRef table;
+	void	  **chunk_bases;
+	Size	   *chunk_lens;
+	int			chunk_slots;
+	Size		table_bytes;
 	Size		peak_memory;
 	uint64		groups_estimate;
 	uint64		grows;
@@ -1024,10 +1031,30 @@ check(TessAggState *state, TessStatusCode code)
 static void
 note_memory(TessAggState *state)
 {
-	state->peak_memory = Max(state->peak_memory, state->region_len);
+	state->peak_memory = Max(state->peak_memory, state->table_bytes);
 }
 
-/* An empty table of groups, sized for the planner's estimate. */
+/*
+ * The groups' records lie in chunks: the first of AGG_FIRST_CHUNK bytes,
+ * so that a few groups take little, the others of the most a chunk may
+ * have. Records never move; when they reach half the buckets, only the
+ * index is made anew, larger.
+ */
+#define AGG_FIRST_CHUNK (64 * 1024)
+
+/* An index for capacity groups in the table's memory. */
+static void *
+new_index(TessAggState *state, uint64 capacity, Size *size)
+{
+	Size		payload_size = sizeof(uint64) * (1 + state->nvalues);
+
+	check(state, state->kernels->table_size(state->nkeys, state->kinds,
+											payload_size, capacity, size,
+											&state->status));
+	return MemoryContextAllocExtended(state->table_context, *size, MCXT_ALLOC_HUGE);
+}
+
+/* An empty table of groups, its index sized for the planner's estimate. */
 static void
 create_table(TessAggState *state)
 {
@@ -1037,37 +1064,75 @@ create_table(TessAggState *state)
 
 	MemoryContextReset(state->table_context);
 	state->capacity = 0;
-	check(state, state->kernels->table_size(state->nkeys, state->kinds,
-											payload_size, capacity, &size,
-											&state->status));
-	state->region = MemoryContextAllocExtended(state->table_context, size,
-											   MCXT_ALLOC_HUGE | MCXT_ALLOC_ZERO);
-	state->region_len = size;
-	check(state, state->kernels->table_create(state->region, size, state->nkeys,
+	state->chunk_slots = 16;
+	state->chunk_bases = MemoryContextAlloc(state->table_context,
+											sizeof(void *) * state->chunk_slots);
+	state->chunk_lens = MemoryContextAlloc(state->table_context,
+										   sizeof(Size) * state->chunk_slots);
+	state->table.index = new_index(state, capacity, &size);
+	state->table.index_len = size;
+	state->table.chunks = state->chunk_bases;
+	state->table.chunk_lens = state->chunk_lens;
+	state->table.nchunks = 0;
+	state->table_bytes = size;
+	check(state, state->kernels->table_create(state->table.index, size, state->nkeys,
 											  state->kinds, payload_size,
 											  capacity, &state->status));
 	note_memory(state);
 }
 
-/*
- * Twice the region: repalloc keeps the records where they are, and the
- * table rebuilds its buckets at the new end.
- */
+/* Another chunk of records, the last one being full. */
 static void
-grow_table(TessAggState *state)
+add_chunk(TessAggState *state)
 {
-	Size		len = state->region_len;
+	int			chunk = state->table.nchunks;
+	Size		len = chunk == 0 ? AGG_FIRST_CHUNK : TESS_TABLE_MAX_CHUNK_LEN;
+	void	   *base;
 
-	if (len > MaxAllocHugeSize / 2)
+	if (chunk == TESS_TABLE_MAX_CHUNKS)
 		ereport(ERROR,
 				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
-				 errmsg("TessAgg group table cannot grow past %zu bytes", len)));
-	state->region = repalloc_huge(state->region, len * 2);
-	state->region_len = len * 2;
-	check(state, state->kernels->table_grow(state->region, state->region_len,
-											&state->status));
-	state->grows++;
+				 errmsg("TessAgg group table cannot hold more than %d chunks",
+						TESS_TABLE_MAX_CHUNKS)));
+	if (chunk == state->chunk_slots)
+	{
+		state->chunk_slots *= 2;
+		state->chunk_bases = repalloc(state->chunk_bases,
+									  sizeof(void *) * state->chunk_slots);
+		state->chunk_lens = repalloc(state->chunk_lens,
+									 sizeof(Size) * state->chunk_slots);
+		state->table.chunks = state->chunk_bases;
+		state->table.chunk_lens = state->chunk_lens;
+	}
+	base = MemoryContextAlloc(state->table_context, len);
+	check(state, state->kernels->table_chunk_init(base, len, &state->status));
+	state->chunk_bases[chunk] = base;
+	state->chunk_lens[chunk] = len;
+	state->table.nchunks++;
+	state->table_bytes += len;
 	note_memory(state);
+}
+
+/*
+ * An index for twice the groups: the buckets are filled anew from the
+ * records, which stay where they are, and the old index is freed.
+ */
+static void
+regrow_table(TessAggState *state, uint64 groups)
+{
+	void	   *old = state->table.index;
+	Size		size;
+	void	   *index = new_index(state, groups * 2, &size);
+
+	check(state, state->kernels->table_regrow(&state->table, index, size,
+											  groups * 2, &state->status));
+	state->table_bytes = state->table_bytes - state->table.index_len + size;
+	state->peak_memory = Max(state->peak_memory, state->table_bytes +
+							 state->table.index_len);
+	state->table.index = index;
+	state->table.index_len = size;
+	pfree(old);
+	state->grows++;
 }
 
 /* The buffers of a batch of nrows rows, in the table's memory. */
@@ -1102,7 +1167,8 @@ computed_column(TessAggState *state, TessBatch *batch, int computed,
 /*
  * One batch into the groups: its keys, hashed in key order with NULL as a
  * key of its own, give each row the record of its group, created where
- * none exists (the table grows when full), and each aggregate folds the
+ * none exists (in another chunk or a larger index when the table has no
+ * room), and each aggregate folds the
  * rows into the records' states. The batch is the projection's wrapper,
  * which computes the keys and the arguments.
  */
@@ -1144,10 +1210,14 @@ group_batch(TessAggState *state, TessBatch *batch)
 		state->table_keys[key].prepared = NULL;
 	}
 	memcpy(state->pending_bits, state->valid_bits, sizeof(uint64) * nwords);
+	if (state->table.nchunks == 0)
+		add_chunk(state);
 	for (;;)
 	{
-		check(state, state->kernels->table_find_or_insert(state->region,
-														  state->region_len,
+		TessTableStats stats = TESS_STRUCT_INITIALIZER(TessTableStats);
+
+		check(state, state->kernels->table_find_or_insert(&state->table,
+														  state->table.nchunks - 1,
 														  state->hashes,
 														  state->nkeys,
 														  state->table_keys,
@@ -1157,8 +1227,16 @@ group_batch(TessAggState *state, TessBatch *batch)
 														  &state->status));
 		if (tess_row_mask_count(&pending) == 0)
 			break;
-		/* The table is full: the rows left pending find room after growth. */
-		grow_table(state);
+		/*
+		 * The rows left pending find room in a larger index, when the
+		 * groups reached half the buckets, or else in another chunk.
+		 */
+		check(state, state->kernels->table_stats(&state->table, &stats,
+												 &state->status));
+		if (stats.records * 2 >= stats.buckets)
+			regrow_table(state, stats.records);
+		else
+			add_chunk(state);
 	}
 	for (int index = 0; index < state->nvalues; index++)
 	{
@@ -1169,8 +1247,7 @@ group_batch(TessAggState *state, TessBatch *batch)
 			computed_column(state, batch, value->computed,
 							TESS_COLUMN_FOR_PROJECTION, &column);
 		state->calls++;
-		check(state, state->kernels->table_accumulate(state->region,
-													  state->region_len,
+		check(state, state->kernels->table_accumulate(&state->table,
 													  state->offsets, &valid,
 													  value->accumulate,
 													  value->computed >= 0 ? &column : NULL,
@@ -1257,7 +1334,7 @@ next_groups(TessAggState *state)
 		int			count;
 		TessBatch  *batch;
 
-		check(state, state->kernels->table_scan(state->region, state->region_len,
+		check(state, state->kernels->table_scan(&state->table,
 												&state->cursor, state->walked,
 												AGG_GROUP_ROWS, &count,
 												&state->status));
@@ -1267,20 +1344,18 @@ next_groups(TessAggState *state)
 		all = count == 64 ? UINT64_MAX : (UINT64CONST(1) << count) - 1;
 		groups = (TessRowMask) {count, &all};
 		for (int key = 0; key < state->nkeys; key++)
-			check(state, state->kernels->table_gather_key(state->region,
-														  state->region_len,
+			check(state, state->kernels->table_gather_key(&state->table,
 														  state->walked, &groups,
 														  key, state->key_values[key],
 														  state->key_isnull[key],
 														  &state->status));
-		check(state, state->kernels->table_gather(state->region, state->region_len,
+		check(state, state->kernels->table_gather(&state->table,
 												  state->walked, &groups, 0,
 												  (Datum *) state->flag_words,
 												  &state->status));
 		tess_builder_reset(state->builder);
 		for (int index = 0; index < state->nvalues; index++)
-			check(state, state->kernels->table_gather(state->region,
-													  state->region_len,
+			check(state, state->kernels->table_gather(&state->table,
 													  state->walked, &groups,
 													  sizeof(uint64) * (1 + index),
 													  (Datum *) &state->state_words[index * AGG_GROUP_ROWS],
