@@ -3,7 +3,7 @@ PG_CONFIG ?= pg_config
 CARGO ?= cargo
 
 .PHONY: all clean install installcheck $(SUBDIRS) \
-	rust rust-release rust-check rust-clean
+	rust rust-release rust-check rust-loom rust-clean
 
 all: $(SUBDIRS)
 
@@ -41,6 +41,12 @@ rust-check:
 	$(CARGO) clippy --workspace --all-targets --locked -- -D warnings
 	$(CARGO) test --workspace --locked
 	$(CARGO) test --workspace --locked --release
+
+# The loom model of the hash table's concurrent protocol; a target
+# directory of its own, since --cfg loom rebuilds every crate.
+rust-loom:
+	RUSTFLAGS="--cfg loom" LOOM_MAX_PREEMPTIONS=3 CARGO_TARGET_DIR=target/loom \
+		$(CARGO) test -p tessera-kernels --lib --release --locked table::loom
 
 rust-clean:
 	$(CARGO) clean

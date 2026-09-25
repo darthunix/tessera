@@ -93,6 +93,8 @@ mod exclusive;
 mod header;
 mod keys;
 mod lanes;
+#[cfg(all(test, loom))]
+mod loom;
 mod record;
 mod region;
 

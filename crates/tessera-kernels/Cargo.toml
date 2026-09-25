@@ -10,5 +10,8 @@ publish.workspace = true
 anyhow.workspace = true
 tessera-core.workspace = true
 
+[target.'cfg(loom)'.dev-dependencies]
+loom = "0.7"
+
 [lints]
 workspace = true

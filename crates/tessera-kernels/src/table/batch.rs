@@ -111,6 +111,9 @@ fn insert_rows<R: Region, K: KeySource + ?Sized, const N: usize, const T: usize,
         let Some((start, count)) = access.reserve(wanted) else {
             break;
         };
+        // Counted before they are published, so that a probe that finds
+        // one of the records also sees a count that covers its chain.
+        access.count(count);
         let mut bits = selected;
         let mut done = 0;
         for slot in 0..count {
@@ -132,7 +135,6 @@ fn insert_rows<R: Region, K: KeySource + ?Sized, const N: usize, const T: usize,
             offsets[row] = offset;
             done |= 1 << bit;
         }
-        access.count(count);
         pending.intersect_word(index, !done)?;
         inserted += count;
         if count < wanted {

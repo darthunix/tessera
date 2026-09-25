@@ -206,11 +206,24 @@ then probes. An insertion reserves the room of a word's rows with one
 compare-and-swap on the end of the record area, writes each record in
 its reserved bytes and publishes it with a compare-and-swap of its
 bucket's head (release), which a probe reads with acquire; the record
-count follows. A published record never changes, except its payload
+count grows before the records are published, so that a probe that finds
+one also sees a count that covers its chain, whose length it checks
+against the count. A published record never changes, except its payload
 under the one writer. The same code runs over local memory, where the
-compare-and-swaps never fail. The loom models and the TLA+ specification
-of the build-barrier-probe protocol come with the parallel join (plan
-item 5.5).
+compare-and-swaps never fail.
+
+`make rust-loom` runs the table's own code over a model region of loom
+atomics (`crates/tessera-kernels/src/table/loom.rs`) with the orderings
+the real region uses: two and three threads inserting into one bucket,
+two records reserved at once per thread, a full table taking one record
+of two, and a probe that finds a record another thread is publishing and
+reads it whole. Every access to a record's bytes is announced to loom
+first, so a read not ordered after the writing is reported; a test with
+relaxed bucket heads checks that the model does report it. The model
+found that counting the records after publishing them let such a probe
+call a chain corrupt. The TLA+ specification of the
+build-barrier-probe protocol comes with the parallel join (plan item
+5.5).
 
 ## Ownership and errors
 
