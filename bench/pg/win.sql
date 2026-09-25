@@ -133,6 +133,15 @@ SELECT pg_temp.measure_pair('either',
 SELECT pg_temp.measure_pair('in_list',
     'SELECT count(*) FROM bench_narrow WHERE c1 % 10 IN (1, 3, 5, 7)',
     :repetitions);
+-- Conditional values: a CASE as an aggregate's argument, a third of the
+-- rows in its first branch; a CASE under a filter, half the rows each way.
+SELECT pg_temp.measure_pair('case_sum',
+    'SELECT sum(CASE WHEN c1 % 3 = 0 THEN c2 ELSE 0 END) FROM bench_narrow',
+    :repetitions);
+SELECT pg_temp.measure_pair('case_filter',
+    format('SELECT count(*) FROM bench_narrow WHERE CASE WHEN c1 < %s THEN c2 ELSE c3 END %% 2 = 0',
+           1000000 * :scale),
+    :repetitions);
 -- An integer column against a bigint constant: a cross-type comparison;
 -- half the rows pass.
 SELECT pg_temp.measure_pair('int4_bigint',
@@ -173,6 +182,8 @@ EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE on_tr
 EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE on_int4_bigint;
 EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE on_either;
 EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE on_in_list;
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE on_case_sum;
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE on_case_filter;
 SET tessera.enable = off;
 EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE off_nothing;
 EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE off_sparse;
@@ -192,5 +203,7 @@ EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE off_t
 EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE off_int4_bigint;
 EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE off_either;
 EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE off_in_list;
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE off_case_sum;
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE off_case_filter;
 \o
 DEALLOCATE ALL;
