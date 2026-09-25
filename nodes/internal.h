@@ -19,6 +19,7 @@
 
 /* Clauses (RestrictInfos) in the order the planner evaluates a plan's quals. */
 extern List *tess_order_clauses(PlannerInfo *root, List *rinfos);
+extern double tess_parallel_divisor(const Path *path);
 
 extern const TessNode tess_pack_node;
 extern const CustomScanMethods tess_pack_scan_methods;

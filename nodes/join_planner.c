@@ -245,9 +245,9 @@ target_supported(RelOptInfo *joinrel, RelOptInfo *innerrel, const JoinKeys *keys
  * the records.
  */
 static double
-table_bytes(Path *inner, int nkeys, int ninner)
+table_bytes(Path *inner, double inner_rows, int nkeys, int ninner)
 {
-	double		rows = Max(inner->rows, 1.0);
+	double		rows = Max(inner_rows, 1.0);
 	double		buckets = 1024;
 
 	while (buckets < 2 * rows)
@@ -275,6 +275,9 @@ make_join_path(PlannerInfo *root, RelOptInfo *joinrel, JoinType jointype,
 	Path	   *inner;
 
 	double		memory_limit = (double) get_hash_memory_limit();
+	/* A partial inner path's rows are one participant's share. */
+	double		inner_rows = shared ?
+		inner_path->rows * tess_parallel_divisor(inner_path) : inner_path->rows;
 
 	/* A shared table may take every participant's hash_mem, as the core's. */
 	if (shared)
@@ -282,7 +285,7 @@ make_join_path(PlannerInfo *root, RelOptInfo *joinrel, JoinType jointype,
 	initial_cost_hashjoin(root, &workspace, jointype, hashclauses,
 						  outer_path, inner_path, extra, shared);
 	if (workspace.numbatches > 1 ||
-		table_bytes(inner_path, keys->nkeys, ninner) > memory_limit)
+		table_bytes(inner_path, inner_rows, keys->nkeys, ninner) > memory_limit)
 		return NULL;
 	outer = tess_batch_input_path(root, outer_path);
 	inner = tess_batch_input_path(root, inner_path);
@@ -306,7 +309,7 @@ make_join_path(PlannerInfo *root, RelOptInfo *joinrel, JoinType jointype,
 									keys->residual, keys->filters);
 	config.node_data = (Node *) list_make3(keys->outer_kinds, keys->inner_kinds,
 										   list_make4_int(extra->inner_unique ? 1 : 0,
-														  (int) Min(inner_path->rows,
+														  (int) Min(inner_rows,
 																	(double) PG_INT32_MAX),
 														  (int) jointype,
 														  shared ? 1 : 0));

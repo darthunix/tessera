@@ -175,8 +175,8 @@ plain_heap_scan(PlannerInfo *root, const Path *path)
 }
 
 /* The core's get_parallel_divisor: the share of one participant. */
-static double
-parallel_divisor(const Path *path)
+double
+tess_parallel_divisor(const Path *path)
 {
 	double		divisor = path->parallel_workers;
 
@@ -212,7 +212,7 @@ heap_scan_rows(PlannerInfo *root, Path *path)
 	scan = tess_path_create(&config);
 	/* Every row of the relation comes out: the node evaluates no clause. */
 	if (path->parallel_workers > 0)
-		rows /= parallel_divisor(path);
+		rows /= tess_parallel_divisor(path);
 	scan->path.rows = clamp_row_est(rows);
 	return scan;
 }

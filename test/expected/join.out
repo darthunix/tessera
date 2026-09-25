@@ -1570,7 +1570,7 @@ SELECT join_property($$SELECT count(*) FROM jbig JOIN jgrow ON jbig.fk = jgrow.k
        join_property($$SELECT count(*) FROM jbig JOIN jgrow ON jbig.fk = jgrow.k$$, 'Buckets') AS buckets;
  overflow | buckets 
 ----------+---------
- 11667    | 65536
+ 1        | 65536
 (1 row)
 
 SET parallel_leader_participation = off;
