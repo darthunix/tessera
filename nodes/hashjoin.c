@@ -7,6 +7,7 @@
 #include "miscadmin.h"
 #include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
+#include "optimizer/optimizer.h"
 #include "utils/datum.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
@@ -175,6 +176,10 @@ typedef struct TessHashJoinState
 	bool		serving;
 	/* The residual join clauses over the pairs, or NULL; the scan tuple's layout. */
 	TessQual   *qual;
+	/* The targets computed over the pairs, or NULL; the batch published then. */
+	TessProjection *projection;
+	List	   *computed;
+	TessBatch  *published;
 	TessLayout	scan_layout;
 	/* Nothing is left to return. */
 	bool		done;
@@ -786,13 +791,16 @@ next_output(TessHashJoinState *state)
 static TupleTableSlot *
 exec_batches(TessHashJoinState *state)
 {
+	/* Releasing a projection's wrapper forgets the pairs, which stay the node's. */
 	tess_output_release(state->output);
 	if (!next_output(state))
 	{
 		state->done = true;
 		return NULL;
 	}
-	return tess_output_publish(state->output, &state->batch);
+	state->published = state->projection == NULL ? &state->batch :
+		tess_projection_wrap(state->projection, &state->batch);
+	return tess_output_publish(state->output, state->published);
 }
 
 /* Row mode: the column of every slot attribute, for the whole round. */
@@ -806,8 +814,10 @@ fetch_columns(TessHashJoinState *state)
 		TessDatumColumn *column = &state->columns[attribute];
 
 		*column = (TessDatumColumn) TESS_STRUCT_INITIALIZER(TessDatumColumn);
-		join_get_column(&state->batch, tess_layout_column(&state->layout, attribute),
-						&state->batch.rows, TESS_COLUMN_FOR_PROJECTION, column);
+		state->published->ops->get_datum_column(state->published,
+												tess_layout_column(&state->layout, attribute),
+												&state->published->rows,
+												TESS_COLUMN_FOR_PROJECTION, column);
 		if (column->values == NULL || column->isnull == NULL ||
 			column->nrows != state->batch.rows.nrows)
 			elog(ERROR, "Tessera batch returned an invalid column");
@@ -826,11 +836,17 @@ exec_rows(TessHashJoinState *state)
 	{
 		if (!state->serving)
 		{
+			/* The previous round's wrapper, and its computed values, go now. */
+			if (state->published != NULL && state->published != &state->batch)
+				state->published->ops->release(state->published);
+			state->published = NULL;
 			if (!next_output(state))
 			{
 				state->done = true;
 				return NULL;
 			}
+			state->published = state->projection == NULL ? &state->batch :
+				tess_projection_wrap(state->projection, &state->batch);
 			fetch_columns(state);
 			state->next_row = tess_row_mask_next(&state->batch.rows, -1);
 			state->serving = true;
@@ -885,6 +901,17 @@ send_requests(TessHashJoinState *state)
 		for (int attribute = 0; attribute < natts; attribute++)
 			needed = bms_add_member(needed,
 									tess_layout_column(&state->layout, attribute));
+	}
+	/* A computed column is the node's: the pairs give the columns it reads. */
+	foreach_node(TargetEntry, entry, state->computed)
+	{
+		int			target = state->ncolumns + foreach_current_index(entry);
+
+		if (!bms_is_member(target, needed))
+			continue;
+		needed = bms_del_member(needed, target);
+		foreach_node(Var, var, pull_var_clause((Node *) entry->expr, 0))
+			needed = bms_add_member(needed, var->varattno - 1);
 	}
 	state->npayload = 0;
 	while ((column = bms_next_member(needed, column)) >= 0)
@@ -987,7 +1014,7 @@ join_begin(CustomScanState *css, EState *estate, int eflags)
 	tess_plan_get_info(cscan, &info);
 	if (info.node != &tess_hash_join_node || info.nchildren != 2 ||
 		info.child_names[0] == NULL || info.child_names[1] == NULL ||
-		info.computed != NIL || cscan->custom_scan_tlist == NIL)
+		cscan->custom_scan_tlist == NIL)
 		elog(ERROR, "TessHashJoin received a foreign plan");
 	state->kernels = tess_runtime_kernels();
 	if (state->kernels == NULL)
@@ -1042,6 +1069,21 @@ join_begin(CustomScanState *css, EState *estate, int eflags)
 		qual.scan_slot = css->ss.ss_ScanTupleSlot;
 		qual.scan_tuple = &state->scan_layout;
 		state->qual = tess_qual_create(&qual);
+	}
+	if (info.computed != NIL)
+	{
+		TessProjectionConfig projection = TESS_STRUCT_INITIALIZER(TessProjectionConfig);
+
+		/* Computed columns follow the scan tuple's, as for TessFilter. */
+		projection.parent_context = estate->es_query_cxt;
+		projection.parent = &css->ss.ps;
+		projection.econtext = css->ss.ps.ps_ExprContext;
+		projection.scan_slot = css->ss.ss_ScanTupleSlot;
+		projection.scan_tuple = &state->scan_layout;
+		projection.base_columns = state->ncolumns;
+		projection.computed = info.computed;
+		state->projection = tess_projection_create(&projection);
+		state->computed = info.computed;
 	}
 	state->status = (TessStatus) TESS_STRUCT_INITIALIZER(TessStatus);
 	state->batch = (TessBatch) {
@@ -1136,6 +1178,9 @@ join_rescan(CustomScanState *css)
 
 	tess_output_clear(state->output);
 	ExecClearTuple(css->ss.ps.ps_ResultTupleSlot);
+	if (state->projection != NULL)
+		tess_projection_reset(state->projection);
+	state->published = NULL;
 	/* The rescan forgets the outer batch with the child's other state. */
 	state->outer_batch = NULL;
 	state->round_open = false;

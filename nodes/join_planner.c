@@ -268,6 +268,8 @@ make_join_path(PlannerInfo *root, RelOptInfo *joinrel,
 	config.methods = &join_path_methods;
 	config.node = &tess_hash_join_node;
 	config.children = list_make2(outer, inner);
+	/* A target above the join becomes the node's, computed over the pairs. */
+	config.flags = CUSTOMPATH_SUPPORT_PROJECTION;
 	config.expressions = list_make4(keys->clauses, keys->outer, keys->inner,
 									keys->residual);
 	config.node_data = (Node *) list_make3(keys->outer_kinds, keys->inner_kinds,
@@ -411,8 +413,18 @@ join_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 	outer_relids = outer.path->parent->relids;
 	for (int side = 0; side < 2; side++)
 	{
-		List	   *wanted = list_copy(tlist);
+		List	   *wanted = NIL;
 
+		/*
+		 * The join's columns: the targets above read them, and PostgreSQL
+		 * plans the node without a target list when it puts a projection
+		 * into the node's plan afterwards. The targets' own columns too,
+		 * when an expression target came down with the path.
+		 */
+		foreach_node(Var, var, pull_var_clause((Node *) rel->reltarget->exprs, 0))
+			wanted = lappend(wanted, makeTargetEntry((Expr *) var, 0, NULL, true));
+		foreach_node(Var, var, pull_var_clause((Node *) tlist, 0))
+			wanted = lappend(wanted, makeTargetEntry((Expr *) var, 0, NULL, true));
 		foreach_node(Var, key, side == 0 ? outer_keys : inner_keys)
 			wanted = lappend(wanted, makeTargetEntry((Expr *) key, 0, NULL, true));
 		/* The residual clauses' columns, which the qual refers to. */
@@ -423,7 +435,7 @@ join_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 			Var		   *var = (Var *) entry->expr;
 
 			if (!IsA(var, Var))
-				elog(ERROR, "TessHashJoin expected plain columns as its targets");
+				elog(ERROR, "TessHashJoin expected columns in its scan tuple");
 			if (bms_is_member(var->varno, outer_relids) != (side == 0) ||
 				scan_has(scan, var))
 				continue;

@@ -119,6 +119,18 @@ SELECT join_same($$SELECT jf.v, jdup.w FROM jf JOIN jdup ON jf.fk = jdup.k AND j
 SELECT join_same($$SELECT jf.v, jd.label FROM jf JOIN jd ON jf.fk = jd.id AND jf.note = jd.label$$);
 SELECT join_same($$SELECT jsmall.k, (SELECT count(*) FROM jf JOIN jdup ON jf.fk = jdup.k AND jf.v - jdup.w > jsmall.k) FROM jsmall$$);
 
+-- Targets above the join are the node's: columns in another order than
+-- the join's, which needs no Result under an aggregate, and expressions
+-- over both sides, computed over the pairs, as rows, under a sort, with
+-- rounds and a residual clause.
+EXPLAIN (COSTS OFF) SELECT sum(jdup.w), count(jf.m), sum(jf.m) FROM jf JOIN jdup ON jf.fk = jdup.k;
+SELECT join_same($$SELECT sum(jdup.w), count(jf.m), sum(jf.m) FROM jf JOIN jdup ON jf.fk = jdup.k$$);
+EXPLAIN (COSTS OFF, VERBOSE) SELECT jf.v + jd.id, jd.label || jf.note FROM jf JOIN jd ON jf.fk = jd.id;
+SELECT join_same($$SELECT jf.v + jd.id, jd.label || jf.note FROM jf JOIN jd ON jf.fk = jd.id$$);
+SELECT jf.v * 1000 + jd.id AS s FROM jf JOIN jd ON jf.fk = jd.id ORDER BY s DESC LIMIT 3;
+SELECT join_same($$SELECT jf.v - jdup.w, jdup.t FROM jf JOIN jdup ON jf.fk = jdup.k AND jf.v > jdup.w$$);
+SELECT join_same($$SELECT sum(jf.v - jdup.w), count(*) FROM jf JOIN jdup ON jf.fk = jdup.k$$);
+
 -- A side of fewer than 64 rows, an empty side, a join over a join.
 SELECT join_same($$SELECT jsmall.s, jd.label FROM jsmall JOIN jd ON jsmall.k = jd.id$$);
 SELECT join_same($$SELECT jf.v, jempty.e FROM jf JOIN jempty ON jf.fk = jempty.k$$);

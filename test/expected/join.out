@@ -374,6 +374,64 @@ SELECT join_same($$SELECT jsmall.k, (SELECT count(*) FROM jf JOIN jdup ON jf.fk 
  10 rows, hash 509ba6b74dc0068e6ae5ca68a0920629
 (1 row)
 
+-- Targets above the join are the node's: columns in another order than
+-- the join's, which needs no Result under an aggregate, and expressions
+-- over both sides, computed over the pairs, as rows, under a sort, with
+-- rounds and a residual clause.
+EXPLAIN (COSTS OFF) SELECT sum(jdup.w), count(jf.m), sum(jf.m) FROM jf JOIN jdup ON jf.fk = jdup.k;
+                   QUERY PLAN                   
+------------------------------------------------
+ Custom Scan (TessAgg)
+   ->  Custom Scan (TessHashJoin)
+         Hash Cond: (jf.fk = jdup.k)
+         ->  Custom Scan (TessHeapScan) on jf
+         ->  Custom Scan (TessHeapScan) on jdup
+(5 rows)
+
+SELECT join_same($$SELECT sum(jdup.w), count(jf.m), sum(jf.m) FROM jf JOIN jdup ON jf.fk = jdup.k$$);
+                   join_same                   
+-----------------------------------------------
+ 1 rows, hash 8f2e569f89910515a6918df4d5add8cb
+(1 row)
+
+EXPLAIN (COSTS OFF, VERBOSE) SELECT jf.v + jd.id, jd.label || jf.note FROM jf JOIN jd ON jf.fk = jd.id;
+                   QUERY PLAN                    
+-------------------------------------------------
+ Custom Scan (TessHashJoin)
+   Output: (jf.v + jd.id), (jd.label || jf.note)
+   Hash Cond: (jd.id = jf.fk)
+   ->  Custom Scan (TessHeapScan) on public.jf
+         Output: jf.v, jf.note, jf.fk
+   ->  Custom Scan (TessHeapScan) on public.jd
+         Output: jd.id, jd.label
+(7 rows)
+
+SELECT join_same($$SELECT jf.v + jd.id, jd.label || jf.note FROM jf JOIN jd ON jf.fk = jd.id$$);
+                    join_same                    
+-------------------------------------------------
+ 764 rows, hash aebedf05fde164ace76d0f6bc18cb60f
+(1 row)
+
+SELECT jf.v * 1000 + jd.id AS s FROM jf JOIN jd ON jf.fk = jd.id ORDER BY s DESC LIMIT 3;
+    s    
+---------
+ 1000251
+  998177
+  997140
+(3 rows)
+
+SELECT join_same($$SELECT jf.v - jdup.w, jdup.t FROM jf JOIN jdup ON jf.fk = jdup.k AND jf.v > jdup.w$$);
+                    join_same                    
+-------------------------------------------------
+ 324 rows, hash 682c47957ed0f21a6bd410788a8c4f08
+(1 row)
+
+SELECT join_same($$SELECT sum(jf.v - jdup.w), count(*) FROM jf JOIN jdup ON jf.fk = jdup.k$$);
+                   join_same                   
+-----------------------------------------------
+ 1 rows, hash 64d5543bfb79f4dc56378bf8af7063c4
+(1 row)
+
 -- A side of fewer than 64 rows, an empty side, a join over a join.
 SELECT join_same($$SELECT jsmall.s, jd.label FROM jsmall JOIN jd ON jsmall.k = jd.id$$);
                    join_same                    

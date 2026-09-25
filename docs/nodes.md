@@ -536,7 +536,15 @@ counters the participants share through `TessSharedStats`.
 The plan's scan tuple is the join's columns, the outer side's first, and
 the keys of both sides and the residual clauses' columns, which the
 clauses in `custom_exprs`, the keys' first and the residual ones after
-them, refer to; the node's targets are columns of it (`TESS_LAYOUT_PROJECTED`). The
+them, refer to. The path supports projection
+(`CUSTOMPATH_SUPPORT_PROJECTION`): a target above the join becomes the
+node's own, with no `Result` between the node and a batch parent. A
+target that is a column of the scan tuple maps to it, whatever the
+order, and an expression is a computed column, which `TessProjection`
+computes over the pairs, by chains where it can and row by row
+otherwise; the scan tuple takes its columns from the join's target,
+since PostgreSQL plans a projecting node without a target list
+(`TESS_LAYOUT_PROJECTED`). The
 plan data records each column's side and its column in that child's
 batches, each key's column and kind on each side, whether the inner side is unique and
 the planner's estimate of its rows.
@@ -606,7 +614,9 @@ sides, NULLs and text of the inner side; the keys as targets and no
 target at all; int8 keys past the int4 range and an int4 key against an
 int8 one both ways; two keys, with NULLs in the second, an int8 key next
 to an int4 one, three keys, and composite keys with duplicates under an
-aggregate and as rows; residual clauses over int4 columns of both sides
+aggregate and as rows; targets above the join in another order than the
+join's and expressions over both sides, as rows, under a sort, with
+rounds and a residual clause; residual clauses over int4 columns of both sides
 with NULLs, text, an OR over both sides, with rounds and compact
 batches, a text equality next to the key and a parameter of an outer
 query; three inner rows per key, duplicates on both sides
