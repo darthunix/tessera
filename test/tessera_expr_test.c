@@ -603,6 +603,20 @@ tessera_test_expr_values(PG_FUNCTION_ARGS)
 		tess_expr_bind(expr, batch, econtext, TESS_COLUMN_FOR_PROJECTION);
 		column = tess_expr_get_column(expr);
 		result &= check(135, row_is(column, tess_expr_non_nulls(expr), 0, false, 2));
+		/* A scalar argument decides every row left; a NULL one none. */
+		expr = tess_expr_compile_value(coalesce_of(a(), int4(0)), NULL, resolve, NULL);
+		tess_expr_bind(expr, batch, econtext, TESS_COLUMN_FOR_PROJECTION);
+		column = tess_expr_get_column(expr);
+		non_nulls = tess_expr_non_nulls(expr);
+		result &= check(138, row_is(column, non_nulls, 4, false, 0) &&
+			row_is(column, non_nulls, 3, false, 4) &&
+			tess_row_mask_count(non_nulls) == 70);
+		expr = tess_expr_compile_value(coalesce_of(a(), null_int4()), NULL, resolve, NULL);
+		tess_expr_bind(expr, batch, econtext, TESS_COLUMN_FOR_PROJECTION);
+		column = tess_expr_get_column(expr);
+		non_nulls = tess_expr_non_nulls(expr);
+		result &= check(139, row_is(column, non_nulls, 4, true, 0) &&
+			tess_row_mask_count(non_nulls) == 56);
 		/* NULLIF(a, 3); NULLIF(a, b / 2), equal everywhere. */
 		expr = tess_expr_compile_value(nullif_of(a(), int4(3)), NULL, resolve, NULL);
 		tess_expr_bind(expr, batch, econtext, TESS_COLUMN_FOR_PROJECTION);

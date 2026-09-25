@@ -1563,11 +1563,15 @@ choice_masks(Choice *choice, int nrows)
 	}
 }
 
+/* Below this many rows a partial word is copied row by row over its bits. */
+#define BLEND_SPARSE_ROWS 16
+
 /*
  * Copy the rows of mask from a branch's column into the expression's first
  * scratch set: the Datums, the NULL flags and the non-NULL bits. A full
- * word is copied by block, a partial one without a branch per row, as
- * finish_step writes, so that it vectorizes.
+ * word is copied by block; a word with few rows visits just those rows;
+ * any other word is written without a branch per row, as finish_step
+ * writes, so that it vectorizes.
  */
 static void
 blend(TessExpr *expr, const TessDatumColumn *column, const uint64 *mask)
@@ -1586,6 +1590,22 @@ blend(TessExpr *expr, const TessDatumColumn *column, const uint64 *mask)
 
 		if (take == 0)
 			continue;
+		if (pg_popcount64(take) < BLEND_SPARSE_ROWS)
+		{
+			uint64		rest = take;
+
+			while (rest != 0)
+			{
+				int			i = pg_rightmost_one_pos64(rest);
+
+				values[first + i] = column->values[first + i];
+				isnull[first + i] = column->isnull[first + i];
+				present |= (uint64) (!column->isnull[first + i]) << i;
+				rest &= rest - 1;
+			}
+			expr->bits[1][word] |= present;
+			continue;
+		}
 		if (count == 64 && take == ~UINT64CONST(0))
 		{
 			memcpy(values + first, column->values + first, sizeof(Datum) * 64);
@@ -1605,6 +1625,72 @@ blend(TessExpr *expr, const TessDatumColumn *column, const uint64 *mask)
 			present |= (uint64) (!column->isnull[first + i]) << i;
 		expr->bits[1][word] |= present & take;
 	}
+}
+
+/*
+ * A branch that is a scalar, such as ELSE 0: evaluated once and written
+ * straight into the rows of mask, with no column of its own.
+ */
+static void
+blend_scalar(TessExpr *expr, TessExpr *branch, const uint64 *mask)
+{
+	int			nrows = expr->rows->nrows;
+	int			nwords = tess_row_mask_word_count(nrows);
+	Datum	   *values = expr->values[1];
+	bool	   *isnull = expr->isnull[1];
+	bool		null;
+	Datum		value = ExecEvalExprSwitchContext(branch->scalar_value,
+												  branch->econtext, &null);
+
+	if (null)
+		value = (Datum) 0;
+	for (int word = 0; word < nwords; word++)
+	{
+		uint64		take = mask[word];
+		int			first = word * 64;
+		int			count = Min(64, nrows - first);
+
+		if (take == 0)
+			continue;
+		if (pg_popcount64(take) < BLEND_SPARSE_ROWS)
+		{
+			uint64		rest = take;
+
+			while (rest != 0)
+			{
+				int			i = pg_rightmost_one_pos64(rest);
+
+				values[first + i] = value;
+				isnull[first + i] = null;
+				rest &= rest - 1;
+			}
+		}
+		else
+		{
+			for (int i = 0; i < count; i++)
+			{
+				bool		chosen = ((take >> i) & 1) != 0;
+
+				values[first + i] = chosen ? value : values[first + i];
+				isnull[first + i] = chosen ? null : isnull[first + i];
+			}
+		}
+		if (!null)
+			expr->bits[1][word] |= take;
+	}
+}
+
+/* The rows of mask take branch: a scalar written in place, else its column. */
+static void
+take_branch(TessExpr *expr, TessExpr *branch, TessRowMask *part)
+{
+	if (branch->scalar_value != NULL && branch->nsteps == 0)
+	{
+		blend_scalar(expr, branch, part->bits);
+		return;
+	}
+	bind_selection(branch, part);
+	blend(expr, tess_expr_get_column(branch), part->bits);
 }
 
 /*
@@ -1646,8 +1732,7 @@ eval_choice(TessExpr *expr)
 				memcpy(part, take, sizeof(uint64) * nwords);
 				if (mask_empty(&choice->part))
 					continue;
-				bind_selection(choice->values[index], &choice->part);
-				blend(expr, tess_expr_get_column(choice->values[index]), part);
+				take_branch(expr, choice->values[index], &choice->part);
 				for (int word = 0; word < nwords; word++)
 					rest[word] &= ~part[word];
 			}
@@ -1656,7 +1741,21 @@ eval_choice(TessExpr *expr)
 			for (int index = 0; index < choice->nvalues && !mask_empty(&choice->rest); index++)
 			{
 				const TessDatumColumn *column;
+				TessExpr   *arg = choice->values[index];
 
+				/* A scalar argument decides every row left, unless NULL. */
+				if (arg->scalar_value != NULL && arg->nsteps == 0)
+				{
+					bool		null;
+
+					(void) ExecEvalExprSwitchContext(arg->scalar_value,
+													 arg->econtext, &null);
+					if (null)
+						continue;
+					blend_scalar(expr, arg, rest);
+					memset(rest, 0, sizeof(uint64) * nwords);
+					break;
+				}
 				memcpy(part, rest, sizeof(uint64) * nwords);
 				bind_selection(choice->values[index], &choice->part);
 				column = tess_expr_get_column(choice->values[index]);
