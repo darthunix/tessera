@@ -248,14 +248,20 @@ impl Header {
         let base = offset_of!(Header, kinds);
         kinds[..8].copy_from_slice(&region.load_u64_relaxed(base).to_ne_bytes());
         kinds[8..].copy_from_slice(&region.load_u64_relaxed(base + 8).to_ne_bytes());
+        // The count before the used mark: an insertion reserves room, then
+        // counts, so a count read with acquire is covered by any used mark
+        // read after it, and a header read while others insert still has
+        // no more records than used bytes.
+        let nrecords = region.load_u64(NRECORDS);
+        let chunk_used = region.load_u64(CHUNK_USED);
         Self {
             magic: region.load_u64_relaxed(offset_of!(Header, magic)),
             version: region.load_u32_relaxed(offset_of!(Header, version)),
             header_size: region.load_u32_relaxed(offset_of!(Header, header_size)),
             region_len: region.load_u64_relaxed(offset_of!(Header, region_len)),
             buckets_offset: region.load_u64_relaxed(offset_of!(Header, buckets_offset)),
-            chunk_used: region.load_u64(CHUNK_USED),
-            nrecords: region.load_u64(NRECORDS),
+            chunk_used,
+            nrecords,
             nbuckets: region.load_u32_relaxed(offset_of!(Header, nbuckets)),
             bucket_shift: region.load_u32_relaxed(offset_of!(Header, bucket_shift)),
             record_size: region.load_u32_relaxed(offset_of!(Header, record_size)),
