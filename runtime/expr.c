@@ -43,8 +43,9 @@ struct TessExpr
 	/* The predicate over the chain's result, when the expression is a filter. */
 	bool		filter;
 	Step		predicate;
-	/* The bound batch. */
+	/* The bound batch, and the selection computed over: its rows or a subset. */
 	TessBatch  *batch;
+	TessRowMask *rows;
 	ExprContext *econtext;
 	TessColumnPurpose purpose;
 	/* Two sets of scratch arrays: the steps alternate between them. */
@@ -492,6 +493,22 @@ tess_expr_input_column(const TessExpr *expr)
 	return expr->column;
 }
 
+/*
+ * Compute over rows, the bound batch's selection or a subset of it, from
+ * now on; the operands follow, and results are computed anew.
+ */
+static void
+bind_selection(TessExpr *expr, TessRowMask *rows)
+{
+	expr->rows = rows;
+	expr->ready = false;
+	for (int index = 0; index < expr->nsteps; index++)
+		if (expr->steps[index].operand != NULL)
+			bind_selection(expr->steps[index].operand, rows);
+	if (expr->filter && expr->predicate.operand != NULL)
+		bind_selection(expr->predicate.operand, rows);
+}
+
 void
 tess_expr_bind(TessExpr *expr, TessBatch *batch, ExprContext *econtext,
 			   TessColumnPurpose purpose)
@@ -501,12 +518,12 @@ tess_expr_bind(TessExpr *expr, TessBatch *batch, ExprContext *econtext,
 	expr->batch = batch;
 	expr->econtext = econtext;
 	expr->purpose = purpose;
-	expr->ready = false;
 	for (int index = 0; index < expr->nsteps; index++)
 		if (expr->steps[index].operand != NULL)
 			tess_expr_bind(expr->steps[index].operand, batch, econtext, purpose);
 	if (expr->filter && expr->predicate.operand != NULL)
 		tess_expr_bind(expr->predicate.operand, batch, econtext, purpose);
+	bind_selection(expr, &batch->rows);
 }
 
 /* Scratch for nrows rows; values stay initialized as placeholders. */
@@ -546,7 +563,7 @@ ensure_capacity(TessExpr *expr, int nrows)
 static void
 fill_scalar(TessExpr *expr, int set, Datum value, bool isnull)
 {
-	const TessRowMask *rows = &expr->batch->rows;
+	const TessRowMask *rows = expr->rows;
 	int			nrows = rows->nrows;
 	Size		mask_size = sizeof(uint64) * tess_row_mask_word_count(nrows);
 	Datum	   *values = expr->values[set];
@@ -573,7 +590,7 @@ fill_scalar(TessExpr *expr, int set, Datum value, bool isnull)
 static void
 finish_step(TessExpr *expr, int set, TessResultFormat format)
 {
-	const TessRowMask *rows = &expr->batch->rows;
+	const TessRowMask *rows = expr->rows;
 	int			nrows = rows->nrows;
 	int			nwords = tess_row_mask_word_count(nrows);
 	const uint64 *present = expr->bits[set];
@@ -647,7 +664,7 @@ call_step(TessExpr *expr, const Step *step, const TessFunctionArg *args,
 	call.nargs = step->nargs;
 	call.args = args;
 	call.inputcollid = step->inputcollid;
-	call.rows = &expr->batch->rows;
+	call.rows = expr->rows;
 	call.values = values;
 	call.non_nulls = non_nulls;
 	call.context = expr->context;
@@ -668,11 +685,11 @@ tess_expr_get_column(TessExpr *expr)
 		elog(ERROR, "Tessera expression is not bound to a batch");
 	if (expr->ready)
 		return &expr->result;
-	nrows = batch->rows.nrows;
+	nrows = expr->rows->nrows;
 	ensure_capacity(expr, nrows);
 	if (expr->column >= 0)
 	{
-		batch->ops->get_datum_column(batch, expr->column, &batch->rows,
+		batch->ops->get_datum_column(batch, expr->column, expr->rows,
 									 expr->purpose, &current);
 		if (current.values == NULL || current.isnull == NULL ||
 			current.nrows != nrows)
@@ -728,7 +745,7 @@ tess_expr_non_nulls(TessExpr *expr)
 	(void) tess_expr_get_column(expr);
 	if (expr->non_nulls_pending)
 	{
-		const TessRowMask *rows = &expr->batch->rows;
+		const TessRowMask *rows = expr->rows;
 		uint64	   *bits = expr->bits[1];
 		int			row = -1;
 
@@ -754,7 +771,7 @@ tess_expr_apply_filter(TessExpr *expr)
 	if (build_args(expr, &expr->predicate, column, args))
 	{
 		/* A NULL scalar makes the strict predicate false everywhere. */
-		TessRowMask *rows = &expr->batch->rows;
+		TessRowMask *rows = expr->rows;
 		int			nwords = tess_row_mask_word_count(rows->nrows);
 
 		if (nwords > 0)
