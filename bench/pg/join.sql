@@ -148,6 +148,21 @@ SELECT pg_temp.measure_pair('rows_parent',
 SELECT pg_temp.measure_pair('chain',
     'SELECT count(*) FROM bench_fact f JOIN bench_dim d ON f.fk = d.id JOIN bench_dup u ON d.id = u.k',
     :repetitions);
+-- Semi, anti and left joins: EXISTS, NOT EXISTS (the NULL keys go out),
+-- a left join whose NULL keys are extended, and one with four records per
+-- key and three dimension rows in four without a match, as in TPC-H Q13.
+SELECT pg_temp.measure_pair('semi',
+    'SELECT count(*) FROM bench_fact f WHERE EXISTS (SELECT 1 FROM bench_dim d WHERE d.id = f.fk)',
+    :repetitions);
+SELECT pg_temp.measure_pair('anti',
+    'SELECT count(*) FROM bench_fact f WHERE NOT EXISTS (SELECT 1 FROM bench_dim d WHERE d.id = f.fk)',
+    :repetitions);
+SELECT pg_temp.measure_pair('left_nulls',
+    'SELECT count(*), count(d.d1) FROM bench_fact f LEFT JOIN bench_dim d ON f.fk = d.id',
+    :repetitions);
+SELECT pg_temp.measure_pair('left_dup',
+    'SELECT count(*), sum(u.v) FROM bench_dim d LEFT JOIN bench_dup u ON d.id = u.k',
+    :repetitions);
 -- The planner over four relations, where the hook sees every join order.
 SELECT pg_temp.measure_plan('plan_time',
     'SELECT count(*) FROM bench_fact f JOIN bench_dim d ON f.fk = d.id JOIN bench_dup u ON d.id = u.k JOIN bench_dim e ON u.v = e.id',
@@ -172,11 +187,11 @@ SET tessera.enable = on;
 SELECT format('EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE on_%s', name)
 FROM unnest(ARRAY['fk_count', 'fk_inner_col', 'fk_outer_col', 'int8', 'mixed',
                   'selective', 'miss', 'dup', 'dup_text', 'two_keys', 'residual', 'rows_parent',
-                  'chain']) AS name \gexec
+                  'chain', 'semi', 'anti', 'left_nulls', 'left_dup']) AS name \gexec
 SET tessera.enable = off;
 SELECT format('EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE off_%s', name)
 FROM unnest(ARRAY['fk_count', 'fk_inner_col', 'fk_outer_col', 'int8', 'mixed',
                   'selective', 'miss', 'dup', 'two_keys', 'residual', 'rows_parent',
-                  'chain']) AS name \gexec
+                  'chain', 'semi', 'anti', 'left_nulls', 'left_dup']) AS name \gexec
 \o
 DEALLOCATE ALL;
