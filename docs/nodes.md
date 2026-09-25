@@ -703,6 +703,21 @@ semi and anti joins, which return outer rows, never enter it. With an
 empty inner side the outer child is still read for a left or anti join,
 whose rows all go out.
 
+A probe that finds no record still reads a bucket, and on a table past
+the cache that is a cache miss. The node therefore counts the valid
+probe rows of each table built and those that found a record: after the
+first 4096, if fewer than half found one and the table holds at least
+4096 rows, it builds a Bloom filter of the table's keys once
+(`tess_table_bloom`, see [table.md](table.md)), 16 bits per row in the
+table's memory context, and from then on checks every batch against it
+first (`tess_bloom_probe`), probing the table only with the rows it lets
+through. A row it rejects has no pair, which a left or anti join returns
+as it does a probe miss. The decision is the batches' fact, not the
+planner's estimate of the join's selectivity, and holds until the table
+is built again; a smaller table stays in the cache, where a miss costs
+less than the check. Under a `Gather` each participant decides on the
+filter of its own table by its own rows.
+
 `EXPLAIN` shows the join type for a semi, anti or left join, the key
 clauses as `Hash Cond`, the residual ones that run in batches as `Batch
 Join Filter` and the others as `Join Filter`, and an outer join's filters
@@ -716,7 +731,9 @@ the inner rows inserted into them, `Table Grows`, the doublings of the
 region, `Probe Rows`, the outer rows probed, and `Matches`, the joined
 rows over every round, `Rows Removed by Join Filter` and `Rows Removed by
 Filter`, and `Compact Batches`, the batches of copied
-pairs, when there are any. Under a `Gather` the counters are the totals of
+pairs, when there are any, and `Bloom Filters`, the filters built, with
+`Rows Removed by Bloom Filter`, the valid probe rows they rejected, when
+one was built. Under a `Gather` the counters are the totals of
 every participant, and the bucket count is the mean over the tables
 built.
 
@@ -763,3 +780,10 @@ misses and NULL keys, with duplicates as rows and in compact mode under
 an aggregate, with a join clause in `ON` and a filter in `WHERE`, under a
 sort; an empty inner side for each kind; rescans with a parameter in the
 join clauses; and under the `Gather` a left, a semi and an anti join.
+The Bloom filter: with `EXPLAIN ANALYZE`, a build side of 5000 keys that
+about 1 % of the probe rows find builds one for an inner, an anti and a
+left join, one whose probe rows all find a key builds none, nor does a
+build side of 300 rows, and an inner side with a parameter builds one
+per table; the rows of inner, semi, anti and left joins through the
+filter are compared, and under the `Gather` an inner and an anti join,
+where the participants build at least one filter.

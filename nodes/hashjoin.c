@@ -40,6 +40,14 @@
 #define JOIN_COMPACT_ROWS 64
 /* A round with at least this many rows is published as it is, not copied. */
 #define JOIN_DENSE_ROUND 32
+/*
+ * The Bloom filter: after this many probed rows with a valid key, a table
+ * of at least JOIN_BLOOM_MIN_ROWS rows gets one when fewer than half of
+ * them found a record. A smaller table stays in the cache, where a miss
+ * costs less than the check.
+ */
+#define JOIN_BLOOM_SAMPLE 4096
+#define JOIN_BLOOM_MIN_ROWS 4096
 
 /* The counters every participant of a parallel plan shares. */
 enum
@@ -59,6 +67,9 @@ enum
 	/* Pairs the residual join clauses removed. */
 	JOIN_FILTER_REMOVED,
 	JOIN_OUTPUT_REMOVED,
+	/* Bloom filters built, and the valid probe rows they rejected. */
+	JOIN_BLOOM_FILTERS,
+	JOIN_BLOOM_REMOVED,
 	JOIN_NCOUNTERS
 };
 
@@ -130,6 +141,15 @@ typedef struct TessHashJoinState
 	char	   *region;
 	Size		region_len;
 	bool		built;
+	/*
+	 * The Bloom filter of the table's keys, or NULL; whether the first
+	 * probes decided on it, and the valid rows and matches they counted.
+	 */
+	uint64	   *bloom;
+	Size		bloom_words;
+	bool		bloom_decided;
+	uint64		sample_rows;
+	uint64		sample_found;
 
 	/* Buffers for one batch of either side, for capacity rows. */
 	int			capacity;
@@ -359,7 +379,7 @@ reserve_rows(TessHashJoinState *state, int nrows)
 static void
 note_memory(TessHashJoinState *state)
 {
-	Size		memory = state->region_len +
+	Size		memory = state->region_len + sizeof(uint64) * state->bloom_words +
 		MemoryContextMemAllocated(state->values_context, true);
 
 	state->peak_memory = Max(state->peak_memory, memory);
@@ -375,6 +395,12 @@ create_table(TessHashJoinState *state)
 
 	MemoryContextReset(state->table_context);
 	MemoryContextReset(state->values_context);
+	/* A new table: decide on its filter again. */
+	state->bloom = NULL;
+	state->bloom_words = 0;
+	state->bloom_decided = false;
+	state->sample_rows = 0;
+	state->sample_found = 0;
 	check(state, state->kernels->table_size(state->nkeys, state->inner_kinds,
 											payload_size, capacity,
 											&size, &state->status));
@@ -679,8 +705,39 @@ start_null_round(TessHashJoinState *state)
 }
 
 /*
+ * After the first JOIN_BLOOM_SAMPLE valid probe rows, a Bloom filter of
+ * the table's keys when most of them found no record and the table is
+ * past the cache: from then on a row the filter rejects skips the table.
+ */
+static void
+decide_bloom(TessHashJoinState *state, uint64 rows, uint64 found)
+{
+	state->sample_rows += rows;
+	state->sample_found += found;
+	if (state->sample_rows < JOIN_BLOOM_SAMPLE)
+		return;
+	state->bloom_decided = true;
+	if (state->sample_found * 2 >= state->sample_rows ||
+		state->build_rows < JOIN_BLOOM_MIN_ROWS)
+		return;
+	check(state, state->kernels->table_bloom_words(state->build_rows,
+												   &state->bloom_words,
+												   &state->status));
+	state->bloom = MemoryContextAllocExtended(state->table_context,
+											  mul_size(sizeof(uint64),
+													   state->bloom_words),
+											  MCXT_ALLOC_HUGE);
+	check(state, state->kernels->table_bloom(state->region, state->region_len,
+											 state->bloom, state->bloom_words,
+											 &state->status));
+	state->counters[JOIN_BLOOM_FILTERS]++;
+	note_memory(state);
+}
+
+/*
  * Probe the table with one outer batch: the rows whose key found a record
- * become the first round. False when none did.
+ * become the first round, after the Bloom filter, when there is one, let
+ * them through. False when none did.
  */
 static bool
 probe_batch(TessHashJoinState *state, TessBatch *batch)
@@ -689,6 +746,9 @@ probe_batch(TessHashJoinState *state, TessBatch *batch)
 	int			nwords = tess_row_mask_word_count(nrows);
 	TessRowMask valid;
 	TessRowMask found;
+	TessRowMask passed;
+	int			count;
+	int			matches;
 
 	reserve_rows(state, nrows);
 	/* A shorter batch than the last: no bits past its rows may remain. */
@@ -696,15 +756,36 @@ probe_batch(TessHashJoinState *state, TessBatch *batch)
 	memset(state->round_bits, 0, sizeof(uint64) * nwords);
 	valid = (TessRowMask) {nrows, state->valid_bits};
 	found = (TessRowMask) {nrows, state->round_bits};
+
 	batch_keys(state, batch, state->outer_keys, state->outer_kinds, &valid);
-	if (tess_row_mask_count(&valid) == 0)
+	count = tess_row_mask_count(&valid);
+	if (count == 0)
 		return false;
+	if (state->bloom != NULL)
+	{
+		int			through;
+
+		/* The kernel fills the mask whole, but checks it is a mask of nrows. */
+		memset(state->pending_bits, 0, sizeof(uint64) * nwords);
+		passed = (TessRowMask) {nrows, state->pending_bits};
+		check(state, state->kernels->bloom_probe(state->bloom, state->bloom_words,
+												 state->hashes, &valid, &passed,
+												 &state->status));
+		through = tess_row_mask_count(&passed);
+		state->counters[JOIN_BLOOM_REMOVED] += count - through;
+		if (through == 0)
+			return false;
+		valid = passed;
+	}
 	check(state, state->kernels->table_probe(state->region, state->region_len,
 											 state->hashes, state->nkeys,
 											 state->table_keys, &valid,
 											 state->offsets, &found,
 											 &state->status));
-	return tess_row_mask_count(&found) > 0;
+	matches = tess_row_mask_count(&found);
+	if (!state->bloom_decided)
+		decide_bloom(state, count, matches);
+	return matches > 0;
 }
 
 /*
@@ -1646,6 +1727,13 @@ join_explain(CustomScanState *css, List *ancestors, ExplainState *es)
 	if (totals[JOIN_COMPACT_BATCHES] > 0)
 		ExplainPropertyInteger("Compact Batches", NULL,
 							   totals[JOIN_COMPACT_BATCHES], es);
+	if (totals[JOIN_BLOOM_FILTERS] > 0)
+	{
+		ExplainPropertyInteger("Bloom Filters", NULL,
+							   totals[JOIN_BLOOM_FILTERS], es);
+		ExplainPropertyInteger("Rows Removed by Bloom Filter", NULL,
+							   totals[JOIN_BLOOM_REMOVED], es);
+	}
 }
 
 /*

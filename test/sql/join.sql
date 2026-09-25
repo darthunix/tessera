@@ -235,6 +235,30 @@ DEALLOCATE joined;
 RESET plan_cache_mode;
 SELECT count(*), sum(jdup.w) FROM jf JOIN jdup ON jf.fk = jdup.k WHERE jf.v > 900;
 
+-- The Bloom filter: a build side of 5000 keys that about 1 % of the probe
+-- rows find, so after the first 4096 probe rows the node builds a filter
+-- and the rows it rejects skip the table.
+CREATE TABLE jbuild AS SELECT g * 100 AS k, g AS w FROM generate_series(1, 5000) AS g;
+CREATE TABLE jprobe AS
+SELECT CASE WHEN g % 97 = 0 THEN NULL ELSE g END AS k, g AS v FROM generate_series(1, 20000) AS g;
+CREATE TABLE jhit AS SELECT (g % 5000 + 1) * 100 AS k, g AS v FROM generate_series(1, 20000) AS g;
+ANALYZE jbuild, jprobe, jhit;
+SELECT join_explain($$SELECT count(*), sum(jbuild.w) FROM jprobe JOIN jbuild ON jprobe.k = jbuild.k$$);
+SELECT join_same($$SELECT jprobe.v, jbuild.w FROM jprobe JOIN jbuild ON jprobe.k = jbuild.k$$);
+SELECT join_explain($$SELECT count(*) FROM jprobe WHERE NOT EXISTS (SELECT 1 FROM jbuild WHERE jbuild.k = jprobe.k)$$);
+SELECT join_same($$SELECT jprobe.v FROM jprobe WHERE NOT EXISTS (SELECT 1 FROM jbuild WHERE jbuild.k = jprobe.k)$$);
+SELECT join_same($$SELECT jprobe.v FROM jprobe WHERE EXISTS (SELECT 1 FROM jbuild WHERE jbuild.k = jprobe.k)$$);
+SELECT join_explain($$SELECT count(*), count(jbuild.w) FROM jprobe LEFT JOIN jbuild ON jprobe.k = jbuild.k$$);
+SELECT join_same($$SELECT jprobe.v, jbuild.w FROM jprobe LEFT JOIN jbuild ON jprobe.k = jbuild.k$$);
+SELECT join_same($$SELECT jprobe.v, jbuild.w FROM jprobe LEFT JOIN jbuild ON jprobe.k = jbuild.k AND jbuild.w > 100$$);
+-- Every probe row finds its key: no filter.
+SELECT join_explain($$SELECT count(*), sum(jbuild.w) FROM jhit JOIN jbuild ON jhit.k = jbuild.k$$);
+-- A build side that fits in the cache: no filter though most rows miss.
+SELECT join_explain($$SELECT count(*) FROM jprobe JOIN jd ON jprobe.k = jd.id$$);
+-- A parameter of the inner side builds each table and decides on its filter again.
+SELECT join_explain($$SELECT jsmall.k, (SELECT count(*) FROM jprobe JOIN jbuild ON jprobe.k = jbuild.k WHERE jbuild.w > jsmall.k) FROM jsmall$$);
+SELECT join_same($$SELECT jsmall.k, (SELECT count(*) FROM jprobe JOIN jbuild ON jprobe.k = jbuild.k WHERE jbuild.w > jsmall.k) FROM jsmall$$);
+
 -- Row-wise parents: a sort, a limit, a scrollable cursor.
 EXPLAIN (COSTS OFF)
 SELECT jf.v, jd.label FROM jf JOIN jd ON jf.fk = jd.id ORDER BY jf.v DESC LIMIT 5;
@@ -283,6 +307,10 @@ SELECT join_property($$SELECT count(*) FROM jbig JOIN jd ON jbig.fk = jd.id$$, '
 SET parallel_leader_participation = off;
 SELECT join_same($$SELECT count(*), sum(jd.n), sum(jbig.v) FROM jbig JOIN jd ON jbig.fk = jd.id$$);
 RESET parallel_leader_participation;
+-- Each participant decides on a filter of its own table by its own rows.
+SELECT join_same($$SELECT count(*), sum(jbuild.w), sum(jprobe.v) FROM jprobe JOIN jbuild ON jprobe.k = jbuild.k$$);
+SELECT join_same($$SELECT count(*), sum(jprobe.v) FROM jprobe WHERE NOT EXISTS (SELECT 1 FROM jbuild WHERE jbuild.k = jprobe.k)$$);
+SELECT join_property($$SELECT count(*) FROM jprobe JOIN jbuild ON jprobe.k = jbuild.k$$, 'Bloom Filters')::int >= 1 AS filtered;
 RESET max_parallel_workers_per_gather;
 RESET parallel_setup_cost;
 RESET parallel_tuple_cost;
@@ -301,7 +329,7 @@ SET tessera.enable = off;
 EXPLAIN (COSTS OFF) SELECT count(*) FROM jf JOIN jd ON jf.fk = jd.id;
 RESET tessera.enable;
 
-DROP TABLE jd, jf, jdup, jsmall, jempty, jgrow, jbig, jpair;
+DROP TABLE jd, jf, jdup, jsmall, jempty, jgrow, jbig, jpair, jbuild, jprobe, jhit;
 DROP FUNCTION join_property(text, text);
 DROP FUNCTION join_explain(text);
 DROP FUNCTION join_many();
