@@ -130,6 +130,8 @@ SELECT join_same($$SELECT count(*), sum(jd.n) FROM jf JOIN jd ON jf.fk = jd.id A
 SELECT join_same($$SELECT jf.v, jd.id8 FROM jf JOIN jd ON jf.fk = jd.id AND jf.v > jd.id8 * 3$$);
 SELECT join_same($$SELECT jf.fk8, jd.n FROM jf JOIN jd ON jf.fk = jd.id AND jd.n <> jf.fk8$$);
 SELECT join_same($$SELECT jf.v + jd.id8, jd.id8 - jf.v FROM jf JOIN jd ON jf.fk = jd.id AND jf.v + jd.id8 > 500$$);
+-- A conditional value over both sides, under an aggregate.
+SELECT join_same($$SELECT sum(CASE WHEN jf.v > jd.n THEN 1 ELSE 0 END), count(*) FROM jf JOIN jd ON jf.fk = jd.id$$);
 -- A condition of several parts over both sides, NULLs in jd.n.
 EXPLAIN (COSTS OFF) SELECT count(*) FROM jf JOIN jd ON jf.fk = jd.id AND (jf.v > jd.n OR jd.n IS NULL);
 SELECT join_same($$SELECT jf.v, jd.n FROM jf JOIN jd ON jf.fk = jd.id AND (jf.v > jd.n OR jd.n IS NULL)$$);

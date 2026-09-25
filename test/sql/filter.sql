@@ -206,6 +206,15 @@ SELECT filter_same($$SELECT count(*) FROM filter_t WHERE b = 0 OR 10 / b > 1$$);
 SELECT filter_same($$SELECT count(*) FROM filter_t WHERE (b IN (1, NULL)) IS UNKNOWN$$);
 SELECT filter_same($$SELECT a FROM filter_t WHERE a IN (3::bigint, 5000000000)$$);
 SELECT filter_same($$SELECT count(*) FROM filter_t WHERE c IS NOT NULL AND a + 1 IS NULL$$);
+-- Conditional values: CASE, a simple CASE, COALESCE and NULLIF, a branch
+-- computed only over the rows that take it.
+EXPLAIN (COSTS OFF) SELECT a FROM filter_t WHERE CASE WHEN b > 5 THEN a ELSE -a END > 50;
+SELECT filter_same($$SELECT a FROM filter_t WHERE CASE WHEN b > 5 THEN a ELSE -a END > 50$$);
+SELECT filter_same($$SELECT sum(CASE WHEN a % 3 = 0 THEN b ELSE 0 END), count(*) FROM filter_t WHERE a > 0$$);
+SELECT filter_same($$SELECT count(*) FROM filter_t WHERE CASE WHEN b <> 0 THEN a / b ELSE 0 END > 20$$);
+SELECT filter_same($$SELECT count(*) FROM filter_t WHERE COALESCE(a, b) > 5$$);
+SELECT filter_same($$SELECT NULLIF(b, 0), a FROM filter_t WHERE a > 150$$);
+SELECT filter_same($$SELECT CASE b WHEN 1 THEN 'one' WHEN 2 THEN c END, a FROM filter_t WHERE a > 180$$);
 -- A parallel worker runs the node from the plan's text form.
 SET debug_parallel_query = on;
 EXPLAIN (COSTS OFF) SELECT count(*) FROM filter_t WHERE a > 100;

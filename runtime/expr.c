@@ -6,6 +6,7 @@
 #include "miscadmin.h"
 #include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
+#include "port/pg_bitutils.h"
 #include "optimizer/optimizer.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
@@ -80,12 +81,45 @@ typedef struct Cond
 	int			capacity;
 } Cond;
 
+/* A conditional value: which rows take which branch. */
+typedef enum ChoiceKind
+{
+	CHOICE_CASE,				/* CASE WHEN c THEN v ... ELSE d END */
+	CHOICE_COALESCE,			/* the first non-NULL argument */
+	CHOICE_NULLIF				/* the first argument, NULL where it equals the second */
+} ChoiceKind;
+
+typedef struct Choice
+{
+	ChoiceKind	kind;
+	/*
+	 * CASE: a condition per branch and a value per branch, then the ELSE
+	 * value; COALESCE: the arguments; NULLIF: the first argument.
+	 */
+	struct Cond **conds;
+	TessExpr  **values;
+	int			nvalues;
+	/* NULLIF: the equality and its second argument, a value or a scalar. */
+	const TessFunction *function;
+	Oid			inputcollid;
+	TessExpr   *right;
+	ExprState  *right_scalar;
+	/* Scratch: the rows still to decide, and those a branch computes over. */
+	TessRowMask rest;
+	TessRowMask part;
+	int			capacity;
+} Choice;
+
 struct TessExpr
 {
 	MemoryContext context;
-	/* The batch column the chain starts from, or -1 with scalar_value. */
+	/*
+	 * The batch column the chain starts from, or -1 with scalar_value, or
+	 * a conditional value whose result the chain starts from.
+	 */
 	int			column;
 	ExprState  *scalar_value;
+	Choice	   *choice;
 	Step	   *steps;
 	int			nsteps;
 	/* The predicate over the chain's result, when the expression is a filter. */
@@ -182,6 +216,41 @@ call_of(Node *node, List **args, Oid *opno, Oid *inputcollid)
  */
 static Node *expand(Node *node);
 
+/* The CaseTestExpr of a simple CASE replaced by its argument, context. */
+static Node *
+replace_case_test(Node *node, void *context)
+{
+	if (node == NULL)
+		return NULL;
+	if (IsA(node, CaseTestExpr))
+		return copyObject((Node *) context);
+	if (IsA(node, CaseExpr))
+	{
+		/* A nested CASE's own tests refer to its own argument. */
+		CaseExpr   *nested = copyObject((CaseExpr *) node);
+
+		nested->arg = (Expr *) replace_case_test((Node *) nested->arg, context);
+		return (Node *) nested;
+	}
+	return expression_tree_mutator(node, replace_case_test, context);
+}
+
+/*
+ * A simple CASE x WHEN v THEN ... as the searched CASE WHEN x = v THEN
+ * ...: x is computed in each condition, which costs nothing for a bare
+ * column.
+ */
+static Node *
+searched_case(CaseExpr *simple)
+{
+	CaseExpr   *searched = copyObject(simple);
+
+	searched->arg = NULL;
+	foreach_node(CaseWhen, when, searched->args)
+		when->expr = (Expr *) replace_case_test((Node *) when->expr, simple->arg);
+	return (Node *) searched;
+}
+
 static List *
 array_clauses(ScalarArrayOpExpr *array_op)
 {
@@ -242,6 +311,8 @@ expand(Node *node)
 	node = strip_relabel(node);
 	if (node == NULL)
 		return NULL;
+	if (IsA(node, CaseExpr) && ((CaseExpr *) node)->arg != NULL)
+		return searched_case((CaseExpr *) node);
 	function = call_of(node, &args, &opno, &inputcollid);
 	if (function == NULL || function->kind != TESS_FUNCTION_EQUIVALENT ||
 		function->struct_size < TESS_FUNCTION_EQUIVALENT_MIN_SIZE ||
@@ -352,6 +423,69 @@ shape_fits(const TessFunction *function, int column_arg, int nargs,
 		commuted(opno, inputcollid, function->kind) != NULL;
 }
 
+static bool analyze_cond(Node *node, Index relid);
+
+/*
+ * Whether a conditional value is supported: a searched CASE whose
+ * conditions are supported conditions and whose values are supported
+ * values, a COALESCE of supported values, a NULLIF of two supported values
+ * with a registered equality that takes them in that shape. It has a
+ * column when any part has one.
+ */
+static bool
+analyze_choice(Node *node, Index relid, int *nvars)
+{
+	int			part_vars;
+
+	*nvars = 0;
+	if (IsA(node, CaseExpr))
+	{
+		CaseExpr   *choice = (CaseExpr *) node;
+
+		foreach_node(CaseWhen, when, choice->args)
+		{
+			if (!analyze_cond((Node *) when->expr, relid) ||
+				!analyze_value((Node *) when->result, relid, &part_vars))
+				return false;
+			/* A condition over a column makes a column too. */
+			*nvars = 1;
+		}
+		if (choice->defresult == NULL ||
+			!analyze_value((Node *) choice->defresult, relid, &part_vars))
+			return false;
+		*nvars |= part_vars;
+		return true;
+	}
+	if (IsA(node, CoalesceExpr))
+	{
+		foreach_ptr(Node, arg, ((CoalesceExpr *) node)->args)
+		{
+			if (!analyze_value(arg, relid, &part_vars))
+				return false;
+			*nvars |= part_vars;
+		}
+		return true;
+	}
+	{
+		NullIfExpr *nullif = (NullIfExpr *) node;
+		const TessFunction *function;
+		int			right_vars;
+
+		set_opfuncid((OpExpr *) nullif);
+		function = tess_runtime_api()->functions->find(nullif->opfuncid);
+		if (!usable(function, nullif->inputcollid, TESS_FUNCTION_PREDICATE) ||
+			list_length(nullif->args) != 2 ||
+			!analyze_value(linitial(nullif->args), relid, &part_vars) ||
+			!analyze_value(lsecond(nullif->args), relid, &right_vars))
+			return false;
+		/* The first argument is a column; the second one a column or a scalar. */
+		if (right_vars > 0 && (function->flags & TESS_FUNCTION_ANY_SHAPE) == 0)
+			return false;
+		*nvars = part_vars | right_vars;
+		return true;
+	}
+}
+
 /*
  * Whether node is a supported value expression, and whether it has a
  * column (nvars 1) or is a scalar (0). The column, when there is one,
@@ -384,6 +518,8 @@ analyze_value(Node *node, Index relid, int *nvars)
 		*nvars = 0;
 		return true;
 	}
+	if (IsA(node, CaseExpr) || IsA(node, CoalesceExpr) || IsA(node, NullIfExpr))
+		return analyze_choice(node, relid, nvars);
 	function = call_of(node, &args, &opno, &inputcollid);
 	if (!usable(function, inputcollid, TESS_FUNCTION_VALUE) ||
 		!analyze_args(args, relid, nvars, &column_arg, &column_operand))
@@ -493,7 +629,10 @@ static void compile_value(TessExpr *expr, Node *node, PlanState *parent,
 						  TessExprResolveVar resolve, void *context);
 static Cond *compile_cond(Node *node, PlanState *parent,
 						  TessExprResolveVar resolve, void *context);
+static Choice *compile_choice(Node *node, PlanState *parent,
+							  TessExprResolveVar resolve, void *context);
 static void bind_selection(TessExpr *expr, TessRowMask *rows);
+static void eval_choice(TessExpr *expr);
 static void eval_cond(Cond *cond, const TessRowMask *rows, bool want_unknown);
 
 /*
@@ -580,11 +719,77 @@ compile_value(TessExpr *expr, Node *node, PlanState *parent,
 		expr->scalar_value = ExecInitExpr((Expr *) node, parent);
 		return;
 	}
+	if (IsA(node, CaseExpr) || IsA(node, CoalesceExpr) || IsA(node, NullIfExpr))
+	{
+		expr->choice = compile_choice(node, parent, resolve, context);
+		return;
+	}
 	call_of(node, &args, &opno, &inputcollid);
 	(void) analyze_args(args, 0, &nvars, &column_arg, &column_operand);
 	compile_value(expr, list_nth(args, column_arg), parent, resolve, context);
 	append_step(expr, node, column_arg, column_operand, parent, resolve,
 				context);
+}
+
+/* A supported conditional value, compiled: its conditions and values. */
+static Choice *
+compile_choice(Node *node, PlanState *parent, TessExprResolveVar resolve,
+			   void *context)
+{
+	Choice	   *choice = palloc0_object(Choice);
+	int			index = 0;
+
+	if (IsA(node, CaseExpr))
+	{
+		CaseExpr   *case_expr = (CaseExpr *) node;
+
+		choice->kind = CHOICE_CASE;
+		choice->nvalues = list_length(case_expr->args) + 1;
+		choice->conds = palloc_array(Cond *, choice->nvalues);
+		choice->values = palloc_array(TessExpr *, choice->nvalues);
+		foreach_node(CaseWhen, when, case_expr->args)
+		{
+			choice->conds[index] = compile_cond((Node *) when->expr, parent,
+												resolve, context);
+			choice->values[index++] = tess_expr_compile_value((Node *) when->result,
+															  parent, resolve,
+															  context);
+		}
+		choice->values[index] = tess_expr_compile_value((Node *) case_expr->defresult,
+														parent, resolve, context);
+	}
+	else if (IsA(node, CoalesceExpr))
+	{
+		CoalesceExpr *coalesce = (CoalesceExpr *) node;
+
+		choice->kind = CHOICE_COALESCE;
+		choice->nvalues = list_length(coalesce->args);
+		choice->values = palloc_array(TessExpr *, choice->nvalues);
+		foreach_ptr(Node, arg, coalesce->args)
+			choice->values[index++] = tess_expr_compile_value(arg, parent, resolve,
+															  context);
+	}
+	else
+	{
+		NullIfExpr *nullif = (NullIfExpr *) node;
+		Node	   *right = lsecond(nullif->args);
+		int			right_vars;
+
+		choice->kind = CHOICE_NULLIF;
+		set_opfuncid((OpExpr *) nullif);
+		choice->function = tess_runtime_api()->functions->find(nullif->opfuncid);
+		choice->inputcollid = nullif->inputcollid;
+		choice->nvalues = 1;
+		choice->values = palloc_array(TessExpr *, 1);
+		choice->values[0] = tess_expr_compile_value(linitial(nullif->args), parent,
+													resolve, context);
+		(void) analyze_value(right, 0, &right_vars);
+		if (right_vars > 0)
+			choice->right = tess_expr_compile_value(right, parent, resolve, context);
+		else
+			choice->right_scalar = ExecInitExpr((Expr *) right, parent);
+	}
+	return choice;
 }
 
 static TessExpr *
@@ -776,6 +981,19 @@ tess_expr_bind(TessExpr *expr, TessBatch *batch, ExprContext *econtext,
 		tess_expr_bind(expr->predicate.operand, batch, econtext, purpose);
 	if (expr->cond != NULL)
 		bind_cond(expr->cond, batch, econtext, purpose);
+	if (expr->choice != NULL)
+	{
+		Choice	   *choice = expr->choice;
+
+		for (int index = 0; index < choice->nvalues; index++)
+		{
+			tess_expr_bind(choice->values[index], batch, econtext, purpose);
+			if (choice->conds != NULL && index < choice->nvalues - 1)
+				bind_cond(choice->conds[index], batch, econtext, purpose);
+		}
+		if (choice->right != NULL)
+			tess_expr_bind(choice->right, batch, econtext, purpose);
+	}
 	bind_selection(expr, &batch->rows);
 }
 
@@ -932,8 +1150,8 @@ call_step(TessExpr *expr, const Step *step, const TessFunctionArg *args,
  */
 static void
 call_predicate(TessExpr *value, const TessFunction *function,
-			   Oid inputcollid, const TessDatumColumn *column, Datum scalar,
-			   TessRowMask *rows)
+			   Oid inputcollid, const TessDatumColumn *column,
+			   const TessDatumColumn *operand, Datum scalar, TessRowMask *rows)
 {
 	TessFunctionCall call = TESS_STRUCT_INITIALIZER(TessFunctionCall);
 	TessFunctionArg args[2];
@@ -941,6 +1159,7 @@ call_predicate(TessExpr *value, const TessFunction *function,
 	args[0] = (TessFunctionArg) TESS_STRUCT_INITIALIZER(TessFunctionArg);
 	args[0].column = column;
 	args[1] = (TessFunctionArg) TESS_STRUCT_INITIALIZER(TessFunctionArg);
+	args[1].column = operand;
 	args[1].scalar = scalar;
 	call.function = function;
 	call.nargs = 2;
@@ -978,6 +1197,14 @@ tess_expr_get_column(TessExpr *expr)
 			elog(ERROR, "Tessera batch returned an invalid column");
 		/* The input's non-NULL rows are not counted unless asked for. */
 		current_bits = NULL;
+	}
+	else if (expr->choice != NULL)
+	{
+		eval_choice(expr);
+		current.values = expr->values[1];
+		current.isnull = expr->isnull[1];
+		current.nrows = nrows;
+		current_bits = expr->bits[1];
 	}
 	else
 	{
@@ -1233,7 +1460,7 @@ eval_cond(Cond *cond, const TessRowMask *rows, bool want_unknown)
 							continue;
 						memcpy(work, rest, sizeof(uint64) * nwords);
 						call_predicate(cond->expr, cond->function,
-									   cond->inputcollid, column,
+									   cond->inputcollid, column, NULL,
 									   cond->elements[index], &cond->work);
 						for (int word = 0; word < nwords; word++)
 						{
@@ -1256,7 +1483,7 @@ eval_cond(Cond *cond, const TessRowMask *rows, bool want_unknown)
 						if (cond->element_nulls[index])
 							continue;
 						call_predicate(cond->expr, cond->function,
-									   cond->inputcollid, column,
+									   cond->inputcollid, column, NULL,
 									   cond->elements[index], &cond->work);
 					}
 					for (int word = 0; word < nwords; word++)
@@ -1303,6 +1530,191 @@ eval_cond(Cond *cond, const TessRowMask *rows, bool want_unknown)
 							break;
 					}
 					truth[word] = result;
+				}
+				break;
+			}
+	}
+}
+
+/* The scratch masks of a choice sized for nrows rows. */
+static void
+choice_masks(Choice *choice, int nrows)
+{
+	int			nwords = tess_row_mask_word_count(nrows);
+	TessRowMask *masks[] = {&choice->rest, &choice->part};
+
+	if (choice->capacity < nwords)
+	{
+		MemoryContext oldcontext = MemoryContextSwitchTo(GetMemoryChunkContext(choice));
+
+		for (int index = 0; index < lengthof(masks); index++)
+		{
+			if (masks[index]->bits != NULL)
+				pfree(masks[index]->bits);
+			masks[index]->bits = palloc_array(uint64, Max(nwords, 1));
+		}
+		choice->capacity = nwords;
+		MemoryContextSwitchTo(oldcontext);
+	}
+	for (int index = 0; index < lengthof(masks); index++)
+	{
+		masks[index]->nrows = nrows;
+		memset(masks[index]->bits, 0, sizeof(uint64) * Max(nwords, 1));
+	}
+}
+
+/*
+ * Copy the rows of mask from a branch's column into the expression's first
+ * scratch set: the Datums, the NULL flags and the non-NULL bits. A full
+ * word is copied by block, a partial one without a branch per row, as
+ * finish_step writes, so that it vectorizes.
+ */
+static void
+blend(TessExpr *expr, const TessDatumColumn *column, const uint64 *mask)
+{
+	int			nrows = expr->rows->nrows;
+	int			nwords = tess_row_mask_word_count(nrows);
+	Datum	   *values = expr->values[1];
+	bool	   *isnull = expr->isnull[1];
+
+	for (int word = 0; word < nwords; word++)
+	{
+		uint64		take = mask[word];
+		int			first = word * 64;
+		int			count = Min(64, nrows - first);
+		uint64		present = 0;
+
+		if (take == 0)
+			continue;
+		if (count == 64 && take == ~UINT64CONST(0))
+		{
+			memcpy(values + first, column->values + first, sizeof(Datum) * 64);
+			memcpy(isnull + first, column->isnull + first, sizeof(bool) * 64);
+		}
+		else
+		{
+			for (int i = 0; i < count; i++)
+			{
+				bool		chosen = ((take >> i) & 1) != 0;
+
+				values[first + i] = chosen ? column->values[first + i] : values[first + i];
+				isnull[first + i] = chosen ? column->isnull[first + i] : isnull[first + i];
+			}
+		}
+		for (int i = 0; i < count; i++)
+			present |= (uint64) (!column->isnull[first + i]) << i;
+		expr->bits[1][word] |= present & take;
+	}
+}
+
+/*
+ * A conditional value over the expression's selection, into its first
+ * scratch set. Each branch is computed only over the rows that take it,
+ * as the executor evaluates only the branch a row takes: a CASE value
+ * where its condition is the first one true, the ELSE value where none
+ * is, a COALESCE argument where the earlier ones are NULL. NULLIF
+ * computes both arguments over every row, as the executor does.
+ */
+static void
+eval_choice(TessExpr *expr)
+{
+	Choice	   *choice = expr->choice;
+	const TessRowMask *rows = expr->rows;
+	int			nrows = rows->nrows;
+	int			nwords = tess_row_mask_word_count(nrows);
+	uint64	   *rest;
+	uint64	   *part;
+
+	choice_masks(choice, nrows);
+	rest = choice->rest.bits;
+	part = choice->part.bits;
+	memset(expr->isnull[1], true, nrows);
+	memset(expr->bits[1], 0, sizeof(uint64) * Max(nwords, 1));
+	memcpy(rest, rows->bits, sizeof(uint64) * nwords);
+	switch (choice->kind)
+	{
+		case CHOICE_CASE:
+			for (int index = 0; index < choice->nvalues && !mask_empty(&choice->rest); index++)
+			{
+				const uint64 *take = rest;
+
+				if (index < choice->nvalues - 1)
+				{
+					eval_cond(choice->conds[index], &choice->rest, false);
+					take = choice->conds[index]->truth.bits;
+				}
+				memcpy(part, take, sizeof(uint64) * nwords);
+				if (mask_empty(&choice->part))
+					continue;
+				bind_selection(choice->values[index], &choice->part);
+				blend(expr, tess_expr_get_column(choice->values[index]), part);
+				for (int word = 0; word < nwords; word++)
+					rest[word] &= ~part[word];
+			}
+			break;
+		case CHOICE_COALESCE:
+			for (int index = 0; index < choice->nvalues && !mask_empty(&choice->rest); index++)
+			{
+				const TessDatumColumn *column;
+
+				memcpy(part, rest, sizeof(uint64) * nwords);
+				bind_selection(choice->values[index], &choice->part);
+				column = tess_expr_get_column(choice->values[index]);
+				/* The rows this argument decides: those where it is not NULL. */
+				for (int word = 0; word < nwords; word++)
+				{
+					int			first = word * 64;
+					int			count = Min(64, nrows - first);
+					uint64		present = 0;
+
+					for (int i = 0; i < count; i++)
+						present |= (uint64) (!column->isnull[first + i]) << i;
+					part[word] = rest[word] & present;
+				}
+				blend(expr, column, part);
+				for (int word = 0; word < nwords; word++)
+					rest[word] &= ~part[word];
+			}
+			break;
+		case CHOICE_NULLIF:
+			{
+				const TessDatumColumn *left;
+				const TessDatumColumn *right = NULL;
+				Datum		scalar = (Datum) 0;
+
+				bind_selection(choice->values[0], &choice->rest);
+				left = tess_expr_get_column(choice->values[0]);
+				blend(expr, left, rows->bits);
+				if (choice->right != NULL)
+				{
+					bind_selection(choice->right, &choice->rest);
+					right = tess_expr_get_column(choice->right);
+				}
+				else
+				{
+					bool		isnull;
+
+					scalar = ExecEvalExprSwitchContext(choice->right_scalar,
+													   expr->econtext, &isnull);
+					/* NULLIF(a, NULL) is a. */
+					if (isnull)
+						break;
+				}
+				memcpy(part, rows->bits, sizeof(uint64) * nwords);
+				call_predicate(choice->values[0], choice->function,
+							   choice->inputcollid, left, right, scalar,
+							   &choice->part);
+				/* Where the arguments are equal, NULL. */
+				for (int word = 0; word < nwords; word++)
+				{
+					uint64		equal = part[word];
+
+					expr->bits[1][word] &= ~equal;
+					while (equal != 0)
+					{
+						expr->isnull[1][word * 64 + pg_rightmost_one_pos64(equal)] = true;
+						equal &= equal - 1;
+					}
 				}
 				break;
 			}

@@ -138,6 +138,58 @@ array_op(const char *name, Node *left, bool use_or, const int32 *values,
 	return (Node *) expr;
 }
 
+/* length(text), which no module registers: unsupported anywhere. */
+static Node *
+text_length(void)
+{
+	return (Node *) makeFuncExpr(F_TEXTLEN, INT4OID, list_make1(var(3, TEXTOID)),
+								 InvalidOid, DEFAULT_COLLATION_OID,
+								 COERCE_EXPLICIT_CALL);
+}
+
+/* CASE WHEN condition THEN result ... ELSE otherwise END, pairs in a list. */
+static Node *
+case_of(List *pairs, Node *otherwise, Oid type)
+{
+	CaseExpr   *choice = makeNode(CaseExpr);
+
+	choice->casetype = type;
+	for (int index = 0; index < list_length(pairs); index += 2)
+	{
+		CaseWhen   *when = makeNode(CaseWhen);
+
+		when->expr = list_nth(pairs, index);
+		when->result = list_nth(pairs, index + 1);
+		when->location = -1;
+		choice->args = lappend(choice->args, when);
+	}
+	choice->defresult = (Expr *) (otherwise != NULL ? otherwise :
+								  (Node *) makeNullConst(type, -1, InvalidOid));
+	choice->location = -1;
+	return (Node *) choice;
+}
+
+static Node *
+coalesce_of(Node *first, Node *second)
+{
+	CoalesceExpr *coalesce = makeNode(CoalesceExpr);
+
+	coalesce->coalescetype = INT4OID;
+	coalesce->args = list_make2(first, second);
+	coalesce->location = -1;
+	return (Node *) coalesce;
+}
+
+static Node *
+nullif_of(Node *first, Node *second)
+{
+	NullIfExpr *nullif = (NullIfExpr *) op("=", first, second);
+
+	nullif->xpr.type = T_NullIfExpr;
+	nullif->opresulttype = INT4OID;
+	return (Node *) nullif;
+}
+
 /* One more element than an IN list the compiler takes. */
 #define MAX_ARRAY 33
 
@@ -250,9 +302,13 @@ tessera_test_expr_supports(PG_FUNCTION_ARGS)
 	result &= check(13, !tess_expr_supports_value((Node *) make_andclause(list_make2(op(">", a(), int4(5)), op("<", a(), int4(9)))), 0));
 	coalesce->coalescetype = INT4OID;
 	coalesce->args = list_make2(a(), int4(0));
-	result &= check(14, !tess_expr_supports_value((Node *) coalesce, 0));
+	result &= check(14, tess_expr_supports_value((Node *) coalesce, 0));
 	/* Something unsupported inside an operand rejects the whole. */
-	result &= check(41, !tess_expr_supports_value(op("*", op("+", a(), int4(1)), (Node *) coalesce), 0));
+	result &= check(41, !tess_expr_supports_value(op("*", op("+", a(), int4(1)), text_length()), 0));
+	/* A conditional value with an unsupported condition or branch. */
+	result &= check(52, !tess_expr_supports_value(case_of(list_make2(op("=", var(3, TEXTOID), (Node *) makeConst(TEXTOID, -1, DEFAULT_COLLATION_OID, -1, CStringGetTextDatum("x"), false, false)), a()), int4(0), INT4OID), 0));
+	result &= check(53, !tess_expr_supports_value(case_of(list_make2(op(">", a(), int4(5)), text_length()), int4(0), INT4OID), 0));
+	result &= check(54, tess_expr_supports_value(nullif_of(a(), op("/", var(2, INT4OID), int4(2))), 0));
 	null_test->arg = (Expr *) a();
 	null_test->nulltesttype = IS_NULL;
 	result &= check(15, !tess_expr_supports_value((Node *) null_test, 0));
@@ -464,6 +520,102 @@ tessera_test_expr_values(PG_FUNCTION_ARGS)
 		column->isnull[4] && !tess_row_mask_contains(non_nulls, 4) &&
 		tess_row_mask_count(non_nulls) == 56);
 
+	/* Conditional values over the 70 rows. */
+	{
+		Node	   *branches = case_of(list_make4(op(">", a(), int4(60)), a(),
+												  op("<", a(), int4(5)), op("-", NULL, a())),
+									   int4(0), INT4OID);
+		CaseTestExpr *test = makeNode(CaseTestExpr);
+
+		expr = tess_expr_compile_value(branches, NULL, resolve, NULL);
+		tess_expr_bind(expr, batch, econtext, TESS_COLUMN_FOR_PROJECTION);
+		column = tess_expr_get_column(expr);
+		non_nulls = tess_expr_non_nulls(expr);
+		result &= check(127, row_is(column, non_nulls, 0, false, -1) &&
+			row_is(column, non_nulls, 64, false, 0) &&
+			row_is(column, non_nulls, 68, false, 69) &&
+			row_is(column, non_nulls, 10, false, 0) &&
+			tess_row_mask_count(non_nulls) == 70);
+		/* Without ELSE, NULL where no condition holds. */
+		expr = tess_expr_compile_value(case_of(list_make2(op(">", a(), int4(60)), a()), NULL, INT4OID), NULL, resolve, NULL);
+		tess_expr_bind(expr, batch, econtext, TESS_COLUMN_FOR_PROJECTION);
+		column = tess_expr_get_column(expr);
+		non_nulls = tess_expr_non_nulls(expr);
+		result &= check(128, row_is(column, non_nulls, 68, false, 69) &&
+			row_is(column, non_nulls, 0, true, 0) &&
+			tess_row_mask_count(non_nulls) == 8);
+		/* A text branch. */
+		expr = tess_expr_compile_value(case_of(list_make2(op(">", a(), int4(60)), var(3, TEXTOID)), var(3, TEXTOID), TEXTOID), NULL, resolve, NULL);
+		tess_expr_bind(expr, batch, econtext, TESS_COLUMN_FOR_PROJECTION);
+		column = tess_expr_get_column(expr);
+		result &= check(129, !column->isnull[68] &&
+			strcmp(TextDatumGetCString(column->values[68]), "r69") == 0 &&
+			tess_row_mask_count(tess_expr_non_nulls(expr)) == 70);
+		/* The division runs only where a is not 3. */
+		expr = tess_expr_compile_value(case_of(list_make2(op("<>", a(), int4(3)), op("/", int4(10), op("-", a(), int4(3)))), int4(0), INT4OID), NULL, resolve, NULL);
+		tess_expr_bind(expr, batch, econtext, TESS_COLUMN_FOR_PROJECTION);
+		column = tess_expr_get_column(expr);
+		non_nulls = tess_expr_non_nulls(expr);
+		result &= check(130, row_is(column, non_nulls, 2, false, 0) &&
+			row_is(column, non_nulls, 3, false, 10));
+		/* A simple CASE a WHEN 1 THEN 10 WHEN 2 THEN 20 END. */
+		test->typeId = INT4OID;
+		test->typeMod = -1;
+		{
+			CaseExpr   *simple = (CaseExpr *) case_of(list_make4(op("=", (Node *) test, int4(1)), int4(10),
+															op("=", (Node *) test, int4(2)), int4(20)),
+													  NULL, INT4OID);
+
+			simple->arg = (Expr *) a();
+			expr = tess_expr_compile_value((Node *) simple, NULL, resolve, NULL);
+		}
+		tess_expr_bind(expr, batch, econtext, TESS_COLUMN_FOR_PROJECTION);
+		column = tess_expr_get_column(expr);
+		non_nulls = tess_expr_non_nulls(expr);
+		result &= check(131, row_is(column, non_nulls, 0, false, 10) &&
+			row_is(column, non_nulls, 1, false, 20) &&
+			row_is(column, non_nulls, 2, true, 0) &&
+			tess_row_mask_count(non_nulls) == 2);
+		/* A step over a choice, and a choice as an operand. */
+		expr = tess_expr_compile_value(op("+", branches, int4(1)), NULL, resolve, NULL);
+		tess_expr_bind(expr, batch, econtext, TESS_COLUMN_FOR_PROJECTION);
+		column = tess_expr_get_column(expr);
+		non_nulls = tess_expr_non_nulls(expr);
+		result &= check(132, row_is(column, non_nulls, 0, false, 0) &&
+			row_is(column, non_nulls, 68, false, 70) &&
+			tess_row_mask_count(non_nulls) == 70);
+		expr = tess_expr_compile_value(op("+", a(), branches), NULL, resolve, NULL);
+		tess_expr_bind(expr, batch, econtext, TESS_COLUMN_FOR_PROJECTION);
+		column = tess_expr_get_column(expr);
+		non_nulls = tess_expr_non_nulls(expr);
+		result &= check(133, row_is(column, non_nulls, 0, false, 0) &&
+			row_is(column, non_nulls, 4, true, 0) &&
+			tess_row_mask_count(non_nulls) == 56);
+		/* COALESCE(a, b); the second argument only where a is NULL. */
+		expr = tess_expr_compile_value(coalesce_of(a(), var(2, INT4OID)), NULL, resolve, NULL);
+		tess_expr_bind(expr, batch, econtext, TESS_COLUMN_FOR_PROJECTION);
+		column = tess_expr_get_column(expr);
+		non_nulls = tess_expr_non_nulls(expr);
+		result &= check(134, row_is(column, non_nulls, 0, false, 1) &&
+			row_is(column, non_nulls, 4, false, 10) &&
+			tess_row_mask_count(non_nulls) == 70);
+		expr = tess_expr_compile_value(coalesce_of(var(2, INT4OID), op("/", int4(10), op("-", var(2, INT4OID), var(2, INT4OID)))), NULL, resolve, NULL);
+		tess_expr_bind(expr, batch, econtext, TESS_COLUMN_FOR_PROJECTION);
+		column = tess_expr_get_column(expr);
+		result &= check(135, row_is(column, tess_expr_non_nulls(expr), 0, false, 2));
+		/* NULLIF(a, 3); NULLIF(a, b / 2), equal everywhere. */
+		expr = tess_expr_compile_value(nullif_of(a(), int4(3)), NULL, resolve, NULL);
+		tess_expr_bind(expr, batch, econtext, TESS_COLUMN_FOR_PROJECTION);
+		column = tess_expr_get_column(expr);
+		non_nulls = tess_expr_non_nulls(expr);
+		result &= check(136, row_is(column, non_nulls, 0, false, 1) &&
+			row_is(column, non_nulls, 2, true, 0) &&
+			tess_row_mask_count(non_nulls) == 55);
+		expr = tess_expr_compile_value(nullif_of(a(), op("/", var(2, INT4OID), int4(2))), NULL, resolve, NULL);
+		tess_expr_bind(expr, batch, econtext, TESS_COLUMN_FOR_PROJECTION);
+		result &= check(137, tess_row_mask_count(tess_expr_non_nulls(expr)) == 0);
+	}
+
 	/* Only the selected rows are computed. */
 	tess_row_mask_clear(&batch->rows, 0);
 	tess_row_mask_clear(&batch->rows, 1);
@@ -663,13 +815,7 @@ tessera_test_expr_errors(PG_FUNCTION_ARGS)
 	switch (kind)
 	{
 		case 0:
-			{
-				CoalesceExpr *coalesce = makeNode(CoalesceExpr);
-
-				coalesce->coalescetype = INT4OID;
-				coalesce->args = list_make2(a(), int4(0));
-				tess_expr_compile_value(op("*", op("+", a(), int4(1)), (Node *) coalesce), NULL, resolve, NULL);
-			}
+			tess_expr_compile_value(op("*", op("+", a(), int4(1)), text_length()), NULL, resolve, NULL);
 			break;
 		case 1:
 			tess_expr_compile_value(a(), NULL, resolve_none, NULL);
@@ -718,6 +864,18 @@ tessera_test_expr_errors(PG_FUNCTION_ARGS)
 				tess_expr_bind(expr, batch, econtext, TESS_COLUMN_FOR_FILTER);
 				tess_expr_apply_filter(expr);
 			}
+			break;
+		case 11:
+			/* A branch runs over its rows: a = 3 takes the division. */
+			expr = tess_expr_compile_value(case_of(list_make2(op("=", a(), int4(3)), op("/", int4(10), op("-", a(), int4(3)))), int4(0), INT4OID), NULL, resolve, NULL);
+			tess_expr_bind(expr, batch, econtext, TESS_COLUMN_FOR_PROJECTION);
+			tess_expr_get_column(expr);
+			break;
+		case 12:
+			/* The second argument runs where a is NULL: b - b is 0 there. */
+			expr = tess_expr_compile_value(coalesce_of(a(), op("/", int4(10), op("-", var(2, INT4OID), var(2, INT4OID)))), NULL, resolve, NULL);
+			tess_expr_bind(expr, batch, econtext, TESS_COLUMN_FOR_PROJECTION);
+			tess_expr_get_column(expr);
 			break;
 		case 8:
 			/* An operand whose column is unavailable. */

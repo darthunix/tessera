@@ -15,7 +15,8 @@
  * Vars, Const and Param scalars, and calls of functions that the function
  * registry implements (see docs/function.md), nested so that a column
  * flows through a chain of calls, a call's other argument being a scalar
- * or a value over the batch compiled as an expression of its own. A filter
+ * or a value over the batch compiled as an expression of its own; CASE,
+ * COALESCE and NULLIF over such values are values too. A filter
  * may also be a condition: AND, OR, NOT, null and boolean tests and short
  * constant IN lists over such filters, in three-valued logic. Nothing
  * else: no general intermediate representation, no non-strict functions. A

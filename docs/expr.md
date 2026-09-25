@@ -40,8 +40,9 @@ commutator's function is implemented: `100 - a` is fine because the int4
 and int8 arithmetic accept any shape; `7 < a` becomes `a > 7`. A scalar argument
 may be an expression of its own without a Var; the executor evaluates it
 whole. An expression with no Var at all is a scalar broadcast over the
-rows. `RelabelType` is transparent. Everything else in a value, `CASE`,
-`COALESCE`, a function the registry does not know,
+rows. `RelabelType` is transparent. A value may also be conditional,
+`CASE`, `COALESCE` or `NULLIF` (below). Everything else in a value, a
+function the registry does not know,
 anywhere in the tree, is left to the row-wise executor for the whole
 expression. `tess_expr_supports_value`
 decides this at planning time, without executor state, with the same rules
@@ -99,6 +100,30 @@ their int64 results into the Datum column directly, since an int8 is its
 Datum; the cast `int8(int4)` is such a step, so `c4::bigint * 3 > 570` is a
 chain of the cast, the mixed multiplication and the mixed comparison. A failed call raises its SQLSTATE and message after the call has
 returned, as every kernel error is reported.
+
+## Conditional values
+
+`CASE WHEN c THEN v … ELSE d END`, a simple `CASE x WHEN w THEN v …`,
+`COALESCE(a, b, …)` and `NULLIF(a, b)` are values when their conditions
+are supported conditions (see Conditions) and their parts supported
+values. Such a value is the input a chain may start from, as a column or
+a scalar is, so `(CASE … END) + 1`, a `CASE` as a step's operand and a
+`CASE` as an aggregate's argument need nothing more. A branch is computed
+only over the rows that take it, as the executor evaluates only the
+branch a row takes: a `CASE` condition where no earlier one was true (a
+NULL condition passes the row on), its value where it is true, the ELSE
+value over the rest, without ELSE NULL; a `COALESCE` argument where the
+earlier ones are NULL. So `CASE WHEN b <> 0 THEN a / b ELSE 0 END`
+divides no row by zero. `NULLIF` computes both arguments over every row,
+as the executor does, and calls the registered equality, which must take
+the second argument in its shape. A simple `CASE` is compiled as the
+searched one with its argument in each condition, which costs nothing
+for a bare column and recomputes a chain per condition. The branches'
+results are copied into the value's column by the rows' mask, a full
+word by block and a partial one without a branch per row. Branches may
+be of any type the parts support, a text column or constant among them;
+a by-reference result points into the batch or the plan, borrowed as any
+result is.
 
 ## Filters
 

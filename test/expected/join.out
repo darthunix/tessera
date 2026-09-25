@@ -466,6 +466,13 @@ SELECT join_same($$SELECT jf.v + jd.id8, jd.id8 - jf.v FROM jf JOIN jd ON jf.fk 
  498 rows, hash 249268ad2064bfc05ffe24da5d268bec
 (1 row)
 
+-- A conditional value over both sides, under an aggregate.
+SELECT join_same($$SELECT sum(CASE WHEN jf.v > jd.n THEN 1 ELSE 0 END), count(*) FROM jf JOIN jd ON jf.fk = jd.id$$);
+                   join_same                   
+-----------------------------------------------
+ 1 rows, hash 764ead8f8e691b51eeed52ed3b362402
+(1 row)
+
 -- A condition of several parts over both sides, NULLs in jd.n.
 EXPLAIN (COSTS OFF) SELECT count(*) FROM jf JOIN jd ON jf.fk = jd.id AND (jf.v > jd.n OR jd.n IS NULL);
                           QUERY PLAN                          

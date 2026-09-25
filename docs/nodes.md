@@ -353,7 +353,9 @@ clause after a row-wise guard, a row-wise clause between batch ones, a
 policy's row-wise guard before a cheaper user division, two computed
 sides of a comparison and of a sum's argument, conditions of several
 parts (`OR`, null and boolean tests, `IN` and `NOT IN` with a NULL, a
-division behind an `OR`), a parallel
+division behind an `OR`), conditional values (`CASE` in a clause and under
+`sum`, a simple `CASE` with a text branch, `COALESCE`, `NULLIF`, a division
+behind a `CASE` condition), a parallel
 worker, a scrollable cursor, an `UPDATE`, and the switch off. The
 parallel suite runs the node under a `Gather` with two workers (see
 TessHeapScan).
@@ -636,7 +638,7 @@ aggregate and as rows; targets above the join in another order than the
 join's and expressions over both sides, as rows, under a sort, with
 rounds and a residual clause; a row-wise guard over both sides before a
 batch division, in either written order; an `OR` with a null test over
-both sides; residual clauses over int4 columns of both sides
+both sides; a `CASE` over both sides under `sum`; residual clauses over int4 columns of both sides
 with NULLs, text, an OR over both sides, with rounds and compact
 batches, a text equality next to the key and a parameter of an outer
 query; three inner rows per key, duplicates on both sides
