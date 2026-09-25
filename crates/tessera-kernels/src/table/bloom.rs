@@ -32,7 +32,8 @@ use core::sync::atomic::AtomicU64;
 use anyhow::{Result, ensure};
 use tessera_core::{RowMask, RowMaskView};
 
-use super::header::{CHUNK_USED, HEADER_SIZE, Layout};
+use super::batch::{check_record, unlinked};
+use super::header::{CHUNK_HEADER, Layout};
 use super::record::Access;
 use super::region::{Region, order};
 
@@ -227,16 +228,14 @@ pub(super) fn fill<R: Region>(region: &R, layout: &Layout, words: &mut [u64]) ->
     })
 }
 
-/// Call `f` with the hash of every record of the table.
+/// Call `f` with the hash of every record of the table, chunk by chunk.
 #[inline(always)]
 fn each_hash<R: Region>(region: &R, layout: &Layout, mut f: impl FnMut(u32)) -> Result<()> {
-    let used = region.load_u64(CHUNK_USED) as usize;
-    let mut access = Access::new(region, layout);
-    let mut byte = HEADER_SIZE;
-    while byte < used {
-        let record = access.locate((byte / 8) as u32)?;
-        f(record.hash());
-        byte += record.len();
+    let access = Access::new(region, layout);
+    for chunk in 0..region.chunks() {
+        for byte in unlinked(&access, chunk, CHUNK_HEADER)? {
+            f(check_record(&access, (chunk, byte))?);
+        }
     }
     Ok(())
 }

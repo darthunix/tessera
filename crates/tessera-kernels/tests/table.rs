@@ -5,8 +5,8 @@ use tessera_core::{ColumnReader, ColumnView, RowMask, RowMaskView};
 use tessera_kernels::int32::{self, NullKeys, hash_combine, murmurhash32};
 use tessera_kernels::ops::ArithmeticError;
 use tessera_kernels::table::{
-    Cursor, FORMAT_VERSION, Fold, KeyKind, KeySource, MAX_KEYS, Slot, TableConfig, TableMut, bloom,
-    normalize_word, region_size,
+    CHUNK_HEADER, Cursor, FORMAT_VERSION, Fold, KeyKind, KeySource, LocalTable, MAX_CHUNK_LEN,
+    MAX_KEYS, Slot, Table, TableConfig, UNIT_BITS, bloom, index_size, normalize_word, record_bytes,
 };
 
 /// Bytes of the header, as the format fixes it.
@@ -17,7 +17,7 @@ const VERSION: usize = 8;
 const HEADER_SIZE: usize = 12;
 const REGION_LEN: usize = 16;
 const BUCKETS_OFFSET: usize = 24;
-const CHUNK_USED: usize = 32;
+const RESERVED_USED: usize = 32;
 const NRECORDS: usize = 40;
 const NBUCKETS: usize = 48;
 const BUCKET_SHIFT: usize = 52;
@@ -26,19 +26,21 @@ const NKEYS: usize = 64;
 const FLAGS: usize = 68;
 const KINDS: usize = 72;
 
+/// Chunks of the tests: small, so that most tables span several.
+const CHUNK: usize = 4096;
+
 const ONE_INT4: TableConfig<'static> = TableConfig {
     keys: &[KeyKind::Int32],
     payload_size: 8,
 };
 
-/// A named way to damage a header.
+/// A named way to damage an index.
 type Corruption<'a> = (&'a str, &'a dyn Fn(&mut [u64]));
-/// An insertion with something wrong about its arguments.
-type Attempt<'a> = &'a dyn Fn(&mut RowMask<'_>, &mut [u32]) -> Result<usize>;
 
-/// A zeroed region for `capacity` records of `config`.
-fn words_for(config: &TableConfig<'_>, capacity: u64) -> Result<Vec<u64>> {
-    Ok(vec![0; region_size(config, capacity)?.div_ceil(8)])
+/// An empty table for `capacity` records of `config` over chunks of
+/// [`CHUNK`] bytes.
+fn local(config: &TableConfig<'_>, capacity: u64) -> Result<LocalTable> {
+    LocalTable::new(config, capacity, CHUNK)
 }
 
 /// The bytes of one field, whatever the word boundaries.
@@ -71,116 +73,103 @@ fn model_buckets(capacity: u64) -> u64 {
     (capacity * 2).max(1024).next_power_of_two()
 }
 
+/// The chunk and the byte in it of a record reference, as the format
+/// packs them.
+fn placement(reference: u32) -> (usize, usize) {
+    (
+        (reference >> UNIT_BITS) as usize,
+        (reference & ((1 << UNIT_BITS) - 1)) as usize * 8,
+    )
+}
+
+/// The reference of the record at `byte` of chunk `chunk`.
+fn reference(chunk: usize, byte: usize) -> u32 {
+    ((chunk as u32) << UNIT_BITS) | (byte / 8) as u32
+}
+
 #[test]
 fn a_created_table_is_empty_and_attaches_again() -> Result<()> {
     let config = TableConfig {
         keys: &[KeyKind::Int32, KeyKind::Int64],
         payload_size: 12,
     };
-    let mut words = words_for(&config, 300)?;
-    let len = words.len() * 8;
+    let table = local(&config, 300)?;
     let stats = {
-        let table = TableMut::create_in(&mut words, &config, 300)?;
+        let table = table.table()?;
         let stats = table.stats();
         assert_eq!(stats.records, 0);
         assert_eq!(stats.buckets, 1024);
         assert_eq!(stats.bytes_used, HEADER as u64 + 1024 * 4);
-        assert_eq!(stats.region_len, len as u64);
+        assert_eq!(stats.region_len, HEADER as u64 + 1024 * 4);
         assert_eq!(table.key_kinds(), config.keys);
         assert_eq!(table.payload_size(), 12);
+        assert_eq!(table.record_size(), model_record_size(2, 12));
         stats
     };
-    let again = TableMut::exclusive(&mut words)?;
+    let again = table.table()?;
     assert_eq!(again.stats(), stats);
     assert_eq!(again.key_kinds(), config.keys);
+    assert_eq!(table.chunks(), 0, "no chunk before the first record");
     Ok(())
 }
 
 #[test]
-fn a_larger_region_than_needed_is_used_whole() -> Result<()> {
-    let mut words = words_for(&ONE_INT4, 10)?;
-    words.extend([0; 1000]);
-    let len = words.len() * 8;
-    let table = TableMut::create_in(&mut words, &ONE_INT4, 10)?;
-    assert_eq!(table.stats().region_len, len as u64);
-    assert_eq!(table.stats().buckets, 1024);
-    Ok(())
-}
-
-#[test]
-fn region_size_covers_header_records_and_buckets() -> Result<()> {
+fn index_size_covers_header_and_buckets() -> Result<()> {
     let keys = [KeyKind::Int32; 3];
     for payload_size in [0, 1, 8, 13] {
         let config = TableConfig {
             keys: &keys,
             payload_size,
         };
+        assert_eq!(record_bytes(&config)?, model_record_size(3, payload_size));
         for capacity in [0, 1, 511, 512, 513, 1000, 100_000] {
-            let size = region_size(&config, capacity)?;
-            let expected = HEADER
-                + capacity as usize * model_record_size(3, payload_size)
-                + model_buckets(capacity) as usize * 4;
-            assert_eq!(size, expected, "{payload_size} payload, {capacity} records");
-            assert_eq!(size % 8, 0);
-            let mut words = vec![0; size / 8];
-            assert!(TableMut::create_in(&mut words, &config, capacity).is_ok());
+            let size = index_size(&config, capacity)?;
+            assert_eq!(
+                size,
+                HEADER + model_buckets(capacity) as usize * 4,
+                "{payload_size} payload, {capacity} records"
+            );
+            assert!(LocalTable::new(&config, capacity, CHUNK).is_ok());
         }
     }
     Ok(())
 }
 
 #[test]
-fn a_tight_region_is_refused() -> Result<()> {
-    let mut words = words_for(&ONE_INT4, 100)?;
-    let short = words.len() - 1;
-    let error = TableMut::create_in(&mut words[..short], &ONE_INT4, 100).unwrap_err();
-    assert!(error.to_string().contains("smaller"), "{error}");
-    assert!(TableMut::create_in(&mut words, &ONE_INT4, 100).is_ok());
-    Ok(())
-}
-
-#[test]
 fn configurations_are_checked() -> Result<()> {
-    let mut words = vec![0; 2048];
     let no_keys = TableConfig {
         keys: &[],
         payload_size: 0,
     };
-    assert!(region_size(&no_keys, 1).is_err());
-    assert!(TableMut::create_in(&mut words, &no_keys, 1).is_err());
+    assert!(index_size(&no_keys, 1).is_err());
+    assert!(local(&no_keys, 1).is_err());
     let too_many = TableConfig {
         keys: &[KeyKind::Int64; MAX_KEYS + 1],
         payload_size: 0,
     };
-    assert!(region_size(&too_many, 1).is_err());
+    assert!(index_size(&too_many, 1).is_err());
     let most = TableConfig {
         keys: &[KeyKind::Int64; MAX_KEYS],
         payload_size: 0,
     };
-    assert!(TableMut::create_in(&mut words, &most, 1).is_ok());
+    assert!(local(&most, 1).is_ok());
     let huge_payload = TableConfig {
         keys: &[KeyKind::Int32],
         payload_size: usize::MAX - 100,
     };
-    assert!(region_size(&huge_payload, 1).is_err());
+    assert!(index_size(&huge_payload, 1).is_err());
     let wide_payload = TableConfig {
         keys: &[KeyKind::Int32],
         payload_size: 1 << 33,
     };
-    assert!(region_size(&wide_payload, 1).is_err());
-    assert!(region_size(&ONE_INT4, u64::MAX).is_err());
-    assert!(region_size(&ONE_INT4, u64::MAX / 32).is_err());
-    Ok(())
-}
-
-#[test]
-fn a_slice_shorter_than_the_region_is_refused() -> Result<()> {
-    let mut words = words_for(&ONE_INT4, 100)?;
-    TableMut::create_in(&mut words, &ONE_INT4, 100)?;
-    let short = words.len() - 1;
-    let error = TableMut::exclusive(&mut words[..short]).unwrap_err();
-    assert!(error.to_string().contains("exceeds"), "{error}");
-    assert!(TableMut::exclusive(&mut words).is_ok());
+    assert!(index_size(&wide_payload, 1).is_err());
+    for bad in [0, 4, 12, MAX_CHUNK_LEN + 8] {
+        assert!(
+            LocalTable::new(&ONE_INT4, 1, bad).is_err(),
+            "chunks of {bad} bytes"
+        );
+    }
+    assert!(LocalTable::new(&ONE_INT4, 1, MAX_CHUNK_LEN).is_ok());
     Ok(())
 }
 
@@ -190,38 +179,27 @@ fn a_corrupt_header_is_refused() -> Result<()> {
         keys: &[KeyKind::Int32, KeyKind::Int64],
         payload_size: 8,
     };
-    let fresh = |words: &mut Vec<u64>| -> Result<usize> {
-        TableMut::create_in(words, &config, 100)?;
-        Ok(words.len() * 8)
-    };
-    let mut words = words_for(&config, 100)?;
-    let len = fresh(&mut words)?;
-    let buckets_offset = (len - 1024 * 4) as u64;
+    let len = (HEADER + 1024 * 4) as u64;
     let corruptions: &[Corruption<'_>] = &[
         ("magic", &|w| set_u64(w, MAGIC, 0x5445_5353_5f54_4142)),
         ("version", &|w| set_u32(w, VERSION, FORMAT_VERSION + 1)),
         ("header size", &|w| set_u32(w, HEADER_SIZE, 88)),
-        ("region longer than given", &|w| {
-            set_u64(w, REGION_LEN, len as u64 + 8)
+        ("index longer than given", &|w| {
+            set_u64(w, REGION_LEN, len + 8)
         }),
-        ("region shorter than buckets", &|w| {
-            set_u64(w, REGION_LEN, len as u64 - 8)
+        ("index shorter than buckets", &|w| {
+            set_u64(w, REGION_LEN, len - 8)
         }),
-        ("region not a multiple of 8", &|w| {
-            set_u64(w, REGION_LEN, len as u64 - 4)
+        ("index not a multiple of 8", &|w| {
+            set_u64(w, REGION_LEN, len - 4)
         }),
-        ("buckets past the end", &|w| {
-            set_u64(w, BUCKETS_OFFSET, buckets_offset + 8)
+        ("buckets moved", &|w| {
+            set_u64(w, BUCKETS_OFFSET, HEADER as u64 + 8)
         }),
         ("buckets misaligned", &|w| {
-            set_u64(w, BUCKETS_OFFSET, buckets_offset - 4)
+            set_u64(w, BUCKETS_OFFSET, HEADER as u64 - 4)
         }),
-        ("records overlap buckets", &|w| {
-            set_u64(w, CHUNK_USED, buckets_offset + 8)
-        }),
-        ("record area before header", &|w| set_u64(w, CHUNK_USED, 88)),
-        ("record area misaligned", &|w| set_u64(w, CHUNK_USED, 100)),
-        ("more records than bytes", &|w| set_u64(w, NRECORDS, 1)),
+        ("reserved word", &|w| set_u64(w, RESERVED_USED, 8)),
         ("buckets not a power of two", &|w| {
             set_u32(w, NBUCKETS, 1000)
         }),
@@ -234,18 +212,20 @@ fn a_corrupt_header_is_refused() -> Result<()> {
         ("flags", &|w| set_u32(w, FLAGS, 1)),
     ];
     for (what, corrupt) in corruptions {
-        fresh(&mut words)?;
-        corrupt(&mut words);
-        assert!(
-            TableMut::exclusive(&mut words).is_err(),
-            "{what} was accepted"
-        );
+        let mut table = local(&config, 100)?;
+        corrupt(table.index_words());
+        assert!(table.table().is_err(), "{what} was accepted");
     }
-    fresh(&mut words)?;
-    set_bytes(&mut words, KINDS + 2, &[3]);
+    let mut table = local(&config, 100)?;
+    set_bytes(table.index_words(), KINDS + 2, &[3]);
     assert!(
-        TableMut::exclusive(&mut words).is_ok(),
+        table.table().is_ok(),
         "a kind byte past the keys is ignored"
+    );
+    set_u64(table.index_words(), NRECORDS, 12);
+    assert!(
+        table.table().is_ok(),
+        "the record count is the links', not checked against chunks"
     );
     Ok(())
 }
@@ -312,9 +292,9 @@ impl KeySource for Mixed<'_> {
     }
 }
 
-/// Insert every row of a batch, expecting room for all of them.
+/// Append and link every row of a batch, expecting all of them to go in.
 fn insert_all<K: KeySource + ?Sized>(
-    table: &TableMut<'_>,
+    table: &mut LocalTable,
     hashes: &[u32],
     keys: &K,
     payload: Option<&[u8]>,
@@ -331,7 +311,7 @@ fn insert_all<K: KeySource + ?Sized>(
 
 /// Probe every row of a batch: the rows found and their matches.
 fn probe_all<K: KeySource + ?Sized>(
-    table: &TableMut<'_>,
+    table: &Table<'_>,
     hashes: &[u32],
     keys: &K,
 ) -> Result<(Vec<usize>, Vec<u32>)> {
@@ -351,19 +331,26 @@ fn inserted_rows_are_found_and_absent_keys_are_not() -> Result<()> {
     let keys = [ColumnView::try_new(&values, None)?];
     let hashes: Vec<u32> = values.iter().map(|&value| hash_i32(value)).collect();
     let payload = payload_for(200);
-    let mut words = words_for(&ONE_INT4, 200)?;
-    let table = TableMut::create_in(&mut words, &ONE_INT4, 200)?;
-    let offsets = insert_all(&table, &hashes, &keys[..], Some(&payload))?;
-    assert_eq!(table.stats().records, 200);
+    let mut table = local(&ONE_INT4, 200)?;
+    let offsets = insert_all(&mut table, &hashes, &keys[..], Some(&payload))?;
     assert_eq!(
-        table.stats().bytes_used,
-        HEADER as u64 + 200 * 32 + 1024 * 4,
-        "a record of one key and eight payload bytes takes 32 bytes"
+        table.chunks(),
+        2,
+        "a record of one key and eight payload bytes takes 32 bytes: 127 per chunk"
     );
+    let table = table.table()?;
+    assert_eq!(table.stats().records, 200);
+    assert_eq!(table.stats().bytes_used, HEADER as u64 + 1024 * 4);
     let mut seen = offsets.clone();
     seen.sort_unstable();
     seen.dedup();
-    assert_eq!(seen.len(), 200, "every record has its own offset");
+    assert_eq!(seen.len(), 200, "every record has its own reference");
+    assert_eq!(placement(offsets[126]), (0, CHUNK_HEADER + 126 * 32));
+    assert_eq!(
+        placement(offsets[127]),
+        (1, CHUNK_HEADER),
+        "the next chunk takes the rest"
+    );
     for (row, &offset) in offsets.iter().enumerate() {
         let record = table.record(offset)?;
         assert_eq!(record.hash, hashes[row]);
@@ -408,9 +395,9 @@ fn equal_keys_chain_through_next_match() -> Result<()> {
     let keys = [ColumnView::try_new(&values, None)?];
     let hashes: Vec<u32> = values.iter().map(|&value| hash_i32(value)).collect();
     let payload = payload_for(100);
-    let mut words = words_for(&ONE_INT4, 100)?;
-    let table = TableMut::create_in(&mut words, &ONE_INT4, 100)?;
-    insert_all(&table, &hashes, &keys[..], Some(&payload))?;
+    let mut table = local(&ONE_INT4, 100)?;
+    insert_all(&mut table, &hashes, &keys[..], Some(&payload))?;
+    let table = table.table()?;
 
     let (found, matches) = probe_all(&table, &hashes, &keys[..])?;
     assert_eq!(found.len(), 100);
@@ -467,10 +454,10 @@ fn a_null_key_groups_apart_from_the_value_it_hashes_like() -> Result<()> {
     assert_eq!(hashes[0], hashes[1], "the value and the NULL hash alike");
     assert_eq!(valid.as_view().selected_count(), 2);
 
-    let mut words = words_for(&ONE_INT4, 2)?;
-    let table = TableMut::create_in(&mut words, &ONE_INT4, 2)?;
+    let mut table = local(&ONE_INT4, 2)?;
     let mut offsets = [0; 2];
     table.insert(&hashes, &keys[..], None, &mut valid, &mut offsets)?;
+    let table = table.table()?;
     assert_eq!(table.stats().records, 2);
     let (found, matches) = probe_all(&table, &hashes, &keys[..])?;
     assert_eq!(found, [0, 1]);
@@ -487,7 +474,7 @@ fn a_null_key_groups_apart_from_the_value_it_hashes_like() -> Result<()> {
     let mut next = matches.clone();
     table.next_match(&mut next, &rows, &mut more)?;
     assert_eq!(more_words, [0], "neither has a second record");
-    assert_eq!(next, matches, "offsets without a next record stay");
+    assert_eq!(next, matches, "references without a next record stay");
 
     let mut rejected_words = [0b11];
     let mut rejected = RowMask::try_new(2, &mut rejected_words)?;
@@ -498,9 +485,9 @@ fn a_null_key_groups_apart_from_the_value_it_hashes_like() -> Result<()> {
         &mut hashes,
         &mut rejected,
     )?;
-    let mut words = words_for(&ONE_INT4, 2)?;
-    let table = TableMut::create_in(&mut words, &ONE_INT4, 2)?;
+    let mut table = local(&ONE_INT4, 2)?;
     table.insert(&hashes, &keys[..], None, &mut rejected, &mut offsets)?;
+    let table = table.table()?;
     assert_eq!(
         table.stats().records,
         1,
@@ -528,9 +515,9 @@ fn two_keys_of_different_kinds_compare_whole() -> Result<()> {
         Key::Int4(ColumnView::try_new(&first, None)?),
         Key::Int8(ColumnView::try_new(&second, None)?),
     ]);
-    let mut words = words_for(&config, 100)?;
-    let table = TableMut::create_in(&mut words, &config, 100)?;
-    let offsets = insert_all(&table, &hashes, &keys, None)?;
+    let mut table = local(&config, 100)?;
+    let offsets = insert_all(&mut table, &hashes, &keys, None)?;
+    let table = table.table()?;
     let record = table.record(offsets[5])?;
     assert_eq!(record.keys, &[i64::from(first[5]), second[5]]);
     assert!(record.payload.is_empty());
@@ -559,30 +546,84 @@ fn two_keys_of_different_kinds_compare_whole() -> Result<()> {
 }
 
 #[test]
-fn a_full_table_leaves_the_rest_pending() -> Result<()> {
+fn a_full_chunk_leaves_the_rest_pending_until_linked_elsewhere() -> Result<()> {
     let values: Vec<i32> = (0..100).collect();
     let keys = [ColumnView::try_new(&values, None)?];
     let hashes: Vec<u32> = values.iter().map(|&value| hash_i32(value)).collect();
-    let mut words = words_for(&ONE_INT4, 16)?;
-    let table = TableMut::create_in(&mut words, &ONE_INT4, 16)?;
+    // A chunk of exactly sixteen records of 32 bytes after its used mark.
+    let mut table = LocalTable::new(&ONE_INT4, 100, CHUNK_HEADER + 16 * 32)?;
+    let chunk = table.add_chunk()?;
     let mut pending_words = all_rows(100);
-    let mut pending = RowMask::try_new(100, &mut pending_words)?;
     let mut offsets = vec![0; 100];
-    let inserted = table.insert(&hashes, &keys[..], None, &mut pending, &mut offsets)?;
-    assert_eq!(inserted, 16, "a region for 16 records holds 16");
-    assert_eq!(rows_of(&pending.as_view()), (16..100).collect::<Vec<_>>());
-    assert_eq!(table.stats().records, 16);
-    assert_eq!(
-        table.stats().bytes_used,
-        table.stats().region_len,
-        "no byte is left"
+    {
+        let shared = table.table()?;
+        let mut pending = RowMask::try_new(100, &mut pending_words)?;
+        let appended =
+            shared.append(chunk, &hashes, &keys[..], None, &mut pending, &mut offsets)?;
+        assert_eq!(appended, 16, "a chunk of sixteen records holds sixteen");
+        assert_eq!(rows_of(&pending.as_view()), (16..100).collect::<Vec<_>>());
+        assert_eq!(
+            shared.append(chunk, &hashes, &keys[..], None, &mut pending, &mut offsets)?,
+            0
+        );
+        assert_eq!(
+            shared.stats().records,
+            0,
+            "appended records are not linked yet"
+        );
+        let (found, _) = probe_all(&shared, &hashes, &keys[..])?;
+        assert!(found.is_empty(), "nor found");
+        let mut from = CHUNK_HEADER;
+        assert_eq!(shared.link(chunk, &mut from)?, 16);
+        assert_eq!(from, CHUNK_HEADER + 16 * 32);
+        assert_eq!(shared.link(chunk, &mut from)?, 0, "nothing is linked twice");
+        assert_eq!(shared.stats().records, 16);
+        let (found, matches) = probe_all(&shared, &hashes, &keys[..])?;
+        assert_eq!(found, (0..16).collect::<Vec<_>>());
+        assert_eq!(matches[..16], offsets[..16]);
+    }
+    assert_eq!(table.chunk_words(chunk)[0], (CHUNK_HEADER + 16 * 32) as u64);
+    // The rest go into a second chunk and are found alongside.
+    let second = table.add_chunk()?;
+    let shared = table.table()?;
+    let mut pending = RowMask::try_new(100, &mut pending_words)?;
+    shared.append(second, &hashes, &keys[..], None, &mut pending, &mut offsets)?;
+    let mut from = CHUNK_HEADER;
+    shared.link(second, &mut from)?;
+    assert_eq!(placement(offsets[16]), (second, CHUNK_HEADER));
+    let (found, _) = probe_all(&shared, &hashes, &keys[..])?;
+    assert_eq!(found, (0..32).collect::<Vec<_>>());
+    // Appending to or linking a chunk that does not exist, or linking from
+    // inside a record or past the used mark, fails.
+    assert!(
+        shared
+            .append(9, &hashes, &keys[..], None, &mut pending, &mut offsets)
+            .is_err()
     );
-    let again = table.insert(&hashes, &keys[..], None, &mut pending, &mut offsets)?;
-    assert_eq!(again, 0);
-    assert_eq!(pending.as_view().selected_count(), 84);
-    let (found, matches) = probe_all(&table, &hashes, &keys[..])?;
-    assert_eq!(found, (0..16).collect::<Vec<_>>());
-    assert_eq!(matches[..16], offsets[..16]);
+    let mut from = CHUNK_HEADER;
+    assert!(shared.link(9, &mut from).is_err());
+    let mut inside = CHUNK_HEADER + 4;
+    assert!(shared.link(chunk, &mut inside).is_err());
+    let mut past = CHUNK_HEADER + 17 * 32;
+    assert!(shared.link(chunk, &mut past).is_err());
+    Ok(())
+}
+
+#[test]
+fn a_record_larger_than_a_chunk_is_refused() -> Result<()> {
+    let config = TableConfig {
+        keys: &[KeyKind::Int32],
+        payload_size: 64,
+    };
+    let values = [1];
+    let keys = [ColumnView::try_new(&values, None)?];
+    let mut table = LocalTable::new(&config, 1, CHUNK_HEADER + 64)?;
+    let mut pending_words = [1];
+    let mut pending = RowMask::try_new(1, &mut pending_words)?;
+    let error = table
+        .insert(&[hash_i32(1)], &keys[..], None, &mut pending, &mut [0])
+        .unwrap_err();
+    assert!(error.to_string().contains("does not fit"), "{error}");
     Ok(())
 }
 
@@ -593,9 +634,9 @@ fn batches_of_every_shape_round_trip() -> Result<()> {
         let keys = [ColumnView::try_new(&values, None)?];
         let hashes: Vec<u32> = values.iter().map(|&value| hash_i32(value)).collect();
         let payload = payload_for(nrows);
-        let mut words = words_for(&ONE_INT4, nrows as u64)?;
-        let table = TableMut::create_in(&mut words, &ONE_INT4, nrows as u64)?;
-        let offsets = insert_all(&table, &hashes, &keys[..], Some(&payload))?;
+        let mut table = local(&ONE_INT4, nrows as u64)?;
+        let offsets = insert_all(&mut table, &hashes, &keys[..], Some(&payload))?;
+        let table = table.table()?;
         assert_eq!(table.stats().records, nrows as u64, "{nrows} rows");
         let (found, matches) = probe_all(&table, &hashes, &keys[..])?;
         assert_eq!(found, (0..nrows).collect::<Vec<_>>(), "{nrows} rows");
@@ -617,10 +658,9 @@ fn a_missing_payload_is_zeros() -> Result<()> {
         keys: &[KeyKind::Int32],
         payload_size: 13,
     };
-    let mut words = words_for(&config, 1)?;
-    let table = TableMut::create_in(&mut words, &config, 1)?;
-    let offsets = insert_all(&table, &hashes, &keys[..], None)?;
-    assert_eq!(table.record(offsets[0])?.payload, [0; 13]);
+    let mut table = local(&config, 1)?;
+    let offsets = insert_all(&mut table, &hashes, &keys[..], None)?;
+    assert_eq!(table.table()?.record(offsets[0])?.payload, [0; 13]);
     Ok(())
 }
 
@@ -638,71 +678,103 @@ fn dimension_errors_come_before_any_change() -> Result<()> {
     ];
     let hashes: Vec<u32> = values.iter().map(|&value| hash_i32(value)).collect();
     let payload = payload_for(70);
-    let mut words = words_for(&config, 70)?;
-    let table = TableMut::create_in(&mut words, &config, 70)?;
+    let mut table = local(&config, 70)?;
+    let chunk = table.add_chunk()?;
     let mut pending_words = all_rows(70);
     let mut offsets = vec![0; 70];
     let rows_words = all_rows(70);
     let rows = RowMaskView::try_new(70, &rows_words)?;
     {
+        let shared = table.table()?;
         let mut pending = RowMask::try_new(70, &mut pending_words)?;
-        let attempts: [Attempt<'_>; 4] = [
-            &|pending, offsets| table.insert(&hashes, &one_key[..], None, pending, offsets),
-            &|pending, offsets| table.insert(&hashes[..69], &two_keys[..], None, pending, offsets),
-            &|pending, offsets| {
-                table.insert(&hashes, &two_keys[..], None, pending, &mut offsets[..69])
-            },
-            &|pending, offsets| {
-                table.insert(
+        assert!(
+            shared
+                .append(
+                    chunk,
+                    &hashes,
+                    &one_key[..],
+                    None,
+                    &mut pending,
+                    &mut offsets
+                )
+                .is_err()
+        );
+        assert!(
+            shared
+                .append(
+                    chunk,
+                    &hashes[..69],
+                    &two_keys[..],
+                    None,
+                    &mut pending,
+                    &mut offsets
+                )
+                .is_err()
+        );
+        assert!(
+            shared
+                .append(
+                    chunk,
+                    &hashes,
+                    &two_keys[..],
+                    None,
+                    &mut pending,
+                    &mut offsets[..69]
+                )
+                .is_err()
+        );
+        assert!(
+            shared
+                .append(
+                    chunk,
                     &hashes,
                     &two_keys[..],
                     Some(&payload[..8]),
-                    pending,
-                    offsets,
+                    &mut pending,
+                    &mut offsets
                 )
-            },
-        ];
-        for (what, attempt) in attempts.iter().enumerate() {
-            assert!(
-                attempt(&mut pending, &mut offsets).is_err(),
-                "attempt {what}"
-            );
-        }
+                .is_err()
+        );
         assert_eq!(pending.as_view().selected_count(), 70);
+        assert_eq!(shared.stats().records, 0);
+        let mut found_words = vec![0; 2];
+        let mut found = RowMask::try_new(70, &mut found_words)?;
+        let mut matches = vec![0; 70];
+        assert!(
+            shared
+                .probe(&hashes, &one_key[..], &rows, &mut matches, &mut found)
+                .is_err()
+        );
+        assert!(
+            shared
+                .probe(
+                    &hashes,
+                    &two_keys[..],
+                    &rows,
+                    &mut matches[..69],
+                    &mut found
+                )
+                .is_err()
+        );
+        let mut short_words = vec![0; 2];
+        let mut short = RowMask::try_new(69, &mut short_words)?;
+        assert!(
+            shared
+                .probe(&hashes, &two_keys[..], &rows, &mut matches, &mut short)
+                .is_err()
+        );
+        assert!(
+            shared
+                .next_match(&mut offsets[..69], &rows, &mut found)
+                .is_err()
+        );
+        assert!(shared.next_match(&mut offsets, &rows, &mut short).is_err());
     }
-    assert_eq!(table.stats().records, 0);
-    let mut found_words = vec![0; 2];
-    let mut found = RowMask::try_new(70, &mut found_words)?;
-    let mut matches = vec![0; 70];
-    assert!(
-        table
-            .probe(&hashes, &one_key[..], &rows, &mut matches, &mut found)
-            .is_err()
+    assert_eq!(
+        table.chunk_words(chunk)[0],
+        CHUNK_HEADER as u64,
+        "the chunk took nothing"
     );
-    assert!(
-        table
-            .probe(
-                &hashes,
-                &two_keys[..],
-                &rows,
-                &mut matches[..69],
-                &mut found
-            )
-            .is_err()
-    );
-    let mut short_words = vec![0; 2];
-    let mut short = RowMask::try_new(69, &mut short_words)?;
-    assert!(
-        table
-            .probe(&hashes, &two_keys[..], &rows, &mut matches, &mut short)
-            .is_err()
-    );
-    assert!(
-        table
-            .next_match(&mut offsets[..69], &rows, &mut found)
-            .is_err()
-    );
-    assert!(table.next_match(&mut offsets, &rows, &mut short).is_err());
     let mut pending = RowMask::try_new(70, &mut pending_words)?;
     assert_eq!(
         table.insert(
@@ -717,57 +789,14 @@ fn dimension_errors_come_before_any_change() -> Result<()> {
     Ok(())
 }
 
-#[test]
-fn a_corrupt_bucket_or_chain_is_an_error() -> Result<()> {
-    let values: Vec<i32> = (0..5).collect();
-    let keys = [ColumnView::try_new(&values, None)?];
-    let hashes: Vec<u32> = values.iter().map(|&value| hash_i32(value)).collect();
-    let mut words = words_for(&ONE_INT4, 5)?;
-    let len = words.len() * 8;
-    let offsets = {
-        let table = TableMut::create_in(&mut words, &ONE_INT4, 5)?;
-        insert_all(&table, &hashes, &keys[..], None)?
-    };
-    let record_byte = offsets[0] as usize * 8;
-    assert!(table_probe_one(&mut words, &hashes, &keys).is_ok());
-
-    // The head of the bucket of key 0 points past the records.
-    let bucket = len - 1024 * 4 + (hashes[0] >> 22) as usize * 4;
-    let mut damaged = words.clone();
-    set_u32(&mut damaged, bucket, (len / 8) as u32);
-    assert!(table_probe_one(&mut damaged, &hashes, &keys).is_err());
-    let mut damaged = words.clone();
-    set_u32(&mut damaged, bucket, 1);
-    assert!(table_probe_one(&mut damaged, &hashes, &keys).is_err());
-    let mut damaged = words.clone();
-    set_u32(&mut damaged, bucket, offsets[0] + 1);
-    assert!(table_probe_one(&mut damaged, &hashes, &keys).is_err());
-    {
-        let table = TableMut::exclusive(&mut words)?;
-        assert!(
-            table.record(offsets[0] + 1).is_err(),
-            "an offset inside a record"
-        );
-    }
-
-    // The record of key 0 chains to itself: a probe with its hash and an
-    // absent key walks the cycle and gives up.
-    set_u32(&mut words, record_byte + 4, offsets[0]);
-    let absent = [999; 5];
-    let absent_keys = [ColumnView::try_new(&absent, None)?];
-    let error = table_probe_one(&mut words, &hashes, &absent_keys).unwrap_err();
-    assert!(error.to_string().contains("longer"), "{error}");
-    Ok(())
-}
-
 /// Probe the first row of a batch through a fresh attachment.
 fn table_probe_one(
-    words: &mut [u64],
+    table: &LocalTable,
     hashes: &[u32],
     keys: &[ColumnView<'_, i32>],
 ) -> Result<bool> {
     let nrows = hashes.len();
-    let table = TableMut::exclusive(words)?;
+    let table = table.table()?;
     let rows_words = [1];
     let rows = RowMaskView::try_new(nrows, &rows_words)?;
     let mut found_words = [0];
@@ -777,10 +806,64 @@ fn table_probe_one(
     Ok(found_words[0] == 1)
 }
 
-/// Resolve every row of a batch to a record, expecting room for all: the
-/// offsets and the rows whose record was created.
+#[test]
+fn a_corrupt_reference_chain_or_used_mark_is_an_error() -> Result<()> {
+    let values: Vec<i32> = (0..5).collect();
+    let keys = [ColumnView::try_new(&values, None)?];
+    let hashes: Vec<u32> = values.iter().map(|&value| hash_i32(value)).collect();
+    let mut table = local(&ONE_INT4, 5)?;
+    let offsets = insert_all(&mut table, &hashes, &keys[..], None)?;
+    assert!(table_probe_one(&table, &hashes, &keys)?);
+    let bucket = HEADER + (hashes[0] >> 22) as usize * 4;
+    let head = table.index_words()[bucket / 8];
+    for (what, damaged) in [
+        ("a chunk that does not exist", reference(3, CHUNK_HEADER)),
+        ("a chunk's used mark", reference(0, 0) | 1 << UNIT_BITS),
+        ("past the chunk", reference(0, CHUNK - 8)),
+        ("inside a record", offsets[0] + 1),
+    ] {
+        set_u32(table.index_words(), bucket, damaged);
+        assert!(
+            table_probe_one(&table, &hashes, &keys).is_err(),
+            "a head at {what}"
+        );
+        table.index_words()[bucket / 8] = head;
+    }
+    assert!(table_probe_one(&table, &hashes, &keys)?);
+    assert!(
+        table.table()?.record(offsets[0] + 1).is_err(),
+        "a reference inside a record"
+    );
+
+    // The record of key 0 chains to itself: a probe with its hash and an
+    // absent key walks the cycle and gives up.
+    let (chunk, byte) = placement(offsets[0]);
+    set_u32(table.chunk_words(chunk), byte + 4, offsets[0]);
+    let absent = [999; 5];
+    let absent_keys = [ColumnView::try_new(&absent, None)?];
+    let error = table_probe_one(&table, &hashes, &absent_keys).unwrap_err();
+    assert!(error.to_string().contains("longer"), "{error}");
+
+    // A used mark that ends no record, or lies past the chunk.
+    for used in [12, CHUNK as u64 + 8] {
+        table.chunk_words(0)[0] = used;
+        assert!(
+            table
+                .table_mut()?
+                .scan(&mut Cursor::start(), &mut [0; 8])
+                .is_err()
+        );
+        let mut from = CHUNK_HEADER;
+        assert!(table.table()?.link(0, &mut from).is_err());
+    }
+    Ok(())
+}
+
+/// Resolve every row of a batch to a record, adding chunks and building a
+/// larger index as needed: the references and the rows whose record was
+/// created.
 fn resolve_all<K: KeySource + ?Sized>(
-    table: &mut TableMut<'_>,
+    table: &mut LocalTable,
     hashes: &[u32],
     keys: &K,
 ) -> Result<(Vec<u32>, Vec<usize>)> {
@@ -797,8 +880,10 @@ fn resolve_all<K: KeySource + ?Sized>(
     Ok((offsets, created))
 }
 
-/// Every record of a table in insertion order, through walks of `step`.
-fn scan_all(table: &TableMut<'_>, step: usize) -> Result<Vec<u32>> {
+/// Every record of a table in the order it was appended, through walks of
+/// `step`.
+fn scan_all(table: &mut LocalTable, step: usize) -> Result<Vec<u32>> {
+    let table = table.table_mut()?;
     let mut cursor = Cursor::start();
     let mut out = vec![0; step];
     let mut all = Vec::new();
@@ -818,30 +903,35 @@ fn rows_find_or_create_the_record_of_their_keys() -> Result<()> {
     let values: Vec<i32> = (0..100).map(|row| row % 10).collect();
     let keys = [ColumnView::try_new(&values, None)?];
     let hashes: Vec<u32> = values.iter().map(|&value| hash_i32(value)).collect();
-    let mut words = words_for(&ONE_INT4, 20)?;
-    let mut table = TableMut::create_in(&mut words, &ONE_INT4, 20)?;
+    let mut table = local(&ONE_INT4, 20)?;
     let (offsets, created) = resolve_all(&mut table, &hashes, &keys[..])?;
     assert_eq!(
         created,
         (0..10).collect::<Vec<_>>(),
         "the first row of each key"
     );
-    assert_eq!(table.stats().records, 10);
+    assert_eq!(table.table()?.stats().records, 10);
     for row in 0..100 {
         assert_eq!(offsets[row], offsets[row % 10]);
-        assert_eq!(table.record(offsets[row])?.keys, &[(row % 10) as i64]);
-        assert_eq!(table.record(offsets[row])?.payload, [0; 8]);
+        assert_eq!(
+            table.table()?.record(offsets[row])?.keys,
+            &[(row % 10) as i64]
+        );
+        assert_eq!(table.table()?.record(offsets[row])?.payload, [0; 8]);
     }
-    for (key, &offset) in offsets[..10].iter().enumerate() {
-        table
-            .payload_mut(offset)?
-            .copy_from_slice(&(key as u64 * 7).to_ne_bytes());
+    {
+        let mut writer = table.table_mut()?;
+        for (key, &offset) in offsets[..10].iter().enumerate() {
+            writer
+                .payload_mut(offset)?
+                .copy_from_slice(&(key as u64 * 7).to_ne_bytes());
+        }
+        assert!(writer.payload_mut(offsets[0] + 1).is_err());
     }
     for (row, &offset) in offsets.iter().enumerate() {
-        let payload = table.record(offset)?.payload;
+        let payload = table.table()?.record(offset)?.payload.to_vec();
         assert_eq!(payload, ((row % 10) as u64 * 7).to_ne_bytes());
     }
-    assert!(table.payload_mut(offsets[0] + 1).is_err());
 
     let more: Vec<i32> = (5..15).collect();
     let more_keys = [ColumnView::try_new(&more, None)?];
@@ -853,6 +943,7 @@ fn rows_find_or_create_the_record_of_their_keys() -> Result<()> {
         "keys 10 to 14 are new"
     );
     assert_eq!(more_offsets[..5], offsets[5..10]);
+    let table = table.table()?;
     assert_eq!(table.stats().records, 15);
     let (found, matches) = probe_all(&table, &more_hashes, &more_keys[..])?;
     assert_eq!(found.len(), 10);
@@ -861,77 +952,127 @@ fn rows_find_or_create_the_record_of_their_keys() -> Result<()> {
 }
 
 #[test]
-fn a_full_table_resolves_known_keys_only() -> Result<()> {
+fn a_full_chunk_resolves_known_keys_only() -> Result<()> {
     let values: Vec<i32> = (0..20).collect();
     let keys = [ColumnView::try_new(&values, None)?];
     let hashes: Vec<u32> = values.iter().map(|&value| hash_i32(value)).collect();
-    let mut words = words_for(&ONE_INT4, 4)?;
-    let mut table = TableMut::create_in(&mut words, &ONE_INT4, 4)?;
+    // A chunk of four records.
+    let mut table = LocalTable::new(&ONE_INT4, 20, CHUNK_HEADER + 4 * 32)?;
+    let chunk = table.add_chunk()?;
     let mut pending_words = all_rows(20);
-    let mut pending = RowMask::try_new(20, &mut pending_words)?;
     let mut offsets = vec![0; 20];
     let mut inserted_words = [0];
-    let mut inserted = RowMask::try_new(20, &mut inserted_words)?;
-    let resolved = table.find_or_insert(
-        &hashes,
-        &keys[..],
-        &mut pending,
-        &mut offsets,
-        &mut inserted,
-    )?;
-    assert_eq!(resolved, 4);
-    assert_eq!(rows_of(&pending.as_view()), (4..20).collect::<Vec<_>>());
+    {
+        let mut writer = table.table_mut()?;
+        let mut pending = RowMask::try_new(20, &mut pending_words)?;
+        let mut inserted = RowMask::try_new(20, &mut inserted_words)?;
+        let resolved = writer.find_or_insert(
+            chunk,
+            &hashes,
+            &keys[..],
+            &mut pending,
+            &mut offsets,
+            &mut inserted,
+        )?;
+        assert_eq!(resolved, 4);
+        assert_eq!(rows_of(&pending.as_view()), (4..20).collect::<Vec<_>>());
+    }
     assert_eq!(inserted_words, [0b1111]);
 
     let known: Vec<i32> = [3, 2, 1, 0, 3].into();
     let known_keys = [ColumnView::try_new(&known, None)?];
     let known_hashes: Vec<u32> = known.iter().map(|&value| hash_i32(value)).collect();
-    let (known_offsets, created) = resolve_all(&mut table, &known_hashes, &known_keys[..])?;
-    assert!(created.is_empty(), "no room is needed for known keys");
+    let mut known_pending = all_rows(5);
+    let mut known_offsets = vec![0; 5];
+    let mut created = [0];
+    let resolved = table.table_mut()?.find_or_insert(
+        chunk,
+        &known_hashes,
+        &known_keys[..],
+        &mut RowMask::try_new(5, &mut known_pending)?,
+        &mut known_offsets,
+        &mut RowMask::try_new(5, &mut created)?,
+    )?;
+    assert_eq!(resolved, 5, "no room is needed for known keys");
+    assert_eq!(created, [0]);
     assert_eq!(known_offsets[0], offsets[3]);
     assert_eq!(known_offsets[4], offsets[3]);
     assert_eq!(known_offsets[3], offsets[0]);
-    assert_eq!(table.stats().records, 4);
+    assert_eq!(table.table()?.stats().records, 4);
     Ok(())
 }
 
 #[test]
-fn a_walk_visits_every_record_once_in_insertion_order() -> Result<()> {
-    let values: Vec<i32> = (0..200).map(|row| row * 7 % 50).collect();
+fn an_index_takes_records_up_to_half_its_buckets_and_regrows() -> Result<()> {
+    let values: Vec<i32> = (0..1500).collect();
     let keys = [ColumnView::try_new(&values, None)?];
     let hashes: Vec<u32> = values.iter().map(|&value| hash_i32(value)).collect();
-    let mut words = words_for(&ONE_INT4, 200)?;
-    let table = TableMut::create_in(&mut words, &ONE_INT4, 200)?;
-    assert!(scan_all(&table, 64)?.is_empty());
+    let mut table = LocalTable::new(&ONE_INT4, 1, MAX_CHUNK_LEN)?;
+    let chunk = table.add_chunk()?;
+    let mut pending_words = all_rows(1500);
+    let mut offsets = vec![0; 1500];
+    let mut inserted_words = all_rows(1500);
+    let resolved = table.table_mut()?.find_or_insert(
+        chunk,
+        &hashes,
+        &keys[..],
+        &mut RowMask::try_new(1500, &mut pending_words)?,
+        &mut offsets,
+        &mut RowMask::try_new(1500, &mut inserted_words)?,
+    )?;
+    assert_eq!(resolved, 512, "1024 buckets take 512 records");
+    // The owner builds larger indexes as it goes; references stay.
+    let first = offsets[..512].to_vec();
+    let (all, created) = resolve_all(&mut table, &hashes, &keys[..])?;
+    assert_eq!(all[..512], first);
+    assert_eq!(created, (512..1500).collect::<Vec<_>>());
+    assert_eq!(table.chunks(), 1, "the records never moved");
+    let shared = table.table()?;
+    assert_eq!(shared.stats().records, 1500);
+    assert!(shared.stats().buckets >= 4096);
+    let (found, matches) = probe_all(&shared, &hashes, &keys[..])?;
+    assert_eq!(found.len(), 1500);
+    assert_eq!(matches, all);
+    Ok(())
+}
+
+#[test]
+fn a_walk_visits_every_record_once_in_appended_order() -> Result<()> {
+    let values: Vec<i32> = (0..400).map(|row| row * 7 % 50).collect();
+    let hashes: Vec<u32> = values.iter().map(|&value| hash_i32(value)).collect();
+    let mut table = local(&ONE_INT4, 400)?;
+    assert!(scan_all(&mut table, 64)?.is_empty());
     let mut offsets = insert_all(
-        &table,
+        &mut table,
         &hashes[..120],
         &[ColumnView::try_new(&values[..120], None)?][..],
         None,
     )?;
     offsets.extend(insert_all(
-        &table,
+        &mut table,
         &hashes[120..],
         &[ColumnView::try_new(&values[120..], None)?][..],
         None,
     )?);
-    let _ = keys;
+    assert_eq!(table.chunks(), 4);
     for step in [1, 7, 64, 500] {
-        assert_eq!(scan_all(&table, step)?, offsets, "walks of {step}");
+        assert_eq!(scan_all(&mut table, step)?, offsets, "walks of {step}");
     }
-    let mut cursor = Cursor::from_raw(HEADER as u64 + 4);
-    assert!(
-        table.scan(&mut cursor, &mut [0; 8]).is_err(),
-        "a cursor inside a record"
-    );
-    let mut cursor = Cursor::from_raw(table.stats().bytes_used + 8);
-    assert!(
-        table.scan(&mut cursor, &mut [0; 8]).is_err(),
-        "a cursor past the records"
-    );
+    let writer = table.table_mut()?;
+    for (what, raw) in [
+        ("inside a record", CHUNK_HEADER as u64 + 4),
+        ("before the first record", 0),
+        ("past the chunks", (6u64 << 32) | CHUNK_HEADER as u64),
+    ] {
+        let mut cursor = Cursor::from_raw(raw);
+        assert!(
+            writer.scan(&mut cursor, &mut [0; 8]).is_err(),
+            "a cursor {what}"
+        );
+    }
     let mut cursor = Cursor::start();
     assert_eq!(
-        table.scan(&mut cursor, &mut [])?,
+        writer.scan(&mut cursor, &mut [])?,
         0,
         "nowhere to put records"
     );
@@ -940,57 +1081,36 @@ fn a_walk_visits_every_record_once_in_insertion_order() -> Result<()> {
 }
 
 #[test]
-fn growing_keeps_records_and_their_offsets() -> Result<()> {
+fn regrowing_keeps_records_and_their_references() -> Result<()> {
     let values: Vec<i32> = (0..100).map(|row| row % 30).collect();
     let keys = [ColumnView::try_new(&values, None)?];
     let hashes: Vec<u32> = values.iter().map(|&value| hash_i32(value)).collect();
     let payload = payload_for(100);
-    let mut words = words_for(&ONE_INT4, 16)?;
-    let mut pending_words = all_rows(100);
-    let mut offsets = vec![0; 100];
-    let mut scans = Vec::new();
-    for (capacity, expected) in [(16, 16), (64, 48), (512, 36), (5000, 0)] {
-        let len = region_size(&ONE_INT4, capacity)?;
-        words.resize(len / 8, 0);
-        let table = if capacity == 16 {
-            TableMut::create_in(&mut words, &ONE_INT4, 16)?
-        } else {
-            let mut table = TableMut::exclusive(&mut words)?;
-            table.grow(len)?;
-            assert_eq!(table.stats().region_len, len as u64);
-            assert_eq!(
-                table.stats().buckets,
-                model_buckets(capacity),
-                "growing into a region sized for {capacity} gives its buckets"
-            );
-            table
-        };
-        let mut pending = RowMask::try_new(100, &mut pending_words)?;
-        let inserted = table.insert(
-            &hashes,
-            &keys[..],
-            Some(&payload),
-            &mut pending,
-            &mut offsets,
-        )?;
-        assert_eq!(inserted, expected, "capacity {capacity}");
-        scans.push(scan_all(&table, 64)?);
-    }
-    let mut table = TableMut::exclusive(&mut words)?;
-    assert_eq!(table.stats().records, 100);
-    assert_eq!(table.stats().buckets, 16384);
-    assert_eq!(scans[3], offsets, "the walk is the insertion order");
-    assert_eq!(scans[2], offsets);
-    assert_eq!(scans[1], offsets[..64]);
-    assert_eq!(scans[0], offsets[..16]);
-    let (found, matches) = probe_all(&table, &hashes, &keys[..])?;
+    let mut table = local(&ONE_INT4, 16)?;
+    let offsets = insert_all(&mut table, &hashes, &keys[..], Some(&payload))?;
+    assert_eq!(table.table()?.stats().buckets, 1024);
+    let before = scan_all(&mut table, 64)?;
+    table.regrow(5000)?;
+    assert_eq!(table.table()?.stats().buckets, model_buckets(5000));
+    assert_eq!(
+        table.table()?.stats().region_len,
+        (HEADER as u64) + model_buckets(5000) * 4
+    );
+    assert_eq!(
+        scan_all(&mut table, 64)?,
+        before,
+        "the records stay where they were"
+    );
+    assert_eq!(before, offsets);
+    let shared = table.table()?;
+    assert_eq!(shared.stats().records, 100);
+    let (found, matches) = probe_all(&shared, &hashes, &keys[..])?;
     assert_eq!(found.len(), 100);
     for row in 0..100 {
-        let record = table.record(matches[row])?;
+        let record = shared.record(matches[row])?;
         assert_eq!(record.keys, &[(row % 30) as i64]);
-        assert_eq!(record.payload, offsets_payload(&offsets, matches[row]));
         assert_eq!(
-            table.record(offsets[row])?.payload,
+            shared.record(offsets[row])?.payload,
             (row as u64 * 10).to_ne_bytes()
         );
     }
@@ -1001,7 +1121,7 @@ fn growing_keeps_records_and_their_offsets() -> Result<()> {
         let rows = RowMaskView::try_new(30, &rows_words)?;
         let mut more_words = [0];
         let mut more = RowMask::try_new(30, &mut more_words)?;
-        table.next_match(&mut current, &rows, &mut more)?;
+        shared.next_match(&mut current, &rows, &mut more)?;
         let hits = rows_of(&more.as_view());
         if hits.is_empty() {
             break;
@@ -1018,45 +1138,8 @@ fn growing_keeps_records_and_their_offsets() -> Result<()> {
             .chain(vec![3; 20])
             .collect::<Vec<_>>()
     );
-
-    let len = table.stats().region_len as usize;
-    assert!(table.grow(len - 8).is_err(), "no shrinking");
-    assert!(table.grow(len + 4).is_err(), "a multiple of 8");
-    assert!(table.grow(len + 8).is_err(), "not past the slice");
-    table.grow(len)?;
-    assert_eq!(table.stats().records, 100);
-    Ok(())
-}
-
-/// The payload that was inserted with the record at `offset`.
-fn offsets_payload(offsets: &[u32], offset: u32) -> [u8; 8] {
-    let row = offsets.iter().position(|&o| o == offset).unwrap();
-    (row as u64 * 10).to_ne_bytes()
-}
-
-#[test]
-fn growing_a_table_whose_records_crowd_the_buckets_halves_them() -> Result<()> {
-    let config = TableConfig {
-        keys: &[KeyKind::Int32],
-        payload_size: 4000,
-    };
-    let values: Vec<i32> = (0..3).collect();
-    let keys = [ColumnView::try_new(&values, None)?];
-    let hashes: Vec<u32> = values.iter().map(|&value| hash_i32(value)).collect();
-    let mut words = words_for(&config, 3)?;
-    let len = words.len() * 8;
-    insert_all(
-        &TableMut::create_in(&mut words, &config, 3)?,
-        &hashes,
-        &keys[..],
-        None,
-    )?;
-    words.resize(len / 8 + 1, 0);
-    let mut table = TableMut::exclusive(&mut words)?;
-    table.grow(len + 8)?;
-    assert_eq!(table.stats().buckets, 1024, "the floor stays");
-    let (found, _) = probe_all(&table, &hashes, &keys[..])?;
-    assert_eq!(found.len(), 3);
+    assert!(table.regrow(16).is_err(), "no shrinking");
+    assert_eq!(table.table()?.stats().records, 100);
     Ok(())
 }
 
@@ -1129,31 +1212,24 @@ fn whole_words_normalize_like_rows() -> Result<()> {
                 }
             }
         }
-        // Both paths build tables that answer alike.
+        // Both paths build tables that answer alike, byte for byte.
         let hashes: Vec<u32> = values.iter().map(|&value| hash_i32(value)).collect();
-        let mut first = words_for(&ONE_INT4, nrows as u64)?;
-        let mut second = words_for(&ONE_INT4, nrows as u64)?;
-        let offsets = insert_all(
-            &TableMut::create_in(&mut first, &ONE_INT4, nrows as u64)?,
-            &hashes,
-            &[dense][..],
-            None,
-        )?;
-        let other = insert_all(
-            &TableMut::create_in(&mut second, &ONE_INT4, nrows as u64)?,
-            &hashes,
-            &[rows][..],
-            None,
-        )?;
+        let mut first = local(&ONE_INT4, nrows as u64)?;
+        let mut second = local(&ONE_INT4, nrows as u64)?;
+        let offsets = insert_all(&mut first, &hashes, &[dense][..], None)?;
+        let other = insert_all(&mut second, &hashes, &[rows][..], None)?;
         assert_eq!(offsets, other);
-        assert_eq!(first, second, "the regions are byte for byte the same");
+        assert_eq!(first.index_words(), second.index_words());
+        for chunk in 0..first.chunks() {
+            assert_eq!(first.chunk_words(chunk), second.chunk_words(chunk));
+        }
     }
     Ok(())
 }
 
 /// Probe `rows` of a batch in one call: the rows found and their matches.
 fn probe_rows(
-    table: &TableMut<'_>,
+    table: &Table<'_>,
     hashes: &[u32],
     keys: &[ColumnView<'_, i32>],
     rows: &[u64],
@@ -1169,14 +1245,14 @@ fn probe_rows(
 
 #[test]
 fn a_word_probed_at_once_answers_as_rows_probed_alone() -> Result<()> {
-    // Three thousand records over 1024 buckets: chains of about three,
-    // with equal keys and equal hashes of different rows in them.
+    // Three thousand records over 8192 buckets, and over many chunks, with
+    // equal keys and equal hashes of different rows in chains.
     let values: Vec<i32> = (0..3000).map(|row| row % 1700).collect();
     let keys = [ColumnView::try_new(&values, None)?];
     let hashes: Vec<u32> = values.iter().map(|&value| hash_i32(value)).collect();
-    let mut words = words_for(&ONE_INT4, 3000)?;
-    let table = TableMut::create_in(&mut words, &ONE_INT4, 3000)?;
-    insert_all(&table, &hashes, &keys[..], None)?;
+    let mut table = local(&ONE_INT4, 3000)?;
+    insert_all(&mut table, &hashes, &keys[..], None)?;
+    let table = table.table()?;
     let mut state = 0x0bad_5eed;
     let probe_values: Vec<i32> = (0..500)
         .map(|_| (random(&mut state) % 2000) as i32)
@@ -1204,18 +1280,15 @@ fn a_word_probed_at_once_detects_a_cycle() -> Result<()> {
     let values: Vec<i32> = (0..64).collect();
     let keys = [ColumnView::try_new(&values, None)?];
     let hashes: Vec<u32> = values.iter().map(|&value| hash_i32(value)).collect();
-    let mut words = words_for(&ONE_INT4, 64)?;
-    let offsets = {
-        let table = TableMut::create_in(&mut words, &ONE_INT4, 64)?;
-        insert_all(&table, &hashes, &keys[..], None)?
-    };
+    let mut table = local(&ONE_INT4, 64)?;
+    let offsets = insert_all(&mut table, &hashes, &keys[..], None)?;
     // The record of key 0 chains to itself; absent keys with the same
     // hashes walk the cycle in the whole-word path.
-    set_u32(&mut words, offsets[0] as usize * 8 + 4, offsets[0]);
+    let (chunk, byte) = placement(offsets[0]);
+    set_u32(table.chunk_words(chunk), byte + 4, offsets[0]);
     let absent = [999; 64];
     let absent_keys = [ColumnView::try_new(&absent, None)?];
-    let table = TableMut::exclusive(&mut words)?;
-    let error = probe_rows(&table, &hashes, &absent_keys, &all_rows(64)).unwrap_err();
+    let error = probe_rows(&table.table()?, &hashes, &absent_keys, &all_rows(64)).unwrap_err();
     assert!(error.to_string().contains("longer"), "{error}");
     Ok(())
 }
@@ -1235,9 +1308,9 @@ fn gather_reads_one_payload_word_of_each_selected_match() -> Result<()> {
         .flat_map(|row| [row * 10, row + 1_000_000])
         .flat_map(u64::to_ne_bytes)
         .collect();
-    let mut words = words_for(&config, nrows as u64)?;
-    let table = TableMut::create_in(&mut words, &config, nrows as u64)?;
-    insert_all(&table, &hashes, &keys[..], Some(&payload))?;
+    let mut table = local(&config, nrows as u64)?;
+    insert_all(&mut table, &hashes, &keys[..], Some(&payload))?;
+    let table = table.table()?;
     let (_, matches) = probe_all(&table, &hashes, &keys[..])?;
 
     // Every third row, across both words of the batch.
@@ -1265,7 +1338,7 @@ fn gather_reads_one_payload_word_of_each_selected_match() -> Result<()> {
         }
     }
 
-    // A word past the payload, short buffers and a bad offset are errors.
+    // A word past the payload, short buffers and a bad reference are errors.
     let mut out = vec![0; nrows];
     assert!(table.gather(&matches, &rows, 9, &mut out).is_err());
     assert!(table.gather(&matches, &rows, usize::MAX, &mut out).is_err());
@@ -1277,35 +1350,27 @@ fn gather_reads_one_payload_word_of_each_selected_match() -> Result<()> {
     Ok(())
 }
 
-/// Insert rows by grouped insertion, returning the duplicates' rows.
+/// Append rows and link them grouped: the count of rows whose keys the
+/// table held already.
 fn insert_grouped_rows(
-    table: &mut TableMut<'_>,
+    table: &mut LocalTable,
     hashes: &[u32],
     keys: &[ColumnView<'_, i32>],
     payload: &[u8],
     rows: &[usize],
     offsets: &mut [u32],
-) -> Result<Vec<usize>> {
+) -> Result<usize> {
     let nrows = hashes.len();
     let mut pending_words = vec![0; nrows.div_ceil(64)];
     for &row in rows {
         pending_words[row / 64] |= 1 << (row % 64);
     }
     let mut pending = RowMask::try_new(nrows, &mut pending_words)?;
-    // Every row set: the call fills the mask whole.
-    let mut duplicate_words = all_rows(nrows);
-    let mut duplicates = RowMask::try_new(nrows, &mut duplicate_words)?;
-    let inserted = table.insert_grouped(
-        hashes,
-        keys,
-        Some(payload),
-        &mut pending,
-        offsets,
-        &mut duplicates,
-    )?;
+    let (inserted, duplicates) =
+        table.insert_grouped(hashes, keys, Some(payload), &mut pending, offsets)?;
     assert_eq!(inserted, rows.len());
     assert_eq!(pending.as_view().selected_count(), 0);
-    Ok(rows_of(&duplicates.as_view()))
+    Ok(duplicates)
 }
 
 #[test]
@@ -1316,25 +1381,20 @@ fn grouped_records_of_a_key_lie_together() -> Result<()> {
     let keys = [ColumnView::try_new(&values, None)?];
     let hashes = vec![0x1234_5678; 100];
     let payload = payload_for(100);
-    let mut words = words_for(&ONE_INT4, 100)?;
-    let mut table = TableMut::create_in(&mut words, &ONE_INT4, 100)?;
+    let mut table = local(&ONE_INT4, 100)?;
     let mut offsets = vec![0; 100];
-    // Two calls: the second finds the first's keys for whole words at once.
     let first: Vec<usize> = (0..30).collect();
     let second: Vec<usize> = (30..100).collect();
     let duplicates =
         insert_grouped_rows(&mut table, &hashes, &keys, &payload, &first, &mut offsets)?;
-    assert_eq!(
-        duplicates,
-        (10..30).collect::<Vec<_>>(),
-        "a key's first row is new"
-    );
+    assert_eq!(duplicates, 20, "a key's first row is new");
     let duplicates =
         insert_grouped_rows(&mut table, &hashes, &keys, &payload, &second, &mut offsets)?;
-    assert_eq!(duplicates, second, "every key was there already");
+    assert_eq!(duplicates, 70, "every key was there already");
 
     // From the probe's record, the group gives every row of the key, one
     // step each, and ends where the next key begins.
+    let table = table.table()?;
     let (found, matches) = probe_all(&table, &hashes, &keys[..])?;
     assert_eq!(found.len(), 100);
     let mut seen = [0; 10];
@@ -1361,60 +1421,23 @@ fn grouped_records_of_a_key_lie_together() -> Result<()> {
 }
 
 #[test]
-fn grouped_insertion_stops_when_full_and_survives_growth() -> Result<()> {
-    let values: Vec<i32> = (0..200).map(|row| row % 7).collect();
+fn grouped_chains_span_chunks_and_survive_a_larger_index() -> Result<()> {
+    let values: Vec<i32> = (0..400).map(|row| row % 7).collect();
     let keys = [ColumnView::try_new(&values, None)?];
     let hashes: Vec<u32> = values.iter().map(|&value| hash_i32(value)).collect();
-    let payload = payload_for(200);
-    // Room for fewer records than rows: the rest stay pending.
-    let mut words = words_for(&ONE_INT4, 64)?;
-    let mut table = TableMut::create_in(&mut words, &ONE_INT4, 64)?;
-    let mut pending_words = all_rows(200);
-    let mut pending = RowMask::try_new(200, &mut pending_words)?;
-    let mut duplicate_words = all_rows(200);
-    let mut duplicates = RowMask::try_new(200, &mut duplicate_words)?;
-    let mut offsets = vec![0; 200];
-    let inserted = table.insert_grouped(
-        &hashes,
-        &keys[..],
-        Some(&payload),
-        &mut pending,
-        &mut offsets,
-        &mut duplicates,
-    )?;
-    assert!(inserted < 200 && inserted > 7, "{inserted} of 200");
-    assert_eq!(pending.as_view().selected_count(), 200 - inserted);
-    let duplicate_rows = rows_of(&duplicates.as_view());
-    assert_eq!(
-        duplicate_rows.len(),
-        inserted - 7,
-        "the first row of each key is new"
-    );
-    assert!(duplicate_rows.iter().all(|&row| row < inserted));
-
-    // The rest after growth, which keeps each key's records together.
-    let mut grown_words = words.clone();
-    grown_words.resize(region_size(&ONE_INT4, 400)?.div_ceil(8), 0);
-    let grown_len = grown_words.len() * 8;
-    let mut table = TableMut::exclusive(&mut grown_words)?;
-    table.grow(grown_len)?;
-    let inserted_after = table.insert_grouped(
-        &hashes,
-        &keys[..],
-        Some(&payload),
-        &mut pending,
-        &mut offsets,
-        &mut duplicates,
-    )?;
-    assert_eq!(inserted + inserted_after, 200);
-    assert_eq!(
-        rows_of(&duplicates.as_view()).len(),
-        inserted_after,
-        "every key was there already"
-    );
+    let payload = payload_for(400);
+    let mut table = local(&ONE_INT4, 64)?;
+    let mut offsets = vec![0; 400];
+    let rows: Vec<usize> = (0..400).collect();
+    let duplicates =
+        insert_grouped_rows(&mut table, &hashes, &keys, &payload, &rows, &mut offsets)?;
+    assert_eq!(duplicates, 393, "the first row of each key is new");
+    assert!(table.chunks() > 3);
+    table.regrow(1000)?;
 
     // next_match walks the chain and finds the same next records, and
     // each key has as many as rows.
+    let table = table.table()?;
     let (_, matches) = probe_all(
         &table,
         &hashes[..7],
@@ -1503,9 +1526,9 @@ fn grouped_states_follow_a_row_by_row_model() -> Result<()> {
             }
         })
         .collect();
-    let mut words = words_for(&config, 64)?;
-    let mut table = TableMut::create_in(&mut words, &config, 64)?;
+    let mut table = LocalTable::new(&config, 64, CHUNK_HEADER + 5 * 64)?;
     let (offsets, _) = resolve_all(&mut table, &hashes, &key_column[..])?;
+    assert!(table.chunks() > 1, "the groups span chunks");
     // Two batches over the same rows: the first and the second half.
     for half in 0..2 {
         let selected: Vec<bool> = (0..nrows)
@@ -1513,16 +1536,17 @@ fn grouped_states_follow_a_row_by_row_model() -> Result<()> {
             .collect();
         let selection = words_of(&selected);
         let rows = RowMaskView::try_new(nrows, &selection)?;
-        table.count_rows(&offsets, &rows, 8)?;
-        table.count_values(&offsets, &rows, &x_column, 16)?;
+        let mut writer = table.table_mut()?;
+        writer.count_rows(&offsets, &rows, 8)?;
+        writer.count_values(&offsets, &rows, &x_column, 16)?;
         let slot = |value_at, flag_bit| Slot {
             value_at,
             flags_at: FLAGS_AT,
             flag_bit,
         };
-        table.fold(&offsets, &rows, &x_column, Fold::Sum, slot(24, 0))?;
-        table.fold(&offsets, &rows, &x_column, Fold::Min, slot(32, 1))?;
-        table.fold(&offsets, &rows, &y_column, Fold::Max, slot(40, 2))?;
+        writer.fold(&offsets, &rows, &x_column, Fold::Sum, slot(24, 0))?;
+        writer.fold(&offsets, &rows, &x_column, Fold::Min, slot(32, 1))?;
+        writer.fold(&offsets, &rows, &y_column, Fold::Max, slot(40, 2))?;
     }
     let mut model: std::collections::HashMap<Option<i32>, GroupModel> = Default::default();
     for row in 0..nrows {
@@ -1538,8 +1562,9 @@ fn grouped_states_follow_a_row_by_row_model() -> Result<()> {
         }
         group.max8 = Some(group.max8.map_or(ys[row], |m| m.max(ys[row])));
     }
-    let groups = scan_all(&table, 7)?;
+    let groups = scan_all(&mut table, 7)?;
     assert_eq!(groups.len(), model.len());
+    let table = table.table()?;
     let all = all_rows(groups.len());
     let rows = RowMaskView::try_new(groups.len(), &all)?;
     let mut key_values = vec![0; groups.len()];
@@ -1579,8 +1604,7 @@ fn a_sum_past_the_bigint_range_fails_and_arguments_are_checked() -> Result<()> {
     };
     let keys = [ColumnView::try_new(&[-5i64, -5, 1 << 40], None)?];
     let hashes: Vec<u32> = [-5i64, -5, 1 << 40].map(hash_i64).into();
-    let mut words = words_for(&config, 8)?;
-    let mut table = TableMut::create_in(&mut words, &config, 8)?;
+    let mut table = local(&config, 8)?;
     let (offsets, created) = resolve_all(&mut table, &hashes, &keys[..])?;
     assert_eq!(created, vec![0, 2]);
     let all = all_rows(3);
@@ -1591,7 +1615,8 @@ fn a_sum_past_the_bigint_range_fails_and_arguments_are_checked() -> Result<()> {
         flag_bit: 0,
     };
     let big = ColumnView::try_new(&[i64::MAX, 1, 0], None)?;
-    let error = table
+    let mut writer = table.table_mut()?;
+    let error = writer
         .fold(&offsets, &rows, &big, Fold::Sum, slot)
         .unwrap_err();
     assert_eq!(
@@ -1601,41 +1626,38 @@ fn a_sum_past_the_bigint_range_fails_and_arguments_are_checked() -> Result<()> {
     // The int8 keys come back whole, a negative one too.
     let mut values = vec![0; 3];
     let mut nulls = vec![true; 3];
-    table.gather_key(&offsets, &rows, 0, &mut values, &mut nulls)?;
+    writer.gather_key(&offsets, &rows, 0, &mut values, &mut nulls)?;
     assert_eq!(values, [(-5i64) as u64, (-5i64) as u64, 1 << 40]);
     assert_eq!(nulls, [false; 3]);
     // Words past the payload, a flag past a word, a key past the keys.
-    assert!(table.count_rows(&offsets, &rows, 16).is_err());
-    assert!(table.count_rows(&offsets, &rows, 3).is_err());
+    assert!(writer.count_rows(&offsets, &rows, 16).is_err());
+    assert!(writer.count_rows(&offsets, &rows, 3).is_err());
     let past = Slot {
         flag_bit: 64,
         ..slot
     };
-    assert!(table.fold(&offsets, &rows, &big, Fold::Min, past).is_err());
+    assert!(writer.fold(&offsets, &rows, &big, Fold::Min, past).is_err());
     assert!(
-        table
+        writer
             .gather_key(&offsets, &rows, 1, &mut values, &mut nulls)
             .is_err()
     );
-    assert!(table.count_rows(&offsets[..2], &rows, 8).is_err());
+    assert!(writer.count_rows(&offsets[..2], &rows, 8).is_err());
     Ok(())
 }
 
 /// A table of `count` int4 keys 0, 3, 6, ... and a filter of its records.
-fn filtered_table(count: usize) -> Result<(Vec<u64>, Vec<u64>)> {
+fn filtered_table(count: usize) -> Result<(LocalTable, Vec<u64>)> {
     let keys: Vec<i32> = (0..count as i32).map(|key| key * 3).collect();
     let hashes: Vec<u32> = keys.iter().map(|&key| hash_i32(key)).collect();
-    let mut words = words_for(&ONE_INT4, count.max(1) as u64)?;
+    let mut table = local(&ONE_INT4, count.max(1) as u64)?;
     let mut filter = vec![0; bloom::words_for(count as u64)?];
-    {
-        let mut table = TableMut::create_in(&mut words, &ONE_INT4, count.max(1) as u64)?;
-        if count > 0 {
-            let column = [ColumnView::try_new(&keys, None)?];
-            resolve_all(&mut table, &hashes, &column[..])?;
-        }
-        table.bloom(&mut filter)?;
+    if count > 0 {
+        let column = [ColumnView::try_new(&keys, None)?];
+        resolve_all(&mut table, &hashes, &column[..])?;
     }
-    Ok((words, filter))
+    table.table()?.bloom(&mut filter)?;
+    Ok((table, filter))
 }
 
 fn probe_filter(filter: &[u64], hashes: &[u32]) -> Result<usize> {
@@ -1657,7 +1679,8 @@ fn probe_filter(filter: &[u64], hashes: &[u32]) -> Result<usize> {
 #[test]
 fn a_filter_lets_every_key_through_and_few_others() -> Result<()> {
     let count = 5000;
-    let (_, filter) = filtered_table(count)?;
+    let (table, filter) = filtered_table(count)?;
+    assert!(table.chunks() > 1, "the records span chunks");
     assert_eq!(filter.len(), (count * 16).div_ceil(64).next_power_of_two());
     let present: Vec<u32> = (0..count as i32).map(|key| hash_i32(key * 3)).collect();
     assert_eq!(
@@ -1720,169 +1743,10 @@ fn a_null_group_key_and_int8_keys_pass_their_filter() -> Result<()> {
         &mut hashes,
         &mut RowMask::try_new(3, &mut valid)?,
     )?;
-    let mut words = words_for(&config, 4)?;
+    let mut table = local(&config, 4)?;
     let mut filter = vec![0; bloom::words_for(3)?];
-    let mut table = TableMut::create_in(&mut words, &config, 4)?;
     resolve_all(&mut table, &hashes, &column[..])?;
-    table.bloom(&mut filter)?;
+    table.table()?.bloom(&mut filter)?;
     assert_eq!(probe_filter(&filter, &hashes)?, 3);
-    Ok(())
-}
-
-/// Stage every row of a batch into buffers of `buffer_words` words, as
-/// many as it takes: the buffers and the bytes each holds.
-fn stage_all<K: KeySource + ?Sized>(
-    table: &TableMut<'_>,
-    hashes: &[u32],
-    keys: &K,
-    payload: Option<&[u8]>,
-    buffer_words: usize,
-) -> Result<Vec<(Vec<u64>, usize)>> {
-    let nrows = hashes.len();
-    let mut pending_words = all_rows(nrows);
-    let mut pending = RowMask::try_new(nrows, &mut pending_words)?;
-    let mut buffers = Vec::new();
-    while pending.as_view().selected_count() > 0 {
-        let mut buffer = vec![0; buffer_words];
-        let mut used = 0;
-        let staged = table.stage(&mut buffer, &mut used, hashes, keys, payload, &mut pending)?;
-        assert!(staged > 0, "a fresh buffer takes at least one record");
-        buffers.push((buffer, used));
-    }
-    Ok(buffers)
-}
-
-#[test]
-fn staged_rows_join_a_table_as_inserted_ones_do() -> Result<()> {
-    let values: Vec<i32> = (0..200).collect();
-    let keys = [ColumnView::try_new(&values, None)?];
-    let hashes: Vec<u32> = values.iter().map(|&value| hash_i32(value)).collect();
-    let payload = payload_for(200);
-    let mut words = words_for(&ONE_INT4, 200)?;
-    let table = TableMut::create_in(&mut words, &ONE_INT4, 200)?;
-    // Buffers of 50 records of 32 bytes, filled across word boundaries.
-    let buffers = stage_all(&table, &hashes, &keys[..], Some(&payload), 50 * 4)?;
-    assert_eq!(buffers.len(), 4);
-    assert_eq!(table.stats().records, 0, "staging leaves the table alone");
-    for (buffer, used) in &buffers {
-        let mut consumed = 0;
-        assert_eq!(table.insert_staged(buffer, *used, &mut consumed)?, 50);
-        assert_eq!(consumed, *used);
-    }
-    assert_eq!(table.stats().records, 200);
-    let (found, matches) = probe_all(&table, &hashes, &keys[..])?;
-    assert_eq!(found, (0..200).collect::<Vec<_>>());
-    for (row, &offset) in matches.iter().enumerate() {
-        let record = table.record(offset)?;
-        assert_eq!(record.hash, hashes[row]);
-        assert_eq!(record.keys, &[row as i64]);
-        assert_eq!(record.payload, (row as u64 * 10).to_ne_bytes());
-    }
-    Ok(())
-}
-
-#[test]
-fn staged_rows_wait_for_room_and_keep_null_and_int8_keys() -> Result<()> {
-    let config = TableConfig {
-        keys: &[KeyKind::Int64, KeyKind::Int32],
-        payload_size: 0,
-    };
-    let big: Vec<i64> = (0..100).map(|row| (row as i64) << 40).collect();
-    let small: Vec<i32> = (0..100).collect();
-    let non_null = all_rows(100)
-        .iter()
-        .map(|word| word & !0b100)
-        .collect::<Vec<_>>();
-    let keys = Mixed(vec![
-        Key::Int8(ColumnView::try_new(&big, None)?),
-        Key::Int4(ColumnView::try_new(
-            &small,
-            Some(RowMaskView::try_new(100, &non_null)?),
-        )?),
-    ]);
-    let hashes: Vec<u32> = big.iter().map(|&value| hash_i64(value)).collect();
-    // Room for 60 records: the staged 100 go in two calls around a grow.
-    let mut words = words_for(&config, 60)?;
-    let table = TableMut::create_in(&mut words, &config, 60)?;
-    let buffers = stage_all(&table, &hashes, &keys, None, 1000)?;
-    let [(buffer, used)] = buffers.as_slice() else {
-        panic!("one buffer holds all the rows");
-    };
-    let mut consumed = 0;
-    let first = table.insert_staged(buffer, *used, &mut consumed)?;
-    assert!(first < 100 && first > 0);
-    assert_eq!(consumed, first * 32);
-    words.resize(words_for(&config, 100)?.len(), 0);
-    let len = words.len() * 8;
-    let mut table = TableMut::exclusive(&mut words)?;
-    table.grow(len)?;
-    assert_eq!(
-        table.insert_staged(buffer, *used, &mut consumed)?,
-        100 - first
-    );
-    assert_eq!(consumed, *used);
-    let (found, matches) = probe_all(&table, &hashes, &keys)?;
-    assert_eq!(found, (0..100).collect::<Vec<_>>());
-    let record = table.record(matches[2])?;
-    assert_eq!(record.null_bits, 0b10, "row 2's int4 key is NULL");
-    assert_eq!(record.keys, &[2 << 40, 0]);
-    Ok(())
-}
-
-#[test]
-fn staging_and_adding_check_their_buffers() -> Result<()> {
-    let values: Vec<i32> = (0..10).collect();
-    let keys = [ColumnView::try_new(&values, None)?];
-    let hashes: Vec<u32> = values.iter().map(|&value| hash_i32(value)).collect();
-    let mut words = words_for(&ONE_INT4, 10)?;
-    let table = TableMut::create_in(&mut words, &ONE_INT4, 10)?;
-    let mut pending_words = all_rows(10);
-    let mut pending = RowMask::try_new(10, &mut pending_words)?;
-    let mut buffer = vec![0; 40];
-    // A used mark inside a record, and past the buffer.
-    for bad in [8, 400] {
-        let mut used = bad;
-        assert!(
-            table
-                .stage(
-                    &mut buffer,
-                    &mut used,
-                    &hashes,
-                    &keys[..],
-                    None,
-                    &mut pending
-                )
-                .is_err()
-        );
-    }
-    // A buffer of three records takes three rows and leaves seven pending.
-    let mut small = vec![0; 12];
-    let mut used = 0;
-    assert_eq!(
-        table.stage(
-            &mut small,
-            &mut used,
-            &hashes,
-            &keys[..],
-            None,
-            &mut pending
-        )?,
-        3
-    );
-    assert_eq!(pending.as_view().selected_count(), 7);
-    // Bytes that are not whole records, a consumed mark past them, and a
-    // record of another length.
-    let mut consumed = 0;
-    assert!(table.insert_staged(&small, 20, &mut consumed).is_err());
-    let mut consumed = 128;
-    assert!(table.insert_staged(&small, 96, &mut consumed).is_err());
-    small[1] = 1 << 32;
-    let mut consumed = 0;
-    assert!(table.insert_staged(&small, 96, &mut consumed).is_err());
-    assert_eq!(
-        table.stats().records,
-        0,
-        "no record goes in before the checks pass"
-    );
     Ok(())
 }

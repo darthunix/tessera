@@ -1,5 +1,7 @@
-//! The phases of a shared build: participants insert the inner side into
-//! one table in shared memory, grow it once if it filled up, and probe it.
+//! The phases of a shared build: participants append the inner side to
+//! chunks of their own, one of them sizes the index exactly, and all link
+//! their chunks into it and probe it. Records never move and the table
+//! never grows.
 //!
 //! A participant is a state machine that never waits itself: each step
 //! returns an action, and the caller performs it and passes the result of
@@ -12,21 +14,19 @@
 //!
 //! The phases, in the barrier's own numbering:
 //!
-//! - [`ELECT`]: every participant arrives; one is elected;
-//! - [`ALLOCATE`]: the elected one creates the table in a region sized by
-//!   the planner's estimate and clears the shared Bloom filter;
-//! - [`BUILD`]: every participant inserts its share of the inner side, and
-//!   stages the rows a full table has no room for, reporting how many;
-//! - [`GROW`]: when some rows were staged, the elected one copies the table
-//!   into a region for every record and grows it;
-//! - [`LINK`]: when some rows were staged, each participant adds its own;
+//! - [`BUILD`]: every participant appends its share of the inner side to
+//!   chunks of its own, numbered by the shared counter, and reports how
+//!   many records it appended;
+//! - [`SIZE`]: the elected one creates the index for exactly the records
+//!   appended and gathers the chunks' directory;
+//! - [`LINK`]: every participant links its own chunks into the index;
 //! - [`PROBE`]: every participant probes, then leaves; the last to leave
 //!   frees the table.
 //!
 //! A participant that attaches late joins the phase the others are in:
-//! during the build it inserts what is left of the inner side, which may
-//! be nothing; from [`PROBE`] on it only probes; after the last one left,
-//! it leaves at once.
+//! during the build it appends what is left of the inner side, which may
+//! be nothing; from [`SIZE`] on it has no chunk to link and waits for the
+//! probe; after the last one left, it leaves at once.
 
 use core::sync::atomic::AtomicU64;
 
@@ -34,13 +34,11 @@ use anyhow::{Result, ensure};
 
 use super::region::order;
 
-pub const ELECT: u32 = 0;
-pub const ALLOCATE: u32 = 1;
-pub const BUILD: u32 = 2;
-pub const GROW: u32 = 3;
-pub const LINK: u32 = 4;
-pub const PROBE: u32 = 5;
-pub const FREE: u32 = 6;
+pub const BUILD: u32 = 0;
+pub const SIZE: u32 = 1;
+pub const LINK: u32 = 2;
+pub const PROBE: u32 = 3;
+pub const FREE: u32 = 4;
 
 /// What a participant does next.
 #[repr(u32)]
@@ -50,26 +48,24 @@ pub enum Action {
     Attach = 1,
     /// Arrive at the barrier and wait, and pass whether it was elected.
     ArriveAndWait = 2,
-    /// Create the table and clear the filter, as the elected one.
-    Allocate = 3,
-    /// Insert this participant's share of the inner side, staging what
-    /// does not fit, and report it.
-    Build = 4,
-    /// Copy the table into a region for every record and grow it, as the
-    /// elected one.
-    Grow = 5,
-    /// Add this participant's staged rows.
-    Link = 6,
+    /// Append this participant's share of the inner side to chunks of its
+    /// own, and report it.
+    Build = 3,
+    /// Create the index for every record appended and the chunks'
+    /// directory, as the elected one.
+    Size = 4,
+    /// Link this participant's own chunks into the index.
+    Link = 5,
     /// Probe; step again once done.
-    Probe = 7,
+    Probe = 6,
     /// Arrive at the barrier and detach, and pass whether it was the last.
-    ArriveAndDetach = 8,
+    ArriveAndDetach = 7,
     /// Detach from the barrier without arriving.
-    Detach = 9,
+    Detach = 8,
     /// Free the table, as the last to leave; then nothing is left.
-    Free = 10,
+    Free = 9,
     /// Nothing is left to do.
-    Done = 11,
+    Done = 10,
 }
 
 /// Where a participant stands between steps.
@@ -111,24 +107,27 @@ pub struct Participant {
     elected: u32,
 }
 
-/// The counters the participants of a build share: the rows staged, and
-/// the payload words that hold a NULL somewhere.
+/// The counters the participants of a build share: the records
+/// appended, the payload words that hold a NULL somewhere, and the chunks
+/// numbered so far.
 pub(super) trait Counters {
-    fn add_staged(&self, rows: u64);
-    fn staged(&self) -> u64;
+    fn add_records(&self, rows: u64);
+    fn records(&self) -> u64;
     fn add_null_columns(&self, bits: u64);
     fn null_columns(&self) -> u64;
+    fn next_chunk(&self) -> u64;
 }
 
 /// The counters of a build in memory several participants map.
 #[derive(Debug)]
 pub struct SharedCounters<'a> {
-    staged: &'a AtomicU64,
+    records: &'a AtomicU64,
     null_columns: &'a AtomicU64,
+    chunks: &'a AtomicU64,
 }
 
 /// The words of [`SharedCounters`].
-pub const COUNTER_WORDS: usize = 2;
+pub const COUNTER_WORDS: usize = 3;
 
 impl<'a> SharedCounters<'a> {
     /// Attach to the [`COUNTER_WORDS`] words at `words`.
@@ -147,43 +146,57 @@ impl<'a> SharedCounters<'a> {
         // alignment of a `u64`.
         let all = unsafe { core::slice::from_raw_parts(words.cast::<AtomicU64>(), COUNTER_WORDS) };
         Ok(Self {
-            staged: &all[0],
+            records: &all[0],
             null_columns: &all[1],
+            chunks: &all[2],
         })
     }
 
     /// Clear the counters, before any participant attaches.
     pub fn init(&self) {
-        self.staged.store(0, order::RELAXED);
+        self.records.store(0, order::RELAXED);
         self.null_columns.store(0, order::RELAXED);
+        self.chunks.store(0, order::RELAXED);
     }
 
-    /// Report what this participant's build staged and which payload
-    /// words it saw a NULL in, before it arrives at the barrier.
-    pub fn report(&self, staged: u64, null_columns: u64) {
-        self.add_staged(staged);
+    /// Report the records this participant appended and the payload words
+    /// it saw a NULL in, before it arrives at the barrier.
+    pub fn report(&self, records: u64, null_columns: u64) {
+        self.add_records(records);
         self.add_null_columns(null_columns);
     }
 
-    /// The rows every participant staged, once the build is over.
-    pub fn staged_rows(&self) -> u64 {
-        self.staged()
+    /// The records every participant appended, once the build is over.
+    pub fn total_records(&self) -> u64 {
+        self.records()
     }
 
     /// The payload words with a NULL, once the build is over.
     pub fn nulls(&self) -> u64 {
         self.null_columns()
     }
-}
 
-// The barrier orders the reports before the reads: relaxed is enough.
-impl Counters for SharedCounters<'_> {
-    fn add_staged(&self, rows: u64) {
-        self.staged.fetch_add(rows, order::RELAXED);
+    /// The number of a new chunk: every participant's chunks are numbered
+    /// from 0 on, in the order they were taken.
+    pub fn take_chunk(&self) -> u64 {
+        self.next_chunk()
     }
 
-    fn staged(&self) -> u64 {
-        self.staged.load(order::RELAXED)
+    /// The chunks numbered so far, once the build is over.
+    pub fn total_chunks(&self) -> u64 {
+        self.chunks.load(order::RELAXED)
+    }
+}
+
+// The barrier orders the reports before the reads: relaxed is enough; a
+// chunk number is unique by the addition alone.
+impl Counters for SharedCounters<'_> {
+    fn add_records(&self, rows: u64) {
+        self.records.fetch_add(rows, order::RELAXED);
+    }
+
+    fn records(&self) -> u64 {
+        self.records.load(order::RELAXED)
     }
 
     fn add_null_columns(&self, bits: u64) {
@@ -192,6 +205,10 @@ impl Counters for SharedCounters<'_> {
 
     fn null_columns(&self) -> u64 {
         self.null_columns.load(order::RELAXED)
+    }
+
+    fn next_chunk(&self) -> u64 {
+        self.chunks.fetch_add(1, order::RELAXED)
     }
 }
 
@@ -249,13 +266,11 @@ impl Participant {
     /// The first action of the phase just entered.
     fn enter<C: Counters + ?Sized>(&mut self, counters: &C) -> Action {
         let elected = self.elected != 0;
-        let staged = counters.staged() > 0;
         match self.phase {
-            ALLOCATE if elected => self.to(State::Working, Action::Allocate),
             BUILD => self.to(State::Working, Action::Build),
-            GROW if elected && staged => self.to(State::Working, Action::Grow),
-            LINK if staged => self.to(State::Working, Action::Link),
-            ELECT | ALLOCATE | GROW | LINK => self.to(State::Arriving, Action::ArriveAndWait),
+            SIZE if elected => self.to(State::Working, Action::Size),
+            LINK if counters.records() > 0 => self.to(State::Working, Action::Link),
+            SIZE | LINK => self.to(State::Arriving, Action::ArriveAndWait),
             PROBE => self.to(State::Probing, Action::Probe),
             _ => self.to(State::Detaching, Action::Detach),
         }
@@ -276,21 +291,24 @@ mod tests {
     struct Alone(core::cell::Cell<u64>);
 
     impl Counters for Alone {
-        fn add_staged(&self, rows: u64) {
+        fn add_records(&self, rows: u64) {
             self.0.set(self.0.get() + rows);
         }
-        fn staged(&self) -> u64 {
+        fn records(&self) -> u64 {
             self.0.get()
         }
         fn add_null_columns(&self, _: u64) {}
         fn null_columns(&self) -> u64 {
             0
         }
+        fn next_chunk(&self) -> u64 {
+            0
+        }
     }
 
     /// The actions of a participant alone at the barrier, which elects it
     /// every time, until it is done.
-    fn alone(staged: u64, attach_at: u32) -> Vec<Action> {
+    fn alone(records: u64, attach_at: u32) -> Vec<Action> {
         let counters = Alone::default();
         let mut participant = Participant::new();
         let mut actions = Vec::new();
@@ -306,7 +324,7 @@ mod tests {
                     1
                 }
                 Action::Build => {
-                    counters.add_staged(staged);
+                    counters.add_records(records);
                     0
                 }
                 Action::ArriveAndDetach => 1,
@@ -318,18 +336,17 @@ mod tests {
     }
 
     #[test]
-    fn a_participant_alone_skips_growth_when_nothing_was_staged() {
+    fn a_participant_alone_builds_sizes_links_and_probes() {
         use Action::*;
         assert_eq!(
-            alone(0, ELECT),
+            alone(3, BUILD),
             [
                 Attach,
-                ArriveAndWait,
-                Allocate,
-                ArriveAndWait,
                 Build,
                 ArriveAndWait,
+                Size,
                 ArriveAndWait,
+                Link,
                 ArriveAndWait,
                 Probe,
                 ArriveAndDetach,
@@ -339,20 +356,16 @@ mod tests {
     }
 
     #[test]
-    fn a_participant_alone_grows_and_links_what_it_staged() {
+    fn nothing_appended_is_nothing_to_link() {
         use Action::*;
         assert_eq!(
-            alone(3, ELECT),
+            alone(0, BUILD),
             [
                 Attach,
-                ArriveAndWait,
-                Allocate,
-                ArriveAndWait,
                 Build,
                 ArriveAndWait,
-                Grow,
+                Size,
                 ArriveAndWait,
-                Link,
                 ArriveAndWait,
                 Probe,
                 ArriveAndDetach,

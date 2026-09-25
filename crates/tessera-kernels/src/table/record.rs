@@ -1,16 +1,19 @@
-//! Records: how one lies in the region and how it is found, written and
+//! Records: how one lies in its chunk and how it is found, written and
 //! published.
 //!
-//! A record starts with 16 bytes: its hash, the offset of the next record
-//! of its bucket, the bits of its keys that are NULL and its length in
-//! 8-byte units; then one 8-byte slot per key and the payload, rounded up
-//! to 8. Offsets are in 8-byte units; 0 is none. A record is written in
-//! reserved, unpublished bytes and published by a compare-and-swap of its
-//! bucket's head, after which it never changes.
+//! A record starts with 16 bytes: its hash, the reference of the next
+//! record of its bucket, the bits of its keys that are NULL and its length
+//! in 8-byte units; then one 8-byte slot per key and the payload, rounded
+//! up to 8. A reference is the record's chunk and its offset there (see
+//! [`super::header::reference`]); 0 is none. A record is appended to a
+//! chunk by the chunk's one writer, then published by a compare-and-swap of
+//! its bucket's head, after which it never changes and never moves.
 
 use anyhow::Result;
 
-use super::header::{CHUNK_USED, HEADER_SIZE, KEY_SLOT, Layout, NRECORDS, RECORD_HEADER};
+use super::header::{
+    CHUNK_HEADER, KEY_SLOT, Layout, NRECORDS, RECORD_HEADER, placement, reference,
+};
 use super::keys::WordKeys;
 use super::region::Region;
 
@@ -109,9 +112,11 @@ pub(super) struct Access<'r, R> {
     record_size: usize,
     payload_size: usize,
     nkeys: usize,
-    used: usize,
     nrecords: u64,
 }
+
+/// Where a record lies: its chunk and its first byte there.
+pub(super) type Place = (usize, usize);
 
 impl<'r, R: Region> Access<'r, R> {
     #[inline]
@@ -123,11 +128,25 @@ impl<'r, R: Region> Access<'r, R> {
             record_size: layout.record_size,
             payload_size: layout.payload_size,
             nkeys: layout.nkeys,
-            used: 0,
             nrecords: 0,
         };
         access.refresh();
         access
+    }
+
+    /// Access for appending to chunks alone, which reads nothing of the
+    /// index: a shared build appends before any participant made one.
+    #[inline]
+    pub(super) fn for_chunks(region: &'r R, layout: &Layout) -> Self {
+        Self {
+            region,
+            buckets_offset: layout.buckets_offset,
+            bucket_shift: layout.bucket_shift,
+            record_size: layout.record_size,
+            payload_size: layout.payload_size,
+            nkeys: layout.nkeys,
+            nrecords: 0,
+        }
     }
 
     /// Bytes of a record.
@@ -136,25 +155,14 @@ impl<'r, R: Region> Access<'r, R> {
         self.record_size
     }
 
-    /// Read the counters again. The end of the record area is clamped to
-    /// the buckets' offset, which attachment checked against the region:
-    /// whatever the shared bytes say later, a record found below it lies
-    /// within the region, which the unchecked accesses rely on.
+    /// Read the record count again.
     #[inline]
     fn refresh(&mut self) {
-        let used = self.region.load_u64(CHUNK_USED);
-        self.used =
-            usize::try_from(used).map_or(self.buckets_offset, |used| used.min(self.buckets_offset));
         self.nrecords = self.region.load_u64(NRECORDS);
     }
 
-    #[inline]
-    fn in_records(&self, byte: usize) -> bool {
-        byte >= HEADER_SIZE && byte + self.record_size <= self.used
-    }
-
-    /// The record at `offset`, which must lie among the records published
-    /// so far and claim the table's record length.
+    /// The record at `offset`, which must lie within a chunk past its used
+    /// mark's word and claim the table's record length.
     #[inline(always)]
     pub(super) fn locate(&mut self, offset: u32) -> Result<View<'r>> {
         self.place(offset)?;
@@ -162,21 +170,19 @@ impl<'r, R: Region> Access<'r, R> {
         unsafe { self.open(offset) }
     }
 
-    /// The byte offset of the record at `offset`, which must lie among the
-    /// records published so far; the first half of [`Self::locate`], which
+    /// Where the record at `offset` lies, which must be within its chunk
+    /// past the used mark's word; the first half of [`Self::locate`], which
     /// reads nothing of the record, so that a caller can prefetch it.
     #[inline(always)]
-    pub(super) fn place(&mut self, offset: u32) -> Result<usize> {
-        let byte = offset as usize * 8;
-        if !self.in_records(byte) {
-            // A record published since the counters were read lies past
-            // them: read again before calling the region corrupt.
-            self.refresh();
-            if !self.in_records(byte) {
-                return Err(outside(offset));
-            }
+    pub(super) fn place(&self, offset: u32) -> Result<Place> {
+        let (chunk, byte) = placement(offset);
+        if chunk >= self.region.chunks()
+            || byte < CHUNK_HEADER
+            || byte + self.record_size > self.region.chunk_len(chunk)
+        {
+            return Err(outside(offset));
         }
-        Ok(byte)
+        Ok((chunk, byte))
     }
 
     /// The record at `offset`, which must claim the table's record length;
@@ -187,7 +193,8 @@ impl<'r, R: Region> Access<'r, R> {
     /// [`Self::place`] accepted `offset` during this operation.
     #[inline(always)]
     pub(super) unsafe fn open(&self, offset: u32) -> Result<View<'r>> {
-        let view = self.view(offset as usize * 8);
+        // SAFETY: `place` accepted the offset, the caller promises.
+        let view = unsafe { self.view(placement(offset)) };
         if view.len() != self.record_size {
             return Err(misplaced(offset));
         }
@@ -200,10 +207,16 @@ impl<'r, R: Region> Access<'r, R> {
         self.region.prefetch(self.bucket(hash));
     }
 
-    /// Hint that the record at a byte offset will be read soon.
+    /// Hint that the record at a place will be read soon.
     #[inline(always)]
-    pub(super) fn prefetch_record(&self, byte: usize) {
-        self.region.prefetch(byte);
+    pub(super) fn prefetch_record(&self, (chunk, byte): Place) {
+        self.region.prefetch_record(chunk, byte);
+    }
+
+    /// The record count as last read.
+    #[inline(always)]
+    pub(super) fn records(&self) -> u64 {
+        self.nrecords
     }
 
     /// Check that `steps` steps down a chain stay within the record count:
@@ -219,14 +232,18 @@ impl<'r, R: Region> Access<'r, R> {
         Ok(())
     }
 
-    /// The published record at a byte offset that `locate` accepted.
+    /// The record at a place `place` accepted.
+    ///
+    /// # Safety
+    ///
+    /// The record lies within its chunk, as `place` checks, and is
+    /// published, or the caller is its chunk's one writer.
     #[inline(always)]
-    fn view(&self, byte: usize) -> View<'r> {
+    pub(super) unsafe fn view(&self, (chunk, byte): Place) -> View<'r> {
         let (nkeys, payload_size) = (self.nkeys, self.payload_size);
-        // SAFETY: a located record is published and never written again,
-        // and its bytes lie among the records, below the used mark, which
-        // is at most the buckets' offset and so within the region.
-        let bytes = unsafe { self.region.bytes_in(byte, self.record_size) };
+        // SAFETY: the caller's contract: a located record lies within its
+        // chunk and is never written again once published.
+        let bytes = unsafe { self.region.record(chunk, byte, self.record_size) };
         // SAFETY: the header checked that the record size is the 16 bytes
         // of the record header, 8 per key and the payload, rounded up, so
         // the three parts lie within `bytes`; the record starts at a
@@ -289,36 +306,43 @@ impl<'r, R: Region> Access<'r, R> {
         Ok(0)
     }
 
-    /// Reserve room for up to `wanted` records: the byte offset of the
-    /// first and how many fit, or `None` when none does.
+    /// The used mark of a chunk this operation writes, and how many more
+    /// records fit it; a mark that is not a record boundary within the
+    /// chunk is corrupt.
     #[inline]
-    pub(super) fn reserve(&mut self, wanted: usize) -> Option<(usize, usize)> {
-        let record_size = self.record_size;
-        loop {
-            let room = self.buckets_offset.saturating_sub(self.used) / record_size;
-            let count = wanted.min(room);
-            if count == 0 {
-                return None;
-            }
-            let end = self.used + count * record_size;
-            match self
-                .region
-                .cas_u64(CHUNK_USED, self.used as u64, end as u64)
-            {
-                Ok(_) => {
-                    let start = self.used;
-                    self.used = end;
-                    return Some((start, count));
-                }
-                // Clamped as in `refresh`: a used mark past the buckets
-                // leaves no room.
-                Err(found) => self.used = (found as usize).min(self.buckets_offset),
-            }
+    pub(super) fn room(&self, chunk: usize) -> Result<(usize, usize)> {
+        if chunk >= self.region.chunks() {
+            return Err(no_chunk(chunk));
         }
+        let len = self.region.chunk_len(chunk);
+        // SAFETY: the chunk exists, and the caller is its one writer.
+        let used = unsafe { self.region.chunk_used(chunk) };
+        let used = usize::try_from(used)
+            .ok()
+            .filter(|&used| {
+                used >= CHUNK_HEADER
+                    && used <= len
+                    && (used - CHUNK_HEADER).is_multiple_of(self.record_size)
+            })
+            .ok_or_else(|| bad_used(chunk, used))?;
+        Ok((used, (len - used) / self.record_size))
     }
 
-    /// Write a reserved record from row `bit` of a word's keys; `payload`
-    /// is the row's payload, `None` for zeros. `N` is the key count and
+    /// Store the used mark of a chunk this operation wrote.
+    ///
+    /// # Safety
+    ///
+    /// The caller is the chunk's one writer, and `used` is a record
+    /// boundary within it.
+    #[inline]
+    pub(super) unsafe fn set_used(&self, chunk: usize, used: usize) {
+        // SAFETY: the caller's contract.
+        unsafe { self.region.set_chunk_used(chunk, used as u64) };
+    }
+
+    /// Write the record at a place of a chunk this operation appends to,
+    /// from row `bit` of a word's keys; `payload` is the row's payload,
+    /// `None` for zeros. `N` is the key count and
     /// `T` the words after the keys (payload and padding) when the caller
     /// knows them, 0 to take them from the layout.
     ///
@@ -328,12 +352,13 @@ impl<'r, R: Region> Access<'r, R> {
     ///
     /// # Safety
     ///
-    /// `byte` starts a record this operation reserved; `keys` was made for
-    /// this table's key count; `N` and `T` are 0 or this table's.
+    /// The place lies past the chunk's used mark and within it, and this
+    /// operation is the chunk's one writer; `keys` was made for this
+    /// table's key count; `N` and `T` are 0 or this table's.
     #[inline(always)]
     pub(super) unsafe fn write<const N: usize, const T: usize>(
         &self,
-        byte: usize,
+        (chunk, byte): Place,
         hash: u32,
         keys: &WordKeys,
         bit: usize,
@@ -341,36 +366,12 @@ impl<'r, R: Region> Access<'r, R> {
     ) {
         let record_size = self.record_size;
         debug_assert!(N == 0 || N == self.nkeys);
-        // SAFETY: the record was reserved by this operation and is not
-        // published yet, so nothing else reads or writes its bytes; a
-        // reservation ends at most at the buckets' offset, in the region.
-        let bytes = unsafe { self.region.bytes_mut_in(byte, record_size) };
+        // SAFETY: the caller's contract: the record lies within the chunk,
+        // past its used mark, and nothing else reads or writes it yet.
+        let bytes = unsafe { self.region.record_mut(chunk, byte, record_size) };
         // SAFETY: the caller's contract on `keys`, `N` and `T`.
         unsafe { fill::<N, T>(bytes, self.nkeys, hash, keys, bit, payload) };
     }
-
-    /// Copy records written elsewhere, `records` whole, into the room at
-    /// `byte` that this operation reserved for them.
-    ///
-    /// # Safety
-    ///
-    /// `byte` starts as many records as `records` holds, all reserved by
-    /// this operation and not published.
-    #[inline]
-    pub(super) unsafe fn copy_in(&self, byte: usize, records: &[u8]) {
-        // SAFETY: the caller's contract; the reservation lies in the
-        // record area, within the region.
-        unsafe { self.region.bytes_mut_in(byte, records.len()) }.copy_from_slice(records);
-    }
-}
-
-/// The hash and the claimed length in bytes of a record written in
-/// `bytes`, for records staged outside the table.
-#[inline(always)]
-pub(super) fn staged_fields(bytes: &[u8]) -> (u32, usize) {
-    let field =
-        |at: usize| u32::from_ne_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]]);
-    (field(HASH), field(LEN) as usize * 8)
 }
 
 /// Write a record into `bytes`, a record's length, from row `bit` of a
@@ -450,15 +451,20 @@ impl<'r, R: Region> Access<'r, R> {
     }
 
     /// Publish a written record as the first of its bucket's chain.
+    ///
+    /// # Safety
+    ///
+    /// The record at `place`, whose reference is `offset`, lies within its
+    /// chunk and is not published yet, and no one else publishes it.
     #[inline]
-    pub(super) fn push(&self, offset: u32, byte: usize, hash: u32) {
+    pub(super) unsafe fn push(&self, offset: u32, (chunk, byte): Place, hash: u32) {
         let bucket = self.bucket(hash);
         // SAFETY: the bucket lies in the bucket array, as in `head`, and
-        // the next field in the record this operation reserved.
+        // the next field in the record, the caller's alone until published.
         unsafe {
             let mut head = self.region.load_u32_in(bucket);
             loop {
-                self.region.store_u32_in(byte + NEXT, head);
+                self.region.store_next(chunk, byte + NEXT, head);
                 match self.region.cas_u32_in(bucket, head, offset) {
                     Ok(_) => return,
                     Err(found) => head = found,
@@ -473,19 +479,26 @@ impl<'r, R: Region> Access<'r, R> {
     ///
     /// # Safety
     ///
-    /// The caller has the region to itself; `byte` starts a record this
-    /// operation reserved and wrote, and `after` is a record it located.
+    /// The caller has the table to itself; the record at `place`, whose
+    /// reference is `offset`, lies within its chunk, and `after` is a
+    /// record it located.
     #[inline]
-    pub(super) unsafe fn link_after(&self, after: u32, byte: usize, offset: u32) {
-        let after_next = after as usize * 8 + NEXT;
-        // SAFETY: both next fields lie in records within the record area,
-        // below the buckets and so within the region; nothing else reads
-        // or writes the region meanwhile.
+    pub(super) unsafe fn link_after(&self, after: u32, (chunk, byte): Place, offset: u32) {
+        let (after_chunk, after_byte) = placement(after);
+        // SAFETY: both next fields lie in records within their chunks, and
+        // nothing else reads or writes the table meanwhile.
         unsafe {
-            let next = self.region.load_u32_in(after_next);
-            self.region.store_u32_in(byte + NEXT, next);
-            self.region.store_u32_in(after_next, offset);
+            let next = self.region.load_next(after_chunk, after_byte + NEXT);
+            self.region.store_next(chunk, byte + NEXT, next);
+            self.region
+                .store_next(after_chunk, after_byte + NEXT, offset);
         }
+    }
+
+    /// The reference of a place.
+    #[inline(always)]
+    pub(super) fn reference(&self, (chunk, byte): Place) -> u32 {
+        reference(chunk, byte)
     }
 
     /// Count records published.
@@ -584,6 +597,20 @@ fn zero_words(dst: &mut [[u8; 8]]) {
 #[inline(never)]
 fn outside(offset: u32) -> anyhow::Error {
     anyhow::anyhow!("table record offset {offset} lies outside the records")
+}
+
+/// The error of a chunk number past the chunks.
+#[cold]
+#[inline(never)]
+fn no_chunk(chunk: usize) -> anyhow::Error {
+    anyhow::anyhow!("table chunk {chunk} does not exist")
+}
+
+/// The error of a used mark that is not a record boundary of its chunk.
+#[cold]
+#[inline(never)]
+fn bad_used(chunk: usize, used: u64) -> anyhow::Error {
+    anyhow::anyhow!("table chunk {chunk} has a used mark of {used} bytes that ends no record")
 }
 
 /// The error of an offset that does not start a record.

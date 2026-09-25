@@ -1,5 +1,6 @@
-//! The batch operations: insertion, probing, the next match of a row (in
-//! any table, or within a group of a grouped one) and the gathering of a
+//! The batch operations: appending rows to a chunk, linking a chunk's
+//! records into the buckets, probing, the next match of a row (in any
+//! table, or within a group of a grouped one) and the gathering of a
 //! payload word.
 
 use core::mem::MaybeUninit;
@@ -7,9 +8,9 @@ use core::mem::MaybeUninit;
 use anyhow::{Result, ensure};
 use tessera_core::{RowMask, RowMaskView};
 
-use super::header::Layout;
+use super::header::{CHUNK_HEADER, Layout};
 use super::keys::{KeySource, WordKeys, slot_buffer};
-use super::record::{Access, fill, same_keys, staged_fields};
+use super::record::{Access, Place, same_keys};
 use super::region::Region;
 
 /// Call `$f` specialized for the common shapes of a table: one or two
@@ -53,35 +54,6 @@ pub(super) fn check<K: KeySource + ?Sized>(
     Ok(())
 }
 
-/// Insert the rows of `pending`, in row order, until the table has no
-/// room: inserted rows leave `pending` and get their record offsets in
-/// `offsets`. The count inserted is returned.
-pub(super) fn insert<R: Region, K: KeySource + ?Sized>(
-    region: &R,
-    layout: &Layout,
-    hashes: &[u32],
-    keys: &K,
-    payload: Option<&[u8]>,
-    pending: &mut RowMask<'_>,
-    offsets: &mut [u32],
-) -> Result<usize> {
-    let nrows = pending.as_view().nrows();
-    check(layout, keys, nrows, hashes.len(), offsets.len())?;
-    let payload_size = layout.payload_size;
-    if let Some(payload) = payload {
-        ensure!(
-            nrows.checked_mul(payload_size) == Some(payload.len()),
-            "the payload has {} bytes, not {payload_size} per row of {nrows}",
-            payload.len()
-        );
-    }
-    shaped!(
-        layout.nkeys,
-        layout.tail_words(),
-        insert_rows(region, layout, hashes, keys, payload, pending, offsets)
-    )
-}
-
 /// Check that `payload` holds `payload_size` bytes for each of `nrows`
 /// rows.
 fn check_payload(payload: Option<&[u8]>, nrows: usize, payload_size: usize) -> Result<()> {
@@ -95,67 +67,64 @@ fn check_payload(payload: Option<&[u8]>, nrows: usize, payload_size: usize) -> R
     Ok(())
 }
 
-/// Write the rows of `pending`, in row order, as records one after
-/// another into `buffer` from byte `*used` on, as long as whole records
-/// fit: written rows leave `pending` and `*used` moves past them. The
-/// records are the table's, with no next record, for
-/// [`insert_staged`] to add to a table of the same layout later. The count
-/// written is returned.
-pub(super) fn stage<K: KeySource + ?Sized>(
+/// Append the rows of `pending`, in row order, as records to chunk
+/// `chunk`, whose one writer the caller is, as long as whole records fit:
+/// appended rows leave `pending` and get their references in `offsets`,
+/// and the chunk's used mark moves past them. The records are not linked
+/// into the buckets: [`link`] does that. The count appended is returned;
+/// rows left pending need another chunk.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn append<R: Region, K: KeySource + ?Sized>(
+    region: &R,
     layout: &Layout,
-    buffer: &mut [u8],
-    used: &mut usize,
+    chunk: usize,
     hashes: &[u32],
     keys: &K,
     payload: Option<&[u8]>,
     pending: &mut RowMask<'_>,
+    offsets: &mut [u32],
 ) -> Result<usize> {
     let nrows = pending.as_view().nrows();
-    check(layout, keys, nrows, hashes.len(), nrows)?;
+    check(layout, keys, nrows, hashes.len(), offsets.len())?;
     check_payload(payload, nrows, layout.payload_size)?;
-    ensure!(
-        *used <= buffer.len() && used.is_multiple_of(layout.record_size),
-        "a staging buffer of {} bytes cannot have {} used",
-        buffer.len(),
-        *used
-    );
     shaped!(
         layout.nkeys,
         layout.tail_words(),
-        stage_rows(buffer, layout, used, hashes, keys, payload, pending)
+        append_rows(
+            region, layout, chunk, hashes, keys, payload, pending, offsets
+        )
     )
 }
 
-/// The rows of [`stage`] for a table of `N` keys and `T` words after
+/// The rows of [`append`] for a table of `N` keys and `T` words after
 /// them, 0 for either when it is not one of the specialized shapes.
 #[inline(never)]
-fn stage_rows<
-    B: AsMut<[u8]> + ?Sized,
-    K: KeySource + ?Sized,
-    const N: usize,
-    const T: usize,
-    const L: usize,
->(
-    buffer: &mut B,
+#[allow(clippy::too_many_arguments)]
+fn append_rows<R: Region, K: KeySource + ?Sized, const N: usize, const T: usize, const L: usize>(
+    region: &R,
     layout: &Layout,
-    used: &mut usize,
+    chunk: usize,
     hashes: &[u32],
     keys: &K,
     payload: Option<&[u8]>,
     pending: &mut RowMask<'_>,
+    offsets: &mut [u32],
 ) -> Result<usize> {
-    let buffer = buffer.as_mut();
-    let (record_size, payload_size) = (layout.record_size, layout.payload_size);
+    // Made here, not passed in, so that its fields stay in registers; the
+    // index is not read.
+    let access = Access::for_chunks(region, layout);
+    let (mut used, mut room) = access.room(chunk)?;
+    let record_size = access.record_size();
     let nrows = pending.as_view().nrows();
-    let mut slots = slot_buffer::<L>();
-    let mut word_keys = WordKeys::new(&mut slots, layout.nkeys);
-    let mut staged = 0;
+    let payload_size = access.payload_size();
+    let mut buffer = slot_buffer::<L>();
+    let mut word_keys = WordKeys::new(&mut buffer, access.nkeys());
+    let mut appended = 0;
     for index in 0..nrows.div_ceil(64) {
         let selected = pending.as_view().word(index).unwrap();
         if selected == 0 {
             continue;
         }
-        let room = (buffer.len() - *used) / record_size;
         if room == 0 {
             break;
         }
@@ -168,140 +137,92 @@ fn stage_rows<
             let bit = bits.trailing_zeros() as usize;
             bits &= bits - 1;
             let row = index * 64 + bit;
-            let row_payload =
-                payload.map(|payload| &payload[row * payload_size..(row + 1) * payload_size]);
-            let bytes = &mut buffer[*used..*used + record_size];
-            // SAFETY: the buffer was made for the table's key count, and
-            // `N` and `T` are 0 or the table's.
-            unsafe {
-                fill::<N, T>(
-                    bytes,
-                    layout.nkeys,
-                    hashes[row],
-                    &word_keys,
-                    bit,
-                    row_payload,
-                )
-            };
-            *used += record_size;
-            done |= 1 << bit;
-        }
-        pending.intersect_word(index, !done)?;
-        staged += count;
-        if count < wanted {
-            break;
-        }
-    }
-    Ok(staged)
-}
-
-/// Add the records [`stage`] wrote in `staged`, from byte `*consumed` on,
-/// to the table, as long as it has room: they are counted, copied in and
-/// published as [`insert`] does its rows, and `*consumed` moves past them.
-/// The count added is returned; records left over need a larger table.
-pub(super) fn insert_staged<R: Region>(
-    region: &R,
-    layout: &Layout,
-    staged: &[u8],
-    consumed: &mut usize,
-) -> Result<usize> {
-    let record_size = layout.record_size;
-    ensure!(
-        staged.len().is_multiple_of(record_size)
-            && consumed.is_multiple_of(record_size)
-            && *consumed <= staged.len(),
-        "{} staged bytes from byte {} are not whole records of {record_size} bytes",
-        staged.len(),
-        *consumed
-    );
-    for record in staged[*consumed..].chunks_exact(record_size) {
-        ensure!(
-            staged_fields(record).1 == record_size,
-            "a staged record is not one of this table's"
-        );
-    }
-    let mut access = Access::new(region, layout);
-    let mut inserted = 0;
-    while *consumed < staged.len() {
-        let wanted = (staged.len() - *consumed) / record_size;
-        let Some((start, count)) = access.reserve(wanted) else {
-            break;
-        };
-        // Counted before they are published, as in `insert`.
-        access.count(count);
-        let records = &staged[*consumed..*consumed + count * record_size];
-        // SAFETY: `start` begins the `count` records just reserved.
-        unsafe { access.copy_in(start, records) };
-        for (slot, record) in records.chunks_exact(record_size).enumerate() {
-            let byte = start + slot * record_size;
-            access.push((byte / 8) as u32, byte, staged_fields(record).0);
-        }
-        *consumed += count * record_size;
-        inserted += count;
-    }
-    Ok(inserted)
-}
-
-/// The rows of [`insert`] for a table of `N` keys and `T` words after
-/// them, 0 for either when it is not one of the specialized shapes.
-#[inline(never)]
-fn insert_rows<R: Region, K: KeySource + ?Sized, const N: usize, const T: usize, const L: usize>(
-    region: &R,
-    layout: &Layout,
-    hashes: &[u32],
-    keys: &K,
-    payload: Option<&[u8]>,
-    pending: &mut RowMask<'_>,
-    offsets: &mut [u32],
-) -> Result<usize> {
-    // Made here, not passed in, so that its fields stay in registers.
-    let mut access = Access::new(region, layout);
-    let nrows = pending.as_view().nrows();
-    let payload_size = access.payload_size();
-    let mut buffer = slot_buffer::<L>();
-    let mut word_keys = WordKeys::new(&mut buffer, access.nkeys());
-    let mut inserted = 0;
-    for index in 0..nrows.div_ceil(64) {
-        let selected = pending.as_view().word(index).unwrap();
-        if selected == 0 {
-            continue;
-        }
-        word_keys.load(keys, index, selected)?;
-        let wanted = selected.count_ones() as usize;
-        let Some((start, count)) = access.reserve(wanted) else {
-            break;
-        };
-        // Counted before they are published, so that a probe that finds
-        // one of the records also sees a count that covers its chain.
-        access.count(count);
-        let mut bits = selected;
-        let mut done = 0;
-        for slot in 0..count {
-            let bit = bits.trailing_zeros() as usize;
-            bits &= bits - 1;
-            let row = index * 64 + bit;
-            let byte = start + slot * access.record_size();
-            let offset = (byte / 8) as u32;
             // SAFETY: the payload was checked to hold `payload_size` bytes
             // for each of the `nrows` rows, and `row` is below `nrows`.
             let row_payload = payload.map(|payload| unsafe {
                 payload.get_unchecked(row * payload_size..(row + 1) * payload_size)
             });
-            let hash = hashes[row];
-            // SAFETY: `byte` starts the `slot`-th of the `count` records
-            // just reserved; the buffer and the shape are this table's.
-            unsafe { access.write::<N, T>(byte, hash, &word_keys, bit, row_payload) };
-            access.push(offset, byte, hash);
-            offsets[row] = offset;
+            // SAFETY: the place lies past the used mark and within the
+            // chunk, as `room` counted; the buffer and the shape are this
+            // table's.
+            unsafe {
+                access.write::<N, T>((chunk, used), hashes[row], &word_keys, bit, row_payload)
+            };
+            offsets[row] = access.reference((chunk, used));
+            used += record_size;
             done |= 1 << bit;
         }
         pending.intersect_word(index, !done)?;
-        inserted += count;
+        appended += count;
+        room -= count;
         if count < wanted {
             break;
         }
     }
-    Ok(inserted)
+    // SAFETY: the caller is the chunk's one writer, and `used` ends the
+    // records just written.
+    unsafe { access.set_used(chunk, used) };
+    Ok(appended)
+}
+
+/// Link the records of chunk `chunk` from byte `*from` to its used mark
+/// into their buckets, first in their chains, and move `*from` past them:
+/// they are counted first, so that a probe that finds one also sees a
+/// count that covers its chain, then published one by one. Several
+/// participants may link chunks of their own at once. The count linked is
+/// returned.
+pub(super) fn link<R: Region>(
+    region: &R,
+    layout: &Layout,
+    chunk: usize,
+    from: &mut usize,
+) -> Result<usize> {
+    let mut access = Access::new(region, layout);
+    let bytes = unlinked(&access, chunk, *from)?;
+    let count = bytes.len();
+    access.count(count);
+    for byte in bytes {
+        let place = (chunk, byte);
+        let hash = check_record(&access, place)?;
+        // SAFETY: the record lies in the chunk, below its used mark, and
+        // the caller alone links this chunk.
+        unsafe { access.push(access.reference(place), place, hash) };
+        *from = byte + access.record_size();
+    }
+    Ok(count)
+}
+
+/// The first bytes of a chunk's records from byte `from` to its used
+/// mark; `from` must be a record boundary.
+pub(super) fn unlinked<R: Region>(
+    access: &Access<'_, R>,
+    chunk: usize,
+    from: usize,
+) -> Result<core::iter::StepBy<core::ops::Range<usize>>> {
+    let (used, _) = access.room(chunk)?;
+    ensure!(
+        from >= CHUNK_HEADER
+            && from <= used
+            && (from - CHUNK_HEADER).is_multiple_of(access.record_size()),
+        "byte {from} of table chunk {chunk} is no record boundary below its {used} used bytes"
+    );
+    Ok((from..used).step_by(access.record_size()))
+}
+
+/// The hash of the record at a place of a chunk below its used mark,
+/// which must claim the table's record length.
+#[inline]
+pub(super) fn check_record<R: Region>(access: &Access<'_, R>, place: Place) -> Result<u32> {
+    // SAFETY: the place lies below the chunk's used mark, which `room`
+    // checked against its length; the caller wrote it or it is published.
+    let view = unsafe { access.view(place) };
+    ensure!(
+        view.len() == access.record_size(),
+        "table chunk {} holds no record at byte {}",
+        place.0,
+        place.1
+    );
+    Ok(view.hash())
 }
 
 /// Find the first record with the hash and keys of each row of `rows`:
@@ -463,8 +384,8 @@ pub(super) fn probe_word<R: Region, const N: usize>(
         access.check_steps(steps)?;
         steps += 1;
         for bit in rows_of(pending) {
-            let byte = access.place(unsafe { lanes.current[bit].assume_init() })?;
-            access.prefetch_record(byte);
+            let place = access.place(unsafe { lanes.current[bit].assume_init() })?;
+            access.prefetch_record(place);
         }
         let mut rest = 0;
         for bit in rows_of(pending) {

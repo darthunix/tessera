@@ -22,7 +22,7 @@
 use anyhow::{Result, ensure};
 use tessera_core::{ColumnView, RowMask, RowMaskView};
 use tessera_kernels::int32::murmurhash32;
-use tessera_kernels::table::{KeyKind, TableConfig, TableMut, bloom, region_size};
+use tessera_kernels::table::{KeyKind, LocalTable, MAX_CHUNK_LEN, TableConfig, bloom};
 
 use crate::support::runner::Runner;
 
@@ -174,7 +174,7 @@ impl Reference {
 
 /// The table, its keys with their hashes, and the output buffers.
 pub struct Setup {
-    pub words: Vec<u64>,
+    pub table: LocalTable,
     pub keys: Keys,
     pub present_hashes: Vec<u32>,
     pub absent_hashes: Vec<u32>,
@@ -199,11 +199,10 @@ impl Setup {
         let inserted_hashes = hashes(&keys.inserted);
         let absent_hashes = hashes(&keys.absent);
         let occupied_hashes = hashes(&keys.occupied);
-        let mut words = vec![0; region_size(&CONFIG, RECORDS as u64)?.div_ceil(8)];
+        let mut table = LocalTable::new(&CONFIG, RECORDS as u64, MAX_CHUNK_LEN)?;
         {
-            let table = TableMut::create_in(&mut words, &CONFIG, RECORDS as u64)?;
             ensure!(
-                table.stats().buckets == BUCKETS as u64,
+                table.table()?.stats().buckets == BUCKETS as u64,
                 "unexpected bucket count"
             );
             let mut offsets = vec![0; BATCH];
@@ -226,10 +225,10 @@ impl Setup {
             }
         }
         let mut filter = vec![0; bloom::words_for(RECORDS as u64)?];
-        TableMut::exclusive(&mut words)?.bloom(&mut filter)?;
+        table.table()?.bloom(&mut filter)?;
         let reference = Reference::new(&keys.inserted);
         Ok(Self {
-            words,
+            table,
             keys,
             present_hashes,
             absent_hashes,
@@ -285,7 +284,7 @@ pub fn probe(setup: &mut Setup, batch: usize, kind: Kind) -> Result<()> {
         ),
     };
     let column = [ColumnView::try_new(keys, None)?];
-    let table = TableMut::exclusive(&mut setup.words)?;
+    let table = setup.table.table()?;
     let all = RowMaskView::try_new(BATCH, &setup.all)?;
     let mut found = RowMask::try_new(BATCH, &mut setup.found)?;
     table.probe(hashes, &column[..], &all, &mut setup.matches, &mut found)
@@ -318,7 +317,7 @@ pub fn bloom_probe(setup: &mut Setup, batch: usize, kind: Kind, then: bool) -> R
         return Ok(());
     }
     let column = [ColumnView::try_new(keys, None)?];
-    let table = TableMut::exclusive(&mut setup.words)?;
+    let table = setup.table.table()?;
     let passed = RowMaskView::try_new(BATCH, &setup.passed)?;
     let mut found = RowMask::try_new(BATCH, &mut setup.found)?;
     table.probe(hashes, &column[..], &passed, &mut setup.matches, &mut found)
@@ -332,11 +331,13 @@ pub fn resolve(setup: &mut Setup, batch: usize) -> Result<()> {
         &setup.keys.present[rows.clone()],
         None,
     )?];
-    let mut table = TableMut::exclusive(&mut setup.words)?;
+    let chunk = setup.table.chunks() - 1;
+    let mut table = setup.table.table_mut()?;
     setup.pending = setup.all;
     let mut pending = RowMask::try_new(BATCH, &mut setup.pending)?;
     let mut inserted = RowMask::try_new(BATCH, &mut setup.inserted)?;
     table.find_or_insert(
+        chunk,
         &setup.present_hashes[rows],
         &column[..],
         &mut pending,
@@ -357,7 +358,7 @@ pub fn check(setup: &mut Setup) -> Result<()> {
             "batch {batch}: a present key missed"
         );
         {
-            let table = TableMut::exclusive(&mut setup.words)?;
+            let table = setup.table.table()?;
             for (row, &offset) in setup.matches.iter().enumerate() {
                 let key = setup.keys.present[batch * BATCH + row];
                 ensure!(
@@ -407,7 +408,7 @@ pub fn check(setup: &mut Setup) -> Result<()> {
             "batch {batch}: the reference hit an absent key in an occupied bucket"
         );
     }
-    let table = TableMut::exclusive(&mut setup.words)?;
+    let table = setup.table.table()?;
     ensure!(
         table.stats().records == RECORDS as u64,
         "records were created"

@@ -1,7 +1,8 @@
 //! The table entry points, declared in `include/tessera/table.h`.
 //!
-//! The region comes as a pointer and a length with every call, and every
-//! call attaches anew: the library keeps nothing between calls. Keys come
+//! The table comes as a `TessTableRef` with every call: its index as a
+//! pointer and a length, its chunks as this process's bases and lengths.
+//! Every call attaches anew: the library keeps nothing between calls. Keys come
 //! as `TessTableKey`s, Datum columns read by their kind, and reach the
 //! table through [`TableKeys`].
 
@@ -12,12 +13,11 @@ use std::slice;
 use anyhow::{Context, Result, bail, ensure};
 use tessera_core::ColumnReader;
 use tessera_kernels::table::{
-    Cursor, FORMAT_VERSION, Fold, HEADER_SIZE, KeyKind, KeySource, MAX_KEYS, Slot, Table,
-    TableConfig, TableMut, VERSION_OFFSET,
+    Chunks, Cursor, FORMAT_VERSION, Fold, HEADER_SIZE, KeyKind, KeySource, MAX_KEYS, Slot, Table,
+    TableConfig, TableMut, VERSION_OFFSET, append_to,
     bloom::SharedFilter,
-    normalize_word,
+    index_size, init_chunk, normalize_word,
     phases::{Participant, SharedCounters},
-    region_size,
 };
 
 use super::args::reader;
@@ -81,6 +81,77 @@ pub struct TableRecord {
 impl TableRecord {
     /// The size through `payload_size` (`TESS_TABLE_RECORD_MIN_SIZE`).
     pub const MIN_SIZE: usize = offset_of!(TableRecord, payload_size) + size_of::<usize>();
+}
+
+/// `TessTableRef`: a table as this process sees it: its index, and its
+/// chunks' bases and lengths.
+#[repr(C)]
+#[derive(Debug)]
+pub struct TableRef {
+    /// The index, aligned to 8, or null where only chunks are used.
+    pub index: *mut u8,
+    /// Bytes of the index.
+    pub index_len: usize,
+    /// The bases of the chunks, in their numbers' order.
+    pub chunks: *const *mut u8,
+    /// The lengths of the chunks.
+    pub chunk_lens: *const usize,
+    /// The number of chunks.
+    pub nchunks: c_int,
+}
+
+/// The chunks of a table reference.
+///
+/// # Safety
+///
+/// `table` must point to a reference whose arrays hold `nchunks` entries
+/// each, valid with the chunks they describe for `'a`, as for
+/// [`Chunks::new`].
+unsafe fn chunks_of<'a>(table: *const TableRef) -> Result<(&'a TableRef, Chunks<'a>)> {
+    // SAFETY: the caller's contract.
+    let table = unsafe { table.as_ref() }.context("a null table")?;
+    let nchunks = usize::try_from(table.nchunks).context("a negative chunk count")?;
+    if nchunks == 0 {
+        return Ok((table, Chunks::none()));
+    }
+    ensure!(
+        !table.chunks.is_null() && !table.chunk_lens.is_null(),
+        "null chunk arrays"
+    );
+    // SAFETY: the caller's contract.
+    let chunks = unsafe {
+        Chunks::new(
+            slice::from_raw_parts(table.chunks, nchunks),
+            slice::from_raw_parts(table.chunk_lens, nchunks),
+        )
+    }?;
+    Ok((table, chunks))
+}
+
+/// Attach to a table for the length of a call.
+///
+/// # Safety
+///
+/// `table` as for [`chunks_of`], and its index as for [`Table::attach`].
+unsafe fn attach<'a>(table: *const TableRef) -> Result<Table<'a>> {
+    // SAFETY: the caller's contract.
+    unsafe {
+        let (table, chunks) = chunks_of(table)?;
+        Table::attach(table.index, table.index_len, chunks)
+    }
+}
+
+/// Attach as the one writer of a table for the length of a call.
+///
+/// # Safety
+///
+/// As [`attach`], and as [`TableMut::attach_mut`].
+unsafe fn attach_mut<'a>(table: *const TableRef) -> Result<TableMut<'a>> {
+    // SAFETY: the caller's contract.
+    unsafe {
+        let (table, chunks) = chunks_of(table)?;
+        TableMut::attach_mut(table.index, table.index_len, chunks)
+    }
 }
 
 /// A key column read by its kind.
@@ -160,6 +231,8 @@ pub extern "C" fn tess_table_layout(kind: c_uint) -> usize {
         5 => offset_of!(TableStats, region_len),
         6 => size_of::<TableRecord>(),
         7 => offset_of!(TableRecord, payload),
+        8 => size_of::<TableRef>(),
+        9 => offset_of!(TableRef, nchunks),
         _ => 0,
     }
 }
@@ -272,7 +345,7 @@ unsafe fn slots<'a, T>(pointer: *mut T, nrows: usize, what: &str) -> Result<&'a 
     Ok(unsafe { slice::from_raw_parts_mut(pointer, nrows) })
 }
 
-/// `tess_table_size`: the bytes a region needs for a table.
+/// `tess_table_size`: the bytes a table's index needs.
 ///
 /// # Safety
 ///
@@ -295,14 +368,14 @@ pub unsafe extern "C" fn tess_table_size(
                 keys: &kinds[..nkeys],
                 payload_size,
             };
-            let bytes = region_size(&config, capacity)?;
+            let bytes = index_size(&config, capacity)?;
             *size.as_mut().context("a null size")? = bytes;
             Ok(())
         })
     }
 }
 
-/// `tess_table_create`: lay an empty table out over the region.
+/// `tess_table_create`: lay an empty table's index out over the region.
 ///
 /// # Safety
 ///
@@ -327,7 +400,7 @@ pub unsafe extern "C" fn tess_table_create(
                 keys: &kinds[..nkeys],
                 payload_size,
             };
-            TableMut::create(region, len, &config, capacity).map(drop)
+            TableMut::create(region, len, &config, capacity, Chunks::none()).map(drop)
         })
     }
 }
@@ -336,36 +409,31 @@ pub unsafe extern "C" fn tess_table_create(
 ///
 /// # Safety
 ///
-/// `region` as for [`Table::attach`] during the call; `status` as for
+/// `table` as for [`attach`] during the call; `status` as for
 /// every entry point.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn tess_table_attach(
-    region: *const u8,
-    len: usize,
-    status: *mut Status,
-) -> Code {
+pub unsafe extern "C" fn tess_table_attach(table: *const TableRef, status: *mut Status) -> Code {
     // SAFETY: the caller's contract.
-    unsafe { guard(status, || Table::attach(region.cast_mut(), len).map(drop)) }
+    unsafe { guard(status, || attach(table).map(drop)) }
 }
 
 /// `tess_table_stats`: the counts of the table.
 ///
 /// # Safety
 ///
-/// `region` as for [`Table::attach`] during the call; `stats` must be
+/// `table` as for [`attach`] during the call; `stats` must be
 /// null or writable for its `struct_size`; `status` as for every entry
 /// point.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn tess_table_stats(
-    region: *const u8,
-    len: usize,
+    table: *const TableRef,
     stats: *mut TableStats,
     status: *mut Status,
 ) -> Code {
     // SAFETY: the caller's contract.
     unsafe {
         guard(status, || {
-            let table = Table::attach(region.cast_mut(), len)?;
+            let table = attach(table)?;
             let out = stats.as_mut().context("a null stats structure")?;
             ensure!(
                 out.struct_size >= TableStats::MIN_SIZE,
@@ -381,20 +449,38 @@ pub unsafe extern "C" fn tess_table_stats(
     }
 }
 
-/// `tess_table_insert`: insert the rows of `pending` until the table has
-/// no room.
+/// `tess_table_chunk_init`: make a block an empty chunk.
 ///
 /// # Safety
 ///
-/// `region` as for [`Table::attach`] during the call; `keys` as for
-/// [`table_keys`]; `pending` must point to a valid mask that nothing else
-/// accesses; `hashes` must hold a hash per row, `offsets` a writable slot
-/// per row and `payload` null or the table's payload size times the rows;
-/// `status` as for every entry point.
+/// `base` must be aligned to 8 and valid for writes of `len` bytes that
+/// nothing else uses yet; `status` as for every entry point.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn tess_table_insert(
-    region: *mut u8,
+pub unsafe extern "C" fn tess_table_chunk_init(
+    base: *mut u8,
     len: usize,
+    status: *mut Status,
+) -> Code {
+    // SAFETY: the caller's contract.
+    unsafe { guard(status, || init_chunk(base, len)) }
+}
+
+/// `tess_table_append`: append the rows of `pending` to chunk `chunk` of
+/// the table's chunks, as long as whole records fit. The table's index is
+/// not read: a shared build appends before it has one.
+///
+/// # Safety
+///
+/// `table` as for [`chunks_of`], the caller being chunk `chunk`'s one
+/// writer; `keys` as for [`table_keys`], their kinds the table's; `pending`
+/// must point to a valid mask that nothing else accesses; `hashes` must
+/// hold a hash per row, `offsets` a writable slot per row and `payload`
+/// null or `payload_size` bytes per row; `status` as for every entry point.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tess_table_append(
+    table: *const TableRef,
+    chunk: c_int,
+    payload_size: usize,
     hashes: *const u32,
     nkeys: c_int,
     keys: *const TableKey,
@@ -406,9 +492,23 @@ pub unsafe extern "C" fn tess_table_insert(
     // SAFETY: the caller's contract.
     unsafe {
         guard(status, || {
-            let table = Table::attach(region, len)?;
+            let (_, chunks) = chunks_of(table)?;
+            let chunk = usize::try_from(chunk).context("a negative chunk")?;
             let mut decoded = TableKeys::empty();
             table_keys(nkeys, keys, &mut decoded)?;
+            let key_list = slice::from_raw_parts(keys, decoded.nkeys);
+            let mut kinds = [KeyKind::Int32; MAX_KEYS];
+            for (slot, key) in kinds.iter_mut().zip(key_list) {
+                *slot = if key.kind == 2 {
+                    KeyKind::Int64
+                } else {
+                    KeyKind::Int32
+                };
+            }
+            let config = TableConfig {
+                keys: &kinds[..decoded.nkeys],
+                payload_size,
+            };
             let mut pending = pending.as_mut().context("a null pending mask")?.mask()?;
             let nrows = pending.as_view().nrows();
             let hashes = values(hashes, nrows, "hashes")?;
@@ -417,13 +517,85 @@ pub unsafe extern "C" fn tess_table_insert(
                 None
             } else {
                 let bytes = nrows
-                    .checked_mul(table.payload_size())
+                    .checked_mul(payload_size)
                     .context("the payload does not fit in memory")?;
                 Some(values(payload, bytes, "payload")?)
             };
-            table
-                .insert(hashes, &decoded, payload, &mut pending, offsets)
-                .map(drop)
+            append_to(
+                &config,
+                chunks,
+                chunk,
+                hashes,
+                &decoded,
+                payload,
+                &mut pending,
+                offsets,
+            )
+            .map(drop)
+        })
+    }
+}
+
+/// `tess_table_link`: link a chunk's records from byte `*from` into the
+/// buckets; several participants may link chunks of their own at once.
+///
+/// # Safety
+///
+/// `table` as for [`attach`] during the call, the caller linking chunk
+/// `chunk` alone; `from` must point to a writable size and `linked` be null
+/// or writable; `status` as for every entry point.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tess_table_link(
+    table: *const TableRef,
+    chunk: c_int,
+    from: *mut usize,
+    linked: *mut u64,
+    status: *mut Status,
+) -> Code {
+    // SAFETY: the caller's contract.
+    unsafe {
+        guard(status, || {
+            let chunk = usize::try_from(chunk).context("a negative chunk")?;
+            let from = from.as_mut().context("a null link cursor")?;
+            let count = attach(table)?.link(chunk, from)?;
+            if let Some(linked) = linked.as_mut() {
+                *linked = count as u64;
+            }
+            Ok(())
+        })
+    }
+}
+
+/// `tess_table_link_grouped`: link a chunk's records next to those of the
+/// same keys, as the table's one writer.
+///
+/// # Safety
+///
+/// `table` as for [`attach_mut`] during the call; `from` must point to a
+/// writable size, `linked` and `duplicates` be null or writable; `status` as
+/// for every entry point.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tess_table_link_grouped(
+    table: *const TableRef,
+    chunk: c_int,
+    from: *mut usize,
+    linked: *mut u64,
+    duplicates: *mut u64,
+    status: *mut Status,
+) -> Code {
+    // SAFETY: the caller's contract.
+    unsafe {
+        guard(status, || {
+            let chunk = usize::try_from(chunk).context("a negative chunk")?;
+            let from = from.as_mut().context("a null link cursor")?;
+            let (count, repeated) = attach_mut(table)?.link_grouped(chunk, from)?;
+            if let Some(linked) = linked.as_mut() {
+                *linked = count as u64;
+            }
+            if let Some(duplicates) = duplicates.as_mut() {
+                *duplicates = repeated as u64;
+            }
+            Ok(())
         })
     }
 }
@@ -432,15 +604,14 @@ pub unsafe extern "C" fn tess_table_insert(
 ///
 /// # Safety
 ///
-/// `region` as for [`Table::attach`] during the call; `keys` as for
+/// `table` as for [`attach`] during the call; `keys` as for
 /// [`table_keys`]; `rows` must point to a valid mask and `found` to a
 /// valid mask that nothing else accesses, both with the batch's rows;
 /// `hashes` must hold a hash per row and `matches` a writable slot per
 /// row; `status` as for every entry point.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn tess_table_probe(
-    region: *const u8,
-    len: usize,
+    table: *const TableRef,
     hashes: *const u32,
     nkeys: c_int,
     keys: *const TableKey,
@@ -452,7 +623,7 @@ pub unsafe extern "C" fn tess_table_probe(
     // SAFETY: the caller's contract.
     unsafe {
         guard(status, || {
-            let table = Table::attach(region.cast_mut(), len)?;
+            let table = attach(table)?;
             let mut decoded = TableKeys::empty();
             table_keys(nkeys, keys, &mut decoded)?;
             let rows = rows.as_ref().context("a null row mask")?.view()?;
@@ -470,15 +641,14 @@ pub unsafe extern "C" fn tess_table_probe(
 ///
 /// # Safety
 ///
-/// `region` as for [`Table::attach`] during the call; `rows` must point
+/// `table` as for [`attach`] during the call; `rows` must point
 /// to a valid mask and `found` to a valid mask that nothing else accesses,
 /// both with the batch's rows; `offsets` must hold an initialized,
 /// writable offset per row that nothing else accesses; `status` as for
 /// every entry point.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn tess_table_next_match(
-    region: *const u8,
-    len: usize,
+    table: *const TableRef,
     offsets: *mut u32,
     rows: *const Mask,
     found: *mut Mask,
@@ -487,7 +657,7 @@ pub unsafe extern "C" fn tess_table_next_match(
     // SAFETY: the caller's contract.
     unsafe {
         guard(status, || {
-            let table = Table::attach(region.cast_mut(), len)?;
+            let table = attach(table)?;
             let rows = rows.as_ref().context("a null row mask")?.view()?;
             let mut found = found.as_mut().context("a null result mask")?.mask()?;
             let offsets = slots(offsets, rows.nrows(), "offsets")?;
@@ -500,14 +670,13 @@ pub unsafe extern "C" fn tess_table_next_match(
 ///
 /// # Safety
 ///
-/// `region` as for [`Table::attach`] during the call; `rows` must point
+/// `table` as for [`attach`] during the call; `rows` must point
 /// to a valid mask; `offsets` must hold an initialized offset per row and
 /// `out` an initialized, writable word per row that nothing else
 /// accesses; `status` as for every entry point.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn tess_table_gather(
-    region: *const u8,
-    len: usize,
+    table: *const TableRef,
     offsets: *const u32,
     rows: *const Mask,
     at: usize,
@@ -517,7 +686,7 @@ pub unsafe extern "C" fn tess_table_gather(
     // SAFETY: the caller's contract.
     unsafe {
         guard(status, || {
-            let table = Table::attach(region.cast_mut(), len)?;
+            let table = attach(table)?;
             let rows = rows.as_ref().context("a null row mask")?.view()?;
             let nrows = rows.nrows();
             let offsets = values(offsets, nrows, "offsets")?;
@@ -535,8 +704,7 @@ pub unsafe extern "C" fn tess_table_gather(
 /// As for [`tess_table_next_match`].
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn tess_table_next_in_group(
-    region: *const u8,
-    len: usize,
+    table: *const TableRef,
     offsets: *mut u32,
     rows: *const Mask,
     found: *mut Mask,
@@ -545,7 +713,7 @@ pub unsafe extern "C" fn tess_table_next_in_group(
     // SAFETY: the caller's contract.
     unsafe {
         guard(status, || {
-            let table = Table::attach(region.cast_mut(), len)?;
+            let table = attach(table)?;
             let rows = rows.as_ref().context("a null row mask")?.view()?;
             let mut found = found.as_mut().context("a null result mask")?.mask()?;
             let offsets = slots(offsets, rows.nrows(), "offsets")?;
@@ -558,13 +726,12 @@ pub unsafe extern "C" fn tess_table_next_in_group(
 ///
 /// # Safety
 ///
-/// `region` as for [`Table::attach`] during the call and until the caller
+/// `table` as for [`attach`] during the call and until the caller
 /// is done with the pointers it receives; `record` must be null or
 /// writable for its `struct_size`; `status` as for every entry point.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn tess_table_record(
-    region: *const u8,
-    len: usize,
+    table: *const TableRef,
     offset: u32,
     record: *mut TableRecord,
     status: *mut Status,
@@ -572,7 +739,7 @@ pub unsafe extern "C" fn tess_table_record(
     // SAFETY: the caller's contract.
     unsafe {
         guard(status, || {
-            let table = Table::attach(region.cast_mut(), len)?;
+            let table = attach(table)?;
             let out = record.as_mut().context("a null record structure")?;
             ensure!(
                 out.struct_size >= TableRecord::MIN_SIZE,
@@ -594,15 +761,15 @@ pub unsafe extern "C" fn tess_table_record(
 ///
 /// # Safety
 ///
-/// `region` as for [`TableMut::attach_mut`] during the call; `keys` as
+/// `table` as for [`attach_mut`] during the call; `keys` as
 /// for [`table_keys`]; `pending` and `inserted` must point to valid masks
 /// that nothing else accesses, with the batch's rows; `hashes` must hold
 /// a hash per row and `offsets` a writable slot per row; `status` as for
 /// every entry point.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn tess_table_find_or_insert(
-    region: *mut u8,
-    len: usize,
+    table: *const TableRef,
+    chunk: c_int,
     hashes: *const u32,
     nkeys: c_int,
     keys: *const TableKey,
@@ -614,7 +781,8 @@ pub unsafe extern "C" fn tess_table_find_or_insert(
     // SAFETY: the caller's contract.
     unsafe {
         guard(status, || {
-            let mut table = TableMut::attach_mut(region, len)?;
+            let mut table = attach_mut(table)?;
+            let chunk = usize::try_from(chunk).context("a negative chunk")?;
             let mut decoded = TableKeys::empty();
             table_keys(nkeys, keys, &mut decoded)?;
             let mut pending = pending.as_mut().context("a null pending mask")?.mask()?;
@@ -623,66 +791,13 @@ pub unsafe extern "C" fn tess_table_find_or_insert(
             let hashes = values(hashes, nrows, "hashes")?;
             let offsets = slots(offsets, nrows, "offsets")?;
             table
-                .find_or_insert(hashes, &decoded, &mut pending, offsets, &mut inserted)
-                .map(drop)
-        })
-    }
-}
-
-/// `tess_table_insert_grouped`: insert each pending row right after a
-/// record with the same keys, when the table holds one.
-///
-/// # Safety
-///
-/// `region` as for [`TableMut::attach_mut`] during the call; `keys` as
-/// for [`table_keys`]; `pending` and `duplicates` must point to valid
-/// masks that nothing else accesses, with the batch's rows; `hashes` must
-/// hold a hash per row, `offsets` a writable slot per row, and `payload`
-/// be null or hold the payload of every row; `status` as for every entry
-/// point.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn tess_table_insert_grouped(
-    region: *mut u8,
-    len: usize,
-    hashes: *const u32,
-    nkeys: c_int,
-    keys: *const TableKey,
-    payload: *const u8,
-    pending: *mut Mask,
-    offsets: *mut u32,
-    duplicates: *mut Mask,
-    status: *mut Status,
-) -> Code {
-    // SAFETY: the caller's contract.
-    unsafe {
-        guard(status, || {
-            let mut table = TableMut::attach_mut(region, len)?;
-            let mut decoded = TableKeys::empty();
-            table_keys(nkeys, keys, &mut decoded)?;
-            let mut pending = pending.as_mut().context("a null pending mask")?.mask()?;
-            let mut duplicates = duplicates
-                .as_mut()
-                .context("a null duplicates mask")?
-                .mask()?;
-            let nrows = pending.as_view().nrows();
-            let hashes = values(hashes, nrows, "hashes")?;
-            let offsets = slots(offsets, nrows, "offsets")?;
-            let payload = if payload.is_null() {
-                None
-            } else {
-                let bytes = nrows
-                    .checked_mul(table.payload_size())
-                    .context("the payload does not fit in memory")?;
-                Some(values(payload, bytes, "payload")?)
-            };
-            table
-                .insert_grouped(
+                .find_or_insert(
+                    chunk,
                     hashes,
                     &decoded,
-                    payload,
                     &mut pending,
                     offsets,
-                    &mut duplicates,
+                    &mut inserted,
                 )
                 .map(drop)
         })
@@ -693,13 +808,12 @@ pub unsafe extern "C" fn tess_table_insert_grouped(
 ///
 /// # Safety
 ///
-/// `region` as for [`TableMut::attach_mut`] during the call and until the
+/// `table` as for [`attach_mut`] during the call and until the
 /// caller is done with the pointer it receives; `payload` must be null or
 /// writable; `status` as for every entry point.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn tess_table_payload(
-    region: *mut u8,
-    len: usize,
+    table: *const TableRef,
     offset: u32,
     payload: *mut *mut u8,
     status: *mut Status,
@@ -707,7 +821,7 @@ pub unsafe extern "C" fn tess_table_payload(
     // SAFETY: the caller's contract.
     unsafe {
         guard(status, || {
-            let mut table = TableMut::attach_mut(region, len)?;
+            let mut table = attach_mut(table)?;
             let bytes = table.payload_mut(offset)?.as_mut_ptr();
             *payload.as_mut().context("a null payload pointer")? = bytes;
             Ok(())
@@ -719,13 +833,12 @@ pub unsafe extern "C" fn tess_table_payload(
 ///
 /// # Safety
 ///
-/// `region` as for [`TableMut::attach_mut`] during the call; `cursor` and
+/// `table` as for [`attach_mut`] during the call; `cursor` and
 /// `count` must be null or writable; `offsets` must hold `capacity`
 /// writable slots; `status` as for every entry point.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn tess_table_scan(
-    region: *mut u8,
-    len: usize,
+    table: *const TableRef,
     cursor: *mut u64,
     offsets: *mut u32,
     capacity: c_int,
@@ -735,7 +848,7 @@ pub unsafe extern "C" fn tess_table_scan(
     // SAFETY: the caller's contract.
     unsafe {
         guard(status, || {
-            let table = TableMut::attach_mut(region, len)?;
+            let table = attach_mut(table)?;
             let raw = cursor.as_mut().context("a null cursor")?;
             let mut cursor = if *raw == 0 {
                 Cursor::start()
@@ -752,17 +865,25 @@ pub unsafe extern "C" fn tess_table_scan(
     }
 }
 
-/// `tess_table_grow`: grow the table to the whole region.
+/// `tess_table_regrow`: move the table to a new index of `len` bytes at
+/// `index`, for `capacity` records, over the same chunks; the old index is
+/// no longer the table's.
 ///
 /// # Safety
 ///
-/// `region` as for [`TableMut::attach_mut`] during the call, the first
-/// bytes of it holding what the table held; `status` as for every entry
-/// point.
+/// `table` as for [`attach_mut`] during the call; `index` must be aligned to
+/// 8 and valid for reads and writes of `len` bytes that nothing else uses;
+/// `status` as for every entry point.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn tess_table_grow(region: *mut u8, len: usize, status: *mut Status) -> Code {
+pub unsafe extern "C" fn tess_table_regrow(
+    table: *const TableRef,
+    index: *mut u8,
+    len: usize,
+    capacity: u64,
+    status: *mut Status,
+) -> Code {
     // SAFETY: the caller's contract.
-    unsafe { guard(status, || TableMut::attach_mut(region, len)?.grow(len)) }
+    unsafe { guard(status, || attach_mut(table)?.regrow(index, len, capacity)) }
 }
 
 /// `TessTableAccumulate`: how `tess_table_accumulate` updates a state.
@@ -779,15 +900,14 @@ const ACCUMULATE_MAX_INT8: c_uint = 7;
 ///
 /// # Safety
 ///
-/// `region` as for [`TableMut::attach_mut`] during the call; `rows` must
+/// `table` as for [`attach_mut`] during the call; `rows` must
 /// point to a valid mask; `offsets` must hold an initialized offset per
 /// row; `column` is ignored for `count(*)` and otherwise must satisfy
 /// [`DatumColumn::ints`]'s contract with `prepared` as its readiness;
 /// `status` as for every entry point.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn tess_table_accumulate(
-    region: *mut u8,
-    len: usize,
+    table: *const TableRef,
     offsets: *const u32,
     rows: *const Mask,
     op: c_uint,
@@ -801,7 +921,7 @@ pub unsafe extern "C" fn tess_table_accumulate(
     // SAFETY: the caller's contract.
     unsafe {
         guard(status, || {
-            let mut table = TableMut::attach_mut(region, len)?;
+            let mut table = attach_mut(table)?;
             let rows = rows.as_ref().context("a null row mask")?.view()?;
             let offsets = values(offsets, rows.nrows(), "offsets")?;
             let slot = Slot {
@@ -844,14 +964,13 @@ pub unsafe extern "C" fn tess_table_accumulate(
 ///
 /// # Safety
 ///
-/// `region` as for [`Table::attach`] during the call; `rows` must point
+/// `table` as for [`attach`] during the call; `rows` must point
 /// to a valid mask; `offsets` must hold an initialized offset per row,
 /// `values` a writable Datum and `isnull` a writable flag per row that
 /// nothing else accesses; `status` as for every entry point.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn tess_table_gather_key(
-    region: *const u8,
-    len: usize,
+    table: *const TableRef,
     offsets: *const u32,
     rows: *const Mask,
     key: c_int,
@@ -862,7 +981,7 @@ pub unsafe extern "C" fn tess_table_gather_key(
     // SAFETY: the caller's contract.
     unsafe {
         guard(status, || {
-            let table = Table::attach(region.cast_mut(), len)?;
+            let table = attach(table)?;
             let rows = rows.as_ref().context("a null row mask")?.view()?;
             let nrows = rows.nrows();
             let offsets = values(offsets, nrows, "offsets")?;
@@ -901,13 +1020,12 @@ pub unsafe extern "C" fn tess_table_bloom_words(
 ///
 /// # Safety
 ///
-/// `region` as for [`Table::attach`] during the call, with no insertion
+/// `table` as for [`attach`] during the call, with no insertion
 /// running; `words` must point to `nwords` writable words that nothing
 /// else accesses; `status` as for every entry point.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn tess_table_bloom(
-    region: *const u8,
-    len: usize,
+    table: *const TableRef,
     words: *mut u64,
     nwords: usize,
     status: *mut Status,
@@ -915,7 +1033,7 @@ pub unsafe extern "C" fn tess_table_bloom(
     // SAFETY: the caller's contract.
     unsafe {
         guard(status, || {
-            let table = Table::attach(region.cast_mut(), len)?;
+            let table = attach(table)?;
             let words = slots(words, nwords, "filter words")?;
             table.bloom(words)
         })
@@ -947,84 +1065,6 @@ pub unsafe extern "C" fn tess_bloom_probe(
             let words = values(words, nwords, "filter words")?;
             let hashes = values(hashes, rows.nrows(), "hashes")?;
             tessera_kernels::table::bloom::probe(words, hashes, &rows, &mut found)
-        })
-    }
-}
-
-/// `tess_table_stage`: write the pending rows of a batch as the table's
-/// records into a staging buffer, as long as whole records fit.
-///
-/// # Safety
-///
-/// `region` as for [`Table::attach`] during the call; `buffer` must point
-/// to `nwords` writable words that nothing else accesses and `used` to
-/// their used byte count; `keys`, `hashes`, `payload` and `pending` as for
-/// [`tess_table_insert`]; `status` as for every entry point.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn tess_table_stage(
-    region: *const u8,
-    len: usize,
-    buffer: *mut u64,
-    nwords: usize,
-    used: *mut usize,
-    hashes: *const u32,
-    nkeys: c_int,
-    keys: *const TableKey,
-    payload: *const u8,
-    pending: *mut Mask,
-    status: *mut Status,
-) -> Code {
-    // SAFETY: the caller's contract.
-    unsafe {
-        guard(status, || {
-            let table = Table::attach(region.cast_mut(), len)?;
-            let mut decoded = TableKeys::empty();
-            table_keys(nkeys, keys, &mut decoded)?;
-            let mut pending = pending.as_mut().context("a null pending mask")?.mask()?;
-            let nrows = pending.as_view().nrows();
-            let hashes = values(hashes, nrows, "hashes")?;
-            let buffer = slots(buffer, nwords, "staging buffer")?;
-            let used = used.as_mut().context("a null used count")?;
-            let payload = if payload.is_null() {
-                None
-            } else {
-                let bytes = nrows
-                    .checked_mul(table.payload_size())
-                    .context("the payload does not fit in memory")?;
-                Some(values(payload, bytes, "payload")?)
-            };
-            table
-                .stage(buffer, used, hashes, &decoded, payload, &mut pending)
-                .map(drop)
-        })
-    }
-}
-
-/// `tess_table_insert_staged`: add a staging buffer's records to the
-/// table, as long as it has room.
-///
-/// # Safety
-///
-/// `region` as for [`Table::attach`] during the call, which may run with
-/// other insertions; `buffer` must point to initialized words holding at
-/// least `used` bytes, and `consumed` to the count of them already added;
-/// `status` as for every entry point.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn tess_table_insert_staged(
-    region: *mut u8,
-    len: usize,
-    buffer: *const u64,
-    used: usize,
-    consumed: *mut usize,
-    status: *mut Status,
-) -> Code {
-    // SAFETY: the caller's contract.
-    unsafe {
-        guard(status, || {
-            let table = Table::attach(region, len)?;
-            let buffer = values(buffer, used.div_ceil(8), "staging buffer")?;
-            let consumed = consumed.as_mut().context("a null consumed count")?;
-            table.insert_staged(buffer, used, consumed).map(drop)
         })
     }
 }
@@ -1089,14 +1129,13 @@ pub unsafe extern "C" fn tess_bloom_shared_init(
 ///
 /// # Safety
 ///
-/// `region` as for [`Table::attach`] during the call, with no insertion
+/// `table` as for [`attach`] during the call, with no insertion
 /// running; `words` as for [`tess_bloom_shared_init`], other participants
 /// using it too; `built` must point to a writable flag; `status` as for
 /// every entry point.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn tess_table_try_build_bloom(
-    region: *const u8,
-    len: usize,
+    table: *const TableRef,
     words: *mut u64,
     nwords: usize,
     built: *mut bool,
@@ -1105,7 +1144,7 @@ pub unsafe extern "C" fn tess_table_try_build_bloom(
     // SAFETY: the caller's contract.
     unsafe {
         guard(status, || {
-            let table = Table::attach(region.cast_mut(), len)?;
+            let table = attach(table)?;
             let filter = shared_filter(words, nwords)?;
             let built = built.as_mut().context("a null result")?;
             *built = table.try_build_bloom(&filter)?;
@@ -1193,7 +1232,7 @@ pub unsafe extern "C" fn tess_build_counters_init(counters: *mut u64, status: *m
     }
 }
 
-/// `tess_build_report`: add what a participant's build staged and the
+/// `tess_build_report`: add the records a participant appended and the
 /// payload words it saw a NULL in.
 ///
 /// # Safety
@@ -1202,38 +1241,62 @@ pub unsafe extern "C" fn tess_build_counters_init(counters: *mut u64, status: *m
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn tess_build_report(
     counters: *mut u64,
-    staged: u64,
+    records: u64,
     null_columns: u64,
     status: *mut Status,
 ) -> Code {
     // SAFETY: the caller's contract.
     unsafe {
         guard(status, || {
-            build_counters(counters).map(|counters| counters.report(staged, null_columns))
+            build_counters(counters).map(|counters| counters.report(records, null_columns))
         })
     }
 }
 
-/// `tess_build_totals`: the rows every participant staged and the payload
-/// words with a NULL, once the build is over.
+/// `tess_build_take_chunk`: the number of a new chunk of a shared build.
 ///
 /// # Safety
 ///
-/// As [`tess_build_report`]; `staged` and `null_columns` must point to
-/// writable words.
+/// As [`tess_build_report`]; `number` must point to a writable word.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn tess_build_totals(
+pub unsafe extern "C" fn tess_build_take_chunk(
     counters: *mut u64,
-    staged: *mut u64,
-    null_columns: *mut u64,
+    number: *mut u64,
     status: *mut Status,
 ) -> Code {
     // SAFETY: the caller's contract.
     unsafe {
         guard(status, || {
             let counters = build_counters(counters)?;
-            *staged.as_mut().context("a null result")? = counters.staged_rows();
+            *number.as_mut().context("a null result")? = counters.take_chunk();
+            Ok(())
+        })
+    }
+}
+
+/// `tess_build_totals`: the records every participant appended, the
+/// payload words with a NULL and the chunks numbered, once the build is
+/// over.
+///
+/// # Safety
+///
+/// As [`tess_build_report`]; `records`, `null_columns` and `chunks` must
+/// point to writable words.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tess_build_totals(
+    counters: *mut u64,
+    records: *mut u64,
+    null_columns: *mut u64,
+    chunks: *mut u64,
+    status: *mut Status,
+) -> Code {
+    // SAFETY: the caller's contract.
+    unsafe {
+        guard(status, || {
+            let counters = build_counters(counters)?;
+            *records.as_mut().context("a null result")? = counters.total_records();
             *null_columns.as_mut().context("a null result")? = counters.nulls();
+            *chunks.as_mut().context("a null result")? = counters.total_chunks();
             Ok(())
         })
     }

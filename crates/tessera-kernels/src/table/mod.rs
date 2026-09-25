@@ -1,64 +1,58 @@
-//! A hash table in a borrowed region of memory, for joins and grouping.
+//! A hash table of records that never move, for joins and grouping.
 //!
-//! The region is a byte buffer the caller owns and hands to every call as a
-//! pointer and a length: the local memory of a serial plan, grown by
-//! `repalloc`, or dynamic shared memory of a parallel one, mapped by every
-//! process at an address of its own. The table keeps no address between
-//! calls and allocates nothing: everything inside the region refers to
-//! other parts by offset from its start, so the bytes stay valid after a
-//! move and mean the same to every process. Rust sees the region through
-//! the operations here; the caller decides where it lives and grows it.
-//!
-//! A region holds a header of 96 bytes (see [`header`]), then the record
-//! area, filled upward from the header, then the bucket array at the end
-//! of the region: growth hands the table a larger region whose first bytes
-//! are the old ones, records stay where they are, and the buckets are
-//! rebuilt at the new end. Offsets of records are 32 bits wide in units of
-//! 8 bytes, which addresses 32 GiB; 0 means none, since the header lies
-//! there. A record has a hash, the offset of the next record of its bucket,
+//! A table is an index and chunks of records, blocks of memory the caller
+//! owns and hands to every call: the local memory of a serial plan, or
+//! dynamic shared memory of a parallel one, mapped by every process at an
+//! address of its own. The table keeps no address between calls and
+//! allocates nothing. The index is a header of 96 bytes (see [`header`])
+//! and the bucket array, a power of two of buckets, at least 1024 and at
+//! least twice the records the index was made for, each holding the
+//! reference of the first record of its chain. The records lie in chunks
+//! of at most [`MAX_CHUNK_LEN`] bytes, each starting with a used mark, one
+//! after another: a hash, the reference of the next record of its bucket,
 //! a bit per key that is NULL and its length in 8-byte units, then one
 //! 8-byte slot per key (an int4 sign-extended) and the payload the table
 //! was created for, rounded up to 8: opaque bytes, a join's build row or
-//! grouping's aggregate states. A bucket is the high bits of the hash;
-//! there are a power of two of them, at least 1024 and at least twice the
-//! capacity the table was created for, each holding the offset of the
-//! first record of its chain. Hashes come from [`crate::int32::hash`],
-//! [`crate::int64::hash`] and their `hash_next`, which decide what NULL
-//! keys do.
+//! grouping's aggregate states. A reference is 32 bits: the chunk's number
+//! and the record's offset there in 8-byte units ([`UNIT_BITS`] of them);
+//! 0 means none, since a chunk's used mark lies there. The caller passes
+//! the chunks as their bases and lengths in its own process ([`Chunks`]).
 //!
-//! [`Table`] is the access several participants may share: inserting
-//! ([`Table::insert`], which always adds a record, so equal keys chain) or
-//! probing ([`Table::probe`] for the first record with a row's hash and
-//! keys, [`Table::next_match`] for the ones after it, [`Table::gather`]
-//! for a payload word of each match), not both at a time.
-//! [`TableMut`] is the access of one writer, which alone may give rows
-//! the record of their keys, creating it when there is none
-//! ([`TableMut::find_or_insert`], for grouping), insert records next to
-//! those of the same keys ([`TableMut::insert_grouped`], for a join,
-//! whose rounds then step with [`Table::next_in_group`]), change a payload in
-//! place ([`TableMut::payload_mut`]), walk the records in insertion order
-//! ([`TableMut::scan`]) or grow the region ([`TableMut::grow`]). A batch
-//! brings its hashes, its keys through a [`KeySource`] and a row mask, and
-//! gets record offsets back. Every call attaches anew and checks the whole header; every
-//! offset is checked before it is followed, and a chain is walked at most
-//! as many steps as there are records, so a corrupt region is an error,
-//! never a hang or an access past the buffer. Dimension errors come before
-//! any change. A full table is not an error: an insertion leaves the rows
-//! without room in its mask for the caller to retry after growing.
+//! A record is appended to a chunk by the chunk's one writer
+//! ([`Table::append`]), then linked into its bucket ([`Table::link`], by
+//! any number of participants at once, each over chunks of its own, or
+//! [`TableMut::link_grouped`], by one writer, next to the records of the
+//! same keys, whose rounds then step with [`Table::next_in_group`]). A
+//! record never moves: a larger index is built over the same chunks
+//! ([`TableMut::regrow`]). Probing ([`Table::probe`] for the first record
+//! with a row's hash and keys, [`Table::next_match`] for the ones after
+//! it, [`Table::gather`] for a payload word of each match) runs once the
+//! records are linked. [`TableMut`] is the access of one writer, which
+//! alone may give rows the record of their keys, creating it when there is
+//! none ([`TableMut::find_or_insert`], for grouping), change a payload in
+//! place, or walk the records ([`TableMut::scan`]). Hashes come from
+//! [`crate::int32::hash`], [`crate::int64::hash`] and their `hash_next`,
+//! which decide what NULL keys do.
 //!
-//! This is the second module of the crate allowed `unsafe`, for the region
-//! over raw pointers and atomics on it; see [`region`]. Tests build tables
-//! over `&mut [u64]` through [`TableMut::create_in`] and
-//! [`TableMut::exclusive`], which need no `unsafe` and align the region.
+//! Every call attaches anew and checks the whole header; every reference
+//! is checked against its chunk before it is followed, and a chain is
+//! walked at most as many steps as there are records, so a corrupt table
+//! is an error, never a hang or an access past a block. Dimension errors
+//! come before any change. A full chunk or index is not an error: rows
+//! without room stay in their mask for the caller to retry after adding a
+//! chunk or building a larger index.
+//!
+//! This is the second module of the crate allowed `unsafe`, for the index
+//! and chunks over raw pointers and atomics on them; see [`region`].
+//! [`LocalTable`] owns its index and chunks and needs no `unsafe`: tests
+//! and benchmarks build tables with it.
 //!
 //! ```
-//! use tessera_kernels::table::{KeyKind, TableConfig, TableMut, region_size};
+//! use tessera_kernels::table::{KeyKind, LocalTable, TableConfig};
 //!
 //! let config = TableConfig { keys: &[KeyKind::Int32], payload_size: 8 };
-//! let mut words = vec![0; region_size(&config, 100)?.div_ceil(8)];
-//! let table = TableMut::create_in(&mut words, &config, 100)?;
-//! assert_eq!(table.stats().records, 0);
-//! assert_eq!(table.key_kinds(), &[KeyKind::Int32]);
+//! let mut table = LocalTable::new(&config, 100, 4096)?;
+//! assert_eq!(table.table()?.stats().records, 0);
 //!
 //! // Three rows with keys 7, 8 and 7, hashed by the int4 kernel's formula.
 //! use tessera_core::{ColumnView, RowMask, RowMaskView};
@@ -73,6 +67,7 @@
 //! assert_eq!(pending, [0], "every row found room");
 //!
 //! // The first row's key has two records; the second row's has one.
+//! let table = table.table()?;
 //! let mut hits = [0];
 //! let mut matches = [0; 3];
 //! let mut found = RowMask::try_new(3, &mut hits)?;
@@ -93,6 +88,7 @@ mod exclusive;
 mod header;
 mod keys;
 mod lanes;
+mod local;
 #[cfg(all(test, loom))]
 mod loom;
 pub mod phases;
@@ -106,11 +102,13 @@ use anyhow::{Result, ensure};
 use tessera_core::{ColumnReader, RowMask, RowMaskView};
 
 pub use exclusive::{Cursor, Fold, Slot};
-use header::{CHUNK_USED, Header, Layout, NRECORDS};
 pub use header::{
-    FORMAT_VERSION, HEADER_SIZE, KeyKind, MAX_KEYS, TableConfig, VERSION_OFFSET, region_size,
+    CHUNK_HEADER, FORMAT_VERSION, HEADER_SIZE, KeyKind, MAX_CHUNK_LEN, MAX_CHUNKS, MAX_KEYS,
+    TableConfig, UNIT_BITS, VERSION_OFFSET, index_size, record_bytes,
 };
+use header::{Header, Layout, NRECORDS};
 pub use keys::{KeySource, KeyValue, normalize_word};
+pub use local::LocalTable;
 use record::Access;
 pub use record::Record;
 use region::{RawRegion, Region};
@@ -118,17 +116,130 @@ use region::{RawRegion, Region};
 /// What a table holds, for planning and EXPLAIN.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Stats {
-    /// Records inserted.
+    /// Records linked into the buckets.
     pub records: u64,
-    /// Buckets of the table.
+    /// Buckets of the index.
     pub buckets: u64,
-    /// Bytes in use: the header, the records and the buckets.
+    /// Bytes of the index in use: the header and the buckets.
     pub bytes_used: u64,
-    /// Bytes of the region the table was created or grown over.
+    /// Bytes of the index the table was created or regrown over.
     pub region_len: u64,
 }
 
-/// A table over a region, as several participants may share it.
+/// The chunks of a table as this process sees them: each one's base and
+/// length.
+#[derive(Clone, Copy, Debug)]
+pub struct Chunks<'a> {
+    bases: &'a [*mut u8],
+    lens: &'a [usize],
+}
+
+impl<'a> Chunks<'a> {
+    /// No chunk.
+    pub fn none() -> Self {
+        Self {
+            bases: &[],
+            lens: &[],
+        }
+    }
+
+    /// The chunks at `bases`, of the lengths in `lens`, after checking that
+    /// the arrays match, there are at most [`MAX_CHUNKS`], and every chunk
+    /// is aligned to 8, a multiple of 8 of [`CHUNK_HEADER`] to
+    /// [`MAX_CHUNK_LEN`] bytes.
+    ///
+    /// # Safety
+    ///
+    /// Every base is valid for reads and writes of its length for `'a`,
+    /// and during `'a` the chunks are accessed only through tables, here or
+    /// in other processes mapping the same memory.
+    pub unsafe fn new(bases: &'a [*mut u8], lens: &'a [usize]) -> Result<Self> {
+        ensure!(
+            bases.len() == lens.len() && bases.len() <= MAX_CHUNKS,
+            "a table has at most {MAX_CHUNKS} chunks with a length each, not {} bases and {} lengths",
+            bases.len(),
+            lens.len()
+        );
+        for (chunk, (&base, &len)) in bases.iter().zip(lens).enumerate() {
+            ensure!(
+                !base.is_null()
+                    && base.addr().is_multiple_of(8)
+                    && len.is_multiple_of(8)
+                    && (CHUNK_HEADER..=MAX_CHUNK_LEN).contains(&len),
+                "table chunk {chunk} of {len} bytes is not aligned to 8 or not a multiple of 8 \
+                 of {CHUNK_HEADER} to {MAX_CHUNK_LEN} bytes"
+            );
+        }
+        Ok(Self { bases, lens })
+    }
+
+    /// The number of chunks.
+    pub fn len(&self) -> usize {
+        self.bases.len()
+    }
+
+    /// Whether there are none.
+    pub fn is_empty(&self) -> bool {
+        self.bases.is_empty()
+    }
+}
+
+/// Make a block of `len` bytes at `base` an empty chunk: its used mark
+/// covers only itself.
+///
+/// # Safety
+///
+/// `base` is aligned to 8 and valid for writes of `len` bytes, a multiple
+/// of 8 of [`CHUNK_HEADER`] to [`MAX_CHUNK_LEN`], and nothing else uses the
+/// block yet.
+pub unsafe fn init_chunk(base: *mut u8, len: usize) -> Result<()> {
+    ensure!(
+        !base.is_null()
+            && base.addr().is_multiple_of(8)
+            && len.is_multiple_of(8)
+            && (CHUNK_HEADER..=MAX_CHUNK_LEN).contains(&len),
+        "a table chunk of {len} bytes is not aligned to 8 or not a multiple of 8 of \
+         {CHUNK_HEADER} to {MAX_CHUNK_LEN} bytes"
+    );
+    // SAFETY: the caller's contract; the used mark is the first word.
+    unsafe { base.cast::<u64>().write(CHUNK_HEADER as u64) };
+    Ok(())
+}
+
+/// Append the rows of `pending` as records of a table of `config` to chunk
+/// `chunk` of `chunks`, as [`Table::append`] does, before the table has an
+/// index: the participants of a shared build append their share first,
+/// and one of them sizes the index for the records once all are counted.
+/// The caller must be the chunk's one writer.
+#[allow(clippy::too_many_arguments)]
+pub fn append_to<K: KeySource + ?Sized>(
+    config: &TableConfig<'_>,
+    chunks: Chunks<'_>,
+    chunk: usize,
+    hashes: &[u32],
+    keys: &K,
+    payload: Option<&[u8]>,
+    pending: &mut RowMask<'_>,
+    offsets: &mut [u32],
+) -> Result<usize> {
+    let layout = header::chunk_layout(config)?;
+    // SAFETY: an empty index, which appending never reads, and the chunks
+    // `Chunks::new` accepted.
+    let region = unsafe {
+        RawRegion::new(
+            core::ptr::NonNull::<u64>::dangling().as_ptr().cast(),
+            0,
+            chunks.bases.as_ptr(),
+            chunks.lens.as_ptr(),
+            chunks.len(),
+        )
+    };
+    batch::append(
+        &region, &layout, chunk, hashes, keys, payload, pending, offsets,
+    )
+}
+
+/// A table over an index and chunks, as several participants may share it.
 ///
 /// It is neither `Send` nor `Sync`: each participant attaches its own.
 #[derive(Debug)]
@@ -138,7 +249,7 @@ pub struct Table<'a> {
     _region: PhantomData<&'a ()>,
 }
 
-/// A table over a region that one writer has to itself.
+/// A table that one writer has to itself.
 #[derive(Debug)]
 pub struct TableMut<'a>(Table<'a>);
 
@@ -150,13 +261,13 @@ impl<'a> Deref for TableMut<'a> {
     }
 }
 
-/// Write the header of a new table for `capacity` records and clear its
-/// buckets; the layout is returned.
+/// Write the header of a new table's index for `capacity` records and
+/// clear its buckets; the layout is returned.
 ///
 /// # Safety
 ///
-/// The caller has the region to itself, so nothing else reads or writes
-/// it meanwhile.
+/// The caller has the index to itself, so nothing else reads or writes it
+/// meanwhile.
 unsafe fn init<R: Region>(region: &R, config: &TableConfig<'_>, capacity: u64) -> Result<Layout> {
     let header = Header::new(config, capacity, region.len())?;
     let layout = header.validate(region.len())?;
@@ -166,46 +277,42 @@ unsafe fn init<R: Region>(region: &R, config: &TableConfig<'_>, capacity: u64) -
     Ok(layout)
 }
 
-/// The bytes of a buffer of words.
-fn words_as_bytes(words: &[u64]) -> &[u8] {
-    // SAFETY: any initialized `u64` is eight initialized bytes, and `u8`
-    // has no alignment requirement.
-    unsafe { core::slice::from_raw_parts(words.as_ptr().cast::<u8>(), words.len() * 8) }
-}
-
-/// The bytes of a buffer of words, to write.
-fn words_as_bytes_mut(words: &mut [u64]) -> &mut [u8] {
-    // SAFETY: as in `words_as_bytes`, and any bytes make a `u64`.
-    unsafe { core::slice::from_raw_parts_mut(words.as_mut_ptr().cast::<u8>(), words.len() * 8) }
-}
-
-/// Reject a region that could not hold a header.
+/// Reject an index that could not hold a header.
 fn check_region(region: *mut u8, len: usize) -> Result<()> {
     ensure!(
         !region.is_null() && region.addr().is_multiple_of(8),
-        "a table region must be aligned to 8 bytes"
+        "a table index must be aligned to 8 bytes"
     );
     ensure!(
         len >= HEADER_SIZE,
-        "a table region of {len} bytes is shorter than the {HEADER_SIZE}-byte header"
+        "a table index of {len} bytes is shorter than the {HEADER_SIZE}-byte header"
     );
     Ok(())
 }
 
 impl<'a> Table<'a> {
-    /// Attach to the table in the `len` bytes at `region`, checking its
-    /// header.
+    /// Attach to the table whose index is the `len` bytes at `index`, over
+    /// `chunks`, checking its header.
     ///
     /// # Safety
     ///
-    /// `region` is aligned to 8 and valid for reads and writes of `len`
-    /// bytes for `'a`, and during `'a` the bytes are accessed only through
-    /// tables, here or in other processes mapping the same memory, and only
-    /// in one phase at a time: insertions or probes.
-    pub unsafe fn attach(region: *mut u8, len: usize) -> Result<Self> {
-        check_region(region, len)?;
-        // SAFETY: the caller's contract.
-        let region = unsafe { RawRegion::new(region, len) };
+    /// `index` is aligned to 8 and valid for reads and writes of `len`
+    /// bytes for `'a`, and during `'a` the index and the chunks are
+    /// accessed only through tables, here or in other processes mapping
+    /// the same memory; probes run only once the records they may find
+    /// are linked, and a chunk has one writer.
+    pub unsafe fn attach(index: *mut u8, len: usize, chunks: Chunks<'a>) -> Result<Self> {
+        check_region(index, len)?;
+        // SAFETY: the caller's contract, and `Chunks::new`'s for the chunks.
+        let region = unsafe {
+            RawRegion::new(
+                index,
+                len,
+                chunks.bases.as_ptr(),
+                chunks.lens.as_ptr(),
+                chunks.len(),
+            )
+        };
         let layout = Header::load(&region).validate(len)?;
         Ok(Self {
             region,
@@ -224,35 +331,44 @@ impl<'a> Table<'a> {
         self.layout.payload_size
     }
 
+    /// Bytes of one record.
+    pub fn record_size(&self) -> usize {
+        self.layout.record_size
+    }
+
     /// The counts of the table as of now.
     pub fn stats(&self) -> Stats {
         let buckets = u64::from(self.layout.nbuckets);
         Stats {
             records: self.region.load_u64(NRECORDS),
             buckets,
-            bytes_used: self.region.load_u64(CHUNK_USED) + buckets * 4,
+            bytes_used: (HEADER_SIZE as u64) + buckets * 4,
             region_len: self.layout.region_len as u64,
         }
     }
 
-    /// Insert the rows of `pending` as new records, in row order, until
-    /// the table has no room: each row inserted leaves `pending` and gets
-    /// the offset of its record in `offsets`; the count inserted is
-    /// returned, and rows still pending need a larger region. `hashes` has
-    /// one hash per physical row, `keys` the table's keys, `payload` the
-    /// payload of every physical row one after another or `None` for
-    /// zeros. Equal keys make separate records.
-    pub fn insert<K: KeySource + ?Sized>(
+    /// Append the rows of `pending` as records to chunk `chunk`, in row
+    /// order, as long as whole records fit: each row appended leaves
+    /// `pending` and gets the reference of its record in `offsets`; the
+    /// count appended is returned, and rows still pending need another
+    /// chunk. `hashes` has one hash per physical row, `keys` the table's
+    /// keys, `payload` the payload of every physical row one after another
+    /// or `None` for zeros. The records are not in the buckets until
+    /// linked. The caller must be the chunk's one writer.
+    #[allow(clippy::too_many_arguments)]
+    pub fn append<K: KeySource + ?Sized>(
         &self,
+        chunk: usize,
         hashes: &[u32],
         keys: &K,
         payload: Option<&[u8]>,
         pending: &mut RowMask<'_>,
         offsets: &mut [u32],
     ) -> Result<usize> {
-        batch::insert(
+        batch::append(
             &self.region,
             &self.layout,
+            chunk,
             hashes,
             keys,
             payload,
@@ -261,51 +377,21 @@ impl<'a> Table<'a> {
         )
     }
 
-    /// Write the rows of `pending` as this table's records into `buffer`
-    /// from byte `*used` on, as long as whole records fit, for
-    /// [`Table::insert_staged`] to add later: a participant of a shared
-    /// build keeps there the rows a full table had no room for. Written
-    /// rows leave `pending`; the count written is returned.
-    pub fn stage<K: KeySource + ?Sized>(
-        &self,
-        buffer: &mut [u64],
-        used: &mut usize,
-        hashes: &[u32],
-        keys: &K,
-        payload: Option<&[u8]>,
-        pending: &mut RowMask<'_>,
-    ) -> Result<usize> {
-        batch::stage(
-            &self.layout,
-            words_as_bytes_mut(buffer),
-            used,
-            hashes,
-            keys,
-            payload,
-            pending,
-        )
-    }
-
-    /// Add the records [`Table::stage`] wrote in the first `used` bytes of
-    /// `buffer`, from byte `*consumed` on, as long as the table has room;
-    /// `*consumed` moves past them and the count added is returned.
-    pub fn insert_staged(
-        &self,
-        buffer: &[u64],
-        used: usize,
-        consumed: &mut usize,
-    ) -> Result<usize> {
-        let bytes = words_as_bytes(buffer);
-        ensure!(used <= bytes.len(), "{used} staged bytes exceed the buffer");
-        batch::insert_staged(&self.region, &self.layout, &bytes[..used], consumed)
+    /// Link the records of chunk `chunk` from byte `*from` to its used
+    /// mark into their buckets, first in their chains, and move `*from`
+    /// past them; the count linked is returned. Several participants may
+    /// link at once, each its own chunks; equal keys make separate
+    /// records. `*from` starts at [`CHUNK_HEADER`].
+    pub fn link(&self, chunk: usize, from: &mut usize) -> Result<usize> {
+        batch::link(&self.region, &self.layout, chunk, from)
     }
 
     /// Find the first record of its chain with the hash, null bits and
-    /// keys of each row of `rows`: `matches[row]` receives its offset and
-    /// `found` the rows that have one, as a mask this call produces. The
-    /// other records with the same keys follow through
-    /// [`Table::next_match`], or [`Table::next_in_group`] in a table
-    /// filled by [`TableMut::insert_grouped`].
+    /// keys of each row of `rows`: `matches[row]` receives its reference
+    /// and `found` the rows that have one, as a mask this call produces.
+    /// The other records with the same keys follow through
+    /// [`Table::next_match`], or [`Table::next_in_group`] in a table linked
+    /// by [`TableMut::link_grouped`].
     pub fn probe<K: KeySource + ?Sized>(
         &self,
         hashes: &[u32],
@@ -325,10 +411,10 @@ impl<'a> Table<'a> {
         )
     }
 
-    /// For each row of `rows`, replace `offsets[row]`, a record offset
-    /// from a probe or an earlier call, by the offset of the next record
+    /// For each row of `rows`, replace `offsets[row]`, a record reference
+    /// from a probe or an earlier call, by the reference of the next record
     /// in its chain with the same hash, null bits and keys; `found`
-    /// receives the rows that have one, and the others keep their offset.
+    /// receives the rows that have one, and the others keep theirs.
     pub fn next_match(
         &self,
         offsets: &mut [u32],
@@ -355,9 +441,9 @@ impl<'a> Table<'a> {
 
     /// For each row of `rows`, replace `offsets[row]` by the record right
     /// after it when that one has the same hash, null bits and keys, and
-    /// put the row in `found`; other rows keep their offset. In a table
-    /// filled by [`TableMut::insert_grouped`] this is the next record of
-    /// the key, found in one step instead of a walk down the chain.
+    /// put the row in `found`; other rows keep theirs. In a table linked by
+    /// [`TableMut::link_grouped`] this is the next record of the key,
+    /// found in one step instead of a walk down the chain.
     pub fn next_in_group(
         &self,
         offsets: &mut [u32],
@@ -391,21 +477,21 @@ impl<'a> Table<'a> {
     }
 
     /// Fill a Bloom filter of [`bloom::words_for`] this table's records
-    /// words (or any power of two) with the hash of every record, after
-    /// clearing it: a probe row it rejects has no record with its hash.
-    /// No insertion may run at the same time, as for a walk.
+    /// words (or any power of two) with the hash of every record of every
+    /// chunk, after clearing it: a probe row it rejects has no record with
+    /// its hash. No chunk may take records at the same time.
     pub fn bloom(&self, words: &mut [u64]) -> Result<()> {
         bloom::fill(&self.region, &self.layout, words)
     }
 
     /// Build a shared filter of this table's records unless another
     /// participant has claimed it: true for the one that built it. Call
-    /// it, like [`Table::bloom`], while the table takes no insertions.
+    /// it, like [`Table::bloom`], while no chunk takes records.
     pub fn try_build_bloom(&self, filter: &bloom::SharedFilter<'_>) -> Result<bool> {
         bloom::try_build(&self.region, &self.layout, filter)
     }
 
-    /// The record at an offset a call of this table returned.
+    /// The record at a reference a call of this table returned.
     pub fn record(&self, offset: u32) -> Result<Record<'_>> {
         Ok(Access::new(&self.region, &self.layout)
             .locate(offset)?
@@ -414,24 +500,33 @@ impl<'a> Table<'a> {
 }
 
 impl<'a> TableMut<'a> {
-    /// Create an empty table for `capacity` records in the `len` bytes at
-    /// `region`, which must be a multiple of 8 and at least
-    /// [`region_size`]; all of them are used.
+    /// Create an empty table for `capacity` records with its index in the
+    /// `len` bytes at `index`, which must be a multiple of 8 and at least
+    /// [`index_size`], over `chunks`.
     ///
     /// # Safety
     ///
-    /// As [`Table::attach`], and no other table is over the region while
+    /// As [`Table::attach`], and no other table is over the index while
     /// this one exists.
     pub unsafe fn create(
-        region: *mut u8,
+        index: *mut u8,
         len: usize,
         config: &TableConfig<'_>,
         capacity: u64,
+        chunks: Chunks<'a>,
     ) -> Result<Self> {
-        check_region(region, len)?;
+        check_region(index, len)?;
         // SAFETY: the caller's contract.
-        let region = unsafe { RawRegion::new(region, len) };
-        // SAFETY: the caller has the region to itself.
+        let region = unsafe {
+            RawRegion::new(
+                index,
+                len,
+                chunks.bases.as_ptr(),
+                chunks.lens.as_ptr(),
+                chunks.len(),
+            )
+        };
+        // SAFETY: the caller has the index to itself.
         let layout = unsafe { init(&region, config, capacity) }?;
         Ok(Self(Table {
             region,
@@ -440,44 +535,26 @@ impl<'a> TableMut<'a> {
         }))
     }
 
-    /// Attach as the one writer of the table in the `len` bytes at `region`.
+    /// Attach as the one writer of a table.
     ///
     /// # Safety
     ///
     /// As [`TableMut::create`].
-    pub unsafe fn attach_mut(region: *mut u8, len: usize) -> Result<Self> {
+    pub unsafe fn attach_mut(index: *mut u8, len: usize, chunks: Chunks<'a>) -> Result<Self> {
         // SAFETY: the caller's contract.
-        unsafe { Table::attach(region, len) }.map(Self)
-    }
-
-    /// Create a table in the words of a slice, as [`TableMut::create`].
-    pub fn create_in(
-        words: &'a mut [u64],
-        config: &TableConfig<'_>,
-        capacity: u64,
-    ) -> Result<Self> {
-        let len = words.len() * 8;
-        // SAFETY: the slice is borrowed exclusively for `'a`, its storage is
-        // aligned to 8 and only this table uses it until it is dropped.
-        unsafe { Self::create(words.as_mut_ptr().cast(), len, config, capacity) }
-    }
-
-    /// Attach to the table in the words of a slice, as
-    /// [`TableMut::attach_mut`].
-    pub fn exclusive(words: &'a mut [u64]) -> Result<Self> {
-        let len = words.len() * 8;
-        // SAFETY: as for `create_in`.
-        unsafe { Self::attach_mut(words.as_mut_ptr().cast(), len) }
+        unsafe { Table::attach(index, len, chunks) }.map(Self)
     }
 
     /// Give each row of `pending` the record of its keys, creating one
-    /// with a zero payload where none exists, in row order, until the
-    /// table has no room for a new one: resolved rows leave `pending` and
-    /// get their record offsets in `offsets`, the rows whose record this
-    /// call created form `inserted`, and the count resolved is returned.
-    /// Rows left pending need a larger region.
+    /// with a zero payload in chunk `chunk` where none exists, in row
+    /// order, until the chunk has no room or the index holds records for
+    /// half its buckets: resolved rows leave `pending` and get their record
+    /// references in `offsets`, the rows whose record this call created
+    /// form `inserted`, and the count resolved is returned. Rows left
+    /// pending need another chunk or a larger index ([`TableMut::regrow`]).
     pub fn find_or_insert<K: KeySource + ?Sized>(
         &mut self,
+        chunk: usize,
         hashes: &[u32],
         keys: &K,
         pending: &mut RowMask<'_>,
@@ -487,6 +564,7 @@ impl<'a> TableMut<'a> {
         exclusive::find_or_insert(
             &self.0.region,
             &self.0.layout,
+            chunk,
             hashes,
             keys,
             pending,
@@ -495,42 +573,24 @@ impl<'a> TableMut<'a> {
         )
     }
 
-    /// Insert the rows of `pending` as [`Table::insert`] does, but each
-    /// right after a record with the same keys when the table holds one,
-    /// so that a key's records lie next to each other and
-    /// [`Table::next_in_group`] steps through them; `duplicates` receives
-    /// the rows whose keys were there already. A lookup per row, and one
-    /// writer: the parallel build of a shared table uses
-    /// [`Table::insert`].
-    pub fn insert_grouped<K: KeySource + ?Sized>(
-        &mut self,
-        hashes: &[u32],
-        keys: &K,
-        payload: Option<&[u8]>,
-        pending: &mut RowMask<'_>,
-        offsets: &mut [u32],
-        duplicates: &mut RowMask<'_>,
-    ) -> Result<usize> {
-        exclusive::insert_grouped(
-            &self.0.region,
-            &self.0.layout,
-            hashes,
-            keys,
-            payload,
-            pending,
-            offsets,
-            duplicates,
-        )
+    /// Link the records of chunk `chunk` from byte `*from` on, as
+    /// [`Table::link`] does, but each right after a record with the same
+    /// keys when the table holds one, so that a key's records lie next to
+    /// each other and [`Table::next_in_group`] steps through them. Returns
+    /// the records linked and how many of them had keys the table held
+    /// already.
+    pub fn link_grouped(&mut self, chunk: usize, from: &mut usize) -> Result<(usize, usize)> {
+        exclusive::link_grouped(&self.0.region, &self.0.layout, chunk, from)
     }
 
-    /// The payload of the record at an offset, to change in place.
+    /// The payload of the record at a reference, to change in place.
     pub fn payload_mut(&mut self, offset: u32) -> Result<&mut [u8]> {
         exclusive::payload_mut(&self.0.region, &self.0.layout, offset)
     }
 
     /// Add one to the `i64` at byte `at` of the payload of each selected
     /// row's record: `count(*)` of a grouped aggregate, whose rows hold
-    /// the offsets [`TableMut::find_or_insert`] gave them.
+    /// the references [`TableMut::find_or_insert`] gave them.
     pub fn count_rows(&mut self, offsets: &[u32], rows: &RowMaskView<'_>, at: usize) -> Result<()> {
         exclusive::count_rows(&self.0.region, &self.0.layout, offsets, rows, at)
     }
@@ -574,21 +634,29 @@ impl<'a> TableMut<'a> {
         )
     }
 
-    /// Visit the records from `cursor` on, in insertion order, as many as
-    /// `out` holds: their offsets fill `out`, the count is returned and
-    /// the cursor moves past them; 0 means the walk is over.
+    /// Visit the records from `cursor` on, chunk by chunk in the order
+    /// they were appended, as many as `out` holds: their references fill
+    /// `out`, the count is returned and the cursor moves past them; 0
+    /// means the walk is over.
     pub fn scan(&self, cursor: &mut Cursor, out: &mut [u32]) -> Result<usize> {
         exclusive::scan(&self.0.region, &self.0.layout, cursor, out)
     }
 
-    /// Grow the table to the first `new_len` bytes of its region, after
-    /// the caller made the region that large with the used bytes intact
-    /// (`repalloc`, or a copy into a new region): the buckets are rebuilt
-    /// at the new end for the records that could now fit, and records and
-    /// their offsets stay as they were. `new_len` is a multiple of 8, at
-    /// least the old length and at most the region's.
-    pub fn grow(&mut self, new_len: usize) -> Result<()> {
-        self.0.layout = exclusive::grow(&self.0.region, &self.0.layout, new_len)?;
+    /// Move the table to a new index of `len` bytes at `index`, for
+    /// `capacity` records, over the same chunks: every record is linked
+    /// there again, grouped chains stay grouped, and the old index is no
+    /// longer the table's. Records and their references stay as they were.
+    ///
+    /// # Safety
+    ///
+    /// As [`TableMut::create`] for the new index, which must live for
+    /// `'a`.
+    pub unsafe fn regrow(&mut self, index: *mut u8, len: usize, capacity: u64) -> Result<()> {
+        check_region(index, len)?;
+        // SAFETY: the caller's contract.
+        let to = unsafe { self.0.region.with_index(index, len) };
+        self.0.layout = exclusive::regrow(&self.0.region, &to, &self.0.layout, capacity)?;
+        self.0.region = to;
         Ok(())
     }
 }
@@ -599,14 +667,29 @@ mod tests {
     use crate::int32::murmurhash32;
     use tessera_core::ColumnView;
 
-    /// A region's base, which the threads of a test attach to.
-    struct Base(*mut u8);
-    // SAFETY: every thread accesses the region only through tables.
-    unsafe impl Sync for Base {}
+    /// The blocks of a table, which the threads of a test attach to.
+    struct Shared {
+        index: *mut u8,
+        len: usize,
+        bases: Vec<*mut u8>,
+        lens: Vec<usize>,
+    }
+    // SAFETY: every thread accesses the blocks only through tables.
+    unsafe impl Sync for Shared {}
 
-    impl Base {
-        fn get(&self) -> *mut u8 {
-            self.0
+    impl Shared {
+        fn table(&self) -> Table<'_> {
+            // SAFETY: the blocks outlive the borrow and are accessed only
+            // through tables; the chunks are all linked before any thread
+            // probes.
+            unsafe {
+                Table::attach(
+                    self.index,
+                    self.len,
+                    Chunks::new(&self.bases, &self.lens).unwrap(),
+                )
+            }
+            .unwrap()
         }
     }
 
@@ -617,26 +700,38 @@ mod tests {
             payload_size: 0,
         };
         let count = 200;
-        let mut region = vec![0_u64; region_size(&config, count).unwrap() / 8];
-        let len = region.len() * 8;
-        let base = Base(region.as_mut_ptr().cast::<u8>());
+        let mut table = LocalTable::new(&config, count, 4096).unwrap();
         let keys: Vec<i32> = (0..count as i32).map(|key| key * 7).collect();
         let hashes: Vec<u32> = keys.iter().map(|&key| murmurhash32(key as u32)).collect();
         let column = [ColumnView::try_new(&keys, None).unwrap()];
-        let all = vec![u64::MAX; 4];
-        let mut all_rows = all.clone();
+        let mut all_rows = vec![u64::MAX; 4];
         all_rows[3] = (1 << (count - 192)) - 1;
-        {
-            // SAFETY: the vector is aligned to 8, and this table alone uses it.
-            let table = unsafe { TableMut::create(base.0, len, &config, count) }.unwrap();
-            let mut pending_words = all_rows.clone();
-            let mut pending = RowMask::try_new(count as usize, &mut pending_words).unwrap();
-            let mut offsets = vec![0; count as usize];
-            let inserted = table
-                .insert(&hashes, &column[..], None, &mut pending, &mut offsets)
-                .unwrap();
-            assert_eq!(inserted, count as usize);
-        }
+        let mut pending_words = all_rows.clone();
+        let mut pending = RowMask::try_new(count as usize, &mut pending_words).unwrap();
+        let mut offsets = vec![0; count as usize];
+        let inserted = table
+            .insert(&hashes, &column[..], None, &mut pending, &mut offsets)
+            .unwrap();
+        assert_eq!(inserted, count as usize);
+        assert!(table.chunks() > 1, "the records span chunks");
+        // Each block's pointer and length from one borrow, the last one
+        // taken of it: a later borrow would retire the pointer.
+        let (index, len) = {
+            let words = table.index_words();
+            (words.as_mut_ptr().cast(), words.len() * 8)
+        };
+        let (bases, lens) = (0..table.chunks())
+            .map(|chunk| {
+                let words = table.chunk_words(chunk);
+                (words.as_mut_ptr().cast::<u8>(), words.len() * 8)
+            })
+            .unzip();
+        let shared = Shared {
+            index,
+            len,
+            bases,
+            lens,
+        };
         let mut words = vec![0; bloom::shared_words_for(count).unwrap()];
         let filter = bloom::SharedFilter::from_mut(&mut words).unwrap();
         filter.init();
@@ -648,9 +743,7 @@ mod tests {
             let threads: Vec<_> = (0..4)
                 .map(|_| {
                     scope.spawn(|| {
-                        // SAFETY: the table is built, and every thread only
-                        // reads it through a table of its own.
-                        let table = unsafe { Table::attach(base.get(), len) }.unwrap();
+                        let table = shared.table();
                         let built = table.try_build_bloom(&filter).unwrap();
                         while !filter.ready() {
                             std::thread::yield_now();
@@ -672,23 +765,44 @@ mod tests {
     }
 
     #[test]
-    fn a_misaligned_or_odd_region_is_refused() {
+    fn misaligned_or_odd_blocks_are_refused() {
         let config = TableConfig {
             keys: &[KeyKind::Int32],
             payload_size: 0,
         };
-        let mut words = vec![0_u64; region_size(&config, 1000).unwrap().div_ceil(8) + 2];
+        let mut words = vec![0_u64; index_size(&config, 1000).unwrap().div_ceil(8) + 2];
         let len = words.len() * 8 - 16;
         let base = words.as_mut_ptr().cast::<u8>();
         // SAFETY: `base + 4` and `base + 8` with `len` bytes lie inside the
         // vector, which nothing else uses meanwhile.
         unsafe {
             let misaligned = base.add(4);
-            assert!(TableMut::create(misaligned, len, &config, 1000).is_err());
-            assert!(Table::attach(misaligned, len).is_err());
-            let odd = TableMut::create(base, len - 4, &config, 1000);
+            assert!(TableMut::create(misaligned, len, &config, 1000, Chunks::none()).is_err());
+            assert!(Table::attach(misaligned, len, Chunks::none()).is_err());
+            let odd = TableMut::create(base, len - 4, &config, 1000, Chunks::none());
             assert!(odd.unwrap_err().to_string().contains("multiple of 8"));
-            assert!(TableMut::create(base.add(8), len, &config, 1000).is_ok());
+            assert!(TableMut::create(base.add(8), len, &config, 1000, Chunks::none()).is_ok());
         }
+        let mut chunk = vec![0_u64; 4];
+        let chunk_base = chunk.as_mut_ptr().cast::<u8>();
+        // SAFETY: the chunk pointers lie inside the vector; nothing is read.
+        unsafe {
+            let misaligned = [chunk_base.add(4)];
+            assert!(Chunks::new(&misaligned, &[24]).is_err());
+            let aligned = [chunk_base];
+            assert!(Chunks::new(&aligned, &[20]).is_err(), "not a multiple of 8");
+            assert!(
+                Chunks::new(&aligned, &[0]).is_err(),
+                "shorter than its used mark"
+            );
+            assert!(
+                Chunks::new(&aligned, &[32, 32]).is_err(),
+                "mismatched arrays"
+            );
+            assert!(Chunks::new(&aligned, &[32]).is_ok());
+            assert!(init_chunk(chunk_base, 20).is_err());
+            init_chunk(chunk_base, 32).unwrap();
+        }
+        assert_eq!(chunk[0], CHUNK_HEADER as u64);
     }
 }

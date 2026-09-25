@@ -5,16 +5,17 @@ use std::ptr;
 
 use anyhow::Result;
 use tessera_capi::c::{
-    Code, DatumColumn, Mask, Status, TableKey, TableRecord, TableStats, tess_int4_hash,
-    tess_int8_hash, tess_table_accumulate, tess_table_attach, tess_table_create,
-    tess_table_find_or_insert, tess_table_format_version, tess_table_gather, tess_table_gather_key,
-    tess_table_grow, tess_table_insert, tess_table_insert_grouped, tess_table_layout,
-    tess_table_next_in_group, tess_table_next_match, tess_table_payload, tess_table_probe,
-    tess_table_record, tess_table_scan, tess_table_size, tess_table_stats,
+    Code, DatumColumn, Mask, Status, TableKey, TableRecord, TableRef, TableStats, tess_int4_hash,
+    tess_int8_hash, tess_table_accumulate, tess_table_append, tess_table_attach,
+    tess_table_chunk_init, tess_table_create, tess_table_find_or_insert, tess_table_format_version,
+    tess_table_gather, tess_table_gather_key, tess_table_layout, tess_table_link,
+    tess_table_link_grouped, tess_table_next_in_group, tess_table_next_match, tess_table_payload,
+    tess_table_probe, tess_table_record, tess_table_regrow, tess_table_scan, tess_table_size,
+    tess_table_stats,
 };
 use tessera_core::{ColumnView, RowMask, RowMaskView};
 use tessera_kernels::int32::{self, NullKeys};
-use tessera_kernels::table::{KeyKind, TableConfig, TableMut, region_size};
+use tessera_kernels::table::{CHUNK_HEADER, KeyKind, LocalTable, TableConfig, index_size};
 
 /// int4 keys with every fifth row NULL and every value twice: as Datum
 /// words with flags, and as dense values with a non-NULL mask.
@@ -94,6 +95,219 @@ const CONFIG: TableConfig<'static> = TableConfig {
     payload_size: 8,
 };
 
+/// A table as C holds one: its index and chunks in vectors, handed to the
+/// entry points as a `TessTableRef`.
+struct CTable {
+    index: Vec<u64>,
+    chunks: Vec<Vec<u64>>,
+    bases: Vec<*mut u8>,
+    lens: Vec<usize>,
+    linked: Vec<usize>,
+    table: TableRef,
+    payload_size: usize,
+}
+
+impl CTable {
+    /// An empty table of one key of `kind` for `capacity` records.
+    ///
+    /// # Safety
+    ///
+    /// None beyond the entry points' own: every buffer is local.
+    unsafe fn new(kind: u32, payload_size: usize, capacity: u64) -> Self {
+        let kinds = [kind];
+        let mut status = Status::new();
+        let mut size = 0;
+        // SAFETY: local buffers of the declared sizes.
+        unsafe {
+            let code = tess_table_size(
+                1,
+                kinds.as_ptr(),
+                payload_size,
+                capacity,
+                &raw mut size,
+                &raw mut status,
+            );
+            assert_eq!(code, Code::Ok, "{}", status.message());
+            let mut index = vec![0_u64; size / 8];
+            let code = tess_table_create(
+                index.as_mut_ptr().cast(),
+                size,
+                1,
+                kinds.as_ptr(),
+                payload_size,
+                capacity,
+                &raw mut status,
+            );
+            assert_eq!(code, Code::Ok, "{}", status.message());
+            let mut table = Self {
+                index,
+                chunks: Vec::new(),
+                bases: Vec::new(),
+                lens: Vec::new(),
+                linked: Vec::new(),
+                table: TableRef {
+                    index: ptr::null_mut(),
+                    index_len: 0,
+                    chunks: ptr::null(),
+                    chunk_lens: ptr::null(),
+                    nchunks: 0,
+                },
+                payload_size,
+            };
+            table.refresh();
+            table
+        }
+    }
+
+    fn refresh(&mut self) {
+        self.table = TableRef {
+            index: self.index.as_mut_ptr().cast(),
+            index_len: self.index.len() * 8,
+            chunks: self.bases.as_ptr(),
+            chunk_lens: self.lens.as_ptr(),
+            nchunks: self.bases.len() as i32,
+        };
+    }
+
+    fn ptr(&self) -> *const TableRef {
+        &raw const self.table
+    }
+
+    /// Add an empty chunk of `bytes` bytes.
+    fn add_chunk(&mut self, bytes: usize) {
+        let mut chunk = vec![0_u64; bytes / 8];
+        let mut status = Status::new();
+        // SAFETY: the vector is the chunk's, aligned to 8 and of its length.
+        let code =
+            unsafe { tess_table_chunk_init(chunk.as_mut_ptr().cast(), bytes, &raw mut status) };
+        assert_eq!(code, Code::Ok, "{}", status.message());
+        self.bases.push(chunk.as_mut_ptr().cast());
+        self.lens.push(bytes);
+        self.chunks.push(chunk);
+        self.linked.push(CHUNK_HEADER);
+        self.refresh();
+    }
+
+    /// Append the pending rows to chunks of `bytes` bytes, adding them as
+    /// they fill, then link the new records, grouped or not.
+    ///
+    /// # Safety
+    ///
+    /// The arguments as for `tess_table_append`.
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn insert(
+        &mut self,
+        bytes: usize,
+        hashes: *const u32,
+        key: *const TableKey,
+        payload: *const u8,
+        pending: *mut Mask,
+        offsets: *mut u32,
+        grouped: bool,
+    ) -> u64 {
+        let mut status = Status::new();
+        // SAFETY: the caller's contract.
+        unsafe {
+            loop {
+                if self.chunks.is_empty() {
+                    self.add_chunk(bytes);
+                }
+                let code = tess_table_append(
+                    self.ptr(),
+                    self.chunks.len() as i32 - 1,
+                    self.payload_size,
+                    hashes,
+                    1,
+                    key,
+                    payload,
+                    pending,
+                    offsets,
+                    &raw mut status,
+                );
+                assert_eq!(code, Code::Ok, "{}", status.message());
+                let words = ((*pending).nrows as usize).div_ceil(64);
+                if slice_of((*pending).bits, words)
+                    .iter()
+                    .all(|&word| word == 0)
+                {
+                    break;
+                }
+                self.add_chunk(bytes);
+            }
+            let mut duplicates = 0;
+            for chunk in 0..self.chunks.len() {
+                let mut from = self.linked[chunk];
+                let mut repeated = 0;
+                let code = if grouped {
+                    tess_table_link_grouped(
+                        self.ptr(),
+                        chunk as i32,
+                        &raw mut from,
+                        ptr::null_mut(),
+                        &raw mut repeated,
+                        &raw mut status,
+                    )
+                } else {
+                    tess_table_link(
+                        self.ptr(),
+                        chunk as i32,
+                        &raw mut from,
+                        ptr::null_mut(),
+                        &raw mut status,
+                    )
+                };
+                assert_eq!(code, Code::Ok, "{}", status.message());
+                self.linked[chunk] = from;
+                duplicates += repeated;
+            }
+            duplicates
+        }
+    }
+
+    /// Move the table to an index for `capacity` records.
+    fn regrow(&mut self, capacity: u64) -> Code {
+        let kinds = [1_u32];
+        let mut status = Status::new();
+        let mut size = 0;
+        // SAFETY: local buffers of the declared sizes; the new index takes
+        // the old one's place once the call succeeded.
+        unsafe {
+            let code = tess_table_size(
+                1,
+                kinds.as_ptr(),
+                self.payload_size,
+                capacity,
+                &raw mut size,
+                &raw mut status,
+            );
+            assert_eq!(code, Code::Ok);
+            let mut index = vec![0_u64; size / 8];
+            let code = tess_table_regrow(
+                self.ptr(),
+                index.as_mut_ptr().cast(),
+                size,
+                capacity,
+                &raw mut status,
+            );
+            if code == Code::Ok {
+                self.index = index;
+                self.refresh();
+            }
+            code
+        }
+    }
+}
+
+/// The words of a mask.
+///
+/// # Safety
+///
+/// `bits` points to `words` initialized words.
+unsafe fn slice_of<'a>(bits: *const u64, words: usize) -> &'a [u64] {
+    // SAFETY: the caller's contract.
+    unsafe { std::slice::from_raw_parts(bits, words) }
+}
+
 /// Insert every valid row of a batch and probe it back: the offsets, the
 /// found words and the matches.
 fn round_trip<K: tessera_kernels::table::KeySource + ?Sized>(
@@ -102,13 +316,13 @@ fn round_trip<K: tessera_kernels::table::KeySource + ?Sized>(
     valid: &[u64],
 ) -> Result<(Vec<u32>, Vec<u64>, Vec<u32>)> {
     let nrows = hashes.len();
-    let mut words = vec![0; region_size(&CONFIG, nrows as u64)?.div_ceil(8)];
-    let table = TableMut::create_in(&mut words, &CONFIG, nrows as u64)?;
+    let mut owner = LocalTable::new(&CONFIG, nrows as u64, 4096)?;
     let mut pending_words = valid.to_vec();
     let mut pending = RowMask::try_new(nrows, &mut pending_words)?;
     let mut offsets = vec![0; nrows];
-    table.insert(hashes, keys, None, &mut pending, &mut offsets)?;
+    owner.insert(hashes, keys, None, &mut pending, &mut offsets)?;
     assert_eq!(pending.as_view().selected_count(), 0);
+    let table = owner.table()?;
     let rows = RowMaskView::try_new(nrows, valid)?;
     let mut found_words = vec![0; nrows.div_ceil(64)];
     let mut found = RowMask::try_new(nrows, &mut found_words)?;
@@ -156,7 +370,7 @@ fn datum_and_dense_keys_build_the_same_table() -> Result<()> {
 
 #[test]
 fn the_layout_probes_match_the_types() {
-    assert_eq!(tess_table_format_version(), 1);
+    assert_eq!(tess_table_format_version(), 2);
     assert_eq!(tess_table_layout(0), 96);
     assert_eq!(tess_table_layout(1), 8);
     assert_eq!(tess_table_layout(2), size_of::<TableKey>());
@@ -165,7 +379,9 @@ fn the_layout_probes_match_the_types() {
     assert_eq!(tess_table_layout(5), 32);
     assert_eq!(tess_table_layout(6), size_of::<TableRecord>());
     assert_eq!(tess_table_layout(7), 24);
-    assert_eq!(tess_table_layout(8), 0);
+    assert_eq!(tess_table_layout(8), size_of::<TableRef>());
+    assert_eq!(tess_table_layout(9), 32);
+    assert_eq!(tess_table_layout(10), 0);
 }
 
 #[test]
@@ -185,12 +401,9 @@ fn the_entry_points_round_trip() -> Result<()> {
     unsafe {
         let code = tess_table_size(1, kinds.as_ptr(), 8, 100, &raw mut size, &raw mut status);
         assert_eq!((code, status.code), (Code::Ok, Code::Ok));
-        assert_eq!(size, region_size(&CONFIG, 100)?);
-        let mut region = vec![0_u64; size / 8];
-        let base = region.as_mut_ptr().cast::<u8>();
-        let code = tess_table_create(base, size, 1, kinds.as_ptr(), 8, 100, &raw mut status);
-        assert_eq!(code, Code::Ok, "{}", status.message());
-        assert_eq!(tess_table_attach(base, size, &raw mut status), Code::Ok);
+        assert_eq!(size, index_size(&CONFIG, 100)?);
+        let mut table = CTable::new(1, 8, 100);
+        assert_eq!(tess_table_attach(table.ptr(), &raw mut status), Code::Ok);
 
         // Hashes under the reject policy: NULL rows leave the valid mask.
         let mut hashes = vec![0; 100];
@@ -227,19 +440,18 @@ fn the_entry_points_round_trip() -> Result<()> {
             bits: pending_words.as_mut_ptr(),
         };
         let mut offsets = vec![0; 100];
-        let code = tess_table_insert(
-            base,
-            size,
+        // Chunks of 1 KiB hold 31 records of 32 bytes: three chunks.
+        table.insert(
+            1024,
             hashes.as_ptr(),
-            1,
             &raw const key,
             payload.as_ptr(),
             &raw mut pending,
             offsets.as_mut_ptr(),
-            &raw mut status,
+            false,
         );
-        assert_eq!(code, Code::Ok, "{}", status.message());
         assert_eq!(pending_words, vec![0; 2]);
+        assert_eq!(table.chunks.len(), 3);
         let mut stats = TableStats {
             struct_size: size_of::<TableStats>(),
             records: 0,
@@ -248,12 +460,12 @@ fn the_entry_points_round_trip() -> Result<()> {
             region_len: 0,
         };
         assert_eq!(
-            tess_table_stats(base, size, &raw mut stats, &raw mut status),
+            tess_table_stats(table.ptr(), &raw mut stats, &raw mut status),
             Code::Ok
         );
         assert_eq!((stats.records, stats.buckets), (80, 1024));
         assert_eq!(stats.region_len, size as u64);
-        assert_eq!(stats.bytes_used, 96 + 80 * 32 + 4096);
+        assert_eq!(stats.bytes_used, 96 + 4096);
 
         // Every valid row is found, at its own record or its twin's.
         let mut found_words = vec![0; 2];
@@ -267,8 +479,7 @@ fn the_entry_points_round_trip() -> Result<()> {
             bits: valid_words.as_mut_ptr(),
         };
         let code = tess_table_probe(
-            base,
-            size,
+            table.ptr(),
             hashes.as_ptr(),
             1,
             &raw const key,
@@ -289,7 +500,7 @@ fn the_entry_points_round_trip() -> Result<()> {
         };
         for &row in &valid_rows {
             let code =
-                tess_table_record(base, size, matches[row], &raw mut record, &raw mut status);
+                tess_table_record(table.ptr(), matches[row], &raw mut record, &raw mut status);
             assert_eq!(code, Code::Ok);
             assert_eq!((record.hash, record.null_bits), (hashes[row], 0));
             assert_eq!(*record.keys, i64::from(keys.values[row]));
@@ -302,8 +513,7 @@ fn the_entry_points_round_trip() -> Result<()> {
         // payload is refused.
         let mut gathered = vec![u64::MAX; 100];
         let code = tess_table_gather(
-            base,
-            size,
+            table.ptr(),
             matches.as_ptr(),
             &raw const valid_view,
             0,
@@ -319,8 +529,7 @@ fn the_entry_points_round_trip() -> Result<()> {
             }
         }
         let code = tess_table_gather(
-            base,
-            size,
+            table.ptr(),
             matches.as_ptr(),
             &raw const valid_view,
             1,
@@ -332,8 +541,7 @@ fn the_entry_points_round_trip() -> Result<()> {
         // The second record of each key, in place; then no third.
         let mut chain = matches.clone();
         let code = tess_table_next_match(
-            base,
-            size,
+            table.ptr(),
             chain.as_mut_ptr(),
             &raw const valid_view,
             &raw mut found,
@@ -362,8 +570,7 @@ fn the_entry_points_round_trip() -> Result<()> {
             bits: twin_words.as_mut_ptr(),
         };
         let code = tess_table_next_match(
-            base,
-            size,
+            table.ptr(),
             chain.as_mut_ptr(),
             &raw const twin_rows,
             &raw mut found,
@@ -372,23 +579,40 @@ fn the_entry_points_round_trip() -> Result<()> {
         assert_eq!(code, Code::Ok);
         assert_eq!(found_words, vec![0; 2], "no key has three records");
 
-        // Errors: a null or foreign region, a short length, the wrong key
-        // count or kind, an undersized structure, a corrupt version.
+        // Errors: a null or foreign index, a short length, a reference
+        // past the chunks, the wrong key count or kind, an undersized
+        // structure, a corrupt version.
         let invalid = Code::InvalidArgument;
+        assert_eq!(tess_table_attach(ptr::null(), &raw mut status), invalid);
+        let base = table.table.index;
+        let mut other = TableRef { ..table.table };
+        other.index_len = size - 8;
         assert_eq!(
-            tess_table_attach(ptr::null(), size, &raw mut status),
+            tess_table_attach(&raw const other, &raw mut status),
             invalid
         );
-        assert_eq!(tess_table_attach(base, size - 8, &raw mut status), invalid);
+        other.index = base.add(8);
         assert_eq!(
-            tess_table_attach(base.add(8), size - 8, &raw mut status),
+            tess_table_attach(&raw const other, &raw mut status),
             invalid
         );
         assert!(status.message().contains("does not hold a table"));
+        other = TableRef { ..table.table };
+        other.nchunks = 1;
+        let last = valid_rows[valid_rows.len() - 1];
+        assert_eq!(
+            tess_table_record(
+                &raw const other,
+                matches[last],
+                &raw mut record,
+                &raw mut status
+            ),
+            invalid,
+            "the last record lies in the third chunk"
+        );
         let two = [key_copy(&key), key_copy(&key)];
         let code = tess_table_probe(
-            base,
-            size,
+            table.ptr(),
             hashes.as_ptr(),
             2,
             two.as_ptr(),
@@ -405,8 +629,7 @@ fn the_entry_points_round_trip() -> Result<()> {
             prepared: ptr::null(),
         };
         let code = tess_table_probe(
-            base,
-            size,
+            table.ptr(),
             hashes.as_ptr(),
             1,
             &raw const odd,
@@ -421,29 +644,28 @@ fn the_entry_points_round_trip() -> Result<()> {
         assert_eq!(code, invalid);
         stats.struct_size = 8;
         assert_eq!(
-            tess_table_stats(base, size, &raw mut stats, &raw mut status),
+            tess_table_stats(table.ptr(), &raw mut stats, &raw mut status),
             invalid
         );
         record.struct_size = 16;
         assert_eq!(
-            tess_table_record(base, size, matches[1], &raw mut record, &raw mut status),
+            tess_table_record(table.ptr(), matches[1], &raw mut record, &raw mut status),
             invalid
         );
         assert_eq!(
-            tess_table_record(base, size, 1, &raw mut record, &raw mut status),
+            tess_table_record(table.ptr(), 1, &raw mut record, &raw mut status),
             invalid
         );
         let version = base.add(8).cast::<u32>();
-        version.write_unaligned(2);
-        assert_eq!(tess_table_attach(base, size, &raw mut status), invalid);
+        version.write_unaligned(1);
+        assert_eq!(tess_table_attach(table.ptr(), &raw mut status), invalid);
         assert!(
-            status.message().contains("version 2"),
+            status.message().contains("version 1"),
             "{}",
             status.message()
         );
-        version.write_unaligned(1);
-        assert_eq!(tess_table_attach(base, size, &raw mut status), Code::Ok);
-        drop(region);
+        version.write_unaligned(2);
+        assert_eq!(tess_table_attach(table.ptr(), &raw mut status), Code::Ok);
     }
     Ok(())
 }
@@ -476,19 +698,13 @@ fn grouped_states_accumulate_through_the_entry_points() -> Result<()> {
         .iter()
         .map(|&value| int32::murmurhash32(value as u32))
         .collect();
-    let kinds = [1_u32];
     let mut status = Status::new();
-    let mut size = 0;
     let mut all = [u64::MAX, (1 << 36) - 1];
     // SAFETY: local buffers of the declared sizes, aliased by nothing else,
     // throughout this test.
     unsafe {
-        let code = tess_table_size(1, kinds.as_ptr(), 16, 16, &raw mut size, &raw mut status);
-        assert_eq!(code, Code::Ok);
-        let mut region = vec![0_u64; size / 8];
-        let base = region.as_mut_ptr().cast::<u8>();
-        let code = tess_table_create(base, size, 1, kinds.as_ptr(), 16, 16, &raw mut status);
-        assert_eq!(code, Code::Ok, "{}", status.message());
+        let mut table = CTable::new(1, 16, 16);
+        table.add_chunk(4096);
         let mut pending_words = all;
         let mut pending = Mask {
             nrows: 100,
@@ -501,8 +717,8 @@ fn grouped_states_accumulate_through_the_entry_points() -> Result<()> {
         };
         let mut offsets = vec![0; 100];
         let code = tess_table_find_or_insert(
-            base,
-            size,
+            table.ptr(),
+            0,
             hashes.as_ptr(),
             1,
             &raw const key,
@@ -518,8 +734,7 @@ fn grouped_states_accumulate_through_the_entry_points() -> Result<()> {
         };
         // sum(int4) at byte 8, its flag bit 3 in the word at byte 0.
         let code = tess_table_accumulate(
-            base,
-            size,
+            table.ptr(),
             offsets.as_ptr(),
             &raw const rows,
             3,
@@ -542,8 +757,7 @@ fn grouped_states_accumulate_through_the_entry_points() -> Result<()> {
         let mut nulls = [true; 10];
         assert_eq!(
             tess_table_gather(
-                base,
-                size,
+                table.ptr(),
                 offsets.as_ptr(),
                 &raw const groups,
                 8,
@@ -554,8 +768,7 @@ fn grouped_states_accumulate_through_the_entry_points() -> Result<()> {
         );
         assert_eq!(
             tess_table_gather(
-                base,
-                size,
+                table.ptr(),
                 offsets.as_ptr(),
                 &raw const groups,
                 0,
@@ -565,8 +778,7 @@ fn grouped_states_accumulate_through_the_entry_points() -> Result<()> {
             Code::Ok
         );
         let code = tess_table_gather_key(
-            base,
-            size,
+            table.ptr(),
             offsets.as_ptr(),
             &raw const groups,
             0,
@@ -583,8 +795,7 @@ fn grouped_states_accumulate_through_the_entry_points() -> Result<()> {
         }
         // An unknown operation is refused.
         let code = tess_table_accumulate(
-            base,
-            size,
+            table.ptr(),
             offsets.as_ptr(),
             &raw const rows,
             99,
@@ -626,13 +837,10 @@ fn the_writer_entry_points_round_trip() -> Result<()> {
     // SAFETY: local buffers of the declared sizes, aliased by nothing else,
     // throughout this test.
     unsafe {
-        // A region for four records fills up; a walk sees them in order.
-        let code = tess_table_size(1, kinds.as_ptr(), 8, 4, &raw mut size, &raw mut status);
-        assert_eq!(code, Code::Ok);
-        let mut region = vec![0_u64; size / 8];
-        let base = region.as_mut_ptr().cast::<u8>();
-        let code = tess_table_create(base, size, 1, kinds.as_ptr(), 8, 4, &raw mut status);
-        assert_eq!(code, Code::Ok, "{}", status.message());
+        // An index for eight records, a chunk for four: the chunk fills
+        // up, and a walk sees its records in order.
+        let mut table = CTable::new(1, 8, 8);
+        table.add_chunk(8 + 4 * 32);
         let mut pending_words = all;
         let mut pending = Mask {
             nrows: 100,
@@ -645,8 +853,8 @@ fn the_writer_entry_points_round_trip() -> Result<()> {
         };
         let mut offsets = vec![0; 100];
         let code = tess_table_find_or_insert(
-            base,
-            size,
+            table.ptr(),
+            0,
             hashes.as_ptr(),
             1,
             &raw const key,
@@ -666,8 +874,7 @@ fn the_writer_entry_points_round_trip() -> Result<()> {
         let mut walked = [0; 8];
         let mut count = 0;
         let code = tess_table_scan(
-            base,
-            size,
+            table.ptr(),
             &raw mut cursor,
             walked.as_mut_ptr(),
             8,
@@ -678,8 +885,7 @@ fn the_writer_entry_points_round_trip() -> Result<()> {
         assert_eq!(walked[..4], offsets[..4]);
         assert_ne!(cursor, 0);
         let code = tess_table_scan(
-            base,
-            size,
+            table.ptr(),
             &raw mut cursor,
             walked.as_mut_ptr(),
             8,
@@ -688,17 +894,28 @@ fn the_writer_entry_points_round_trip() -> Result<()> {
         );
         assert_eq!((code, count), (Code::Ok, 0));
 
-        // Grown to a region for a hundred, the rest resolve to ten records,
-        // and payloads change in place.
+        // The records stay where they are under an index for a hundred; in
+        // a second chunk the rest resolve to ten records, and payloads
+        // change in place.
+        assert_eq!(table.regrow(100), Code::Ok);
         let code = tess_table_size(1, kinds.as_ptr(), 8, 100, &raw mut size, &raw mut status);
         assert_eq!(code, Code::Ok);
-        region.resize(size / 8, 0);
-        let base = region.as_mut_ptr().cast::<u8>();
-        let code = tess_table_grow(base, size, &raw mut status);
-        assert_eq!(code, Code::Ok, "{}", status.message());
+        let mut again = [0; 4];
+        let mut cursor = 0;
+        let code = tess_table_scan(
+            table.ptr(),
+            &raw mut cursor,
+            again.as_mut_ptr(),
+            4,
+            &raw mut count,
+            &raw mut status,
+        );
+        assert_eq!((code, count), (Code::Ok, 4));
+        assert_eq!(again, offsets[..4]);
+        table.add_chunk(4096);
         let code = tess_table_find_or_insert(
-            base,
-            size,
+            table.ptr(),
+            1,
             hashes.as_ptr(),
             1,
             &raw const key,
@@ -714,7 +931,7 @@ fn the_writer_entry_points_round_trip() -> Result<()> {
             assert_eq!(offsets[row], offsets[row % 10]);
             let mut payload: *mut u8 = ptr::null_mut();
             let code =
-                tess_table_payload(base, size, offsets[row], &raw mut payload, &raw mut status);
+                tess_table_payload(table.ptr(), offsets[row], &raw mut payload, &raw mut status);
             assert_eq!(code, Code::Ok);
             let counter = payload.cast::<u64>();
             counter.write_unaligned(counter.read_unaligned() + row as u64);
@@ -728,7 +945,7 @@ fn the_writer_entry_points_round_trip() -> Result<()> {
             payload_size: 0,
         };
         for (key, &offset) in offsets[..10].iter().enumerate() {
-            let code = tess_table_record(base, size, offset, &raw mut record, &raw mut status);
+            let code = tess_table_record(table.ptr(), offset, &raw mut record, &raw mut status);
             assert_eq!(code, Code::Ok);
             let sum = u64::from_ne_bytes(*record.payload.cast::<[u8; 8]>());
             assert_eq!(
@@ -744,15 +961,14 @@ fn the_writer_entry_points_round_trip() -> Result<()> {
             region_len: 0,
         };
         assert_eq!(
-            tess_table_stats(base, size, &raw mut stats, &raw mut status),
+            tess_table_stats(table.ptr(), &raw mut stats, &raw mut status),
             Code::Ok
         );
         assert_eq!((stats.records, stats.region_len), (10, size as u64));
         let mut cursor = 0;
         let mut all_offsets = [0; 16];
         let code = tess_table_scan(
-            base,
-            size,
+            table.ptr(),
             &raw mut cursor,
             all_offsets.as_mut_ptr(),
             16,
@@ -762,11 +978,11 @@ fn the_writer_entry_points_round_trip() -> Result<()> {
         assert_eq!((code, count), (Code::Ok, 10));
         assert_eq!(all_offsets[..10], offsets[..10]);
 
-        // Errors: a cursor inside a record, no shrinking, a bad offset.
+        // Errors: a cursor inside a record, an index too short, a bad
+        // offset.
         let mut cursor = 100;
         let code = tess_table_scan(
-            base,
-            size,
+            table.ptr(),
             &raw mut cursor,
             all_offsets.as_mut_ptr(),
             16,
@@ -774,20 +990,23 @@ fn the_writer_entry_points_round_trip() -> Result<()> {
             &raw mut status,
         );
         assert_eq!(code, Code::InvalidArgument);
-        assert_eq!(
-            tess_table_grow(base, size - 8, &raw mut status),
-            Code::InvalidArgument
+        let mut short = vec![0_u64; size / 8 - 1];
+        let code = tess_table_regrow(
+            table.ptr(),
+            short.as_mut_ptr().cast(),
+            size - 8,
+            100,
+            &raw mut status,
         );
+        assert_eq!(code, Code::InvalidArgument);
         let mut payload: *mut u8 = ptr::null_mut();
         let code = tess_table_payload(
-            base,
-            size,
+            table.ptr(),
             offsets[0] + 1,
             &raw mut payload,
             &raw mut status,
         );
         assert_eq!(code, Code::InvalidArgument);
-        drop(region);
     }
     Ok(())
 }
@@ -886,17 +1105,10 @@ fn int4_keys_find_the_records_of_int8_keys() -> Result<()> {
         nrows: 64,
     };
     let (built_column, probed_column) = (column(&built_datums), column(&probed_datums));
-    let kinds = [2_u32];
     let mut status = Status::new();
-    let mut size = 0;
     // SAFETY: local buffers of the declared sizes, aliased by nothing else.
     unsafe {
-        let code = tess_table_size(1, kinds.as_ptr(), 0, 64, &raw mut size, &raw mut status);
-        assert_eq!(code, Code::Ok, "{}", status.message());
-        let mut region = vec![0_u64; size / 8];
-        let base = region.as_mut_ptr().cast::<u8>();
-        let code = tess_table_create(base, size, 1, kinds.as_ptr(), 0, 64, &raw mut status);
-        assert_eq!(code, Code::Ok, "{}", status.message());
+        let mut table = CTable::new(2, 0, 64);
 
         let (built_hashes, mut pending_words) = hash_column(&built_column, 2, 64);
         let built_key = TableKey {
@@ -909,18 +1121,15 @@ fn int4_keys_find_the_records_of_int8_keys() -> Result<()> {
             bits: pending_words.as_mut_ptr(),
         };
         let mut offsets = vec![0; 64];
-        let code = tess_table_insert(
-            base,
-            size,
+        table.insert(
+            4096,
             built_hashes.as_ptr(),
-            1,
             &raw const built_key,
             ptr::null(),
             &raw mut pending,
             offsets.as_mut_ptr(),
-            &raw mut status,
+            false,
         );
-        assert_eq!(code, Code::Ok, "{}", status.message());
         assert_eq!(pending_words, [0]);
 
         let (probed_hashes, mut rows_words) = hash_column(&probed_column, 1, 64);
@@ -943,8 +1152,7 @@ fn int4_keys_find_the_records_of_int8_keys() -> Result<()> {
         };
         let mut matches = vec![0; 64];
         let code = tess_table_probe(
-            base,
-            size,
+            table.ptr(),
             probed_hashes.as_ptr(),
             1,
             &raw const probed_key,
@@ -978,49 +1186,29 @@ fn grouped_insertion_steps_through_a_key_in_one_call_each() -> Result<()> {
         column: &raw const column,
         prepared: ptr::null(),
     };
-    let kinds = [1_u32];
     let payload: Vec<u8> = (0..64_u64).flat_map(|row| row.to_ne_bytes()).collect();
     let mut status = Status::new();
-    let mut size = 0;
     // SAFETY: local buffers of the declared sizes, aliased by nothing else.
     unsafe {
-        let code = tess_table_size(1, kinds.as_ptr(), 8, 64, &raw mut size, &raw mut status);
-        assert_eq!(code, Code::Ok, "{}", status.message());
-        let mut region = vec![0_u64; size / 8];
-        let base = region.as_mut_ptr().cast::<u8>();
-        let code = tess_table_create(base, size, 1, kinds.as_ptr(), 8, 64, &raw mut status);
-        assert_eq!(code, Code::Ok, "{}", status.message());
+        let mut table = CTable::new(1, 8, 64);
         let (hashes, _) = hash_column(&column, 1, 64);
         let mut pending_words = [u64::MAX];
         let mut pending = Mask {
             nrows: 64,
             bits: pending_words.as_mut_ptr(),
         };
-        let mut duplicate_words = [0];
-        let mut duplicates = Mask {
-            nrows: 64,
-            bits: duplicate_words.as_mut_ptr(),
-        };
         let mut offsets = vec![0; 64];
-        let code = tess_table_insert_grouped(
-            base,
-            size,
+        let duplicates = table.insert(
+            4096,
             hashes.as_ptr(),
-            1,
             &raw const key,
             payload.as_ptr(),
             &raw mut pending,
             offsets.as_mut_ptr(),
-            &raw mut duplicates,
-            &raw mut status,
+            true,
         );
-        assert_eq!(code, Code::Ok, "{}", status.message());
         assert_eq!(pending_words, [0]);
-        assert_eq!(
-            duplicate_words,
-            [u64::MAX << 16],
-            "the first row of each key is new"
-        );
+        assert_eq!(duplicates, 48, "the first row of each key is new");
 
         // From each key's first row: three more records, one step each.
         let mut current = offsets.clone();
@@ -1036,8 +1224,7 @@ fn grouped_insertion_steps_through_a_key_in_one_call_each() -> Result<()> {
                 bits: found_words.as_mut_ptr(),
             };
             let code = tess_table_next_in_group(
-                base,
-                size,
+                table.ptr(),
                 current.as_mut_ptr(),
                 &raw const rows,
                 &raw mut found,
