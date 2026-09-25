@@ -141,6 +141,8 @@ typedef struct TessHashJoinState
 	bool		nulls_gathered;
 	bool	   *gathered;
 
+	/* The copies of the compact batch's by-reference outer values. */
+	MemoryContext compact_context;
 	/* The records and rows the published batch reads: a round's or a compact batch's. */
 	uint32	   *current_offsets;
 	uint64	   *current_bits;
@@ -693,6 +695,9 @@ fill_compact(TessHashJoinState *state)
 {
 	int			count = 0;
 
+	/* The parent released the previous compact batch: its copies go. */
+	MemoryContextReset(state->compact_context);
+
 	while (count < JOIN_COMPACT_ROWS)
 	{
 		int			nrows;
@@ -732,10 +737,23 @@ fill_compact(TessHashJoinState *state)
 				{
 					int			scan = state->outer_columns[column];
 
-					state->compact_values[scan][count] =
-						state->round_columns[column].values[row];
-					state->compact_isnull[scan][count] =
-						state->round_columns[column].isnull[row];
+					Datum		value = state->round_columns[column].values[row];
+					bool		isnull = state->round_columns[column].isnull[row];
+
+					/*
+					 * A by-reference value points into the outer batch,
+					 * which goes before the compact batch does: a copy.
+					 */
+					if (!isnull && !state->typbyvals[scan])
+					{
+						MemoryContext oldcontext =
+							MemoryContextSwitchTo(state->compact_context);
+
+						value = datumCopy(value, false, state->typlens[scan]);
+						MemoryContextSwitchTo(oldcontext);
+					}
+					state->compact_values[scan][count] = value;
+					state->compact_isnull[scan][count] = isnull;
 				}
 				count++;
 			}
@@ -1098,9 +1116,9 @@ join_begin(CustomScanState *css, EState *estate, int eflags)
 }
 
 /*
- * Compact mode for a batch-aware parent over a table with duplicate keys,
- * when every outer column asked for is passed by value: a copied value
- * must outlive the outer batch.
+ * Compact mode for a batch-aware parent over a table with duplicate keys;
+ * a by-reference outer value is copied, since it must outlive its outer
+ * batch.
  */
 static void
 decide_compact(TessHashJoinState *state)
@@ -1113,9 +1131,6 @@ decide_compact(TessHashJoinState *state)
 		state->inner_unique || state->duplicates == 0)
 		return;
 	for (int index = 0; index < state->nouter; index++)
-		if (!state->typbyvals[state->outer_columns[index]])
-			return;
-	for (int index = 0; index < state->nouter; index++)
 	{
 		int			column = state->outer_columns[index];
 
@@ -1126,6 +1141,11 @@ decide_compact(TessHashJoinState *state)
 		state->compact_isnull[column] =
 			MemoryContextAllocZero(context, sizeof(bool) * JOIN_COMPACT_ROWS);
 	}
+	/* The copies of by-reference values, for one compact batch at a time. */
+	if (state->compact_context == NULL)
+		state->compact_context = AllocSetContextCreate(context,
+													   "TessHashJoin compact values",
+													   ALLOCSET_DEFAULT_SIZES);
 	state->compact = true;
 }
 

@@ -176,8 +176,8 @@ SELECT join_same($$SELECT a.w, b.w FROM jdup a JOIN jdup b ON a.k = b.k$$);
 (1 row)
 
 -- Under an aggregate, the pairs of the rounds are copied into full batches
--- (compact mode): outer columns by value, NULLs among them; a text outer
--- column keeps the rounds over the outer batches.
+-- (compact mode): outer columns by value, NULLs among them, and text,
+-- whose values are copied.
 SELECT join_explain($$SELECT count(jf.m), sum(jf.m), sum(jdup.w) FROM jf JOIN jdup ON jf.fk = jdup.k$$);
                                 join_explain                                 
 -----------------------------------------------------------------------------
@@ -216,10 +216,59 @@ SELECT join_same($$SELECT count(jf.m), sum(jf.m), sum(jdup.w) FROM jf JOIN jdup 
  1 rows, hash d5af30b3f7d1286c1b1cd3e04c337295
 (1 row)
 
+SELECT join_explain($$SELECT count(jf.note), max(jdup.w) FROM jf JOIN jdup ON jf.fk = jdup.k$$);
+                                join_explain                                 
+-----------------------------------------------------------------------------
+ Custom Scan (TessAgg) (actual rows=1.00 loops=1)
+   Input Batches: 6
+   Input Rows: 357
+   Kernel Calls: 12
+   Computed Datums: 714
+   ->  Custom Scan (TessHashJoin) (actual rows=357.00 loops=1)
+         Hash Cond: (jf.fk = jdup.k)
+         Buckets: 1024
+         Memory Usage: N kB
+         Builds: 1
+         Build Rows: 139
+         Table Grows: 0
+         Probe Rows: 1000
+         Matches: 357
+         Compact Batches: 6
+         ->  Custom Scan (TessHeapScan) on jf (actual rows=1000.00 loops=1)
+               Batch Size: 64
+               Batches: 18
+               Pages: 9
+               Deformed Datums: 2000
+               Restarted Datums: 0
+         ->  Custom Scan (TessHeapScan) on jdup (actual rows=150.00 loops=1)
+               Batch Size: 64
+               Batches: 3
+               Pages: 1
+               Deformed Datums: 289
+               Restarted Datums: 0
+(27 rows)
+
 SELECT join_same($$SELECT count(jf.note), max(jdup.w) FROM jf JOIN jdup ON jf.fk = jdup.k$$);
                    join_same                   
 -----------------------------------------------
  1 rows, hash 95e42a388044c9604554cfc4780a944d
+(1 row)
+
+-- A limit reads batches too: the text values of compact batches, copied.
+EXPLAIN (COSTS OFF) SELECT jf.note, jdup.t FROM jf JOIN jdup ON jf.fk = jdup.k LIMIT 1000;
+                   QUERY PLAN                   
+------------------------------------------------
+ Custom Scan (TessLimit)
+   ->  Custom Scan (TessHashJoin)
+         Hash Cond: (jf.fk = jdup.k)
+         ->  Custom Scan (TessHeapScan) on jf
+         ->  Custom Scan (TessHeapScan) on jdup
+(5 rows)
+
+SELECT join_same($$SELECT jf.note, jdup.t FROM jf JOIN jdup ON jf.fk = jdup.k LIMIT 1000$$);
+                    join_same                    
+-------------------------------------------------
+ 357 rows, hash 73ad95120c03f976250b661b05ad9bc6
 (1 row)
 
 -- Several keys: two int4 ones, NULL in the second on the inner side; an

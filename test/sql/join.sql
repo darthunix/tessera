@@ -85,11 +85,15 @@ SELECT join_same($$SELECT jf.v, jdup.w, jdup.t FROM jf JOIN jdup ON jf.fk = jdup
 SELECT join_same($$SELECT count(*), sum(jdup.w) FROM jf JOIN jdup ON jf.fk = jdup.k$$);
 SELECT join_same($$SELECT a.w, b.w FROM jdup a JOIN jdup b ON a.k = b.k$$);
 -- Under an aggregate, the pairs of the rounds are copied into full batches
--- (compact mode): outer columns by value, NULLs among them; a text outer
--- column keeps the rounds over the outer batches.
+-- (compact mode): outer columns by value, NULLs among them, and text,
+-- whose values are copied.
 SELECT join_explain($$SELECT count(jf.m), sum(jf.m), sum(jdup.w) FROM jf JOIN jdup ON jf.fk = jdup.k$$);
 SELECT join_same($$SELECT count(jf.m), sum(jf.m), sum(jdup.w) FROM jf JOIN jdup ON jf.fk = jdup.k$$);
+SELECT join_explain($$SELECT count(jf.note), max(jdup.w) FROM jf JOIN jdup ON jf.fk = jdup.k$$);
 SELECT join_same($$SELECT count(jf.note), max(jdup.w) FROM jf JOIN jdup ON jf.fk = jdup.k$$);
+-- A limit reads batches too: the text values of compact batches, copied.
+EXPLAIN (COSTS OFF) SELECT jf.note, jdup.t FROM jf JOIN jdup ON jf.fk = jdup.k LIMIT 1000;
+SELECT join_same($$SELECT jf.note, jdup.t FROM jf JOIN jdup ON jf.fk = jdup.k LIMIT 1000$$);
 
 -- Several keys: two int4 ones, NULL in the second on the inner side; an
 -- int8 key next to an int4 one; three keys; composite keys with

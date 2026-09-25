@@ -175,19 +175,7 @@ columns of the subquery and whose subquery is planned as a batch path,
 hands the batches of the plan under the subquery scan to its parent.
 PostgreSQL keeps the subquery scan in the plan for the subquery's range
 table, unless the scan is trivial, in which case it drops it after
-planning and the pack's child is the batch node itself.
-
-A batch-aware parent over a table with duplicate keys gets compact
-batches instead, when every outer column it asked for is passed by
-value: the node copies the pairs of the rounds one after another into
-batches of 64 rows, each outer column's value copied from the round's
-outer batch and each pair's record kept, and gathers the inner columns
-from those records. Published over the outer batch, a key with four
-records would give four batches with a quarter of their rows selected,
-each paying the whole cost of a batch in the parent. A copied value must
-outlive its outer batch, which a by-reference one would not; and without
-duplicates a round is dense enough that copying the outer columns costs
-more than it saves. The explicit
+planning and the pack's child is the batch node itself. The explicit
 layout `PlanCustomPath` builds from the subplan's layout, mapping every
 target to the column of the subplan's target of the same number, holds
 either way. A subquery scan with a clause of its own, or over a subquery
@@ -584,7 +572,20 @@ selection only, the round's own rows staying whole for the next round,
 and a batch they leave empty is skipped. There is no second round when the planner
 knows the inner side unique or the build met no duplicate key: walking a
 chain to find that a key has no other record cost as much as the probe
-itself. The outer batch stays active until its
+itself.
+
+A batch-aware parent over a table with duplicate keys gets compact
+batches instead: the node copies the pairs of the rounds one after
+another into batches of 64 rows, each outer column's value copied from
+the round's outer batch and each pair's record kept, and gathers the
+inner columns from those records. Published over the outer batch, a key
+with four records would give four batches with a quarter of their rows
+selected, each paying the whole cost of a batch in the parent. A
+by-reference value points into its outer batch, which goes before the
+compact batch does, so it is copied into a memory context the node
+resets before it fills the next compact batch, once the parent has
+released the previous one. Without duplicates a round is dense enough
+that copying the outer columns costs more than it saves. The outer batch stays active until its
 last round is finished. A row-wise parent is served from the round's
 columns row by row. The node scans forward only: a scrollable cursor
 gets a `Material` above it. A rescan builds the table again only when
@@ -621,7 +622,8 @@ with NULLs, text, an OR over both sides, with rounds and compact
 batches, a text equality next to the key and a parameter of an outer
 query; three inner rows per key, duplicates on both sides
 and NULL keys on both; compact batches under an aggregate, with NULLs in
-an outer column, and a text outer column that keeps the rounds; a side
+an outer column, and with text outer columns under an aggregate and a
+limit; a side
 of fewer than 64 rows, an empty side on
 either side, a join over a join; an inner side much larger than the
 planner's estimate, which makes the table grow; a top-N sort and a limit
