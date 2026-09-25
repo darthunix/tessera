@@ -240,10 +240,23 @@ typedef struct TessKernelOps
 										  const TessRowMask *rows,
 										  TessRowMask *found,
 										  TessStatus *status);
+	/* tess_build_counters_init */
+	TessStatusCode (*build_counters_init) (uint64 *counters,
+										   TessStatus *status);
+	/* tess_build_report */
+	TessStatusCode (*build_report) (uint64 *counters, uint64 staged,
+									uint64 null_columns, TessStatus *status);
+	/* tess_build_totals */
+	TessStatusCode (*build_totals) (uint64 *counters, uint64 *staged,
+									uint64 *null_columns, TessStatus *status);
+	/* tess_build_step */
+	TessStatusCode (*build_step) (TessBuildParticipant *participant,
+								  uint64 *counters, uint32 reply,
+								  uint32 *action, TessStatus *status);
 } TessKernelOps;
 
 #define TESS_KERNEL_OPS_MIN_SIZE \
-	TESS_ABI_SIZE_INCLUDING_FIELD(TessKernelOps, bloom_shared_probe)
+	TESS_ABI_SIZE_INCLUDING_FIELD(TessKernelOps, build_step)
 
 /*
  * The registry of the kernels: one table per backend, installed by the

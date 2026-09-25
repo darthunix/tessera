@@ -26,8 +26,9 @@ use core::sync::atomic::Ordering;
 use tessera_core::{ColumnView, RowMask, RowMaskView};
 
 use super::bloom::{self, FilterRead, FilterShared};
-use super::exclusive::{Cursor, scan};
+use super::exclusive::{self, Cursor, scan};
 use super::header::{CHUNK_USED, HEADER_SIZE, Header, KeyKind, Layout, NRECORDS, TableConfig};
+use super::phases::{Action, Counters, Participant};
 use super::record::Access;
 use super::region::{Region, order};
 use super::{batch, init, region_size};
@@ -641,4 +642,367 @@ fn two_participants_add_their_staged_rows_to_one_bucket() {
 #[test]
 fn staged_rows_join_rows_inserted_at_the_same_time() {
     concurrent_links(&[(&[1, 2], true), (&[3], false)]);
+}
+
+/// PostgreSQL's `Barrier` (`storage/ipc/barrier.c`) over loom: the same
+/// counts, phase and election, a mutex for its spinlock and a condition
+/// variable for its own. `skip` makes arrivals in one phase return at
+/// once, for the test that the model notices a missing wait.
+struct LoomBarrier {
+    state: ::loom::sync::Mutex<BarrierState>,
+    released: ::loom::sync::Condvar,
+    skip: Option<u32>,
+}
+
+struct BarrierState {
+    participants: u32,
+    arrived: u32,
+    phase: u32,
+    elected: u32,
+}
+
+impl LoomBarrier {
+    fn new(skip: Option<u32>) -> Self {
+        Self {
+            state: ::loom::sync::Mutex::new(BarrierState {
+                participants: 0,
+                arrived: 0,
+                phase: 0,
+                elected: 0,
+            }),
+            released: ::loom::sync::Condvar::new(),
+            skip,
+        }
+    }
+
+    fn attach(&self) -> u32 {
+        let mut state = self.state.lock().unwrap();
+        state.participants += 1;
+        state.phase
+    }
+
+    fn arrive_and_wait(&self) -> bool {
+        let mut state = self.state.lock().unwrap();
+        let next = state.phase + 1;
+        let skipping = self.skip == Some(state.phase);
+        state.arrived += 1;
+        if state.arrived == state.participants {
+            state.arrived = 0;
+            state.phase = next;
+            state.elected = next;
+            drop(state);
+            self.released.notify_all();
+            return true;
+        }
+        if skipping {
+            return false;
+        }
+        loop {
+            if state.phase == next {
+                if state.elected != next {
+                    state.elected = next;
+                    return true;
+                }
+                return false;
+            }
+            state = self.released.wait(state).unwrap();
+        }
+    }
+
+    fn detach(&self, arrive: bool) -> bool {
+        let mut state = self.state.lock().unwrap();
+        state.participants -= 1;
+        let release = (arrive || state.participants > 0) && state.arrived == state.participants;
+        if release {
+            state.arrived = 0;
+            state.phase += 1;
+        }
+        let last = state.participants == 0;
+        drop(state);
+        if release {
+            self.released.notify_all();
+        }
+        last
+    }
+}
+
+/// The build counters over loom atomics.
+struct LoomCounters {
+    staged: AtomicU64,
+    null_columns: AtomicU64,
+}
+
+impl Counters for LoomCounters {
+    fn add_staged(&self, rows: u64) {
+        self.staged.fetch_add(rows, order::RELAXED);
+    }
+    fn staged(&self) -> u64 {
+        self.staged.load(order::RELAXED)
+    }
+    fn add_null_columns(&self, bits: u64) {
+        self.null_columns.fetch_or(bits, order::RELAXED);
+    }
+    fn null_columns(&self) -> u64 {
+        self.null_columns.load(order::RELAXED)
+    }
+}
+
+impl LoomRegion {
+    /// Copy the header and the first `used` bytes of records of `from`,
+    /// as a participant copies a table into a larger region before
+    /// growing it.
+    fn copy_table(&self, from: &LoomRegion, used: usize) {
+        for word in 0..HEADER_SIZE / 4 {
+            match from.widths[word].load(Plain::Relaxed) {
+                8 if word % 2 == 0 => {
+                    let value = from.header64(word * 4).load(order::RELAXED);
+                    self.header64(word * 4).store(value, order::RELAXED);
+                }
+                4 => {
+                    let value = from.header32(word * 4).load(order::RELAXED);
+                    self.header32(word * 4).store(value, order::RELAXED);
+                }
+                _ => {}
+            }
+        }
+        let len = used - HEADER_SIZE;
+        if len > 0 {
+            let source = from.read(HEADER_SIZE, len);
+            let target = self.write(HEADER_SIZE, len);
+            // SAFETY: both ranges lie in their regions' records, checked by
+            // `read` and `write`, and do not overlap: they are two regions.
+            unsafe { core::ptr::copy_nonoverlapping(source, target, len) };
+        }
+    }
+}
+
+/// A shared build: the inner side's keys, which the participants take
+/// one at a time as a parallel scan hands out pages, the table's region
+/// sized by the estimate and the one for every record, which of them is
+/// the table, the counters, the barrier and the frees.
+struct Build {
+    keys: &'static [i32],
+    next_key: ::loom::sync::atomic::AtomicUsize,
+    regions: [LoomRegion; 2],
+    lens: [usize; 2],
+    estimate: u64,
+    current: ::loom::sync::atomic::AtomicUsize,
+    counters: LoomCounters,
+    barrier: LoomBarrier,
+    frees: ::loom::sync::atomic::AtomicUsize,
+}
+
+impl Build {
+    fn new(keys: &'static [i32], estimate: u64, skip: Option<u32>) -> Self {
+        let total = keys.len() as u64;
+        let region = |capacity: u64| {
+            let len = region_size(&CONFIG, capacity).unwrap();
+            let layout = Header::new(&CONFIG, capacity, len)
+                .unwrap()
+                .validate(len)
+                .unwrap();
+            (LoomRegion::new(&layout, HEADS), len)
+        };
+        let (first, first_len) = region(estimate);
+        let (second, second_len) = region(total);
+        Self {
+            keys,
+            next_key: ::loom::sync::atomic::AtomicUsize::new(0),
+            regions: [first, second],
+            lens: [first_len, second_len],
+            estimate,
+            current: ::loom::sync::atomic::AtomicUsize::new(0),
+            counters: LoomCounters {
+                staged: AtomicU64::new(0),
+                null_columns: AtomicU64::new(0),
+            },
+            barrier: LoomBarrier::new(skip),
+            frees: ::loom::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
+    /// The table as a participant attaches to it: the region the elected
+    /// one published and the layout its header holds.
+    fn table(&self) -> (&LoomRegion, Layout) {
+        let region = &self.regions[self.current.load(order::RELAXED)];
+        let layout = Header::load(region).validate(region.len()).unwrap();
+        (region, layout)
+    }
+
+    /// Take keys of the inner side until none is left, inserting each and
+    /// staging those the table has no room for: the staged records, if
+    /// any, once their count is reported.
+    fn build(&self) -> Option<Vec<u8>> {
+        let mut staged = Vec::new();
+        let (region, layout) = self.table();
+        loop {
+            let index = self.next_key.fetch_add(1, order::RELAXED);
+            let Some(&key) = self.keys.get(index) else {
+                break;
+            };
+            staged.extend(self.insert_or_stage(region, &layout, &[key]));
+        }
+        let rows = staged.len() / layout.record_size;
+        self.counters.add_staged(rows as u64);
+        (rows > 0).then_some(staged)
+    }
+
+    /// Insert `keys`, staging the rows the table has no room for: the
+    /// staged records.
+    fn insert_or_stage(&self, region: &LoomRegion, layout: &Layout, keys: &[i32]) -> Vec<u8> {
+        let layout = *layout;
+        let nrows = keys.len();
+        let hashes = vec![HASH; nrows];
+        let columns = [ColumnView::try_new(keys, None).unwrap()];
+        let payload = payload(keys);
+        let mut pending_bits = [(1u64 << nrows) - 1];
+        let mut pending = RowMask::try_new(nrows, &mut pending_bits).unwrap();
+        let mut offsets = vec![0; nrows];
+        batch::insert(
+            region,
+            &layout,
+            &hashes,
+            &columns[..],
+            Some(&payload),
+            &mut pending,
+            &mut offsets,
+        )
+        .unwrap();
+        let left = pending.as_view().selected_count();
+        if left == 0 {
+            return Vec::new();
+        }
+        let mut buffer = vec![0; left * layout.record_size];
+        let mut used = 0;
+        let staged = batch::stage(
+            &layout,
+            &mut buffer,
+            &mut used,
+            &hashes,
+            &columns[..],
+            Some(&payload),
+            &mut pending,
+        )
+        .unwrap();
+        assert_eq!(staged, left);
+        buffer
+    }
+
+    /// Copy the table into the region for every record and grow it there.
+    fn grow(&self) {
+        let (from, layout) = self.table();
+        let used = from.load_u64(CHUNK_USED) as usize;
+        self.regions[1].copy_table(from, used);
+        exclusive::grow(&self.regions[1], &layout, self.lens[1]).unwrap();
+        self.current.store(1, order::RELAXED);
+    }
+
+    /// Run one participant, checking that its probes find every key.
+    fn participate(&self) {
+        let all = self.keys;
+        let mut participant = Participant::new();
+        let mut staged = None;
+        let mut reply = 0;
+        loop {
+            let action = participant.next(&self.counters, reply).unwrap();
+            reply = 0;
+            match action {
+                Action::Attach => reply = self.barrier.attach(),
+                Action::ArriveAndWait => reply = u32::from(self.barrier.arrive_and_wait()),
+                Action::Allocate => {
+                    // SAFETY: the elected one alone uses the region now.
+                    unsafe { init(&self.regions[0], &CONFIG, self.estimate) }.unwrap();
+                    self.current.store(0, order::RELAXED);
+                }
+                Action::Build => staged = self.build(),
+                Action::Grow => self.grow(),
+                Action::Link => {
+                    if let Some(buffer) = staged.take() {
+                        let (region, layout) = self.table();
+                        let mut consumed = 0;
+                        let added =
+                            batch::insert_staged(region, &layout, &buffer, &mut consumed).unwrap();
+                        assert_eq!(
+                            added * layout.record_size,
+                            buffer.len(),
+                            "a staged row was lost"
+                        );
+                    }
+                }
+                Action::Probe => {
+                    let (region, layout) = self.table();
+                    for (key, offset) in all.iter().zip(probe(region, &layout, all).unwrap()) {
+                        assert_ne!(offset, 0, "key {key} was lost");
+                        check_record(region, &layout, offset, *key).unwrap();
+                    }
+                }
+                Action::ArriveAndDetach => reply = u32::from(self.barrier.detach(true)),
+                Action::Detach => {
+                    self.barrier.detach(false);
+                }
+                Action::Free => {
+                    self.frees.fetch_add(1, order::RELAXED);
+                    return;
+                }
+                Action::Done => return,
+            }
+        }
+    }
+}
+
+/// `participants` build one table of `keys` sized for `estimate` records
+/// and probe it; exactly one frees it.
+fn shared_build(
+    participants: usize,
+    keys: &'static [i32],
+    estimate: u64,
+    skip: Option<u32>,
+    preemptions: usize,
+) {
+    let mut model = ::loom::model::Builder::new();
+    model.preemption_bound = Some(preemptions);
+    model.max_branches = 100_000;
+    model.check(move || {
+        let build = Arc::new(Build::new(keys, estimate, skip));
+        let threads: Vec<_> = (0..participants)
+            .map(|_| {
+                let build = build.clone();
+                thread::spawn(move || build.participate())
+            })
+            .collect();
+        for thread in threads {
+            thread.join().unwrap();
+        }
+        assert_eq!(
+            build.frees.load(order::RELAXED),
+            1,
+            "the table is freed once"
+        );
+        assert_eq!(
+            build.current.load(order::RELAXED),
+            usize::from(estimate < keys.len() as u64),
+            "the table grew exactly when the estimate fell short"
+        );
+    });
+}
+
+#[test]
+fn two_participants_build_a_table_the_estimate_covers() {
+    shared_build(2, &[1, 2], 2, None, 3);
+}
+
+#[test]
+fn two_participants_stage_grow_and_link_past_the_estimate() {
+    shared_build(2, &[1, 2, 3], 1, None, 2);
+}
+
+#[test]
+fn three_participants_attach_at_any_phase() {
+    shared_build(3, &[1, 2, 3], 1, None, 2);
+}
+
+#[test]
+#[should_panic(expected = "was lost")]
+fn linking_without_waiting_for_the_growth_loses_rows() {
+    shared_build(2, &[1, 2, 3], 1, Some(super::phases::GROW), 2);
 }

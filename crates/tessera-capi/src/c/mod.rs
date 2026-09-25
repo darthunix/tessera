@@ -36,6 +36,7 @@ pub use status::{Code, MESSAGE_SIZE, Status};
 pub use table::{
     TableKey, TableKeys, TableRecord, TableStats, tess_bloom_probe, tess_bloom_shared_init,
     tess_bloom_shared_probe, tess_bloom_shared_ready, tess_bloom_shared_words,
+    tess_build_counters_init, tess_build_report, tess_build_step, tess_build_totals,
     tess_table_accumulate, tess_table_attach, tess_table_bloom, tess_table_bloom_words,
     tess_table_create, tess_table_find_or_insert, tess_table_format_version, tess_table_gather,
     tess_table_gather_key, tess_table_grow, tess_table_insert, tess_table_insert_grouped,

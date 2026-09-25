@@ -442,6 +442,86 @@ extern TessStatusCode tess_bloom_shared_probe(uint64 *words, Size nwords,
 											  TessStatus *status);
 
 /*
+ * The phases of a shared build, which a participant steps through without
+ * waiting itself: each step returns an action, the node performs it, and
+ * a barrier operation's result goes into the next step. The barrier is
+ * the core's Barrier; its waits stay in the node, since they may raise an
+ * error. The phases, in the barrier's numbering, and the actions follow;
+ * see docs/table.md.
+ */
+#define TESS_BUILD_ELECT		0
+#define TESS_BUILD_ALLOCATE		1
+#define TESS_BUILD_BUILD		2
+#define TESS_BUILD_GROW			3
+#define TESS_BUILD_LINK			4
+#define TESS_BUILD_PROBE		5
+#define TESS_BUILD_FREE			6
+
+typedef enum TessBuildAction
+{
+	/* BarrierAttach, and pass the phase it returns. */
+	TESS_BUILD_ATTACH = 1,
+	/* BarrierArriveAndWait, and pass whether it elected this participant. */
+	TESS_BUILD_ARRIVE_AND_WAIT = 2,
+	/* Create the table sized by the estimate and clear the filter. */
+	TESS_BUILD_DO_ALLOCATE = 3,
+	/* Insert this participant's share, stage the rest, report both. */
+	TESS_BUILD_DO_BUILD = 4,
+	/* Copy the table into a region for every record and grow it. */
+	TESS_BUILD_DO_GROW = 5,
+	/* Add this participant's staged rows. */
+	TESS_BUILD_DO_LINK = 6,
+	/* Probe; step again once done. */
+	TESS_BUILD_DO_PROBE = 7,
+	/* BarrierArriveAndDetach, and pass whether it was the last. */
+	TESS_BUILD_ARRIVE_AND_DETACH = 8,
+	/* BarrierDetach. */
+	TESS_BUILD_DETACH = 9,
+	/* Free the table, as the last to leave. */
+	TESS_BUILD_DO_FREE = 10,
+	/* Nothing is left to do. */
+	TESS_BUILD_DONE = 11
+} TessBuildAction;
+
+/* A participant's own state: zeroed before its first step. */
+typedef struct TessBuildParticipant
+{
+	uint32		phase;
+	uint32		state;
+	uint32		elected;
+} TessBuildParticipant;
+
+/* The words of a build's shared counters: rows staged, NULL columns. */
+#define TESS_BUILD_COUNTER_WORDS 2
+
+/* Clear a build's counters, before any participant attaches. */
+extern TessStatusCode tess_build_counters_init(uint64 *counters,
+											   TessStatus *status);
+
+/*
+ * Add what a participant's build staged and the payload words it saw a
+ * NULL in, before it arrives at the barrier.
+ */
+extern TessStatusCode tess_build_report(uint64 *counters, uint64 staged,
+										uint64 null_columns,
+										TessStatus *status);
+
+/* The totals of every participant, once the build is over. */
+extern TessStatusCode tess_build_totals(uint64 *counters, uint64 *staged,
+										uint64 *null_columns,
+										TessStatus *status);
+
+/*
+ * The participant's next action (a TessBuildAction) after the previous one
+ * is done: reply is the phase BarrierAttach returned, or 1 if
+ * BarrierArriveAndWait elected the participant or BarrierArriveAndDetach
+ * found it the last, else 0.
+ */
+extern TessStatusCode tess_build_step(TessBuildParticipant *participant,
+									  uint64 *counters, uint32 reply,
+									  uint32 *action, TessStatus *status);
+
+/*
  * The payload of the record at an offset, to change in place: payload_size
  * bytes valid until the region moves or the table grows.
  */

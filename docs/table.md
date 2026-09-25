@@ -245,19 +245,43 @@ grown, each adds its buffers:
   them, copies them in and publishes each, as an insertion does, so it may
   run with other insertions.
 
+The participants of a shared build go through phases that the core's
+`Barrier` separates, in its own numbering: `ELECT`, where one is elected;
+`ALLOCATE`, where it creates the table in a region sized by the
+planner's estimate; `BUILD`, where every participant inserts its share
+and stages what does not fit, then reports the rows staged and the
+payload words it saw a NULL in (`tess_build_report`); `GROW` and `LINK`,
+only when rows were staged, where the elected one copies the table into
+a region for every record and grows it, then each adds its staged rows;
+and `PROBE`, after which each leaves and the last frees the table. A
+participant is a state machine (`tess_build_step`, `TessBuildParticipant`)
+that never waits itself: each step returns an action, the node performs
+it, and what a barrier operation returned (the phase `BarrierAttach`
+gives, whether `BarrierArriveAndWait` elected it, whether
+`BarrierArriveAndDetach` found it the last) goes into the next step. The
+waits stay in the node, since they may raise an error that must not
+unwind Rust frames. A participant that attaches late joins the phase the
+others are in: while they build, it takes what is left of the inner
+side, which a parallel scan hands out page by page; from `PROBE` on it
+only probes; after the last one left, it leaves at once.
+
 `make rust-loom` runs the table's own code over a model region of loom
 atomics (`crates/tessera-kernels/src/table/loom.rs`) with the orderings
 the real region uses: two and three threads inserting into one bucket,
 two records reserved at once per thread, a full table taking one record
 of two, staged records added by two threads at once or next to an
-insertion, and a probe that finds a record another thread is publishing and
+insertion, a whole shared build of two or three participants over a
+model of the core's barrier (with a table the estimate covers, and with
+one that grows), and a probe that finds a record another thread is publishing and
 reads it whole. Every access to a record's bytes is announced to loom
 first, so a read not ordered after the writing is reported; a test with
 relaxed bucket heads checks that the model does report it. The model
 found that counting the records after publishing them let such a probe
-call a chain corrupt. The phases of a shared build (insertion, growth,
-the barrier, probing) come with the parallel join (plan item 5.5) as a
-state machine in Rust, checked under loom the same way.
+call a chain corrupt, and that a header read while others insert could
+see the new record count with the old used mark and call the table
+corrupt: the count is now read first.
+The negative test of the build has participants skip the wait after
+growth, which the model catches losing rows.
 
 ## Ownership and errors
 

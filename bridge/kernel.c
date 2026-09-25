@@ -45,7 +45,9 @@ validate_kernels(const TessKernelOps *ops)
 		ops->bloom_probe == NULL || ops->table_stage == NULL ||
 		ops->table_insert_staged == NULL || ops->bloom_shared_words == NULL ||
 		ops->bloom_shared_init == NULL || ops->table_try_build_bloom == NULL ||
-		ops->bloom_shared_ready == NULL || ops->bloom_shared_probe == NULL)
+		ops->bloom_shared_ready == NULL || ops->bloom_shared_probe == NULL ||
+		ops->build_counters_init == NULL || ops->build_report == NULL ||
+		ops->build_totals == NULL || ops->build_step == NULL)
 		elog(ERROR, "Tessera kernels must provide every operation");
 }
 

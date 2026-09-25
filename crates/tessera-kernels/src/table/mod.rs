@@ -95,6 +95,7 @@ mod keys;
 mod lanes;
 #[cfg(all(test, loom))]
 mod loom;
+pub mod phases;
 mod record;
 mod region;
 

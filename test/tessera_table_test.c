@@ -169,10 +169,64 @@ record_matches(const void *region, Size size, const Batch *batch,
 		DatumGetInt32(batch->values[stored]) == DatumGetInt32(batch->values[row]);
 }
 
+/*
+ * A participant alone at its barrier, which elects it at every phase, and
+ * whose build stages three rows: the actions it steps through.
+ */
+static bool
+build_alone(void)
+{
+	static const uint32 expected[] = {
+		TESS_BUILD_ATTACH, TESS_BUILD_ARRIVE_AND_WAIT, TESS_BUILD_DO_ALLOCATE,
+		TESS_BUILD_ARRIVE_AND_WAIT, TESS_BUILD_DO_BUILD,
+		TESS_BUILD_ARRIVE_AND_WAIT, TESS_BUILD_DO_GROW,
+		TESS_BUILD_ARRIVE_AND_WAIT, TESS_BUILD_DO_LINK,
+		TESS_BUILD_ARRIVE_AND_WAIT, TESS_BUILD_DO_PROBE,
+		TESS_BUILD_ARRIVE_AND_DETACH, TESS_BUILD_DO_FREE
+	};
+	TessBuildParticipant participant = {0};
+	TessStatus	status = TESS_STRUCT_INITIALIZER(TessStatus);
+	uint64		counters[TESS_BUILD_COUNTER_WORDS];
+	uint64		staged;
+	uint64		nulls;
+	uint32		phase = TESS_BUILD_ELECT;
+	uint32		reply = 0;
+	int			step;
+
+	StaticAssertStmt(sizeof(TessBuildParticipant) == 12,
+					 "a participant is three words of four bytes");
+	if (tess_build_counters_init(counters, &status) != TESS_OK)
+		return false;
+	for (step = 0; step < lengthof(expected); step++)
+	{
+		uint32		action;
+
+		if (tess_build_step(&participant, counters, reply, &action,
+							&status) != TESS_OK || action != expected[step])
+			return false;
+		reply = 0;
+		if (action == TESS_BUILD_ATTACH)
+			reply = phase;
+		else if (action == TESS_BUILD_ARRIVE_AND_WAIT)
+		{
+			phase++;
+			reply = 1;
+		}
+		else if (action == TESS_BUILD_DO_BUILD &&
+				 tess_build_report(counters, 3, 0x5, &status) != TESS_OK)
+			return false;
+		else if (action == TESS_BUILD_ARRIVE_AND_DETACH)
+			reply = 1;
+	}
+	return tess_build_totals(counters, &staged, &nulls, &status) == TESS_OK &&
+		staged == 3 && nulls == 0x5;
+}
+
 Datum
 tessera_test_table_layout(PG_FUNCTION_ARGS)
 {
-	PG_RETURN_BOOL(tess_table_format_version() == TESS_TABLE_FORMAT_VERSION &&
+	PG_RETURN_BOOL(build_alone() &&
+				   tess_table_format_version() == TESS_TABLE_FORMAT_VERSION &&
 				   tess_table_layout(TESS_TABLE_LAYOUT_HEADER_SIZE) == 96 &&
 				   tess_table_layout(TESS_TABLE_LAYOUT_VERSION_OFFSET) == 8 &&
 				   tess_table_layout(TESS_TABLE_LAYOUT_KEY_SIZE) ==

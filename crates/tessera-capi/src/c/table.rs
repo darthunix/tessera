@@ -13,7 +13,11 @@ use anyhow::{Context, Result, bail, ensure};
 use tessera_core::ColumnReader;
 use tessera_kernels::table::{
     Cursor, FORMAT_VERSION, Fold, HEADER_SIZE, KeyKind, KeySource, MAX_KEYS, Slot, Table,
-    TableConfig, TableMut, VERSION_OFFSET, bloom::SharedFilter, normalize_word, region_size,
+    TableConfig, TableMut, VERSION_OFFSET,
+    bloom::SharedFilter,
+    normalize_word,
+    phases::{Participant, SharedCounters},
+    region_size,
 };
 
 use super::args::reader;
@@ -1162,9 +1166,117 @@ pub unsafe extern "C" fn tess_bloom_shared_probe(
     }
 }
 
+/// Attach to a build's counters for the length of a call.
+///
+/// # Safety
+///
+/// `counters` as for [`SharedCounters::attach`] during the call.
+unsafe fn build_counters<'a>(counters: *mut u64) -> Result<SharedCounters<'a>> {
+    // SAFETY: the caller's contract.
+    unsafe { SharedCounters::attach(counters) }
+}
+
+/// `tess_build_counters_init`: clear a shared build's counters before any
+/// participant attaches.
+///
+/// # Safety
+///
+/// `counters` must point to `TESS_BUILD_COUNTER_WORDS` words aligned to 8
+/// that only build counters access; `status` as for every entry point.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tess_build_counters_init(counters: *mut u64, status: *mut Status) -> Code {
+    // SAFETY: the caller's contract.
+    unsafe {
+        guard(status, || {
+            build_counters(counters).map(|counters| counters.init())
+        })
+    }
+}
+
+/// `tess_build_report`: add what a participant's build staged and the
+/// payload words it saw a NULL in.
+///
+/// # Safety
+///
+/// As [`tess_build_counters_init`], other participants using them too.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tess_build_report(
+    counters: *mut u64,
+    staged: u64,
+    null_columns: u64,
+    status: *mut Status,
+) -> Code {
+    // SAFETY: the caller's contract.
+    unsafe {
+        guard(status, || {
+            build_counters(counters).map(|counters| counters.report(staged, null_columns))
+        })
+    }
+}
+
+/// `tess_build_totals`: the rows every participant staged and the payload
+/// words with a NULL, once the build is over.
+///
+/// # Safety
+///
+/// As [`tess_build_report`]; `staged` and `null_columns` must point to
+/// writable words.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tess_build_totals(
+    counters: *mut u64,
+    staged: *mut u64,
+    null_columns: *mut u64,
+    status: *mut Status,
+) -> Code {
+    // SAFETY: the caller's contract.
+    unsafe {
+        guard(status, || {
+            let counters = build_counters(counters)?;
+            *staged.as_mut().context("a null result")? = counters.staged_rows();
+            *null_columns.as_mut().context("a null result")? = counters.nulls();
+            Ok(())
+        })
+    }
+}
+
+/// `tess_build_step`: a participant's next action, after the previous one
+/// is done, given what its barrier operation returned.
+///
+/// # Safety
+///
+/// `participant` must point to a participant this process alone uses,
+/// zeroed before its first step; `counters` as for [`tess_build_report`];
+/// `action` must point to a writable code; `status` as for every entry
+/// point.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tess_build_step(
+    participant: *mut Participant,
+    counters: *mut u64,
+    reply: u32,
+    action: *mut u32,
+    status: *mut Status,
+) -> Code {
+    // SAFETY: the caller's contract.
+    unsafe {
+        guard(status, || {
+            let participant = participant.as_mut().context("a null participant")?;
+            let counters = build_counters(counters)?;
+            let next = participant.step(&counters, reply)?;
+            *action.as_mut().context("a null action")? = next as u32;
+            Ok(())
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{TableKey, TableRecord, TableStats};
+
+    #[test]
+    fn a_participant_is_three_words_of_four_bytes() {
+        assert_eq!(size_of::<tessera_kernels::table::phases::Participant>(), 12);
+        assert_eq!(align_of::<tessera_kernels::table::phases::Participant>(), 4);
+    }
 
     #[test]
     fn layouts_match_the_header() {

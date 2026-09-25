@@ -40,4 +40,8 @@ const TessKernelOps tess_kernel_ops = {
 	.table_try_build_bloom = tess_table_try_build_bloom,
 	.bloom_shared_ready = tess_bloom_shared_ready,
 	.bloom_shared_probe = tess_bloom_shared_probe,
+	.build_counters_init = tess_build_counters_init,
+	.build_report = tess_build_report,
+	.build_totals = tess_build_totals,
+	.build_step = tess_build_step,
 };
