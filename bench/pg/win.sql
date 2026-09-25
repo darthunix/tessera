@@ -142,6 +142,18 @@ SELECT pg_temp.measure_pair('case_filter',
     format('SELECT count(*) FROM bench_narrow WHERE CASE WHEN c1 < %s THEN c2 ELSE c3 END %% 2 = 0',
            1000000 * :scale),
     :repetitions);
+-- GROUP BY over a table of groups: ten groups, a hundred thousand, and a
+-- thousand over a filter that keeps half the rows.
+SELECT pg_temp.measure_pair('group_few',
+    'SELECT c1 % 10, count(*), sum(c2) FROM bench_narrow GROUP BY 1',
+    :repetitions);
+SELECT pg_temp.measure_pair('group_many',
+    'SELECT c1 % 100000, count(*), max(c3) FROM bench_narrow GROUP BY 1',
+    :repetitions);
+SELECT pg_temp.measure_pair('group_filter',
+    format('SELECT c2 %% 1000, count(*), sum(c3) FROM bench_narrow WHERE c1 > %s GROUP BY 1',
+           1000000 * :scale),
+    :repetitions);
 -- An integer column against a bigint constant: a cross-type comparison;
 -- half the rows pass.
 SELECT pg_temp.measure_pair('int4_bigint',
@@ -184,6 +196,9 @@ EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE on_ei
 EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE on_in_list;
 EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE on_case_sum;
 EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE on_case_filter;
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE on_group_few;
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE on_group_many;
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE on_group_filter;
 SET tessera.enable = off;
 EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE off_nothing;
 EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE off_sparse;
@@ -205,5 +220,8 @@ EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE off_e
 EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE off_in_list;
 EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE off_case_sum;
 EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE off_case_filter;
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE off_group_few;
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE off_group_many;
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE off_group_filter;
 \o
 DEALLOCATE ALL;
