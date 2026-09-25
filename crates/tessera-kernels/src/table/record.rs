@@ -194,11 +194,36 @@ impl<'r, R: Region> Access<'r, R> {
     #[inline(always)]
     pub(super) unsafe fn open(&self, offset: u32) -> Result<View<'r>> {
         // SAFETY: `place` accepted the offset, the caller promises.
-        let view = unsafe { self.view(placement(offset)) };
+        unsafe { self.open_at(self.spot(placement(offset)), offset) }
+    }
+
+    /// The record at `offset`, whose spot the caller resolved, as
+    /// [`Self::open`] gives it.
+    ///
+    /// # Safety
+    ///
+    /// [`Self::place`] accepted `offset` during this operation, and `spot`
+    /// is the spot of that place.
+    #[inline(always)]
+    pub(super) unsafe fn open_at(&self, spot: R::Spot, offset: u32) -> Result<View<'r>> {
+        // SAFETY: the caller's contract.
+        let view = unsafe { self.view_at(spot) };
         if view.len() != self.record_size {
             return Err(misplaced(offset));
         }
         Ok(view)
+    }
+
+    /// The spot of a place.
+    ///
+    /// # Safety
+    ///
+    /// [`Self::place`] accepted the place, or it lies below its chunk's
+    /// used mark.
+    #[inline(always)]
+    pub(super) unsafe fn spot(&self, (chunk, byte): Place) -> R::Spot {
+        // SAFETY: the caller's contract.
+        unsafe { self.region.spot(chunk, byte) }
     }
 
     /// Hint that the bucket of a hash will be read soon.
@@ -207,10 +232,10 @@ impl<'r, R: Region> Access<'r, R> {
         self.region.prefetch(self.bucket(hash));
     }
 
-    /// Hint that the record at a place will be read soon.
+    /// Hint that the record at a spot will be read soon.
     #[inline(always)]
-    pub(super) fn prefetch_record(&self, (chunk, byte): Place) {
-        self.region.prefetch_record(chunk, byte);
+    pub(super) fn prefetch_record(&self, spot: R::Spot) {
+        self.region.prefetch_record(spot);
     }
 
     /// The record count as last read.
@@ -239,11 +264,22 @@ impl<'r, R: Region> Access<'r, R> {
     /// The record lies within its chunk, as `place` checks, and is
     /// published, or the caller is its chunk's one writer.
     #[inline(always)]
-    pub(super) unsafe fn view(&self, (chunk, byte): Place) -> View<'r> {
+    pub(super) unsafe fn view(&self, place: Place) -> View<'r> {
+        // SAFETY: the caller's contract.
+        unsafe { self.view_at(self.spot(place)) }
+    }
+
+    /// The record at a spot, as [`Self::view`] gives it.
+    ///
+    /// # Safety
+    ///
+    /// As [`Self::view`], for the place of the spot.
+    #[inline(always)]
+    pub(super) unsafe fn view_at(&self, spot: R::Spot) -> View<'r> {
         let (nkeys, payload_size) = (self.nkeys, self.payload_size);
         // SAFETY: the caller's contract: a located record lies within its
         // chunk and is never written again once published.
-        let bytes = unsafe { self.region.record(chunk, byte, self.record_size) };
+        let bytes = unsafe { self.region.record(spot, self.record_size) };
         // SAFETY: the header checked that the record size is the 16 bytes
         // of the record header, 8 per key and the payload, rounded up, so
         // the three parts lie within `bytes`; the record starts at a
@@ -368,7 +404,10 @@ impl<'r, R: Region> Access<'r, R> {
         debug_assert!(N == 0 || N == self.nkeys);
         // SAFETY: the caller's contract: the record lies within the chunk,
         // past its used mark, and nothing else reads or writes it yet.
-        let bytes = unsafe { self.region.record_mut(chunk, byte, record_size) };
+        let bytes = unsafe {
+            self.region
+                .record_mut(self.region.spot(chunk, byte), record_size)
+        };
         // SAFETY: the caller's contract on `keys`, `N` and `T`.
         unsafe { fill::<N, T>(bytes, self.nkeys, hash, keys, bit, payload) };
     }
@@ -457,14 +496,26 @@ impl<'r, R: Region> Access<'r, R> {
     /// The record at `place`, whose reference is `offset`, lies within its
     /// chunk and is not published yet, and no one else publishes it.
     #[inline]
-    pub(super) unsafe fn push(&self, offset: u32, (chunk, byte): Place, hash: u32) {
+    pub(super) unsafe fn push(&self, offset: u32, place: Place, hash: u32) {
+        // SAFETY: the caller's contract.
+        unsafe { self.push_at(offset, self.spot(place), hash) }
+    }
+
+    /// As [`Self::push`], for the record at a spot the caller resolved.
+    ///
+    /// # Safety
+    ///
+    /// As [`Self::push`], `spot` being the record's.
+    #[inline(always)]
+    pub(super) unsafe fn push_at(&self, offset: u32, spot: R::Spot, hash: u32) {
         let bucket = self.bucket(hash);
+        let next = R::advance(spot, NEXT);
         // SAFETY: the bucket lies in the bucket array, as in `head`, and
         // the next field in the record, the caller's alone until published.
         unsafe {
             let mut head = self.region.load_u32_in(bucket);
             loop {
-                self.region.store_next(chunk, byte + NEXT, head);
+                self.region.store_next(next, head);
                 match self.region.cas_u32_in(bucket, head, offset) {
                     Ok(_) => return,
                     Err(found) => head = found,
@@ -488,10 +539,11 @@ impl<'r, R: Region> Access<'r, R> {
         // SAFETY: both next fields lie in records within their chunks, and
         // nothing else reads or writes the table meanwhile.
         unsafe {
-            let next = self.region.load_next(after_chunk, after_byte + NEXT);
-            self.region.store_next(chunk, byte + NEXT, next);
+            let after = self.region.spot(after_chunk, after_byte + NEXT);
+            let next = self.region.load_next(after);
             self.region
-                .store_next(after_chunk, after_byte + NEXT, offset);
+                .store_next(self.region.spot(chunk, byte + NEXT), next);
+            self.region.store_next(after, offset);
         }
     }
 

@@ -180,15 +180,19 @@ pub(super) fn link<R: Region>(
     let mut access = Access::new(region, layout);
     let bytes = unlinked(&access, chunk, *from)?;
     let count = bytes.len();
+    let end = *from + count * access.record_size();
     access.count(count);
+    // The chunk resolved once: a store into a record may not reload it.
+    // SAFETY: `unlinked` checked the chunk and its used mark.
+    let first = unsafe { region.spot(chunk, 0) };
     for byte in bytes {
-        let place = (chunk, byte);
-        let hash = check_record(&access, place)?;
-        // SAFETY: the record lies in the chunk, below its used mark, and
-        // the caller alone links this chunk.
-        unsafe { access.push(access.reference(place), place, hash) };
-        *from = byte + access.record_size();
+        let spot = R::advance(first, byte);
+        // SAFETY: the record lies in the chunk, below its used mark.
+        let hash = unsafe { check_record_at(&access, spot, (chunk, byte)) }?;
+        // SAFETY: as above, and the caller alone links this chunk.
+        unsafe { access.push_at(access.reference((chunk, byte)), spot, hash) };
     }
+    *from = end;
     Ok(count)
 }
 
@@ -215,7 +219,22 @@ pub(super) fn unlinked<R: Region>(
 pub(super) fn check_record<R: Region>(access: &Access<'_, R>, place: Place) -> Result<u32> {
     // SAFETY: the place lies below the chunk's used mark, which `room`
     // checked against its length; the caller wrote it or it is published.
-    let view = unsafe { access.view(place) };
+    unsafe { check_record_at(access, access.spot(place), place) }
+}
+
+/// As [`check_record`], for the record at a spot the caller resolved.
+///
+/// # Safety
+///
+/// `spot` is the spot of `place`, which lies below its chunk's used mark.
+#[inline(always)]
+pub(super) unsafe fn check_record_at<R: Region>(
+    access: &Access<'_, R>,
+    spot: R::Spot,
+    place: Place,
+) -> Result<u32> {
+    // SAFETY: the caller's contract; the record is written or published.
+    let view = unsafe { access.view_at(spot) };
     ensure!(
         view.len() == access.record_size(),
         "table chunk {} holds no record at byte {}",
@@ -314,20 +333,23 @@ fn probe_rows<R: Region, K: KeySource + ?Sized, const N: usize, const T: usize, 
 pub(super) const VERTICAL_MIN_ROWS: u32 = 8;
 
 /// The per-row arrays of a word's vertical probe, indexed by row within
-/// the word: the rows' hashes and the records each row is at. A probe
-/// writes a row's entries before it reads them, for the selected rows
-/// only, so the arrays start uninitialized and are never cleared.
-pub(super) struct Lanes {
+/// the word: the rows' hashes, the records each row is at, and their
+/// spots, resolved once per step for both the hint and the comparison. A
+/// probe writes a row's entries before it reads them, for the selected
+/// rows only, so the arrays start uninitialized and are never cleared.
+pub(super) struct Lanes<S: Copy> {
     hash: [MaybeUninit<u32>; 64],
     current: [MaybeUninit<u32>; 64],
+    spot: [MaybeUninit<S>; 64],
 }
 
-impl Lanes {
+impl<S: Copy> Lanes<S> {
     #[inline(always)]
     pub(super) fn new() -> Self {
         Self {
             hash: [MaybeUninit::uninit(); 64],
             current: [MaybeUninit::uninit(); 64],
+            spot: [MaybeUninit::uninit(); 64],
         }
     }
 }
@@ -362,7 +384,7 @@ pub(super) fn probe_word<R: Region, const N: usize>(
     hashes: &[u32],
     selected: u64,
     matches: &mut [u32],
-    lanes: &mut Lanes,
+    lanes: &mut Lanes<R::Spot>,
 ) -> Result<u64> {
     for bit in rows_of(selected) {
         let hash = hashes[bit];
@@ -385,13 +407,17 @@ pub(super) fn probe_word<R: Region, const N: usize>(
         steps += 1;
         for bit in rows_of(pending) {
             let place = access.place(unsafe { lanes.current[bit].assume_init() })?;
-            access.prefetch_record(place);
+            // SAFETY: `place` accepted it.
+            let spot = unsafe { access.spot(place) };
+            lanes.spot[bit].write(spot);
+            access.prefetch_record(spot);
         }
         let mut rest = 0;
         for bit in rows_of(pending) {
             let offset = unsafe { lanes.current[bit].assume_init() };
-            // SAFETY: `place` accepted every offset of `pending` above.
-            let record = unsafe { access.open(offset) }?;
+            // SAFETY: `place` accepted every offset of `pending` above,
+            // and the loop above resolved its spot.
+            let record = unsafe { access.open_at(lanes.spot[bit].assume_init(), offset) }?;
             // SAFETY: the record is this table's, whose key count the
             // buffer was made for and `N` is 0 or.
             let hash = unsafe { lanes.hash[bit].assume_init() };

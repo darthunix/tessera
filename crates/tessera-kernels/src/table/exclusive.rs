@@ -241,7 +241,7 @@ pub(super) fn payload_mut<'r, R: Region>(
     let start = byte + RECORD_HEADER + layout.nkeys * KEY_SLOT;
     // SAFETY: the caller has the table to itself, and the payload lies
     // within a record that `locate` accepted.
-    Ok(unsafe { region.record_mut(chunk, start, layout.payload_size) })
+    Ok(unsafe { region.record_mut(region.spot(chunk, start), layout.payload_size) })
 }
 
 /// Visit the records from `cursor` on, chunk by chunk and in the order
@@ -382,7 +382,7 @@ fn payload_at<'r, R: Region>(
     // SAFETY: the caller has the table to itself, and the payload lies
     // within a record that `locate` accepted; the slice is dropped before
     // the next row's is made.
-    Ok(unsafe { region.record_mut(chunk, start, layout.payload_size) })
+    Ok(unsafe { region.record_mut(region.spot(chunk, start), layout.payload_size) })
 }
 
 #[inline(always)]

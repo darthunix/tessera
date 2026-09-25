@@ -250,27 +250,38 @@ impl Region for LoomRegion {
         unsafe { self.address(chunk, 0).cast::<u64>().write(used) }
     }
 
-    unsafe fn record(&self, chunk: usize, byte: usize, len: usize) -> &[u8] {
+    type Spot = (usize, usize);
+
+    unsafe fn spot(&self, chunk: usize, byte: usize) -> (usize, usize) {
+        assert!(chunk < self.chunks.len() && byte <= self.chunk_len);
+        (chunk, byte)
+    }
+
+    fn advance((chunk, byte): (usize, usize), bytes: usize) -> (usize, usize) {
+        (chunk, byte + bytes)
+    }
+
+    unsafe fn record(&self, (chunk, byte): (usize, usize), len: usize) -> &[u8] {
         // SAFETY: within the chunk, the cells checked.
         unsafe { core::slice::from_raw_parts(self.read(chunk, byte, len), len) }
     }
 
-    unsafe fn record_mut(&self, chunk: usize, byte: usize, len: usize) -> &mut [u8] {
+    unsafe fn record_mut(&self, (chunk, byte): (usize, usize), len: usize) -> &mut [u8] {
         // SAFETY: as in `record`.
         unsafe { core::slice::from_raw_parts_mut(self.write(chunk, byte, len), len) }
     }
 
-    unsafe fn load_next(&self, chunk: usize, byte: usize) -> u32 {
+    unsafe fn load_next(&self, (chunk, byte): (usize, usize)) -> u32 {
         // SAFETY: four bytes of a record, aligned to 4.
         unsafe { self.read(chunk, byte, 4).cast::<u32>().read() }
     }
 
-    unsafe fn store_next(&self, chunk: usize, byte: usize, value: u32) {
+    unsafe fn store_next(&self, (chunk, byte): (usize, usize), value: u32) {
         // SAFETY: as in `load_next`.
         unsafe { self.write(chunk, byte, 4).cast::<u32>().write(value) }
     }
 
-    fn prefetch_record(&self, _chunk: usize, _byte: usize) {}
+    fn prefetch_record(&self, _spot: (usize, usize)) {}
 }
 
 /// Every row hashes to one bucket, so that the participants race for its

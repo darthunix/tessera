@@ -121,43 +121,57 @@ pub(super) trait Region {
     /// As [`Self::chunk_used`], and the caller is the chunk's one writer.
     unsafe fn set_chunk_used(&self, chunk: usize, used: u64);
 
-    /// Borrow `len` bytes at `byte` of a chunk for reading.
+    /// A byte of a chunk as this process reaches it: its address over
+    /// real memory, its chunk and byte in the model. A loop that visits a
+    /// record twice, or the records of one chunk, resolves the chunk once.
+    type Spot: Copy;
+
+    /// The spot at `byte` of a chunk.
     ///
     /// # Safety
     ///
-    /// `byte + len` is within the chunk, and nothing writes these bytes
+    /// `chunk` is below [`Self::chunks`] and `byte` within its length.
+    unsafe fn spot(&self, chunk: usize, byte: usize) -> Self::Spot;
+
+    /// The spot `bytes` further on in the same chunk.
+    fn advance(spot: Self::Spot, bytes: usize) -> Self::Spot;
+
+    /// Borrow `len` bytes at a spot for reading.
+    ///
+    /// # Safety
+    ///
+    /// The `len` bytes lie within the spot's chunk, and nothing writes them
     /// while the slice lives: they hold a published record, or the caller
     /// is the chunk's one writer.
-    unsafe fn record(&self, chunk: usize, byte: usize, len: usize) -> &[u8];
+    unsafe fn record(&self, spot: Self::Spot, len: usize) -> &[u8];
 
-    /// Borrow `len` bytes at `byte` of a chunk for writing.
+    /// Borrow `len` bytes at a spot for writing.
     ///
     /// # Safety
     ///
-    /// `byte + len` is within the chunk, and nothing else reads or writes
-    /// these bytes while the slice lives: the record is not published yet,
-    /// or the caller has exclusive use of the table.
+    /// The `len` bytes lie within the spot's chunk, and nothing else reads
+    /// or writes them while the slice lives: the record is not published
+    /// yet, or the caller has exclusive use of the table.
     #[allow(clippy::mut_from_ref)]
-    unsafe fn record_mut(&self, chunk: usize, byte: usize, len: usize) -> &mut [u8];
+    unsafe fn record_mut(&self, spot: Self::Spot, len: usize) -> &mut [u8];
 
-    /// Read the 32-bit word at `byte` of a chunk: a record's next field.
+    /// Read the 32-bit word at a spot: a record's next field.
     ///
     /// # Safety
     ///
-    /// As [`Self::record`] for 4 bytes.
-    unsafe fn load_next(&self, chunk: usize, byte: usize) -> u32;
+    /// As [`Self::record`] for 4 bytes aligned to 4.
+    unsafe fn load_next(&self, spot: Self::Spot) -> u32;
 
-    /// Write the 32-bit word at `byte` of a chunk: a record's next field,
-    /// before the record is published or under the table's one writer.
+    /// Write the 32-bit word at a spot: a record's next field, before the
+    /// record is published or under the table's one writer.
     ///
     /// # Safety
     ///
-    /// As [`Self::record_mut`] for 4 bytes.
-    unsafe fn store_next(&self, chunk: usize, byte: usize, value: u32);
+    /// As [`Self::record_mut`] for 4 bytes aligned to 4.
+    unsafe fn store_next(&self, spot: Self::Spot, value: u32);
 
-    /// Hint that the cache line at `byte` of a chunk will be read soon;
-    /// any values are allowed.
-    fn prefetch_record(&self, chunk: usize, byte: usize);
+    /// Hint that the cache line at a spot will be read soon.
+    fn prefetch_record(&self, spot: Self::Spot);
 }
 
 /// An index and its chunks over the caller's memory.
@@ -366,37 +380,46 @@ impl Region for RawRegion {
         unsafe { self.chunk_at(chunk, 0, 8).cast::<u64>().write(used) }
     }
 
+    type Spot = *mut u8;
+
     #[inline(always)]
-    unsafe fn record(&self, chunk: usize, byte: usize, len: usize) -> &[u8] {
+    unsafe fn spot(&self, chunk: usize, byte: usize) -> *mut u8 {
         // SAFETY: the caller's contract.
-        unsafe { core::slice::from_raw_parts(self.chunk_at(chunk, byte, len), len) }
+        unsafe { self.chunk_at(chunk, byte, 0) }
     }
 
     #[inline(always)]
-    unsafe fn record_mut(&self, chunk: usize, byte: usize, len: usize) -> &mut [u8] {
-        // SAFETY: the caller's contract.
-        unsafe { core::slice::from_raw_parts_mut(self.chunk_at(chunk, byte, len), len) }
+    fn advance(spot: *mut u8, bytes: usize) -> *mut u8 {
+        spot.wrapping_add(bytes)
     }
 
     #[inline(always)]
-    unsafe fn load_next(&self, chunk: usize, byte: usize) -> u32 {
+    unsafe fn record(&self, spot: *mut u8, len: usize) -> &[u8] {
+        // SAFETY: the caller's contract.
+        unsafe { core::slice::from_raw_parts(spot, len) }
+    }
+
+    #[inline(always)]
+    unsafe fn record_mut(&self, spot: *mut u8, len: usize) -> &mut [u8] {
+        // SAFETY: the caller's contract.
+        unsafe { core::slice::from_raw_parts_mut(spot, len) }
+    }
+
+    #[inline(always)]
+    unsafe fn load_next(&self, spot: *mut u8) -> u32 {
         // SAFETY: the caller's contract; records start at multiples of 8,
         // their next field 4 bytes in, so the word is aligned.
-        unsafe { self.chunk_at(chunk, byte, 4).cast::<u32>().read() }
+        unsafe { spot.cast::<u32>().read() }
     }
 
     #[inline(always)]
-    unsafe fn store_next(&self, chunk: usize, byte: usize, value: u32) {
+    unsafe fn store_next(&self, spot: *mut u8, value: u32) {
         // SAFETY: as for `load_next`.
-        unsafe { self.chunk_at(chunk, byte, 4).cast::<u32>().write(value) }
+        unsafe { spot.cast::<u32>().write(value) }
     }
 
     #[inline(always)]
-    fn prefetch_record(&self, chunk: usize, byte: usize) {
-        if chunk < self.nchunks {
-            // SAFETY: the chunk exists; the address is only a hint.
-            let base = unsafe { *self.chunk_bases.add(chunk) };
-            super::lanes::prefetch(base.wrapping_add(byte));
-        }
+    fn prefetch_record(&self, spot: *mut u8) {
+        super::lanes::prefetch(spot);
     }
 }
