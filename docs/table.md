@@ -170,6 +170,34 @@ A walk reads every record below the used mark, which an insertion in
 flight would have reserved but not written; that is why it belongs to the
 one writer.
 
+## A Bloom filter of the keys
+
+A probe that finds no record still reads a bucket, and a record too when
+the bucket holds another key; on a table past the cache these are cache
+misses. A join whose rows mostly find no pair can check them first against
+a Bloom filter of the table's keys, which rejects most of those rows
+without touching the table. The filter is a blocked one: one 64-bit word
+per key, four bits in it, both taken from the row hash (the same hash the
+table uses, with every key and the NULL policy) multiplied by
+`0x9E3779B97F4A7C15`, the word from the high bits of the product and the
+bits from its low 24, so the word does not repeat the bucket index. A
+check reads one word and compares it with a four-bit mask. The size is a
+power of two words, 16 bits per record, which lets about 1 % of absent
+keys through; a key of the table always passes.
+
+Like the table, the filter lives in a borrowed buffer of words with no
+process addresses in it, so it may later sit in shared memory next to a
+shared table:
+
+- `tess_table_bloom_words(records, &nwords, &status)` gives the size for
+  a number of records;
+- `tess_table_bloom(region, len, words, nwords, &status)` clears the
+  words and sets the bits of every record of the table; it walks the
+  records, so it belongs to the one writer, like a scan;
+- `tess_bloom_probe(words, nwords, hashes, &rows, &found, &status)` fills
+  `found` whole with the rows of `rows` whose bits are all set; the two
+  masks must not share words.
+
 ## Several participants
 
 Over shared memory, insertions may run in several processes at once, and
@@ -204,4 +232,8 @@ which checks the layout probes against `sizeof` and `offsetof` and runs a
 batch through creation, insertion, probing, grouping, growth by
 `repalloc` and the error statuses. The benchmark `table_int32`
 (`crates/tessera-capi/benches/README.md`) measures insertion, probes and
-find-or-insert on PMU counters against a chained table with plain stores.
+find-or-insert on PMU counters against a chained table with plain stores. The
+benchmark `table_large` adds a table past the cache, where the groups
+`hit`, `miss` and `occupied` also time the Bloom filter check alone
+(`bloom_probe`) and with the probe of the rows it passes
+(`bloom_then_probe`).

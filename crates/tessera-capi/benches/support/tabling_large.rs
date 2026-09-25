@@ -22,7 +22,7 @@
 use anyhow::{Result, ensure};
 use tessera_core::{ColumnView, RowMask, RowMaskView};
 use tessera_kernels::int32::murmurhash32;
-use tessera_kernels::table::{KeyKind, TableConfig, TableMut, region_size};
+use tessera_kernels::table::{KeyKind, TableConfig, TableMut, bloom, region_size};
 
 use crate::support::runner::Runner;
 
@@ -185,6 +185,9 @@ pub struct Setup {
     pub inserted: [u64; BATCH / 64],
     pub pending: [u64; BATCH / 64],
     pub matches: Vec<u32>,
+    /// A Bloom filter of the table's records, and the rows it passed.
+    pub filter: Vec<u64>,
+    pub passed: [u64; BATCH / 64],
 }
 
 impl Setup {
@@ -222,6 +225,8 @@ impl Setup {
                 );
             }
         }
+        let mut filter = vec![0; bloom::words_for(RECORDS as u64)?];
+        TableMut::exclusive(&mut words)?.bloom(&mut filter)?;
         let reference = Reference::new(&keys.inserted);
         Ok(Self {
             words,
@@ -235,6 +240,8 @@ impl Setup {
             inserted: [0; BATCH / 64],
             pending: [0; BATCH / 64],
             matches: vec![0; BATCH],
+            filter,
+            passed: [0; BATCH / 64],
         })
     }
 }
@@ -284,6 +291,39 @@ pub fn probe(setup: &mut Setup, batch: usize, kind: Kind) -> Result<()> {
     table.probe(hashes, &column[..], &all, &mut setup.matches, &mut found)
 }
 
+/// Check batch `batch` of a kind against the filter and, with `then`,
+/// look up only the rows it passed, as a join with the filter on does.
+#[inline(never)]
+pub fn bloom_probe(setup: &mut Setup, batch: usize, kind: Kind, then: bool) -> Result<()> {
+    let rows = batch * BATCH..(batch + 1) * BATCH;
+    let (keys, hashes) = match kind {
+        Kind::Present => (
+            &setup.keys.present[rows.clone()],
+            &setup.present_hashes[rows],
+        ),
+        Kind::Absent => (&setup.keys.absent[rows.clone()], &setup.absent_hashes[rows]),
+        Kind::Occupied => (
+            &setup.keys.occupied[rows.clone()],
+            &setup.occupied_hashes[rows],
+        ),
+    };
+    let all = RowMaskView::try_new(BATCH, &setup.all)?;
+    bloom::probe(
+        &setup.filter,
+        hashes,
+        &all,
+        &mut RowMask::try_new(BATCH, &mut setup.passed)?,
+    )?;
+    if !then {
+        return Ok(());
+    }
+    let column = [ColumnView::try_new(keys, None)?];
+    let table = TableMut::exclusive(&mut setup.words)?;
+    let passed = RowMaskView::try_new(BATCH, &setup.passed)?;
+    let mut found = RowMask::try_new(BATCH, &mut setup.found)?;
+    table.probe(hashes, &column[..], &passed, &mut setup.matches, &mut found)
+}
+
 /// Resolve batch `batch` of present keys to their records.
 #[inline(never)]
 pub fn resolve(setup: &mut Setup, batch: usize) -> Result<()> {
@@ -330,6 +370,11 @@ pub fn check(setup: &mut Setup) -> Result<()> {
         ensure!(
             setup.pending == [0; BATCH / 64] && setup.inserted == [0; BATCH / 64],
             "batch {batch}: find_or_insert created a record"
+        );
+        bloom_probe(setup, batch, Kind::Present, true)?;
+        ensure!(
+            setup.passed == setup.all && setup.found == setup.all,
+            "batch {batch}: the filter rejected a present key"
         );
         probe(setup, batch, Kind::Absent)?;
         ensure!(
@@ -391,6 +436,10 @@ pub fn bench(runner: &mut Runner) -> Result<()> {
         let batch = advance(&mut cursor);
         resolve(black_box(&mut setup), batch).unwrap()
     })?;
+    group.op("bloom_then_probe", || {
+        let batch = advance(&mut cursor);
+        bloom_probe(black_box(&mut setup), batch, Kind::Present, true).unwrap()
+    })?;
     group.op("reference", || {
         let batch = advance(&mut cursor);
         let rows = batch * BATCH..(batch + 1) * BATCH;
@@ -405,6 +454,14 @@ pub fn bench(runner: &mut Runner) -> Result<()> {
         let batch = advance(&mut cursor);
         probe(black_box(&mut setup), batch, Kind::Absent).unwrap()
     })?;
+    group.op("bloom_probe", || {
+        let batch = advance(&mut cursor);
+        bloom_probe(black_box(&mut setup), batch, Kind::Absent, false).unwrap()
+    })?;
+    group.op("bloom_then_probe", || {
+        let batch = advance(&mut cursor);
+        bloom_probe(black_box(&mut setup), batch, Kind::Absent, true).unwrap()
+    })?;
     group.op("reference", || {
         let batch = advance(&mut cursor);
         let rows = batch * BATCH..(batch + 1) * BATCH;
@@ -417,6 +474,10 @@ pub fn bench(runner: &mut Runner) -> Result<()> {
     group.op("probe_miss", || {
         let batch = advance(&mut cursor);
         probe(black_box(&mut setup), batch, Kind::Occupied).unwrap()
+    })?;
+    group.op("bloom_then_probe", || {
+        let batch = advance(&mut cursor);
+        bloom_probe(black_box(&mut setup), batch, Kind::Occupied, true).unwrap()
     })?;
     group.op("reference", || {
         let batch = advance(&mut cursor);

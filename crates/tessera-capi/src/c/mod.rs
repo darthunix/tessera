@@ -34,9 +34,10 @@ pub use int64::{
 pub use mask::Mask;
 pub use status::{Code, MESSAGE_SIZE, Status};
 pub use table::{
-    TableKey, TableKeys, TableRecord, TableStats, tess_table_accumulate, tess_table_attach,
-    tess_table_create, tess_table_find_or_insert, tess_table_format_version, tess_table_gather,
-    tess_table_gather_key, tess_table_grow, tess_table_insert, tess_table_insert_grouped,
-    tess_table_layout, tess_table_next_in_group, tess_table_next_match, tess_table_payload,
-    tess_table_probe, tess_table_record, tess_table_scan, tess_table_size, tess_table_stats,
+    TableKey, TableKeys, TableRecord, TableStats, tess_bloom_probe, tess_table_accumulate,
+    tess_table_attach, tess_table_bloom, tess_table_bloom_words, tess_table_create,
+    tess_table_find_or_insert, tess_table_format_version, tess_table_gather, tess_table_gather_key,
+    tess_table_grow, tess_table_insert, tess_table_insert_grouped, tess_table_layout,
+    tess_table_next_in_group, tess_table_next_match, tess_table_payload, tess_table_probe,
+    tess_table_record, tess_table_scan, tess_table_size, tess_table_stats,
 };

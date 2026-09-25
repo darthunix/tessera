@@ -341,6 +341,38 @@ extern TessStatusCode tess_table_gather_key(const void *region,
 											TessStatus *status);
 
 /*
+ * A Bloom filter of a table's records, which a join checks a batch of
+ * probe rows against before it looks them up: a row the filter rejects
+ * has no record with its hash. The filter is a buffer of words the caller
+ * owns, a power of two of them, with no address inside, like the region.
+ * Each hash sets four bits of one word; at 16 bits per record about one
+ * absent key in a hundred gets through. See docs/table.md.
+ */
+
+/* The words of a filter for a table of records records. */
+extern TessStatusCode tess_table_bloom_words(uint64 records, Size *nwords,
+											 TessStatus *status);
+
+/*
+ * Clear the nwords words at words and set the bits of every record of the
+ * table: no insertion may run at the same time, as for a walk.
+ */
+extern TessStatusCode tess_table_bloom(const void *region, Size len,
+									   uint64 *words, Size nwords,
+									   TessStatus *status);
+
+/*
+ * The rows of rows whose hash has all its bits in the filter, into found,
+ * which this call fills whole; hashes has a hash per row. rows and found
+ * must not share their words.
+ */
+extern TessStatusCode tess_bloom_probe(const uint64 *words, Size nwords,
+									   const uint32 *hashes,
+									   const TessRowMask *rows,
+									   TessRowMask *found,
+									   TessStatus *status);
+
+/*
  * The payload of the record at an offset, to change in place: payload_size
  * bytes valid until the region moves or the table grows.
  */

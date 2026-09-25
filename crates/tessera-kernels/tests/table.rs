@@ -5,7 +5,7 @@ use tessera_core::{ColumnReader, ColumnView, RowMask, RowMaskView};
 use tessera_kernels::int32::{self, NullKeys, hash_combine, murmurhash32};
 use tessera_kernels::ops::ArithmeticError;
 use tessera_kernels::table::{
-    Cursor, FORMAT_VERSION, Fold, KeyKind, KeySource, MAX_KEYS, Slot, TableConfig, TableMut,
+    Cursor, FORMAT_VERSION, Fold, KeyKind, KeySource, MAX_KEYS, Slot, TableConfig, TableMut, bloom,
     normalize_word, region_size,
 };
 
@@ -1618,5 +1618,113 @@ fn a_sum_past_the_bigint_range_fails_and_arguments_are_checked() -> Result<()> {
             .is_err()
     );
     assert!(table.count_rows(&offsets[..2], &rows, 8).is_err());
+    Ok(())
+}
+
+/// A table of `count` int4 keys 0, 3, 6, ... and a filter of its records.
+fn filtered_table(count: usize) -> Result<(Vec<u64>, Vec<u64>)> {
+    let keys: Vec<i32> = (0..count as i32).map(|key| key * 3).collect();
+    let hashes: Vec<u32> = keys.iter().map(|&key| hash_i32(key)).collect();
+    let mut words = words_for(&ONE_INT4, count.max(1) as u64)?;
+    let mut filter = vec![0; bloom::words_for(count as u64)?];
+    {
+        let mut table = TableMut::create_in(&mut words, &ONE_INT4, count.max(1) as u64)?;
+        if count > 0 {
+            let column = [ColumnView::try_new(&keys, None)?];
+            resolve_all(&mut table, &hashes, &column[..])?;
+        }
+        table.bloom(&mut filter)?;
+    }
+    Ok((words, filter))
+}
+
+fn probe_filter(filter: &[u64], hashes: &[u32]) -> Result<usize> {
+    let rows_words = all_rows(hashes.len());
+    let rows = RowMaskView::try_new(hashes.len(), &rows_words)?;
+    let mut found_words = vec![0; hashes.len().div_ceil(64)];
+    bloom::probe(
+        filter,
+        hashes,
+        &rows,
+        &mut RowMask::try_new(hashes.len(), &mut found_words)?,
+    )?;
+    Ok(found_words
+        .iter()
+        .map(|word| word.count_ones() as usize)
+        .sum())
+}
+
+#[test]
+fn a_filter_lets_every_key_through_and_few_others() -> Result<()> {
+    let count = 5000;
+    let (_, filter) = filtered_table(count)?;
+    assert_eq!(filter.len(), (count * 16).div_ceil(64).next_power_of_two());
+    let present: Vec<u32> = (0..count as i32).map(|key| hash_i32(key * 3)).collect();
+    assert_eq!(
+        probe_filter(&filter, &present)?,
+        count,
+        "no key of the table is rejected"
+    );
+    // Keys 1, 4, 7, ... are absent: about one in a hundred gets through.
+    let absent: Vec<u32> = (0..100_000).map(|key| hash_i32(key * 3 + 1)).collect();
+    let through = probe_filter(&filter, &absent)?;
+    assert!(through < 3000, "{through} of 100000 absent keys passed");
+    Ok(())
+}
+
+#[test]
+fn an_empty_table_rejects_everything_and_sizes_are_checked() -> Result<()> {
+    let (_, filter) = filtered_table(0)?;
+    assert_eq!(filter.len(), 1);
+    let hashes: Vec<u32> = (0..200).map(hash_i32).collect();
+    assert_eq!(probe_filter(&filter, &hashes)?, 0);
+    // Not a power of two, and hashes of another row count.
+    assert!(probe_filter(&[0; 3], &hashes).is_err());
+    let rows_words = all_rows(4);
+    let rows = RowMaskView::try_new(4, &rows_words)?;
+    let mut found = [0];
+    assert!(
+        bloom::probe(
+            &filter,
+            &[1, 2],
+            &rows,
+            &mut RowMask::try_new(4, &mut found)?
+        )
+        .is_err()
+    );
+    assert!(bloom::words_for(u64::MAX).is_err());
+    Ok(())
+}
+
+#[test]
+fn a_null_group_key_and_int8_keys_pass_their_filter() -> Result<()> {
+    // Keys 1, NULL, 2^40 under the grouping policy: the NULL's hash is the
+    // policy's constant.
+    let config = TableConfig {
+        keys: &[KeyKind::Int64],
+        payload_size: 8,
+    };
+    let values = [1_i64, 0, 1 << 40];
+    let non_null = [0b101_u64];
+    let column = [ColumnView::try_new(
+        &values,
+        Some(RowMaskView::try_new(3, &non_null)?),
+    )?];
+    let mut hashes = vec![0; 3];
+    let all = all_rows(3);
+    let mut valid = all.clone();
+    tessera_kernels::int64::hash(
+        &column[0],
+        &RowMaskView::try_new(3, &all)?,
+        NullKeys::Group,
+        &mut hashes,
+        &mut RowMask::try_new(3, &mut valid)?,
+    )?;
+    let mut words = words_for(&config, 4)?;
+    let mut filter = vec![0; bloom::words_for(3)?];
+    let mut table = TableMut::create_in(&mut words, &config, 4)?;
+    resolve_all(&mut table, &hashes, &column[..])?;
+    table.bloom(&mut filter)?;
+    assert_eq!(probe_filter(&filter, &hashes)?, 3);
     Ok(())
 }

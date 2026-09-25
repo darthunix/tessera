@@ -193,10 +193,23 @@ typedef struct TessKernelOps
 										Datum *values,
 										bool *isnull,
 										TessStatus *status);
+	/* tess_table_bloom_words */
+	TessStatusCode (*table_bloom_words) (uint64 records, Size *nwords,
+										 TessStatus *status);
+	/* tess_table_bloom */
+	TessStatusCode (*table_bloom) (const void *region, Size len,
+								   uint64 *words, Size nwords,
+								   TessStatus *status);
+	/* tess_bloom_probe */
+	TessStatusCode (*bloom_probe) (const uint64 *words, Size nwords,
+								   const uint32 *hashes,
+								   const TessRowMask *rows,
+								   TessRowMask *found,
+								   TessStatus *status);
 } TessKernelOps;
 
 #define TESS_KERNEL_OPS_MIN_SIZE \
-	TESS_ABI_SIZE_INCLUDING_FIELD(TessKernelOps, table_gather_key)
+	TESS_ABI_SIZE_INCLUDING_FIELD(TessKernelOps, bloom_probe)
 
 /*
  * The registry of the kernels: one table per backend, installed by the

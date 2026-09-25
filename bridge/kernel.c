@@ -40,7 +40,9 @@ validate_kernels(const TessKernelOps *ops)
 		ops->table_find_or_insert == NULL || ops->table_payload == NULL ||
 		ops->table_scan == NULL || ops->table_grow == NULL ||
 		ops->table_insert_grouped == NULL || ops->table_next_in_group == NULL ||
-		ops->table_accumulate == NULL || ops->table_gather_key == NULL)
+		ops->table_accumulate == NULL || ops->table_gather_key == NULL ||
+		ops->table_bloom_words == NULL || ops->table_bloom == NULL ||
+		ops->bloom_probe == NULL)
 		elog(ERROR, "Tessera kernels must provide every operation");
 }
 

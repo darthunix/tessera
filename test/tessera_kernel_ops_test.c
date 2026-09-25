@@ -38,6 +38,9 @@ static const TessKernelOps kernels = {
 	.table_next_in_group = tess_table_next_in_group,
 	.table_accumulate = tess_table_accumulate,
 	.table_gather_key = tess_table_gather_key,
+	.table_bloom_words = tess_table_bloom_words,
+	.table_bloom = tess_table_bloom,
+	.bloom_probe = tess_bloom_probe,
 };
 
 static const TessKernelRegistryOps *

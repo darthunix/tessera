@@ -870,6 +870,83 @@ pub unsafe extern "C" fn tess_table_gather_key(
     }
 }
 
+/// `tess_table_bloom_words`: the words of a Bloom filter for a table of
+/// `records` records.
+///
+/// # Safety
+///
+/// `nwords` must point to a writable size; `status` as for every entry
+/// point.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tess_table_bloom_words(
+    records: u64,
+    nwords: *mut usize,
+    status: *mut Status,
+) -> Code {
+    // SAFETY: the caller's contract.
+    unsafe {
+        guard(status, || {
+            let out = nwords.as_mut().context("a null result")?;
+            *out = tessera_kernels::table::bloom::words_for(records)?;
+            Ok(())
+        })
+    }
+}
+
+/// `tess_table_bloom`: fill a Bloom filter with the table's records.
+///
+/// # Safety
+///
+/// `region` as for [`Table::attach`] during the call, with no insertion
+/// running; `words` must point to `nwords` writable words that nothing
+/// else accesses; `status` as for every entry point.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tess_table_bloom(
+    region: *const u8,
+    len: usize,
+    words: *mut u64,
+    nwords: usize,
+    status: *mut Status,
+) -> Code {
+    // SAFETY: the caller's contract.
+    unsafe {
+        guard(status, || {
+            let table = Table::attach(region.cast_mut(), len)?;
+            let words = slots(words, nwords, "filter words")?;
+            table.bloom(words)
+        })
+    }
+}
+
+/// `tess_bloom_probe`: the rows of a batch whose hash the filter lets
+/// through.
+///
+/// # Safety
+///
+/// `words` must point to `nwords` initialized words; `rows` and `found`
+/// to valid masks of the same row count that do not overlap; `hashes` to
+/// a hash per row; `status` as for every entry point.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tess_bloom_probe(
+    words: *const u64,
+    nwords: usize,
+    hashes: *const u32,
+    rows: *const Mask,
+    found: *mut Mask,
+    status: *mut Status,
+) -> Code {
+    // SAFETY: the caller's contract.
+    unsafe {
+        guard(status, || {
+            let rows = rows.as_ref().context("a null row mask")?.view()?;
+            let mut found = found.as_mut().context("a null result mask")?.mask()?;
+            let words = values(words, nwords, "filter words")?;
+            let hashes = values(hashes, rows.nrows(), "hashes")?;
+            tessera_kernels::table::bloom::probe(words, hashes, &rows, &mut found)
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{TableKey, TableRecord, TableStats};

@@ -88,6 +88,7 @@
 #![allow(unsafe_code)]
 
 mod batch;
+pub mod bloom;
 mod exclusive;
 mod header;
 mod keys;
@@ -316,6 +317,14 @@ impl<'a> Table<'a> {
             values,
             nulls,
         )
+    }
+
+    /// Fill a Bloom filter of [`bloom::words_for`] this table's records
+    /// words (or any power of two) with the hash of every record, after
+    /// clearing it: a probe row it rejects has no record with its hash.
+    /// No insertion may run at the same time, as for a walk.
+    pub fn bloom(&self, words: &mut [u64]) -> Result<()> {
+        bloom::fill(&self.region, &self.layout, words)
     }
 
     /// The record at an offset a call of this table returned.

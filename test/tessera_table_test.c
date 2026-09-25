@@ -425,6 +425,24 @@ tessera_test_table_groups(PG_FUNCTION_ARGS)
 				nulls[key])
 				PG_RETURN_BOOL(false);
 		}
+		/* A filter of the ten records lets every row of the batch through. */
+		{
+			Size		nwords;
+			uint64	   *filter;
+			uint64		passed[NWORDS] = {0};
+			TessRowMask passed_mask = {NROWS, passed};
+
+			if (tess_table_bloom_words(10, &nwords, &status) != TESS_OK || nwords != 4)
+				PG_RETURN_BOOL(false);
+			filter = palloc0(sizeof(uint64) * nwords);
+			if (tess_table_bloom(region, size, filter, nwords, &status) != TESS_OK ||
+				tess_bloom_probe(filter, nwords, batch->hashes, &all, &passed_mask,
+								 &status) != TESS_OK ||
+				count_bits(passed) != NROWS ||
+				tess_bloom_probe(filter, 3, batch->hashes, &all, &passed_mask,
+								 &status) != TESS_ERROR_INVALID_ARGUMENT)
+				PG_RETURN_BOOL(false);
+		}
 		/* A word past the payload is refused. */
 		if (tess_table_accumulate(region, size, offsets, &all, TESS_TABLE_COUNT_ROWS,
 								  NULL, NULL, 8, 0, 0,

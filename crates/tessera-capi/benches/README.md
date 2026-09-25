@@ -31,7 +31,11 @@ The benchmark programs:
   from a ring, so that buckets and records come from memory: probes that
   hit, probes that miss and find-or-insert against the same plain chained
   table. Every key has a bucket of its own, so every call does the same
-  work and the instruction counts are exact.
+  work and the instruction counts are exact. The operations
+  `bloom_probe` and `bloom_then_probe` check a batch against the Bloom
+  filter of the table's keys, alone and followed by the probe of the rows
+  it passes; about 1 % of absent keys pass, so on misses the second one
+  varies a little from batch to batch.
 
 Neither measures SQL latency or requires PostgreSQL. They measure PMU
 counters, not time: retired instructions, core cycles, mispredicted branches
