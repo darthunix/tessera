@@ -124,6 +124,15 @@ SELECT pg_temp.measure_pair('tree',
 SELECT pg_temp.measure_pair('tree_sum',
     'SELECT sum(((c1 % 1000) + 1) * ((c2 % 1000) + 1)) FROM bench_narrow',
     :repetitions);
+-- An OR of two comparisons, the right one over the rows the left one did
+-- not keep; half the rows pass. A short IN list over a chain: four of ten.
+SELECT pg_temp.measure_pair('or',
+    format('SELECT count(*) FROM bench_narrow WHERE c1 < %s OR c2 > %s',
+           500000 * :scale, 1500000 * :scale),
+    :repetitions);
+SELECT pg_temp.measure_pair('in_list',
+    'SELECT count(*) FROM bench_narrow WHERE c1 % 10 IN (1, 3, 5, 7)',
+    :repetitions);
 -- An integer column against a bigint constant: a cross-type comparison;
 -- half the rows pass.
 SELECT pg_temp.measure_pair('int4_bigint',
@@ -162,6 +171,8 @@ EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE on_tw
 EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE on_tree;
 EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE on_tree_sum;
 EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE on_int4_bigint;
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE on_or;
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE on_in_list;
 SET tessera.enable = off;
 EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE off_nothing;
 EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE off_sparse;
@@ -179,5 +190,7 @@ EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE off_t
 EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE off_tree;
 EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE off_tree_sum;
 EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE off_int4_bigint;
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE off_or;
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE off_in_list;
 \o
 DEALLOCATE ALL;
