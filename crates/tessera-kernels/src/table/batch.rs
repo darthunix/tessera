@@ -9,7 +9,7 @@ use tessera_core::{RowMask, RowMaskView};
 
 use super::header::Layout;
 use super::keys::{KeySource, WordKeys, slot_buffer};
-use super::record::{Access, same_keys};
+use super::record::{Access, fill, same_keys, staged_fields};
 use super::region::Region;
 
 /// Call `$f` specialized for the common shapes of a table: one or two
@@ -80,6 +80,166 @@ pub(super) fn insert<R: Region, K: KeySource + ?Sized>(
         layout.tail_words(),
         insert_rows(region, layout, hashes, keys, payload, pending, offsets)
     )
+}
+
+/// Check that `payload` holds `payload_size` bytes for each of `nrows`
+/// rows.
+fn check_payload(payload: Option<&[u8]>, nrows: usize, payload_size: usize) -> Result<()> {
+    if let Some(payload) = payload {
+        ensure!(
+            nrows.checked_mul(payload_size) == Some(payload.len()),
+            "the payload has {} bytes, not {payload_size} per row of {nrows}",
+            payload.len()
+        );
+    }
+    Ok(())
+}
+
+/// Write the rows of `pending`, in row order, as records one after
+/// another into `buffer` from byte `*used` on, as long as whole records
+/// fit: written rows leave `pending` and `*used` moves past them. The
+/// records are the table's, with no next record, for
+/// [`insert_staged`] to add to a table of the same layout later. The count
+/// written is returned.
+pub(super) fn stage<K: KeySource + ?Sized>(
+    layout: &Layout,
+    buffer: &mut [u8],
+    used: &mut usize,
+    hashes: &[u32],
+    keys: &K,
+    payload: Option<&[u8]>,
+    pending: &mut RowMask<'_>,
+) -> Result<usize> {
+    let nrows = pending.as_view().nrows();
+    check(layout, keys, nrows, hashes.len(), nrows)?;
+    check_payload(payload, nrows, layout.payload_size)?;
+    ensure!(
+        *used <= buffer.len() && used.is_multiple_of(layout.record_size),
+        "a staging buffer of {} bytes cannot have {} used",
+        buffer.len(),
+        *used
+    );
+    shaped!(
+        layout.nkeys,
+        layout.tail_words(),
+        stage_rows(buffer, layout, used, hashes, keys, payload, pending)
+    )
+}
+
+/// The rows of [`stage`] for a table of `N` keys and `T` words after
+/// them, 0 for either when it is not one of the specialized shapes.
+#[inline(never)]
+fn stage_rows<
+    B: AsMut<[u8]> + ?Sized,
+    K: KeySource + ?Sized,
+    const N: usize,
+    const T: usize,
+    const L: usize,
+>(
+    buffer: &mut B,
+    layout: &Layout,
+    used: &mut usize,
+    hashes: &[u32],
+    keys: &K,
+    payload: Option<&[u8]>,
+    pending: &mut RowMask<'_>,
+) -> Result<usize> {
+    let buffer = buffer.as_mut();
+    let (record_size, payload_size) = (layout.record_size, layout.payload_size);
+    let nrows = pending.as_view().nrows();
+    let mut slots = slot_buffer::<L>();
+    let mut word_keys = WordKeys::new(&mut slots, layout.nkeys);
+    let mut staged = 0;
+    for index in 0..nrows.div_ceil(64) {
+        let selected = pending.as_view().word(index).unwrap();
+        if selected == 0 {
+            continue;
+        }
+        let room = (buffer.len() - *used) / record_size;
+        if room == 0 {
+            break;
+        }
+        word_keys.load(keys, index, selected)?;
+        let wanted = selected.count_ones() as usize;
+        let count = wanted.min(room);
+        let mut bits = selected;
+        let mut done = 0;
+        for _ in 0..count {
+            let bit = bits.trailing_zeros() as usize;
+            bits &= bits - 1;
+            let row = index * 64 + bit;
+            let row_payload =
+                payload.map(|payload| &payload[row * payload_size..(row + 1) * payload_size]);
+            let bytes = &mut buffer[*used..*used + record_size];
+            // SAFETY: the buffer was made for the table's key count, and
+            // `N` and `T` are 0 or the table's.
+            unsafe {
+                fill::<N, T>(
+                    bytes,
+                    layout.nkeys,
+                    hashes[row],
+                    &word_keys,
+                    bit,
+                    row_payload,
+                )
+            };
+            *used += record_size;
+            done |= 1 << bit;
+        }
+        pending.intersect_word(index, !done)?;
+        staged += count;
+        if count < wanted {
+            break;
+        }
+    }
+    Ok(staged)
+}
+
+/// Add the records [`stage`] wrote in `staged`, from byte `*consumed` on,
+/// to the table, as long as it has room: they are counted, copied in and
+/// published as [`insert`] does its rows, and `*consumed` moves past them.
+/// The count added is returned; records left over need a larger table.
+pub(super) fn insert_staged<R: Region>(
+    region: &R,
+    layout: &Layout,
+    staged: &[u8],
+    consumed: &mut usize,
+) -> Result<usize> {
+    let record_size = layout.record_size;
+    ensure!(
+        staged.len().is_multiple_of(record_size)
+            && consumed.is_multiple_of(record_size)
+            && *consumed <= staged.len(),
+        "{} staged bytes from byte {} are not whole records of {record_size} bytes",
+        staged.len(),
+        *consumed
+    );
+    for record in staged[*consumed..].chunks_exact(record_size) {
+        ensure!(
+            staged_fields(record).1 == record_size,
+            "a staged record is not one of this table's"
+        );
+    }
+    let mut access = Access::new(region, layout);
+    let mut inserted = 0;
+    while *consumed < staged.len() {
+        let wanted = (staged.len() - *consumed) / record_size;
+        let Some((start, count)) = access.reserve(wanted) else {
+            break;
+        };
+        // Counted before they are published, as in `insert`.
+        access.count(count);
+        let records = &staged[*consumed..*consumed + count * record_size];
+        // SAFETY: `start` begins the `count` records just reserved.
+        unsafe { access.copy_in(start, records) };
+        for (slot, record) in records.chunks_exact(record_size).enumerate() {
+            let byte = start + slot * record_size;
+            access.push((byte / 8) as u32, byte, staged_fields(record).0);
+        }
+        *consumed += count * record_size;
+        inserted += count;
+    }
+    Ok(inserted)
 }
 
 /// The rows of [`insert`] for a table of `N` keys and `T` words after

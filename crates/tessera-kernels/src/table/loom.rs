@@ -571,3 +571,74 @@ fn a_reader_sees_the_filter_whole_once_it_is_ready() {
 fn a_relaxed_state_lets_a_reader_see_an_unfilled_filter() {
     a_reader_sees_the_built_filter(true);
 }
+
+/// Stage `keys` into a buffer of the table's records, outside the table.
+fn staged(layout: &Layout, keys: &[i32]) -> Vec<u8> {
+    let nrows = keys.len();
+    let hashes = vec![HASH; nrows];
+    let columns = [ColumnView::try_new(keys, None).unwrap()];
+    let mut pending_bits = [(1u64 << nrows) - 1];
+    let mut pending = RowMask::try_new(nrows, &mut pending_bits).unwrap();
+    let payload = payload(keys);
+    let mut buffer = vec![0; nrows * layout.record_size];
+    let mut used = 0;
+    let count = batch::stage(
+        layout,
+        &mut buffer,
+        &mut used,
+        &hashes,
+        &columns[..],
+        Some(&payload),
+        &mut pending,
+    )
+    .unwrap();
+    assert_eq!((count, used), (nrows, buffer.len()));
+    buffer
+}
+
+/// Threads add their staged rows, or insert rows, into one bucket at once;
+/// then every key is found whole and the counts agree.
+fn concurrent_links(batches: &'static [(&'static [i32], bool)]) {
+    ::loom::model(move || {
+        let total: usize = batches.iter().map(|(keys, _)| keys.len()).sum();
+        let (region, layout) = table(total as u64, HEADS).unwrap();
+        let threads: Vec<_> = batches
+            .iter()
+            .map(|&(keys, stage)| {
+                let (region, layout) = (region.clone(), layout);
+                let buffer = stage.then(|| staged(&layout, keys));
+                thread::spawn(move || match buffer {
+                    Some(buffer) => {
+                        let mut consumed = 0;
+                        let added = batch::insert_staged(&*region, &layout, &buffer, &mut consumed)
+                            .unwrap();
+                        assert_eq!(consumed, buffer.len());
+                        added
+                    }
+                    None => insert(&region, &layout, keys).unwrap(),
+                })
+            })
+            .collect();
+        for (thread, (keys, _)) in threads.into_iter().zip(batches) {
+            assert_eq!(thread.join().unwrap(), keys.len());
+        }
+        assert_eq!(region.load_u64(NRECORDS), total as u64);
+        for (keys, _) in batches {
+            for (key, offset) in keys.iter().zip(probe(&region, &layout, keys).unwrap()) {
+                assert_ne!(offset, 0, "key {key} not found");
+                check_record(&region, &layout, offset, *key).unwrap();
+            }
+        }
+        assert_eq!(chain_and_walk(&region, &layout).unwrap(), (total, total));
+    });
+}
+
+#[test]
+fn two_participants_add_their_staged_rows_to_one_bucket() {
+    concurrent_links(&[(&[1, 2], true), (&[3, 4], true)]);
+}
+
+#[test]
+fn staged_rows_join_rows_inserted_at_the_same_time() {
+    concurrent_links(&[(&[1, 2], true), (&[3], false)]);
+}

@@ -1728,3 +1728,161 @@ fn a_null_group_key_and_int8_keys_pass_their_filter() -> Result<()> {
     assert_eq!(probe_filter(&filter, &hashes)?, 3);
     Ok(())
 }
+
+/// Stage every row of a batch into buffers of `buffer_words` words, as
+/// many as it takes: the buffers and the bytes each holds.
+fn stage_all<K: KeySource + ?Sized>(
+    table: &TableMut<'_>,
+    hashes: &[u32],
+    keys: &K,
+    payload: Option<&[u8]>,
+    buffer_words: usize,
+) -> Result<Vec<(Vec<u64>, usize)>> {
+    let nrows = hashes.len();
+    let mut pending_words = all_rows(nrows);
+    let mut pending = RowMask::try_new(nrows, &mut pending_words)?;
+    let mut buffers = Vec::new();
+    while pending.as_view().selected_count() > 0 {
+        let mut buffer = vec![0; buffer_words];
+        let mut used = 0;
+        let staged = table.stage(&mut buffer, &mut used, hashes, keys, payload, &mut pending)?;
+        assert!(staged > 0, "a fresh buffer takes at least one record");
+        buffers.push((buffer, used));
+    }
+    Ok(buffers)
+}
+
+#[test]
+fn staged_rows_join_a_table_as_inserted_ones_do() -> Result<()> {
+    let values: Vec<i32> = (0..200).collect();
+    let keys = [ColumnView::try_new(&values, None)?];
+    let hashes: Vec<u32> = values.iter().map(|&value| hash_i32(value)).collect();
+    let payload = payload_for(200);
+    let mut words = words_for(&ONE_INT4, 200)?;
+    let table = TableMut::create_in(&mut words, &ONE_INT4, 200)?;
+    // Buffers of 50 records of 32 bytes, filled across word boundaries.
+    let buffers = stage_all(&table, &hashes, &keys[..], Some(&payload), 50 * 4)?;
+    assert_eq!(buffers.len(), 4);
+    assert_eq!(table.stats().records, 0, "staging leaves the table alone");
+    for (buffer, used) in &buffers {
+        let mut consumed = 0;
+        assert_eq!(table.insert_staged(buffer, *used, &mut consumed)?, 50);
+        assert_eq!(consumed, *used);
+    }
+    assert_eq!(table.stats().records, 200);
+    let (found, matches) = probe_all(&table, &hashes, &keys[..])?;
+    assert_eq!(found, (0..200).collect::<Vec<_>>());
+    for (row, &offset) in matches.iter().enumerate() {
+        let record = table.record(offset)?;
+        assert_eq!(record.hash, hashes[row]);
+        assert_eq!(record.keys, &[row as i64]);
+        assert_eq!(record.payload, (row as u64 * 10).to_ne_bytes());
+    }
+    Ok(())
+}
+
+#[test]
+fn staged_rows_wait_for_room_and_keep_null_and_int8_keys() -> Result<()> {
+    let config = TableConfig {
+        keys: &[KeyKind::Int64, KeyKind::Int32],
+        payload_size: 0,
+    };
+    let big: Vec<i64> = (0..100).map(|row| (row as i64) << 40).collect();
+    let small: Vec<i32> = (0..100).collect();
+    let non_null = all_rows(100)
+        .iter()
+        .map(|word| word & !0b100)
+        .collect::<Vec<_>>();
+    let keys = Mixed(vec![
+        Key::Int8(ColumnView::try_new(&big, None)?),
+        Key::Int4(ColumnView::try_new(
+            &small,
+            Some(RowMaskView::try_new(100, &non_null)?),
+        )?),
+    ]);
+    let hashes: Vec<u32> = big.iter().map(|&value| hash_i64(value)).collect();
+    // Room for 60 records: the staged 100 go in two calls around a grow.
+    let mut words = words_for(&config, 60)?;
+    let table = TableMut::create_in(&mut words, &config, 60)?;
+    let buffers = stage_all(&table, &hashes, &keys, None, 1000)?;
+    let [(buffer, used)] = buffers.as_slice() else {
+        panic!("one buffer holds all the rows");
+    };
+    let mut consumed = 0;
+    let first = table.insert_staged(buffer, *used, &mut consumed)?;
+    assert!(first < 100 && first > 0);
+    assert_eq!(consumed, first * 32);
+    words.resize(words_for(&config, 100)?.len(), 0);
+    let len = words.len() * 8;
+    let mut table = TableMut::exclusive(&mut words)?;
+    table.grow(len)?;
+    assert_eq!(
+        table.insert_staged(buffer, *used, &mut consumed)?,
+        100 - first
+    );
+    assert_eq!(consumed, *used);
+    let (found, matches) = probe_all(&table, &hashes, &keys)?;
+    assert_eq!(found, (0..100).collect::<Vec<_>>());
+    let record = table.record(matches[2])?;
+    assert_eq!(record.null_bits, 0b10, "row 2's int4 key is NULL");
+    assert_eq!(record.keys, &[2 << 40, 0]);
+    Ok(())
+}
+
+#[test]
+fn staging_and_adding_check_their_buffers() -> Result<()> {
+    let values: Vec<i32> = (0..10).collect();
+    let keys = [ColumnView::try_new(&values, None)?];
+    let hashes: Vec<u32> = values.iter().map(|&value| hash_i32(value)).collect();
+    let mut words = words_for(&ONE_INT4, 10)?;
+    let table = TableMut::create_in(&mut words, &ONE_INT4, 10)?;
+    let mut pending_words = all_rows(10);
+    let mut pending = RowMask::try_new(10, &mut pending_words)?;
+    let mut buffer = vec![0; 40];
+    // A used mark inside a record, and past the buffer.
+    for bad in [8, 400] {
+        let mut used = bad;
+        assert!(
+            table
+                .stage(
+                    &mut buffer,
+                    &mut used,
+                    &hashes,
+                    &keys[..],
+                    None,
+                    &mut pending
+                )
+                .is_err()
+        );
+    }
+    // A buffer of three records takes three rows and leaves seven pending.
+    let mut small = vec![0; 12];
+    let mut used = 0;
+    assert_eq!(
+        table.stage(
+            &mut small,
+            &mut used,
+            &hashes,
+            &keys[..],
+            None,
+            &mut pending
+        )?,
+        3
+    );
+    assert_eq!(pending.as_view().selected_count(), 7);
+    // Bytes that are not whole records, a consumed mark past them, and a
+    // record of another length.
+    let mut consumed = 0;
+    assert!(table.insert_staged(&small, 20, &mut consumed).is_err());
+    let mut consumed = 128;
+    assert!(table.insert_staged(&small, 96, &mut consumed).is_err());
+    small[1] = 1 << 32;
+    let mut consumed = 0;
+    assert!(table.insert_staged(&small, 96, &mut consumed).is_err());
+    assert_eq!(
+        table.stats().records,
+        0,
+        "no record goes in before the checks pass"
+    );
+    Ok(())
+}

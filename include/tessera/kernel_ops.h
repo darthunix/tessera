@@ -206,10 +206,44 @@ typedef struct TessKernelOps
 								   const TessRowMask *rows,
 								   TessRowMask *found,
 								   TessStatus *status);
+	/* tess_table_stage */
+	TessStatusCode (*table_stage) (const void *region, Size len,
+								   uint64 *buffer, Size nwords, Size *used,
+								   const uint32 *hashes, int nkeys,
+								   const TessTableKey *keys,
+								   const uint8 *payload,
+								   TessRowMask *pending,
+								   TessStatus *status);
+	/* tess_table_insert_staged */
+	TessStatusCode (*table_insert_staged) (void *region, Size len,
+										   const uint64 *buffer, Size used,
+										   Size *consumed,
+										   TessStatus *status);
+	/* tess_bloom_shared_words */
+	TessStatusCode (*bloom_shared_words) (uint64 records, Size *nwords,
+										  TessStatus *status);
+	/* tess_bloom_shared_init */
+	TessStatusCode (*bloom_shared_init) (uint64 *words, Size nwords,
+										 TessStatus *status);
+	/* tess_table_try_build_bloom */
+	TessStatusCode (*table_try_build_bloom) (const void *region, Size len,
+											 uint64 *words, Size nwords,
+											 bool *built,
+											 TessStatus *status);
+	/* tess_bloom_shared_ready */
+	TessStatusCode (*bloom_shared_ready) (uint64 *words, Size nwords,
+										  bool *ready,
+										  TessStatus *status);
+	/* tess_bloom_shared_probe */
+	TessStatusCode (*bloom_shared_probe) (uint64 *words, Size nwords,
+										  const uint32 *hashes,
+										  const TessRowMask *rows,
+										  TessRowMask *found,
+										  TessStatus *status);
 } TessKernelOps;
 
 #define TESS_KERNEL_OPS_MIN_SIZE \
-	TESS_ABI_SIZE_INCLUDING_FIELD(TessKernelOps, bloom_probe)
+	TESS_ABI_SIZE_INCLUDING_FIELD(TessKernelOps, bloom_shared_probe)
 
 /*
  * The registry of the kernels: one table per backend, installed by the

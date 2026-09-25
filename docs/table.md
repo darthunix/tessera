@@ -229,11 +229,28 @@ against the count. A published record never changes, except its payload
 under the one writer. The same code runs over local memory, where the
 compare-and-swaps never fail.
 
+A shared table cannot move to a larger region while others insert into
+it, so a participant that finds it full does not wait: it writes the rows
+left over as the table's records into staging buffers of its own and
+carries on, and once every participant has finished and the table has
+grown, each adds its buffers:
+
+- `tess_table_stage(region, len, buffer, nwords, &used, hashes, nkeys,
+  keys, payload, &pending, &status)` writes the pending rows as records,
+  with no next record, into the words at `buffer` from byte `used` on, as
+  long as whole records fit; written rows leave `pending`;
+- `tess_table_insert_staged(region, len, buffer, used, &consumed,
+  &status)` adds a buffer's records from byte `consumed` on, as long as
+  the table has room: it reserves them with one compare-and-swap, counts
+  them, copies them in and publishes each, as an insertion does, so it may
+  run with other insertions.
+
 `make rust-loom` runs the table's own code over a model region of loom
 atomics (`crates/tessera-kernels/src/table/loom.rs`) with the orderings
 the real region uses: two and three threads inserting into one bucket,
 two records reserved at once per thread, a full table taking one record
-of two, and a probe that finds a record another thread is publishing and
+of two, staged records added by two threads at once or next to an
+insertion, and a probe that finds a record another thread is publishing and
 reads it whole. Every access to a record's bytes is announced to loom
 first, so a read not ordered after the writing is reported; a test with
 relaxed bucket heads checks that the model does report it. The model

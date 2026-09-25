@@ -41,6 +41,13 @@ static const TessKernelOps kernels = {
 	.table_bloom_words = tess_table_bloom_words,
 	.table_bloom = tess_table_bloom,
 	.bloom_probe = tess_bloom_probe,
+	.table_stage = tess_table_stage,
+	.table_insert_staged = tess_table_insert_staged,
+	.bloom_shared_words = tess_bloom_shared_words,
+	.bloom_shared_init = tess_bloom_shared_init,
+	.table_try_build_bloom = tess_table_try_build_bloom,
+	.bloom_shared_ready = tess_bloom_shared_ready,
+	.bloom_shared_probe = tess_bloom_shared_probe,
 };
 
 static const TessKernelRegistryOps *

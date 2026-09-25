@@ -165,6 +165,19 @@ unsafe fn init<R: Region>(region: &R, config: &TableConfig<'_>, capacity: u64) -
     Ok(layout)
 }
 
+/// The bytes of a buffer of words.
+fn words_as_bytes(words: &[u64]) -> &[u8] {
+    // SAFETY: any initialized `u64` is eight initialized bytes, and `u8`
+    // has no alignment requirement.
+    unsafe { core::slice::from_raw_parts(words.as_ptr().cast::<u8>(), words.len() * 8) }
+}
+
+/// The bytes of a buffer of words, to write.
+fn words_as_bytes_mut(words: &mut [u64]) -> &mut [u8] {
+    // SAFETY: as in `words_as_bytes`, and any bytes make a `u64`.
+    unsafe { core::slice::from_raw_parts_mut(words.as_mut_ptr().cast::<u8>(), words.len() * 8) }
+}
+
 /// Reject a region that could not hold a header.
 fn check_region(region: *mut u8, len: usize) -> Result<()> {
     ensure!(
@@ -245,6 +258,45 @@ impl<'a> Table<'a> {
             pending,
             offsets,
         )
+    }
+
+    /// Write the rows of `pending` as this table's records into `buffer`
+    /// from byte `*used` on, as long as whole records fit, for
+    /// [`Table::insert_staged`] to add later: a participant of a shared
+    /// build keeps there the rows a full table had no room for. Written
+    /// rows leave `pending`; the count written is returned.
+    pub fn stage<K: KeySource + ?Sized>(
+        &self,
+        buffer: &mut [u64],
+        used: &mut usize,
+        hashes: &[u32],
+        keys: &K,
+        payload: Option<&[u8]>,
+        pending: &mut RowMask<'_>,
+    ) -> Result<usize> {
+        batch::stage(
+            &self.layout,
+            words_as_bytes_mut(buffer),
+            used,
+            hashes,
+            keys,
+            payload,
+            pending,
+        )
+    }
+
+    /// Add the records [`Table::stage`] wrote in the first `used` bytes of
+    /// `buffer`, from byte `*consumed` on, as long as the table has room;
+    /// `*consumed` moves past them and the count added is returned.
+    pub fn insert_staged(
+        &self,
+        buffer: &[u64],
+        used: usize,
+        consumed: &mut usize,
+    ) -> Result<usize> {
+        let bytes = words_as_bytes(buffer);
+        ensure!(used <= bytes.len(), "{used} staged bytes exceed the buffer");
+        batch::insert_staged(&self.region, &self.layout, &bytes[..used], consumed)
     }
 
     /// Find the first record of its chain with the hash, null bits and

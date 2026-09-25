@@ -13,7 +13,7 @@ use anyhow::{Context, Result, bail, ensure};
 use tessera_core::ColumnReader;
 use tessera_kernels::table::{
     Cursor, FORMAT_VERSION, Fold, HEADER_SIZE, KeyKind, KeySource, MAX_KEYS, Slot, Table,
-    TableConfig, TableMut, VERSION_OFFSET, normalize_word, region_size,
+    TableConfig, TableMut, VERSION_OFFSET, bloom::SharedFilter, normalize_word, region_size,
 };
 
 use super::args::reader;
@@ -943,6 +943,221 @@ pub unsafe extern "C" fn tess_bloom_probe(
             let words = values(words, nwords, "filter words")?;
             let hashes = values(hashes, rows.nrows(), "hashes")?;
             tessera_kernels::table::bloom::probe(words, hashes, &rows, &mut found)
+        })
+    }
+}
+
+/// `tess_table_stage`: write the pending rows of a batch as the table's
+/// records into a staging buffer, as long as whole records fit.
+///
+/// # Safety
+///
+/// `region` as for [`Table::attach`] during the call; `buffer` must point
+/// to `nwords` writable words that nothing else accesses and `used` to
+/// their used byte count; `keys`, `hashes`, `payload` and `pending` as for
+/// [`tess_table_insert`]; `status` as for every entry point.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tess_table_stage(
+    region: *const u8,
+    len: usize,
+    buffer: *mut u64,
+    nwords: usize,
+    used: *mut usize,
+    hashes: *const u32,
+    nkeys: c_int,
+    keys: *const TableKey,
+    payload: *const u8,
+    pending: *mut Mask,
+    status: *mut Status,
+) -> Code {
+    // SAFETY: the caller's contract.
+    unsafe {
+        guard(status, || {
+            let table = Table::attach(region.cast_mut(), len)?;
+            let mut decoded = TableKeys::empty();
+            table_keys(nkeys, keys, &mut decoded)?;
+            let mut pending = pending.as_mut().context("a null pending mask")?.mask()?;
+            let nrows = pending.as_view().nrows();
+            let hashes = values(hashes, nrows, "hashes")?;
+            let buffer = slots(buffer, nwords, "staging buffer")?;
+            let used = used.as_mut().context("a null used count")?;
+            let payload = if payload.is_null() {
+                None
+            } else {
+                let bytes = nrows
+                    .checked_mul(table.payload_size())
+                    .context("the payload does not fit in memory")?;
+                Some(values(payload, bytes, "payload")?)
+            };
+            table
+                .stage(buffer, used, hashes, &decoded, payload, &mut pending)
+                .map(drop)
+        })
+    }
+}
+
+/// `tess_table_insert_staged`: add a staging buffer's records to the
+/// table, as long as it has room.
+///
+/// # Safety
+///
+/// `region` as for [`Table::attach`] during the call, which may run with
+/// other insertions; `buffer` must point to initialized words holding at
+/// least `used` bytes, and `consumed` to the count of them already added;
+/// `status` as for every entry point.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tess_table_insert_staged(
+    region: *mut u8,
+    len: usize,
+    buffer: *const u64,
+    used: usize,
+    consumed: *mut usize,
+    status: *mut Status,
+) -> Code {
+    // SAFETY: the caller's contract.
+    unsafe {
+        guard(status, || {
+            let table = Table::attach(region, len)?;
+            let buffer = values(buffer, used.div_ceil(8), "staging buffer")?;
+            let consumed = consumed.as_mut().context("a null consumed count")?;
+            table.insert_staged(buffer, used, consumed).map(drop)
+        })
+    }
+}
+
+/// `tess_bloom_shared_words`: the words of a shared Bloom filter, its
+/// state word included, for a table of `records` records.
+///
+/// # Safety
+///
+/// `nwords` must point to a writable size; `status` as for every entry
+/// point.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tess_bloom_shared_words(
+    records: u64,
+    nwords: *mut usize,
+    status: *mut Status,
+) -> Code {
+    // SAFETY: the caller's contract.
+    unsafe {
+        guard(status, || {
+            let out = nwords.as_mut().context("a null result")?;
+            *out = tessera_kernels::table::bloom::shared_words_for(records)?;
+            Ok(())
+        })
+    }
+}
+
+/// Attach to a shared filter for the length of a call.
+///
+/// # Safety
+///
+/// `words` as for [`SharedFilter::attach`] during the call.
+unsafe fn shared_filter<'a>(words: *mut u64, nwords: usize) -> Result<SharedFilter<'a>> {
+    // SAFETY: the caller's contract.
+    unsafe { SharedFilter::attach(words, nwords) }
+}
+
+/// `tess_bloom_shared_init`: clear a shared filter before any participant
+/// uses it.
+///
+/// # Safety
+///
+/// `words` must point to `nwords` words aligned to 8 that only shared
+/// filters access and no other participant uses yet; `status` as for
+/// every entry point.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tess_bloom_shared_init(
+    words: *mut u64,
+    nwords: usize,
+    status: *mut Status,
+) -> Code {
+    // SAFETY: the caller's contract.
+    unsafe {
+        guard(status, || {
+            shared_filter(words, nwords).map(|filter| filter.init())
+        })
+    }
+}
+
+/// `tess_table_try_build_bloom`: build a shared filter of the table's
+/// records unless another participant has claimed it.
+///
+/// # Safety
+///
+/// `region` as for [`Table::attach`] during the call, with no insertion
+/// running; `words` as for [`tess_bloom_shared_init`], other participants
+/// using it too; `built` must point to a writable flag; `status` as for
+/// every entry point.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tess_table_try_build_bloom(
+    region: *const u8,
+    len: usize,
+    words: *mut u64,
+    nwords: usize,
+    built: *mut bool,
+    status: *mut Status,
+) -> Code {
+    // SAFETY: the caller's contract.
+    unsafe {
+        guard(status, || {
+            let table = Table::attach(region.cast_mut(), len)?;
+            let filter = shared_filter(words, nwords)?;
+            let built = built.as_mut().context("a null result")?;
+            *built = table.try_build_bloom(&filter)?;
+            Ok(())
+        })
+    }
+}
+
+/// `tess_bloom_shared_ready`: whether a shared filter is built.
+///
+/// # Safety
+///
+/// `words` as for [`tess_table_try_build_bloom`]; `ready` must point to a
+/// writable flag; `status` as for every entry point.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tess_bloom_shared_ready(
+    words: *mut u64,
+    nwords: usize,
+    ready: *mut bool,
+    status: *mut Status,
+) -> Code {
+    // SAFETY: the caller's contract.
+    unsafe {
+        guard(status, || {
+            let filter = shared_filter(words, nwords)?;
+            *ready.as_mut().context("a null result")? = filter.ready();
+            Ok(())
+        })
+    }
+}
+
+/// `tess_bloom_shared_probe`: [`tess_bloom_probe`] against a shared filter,
+/// which must be ready.
+///
+/// # Safety
+///
+/// `words` as for [`tess_table_try_build_bloom`]; `rows`, `found` and
+/// `hashes` as for [`tess_bloom_probe`]; `status` as for every entry
+/// point.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tess_bloom_shared_probe(
+    words: *mut u64,
+    nwords: usize,
+    hashes: *const u32,
+    rows: *const Mask,
+    found: *mut Mask,
+    status: *mut Status,
+) -> Code {
+    // SAFETY: the caller's contract.
+    unsafe {
+        guard(status, || {
+            let filter = shared_filter(words, nwords)?;
+            let rows = rows.as_ref().context("a null row mask")?.view()?;
+            let mut found = found.as_mut().context("a null result mask")?.mask()?;
+            let hashes = values(hashes, rows.nrows(), "hashes")?;
+            tessera_kernels::table::bloom::probe_shared(&filter, hashes, &rows, &mut found)
         })
     }
 }

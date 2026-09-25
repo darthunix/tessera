@@ -340,13 +340,61 @@ impl<'r, R: Region> Access<'r, R> {
         payload: Option<&[u8]>,
     ) {
         let record_size = self.record_size;
-        let nkeys = if N > 0 { N } else { self.nkeys };
-        debug_assert!(nkeys == self.nkeys);
-        debug_assert!(T == 0 || T == record_size / 8 - RECORD_HEADER / 8 - nkeys);
+        debug_assert!(N == 0 || N == self.nkeys);
         // SAFETY: the record was reserved by this operation and is not
         // published yet, so nothing else reads or writes its bytes; a
         // reservation ends at most at the buckets' offset, in the region.
         let bytes = unsafe { self.region.bytes_mut_in(byte, record_size) };
+        // SAFETY: the caller's contract on `keys`, `N` and `T`.
+        unsafe { fill::<N, T>(bytes, self.nkeys, hash, keys, bit, payload) };
+    }
+
+    /// Copy records written elsewhere, `records` whole, into the room at
+    /// `byte` that this operation reserved for them.
+    ///
+    /// # Safety
+    ///
+    /// `byte` starts as many records as `records` holds, all reserved by
+    /// this operation and not published.
+    #[inline]
+    pub(super) unsafe fn copy_in(&self, byte: usize, records: &[u8]) {
+        // SAFETY: the caller's contract; the reservation lies in the
+        // record area, within the region.
+        unsafe { self.region.bytes_mut_in(byte, records.len()) }.copy_from_slice(records);
+    }
+}
+
+/// The hash and the claimed length in bytes of a record written in
+/// `bytes`, for records staged outside the table.
+#[inline(always)]
+pub(super) fn staged_fields(bytes: &[u8]) -> (u32, usize) {
+    let field =
+        |at: usize| u32::from_ne_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]]);
+    (field(HASH), field(LEN) as usize * 8)
+}
+
+/// Write a record into `bytes`, a record's length, from row `bit` of a
+/// word's keys: its header with no next record, the key slots, then the
+/// payload (`None` for zeros) and its padding. `N` is the key count and
+/// `T` the words after the keys when the caller knows them, 0 to take
+/// them from `nkeys` and the length.
+///
+/// # Safety
+///
+/// `keys` was made for `nkeys` keys; `N` and `T` are 0 or the table's.
+#[inline(always)]
+pub(super) unsafe fn fill<const N: usize, const T: usize>(
+    bytes: &mut [u8],
+    nkeys: usize,
+    hash: u32,
+    keys: &WordKeys,
+    bit: usize,
+    payload: Option<&[u8]>,
+) {
+    {
+        let record_size = bytes.len();
+        let nkeys = if N > 0 { N } else { nkeys };
+        debug_assert!(T == 0 || T == record_size / 8 - RECORD_HEADER / 8 - nkeys);
         let (words, _) = bytes.as_chunks_mut::<8>();
         let mut fields = [0; RECORD_HEADER];
         fields[HASH..HASH + 4].copy_from_slice(&hash.to_ne_bytes());
@@ -386,7 +434,9 @@ impl<'r, R: Region> Access<'r, R> {
             write_tail(tail, payload);
         }
     }
+}
 
+impl<'r, R: Region> Access<'r, R> {
     /// The key count of a record.
     #[inline(always)]
     pub(super) fn nkeys(&self) -> usize {

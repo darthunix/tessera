@@ -373,6 +373,75 @@ extern TessStatusCode tess_bloom_probe(const uint64 *words, Size nwords,
 									   TessStatus *status);
 
 /*
+ * A shared build (plan item 5.5) keeps the rows a full table had no room
+ * for in staging buffers of the participant's, as the table's records,
+ * and adds them once the table has grown. tess_table_stage writes the
+ * pending rows as records into the nwords words at buffer from byte *used
+ * on, as long as whole records fit, and moves *used past them; written
+ * rows leave pending, and the rest wait for another buffer. keys, hashes
+ * and payload are as for tess_table_insert.
+ */
+extern TessStatusCode tess_table_stage(const void *region, Size len,
+									   uint64 *buffer, Size nwords,
+									   Size *used,
+									   const uint32 *hashes,
+									   int nkeys,
+									   const TessTableKey *keys,
+									   const uint8 *payload,
+									   TessRowMask *pending,
+									   TessStatus *status);
+
+/*
+ * Add the records of the first used bytes of buffer, from byte *consumed
+ * on, as long as the table has room, and move *consumed past them: they
+ * are counted, copied in and published as tess_table_insert does its
+ * rows, so it may run with other insertions.
+ */
+extern TessStatusCode tess_table_insert_staged(void *region, Size len,
+											   const uint64 *buffer,
+											   Size used,
+											   Size *consumed,
+											   TessStatus *status);
+
+/*
+ * A shared Bloom filter, next to a shared table: a state word (none,
+ * building, ready), then the words of a filter. One participant clears
+ * it before the others use it; the first that wants the filter builds it
+ * alone and marks it ready, and the others check batches against it only
+ * once it is ready. See docs/table.md.
+ */
+
+/* The words of a shared filter for a table of records records. */
+extern TessStatusCode tess_bloom_shared_words(uint64 records, Size *nwords,
+											  TessStatus *status);
+
+/* Clear a shared filter, before any other participant uses it. */
+extern TessStatusCode tess_bloom_shared_init(uint64 *words, Size nwords,
+											 TessStatus *status);
+
+/*
+ * Build the shared filter from the table's records unless another
+ * participant has claimed it: *built is true for the one that did. No
+ * insertion may run at the same time.
+ */
+extern TessStatusCode tess_table_try_build_bloom(const void *region, Size len,
+												 uint64 *words, Size nwords,
+												 bool *built,
+												 TessStatus *status);
+
+/* Whether the shared filter is built. */
+extern TessStatusCode tess_bloom_shared_ready(uint64 *words, Size nwords,
+											  bool *ready,
+											  TessStatus *status);
+
+/* tess_bloom_probe against a shared filter, which must be ready. */
+extern TessStatusCode tess_bloom_shared_probe(uint64 *words, Size nwords,
+											  const uint32 *hashes,
+											  const TessRowMask *rows,
+											  TessRowMask *found,
+											  TessStatus *status);
+
+/*
  * The payload of the record at an offset, to change in place: payload_size
  * bytes valid until the region moves or the table grows.
  */

@@ -443,6 +443,38 @@ tessera_test_table_groups(PG_FUNCTION_ARGS)
 								 &status) != TESS_ERROR_INVALID_ARGUMENT)
 				PG_RETURN_BOOL(false);
 		}
+		/*
+		 * A shared filter: not ready before it is built, built once, then
+		 * every row passes.
+		 */
+		{
+			Size		nwords;
+			uint64	   *filter;
+			uint64		passed[NWORDS] = {0};
+			TessRowMask passed_mask = {NROWS, passed};
+			bool		built;
+			bool		ready;
+
+			if (tess_bloom_shared_words(10, &nwords, &status) != TESS_OK || nwords != 5)
+				PG_RETURN_BOOL(false);
+			filter = palloc(sizeof(uint64) * nwords);
+			if (tess_bloom_shared_init(filter, nwords, &status) != TESS_OK ||
+				tess_bloom_shared_ready(filter, nwords, &ready, &status) != TESS_OK ||
+				ready ||
+				tess_bloom_shared_probe(filter, nwords, batch->hashes, &all,
+										&passed_mask,
+										&status) != TESS_ERROR_INVALID_ARGUMENT ||
+				tess_table_try_build_bloom(region, size, filter, nwords, &built,
+										   &status) != TESS_OK || !built ||
+				tess_table_try_build_bloom(region, size, filter, nwords, &built,
+										   &status) != TESS_OK || built ||
+				tess_bloom_shared_ready(filter, nwords, &ready, &status) != TESS_OK ||
+				!ready ||
+				tess_bloom_shared_probe(filter, nwords, batch->hashes, &all,
+										&passed_mask, &status) != TESS_OK ||
+				count_bits(passed) != NROWS)
+				PG_RETURN_BOOL(false);
+		}
 		/* A word past the payload is refused. */
 		if (tess_table_accumulate(region, size, offsets, &all, TESS_TABLE_COUNT_ROWS,
 								  NULL, NULL, 8, 0, 0,
@@ -513,6 +545,60 @@ tessera_test_table_grow(PG_FUNCTION_ARGS)
 	if (total != 160 ||
 		tess_table_grow(region, grown - 8, &status) != TESS_ERROR_INVALID_ARGUMENT)
 		PG_RETURN_BOOL(false);
+	pfree(region);
+
+	/*
+	 * The rows the full table had no room for, staged into buffers of 40
+	 * records of 32 bytes, then added after the table grew.
+	 */
+	{
+		uint64	   *buffers[4];
+		Size		used[4];
+		TessRowMask pending_mask = {NROWS, pending};
+		int			nbuffers = 0;
+		int			buffer;
+
+		region = make_region(16, &size);
+		memcpy(pending, batch->valid, sizeof(pending));
+		if (region == NULL ||
+			insert_batch(region, size, batch, pending, offsets) != 160 - 16)
+			PG_RETURN_BOOL(false);
+		while (count_bits(pending) > 0)
+		{
+			if (nbuffers == 4)
+				PG_RETURN_BOOL(false);
+			buffers[nbuffers] = palloc(40 * 32);
+			used[nbuffers] = 0;
+			if (tess_table_stage(region, size, buffers[nbuffers], 40 * 4,
+								 &used[nbuffers], batch->hashes, 1, &batch->key,
+								 (const uint8 *) batch->payload, &pending_mask,
+								 &status) != TESS_OK)
+				PG_RETURN_BOOL(false);
+			nbuffers++;
+		}
+		if (nbuffers != 4 || used[3] != 24 * 32)
+			PG_RETURN_BOOL(false);
+		region = repalloc(region, grown);
+		if (tess_table_grow(region, grown, &status) != TESS_OK)
+			PG_RETURN_BOOL(false);
+		for (buffer = 0; buffer < nbuffers; buffer++)
+		{
+			Size		consumed = 0;
+
+			if (tess_table_insert_staged(region, grown, buffers[buffer], used[buffer],
+										 &consumed, &status) != TESS_OK ||
+				consumed != used[buffer])
+				PG_RETURN_BOOL(false);
+		}
+		if (!stats_of(region, grown, &stats) || stats.records != 160 ||
+			!probe_batch(region, grown, batch, found, matches) ||
+			memcmp(found, batch->valid, sizeof(found)) != 0)
+			PG_RETURN_BOOL(false);
+		for (row = 0; row < NROWS; row++)
+			if (has_bit(batch->valid, row) &&
+				!record_matches(region, grown, batch, row, matches[row]))
+				PG_RETURN_BOOL(false);
+	}
 	pfree(region);
 	pfree(batch);
 	PG_RETURN_BOOL(true);
