@@ -15,7 +15,7 @@
 #define TESS_FILTER_DATA "tessera.filter"
 #define TESS_FILTER_DATA_VERSION 1
 #define TESS_HASH_JOIN_DATA "tessera.hash_join"
-#define TESS_HASH_JOIN_DATA_VERSION 4
+#define TESS_HASH_JOIN_DATA_VERSION 5
 
 /* Clauses (RestrictInfos) in the order the planner evaluates a plan's quals. */
 extern List *tess_order_clauses(PlannerInfo *root, List *rinfos);

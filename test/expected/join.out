@@ -623,6 +623,213 @@ SELECT join_same($$SELECT jf.v, jd.label, jdup.w FROM jf JOIN jd ON jf.fk = jd.i
  357 rows, hash a0ab62388283a8ae0d21b2ffe91e22c2
 (1 row)
 
+-- SEMI, ANTI and LEFT: the kinds that keep the outer side, which the node
+-- probes with. SEMI returns each outer row with a match once, ANTI those
+-- without one (a NULL key has none), LEFT the pairs and then the rows
+-- without a pair, their inner columns NULL. A pair counts when it passes
+-- the join clauses; a LEFT join's WHERE clause above filters every row.
+EXPLAIN (COSTS OFF) SELECT count(*) FROM jf WHERE EXISTS (SELECT 1 FROM jdup WHERE jdup.k = jf.fk);
+                   QUERY PLAN                   
+------------------------------------------------
+ Custom Scan (TessAgg)
+   ->  Custom Scan (TessHashJoin)
+         Join Type: Semi
+         Hash Cond: (jf.fk = jdup.k)
+         ->  Custom Scan (TessHeapScan) on jf
+         ->  Custom Scan (TessHeapScan) on jdup
+(6 rows)
+
+SELECT join_same($$SELECT jf.v FROM jf WHERE EXISTS (SELECT 1 FROM jdup WHERE jdup.k = jf.fk)$$);
+                    join_same                    
+-------------------------------------------------
+ 129 rows, hash d561db71b6a0272c85dd74d80ee18be0
+(1 row)
+
+EXPLAIN (COSTS OFF) SELECT count(*) FROM jf WHERE EXISTS (SELECT 1 FROM jdup WHERE jdup.k = jf.fk AND jdup.w > jf.v);
+                   QUERY PLAN                   
+------------------------------------------------
+ Custom Scan (TessAgg)
+   ->  Custom Scan (TessHashJoin)
+         Join Type: Semi
+         Hash Cond: (jf.fk = jdup.k)
+         Batch Join Filter: (jdup.w > jf.v)
+         ->  Custom Scan (TessHeapScan) on jf
+         ->  Custom Scan (TessHeapScan) on jdup
+(7 rows)
+
+SELECT join_same($$SELECT jf.v FROM jf WHERE EXISTS (SELECT 1 FROM jdup WHERE jdup.k = jf.fk AND jdup.w > jf.v)$$);
+                   join_same                    
+------------------------------------------------
+ 18 rows, hash 3c3905c94ba60802c2277d6075714d14
+(1 row)
+
+SELECT join_same($$SELECT jf.v FROM jf WHERE jf.fk IN (SELECT k FROM jdup WHERE w > 100)$$);
+                    join_same                    
+-------------------------------------------------
+ 119 rows, hash 0ff3ef29736b884dcf653bedeeb799cd
+(1 row)
+
+EXPLAIN (COSTS OFF) SELECT count(*) FROM jf WHERE NOT EXISTS (SELECT 1 FROM jdup WHERE jdup.k = jf.fk);
+                   QUERY PLAN                   
+------------------------------------------------
+ Custom Scan (TessAgg)
+   ->  Custom Scan (TessHashJoin)
+         Join Type: Anti
+         Hash Cond: (jdup.k = jf.fk)
+         ->  Custom Scan (TessHeapScan) on jf
+         ->  Custom Scan (TessHeapScan) on jdup
+(6 rows)
+
+SELECT join_same($$SELECT jf.v, jf.fk FROM jf WHERE NOT EXISTS (SELECT 1 FROM jdup WHERE jdup.k = jf.fk)$$);
+                    join_same                    
+-------------------------------------------------
+ 871 rows, hash f5eac91ae7e450cccdb6f49f4b9473fe
+(1 row)
+
+SELECT join_same($$SELECT jf.v FROM jf WHERE NOT EXISTS (SELECT 1 FROM jdup WHERE jdup.k = jf.fk AND jdup.w > jf.v)$$);
+                    join_same                    
+-------------------------------------------------
+ 982 rows, hash 90719567457cef15c4fa369626edcd7e
+(1 row)
+
+SELECT join_same($$SELECT jf.v, jf.fk FROM jf LEFT JOIN jd ON jf.fk = jd.id WHERE jd.id IS NULL$$);
+                    join_same                    
+-------------------------------------------------
+ 236 rows, hash 0efe51246a3e6d4d26f11caf4b57969f
+(1 row)
+
+EXPLAIN (COSTS OFF) SELECT jf.v, jd.label FROM jf LEFT JOIN jd ON jf.fk = jd.id;
+               QUERY PLAN               
+----------------------------------------
+ Custom Scan (TessHashJoin)
+   Join Type: Left
+   Hash Cond: (jf.fk = jd.id)
+   ->  Custom Scan (TessHeapScan) on jf
+   ->  Custom Scan (TessHeapScan) on jd
+(5 rows)
+
+SELECT join_same($$SELECT jf.v, jd.label, jd.n FROM jf LEFT JOIN jd ON jf.fk = jd.id$$);
+                    join_same                     
+--------------------------------------------------
+ 1000 rows, hash aade5b8706be7bba53d987efdc0ed397
+(1 row)
+
+SELECT join_same($$SELECT jf.v, jdup.w, jdup.t FROM jf LEFT JOIN jdup ON jf.fk = jdup.k$$);
+                    join_same                     
+--------------------------------------------------
+ 1228 rows, hash 48724ee9bc34bbb2f64abfc24503103f
+(1 row)
+
+SELECT join_explain($$SELECT count(*), count(jdup.w), sum(jdup.w) FROM jf LEFT JOIN jdup ON jf.fk = jdup.k$$);
+                                join_explain                                 
+-----------------------------------------------------------------------------
+ Custom Scan (TessAgg) (actual rows=1.00 loops=1)
+   Input Batches: 36
+   Input Rows: 1228
+   Kernel Calls: 108
+   Computed Datums: 2456
+   ->  Custom Scan (TessHashJoin) (actual rows=1228.00 loops=1)
+         Join Type: Left
+         Hash Cond: (jf.fk = jdup.k)
+         Buckets: 1024
+         Memory Usage: N kB
+         Builds: 1
+         Build Rows: 139
+         Table Grows: 0
+         Probe Rows: 1000
+         Matches: 357
+         Compact Batches: 18
+         ->  Custom Scan (TessHeapScan) on jf (actual rows=1000.00 loops=1)
+               Batch Size: 64
+               Batches: 18
+               Pages: 9
+               Deformed Datums: 1000
+               Restarted Datums: 0
+         ->  Custom Scan (TessHeapScan) on jdup (actual rows=150.00 loops=1)
+               Batch Size: 64
+               Batches: 3
+               Pages: 1
+               Deformed Datums: 289
+               Restarted Datums: 0
+(28 rows)
+
+SELECT join_same($$SELECT count(*), count(jdup.w), sum(jdup.w) FROM jf LEFT JOIN jdup ON jf.fk = jdup.k$$);
+                   join_same                   
+-----------------------------------------------
+ 1 rows, hash 2e4290b3b35d338d5589cb1b866bd209
+(1 row)
+
+SELECT join_same($$SELECT jf.v, jdup.w FROM jf LEFT JOIN jdup ON jf.fk = jdup.k AND jdup.w > jf.v$$);
+                    join_same                     
+--------------------------------------------------
+ 1015 rows, hash ecc883da8fbedd6f705c63366df2bd04
+(1 row)
+
+SELECT join_same($$SELECT count(*), count(jdup.w) FROM jf LEFT JOIN jdup ON jf.fk = jdup.k AND jdup.w > jf.v$$);
+                   join_same                   
+-----------------------------------------------
+ 1 rows, hash 78dcbb9385a2118e43874b308213f1b3
+(1 row)
+
+EXPLAIN (COSTS OFF) SELECT jf.v, jdup.w FROM jf LEFT JOIN jdup ON jf.fk = jdup.k WHERE jdup.w IS NULL OR jdup.w > jf.v;
+                      QUERY PLAN                       
+-------------------------------------------------------
+ Custom Scan (TessHashJoin)
+   Join Type: Left
+   Hash Cond: (jf.fk = jdup.k)
+   Batch Filter: ((jdup.w IS NULL) OR (jdup.w > jf.v))
+   ->  Custom Scan (TessHeapScan) on jf
+   ->  Custom Scan (TessHeapScan) on jdup
+(6 rows)
+
+SELECT join_same($$SELECT jf.v, jdup.w FROM jf LEFT JOIN jdup ON jf.fk = jdup.k WHERE jdup.w IS NULL OR jdup.w > jf.v$$);
+                    join_same                    
+-------------------------------------------------
+ 904 rows, hash a7cc1ac64fe3de0299f6241d5ee66ed8
+(1 row)
+
+SELECT jf.v, jd.label FROM jf LEFT JOIN jd ON jf.fk = jd.id ORDER BY jf.v DESC LIMIT 5;
+  v   | label 
+------+-------
+ 1000 | d251
+  999 | 
+  998 | d177
+  997 | d140
+  996 | d103
+(5 rows)
+
+-- An empty inner side: LEFT and ANTI return every outer row, SEMI none.
+SELECT join_same($$SELECT jf.v, jempty.e FROM jf LEFT JOIN jempty ON jf.fk = jempty.k$$);
+                    join_same                     
+--------------------------------------------------
+ 1000 rows, hash b67f2b55de45c5249bee0127bdabfbbf
+(1 row)
+
+SELECT join_same($$SELECT count(*) FROM jf WHERE NOT EXISTS (SELECT 1 FROM jempty WHERE jempty.k = jf.fk)$$);
+                   join_same                   
+-----------------------------------------------
+ 1 rows, hash adc7de3d21b50bb5bbb7cc0f0428d490
+(1 row)
+
+SELECT join_same($$SELECT count(*) FROM jf WHERE EXISTS (SELECT 1 FROM jempty WHERE jempty.k = jf.fk)$$);
+                   join_same                   
+-----------------------------------------------
+ 1 rows, hash c0f42481968812076edc1084384e868a
+(1 row)
+
+-- Rescans with a parameter in the join clauses.
+SELECT join_same($$SELECT jsmall.k, (SELECT count(jdup.w) FROM jf LEFT JOIN jdup ON jf.fk = jdup.k AND jdup.w > jsmall.k) FROM jsmall$$);
+                   join_same                    
+------------------------------------------------
+ 10 rows, hash e393d288bb04efe77e36a7504380a997
+(1 row)
+
+SELECT join_same($$SELECT jsmall.k, (SELECT count(*) FROM jf WHERE NOT EXISTS (SELECT 1 FROM jdup WHERE jdup.k = jf.fk AND jdup.w > jsmall.k)) FROM jsmall$$);
+                   join_same                    
+------------------------------------------------
+ 10 rows, hash 9932f3730a581284a38168d4d0362ee3
+(1 row)
+
 -- A build side larger than the planner thinks: the table grows.
 CREATE TABLE jgrow (k int, g int);
 ANALYZE jgrow;
@@ -974,6 +1181,24 @@ SELECT join_same($$SELECT count(*), sum(jdup.w) FROM jbig JOIN jdup ON jbig.fk =
  1 rows, hash 3261c99d9688ea029ecbfb9a64acbd22
 (1 row)
 
+SELECT join_same($$SELECT count(*), count(jd.n) FROM jbig LEFT JOIN jd ON jbig.fk = jd.id$$);
+                   join_same                   
+-----------------------------------------------
+ 1 rows, hash 51c099882315b52d8f73a753e553f5a0
+(1 row)
+
+SELECT join_same($$SELECT count(*) FROM jbig WHERE EXISTS (SELECT 1 FROM jdup WHERE jdup.k = jbig.fk)$$);
+                   join_same                   
+-----------------------------------------------
+ 1 rows, hash af0a25e5b011a20460ff6089ba7473af
+(1 row)
+
+SELECT join_same($$SELECT count(*), sum(jbig.v) FROM jbig WHERE NOT EXISTS (SELECT 1 FROM jd WHERE jd.id = jbig.fk)$$);
+                   join_same                   
+-----------------------------------------------
+ 1 rows, hash 7968083c1faeae6c01725a869cd0c6a7
+(1 row)
+
 SELECT join_property($$SELECT count(*) FROM jbig JOIN jd ON jbig.fk = jd.id$$, 'Probe Rows') AS probe_rows,
        join_property($$SELECT count(*) FROM jbig JOIN jd ON jbig.fk = jd.id$$, 'Matches') AS matches;
  probe_rows | matches 
@@ -996,12 +1221,12 @@ RESET min_parallel_table_scan_size;
 RESET enable_parallel_hash;
 -- No path: another join type, clauses without an integer key, another key type, the
 -- core's hash join disabled, the batch nodes off.
-EXPLAIN (COSTS OFF) SELECT count(jd.id) FROM jf LEFT JOIN jd ON jf.fk = jd.id;
+EXPLAIN (COSTS OFF) SELECT count(jd.id) FROM jf FULL JOIN jd ON jf.fk = jd.id;
                 QUERY PLAN                
 ------------------------------------------
  Custom Scan (TessAgg)
    ->  Custom Scan (TessPack)
-         ->  Hash Left Join
+         ->  Hash Full Join
                Hash Cond: (jf.fk = jd.id)
                ->  Seq Scan on jf
                ->  Hash

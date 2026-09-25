@@ -58,6 +58,7 @@ enum
 	JOIN_COMPACT_BATCHES,
 	/* Pairs the residual join clauses removed. */
 	JOIN_FILTER_REMOVED,
+	JOIN_OUTPUT_REMOVED,
 	JOIN_NCOUNTERS
 };
 
@@ -100,6 +101,13 @@ typedef struct TessHashJoinState
 	TessTableKey table_keys[TESS_TABLE_MAX_KEYS];
 	/* Every outer row matches at most one inner row: no second round. */
 	bool		inner_unique;
+	/*
+	 * INNER, SEMI, ANTI or LEFT: the kinds that keep the outer side, which
+	 * the node probes with.
+	 */
+	JoinType	jointype;
+	/* Per filter of an outer join in evaluation order: whether it runs in batches. */
+	List	   *filter_batch;
 	/* The residual clauses after the keys that run in batches, first. */
 	/* Per residual clause in evaluation order: whether it runs in batches. */
 	List	   *residual_batch;
@@ -185,6 +193,22 @@ typedef struct TessHashJoinState
 	bool		serving;
 	/* The residual join clauses over the pairs, or NULL; the scan tuple's layout. */
 	TessQual   *qual;
+	/* An outer join's filters over the rows it returns, or NULL. */
+	TessQual   *filter;
+	/*
+	 * SEMI, ANTI and LEFT: the rows of the outer batch with a pair that
+	 * passed the join clauses so far.
+	 */
+	uint64	   *matched_bits;
+	/*
+	 * LEFT: the published round extends the outer rows without a match
+	 * with NULL inner columns, which these all-NULL columns give; a
+	 * compact batch in progress holds it back for the next call.
+	 */
+	bool		null_round;
+	bool		null_held;
+	Datum	   *null_values;
+	bool	   *null_isnull;
 	/* The targets computed over the pairs, or NULL; the batch published then. */
 	TessProjection *projection;
 	List	   *computed;
@@ -294,6 +318,9 @@ reserve_rows(TessHashJoinState *state, int nrows)
 		pfree(state->published_bits);
 		pfree(state->taken_bits);
 		pfree(state->null_words);
+		pfree(state->matched_bits);
+		pfree(state->null_values);
+		pfree(state->null_isnull);
 		for (int word = 0; word < state->npayload; word++)
 		{
 			pfree(state->inner_values[word]);
@@ -313,6 +340,10 @@ reserve_rows(TessHashJoinState *state, int nrows)
 	state->published_bits = MemoryContextAllocZero(context, sizeof(uint64) * nwords);
 	state->taken_bits = MemoryContextAllocZero(context, sizeof(uint64) * nwords);
 	state->null_words = MemoryContextAllocZero(context, sizeof(Datum) * nrows);
+	state->matched_bits = MemoryContextAllocZero(context, sizeof(uint64) * nwords);
+	state->null_values = MemoryContextAllocZero(context, sizeof(Datum) * nrows);
+	state->null_isnull = MemoryContextAlloc(context, sizeof(bool) * nrows);
+	memset(state->null_isnull, true, sizeof(bool) * nrows);
 	/* Zeroed: rows outside a round are initialized memory, as batches promise. */
 	for (int word = 0; word < state->npayload; word++)
 	{
@@ -580,6 +611,14 @@ join_get_column(TessBatch *batch, int column, const TessRowMask *rows,
 	word = state->payload_words[column];
 	if (word == 0)
 		elog(ERROR, "TessHashJoin column %d was not requested", column);
+	/* LEFT: the rows without a match have NULL inner columns. */
+	if (state->null_round)
+	{
+		result->values = state->null_values;
+		result->isnull = state->null_isnull;
+		result->nrows = batch->rows.nrows;
+		return;
+	}
 	gather_inner(state, word - 1);
 	result->values = state->inner_values[word - 1];
 	result->isnull = state->inner_isnull[word - 1];
@@ -607,6 +646,36 @@ start_round(TessHashJoinState *state)
 	state->nulls_gathered = false;
 	memset(state->gathered, 0, sizeof(bool) * Max(state->npayload, 1));
 	state->counters[JOIN_MATCHES] += tess_row_mask_count(&round);
+}
+
+/*
+ * LEFT: the selected rows of the outer batch without a match, published
+ * with NULL inner columns. False when every row had one.
+ */
+static bool
+start_null_round(TessHashJoinState *state)
+{
+	TessBatch  *outer = state->outer_batch;
+	int			nrows = outer->rows.nrows;
+	int			nwords = tess_row_mask_word_count(nrows);
+	uint64		any = 0;
+
+	for (int word = 0; word < nwords; word++)
+	{
+		state->published_bits[word] = outer->rows.bits[word] &
+			~state->matched_bits[word];
+		any |= state->published_bits[word];
+	}
+	if (any == 0)
+		return false;
+	state->null_round = true;
+	state->batch.rows.nrows = nrows;
+	state->batch.rows.bits = state->published_bits;
+	state->current_offsets = state->offsets;
+	state->current_bits = state->published_bits;
+	state->nulls_gathered = false;
+	memset(state->gathered, 0, sizeof(bool) * Max(state->npayload, 1));
+	return true;
 }
 
 /*
@@ -649,8 +718,9 @@ next_round(TessHashJoinState *state)
 	for (;;)
 	{
 		TessBatch  *batch;
+		bool		found;
 
-		if (state->outer_batch != NULL)
+		if (state->outer_batch != NULL && !state->null_round)
 		{
 			int			nrows = state->outer_batch->rows.nrows;
 
@@ -673,6 +743,13 @@ next_round(TessHashJoinState *state)
 					return true;
 				}
 			}
+			/* LEFT: after the pairs, the rows that had none. */
+			if (state->jointype == JOIN_LEFT && start_null_round(state))
+				return true;
+		}
+		if (state->outer_batch != NULL)
+		{
+			state->null_round = false;
 			tess_input_finish(state->outer_input);
 			state->outer_batch = NULL;
 		}
@@ -680,7 +757,27 @@ next_round(TessHashJoinState *state)
 		if (batch == NULL)
 			return false;
 		state->counters[JOIN_PROBE_ROWS] += tess_row_mask_count(&batch->rows);
-		if (!probe_batch(state, batch))
+		found = probe_batch(state, batch);
+		if (state->jointype == JOIN_LEFT)
+		{
+			int			nwords = tess_row_mask_word_count(batch->rows.nrows);
+
+			/* Without join clauses every row found has its match. */
+			state->outer_batch = batch;
+			if (found && state->qual == NULL)
+				memcpy(state->matched_bits, state->round_bits, sizeof(uint64) * nwords);
+			else
+				memset(state->matched_bits, 0, sizeof(uint64) * nwords);
+			if (found)
+			{
+				start_round(state);
+				return true;
+			}
+			if (start_null_round(state))
+				return true;
+			continue;
+		}
+		if (!found)
 		{
 			tess_input_finish(state->outer_input);
 			continue;
@@ -704,6 +801,14 @@ fill_compact(TessHashJoinState *state)
 
 	/* The parent released the previous compact batch: its copies go. */
 	MemoryContextReset(state->compact_context);
+	/* LEFT: the rows without a match the last compact batch held back. */
+	if (state->null_held)
+	{
+		state->null_held = false;
+		(void) start_null_round(state);
+		state->output_compact = false;
+		return true;
+	}
 
 	while (count < JOIN_COMPACT_ROWS)
 	{
@@ -714,6 +819,22 @@ fill_compact(TessHashJoinState *state)
 		{
 			if (!next_round(state))
 				break;
+			/*
+			 * LEFT: the rows without a match go out over the outer batch,
+			 * after the pairs copied so far.
+			 */
+			if (state->null_round)
+			{
+				if (count == 0)
+				{
+					state->output_compact = false;
+					return true;
+				}
+				/* The pairs go first, their inner columns gathered. */
+				state->null_held = true;
+				state->null_round = false;
+				break;
+			}
 			nrows = state->outer_batch->rows.nrows;
 			/*
 			 * A dense round, met with nothing copied yet, goes out as it is:
@@ -801,6 +922,102 @@ more:
 }
 
 /*
+ * SEMI and ANTI: each outer batch once, its rows with a match (SEMI) or
+ * without one (ANTI), a row with a NULL key never having one. A pair
+ * counts when it passes the join clauses; rounds walk each row's records
+ * until it has one, the rows that do leaving the next rounds. ANTI's
+ * filters then apply to the rows it returns. False at the end.
+ */
+static bool
+next_matches(TessHashJoinState *state)
+{
+	ExprContext *econtext = state->css.ss.ps.ps_ExprContext;
+
+	for (;;)
+	{
+		TessBatch  *batch;
+		int			nrows;
+		int			nwords;
+		uint64		any = 0;
+
+		if (state->outer_batch != NULL)
+		{
+			tess_input_finish(state->outer_input);
+			state->outer_batch = NULL;
+		}
+		batch = tess_input_next(state->outer_input);
+		if (batch == NULL)
+			return false;
+		state->counters[JOIN_PROBE_ROWS] += tess_row_mask_count(&batch->rows);
+		nrows = batch->rows.nrows;
+		nwords = tess_row_mask_word_count(nrows);
+		reserve_rows(state, nrows);
+		memset(state->matched_bits, 0, sizeof(uint64) * nwords);
+		state->outer_batch = batch;
+		if (state->build_rows > 0 && probe_batch(state, batch))
+		{
+			if (state->qual == NULL)
+				memcpy(state->matched_bits, state->round_bits, sizeof(uint64) * nwords);
+			else
+				for (;;)
+				{
+					TessRowMask round = {nrows, state->round_bits};
+					TessRowMask rest = {nrows, state->next_bits};
+					uint64		left = 0;
+
+					start_round(state);
+					ResetExprContext(econtext);
+					(void) tess_qual_apply(state->qual, &state->batch, econtext,
+										   tess_row_mask_count(&round));
+					for (int word = 0; word < nwords; word++)
+						state->matched_bits[word] |= state->published_bits[word];
+					if (state->inner_unique || state->duplicates == 0)
+						break;
+					for (int word = 0; word < nwords; word++)
+					{
+						state->next_bits[word] = state->round_bits[word] &
+							~state->matched_bits[word];
+						left |= state->next_bits[word];
+					}
+					if (left == 0)
+						break;
+					check(state, state->kernels->table_next_in_group(state->region,
+																	 state->region_len,
+																	 state->offsets,
+																	 &rest, &round,
+																	 &state->status));
+					if (tess_row_mask_count(&round) == 0)
+						break;
+				}
+		}
+		/* The rows returned: SEMI the matched ones, ANTI the others. */
+		for (int word = 0; word < nwords; word++)
+		{
+			state->published_bits[word] = state->jointype == JOIN_SEMI ?
+				state->matched_bits[word] :
+				batch->rows.bits[word] & ~state->matched_bits[word];
+			any |= state->published_bits[word];
+		}
+		if (any == 0)
+			continue;
+		state->batch.rows.nrows = nrows;
+		state->batch.rows.bits = state->published_bits;
+		state->current_offsets = state->offsets;
+		state->current_bits = state->published_bits;
+		state->nulls_gathered = false;
+		memset(state->gathered, 0, sizeof(bool) * Max(state->npayload, 1));
+		if (state->filter != NULL)
+		{
+			ResetExprContext(econtext);
+			if (tess_qual_apply(state->filter, &state->batch, econtext,
+								tess_row_mask_count(&state->batch.rows)) == 0)
+				continue;
+		}
+		return true;
+	}
+}
+
+/*
  * The next batch of pairs, a round or a compact batch, with the residual
  * join clauses applied: a batch they leave empty is skipped. The clauses
  * narrow the published selection only; a round's own rows stay whole for
@@ -811,16 +1028,33 @@ next_output(TessHashJoinState *state)
 {
 	ExprContext *econtext = state->css.ss.ps.ps_ExprContext;
 
+	if (state->jointype == JOIN_SEMI || state->jointype == JOIN_ANTI)
+		return next_matches(state);
 	for (;;)
 	{
 		if (state->compact ? !fill_compact(state) : !next_round(state))
 			return false;
-		if (state->qual == NULL)
-			return true;
-		ResetExprContext(econtext);
-		if (tess_qual_apply(state->qual, &state->batch, econtext,
-							tess_row_mask_count(&state->batch.rows)) > 0)
-			return true;
+		/* The join clauses decide the pairs; the rows without one have none. */
+		if (state->qual != NULL && !state->null_round)
+		{
+			ResetExprContext(econtext);
+			if (tess_qual_apply(state->qual, &state->batch, econtext,
+								tess_row_mask_count(&state->batch.rows)) == 0)
+				continue;
+			/* LEFT: the pairs that passed; no compact batch with join clauses. */
+			if (state->jointype == JOIN_LEFT)
+				for (int word = 0; word < tess_row_mask_word_count(state->batch.rows.nrows); word++)
+					state->matched_bits[word] |= state->published_bits[word];
+		}
+		/* An outer join's filters over every row it returns. */
+		if (state->filter != NULL)
+		{
+			ResetExprContext(econtext);
+			if (tess_qual_apply(state->filter, &state->batch, econtext,
+								tess_row_mask_count(&state->batch.rows)) == 0)
+				continue;
+		}
+		return true;
 	}
 }
 
@@ -985,17 +1219,16 @@ send_requests(TessHashJoinState *state)
 	state->request = request;
 }
 
-/* The residual clauses that run in batches and the others, each in evaluation order. */
+/* The clauses that run in batches and the others, each in evaluation order. */
 static void
-split_residual(const TessHashJoinState *state, List *residual, List **batch,
-			   List **rows)
+split_clauses(List *clauses, List *flags, List **batch, List **rows)
 {
 	ListCell   *clause;
 	ListCell   *flag;
 
 	*batch = NIL;
 	*rows = NIL;
-	forboth(clause, residual, flag, state->residual_batch)
+	forboth(clause, clauses, flag, flags)
 	{
 		if (lfirst_int(flag) != 0)
 			*batch = lappend(*batch, lfirst(clause));
@@ -1021,6 +1254,8 @@ read_node_data(TessHashJoinState *state, const List *data)
 	int			index = 0;
 
 	state->residual_batch = tess_plan_read_int_list(reader, "residual_batch");
+	state->filter_batch = tess_plan_read_int_list(reader, "filter_batch");
+	state->jointype = (JoinType) tess_plan_read_int(reader, "jointype");
 	state->inner_unique = tess_plan_read_int(reader, "inner_unique") != 0;
 	state->inner_rows = tess_plan_read_int(reader, "inner_rows");
 	tess_plan_reader_finish(reader);
@@ -1030,7 +1265,11 @@ read_node_data(TessHashJoinState *state, const List *data)
 		state->nkeys < 1 || state->nkeys > TESS_TABLE_MAX_KEYS ||
 		list_length(inner_keys) != state->nkeys ||
 		list_length(outer_kinds) != state->nkeys ||
-		list_length(inner_kinds) != state->nkeys)
+		list_length(inner_kinds) != state->nkeys ||
+		(state->jointype != JOIN_INNER && state->jointype != JOIN_SEMI &&
+		 state->jointype != JOIN_ANTI && state->jointype != JOIN_LEFT) ||
+		(state->filter_batch != NIL &&
+		 state->jointype != JOIN_LEFT && state->jointype != JOIN_ANTI))
 		elog(ERROR, "TessHashJoin received foreign plan data");
 	for (int key = 0; key < state->nkeys; key++)
 	{
@@ -1115,18 +1354,39 @@ join_begin(CustomScanState *css, EState *estate, int eflags)
 	state->scan_layout = (TessLayout) TESS_STRUCT_INITIALIZER(TessLayout);
 	state->scan_layout.ncolumns = state->ncolumns;
 	state->scan_layout.ntargets = state->ncolumns;
-	/* custom_exprs: the key clauses, then the residual ones. */
-	if (list_length(cscan->custom_exprs) > state->nkeys)
+	/* custom_exprs: the key clauses, the residual ones, an outer join's filters. */
+	if (list_length(cscan->custom_exprs) !=
+		state->nkeys + list_length(state->residual_batch) +
+		list_length(state->filter_batch))
+		elog(ERROR, "TessHashJoin received a foreign plan");
+	if (state->filter_batch != NIL)
+	{
+		TessQualConfig filter = TESS_STRUCT_INITIALIZER(TessQualConfig);
+		List	   *filters = list_copy_tail(cscan->custom_exprs,
+											 state->nkeys +
+											 list_length(state->residual_batch));
+
+		filter.parent_context = estate->es_query_cxt;
+		filter.parent = &css->ss.ps;
+		split_clauses(filters, state->filter_batch, &filter.batch_clauses,
+					  &filter.row_clauses);
+		filter.order = state->filter_batch;
+		filter.scan_slot = css->ss.ss_ScanTupleSlot;
+		filter.scan_tuple = &state->scan_layout;
+		state->filter = tess_qual_create(&filter);
+	}
+	if (state->residual_batch != NIL)
 	{
 		TessQualConfig qual = TESS_STRUCT_INITIALIZER(TessQualConfig);
 
-		List	   *residual = list_copy_tail(cscan->custom_exprs, state->nkeys);
+		List	   *residual = list_copy_head(list_copy_tail(cscan->custom_exprs,
+															  state->nkeys),
+											  list_length(state->residual_batch));
 
-		if (list_length(state->residual_batch) != list_length(residual))
-			elog(ERROR, "TessHashJoin received a foreign plan");
 		qual.parent_context = estate->es_query_cxt;
 		qual.parent = &css->ss.ps;
-		split_residual(state, residual, &qual.batch_clauses, &qual.row_clauses);
+		split_clauses(residual, state->residual_batch, &qual.batch_clauses,
+					  &qual.row_clauses);
 		qual.order = state->residual_batch;
 		qual.scan_slot = css->ss.ss_ScanTupleSlot;
 		qual.scan_tuple = &state->scan_layout;
@@ -1171,8 +1431,14 @@ decide_compact(TessHashJoinState *state)
 
 	state->compact_decided = true;
 	state->compact = false;
+	/*
+	 * SEMI and ANTI return outer rows, not pairs; LEFT with join clauses
+	 * must see each round whole to know the rows without a match.
+	 */
 	if (state->request->output_mode != TESS_OUTPUT_BATCH ||
-		state->inner_unique || state->duplicates == 0)
+		state->inner_unique || state->duplicates == 0 ||
+		state->jointype == JOIN_SEMI || state->jointype == JOIN_ANTI ||
+		(state->jointype == JOIN_LEFT && state->qual != NULL))
 		return;
 	for (int index = 0; index < state->nouter; index++)
 	{
@@ -1204,8 +1470,12 @@ join_exec(CustomScanState *css)
 		send_requests(state);
 	if (!state->built)
 		build_table(state);
-	/* Nothing to match: the outer child is never read, as in the core. */
-	if (state->build_rows == 0)
+	/*
+	 * Nothing to match: the outer child is never read, as in the core,
+	 * unless its rows go out without a match (LEFT, ANTI).
+	 */
+	if (state->build_rows == 0 &&
+		(state->jointype == JOIN_INNER || state->jointype == JOIN_SEMI))
 	{
 		state->done = true;
 		return NULL;
@@ -1248,6 +1518,8 @@ join_rescan(CustomScanState *css)
 	/* The rescan forgets the outer batch with the child's other state. */
 	state->outer_batch = NULL;
 	state->round_open = false;
+	state->null_round = false;
+	state->null_held = false;
 	state->serving = false;
 	state->next_row = -1;
 	state->done = false;
@@ -1281,6 +1553,12 @@ join_counters(TessHashJoinState *state, uint64 *values)
 
 		values[JOIN_FILTER_REMOVED] = removed->batch_removed + removed->row_removed;
 	}
+	if (state->filter != NULL)
+	{
+		const TessQualStats *removed = tess_qual_stats(state->filter);
+
+		values[JOIN_OUTPUT_REMOVED] = removed->batch_removed + removed->row_removed;
+	}
 	values[JOIN_MEMORY] = state->peak_memory;
 	values[JOIN_OVERRUN] = state->peak_memory > limit ?
 		state->peak_memory - limit : 0;
@@ -1305,25 +1583,35 @@ join_explain(CustomScanState *css, List *ancestors, ExplainState *es)
 
 	context = set_deparse_context_plan(es->deparse_cxt, css->ss.ps.plan,
 									   ancestors);
+	if (state->jointype != JOIN_INNER)
+		ExplainPropertyText("Join Type",
+							state->jointype == JOIN_SEMI ? "Semi" :
+							state->jointype == JOIN_ANTI ? "Anti" : "Left", es);
 	ExplainPropertyText("Hash Cond",
 						deparse_expression((Node *) make_ands_explicit(list_copy_head(cscan->custom_exprs,
 																					  state->nkeys)),
 										   context, useprefix, false), es);
-	if (state->qual != NULL)
+	for (int part = 0; part < 2; part++)
 	{
-		/* The residual clauses the compiler took in batches, and the others. */
-		List	   *residual = list_copy_tail(cscan->custom_exprs, state->nkeys);
+		/*
+		 * The residual join clauses, then an outer join's filters: those
+		 * the compiler took in batches, and the others.
+		 */
+		List	   *flags = part == 0 ? state->residual_batch : state->filter_batch;
+		int			first = state->nkeys +
+			(part == 0 ? 0 : list_length(state->residual_batch));
+		List	   *clauses = list_copy_head(list_copy_tail(cscan->custom_exprs, first),
+											 list_length(flags));
 		List	   *batch;
 		List	   *rows;
 
-		split_residual(state, residual, &batch, &rows);
-
+		split_clauses(clauses, flags, &batch, &rows);
 		if (batch != NIL)
-			ExplainPropertyText("Batch Join Filter",
+			ExplainPropertyText(part == 0 ? "Batch Join Filter" : "Batch Filter",
 								deparse_expression((Node *) make_ands_explicit(batch),
 												   context, useprefix, false), es);
 		if (rows != NIL)
-			ExplainPropertyText("Join Filter",
+			ExplainPropertyText(part == 0 ? "Join Filter" : "Filter",
 								deparse_expression((Node *) make_ands_explicit(rows),
 												   context, useprefix, false), es);
 	}
@@ -1352,6 +1640,9 @@ join_explain(CustomScanState *css, List *ancestors, ExplainState *es)
 	if (state->qual != NULL)
 		ExplainPropertyInteger("Rows Removed by Join Filter", NULL,
 							   totals[JOIN_FILTER_REMOVED], es);
+	if (state->filter != NULL)
+		ExplainPropertyInteger("Rows Removed by Filter", NULL,
+							   totals[JOIN_OUTPUT_REMOVED], es);
 	if (totals[JOIN_COMPACT_BATCHES] > 0)
 		ExplainPropertyInteger("Compact Batches", NULL,
 							   totals[JOIN_COMPACT_BATCHES], es);

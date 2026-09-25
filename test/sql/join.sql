@@ -169,6 +169,38 @@ EXPLAIN (COSTS OFF)
 SELECT count(*) FROM jf JOIN jd ON jf.fk = jd.id JOIN jdup ON jd.id = jdup.k;
 SELECT join_same($$SELECT jf.v, jd.label, jdup.w FROM jf JOIN jd ON jf.fk = jd.id JOIN jdup ON jd.id = jdup.k$$);
 
+-- SEMI, ANTI and LEFT: the kinds that keep the outer side, which the node
+-- probes with. SEMI returns each outer row with a match once, ANTI those
+-- without one (a NULL key has none), LEFT the pairs and then the rows
+-- without a pair, their inner columns NULL. A pair counts when it passes
+-- the join clauses; a LEFT join's WHERE clause above filters every row.
+EXPLAIN (COSTS OFF) SELECT count(*) FROM jf WHERE EXISTS (SELECT 1 FROM jdup WHERE jdup.k = jf.fk);
+SELECT join_same($$SELECT jf.v FROM jf WHERE EXISTS (SELECT 1 FROM jdup WHERE jdup.k = jf.fk)$$);
+EXPLAIN (COSTS OFF) SELECT count(*) FROM jf WHERE EXISTS (SELECT 1 FROM jdup WHERE jdup.k = jf.fk AND jdup.w > jf.v);
+SELECT join_same($$SELECT jf.v FROM jf WHERE EXISTS (SELECT 1 FROM jdup WHERE jdup.k = jf.fk AND jdup.w > jf.v)$$);
+SELECT join_same($$SELECT jf.v FROM jf WHERE jf.fk IN (SELECT k FROM jdup WHERE w > 100)$$);
+EXPLAIN (COSTS OFF) SELECT count(*) FROM jf WHERE NOT EXISTS (SELECT 1 FROM jdup WHERE jdup.k = jf.fk);
+SELECT join_same($$SELECT jf.v, jf.fk FROM jf WHERE NOT EXISTS (SELECT 1 FROM jdup WHERE jdup.k = jf.fk)$$);
+SELECT join_same($$SELECT jf.v FROM jf WHERE NOT EXISTS (SELECT 1 FROM jdup WHERE jdup.k = jf.fk AND jdup.w > jf.v)$$);
+SELECT join_same($$SELECT jf.v, jf.fk FROM jf LEFT JOIN jd ON jf.fk = jd.id WHERE jd.id IS NULL$$);
+EXPLAIN (COSTS OFF) SELECT jf.v, jd.label FROM jf LEFT JOIN jd ON jf.fk = jd.id;
+SELECT join_same($$SELECT jf.v, jd.label, jd.n FROM jf LEFT JOIN jd ON jf.fk = jd.id$$);
+SELECT join_same($$SELECT jf.v, jdup.w, jdup.t FROM jf LEFT JOIN jdup ON jf.fk = jdup.k$$);
+SELECT join_explain($$SELECT count(*), count(jdup.w), sum(jdup.w) FROM jf LEFT JOIN jdup ON jf.fk = jdup.k$$);
+SELECT join_same($$SELECT count(*), count(jdup.w), sum(jdup.w) FROM jf LEFT JOIN jdup ON jf.fk = jdup.k$$);
+SELECT join_same($$SELECT jf.v, jdup.w FROM jf LEFT JOIN jdup ON jf.fk = jdup.k AND jdup.w > jf.v$$);
+SELECT join_same($$SELECT count(*), count(jdup.w) FROM jf LEFT JOIN jdup ON jf.fk = jdup.k AND jdup.w > jf.v$$);
+EXPLAIN (COSTS OFF) SELECT jf.v, jdup.w FROM jf LEFT JOIN jdup ON jf.fk = jdup.k WHERE jdup.w IS NULL OR jdup.w > jf.v;
+SELECT join_same($$SELECT jf.v, jdup.w FROM jf LEFT JOIN jdup ON jf.fk = jdup.k WHERE jdup.w IS NULL OR jdup.w > jf.v$$);
+SELECT jf.v, jd.label FROM jf LEFT JOIN jd ON jf.fk = jd.id ORDER BY jf.v DESC LIMIT 5;
+-- An empty inner side: LEFT and ANTI return every outer row, SEMI none.
+SELECT join_same($$SELECT jf.v, jempty.e FROM jf LEFT JOIN jempty ON jf.fk = jempty.k$$);
+SELECT join_same($$SELECT count(*) FROM jf WHERE NOT EXISTS (SELECT 1 FROM jempty WHERE jempty.k = jf.fk)$$);
+SELECT join_same($$SELECT count(*) FROM jf WHERE EXISTS (SELECT 1 FROM jempty WHERE jempty.k = jf.fk)$$);
+-- Rescans with a parameter in the join clauses.
+SELECT join_same($$SELECT jsmall.k, (SELECT count(jdup.w) FROM jf LEFT JOIN jdup ON jf.fk = jdup.k AND jdup.w > jsmall.k) FROM jsmall$$);
+SELECT join_same($$SELECT jsmall.k, (SELECT count(*) FROM jf WHERE NOT EXISTS (SELECT 1 FROM jdup WHERE jdup.k = jf.fk AND jdup.w > jsmall.k)) FROM jsmall$$);
+
 -- A build side larger than the planner thinks: the table grows.
 CREATE TABLE jgrow (k int, g int);
 ANALYZE jgrow;
@@ -243,6 +275,9 @@ EXPLAIN (COSTS OFF) SELECT count(*), sum(jd.n) FROM jbig JOIN jd ON jbig.fk = jd
 SELECT join_same($$SELECT count(*), sum(jd.n), sum(jbig.v) FROM jbig JOIN jd ON jbig.fk = jd.id$$);
 SELECT join_same($$SELECT jbig.v, jd.label FROM jbig JOIN jd ON jbig.fk = jd.id$$);
 SELECT join_same($$SELECT count(*), sum(jdup.w) FROM jbig JOIN jdup ON jbig.fk = jdup.k$$);
+SELECT join_same($$SELECT count(*), count(jd.n) FROM jbig LEFT JOIN jd ON jbig.fk = jd.id$$);
+SELECT join_same($$SELECT count(*) FROM jbig WHERE EXISTS (SELECT 1 FROM jdup WHERE jdup.k = jbig.fk)$$);
+SELECT join_same($$SELECT count(*), sum(jbig.v) FROM jbig WHERE NOT EXISTS (SELECT 1 FROM jd WHERE jd.id = jbig.fk)$$);
 SELECT join_property($$SELECT count(*) FROM jbig JOIN jd ON jbig.fk = jd.id$$, 'Probe Rows') AS probe_rows,
        join_property($$SELECT count(*) FROM jbig JOIN jd ON jbig.fk = jd.id$$, 'Matches') AS matches;
 SET parallel_leader_participation = off;
@@ -256,7 +291,7 @@ RESET enable_parallel_hash;
 
 -- No path: another join type, clauses without an integer key, another key type, the
 -- core's hash join disabled, the batch nodes off.
-EXPLAIN (COSTS OFF) SELECT count(jd.id) FROM jf LEFT JOIN jd ON jf.fk = jd.id;
+EXPLAIN (COSTS OFF) SELECT count(jd.id) FROM jf FULL JOIN jd ON jf.fk = jd.id;
 EXPLAIN (COSTS OFF) SELECT count(*) FROM jf JOIN jd ON jf.v > jd.n AND jf.note = jd.label;
 EXPLAIN (COSTS OFF) SELECT count(*) FROM jf JOIN jd ON jf.note = jd.label;
 SET enable_hashjoin = off;

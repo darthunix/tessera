@@ -563,15 +563,26 @@ node calls through the bridge's kernel registry (see
 
 ### Planning
 
-The module's `set_join_pathlist` hook offers the path for an inner join
-with at least one `int4eq`, `int8eq`, `int48eq` or `int84eq` between a
+The module's `set_join_pathlist` hook offers the path for an inner, a
+semi, an anti or a left join, the kinds that keep the outer side, which
+the node probes with (a right or full join would need marks on the
+table's records, and the hook passes the right join the other way round
+over), with at least one `int4eq`, `int8eq`, `int48eq` or `int84eq` between a
 column of each side, when the join's target is plain columns and at most
 64 of them, the inner keys and the inner columns of the residual clauses
 are the inner side's. Each such clause, up to 16, is a key of the table;
 the others are residual clauses, evaluated over the joined rows, when
 they read plain columns only (no placeholder) and are not
-pseudoconstant, in the order the core's hash join evaluates them:
-`order_qual_clauses` is private, so the hook sorts them with the same
+pseudoconstant, in the order the core's hash join evaluates them. An
+outer join, left or anti, splits its clauses as the core does: a clause
+pushed down to the join from above (a `WHERE` clause over a left join)
+is no join clause and never a key but a filter over the rows the join
+returns, after NULL extension, in the same order. Above a left join an
+inner column is marked as nulled by it while the join's own clauses
+read it unmarked, and the planner matches every expression of the plan
+against the scan tuple's one entry of its column, marks included: the
+clauses' columns take the entry's marks, which the executor never
+reads. `order_qual_clauses` is private, so the hook sorts the clauses with the same
 key as for `TessFilter`, and a guard runs before the division it
 protects whichever of them runs in batches; keys go into it as 8-byte values and
 an int8 inside the int4 range hashes as the int4, so every combination
@@ -675,8 +686,27 @@ gets a `Material` above it. A rescan builds the table again only when
 the inner child has changed parameters, as the core's hash join decides,
 and otherwise probes the same table with the rescanned outer child.
 
-`EXPLAIN` shows the key clauses as `Hash Cond`, the residual ones that run
-in batches as `Batch Join Filter` and the others as `Join Filter`. With `ANALYZE` it adds
+A semi or anti join marks the rows of each outer batch that have a pair
+passing the join clauses: without such clauses the rows the probe found,
+with them the rows of each round that pass, which then leave the next
+rounds, since one pair decides. The batch then goes out once, with the
+marked rows for a semi join and the others for an anti join, a row with
+a NULL key having no pair; an anti join's filters apply to it. A left
+join publishes the rounds of pairs as an inner join does, marking the
+rows whose pairs pass the join clauses, and then a round of the rows
+without one, over the outer batch, whose inner columns are all NULL; the
+filters apply to every batch it returns. In compact mode the round of
+unmatched rows goes out alone, after the compact batch of pairs in
+progress; a left join with join clauses stays out of compact mode, which
+would copy the pairs before the clauses mark the rows that have one, and
+semi and anti joins, which return outer rows, never enter it. With an
+empty inner side the outer child is still read for a left or anti join,
+whose rows all go out.
+
+`EXPLAIN` shows the join type for a semi, anti or left join, the key
+clauses as `Hash Cond`, the residual ones that run in batches as `Batch
+Join Filter` and the others as `Join Filter`, and an outer join's filters
+as `Batch Filter` and `Filter`. With `ANALYZE` it adds
 the bucket count of the last table built, `Memory Usage`, the most the
 table and the copies of inner values took, `Overrun`, what of it
 exceeded `hash_mem` (shown only then: the node keeps the whole inner side
@@ -684,7 +714,8 @@ in memory, and a table larger than the planner expected is kept rather
 than split), `Builds`, the tables built over the rescans, `Build Rows`,
 the inner rows inserted into them, `Table Grows`, the doublings of the
 region, `Probe Rows`, the outer rows probed, and `Matches`, the joined
-rows over every round, `Rows Removed by Join Filter`, and `Compact Batches`, the batches of copied
+rows over every round, `Rows Removed by Join Filter` and `Rows Removed by
+Filter`, and `Compact Batches`, the batches of copied
 pairs, when there are any. Under a `Gather` the counters are the totals of
 every participant, and the bucket count is the mean over the tables
 built.
@@ -723,5 +754,12 @@ table disabled, it compares an aggregate over the node's partial path,
 rows through the `Gather`, rounds, and the leader not taking part, and
 checks that the rows probed and the matches are the totals of every
 participant. It also shows
-the core's plan without the kernels module, for a left join, clauses
+the core's plan without the kernels module, for a full join, clauses
 without an integer key, a text key, hash joins disabled and the switch off.
+Semi, anti and left joins: `EXISTS` with and without a join clause, `IN`
+over a subquery, `NOT EXISTS` with and without one (NULL keys going
+out), a left join the planner turns into an anti join, left joins with
+misses and NULL keys, with duplicates as rows and in compact mode under
+an aggregate, with a join clause in `ON` and a filter in `WHERE`, under a
+sort; an empty inner side for each kind; rescans with a parameter in the
+join clauses; and under the `Gather` a left, a semi and an anti join.

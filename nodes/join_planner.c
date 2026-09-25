@@ -51,8 +51,13 @@ typedef struct JoinKeys
 	List	   *inner;
 	List	   *outer_kinds;
 	List	   *inner_kinds;
-	/* The other clauses, evaluated over the joined rows. */
+	/* The other join clauses, which decide with the keys whether rows match. */
 	List	   *residual;
+	/*
+	 * LEFT and ANTI: the clauses pushed down to the join from above, a
+	 * filter over the rows it returns, after NULL extension.
+	 */
+	List	   *filters;
 } JoinKeys;
 
 /* The table's kind of a key of this type, or false for another type. */
@@ -154,17 +159,29 @@ residual_supported(RestrictInfo *rinfo)
  * The join's clauses: its integer equalities between the sides as keys,
  * as many as the table takes, and the others as residual clauses, in the
  * order the core's hash join evaluates them, which sorts the join's
- * clauses by cost within security levels. There must be a key.
+ * clauses by cost within security levels. An outer join (LEFT, ANTI)
+ * splits them as the core does: a clause pushed down from above is no
+ * join clause but a filter over the joined rows, and never a key. There
+ * must be a key.
  */
 static bool
-find_keys(PlannerInfo *root, List *restrictlist, RelOptInfo *outerrel,
-		  RelOptInfo *innerrel, JoinKeys *keys)
+find_keys(PlannerInfo *root, RelOptInfo *joinrel, List *restrictlist,
+		  RelOptInfo *outerrel, RelOptInfo *innerrel, JoinType jointype,
+		  JoinKeys *keys)
 {
 	List	   *residual = NIL;
+	List	   *filters = NIL;
 
 	memset(keys, 0, sizeof(*keys));
 	foreach_node(RestrictInfo, rinfo, restrictlist)
 	{
+		if (IS_OUTER_JOIN(jointype) && RINFO_IS_PUSHED_DOWN(rinfo, joinrel->relids))
+		{
+			if (!residual_supported(rinfo))
+				return false;
+			filters = lappend(filters, rinfo);
+			continue;
+		}
 		if (keys->nkeys < TESS_TABLE_MAX_KEYS &&
 			add_key(rinfo, outerrel, innerrel, keys))
 			continue;
@@ -174,6 +191,8 @@ find_keys(PlannerInfo *root, List *restrictlist, RelOptInfo *outerrel,
 	}
 	foreach_node(RestrictInfo, rinfo, tess_order_clauses(root, residual))
 		keys->residual = lappend(keys->residual, rinfo->clause);
+	foreach_node(RestrictInfo, rinfo, tess_order_clauses(root, filters))
+		keys->filters = lappend(keys->filters, rinfo->clause);
 	return keys->nkeys > 0;
 }
 
@@ -208,8 +227,9 @@ target_supported(RelOptInfo *joinrel, RelOptInfo *innerrel, const JoinKeys *keys
 	}
 	/* Keys outside the target are columns of the scan tuple too. */
 	*ninner += keys->nkeys - bms_num_members(inner_keys);
-	/* So are the residual clauses' inner columns, counted generously. */
-	foreach_node(Var, var, pull_var_clause((Node *) keys->residual, 0))
+	/* So are the clauses' inner columns, counted generously. */
+	foreach_node(Var, var, pull_var_clause((Node *) list_make2(keys->residual,
+															   keys->filters), 0))
 	{
 		if (bms_is_member(var->varno, innerrel->relids))
 			(*ninner)++;
@@ -242,7 +262,7 @@ table_bytes(Path *inner, int nkeys, int ninner)
  * node keeps the whole table in memory.
  */
 static CustomPath *
-make_join_path(PlannerInfo *root, RelOptInfo *joinrel,
+make_join_path(PlannerInfo *root, RelOptInfo *joinrel, JoinType jointype,
 			   JoinPathExtraData *extra, const JoinKeys *keys, int ninner,
 			   Path *outer_path, Path *inner_path)
 {
@@ -253,7 +273,7 @@ make_join_path(PlannerInfo *root, RelOptInfo *joinrel,
 	Path	   *outer;
 	Path	   *inner;
 
-	initial_cost_hashjoin(root, &workspace, JOIN_INNER, hashclauses,
+	initial_cost_hashjoin(root, &workspace, jointype, hashclauses,
 						  outer_path, inner_path, extra, false);
 	if (workspace.numbatches > 1 ||
 		table_bytes(inner_path, keys->nkeys, ninner) > (double) get_hash_memory_limit())
@@ -266,7 +286,7 @@ make_join_path(PlannerInfo *root, RelOptInfo *joinrel,
 	foreach_node(RestrictInfo, rinfo, keys->rinfos)
 		rinfo->outer_is_left = bms_is_subset(rinfo->left_relids,
 											 outer_path->parent->relids);
-	template = create_hashjoin_path(root, joinrel, JOIN_INNER, &workspace,
+	template = create_hashjoin_path(root, joinrel, jointype, &workspace,
 									extra, outer_path, inner_path, false,
 									extra->restrictlist, NULL, hashclauses);
 	template->jpath.path.total_cost *= JOIN_COST_FACTOR;
@@ -276,12 +296,13 @@ make_join_path(PlannerInfo *root, RelOptInfo *joinrel,
 	config.children = list_make2(outer, inner);
 	/* A target above the join becomes the node's, computed over the pairs. */
 	config.flags = CUSTOMPATH_SUPPORT_PROJECTION;
-	config.expressions = list_make4(keys->clauses, keys->outer, keys->inner,
-									keys->residual);
+	config.expressions = list_make5(keys->clauses, keys->outer, keys->inner,
+									keys->residual, keys->filters);
 	config.node_data = (Node *) list_make3(keys->outer_kinds, keys->inner_kinds,
-										   list_make2_int(extra->inner_unique ? 1 : 0,
+										   list_make3_int(extra->inner_unique ? 1 : 0,
 														  (int) Min(inner_path->rows,
-																	(double) PG_INT32_MAX)));
+																	(double) PG_INT32_MAX),
+														  (int) jointype));
 	return tess_path_create(&config);
 }
 
@@ -299,17 +320,26 @@ join_pathlist(PlannerInfo *root, RelOptInfo *joinrel, RelOptInfo *outerrel,
 	if (previous_set_join_pathlist_hook != NULL)
 		previous_set_join_pathlist_hook(root, joinrel, outerrel, innerrel,
 										jointype, extra);
-	/* The core offers no hash join either without PGS_HASHJOIN. */
-	if (!*tess_runtime_api()->settings->enable || jointype != JOIN_INNER ||
+	/*
+	 * The core offers no hash join either without PGS_HASHJOIN. The kinds
+	 * that keep the outer side, which the node probes with: each outer
+	 * row's matches are known when its batch has been probed. RIGHT, the
+	 * LEFT join with the sides the other way, would need marks on the
+	 * table's records, as would FULL.
+	 */
+	if (!*tess_runtime_api()->settings->enable ||
+		(jointype != JOIN_INNER && jointype != JOIN_SEMI &&
+		 jointype != JOIN_ANTI && jointype != JOIN_LEFT) ||
 		(extra->pgs_mask & PGS_HASHJOIN) == 0 ||
-		!find_keys(root, extra->restrictlist, outerrel, innerrel, &keys) ||
+		!find_keys(root, joinrel, extra->restrictlist, outerrel, innerrel,
+				   jointype, &keys) ||
 		!target_supported(joinrel, innerrel, &keys, &ninner) ||
 		outer_path == NULL || inner_path == NULL ||
 		PATH_REQ_OUTER(outer_path) != NULL || PATH_REQ_OUTER(inner_path) != NULL ||
 		tess_runtime_kernels() == NULL)
 		return;
-	path = make_join_path(root, joinrel, extra, &keys, ninner, outer_path,
-						  inner_path);
+	path = make_join_path(root, joinrel, jointype, extra, &keys, ninner,
+						  outer_path, inner_path);
 	if (path != NULL)
 		add_path(joinrel, &path->path);
 
@@ -327,7 +357,7 @@ join_pathlist(PlannerInfo *root, RelOptInfo *joinrel, RelOptInfo *outerrel,
 		inner_path = get_cheapest_parallel_safe_total_inner(innerrel->pathlist);
 	if (inner_path == NULL)
 		return;
-	path = make_join_path(root, joinrel, extra, &keys, ninner,
+	path = make_join_path(root, joinrel, jointype, extra, &keys, ninner,
 						  linitial(outerrel->partial_pathlist), inner_path);
 	if (path == NULL || !path->path.parallel_safe ||
 		path->path.parallel_workers <= 0)
@@ -365,18 +395,52 @@ child_column(const TessPlanChild *child, const Var *var)
 	return column;
 }
 
-/* Whether the scan tuple already has this column. */
-static bool
-scan_has(List *scan, const Var *var)
+/* The scan tuple's entry of this column, or NULL. */
+static Var *
+scan_entry(List *scan, const Var *var)
 {
 	foreach_ptr(TargetEntry, entry, scan)
 	{
 		Var		   *other = (Var *) entry->expr;
 
 		if (other->varno == var->varno && other->varattno == var->varattno)
-			return true;
+			return other;
 	}
-	return false;
+	return NULL;
+}
+
+/* Whether the scan tuple already has this column. */
+static bool
+scan_has(List *scan, const Var *var)
+{
+	return scan_entry(scan, var) != NULL;
+}
+
+/*
+ * Above a LEFT join an inner column is marked as nulled by it, while the
+ * join's own clauses read it unmarked; the planner matches every Var of
+ * custom_exprs against the scan tuple's one entry of its column, marks
+ * included. The clauses' Vars take the entry's marks, which mean nothing
+ * to the executor: it reads the scan tuple's column either way.
+ */
+static Node *
+align_nullingrels(Node *node, List *scan)
+{
+	if (node == NULL)
+		return NULL;
+	if (IsA(node, Var))
+	{
+		Var		   *entry = scan_entry(scan, (Var *) node);
+		Var		   *var;
+
+		if (entry == NULL ||
+			bms_equal(entry->varnullingrels, ((Var *) node)->varnullingrels))
+			return node;
+		var = copyObject((Var *) node);
+		var->varnullingrels = bms_copy(entry->varnullingrels);
+		return (Node *) var;
+	}
+	return expression_tree_mutator(node, align_nullingrels, scan);
 }
 
 /*
@@ -399,7 +463,9 @@ join_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 	List	   *outer_keys;
 	List	   *inner_keys;
 	List	   *residual;
+	List	   *filters;
 	List	   *residual_batch = NIL;
+	List	   *filter_batch = NIL;
 	List	   *outer_columns = NIL;
 	List	   *inner_columns = NIL;
 	Relids		outer_relids;
@@ -410,16 +476,20 @@ join_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 	tess_path_get_info(best_path, &info);
 	if (!tess_plan_child(best_path, custom_plans, 0, &outer) ||
 		!tess_plan_child(best_path, custom_plans, 1, &inner) ||
-		list_length(info.expressions) != 4)
+		list_length(info.expressions) != 5)
 		elog(ERROR, "TessHashJoin expected two batch children");
 	hash_clauses = linitial(info.expressions);
 	outer_keys = lsecond(info.expressions);
 	inner_keys = lthird(info.expressions);
 	residual = lfourth(info.expressions);
+	filters = list_nth(info.expressions, 4);
 	/* In evaluation order, each in batches if the compiler takes it, else by rows. */
 	foreach_ptr(Node, clause, residual)
 		residual_batch = lappend_int(residual_batch,
 									 tess_expr_supports_filter(clause, 0) ? 1 : 0);
+	foreach_ptr(Node, clause, filters)
+		filter_batch = lappend_int(filter_batch,
+								   tess_expr_supports_filter(clause, 0) ? 1 : 0);
 	data = (List *) info.node_data;
 	outer_relids = outer.path->parent->relids;
 	for (int side = 0; side < 2; side++)
@@ -438,8 +508,8 @@ join_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 			wanted = lappend(wanted, makeTargetEntry((Expr *) var, 0, NULL, true));
 		foreach_node(Var, key, side == 0 ? outer_keys : inner_keys)
 			wanted = lappend(wanted, makeTargetEntry((Expr *) key, 0, NULL, true));
-		/* The residual clauses' columns, which the qual refers to. */
-		foreach_node(Var, var, pull_var_clause((Node *) residual, 0))
+		/* The clauses' columns, which the quals refer to. */
+		foreach_node(Var, var, pull_var_clause((Node *) list_make2(residual, filters), 0))
 			wanted = lappend(wanted, makeTargetEntry((Expr *) var, 0, NULL, true));
 		foreach_ptr(TargetEntry, entry, wanted)
 		{
@@ -474,6 +544,8 @@ join_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 	tess_plan_write_int_list(writer, "outer_kinds", linitial(data));
 	tess_plan_write_int_list(writer, "inner_kinds", lsecond(data));
 	tess_plan_write_int_list(writer, "residual_batch", residual_batch);
+	tess_plan_write_int_list(writer, "filter_batch", filter_batch);
+	tess_plan_write_int(writer, "jointype", lthird_int(lthird(data)));
 	tess_plan_write_int(writer, "inner_unique", linitial_int(lthird(data)));
 	tess_plan_write_int(writer, "inner_rows", lsecond_int(lthird(data)));
 
@@ -481,12 +553,14 @@ join_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 	config.layout_policy = TESS_LAYOUT_PROJECTED;
 	config.explicit_layout = &layout;
 	/*
-	 * The key clauses, then the residual ones in evaluation order: the
-	 * node shows and applies them all, and a plan qual would also be shown
-	 * by EXPLAIN as a filter.
+	 * The key clauses, the residual join clauses and the filters of an
+	 * outer join, each in evaluation order: the node shows and applies
+	 * them all, and a plan qual would also be shown by EXPLAIN as a filter.
 	 */
 	config.qual = NIL;
-	config.expressions = list_concat_copy(hash_clauses, residual);
+	config.expressions = (List *)
+		align_nullingrels((Node *) list_concat(list_concat_copy(hash_clauses, residual),
+											   filters), scan);
 	config.node_data = (Node *) tess_plan_writer_finish(writer);
 	config.scan_targetlist = scan;
 	config.scanrelid = 0;
