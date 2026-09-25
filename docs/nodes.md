@@ -373,7 +373,10 @@ a chain the [expression compiler](expr.md) accepts, with constants and
 parameters, by the chain over the batch, anything else row by row (see
 "Computing columns on demand" in [runtime.md](runtime.md)); expressions
 above the aggregates and `HAVING` are left to the plan's own projection
-and qualifier over the aggregates.
+and qualifier over the aggregates. With `GROUP BY` it stands in for the
+core's `HashAggregate`: each row finds the record of its keys in the hash
+table of [table.md](table.md), whose payload holds the group's aggregate
+states, and the groups go out in batches when the input ends.
 
 ### Planning
 
@@ -402,6 +405,26 @@ aggregates; their parameters alone go through `custom_exprs`, so that the
 planner counts them among the plan's and a node above that rescans its
 child only for a changed parameter of its own, a sort in a correlated
 subquery, does rescan the node.
+
+With `GROUP BY` the hook takes the grouping expressions of the query,
+1 to 16 int4 or int8 values the expression compiler accepts (a bare
+column or a chain such as `c % 10`), without grouping sets, and puts them
+first in the scan tuple, before the aggregates, which may then number up
+to 64, since each has a flag bit in the group's payload; a grouping
+without aggregates is accepted too. Every expression above the grouping
+must be made of the grouping expressions, the aggregates and constants,
+as the planner will rewrite it: a column the primary key makes
+functionally dependent is not, and the core keeps such a query. The
+templates are the core's `HashAggregate` paths, whose rows are the
+planner's estimate of the groups, and there is no path when the table of
+that many groups (a record of a header, a slot per key and a payload of a
+flags word and a word per aggregate, with the buckets) would exceed
+`hash_mem`: the node keeps every group in memory, and a table larger than
+the planner expected is kept rather than split, as for `TessHashJoin`.
+PostgreSQL puts a grouping expression whole into the child's target, so
+a key is resolved to the child's column that holds it, which the child
+computes; the plan data (`tessera.agg`, version 1) records the arguments,
+the keys and the estimate of the groups.
 
 The hook also puts the node under a `Gather`, in place of the core's
 partial aggregate, when the core built partial aggregate paths for the
@@ -443,7 +466,29 @@ is 0. The row is built in the scan slot, `HAVING` is evaluated over it, the
 plan's projection runs when the targets are not the bare aggregates, and
 the row is published as a one-row batch: a batch-aware parent such as
 `TessLimit` reads the batch, an ordinary parent the row. The next call
-returns nothing. Rescan passes changed parameters on to the child, since
+returns nothing.
+
+With `GROUP BY` the keys are the projection's first computed columns and
+the table lives in a memory context of its own, created at the first
+execution for the planner's estimate of the groups (256 at least). Per
+batch the keys are hashed in key order with NULL as a key of its own
+(`TESS_NULL_KEYS_GROUP`), so rows with NULL keys form one group, and
+`tess_table_find_or_insert` gives each row the record of its group,
+creating it with a zero payload; the rows left pending when the table is
+full go in after the region doubles (`repalloc` and `tess_table_grow`).
+Each aggregate then folds the batch into the records' states with
+`tess_table_accumulate`, one call per aggregate and batch: `count(*)`
+and `count(x)` add one, `sum`, `min` and `max` take the non-NULL values
+and set the aggregate's flag bit, so a group without a value stays NULL.
+When the input ends, `tess_table_scan` walks the groups 64 at a time,
+`tess_table_gather_key` and `tess_table_gather` bring their keys and
+states, and each group is built in the scan slot, `HAVING` is evaluated
+over it and the plan's projection runs, the rows that pass going into a
+batch of up to 64 rows: a batch-aware parent reads one batch per call, a
+row-wise one the rows one by one; a batch `HAVING` leaves empty is not
+published. The order of the groups is the table's insertion order and is
+not promised, as for the core's `HashAggregate`. A rescan builds the
+table again from the rescanned child. Rescan passes changed parameters on to the child, since
 the core does that for outer and inner plans only, and resets the values.
 The node forwards no tuple bound, as the core's aggregate does not. Under
 a `Gather` every participant runs the node over its share of the child's
@@ -454,11 +499,14 @@ chunk, a worker attaches to its own, each stores its counters when the
 executor shuts the node down after the plan's last row, and the leader
 shows the totals.
 
-`EXPLAIN` shows `HAVING` as the core's `Filter` and `Partial Mode:
-Partial` under a `Gather`; with `ANALYZE`, the batches and rows read from
-the child, the batch function calls, and the `Computed Datums` of the
-arguments, by chains and row by row together, summed over the
-participants of a parallel plan.
+`EXPLAIN` shows the grouping expressions as the core's `Group Key`,
+`HAVING` as the core's `Filter` and `Partial Mode: Partial` under a
+`Gather`; with `ANALYZE`, the batches and rows read from the child, the
+batch function calls (per aggregate and batch with `GROUP BY`), the
+`Computed Datums` of the keys and the arguments, by chains and row by row
+together, and with `GROUP BY` the groups, the times the table grew, its
+`Memory Usage` and `Overrun`, what of it exceeded `hash_mem` (shown only
+then), summed over the participants of a parallel plan.
 
 ### Tests
 
@@ -476,8 +524,16 @@ chain; `count` of a text column; a bigint column with `min`, `max` and
 of bigint with an integer constant, the cast of an int4 column as an
 argument, the bigint extremes under a single-copy `Gather` and the
 overflow of a bigint chain; and the core keeping `DISTINCT` and `FILTER`
-in the aggregate, `GROUP BY`, a window function, an empty relation,
-`sum` over bigint, `avg`, the switch off and the kernels module absent. The parallel
+in the aggregate, a window function, an empty relation,
+`sum` over bigint, `avg`, the switch off and the kernels module absent.
+With `GROUP BY`: a bare key and an expression key (computed by the scan),
+NULL keys as one group, two keys, expressions over the keys and the
+aggregates, `HAVING` over a filter, grouping without aggregates, a
+constant target, an empty input, one group, int8 keys and extremes, a
+grouping over the hash join and in a rescanned subquery, 100 000 groups
+against an estimate of 200 (the table grows), a sort above reading the
+groups row by row; and the core keeping grouping sets, a text key, a
+functionally dependent column and a disabled hash aggregation. The parallel
 suite (`test/sql/parallel.sql`) runs the node under a `Gather` with two
 workers: the five aggregates with and without a clause, chains and
 row-wise arguments, expressions above, `HAVING` true and false,
