@@ -9,6 +9,7 @@
 #include "nodes/nodeFuncs.h"
 #include "optimizer/optimizer.h"
 #include "utils/datum.h"
+#include "utils/expandeddatum.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "storage/barrier.h"
@@ -87,6 +88,22 @@ enum
  */
 #define JOIN_STAGING_WORDS (256 * 1024 / 8)
 
+/*
+ * A shared table's by-reference inner values live in blocks of the
+ * query's dynamic shared memory, each participant filling blocks of this
+ * size, a value larger than a quarter of one getting a block of its own;
+ * a payload word holds the value's dsa_pointer, 0 for NULL. Every block
+ * starts with the next one in a list the table frees them by.
+ */
+#define JOIN_VALUE_BLOCK (64 * 1024)
+
+typedef struct JoinValueBlock
+{
+	dsa_pointer next;
+} JoinValueBlock;
+
+#define JOIN_VALUE_HEADER MAXALIGN(sizeof(JoinValueBlock))
+
 /* The part of the node's DSM chunk a shared build uses, before the counters. */
 typedef struct JoinShared
 {
@@ -99,6 +116,9 @@ typedef struct JoinShared
 	/* The shared Bloom filter, sized with the table; one participant builds it. */
 	dsa_pointer filter;
 	Size		filter_words;
+	/* Every block of by-reference values, under the lock. */
+	slock_t		values_lock;
+	dsa_pointer values;
 } JoinShared;
 
 /* Which child a column of the scan tuple comes from. */
@@ -302,6 +322,10 @@ typedef struct TessHashJoinState
 	dsa_pointer *staged;
 	Size	   *staged_used;
 	uint64		staged_rows;
+	/* The block this participant copies by-reference values into, and its bytes. */
+	dsa_pointer value_block;
+	Size		value_used;
+	Size		value_bytes;
 } TessHashJoinState;
 
 static const CustomExecMethods join_exec_methods;
@@ -485,6 +509,66 @@ grow_table(TessHashJoinState *state)
 	note_memory(state);
 }
 
+static dsa_area *query_dsa(TessHashJoinState *state);
+
+/* A block of `size` bytes for by-reference values, entered in the table's list. */
+static dsa_pointer
+new_value_block(TessHashJoinState *state, Size size)
+{
+	dsa_area   *area = query_dsa(state);
+	dsa_pointer block = dsa_allocate_extended(area, add_size(JOIN_VALUE_HEADER, size),
+											  DSA_ALLOC_HUGE);
+	JoinValueBlock *header = dsa_get_address(area, block);
+
+	SpinLockAcquire(&state->shared->values_lock);
+	header->next = state->shared->values;
+	state->shared->values = block;
+	SpinLockRelease(&state->shared->values_lock);
+	state->value_bytes = add_size(state->value_bytes, add_size(JOIN_VALUE_HEADER, size));
+	return block;
+}
+
+/*
+ * Copy a by-reference inner value into the query's shared memory, where
+ * every participant finds it, and return its dsa_pointer: the bytes
+ * datumCopy would copy, an expanded object flattened.
+ */
+static uint64
+store_shared_value(TessHashJoinState *state, Datum value, int16 typlen)
+{
+	ExpandedObjectHeader *expanded = NULL;
+	dsa_pointer target;
+	Size		size;
+	Size		aligned;
+
+	if (typlen == -1 && VARATT_IS_EXTERNAL_EXPANDED(DatumGetPointer(value)))
+	{
+		expanded = DatumGetEOHP(value);
+		size = EOH_get_flat_size(expanded);
+	}
+	else
+		size = datumGetSize(value, false, typlen);
+	aligned = MAXALIGN(size);
+	if (aligned > JOIN_VALUE_BLOCK / 4)
+		target = new_value_block(state, aligned) + JOIN_VALUE_HEADER;
+	else
+	{
+		if (!DsaPointerIsValid(state->value_block) ||
+			state->value_used + aligned > JOIN_VALUE_BLOCK - JOIN_VALUE_HEADER)
+		{
+			state->value_block = new_value_block(state, JOIN_VALUE_BLOCK - JOIN_VALUE_HEADER);
+			state->value_used = 0;
+		}
+		target = state->value_block + JOIN_VALUE_HEADER + state->value_used;
+		state->value_used += aligned;
+	}
+	if (expanded != NULL)
+		EOH_flatten_into(expanded, dsa_get_address(query_dsa(state), target), size);
+	else
+		memcpy(dsa_get_address(query_dsa(state), target), DatumGetPointer(value), size);
+	return (uint64) target;
+}
+
 /*
  * The payload of every valid row: the NULL bits of the kept inner
  * columns, then each value, a by-reference one copied into the node's
@@ -521,9 +605,12 @@ fill_payload(TessHashJoinState *state, TessBatch *batch, const TessRowMask *vali
 				record[1 + word] = 0;
 				state->null_columns |= UINT64CONST(1) << word;
 			}
+			else if (byval)
+				record[1 + word] = values.values[row];
+			else if (state->shared != NULL)
+				record[1 + word] = store_shared_value(state, values.values[row], typlen);
 			else
-				record[1 + word] = byval ? values.values[row] :
-					datumCopy(values.values[row], false, typlen);
+				record[1 + word] = datumCopy(values.values[row], false, typlen);
 		}
 		MemoryContextSwitchTo(oldcontext);
 	}
@@ -808,7 +895,8 @@ insert_shared_batch(TessHashJoinState *state, TessBatch *batch)
 	state->build_rows += count;
 	state->counters[JOIN_BUILD_ROWS] += count;
 	state->peak_memory = Max(state->peak_memory,
-							 sizeof(uint64) * JOIN_STAGING_WORDS * state->nstaged);
+							 add_size(sizeof(uint64) * JOIN_STAGING_WORDS * state->nstaged,
+									  state->value_bytes));
 }
 
 /* BUILD: this participant's share of the inner side, then its report. */
@@ -910,6 +998,14 @@ free_shared_table(TessHashJoinState *state)
 		dsa_free(query_dsa(state), state->shared->region);
 		state->shared->region = InvalidDsaPointer;
 	}
+	while (DsaPointerIsValid(state->shared->values))
+	{
+		dsa_pointer block = state->shared->values;
+
+		state->shared->values =
+			((JoinValueBlock *) dsa_get_address(query_dsa(state), block))->next;
+		dsa_free(query_dsa(state), block);
+	}
 	if (DsaPointerIsValid(state->shared->filter))
 	{
 		dsa_free(query_dsa(state), state->shared->filter);
@@ -932,10 +1028,10 @@ build_shared(TessHashJoinState *state)
 {
 	uint32		reply = 0;
 
-	for (int word = 0; word < state->npayload; word++)
-		if (!state->typbyvals[state->payload_columns[word]])
-			elog(ERROR, "TessHashJoin cannot share a by-reference inner column");
 	state->compact_decided = false;
+	state->value_block = InvalidDsaPointer;
+	state->value_used = 0;
+	state->value_bytes = 0;
 	state->build_rows = 0;
 	state->duplicates = 0;
 	state->null_columns = 0;
@@ -1080,6 +1176,18 @@ gather_inner(TessHashJoinState *state, int word)
 											  sizeof(uint64) * (1 + word),
 											  state->inner_values[word],
 											  &state->status));
+	/* A shared table holds a by-reference value's dsa_pointer: its address here. */
+	if (state->shared != NULL && !state->typbyvals[state->payload_columns[word]])
+	{
+		dsa_area   *area = query_dsa(state);
+		Datum	   *values = state->inner_values[word];
+
+		while ((row = tess_row_mask_next(&round, row)) >= 0)
+			if (values[row] != 0)
+				values[row] = PointerGetDatum(dsa_get_address(area,
+															  (dsa_pointer) values[row]));
+		row = -1;
+	}
 	if (nullable)
 		while ((row = tess_row_mask_next(&round, row)) >= 0)
 			state->inner_isnull[word][row] =
@@ -2284,6 +2392,8 @@ init_shared(TessHashJoinState *state)
 	state->shared->region_len = 0;
 	state->shared->filter = InvalidDsaPointer;
 	state->shared->filter_words = 0;
+	SpinLockInit(&state->shared->values_lock);
+	state->shared->values = InvalidDsaPointer;
 	check(state, state->kernels->build_counters_init(state->shared->counters,
 													 &state->status));
 	memset(&state->participant, 0, sizeof(state->participant));

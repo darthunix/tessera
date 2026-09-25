@@ -1596,7 +1596,8 @@ SELECT join_same($$SELECT count(*), sum(jprobe.v) FROM jprobe WHERE NOT EXISTS (
  1 rows, hash 8641ae42b30194e539434992596ad8d1
 (1 row)
 
--- A by-reference inner column: a table in each participant.
+-- By-reference inner columns: their values live in the query's shared
+-- memory, in blocks of each participant's, and the payload holds where.
 EXPLAIN (COSTS OFF) SELECT count(*), max(jd.label) FROM jbig JOIN jd ON jbig.fk = jd.id;
                              QUERY PLAN                              
 ---------------------------------------------------------------------
@@ -1606,9 +1607,109 @@ EXPLAIN (COSTS OFF) SELECT count(*), max(jd.label) FROM jbig JOIN jd ON jbig.fk 
          ->  Partial Aggregate
                ->  Parallel Custom Scan (TessHashJoin)
                      Hash Cond: (jd.id = jbig.fk)
+                     Shared Table: true
                      ->  Parallel Custom Scan (TessHeapScan) on jbig
-                     ->  Custom Scan (TessHeapScan) on jd
-(8 rows)
+                     ->  Parallel Custom Scan (TessHeapScan) on jd
+(9 rows)
+
+SELECT join_same($$SELECT jbig.v, jd.label FROM jbig JOIN jd ON jbig.fk = jd.id$$);
+                     join_same                     
+---------------------------------------------------
+ 17150 rows, hash 66215cf3951486f752d1e0134f61067e
+(1 row)
+
+SELECT join_same($$SELECT count(*), count(jd.label), max(jd.label) FROM jbig LEFT JOIN jd ON jbig.fk = jd.id$$);
+                   join_same                   
+-----------------------------------------------
+ 1 rows, hash 1e8e8419f462edc4fa0716d5fcc6b977
+(1 row)
+
+SELECT join_same($$SELECT count(*) FROM jbig WHERE EXISTS (SELECT 1 FROM jd WHERE jd.id = jbig.fk AND jd.label <> 'd' || jbig.v)$$);
+                   join_same                   
+-----------------------------------------------
+ 1 rows, hash df3ab48039bb47dd7ebd5ec2bbcc905c
+(1 row)
+
+-- numeric and text with NULLs, values of 32 to 1920 bytes over many
+-- blocks; a value computed from them goes out above the join, so the
+-- table keeps the stored ones.
+CREATE TABLE jref (k int, n numeric, t text);
+INSERT INTO jref
+SELECT g, CASE WHEN g % 4 = 0 THEN NULL ELSE g / 7.0 END,
+       CASE WHEN g % 5 = 0 THEN NULL ELSE repeat(md5(g::text), 1 + g % 60) END
+FROM generate_series(1, 20000) AS g;
+ANALYZE jref;
+CREATE TABLE jrefprobe AS SELECT g % 25000 AS k, g AS v FROM generate_series(1, 60000) AS g;
+ANALYZE jrefprobe;
+EXPLAIN (COSTS OFF) SELECT count(*), sum(jref.n), max(jref.t) FROM jrefprobe JOIN jref ON jrefprobe.k = jref.k;
+                                QUERY PLAN                                
+--------------------------------------------------------------------------
+ Finalize Aggregate
+   ->  Gather
+         Workers Planned: 2
+         ->  Partial Aggregate
+               ->  Parallel Custom Scan (TessHashJoin)
+                     Hash Cond: (jrefprobe.k = jref.k)
+                     Shared Table: true
+                     ->  Parallel Custom Scan (TessHeapScan) on jrefprobe
+                     ->  Parallel Custom Scan (TessHeapScan) on jref
+(9 rows)
+
+SELECT join_same($$SELECT count(*), sum(jref.n), count(jref.t), sum(length(jref.t)), max(jref.t) FROM jrefprobe JOIN jref ON jrefprobe.k = jref.k$$);
+                   join_same                   
+-----------------------------------------------
+ 1 rows, hash 4512fa443bd2dc21fa2093a81282e181
+(1 row)
+
+SELECT join_same($$SELECT jrefprobe.v, jref.n, jref.t FROM jrefprobe LEFT JOIN jref ON jrefprobe.k = jref.k WHERE jrefprobe.v % 97 = 0$$);
+                    join_same                    
+-------------------------------------------------
+ 618 rows, hash 59f99c018252b1f14ffefff1b256366a
+(1 row)
+
+EXPLAIN (COSTS OFF) SELECT count(*), sum(length(big.t)) FROM jrefprobe JOIN (SELECT k, CASE WHEN k % 500 = 0 THEN repeat(t, 20) ELSE t END AS t FROM jref) AS big ON jrefprobe.k = big.k;
+                                QUERY PLAN                                
+--------------------------------------------------------------------------
+ Finalize Aggregate
+   ->  Gather
+         Workers Planned: 2
+         ->  Parallel Custom Scan (TessAgg)
+               Partial Mode: Partial
+               ->  Parallel Custom Scan (TessHashJoin)
+                     Hash Cond: (jrefprobe.k = jref.k)
+                     Shared Table: true
+                     ->  Parallel Custom Scan (TessHeapScan) on jrefprobe
+                     ->  Parallel Custom Scan (TessHeapScan) on jref
+(10 rows)
+
+SELECT join_same($$SELECT count(*), sum(length(big.t)) FROM jrefprobe JOIN (SELECT k, CASE WHEN k % 500 = 0 THEN repeat(t, 20) ELSE t END AS t FROM jref) AS big ON jrefprobe.k = big.k$$);
+                   join_same                   
+-----------------------------------------------
+ 1 rows, hash ea0e8991177620cd9d01d8be275e6d0b
+(1 row)
+
+-- A table that grows keeps its values, which stay where they are.
+CREATE TABLE jrefgrow (k int, t text);
+ANALYZE jrefgrow;
+INSERT INTO jrefgrow SELECT g % 400, 'g' || g FROM generate_series(1, 20000) AS g;
+SELECT join_same($$SELECT count(*), max(jrefgrow.t), sum(length(jrefgrow.t)) FROM jbig JOIN jrefgrow ON jbig.fk = jrefgrow.k$$);
+                   join_same                   
+-----------------------------------------------
+ 1 rows, hash 7a8f3416f88ed818b1bd034415696793
+(1 row)
+
+SELECT join_property($$SELECT count(*), max(jrefgrow.t) FROM jbig JOIN jrefgrow ON jbig.fk = jrefgrow.k$$, 'Table Grows') AS grows;
+ grows 
+-------
+ 1
+(1 row)
+
+-- A rescan of the Gather frees the blocks and fills new ones.
+SELECT join_same($$SELECT jsmall.k, (SELECT max(jref.t) FROM jrefprobe JOIN jref ON jrefprobe.k = jref.k WHERE jref.k > jsmall.k * 1000) FROM jsmall$$);
+                   join_same                    
+------------------------------------------------
+ 10 rows, hash 685dc11db67bb1ea4c8a91a2a1bf44b7
+(1 row)
 
 -- A rescan of the Gather builds the shared table anew.
 SELECT join_same($$SELECT jsmall.k, (SELECT count(*) FROM jprobe JOIN jbuild ON jprobe.k = jbuild.k WHERE jbuild.w > jsmall.k * 100) FROM jsmall$$);
@@ -1689,7 +1790,7 @@ EXPLAIN (COSTS OFF) SELECT count(*) FROM jf JOIN jd ON jf.fk = jd.id;
 (6 rows)
 
 RESET tessera.enable;
-DROP TABLE jd, jf, jdup, jsmall, jempty, jgrow, jbig, jpair, jbuild, jprobe, jhit;
+DROP TABLE jd, jf, jdup, jsmall, jempty, jgrow, jbig, jpair, jbuild, jprobe, jhit, jref, jrefprobe, jrefgrow;
 DROP FUNCTION join_property(text, text);
 DROP FUNCTION join_explain(text);
 DROP FUNCTION join_many();

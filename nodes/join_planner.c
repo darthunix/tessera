@@ -10,7 +10,6 @@
 #include "optimizer/paths.h"
 #include "optimizer/restrictinfo.h"
 #include "utils/fmgroids.h"
-#include "utils/lsyscache.h"
 
 #include "tessera/expr.h"
 #include "tessera/kernel_ops.h"
@@ -316,22 +315,6 @@ make_join_path(PlannerInfo *root, RelOptInfo *joinrel, JoinType jointype,
 	return tess_path_create(&config);
 }
 
-/* Every inner column of the join's target and clauses is passed by value. */
-static bool
-inner_by_value(RelOptInfo *joinrel, RelOptInfo *innerrel, const JoinKeys *keys)
-{
-	List	   *vars = list_concat(pull_var_clause((Node *) joinrel->reltarget->exprs, 0),
-								   pull_var_clause((Node *) list_make2(keys->residual,
-																	   keys->filters), 0));
-
-	foreach_node(Var, var, vars)
-	{
-		if (bms_is_member(var->varno, innerrel->relids) && !get_typbyval(var->vartype))
-			return false;
-	}
-	return true;
-}
-
 static void
 join_pathlist(PlannerInfo *root, RelOptInfo *joinrel, RelOptInfo *outerrel,
 			  RelOptInfo *innerrel, JoinType jointype,
@@ -394,12 +377,9 @@ join_pathlist(PlannerInfo *root, RelOptInfo *joinrel, RelOptInfo *outerrel,
 	/*
 	 * A shared table, where the core offers a Parallel Hash: the inner
 	 * side's partial path divides the build among the participants too,
-	 * into one table in the query's shared memory. Its payload must not
-	 * hold a pointer into one participant's memory, so the kept inner
-	 * columns are passed by value.
+	 * into one table in the query's shared memory.
 	 */
-	if (!enable_parallel_hash || innerrel->partial_pathlist == NIL ||
-		!inner_by_value(joinrel, innerrel, &keys))
+	if (!enable_parallel_hash || innerrel->partial_pathlist == NIL)
 		return;
 	path = make_join_path(root, joinrel, jointype, extra, &keys, ninner,
 						  linitial(outerrel->partial_pathlist),

@@ -612,11 +612,7 @@ offers a second partial path with a shared table: the inner side's
 partial path divides the build among the participants too, into one
 table in the query's dynamic shared memory; its template is the core's
 Parallel Hash join, and the table may take every participant's
-`hash_mem`, as the core's does. A record's payload must not hold a
-pointer into one participant's memory, so the path needs every inner
-column of the join's target and clauses to be passed by value; with a
-by-reference one only the path with a table in each participant
-remains. The cheaper of the two wins.
+`hash_mem`, as the core's does. The cheaper of the two wins.
 
 The plan's scan tuple is the join's columns, the outer side's first, and
 the keys of both sides and the residual clauses' columns, which the
@@ -706,8 +702,16 @@ inserts the inner batches its partial scan hands it with
 256 kB buffers of shared memory with `tess_table_stage`, and reports
 them; when some were staged, the elected one copies the header and the
 records into a region for every record and grows the table there, and
-each participant adds its buffers with `tess_table_insert_staged`. The
-barrier's waits stay in the node, since they may raise an error. Then
+each participant adds its buffers with `tess_table_insert_staged`. A
+by-reference inner value cannot be a pointer into one participant's
+memory: each participant copies its rows' values into 64 kB blocks of
+the query's dynamic shared memory (a value larger than a quarter of one
+into a block of its own, an expanded object flattened, a TOAST pointer
+as it is), the payload word holding the value's `dsa_pointer`, and a
+round's values are turned into addresses of the probing participant
+(`dsa_get_address`) when a parent first asks for the column. The blocks
+are entered in a list under a spinlock, by which the table frees them.
+The barrier's waits stay in the node, since they may raise an error. Then
 every participant probes the one table; its chains are not grouped, so
 the next record of a key is found by `tess_table_next_match`, rounds go
 over the outer batch, since the duplicates are not known, and there is
@@ -831,5 +835,7 @@ shared table: inner, semi, anti and left joins compared with the core,
 duplicate keys, an inner side past the estimate whose table grows, the
 leader not taking part, a rescan of the `Gather` from a correlated
 subquery, the counters of the growth (one build, the overflow, the
-buckets), one shared Bloom filter built for all, and the path with a
-table in each participant for a by-reference inner column.
+buckets), one shared Bloom filter built for all, and by-reference inner
+columns: text in the target and in a join clause, numeric and text with
+NULLs over many value blocks under inner and left joins, a table with
+text that grows, and a rescan that frees the blocks and fills new ones.
