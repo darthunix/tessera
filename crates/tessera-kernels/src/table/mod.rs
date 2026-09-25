@@ -345,6 +345,13 @@ impl<'a> Table<'a> {
         bloom::fill(&self.region, &self.layout, words)
     }
 
+    /// Build a shared filter of this table's records unless another
+    /// participant has claimed it: true for the one that built it. Call
+    /// it, like [`Table::bloom`], while the table takes no insertions.
+    pub fn try_build_bloom(&self, filter: &bloom::SharedFilter<'_>) -> Result<bool> {
+        bloom::try_build(&self.region, &self.layout, filter)
+    }
+
     /// The record at an offset a call of this table returned.
     pub fn record(&self, offset: u32) -> Result<Record<'_>> {
         Ok(Access::new(&self.region, &self.layout)
@@ -536,6 +543,80 @@ impl<'a> TableMut<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::int32::murmurhash32;
+    use tessera_core::ColumnView;
+
+    /// A region's base, which the threads of a test attach to.
+    struct Base(*mut u8);
+    // SAFETY: every thread accesses the region only through tables.
+    unsafe impl Sync for Base {}
+
+    impl Base {
+        fn get(&self) -> *mut u8 {
+            self.0
+        }
+    }
+
+    #[test]
+    fn one_of_four_threads_builds_a_shared_filter_every_key_passes() {
+        let config = TableConfig {
+            keys: &[KeyKind::Int32],
+            payload_size: 0,
+        };
+        let count = 200;
+        let mut region = vec![0_u64; region_size(&config, count).unwrap() / 8];
+        let len = region.len() * 8;
+        let base = Base(region.as_mut_ptr().cast::<u8>());
+        let keys: Vec<i32> = (0..count as i32).map(|key| key * 7).collect();
+        let hashes: Vec<u32> = keys.iter().map(|&key| murmurhash32(key as u32)).collect();
+        let column = [ColumnView::try_new(&keys, None).unwrap()];
+        let all = vec![u64::MAX; 4];
+        let mut all_rows = all.clone();
+        all_rows[3] = (1 << (count - 192)) - 1;
+        {
+            // SAFETY: the vector is aligned to 8, and this table alone uses it.
+            let table = unsafe { TableMut::create(base.0, len, &config, count) }.unwrap();
+            let mut pending_words = all_rows.clone();
+            let mut pending = RowMask::try_new(count as usize, &mut pending_words).unwrap();
+            let mut offsets = vec![0; count as usize];
+            let inserted = table
+                .insert(&hashes, &column[..], None, &mut pending, &mut offsets)
+                .unwrap();
+            assert_eq!(inserted, count as usize);
+        }
+        let mut words = vec![0; bloom::shared_words_for(count).unwrap()];
+        let filter = bloom::SharedFilter::from_mut(&mut words).unwrap();
+        filter.init();
+        let rows = RowMaskView::try_new(count as usize, &all_rows).unwrap();
+        let mut found_words = [0; 4];
+        let mut found = RowMask::try_new(count as usize, &mut found_words).unwrap();
+        assert!(bloom::probe_shared(&filter, &hashes, &rows, &mut found).is_err());
+        let built: usize = std::thread::scope(|scope| {
+            let threads: Vec<_> = (0..4)
+                .map(|_| {
+                    scope.spawn(|| {
+                        // SAFETY: the table is built, and every thread only
+                        // reads it through a table of its own.
+                        let table = unsafe { Table::attach(base.get(), len) }.unwrap();
+                        let built = table.try_build_bloom(&filter).unwrap();
+                        while !filter.ready() {
+                            std::thread::yield_now();
+                        }
+                        let mut found_words = [0; 4];
+                        let mut found = RowMask::try_new(count as usize, &mut found_words).unwrap();
+                        bloom::probe_shared(&filter, &hashes, &rows, &mut found).unwrap();
+                        assert_eq!(found_words, all_rows.as_slice(), "a key was rejected");
+                        usize::from(built)
+                    })
+                })
+                .collect();
+            threads
+                .into_iter()
+                .map(|thread| thread.join().unwrap())
+                .sum()
+        });
+        assert_eq!(built, 1);
+    }
 
     #[test]
     fn a_misaligned_or_odd_region_is_refused() {
@@ -543,7 +624,7 @@ mod tests {
             keys: &[KeyKind::Int32],
             payload_size: 0,
         };
-        let mut words = vec![0; region_size(&config, 1000).unwrap().div_ceil(8) + 2];
+        let mut words = vec![0_u64; region_size(&config, 1000).unwrap().div_ceil(8) + 2];
         let len = words.len() * 8 - 16;
         let base = words.as_mut_ptr().cast::<u8>();
         // SAFETY: `base + 4` and `base + 8` with `len` bytes lie inside the

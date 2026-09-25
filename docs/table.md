@@ -198,6 +198,23 @@ shared table:
   `found` whole with the rows of `rows` whose bits are all set; the two
   masks must not share words.
 
+A filter next to a shared table (plan item 5.5) is shared too, and the
+Rust kernels already have it: `bloom::SharedFilter` is a state word
+(none, building, ready) and then the filter's words,
+`bloom::shared_words_for(records)` in all, cleared by one participant
+before the table is built. Each participant decides by its own batches
+whether it wants the filter; `Table::try_build_bloom` lets the first
+that does claim it with a compare-and-swap of the state, fill it alone
+and mark it ready with release, and returns false to the others, which
+wait for nothing: `bloom::probe_shared` checks a batch only once the
+state reads ready with acquire, and until then the participant probes
+the table without the filter. A participant that never wants the filter
+leaves nothing half done. The C API for it comes with 5.5; `make
+rust-loom` checks the protocol: two participants racing to build it, a
+reader that sees it ready and then every bit the builder set, and a
+relaxed state that the model catches letting a reader see an unfilled
+filter.
+
 ## Several participants
 
 Over shared memory, insertions may run in several processes at once, and
