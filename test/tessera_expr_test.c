@@ -13,6 +13,7 @@
 #include "utils/builtins.h"
 #include "utils/fmgroids.h"
 #include "utils/lsyscache.h"
+#include "utils/array.h"
 #include "utils/memutils.h"
 
 #include "tessera/expr.h"
@@ -69,6 +70,76 @@ a(void)
 {
 	return var(1, INT4OID);
 }
+
+static Node *
+or2(Node *left, Node *right)
+{
+	return (Node *) make_orclause(list_make2(left, right));
+}
+
+static Node *
+and2(Node *left, Node *right)
+{
+	return (Node *) make_andclause(list_make2(left, right));
+}
+
+static Node *
+not1(Node *arg)
+{
+	return (Node *) make_notclause((Expr *) arg);
+}
+
+static Node *
+nulltest(Node *arg, NullTestType type)
+{
+	NullTest   *test = makeNode(NullTest);
+
+	test->arg = (Expr *) arg;
+	test->nulltesttype = type;
+	test->location = -1;
+	return (Node *) test;
+}
+
+static Node *
+bool_test(Node *arg, BoolTestType type)
+{
+	BooleanTest *test = makeNode(BooleanTest);
+
+	test->arg = (Expr *) arg;
+	test->booltesttype = type;
+	test->location = -1;
+	return (Node *) test;
+}
+
+/* left op ANY (or ALL) of a constant int4 array; a NULL element when nulls say. */
+static Node *
+array_op(const char *name, Node *left, bool use_or, const int32 *values,
+		 const bool *nulls, int count)
+{
+	Datum	   *elements = palloc_array(Datum, Max(count, 1));
+	int			dims[1] = {count};
+	int			lbs[1] = {1};
+	ScalarArrayOpExpr *expr = makeNode(ScalarArrayOpExpr);
+	ArrayType  *array;
+
+	for (int index = 0; index < count; index++)
+		elements[index] = Int32GetDatum(values[index]);
+	array = construct_md_array(elements, (bool *) nulls, 1, dims, lbs, INT4OID,
+							   4, true, TYPALIGN_INT);
+	expr->opno = OpernameGetOprid(list_make1(makeString(pstrdup(name))),
+								  INT4OID, INT4OID);
+	expr->opfuncid = get_opcode(expr->opno);
+	expr->useOr = use_or;
+	expr->inputcollid = InvalidOid;
+	expr->args = list_make2(left,
+							makeConst(INT4ARRAYOID, -1, InvalidOid, -1,
+									  PointerGetDatum(array), false, false));
+	expr->location = -1;
+	return (Node *) expr;
+}
+
+/* One more element than an IN list the compiler takes. */
+#define MAX_ARRAY 33
 
 /* A builder batch of (a int4, b int4, c text): a = 1..n with a NULL every
  * fifth row, b = 2a, c = 'r' || a. */
@@ -201,7 +272,30 @@ tessera_test_expr_supports(PG_FUNCTION_ARGS)
 	result &= check(25, tess_expr_supports_filter(op("=", a(), var(2, INT4OID)), 0));
 	result &= check(208, tess_expr_supports_filter(op(">", var(2, INT4OID), op("*", a(), int4(10))), 0));
 	result &= check(209, tess_expr_supports_filter(op(">", op("+", var(2, INT4OID), int4(1)), op("*", a(), int4(10))), 0));
-	result &= check(26, !tess_expr_supports_filter((Node *) make_andclause(list_make2(op(">", a(), int4(5)), op("<", a(), int4(9)))), 0));
+	/* Conditions of several parts. */
+	result &= check(26, tess_expr_supports_filter((Node *) make_andclause(list_make2(op(">", a(), int4(5)), op("<", a(), int4(9)))), 0));
+	result &= check(44, tess_expr_supports_filter(or2(op(">", a(), int4(5)), not1(op("<", a(), var(2, INT4OID)))), 0));
+	result &= check(45, tess_expr_supports_filter(nulltest(var(3, TEXTOID), IS_NOT_NULL), 0));
+	result &= check(46, tess_expr_supports_filter(bool_test(op(">", a(), int4(5)), IS_UNKNOWN), 0));
+	{
+		int32		few[3] = {1, 3, 5};
+		int32		many[MAX_ARRAY];
+		NullTest   *row_test = (NullTest *) nulltest(a(), IS_NULL);
+		ScalarArrayOpExpr *param_array;
+
+		for (int index = 0; index < MAX_ARRAY; index++)
+			many[index] = index;
+		result &= check(47, tess_expr_supports_filter(array_op("=", a(), true, few, NULL, 3), 0));
+		result &= check(48, !tess_expr_supports_filter(array_op("=", a(), true, many, NULL, MAX_ARRAY), 0));
+		param_array = (ScalarArrayOpExpr *) array_op("=", a(), true, few, NULL, 3);
+		lsecond(param_array->args) = makeNode(Param);
+		((Param *) lsecond(param_array->args))->paramkind = PARAM_EXTERN;
+		((Param *) lsecond(param_array->args))->paramtype = INT4ARRAYOID;
+		result &= check(49, !tess_expr_supports_filter((Node *) param_array, 0));
+		row_test->argisrow = true;
+		result &= check(50, !tess_expr_supports_filter((Node *) row_test, 0));
+		result &= check(51, !tess_expr_supports_filter(or2(op(">", a(), int4(5)), op("=", var(3, TEXTOID), (Node *) makeConst(TEXTOID, -1, DEFAULT_COLLATION_OID, -1, CStringGetTextDatum("x"), false, false))), 0));
+	}
 	result &= check(27, !tess_expr_supports_filter(op("=", var(3, TEXTOID), (Node *) makeConst(TEXTOID, -1, DEFAULT_COLLATION_OID, -1, CStringGetTextDatum("x"), false, false)), 0));
 	PG_RETURN_BOOL(result);
 }
@@ -471,6 +565,58 @@ tessera_test_expr_filters(PG_FUNCTION_ARGS)
 	batch = filtered(op("<", a(), (Node *) makeConst(INT8OID, -1, InvalidOid, 8, Int64GetDatum(INT64CONST(5000000000)), false, true)), econtext);
 	result &= check(212, tess_row_mask_count(&batch->rows) == 56 &&
 		!tess_row_mask_contains(&batch->rows, 4));
+	/* Three-valued logic over masks: a is NULL on every fifth row. */
+	{
+		const int32 odd[3] = {1, 3, 5};
+		const int32 one_null[2] = {1, 0};
+		const bool	second_null[2] = {false, true};
+		const int32 bounds[2] = {3, 7};
+
+		batch = filtered(or2(op(">", a(), int4(60)), op("<", a(), int4(5))), econtext);
+		result &= check(213, tess_row_mask_count(&batch->rows) == 12);
+		batch = filtered(or2(op(">", a(), int4(60)), nulltest(a(), IS_NULL)), econtext);
+		result &= check(214, tess_row_mask_count(&batch->rows) == 22);
+		batch = filtered(not1(op(">", a(), int4(5))), econtext);
+		result &= check(215, tess_row_mask_count(&batch->rows) == 4 &&
+			!tess_row_mask_contains(&batch->rows, 4));
+		batch = filtered(not1(or2(op(">", a(), int4(5)), op("<", a(), int4(2)))), econtext);
+		result &= check(216, tess_row_mask_count(&batch->rows) == 3);
+		batch = filtered(bool_test(and2(op(">", a(), int4(5)), op("<", a(), int4(9))), IS_NOT_TRUE), econtext);
+		result &= check(217, tess_row_mask_count(&batch->rows) == 67);
+		batch = filtered(bool_test(op(">", a(), int4(5)), IS_UNKNOWN), econtext);
+		result &= check(218, tess_row_mask_count(&batch->rows) == 14);
+		/* The right side runs only where the left one is not true, or not
+		 * false: no division by zero on the row where a is 3. */
+		batch = filtered(or2(op("=", a(), int4(3)), op(">", op("/", int4(10), op("-", a(), int4(3))), int4(1))), econtext);
+		result &= check(219, tess_row_mask_count(&batch->rows) == 5);
+		batch = filtered(and2(op("<>", a(), int4(3)), op(">", op("/", int4(10), op("-", a(), int4(3))), int4(1))), econtext);
+		result &= check(220, tess_row_mask_count(&batch->rows) == 4);
+		/* Null tests over a value, a chain and a text column. */
+		batch = filtered(nulltest(a(), IS_NULL), econtext);
+		result &= check(221, tess_row_mask_count(&batch->rows) == 14);
+		batch = filtered(nulltest(op("+", a(), int4(1)), IS_NOT_NULL), econtext);
+		result &= check(222, tess_row_mask_count(&batch->rows) == 56);
+		batch = filtered(nulltest(var(3, TEXTOID), IS_NOT_NULL), econtext);
+		result &= check(223, tess_row_mask_count(&batch->rows) == 70);
+		/* Short lists: a NULL element leaves a non-match unknown. */
+		batch = filtered(array_op("=", a(), true, odd, NULL, 3), econtext);
+		result &= check(224, tess_row_mask_count(&batch->rows) == 2);
+		batch = filtered(array_op("=", a(), true, one_null, second_null, 2), econtext);
+		result &= check(225, tess_row_mask_count(&batch->rows) == 1);
+		batch = filtered(array_op("<>", a(), false, one_null, second_null, 2), econtext);
+		result &= check(226, tess_row_mask_count(&batch->rows) == 0);
+		batch = filtered(not1(array_op("=", a(), true, one_null, second_null, 2)), econtext);
+		result &= check(227, tess_row_mask_count(&batch->rows) == 0);
+		batch = filtered(array_op("<", a(), true, bounds, NULL, 2), econtext);
+		result &= check(228, tess_row_mask_count(&batch->rows) == 5);
+		/* A condition over a selection a previous one narrowed. */
+		batch = filtered(or2(op(">", a(), int4(60)), op("<", a(), int4(5))), econtext);
+		expr = tess_expr_compile_filter(or2(op("<", a(), int4(3)), op(">", a(), int4(68))), NULL, resolve, NULL);
+		tess_expr_bind(expr, batch, econtext, TESS_COLUMN_FOR_FILTER);
+		tess_expr_apply_filter(expr);
+		result &= check(229, tess_row_mask_count(&batch->rows) == 3 &&
+			tess_row_mask_contains(&batch->rows, 68));
+	}
 	/* a + b > 10: the other column as the step's operand. */
 	batch = filtered(op(">", op("+", a(), var(2, INT4OID)), int4(10)), econtext);
 	result &= check(207, tess_row_mask_count(&batch->rows) == 53 &&
@@ -529,6 +675,13 @@ tessera_test_expr_errors(PG_FUNCTION_ARGS)
 			expr = tess_expr_compile_value(op("*", op("+", a(), int4(1)), op("/", var(2, INT4OID), int4(0))), NULL, resolve, NULL);
 			tess_expr_bind(expr, batch, econtext, TESS_COLUMN_FOR_PROJECTION);
 			tess_expr_get_column(expr);
+			break;
+		case 9:
+			/* a = 3 AND 10 / (a - 3) > 1: the right side runs where the
+			 * left one is true, on the row where a is 3 too. */
+			expr = tess_expr_compile_filter(and2(op("=", a(), int4(3)), op(">", op("/", int4(10), op("-", a(), int4(3))), int4(1))), NULL, resolve, NULL);
+			tess_expr_bind(expr, batch, econtext, TESS_COLUMN_FOR_FILTER);
+			tess_expr_apply_filter(expr);
 			break;
 		case 8:
 			/* An operand whose column is unavailable. */

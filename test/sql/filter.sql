@@ -95,7 +95,7 @@ EXPLAIN (COSTS OFF) SELECT a FROM filter_t WHERE a > 100 AND c = 'r150';
 SELECT filter_same($$SELECT a FROM filter_t WHERE a > 100 AND c = 'r150'$$);
 -- The planner orders the text comparison after the cheaper int4 one.
 EXPLAIN (COSTS OFF) SELECT a FROM filter_t WHERE c = 'r150' AND a > 100;
--- A null test costs nothing and comes first: the node is not offered.
+-- A null test costs nothing and comes first; it runs in batches too.
 EXPLAIN (COSTS OFF) SELECT a FROM filter_t WHERE a > 100 AND c IS NOT NULL;
 -- An expensive clause moves behind a cheap batch one.
 CREATE FUNCTION filter_slow(x int) RETURNS boolean
@@ -190,6 +190,20 @@ RESET ROLE;
 DROP TABLE filter_rls;
 DROP ROLE regress_tessera_rls;
 
+-- Conditions of several parts in batches: OR, AND inside it, null tests,
+-- boolean tests and short IN lists, in three-valued logic; the right side
+-- of an OR runs only where the left one is not true.
+EXPLAIN (COSTS OFF) SELECT a FROM filter_t WHERE a < 10 OR b = 3;
+SELECT filter_same($$SELECT a, b FROM filter_t WHERE a < 10 OR b = 3$$);
+SELECT filter_same($$SELECT count(*) FROM filter_t WHERE a IS NULL OR (a > 190 AND b <> 3)$$);
+SELECT filter_same($$SELECT count(*) FROM filter_t WHERE (a > 100) IS NOT TRUE$$);
+SELECT filter_same($$SELECT count(*) FROM filter_t WHERE (a > 100) IS UNKNOWN$$);
+EXPLAIN (COSTS OFF) SELECT a FROM filter_t WHERE a IN (3, 5, 7, 14);
+SELECT filter_same($$SELECT a FROM filter_t WHERE a IN (3, 5, 7, 14)$$);
+SELECT filter_same($$SELECT count(*) FROM filter_t WHERE a NOT IN (3, NULL)$$);
+SELECT filter_same($$SELECT count(*) FROM filter_t WHERE a + 1 IN (4, NULL) OR b IN (1, 2)$$);
+SELECT filter_same($$SELECT count(*) FROM filter_t WHERE b = 0 OR 10 / b > 1$$);
+SELECT filter_same($$SELECT count(*) FROM filter_t WHERE c IS NOT NULL AND a + 1 IS NULL$$);
 -- A parallel worker runs the node from the plan's text form.
 SET debug_parallel_query = on;
 EXPLAIN (COSTS OFF) SELECT count(*) FROM filter_t WHERE a > 100;

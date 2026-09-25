@@ -351,7 +351,9 @@ the node away, the separate removal counts, a join of two filtered
 relations, the planner's order in front of a division by zero, a batch
 clause after a row-wise guard, a row-wise clause between batch ones, a
 policy's row-wise guard before a cheaper user division, two computed
-sides of a comparison and of a sum's argument, a parallel
+sides of a comparison and of a sum's argument, conditions of several
+parts (`OR`, null and boolean tests, `IN` and `NOT IN` with a NULL, a
+division behind an `OR`), a parallel
 worker, a scrollable cursor, an `UPDATE`, and the switch off. The
 parallel suite runs the node under a `Gather` with two workers (see
 TessHeapScan).
@@ -633,7 +635,8 @@ to an int4 one, three keys, and composite keys with duplicates under an
 aggregate and as rows; targets above the join in another order than the
 join's and expressions over both sides, as rows, under a sort, with
 rounds and a residual clause; a row-wise guard over both sides before a
-batch division, in either written order; residual clauses over int4 columns of both sides
+batch division, in either written order; an `OR` with a null test over
+both sides; residual clauses over int4 columns of both sides
 with NULLs, text, an OR over both sides, with rounds and compact
 batches, a text equality next to the key and a parameter of an outer
 query; three inner rows per key, duplicates on both sides

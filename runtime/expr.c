@@ -1,6 +1,7 @@
 #include "postgres.h"
 
 #include "catalog/pg_type_d.h"
+#include "utils/array.h"
 #include "executor/executor.h"
 #include "miscadmin.h"
 #include "nodes/makefuncs.h"
@@ -14,6 +15,8 @@
 #include "tessera/runtime.h"
 
 #define MAX_ARGS 2
+/* The most elements of an IN list compiled as an OR of comparisons. */
+#define MAX_ARRAY_ELEMENTS 32
 
 /* One registered call of the chain; args[column_arg] is the column. */
 typedef struct Step
@@ -32,6 +35,38 @@ typedef struct Step
 	ExprState  *scalars[MAX_ARGS];
 } Step;
 
+/* A node of a condition over the batch, in three-valued logic. */
+typedef enum CondKind
+{
+	COND_LEAF,					/* a filter: a predicate over a value */
+	COND_AND,
+	COND_OR,
+	COND_NOT,
+	COND_NULL_TEST,				/* IS [NOT] NULL over a value */
+	COND_BOOL_TEST				/* IS [NOT] TRUE, FALSE or UNKNOWN */
+} CondKind;
+
+typedef struct Cond
+{
+	CondKind	kind;
+	/* LEAF: the filter; NULL_TEST: the value tested. */
+	TessExpr   *expr;
+	bool		is_null;
+	BoolTestType test;
+	struct Cond **args;
+	int			nargs;
+	/*
+	 * Per evaluation over a selection: the rows where the condition is
+	 * true, those where it is unknown (NULL), and scratch for the rows a
+	 * child is evaluated over.
+	 */
+	TessRowMask truth;
+	TessRowMask unknown;
+	TessRowMask rest;
+	TessRowMask all_true;
+	int			capacity;
+} Cond;
+
 struct TessExpr
 {
 	MemoryContext context;
@@ -43,6 +78,8 @@ struct TessExpr
 	/* The predicate over the chain's result, when the expression is a filter. */
 	bool		filter;
 	Step		predicate;
+	/* A filter that is a condition of several parts instead: its root. */
+	Cond	   *cond;
 	/* The bound batch, and the selection computed over: its rows or a subset. */
 	TessBatch  *batch;
 	TessRowMask *rows;
@@ -125,6 +162,54 @@ call_of(Node *node, List **args, Oid *opno, Oid *inputcollid)
 }
 
 /*
+ * x op ANY (array) over a constant array of a few elements as the OR of
+ * x op element, and op ALL as the AND: an element NULL makes its
+ * comparison unknown, as the array operator's rules say. Anything else,
+ * a parameter, a NULL or empty or long array, as it is.
+ */
+static Node *
+array_as_clauses(ScalarArrayOpExpr *array_op)
+{
+	Const	   *array = (Const *) strip_relabel(lsecond(array_op->args));
+	ArrayType  *elements;
+	Oid			element_type;
+	int16		typlen;
+	bool		byval;
+	char		align;
+	Datum	   *values;
+	bool	   *nulls;
+	int			count;
+	List	   *clauses = NIL;
+
+	if (!IsA(array, Const) || array->constisnull)
+		return (Node *) array_op;
+	elements = DatumGetArrayTypeP(array->constvalue);
+	element_type = ARR_ELEMTYPE(elements);
+	get_typlenbyvalalign(element_type, &typlen, &byval, &align);
+	deconstruct_array(elements, element_type, typlen, byval, align, &values,
+					  &nulls, &count);
+	if (count == 0 || count > MAX_ARRAY_ELEMENTS)
+		return (Node *) array_op;
+	for (int index = 0; index < count; index++)
+	{
+		Expr	   *element = (Expr *) makeConst(element_type, -1,
+												 get_typcollation(element_type),
+												 typlen, values[index],
+												 nulls[index], byval);
+		OpExpr	   *clause = (OpExpr *) make_opclause(array_op->opno, BOOLOID,
+													  false,
+													  (Expr *) linitial(array_op->args),
+													  element, InvalidOid,
+													  array_op->inputcollid);
+
+		set_opfuncid(clause);
+		clauses = lappend(clauses, clause);
+	}
+	return (Node *) (array_op->useOr ? make_orclause(clauses) :
+					 make_andclause(clauses));
+}
+
+/*
  * The node with a call of an equivalent (a cross-type function such as
  * int48pl) replaced by the call it stands for: the equivalent function
  * over the arguments cast as the description says, a cast of a constant
@@ -143,6 +228,8 @@ expand(Node *node)
 	node = strip_relabel(node);
 	if (node == NULL)
 		return NULL;
+	if (IsA(node, ScalarArrayOpExpr))
+		return array_as_clauses((ScalarArrayOpExpr *) node);
 	function = call_of(node, &args, &opno, &inputcollid);
 	if (function == NULL || function->kind != TESS_FUNCTION_EQUIVALENT ||
 		function->struct_size < TESS_FUNCTION_EQUIVALENT_MIN_SIZE ||
@@ -335,18 +422,57 @@ tess_expr_supports_value(Node *node, Index relid)
 	return analyze_value(node, relid, &nvars);
 }
 
-bool
-tess_expr_supports_filter(Node *node, Index relid)
+/*
+ * Whether node is a supported condition: a filter, or AND, OR and NOT
+ * over supported conditions, IS [NOT] NULL over a supported value (a bare
+ * column of any type among them), IS [NOT] TRUE, FALSE or UNKNOWN over a
+ * supported condition, and an ANY or ALL over a short constant array.
+ */
+static bool
+analyze_cond(Node *node, Index relid)
 {
 	int			column_arg;
 	int			column_operand;
+	int			nvars;
 
+	check_stack_depth();
+	node = expand(node);
+	if (node == NULL)
+		return false;
+	if (IsA(node, BoolExpr))
+	{
+		foreach_ptr(Node, arg, ((BoolExpr *) node)->args)
+		{
+			if (!analyze_cond(arg, relid))
+				return false;
+		}
+		return true;
+	}
+	if (IsA(node, NullTest))
+	{
+		NullTest   *test = (NullTest *) node;
+
+		return !test->argisrow &&
+			analyze_value((Node *) test->arg, relid, &nvars);
+	}
+	if (IsA(node, BooleanTest))
+		return analyze_cond((Node *) ((BooleanTest *) node)->arg, relid);
 	return analyze_filter(node, relid, &column_arg, &column_operand);
+}
+
+bool
+tess_expr_supports_filter(Node *node, Index relid)
+{
+	return analyze_cond(node, relid);
 }
 
 static TessExpr *new_expr(Node *node, TessExprResolveVar resolve);
 static void compile_value(TessExpr *expr, Node *node, PlanState *parent,
 						  TessExprResolveVar resolve, void *context);
+static Cond *compile_cond(Node *node, PlanState *parent,
+						  TessExprResolveVar resolve, void *context);
+static void bind_selection(TessExpr *expr, TessRowMask *rows);
+static void eval_cond(Cond *cond, const TessRowMask *rows, bool want_unknown);
 
 /*
  * Set up the call of node, whose column argument was compiled already;
@@ -465,6 +591,59 @@ tess_expr_compile_value(Node *node, PlanState *parent,
 	return expr;
 }
 
+/* A supported condition, compiled: its filters and values, its scratch. */
+static Cond *
+compile_cond(Node *node, PlanState *parent, TessExprResolveVar resolve,
+			 void *context)
+{
+	Cond	   *cond = palloc0_object(Cond);
+	int			column_arg;
+	int			column_operand;
+
+	check_stack_depth();
+	node = expand(node);
+	if (IsA(node, BoolExpr))
+	{
+		BoolExpr   *bool_expr = (BoolExpr *) node;
+		int			index = 0;
+
+		cond->kind = bool_expr->boolop == AND_EXPR ? COND_AND :
+			bool_expr->boolop == OR_EXPR ? COND_OR : COND_NOT;
+		cond->nargs = list_length(bool_expr->args);
+		cond->args = palloc_array(Cond *, cond->nargs);
+		foreach_ptr(Node, arg, bool_expr->args)
+			cond->args[index++] = compile_cond(arg, parent, resolve, context);
+	}
+	else if (IsA(node, NullTest))
+	{
+		NullTest   *test = (NullTest *) node;
+
+		cond->kind = COND_NULL_TEST;
+		cond->is_null = test->nulltesttype == IS_NULL;
+		cond->expr = tess_expr_compile_value((Node *) test->arg, parent,
+											 resolve, context);
+	}
+	else if (IsA(node, BooleanTest))
+	{
+		BooleanTest *test = (BooleanTest *) node;
+
+		cond->kind = COND_BOOL_TEST;
+		cond->test = test->booltesttype;
+		cond->nargs = 1;
+		cond->args = palloc_array(Cond *, 1);
+		cond->args[0] = compile_cond((Node *) test->arg, parent, resolve,
+									 context);
+	}
+	else if (analyze_filter(node, 0, &column_arg, &column_operand))
+	{
+		cond->kind = COND_LEAF;
+		cond->expr = tess_expr_compile_filter(node, parent, resolve, context);
+	}
+	else
+		elog(ERROR, "Tessera received an unsupported batch condition");
+	return cond;
+}
+
 TessExpr *
 tess_expr_compile_filter(Node *node, PlanState *parent,
 						 TessExprResolveVar resolve, void *context)
@@ -477,7 +656,13 @@ tess_expr_compile_filter(Node *node, PlanState *parent,
 	int			column_operand;
 
 	if (!analyze_filter(node, 0, &column_arg, &column_operand))
-		elog(ERROR, "Tessera received an unsupported batch filter");
+	{
+		if (!analyze_cond(node, 0))
+			elog(ERROR, "Tessera received an unsupported batch filter");
+		expr->cond = compile_cond(node, parent, resolve, context);
+		expr->filter = true;
+		return expr;
+	}
 	node = expand(node);
 	call_of(node, &args, &opno, &inputcollid);
 	compile_value(expr, list_nth(args, column_arg), parent, resolve, context);
@@ -509,6 +694,17 @@ bind_selection(TessExpr *expr, TessRowMask *rows)
 		bind_selection(expr->predicate.operand, rows);
 }
 
+/* Every filter and value of a condition, bound to the batch. */
+static void
+bind_cond(Cond *cond, TessBatch *batch, ExprContext *econtext,
+		  TessColumnPurpose purpose)
+{
+	if (cond->expr != NULL)
+		tess_expr_bind(cond->expr, batch, econtext, purpose);
+	for (int index = 0; index < cond->nargs; index++)
+		bind_cond(cond->args[index], batch, econtext, purpose);
+}
+
 void
 tess_expr_bind(TessExpr *expr, TessBatch *batch, ExprContext *econtext,
 			   TessColumnPurpose purpose)
@@ -523,6 +719,8 @@ tess_expr_bind(TessExpr *expr, TessBatch *batch, ExprContext *econtext,
 			tess_expr_bind(expr->steps[index].operand, batch, econtext, purpose);
 	if (expr->filter && expr->predicate.operand != NULL)
 		tess_expr_bind(expr->predicate.operand, batch, econtext, purpose);
+	if (expr->cond != NULL)
+		bind_cond(expr->cond, batch, econtext, purpose);
 	bind_selection(expr, &batch->rows);
 }
 
@@ -683,6 +881,8 @@ tess_expr_get_column(TessExpr *expr)
 
 	if (batch == NULL)
 		elog(ERROR, "Tessera expression is not bound to a batch");
+	if (expr->cond != NULL)
+		elog(ERROR, "Tessera condition has no value column");
 	if (expr->ready)
 		return &expr->result;
 	nrows = expr->rows->nrows;
@@ -759,6 +959,216 @@ tess_expr_non_nulls(TessExpr *expr)
 	return &expr->non_nulls;
 }
 
+/* The masks of a condition node sized for nrows rows, cleared. */
+static void
+cond_masks(Cond *cond, int nrows)
+{
+	int			nwords = tess_row_mask_word_count(nrows);
+	TessRowMask *masks[] = {&cond->truth, &cond->unknown, &cond->rest,
+	&cond->all_true};
+
+	if (cond->capacity < nwords)
+	{
+		MemoryContext oldcontext = MemoryContextSwitchTo(GetMemoryChunkContext(cond));
+
+		for (int index = 0; index < lengthof(masks); index++)
+		{
+			if (masks[index]->bits != NULL)
+				pfree(masks[index]->bits);
+			masks[index]->bits = palloc_array(uint64, Max(nwords, 1));
+		}
+		cond->capacity = nwords;
+		MemoryContextSwitchTo(oldcontext);
+	}
+	for (int index = 0; index < lengthof(masks); index++)
+	{
+		masks[index]->nrows = nrows;
+		memset(masks[index]->bits, 0, sizeof(uint64) * Max(nwords, 1));
+	}
+}
+
+/* Whether no row of the mask is set. */
+static bool
+mask_empty(const TessRowMask *mask)
+{
+	int			nwords = tess_row_mask_word_count(mask->nrows);
+
+	for (int word = 0; word < nwords; word++)
+		if (mask->bits[word] != 0)
+			return false;
+	return true;
+}
+
+/* The leaf's scalar arguments: whether one of them is NULL. */
+static bool
+scalar_null(TessExpr *expr)
+{
+	const Step *step = &expr->predicate;
+
+	for (int position = 0; position < step->nargs; position++)
+	{
+		bool		isnull;
+
+		if (position == step->column_arg || position == step->column_operand)
+			continue;
+		(void) ExecEvalExprSwitchContext(step->scalars[position],
+										 expr->econtext, &isnull);
+		if (isnull)
+			return true;
+	}
+	return false;
+}
+
+/*
+ * Evaluate a condition over the selection rows, a subset of the bound
+ * batch's: cond->truth receives the rows where it is true and, when
+ * unknown is asked for, cond->unknown those where it is NULL; the others
+ * are false. A child runs only over the rows the executor would evaluate
+ * it for: the right side of an OR where the left is not true, of an AND
+ * where the left is not false, so a failure falls on the same rows.
+ */
+static void
+eval_cond(Cond *cond, const TessRowMask *rows, bool want_unknown)
+{
+	int			nrows = rows->nrows;
+	int			nwords = tess_row_mask_word_count(nrows);
+	uint64	   *truth;
+	uint64	   *unknown;
+	uint64	   *rest;
+
+	check_stack_depth();
+	cond_masks(cond, nrows);
+	truth = cond->truth.bits;
+	unknown = cond->unknown.bits;
+	rest = cond->rest.bits;
+	switch (cond->kind)
+	{
+		case COND_LEAF:
+			memcpy(truth, rows->bits, sizeof(uint64) * nwords);
+			bind_selection(cond->expr, &cond->truth);
+			if (want_unknown)
+			{
+				/* NULL in the value, the operand or a scalar. */
+				if (scalar_null(cond->expr))
+					memcpy(unknown, rows->bits, sizeof(uint64) * nwords);
+				else
+				{
+					const TessRowMask *value = tess_expr_non_nulls(cond->expr);
+					const Step *predicate = &cond->expr->predicate;
+					const TessRowMask *operand = predicate->operand != NULL ?
+						tess_expr_non_nulls(predicate->operand) : NULL;
+
+					for (int word = 0; word < nwords; word++)
+						unknown[word] = rows->bits[word] &
+							~(value->bits[word] &
+							  (operand != NULL ? operand->bits[word] : ~UINT64CONST(0)));
+				}
+			}
+			tess_expr_apply_filter(cond->expr);
+			break;
+		case COND_OR:
+			memcpy(rest, rows->bits, sizeof(uint64) * nwords);
+			for (int index = 0; index < cond->nargs && !mask_empty(&cond->rest); index++)
+			{
+				Cond	   *arg = cond->args[index];
+
+				eval_cond(arg, &cond->rest, want_unknown);
+				for (int word = 0; word < nwords; word++)
+				{
+					truth[word] |= arg->truth.bits[word];
+					if (want_unknown)
+						unknown[word] |= arg->unknown.bits[word];
+					rest[word] &= ~arg->truth.bits[word];
+				}
+			}
+			for (int word = 0; word < nwords; word++)
+				unknown[word] &= ~truth[word];
+			break;
+		case COND_AND:
+			memcpy(rest, rows->bits, sizeof(uint64) * nwords);
+			memcpy(cond->all_true.bits, rows->bits, sizeof(uint64) * nwords);
+			for (int index = 0; index < cond->nargs && !mask_empty(&cond->rest); index++)
+			{
+				Cond	   *arg = cond->args[index];
+				bool		last = index == cond->nargs - 1;
+
+				/* The next child runs where this one is true or unknown. */
+				eval_cond(arg, &cond->rest, !last || want_unknown);
+				for (int word = 0; word < nwords; word++)
+				{
+					cond->all_true.bits[word] &= arg->truth.bits[word];
+					rest[word] = arg->truth.bits[word] |
+						(!last || want_unknown ? arg->unknown.bits[word] : 0);
+				}
+			}
+			for (int word = 0; word < nwords; word++)
+			{
+				truth[word] = cond->all_true.bits[word];
+				if (want_unknown)
+					unknown[word] = rest[word] & ~truth[word];
+			}
+			break;
+		case COND_NOT:
+			eval_cond(cond->args[0], rows, true);
+			for (int word = 0; word < nwords; word++)
+			{
+				truth[word] = rows->bits[word] & ~cond->args[0]->truth.bits[word] &
+					~cond->args[0]->unknown.bits[word];
+				unknown[word] = cond->args[0]->unknown.bits[word];
+			}
+			break;
+		case COND_NULL_TEST:
+			{
+				const TessRowMask *present;
+
+				memcpy(rest, rows->bits, sizeof(uint64) * nwords);
+				bind_selection(cond->expr, &cond->rest);
+				present = tess_expr_non_nulls(cond->expr);
+				for (int word = 0; word < nwords; word++)
+					truth[word] = rows->bits[word] &
+						(cond->is_null ? ~present->bits[word] : present->bits[word]);
+				break;
+			}
+		case COND_BOOL_TEST:
+			{
+				Cond	   *arg = cond->args[0];
+
+				eval_cond(arg, rows, true);
+				for (int word = 0; word < nwords; word++)
+				{
+					uint64		yes = arg->truth.bits[word];
+					uint64		maybe = arg->unknown.bits[word];
+					uint64		no = rows->bits[word] & ~yes & ~maybe;
+					uint64		result;
+
+					switch (cond->test)
+					{
+						case IS_TRUE:
+							result = yes;
+							break;
+						case IS_NOT_TRUE:
+							result = no | maybe;
+							break;
+						case IS_FALSE:
+							result = no;
+							break;
+						case IS_NOT_FALSE:
+							result = yes | maybe;
+							break;
+						case IS_UNKNOWN:
+							result = maybe;
+							break;
+						default:
+							result = yes | no;
+							break;
+					}
+					truth[word] = result;
+				}
+				break;
+			}
+	}
+}
+
 void
 tess_expr_apply_filter(TessExpr *expr)
 {
@@ -767,6 +1177,16 @@ tess_expr_apply_filter(TessExpr *expr)
 
 	if (!expr->filter)
 		elog(ERROR, "Tessera expression is not a filter");
+	if (expr->cond != NULL)
+	{
+		if (expr->batch == NULL)
+			elog(ERROR, "Tessera expression is not bound to a batch");
+		eval_cond(expr->cond, expr->rows, false);
+		if (expr->rows->nrows > 0)
+			memcpy(expr->rows->bits, expr->cond->truth.bits,
+				   sizeof(uint64) * tess_row_mask_word_count(expr->rows->nrows));
+		return;
+	}
 	column = tess_expr_get_column(expr);
 	if (build_args(expr, &expr->predicate, column, args))
 	{

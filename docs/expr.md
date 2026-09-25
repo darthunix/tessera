@@ -40,8 +40,8 @@ commutator's function is implemented: `100 - a` is fine because the int4
 and int8 arithmetic accept any shape; `7 < a` becomes `a > 7`. A scalar argument
 may be an expression of its own without a Var; the executor evaluates it
 whole. An expression with no Var at all is a scalar broadcast over the
-rows. `RelabelType` is transparent. Everything else, `AND`, `OR`, `NOT`,
-`CASE`, `COALESCE`, `IS NULL`, a function the registry does not know,
+rows. `RelabelType` is transparent. Everything else in a value, `CASE`,
+`COALESCE`, a function the registry does not know,
 anywhere in the tree, is left to the row-wise executor for the whole
 expression. `tess_expr_supports_value`
 decides this at planning time, without executor state, with the same rules
@@ -127,8 +127,28 @@ previous ones kept. A predicate that does not accept any shape takes the
 column first, so `7 < a` is compiled through the operator's commutator
 from the catalog into `a > 7`; without a commutator whose function is
 implemented, the filter is not supported. What a filter cannot express,
-`AND`, `OR`, `NOT`, `IS NULL`, a boolean column, stays with `ExecQual`
-over the rows that survive.
+a boolean column, stays with `ExecQual` over the rows that survive.
+
+## Conditions
+
+A filter may also be a condition of several parts, in SQL's three-valued
+logic: `AND`, `OR` and `NOT` over supported conditions; `IS NULL` and `IS
+NOT NULL` over a supported value, a bare column of any type among them,
+since only its NULL flags are read; `IS [NOT] TRUE`, `IS [NOT] FALSE` and
+`IS [NOT] UNKNOWN` over a supported condition; and `x op ANY (array)` or
+`x op ALL (array)` over a constant array of at most 32 elements, which the
+compiler turns into the `OR` (or the `AND`) of `x op element`, so `a IN
+(1, 3, 5)` and `a NOT IN (1, NULL)` are covered. A condition evaluates to
+two masks over the selection it is given, the rows where it is true and
+those where it is unknown (NULL), the rest being false: a leaf's unknown
+rows are those where its value, its operand or a scalar is NULL, and the
+connectives combine the masks word by word, with no kernel. A child runs
+only over the rows the executor would evaluate it for: the right side of
+an `OR` where the left one is not true, of an `AND` where the left one is
+not false, so `b = 0 OR 10 / b > 1` divides no row by zero, and `a = 3 AND
+10 / (a - 3) > 1` fails on the row where `a` is 3, as in the executor.
+The unknown mask is computed only where a `NOT`, a boolean test or an
+inner `AND` needs it. A boolean column (`WHERE flag`) waits for the type.
 
 ## Errors
 

@@ -321,13 +321,14 @@ EXPLAIN (COSTS OFF) SELECT a FROM filter_t WHERE c = 'r150' AND a > 100;
    ->  Custom Scan (TessHeapScan) on filter_t
 (4 rows)
 
--- A null test costs nothing and comes first: the node is not offered.
+-- A null test costs nothing and comes first; it runs in batches too.
 EXPLAIN (COSTS OFF) SELECT a FROM filter_t WHERE a > 100 AND c IS NOT NULL;
-                QUERY PLAN                 
--------------------------------------------
- Seq Scan on filter_t
-   Filter: ((c IS NOT NULL) AND (a > 100))
-(2 rows)
+                   QUERY PLAN                    
+-------------------------------------------------
+ Custom Scan (TessFilter) on filter_t
+   Batch Filter: ((c IS NOT NULL) AND (a > 100))
+   ->  Custom Scan (TessHeapScan) on filter_t
+(3 rows)
 
 -- An expensive clause moves behind a cheap batch one.
 CREATE FUNCTION filter_slow(x int) RETURNS boolean
@@ -653,6 +654,79 @@ SELECT filter_same($$SELECT count(*), sum(a) FROM filter_rls WHERE 10 / b > 1$$)
 RESET ROLE;
 DROP TABLE filter_rls;
 DROP ROLE regress_tessera_rls;
+-- Conditions of several parts in batches: OR, AND inside it, null tests,
+-- boolean tests and short IN lists, in three-valued logic; the right side
+-- of an OR runs only where the left one is not true.
+EXPLAIN (COSTS OFF) SELECT a FROM filter_t WHERE a < 10 OR b = 3;
+                  QUERY PLAN                  
+----------------------------------------------
+ Custom Scan (TessFilter) on filter_t
+   Batch Filter: ((a < 10) OR (b = 3))
+   ->  Custom Scan (TessHeapScan) on filter_t
+(3 rows)
+
+SELECT filter_same($$SELECT a, b FROM filter_t WHERE a < 10 OR b = 3$$);
+                                                                                                                    filter_same                                                                                                                    
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ {"(,3)","(,3)","(1,1)","(103,3)","(113,3)","(123,3)","(13,3)","(143,3)","(153,3)","(163,3)","(173,3)","(183,3)","(193,3)","(2,2)","(23,3)","(3,3)","(33,3)","(4,4)","(43,3)","(5,5)","(53,3)","(6,6)","(73,3)","(8,8)","(83,3)","(9,9)","(93,3)"}
+(1 row)
+
+SELECT filter_same($$SELECT count(*) FROM filter_t WHERE a IS NULL OR (a > 190 AND b <> 3)$$);
+ filter_same 
+-------------
+ {(36)}
+(1 row)
+
+SELECT filter_same($$SELECT count(*) FROM filter_t WHERE (a > 100) IS NOT TRUE$$);
+ filter_same 
+-------------
+ {(114)}
+(1 row)
+
+SELECT filter_same($$SELECT count(*) FROM filter_t WHERE (a > 100) IS UNKNOWN$$);
+ filter_same 
+-------------
+ {(28)}
+(1 row)
+
+EXPLAIN (COSTS OFF) SELECT a FROM filter_t WHERE a IN (3, 5, 7, 14);
+                     QUERY PLAN                      
+-----------------------------------------------------
+ Custom Scan (TessFilter) on filter_t
+   Batch Filter: (a = ANY ('{3,5,7,14}'::integer[]))
+   ->  Custom Scan (TessHeapScan) on filter_t
+(3 rows)
+
+SELECT filter_same($$SELECT a FROM filter_t WHERE a IN (3, 5, 7, 14)$$);
+ filter_same 
+-------------
+ {(3),(5)}
+(1 row)
+
+SELECT filter_same($$SELECT count(*) FROM filter_t WHERE a NOT IN (3, NULL)$$);
+ filter_same 
+-------------
+ {(0)}
+(1 row)
+
+SELECT filter_same($$SELECT count(*) FROM filter_t WHERE a + 1 IN (4, NULL) OR b IN (1, 2)$$);
+ filter_same 
+-------------
+ {(41)}
+(1 row)
+
+SELECT filter_same($$SELECT count(*) FROM filter_t WHERE b = 0 OR 10 / b > 1$$);
+ filter_same 
+-------------
+ {(120)}
+(1 row)
+
+SELECT filter_same($$SELECT count(*) FROM filter_t WHERE c IS NOT NULL AND a + 1 IS NULL$$);
+ filter_same 
+-------------
+ {(28)}
+(1 row)
+
 -- A parallel worker runs the node from the plan's text form.
 SET debug_parallel_query = on;
 EXPLAIN (COSTS OFF) SELECT count(*) FROM filter_t WHERE a > 100;
