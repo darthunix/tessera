@@ -328,9 +328,18 @@ SELECT join_same($$SELECT jbig.v, jgrow.g FROM jbig JOIN jgrow ON jbig.fk = jgro
 SELECT join_property($$SELECT count(*) FROM jbig JOIN jgrow ON jbig.fk = jgrow.k$$, 'Builds') AS builds,
        join_property($$SELECT count(*) FROM jbig JOIN jgrow ON jbig.fk = jgrow.k$$, 'Table Grows') AS grows,
        join_property($$SELECT count(*) FROM jbig JOIN jgrow ON jbig.fk = jgrow.k$$, 'Build Rows') AS build_rows;
+SELECT join_property($$SELECT count(*) FROM jbig JOIN jgrow ON jbig.fk = jgrow.k$$, 'Overflow Rows') AS overflow,
+       join_property($$SELECT count(*) FROM jbig JOIN jgrow ON jbig.fk = jgrow.k$$, 'Buckets') AS buckets;
 SET parallel_leader_participation = off;
 SELECT join_same($$SELECT count(*), sum(jbuild.w), sum(jprobe.v) FROM jprobe JOIN jbuild ON jprobe.k = jbuild.k$$);
 RESET parallel_leader_participation;
+-- One participant builds the shared Bloom filter for all; the others use
+-- it once it is ready.
+SELECT join_property($$SELECT count(*) FROM jprobe JOIN jbuild ON jprobe.k = jbuild.k$$, 'Bloom Filters') AS filters,
+       join_property($$SELECT count(*) FROM jprobe JOIN jbuild ON jprobe.k = jbuild.k$$, 'Shared Table') AS shared;
+SELECT join_same($$SELECT count(*), sum(jprobe.v) FROM jprobe WHERE NOT EXISTS (SELECT 1 FROM jbuild WHERE jbuild.k = jprobe.k)$$);
+-- A by-reference inner column: a table in each participant.
+EXPLAIN (COSTS OFF) SELECT count(*), max(jd.label) FROM jbig JOIN jd ON jbig.fk = jd.id;
 -- A rescan of the Gather builds the shared table anew.
 SELECT join_same($$SELECT jsmall.k, (SELECT count(*) FROM jprobe JOIN jbuild ON jprobe.k = jbuild.k WHERE jbuild.w > jsmall.k * 100) FROM jsmall$$);
 RESET enable_parallel_hash;

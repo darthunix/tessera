@@ -73,6 +73,8 @@ enum
 	/* Bloom filters built, and the valid probe rows they rejected. */
 	JOIN_BLOOM_FILTERS,
 	JOIN_BLOOM_REMOVED,
+	/* Inner rows a full shared table had no room for, staged until it grew. */
+	JOIN_OVERFLOW_ROWS,
 	JOIN_NCOUNTERS
 };
 
@@ -94,6 +96,9 @@ typedef struct JoinShared
 	Size		region_len;
 	/* The rows staged and the NULL columns, as tess_build_report adds them. */
 	uint64		counters[TESS_BUILD_COUNTER_WORDS];
+	/* The shared Bloom filter, sized with the table; one participant builds it. */
+	dsa_pointer filter;
+	Size		filter_words;
 } JoinShared;
 
 /* Which child a column of the scan tuple comes from. */
@@ -171,6 +176,9 @@ typedef struct TessHashJoinState
 	uint64	   *bloom;
 	Size		bloom_words;
 	bool		bloom_decided;
+	/* The filter is a shared table's, and whether it was seen ready. */
+	bool		bloom_shared;
+	bool		bloom_ready;
 	uint64		sample_rows;
 	uint64		sample_found;
 
@@ -652,6 +660,36 @@ attach_shared_table(TessHashJoinState *state)
 	state->region_len = state->shared->region_len;
 }
 
+/*
+ * A cleared shared Bloom filter for a table of `records` records, in
+ * place of the one before; only the elected participant, whom the build
+ * barrier separates from the probes, calls it.
+ */
+static void
+allocate_shared_filter(TessHashJoinState *state, uint64 records)
+{
+	dsa_area   *area = query_dsa(state);
+	Size		nwords;
+
+	if (DsaPointerIsValid(state->shared->filter))
+		dsa_free(area, state->shared->filter);
+	check(state, state->kernels->bloom_shared_words(records, &nwords, &state->status));
+	state->shared->filter = dsa_allocate_extended(area, mul_size(sizeof(uint64), nwords),
+												  DSA_ALLOC_HUGE);
+	state->shared->filter_words = nwords;
+	check(state, state->kernels->bloom_shared_init(dsa_get_address(area,
+																   state->shared->filter),
+												   nwords, &state->status));
+}
+
+/* The memory a shared build's elected participant holds, in bytes. */
+static void
+note_shared_memory(TessHashJoinState *state, Size bytes)
+{
+	bytes = add_size(bytes, mul_size(sizeof(uint64), state->shared->filter_words));
+	state->peak_memory = Max(state->peak_memory, bytes);
+}
+
 /* ALLOCATE: an empty shared table sized for the planner's estimate. */
 static void
 allocate_shared_table(TessHashJoinState *state)
@@ -676,6 +714,8 @@ allocate_shared_table(TessHashJoinState *state)
 	attach_shared_table(state);
 	check(state, state->kernels->table_stats(state->region, state->region_len,
 											 &stats, &state->status));
+	allocate_shared_filter(state, capacity);
+	note_shared_memory(state, size);
 	state->counters[JOIN_BUILDS]++;
 	state->counters[JOIN_BUCKETS] += stats.buckets;
 }
@@ -739,6 +779,7 @@ insert_shared_batch(TessHashJoinState *state, TessBatch *batch)
 											  &state->status));
 	left = tess_row_mask_count(&pending);
 	state->staged_rows += left;
+	state->counters[JOIN_OVERFLOW_ROWS] += left;
 	while (left > 0)
 	{
 		bool		fresh = state->nstaged == 0;
@@ -766,6 +807,8 @@ insert_shared_batch(TessHashJoinState *state, TessBatch *batch)
 	}
 	state->build_rows += count;
 	state->counters[JOIN_BUILD_ROWS] += count;
+	state->peak_memory = Max(state->peak_memory,
+							 sizeof(uint64) * JOIN_STAGING_WORDS * state->nstaged);
 }
 
 /* BUILD: this participant's share of the inner side, then its report. */
@@ -820,8 +863,11 @@ grow_shared_table(TessHashJoinState *state)
 	memcpy(target, state->region, before.bytes_used - before.buckets * 4);
 	check(state, state->kernels->table_grow(target, size, &state->status));
 	dsa_free(area, state->shared->region);
+	/* Both regions were held at once, during the copy. */
+	note_shared_memory(state, add_size(state->shared->region_len, size));
 	state->shared->region = grown;
 	state->shared->region_len = size;
+	allocate_shared_filter(state, before.records + staged);
 	attach_shared_table(state);
 	check(state, state->kernels->table_stats(state->region, state->region_len,
 											 &after, &state->status));
@@ -864,6 +910,14 @@ free_shared_table(TessHashJoinState *state)
 		dsa_free(query_dsa(state), state->shared->region);
 		state->shared->region = InvalidDsaPointer;
 	}
+	if (DsaPointerIsValid(state->shared->filter))
+	{
+		dsa_free(query_dsa(state), state->shared->filter);
+		state->shared->filter = InvalidDsaPointer;
+		state->shared->filter_words = 0;
+	}
+	state->bloom = NULL;
+	state->bloom_words = 0;
 	state->region = NULL;
 	state->region_len = 0;
 }
@@ -888,6 +942,14 @@ build_shared(TessHashJoinState *state)
 	state->staged_rows = 0;
 	state->nstaged = 0;
 	state->participating = true;
+	/* This build's filter: decided again by this participant's batches. */
+	state->bloom = NULL;
+	state->bloom_words = 0;
+	state->bloom_decided = false;
+	state->bloom_shared = false;
+	state->bloom_ready = false;
+	state->sample_rows = 0;
+	state->sample_found = 0;
 	for (;;)
 	{
 		uint32		action;
@@ -1133,12 +1195,6 @@ start_null_round(TessHashJoinState *state)
 static void
 decide_bloom(TessHashJoinState *state, uint64 rows, uint64 found)
 {
-	/* A shared table's filter comes with its own decision. */
-	if (state->shared != NULL)
-	{
-		state->bloom_decided = true;
-		return;
-	}
 	state->sample_rows += rows;
 	state->sample_found += found;
 	if (state->sample_rows < JOIN_BLOOM_SAMPLE)
@@ -1147,6 +1203,26 @@ decide_bloom(TessHashJoinState *state, uint64 rows, uint64 found)
 	if (state->sample_found * 2 >= state->sample_rows ||
 		state->build_rows < JOIN_BLOOM_MIN_ROWS)
 		return;
+	/*
+	 * A shared table's filter: the first participant that wants it builds
+	 * it for all; until it is ready, the others probe without it.
+	 */
+	if (state->shared != NULL)
+	{
+		bool		built;
+
+		state->bloom = dsa_get_address(query_dsa(state), state->shared->filter);
+		state->bloom_words = state->shared->filter_words;
+		state->bloom_shared = true;
+		check(state, state->kernels->table_try_build_bloom(state->region,
+														   state->region_len,
+														   state->bloom,
+														   state->bloom_words,
+														   &built, &state->status));
+		if (built)
+			state->counters[JOIN_BLOOM_FILTERS]++;
+		return;
+	}
 	check(state, state->kernels->table_bloom_words(state->build_rows,
 												   &state->bloom_words,
 												   &state->status));
@@ -1188,16 +1264,26 @@ probe_batch(TessHashJoinState *state, TessBatch *batch)
 	count = tess_row_mask_count(&valid);
 	if (count == 0)
 		return false;
-	if (state->bloom != NULL)
+	if (state->bloom != NULL && state->bloom_shared && !state->bloom_ready)
+		check(state, state->kernels->bloom_shared_ready(state->bloom, state->bloom_words,
+														&state->bloom_ready,
+														&state->status));
+	if (state->bloom != NULL && (!state->bloom_shared || state->bloom_ready))
 	{
 		int			through;
 
 		/* The kernel fills the mask whole, but checks it is a mask of nrows. */
 		memset(state->pending_bits, 0, sizeof(uint64) * nwords);
 		passed = (TessRowMask) {nrows, state->pending_bits};
-		check(state, state->kernels->bloom_probe(state->bloom, state->bloom_words,
-												 state->hashes, &valid, &passed,
-												 &state->status));
+		if (state->bloom_shared)
+			check(state, state->kernels->bloom_shared_probe(state->bloom,
+															state->bloom_words,
+															state->hashes, &valid,
+															&passed, &state->status));
+		else
+			check(state, state->kernels->bloom_probe(state->bloom, state->bloom_words,
+													 state->hashes, &valid, &passed,
+													 &state->status));
 		through = tess_row_mask_count(&passed);
 		state->counters[JOIN_BLOOM_REMOVED] += count - through;
 		if (through == 0)
@@ -2107,6 +2193,8 @@ join_explain(CustomScanState *css, List *ancestors, ExplainState *es)
 						deparse_expression((Node *) make_ands_explicit(list_copy_head(cscan->custom_exprs,
 																					  state->nkeys)),
 										   context, useprefix, false), es);
+	if (state->shared_mode)
+		ExplainPropertyBool("Shared Table", true, es);
 	for (int part = 0; part < 2; part++)
 	{
 		/*
@@ -2162,6 +2250,9 @@ join_explain(CustomScanState *css, List *ancestors, ExplainState *es)
 	if (totals[JOIN_COMPACT_BATCHES] > 0)
 		ExplainPropertyInteger("Compact Batches", NULL,
 							   totals[JOIN_COMPACT_BATCHES], es);
+	if (totals[JOIN_OVERFLOW_ROWS] > 0)
+		ExplainPropertyInteger("Overflow Rows", NULL,
+							   totals[JOIN_OVERFLOW_ROWS], es);
 	if (totals[JOIN_BLOOM_FILTERS] > 0)
 	{
 		ExplainPropertyInteger("Bloom Filters", NULL,
@@ -2191,6 +2282,8 @@ init_shared(TessHashJoinState *state)
 	BarrierInit(&state->shared->build, 0);
 	state->shared->region = InvalidDsaPointer;
 	state->shared->region_len = 0;
+	state->shared->filter = InvalidDsaPointer;
+	state->shared->filter_words = 0;
 	check(state, state->kernels->build_counters_init(state->shared->counters,
 													 &state->status));
 	memset(&state->participant, 0, sizeof(state->participant));

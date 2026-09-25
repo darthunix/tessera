@@ -1495,9 +1495,10 @@ EXPLAIN (COSTS OFF) SELECT count(*), sum(jbuild.w) FROM jprobe JOIN jbuild ON jp
                Partial Mode: Partial
                ->  Parallel Custom Scan (TessHashJoin)
                      Hash Cond: (jprobe.k = jbuild.k)
+                     Shared Table: true
                      ->  Parallel Custom Scan (TessHeapScan) on jprobe
                      ->  Parallel Custom Scan (TessHeapScan) on jbuild
-(9 rows)
+(10 rows)
 
 SELECT join_same($$SELECT count(*), sum(jbuild.w), sum(jprobe.v) FROM jprobe JOIN jbuild ON jprobe.k = jbuild.k$$);
                    join_same                   
@@ -1540,9 +1541,10 @@ EXPLAIN (COSTS OFF) SELECT count(*), sum(jgrow.g) FROM jbig JOIN jgrow ON jbig.f
                Partial Mode: Partial
                ->  Parallel Custom Scan (TessHashJoin)
                      Hash Cond: (jbig.fk = jgrow.k)
+                     Shared Table: true
                      ->  Parallel Custom Scan (TessHeapScan) on jgrow
                      ->  Parallel Custom Scan (TessHeapScan) on jbig
-(9 rows)
+(10 rows)
 
 SELECT join_same($$SELECT count(*), sum(jgrow.g), sum(jbig.v) FROM jbig JOIN jgrow ON jbig.fk = jgrow.k$$);
                    join_same                   
@@ -1564,6 +1566,13 @@ SELECT join_property($$SELECT count(*) FROM jbig JOIN jgrow ON jbig.fk = jgrow.k
  1      | 1     | 20000
 (1 row)
 
+SELECT join_property($$SELECT count(*) FROM jbig JOIN jgrow ON jbig.fk = jgrow.k$$, 'Overflow Rows') AS overflow,
+       join_property($$SELECT count(*) FROM jbig JOIN jgrow ON jbig.fk = jgrow.k$$, 'Buckets') AS buckets;
+ overflow | buckets 
+----------+---------
+ 11667    | 65536
+(1 row)
+
 SET parallel_leader_participation = off;
 SELECT join_same($$SELECT count(*), sum(jbuild.w), sum(jprobe.v) FROM jprobe JOIN jbuild ON jprobe.k = jbuild.k$$);
                    join_same                   
@@ -1572,6 +1581,35 @@ SELECT join_same($$SELECT count(*), sum(jbuild.w), sum(jprobe.v) FROM jprobe JOI
 (1 row)
 
 RESET parallel_leader_participation;
+-- One participant builds the shared Bloom filter for all; the others use
+-- it once it is ready.
+SELECT join_property($$SELECT count(*) FROM jprobe JOIN jbuild ON jprobe.k = jbuild.k$$, 'Bloom Filters') AS filters,
+       join_property($$SELECT count(*) FROM jprobe JOIN jbuild ON jprobe.k = jbuild.k$$, 'Shared Table') AS shared;
+ filters | shared 
+---------+--------
+ 1       | true
+(1 row)
+
+SELECT join_same($$SELECT count(*), sum(jprobe.v) FROM jprobe WHERE NOT EXISTS (SELECT 1 FROM jbuild WHERE jbuild.k = jprobe.k)$$);
+                   join_same                   
+-----------------------------------------------
+ 1 rows, hash 8641ae42b30194e539434992596ad8d1
+(1 row)
+
+-- A by-reference inner column: a table in each participant.
+EXPLAIN (COSTS OFF) SELECT count(*), max(jd.label) FROM jbig JOIN jd ON jbig.fk = jd.id;
+                             QUERY PLAN                              
+---------------------------------------------------------------------
+ Finalize Aggregate
+   ->  Gather
+         Workers Planned: 2
+         ->  Partial Aggregate
+               ->  Parallel Custom Scan (TessHashJoin)
+                     Hash Cond: (jd.id = jbig.fk)
+                     ->  Parallel Custom Scan (TessHeapScan) on jbig
+                     ->  Custom Scan (TessHeapScan) on jd
+(8 rows)
+
 -- A rescan of the Gather builds the shared table anew.
 SELECT join_same($$SELECT jsmall.k, (SELECT count(*) FROM jprobe JOIN jbuild ON jprobe.k = jbuild.k WHERE jbuild.w > jsmall.k * 100) FROM jsmall$$);
                    join_same                    

@@ -711,7 +711,11 @@ barrier's waits stay in the node, since they may raise an error. Then
 every participant probes the one table; its chains are not grouped, so
 the next record of a key is found by `tess_table_next_match`, rounds go
 over the outer batch, since the duplicates are not known, and there is
-no compact mode. Each participant leaves at shutdown or at a rescan, and
+no compact mode. The shared Bloom filter is sized with the table: each
+participant decides on it by its own batches as before, the first that
+wants it builds it for all (`tess_table_try_build_bloom`), and every
+participant checks batches against it once it reads it ready, probing
+without it until then. Each participant leaves at shutdown or at a rescan, and
 the last one to leave frees the table; a rescan of the `Gather` builds
 anew. A worker that attaches once the build is over only probes, and one
 that attaches after the last one left returns nothing. Without a DSM (a
@@ -751,7 +755,7 @@ less than the check. Under a `Gather` each participant decides on the
 filter of its own table by its own rows.
 
 `EXPLAIN` shows the join type for a semi, anti or left join, the key
-clauses as `Hash Cond`, the residual ones that run in batches as `Batch
+clauses as `Hash Cond`, `Shared Table` for a shared table, the residual ones that run in batches as `Batch
 Join Filter` and the others as `Join Filter`, and an outer join's filters
 as `Batch Filter` and `Filter`. With `ANALYZE` it adds
 the bucket count of the last table built, `Memory Usage`, the most the
@@ -765,7 +769,11 @@ rows over every round, `Rows Removed by Join Filter` and `Rows Removed by
 Filter`, and `Compact Batches`, the batches of copied
 pairs, when there are any, and `Bloom Filters`, the filters built, with
 `Rows Removed by Bloom Filter`, the valid probe rows they rejected, when
-one was built. Under a `Gather` the counters are the totals of
+one was built, and `Overflow Rows`, the inner rows a full shared table
+had no room for until it grew, when there were any; with a shared table
+`Builds` counts the one build, and `Memory Usage` the table and filter
+of the participant that allocated or grew them and each participant's
+staging buffers. Under a `Gather` the counters are the totals of
 every participant, and the bucket count is the mean over the tables
 built.
 
@@ -821,5 +829,7 @@ filter are compared, and under the `Gather` an inner and an anti join,
 where the participants build at least one filter. With `enable_parallel_hash` on, the
 shared table: inner, semi, anti and left joins compared with the core,
 duplicate keys, an inner side past the estimate whose table grows, the
-leader not taking part, and a rescan of the `Gather` from a correlated
-subquery.
+leader not taking part, a rescan of the `Gather` from a correlated
+subquery, the counters of the growth (one build, the overflow, the
+buckets), one shared Bloom filter built for all, and the path with a
+table in each participant for a by-reference inner column.
