@@ -124,6 +124,11 @@ SELECT pg_temp.measure_pair('tree',
 SELECT pg_temp.measure_pair('tree_sum',
     'SELECT sum(((c1 % 1000) + 1) * ((c2 % 1000) + 1)) FROM bench_narrow',
     :repetitions);
+-- An integer column against a bigint constant: a cross-type comparison;
+-- half the rows pass.
+SELECT pg_temp.measure_pair('int4_bigint',
+    format('SELECT count(*) FROM bench_narrow WHERE c1 > %s::bigint', 1000000 * :scale),
+    :repetitions);
 
 \copy timings TO 'timings.csv' CSV HEADER
 
@@ -156,6 +161,7 @@ EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE on_fo
 EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE on_two_columns;
 EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE on_tree;
 EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE on_tree_sum;
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE on_int4_bigint;
 SET tessera.enable = off;
 EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE off_nothing;
 EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE off_sparse;
@@ -172,5 +178,6 @@ EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE off_f
 EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE off_two_columns;
 EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE off_tree;
 EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE off_tree_sum;
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE off_int4_bigint;
 \o
 DEALLOCATE ALL;
