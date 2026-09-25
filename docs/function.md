@@ -38,7 +38,39 @@ error, `remove` unregisters only that exact object without waiting for
 consumers, and a pointer returned by `find` is borrowed. An invalid
 description is rejected: a wrong ABI version or size, an invalid `funcid`, a
 missing `evaluate`, an unknown kind or result format, or a non-strict
-function.
+function; an equivalent (below) shorter than
+`TESS_FUNCTION_EQUIVALENT_MIN_SIZE`, without another function to stand for,
+or with a callback.
+
+## Equivalents
+
+A function over two types of one family, such as `int48pl(int4, int8)`,
+needs no implementation of its own: it returns and raises what `int8pl`
+does over its first argument widened. A description of kind
+`TESS_FUNCTION_EQUIVALENT` says so as data: `equivalent` is the function to
+call instead, and `arg_casts` holds, per argument, a one-argument cast to
+apply first, or `InvalidOid`:
+
+```c
+static const TessFunction int48pl = {
+    TESS_ABI_INITIALIZER(TESS_FUNCTION_ABI_VERSION, TessFunction),
+    .funcid = F_INT48PL,
+    .kind = TESS_FUNCTION_EQUIVALENT,
+    .flags = TESS_FUNCTION_STRICT | TESS_FUNCTION_COLLATION_INSENSITIVE,
+    .equivalent = F_INT8PL,
+    .arg_casts = {F_INT8_INT4, InvalidOid},
+};
+```
+
+The consumer compiles the equivalent function over the cast arguments, a
+cast of a column being a step of its own and a cast of a constant folded
+once; so a family of k types needs k sets of kernels and the casts between
+them, and each pair of types only lines of data. The promise is the
+provider's: only casts that lose nothing (widenings) keep the results and
+the errors the same. The equivalent and the casts are looked up when an
+expression is compiled, so they may be registered in any order, and an
+expression whose equivalent or casts have no implementation stays row by
+row.
 
 Built-in integer functions are registered by the kernels module
 `tessera_kernels` (`kernels/`), which links the Rust kernels statically and

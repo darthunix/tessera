@@ -37,11 +37,28 @@ validate_function(const TessFunction *function)
 						   function->abi_version, function->struct_size)));
 	if (!OidIsValid(function->funcid))
 		elog(ERROR, "Tessera function must name a PostgreSQL function");
-	if (function->evaluate == NULL)
+	if (function->kind == TESS_FUNCTION_EQUIVALENT)
+	{
+		/* Its target may be registered later; the consumer looks it up. */
+		if (function->struct_size < TESS_FUNCTION_EQUIVALENT_MIN_SIZE)
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("incompatible Tessera function ABI"),
+					 errdetail("An equivalent needs at least %zu bytes, got %zu.",
+							   TESS_FUNCTION_EQUIVALENT_MIN_SIZE,
+							   function->struct_size)));
+		if (!OidIsValid(function->equivalent) ||
+			function->equivalent == function->funcid)
+			elog(ERROR, "Tessera equivalent must name another PostgreSQL function");
+		if (function->evaluate != NULL)
+			elog(ERROR, "Tessera equivalent has no evaluate callback");
+	}
+	else if (function->evaluate == NULL)
 		elog(ERROR, "Tessera function must have an evaluate callback");
 	if (function->kind != TESS_FUNCTION_PREDICATE &&
 		function->kind != TESS_FUNCTION_VALUE &&
-		function->kind != TESS_FUNCTION_AGGREGATE)
+		function->kind != TESS_FUNCTION_AGGREGATE &&
+		function->kind != TESS_FUNCTION_EQUIVALENT)
 		elog(ERROR, "Tessera function has an unknown kind");
 	if (function->result_format != TESS_RESULT_DATUM &&
 		function->result_format != TESS_RESULT_INT32)

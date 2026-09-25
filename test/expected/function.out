@@ -42,6 +42,14 @@ SELECT tessera_test_invalid_function(6);
 ERROR:  Tessera function has an unknown result format
 SELECT tessera_test_invalid_function(7);
 ERROR:  Tessera function must be strict
+SELECT tessera_test_invalid_function(8);
+ERROR:  Tessera equivalent must name another PostgreSQL function
+SELECT tessera_test_invalid_function(9);
+ERROR:  Tessera equivalent must name another PostgreSQL function
+SELECT tessera_test_invalid_function(10);
+ERROR:  Tessera equivalent has no evaluate callback
+SELECT tessera_test_invalid_function(11);
+ERROR:  incompatible Tessera function ABI
 SELECT tessera_test_duplicate_function();
 ERROR:  Tessera function float8pl(double precision,double precision) is already registered
 \set VERBOSITY default

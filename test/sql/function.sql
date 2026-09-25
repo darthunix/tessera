@@ -39,6 +39,10 @@ SELECT tessera_test_invalid_function(4);
 SELECT tessera_test_invalid_function(5);
 SELECT tessera_test_invalid_function(6);
 SELECT tessera_test_invalid_function(7);
+SELECT tessera_test_invalid_function(8);
+SELECT tessera_test_invalid_function(9);
+SELECT tessera_test_invalid_function(10);
+SELECT tessera_test_invalid_function(11);
 SELECT tessera_test_duplicate_function();
 \set VERBOSITY default
 

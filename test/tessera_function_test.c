@@ -37,6 +37,16 @@ static const TessFunction function_two = {
 	.evaluate = noop_evaluate,
 };
 
+/* An equivalent: no callback, another function over the arguments as they are. */
+static const TessFunction function_equivalent = {
+	TESS_ABI_INITIALIZER(TESS_FUNCTION_ABI_VERSION, TessFunction),
+	.funcid = F_FLOAT8DIV,
+	.kind = TESS_FUNCTION_EQUIVALENT,
+	.result_format = TESS_RESULT_DATUM,
+	.flags = TESS_FUNCTION_STRICT,
+	.equivalent = F_FLOAT8MUL,
+};
+
 typedef struct ExtendedFunction
 {
 	TessFunction base;
@@ -94,6 +104,13 @@ tessera_test_function_registry(PG_FUNCTION_ARGS)
 	functions->remove(&other);
 	result = result && functions->find(other.funcid) == NULL;
 
+	/* An equivalent is found like any description; its target need not be. */
+	functions->add(&function_equivalent);
+	result = result && functions->find(F_FLOAT8DIV) == &function_equivalent &&
+		functions->find(F_FLOAT8MUL) == NULL;
+	functions->remove(&function_equivalent);
+	result = result && functions->find(F_FLOAT8DIV) == NULL;
+
 	PG_RETURN_BOOL(result);
 }
 
@@ -142,8 +159,21 @@ tessera_test_invalid_function(PG_FUNCTION_ARGS)
 		invalid.kind = (TessFunctionKind) 7;
 	else if (kind == 6)
 		invalid.result_format = (TessResultFormat) 7;
-	else
+	else if (kind == 7)
 		invalid.flags = TESS_FUNCTION_ANY_SHAPE;
+	else
+	{
+		/* An equivalent: without a target, its own target, with a callback. */
+		invalid.kind = TESS_FUNCTION_EQUIVALENT;
+		invalid.evaluate = NULL;
+		invalid.equivalent = kind == 8 ? InvalidOid : F_FLOAT8MUL;
+		if (kind == 9)
+			invalid.equivalent = invalid.funcid;
+		else if (kind == 10)
+			invalid.evaluate = noop_evaluate;
+		else if (kind == 11)
+			invalid.struct_size = TESS_FUNCTION_EQUIVALENT_MIN_SIZE - 1;
+	}
 	functions->add(&invalid);
 	functions->remove(&invalid);
 	elog(ERROR, "Tessera test registered an invalid function");

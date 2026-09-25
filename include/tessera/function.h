@@ -39,7 +39,14 @@ typedef enum TessFunctionKind
 	 * The consumer combines the partials of the batches; strict means that
 	 * NULL rows are left out, as with a strict transition function.
 	 */
-	TESS_FUNCTION_AGGREGATE = 2
+	TESS_FUNCTION_AGGREGATE = 2,
+	/*
+	 * No implementation of its own: for every input the function returns
+	 * and raises what the function equivalent returns and raises over the
+	 * arguments cast by arg_casts, which the consumer compiles instead.
+	 * Such as int48pl(a, b), which is int8pl(int8(a), b).
+	 */
+	TESS_FUNCTION_EQUIVALENT = 3
 } TessFunctionKind;
 
 /* How a VALUE implementation stores its result column. */
@@ -61,6 +68,9 @@ typedef enum TessResultFormat
  * column first through the operator's commutator from the catalog.
  */
 #define TESS_FUNCTION_ANY_SHAPE 0x4
+
+/* The most arguments an equivalent's casts describe. */
+#define TESS_FUNCTION_MAX_ARGS 2
 
 /* One argument of a call: a column of the batch or a scalar. */
 typedef struct TessFunctionArg
@@ -131,12 +141,24 @@ struct TessFunction
 	TessResultFormat result_format;
 	/* TESS_FUNCTION_* flags. */
 	uint32		flags;
-	/* Evaluate one call; returns the code also stored in the call's status. */
+	/*
+	 * Evaluate one call; returns the code also stored in the call's status.
+	 * NULL for an EQUIVALENT.
+	 */
 	TessStatusCode (*evaluate) (TessFunctionCall *call);
+	/* EQUIVALENT: the function the consumer calls instead, by OID. */
+	Oid			equivalent;
+	/*
+	 * EQUIVALENT: per argument, the OID of a one-argument cast applied to it
+	 * first, or InvalidOid to pass it as it is.
+	 */
+	Oid			arg_casts[TESS_FUNCTION_MAX_ARGS];
 };
 
 #define TESS_FUNCTION_MIN_SIZE \
 	TESS_ABI_SIZE_INCLUDING_FIELD(TessFunction, evaluate)
+#define TESS_FUNCTION_EQUIVALENT_MIN_SIZE \
+	TESS_ABI_SIZE_INCLUDING_FIELD(TessFunction, arg_casts)
 
 /* The registry of batch implementations, keyed by function OID. */
 typedef struct TessFunctionRegistryOps
