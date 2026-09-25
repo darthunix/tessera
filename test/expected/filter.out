@@ -721,6 +721,18 @@ SELECT filter_same($$SELECT count(*) FROM filter_t WHERE b = 0 OR 10 / b > 1$$);
  {(120)}
 (1 row)
 
+SELECT filter_same($$SELECT count(*) FROM filter_t WHERE (b IN (1, NULL)) IS UNKNOWN$$);
+ filter_same 
+-------------
+ {(180)}
+(1 row)
+
+SELECT filter_same($$SELECT a FROM filter_t WHERE a IN (3::bigint, 5000000000)$$);
+ filter_same 
+-------------
+ {(3)}
+(1 row)
+
 SELECT filter_same($$SELECT count(*) FROM filter_t WHERE c IS NOT NULL AND a + 1 IS NULL$$);
  filter_same 
 -------------
@@ -1029,6 +1041,12 @@ SELECT filter_same($$SELECT (a % 4294967296)::int + 1 FROM filter8_t WHERE (a % 
 SELECT count(*) FROM filter8_t WHERE a::int > 0;
 ERROR:  integer out of range
 \set VERBOSITY default
+SELECT filter_same($$SELECT a FROM filter8_t WHERE a IN (1, 2, 4294967297, 8589934594)$$);
+         filter_same         
+-----------------------------
+ {(4294967297),(8589934594)}
+(1 row)
+
 -- An overflow in a bigint chain is reported as bigint's.
 SELECT a FROM filter8_t WHERE a * 4294967296 > 1;
 ERROR:  bigint out of range

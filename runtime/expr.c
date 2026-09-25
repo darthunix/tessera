@@ -43,7 +43,8 @@ typedef enum CondKind
 	COND_OR,
 	COND_NOT,
 	COND_NULL_TEST,				/* IS [NOT] NULL over a value */
-	COND_BOOL_TEST				/* IS [NOT] TRUE, FALSE or UNKNOWN */
+	COND_BOOL_TEST,				/* IS [NOT] TRUE, FALSE or UNKNOWN */
+	COND_ARRAY					/* x op ANY or ALL of a constant array */
 } CondKind;
 
 typedef struct Cond
@@ -56,6 +57,17 @@ typedef struct Cond
 	struct Cond **args;
 	int			nargs;
 	/*
+	 * ARRAY: x in expr, computed once, and the predicate called against
+	 * each element: ANY or ALL, the elements, whether one is NULL.
+	 */
+	const TessFunction *function;
+	Oid			inputcollid;
+	bool		use_or;
+	Datum	   *elements;
+	bool	   *element_nulls;
+	int			nelements;
+	bool		has_null;
+	/*
 	 * Per evaluation over a selection: the rows where the condition is
 	 * true, those where it is unknown (NULL), and scratch for the rows a
 	 * child is evaluated over.
@@ -64,6 +76,7 @@ typedef struct Cond
 	TessRowMask unknown;
 	TessRowMask rest;
 	TessRowMask all_true;
+	TessRowMask work;
 	int			capacity;
 } Cond;
 
@@ -162,13 +175,15 @@ call_of(Node *node, List **args, Oid *opno, Oid *inputcollid)
 }
 
 /*
- * x op ANY (array) over a constant array of a few elements as the OR of
- * x op element, and op ALL as the AND: an element NULL makes its
- * comparison unknown, as the array operator's rules say. Anything else,
- * a parameter, a NULL or empty or long array, as it is.
+ * x op element for each element of x op ANY (array) or op ALL over a
+ * constant array of a few elements, each through expand, so a cross-type
+ * operator stands for its equivalent; NIL for anything else: a
+ * parameter, a NULL or empty or long array.
  */
-static Node *
-array_as_clauses(ScalarArrayOpExpr *array_op)
+static Node *expand(Node *node);
+
+static List *
+array_clauses(ScalarArrayOpExpr *array_op)
 {
 	Const	   *array = (Const *) strip_relabel(lsecond(array_op->args));
 	ArrayType  *elements;
@@ -182,14 +197,14 @@ array_as_clauses(ScalarArrayOpExpr *array_op)
 	List	   *clauses = NIL;
 
 	if (!IsA(array, Const) || array->constisnull)
-		return (Node *) array_op;
+		return NIL;
 	elements = DatumGetArrayTypeP(array->constvalue);
 	element_type = ARR_ELEMTYPE(elements);
 	get_typlenbyvalalign(element_type, &typlen, &byval, &align);
 	deconstruct_array(elements, element_type, typlen, byval, align, &values,
 					  &nulls, &count);
 	if (count == 0 || count > MAX_ARRAY_ELEMENTS)
-		return (Node *) array_op;
+		return NIL;
 	for (int index = 0; index < count; index++)
 	{
 		Expr	   *element = (Expr *) makeConst(element_type, -1,
@@ -203,10 +218,9 @@ array_as_clauses(ScalarArrayOpExpr *array_op)
 													  array_op->inputcollid);
 
 		set_opfuncid(clause);
-		clauses = lappend(clauses, clause);
+		clauses = lappend(clauses, expand((Node *) clause));
 	}
-	return (Node *) (array_op->useOr ? make_orclause(clauses) :
-					 make_andclause(clauses));
+	return clauses;
 }
 
 /*
@@ -228,8 +242,6 @@ expand(Node *node)
 	node = strip_relabel(node);
 	if (node == NULL)
 		return NULL;
-	if (IsA(node, ScalarArrayOpExpr))
-		return array_as_clauses((ScalarArrayOpExpr *) node);
 	function = call_of(node, &args, &opno, &inputcollid);
 	if (function == NULL || function->kind != TESS_FUNCTION_EQUIVALENT ||
 		function->struct_size < TESS_FUNCTION_EQUIVALENT_MIN_SIZE ||
@@ -457,6 +469,16 @@ analyze_cond(Node *node, Index relid)
 	}
 	if (IsA(node, BooleanTest))
 		return analyze_cond((Node *) ((BooleanTest *) node)->arg, relid);
+	if (IsA(node, ScalarArrayOpExpr))
+	{
+		List	   *clauses = array_clauses((ScalarArrayOpExpr *) node);
+
+		/* x op element in the shape of a filter: x first, a scalar after. */
+		return clauses != NIL &&
+			analyze_filter(linitial(clauses), relid, &column_arg,
+						   &column_operand) &&
+			column_arg == 0 && column_operand < 0;
+	}
 	return analyze_filter(node, relid, &column_arg, &column_operand);
 }
 
@@ -633,6 +655,39 @@ compile_cond(Node *node, PlanState *parent, TessExprResolveVar resolve,
 		cond->args = palloc_array(Cond *, 1);
 		cond->args[0] = compile_cond((Node *) test->arg, parent, resolve,
 									 context);
+	}
+	else if (IsA(node, ScalarArrayOpExpr))
+	{
+		List	   *clauses = array_clauses((ScalarArrayOpExpr *) node);
+		Node	   *value = NULL;
+		int			index = 0;
+
+		cond->kind = COND_ARRAY;
+		cond->use_or = ((ScalarArrayOpExpr *) node)->useOr;
+		cond->nelements = list_length(clauses);
+		cond->elements = palloc_array(Datum, Max(cond->nelements, 1));
+		cond->element_nulls = palloc0_array(bool, Max(cond->nelements, 1));
+		foreach_ptr(Node, clause, clauses)
+		{
+			List	   *args;
+			Oid			opno;
+			Const	   *element;
+
+			cond->function = call_of(clause, &args, &opno, &cond->inputcollid);
+			element = (Const *) strip_relabel(lsecond(args));
+			if (value == NULL)
+				value = linitial(args);
+			if (!IsA(element, Const) || !equal(value, linitial(args)))
+				elog(ERROR, "Tessera received an unsupported batch condition");
+			cond->elements[index] = element->constvalue;
+			if (element->constisnull)
+			{
+				cond->has_null = true;
+				cond->elements[index] = (Datum) 0;
+			}
+			cond->element_nulls[index++] = element->constisnull;
+		}
+		cond->expr = tess_expr_compile_value(value, parent, resolve, context);
 	}
 	else if (analyze_filter(node, 0, &column_arg, &column_operand))
 	{
@@ -871,6 +926,33 @@ call_step(TessExpr *expr, const Step *step, const TessFunctionArg *args,
 		tess_status_report(&expr->status);
 }
 
+/*
+ * A predicate over column and a scalar, narrowing rows in place; a failure
+ * is raised here with value's status.
+ */
+static void
+call_predicate(TessExpr *value, const TessFunction *function,
+			   Oid inputcollid, const TessDatumColumn *column, Datum scalar,
+			   TessRowMask *rows)
+{
+	TessFunctionCall call = TESS_STRUCT_INITIALIZER(TessFunctionCall);
+	TessFunctionArg args[2];
+
+	args[0] = (TessFunctionArg) TESS_STRUCT_INITIALIZER(TessFunctionArg);
+	args[0].column = column;
+	args[1] = (TessFunctionArg) TESS_STRUCT_INITIALIZER(TessFunctionArg);
+	args[1].scalar = scalar;
+	call.function = function;
+	call.nargs = 2;
+	call.args = args;
+	call.inputcollid = inputcollid;
+	call.rows = rows;
+	call.context = value->context;
+	call.status = &value->status;
+	if (function->evaluate(&call) != TESS_OK)
+		tess_status_report(&value->status);
+}
+
 const TessDatumColumn *
 tess_expr_get_column(TessExpr *expr)
 {
@@ -965,7 +1047,7 @@ cond_masks(Cond *cond, int nrows)
 {
 	int			nwords = tess_row_mask_word_count(nrows);
 	TessRowMask *masks[] = {&cond->truth, &cond->unknown, &cond->rest,
-	&cond->all_true};
+	&cond->all_true, &cond->work};
 
 	if (cond->capacity < nwords)
 	{
@@ -1127,6 +1209,64 @@ eval_cond(Cond *cond, const TessRowMask *rows, bool want_unknown)
 				for (int word = 0; word < nwords; word++)
 					truth[word] = rows->bits[word] &
 						(cond->is_null ? ~present->bits[word] : present->bits[word]);
+				break;
+			}
+		case COND_ARRAY:
+			{
+				const TessDatumColumn *column;
+				uint64	   *present = cond->all_true.bits;
+				uint64	   *work = cond->work.bits;
+
+				/* x once, over the selection. */
+				memcpy(rest, rows->bits, sizeof(uint64) * nwords);
+				bind_selection(cond->expr, &cond->rest);
+				column = tess_expr_get_column(cond->expr);
+				if (want_unknown)
+					memcpy(present, tess_expr_non_nulls(cond->expr)->bits,
+						   sizeof(uint64) * nwords);
+				if (cond->use_or)
+				{
+					/* Each element over the rows no earlier one matched. */
+					for (int index = 0; index < cond->nelements && !mask_empty(&cond->rest); index++)
+					{
+						if (cond->element_nulls[index])
+							continue;
+						memcpy(work, rest, sizeof(uint64) * nwords);
+						call_predicate(cond->expr, cond->function,
+									   cond->inputcollid, column,
+									   cond->elements[index], &cond->work);
+						for (int word = 0; word < nwords; word++)
+						{
+							truth[word] |= work[word];
+							rest[word] &= ~work[word];
+						}
+					}
+					if (want_unknown)
+						for (int word = 0; word < nwords; word++)
+							unknown[word] = rows->bits[word] &
+								(~present[word] |
+								 (cond->has_null ? present[word] & ~truth[word] : 0));
+				}
+				else
+				{
+					/* Each element over the rows every earlier one matched. */
+					memcpy(work, rows->bits, sizeof(uint64) * nwords);
+					for (int index = 0; index < cond->nelements && !mask_empty(&cond->work); index++)
+					{
+						if (cond->element_nulls[index])
+							continue;
+						call_predicate(cond->expr, cond->function,
+									   cond->inputcollid, column,
+									   cond->elements[index], &cond->work);
+					}
+					for (int word = 0; word < nwords; word++)
+					{
+						truth[word] = cond->has_null ? 0 : work[word];
+						if (want_unknown)
+							unknown[word] = rows->bits[word] &
+								(~present[word] | (cond->has_null ? work[word] : 0));
+					}
+				}
 				break;
 			}
 		case COND_BOOL_TEST:

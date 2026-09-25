@@ -609,6 +609,32 @@ tessera_test_expr_filters(PG_FUNCTION_ARGS)
 		result &= check(227, tess_row_mask_count(&batch->rows) == 0);
 		batch = filtered(array_op("<", a(), true, bounds, NULL, 2), econtext);
 		result &= check(228, tess_row_mask_count(&batch->rows) == 5);
+		/* x computed once and compared with each element: a chain, a
+		 * remainder, a narrowed selection, the unknown rows, ALL. */
+		{
+			const int32 evens[3] = {2, 4, 6};
+			const int32 residues[2] = {0, 3};
+			const int32 three_null[2] = {3, 0};
+			const int32 threes[2] = {3, 3};
+			const int32 three_five[2] = {3, 5};
+
+			batch = filtered(array_op("=", op("+", a(), int4(1)), true, evens, NULL, 3), econtext);
+			result &= check(230, tess_row_mask_count(&batch->rows) == 2);
+			batch = filtered(array_op("=", op("%", a(), int4(7)), true, residues, NULL, 2), econtext);
+			result &= check(231, tess_row_mask_count(&batch->rows) == 16);
+			batch = filtered(op(">", a(), int4(60)), econtext);
+			expr = tess_expr_compile_filter(array_op("=", a(), true, residues, NULL, 2), NULL, resolve, NULL);
+			tess_expr_bind(expr, batch, econtext, TESS_COLUMN_FOR_FILTER);
+			tess_expr_apply_filter(expr);
+			result &= check(232, tess_row_mask_count(&batch->rows) == 0);
+			batch = filtered(bool_test(array_op("=", a(), true, three_null, second_null, 2), IS_UNKNOWN), econtext);
+			result &= check(233, tess_row_mask_count(&batch->rows) == 69);
+			batch = filtered(array_op("=", a(), false, threes, NULL, 2), econtext);
+			result &= check(234, tess_row_mask_count(&batch->rows) == 1 &&
+				tess_row_mask_contains(&batch->rows, 2));
+			batch = filtered(array_op("<>", a(), false, three_five, NULL, 2), econtext);
+			result &= check(235, tess_row_mask_count(&batch->rows) == 55);
+		}
 		/* A condition over a selection a previous one narrowed. */
 		batch = filtered(or2(op(">", a(), int4(60)), op("<", a(), int4(5))), econtext);
 		expr = tess_expr_compile_filter(or2(op("<", a(), int4(3)), op(">", a(), int4(68))), NULL, resolve, NULL);
@@ -682,6 +708,16 @@ tessera_test_expr_errors(PG_FUNCTION_ARGS)
 			expr = tess_expr_compile_filter(and2(op("=", a(), int4(3)), op(">", op("/", int4(10), op("-", a(), int4(3))), int4(1))), NULL, resolve, NULL);
 			tess_expr_bind(expr, batch, econtext, TESS_COLUMN_FOR_FILTER);
 			tess_expr_apply_filter(expr);
+			break;
+		case 10:
+			/* 10 / (a - 3) IN (1, 2): x fails on the row where a is 3. */
+			{
+				const int32 small_values[2] = {1, 2};
+
+				expr = tess_expr_compile_filter(array_op("=", op("/", int4(10), op("-", a(), int4(3))), true, small_values, NULL, 2), NULL, resolve, NULL);
+				tess_expr_bind(expr, batch, econtext, TESS_COLUMN_FOR_FILTER);
+				tess_expr_apply_filter(expr);
+			}
 			break;
 		case 8:
 			/* An operand whose column is unavailable. */

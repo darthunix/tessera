@@ -50,6 +50,8 @@ SELECT tessera_test_expr_errors(8);
 ERROR:  Tessera expression input column is unavailable
 SELECT tessera_test_expr_errors(9);
 ERROR:  division by zero
+SELECT tessera_test_expr_errors(10);
+ERROR:  division by zero
 \set VERBOSITY default
 DROP FUNCTION tessera_test_expr_errors(integer);
 DROP FUNCTION tessera_test_expr_filters();

@@ -136,9 +136,15 @@ logic: `AND`, `OR` and `NOT` over supported conditions; `IS NULL` and `IS
 NOT NULL` over a supported value, a bare column of any type among them,
 since only its NULL flags are read; `IS [NOT] TRUE`, `IS [NOT] FALSE` and
 `IS [NOT] UNKNOWN` over a supported condition; and `x op ANY (array)` or
-`x op ALL (array)` over a constant array of at most 32 elements, which the
-compiler turns into the `OR` (or the `AND`) of `x op element`, so `a IN
-(1, 3, 5)` and `a NOT IN (1, NULL)` are covered. A condition evaluates to
+`x op ALL (array)` over a constant array of at most 32 elements, so `a IN
+(1, 3, 5)` and `a NOT IN (1, NULL)` are covered: `x` is computed once over
+the selection, as the executor computes it once per row, and the
+predicate compared against each element, for `ANY` over the rows no
+earlier element matched, for `ALL` over the rows every earlier one did;
+a NULL element leaves a row that matches no other unknown for `ANY` and
+makes every row that is not false unknown for `ALL`, as the array
+operators say. A cross-type operator in the list stands for its
+equivalent, the elements cast once. A condition evaluates to
 two masks over the selection it is given, the rows where it is true and
 those where it is unknown (NULL), the rest being false: a leaf's unknown
 rows are those where its value, its operand or a scalar is NULL, and the

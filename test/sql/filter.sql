@@ -203,6 +203,8 @@ SELECT filter_same($$SELECT a FROM filter_t WHERE a IN (3, 5, 7, 14)$$);
 SELECT filter_same($$SELECT count(*) FROM filter_t WHERE a NOT IN (3, NULL)$$);
 SELECT filter_same($$SELECT count(*) FROM filter_t WHERE a + 1 IN (4, NULL) OR b IN (1, 2)$$);
 SELECT filter_same($$SELECT count(*) FROM filter_t WHERE b = 0 OR 10 / b > 1$$);
+SELECT filter_same($$SELECT count(*) FROM filter_t WHERE (b IN (1, NULL)) IS UNKNOWN$$);
+SELECT filter_same($$SELECT a FROM filter_t WHERE a IN (3::bigint, 5000000000)$$);
 SELECT filter_same($$SELECT count(*) FROM filter_t WHERE c IS NOT NULL AND a + 1 IS NULL$$);
 -- A parallel worker runs the node from the plan's text form.
 SET debug_parallel_query = on;
@@ -281,6 +283,7 @@ SELECT filter_same($$SELECT (a % 4294967296)::int + 1 FROM filter8_t WHERE (a % 
 \set VERBOSITY terse
 SELECT count(*) FROM filter8_t WHERE a::int > 0;
 \set VERBOSITY default
+SELECT filter_same($$SELECT a FROM filter8_t WHERE a IN (1, 2, 4294967297, 8589934594)$$);
 -- An overflow in a bigint chain is reported as bigint's.
 SELECT a FROM filter8_t WHERE a * 4294967296 > 1;
 DROP TABLE filter8_t;
