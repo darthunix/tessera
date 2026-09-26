@@ -330,6 +330,13 @@ forwards it below, as the pack node does, so a sort under the limit stays a
 top-N sort and the pack node pulls no more rows than the bound; any other
 child goes to `ExecSetTupleBound` itself.
 
+`tess_input_set_key_filter(input, filter)` hands the input's child a key
+filter (`TessKeyFilter`, [node.md](node.md)) through its kind's
+`set_key_filter` callback, or takes it back with `NULL`, and returns
+whether the child took it; a child of another kind refuses.
+`tess_batch_node_of` gives the kind of a batch node's execution state
+built by the plan helpers, as both this and the tuple bound find it.
+
 `tess_unary_rescan` performs the node contract's whole rescan order: it
 clears the node's output, finishes the input, rescans the child, resets the
 input and the helper's counters. `tess_unary_end` detaches the node's
@@ -608,6 +615,10 @@ set of batch columns the clauses read, for the request to the producer;
 `tess_qual_apply(qual, batch, econtext, rows)` narrows the batch's
 selection and returns the rows kept, the caller having reset the
 expression context; `tess_qual_stats` counts the rows the batch stages and the row-wise ones removed.
+`tess_qual_set_row_prefilter` adds a step that runs once per batch right
+before the first row-wise clause and may only remove rows (TessFilter
+checks a parent's key filter there), and `tess_qual_has_row_clauses`
+says whether there is a row-wise clause for it to precede.
 
 ## Batch expressions
 

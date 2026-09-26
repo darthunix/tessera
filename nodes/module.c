@@ -1,6 +1,7 @@
 #include "postgres.h"
 
 #include "fmgr.h"
+#include "utils/guc.h"
 
 #include "tessera/runtime.h"
 
@@ -9,6 +10,8 @@
 PG_MODULE_MAGIC;
 
 PGDLLEXPORT void _PG_init(void);
+
+double		tess_join_bloom_ratio = 0.5;
 
 /*
  * The module registers its node kinds and scan methods. The pack and heap
@@ -37,4 +40,11 @@ _PG_init(void)
 	RegisterCustomScanMethods(&tess_hash_join_scan_methods);
 	api->nodes->add(&tess_hash_join_node);
 	tess_hash_join_planner_init();
+	DefineCustomRealVariable("tessera.join_bloom_ratio",
+							 "Share of probe rows with a pair below which a hash join builds a Bloom filter.",
+							 "After its first probe rows a join builds a Bloom filter of its keys when "
+							 "fewer of them than this share found a pair: 0 never builds one, 1 builds "
+							 "one at once, whatever the sizes.",
+							 &tess_join_bloom_ratio, 0.5, 0.0, 1.0,
+							 PGC_USERSET, 0, NULL, NULL, NULL);
 }

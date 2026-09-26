@@ -3,6 +3,8 @@
 #include "executor/executor.h"
 #include "utils/memutils.h"
 
+#include "tessera/plan.h"
+#include "tessera/planner.h"
 #include "tessera/runtime.h"
 
 struct TessInput
@@ -56,6 +58,40 @@ void
 tess_input_set_request(TessInput *input, const TessRequest *request)
 {
 	input->ops->set_request(input->request_binding, request);
+}
+
+const TessNode *
+tess_batch_node_of(PlanState *state)
+{
+	CustomScan *scan;
+	TessPlanInfo info = TESS_STRUCT_INITIALIZER(TessPlanInfo);
+	const char *kind;
+
+	if (!IsA(state, CustomScanState) || state->plan == NULL ||
+		!IsA(state->plan, CustomScan))
+		return NULL;
+	scan = (CustomScan *) state->plan;
+	kind = tess_plan_data_kind(scan->custom_private);
+	if (kind == NULL || strcmp(kind, "tessera.plan") != 0)
+		return NULL;
+	tess_plan_get_info(scan, &info);
+	pfree(info.child_names);
+	if (info.layout.target_columns != NULL)
+		pfree((void *) info.layout.target_columns);
+	return info.node;
+}
+
+bool
+tess_input_set_key_filter(TessInput *input, const TessKeyFilter *filter)
+{
+	const TessNode *node = tess_batch_node_of(input->child);
+
+	if (filter != NULL && filter->struct_size < TESS_KEY_FILTER_MIN_SIZE)
+		elog(ERROR, "Tessera key filter is smaller than its required fields");
+	if (node == NULL || !TESS_ABI_HAS_FIELD(node, TessNode, set_key_filter) ||
+		node->set_key_filter == NULL)
+		return false;
+	return node->set_key_filter((CustomScanState *) input->child, filter);
 }
 
 static void

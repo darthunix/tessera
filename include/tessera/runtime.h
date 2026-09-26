@@ -305,6 +305,20 @@ extern int	tess_qual_apply(TessQual *qual, TessBatch *batch,
 extern const TessQualStats *tess_qual_stats(const TessQual *qual);
 
 /*
+ * A step tess_qual_apply takes once per batch right before the first
+ * row-wise clause: it may only remove rows of the batch, and returns how
+ * many remain.
+ */
+typedef int (*TessQualPrefilter) (void *arg, TessBatch *batch, int rows);
+
+/* Whether any clause runs row by row. */
+extern bool tess_qual_has_row_clauses(const TessQual *qual);
+
+/* Set the step before the row-wise clauses, or remove it with NULL. */
+extern void tess_qual_set_row_prefilter(TessQual *qual, TessQualPrefilter prefilter,
+										void *arg);
+
+/*
  * The output side of a node: a virtual slot bound to the bridge through
  * which batches are published to a batch-aware parent and rows are served
  * to an ordinary one. Publishing leaves the slot non-empty: in row mode it
@@ -399,6 +413,21 @@ extern void tess_input_finish(TessInput *input);
 
 /* Forget cached and active pointers after the caller rescanned the child. */
 extern void tess_input_rescan(TessInput *input);
+
+/*
+ * Hand the child a key filter (tessera/node.h), or take it back with
+ * NULL: true when the child's node kind takes it. The child applies it to
+ * the batches it returns from then on; the caller keeps the filter valid
+ * until it takes it back.
+ */
+extern bool tess_input_set_key_filter(TessInput *input,
+									  const TessKeyFilter *filter);
+
+/*
+ * The node kind of a batch node's execution state built by the plan
+ * helpers, or NULL for any other state.
+ */
+extern const TessNode *tess_batch_node_of(PlanState *state);
 
 /*
  * A unary node has one batch child and only removes rows from its batches:

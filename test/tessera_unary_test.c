@@ -394,10 +394,23 @@ bound_node_set_tuple_bound(CustomScanState *css, int64 tuples_needed)
 	ExecSetTupleBound(tuples_needed, linitial(css->custom_ps));
 }
 
+/* It also takes key filters of one key, and records the keys it holds. */
+static int	recorded_keys = -1;
+
+static bool
+bound_node_set_key_filter(CustomScanState *css, const TessKeyFilter *filter)
+{
+	if (filter != NULL && filter->nkeys != 1)
+		return false;
+	recorded_keys = filter == NULL ? 0 : filter->nkeys;
+	return true;
+}
+
 static const TessNode bound_node = {
 	TESS_ABI_INITIALIZER(TESS_NODE_ABI_VERSION, TessNode),
 	.name = "tessera.unary_test",
 	.set_tuple_bound = bound_node_set_tuple_bound,
+	.set_key_filter = bound_node_set_key_filter,
 };
 
 static const CustomPathMethods bound_path_methods = {
@@ -474,6 +487,31 @@ tessera_test_unary_bound(PG_FUNCTION_ARGS)
 	unary = tess_unary_create(&config);
 	tess_unary_set_tuple_bound(unary, 5);
 	result &= recorded_bound == -2 && !sort->bounded;
+
+	/*
+	 * A key filter reaches the kind's callback, which takes one key and
+	 * refuses two; NULL takes it back. A child of no such kind refuses.
+	 */
+	{
+		TessInput  *input = tess_input_create(CurrentMemoryContext, &bounded->ss.ps);
+		TessInput  *other = tess_input_create(CurrentMemoryContext, &plain->css.ss.ps);
+		TessKeyFilter filter = TESS_STRUCT_INITIALIZER(TessKeyFilter);
+		int			columns[2] = {0, 1};
+		TessTableKeyKind kinds[2] = {TESS_TABLE_KEY_INT4, TESS_TABLE_KEY_INT8};
+		uint64		words[4] = {0};
+
+		filter.nkeys = 1;
+		filter.columns = columns;
+		filter.kinds = kinds;
+		filter.words = words;
+		filter.nwords = 4;
+		result &= tess_input_set_key_filter(input, &filter) && recorded_keys == 1;
+		filter.nkeys = 2;
+		result &= !tess_input_set_key_filter(input, &filter) && recorded_keys == 1;
+		result &= tess_input_set_key_filter(input, NULL) && recorded_keys == 0;
+		filter.nkeys = 1;
+		result &= !tess_input_set_key_filter(other, &filter) && recorded_keys == 0;
+	}
 	PG_RETURN_BOOL(result);
 }
 

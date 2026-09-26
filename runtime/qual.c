@@ -32,6 +32,10 @@ struct TessQual
 	/* Every batch column any clause reads. */
 	Bitmapset  *read_columns;
 	TessQualStats stats;
+	/* The first stage of row-wise clauses, or -1, and the step before it. */
+	int			first_row_stage;
+	TessQualPrefilter prefilter;
+	void	   *prefilter_arg;
 };
 
 /* A Var of the scan tuple is a position in the scan tuple's layout. */
@@ -110,6 +114,7 @@ tess_qual_create(const TessQualConfig *config)
 	oldcontext = MemoryContextSwitchTo(config->parent_context);
 	qual = palloc0_object(TessQual);
 	qual->stages = palloc0_array(QualStage, Max(nclauses, 1));
+	qual->first_row_stage = -1;
 	if (config->row_clauses != NIL)
 		map_row_attributes(qual, config);
 	nbatch = 0;
@@ -138,6 +143,8 @@ tess_qual_create(const TessQualConfig *config)
 			for (int index = first; index < end; index++)
 				clauses = lappend(clauses, list_nth(config->row_clauses, nrow++));
 			stage->row_qual = ExecInitQual(clauses, config->parent);
+			if (qual->first_row_stage < 0)
+				qual->first_row_stage = qual->nstages - 1;
 		}
 		first = end;
 	}
@@ -208,6 +215,13 @@ tess_qual_apply(TessQual *qual, TessBatch *batch, ExprContext *econtext,
 
 		if (stage->row_qual != NULL)
 		{
+			if (qual->prefilter != NULL && index == qual->first_row_stage)
+			{
+				kept = qual->prefilter(qual->prefilter_arg, batch, kept);
+				if (kept == 0)
+					break;
+				before = kept;
+			}
 			kept = apply_rows(qual, stage->row_qual, batch, econtext, kept);
 			qual->stats.row_removed += before - kept;
 			continue;
@@ -222,6 +236,19 @@ tess_qual_apply(TessQual *qual, TessBatch *batch, ExprContext *econtext,
 		qual->stats.batch_removed += before - kept;
 	}
 	return kept;
+}
+
+bool
+tess_qual_has_row_clauses(const TessQual *qual)
+{
+	return qual->first_row_stage >= 0;
+}
+
+void
+tess_qual_set_row_prefilter(TessQual *qual, TessQualPrefilter prefilter, void *arg)
+{
+	qual->prefilter = prefilter;
+	qual->prefilter_arg = arg;
 }
 
 const TessQualStats *

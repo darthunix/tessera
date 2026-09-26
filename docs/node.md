@@ -162,7 +162,14 @@ a planner defect. `EXEC_FLAG_REWIND` is supported through rescan.
 `ExecSetTupleBound` is optional and up to the node; a limit node calls the
 unary helper's form of it, which reaches a batch child through the node
 kind's `set_tuple_bound` callback, and a pass-through node like the pack
-node forwards the bound and pulls no more rows than it.
+node forwards the bound and pulls no more rows than it. In the same way a
+parent may hand a batch child a key filter (`TessKeyFilter`: key columns
+of the child's batches and their kinds, and a Bloom filter of hashes)
+through the kind's optional `set_key_filter` callback, which returns
+whether the node takes it: a node that does applies it to the batches it
+returns from then on, until the parent takes it back with `NULL`, and
+the filter stays the parent's. A hash join hands its Bloom filter to a
+TessFilter below it this way.
 
 ### Parallel execution
 

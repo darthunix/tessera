@@ -8,9 +8,36 @@
 #include "nodes/pathnodes.h"
 
 #include "tessera/abi.h"
+#include "tessera/table.h"
 
 #define TESS_NODE_ABI_VERSION 0
 #define TESS_NODE_REGISTRY_OPS_ABI_VERSION 0
+
+/*
+ * A filter of key hashes a parent hands its child while executing: a hash
+ * join's Bloom filter of its build side's keys, which a child may apply to
+ * its rows before its costlier work, when a row the filter rejects cannot
+ * reach the parent's output. The keys are columns of the child's batches
+ * with their kinds, hashed as tess_int4_hash and tess_int8_hash and their
+ * _next forms hash a join's keys, a NULL key rejected; the words are the
+ * filter, as tess_bloom_probe reads it, or, when shared, a shared filter
+ * the child checks rows against only once tess_bloom_shared_ready says it
+ * is. Everything is the parent's and stays valid until the parent takes
+ * the filter back.
+ */
+typedef struct TessKeyFilter
+{
+	Size		struct_size;
+	int			nkeys;
+	const int  *columns;
+	const TessTableKeyKind *kinds;
+	uint64	   *words;
+	Size		nwords;
+	bool		shared;
+} TessKeyFilter;
+
+#define TESS_KEY_FILTER_MIN_SIZE \
+	TESS_ABI_SIZE_INCLUDING_FIELD(TessKeyFilter, shared)
 
 /*
  * Stable identity of a kind of batch-producing node, not one execution.
@@ -48,6 +75,14 @@ typedef struct TessNode
 	 * it, and the runtime's tess_batch_scan_path calls it.
 	 */
 	CustomPath *(*scan_rows) (PlannerInfo *root, Path *path);
+	/*
+	 * Optional: apply the parent's key filter to this node's batches from
+	 * now on, or stop applying one when filter is NULL; false when the
+	 * node does not take it, and then nothing changes. The runtime's
+	 * tess_input_set_key_filter calls it for a node's child.
+	 */
+	bool		(*set_key_filter) (CustomScanState *node,
+								   const TessKeyFilter *filter);
 } TessNode;
 
 #define TESS_NODE_MIN_SIZE \

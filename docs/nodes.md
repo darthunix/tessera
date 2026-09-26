@@ -317,7 +317,12 @@ once and the clauses are applied through `TessQual`
 previous ones left: a batch clause is bound and applied to the mask, and a
 run of row-wise clauses fetches its columns with the narrowed mask, shows
 each row to `ExecQual` through the scan tuple slot, and clears the bit of
-a row it rejects. A batch-aware parent receives the child's slot with
+a row it rejects. A hash join above may hand the node its Bloom filter
+(`set_key_filter`, [node.md](node.md)) when the node has a row-wise
+clause and the join's keys are columns of the child: the node then
+hashes the keys of the rows its batch clauses kept, as the join does,
+and removes the rows the filter rejects before its first row-wise
+clause, a shared filter once it reads it ready. A batch-aware parent receives the child's slot with
 the whole batch; an ordinary parent receives rows through the helper. With
 computed targets the helper publishes the projection provider's wrapper of
 each batch instead ([runtime.md](runtime.md)), which computes a column
@@ -333,7 +338,9 @@ row, and the leader shows the totals.
 `EXPLAIN` shows the batch clauses as `Batch Filter` and the others as the
 core's `Filter`, each in the planner's order; with `ANALYZE`, the rows removed by each part, per loop,
 the helper's batches and rows and, with computed targets, the `Computed
-Datums`, summed over the participants of a parallel plan. The core's
+Datums`, summed over the participants of a parallel plan, and `Rows
+Removed by Bloom Filter`, the rows a join's filter removed, when there
+are any. The core's
 `Rows Removed by Filter` counts both parts, since the helper reports
 every row the node removes.
 
@@ -757,7 +764,8 @@ whose rows all go out.
 A probe that finds no record still reads a bucket, and on a table past
 the cache that is a cache miss. The node therefore counts the valid
 probe rows of each table built and those that found a record: after the
-first 4096, if fewer than half found one and the table holds at least
+first 4096, if fewer than a share of them found one (the setting
+`tessera.join_bloom_ratio`, 0.5 by default) and the table holds at least
 4096 rows, it builds a Bloom filter of the table's keys once
 (`tess_table_bloom`, see [table.md](table.md)), 16 bits per row in the
 table's memory context, and from then on checks every batch against it
@@ -767,7 +775,13 @@ as it does a probe miss. The decision is the batches' fact, not the
 planner's estimate of the join's selectivity, and holds until the table
 is built again; a smaller table stays in the cache, where a miss costs
 less than the check. Under a `Gather` each participant decides on the
-filter of its own table by its own rows.
+filter of its own table by its own rows. The setting at 1 builds the
+filter at the first batch whatever the sizes, at 0 never. An inner or
+semi join, which drops a row without a pair, then hands the filter to
+its outer child (`tess_input_set_key_filter`): a TessFilter with row-wise
+clauses takes it and removes the rows it rejects before those clauses
+run, and the join checks no more; it takes the filter back before the
+table goes. A left or anti join returns those rows and keeps the filter.
 
 `EXPLAIN` shows the join type for a semi, anti or left join, the key
 clauses as `Hash Cond`, `Shared Table` for a shared table, the residual ones that run in batches as `Batch
@@ -784,7 +798,8 @@ rows over every round, `Rows Removed by Join Filter` and `Rows Removed by
 Filter`, and `Compact Batches`, the batches of copied
 pairs, when there are any, and `Bloom Filters`, the filters built, with
 `Rows Removed by Bloom Filter`, the valid probe rows they rejected, when
-one was built; with a shared table `Builds` counts the one build, and
+one was built (not shown when the outer child took the filter and the
+join removed none), and `Bloom Filter Below` when it did; with a shared table `Builds` counts the one build, and
 `Memory Usage` each participant's chunks and value blocks, and the index
 and filter of the elected one. Under a `Gather` the counters are the totals of
 every participant, and the bucket count is the mean over the tables

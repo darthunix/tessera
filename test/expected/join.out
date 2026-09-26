@@ -1315,6 +1315,220 @@ SELECT join_same($$SELECT jsmall.k, (SELECT count(*) FROM jprobe JOIN jbuild ON 
  10 rows, hash 2ae875d81706c4c95ac117369b1a5ec0
 (1 row)
 
+-- The filter below the join: the outer side's TessFilter checks its rows
+-- against it after its batch clause and before its row-wise one, for
+-- INNER and SEMI, where a row without a pair leaves; ANTI and LEFT keep
+-- theirs, and check in the join.
+SELECT join_explain($$SELECT count(*), sum(jbuild.w) FROM jprobe JOIN jbuild ON jprobe.k = jbuild.k WHERE jprobe.v > 0 AND jprobe.v::text LIKE '%1%'$$);
+                                     join_explain                                      
+---------------------------------------------------------------------------------------
+ Custom Scan (TessAgg) (actual rows=1.00 loops=1)
+   Input Batches: 118
+   Input Rows: 118
+   Kernel Calls: 120
+   Computed Datums: 118
+   ->  Custom Scan (TessHashJoin) (actual rows=118.00 loops=1)
+         Hash Cond: (jprobe.k = jbuild.k)
+         Buckets: 16384
+         Memory Usage: N kB
+         Builds: 1
+         Build Rows: 5000
+         Chunks: 2
+         Probe Rows: 4295
+         Matches: 118
+         Bloom Filters: 1
+         Bloom Filter Below: true
+         ->  Custom Scan (TessFilter) on jprobe (actual rows=4295.00 loops=1)
+               Filter: ((v)::text ~~ '%1%'::text)
+               Rows Removed by Filter: 15705
+               Batch Filter: (jprobe.v > 0)
+               Rows Removed by Batch Filter: 0
+               Rows Removed by Bloom Filter: 9144
+               Rows Removed by Residual Filter: 6561
+               Input Batches: 354
+               Input Rows: 20000
+               Output Rows: 4295
+               ->  Custom Scan (TessHeapScan) on jprobe (actual rows=20000.00 loops=1)
+                     Batch Size: 64
+                     Batches: 354
+                     Pages: 89
+                     Deformed Datums: 33440
+                     Restarted Datums: 137
+         ->  Custom Scan (TessHeapScan) on jbuild (actual rows=5000.00 loops=1)
+               Batch Size: 64
+               Batches: 89
+               Pages: 23
+               Deformed Datums: 10000
+               Restarted Datums: 0
+(38 rows)
+
+SELECT join_same($$SELECT jprobe.v, jbuild.w FROM jprobe JOIN jbuild ON jprobe.k = jbuild.k WHERE jprobe.v > 0 AND jprobe.v::text LIKE '%1%'$$);
+                    join_same                    
+-------------------------------------------------
+ 118 rows, hash f76c847caf93d5eb0d4a444b6dafe771
+(1 row)
+
+SELECT join_same($$SELECT jprobe.v FROM jprobe WHERE jprobe.v > 0 AND jprobe.v::text LIKE '%1%' AND EXISTS (SELECT 1 FROM jbuild WHERE jbuild.k = jprobe.k)$$);
+                    join_same                    
+-------------------------------------------------
+ 118 rows, hash 781a9068acfcc371e0f74909f5fa3f12
+(1 row)
+
+SELECT join_explain($$SELECT count(*) FROM jprobe WHERE jprobe.v > 0 AND jprobe.v::text LIKE '%1%' AND NOT EXISTS (SELECT 1 FROM jbuild WHERE jbuild.k = jprobe.k)$$);
+                                     join_explain                                      
+---------------------------------------------------------------------------------------
+ Custom Scan (TessAgg) (actual rows=1.00 loops=1)
+   Input Batches: 354
+   Input Rows: 13321
+   Kernel Calls: 354
+   ->  Custom Scan (TessHashJoin) (actual rows=13321.00 loops=1)
+         Join Type: Anti
+         Hash Cond: (jbuild.k = jprobe.k)
+         Buckets: 16384
+         Memory Usage: N kB
+         Builds: 1
+         Build Rows: 5000
+         Chunks: 2
+         Probe Rows: 13439
+         Matches: 0
+         Bloom Filters: 1
+         Rows Removed by Bloom Filter: 9048
+         ->  Custom Scan (TessFilter) on jprobe (actual rows=13439.00 loops=1)
+               Filter: ((v)::text ~~ '%1%'::text)
+               Rows Removed by Filter: 6561
+               Batch Filter: (jprobe.v > 0)
+               Rows Removed by Batch Filter: 0
+               Rows Removed by Residual Filter: 6561
+               Input Batches: 354
+               Input Rows: 20000
+               Output Rows: 13439
+               ->  Custom Scan (TessHeapScan) on jprobe (actual rows=20000.00 loops=1)
+                     Batch Size: 64
+                     Batches: 354
+                     Pages: 89
+                     Deformed Datums: 33439
+                     Restarted Datums: 137
+         ->  Custom Scan (TessHeapScan) on jbuild (actual rows=5000.00 loops=1)
+               Batch Size: 64
+               Batches: 89
+               Pages: 23
+               Deformed Datums: 5000
+               Restarted Datums: 0
+(37 rows)
+
+SELECT join_same($$SELECT jprobe.v FROM jprobe WHERE jprobe.v > 0 AND jprobe.v::text LIKE '%1%' AND NOT EXISTS (SELECT 1 FROM jbuild WHERE jbuild.k = jprobe.k)$$);
+                     join_same                     
+---------------------------------------------------
+ 13321 rows, hash 1c80c277ae45ceafd7375f735a199847
+(1 row)
+
+SELECT join_same($$SELECT jprobe.v, jbuild.w FROM jprobe LEFT JOIN jbuild ON jprobe.k = jbuild.k WHERE jprobe.v > 0 AND jprobe.v::text LIKE '%1%'$$);
+                     join_same                     
+---------------------------------------------------
+ 13439 rows, hash bb25c78991f2077dbf3884b5be23ee1e
+(1 row)
+
+-- Each table built for a parameter takes its filter back before it goes.
+SELECT join_same($$SELECT jsmall.k, (SELECT count(*) FROM jprobe JOIN jbuild ON jprobe.k = jbuild.k WHERE jbuild.w > jsmall.k AND jprobe.v > 0 AND jprobe.v::text LIKE '%1%') FROM jsmall$$);
+                   join_same                    
+------------------------------------------------
+ 10 rows, hash 03078623f913892deabc346e22e06589
+(1 row)
+
+-- tessera.join_bloom_ratio: at 1 a filter at once, whatever the sizes; at
+-- 0 none.
+SET tessera.join_bloom_ratio = 1;
+SELECT join_explain($$SELECT count(*), sum(jd.n) FROM jf JOIN jd ON jf.fk = jd.id WHERE jf.v > 0 AND jf.note LIKE 'f1%'$$);
+                                   join_explain                                   
+----------------------------------------------------------------------------------
+ Custom Scan (TessAgg) (actual rows=1.00 loops=1)
+   Input Batches: 5
+   Input Rows: 87
+   Kernel Calls: 10
+   Computed Datums: 87
+   ->  Custom Scan (TessHashJoin) (actual rows=87.00 loops=1)
+         Hash Cond: (jd.id = jf.fk)
+         Buckets: 1024
+         Memory Usage: N kB
+         Builds: 1
+         Build Rows: 300
+         Chunks: 1
+         Probe Rows: 88
+         Matches: 87
+         Bloom Filters: 1
+         Bloom Filter Below: true
+         ->  Custom Scan (TessFilter) on jf (actual rows=88.00 loops=1)
+               Filter: (note ~~ 'f1%'::text)
+               Rows Removed by Filter: 912
+               Batch Filter: (jf.v > 0)
+               Rows Removed by Batch Filter: 0
+               Rows Removed by Bloom Filter: 224
+               Rows Removed by Residual Filter: 688
+               Input Batches: 18
+               Input Rows: 1000
+               Output Rows: 88
+               ->  Custom Scan (TessHeapScan) on jf (actual rows=1000.00 loops=1)
+                     Batch Size: 64
+                     Batches: 18
+                     Pages: 9
+                     Deformed Datums: 2723
+                     Restarted Datums: 105
+         ->  Custom Scan (TessHeapScan) on jd (actual rows=300.00 loops=1)
+               Batch Size: 64
+               Batches: 6
+               Pages: 3
+               Deformed Datums: 600
+               Restarted Datums: 0
+(38 rows)
+
+SELECT join_same($$SELECT jf.v, jd.label FROM jf JOIN jd ON jf.fk = jd.id WHERE jf.v > 0 AND jf.note LIKE 'f1%'$$);
+                   join_same                    
+------------------------------------------------
+ 87 rows, hash 199b1825866588b78b9b7088ef122f81
+(1 row)
+
+SET tessera.join_bloom_ratio = 0;
+SELECT join_explain($$SELECT count(*), sum(jbuild.w) FROM jprobe JOIN jbuild ON jprobe.k = jbuild.k WHERE jprobe.v > 0 AND jprobe.v::text LIKE '%1%'$$);
+                                     join_explain                                      
+---------------------------------------------------------------------------------------
+ Custom Scan (TessAgg) (actual rows=1.00 loops=1)
+   Input Batches: 118
+   Input Rows: 118
+   Kernel Calls: 120
+   Computed Datums: 118
+   ->  Custom Scan (TessHashJoin) (actual rows=118.00 loops=1)
+         Hash Cond: (jprobe.k = jbuild.k)
+         Buckets: 16384
+         Memory Usage: N kB
+         Builds: 1
+         Build Rows: 5000
+         Chunks: 2
+         Probe Rows: 13439
+         Matches: 118
+         ->  Custom Scan (TessFilter) on jprobe (actual rows=13439.00 loops=1)
+               Filter: ((v)::text ~~ '%1%'::text)
+               Rows Removed by Filter: 6561
+               Batch Filter: (jprobe.v > 0)
+               Rows Removed by Batch Filter: 0
+               Rows Removed by Residual Filter: 6561
+               Input Batches: 354
+               Input Rows: 20000
+               Output Rows: 13439
+               ->  Custom Scan (TessHeapScan) on jprobe (actual rows=20000.00 loops=1)
+                     Batch Size: 64
+                     Batches: 354
+                     Pages: 89
+                     Deformed Datums: 33439
+                     Restarted Datums: 137
+         ->  Custom Scan (TessHeapScan) on jbuild (actual rows=5000.00 loops=1)
+               Batch Size: 64
+               Batches: 89
+               Pages: 23
+               Deformed Datums: 10000
+               Restarted Datums: 0
+(35 rows)
+
+RESET tessera.join_bloom_ratio;
 -- Row-wise parents: a sort, a limit, a scrollable cursor.
 EXPLAIN (COSTS OFF)
 SELECT jf.v, jd.label FROM jf JOIN jd ON jf.fk = jd.id ORDER BY jf.v DESC LIMIT 5;
@@ -1600,6 +1814,20 @@ SELECT join_same($$SELECT count(*), sum(jprobe.v) FROM jprobe WHERE NOT EXISTS (
                    join_same                   
 -----------------------------------------------
  1 rows, hash 8641ae42b30194e539434992596ad8d1
+(1 row)
+
+-- The shared filter below the join: each participant's TessFilter checks
+-- its rows once the filter is ready.
+SELECT join_same($$SELECT count(*), sum(jbuild.w), sum(jprobe.v) FROM jprobe JOIN jbuild ON jprobe.k = jbuild.k WHERE jprobe.v > 0 AND jprobe.v::text LIKE '%1%'$$);
+                   join_same                   
+-----------------------------------------------
+ 1 rows, hash 6966fd80c5ea516e4aea176e0220b169
+(1 row)
+
+SELECT join_property($$SELECT count(*) FROM jprobe JOIN jbuild ON jprobe.k = jbuild.k WHERE jprobe.v > 0 AND jprobe.v::text LIKE '%1%'$$, 'Bloom Filter Below') AS below;
+ below 
+-------
+ true
 (1 row)
 
 -- By-reference inner columns: their values live in the query's shared

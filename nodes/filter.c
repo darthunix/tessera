@@ -9,6 +9,7 @@
 #include "storage/shm_toc.h"
 #include "utils/ruleutils.h"
 
+#include "tessera/kernel_ops.h"
 #include "tessera/plan.h"
 #include "tessera/runtime.h"
 
@@ -19,7 +20,9 @@
  * clauses to each batch of its child in the planner's order, those the
  * compiler takes as batch filters and the others row by row, each over
  * the rows the ones before it kept, and passes
- * the batch on with the rows that remain. Under a Gather, the leader
+ * the batch on with the rows that remain. A hash join above may hand it
+ * the Bloom filter of its build side's keys, which it then checks rows
+ * against before its first row-wise clause. Under a Gather, the leader
  * reports the counters of every participant. See docs/nodes.md.
  */
 
@@ -32,6 +35,8 @@ enum
 	FILTER_INPUT_ROWS,
 	FILTER_OUTPUT_ROWS,
 	FILTER_COMPUTED,
+	/* Rows a parent's key filter removed. */
+	FILTER_KEY_REMOVED,
 	FILTER_NCOUNTERS
 };
 
@@ -47,6 +52,25 @@ typedef struct FilterState
 	TessProjection *projection;
 	/* The counters of every participant, in a parallel plan. */
 	TessSharedStats *stats;
+
+	/*
+	 * A parent's key filter, applied before the first row-wise clause: its
+	 * keys and their kinds, whether a shared filter was seen ready, and the
+	 * buffers of a batch for capacity rows.
+	 */
+	const TessKernelOps *kernels;
+	bool		key_filter_set;
+	TessKeyFilter key_filter;
+	int			key_columns[TESS_TABLE_MAX_KEYS];
+	TessTableKeyKind key_kinds[TESS_TABLE_MAX_KEYS];
+	bool		key_filter_ready;
+	int			capacity;
+	uint32	   *hashes;
+	uint64	   *valid_bits;
+	uint64	   *passed_bits;
+	uint64		key_removed;
+	/* Written by a kernel on failure only. */
+	TessStatus	status;
 } FilterState;
 
 static void filter_begin(CustomScanState *css, EState *estate, int eflags);
@@ -78,10 +102,147 @@ static const CustomExecMethods filter_exec_methods = {
 	.ShutdownCustomScan = filter_shutdown,
 };
 
+static bool filter_set_key_filter(CustomScanState *css, const TessKeyFilter *filter);
+
 const TessNode tess_filter_node = {
 	TESS_ABI_INITIALIZER(TESS_NODE_ABI_VERSION, TessNode),
 	.name = TESS_FILTER_NODE_NAME,
+	.set_key_filter = filter_set_key_filter,
 };
+
+/* Raise the error a kernel stored, if the call failed. */
+static inline void
+check(FilterState *state, TessStatusCode code)
+{
+	if (code != TESS_OK)
+		tess_status_report(&state->status);
+}
+
+/*
+ * The parent's key filter over the rows the batch clauses kept: the keys
+ * hashed as the join hashes them, a NULL key never passing, and the rows
+ * whose hash the filter rejects removed. A shared filter is used once it
+ * is seen ready; until then every row passes.
+ */
+static int
+apply_key_filter(void *private_data, TessBatch *batch, int rows)
+{
+	FilterState *state = private_data;
+	const TessKernelOps *kernels = state->kernels;
+	TessKeyFilter *filter = &state->key_filter;
+	int			nrows = batch->rows.nrows;
+	int			nwords = tess_row_mask_word_count(nrows);
+	TessRowMask valid;
+	TessRowMask passed;
+	int			kept;
+
+	if (filter->shared && !state->key_filter_ready)
+	{
+		check(state, kernels->bloom_shared_ready(filter->words, filter->nwords,
+												 &state->key_filter_ready,
+												 &state->status));
+		if (!state->key_filter_ready)
+			return rows;
+	}
+	if (nrows > state->capacity)
+	{
+		MemoryContext context = state->css.ss.ps.state->es_query_cxt;
+		int			capacity = Max(nrows, 64);
+
+		if (state->hashes != NULL)
+		{
+			pfree(state->hashes);
+			pfree(state->valid_bits);
+			pfree(state->passed_bits);
+		}
+		state->hashes = MemoryContextAlloc(context, sizeof(uint32) * capacity);
+		state->valid_bits = MemoryContextAlloc(context, sizeof(uint64) *
+											   tess_row_mask_word_count(capacity));
+		state->passed_bits = MemoryContextAlloc(context, sizeof(uint64) *
+												tess_row_mask_word_count(capacity));
+		state->capacity = capacity;
+	}
+	/* The kernels fill the masks whole, but check they are masks of nrows. */
+	memset(state->valid_bits, 0, sizeof(uint64) * nwords);
+	memset(state->passed_bits, 0, sizeof(uint64) * nwords);
+	valid = (TessRowMask) {nrows, state->valid_bits};
+	passed = (TessRowMask) {nrows, state->passed_bits};
+	for (int key = 0; key < filter->nkeys; key++)
+	{
+		TessDatumColumn column = TESS_STRUCT_INITIALIZER(TessDatumColumn);
+		bool		int8 = filter->kinds[key] == TESS_TABLE_KEY_INT8;
+
+		batch->ops->get_datum_column(batch, filter->columns[key],
+									 key == 0 ? &batch->rows : &valid,
+									 TESS_COLUMN_FOR_FILTER, &column);
+		if (column.values == NULL || column.isnull == NULL || column.nrows != nrows)
+			elog(ERROR, "Tessera batch returned an invalid column");
+		if (key == 0)
+			check(state, (int8 ? kernels->int8_hash : kernels->int4_hash)
+				  (&column, NULL, &batch->rows, TESS_NULL_KEYS_REJECT,
+				   state->hashes, &valid, &state->status));
+		else
+			check(state, (int8 ? kernels->int8_hash_next : kernels->int4_hash_next)
+				  (&column, NULL, TESS_NULL_KEYS_REJECT, state->hashes, &valid,
+				   &state->status));
+	}
+	if (filter->shared)
+		check(state, kernels->bloom_shared_probe(filter->words, filter->nwords,
+												 state->hashes, &valid, &passed,
+												 &state->status));
+	else
+		check(state, kernels->bloom_probe(filter->words, filter->nwords,
+										  state->hashes, &valid, &passed,
+										  &state->status));
+	/* The rows passed are among the batch's: only rows are removed. */
+	memcpy(batch->rows.bits, state->passed_bits, sizeof(uint64) * nwords);
+	kept = tess_row_mask_count(&passed);
+	state->key_removed += rows - kept;
+	return kept;
+}
+
+/*
+ * Take a parent's key filter, when the node has row-wise clauses for it
+ * to save and its keys are columns of the child; NULL takes it back.
+ */
+static bool
+filter_set_key_filter(CustomScanState *css, const TessKeyFilter *filter)
+{
+	FilterState *state = (FilterState *) css;
+
+	if (filter == NULL)
+	{
+		state->key_filter_set = false;
+		tess_qual_set_row_prefilter(state->qual, NULL, NULL);
+		return true;
+	}
+	if (!tess_qual_has_row_clauses(state->qual) ||
+		filter->nkeys < 1 || filter->nkeys > TESS_TABLE_MAX_KEYS ||
+		filter->words == NULL || filter->nwords == 0)
+		return false;
+	for (int key = 0; key < filter->nkeys; key++)
+	{
+		/* A computed column exists only after the clauses ran. */
+		if (filter->columns[key] < 0 ||
+			filter->columns[key] >= state->child_layout.ncolumns ||
+			(filter->kinds[key] != TESS_TABLE_KEY_INT4 &&
+			 filter->kinds[key] != TESS_TABLE_KEY_INT8))
+			return false;
+		state->key_columns[key] = filter->columns[key];
+		state->key_kinds[key] = filter->kinds[key];
+	}
+	if (state->kernels == NULL)
+		state->kernels = tess_runtime_kernels();
+	if (state->kernels == NULL)
+		return false;
+	state->key_filter = *filter;
+	state->key_filter.columns = state->key_columns;
+	state->key_filter.kinds = state->key_kinds;
+	state->key_filter_ready = false;
+	state->key_filter_set = true;
+	tess_qual_set_row_prefilter(state->qual, apply_key_filter, state);
+	return true;
+}
 
 Node *
 tess_filter_create_state(CustomScan *cscan)
@@ -219,6 +380,7 @@ filter_counters(FilterState *state, uint64 *values)
 
 		values[FILTER_COMPUTED] = computed->chain_datums + computed->row_datums;
 	}
+	values[FILTER_KEY_REMOVED] = state->key_removed;
 }
 
 /*
@@ -251,6 +413,9 @@ filter_explain(CustomScanState *css, List *ancestors, ExplainState *es)
 	}
 	show_removed("Rows Removed by Batch Filter", totals[FILTER_BATCH_REMOVED],
 				 css, es);
+	if (totals[FILTER_KEY_REMOVED] > 0)
+		show_removed("Rows Removed by Bloom Filter", totals[FILTER_KEY_REMOVED],
+					 css, es);
 	if (cscan->scan.plan.qual != NIL)
 		show_removed("Rows Removed by Residual Filter",
 					 totals[FILTER_RESIDUAL_REMOVED], css, es);

@@ -21,6 +21,9 @@
 extern List *tess_order_clauses(PlannerInfo *root, List *rinfos);
 extern double tess_parallel_divisor(const Path *path);
 
+/* tessera.join_bloom_ratio: see nodes/module.c. */
+extern double tess_join_bloom_ratio;
+
 extern const TessNode tess_pack_node;
 extern const CustomScanMethods tess_pack_scan_methods;
 

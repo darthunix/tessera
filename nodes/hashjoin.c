@@ -75,6 +75,8 @@ enum
 	/* Bloom filters built, and the valid probe rows they rejected. */
 	JOIN_BLOOM_FILTERS,
 	JOIN_BLOOM_REMOVED,
+	/* Filters the outer child took, to check its rows with. */
+	JOIN_BLOOM_BELOW,
 	JOIN_NCOUNTERS
 };
 
@@ -231,6 +233,8 @@ typedef struct TessHashJoinState
 	/* The filter is a shared table's, and whether it was seen ready. */
 	bool		bloom_shared;
 	bool		bloom_ready;
+	/* The outer child checks its rows against the filter: the join does not. */
+	bool		bloom_below;
 	uint64		sample_rows;
 	uint64		sample_found;
 
@@ -517,10 +521,24 @@ reserve_chunks(TessHashJoinState *state, int nchunks)
 	state->table.chunk_lens = state->chunk_lens;
 }
 
+/*
+ * Take the filter back from the outer child before it goes: a new table
+ * decides on its own.
+ */
+static void
+take_back_bloom(TessHashJoinState *state)
+{
+	if (!state->bloom_below)
+		return;
+	(void) tess_input_set_key_filter(state->outer_input, NULL);
+	state->bloom_below = false;
+}
+
 /* An empty table with no index yet, for a build that appends first. */
 static void
 create_table(TessHashJoinState *state)
 {
+	take_back_bloom(state);
 	MemoryContextReset(state->table_context);
 	MemoryContextReset(state->values_context);
 	/* A new table: decide on its filter again. */
@@ -1152,6 +1170,7 @@ free_shared_table(TessHashJoinState *state)
 		state->shared->filter = InvalidDsaPointer;
 		state->shared->filter_words = 0;
 	}
+	take_back_bloom(state);
 	state->bloom = NULL;
 	state->bloom_words = 0;
 	state->table.index = NULL;
@@ -1183,6 +1202,7 @@ build_shared(TessHashJoinState *state)
 	state->appended = 0;
 	state->participating = true;
 	/* This build's filter: decided again by this participant's batches. */
+	take_back_bloom(state);
 	state->bloom = NULL;
 	state->bloom_words = 0;
 	state->bloom_decided = false;
@@ -1439,6 +1459,31 @@ start_null_round(TessHashJoinState *state)
 }
 
 /*
+ * Offer the filter to the outer child, which may check its rows against it
+ * before its costlier work (TessFilter's row-wise clauses): only when a
+ * row without a pair leaves the join's output, as INNER and SEMI drop it.
+ * A child that takes it passes only the rows the filter lets through, and
+ * the join checks no more.
+ */
+static void
+hand_down_bloom(TessHashJoinState *state)
+{
+	TessKeyFilter filter = TESS_STRUCT_INITIALIZER(TessKeyFilter);
+
+	if (state->jointype != JOIN_INNER && state->jointype != JOIN_SEMI)
+		return;
+	filter.nkeys = state->nkeys;
+	filter.columns = state->outer_keys;
+	filter.kinds = state->outer_kinds;
+	filter.words = state->bloom;
+	filter.nwords = state->bloom_words;
+	filter.shared = state->bloom_shared;
+	state->bloom_below = tess_input_set_key_filter(state->outer_input, &filter);
+	if (state->bloom_below)
+		state->counters[JOIN_BLOOM_BELOW]++;
+}
+
+/*
  * After the first JOIN_BLOOM_SAMPLE valid probe rows, a Bloom filter of
  * the table's keys when most of them found no record and the table is
  * past the cache: from then on a row the filter rejects skips the table.
@@ -1446,13 +1491,18 @@ start_null_round(TessHashJoinState *state)
 static void
 decide_bloom(TessHashJoinState *state, uint64 rows, uint64 found)
 {
+	double		ratio = tess_join_bloom_ratio;
+
 	state->sample_rows += rows;
 	state->sample_found += found;
-	if (state->sample_rows < JOIN_BLOOM_SAMPLE)
+	/* At 1 the filter comes at once, whatever the sizes; at 0 never. */
+	if (ratio < 1.0 && state->sample_rows < JOIN_BLOOM_SAMPLE)
 		return;
 	state->bloom_decided = true;
-	if (state->sample_found * 2 >= state->sample_rows ||
-		state->build_rows < JOIN_BLOOM_MIN_ROWS)
+	if (ratio <= 0.0 ||
+		(ratio < 1.0 &&
+		 ((double) state->sample_found >= ratio * state->sample_rows ||
+		  state->build_rows < JOIN_BLOOM_MIN_ROWS)))
 		return;
 	/*
 	 * A shared table's filter: the first participant that wants it builds
@@ -1471,6 +1521,7 @@ decide_bloom(TessHashJoinState *state, uint64 rows, uint64 found)
 														   &built, &state->status));
 		if (built)
 			state->counters[JOIN_BLOOM_FILTERS]++;
+		hand_down_bloom(state);
 		return;
 	}
 	check(state, state->kernels->table_bloom_words(state->build_rows,
@@ -1485,6 +1536,7 @@ decide_bloom(TessHashJoinState *state, uint64 rows, uint64 found)
 											 &state->status));
 	state->counters[JOIN_BLOOM_FILTERS]++;
 	note_memory(state);
+	hand_down_bloom(state);
 }
 
 /*
@@ -1514,11 +1566,13 @@ probe_batch(TessHashJoinState *state, TessBatch *batch)
 	count = tess_row_mask_count(&valid);
 	if (count == 0)
 		return false;
-	if (state->bloom != NULL && state->bloom_shared && !state->bloom_ready)
+	if (state->bloom != NULL && !state->bloom_below && state->bloom_shared &&
+		!state->bloom_ready)
 		check(state, state->kernels->bloom_shared_ready(state->bloom, state->bloom_words,
 														&state->bloom_ready,
 														&state->status));
-	if (state->bloom != NULL && (!state->bloom_shared || state->bloom_ready))
+	if (state->bloom != NULL && !state->bloom_below &&
+		(!state->bloom_shared || state->bloom_ready))
 	{
 		int			through;
 
@@ -2506,9 +2560,14 @@ join_explain(CustomScanState *css, List *ancestors, ExplainState *es)
 	{
 		ExplainPropertyInteger("Bloom Filters", NULL,
 							   totals[JOIN_BLOOM_FILTERS], es);
-		ExplainPropertyInteger("Rows Removed by Bloom Filter", NULL,
-							   totals[JOIN_BLOOM_REMOVED], es);
+		/* A child that took the filter shows the rows it removed instead. */
+		if (totals[JOIN_BLOOM_BELOW] == 0 || totals[JOIN_BLOOM_REMOVED] > 0)
+			ExplainPropertyInteger("Rows Removed by Bloom Filter", NULL,
+								   totals[JOIN_BLOOM_REMOVED], es);
 	}
+	/* The outer child checked its rows: it shows the rows removed. */
+	if (totals[JOIN_BLOOM_BELOW] > 0)
+		ExplainPropertyBool("Bloom Filter Below", true, es);
 }
 
 /*

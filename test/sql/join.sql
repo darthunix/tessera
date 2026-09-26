@@ -259,6 +259,26 @@ SELECT join_explain($$SELECT count(*) FROM jprobe JOIN jd ON jprobe.k = jd.id$$)
 -- A parameter of the inner side builds each table and decides on its filter again.
 SELECT join_explain($$SELECT jsmall.k, (SELECT count(*) FROM jprobe JOIN jbuild ON jprobe.k = jbuild.k WHERE jbuild.w > jsmall.k) FROM jsmall$$);
 SELECT join_same($$SELECT jsmall.k, (SELECT count(*) FROM jprobe JOIN jbuild ON jprobe.k = jbuild.k WHERE jbuild.w > jsmall.k) FROM jsmall$$);
+-- The filter below the join: the outer side's TessFilter checks its rows
+-- against it after its batch clause and before its row-wise one, for
+-- INNER and SEMI, where a row without a pair leaves; ANTI and LEFT keep
+-- theirs, and check in the join.
+SELECT join_explain($$SELECT count(*), sum(jbuild.w) FROM jprobe JOIN jbuild ON jprobe.k = jbuild.k WHERE jprobe.v > 0 AND jprobe.v::text LIKE '%1%'$$);
+SELECT join_same($$SELECT jprobe.v, jbuild.w FROM jprobe JOIN jbuild ON jprobe.k = jbuild.k WHERE jprobe.v > 0 AND jprobe.v::text LIKE '%1%'$$);
+SELECT join_same($$SELECT jprobe.v FROM jprobe WHERE jprobe.v > 0 AND jprobe.v::text LIKE '%1%' AND EXISTS (SELECT 1 FROM jbuild WHERE jbuild.k = jprobe.k)$$);
+SELECT join_explain($$SELECT count(*) FROM jprobe WHERE jprobe.v > 0 AND jprobe.v::text LIKE '%1%' AND NOT EXISTS (SELECT 1 FROM jbuild WHERE jbuild.k = jprobe.k)$$);
+SELECT join_same($$SELECT jprobe.v FROM jprobe WHERE jprobe.v > 0 AND jprobe.v::text LIKE '%1%' AND NOT EXISTS (SELECT 1 FROM jbuild WHERE jbuild.k = jprobe.k)$$);
+SELECT join_same($$SELECT jprobe.v, jbuild.w FROM jprobe LEFT JOIN jbuild ON jprobe.k = jbuild.k WHERE jprobe.v > 0 AND jprobe.v::text LIKE '%1%'$$);
+-- Each table built for a parameter takes its filter back before it goes.
+SELECT join_same($$SELECT jsmall.k, (SELECT count(*) FROM jprobe JOIN jbuild ON jprobe.k = jbuild.k WHERE jbuild.w > jsmall.k AND jprobe.v > 0 AND jprobe.v::text LIKE '%1%') FROM jsmall$$);
+-- tessera.join_bloom_ratio: at 1 a filter at once, whatever the sizes; at
+-- 0 none.
+SET tessera.join_bloom_ratio = 1;
+SELECT join_explain($$SELECT count(*), sum(jd.n) FROM jf JOIN jd ON jf.fk = jd.id WHERE jf.v > 0 AND jf.note LIKE 'f1%'$$);
+SELECT join_same($$SELECT jf.v, jd.label FROM jf JOIN jd ON jf.fk = jd.id WHERE jf.v > 0 AND jf.note LIKE 'f1%'$$);
+SET tessera.join_bloom_ratio = 0;
+SELECT join_explain($$SELECT count(*), sum(jbuild.w) FROM jprobe JOIN jbuild ON jprobe.k = jbuild.k WHERE jprobe.v > 0 AND jprobe.v::text LIKE '%1%'$$);
+RESET tessera.join_bloom_ratio;
 
 -- Row-wise parents: a sort, a limit, a scrollable cursor.
 EXPLAIN (COSTS OFF)
@@ -344,6 +364,10 @@ RESET parallel_leader_participation;
 SELECT join_property($$SELECT count(*) FROM jprobe JOIN jbuild ON jprobe.k = jbuild.k$$, 'Bloom Filters') AS filters,
        join_property($$SELECT count(*) FROM jprobe JOIN jbuild ON jprobe.k = jbuild.k$$, 'Shared Table') AS shared;
 SELECT join_same($$SELECT count(*), sum(jprobe.v) FROM jprobe WHERE NOT EXISTS (SELECT 1 FROM jbuild WHERE jbuild.k = jprobe.k)$$);
+-- The shared filter below the join: each participant's TessFilter checks
+-- its rows once the filter is ready.
+SELECT join_same($$SELECT count(*), sum(jbuild.w), sum(jprobe.v) FROM jprobe JOIN jbuild ON jprobe.k = jbuild.k WHERE jprobe.v > 0 AND jprobe.v::text LIKE '%1%'$$);
+SELECT join_property($$SELECT count(*) FROM jprobe JOIN jbuild ON jprobe.k = jbuild.k WHERE jprobe.v > 0 AND jprobe.v::text LIKE '%1%'$$, 'Bloom Filter Below') AS below;
 -- By-reference inner columns: their values live in the query's shared
 -- memory, in blocks of each participant's, and the payload holds where.
 EXPLAIN (COSTS OFF) SELECT count(*), max(jd.label) FROM jbig JOIN jd ON jbig.fk = jd.id;
