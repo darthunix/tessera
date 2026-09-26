@@ -167,6 +167,24 @@ SELECT plan_property($$SELECT k, count(*) FROM parallel_spread GROUP BY k$$, 'Te
 RESET enable_sort;
 RESET work_mem;
 DROP TABLE parallel_groups, parallel_spread;
+-- A batch node above a Gather: the pack under it takes the leader's rows
+-- in the Gather's child's slot and the workers' in the Gather's own, two
+-- descriptors of one layout, and deforms both by the first.
+CREATE TABLE parallel_pack AS
+SELECT g % 5000 AS k, g AS v FROM generate_series(1, 300000) AS g;
+ANALYZE parallel_pack;
+SET work_mem = '256kB';
+SET enable_sort = off;
+SET cpu_tuple_cost = 0.05;
+EXPLAIN (COSTS OFF) SELECT k, count(*), sum(v), min(v), max(v) FROM parallel_pack GROUP BY k;
+SELECT parallel_same($$SELECT md5(string_agg(q::text, ',' ORDER BY q::text)) FROM (SELECT k, count(*), sum(v), min(v), max(v) FROM parallel_pack GROUP BY k) AS q$$);
+SET parallel_leader_participation = off;
+SELECT parallel_same($$SELECT md5(string_agg(q::text, ',' ORDER BY q::text)) FROM (SELECT k, count(*), sum(v), min(v), max(v) FROM parallel_pack GROUP BY k) AS q$$);
+RESET parallel_leader_participation;
+RESET cpu_tuple_cost;
+RESET enable_sort;
+RESET work_mem;
+DROP TABLE parallel_pack;
 -- An aggregate the node does not compute: the core's partial aggregate over the rows.
 EXPLAIN (COSTS OFF) SELECT count(c), count(*) FROM parallel_t WHERE a > 100;
 SELECT parallel_same($$SELECT count(c), count(*) FROM parallel_t WHERE a > 100$$);

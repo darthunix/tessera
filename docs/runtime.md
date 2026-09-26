@@ -122,7 +122,13 @@ the missing value, as a slot does. `tess_heap_batch_stats` gives the
 deformed and restarted values and the copied rows for `EXPLAIN`. The
 guaranteed prefix (`tts_first_nonguaranteed` of the first slot) and the
 descriptor are taken from the slots appended, so a node needs no
-descriptor of its own.
+descriptor of its own. A slot of another descriptor is taken when its
+tuples deform the same (the same attributes, each of the same type,
+length, passing, alignment, dropped and missing-value flags), with the
+smaller guaranteed prefix of the two: a `Gather` returns the leader's rows
+in its child's slot, of the relation's descriptor, and the workers' in its
+own, of one made from the target list. Any other change of descriptor is
+an error.
 
 ## Computing columns on demand
 

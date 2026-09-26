@@ -11,8 +11,13 @@
 struct TessHeapBatch
 {
 	TessBatch	batch;
-	/* The slots' descriptor, taken from the first row. */
+	/*
+	 * The slots' descriptor, taken from the first row; another one of the
+	 * same layout already accepted (a Gather returns the leader's rows in
+	 * its child's slot and the workers' in its own).
+	 */
 	TupleDesc	tuple_desc;
+	TupleDesc	other_desc;
 	int			first_non_guaranteed;
 	/* Tuples copied from slots without a pinned page; reset per batch. */
 	MemoryContext copies;
@@ -307,6 +312,33 @@ tess_heap_batch_is_full(const TessHeapBatch *heap)
 	return heap->sealed || heap->nrows == heap->capacity;
 }
 
+/*
+ * Whether tuples of one descriptor deform the same by the other: the same
+ * attributes, each of the same type, length, passing and alignment,
+ * dropped or not, with a missing value or not. Names and the row type may
+ * differ, as between a relation's descriptor and one made from a target
+ * list.
+ */
+static bool
+same_layout(TupleDesc a, TupleDesc b)
+{
+	if (a->natts != b->natts)
+		return false;
+	for (int attr = 0; attr < a->natts; attr++)
+	{
+		const CompactAttribute *left = TupleDescCompactAttr(a, attr);
+		const CompactAttribute *right = TupleDescCompactAttr(b, attr);
+
+		if (left->attlen != right->attlen || left->attbyval != right->attbyval ||
+			left->attalignby != right->attalignby ||
+			left->attisdropped != right->attisdropped ||
+			left->atthasmissing != right->atthasmissing ||
+			TupleDescAttr(a, attr)->atttypid != TupleDescAttr(b, attr)->atttypid)
+			return false;
+	}
+	return true;
+}
+
 void
 tess_heap_batch_append_slot(TessHeapBatch *heap, TupleTableSlot *slot)
 {
@@ -319,8 +351,16 @@ tess_heap_batch_append_slot(TessHeapBatch *heap, TupleTableSlot *slot)
 		heap->tuple_desc = slot->tts_tupleDescriptor;
 		heap->first_non_guaranteed = slot->tts_first_nonguaranteed;
 	}
-	else if (slot->tts_tupleDescriptor != heap->tuple_desc)
-		elog(ERROR, "Tessera heap batch input changed its descriptor");
+	else if (slot->tts_tupleDescriptor != heap->tuple_desc &&
+			 slot->tts_tupleDescriptor != heap->other_desc)
+	{
+		if (!same_layout(slot->tts_tupleDescriptor, heap->tuple_desc))
+			elog(ERROR, "Tessera heap batch input changed its descriptor");
+		heap->other_desc = slot->tts_tupleDescriptor;
+		/* Columns known not NULL only as far as both descriptors know it. */
+		heap->first_non_guaranteed = Min(heap->first_non_guaranteed,
+										 slot->tts_first_nonguaranteed);
+	}
 	/* The slot's tuple header is overwritten by the next fetch. */
 	if (TTS_IS_BUFFERTUPLE(slot) && BufferIsValid(bslot->buffer))
 		keep_tuple(heap, bslot->base.tuple, bslot->buffer);
