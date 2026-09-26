@@ -1588,20 +1588,31 @@ spill_memory(JoinSpill *spill, uint64 *resident)
 			rows += spill->build.parts[partition].rows;
 	if (resident != NULL)
 		*resident = rows;
-	/* The levels above keep the tails of their partitions to come. */
+	/*
+	 * The levels above keep the tails of their partitions to come; every
+	 * open file keeps a buffer of a page.
+	 */
 	for (JoinSpill *level = spill; level != NULL; level = level->parent)
+	{
+		int			build_files;
+		int			probe_files;
+
+		tess_spill_stats(level->build.file, NULL, NULL, &build_files);
+		tess_spill_stats(level->probe.file, NULL, NULL, &probe_files);
 		bytes += level->build.bytes + level->probe.bytes +
 			sizeof(uint64) * level->bloom_words +
 			MemoryContextMemAllocated(level->part_context, true) +
-			MemoryContextMemAllocated(level->block_context, true);
+			MemoryContextMemAllocated(level->block_context, true) +
+			(Size) (build_files + probe_files) * BLCKSZ;
+	}
 	return bytes + rows * sizeof(uint64);
 }
 
 /*
  * Keep spilling within hash_mem while building: while it takes more, the
  * largest resident partition goes to disk. Room stays for the outer
- * side's tails, a chunk of records and one of values per partition,
- * which come once the probing starts. The tails stay: the chunk size
+ * side's tails, a chunk of records and one of values per partition, and
+ * its files' buffers, which come once the probing starts. The tails stay: the chunk size
  * bounds them, and writing them sooner would write chunks of a few rows.
  */
 static void
@@ -1609,7 +1620,7 @@ make_room(TessHashJoinState *state, bool building)
 {
 	JoinSpill  *spill = state->spill;
 	Size		limit = get_hash_memory_limit();
-	Size		outer = (Size) spill->npartitions * 2 * spill->probe.chunk_len;
+	Size		outer = (Size) spill->npartitions * (2 * spill->probe.chunk_len + BLCKSZ);
 
 	while (building && spill_memory(spill, NULL) + outer > limit)
 	{
@@ -1662,13 +1673,22 @@ spill_create(TessHashJoinState *state, JoinSpill *parent, double expected,
 	int			nchild = 0;
 	int			nstored = 0;
 
+	/* A level below has what the levels above leave, a quarter at least. */
+	if (parent != NULL)
+	{
+		Size		used = spill_memory(parent, NULL);
+
+		limit = used < limit / 4 * 3 ? limit - used : limit / 4;
+	}
+
 	/*
-	 * Each partition keeps a tail of records and one of values on each
-	 * side: at the smallest chunk, half of hash_mem bounds them all.
+	 * Each partition keeps a tail of records and one of values and a
+	 * file's buffer of a page on each side: at the smallest chunk, half of
+	 * hash_mem bounds them all.
 	 */
 	while (npartitions < JOIN_SPILL_MAX_PARTITIONS &&
 		   (double) npartitions * (limit / 2) < expected &&
-		   (Size) npartitions * 2 * 4 * JOIN_SPILL_MIN_CHUNK <= limit / 2 &&
+		   (Size) npartitions * 2 * (4 * JOIN_SPILL_MIN_CHUNK + 2 * BLCKSZ) <= limit / 2 &&
 		   shift + pg_leftmost_one_pos32(npartitions) + 1 < 32)
 		npartitions *= 2;
 	chunk_len = limit / (16 * npartitions);
