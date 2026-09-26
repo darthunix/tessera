@@ -1,0 +1,352 @@
+#include "postgres.h"
+
+#include "fmgr.h"
+#include "storage/dsm.h"
+#include "utils/memutils.h"
+
+#include "tessera/kernel_ops.h"
+#include "tessera/runtime.h"
+#include "tessera/spill.h"
+
+PG_MODULE_MAGIC;
+
+PG_FUNCTION_INFO_V1(tessera_test_spill_serial);
+PG_FUNCTION_INFO_V1(tessera_test_spill_shared);
+PG_FUNCTION_INFO_V1(tessera_test_spill_error);
+PG_FUNCTION_INFO_V1(tessera_test_spill_bytes);
+
+#define FINGERPRINT UINT64CONST(0x5445535354455354)
+#define MAX_LEN (2 * 1024 * 1024)
+
+/* The kernels of spilled blocks, which this module links. */
+static const TessKernelOps kernels = {
+	TESS_ABI_INITIALIZER(TESS_KERNEL_OPS_ABI_VERSION, TessKernelOps),
+	.table_format_version = TESS_TABLE_FORMAT_VERSION,
+	.spill_header_write = tess_spill_header_write,
+	.spill_header_read = tess_spill_header_read,
+};
+
+/* A block's body: every word names its partition, chunk and place. */
+typedef struct Block
+{
+	int			partition;
+	TessSpillKind kind;
+	uint32		number;
+	Size		len;
+	TessSpillPosition position;
+} Block;
+
+static uint64
+word(const Block *block, Size i)
+{
+	return ((uint64) block->partition << 48) |
+		((uint64) block->number << 32) | (uint64) i;
+}
+
+static void
+fill(const Block *block, uint64 *body)
+{
+	for (Size i = 0; i < block->len / sizeof(uint64); i++)
+		body[i] = word(block, i);
+}
+
+static bool
+same(const Block *block, const uint64 *body)
+{
+	for (Size i = 0; i < block->len / sizeof(uint64); i++)
+		if (body[i] != word(block, i))
+			return false;
+	return true;
+}
+
+static TessSpill *
+make_spill(SharedFileSet *shared, int participant, uint64 fingerprint)
+{
+	TessSpillConfig config = TESS_STRUCT_INITIALIZER(TessSpillConfig);
+
+	config.parent_context = CurrentMemoryContext;
+	config.kernels = &kernels;
+	config.npartitions = 4;
+	config.level = 1;
+	config.fingerprint = fingerprint;
+	config.max_len = MAX_LEN;
+	config.shared = shared;
+	config.participant = participant;
+	config.name = "tess_test";
+	return tess_spill_create(&config);
+}
+
+static void
+write_blocks(TessSpill *spill, Block *blocks, int nblocks)
+{
+	uint64	   *body = palloc(MAX_LEN);
+
+	for (int i = 0; i < nblocks; i++)
+	{
+		fill(&blocks[i], body);
+		tess_spill_write(spill, blocks[i].partition, blocks[i].kind,
+						 blocks[i].number, body, blocks[i].len,
+						 &blocks[i].position);
+	}
+	pfree(body);
+}
+
+/* The partition's blocks read in order are the ones written to it. */
+static bool
+read_partition(TessSpill *spill, int participant, int partition,
+			   const Block *blocks, int nblocks)
+{
+	TessSpillReader *reader = tess_spill_open(spill, participant, partition);
+	TessSpillHeader header;
+	uint64	   *body = palloc(MAX_LEN);
+	bool		ok = true;
+	int			found = 0;
+
+	for (int i = 0; i < nblocks && ok; i++)
+	{
+		if (blocks[i].partition != partition)
+			continue;
+		found++;
+		ok = reader != NULL && tess_spill_read_header(reader, &header) &&
+			header.kind == (uint32) blocks[i].kind &&
+			header.number == blocks[i].number &&
+			header.partition == (uint32) partition && header.level == 1 &&
+			header.len == blocks[i].len;
+		if (ok)
+		{
+			tess_spill_read_body(reader, body, header.len);
+			ok = same(&blocks[i], body);
+		}
+	}
+	if (found == 0)
+		ok = reader == NULL;
+	else if (ok)
+		ok = !tess_spill_read_header(reader, &header);
+	tess_spill_close(reader);
+	pfree(body);
+	return ok;
+}
+
+/* A block read after a seek to its position is the one written there. */
+static bool
+seek_block(TessSpill *spill, int participant, const Block *block)
+{
+	TessSpillReader *reader = tess_spill_open(spill, participant,
+											  block->partition);
+	TessSpillHeader header;
+	uint64	   *body = palloc(MAX_LEN);
+	bool		ok;
+
+	tess_spill_seek(reader, block->position);
+	ok = tess_spill_read_header(reader, &header) &&
+		header.number == block->number && header.len == block->len;
+	if (ok)
+	{
+		tess_spill_read_body(reader, body, header.len);
+		ok = same(block, body);
+	}
+	tess_spill_close(reader);
+	pfree(body);
+	return ok;
+}
+
+/*
+ * A serial set: blocks of records and values of 8 bytes, several file
+ * buffers and 1 MB, and an empty one, into two of four partitions, read
+ * back in order and by position; a partition without blocks has no file;
+ * the counters; a dropped file.
+ */
+Datum
+tessera_test_spill_serial(PG_FUNCTION_ARGS)
+{
+	Block		blocks[] = {
+		{0, TESS_SPILL_RECORDS, 0, 8},
+		{2, TESS_SPILL_RECORDS, 1, 3 * BLCKSZ + 8},
+		{0, TESS_SPILL_VALUES, 0, 1024 * 1024},
+		{2, TESS_SPILL_VALUES, 1, 0},
+		{0, TESS_SPILL_RECORDS, 2, 1024 * 1024},
+	};
+	int			nblocks = lengthof(blocks);
+	TessSpill  *spill = make_spill(NULL, 0, FINGERPRINT);
+	uint64		written = 0;
+	uint64		nwritten;
+	uint64		bytes;
+	int			files;
+
+	write_blocks(spill, blocks, nblocks);
+	tess_spill_finish(spill);
+	for (int partition = 0; partition < 4; partition++)
+		if (!read_partition(spill, 0, partition, blocks, nblocks))
+			elog(ERROR, "partition %d reads back wrong", partition);
+	/* Twice: a reader starts from the file's first block. */
+	if (!read_partition(spill, 0, 0, blocks, nblocks))
+		elog(ERROR, "partition 0 reads back wrong the second time");
+	for (int i = nblocks - 1; i >= 0; i--)
+		if (!seek_block(spill, 0, &blocks[i]))
+			elog(ERROR, "block %d reads back wrong at its position", i);
+	for (int i = 0; i < nblocks; i++)
+		written += TESS_SPILL_HEADER_SIZE + blocks[i].len;
+	tess_spill_stats(spill, &nwritten, &bytes, &files);
+	if (nwritten != (uint64) nblocks || bytes != written || files != 2)
+		elog(ERROR, "counters: " UINT64_FORMAT " blocks, " UINT64_FORMAT " bytes, %d files",
+			 nwritten, bytes, files);
+	tess_spill_drop(spill, 0);
+	tess_spill_stats(spill, &nwritten, NULL, &files);
+	if (files != 1 || nwritten != (uint64) nblocks ||
+		tess_spill_open(spill, 0, 0) != NULL)
+		elog(ERROR, "a dropped file is still there");
+	tess_spill_free(spill);
+	PG_RETURN_BOOL(true);
+}
+
+/*
+ * Two participants of a shared set in one segment: each reads the other's
+ * files and its own, a partition one of them left empty has no file of
+ * that participant; the files go with the segment.
+ */
+Datum
+tessera_test_spill_shared(PG_FUNCTION_ARGS)
+{
+	Block		first[] = {
+		{1, TESS_SPILL_RECORDS, 0, 64},
+		{3, TESS_SPILL_RECORDS, 1, 1024 * 1024},
+		{1, TESS_SPILL_VALUES, 0, 5 * BLCKSZ},
+	};
+	Block		second[] = {
+		{1, TESS_SPILL_RECORDS, 2, 1024 * 1024},
+		{2, TESS_SPILL_VALUES, 1, 16},
+	};
+	dsm_segment *segment = dsm_create(sizeof(SharedFileSet), 0);
+	SharedFileSet *shared = dsm_segment_address(segment);
+	TessSpill  *one;
+	TessSpill  *two;
+	TessSpillReader *early;
+	TessSpillReader *late;
+	TessSpillHeader header;
+
+	tess_spill_shared_init(shared, segment);
+	one = make_spill(shared, 0, FINGERPRINT);
+	two = make_spill(shared, 1, FINGERPRINT);
+	write_blocks(one, first, lengthof(first));
+	write_blocks(two, second, lengthof(second));
+	tess_spill_finish(one);
+	tess_spill_finish(two);
+	for (int partition = 0; partition < 4; partition++)
+		if (!read_partition(one, 1, partition, second, lengthof(second)) ||
+			!read_partition(two, 0, partition, first, lengthof(first)) ||
+			!read_partition(one, 0, partition, first, lengthof(first)))
+			elog(ERROR, "shared partition %d reads back wrong", partition);
+	if (!seek_block(two, 0, &first[2]) || !seek_block(one, 1, &second[0]))
+		elog(ERROR, "a shared block reads back wrong at its position");
+	/* Two readers of one file keep their own positions. */
+	early = tess_spill_open(one, 1, 1);
+	late = tess_spill_open(two, 1, 1);
+	if (!tess_spill_read_header(late, &header) || header.number != 2 ||
+		!tess_spill_read_header(early, &header) || header.number != 2)
+		elog(ERROR, "two readers share a position");
+	tess_spill_close(late);
+	/* The set closes a reader left open. */
+	tess_spill_free(one);
+	tess_spill_drop(two, 1);
+	if (tess_spill_open(two, 1, 1) != NULL)
+		elog(ERROR, "a dropped shared file is still there");
+	tess_spill_free(two);
+	dsm_detach(segment);
+	PG_RETURN_BOOL(true);
+}
+
+/* Each case raises the ERROR the SQL expects. */
+Datum
+tessera_test_spill_error(PG_FUNCTION_ARGS)
+{
+	int			which = PG_GETARG_INT32(0);
+	Block		block = {0, TESS_SPILL_RECORDS, 0, 64};
+	uint64		body[8] = {0};
+	TessSpill  *spill = make_spill(NULL, 0, FINGERPRINT);
+	TessSpillReader *reader;
+	TessSpillHeader header;
+	dsm_segment *segment;
+	SharedFileSet *shared;
+	TessSpill  *other;
+
+	switch (which)
+	{
+		case 1:
+			/* A block after the set was finished. */
+			write_blocks(spill, &block, 1);
+			tess_spill_finish(spill);
+			write_blocks(spill, &block, 1);
+			break;
+		case 2:
+			/* A body of a length the header does not take. */
+			tess_spill_write(spill, 0, TESS_SPILL_RECORDS, 0, body, 12, NULL);
+			break;
+		case 3:
+			/* A body longer than the set accepts. */
+			tess_spill_write(spill, 0, TESS_SPILL_VALUES, 0, body,
+							 MAX_LEN + 8, NULL);
+			break;
+		case 4:
+			/* Another participant's file of a serial set. */
+			tess_spill_finish(spill);
+			tess_spill_open(spill, 1, 0);
+			break;
+		case 5:
+			/* A body read with another length than its header's. */
+			write_blocks(spill, &block, 1);
+			tess_spill_finish(spill);
+			reader = tess_spill_open(spill, 0, 0);
+			tess_spill_read_header(reader, &header);
+			tess_spill_read_body(reader, body, 8);
+			break;
+		case 6:
+			/* The next header before the body. */
+			write_blocks(spill, &block, 1);
+			tess_spill_finish(spill);
+			reader = tess_spill_open(spill, 0, 0);
+			tess_spill_read_header(reader, &header);
+			tess_spill_read_header(reader, &header);
+			break;
+		case 7:
+			/* A block of another table's layout. */
+			segment = dsm_create(sizeof(SharedFileSet), 0);
+			shared = dsm_segment_address(segment);
+			tess_spill_shared_init(shared, segment);
+			other = make_spill(shared, 0, FINGERPRINT);
+			write_blocks(other, &block, 1);
+			tess_spill_finish(other);
+			other = make_spill(shared, 1, FINGERPRINT + 1);
+			tess_spill_finish(other);
+			reader = tess_spill_open(other, 0, 0);
+			tess_spill_read_header(reader, &header);
+			break;
+		case 8:
+			/* A partition out of range. */
+			tess_spill_write(spill, 4, TESS_SPILL_RECORDS, 0, body, 8, NULL);
+			break;
+		case 9:
+			/* A second reader of a serial file. */
+			write_blocks(spill, &block, 1);
+			tess_spill_finish(spill);
+			tess_spill_open(spill, 0, 0);
+			tess_spill_open(spill, 0, 0);
+			break;
+	}
+	PG_RETURN_VOID();
+}
+
+/* Write bytes in blocks of 1 MB to one partition, for temp_file_limit. */
+Datum
+tessera_test_spill_bytes(PG_FUNCTION_ARGS)
+{
+	int64		bytes = PG_GETARG_INT64(0);
+	TessSpill  *spill = make_spill(NULL, 0, FINGERPRINT);
+	char	   *body = palloc0(1024 * 1024);
+
+	for (uint32 number = 0; bytes > 0; number++, bytes -= 1024 * 1024)
+		tess_spill_write(spill, 0, TESS_SPILL_VALUES, number, body, 1024 * 1024,
+						 NULL);
+	tess_spill_free(spill);
+	pfree(body);
+	PG_RETURN_VOID();
+}

@@ -48,3 +48,39 @@ status, never a record read the wrong way; the records themselves are
 then checked as any chunk is, when the table attaches them. The header is
 in native byte order and carries no checksum: temporary files are read by
 the query that wrote them, on the same machine, as PostgreSQL's are.
+
+## Files
+
+The runtime library writes and reads the blocks
+(`runtime/spill.c`, declared in `tessera/runtime.h`). A node makes a
+`TessSpill` per level of partitioning, with the table's fingerprint, the
+longest body it accepts and the number of partitions; each partition gets
+a file on its first block, so a partition that never spills has none.
+
+- A **serial** set writes PostgreSQL's temporary files
+  (`BufFileCreateTemp`): the query's temporary tablespaces are looked up
+  when the set is made, `temp_file_limit` applies, and the files are
+  deleted when the set drops them or, after an ERROR, when the query's
+  resources are released.
+- A **shared** set writes this participant's files of a `SharedFileSet`
+  in the node's chunk of the query's shared memory
+  (`tess_spill_shared_init` in the leader, `tess_spill_shared_attach` in a
+  worker), named `<name>.<participant>.<partition>`; every participant
+  opens any participant's file once its writer finished the set, and the
+  files are deleted when the last participant detaches the segment.
+
+A set first writes: `tess_spill_write` puts a header and the body into the
+partition's file and can return where the block starts. After
+`tess_spill_finish` it reads: `tess_spill_open` gives a reader at the
+file's first block, `tess_spill_read_header` the next header, checked
+against the set's fingerprint, longest body, partition and level, then
+`tess_spill_read_body` its body whole; `tess_spill_seek` goes to a block
+by its position, which lets participants take blocks of one file each on
+their own. A serial file has one reader at a time, since the reader moves
+the file's own position; a shared reader opens a handle of its own.
+`tess_spill_drop` deletes a partition's file once it has been read, and
+`tess_spill_stats` gives the blocks and bytes written and the files open,
+each of which holds a buffer of one page.
+
+These are the only calls of PostgreSQL's file layer for spilling: a core
+with another manager of work files, like Greengage's, replaces this file.

@@ -909,7 +909,7 @@ tessera_test_spill_header(PG_FUNCTION_ARGS)
 	uint64		other_fingerprint;
 	uint64		block[8];
 
-	if (tess_spill_header_size() != 48 || table == NULL)
+	if (tess_spill_header_size() != TESS_SPILL_HEADER_SIZE || table == NULL)
 		PG_RETURN_BOOL(false);
 	/* A table of two keys has another layout. */
 	if (tess_table_size(2, two_keys, 8, 16, &other->ref.index_len, &status) != TESS_OK)

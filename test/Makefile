@@ -7,12 +7,12 @@ MODULES = tessera_batch_test tessera_binding_test tessera_bridge_test \
 	tessera_plan_test tessera_planner_test tessera_producer_test \
 	tessera_project_test \
 	tessera_request_test tessera_row_mask_test tessera_shared_stats_test \
-	tessera_source_test tessera_table_test tessera_transfer_test \
+	tessera_source_test tessera_spill_test tessera_table_test tessera_transfer_test \
 	tessera_unary_test
 REGRESS = agg batch binding bridge builder expr filter forward function heap_batch \
 	heap_deform input join kernel_ops kernels kernels_module limit modules node output \
 	pack parallel plan planner project project_provider request row_mask shared_stats \
-	source table transfer unary
+	source spill table transfer unary
 REGRESS_OPTS = --dlpath=$(CURDIR)
 PG_CPPFLAGS = -I$(srcdir)/../include
 NO_INSTALL = 1
@@ -63,4 +63,6 @@ tessera_shared_stats_test$(DLSUFFIX): tessera_shared_stats_test.o $(RUNTIME_LIB)
 # The kernel registry test links both: the kernels it installs and the
 # runtime that reads them back.
 tessera_kernel_ops_test$(DLSUFFIX): tessera_kernel_ops_test.o $(RUST_LIB) $(RUNTIME_LIB)
+	$(CC) $(CFLAGS) $< $(RUST_LIB) $(RUNTIME_LIB) $(LDFLAGS) $(LDFLAGS_SL) -bundle $(BE_DLLLIBS) -o $@
+tessera_spill_test$(DLSUFFIX): tessera_spill_test.o $(RUST_LIB) $(RUNTIME_LIB)
 	$(CC) $(CFLAGS) $< $(RUST_LIB) $(RUNTIME_LIB) $(LDFLAGS) $(LDFLAGS_SL) -bundle $(BE_DLLLIBS) -o $@

@@ -41,7 +41,9 @@ typedef struct TessSpillHeader
 	uint64		len;
 } TessSpillHeader;
 
-/* Bytes of a spilled block's header. */
+/* Bytes of a spilled block's header, what tess_spill_header_size() returns. */
+#define TESS_SPILL_HEADER_SIZE 48
+
 extern Size tess_spill_header_size(void);
 
 /* The fingerprint of the table's record layout. */
