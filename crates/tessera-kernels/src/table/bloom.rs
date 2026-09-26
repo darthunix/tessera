@@ -332,6 +332,47 @@ pub fn add(words: &mut [u64], hashes: &[u32], rows: &RowMaskView<'_>) -> Result<
     Ok(())
 }
 
+/// As [`add`], for a filter several participants fill at once: each word
+/// is changed by an atomic OR (relaxed), and the filter is read with
+/// [`probe`] once a barrier ordered every participant's additions before
+/// the reads.
+///
+/// # Safety
+///
+/// `words` points to `nwords` words, aligned to 8, valid for reads and
+/// writes, which every participant accesses only atomically until the
+/// barrier.
+pub unsafe fn add_shared(
+    words: *mut u64,
+    nwords: usize,
+    hashes: &[u32],
+    rows: &RowMaskView<'_>,
+) -> Result<()> {
+    let nrows = rows.nrows();
+    let shift = shift_for(nwords)?;
+    ensure!(
+        !words.is_null() && words.addr().is_multiple_of(8),
+        "a shared filter must be aligned to 8 bytes"
+    );
+    ensure!(
+        hashes.len() == nrows,
+        "the hashes and the mask of the batch have different row counts"
+    );
+    // SAFETY: the caller's contract; an `AtomicU64` has the size and
+    // alignment of a `u64`.
+    let atomics = unsafe { core::slice::from_raw_parts(words.cast::<AtomicU64>(), nwords) };
+    for index in 0..nrows.div_ceil(64) {
+        let mut bits = rows.word(index).unwrap();
+        while bits != 0 {
+            let bit = bits.trailing_zeros() as usize;
+            bits &= bits - 1;
+            let (word, mask) = place(hashes[index * 64 + bit], shift);
+            atomics[word].fetch_or(mask, order::RELAXED);
+        }
+    }
+    Ok(())
+}
+
 /// [`probe`] against a shared filter, which must be ready.
 ///
 /// # Errors

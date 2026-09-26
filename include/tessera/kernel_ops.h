@@ -302,10 +302,85 @@ typedef struct TessKernelOps
 									 const TessTableCombine *combines,
 									 int *merged, int *stop,
 									 TessStatus *status);
+	/* tess_table_spill_words */
+	TessStatusCode (*table_spill_words) (int capacity,
+										 Size *nwords,
+										 TessStatus *status);
+	/* tess_table_spill_init */
+	TessStatusCode (*table_spill_init) (uint64 *words,
+										Size nwords,
+										uint64 budget,
+										TessStatus *status);
+	/* tess_table_spill_split */
+	TessStatusCode (*table_spill_split) (uint64 *words,
+										 Size nwords,
+										 uint32 partitions,
+										 uint32 *in_force,
+										 TessStatus *status);
+	/* tess_table_spill_partitions */
+	TessStatusCode (*table_spill_partitions) (uint64 *words,
+											  Size nwords,
+											  uint32 *partitions,
+											  TessStatus *status);
+	/* tess_table_spill_add_bytes */
+	TessStatusCode (*table_spill_add_bytes) (uint64 *words,
+											 Size nwords,
+											 int64 delta,
+											 int32 partition,
+											 bool *over,
+											 TessStatus *status);
+	/* tess_table_spill_evict */
+	TessStatusCode (*table_spill_evict) (uint64 *words,
+										 Size nwords,
+										 int32 *partition,
+										 TessStatus *status);
+	/* tess_table_spill_flags */
+	TessStatusCode (*table_spill_flags) (uint64 *words,
+										 Size nwords,
+										 uint32 partition,
+										 bool *on_disk,
+										 bool *alone,
+										 TessStatus *status);
+	/* tess_table_spill_records */
+	TessStatusCode (*table_spill_records) (uint64 *words,
+										   Size nwords,
+										   uint32 partition,
+										   uint64 added,
+										   uint64 *records,
+										   TessStatus *status);
+	/* tess_table_spill_start */
+	TessStatusCode (*table_spill_start) (uint64 *words,
+										 Size nwords,
+										 uint32 *partition,
+										 TessStatus *status);
+	/* tess_table_spill_take_file */
+	TessStatusCode (*table_spill_take_file) (uint64 *words,
+											 Size nwords,
+											 uint32 partition,
+											 bool outer,
+											 uint32 *file,
+											 TessStatus *status);
+	/* tess_table_spill_take_alone */
+	TessStatusCode (*table_spill_take_alone) (uint64 *words,
+											  Size nwords,
+											  uint32 partition,
+											  bool *taken,
+											  TessStatus *status);
+	/* tess_round_step */
+	TessStatusCode (*round_step) (TessBuildParticipant *participant,
+								  uint32 reply,
+								  uint32 *action,
+								  TessStatus *status);
+	/* tess_bloom_shared_add */
+	TessStatusCode (*bloom_shared_add) (uint64 *words,
+										Size nwords,
+										const uint32 *hashes,
+										const TessRowMask *rows,
+										TessStatus *status);
 } TessKernelOps;
 
 #define TESS_KERNEL_OPS_MIN_SIZE \
-	TESS_ABI_SIZE_INCLUDING_FIELD(TessKernelOps, table_combine)
+	TESS_ABI_SIZE_INCLUDING_FIELD(TessKernelOps, bloom_shared_add)
 
 /*
  * The registry of the kernels: one table per backend, installed by the

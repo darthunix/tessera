@@ -52,7 +52,13 @@ validate_kernels(const TessKernelOps *ops)
 		ops->build_step == NULL || ops->table_append_partitioned == NULL ||
 		ops->table_split == NULL || ops->bloom_add == NULL ||
 		ops->table_find_or_insert_partitioned == NULL ||
-		ops->table_combine == NULL ||
+		ops->table_combine == NULL || ops->table_spill_words == NULL ||
+		ops->table_spill_init == NULL || ops->table_spill_split == NULL ||
+		ops->table_spill_partitions == NULL || ops->table_spill_add_bytes == NULL ||
+		ops->table_spill_evict == NULL || ops->table_spill_flags == NULL ||
+		ops->table_spill_records == NULL || ops->table_spill_start == NULL ||
+		ops->table_spill_take_file == NULL || ops->table_spill_take_alone == NULL ||
+		ops->round_step == NULL || ops->bloom_shared_add == NULL ||
 		ops->table_fingerprint == NULL ||
 		ops->spill_header_write == NULL || ops->spill_header_read == NULL)
 		elog(ERROR, "Tessera kernels must provide every operation");

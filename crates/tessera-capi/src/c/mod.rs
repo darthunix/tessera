@@ -14,6 +14,7 @@ mod count;
 mod int32;
 mod int64;
 mod mask;
+mod shared_spill;
 mod spill;
 mod status;
 mod table;
@@ -33,6 +34,12 @@ pub use int64::{
     tess_int8_max, tess_int8_min,
 };
 pub use mask::Mask;
+pub use shared_spill::{
+    tess_bloom_shared_add, tess_round_step, tess_table_spill_add_bytes, tess_table_spill_evict,
+    tess_table_spill_flags, tess_table_spill_init, tess_table_spill_partitions,
+    tess_table_spill_records, tess_table_spill_split, tess_table_spill_start,
+    tess_table_spill_take_alone, tess_table_spill_take_file, tess_table_spill_words,
+};
 pub use spill::{
     SpillHeader, tess_spill_header_read, tess_spill_header_size, tess_spill_header_write,
 };

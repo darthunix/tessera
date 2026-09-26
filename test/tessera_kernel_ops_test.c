@@ -62,6 +62,19 @@ static const TessKernelOps kernels = {
 	.bloom_add = tess_bloom_add,
 	.table_find_or_insert_partitioned = tess_table_find_or_insert_partitioned,
 	.table_combine = tess_table_combine,
+	.table_spill_words = tess_table_spill_words,
+	.table_spill_init = tess_table_spill_init,
+	.table_spill_split = tess_table_spill_split,
+	.table_spill_partitions = tess_table_spill_partitions,
+	.table_spill_add_bytes = tess_table_spill_add_bytes,
+	.table_spill_evict = tess_table_spill_evict,
+	.table_spill_flags = tess_table_spill_flags,
+	.table_spill_records = tess_table_spill_records,
+	.table_spill_start = tess_table_spill_start,
+	.table_spill_take_file = tess_table_spill_take_file,
+	.table_spill_take_alone = tess_table_spill_take_alone,
+	.round_step = tess_round_step,
+	.bloom_shared_add = tess_bloom_shared_add,
 };
 
 static const TessKernelRegistryOps *

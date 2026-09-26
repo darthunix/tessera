@@ -582,10 +582,12 @@ extern TessStatusCode tess_bloom_shared_probe(uint64 *words, Size nwords,
  * see docs/table.md.
  */
 #define TESS_BUILD_BUILD		0
-#define TESS_BUILD_SIZE			1
-#define TESS_BUILD_LINK			2
-#define TESS_BUILD_PROBE		3
-#define TESS_BUILD_FREE			4
+#define TESS_BUILD_FLUSH		1
+#define TESS_BUILD_SIZE			2
+#define TESS_BUILD_LINK			3
+#define TESS_BUILD_OUTER		4
+#define TESS_BUILD_PROBE		5
+#define TESS_BUILD_FREE			6
 
 typedef enum TessBuildAction
 {
@@ -614,7 +616,22 @@ typedef enum TessBuildAction
 	/* Free the table, as the last to leave. */
 	TESS_BUILD_DO_FREE = 9,
 	/* Nothing is left to do. */
-	TESS_BUILD_DONE = 10
+	TESS_BUILD_DONE = 10,
+	/*
+	 * Write this participant's chunks of the partitions on disk, when the
+	 * table spilled, and finish its files.
+	 */
+	TESS_BUILD_DO_FLUSH = 11,
+	/*
+	 * Write this participant's share of the outer side to the partitions'
+	 * files, when the table spilled: before any row goes out, so that no
+	 * participant waits at a barrier once it returns rows.
+	 */
+	TESS_BUILD_DO_OUTER = 12,
+	/* A round: make the partition's index, as the elected one. */
+	TESS_BUILD_DO_ALLOCATE = 13,
+	/* A round: load inner files taken one at a time, and link them. */
+	TESS_BUILD_DO_LOAD = 14
 } TessBuildAction;
 
 /* A participant's own state: zeroed before its first step. */
@@ -708,5 +725,115 @@ extern TessStatusCode tess_table_regrow(const TessTableRef *table,
 										Size len,
 										uint64 capacity,
 										TessStatus *status);
+
+/*
+ * A shared table that spills (see docs/spill.md): words in memory every
+ * participant maps, which decide for all of them once which partitions
+ * the table splits into and which of them go to disk, and hold the
+ * counters of the rounds over the partitions afterwards. The first
+ * participant whose chunks pass the budget splits the table; while they
+ * still take more, the largest partition in memory goes to disk, marked
+ * by the one participant whose flag set it. After the build, the rounds
+ * take the files of a partition one at a time, and a partition too large
+ * for one participant's memory goes whole to one of them.
+ */
+
+/* The words of the shared state for up to capacity partitions. */
+extern TessStatusCode tess_table_spill_words(int capacity, Size *nwords,
+											 TessStatus *status);
+
+/* Clear the state for a budget of bytes, before any participant uses it. */
+extern TessStatusCode tess_table_spill_init(uint64 *words, Size nwords,
+											uint64 budget, TessStatus *status);
+
+/*
+ * Split the table into partitions, a power of two, unless another
+ * participant did: *in_force receives the partitions in force.
+ */
+extern TessStatusCode tess_table_spill_split(uint64 *words, Size nwords,
+											 uint32 partitions, uint32 *in_force,
+											 TessStatus *status);
+
+/* The partitions, 0 while the table is whole. */
+extern TessStatusCode tess_table_spill_partitions(uint64 *words, Size nwords,
+												  uint32 *partitions,
+												  TessStatus *status);
+
+/*
+ * Add bytes of chunks in memory (negative when freed), of a partition, or
+ * of none (-1) before the split: *over is whether all of them pass the
+ * budget.
+ */
+extern TessStatusCode tess_table_spill_add_bytes(uint64 *words, Size nwords,
+												 int64 delta, int32 partition,
+												 bool *over, TessStatus *status);
+
+/*
+ * Send the partition in memory with the most bytes to disk: *partition is
+ * its number for the participant that marked it, -1 for any other.
+ */
+extern TessStatusCode tess_table_spill_evict(uint64 *words, Size nwords,
+											 int32 *partition,
+											 TessStatus *status);
+
+/* Whether a partition went to disk, and whether one participant took it whole. */
+extern TessStatusCode tess_table_spill_flags(uint64 *words, Size nwords,
+											 uint32 partition, bool *on_disk,
+											 bool *alone, TessStatus *status);
+
+/* Add records to a partition; then its records into *records unless NULL. */
+extern TessStatusCode tess_table_spill_records(uint64 *words, Size nwords,
+											   uint32 partition, uint64 added,
+											   uint64 *records,
+											   TessStatus *status);
+
+/* The partition a participant starts its rounds at, spread over them. */
+extern TessStatusCode tess_table_spill_start(uint64 *words, Size nwords,
+											 uint32 *partition,
+											 TessStatus *status);
+
+/*
+ * The next file of a partition's inner or outer rows to read, each number
+ * to one participant; the partitions' count stands for the outer rows of
+ * the partitions kept in memory.
+ */
+extern TessStatusCode tess_table_spill_take_file(uint64 *words, Size nwords,
+												 uint32 partition, bool outer,
+												 uint32 *file,
+												 TessStatus *status);
+
+/* Take a partition whole: *taken for the one participant that did. */
+extern TessStatusCode tess_table_spill_take_alone(uint64 *words, Size nwords,
+												  uint32 partition,
+												  bool *taken,
+												  TessStatus *status);
+
+/*
+ * The phases of a round over a partition on disk, in its own barrier's
+ * numbering, as the core's batches of a parallel hash join: the elected
+ * one makes the partition's index, all load its inner files and link
+ * them, all probe with its outer rows and leave without waiting, the last
+ * to leave frees it. The actions are TessBuildAction's.
+ */
+#define TESS_ROUND_ELECT		0
+#define TESS_ROUND_ALLOCATE		1
+#define TESS_ROUND_LOAD			2
+#define TESS_ROUND_PROBE		3
+#define TESS_ROUND_FREE			4
+
+/* A round participant's next action, as tess_build_step for a build. */
+extern TessStatusCode tess_round_step(TessBuildParticipant *participant,
+									  uint32 reply, uint32 *action,
+									  TessStatus *status);
+
+/*
+ * Set the bits of the hashes of rows in a filter several participants
+ * fill at once, word by word atomically; read it with tess_bloom_probe
+ * once a barrier ordered every participant's additions before the reads.
+ */
+extern TessStatusCode tess_bloom_shared_add(uint64 *words, Size nwords,
+											const uint32 *hashes,
+											const TessRowMask *rows,
+											TessStatus *status);
 
 #endif							/* TESSERA_TABLE_H */

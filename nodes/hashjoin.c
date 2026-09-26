@@ -3430,6 +3430,10 @@ build_shared(TessHashJoinState *state)
 				Assert(BarrierPhase(&state->shared->build) == TESS_BUILD_BUILD);
 				build_shared_inner(state);
 				break;
+			case TESS_BUILD_DO_FLUSH:
+			case TESS_BUILD_DO_OUTER:
+				/* Nothing spills yet. */
+				break;
 			case TESS_BUILD_DO_SIZE:
 				Assert(BarrierPhase(&state->shared->build) == TESS_BUILD_SIZE);
 				size_shared_table(state);

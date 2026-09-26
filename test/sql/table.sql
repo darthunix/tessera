@@ -31,6 +31,10 @@ CREATE FUNCTION tessera_test_table_combine()
 RETURNS boolean
 AS :'table_test', 'tessera_test_table_combine'
 LANGUAGE C STRICT;
+CREATE FUNCTION tessera_test_table_shared_spill()
+RETURNS boolean
+AS :'table_test', 'tessera_test_table_shared_spill'
+LANGUAGE C STRICT;
 CREATE FUNCTION tessera_test_spill_header()
 RETURNS boolean
 AS :'table_test', 'tessera_test_spill_header'
@@ -50,6 +54,8 @@ SELECT tessera_test_table_partitions() AS partitions \gset
 \echo :partitions
 SELECT tessera_test_table_combine() AS combine \gset
 \echo :combine
+SELECT tessera_test_table_shared_spill() AS shared_spill \gset
+\echo :shared_spill
 SELECT tessera_test_spill_header() AS spill \gset
 \echo :spill
 
@@ -60,4 +66,5 @@ DROP FUNCTION tessera_test_table_regrow();
 DROP FUNCTION tessera_test_table_errors();
 DROP FUNCTION tessera_test_table_partitions();
 DROP FUNCTION tessera_test_table_combine();
+DROP FUNCTION tessera_test_table_shared_spill();
 DROP FUNCTION tessera_test_spill_header();

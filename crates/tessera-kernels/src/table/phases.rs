@@ -17,16 +17,23 @@
 //! - [`BUILD`]: every participant appends its share of the inner side to
 //!   chunks of its own, numbered by the shared counter, and reports how
 //!   many records it appended;
+//! - [`FLUSH`]: every participant writes its chunks of the partitions that
+//!   went to disk, when the table spilled, and finishes its files;
 //! - [`SIZE`]: the elected one creates the index for exactly the records
-//!   appended and gathers the chunks' directory;
+//!   appended, those in memory when the table spilled, and gathers the
+//!   chunks' directory;
 //! - [`LINK`]: every participant links its own chunks into the index;
+//! - [`OUTER`]: when the table spilled, every participant writes its share
+//!   of the outer side to the partitions' files, before any row goes out,
+//!   so that no participant waits once it returns rows;
 //! - [`PROBE`]: every participant probes, then leaves; the last to leave
 //!   frees the table.
 //!
 //! A participant that attaches late joins the phase the others are in:
 //! during the build it appends what is left of the inner side, which may
-//! be nothing; from [`SIZE`] on it has no chunk to link and waits for the
-//! probe; after the last one left, it leaves at once.
+//! be nothing; in [`FLUSH`] it has nothing to write, from [`SIZE`] on no
+//! chunk to link; in [`OUTER`] it writes what is left of the outer side;
+//! after the last one left, it leaves at once.
 
 use core::sync::atomic::AtomicU64;
 
@@ -35,10 +42,25 @@ use anyhow::{Result, ensure};
 use super::region::order;
 
 pub const BUILD: u32 = 0;
-pub const SIZE: u32 = 1;
-pub const LINK: u32 = 2;
-pub const PROBE: u32 = 3;
-pub const FREE: u32 = 4;
+pub const FLUSH: u32 = 1;
+pub const SIZE: u32 = 2;
+pub const LINK: u32 = 3;
+pub const OUTER: u32 = 4;
+pub const PROBE: u32 = 5;
+pub const FREE: u32 = 6;
+
+/// The phases of a round over one partition a shared table spilled, in its
+/// own barrier's numbering, as the core's batches of a parallel hash join
+/// have them: the participants that attach elect one, which makes the
+/// partition's index; all load its inner rows from the files and link
+/// them; all probe it with its outer rows and leave without waiting,
+/// since they return rows; the last to leave frees it. One that attaches
+/// once the round is freed has nothing to do there.
+pub const ROUND_ELECT: u32 = 0;
+pub const ROUND_ALLOCATE: u32 = 1;
+pub const ROUND_LOAD: u32 = 2;
+pub const ROUND_PROBE: u32 = 3;
+pub const ROUND_FREE: u32 = 4;
 
 /// What a participant does next.
 #[repr(u32)]
@@ -66,6 +88,17 @@ pub enum Action {
     Free = 9,
     /// Nothing is left to do.
     Done = 10,
+    /// Write this participant's chunks of the partitions on disk, when the
+    /// table spilled, and finish its files.
+    Flush = 11,
+    /// Write this participant's share of the outer side to the partitions'
+    /// files, when the table spilled.
+    Outer = 12,
+    /// Make the partition's index, as the elected one of a round.
+    Allocate = 13,
+    /// Load inner files of the partition, taken one at a time, and link
+    /// their records.
+    Load = 14,
 }
 
 /// Where a participant stands between steps.
@@ -283,10 +316,54 @@ impl Participant {
         let elected = self.elected != 0;
         match self.phase {
             BUILD => self.to(State::Working, Action::Build),
+            FLUSH => self.to(State::Working, Action::Flush),
             SIZE if elected => self.to(State::Working, Action::Size),
             LINK if counters.records() > 0 => self.to(State::Working, Action::Link),
             SIZE | LINK => self.to(State::Arriving, Action::ArriveAndWait),
+            OUTER => self.to(State::Working, Action::Outer),
             PROBE => self.to(State::Probing, Action::Probe),
+            _ => self.to(State::Detaching, Action::Detach),
+        }
+    }
+
+    /// The next action of a round over a partition, as [`Self::step`] for
+    /// a build.
+    pub fn round_step(&mut self, reply: u32) -> Result<Action> {
+        let state = State::from_code(self.state)
+            .ok_or_else(|| anyhow::anyhow!("a round participant in no known state"))?;
+        Ok(match state {
+            State::New => self.to(State::Attaching, Action::Attach),
+            State::Attaching => {
+                self.phase = reply;
+                self.elected = 0;
+                self.enter_round()
+            }
+            State::Arriving => {
+                self.phase += 1;
+                self.elected = u32::from(reply != 0);
+                self.enter_round()
+            }
+            State::Working => self.to(State::Arriving, Action::ArriveAndWait),
+            State::Probing => self.to(State::Leaving, Action::ArriveAndDetach),
+            State::Leaving => {
+                let last = reply != 0;
+                self.to(
+                    State::Finished,
+                    if last { Action::Free } else { Action::Done },
+                )
+            }
+            State::Detaching | State::Finished => self.to(State::Finished, Action::Done),
+        })
+    }
+
+    /// The first action of the round's phase just entered.
+    fn enter_round(&mut self) -> Action {
+        match self.phase {
+            ROUND_ELECT => self.to(State::Arriving, Action::ArriveAndWait),
+            ROUND_ALLOCATE if self.elected != 0 => self.to(State::Working, Action::Allocate),
+            ROUND_ALLOCATE => self.to(State::Arriving, Action::ArriveAndWait),
+            ROUND_LOAD => self.to(State::Working, Action::Load),
+            ROUND_PROBE => self.to(State::Probing, Action::Probe),
             _ => self.to(State::Detaching, Action::Detach),
         }
     }
@@ -351,7 +428,7 @@ mod tests {
     }
 
     #[test]
-    fn a_participant_alone_builds_sizes_links_and_probes() {
+    fn a_participant_alone_builds_flushes_sizes_links_and_probes() {
         use Action::*;
         assert_eq!(
             alone(3, BUILD),
@@ -359,9 +436,13 @@ mod tests {
                 Attach,
                 Build,
                 ArriveAndWait,
+                Flush,
+                ArriveAndWait,
                 Size,
                 ArriveAndWait,
                 Link,
+                ArriveAndWait,
+                Outer,
                 ArriveAndWait,
                 Probe,
                 ArriveAndDetach,
@@ -379,8 +460,12 @@ mod tests {
                 Attach,
                 Build,
                 ArriveAndWait,
+                Flush,
+                ArriveAndWait,
                 Size,
                 ArriveAndWait,
+                ArriveAndWait,
+                Outer,
                 ArriveAndWait,
                 Probe,
                 ArriveAndDetach,
@@ -393,7 +478,58 @@ mod tests {
     fn a_late_participant_probes_or_leaves() {
         use Action::*;
         assert_eq!(alone(0, PROBE), [Attach, Probe, ArriveAndDetach, Free]);
+        assert_eq!(
+            alone(0, OUTER),
+            [Attach, Outer, ArriveAndWait, Probe, ArriveAndDetach, Free]
+        );
         assert_eq!(alone(0, FREE), [Attach, Detach, Done]);
+    }
+
+    /// The actions of a participant alone in a round attached at a phase.
+    fn round_alone(attach_at: u32) -> Vec<Action> {
+        let mut participant = Participant::new();
+        let mut actions = Vec::new();
+        let mut reply = 0;
+        let mut phase = attach_at;
+        loop {
+            let action = participant.round_step(reply).unwrap();
+            actions.push(action);
+            reply = match action {
+                Action::Attach => phase,
+                Action::ArriveAndWait => {
+                    phase += 1;
+                    1
+                }
+                Action::ArriveAndDetach => 1,
+                Action::Free | Action::Done => break,
+                _ => 0,
+            };
+        }
+        actions
+    }
+
+    #[test]
+    fn a_round_elects_allocates_loads_probes_and_frees() {
+        use Action::*;
+        assert_eq!(
+            round_alone(ROUND_ELECT),
+            [
+                Attach,
+                ArriveAndWait,
+                Allocate,
+                ArriveAndWait,
+                Load,
+                ArriveAndWait,
+                Probe,
+                ArriveAndDetach,
+                Free
+            ]
+        );
+        assert_eq!(
+            round_alone(ROUND_LOAD),
+            [Attach, Load, ArriveAndWait, Probe, ArriveAndDetach, Free]
+        );
+        assert_eq!(round_alone(ROUND_FREE), [Attach, Detach, Done]);
     }
 
     #[test]

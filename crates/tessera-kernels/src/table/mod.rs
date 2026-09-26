@@ -94,6 +94,7 @@ mod loom;
 pub mod phases;
 mod record;
 mod region;
+pub mod shared_spill;
 
 use core::marker::PhantomData;
 use core::ops::Deref;

@@ -32,6 +32,7 @@ use super::header::{
 use super::phases::{Action, Counters, Participant};
 use super::record::Access;
 use super::region::{Region, order};
+use super::shared_spill::{Spill, Words};
 use super::{batch, index_size, init};
 
 /// The orderings of the bucket heads: the region's, or relaxed ones that
@@ -821,6 +822,9 @@ impl Build {
                 Action::Attach => reply = self.barrier.attach(),
                 Action::ArriveAndWait => reply = u32::from(self.barrier.arrive_and_wait()),
                 Action::Build => self.build(chunk),
+                // No spill in the model: nothing to write.
+                Action::Flush | Action::Outer => {}
+                Action::Allocate | Action::Load => panic!("a build got {action:?}"),
                 Action::Size => {
                     // SAFETY: the elected one alone uses the index now.
                     unsafe { init(&self.region, &CONFIG, self.counters.records()) }.unwrap();
@@ -890,4 +894,239 @@ fn three_participants_attach_at_any_phase() {
 #[should_panic(expected = "does not hold a table")]
 fn linking_before_the_index_is_made_breaks_the_table() {
     shared_build(2, &[1, 2, 3], Some(super::phases::SIZE), 2);
+}
+
+/// The shared state of a spill over loom atomics, for `capacity`
+/// partitions and the resident ones.
+struct LoomSpill {
+    words: Vec<AtomicU64>,
+    capacity: usize,
+}
+
+impl LoomSpill {
+    fn new(capacity: usize, budget: u64) -> Self {
+        let words = (0..super::shared_spill::words_for(capacity).unwrap())
+            .map(|_| AtomicU64::new(0))
+            .collect();
+        let spill = Self { words, capacity };
+        spill.init(budget);
+        spill
+    }
+}
+
+impl Words for LoomSpill {
+    fn load(&self, index: usize) -> u64 {
+        self.words[index].load(order::LOAD)
+    }
+    fn store(&self, index: usize, value: u64) {
+        self.words[index].store(value, order::STORE);
+    }
+    fn fetch_add(&self, index: usize, delta: u64) -> u64 {
+        self.words[index].fetch_add(delta, order::ADD)
+    }
+    fn fetch_sub(&self, index: usize, delta: u64) -> u64 {
+        self.words[index].fetch_sub(delta, order::ADD)
+    }
+    fn fetch_or(&self, index: usize, bits: u64) -> u64 {
+        self.words[index].fetch_or(bits, order::CAS)
+    }
+    fn compare_exchange(&self, index: usize, current: u64, new: u64) -> Result<u64, u64> {
+        self.words[index].compare_exchange(current, new, order::CAS, order::CAS_FAILED)
+    }
+    fn capacity(&self) -> usize {
+        self.capacity
+    }
+}
+
+#[test]
+fn participants_past_the_budget_agree_on_one_split() {
+    ::loom::model(|| {
+        let spill = Arc::new(LoomSpill::new(8, 100));
+        let threads: Vec<_> = [4_u32, 8]
+            .into_iter()
+            .map(|wanted| {
+                let spill = spill.clone();
+                thread::spawn(move || {
+                    let over = spill.add_bytes(60, None).unwrap();
+                    // Whoever sees the budget passed splits; the first holds.
+                    if over || spill.partitions() == 0 {
+                        spill.split(wanted).unwrap()
+                    } else {
+                        spill.partitions()
+                    }
+                })
+            })
+            .collect();
+        let seen: Vec<u32> = threads.into_iter().map(|t| t.join().unwrap()).collect();
+        let partitions = spill.partitions();
+        assert!(partitions == 4 || partitions == 8);
+        assert!(
+            seen.iter().all(|&p| p == partitions),
+            "{seen:?} split apart"
+        );
+    });
+}
+
+#[test]
+fn a_partition_goes_to_disk_once() {
+    ::loom::model(|| {
+        let spill = Arc::new(LoomSpill::new(4, 10));
+        spill.split(4).unwrap();
+        spill.add_bytes(30, Some(1)).unwrap();
+        spill.add_bytes(20, Some(2)).unwrap();
+        let threads: Vec<_> = (0..2)
+            .map(|_| {
+                let spill = spill.clone();
+                thread::spawn(move || spill.evict_largest())
+            })
+            .collect();
+        let marked: Vec<u32> = threads
+            .into_iter()
+            .filter_map(|t| t.join().unwrap())
+            .collect();
+        assert!(marked.contains(&1), "the largest went to disk");
+        assert!(
+            marked.len() < 2 || marked[0] != marked[1],
+            "one partition marked twice"
+        );
+        assert!(spill.on_disk(1).unwrap());
+    });
+}
+
+/// A round over one partition: its inner rows in files, which the
+/// participants take one at a time and load into chunks of their own, the
+/// index the elected one makes, the barrier and the frees.
+struct Round {
+    files: &'static [&'static [i32]],
+    keys: usize,
+    spill: LoomSpill,
+    region: LoomRegion,
+    barrier: LoomBarrier,
+    frees: ::loom::sync::atomic::AtomicUsize,
+    probes: ::loom::sync::atomic::AtomicUsize,
+}
+
+impl Round {
+    fn new(files: &'static [&'static [i32]], participants: usize, skip: Option<u32>) -> Self {
+        let keys = files.iter().map(|file| file.len()).sum();
+        let spill = LoomSpill::new(1, 0);
+        spill.split(1).unwrap();
+        Self {
+            files,
+            keys,
+            spill,
+            region: LoomRegion::new(keys as u64, participants, keys, HEADS),
+            barrier: LoomBarrier::new(skip),
+            frees: ::loom::sync::atomic::AtomicUsize::new(0),
+            probes: ::loom::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
+    fn layout(&self) -> Layout {
+        Header::load(&self.region)
+            .validate(self.region.len())
+            .unwrap()
+    }
+
+    /// Participant `chunk` of the round, loading into the chunk of its
+    /// number; its probe finds every key of every file.
+    fn participate(&self, chunk: usize) {
+        let mut participant = Participant::new();
+        let mut reply = 0;
+        loop {
+            let action = participant.round_step(reply).unwrap();
+            reply = 0;
+            match action {
+                Action::Attach => reply = self.barrier.attach(),
+                Action::ArriveAndWait => reply = u32::from(self.barrier.arrive_and_wait()),
+                Action::Allocate => {
+                    // SAFETY: the elected one alone uses the index now.
+                    unsafe { init(&self.region, &CONFIG, self.keys as u64) }.unwrap();
+                }
+                Action::Load => {
+                    let layout = self.layout();
+                    let mut loaded = false;
+                    loop {
+                        let file = self.spill.take_file(0, false).unwrap() as usize;
+                        let Some(keys) = self.files.get(file) else {
+                            break;
+                        };
+                        append(&self.region, &layout, chunk, keys).unwrap();
+                        loaded = true;
+                    }
+                    if loaded {
+                        link(&self.region, &layout, chunk).unwrap();
+                    }
+                }
+                Action::Probe => {
+                    let layout = self.layout();
+                    for file in self.files {
+                        let found = probe(&self.region, &layout, file).unwrap();
+                        for (key, offset) in file.iter().zip(found) {
+                            assert_ne!(offset, 0, "key {key} was not loaded");
+                            check_record(&self.region, &layout, offset, *key).unwrap();
+                        }
+                    }
+                    self.probes.fetch_add(1, order::RELAXED);
+                }
+                Action::ArriveAndDetach => reply = u32::from(self.barrier.detach(true)),
+                Action::Detach => {
+                    self.barrier.detach(false);
+                }
+                Action::Free => {
+                    self.frees.fetch_add(1, order::RELAXED);
+                    return;
+                }
+                Action::Done => return,
+                other => panic!("a round got {other:?}"),
+            }
+        }
+    }
+}
+
+/// `participants` join a round over a partition of `files` at any time;
+/// every file is loaded once, the probes see every key, one frees it.
+fn round(
+    participants: usize,
+    files: &'static [&'static [i32]],
+    skip: Option<u32>,
+    preemptions: usize,
+) {
+    let mut model = ::loom::model::Builder::new();
+    model.preemption_bound = Some(preemptions);
+    model.max_branches = 100_000;
+    model.check(move || {
+        let round = Arc::new(Round::new(files, participants, skip));
+        let threads: Vec<_> = (0..participants)
+            .map(|chunk| {
+                let round = round.clone();
+                thread::spawn(move || round.participate(chunk))
+            })
+            .collect();
+        for thread in threads {
+            thread.join().unwrap();
+        }
+        assert_eq!(
+            round.frees.load(order::RELAXED),
+            1,
+            "the round is freed once"
+        );
+        assert!(round.probes.load(order::RELAXED) >= 1, "someone probed");
+    });
+}
+
+#[test]
+fn two_participants_load_a_partition_and_probe_it() {
+    round(2, &[&[1, 2], &[3]], None, 3);
+}
+
+#[test]
+fn three_participants_join_a_round_at_any_phase() {
+    round(3, &[&[1], &[2], &[3]], None, 2);
+}
+
+#[test]
+#[should_panic(expected = "was not loaded")]
+fn probing_before_every_file_is_loaded_misses_keys() {
+    round(2, &[&[1], &[2]], Some(super::phases::ROUND_LOAD), 2);
 }

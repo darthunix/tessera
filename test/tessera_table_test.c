@@ -18,6 +18,7 @@ PG_FUNCTION_INFO_V1(tessera_test_table_errors);
 PG_FUNCTION_INFO_V1(tessera_test_spill_header);
 PG_FUNCTION_INFO_V1(tessera_test_table_partitions);
 PG_FUNCTION_INFO_V1(tessera_test_table_combine);
+PG_FUNCTION_INFO_V1(tessera_test_table_shared_spill);
 
 #define NROWS 200
 #define NWORDS 4
@@ -258,8 +259,10 @@ build_alone(void)
 {
 	static const uint32 expected[] = {
 		TESS_BUILD_ATTACH, TESS_BUILD_DO_BUILD,
+		TESS_BUILD_ARRIVE_AND_WAIT, TESS_BUILD_DO_FLUSH,
 		TESS_BUILD_ARRIVE_AND_WAIT, TESS_BUILD_DO_SIZE,
 		TESS_BUILD_ARRIVE_AND_WAIT, TESS_BUILD_DO_LINK,
+		TESS_BUILD_ARRIVE_AND_WAIT, TESS_BUILD_DO_OUTER,
 		TESS_BUILD_ARRIVE_AND_WAIT, TESS_BUILD_DO_PROBE,
 		TESS_BUILD_ARRIVE_AND_DETACH, TESS_BUILD_DO_FREE
 	};
@@ -1239,5 +1242,103 @@ tessera_test_table_combine(PG_FUNCTION_ARGS)
 	table->ref.nchunks--;
 	free_table(table);
 	free_table(other);
+	PG_RETURN_BOOL(true);
+}
+
+/*
+ * The shared state of a spilling shared table, by one participant: the
+ * first split holds, the largest partition goes to disk, files and a
+ * partition taken once; a round alone steps through its phases; a shared
+ * filter filled atomically lets its rows through.
+ */
+Datum
+tessera_test_table_shared_spill(PG_FUNCTION_ARGS)
+{
+	static const uint32 round[] = {
+		TESS_BUILD_ATTACH, TESS_BUILD_ARRIVE_AND_WAIT,
+		TESS_BUILD_DO_ALLOCATE, TESS_BUILD_ARRIVE_AND_WAIT,
+		TESS_BUILD_DO_LOAD, TESS_BUILD_ARRIVE_AND_WAIT,
+		TESS_BUILD_DO_PROBE, TESS_BUILD_ARRIVE_AND_DETACH, TESS_BUILD_DO_FREE
+	};
+	TessStatus	status = TESS_STRUCT_INITIALIZER(TessStatus);
+	TessBuildParticipant participant = {0};
+	Batch	   *batch = palloc0(sizeof(Batch));
+	TessRowMask valid = {NROWS, batch->valid};
+	uint64		found_words[NWORDS];
+	TessRowMask found = {NROWS, found_words};
+	uint64	   *words;
+	uint64	   *filter;
+	Size		nwords;
+	Size		filter_words;
+	uint32		partitions;
+	int32		evicted;
+	bool		over;
+	bool		on_disk;
+	bool		alone;
+	uint32		file;
+	uint32		phase = TESS_ROUND_ELECT;
+	uint32		reply = 0;
+	uint64		records;
+
+	if (tess_table_spill_words(16, &nwords, &status) != TESS_OK)
+		PG_RETURN_BOOL(false);
+	words = palloc(sizeof(uint64) * nwords);
+	if (tess_table_spill_init(words, nwords, 100, &status) != TESS_OK ||
+		tess_table_spill_add_bytes(words, nwords, 120, -1, &over, &status) != TESS_OK ||
+		!over ||
+		tess_table_spill_split(words, nwords, 4, &partitions, &status) != TESS_OK ||
+		partitions != 4 ||
+		tess_table_spill_split(words, nwords, 8, &partitions, &status) != TESS_OK ||
+		partitions != 4 ||
+		tess_table_spill_add_bytes(words, nwords, 30, 2, &over, &status) != TESS_OK ||
+		tess_table_spill_evict(words, nwords, &evicted, &status) != TESS_OK ||
+		evicted != 2 ||
+		tess_table_spill_flags(words, nwords, 2, &on_disk, &alone, &status) != TESS_OK ||
+		!on_disk || alone ||
+		tess_table_spill_records(words, nwords, 2, 5, &records, &status) != TESS_OK ||
+		records != 5 ||
+		tess_table_spill_take_file(words, nwords, 2, false, &file, &status) != TESS_OK ||
+		file != 0 ||
+		tess_table_spill_take_file(words, nwords, 2, false, &file, &status) != TESS_OK ||
+		file != 1 ||
+		tess_table_spill_take_alone(words, nwords, 2, &alone, &status) != TESS_OK ||
+		!alone ||
+		tess_table_spill_take_alone(words, nwords, 2, &alone, &status) != TESS_OK ||
+		alone ||
+		tess_table_spill_flags(words, nwords, 9, &on_disk, &alone, &status) !=
+		TESS_ERROR_INVALID_ARGUMENT)
+		PG_RETURN_BOOL(false);
+	for (int step = 0; step < lengthof(round); step++)
+	{
+		uint32		action;
+
+		if (tess_round_step(&participant, reply, &action, &status) != TESS_OK ||
+			action != round[step])
+			PG_RETURN_BOOL(false);
+		reply = 0;
+		if (action == TESS_BUILD_ATTACH)
+			reply = phase;
+		else if (action == TESS_BUILD_ARRIVE_AND_WAIT)
+		{
+			phase++;
+			reply = 1;
+		}
+		else if (action == TESS_BUILD_ARRIVE_AND_DETACH)
+			reply = 1;
+	}
+	/* The valid rows added, their hashes all pass. */
+	if (!prepare(batch, TESS_NULL_KEYS_REJECT, 0, false) ||
+		tess_table_bloom_words(NROWS, &filter_words, &status) != TESS_OK)
+		PG_RETURN_BOOL(false);
+	filter = palloc0(sizeof(uint64) * filter_words);
+	if (tess_bloom_shared_add(filter, filter_words, batch->hashes, &valid,
+							  &status) != TESS_OK ||
+		tess_bloom_probe(filter, filter_words, batch->hashes, &valid, &found,
+						 &status) != TESS_OK ||
+		memcmp(found_words, batch->valid, sizeof(found_words)) != 0)
+		PG_RETURN_BOOL(false);
+	pfree(filter);
+	pfree(words);
+	pfree(batch);
 	PG_RETURN_BOOL(true);
 }
