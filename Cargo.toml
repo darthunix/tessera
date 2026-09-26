@@ -3,6 +3,7 @@ members = [
     "crates/tessera-core",
     "crates/tessera-capi",
     "crates/tessera-kernels",
+    "crates/tessera-spill",
     "tools/tessera-bench",
     "tools/tessera-pmu",
 ]
@@ -24,6 +25,7 @@ sha2 = "0.10"
 tempfile = "3"
 tessera-core = { path = "crates/tessera-core" }
 tessera-kernels = { path = "crates/tessera-kernels" }
+tessera-spill = { path = "crates/tessera-spill" }
 tessera-pmu = { path = "tools/tessera-pmu" }
 
 [workspace.lints.rust]

@@ -5,6 +5,7 @@
 #include "fmgr.h"
 
 #include "tessera/kernels.h"
+#include "tessera/spill.h"
 #include "tessera/table.h"
 
 PG_MODULE_MAGIC;
@@ -14,6 +15,7 @@ PG_FUNCTION_INFO_V1(tessera_test_table_cycle);
 PG_FUNCTION_INFO_V1(tessera_test_table_groups);
 PG_FUNCTION_INFO_V1(tessera_test_table_regrow);
 PG_FUNCTION_INFO_V1(tessera_test_table_errors);
+PG_FUNCTION_INFO_V1(tessera_test_spill_header);
 
 #define NROWS 200
 #define NWORDS 4
@@ -886,5 +888,56 @@ tessera_test_table_errors(PG_FUNCTION_ARGS)
 	free_table(table);
 	pfree(zeros);
 	pfree(batch);
+	PG_RETURN_BOOL(true);
+}
+
+/*
+ * A spilled block's header reads back as written for its own table; a
+ * table of another layout, a damaged magic or a body too long for the
+ * reader is refused.
+ */
+Datum
+tessera_test_spill_header(PG_FUNCTION_ARGS)
+{
+	static const TessTableKeyKind two_keys[2] = {TESS_TABLE_KEY_INT4, TESS_TABLE_KEY_INT8};
+	TessStatus	status = TESS_STRUCT_INITIALIZER(TessStatus);
+	Table	   *table = make_table(16);
+	Table	   *other = palloc0(sizeof(Table));
+	TessSpillHeader header = {TESS_SPILL_RECORDS, 7, 3, 1, 0, 4096};
+	TessSpillHeader back = {0};
+	uint64		fingerprint;
+	uint64		other_fingerprint;
+	uint64		block[8];
+
+	if (tess_spill_header_size() != 48 || table == NULL)
+		PG_RETURN_BOOL(false);
+	/* A table of two keys has another layout. */
+	if (tess_table_size(2, two_keys, 8, 16, &other->ref.index_len, &status) != TESS_OK)
+		PG_RETURN_BOOL(false);
+	other->ref.index = palloc(other->ref.index_len);
+	if (tess_table_create(other->ref.index, other->ref.index_len, 2, two_keys, 8, 16,
+						  &status) != TESS_OK ||
+		tess_table_fingerprint(&table->ref, &fingerprint, &status) != TESS_OK ||
+		tess_table_fingerprint(&other->ref, &other_fingerprint, &status) != TESS_OK ||
+		fingerprint == other_fingerprint)
+		PG_RETURN_BOOL(false);
+	header.fingerprint = fingerprint;
+	if (tess_spill_header_write(block, sizeof(block), &header, 1 << 20,
+								&status) != TESS_OK ||
+		tess_spill_header_read(block, sizeof(block), fingerprint, 1 << 20, &back,
+							   &status) != TESS_OK ||
+		memcmp(&header, &back, sizeof(header)) != 0 ||
+		tess_spill_header_read(block, sizeof(block), other_fingerprint, 1 << 20, &back,
+							   &status) != TESS_ERROR_INVALID_ARGUMENT ||
+		strstr(status.message, "another table") == NULL ||
+		tess_spill_header_read(block, sizeof(block), fingerprint, 1024, &back,
+							   &status) != TESS_ERROR_INVALID_ARGUMENT)
+		PG_RETURN_BOOL(false);
+	block[0] ^= 1;
+	if (tess_spill_header_read(block, sizeof(block), fingerprint, 1 << 20, &back,
+							   &status) != TESS_ERROR_INVALID_ARGUMENT ||
+		strstr(status.message, "no spilled block") == NULL)
+		PG_RETURN_BOOL(false);
+	free_table(table);
 	PG_RETURN_BOOL(true);
 }

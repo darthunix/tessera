@@ -521,6 +521,7 @@ dependencies = [
  "tessera-core",
  "tessera-kernels",
  "tessera-pmu",
+ "tessera-spill",
 ]
 
 [[package]]
@@ -545,6 +546,13 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "serde",
+]
+
+[[package]]
+name = "tessera-spill"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
 ]
 
 [[package]]

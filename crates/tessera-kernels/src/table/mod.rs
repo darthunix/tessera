@@ -336,6 +336,12 @@ impl<'a> Table<'a> {
         self.layout.record_size
     }
 
+    /// The fingerprint of the table's record layout, which spilled blocks
+    /// carry so that they are read back only into a table like it.
+    pub fn fingerprint(&self) -> u64 {
+        self.layout.fingerprint()
+    }
+
     /// The counts of the table as of now.
     pub fn stats(&self) -> Stats {
         let buckets = u64::from(self.layout.nbuckets);

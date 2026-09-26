@@ -1367,6 +1367,27 @@ pub unsafe extern "C" fn tess_build_step(
     }
 }
 
+/// `tess_table_fingerprint`: the fingerprint of the table's record layout.
+///
+/// # Safety
+///
+/// `table` as for [`attach`] during the call; `fingerprint` must point to
+/// a writable word; `status` as for every entry point.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tess_table_fingerprint(
+    table: *const TableRef,
+    fingerprint: *mut u64,
+    status: *mut Status,
+) -> Code {
+    // SAFETY: the caller's contract.
+    unsafe {
+        guard(status, || {
+            *fingerprint.as_mut().context("a null fingerprint")? = attach(table)?.fingerprint();
+            Ok(())
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{TableKey, TableRecord, TableStats};

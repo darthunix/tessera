@@ -23,6 +23,10 @@ CREATE FUNCTION tessera_test_table_errors()
 RETURNS boolean
 AS :'table_test', 'tessera_test_table_errors'
 LANGUAGE C STRICT;
+CREATE FUNCTION tessera_test_spill_header()
+RETURNS boolean
+AS :'table_test', 'tessera_test_spill_header'
+LANGUAGE C STRICT;
 
 SELECT tessera_test_table_layout() AS layout \gset
 \echo :layout
@@ -34,9 +38,12 @@ SELECT tessera_test_table_regrow() AS regrow \gset
 \echo :regrow
 SELECT tessera_test_table_errors() AS errors \gset
 \echo :errors
+SELECT tessera_test_spill_header() AS spill \gset
+\echo :spill
 
 DROP FUNCTION tessera_test_table_layout();
 DROP FUNCTION tessera_test_table_cycle();
 DROP FUNCTION tessera_test_table_groups();
 DROP FUNCTION tessera_test_table_regrow();
 DROP FUNCTION tessera_test_table_errors();
+DROP FUNCTION tessera_test_spill_header();

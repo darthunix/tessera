@@ -139,6 +139,34 @@ impl Layout {
     pub(super) fn tail_words(&self) -> usize {
         self.record_size / 8 - RECORD_HEADER / 8 - self.nkeys
     }
+
+    /// A fingerprint of what a record is: the format, the key kinds, the
+    /// record and payload sizes (FNV-1a). Records written with one layout
+    /// are read back only by a table of the same fingerprint.
+    pub(super) fn fingerprint(&self) -> u64 {
+        let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+        let mut feed = |byte: u8| {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        };
+        FORMAT_VERSION.to_le_bytes().into_iter().for_each(&mut feed);
+        (self.nkeys as u32)
+            .to_le_bytes()
+            .into_iter()
+            .for_each(&mut feed);
+        self.kinds[..self.nkeys]
+            .iter()
+            .for_each(|kind| feed(*kind as u8));
+        (self.record_size as u64)
+            .to_le_bytes()
+            .into_iter()
+            .for_each(&mut feed);
+        (self.payload_size as u64)
+            .to_le_bytes()
+            .into_iter()
+            .for_each(&mut feed);
+        hash
+    }
 }
 
 /// Bytes the index of a table for `capacity` records takes: the header

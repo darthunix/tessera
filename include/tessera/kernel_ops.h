@@ -18,6 +18,7 @@
 
 #include "tessera/abi.h"
 #include "tessera/kernels.h"
+#include "tessera/spill.h"
 #include "tessera/table.h"
 
 #define TESS_KERNEL_OPS_ABI_VERSION 0
@@ -246,10 +247,23 @@ typedef struct TessKernelOps
 	TessStatusCode (*build_step) (TessBuildParticipant *participant,
 								  uint64 *counters, uint32 reply,
 								  uint32 *action, TessStatus *status);
+	/* tess_table_fingerprint */
+	TessStatusCode (*table_fingerprint) (const TessTableRef *table,
+										 uint64 *fingerprint,
+										 TessStatus *status);
+	/* tess_spill_header_write */
+	TessStatusCode (*spill_header_write) (void *out, Size len,
+										  const TessSpillHeader *header,
+										  uint64 max_len, TessStatus *status);
+	/* tess_spill_header_read */
+	TessStatusCode (*spill_header_read) (const void *bytes, Size len,
+										 uint64 fingerprint, uint64 max_len,
+										 TessSpillHeader *header,
+										 TessStatus *status);
 } TessKernelOps;
 
 #define TESS_KERNEL_OPS_MIN_SIZE \
-	TESS_ABI_SIZE_INCLUDING_FIELD(TessKernelOps, build_step)
+	TESS_ABI_SIZE_INCLUDING_FIELD(TessKernelOps, spill_header_read)
 
 /*
  * The registry of the kernels: one table per backend, installed by the

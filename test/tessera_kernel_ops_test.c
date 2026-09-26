@@ -54,6 +54,9 @@ static const TessKernelOps kernels = {
 	.build_add_duplicates = tess_build_add_duplicates,
 	.build_totals = tess_build_totals,
 	.build_step = tess_build_step,
+	.table_fingerprint = tess_table_fingerprint,
+	.spill_header_write = tess_spill_header_write,
+	.spill_header_read = tess_spill_header_read,
 };
 
 static const TessKernelRegistryOps *
