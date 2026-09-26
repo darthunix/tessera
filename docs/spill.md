@@ -22,10 +22,28 @@ A node spills chunks of its table whole, never rows one by one:
   in its array of value bases under the chunk's number.
 
 Reading a chunk back gives a chunk that is ready at once: no row is
-decoded or allocated, and `tess_table_link` or `tess_table_link_grouped`
-puts its records into a new index. PostgreSQL's own spilling writes a
-tuple at a time (its hash, then the minimal tuple) and allocates each on
-reading.
+allocated, and `tess_table_link` or `tess_table_link_grouped` puts its
+records into a new index. PostgreSQL's own spilling writes a tuple at a
+time (its hash, then the minimal tuple) and allocates each on reading.
+
+**Packing.** A record in memory is built for linking and probing: the
+next-record reference means nothing on disk, the length is the same in
+every record, NULL bits are mostly 0, and an `int4` key or value takes a
+slot of 8 bytes, so a record of a join on one `int4` key with one `int4`
+column takes 40 bytes for 12 of content. A chunk of records therefore
+goes to disk packed when that makes it shorter (`tess_spill_pack`,
+`crates/tessera-spill/src/pack.rs`): its records seen as lanes of 4
+bytes, the same lane of every record together, each lane stored at the
+width its values need in this chunk: nothing when all are 0, one word
+when all are equal, or 1, 2 or 4 bytes each; the next-record lane is
+dropped. Reading unpacks it into the caller's buffer, a chunk as it was
+but for next-record references of 0, as a chunk not yet linked has them.
+Nothing depends on the column types: the widths follow the values.
+Packing runs at 7 to 10 GB/s and unpacking at 12 to 14 GB/s on one
+core; at the data multiplier 10 of the bench/pg spill family they cut the
+join's and the grouping's files 2.7 to 3.5 times (the joins' below the
+core's) and the queries' time by up to 13 %, where general compression
+(lz4 1.3 GB/s) would cost more time than the smaller files save.
 
 ## The block header
 
@@ -34,13 +52,15 @@ Each chunk goes to disk as a header of `tess_spill_header_size()` bytes
 `crates/tessera-spill`):
 
 ```
- 0  magic "TESSSPIL"    8  version = 1    12  kind (1 records, 2 values)
-16  chunk number       20  partition     24  level (below 32)   28  reserved = 0
+ 0  magic "TESSSPIL"    8  version = 2    12  kind (1 records, 2 values)
+16  chunk number       20  partition     24  level (below 32)
+28  packed length (bytes on disk of a packed chunk of records, 0 for a body as it is)
 32  table fingerprint  40  body length (a multiple of 8; at least 8 for records)
 ```
 
 `tess_spill_header_read` checks the magic, the version, the kind, the
-reserved word, the body length against the most the reader accepts, and
+packed length (records only, a multiple of 8 below the body length), the
+body length against the most the reader accepts, and
 the fingerprint against the reading table's (`tess_table_fingerprint`: a
 hash of the table format, the key kinds and the record and payload
 sizes), so that a block of another table or a damaged file is an error
