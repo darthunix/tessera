@@ -227,9 +227,21 @@ few rows spread through the input may cost more than its rows would.
 **One index.** Every partition's chunks lie under one index while the
 input is read, a new group going to its partition's chunk
 (`tess_table_find_or_insert_partitioned`); sending a partition to disk
-frees its chunks and makes the index anew over the rest.
+frees its chunks and makes the index anew over the rest. So once the
+table passes seven eighths of `hash_mem`, the largest partitions go to
+disk until it takes half, and the index is made once for them all:
+evicting one partition at a time made it anew after each, 3598 times for
+5 M groups of a row each at a `work_mem` of 4 MB (1.38 s against the
+core's 0.94; now 0.48). An index a batch could fill counts twice its
+size as it would grow, so that eviction comes first, never a larger
+index in the middle of a batch.
 
-**Giving out.** After the input, each partition makes a table of its
+**Giving out.** After the input, a partition with records on disk also
+writes its chunks in memory, since it merges from disk anyway: kept,
+they narrow the room the others merge in (sixteen of 50 to 100 kB took
+1.3 MB of 2 in the tests, and partitions split that fit alone). Then
+the partitions wholly in memory go out first, and each partition makes
+a table of its
 own: its records in memory, each group once, are linked, and its chunks
 read back merge in. What a merge holds is a record per group, not the
 file: a group evicted many times has as many records on disk and one
