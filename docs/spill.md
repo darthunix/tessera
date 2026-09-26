@@ -220,9 +220,17 @@ frees its chunks and makes the index anew over the rest.
 
 **Giving out.** After the input, each partition makes a table of its
 own: its records in memory, each group once, are linked, and its chunks
-read back merge in. A partition too large splits by the next bits into
-a level below first; a split does not find a group's other records, so
-that level merges its chunks in memory as it merges those from disk.
+read back merge in. What a merge holds is a record per group, not the
+file: a group evicted many times has as many records on disk and one
+after the merge. Each partition therefore keeps an estimate of its
+groups (HyperLogLog over the hashes of every record made in it, 64
+registers, as the core's hash aggregate keeps one per spilled
+partition), and only a partition whose groups, with a third more for the
+estimate's error, would not fit splits by the next bits into a level
+below first; a split does not find a group's other records, so that
+level merges its chunks in memory as it merges those from disk. Grouping
+20 M rows into 1 M groups at a `work_mem` of 4 MB, the estimate took the
+files from 447 MB to 211 MB (the core writes 446 MB).
 
 **Partial mode.** Under a `Gather` the node writes nothing: past seven
 eighths of `hash_mem` it sends its groups up as partials, which the

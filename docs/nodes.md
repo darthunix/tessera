@@ -559,8 +559,10 @@ When the input ends, the partitions are given out in turn. A partition's
 records in memory are linked into a table of their own, each group once,
 and its chunks read back merge into it (`tess_table_combine`: counts and
 sums add, minima and maxima keep the extreme); its groups then go out as
-before. A partition whose records would not fit splits first by the next
-bits of the hash into a level of its own, all its records written again
+before. A partition whose groups would not fit, by an estimate of them
+(HyperLogLog over its records' hashes, see [spill.md](spill.md)) rather
+than by its records on disk, of which a group evicted many times has
+many, splits first by the next bits of the hash into a level of its own, all its records written again
 by partition, and the level's partitions are merged in turn, their
 chunks in memory merged as sources too, since a split does not find a
 group's other records; a level given out hands back to the one above.
@@ -594,7 +596,8 @@ against an estimate of 200 (the index is made anew), a sort above reading the
 groups row by row; spilling at a `work_mem` of 1 MB, 200 000 groups of three rows
 with NULL keys and values, with the counters, every group compared by an md5 of
 them all for the four aggregates, two keys and `HAVING`, ten hot groups among
-the rare ones, 200 000 groups the planner expects 10 of (a level below), a sort
+the rare ones, no split where each partition's groups fit however often they
+went to disk, 200 000 groups the planner expects 10 of (a level below), a sort
 above reading the groups row by row and a rescan with a parameter; and the core keeping grouping sets, a text key, a
 functionally dependent column and a disabled hash aggregation. The parallel
 suite (`test/sql/parallel.sql`) runs the node under a `Gather` with two
