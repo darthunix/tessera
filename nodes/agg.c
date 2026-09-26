@@ -1122,7 +1122,11 @@ regrow_table(TessAggState *state, uint64 groups)
 {
 	void	   *old = state->table.index;
 	Size		size;
-	void	   *index = new_index(state, groups * 2, &size);
+	void	   *index;
+
+	/* find_or_insert stopped at half the buckets, over existing chunks. */
+	Assert(groups > 0 && state->table.nchunks > 0);
+	index = new_index(state, groups * 2, &size);
 
 	check(state, state->kernels->table_regrow(&state->table, index, size,
 											  groups * 2, &state->status));

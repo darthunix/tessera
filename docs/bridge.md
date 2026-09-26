@@ -42,7 +42,11 @@ Installation requires write access to the selected PostgreSQL installation.
 It installs the bridge, extension files, and public headers. The test
 libraries remain in the build's `test` directory; they are not installed.
 Always clean and rebuild when switching PostgreSQL installations, including
-between builds with and without assertions.
+between builds with and without assertions. Run the suites against a
+PostgreSQL configured with `--enable-cassert` as well before changing a
+node's shared state or its build phases: the nodes check the barrier's
+phase against each action and the shared table's pointers with `Assert`,
+which only such a build evaluates.
 
 Choose a free port and run the example in a fresh temporary instance:
 

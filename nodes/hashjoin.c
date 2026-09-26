@@ -574,6 +574,8 @@ index_table(TessHashJoinState *state)
 	TessTableStats stats = TESS_STRUCT_INITIALIZER(TessTableStats);
 	Size		size;
 
+	/* One index per build, made once every chunk is appended. */
+	Assert(state->table.index == NULL);
 	check(state, state->kernels->table_size(state->nkeys, state->inner_kinds,
 											payload_size, capacity,
 											&size, &state->status));
@@ -861,6 +863,9 @@ attach_shared_table(TessHashJoinState *state)
 	dsa_pointer *bases;
 	Size	   *lens;
 
+	/* SIZE published both before the barrier that led here. */
+	Assert(DsaPointerIsValid(state->shared->index));
+	Assert(DsaPointerIsValid(state->shared->directory));
 	state->table.index = dsa_get_address(area, state->shared->index);
 	state->table.index_len = state->shared->index_len;
 	reserve_chunks(state, Max(nchunks, 1));
@@ -1028,6 +1033,9 @@ size_shared_table(TessHashJoinState *state)
 	dsa_pointer block;
 	Size		size;
 
+	/* The elected one alone, once per build. */
+	Assert(!DsaPointerIsValid(state->shared->index));
+	Assert(!DsaPointerIsValid(state->shared->directory));
 	check(state, state->kernels->build_totals(state->shared->counters, &records,
 											  &nulls, &nchunks, NULL,
 											  &state->status));
@@ -1090,6 +1098,8 @@ link_own_chunks(TessHashJoinState *state)
 	{
 		Size		from = TESS_TABLE_CHUNK_HEADER;
 		uint64		repeated = 0;
+
+		Assert(state->own_chunks[own] < state->table.nchunks);
 
 		check(state, state->kernels->table_link(&state->table, state->own_chunks[own],
 												&from, NULL,
@@ -1198,15 +1208,19 @@ build_shared(TessHashJoinState *state)
 											 PG_WAIT_EXTENSION) ? 1 : 0;
 				break;
 			case TESS_BUILD_DO_BUILD:
+				Assert(BarrierPhase(&state->shared->build) == TESS_BUILD_BUILD);
 				build_shared_inner(state);
 				break;
 			case TESS_BUILD_DO_SIZE:
+				Assert(BarrierPhase(&state->shared->build) == TESS_BUILD_SIZE);
 				size_shared_table(state);
 				break;
 			case TESS_BUILD_DO_LINK:
+				Assert(BarrierPhase(&state->shared->build) == TESS_BUILD_LINK);
 				link_own_chunks(state);
 				break;
 			case TESS_BUILD_DO_PROBE:
+				Assert(BarrierPhase(&state->shared->build) == TESS_BUILD_PROBE);
 				{
 					uint64		records;
 					uint64		nchunks;

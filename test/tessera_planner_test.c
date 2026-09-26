@@ -383,12 +383,14 @@ static bool
 check_children(const Plan *plan, int ncolumns)
 {
 	TessPlanInfo info = TESS_STRUCT_INITIALIZER(TessPlanInfo);
+	const CustomScan *cscan = (const CustomScan *) plan;
 
-	tess_plan_get_info(castNode(CustomScan, plan), &info);
+	Assert(IsA(plan, CustomScan));
+	tess_plan_get_info(cscan, &info);
 	return info.nchildren == 2 && info.child_names[0] != NULL &&
 		strcmp(info.child_names[0], test_node.name) == 0 &&
 		info.child_names[1] == NULL && info.layout.ncolumns == ncolumns &&
-		list_length(castNode(CustomScan, plan)->custom_plans) == 2;
+		list_length(cscan->custom_plans) == 2;
 }
 
 Datum
