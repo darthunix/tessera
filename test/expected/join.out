@@ -19,14 +19,24 @@ BEGIN
     RETURN coalesce(array_length(with_tessera, 1), 0) || ' rows, hash ' ||
            md5(coalesce(with_tessera::text, ''));
 END $$;
--- EXPLAIN ANALYZE with the memory masked, since it depends on the allocator.
+-- EXPLAIN ANALYZE with the memory as whether it stayed within hash_mem:
+-- its bytes depend on the allocator, and an assert build's differ.
 CREATE FUNCTION join_explain(query text) RETURNS SETOF text
 LANGUAGE plpgsql AS $$
 DECLARE
     line text;
+    limit_kb bigint := (SELECT setting::bigint FROM pg_settings WHERE name = 'work_mem') *
+                       current_setting('hash_mem_multiplier')::float8;
 BEGIN
     FOR line IN EXECUTE 'EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) ' || query LOOP
-        RETURN NEXT regexp_replace(line, '(Memory Usage|Overrun): \d+ kB', '\1: N kB');
+        -- Overrun repeats what the memory line says.
+        CONTINUE WHEN line ~ 'Overrun: \d+ kB';
+        IF line ~ 'Memory Usage: \d+ kB' THEN
+            line := regexp_replace(line, 'Memory Usage: \d+ kB',
+                CASE WHEN substring(line FROM 'Memory Usage: (\d+) kB')::bigint <= limit_kb
+                     THEN 'Memory Usage: within hash_mem' ELSE 'Memory Usage: over hash_mem' END);
+        END IF;
+        RETURN NEXT line;
     END LOOP;
 END $$;
 -- A dimension with a unique key, int8 copies of it and values past the
@@ -189,7 +199,7 @@ SELECT join_explain($$SELECT count(jf.m), sum(jf.m), sum(jdup.w) FROM jf JOIN jd
    ->  Custom Scan (TessHashJoin) (actual rows=357.00 loops=1)
          Hash Cond: (jf.fk = jdup.k)
          Buckets: 1024
-         Memory Usage: N kB
+         Memory Usage: within hash_mem
          Builds: 1
          Build Rows: 139
          Chunks: 1
@@ -227,7 +237,7 @@ SELECT join_explain($$SELECT count(jf.note), max(jdup.w) FROM jf JOIN jdup ON jf
    ->  Custom Scan (TessHashJoin) (actual rows=357.00 loops=1)
          Hash Cond: (jf.fk = jdup.k)
          Buckets: 1024
-         Memory Usage: N kB
+         Memory Usage: within hash_mem
          Builds: 1
          Build Rows: 139
          Chunks: 1
@@ -377,7 +387,7 @@ SELECT join_explain($$SELECT count(*), sum(jdup.w) FROM jf JOIN jdup ON jf.fk = 
          Hash Cond: (jf.fk = jdup.k)
          Batch Join Filter: (jf.v > jdup.w)
          Buckets: 1024
-         Memory Usage: N kB
+         Memory Usage: within hash_mem
          Builds: 1
          Build Rows: 139
          Chunks: 1
@@ -732,7 +742,7 @@ SELECT join_explain($$SELECT count(*), count(jdup.w), sum(jdup.w) FROM jf LEFT J
          Join Type: Left
          Hash Cond: (jf.fk = jdup.k)
          Buckets: 1024
-         Memory Usage: N kB
+         Memory Usage: within hash_mem
          Builds: 1
          Build Rows: 139
          Chunks: 1
@@ -857,7 +867,7 @@ SELECT join_explain($$SELECT count(*) FROM jf JOIN jd ON jf.fk = jd.id$$);
    ->  Custom Scan (TessHashJoin) (actual rows=764.00 loops=1)
          Hash Cond: (jd.id = jf.fk)
          Buckets: 1024
-         Memory Usage: N kB
+         Memory Usage: within hash_mem
          Builds: 1
          Build Rows: 300
          Chunks: 1
@@ -889,7 +899,7 @@ SELECT join_explain($$SELECT sum(jdup.w) FROM jf JOIN jdup ON jf.fk = jdup.k$$);
    ->  Custom Scan (TessHashJoin) (actual rows=357.00 loops=1)
          Hash Cond: (jf.fk = jdup.k)
          Buckets: 1024
-         Memory Usage: N kB
+         Memory Usage: within hash_mem
          Builds: 1
          Build Rows: 139
          Chunks: 1
@@ -911,8 +921,8 @@ SELECT join_explain($$SELECT sum(jdup.w) FROM jf JOIN jdup ON jf.fk = jdup.k$$);
 (27 rows)
 
 -- An inner side the planner thinks small: the table goes past hash_mem
--- and spills; at a hash_mem this small its partitions do not fit either,
--- which Overrun reports.
+-- and spills; at a hash_mem this small the tails of its partitions do
+-- not fit either, and the memory goes over it.
 CREATE FUNCTION join_many() RETURNS SETOF int LANGUAGE sql ROWS 10
 AS 'SELECT generate_series(1, 20000)';
 SET work_mem = '64kB';
@@ -926,8 +936,7 @@ SELECT join_explain($$SELECT count(*) FROM jf JOIN join_many() AS m(k) ON jf.v =
    ->  Custom Scan (TessHashJoin) (actual rows=1000.00 loops=1)
          Hash Cond: (jf.v = m.k)
          Buckets: 1024
-         Memory Usage: N kB
-         Overrun: N kB
+         Memory Usage: over hash_mem
          Builds: 1
          Build Rows: 20000
          Chunks: 3838
@@ -952,7 +961,7 @@ SELECT join_explain($$SELECT count(*) FROM jf JOIN join_many() AS m(k) ON jf.v =
                Rows Kept As: copies
                Batches: 313
                ->  Function Scan on join_many m (actual rows=20000.00 loops=1)
-(33 rows)
+(32 rows)
 
 SELECT join_same($$SELECT count(*), sum(m.k) FROM jf JOIN join_many() AS m(k) ON jf.v = m.k$$);
                    join_same                   
@@ -975,7 +984,7 @@ SELECT join_explain($$SELECT jsmall.k, (SELECT count(*) FROM jf JOIN jdup ON jf.
            ->  Custom Scan (TessHashJoin) (actual rows=264.00 loops=10)
                  Hash Cond: (jf.fk = jdup.k)
                  Buckets: 1024
-                 Memory Usage: N kB
+                 Memory Usage: within hash_mem
                  Builds: 10
                  Build Rows: 1030
                  Chunks: 10
@@ -1020,7 +1029,7 @@ SELECT join_explain($$SELECT jsmall.k, (SELECT count(*) FROM jf JOIN jdup ON jf.
            ->  Custom Scan (TessHashJoin) (actual rows=216.50 loops=10)
                  Hash Cond: (jf.fk = jdup.k)
                  Buckets: 1024
-                 Memory Usage: N kB
+                 Memory Usage: within hash_mem
                  Builds: 1
                  Build Rows: 139
                  Chunks: 1
@@ -1095,7 +1104,7 @@ SELECT join_explain($$SELECT count(*), sum(jbuild.w) FROM jprobe JOIN jbuild ON 
    ->  Custom Scan (TessHashJoin) (actual rows=198.00 loops=1)
          Hash Cond: (jprobe.k = jbuild.k)
          Buckets: 16384
-         Memory Usage: N kB
+         Memory Usage: within hash_mem
          Builds: 1
          Build Rows: 5000
          Chunks: 2
@@ -1134,7 +1143,7 @@ SELECT join_explain($$SELECT count(*) FROM jprobe WHERE NOT EXISTS (SELECT 1 FRO
          Join Type: Anti
          Hash Cond: (jbuild.k = jprobe.k)
          Buckets: 16384
-         Memory Usage: N kB
+         Memory Usage: within hash_mem
          Builds: 1
          Build Rows: 5000
          Chunks: 2
@@ -1180,7 +1189,7 @@ SELECT join_explain($$SELECT count(*), count(jbuild.w) FROM jprobe LEFT JOIN jbu
          Join Type: Left
          Hash Cond: (jprobe.k = jbuild.k)
          Buckets: 16384
-         Memory Usage: N kB
+         Memory Usage: within hash_mem
          Builds: 1
          Build Rows: 5000
          Chunks: 2
@@ -1226,7 +1235,7 @@ SELECT join_explain($$SELECT count(*), sum(jbuild.w) FROM jhit JOIN jbuild ON jh
    ->  Custom Scan (TessHashJoin) (actual rows=20000.00 loops=1)
          Hash Cond: (jhit.k = jbuild.k)
          Buckets: 16384
-         Memory Usage: N kB
+         Memory Usage: within hash_mem
          Builds: 1
          Build Rows: 5000
          Chunks: 2
@@ -1257,7 +1266,7 @@ SELECT join_explain($$SELECT count(*) FROM jprobe JOIN jd ON jprobe.k = jd.id$$)
    ->  Custom Scan (TessHashJoin) (actual rows=297.00 loops=1)
          Hash Cond: (jd.id = jprobe.k)
          Buckets: 1024
-         Memory Usage: N kB
+         Memory Usage: within hash_mem
          Builds: 1
          Build Rows: 300
          Chunks: 1
@@ -1290,7 +1299,7 @@ SELECT join_explain($$SELECT jsmall.k, (SELECT count(*) FROM jprobe JOIN jbuild 
            ->  Custom Scan (TessHashJoin) (actual rows=159.50 loops=10)
                  Hash Cond: (jprobe.k = jbuild.k)
                  Buckets: 16384
-                 Memory Usage: N kB
+                 Memory Usage: within hash_mem
                  Builds: 10
                  Build Rows: 49615
                  Chunks: 20
@@ -1339,7 +1348,7 @@ SELECT join_explain($$SELECT count(*), sum(jbuild.w) FROM jprobe JOIN jbuild ON 
    ->  Custom Scan (TessHashJoin) (actual rows=118.00 loops=1)
          Hash Cond: (jprobe.k = jbuild.k)
          Buckets: 16384
-         Memory Usage: N kB
+         Memory Usage: within hash_mem
          Builds: 1
          Build Rows: 5000
          Chunks: 2
@@ -1394,7 +1403,7 @@ SELECT join_explain($$SELECT count(*) FROM jprobe WHERE jprobe.v > 0 AND jprobe.
          Join Type: Anti
          Hash Cond: (jbuild.k = jprobe.k)
          Buckets: 16384
-         Memory Usage: N kB
+         Memory Usage: within hash_mem
          Builds: 1
          Build Rows: 5000
          Chunks: 2
@@ -1458,7 +1467,7 @@ SELECT join_explain($$SELECT count(*), sum(jbuild.w) FROM jprobe JOIN jbuild ON 
    ->  Custom Scan (TessHashJoin) (actual rows=118.00 loops=1)
          Hash Cond: (jprobe.k = jbuild.k)
          Buckets: 16384
-         Memory Usage: N kB
+         Memory Usage: within hash_mem
          Builds: 1
          Build Rows: 5000
          Chunks: 2
@@ -1533,7 +1542,7 @@ SELECT join_explain($$SELECT count(*), sum(jd.n) FROM jf JOIN jd ON jf.fk = jd.i
    ->  Custom Scan (TessHashJoin) (actual rows=87.00 loops=1)
          Hash Cond: (jd.id = jf.fk)
          Buckets: 1024
-         Memory Usage: N kB
+         Memory Usage: within hash_mem
          Builds: 1
          Build Rows: 300
          Chunks: 1
@@ -1583,7 +1592,7 @@ SELECT join_explain($$SELECT count(*), sum(jbuild.w) FROM jprobe JOIN jbuild ON 
    ->  Custom Scan (TessHashJoin) (actual rows=118.00 loops=1)
          Hash Cond: (jprobe.k = jbuild.k)
          Buckets: 16384
-         Memory Usage: N kB
+         Memory Usage: within hash_mem
          Builds: 1
          Build Rows: 5000
          Chunks: 2
@@ -1645,7 +1654,7 @@ SELECT join_explain($$SELECT count(*), sum(length(jsb.t)) FROM jsp JOIN jsb ON j
    ->  Custom Scan (TessHashJoin) (actual rows=171130.00 loops=1)
          Hash Cond: (jsp.k = jsb.k)
          Buckets: 16384
-         Memory Usage: N kB
+         Memory Usage: within hash_mem
          Builds: 1
          Build Rows: 37648
          Chunks: 105
@@ -1697,7 +1706,7 @@ SELECT join_explain($$SELECT count(*), count(jsb.n), sum(length(jsb.t)) FROM jsp
          Join Type: Left
          Hash Cond: (jsp.k = jsb.k)
          Buckets: 16384
-         Memory Usage: N kB
+         Memory Usage: within hash_mem
          Builds: 1
          Build Rows: 37648
          Chunks: 119
@@ -1766,7 +1775,7 @@ SELECT join_explain($$SELECT count(*), sum(jskew.w) FROM jsp JOIN jskew() AS jsk
    ->  Custom Scan (TessHashJoin) (actual rows=240000.00 loops=1)
          Hash Cond: (jsp.k = jskew.k)
          Buckets: 4096
-         Memory Usage: N kB
+         Memory Usage: within hash_mem
          Builds: 1
          Build Rows: 62000
          Chunks: 58
@@ -1846,7 +1855,7 @@ SELECT join_explain($$SELECT count(*), sum(length(w.t)) FROM jsp JOIN jwide() AS
    ->  Custom Scan (TessHashJoin) (actual rows=363640.00 loops=1)
          Hash Cond: (jsp.k = w.k)
          Buckets: 1024
-         Memory Usage: N kB
+         Memory Usage: within hash_mem
          Builds: 1
          Build Rows: 200000
          Chunks: 522

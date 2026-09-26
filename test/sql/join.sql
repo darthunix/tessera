@@ -21,14 +21,24 @@ BEGIN
            md5(coalesce(with_tessera::text, ''));
 END $$;
 
--- EXPLAIN ANALYZE with the memory masked, since it depends on the allocator.
+-- EXPLAIN ANALYZE with the memory as whether it stayed within hash_mem:
+-- its bytes depend on the allocator, and an assert build's differ.
 CREATE FUNCTION join_explain(query text) RETURNS SETOF text
 LANGUAGE plpgsql AS $$
 DECLARE
     line text;
+    limit_kb bigint := (SELECT setting::bigint FROM pg_settings WHERE name = 'work_mem') *
+                       current_setting('hash_mem_multiplier')::float8;
 BEGIN
     FOR line IN EXECUTE 'EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) ' || query LOOP
-        RETURN NEXT regexp_replace(line, '(Memory Usage|Overrun): \d+ kB', '\1: N kB');
+        -- Overrun repeats what the memory line says.
+        CONTINUE WHEN line ~ 'Overrun: \d+ kB';
+        IF line ~ 'Memory Usage: \d+ kB' THEN
+            line := regexp_replace(line, 'Memory Usage: \d+ kB',
+                CASE WHEN substring(line FROM 'Memory Usage: (\d+) kB')::bigint <= limit_kb
+                     THEN 'Memory Usage: within hash_mem' ELSE 'Memory Usage: over hash_mem' END);
+        END IF;
+        RETURN NEXT line;
     END LOOP;
 END $$;
 
@@ -213,8 +223,8 @@ SELECT join_explain($$SELECT count(*) FROM jf JOIN jd ON jf.fk = jd.id$$);
 -- Rounds: every match of a key with three records counts.
 SELECT join_explain($$SELECT sum(jdup.w) FROM jf JOIN jdup ON jf.fk = jdup.k$$);
 -- An inner side the planner thinks small: the table goes past hash_mem
--- and spills; at a hash_mem this small its partitions do not fit either,
--- which Overrun reports.
+-- and spills; at a hash_mem this small the tails of its partitions do
+-- not fit either, and the memory goes over it.
 CREATE FUNCTION join_many() RETURNS SETOF int LANGUAGE sql ROWS 10
 AS 'SELECT generate_series(1, 20000)';
 SET work_mem = '64kB';

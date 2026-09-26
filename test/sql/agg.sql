@@ -185,9 +185,18 @@ CREATE FUNCTION agg_explain(query text) RETURNS SETOF text
 LANGUAGE plpgsql AS $$
 DECLARE
     line text;
+    limit_kb bigint := (SELECT setting::bigint FROM pg_settings WHERE name = 'work_mem') *
+                       current_setting('hash_mem_multiplier')::float8;
 BEGIN
     FOR line IN EXECUTE 'EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) ' || query LOOP
-        RETURN NEXT regexp_replace(line, '(Memory Usage|Overrun): \d+ kB', '\1: N kB');
+        -- Overrun repeats what the memory line says.
+        CONTINUE WHEN line ~ 'Overrun: \d+ kB';
+        IF line ~ 'Memory Usage: \d+ kB' THEN
+            line := regexp_replace(line, 'Memory Usage: \d+ kB',
+                CASE WHEN substring(line FROM 'Memory Usage: (\d+) kB')::bigint <= limit_kb
+                     THEN 'Memory Usage: within hash_mem' ELSE 'Memory Usage: over hash_mem' END);
+        END IF;
+        RETURN NEXT line;
     END LOOP;
 END $$;
 EXPLAIN (COSTS OFF) SELECT b, count(*), sum(a), min(a), max(a) FROM agg_t GROUP BY b;

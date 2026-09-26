@@ -919,7 +919,7 @@ of fewer than 64 rows, an empty side on
 either side, a join over a join; an inner side much larger than the
 planner's estimate, which takes more chunks; a top-N sort and a limit
 above the node, and a scrollable cursor through `Material`. With
-`EXPLAIN ANALYZE`, the memory masked, it shows the counters of a join, of
+`EXPLAIN ANALYZE`, the memory shown as within `hash_mem` or over it (its bytes depend on the allocator and differ in an assert build), it shows the counters of a join, of
 one with rounds and of an inner side of 20000 rows estimated at 10, which goes
 past a small `work_mem`; correlated subqueries whose parameter is on the
 inner side, which builds the table for every outer row, and on the outer
