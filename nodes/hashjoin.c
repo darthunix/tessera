@@ -404,6 +404,11 @@ typedef struct JoinSpill
 	uint64		stamp;
 	/* The outer child is done: the partitions on disk are joined in turn. */
 	bool		joining;
+	/*
+	 * The resident partitions' index is made: its bytes are the table's
+	 * now, no longer estimated per resident row.
+	 */
+	bool		indexed;
 	/* The outer child returned its last batch. */
 	bool		child_done;
 	/* The participants whose files a partition is read from: 1 when serial. */
@@ -875,17 +880,22 @@ reserve_rows(TessHashJoinState *state, int nrows)
 	state->capacity = nrows;
 }
 
-/* The bytes the table and the copies of inner values take now. */
-static void
-note_memory(TessHashJoinState *state)
+/* The bytes the table, the copies of inner values and spilling take now. */
+static Size
+join_memory(TessHashJoinState *state)
 {
 	Size		memory = state->table_bytes + sizeof(uint64) * state->bloom_words +
 		MemoryContextMemAllocated(state->values_context, true);
 
 	if (state->spill != NULL)
 		memory += spill_memory(state->spill, NULL);
+	return memory;
+}
 
-	state->peak_memory = Max(state->peak_memory, memory);
+static void
+note_memory(TessHashJoinState *state)
+{
+	state->peak_memory = Max(state->peak_memory, join_memory(state));
 }
 
 /* Room for the bases and lengths of nchunks chunks in this process. */
@@ -1988,24 +1998,37 @@ spill_memory(JoinSpill *spill, uint64 *resident)
 			MemoryContextMemAllocated(level->block_context, true) +
 			(Size) (build_files + probe_files) * BLCKSZ;
 	}
-	return bytes + rows * sizeof(uint64);
+	return bytes + (spill->indexed ? 0 : rows * sizeof(uint64));
 }
 
 /*
  * Keep spilling within hash_mem while building: while it takes more, the
  * largest resident partition goes to disk. Room stays for the outer
- * side's tails, a chunk of records and one of values per partition, and
- * its files' buffers, which come once the probing starts. The tails stay: the chunk size
- * bounds them, and writing them sooner would write chunks of a few rows.
+ * side's tails of the partitions on disk, which come once the probing
+ * starts: a chunk of records, one of values when the outer side keeps a
+ * by-reference column, and a file's buffer each; a resident partition
+ * writes no outer row. The tails stay: the chunk size bounds them, and
+ * writing them sooner would write chunks of a few rows.
  */
 static void
 make_room(TessHashJoinState *state, bool building)
 {
 	JoinSpill  *spill = state->spill;
 	Size		limit = get_hash_memory_limit();
-	Size		outer = (Size) spill->npartitions * (2 * spill->probe.chunk_len + BLCKSZ);
+	Size		tail = spill->probe.chunk_len + BLCKSZ;
+	int			on_disk = 0;
 
-	while (building && spill_memory(spill, NULL) + outer > limit)
+	for (int word = 0; word < spill->probe.nwords; word++)
+		if (!spill->probe.byvals[word])
+		{
+			tail += spill->probe.chunk_len;
+			break;
+		}
+	for (int partition = 0; partition < spill->npartitions; partition++)
+		if (!spill->build.parts[partition].resident)
+			on_disk++;
+	/* What the node reports, so that what it keeps is what it says. */
+	while (building && join_memory(state) + on_disk * tail > limit)
 	{
 		int			largest = -1;
 		Size		bytes = 0;
@@ -2023,6 +2046,23 @@ make_room(TessHashJoinState *state, bool building)
 		if (largest < 0)
 			break;
 		side_demote(state, &spill->build, largest);
+		on_disk++;
+	}
+	/*
+	 * Too little left resident to be worth probing, as finish_spill_build
+	 * decides: all of it goes now, not after the build.
+	 */
+	if (building && on_disk > 0)
+	{
+		uint64		resident = 0;
+
+		for (int partition = 0; partition < spill->npartitions; partition++)
+			if (spill->build.parts[partition].resident)
+				resident += spill->build.parts[partition].rows;
+		if (resident > 0 && resident * 4 < spill->total_rows)
+			for (int partition = 0; partition < spill->npartitions; partition++)
+				if (spill->build.parts[partition].resident)
+					side_demote(state, &spill->build, partition);
 	}
 	note_memory(state);
 }
@@ -2525,6 +2565,20 @@ finish_spill_build(TessHashJoinState *state)
 	SpillSide  *side = &spill->build;
 	int			nchunks = 0;
 	uint64		rows = 0;
+	uint64		resident = 0;
+
+	/*
+	 * Resident partitions holding less than a quarter of the inner rows go
+	 * to disk too: probing them would cost every outer batch the whole
+	 * probe for the few rows of theirs, more than writing them saves.
+	 */
+	for (int partition = 0; partition < spill->npartitions; partition++)
+		if (side->parts[partition].resident)
+			resident += side->parts[partition].rows;
+	if (resident > 0 && resident * 4 < spill->total_rows)
+		for (int partition = 0; partition < spill->npartitions; partition++)
+			if (side->parts[partition].resident)
+				side_demote(state, side, partition);
 
 	for (int partition = 0; partition < spill->npartitions; partition++)
 	{
@@ -2552,6 +2606,7 @@ finish_spill_build(TessHashJoinState *state)
 	state->build_rows = rows;
 	state->value_bases = side->value_bases;
 	state->nvalue_chunks = side->nvalues;
+	spill->indexed = true;
 	if (spill->parent == NULL)
 		index_table(state);
 	else
