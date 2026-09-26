@@ -63,6 +63,18 @@ enum
 	AGG_GROUPS,
 	AGG_MEMORY,
 	AGG_GROWS,
+	/*
+	 * Spilling: the most partitions of a level, the partitions sent to
+	 * disk while the input was read, the chunks and bytes written, the
+	 * partitions split into a level below.
+	 */
+	AGG_PARTITIONS,
+	AGG_EVICTIONS,
+	AGG_SPILLED,
+	AGG_DISK,
+	AGG_SPLITS,
+	/* Partial mode: the times the groups went out before the input ended. */
+	AGG_EARLY,
 	AGG_NCOUNTERS
 };
 
@@ -160,6 +172,28 @@ typedef struct TessAggState
 	uint64	   *state_words;
 	TessBatch  *published;
 	int			next_row;
+
+	/*
+	 * Spilling: the level of partitions being read or given out, NULL
+	 * while the groups fit; an index of the table's layout alone, for the
+	 * files' fingerprint; how each aggregate's states merge; the counters.
+	 */
+	struct AggSpill *spill;
+	void	   *layout_index;
+	Size		layout_len;
+	TessTableCombine *combines;
+	uint64		partitions;
+	uint64		evictions;
+	uint64		spilled;
+	uint64		disk_bytes;
+	uint64		splits;
+	/*
+	 * Partial mode: the groups go out and the table starts anew whenever it
+	 * would outgrow hash_mem, the Finalize Aggregate above merging a
+	 * group's partials; the input may go on after a walk.
+	 */
+	bool		input_done;
+	uint64		early_emits;
 } TessAggState;
 
 static const CustomExecMethods agg_exec_methods;
@@ -365,22 +399,6 @@ group_keys(PlannerInfo *root)
 	return keys;
 }
 
-/*
- * The bytes a table of groups takes by the planner's estimate: a record
- * of a header, a slot per key and a payload of a flags word and a word
- * per aggregate, and the buckets, at least twice the records.
- */
-static double
-group_bytes(double groups, int nkeys, int naggregates)
-{
-	double		buckets = 1024;
-
-	groups = Max(groups, 1.0);
-	while (buckets < 2 * groups)
-		buckets *= 2;
-	return groups * (16 + 8 * nkeys + 8 * (1 + naggregates)) + buckets * 4;
-}
-
 /* The core's aggregate paths of the list with this strategy and split. */
 static List *
 aggregate_templates(const List *pathlist, AggStrategy strategy, AggSplit aggsplit)
@@ -400,10 +418,9 @@ aggregate_templates(const List *pathlist, AggStrategy strategy, AggSplit aggspli
 /*
  * The node's path in place of the core's aggregate path: the same planner
  * properties and rows, a lower cost, the batch child over the core path's
- * input, the grouping expressions and the aggregates it computes. NULL
- * when the input cannot be read in batches or lacks a column, or when the
- * planner's estimate of the groups would not fit in hash_mem: the node
- * keeps every group in memory.
+ * input, the grouping expressions and the aggregates it computes; the
+ * groups spill past hash_mem as the core's do. NULL when the input cannot
+ * be read in batches or lacks a column.
  */
 static CustomPath *
 make_agg_path(PlannerInfo *root, const AggPath *agg, List *tlist, int nkeys)
@@ -412,10 +429,6 @@ make_agg_path(PlannerInfo *root, const AggPath *agg, List *tlist, int nkeys)
 	Path	   *child;
 	Path		template;
 
-	if (nkeys > 0 &&
-		group_bytes(agg->path.rows, nkeys, list_length(tlist) - nkeys) >
-		(double) get_hash_memory_limit())
-		return NULL;
 	child = tess_batch_input_path(root, agg->subpath);
 	if (child == NULL || !arguments_available(tlist, child))
 		return NULL;
@@ -820,11 +833,30 @@ agg_begin(CustomScanState *css, EState *estate, int eflags)
 	{
 		state->kernels = tess_runtime_kernels();
 		if (state->kernels == NULL ||
-			!TESS_ABI_HAS_FIELD(state->kernels, TessKernelOps, table_gather_key))
+			!TESS_ABI_HAS_FIELD(state->kernels, TessKernelOps, table_combine))
 			elog(ERROR, "TessAgg needs the kernels module for GROUP BY");
 		state->table_context = AllocSetContextCreate(estate->es_query_cxt,
 													 "TessAgg groups",
 													 ALLOCSET_DEFAULT_SIZES);
+		/* For spilling: how the states merge, and the layout's fingerprint. */
+		state->combines = palloc_array(TessTableCombine, Max(state->nvalues, 1));
+		for (int value = 0; value < state->nvalues; value++)
+			state->combines[value] =
+				state->values[value].kind == AGG_COUNT ? TESS_TABLE_COMBINE_COUNT :
+				state->values[value].kind == AGG_SUM ? TESS_TABLE_COMBINE_SUM :
+				state->values[value].kind == AGG_MIN ? TESS_TABLE_COMBINE_MIN :
+				TESS_TABLE_COMBINE_MAX;
+		if (state->kernels->table_size(state->nkeys, state->kinds,
+									   sizeof(uint64) * (1 + state->nvalues),
+									   AGG_INITIAL_GROUPS, &state->layout_len,
+									   &state->status) != TESS_OK)
+			tess_status_report(&state->status);
+		state->layout_index = palloc0(state->layout_len);
+		if (state->kernels->table_create(state->layout_index, state->layout_len,
+										 state->nkeys, state->kinds,
+										 sizeof(uint64) * (1 + state->nvalues),
+										 AGG_INITIAL_GROUPS, &state->status) != TESS_OK)
+			tess_status_report(&state->status);
 		state->state_words = palloc0_array(uint64,
 										   Max(state->nvalues, 1) * AGG_GROUP_ROWS);
 		if (state->projection == NULL)
@@ -1027,11 +1059,19 @@ check(TessAggState *state, TessStatusCode code)
 		tess_status_report(&state->status);
 }
 
-/* The bytes of the table now, and the most so far. */
+static Size agg_spill_memory(TessAggState *state);
+
+/*
+ * The bytes of the table now, and the most so far; once it spills, the
+ * index and every chunk of every level, which live in the levels' memory.
+ */
 static void
 note_memory(TessAggState *state)
 {
-	state->peak_memory = Max(state->peak_memory, state->table_bytes);
+	Size		memory = state->spill == NULL ? state->table_bytes :
+		agg_spill_memory(state);
+
+	state->peak_memory = Max(state->peak_memory, memory);
 }
 
 /*
@@ -1041,6 +1081,19 @@ note_memory(TessAggState *state)
  * index is made anew, larger.
  */
 #define AGG_FIRST_CHUNK (64 * 1024)
+
+/*
+ * A first index for capacity groups at most, and at most a quarter of
+ * hash_mem, about 8 bytes of buckets per group: an estimate too large
+ * would take the memory the groups need; the index grows as they come.
+ */
+static uint64
+first_capacity(uint64 capacity)
+{
+	uint64		most = get_hash_memory_limit() / 32;
+
+	return Max(Min(capacity, most), AGG_INITIAL_GROUPS);
+}
 
 /* An index for capacity groups in the table's memory. */
 static void *
@@ -1059,7 +1112,7 @@ static void
 create_table(TessAggState *state)
 {
 	Size		payload_size = sizeof(uint64) * (1 + state->nvalues);
-	uint64		capacity = Max(state->groups_estimate, AGG_INITIAL_GROUPS);
+	uint64		capacity = first_capacity(state->groups_estimate);
 	Size		size;
 
 	MemoryContextReset(state->table_context);
@@ -1086,7 +1139,10 @@ static void
 add_chunk(TessAggState *state)
 {
 	int			chunk = state->table.nchunks;
-	Size		len = chunk == 0 ? AGG_FIRST_CHUNK : TESS_TABLE_MAX_CHUNK_LEN;
+	/* Past the first, an eighth of hash_mem, so that a small one spills late. */
+	Size		len = chunk == 0 ? AGG_FIRST_CHUNK :
+		Max(AGG_FIRST_CHUNK, Min(TESS_TABLE_MAX_CHUNK_LEN,
+								 TYPEALIGN_DOWN(8, get_hash_memory_limit() / 8)));
 	void	   *base;
 
 	if (chunk == TESS_TABLE_MAX_CHUNKS)
@@ -1155,6 +1211,820 @@ reserve_rows(TessAggState *state, int nrows)
 	state->capacity = nrows;
 }
 
+/*
+ * Spilling (plan item 5.6, docs/spill.md). The groups fit until the table
+ * takes more than hash_mem; then they go into partitions by the hashes'
+ * low bits under the one index, and while the table takes more, the
+ * largest partition goes to disk whole: its records, each a group's
+ * states, are written and freed, and the index is made anew over the
+ * rest. Its rows then make new records, which are merged with those on
+ * disk once the input is done: partition by partition, the records in
+ * memory make a table, and the chunks read back merge into it
+ * (tess_table_combine). A partition too large to merge is split first by
+ * the next bits of the hash into a level of its own.
+ *
+ * The chunk arrays keep two slots first: AGG_SOURCE, empty or a chunk read
+ * back for a merge or a split, and AGG_EMPTY, an empty chunk a partition
+ * without one appends to, which sends its rows back for a chunk.
+ */
+#define AGG_SPILL_MIN_CHUNK (8 * 1024)
+#define AGG_SPILL_MIN_PARTITIONS 4
+#define AGG_SPILL_MAX_PARTITIONS 1024
+#define AGG_SOURCE 0
+#define AGG_EMPTY 1
+
+/* A partition: its chunks in memory, the last the one it appends to. */
+typedef struct AggPart
+{
+	void	  **chunks;
+	int			nchunks;
+	int			slots;
+	Size		bytes;
+	/* Records in memory and on disk, and the bytes written. */
+	uint64		records;
+	uint64		disk_records;
+	uint64		disk_bytes;
+} AggPart;
+
+typedef struct AggSpill
+{
+	struct AggSpill *parent;
+	/* The chunks, in blocks of their own size; the blocks read back. */
+	MemoryContext context;
+	MemoryContext block_context;
+	uint32		level;
+	uint32		shift;
+	int			npartitions;
+	Size		chunk_len;
+	AggPart    *parts;
+	/*
+	 * A split's chunks: the source, the empty one, and each partition's
+	 * current chunk at AGG_EMPTY + 1 + partition, or the empty one.
+	 */
+	void	  **bases;
+	Size	   *lens;
+	uint32	   *current;
+	TessSpill  *file;
+	uint32		next_number;
+	/* The input is read; the partition being given out, -1 before any. */
+	bool		done_input;
+	int			partition;
+	/* The empty chunks of the two first slots. */
+	uint64		source_empty[1];
+	uint64		empty[1];
+} AggSpill;
+
+static inline uint32
+agg_partition(const AggSpill *spill, uint32 hash)
+{
+	return (hash >> spill->shift) & (uint32) (spill->npartitions - 1);
+}
+
+static inline Size
+agg_chunk_used(const void *base)
+{
+	return (Size) *(const uint64 *) base;
+}
+
+/* The bytes of a record: header, key slots, flags and a word per aggregate. */
+static Size
+agg_record_size(TessAggState *state)
+{
+	return 16 + 8 * state->nkeys + sizeof(uint64) * (1 + state->nvalues);
+}
+
+static void
+part_push(AggSpill *spill, AggPart *part, void *base)
+{
+	if (part->nchunks == part->slots)
+	{
+		part->slots = Max(part->slots * 2, 4);
+		part->chunks = part->chunks == NULL ?
+			MemoryContextAlloc(spill->context, sizeof(void *) * part->slots) :
+			repalloc(part->chunks, sizeof(void *) * part->slots);
+	}
+	part->chunks[part->nchunks++] = base;
+	part->bytes += spill->chunk_len;
+}
+
+static void *
+agg_new_chunk(TessAggState *state, AggSpill *spill)
+{
+	void	   *base = MemoryContextAlloc(spill->context, spill->chunk_len);
+
+	check(state, state->kernels->table_chunk_init(base, spill->chunk_len,
+												  &state->status));
+	return base;
+}
+
+/* Free a partition's chunks in memory. */
+static void
+part_release(AggSpill *spill, AggPart *part)
+{
+	for (int chunk = 0; chunk < part->nchunks; chunk++)
+		pfree(part->chunks[chunk]);
+	part->nchunks = 0;
+	part->bytes = 0;
+	part->records = 0;
+}
+
+/* Write a chunk of the partition's records, unless it holds none. */
+static void
+agg_write_chunk(TessAggState *state, AggSpill *spill, int partition, void *base)
+{
+	Size		used = agg_chunk_used(base);
+
+	if (used <= TESS_TABLE_CHUNK_HEADER)
+		return;
+	tess_spill_write(spill->file, partition, TESS_SPILL_RECORDS,
+					 spill->next_number++, base, used, NULL);
+	spill->parts[partition].disk_bytes += used;
+	spill->parts[partition].disk_records +=
+		(used - TESS_TABLE_CHUNK_HEADER) / agg_record_size(state);
+	state->spilled++;
+	state->disk_bytes += TESS_SPILL_HEADER_SIZE + used;
+}
+
+/*
+ * A level of partitions by the hash bits from shift, for expected bytes:
+ * the power of two that makes each about half of hash_mem, as long as the
+ * bits last and a chunk per partition fits in half of hash_mem.
+ */
+static AggSpill *
+agg_spill_create(TessAggState *state, AggSpill *parent, double expected, uint32 shift)
+{
+	MemoryContext context = state->css.ss.ps.state->es_query_cxt;
+	Size		limit = get_hash_memory_limit();
+	Size		record = agg_record_size(state);
+	TessSpillConfig config = TESS_STRUCT_INITIALIZER(TessSpillConfig);
+	TessTableRef layout = {0};
+	AggSpill   *spill = MemoryContextAllocZero(context, sizeof(AggSpill));
+	int			npartitions = AGG_SPILL_MIN_PARTITIONS;
+	Size		chunk_len;
+
+	/* Each partition keeps a chunk and its file's buffer of a page. */
+	while (npartitions < AGG_SPILL_MAX_PARTITIONS &&
+		   (double) npartitions * (limit / 2) < expected &&
+		   (Size) npartitions * 2 * (AGG_SPILL_MIN_CHUNK + BLCKSZ) <= limit / 2 &&
+		   shift + pg_leftmost_one_pos32(npartitions) + 1 < 32)
+		npartitions *= 2;
+	chunk_len = limit / (8 * npartitions);
+	chunk_len = Min(chunk_len, TESS_TABLE_MAX_CHUNK_LEN);
+	chunk_len = Max(chunk_len, AGG_SPILL_MIN_CHUNK);
+	chunk_len = Max(chunk_len, TESS_TABLE_CHUNK_HEADER + 4 * record);
+	spill->chunk_len = TYPEALIGN_DOWN(8, chunk_len);
+	spill->parent = parent;
+	spill->level = parent == NULL ? 0 : parent->level + 1;
+	spill->shift = shift;
+	spill->npartitions = npartitions;
+	spill->partition = -1;
+	/* Small blocks: a chunk takes a block of its own size. */
+	spill->context = AllocSetContextCreate(context, "TessAgg spill",
+										   ALLOCSET_SMALL_SIZES);
+	spill->block_context = AllocSetContextCreate(spill->context,
+												 "TessAgg spilled block",
+												 ALLOCSET_SMALL_SIZES);
+	spill->parts = MemoryContextAllocZero(spill->context,
+										  sizeof(AggPart) * npartitions);
+	spill->bases = MemoryContextAlloc(spill->context,
+									  sizeof(void *) * (npartitions + 2));
+	spill->lens = MemoryContextAlloc(spill->context, sizeof(Size) * (npartitions + 2));
+	spill->current = MemoryContextAlloc(spill->context, sizeof(uint32) * npartitions);
+	spill->source_empty[0] = TESS_TABLE_CHUNK_HEADER;
+	spill->empty[0] = TESS_TABLE_CHUNK_HEADER;
+	spill->bases[AGG_SOURCE] = spill->source_empty;
+	spill->lens[AGG_SOURCE] = TESS_TABLE_CHUNK_HEADER;
+	for (int partition = 0; partition < npartitions; partition++)
+	{
+		spill->bases[AGG_EMPTY + 1 + partition] = spill->empty;
+		spill->lens[AGG_EMPTY + 1 + partition] = TESS_TABLE_CHUNK_HEADER;
+		spill->current[partition] = AGG_EMPTY + 1 + partition;
+	}
+	spill->bases[AGG_EMPTY] = spill->empty;
+	spill->lens[AGG_EMPTY] = TESS_TABLE_CHUNK_HEADER;
+	/* The files' fingerprint: the table's layout, from the index. */
+	layout.index = state->layout_index;
+	layout.index_len = state->layout_len;
+	layout.chunks = spill->bases;
+	layout.chunk_lens = spill->lens;
+	check(state, state->kernels->table_fingerprint(&layout, &config.fingerprint,
+												   &state->status));
+	config.parent_context = spill->context;
+	config.kernels = state->kernels;
+	config.npartitions = npartitions;
+	config.level = spill->level;
+	config.max_len = (uint64) MaxAllocHugeSize;
+	spill->file = tess_spill_create(&config);
+	state->partitions = Max(state->partitions, (uint64) npartitions);
+	return spill;
+}
+
+/* Delete a level's files and free its memory. */
+static void
+agg_level_free(AggSpill *spill)
+{
+	tess_spill_free(spill->file);
+	MemoryContextDelete(spill->context);
+	pfree(spill);
+}
+
+static void
+agg_spill_free(TessAggState *state)
+{
+	while (state->spill != NULL)
+	{
+		AggSpill   *parent = state->spill->parent;
+
+		agg_level_free(state->spill);
+		state->spill = parent;
+	}
+}
+
+/*
+ * Split a chunk of records, placed at the source slot, into the level's
+ * partitions by the kernel: a partition whose chunk fills keeps it and
+ * gets another with keep, or writes it and starts it again otherwise.
+ */
+static void
+agg_split(TessAggState *state, AggSpill *spill, void *base, Size len, bool keep)
+{
+	TessTableRef ref = {0};
+	uint32		offsets[AGG_GROUP_ROWS];
+	uint32		hashes[AGG_GROUP_ROWS];
+	Size		from = TESS_TABLE_CHUNK_HEADER;
+
+	spill->bases[AGG_SOURCE] = base;
+	spill->lens[AGG_SOURCE] = len;
+	ref.chunks = spill->bases;
+	ref.chunk_lens = spill->lens;
+	ref.nchunks = spill->npartitions + 2;
+	for (;;)
+	{
+		int			count;
+		int			full;
+
+		check(state, state->kernels->table_split(&ref, state->nkeys, state->kinds,
+												 sizeof(uint64) * (1 + state->nvalues),
+												 spill->current, spill->npartitions,
+												 spill->shift, AGG_SOURCE, &from,
+												 AGG_GROUP_ROWS, offsets, hashes,
+												 &count, &full, &state->status));
+		for (int index = 0; index < count; index++)
+			spill->parts[agg_partition(spill, hashes[index])].records++;
+		if (full >= 0)
+		{
+			AggPart    *part = &spill->parts[full];
+			int			slot = AGG_EMPTY + 1 + full;
+
+			if (spill->bases[slot] == spill->empty)
+			{
+				void	   *chunk = agg_new_chunk(state, spill);
+
+				part_push(spill, part, chunk);
+				spill->bases[slot] = chunk;
+				spill->lens[slot] = spill->chunk_len;
+			}
+			else if (keep)
+			{
+				void	   *chunk = agg_new_chunk(state, spill);
+
+				part_push(spill, part, chunk);
+				spill->bases[slot] = chunk;
+			}
+			else
+			{
+				agg_write_chunk(state, spill, full, spill->bases[slot]);
+				part->records = 0;
+				check(state, state->kernels->table_chunk_init(spill->bases[slot],
+															  spill->chunk_len,
+															  &state->status));
+			}
+		}
+		else if (count == 0)
+			break;
+	}
+	spill->bases[AGG_SOURCE] = spill->source_empty;
+	spill->lens[AGG_SOURCE] = TESS_TABLE_CHUNK_HEADER;
+}
+
+/*
+ * The table over the partitions' chunks in memory: the chunk arrays made
+ * anew, each partition appending to its last chunk, and an index for
+ * twice their records, into which every record is linked.
+ */
+static void
+agg_table_from_parts(TessAggState *state, AggSpill *spill, uint64 capacity)
+{
+	Size		payload_size = sizeof(uint64) * (1 + state->nvalues);
+	int			nchunks = 2;
+	Size		size;
+	void	   *old = state->table.index;
+
+	for (int partition = 0; partition < spill->npartitions; partition++)
+		nchunks += spill->parts[partition].nchunks;
+	if (nchunks > state->chunk_slots)
+	{
+		state->chunk_slots = Max(nchunks, state->chunk_slots * 2);
+		state->chunk_bases = repalloc(state->chunk_bases,
+									  sizeof(void *) * state->chunk_slots);
+		state->chunk_lens = repalloc(state->chunk_lens,
+									 sizeof(Size) * state->chunk_slots);
+	}
+	state->chunk_bases[AGG_SOURCE] = spill->source_empty;
+	state->chunk_lens[AGG_SOURCE] = TESS_TABLE_CHUNK_HEADER;
+	state->chunk_bases[AGG_EMPTY] = spill->empty;
+	state->chunk_lens[AGG_EMPTY] = TESS_TABLE_CHUNK_HEADER;
+	nchunks = 2;
+	state->table_bytes = 0;
+	for (int partition = 0; partition < spill->npartitions; partition++)
+	{
+		AggPart    *part = &spill->parts[partition];
+
+		spill->current[partition] = AGG_EMPTY;
+		for (int chunk = 0; chunk < part->nchunks; chunk++)
+		{
+			state->chunk_bases[nchunks] = part->chunks[chunk];
+			state->chunk_lens[nchunks] = spill->chunk_len;
+			spill->current[partition] = nchunks++;
+			state->table_bytes += spill->chunk_len;
+		}
+	}
+	state->table.chunks = state->chunk_bases;
+	state->table.chunk_lens = state->chunk_lens;
+	state->table.nchunks = nchunks;
+	capacity = first_capacity(capacity);
+	state->table.index = new_index(state, capacity, &size);
+	state->table.index_len = size;
+	check(state, state->kernels->table_create(state->table.index, size, state->nkeys,
+											  state->kinds, payload_size,
+											  capacity, &state->status));
+	for (int chunk = AGG_EMPTY + 1; chunk < nchunks; chunk++)
+	{
+		Size		from = TESS_TABLE_CHUNK_HEADER;
+
+		check(state, state->kernels->table_link(&state->table, chunk, &from, NULL,
+												NULL, &state->status));
+	}
+	if (old != NULL)
+		pfree(old);
+	state->table_bytes += size;
+	note_memory(state);
+}
+
+static bool agg_evict(TessAggState *state, Size extra);
+static uint64 agg_records(AggSpill *spill);
+
+/*
+ * The table outgrew hash_mem: the first level of partitions, for twice the
+ * groups so far or the planner's if more, and the records so far split
+ * into them.
+ */
+static void
+agg_start_spill(TessAggState *state)
+{
+	TessTableStats stats = TESS_STRUCT_INITIALIZER(TessTableStats);
+	double		bytes = state->table_bytes;
+	double		expected;
+	AggSpill   *spill;
+	int			nold = state->table.nchunks;
+	void	  **old = palloc(sizeof(void *) * Max(nold, 1));
+	Size	   *old_lens = palloc(sizeof(Size) * Max(nold, 1));
+
+	check(state, state->kernels->table_stats(&state->table, &stats, &state->status));
+	expected = bytes * 2;
+	if (stats.records > 0)
+		expected = Max(expected,
+					   bytes / stats.records * (double) state->groups_estimate);
+	spill = agg_spill_create(state, NULL, expected, 0);
+	state->spill = spill;
+	memcpy(old, state->chunk_bases, sizeof(void *) * nold);
+	memcpy(old_lens, state->chunk_lens, sizeof(Size) * nold);
+	for (int chunk = 0; chunk < nold; chunk++)
+	{
+		agg_split(state, spill, old[chunk], old_lens[chunk], true);
+		pfree(old[chunk]);
+	}
+	pfree(old);
+	pfree(old_lens);
+	/* Room for the index first: the old one goes, the new one is made last. */
+	pfree(state->table.index);
+	state->table.index = NULL;
+	(void) agg_evict(state, sizeof(uint64) * first_capacity(agg_records(spill) * 2));
+	agg_table_from_parts(state, spill, agg_records(spill) * 2);
+}
+
+/*
+ * While the table, with its files' buffers, takes more than seven eighths
+ * of hash_mem, the
+ * partition with the most bytes in memory goes to disk whole, and the
+ * index is made anew over the rest.
+ */
+static bool
+agg_evict(TessAggState *state, Size extra)
+{
+	AggSpill   *spill = state->spill;
+	/* An eighth of hash_mem is left for a batch's new chunks and index. */
+	Size		limit = get_hash_memory_limit() / 8 * 7;
+	bool		evicted = false;
+
+	while (agg_spill_memory(state) + extra > limit)
+	{
+		int			largest = -1;
+		Size		bytes = 0;
+
+		for (int partition = 0; partition < spill->npartitions; partition++)
+			if (spill->parts[partition].bytes > bytes)
+			{
+				largest = partition;
+				bytes = spill->parts[partition].bytes;
+			}
+		if (largest < 0)
+			break;
+		for (int chunk = 0; chunk < spill->parts[largest].nchunks; chunk++)
+			agg_write_chunk(state, spill, largest, spill->parts[largest].chunks[chunk]);
+		part_release(spill, &spill->parts[largest]);
+		state->evictions++;
+		evicted = true;
+	}
+	return evicted;
+}
+
+/* The records of the partitions in memory, for their index. */
+static uint64
+agg_records(AggSpill *spill)
+{
+	uint64		records = 0;
+
+	for (int partition = 0; partition < spill->npartitions; partition++)
+		records += spill->parts[partition].records;
+	return records;
+}
+
+static void
+agg_make_room(TessAggState *state)
+{
+	if (agg_evict(state, 0))
+		agg_table_from_parts(state, state->spill, agg_records(state->spill) * 2);
+}
+
+/*
+ * The rows of a batch into the groups of a table that spills: new groups
+ * go to their partitions' chunks, a partition without room getting
+ * another; a full index grows. Returns with every row resolved.
+ */
+static void
+agg_find_partitioned(TessAggState *state, TessRowMask *pending, TessRowMask *inserted)
+{
+	AggSpill   *spill = state->spill;
+	int			nrows = pending->nrows;
+	int			nwords = tess_row_mask_word_count(nrows);
+	uint64	   *found = palloc0(sizeof(uint64) * nwords);
+	bool	   *seen = palloc(sizeof(bool) * spill->npartitions);
+
+	for (;;)
+	{
+		TessTableStats stats = TESS_STRUCT_INITIALIZER(TessTableStats);
+		TessRowMask created = {nrows, found};
+		int			row = -1;
+		bool		index_full;
+
+		memset(found, 0, sizeof(uint64) * nwords);
+		check(state, state->kernels->table_find_or_insert_partitioned(&state->table,
+																	  spill->current,
+																	  spill->npartitions,
+																	  spill->shift,
+																	  state->hashes,
+																	  state->nkeys,
+																	  state->table_keys,
+																	  pending,
+																	  state->offsets,
+																	  &created,
+																	  &state->status));
+		while ((row = tess_row_mask_next(&created, row)) >= 0)
+			spill->parts[agg_partition(spill, state->hashes[row])].records++;
+		for (int word = 0; word < nwords; word++)
+			inserted->bits[word] |= found[word];
+		if (tess_row_mask_count(pending) == 0)
+			break;
+		check(state, state->kernels->table_stats(&state->table, &stats,
+												 &state->status));
+		index_full = stats.records * 2 >= stats.buckets;
+		if (index_full)
+		{
+			regrow_table(state, stats.records);
+			continue;
+		}
+		/*
+		 * A new chunk for each partition that has rows left: its chunk ran
+		 * out of room, or it had none.
+		 */
+		memset(seen, 0, sizeof(bool) * spill->npartitions);
+		row = -1;
+		while ((row = tess_row_mask_next(pending, row)) >= 0)
+		{
+			int			partition = agg_partition(spill, state->hashes[row]);
+			AggPart    *part = &spill->parts[partition];
+			int			chunk = state->table.nchunks;
+
+			if (seen[partition])
+				continue;
+			seen[partition] = true;
+			if (chunk == state->chunk_slots)
+			{
+				state->chunk_slots *= 2;
+				state->chunk_bases = repalloc(state->chunk_bases,
+											  sizeof(void *) * state->chunk_slots);
+				state->chunk_lens = repalloc(state->chunk_lens,
+											 sizeof(Size) * state->chunk_slots);
+				state->table.chunks = state->chunk_bases;
+				state->table.chunk_lens = state->chunk_lens;
+			}
+			if (chunk == TESS_TABLE_MAX_CHUNKS)
+				ereport(ERROR,
+						(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+						 errmsg("TessAgg group table cannot hold more than %d chunks",
+								TESS_TABLE_MAX_CHUNKS)));
+			state->chunk_bases[chunk] = agg_new_chunk(state, spill);
+			state->chunk_lens[chunk] = spill->chunk_len;
+			part_push(spill, part, state->chunk_bases[chunk]);
+			spill->current[partition] = chunk;
+			state->table.nchunks++;
+			state->table_bytes += spill->chunk_len;
+		}
+		note_memory(state);
+	}
+	pfree(found);
+	pfree(seen);
+}
+
+/*
+ * Merge a chunk of groups' states, placed at the source slot, into the
+ * partition's table by the kernel: a group the table lacks goes to the
+ * chunk at *dest, or to a new one of the partition's when that is full.
+ */
+static void
+agg_combine(TessAggState *state, AggSpill *spill, AggPart *part, void *base,
+			Size len, int *dest)
+{
+	Size		from = TESS_TABLE_CHUNK_HEADER;
+
+	state->chunk_bases[AGG_SOURCE] = base;
+	state->chunk_lens[AGG_SOURCE] = len;
+	for (;;)
+	{
+		int			merged;
+		int			stop;
+
+		/* A partition with nothing in memory takes a chunk for its groups. */
+		if (*dest <= AGG_EMPTY)
+			stop = TESS_TABLE_COMBINE_CHUNK_FULL;
+		else
+			check(state, state->kernels->table_combine(&state->table, AGG_SOURCE,
+													   &from, *dest, state->nvalues,
+													   state->combines, &merged,
+													   &stop, &state->status));
+		if (stop == TESS_TABLE_COMBINE_DONE)
+			break;
+		if (stop == TESS_TABLE_COMBINE_INDEX_FULL)
+		{
+			TessTableStats stats = TESS_STRUCT_INITIALIZER(TessTableStats);
+
+			check(state, state->kernels->table_stats(&state->table, &stats,
+													 &state->status));
+			regrow_table(state, stats.records);
+			continue;
+		}
+		if (state->table.nchunks == state->chunk_slots)
+		{
+			state->chunk_slots *= 2;
+			state->chunk_bases = repalloc(state->chunk_bases,
+										  sizeof(void *) * state->chunk_slots);
+			state->chunk_lens = repalloc(state->chunk_lens,
+										 sizeof(Size) * state->chunk_slots);
+			state->table.chunks = state->chunk_bases;
+			state->table.chunk_lens = state->chunk_lens;
+		}
+		*dest = state->table.nchunks++;
+		state->chunk_bases[*dest] = agg_new_chunk(state, spill);
+		state->chunk_lens[*dest] = spill->chunk_len;
+		part_push(spill, part, state->chunk_bases[*dest]);
+	}
+	state->chunk_bases[AGG_SOURCE] = spill->source_empty;
+	state->chunk_lens[AGG_SOURCE] = TESS_TABLE_CHUNK_HEADER;
+}
+
+/*
+ * The table of one partition, with an index for its records in memory and
+ * on disk: its chunks in memory linked, when they hold each group once, as
+ * those the first level found by the index do, and merged by the kernel
+ * otherwise, as a level below's split them; then its chunks read back
+ * merged in, a group the table lacks copied to its last chunk or a new one.
+ */
+static void
+agg_merge(TessAggState *state, AggSpill *spill, int partition)
+{
+	AggPart    *part = &spill->parts[partition];
+	Size		payload_size = sizeof(uint64) * (1 + state->nvalues);
+	uint64		capacity = first_capacity(part->records + part->disk_records);
+	bool		unique = spill->parent == NULL;
+	void	  **split = NULL;
+	int			nsplit = 0;
+	TessSpillReader *reader;
+	TessSpillHeader header;
+	int			nchunks = 2;
+	Size		size;
+	int			dest;
+
+	/* A level below's chunks are merged as sources, the partition's afresh. */
+	if (!unique && part->nchunks > 0)
+	{
+		nsplit = part->nchunks;
+		split = palloc(sizeof(void *) * nsplit);
+		memcpy(split, part->chunks, sizeof(void *) * nsplit);
+		part->nchunks = 0;
+		part->bytes = 0;
+	}
+
+	if (state->table.index != NULL)
+		pfree(state->table.index);
+	if (part->nchunks + 3 > state->chunk_slots)
+	{
+		state->chunk_slots = Max(part->nchunks + 3, state->chunk_slots * 2);
+		state->chunk_bases = repalloc(state->chunk_bases,
+									  sizeof(void *) * state->chunk_slots);
+		state->chunk_lens = repalloc(state->chunk_lens,
+									 sizeof(Size) * state->chunk_slots);
+	}
+	state->chunk_bases[AGG_SOURCE] = spill->source_empty;
+	state->chunk_lens[AGG_SOURCE] = TESS_TABLE_CHUNK_HEADER;
+	state->chunk_bases[AGG_EMPTY] = spill->empty;
+	state->chunk_lens[AGG_EMPTY] = TESS_TABLE_CHUNK_HEADER;
+	for (int chunk = 0; chunk < part->nchunks; chunk++)
+	{
+		state->chunk_bases[nchunks] = part->chunks[chunk];
+		state->chunk_lens[nchunks++] = spill->chunk_len;
+	}
+	state->table.chunks = state->chunk_bases;
+	state->table.chunk_lens = state->chunk_lens;
+	state->table.nchunks = nchunks;
+	state->table.index = new_index(state, capacity, &size);
+	state->table.index_len = size;
+	check(state, state->kernels->table_create(state->table.index, size, state->nkeys,
+											  state->kinds, payload_size,
+											  capacity, &state->status));
+	for (int chunk = AGG_EMPTY + 1; chunk < nchunks; chunk++)
+	{
+		Size		from = TESS_TABLE_CHUNK_HEADER;
+
+		check(state, state->kernels->table_link(&state->table, chunk, &from, NULL,
+												NULL, &state->status));
+	}
+	dest = nchunks - 1;
+	for (int chunk = 0; chunk < nsplit; chunk++)
+	{
+		agg_combine(state, spill, part, split[chunk], spill->chunk_len, &dest);
+		pfree(split[chunk]);
+	}
+	if (split != NULL)
+		pfree(split);
+	reader = tess_spill_open(spill->file, 0, partition);
+	while (reader != NULL && tess_spill_read_header(reader, &header))
+	{
+		void	   *body = MemoryContextAllocExtended(spill->block_context,
+													  Max(header.len, 8),
+													  MCXT_ALLOC_HUGE);
+
+		tess_spill_read_body(reader, body, header.len);
+		agg_combine(state, spill, part, body, header.len, &dest);
+		MemoryContextReset(spill->block_context);
+	}
+	if (reader != NULL)
+		tess_spill_close(reader);
+	tess_spill_drop(spill->file, partition);
+	state->table_bytes = size + part->bytes;
+	note_memory(state);
+}
+
+/*
+ * A partition too large to merge splits by the next bits of the hash
+ * into a level of its own: its chunks read back, then those in memory,
+ * each split into the new level's partitions, which keep a chunk each in
+ * memory and write the others. The new level is given out next.
+ */
+static void
+agg_split_level(TessAggState *state, AggSpill *spill, int partition)
+{
+	AggPart    *part = &spill->parts[partition];
+	AggSpill   *level = agg_spill_create(state, spill,
+										 (double) part->disk_bytes + part->bytes,
+										 spill->shift + pg_leftmost_one_pos32(spill->npartitions));
+	TessSpillReader *reader = tess_spill_open(spill->file, 0, partition);
+	TessSpillHeader header;
+
+	state->splits++;
+	while (reader != NULL && tess_spill_read_header(reader, &header))
+	{
+		void	   *body = MemoryContextAllocExtended(level->block_context,
+													  Max(header.len, 8),
+													  MCXT_ALLOC_HUGE);
+
+		tess_spill_read_body(reader, body, header.len);
+		agg_split(state, level, body, header.len, false);
+		MemoryContextReset(level->block_context);
+	}
+	if (reader != NULL)
+		tess_spill_close(reader);
+	for (int chunk = 0; chunk < part->nchunks; chunk++)
+		agg_split(state, level, part->chunks[chunk], spill->chunk_len, false);
+	part_release(spill, part);
+	tess_spill_drop(spill->file, partition);
+	level->done_input = true;
+	tess_spill_finish(level->file);
+	state->spill = level;
+	note_memory(state);
+}
+
+/*
+ * The next partition to give out, merged into a table: after the input,
+ * the partitions of the first level in turn, a level below given out
+ * whole where one split, and then the level above again. False once
+ * every group is out.
+ */
+static bool
+agg_advance(TessAggState *state)
+{
+	Size		limit = get_hash_memory_limit();
+
+	for (;;)
+	{
+		AggSpill   *spill = state->spill;
+		AggPart    *part;
+		Size		others = 0;
+		Size		size;
+
+		if (spill->partition >= 0 && spill->partition < spill->npartitions)
+			part_release(spill, &spill->parts[spill->partition]);
+		if (++spill->partition >= spill->npartitions)
+		{
+			if (spill->parent == NULL)
+				return false;
+			state->spill = spill->parent;
+			agg_level_free(spill);
+			continue;
+		}
+		part = &spill->parts[spill->partition];
+		if (part->records == 0 && part->disk_records == 0)
+			continue;
+		/*
+		 * What the partition takes merged, at most: its records and their
+		 * index, next to the chunks every level keeps.
+		 */
+		size = part->disk_bytes + part->bytes +
+			2 * sizeof(uint64) * (part->records + part->disk_records);
+		for (AggSpill *level = spill; level != NULL; level = level->parent)
+			for (int partition = 0; partition < level->npartitions; partition++)
+				if (level != spill || partition != spill->partition)
+					others += level->parts[partition].bytes;
+		if (part->disk_bytes > 0 && others + size > limit &&
+			spill->shift + pg_leftmost_one_pos32(spill->npartitions) + 2 <= 32)
+		{
+			agg_split_level(state, spill, spill->partition);
+			continue;
+		}
+		agg_merge(state, spill, spill->partition);
+		return true;
+	}
+}
+
+/* The input is done: the partitions are given out one by one. */
+static void
+agg_finish_input(TessAggState *state)
+{
+	AggSpill   *spill = state->spill;
+
+	spill->done_input = true;
+	spill->partition = -1;
+	tess_spill_finish(spill->file);
+	if (state->table.index != NULL)
+		pfree(state->table.index);
+	state->table.index = NULL;
+	state->table.nchunks = 0;
+	state->table_bytes = 0;
+	state->cursor = 0;
+	if (!agg_advance(state))
+		state->table.nchunks = 0;
+}
+
+static Size
+agg_spill_memory(TessAggState *state)
+{
+	Size		memory = state->table.index != NULL ? state->table.index_len : 0;
+
+	for (AggSpill *spill = state->spill; spill != NULL; spill = spill->parent)
+		memory += MemoryContextMemAllocated(spill->context, true);
+	return memory;
+}
+
 /* A computed column of the projection's wrapper, checked. */
 static void
 computed_column(TessAggState *state, TessBatch *batch, int computed,
@@ -1214,9 +2084,11 @@ group_batch(TessAggState *state, TessBatch *batch)
 		state->table_keys[key].prepared = NULL;
 	}
 	memcpy(state->pending_bits, state->valid_bits, sizeof(uint64) * nwords);
-	if (state->table.nchunks == 0)
+	if (state->spill != NULL)
+		agg_find_partitioned(state, &pending, &inserted);
+	else if (state->table.nchunks == 0)
 		add_chunk(state);
-	for (;;)
+	for (; state->spill == NULL;)
 	{
 		TessTableStats stats = TESS_STRUCT_INITIALIZER(TessTableStats);
 
@@ -1260,18 +2132,41 @@ group_batch(TessAggState *state, TessBatch *batch)
 													  0, (uint32) index,
 													  &state->status));
 	}
+	/*
+	 * Past seven eighths of hash_mem, the rest left for a batch's chunk and
+	 * index: the groups go into partitions, and the largest to disk; in
+	 * partial mode they go out instead (group_drain).
+	 */
+	if (state->spill == NULL && !state->partial &&
+		state->table_bytes > get_hash_memory_limit() / 8 * 7)
+		agg_start_spill(state);
+	if (state->spill != NULL)
+		agg_make_room(state);
 }
 
 /* Read every batch of the child into the table of groups. */
 static void
 group_drain(TessAggState *state)
 {
+	agg_spill_free(state);
 	create_table(state);
 	for (;;)
 	{
-		TessBatch  *batch = tess_input_next(state->input);
+		TessBatch  *batch;
 		int			rows;
 
+		/*
+		 * Partial mode: a table near hash_mem goes out now, as partials the
+		 * Finalize Aggregate merges, and the input goes on after it.
+		 */
+		if (state->partial && state->table_bytes > get_hash_memory_limit() / 8 * 7)
+		{
+			state->early_emits++;
+			state->drained = true;
+			state->cursor = 0;
+			return;
+		}
+		batch = tess_input_next(state->input);
 		if (batch == NULL)
 			break;
 		rows = tess_row_mask_count(&batch->rows);
@@ -1288,7 +2183,10 @@ group_drain(TessAggState *state)
 		tess_input_finish(state->input);
 	}
 	state->drained = true;
+	state->input_done = true;
 	state->cursor = 0;
+	if (state->spill != NULL)
+		agg_finish_input(state);
 }
 
 /*
@@ -1338,12 +2236,27 @@ next_groups(TessAggState *state)
 		int			count;
 		TessBatch  *batch;
 
+		/* A table that spilled has no index once every partition is out. */
+		if (state->table.index == NULL)
+			return NULL;
 		check(state, state->kernels->table_scan(&state->table,
 												&state->cursor, state->walked,
 												AGG_GROUP_ROWS, &count,
 												&state->status));
 		if (count == 0)
-			return NULL;
+		{
+			/* Partial mode: the rest of the input into a table anew. */
+			if (state->spill == NULL && !state->input_done)
+			{
+				group_drain(state);
+				continue;
+			}
+			/* The next partition of a table that spilled. */
+			if (state->spill == NULL || !agg_advance(state))
+				return NULL;
+			state->cursor = 0;
+			continue;
+		}
 		state->groups += count;
 		all = count == 64 ? UINT64_MAX : (UINT64CONST(1) << count) - 1;
 		groups = (TessRowMask) {count, &all};
@@ -1469,6 +2382,7 @@ agg_end(CustomScanState *css)
 		tess_shared_stats_end(state->stats);
 	tess_output_end(state->output);
 	ExecEndNode(state->child);
+	agg_spill_free(state);
 	if (state->table_context != NULL)
 		MemoryContextDelete(state->table_context);
 }
@@ -1497,7 +2411,9 @@ agg_rescan(CustomScanState *css)
 	state->rows = 0;
 	state->calls = 0;
 	/* GROUP BY: the table is built again from the rescanned child. */
+	agg_spill_free(state);
 	state->drained = false;
+	state->input_done = false;
 	state->published = NULL;
 	state->groups = 0;
 }
@@ -1519,6 +2435,12 @@ agg_counters(TessAggState *state, uint64 *values)
 	values[AGG_GROUPS] = state->groups;
 	values[AGG_MEMORY] = state->peak_memory;
 	values[AGG_GROWS] = state->grows;
+	values[AGG_PARTITIONS] = state->partitions;
+	values[AGG_EVICTIONS] = state->evictions;
+	values[AGG_SPILLED] = state->spilled;
+	values[AGG_DISK] = state->disk_bytes;
+	values[AGG_SPLITS] = state->splits;
+	values[AGG_EARLY] = state->early_emits;
 }
 
 /* The totals of every participant in a parallel plan, else the node's own. */
@@ -1568,11 +2490,17 @@ agg_explain(CustomScanState *css, List *ancestors, ExplainState *es)
 		ExplainPropertyInteger("Table Grows", NULL, totals[AGG_GROWS], es);
 		ExplainPropertyInteger("Memory Usage", "kB",
 							   (totals[AGG_MEMORY] + 1023) / 1024, es);
-		/* The node keeps every group in memory rather than spilling. */
-		if (totals[AGG_MEMORY] > get_hash_memory_limit())
-			ExplainPropertyInteger("Overrun", "kB",
-								   (totals[AGG_MEMORY] - get_hash_memory_limit() + 1023) / 1024,
-								   es);
+		if (totals[AGG_EARLY] > 0)
+			ExplainPropertyInteger("Early Emits", NULL, totals[AGG_EARLY], es);
+		if (totals[AGG_PARTITIONS] > 0)
+		{
+			ExplainPropertyInteger("Batches", NULL, totals[AGG_PARTITIONS], es);
+			ExplainPropertyInteger("Evictions", NULL, totals[AGG_EVICTIONS], es);
+			ExplainPropertyInteger("Spilled Chunks", NULL, totals[AGG_SPILLED], es);
+			ExplainPropertyInteger("Disk Usage", "kB", (totals[AGG_DISK] + 1023) / 1024, es);
+			if (totals[AGG_SPLITS] > 0)
+				ExplainPropertyInteger("Split Partitions", NULL, totals[AGG_SPLITS], es);
+		}
 	}
 }
 

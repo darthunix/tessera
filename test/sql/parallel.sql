@@ -141,6 +141,21 @@ SELECT plan_property($$SELECT b, sum(a) FROM parallel_t GROUP BY b$$, 'TessAgg',
 SET parallel_leader_participation = off;
 SELECT parallel_same($$SELECT b, sum(a) FROM parallel_t GROUP BY b$$);
 RESET parallel_leader_participation;
+-- Partial groups past hash_mem go out early, and the table starts anew:
+-- the Finalize Aggregate merges a group's partials, and nothing is written.
+CREATE TABLE parallel_groups AS
+SELECT g % 5000 AS k, g AS v FROM generate_series(1, 300000) AS g;
+ANALYZE parallel_groups;
+SET work_mem = '64kB';
+-- The core's sorted grouping would leave no partial hash aggregate to take.
+SET enable_sort = off;
+EXPLAIN (COSTS OFF) SELECT k, count(*), sum(v), min(v), max(v) FROM parallel_groups GROUP BY k;
+SELECT parallel_same($$SELECT md5(string_agg(q::text, ',' ORDER BY q::text)) FROM (SELECT k, count(*), sum(v), min(v), max(v) FROM parallel_groups GROUP BY k) AS q$$);
+SELECT plan_property($$SELECT k, count(*) FROM parallel_groups GROUP BY k$$, 'TessAgg', 'Early Emits')::int > 0 AS early,
+       plan_property($$SELECT k, count(*) FROM parallel_groups GROUP BY k$$, 'TessAgg', 'Disk Usage') AS disk;
+RESET enable_sort;
+RESET work_mem;
+DROP TABLE parallel_groups;
 -- An aggregate the node does not compute: the core's partial aggregate over the rows.
 EXPLAIN (COSTS OFF) SELECT count(c), count(*) FROM parallel_t WHERE a > 100;
 SELECT parallel_same($$SELECT count(c), count(*) FROM parallel_t WHERE a > 100$$);

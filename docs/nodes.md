@@ -432,11 +432,9 @@ must be made of the grouping expressions, the aggregates and constants,
 as the planner will rewrite it: a column the primary key makes
 functionally dependent is not, and the core keeps such a query. The
 templates are the core's `HashAggregate` paths, whose rows are the
-planner's estimate of the groups, and there is no path when the table of
-that many groups (a record of a header, a slot per key and a payload of a
-flags word and a word per aggregate, with the buckets) would exceed
-`hash_mem`: the node keeps every group in memory, and a table larger than
-the planner expected is kept rather than split, as for `TessHashJoin`.
+planner's estimate of the groups, and their cost counts the batches the
+core would write; the node spills where the core's would (see Spilling
+below).
 PostgreSQL puts a grouping expression whole into the child's target, so
 a key is resolved to the child's column that holds it, which the child
 computes; the plan data (`tessera.agg`, version 1) records the arguments,
@@ -492,8 +490,10 @@ returns nothing.
 
 With `GROUP BY` the keys are the projection's first computed columns and
 the table lives in a memory context of its own, its index created at the
-first execution for the planner's estimate of the groups (256 at least)
-and its records in chunks, the first of 64 kB and the others of 1 MB. Per
+first execution for the planner's estimate of the groups (256 at least,
+and at most what a quarter of `hash_mem` holds) and its records in
+chunks, the first of 64 kB and the others of an eighth of `hash_mem` up
+to 1 MB. Per
 batch the keys are hashed in key order with NULL as a key of its own
 (`TESS_NULL_KEYS_GROUP`), so rows with NULL keys form one group, and
 `tess_table_find_or_insert` gives each row the record of its group,
@@ -530,8 +530,42 @@ shows the totals.
 batch function calls (per aggregate and batch with `GROUP BY`), the
 `Computed Datums` of the keys and the arguments, by chains and row by row
 together, and with `GROUP BY` the groups, the times the table grew, its
-`Memory Usage` and `Overrun`, what of it exceeded `hash_mem` (shown only
-then), summed over the participants of a parallel plan.
+`Memory Usage`, and for a table that spilled `Batches`, the most
+partitions of a level, `Evictions`, the partitions sent to disk while
+the input was read, `Spilled Chunks` and `Disk Usage`, the chunks and
+bytes written, and `Split Partitions`, those split into a level below,
+summed over the participants of a parallel plan.
+
+### Spilling
+
+The groups spill once the table would outgrow `hash_mem` (see
+[spill.md](spill.md)). What goes to disk is not the input rows but the
+groups' records, each a group's keys and states, and a group has no
+by-reference value, so no value chunks are needed. Past seven eighths of
+`hash_mem`, the eighth left for a batch's new chunk and index, the node
+chooses a power of two of partitions by the hashes' low bits, splits
+the records so far into them (`tess_table_split`) and makes one index
+over them all; new groups go to their partitions' chunks
+(`tess_table_find_or_insert_partitioned`), a partition without room
+taking another. While the table, its files' buffers included, takes more
+than seven eighths of `hash_mem`, the partition with the most bytes in
+memory goes to disk whole, its chunks written and freed, and the index
+is made anew over the rest. Its rows go on making new records, which fold
+the rows of its hot groups in memory until the next time it goes; a
+group's states may thus lie in several records, one per time its
+partition went to disk.
+
+When the input ends, the partitions are given out in turn. A partition's
+records in memory are linked into a table of their own, each group once,
+and its chunks read back merge into it (`tess_table_combine`: counts and
+sums add, minima and maxima keep the extreme); its groups then go out as
+before. A partition whose records would not fit splits first by the next
+bits of the hash into a level of its own, all its records written again
+by partition, and the level's partitions are merged in turn, their
+chunks in memory merged as sources too, since a split does not find a
+group's other records; a level given out hands back to the one above.
+The chunks live in memory contexts of small blocks, so that a chunk
+takes a block of its own size and memory is what the chunks take.
 
 ### Tests
 
@@ -557,7 +591,11 @@ aggregates, `HAVING` over a filter, grouping without aggregates, a
 constant target, an empty input, one group, int8 keys and extremes, a
 grouping over the hash join and in a rescanned subquery, 100 000 groups
 against an estimate of 200 (the index is made anew), a sort above reading the
-groups row by row; and the core keeping grouping sets, a text key, a
+groups row by row; spilling at a `work_mem` of 1 MB, 200 000 groups of three rows
+with NULL keys and values, with the counters, every group compared by an md5 of
+them all for the four aggregates, two keys and `HAVING`, ten hot groups among
+the rare ones, 200 000 groups the planner expects 10 of (a level below), a sort
+above reading the groups row by row and a rescan with a parameter; and the core keeping grouping sets, a text key, a
 functionally dependent column and a disabled hash aggregation. The parallel
 suite (`test/sql/parallel.sql`) runs the node under a `Gather` with two
 workers: the five aggregates with and without a clause, chains and

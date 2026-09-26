@@ -498,6 +498,43 @@ SELECT parallel_same($$SELECT b, sum(a) FROM parallel_t GROUP BY b$$);
 (1 row)
 
 RESET parallel_leader_participation;
+-- Partial groups past hash_mem go out early, and the table starts anew:
+-- the Finalize Aggregate merges a group's partials, and nothing is written.
+CREATE TABLE parallel_groups AS
+SELECT g % 5000 AS k, g AS v FROM generate_series(1, 300000) AS g;
+ANALYZE parallel_groups;
+SET work_mem = '64kB';
+-- The core's sorted grouping would leave no partial hash aggregate to take.
+SET enable_sort = off;
+EXPLAIN (COSTS OFF) SELECT k, count(*), sum(v), min(v), max(v) FROM parallel_groups GROUP BY k;
+                                QUERY PLAN                                
+--------------------------------------------------------------------------
+ Finalize HashAggregate
+   Group Key: k
+   ->  Gather
+         Workers Planned: 2
+         ->  Parallel Custom Scan (TessAgg)
+               Group Key: k
+               Partial Mode: Partial
+               ->  Parallel Custom Scan (TessHeapScan) on parallel_groups
+(8 rows)
+
+SELECT parallel_same($$SELECT md5(string_agg(q::text, ',' ORDER BY q::text)) FROM (SELECT k, count(*), sum(v), min(v), max(v) FROM parallel_groups GROUP BY k) AS q$$);
+            parallel_same             
+--------------------------------------
+ {(e7471a8f08c3bade7f7219d9a0971914)}
+(1 row)
+
+SELECT plan_property($$SELECT k, count(*) FROM parallel_groups GROUP BY k$$, 'TessAgg', 'Early Emits')::int > 0 AS early,
+       plan_property($$SELECT k, count(*) FROM parallel_groups GROUP BY k$$, 'TessAgg', 'Disk Usage') AS disk;
+ early | disk 
+-------+------
+ t     | 
+(1 row)
+
+RESET enable_sort;
+RESET work_mem;
+DROP TABLE parallel_groups;
 -- An aggregate the node does not compute: the core's partial aggregate over the rows.
 EXPLAIN (COSTS OFF) SELECT count(c), count(*) FROM parallel_t WHERE a > 100;
                                 QUERY PLAN                                 

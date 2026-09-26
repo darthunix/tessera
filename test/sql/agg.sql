@@ -226,6 +226,39 @@ SELECT agg_explain($$SELECT k % 100000, sum(v) FROM agg_many GROUP BY k % 100000
 SELECT agg_same($$SELECT count(*), sum(s), min(s), max(s) FROM (SELECT k % 100000 AS g, sum(v) AS s FROM agg_many GROUP BY k % 100000) AS q$$);
 SELECT k, sum(v) FROM agg_many GROUP BY k ORDER BY sum(v) DESC, k LIMIT 3;
 DROP TABLE agg_many;
+-- Spilling, at a hash_mem of 2 MB: 200000 groups of three rows, with NULL
+-- keys and NULL values, go past it; the groups go into partitions, the
+-- largest to disk while the input is read, and each partition's groups
+-- on disk merge with those in memory. Every group is compared by an md5
+-- of them all.
+CREATE TABLE agg_spill (k int, k8 bigint, v int);
+INSERT INTO agg_spill
+SELECT CASE WHEN g % 97 = 0 THEN NULL ELSE g % 200000 END, g % 7,
+       CASE WHEN g % 11 = 0 THEN NULL ELSE g END
+FROM generate_series(1, 600000) AS g;
+ANALYZE agg_spill;
+SET work_mem = '1MB';
+-- The partitions follow the planner's estimate of the groups, a sample's:
+-- the counts of spilling are masked, and whether a partition split.
+SELECT regexp_replace(line, '(Batches|Evictions|Spilled Chunks|Disk Usage): \d+', '\1: N')
+FROM agg_explain($$SELECT k, count(*), sum(v) FROM agg_spill GROUP BY k$$) AS line
+WHERE line !~ 'Split Partitions';
+SELECT agg_same($$SELECT md5(string_agg(q::text, ',' ORDER BY q::text)) FROM (SELECT k, count(*), count(v), sum(v), min(v), max(v) FROM agg_spill GROUP BY k) AS q$$);
+-- Two keys, int4 and int8; HAVING over the merged states.
+SELECT agg_same($$SELECT md5(string_agg(q::text, ',' ORDER BY q::text)) FROM (SELECT k, k8, count(v), sum(v), max(k8) FROM agg_spill GROUP BY k, k8) AS q$$);
+SELECT agg_same($$SELECT count(*), sum(c) FROM (SELECT k, count(*) AS c FROM agg_spill GROUP BY k HAVING count(*) > 2 AND min(v) > 1000) AS q$$);
+-- Ten hot groups among the rare ones: their rows keep folding in memory.
+SELECT agg_same($$SELECT md5(string_agg(q::text, ',' ORDER BY q::text)) FROM (SELECT CASE WHEN v % 3 = 0 THEN v % 10 ELSE k END AS g, count(*), sum(v), min(v) FROM agg_spill GROUP BY 1) AS q$$);
+-- 200000 groups the planner expects 10 of: partitions split into a level below.
+CREATE FUNCTION agg_rows() RETURNS TABLE (k int, v int) LANGUAGE sql ROWS 10
+AS 'SELECT g % 200000, g FROM generate_series(1, 600000) AS g';
+SELECT agg_same($$SELECT md5(string_agg(q::text, ',' ORDER BY q::text)) FROM (SELECT k, count(*), sum(v), min(v), max(v) FROM agg_rows() GROUP BY k) AS q$$);
+-- Row by row to a sort above, and a rescan with a parameter.
+SELECT k, count(*), sum(v) FROM agg_spill GROUP BY k ORDER BY sum(v) DESC NULLS LAST, k LIMIT 3;
+SELECT agg_same($$SELECT x, (SELECT count(*) FROM (SELECT k FROM agg_spill WHERE k8 < x GROUP BY k) AS q) FROM (VALUES (1), (4)) AS v(x)$$);
+RESET work_mem;
+DROP FUNCTION agg_rows();
+DROP TABLE agg_spill;
 -- Left to the core: grouping sets, a text key, a column the primary key
 -- makes functionally dependent, and hash aggregation disabled.
 EXPLAIN (COSTS OFF) SELECT b, count(*) FROM agg_t GROUP BY GROUPING SETS ((b), ());
