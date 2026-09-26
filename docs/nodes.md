@@ -874,8 +874,13 @@ them alone; the `OUTER` phase writes every outer row before any goes
 out, those of the partitions on disk to their files and the others to
 a file the shared table answers, left and anti joins' rows without a
 pair among them. At `PROBE` each participant probes the shared table
-with those rows, leaves it, and joins the partitions on disk it takes
-whole, from every participant's files, with the code above. The
+with those rows and leaves it. A partition on disk that fits in one
+participant's `hash_mem` is then a round every participant takes part
+in (`tess_round_step`, a barrier per partition): the elected one makes
+its index in shared memory, all load its blocks from the files they
+take and link them, all probe with the outer files they take, and the
+last to leave frees it; a larger one is joined by the participant that
+takes it whole, from every participant's files, with the code above. The
 partitions' records and values carry the numbers every participant
 shares, so a participant reads another's files as its own.
 
@@ -931,8 +936,10 @@ records, and for a table that spilled `Batches`, its partitions,
 `Resident Partitions`, those kept in memory, `Spilled Chunks` and `Disk
 Usage`, the blocks and bytes written by both sides, and `Tail Chunks
 Kept`, the tails joined without being written, `Split Partitions`, the
-partitions split into a level below, and `Extra Passes`, the
-passes over outer rows past the first of a partition joined in pieces;
+partitions split into a level below, `Extra Passes`, the
+passes over outer rows past the first of a partition joined in pieces,
+and for a shared table `Partitions Joined Together`, the rounds, and
+`Partitions Joined Alone`, the partitions one participant took whole;
 `Probe Rows`, the outer
 rows probed, and `Matches`, the joined
 rows over every round, `Rows Removed by Join Filter` and `Rows Removed by
@@ -995,7 +1002,9 @@ participant's `hash_mem` together about half of the inner side): inner
 and left joins with text of both sides and a residual clause, one key of
 60000 rows the planner does not expect, semi and anti joins over the
 larger side, the workers alone, a rescan of the `Gather`, and no
-temporary file left.
+temporary file left; at 1 MB, partitions joined in rounds, with a key of
+100000 rows statistics do not show, under every join kind, a residual
+clause, the workers alone and a rescan.
 Semi, anti and left joins: `EXISTS` with and without a join clause, `IN`
 over a subquery, `NOT EXISTS` with and without one (NULL keys going
 out), a left join the planner turns into an anti join, left joins with

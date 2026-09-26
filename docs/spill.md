@@ -155,11 +155,25 @@ partitions in memory, and for a left or anti join those without a pair
 or with a NULL key, to a file the shared table answers; the core writes
 all of its outer side, this node what its filter lets through. Each
 participant then reads such files one at a time as it takes them
-(`tess_table_spill_take_file`) and probes the shared table, leaves the
-build (the last one frees the table), and joins the partitions on disk
-it takes whole (`tess_table_spill_take_alone`) from every participant's
-files, as a serial table joins its partitions, splitting or in pieces
-where needed. A participant that releases its set leaves its files for
+(`tess_table_spill_take_file`) and probes the shared table, and leaves
+the build (the last one frees the table).
+
+Then each participant goes round the partitions on disk from a start of
+its own (`tess_table_spill_start`), so that they spread. A partition
+whose blocks and index fit in one participant's `hash_mem`, as the
+elected participant of `SIZE` decides from the bytes and blocks every
+participant wrote, is a round, as the core's batches are: the
+participants that come elect one, which makes its index in shared
+memory; all load its inner files, one at a time as they take them, each
+block into a block of shared memory, a chunk of records numbered by the
+round's counter and linked at once; all probe it with its outer files,
+taken the same way, and leave without waiting, the last one freeing it.
+One that comes when the round is past loading has nothing to do there.
+A larger partition, a skewed key's, is taken whole by one participant
+(`tess_table_spill_take_alone`) and joined from every participant's
+files as a serial table joins its partitions, splitting or in pieces;
+the others meanwhile take the rounds and the other partitions, so a skew
+holds up one participant, not all. A participant that releases its set leaves its files for
 the others (`tess_spill_release`); the set deletes them when the last
 participant detaches, or at a rescan.
 

@@ -428,9 +428,10 @@ a barrier of its own and the phases of the core's batches (`ELECT`,
 makes the partition's index, all load its files, taken one at a time
 from a counter, and link them, all probe and leave without waiting, the
 last frees it. A partition too large for one participant is taken whole
-by one of them; the node takes every partition on disk that way for now
-(`tess_table_spill_take_alone`), and the rounds wait for it (plan item
-5.6, series 5в). A filter of every inner row is filled by all at once,
+by one of them (`tess_table_spill_take_alone`). A round's chunks are
+linked as they are loaded, without counting duplicates: a link reads
+only its own chunk and the buckets, so a participant sees the chunks
+others load only once the round probes. A filter of every inner row is filled by all at once,
 word by word atomically (`tess_bloom_shared_add`).
 
 `make rust-loom` runs the table's own code over a model index and model
