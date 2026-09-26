@@ -389,10 +389,16 @@ typedef struct TessKernelOps
 	/* tess_spill_unpack */
 	TessStatusCode (*spill_unpack) (const void *packed, Size len, void *chunk,
 									Size chunk_len, TessStatus *status);
+	/* tess_table_payloads */
+	TessStatusCode (*table_payloads) (const TessTableRef *table,
+									  const uint32 *offsets,
+									  const TessRowMask *rows,
+									  uint8 **payloads,
+									  TessStatus *status);
 } TessKernelOps;
 
 #define TESS_KERNEL_OPS_MIN_SIZE \
-	TESS_ABI_SIZE_INCLUDING_FIELD(TessKernelOps, spill_unpack)
+	TESS_ABI_SIZE_INCLUDING_FIELD(TessKernelOps, table_payloads)
 
 /*
  * The registry of the kernels: one table per backend, installed by the

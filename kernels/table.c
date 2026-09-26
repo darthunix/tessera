@@ -27,6 +27,7 @@ const TessKernelOps tess_kernel_ops = {
 	.table_record = tess_table_record,
 	.table_find_or_insert = tess_table_find_or_insert,
 	.table_payload = tess_table_payload,
+	.table_payloads = tess_table_payloads,
 	.table_scan = tess_table_scan,
 	.table_regrow = tess_table_regrow,
 	.table_next_in_group = tess_table_next_in_group,

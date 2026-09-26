@@ -39,7 +39,8 @@ validate_kernels(const TessKernelOps *ops)
 		ops->table_link_grouped == NULL || ops->table_probe == NULL ||
 		ops->table_next_match == NULL || ops->table_gather == NULL ||
 		ops->table_record == NULL || ops->table_find_or_insert == NULL ||
-		ops->table_payload == NULL || ops->table_scan == NULL ||
+		ops->table_payload == NULL || ops->table_payloads == NULL ||
+		ops->table_scan == NULL ||
 		ops->table_regrow == NULL || ops->table_next_in_group == NULL ||
 		ops->table_accumulate == NULL || ops->table_gather_key == NULL ||
 		ops->table_bloom_words == NULL || ops->table_bloom == NULL ||

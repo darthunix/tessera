@@ -702,6 +702,16 @@ extern TessStatusCode tess_table_payload(const TessTableRef *table,
 										 TessStatus *status);
 
 /*
+ * The payload of the record of each row of rows, at offsets[row], into
+ * payloads[row]: tess_table_payload for a batch in one call.
+ */
+extern TessStatusCode tess_table_payloads(const TessTableRef *table,
+										  const uint32 *offsets,
+										  const TessRowMask *rows,
+										  uint8 **payloads,
+										  TessStatus *status);
+
+/*
  * Visit the records from the cursor on, chunk by chunk in the order they
  * were appended, up to capacity of them: their references fill offsets,
  * count receives how many, and the cursor moves past them. The caller

@@ -477,6 +477,7 @@ typedef struct JoinSpill
 	uint64	   *payload;
 	int			payload_rows;
 	uint64	   *before_bits;
+	uint8	  **payloads;
 	TessDatumColumn *columns;
 } JoinSpill;
 
@@ -2271,6 +2272,7 @@ spill_reserve(TessHashJoinState *state)
 	{
 		pfree(spill->payload);
 		pfree(spill->before_bits);
+		pfree(spill->payloads);
 	}
 	spill->payload = MemoryContextAlloc(spill->context,
 										mul_size(sizeof(uint64) * state->capacity,
@@ -2279,6 +2281,8 @@ spill_reserve(TessHashJoinState *state)
 	spill->before_bits = MemoryContextAlloc(spill->context,
 											sizeof(uint64) *
 											tess_row_mask_word_count(state->capacity));
+	spill->payloads = MemoryContextAlloc(spill->context,
+										 sizeof(uint8 *) * state->capacity);
 	spill->payload_rows = state->capacity;
 }
 
@@ -2302,6 +2306,7 @@ split_chunk(TessHashJoinState *state, void *base, Size len, char *const *values)
 	SpillSide  *side = &spill->build;
 	uint32		offsets[JOIN_COMPACT_ROWS];
 	uint32		hashes[JOIN_COMPACT_ROWS];
+	uint8	   *payloads[JOIN_COMPACT_ROWS];
 	bool		byref = false;
 	Size		from = TESS_TABLE_CHUNK_HEADER;
 	int			source;
@@ -2341,19 +2346,21 @@ split_chunk(TessHashJoinState *state, void *base, Size len, char *const *values)
 													  hashes,
 													  &(TessRowMask) {count, &bits},
 													  &state->status));
+		/* The payloads of the records just split, in one call. */
+		if (byref && count > 0)
+			check(state, state->kernels->table_payloads(&side->ref, offsets,
+														&(TessRowMask) {count, &bits},
+														payloads, &state->status));
 		for (int index = 0; index < count; index++)
 		{
 			int			partition = spill_partition(spill, hashes[index]);
-			uint8	   *payload;
 
 			side->parts[partition].rows++;
 			if (!byref)
 				continue;
-			check(state, state->kernels->table_payload(&side->ref, offsets[index],
-													   &payload, &state->status));
 			for (int word = 0; word < side->nwords; word++)
 			{
-				uint64	   *slot = (uint64 *) payload + 1 + word;
+				uint64	   *slot = (uint64 *) payloads[index] + 1 + word;
 				char	   *value;
 
 				if (side->byvals[word] || *slot == 0)
@@ -2453,7 +2460,10 @@ side_append(TessHashJoinState *state, SpillSide *side, TessBatch *batch,
 	TessRowMask before = {pending->nrows, NULL};
 	TessDatumColumn *columns = spill->columns;
 	int			row = -1;
+	bool		byref = false;
 
+	for (int word = 0; word < side->nwords; word++)
+		byref |= !side->byvals[word];
 	spill_reserve(state);
 	before.bits = spill->before_bits;
 	while ((row = tess_row_mask_next(pending, row)) >= 0)
@@ -2491,23 +2501,21 @@ side_append(TessHashJoinState *state, SpillSide *side, TessBatch *batch,
 															  &state->status));
 		for (int word = 0; word < nwords; word++)
 			spill->before_bits[word] &= ~pending->bits[word];
+		/* The payloads of the rows just appended, in one call, where a value is copied. */
+		if (byref && tess_row_mask_count(&before) > 0)
+			check(state, state->kernels->table_payloads(&side->ref, state->offsets, &before,
+														spill->payloads, &state->status));
 		row = -1;
 		while ((row = tess_row_mask_next(&before, row)) >= 0)
 		{
 			int			partition = side_partition(side, spill, state->hashes[row]);
-			uint8	   *payload = NULL;
 
 			side->parts[partition].rows++;
 			for (int word = 0; word < side->nwords; word++)
 			{
 				if (side->byvals[word] || columns[word].isnull[row])
 					continue;
-				if (payload == NULL)
-					check(state, state->kernels->table_payload(&side->ref,
-															   state->offsets[row],
-															   &payload,
-															   &state->status));
-				((uint64 *) payload)[1 + word] =
+				((uint64 *) spill->payloads[row])[1 + word] =
 					side_store(side, partition, columns[word].values[row],
 							   side->typlens[word]);
 			}

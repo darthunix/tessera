@@ -1082,6 +1082,41 @@ pub unsafe extern "C" fn tess_table_payload(
     }
 }
 
+/// `tess_table_payloads`: the payload of the record of each selected
+/// row, to change in place: one call for a batch, where
+/// `tess_table_payload` takes one per record.
+///
+/// # Safety
+///
+/// `table` as for [`attach_mut`] during the call and until the caller
+/// is done with the pointers it receives; `rows` must point to a valid
+/// mask; `offsets` must hold an initialized offset per row and
+/// `payloads` a writable pointer per row; `status` as for every entry
+/// point.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tess_table_payloads(
+    table: *const TableRef,
+    offsets: *const u32,
+    rows: *const Mask,
+    payloads: *mut *mut u8,
+    status: *mut Status,
+) -> Code {
+    // SAFETY: the caller's contract.
+    unsafe {
+        guard(status, || {
+            let mut table = attach_mut(table)?;
+            let rows = rows.as_ref().context("a null row mask")?.view()?;
+            let nrows = rows.nrows();
+            let offsets = values(offsets, nrows, "offsets")?;
+            let payloads = slots(payloads, nrows, "payload pointers")?;
+            for row in rows.selected_indices() {
+                payloads[row] = table.payload_mut(offsets[row])?.as_mut_ptr();
+            }
+            Ok(())
+        })
+    }
+}
+
 /// `tess_table_scan`: the next records in insertion order.
 ///
 /// # Safety
