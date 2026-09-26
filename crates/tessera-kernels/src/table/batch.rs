@@ -169,7 +169,7 @@ fn append_rows<R: Region, K: KeySource + ?Sized, const N: usize, const T: usize,
 
 /// Check that every partition's chunk exists and that the partition bits
 /// lie within the hash; the mask of a partition number is returned.
-fn check_partitions<R: Region>(region: &R, partitions: &Partitions<'_>) -> Result<u32> {
+pub(super) fn check_partitions<R: Region>(region: &R, partitions: &Partitions<'_>) -> Result<u32> {
     let count = partitions.chunks.len();
     ensure!(
         count.is_power_of_two() && count <= MAX_PARTITIONS,

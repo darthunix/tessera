@@ -12,7 +12,8 @@ use tessera_core::{ColumnReader, RowMask, RowMaskView};
 
 use crate::ops::ArithmeticError;
 
-use super::batch::{Lanes, VERTICAL_MIN_ROWS, check, probe_word, shaped};
+use super::Partitions;
+use super::batch::{Lanes, VERTICAL_MIN_ROWS, check, check_partitions, probe_word, shaped};
 use super::batch::{check_record, unlinked};
 use super::header::{CHUNK_HEADER, Header, KEY_SLOT, Layout, RECORD_HEADER};
 use super::keys::{KeySource, WordKeys, slot_buffer};
@@ -68,13 +69,55 @@ pub(super) fn find_or_insert<R: Region, K: KeySource + ?Sized>(
         layout.nkeys,
         layout.tail_words(),
         resolve_rows(
-            region, layout, chunk, hashes, keys, pending, offsets, inserted
+            region, layout, chunk, None, hashes, keys, pending, offsets, inserted
+        )
+    )
+}
+
+/// As [`find_or_insert`], but a new record goes to the chunk of its
+/// hash's partition, whose one writer the caller is: a row whose
+/// partition's chunk is full stays pending while the rows after it go on,
+/// and all stop once the index holds as many records as half its buckets.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn find_or_insert_partitioned<R: Region, K: KeySource + ?Sized>(
+    region: &R,
+    layout: &Layout,
+    partitions: &Partitions<'_>,
+    hashes: &[u32],
+    keys: &K,
+    pending: &mut RowMask<'_>,
+    offsets: &mut [u32],
+    inserted: &mut RowMask<'_>,
+) -> Result<usize> {
+    let nrows = pending.as_view().nrows();
+    check(layout, keys, nrows, hashes.len(), offsets.len())?;
+    ensure!(
+        inserted.as_view().nrows() == nrows,
+        "the inserted mask has {} rows, the batch {nrows}",
+        inserted.as_view().nrows()
+    );
+    let mask = check_partitions(region, partitions)?;
+    shaped!(
+        layout.nkeys,
+        layout.tail_words(),
+        resolve_rows(
+            region,
+            layout,
+            0,
+            Some((partitions, mask)),
+            hashes,
+            keys,
+            pending,
+            offsets,
+            inserted
         )
     )
 }
 
 /// The rows of [`find_or_insert`] for a table of `N` keys and `T` words
-/// after them, 0 for either when it is not one of the specialized shapes.
+/// after them, 0 for either when it is not one of the specialized shapes;
+/// with partitions and the mask of a partition number, a new record goes
+/// to its partition's chunk instead of `chunk`.
 #[inline(never)]
 #[allow(clippy::too_many_arguments)]
 fn resolve_rows<
@@ -87,6 +130,7 @@ fn resolve_rows<
     region: &R,
     layout: &Layout,
     chunk: usize,
+    partitions: Option<(&Partitions<'_>, u32)>,
     hashes: &[u32],
     keys: &K,
     pending: &mut RowMask<'_>,
@@ -95,7 +139,10 @@ fn resolve_rows<
 ) -> Result<usize> {
     // Made here, not passed in, so that its fields stay in registers.
     let mut access = Access::new(region, layout);
-    let (mut used, mut room) = access.room(chunk)?;
+    let (mut used, mut room) = match partitions {
+        None => access.room(chunk)?,
+        Some(_) => (0, 0),
+    };
     // The index takes records up to half its buckets.
     let limit = u64::from(layout.nbuckets / 2);
     let nrows = pending.as_view().nrows();
@@ -145,11 +192,28 @@ fn resolve_rows<
                 })?;
                 offsets[row] = match found {
                     0 => {
-                        if room == 0 || access.records() >= limit {
+                        if access.records() >= limit {
                             full = true;
                             break;
                         }
-                        let place = (chunk, used);
+                        let place = match partitions {
+                            None if room == 0 => {
+                                full = true;
+                                break;
+                            }
+                            None => (chunk, used),
+                            Some((partitions, mask)) => {
+                                let target = partitions.chunks
+                                    [((hash >> partitions.shift) & mask) as usize]
+                                    as usize;
+                                let (at, space) = access.room(target)?;
+                                // The row waits for a new chunk of its partition.
+                                if space == 0 {
+                                    continue;
+                                }
+                                (target, at)
+                            }
+                        };
                         let offset = access.reference(place);
                         // SAFETY: the place lies past the used mark and
                         // within the chunk, whose writer this is; the
@@ -162,8 +226,14 @@ fn resolve_rows<
                         // SAFETY: the record was just written and is this
                         // writer's alone.
                         unsafe { access.push(offset, place, hash) };
-                        used += access.record_size();
-                        room -= 1;
+                        if partitions.is_none() {
+                            used += access.record_size();
+                            room -= 1;
+                        } else {
+                            // SAFETY: this is the chunk's writer, and the
+                            // record just written ends at the new mark.
+                            unsafe { access.set_used(place.0, place.1 + access.record_size()) };
+                        }
                         created |= 1 << bit;
                         offset
                     }
@@ -176,8 +246,10 @@ fn resolve_rows<
         pending.intersect_word(index, !done)?;
         inserted.set_word(index, created)?;
     }
-    // SAFETY: this is the chunk's writer, and `used` ends its records.
-    unsafe { access.set_used(chunk, used) };
+    if partitions.is_none() {
+        // SAFETY: this is the chunk's writer, and `used` ends its records.
+        unsafe { access.set_used(chunk, used) };
+    }
     Ok(resolved)
 }
 
@@ -523,4 +595,135 @@ where
         }
     }
     Ok(())
+}
+
+/// How an aggregate's state of a record merges into the state of the same
+/// group in another: the payload holds a word of flags, bit `i` set once
+/// aggregate `i` has a value, then a word per aggregate.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Combine {
+    /// A count: the two add, an overflow failing as the transition would.
+    Count,
+    /// A sum: the two add when both have a value, else the one that has.
+    Sum,
+    /// The least of the two values.
+    Min,
+    /// The greatest of the two values.
+    Max,
+}
+
+/// Where [`combine`] stopped.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CombineStop {
+    /// Every record of the source was merged.
+    Done,
+    /// A record of a new group needs another chunk.
+    ChunkFull,
+    /// A record of a new group needs a larger index.
+    IndexFull,
+}
+
+/// Merge the records of chunk `source` from byte `*from` on, each the
+/// states of a group, into the table: the record of the same keys takes
+/// the states in, and a group the table lacks is copied whole to chunk
+/// `chunk` and linked. `*from` moves past the records merged; the call
+/// stops where a new group finds no room in `chunk` or the index holds as
+/// many records as half its buckets. The count merged is returned. The
+/// source is none of the table's linked chunks.
+pub(super) fn combine<R: Region>(
+    region: &R,
+    layout: &Layout,
+    source: usize,
+    from: &mut usize,
+    chunk: usize,
+    combines: &[Combine],
+) -> Result<(usize, CombineStop)> {
+    ensure!(
+        combines.len() <= 64 && 8 * (1 + combines.len()) <= layout.payload_size,
+        "{} aggregates do not fit a payload of {} bytes with a word of flags",
+        combines.len(),
+        layout.payload_size
+    );
+    ensure!(
+        source != chunk,
+        "table chunk {source} is merged into itself"
+    );
+    let mut access = Access::new(region, layout);
+    let record_size = access.record_size();
+    let limit = u64::from(layout.nbuckets / 2);
+    let (mut used, mut room) = access.room(chunk)?;
+    let places = unlinked(&access, source, *from)?;
+    let mut merged = 0;
+    let mut stop = CombineStop::Done;
+    let mut words = [0u64; 65];
+    for byte in places {
+        let hash = check_record(&access, (source, byte))?;
+        // SAFETY: `check_record` accepted the record, which nothing writes.
+        let record = unsafe { access.view((source, byte)) };
+        let (null_bits, keys) = (record.null_bits(), record.keys());
+        let head = access.head(hash);
+        let same = access.find(head, hash, |other| {
+            other.null_bits() == null_bits && same_keys(other.keys(), keys)
+        })?;
+        if same == 0 {
+            if room == 0 {
+                stop = CombineStop::ChunkFull;
+                break;
+            }
+            if access.records() >= limit {
+                stop = CombineStop::IndexFull;
+                break;
+            }
+            let place = (chunk, used);
+            // SAFETY: the source record lies below its chunk's used mark,
+            // the copy past the destination's, within it as `room`
+            // counted, and the chunks differ; this is the table's writer.
+            unsafe {
+                let bytes = region.record(region.spot(source, byte), record_size);
+                let copy = region.record_mut(region.spot(chunk, used), record_size);
+                copy.copy_from_slice(bytes);
+            }
+            let offset = access.reference(place);
+            access.count(1);
+            // SAFETY: the record was just written and is this writer's.
+            unsafe { access.push(offset, place, hash) };
+            used += record_size;
+            room -= 1;
+        } else {
+            let incoming = record.payload();
+            for (index, word) in words.iter_mut().enumerate().take(1 + combines.len()) {
+                *word = read_word(incoming, 8 * index);
+            }
+            let payload = payload_at(&mut access, region, layout, same)?;
+            let mut flags = read_word(payload, 0);
+            for (index, &how) in combines.iter().enumerate() {
+                let at = 8 * (1 + index);
+                let flag = 1u64 << index;
+                let theirs = words[1 + index] as i64;
+                let ours = read_word(payload, at) as i64;
+                let next = match how {
+                    Combine::Count => ours
+                        .checked_add(theirs)
+                        .ok_or(ArithmeticError::BigintOutOfRange)?,
+                    _ if words[0] & flag == 0 => continue,
+                    _ if flags & flag == 0 => theirs,
+                    Combine::Sum => ours
+                        .checked_add(theirs)
+                        .ok_or(ArithmeticError::BigintOutOfRange)?,
+                    Combine::Min => ours.min(theirs),
+                    Combine::Max => ours.max(theirs),
+                };
+                if how != Combine::Count {
+                    flags |= flag;
+                }
+                write_word(payload, at, next as u64);
+            }
+            write_word(payload, 0, flags);
+        }
+        *from = byte + record_size;
+        merged += 1;
+    }
+    // SAFETY: this is the chunk's writer, and `used` ends its records.
+    unsafe { access.set_used(chunk, used) };
+    Ok((merged, stop))
 }

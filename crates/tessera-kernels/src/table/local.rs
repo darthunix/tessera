@@ -164,6 +164,23 @@ impl LocalTable {
         Ok(self.chunks.len() - 1)
     }
 
+    /// Add a chunk holding a copy of `words`, a chunk's words from another
+    /// table of the same layout, such as one read back from disk, and
+    /// return its number; its records are not linked.
+    pub fn add_chunk_copy(&mut self, words: &[u64]) -> Result<usize> {
+        ensure!(
+            self.chunks.len() < MAX_CHUNKS,
+            "a table has at most {MAX_CHUNKS} chunks"
+        );
+        let mut block = Block::new(words.len());
+        block.words_mut().copy_from_slice(words);
+        self.bases.push(block.base());
+        self.lens.push(block.bytes());
+        self.chunks.push(block);
+        self.linked.push(CHUNK_HEADER);
+        Ok(self.chunks.len() - 1)
+    }
+
     /// The number of chunks.
     pub fn chunks(&self) -> usize {
         self.chunks.len()

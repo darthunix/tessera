@@ -310,6 +310,23 @@ on chunks alone, without the index, as `tess_table_append` does:
   large and splits by the next bits. The copies are not linked: a
   partition gets an index when it is processed.
 
+A grouping that spills (TessAgg) keeps one index over every partition's
+chunks, since its rows must find their groups as they come, and has two
+calls of its own:
+
+- `tess_table_find_or_insert_partitioned` resolves a batch's rows to the
+  records of their keys as `tess_table_find_or_insert` does, but a new
+  group goes to the current chunk of its partition; a row whose
+  partition's chunk is full stays pending while the rows after it go on,
+  and every row stops once the records reach half the buckets.
+- `tess_table_combine` merges a chunk of groups' states read back from
+  disk into the table: the record of the same keys takes each state in
+  as the caller says per aggregate (counts and sums add, with 22003 past
+  the int8 range, a sum only where it has a value; minima and maxima keep
+  the extreme; the flags join), and a group the table lacks is copied
+  whole to a chunk the caller names and linked. It stops where a new
+  group needs another chunk or a larger index, and goes on from there.
+
 ## A Bloom filter of the keys
 
 A probe that finds no record still reads a bucket, and a record too when

@@ -381,6 +381,67 @@ extern TessStatusCode tess_table_find_or_insert(const TessTableRef *table,
 												TessRowMask *inserted,
 												TessStatus *status);
 
+/*
+ * A grouping that spills keeps its groups in partitions, as a join's
+ * table does: resolve each row of pending to the record of its keys, as
+ * tess_table_find_or_insert, but a new record goes to chunk
+ * partition_chunks[(hash >> shift) & (npartitions - 1)]; a row whose
+ * partition's chunk is full stays pending while the rows after it go on,
+ * and every row stops once the records reach half the buckets. The
+ * caller is the one writer of the table.
+ */
+extern TessStatusCode tess_table_find_or_insert_partitioned(const TessTableRef *table,
+															const uint32 *partition_chunks,
+															int npartitions,
+															uint32 shift,
+															const uint32 *hashes,
+															int nkeys,
+															const TessTableKey *keys,
+															TessRowMask *pending,
+															uint32 *offsets,
+															TessRowMask *inserted,
+															TessStatus *status);
+
+/*
+ * How a group's aggregate state merges into the state of the same group
+ * in another record. The payload is a word of flags, bit i set once
+ * aggregate i has a value, then a word per aggregate.
+ */
+typedef enum TessTableCombine
+{
+	/* Counts add; past the int8 range 22003 "bigint out of range". */
+	TESS_TABLE_COMBINE_COUNT = 1,
+	/* Sums add when both have a value, as counts do. */
+	TESS_TABLE_COMBINE_SUM = 2,
+	TESS_TABLE_COMBINE_MIN = 3,
+	TESS_TABLE_COMBINE_MAX = 4
+} TessTableCombine;
+
+/* Where tess_table_combine stopped. */
+typedef enum TessTableCombineStop
+{
+	TESS_TABLE_COMBINE_DONE = 0,
+	/* A group the table lacks needs another chunk. */
+	TESS_TABLE_COMBINE_CHUNK_FULL = 1,
+	/* A group the table lacks needs a larger index (tess_table_regrow). */
+	TESS_TABLE_COMBINE_INDEX_FULL = 2
+} TessTableCombineStop;
+
+/*
+ * Merge the records of chunk `source` from byte *from on (at first
+ * TESS_TABLE_CHUNK_HEADER), each the states of a group, a chunk a
+ * grouping wrote to disk and read back, into the table: the record of the
+ * same keys takes the states in as combines[i] says for aggregate i, and
+ * a group the table lacks is copied whole to chunk `chunk` and linked.
+ * *from moves past the records merged, *merged receives their count and
+ * *stop why the call stopped. The source is none of the linked chunks.
+ */
+extern TessStatusCode tess_table_combine(const TessTableRef *table, int source,
+										 Size *from, int chunk, int naggregates,
+										 const TessTableCombine *combines,
+										 int *merged, int *stop,
+										 TessStatus *status);
+
 /* How tess_table_accumulate folds a row into an aggregate state. */
 typedef enum TessTableAccumulate
 {

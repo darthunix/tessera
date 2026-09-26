@@ -17,6 +17,7 @@ PG_FUNCTION_INFO_V1(tessera_test_table_regrow);
 PG_FUNCTION_INFO_V1(tessera_test_table_errors);
 PG_FUNCTION_INFO_V1(tessera_test_spill_header);
 PG_FUNCTION_INFO_V1(tessera_test_table_partitions);
+PG_FUNCTION_INFO_V1(tessera_test_table_combine);
 
 #define NROWS 200
 #define NWORDS 4
@@ -1099,5 +1100,144 @@ tessera_test_table_partitions(PG_FUNCTION_ARGS)
 	free_table(table);
 	free_table(whole);
 	pfree(batch);
+	PG_RETURN_BOOL(true);
+}
+
+/* A table of one int4 key and a group's states: flags, count, sum, min, max. */
+static Table *
+make_groups(void)
+{
+	TessStatus	status = TESS_STRUCT_INITIALIZER(TessStatus);
+	Table	   *table = palloc0(sizeof(Table));
+
+	if (tess_table_size(1, one_int4, 40, 256, &table->ref.index_len, &status) != TESS_OK)
+		return NULL;
+	table->ref.index = palloc(table->ref.index_len);
+	table->ref.chunks = table->chunks;
+	table->ref.chunk_lens = table->lens;
+	if (tess_table_create(table->ref.index, table->ref.index_len, 1, one_int4, 40,
+						  256, &status) != TESS_OK)
+		return NULL;
+	return table;
+}
+
+/* Give the group of each row its states: count 1, the key as sum, min and max. */
+static bool
+set_states(Table *table, Batch *batch, const uint32 *offsets)
+{
+	TessStatus	status = TESS_STRUCT_INITIALIZER(TessStatus);
+
+	for (int row = 0; row < NROWS; row++)
+	{
+		uint8	   *payload;
+		int64		states[5] = {0b1110, 1, 0, 0, 0};
+
+		if (!has_bit(batch->valid, row))
+			continue;
+		states[2] = states[3] = states[4] = DatumGetInt32(batch->values[row]);
+		if (tess_table_payload(&table->ref, offsets[row], &payload, &status) != TESS_OK)
+			return false;
+		memcpy(payload, states, sizeof(states));
+	}
+	return true;
+}
+
+/*
+ * Groups of one table built by partitions, of another as ever; the
+ * other's chunk merged into the first: a group of both adds its counts
+ * and sums and keeps its extremes, one of the other alone comes over.
+ */
+Datum
+tessera_test_table_combine(PG_FUNCTION_ARGS)
+{
+	static const TessTableCombine combines[4] = {
+		TESS_TABLE_COMBINE_COUNT, TESS_TABLE_COMBINE_SUM,
+		TESS_TABLE_COMBINE_MIN, TESS_TABLE_COMBINE_MAX
+	};
+	TessStatus	status = TESS_STRUCT_INITIALIZER(TessStatus);
+	Batch	   *ours = palloc0(sizeof(Batch));
+	Batch	   *theirs = palloc0(sizeof(Batch));
+	Table	   *table = make_groups();
+	Table	   *other = make_groups();
+	uint64		pending_words[NWORDS];
+	uint64		inserted_words[NWORDS] = {0};
+	uint32		offsets[NROWS];
+	uint32		chunks[2];
+	TessRowMask pending = {NROWS, pending_words};
+	TessRowMask inserted = {NROWS, inserted_words};
+	Size		from = TESS_TABLE_CHUNK_HEADER;
+	int			merged;
+	int			stop;
+	int			source;
+
+	/*
+	 * Keys -25..24 here, -20..29 there, a fifth of them only in NULL rows:
+	 * 40 groups on each side, 36 of both.
+	 */
+	if (table == NULL || other == NULL ||
+		!prepare(ours, TESS_NULL_KEYS_REJECT, 0, false) ||
+		!prepare(theirs, TESS_NULL_KEYS_REJECT, 5, false))
+		PG_RETURN_BOOL(false);
+	for (int partition = 0; partition < 2; partition++)
+	{
+		if (!add_chunk(table, CHUNK_LEN * 2))
+			PG_RETURN_BOOL(false);
+		chunks[partition] = table->ref.nchunks - 1;
+	}
+	memcpy(pending_words, ours->valid, sizeof(pending_words));
+	if (tess_table_find_or_insert_partitioned(&table->ref, chunks, 2, 0, ours->hashes, 1,
+											  &ours->key, &pending, offsets, &inserted,
+											  &status) != TESS_OK ||
+		count_bits(pending_words) != 0 || count_bits(inserted_words) != 40 ||
+		!set_states(table, ours, offsets))
+		PG_RETURN_BOOL(false);
+	/* Every group lies in the chunk of its hash's partition. */
+	for (int row = 0; row < NROWS; row++)
+		if (has_bit(ours->valid, row) &&
+			(int) (offsets[row] >> 17) != (int) chunks[ours->hashes[row] & 1])
+			PG_RETURN_BOOL(false);
+	if (!add_chunk(other, CHUNK_LEN * 2))
+		PG_RETURN_BOOL(false);
+	memcpy(pending_words, theirs->valid, sizeof(pending_words));
+	if (tess_table_find_or_insert(&other->ref, 0, theirs->hashes, 1, &theirs->key,
+								  &pending, offsets, &inserted, &status) != TESS_OK ||
+		!set_states(other, theirs, offsets))
+		PG_RETURN_BOOL(false);
+	/* Their chunk, as read back from disk, joins ours and merges. */
+	source = table->ref.nchunks;
+	table->chunks[source] = other->chunks[0];
+	table->lens[source] = other->lens[0];
+	table->ref.nchunks++;
+	if (tess_table_combine(&table->ref, source, &from, chunks[1], 4, combines, &merged,
+						   &stop, &status) != TESS_OK ||
+		stop != TESS_TABLE_COMBINE_DONE || merged != 40)
+		PG_RETURN_BOOL(false);
+	if (tess_table_combine(&table->ref, source, &from, source, 4, combines, &merged,
+						   &stop, &status) != TESS_ERROR_INVALID_ARGUMENT)
+		PG_RETURN_BOOL(false);
+	/* Look their keys up: counts 2 for the 36 groups of both, 1 for theirs alone. */
+	memcpy(pending_words, theirs->valid, sizeof(pending_words));
+	if (tess_table_find_or_insert(&table->ref, chunks[1], theirs->hashes, 1, &theirs->key,
+								  &pending, offsets, &inserted, &status) != TESS_OK ||
+		count_bits(inserted_words) != 0)
+		PG_RETURN_BOOL(false);
+	for (int row = 0; row < NROWS; row++)
+	{
+		TessTableRecord record = TESS_STRUCT_INITIALIZER(TessTableRecord);
+		int32		key = DatumGetInt32(theirs->values[row]);
+		int64		states[5];
+
+		if (!has_bit(theirs->valid, row))
+			continue;
+		if (tess_table_record(&table->ref, offsets[row], &record, &status) != TESS_OK)
+			PG_RETURN_BOOL(false);
+		memcpy(states, record.payload, sizeof(states));
+		if (states[0] != 0b1110 || states[3] != key || states[4] != key ||
+			states[1] != (key < 25 ? 2 : 1) || states[2] != (key < 25 ? 2 * key : key))
+			PG_RETURN_BOOL(false);
+	}
+	table->ref.nchunks--;
+	free_table(table);
+	free_table(other);
 	PG_RETURN_BOOL(true);
 }

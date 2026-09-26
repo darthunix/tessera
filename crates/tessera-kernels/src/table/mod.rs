@@ -101,7 +101,7 @@ use core::ops::Deref;
 use anyhow::{Result, ensure};
 use tessera_core::{ColumnReader, RowMask, RowMaskView};
 
-pub use exclusive::{Cursor, Fold, Slot};
+pub use exclusive::{Combine, CombineStop, Cursor, Fold, Slot};
 pub use header::{
     CHUNK_HEADER, FORMAT_VERSION, HEADER_SIZE, KeyKind, MAX_CHUNK_LEN, MAX_CHUNKS, MAX_KEYS,
     TableConfig, UNIT_BITS, VERSION_OFFSET, index_size, record_bytes,
@@ -676,6 +676,56 @@ impl<'a> TableMut<'a> {
         )
     }
 
+    /// Give each row of `pending` the record of its keys, as
+    /// [`TableMut::find_or_insert`] does, but a new record goes to the chunk
+    /// of its hash's partition: a row whose partition's chunk is full stays
+    /// pending while the rows after it go on, and all stop once the records
+    /// reach half the buckets. For a grouping that spills.
+    #[allow(clippy::too_many_arguments)]
+    pub fn find_or_insert_partitioned<K: KeySource + ?Sized>(
+        &mut self,
+        partitions: &Partitions<'_>,
+        hashes: &[u32],
+        keys: &K,
+        pending: &mut RowMask<'_>,
+        offsets: &mut [u32],
+        inserted: &mut RowMask<'_>,
+    ) -> Result<usize> {
+        exclusive::find_or_insert_partitioned(
+            &self.0.region,
+            &self.0.layout,
+            partitions,
+            hashes,
+            keys,
+            pending,
+            offsets,
+            inserted,
+        )
+    }
+
+    /// Merge the records of chunk `source` from byte `*from` on, each a
+    /// group's states as [`Combine`] says per aggregate after a word of
+    /// flags, into the records of the same keys, copying a group the table
+    /// lacks to chunk `chunk`; `*from` moves past those merged, and the
+    /// call stops where a new group needs another chunk or a larger index.
+    /// For a grouping that spilled, reading a partition back.
+    pub fn combine(
+        &mut self,
+        source: usize,
+        from: &mut usize,
+        chunk: usize,
+        combines: &[Combine],
+    ) -> Result<(usize, CombineStop)> {
+        exclusive::combine(
+            &self.0.region,
+            &self.0.layout,
+            source,
+            from,
+            chunk,
+            combines,
+        )
+    }
+
     /// Link the records of chunk `chunk` from byte `*from` on, as
     /// [`Table::link`] does, but each right after a record with the same
     /// keys when the table holds one, so that a key's records lie next to
@@ -1121,6 +1171,229 @@ mod tests {
             &mut [0; 4],
         )
         .unwrap_err();
+        assert!(error.to_string().contains("into itself"), "{error}");
+    }
+
+    /// Keys and their hashes as a batch's key column.
+    fn key_batch(keys: &[i32]) -> (Vec<u32>, Vec<u64>) {
+        let hashes = keys.iter().map(|&key| murmurhash32(key as u32)).collect();
+        let mut words = vec![0; keys.len().div_ceil(64)];
+        for row in 0..keys.len() {
+            words[row / 64] |= 1 << (row % 64);
+        }
+        (hashes, words)
+    }
+
+    #[test]
+    fn groups_go_to_the_chunks_of_their_partitions() {
+        let config = TableConfig {
+            keys: &[KeyKind::Int32],
+            payload_size: 8,
+        };
+        // Records of 32 bytes, 8 to a chunk: the partitions fill.
+        let mut table = LocalTable::new(&config, 1024, CHUNK_HEADER + 8 * 32).unwrap();
+        let mut current: Vec<u32> = (0..4).map(|_| table.add_chunk().unwrap() as u32).collect();
+        let mut owner: Vec<u32> = (0..4).collect();
+        let mut first = std::collections::HashMap::new();
+        for batch in 0..3 {
+            let keys: Vec<i32> = (0..100).map(|row| (batch * 100 + row) % 97).collect();
+            let column = [ColumnView::try_new(&keys, None).unwrap()];
+            let (hashes, all) = key_batch(&keys);
+            let mut pending_words = all.clone();
+            let mut offsets = vec![0; keys.len()];
+            loop {
+                let mut inserted_words = vec![0; all.len()];
+                let mut pending = RowMask::try_new(keys.len(), &mut pending_words).unwrap();
+                let mut inserted = RowMask::try_new(keys.len(), &mut inserted_words).unwrap();
+                table
+                    .table_mut()
+                    .unwrap()
+                    .find_or_insert_partitioned(
+                        &Partitions {
+                            shift: 3,
+                            chunks: &current,
+                        },
+                        &hashes,
+                        &column[..],
+                        &mut pending,
+                        &mut offsets,
+                        &mut inserted,
+                    )
+                    .unwrap();
+                if pending_words.iter().all(|&word| word == 0) {
+                    break;
+                }
+                let mut full = [false; 4];
+                for row in 0..keys.len() {
+                    if pending_words[row / 64] >> (row % 64) & 1 == 1 {
+                        full[((hashes[row] >> 3) & 3) as usize] = true;
+                    }
+                }
+                for partition in 0..4 {
+                    if full[partition] {
+                        current[partition] = table.add_chunk().unwrap() as u32;
+                        owner.push(partition as u32);
+                    }
+                }
+            }
+            let reader = table.table().unwrap();
+            for (row, &key) in keys.iter().enumerate() {
+                let record = reader.record(offsets[row]).unwrap();
+                assert_eq!(record.keys[0], i64::from(key));
+                assert_eq!(
+                    owner[(offsets[row] >> UNIT_BITS) as usize],
+                    (hashes[row] >> 3) & 3,
+                    "a group outside its partition"
+                );
+                assert_eq!(*first.entry(key).or_insert(offsets[row]), offsets[row]);
+            }
+        }
+        assert_eq!(table.table().unwrap().stats().records, 97);
+    }
+
+    /// The states of a group: flags, count, sum, min, max.
+    fn states(table: &LocalTable, offset: u32) -> [i64; 5] {
+        let reader = table.table().unwrap();
+        let record = reader.record(offset).unwrap();
+        let mut out = [0; 5];
+        for (index, word) in out.iter_mut().enumerate() {
+            *word =
+                i64::from_ne_bytes(record.payload[8 * index..8 * index + 8].try_into().unwrap());
+        }
+        out
+    }
+
+    /// A table of the keys, each with the states `of` gives it.
+    fn grouped(
+        keys: &[i32],
+        of: impl Fn(i32) -> [i64; 5],
+        capacity: u64,
+    ) -> (LocalTable, Vec<u32>) {
+        let config = TableConfig {
+            keys: &[KeyKind::Int32],
+            payload_size: 40,
+        };
+        let mut table = LocalTable::new(&config, capacity, CHUNK_HEADER + 16 * 56).unwrap();
+        let column = [ColumnView::try_new(keys, None).unwrap()];
+        let (hashes, mut pending_words) = key_batch(keys);
+        let mut inserted_words = vec![0; pending_words.len()];
+        let mut offsets = vec![0; keys.len()];
+        table
+            .find_or_insert(
+                &hashes,
+                &column[..],
+                &mut RowMask::try_new(keys.len(), &mut pending_words).unwrap(),
+                &mut offsets,
+                &mut RowMask::try_new(keys.len(), &mut inserted_words).unwrap(),
+            )
+            .unwrap();
+        for (row, &key) in keys.iter().enumerate() {
+            let mut writer = table.table_mut().unwrap();
+            let payload = writer.payload_mut(offsets[row]).unwrap();
+            for (index, word) in of(key).iter().enumerate() {
+                payload[8 * index..8 * index + 8].copy_from_slice(&word.to_ne_bytes());
+            }
+        }
+        (table, offsets)
+    }
+
+    const COMBINES: [Combine; 4] = [Combine::Count, Combine::Sum, Combine::Min, Combine::Max];
+
+    /// Merge every chunk of `from` into `into`, adding chunks and growing
+    /// its index as the kernel asks.
+    fn merge(into: &mut LocalTable, from: &mut LocalTable) -> Result<()> {
+        let mut chunk = into.chunks() - 1;
+        for source_chunk in 0..from.chunks() {
+            let words = from.chunk_words(source_chunk).to_vec();
+            let source = into.add_chunk_copy(&words)?;
+            let mut at = CHUNK_HEADER;
+            loop {
+                let (_, stop) = into
+                    .table_mut()?
+                    .combine(source, &mut at, chunk, &COMBINES)?;
+                match stop {
+                    CombineStop::Done => break,
+                    CombineStop::ChunkFull => chunk = into.add_chunk()?,
+                    CombineStop::IndexFull => {
+                        let records = into.table()?.stats().records;
+                        into.regrow(records * 2)?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn states_of_a_group_merge() {
+        // Some groups on both sides, with and without values of their own.
+        let ours = |key: i32| {
+            let key = i64::from(key);
+            let flags = if key % 5 == 0 { 0 } else { 0b1110 };
+            [flags, key, key * 10, key, key]
+        };
+        let theirs = |key: i32| {
+            let key = i64::from(key);
+            let flags = if key % 3 == 0 { 0 } else { 0b1110 };
+            [flags, 1, key, key - 100, key + 100]
+        };
+        let (mut into, _) = grouped(&(0..50).collect::<Vec<_>>(), ours, 64);
+        let (mut from, _) = grouped(&(25..100).collect::<Vec<_>>(), theirs, 256);
+        merge(&mut into, &mut from).unwrap();
+        let keys: Vec<i32> = (0..100).collect();
+        let column = [ColumnView::try_new(&keys, None).unwrap()];
+        let (hashes, mut pending_words) = key_batch(&keys);
+        let mut inserted_words = vec![0; pending_words.len()];
+        let mut offsets = vec![0; keys.len()];
+        into.find_or_insert(
+            &hashes,
+            &column[..],
+            &mut RowMask::try_new(keys.len(), &mut pending_words).unwrap(),
+            &mut offsets,
+            &mut RowMask::try_new(keys.len(), &mut inserted_words).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            inserted_words.iter().all(|&word| word == 0),
+            "a group was lost"
+        );
+        for &key in &keys {
+            let (a, b) = (ours(key), theirs(key));
+            let (in_a, in_b) = (key < 50, key >= 25);
+            let expected = match (in_a, in_b) {
+                (true, false) => a,
+                (false, true) => b,
+                _ => {
+                    let mut merged = [a[0] | b[0], a[1] + b[1], a[2], a[3], a[4]];
+                    let (fa, fb) = (a[0] != 0, b[0] != 0);
+                    if fa && fb {
+                        merged[2] = a[2] + b[2];
+                        merged[3] = a[3].min(b[3]);
+                        merged[4] = a[4].max(b[4]);
+                    } else if fb {
+                        merged[2..].copy_from_slice(&b[2..]);
+                    }
+                    merged
+                }
+            };
+            assert_eq!(states(&into, offsets[key as usize]), expected, "key {key}");
+        }
+    }
+
+    #[test]
+    fn a_merged_count_past_the_int8_range_fails() {
+        let (mut into, _) = grouped(&[7], |_| [0, i64::MAX, 0, 0, 0], 64);
+        let (mut from, _) = grouped(&[7], |_| [0, 1, 0, 0, 0], 64);
+        let error = merge(&mut into, &mut from).unwrap_err();
+        assert!(error.to_string().contains("bigint out of range"), "{error}");
+        let (mut table, _) = grouped(&[7], |_| [0; 5], 64);
+        let chunk = table.chunks() - 1;
+        let mut at = CHUNK_HEADER;
+        let error = table
+            .table_mut()
+            .unwrap()
+            .combine(chunk, &mut at, chunk, &COMBINES)
+            .unwrap_err();
         assert!(error.to_string().contains("into itself"), "{error}");
     }
 

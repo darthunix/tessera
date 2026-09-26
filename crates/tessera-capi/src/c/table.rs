@@ -13,8 +13,9 @@ use std::slice;
 use anyhow::{Context, Result, bail, ensure};
 use tessera_core::ColumnReader;
 use tessera_kernels::table::{
-    Chunks, Cursor, FORMAT_VERSION, Fold, HEADER_SIZE, KeyKind, KeySource, MAX_KEYS, Partitions,
-    Slot, Table, TableConfig, TableMut, VERSION_OFFSET, append_partitioned_to, append_to,
+    Chunks, Combine, CombineStop, Cursor, FORMAT_VERSION, Fold, HEADER_SIZE, KeyKind, KeySource,
+    MAX_KEYS, Partitions, Slot, Table, TableConfig, TableMut, VERSION_OFFSET,
+    append_partitioned_to, append_to,
     bloom::SharedFilter,
     index_size, init_chunk, normalize_word,
     phases::{Participant, SharedCounters},
@@ -950,6 +951,108 @@ pub unsafe extern "C" fn tess_table_find_or_insert(
                     &mut inserted,
                 )
                 .map(drop)
+        })
+    }
+}
+
+/// `tess_table_find_or_insert_partitioned`: resolve each pending row to
+/// the record of its keys, a new one going to its partition's chunk.
+///
+/// # Safety
+///
+/// As for [`tess_table_find_or_insert`], the caller being the one writer
+/// of every partition's chunk; `partition_chunks` as for [`partitions`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tess_table_find_or_insert_partitioned(
+    table: *const TableRef,
+    partition_chunks: *const u32,
+    npartitions: c_int,
+    shift: u32,
+    hashes: *const u32,
+    nkeys: c_int,
+    keys: *const TableKey,
+    pending: *mut Mask,
+    offsets: *mut u32,
+    inserted: *mut Mask,
+    status: *mut Status,
+) -> Code {
+    // SAFETY: the caller's contract.
+    unsafe {
+        guard(status, || {
+            let mut table = attach_mut(table)?;
+            let partitions = partitions(partition_chunks, npartitions, shift)?;
+            let mut decoded = TableKeys::empty();
+            table_keys(nkeys, keys, &mut decoded)?;
+            let mut pending = pending.as_mut().context("a null pending mask")?.mask()?;
+            let mut inserted = inserted.as_mut().context("a null inserted mask")?.mask()?;
+            let nrows = pending.as_view().nrows();
+            let hashes = values(hashes, nrows, "hashes")?;
+            let offsets = slots(offsets, nrows, "offsets")?;
+            table
+                .find_or_insert_partitioned(
+                    &partitions,
+                    hashes,
+                    &decoded,
+                    &mut pending,
+                    offsets,
+                    &mut inserted,
+                )
+                .map(drop)
+        })
+    }
+}
+
+/// `tess_table_combine`: merge the groups' states of a chunk into the
+/// table.
+///
+/// # Safety
+///
+/// `table` as for [`attach_mut`] during the call; `combines` must point to
+/// `naggregates` codes; `from`, `merged` and `stop` must be writable;
+/// `status` as for every entry point.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tess_table_combine(
+    table: *const TableRef,
+    source: c_int,
+    from: *mut usize,
+    chunk: c_int,
+    naggregates: c_int,
+    combines: *const c_uint,
+    merged: *mut c_int,
+    stop: *mut c_int,
+    status: *mut Status,
+) -> Code {
+    // SAFETY: the caller's contract.
+    unsafe {
+        guard(status, || {
+            let mut table = attach_mut(table)?;
+            let source = usize::try_from(source).context("a negative chunk")?;
+            let chunk = usize::try_from(chunk).context("a negative chunk")?;
+            let count = usize::try_from(naggregates).context("a negative aggregate count")?;
+            ensure!(
+                count <= 64,
+                "{count} aggregates are more than a word of flags holds"
+            );
+            let codes = values(combines, count, "combines")?;
+            let mut decoded = [Combine::Count; 64];
+            for (slot, &code) in decoded.iter_mut().zip(codes) {
+                *slot = match code {
+                    1 => Combine::Count,
+                    2 => Combine::Sum,
+                    3 => Combine::Min,
+                    4 => Combine::Max,
+                    _ => bail!("unknown combine {code}"),
+                };
+            }
+            let from = from.as_mut().context("a null from")?;
+            let (count_merged, stopped) = table.combine(source, from, chunk, &decoded[..count])?;
+            *merged.as_mut().context("a null merged count")? = count_merged as c_int;
+            *stop.as_mut().context("a null stop")? = match stopped {
+                CombineStop::Done => 0,
+                CombineStop::ChunkFull => 1,
+                CombineStop::IndexFull => 2,
+            };
+            Ok(())
         })
     }
 }

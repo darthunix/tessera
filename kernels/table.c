@@ -52,4 +52,6 @@ const TessKernelOps tess_kernel_ops = {
 	.table_append_partitioned = tess_table_append_partitioned,
 	.table_split = tess_table_split,
 	.bloom_add = tess_bloom_add,
+	.table_find_or_insert_partitioned = tess_table_find_or_insert_partitioned,
+	.table_combine = tess_table_combine,
 };
