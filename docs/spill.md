@@ -232,9 +232,18 @@ level merges its chunks in memory as it merges those from disk. Grouping
 20 M rows into 1 M groups at a `work_mem` of 4 MB, the estimate took the
 files from 447 MB to 211 MB (the core writes 446 MB).
 
-**Partial mode.** Under a `Gather` the node writes nothing: past seven
-eighths of `hash_mem` it sends its groups up as partials, which the
-core's Finalize Aggregate merges, and starts its table anew.
+**Partial mode.** Under a `Gather`, past seven eighths of `hash_mem`,
+the node sends its groups up as partials, which the core's Finalize
+Aggregate merges, and starts its table anew, when that folds: a table of
+fewer groups than half the rows read since it started. Groups spread
+over the input fold nothing before the table fills, a group per row
+read, and sending them up would hand the Finalize Aggregate every row
+(1 M groups of 20 M rows at a `work_mem` of 4 MB: 6.15 M partials of
+6.7 M rows per participant, and the core's Finalize wrote 0.59 GB). Then
+the node spills from then on, as a serial one, and gives its groups out
+as partials once the input is done, as the core's partial hash
+aggregate does: that grouping ran in 1.03 s instead of 2.04 (the core
+1.35–1.51).
 
 **Memory.** The first index takes at most a quarter of `hash_mem`, a
 chunk an eighth; the node acts at seven eighths, the rest left for a
