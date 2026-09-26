@@ -1290,6 +1290,13 @@ typedef struct AggSpill
 	/* The input is read; the partition being given out, -1 before any. */
 	bool		done_input;
 	int			partition;
+	/*
+	 * Giving out: the partitions wholly in memory first, which merge with
+	 * nothing and free their memory, then those with records on disk (pass
+	 * 1); whether the current partition was given out, to free it next.
+	 */
+	int			pass;
+	bool		given;
 	/* The empty chunks of the two first slots. */
 	uint64		source_empty[1];
 	uint64		empty[1];
@@ -1647,10 +1654,12 @@ agg_start_spill(TessAggState *state)
 }
 
 /*
- * While the table, with its files' buffers, takes more than seven eighths
- * of hash_mem, the
- * partition with the most bytes in memory goes to disk whole, and the
- * index is made anew over the rest.
+ * Once the table, with its files' buffers, takes more than seven eighths
+ * of hash_mem, the partition with the most bytes in memory goes to disk
+ * whole, and the next, until the table takes half of hash_mem; the index
+ * is then made anew over the rest. Evicting down to the limit only made
+ * the index anew after every partition: 5 M groups of a row each at a
+ * work_mem of 4 MB made it 3598 times.
  */
 static bool
 agg_evict(TessAggState *state, Size extra)
@@ -1658,9 +1667,12 @@ agg_evict(TessAggState *state, Size extra)
 	AggSpill   *spill = state->spill;
 	/* An eighth of hash_mem is left for a batch's new chunks and index. */
 	Size		limit = get_hash_memory_limit() / 8 * 7;
+	Size		target = get_hash_memory_limit() / 2;
 	bool		evicted = false;
 
-	while (agg_spill_memory(state) + extra > limit)
+	if (agg_spill_memory(state) + extra <= limit)
+		return false;
+	while (agg_spill_memory(state) + extra > target)
 	{
 		int			largest = -1;
 		Size		bytes = 0;
@@ -1696,7 +1708,18 @@ agg_records(AggSpill *spill)
 static void
 agg_make_room(TessAggState *state)
 {
-	if (agg_evict(state, 0))
+	TessTableStats stats = TESS_STRUCT_INITIALIZER(TessTableStats);
+	Size		extra = 0;
+
+	/*
+	 * An index a batch could fill grows by a new one twice its size next
+	 * to it: counted now, so that the partitions go to disk before the
+	 * table outgrows hash_mem in the middle of a batch.
+	 */
+	check(state, state->kernels->table_stats(&state->table, &stats, &state->status));
+	if ((stats.records + state->capacity) * 2 >= stats.buckets)
+		extra = 2 * state->table.index_len;
+	if (agg_evict(state, extra))
 		agg_table_from_parts(state, state->spill, agg_records(state->spill) * 2);
 }
 
@@ -1957,6 +1980,28 @@ agg_merge(TessAggState *state, AggSpill *spill, int partition)
 }
 
 /*
+ * Before a level's partitions are given out: a partition with records on
+ * disk writes its chunks in memory too, since it merges from disk anyway;
+ * kept, they would narrow the room every other partition merges in, and
+ * a partition that does not fit splits, writing all its records again.
+ * Partitions wholly in memory stay.
+ */
+static void
+agg_flush_spilled(TessAggState *state, AggSpill *spill)
+{
+	for (int partition = 0; partition < spill->npartitions; partition++)
+	{
+		AggPart    *part = &spill->parts[partition];
+
+		if (part->disk_records == 0 || part->nchunks == 0)
+			continue;
+		for (int chunk = 0; chunk < part->nchunks; chunk++)
+			agg_write_chunk(state, spill, partition, part->chunks[chunk]);
+		part_release(spill, part);
+	}
+}
+
+/*
  * A partition too large to merge splits by the next bits of the hash
  * into a level of its own: its chunks read back, then those in memory,
  * each split into the new level's partitions, which keep a chunk each in
@@ -1990,6 +2035,7 @@ agg_split_level(TessAggState *state, AggSpill *spill, int partition)
 	part_release(spill, part);
 	tess_spill_drop(spill->file, partition);
 	level->done_input = true;
+	agg_flush_spilled(state, level);
 	tess_spill_finish(level->file);
 	state->spill = level;
 	note_memory(state);
@@ -1997,9 +2043,10 @@ agg_split_level(TessAggState *state, AggSpill *spill, int partition)
 
 /*
  * The next partition to give out, merged into a table: after the input,
- * the partitions of the first level in turn, a level below given out
- * whole where one split, and then the level above again. False once
- * every group is out.
+ * the partitions of the first level in turn, those wholly in memory
+ * first, so that a partition read back from disk merges with the most
+ * room; a level below given out whole where one split, and then the level
+ * above again. False once every group is out.
  */
 static bool
 agg_advance(TessAggState *state)
@@ -2013,10 +2060,17 @@ agg_advance(TessAggState *state)
 		Size		others = 0;
 		Size		size;
 
-		if (spill->partition >= 0 && spill->partition < spill->npartitions)
+		if (spill->given)
 			part_release(spill, &spill->parts[spill->partition]);
+		spill->given = false;
 		if (++spill->partition >= spill->npartitions)
 		{
+			if (spill->pass == 0)
+			{
+				spill->pass = 1;
+				spill->partition = -1;
+				continue;
+			}
 			if (spill->parent == NULL)
 				return false;
 			state->spill = spill->parent;
@@ -2025,6 +2079,8 @@ agg_advance(TessAggState *state)
 		}
 		part = &spill->parts[spill->partition];
 		if (part->records == 0 && part->disk_records == 0)
+			continue;
+		if (spill->pass == 0 && part->disk_records > 0)
 			continue;
 		/*
 		 * What the partition takes merged: a record per group and its
@@ -2045,6 +2101,7 @@ agg_advance(TessAggState *state)
 			continue;
 		}
 		agg_merge(state, spill, spill->partition);
+		spill->given = true;
 		return true;
 	}
 }
@@ -2057,6 +2114,7 @@ agg_finish_input(TessAggState *state)
 
 	spill->done_input = true;
 	spill->partition = -1;
+	agg_flush_spilled(state, spill);
 	tess_spill_finish(spill->file);
 	if (state->table.index != NULL)
 		pfree(state->table.index);

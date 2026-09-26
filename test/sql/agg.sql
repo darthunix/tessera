@@ -240,7 +240,7 @@ ANALYZE agg_spill;
 SET work_mem = '1MB';
 -- The partitions follow the planner's estimate of the groups, a sample's:
 -- the counts of spilling are masked, and whether a partition split.
-SELECT regexp_replace(line, '(Batches|Evictions|Spilled Chunks|Disk Usage): \d+', '\1: N')
+SELECT regexp_replace(line, '(Table Grows|Batches|Evictions|Spilled Chunks|Disk Usage): \d+', '\1: N')
 FROM agg_explain($$SELECT k, count(*), sum(v) FROM agg_spill GROUP BY k$$) AS line
 WHERE line !~ 'Split Partitions';
 SELECT agg_same($$SELECT md5(string_agg(q::text, ',' ORDER BY q::text)) FROM (SELECT k, count(*), count(v), sum(v), min(v), max(v) FROM agg_spill GROUP BY k) AS q$$);

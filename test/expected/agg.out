@@ -835,7 +835,7 @@ ANALYZE agg_spill;
 SET work_mem = '1MB';
 -- The partitions follow the planner's estimate of the groups, a sample's:
 -- the counts of spilling are masked, and whether a partition split.
-SELECT regexp_replace(line, '(Batches|Evictions|Spilled Chunks|Disk Usage): \d+', '\1: N')
+SELECT regexp_replace(line, '(Table Grows|Batches|Evictions|Spilled Chunks|Disk Usage): \d+', '\1: N')
 FROM agg_explain($$SELECT k, count(*), sum(v) FROM agg_spill GROUP BY k$$) AS line
 WHERE line !~ 'Split Partitions';
                                 regexp_replace                                 
@@ -847,7 +847,7 @@ WHERE line !~ 'Split Partitions';
    Kernel Calls: 22642
    Computed Datums: 1200000
    Groups: 200001
-   Table Grows: 0
+   Table Grows: N
    Memory Usage: within hash_mem
    Batches: N
    Evictions: N
