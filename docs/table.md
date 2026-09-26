@@ -22,17 +22,18 @@ mean the same in every process, whatever address a chunk has there.
 
 Records never move. A chunk fills and the caller adds another; when the
 records outgrow the buckets, only the index is made anew, over the same
-chunks. The format before this one (version 1) kept the records and the
-buckets in one region that grew by `repalloc` or by a copy: a shared
-table that the planner underestimated was copied whole, with the old and
-the new region held at once (plan item 5.1b).
+chunks. The first design kept the records and the buckets in one region
+that grew by `repalloc` or by a copy: a shared table that the planner
+underestimated was copied whole, with the old and the new region held at
+once (plan item 5.1b). With no table stored anywhere yet, the format kept
+its version, 1.
 
 ## The index and the chunks
 
 Every block is aligned to 8 (`palloc` and DSA allocations are).
 
 The index holds a header of 96 bytes with a magic value and the format
-version (`TESS_TABLE_FORMAT_VERSION`, 2), the index length, the key
+version (`TESS_TABLE_FORMAT_VERSION`, 1), the index length, the key
 kinds, the payload size, the record size, the bucket count and the
 record count; then the buckets, a power of two of 32-bit slots, at least
 1024 and at least twice the capacity the index was made for, each
@@ -76,7 +77,7 @@ The index:
 ```
  byte
    0 ┌──────────────────────────── header, 96 bytes ───────────────────────────────┐
-     │ 0   magic "TESSTABL"   8 version = 2   12 header_size                       │
+     │ 0   magic "TESSTABL"   8 version = 1   12 header_size                       │
      │ 16  region_len (index length)        24 buckets_offset = 96                 │
      │ 32  reserved_used = 0                40 nrecords  ◄── the one field that     │
      │                                                       changes while a       │

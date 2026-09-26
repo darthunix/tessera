@@ -43,7 +43,7 @@
  */
 
 /* The format of the table this header describes. */
-#define TESS_TABLE_FORMAT_VERSION 2
+#define TESS_TABLE_FORMAT_VERSION 1
 
 /* The most keys a record holds. */
 #define TESS_TABLE_MAX_KEYS 16

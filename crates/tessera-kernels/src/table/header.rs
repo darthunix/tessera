@@ -25,7 +25,7 @@ use anyhow::{Result, bail, ensure};
 use super::region::Region;
 
 /// The format of the table this code writes and accepts.
-pub const FORMAT_VERSION: u32 = 2;
+pub const FORMAT_VERSION: u32 = 1;
 /// The most keys a record holds.
 pub const MAX_KEYS: usize = 16;
 /// The first eight bytes of a region: `TESSTABL` in ASCII.

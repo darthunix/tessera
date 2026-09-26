@@ -370,7 +370,7 @@ fn datum_and_dense_keys_build_the_same_table() -> Result<()> {
 
 #[test]
 fn the_layout_probes_match_the_types() {
-    assert_eq!(tess_table_format_version(), 2);
+    assert_eq!(tess_table_format_version(), 1);
     assert_eq!(tess_table_layout(0), 96);
     assert_eq!(tess_table_layout(1), 8);
     assert_eq!(tess_table_layout(2), size_of::<TableKey>());
@@ -657,14 +657,14 @@ fn the_entry_points_round_trip() -> Result<()> {
             invalid
         );
         let version = base.add(8).cast::<u32>();
-        version.write_unaligned(1);
+        version.write_unaligned(2);
         assert_eq!(tess_table_attach(table.ptr(), &raw mut status), invalid);
         assert!(
-            status.message().contains("version 1"),
+            status.message().contains("version 2"),
             "{}",
             status.message()
         );
-        version.write_unaligned(2);
+        version.write_unaligned(1);
         assert_eq!(tess_table_attach(table.ptr(), &raw mut status), Code::Ok);
     }
     Ok(())
