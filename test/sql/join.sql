@@ -326,6 +326,17 @@ SELECT join_same($$SELECT jsp.s, jskew.w FROM jsp LEFT JOIN jskew() AS jskew ON 
 SELECT join_same($$SELECT count(*), sum(length(jsp.s)) FROM jsp WHERE EXISTS (SELECT 1 FROM jskew() AS jskew WHERE jskew.k = jsp.k)$$);
 SELECT join_same($$SELECT count(*), sum(length(jsp.s)) FROM jsp WHERE NOT EXISTS (SELECT 1 FROM jskew() AS jskew WHERE jskew.k = jsp.k)$$);
 SELECT join_same($$SELECT count(*) FROM jsp JOIN jskew() AS jskew ON jsp.k = jskew.k AND jskew.w % 3 = jsp.k % 3$$);
+-- 200000 inner rows with text the planner expects 10 of: the first
+-- level's partitions are still larger than hash_mem, and split by the
+-- next bits of the hash into a level of their own.
+CREATE FUNCTION jwide() RETURNS TABLE (k int, t text) LANGUAGE sql ROWS 10
+AS 'SELECT g % 50000, repeat(''x'', g % 30) || g FROM generate_series(1, 200000) AS g';
+SELECT join_explain($$SELECT count(*), sum(length(w.t)) FROM jsp JOIN jwide() AS w ON jsp.k = w.k$$);
+SELECT join_same($$SELECT count(*), sum(length(w.t)), sum(jsp.k) FROM jsp JOIN jwide() AS w ON jsp.k = w.k$$);
+SELECT join_same($$SELECT jsp.s, w.t FROM jsp JOIN jwide() AS w ON jsp.k = w.k WHERE jsp.s LIKE '%13'$$);
+SELECT join_same($$SELECT count(*), count(w.t), sum(length(w.t)) FROM jsp LEFT JOIN jwide() AS w ON jsp.k = w.k$$);
+SELECT join_same($$SELECT count(*), sum(length(jsp.s)) FROM jsp WHERE EXISTS (SELECT 1 FROM jwide() AS w WHERE w.k = jsp.k)$$);
+SELECT join_same($$SELECT jsp.s FROM jsp WHERE NOT EXISTS (SELECT 1 FROM jwide() AS w WHERE w.k = jsp.k)$$);
 -- A rescan with a parameter of the outer side reads the inner side again.
 SELECT join_same($$SELECT v.x, (SELECT count(*) FROM jsp JOIN jsb ON jsp.k = jsb.k WHERE jsp.k < v.x) FROM (VALUES (100), (15000)) AS v(x)$$);
 RESET work_mem;
@@ -479,6 +490,7 @@ RESET tessera.enable;
 
 DROP TABLE jd, jf, jdup, jsmall, jempty, jgrow, jbig, jpair, jbuild, jprobe, jhit, jref, jrefprobe, jrefgrow, jsb, jsp;
 DROP FUNCTION jskew();
+DROP FUNCTION jwide();
 DROP FUNCTION join_property(text, text);
 DROP FUNCTION join_explain(text);
 DROP FUNCTION join_many();

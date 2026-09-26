@@ -920,9 +920,9 @@ SELECT join_explain($$SELECT count(*) FROM jf JOIN join_many() AS m(k) ON jf.v =
                                  join_explain                                  
 -------------------------------------------------------------------------------
  Custom Scan (TessAgg) (actual rows=1.00 loops=1)
-   Input Batches: 20
+   Input Batches: 567
    Input Rows: 1000
-   Kernel Calls: 20
+   Kernel Calls: 567
    ->  Custom Scan (TessHashJoin) (actual rows=1000.00 loops=1)
          Hash Cond: (jf.v = m.k)
          Buckets: 1024
@@ -930,13 +930,13 @@ SELECT join_explain($$SELECT count(*) FROM jf JOIN join_many() AS m(k) ON jf.v =
          Overrun: N kB
          Builds: 1
          Build Rows: 20000
-         Chunks: 10
+         Chunks: 3838
          Batches: 4
-         Resident Partitions: 0
-         Spilled Chunks: 84
-         Disk Usage: 644 kB
-         Tail Chunks Kept: 22
-         Extra Passes: 14
+         Resident Partitions: 507
+         Spilled Chunks: 4005
+         Disk Usage: 2091 kB
+         Tail Chunks Kept: 2018
+         Split Partitions: 1082
          Probe Rows: 1000
          Matches: 1000
          Bloom Filters: 1
@@ -1648,17 +1648,17 @@ SELECT join_explain($$SELECT count(*), sum(length(jsb.t)) FROM jsp JOIN jsb ON j
          Memory Usage: N kB
          Builds: 1
          Build Rows: 37648
-         Chunks: 104
+         Chunks: 105
          Batches: 8
          Resident Partitions: 1
-         Spilled Chunks: 601
-         Disk Usage: 4634 kB
+         Spilled Chunks: 603
+         Disk Usage: 4646 kB
          Tail Chunks Kept: 14
          Probe Rows: 100000
          Matches: 171130
-         Compact Batches: 2568
+         Compact Batches: 2562
          Bloom Filters: 1
-         Rows Removed by Bloom Filter: 20033
+         Rows Removed by Bloom Filter: 19752
          ->  Custom Scan (TessHeapScan) on jsp (actual rows=100000.00 loops=1)
                Batch Size: 64
                Batches: 1597
@@ -1689,9 +1689,9 @@ SELECT join_explain($$SELECT count(*), count(jsb.n), sum(length(jsb.t)) FROM jsp
                                  join_explain                                  
 -------------------------------------------------------------------------------
  Custom Scan (TessAgg) (actual rows=1.00 loops=1)
-   Input Batches: 5155
+   Input Batches: 5154
    Input Rows: 202947
-   Kernel Calls: 13043
+   Kernel Calls: 13090
    Computed Datums: 405894
    ->  Custom Scan (TessHashJoin) (actual rows=202947.00 loops=1)
          Join Type: Left
@@ -1700,17 +1700,17 @@ SELECT join_explain($$SELECT count(*), count(jsb.n), sum(length(jsb.t)) FROM jsp
          Memory Usage: N kB
          Builds: 1
          Build Rows: 37648
-         Chunks: 117
+         Chunks: 119
          Batches: 8
          Resident Partitions: 1
          Spilled Chunks: 658
-         Disk Usage: 4928 kB
+         Disk Usage: 4923 kB
          Tail Chunks Kept: 14
          Probe Rows: 100000
          Matches: 171130
-         Compact Batches: 3441
+         Compact Batches: 3442
          Bloom Filters: 1
-         Rows Removed by Bloom Filter: 19959
+         Rows Removed by Bloom Filter: 20033
          ->  Custom Scan (TessHeapScan) on jsp (actual rows=100000.00 loops=1)
                Batch Size: 64
                Batches: 1597
@@ -1759,9 +1759,9 @@ SELECT join_explain($$SELECT count(*), sum(jskew.w) FROM jsp JOIN jskew() AS jsk
                                  join_explain                                  
 -------------------------------------------------------------------------------
  Custom Scan (TessAgg) (actual rows=1.00 loops=1)
-   Input Batches: 3752
+   Input Batches: 3753
    Input Rows: 240000
-   Kernel Calls: 7504
+   Kernel Calls: 7506
    Computed Datums: 240000
    ->  Custom Scan (TessHashJoin) (actual rows=240000.00 loops=1)
          Hash Cond: (jsp.k = jskew.k)
@@ -1778,7 +1778,7 @@ SELECT join_explain($$SELECT count(*), sum(jskew.w) FROM jsp JOIN jskew() AS jsk
          Extra Passes: 3
          Probe Rows: 100000
          Matches: 240000
-         Compact Batches: 3751
+         Compact Batches: 3752
          Bloom Filters: 1
          Rows Removed by Bloom Filter: 23146
          ->  Custom Scan (TessHeapScan) on jsp (actual rows=100000.00 loops=1)
@@ -1828,6 +1828,80 @@ SELECT join_same($$SELECT count(*) FROM jsp JOIN jskew() AS jskew ON jsp.k = jsk
                    join_same                   
 -----------------------------------------------
  1 rows, hash 2549420b7a780ea269982e2c7bf952a9
+(1 row)
+
+-- 200000 inner rows with text the planner expects 10 of: the first
+-- level's partitions are still larger than hash_mem, and split by the
+-- next bits of the hash into a level of their own.
+CREATE FUNCTION jwide() RETURNS TABLE (k int, t text) LANGUAGE sql ROWS 10
+AS 'SELECT g % 50000, repeat(''x'', g % 30) || g FROM generate_series(1, 200000) AS g';
+SELECT join_explain($$SELECT count(*), sum(length(w.t)) FROM jsp JOIN jwide() AS w ON jsp.k = w.k$$);
+                                 join_explain                                  
+-------------------------------------------------------------------------------
+ Custom Scan (TessAgg) (actual rows=1.00 loops=1)
+   Input Batches: 7093
+   Input Rows: 363640
+   Kernel Calls: 13243
+   Computed Datums: 363640
+   ->  Custom Scan (TessHashJoin) (actual rows=363640.00 loops=1)
+         Hash Cond: (jsp.k = w.k)
+         Buckets: 1024
+         Memory Usage: N kB
+         Builds: 1
+         Build Rows: 200000
+         Chunks: 522
+         Batches: 8
+         Resident Partitions: 4
+         Spilled Chunks: 3163
+         Disk Usage: 30123 kB
+         Tail Chunks Kept: 60
+         Split Partitions: 4
+         Probe Rows: 100000
+         Matches: 363640
+         Compact Batches: 4169
+         Bloom Filters: 1
+         Rows Removed by Bloom Filter: 0
+         ->  Custom Scan (TessHeapScan) on jsp (actual rows=100000.00 loops=1)
+               Batch Size: 64
+               Batches: 1597
+               Pages: 532
+               Deformed Datums: 100000
+               Restarted Datums: 0
+         ->  Custom Scan (TessPack) (actual rows=200000.00 loops=1)
+               Batch Size: 64
+               Rows Kept As: copies
+               Batches: 3125
+               ->  Function Scan on jwide w (actual rows=200000.00 loops=1)
+(34 rows)
+
+SELECT join_same($$SELECT count(*), sum(length(w.t)), sum(jsp.k) FROM jsp JOIN jwide() AS w ON jsp.k = w.k$$);
+                   join_same                   
+-----------------------------------------------
+ 1 rows, hash de77e070b7e500121173c912eb3facb9
+(1 row)
+
+SELECT join_same($$SELECT jsp.s, w.t FROM jsp JOIN jwide() AS w ON jsp.k = w.k WHERE jsp.s LIKE '%13'$$);
+                    join_same                     
+--------------------------------------------------
+ 3636 rows, hash dacb4db351ca5b6c3e0255ddd132a8ee
+(1 row)
+
+SELECT join_same($$SELECT count(*), count(w.t), sum(length(w.t)) FROM jsp LEFT JOIN jwide() AS w ON jsp.k = w.k$$);
+                   join_same                   
+-----------------------------------------------
+ 1 rows, hash 750538f886c9fa8a6ba17ab719feff93
+(1 row)
+
+SELECT join_same($$SELECT count(*), sum(length(jsp.s)) FROM jsp WHERE EXISTS (SELECT 1 FROM jwide() AS w WHERE w.k = jsp.k)$$);
+                   join_same                   
+-----------------------------------------------
+ 1 rows, hash fa953eff939e7c0f8c4e985685ad08f9
+(1 row)
+
+SELECT join_same($$SELECT jsp.s FROM jsp WHERE NOT EXISTS (SELECT 1 FROM jwide() AS w WHERE w.k = jsp.k)$$);
+                    join_same                     
+--------------------------------------------------
+ 9090 rows, hash e2a7e5e5c15da3253e283e4ed84f4aa0
 (1 row)
 
 -- A rescan with a parameter of the outer side reads the inner side again.
@@ -2374,6 +2448,7 @@ EXPLAIN (COSTS OFF) SELECT count(*) FROM jf JOIN jd ON jf.fk = jd.id;
 RESET tessera.enable;
 DROP TABLE jd, jf, jdup, jsmall, jempty, jgrow, jbig, jpair, jbuild, jprobe, jhit, jref, jrefprobe, jrefgrow, jsb, jsp;
 DROP FUNCTION jskew();
+DROP FUNCTION jwide();
 DROP FUNCTION join_property(text, text);
 DROP FUNCTION join_explain(text);
 DROP FUNCTION join_many();

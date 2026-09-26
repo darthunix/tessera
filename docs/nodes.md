@@ -802,8 +802,20 @@ and anti joins without a pair. A compact batch holding pairs of one
 table keeps the next from being loaded until it goes out, and a table
 with duplicates the resident one lacked turns compact mode on.
 
-A partition whose file is larger than what `hash_mem` leaves is joined
-in pieces: its blocks are read back in order until the piece passes the
+A partition whose file is larger than what `hash_mem` leaves, and that
+holds less than nine tenths of the inner rows its level split, so that
+it is no single key, splits again while hash bits are left: its inner
+rows are read back group by group (value chunks, then the chunks of
+records that refer to them), and then its tail, each chunk split by the
+bits above its level's into a level of partitions of its own, which
+start resident and go to disk as the first level's do; that level then
+probes with the partition's outer rows as its outer side, joins its own
+partitions in turn, splitting further where needed, and hands back to
+the level above. Memory counts the tails every level keeps, and the
+spilled chunks are allocated in blocks of their own size.
+
+Any other partition whose file is larger than what `hash_mem` leaves is
+joined in pieces: its blocks are read back in order until the piece passes the
 room, ending only where a group ends (value chunks, then the chunks of
 records that refer to them; without by-reference columns, any chunk),
 the tail with the last piece, and every piece is joined with all of the
@@ -867,7 +879,8 @@ the inner rows inserted into them, `Chunks`, the chunks of their
 records, and for a table that spilled `Batches`, its partitions,
 `Resident Partitions`, those kept in memory, `Spilled Chunks` and `Disk
 Usage`, the blocks and bytes written by both sides, and `Tail Chunks
-Kept`, the tails joined without being written, and `Extra Passes`, the
+Kept`, the tails joined without being written, `Split Partitions`, the
+partitions split into a level below, and `Extra Passes`, the
 passes over outer rows past the first of a partition joined in pieces;
 `Probe Rows`, the outer
 rows probed, and `Matches`, the joined
@@ -924,7 +937,8 @@ inner and a left join, and compared as rows with text of both sides, a
 left join with misses and NULL keys, semi and anti joins, a residual
 clause, one key held by 60000 inner rows the planner expects 10 of,
 joined in pieces as inner, left, semi and anti joins and with a residual
-clause, a rescan with a parameter of the outer side, and under the `Gather` each participant spilling its own
+clause, 200000 inner rows with text it expects 10 of, whose partitions
+split into a level below, under the same joins, a rescan with a parameter of the outer side, and under the `Gather` each participant spilling its own
 table.
 Semi, anti and left joins: `EXISTS` with and without a join clause, `IN`
 over a subquery, `NOT EXISTS` with and without one (NULL keys going
