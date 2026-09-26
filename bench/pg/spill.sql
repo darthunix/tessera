@@ -93,7 +93,7 @@ FROM unnest(ARRAY['4MB', '16MB', '64MB']) WITH ORDINALITY AS m(memory, m_order),
                   'SELECT count(*) FROM bench_fact f WHERE NOT EXISTS (SELECT 1 FROM bench_dim d WHERE d.id = f.fk)',
                   'SELECT count(m.e) FROM bench_fact f JOIN bench_mixed m ON f.fk = m.a',
                   'SELECT count(*), sum(s) FROM (SELECT fk, sum(f1) AS s FROM bench_fact GROUP BY fk) AS g',
-                  'SELECT count(*), sum(s) FROM (SELECT a, sum(c) AS s FROM bench_mixed GROUP BY a) AS g'])
+                  'SELECT count(*), sum(s) FROM (SELECT a, sum(d) AS s FROM bench_mixed GROUP BY a) AS g'])
          WITH ORDINALITY AS c(name, sql, c_order)
 ORDER BY m_order, c_order;
 RESET work_mem;
