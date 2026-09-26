@@ -244,6 +244,11 @@ SELECT regexp_replace(line, '(Batches|Evictions|Spilled Chunks|Disk Usage): \d+'
 FROM agg_explain($$SELECT k, count(*), sum(v) FROM agg_spill GROUP BY k$$) AS line
 WHERE line !~ 'Split Partitions';
 SELECT agg_same($$SELECT md5(string_agg(q::text, ',' ORDER BY q::text)) FROM (SELECT k, count(*), count(v), sum(v), min(v), max(v) FROM agg_spill GROUP BY k) AS q$$);
+-- A partition's groups went to disk many times, its file larger than
+-- hash_mem, but they fit: the estimate of its groups merges it, no split.
+SELECT count(*) AS splits
+FROM agg_explain($$SELECT k, count(*), sum(v) FROM agg_spill GROUP BY k$$) AS line
+WHERE line ~ 'Split Partitions';
 -- Two keys, int4 and int8; HAVING over the merged states.
 SELECT agg_same($$SELECT md5(string_agg(q::text, ',' ORDER BY q::text)) FROM (SELECT k, k8, count(v), sum(v), max(k8) FROM agg_spill GROUP BY k, k8) AS q$$);
 SELECT agg_same($$SELECT count(*), sum(c) FROM (SELECT k, count(*) AS c FROM agg_spill GROUP BY k HAVING count(*) > 2 AND min(v) > 1000) AS q$$);
@@ -253,6 +258,9 @@ SELECT agg_same($$SELECT md5(string_agg(q::text, ',' ORDER BY q::text)) FROM (SE
 CREATE FUNCTION agg_rows() RETURNS TABLE (k int, v int) LANGUAGE sql ROWS 10
 AS 'SELECT g % 200000, g FROM generate_series(1, 600000) AS g';
 SELECT agg_same($$SELECT md5(string_agg(q::text, ',' ORDER BY q::text)) FROM (SELECT k, count(*), sum(v), min(v), max(v) FROM agg_rows() GROUP BY k) AS q$$);
+SELECT count(*) AS splits
+FROM agg_explain($$SELECT k, count(*), sum(v) FROM agg_rows() GROUP BY k$$) AS line
+WHERE line ~ 'Split Partitions';
 -- Row by row to a sort above, and a rescan with a parameter.
 SELECT k, count(*), sum(v) FROM agg_spill GROUP BY k ORDER BY sum(v) DESC NULLS LAST, k LIMIT 3;
 SELECT agg_same($$SELECT x, (SELECT count(*) FROM (SELECT k FROM agg_spill WHERE k8 < x GROUP BY k) AS q) FROM (VALUES (1), (4)) AS v(x)$$);

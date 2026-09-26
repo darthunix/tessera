@@ -5,8 +5,10 @@
 #include "catalog/pg_type_d.h"
 #include "commands/explain.h"
 #include "commands/explain_format.h"
+#include "common/hashfn.h"
 #include "common/int.h"
 #include "executor/executor.h"
+#include "lib/hyperloglog.h"
 #include "miscadmin.h"
 #include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
@@ -1244,7 +1246,17 @@ typedef struct AggPart
 	uint64		records;
 	uint64		disk_records;
 	uint64		disk_bytes;
+	/*
+	 * The partition's groups, estimated from the hashes of every record
+	 * made in it (HyperLogLog, as the core's hash aggregate keeps one per
+	 * spilled partition): what a merge holds, however many times a group
+	 * went to disk.
+	 */
+	hyperLogLogState groups;
 } AggPart;
+
+/* Registers of a partition's estimate, 2^6 bytes: an error of about 13 %. */
+#define AGG_GROUPS_WIDTH 6
 
 typedef struct AggSpill
 {
@@ -1386,6 +1398,13 @@ agg_spill_create(TessAggState *state, AggSpill *parent, double expected, uint32 
 												 ALLOCSET_SMALL_SIZES);
 	spill->parts = MemoryContextAllocZero(spill->context,
 										  sizeof(AggPart) * npartitions);
+	{
+		MemoryContext old = MemoryContextSwitchTo(spill->context);
+
+		for (int partition = 0; partition < npartitions; partition++)
+			initHyperLogLog(&spill->parts[partition].groups, AGG_GROUPS_WIDTH);
+		MemoryContextSwitchTo(old);
+	}
 	spill->bases = MemoryContextAlloc(spill->context,
 									  sizeof(void *) * (npartitions + 2));
 	spill->lens = MemoryContextAlloc(spill->context, sizeof(Size) * (npartitions + 2));
@@ -1470,7 +1489,12 @@ agg_split(TessAggState *state, AggSpill *spill, void *base, Size len, bool keep)
 												 AGG_GROUP_ROWS, offsets, hashes,
 												 &count, &full, &state->status));
 		for (int index = 0; index < count; index++)
-			spill->parts[agg_partition(spill, hashes[index])].records++;
+		{
+			AggPart    *part = &spill->parts[agg_partition(spill, hashes[index])];
+
+			part->records++;
+			addHyperLogLog(&part->groups, murmurhash32(hashes[index]));
+		}
 		if (full >= 0)
 		{
 			AggPart    *part = &spill->parts[full];
@@ -1701,7 +1725,13 @@ agg_find_partitioned(TessAggState *state, TessRowMask *pending, TessRowMask *ins
 																	  &created,
 																	  &state->status));
 		while ((row = tess_row_mask_next(&created, row)) >= 0)
-			spill->parts[agg_partition(spill, state->hashes[row])].records++;
+		{
+			AggPart    *part = &spill->parts[agg_partition(spill, state->hashes[row])];
+
+			part->records++;
+			/* The partition's bits are the hash's low ones: mixed first. */
+			addHyperLogLog(&part->groups, murmurhash32(state->hashes[row]));
+		}
 		for (int word = 0; word < nwords; word++)
 			inserted->bits[word] |= found[word];
 		if (tess_row_mask_count(pending) == 0)
@@ -1814,6 +1844,18 @@ agg_combine(TessAggState *state, AggSpill *spill, AggPart *part, void *base,
 }
 
 /*
+ * The groups a partition merges into: its estimate with a third more for
+ * the estimate's error, at most its records.
+ */
+static uint64
+part_groups(AggPart *part)
+{
+	double		groups = estimateHyperLogLog(&part->groups) * 4 / 3;
+
+	return (uint64) Min(groups, (double) (part->records + part->disk_records));
+}
+
+/*
  * The table of one partition, with an index for its records in memory and
  * on disk: its chunks in memory linked, when they hold each group once, as
  * those the first level found by the index do, and merged by the kernel
@@ -1825,7 +1867,7 @@ agg_merge(TessAggState *state, AggSpill *spill, int partition)
 {
 	AggPart    *part = &spill->parts[partition];
 	Size		payload_size = sizeof(uint64) * (1 + state->nvalues);
-	uint64		capacity = first_capacity(part->records + part->disk_records);
+	uint64		capacity = first_capacity(part_groups(part));
 	bool		unique = spill->parent == NULL;
 	void	  **split = NULL;
 	int			nsplit = 0;
@@ -1976,11 +2018,13 @@ agg_advance(TessAggState *state)
 		if (part->records == 0 && part->disk_records == 0)
 			continue;
 		/*
-		 * What the partition takes merged, at most: its records and their
-		 * index, next to the chunks every level keeps.
+		 * What the partition takes merged: a record per group and its
+		 * index, and a block read back, next to the chunks every level
+		 * keeps. A group written many times merges into one record, so the
+		 * groups decide, not the file.
 		 */
-		size = part->disk_bytes + part->bytes +
-			2 * sizeof(uint64) * (part->records + part->disk_records);
+		size = part_groups(part) * (agg_record_size(state) + 2 * sizeof(uint64)) +
+			spill->chunk_len;
 		for (AggSpill *level = spill; level != NULL; level = level->parent)
 			for (int partition = 0; partition < level->npartitions; partition++)
 				if (level != spill || partition != spill->partition)

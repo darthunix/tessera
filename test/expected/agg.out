@@ -867,6 +867,16 @@ SELECT agg_same($$SELECT md5(string_agg(q::text, ',' ORDER BY q::text)) FROM (SE
  {(6520d4d83a8aa8ac44e8ad9d6cd7eca0)}
 (1 row)
 
+-- A partition's groups went to disk many times, its file larger than
+-- hash_mem, but they fit: the estimate of its groups merges it, no split.
+SELECT count(*) AS splits
+FROM agg_explain($$SELECT k, count(*), sum(v) FROM agg_spill GROUP BY k$$) AS line
+WHERE line ~ 'Split Partitions';
+ splits 
+--------
+      0
+(1 row)
+
 -- Two keys, int4 and int8; HAVING over the merged states.
 SELECT agg_same($$SELECT md5(string_agg(q::text, ',' ORDER BY q::text)) FROM (SELECT k, k8, count(v), sum(v), max(k8) FROM agg_spill GROUP BY k, k8) AS q$$);
                agg_same               
@@ -894,6 +904,14 @@ SELECT agg_same($$SELECT md5(string_agg(q::text, ',' ORDER BY q::text)) FROM (SE
                agg_same               
 --------------------------------------
  {(d8ce22b67fe0861b7180fbc7f82fb9f2)}
+(1 row)
+
+SELECT count(*) AS splits
+FROM agg_explain($$SELECT k, count(*), sum(v) FROM agg_rows() GROUP BY k$$) AS line
+WHERE line ~ 'Split Partitions';
+ splits 
+--------
+      1
 (1 row)
 
 -- Row by row to a sort above, and a rescan with a parameter.
