@@ -87,12 +87,44 @@ with another manager of work files, like Greengage's, replaces this file.
 
 ## In the hash join
 
-TessHashJoin spills a table of its own (docs/nodes.md, "Spilling"): two
-sets of files, one for the inner side's partitions and one for the
-outer rows written, each a table of its own layout and fingerprint. A
-partition's file holds its value chunks and chunks of records in the
-order they were written, a chunk's values always before it, so the outer
-rows are read back one chunk at a time with only that chunk's values in
-memory; the inner side's partition is read whole. Each partition's tail
-chunk, never full, stays in memory and is joined as it is, so a
-partition whose rows fit in its tail never touches the disk.
+TessHashJoin spills a table of its own ([nodes.md](nodes.md),
+"Spilling"); a shared table does not spill yet.
+
+**Partitions and bits.** A partition is `(hash >> shift) &
+(npartitions - 1)` of the 32-bit hash the table stores; the buckets take
+its high bits, the first level of partitions its low ones from bit 0,
+and a level below the bits right above its parent's. A partition's
+chunks are small, `hash_mem / (16 × partitions)` from 8 kB to 1 MB, so
+that every partition's tail on both sides fits in half of `hash_mem`.
+
+**Files.** Each level has two sets: the inner side's partitions and the
+outer rows written, each a table of its own layout and fingerprint.
+Both sides append the same way: a row goes into its partition's chunk,
+then its by-reference values into the partition's value chunks, and a
+chunk that fills is written after the value chunks opened since the
+last one. A file is therefore a series of groups, value chunks and then
+the chunks of records that refer to them (a partition that went to disk
+whole makes one group of all it had); without by-reference columns,
+every chunk is a group. The outer rows are read back one chunk at a
+time, with only that chunk's values in memory.
+
+**What never goes to disk.** The resident partitions, joined while the
+outer child is read; each partition's tail chunk and the value chunks
+after the last write, joined as they are, so a partition whose rows fit
+in its tail never touches the disk; the outer rows without a pair, found
+so by the empty inner partition or by the Bloom filter of every inner
+row, answered at once; and the first level's filter itself, freed once
+the outer child is done.
+
+**A partition too large.** Its file is compared with what `hash_mem`
+leaves once the rest of spilling, on every level, is counted. One that
+holds less than nine tenths of the inner rows its level split splits
+into a level below while bits last; a single key cannot split, and its
+partition is joined in pieces of whole groups, the outer rows read once
+per piece, a bit per outer row recording a pair for left, semi and anti
+joins, and a last pass without a table answering left and anti joins'
+rows without one.
+
+**Memory.** The spill's contexts use small blocks, so that a chunk of a
+few kB or more takes a block of its own size; `Memory Usage` counts the
+tables, the chunks, the values and the filter of every level.
