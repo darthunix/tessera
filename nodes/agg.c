@@ -196,6 +196,15 @@ typedef struct TessAggState
 	 */
 	bool		input_done;
 	uint64		early_emits;
+	/*
+	 * The rows read when the table last started anew; and whether the
+	 * groups go to disk instead, as a serial node's do, since a table sent
+	 * up held nearly a group per row read: spread groups fold little
+	 * before the table fills, and the Finalize Aggregate would get them
+	 * all.
+	 */
+	uint64		emit_rows;
+	bool		partial_spill;
 } TessAggState;
 
 static const CustomExecMethods agg_exec_methods;
@@ -2181,7 +2190,7 @@ group_batch(TessAggState *state, TessBatch *batch)
 	 * index: the groups go into partitions, and the largest to disk; in
 	 * partial mode they go out instead (group_drain).
 	 */
-	if (state->spill == NULL && !state->partial &&
+	if (state->spill == NULL && (!state->partial || state->partial_spill) &&
 		state->table_bytes > get_hash_memory_limit() / 8 * 7)
 		agg_start_spill(state);
 	if (state->spill != NULL)
@@ -2203,8 +2212,26 @@ group_drain(TessAggState *state)
 		 * Partial mode: a table near hash_mem goes out now, as partials the
 		 * Finalize Aggregate merges, and the input goes on after it.
 		 */
-		if (state->partial && state->table_bytes > get_hash_memory_limit() / 8 * 7)
+		if (state->partial && !state->partial_spill &&
+			state->table_bytes > get_hash_memory_limit() / 8 * 7)
 		{
+			TessTableStats stats = TESS_STRUCT_INITIALIZER(TessTableStats);
+
+			check(state, state->kernels->table_stats(&state->table, &stats,
+													 &state->status));
+			/*
+			 * More groups than half the rows read since the table started:
+			 * sending it up would fold nothing. The groups go into
+			 * partitions and to disk from now on, and out once the input is
+			 * done, still as partials.
+			 */
+			if (stats.records * 2 > state->rows - state->emit_rows)
+			{
+				state->partial_spill = true;
+				agg_start_spill(state);
+				continue;
+			}
+			state->emit_rows = state->rows;
 			state->early_emits++;
 			state->drained = true;
 			state->cursor = 0;
@@ -2460,6 +2487,8 @@ agg_rescan(CustomScanState *css)
 	state->input_done = false;
 	state->published = NULL;
 	state->groups = 0;
+	state->emit_rows = 0;
+	state->partial_spill = false;
 }
 
 /* This participant's counters. */

@@ -143,8 +143,9 @@ SELECT parallel_same($$SELECT b, sum(a) FROM parallel_t GROUP BY b$$);
 RESET parallel_leader_participation;
 -- Partial groups past hash_mem go out early, and the table starts anew:
 -- the Finalize Aggregate merges a group's partials, and nothing is written.
+-- A group's rows come together, so a table folds many before it fills.
 CREATE TABLE parallel_groups AS
-SELECT g % 5000 AS k, g AS v FROM generate_series(1, 300000) AS g;
+SELECT g / 60 AS k, g AS v FROM generate_series(1, 300000) AS g;
 ANALYZE parallel_groups;
 SET work_mem = '64kB';
 -- The core's sorted grouping would leave no partial hash aggregate to take.
@@ -153,9 +154,19 @@ EXPLAIN (COSTS OFF) SELECT k, count(*), sum(v), min(v), max(v) FROM parallel_gro
 SELECT parallel_same($$SELECT md5(string_agg(q::text, ',' ORDER BY q::text)) FROM (SELECT k, count(*), sum(v), min(v), max(v) FROM parallel_groups GROUP BY k) AS q$$);
 SELECT plan_property($$SELECT k, count(*) FROM parallel_groups GROUP BY k$$, 'TessAgg', 'Early Emits')::int > 0 AS early,
        plan_property($$SELECT k, count(*) FROM parallel_groups GROUP BY k$$, 'TessAgg', 'Disk Usage') AS disk;
+-- Groups spread over the input fold nothing before the table fills, a
+-- group per row read: sending the table up would hand the Finalize
+-- Aggregate every row. The groups go to disk instead, as a serial node's,
+-- and out as partials once the input is done.
+CREATE TABLE parallel_spread AS
+SELECT g % 5000 AS k, g AS v FROM generate_series(1, 300000) AS g;
+ANALYZE parallel_spread;
+SELECT parallel_same($$SELECT md5(string_agg(q::text, ',' ORDER BY q::text)) FROM (SELECT k, count(*), sum(v), min(v), max(v) FROM parallel_spread GROUP BY k) AS q$$);
+SELECT plan_property($$SELECT k, count(*) FROM parallel_spread GROUP BY k$$, 'TessAgg', 'Early Emits') IS NULL AS no_early,
+       plan_property($$SELECT k, count(*) FROM parallel_spread GROUP BY k$$, 'TessAgg', 'Disk Usage')::int > 0 AS spilled;
 RESET enable_sort;
 RESET work_mem;
-DROP TABLE parallel_groups;
+DROP TABLE parallel_groups, parallel_spread;
 -- An aggregate the node does not compute: the core's partial aggregate over the rows.
 EXPLAIN (COSTS OFF) SELECT count(c), count(*) FROM parallel_t WHERE a > 100;
 SELECT parallel_same($$SELECT count(c), count(*) FROM parallel_t WHERE a > 100$$);
