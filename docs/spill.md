@@ -130,6 +130,17 @@ whole makes one group of all it had); without by-reference columns,
 every chunk is a group. The outer rows are read back one chunk at a
 time, with only that chunk's values in memory.
 
+**Which partitions stay.** While the build takes more than `hash_mem`,
+counted as the node reports it, the largest resident partition goes to
+disk; room stays for the outer side's tails of the partitions on disk
+only (a chunk of records, one of values when the outer side keeps a
+by-reference column, and a file's buffer), since a resident partition
+writes no outer row. Resident partitions holding less than a quarter of
+the inner rows go to disk too, once that is so: probing them would cost
+every outer batch the whole probe for the few rows of theirs, more than
+writing them saves (1 resident partition of 32 made a join of 5 M inner
+rows 3 % slower than none, 2 of 4 made one of 1 M 7 % faster).
+
 **What never goes to disk.** The resident partitions, joined while the
 outer child is read; each partition's tail chunk and the value chunks
 after the last write, joined as they are, so a partition whose rows fit
