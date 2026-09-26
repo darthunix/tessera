@@ -55,6 +55,97 @@ slot per key, then the payload, rounded up to 8. Keys are `int4`
 its bit. The payload is opaque: a join keeps the Datums of its build row
 there, grouping its aggregate states.
 
+## The layout in pictures
+
+```
+ TessTableRef (one per process: the addresses differ between processes)
+ ┌────────────────────────────────────┐
+ │ index ──────────────► INDEX        │   one allocation; only a regrow replaces it
+ │ index_len                          │
+ │ chunks[] ─┬─► chunk 0              │   64 kB in the nodes
+ │           ├─► chunk 1              │   1 MB
+ │           ├─► chunk 2              │   1 MB
+ │           └─► …                    │   up to 32768 chunks
+ │ chunk_lens[]                       │
+ │ nchunks                            │
+ └────────────────────────────────────┘
+```
+
+The index:
+
+```
+ byte
+   0 ┌──────────────────────────── header, 96 bytes ───────────────────────────────┐
+     │ 0   magic "TESSTABL"   8 version = 2   12 header_size                       │
+     │ 16  region_len (index length)        24 buckets_offset = 96                 │
+     │ 32  reserved_used = 0                40 nrecords  ◄── the one field that     │
+     │                                                       changes while a       │
+     │                                                       build runs            │
+     │ 48  nbuckets   52 bucket_shift   56 record_size   60 payload_size           │
+     │ 64  nkeys      68 flags          72 kinds[16]     88 reserved               │
+  96 ├──────────────────────────────── buckets ────────────────────────────────────┤
+     │ [0] u32 reference │ [1] u32 │ [2] u32 │ … │ [nbuckets - 1] u32               │
+     └───────────────────────────────────────────────────────────────────────────────┘
+       nbuckets: a power of two, at least max(1024, 2 × capacity)
+       bucket = hash >> bucket_shift (the high bits of the hash); 0 is an empty bucket
+```
+
+A chunk and a record:
+
+```
+ chunk k (at most 1 MiB, aligned to 8)
+ ┌────────┬──────────┬──────────┬──────────┬─────────────┬───────────────┐
+ │ used   │ record 0 │ record 1 │ record 2 │    …        │ free          │
+ │ 8 bytes│          │          │          │             │               │
+ └────────┴──────────┴──────────┴──────────┴─────────────┴───────────────┘
+  used: the bytes taken, these 8 included; only the chunk's writer stores it
+
+ record (record_size bytes, a multiple of 8)
+ ┌──────┬──────┬───────────┬──────┬────────┬────────┬─────┬──────────────────┐
+ │ hash │ next │ null_bits │ len  │ key 0  │ key 1  │  …  │ payload, padding │
+ │ u32  │ u32  │   u32     │ u32  │  i64   │  i64   │     │                  │
+ └──────┴──────┴───────────┴──────┴────────┴────────┴─────┴──────────────────┘
+  0      4      8           12     16 (the record header is 16 bytes)
+  next: the reference of the next record of the bucket, 0 at the end of the chain
+```
+
+A reference, the same in every process:
+
+```
+  31            17 16                    0
+ ┌────────────────┬────────────────────────┐
+ │ chunk (15 bits)│ place / 8 (17 bits)    │   address = chunks[chunk] + place · 8
+ └────────────────┴────────────────────────┘
+  reference 0 is chunk 0, byte 0: the used mark, never a record, so 0 means none
+```
+
+Before a record is read, its reference is checked: the chunk below `nchunks`, the place at
+least 8, the whole record within `chunk_lens[chunk]`, its `len` equal to `record_size`.
+
+A chain may run through several chunks:
+
+```
+ index                               chunk 0              chunk 1              chunk 2
+ ┌──────────┐                        ┌──────────┐         ┌──────────┐         ┌──────────┐
+ │ bucket 0 │ 0                      │ used     │         │ used     │         │ used     │
+ │ bucket 1 │────────────────────────┼──────────┼─────────┼─►┌─────┐ │         │          │
+ │ bucket 2 │ 0                      │          │         │  │ A   │─┼─────────┼─►┌─────┐ │
+ │ bucket 3 │──────►┌─────┐          │          │         │  │next │ │         │  │ B   │ │
+ │   …      │       │ C   │ next = 0 │          │         │  └─────┘ │         │  │next=0│
+ └──────────┘       └─────┘(chunk 0) └──────────┘         └──────────┘         └──┴─────┴─┘
+```
+
+`tess_table_link` puts each record at the head of its bucket, so a key's records lie among
+others and the next one is found by a walk (`tess_table_next_match`);
+`tess_table_link_grouped` puts a record right after one with the same keys, so the next
+record of a key is the next one in the chain (`tess_table_next_in_group`):
+
+```
+ link:          bucket → D(k=5) → B(k=7) → C(k=5) → A(k=5)
+ link_grouped:  bucket → D(k=9) → A(k=5) → C(k=5) → E(k=5) → B(k=7)
+                                  └── key 5 together ──┘
+```
+
 ## Creating and attaching
 
 `tess_table_size(nkeys, kinds, payload_size, capacity, &size, &status)`
@@ -281,6 +372,90 @@ an unwritten record, a relaxed filter state lets a reader see an
 unfilled filter, and linking before the index is made breaks the table.
 The model found that counting the records after publishing them let
 such a probe call a chain corrupt; they are counted first.
+
+## How the table grows
+
+Records never move; only the index is made anew.
+
+- A serial `TessHashJoin` appends the inner side to chunks (64 kB, then 1 MB, another when
+  the last is full) with no index at all (`index` is NULL); once the inner side is read,
+  it makes the index for exactly the rows appended and links every chunk grouped:
+  `build_rows = N → index for N → link_grouped(chunk 0), link_grouped(chunk 1), …`.
+- `TessAgg` creates the index for the planner's estimate of the groups;
+  `tess_table_find_or_insert` appends new groups to the last chunk and puts them into the
+  buckets at once, and stops when the chunk is full (the node adds a chunk) or the groups
+  reach half the buckets (the node makes an index for twice the groups with
+  `tess_table_regrow`: the header copied, the buckets cleared, every record of every chunk
+  put into its bucket again, grouped; the old index is freed). Both indexes live for the
+  moment of the regrow, 4 bytes per bucket each; no record is copied.
+- A shared table does not grow at all: its index is made once, for every record appended
+  (below).
+
+## The atomics in order
+
+Most header fields are written once, when the index is made, before anyone else sees it,
+and are read without ordering. Only `nrecords` and the buckets change during a build.
+
+Linking a chunk (`tess_table_link`, several processes at once in a shared build):
+
+```
+ 1. nrecords.fetch_add(records of the chunk)        AcqRel   ← counted first
+ 2. for each record of the chunk, in order:
+      hash = record.hash                            plain read (the linker's own record)
+      head = bucket.load()                          Acquire
+      loop:
+        record.next = head                          plain store (the record is not yet visible)
+        CAS(bucket, head → the record's reference)  AcqRel; on failure Acquire and again
+```
+
+The count comes first so that a probe that finds a new record also sees a record count
+that covers its chain; otherwise it could take a long chain for a cycle and report a
+corrupt table (the loom model found this).
+
+Probing, once linking is over:
+
+```
+ head = bucket.load()                               Acquire  ← sees the whole record the CAS published
+ each step:
+   check the reference (chunk < nchunks, the chunk's length)
+   read hash, keys, next                            plain reads (a published record never changes)
+   steps ≥ nrecords: read nrecords again            Acquire; still ≥ → a cycle, the table is corrupt
+```
+
+Appending (`tess_table_append`) is plain stores into the appender's own chunk and its used
+mark; the buckets are not touched. The one writer (`tess_table_find_or_insert`,
+`tess_table_link_grouped`, `tess_table_regrow`) uses the same CAS, which never fails for it;
+placing a record after another of its keys is plain stores of two `next` fields, which one
+writer may do.
+
+A shared build, by the phases of the barrier:
+
+```
+ BUILD ─ every participant:
+          tess_build_take_chunk: counters.chunks.fetch_add(1)   Relaxed → a chunk number
+          dsa_allocate, tess_table_chunk_init
+          under the node's spinlock: the chunk into the table's list
+          tess_table_append of its rows into its own chunks (plain stores)
+          tess_build_report: counters.records, null_columns fetch_add   Relaxed
+ ═══ BarrierArriveAndWait ═══  ← orders everything above
+ SIZE  ─ the elected one: the totals (Relaxed) → the index for exactly N records (plain
+          stores of the header, the buckets cleared) → the directory of dsa_pointers by
+          number, from the list → the Bloom filter
+ ═══ BarrierArriveAndWait ═══
+ LINK  ─ every participant: the chunks' bases from the directory → tess_table_link of its
+          own chunks (fetch_add and CAS, as above)
+ ═══ BarrierArriveAndWait ═══
+ PROBE ─ every participant: probes (Acquire loads of the heads)
+ ═══ BarrierArriveAndDetach ═══ → the last one frees the index, directory, chunks and values
+```
+
+The build counters need no ordering: the barrier shows the others everything a participant
+did before it (the model of the core's barrier in `loom.rs`); other participants' used
+marks are only read after the barrier.
+
+The shared Bloom filter has a state word (0 none, 1 building, 2 ready): the participant
+whose CAS 0 → 1 succeeds fills the filter and stores 2 with Release; the others check rows
+against it only after they read 2 with Acquire, and probe the table without it until then.
 
 ## Ownership and errors
 
