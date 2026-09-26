@@ -38,6 +38,17 @@ query down, and where it can, does it speed one up.
   with two, and the plans of both modes with `EXPLAIN VERBOSE`, which
   shows every worker's time and rows under each node. Run with
   `measure probe 2`; the workers of each case are set in the file.
+- **spill** (`spill.sql`): joins and groupings whose table outgrows
+  `hash_mem` at the data multiplier 10 (`SHARED_BUFFERS=4GB run.sh setup
+  10`), each at a `work_mem` of 4, 16 and 64 MB, set while both modes plan
+  and run it: the fact table's key into the dimension as an inner join
+  with a dimension column, a left join and `NOT EXISTS`; the dimension's
+  keys against `bench_mixed` with its text column on the inner side; the
+  fact table grouped by its key (1 M groups) and `bench_mixed` by its
+  unique one (5 M). A case runs for seconds, so it is warmed up twice
+  and timed 11 times (`-v warmups=`, `-v repetitions=` change that); the
+  plans record the partitions and disk of both modes. Run serially and
+  with `measure spill 2`.
 - **oltp**: short prepared-statement queries, `pgbench -S`, where the
   planner hooks and the loaded modules must not slow down queries that
   never use a batch node. Arrives when more than one hook is installed.
