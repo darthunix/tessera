@@ -109,20 +109,20 @@ typedef struct JoinChunk
 #define JOIN_CHUNK_HEADER MAXALIGN(sizeof(JoinChunk))
 
 /*
- * A shared table's by-reference inner values live in blocks of the
- * query's dynamic shared memory, each participant filling blocks of this
- * size, a value larger than a quarter of one getting a block of its own;
- * a payload word holds the value's dsa_pointer, 0 for NULL. Every block
- * starts with the next one in a list the table frees them by.
+ * By-reference inner values live in chunks of their own, the first of
+ * JOIN_VALUE_FIRST bytes and the others of JOIN_VALUE_CHUNK, a value
+ * larger than a quarter of one getting a chunk of its own: in the node's
+ * memory for a table of its own, in the query's dynamic shared memory for
+ * a shared one, where each participant fills chunks of its own, numbered
+ * under the lock and entered in the table's list after a JoinChunk
+ * header. A payload word refers to a value by its chunk's number plus one
+ * and its byte in the chunk (JOIN_VALUE_REF), 0 standing for NULL: no
+ * address of a process, so that the words mean the same in every process
+ * and on disk. A gather turns them into addresses.
  */
-#define JOIN_VALUE_BLOCK (64 * 1024)
-
-typedef struct JoinValueBlock
-{
-	dsa_pointer next;
-} JoinValueBlock;
-
-#define JOIN_VALUE_HEADER MAXALIGN(sizeof(JoinValueBlock))
+#define JOIN_VALUE_FIRST (64 * 1024)
+#define JOIN_VALUE_CHUNK (1024 * 1024)
+#define JOIN_VALUE_REF(number, byte) ((((uint64) (number) + 1) << 32) | (uint64) (byte))
 
 /* The part of the node's DSM chunk a shared build uses, before the counters. */
 typedef struct JoinShared
@@ -142,10 +142,17 @@ typedef struct JoinShared
 	/* The shared Bloom filter, sized with the table; one participant builds it. */
 	dsa_pointer filter;
 	Size		filter_words;
-	/* Every chunk and every block of by-reference values, under the lock. */
+	/*
+	 * Every chunk of records and every chunk of values, under the lock,
+	 * which also numbers the value chunks; the elected participant makes
+	 * the value chunks' directory as it does the records'.
+	 */
 	slock_t		lock;
 	dsa_pointer chunks;
 	dsa_pointer values;
+	uint32		next_value_chunk;
+	dsa_pointer value_directory;
+	int			nvalue_chunks;
 } JoinShared;
 
 /* Which child a column of the scan tuple comes from. */
@@ -360,13 +367,25 @@ typedef struct TessHashJoinState
 	int			own_slots;
 	Size		own_bytes;
 	uint64		appended;
-	/* The block this participant copies by-reference values into, and its bytes. */
-	dsa_pointer value_block;
+	/*
+	 * The chunks of by-reference values: their bases in this process by
+	 * number, with room for value_slots; the chunk values are copied into
+	 * and its length and bytes used; the chunks this process made and the
+	 * bytes they take.
+	 */
+	char	  **value_bases;
+	int			nvalue_chunks;
+	int			value_slots;
+	int			value_current;
+	Size		value_len;
 	Size		value_used;
+	int			value_own;
 	Size		value_bytes;
 } TessHashJoinState;
 
 static const CustomExecMethods join_exec_methods;
+
+static void reset_values(TessHashJoinState *state);
 
 /* Raise the error a kernel stored, if the call failed. */
 static inline void
@@ -541,6 +560,7 @@ create_table(TessHashJoinState *state)
 	take_back_bloom(state);
 	MemoryContextReset(state->table_context);
 	MemoryContextReset(state->values_context);
+	reset_values(state);
 	/* A new table: decide on its filter again. */
 	state->bloom = NULL;
 	state->bloom_words = 0;
@@ -624,35 +644,94 @@ index_table(TessHashJoinState *state)
 
 static dsa_area *query_dsa(TessHashJoinState *state);
 
-/* A block of `size` bytes for by-reference values, entered in the table's list. */
-static dsa_pointer
-new_value_block(TessHashJoinState *state, Size size)
+/* Room for the bases of nchunks value chunks in this process. */
+static void
+reserve_values(TessHashJoinState *state, int nchunks)
 {
-	dsa_area   *area = query_dsa(state);
-	dsa_pointer block = dsa_allocate_extended(area, add_size(JOIN_VALUE_HEADER, size),
-											  DSA_ALLOC_HUGE);
-	JoinValueBlock *header = dsa_get_address(area, block);
+	MemoryContext context = state->css.ss.ps.state->es_query_cxt;
+	int			slots = Max(state->value_slots, 16);
 
-	SpinLockAcquire(&state->shared->lock);
-	header->next = state->shared->values;
-	state->shared->values = block;
-	SpinLockRelease(&state->shared->lock);
-	state->value_bytes = add_size(state->value_bytes, add_size(JOIN_VALUE_HEADER, size));
-	return block;
+	if (nchunks <= state->value_slots)
+		return;
+	while (slots < nchunks)
+		slots *= 2;
+	state->value_bases = state->value_bases == NULL ?
+		MemoryContextAllocZero(context, sizeof(char *) * slots) :
+		repalloc0(state->value_bases, sizeof(char *) * state->value_slots,
+				  sizeof(char *) * slots);
+	state->value_slots = slots;
+}
+
+/* Forget the value chunks, which went with the table. */
+static void
+reset_values(TessHashJoinState *state)
+{
+	state->nvalue_chunks = 0;
+	state->value_current = -1;
+	state->value_len = 0;
+	state->value_used = 0;
+	state->value_own = 0;
+	state->value_bytes = 0;
 }
 
 /*
- * Copy a by-reference inner value into the query's shared memory, where
- * every participant finds it, and return its dsa_pointer: the bytes
- * datumCopy would copy, an expanded object flattened.
+ * A value chunk of len bytes: in the node's memory, or in the query's
+ * shared memory, numbered under the lock and entered in the table's list.
+ * Returns its number.
+ */
+static int
+new_value_chunk(TessHashJoinState *state, Size len)
+{
+	int			number;
+	char	   *base;
+
+	if (state->shared != NULL)
+	{
+		dsa_area   *area = query_dsa(state);
+		dsa_pointer block = dsa_allocate_extended(area, add_size(JOIN_CHUNK_HEADER, len),
+												  DSA_ALLOC_HUGE);
+		JoinChunk  *header = dsa_get_address(area, block);
+
+		SpinLockAcquire(&state->shared->lock);
+		number = (int) state->shared->next_value_chunk++;
+		header->next = state->shared->values;
+		state->shared->values = block;
+		SpinLockRelease(&state->shared->lock);
+		header->number = number;
+		header->len = len;
+		base = (char *) header + JOIN_CHUNK_HEADER;
+		state->value_bytes = add_size(state->value_bytes, JOIN_CHUNK_HEADER);
+	}
+	else
+	{
+		number = state->nvalue_chunks;
+		base = MemoryContextAllocExtended(state->values_context, len, MCXT_ALLOC_HUGE);
+	}
+	if (number >= INT_MAX - 1)
+		ereport(ERROR,
+				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+				 errmsg("TessHashJoin cannot hold more chunks of values")));
+	reserve_values(state, number + 1);
+	state->value_bases[number] = base;
+	state->nvalue_chunks = Max(state->nvalue_chunks, number + 1);
+	state->value_own++;
+	state->value_bytes = add_size(state->value_bytes, len);
+	return number;
+}
+
+/*
+ * Copy a by-reference inner value into the table's value chunks and
+ * return its reference: the bytes datumCopy would copy, an expanded
+ * object flattened.
  */
 static uint64
-store_shared_value(TessHashJoinState *state, Datum value, int16 typlen)
+store_value(TessHashJoinState *state, Datum value, int16 typlen)
 {
 	ExpandedObjectHeader *expanded = NULL;
-	dsa_pointer target;
 	Size		size;
 	Size		aligned;
+	int			number;
+	Size		byte;
 
 	if (typlen == -1 && VARATT_IS_EXTERNAL_EXPANDED(DatumGetPointer(value)))
 	{
@@ -662,24 +741,31 @@ store_shared_value(TessHashJoinState *state, Datum value, int16 typlen)
 	else
 		size = datumGetSize(value, false, typlen);
 	aligned = MAXALIGN(size);
-	if (aligned > JOIN_VALUE_BLOCK / 4)
-		target = new_value_block(state, aligned) + JOIN_VALUE_HEADER;
+	if (aligned > JOIN_VALUE_CHUNK / 4)
+	{
+		number = new_value_chunk(state, aligned);
+		byte = 0;
+	}
 	else
 	{
-		if (!DsaPointerIsValid(state->value_block) ||
-			state->value_used + aligned > JOIN_VALUE_BLOCK - JOIN_VALUE_HEADER)
+		if (state->value_current < 0 ||
+			state->value_used + aligned > state->value_len)
 		{
-			state->value_block = new_value_block(state, JOIN_VALUE_BLOCK - JOIN_VALUE_HEADER);
+			Size		len = state->value_own == 0 ? JOIN_VALUE_FIRST : JOIN_VALUE_CHUNK;
+
+			state->value_len = Max(len, aligned);
+			state->value_current = new_value_chunk(state, state->value_len);
 			state->value_used = 0;
 		}
-		target = state->value_block + JOIN_VALUE_HEADER + state->value_used;
+		number = state->value_current;
+		byte = state->value_used;
 		state->value_used += aligned;
 	}
 	if (expanded != NULL)
-		EOH_flatten_into(expanded, dsa_get_address(query_dsa(state), target), size);
+		EOH_flatten_into(expanded, state->value_bases[number] + byte, size);
 	else
-		memcpy(dsa_get_address(query_dsa(state), target), DatumGetPointer(value), size);
-	return (uint64) target;
+		memcpy(state->value_bases[number] + byte, DatumGetPointer(value), size);
+	return JOIN_VALUE_REF(number, byte);
 }
 
 /*
@@ -702,11 +788,9 @@ fill_payload(TessHashJoinState *state, TessBatch *batch, const TessRowMask *vali
 		int16		typlen = state->typlens[scan_column];
 		bool		byval = state->typbyvals[scan_column];
 		TessDatumColumn values;
-		MemoryContext oldcontext;
 
 		child_column(batch, state->child_columns[scan_column], valid,
 					 TESS_COLUMN_FOR_PROJECTION, &values);
-		oldcontext = MemoryContextSwitchTo(state->values_context);
 		row = -1;
 		while ((row = tess_row_mask_next(valid, row)) >= 0)
 		{
@@ -720,12 +804,9 @@ fill_payload(TessHashJoinState *state, TessBatch *batch, const TessRowMask *vali
 			}
 			else if (byval)
 				record[1 + word] = values.values[row];
-			else if (state->shared != NULL)
-				record[1 + word] = store_shared_value(state, values.values[row], typlen);
 			else
-				record[1 + word] = datumCopy(values.values[row], false, typlen);
+				record[1 + word] = store_value(state, values.values[row], typlen);
 		}
-		MemoryContextSwitchTo(oldcontext);
 	}
 }
 
@@ -895,6 +976,12 @@ attach_shared_table(TessHashJoinState *state)
 		state->chunk_lens[chunk] = lens[chunk];
 	}
 	state->table.nchunks = nchunks;
+	/* Every participant's value chunks, which a gather reads. */
+	reserve_values(state, Max(state->shared->nvalue_chunks, 1));
+	bases = dsa_get_address(area, state->shared->value_directory);
+	for (int chunk = 0; chunk < state->shared->nvalue_chunks; chunk++)
+		state->value_bases[chunk] = dsa_get_address(area, bases[chunk]);
+	state->nvalue_chunks = state->shared->nvalue_chunks;
 }
 
 /*
@@ -1090,6 +1177,28 @@ size_shared_table(TessHashJoinState *state)
 			elog(ERROR, "TessHashJoin is missing chunk %llu of its table",
 				 (unsigned long long) chunk);
 	state->shared->nchunks = (int) nchunks;
+	/* The value chunks' directory: dsa_pointers of their bases by number. */
+	state->shared->nvalue_chunks = (int) state->shared->next_value_chunk;
+	state->shared->value_directory =
+		dsa_allocate_extended(area,
+							  mul_size(Max(state->shared->nvalue_chunks, 1),
+									   sizeof(dsa_pointer)),
+							  DSA_ALLOC_ZERO | DSA_ALLOC_HUGE);
+	bases = dsa_get_address(area, state->shared->value_directory);
+	for (block = state->shared->values; DsaPointerIsValid(block);)
+	{
+		JoinChunk  *header = dsa_get_address(area, block);
+
+		if (header->number >= (uint64) state->shared->nvalue_chunks ||
+			DsaPointerIsValid(bases[header->number]))
+			elog(ERROR, "TessHashJoin found value chunk %llu out of the directory",
+				 (unsigned long long) header->number);
+		bases[header->number] = block + JOIN_CHUNK_HEADER;
+		block = header->next;
+	}
+	for (int chunk = 0; chunk < state->shared->nvalue_chunks; chunk++)
+		if (!DsaPointerIsValid(bases[chunk]))
+			elog(ERROR, "TessHashJoin is missing value chunk %d of its table", chunk);
 	attach_shared_table(state);
 	check(state, state->kernels->table_stats(&state->table, &stats,
 											 &state->status));
@@ -1161,9 +1270,17 @@ free_shared_table(TessHashJoinState *state)
 		dsa_pointer block = state->shared->values;
 
 		state->shared->values =
-			((JoinValueBlock *) dsa_get_address(query_dsa(state), block))->next;
+			((JoinChunk *) dsa_get_address(query_dsa(state), block))->next;
 		dsa_free(query_dsa(state), block);
 	}
+	if (DsaPointerIsValid(state->shared->value_directory))
+	{
+		dsa_free(query_dsa(state), state->shared->value_directory);
+		state->shared->value_directory = InvalidDsaPointer;
+	}
+	state->shared->next_value_chunk = 0;
+	state->shared->nvalue_chunks = 0;
+	reset_values(state);
 	if (DsaPointerIsValid(state->shared->filter))
 	{
 		dsa_free(query_dsa(state), state->shared->filter);
@@ -1189,9 +1306,7 @@ build_shared(TessHashJoinState *state)
 	uint32		reply = 0;
 
 	state->compact_decided = false;
-	state->value_block = InvalidDsaPointer;
-	state->value_used = 0;
-	state->value_bytes = 0;
+	reset_values(state);
 	state->build_rows = 0;
 	state->duplicates = 0;
 	state->null_columns = 0;
@@ -1339,16 +1454,21 @@ gather_inner(TessHashJoinState *state, int word)
 											  sizeof(uint64) * (1 + word),
 											  state->inner_values[word],
 											  &state->status));
-	/* A shared table holds a by-reference value's dsa_pointer: its address here. */
-	if (state->shared != NULL && !state->typbyvals[state->payload_columns[word]])
+	/* A by-reference value's word is its reference: its address here. */
+	if (!state->typbyvals[state->payload_columns[word]])
 	{
-		dsa_area   *area = query_dsa(state);
 		Datum	   *values = state->inner_values[word];
 
 		while ((row = tess_row_mask_next(&round, row)) >= 0)
-			if (values[row] != 0)
-				values[row] = PointerGetDatum(dsa_get_address(area,
-															  (dsa_pointer) values[row]));
+		{
+			uint64		ref = DatumGetUInt64(values[row]);
+
+			if (ref == 0)
+				continue;
+			Assert((ref >> 32) - 1 < (uint64) state->nvalue_chunks);
+			values[row] = PointerGetDatum(state->value_bases[(ref >> 32) - 1] +
+										  (ref & 0xFFFFFFFF));
+		}
 		row = -1;
 	}
 	if (nullable)
@@ -2245,6 +2365,7 @@ join_begin(CustomScanState *css, EState *estate, int eflags)
 	state->values_context = AllocSetContextCreate(estate->es_query_cxt,
 												  "TessHashJoin values",
 												  ALLOCSET_DEFAULT_SIZES);
+	reset_values(state);
 	/* The residual clauses: those the compiler took in batches, then by rows. */
 	state->scan_layout = (TessLayout) TESS_STRUCT_INITIALIZER(TessLayout);
 	state->scan_layout.ncolumns = state->ncolumns;
@@ -2597,6 +2718,9 @@ init_shared(TessHashJoinState *state)
 	SpinLockInit(&state->shared->lock);
 	state->shared->chunks = InvalidDsaPointer;
 	state->shared->values = InvalidDsaPointer;
+	state->shared->next_value_chunk = 0;
+	state->shared->value_directory = InvalidDsaPointer;
+	state->shared->nvalue_chunks = 0;
 	check(state, state->kernels->build_counters_init(state->shared->counters,
 													 &state->status));
 	memset(&state->participant, 0, sizeof(state->participant));

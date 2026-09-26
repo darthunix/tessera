@@ -665,8 +665,14 @@ join (a NULL in any key never matches) and appends the rows as records
 to chunks with `tess_table_append`, the first chunk of 64 kB and the
 others of 1 MB, adding one when the last is full. A record's payload is
 a word of the NULL bits of the kept inner columns and a Datum per
-column; a by-reference value is copied into the node's memory, where it
-lives as long as the table. The node also notes which kept columns hold
+column. A by-reference value is copied into the table's value chunks,
+the first of 64 kB and the others of 1 MB (a value larger than a quarter
+of one into a chunk of its own, an expanded object flattened, a TOAST
+pointer as it is), and the payload word holds its reference, the chunk's
+number plus one and the byte in it, 0 for NULL: no address of a process,
+so the words mean the same in every process and, for spilling (plan item
+5.6), on disk. A round's values are turned into addresses through the
+chunks' bases when a parent first asks for the column. The node also notes which kept columns hold
 a NULL at all. Once the inner side is read, the node makes the index for
 exactly the rows appended and links every chunk with
 `tess_table_link_grouped`, which puts a key's records next to each
@@ -730,15 +736,13 @@ under a spinlock, and reports its records; the elected one makes the
 index for exactly the records appended and the directory of the chunks'
 `dsa_pointer`s by number, from which every participant maps their
 bases; each participant links its own chunks with `tess_table_link`.
-Nothing is copied and the table never grows. A
-by-reference inner value cannot be a pointer into one participant's
-memory: each participant copies its rows' values into 64 kB blocks of
-the query's dynamic shared memory (a value larger than a quarter of one
-into a block of its own, an expanded object flattened, a TOAST pointer
-as it is), the payload word holding the value's `dsa_pointer`, and a
-round's values are turned into addresses of the probing participant
-(`dsa_get_address`) when a parent first asks for the column. The blocks
-are entered in a list under a spinlock, by which the table frees them.
+Nothing is copied and the table never grows. By-reference inner values
+go into value chunks as in a table of its own, allocated in the query's
+dynamic shared memory: each participant fills chunks of its own,
+numbered under a spinlock and entered in the table's list, by which the
+table frees them; the elected one makes their directory with the
+records', and every participant maps their bases, so a reference means
+the same in each.
 The barrier's waits stay in the node, since they may raise an error. Then
 every participant probes the one table; its chains are not grouped, so
 the next record of a key is found by `tess_table_next_match`. The links
