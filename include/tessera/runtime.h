@@ -701,4 +701,12 @@ extern void tess_spill_stats(const TessSpill *spill, uint64 *blocks,
 /* Delete this participant's files and release the set. */
 extern void tess_spill_free(TessSpill *spill);
 
+/*
+ * Release the set, closing this participant's files: a shared set's files
+ * stay for the other participants to read until the file set is deleted
+ * (SharedFileSetDeleteAll, or its segment's last detach); a serial set's
+ * are deleted, as tess_spill_free does.
+ */
+extern void tess_spill_release(TessSpill *spill);
+
 #endif							/* TESSERA_RUNTIME_H */

@@ -31,8 +31,9 @@ const ON_DISK: u64 = 1;
 const ALONE: u64 = 2;
 
 /// Words before the partitions': the partitions, the bytes in memory, the
-/// budget, the counter that spreads the participants over the partitions.
-const HEAD_WORDS: usize = 4;
+/// budget, the counter that spreads the participants over the partitions,
+/// and the partitions sent to disk so far.
+const HEAD_WORDS: usize = 5;
 /// Words per partition: bytes in memory, records, flags, the next inner
 /// file and the next outer file to take.
 const PART_WORDS: usize = 5;
@@ -187,7 +188,17 @@ pub(super) trait Spill: Words {
         }
         let partition = largest?;
         let before = self.fetch_or(self.part(partition, 2), ON_DISK);
-        (before & ON_DISK == 0).then_some(partition)
+        if before & ON_DISK != 0 {
+            return None;
+        }
+        self.fetch_add(4, 1);
+        Some(partition)
+    }
+
+    /// The partitions sent to disk so far: a participant that saw fewer
+    /// writes its chunks of the new ones.
+    fn evictions(&self) -> u64 {
+        self.load(4)
     }
 
     /// Whether the partition went to disk.
@@ -290,6 +301,10 @@ impl SharedSpill<'_> {
     pub fn evict_largest(&self) -> Option<u32> {
         Spill::evict_largest(self)
     }
+    /// See [`Spill::evictions`].
+    pub fn evictions(&self) -> u64 {
+        Spill::evictions(self)
+    }
     /// See [`Spill::on_disk`].
     pub fn on_disk(&self, partition: u32) -> Result<bool> {
         Spill::on_disk(self, partition)
@@ -347,6 +362,7 @@ mod tests {
         assert_eq!(spill.evict_largest(), Some(2));
         assert!(spill.on_disk(2).unwrap());
         assert_eq!(spill.evict_largest(), Some(1), "then the next largest");
+        assert_eq!(spill.evictions(), 2);
         assert_eq!(spill.evict_largest(), None, "no bytes left in memory");
         assert!(spill.add_bytes(-30, Some(2)).is_ok());
         assert_eq!(spill.bytes(), 80 + 40 + 10);

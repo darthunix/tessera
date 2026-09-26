@@ -776,6 +776,11 @@ extern TessStatusCode tess_table_spill_evict(uint64 *words, Size nwords,
 											 int32 *partition,
 											 TessStatus *status);
 
+/* The partitions sent to disk so far. */
+extern TessStatusCode tess_table_spill_evictions(uint64 *words, Size nwords,
+												 uint64 *evictions,
+												 TessStatus *status);
+
 /* Whether a partition went to disk, and whether one participant took it whole. */
 extern TessStatusCode tess_table_spill_flags(uint64 *words, Size nwords,
 											 uint32 partition, bool *on_disk,

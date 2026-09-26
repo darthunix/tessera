@@ -175,6 +175,28 @@ pub unsafe extern "C" fn tess_table_spill_evict(
     }
 }
 
+/// `tess_table_spill_evictions`: the partitions sent to disk so far.
+///
+/// # Safety
+///
+/// As for [`spill`]; `evictions` must be writable; `status` as for every
+/// entry point.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tess_table_spill_evictions(
+    words: *mut u64,
+    nwords: usize,
+    evictions: *mut u64,
+    status: *mut Status,
+) -> Code {
+    // SAFETY: the caller's contract.
+    unsafe {
+        guard(status, || {
+            *evictions.as_mut().context("a null count")? = spill(words, nwords)?.evictions();
+            Ok(())
+        })
+    }
+}
+
 /// `tess_table_spill_flags`: whether a partition went to disk, and
 /// whether one participant took it whole.
 ///

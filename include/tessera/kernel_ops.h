@@ -377,10 +377,15 @@ typedef struct TessKernelOps
 										const uint32 *hashes,
 										const TessRowMask *rows,
 										TessStatus *status);
+	/* tess_table_spill_evictions */
+	TessStatusCode (*table_spill_evictions) (uint64 *words,
+											 Size nwords,
+											 uint64 *evictions,
+											 TessStatus *status);
 } TessKernelOps;
 
 #define TESS_KERNEL_OPS_MIN_SIZE \
-	TESS_ABI_SIZE_INCLUDING_FIELD(TessKernelOps, bloom_shared_add)
+	TESS_ABI_SIZE_INCLUDING_FIELD(TessKernelOps, table_spill_evictions)
 
 /*
  * The registry of the kernels: one table per backend, installed by the

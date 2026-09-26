@@ -405,6 +405,25 @@ tess_spill_stats(const TessSpill *spill, uint64 *blocks, uint64 *bytes,
 }
 
 void
+tess_spill_release(TessSpill *spill)
+{
+	if (spill == NULL)
+		return;
+	if (spill->shared == NULL)
+	{
+		tess_spill_free(spill);
+		return;
+	}
+	while (spill->readers != NULL)
+		tess_spill_close(spill->readers);
+	/* Closing a file of a set keeps it; the set deletes it. */
+	for (int partition = 0; partition < spill->npartitions; partition++)
+		if (spill->files[partition] != NULL)
+			BufFileClose(spill->files[partition]);
+	MemoryContextDelete(spill->context);
+}
+
+void
 tess_spill_free(TessSpill *spill)
 {
 	if (spill == NULL)

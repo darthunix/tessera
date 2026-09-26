@@ -202,7 +202,8 @@ tessera_test_spill_serial(PG_FUNCTION_ARGS)
 /*
  * Two participants of a shared set in one segment: each reads the other's
  * files and its own, a partition one of them left empty has no file of
- * that participant; the files go with the segment.
+ * that participant; one that releases its set leaves its files to the
+ * others, and the files go with the segment.
  */
 Datum
 tessera_test_spill_shared(PG_FUNCTION_ARGS)
@@ -245,8 +246,11 @@ tessera_test_spill_shared(PG_FUNCTION_ARGS)
 		!tess_spill_read_header(early, &header) || header.number != 2)
 		elog(ERROR, "two readers share a position");
 	tess_spill_close(late);
-	/* The set closes a reader left open. */
-	tess_spill_free(one);
+	/* The set closes a reader left open; released, its files stay for the others. */
+	tess_spill_release(one);
+	for (int partition = 0; partition < 4; partition++)
+		if (!read_partition(two, 0, partition, first, lengthof(first)))
+			elog(ERROR, "a released participant's partition %d is gone", partition);
 	tess_spill_drop(two, 1);
 	if (tess_spill_open(two, 1, 1) != NULL)
 		elog(ERROR, "a dropped shared file is still there");
