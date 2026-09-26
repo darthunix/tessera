@@ -289,6 +289,15 @@ scan below divides the work. Without a `Gather` of its own, an aggregate
 above the relation gets the core's partial aggregate over the node's rows
 in each worker.
 
+A relation whose clauses all run row by row gets no such path, since the
+node would have no batch work of its own; but an inner or semi hash join
+takes one for its outer side (`tess_filter_row_path`), over the
+relation's sequential scan or partial one when that is the cheapest path:
+the join's Bloom filter then reaches the rows before the row-wise
+clauses, and even without it the node's lazy columns cost less than the
+core scan's tuples under the pack node (plan item 5.2). Such a node shows
+no `Batch Filter`.
+
 Two things make the node possible before that scan. The planner gives
 every scan of the relation its clauses, so `PlanCustomPath` takes them
 away from the sequential scan below the pack node, after checking they are
@@ -598,7 +607,10 @@ protects whichever of them runs in batches; keys go into it as 8-byte values and
 an int8 inside the int4 range hashes as the int4, so every combination
 of the two types uses one table. The children are batch
 paths over the sides' cheapest paths (`tess_batch_input_path`: a native
-scan, a batch path as it is, or pack over anything else). The hook is
+scan, a batch path as it is, or pack over anything else); for an inner or
+semi join an outer relation whose clauses all run row by row is read
+through TessFilter instead (see TessFilter, Planning), where the join's
+Bloom filter reaches it. The hook is
 called for both orders of the sides, and as in the core the inner side is
 the one built, so the cost decides which side that is. The template is
 the core's hash join of the same inputs (`initial_cost_hashjoin` and

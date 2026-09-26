@@ -7,6 +7,7 @@
 #include "optimizer/paths.h"
 #include "optimizer/restrictinfo.h"
 #include "optimizer/tlist.h"
+#include "parser/parsetree.h"
 
 #include "tessera/expr.h"
 #include "tessera/plan.h"
@@ -184,6 +185,32 @@ find_seqscan(const List *pathlist)
 }
 
 /*
+ * TessFilter over a base relation whose clauses all run row by row, in
+ * place of its sequential scan (a partial one gives a partial path), or
+ * NULL. Such a node has no batch work of its own, so the relation does not
+ * get it as a path, but an inner or semi hash join takes it for its outer
+ * side: the join's Bloom filter then removes rows before the row-wise
+ * clauses run, and even without one the node's lazy columns cost less
+ * than a core scan's tuples under the pack node.
+ */
+Path *
+tess_filter_row_path(PlannerInfo *root, RelOptInfo *rel, Path *seqscan)
+{
+	Path	   *child;
+
+	if (!*tess_runtime_api()->settings->enable || seqscan == NULL ||
+		seqscan->pathtype != T_SeqScan || seqscan->param_info != NULL ||
+		rel->reloptkind != RELOPT_BASEREL ||
+		!relation_supported(root, rel, planner_rt_fetch(rel->relid, root)) ||
+		first_clause(root, rel) == NULL || clauses_supported(root, rel) ||
+		(seqscan->parallel_workers > 0 &&
+		 (!seqscan->parallel_aware || !rel->consider_parallel)))
+		return NULL;
+	child = make_child_path(root, rel, seqscan);
+	return child != NULL ? (Path *) make_filter_path(rel, seqscan, child) : NULL;
+}
+
+/*
  * The node's path in place of the sequential scan, and a partial one in
  * place of the parallel sequential scan, so that a Gather above runs the
  * node in every participant over that participant's share of the pages;
@@ -297,8 +324,8 @@ filter_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 			residual = lappend(residual, clause);
 		order = lappend_int(order, batch ? 1 : 0);
 	}
-	if (order == NIL || linitial_int(order) == 0)
-		elog(ERROR, "TessFilter found no batch clause first in the planner's order");
+	if (order == NIL)
+		elog(ERROR, "TessFilter found no clause");
 	writer = tess_plan_writer_create(TESS_FILTER_DATA, TESS_FILTER_DATA_VERSION);
 	tess_plan_write_int_list(writer, "order", order);
 	map_scan_tuple(&layout, &child);

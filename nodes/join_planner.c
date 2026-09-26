@@ -347,6 +347,18 @@ join_pathlist(PlannerInfo *root, RelOptInfo *joinrel, RelOptInfo *outerrel,
 		PATH_REQ_OUTER(outer_path) != NULL || PATH_REQ_OUTER(inner_path) != NULL ||
 		tess_runtime_kernels() == NULL)
 		return;
+	/*
+	 * An inner or semi join drops an outer row without a pair: over a
+	 * relation whose clauses all run row by row, TessFilter takes them
+	 * from the core scan, and the join's Bloom filter reaches them.
+	 */
+	if (jointype == JOIN_INNER || jointype == JOIN_SEMI)
+	{
+		Path	   *filtered = tess_filter_row_path(root, outerrel, outer_path);
+
+		if (filtered != NULL)
+			outer_path = filtered;
+	}
 	path = make_join_path(root, joinrel, jointype, extra, &keys, ninner,
 						  outer_path, inner_path, false);
 	if (path != NULL)
@@ -366,8 +378,16 @@ join_pathlist(PlannerInfo *root, RelOptInfo *joinrel, RelOptInfo *outerrel,
 		inner_path = get_cheapest_parallel_safe_total_inner(innerrel->pathlist);
 	if (inner_path == NULL)
 		return;
+	outer_path = linitial(outerrel->partial_pathlist);
+	if (jointype == JOIN_INNER || jointype == JOIN_SEMI)
+	{
+		Path	   *filtered = tess_filter_row_path(root, outerrel, outer_path);
+
+		if (filtered != NULL)
+			outer_path = filtered;
+	}
 	path = make_join_path(root, joinrel, jointype, extra, &keys, ninner,
-						  linitial(outerrel->partial_pathlist), inner_path, false);
+						  outer_path, inner_path, false);
 	if (path != NULL && path->path.parallel_safe && path->path.parallel_workers > 0)
 	{
 		path->path.parallel_aware = true;
@@ -382,8 +402,7 @@ join_pathlist(PlannerInfo *root, RelOptInfo *joinrel, RelOptInfo *outerrel,
 	if (!enable_parallel_hash || innerrel->partial_pathlist == NIL)
 		return;
 	path = make_join_path(root, joinrel, jointype, extra, &keys, ninner,
-						  linitial(outerrel->partial_pathlist),
-						  linitial(innerrel->partial_pathlist), true);
+						  outer_path, linitial(innerrel->partial_pathlist), true);
 	if (path == NULL || !path->path.parallel_safe ||
 		path->path.parallel_workers <= 0)
 		return;

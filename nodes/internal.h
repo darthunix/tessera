@@ -34,6 +34,7 @@ extern const TessNode tess_filter_node;
 extern const CustomScanMethods tess_filter_scan_methods;
 extern Node *tess_filter_create_state(CustomScan *cscan);
 extern void tess_filter_planner_init(void);
+extern Path *tess_filter_row_path(PlannerInfo *root, RelOptInfo *rel, Path *seqscan);
 
 extern const TessNode tess_agg_node;
 extern const CustomScanMethods tess_agg_scan_methods;

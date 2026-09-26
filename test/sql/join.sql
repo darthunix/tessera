@@ -271,6 +271,14 @@ SELECT join_same($$SELECT jprobe.v FROM jprobe WHERE jprobe.v > 0 AND jprobe.v::
 SELECT join_same($$SELECT jprobe.v, jbuild.w FROM jprobe LEFT JOIN jbuild ON jprobe.k = jbuild.k WHERE jprobe.v > 0 AND jprobe.v::text LIKE '%1%'$$);
 -- Each table built for a parameter takes its filter back before it goes.
 SELECT join_same($$SELECT jsmall.k, (SELECT count(*) FROM jprobe JOIN jbuild ON jprobe.k = jbuild.k WHERE jbuild.w > jsmall.k AND jprobe.v > 0 AND jprobe.v::text LIKE '%1%') FROM jsmall$$);
+-- Only row-wise clauses: for an inner or semi join TessFilter takes them
+-- from the core scan, so that the filter below reaches them; an anti join
+-- keeps the core's scan.
+SELECT join_explain($$SELECT count(*), sum(jbuild.w) FROM jprobe JOIN jbuild ON jprobe.k = jbuild.k WHERE jprobe.v::text LIKE '%1%'$$);
+SELECT join_same($$SELECT jprobe.v, jbuild.w FROM jprobe JOIN jbuild ON jprobe.k = jbuild.k WHERE jprobe.v::text LIKE '%1%'$$);
+SELECT join_same($$SELECT jprobe.v FROM jprobe WHERE jprobe.v::text LIKE '%1%' AND EXISTS (SELECT 1 FROM jbuild WHERE jbuild.k = jprobe.k)$$);
+EXPLAIN (COSTS OFF) SELECT count(*) FROM jprobe WHERE jprobe.v::text LIKE '%1%' AND NOT EXISTS (SELECT 1 FROM jbuild WHERE jbuild.k = jprobe.k);
+SELECT join_same($$SELECT jprobe.v FROM jprobe WHERE jprobe.v::text LIKE '%1%' AND NOT EXISTS (SELECT 1 FROM jbuild WHERE jbuild.k = jprobe.k)$$);
 -- tessera.join_bloom_ratio: at 1 a filter at once, whatever the sizes; at
 -- 0 none.
 SET tessera.join_bloom_ratio = 1;
@@ -368,6 +376,8 @@ SELECT join_same($$SELECT count(*), sum(jprobe.v) FROM jprobe WHERE NOT EXISTS (
 -- its rows once the filter is ready.
 SELECT join_same($$SELECT count(*), sum(jbuild.w), sum(jprobe.v) FROM jprobe JOIN jbuild ON jprobe.k = jbuild.k WHERE jprobe.v > 0 AND jprobe.v::text LIKE '%1%'$$);
 SELECT join_property($$SELECT count(*) FROM jprobe JOIN jbuild ON jprobe.k = jbuild.k WHERE jprobe.v > 0 AND jprobe.v::text LIKE '%1%'$$, 'Bloom Filter Below') AS below;
+EXPLAIN (COSTS OFF) SELECT count(*) FROM jprobe JOIN jbuild ON jprobe.k = jbuild.k WHERE jprobe.v::text LIKE '%1%';
+SELECT join_same($$SELECT count(*), sum(jbuild.w), sum(jprobe.v) FROM jprobe JOIN jbuild ON jprobe.k = jbuild.k WHERE jprobe.v::text LIKE '%1%'$$);
 -- By-reference inner columns: their values live in the query's shared
 -- memory, in blocks of each participant's, and the payload holds where.
 EXPLAIN (COSTS OFF) SELECT count(*), max(jd.label) FROM jbig JOIN jd ON jbig.fk = jd.id;

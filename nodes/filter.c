@@ -281,7 +281,8 @@ filter_begin(CustomScanState *css, EState *estate, int eflags)
 		elog(ERROR, "TessFilter supports neither backward scan nor mark/restore");
 	tess_plan_get_info(cscan, &info);
 	if (info.node != &tess_filter_node || info.nchildren != 1 ||
-		info.child_names[0] == NULL || cscan->custom_exprs == NIL)
+		info.child_names[0] == NULL ||
+		(cscan->custom_exprs == NIL && cscan->scan.plan.qual == NIL))
 		elog(ERROR, "TessFilter received a foreign plan");
 	child = ExecInitNode(linitial(cscan->custom_plans), estate, eflags);
 	css->custom_ps = list_make1(child);
@@ -399,9 +400,10 @@ filter_explain(CustomScanState *css, List *ancestors, ExplainState *es)
 
 	context = set_deparse_context_plan(es->deparse_cxt, css->ss.ps.plan,
 									   ancestors);
-	ExplainPropertyText("Batch Filter",
-						deparse_expression((Node *) make_ands_explicit(cscan->custom_exprs),
-										   context, useprefix, false), es);
+	if (cscan->custom_exprs != NIL)
+		ExplainPropertyText("Batch Filter",
+							deparse_expression((Node *) make_ands_explicit(cscan->custom_exprs),
+											   context, useprefix, false), es);
 	if (!es->analyze)
 		return;
 	if (state->stats != NULL)
@@ -411,8 +413,9 @@ filter_explain(CustomScanState *css, List *ancestors, ExplainState *es)
 		filter_counters(state, own);
 		totals = own;
 	}
-	show_removed("Rows Removed by Batch Filter", totals[FILTER_BATCH_REMOVED],
-				 css, es);
+	if (cscan->custom_exprs != NIL)
+		show_removed("Rows Removed by Batch Filter", totals[FILTER_BATCH_REMOVED],
+					 css, es);
 	if (totals[FILTER_KEY_REMOVED] > 0)
 		show_removed("Rows Removed by Bloom Filter", totals[FILTER_KEY_REMOVED],
 					 css, es);
