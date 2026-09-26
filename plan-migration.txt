@@ -1527,6 +1527,15 @@
   для отношений только с построчными условиями — сначала замер: TessHeapScan → TessFilter(построчные) против Seq
   Scan ядра → TessPack без фильтра Блума; затем снятие запрета «первое условие пачкой» только для внешней стороны
   TessHashJoin INNER/SEMI (путь строит планировщик join), замер pg-below.
+  Сделано, серия 1 (2026-09-26, c557e65): TessNode.set_key_filter и TessKeyFilter (node.h), tess_input_set_key_filter
+  и tess_batch_node_of (runtime, находят вид узла, как set_tuple_bound), шаг TessQual перед первым построчным
+  условием (tess_qual_set_row_prefilter); TessFilter берёт фильтр при построчных условиях и ключах-колонках ребёнка,
+  хэширует ключи ядром как join и отбрасывает строки до построчных условий (общий — после «готов»), EXPLAIN Rows
+  Removed by Bloom Filter; join отдаёт фильтр для INNER/SEMI, сам больше не проверяет, забирает до сброса таблицы,
+  EXPLAIN Bloom Filter Below; настройка tessera.join_bloom_ratio в модуле узлов. Тесты join.sql (INNER, SEMI, ANTI и
+  LEFT без передачи, параметр, настройка 1 и 0, общий фильтр под Gather), C-тест помощника; pgcheck 33/33 на release
+  и assert-сборке. Замер pg-pushed-jEcPFS (против d98372c): with_filter 177,9 → 51,3 мс (−71 %); семейство join и
+  пять параллельных случаев без изменений (±1 %).
   Остаются SQL-замеры — по подтверждению свободной машины.
   Сделано заранее (2026-09-25, 5ffc8d1, ce99e89): loom для вставки и публикации — модельный регион на
   атомиках loom (table/loom.rs) гоняет тот же обобщённый код таблицы с упорядочиваниями region::order: 2 и 3 потока в
