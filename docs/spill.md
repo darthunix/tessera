@@ -80,7 +80,9 @@ their own. A serial file has one reader at a time, since the reader moves
 the file's own position; a shared reader opens a handle of its own.
 `tess_spill_drop` deletes a partition's file once it has been read, and
 `tess_spill_stats` gives the blocks and bytes written and the files open,
-each of which holds a buffer of one page.
+each of which holds a buffer of one page. `tess_spill_free` deletes this
+participant's files with the set; `tess_spill_release` only closes a
+shared set's, which the other participants may still read.
 
 These are the only calls of PostgreSQL's file layer for spilling: a core
 with another manager of work files, like Greengage's, replaces this file.
@@ -88,7 +90,7 @@ with another manager of work files, like Greengage's, replaces this file.
 ## In the hash join
 
 TessHashJoin spills a table of its own ([nodes.md](nodes.md),
-"Spilling"); a shared table does not spill yet.
+"Spilling"), and a shared one (below).
 
 **Partitions and bits.** A partition is `(hash >> shift) &
 (npartitions - 1)` of the 32-bit hash the table stores; the buckets take
@@ -128,6 +130,38 @@ rows without one.
 **Memory.** The spill's contexts use small blocks, so that a chunk of a
 few kB or more takes a block of its own size; `Memory Usage` counts the
 tables, the chunks, the values and the filter of every level.
+
+**A shared table.** Under a `Gather` the participants build one table in
+the query's shared memory, and its budget is every participant's
+`hash_mem`, as the core's. Their chunks' bytes are counted in words
+every participant maps ([table.md](table.md), `shared_spill.rs`); the
+first whose chunks pass the budget publishes a filter of every inner
+row and splits the table into partitions, two per participant at least.
+Each participant, once it sees the split after a batch, splits its own
+chunks so far into partitions whose chunks are in shared memory too and
+appends partitioned from then on; while the chunks take more than the
+budget, the largest partition goes to disk, marked by one participant,
+and every participant writes its own chunks of it to its own files of
+the table's `SharedFileSet`. The chunk lists are each participant's
+own, so none is unlinked from a list others add to.
+
+After the inner side (`FLUSH`), each participant writes its tails of
+the partitions on disk and hands its chunks of the others to the table,
+which is indexed for them alone. Then (`OUTER`) every participant writes
+its share of the outer side before any row goes out, since a participant
+that returns rows may not wait at a barrier, as the core's rule is: the
+rows of the partitions on disk to their files, the rows of the
+partitions in memory, and for a left or anti join those without a pair
+or with a NULL key, to a file the shared table answers; the core writes
+all of its outer side, this node what its filter lets through. Each
+participant then reads such files one at a time as it takes them
+(`tess_table_spill_take_file`) and probes the shared table, leaves the
+build (the last one frees the table), and joins the partitions on disk
+it takes whole (`tess_table_spill_take_alone`) from every participant's
+files, as a serial table joins its partitions, splitting or in pieces
+where needed. A participant that releases its set leaves its files for
+the others (`tess_spill_release`); the set deletes them when the last
+participant detaches, or at a rescan.
 
 ## In the grouping
 

@@ -655,12 +655,8 @@ the core's hash join of the same inputs (`initial_cost_hashjoin` and
 `create_hashjoin_path`, not added), at nine tenths of its cost; its
 disabled count comes along, and like the core the hook offers nothing
 when hash joins are disabled. The template counts the batches the core
-would write, and a table of the node's own spills where the core's
-would (see Spilling below); a shared table does not spill yet, so there
-is no shared path when the core would split the inner side, or when the
-node's own estimate of the table (a record of 24 bytes, a word per key
-and per inner column, the columns' width, the buckets) exceeds the
-participants' `hash_mem`.
+would write, and the node's table spills where the core's would (see
+Spilling below), a shared one past every participant's `hash_mem`.
 
 Under a `Gather` the hook also offers a partial path: the outer side's
 cheapest partial path divides the rows, and every participant builds the
@@ -771,15 +767,16 @@ directory and lists in the query's dynamic shared memory, and steps its
 participant through the phases of `tess_build_step` (see
 [table.md](table.md)): every participant appends the inner batches its
 partial scan hands it to chunks of its own in dynamic shared memory,
-each numbered by `tess_build_take_chunk` and entered in the table's list
-under a spinlock, and reports its records; the elected one makes the
+each numbered by `tess_build_take_chunk` and entered in a list of its
+own, which only it adds to until the elected one reads them all, and
+reports its records; the elected one makes the
 index for exactly the records appended and the directory of the chunks'
 `dsa_pointer`s by number, from which every participant maps their
 bases; each participant links its own chunks with `tess_table_link`.
 Nothing is copied and the table never grows. By-reference inner values
 go into value chunks as in a table of its own, allocated in the query's
 dynamic shared memory: each participant fills chunks of its own,
-numbered under a spinlock and entered in the table's list, by which the
+numbered under a spinlock and entered in a list of its own, by which the
 table frees them; the elected one makes their directory with the
 records', and every participant maps their bases, so a reference means
 the same in each.
@@ -865,6 +862,22 @@ last pass without a table. Both sides append their rows the same way, a
 by-reference value going into its partition's value chunks right after
 its row, so that a chunk's values are written with it or before it. A
 rescan of a table that spilled reads the inner side again.
+
+A shared table spills past every participant's `hash_mem` (see
+[spill.md](spill.md), "A shared table"): the first participant past the
+budget splits it, every participant splits its own chunks when it sees
+that and appends partitioned, and the largest partition goes to disk
+while the chunks take more, each participant writing its own chunks of
+it. The `FLUSH` phase writes the tails of the partitions on disk and
+hands the chunks of the others to the table, which `SIZE` indexes for
+them alone; the `OUTER` phase writes every outer row before any goes
+out, those of the partitions on disk to their files and the others to
+a file the shared table answers, left and anti joins' rows without a
+pair among them. At `PROBE` each participant probes the shared table
+with those rows, leaves it, and joins the partitions on disk it takes
+whole, from every participant's files, with the code above. The
+partitions' records and values carry the numbers every participant
+shares, so a participant reads another's files as its own.
 
 A semi or anti join marks the rows of each outer batch that have a pair
 passing the join clauses: without such clauses the rows the probe found,
@@ -977,7 +990,12 @@ clause, one key held by 60000 inner rows the planner expects 10 of,
 joined in pieces as inner, left, semi and anti joins and with a residual
 clause, 200000 inner rows with text it expects 10 of, whose partitions
 split into a level below, under the same joins, a rescan with a parameter of the outer side, and under the `Gather` each participant spilling its own
-table.
+table. A shared table spilling at a `work_mem` of 256 kB (every
+participant's `hash_mem` together about half of the inner side): inner
+and left joins with text of both sides and a residual clause, one key of
+60000 rows the planner does not expect, semi and anti joins over the
+larger side, the workers alone, a rescan of the `Gather`, and no
+temporary file left.
 Semi, anti and left joins: `EXISTS` with and without a join clause, `IN`
 over a subquery, `NOT EXISTS` with and without one (NULL keys going
 out), a left join the planner turns into an anti join, left joins with
