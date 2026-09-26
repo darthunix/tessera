@@ -2383,6 +2383,136 @@ SELECT join_same($$SELECT jsmall.k, (SELECT count(*) FROM jprobe JOIN jbuild ON 
  10 rows, hash c085776e4f1c0762a2781a0a3eca9e93
 (1 row)
 
+-- A shared table that spills: past every participant's hash_mem it splits
+-- into partitions, two per participant at least; the largest go to disk,
+-- each participant's chunks of them to files of its own, and every outer
+-- row is written before any row goes out, those of the partitions in
+-- memory and those without a pair to be probed by the shared table. Each
+-- partition on disk is then joined by the participant that takes it, from
+-- every participant's files. Every participant's hash_mem of 512 kB:
+-- jsb's text takes the table well past them.
+SET work_mem = '256kB';
+SELECT join_property($$SELECT count(*), sum(length(jsb.t)) FROM jsp JOIN jsb ON jsp.k = jsb.k$$, 'Shared Table') AS shared,
+       join_property($$SELECT count(*), sum(length(jsb.t)) FROM jsp JOIN jsb ON jsp.k = jsb.k$$, 'Spilled Chunks')::int > 0 AS spilled;
+ shared | spilled 
+--------+---------
+ true   | t
+(1 row)
+
+SELECT join_same($$SELECT count(*), sum(length(jsb.t)), sum(jsp.k), sum(jsb.n) FROM jsp JOIN jsb ON jsp.k = jsb.k$$);
+                   join_same                   
+-----------------------------------------------
+ 1 rows, hash eccf0fec6dc065c1ff5eb57067141f83
+(1 row)
+
+SELECT join_same($$SELECT jsp.s, jsb.t, jsb.n FROM jsp JOIN jsb ON jsp.k = jsb.k WHERE jsp.s LIKE '%7'$$);
+                     join_same                     
+---------------------------------------------------
+ 17107 rows, hash a15b33f6ce1da529228e12fecd74b017
+(1 row)
+
+SELECT join_same($$SELECT count(*), count(jsb.n), sum(length(jsb.t)), sum(length(jsp.s)) FROM jsp LEFT JOIN jsb ON jsp.k = jsb.k$$);
+                   join_same                   
+-----------------------------------------------
+ 1 rows, hash 4a249c7a952850db2a0dab60ba5fc4fe
+(1 row)
+
+SELECT join_same($$SELECT jsp.s, jsb.t FROM jsp LEFT JOIN jsb ON jsp.k = jsb.k WHERE jsp.s LIKE '%3'$$);
+                     join_same                     
+---------------------------------------------------
+ 20295 rows, hash 994b992db832eee0c326637a3d8f340c
+(1 row)
+
+SELECT join_same($$SELECT count(*), sum(jsb.n), sum(length(jsb.t)) FROM jsp JOIN jsb ON jsp.k = jsb.k AND jsb.n > jsp.k * 2$$);
+                   join_same                   
+-----------------------------------------------
+ 1 rows, hash 3f1765ba916263e4e764755b041c8850
+(1 row)
+
+SELECT join_same($$SELECT count(*), count(jsb.n), sum(length(jsb.t)) FROM jsp LEFT JOIN jsb ON jsp.k = jsb.k AND jsb.n > jsp.k * 2$$);
+                   join_same                   
+-----------------------------------------------
+ 1 rows, hash 1de6f4929b68a1b5c29c381ba953baa4
+(1 row)
+
+-- One key held by 60000 inner rows the planner does not expect: the
+-- table splits late, and the key's partition, larger than hash_mem, is
+-- joined in pieces by the participant that takes it.
+CREATE TABLE jsskew (k int, w int);
+ANALYZE jsskew;
+INSERT INTO jsskew SELECT CASE WHEN g <= 60000 THEN 7 ELSE g END, g FROM generate_series(1, 62000) AS g;
+SELECT join_property($$SELECT count(*), sum(jsskew.w) FROM jsp JOIN jsskew ON jsp.k = jsskew.k$$, 'Shared Table') AS shared,
+       join_property($$SELECT count(*), sum(jsskew.w) FROM jsp JOIN jsskew ON jsp.k = jsskew.k$$, 'Spilled Chunks')::int > 0 AS spilled;
+ shared | spilled 
+--------+---------
+ true   | t
+(1 row)
+
+SELECT join_same($$SELECT count(*), sum(jsskew.w), sum(jsp.k) FROM jsp JOIN jsskew ON jsp.k = jsskew.k$$);
+                   join_same                   
+-----------------------------------------------
+ 1 rows, hash 3d385a0f4ee7da2221cb15244b60e4ef
+(1 row)
+
+SELECT join_same($$SELECT jsp.s, jsskew.w FROM jsp JOIN jsskew ON jsp.k = jsskew.k WHERE jsp.s LIKE '%07'$$);
+                     join_same                      
+----------------------------------------------------
+ 180000 rows, hash ed669e9f0bc82792f00f220274071704
+(1 row)
+
+-- The workers alone, and a rescan of the Gather: the files go with the
+-- set, and the table spills anew.
+SET parallel_leader_participation = off;
+SELECT join_same($$SELECT count(*), sum(length(jsb.t)), sum(jsp.k) FROM jsp JOIN jsb ON jsp.k = jsb.k$$);
+                   join_same                   
+-----------------------------------------------
+ 1 rows, hash f5ad39ad9ef050decc011fbfd96379bf
+(1 row)
+
+SELECT join_same($$SELECT count(*), count(jsb.n), sum(length(jsb.t)) FROM jsp LEFT JOIN jsb ON jsp.k = jsb.k$$);
+                   join_same                   
+-----------------------------------------------
+ 1 rows, hash c5065546b75a2dbf512e64519dbdc6b1
+(1 row)
+
+RESET parallel_leader_participation;
+SET enable_material = off;
+SELECT join_same($$SELECT x, n, t FROM (SELECT count(*) AS n, sum(length(jsb.t)) AS t FROM jsp LEFT JOIN jsb ON jsp.k = jsb.k) AS ss
+RIGHT JOIN (VALUES (1), (2)) AS v(x) ON true$$);
+                   join_same                   
+-----------------------------------------------
+ 2 rows, hash 6fdcf27ae3162efb5dd95f89b1949b08
+(1 row)
+
+RESET enable_material;
+-- Semi and anti joins keep no inner column: jsp's keys, the larger side,
+-- are the table.
+SELECT join_property($$SELECT count(*), sum(length(jsb.t)) FROM jsb WHERE EXISTS (SELECT 1 FROM jsp WHERE jsp.k = jsb.k)$$, 'Spilled Chunks')::int > 0 AS semi_spilled,
+       join_property($$SELECT jsb.t FROM jsb WHERE NOT EXISTS (SELECT 1 FROM jsp WHERE jsp.k = jsb.k)$$, 'Spilled Chunks')::int > 0 AS anti_spilled;
+ semi_spilled | anti_spilled 
+--------------+--------------
+ t            | t
+(1 row)
+
+SELECT join_same($$SELECT count(*), sum(length(jsb.t)) FROM jsb WHERE EXISTS (SELECT 1 FROM jsp WHERE jsp.k = jsb.k)$$);
+                   join_same                   
+-----------------------------------------------
+ 1 rows, hash 3a80ff2a6f4b2aeed6d951696c16c7c1
+(1 row)
+
+SELECT join_same($$SELECT jsb.t, jsb.n FROM jsb WHERE NOT EXISTS (SELECT 1 FROM jsp WHERE jsp.k = jsb.k)$$);
+                    join_same                     
+--------------------------------------------------
+ 2352 rows, hash f1a54a8db3386a9b44729e1253bd707b
+(1 row)
+
+SELECT count(*) AS temporary_files FROM pg_ls_tmpdir();
+ temporary_files 
+-----------------
+               0
+(1 row)
+
+RESET work_mem;
 RESET enable_parallel_hash;
 RESET max_parallel_workers_per_gather;
 RESET parallel_setup_cost;
@@ -2455,7 +2585,7 @@ EXPLAIN (COSTS OFF) SELECT count(*) FROM jf JOIN jd ON jf.fk = jd.id;
 (6 rows)
 
 RESET tessera.enable;
-DROP TABLE jd, jf, jdup, jsmall, jempty, jgrow, jbig, jpair, jbuild, jprobe, jhit, jref, jrefprobe, jrefgrow, jsb, jsp;
+DROP TABLE jd, jf, jdup, jsmall, jempty, jgrow, jbig, jpair, jbuild, jprobe, jhit, jref, jrefprobe, jrefgrow, jsb, jsp, jsskew;
 DROP FUNCTION jskew();
 DROP FUNCTION jwide();
 DROP FUNCTION join_property(text, text);

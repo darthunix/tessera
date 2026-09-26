@@ -479,6 +479,51 @@ SELECT join_property($$SELECT count(*), max(jrefgrow.t) FROM jbig JOIN jrefgrow 
 SELECT join_same($$SELECT jsmall.k, (SELECT max(jref.t) FROM jrefprobe JOIN jref ON jrefprobe.k = jref.k WHERE jref.k > jsmall.k * 1000) FROM jsmall$$);
 -- A rescan of the Gather builds the shared table anew.
 SELECT join_same($$SELECT jsmall.k, (SELECT count(*) FROM jprobe JOIN jbuild ON jprobe.k = jbuild.k WHERE jbuild.w > jsmall.k * 100) FROM jsmall$$);
+-- A shared table that spills: past every participant's hash_mem it splits
+-- into partitions, two per participant at least; the largest go to disk,
+-- each participant's chunks of them to files of its own, and every outer
+-- row is written before any row goes out, those of the partitions in
+-- memory and those without a pair to be probed by the shared table. Each
+-- partition on disk is then joined by the participant that takes it, from
+-- every participant's files. Every participant's hash_mem of 512 kB:
+-- jsb's text takes the table well past them.
+SET work_mem = '256kB';
+SELECT join_property($$SELECT count(*), sum(length(jsb.t)) FROM jsp JOIN jsb ON jsp.k = jsb.k$$, 'Shared Table') AS shared,
+       join_property($$SELECT count(*), sum(length(jsb.t)) FROM jsp JOIN jsb ON jsp.k = jsb.k$$, 'Spilled Chunks')::int > 0 AS spilled;
+SELECT join_same($$SELECT count(*), sum(length(jsb.t)), sum(jsp.k), sum(jsb.n) FROM jsp JOIN jsb ON jsp.k = jsb.k$$);
+SELECT join_same($$SELECT jsp.s, jsb.t, jsb.n FROM jsp JOIN jsb ON jsp.k = jsb.k WHERE jsp.s LIKE '%7'$$);
+SELECT join_same($$SELECT count(*), count(jsb.n), sum(length(jsb.t)), sum(length(jsp.s)) FROM jsp LEFT JOIN jsb ON jsp.k = jsb.k$$);
+SELECT join_same($$SELECT jsp.s, jsb.t FROM jsp LEFT JOIN jsb ON jsp.k = jsb.k WHERE jsp.s LIKE '%3'$$);
+SELECT join_same($$SELECT count(*), sum(jsb.n), sum(length(jsb.t)) FROM jsp JOIN jsb ON jsp.k = jsb.k AND jsb.n > jsp.k * 2$$);
+SELECT join_same($$SELECT count(*), count(jsb.n), sum(length(jsb.t)) FROM jsp LEFT JOIN jsb ON jsp.k = jsb.k AND jsb.n > jsp.k * 2$$);
+-- One key held by 60000 inner rows the planner does not expect: the
+-- table splits late, and the key's partition, larger than hash_mem, is
+-- joined in pieces by the participant that takes it.
+CREATE TABLE jsskew (k int, w int);
+ANALYZE jsskew;
+INSERT INTO jsskew SELECT CASE WHEN g <= 60000 THEN 7 ELSE g END, g FROM generate_series(1, 62000) AS g;
+SELECT join_property($$SELECT count(*), sum(jsskew.w) FROM jsp JOIN jsskew ON jsp.k = jsskew.k$$, 'Shared Table') AS shared,
+       join_property($$SELECT count(*), sum(jsskew.w) FROM jsp JOIN jsskew ON jsp.k = jsskew.k$$, 'Spilled Chunks')::int > 0 AS spilled;
+SELECT join_same($$SELECT count(*), sum(jsskew.w), sum(jsp.k) FROM jsp JOIN jsskew ON jsp.k = jsskew.k$$);
+SELECT join_same($$SELECT jsp.s, jsskew.w FROM jsp JOIN jsskew ON jsp.k = jsskew.k WHERE jsp.s LIKE '%07'$$);
+-- The workers alone, and a rescan of the Gather: the files go with the
+-- set, and the table spills anew.
+SET parallel_leader_participation = off;
+SELECT join_same($$SELECT count(*), sum(length(jsb.t)), sum(jsp.k) FROM jsp JOIN jsb ON jsp.k = jsb.k$$);
+SELECT join_same($$SELECT count(*), count(jsb.n), sum(length(jsb.t)) FROM jsp LEFT JOIN jsb ON jsp.k = jsb.k$$);
+RESET parallel_leader_participation;
+SET enable_material = off;
+SELECT join_same($$SELECT x, n, t FROM (SELECT count(*) AS n, sum(length(jsb.t)) AS t FROM jsp LEFT JOIN jsb ON jsp.k = jsb.k) AS ss
+RIGHT JOIN (VALUES (1), (2)) AS v(x) ON true$$);
+RESET enable_material;
+-- Semi and anti joins keep no inner column: jsp's keys, the larger side,
+-- are the table.
+SELECT join_property($$SELECT count(*), sum(length(jsb.t)) FROM jsb WHERE EXISTS (SELECT 1 FROM jsp WHERE jsp.k = jsb.k)$$, 'Spilled Chunks')::int > 0 AS semi_spilled,
+       join_property($$SELECT jsb.t FROM jsb WHERE NOT EXISTS (SELECT 1 FROM jsp WHERE jsp.k = jsb.k)$$, 'Spilled Chunks')::int > 0 AS anti_spilled;
+SELECT join_same($$SELECT count(*), sum(length(jsb.t)) FROM jsb WHERE EXISTS (SELECT 1 FROM jsp WHERE jsp.k = jsb.k)$$);
+SELECT join_same($$SELECT jsb.t, jsb.n FROM jsb WHERE NOT EXISTS (SELECT 1 FROM jsp WHERE jsp.k = jsb.k)$$);
+SELECT count(*) AS temporary_files FROM pg_ls_tmpdir();
+RESET work_mem;
 RESET enable_parallel_hash;
 RESET max_parallel_workers_per_gather;
 RESET parallel_setup_cost;
@@ -498,7 +543,7 @@ SET tessera.enable = off;
 EXPLAIN (COSTS OFF) SELECT count(*) FROM jf JOIN jd ON jf.fk = jd.id;
 RESET tessera.enable;
 
-DROP TABLE jd, jf, jdup, jsmall, jempty, jgrow, jbig, jpair, jbuild, jprobe, jhit, jref, jrefprobe, jrefgrow, jsb, jsp;
+DROP TABLE jd, jf, jdup, jsmall, jempty, jgrow, jbig, jpair, jbuild, jprobe, jhit, jref, jrefprobe, jrefgrow, jsb, jsp, jsskew;
 DROP FUNCTION jskew();
 DROP FUNCTION jwide();
 DROP FUNCTION join_property(text, text);

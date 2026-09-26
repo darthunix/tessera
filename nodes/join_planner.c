@@ -238,34 +238,14 @@ target_supported(RelOptInfo *joinrel, RelOptInfo *innerrel, const JoinKeys *keys
 }
 
 /*
- * The table's bytes for the inner rows: a record of a header, the key and
- * the payload (the NULL bits and a word per column), by-reference values
- * copied by their width, and the buckets, a power of two at least twice
- * the records.
- */
-static double
-table_bytes(Path *inner, double inner_rows, int nkeys, int ninner)
-{
-	double		rows = Max(inner_rows, 1.0);
-	double		buckets = 1024;
-
-	while (buckets < 2 * rows)
-		buckets *= 2;
-	return rows * (16 + 8 * nkeys + 8 * (1 + ninner) + inner->pathtarget->width) +
-		buckets * 4;
-}
-
-/*
  * The path: the core's hash join of the same inputs as the template, at a
  * lower cost, over batch paths of them; the template's cost counts the
- * batches the core would write, and the node spills as the core does. A
- * shared table does not spill yet: NULL when the core would split its
- * inner side into batches or the table would not fit in the participants'
- * hash_mem.
+ * batches the core would write, and the node spills as the core does, a
+ * shared table past every participant's hash_mem too.
  */
 static CustomPath *
 make_join_path(PlannerInfo *root, RelOptInfo *joinrel, JoinType jointype,
-			   JoinPathExtraData *extra, const JoinKeys *keys, int ninner,
+			   JoinPathExtraData *extra, const JoinKeys *keys,
 			   Path *outer_path, Path *inner_path, bool shared)
 {
 	TessPathConfig config = TESS_STRUCT_INITIALIZER(TessPathConfig);
@@ -275,20 +255,12 @@ make_join_path(PlannerInfo *root, RelOptInfo *joinrel, JoinType jointype,
 	Path	   *outer;
 	Path	   *inner;
 
-	double		memory_limit = (double) get_hash_memory_limit();
 	/* A partial inner path's rows are one participant's share. */
 	double		inner_rows = shared ?
 		inner_path->rows * tess_parallel_divisor(inner_path) : inner_path->rows;
 
-	/* A shared table may take every participant's hash_mem, as the core's. */
-	if (shared)
-		memory_limit *= outer_path->parallel_workers + 1;
 	initial_cost_hashjoin(root, &workspace, jointype, hashclauses,
 						  outer_path, inner_path, extra, shared);
-	if (shared &&
-		(workspace.numbatches > 1 ||
-		 table_bytes(inner_path, inner_rows, keys->nkeys, ninner) > memory_limit))
-		return NULL;
 	outer = tess_batch_input_path(root, outer_path);
 	inner = tess_batch_input_path(root, inner_path);
 	if (outer == NULL || inner == NULL)
@@ -362,7 +334,7 @@ join_pathlist(PlannerInfo *root, RelOptInfo *joinrel, RelOptInfo *outerrel,
 		if (filtered != NULL)
 			outer_path = filtered;
 	}
-	path = make_join_path(root, joinrel, jointype, extra, &keys, ninner,
+	path = make_join_path(root, joinrel, jointype, extra, &keys,
 						  outer_path, inner_path, false);
 	if (path != NULL)
 		add_path(joinrel, &path->path);
@@ -389,7 +361,7 @@ join_pathlist(PlannerInfo *root, RelOptInfo *joinrel, RelOptInfo *outerrel,
 		if (filtered != NULL)
 			outer_path = filtered;
 	}
-	path = make_join_path(root, joinrel, jointype, extra, &keys, ninner,
+	path = make_join_path(root, joinrel, jointype, extra, &keys,
 						  outer_path, inner_path, false);
 	if (path != NULL && path->path.parallel_safe && path->path.parallel_workers > 0)
 	{
@@ -404,7 +376,7 @@ join_pathlist(PlannerInfo *root, RelOptInfo *joinrel, RelOptInfo *outerrel,
 	 */
 	if (!enable_parallel_hash || innerrel->partial_pathlist == NIL)
 		return;
-	path = make_join_path(root, joinrel, jointype, extra, &keys, ninner,
+	path = make_join_path(root, joinrel, jointype, extra, &keys,
 						  outer_path, linitial(innerrel->partial_pathlist), true);
 	if (path == NULL || !path->path.parallel_safe ||
 		path->path.parallel_workers <= 0)
