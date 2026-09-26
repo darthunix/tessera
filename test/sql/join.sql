@@ -303,10 +303,12 @@ CREATE TABLE jsp (k int, s text);
 INSERT INTO jsp
 SELECT CASE WHEN g % 11 = 0 THEN NULL ELSE g % 20000 END, 'p' || g
 FROM generate_series(1, 100000) AS g;
--- One key held by 5000 inner rows: its partition cannot split.
-CREATE TABLE jskew (k int, w int);
-INSERT INTO jskew SELECT CASE WHEN g <= 5000 THEN 7 ELSE g END, g FROM generate_series(1, 8000) AS g;
-ANALYZE jsb, jsp, jskew;
+-- One key held by 60000 inner rows the planner expects 10 of: its
+-- partition, larger than hash_mem, cannot split, and is joined in pieces,
+-- its outer rows read once per piece.
+CREATE FUNCTION jskew() RETURNS TABLE (k int, w int) LANGUAGE sql ROWS 10
+AS 'SELECT CASE WHEN g <= 60000 THEN 7 ELSE g END, g FROM generate_series(1, 62000) AS g';
+ANALYZE jsb, jsp;
 SET work_mem = '512kB';
 SELECT join_explain($$SELECT count(*), sum(length(jsb.t)) FROM jsp JOIN jsb ON jsp.k = jsb.k$$);
 SELECT join_same($$SELECT count(*), sum(length(jsb.t)), sum(jsp.k), sum(jsb.n) FROM jsp JOIN jsb ON jsp.k = jsb.k$$);
@@ -317,7 +319,13 @@ SELECT join_same($$SELECT jsp.s, jsb.t FROM jsp LEFT JOIN jsb ON jsp.k = jsb.k W
 SELECT join_same($$SELECT count(*), sum(length(jsp.s)) FROM jsp WHERE EXISTS (SELECT 1 FROM jsb WHERE jsb.k = jsp.k)$$);
 SELECT join_same($$SELECT jsp.s FROM jsp WHERE NOT EXISTS (SELECT 1 FROM jsb WHERE jsb.k = jsp.k)$$);
 SELECT join_same($$SELECT count(*), sum(jsb.n) FROM jsp JOIN jsb ON jsp.k = jsb.k AND jsb.n > jsp.k * 2$$);
-SELECT join_same($$SELECT count(*), sum(jskew.w), sum(jsp.k) FROM jsp JOIN jskew ON jsp.k = jskew.k$$);
+SELECT join_explain($$SELECT count(*), sum(jskew.w) FROM jsp JOIN jskew() AS jskew ON jsp.k = jskew.k$$);
+SELECT join_same($$SELECT count(*), sum(jskew.w), sum(jsp.k) FROM jsp JOIN jskew() AS jskew ON jsp.k = jskew.k$$);
+SELECT join_same($$SELECT count(*), count(jskew.w), sum(jskew.w) FROM jsp LEFT JOIN jskew() AS jskew ON jsp.k = jskew.k$$);
+SELECT join_same($$SELECT jsp.s, jskew.w FROM jsp LEFT JOIN jskew() AS jskew ON jsp.k = jskew.k WHERE jsp.s LIKE '%07'$$);
+SELECT join_same($$SELECT count(*), sum(length(jsp.s)) FROM jsp WHERE EXISTS (SELECT 1 FROM jskew() AS jskew WHERE jskew.k = jsp.k)$$);
+SELECT join_same($$SELECT count(*), sum(length(jsp.s)) FROM jsp WHERE NOT EXISTS (SELECT 1 FROM jskew() AS jskew WHERE jskew.k = jsp.k)$$);
+SELECT join_same($$SELECT count(*) FROM jsp JOIN jskew() AS jskew ON jsp.k = jskew.k AND jskew.w % 3 = jsp.k % 3$$);
 -- A rescan with a parameter of the outer side reads the inner side again.
 SELECT join_same($$SELECT v.x, (SELECT count(*) FROM jsp JOIN jsb ON jsp.k = jsb.k WHERE jsp.k < v.x) FROM (VALUES (100), (15000)) AS v(x)$$);
 RESET work_mem;
@@ -469,7 +477,8 @@ SET tessera.enable = off;
 EXPLAIN (COSTS OFF) SELECT count(*) FROM jf JOIN jd ON jf.fk = jd.id;
 RESET tessera.enable;
 
-DROP TABLE jd, jf, jdup, jsmall, jempty, jgrow, jbig, jpair, jbuild, jprobe, jhit, jref, jrefprobe, jrefgrow, jsb, jsp, jskew;
+DROP TABLE jd, jf, jdup, jsmall, jempty, jgrow, jbig, jpair, jbuild, jprobe, jhit, jref, jrefprobe, jrefgrow, jsb, jsp;
+DROP FUNCTION jskew();
 DROP FUNCTION join_property(text, text);
 DROP FUNCTION join_explain(text);
 DROP FUNCTION join_many();

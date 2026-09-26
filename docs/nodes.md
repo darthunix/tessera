@@ -799,9 +799,22 @@ of their own, and its outer rows come back in batches of up to 64 rows
 gathered from their records, which take the same way as the outer
 child's batches, rounds, compact batches, clauses, and the rows of left
 and anti joins without a pair. A compact batch holding pairs of one
-table keeps the next from being loaded until it goes out. A partition
-larger than `hash_mem` is joined whole for now (`Overrun` reports it).
-A rescan of a table that spilled reads the inner side again.
+table keeps the next from being loaded until it goes out, and a table
+with duplicates the resident one lacked turns compact mode on.
+
+A partition whose file is larger than what `hash_mem` leaves is joined
+in pieces: its blocks are read back in order until the piece passes the
+room, ending only where a group ends (value chunks, then the chunks of
+records that refer to them; without by-reference columns, any chunk),
+the tail with the last piece, and every piece is joined with all of the
+partition's outer rows, read again from their first. A left, semi or
+anti join keeps a bit per outer row of the partition, in the order read,
+set once the row finds a pair: a semi join's row with one takes no
+further part, and left and anti joins answer the rows without one in a
+last pass without a table. Both sides append their rows the same way, a
+by-reference value going into its partition's value chunks right after
+its row, so that a chunk's values are written with it or before it. A
+rescan of a table that spilled reads the inner side again.
 
 A semi or anti join marks the rows of each outer batch that have a pair
 passing the join clauses: without such clauses the rows the probe found,
@@ -854,7 +867,9 @@ the inner rows inserted into them, `Chunks`, the chunks of their
 records, and for a table that spilled `Batches`, its partitions,
 `Resident Partitions`, those kept in memory, `Spilled Chunks` and `Disk
 Usage`, the blocks and bytes written by both sides, and `Tail Chunks
-Kept`, the tails joined without being written; `Probe Rows`, the outer
+Kept`, the tails joined without being written, and `Extra Passes`, the
+passes over outer rows past the first of a partition joined in pieces;
+`Probe Rows`, the outer
 rows probed, and `Matches`, the joined
 rows over every round, `Rows Removed by Join Filter` and `Rows Removed by
 Filter`, and `Compact Batches`, the batches of copied
@@ -907,8 +922,9 @@ Spilling, at a `work_mem` of 512 kB: an inner side of about 3 MB with
 duplicates, NULL keys and text, joined with the counters shown for an
 inner and a left join, and compared as rows with text of both sides, a
 left join with misses and NULL keys, semi and anti joins, a residual
-clause, one key held by 5000 inner rows, a rescan with a parameter of the
-outer side, and under the `Gather` each participant spilling its own
+clause, one key held by 60000 inner rows the planner expects 10 of,
+joined in pieces as inner, left, semi and anti joins and with a residual
+clause, a rescan with a parameter of the outer side, and under the `Gather` each participant spilling its own
 table.
 Semi, anti and left joins: `EXISTS` with and without a join clause, `IN`
 over a subquery, `NOT EXISTS` with and without one (NULL keys going
