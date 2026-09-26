@@ -128,3 +128,38 @@ rows without one.
 **Memory.** The spill's contexts use small blocks, so that a chunk of a
 few kB or more takes a block of its own size; `Memory Usage` counts the
 tables, the chunks, the values and the filter of every level.
+
+## In the grouping
+
+TessAgg spills a table of its own ([nodes.md](nodes.md), "Spilling"
+under TessAgg). A group's record holds its keys and its states, no
+by-reference value, so only chunks of records go to disk, one file per
+partition and level.
+
+**States, not rows.** The core's hash aggregate stops creating groups
+once full and writes the input rows of new groups; TessAgg writes a
+partition's groups whole when memory runs short, and the partition's
+rows go on folding into new records in memory. A group whose partition
+went to disk several times has several records, one per time; merging
+them (`tess_table_combine`) adds counts and sums and keeps extremes. A
+hot group costs a record per eviction, not a row per row; a group of
+few rows spread through the input may cost more than its rows would.
+
+**One index.** Every partition's chunks lie under one index while the
+input is read, a new group going to its partition's chunk
+(`tess_table_find_or_insert_partitioned`); sending a partition to disk
+frees its chunks and makes the index anew over the rest.
+
+**Giving out.** After the input, each partition makes a table of its
+own: its records in memory, each group once, are linked, and its chunks
+read back merge in. A partition too large splits by the next bits into
+a level below first; a split does not find a group's other records, so
+that level merges its chunks in memory as it merges those from disk.
+
+**Partial mode.** Under a `Gather` the node writes nothing: past seven
+eighths of `hash_mem` it sends its groups up as partials, which the
+core's Finalize Aggregate merges, and starts its table anew.
+
+**Memory.** The first index takes at most a quarter of `hash_mem`, a
+chunk an eighth; the node acts at seven eighths, the rest left for a
+batch's growth, and counts its files' buffers, a page each.
