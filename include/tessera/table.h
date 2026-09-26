@@ -245,7 +245,7 @@ extern TessStatusCode tess_table_append_partitioned(const TessTableRef *table,
  * payload size from byte *from on (TESS_TABLE_CHUNK_HEADER at first),
  * whole and in order, each to the chunk of its hash's partition, and move
  * *from past them: at most capacity records, their new references into
- * offsets and their partitions into partitions. It stops before a record
+ * offsets and their hashes into hashes. It stops before a record
  * whose partition's chunk is full, *full receiving that partition, -1
  * otherwise; *count receives the records copied, 0 at the source's end.
  * The copies are not linked; the source must be none of the partitions'
@@ -258,7 +258,7 @@ extern TessStatusCode tess_table_split(const TessTableRef *table,
 									   const uint32 *partition_chunks,
 									   int npartitions, uint32 shift,
 									   int source, Size *from, int capacity,
-									   uint32 *offsets, uint32 *partitions,
+									   uint32 *offsets, uint32 *hashes,
 									   int *count, int *full,
 									   TessStatus *status);
 
@@ -452,6 +452,16 @@ extern TessStatusCode tess_table_bloom_words(uint64 records, Size *nwords,
 extern TessStatusCode tess_table_bloom(const TessTableRef *table,
 									   uint64 *words, Size nwords,
 									   TessStatus *status);
+
+/*
+ * Set the bits of the hash of every row of rows in the filter: for the
+ * filter of a table that spills, filled as its rows come. hashes has a
+ * hash per row.
+ */
+extern TessStatusCode tess_bloom_add(uint64 *words, Size nwords,
+									 const uint32 *hashes,
+									 const TessRowMask *rows,
+									 TessStatus *status);
 
 /*
  * The rows of rows whose hash has all its bits in the filter, into found,

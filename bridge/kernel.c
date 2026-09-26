@@ -50,7 +50,8 @@ validate_kernels(const TessKernelOps *ops)
 		ops->build_take_chunk == NULL || ops->build_add_duplicates == NULL ||
 		ops->build_totals == NULL ||
 		ops->build_step == NULL || ops->table_append_partitioned == NULL ||
-		ops->table_split == NULL || ops->table_fingerprint == NULL ||
+		ops->table_split == NULL || ops->bloom_add == NULL ||
+		ops->table_fingerprint == NULL ||
 		ops->spill_header_write == NULL || ops->spill_header_read == NULL)
 		elog(ERROR, "Tessera kernels must provide every operation");
 }

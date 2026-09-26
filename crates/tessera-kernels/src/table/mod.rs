@@ -304,8 +304,7 @@ pub fn append_partitioned_to<K: KeySource + ?Sized>(
 /// Copy the records of chunk `source` of a table of `config` from byte
 /// `*from` on, whole and in order, each to the chunk of its hash's
 /// partition, and move `*from` past them: at most `offsets.len()`, their
-/// new references into `offsets` and their partitions into
-/// `partition_of`, stopping before a record whose partition's chunk is
+/// new references into `offsets` and their hashes into `hashes`, stopping before a record whose partition's chunk is
 /// full. The copies are not linked; `*from` starts at [`CHUNK_HEADER`].
 /// The caller must be the one writer of every partition's chunk.
 pub fn split_to(
@@ -315,7 +314,7 @@ pub fn split_to(
     source: usize,
     from: &mut usize,
     offsets: &mut [u32],
-    partition_of: &mut [u32],
+    hashes: &mut [u32],
 ) -> Result<Split> {
     let layout = header::chunk_layout(config)?;
     batch::split(
@@ -325,7 +324,7 @@ pub fn split_to(
         source,
         from,
         offsets,
-        partition_of,
+        hashes,
     )
 }
 
@@ -1043,7 +1042,7 @@ mod tests {
         let mut from = CHUNK_HEADER;
         let mut copied = 0;
         let mut new_offsets = [0; 16];
-        let mut partition_of = [0; 16];
+        let mut split_hashes = [0; 16];
         loop {
             let partitions = Partitions {
                 shift: 9,
@@ -1056,11 +1055,11 @@ mod tests {
                 source as usize,
                 &mut from,
                 &mut new_offsets,
-                &mut partition_of,
+                &mut split_hashes,
             )
             .unwrap();
-            for (&offset, &partition) in new_offsets.iter().zip(&partition_of).take(split.count) {
-                assert_eq!(owner[(offset >> UNIT_BITS) as usize], partition);
+            for (&offset, &hash) in new_offsets.iter().zip(&split_hashes).take(split.count) {
+                assert_eq!(owner[(offset >> UNIT_BITS) as usize], (hash >> 9) & 3);
             }
             copied += split.count;
             match split.full {

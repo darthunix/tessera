@@ -59,6 +59,7 @@ static const TessKernelOps kernels = {
 	.spill_header_read = tess_spill_header_read,
 	.table_append_partitioned = tess_table_append_partitioned,
 	.table_split = tess_table_split,
+	.bloom_add = tess_bloom_add,
 };
 
 static const TessKernelRegistryOps *

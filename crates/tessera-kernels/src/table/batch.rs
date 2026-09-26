@@ -293,8 +293,8 @@ fn append_partitioned_rows<
 /// Copy the records of chunk `source` from byte `*from` on, whole and in
 /// order, each to the chunk of its hash's partition, whose one writer the
 /// caller is, and move `*from` past them: at most `offsets.len()` of them,
-/// the new references into `offsets` and their partitions into
-/// `partition_of`. The copies are not linked. It stops before a record
+/// the new references into `offsets` and their hashes into `hashes`. The
+/// copies are not linked. It stops before a record
 /// whose partition's chunk is full, which [`Split::full`] names.
 pub(super) fn split<R: Region>(
     region: &R,
@@ -303,12 +303,12 @@ pub(super) fn split<R: Region>(
     source: usize,
     from: &mut usize,
     offsets: &mut [u32],
-    partition_of: &mut [u32],
+    hashes: &mut [u32],
 ) -> Result<Split> {
     let mask = check_partitions(region, partitions)?;
     ensure!(
-        offsets.len() == partition_of.len(),
-        "the offsets and partitions of a split have different lengths"
+        offsets.len() == hashes.len(),
+        "the offsets and hashes of a split have different lengths"
     );
     ensure!(
         !partitions.chunks.contains(&(source as u32)),
@@ -343,7 +343,7 @@ pub(super) fn split<R: Region>(
             access.set_used(chunk, used + record_size);
         }
         offsets[count] = access.reference((chunk, used));
-        partition_of[count] = partition;
+        hashes[count] = hash;
         count += 1;
         *from = byte + record_size;
     }

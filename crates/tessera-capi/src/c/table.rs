@@ -631,7 +631,7 @@ pub unsafe extern "C" fn tess_table_append_partitioned(
 /// `table` as for [`chunks_of`], the caller being the one writer of every
 /// partition's chunk; `kinds` as for [`key_kinds`]; `partition_chunks` as
 /// for [`partitions`]; `from`, `count` and `full` must be writable,
-/// `offsets` and `partition_of` hold `capacity` writable slots; `status`
+/// `offsets` and `hashes` hold `capacity` writable slots; `status`
 /// as for every entry point.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn tess_table_split(
@@ -646,7 +646,7 @@ pub unsafe extern "C" fn tess_table_split(
     from: *mut usize,
     capacity: c_int,
     offsets: *mut u32,
-    partition_of: *mut u32,
+    hashes: *mut u32,
     count: *mut c_int,
     full: *mut c_int,
     status: *mut Status,
@@ -664,17 +664,9 @@ pub unsafe extern "C" fn tess_table_split(
             let source = usize::try_from(source).context("a negative chunk")?;
             let capacity = usize::try_from(capacity).context("a negative capacity")?;
             let offsets = slots(offsets, capacity, "offsets")?;
-            let partition_of = slots(partition_of, capacity, "partitions")?;
+            let hashes = slots(hashes, capacity, "hashes")?;
             let from = from.as_mut().context("a null from")?;
-            let split = split_to(
-                &config,
-                chunks,
-                &partitions,
-                source,
-                from,
-                offsets,
-                partition_of,
-            )?;
+            let split = split_to(&config, chunks, &partitions, source, from, offsets, hashes)?;
             *count.as_mut().context("a null count")? = split.count as c_int;
             *full.as_mut().context("a null full")? =
                 split.full.map_or(-1, |partition| partition as c_int);
@@ -1194,6 +1186,32 @@ pub unsafe extern "C" fn tess_table_bloom(
             let table = attach(table)?;
             let words = slots(words, nwords, "filter words")?;
             table.bloom(words)
+        })
+    }
+}
+
+/// `tess_bloom_add`: set the bits of the hashes of a batch's rows.
+///
+/// # Safety
+///
+/// `words` must point to `nwords` writable words that nothing else
+/// accesses; `rows` to a valid mask; `hashes` to a hash per row; `status`
+/// as for every entry point.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tess_bloom_add(
+    words: *mut u64,
+    nwords: usize,
+    hashes: *const u32,
+    rows: *const Mask,
+    status: *mut Status,
+) -> Code {
+    // SAFETY: the caller's contract.
+    unsafe {
+        guard(status, || {
+            let rows = rows.as_ref().context("a null row mask")?.view()?;
+            let words = slots(words, nwords, "filter words")?;
+            let hashes = values(hashes, rows.nrows(), "hashes")?;
+            tessera_kernels::table::bloom::add(words, hashes, &rows)
         })
     }
 }

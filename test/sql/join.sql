@@ -212,8 +212,9 @@ SELECT join_same($$SELECT count(*), sum(jgrow.g) FROM jd JOIN jgrow ON jd.id = j
 SELECT join_explain($$SELECT count(*) FROM jf JOIN jd ON jf.fk = jd.id$$);
 -- Rounds: every match of a key with three records counts.
 SELECT join_explain($$SELECT sum(jdup.w) FROM jf JOIN jdup ON jf.fk = jdup.k$$);
--- An inner side the planner thinks small: the table goes past hash_mem,
--- and is kept and reported, not split.
+-- An inner side the planner thinks small: the table goes past hash_mem
+-- and spills; at a hash_mem this small its partitions do not fit either,
+-- which Overrun reports.
 CREATE FUNCTION join_many() RETURNS SETOF int LANGUAGE sql ROWS 10
 AS 'SELECT generate_series(1, 20000)';
 SET work_mem = '64kB';
@@ -288,6 +289,39 @@ SET tessera.join_bloom_ratio = 0;
 SELECT join_explain($$SELECT count(*), sum(jbuild.w) FROM jprobe JOIN jbuild ON jprobe.k = jbuild.k WHERE jprobe.v > 0 AND jprobe.v::text LIKE '%1%'$$);
 RESET tessera.join_bloom_ratio;
 
+-- Spilling: an inner side of about 3 MB with duplicates, NULL keys and
+-- text of 1 to 60 bytes, past a hash_mem of 1 MB. The first partitions
+-- stay in memory, the others go to disk with the outer rows of theirs,
+-- which pass the Bloom filter of every inner row first, and are joined
+-- after the outer side; text of both sides comes back from disk.
+CREATE TABLE jsb (k int, t text, n bigint);
+INSERT INTO jsb
+SELECT CASE WHEN g % 17 = 0 THEN NULL ELSE g % 15000 END,
+       CASE WHEN g % 7 = 0 THEN NULL ELSE repeat('b', g % 60) || g END, g
+FROM generate_series(1, 40000) AS g;
+CREATE TABLE jsp (k int, s text);
+INSERT INTO jsp
+SELECT CASE WHEN g % 11 = 0 THEN NULL ELSE g % 20000 END, 'p' || g
+FROM generate_series(1, 100000) AS g;
+-- One key held by 5000 inner rows: its partition cannot split.
+CREATE TABLE jskew (k int, w int);
+INSERT INTO jskew SELECT CASE WHEN g <= 5000 THEN 7 ELSE g END, g FROM generate_series(1, 8000) AS g;
+ANALYZE jsb, jsp, jskew;
+SET work_mem = '512kB';
+SELECT join_explain($$SELECT count(*), sum(length(jsb.t)) FROM jsp JOIN jsb ON jsp.k = jsb.k$$);
+SELECT join_same($$SELECT count(*), sum(length(jsb.t)), sum(jsp.k), sum(jsb.n) FROM jsp JOIN jsb ON jsp.k = jsb.k$$);
+SELECT join_same($$SELECT jsp.s, jsb.t, jsb.n FROM jsp JOIN jsb ON jsp.k = jsb.k WHERE jsp.s LIKE '%7'$$);
+SELECT join_explain($$SELECT count(*), count(jsb.n), sum(length(jsb.t)) FROM jsp LEFT JOIN jsb ON jsp.k = jsb.k$$);
+SELECT join_same($$SELECT count(*), count(jsb.n), sum(length(jsb.t)), sum(length(jsp.s)) FROM jsp LEFT JOIN jsb ON jsp.k = jsb.k$$);
+SELECT join_same($$SELECT jsp.s, jsb.t FROM jsp LEFT JOIN jsb ON jsp.k = jsb.k WHERE jsp.s LIKE '%3'$$);
+SELECT join_same($$SELECT count(*), sum(length(jsp.s)) FROM jsp WHERE EXISTS (SELECT 1 FROM jsb WHERE jsb.k = jsp.k)$$);
+SELECT join_same($$SELECT jsp.s FROM jsp WHERE NOT EXISTS (SELECT 1 FROM jsb WHERE jsb.k = jsp.k)$$);
+SELECT join_same($$SELECT count(*), sum(jsb.n) FROM jsp JOIN jsb ON jsp.k = jsb.k AND jsb.n > jsp.k * 2$$);
+SELECT join_same($$SELECT count(*), sum(jskew.w), sum(jsp.k) FROM jsp JOIN jskew ON jsp.k = jskew.k$$);
+-- A rescan with a parameter of the outer side reads the inner side again.
+SELECT join_same($$SELECT v.x, (SELECT count(*) FROM jsp JOIN jsb ON jsp.k = jsb.k WHERE jsp.k < v.x) FROM (VALUES (100), (15000)) AS v(x)$$);
+RESET work_mem;
+
 -- Row-wise parents: a sort, a limit, a scrollable cursor.
 EXPLAIN (COSTS OFF)
 SELECT jf.v, jd.label FROM jf JOIN jd ON jf.fk = jd.id ORDER BY jf.v DESC LIMIT 5;
@@ -336,6 +370,11 @@ SELECT join_property($$SELECT count(*) FROM jbig JOIN jd ON jbig.fk = jd.id$$, '
 SET parallel_leader_participation = off;
 SELECT join_same($$SELECT count(*), sum(jd.n), sum(jbig.v) FROM jbig JOIN jd ON jbig.fk = jd.id$$);
 RESET parallel_leader_participation;
+-- Each participant spills a table of its own.
+SET work_mem = '512kB';
+SELECT join_same($$SELECT count(*), sum(length(jsb.t)), sum(jsp.k) FROM jsp JOIN jsb ON jsp.k = jsb.k$$);
+SELECT join_same($$SELECT count(*), count(jsb.n) FROM jsp LEFT JOIN jsb ON jsp.k = jsb.k$$);
+RESET work_mem;
 -- Each participant decides on a filter of its own table by its own rows.
 SELECT join_same($$SELECT count(*), sum(jbuild.w), sum(jprobe.v) FROM jprobe JOIN jbuild ON jprobe.k = jbuild.k$$);
 SELECT join_same($$SELECT count(*), sum(jprobe.v) FROM jprobe WHERE NOT EXISTS (SELECT 1 FROM jbuild WHERE jbuild.k = jprobe.k)$$);
@@ -430,7 +469,7 @@ SET tessera.enable = off;
 EXPLAIN (COSTS OFF) SELECT count(*) FROM jf JOIN jd ON jf.fk = jd.id;
 RESET tessera.enable;
 
-DROP TABLE jd, jf, jdup, jsmall, jempty, jgrow, jbig, jpair, jbuild, jprobe, jhit, jref, jrefprobe, jrefgrow;
+DROP TABLE jd, jf, jdup, jsmall, jempty, jgrow, jbig, jpair, jbuild, jprobe, jhit, jref, jrefprobe, jrefgrow, jsb, jsp, jskew;
 DROP FUNCTION join_property(text, text);
 DROP FUNCTION join_explain(text);
 DROP FUNCTION join_many();

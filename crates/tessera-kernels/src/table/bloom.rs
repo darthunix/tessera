@@ -290,6 +290,48 @@ pub fn probe(
     check(words, hashes, rows, found)
 }
 
+/// Set the bits of the hash of every row of `rows` in the filter: for a
+/// filter of a table that spills, which sees its rows as they come, some
+/// of them never in memory at once. `hashes` holds a hash per row.
+///
+/// # Errors
+///
+/// A filter whose length is not a power of two, and hashes of another row
+/// count than the mask, fail before any change.
+///
+/// ```
+/// use tessera_core::{RowMask, RowMaskView};
+/// use tessera_kernels::table::bloom;
+///
+/// // The rows added pass; a row not added, most likely not.
+/// let mut words = vec![0; bloom::words_for(100)?];
+/// bloom::add(&mut words, &[7, 8, 9], &RowMaskView::try_new(3, &[0b011])?)?;
+/// let mut found = [0];
+/// let all = RowMaskView::try_new(3, &[0b111])?;
+/// bloom::probe(&words, &[7, 8, 9], &all, &mut RowMask::try_new(3, &mut found)?)?;
+/// assert_eq!(found[0] & 0b011, 0b011);
+/// assert!(bloom::add(&mut words[..3], &[7], &RowMaskView::try_new(1, &[1])?).is_err());
+/// # Ok::<(), anyhow::Error>(())
+/// ```
+pub fn add(words: &mut [u64], hashes: &[u32], rows: &RowMaskView<'_>) -> Result<()> {
+    let nrows = rows.nrows();
+    let shift = shift_for(words.len())?;
+    ensure!(
+        hashes.len() == nrows,
+        "the hashes and the mask of the batch have different row counts"
+    );
+    for index in 0..nrows.div_ceil(64) {
+        let mut bits = rows.word(index).unwrap();
+        while bits != 0 {
+            let bit = bits.trailing_zeros() as usize;
+            bits &= bits - 1;
+            let (word, mask) = place(hashes[index * 64 + bit], shift);
+            words[word] |= mask;
+        }
+    }
+    Ok(())
+}
+
 /// [`probe`] against a shared filter, which must be ready.
 ///
 /// # Errors

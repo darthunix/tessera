@@ -84,3 +84,15 @@ each of which holds a buffer of one page.
 
 These are the only calls of PostgreSQL's file layer for spilling: a core
 with another manager of work files, like Greengage's, replaces this file.
+
+## In the hash join
+
+TessHashJoin spills a table of its own (docs/nodes.md, "Spilling"): two
+sets of files, one for the inner side's partitions and one for the
+outer rows written, each a table of its own layout and fingerprint. A
+partition's file holds its value chunks and chunks of records in the
+order they were written, a chunk's values always before it, so the outer
+rows are read back one chunk at a time with only that chunk's values in
+memory; the inner side's partition is read whole. Each partition's tail
+chunk, never full, stays in memory and is joined as it is, so a
+partition whose rows fit in its tail never touches the disk.

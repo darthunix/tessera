@@ -991,6 +991,7 @@ tessera_test_table_partitions(PG_FUNCTION_ARGS)
 	uint32		partitions[NROWS];
 	uint32		chunks[4];
 	uint32		split_offsets[NROWS];
+	uint32		split_hashes[NROWS];
 	uint32		split_partitions[NROWS];
 	int			nvalid;
 	int			copied = 0;
@@ -1063,7 +1064,7 @@ tessera_test_table_partitions(PG_FUNCTION_ARGS)
 
 		if (tess_table_split(&whole->ref, 1, one_int4, 8, chunks, 4, 9, 0, &from,
 							 NROWS - copied, split_offsets + copied,
-							 split_partitions + copied, &count, &full,
+							 split_hashes + copied, &count, &full,
 							 &status) != TESS_OK)
 			PG_RETURN_BOOL(false);
 		copied += count;
@@ -1076,6 +1077,8 @@ tessera_test_table_partitions(PG_FUNCTION_ARGS)
 		else if (count == 0)
 			break;
 	}
+	for (int i = 0; i < copied; i++)
+		split_partitions[i] = (split_hashes[i] >> 9) & 3;
 	if (copied != nvalid ||
 		!partitioned_rows(whole, batch, split_offsets, split_partitions, copied, 9))
 		PG_RETURN_BOOL(false);
@@ -1089,7 +1092,7 @@ tessera_test_table_partitions(PG_FUNCTION_ARGS)
 		PG_RETURN_BOOL(false);
 	chunks[0] = 0;
 	if (tess_table_split(&whole->ref, 1, one_int4, 8, chunks, 4, 9, 0, &from, NROWS,
-						 split_offsets, split_partitions, &copied, &copied,
+						 split_offsets, split_hashes, &copied, &copied,
 						 &status) != TESS_ERROR_INVALID_ARGUMENT ||
 		strstr(status.message, "into itself") == NULL)
 		PG_RETURN_BOOL(false);

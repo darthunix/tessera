@@ -304,7 +304,7 @@ on chunks alone, without the index, as `tess_table_append` does:
 - `tess_table_split` copies the records of one chunk, whole and in order,
   each to the chunk of its partition, and stops before a record whose
   partition's chunk is full, naming that partition; it returns the new
-  references and partitions of the records copied. A node uses it once,
+  references and the hashes of the records copied. A node uses it once,
   when its table first overflows, to sort the chunks it built into
   partitions, and again when a partition read back from disk is still too
   large and splits by the next bits. The copies are not linked: a

@@ -38,7 +38,7 @@ pub use spill::{
 };
 pub use status::{Code, MESSAGE_SIZE, Status};
 pub use table::{
-    TableKey, TableKeys, TableRecord, TableRef, TableStats, tess_bloom_probe,
+    TableKey, TableKeys, TableRecord, TableRef, TableStats, tess_bloom_add, tess_bloom_probe,
     tess_bloom_shared_init, tess_bloom_shared_probe, tess_bloom_shared_ready,
     tess_bloom_shared_words, tess_build_add_duplicates, tess_build_counters_init,
     tess_build_report, tess_build_step, tess_build_take_chunk, tess_build_totals,

@@ -616,11 +616,13 @@ the one built, so the cost decides which side that is. The template is
 the core's hash join of the same inputs (`initial_cost_hashjoin` and
 `create_hashjoin_path`, not added), at nine tenths of its cost; its
 disabled count comes along, and like the core the hook offers nothing
-when hash joins are disabled. The node keeps the whole table in memory
-and does not split it into batches, so there is no path when the core
-would split the inner side, or when the node's own estimate of the table
-(a record of 24 bytes, a word per key and per inner column, the
-columns' width, the buckets) exceeds `hash_mem`.
+when hash joins are disabled. The template counts the batches the core
+would write, and a table of the node's own spills where the core's
+would (see Spilling below); a shared table does not spill yet, so there
+is no shared path when the core would split the inner side, or when the
+node's own estimate of the table (a record of 24 bytes, a word per key
+and per inner column, the columns' width, the buckets) exceeds the
+participants' `hash_mem`.
 
 Under a `Gather` the hook also offers a partial path: the outer side's
 cheapest partial path divides the rows, and every participant builds the
@@ -760,6 +762,47 @@ that attaches after the last one left returns nothing. Without a DSM (a
 `Gather` that launched no workers) the node builds a table of its own
 from the whole inner side, which its partial scan then reads alone.
 
+### Spilling
+
+A table of the node's own spills once it would outgrow `hash_mem` (see
+[spill.md](spill.md)): its chunks past the first take at most an eighth
+of `hash_mem`, and before a batch that could take the table past it
+with a chunk of records and one of values, the node chooses a power of
+two of partitions, from 4 to 1024, that makes the inner side it expects
+(twice what it read, or the planner's rows if more) about half of
+`hash_mem` each, as long as a tail per partition and side still fits in
+half of it. The records read so far are split into the partitions by
+their hashes' low bits (`tess_table_split`), their by-reference values
+copied into value chunks of their partitions, and the rest of the inner
+side is appended partitioned (`tess_table_append_partitioned`). Every
+partition starts resident, in memory whole; while the partitions,
+their values, a Bloom filter of every inner row and room for the outer
+side's tails take more than `hash_mem`, the largest resident partition
+goes to disk: its value chunks, then its chunks of records, each to the
+partition's temporary file, its last chunk staying as its tail. A
+partition on disk writes its tail when it fills, after the value chunks
+opened since the last one, so that a file read in order gives values
+before the records that refer to them.
+
+Once the inner side is read, the resident partitions make the table the
+outer batches probe. An outer row whose partition is on disk leaves the
+probe: without an inner row in its partition, or rejected by the filter
+of every inner row, it has no pair and is answered at once (a left or
+anti join returns it); otherwise it is appended as a record of its
+partition to a table of the outer keys, whose payload is the NULL bits
+and the outer columns the node reads, a by-reference value copied into
+the partition's value chunks right after its row, and the rows the
+batch answers now leave out those written. When the outer child is
+done, each partition with outer rows written is joined in turn: its
+chunks and values are read back, with its tail, and indexed as a table
+of their own, and its outer rows come back in batches of up to 64 rows
+gathered from their records, which take the same way as the outer
+child's batches, rounds, compact batches, clauses, and the rows of left
+and anti joins without a pair. A compact batch holding pairs of one
+table keeps the next from being loaded until it goes out. A partition
+larger than `hash_mem` is joined whole for now (`Overrun` reports it).
+A rescan of a table that spilled reads the inner side again.
+
 A semi or anti join marks the rows of each outer batch that have a pair
 passing the join clauses: without such clauses the rows the probe found,
 with them the rows of each round that pass, which then leave the next
@@ -804,12 +847,15 @@ clauses as `Hash Cond`, `Shared Table` for a shared table, the residual ones tha
 Join Filter` and the others as `Join Filter`, and an outer join's filters
 as `Batch Filter` and `Filter`. With `ANALYZE` it adds
 the bucket count of the last table built, `Memory Usage`, the most the
-table and the copies of inner values took, `Overrun`, what of it
-exceeded `hash_mem` (shown only then: the node keeps the whole inner side
-in memory, and a table larger than the planner expected is kept rather
-than split), `Builds`, the tables built over the rescans, `Build Rows`,
+table, the copies of inner values and spilling took, `Overrun`, what of
+it exceeded `hash_mem` (shown only then: a partition larger than it is
+joined whole), `Builds`, the tables built over the rescans, `Build Rows`,
 the inner rows inserted into them, `Chunks`, the chunks of their
-records, `Probe Rows`, the outer rows probed, and `Matches`, the joined
+records, and for a table that spilled `Batches`, its partitions,
+`Resident Partitions`, those kept in memory, `Spilled Chunks` and `Disk
+Usage`, the blocks and bytes written by both sides, and `Tail Chunks
+Kept`, the tails joined without being written; `Probe Rows`, the outer
+rows probed, and `Matches`, the joined
 rows over every round, `Rows Removed by Join Filter` and `Rows Removed by
 Filter`, and `Compact Batches`, the batches of copied
 pairs, when there are any, and `Bloom Filters`, the filters built, with
@@ -857,6 +903,13 @@ checks that the rows probed and the matches are the totals of every
 participant. It also shows
 the core's plan without the kernels module, for a full join, clauses
 without an integer key, a text key, hash joins disabled and the switch off.
+Spilling, at a `work_mem` of 512 kB: an inner side of about 3 MB with
+duplicates, NULL keys and text, joined with the counters shown for an
+inner and a left join, and compared as rows with text of both sides, a
+left join with misses and NULL keys, semi and anti joins, a residual
+clause, one key held by 5000 inner rows, a rescan with a parameter of the
+outer side, and under the `Gather` each participant spilling its own
+table.
 Semi, anti and left joins: `EXISTS` with and without a join clause, `IN`
 over a subquery, `NOT EXISTS` with and without one (NULL keys going
 out), a left join the planner turns into an anti join, left joins with

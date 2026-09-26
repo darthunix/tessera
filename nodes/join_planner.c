@@ -257,9 +257,11 @@ table_bytes(Path *inner, double inner_rows, int nkeys, int ninner)
 
 /*
  * The path: the core's hash join of the same inputs as the template, at a
- * lower cost, over batch paths of them. NULL when the core would split the
- * inner side into batches or the table would not fit in hash_mem: the
- * node keeps the whole table in memory.
+ * lower cost, over batch paths of them; the template's cost counts the
+ * batches the core would write, and the node spills as the core does. A
+ * shared table does not spill yet: NULL when the core would split its
+ * inner side into batches or the table would not fit in the participants'
+ * hash_mem.
  */
 static CustomPath *
 make_join_path(PlannerInfo *root, RelOptInfo *joinrel, JoinType jointype,
@@ -283,8 +285,9 @@ make_join_path(PlannerInfo *root, RelOptInfo *joinrel, JoinType jointype,
 		memory_limit *= outer_path->parallel_workers + 1;
 	initial_cost_hashjoin(root, &workspace, jointype, hashclauses,
 						  outer_path, inner_path, extra, shared);
-	if (workspace.numbatches > 1 ||
-		table_bytes(inner_path, inner_rows, keys->nkeys, ninner) > memory_limit)
+	if (shared &&
+		(workspace.numbatches > 1 ||
+		 table_bytes(inner_path, inner_rows, keys->nkeys, ninner) > memory_limit))
 		return NULL;
 	outer = tess_batch_input_path(root, outer_path);
 	inner = tess_batch_input_path(root, inner_path);
