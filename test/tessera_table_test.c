@@ -931,7 +931,10 @@ tessera_test_spill_header(PG_FUNCTION_ARGS)
 								&status) != TESS_OK ||
 		tess_spill_header_read(block, sizeof(block), fingerprint, 1 << 20, &back,
 							   &status) != TESS_OK ||
-		memcmp(&header, &back, sizeof(header)) != 0 ||
+		back.kind != header.kind || back.number != header.number ||
+		back.partition != header.partition || back.level != header.level ||
+		back.fingerprint != header.fingerprint || back.len != header.len ||
+		back.packed != 0 ||
 		tess_spill_header_read(block, sizeof(block), other_fingerprint, 1 << 20, &back,
 							   &status) != TESS_ERROR_INVALID_ARGUMENT ||
 		strstr(status.message, "another table") == NULL ||

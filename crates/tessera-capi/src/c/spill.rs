@@ -21,6 +21,8 @@ pub struct SpillHeader {
     pub fingerprint: u64,
     /// Bytes of the body after the header.
     pub len: u64,
+    /// Bytes of a packed chunk of records on disk, 0 for a body as it is.
+    pub packed: u32,
 }
 
 impl SpillHeader {
@@ -37,6 +39,7 @@ impl SpillHeader {
             level: self.level,
             fingerprint: self.fingerprint,
             len: self.len,
+            packed: self.packed,
         })
     }
 
@@ -48,6 +51,7 @@ impl SpillHeader {
             level: block.level,
             fingerprint: block.fingerprint,
             len: block.len,
+            packed: block.packed,
         }
     }
 }
@@ -116,6 +120,79 @@ pub unsafe extern "C" fn tess_spill_header_read(
             let block = BlockHeader::read(bytes, fingerprint, max_len)?;
             *header.as_mut().context("a null spill header")? = SpillHeader::from_block(block);
             Ok(())
+        })
+    }
+}
+
+/// `tess_spill_pack`: pack the `len` bytes of a chunk of records at `chunk`
+/// into `out`, of `capacity` bytes: the packed length into `packed`, or 0
+/// when the chunk is not one packing takes or would not get shorter.
+///
+/// # Safety
+///
+/// `chunk` must be valid for reads of `len` bytes, `out` for writes of
+/// `capacity` bytes, and `packed` writable; `status` as for every entry
+/// point.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tess_spill_pack(
+    chunk: *const u8,
+    len: usize,
+    out: *mut u8,
+    capacity: usize,
+    packed: *mut usize,
+    status: *mut Status,
+) -> Code {
+    // SAFETY: the caller's contract.
+    unsafe {
+        guard(status, || {
+            let chunk = slice::from_raw_parts(
+                (!chunk.is_null())
+                    .then_some(chunk)
+                    .context("a null chunk")?,
+                len,
+            );
+            let out = slice::from_raw_parts_mut(
+                (!out.is_null()).then_some(out).context("a null buffer")?,
+                capacity,
+            );
+            *packed.as_mut().context("a null length")? =
+                tessera_spill::pack(chunk, out).unwrap_or(0);
+            Ok(())
+        })
+    }
+}
+
+/// `tess_spill_unpack`: unpack the `len` bytes `tess_spill_pack` made at
+/// `packed` into the chunk of `chunk_len` bytes at `chunk`.
+///
+/// # Safety
+///
+/// `packed` must be valid for reads of `len` bytes and `chunk` for writes
+/// of `chunk_len` bytes; `status` as for every entry point.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tess_spill_unpack(
+    packed: *const u8,
+    len: usize,
+    chunk: *mut u8,
+    chunk_len: usize,
+    status: *mut Status,
+) -> Code {
+    // SAFETY: the caller's contract.
+    unsafe {
+        guard(status, || {
+            let packed = slice::from_raw_parts(
+                (!packed.is_null())
+                    .then_some(packed)
+                    .context("a null packed body")?,
+                len,
+            );
+            let chunk = slice::from_raw_parts_mut(
+                (!chunk.is_null())
+                    .then_some(chunk)
+                    .context("a null chunk")?,
+                chunk_len,
+            );
+            tessera_spill::unpack(packed, chunk)
         })
     }
 }

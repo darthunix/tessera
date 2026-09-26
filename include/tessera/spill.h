@@ -39,6 +39,11 @@ typedef struct TessSpillHeader
 	uint64		fingerprint;
 	/* Bytes of the body after the header, a multiple of 8. */
 	uint64		len;
+	/*
+	 * A chunk of records stored packed (tess_spill_pack): the bytes on
+	 * disk, fewer than len; 0 when the body is stored as it is.
+	 */
+	uint32		packed;
 } TessSpillHeader;
 
 /* Bytes of a spilled block's header, what tess_spill_header_size() returns. */
@@ -70,5 +75,20 @@ extern TessStatusCode tess_spill_header_read(const void *bytes, Size len,
 											 uint64 max_len,
 											 TessSpillHeader *header,
 											 TessStatus *status);
+
+/*
+ * Pack the len bytes of a chunk of records at chunk into out, of capacity
+ * bytes (len is enough): *packed gets the packed length, or 0 when the
+ * chunk is not one of records of one length or would not get shorter.
+ * Each 4-byte lane of the records is stored at the width its values need
+ * in this chunk; the lane of the next-record references is dropped.
+ */
+extern TessStatusCode tess_spill_pack(const void *chunk, Size len, void *out,
+									  Size capacity, Size *packed,
+									  TessStatus *status);
+
+/* Unpack len bytes tess_spill_pack made into the chunk of chunk_len bytes. */
+extern TessStatusCode tess_spill_unpack(const void *packed, Size len, void *chunk,
+										Size chunk_len, TessStatus *status);
 
 #endif							/* TESSERA_SPILL_H */

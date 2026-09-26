@@ -42,6 +42,9 @@ struct TessSpill
 	uint64		blocks;
 	uint64		bytes;
 	int			nfiles;
+	/* A buffer for packing and unpacking chunks of records, grown as needed. */
+	char	   *scratch;
+	Size		scratch_len;
 };
 
 struct TessSpillReader
@@ -51,9 +54,10 @@ struct TessSpillReader
 	int			partition;
 	/* The file is the set's own handle, not one opened for this reader. */
 	bool		own;
-	/* The body length of the header just read, until the body is read. */
+	/* The body length of the header just read, until the body is read, and its packed bytes. */
 	bool		pending;
 	uint64		pending_len;
+	uint32		pending_packed;
 	TessSpillReader *next;
 };
 
@@ -107,7 +111,9 @@ tess_spill_create(const TessSpillConfig *config)
 	if (config->kernels == NULL ||
 		!TESS_ABI_HAS_FIELD(config->kernels, TessKernelOps, spill_header_read) ||
 		config->kernels->spill_header_write == NULL ||
-		config->kernels->spill_header_read == NULL)
+		config->kernels->spill_header_read == NULL ||
+		!TESS_ABI_HAS_FIELD(config->kernels, TessKernelOps, spill_unpack) ||
+		config->kernels->spill_pack == NULL || config->kernels->spill_unpack == NULL)
 		elog(ERROR, "Tessera spill set requires the kernels of spilled blocks");
 	if (config->npartitions <= 0 || config->level >= 32)
 		elog(ERROR, "Tessera spill set requires partitions and a level below 32");
@@ -166,7 +172,21 @@ partition_file(TessSpill *spill, int partition)
 	return spill->files[partition];
 }
 
-void
+/* The set's buffer for packing, of at least len bytes. */
+static char *
+scratch(TessSpill *spill, Size len)
+{
+	if (spill->scratch_len < len)
+	{
+		if (spill->scratch != NULL)
+			pfree(spill->scratch);
+		spill->scratch = MemoryContextAllocExtended(spill->context, len, MCXT_ALLOC_HUGE);
+		spill->scratch_len = len;
+	}
+	return spill->scratch;
+}
+
+Size
 tess_spill_write(TessSpill *spill, int partition, TessSpillKind kind,
 				 uint32 number, const void *body, Size len,
 				 TessSpillPosition *position)
@@ -190,6 +210,21 @@ tess_spill_write(TessSpill *spill, int partition, TessSpillKind kind,
 	header.level = spill->level;
 	header.fingerprint = spill->fingerprint;
 	header.len = len;
+	header.packed = 0;
+	/* A chunk of records goes packed when that makes it shorter. */
+	if (kind == TESS_SPILL_RECORDS && len >= 64 && len <= PG_UINT32_MAX)
+	{
+		Size		packed;
+
+		if (spill->kernels->spill_pack(body, len, scratch(spill, len), len, &packed,
+									   &status) != TESS_OK)
+			tess_status_report(&status);
+		if (packed > 0)
+		{
+			header.packed = (uint32) packed;
+			body = spill->scratch;
+		}
+	}
 	if (spill->kernels->spill_header_write(bytes, sizeof(bytes), &header,
 										   spill->max_len, &status) != TESS_OK)
 		tess_status_report(&status);
@@ -200,11 +235,14 @@ tess_spill_write(TessSpill *spill, int partition, TessSpillKind kind,
 		position->segment = segment;
 		position->offset = offset;
 	}
+	if (header.packed > 0)
+		len = header.packed;
 	BufFileWrite(file, bytes, sizeof(bytes));
 	if (len > 0)
 		BufFileWrite(file, body, len);
 	spill->blocks++;
 	spill->bytes += sizeof(bytes) + len;
+	return sizeof(bytes) + len;
 }
 
 void
@@ -294,7 +332,7 @@ tess_spill_read_header(TessSpillReader *reader, TessSpillHeader *header)
 {
 	TessStatus	status = TESS_STRUCT_INITIALIZER(TessStatus);
 	uint64		bytes[TESS_SPILL_HEADER_SIZE / sizeof(uint64)];
-	const TessSpill *spill;
+	TessSpill  *spill;
 
 	check_reader(reader);
 	if (header == NULL)
@@ -317,6 +355,7 @@ tess_spill_read_header(TessSpillReader *reader, TessSpillHeader *header)
 					   spill->level));
 	reader->pending = true;
 	reader->pending_len = header->len;
+	reader->pending_packed = header->packed;
 	return true;
 }
 
@@ -330,7 +369,19 @@ tess_spill_read_body(TessSpillReader *reader, void *body, Size len)
 	{
 		if (body == NULL)
 			elog(ERROR, "Tessera spilled block's body requires a buffer");
-		BufFileReadExact(reader->file, body, len);
+		if (reader->pending_packed > 0)
+		{
+			TessStatus	status = TESS_STRUCT_INITIALIZER(TessStatus);
+			TessSpill  *spill = reader->spill;
+			char	   *packed = scratch(spill, reader->pending_packed);
+
+			BufFileReadExact(reader->file, packed, reader->pending_packed);
+			if (spill->kernels->spill_unpack(packed, reader->pending_packed, body, len,
+											 &status) != TESS_OK)
+				tess_status_report(&status);
+		}
+		else
+			BufFileReadExact(reader->file, body, len);
 	}
 	reader->pending = false;
 }

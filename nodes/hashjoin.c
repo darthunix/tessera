@@ -1767,13 +1767,14 @@ static void
 write_block(TessHashJoinState *state, SpillSide *side, int partition,
 			TessSpillKind kind, uint32 number, const void *body, Size len)
 {
-	tess_spill_write(side->file, partition, kind, number, body, len, NULL);
+	/* disk_bytes: what the block takes read back; the disk counts what was stored. */
+	state->counters[JOIN_DISK] += tess_spill_write(side->file, partition, kind, number,
+												   body, len, NULL);
 	side->parts[partition].written = true;
 	side->parts[partition].disk_bytes += len;
 	if (kind == TESS_SPILL_RECORDS)
 		side->parts[partition].blocks++;
 	state->counters[JOIN_SPILLED]++;
-	state->counters[JOIN_DISK] += TESS_SPILL_HEADER_SIZE + len;
 }
 
 /* Write the partition's value chunks in memory and free them. */

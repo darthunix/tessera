@@ -19,11 +19,14 @@
 
 use anyhow::{Result, bail, ensure};
 
+mod pack;
+pub use pack::{pack, unpack};
+
 /// The first word of every block.
 pub const MAGIC: u64 = u64::from_le_bytes(*b"TESSSPIL");
 
 /// The format of the blocks this crate writes and reads.
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 
 /// Bytes of a block header; the body follows, aligned to 8.
 pub const HEADER_SIZE: usize = 48;
@@ -67,6 +70,10 @@ pub struct BlockHeader {
     pub fingerprint: u64,
     /// Bytes of the body: a multiple of 8, at least 8 for records.
     pub len: u64,
+    /// For a chunk of records stored packed ([`pack`]), the bytes on disk,
+    /// fewer than `len`, a multiple of 8; 0 when the body is stored as it
+    /// is, as every chunk of values is.
+    pub packed: u32,
 }
 
 const MAGIC_AT: usize = 0;
@@ -75,7 +82,7 @@ const KIND_AT: usize = 12;
 const NUMBER_AT: usize = 16;
 const PARTITION_AT: usize = 20;
 const LEVEL_AT: usize = 24;
-const RESERVED_AT: usize = 28;
+const PACKED_AT: usize = 28;
 const FINGERPRINT_AT: usize = 32;
 const LEN_AT: usize = 40;
 
@@ -107,6 +114,16 @@ impl BlockHeader {
             "a spilled chunk of records has no used mark"
         );
         ensure!(
+            self.packed == 0
+                || (self.kind == BlockKind::Records
+                    && self.packed.is_multiple_of(8)
+                    && u64::from(self.packed) >= 16
+                    && u64::from(self.packed) < self.len),
+            "a spilled block packed into {} bytes of {} is no packed chunk of records",
+            self.packed,
+            self.len
+        );
+        ensure!(
             self.level < MAX_LEVEL,
             "a spilled block at level {} is past the hash's bits",
             self.level
@@ -129,7 +146,7 @@ impl BlockHeader {
         put_u32(out, NUMBER_AT, self.number);
         put_u32(out, PARTITION_AT, self.partition);
         put_u32(out, LEVEL_AT, self.level);
-        put_u32(out, RESERVED_AT, 0);
+        put_u32(out, PACKED_AT, self.packed);
         put_u64(out, FINGERPRINT_AT, self.fingerprint);
         put_u64(out, LEN_AT, self.len);
         Ok(())
@@ -159,10 +176,6 @@ impl BlockHeader {
                 get_u32(bytes, KIND_AT)
             );
         };
-        ensure!(
-            get_u32(bytes, RESERVED_AT) == 0,
-            "a spilled block header has a reserved word set"
-        );
         let header = Self {
             kind,
             number: get_u32(bytes, NUMBER_AT),
@@ -170,6 +183,7 @@ impl BlockHeader {
             level: get_u32(bytes, LEVEL_AT),
             fingerprint: get_u64(bytes, FINGERPRINT_AT),
             len: get_u64(bytes, LEN_AT),
+            packed: get_u32(bytes, PACKED_AT),
         };
         ensure!(
             header.fingerprint == fingerprint,
@@ -192,6 +206,7 @@ mod tests {
             level: 1,
             fingerprint: 0x1234_5678_9abc_def0,
             len: 4096,
+            packed: 0,
         }
     }
 
@@ -221,11 +236,12 @@ mod tests {
         let mut good = [0_u8; HEADER_SIZE];
         header().write(&mut good, 1 << 20)?;
         let fingerprint = header().fingerprint;
-        let cases: [(&str, usize, u64, usize); 8] = [
+        let cases: [(&str, usize, u64, usize); 9] = [
             ("magic", MAGIC_AT, 1, 8),
-            ("version", VERSION_AT, 2, 4),
+            ("version", VERSION_AT, 1, 4),
             ("kind", KIND_AT, 9, 4),
-            ("reserved", RESERVED_AT, 1, 4),
+            ("odd packing", PACKED_AT, 1001, 4),
+            ("packing no shorter", PACKED_AT, 4096, 4),
             ("fingerprint", FINGERPRINT_AT, 1, 8),
             ("odd length", LEN_AT, 4097, 8),
             ("long length", LEN_AT, 2 << 20, 8),
@@ -254,6 +270,17 @@ mod tests {
         let empty_records = BlockHeader { len: 0, ..header() };
         assert!(empty_records.write(&mut bytes, 1 << 20).is_err());
         assert!(header().write(&mut bytes, 1024).is_err());
+        let packed_values = BlockHeader {
+            kind: BlockKind::Values,
+            packed: 64,
+            ..header()
+        };
+        assert!(packed_values.write(&mut bytes, 1 << 20).is_err());
+        let packed = BlockHeader {
+            packed: 64,
+            ..header()
+        };
+        assert!(packed.write(&mut bytes, 1 << 20).is_ok());
         assert!(
             header()
                 .write(&mut bytes[..HEADER_SIZE - 1], 1 << 20)

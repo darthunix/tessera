@@ -1336,13 +1336,13 @@ agg_write_chunk(TessAggState *state, AggSpill *spill, int partition, void *base)
 
 	if (used <= TESS_TABLE_CHUNK_HEADER)
 		return;
-	tess_spill_write(spill->file, partition, TESS_SPILL_RECORDS,
-					 spill->next_number++, base, used, NULL);
+	/* disk_bytes of a partition: what it takes read back; the node's, what was stored. */
+	state->disk_bytes += tess_spill_write(spill->file, partition, TESS_SPILL_RECORDS,
+										  spill->next_number++, base, used, NULL);
 	spill->parts[partition].disk_bytes += used;
 	spill->parts[partition].disk_records +=
 		(used - TESS_TABLE_CHUNK_HEADER) / agg_record_size(state);
 	state->spilled++;
-	state->disk_bytes += TESS_SPILL_HEADER_SIZE + used;
 }
 
 /*

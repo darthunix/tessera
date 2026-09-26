@@ -43,6 +43,7 @@ pub use shared_spill::{
 };
 pub use spill::{
     SpillHeader, tess_spill_header_read, tess_spill_header_size, tess_spill_header_write,
+    tess_spill_pack, tess_spill_unpack,
 };
 pub use status::{Code, MESSAGE_SIZE, Status};
 pub use table::{

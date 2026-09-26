@@ -943,7 +943,7 @@ SELECT join_explain($$SELECT count(*) FROM jf JOIN join_many() AS m(k) ON jf.v =
          Batches: 4
          Resident Partitions: 791
          Spilled Chunks: 6262
-         Disk Usage: 2922 kB
+         Disk Usage: 938 kB
          Tail Chunks Kept: 2832
          Split Partitions: 1714
          Probe Rows: 1000
@@ -1661,7 +1661,7 @@ SELECT join_explain($$SELECT count(*), sum(length(jsb.t)) FROM jsp JOIN jsb ON j
          Batches: 8
          Resident Partitions: 1
          Spilled Chunks: 605
-         Disk Usage: 4649 kB
+         Disk Usage: 1865 kB
          Tail Chunks Kept: 14
          Probe Rows: 100000
          Matches: 171130
@@ -1713,7 +1713,7 @@ SELECT join_explain($$SELECT count(*), count(jsb.n), sum(length(jsb.t)) FROM jsp
          Batches: 8
          Resident Partitions: 1
          Spilled Chunks: 660
-         Disk Usage: 4932 kB
+         Disk Usage: 1946 kB
          Tail Chunks Kept: 14
          Probe Rows: 100000
          Matches: 171130
@@ -1782,7 +1782,7 @@ SELECT join_explain($$SELECT count(*), sum(jskew.w) FROM jsp JOIN jskew() AS jsk
          Batches: 4
          Resident Partitions: 3
          Spilled Chunks: 148
-         Disk Usage: 2359 kB
+         Disk Usage: 133 kB
          Tail Chunks Kept: 5
          Extra Passes: 3
          Probe Rows: 100000
@@ -1862,7 +1862,7 @@ SELECT join_explain($$SELECT count(*), sum(length(w.t)) FROM jsp JOIN jwide() AS
          Batches: 8
          Resident Partitions: 22
          Spilled Chunks: 3295
-         Disk Usage: 32811 kB
+         Disk Usage: 14530 kB
          Tail Chunks Kept: 65
          Split Partitions: 11
          Probe Rows: 100000

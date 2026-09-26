@@ -12,6 +12,7 @@ PG_MODULE_MAGIC;
 
 PG_FUNCTION_INFO_V1(tessera_test_spill_serial);
 PG_FUNCTION_INFO_V1(tessera_test_spill_shared);
+PG_FUNCTION_INFO_V1(tessera_test_spill_packed);
 PG_FUNCTION_INFO_V1(tessera_test_spill_error);
 PG_FUNCTION_INFO_V1(tessera_test_spill_bytes);
 
@@ -24,6 +25,8 @@ static const TessKernelOps kernels = {
 	.table_format_version = TESS_TABLE_FORMAT_VERSION,
 	.spill_header_write = tess_spill_header_write,
 	.spill_header_read = tess_spill_header_read,
+	.spill_pack = tess_spill_pack,
+	.spill_unpack = tess_spill_unpack,
 };
 
 /* A block's body: every word names its partition, chunk and place. */
@@ -256,6 +259,71 @@ tessera_test_spill_shared(PG_FUNCTION_ARGS)
 		elog(ERROR, "a dropped shared file is still there");
 	tess_spill_free(two);
 	dsm_detach(segment);
+	PG_RETURN_BOOL(true);
+}
+
+/*
+ * A chunk of 1000 records of 40 bytes, as a join's table holds them (a
+ * hash, a next-record reference, no NULL, the length, an int4 key and an
+ * int4 value in slots of 8 bytes, a NULL-bits word of 0), goes to disk
+ * packed, a lane of 4 bytes stored at the width its values need, and reads
+ * back the same but for the next-record references, which a chunk not yet
+ * linked holds as 0; bytes that are no such chunk go as they are.
+ */
+Datum
+tessera_test_spill_packed(PG_FUNCTION_ARGS)
+{
+	const int	nrecords = 1000;
+	Size		len = 8 + nrecords * 40;
+	uint32	   *chunk = palloc0(len);
+	uint32	   *back = palloc(len);
+	uint64	   *noise = palloc(4096);
+	TessSpill  *spill = make_spill(NULL, 0, FINGERPRINT);
+	TessSpillReader *reader;
+	TessSpillHeader header;
+	Size		stored;
+	Size		plain;
+	uint64		bytes;
+
+	*(uint64 *) chunk = len;
+	for (int record = 0; record < nrecords; record++)
+	{
+		uint32	   *words = chunk + 2 + record * 10;
+
+		words[0] = (uint32) record * 2654435761U;
+		words[1] = 12345;
+		words[3] = 5;
+		words[4] = 1000000 + record;
+		words[8] = 7 * record + 100000;
+	}
+	for (int word = 0; word < 512; word++)
+		noise[word] = UINT64CONST(0x9e3779b97f4a7c15) * (word + 1);
+	stored = tess_spill_write(spill, 1, TESS_SPILL_RECORDS, 0, chunk, len, NULL);
+	plain = tess_spill_write(spill, 1, TESS_SPILL_RECORDS, 1, noise, 4096, NULL);
+	if (stored > TESS_SPILL_HEADER_SIZE + 8 + 16 + nrecords * 12 + 8 ||
+		plain != TESS_SPILL_HEADER_SIZE + 4096)
+		elog(ERROR, "stored %zu and %zu bytes", stored, plain);
+	tess_spill_stats(spill, NULL, &bytes, NULL);
+	if (bytes != stored + plain)
+		elog(ERROR, "counted " UINT64_FORMAT " bytes", bytes);
+	tess_spill_finish(spill);
+	reader = tess_spill_open(spill, 0, 1);
+	if (!tess_spill_read_header(reader, &header) || header.len != len ||
+		header.packed == 0)
+		elog(ERROR, "a packed chunk reads back with a wrong header");
+	tess_spill_read_body(reader, back, len);
+	for (int record = 0; record < nrecords; record++)
+		chunk[2 + record * 10 + 1] = 0;
+	if (memcmp(back, chunk, len) != 0)
+		elog(ERROR, "a packed chunk reads back wrong");
+	if (!tess_spill_read_header(reader, &header) || header.len != 4096 ||
+		header.packed != 0)
+		elog(ERROR, "a plain block reads back with a wrong header");
+	tess_spill_read_body(reader, back, 4096);
+	if (memcmp(back, noise, 4096) != 0)
+		elog(ERROR, "a plain block reads back wrong");
+	tess_spill_close(reader);
+	tess_spill_free(spill);
 	PG_RETURN_BOOL(true);
 }
 

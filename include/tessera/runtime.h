@@ -652,8 +652,11 @@ extern TessSpill *tess_spill_create(const TessSpillConfig *config);
 /*
  * Write a block of len bytes at body to the partition's file, its header
  * naming kind and number; its start into position unless that is NULL.
+ * A chunk of records is stored packed when that makes it shorter
+ * (tess_spill_pack), and reads back whole. Returns the bytes on disk,
+ * header included.
  */
-extern void tess_spill_write(TessSpill *spill, int partition,
+extern Size tess_spill_write(TessSpill *spill, int partition,
 							 TessSpillKind kind, uint32 number,
 							 const void *body, Size len,
 							 TessSpillPosition *position);
