@@ -655,7 +655,7 @@ fn outside(offset: u32) -> anyhow::Error {
 /// The error of a chunk number past the chunks.
 #[cold]
 #[inline(never)]
-fn no_chunk(chunk: usize) -> anyhow::Error {
+pub(super) fn no_chunk(chunk: usize) -> anyhow::Error {
     anyhow::anyhow!("table chunk {chunk} does not exist")
 }
 

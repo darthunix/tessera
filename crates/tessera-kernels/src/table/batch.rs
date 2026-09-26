@@ -10,8 +10,10 @@ use tessera_core::{RowMask, RowMaskView};
 
 use super::header::{CHUNK_HEADER, Layout};
 use super::keys::{KeySource, WordKeys, slot_buffer};
+use super::record::no_chunk;
 use super::record::{Access, Place, same_keys};
 use super::region::Region;
+use super::{MAX_PARTITIONS, Partitions, Split};
 
 /// Call `$f` specialized for the common shapes of a table: one or two
 /// keys, one or two words after them; 0 stands for any other count, read
@@ -163,6 +165,189 @@ fn append_rows<R: Region, K: KeySource + ?Sized, const N: usize, const T: usize,
     // records just written.
     unsafe { access.set_used(chunk, used) };
     Ok(appended)
+}
+
+/// Check that every partition's chunk exists and that the partition bits
+/// lie within the hash; the mask of a partition number is returned.
+fn check_partitions<R: Region>(region: &R, partitions: &Partitions<'_>) -> Result<u32> {
+    let count = partitions.chunks.len();
+    ensure!(
+        count.is_power_of_two() && count <= MAX_PARTITIONS,
+        "{count} partitions are not a power of two up to {MAX_PARTITIONS}"
+    );
+    let bits = count.trailing_zeros();
+    ensure!(
+        partitions.shift < 32 && partitions.shift + bits <= 32,
+        "partition bits {} to {} lie past the 32 bits of a hash",
+        partitions.shift,
+        partitions.shift + bits
+    );
+    if let Some(&chunk) = partitions
+        .chunks
+        .iter()
+        .find(|&&chunk| chunk as usize >= region.chunks())
+    {
+        return Err(no_chunk(chunk as usize));
+    }
+    Ok((count - 1) as u32)
+}
+
+/// Append the rows of `pending`, in row order, as records each to the
+/// chunk of its hash's partition, whose one writer the caller is, as long
+/// as whole records fit there: appended rows leave `pending` and get their
+/// references in `offsets`; a row whose partition's chunk is full stays
+/// pending, and the rows after it go on. The count appended is returned.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn append_partitioned<R: Region, K: KeySource + ?Sized>(
+    region: &R,
+    layout: &Layout,
+    partitions: &Partitions<'_>,
+    hashes: &[u32],
+    keys: &K,
+    payload: Option<&[u8]>,
+    pending: &mut RowMask<'_>,
+    offsets: &mut [u32],
+) -> Result<usize> {
+    let nrows = pending.as_view().nrows();
+    check(layout, keys, nrows, hashes.len(), offsets.len())?;
+    check_payload(payload, nrows, layout.payload_size)?;
+    let mask = check_partitions(region, partitions)?;
+    shaped!(
+        layout.nkeys,
+        layout.tail_words(),
+        append_partitioned_rows(
+            region, layout, partitions, mask, hashes, keys, payload, pending, offsets
+        )
+    )
+}
+
+/// The rows of [`append_partitioned`], shaped as [`append_rows`].
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+fn append_partitioned_rows<
+    R: Region,
+    K: KeySource + ?Sized,
+    const N: usize,
+    const T: usize,
+    const L: usize,
+>(
+    region: &R,
+    layout: &Layout,
+    partitions: &Partitions<'_>,
+    mask: u32,
+    hashes: &[u32],
+    keys: &K,
+    payload: Option<&[u8]>,
+    pending: &mut RowMask<'_>,
+    offsets: &mut [u32],
+) -> Result<usize> {
+    let access = Access::for_chunks(region, layout);
+    let record_size = access.record_size();
+    let nrows = pending.as_view().nrows();
+    let payload_size = access.payload_size();
+    let shift = partitions.shift;
+    let mut buffer = slot_buffer::<L>();
+    let mut word_keys = WordKeys::new(&mut buffer, access.nkeys());
+    let mut appended = 0;
+    for index in 0..nrows.div_ceil(64) {
+        let selected = pending.as_view().word(index).unwrap();
+        if selected == 0 {
+            continue;
+        }
+        word_keys.load(keys, index, selected)?;
+        let mut bits = selected;
+        let mut done = 0;
+        while bits != 0 {
+            let bit = bits.trailing_zeros() as usize;
+            bits &= bits - 1;
+            let row = index * 64 + bit;
+            let partition = (hashes[row] >> shift) & mask;
+            // Checked: every partition's chunk exists.
+            let chunk = partitions.chunks[partition as usize] as usize;
+            let (used, room) = access.room(chunk)?;
+            if room == 0 {
+                continue;
+            }
+            // SAFETY: as in `append_rows`.
+            let row_payload = payload.map(|payload| unsafe {
+                payload.get_unchecked(row * payload_size..(row + 1) * payload_size)
+            });
+            // SAFETY: the place lies past the used mark and within the
+            // chunk, as `room` counted; the buffer and the shape are this
+            // table's.
+            unsafe {
+                access.write::<N, T>((chunk, used), hashes[row], &word_keys, bit, row_payload)
+            };
+            offsets[row] = access.reference((chunk, used));
+            // SAFETY: the caller is the chunk's one writer, and the record
+            // just written ends at the new mark.
+            unsafe { access.set_used(chunk, used + record_size) };
+            done |= 1 << bit;
+            appended += 1;
+        }
+        pending.intersect_word(index, !done)?;
+    }
+    Ok(appended)
+}
+
+/// Copy the records of chunk `source` from byte `*from` on, whole and in
+/// order, each to the chunk of its hash's partition, whose one writer the
+/// caller is, and move `*from` past them: at most `offsets.len()` of them,
+/// the new references into `offsets` and their partitions into
+/// `partition_of`. The copies are not linked. It stops before a record
+/// whose partition's chunk is full, which [`Split::full`] names.
+pub(super) fn split<R: Region>(
+    region: &R,
+    layout: &Layout,
+    partitions: &Partitions<'_>,
+    source: usize,
+    from: &mut usize,
+    offsets: &mut [u32],
+    partition_of: &mut [u32],
+) -> Result<Split> {
+    let mask = check_partitions(region, partitions)?;
+    ensure!(
+        offsets.len() == partition_of.len(),
+        "the offsets and partitions of a split have different lengths"
+    );
+    ensure!(
+        !partitions.chunks.contains(&(source as u32)),
+        "table chunk {source} is split into itself"
+    );
+    let access = Access::for_chunks(region, layout);
+    let record_size = access.record_size();
+    let places = unlinked(&access, source, *from)?;
+    let mut count = 0;
+    let mut full = None;
+    for byte in places {
+        if count == offsets.len() {
+            break;
+        }
+        let hash = check_record(&access, (source, byte))?;
+        let partition = (hash >> partitions.shift) & mask;
+        let chunk = partitions.chunks[partition as usize] as usize;
+        let (used, room) = access.room(chunk)?;
+        if room == 0 {
+            full = Some(partition);
+            break;
+        }
+        // SAFETY: the source record lies below its chunk's used mark, the
+        // copy past the destination's, within it as `room` counted, and
+        // the chunks differ; the caller is the destination's one writer.
+        unsafe {
+            let bytes = region.record(region.spot(source, byte), record_size);
+            let copy = region.record_mut(region.spot(chunk, used), record_size);
+            copy.copy_from_slice(bytes);
+            // No next record: the copy is linked anew.
+            copy[4..8].fill(0);
+            access.set_used(chunk, used + record_size);
+        }
+        offsets[count] = access.reference((chunk, used));
+        partition_of[count] = partition;
+        count += 1;
+        *from = byte + record_size;
+    }
+    Ok(Split { count, full })
 }
 
 /// Link the records of chunk `chunk` from byte `*from` to its used mark

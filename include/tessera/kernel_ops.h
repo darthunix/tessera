@@ -260,10 +260,30 @@ typedef struct TessKernelOps
 										 uint64 fingerprint, uint64 max_len,
 										 TessSpillHeader *header,
 										 TessStatus *status);
+	/* tess_table_append_partitioned */
+	TessStatusCode (*table_append_partitioned) (const TessTableRef *table,
+												const uint32 *partition_chunks,
+												int npartitions, uint32 shift,
+												Size payload_size,
+												const uint32 *hashes, int nkeys,
+												const TessTableKey *keys,
+												const uint8 *payload,
+												TessRowMask *pending,
+												uint32 *offsets,
+												TessStatus *status);
+	/* tess_table_split */
+	TessStatusCode (*table_split) (const TessTableRef *table, int nkeys,
+								   const TessTableKeyKind *kinds,
+								   Size payload_size,
+								   const uint32 *partition_chunks,
+								   int npartitions, uint32 shift, int source,
+								   Size *from, int capacity, uint32 *offsets,
+								   uint32 *partitions, int *count, int *full,
+								   TessStatus *status);
 } TessKernelOps;
 
 #define TESS_KERNEL_OPS_MIN_SIZE \
-	TESS_ABI_SIZE_INCLUDING_FIELD(TessKernelOps, spill_header_read)
+	TESS_ABI_SIZE_INCLUDING_FIELD(TessKernelOps, table_split)
 
 /*
  * The registry of the kernels: one table per backend, installed by the

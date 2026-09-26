@@ -16,13 +16,14 @@ PG_FUNCTION_INFO_V1(tessera_test_table_groups);
 PG_FUNCTION_INFO_V1(tessera_test_table_regrow);
 PG_FUNCTION_INFO_V1(tessera_test_table_errors);
 PG_FUNCTION_INFO_V1(tessera_test_spill_header);
+PG_FUNCTION_INFO_V1(tessera_test_table_partitions);
 
 #define NROWS 200
 #define NWORDS 4
 
 /* Chunks of 64 records of 32 bytes: the valid rows of a batch take three. */
 #define CHUNK_LEN (TESS_TABLE_CHUNK_HEADER + 64 * 32)
-#define MAX_TEST_CHUNKS 8
+#define MAX_TEST_CHUNKS 16
 
 static const TessTableKeyKind one_int4[1] = {TESS_TABLE_KEY_INT4};
 
@@ -939,5 +940,161 @@ tessera_test_spill_header(PG_FUNCTION_ARGS)
 		strstr(status.message, "no spilled block") == NULL)
 		PG_RETURN_BOOL(false);
 	free_table(table);
+	PG_RETURN_BOOL(true);
+}
+
+/*
+ * Whether the records at offsets are the valid rows of the batch, each
+ * once, with its hash and row number, and in the partition of its hash's
+ * bits from shift, which partitions[i] names.
+ */
+static bool
+partitioned_rows(Table *table, Batch *batch, const uint32 *offsets,
+				 const uint32 *partitions, int count, uint32 shift)
+{
+	TessStatus	status = TESS_STRUCT_INITIALIZER(TessStatus);
+	uint64		seen[NWORDS] = {0};
+
+	for (int i = 0; i < count; i++)
+	{
+		TessTableRecord record = TESS_STRUCT_INITIALIZER(TessTableRecord);
+		uint64		row;
+
+		if (tess_table_record(&table->ref, offsets[i], &record, &status) != TESS_OK)
+			return false;
+		memcpy(&row, record.payload, sizeof(row));
+		if (row >= NROWS || !has_bit(batch->valid, row) || has_bit(seen, row) ||
+			record.hash != batch->hashes[row] ||
+			((record.hash >> shift) & 3) != partitions[i])
+			return false;
+		seen[row / 64] |= UINT64CONST(1) << (row % 64);
+	}
+	return memcmp(seen, batch->valid, sizeof(seen)) == 0;
+}
+
+/*
+ * A table that spills: the valid rows appended each to the chunk of its
+ * partition, chunks added as partitions fill; then a chunk of every row
+ * split into four partitions by the next bits. Every row lands once, in
+ * its partition; a bad partition count and a source among the partitions
+ * are refused.
+ */
+Datum
+tessera_test_table_partitions(PG_FUNCTION_ARGS)
+{
+	TessStatus	status = TESS_STRUCT_INITIALIZER(TessStatus);
+	Batch	   *batch = palloc0(sizeof(Batch));
+	Table	   *table = make_table(256);
+	Table	   *whole = make_table(256);
+	uint64		pending_words[NWORDS];
+	uint32		offsets[NROWS];
+	uint32		partitions[NROWS];
+	uint32		chunks[4];
+	uint32		split_offsets[NROWS];
+	uint32		split_partitions[NROWS];
+	int			nvalid;
+	int			copied = 0;
+	Size		from = TESS_TABLE_CHUNK_HEADER;
+	TessRowMask pending = {NROWS, pending_words};
+
+	if (table == NULL || whole == NULL ||
+		!prepare(batch, TESS_NULL_KEYS_REJECT, 0, false))
+		PG_RETURN_BOOL(false);
+	nvalid = count_bits(batch->valid);
+	/* Chunks of 16 records: each partition fills several. */
+	for (int partition = 0; partition < 4; partition++)
+	{
+		if (!add_chunk(table, TESS_TABLE_CHUNK_HEADER + 16 * 32))
+			PG_RETURN_BOOL(false);
+		chunks[partition] = table->ref.nchunks - 1;
+	}
+	memcpy(pending_words, batch->valid, sizeof(pending_words));
+	for (;;)
+	{
+		if (tess_table_append_partitioned(&table->ref, chunks, 4, 7, 8,
+										  batch->hashes, 1, &batch->key,
+										  (const uint8 *) batch->payload,
+										  &pending, offsets, &status) != TESS_OK)
+			PG_RETURN_BOOL(false);
+		if (count_bits(pending_words) == 0)
+			break;
+		{
+			bool		full[4] = {false};
+
+			for (int row = 0; row < NROWS; row++)
+				if (has_bit(pending_words, row))
+					full[(batch->hashes[row] >> 7) & 3] = true;
+			for (int partition = 0; partition < 4; partition++)
+				if (full[partition])
+				{
+					if (!add_chunk(table, TESS_TABLE_CHUNK_HEADER + 16 * 32))
+						PG_RETURN_BOOL(false);
+					chunks[partition] = table->ref.nchunks - 1;
+				}
+		}
+	}
+	for (int row = 0, i = 0; row < NROWS; row++)
+		if (has_bit(batch->valid, row))
+		{
+			partitions[i] = (batch->hashes[row] >> 7) & 3;
+			offsets[i++] = offsets[row];
+		}
+	if (!partitioned_rows(table, batch, offsets, partitions, nvalid, 7))
+		PG_RETURN_BOOL(false);
+
+	/* One chunk of every row, split by bits 9 and 10. */
+	if (!add_chunk(whole, TESS_TABLE_CHUNK_HEADER + NROWS * 32))
+		PG_RETURN_BOOL(false);
+	memcpy(pending_words, batch->valid, sizeof(pending_words));
+	if (tess_table_append(&whole->ref, 0, 8, batch->hashes, 1, &batch->key,
+						  (const uint8 *) batch->payload, &pending, offsets,
+						  &status) != TESS_OK)
+		PG_RETURN_BOOL(false);
+	for (int partition = 0; partition < 4; partition++)
+	{
+		if (!add_chunk(whole, TESS_TABLE_CHUNK_HEADER + 16 * 32))
+			PG_RETURN_BOOL(false);
+		chunks[partition] = whole->ref.nchunks - 1;
+	}
+	for (;;)
+	{
+		int			count;
+		int			full;
+
+		if (tess_table_split(&whole->ref, 1, one_int4, 8, chunks, 4, 9, 0, &from,
+							 NROWS - copied, split_offsets + copied,
+							 split_partitions + copied, &count, &full,
+							 &status) != TESS_OK)
+			PG_RETURN_BOOL(false);
+		copied += count;
+		if (full >= 0)
+		{
+			if (!add_chunk(whole, TESS_TABLE_CHUNK_HEADER + 16 * 32))
+				PG_RETURN_BOOL(false);
+			chunks[full] = whole->ref.nchunks - 1;
+		}
+		else if (count == 0)
+			break;
+	}
+	if (copied != nvalid ||
+		!partitioned_rows(whole, batch, split_offsets, split_partitions, copied, 9))
+		PG_RETURN_BOOL(false);
+
+	/* Three partitions, and the source among them, are refused. */
+	from = TESS_TABLE_CHUNK_HEADER;
+	if (tess_table_append_partitioned(&table->ref, chunks, 3, 7, 8, batch->hashes, 1,
+									  &batch->key, (const uint8 *) batch->payload,
+									  &pending, offsets, &status) != TESS_ERROR_INVALID_ARGUMENT ||
+		strstr(status.message, "power of two") == NULL)
+		PG_RETURN_BOOL(false);
+	chunks[0] = 0;
+	if (tess_table_split(&whole->ref, 1, one_int4, 8, chunks, 4, 9, 0, &from, NROWS,
+						 split_offsets, split_partitions, &copied, &copied,
+						 &status) != TESS_ERROR_INVALID_ARGUMENT ||
+		strstr(status.message, "into itself") == NULL)
+		PG_RETURN_BOOL(false);
+	free_table(table);
+	free_table(whole);
+	pfree(batch);
 	PG_RETURN_BOOL(true);
 }

@@ -213,6 +213,56 @@ extern TessStatusCode tess_table_append(const TessTableRef *table,
 										TessStatus *status);
 
 /*
+ * A table that spills keeps its records in partitions: the partition of a
+ * hash is (hash >> shift) & (npartitions - 1), npartitions a power of two
+ * up to 65536, and partition p appends to chunk partition_chunks[p]. The
+ * buckets take the hash's high bits, so the first level of partitions
+ * takes its low ones and each further level the bits above. See
+ * docs/spill.md.
+ *
+ * Append the rows of pending as records, each to the chunk of its hash's
+ * partition, in row order, as long as whole records fit there: as
+ * tess_table_append, except that a row whose partition's chunk is full
+ * stays pending while the rows after it go on; the caller gives those
+ * partitions new chunks and calls again. The caller is the one writer of
+ * every partition's chunk.
+ */
+extern TessStatusCode tess_table_append_partitioned(const TessTableRef *table,
+													const uint32 *partition_chunks,
+													int npartitions,
+													uint32 shift,
+													Size payload_size,
+													const uint32 *hashes,
+													int nkeys,
+													const TessTableKey *keys,
+													const uint8 *payload,
+													TessRowMask *pending,
+													uint32 *offsets,
+													TessStatus *status);
+
+/*
+ * Copy the records of chunk `source` of a table of the key kinds and
+ * payload size from byte *from on (TESS_TABLE_CHUNK_HEADER at first),
+ * whole and in order, each to the chunk of its hash's partition, and move
+ * *from past them: at most capacity records, their new references into
+ * offsets and their partitions into partitions. It stops before a record
+ * whose partition's chunk is full, *full receiving that partition, -1
+ * otherwise; *count receives the records copied, 0 at the source's end.
+ * The copies are not linked; the source must be none of the partitions'
+ * chunks. For a table's first spill and a partition split further.
+ */
+extern TessStatusCode tess_table_split(const TessTableRef *table,
+									   int nkeys,
+									   const TessTableKeyKind *kinds,
+									   Size payload_size,
+									   const uint32 *partition_chunks,
+									   int npartitions, uint32 shift,
+									   int source, Size *from, int capacity,
+									   uint32 *offsets, uint32 *partitions,
+									   int *count, int *full,
+									   TessStatus *status);
+
+/*
  * Link the records of chunk `chunk` from byte *from on into the buckets
  * and move *from past them; *linked (unless NULL) receives how many.
  * *from starts at TESS_TABLE_CHUNK_HEADER. Equal keys make separate

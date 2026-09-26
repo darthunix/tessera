@@ -57,6 +57,8 @@ static const TessKernelOps kernels = {
 	.table_fingerprint = tess_table_fingerprint,
 	.spill_header_write = tess_spill_header_write,
 	.spill_header_read = tess_spill_header_read,
+	.table_append_partitioned = tess_table_append_partitioned,
+	.table_split = tess_table_split,
 };
 
 static const TessKernelRegistryOps *

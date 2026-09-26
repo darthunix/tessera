@@ -13,11 +13,12 @@ use std::slice;
 use anyhow::{Context, Result, bail, ensure};
 use tessera_core::ColumnReader;
 use tessera_kernels::table::{
-    Chunks, Cursor, FORMAT_VERSION, Fold, HEADER_SIZE, KeyKind, KeySource, MAX_KEYS, Slot, Table,
-    TableConfig, TableMut, VERSION_OFFSET, append_to,
+    Chunks, Cursor, FORMAT_VERSION, Fold, HEADER_SIZE, KeyKind, KeySource, MAX_KEYS, Partitions,
+    Slot, Table, TableConfig, TableMut, VERSION_OFFSET, append_partitioned_to, append_to,
     bloom::SharedFilter,
     index_size, init_chunk, normalize_word,
     phases::{Participant, SharedCounters},
+    split_to,
 };
 
 use super::args::reader;
@@ -532,6 +533,152 @@ pub unsafe extern "C" fn tess_table_append(
                 offsets,
             )
             .map(drop)
+        })
+    }
+}
+
+/// The partitions of a spilling table: `npartitions` chunk numbers at
+/// `chunks`, and the shift of the partition bits.
+///
+/// # Safety
+///
+/// `chunks` must point to `npartitions` numbers, or be null for none.
+unsafe fn partitions<'a>(
+    chunks: *const u32,
+    npartitions: c_int,
+    shift: u32,
+) -> Result<Partitions<'a>> {
+    let count = usize::try_from(npartitions).context("a negative partition count")?;
+    // SAFETY: the caller's contract.
+    let chunks = unsafe { values(chunks, count, "partition chunks") }?;
+    Ok(Partitions { shift, chunks })
+}
+
+/// `tess_table_append_partitioned`: append the rows of `pending`, each to
+/// the chunk of its hash's partition, as long as whole records fit there.
+///
+/// # Safety
+///
+/// As for [`tess_table_append`], the caller being the one writer of every
+/// partition's chunk; `partition_chunks` as for [`partitions`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tess_table_append_partitioned(
+    table: *const TableRef,
+    partition_chunks: *const u32,
+    npartitions: c_int,
+    shift: u32,
+    payload_size: usize,
+    hashes: *const u32,
+    nkeys: c_int,
+    keys: *const TableKey,
+    payload: *const u8,
+    pending: *mut Mask,
+    offsets: *mut u32,
+    status: *mut Status,
+) -> Code {
+    // SAFETY: the caller's contract.
+    unsafe {
+        guard(status, || {
+            let (_, chunks) = chunks_of(table)?;
+            let partitions = partitions(partition_chunks, npartitions, shift)?;
+            let mut decoded = TableKeys::empty();
+            table_keys(nkeys, keys, &mut decoded)?;
+            let key_list = slice::from_raw_parts(keys, decoded.nkeys);
+            let mut kinds = [KeyKind::Int32; MAX_KEYS];
+            for (slot, key) in kinds.iter_mut().zip(key_list) {
+                *slot = if key.kind == 2 {
+                    KeyKind::Int64
+                } else {
+                    KeyKind::Int32
+                };
+            }
+            let config = TableConfig {
+                keys: &kinds[..decoded.nkeys],
+                payload_size,
+            };
+            let mut pending = pending.as_mut().context("a null pending mask")?.mask()?;
+            let nrows = pending.as_view().nrows();
+            let hashes = values(hashes, nrows, "hashes")?;
+            let offsets = slots(offsets, nrows, "offsets")?;
+            let payload = if payload.is_null() {
+                None
+            } else {
+                let bytes = nrows
+                    .checked_mul(payload_size)
+                    .context("the payload does not fit in memory")?;
+                Some(values(payload, bytes, "payload")?)
+            };
+            append_partitioned_to(
+                &config,
+                chunks,
+                &partitions,
+                hashes,
+                &decoded,
+                payload,
+                &mut pending,
+                offsets,
+            )
+            .map(drop)
+        })
+    }
+}
+
+/// `tess_table_split`: copy the records of chunk `source` from byte
+/// `*from` on, each to the chunk of its hash's partition.
+///
+/// # Safety
+///
+/// `table` as for [`chunks_of`], the caller being the one writer of every
+/// partition's chunk; `kinds` as for [`key_kinds`]; `partition_chunks` as
+/// for [`partitions`]; `from`, `count` and `full` must be writable,
+/// `offsets` and `partition_of` hold `capacity` writable slots; `status`
+/// as for every entry point.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tess_table_split(
+    table: *const TableRef,
+    nkeys: c_int,
+    kinds: *const c_uint,
+    payload_size: usize,
+    partition_chunks: *const u32,
+    npartitions: c_int,
+    shift: u32,
+    source: c_int,
+    from: *mut usize,
+    capacity: c_int,
+    offsets: *mut u32,
+    partition_of: *mut u32,
+    count: *mut c_int,
+    full: *mut c_int,
+    status: *mut Status,
+) -> Code {
+    // SAFETY: the caller's contract.
+    unsafe {
+        guard(status, || {
+            let (_, chunks) = chunks_of(table)?;
+            let (kinds, nkeys) = key_kinds(nkeys, kinds)?;
+            let config = TableConfig {
+                keys: &kinds[..nkeys],
+                payload_size,
+            };
+            let partitions = partitions(partition_chunks, npartitions, shift)?;
+            let source = usize::try_from(source).context("a negative chunk")?;
+            let capacity = usize::try_from(capacity).context("a negative capacity")?;
+            let offsets = slots(offsets, capacity, "offsets")?;
+            let partition_of = slots(partition_of, capacity, "partitions")?;
+            let from = from.as_mut().context("a null from")?;
+            let split = split_to(
+                &config,
+                chunks,
+                &partitions,
+                source,
+                from,
+                offsets,
+                partition_of,
+            )?;
+            *count.as_mut().context("a null count")? = split.count as c_int;
+            *full.as_mut().context("a null full")? =
+                split.full.map_or(-1, |partition| partition as c_int);
+            Ok(())
         })
     }
 }

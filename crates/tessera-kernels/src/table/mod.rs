@@ -206,6 +206,21 @@ pub unsafe fn init_chunk(base: *mut u8, len: usize) -> Result<()> {
     Ok(())
 }
 
+/// The chunks alone as a region, with an empty index, which the calls
+/// over chunks never read.
+fn chunk_region(chunks: &Chunks<'_>) -> RawRegion {
+    // SAFETY: an empty index and the chunks `Chunks::new` accepted.
+    unsafe {
+        RawRegion::new(
+            core::ptr::NonNull::<u64>::dangling().as_ptr().cast(),
+            0,
+            chunks.bases.as_ptr(),
+            chunks.lens.as_ptr(),
+            chunks.len(),
+        )
+    }
+}
+
 /// Append the rows of `pending` as records of a table of `config` to chunk
 /// `chunk` of `chunks`, as [`Table::append`] does, before the table has an
 /// index: the participants of a shared build append their share first,
@@ -223,19 +238,94 @@ pub fn append_to<K: KeySource + ?Sized>(
     offsets: &mut [u32],
 ) -> Result<usize> {
     let layout = header::chunk_layout(config)?;
-    // SAFETY: an empty index, which appending never reads, and the chunks
-    // `Chunks::new` accepted.
-    let region = unsafe {
-        RawRegion::new(
-            core::ptr::NonNull::<u64>::dangling().as_ptr().cast(),
-            0,
-            chunks.bases.as_ptr(),
-            chunks.lens.as_ptr(),
-            chunks.len(),
-        )
-    };
     batch::append(
-        &region, &layout, chunk, hashes, keys, payload, pending, offsets,
+        &chunk_region(&chunks),
+        &layout,
+        chunk,
+        hashes,
+        keys,
+        payload,
+        pending,
+        offsets,
+    )
+}
+
+/// The most partitions one split makes.
+pub const MAX_PARTITIONS: usize = 1 << 16;
+
+/// Where the records of a table that spills go: the partition of a hash
+/// is `(hash >> shift) & (chunks.len() - 1)`, a power of two of
+/// partitions, and each partition appends to its chunk of `chunks`. The
+/// buckets take the hash's high bits, so a table spills by its low ones,
+/// the next level of partitions by the bits above them.
+#[derive(Clone, Copy, Debug)]
+pub struct Partitions<'a> {
+    pub shift: u32,
+    pub chunks: &'a [u32],
+}
+
+/// What [`split_to`] did: the records copied, and the partition whose
+/// chunk was full, if it stopped at one.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Split {
+    pub count: usize,
+    pub full: Option<u32>,
+}
+
+/// Append the rows of `pending` as records of a table of `config`, each
+/// to the chunk of its hash's partition, before the table has an index:
+/// as [`append_to`], except that a row whose partition's chunk is full
+/// stays pending while the rows after it go on. The caller must be the
+/// one writer of every partition's chunk.
+#[allow(clippy::too_many_arguments)]
+pub fn append_partitioned_to<K: KeySource + ?Sized>(
+    config: &TableConfig<'_>,
+    chunks: Chunks<'_>,
+    partitions: &Partitions<'_>,
+    hashes: &[u32],
+    keys: &K,
+    payload: Option<&[u8]>,
+    pending: &mut RowMask<'_>,
+    offsets: &mut [u32],
+) -> Result<usize> {
+    let layout = header::chunk_layout(config)?;
+    batch::append_partitioned(
+        &chunk_region(&chunks),
+        &layout,
+        partitions,
+        hashes,
+        keys,
+        payload,
+        pending,
+        offsets,
+    )
+}
+
+/// Copy the records of chunk `source` of a table of `config` from byte
+/// `*from` on, whole and in order, each to the chunk of its hash's
+/// partition, and move `*from` past them: at most `offsets.len()`, their
+/// new references into `offsets` and their partitions into
+/// `partition_of`, stopping before a record whose partition's chunk is
+/// full. The copies are not linked; `*from` starts at [`CHUNK_HEADER`].
+/// The caller must be the one writer of every partition's chunk.
+pub fn split_to(
+    config: &TableConfig<'_>,
+    chunks: Chunks<'_>,
+    partitions: &Partitions<'_>,
+    source: usize,
+    from: &mut usize,
+    offsets: &mut [u32],
+    partition_of: &mut [u32],
+) -> Result<Split> {
+    let layout = header::chunk_layout(config)?;
+    batch::split(
+        &chunk_region(&chunks),
+        &layout,
+        partitions,
+        source,
+        from,
+        offsets,
+        partition_of,
     )
 }
 
@@ -776,6 +866,263 @@ mod tests {
                 .sum()
         });
         assert_eq!(built, 1);
+    }
+
+    /// Chunks of words the tests of partitioning add as they fill, each
+    /// read and written only through its pointer, taken once.
+    struct Blocks {
+        _storage: Vec<Vec<u64>>,
+        bases: Vec<*mut u8>,
+        lens: Vec<usize>,
+    }
+
+    impl Blocks {
+        fn new() -> Self {
+            Self {
+                _storage: Vec::new(),
+                bases: Vec::new(),
+                lens: Vec::new(),
+            }
+        }
+
+        fn add(&mut self, len: usize) -> u32 {
+            // A vector, not a box: moving a box would retag its memory as
+            // unique and retire the pointer taken here.
+            let mut block = vec![0_u64; len / 8];
+            let base = block.as_mut_ptr().cast::<u8>();
+            // SAFETY: the block is aligned to 8, `len` bytes, used only here.
+            unsafe { init_chunk(base, len) }.unwrap();
+            self._storage.push(block);
+            self.bases.push(base);
+            self.lens.push(len);
+            (self.bases.len() - 1) as u32
+        }
+
+        fn chunks(&self) -> Chunks<'_> {
+            // SAFETY: the blocks live as long as `self` and are accessed
+            // only through tables and `records`.
+            unsafe { Chunks::new(&self.bases, &self.lens) }.unwrap()
+        }
+
+        /// The (hash, next, key, payload) of every record of a chunk of
+        /// records of one int4 key and one payload word.
+        fn records(&self, chunk: u32) -> Vec<(u32, u32, i64, u64)> {
+            let base = self.bases[chunk as usize].cast::<u64>();
+            // SAFETY: the used mark and the records below it lie in the block.
+            unsafe {
+                let used = base.read() as usize;
+                (CHUNK_HEADER..used)
+                    .step_by(32)
+                    .map(|byte| {
+                        let record = base.add(byte / 8);
+                        let header = record.read();
+                        (
+                            header as u32,
+                            (header >> 32) as u32,
+                            record.add(2).read() as i64,
+                            record.add(3).read(),
+                        )
+                    })
+                    .collect()
+            }
+        }
+    }
+
+    const PARTITION_CONFIG: TableConfig<'static> = TableConfig {
+        keys: &[KeyKind::Int32],
+        payload_size: 8,
+    };
+
+    /// 200 rows, the key's square as payload.
+    fn partition_rows() -> (Vec<i32>, Vec<u32>, Vec<u8>) {
+        let keys: Vec<i32> = (0..200).collect();
+        let hashes = keys.iter().map(|&key| murmurhash32(key as u32)).collect();
+        let payload = keys
+            .iter()
+            .flat_map(|&key| (key as u64 * key as u64).to_ne_bytes())
+            .collect();
+        (keys, hashes, payload)
+    }
+
+    /// Every row once, each in a chunk of its hash's partition, whole.
+    fn check_partitioned(blocks: &Blocks, owner: &[u32], shift: u32, keys: &[i32]) {
+        let mut seen = vec![false; keys.len()];
+        for (chunk, &partition) in owner.iter().enumerate() {
+            if partition == u32::MAX {
+                continue;
+            }
+            for (hash, next, key, payload) in blocks.records(chunk as u32) {
+                assert_eq!(
+                    (hash >> shift) & 3,
+                    partition,
+                    "record in another partition"
+                );
+                assert_eq!(hash, murmurhash32(key as u32));
+                assert_eq!(payload, (key * key) as u64);
+                assert_eq!(next, 0);
+                assert!(!seen[key as usize], "key {key} twice");
+                seen[key as usize] = true;
+            }
+        }
+        assert!(seen.iter().all(|&seen| seen), "a row is missing");
+    }
+
+    #[test]
+    fn rows_append_to_the_chunks_of_their_partitions() {
+        let (keys, hashes, payload) = partition_rows();
+        let column = [ColumnView::try_new(&keys, None).unwrap()];
+        let mut blocks = Blocks::new();
+        // Room for 8 records each: the partitions fill and take more.
+        let len = CHUNK_HEADER + 8 * 32;
+        let mut current: Vec<u32> = (0..4).map(|_| blocks.add(len)).collect();
+        let mut owner = vec![0, 1, 2, 3];
+        let mut words = vec![u64::MAX, u64::MAX, u64::MAX, (1 << 8) - 1];
+        let mut offsets = vec![0; 200];
+        let mut total = 0;
+        loop {
+            let mut pending = RowMask::try_new(200, &mut words).unwrap();
+            let partitions = Partitions {
+                shift: 5,
+                chunks: &current,
+            };
+            total += append_partitioned_to(
+                &PARTITION_CONFIG,
+                blocks.chunks(),
+                &partitions,
+                &hashes,
+                &column[..],
+                Some(&payload),
+                &mut pending,
+                &mut offsets,
+            )
+            .unwrap();
+            if words.iter().all(|&word| word == 0) {
+                break;
+            }
+            // A new chunk for every partition whose rows are left.
+            let mut full = [false; 4];
+            for row in 0..200 {
+                if words[row / 64] >> (row % 64) & 1 == 1 {
+                    full[((hashes[row] >> 5) & 3) as usize] = true;
+                }
+            }
+            for partition in 0..4 {
+                if full[partition] {
+                    current[partition] = blocks.add(len);
+                    owner.push(partition as u32);
+                }
+            }
+        }
+        assert_eq!(total, 200);
+        check_partitioned(&blocks, &owner, 5, &keys);
+    }
+
+    #[test]
+    fn a_chunk_splits_into_the_chunks_of_its_partitions() {
+        let (keys, hashes, payload) = partition_rows();
+        let column = [ColumnView::try_new(&keys, None).unwrap()];
+        let mut blocks = Blocks::new();
+        let source = blocks.add(CHUNK_HEADER + 200 * 32);
+        let mut words = vec![u64::MAX, u64::MAX, u64::MAX, (1 << 8) - 1];
+        let mut pending = RowMask::try_new(200, &mut words).unwrap();
+        let mut offsets = vec![0; 200];
+        append_to(
+            &PARTITION_CONFIG,
+            blocks.chunks(),
+            source as usize,
+            &hashes,
+            &column[..],
+            Some(&payload),
+            &mut pending,
+            &mut offsets,
+        )
+        .unwrap();
+        let len = CHUNK_HEADER + 8 * 32;
+        let mut current: Vec<u32> = (0..4).map(|_| blocks.add(len)).collect();
+        let mut owner = vec![u32::MAX, 0, 1, 2, 3];
+        let mut from = CHUNK_HEADER;
+        let mut copied = 0;
+        let mut new_offsets = [0; 16];
+        let mut partition_of = [0; 16];
+        loop {
+            let partitions = Partitions {
+                shift: 9,
+                chunks: &current,
+            };
+            let split = split_to(
+                &PARTITION_CONFIG,
+                blocks.chunks(),
+                &partitions,
+                source as usize,
+                &mut from,
+                &mut new_offsets,
+                &mut partition_of,
+            )
+            .unwrap();
+            for (&offset, &partition) in new_offsets.iter().zip(&partition_of).take(split.count) {
+                assert_eq!(owner[(offset >> UNIT_BITS) as usize], partition);
+            }
+            copied += split.count;
+            match split.full {
+                Some(partition) => {
+                    current[partition as usize] = blocks.add(len);
+                    owner.push(partition);
+                }
+                None if split.count == 0 => break,
+                None => {}
+            }
+        }
+        assert_eq!(copied, 200);
+        assert_eq!(from, CHUNK_HEADER + 200 * 32);
+        check_partitioned(&blocks, &owner, 9, &keys);
+    }
+
+    #[test]
+    fn partitions_past_the_hash_or_the_chunks_are_refused() {
+        let (keys, hashes, payload) = partition_rows();
+        let column = [ColumnView::try_new(&keys, None).unwrap()];
+        let mut blocks = Blocks::new();
+        for _ in 0..4 {
+            blocks.add(CHUNK_HEADER + 256 * 32);
+        }
+        let mut offsets = vec![0; 200];
+        let cases: [(u32, &[u32], &str); 4] = [
+            (0, &[0, 1, 2], "power of two"),
+            (31, &[0, 1, 2, 3], "past the 32 bits"),
+            (0, &[0, 1, 2, 9], "does not exist"),
+            (32, &[0], "past the 32 bits"),
+        ];
+        for (shift, chunks, message) in cases {
+            let mut words = vec![u64::MAX, u64::MAX, u64::MAX, (1 << 8) - 1];
+            let mut pending = RowMask::try_new(200, &mut words).unwrap();
+            let error = append_partitioned_to(
+                &PARTITION_CONFIG,
+                blocks.chunks(),
+                &Partitions { shift, chunks },
+                &hashes,
+                &column[..],
+                Some(&payload),
+                &mut pending,
+                &mut offsets,
+            )
+            .unwrap_err();
+            assert!(error.to_string().contains(message), "{error}");
+        }
+        let mut from = CHUNK_HEADER;
+        let error = split_to(
+            &PARTITION_CONFIG,
+            blocks.chunks(),
+            &Partitions {
+                shift: 0,
+                chunks: &[0, 1],
+            },
+            1,
+            &mut from,
+            &mut [0; 4],
+            &mut [0; 4],
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("into itself"), "{error}");
     }
 
     #[test]

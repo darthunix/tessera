@@ -286,6 +286,30 @@ other call over it at the same time:
 A walk reads every record below a chunk's used mark, which an append in
 flight moves; that is why it belongs to the one writer.
 
+## Partitions for spilling
+
+A node whose table outgrows its memory keeps the records in partitions
+and writes whole chunks of some of them to disk (see
+[spill.md](spill.md)). The partition of a hash is
+`(hash >> shift) & (npartitions - 1)`, a power of two of partitions: the
+buckets take the hash's high bits, so the first level takes its low ones
+and a partition split further takes the bits above them. Two calls work
+on chunks alone, without the index, as `tess_table_append` does:
+
+- `tess_table_append_partitioned` appends a batch's rows each to the
+  current chunk of its partition, given as a chunk number per partition.
+  A row whose partition's chunk is full stays pending while the rows
+  after it go on, so the node gives every such partition a new chunk and
+  calls again.
+- `tess_table_split` copies the records of one chunk, whole and in order,
+  each to the chunk of its partition, and stops before a record whose
+  partition's chunk is full, naming that partition; it returns the new
+  references and partitions of the records copied. A node uses it once,
+  when its table first overflows, to sort the chunks it built into
+  partitions, and again when a partition read back from disk is still too
+  large and splits by the next bits. The copies are not linked: a
+  partition gets an index when it is processed.
+
 ## A Bloom filter of the keys
 
 A probe that finds no record still reads a bucket, and a record too when
