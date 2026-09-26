@@ -103,6 +103,7 @@ typedef struct TessKernelOps
 								  int chunk,
 								  Size *from,
 								  uint64 *linked,
+								  uint64 *duplicates,
 								  TessStatus *status);
 	/* tess_table_link_grouped */
 	TessStatusCode (*table_link_grouped) (const TessTableRef *table,
@@ -234,10 +235,13 @@ typedef struct TessKernelOps
 	/* tess_build_take_chunk */
 	TessStatusCode (*build_take_chunk) (uint64 *counters, uint64 *number,
 										TessStatus *status);
+	/* tess_build_add_duplicates */
+	TessStatusCode (*build_add_duplicates) (uint64 *counters, uint64 duplicates,
+											TessStatus *status);
 	/* tess_build_totals */
 	TessStatusCode (*build_totals) (uint64 *counters, uint64 *records,
 									uint64 *null_columns, uint64 *chunks,
-									TessStatus *status);
+									uint64 *duplicates, TessStatus *status);
 	/* tess_build_step */
 	TessStatusCode (*build_step) (TessBuildParticipant *participant,
 								  uint64 *counters, uint32 reply,

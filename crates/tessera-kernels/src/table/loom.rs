@@ -335,6 +335,12 @@ fn link(region: &LoomRegion, layout: &Layout, chunk: usize) -> Result<usize> {
     batch::link(region, layout, chunk, &mut from)
 }
 
+/// Link a chunk counting the records whose keys were there already.
+fn link_counting(region: &LoomRegion, layout: &Layout, chunk: usize) -> Result<(usize, usize)> {
+    let mut from = CHUNK_HEADER;
+    batch::link_counting::<_, true>(region, layout, chunk, &mut from)
+}
+
 /// Probe for `keys`: the reference of each one's record, 0 for none.
 fn probe(region: &LoomRegion, layout: &Layout, keys: &[i32]) -> Result<Vec<u32>> {
     let nrows = keys.len();
@@ -391,7 +397,7 @@ fn chain_and_walk(region: &LoomRegion, layout: &Layout) -> Result<(usize, usize)
 /// Participants append their shares to chunks of their own and link them
 /// at once; then every key is found, and the count, the chain and a walk
 /// agree.
-fn concurrent_links(shares: &'static [&'static [i32]]) {
+fn concurrent_links(shares: &'static [&'static [i32]], duplicates: usize) {
     ::loom::model(move || {
         let total: usize = shares.iter().map(|keys| keys.len()).sum();
         let most = shares.iter().map(|keys| keys.len()).max().unwrap();
@@ -403,13 +409,19 @@ fn concurrent_links(shares: &'static [&'static [i32]]) {
                 let (region, layout) = (region.clone(), layout);
                 thread::spawn(move || {
                     assert_eq!(append(&region, &layout, chunk, keys).unwrap(), keys.len());
-                    link(&region, &layout, chunk).unwrap()
+                    link_counting(&region, &layout, chunk).unwrap()
                 })
             })
             .collect();
+        let mut found = 0;
         for (thread, keys) in threads.into_iter().zip(shares) {
-            assert_eq!(thread.join().unwrap(), keys.len());
+            let (linked, repeated) = thread.join().unwrap();
+            assert_eq!(linked, keys.len());
+            found += repeated;
         }
+        // Of two records of one key, exactly the one linked later finds
+        // the other, whatever the interleaving.
+        assert_eq!(found, duplicates, "duplicates counted");
         assert_eq!(region.load_u64(NRECORDS), total as u64);
         for keys in shares {
             for (key, offset) in keys.iter().zip(probe(&region, &layout, keys).unwrap()) {
@@ -423,17 +435,32 @@ fn concurrent_links(shares: &'static [&'static [i32]]) {
 
 #[test]
 fn two_participants_link_their_chunks_into_one_bucket() {
-    concurrent_links(&[&[1], &[2]]);
+    concurrent_links(&[&[1], &[2]], 0);
 }
 
 #[test]
 fn two_participants_link_two_records_each() {
-    concurrent_links(&[&[1, 2], &[3, 4]]);
+    concurrent_links(&[&[1, 2], &[3, 4]], 0);
 }
 
 #[test]
 fn three_participants_link_into_one_bucket() {
-    concurrent_links(&[&[1], &[2], &[3]]);
+    concurrent_links(&[&[1], &[2], &[3]], 0);
+}
+
+#[test]
+fn two_participants_link_one_key_and_one_counts_it() {
+    concurrent_links(&[&[1], &[1]], 1);
+}
+
+#[test]
+fn a_key_shared_by_two_participants_counts_once() {
+    concurrent_links(&[&[1, 2], &[2, 3]], 1);
+}
+
+#[test]
+fn three_records_of_one_key_count_twice() {
+    concurrent_links(&[&[5, 5], &[5]], 2);
 }
 
 /// One participant appends and links a key while another probes until it

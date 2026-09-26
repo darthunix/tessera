@@ -681,7 +681,9 @@ A batch-aware parent over a table with duplicate keys gets compact
 batches instead: the node copies the pairs of the rounds one after
 another into batches of 64 rows, each outer column's value copied from
 the round's outer batch and each pair's record kept, and gathers the
-inner columns from those records. Published over the outer batch, a key
+inner columns from those records. An outer column is read over the
+first round's rows only, since the later rounds are among them, so a
+lazy child reads no value of a row without a pair. Published over the outer batch, a key
 with four records would give four batches with a quarter of their rows
 selected, each paying the whole cost of a batch in the parent. A
 by-reference value points into its outer batch, which goes before the
@@ -720,9 +722,11 @@ round's values are turned into addresses of the probing participant
 are entered in a list under a spinlock, by which the table frees them.
 The barrier's waits stay in the node, since they may raise an error. Then
 every participant probes the one table; its chains are not grouped, so
-the next record of a key is found by `tess_table_next_match`, rounds go
-over the outer batch, since the duplicates are not known, and there is
-no compact mode. The shared Bloom filter is sized with the table: each
+the next record of a key is found by `tess_table_next_match`. The links
+count the table's duplicates (`tess_table_link` with its count), unless
+the planner knows the inner side unique: a table without them has no
+second round, and one with them goes out in compact batches as a serial
+table does. The shared Bloom filter is sized with the table: each
 participant decides on it by its own batches as before, the first that
 wants it builds it for all (`tess_table_try_build_bloom`), and every
 participant checks batches against it once it reads it ready, probing

@@ -118,16 +118,18 @@ pub(super) trait Counters {
     fn next_chunk(&self) -> u64;
 }
 
-/// The counters of a build in memory several participants map.
+/// The counters of a build in memory several participants map: those of
+/// [`Counters`], and the records linked whose keys the table held already.
 #[derive(Debug)]
 pub struct SharedCounters<'a> {
     records: &'a AtomicU64,
     null_columns: &'a AtomicU64,
     chunks: &'a AtomicU64,
+    duplicates: &'a AtomicU64,
 }
 
 /// The words of [`SharedCounters`].
-pub const COUNTER_WORDS: usize = 3;
+pub const COUNTER_WORDS: usize = 4;
 
 impl<'a> SharedCounters<'a> {
     /// Attach to the [`COUNTER_WORDS`] words at `words`.
@@ -149,6 +151,7 @@ impl<'a> SharedCounters<'a> {
             records: &all[0],
             null_columns: &all[1],
             chunks: &all[2],
+            duplicates: &all[3],
         })
     }
 
@@ -157,6 +160,7 @@ impl<'a> SharedCounters<'a> {
         self.records.store(0, order::RELAXED);
         self.null_columns.store(0, order::RELAXED);
         self.chunks.store(0, order::RELAXED);
+        self.duplicates.store(0, order::RELAXED);
     }
 
     /// Report the records this participant appended and the payload words
@@ -185,6 +189,17 @@ impl<'a> SharedCounters<'a> {
     /// The chunks numbered so far, once the build is over.
     pub fn total_chunks(&self) -> u64 {
         self.chunks.load(order::RELAXED)
+    }
+
+    /// Add the duplicates this participant's links found, before it
+    /// arrives at the barrier after linking.
+    pub fn add_duplicates(&self, duplicates: u64) {
+        self.duplicates.fetch_add(duplicates, order::RELAXED);
+    }
+
+    /// The duplicates every participant found, once linking is over.
+    pub fn total_duplicates(&self) -> u64 {
+        self.duplicates.load(order::RELAXED)
     }
 }
 

@@ -200,7 +200,7 @@ SELECT join_explain($$SELECT count(jf.m), sum(jf.m), sum(jdup.w) FROM jf JOIN jd
                Batch Size: 64
                Batches: 18
                Pages: 9
-               Deformed Datums: 2000
+               Deformed Datums: 1129
                Restarted Datums: 0
          ->  Custom Scan (TessHeapScan) on jdup (actual rows=150.00 loops=1)
                Batch Size: 64
@@ -238,7 +238,7 @@ SELECT join_explain($$SELECT count(jf.note), max(jdup.w) FROM jf JOIN jdup ON jf
                Batch Size: 64
                Batches: 18
                Pages: 9
-               Deformed Datums: 2000
+               Deformed Datums: 1129
                Restarted Datums: 0
          ->  Custom Scan (TessHeapScan) on jdup (actual rows=150.00 loops=1)
                Batch Size: 64
@@ -389,7 +389,7 @@ SELECT join_explain($$SELECT count(*), sum(jdup.w) FROM jf JOIN jdup ON jf.fk = 
                Batch Size: 64
                Batches: 18
                Pages: 9
-               Deformed Datums: 2000
+               Deformed Datums: 1129
                Restarted Datums: 0
          ->  Custom Scan (TessHeapScan) on jdup (actual rows=150.00 loops=1)
                Batch Size: 64
@@ -1567,6 +1567,16 @@ SELECT join_property($$SELECT count(*) FROM jbig JOIN jgrow ON jbig.fk = jgrow.k
  builds | build_rows | buckets 
 --------+------------+---------
  1      | 20000      | 65536
+(1 row)
+
+-- The links count the duplicates of the shared table: jgrow has them,
+-- and its pairs go out in compact batches; jbuild has none, and no rounds
+-- or compact batches follow the first.
+SELECT join_property($$SELECT count(*), sum(jgrow.g) FROM jbig JOIN jgrow ON jbig.fk = jgrow.k$$, 'Compact Batches')::int > 0 AS dup_compact,
+       join_property($$SELECT count(*), sum(jbuild.w) FROM jprobe JOIN jbuild ON jprobe.k = jbuild.k$$, 'Compact Batches') IS NULL AS unique_rounds;
+ dup_compact | unique_rounds 
+-------------+---------------
+ t           | t
 (1 row)
 
 SET parallel_leader_participation = off;

@@ -190,7 +190,7 @@ insert_batch(Table *table, Batch *batch, uint64 *pending_words,
 			tess_table_link_grouped(&table->ref, chunk, &table->linked[chunk],
 									NULL, &repeated, &status) != TESS_OK :
 			tess_table_link(&table->ref, chunk, &table->linked[chunk], NULL,
-							&status) != TESS_OK)
+							&repeated, &status) != TESS_OK)
 			return false;
 		if (duplicates != NULL)
 			*duplicates += repeated;
@@ -246,8 +246,8 @@ record_matches(const Table *table, const Batch *batch, int row, uint32 offset)
 
 /*
  * A participant alone at its barrier, which elects it at every phase, and
- * whose build takes two chunks and appends three records: the actions it
- * steps through.
+ * whose build takes two chunks and appends three records and whose links
+ * find two duplicates: the actions it steps through.
  */
 static bool
 build_alone(void)
@@ -265,6 +265,7 @@ build_alone(void)
 	uint64		records;
 	uint64		nulls;
 	uint64		chunks;
+	uint64		duplicates;
 	uint32		phase = TESS_BUILD_BUILD;
 	uint32		reply = 0;
 	int			step;
@@ -299,12 +300,15 @@ build_alone(void)
 				tess_build_report(counters, 3, 0x5, &status) != TESS_OK)
 				return false;
 		}
+		else if (action == TESS_BUILD_DO_LINK &&
+				 tess_build_add_duplicates(counters, 2, &status) != TESS_OK)
+			return false;
 		else if (action == TESS_BUILD_ARRIVE_AND_DETACH)
 			reply = 1;
 	}
-	return tess_build_totals(counters, &records, &nulls, &chunks,
+	return tess_build_totals(counters, &records, &nulls, &chunks, &duplicates,
 							 &status) == TESS_OK &&
-		records == 3 && nulls == 0x5 && chunks == 2;
+		records == 3 && nulls == 0x5 && chunks == 2 && duplicates == 2;
 }
 
 Datum

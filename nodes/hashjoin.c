@@ -1029,7 +1029,8 @@ size_shared_table(TessHashJoinState *state)
 	Size		size;
 
 	check(state, state->kernels->build_totals(state->shared->counters, &records,
-											  &nulls, &nchunks, &state->status));
+											  &nulls, &nchunks, NULL,
+											  &state->status));
 	capacity = Max(records, JOIN_INITIAL_ROWS);
 	check(state, state->kernels->table_size(state->nkeys, state->inner_kinds,
 											payload_size, capacity,
@@ -1073,18 +1074,33 @@ size_shared_table(TessHashJoinState *state)
 	state->counters[JOIN_BUCKETS] += stats.buckets;
 }
 
-/* LINK: this participant's own chunks into the index. */
+/*
+ * LINK: this participant's own chunks into the index, counting the
+ * records whose keys the table held already unless the planner knows the
+ * inner side unique: the probes then skip the rounds a table without
+ * duplicates has no use for.
+ */
 static void
 link_own_chunks(TessHashJoinState *state)
 {
+	uint64		duplicates = 0;
+
 	attach_shared_table(state);
 	for (int own = 0; own < state->nown; own++)
 	{
 		Size		from = TESS_TABLE_CHUNK_HEADER;
+		uint64		repeated = 0;
 
 		check(state, state->kernels->table_link(&state->table, state->own_chunks[own],
-												&from, NULL, &state->status));
+												&from, NULL,
+												state->inner_unique ? NULL : &repeated,
+												&state->status));
+		duplicates += repeated;
 	}
+	if (duplicates > 0)
+		check(state, state->kernels->build_add_duplicates(state->shared->counters,
+														  duplicates,
+														  &state->status));
 	state->nown = 0;
 }
 
@@ -1196,14 +1212,14 @@ build_shared(TessHashJoinState *state)
 					uint64		nchunks;
 
 					attach_shared_table(state);
+					/* The whole table's rows and duplicates, every link done. */
 					check(state, state->kernels->build_totals(state->shared->counters,
 															  &records,
 															  &state->null_columns,
 															  &nchunks,
+															  &state->duplicates,
 															  &state->status));
-					/* The whole table's rows; its duplicates are unknown. */
 					state->build_rows = records;
-					state->duplicates = state->inner_unique ? 0 : 1;
 					state->built = true;
 					return;
 				}
@@ -1663,8 +1679,12 @@ fill_compact(TessHashJoinState *state)
 			{
 				int			column = state->outer_columns[index];
 
+				/*
+				 * The round's rows only: the next rounds are among them,
+				 * and a lazy child need not read the rows without a pair.
+				 */
 				child_column(state->outer_batch, state->child_columns[column],
-							 &state->outer_batch->rows,
+							 &(TessRowMask) {nrows, state->round_bits},
 							 TESS_COLUMN_FOR_PROJECTION,
 							 &state->round_columns[index]);
 			}
@@ -2244,8 +2264,6 @@ decide_compact(TessHashJoinState *state)
 	 */
 	if (state->request->output_mode != TESS_OUTPUT_BATCH ||
 		state->inner_unique || state->duplicates == 0 ||
-		/* A shared table's duplicates are unknown: rounds over the batch. */
-		state->shared != NULL ||
 		state->jointype == JOIN_SEMI || state->jointype == JOIN_ANTI ||
 		(state->jointype == JOIN_LEFT && state->qual != NULL))
 		return;

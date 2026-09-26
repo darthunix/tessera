@@ -216,12 +216,17 @@ extern TessStatusCode tess_table_append(const TessTableRef *table,
  * Link the records of chunk `chunk` from byte *from on into the buckets
  * and move *from past them; *linked (unless NULL) receives how many.
  * *from starts at TESS_TABLE_CHUNK_HEADER. Equal keys make separate
- * records. Several processes may link chunks of their own at once.
+ * records. Several processes may link chunks of their own at once. With
+ * duplicates, each record once published also walks the rest of its
+ * chain for its keys, and *duplicates receives how many records had keys
+ * the table held already: of two records of one key exactly the one
+ * linked later counts, so the sum over every participant is exact.
  */
 extern TessStatusCode tess_table_link(const TessTableRef *table,
 									  int chunk,
 									  Size *from,
 									  uint64 *linked,
+									  uint64 *duplicates,
 									  TessStatus *status);
 
 /*
@@ -501,9 +506,9 @@ typedef struct TessBuildParticipant
 
 /*
  * The words of a build's shared counters: records appended, NULL columns,
- * chunks numbered.
+ * chunks numbered, duplicates the links found.
  */
-#define TESS_BUILD_COUNTER_WORDS 3
+#define TESS_BUILD_COUNTER_WORDS 4
 
 /* Clear a build's counters, before any participant attaches. */
 extern TessStatusCode tess_build_counters_init(uint64 *counters,
@@ -521,10 +526,22 @@ extern TessStatusCode tess_build_report(uint64 *counters, uint64 records,
 extern TessStatusCode tess_build_take_chunk(uint64 *counters, uint64 *number,
 											TessStatus *status);
 
-/* The totals of every participant, once the build is over. */
+/*
+ * Add the duplicates a participant's links found, before it arrives at
+ * the barrier after linking.
+ */
+extern TessStatusCode tess_build_add_duplicates(uint64 *counters,
+												uint64 duplicates,
+												TessStatus *status);
+
+/*
+ * The totals of every participant, once the build is over; *duplicates
+ * (unless NULL) once linking is over.
+ */
 extern TessStatusCode tess_build_totals(uint64 *counters, uint64 *records,
 										uint64 *null_columns,
 										uint64 *chunks,
+										uint64 *duplicates,
 										TessStatus *status);
 
 /*

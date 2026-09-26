@@ -253,6 +253,7 @@ impl CTable {
                         chunk as i32,
                         &raw mut from,
                         ptr::null_mut(),
+                        &raw mut repeated,
                         &raw mut status,
                     )
                 };
@@ -440,8 +441,9 @@ fn the_entry_points_round_trip() -> Result<()> {
             bits: pending_words.as_mut_ptr(),
         };
         let mut offsets = vec![0; 100];
-        // Chunks of 1 KiB hold 31 records of 32 bytes: three chunks.
-        table.insert(
+        // Chunks of 1 KiB hold 31 records of 32 bytes: three chunks. The
+        // links count the rows whose key an earlier valid row had.
+        let duplicates = table.insert(
             1024,
             hashes.as_ptr(),
             &raw const key,
@@ -452,6 +454,9 @@ fn the_entry_points_round_trip() -> Result<()> {
         );
         assert_eq!(pending_words, vec![0; 2]);
         assert_eq!(table.chunks.len(), 3);
+        let distinct: std::collections::HashSet<i32> =
+            valid_rows.iter().map(|&row| keys.values[row]).collect();
+        assert_eq!(duplicates, (valid_rows.len() - distinct.len()) as u64);
         let mut stats = TableStats {
             struct_size: size_of::<TableStats>(),
             records: 0,

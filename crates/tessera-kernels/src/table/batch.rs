@@ -177,7 +177,25 @@ pub(super) fn link<R: Region>(
     chunk: usize,
     from: &mut usize,
 ) -> Result<usize> {
+    link_counting::<R, false>(region, layout, chunk, from).map(|(count, _)| count)
+}
+
+/// As [`link`], and with `DUPLICATES` also count the records whose keys
+/// the table held already: once a record is published, the rest of its
+/// chain, the head it was put before, is walked for a record with the same
+/// hash, NULL bits and keys. The CAS on a bucket orders its records, so of
+/// two records of one key exactly the one linked later finds the other,
+/// whatever participants link at once: the count is exact, as
+/// [`super::exclusive::link_grouped`]'s. Returns the count linked and the
+/// duplicates.
+pub(super) fn link_counting<R: Region, const DUPLICATES: bool>(
+    region: &R,
+    layout: &Layout,
+    chunk: usize,
+    from: &mut usize,
+) -> Result<(usize, usize)> {
     let mut access = Access::new(region, layout);
+    let mut duplicates = 0;
     let bytes = unlinked(&access, chunk, *from)?;
     let count = bytes.len();
     let end = *from + count * access.record_size();
@@ -190,10 +208,19 @@ pub(super) fn link<R: Region>(
         // SAFETY: the record lies in the chunk, below its used mark.
         let hash = unsafe { check_record_at(&access, spot, (chunk, byte)) }?;
         // SAFETY: as above, and the caller alone links this chunk.
-        unsafe { access.push_at(access.reference((chunk, byte)), spot, hash) };
+        let rest = unsafe { access.push_at(access.reference((chunk, byte)), spot, hash) };
+        if DUPLICATES && rest != 0 {
+            // SAFETY: the record is published and never written again.
+            let record = unsafe { access.view_at(spot) };
+            let (null_bits, keys) = (record.null_bits(), record.keys());
+            let same = access.find(rest, hash, |other| {
+                other.null_bits() == null_bits && same_keys(other.keys(), keys)
+            })?;
+            duplicates += usize::from(same != 0);
+        }
     }
     *from = end;
-    Ok(count)
+    Ok((count, duplicates))
 }
 
 /// The first bytes of a chunk's records from byte `from` to its used

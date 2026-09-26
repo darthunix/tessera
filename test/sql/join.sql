@@ -331,6 +331,11 @@ SELECT join_same($$SELECT jbig.v, jgrow.g FROM jbig JOIN jgrow ON jbig.fk = jgro
 SELECT join_property($$SELECT count(*) FROM jbig JOIN jgrow ON jbig.fk = jgrow.k$$, 'Builds') AS builds,
        join_property($$SELECT count(*) FROM jbig JOIN jgrow ON jbig.fk = jgrow.k$$, 'Build Rows') AS build_rows,
        join_property($$SELECT count(*) FROM jbig JOIN jgrow ON jbig.fk = jgrow.k$$, 'Buckets') AS buckets;
+-- The links count the duplicates of the shared table: jgrow has them,
+-- and its pairs go out in compact batches; jbuild has none, and no rounds
+-- or compact batches follow the first.
+SELECT join_property($$SELECT count(*), sum(jgrow.g) FROM jbig JOIN jgrow ON jbig.fk = jgrow.k$$, 'Compact Batches')::int > 0 AS dup_compact,
+       join_property($$SELECT count(*), sum(jbuild.w) FROM jprobe JOIN jbuild ON jprobe.k = jbuild.k$$, 'Compact Batches') IS NULL AS unique_rounds;
 SET parallel_leader_participation = off;
 SELECT join_same($$SELECT count(*), sum(jbuild.w), sum(jprobe.v) FROM jprobe JOIN jbuild ON jprobe.k = jbuild.k$$);
 RESET parallel_leader_participation;

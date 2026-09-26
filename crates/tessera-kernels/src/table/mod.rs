@@ -386,6 +386,14 @@ impl<'a> Table<'a> {
         batch::link(&self.region, &self.layout, chunk, from)
     }
 
+    /// As [`Self::link`], also counting the records whose keys the table
+    /// held already, each once, even while other participants link: a
+    /// published record walks the rest of its chain for its keys. Returns
+    /// the count linked and the duplicates.
+    pub fn link_counting(&self, chunk: usize, from: &mut usize) -> Result<(usize, usize)> {
+        batch::link_counting::<_, true>(&self.region, &self.layout, chunk, from)
+    }
+
     /// Find the first record of its chain with the hash, null bits and
     /// keys of each row of `rows`: `matches[row]` receives its reference
     /// and `found` the rows that have one, as a mask this call produces.

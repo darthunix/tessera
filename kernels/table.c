@@ -43,6 +43,7 @@ const TessKernelOps tess_kernel_ops = {
 	.build_counters_init = tess_build_counters_init,
 	.build_report = tess_build_report,
 	.build_take_chunk = tess_build_take_chunk,
+	.build_add_duplicates = tess_build_add_duplicates,
 	.build_totals = tess_build_totals,
 	.build_step = tess_build_step,
 };

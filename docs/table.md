@@ -191,9 +191,16 @@ reference of its record in `offsets`; the rows still pending need
 another chunk. `payload` is the payload of every physical row one after
 another, or `NULL` for zeros. Append does not read the index, which a
 build may not have yet. `tess_table_link(&table, chunk, &from, &linked,
-&status)` then puts the chunk's records from byte `from` on (starting at
-`TESS_TABLE_CHUNK_HEADER`) into the buckets, and moves `from` past them;
-equal keys make separate records that chain in their bucket.
+&duplicates, &status)` then puts the chunk's records from byte `from` on
+(starting at `TESS_TABLE_CHUNK_HEADER`) into the buckets, and moves `from`
+past them; equal keys make separate records that chain in their bucket.
+With `duplicates` (not `NULL`), each record, once published, walks the
+rest of its chain for a record with its hash, NULL bits and keys, and
+`duplicates` receives how many found one: the records whose keys the
+table held already. The compare-and-swap orders a bucket's records, so
+of two records of one key exactly the one linked later finds the other,
+whatever participants link at once, and the sum over the participants
+is exact, the count `tess_table_link_grouped` gives.
 
 `tess_table_probe(&table, hashes, nkeys, keys, &rows, matches, &found,
 &status)` finds, for each row of `rows`, the first record of its chain
@@ -341,7 +348,9 @@ The participants of a shared build go through phases that the core's
 - `SIZE`: the elected participant makes the index for exactly the
   records appended (`tess_build_totals`) and the directory of the
   chunks by number, from which every participant maps their bases;
-- `LINK`: every participant links its own chunks into the index;
+- `LINK`: every participant links its own chunks into the index,
+  counting the duplicates unless the planner knows the inner side
+  unique, and adds them to the counters (`tess_build_add_duplicates`);
 - `PROBE`: every participant probes, then leaves; the last to leave
   frees the table.
 
@@ -407,6 +416,8 @@ Linking a chunk (`tess_table_link`, several processes at once in a shared build)
       loop:
         record.next = head                          plain store (the record is not yet visible)
         CAS(bucket, head → the record's reference)  AcqRel; on failure Acquire and again
+      with duplicates: walk from record.next         plain reads (published records never change)
+        a record with the same keys → count it
 ```
 
 The count comes first so that a probe that finds a new record also sees a record count
@@ -444,7 +455,8 @@ A shared build, by the phases of the barrier:
           number, from the list → the Bloom filter
  ═══ BarrierArriveAndWait ═══
  LINK  ─ every participant: the chunks' bases from the directory → tess_table_link of its
-          own chunks (fetch_add and CAS, as above)
+          own chunks (fetch_add and CAS, as above), counting duplicates →
+          tess_build_add_duplicates: counters.duplicates fetch_add   Relaxed
  ═══ BarrierArriveAndWait ═══
  PROBE ─ every participant: probes (Acquire loads of the heads)
  ═══ BarrierArriveAndDetach ═══ → the last one frees the index, directory, chunks and values

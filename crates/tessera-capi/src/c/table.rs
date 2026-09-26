@@ -538,18 +538,21 @@ pub unsafe extern "C" fn tess_table_append(
 
 /// `tess_table_link`: link a chunk's records from byte `*from` into the
 /// buckets; several participants may link chunks of their own at once.
+/// With `duplicates`, also count the records whose keys the table held
+/// already.
 ///
 /// # Safety
 ///
 /// `table` as for [`attach`] during the call, the caller linking chunk
-/// `chunk` alone; `from` must point to a writable size and `linked` be null
-/// or writable; `status` as for every entry point.
+/// `chunk` alone; `from` must point to a writable size, `linked` and
+/// `duplicates` be null or writable; `status` as for every entry point.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn tess_table_link(
     table: *const TableRef,
     chunk: c_int,
     from: *mut usize,
     linked: *mut u64,
+    duplicates: *mut u64,
     status: *mut Status,
 ) -> Code {
     // SAFETY: the caller's contract.
@@ -557,7 +560,15 @@ pub unsafe extern "C" fn tess_table_link(
         guard(status, || {
             let chunk = usize::try_from(chunk).context("a negative chunk")?;
             let from = from.as_mut().context("a null link cursor")?;
-            let count = attach(table)?.link(chunk, from)?;
+            let table = attach(table)?;
+            let count = match duplicates.as_mut() {
+                Some(duplicates) => {
+                    let (count, repeated) = table.link_counting(chunk, from)?;
+                    *duplicates = repeated as u64;
+                    count
+                }
+                None => table.link(chunk, from)?,
+            };
             if let Some(linked) = linked.as_mut() {
                 *linked = count as u64;
             }
@@ -1274,20 +1285,42 @@ pub unsafe extern "C" fn tess_build_take_chunk(
     }
 }
 
+/// `tess_build_add_duplicates`: add the duplicates a participant's links
+/// found, before it arrives at the barrier after linking.
+///
+/// # Safety
+///
+/// As [`tess_build_report`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tess_build_add_duplicates(
+    counters: *mut u64,
+    duplicates: u64,
+    status: *mut Status,
+) -> Code {
+    // SAFETY: the caller's contract.
+    unsafe {
+        guard(status, || {
+            build_counters(counters)?.add_duplicates(duplicates);
+            Ok(())
+        })
+    }
+}
+
 /// `tess_build_totals`: the records every participant appended, the
-/// payload words with a NULL and the chunks numbered, once the build is
-/// over.
+/// payload words with a NULL, the chunks numbered and, once linking is
+/// over, the duplicates the links found.
 ///
 /// # Safety
 ///
 /// As [`tess_build_report`]; `records`, `null_columns` and `chunks` must
-/// point to writable words.
+/// point to writable words, `duplicates` be null or writable.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn tess_build_totals(
     counters: *mut u64,
     records: *mut u64,
     null_columns: *mut u64,
     chunks: *mut u64,
+    duplicates: *mut u64,
     status: *mut Status,
 ) -> Code {
     // SAFETY: the caller's contract.
@@ -1297,6 +1330,9 @@ pub unsafe extern "C" fn tess_build_totals(
             *records.as_mut().context("a null result")? = counters.total_records();
             *null_columns.as_mut().context("a null result")? = counters.nulls();
             *chunks.as_mut().context("a null result")? = counters.total_chunks();
+            if let Some(duplicates) = duplicates.as_mut() {
+                *duplicates = counters.total_duplicates();
+            }
             Ok(())
         })
     }

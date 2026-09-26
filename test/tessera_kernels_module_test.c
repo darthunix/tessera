@@ -727,6 +727,7 @@ tessera_test_kernels_module_table(PG_FUNCTION_ARGS)
 	uint8	   *state;
 	int			row;
 	int			chunk;
+	uint64		duplicates = 0;
 
 	/* Build: 64 rows, keys 0..15 as int8, the row number as payload. */
 	init_keys(&build_column, build_values, isnull, 16, true);
@@ -757,7 +758,10 @@ tessera_test_kernels_module_table(PG_FUNCTION_ARGS)
 	if (pending_word != 0)
 		cycle_failed("build: room", &status);
 
-	/* An index for sixteen records, the chunks linked into it. */
+	/*
+	 * An index for sixteen records, the chunks linked into it: of the four
+	 * records of each key, three find one linked before.
+	 */
 	table.index = palloc(small);
 	table.index_len = small;
 	if (ops->table_create(table.index, small, 1, &kind, 8, 16, &status) != TESS_OK)
@@ -766,11 +770,16 @@ tessera_test_kernels_module_table(PG_FUNCTION_ARGS)
 	{
 		Size		from = TESS_TABLE_CHUNK_HEADER;
 		uint64		linked;
+		uint64		repeated;
 
-		if (ops->table_link(&table, chunk, &from, &linked, &status) != TESS_OK ||
+		if (ops->table_link(&table, chunk, &from, &linked, &repeated,
+							&status) != TESS_OK ||
 			linked != (chunk < 4 ? 16 : 0))
 			cycle_failed("build: link", &status);
+		duplicates += repeated;
 	}
+	if (duplicates != TABLE_ROWS - 16)
+		cycle_failed("build: duplicates", &status);
 
 	/* A larger index over the same chunks: the records keep their offsets. */
 	index = palloc(size);

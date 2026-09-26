@@ -610,6 +610,33 @@ fn a_full_chunk_leaves_the_rest_pending_until_linked_elsewhere() -> Result<()> {
 }
 
 #[test]
+fn linking_counts_the_records_whose_keys_were_there_already() -> Result<()> {
+    // Two participants' chunks: keys 0..40 with every key below 10 twice
+    // in the first, and 30..60 in the second.
+    let first: Vec<i32> = (0..40).chain(0..10).collect();
+    let second: Vec<i32> = (30..60).collect();
+    let mut table = LocalTable::new(&ONE_INT4, 100, 4096)?;
+    let chunks = [table.add_chunk()?, table.add_chunk()?];
+    let shared = table.table()?;
+    for (chunk, values) in chunks.iter().zip([&first, &second]) {
+        let keys = [ColumnView::try_new(values, None)?];
+        let hashes: Vec<u32> = values.iter().map(|&value| hash_i32(value)).collect();
+        let mut pending_words = all_rows(values.len());
+        let mut pending = RowMask::try_new(values.len(), &mut pending_words)?;
+        let mut offsets = vec![0; values.len()];
+        shared.append(*chunk, &hashes, &keys[..], None, &mut pending, &mut offsets)?;
+    }
+    let mut from = [CHUNK_HEADER; 2];
+    assert_eq!(shared.link_counting(chunks[0], &mut from[0])?, (50, 10));
+    // Keys 30..40 were there from the first chunk; linking nothing more
+    // counts nothing.
+    assert_eq!(shared.link_counting(chunks[1], &mut from[1])?, (30, 10));
+    assert_eq!(shared.link_counting(chunks[1], &mut from[1])?, (0, 0));
+    assert_eq!(shared.stats().records, 80);
+    Ok(())
+}
+
+#[test]
 fn a_record_larger_than_a_chunk_is_refused() -> Result<()> {
     let config = TableConfig {
         keys: &[KeyKind::Int32],

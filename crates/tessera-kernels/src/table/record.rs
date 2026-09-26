@@ -498,16 +498,17 @@ impl<'r, R: Region> Access<'r, R> {
     #[inline]
     pub(super) unsafe fn push(&self, offset: u32, place: Place, hash: u32) {
         // SAFETY: the caller's contract.
-        unsafe { self.push_at(offset, self.spot(place), hash) }
+        unsafe { self.push_at(offset, self.spot(place), hash) };
     }
 
-    /// As [`Self::push`], for the record at a spot the caller resolved.
+    /// As [`Self::push`], for the record at a spot the caller resolved;
+    /// returns the head the record was put before, the rest of its chain.
     ///
     /// # Safety
     ///
     /// As [`Self::push`], `spot` being the record's.
     #[inline(always)]
-    pub(super) unsafe fn push_at(&self, offset: u32, spot: R::Spot, hash: u32) {
+    pub(super) unsafe fn push_at(&self, offset: u32, spot: R::Spot, hash: u32) -> u32 {
         let bucket = self.bucket(hash);
         let next = R::advance(spot, NEXT);
         // SAFETY: the bucket lies in the bucket array, as in `head`, and
@@ -517,7 +518,7 @@ impl<'r, R: Region> Access<'r, R> {
             loop {
                 self.region.store_next(next, head);
                 match self.region.cas_u32_in(bucket, head, offset) {
-                    Ok(_) => return,
+                    Ok(_) => return head,
                     Err(found) => head = found,
                 }
             }
