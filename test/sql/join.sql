@@ -522,6 +522,35 @@ SELECT join_property($$SELECT count(*), sum(length(jsb.t)) FROM jsb WHERE EXISTS
        join_property($$SELECT jsb.t FROM jsb WHERE NOT EXISTS (SELECT 1 FROM jsp WHERE jsp.k = jsb.k)$$, 'Spilled Chunks')::int > 0 AS anti_spilled;
 SELECT join_same($$SELECT count(*), sum(length(jsb.t)) FROM jsb WHERE EXISTS (SELECT 1 FROM jsp WHERE jsp.k = jsb.k)$$);
 SELECT join_same($$SELECT jsb.t, jsb.n FROM jsb WHERE NOT EXISTS (SELECT 1 FROM jsp WHERE jsp.k = jsb.k)$$);
+-- Rounds: at a hash_mem of 2 MB a partition on disk that fits in one
+-- participant's is loaded into shared memory by every participant
+-- together, each taking files, and probed by all; one too large, here
+-- the key 100000 rows share, which statistics taken before them do not
+-- show, is joined by one participant alone.
+SET work_mem = '1MB';
+CREATE TABLE jsouter (k int, s text);
+ANALYZE jsouter;
+INSERT INTO jsouter
+SELECT CASE WHEN g % 11 = 0 THEN NULL ELSE g % 50000 END, 'q' || g FROM generate_series(1, 100000) AS g;
+CREATE TABLE jsheavy AS SELECT g % 60000 AS k, g AS w FROM generate_series(1, 200000) AS g;
+ANALYZE jsheavy;
+INSERT INTO jsheavy SELECT 7, g FROM generate_series(1, 100000) AS g;
+SELECT join_property($$SELECT count(*), sum(jsheavy.w) FROM jsouter JOIN jsheavy ON jsouter.k = jsheavy.k$$, 'Shared Table') AS shared,
+       join_property($$SELECT count(*), sum(jsheavy.w) FROM jsouter JOIN jsheavy ON jsouter.k = jsheavy.k$$, 'Partitions Joined Together')::int > 0 AS together;
+SELECT join_same($$SELECT count(*), sum(jsheavy.w), sum(length(jsouter.s)) FROM jsouter JOIN jsheavy ON jsouter.k = jsheavy.k$$);
+SELECT join_same($$SELECT jsouter.s, jsheavy.w FROM jsouter JOIN jsheavy ON jsouter.k = jsheavy.k WHERE jsouter.s LIKE '%77'$$);
+SELECT join_same($$SELECT count(*), count(jsheavy.w), sum(jsheavy.w) FROM jsouter LEFT JOIN jsheavy ON jsouter.k = jsheavy.k$$);
+SELECT join_same($$SELECT jsouter.s FROM jsouter LEFT JOIN jsheavy ON jsouter.k = jsheavy.k WHERE jsheavy.w IS NULL$$);
+SELECT join_same($$SELECT count(*), sum(length(jsouter.s)) FROM jsouter WHERE EXISTS (SELECT 1 FROM jsheavy WHERE jsheavy.k = jsouter.k)$$);
+SELECT join_same($$SELECT jsouter.s FROM jsouter WHERE NOT EXISTS (SELECT 1 FROM jsheavy WHERE jsheavy.k = jsouter.k)$$);
+SELECT join_same($$SELECT count(*), sum(jsheavy.w) FROM jsouter JOIN jsheavy ON jsouter.k = jsheavy.k AND jsheavy.w % 3 = jsouter.k % 3$$);
+SET parallel_leader_participation = off;
+SELECT join_same($$SELECT count(*), sum(jsheavy.w), sum(length(jsouter.s)) FROM jsouter JOIN jsheavy ON jsouter.k = jsheavy.k$$);
+RESET parallel_leader_participation;
+SET enable_material = off;
+SELECT join_same($$SELECT x, n, t FROM (SELECT count(*) AS n, sum(jsheavy.w) AS t FROM jsouter LEFT JOIN jsheavy ON jsouter.k = jsheavy.k) AS ss
+RIGHT JOIN (VALUES (1), (2)) AS v(x) ON true$$);
+RESET enable_material;
 SELECT count(*) AS temporary_files FROM pg_ls_tmpdir();
 RESET work_mem;
 RESET enable_parallel_hash;
@@ -543,7 +572,7 @@ SET tessera.enable = off;
 EXPLAIN (COSTS OFF) SELECT count(*) FROM jf JOIN jd ON jf.fk = jd.id;
 RESET tessera.enable;
 
-DROP TABLE jd, jf, jdup, jsmall, jempty, jgrow, jbig, jpair, jbuild, jprobe, jhit, jref, jrefprobe, jrefgrow, jsb, jsp, jsskew;
+DROP TABLE jd, jf, jdup, jsmall, jempty, jgrow, jbig, jpair, jbuild, jprobe, jhit, jref, jrefprobe, jrefgrow, jsb, jsp, jsskew, jsouter, jsheavy;
 DROP FUNCTION jskew();
 DROP FUNCTION jwide();
 DROP FUNCTION join_property(text, text);
