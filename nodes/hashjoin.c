@@ -5,6 +5,7 @@
 #include "commands/explain_format.h"
 #include "executor/executor.h"
 #include "miscadmin.h"
+#include "port/pg_bitutils.h"
 #include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
 #include "optimizer/optimizer.h"
@@ -522,9 +523,26 @@ typedef struct TessHashJoinState
 	bool		inner_unique;
 	/*
 	 * INNER, SEMI, ANTI or LEFT: the kinds that keep the outer side, which
-	 * the node probes with.
+	 * the node probes with. RIGHT runs as INNER and FULL as LEFT, keeping
+	 * the inner side too: preserve_inner, and the plan's kind for EXPLAIN.
 	 */
 	JoinType	jointype;
+	JoinType	plan_jointype;
+	bool		preserve_inner;
+	/*
+	 * RIGHT and FULL: per chunk of the table, a bit per record set once a
+	 * pair of it passed the join clauses; after the outer side, the records
+	 * without one go out with NULL outer columns (the tail), from the walk's
+	 * chunk and byte on.
+	 */
+	uint64	  **marks;
+	int			mark_slots;
+	Size		record_size;
+	bool		tail;
+	int			tail_chunk;
+	Size		tail_byte;
+	uint32		tail_refs[JOIN_COMPACT_ROWS];
+	uint64		tail_bits[1];
 	/* Per filter of an outer join in evaluation order: whether it runs in batches. */
 	List	   *filter_batch;
 	/* The residual clauses after the keys that run in batches, first. */
@@ -783,6 +801,13 @@ static void
 batch_keys(TessHashJoinState *state, TessBatch *batch, const int *columns,
 		   const TessTableKeyKind *kinds, TessRowMask *valid)
 {
+	/*
+	 * A NULL key never matches; RIGHT and FULL still keep such an inner row
+	 * as a record, which no probe finds and the tail returns.
+	 */
+	TessNullKeys nulls = state->preserve_inner && kinds == state->inner_kinds ?
+		TESS_NULL_KEYS_GROUP : TESS_NULL_KEYS_REJECT;
+
 	for (int key = 0; key < state->nkeys; key++)
 	{
 		TessDatumColumn *keys = &state->key_columns[key];
@@ -793,13 +818,13 @@ batch_keys(TessHashJoinState *state, TessBatch *batch, const int *columns,
 		if (key == 0)
 			check(state, (int8 ? state->kernels->int8_hash :
 						  state->kernels->int4_hash) (keys, NULL, &batch->rows,
-													  TESS_NULL_KEYS_REJECT,
+													  nulls,
 													  state->hashes, valid,
 													  &state->status));
 		else
 			check(state, (int8 ? state->kernels->int8_hash_next :
 						  state->kernels->int4_hash_next) (keys, NULL,
-														   TESS_NULL_KEYS_REJECT,
+														   nulls,
 														   state->hashes, valid,
 														   &state->status));
 		state->table_keys[key].kind = kinds[key];
@@ -946,6 +971,9 @@ create_table(TessHashJoinState *state)
 	MemoryContextReset(state->table_context);
 	MemoryContextReset(state->values_context);
 	reset_values(state);
+	/* The marks lived in the table's memory. */
+	state->marks = NULL;
+	state->mark_slots = 0;
 	/* A new table: decide on its filter again. */
 	state->bloom = NULL;
 	state->bloom_words = 0;
@@ -1334,7 +1362,8 @@ insert_batch(TessHashJoinState *state, TessBatch *batch)
 	bool		fresh = false;
 
 	/* A batch adds a chunk of records and one of values at most. */
-	if (state->spill == NULL &&
+	/* RIGHT and FULL mark records in memory: their table does not spill. */
+	if (state->spill == NULL && !state->preserve_inner &&
 		state->table_bytes + state->value_bytes +
 		2 * chunk_len_for(JOIN_CHUNK_LEN) > get_hash_memory_limit())
 		start_spill(state);
@@ -5094,6 +5123,14 @@ join_get_column(TessBatch *batch, int column, const TessRowMask *rows,
 		result->nrows = batch->rows.nrows;
 		return;
 	}
+	/* The tail: inner rows without a pair, their outer columns NULL. */
+	if (state->sides[column] == JOIN_SIDE_OUTER && state->tail)
+	{
+		result->values = state->null_values;
+		result->isnull = state->null_isnull;
+		result->nrows = batch->rows.nrows;
+		return;
+	}
 	if (state->sides[column] == JOIN_SIDE_OUTER)
 	{
 		TessBatch  *outer = state->outer_batch;
@@ -5661,6 +5698,103 @@ next_matches(TessHashJoinState *state)
 }
 
 /*
+ * RIGHT and FULL: mark the records of the published pairs, which passed
+ * the join clauses. A reference is a chunk's number and a place in 8-byte
+ * units (tessera/table.h); a chunk's records follow its header, each of
+ * record_size bytes.
+ */
+static void
+mark_pairs(TessHashJoinState *state)
+{
+	const TessRowMask *rows = &state->batch.rows;
+	int			nwords = tess_row_mask_word_count(rows->nrows);
+
+	if (state->marks == NULL || state->mark_slots < state->table.nchunks)
+	{
+		int			slots = Max(state->table.nchunks, 16);
+		uint64	  **marks = MemoryContextAllocZero(state->table_context,
+												   sizeof(uint64 *) * slots);
+
+		if (state->marks != NULL)
+			memcpy(marks, state->marks, sizeof(uint64 *) * state->mark_slots);
+		state->marks = marks;
+		state->mark_slots = slots;
+	}
+	for (int word = 0; word < nwords; word++)
+		for (uint64 bits = rows->bits[word]; bits != 0; bits &= bits - 1)
+		{
+			uint32		ref = state->current_offsets[word * 64 +
+												   pg_rightmost_one_pos64(bits)];
+			int			chunk = (int) (ref >> TESS_TABLE_UNIT_BITS);
+			Size		byte = (Size) (ref & ((1u << TESS_TABLE_UNIT_BITS) - 1)) * 8;
+			Size		index = (byte - TESS_TABLE_CHUNK_HEADER) / state->record_size;
+
+			if (state->marks[chunk] == NULL)
+				state->marks[chunk] =
+					MemoryContextAllocZero(state->table_context,
+										   sizeof(uint64) *
+										   ((state->table.chunk_lens[chunk] /
+											 state->record_size + 63) / 64));
+			state->marks[chunk][index / 64] |= UINT64CONST(1) << (index % 64);
+		}
+}
+
+/* Start the tail: the inner rows without a pair, from the first chunk on. */
+static void
+start_tail(TessHashJoinState *state)
+{
+	reserve_rows(state, JOIN_COMPACT_ROWS);
+	state->tail = true;
+	state->tail_chunk = 0;
+	state->tail_byte = TESS_TABLE_CHUNK_HEADER;
+	state->output_compact = false;
+	state->null_round = false;
+}
+
+/*
+ * The next records without a pair, up to a batch of them, published with
+ * NULL outer columns: a chunk's used mark is its first word. False when
+ * the walk is over.
+ */
+static bool
+next_tail(TessHashJoinState *state)
+{
+	int			count = 0;
+
+	while (count < JOIN_COMPACT_ROWS && state->tail_chunk < state->table.nchunks)
+	{
+		int			chunk = state->tail_chunk;
+		uint64		used = *(const uint64 *) state->table.chunks[chunk];
+		Size		index;
+
+		if (state->tail_byte >= used)
+		{
+			state->tail_chunk++;
+			state->tail_byte = TESS_TABLE_CHUNK_HEADER;
+			continue;
+		}
+		index = (state->tail_byte - TESS_TABLE_CHUNK_HEADER) / state->record_size;
+		if (state->marks == NULL || chunk >= state->mark_slots ||
+			state->marks[chunk] == NULL ||
+			((state->marks[chunk][index / 64] >> (index % 64)) & 1) == 0)
+			state->tail_refs[count++] = ((uint32) chunk << TESS_TABLE_UNIT_BITS) |
+				(uint32) (state->tail_byte / 8);
+		state->tail_byte += state->record_size;
+	}
+	if (count == 0)
+		return false;
+	state->tail_bits[0] = count == 64 ? ~UINT64CONST(0) :
+		(UINT64CONST(1) << count) - 1;
+	state->batch.rows.nrows = count;
+	state->batch.rows.bits = state->tail_bits;
+	state->current_offsets = state->tail_refs;
+	state->current_bits = state->tail_bits;
+	state->nulls_gathered = false;
+	memset(state->gathered, 0, sizeof(bool) * Max(state->npayload, 1));
+	return true;
+}
+
+/*
  * The next batch of pairs, a round or a compact batch, with the residual
  * join clauses applied: a batch they leave empty is skipped. The clauses
  * narrow the published selection only; a round's own rows stay whole for
@@ -5675,10 +5809,21 @@ next_output(TessHashJoinState *state)
 		return next_matches(state);
 	for (;;)
 	{
-		if (state->compact ? !fill_compact(state) : !next_round(state))
-			return false;
+		if (state->tail)
+		{
+			if (!next_tail(state))
+				return false;
+		}
+		else if (state->compact ? !fill_compact(state) : !next_round(state))
+		{
+			/* RIGHT and FULL: then the inner rows without a pair. */
+			if (!state->preserve_inner)
+				return false;
+			start_tail(state);
+			continue;
+		}
 		/* The join clauses decide the pairs; the rows without one have none. */
-		if (state->qual != NULL && !state->null_round)
+		if (state->qual != NULL && !state->null_round && !state->tail)
 		{
 			ResetExprContext(econtext);
 			if (tess_qual_apply(state->qual, &state->batch, econtext,
@@ -5689,6 +5834,8 @@ next_output(TessHashJoinState *state)
 				for (int word = 0; word < tess_row_mask_word_count(state->batch.rows.nrows); word++)
 					state->matched_bits[word] |= state->published_bits[word];
 		}
+		if (state->preserve_inner && !state->null_round && !state->tail)
+			mark_pairs(state);
 		/* An outer join's filters over every row it returns. */
 		if (state->filter != NULL)
 		{
@@ -5852,6 +5999,8 @@ send_requests(TessHashJoinState *state)
 		state->payload_columns[state->npayload] = column;
 		state->payload_words[column] = ++state->npayload;
 	}
+	/* A record: its header, a slot per key and the payload's words. */
+	state->record_size = 16 + sizeof(uint64) * (state->nkeys + 1 + state->npayload);
 	/* The keys before any other column, then the rows that survive them. */
 	outer_request.filter_columns = outer_key;
 	outer_request.projection_columns = outer_columns;
@@ -5905,6 +6054,13 @@ read_node_data(TessHashJoinState *state, const List *data)
 	state->residual_batch = tess_plan_read_int_list(reader, "residual_batch");
 	state->filter_batch = tess_plan_read_int_list(reader, "filter_batch");
 	state->jointype = (JoinType) tess_plan_read_int(reader, "jointype");
+	state->plan_jointype = state->jointype;
+	/* RIGHT is INNER and FULL is LEFT, the unmatched inner rows added last. */
+	if (state->jointype == JOIN_RIGHT || state->jointype == JOIN_FULL)
+	{
+		state->preserve_inner = true;
+		state->jointype = state->jointype == JOIN_RIGHT ? JOIN_INNER : JOIN_LEFT;
+	}
 	state->inner_unique = tess_plan_read_int(reader, "inner_unique") != 0;
 	state->inner_rows = tess_plan_read_int(reader, "inner_rows");
 	state->shared_mode = tess_plan_read_int(reader, "shared") != 0;
@@ -5920,7 +6076,9 @@ read_node_data(TessHashJoinState *state, const List *data)
 		(state->jointype != JOIN_INNER && state->jointype != JOIN_SEMI &&
 		 state->jointype != JOIN_ANTI && state->jointype != JOIN_LEFT) ||
 		(state->filter_batch != NIL &&
-		 state->jointype != JOIN_LEFT && state->jointype != JOIN_ANTI))
+		 state->jointype != JOIN_LEFT && state->jointype != JOIN_ANTI &&
+		 !state->preserve_inner) ||
+		(state->preserve_inner && state->shared_mode))
 		elog(ERROR, "TessHashJoin received foreign plan data");
 	for (int key = 0; key < state->nkeys; key++)
 	{
@@ -6181,6 +6339,13 @@ join_rescan(CustomScanState *css)
 	state->null_round = false;
 	state->null_held = false;
 	state->serving = false;
+	/* RIGHT and FULL: a table kept for the next scan has no pair yet. */
+	state->tail = false;
+	for (int chunk = 0; state->marks != NULL && chunk < state->mark_slots; chunk++)
+		if (state->marks[chunk] != NULL)
+			memset(state->marks[chunk], 0,
+				   sizeof(uint64) * ((state->table.chunk_lens[chunk] /
+									  state->record_size + 63) / 64));
 	state->next_row = -1;
 	state->done = false;
 	if (css->ss.ps.chgParam != NULL)
@@ -6263,10 +6428,12 @@ join_explain(CustomScanState *css, List *ancestors, ExplainState *es)
 
 	context = set_deparse_context_plan(es->deparse_cxt, css->ss.ps.plan,
 									   ancestors);
-	if (state->jointype != JOIN_INNER)
+	if (state->plan_jointype != JOIN_INNER)
 		ExplainPropertyText("Join Type",
-							state->jointype == JOIN_SEMI ? "Semi" :
-							state->jointype == JOIN_ANTI ? "Anti" : "Left", es);
+							state->plan_jointype == JOIN_SEMI ? "Semi" :
+							state->plan_jointype == JOIN_ANTI ? "Anti" :
+							state->plan_jointype == JOIN_RIGHT ? "Right" :
+							state->plan_jointype == JOIN_FULL ? "Full" : "Left", es);
 	ExplainPropertyText("Hash Cond",
 						deparse_expression((Node *) make_ands_explicit(list_copy_head(cscan->custom_exprs,
 																					  state->nkeys)),

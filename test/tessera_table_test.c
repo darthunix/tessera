@@ -342,6 +342,7 @@ tessera_test_table_layout(PG_FUNCTION_ARGS)
 				   sizeof(TessTableRef) &&
 				   tess_table_layout(TESS_TABLE_LAYOUT_REF_NCHUNKS_OFFSET) ==
 				   offsetof(TessTableRef, nchunks) &&
+				   tess_table_layout(TESS_TABLE_LAYOUT_UNIT_BITS) == TESS_TABLE_UNIT_BITS &&
 				   tess_table_layout((TessTableLayoutKind) 99) == 0 &&
 				   tess_sort_layout(TESS_SORT_LAYOUT_KEY_SIZE) == sizeof(TessSortKey) &&
 				   tess_sort_layout(TESS_SORT_LAYOUT_KEY_FLAGS_OFFSET) ==

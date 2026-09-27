@@ -54,6 +54,8 @@
  * chunk count the bytes it uses.
  */
 #define TESS_TABLE_MAX_CHUNKS 32768
+/* A reference's low bits: the record's place in its chunk in 8-byte units. */
+#define TESS_TABLE_UNIT_BITS 17
 #define TESS_TABLE_MAX_CHUNK_LEN (1024 * 1024)
 #define TESS_TABLE_CHUNK_HEADER 8
 
@@ -142,7 +144,8 @@ typedef enum TessTableLayoutKind
 	TESS_TABLE_LAYOUT_RECORD_SIZE = 6,
 	TESS_TABLE_LAYOUT_RECORD_PAYLOAD_OFFSET = 7,
 	TESS_TABLE_LAYOUT_REF_SIZE = 8,
-	TESS_TABLE_LAYOUT_REF_NCHUNKS_OFFSET = 9
+	TESS_TABLE_LAYOUT_REF_NCHUNKS_OFFSET = 9,
+	TESS_TABLE_LAYOUT_UNIT_BITS = 10
 } TessTableLayoutKind;
 
 /* The table format the library writes and accepts; must equal the header's. */

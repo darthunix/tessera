@@ -1942,6 +1942,142 @@ SELECT join_same($$SELECT v.x, (SELECT count(*) FROM jsp JOIN jsb ON jsp.k = jsb
 (1 row)
 
 RESET work_mem;
+-- RIGHT and FULL: the inner side's records that find a pair are marked,
+-- and those without one, NULL keys among them, go out after the outer
+-- side with NULL outer columns.
+EXPLAIN (COSTS OFF) SELECT jf.v, jd.label FROM jf RIGHT JOIN jd ON jf.fk = jd.id;
+               QUERY PLAN               
+----------------------------------------
+ Custom Scan (TessHashJoin)
+   Join Type: Right
+   Hash Cond: (jf.fk = jd.id)
+   ->  Custom Scan (TessHeapScan) on jf
+   ->  Custom Scan (TessHeapScan) on jd
+(5 rows)
+
+EXPLAIN (COSTS OFF) SELECT jf.v, jd.label FROM jf FULL JOIN jd ON jf.fk = jd.id;
+               QUERY PLAN               
+----------------------------------------
+ Custom Scan (TessHashJoin)
+   Join Type: Full
+   Hash Cond: (jf.fk = jd.id)
+   ->  Custom Scan (TessHeapScan) on jf
+   ->  Custom Scan (TessHeapScan) on jd
+(5 rows)
+
+SELECT join_same($$SELECT jf.v, jd.id, jd.label FROM jf RIGHT JOIN jd ON jf.fk = jd.id$$);
+                    join_same                    
+-------------------------------------------------
+ 764 rows, hash 15bfa7ea657d795038f65c5acbe4b1c4
+(1 row)
+
+SELECT join_same($$SELECT jf.v, jf.fk, jd.id, jd.n FROM jf FULL JOIN jd ON jf.fk = jd.id$$);
+                    join_same                     
+--------------------------------------------------
+ 1000 rows, hash d644c388b4cddc78c05f45906627f845
+(1 row)
+
+SELECT join_same($$SELECT count(*), count(jf.v), count(jd.id) FROM jf FULL JOIN jd ON jf.fk = jd.id$$);
+                   join_same                   
+-----------------------------------------------
+ 1 rows, hash 122a8c9fb7ad7834892c1a78d10a3beb
+(1 row)
+
+-- NULL keys on both sides, and duplicates: four inner rows per key.
+SELECT join_same($$SELECT jf.v, jdup.w, jdup.t FROM jf RIGHT JOIN jdup ON jf.fk = jdup.k$$);
+                    join_same                    
+-------------------------------------------------
+ 368 rows, hash c0c92792d18b6e47359dfb250ee1fc0f
+(1 row)
+
+SELECT join_same($$SELECT jf.v, jdup.w FROM jf FULL JOIN jdup ON jf.fk = jdup.k$$);
+                    join_same                     
+--------------------------------------------------
+ 1239 rows, hash ce5151ce288f7f00441c7dd5b529c350
+(1 row)
+
+SELECT join_same($$SELECT jdup.w, jf.v FROM jdup FULL JOIN jf ON jdup.k = jf.fk$$);
+                    join_same                     
+--------------------------------------------------
+ 1239 rows, hash 14c0593d8873bd2661c956ae91647907
+(1 row)
+
+-- A join clause beyond the keys decides the pairs, and the marks.
+SELECT join_same($$SELECT jf.v, jd.id FROM jf RIGHT JOIN jd ON jf.fk = jd.id AND jf.v > jd.n$$);
+                    join_same                    
+-------------------------------------------------
+ 337 rows, hash f4533cc21a82a14a0efac04ef4727a96
+(1 row)
+
+SELECT join_same($$SELECT jf.v, jd.id FROM jf FULL JOIN jd ON jf.fk = jd.id AND jf.v % 3 = 0$$);
+                    join_same                     
+--------------------------------------------------
+ 1109 rows, hash 8fb8f057e02a1c33ae156e8d7b465a37
+(1 row)
+
+-- Filters above the join over either side's columns.
+SELECT join_same($$SELECT jf.v, jdup.w FROM jf FULL JOIN jdup ON jf.fk = jdup.k WHERE jdup.w IS NULL$$);
+                    join_same                    
+-------------------------------------------------
+ 871 rows, hash 642fcd2e076ee6341181af312a8c7e20
+(1 row)
+
+SELECT join_same($$SELECT jdup.w FROM jf RIGHT JOIN jdup ON jf.fk = jdup.k WHERE jf.fk IS NULL$$);
+                   join_same                    
+------------------------------------------------
+ 11 rows, hash c255184ea854578949468f692b9ca6bc
+(1 row)
+
+EXPLAIN (COSTS OFF)
+SELECT x, (SELECT count(*) FROM (SELECT jd.id FROM jsmall FULL JOIN jd ON jsmall.k = jd.id AND jd.id > x) s)
+FROM generate_series(0, 300, 100) AS x;
+                        QUERY PLAN                        
+----------------------------------------------------------
+ Function Scan on generate_series x
+   SubPlan expr_1
+     ->  Custom Scan (TessAgg)
+           ->  Custom Scan (TessHashJoin)
+                 Join Type: Full
+                 Hash Cond: (jsmall.k = jd.id)
+                 Batch Join Filter: (jd.id > x.x)
+                 ->  Custom Scan (TessHeapScan) on jd
+                 ->  Custom Scan (TessHeapScan) on jsmall
+(9 rows)
+
+SELECT join_same($$SELECT jf.v, jd.id FROM jf FULL JOIN jd ON jf.fk = jd.id WHERE jd.n > 1000 OR jd.n IS NULL$$);
+                    join_same                    
+-------------------------------------------------
+ 795 rows, hash 1e960bf20d286bd97c7304ef48864c88
+(1 row)
+
+-- Empty sides.
+SELECT join_same($$SELECT jf.v, jempty.e FROM jf FULL JOIN jempty ON jf.fk = jempty.k$$);
+                    join_same                     
+--------------------------------------------------
+ 1000 rows, hash b67f2b55de45c5249bee0127bdabfbbf
+(1 row)
+
+SELECT join_same($$SELECT jempty.e, jd.id FROM jempty RIGHT JOIN jd ON jempty.k = jd.id$$);
+                    join_same                    
+-------------------------------------------------
+ 300 rows, hash b1a778e61aabd4e408ad6186bfeaa616
+(1 row)
+
+SELECT join_same($$SELECT jempty.e, jd.id FROM jempty FULL JOIN jd ON jempty.k = jd.id$$);
+                    join_same                    
+-------------------------------------------------
+ 300 rows, hash b1a778e61aabd4e408ad6186bfeaa616
+(1 row)
+
+-- A rescan: the table stays, and its marks start anew.
+SELECT join_same($$
+SELECT x, (SELECT count(*) FROM (SELECT jd.id FROM jsmall FULL JOIN jd ON jsmall.k = jd.id AND jd.id > x) s)
+FROM generate_series(0, 300, 100) AS x$$);
+                   join_same                   
+-----------------------------------------------
+ 4 rows, hash 0232b9ddc7060747fa23496b03c0a6e5
+(1 row)
+
 -- Row-wise parents: a sort, a limit, a scrollable cursor.
 EXPLAIN (COSTS OFF)
 SELECT jf.v, jd.label FROM jf JOIN jd ON jf.fk = jd.id ORDER BY jf.v DESC LIMIT 5;
@@ -2618,20 +2754,8 @@ RESET parallel_setup_cost;
 RESET parallel_tuple_cost;
 RESET min_parallel_table_scan_size;
 RESET enable_parallel_hash;
--- No path: another join type, clauses without an integer key, another key type, the
--- core's hash join disabled, the batch nodes off.
-EXPLAIN (COSTS OFF) SELECT count(jd.id) FROM jf FULL JOIN jd ON jf.fk = jd.id;
-                QUERY PLAN                
-------------------------------------------
- Custom Scan (TessAgg)
-   ->  Custom Scan (TessPack)
-         ->  Hash Full Join
-               Hash Cond: (jf.fk = jd.id)
-               ->  Seq Scan on jf
-               ->  Hash
-                     ->  Seq Scan on jd
-(7 rows)
-
+-- No path: clauses without an integer key, another key type, the core's
+-- hash join disabled, the batch nodes off.
 EXPLAIN (COSTS OFF) SELECT count(*) FROM jf JOIN jd ON jf.v > jd.n AND jf.note = jd.label;
                   QUERY PLAN                   
 -----------------------------------------------

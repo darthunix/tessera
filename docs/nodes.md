@@ -644,9 +644,8 @@ node calls through the bridge's kernel registry (see
 
 The module's `set_join_pathlist` hook offers the path for an inner, a
 semi, an anti or a left join, the kinds that keep the outer side, which
-the node probes with (a right or full join would need marks on the
-table's records, and the hook passes the right join the other way round
-over), with at least one `int4eq`, `int8eq`, `int48eq` or `int84eq` between a
+the node probes with, and for a right or a full join, which keep the
+inner side too (see "Right and full joins" below), with at least one `int4eq`, `int8eq`, `int48eq` or `int84eq` between a
 column of each side, when the join's target is plain columns and at most
 64 of them, the inner keys and the inner columns of the residual clauses
 are the inner side's. Each such clause, up to 16, is a key of the table;
@@ -819,6 +818,21 @@ that attaches after the last one left returns nothing. Without a DSM (a
 `Gather` that launched no workers) the node builds a table of its own
 from the whole inner side, which its partial scan then reads alone.
 
+### Right and full joins
+
+A right join runs as an inner join and a full join as a left one, the
+inner side kept too: its rows with a NULL key become records as well,
+hashed as a key of their own, which no probe finds. Every published pair
+that passed the join clauses marks its record, in a bit per record per
+chunk the node keeps (a reference is a chunk's number and a place in
+8-byte units, `TESS_TABLE_UNIT_BITS`). After the outer side the node
+walks each chunk's records up to its used mark and returns those without
+a mark, their outer columns NULL, through the outer join's filters. The
+table does not spill: the path is taken only when the planner expects the
+inner side within `hash_mem`, and only serially, since every participant
+would return the same records without a pair. A rescan that keeps the
+table clears the marks.
+
 ### Spilling
 
 A table of the node's own spills once it would outgrow `hash_mem` (see
@@ -945,7 +959,7 @@ clauses takes it and removes the rows it rejects before those clauses
 run, and the join checks no more; it takes the filter back before the
 table goes. A left or anti join returns those rows and keeps the filter.
 
-`EXPLAIN` shows the join type for a semi, anti or left join, the key
+`EXPLAIN` shows the join type for a semi, anti, left, right or full join, the key
 clauses as `Hash Cond`, `Shared Table` for a shared table, the residual ones that run in batches as `Batch
 Join Filter` and the others as `Join Filter`, and an outer join's filters
 as `Batch Filter` and `Filter`. With `ANALYZE` it adds

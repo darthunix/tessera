@@ -307,13 +307,14 @@ join_pathlist(PlannerInfo *root, RelOptInfo *joinrel, RelOptInfo *outerrel,
 	/*
 	 * The core offers no hash join either without PGS_HASHJOIN. The kinds
 	 * that keep the outer side, which the node probes with: each outer
-	 * row's matches are known when its batch has been probed. RIGHT, the
-	 * LEFT join with the sides the other way, would need marks on the
-	 * table's records, as would FULL.
+	 * row's matches are known when its batch has been probed; RIGHT and
+	 * FULL keep the inner side too, marking the table's records that find
+	 * a pair and returning the others after the outer side.
 	 */
 	if (!*tess_runtime_api()->settings->enable ||
 		(jointype != JOIN_INNER && jointype != JOIN_SEMI &&
-		 jointype != JOIN_ANTI && jointype != JOIN_LEFT) ||
+		 jointype != JOIN_ANTI && jointype != JOIN_LEFT &&
+		 jointype != JOIN_RIGHT && jointype != JOIN_FULL) ||
 		(extra->pgs_mask & PGS_HASHJOIN) == 0 ||
 		!find_keys(root, joinrel, extra->restrictlist, outerrel, innerrel,
 				   jointype, &keys) ||
@@ -334,10 +335,23 @@ join_pathlist(PlannerInfo *root, RelOptInfo *joinrel, RelOptInfo *outerrel,
 		if (filtered != NULL)
 			outer_path = filtered;
 	}
+	/*
+	 * RIGHT and FULL mark the records in memory, which do not spill: the
+	 * inner side must fit hash_mem as the planner estimates it, with a
+	 * record per row. Every participant would return the same records
+	 * without a pair: no parallel path.
+	 */
+	if ((jointype == JOIN_RIGHT || jointype == JOIN_FULL) &&
+		inner_path->rows * (16.0 + 8.0 * (list_length(keys.rinfos) + 1 + ninner) +
+							inner_path->pathtarget->width) >
+		(double) get_hash_memory_limit())
+		return;
 	path = make_join_path(root, joinrel, jointype, extra, &keys,
 						  outer_path, inner_path, false);
 	if (path != NULL)
 		add_path(joinrel, &path->path);
+	if (jointype == JOIN_RIGHT || jointype == JOIN_FULL)
+		return;
 
 	/*
 	 * Under a Gather: the outer side's cheapest partial path divides the

@@ -362,6 +362,37 @@ SELECT join_same($$SELECT jsp.s FROM jsp WHERE NOT EXISTS (SELECT 1 FROM jwide()
 SELECT join_same($$SELECT v.x, (SELECT count(*) FROM jsp JOIN jsb ON jsp.k = jsb.k WHERE jsp.k < v.x) FROM (VALUES (100), (15000)) AS v(x)$$);
 RESET work_mem;
 
+-- RIGHT and FULL: the inner side's records that find a pair are marked,
+-- and those without one, NULL keys among them, go out after the outer
+-- side with NULL outer columns.
+EXPLAIN (COSTS OFF) SELECT jf.v, jd.label FROM jf RIGHT JOIN jd ON jf.fk = jd.id;
+EXPLAIN (COSTS OFF) SELECT jf.v, jd.label FROM jf FULL JOIN jd ON jf.fk = jd.id;
+SELECT join_same($$SELECT jf.v, jd.id, jd.label FROM jf RIGHT JOIN jd ON jf.fk = jd.id$$);
+SELECT join_same($$SELECT jf.v, jf.fk, jd.id, jd.n FROM jf FULL JOIN jd ON jf.fk = jd.id$$);
+SELECT join_same($$SELECT count(*), count(jf.v), count(jd.id) FROM jf FULL JOIN jd ON jf.fk = jd.id$$);
+-- NULL keys on both sides, and duplicates: four inner rows per key.
+SELECT join_same($$SELECT jf.v, jdup.w, jdup.t FROM jf RIGHT JOIN jdup ON jf.fk = jdup.k$$);
+SELECT join_same($$SELECT jf.v, jdup.w FROM jf FULL JOIN jdup ON jf.fk = jdup.k$$);
+SELECT join_same($$SELECT jdup.w, jf.v FROM jdup FULL JOIN jf ON jdup.k = jf.fk$$);
+-- A join clause beyond the keys decides the pairs, and the marks.
+SELECT join_same($$SELECT jf.v, jd.id FROM jf RIGHT JOIN jd ON jf.fk = jd.id AND jf.v > jd.n$$);
+SELECT join_same($$SELECT jf.v, jd.id FROM jf FULL JOIN jd ON jf.fk = jd.id AND jf.v % 3 = 0$$);
+-- Filters above the join over either side's columns.
+SELECT join_same($$SELECT jf.v, jdup.w FROM jf FULL JOIN jdup ON jf.fk = jdup.k WHERE jdup.w IS NULL$$);
+SELECT join_same($$SELECT jdup.w FROM jf RIGHT JOIN jdup ON jf.fk = jdup.k WHERE jf.fk IS NULL$$);
+EXPLAIN (COSTS OFF)
+SELECT x, (SELECT count(*) FROM (SELECT jd.id FROM jsmall FULL JOIN jd ON jsmall.k = jd.id AND jd.id > x) s)
+FROM generate_series(0, 300, 100) AS x;
+SELECT join_same($$SELECT jf.v, jd.id FROM jf FULL JOIN jd ON jf.fk = jd.id WHERE jd.n > 1000 OR jd.n IS NULL$$);
+-- Empty sides.
+SELECT join_same($$SELECT jf.v, jempty.e FROM jf FULL JOIN jempty ON jf.fk = jempty.k$$);
+SELECT join_same($$SELECT jempty.e, jd.id FROM jempty RIGHT JOIN jd ON jempty.k = jd.id$$);
+SELECT join_same($$SELECT jempty.e, jd.id FROM jempty FULL JOIN jd ON jempty.k = jd.id$$);
+-- A rescan: the table stays, and its marks start anew.
+SELECT join_same($$
+SELECT x, (SELECT count(*) FROM (SELECT jd.id FROM jsmall FULL JOIN jd ON jsmall.k = jd.id AND jd.id > x) s)
+FROM generate_series(0, 300, 100) AS x$$);
+
 -- Row-wise parents: a sort, a limit, a scrollable cursor.
 EXPLAIN (COSTS OFF)
 SELECT jf.v, jd.label FROM jf JOIN jd ON jf.fk = jd.id ORDER BY jf.v DESC LIMIT 5;
@@ -571,9 +602,8 @@ RESET parallel_tuple_cost;
 RESET min_parallel_table_scan_size;
 RESET enable_parallel_hash;
 
--- No path: another join type, clauses without an integer key, another key type, the
--- core's hash join disabled, the batch nodes off.
-EXPLAIN (COSTS OFF) SELECT count(jd.id) FROM jf FULL JOIN jd ON jf.fk = jd.id;
+-- No path: clauses without an integer key, another key type, the core's
+-- hash join disabled, the batch nodes off.
 EXPLAIN (COSTS OFF) SELECT count(*) FROM jf JOIN jd ON jf.v > jd.n AND jf.note = jd.label;
 EXPLAIN (COSTS OFF) SELECT count(*) FROM jf JOIN jd ON jf.note = jd.label;
 SET enable_hashjoin = off;

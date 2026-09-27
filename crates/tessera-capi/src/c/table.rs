@@ -14,8 +14,8 @@ use anyhow::{Context, Result, bail, ensure};
 use tessera_core::ColumnReader;
 use tessera_kernels::table::{
     Chunks, Combine, CombineStop, Cursor, FORMAT_VERSION, Fold, HEADER_SIZE, KeyKind, KeySource,
-    MAX_KEYS, Partitions, PayloadColumns, Slot, Table, TableConfig, TableMut, VERSION_OFFSET,
-    append_columns_to, append_partitioned_to, append_to,
+    MAX_KEYS, Partitions, PayloadColumns, Slot, Table, TableConfig, TableMut, UNIT_BITS,
+    VERSION_OFFSET, append_columns_to, append_partitioned_to, append_to,
     bloom::SharedFilter,
     index_size, init_chunk, normalize_word,
     phases::{Participant, SharedCounters},
@@ -235,6 +235,7 @@ pub extern "C" fn tess_table_layout(kind: c_uint) -> usize {
         7 => offset_of!(TableRecord, payload),
         8 => size_of::<TableRef>(),
         9 => offset_of!(TableRef, nchunks),
+        10 => UNIT_BITS as usize,
         _ => 0,
     }
 }
