@@ -211,6 +211,31 @@ RESET max_parallel_workers_per_gather;
 DROP TABLE sort_ext;
 RESET work_mem;
 
+-- Under a Gather Merge: every participant sorts its share of a parallel
+-- scan, and the Gather Merge merges them; the node is parallel-aware for
+-- the counters it shares.
+SET max_parallel_workers_per_gather = 2;
+SET parallel_setup_cost = 0;
+SET parallel_tuple_cost = 0;
+SET min_parallel_table_scan_size = 0;
+EXPLAIN (COSTS OFF) SELECT k, v FROM sort_big ORDER BY k;
+SELECT sort_same($$SELECT k, v FROM sort_big ORDER BY k$$);
+SELECT sort_same($$SELECT k FROM sort_big ORDER BY k DESC$$);
+SET work_mem = '64kB';
+SELECT sort_same($$SELECT k, v FROM sort_big ORDER BY k$$);
+SET parallel_leader_participation = off;
+SELECT sort_same($$SELECT k, v FROM sort_big ORDER BY k DESC$$);
+RESET parallel_leader_participation;
+RESET work_mem;
+-- A rescan of the Gather Merge sorts every participant's share anew.
+SELECT sort_same($$
+SELECT x, (SELECT array_agg(k) FROM (SELECT k FROM sort_big WHERE k % 997 = x ORDER BY k) s)
+FROM generate_series(1, 3) AS x ORDER BY x$$);
+RESET min_parallel_table_scan_size;
+RESET parallel_tuple_cost;
+RESET parallel_setup_cost;
+RESET max_parallel_workers_per_gather;
+
 -- A scrollable cursor: forward and backward, across batches and past both ends.
 EXPLAIN (COSTS OFF) DECLARE c SCROLL CURSOR FOR SELECT d, a FROM sort_t ORDER BY d;
 BEGIN;

@@ -1108,7 +1108,19 @@ sort's input, with the same rows, costs and path keys, when
 Rows past `work_mem` are sorted into runs on disk and merged (see
 External sort below), so the planner's estimate of the rows is no gate.
 
-`IncrementalSort` and the sorts under a `Gather Merge` stay with the core.
+A sort under a `Gather Merge`, a `SortPath` over a partial path as the
+core plans it for a parallel ordered scan, becomes the node's path too:
+every participant sorts its share, in memory or in runs of its own, and
+the `Gather Merge` merges them. That path is parallel-aware only for the
+counters the participants share (`TessSharedStats`: EXPLAIN sums rows,
+runs, disk and memory, and the overrun past each one's `work_mem`). With
+two workers, 2 M rows sort in 0.77 to 0.90 of the core's parallel sort
+(an int4 key in memory 91 ms against 103; past 4 MB, 102 against 132);
+the `Gather Merge`, which passes every row through a queue and merges in
+the leader, bounds it, and a serial TessSort of the same rows takes 58
+to 81 ms: the path keeps the core's costs, so the planner chooses between
+the two as it would between the core's. `IncrementalSort` stays with the
+core.
 The plan's layout is dense, one column per target; the private data gives
 each target's column in the child's batches and each key's target, kind
 and flags, and `custom_exprs` holds the keys' expressions for `EXPLAIN`.

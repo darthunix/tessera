@@ -101,6 +101,29 @@ typedef struct MergeInput
 	uint32		place;
 } MergeInput;
 
+/*
+ * What EXPLAIN shows, summed over the participants of a parallel plan
+ * (TessSharedStats): the batches and rows read, memory and its overrun
+ * past each one's work_mem, the participants that sorted, sorted
+ * externally or kept a top-N heap, the runs, passes and bytes written, the
+ * rows rebuilt.
+ */
+enum
+{
+	SORT_BATCHES,
+	SORT_INPUT_ROWS,
+	SORT_MEMORY,
+	SORT_OVERRUN,
+	SORT_SORTED,
+	SORT_EXTERNAL,
+	SORT_TOPN,
+	SORT_RUNS,
+	SORT_PASSES,
+	SORT_DISK,
+	SORT_REBUILT,
+	SORT_NCOUNTERS
+};
+
 /* The counters of the node. */
 typedef struct SortCounters
 {
@@ -178,6 +201,8 @@ typedef struct TessSortState
 	 * with the next rows.
 	 */
 	int			eflags;
+	/* The participants' counters, under a Gather Merge. */
+	TessSharedStats *stats;
 	bool		external;
 	SortRun   **runs;
 	int			nruns;
@@ -326,6 +351,35 @@ create_upper_paths(PlannerInfo *root, UpperRelationKind stage,
 		{
 			projection = (ProjectionPath *) path;
 			path = projection->subpath;
+		}
+		/*
+		 * A sort in every participant under a Gather Merge: the node sorts
+		 * each participant's share, the Gather Merge merges them as it
+		 * merges the core's sorts.
+		 */
+		if (IsA(path, GatherMergePath))
+		{
+			GatherMergePath *gather = (GatherMergePath *) path;
+			ProjectionPath *below = NULL;
+			Path	   *subpath = gather->subpath;
+
+			if (IsA(subpath, ProjectionPath))
+			{
+				below = (ProjectionPath *) subpath;
+				subpath = below->subpath;
+			}
+			if (!IsA(subpath, SortPath))
+				continue;
+			sort = make_sort_path(root, (SortPath *) subpath);
+			if (sort == NULL || !sort->path.parallel_safe)
+				continue;
+			/* Parallel-aware for the counters the participants share. */
+			sort->path.parallel_aware = true;
+			if (below != NULL)
+				below->subpath = &sort->path;
+			else
+				gather->subpath = &sort->path;
+			continue;
 		}
 		if (!IsA(path, SortPath))
 			continue;
@@ -1785,6 +1839,8 @@ sort_end(CustomScanState *css)
 {
 	TessSortState *state = (TessSortState *) css;
 
+	if (state->stats != NULL)
+		tess_shared_stats_end(state->stats);
 	tess_output_end(state->output);
 	ExecEndNode(state->child);
 	free_external(state);
@@ -1846,6 +1902,26 @@ sort_set_tuple_bound(CustomScanState *css, int64 tuples_needed)
 	state->bound = tuples_needed < 0 ? -1 : tuples_needed;
 }
 
+/* This participant's counters. */
+static void
+sort_counters(TessSortState *state, uint64 *values)
+{
+	Size		limit = (Size) work_mem * 1024;
+
+	memset(values, 0, sizeof(uint64) * SORT_NCOUNTERS);
+	values[SORT_BATCHES] = state->counters.batches;
+	values[SORT_INPUT_ROWS] = state->counters.rows;
+	values[SORT_MEMORY] = state->counters.memory;
+	values[SORT_OVERRUN] = state->counters.memory > limit ? state->counters.memory - limit : 0;
+	values[SORT_SORTED] = state->sorted ? 1 : 0;
+	values[SORT_EXTERNAL] = state->sorted && state->external ? 1 : 0;
+	values[SORT_TOPN] = state->sorted && state->topn ? 1 : 0;
+	values[SORT_RUNS] = (uint64) state->runs_written;
+	values[SORT_PASSES] = (uint64) state->merge_passes;
+	values[SORT_DISK] = state->disk_bytes;
+	values[SORT_REBUILT] = state->topn ? state->compactions : 0;
+}
+
 static void
 sort_explain(CustomScanState *css, List *ancestors, ExplainState *es)
 {
@@ -1855,6 +1931,8 @@ sort_explain(CustomScanState *css, List *ancestors, ExplainState *es)
 												   css->ss.ps.plan, ancestors);
 	bool		useprefix = es->rtable_size > 1 || es->verbose;
 	List	   *keys = NIL;
+	const uint64 *totals = NULL;
+	uint64		own[SORT_NCOUNTERS];
 
 	foreach_ptr(Node, expr, cscan->custom_exprs)
 	{
@@ -1871,27 +1949,85 @@ sort_explain(CustomScanState *css, List *ancestors, ExplainState *es)
 		keys = lappend(keys, key);
 	}
 	ExplainPropertyList("Sort Key", keys, es);
-	if (!es->analyze || !state->sorted)
+	if (!es->analyze)
 		return;
-	ExplainPropertyText("Sort Method", state->topn ? "top-N in memory" :
-						state->external ? "external merge" : "in memory", es);
-	ExplainPropertyInteger("Memory Usage", "kB",
-						   (state->counters.memory + 1023) / 1024, es);
-	if (state->external)
+	if (state->stats != NULL)
+		totals = tess_shared_stats_totals(state->stats);
+	if (totals == NULL)
 	{
-		ExplainPropertyInteger("Disk Usage", "kB", (state->disk_bytes + 1023) / 1024, es);
-		ExplainPropertyInteger("Runs", NULL, state->runs_written, es);
-		if (state->merge_passes > 0)
-			ExplainPropertyInteger("Merge Passes", NULL, state->merge_passes, es);
+		sort_counters(state, own);
+		totals = own;
 	}
-	if (state->counters.memory > (Size) work_mem * 1024)
-		ExplainPropertyInteger("Overrun", "kB",
-							   (state->counters.memory - (Size) work_mem * 1024 + 1023) / 1024,
-							   es);
-	ExplainPropertyInteger("Input Batches", NULL, state->counters.batches, es);
-	ExplainPropertyInteger("Input Rows", NULL, state->counters.rows, es);
-	if (state->topn && state->compactions > 0)
-		ExplainPropertyInteger("Rows Rebuilt", NULL, state->compactions, es);
+	if (totals[SORT_SORTED] == 0)
+		return;
+	ExplainPropertyText("Sort Method", totals[SORT_TOPN] > 0 ? "top-N in memory" :
+						totals[SORT_EXTERNAL] > 0 ? "external merge" : "in memory", es);
+	ExplainPropertyInteger("Memory Usage", "kB", (totals[SORT_MEMORY] + 1023) / 1024, es);
+	if (totals[SORT_EXTERNAL] > 0)
+	{
+		ExplainPropertyInteger("Disk Usage", "kB", (totals[SORT_DISK] + 1023) / 1024, es);
+		ExplainPropertyInteger("Runs", NULL, totals[SORT_RUNS], es);
+		if (totals[SORT_PASSES] > 0)
+			ExplainPropertyInteger("Merge Passes", NULL, totals[SORT_PASSES], es);
+	}
+	if (totals[SORT_OVERRUN] > 0)
+		ExplainPropertyInteger("Overrun", "kB", (totals[SORT_OVERRUN] + 1023) / 1024, es);
+	ExplainPropertyInteger("Input Batches", NULL, totals[SORT_BATCHES], es);
+	ExplainPropertyInteger("Input Rows", NULL, totals[SORT_INPUT_ROWS], es);
+	if (totals[SORT_REBUILT] > 0)
+		ExplainPropertyInteger("Rows Rebuilt", NULL, totals[SORT_REBUILT], es);
+}
+
+/*
+ * Under a Gather Merge every participant sorts its share, and the node,
+ * parallel-aware for this alone, shares only its counters, in the rows of
+ * its chunk.
+ */
+static Size
+sort_estimate_dsm(CustomScanState *css, ParallelContext *pcxt)
+{
+	return tess_shared_stats_estimate(SORT_NCOUNTERS, pcxt->nworkers);
+}
+
+static void
+sort_initialize_dsm(CustomScanState *css, ParallelContext *pcxt, void *coordinate)
+{
+	TessSortState *state = (TessSortState *) css;
+
+	/* A Gather Merge a limit above shut down sets up anew when rescanned. */
+	if (state->stats != NULL)
+		tess_shared_stats_end(state->stats);
+	state->stats = tess_shared_stats_init(css->ss.ps.state->es_query_cxt, coordinate,
+										  SORT_NCOUNTERS, pcxt->nworkers, pcxt->seg);
+}
+
+static void
+sort_reinitialize_dsm(CustomScanState *css, ParallelContext *pcxt, void *coordinate)
+{
+	TessSortState *state = (TessSortState *) css;
+
+	tess_shared_stats_reset(state->stats);
+}
+
+static void
+sort_initialize_worker(CustomScanState *css, shm_toc *toc, void *coordinate)
+{
+	TessSortState *state = (TessSortState *) css;
+
+	state->stats = tess_shared_stats_attach(css->ss.ps.state->es_query_cxt, coordinate,
+											ParallelWorkerNumber + 1);
+}
+
+static void
+sort_shutdown(CustomScanState *css)
+{
+	TessSortState *state = (TessSortState *) css;
+	uint64		values[SORT_NCOUNTERS];
+
+	if (state->stats == NULL)
+		return;
+	sort_counters(state, values);
+	tess_shared_stats_store(state->stats, values);
 }
 
 static const CustomExecMethods sort_exec_methods = {
@@ -1900,6 +2036,11 @@ static const CustomExecMethods sort_exec_methods = {
 	.ExecCustomScan = sort_exec,
 	.EndCustomScan = sort_end,
 	.ReScanCustomScan = sort_rescan,
+	.EstimateDSMCustomScan = sort_estimate_dsm,
+	.InitializeDSMCustomScan = sort_initialize_dsm,
+	.ReInitializeDSMCustomScan = sort_reinitialize_dsm,
+	.InitializeWorkerCustomScan = sort_initialize_worker,
+	.ShutdownCustomScan = sort_shutdown,
 	.ExplainCustomScan = sort_explain,
 };
 
