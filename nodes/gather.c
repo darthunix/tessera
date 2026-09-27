@@ -18,6 +18,7 @@
 #include "utils/memutils.h"
 #include "utils/wait_event.h"
 
+#include "tessera/kernel_ops.h"
 #include "tessera/plan.h"
 #include "tessera/runtime.h"
 
@@ -39,6 +40,12 @@
  * gives its parent the messages as batches of up to 64 rows whose columns
  * point into the message; while every queue is empty and the leader takes
  * part, it runs the subtree itself, reading TessSend's child directly.
+ *
+ * TessGatherMerge stands in for the core's Gather Merge the same way: each
+ * worker's rows come in order, and its messages carry, after the columns'
+ * lanes, a lane per word of the rows' sort items (tessera/sort.h), which
+ * the leader merges with the kernel tess_sort_merge, its own rows among
+ * them, as the last merge of an external TessSort does.
  */
 
 /* Rows of a batch given out, and the most rows of a message. */
@@ -54,7 +61,8 @@ typedef struct GatherHeader
 	uint32		ncolumns;
 	/* The rows each lane has room for: the lanes' stride. */
 	uint32		stride;
-	uint32		pad;
+	/* The lanes of the rows' sort items' words, after the columns'. */
+	uint32		key_words;
 	uint64		values_len;
 } GatherHeader;
 
@@ -63,9 +71,33 @@ typedef struct SendShared
 {
 	dsm_handle	segment;
 	int			nqueues;
+	/* The rows a parent needs, -1 for all: no worker sends more. */
+	int64		bound;
 } SendShared;
 
 #define SEND_QUEUES_OFFSET MAXALIGN(sizeof(SendShared))
+
+/*
+ * A message being filled from a batch input: its lanes after the header,
+ * its rows, the by-reference values' bytes; the batch being copied, the
+ * last of its rows copied and how many, and its selected rows' key words.
+ */
+typedef struct MessageBuilder
+{
+	char	   *message;
+	Size		message_len;
+	uint32		rows;
+	char	   *values;
+	Size		values_len;
+	Size		values_used;
+	TessBatch  *batch;
+	TessDatumColumn columns[64];
+	int			row;
+	int			selected;
+	uint64	   *key_lanes;
+	int			key_capacity;
+	bool		exhausted;
+} MessageBuilder;
 
 typedef struct TessSendState
 {
@@ -77,6 +109,20 @@ typedef struct TessSendState
 	int			ncolumns;
 	int16	   *typlens;
 	bool	   *typbyvals;
+	/*
+	 * Under TessGatherMerge, the keys its rows come in the order of: each
+	 * one's target, how it orders, and the words of the rows' items each
+	 * message carries in lanes.
+	 */
+	int			nkeys;
+	int			key_places[TESS_TABLE_MAX_KEYS];
+	TessSortKey keys[TESS_TABLE_MAX_KEYS];
+	int			key_words;
+	const TessKernelOps *kernels;
+	/* The lanes of a message: NULL bits, the columns, the keys' words. */
+	int			nlanes;
+	/* The rows the parent above needs, -1 for all. */
+	int64		bound;
 	/* The rows of a message: a quarter of the queue for its lanes, 64 to GATHER_MESSAGE_ROWS. */
 	uint32		stride;
 	/* The leader's view of the queues, once laid out. */
@@ -84,22 +130,34 @@ typedef struct TessSendState
 	char	   *queues;
 	/* A worker's queue and the message it fills. */
 	shm_mq_handle *queue;
-	char	   *message;
-	Size		message_len;
-	uint32		rows;
-	char	   *values;
-	Size		values_len;
-	Size		values_used;
+	MessageBuilder builder;
 	uint64		sent_messages;
 	uint64		sent_rows;
 	bool		done;
 } TessSendState;
 
+/*
+ * A stream TessGatherMerge merges: a worker's message in hand, or the
+ * leader's own batch, its rows' places and key lanes; its rows and the next
+ * one; done once it has no more.
+ */
+typedef struct MergeSource
+{
+	char	   *message;
+	const char *values;
+	uint32		stride;
+	uint32		rows;
+	uint32		place;
+	bool		done;
+} MergeSource;
+
 typedef struct TessGatherState
 {
 	CustomScanState css;
 	TessSendState  *send;
+	bool		merge;
 	int			num_workers;
+	int64		bound;
 	TessOutput *output;
 	int			ncolumns;
 	bool	   *typbyvals;
@@ -133,6 +191,15 @@ typedef struct TessGatherState
 	uint64		messages;
 	uint64		worker_rows;
 	uint64		local_rows;
+	/*
+	 * TessGatherMerge: a source per worker and the leader's last, whose
+	 * rows it copies into messages of its own as a worker does; the
+	 * merge's tree, kept between calls.
+	 */
+	MergeSource *sources;
+	int			nsources;
+	uint32		merge_state[TESS_SORT_MERGE_STATE_WORDS];
+	MessageBuilder local_builder;
 } TessGatherState;
 
 static const CustomExecMethods send_exec_methods;
@@ -141,12 +208,19 @@ static create_upper_paths_hook_type previous_create_upper_paths_hook = NULL;
 
 static Plan *gather_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 						 List *tlist, List *clauses, List *custom_plans);
+static Plan *gather_merge_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
+							   List *tlist, List *clauses, List *custom_plans);
 static Plan *send_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 					   List *tlist, List *clauses, List *custom_plans);
 
 static const CustomPathMethods gather_path_methods = {
 	.CustomName = "TessGather",
 	.PlanCustomPath = gather_plan,
+};
+
+static const CustomPathMethods gather_merge_path_methods = {
+	.CustomName = "TessGatherMerge",
+	.PlanCustomPath = gather_merge_plan,
 };
 
 static const CustomPathMethods send_path_methods = {
@@ -162,36 +236,91 @@ static const CustomPathMethods send_path_methods = {
  * NULL where the core's Gather stays: a single copy, no worker, a subpath
  * that is no batch path, or a Gather that projects.
  */
+static bool
+gathers_batches(Path *gather, Path *subpath, int num_workers)
+{
+	return num_workers > 0 && tess_path_node(subpath) != NULL && subpath->parallel_safe &&
+		subpath->param_info == NULL &&
+		equal(gather->pathtarget->exprs, subpath->pathtarget->exprs) &&
+		list_length(subpath->pathtarget->exprs) > 0 &&
+		list_length(subpath->pathtarget->exprs) <= 64;
+}
+
+/*
+ * TessSend over subpath and the gathering node over it, with the core
+ * node's rows, costs and path keys; send_data the keys TessSend's messages
+ * carry, if any.
+ */
 static Path *
-make_gather_path(PlannerInfo *root, GatherPath *gather)
+make_send_and_gather(Path *gather, Path *subpath, int num_workers, List *send_data,
+					 const CustomPathMethods *methods, const TessNode *node)
 {
 	TessPathConfig config = TESS_STRUCT_INITIALIZER(TessPathConfig);
-	Path	   *subpath = gather->subpath;
 	CustomPath *send;
 	CustomPath *path;
 
-	if (gather->single_copy || gather->num_workers <= 0 ||
-		tess_path_node(subpath) == NULL || !subpath->parallel_safe ||
-		subpath->param_info != NULL ||
-		!equal(gather->path.pathtarget->exprs, subpath->pathtarget->exprs) ||
-		list_length(subpath->pathtarget->exprs) == 0 ||
-		list_length(subpath->pathtarget->exprs) > 64)
-		return NULL;
 	config.template_path = subpath;
 	config.methods = &send_path_methods;
 	config.node = &tess_send_node;
 	config.children = list_make1(subpath);
+	config.node_data = (Node *) send_data;
 	send = tess_path_create(&config);
 	/* Parallel-aware for the chunk of shared memory its queues take. */
 	send->path.parallel_aware = true;
 	config = (TessPathConfig) TESS_STRUCT_INITIALIZER(TessPathConfig);
-	config.template_path = &gather->path;
-	config.methods = &gather_path_methods;
-	config.node = &tess_gather_node;
+	config.template_path = gather;
+	config.methods = methods;
+	config.node = node;
 	config.children = list_make1(&send->path);
-	config.node_data = (Node *) list_make1(makeInteger(gather->num_workers));
+	config.node_data = (Node *) list_make1(makeInteger(num_workers));
 	path = tess_path_create(&config);
 	return &path->path;
+}
+
+static Path *
+make_gather_path(PlannerInfo *root, GatherPath *gather)
+{
+	if (gather->single_copy ||
+		!gathers_batches(&gather->path, gather->subpath, gather->num_workers))
+		return NULL;
+	return make_send_and_gather(&gather->path, gather->subpath, gather->num_workers, NIL,
+								&gather_path_methods, &tess_gather_node);
+}
+
+/*
+ * The node's path in place of a Gather Merge over a batch path whose path
+ * keys the sort kernels order by: TessGatherMerge over TessSend, which
+ * sends each row's key words with it. NULL where the core's stays.
+ */
+static Path *
+make_gather_merge_path(PlannerInfo *root, GatherMergePath *gather)
+{
+	const TessKernelOps *kernels = tess_runtime_kernels();
+	Path	   *subpath = gather->subpath;
+	List	   *places = NIL;
+	List	   *kinds = NIL;
+	List	   *flags = NIL;
+	int			nkeys = list_length(gather->path.pathkeys);
+
+	if (!gathers_batches(&gather->path, subpath, gather->num_workers) ||
+		nkeys == 0 || nkeys > TESS_TABLE_MAX_KEYS || kernels == NULL ||
+		!TESS_ABI_HAS_FIELD(kernels, TessKernelOps, sort_key_lanes))
+		return NULL;
+	foreach_node(PathKey, pathkey, gather->path.pathkeys)
+	{
+		TessSortKey key;
+		int			place;
+
+		if (!tess_sort_key_of(pathkey, subpath->pathtarget, subpath->parent->relids,
+							  &place, &key))
+			return NULL;
+		places = lappend_int(places, place);
+		kinds = lappend_int(kinds, (int) key.kind);
+		flags = lappend_int(flags, (int) key.flags);
+	}
+	return make_send_and_gather(&gather->path, subpath, gather->num_workers,
+								list_make3(places, kinds, flags),
+								&gather_merge_path_methods, &tess_gather_merge_node);
 }
 
 /*
@@ -209,6 +338,12 @@ replace_gathers(PlannerInfo *root, Path *path)
 		case T_GatherPath:
 			{
 				Path	   *replaced = make_gather_path(root, (GatherPath *) path);
+
+				return replaced != NULL ? replaced : path;
+			}
+		case T_GatherMergePath:
+			{
+				Path	   *replaced = make_gather_merge_path(root, (GatherMergePath *) path);
 
 				return replaced != NULL ? replaced : path;
 			}
@@ -300,7 +435,8 @@ replace_gathers(PlannerInfo *root, Path *path)
 				 */
 				if (node != NULL && strcmp(node->name, TESS_PACK_NODE_NAME) == 0 &&
 					list_length(custom->custom_paths) == 1 &&
-					tess_path_node(linitial(custom->custom_paths)) == &tess_gather_node &&
+					(tess_path_node(linitial(custom->custom_paths)) == &tess_gather_node ||
+					 tess_path_node(linitial(custom->custom_paths)) == &tess_gather_merge_node) &&
 					equal(path->pathtarget->exprs,
 						  ((Path *) linitial(custom->custom_paths))->pathtarget->exprs))
 					return linitial(custom->custom_paths);
@@ -338,18 +474,29 @@ send_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path, List *tlist
 		  List *clauses, List *custom_plans)
 {
 	TessPlanConfig config = TESS_STRUCT_INITIALIZER(TessPlanConfig);
+	TessPathInfo info = TESS_STRUCT_INITIALIZER(TessPathInfo);
+	List	   *data = NIL;
+	TessPlanWriter *writer;
 
+	tess_path_get_info(best_path, &info);
+	data = (List *) info.node_data;
+	/* The keys a merge above orders by, none under TessGather. */
+	writer = tess_plan_writer_create(TESS_SEND_DATA, TESS_SEND_DATA_VERSION);
+	tess_plan_write_int_list(writer, "keys", data == NIL ? NIL : linitial(data));
+	tess_plan_write_int_list(writer, "kinds", data == NIL ? NIL : lsecond(data));
+	tess_plan_write_int_list(writer, "flags", data == NIL ? NIL : lthird(data));
 	config.methods = &tess_send_scan_methods;
 	config.layout_policy = TESS_LAYOUT_PRESERVE_CHILD;
 	config.layout_child = 0;
 	config.scanrelid = 0;
+	config.node_data = (Node *) tess_plan_writer_finish(writer);
 	return tess_plan_create(best_path, tlist, custom_plans, &config);
 }
 
-/* TessGather: a column per target, the targets TessSend sends. */
+/* TessGather and TessGatherMerge: a column per target, the targets TessSend sends. */
 static Plan *
-gather_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path, List *tlist,
-			List *clauses, List *custom_plans)
+gather_plan_of(PlannerInfo *root, CustomPath *best_path, List *tlist, List *custom_plans,
+			   const CustomScanMethods *methods)
 {
 	TessPlanConfig config = TESS_STRUCT_INITIALIZER(TessPlanConfig);
 	TessPathInfo info = TESS_STRUCT_INITIALIZER(TessPathInfo);
@@ -360,14 +507,69 @@ gather_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path, List *tli
 	root->glob->parallelModeNeeded = true;
 	writer = tess_plan_writer_create(TESS_GATHER_DATA, TESS_GATHER_DATA_VERSION);
 	tess_plan_write_int(writer, "workers", intVal(linitial((List *) info.node_data)));
-	config.methods = &tess_gather_scan_methods;
+	config.methods = methods;
 	config.layout_policy = TESS_LAYOUT_DENSE;
 	config.scanrelid = 0;
 	config.node_data = (Node *) tess_plan_writer_finish(writer);
 	return tess_plan_create(best_path, tlist, custom_plans, &config);
 }
 
+static Plan *
+gather_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path, List *tlist,
+			List *clauses, List *custom_plans)
+{
+	return gather_plan_of(root, best_path, tlist, custom_plans, &tess_gather_scan_methods);
+}
+
+static Plan *
+gather_merge_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path, List *tlist,
+				  List *clauses, List *custom_plans)
+{
+	return gather_plan_of(root, best_path, tlist, custom_plans, &tess_gather_merge_scan_methods);
+}
+
 /* ---------------------------------------------------------------- TessSend */
+
+static void
+check_kernel(TessStatusCode code, TessStatus *status)
+{
+	if (code != TESS_OK)
+		tess_status_report(status);
+}
+
+/*
+ * The words of the items a merge compares, as a run of an external
+ * TessSort keeps them: every key takes its bit for NULL, and the last word
+ * goes when it holds no key's bits, the reference's only.
+ */
+static int
+merge_key_words(const TessKernelOps *kernels, int nkeys, TessSortKey *keys)
+{
+	TessStatus	status = TESS_STRUCT_INITIALIZER(TessStatus);
+	int			words;
+	int			bits = 0;
+
+	for (int key = 0; key < nkeys; key++)
+	{
+		keys[key].flags |= TESS_SORT_NULLABLE;
+		bits += (keys[key].kind == TESS_TABLE_KEY_INT8 ? 64 : 32) + 1;
+	}
+	check_kernel(kernels->sort_item_words(nkeys, keys, &words, &status), &status);
+	return bits <= 64 * (words - 1) ? words - 1 : words;
+}
+
+/* Pass a bound to a child, as ExecSetTupleBound would, a batch node's through its kind. */
+static void
+set_child_bound(PlanState *child, int64 bound)
+{
+	const TessNode *node = tess_batch_node_of(child);
+
+	if (node != NULL && TESS_ABI_HAS_FIELD(node, TessNode, set_tuple_bound) &&
+		node->set_tuple_bound != NULL)
+		node->set_tuple_bound((CustomScanState *) child, bound);
+	else
+		ExecSetTupleBound(bound, child);
+}
 
 static Node *
 send_create_state(CustomScan *cscan)
@@ -385,11 +587,22 @@ send_begin(CustomScanState *css, EState *estate, int eflags)
 	CustomScan *cscan = castNode(CustomScan, css->ss.ps.plan);
 	TessPlanInfo info = TESS_STRUCT_INITIALIZER(TessPlanInfo);
 	TupleDesc	desc = css->ss.ps.ps_ResultTupleSlot->tts_tupleDescriptor;
+	TessPlanReader *reader;
+	List	   *places;
+	List	   *kinds;
+	List	   *flags;
 
 	tess_plan_get_info(cscan, &info);
 	if (info.node != &tess_send_node || info.nchildren != 1 ||
 		info.child_names[0] == NULL)
 		elog(ERROR, "TessSend received a foreign plan");
+	reader = tess_plan_reader_create((List *) info.node_data, TESS_SEND_DATA,
+									 TESS_SEND_DATA_VERSION);
+	places = tess_plan_read_int_list(reader, "keys");
+	kinds = tess_plan_read_int_list(reader, "kinds");
+	flags = tess_plan_read_int_list(reader, "flags");
+	tess_plan_reader_finish(reader);
+	state->bound = -1;
 	state->child = ExecInitNode(linitial(cscan->custom_plans), estate, eflags);
 	css->custom_ps = list_make1(state->child);
 	state->child_layout = (TessLayout) TESS_STRUCT_INITIALIZER(TessLayout);
@@ -404,10 +617,31 @@ send_begin(CustomScanState *css, EState *estate, int eflags)
 		state->typlens[column] = TupleDescAttr(desc, column)->attlen;
 		state->typbyvals[column] = TupleDescAttr(desc, column)->attbyval;
 	}
+	state->nkeys = list_length(places);
+	if (state->nkeys > TESS_TABLE_MAX_KEYS || list_length(kinds) != state->nkeys ||
+		list_length(flags) != state->nkeys)
+		elog(ERROR, "TessSend received a foreign plan");
+	for (int key = 0; key < state->nkeys; key++)
+	{
+		state->key_places[key] = list_nth_int(places, key);
+		state->keys[key].kind = (TessTableKeyKind) list_nth_int(kinds, key);
+		state->keys[key].flags = (uint32) list_nth_int(flags, key);
+		if (state->key_places[key] < 0 || state->key_places[key] >= state->ncolumns)
+			elog(ERROR, "TessSend received a foreign plan");
+	}
+	if (state->nkeys > 0)
+	{
+		state->kernels = tess_runtime_kernels();
+		if (state->kernels == NULL ||
+			!TESS_ABI_HAS_FIELD(state->kernels, TessKernelOps, sort_key_lanes))
+			elog(ERROR, "TessSend needs the Tessera kernels module");
+		state->key_words = merge_key_words(state->kernels, state->nkeys, state->keys);
+	}
+	state->nlanes = 1 + state->ncolumns + state->key_words;
 	state->stride = (uint32) Min((Size) GATHER_MESSAGE_ROWS,
 								 Max((Size) GATHER_ROWS,
 									 GATHER_QUEUE_SIZE / 4 /
-									 (sizeof(uint64) * (1 + state->ncolumns))));
+									 (sizeof(uint64) * state->nlanes)));
 	/* A worker reads the child and sends; the leader's TessGather reads the child itself. */
 	if (IsParallelWorker())
 	{
@@ -424,38 +658,174 @@ send_begin(CustomScanState *css, EState *estate, int eflags)
 	}
 }
 
-/* The bytes of a message of rows rows before its values. */
+/* The bytes of a message of nlanes lanes of rows rows before its values. */
 static Size
-message_head(int ncolumns, uint32 rows)
+message_head(int nlanes, uint32 rows)
 {
-	return MAXALIGN(sizeof(GatherHeader)) + sizeof(uint64) * (Size) rows * (1 + ncolumns);
+	return MAXALIGN(sizeof(GatherHeader)) + sizeof(uint64) * (Size) rows * nlanes;
+}
+
+/*
+ * Copy the selected rows of the input's batches into the builder's
+ * message, from the rows left of the batch it stopped in: true once the
+ * message is full, its rows at the stride or its values past half a queue,
+ * with more rows to come; false once the input is done.
+ */
+static bool
+fill_message(TessSendState *send, MessageBuilder *builder, TessInput *input,
+			 MemoryContext context)
+{
+	uint64	   *lanes;
+
+	if (builder->message == NULL)
+	{
+		builder->message_len = message_head(send->nlanes, send->stride);
+		builder->message = MemoryContextAllocZero(context, builder->message_len);
+		builder->values_len = 64 * 1024;
+		builder->values = MemoryContextAlloc(context, builder->values_len);
+	}
+	lanes = (uint64 *) (builder->message + MAXALIGN(sizeof(GatherHeader)));
+	builder->rows = 0;
+	builder->values_used = 0;
+	if (builder->exhausted)
+		return false;
+	for (;;)
+	{
+		TessBatch  *batch = builder->batch;
+		TessDatumColumn *columns = builder->columns;
+		int			row;
+
+		if (batch == NULL)
+		{
+			batch = tess_input_next(input);
+			if (batch == NULL)
+			{
+				builder->exhausted = true;
+				return false;
+			}
+			for (int column = 0; column < send->ncolumns; column++)
+			{
+				columns[column] = (TessDatumColumn) TESS_STRUCT_INITIALIZER(TessDatumColumn);
+				batch->ops->get_datum_column(batch,
+											 tess_layout_column(&send->child_layout, column),
+											 &batch->rows, TESS_COLUMN_FOR_PROJECTION,
+											 &columns[column]);
+				if (columns[column].values == NULL || columns[column].isnull == NULL ||
+					columns[column].nrows != batch->rows.nrows)
+					elog(ERROR, "Tessera batch returned an invalid column");
+			}
+			/* The selected rows' key words, in order, for a merge above. */
+			if (send->nkeys > 0)
+			{
+				TessStatus	status = TESS_STRUCT_INITIALIZER(TessStatus);
+				TessTableKey table_keys[TESS_TABLE_MAX_KEYS];
+				uint64	   *key_lanes[TESS_SORT_MAX_ITEM_WORDS];
+				int			count;
+
+				if (batch->rows.nrows > builder->key_capacity)
+				{
+					if (builder->key_lanes != NULL)
+						pfree(builder->key_lanes);
+					builder->key_capacity = Max(batch->rows.nrows, GATHER_ROWS);
+					builder->key_lanes = MemoryContextAlloc(context, sizeof(uint64) *
+															send->key_words *
+															builder->key_capacity);
+				}
+				for (int key = 0; key < send->nkeys; key++)
+				{
+					table_keys[key].kind = send->keys[key].kind;
+					table_keys[key].column = &columns[send->key_places[key]];
+					table_keys[key].prepared = NULL;
+				}
+				for (int word = 0; word < send->key_words; word++)
+					key_lanes[word] = builder->key_lanes + (Size) word * builder->key_capacity;
+				check_kernel(send->kernels->sort_key_lanes(send->nkeys, send->keys, table_keys,
+														   &batch->rows, send->key_words,
+														   key_lanes, builder->key_capacity,
+														   &count, &status),
+							 &status);
+			}
+			builder->batch = batch;
+			builder->row = -1;
+			builder->selected = 0;
+		}
+		while ((row = tess_row_mask_next(&batch->rows, builder->row)) >= 0)
+		{
+			uint64		nulls = 0;
+			Size		need = 0;
+
+			for (int column = 0; column < send->ncolumns; column++)
+				if (!columns[column].isnull[row] && !send->typbyvals[column])
+					need += MAXALIGN(datumGetSize(columns[column].values[row], false,
+												  send->typlens[column]));
+			if (builder->rows == send->stride ||
+				(builder->rows > 0 && builder->values_used + need > GATHER_QUEUE_SIZE / 2))
+				return true;
+			if (builder->values_used + need > builder->values_len)
+			{
+				builder->values_len = Max(builder->values_len * 2, builder->values_used + need);
+				builder->values = repalloc_huge(builder->values, builder->values_len);
+			}
+			for (int column = 0; column < send->ncolumns; column++)
+			{
+				uint64	   *lane = lanes + (Size) send->stride * (1 + column);
+
+				if (columns[column].isnull[row])
+				{
+					nulls |= UINT64CONST(1) << column;
+					lane[builder->rows] = 0;
+				}
+				else if (send->typbyvals[column])
+					lane[builder->rows] = (uint64) columns[column].values[row];
+				else
+				{
+					Size		size = datumGetSize(columns[column].values[row], false,
+													send->typlens[column]);
+
+					memcpy(builder->values + builder->values_used,
+						   DatumGetPointer(columns[column].values[row]), size);
+					lane[builder->rows] = builder->values_used;
+					builder->values_used += MAXALIGN(size);
+				}
+			}
+			for (int word = 0; word < send->key_words; word++)
+				lanes[(Size) send->stride * (1 + send->ncolumns + word) + builder->rows] =
+					builder->key_lanes[(Size) word * builder->key_capacity + builder->selected];
+			lanes[builder->rows] = nulls;
+			builder->rows++;
+			builder->row = row;
+			builder->selected++;
+		}
+		tess_input_finish(input);
+		builder->batch = NULL;
+		CHECK_FOR_INTERRUPTS();
+	}
 }
 
 /* Send the message the worker filled, whole; false once the leader left. */
 static bool
 send_message(TessSendState *state)
 {
-	GatherHeader *header = (GatherHeader *) state->message;
-	Size		head = message_head(state->ncolumns, state->stride);
+	MessageBuilder *builder = &state->builder;
+	GatherHeader *header = (GatherHeader *) builder->message;
 	shm_mq_iovec parts[2];
 	shm_mq_result result;
 
-	if (state->rows == 0)
+	if (builder->rows == 0)
 		return true;
-	header->nrows = state->rows;
+	header->nrows = builder->rows;
 	header->ncolumns = state->ncolumns;
 	header->stride = state->stride;
-	header->values_len = state->values_used;
+	header->key_words = (uint32) state->key_words;
+	header->values_len = builder->values_used;
 	/* The lanes as filled, for stride rows each, then the values. */
-	parts[0].data = state->message;
-	parts[0].len = head;
-	parts[1].data = state->values;
-	parts[1].len = state->values_used;
-	result = shm_mq_sendv(state->queue, parts, state->values_used > 0 ? 2 : 1, false, true);
+	parts[0].data = builder->message;
+	parts[0].len = builder->message_len;
+	parts[1].data = builder->values;
+	parts[1].len = builder->values_used;
+	result = shm_mq_sendv(state->queue, parts, builder->values_used > 0 ? 2 : 1, false, true);
 	state->sent_messages++;
-	state->sent_rows += state->rows;
-	state->rows = 0;
-	state->values_used = 0;
+	state->sent_rows += builder->rows;
 	return result == SHM_MQ_SUCCESS;
 }
 
@@ -464,7 +834,6 @@ static TupleTableSlot *
 send_exec(CustomScanState *css)
 {
 	TessSendState  *state = (TessSendState *) css;
-	TessDatumColumn columns[64];
 
 	if (state->input == NULL)
 		elog(ERROR, "TessSend runs only in a parallel worker");
@@ -472,87 +841,23 @@ send_exec(CustomScanState *css)
 		return NULL;
 	if (state->queue == NULL)
 		elog(ERROR, "TessSend has no queue");
-	if (state->message == NULL)
-	{
-		MemoryContext context = css->ss.ps.state->es_query_cxt;
-
-		state->message_len = message_head(state->ncolumns, state->stride);
-		state->message = MemoryContextAllocZero(context, state->message_len);
-		state->values_len = 64 * 1024;
-		state->values = MemoryContextAlloc(context, state->values_len);
-	}
 	for (;;)
 	{
-		TessBatch  *batch = tess_input_next(state->input);
-		int			row = -1;
+		bool		full = fill_message(state, &state->builder, state->input,
+										css->ss.ps.state->es_query_cxt);
 
-		if (batch == NULL)
+		if (!send_message(state))
+		{
+			/* The leader left: a limit above was met. */
+			if (state->builder.batch != NULL)
+				tess_input_finish(state->input);
+			state->builder.batch = NULL;
+			state->done = true;
+			return NULL;
+		}
+		if (!full)
 			break;
-		for (int column = 0; column < state->ncolumns; column++)
-		{
-			columns[column] = (TessDatumColumn) TESS_STRUCT_INITIALIZER(TessDatumColumn);
-			batch->ops->get_datum_column(batch,
-										 tess_layout_column(&state->child_layout, column),
-										 &batch->rows, TESS_COLUMN_FOR_PROJECTION,
-										 &columns[column]);
-			if (columns[column].values == NULL || columns[column].isnull == NULL ||
-				columns[column].nrows != batch->rows.nrows)
-				elog(ERROR, "Tessera batch returned an invalid column");
-		}
-		while ((row = tess_row_mask_next(&batch->rows, row)) >= 0)
-		{
-			uint64	   *lanes = (uint64 *) (state->message + MAXALIGN(sizeof(GatherHeader)));
-			uint64		nulls = 0;
-			Size		need = 0;
-
-			for (int column = 0; column < state->ncolumns; column++)
-				if (!columns[column].isnull[row] && !state->typbyvals[column])
-					need += MAXALIGN(datumGetSize(columns[column].values[row], false,
-												  state->typlens[column]));
-			if (state->rows == state->stride ||
-				(state->rows > 0 && state->values_used + need > GATHER_QUEUE_SIZE / 2))
-			{
-				if (!send_message(state))
-				{
-					state->done = true;
-					tess_input_finish(state->input);
-					return NULL;
-				}
-			}
-			if (state->values_used + need > state->values_len)
-			{
-				state->values_len = Max(state->values_len * 2, state->values_used + need);
-				state->values = repalloc_huge(state->values, state->values_len);
-			}
-			for (int column = 0; column < state->ncolumns; column++)
-			{
-				uint64	   *lane = lanes + (Size) state->stride * (1 + column);
-
-				if (columns[column].isnull[row])
-				{
-					nulls |= UINT64CONST(1) << column;
-					lane[state->rows] = 0;
-				}
-				else if (state->typbyvals[column])
-					lane[state->rows] = (uint64) columns[column].values[row];
-				else
-				{
-					Size		size = datumGetSize(columns[column].values[row], false,
-													state->typlens[column]);
-
-					memcpy(state->values + state->values_used,
-						   DatumGetPointer(columns[column].values[row]), size);
-					lane[state->rows] = state->values_used;
-					state->values_used += MAXALIGN(size);
-				}
-			}
-			lanes[state->rows] = nulls;
-			state->rows++;
-		}
-		tess_input_finish(state->input);
-		CHECK_FOR_INTERRUPTS();
 	}
-	(void) send_message(state);
 	state->done = true;
 	shm_mq_detach(state->queue);
 	state->queue = NULL;
@@ -578,6 +883,8 @@ send_rescan(CustomScanState *css)
 	ExecReScan(state->child);
 	if (state->input != NULL)
 		tess_input_rescan(state->input);
+	state->builder.batch = NULL;
+	state->builder.exhausted = false;
 	state->done = false;
 }
 
@@ -595,6 +902,7 @@ send_lay_out(TessSendState *state, ParallelContext *pcxt, void *coordinate)
 	state->shared = coordinate;
 	state->shared->segment = dsm_segment_handle(pcxt->seg);
 	state->shared->nqueues = pcxt->nworkers;
+	state->shared->bound = state->bound;
 	state->queues = (char *) coordinate + SEND_QUEUES_OFFSET;
 	for (int worker = 0; worker < pcxt->nworkers; worker++)
 	{
@@ -632,6 +940,9 @@ send_initialize_worker(CustomScanState *css, shm_toc *toc, void *coordinate)
 						(Size) ParallelWorkerNumber * GATHER_QUEUE_SIZE);
 	shm_mq_set_sender(queue, MyProc);
 	state->queue = shm_mq_attach(queue, segment, NULL);
+	/* A worker's share needs no more rows than the whole. */
+	if (shared->bound >= 0)
+		set_child_bound(state->child, shared->bound);
 }
 
 static void
@@ -705,9 +1016,11 @@ gather_begin(CustomScanState *css, EState *estate, int eflags)
 	if (eflags & (EXEC_FLAG_BACKWARD | EXEC_FLAG_MARK))
 		elog(ERROR, "TessGather supports neither backward scan nor mark/restore");
 	tess_plan_get_info(cscan, &info);
-	if (info.node != &tess_gather_node || info.nchildren != 1 ||
-		info.child_names[0] == NULL)
+	if ((info.node != &tess_gather_node && info.node != &tess_gather_merge_node) ||
+		info.nchildren != 1 || info.child_names[0] == NULL)
 		elog(ERROR, "TessGather received a foreign plan");
+	state->merge = info.node == &tess_gather_merge_node;
+	state->bound = -1;
 	reader = tess_plan_reader_create((List *) info.node_data, TESS_GATHER_DATA,
 									 TESS_GATHER_DATA_VERSION);
 	state->num_workers = tess_plan_read_int(reader, "workers");
@@ -719,7 +1032,8 @@ gather_begin(CustomScanState *css, EState *estate, int eflags)
 		elog(ERROR, "TessGather expected TessSend below it");
 	state->send = (TessSendState *) send;
 	state->ncolumns = desc->natts;
-	if (state->ncolumns != state->send->ncolumns || state->ncolumns > 64)
+	if (state->ncolumns != state->send->ncolumns || state->ncolumns > 64 ||
+		state->merge != (state->send->nkeys > 0))
 		elog(ERROR, "TessGather received a foreign plan");
 	state->typbyvals = palloc_array(bool, Max(state->ncolumns, 1));
 	state->values = palloc_array(Datum *, Max(state->ncolumns, 1));
@@ -761,8 +1075,10 @@ gather_launch(TessGatherState *state)
 		Bitmapset  *params = bms_copy(send->plan->extParam);
 
 		/* The initplans' values below go to the workers, as a Gather's initParam. */
+		state->send->bound = state->bound;
 		if (state->pei == NULL)
-			state->pei = ExecInitParallelPlan(send, estate, params, state->num_workers, -1);
+			state->pei = ExecInitParallelPlan(send, estate, params, state->num_workers,
+											  state->bound);
 		else
 			ExecParallelReinitialize(send, state->pei, params);
 		pcxt = state->pei->pcxt;
@@ -789,7 +1105,29 @@ gather_launch(TessGatherState *state)
 	state->nextreader = 0;
 	state->need_local = state->nreaders == 0 || parallel_leader_participation;
 	state->local_done = !state->need_local;
+	if (state->merge)
+	{
+		/* A source per worker, the leader's last; each loads when merged first. */
+		state->nsources = state->nreaders + 1;
+		state->sources = palloc0_array(MergeSource, state->nsources);
+		state->sources[state->nreaders].done = !state->need_local;
+		state->merge_state[0] = 0;
+	}
 	state->initialized = true;
+}
+
+/* A message a worker sent: its header checked against the node's. */
+static void
+check_message(TessGatherState *state, void *data, Size nbytes)
+{
+	GatherHeader *header = data;
+
+	if (nbytes < sizeof(GatherHeader) ||
+		header->ncolumns != (uint32) state->ncolumns ||
+		header->key_words != (uint32) state->send->key_words ||
+		header->nrows > header->stride ||
+		nbytes != message_head(state->send->nlanes, header->stride) + header->values_len)
+		elog(ERROR, "TessGather received a foreign message");
 }
 
 /* The next message of a worker: true with one in hand, false when every queue is empty or gone. */
@@ -821,15 +1159,10 @@ gather_receive(TessGatherState *state, bool wait)
 			if (result == SHM_MQ_WOULD_BLOCK)
 				continue;
 			state->nextreader = (index + 1) % state->nreaders;
+			check_message(state, data, nbytes);
 			state->message = data;
 			state->message_rows = ((GatherHeader *) data)->nrows;
 			state->message_stride = ((GatherHeader *) data)->stride;
-			if (nbytes < sizeof(GatherHeader) ||
-				((GatherHeader *) data)->ncolumns != (uint32) state->ncolumns ||
-				state->message_rows > state->message_stride ||
-				nbytes != message_head(state->ncolumns, state->message_stride) +
-				((GatherHeader *) data)->values_len)
-				elog(ERROR, "TessGather received a foreign message");
 			state->next_row = 0;
 			state->messages++;
 			return true;
@@ -868,7 +1201,7 @@ show_message_window(TessGatherState *state)
 {
 	uint32		n = Min(GATHER_ROWS, state->message_rows - state->next_row);
 	const uint64 *lanes = (const uint64 *) (state->message + MAXALIGN(sizeof(GatherHeader)));
-	const char *values = state->message + message_head(state->ncolumns, state->message_stride);
+	const char *values = state->message + message_head(state->send->nlanes, state->message_stride);
 	const uint64 *nulls = lanes + state->next_row;
 	uint64		any = 0;
 
@@ -952,6 +1285,155 @@ gather_next(TessGatherState *state)
 	}
 }
 
+/* ------------------------------------------------------------ TessGatherMerge */
+
+/*
+ * The next rows of source index: a worker's next message, waited for, or
+ * the leader's own next rows, copied into a message as a worker's are;
+ * done when it has none.
+ */
+static void
+merge_load(TessGatherState *state, int index)
+{
+	MergeSource *source = &state->sources[index];
+	TessSendState *send = state->send;
+
+	source->place = 0;
+	source->rows = 0;
+	if (index < state->nreaders)
+	{
+		shm_mq_handle *reader = state->readers[index];
+		Size		nbytes;
+		void	   *data;
+
+		if (shm_mq_receive(reader, &nbytes, &data, false) == SHM_MQ_DETACHED)
+		{
+			shm_mq_detach(reader);
+			state->readers[index] = NULL;
+			source->done = true;
+			return;
+		}
+		check_message(state, data, nbytes);
+		source->message = data;
+		source->rows = ((GatherHeader *) data)->nrows;
+		source->stride = ((GatherHeader *) data)->stride;
+		source->values = source->message + message_head(send->nlanes, source->stride);
+		state->messages++;
+		return;
+	}
+	(void) fill_message(send, &state->local_builder, state->local,
+						state->css.ss.ps.state->es_query_cxt);
+	if (state->local_builder.rows == 0)
+	{
+		source->done = true;
+		return;
+	}
+	source->message = state->local_builder.message;
+	source->values = state->local_builder.values;
+	source->rows = state->local_builder.rows;
+	source->stride = send->stride;
+}
+
+/* Row place of source index into the batch's arrays at out. */
+static void
+merge_take(TessGatherState *state, int index, uint32 place, int out)
+{
+	MergeSource *source = &state->sources[index];
+	const uint64 *lanes = (const uint64 *) (source->message + MAXALIGN(sizeof(GatherHeader)));
+	uint64		nulls = lanes[place];
+
+	for (int column = 0; column < state->ncolumns; column++)
+	{
+		uint64		word = lanes[(Size) source->stride * (1 + column) + place];
+		bool		null = (nulls >> column) & 1;
+
+		state->isnull[column][out] = null;
+		if (null)
+			state->values[column][out] = (Datum) 0;
+		else if (state->typbyvals[column])
+			state->values[column][out] = (Datum) word;
+		else
+			state->values[column][out] = PointerGetDatum(source->values + word);
+	}
+	if (index == state->nreaders)
+		state->local_rows++;
+	else
+		state->worker_rows++;
+}
+
+/*
+ * The next batch in order: up to 64 rows merged from the sources by their
+ * key words. A source whose rows ran out loads the next only here, once
+ * the batch before, which may point into its rows, is consumed: the merge
+ * stops at a source's last row in hand when more of it follows, and the
+ * batch goes out shorter. False at the end.
+ */
+static bool
+merge_next(TessGatherState *state)
+{
+	TessSendState *send = state->send;
+	const uint64 *lanes[(TESS_SORT_MAX_MERGE_RUNS) * TESS_SORT_MAX_ITEM_WORDS];
+	uint32		left[TESS_SORT_MAX_MERGE_RUNS];
+	bool		more[TESS_SORT_MAX_MERGE_RUNS];
+	uint32		order[GATHER_ROWS];
+	int			taken = 0;
+
+	if (state->nsources > TESS_SORT_MAX_MERGE_RUNS)
+		elog(ERROR, "TessGatherMerge merges up to %d streams", TESS_SORT_MAX_MERGE_RUNS);
+	/*
+	 * The leader's own source first, as the core's Gather Merge reads: it
+	 * sorts its share meanwhile, where waiting for the workers' first rows
+	 * left it none of the scan.
+	 */
+	for (int visit = 0; visit < state->nsources; visit++)
+	{
+		int			index = (state->nreaders + visit) % state->nsources;
+		MergeSource *source = &state->sources[index];
+
+		if (source->done || source->place < source->rows)
+			continue;
+		merge_load(state, index);
+	}
+	while (taken < GATHER_ROWS)
+	{
+		TessStatus	status = TESS_STRUCT_INITIALIZER(TessStatus);
+		int			count;
+		int			refill;
+
+		for (int index = 0; index < state->nsources; index++)
+		{
+			MergeSource *source = &state->sources[index];
+
+			left[index] = source->rows - source->place;
+			more[index] = !source->done;
+			for (int word = 0; word < send->key_words; word++)
+				lanes[index * send->key_words + word] = left[index] == 0 ? NULL :
+					(const uint64 *) (source->message + MAXALIGN(sizeof(GatherHeader))) +
+					(Size) source->stride * (1 + state->ncolumns + word) + source->place;
+		}
+		check_kernel(send->kernels->sort_merge(state->nsources, send->key_words, lanes, left,
+											   more, state->merge_state, order,
+											   GATHER_ROWS - taken, &count, &refill, &status),
+					 &status);
+		for (int row = 0; row < count; row++)
+		{
+			MergeSource *source = &state->sources[order[row]];
+
+			merge_take(state, (int) order[row], source->place++, taken + row);
+		}
+		taken += count;
+		if (count == 0 || refill >= 0)
+			break;
+	}
+	if (taken == 0)
+		return false;
+	state->window_bits[0] = taken == 64 ? ~UINT64CONST(0) : (UINT64CONST(1) << taken) - 1;
+	state->batch.rows.nrows = taken;
+	state->batch.rows.bits = state->window_bits;
+	state->from_local = false;
+	return true;
+}
+
 /* Stop the workers and take their instrumentation, as ExecShutdownGatherWorkers does. */
 static void
 gather_shutdown_workers(TessGatherState *state)
@@ -968,6 +1450,10 @@ gather_shutdown_workers(TessGatherState *state)
 	}
 	state->nreaders = 0;
 	state->message = NULL;
+	if (state->sources != NULL)
+		pfree(state->sources);
+	state->sources = NULL;
+	state->nsources = 0;
 }
 
 static TupleTableSlot *
@@ -992,7 +1478,7 @@ gather_exec(CustomScanState *css)
 	}
 	tess_output_release(state->output);
 	state->published = false;
-	if (!gather_next(state))
+	if (!(state->merge ? merge_next(state) : gather_next(state)))
 		return NULL;
 	state->published = true;
 	state->served = tess_row_mask_next(&state->batch.rows, -1);
@@ -1036,8 +1522,10 @@ gather_rescan(CustomScanState *css)
 
 	tess_output_clear(state->output);
 	state->published = false;
-	if (state->local_batch != NULL)
-		state->local_batch = NULL;
+	state->local_batch = NULL;
+	if (state->local_builder.batch != NULL)
+		state->local_builder.batch = NULL;
+	state->local_builder.exhausted = false;
 	gather_shutdown_workers(state);
 	state->initialized = false;
 	state->from_local = false;
@@ -1062,6 +1550,16 @@ gather_explain(CustomScanState *css, List *ancestors, ExplainState *es)
 	ExplainPropertyInteger("Rows of the Leader", NULL, state->local_rows, es);
 }
 
+/* As ExecSetTupleBound for a Gather: the leader's part and every worker's need no more rows. */
+static void
+gather_set_tuple_bound(CustomScanState *css, int64 tuples_needed)
+{
+	TessGatherState *state = (TessGatherState *) css;
+
+	state->bound = tuples_needed < 0 ? -1 : tuples_needed;
+	set_child_bound(state->send->child, state->bound);
+}
+
 static const CustomExecMethods gather_exec_methods = {
 	.CustomName = "TessGather",
 	.BeginCustomScan = gather_begin,
@@ -1077,6 +1575,30 @@ const CustomScanMethods tess_gather_scan_methods = {
 	.CreateCustomScanState = gather_create_state,
 };
 
+static const CustomExecMethods gather_merge_exec_methods = {
+	.CustomName = "TessGatherMerge",
+	.BeginCustomScan = gather_begin,
+	.ExecCustomScan = gather_exec,
+	.EndCustomScan = gather_end,
+	.ReScanCustomScan = gather_rescan,
+	.ExplainCustomScan = gather_explain,
+	.ShutdownCustomScan = gather_shutdown,
+};
+
+static Node *
+gather_merge_create_state(CustomScan *cscan)
+{
+	TessGatherState *state = (TessGatherState *) newNode(sizeof(TessGatherState), T_CustomScanState);
+
+	state->css.methods = &gather_merge_exec_methods;
+	return (Node *) state;
+}
+
+const CustomScanMethods tess_gather_merge_scan_methods = {
+	.CustomName = "TessGatherMerge",
+	.CreateCustomScanState = gather_merge_create_state,
+};
+
 const CustomScanMethods tess_send_scan_methods = {
 	.CustomName = "TessSend",
 	.CreateCustomScanState = send_create_state,
@@ -1085,6 +1607,13 @@ const CustomScanMethods tess_send_scan_methods = {
 const TessNode tess_gather_node = {
 	TESS_ABI_INITIALIZER(TESS_NODE_ABI_VERSION, TessNode),
 	.name = TESS_GATHER_NODE_NAME,
+	.set_tuple_bound = gather_set_tuple_bound,
+};
+
+const TessNode tess_gather_merge_node = {
+	TESS_ABI_INITIALIZER(TESS_NODE_ABI_VERSION, TessNode),
+	.name = TESS_GATHER_MERGE_NODE_NAME,
+	.set_tuple_bound = gather_set_tuple_bound,
 };
 
 const TessNode tess_send_node = {

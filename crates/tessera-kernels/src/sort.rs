@@ -18,7 +18,7 @@
 
 use anyhow::{Result, bail, ensure};
 
-use tessera_core::RowMask;
+use tessera_core::{RowMask, RowMaskView};
 
 use crate::table::{KeyKind, KeySource, MAX_KEYS};
 
@@ -320,6 +320,84 @@ fn candidates_as<K: KeySource + ?Sized, const W: usize>(
         kept += keep.count_ones() as usize;
     }
     Ok(kept)
+}
+
+/// Write the key words of the selected rows of `source`, a batch's keys,
+/// in order into `lanes`: lane `w` gets word `w` of each row's item with
+/// the reference 0, for the first `lanes.len()` words of the item (a
+/// caller may leave out a last word that holds no key's bits), the lanes
+/// a merge compares ([`merge`]). Returns the rows written.
+pub fn key_lanes<K: KeySource + ?Sized>(
+    keys: &[SortKey],
+    source: &K,
+    rows: &RowMaskView<'_>,
+    lanes: &mut [&mut [u64]],
+) -> Result<usize> {
+    let encoder = Encoder::new(keys)?;
+    ensure!(
+        source.nkeys() == keys.len() && source.nrows() == rows.nrows(),
+        "the batch's keys do not match the sort's keys and rows"
+    );
+    ensure!(
+        (1..=encoder.words()).contains(&lanes.len()),
+        "an item of {} words has no {} lanes",
+        encoder.words(),
+        lanes.len()
+    );
+    let selected: usize = (0..rows.nrows().div_ceil(64))
+        .map(|index| rows.word(index).unwrap().count_ones() as usize)
+        .sum();
+    ensure!(
+        lanes.iter().all(|lane| lane.len() >= selected),
+        "the lanes do not hold {selected} rows"
+    );
+    macro_rules! dispatch {
+        ($($n:literal)*) => {
+            match encoder.words() {
+                $($n => lanes_as::<K, $n>(&encoder, source, rows, lanes),)*
+                words => unreachable!("an item has at most 17 words, not {words}"),
+            }
+        };
+    }
+    dispatch!(1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17)
+}
+
+fn lanes_as<K: KeySource + ?Sized, const W: usize>(
+    encoder: &Encoder<'_>,
+    source: &K,
+    rows: &RowMaskView<'_>,
+    lanes: &mut [&mut [u64]],
+) -> Result<usize> {
+    let nkeys = encoder.keys.len();
+    let mut slots = [[0i64; 64]; MAX_KEYS];
+    let mut non_null = [0u64; MAX_KEYS];
+    let mut out = 0;
+    for index in 0..rows.nrows().div_ceil(64) {
+        let selected = rows.word(index).unwrap();
+        if selected == 0 {
+            continue;
+        }
+        for key in 0..nkeys {
+            non_null[key] = source.word(key, index, selected, &mut slots[key])?;
+        }
+        let mut bits = selected;
+        while bits != 0 {
+            let bit = bits.trailing_zeros() as usize;
+            bits &= bits - 1;
+            let mut row_slots = [0i64; MAX_KEYS];
+            let mut null_bits = 0u32;
+            for key in 0..nkeys {
+                row_slots[key] = slots[key][bit];
+                null_bits |= u32::from((non_null[key] >> bit) & 1 == 0) << key;
+            }
+            let item = encoder.encode::<W>(&row_slots[..nkeys], null_bits, 0)?;
+            for (word, lane) in lanes.iter_mut().enumerate() {
+                lane[out] = item[word];
+            }
+            out += 1;
+        }
+    }
+    Ok(out)
 }
 
 /// The most runs one merge takes.

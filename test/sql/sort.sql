@@ -211,8 +211,8 @@ RESET max_parallel_workers_per_gather;
 DROP TABLE sort_ext;
 RESET work_mem;
 
--- Under a Gather Merge: every participant sorts its share of a parallel
--- scan, and the Gather Merge merges them; the node is parallel-aware for
+-- Under a gather merge: every participant sorts its share of a parallel
+-- scan, and TessGatherMerge merges them; the node is parallel-aware for
 -- the counters it shares.
 SET max_parallel_workers_per_gather = 2;
 SET parallel_setup_cost = 0;
@@ -227,10 +227,43 @@ SET parallel_leader_participation = off;
 SELECT sort_same($$SELECT k, v FROM sort_big ORDER BY k DESC$$);
 RESET parallel_leader_participation;
 RESET work_mem;
--- A rescan of the Gather Merge sorts every participant's share anew.
+-- A rescan of the gather merge sorts every participant's share anew.
 SELECT sort_same($$
 SELECT x, (SELECT array_agg(k) FROM (SELECT k FROM sort_big WHERE k % 997 = x ORDER BY k) s)
 FROM generate_series(1, 3) AS x ORDER BY x$$);
+-- TessGatherMerge in place of the core's Gather Merge: every worker sends
+-- its rows in order with their key words, and the leader merges them with
+-- its own; keys of both kinds, both directions and places of NULL, text
+-- carried along, values of 2000 bytes, sorts past work_mem, the workers
+-- alone, a limit whose bound reaches the workers, and the core's Gather
+-- Merge with tessera.batch_gather off.
+CREATE TABLE sort_par AS
+SELECT CASE WHEN i % 9 = 0 THEN NULL ELSE i % 1000 - 500 END AS a,
+       (i % 17 - 8)::bigint * 3000000000 AS b,
+       CASE WHEN i % 13 = 0 THEN NULL ELSE 'p' || i END AS c,
+       i AS d,
+       CASE WHEN i % 4999 = 0 THEN repeat('w', 2000) END AS w
+FROM generate_series(1, 100000) AS i;
+ANALYZE sort_par;
+EXPLAIN (COSTS OFF) SELECT a, d, c FROM sort_par ORDER BY a, d;
+SELECT sort_same($$SELECT a, d, c FROM sort_par ORDER BY a, d$$);
+SELECT sort_same($$SELECT a, b, d, w FROM sort_par ORDER BY b DESC, a NULLS FIRST, d$$);
+SELECT sort_same($$SELECT a, d FROM sort_par ORDER BY a DESC NULLS LAST, d DESC$$);
+SELECT sort_same($$SELECT d, c FROM sort_par WHERE d % 3 = 0 ORDER BY d$$);
+SET work_mem = '256kB';
+SELECT sort_same($$SELECT a, b, d, c FROM sort_par ORDER BY a, b, d$$);
+SET parallel_leader_participation = off;
+SELECT sort_same($$SELECT a, d, c FROM sort_par ORDER BY a, d$$);
+RESET parallel_leader_participation;
+RESET work_mem;
+EXPLAIN (COSTS OFF) SELECT a, d FROM sort_par ORDER BY a, d LIMIT 10;
+SELECT sort_same($$SELECT a, d FROM sort_par ORDER BY a, d LIMIT 10$$);
+SELECT sort_same($$SELECT a, d FROM sort_par ORDER BY a, d OFFSET 99990$$);
+SET tessera.batch_gather = off;
+EXPLAIN (COSTS OFF) SELECT a, d, c FROM sort_par ORDER BY a, d;
+SELECT sort_same($$SELECT a, d, c FROM sort_par ORDER BY a, d$$);
+RESET tessera.batch_gather;
+DROP TABLE sort_par;
 RESET min_parallel_table_scan_size;
 RESET parallel_tuple_cost;
 RESET parallel_setup_cost;

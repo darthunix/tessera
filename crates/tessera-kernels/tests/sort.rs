@@ -420,3 +420,71 @@ fn a_heap_rejects_the_rows_that_do_not_beat_its_worst() -> Result<()> {
     assert!(top_candidates(&keys, &rows, &mut mask, &worst[..words - 1]).is_err());
     Ok(())
 }
+
+#[test]
+fn key_lanes_order_the_selected_rows_as_their_keys() -> Result<()> {
+    use KeyKind::{Int32, Int64};
+    use tessera_kernels::sort::key_lanes;
+    let sets: [&[SortKey]; 3] = [
+        &[key(Int32, false, false, true)],
+        &[key(Int64, true, true, true), key(Int32, false, false, true)],
+        &[
+            key(Int32, true, false, true),
+            key(Int64, false, true, true),
+            key(Int64, true, true, true),
+        ],
+    ];
+    for (set, keys) in sets.iter().enumerate() {
+        let nrows = 150;
+        let mut random = Random(11 + set as u64);
+        let rows = Rows {
+            kinds: keys.iter().map(|key| key.kind).collect(),
+            values: keys
+                .iter()
+                .map(|key| {
+                    (0..nrows)
+                        .map(|_| random.value(key.kind, true, 5))
+                        .collect()
+                })
+                .collect(),
+        };
+        let mut mask_words = vec![random.next(), random.next(), random.next() & 0x3F_FFFF];
+        let selected: Vec<usize> = (0..nrows)
+            .filter(|row| (mask_words[row / 64] >> (row % 64)) & 1 == 1)
+            .collect();
+        let mask = RowMask::try_new(nrows, &mut mask_words)?;
+        let words = item_words(keys)?;
+        let mut storage = vec![vec![0u64; nrows]; words];
+        let mut lanes: Vec<&mut [u64]> = storage.iter_mut().map(Vec::as_mut_slice).collect();
+        assert_eq!(
+            key_lanes(keys, &rows, &mask.as_view(), &mut lanes)?,
+            selected.len()
+        );
+        let item = |at: usize| -> Vec<u64> { storage.iter().map(|lane| lane[at]).collect() };
+        for a in 0..selected.len() {
+            for b in 0..selected.len() {
+                let expected = keys
+                    .iter()
+                    .enumerate()
+                    .map(|(k, key)| {
+                        compare_key(
+                            key,
+                            rows.values[k][selected[a]],
+                            rows.values[k][selected[b]],
+                        )
+                    })
+                    .find(|order| order.is_ne())
+                    .unwrap_or(Ordering::Equal);
+                assert_eq!(
+                    item(a).cmp(&item(b)),
+                    expected,
+                    "keys {keys:?}, rows {a} and {b}"
+                );
+            }
+        }
+        let mut short = vec![vec![0u64; selected.len() - 1]; words];
+        let mut lanes: Vec<&mut [u64]> = short.iter_mut().map(Vec::as_mut_slice).collect();
+        assert!(key_lanes(keys, &rows, &mask.as_view(), &mut lanes).is_err());
+    }
+    Ok(())
+}

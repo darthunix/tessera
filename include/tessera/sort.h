@@ -111,6 +111,19 @@ extern TessStatusCode tess_sort_top_push(const TessTableRef *table,
 										 uint64 *len,
 										 TessStatus *status);
 
+/*
+ * The key words of the selected rows of a batch (table_keys, its key
+ * columns as a table takes them) in order: lane w of lanes, capacity words
+ * each, gets word w of each row's item with the reference 0, for the first
+ * words words of the item, the lanes tess_sort_merge compares. *count
+ * receives the rows written.
+ */
+extern TessStatusCode tess_sort_key_lanes(int nkeys, const TessSortKey *keys,
+										  const TessTableKey *table_keys,
+										  const TessRowMask *rows, int words,
+										  uint64 *const *lanes, Size capacity,
+										  int *count, TessStatus *status);
+
 /* The most runs one tess_sort_merge takes, and the words of its state. */
 #define TESS_SORT_MAX_MERGE_RUNS 256
 #define TESS_SORT_MERGE_STATE_WORDS (2 + TESS_SORT_MAX_MERGE_RUNS)

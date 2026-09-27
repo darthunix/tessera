@@ -244,8 +244,8 @@ static const CustomPathMethods sort_path_methods = {
  * its kind and flags: an int4 or int8 of the integer operator family,
  * ascending or descending. False for any other key.
  */
-static bool
-sort_key_of(PathKey *pathkey, PathTarget *target, Relids relids, int *place,
+bool
+tess_sort_key_of(PathKey *pathkey, PathTarget *target, Relids relids, int *place,
 			TessSortKey *key)
 {
 	EquivalenceClass *ec = pathkey->pk_eclass;
@@ -297,7 +297,7 @@ make_sort_path(PlannerInfo *root, SortPath *sort)
 		TessSortKey key;
 		int			place;
 
-		if (!sort_key_of(pathkey, target, input->parent->relids, &place, &key))
+		if (!tess_sort_key_of(pathkey, target, input->parent->relids, &place, &key))
 			return NULL;
 		exprs = lappend(exprs, list_nth(target->exprs, place));
 		kinds = lappend_int(kinds, (int) key.kind);

@@ -4,6 +4,7 @@
 
 #include "tessera/node.h"
 #include "tessera/planner.h"
+#include "tessera/sort.h"
 
 #define TESS_FILTER_NODE_NAME "tessera.filter"
 #define TESS_AGG_NODE_NAME "tessera.agg"
@@ -11,6 +12,7 @@
 #define TESS_SORT_NODE_NAME "tessera.sort"
 #define TESS_GATHER_NODE_NAME "tessera.gather"
 #define TESS_SEND_NODE_NAME "tessera.send"
+#define TESS_GATHER_MERGE_NODE_NAME "tessera.gather_merge"
 
 /* The plan data of TessFilter and TessHashJoin, written by their planners. */
 #define TESS_AGG_DATA "tessera.agg"
@@ -23,6 +25,8 @@
 #define TESS_SORT_DATA_VERSION 1
 #define TESS_GATHER_DATA "tessera.gather"
 #define TESS_GATHER_DATA_VERSION 1
+#define TESS_SEND_DATA "tessera.send"
+#define TESS_SEND_DATA_VERSION 1
 
 /* Clauses (RestrictInfos) in the order the planner evaluates a plan's quals. */
 extern List *tess_order_clauses(PlannerInfo *root, List *rinfos);
@@ -56,11 +60,16 @@ extern void tess_hash_join_planner_init(void);
 extern const TessNode tess_sort_node;
 extern const CustomScanMethods tess_sort_scan_methods;
 extern void tess_sort_planner_init(void);
+/* A path key the sort kernels order by: its target's place in target, kind and flags. */
+extern bool tess_sort_key_of(PathKey *pathkey, PathTarget *target, Relids relids,
+							 int *place, TessSortKey *key);
 
 extern const TessNode tess_gather_node;
 extern const CustomScanMethods tess_gather_scan_methods;
 extern const TessNode tess_send_node;
 extern const CustomScanMethods tess_send_scan_methods;
+extern const TessNode tess_gather_merge_node;
+extern const CustomScanMethods tess_gather_merge_scan_methods;
 extern void tess_gather_planner_init(void);
 
 #endif							/* TESSERA_NODES_INTERNAL_H */

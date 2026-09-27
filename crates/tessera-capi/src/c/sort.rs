@@ -11,7 +11,8 @@ use std::slice;
 
 use anyhow::{Context, Result, bail, ensure};
 use tessera_kernels::sort::{
-    MAX_MERGE_RUNS, MERGE_STATE_WORDS, SortKey, item_words, merge, sort_items, top_candidates,
+    MAX_ITEM_WORDS, MAX_MERGE_RUNS, MERGE_STATE_WORDS, SortKey, item_words, key_lanes, merge,
+    sort_items, top_candidates,
 };
 use tessera_kernels::table::{KeyKind, MAX_KEYS};
 
@@ -211,6 +212,54 @@ pub unsafe extern "C" fn tess_sort_top_candidates(
             let worst = values(worst, item_words(keys)?, "worst item")?;
             let count = top_candidates(keys, &batch, &mut rows, worst)?;
             *kept.as_mut().context("a null count")? = count as c_int;
+            Ok(())
+        })
+    }
+}
+
+/// `tess_sort_key_lanes`: write the key words of a batch's selected rows
+/// into lanes, as a merge compares them.
+///
+/// # Safety
+///
+/// `keys` as for [`sort_keys`]; `table_keys` must point to `nkeys` batch
+/// keys, as for the table's entry points, of the mask's rows; `rows` must
+/// point to a valid mask; `lanes` to `words` pointers, each to `capacity`
+/// writable words that nothing else accesses; `count` writable; `status`
+/// as for every entry point.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tess_sort_key_lanes(
+    nkeys: c_int,
+    keys: *const CSortKey,
+    table_keys: *const TableKey,
+    rows: *const Mask,
+    words: c_int,
+    lanes: *const *mut u64,
+    capacity: usize,
+    count: *mut c_int,
+    status: *mut Status,
+) -> Code {
+    // SAFETY: the caller's contract.
+    unsafe {
+        guard(status, || {
+            let mut decoded = [UNUSED; MAX_KEYS];
+            let nkeys = sort_keys(nkeys, keys, &mut decoded)?;
+            let keys = &decoded[..nkeys];
+            let mut batch = TableKeys::empty();
+            super::table::table_keys(nkeys as c_int, table_keys, &mut batch)?;
+            let rows = rows.as_ref().context("a null row mask")?.view()?;
+            let words = usize::try_from(words).context("a negative lane count")?;
+            ensure!(
+                words <= MAX_ITEM_WORDS,
+                "an item has at most {MAX_ITEM_WORDS} words, not {words}"
+            );
+            let pointers = values(lanes, words, "lanes")?;
+            let mut storage: [&mut [u64]; MAX_ITEM_WORDS] = Default::default();
+            for (index, &pointer) in pointers.iter().enumerate() {
+                storage[index] = slots(pointer, capacity, "lane")?;
+            }
+            let written = key_lanes(keys, &batch, &rows, &mut storage[..words])?;
+            *count.as_mut().context("a null count")? = written as c_int;
             Ok(())
         })
     }

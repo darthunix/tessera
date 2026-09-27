@@ -498,10 +498,16 @@ typedef struct TessKernelOps
 								  const uint32 *left, const bool *more,
 								  uint32 *state, uint32 *out, int max_out,
 								  int *count, int *refill, TessStatus *status);
+	/* tess_sort_key_lanes */
+	TessStatusCode (*sort_key_lanes) (int nkeys, const TessSortKey *keys,
+									  const TessTableKey *table_keys,
+									  const TessRowMask *rows, int words,
+									  uint64 *const *lanes, Size capacity,
+									  int *count, TessStatus *status);
 } TessKernelOps;
 
 #define TESS_KERNEL_OPS_MIN_SIZE \
-	TESS_ABI_SIZE_INCLUDING_FIELD(TessKernelOps, sort_merge)
+	TESS_ABI_SIZE_INCLUDING_FIELD(TessKernelOps, sort_key_lanes)
 
 /*
  * The registry of the kernels: one table per backend, installed by the

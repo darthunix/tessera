@@ -1112,16 +1112,12 @@ External sort below), so the planner's estimate of the rows is no gate.
 A sort under a `Gather Merge`, a `SortPath` over a partial path as the
 core plans it for a parallel ordered scan, becomes the node's path too:
 every participant sorts its share, in memory or in runs of its own, and
-the `Gather Merge` merges them. That path is parallel-aware only for the
+`TessGatherMerge` (below) merges them in place of the `Gather Merge`. That path is parallel-aware only for the
 counters the participants share (`TessSharedStats`: EXPLAIN sums rows,
-runs, disk and memory, and the overrun past each one's `work_mem`). With
-two workers, 2 M rows sort in 0.77 to 0.90 of the core's parallel sort
-(an int4 key in memory 91 ms against 103; past 4 MB, 102 against 132);
-the `Gather Merge`, which passes every row through a queue and merges in
-the leader, bounds it, and a serial TessSort of the same rows takes 58
-to 81 ms: the path keeps the core's costs, so the planner chooses between
-the two as it would between the core's. `IncrementalSort` stays with the
-core.
+runs, disk and memory, and the overrun past each one's `work_mem`). The
+path keeps the core's costs, so the planner chooses between a serial and
+a parallel sort as it would between the core's. `IncrementalSort` stays
+with the core.
 The plan's layout is dense, one column per target; the private data gives
 each target's column in the child's batches and each key's target, kind
 and flags, and `custom_exprs` holds the keys' expressions for `EXPLAIN`.
@@ -1227,10 +1223,11 @@ subquery whose parameter reaches the child, sorted for every outer row,
 and one whose parameter stays above the node, read once; and a generic
 plan with a parameter.
 
-## TessGather and TessSend
+## TessGather, TessGatherMerge and TessSend
 
 `TessGather` (`nodes/gather.c`) stands in for the core's `Gather` over a
-batch subtree, and `TessSend` is the subtree's top in every worker. The
+batch subtree, `TessGatherMerge` for its `Gather Merge`, and `TessSend` is
+the subtree's top in every worker. The
 core's `Gather` passes rows one by one: a worker forms a minimal tuple of
 each and puts it into a queue, the leader reads and deforms it. Through
 it 1.33 M rows of a filtered scan took 27 to 30 ms with two workers,
@@ -1250,6 +1247,12 @@ and costs, when
 - the child is parallel-safe, unparameterized and has the gather's
   target, of 1 to 64 columns;
 - `tessera.batch_gather` is on (the default).
+
+A `GatherMergePath` over a Tessera path becomes `TessGatherMerge` over
+`TessSend` the same way when every path key is one the sort kernels order
+by, an int4 or int8 target through the integer operator family (as for
+`TessSort`, at most 16 keys), and the kernels module is loaded; TessSend's
+data then lists each key's target, kind and flags.
 
 A `TessPack` above the gather goes, since `TessGather` gives batches. The
 plan sets `parallelModeNeeded`; `TessGather`'s layout is dense, one column
@@ -1281,9 +1284,38 @@ queue is detached and its own share is read. Without launched workers the
 leader reads the whole child. The shutdown finishes the workers and
 moves their counters into the plan's nodes for `EXPLAIN ANALYZE`; a
 rescan shuts them down and rescans the child, and the next fetch launches
-anew. `EXPLAIN` shows `Workers Planned`, `ANALYZE` `Workers Launched`,
-and `VERBOSE` the messages and the rows from the workers and of the
-leader.
+anew. A bound set by a limit above (`set_tuple_bound`) goes to the
+leader's child and, through TessSend's shared memory, to every worker's,
+so that a sort below keeps a top-N heap in each participant; the core's
+`Gather Merge` passes no bound to a custom scan. `EXPLAIN` shows
+`Workers Planned`, `ANALYZE` `Workers Launched`, and `VERBOSE` the
+messages and the rows from the workers and of the leader.
+
+### Merging
+
+Under `TessGatherMerge` a message carries, after the columns' lanes, a
+lane per word of the rows' sort items as the runs of an external
+`TessSort` keep them (every key with its bit for NULL, the reference left
+out, and the last word when it holds only the reference's bits): the
+kernel `tess_sort_key_lanes` (`tessera/sort.h`) writes them for a batch's
+selected rows from its key columns. The leader copies its own rows into
+messages of the same form, first, so that it sorts its share while the
+workers sort theirs; then it waits for a message of every worker and
+merges the streams with `tess_sort_merge` through a loser tree kept
+between calls. A batch takes up to 64 rows in order, its columns copied
+into the node's arrays, a by-reference value pointing into its message; a
+stream whose message ran out loads the next only when the next batch is
+asked for, once the rows pointing into it are consumed, so the merge
+stops at a stream's last row in hand and the batch goes out shorter.
+
+With two workers, 2 M rows ordered by an int4 key take 61 ms against 100
+for the core's `Gather Merge` over the same `TessSort`s and 81 for a
+serial `TessSort` (with text 76 against 120 and 113; two keys 77 against
+130 and 118); with four, 54 against 105. The leader then merges at about
+16 ns a row while the workers wait on full queues, and sorts its own
+share before: with `parallel_leader_participation` off, four workers take
+44 ms. Under `LIMIT 10` 17 ms against 29, the workers keeping a top-N
+heap.
 
 On 20 M rows of which 13.3 M pass the gather, one process takes 124 ms;
 with two workers `TessGather` takes 67 ms against 250 to 274 for the
@@ -1292,6 +1324,11 @@ core's `Gather` over the same nodes and 317 for the core's plan, with four
 
 ### Tests
 
+`test/sql/sort.sql` compares the rows of `TessGatherMerge` in order with
+Tessera off: keys of both kinds, both directions and places of NULL, text
+and values of 2000 bytes carried along, sorts past `work_mem`, the
+workers alone, a limit and an offset, a rescan, and the core's
+`Gather Merge` with `tessera.batch_gather` off.
 `test/sql/parallel.sql` shows the plans and compares the rows with the
 serial plan's: scans, filters, joins and aggregates under `TessGather`;
 200000 rows with NULLs, text and values of 2000 bytes that fill a

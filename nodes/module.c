@@ -49,6 +49,8 @@ _PG_init(void)
 	api->nodes->add(&tess_gather_node);
 	RegisterCustomScanMethods(&tess_send_scan_methods);
 	api->nodes->add(&tess_send_node);
+	RegisterCustomScanMethods(&tess_gather_merge_scan_methods);
+	api->nodes->add(&tess_gather_merge_node);
 	tess_gather_planner_init();
 	DefineCustomRealVariable("tessera.join_bloom_ratio",
 							 "Share of probe rows with a pair below which a hash join builds a Bloom filter.",

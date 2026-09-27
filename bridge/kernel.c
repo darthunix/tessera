@@ -72,7 +72,7 @@ validate_kernels(const TessKernelOps *ops)
 		ops->spill_columns_init == NULL ||
 		ops->spill_columns_append_partitioned == NULL ||
 		ops->spill_columns_pack == NULL || ops->spill_columns_unpack == NULL ||
-		ops->sort_merge == NULL)
+		ops->sort_merge == NULL || ops->sort_key_lanes == NULL)
 		elog(ERROR, "Tessera kernels must provide every operation");
 }
 
