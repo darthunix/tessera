@@ -734,7 +734,7 @@ typedef struct TessRowsConfig
 	Size		struct_size;
 	/* Owns the rows, their chunks and their values. */
 	MemoryContext parent_context;
-	/* The table's kernels: size, create, chunk_init, append, gather. */
+	/* The table's kernels: size, create, chunk_init, append_columns, gather. */
 	const TessKernelOps *kernels;
 	/* The keys every record holds, in their slots: one at least. */
 	int			nkeys;

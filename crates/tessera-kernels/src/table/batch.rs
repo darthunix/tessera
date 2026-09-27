@@ -11,7 +11,7 @@ use tessera_core::{RowMask, RowMaskView};
 use super::header::{CHUNK_HEADER, Layout};
 use super::keys::{KeySource, WordKeys, slot_buffer};
 use super::record::no_chunk;
-use super::record::{Access, Place, same_keys};
+use super::record::{Access, PayloadColumns, Place, same_keys};
 use super::region::Region;
 use super::{MAX_PARTITIONS, Partitions, Split};
 
@@ -149,6 +149,109 @@ fn append_rows<R: Region, K: KeySource + ?Sized, const N: usize, const T: usize,
             // table's.
             unsafe {
                 access.write::<N, T>((chunk, used), hashes[row], &word_keys, bit, row_payload)
+            };
+            offsets[row] = access.reference((chunk, used));
+            used += record_size;
+            done |= 1 << bit;
+        }
+        pending.intersect_word(index, !done)?;
+        appended += count;
+        room -= count;
+        if count < wanted {
+            break;
+        }
+    }
+    // SAFETY: the caller is the chunk's one writer, and `used` ends the
+    // records just written.
+    unsafe { access.set_used(chunk, used) };
+    Ok(appended)
+}
+
+/// As [`append`], with each row's payload taken from `columns`: a word of
+/// its NULL bits, then a word per column. The table's payload must be
+/// exactly those words.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn append_columns<R: Region, K: KeySource + ?Sized>(
+    region: &R,
+    layout: &Layout,
+    chunk: usize,
+    hashes: &[u32],
+    keys: &K,
+    columns: &PayloadColumns<'_>,
+    pending: &mut RowMask<'_>,
+    offsets: &mut [u32],
+) -> Result<usize> {
+    let nrows = pending.as_view().nrows();
+    check(layout, keys, nrows, hashes.len(), offsets.len())?;
+    ensure!(
+        layout.payload_size == 8 * (1 + columns.len()),
+        "the table's payload has {} bytes, not a word of NULL bits and {} columns",
+        layout.payload_size,
+        columns.len()
+    );
+    ensure!(
+        columns.nrows() == nrows,
+        "the payload columns do not have the batch's {nrows} rows"
+    );
+    shaped!(
+        layout.nkeys,
+        layout.tail_words(),
+        append_column_rows(
+            region, layout, chunk, hashes, keys, columns, pending, offsets
+        )
+    )
+}
+
+/// The rows of [`append_columns`], shaped as [`append_rows`]; the words
+/// after the keys are the columns', so `T` does not matter.
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+fn append_column_rows<
+    R: Region,
+    K: KeySource + ?Sized,
+    const N: usize,
+    const T: usize,
+    const L: usize,
+>(
+    region: &R,
+    layout: &Layout,
+    chunk: usize,
+    hashes: &[u32],
+    keys: &K,
+    columns: &PayloadColumns<'_>,
+    pending: &mut RowMask<'_>,
+    offsets: &mut [u32],
+) -> Result<usize> {
+    let access = Access::for_chunks(region, layout);
+    let (mut used, mut room) = access.room(chunk)?;
+    let record_size = access.record_size();
+    let nrows = pending.as_view().nrows();
+    let mut buffer = slot_buffer::<L>();
+    let mut word_keys = WordKeys::new(&mut buffer, access.nkeys());
+    let mut appended = 0;
+    for index in 0..nrows.div_ceil(64) {
+        let selected = pending.as_view().word(index).unwrap();
+        if selected == 0 {
+            continue;
+        }
+        if room == 0 {
+            break;
+        }
+        word_keys.load(keys, index, selected)?;
+        let wanted = selected.count_ones() as usize;
+        let count = wanted.min(room);
+        let mut bits = selected;
+        let mut done = 0;
+        for _ in 0..count {
+            let bit = bits.trailing_zeros() as usize;
+            bits &= bits - 1;
+            let row = index * 64 + bit;
+            // SAFETY: the place lies past the used mark and within the
+            // chunk, as `room` counted; the buffer and the shape are this
+            // table's; the payload is a word and one per column, and `row`
+            // is below the columns' row count, `nrows`.
+            unsafe {
+                access.write_columns::<N>((chunk, used), hashes[row], &word_keys, bit, columns, row)
             };
             offsets[row] = access.reference((chunk, used));
             used += record_size;

@@ -1777,3 +1777,120 @@ fn a_null_group_key_and_int8_keys_pass_their_filter() -> Result<()> {
     assert_eq!(probe_filter(&filter, &hashes)?, 3);
     Ok(())
 }
+
+/// Records appended from payload columns hold what records appended from
+/// the same payload laid out row by row hold: a word of the row's NULL
+/// bits, then a word per column, 0 for a NULL; the rows left out of the
+/// mask get none, and a column of the wrong length or a payload of the
+/// wrong size is refused.
+#[test]
+fn payload_columns_append_the_records_a_payload_array_does() -> Result<()> {
+    use tessera_kernels::table::PayloadColumns;
+    const ROWS: usize = 150;
+    const COLUMNS: usize = 3;
+    let keys_values: Vec<i32> = (0..ROWS as i32).map(|row| row * 7 % 50).collect();
+    let keys = [ColumnView::try_new(&keys_values, None)?];
+    let hashes: Vec<u32> = keys_values.iter().map(|&value| hash_i32(value)).collect();
+    let values: Vec<Vec<u64>> = (0..COLUMNS)
+        .map(|column| {
+            (0..ROWS as u64)
+                .map(|row| row * 1000 + column as u64)
+                .collect()
+        })
+        .collect();
+    let nulls: Vec<Vec<bool>> = (0..COLUMNS)
+        .map(|column| (0..ROWS).map(|row| row % (3 + column) == 0).collect())
+        .collect();
+    // The same payload row by row, as a caller would lay it out.
+    let mut payload = vec![0u64; ROWS * (1 + COLUMNS)];
+    for row in 0..ROWS {
+        for column in 0..COLUMNS {
+            if nulls[column][row] {
+                payload[row * (1 + COLUMNS)] |= 1 << column;
+            } else {
+                payload[row * (1 + COLUMNS) + 1 + column] = values[column][row];
+            }
+        }
+    }
+    let payload_bytes: Vec<u8> = payload.iter().flat_map(|word| word.to_ne_bytes()).collect();
+    let config = TableConfig {
+        keys: &[KeyKind::Int32],
+        payload_size: 8 * (1 + COLUMNS),
+    };
+    // Every third row left out of the mask.
+    let mut selected = all_rows(ROWS);
+    for row in (0..ROWS).step_by(3) {
+        selected[row / 64] &= !(1 << (row % 64));
+    }
+    let value_slices: Vec<&[u64]> = values.iter().map(Vec::as_slice).collect();
+    let null_slices: Vec<&[bool]> = nulls.iter().map(Vec::as_slice).collect();
+    let columns = PayloadColumns::new(&value_slices, &null_slices, ROWS)?;
+    let mut tables = Vec::new();
+    for from_columns in [false, true] {
+        let mut table = LocalTable::new(&config, 0, CHUNK)?;
+        let mut pending_words = selected.clone();
+        let mut offsets = vec![0u32; ROWS];
+        loop {
+            let chunk = match table.chunks() {
+                0 => table.add_chunk()?,
+                n => n - 1,
+            };
+            let shared = table.table()?;
+            let mut pending = RowMask::try_new(ROWS, &mut pending_words)?;
+            if from_columns {
+                shared.append_columns(
+                    chunk,
+                    &hashes,
+                    &keys[..],
+                    &columns,
+                    &mut pending,
+                    &mut offsets,
+                )?;
+            } else {
+                shared.append(
+                    chunk,
+                    &hashes,
+                    &keys[..],
+                    Some(&payload_bytes),
+                    &mut pending,
+                    &mut offsets,
+                )?;
+            }
+            if pending_words.iter().all(|&word| word == 0) {
+                break;
+            }
+            table.add_chunk()?;
+        }
+        tables.push((table, offsets));
+    }
+    let (by_rows, offsets) = &tables[0];
+    let (by_columns, column_offsets) = &tables[1];
+    assert_eq!(
+        offsets, column_offsets,
+        "the records lie in the same places"
+    );
+    let (rows_table, columns_table) = (by_rows.table()?, by_columns.table()?);
+    for row in (0..ROWS).filter(|row| row % 3 != 0) {
+        let expected = rows_table.record(offsets[row])?;
+        let got = columns_table.record(column_offsets[row])?;
+        assert_eq!(got.payload, expected.payload, "row {row}");
+        assert_eq!(got.keys, expected.keys);
+        assert_eq!(got.hash, expected.hash);
+    }
+    // Refusals: a column shorter than the batch, a payload of another size.
+    let short: Vec<&[u64]> = vec![&values[0][..ROWS - 1]; COLUMNS];
+    assert!(PayloadColumns::new(&short, &null_slices, ROWS).is_err());
+    let two = PayloadColumns::new(&value_slices[..2], &null_slices[..2], ROWS)?;
+    let mut table = LocalTable::new(&config, 0, CHUNK)?;
+    let chunk = table.add_chunk()?;
+    let mut pending_words = selected.clone();
+    let mut pending = RowMask::try_new(ROWS, &mut pending_words)?;
+    let mut offsets = vec![0u32; ROWS];
+    assert!(
+        table
+            .table()?
+            .append_columns(chunk, &hashes, &keys[..], &two, &mut pending, &mut offsets)
+            .is_err()
+    );
+    Ok(())
+}

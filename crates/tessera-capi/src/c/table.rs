@@ -14,8 +14,8 @@ use anyhow::{Context, Result, bail, ensure};
 use tessera_core::ColumnReader;
 use tessera_kernels::table::{
     Chunks, Combine, CombineStop, Cursor, FORMAT_VERSION, Fold, HEADER_SIZE, KeyKind, KeySource,
-    MAX_KEYS, Partitions, Slot, Table, TableConfig, TableMut, VERSION_OFFSET,
-    append_partitioned_to, append_to,
+    MAX_KEYS, Partitions, PayloadColumns, Slot, Table, TableConfig, TableMut, VERSION_OFFSET,
+    append_columns_to, append_partitioned_to, append_to,
     bloom::SharedFilter,
     index_size, init_chunk, normalize_word,
     phases::{Participant, SharedCounters},
@@ -534,6 +534,84 @@ pub unsafe extern "C" fn tess_table_append(
                 hashes,
                 &decoded,
                 payload,
+                &mut pending,
+                offsets,
+            )
+            .map(drop)
+        })
+    }
+}
+
+/// `tess_table_append_columns`: as [`tess_table_append`], each row's
+/// payload a word of its NULL bits and then a word per column of
+/// `columns`, which is the table's whole payload.
+///
+/// # Safety
+///
+/// As for [`tess_table_append`]; `columns` must point to `ncolumns`
+/// columns, each of the mask's rows, valid and unchanged during the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tess_table_append_columns(
+    table: *const TableRef,
+    chunk: c_int,
+    hashes: *const u32,
+    nkeys: c_int,
+    keys: *const TableKey,
+    ncolumns: c_int,
+    columns: *const DatumColumn,
+    pending: *mut Mask,
+    offsets: *mut u32,
+    status: *mut Status,
+) -> Code {
+    // SAFETY: the caller's contract.
+    unsafe {
+        guard(status, || {
+            let (_, chunks) = chunks_of(table)?;
+            let chunk = usize::try_from(chunk).context("a negative chunk")?;
+            let mut decoded = TableKeys::empty();
+            table_keys(nkeys, keys, &mut decoded)?;
+            let key_list = slice::from_raw_parts(keys, decoded.nkeys);
+            let mut kinds = [KeyKind::Int32; MAX_KEYS];
+            for (slot, key) in kinds.iter_mut().zip(key_list) {
+                *slot = if key.kind == 2 {
+                    KeyKind::Int64
+                } else {
+                    KeyKind::Int32
+                };
+            }
+            let ncolumns = usize::try_from(ncolumns).context("a negative column count")?;
+            ensure!(
+                ncolumns <= 64,
+                "a payload has up to 64 columns, not {ncolumns}"
+            );
+            let config = TableConfig {
+                keys: &kinds[..decoded.nkeys],
+                payload_size: 8 * (1 + ncolumns),
+            };
+            let mut pending = pending.as_mut().context("a null pending mask")?.mask()?;
+            let nrows = pending.as_view().nrows();
+            let hashes = values(hashes, nrows, "hashes")?;
+            let offsets = slots(offsets, nrows, "offsets")?;
+            let columns = values(columns, ncolumns, "payload columns")?;
+            let mut words: [&[u64]; 64] = [&[]; 64];
+            let mut nulls: [&[bool]; 64] = [&[]; 64];
+            for (index, column) in columns.iter().enumerate() {
+                ensure!(
+                    usize::try_from(column.nrows).ok() == Some(nrows),
+                    "payload column {index} has {} rows, not {nrows}",
+                    column.nrows
+                );
+                words[index] = values(column.values, nrows, "payload values")?;
+                nulls[index] = values(column.isnull, nrows, "payload NULL flags")?;
+            }
+            let payload = PayloadColumns::new(&words[..ncolumns], &nulls[..ncolumns], nrows)?;
+            append_columns_to(
+                &config,
+                chunks,
+                chunk,
+                hashes,
+                &decoded,
+                &payload,
                 &mut pending,
                 offsets,
             )

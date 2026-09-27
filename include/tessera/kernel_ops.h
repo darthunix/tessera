@@ -416,10 +416,21 @@ typedef struct TessKernelOps
 							int words,
 							uint32 *refs,
 							TessStatus *status);
+	/* tess_table_append_columns */
+	TessStatusCode (*table_append_columns) (const TessTableRef *table,
+											int chunk,
+											const uint32 *hashes,
+											int nkeys,
+											const TessTableKey *keys,
+											int ncolumns,
+											const TessDatumColumn *columns,
+											TessRowMask *pending,
+											uint32 *offsets,
+											TessStatus *status);
 } TessKernelOps;
 
 #define TESS_KERNEL_OPS_MIN_SIZE \
-	TESS_ABI_SIZE_INCLUDING_FIELD(TessKernelOps, sort)
+	TESS_ABI_SIZE_INCLUDING_FIELD(TessKernelOps, table_append_columns)
 
 /*
  * The registry of the kernels: one table per backend, installed by the

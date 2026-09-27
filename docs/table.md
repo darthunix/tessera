@@ -189,7 +189,12 @@ rows of `pending` as records into chunk `chunk`, in row order, as long
 as whole records fit: each row appended leaves `pending` and gets the
 reference of its record in `offsets`; the rows still pending need
 another chunk. `payload` is the payload of every physical row one after
-another, or `NULL` for zeros. Append does not read the index, which a
+another, or `NULL` for zeros. `tess_table_append_columns` takes the
+payload from columns instead, a `TessDatumColumn` each: a record's payload
+is then a word of the row's NULL bits and a word per column, 0 for a NULL,
+written straight from the columns with no array in between (`TessRows`
+passes a by-value column as it is and a by-reference one as the
+references of its copies). Append does not read the index, which a
 build may not have yet. `tess_table_link(&table, chunk, &from, &linked,
 &duplicates, &status)` then puts the chunk's records from byte `from` on
 (starting at `TESS_TABLE_CHUNK_HEADER`) into the buckets, and moves `from`

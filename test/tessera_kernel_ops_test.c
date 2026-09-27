@@ -82,6 +82,7 @@ static const TessKernelOps kernels = {
 	.sort_item_words = tess_sort_item_words,
 	.sort_items = tess_sort_items,
 	.sort = tess_sort,
+	.table_append_columns = tess_table_append_columns,
 };
 
 static const TessKernelRegistryOps *

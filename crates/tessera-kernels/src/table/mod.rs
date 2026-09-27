@@ -112,7 +112,7 @@ use header::{Header, Layout, NRECORDS};
 pub use keys::{KeySource, KeyValue, normalize_word};
 pub use local::LocalTable;
 use record::Access;
-pub use record::Record;
+pub use record::{PayloadColumns, Record};
 use region::{RawRegion, Region};
 
 /// What a table holds, for planning and EXPLAIN.
@@ -247,6 +247,33 @@ pub fn append_to<K: KeySource + ?Sized>(
         hashes,
         keys,
         payload,
+        pending,
+        offsets,
+    )
+}
+
+/// As [`append_to`], with each row's payload taken from `columns`: a word
+/// of its NULL bits, then a word per column, which must be the table's
+/// whole payload.
+#[allow(clippy::too_many_arguments)]
+pub fn append_columns_to<K: KeySource + ?Sized>(
+    config: &TableConfig<'_>,
+    chunks: Chunks<'_>,
+    chunk: usize,
+    hashes: &[u32],
+    keys: &K,
+    columns: &PayloadColumns<'_>,
+    pending: &mut RowMask<'_>,
+    offsets: &mut [u32],
+) -> Result<usize> {
+    let layout = header::chunk_layout(config)?;
+    batch::append_columns(
+        &chunk_region(&chunks),
+        &layout,
+        chunk,
+        hashes,
+        keys,
+        columns,
         pending,
         offsets,
     )
@@ -469,6 +496,30 @@ impl<'a> Table<'a> {
             hashes,
             keys,
             payload,
+            pending,
+            offsets,
+        )
+    }
+
+    /// As [`Table::append`], with each row's payload taken from `columns`:
+    /// a word of its NULL bits, then a word per column, which must be the
+    /// table's whole payload.
+    pub fn append_columns<K: KeySource + ?Sized>(
+        &self,
+        chunk: usize,
+        hashes: &[u32],
+        keys: &K,
+        columns: &PayloadColumns<'_>,
+        pending: &mut RowMask<'_>,
+        offsets: &mut [u32],
+    ) -> Result<usize> {
+        batch::append_columns(
+            &self.region,
+            &self.layout,
+            chunk,
+            hashes,
+            keys,
+            columns,
             pending,
             offsets,
         )

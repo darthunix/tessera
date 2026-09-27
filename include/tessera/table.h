@@ -213,6 +213,25 @@ extern TessStatusCode tess_table_append(const TessTableRef *table,
 										TessStatus *status);
 
 /*
+ * As tess_table_append, each row's payload taken from columns instead of
+ * a payload array: a word of the row's NULL bits (bit c for column c),
+ * then a word per column, the column's Datum or 0 for a NULL; the table's
+ * payload must be exactly those 1 + ncolumns words, ncolumns at most 64.
+ * A column is whatever words the caller keeps per row, such as the
+ * references of copied by-reference values; each has the mask's rows.
+ */
+extern TessStatusCode tess_table_append_columns(const TessTableRef *table,
+												int chunk,
+												const uint32 *hashes,
+												int nkeys,
+												const TessTableKey *keys,
+												int ncolumns,
+												const TessDatumColumn *columns,
+												TessRowMask *pending,
+												uint32 *offsets,
+												TessStatus *status);
+
+/*
  * A table that spills keeps its records in partitions: the partition of a
  * hash is (hash >> shift) & (npartitions - 1), npartitions a power of two
  * up to 65536, and partition p appends to chunk partition_chunks[p]. The

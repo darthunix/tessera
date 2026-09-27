@@ -3,8 +3,8 @@
  *
  * The records lie in chunks the rows allocate, the first of ROWS_FIRST_CHUNK
  * bytes and the others of the most a chunk may have, appended by the
- * kernels (tess_table_append) and read back by reference
- * (tess_table_gather). A record's payload is a word of its kept columns'
+ * kernels from the columns themselves (tess_table_append_columns) and read
+ * back by reference (tess_table_gather). A record's payload is a word of its kept columns'
  * NULL bits, then a word per column: a by-value Datum, or the reference of
  * a by-reference value's copy in the value chunks, the first of
  * ROWS_VALUE_FIRST bytes and the others of ROWS_VALUE_CHUNK, a value
@@ -18,6 +18,7 @@
 
 #include "utils/datum.h"
 #include "utils/expandeddatum.h"
+#include "port/pg_bitutils.h"
 #include "utils/memutils.h"
 
 #include "tessera/kernel_ops.h"
@@ -53,10 +54,15 @@ struct TessRows
 	int			value_current;
 	Size		value_len;
 	Size		value_used;
-	/* Buffers of one append, for capacity rows: zero hashes and the payloads. */
+	/*
+	 * Buffers of one append, for capacity rows: zero hashes, the columns the
+	 * kernels read the payload from, and for each by-reference column the
+	 * references of its copies.
+	 */
 	int			capacity;
 	uint32	   *hashes;
-	uint64	   *payload;
+	TessDatumColumn *payload;
+	Datum	  **copies;
 	uint64	   *pending_bits;
 	/* A gather's NULL words, for capacity rows. */
 	Datum	   *null_words;
@@ -114,7 +120,8 @@ tess_rows_create(const TessRowsConfig *config)
 		config->kernels->table_size == NULL ||
 		config->kernels->table_create == NULL ||
 		config->kernels->table_chunk_init == NULL ||
-		config->kernels->table_append == NULL ||
+		!TESS_ABI_HAS_FIELD(config->kernels, TessKernelOps, table_append_columns) ||
+		config->kernels->table_append_columns == NULL ||
 		config->kernels->table_gather == NULL)
 		elog(ERROR, "Tessera rows require the kernels of the table");
 	if (config->nkeys < 1 || config->nkeys > TESS_TABLE_MAX_KEYS ||
@@ -262,24 +269,32 @@ store_value(TessRows *rows, Datum value, int16 typlen)
 static void
 reserve(TessRows *rows, int nrows)
 {
-	int			width = 1 + rows->ncolumns;
-
 	if (nrows <= rows->capacity)
 		return;
 	if (rows->hashes != NULL)
 	{
 		pfree(rows->hashes);
-		pfree(rows->payload);
 		pfree(rows->pending_bits);
 		pfree(rows->null_words);
+		for (int column = 0; column < rows->ncolumns; column++)
+			if (rows->copies[column] != NULL)
+				pfree(rows->copies[column]);
+	}
+	else
+	{
+		rows->payload = MemoryContextAllocZero(rows->context,
+											   sizeof(TessDatumColumn) *
+											   Max(rows->ncolumns, 1));
+		rows->copies = MemoryContextAllocZero(rows->context,
+											  sizeof(Datum *) * Max(rows->ncolumns, 1));
 	}
 	rows->capacity = Max(nrows, 64);
 	rows->hashes = MemoryContextAllocZero(rows->context,
 										  sizeof(uint32) * rows->capacity);
-	rows->payload = MemoryContextAllocExtended(rows->context,
-											   mul_size(sizeof(uint64) * width,
-														rows->capacity),
-											   MCXT_ALLOC_HUGE);
+	/* Zeroed: a NULL or unselected row's word is initialized memory. */
+	for (int column = 0; column < rows->ncolumns; column++)
+		rows->copies[column] = rows->typbyvals[column] ? NULL :
+			MemoryContextAllocZero(rows->context, sizeof(Datum) * rows->capacity);
 	rows->pending_bits = MemoryContextAlloc(rows->context,
 											sizeof(uint64) *
 											tess_row_mask_word_count(rows->capacity));
@@ -287,13 +302,41 @@ reserve(TessRows *rows, int nrows)
 										  sizeof(Datum) * rows->capacity);
 }
 
+/*
+ * Whether a selected row of the mask is NULL: a word of rows at a time,
+ * whose 64 flags memchr scans at once, the selected rows checked one by
+ * one only where a flag is set.
+ */
+static bool
+selected_null(const TessRowMask *mask, const bool *isnull)
+{
+	int			nwords = tess_row_mask_word_count(mask->nrows);
+
+	for (int word = 0; word < nwords; word++)
+	{
+		uint64		bits = mask->bits[word];
+		const bool *flags = isnull + (Size) word * 64;
+
+		if (bits == 0 ||
+			memchr(flags, true, Min(64, mask->nrows - word * 64)) == NULL)
+			continue;
+		for (; bits != 0; bits &= bits - 1)
+			if (flags[pg_rightmost_one_pos64(bits)])
+				return true;
+	}
+	return false;
+}
+
+/*
+ * The records are written by the kernels from the columns themselves: a
+ * by-value column as it is, a by-reference one as the references of its
+ * values' copies, made here for the selected rows.
+ */
 void
 tess_rows_append(TessRows *rows, const TessTableKey *keys,
 				 const TessDatumColumn *columns, const TessRowMask *mask,
 				 uint32 *refs)
 {
-	int			width;
-	int			row = -1;
 	int			count;
 	TessRowMask pending;
 	bool		fresh = false;
@@ -310,27 +353,26 @@ tess_rows_append(TessRows *rows, const TessTableKey *keys,
 			elog(ERROR, "Tessera rows column %d has %d rows, not %d",
 				 column, columns[column].nrows, mask->nrows);
 	reserve(rows, mask->nrows);
-	width = 1 + rows->ncolumns;
-	while ((row = tess_row_mask_next(mask, row)) >= 0)
+	for (int column = 0; column < rows->ncolumns; column++)
 	{
-		uint64	   *record = &rows->payload[(Size) row * width];
+		const TessDatumColumn *values = &columns[column];
+		TessDatumColumn *payload = &rows->payload[column];
+		uint64		bit = UINT64CONST(1) << column;
 
-		record[0] = 0;
-		for (int column = 0; column < rows->ncolumns; column++)
+		if ((rows->null_columns & bit) == 0 &&
+			selected_null(mask, values->isnull))
+			rows->null_columns |= bit;
+		*payload = *values;
+		if (!rows->typbyvals[column])
 		{
-			const TessDatumColumn *values = &columns[column];
+			Datum	   *copies = rows->copies[column];
+			int16		typlen = rows->typlens[column];
+			int			row = -1;
 
-			if (values->isnull[row])
-			{
-				record[0] |= UINT64CONST(1) << column;
-				record[1 + column] = 0;
-				rows->null_columns |= UINT64CONST(1) << column;
-			}
-			else if (rows->typbyvals[column])
-				record[1 + column] = values->values[row];
-			else
-				record[1 + column] = store_value(rows, values->values[row],
-												 rows->typlens[column]);
+			while ((row = tess_row_mask_next(mask, row)) >= 0)
+				if (!values->isnull[row])
+					copies[row] = store_value(rows, values->values[row], typlen);
+			payload->values = copies;
 		}
 	}
 	memcpy(rows->pending_bits, mask->bits,
@@ -345,14 +387,13 @@ tess_rows_append(TessRows *rows, const TessTableKey *keys,
 	{
 		int			before = tess_row_mask_count(&pending);
 
-		check(rows, rows->kernels->table_append(&rows->table,
-												rows->table.nchunks - 1,
-												rows->payload_size,
-												rows->hashes, rows->nkeys,
-												keys,
-												(const uint8 *) rows->payload,
-												&pending, refs,
-												&rows->status));
+		check(rows, rows->kernels->table_append_columns(&rows->table,
+														rows->table.nchunks - 1,
+														rows->hashes, rows->nkeys,
+														keys, rows->ncolumns,
+														rows->payload,
+														&pending, refs,
+														&rows->status));
 		if (tess_row_mask_count(&pending) == 0)
 			break;
 		if (tess_row_mask_count(&pending) == before && fresh)

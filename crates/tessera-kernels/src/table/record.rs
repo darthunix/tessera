@@ -9,7 +9,7 @@
 //! chunk by the chunk's one writer, then published by a compare-and-swap of
 //! its bucket's head, after which it never changes and never moves.
 
-use anyhow::Result;
+use anyhow::{Result, ensure};
 
 use super::header::{
     CHUNK_HEADER, KEY_SLOT, Layout, NRECORDS, RECORD_HEADER, placement, reference,
@@ -411,6 +411,148 @@ impl<'r, R: Region> Access<'r, R> {
         // SAFETY: the caller's contract on `keys`, `N` and `T`.
         unsafe { fill::<N, T>(bytes, self.nkeys, hash, keys, bit, payload) };
     }
+
+    /// As [`Self::write`], with the payload of row `row` of `columns`: a
+    /// word of its NULL bits, then a word per column, 0 for a NULL.
+    ///
+    /// # Safety
+    ///
+    /// As [`Self::write`]; `columns` has as many columns as the payload
+    /// has words after its first, and `row` is one of its rows.
+    #[inline(always)]
+    pub(super) unsafe fn write_columns<const N: usize>(
+        &self,
+        (chunk, byte): Place,
+        hash: u32,
+        keys: &WordKeys,
+        bit: usize,
+        columns: &PayloadColumns<'_>,
+        row: usize,
+    ) {
+        let record_size = self.record_size;
+        // SAFETY: the caller's contract: the record lies within the chunk,
+        // past its used mark, and nothing else reads or writes it yet.
+        let bytes = unsafe {
+            self.region
+                .record_mut(self.region.spot(chunk, byte), record_size)
+        };
+        // SAFETY: the caller's contract on `keys` and `N`.
+        let tail = unsafe { fill_head::<N>(bytes, self.nkeys, hash, keys, bit) };
+        // SAFETY: the caller's contract on `columns` and `row`.
+        unsafe { columns.write_row(row, tail) };
+    }
+}
+
+/// The payload of a batch's rows as its columns hold them: per column a
+/// word per row (a by-value Datum, or whatever word the caller stores for
+/// a value, such as a reference to its copy) and a NULL flag per row. A
+/// record's payload is a word of the row's NULL bits, then a word per
+/// column, 0 for a NULL.
+#[derive(Clone, Copy, Debug)]
+pub struct PayloadColumns<'a> {
+    values: &'a [&'a [u64]],
+    nulls: &'a [&'a [bool]],
+    nrows: usize,
+}
+
+impl<'a> PayloadColumns<'a> {
+    /// Columns of `nrows` rows each, at most 64, as the word of NULL bits
+    /// holds.
+    pub fn new(values: &'a [&'a [u64]], nulls: &'a [&'a [bool]], nrows: usize) -> Result<Self> {
+        ensure!(
+            values.len() == nulls.len() && values.len() <= 64,
+            "a payload has up to 64 columns of values and NULL flags, not {} and {}",
+            values.len(),
+            nulls.len()
+        );
+        ensure!(
+            values.iter().all(|column| column.len() == nrows)
+                && nulls.iter().all(|column| column.len() == nrows),
+            "a payload column does not have the batch's {nrows} rows"
+        );
+        Ok(Self {
+            values,
+            nulls,
+            nrows,
+        })
+    }
+
+    /// Columns of the payload.
+    pub fn len(&self) -> usize {
+        self.values.len()
+    }
+
+    /// Rows of every column.
+    pub fn nrows(&self) -> usize {
+        self.nrows
+    }
+
+    /// Whether the payload has no column, only its word of NULL bits.
+    pub fn is_empty(&self) -> bool {
+        self.values.is_empty()
+    }
+
+    /// Write row `row` as a payload into `tail`, the words after a
+    /// record's keys, whose padding is zeroed.
+    ///
+    /// # Safety
+    ///
+    /// `row` is below the columns' row count, and `tail` has at least one
+    /// word more than the columns.
+    #[inline(always)]
+    unsafe fn write_row(&self, row: usize, tail: &mut [[u8; 8]]) {
+        let columns = self.values.len();
+        debug_assert!(tail.len() > columns);
+        let mut nulls = 0u64;
+        for column in 0..columns {
+            // SAFETY: the caller's contract: `row` is one of every column's
+            // rows and the tail has a word for every column.
+            unsafe {
+                let null = *self.nulls.get_unchecked(column).get_unchecked(row);
+                let value = *self.values.get_unchecked(column).get_unchecked(row);
+                nulls |= u64::from(null) << column;
+                *tail.get_unchecked_mut(1 + column) = (if null { 0 } else { value }).to_ne_bytes();
+            }
+        }
+        // SAFETY: the tail has a word more than the columns.
+        unsafe { *tail.get_unchecked_mut(0) = nulls.to_ne_bytes() };
+        zero_words(&mut tail[1 + columns..]);
+    }
+}
+
+/// Write a record's header with no next record and its key slots into
+/// `bytes`, a record's length, from row `bit` of a word's keys, and return
+/// the words after the keys. `N` is the key count when the caller knows
+/// it, 0 to take it from `nkeys`.
+///
+/// # Safety
+///
+/// `keys` was made for `nkeys` keys; `N` is 0 or the table's.
+#[inline(always)]
+unsafe fn fill_head<'b, const N: usize>(
+    bytes: &'b mut [u8],
+    nkeys: usize,
+    hash: u32,
+    keys: &WordKeys,
+    bit: usize,
+) -> &'b mut [[u8; 8]] {
+    let record_size = bytes.len();
+    let nkeys = if N > 0 { N } else { nkeys };
+    let (words, _) = bytes.as_chunks_mut::<8>();
+    let mut fields = [0; RECORD_HEADER];
+    fields[HASH..HASH + 4].copy_from_slice(&hash.to_ne_bytes());
+    fields[NULL_BITS..NULL_BITS + 4].copy_from_slice(&keys.null_bits(bit).to_ne_bytes());
+    fields[LEN..LEN + 4].copy_from_slice(&((record_size / 8) as u32).to_ne_bytes());
+    let (header, rest) = words.split_at_mut(RECORD_HEADER / 8);
+    let (first, second) = fields.split_at(8);
+    header[0] = first.try_into().unwrap();
+    header[1] = second.try_into().unwrap();
+    let (slots, tail) = rest.split_at_mut(nkeys);
+    for (key, slot) in slots.iter_mut().enumerate() {
+        // SAFETY: `key < nkeys`, the buffer's key count.
+        *slot = unsafe { keys.key(key, bit) }.to_ne_bytes();
+    }
+    tail
 }
 
 /// Write a record into `bytes`, a record's length, from row `bit` of a
@@ -432,23 +574,11 @@ pub(super) unsafe fn fill<const N: usize, const T: usize>(
     payload: Option<&[u8]>,
 ) {
     {
-        let record_size = bytes.len();
-        let nkeys = if N > 0 { N } else { nkeys };
-        debug_assert!(T == 0 || T == record_size / 8 - RECORD_HEADER / 8 - nkeys);
-        let (words, _) = bytes.as_chunks_mut::<8>();
-        let mut fields = [0; RECORD_HEADER];
-        fields[HASH..HASH + 4].copy_from_slice(&hash.to_ne_bytes());
-        fields[NULL_BITS..NULL_BITS + 4].copy_from_slice(&keys.null_bits(bit).to_ne_bytes());
-        fields[LEN..LEN + 4].copy_from_slice(&((record_size / 8) as u32).to_ne_bytes());
-        let (header, rest) = words.split_at_mut(RECORD_HEADER / 8);
-        let (first, second) = fields.split_at(8);
-        header[0] = first.try_into().unwrap();
-        header[1] = second.try_into().unwrap();
-        let (slots, tail) = rest.split_at_mut(nkeys);
-        for (key, slot) in slots.iter_mut().enumerate() {
-            // SAFETY: `key < nkeys`, the buffer's key count.
-            *slot = unsafe { keys.key(key, bit) }.to_ne_bytes();
-        }
+        debug_assert!(
+            T == 0 || T == bytes.len() / 8 - RECORD_HEADER / 8 - if N > 0 { N } else { nkeys }
+        );
+        // SAFETY: the caller's contract.
+        let tail = unsafe { fill_head::<N>(bytes, nkeys, hash, keys, bit) };
         if T > 0
             && let Some(tail) = tail.first_chunk_mut::<T>()
         {
