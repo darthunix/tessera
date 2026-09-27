@@ -537,8 +537,16 @@ typedef struct TessHashJoinState
 	 */
 	uint64	  **marks;
 	int			mark_slots;
+	MemoryContext marks_context;
 	Size		record_size;
 	bool		tail;
+	/*
+	 * The tail of the table in memory is done; a spilling join asks for
+	 * one before each table it drops: the resident partitions', each
+	 * piece's, each partition's.
+	 */
+	bool		table_tail_done;
+	bool		tail_request;
 	int			tail_chunk;
 	Size		tail_byte;
 	uint32		tail_refs[JOIN_COMPACT_ROWS];
@@ -924,6 +932,20 @@ note_memory(TessHashJoinState *state)
 	state->peak_memory = Max(state->peak_memory, join_memory(state));
 }
 
+/*
+ * RIGHT and FULL: the table in memory is another, or is built anew: its
+ * records have no mark, and its tail is still to come.
+ */
+static void
+forget_marks(TessHashJoinState *state)
+{
+	if (state->marks_context != NULL)
+		MemoryContextReset(state->marks_context);
+	state->marks = NULL;
+	state->mark_slots = 0;
+	state->table_tail_done = false;
+}
+
 /* Room for the bases and lengths of nchunks chunks in this process. */
 static void
 reserve_chunks(TessHashJoinState *state, int nchunks)
@@ -971,9 +993,7 @@ create_table(TessHashJoinState *state)
 	MemoryContextReset(state->table_context);
 	MemoryContextReset(state->values_context);
 	reset_values(state);
-	/* The marks lived in the table's memory. */
-	state->marks = NULL;
-	state->mark_slots = 0;
+	forget_marks(state);
 	/* A new table: decide on its filter again. */
 	state->bloom = NULL;
 	state->bloom_words = 0;
@@ -1362,8 +1382,7 @@ insert_batch(TessHashJoinState *state, TessBatch *batch)
 	bool		fresh = false;
 
 	/* A batch adds a chunk of records and one of values at most. */
-	/* RIGHT and FULL mark records in memory: their table does not spill. */
-	if (state->spill == NULL && !state->preserve_inner &&
+	if (state->spill == NULL &&
 		state->table_bytes + state->value_bytes +
 		2 * chunk_len_for(JOIN_CHUNK_LEN) > get_hash_memory_limit())
 		start_spill(state);
@@ -2638,6 +2657,8 @@ finish_spill_build(TessHashJoinState *state)
 		spill->input_rows = spill->total_rows;
 	state->table.index = NULL;
 	state->table.nchunks = nchunks;
+	/* A level's own resident table, with its tail still to come. */
+	forget_marks(state);
 	/* The chunks count with the side's memory; the index with the table's. */
 	state->table_bytes = 0;
 	state->build_rows = rows;
@@ -2714,6 +2735,7 @@ start_joining(TessHashJoinState *state)
 	MemoryContextReset(state->table_context);
 	state->table.index = NULL;
 	state->table.nchunks = 0;
+	forget_marks(state);
 	state->bloom = NULL;
 	state->bloom_words = 0;
 	tess_spill_finish(spill->build.file);
@@ -2759,6 +2781,7 @@ end_partition(TessHashJoinState *state)
 	MemoryContextReset(state->table_context);
 	state->table.index = NULL;
 	state->table.nchunks = 0;
+	forget_marks(state);
 }
 
 /* A chunk of the joined partition's table, read back or its tail. */
@@ -2809,6 +2832,7 @@ drop_piece(TessHashJoinState *state)
 	state->table_bytes = 0;
 	state->build_rows = 0;
 	state->duplicates = 0;
+	forget_marks(state);
 }
 
 /* A value chunk read back into the piece's table. */
@@ -3152,7 +3176,9 @@ next_partition(TessHashJoinState *state)
 	{
 		if (spill->build.parts[partition].resident)
 			continue;
-		if (spill->probe.parts[partition].rows == 0)
+		/* RIGHT and FULL return a partition's inner rows without outer ones too. */
+		if (spill->probe.parts[partition].rows == 0 &&
+			(!state->preserve_inner || spill->build.parts[partition].rows == 0))
 		{
 			side_release(&spill->build, partition);
 			side_release(&spill->probe, partition);
@@ -3384,6 +3410,20 @@ matched_word(const JoinSpill *spill, int count)
 }
 
 /*
+ * RIGHT and FULL over a table that spills: before the table in memory goes
+ * (the resident partitions', a piece's, a partition's), its records
+ * without a pair go out; true asks the caller for that tail first.
+ */
+static bool
+tail_first(TessHashJoinState *state)
+{
+	if (!state->preserve_inner || state->table_tail_done)
+		return false;
+	state->tail_request = true;
+	return true;
+}
+
+/*
  * The next outer batch: the outer child's, while it has one, then those
  * of the partitions on disk, each joined in turn. The rows to answer are
  * the batch's selected ones, until the table sends some to disk.
@@ -3434,7 +3474,7 @@ outer_next(TessHashJoinState *state)
 			}
 			/* The resident table goes: not while a compact batch holds its pairs. */
 			spill->child_done = true;
-			if (state->holding)
+			if (state->holding || tail_first(state))
 				return NULL;
 			start_joining(state);
 		}
@@ -3455,7 +3495,8 @@ outer_next(TessHashJoinState *state)
 			state->active_bits[0] = active;
 			return &spill->batch;
 		}
-		if (state->holding)
+		/* RIGHT and FULL: the table's records without a pair before it goes. */
+		if (state->holding || tail_first(state))
 			return NULL;
 		if (spill->partition >= 0 && spill->partition < spill->npartitions &&
 			next_pass(state))
@@ -5712,8 +5753,13 @@ mark_pairs(TessHashJoinState *state)
 	if (state->marks == NULL || state->mark_slots < state->table.nchunks)
 	{
 		int			slots = Max(state->table.nchunks, 16);
-		uint64	  **marks = MemoryContextAllocZero(state->table_context,
-												   sizeof(uint64 *) * slots);
+		uint64	  **marks;
+
+		if (state->marks_context == NULL)
+			state->marks_context = AllocSetContextCreate(state->css.ss.ps.state->es_query_cxt,
+														 "TessHashJoin marks",
+														 ALLOCSET_DEFAULT_SIZES);
+		marks = MemoryContextAllocZero(state->marks_context, sizeof(uint64 *) * slots);
 
 		if (state->marks != NULL)
 			memcpy(marks, state->marks, sizeof(uint64 *) * state->mark_slots);
@@ -5731,7 +5777,7 @@ mark_pairs(TessHashJoinState *state)
 
 			if (state->marks[chunk] == NULL)
 				state->marks[chunk] =
-					MemoryContextAllocZero(state->table_context,
+					MemoryContextAllocZero(state->marks_context,
 										   sizeof(uint64) *
 										   ((state->table.chunk_lens[chunk] /
 											 state->record_size + 63) / 64));
@@ -5812,12 +5858,23 @@ next_output(TessHashJoinState *state)
 		if (state->tail)
 		{
 			if (!next_tail(state))
-				return false;
+			{
+				/*
+				 * The table's tail is done: the join goes on past the table
+				 * that asked for it, or is over.
+				 */
+				state->tail = false;
+				state->table_tail_done = true;
+				if (!state->tail_request)
+					return false;
+				state->tail_request = false;
+				continue;
+			}
 		}
 		else if (state->compact ? !fill_compact(state) : !next_round(state))
 		{
 			/* RIGHT and FULL: then the inner rows without a pair. */
-			if (!state->preserve_inner)
+			if (!state->preserve_inner || state->table_tail_done)
 				return false;
 			start_tail(state);
 			continue;
@@ -6341,6 +6398,8 @@ join_rescan(CustomScanState *css)
 	state->serving = false;
 	/* RIGHT and FULL: a table kept for the next scan has no pair yet. */
 	state->tail = false;
+	state->tail_request = false;
+	state->table_tail_done = false;
 	for (int chunk = 0; state->marks != NULL && chunk < state->mark_slots; chunk++)
 		if (state->marks[chunk] != NULL)
 			memset(state->marks[chunk], 0,

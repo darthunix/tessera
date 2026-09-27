@@ -335,21 +335,11 @@ join_pathlist(PlannerInfo *root, RelOptInfo *joinrel, RelOptInfo *outerrel,
 		if (filtered != NULL)
 			outer_path = filtered;
 	}
-	/*
-	 * RIGHT and FULL mark the records in memory, which do not spill: the
-	 * inner side must fit hash_mem as the planner estimates it, with a
-	 * record per row. Every participant would return the same records
-	 * without a pair: no parallel path.
-	 */
-	if ((jointype == JOIN_RIGHT || jointype == JOIN_FULL) &&
-		inner_path->rows * (16.0 + 8.0 * (list_length(keys.rinfos) + 1 + ninner) +
-							inner_path->pathtarget->width) >
-		(double) get_hash_memory_limit())
-		return;
 	path = make_join_path(root, joinrel, jointype, extra, &keys,
 						  outer_path, inner_path, false);
 	if (path != NULL)
 		add_path(joinrel, &path->path);
+	/* RIGHT and FULL: every participant would return the records without a pair. */
 	if (jointype == JOIN_RIGHT || jointype == JOIN_FULL)
 		return;
 

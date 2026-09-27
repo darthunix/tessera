@@ -827,11 +827,16 @@ that passed the join clauses marks its record, in a bit per record per
 chunk the node keeps (a reference is a chunk's number and a place in
 8-byte units, `TESS_TABLE_UNIT_BITS`). After the outer side the node
 walks each chunk's records up to its used mark and returns those without
-a mark, their outer columns NULL, through the outer join's filters. The
-table does not spill: the path is taken only when the planner expects the
-inner side within `hash_mem`, and only serially, since every participant
-would return the same records without a pair. A rescan that keeps the
-table clears the marks.
+a mark, their outer columns NULL, through the outer join's filters. A
+table that spills does the same for each table it holds in memory before
+that one goes: the resident partitions' after the outer side, a
+partition's after its outer rows, each piece of a partition joined in
+passes after its pass, and a level's resident partitions after the outer
+rows of the partition it split; a partition with inner rows and no outer
+ones is loaded for its tail alone. Every table built or loaded starts
+without marks. The path is serial only, since every participant would
+return the same records without a pair. A rescan that keeps the table
+clears the marks.
 
 ### Spilling
 

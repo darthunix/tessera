@@ -360,6 +360,19 @@ SELECT join_same($$SELECT count(*), sum(length(jsp.s)) FROM jsp WHERE EXISTS (SE
 SELECT join_same($$SELECT jsp.s FROM jsp WHERE NOT EXISTS (SELECT 1 FROM jwide() AS w WHERE w.k = jsp.k)$$);
 -- A rescan with a parameter of the outer side reads the inner side again.
 SELECT join_same($$SELECT v.x, (SELECT count(*) FROM jsp JOIN jsb ON jsp.k = jsb.k WHERE jsp.k < v.x) FROM (VALUES (100), (15000)) AS v(x)$$);
+-- RIGHT and FULL over a table that spills: each table in memory, the
+-- resident partitions', a partition's, each piece of one, and a level's,
+-- returns its records without a pair before it goes.
+SELECT join_explain($$SELECT count(*), count(jsp.s), sum(length(jsb.t)) FROM jsp RIGHT JOIN jsb ON jsp.k = jsb.k$$);
+SELECT join_same($$SELECT count(*), count(jsp.s), sum(length(jsb.t)), sum(jsb.n) FROM jsp RIGHT JOIN jsb ON jsp.k = jsb.k$$);
+SELECT join_same($$SELECT count(*), count(jsp.s), count(jsb.t), sum(jsb.n) FROM jsp FULL JOIN jsb ON jsp.k = jsb.k$$);
+SELECT join_same($$SELECT jsp.s, jsb.t FROM jsp FULL JOIN jsb ON jsp.k = jsb.k WHERE jsb.n % 100 = 3 OR jsp.s LIKE '%77'$$);
+SELECT join_explain($$SELECT count(*), count(jsp.s), sum(jskew.w) FROM jsp RIGHT JOIN jskew() AS jskew ON jsp.k = jskew.k$$);
+SELECT join_same($$SELECT count(*), count(jsp.s), sum(jskew.w) FROM jsp RIGHT JOIN jskew() AS jskew ON jsp.k = jskew.k$$);
+SELECT join_same($$SELECT count(*), count(jsp.s), count(jskew.w), sum(jskew.w) FROM jsp FULL JOIN jskew() AS jskew ON jsp.k = jskew.k$$);
+SELECT join_explain($$SELECT count(*), count(jsp.s), sum(length(w.t)) FROM jsp RIGHT JOIN jwide() AS w ON jsp.k = w.k$$);
+SELECT join_same($$SELECT count(*), count(jsp.s), sum(length(w.t)) FROM jsp RIGHT JOIN jwide() AS w ON jsp.k = w.k$$);
+SELECT join_same($$SELECT count(*), count(jsp.s), count(w.t), sum(length(w.t)) FROM jsp FULL JOIN jwide() AS w ON jsp.k = w.k$$);
 RESET work_mem;
 
 -- RIGHT and FULL: the inner side's records that find a pair are marked,
