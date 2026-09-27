@@ -712,4 +712,75 @@ extern void tess_spill_free(TessSpill *spill);
  */
 extern void tess_spill_release(TessSpill *spill);
 
+/*
+ * Rows a node keeps, such as the input of a sort: records of the kernels'
+ * table format (tessera/table.h) in chunks of the node's memory, never
+ * moved, each with the row's keys and a payload of its kept columns, a
+ * word of their NULL bits and then a Datum each; a by-reference value is
+ * copied into value chunks of its own and its word is a reference to it
+ * (the chunk's number plus one, and the byte), so that a chunk means the
+ * same wherever it is read, spilled blocks included. A record is named by
+ * its 32-bit reference, which tess_rows_append returns and every gather
+ * takes. The records are not linked: there is an index only of the
+ * layout, which the kernels check on every call. Serial only, in the
+ * caller's memory. (TessHashJoin keeps its rows the same way with code of
+ * its own, which shares them between processes and partitions.)
+ */
+typedef struct TessRows TessRows;
+
+typedef struct TessRowsConfig
+{
+	Size		struct_size;
+	/* Owns the rows, their chunks and their values. */
+	MemoryContext parent_context;
+	/* The table's kernels: size, create, chunk_init, append, gather. */
+	const TessKernelOps *kernels;
+	/* The keys every record holds, in their slots. */
+	int			nkeys;
+	const TessTableKeyKind *kinds;
+	/* The kept columns, at most TESS_ROWS_MAX_COLUMNS, and their types. */
+	int			ncolumns;
+	const int16 *typlens;
+	const bool *typbyvals;
+} TessRowsConfig;
+
+#define TESS_ROWS_CONFIG_MIN_SIZE \
+	TESS_ABI_SIZE_INCLUDING_FIELD(TessRowsConfig, typbyvals)
+
+/* A word of NULL bits holds the kept columns': at most 64. */
+#define TESS_ROWS_MAX_COLUMNS 64
+
+/* Empty rows. */
+extern TessRows *tess_rows_create(const TessRowsConfig *config);
+
+/*
+ * Append the rows of rows as records: keys are the rows' nkeys keys, as a
+ * table takes them, and columns their kept columns, each over the same
+ * rows; refs[row] receives the reference of each row's record. Chunks
+ * are added as the records need; a by-reference value is copied, an
+ * expanded object flattened.
+ */
+extern void tess_rows_append(TessRows *rows, const TessTableKey *keys,
+							 const TessDatumColumn *columns,
+							 const TessRowMask *mask, uint32 *refs);
+
+/*
+ * Kept column `column` of the records refs[row] for each row of mask into
+ * values and isnull: a by-reference value as the address of its copy,
+ * valid as long as the rows. Other rows keep their slots.
+ */
+extern void tess_rows_gather(TessRows *rows, int column, const uint32 *refs,
+							 const TessRowMask *mask, Datum *values,
+							 bool *isnull);
+
+/* The records appended, and the bytes the rows take: chunks, values and index. */
+extern uint64 tess_rows_count(const TessRows *rows);
+extern Size tess_rows_memory(const TessRows *rows);
+
+/* Forget every record, keeping nothing but the layout. */
+extern void tess_rows_reset(TessRows *rows);
+
+/* Release the rows and their memory. */
+extern void tess_rows_free(TessRows *rows);
+
 #endif							/* TESSERA_RUNTIME_H */

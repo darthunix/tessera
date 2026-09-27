@@ -394,6 +394,31 @@ then and cancels the callback. `EXPLAIN` prints the totals when
 otherwise, in a serial plan. A rescan of the `Gather` reinitializes the
 chunk and zeroes every row.
 
+## Keeping rows
+
+A node that must hold every row of its input before it returns one, such
+as a sort, keeps them in `TessRows` (`tessera/runtime.h`): records of the
+kernels' table format ([table.md](table.md)) in chunks of its memory, each
+with the row's keys in their slots and a payload of the kept columns, a
+word of their NULL bits and then a word each. A by-value column's word is
+its Datum; a by-reference value is copied into value chunks, an expanded
+object flattened, and its word is the chunk's number plus one and the
+byte, never an address, so a chunk reads the same from a temporary file.
+Records never move and are named by their 32-bit references:
+
+```c
+rows = tess_rows_create(&config);   /* keys, kept columns and their types */
+tess_rows_append(rows, keys, columns, &mask, refs);   /* refs[row] per row */
+tess_rows_gather(rows, column, refs, &mask, values, isnull);
+```
+
+`tess_rows_gather` reads any rows in any order, a batch at a time, and
+gives a by-reference value as the address of its copy, valid as long as
+the rows. The index holds only the layout: nothing is linked or hashed.
+`tess_rows_reset` forgets every record for a rescan. `TessHashJoin` keeps
+its rows in the same format with code of its own, which also shares them
+between processes and partitions.
+
 ## Named plan data
 
 A `CustomPath` and a `CustomScan` carry a node's private data in
