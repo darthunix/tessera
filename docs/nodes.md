@@ -1143,15 +1143,17 @@ after another, and a chunk of columns (`TESS_SPILL_COLUMNS`) of those
 rows: a lane of the output columns' NULL bits, a lane per output column,
 a by-value Datum or a value's byte in its block of values, and a lane per
 word of the rows' items without the reference (0 in its place), which the
-merge compares. A block holds a 64th of `work_mem`, 64 rows at least.
+merge compares. A block holds a 128th of `work_mem`, 64 rows at least.
 
 After the input, the runs merge with the kernel `tess_sort_merge`
 (`tessera/sort.h`): each run's current block in memory, its key lanes
 from its next row on, the kernel putting out the run of each row in order
 and stopping when a run's block is done with more of it to come, which the
-node then reads. A merge takes as many runs as two block pairs each fit
-`work_mem`, 6 at least as the core's does (a small `work_mem` is passed
+node then reads. A merge takes as many runs as a block pair each fits
+`work_mem` (the pairs a batch put out points into stay only until the
+next batch), 6 at least as the core's does (a small `work_mem` is passed
 then) and 256 at most; more runs merge in passes into longer runs first.
+At 4 MB a merge takes 64 runs: 2 M rows make 41 to 55 and merge once.
 The last merge streams: every batch of 64 rows takes its columns from the
 runs' blocks, a by-reference value pointing into its block of values, and
 the blocks a batch points into are freed with the next batch. A plan that
@@ -1160,9 +1162,10 @@ whose blocks are read by their positions, a window within one block, in
 either direction. A rescan without a changed parameter starts the last
 merge again over the runs on disk; a changed one reads the child anew.
 `EXPLAIN ANALYZE` shows `Sort Method: external merge`, the disk written,
-the runs and the passes. At a `work_mem` of 4 MB, 2 M rows of an int4 key
-and column sort in about 130 to 180 ms against the core's 240; at 64 kB,
-where the runs are small and the passes many, in 1.3 s against 0.5.
+the runs and the passes. At a `work_mem` of 4 MB, 2 M rows sort in 0.56
+to 0.73 of the core's time (an int4 key and column 118 ms against 205,
+two keys 187 against 331, with text 173 against 237); at 64 kB, where the
+runs are small and the passes many, in 1.2 s against 0.5.
 
 ### Top-N
 

@@ -991,17 +991,19 @@ plan_external(TessSortState *state)
 												 &state->ext_words, &status),
 				 &status);
 	/*
-	 * A merge holds two block pairs of each run it takes, rows and values:
-	 * blocks of a 64th of work_mem, 64 rows to 256 kB, and a merge of 6
-	 * runs at least, as the core's (a small work_mem is passed then), up
-	 * to TESS_SORT_MAX_MERGE_RUNS.
+	 * A merge holds a block pair of each run it takes, rows and values, and
+	 * briefly the pairs a batch put out points into: blocks of a 128th of
+	 * work_mem, 64 rows to 256 kB, so that a work_mem of 4 MB merges 64
+	 * runs at once, and a merge of 6 runs at least, as the core's (a small
+	 * work_mem is passed then), up to TESS_SORT_MAX_MERGE_RUNS. Blocks of
+	 * a 64th and two pairs each took a pass more for 44 runs.
 	 */
 	row_bytes = sizeof(uint64) * (1 + run_words(state));
-	block_bytes = Min((Size) work_mem * 1024 / 64, (Size) 256 * 1024);
+	block_bytes = Min((Size) work_mem * 1024 / 128, (Size) 256 * 1024);
 	state->block_rows = (uint32) Max(block_bytes / row_bytes, (Size) SORT_ROWS);
 	state->block_values = Max(block_bytes, (Size) 4096);
 	block_bytes = Max(block_bytes, (Size) state->block_rows * row_bytes);
-	state->fan_in = (int) ((Size) work_mem * 1024 / (2 * 2 * block_bytes));
+	state->fan_in = (int) ((Size) work_mem * 1024 / (2 * block_bytes));
 	state->fan_in = Max(state->fan_in, 6);
 	state->fan_in = Min(state->fan_in, TESS_SORT_MAX_MERGE_RUNS);
 }
@@ -1460,7 +1462,7 @@ sort_rows(TessSortState *state)
 	{
 		spill_run(state);
 		merge_runs(state);
-		note_memory(state, (Size) Max(state->ninputs, 1) * 2 *
+		note_memory(state, (Size) Max(state->ninputs, 1) *
 					(state->block_values + sizeof(uint64) * state->block_rows *
 					 (1 + run_words(state))));
 		state->count = 0;
