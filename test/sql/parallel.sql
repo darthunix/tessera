@@ -219,6 +219,24 @@ RESET parallel_leader_participation;
 SET tessera.batch_gather = off;
 EXPLAIN (COSTS OFF) SELECT k, a, t FROM parallel_wide WHERE k % 3 <> 0;
 RESET tessera.batch_gather;
+-- A hundred columns: two lanes of NULL bits in a message, a column from
+-- the 65th on taking its bit in the second.
+DO $$
+BEGIN
+    EXECUTE format('CREATE TABLE parallel_many AS SELECT g AS k, %s, '
+                   'CASE WHEN g %% 5 = 0 THEN NULL ELSE ''x'' || g END AS t '
+                   'FROM generate_series(1, 20000) AS g',
+                   (SELECT string_agg(format('CASE WHEN g %% %s = 0 THEN NULL ELSE g + %s END AS c%s',
+                                             i % 7 + 2, i, i), ', ')
+                    FROM generate_series(1, 98) AS i));
+END $$;
+ANALYZE parallel_many;
+EXPLAIN (COSTS OFF) SELECT * FROM parallel_many WHERE k % 3 <> 0;
+SELECT parallel_same($$SELECT md5(string_agg(q::text, ',' ORDER BY q::text)) FROM (SELECT * FROM parallel_many WHERE k % 3 <> 0 OFFSET 0) AS q$$);
+SET parallel_leader_participation = off;
+SELECT parallel_same($$SELECT md5(string_agg(q::text, ',' ORDER BY q::text)) FROM (SELECT t, c98, c64, * FROM parallel_many WHERE k % 3 <> 0 OFFSET 0) AS q$$);
+RESET parallel_leader_participation;
+DROP TABLE parallel_many;
 -- A projection the workers may compute goes below the gather, and the
 -- batch node there takes it; one of a parallel-restricted function stays
 -- in the leader, above TessGather.

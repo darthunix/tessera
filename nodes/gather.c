@@ -1,5 +1,6 @@
 #include "postgres.h"
 
+#include "access/htup_details.h"
 #include "access/parallel.h"
 #include "commands/explain.h"
 #include "commands/explain_format.h"
@@ -33,7 +34,7 @@
  * that 1.33 M rows of a filtered scan took 27 to 30 ms with two workers
  * against 12.4 ms in one process. Here a worker sends batches: TessSend
  * copies the selected rows of its child's batches into messages of up to
- * GATHER_MESSAGE_ROWS rows, a lane of their NULL bits, a lane of words per
+ * GATHER_MESSAGE_ROWS rows, a lane of their NULL bits per 64 columns, a lane of words per
  * column and the bytes of the by-reference values, each column's word its
  * value or the value's byte in the message, and sends each whole through
  * a queue of its own in the node's chunk of the query's shared memory. The
@@ -52,6 +53,9 @@
 /* Rows of a batch given out, and the most rows of a message. */
 #define GATHER_ROWS 64
 #define GATHER_MESSAGE_ROWS 1024
+/* A message's lanes of NULL bits: column c takes bit c % 64 of lane c / 64. */
+#define GATHER_NULL_LANES(ncolumns) (((ncolumns) + 63) / 64)
+#define GATHER_MAX_NULL_LANES GATHER_NULL_LANES(MaxTupleAttributeNumber)
 /* A queue per worker, as large as four of the core's tuple queues. */
 #define GATHER_QUEUE_SIZE (256 * 1024)
 
@@ -99,7 +103,7 @@ typedef struct MessageBuilder
 	Size		values_len;
 	Size		values_used;
 	TessBatch  *batch;
-	TessDatumColumn columns[64];
+	TessDatumColumn *columns;
 	int			row;
 	int			selected;
 	uint64	   *key_lanes;
@@ -128,6 +132,7 @@ typedef struct TessSendState
 	int			key_words;
 	const TessKernelOps *kernels;
 	/* The lanes of a message: NULL bits, the columns, the keys' words. */
+	int			null_lanes;
 	int			nlanes;
 	/* The rows the parent above needs, -1 for all. */
 	int64		bound;
@@ -255,7 +260,7 @@ static const CustomPathMethods send_path_methods = {
  * projection the planner put there for a batch node that projects, a copy
  * of that node taking the projection's target, as the core's plan would
  * give it the projection. NULL where the core's gather stays: no worker,
- * or no batch path the workers may run of 1 to 64 columns.
+ * or no batch path the workers may run of a column at least.
  */
 static Path *
 gathered_batch_path(Path *subpath, int num_workers)
@@ -277,7 +282,7 @@ gathered_batch_path(Path *subpath, int num_workers)
 	if (num_workers <= 0 || tess_path_node(subpath) == NULL || !subpath->parallel_safe ||
 		subpath->param_info != NULL ||
 		list_length(subpath->pathtarget->exprs) == 0 ||
-		list_length(subpath->pathtarget->exprs) > 64)
+		list_length(subpath->pathtarget->exprs) > MaxTupleAttributeNumber)
 		return NULL;
 	return subpath;
 }
@@ -826,7 +831,7 @@ send_begin(CustomScanState *css, EState *estate, int eflags)
 	state->child_layout = (TessLayout) TESS_STRUCT_INITIALIZER(TessLayout);
 	tess_plan_get_layout(state->child->plan, &state->child_layout);
 	state->ncolumns = desc->natts;
-	if (state->ncolumns != state->child_layout.ntargets || state->ncolumns > 64)
+	if (state->ncolumns != state->child_layout.ntargets || state->ncolumns == 0)
 		elog(ERROR, "TessSend received a foreign plan");
 	state->typlens = palloc_array(int16, Max(state->ncolumns, 1));
 	state->typbyvals = palloc_array(bool, Max(state->ncolumns, 1));
@@ -855,7 +860,8 @@ send_begin(CustomScanState *css, EState *estate, int eflags)
 			elog(ERROR, "TessSend needs the Tessera kernels module");
 		state->key_words = merge_key_words(state->kernels, state->nkeys, state->keys);
 	}
-	state->nlanes = 1 + state->ncolumns + state->key_words;
+	state->null_lanes = GATHER_NULL_LANES(state->ncolumns);
+	state->nlanes = state->null_lanes + state->ncolumns + state->key_words;
 	state->stride = (uint32) Min((Size) GATHER_MESSAGE_ROWS,
 								 Max((Size) GATHER_ROWS,
 									 GATHER_QUEUE_SIZE / 4 /
@@ -901,6 +907,8 @@ fill_message(TessSendState *send, MessageBuilder *builder, TessInput *input,
 		builder->message = MemoryContextAllocZero(context, builder->message_len);
 		builder->values_len = 64 * 1024;
 		builder->values = MemoryContextAlloc(context, builder->values_len);
+		builder->columns = MemoryContextAlloc(context,
+											  sizeof(TessDatumColumn) * send->ncolumns);
 	}
 	lanes = (uint64 *) (builder->message + MAXALIGN(sizeof(GatherHeader)));
 	builder->rows = 0;
@@ -969,7 +977,6 @@ fill_message(TessSendState *send, MessageBuilder *builder, TessInput *input,
 		}
 		while ((row = tess_row_mask_next(&batch->rows, builder->row)) >= 0)
 		{
-			uint64		nulls = 0;
 			Size		need = 0;
 
 			for (int column = 0; column < send->ncolumns; column++)
@@ -984,13 +991,16 @@ fill_message(TessSendState *send, MessageBuilder *builder, TessInput *input,
 				builder->values_len = Max(builder->values_len * 2, builder->values_used + need);
 				builder->values = repalloc_huge(builder->values, builder->values_len);
 			}
+			for (int lane = 0; lane < send->null_lanes; lane++)
+				lanes[(Size) send->stride * lane + builder->rows] = 0;
 			for (int column = 0; column < send->ncolumns; column++)
 			{
-				uint64	   *lane = lanes + (Size) send->stride * (1 + column);
+				uint64	   *lane = lanes + (Size) send->stride * (send->null_lanes + column);
 
 				if (columns[column].isnull[row])
 				{
-					nulls |= UINT64CONST(1) << column;
+					lanes[(Size) send->stride * (column / 64) + builder->rows] |=
+						UINT64CONST(1) << (column % 64);
 					lane[builder->rows] = 0;
 				}
 				else if (send->typbyvals[column])
@@ -1007,9 +1017,9 @@ fill_message(TessSendState *send, MessageBuilder *builder, TessInput *input,
 				}
 			}
 			for (int word = 0; word < send->key_words; word++)
-				lanes[(Size) send->stride * (1 + send->ncolumns + word) + builder->rows] =
+				lanes[(Size) send->stride * (send->null_lanes + send->ncolumns + word) +
+					  builder->rows] =
 					builder->key_lanes[(Size) word * builder->key_capacity + builder->selected];
-			lanes[builder->rows] = nulls;
 			builder->rows++;
 			builder->row = row;
 			builder->selected++;
@@ -1250,7 +1260,7 @@ gather_begin(CustomScanState *css, EState *estate, int eflags)
 		elog(ERROR, "TessGather expected TessSend below it");
 	state->send = (TessSendState *) send;
 	state->ncolumns = desc->natts;
-	if (state->ncolumns != state->send->ncolumns || state->ncolumns > 64 ||
+	if (state->ncolumns != state->send->ncolumns ||
 		state->merge != (state->send->nkeys > 0))
 		elog(ERROR, "TessGather received a foreign plan");
 	state->typbyvals = palloc_array(bool, Max(state->ncolumns, 1));
@@ -1420,20 +1430,29 @@ show_message_window(TessGatherState *state)
 	uint32		n = Min(GATHER_ROWS, state->message_rows - state->next_row);
 	const uint64 *lanes = (const uint64 *) (state->message + MAXALIGN(sizeof(GatherHeader)));
 	const char *values = state->message + message_head(state->send->nlanes, state->message_stride);
-	const uint64 *nulls = lanes + state->next_row;
-	uint64		any = 0;
+	int			null_lanes = state->send->null_lanes;
+	uint64		any[GATHER_MAX_NULL_LANES];
 
-	for (uint32 row = 0; row < n; row++)
-		any |= nulls[row];
+	for (int lane = 0; lane < null_lanes; lane++)
+	{
+		const uint64 *nulls = lanes + (Size) state->message_stride * lane + state->next_row;
+
+		any[lane] = 0;
+		for (uint32 row = 0; row < n; row++)
+			any[lane] |= nulls[row];
+	}
 	for (int column = 0; column < state->ncolumns; column++)
 	{
-		const uint64 *lane = lanes + (Size) state->message_stride * (1 + column) + state->next_row;
+		const uint64 *lane = lanes + (Size) state->message_stride * (null_lanes + column) +
+			state->next_row;
+		const uint64 *nulls = lanes + (Size) state->message_stride * (column / 64) +
+			state->next_row;
 		bool	   *isnull = state->isnull[column];
 		Datum	   *out = state->values[column];
 
-		if ((any >> column) & 1)
+		if ((any[column / 64] >> (column % 64)) & 1)
 			for (uint32 row = 0; row < n; row++)
-				isnull[row] = (nulls[row] >> column) & 1;
+				isnull[row] = (nulls[row] >> (column % 64)) & 1;
 		else
 			memset(isnull, 0, sizeof(bool) * n);
 		if (state->typbyvals[column])
@@ -1558,12 +1577,13 @@ merge_take(TessGatherState *state, int index, uint32 place, int out)
 {
 	MergeSource *source = &state->sources[index];
 	const uint64 *lanes = (const uint64 *) (source->message + MAXALIGN(sizeof(GatherHeader)));
-	uint64		nulls = lanes[place];
+	int			null_lanes = state->send->null_lanes;
 
 	for (int column = 0; column < state->ncolumns; column++)
 	{
-		uint64		word = lanes[(Size) source->stride * (1 + column) + place];
-		bool		null = (nulls >> column) & 1;
+		uint64		word = lanes[(Size) source->stride * (null_lanes + column) + place];
+		bool		null = (lanes[(Size) source->stride * (column / 64) + place] >>
+							(column % 64)) & 1;
 
 		state->isnull[column][out] = null;
 		if (null)
@@ -1627,7 +1647,8 @@ merge_next(TessGatherState *state)
 			for (int word = 0; word < send->key_words; word++)
 				lanes[index * send->key_words + word] = left[index] == 0 ? NULL :
 					(const uint64 *) (source->message + MAXALIGN(sizeof(GatherHeader))) +
-					(Size) source->stride * (1 + state->ncolumns + word) + source->place;
+					(Size) source->stride * (send->null_lanes + state->ncolumns + word) +
+					source->place;
 		}
 		check_kernel(send->kernels->sort_merge(state->nsources, send->key_words, lanes, left,
 											   more, state->merge_state, order,

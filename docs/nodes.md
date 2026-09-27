@@ -1250,7 +1250,7 @@ same rows and costs, when
 - the gather plans workers (a single copy runs in one worker without the
   leader; the core makes one only as the plan-level `Gather` of
   `debug_parallel_query`, outside the paths, and it stays);
-- the child is parallel-safe, unparameterized, of 1 to 64 columns;
+- the child is parallel-safe, unparameterized, of a column at least;
 - `tessera.batch_gather` is on (the default).
 
 A projection the core put under the gather, over a Tessera node that
@@ -1302,7 +1302,8 @@ per target, and `TessSend` keeps its child's.
 query's shared memory a queue of 256 kB per worker, the leader its
 receiver. In a worker it reads its child's batches and copies their
 selected rows into a message: a header (rows, columns, the lanes' stride,
-the bytes of values), a lane of the rows' NULL bits, a lane of words per
+the bytes of values), a lane of the rows' NULL bits per 64 columns (column c
+takes bit c % 64 of lane c / 64), a lane of words per
 column, a by-value Datum or a value's byte offset in the message, and the
 by-reference values' bytes. The rows of a message are as many as a
 quarter of the queue holds in lanes, 64 to 1024; a message is sent when
