@@ -642,7 +642,7 @@ typedef struct TessSpillConfig
  * little: what a write costs goes with its bytes.
  */
 #define TESS_SPILL_BUFFER_LEN(limit) \
-	((Size) Min(Max((Size) (limit) / 16, (Size) 32 * 1024), (Size) 256 * 1024))
+	((Size) Min(Max((Size) (limit) / 16, (Size) BLCKSZ), (Size) 256 * 1024))
 
 /* Where a block starts in its file: a file of segments and a byte in one. */
 typedef struct TessSpillPosition

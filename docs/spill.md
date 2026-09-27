@@ -180,12 +180,16 @@ writing them saves (1 resident partition of 32 made a join of 5 M inner
 rows 3 % slower than none, 2 of 4 made one of 1 M 7 % faster).
 
 **What never goes to disk.** The resident partitions, joined while the
-outer child is read; each partition's tail chunk and the value chunks
-after the last write, joined as they are, so a partition whose rows fit
-in its tail never touches the disk; the outer rows without a pair, found
-so by the empty inner partition or by the Bloom filter of every inner
-row, answered at once; and the first level's filter itself, freed once
-the outer child is done.
+outer child is read; the outer rows without a pair, found so by the
+empty inner partition or by the Bloom filter of every inner row,
+answered at once; and the first level's filter itself, an eighth of
+`hash_mem` at most (a smaller one lets more rows through), freed once
+the outer child is done. A partition's tails, its last chunk and value
+chunks of each side, are written and freed when its level starts
+joining: kept, every partition's tails left the partition being joined,
+or a level below, little of a small `hash_mem`, and a semi join at a
+`hash_mem` of 256 kB split partitions 9483 times (636 ms against the
+core's 16; 20 splits and 37 ms written).
 
 **A partition too large.** Its file is compared with what `hash_mem`
 leaves once the rest of spilling, on every level, is counted. One that

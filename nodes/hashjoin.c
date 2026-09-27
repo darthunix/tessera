@@ -1999,6 +1999,28 @@ side_demote(TessHashJoinState *state, SpillSide *side, int partition)
 	side_compact(side);
 }
 
+/*
+ * A partition on disk writes its values and its tail and frees them, as
+ * its level starts joining: the tails of every partition kept in memory
+ * would leave a partition, or a level below, little of hash_mem, and a
+ * small hash_mem split partitions thousands of times.
+ */
+static void
+side_evict(TessHashJoinState *state, SpillSide *side, int partition)
+{
+	int			index = side->current[partition];
+
+	if (side->parts[partition].resident)
+		return;
+	side_write_values(state, side, partition);
+	side->parts[partition].queued = false;
+	if (index == 0)
+		return;
+	side_write_records(state, side, partition, index);
+	side_free_chunk(side, partition, index);
+	side->current[partition] = 0;
+}
+
 /* A value chunk of len bytes for the partition; its number. */
 static int
 side_value_chunk(SpillSide *side, int partition, Size len)
@@ -2381,6 +2403,13 @@ start_spill(TessHashJoinState *state)
 	check(state, state->kernels->table_bloom_words(Max(expected_rows, 1),
 												   &spill->bloom_words,
 												   &state->status));
+	/*
+	 * An eighth of hash_mem at most: a smaller filter lets more rows
+	 * through, a larger one would leave a small hash_mem no room.
+	 */
+	while (spill->bloom_words > 1 &&
+		   sizeof(uint64) * spill->bloom_words > get_hash_memory_limit() / 8)
+		spill->bloom_words /= 2;
 	spill->bloom = MemoryContextAllocExtended(spill->context,
 											  mul_size(sizeof(uint64), spill->bloom_words),
 											  MCXT_ALLOC_HUGE | MCXT_ALLOC_ZERO);
@@ -2857,8 +2886,15 @@ start_joining(TessHashJoinState *state)
 	spill->bloom = NULL;
 	spill->bloom_words = 0;
 	for (int partition = 0; partition < spill->npartitions; partition++)
+	{
 		if (spill->build.parts[partition].resident)
 			side_release(&spill->build, partition);
+		else
+			side_evict(state, &spill->build, partition);
+		side_evict(state, &spill->probe, partition);
+	}
+	side_compact(&spill->build);
+	side_compact(&spill->probe);
 	MemoryContextReset(state->table_context);
 	state->table.index = NULL;
 	state->table.nchunks = 0;
