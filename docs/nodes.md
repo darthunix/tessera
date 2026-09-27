@@ -8,7 +8,8 @@ no hook; the filter node offers its path to base relations through the
 module's `set_rel_pathlist` hook, the aggregate node to the grouping stage
 through its `create_upper_paths` hook, the hash join node to joins
 through its `set_join_pathlist` hook, the sort node to the ordered stage
-through another `create_upper_paths` hook. It is loaded after the bridge; loading it without
+through another `create_upper_paths` hook, the gather node to the final
+stage through a third. It is loaded after the bridge; loading it without
 the bridge is an error. A
 running installation preloads both in every session (see
 [bridge.md](bridge.md)):
@@ -1225,3 +1226,76 @@ past both ends, and one whose first fetch is backward; a correlated
 subquery whose parameter reaches the child, sorted for every outer row,
 and one whose parameter stays above the node, read once; and a generic
 plan with a parameter.
+
+## TessGather and TessSend
+
+`TessGather` (`nodes/gather.c`) stands in for the core's `Gather` over a
+batch subtree, and `TessSend` is the subtree's top in every worker. The
+core's `Gather` passes rows one by one: a worker forms a minimal tuple of
+each and puts it into a queue, the leader reads and deforms it. Through
+it 1.33 M rows of a filtered scan took 27 to 30 ms with two workers,
+against 12.4 ms in one process: the parallel plan was slower than the
+serial one.
+
+### Planning
+
+The module's `create_upper_paths` hook, at the final relation, walks the
+tree of each of its paths (projections, sorts, aggregates, window
+functions, unique, limit, row locks, material, memoize, joins, appends
+and custom paths) and replaces a `GatherPath` whose child is a Tessera
+path by `TessGather` over `TessSend` over that child, with the same rows
+and costs, when
+
+- the gather is not single-copy and plans workers;
+- the child is parallel-safe, unparameterized and has the gather's
+  target, of 1 to 64 columns;
+- `tessera.batch_gather` is on (the default).
+
+A `TessPack` above the gather goes, since `TessGather` gives batches. The
+plan sets `parallelModeNeeded`; `TessGather`'s layout is dense, one column
+per target, and `TessSend` keeps its child's.
+
+### Execution
+
+`TessSend` is parallel-aware: in the leader it puts into its chunk of the
+query's shared memory a queue of 256 kB per worker, the leader its
+receiver. In a worker it reads its child's batches and copies their
+selected rows into a message: a header (rows, columns, the lanes' stride,
+the bytes of values), a lane of the rows' NULL bits, a lane of words per
+column, a by-value Datum or a value's byte offset in the message, and the
+by-reference values' bytes. The rows of a message are as many as a
+quarter of the queue holds in lanes, 64 to 1024; a message is sent when
+its rows are full or its values pass half the queue. Rows go to no
+parent; when the leader has detached from the queue (a limit above was
+met), the worker stops.
+
+`TessGather` launches the workers as `ExecGather` does
+(`ExecInitParallelPlan` with the child's external parameters,
+`LaunchParallelWorkers`, the queues attached with the workers' handles).
+It reads the queues in turn without waiting and gives its parent each
+message as batches of up to 64 rows whose columns point into the message.
+While every queue is empty and the leader takes part
+(`parallel_leader_participation`), it reads `TessSend`'s child itself as
+a batch input; when it does not, it waits on its latch. It ends when every
+queue is detached and its own share is read. Without launched workers the
+leader reads the whole child. The shutdown finishes the workers and
+moves their counters into the plan's nodes for `EXPLAIN ANALYZE`; a
+rescan shuts them down and rescans the child, and the next fetch launches
+anew. `EXPLAIN` shows `Workers Planned`, `ANALYZE` `Workers Launched`,
+and `VERBOSE` the messages and the rows from the workers and of the
+leader.
+
+On 20 M rows of which 13.3 M pass the gather, one process takes 124 ms;
+with two workers `TessGather` takes 67 ms against 250 to 274 for the
+core's `Gather` over the same nodes and 317 for the core's plan, with four
+47 against 188 and 218.
+
+### Tests
+
+`test/sql/parallel.sql` shows the plans and compares the rows with the
+serial plan's: scans, filters, joins and aggregates under `TessGather`;
+200000 rows with NULLs, text and values of 2000 bytes that fill a
+message's half of its queue before its rows do; twenty columns, which
+narrow a message's rows; the workers alone; a limit that stops them while
+they send; an error in a worker; and the core's `Gather` with
+`tessera.batch_gather` off.

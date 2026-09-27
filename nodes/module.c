@@ -12,6 +12,7 @@ PG_MODULE_MAGIC;
 PGDLLEXPORT void _PG_init(void);
 
 double		tess_join_bloom_ratio = 0.5;
+bool		tess_batch_gather = true;
 
 /*
  * The module registers its node kinds and scan methods. The pack and heap
@@ -44,6 +45,11 @@ _PG_init(void)
 	RegisterCustomScanMethods(&tess_sort_scan_methods);
 	api->nodes->add(&tess_sort_node);
 	tess_sort_planner_init();
+	RegisterCustomScanMethods(&tess_gather_scan_methods);
+	api->nodes->add(&tess_gather_node);
+	RegisterCustomScanMethods(&tess_send_scan_methods);
+	api->nodes->add(&tess_send_node);
+	tess_gather_planner_init();
 	DefineCustomRealVariable("tessera.join_bloom_ratio",
 							 "Share of probe rows with a pair below which a hash join builds a Bloom filter.",
 							 "After its first probe rows a join builds a Bloom filter of its keys when "
@@ -51,4 +57,9 @@ _PG_init(void)
 							 "one at once, whatever the sizes.",
 							 &tess_join_bloom_ratio, 0.5, 0.0, 1.0,
 							 PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomBoolVariable("tessera.batch_gather",
+							 "Gathers a parallel batch subtree's rows in batches.",
+							 "TessGather stands in for the core's Gather over a batch path: the workers "
+							 "send batches of rows instead of a tuple each.",
+							 &tess_batch_gather, true, PGC_USERSET, 0, NULL, NULL, NULL);
 }

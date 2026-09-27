@@ -2326,18 +2326,19 @@ SET min_parallel_table_scan_size = 0;
 -- costs less than a table in each; the node's shared table comes later.
 SET enable_parallel_hash = off;
 EXPLAIN (COSTS OFF) SELECT count(*), sum(jd.n) FROM jbig JOIN jd ON jbig.fk = jd.id;
-                             QUERY PLAN                              
----------------------------------------------------------------------
+                                QUERY PLAN                                 
+---------------------------------------------------------------------------
  Finalize Aggregate
-   ->  Gather
+   ->  Custom Scan (TessGather)
          Workers Planned: 2
-         ->  Parallel Custom Scan (TessAgg)
-               Partial Mode: Partial
-               ->  Parallel Custom Scan (TessHashJoin)
-                     Hash Cond: (jd.id = jbig.fk)
-                     ->  Parallel Custom Scan (TessHeapScan) on jbig
-                     ->  Custom Scan (TessHeapScan) on jd
-(9 rows)
+         ->  Parallel Custom Scan (TessSend)
+               ->  Parallel Custom Scan (TessAgg)
+                     Partial Mode: Partial
+                     ->  Parallel Custom Scan (TessHashJoin)
+                           Hash Cond: (jd.id = jbig.fk)
+                           ->  Parallel Custom Scan (TessHeapScan) on jbig
+                           ->  Custom Scan (TessHeapScan) on jd
+(10 rows)
 
 SELECT join_same($$SELECT count(*), sum(jd.n), sum(jbig.v) FROM jbig JOIN jd ON jbig.fk = jd.id$$);
                    join_same                   
@@ -2429,19 +2430,20 @@ SELECT join_property($$SELECT count(*) FROM jprobe JOIN jbuild ON jprobe.k = jbu
 -- table in the query's shared memory.
 SET enable_parallel_hash = on;
 EXPLAIN (COSTS OFF) SELECT count(*), sum(jbuild.w) FROM jprobe JOIN jbuild ON jprobe.k = jbuild.k;
-                              QUERY PLAN                               
------------------------------------------------------------------------
+                                 QUERY PLAN                                  
+-----------------------------------------------------------------------------
  Finalize Aggregate
-   ->  Gather
+   ->  Custom Scan (TessGather)
          Workers Planned: 2
-         ->  Parallel Custom Scan (TessAgg)
-               Partial Mode: Partial
-               ->  Parallel Custom Scan (TessHashJoin)
-                     Hash Cond: (jprobe.k = jbuild.k)
-                     Shared Table: true
-                     ->  Parallel Custom Scan (TessHeapScan) on jprobe
-                     ->  Parallel Custom Scan (TessHeapScan) on jbuild
-(10 rows)
+         ->  Parallel Custom Scan (TessSend)
+               ->  Parallel Custom Scan (TessAgg)
+                     Partial Mode: Partial
+                     ->  Parallel Custom Scan (TessHashJoin)
+                           Hash Cond: (jprobe.k = jbuild.k)
+                           Shared Table: true
+                           ->  Parallel Custom Scan (TessHeapScan) on jprobe
+                           ->  Parallel Custom Scan (TessHeapScan) on jbuild
+(11 rows)
 
 SELECT join_same($$SELECT count(*), sum(jbuild.w), sum(jprobe.v) FROM jprobe JOIN jbuild ON jprobe.k = jbuild.k$$);
                    join_same                   
@@ -2477,20 +2479,21 @@ SELECT join_same($$SELECT count(*), count(jbuild.w), sum(jprobe.v) FROM jprobe L
 -- records of its pairs in shared memory, and the last one to leave the
 -- table returns those without a mark.
 EXPLAIN (COSTS OFF) SELECT count(*), count(jprobe.v) FROM jprobe RIGHT JOIN jbuild ON jprobe.k = jbuild.k;
-                              QUERY PLAN                               
------------------------------------------------------------------------
+                                 QUERY PLAN                                  
+-----------------------------------------------------------------------------
  Finalize Aggregate
-   ->  Gather
+   ->  Custom Scan (TessGather)
          Workers Planned: 2
-         ->  Parallel Custom Scan (TessAgg)
-               Partial Mode: Partial
-               ->  Parallel Custom Scan (TessHashJoin)
-                     Join Type: Right
-                     Hash Cond: (jprobe.k = jbuild.k)
-                     Shared Table: true
-                     ->  Parallel Custom Scan (TessHeapScan) on jprobe
-                     ->  Parallel Custom Scan (TessHeapScan) on jbuild
-(11 rows)
+         ->  Parallel Custom Scan (TessSend)
+               ->  Parallel Custom Scan (TessAgg)
+                     Partial Mode: Partial
+                     ->  Parallel Custom Scan (TessHashJoin)
+                           Join Type: Right
+                           Hash Cond: (jprobe.k = jbuild.k)
+                           Shared Table: true
+                           ->  Parallel Custom Scan (TessHeapScan) on jprobe
+                           ->  Parallel Custom Scan (TessHeapScan) on jbuild
+(12 rows)
 
 SELECT join_same($$SELECT count(*), count(jprobe.v), sum(jbuild.w) FROM jprobe RIGHT JOIN jbuild ON jprobe.k = jbuild.k$$);
                    join_same                   
@@ -2539,19 +2542,20 @@ SELECT join_same($$SELECT jsmall.k, (SELECT count(*) FROM jprobe RIGHT JOIN jbui
 
 -- Duplicate keys: the next record of a key is found down its chain.
 EXPLAIN (COSTS OFF) SELECT count(*), sum(jgrow.g) FROM jbig JOIN jgrow ON jbig.fk = jgrow.k;
-                              QUERY PLAN                              
-----------------------------------------------------------------------
+                                 QUERY PLAN                                 
+----------------------------------------------------------------------------
  Finalize Aggregate
-   ->  Gather
+   ->  Custom Scan (TessGather)
          Workers Planned: 2
-         ->  Parallel Custom Scan (TessAgg)
-               Partial Mode: Partial
-               ->  Parallel Custom Scan (TessHashJoin)
-                     Hash Cond: (jbig.fk = jgrow.k)
-                     Shared Table: true
-                     ->  Parallel Custom Scan (TessHeapScan) on jgrow
-                     ->  Parallel Custom Scan (TessHeapScan) on jbig
-(10 rows)
+         ->  Parallel Custom Scan (TessSend)
+               ->  Parallel Custom Scan (TessAgg)
+                     Partial Mode: Partial
+                     ->  Parallel Custom Scan (TessHashJoin)
+                           Hash Cond: (jbig.fk = jgrow.k)
+                           Shared Table: true
+                           ->  Parallel Custom Scan (TessHeapScan) on jgrow
+                           ->  Parallel Custom Scan (TessHeapScan) on jbig
+(11 rows)
 
 SELECT join_same($$SELECT count(*), sum(jgrow.g), sum(jbig.v) FROM jbig JOIN jgrow ON jbig.fk = jgrow.k$$);
                    join_same                   
@@ -2623,21 +2627,22 @@ SELECT join_property($$SELECT count(*) FROM jprobe JOIN jbuild ON jprobe.k = jbu
 (1 row)
 
 EXPLAIN (COSTS OFF) SELECT count(*) FROM jprobe JOIN jbuild ON jprobe.k = jbuild.k WHERE jprobe.v::text LIKE '%1%';
-                                 QUERY PLAN                                  
------------------------------------------------------------------------------
+                                    QUERY PLAN                                     
+-----------------------------------------------------------------------------------
  Finalize Aggregate
-   ->  Gather
+   ->  Custom Scan (TessGather)
          Workers Planned: 2
-         ->  Parallel Custom Scan (TessAgg)
-               Partial Mode: Partial
-               ->  Parallel Custom Scan (TessHashJoin)
-                     Hash Cond: (jprobe.k = jbuild.k)
-                     Shared Table: true
-                     ->  Parallel Custom Scan (TessFilter) on jprobe
-                           Filter: ((v)::text ~~ '%1%'::text)
-                           ->  Parallel Custom Scan (TessHeapScan) on jprobe
-                     ->  Parallel Custom Scan (TessHeapScan) on jbuild
-(12 rows)
+         ->  Parallel Custom Scan (TessSend)
+               ->  Parallel Custom Scan (TessAgg)
+                     Partial Mode: Partial
+                     ->  Parallel Custom Scan (TessHashJoin)
+                           Hash Cond: (jprobe.k = jbuild.k)
+                           Shared Table: true
+                           ->  Parallel Custom Scan (TessFilter) on jprobe
+                                 Filter: ((v)::text ~~ '%1%'::text)
+                                 ->  Parallel Custom Scan (TessHeapScan) on jprobe
+                           ->  Parallel Custom Scan (TessHeapScan) on jbuild
+(13 rows)
 
 SELECT join_same($$SELECT count(*), sum(jbuild.w), sum(jprobe.v) FROM jprobe JOIN jbuild ON jprobe.k = jbuild.k WHERE jprobe.v::text LIKE '%1%'$$);
                    join_same                   
@@ -2717,19 +2722,20 @@ SELECT join_same($$SELECT jrefprobe.v, jref.n, jref.t FROM jrefprobe LEFT JOIN j
 (1 row)
 
 EXPLAIN (COSTS OFF) SELECT count(*), sum(length(big.t)) FROM jrefprobe JOIN (SELECT k, CASE WHEN k % 500 = 0 THEN repeat(t, 20) ELSE t END AS t FROM jref) AS big ON jrefprobe.k = big.k;
-                                QUERY PLAN                                
---------------------------------------------------------------------------
+                                   QUERY PLAN                                   
+--------------------------------------------------------------------------------
  Finalize Aggregate
-   ->  Gather
+   ->  Custom Scan (TessGather)
          Workers Planned: 2
-         ->  Parallel Custom Scan (TessAgg)
-               Partial Mode: Partial
-               ->  Parallel Custom Scan (TessHashJoin)
-                     Hash Cond: (jrefprobe.k = jref.k)
-                     Shared Table: true
-                     ->  Parallel Custom Scan (TessHeapScan) on jrefprobe
-                     ->  Parallel Custom Scan (TessHeapScan) on jref
-(10 rows)
+         ->  Parallel Custom Scan (TessSend)
+               ->  Parallel Custom Scan (TessAgg)
+                     Partial Mode: Partial
+                     ->  Parallel Custom Scan (TessHashJoin)
+                           Hash Cond: (jrefprobe.k = jref.k)
+                           Shared Table: true
+                           ->  Parallel Custom Scan (TessHeapScan) on jrefprobe
+                           ->  Parallel Custom Scan (TessHeapScan) on jref
+(11 rows)
 
 SELECT join_same($$SELECT count(*), sum(length(big.t)) FROM jrefprobe JOIN (SELECT k, CASE WHEN k % 500 = 0 THEN repeat(t, 20) ELSE t END AS t FROM jref) AS big ON jrefprobe.k = big.k$$);
                    join_same                   

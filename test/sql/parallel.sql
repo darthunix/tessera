@@ -167,9 +167,11 @@ SELECT plan_property($$SELECT k, count(*) FROM parallel_spread GROUP BY k$$, 'Te
 RESET enable_sort;
 RESET work_mem;
 DROP TABLE parallel_groups, parallel_spread;
--- A batch node above a Gather: the pack under it takes the leader's rows
--- in the Gather's child's slot and the workers' in the Gather's own, two
--- descriptors of one layout, and deforms both by the first.
+-- A batch node above a Gather: with the core's Gather (tessera.batch_gather
+-- off) the pack under it takes the leader's rows in the Gather's child's
+-- slot and the workers' in the Gather's own, two descriptors of one
+-- layout, and deforms both by the first; TessGather gives batches, and
+-- the pack goes.
 CREATE TABLE parallel_pack AS
 SELECT g % 5000 AS k, g AS v FROM generate_series(1, 300000) AS g;
 ANALYZE parallel_pack;
@@ -178,7 +180,12 @@ SET enable_sort = off;
 SET cpu_tuple_cost = 0.05;
 EXPLAIN (COSTS OFF) SELECT k, count(*), sum(v), min(v), max(v) FROM parallel_pack GROUP BY k;
 SELECT parallel_same($$SELECT md5(string_agg(q::text, ',' ORDER BY q::text)) FROM (SELECT k, count(*), sum(v), min(v), max(v) FROM parallel_pack GROUP BY k) AS q$$);
+SET tessera.batch_gather = off;
+EXPLAIN (COSTS OFF) SELECT k, count(*), sum(v), min(v), max(v) FROM parallel_pack GROUP BY k;
+SELECT parallel_same($$SELECT md5(string_agg(q::text, ',' ORDER BY q::text)) FROM (SELECT k, count(*), sum(v), min(v), max(v) FROM parallel_pack GROUP BY k) AS q$$);
 SET parallel_leader_participation = off;
+SELECT parallel_same($$SELECT md5(string_agg(q::text, ',' ORDER BY q::text)) FROM (SELECT k, count(*), sum(v), min(v), max(v) FROM parallel_pack GROUP BY k) AS q$$);
+RESET tessera.batch_gather;
 SELECT parallel_same($$SELECT md5(string_agg(q::text, ',' ORDER BY q::text)) FROM (SELECT k, count(*), sum(v), min(v), max(v) FROM parallel_pack GROUP BY k) AS q$$);
 RESET parallel_leader_participation;
 RESET cpu_tuple_cost;
@@ -188,6 +195,31 @@ DROP TABLE parallel_pack;
 -- An aggregate the node does not compute: the core's partial aggregate over the rows.
 EXPLAIN (COSTS OFF) SELECT count(c), count(*) FROM parallel_t WHERE a > 100;
 SELECT parallel_same($$SELECT count(c), count(*) FROM parallel_t WHERE a > 100$$);
+-- TessGather: the workers send batches of rows through queues of their
+-- own; 200000 rows with NULLs and text, values of up to 2000 bytes that
+-- fill a message's half of its queue before its rows do, twenty columns
+-- that narrow a message's rows, the workers alone, a limit that stops them
+-- while they send, and the core's Gather with tessera.batch_gather off.
+CREATE TABLE parallel_wide AS
+SELECT g AS k, CASE WHEN g % 9 = 0 THEN NULL ELSE g % 1000 END AS a,
+       CASE WHEN g % 11 = 0 THEN NULL ELSE repeat('t', g % 40) || g END AS t,
+       CASE WHEN g % 997 = 0 THEN repeat('w', 2000) END AS w,
+       g + 1 AS c1, g + 2 AS c2, g + 3 AS c3, g + 4 AS c4, g + 5 AS c5, g + 6 AS c6,
+       g + 7 AS c7, g + 8 AS c8, g + 9 AS c9, g + 10 AS c10, g + 11 AS c11,
+       g + 12 AS c12, g + 13 AS c13, g + 14 AS c14, g + 15 AS c15, g + 16 AS c16
+FROM generate_series(1, 200000) AS g;
+ANALYZE parallel_wide;
+EXPLAIN (COSTS OFF) SELECT k, a, t FROM parallel_wide WHERE k % 3 <> 0;
+SELECT parallel_same($$SELECT md5(string_agg(q::text, ',' ORDER BY q::text)) FROM (SELECT k, a, t, w FROM parallel_wide WHERE k % 3 <> 0 OFFSET 0) AS q$$);
+SELECT parallel_same($$SELECT md5(string_agg(q::text, ',' ORDER BY q::text)) FROM (SELECT * FROM parallel_wide WHERE k % 2 = 0 OFFSET 0) AS q$$);
+SET parallel_leader_participation = off;
+SELECT parallel_same($$SELECT md5(string_agg(q::text, ',' ORDER BY q::text)) FROM (SELECT k, a, t, w FROM parallel_wide WHERE k % 3 <> 0 OFFSET 0) AS q$$);
+SELECT count(*) FROM (SELECT k, t FROM parallel_wide WHERE a > 5 LIMIT 10) AS q;
+RESET parallel_leader_participation;
+SET tessera.batch_gather = off;
+EXPLAIN (COSTS OFF) SELECT k, a, t FROM parallel_wide WHERE k % 3 <> 0;
+RESET tessera.batch_gather;
+DROP TABLE parallel_wide;
 -- The switch off.
 SET tessera.enable = off;
 EXPLAIN (COSTS OFF) SELECT a, b FROM parallel_t WHERE a > 4990;

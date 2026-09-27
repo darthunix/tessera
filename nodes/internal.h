@@ -9,6 +9,8 @@
 #define TESS_AGG_NODE_NAME "tessera.agg"
 #define TESS_HASH_JOIN_NODE_NAME "tessera.hash_join"
 #define TESS_SORT_NODE_NAME "tessera.sort"
+#define TESS_GATHER_NODE_NAME "tessera.gather"
+#define TESS_SEND_NODE_NAME "tessera.send"
 
 /* The plan data of TessFilter and TessHashJoin, written by their planners. */
 #define TESS_AGG_DATA "tessera.agg"
@@ -19,6 +21,8 @@
 #define TESS_HASH_JOIN_DATA_VERSION 6
 #define TESS_SORT_DATA "tessera.sort"
 #define TESS_SORT_DATA_VERSION 1
+#define TESS_GATHER_DATA "tessera.gather"
+#define TESS_GATHER_DATA_VERSION 1
 
 /* Clauses (RestrictInfos) in the order the planner evaluates a plan's quals. */
 extern List *tess_order_clauses(PlannerInfo *root, List *rinfos);
@@ -26,6 +30,8 @@ extern double tess_parallel_divisor(const Path *path);
 
 /* tessera.join_bloom_ratio: see nodes/module.c. */
 extern double tess_join_bloom_ratio;
+/* tessera.batch_gather: see nodes/module.c. */
+extern bool tess_batch_gather;
 
 extern const TessNode tess_pack_node;
 extern const CustomScanMethods tess_pack_scan_methods;
@@ -50,5 +56,11 @@ extern void tess_hash_join_planner_init(void);
 extern const TessNode tess_sort_node;
 extern const CustomScanMethods tess_sort_scan_methods;
 extern void tess_sort_planner_init(void);
+
+extern const TessNode tess_gather_node;
+extern const CustomScanMethods tess_gather_scan_methods;
+extern const TessNode tess_send_node;
+extern const CustomScanMethods tess_send_scan_methods;
+extern void tess_gather_planner_init(void);
 
 #endif							/* TESSERA_NODES_INTERNAL_H */
