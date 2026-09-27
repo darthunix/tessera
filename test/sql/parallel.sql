@@ -219,6 +219,21 @@ RESET parallel_leader_participation;
 SET tessera.batch_gather = off;
 EXPLAIN (COSTS OFF) SELECT k, a, t FROM parallel_wide WHERE k % 3 <> 0;
 RESET tessera.batch_gather;
+-- At the core's costs of parallel work the node's own paths cost a row a
+-- quarter of parallel_tuple_cost: a scan returning 8000 rows and a sort of
+-- every row go parallel through TessGather and TessGatherMerge, and stay
+-- serial with tessera.batch_gather off, where a row costs the core's
+-- Gather the whole.
+RESET parallel_setup_cost;
+RESET parallel_tuple_cost;
+EXPLAIN (COSTS OFF) SELECT k, a, t FROM parallel_wide WHERE k < 8000;
+EXPLAIN (COSTS OFF) SELECT k, a FROM parallel_wide ORDER BY a, k;
+SET tessera.batch_gather = off;
+EXPLAIN (COSTS OFF) SELECT k, a, t FROM parallel_wide WHERE k < 8000;
+EXPLAIN (COSTS OFF) SELECT k, a FROM parallel_wide ORDER BY a, k;
+RESET tessera.batch_gather;
+SET parallel_setup_cost = 0;
+SET parallel_tuple_cost = 0;
 DROP TABLE parallel_wide;
 -- The switch off.
 SET tessera.enable = off;

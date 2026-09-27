@@ -1115,8 +1115,10 @@ every participant sorts its share, in memory or in runs of its own, and
 `TessGatherMerge` (below) merges them in place of the `Gather Merge`. That path is parallel-aware only for the
 counters the participants share (`TessSharedStats`: EXPLAIN sums rows,
 runs, disk and memory, and the overrun past each one's `work_mem`). The
-path keeps the core's costs, so the planner chooses between a serial and
-a parallel sort as it would between the core's. `IncrementalSort` stays
+path keeps the core's costs; the ordered stage also gets the node's sort
+of the cheapest partial path under `TessGatherMerge` at the batch
+gather's cost of a row (below), which the core's `Gather Merge` of the
+same sort may have lost to a serial sort already. `IncrementalSort` stays
 with the core.
 The plan's layout is dense, one column per target; the private data gives
 each target's column in the child's batches and each key's target, kind
@@ -1254,6 +1256,22 @@ by, an int4 or int8 target through the integer operator family (as for
 `TessSort`, at most 16 keys), and the kernels module is loaded; TessSend's
 data then lists each key's target, kind and flags.
 
+That replacement keeps the core's costs, and a `Gather` the core costs at
+`parallel_tuple_cost` a row has often lost to a serial path by then.
+So the module also offers the node's own paths where the core gathers,
+at a quarter of `parallel_tuple_cost` a row (13.3 M rows took the leader
+at most 3.5 ns each through `TessGather` against 14 through the core's
+`Gather` over the same nodes): the `set_rel_pathlist` and
+`set_join_pathlist` hooks add `TessGather` over a base or join
+relation's cheapest partial path when that is a Tessera path, before the
+core gathers the same partial path at its own cost, and the ordered
+stage's hook adds `TessGatherMerge` over the node's sort of the cheapest
+partial path; `add_path` keeps the cheaper. At the default costs, 2 M
+rows of `bench_sort` ordered by an int4 key then run in parallel, 61 ms
+against 82 for the serial `TessSort` chosen before, `ORDER BY ... LIMIT
+10` 10 ms against 32 for the core's `Gather Merge` over `TessSort`s that
+get no bound, and a scan returning 200000 of the rows 7 ms against 8.
+
 A `TessPack` above the gather goes, since `TessGather` gives batches. The
 plan sets `parallelModeNeeded`; `TessGather`'s layout is dense, one column
 per target, and `TessSend` keeps its child's.
@@ -1330,7 +1348,8 @@ and values of 2000 bytes carried along, sorts past `work_mem`, the
 workers alone, a limit and an offset, a rescan, and the core's
 `Gather Merge` with `tessera.batch_gather` off.
 `test/sql/parallel.sql` shows the plans and compares the rows with the
-serial plan's: scans, filters, joins and aggregates under `TessGather`;
+serial plan's, and at the default costs the plans that go parallel only
+through the node's own paths: scans, filters, joins and aggregates under `TessGather`;
 200000 rows with NULLs, text and values of 2000 bytes that fill a
 message's half of its queue before its rows do; twenty columns, which
 narrow a message's rows; the workers alone; a limit that stops them while

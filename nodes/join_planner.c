@@ -291,9 +291,9 @@ make_join_path(PlannerInfo *root, RelOptInfo *joinrel, JoinType jointype,
 }
 
 static void
-join_pathlist(PlannerInfo *root, RelOptInfo *joinrel, RelOptInfo *outerrel,
-			  RelOptInfo *innerrel, JoinType jointype,
-			  JoinPathExtraData *extra)
+add_join_paths(PlannerInfo *root, RelOptInfo *joinrel, RelOptInfo *outerrel,
+			   RelOptInfo *innerrel, JoinType jointype,
+			   JoinPathExtraData *extra)
 {
 	JoinKeys	keys;
 	int			ninner;
@@ -301,9 +301,6 @@ join_pathlist(PlannerInfo *root, RelOptInfo *joinrel, RelOptInfo *outerrel,
 	Path	   *inner_path = innerrel->cheapest_total_path;
 	CustomPath *path;
 
-	if (previous_set_join_pathlist_hook != NULL)
-		previous_set_join_pathlist_hook(root, joinrel, outerrel, innerrel,
-										jointype, extra);
 	/*
 	 * The core offers no hash join either without PGS_HASHJOIN. The kinds
 	 * that keep the outer side, which the node probes with: each outer
@@ -387,6 +384,19 @@ join_pathlist(PlannerInfo *root, RelOptInfo *joinrel, RelOptInfo *outerrel,
 		return;
 	path->path.parallel_aware = true;
 	add_partial_path(joinrel, &path->path);
+}
+
+/* The node's paths, then TessGather over the cheapest partial path, before the core gathers it. */
+static void
+join_pathlist(PlannerInfo *root, RelOptInfo *joinrel, RelOptInfo *outerrel,
+			  RelOptInfo *innerrel, JoinType jointype,
+			  JoinPathExtraData *extra)
+{
+	if (previous_set_join_pathlist_hook != NULL)
+		previous_set_join_pathlist_hook(root, joinrel, outerrel, innerrel,
+										jointype, extra);
+	add_join_paths(root, joinrel, outerrel, innerrel, jointype, extra);
+	tess_gather_add_paths(root, joinrel);
 }
 
 

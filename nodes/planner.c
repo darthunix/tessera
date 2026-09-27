@@ -218,15 +218,12 @@ tess_filter_row_path(PlannerInfo *root, RelOptInfo *rel, Path *seqscan)
  * participant, and is parallel-aware for the counters the node shares.
  */
 static void
-set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
-				 RangeTblEntry *rte)
+add_filter_paths(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte)
 {
 	Path	   *seqscan;
 	Path	   *partial;
 	Path	   *child;
 
-	if (previous_set_rel_pathlist_hook != NULL)
-		previous_set_rel_pathlist_hook(root, rel, rti, rte);
 	if (!*tess_runtime_api()->settings->enable ||
 		!relation_supported(root, rel, rte) || !clauses_supported(root, rel))
 		return;
@@ -247,6 +244,17 @@ set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
 	 */
 	if (child != NULL)
 		add_partial_path(rel, (Path *) make_filter_path(rel, partial, child));
+}
+
+/* The node's paths, then TessGather over the cheapest partial path, before the core gathers it. */
+static void
+set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
+				 RangeTblEntry *rte)
+{
+	if (previous_set_rel_pathlist_hook != NULL)
+		previous_set_rel_pathlist_hook(root, rel, rti, rte);
+	add_filter_paths(root, rel, rte);
+	tess_gather_add_paths(root, rel);
 }
 
 /*

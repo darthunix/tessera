@@ -395,6 +395,34 @@ create_upper_paths(PlannerInfo *root, UpperRelationKind stage,
 		else
 			lfirst(lc) = sort;
 	}
+
+	/*
+	 * The node's sort of the cheapest partial path under TessGatherMerge,
+	 * at the batch gather's cost of a row: the core's Gather Merge of the
+	 * same sort, costed at its own, may have lost to a serial sort already.
+	 */
+	if (output_rel->consider_parallel && root->sort_pathkeys != NIL &&
+		input_rel->partial_pathlist != NIL && output_rel->pathlist != NIL)
+	{
+		Path	   *input = linitial(input_rel->partial_pathlist);
+		CustomPath *sort;
+		Path	   *path;
+
+		/* make_sort_path reads a core scan through the node's batch input. */
+		if (pathkeys_contained_in(root->sort_pathkeys, input->pathkeys))
+			return;
+		sort = make_sort_path(root, create_sort_path(root, output_rel, input,
+													 root->sort_pathkeys,
+													 root->limit_tuples));
+		if (sort == NULL || !sort->path.parallel_safe)
+			return;
+		sort->path.parallel_aware = true;
+		/* Every path of the ordered relation emits its target; the relation keeps none. */
+		path = tess_gather_merge_path(root, output_rel, &sort->path,
+									  ((Path *) linitial(output_rel->pathlist))->pathtarget);
+		if (path != NULL)
+			add_path(output_rel, path);
+	}
 }
 
 /*

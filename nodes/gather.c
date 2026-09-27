@@ -6,6 +6,7 @@
 #include "executor/execParallel.h"
 #include "executor/executor.h"
 #include "miscadmin.h"
+#include "optimizer/cost.h"
 #include "optimizer/optimizer.h"
 #include "optimizer/pathnode.h"
 #include "optimizer/planner.h"
@@ -53,6 +54,13 @@
 #define GATHER_MESSAGE_ROWS 1024
 /* A queue per worker, as large as four of the core's tuple queues. */
 #define GATHER_QUEUE_SIZE (256 * 1024)
+
+/*
+ * The share of parallel_tuple_cost a row costs through TessGather, where
+ * the node's own paths are offered: 13.3 M rows took the leader at most
+ * 3.5 ns each against 14 through the core's Gather over the same nodes.
+ */
+#define GATHER_TUPLE_COST_SHARE 0.25
 
 /* What a message starts with; its lanes and values follow, aligned to 8. */
 typedef struct GatherHeader
@@ -321,6 +329,73 @@ make_gather_merge_path(PlannerInfo *root, GatherMergePath *gather)
 	return make_send_and_gather(&gather->path, subpath, gather->num_workers,
 								list_make3(places, kinds, flags),
 								&gather_merge_path_methods, &tess_gather_merge_node);
+}
+
+/*
+ * A gather's cost at the node's share of parallel_tuple_cost for rows rows,
+ * factor times each as the core's costs them.
+ */
+static void
+discount_transfer(Path *path, double rows, double factor)
+{
+	path->total_cost -= (1.0 - GATHER_TUPLE_COST_SHARE) * factor * parallel_tuple_cost * rows;
+}
+
+/*
+ * TessGather over the cheapest partial path of rel, where that is a batch
+ * path, at the node's cost of a row: the core gathers the same partial
+ * path at its own cost after the hooks that call this, and add_path keeps
+ * the cheaper. A base or join relation only, as the core's gathers; for
+ * the topmost one the core applies the final target to it as to any path.
+ */
+void
+tess_gather_add_paths(PlannerInfo *root, RelOptInfo *rel)
+{
+	Path	   *subpath;
+	GatherPath *gather;
+	Path	   *path;
+	double		rows;
+
+	if (!*tess_runtime_api()->settings->enable || !tess_batch_gather ||
+		!rel->consider_parallel || rel->partial_pathlist == NIL ||
+		(rel->reloptkind != RELOPT_BASEREL && rel->reloptkind != RELOPT_JOINREL))
+		return;
+	subpath = linitial(rel->partial_pathlist);
+	if (tess_path_node(subpath) == NULL)
+		return;
+	rows = compute_gather_rows(subpath);
+	gather = create_gather_path(root, rel, subpath, rel->reltarget, NULL, &rows);
+	path = make_gather_path(root, gather);
+	if (path == NULL)
+		return;
+	discount_transfer(path, gather->path.rows, 1.0);
+	add_path(rel, path);
+}
+
+/*
+ * TessGatherMerge over sorted, a partial path of the node's sort in the
+ * ordered relation, at the node's cost of a row, projected to target when
+ * that differs; NULL where the node cannot merge it.
+ */
+Path *
+tess_gather_merge_path(PlannerInfo *root, RelOptInfo *rel, Path *sorted, PathTarget *target)
+{
+	GatherMergePath *gather;
+	Path	   *path;
+	double		rows;
+
+	if (!*tess_runtime_api()->settings->enable || !tess_batch_gather)
+		return NULL;
+	rows = compute_gather_rows(sorted);
+	gather = create_gather_merge_path(root, rel, sorted, sorted->pathtarget, sorted->pathkeys,
+									  NULL, &rows);
+	path = make_gather_merge_path(root, gather);
+	if (path == NULL)
+		return NULL;
+	discount_transfer(path, gather->path.rows, 1.05);
+	if (!equal(path->pathtarget->exprs, target->exprs))
+		path = (Path *) create_projection_path(root, rel, path, target);
+	return path;
 }
 
 /*

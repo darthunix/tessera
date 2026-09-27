@@ -71,5 +71,8 @@ extern const CustomScanMethods tess_send_scan_methods;
 extern const TessNode tess_gather_merge_node;
 extern const CustomScanMethods tess_gather_merge_scan_methods;
 extern void tess_gather_planner_init(void);
+extern void tess_gather_add_paths(PlannerInfo *root, RelOptInfo *rel);
+extern Path *tess_gather_merge_path(PlannerInfo *root, RelOptInfo *rel, Path *sorted,
+									PathTarget *target);
 
 #endif							/* TESSERA_NODES_INTERNAL_H */
