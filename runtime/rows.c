@@ -71,6 +71,9 @@ struct TessRows
 	uint64		null_columns;
 	uint64		records;
 	Size		bytes;
+	/* The most bytes a chunk of records and one of small values take. */
+	Size		chunk_len;
+	Size		value_chunk;
 	TessStatus	status;
 };
 
@@ -151,6 +154,14 @@ tess_rows_create(const TessRowsConfig *config)
 		rows->typbyvals[column] = config->typbyvals[column];
 	}
 	rows->payload_size = sizeof(uint64) * (1 + config->ncolumns);
+	rows->chunk_len = ROWS_CHUNK_LEN;
+	rows->value_chunk = ROWS_VALUE_CHUNK;
+	if (TESS_ABI_HAS_FIELD(config, TessRowsConfig, chunk_len) && config->chunk_len > 0)
+	{
+		rows->chunk_len = TYPEALIGN_DOWN(8, Min(Max(config->chunk_len, (Size) 4096),
+												(Size) ROWS_CHUNK_LEN));
+		rows->value_chunk = Min(Max(config->chunk_len, (Size) 4096), (Size) ROWS_VALUE_CHUNK);
+	}
 	rows->status = (TessStatus) TESS_STRUCT_INITIALIZER(TessStatus);
 	rows->slots = 16;
 	rows->bases = MemoryContextAlloc(context, sizeof(void *) * rows->slots);
@@ -167,7 +178,7 @@ static void
 add_chunk(TessRows *rows)
 {
 	int			chunk = rows->table.nchunks;
-	Size		len = chunk == 0 ? ROWS_FIRST_CHUNK : ROWS_CHUNK_LEN;
+	Size		len = chunk == 0 ? Min(ROWS_FIRST_CHUNK, rows->chunk_len) : rows->chunk_len;
 	void	   *base;
 
 	if (chunk == TESS_TABLE_MAX_CHUNKS)
@@ -238,7 +249,7 @@ store_value(TessRows *rows, Datum value, int16 typlen)
 	else
 		size = datumGetSize(value, false, typlen);
 	aligned = MAXALIGN(size);
-	if (aligned > ROWS_VALUE_CHUNK / 4)
+	if (aligned > rows->value_chunk / 4)
 	{
 		number = new_value_chunk(rows, aligned);
 		byte = 0;
@@ -250,7 +261,7 @@ store_value(TessRows *rows, Datum value, int16 typlen)
 		{
 			/* The first chunk of small values is small, for rows with few. */
 			rows->value_len = rows->value_current < 0 ?
-				ROWS_VALUE_FIRST : ROWS_VALUE_CHUNK;
+				Min(ROWS_VALUE_FIRST, rows->value_chunk) : rows->value_chunk;
 			rows->value_current = new_value_chunk(rows, rows->value_len);
 			rows->value_used = 0;
 		}
@@ -459,26 +470,26 @@ tess_rows_gather(TessRows *rows, int column, const uint32 *refs,
 		}
 }
 
-void
-tess_rows_sort(TessRows *rows, const TessSortKey *keys, uint32 *refs)
+uint64 *
+tess_rows_sort_items(TessRows *rows, const TessSortKey *keys, uint32 *refs,
+					 int *words)
 {
-	int			words;
 	uint64	   *items;
 	uint64		count;
 	Size		nwords;
 
 	check_rows(rows);
-	if (keys == NULL || refs == NULL)
-		elog(ERROR, "Tessera rows sort requires keys and references");
+	if (keys == NULL || refs == NULL || words == NULL)
+		elog(ERROR, "Tessera rows sort requires keys, references and a width");
 	if (!TESS_ABI_HAS_FIELD(rows->kernels, TessKernelOps, sort) ||
 		rows->kernels->sort_item_words == NULL ||
 		rows->kernels->sort_items == NULL || rows->kernels->sort == NULL)
 		elog(ERROR, "Tessera rows sort requires the kernels of the sort");
-	if (rows->records == 0)
-		return;
-	check(rows, rows->kernels->sort_item_words(rows->nkeys, keys, &words,
+	check(rows, rows->kernels->sort_item_words(rows->nkeys, keys, words,
 											   &rows->status));
-	nwords = mul_size((Size) rows->records, (Size) words);
+	if (rows->records == 0)
+		return NULL;
+	nwords = mul_size((Size) rows->records, (Size) *words);
 	items = MemoryContextAllocExtended(rows->context, mul_size(nwords, sizeof(uint64)),
 									   MCXT_ALLOC_HUGE);
 	check(rows, rows->kernels->sort_items(&rows->table, rows->nkeys, keys,
@@ -486,9 +497,19 @@ tess_rows_sort(TessRows *rows, const TessSortKey *keys, uint32 *refs)
 	if (count != rows->records)
 		elog(ERROR, "Tessera rows hold " UINT64_FORMAT " records, the sort found " UINT64_FORMAT,
 			 rows->records, count);
-	check(rows, rows->kernels->sort(items, (Size) count, words, refs,
+	check(rows, rows->kernels->sort(items, (Size) count, *words, refs,
 									&rows->status));
-	pfree(items);
+	return items;
+}
+
+void
+tess_rows_sort(TessRows *rows, const TessSortKey *keys, uint32 *refs)
+{
+	int			words;
+	uint64	   *items = tess_rows_sort_items(rows, keys, refs, &words);
+
+	if (items != NULL)
+		pfree(items);
 }
 
 void

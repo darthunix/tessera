@@ -41,7 +41,8 @@ DECLARE
 BEGIN
     FOR line IN EXECUTE 'EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) ' || query
     LOOP
-        RETURN NEXT regexp_replace(line, 'Memory Usage: \d+', 'Memory Usage: N');
+        RETURN NEXT regexp_replace(regexp_replace(line, 'Memory Usage: \d+', 'Memory Usage: N'),
+                                   '(Disk Usage|Runs|Merge Passes): \d+', '\1: N');
     END LOOP;
 END
 $$;
@@ -158,9 +159,56 @@ SELECT sort_explain($$SELECT i, t FROM sort_seq ORDER BY i DESC LIMIT 10$$);
 SELECT sort_same($$SELECT i, t FROM sort_seq ORDER BY i DESC LIMIT 50000$$);
 RESET max_parallel_workers_per_gather;
 DROP TABLE sort_seq;
--- Past work_mem the core sorts.
-SET work_mem = '4MB';
-EXPLAIN (COSTS OFF) SELECT k, v FROM sort_big ORDER BY k;
+-- Past work_mem: sorted runs on disk, merged. At 64 kB sort_big, text of
+-- up to 300 bytes, takes many runs, more than a merge takes at once, so
+-- that passes merge them into longer ones first.
+SET work_mem = '64kB';
+SET max_parallel_workers_per_gather = 0;
+SELECT sort_explain($$SELECT k, v FROM sort_big ORDER BY k$$);
+SELECT sort_same($$SELECT k, v FROM sort_big ORDER BY k$$);
+SELECT sort_same($$SELECT k, v FROM sort_big ORDER BY k DESC$$);
+-- Every class of key, both directions and places of NULL, several keys,
+-- equal keys (the key alone returned, as ties come in any order).
+CREATE TABLE sort_ext AS
+SELECT CASE WHEN i % 7 = 0 THEN NULL ELSE i % 50 - 25 END AS a,
+       (i % 13 - 6)::bigint * 5000000000 AS b,
+       CASE WHEN i % 11 = 0 THEN NULL ELSE 'r' || i END AS c,
+       i * 7919 % 60000 AS d
+FROM generate_series(0, 59999) AS i;
+ANALYZE sort_ext;
+SELECT sort_same($$SELECT a, b, c, d FROM sort_ext ORDER BY a NULLS FIRST, b DESC, d$$);
+SELECT sort_same($$SELECT a, d FROM sort_ext ORDER BY a DESC NULLS LAST, d DESC$$);
+SELECT sort_same($$SELECT b, d FROM sort_ext ORDER BY b, d$$);
+SELECT sort_same($$SELECT a FROM sort_ext ORDER BY a$$);
+SELECT sort_same($$SELECT b FROM sort_ext ORDER BY b DESC$$);
+SELECT sort_same($$SELECT d FROM sort_ext WHERE d < 0 ORDER BY d$$);
+SELECT sort_same($$SELECT d, c FROM sort_ext WHERE d = 7 ORDER BY d$$);
+-- Rescans: none of the child's parameters changes and the last merge
+-- starts again over the runs; one does and the rows are sorted anew.
+SELECT sort_same($$
+SELECT x, s.k FROM generate_series(1, 3) AS x,
+LATERAL (SELECT k FROM sort_big ORDER BY k DESC OFFSET 99995) AS s ORDER BY x, s.k$$);
+SELECT sort_same($$
+SELECT x, (SELECT array_agg(k) FROM (SELECT k FROM sort_big WHERE k % 1000 = x ORDER BY k DESC) s)
+FROM generate_series(1, 3) AS x ORDER BY x$$);
+-- A scrollable cursor: the last merge writes one run, read by blocks in
+-- either direction. k is 0 to 99999 once each: row n holds n - 1.
+BEGIN;
+DECLARE e SCROLL CURSOR FOR SELECT k FROM sort_big ORDER BY k;
+FETCH ABSOLUTE 50000 FROM e;
+FETCH BACKWARD 3 FROM e;
+FETCH LAST FROM e;
+FETCH PRIOR FROM e;
+FETCH FIRST FROM e;
+FETCH ABSOLUTE 65 FROM e;
+FETCH BACKWARD 2 FROM e;
+MOVE LAST IN e;
+FETCH NEXT FROM e;
+FETCH BACKWARD 2 FROM e;
+CLOSE e;
+COMMIT;
+RESET max_parallel_workers_per_gather;
+DROP TABLE sort_ext;
 RESET work_mem;
 
 -- A scrollable cursor: forward and backward, across batches and past both ends.

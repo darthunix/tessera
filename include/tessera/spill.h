@@ -121,6 +121,13 @@ tess_spill_columns_capacity(const void *chunk)
 	return ((const uint32 *) chunk)[1];
 }
 
+/* Set a chunk's row count: its rows fill the first places of each lane. */
+static inline void
+tess_spill_columns_set_rows(void *chunk, uint32 rows)
+{
+	((uint32 *) chunk)[0] = rows;
+}
+
 /* Lane `lane` of a chunk: 0 the NULL bits, 1 + w stored word w. */
 static inline uint64 *
 tess_spill_columns_lane(void *chunk, int lane)

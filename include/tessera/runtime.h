@@ -766,6 +766,12 @@ typedef struct TessRowsConfig
 	int			ncolumns;
 	const int16 *typlens;
 	const bool *typbyvals;
+	/*
+	 * The most bytes a chunk of records or of values takes, 0 for 1 MB (the
+	 * first of each takes 64 kB at most): smaller for a caller whose memory
+	 * is small, such as a sort that writes runs.
+	 */
+	Size		chunk_len;
 } TessRowsConfig;
 
 #define TESS_ROWS_CONFIG_MIN_SIZE \
@@ -806,6 +812,14 @@ extern void tess_rows_gather(TessRows *rows, int column, const uint32 *refs,
  */
 extern void tess_rows_sort(TessRows *rows, const TessSortKey *keys,
 						   uint32 *refs);
+
+/*
+ * As tess_rows_sort, and the sorted items returned: *words words each, in
+ * the rows' memory, the reference of each in the low 32 bits of its last
+ * word; the caller frees them. NULL for no rows.
+ */
+extern uint64 *tess_rows_sort_items(TessRows *rows, const TessSortKey *keys,
+									uint32 *refs, int *words);
 
 /*
  * Top-N: push the item of each record refs[row] of mask, keyed by keys as
