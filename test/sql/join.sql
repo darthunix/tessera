@@ -2,8 +2,12 @@ CREATE EXTENSION tessera;
 LOAD 'tessera_nodes';
 LOAD 'tessera_limit';
 
--- The rows of a query with the batch nodes and without them, sorted.
-CREATE FUNCTION join_same(query text) RETURNS text
+-- The rows of a query with the batch nodes and without them, sorted. With
+-- core_parallel_hash off the core answers without its shared hash table:
+-- on a key most inner rows share it splits its batches without end (a
+-- minute a query), where its serial hash join takes a tenth of a second.
+CREATE FUNCTION join_same(query text, core_parallel_hash boolean DEFAULT true)
+RETURNS text
 LANGUAGE plpgsql AS $$
 DECLARE
     with_tessera text[];
@@ -13,6 +17,9 @@ BEGIN
     PERFORM set_config('tessera.enable', 'on', true);
     EXECUTE wrapped INTO with_tessera;
     PERFORM set_config('tessera.enable', 'off', true);
+    IF NOT core_parallel_hash THEN
+        PERFORM set_config('enable_parallel_hash', 'off', true);
+    END IF;
     EXECUTE wrapped INTO without_tessera;
     IF with_tessera IS DISTINCT FROM without_tessera THEN
         RETURN format('MISMATCH on %s off %s', with_tessera, without_tessera);
@@ -193,6 +200,10 @@ EXPLAIN (COSTS OFF) SELECT count(*) FROM jf WHERE NOT EXISTS (SELECT 1 FROM jdup
 SELECT join_same($$SELECT jf.v, jf.fk FROM jf WHERE NOT EXISTS (SELECT 1 FROM jdup WHERE jdup.k = jf.fk)$$);
 SELECT join_same($$SELECT jf.v FROM jf WHERE NOT EXISTS (SELECT 1 FROM jdup WHERE jdup.k = jf.fk AND jdup.w > jf.v)$$);
 SELECT join_same($$SELECT jf.v, jf.fk FROM jf LEFT JOIN jd ON jf.fk = jd.id WHERE jd.id IS NULL$$);
+-- A filter over an inner column no parent asks for: the join keeps it for
+-- the filter alone.
+SELECT join_same($$SELECT jf.v FROM jf LEFT JOIN jd ON jf.fk = jd.id WHERE jd.n IS NULL$$);
+SELECT join_same($$SELECT count(*) FROM jf LEFT JOIN jd ON jf.fk = jd.id WHERE jd.n IS NULL$$);
 EXPLAIN (COSTS OFF) SELECT jf.v, jd.label FROM jf LEFT JOIN jd ON jf.fk = jd.id;
 SELECT join_same($$SELECT jf.v, jd.label, jd.n FROM jf LEFT JOIN jd ON jf.fk = jd.id$$);
 SELECT join_same($$SELECT jf.v, jdup.w, jdup.t FROM jf LEFT JOIN jdup ON jf.fk = jdup.k$$);
@@ -537,19 +548,19 @@ ANALYZE jsheavy;
 INSERT INTO jsheavy SELECT 7, g FROM generate_series(1, 100000) AS g;
 SELECT join_property($$SELECT count(*), sum(jsheavy.w) FROM jsouter JOIN jsheavy ON jsouter.k = jsheavy.k$$, 'Shared Table') AS shared,
        join_property($$SELECT count(*), sum(jsheavy.w) FROM jsouter JOIN jsheavy ON jsouter.k = jsheavy.k$$, 'Partitions Joined Together')::int > 0 AS together;
-SELECT join_same($$SELECT count(*), sum(jsheavy.w), sum(length(jsouter.s)) FROM jsouter JOIN jsheavy ON jsouter.k = jsheavy.k$$);
-SELECT join_same($$SELECT jsouter.s, jsheavy.w FROM jsouter JOIN jsheavy ON jsouter.k = jsheavy.k WHERE jsouter.s LIKE '%77'$$);
-SELECT join_same($$SELECT count(*), count(jsheavy.w), sum(jsheavy.w) FROM jsouter LEFT JOIN jsheavy ON jsouter.k = jsheavy.k$$);
-SELECT join_same($$SELECT jsouter.s FROM jsouter LEFT JOIN jsheavy ON jsouter.k = jsheavy.k WHERE jsheavy.w IS NULL$$);
-SELECT join_same($$SELECT count(*), sum(length(jsouter.s)) FROM jsouter WHERE EXISTS (SELECT 1 FROM jsheavy WHERE jsheavy.k = jsouter.k)$$);
-SELECT join_same($$SELECT jsouter.s FROM jsouter WHERE NOT EXISTS (SELECT 1 FROM jsheavy WHERE jsheavy.k = jsouter.k)$$);
-SELECT join_same($$SELECT count(*), sum(jsheavy.w) FROM jsouter JOIN jsheavy ON jsouter.k = jsheavy.k AND jsheavy.w % 3 = jsouter.k % 3$$);
+SELECT join_same($$SELECT count(*), sum(jsheavy.w), sum(length(jsouter.s)) FROM jsouter JOIN jsheavy ON jsouter.k = jsheavy.k$$, false);
+SELECT join_same($$SELECT jsouter.s, jsheavy.w FROM jsouter JOIN jsheavy ON jsouter.k = jsheavy.k WHERE jsouter.s LIKE '%77'$$, false);
+SELECT join_same($$SELECT count(*), count(jsheavy.w), sum(jsheavy.w) FROM jsouter LEFT JOIN jsheavy ON jsouter.k = jsheavy.k$$, false);
+SELECT join_same($$SELECT jsouter.s FROM jsouter LEFT JOIN jsheavy ON jsouter.k = jsheavy.k WHERE jsheavy.w IS NULL$$, false);
+SELECT join_same($$SELECT count(*), sum(length(jsouter.s)) FROM jsouter WHERE EXISTS (SELECT 1 FROM jsheavy WHERE jsheavy.k = jsouter.k)$$, false);
+SELECT join_same($$SELECT jsouter.s FROM jsouter WHERE NOT EXISTS (SELECT 1 FROM jsheavy WHERE jsheavy.k = jsouter.k)$$, false);
+SELECT join_same($$SELECT count(*), sum(jsheavy.w) FROM jsouter JOIN jsheavy ON jsouter.k = jsheavy.k AND jsheavy.w % 3 = jsouter.k % 3$$, false);
 SET parallel_leader_participation = off;
-SELECT join_same($$SELECT count(*), sum(jsheavy.w), sum(length(jsouter.s)) FROM jsouter JOIN jsheavy ON jsouter.k = jsheavy.k$$);
+SELECT join_same($$SELECT count(*), sum(jsheavy.w), sum(length(jsouter.s)) FROM jsouter JOIN jsheavy ON jsouter.k = jsheavy.k$$, false);
 RESET parallel_leader_participation;
 SET enable_material = off;
 SELECT join_same($$SELECT x, n, t FROM (SELECT count(*) AS n, sum(jsheavy.w) AS t FROM jsouter LEFT JOIN jsheavy ON jsouter.k = jsheavy.k) AS ss
-RIGHT JOIN (VALUES (1), (2)) AS v(x) ON true$$);
+RIGHT JOIN (VALUES (1), (2)) AS v(x) ON true$$, false);
 RESET enable_material;
 SELECT count(*) AS temporary_files FROM pg_ls_tmpdir();
 RESET work_mem;
@@ -578,5 +589,5 @@ DROP FUNCTION jwide();
 DROP FUNCTION join_property(text, text);
 DROP FUNCTION join_explain(text);
 DROP FUNCTION join_many();
-DROP FUNCTION join_same(text);
+DROP FUNCTION join_same(text, boolean);
 DROP EXTENSION tessera;

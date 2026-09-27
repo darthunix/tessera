@@ -1,8 +1,12 @@
 CREATE EXTENSION tessera;
 LOAD 'tessera_nodes';
 LOAD 'tessera_limit';
--- The rows of a query with the batch nodes and without them, sorted.
-CREATE FUNCTION join_same(query text) RETURNS text
+-- The rows of a query with the batch nodes and without them, sorted. With
+-- core_parallel_hash off the core answers without its shared hash table:
+-- on a key most inner rows share it splits its batches without end (a
+-- minute a query), where its serial hash join takes a tenth of a second.
+CREATE FUNCTION join_same(query text, core_parallel_hash boolean DEFAULT true)
+RETURNS text
 LANGUAGE plpgsql AS $$
 DECLARE
     with_tessera text[];
@@ -12,6 +16,9 @@ BEGIN
     PERFORM set_config('tessera.enable', 'on', true);
     EXECUTE wrapped INTO with_tessera;
     PERFORM set_config('tessera.enable', 'off', true);
+    IF NOT core_parallel_hash THEN
+        PERFORM set_config('enable_parallel_hash', 'off', true);
+    END IF;
     EXECUTE wrapped INTO without_tessera;
     IF with_tessera IS DISTINCT FROM without_tessera THEN
         RETURN format('MISMATCH on %s off %s', with_tessera, without_tessera);
@@ -706,6 +713,20 @@ SELECT join_same($$SELECT jf.v, jf.fk FROM jf LEFT JOIN jd ON jf.fk = jd.id WHER
                     join_same                    
 -------------------------------------------------
  236 rows, hash 0efe51246a3e6d4d26f11caf4b57969f
+(1 row)
+
+-- A filter over an inner column no parent asks for: the join keeps it for
+-- the filter alone.
+SELECT join_same($$SELECT jf.v FROM jf LEFT JOIN jd ON jf.fk = jd.id WHERE jd.n IS NULL$$);
+                    join_same                    
+-------------------------------------------------
+ 391 rows, hash be346dfb90c0103d7eae7116d33b54b4
+(1 row)
+
+SELECT join_same($$SELECT count(*) FROM jf LEFT JOIN jd ON jf.fk = jd.id WHERE jd.n IS NULL$$);
+                   join_same                   
+-----------------------------------------------
+ 1 rows, hash f0794536f8fe68539fb83cdd8c0c7180
 (1 row)
 
 EXPLAIN (COSTS OFF) SELECT jf.v, jd.label FROM jf LEFT JOIN jd ON jf.fk = jd.id;
@@ -2525,50 +2546,50 @@ SELECT join_property($$SELECT count(*), sum(jsheavy.w) FROM jsouter JOIN jsheavy
  true   | t
 (1 row)
 
-SELECT join_same($$SELECT count(*), sum(jsheavy.w), sum(length(jsouter.s)) FROM jsouter JOIN jsheavy ON jsouter.k = jsheavy.k$$);
+SELECT join_same($$SELECT count(*), sum(jsheavy.w), sum(length(jsouter.s)) FROM jsouter JOIN jsheavy ON jsouter.k = jsheavy.k$$, false);
                    join_same                   
 -----------------------------------------------
  1 rows, hash c1a85879f5b259b3ae7ea143c8bb8376
 (1 row)
 
-SELECT join_same($$SELECT jsouter.s, jsheavy.w FROM jsouter JOIN jsheavy ON jsouter.k = jsheavy.k WHERE jsouter.s LIKE '%77'$$);
+SELECT join_same($$SELECT jsouter.s, jsheavy.w FROM jsouter JOIN jsheavy ON jsouter.k = jsheavy.k WHERE jsouter.s LIKE '%77'$$, false);
                     join_same                     
 --------------------------------------------------
  3090 rows, hash 84e201b7012054d9f8e166abc3aca124
 (1 row)
 
-SELECT join_same($$SELECT count(*), count(jsheavy.w), sum(jsheavy.w) FROM jsouter LEFT JOIN jsheavy ON jsouter.k = jsheavy.k$$);
+SELECT join_same($$SELECT count(*), count(jsheavy.w), sum(jsheavy.w) FROM jsouter LEFT JOIN jsheavy ON jsouter.k = jsheavy.k$$, false);
                    join_same                   
 -----------------------------------------------
  1 rows, hash 4fa207d7d71a64896e68e071b73b014c
 (1 row)
 
-SELECT join_same($$SELECT jsouter.s FROM jsouter LEFT JOIN jsheavy ON jsouter.k = jsheavy.k WHERE jsheavy.w IS NULL$$);
+SELECT join_same($$SELECT jsouter.s FROM jsouter LEFT JOIN jsheavy ON jsouter.k = jsheavy.k WHERE jsheavy.w IS NULL$$, false);
                     join_same                     
 --------------------------------------------------
  9090 rows, hash 78168d0894edd24799766bf7e2bdedeb
 (1 row)
 
-SELECT join_same($$SELECT count(*), sum(length(jsouter.s)) FROM jsouter WHERE EXISTS (SELECT 1 FROM jsheavy WHERE jsheavy.k = jsouter.k)$$);
+SELECT join_same($$SELECT count(*), sum(length(jsouter.s)) FROM jsouter WHERE EXISTS (SELECT 1 FROM jsheavy WHERE jsheavy.k = jsouter.k)$$, false);
                    join_same                   
 -----------------------------------------------
  1 rows, hash fa953eff939e7c0f8c4e985685ad08f9
 (1 row)
 
-SELECT join_same($$SELECT jsouter.s FROM jsouter WHERE NOT EXISTS (SELECT 1 FROM jsheavy WHERE jsheavy.k = jsouter.k)$$);
+SELECT join_same($$SELECT jsouter.s FROM jsouter WHERE NOT EXISTS (SELECT 1 FROM jsheavy WHERE jsheavy.k = jsouter.k)$$, false);
                     join_same                     
 --------------------------------------------------
  9090 rows, hash 78168d0894edd24799766bf7e2bdedeb
 (1 row)
 
-SELECT join_same($$SELECT count(*), sum(jsheavy.w) FROM jsouter JOIN jsheavy ON jsouter.k = jsheavy.k AND jsheavy.w % 3 = jsouter.k % 3$$);
+SELECT join_same($$SELECT count(*), sum(jsheavy.w) FROM jsouter JOIN jsheavy ON jsouter.k = jsheavy.k AND jsheavy.w % 3 = jsouter.k % 3$$, false);
                    join_same                   
 -----------------------------------------------
  1 rows, hash fc184cd587e6f88232c5c6ff26a957d9
 (1 row)
 
 SET parallel_leader_participation = off;
-SELECT join_same($$SELECT count(*), sum(jsheavy.w), sum(length(jsouter.s)) FROM jsouter JOIN jsheavy ON jsouter.k = jsheavy.k$$);
+SELECT join_same($$SELECT count(*), sum(jsheavy.w), sum(length(jsouter.s)) FROM jsouter JOIN jsheavy ON jsouter.k = jsheavy.k$$, false);
                    join_same                   
 -----------------------------------------------
  1 rows, hash c1a85879f5b259b3ae7ea143c8bb8376
@@ -2577,7 +2598,7 @@ SELECT join_same($$SELECT count(*), sum(jsheavy.w), sum(length(jsouter.s)) FROM 
 RESET parallel_leader_participation;
 SET enable_material = off;
 SELECT join_same($$SELECT x, n, t FROM (SELECT count(*) AS n, sum(jsheavy.w) AS t FROM jsouter LEFT JOIN jsheavy ON jsouter.k = jsheavy.k) AS ss
-RIGHT JOIN (VALUES (1), (2)) AS v(x) ON true$$);
+RIGHT JOIN (VALUES (1), (2)) AS v(x) ON true$$, false);
                    join_same                   
 -----------------------------------------------
  2 rows, hash 22e9c0c39c606e5d158dac70955b3ce4
@@ -2669,5 +2690,5 @@ DROP FUNCTION jwide();
 DROP FUNCTION join_property(text, text);
 DROP FUNCTION join_explain(text);
 DROP FUNCTION join_many();
-DROP FUNCTION join_same(text);
+DROP FUNCTION join_same(text, boolean);
 DROP EXTENSION tessera;
