@@ -2119,6 +2119,12 @@
   Тесты join: общая таблица без spill (RIGHT/FULL, дубликаты, by-ref значения, условие соединения, без лидера,
   rescan Gather), со spill (разделы, порции jsskew, без лидера), раунды jsheavy; мутация «хвост у каждого» — 4
   расхождения.
+  Замер (min, мс, вкл/выкл): последовательно (pg-rf2_scratch-0uQDY3) full_join 33.5/145.9 (×0.23), right_join
+  25.5/123.1 (×0.21), со spill при work_mem 1MB full_spill 113.2/198.2 (×0.57), right_spill 102.3/178.8 (×0.57);
+  два воркера (pg-rfpar_scratch-w2-OeuWpg, parallel_setup/tuple_cost = 0 и min_parallel_table_scan_size = 0 в обоих
+  режимах, иначе оба берут Gather под соединением): общая таблица против Parallel Hash Full/Right Join ядра —
+  full_join 17.7/64.8 (×0.27), right_join 13.8/55.5 (×0.25); при 1MB общая таблица не сбрасывается (бюджет —
+  hash_mem каждого участника), цифры те же.
   11. Операции над множествами: UNION, INTERSECT, EXCEPT (с ALL и без; записано 2026-09-27 по решению пользователя).
   а) UNION ALL — Append ядра над пакетными детьми сейчас рвёт пачки (над каждым ребёнком pack или выдача строками):
   пакетный Append (TessAppend, выдача пачек детей по очереди, с частичным режимом — Parallel Append ядра как образец)
