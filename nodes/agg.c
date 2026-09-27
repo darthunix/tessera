@@ -383,20 +383,20 @@ query_supported(PlannerInfo *root, RelOptInfo *input_rel, RelOptInfo *output_rel
 }
 
 /*
- * The grouping expressions when the node can group by them: 1 to 16 int4
+ * The expressions of grouping or distinct clauses when the node can group
+ * by them: 1 to 16 int4
  * or int8 values the expression compiler takes, a bare column or a chain
  * such as c % 10. NIL otherwise, also when the planner dropped every
  * grouping clause, as for a constant one.
  */
 static List *
-group_keys(PlannerInfo *root)
+clause_keys(PlannerInfo *root, List *clauses)
 {
 	List	   *keys = NIL;
 
-	if (root->processed_groupClause == NIL ||
-		list_length(root->processed_groupClause) > TESS_TABLE_MAX_KEYS)
+	if (clauses == NIL || list_length(clauses) > TESS_TABLE_MAX_KEYS)
 		return NIL;
-	foreach_node(SortGroupClause, clause, root->processed_groupClause)
+	foreach_node(SortGroupClause, clause, clauses)
 	{
 		Node	   *expr = (Node *) get_sortgroupclause_expr(clause,
 															root->processed_tlist);
@@ -408,6 +408,12 @@ group_keys(PlannerInfo *root)
 		keys = lappend(keys, expr);
 	}
 	return keys;
+}
+
+static List *
+group_keys(PlannerInfo *root)
+{
+	return clause_keys(root, root->processed_groupClause);
 }
 
 /* The core's aggregate paths of the list with this strategy and split. */
@@ -527,6 +533,40 @@ create_partial_paths(PlannerInfo *root, RelOptInfo *grouped_rel,
 }
 
 /*
+ * SELECT DISTINCT is grouping without aggregates: the node's path next to
+ * each of the core's hashed distinct paths, over the same input, its keys
+ * the distinct expressions. DISTINCT ON, which keeps other columns of a
+ * row of each group, needs the order and stays with the core.
+ */
+static void
+create_distinct_paths(PlannerInfo *root, RelOptInfo *input_rel,
+					  RelOptInfo *output_rel)
+{
+	List	   *keys;
+	List	   *tlist;
+
+	if (root->parse->hasDistinctOn || IS_DUMMY_REL(input_rel))
+		return;
+	keys = clause_keys(root, root->processed_distinctClause);
+	if (keys == NIL)
+		return;
+	tlist = add_to_flat_tlist(NIL, keys);
+	/* add_path changes the list: the candidates are taken first. */
+	foreach_ptr(AggPath, agg, aggregate_templates(output_rel->pathlist,
+												  AGG_HASHED, AGGSPLIT_SIMPLE))
+	{
+		CustomPath *path;
+
+		if (agg->groupClause == NIL ||
+			not_from_groups((Node *) agg->path.pathtarget->exprs, keys))
+			continue;
+		path = make_agg_path(root, agg, tlist, list_length(keys));
+		if (path != NULL)
+			add_path(output_rel, &path->path);
+	}
+}
+
+/*
  * The node's path in place of each of the core's plain aggregate paths
  * whose input can be read in batches, and the parallel stack in place of
  * each partial one.
@@ -543,8 +583,14 @@ create_upper_paths(PlannerInfo *root, UpperRelationKind stage,
 	if (previous_create_upper_paths_hook != NULL)
 		previous_create_upper_paths_hook(root, stage, input_rel, output_rel,
 										 extra);
-	if (!*tess_runtime_api()->settings->enable ||
-		stage != UPPERREL_GROUP_AGG ||
+	if (!*tess_runtime_api()->settings->enable)
+		return;
+	if (stage == UPPERREL_DISTINCT)
+	{
+		create_distinct_paths(root, input_rel, output_rel);
+		return;
+	}
+	if (stage != UPPERREL_GROUP_AGG ||
 		!query_supported(root, input_rel, output_rel))
 		return;
 	if (root->parse->groupClause != NIL)

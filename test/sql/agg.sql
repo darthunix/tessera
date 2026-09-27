@@ -279,6 +279,20 @@ EXPLAIN (COSTS OFF) SELECT b, count(*) FROM agg_t GROUP BY b;
 RESET enable_hashagg;
 DROP FUNCTION agg_explain(text);
 
+-- SELECT DISTINCT groups without aggregates: NULL a value of its own, two
+-- keys, an int8 and an expression; over a filter; above it a count.
+EXPLAIN (COSTS OFF) SELECT DISTINCT b FROM agg_t;
+SELECT agg_same($$SELECT DISTINCT b FROM agg_t$$);
+SELECT agg_same($$SELECT DISTINCT a % 13 FROM agg_t$$);
+SELECT agg_same($$SELECT count(*), sum(b), sum(r) FROM (SELECT DISTINCT b, a % 3 AS r FROM agg_t) AS s$$);
+EXPLAIN (COSTS OFF) SELECT count(*), sum(b), sum(r) FROM (SELECT DISTINCT b, a % 3 AS r FROM agg_t) AS s;
+SELECT agg_same($$SELECT count(*), sum(x) FROM (SELECT DISTINCT a::bigint * 1000000000 AS x FROM agg_t WHERE a > 250) AS s$$);
+SELECT agg_same($$SELECT count(*) FROM (SELECT DISTINCT a FROM agg_t) AS s$$);
+SELECT agg_same($$SELECT DISTINCT b FROM agg_t WHERE false$$);
+-- Left to the core: DISTINCT ON, a text key.
+EXPLAIN (COSTS OFF) SELECT DISTINCT ON (b) b, a FROM agg_t ORDER BY b, a;
+EXPLAIN (COSTS OFF) SELECT DISTINCT c FROM agg_t;
+
 -- Under a single-copy Gather.
 SET debug_parallel_query = on;
 EXPLAIN (COSTS OFF) SELECT count(*) FROM agg_t WHERE a > 100;
