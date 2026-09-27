@@ -263,6 +263,27 @@ extern TessStatusCode tess_table_append_partitioned(const TessTableRef *table,
 													TessStatus *status);
 
 /*
+ * As tess_table_append_partitioned, each row's payload taken from columns
+ * as tess_table_append_columns takes it (the table's payload is a word of
+ * NULL bits and a word per column): every row appended adds one to
+ * rows[partition], and its NULL bits are ORed into *nulls.
+ */
+extern TessStatusCode tess_table_append_partitioned_columns(const TessTableRef *table,
+															const uint32 *partition_chunks,
+															int npartitions,
+															uint32 shift,
+															const uint32 *hashes,
+															int nkeys,
+															const TessTableKey *keys,
+															int ncolumns,
+															const TessDatumColumn *columns,
+															TessRowMask *pending,
+															uint32 *offsets,
+															uint64 *rows,
+															uint64 *nulls,
+															TessStatus *status);
+
+/*
  * Copy the records of chunk `source` of a table of the key kinds and
  * payload size from byte *from on (TESS_TABLE_CHUNK_HEADER at first),
  * whole and in order, each to the chunk of its hash's partition, and move

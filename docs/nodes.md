@@ -861,7 +861,9 @@ two of partitions, from 4 to 1024, that makes the inner side it expects
 half of it. The records read so far are split into the partitions by
 their hashes' low bits (`tess_table_split`), their by-reference values
 copied into value chunks of their partitions, and the rest of the inner
-side is appended partitioned (`tess_table_append_partitioned`). Every
+side is appended partitioned from the batch's columns
+(`tess_table_append_partitioned_columns`), which counts each partition's
+rows; the node then only copies the by-reference values. Every
 partition starts resident, in memory whole; while the partitions,
 their values, a Bloom filter of every inner row and room for the outer
 side's tails take more than `hash_mem`, the largest resident partition

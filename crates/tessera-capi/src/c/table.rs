@@ -15,7 +15,8 @@ use tessera_core::ColumnReader;
 use tessera_kernels::table::{
     Chunks, Combine, CombineStop, Cursor, FORMAT_VERSION, Fold, HEADER_SIZE, KeyKind, KeySource,
     MAX_KEYS, Partitions, PayloadColumns, Slot, Table, TableConfig, TableMut, UNIT_BITS,
-    VERSION_OFFSET, append_columns_to, append_partitioned_to, append_to,
+    VERSION_OFFSET, append_columns_to, append_partitioned_columns_to, append_partitioned_to,
+    append_to,
     bloom::SharedFilter,
     index_size, init_chunk, normalize_word,
     phases::{Participant, SharedCounters},
@@ -709,6 +710,102 @@ pub unsafe extern "C" fn tess_table_append_partitioned(
                 payload,
                 &mut pending,
                 offsets,
+            )
+            .map(drop)
+        })
+    }
+}
+
+/// `tess_table_append_partitioned_columns`: as
+/// [`tess_table_append_partitioned`], each row's payload taken from
+/// `columns` as [`tess_table_append_columns`] takes it; every row appended
+/// counts in `rows` at its partition, and its NULL bits go into `*nulls`.
+///
+/// # Safety
+///
+/// As for [`tess_table_append_partitioned`] and
+/// [`tess_table_append_columns`]; `rows` must point to `npartitions`
+/// counts and `nulls` to a word, both writable and not accessed by
+/// anything else during the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tess_table_append_partitioned_columns(
+    table: *const TableRef,
+    partition_chunks: *const u32,
+    npartitions: c_int,
+    shift: u32,
+    hashes: *const u32,
+    nkeys: c_int,
+    keys: *const TableKey,
+    ncolumns: c_int,
+    columns: *const DatumColumn,
+    pending: *mut Mask,
+    offsets: *mut u32,
+    rows: *mut u64,
+    nulls: *mut u64,
+    status: *mut Status,
+) -> Code {
+    // SAFETY: the caller's contract.
+    unsafe {
+        guard(status, || {
+            let (_, chunks) = chunks_of(table)?;
+            let partitions = partitions(partition_chunks, npartitions, shift)?;
+            let mut decoded = TableKeys::empty();
+            table_keys(nkeys, keys, &mut decoded)?;
+            let key_list = slice::from_raw_parts(keys, decoded.nkeys);
+            let mut kinds = [KeyKind::Int32; MAX_KEYS];
+            for (slot, key) in kinds.iter_mut().zip(key_list) {
+                *slot = if key.kind == 2 {
+                    KeyKind::Int64
+                } else {
+                    KeyKind::Int32
+                };
+            }
+            let ncolumns = usize::try_from(ncolumns).context("a negative column count")?;
+            ensure!(
+                ncolumns <= 64,
+                "a payload has up to 64 columns, not {ncolumns}"
+            );
+            let config = TableConfig {
+                keys: &kinds[..decoded.nkeys],
+                payload_size: 8 * (1 + ncolumns),
+            };
+            let mut pending = pending.as_mut().context("a null pending mask")?.mask()?;
+            let nrows = pending.as_view().nrows();
+            let hashes = values(hashes, nrows, "hashes")?;
+            let offsets = slots(offsets, nrows, "offsets")?;
+            let rows = slots(rows, partitions.chunks.len(), "partition row counts")?;
+            let nulls = nulls.as_mut().context("a null word of NULL bits")?;
+            let columns = values(columns, ncolumns, "payload columns")?;
+            // Only the columns given are set, as tess_table_append_columns does.
+            let mut words = [const { MaybeUninit::<&[u64]>::uninit() }; 64];
+            let mut flags = [const { MaybeUninit::<&[bool]>::uninit() }; 64];
+            for (index, column) in columns.iter().enumerate() {
+                ensure!(
+                    usize::try_from(column.nrows).ok() == Some(nrows),
+                    "payload column {index} has {} rows, not {nrows}",
+                    column.nrows
+                );
+                words[index].write(values(column.values, nrows, "payload values")?);
+                flags[index].write(values(column.isnull, nrows, "payload NULL flags")?);
+            }
+            // SAFETY: the loop above initialized the first `ncolumns`
+            // slots of each array, and `ncolumns` is at most 64.
+            let (words, flags) = (
+                &*(&raw const words[..ncolumns] as *const [&[u64]]),
+                &*(&raw const flags[..ncolumns] as *const [&[bool]]),
+            );
+            let payload = PayloadColumns::new(words, flags, nrows)?;
+            append_partitioned_columns_to(
+                &config,
+                chunks,
+                &partitions,
+                hashes,
+                &decoded,
+                &payload,
+                &mut pending,
+                offsets,
+                rows,
+                nulls,
             )
             .map(drop)
         })

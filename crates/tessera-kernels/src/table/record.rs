@@ -418,7 +418,8 @@ impl<'r, R: Region> Access<'r, R> {
     /// # Safety
     ///
     /// As [`Self::write`]; `columns` has as many columns as the payload
-    /// has words after its first, and `row` is one of its rows.
+    /// has words after its first, and `row` is one of its rows. Returns
+    /// the row's word of NULL bits.
     #[inline(always)]
     pub(super) unsafe fn write_columns<const N: usize>(
         &self,
@@ -428,7 +429,7 @@ impl<'r, R: Region> Access<'r, R> {
         bit: usize,
         columns: &PayloadColumns<'_>,
         row: usize,
-    ) {
+    ) -> u64 {
         let record_size = self.record_size;
         // SAFETY: the caller's contract: the record lies within the chunk,
         // past its used mark, and nothing else reads or writes it yet.
@@ -439,7 +440,7 @@ impl<'r, R: Region> Access<'r, R> {
         // SAFETY: the caller's contract on `keys` and `N`.
         let tail = unsafe { fill_head::<N>(bytes, self.nkeys, hash, keys, bit) };
         // SAFETY: the caller's contract on `columns` and `row`.
-        unsafe { columns.write_row(row, tail) };
+        unsafe { columns.write_row(row, tail) }
     }
 }
 
@@ -493,14 +494,15 @@ impl<'a> PayloadColumns<'a> {
     }
 
     /// Write row `row` as a payload into `tail`, the words after a
-    /// record's keys, whose padding is zeroed.
+    /// record's keys, whose padding is zeroed; returns its word of NULL
+    /// bits.
     ///
     /// # Safety
     ///
     /// `row` is below the columns' row count, and `tail` has at least one
     /// word more than the columns.
     #[inline(always)]
-    unsafe fn write_row(&self, row: usize, tail: &mut [[u8; 8]]) {
+    unsafe fn write_row(&self, row: usize, tail: &mut [[u8; 8]]) -> u64 {
         let columns = self.values.len();
         debug_assert!(tail.len() > columns);
         let mut nulls = 0u64;
@@ -517,6 +519,7 @@ impl<'a> PayloadColumns<'a> {
         // SAFETY: the tail has a word more than the columns.
         unsafe { *tail.get_unchecked_mut(0) = nulls.to_ne_bytes() };
         zero_words(&mut tail[1 + columns..]);
+        nulls
     }
 }
 

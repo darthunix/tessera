@@ -393,6 +393,121 @@ fn append_partitioned_rows<
     Ok(appended)
 }
 
+/// As [`append_partitioned`], each row's payload taken from `columns` as
+/// [`append_columns`] takes it: every row appended counts in `rows` at its
+/// partition, and its NULL bits go into `nulls`.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn append_partitioned_columns<R: Region, K: KeySource + ?Sized>(
+    region: &R,
+    layout: &Layout,
+    partitions: &Partitions<'_>,
+    hashes: &[u32],
+    keys: &K,
+    columns: &PayloadColumns<'_>,
+    pending: &mut RowMask<'_>,
+    offsets: &mut [u32],
+    rows: &mut [u64],
+    nulls: &mut u64,
+) -> Result<usize> {
+    let nrows = pending.as_view().nrows();
+    check(layout, keys, nrows, hashes.len(), offsets.len())?;
+    ensure!(
+        layout.payload_size == 8 * (1 + columns.len()),
+        "the table's payload has {} bytes, not a word of NULL bits and {} columns",
+        layout.payload_size,
+        columns.len()
+    );
+    ensure!(
+        columns.nrows() == nrows,
+        "the payload columns do not have the batch's {nrows} rows"
+    );
+    let mask = check_partitions(region, partitions)?;
+    ensure!(
+        rows.len() == partitions.chunks.len(),
+        "{} row counts for {} partitions",
+        rows.len(),
+        partitions.chunks.len()
+    );
+    shaped!(
+        layout.nkeys,
+        layout.tail_words(),
+        append_partitioned_column_rows(
+            region, layout, partitions, mask, hashes, keys, columns, pending, offsets, rows, nulls
+        )
+    )
+}
+
+/// The rows of [`append_partitioned_columns`], shaped as [`append_rows`];
+/// the words after the keys are the columns', so `T` does not matter.
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+fn append_partitioned_column_rows<
+    R: Region,
+    K: KeySource + ?Sized,
+    const N: usize,
+    const T: usize,
+    const L: usize,
+>(
+    region: &R,
+    layout: &Layout,
+    partitions: &Partitions<'_>,
+    mask: u32,
+    hashes: &[u32],
+    keys: &K,
+    columns: &PayloadColumns<'_>,
+    pending: &mut RowMask<'_>,
+    offsets: &mut [u32],
+    rows: &mut [u64],
+    nulls: &mut u64,
+) -> Result<usize> {
+    let access = Access::for_chunks(region, layout);
+    let record_size = access.record_size();
+    let nrows = pending.as_view().nrows();
+    let shift = partitions.shift;
+    let mut buffer = slot_buffer::<L>();
+    let mut word_keys = WordKeys::new(&mut buffer, access.nkeys());
+    let mut appended = 0;
+    let mut seen = 0u64;
+    for index in 0..nrows.div_ceil(64) {
+        let selected = pending.as_view().word(index).unwrap();
+        if selected == 0 {
+            continue;
+        }
+        word_keys.load(keys, index, selected)?;
+        let mut bits = selected;
+        let mut done = 0;
+        while bits != 0 {
+            let bit = bits.trailing_zeros() as usize;
+            bits &= bits - 1;
+            let row = index * 64 + bit;
+            let partition = ((hashes[row] >> shift) & mask) as usize;
+            // Checked: every partition's chunk exists, and has a count.
+            let chunk = partitions.chunks[partition] as usize;
+            let (used, room) = access.room(chunk)?;
+            if room == 0 {
+                continue;
+            }
+            // SAFETY: the place lies past the used mark and within the
+            // chunk, as `room` counted; the buffer and the shape are this
+            // table's; the payload is a word and one per column, and `row`
+            // is below the columns' row count, `nrows`.
+            seen |= unsafe {
+                access.write_columns::<N>((chunk, used), hashes[row], &word_keys, bit, columns, row)
+            };
+            offsets[row] = access.reference((chunk, used));
+            // SAFETY: the caller is the chunk's one writer, and the record
+            // just written ends at the new mark.
+            unsafe { access.set_used(chunk, used + record_size) };
+            rows[partition] += 1;
+            done |= 1 << bit;
+            appended += 1;
+        }
+        pending.intersect_word(index, !done)?;
+    }
+    *nulls |= seen;
+    Ok(appended)
+}
+
 /// Copy the records of chunk `source` from byte `*from` on, whole and in
 /// order, each to the chunk of its hash's partition, whose one writer the
 /// caller is, and move `*from` past them: at most `offsets.len()` of them,

@@ -330,6 +330,37 @@ pub fn append_partitioned_to<K: KeySource + ?Sized>(
     )
 }
 
+/// As [`append_partitioned_to`], each row's payload taken from `columns`
+/// as [`append_columns_to`] takes it: every row appended counts in `rows`
+/// at its partition, and its NULL bits go into `nulls`.
+#[allow(clippy::too_many_arguments)]
+pub fn append_partitioned_columns_to<K: KeySource + ?Sized>(
+    config: &TableConfig<'_>,
+    chunks: Chunks<'_>,
+    partitions: &Partitions<'_>,
+    hashes: &[u32],
+    keys: &K,
+    columns: &PayloadColumns<'_>,
+    pending: &mut RowMask<'_>,
+    offsets: &mut [u32],
+    rows: &mut [u64],
+    nulls: &mut u64,
+) -> Result<usize> {
+    let layout = header::chunk_layout(config)?;
+    batch::append_partitioned_columns(
+        &chunk_region(&chunks),
+        &layout,
+        partitions,
+        hashes,
+        keys,
+        columns,
+        pending,
+        offsets,
+        rows,
+        nulls,
+    )
+}
+
 /// Copy the records of chunk `source` of a table of `config` from byte
 /// `*from` on, whole and in order, each to the chunk of its hash's
 /// partition, and move `*from` past them: at most `offsets.len()`, their

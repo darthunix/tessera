@@ -311,7 +311,12 @@ on chunks alone, without the index, as `tess_table_append` does:
   current chunk of its partition, given as a chunk number per partition.
   A row whose partition's chunk is full stays pending while the rows
   after it go on, so the node gives every such partition a new chunk and
-  calls again.
+  calls again. `tess_table_append_partitioned_columns` does the same with
+  the payload taken from columns, as `tess_table_append_columns` takes
+  it, and also adds each appended row to its partition's count and ORs
+  the rows' NULL bits into a word: a spilling join appends a batch
+  without a pass of its own over the rows (plan item 5.12, a fifth off a
+  spilled join).
 - `tess_table_split` copies the records of one chunk, whole and in order,
   each to the chunk of its partition, and stops before a record whose
   partition's chunk is full, naming that partition; it returns the new

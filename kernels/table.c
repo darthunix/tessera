@@ -78,4 +78,5 @@ const TessKernelOps tess_kernel_ops = {
 	.table_gather_scattered = tess_table_gather_scattered,
 	.sort_top_candidates = tess_sort_top_candidates,
 	.sort_top_push = tess_sort_top_push,
+	.table_append_partitioned_columns = tess_table_append_partitioned_columns,
 };
