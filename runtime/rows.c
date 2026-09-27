@@ -6,7 +6,8 @@
  * kernels from the columns themselves (tess_table_append_columns) and read
  * back by reference, prefetched, since a sort reads them in no order
  * (tess_table_gather_scattered). A record's payload is a word of its kept
- * columns' NULL bits, then a word per column: a by-value Datum, or the reference of
+ * columns' NULL bits per 64 of them (column c takes bit c % 64 of word
+ * c / 64), then a word per column: a by-value Datum, or the reference of
  * a by-reference value's copy in the value chunks, the first of
  * ROWS_VALUE_FIRST bytes and the others of ROWS_VALUE_CHUNK, a value
  * larger than a quarter of one getting a chunk of its own. A reference is
@@ -42,6 +43,8 @@ struct TessRows
 	int			ncolumns;
 	int16	   *typlens;
 	bool	   *typbyvals;
+	/* The payload's words of NULL bits, and its bytes. */
+	int			null_words;
 	Size		payload_size;
 	/* The index of the layout, and the chunks by number with room for slots. */
 	TessTableRef table;
@@ -65,10 +68,10 @@ struct TessRows
 	TessDatumColumn *payload;
 	Datum	  **copies;
 	uint64	   *pending_bits;
-	/* A gather's NULL words, for capacity rows. */
-	Datum	   *null_words;
-	/* Bit c: kept column c holds a NULL somewhere. */
-	uint64		null_columns;
+	/* A gather's words of NULL bits, for capacity rows. */
+	Datum	   *null_bits;
+	/* Bit c % 64 of word c / 64: kept column c holds a NULL somewhere. */
+	uint64	   *null_columns;
 	uint64		records;
 	Size		bytes;
 	/* The most bytes a chunk of records and one of small values take. */
@@ -153,7 +156,9 @@ tess_rows_create(const TessRowsConfig *config)
 		rows->typlens[column] = config->typlens[column];
 		rows->typbyvals[column] = config->typbyvals[column];
 	}
-	rows->payload_size = sizeof(uint64) * (1 + config->ncolumns);
+	rows->null_words = Max((config->ncolumns + 63) / 64, 1);
+	rows->payload_size = sizeof(uint64) * (rows->null_words + config->ncolumns);
+	rows->null_columns = MemoryContextAllocZero(context, sizeof(uint64) * rows->null_words);
 	rows->chunk_len = ROWS_CHUNK_LEN;
 	rows->value_chunk = ROWS_VALUE_CHUNK;
 	if (TESS_ABI_HAS_FIELD(config, TessRowsConfig, chunk_len) && config->chunk_len > 0)
@@ -286,7 +291,7 @@ reserve(TessRows *rows, int nrows)
 	{
 		pfree(rows->hashes);
 		pfree(rows->pending_bits);
-		pfree(rows->null_words);
+		pfree(rows->null_bits);
 		for (int column = 0; column < rows->ncolumns; column++)
 			if (rows->copies[column] != NULL)
 				pfree(rows->copies[column]);
@@ -309,8 +314,8 @@ reserve(TessRows *rows, int nrows)
 	rows->pending_bits = MemoryContextAlloc(rows->context,
 											sizeof(uint64) *
 											tess_row_mask_word_count(rows->capacity));
-	rows->null_words = MemoryContextAlloc(rows->context,
-										  sizeof(Datum) * rows->capacity);
+	rows->null_bits = MemoryContextAlloc(rows->context,
+										 sizeof(Datum) * rows->capacity);
 }
 
 /*
@@ -371,11 +376,11 @@ tess_rows_append(TessRows *rows, const TessTableKey *keys,
 	{
 		const TessDatumColumn *values = &columns[column];
 		TessDatumColumn *payload = &rows->payload[column];
-		uint64		bit = UINT64CONST(1) << column;
+		uint64		bit = UINT64CONST(1) << (column % 64);
 
-		if ((rows->null_columns & bit) == 0 &&
+		if ((rows->null_columns[column / 64] & bit) == 0 &&
 			tess_rows_selected_null(mask, values->isnull))
-			rows->null_columns |= bit;
+			rows->null_columns[column / 64] |= bit;
 		*payload = *values;
 		if (!rows->typbyvals[column])
 		{
@@ -432,7 +437,7 @@ tess_rows_gather(TessRows *rows, int column, const uint32 *refs,
 		elog(ERROR, "Tessera rows gather requires references, a mask and outputs");
 	nwords = tess_row_mask_word_count(mask->nrows);
 	check(rows, rows->kernels->table_gather_scattered(&rows->table, refs, mask,
-													  sizeof(uint64) * (1 + column),
+													  sizeof(uint64) * (rows->null_words + column),
 													  values, &rows->status));
 	/* A by-reference value's word is its reference: its address here. */
 	bases = rows->values;
@@ -453,20 +458,21 @@ tess_rows_gather(TessRows *rows, int column, const uint32 *refs,
 	 * A column no row left NULL needs no bits: every flag is false, the
 	 * rows outside the mask's too, which a caller may set to anything.
 	 */
-	if (((rows->null_columns >> column) & 1) == 0)
+	if (((rows->null_columns[column / 64] >> (column % 64)) & 1) == 0)
 	{
 		memset(isnull, 0, sizeof(bool) * mask->nrows);
 		return;
 	}
 	reserve(rows, mask->nrows);
-	check(rows, rows->kernels->table_gather_scattered(&rows->table, refs, mask, 0,
-													  rows->null_words, &rows->status));
+	check(rows, rows->kernels->table_gather_scattered(&rows->table, refs, mask,
+													  sizeof(uint64) * (column / 64),
+													  rows->null_bits, &rows->status));
 	for (int word = 0; word < nwords; word++)
 		for (uint64 bits = mask->bits[word]; bits != 0; bits &= bits - 1)
 		{
 			int			row = word * 64 + pg_rightmost_one_pos64(bits);
 
-			isnull[row] = (DatumGetUInt64(rows->null_words[row]) >> column) & 1;
+			isnull[row] = (DatumGetUInt64(rows->null_bits[row]) >> (column % 64)) & 1;
 		}
 }
 
@@ -549,7 +555,7 @@ tess_rows_reset(TessRows *rows)
 	rows->value_current = -1;
 	rows->value_len = 0;
 	rows->value_used = 0;
-	rows->null_columns = 0;
+	memset(rows->null_columns, 0, sizeof(uint64) * rows->null_words);
 	rows->records = 0;
 	make_index(rows);
 }

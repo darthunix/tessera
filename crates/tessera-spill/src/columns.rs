@@ -3,8 +3,9 @@
 //! A join's outer rows that wait for their partition are never linked or
 //! probed: they are written, read once and probed then. They are kept as
 //! a chunk of columns instead of the table's records: a header, then a
-//! lane per column of `capacity` words each, the first the rows' NULL
-//! bits (bit `w` for word `w`), then a lane per stored word (a by-value
+//! lane per column of `capacity` words each, first the rows' NULL bits
+//! (bit `w % 64` of lane `w / 64` for word `w`, one lane at least), then a
+//! lane per stored word (a by-value
 //! Datum, or the reference of a by-reference value; 0 for a NULL). The
 //! rows fill the lanes from the first place on, and a lane is read back as
 //! an array of Datums, with no gathering.
@@ -28,12 +29,24 @@ pub const HEADER: usize = 16;
 /// reference to it gives it.
 pub const MAX_ROWS: usize = (1 << 17) - 1;
 
-/// The most stored words: a word of NULL bits holds one bit per word.
-pub const MAX_WORDS: usize = 64;
+/// The most stored words: a record's most columns and a sort item's words.
+pub const MAX_WORDS: usize = 4096;
 
-/// Bytes a packed chunk may take past its lanes' bytes: a count word and
-/// a descriptor of 16 bytes per lane.
-pub const PACK_SLACK: usize = 8 + 16 * (1 + MAX_WORDS);
+/// Lanes of NULL bits in a chunk of `words` stored words.
+pub fn null_lanes(words: usize) -> usize {
+    words.div_ceil(64).max(1)
+}
+
+/// Lanes of a chunk of `words` stored words: its NULL bits and the words.
+pub fn lanes(words: usize) -> usize {
+    null_lanes(words) + words
+}
+
+/// Bytes a packed chunk of `words` stored words may take past its lanes'
+/// bytes: a count word and a descriptor of 16 bytes per lane.
+pub fn pack_slack(words: usize) -> usize {
+    8 + 16 * lanes(words)
+}
 
 const ROWS_AT: usize = 0;
 const CAPACITY_AT: usize = 4;
@@ -58,21 +71,26 @@ pub struct Shape {
 }
 
 impl Shape {
-    /// Where lane `lane` starts: lane 0 is the NULL bits, lane `1 + w`
-    /// stored word `w`.
+    /// Where lane `lane` starts: the NULL bits' lanes first, then lane
+    /// [`Self::word_lane`] of each stored word.
     pub fn lane_at(&self, lane: usize) -> usize {
         HEADER + 8 * self.capacity * lane
+    }
+
+    /// The lane of stored word `word`.
+    pub fn word_lane(&self, word: usize) -> usize {
+        null_lanes(self.words) + word
     }
 }
 
 /// Bytes of a chunk of `capacity` rows of `words` stored words.
 pub fn size(capacity: usize, words: usize) -> usize {
-    HEADER + 8 * capacity * (1 + words)
+    HEADER + 8 * capacity * lanes(words)
 }
 
 /// The rows a chunk of `len` bytes holds, with `words` stored words.
 pub fn capacity(len: usize, words: usize) -> usize {
-    (len.saturating_sub(HEADER) / (8 * (1 + words))).min(MAX_ROWS)
+    (len.saturating_sub(HEADER) / (8 * lanes(words))).min(MAX_ROWS)
 }
 
 /// Make the `len` bytes of `chunk` an empty chunk of `words` stored words;
@@ -131,7 +149,7 @@ pub fn set_rows(chunk: &mut [u8], rows: usize) {
 
 /// Bytes a packed chunk of `rows` rows of `words` stored words may take.
 pub fn pack_bound(rows: usize, words: usize) -> usize {
-    8 + (1 + words) * (16 + (8 * rows).next_multiple_of(8))
+    8 + lanes(words) * (16 + (8 * rows).next_multiple_of(8))
 }
 
 fn lane(chunk: &[u8], shape: &Shape, lane: usize) -> impl Iterator<Item = u64> {
@@ -169,7 +187,7 @@ fn get<const W: usize>(packed: &[u8], base: u64, out: &mut [u8]) {
 /// (its lanes for its rows only) are returned.
 pub fn pack(chunk: &[u8], out: &mut [u8]) -> Result<(usize, usize)> {
     let shape = shape(chunk)?;
-    let lanes = 1 + shape.words;
+    let lanes = lanes(shape.words);
     ensure!(
         out.len() >= pack_bound(shape.rows, shape.words),
         "a chunk of columns of {} rows packs into up to {} bytes, not {}",
@@ -229,7 +247,7 @@ pub fn unpack(packed: &[u8], out: &mut [u8]) -> Result<()> {
         "a packed chunk of {rows} rows of {words} words does not unpack into {} bytes",
         out.len()
     );
-    let lanes = 1 + words;
+    let lanes = lanes(words);
     ensure!(
         packed.len() >= 8 + 16 * lanes,
         "a packed chunk of columns is shorter than its descriptors"
@@ -361,6 +379,31 @@ mod tests {
             .collect();
         round_trip(10, 2, &rows);
         round_trip(10, 0, &(0..10).map(|row| vec![row]).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn wide_chunks_take_a_lane_of_null_bits_per_64_words() {
+        assert_eq!(
+            (
+                null_lanes(0),
+                null_lanes(64),
+                null_lanes(65),
+                null_lanes(130)
+            ),
+            (1, 1, 2, 3)
+        );
+        let words = 130;
+        let rows: Vec<Vec<u64>> = (0..50_u64)
+            .map(|row| {
+                (0..lanes(words) as u64)
+                    .map(|lane| row * 1000 + lane * (row % 3))
+                    .collect()
+            })
+            .collect();
+        let (_, back) = round_trip(60, words, &rows);
+        let shape = shape(&back).unwrap();
+        assert_eq!(shape.word_lane(0), 3);
+        assert_eq!(size(4, words), HEADER + 8 * 4 * 133);
     }
 
     #[test]

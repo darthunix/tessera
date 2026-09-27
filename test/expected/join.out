@@ -960,7 +960,7 @@ SELECT join_explain($$SELECT count(*) FROM jf JOIN join_many() AS m(k) ON jf.v =
          Memory Usage: within hash_mem
          Builds: 1
          Build Rows: 20000
-         Chunks: 45
+         Chunks: 47
          Batches: 4
          Resident Partitions: 0
          Spilled Chunks: 200

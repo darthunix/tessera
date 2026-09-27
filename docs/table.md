@@ -191,7 +191,8 @@ reference of its record in `offsets`; the rows still pending need
 another chunk. `payload` is the payload of every physical row one after
 another, or `NULL` for zeros. `tess_table_append_columns` takes the
 payload from columns instead, a `TessDatumColumn` each: a record's payload
-is then a word of the row's NULL bits and a word per column, 0 for a NULL,
+is then a word of the row's NULL bits per 64 columns (column `c` takes bit
+`c % 64` of word `c / 64`) and a word per column, 0 for a NULL,
 written straight from the columns with no array in between (`TessRows`
 passes a by-value column as it is and a by-reference one as the
 references of its copies). Append does not read the index, which a
@@ -314,7 +315,8 @@ on chunks alone, without the index, as `tess_table_append` does:
   calls again. `tess_table_append_partitioned_columns` does the same with
   the payload taken from columns, as `tess_table_append_columns` takes
   it, and also adds each appended row to its partition's count and ORs
-  the rows' NULL bits into a word: a spilling join appends a batch
+  the rows' NULL bits into a word, so it takes 64 columns at most: a
+  spilling join appends a batch
   without a pass of its own over the rows (plan item 5.12, a fifth off a
   spilled join).
 - `tess_table_split` copies the records of one chunk, whole and in order,

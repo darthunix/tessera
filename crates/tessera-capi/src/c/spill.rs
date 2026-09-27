@@ -206,14 +206,15 @@ pub unsafe extern "C" fn tess_spill_unpack(
 }
 
 /// `tess_spill_columns_layout`: the bytes of a chunk of columns' header
-/// (0) and where its row count (1) and capacity (2) lie, for the C side's
-/// checks; 0 for another code.
+/// (0) and where its row count (1), capacity (2) and stored words (3) lie,
+/// for the C side's checks; 0 for another code.
 #[unsafe(no_mangle)]
 pub extern "C" fn tess_spill_columns_layout(what: c_int) -> usize {
     match what {
         0 => columns::HEADER,
         1 => 0,
         2 => 4,
+        3 => 8,
         _ => 0,
     }
 }
@@ -316,9 +317,8 @@ pub unsafe extern "C" fn tess_spill_columns_append_partitioned(
             let rows = slots(rows, npartitions, "partition row counts")?;
             let ncolumns = usize::try_from(ncolumns).context("a negative column count")?;
             ensure!(
-                ncolumns <= columns::MAX_WORDS,
-                "a chunk of columns keeps up to {} words, not {ncolumns}",
-                columns::MAX_WORDS
+                ncolumns <= 64,
+                "a partitioned chunk of columns keeps up to 64 words, not {ncolumns}"
             );
             let given = values(columns_in, ncolumns, "columns")?;
             // Only the columns given are set: a batch of a few rows would

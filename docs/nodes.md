@@ -1102,7 +1102,7 @@ sort's input, with the same rows, costs and path keys, when
 - every path key orders by an int4 or int8 expression of the sort's
   input target through the integer operator family, ascending or
   descending, NULLs first or last, at most 16 keys;
-- the output has 1 to 64 columns;
+- the output has 1 to 1664 columns, a tuple's most;
 - the query is not `FETCH ... WITH TIES`, which passes no bound, and the
   kernels module is loaded.
 
@@ -1151,7 +1151,7 @@ external sort's items has its bit for NULL, so that every run's items
 have one width. A run is a set of its own ([spill.md](spill.md), "Files")
 of block pairs: a block of the by-reference values of some rows, one
 after another, and a chunk of columns (`TESS_SPILL_COLUMNS`) of those
-rows: a lane of the output columns' NULL bits, a lane per output column,
+rows: a lane of the output columns' NULL bits per 64 stored words, a lane per output column,
 a by-value Datum or a value's byte in its block of values, and a lane per
 word of the rows' items without the reference, which the merge compares:
 the last word goes when it holds no key's bits (an int4 key's 33 bits

@@ -353,7 +353,7 @@ tess_spill_write(TessSpill *spill, int partition, TessSpillKind kind,
 	{
 		Size		packed;
 		Size		unpacked;
-		Size		room = len + TESS_SPILL_COLUMNS_SLACK;
+		Size		room = len + TESS_SPILL_COLUMNS_SLACK(tess_spill_columns_words(body));
 		char	   *out;
 
 		if (spill->buffered + sizeof(bytes) + room > spill->buffer_len &&

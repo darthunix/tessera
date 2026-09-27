@@ -1780,42 +1780,49 @@ fn a_null_group_key_and_int8_keys_pass_their_filter() -> Result<()> {
 
 /// Records appended from payload columns hold what records appended from
 /// the same payload laid out row by row hold: a word of the row's NULL
-/// bits, then a word per column, 0 for a NULL; the rows left out of the
-/// mask get none, and a column of the wrong length or a payload of the
-/// wrong size is refused.
+/// bits per 64 columns, then a word per column, 0 for a NULL; the rows
+/// left out of the mask get none, and a column of the wrong length or a
+/// payload of the wrong size is refused.
 #[test]
 fn payload_columns_append_the_records_a_payload_array_does() -> Result<()> {
-    use tessera_kernels::table::PayloadColumns;
+    payload_columns_of(3)?;
+    payload_columns_of(64)?;
+    payload_columns_of(130)
+}
+
+fn payload_columns_of(ncolumns: usize) -> Result<()> {
+    use tessera_kernels::table::{PayloadColumns, payload_null_words};
     const ROWS: usize = 150;
-    const COLUMNS: usize = 3;
+    let null_words = payload_null_words(ncolumns);
     let keys_values: Vec<i32> = (0..ROWS as i32).map(|row| row * 7 % 50).collect();
     let keys = [ColumnView::try_new(&keys_values, None)?];
     let hashes: Vec<u32> = keys_values.iter().map(|&value| hash_i32(value)).collect();
-    let values: Vec<Vec<u64>> = (0..COLUMNS)
+    let values: Vec<Vec<u64>> = (0..ncolumns)
         .map(|column| {
             (0..ROWS as u64)
                 .map(|row| row * 1000 + column as u64)
                 .collect()
         })
         .collect();
-    let nulls: Vec<Vec<bool>> = (0..COLUMNS)
+    let nulls: Vec<Vec<bool>> = (0..ncolumns)
         .map(|column| (0..ROWS).map(|row| row % (3 + column) == 0).collect())
         .collect();
     // The same payload row by row, as a caller would lay it out.
-    let mut payload = vec![0u64; ROWS * (1 + COLUMNS)];
+    let width = null_words + ncolumns;
+    let mut payload = vec![0u64; ROWS * width];
     for row in 0..ROWS {
-        for column in 0..COLUMNS {
+        for column in 0..ncolumns {
             if nulls[column][row] {
-                payload[row * (1 + COLUMNS)] |= 1 << column;
+                payload[row * width + column / 64] |= 1 << (column % 64);
             } else {
-                payload[row * (1 + COLUMNS) + 1 + column] = values[column][row];
+                payload[row * width + null_words + column] = values[column][row];
             }
         }
     }
     let payload_bytes: Vec<u8> = payload.iter().flat_map(|word| word.to_ne_bytes()).collect();
     let config = TableConfig {
         keys: &[KeyKind::Int32],
-        payload_size: 8 * (1 + COLUMNS),
+        payload_size: 8 * width,
     };
     // Every third row left out of the mask.
     let mut selected = all_rows(ROWS);
@@ -1878,7 +1885,7 @@ fn payload_columns_append_the_records_a_payload_array_does() -> Result<()> {
         assert_eq!(got.hash, expected.hash);
     }
     // Refusals: a column shorter than the batch, a payload of another size.
-    let short: Vec<&[u64]> = vec![&values[0][..ROWS - 1]; COLUMNS];
+    let short: Vec<&[u64]> = vec![&values[0][..ROWS - 1]; ncolumns];
     assert!(PayloadColumns::new(&short, &null_slices, ROWS).is_err());
     let two = PayloadColumns::new(&value_slices[..2], &null_slices[..2], ROWS)?;
     let mut table = LocalTable::new(&config, 0, CHUNK)?;

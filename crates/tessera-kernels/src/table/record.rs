@@ -444,11 +444,21 @@ impl<'r, R: Region> Access<'r, R> {
     }
 }
 
+/// The most columns a payload holds: PostgreSQL's most attributes of a
+/// tuple, with room to spare.
+pub const MAX_PAYLOAD_COLUMNS: usize = 2048;
+
+/// The words of NULL bits in the payload of `columns` columns: column `c`
+/// takes bit `c % 64` of word `c / 64`, and a payload has one at least.
+pub fn payload_null_words(columns: usize) -> usize {
+    columns.div_ceil(64).max(1)
+}
+
 /// The payload of a batch's rows as its columns hold them: per column a
 /// word per row (a by-value Datum, or whatever word the caller stores for
 /// a value, such as a reference to its copy) and a NULL flag per row. A
-/// record's payload is a word of the row's NULL bits, then a word per
-/// column, 0 for a NULL.
+/// record's payload is its words of the row's NULL bits
+/// ([`payload_null_words`]), then a word per column, 0 for a NULL.
 #[derive(Clone, Copy, Debug)]
 pub struct PayloadColumns<'a> {
     values: &'a [&'a [u64]],
@@ -457,12 +467,11 @@ pub struct PayloadColumns<'a> {
 }
 
 impl<'a> PayloadColumns<'a> {
-    /// Columns of `nrows` rows each, at most 64, as the word of NULL bits
-    /// holds.
+    /// Columns of `nrows` rows each, at most [`MAX_PAYLOAD_COLUMNS`].
     pub fn new(values: &'a [&'a [u64]], nulls: &'a [&'a [bool]], nrows: usize) -> Result<Self> {
         ensure!(
-            values.len() == nulls.len() && values.len() <= 64,
-            "a payload has up to 64 columns of values and NULL flags, not {} and {}",
+            values.len() == nulls.len() && values.len() <= MAX_PAYLOAD_COLUMNS,
+            "a payload has up to {MAX_PAYLOAD_COLUMNS} columns of values and NULL flags, not {} and {}",
             values.len(),
             nulls.len()
         );
@@ -501,17 +510,26 @@ impl<'a> PayloadColumns<'a> {
         self.values.is_empty()
     }
 
+    /// Words of NULL bits of the payload.
+    pub fn null_words(&self) -> usize {
+        payload_null_words(self.values.len())
+    }
+
     /// Write row `row` as a payload into `tail`, the words after a
-    /// record's keys, whose padding is zeroed; returns its word of NULL
-    /// bits.
+    /// record's keys, whose padding is zeroed; returns its first word of
+    /// NULL bits, all of them for 64 columns or fewer.
     ///
     /// # Safety
     ///
-    /// `row` is below the columns' row count, and `tail` has at least one
-    /// word more than the columns.
+    /// `row` is below the columns' row count, and `tail` has at least
+    /// [`Self::null_words`] words more than the columns.
     #[inline(always)]
     unsafe fn write_row(&self, row: usize, tail: &mut [[u8; 8]]) -> u64 {
         let columns = self.values.len();
+        if columns > 64 {
+            // SAFETY: the caller's contract.
+            return unsafe { self.write_wide_row(row, tail) };
+        }
         debug_assert!(tail.len() > columns);
         let mut nulls = 0u64;
         for column in 0..columns {
@@ -528,6 +546,30 @@ impl<'a> PayloadColumns<'a> {
         unsafe { *tail.get_unchecked_mut(0) = nulls.to_ne_bytes() };
         zero_words(&mut tail[1 + columns..]);
         nulls
+    }
+
+    /// [`Self::write_row`] for more than 64 columns: a word of NULL bits
+    /// per 64 of them.
+    ///
+    /// # Safety
+    ///
+    /// As for [`Self::write_row`].
+    #[inline(never)]
+    unsafe fn write_wide_row(&self, row: usize, tail: &mut [[u8; 8]]) -> u64 {
+        let columns = self.values.len();
+        let words = self.null_words();
+        debug_assert!(tail.len() >= words + columns);
+        tail[..words].fill([0; 8]);
+        for column in 0..columns {
+            let null = self.nulls[column][row];
+            if null {
+                let word = &mut tail[column / 64];
+                *word = (u64::from_ne_bytes(*word) | (1 << (column % 64))).to_ne_bytes();
+            }
+            tail[words + column] = (if null { 0 } else { self.values[column][row] }).to_ne_bytes();
+        }
+        zero_words(&mut tail[words + columns..]);
+        u64::from_ne_bytes(tail[0])
     }
 }
 

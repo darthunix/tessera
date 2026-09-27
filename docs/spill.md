@@ -24,7 +24,8 @@ A node spills chunks of its table whole, never rows one by one:
   partition (`crates/tessera-spill/src/columns.rs`, `tessera/spill.h`).
   They are never linked or probed as records, only written and read back
   once, so they are kept as a header and then a lane per column of the
-  chunk's capacity: the rows' NULL bits, then a word per stored column (a
+  chunk's capacity: the rows' NULL bits, a lane per 64 stored words (bit
+  `w % 64` of lane `w / 64` for word `w`), then a word per stored column (a
   by-value Datum, or a value's reference as above; 0 for a NULL). A batch
   appends to its partitions' chunks straight from its columns
   (`tess_spill_columns_append_partitioned`), and a batch read back takes

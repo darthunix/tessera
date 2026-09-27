@@ -112,7 +112,7 @@ use header::{Header, Layout, NRECORDS};
 pub use keys::{KeySource, KeyValue, normalize_word};
 pub use local::LocalTable;
 use record::Access;
-pub use record::{PayloadColumns, Record};
+pub use record::{MAX_PAYLOAD_COLUMNS, PayloadColumns, Record, payload_null_words};
 use region::{RawRegion, Region};
 
 /// What a table holds, for planning and EXPLAIN.

@@ -184,8 +184,8 @@ pub(super) fn append_columns<R: Region, K: KeySource + ?Sized>(
     let nrows = pending.as_view().nrows();
     check(layout, keys, nrows, hashes.len(), offsets.len())?;
     ensure!(
-        layout.payload_size == 8 * (1 + columns.len()),
-        "the table's payload has {} bytes, not a word of NULL bits and {} columns",
+        layout.payload_size == 8 * (columns.null_words() + columns.len()),
+        "the table's payload has {} bytes, not its words of NULL bits and {} columns",
         layout.payload_size,
         columns.len()
     );
@@ -412,8 +412,8 @@ pub(super) fn append_partitioned_columns<R: Region, K: KeySource + ?Sized>(
     let nrows = pending.as_view().nrows();
     check(layout, keys, nrows, hashes.len(), offsets.len())?;
     ensure!(
-        layout.payload_size == 8 * (1 + columns.len()),
-        "the table's payload has {} bytes, not a word of NULL bits and {} columns",
+        layout.payload_size == 8 * (1 + columns.len()) && columns.len() <= 64,
+        "the table's payload has {} bytes, not a word of NULL bits and {} columns, 64 at most",
         layout.payload_size,
         columns.len()
     );

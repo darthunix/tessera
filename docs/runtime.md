@@ -400,7 +400,8 @@ A node that must hold every row of its input before it returns one, such
 as a sort, keeps them in `TessRows` (`tessera/runtime.h`): records of the
 kernels' table format ([table.md](table.md)) in chunks of its memory, each
 with the row's keys in their slots and a payload of the kept columns, a
-word of their NULL bits and then a word each. A by-value column's word is
+word of their NULL bits per 64 of them and then a word each, up to the
+1664 columns of a tuple. A by-value column's word is
 its Datum; a by-reference value is copied into value chunks, an expanded
 object flattened, and its word is the chunk's number plus one and the
 byte, never an address, so a chunk reads the same from a temporary file.

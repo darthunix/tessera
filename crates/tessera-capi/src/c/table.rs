@@ -14,11 +14,11 @@ use anyhow::{Context, Result, bail, ensure};
 use tessera_core::ColumnReader;
 use tessera_kernels::table::{
     Chunks, Combine, CombineStop, Cursor, FORMAT_VERSION, Fold, HEADER_SIZE, KeyKind, KeySource,
-    MAX_KEYS, Partitions, PayloadColumns, Slot, Table, TableConfig, TableMut, UNIT_BITS,
-    VERSION_OFFSET, append_columns_to, append_partitioned_columns_to, append_partitioned_to,
-    append_to,
+    MAX_KEYS, MAX_PAYLOAD_COLUMNS, Partitions, PayloadColumns, Slot, Table, TableConfig, TableMut,
+    UNIT_BITS, VERSION_OFFSET, append_columns_to, append_partitioned_columns_to,
+    append_partitioned_to, append_to,
     bloom::SharedFilter,
-    index_size, init_chunk, normalize_word,
+    index_size, init_chunk, normalize_word, payload_null_words,
     phases::{Participant, SharedCounters},
     split_to,
 };
@@ -583,12 +583,12 @@ pub unsafe extern "C" fn tess_table_append_columns(
             }
             let ncolumns = usize::try_from(ncolumns).context("a negative column count")?;
             ensure!(
-                ncolumns <= 64,
-                "a payload has up to 64 columns, not {ncolumns}"
+                ncolumns <= MAX_PAYLOAD_COLUMNS,
+                "a payload has up to {MAX_PAYLOAD_COLUMNS} columns, not {ncolumns}"
             );
             let config = TableConfig {
                 keys: &kinds[..decoded.nkeys],
-                payload_size: 8 * (1 + ncolumns),
+                payload_size: 8 * (payload_null_words(ncolumns) + ncolumns),
             };
             let mut pending = pending.as_mut().context("a null pending mask")?.mask()?;
             let nrows = pending.as_view().nrows();
@@ -596,24 +596,40 @@ pub unsafe extern "C" fn tess_table_append_columns(
             let offsets = slots(offsets, nrows, "offsets")?;
             let columns = values(columns, ncolumns, "payload columns")?;
             // Only the columns given are set: a batch of a few rows would
-            // otherwise pay for clearing 64 slices of each kind.
+            // otherwise pay for clearing 64 slices of each kind. Wider
+            // payloads take their slices from the heap.
             let mut words = [const { MaybeUninit::<&[u64]>::uninit() }; 64];
             let mut nulls = [const { MaybeUninit::<&[bool]>::uninit() }; 64];
+            let mut wide_words: Vec<&[u64]> = Vec::new();
+            let mut wide_nulls: Vec<&[bool]> = Vec::new();
             for (index, column) in columns.iter().enumerate() {
                 ensure!(
                     usize::try_from(column.nrows).ok() == Some(nrows),
                     "payload column {index} has {} rows, not {nrows}",
                     column.nrows
                 );
-                words[index].write(values(column.values, nrows, "payload values")?);
-                nulls[index].write(values(column.isnull, nrows, "payload NULL flags")?);
+                let (value_slice, null_slice) = (
+                    values(column.values, nrows, "payload values")?,
+                    values(column.isnull, nrows, "payload NULL flags")?,
+                );
+                if ncolumns <= 64 {
+                    words[index].write(value_slice);
+                    nulls[index].write(null_slice);
+                } else {
+                    wide_words.push(value_slice);
+                    wide_nulls.push(null_slice);
+                }
             }
-            // SAFETY: the loop above initialized the first `ncolumns`
-            // slots of each array, and `ncolumns` is at most 64.
-            let (words, nulls) = (
-                &*(&raw const words[..ncolumns] as *const [&[u64]]),
-                &*(&raw const nulls[..ncolumns] as *const [&[bool]]),
-            );
+            // SAFETY: for 64 columns or fewer the loop above initialized
+            // the first `ncolumns` slots of each array.
+            let (words, nulls) = if ncolumns <= 64 {
+                (
+                    &*(&raw const words[..ncolumns] as *const [&[u64]]),
+                    &*(&raw const nulls[..ncolumns] as *const [&[bool]]),
+                )
+            } else {
+                (wide_words.as_slice(), wide_nulls.as_slice())
+            };
             let payload = PayloadColumns::new(words, nulls, nrows)?;
             append_columns_to(
                 &config,

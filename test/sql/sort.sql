@@ -326,6 +326,42 @@ EXECUTE p(23);
 DEALLOCATE p;
 RESET plan_cache_mode;
 
+-- A hundred output columns: a record's NULL bits take two words and a
+-- run's chunk two lanes of them. In memory, past work_mem, under a limit
+-- whose rows are made anew from the heap (r falls as the rows are read,
+-- so every row beats the ones kept; the heap and the rows appended before
+-- a rebuild take a work_mem of 64 MB), and under TessGatherMerge.
+DO $$
+BEGIN
+    EXECUTE format('CREATE TABLE sort_many AS SELECT g * 7919 %% 70000 AS k, 70001 - g AS r, %s, '
+                   'CASE WHEN g %% 5 = 0 THEN NULL ELSE ''x'' || g END AS t '
+                   'FROM generate_series(1, 70000) AS g',
+                   (SELECT string_agg(format('CASE WHEN g %% %s = 0 THEN NULL ELSE g + %s END AS c%s',
+                                             i % 7 + 2, i, i), ', ')
+                    FROM generate_series(1, 98) AS i));
+END $$;
+ANALYZE sort_many;
+SET max_parallel_workers_per_gather = 0;
+SELECT sort_same($$SELECT * FROM sort_many ORDER BY k$$);
+SET work_mem = '64MB';
+SELECT sort_same($$SELECT * FROM sort_many ORDER BY r LIMIT 10$$);
+SELECT sort_explain($$SELECT * FROM sort_many ORDER BY r LIMIT 10$$);
+SET work_mem = '256kB';
+SELECT sort_same($$SELECT t, c98, c64, * FROM sort_many ORDER BY k DESC$$);
+SELECT sort_explain($$SELECT * FROM sort_many ORDER BY k DESC$$);
+RESET work_mem;
+SET max_parallel_workers_per_gather = 2;
+SET parallel_setup_cost = 0;
+SET parallel_tuple_cost = 0;
+SET min_parallel_table_scan_size = 0;
+EXPLAIN (COSTS OFF) SELECT * FROM sort_many ORDER BY k;
+SELECT sort_same($$SELECT * FROM sort_many ORDER BY k$$);
+RESET min_parallel_table_scan_size;
+RESET parallel_tuple_cost;
+RESET parallel_setup_cost;
+RESET max_parallel_workers_per_gather;
+DROP TABLE sort_many;
+
 DROP FUNCTION sort_same(text);
 DROP FUNCTION sort_explain(text);
 DROP TABLE sort_big;

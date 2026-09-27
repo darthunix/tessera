@@ -740,7 +740,8 @@ extern void tess_spill_release(TessSpill *spill);
  * Rows a node keeps, such as the input of a sort: records of the kernels'
  * table format (tessera/table.h) in chunks of the node's memory, never
  * moved, each with the row's keys and a payload of its kept columns, a
- * word of their NULL bits and then a Datum each; a by-reference value is
+ * word of their NULL bits per 64 of them and then a Datum each; a
+ * by-reference value is
  * copied into value chunks of its own and its word is a reference to it
  * (the chunk's number plus one, and the byte), so that a chunk means the
  * same wherever it is read, spilled blocks included. A record is named by
@@ -777,8 +778,8 @@ typedef struct TessRowsConfig
 #define TESS_ROWS_CONFIG_MIN_SIZE \
 	TESS_ABI_SIZE_INCLUDING_FIELD(TessRowsConfig, typbyvals)
 
-/* A word of NULL bits holds the kept columns': at most 64. */
-#define TESS_ROWS_MAX_COLUMNS 64
+/* The most kept columns: a tuple's most attributes (MaxTupleAttributeNumber). */
+#define TESS_ROWS_MAX_COLUMNS 1664
 
 /* Empty rows. */
 extern TessRows *tess_rows_create(const TessRowsConfig *config);

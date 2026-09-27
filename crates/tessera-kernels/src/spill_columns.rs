@@ -81,6 +81,10 @@ pub fn append_partitioned<C: ColumnChunks + ?Sized>(
     );
     let mask = (count - 1) as u32;
     let width = columns.len();
+    ensure!(
+        width <= 64,
+        "a partitioned chunk of columns takes rows of up to 64 words, not {width}"
+    );
     let mut appended = 0;
     for index in 0..nrows.div_ceil(64) {
         let selected = pending.as_view().word(index).unwrap();

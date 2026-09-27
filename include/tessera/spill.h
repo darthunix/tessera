@@ -98,16 +98,25 @@ extern TessStatusCode tess_spill_unpack(const void *packed, Size len, void *chun
  * a join keeps for their partition, which are only written and read back,
  * never linked. A chunk is a header of TESS_SPILL_COLUMNS_HEADER bytes (its
  * row count, then its capacity, a uint32 each, then its stored words and
- * a magic), then lanes of capacity words each: the rows' NULL bits (bit w
- * for word w), then one lane per stored word, 0 for a NULL. A row's place
+ * a magic), then lanes of capacity words each: the rows' NULL bits (bit
+ * w % 64 of lane w / 64 for word w, one lane at least), then one lane per
+ * stored word, 0 for a NULL. A row's place
  * is referred to as (chunk << TESS_SPILL_COLUMNS_PLACE_BITS) | place. On
  * disk each lane is stored for the chunk's rows only, by frame of
  * reference; read back, the chunk has a capacity of its rows.
  */
 #define TESS_SPILL_COLUMNS_HEADER 16
 #define TESS_SPILL_COLUMNS_PLACE_BITS 17
-/* The most a packed chunk takes past the chunk's own bytes. */
-#define TESS_SPILL_COLUMNS_SLACK (8 + 16 * 65)
+/* The lanes of NULL bits of a chunk of words stored words. */
+static inline int
+tess_spill_columns_null_lanes(uint32 words)
+{
+	return words <= 64 ? 1 : (int) ((words + 63) / 64);
+}
+
+/* The most a packed chunk of words stored words takes past its own bytes. */
+#define TESS_SPILL_COLUMNS_SLACK(words) \
+	(8 + 16 * ((Size) tess_spill_columns_null_lanes(words) + (Size) (words)))
 
 static inline uint32
 tess_spill_columns_rows(const void *chunk)
@@ -121,6 +130,13 @@ tess_spill_columns_capacity(const void *chunk)
 	return ((const uint32 *) chunk)[1];
 }
 
+/* A chunk's stored words. */
+static inline uint32
+tess_spill_columns_words(const void *chunk)
+{
+	return ((const uint32 *) chunk)[2];
+}
+
 /* Set a chunk's row count: its rows fill the first places of each lane. */
 static inline void
 tess_spill_columns_set_rows(void *chunk, uint32 rows)
@@ -128,7 +144,11 @@ tess_spill_columns_set_rows(void *chunk, uint32 rows)
 	((uint32 *) chunk)[0] = rows;
 }
 
-/* Lane `lane` of a chunk: 0 the NULL bits, 1 + w stored word w. */
+/*
+ * Lane `lane` of a chunk: the lanes of NULL bits first, then a lane per
+ * stored word (tess_spill_columns_word); with 64 words or fewer, 0 is the
+ * NULL bits and 1 + w stored word w.
+ */
 static inline uint64 *
 tess_spill_columns_lane(void *chunk, int lane)
 {
@@ -136,7 +156,19 @@ tess_spill_columns_lane(void *chunk, int lane)
 					   sizeof(uint64) * (Size) tess_spill_columns_capacity(chunk) * lane);
 }
 
-/* The header's bytes (0), where its row count (1) and capacity (2) lie. */
+/* The lane of stored word `word`. */
+static inline uint64 *
+tess_spill_columns_word(void *chunk, int word)
+{
+	return tess_spill_columns_lane(chunk,
+								   tess_spill_columns_null_lanes(tess_spill_columns_words(chunk)) +
+								   word);
+}
+
+/*
+ * The header's bytes (0), where its row count (1), capacity (2) and stored
+ * words (3) lie.
+ */
 extern Size tess_spill_columns_layout(int what);
 
 /* Make the len bytes at chunk an empty chunk of words stored words. */

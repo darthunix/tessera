@@ -82,6 +82,8 @@ typedef struct RunWriter
 	SortRun    *run;
 	char	   *chunk;
 	Size		chunk_len;
+	/* The chunk's lanes of NULL bits. */
+	int			null_lanes;
 	uint32		capacity;
 	uint32		rows;
 	char	   *values;
@@ -731,9 +733,10 @@ compact_rows(TessSortState *state)
 	uint64		len = state->heap_len;
 	uint32	   *kept = palloc_array(uint32, Max(len, 1));
 	uint32		new_refs[SORT_ROWS];
-	Datum		values[TESS_ROWS_MAX_COLUMNS][SORT_ROWS];
-	bool		nulls[TESS_ROWS_MAX_COLUMNS][SORT_ROWS];
-	TessDatumColumn columns[TESS_ROWS_MAX_COLUMNS];
+	int			ncolumns = Max(state->ncolumns, 1);
+	Datum	   *values = palloc_array(Datum, ncolumns * SORT_ROWS);
+	bool	   *nulls = palloc_array(bool, ncolumns * SORT_ROWS);
+	TessDatumColumn *columns = palloc_array(TessDatumColumn, ncolumns);
 	TessTableKey keys[TESS_TABLE_MAX_KEYS];
 
 	/* The heap is made anew below: its records are taken first. */
@@ -749,10 +752,10 @@ compact_rows(TessSortState *state)
 		for (int column = 0; column < state->ncolumns; column++)
 		{
 			tess_rows_gather(state->rows, column, &kept[first], &mask,
-							 values[column], nulls[column]);
+							 &values[column * SORT_ROWS], &nulls[column * SORT_ROWS]);
 			columns[column] = (TessDatumColumn) TESS_STRUCT_INITIALIZER(TessDatumColumn);
-			columns[column].values = values[column];
-			columns[column].isnull = nulls[column];
+			columns[column].values = &values[column * SORT_ROWS];
+			columns[column].isnull = &nulls[column * SORT_ROWS];
 			columns[column].nrows = n;
 		}
 		for (int key = 0; key < state->nkeys; key++)
@@ -767,6 +770,9 @@ compact_rows(TessSortState *state)
 						   state->heap_capacity, &state->heap_len);
 	}
 	pfree(kept);
+	pfree(values);
+	pfree(nulls);
+	pfree(columns);
 	tess_rows_free(state->rows);
 	state->rows = rows;
 	state->compactions++;
@@ -830,7 +836,7 @@ choose_topn(TessSortState *state)
 				 &status);
 	bytes = (double) state->bound * state->words * sizeof(uint64) +
 		(double) Max(4 * (double) state->bound, 65536.0) *
-		(16.0 + 8.0 * (state->nkeys + 1 + state->ncolumns));
+		(16.0 + 8.0 * (state->nkeys + (state->ncolumns + 63) / 64 + state->ncolumns));
 	return bytes <= (double) work_mem * 1024.0;
 }
 
@@ -931,8 +937,9 @@ writer_start(TessSortState *state, RunWriter *writer, SortRun *run)
 	MemoryContext context = state->css.ss.ps.state->es_query_cxt;
 
 	writer->run = run;
+	writer->null_lanes = tess_spill_columns_null_lanes(run_words(state));
 	writer->chunk_len = TESS_SPILL_COLUMNS_HEADER +
-		sizeof(uint64) * (Size) state->block_rows * (1 + run_words(state));
+		sizeof(uint64) * (Size) state->block_rows * (writer->null_lanes + run_words(state));
 	writer->chunk = MemoryContextAllocExtended(context, writer->chunk_len, MCXT_ALLOC_HUGE);
 	writer->values_len = state->block_values;
 	writer->values = MemoryContextAllocExtended(context, writer->values_len, MCXT_ALLOC_HUGE);
@@ -999,6 +1006,7 @@ writer_add(TessSortState *state, RunWriter *writer, int n, Datum *const *values,
 {
 	const int16 *typlens = state->rows_config.typlens;
 	const bool *typbyvals = state->rows_config.typbyvals;
+	Size		capacity = writer->capacity;
 	bool		byref = false;
 
 	for (int column = 0; column < state->ncolumns; column++)
@@ -1016,16 +1024,19 @@ writer_add(TessSortState *state, RunWriter *writer, int n, Datum *const *values,
 		{
 			int			take;
 			uint64	   *nulls;
+			uint64	   *words;
 
 			if (writer->rows == writer->capacity)
 				writer_flush(state, writer);
 			take = Min(n - row, (int) (writer->capacity - writer->rows));
 			nulls = tess_spill_columns_lane(writer->chunk, 0) + writer->rows;
-			memset(nulls, 0, sizeof(uint64) * take);
+			words = nulls + capacity * writer->null_lanes;
+			for (int lane = 0; lane < writer->null_lanes; lane++)
+				memset(nulls + capacity * lane, 0, sizeof(uint64) * take);
 			for (int column = 0; column < state->ncolumns; column++)
 			{
-				uint64	   *lane = tess_spill_columns_lane(writer->chunk, 1 + column) +
-					writer->rows;
+				uint64	   *lane = words + capacity * column;
+				uint64	   *column_nulls = nulls + capacity * (column / 64);
 				const bool *flags = &isnull[column][row];
 
 				memcpy(lane, &values[column][row], sizeof(uint64) * take);
@@ -1034,15 +1045,13 @@ writer_add(TessSortState *state, RunWriter *writer, int n, Datum *const *values,
 				for (int at = 0; at < take; at++)
 					if (flags[at])
 					{
-						nulls[at] |= UINT64CONST(1) << column;
+						column_nulls[at] |= UINT64CONST(1) << (column % 64);
 						lane[at] = 0;
 					}
 			}
 			for (int word = 0; word < state->ext_words; word++)
 			{
-				uint64	   *lane = tess_spill_columns_lane(writer->chunk,
-														  1 + state->ncolumns + word) +
-					writer->rows;
+				uint64	   *lane = words + capacity * (state->ncolumns + word);
 
 				for (int at = 0; at < take; at++)
 					lane[at] = keys[row + at][word];
@@ -1055,8 +1064,9 @@ writer_add(TessSortState *state, RunWriter *writer, int n, Datum *const *values,
 	for (int row = 0; row < n; row++)
 	{
 		Size		need = 0;
-		uint64		nulls = 0;
 		uint32		place;
+		uint64	   *nulls;
+		uint64	   *words;
 
 		for (int column = 0; column < state->ncolumns; column++)
 			if (!isnull[column][row] && !typbyvals[column])
@@ -1070,31 +1080,33 @@ writer_add(TessSortState *state, RunWriter *writer, int n, Datum *const *values,
 			writer->values = repalloc_huge(writer->values, writer->values_len);
 		}
 		place = writer->rows++;
+		nulls = tess_spill_columns_lane(writer->chunk, 0) + place;
+		words = nulls + capacity * writer->null_lanes;
+		for (int lane = 0; lane < writer->null_lanes; lane++)
+			nulls[capacity * lane] = 0;
 		for (int column = 0; column < state->ncolumns; column++)
 		{
-			uint64	   *lane = tess_spill_columns_lane(writer->chunk, 1 + column);
+			uint64	   *lane = words + capacity * column;
 
 			if (isnull[column][row])
 			{
-				nulls |= UINT64CONST(1) << column;
-				lane[place] = 0;
+				nulls[capacity * (column / 64)] |= UINT64CONST(1) << (column % 64);
+				lane[0] = 0;
 			}
 			else if (typbyvals[column])
-				lane[place] = (uint64) values[column][row];
+				lane[0] = (uint64) values[column][row];
 			else
 			{
 				Size		size = datumGetSize(values[column][row], false, typlens[column]);
 
 				memcpy(writer->values + writer->values_used,
 					   DatumGetPointer(values[column][row]), size);
-				lane[place] = writer->values_used;
+				lane[0] = writer->values_used;
 				writer->values_used += MAXALIGN(size);
 			}
 		}
-		tess_spill_columns_lane(writer->chunk, 0)[place] = nulls;
 		for (int word = 0; word < state->ext_words; word++)
-			tess_spill_columns_lane(writer->chunk, 1 + state->ncolumns + word)[place] =
-				keys[row][word];
+			words[capacity * (state->ncolumns + word)] = keys[row][word];
 	}
 }
 
@@ -1111,8 +1123,8 @@ spill_run(TessSortState *state)
 	uint64	   *items;
 	int			words;
 	RunWriter	writer;
-	Datum	   *values[TESS_ROWS_MAX_COLUMNS];
-	bool	   *nulls[TESS_ROWS_MAX_COLUMNS];
+	Datum	  **values = state->values;
+	bool	  **nulls = state->isnull;
 	const uint64 *keys[SORT_ROWS];
 	uint64		copies[SORT_ROWS][TESS_SORT_MAX_ITEM_WORDS];
 
@@ -1125,11 +1137,6 @@ spill_run(TessSortState *state)
 		elog(ERROR, "TessSort items of %d words, not %d", words, state->item_words);
 	note_memory(state, mul_size(count, sizeof(uint32) + sizeof(uint64) * words));
 	writer_start(state, &writer, run_create(state));
-	for (int column = 0; column < state->ncolumns; column++)
-	{
-		values[column] = state->values[column];
-		nulls[column] = state->isnull[column];
-	}
 	for (uint64 first = 0; first < count; first += SORT_ROWS)
 	{
 		int			n = (int) Min((uint64) SORT_ROWS, count - first);
@@ -1203,7 +1210,8 @@ plan_external(TessSortState *state)
 	 * work_mem is passed then), up to TESS_SORT_MAX_MERGE_RUNS. Blocks of
 	 * a 64th and two pairs each took a pass more for 44 runs.
 	 */
-	row_bytes = sizeof(uint64) * (1 + run_words(state));
+	row_bytes = sizeof(uint64) *
+		(tess_spill_columns_null_lanes(run_words(state)) + run_words(state));
 	block_bytes = Min((Size) work_mem * 1024 / 128, (Size) 256 * 1024);
 	state->block_rows = (uint32) Max(block_bytes / row_bytes, (Size) SORT_ROWS);
 	state->block_values = Max(block_bytes, (Size) 4096);
@@ -1304,14 +1312,16 @@ static void
 input_take(TessSortState *state, MergeInput *input, uint32 place, int out,
 		   Datum *const *values, bool *const *isnull, uint64 *keys)
 {
-	uint64		nulls = tess_spill_columns_lane(input->chunk, 0)[place];
 	const bool *typbyvals = state->rows_config.typbyvals;
+	Size		capacity = tess_spill_columns_capacity(input->chunk);
+	const uint64 *nulls = tess_spill_columns_lane(input->chunk, 0) + place;
+	const uint64 *words = tess_spill_columns_word(input->chunk, 0) + place;
 
 	for (int column = 0; column < state->ncolumns; column++)
 	{
-		uint64		word = tess_spill_columns_lane(input->chunk, 1 + column)[place];
+		uint64		word = words[capacity * column];
 
-		isnull[column][out] = (nulls >> column) & 1;
+		isnull[column][out] = (nulls[capacity * (column / 64)] >> (column % 64)) & 1;
 		if (isnull[column][out])
 			values[column][out] = (Datum) 0;
 		else if (typbyvals[column])
@@ -1321,7 +1331,7 @@ input_take(TessSortState *state, MergeInput *input, uint32 place, int out,
 	}
 	if (keys != NULL)
 		for (int word = 0; word < state->ext_words; word++)
-			keys[word] = tess_spill_columns_lane(input->chunk, 1 + state->ncolumns + word)[place];
+			keys[word] = words[capacity * (state->ncolumns + word)];
 }
 
 /*
@@ -1357,7 +1367,7 @@ merge_rows(TessSortState *state, MergeInput *inputs, int ninputs, uint32 *tree, 
 			more[input] = in->reader != NULL && in->block < in->run->nblocks;
 			for (int word = 0; word < state->ext_words; word++)
 				lanes[input * state->ext_words + word] = left[input] == 0 ? NULL :
-					tess_spill_columns_lane(in->chunk, 1 + state->ncolumns + word) + in->place;
+					tess_spill_columns_word(in->chunk, state->ncolumns + word) + in->place;
 		}
 		check_kernel(state->kernels->sort_merge(ninputs, state->ext_words, lanes, left, more,
 												tree, order, max - taken, &count, &refill,
@@ -1382,17 +1392,12 @@ static void
 merge_pass(TessSortState *state, int first, int count, RunWriter *writer)
 {
 	MergeInput *inputs = palloc0_array(MergeInput, count);
-	Datum	   *values[TESS_ROWS_MAX_COLUMNS];
-	bool	   *nulls[TESS_ROWS_MAX_COLUMNS];
+	Datum	  **values = state->values;
+	bool	  **nulls = state->isnull;
 	uint64		keys[SORT_ROWS][TESS_SORT_MAX_ITEM_WORDS];
 	const uint64 *pointers[SORT_ROWS];
 	uint32		tree[TESS_SORT_MERGE_STATE_WORDS] = {0};
 
-	for (int column = 0; column < state->ncolumns; column++)
-	{
-		values[column] = state->values[column];
-		nulls[column] = state->isnull[column];
-	}
 	for (int row = 0; row < SORT_ROWS; row++)
 		pointers[row] = keys[row];
 	for (int input = 0; input < count; input++)
@@ -1678,7 +1683,7 @@ sort_rows(TessSortState *state)
 		merge_runs(state);
 		note_memory(state, (Size) Max(state->ninputs, 1) *
 					(state->block_values + sizeof(uint64) * state->block_rows *
-					 (1 + run_words(state))));
+					 (tess_spill_columns_null_lanes(run_words(state)) + run_words(state))));
 		state->count = 0;
 		for (int run = 0; run < state->nruns; run++)
 			state->count += state->runs[run]->rows;
