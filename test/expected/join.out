@@ -1924,17 +1924,16 @@ RESET work_mem;
 -- Row-wise parents: a sort, a limit, a scrollable cursor.
 EXPLAIN (COSTS OFF)
 SELECT jf.v, jd.label FROM jf JOIN jd ON jf.fk = jd.id ORDER BY jf.v DESC LIMIT 5;
-                        QUERY PLAN                        
-----------------------------------------------------------
- Custom Scan (TessLimit)
-   ->  Custom Scan (TessPack)
-         ->  Sort
-               Sort Key: jf.v DESC
-               ->  Custom Scan (TessHashJoin)
-                     Hash Cond: (jd.id = jf.fk)
-                     ->  Custom Scan (TessHeapScan) on jf
-                     ->  Custom Scan (TessHeapScan) on jd
-(8 rows)
+                     QUERY PLAN                     
+----------------------------------------------------
+ Limit
+   ->  Sort
+         Sort Key: jf.v DESC
+         ->  Custom Scan (TessHashJoin)
+               Hash Cond: (jd.id = jf.fk)
+               ->  Custom Scan (TessHeapScan) on jf
+               ->  Custom Scan (TessHeapScan) on jd
+(7 rows)
 
 SELECT jf.v, jd.label FROM jf JOIN jd ON jf.fk = jd.id ORDER BY jf.v DESC LIMIT 5;
   v   | label 

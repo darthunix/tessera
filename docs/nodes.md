@@ -33,10 +33,12 @@ headers and the runtime library alone, as a node of another extension
 would be: the module `tessera_limit` registers the kind `tessera.limit`,
 installs its own `create_upper_paths` hook and replaces the core limit path
 in the final relation with a batch limit above a batch input over the
-limit's child, so an ordinary child gets a pack node below. It stands on
+limit's child, so an ordinary scan gets a pack node below. Over any other
+row-wise child (a sort, an aggregate, a join) the core limit stays: a pack
+there would copy every row the limit reads. It stands on
 the unary helper, removes the offset's rows and the rows past the count,
 stops the input once the count is reached, and passes the tuple bound to
-the child through the pack node, which keeps a sort under it a top-N sort.
+the child, through the pack node when there is one.
 `WITH TIES` and parameterized inputs stay with the core node. Load it
 after the bridge, and after the nodes module when ordinary children should
 be packed; without a pack node it adds no paths. The

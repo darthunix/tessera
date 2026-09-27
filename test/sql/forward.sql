@@ -64,8 +64,9 @@ FROM generate_series(0, 3) AS g;
 SELECT g, (SELECT sum(a) FROM (SELECT a FROM forward_t WHERE a > g LIMIT 5) AS s) AS n
 FROM generate_series(95, 99) AS g;
 
--- A sort under the limit: the limit's own pack packs the sorted rows, and
--- the pack above the subquery scan still forwards the limit's batches.
+-- A sort under the limit: the core limit stays over it, since a pack would
+-- copy every row it reads, and the pack above the subquery scan packs the
+-- limit's five rows.
 EXPLAIN (COSTS OFF)
 SELECT count(*) FROM (SELECT a FROM forward_t ORDER BY a DESC LIMIT 5) AS s;
 SELECT count(*), min(a) FROM (SELECT a FROM forward_t ORDER BY a DESC LIMIT 5) AS s;

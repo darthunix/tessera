@@ -24,9 +24,32 @@ const CustomScanMethods tess_limit_scan_methods = {
 };
 
 /*
+ * Whether a batch input is worth a limit above it. A pack pays for itself
+ * under a limit only over a scan, whose columns it deforms on request, or
+ * over a subquery whose batches it forwards; over any other row-wise node
+ * (a sort, an aggregate, a join) it would copy every row the limit reads,
+ * and the core limit reads them for free.
+ */
+static bool
+worth_limiting(const Path *child)
+{
+	const TessNode *pack = tess_runtime_api()->nodes->find(TESS_PACK_NODE_NAME);
+	const Path *wrapped;
+
+	if (pack == NULL || tess_path_node(child) != pack)
+		return true;
+	wrapped = linitial(((const CustomPath *) child)->custom_paths);
+	if (wrapped->pathtype == T_SeqScan)
+		return true;
+	return IsA(wrapped, SubqueryScanPath) &&
+		tess_path_node(((const SubqueryScanPath *) wrapped)->subpath) != NULL;
+}
+
+/*
  * The node's path in place of the core limit path: the same planner
  * properties above a batch input over the limit's child, carrying the
- * offset and count expressions. NULL when no batch input is possible.
+ * offset and count expressions. NULL when no batch input is possible or
+ * worth it.
  */
 static CustomPath *
 make_limit_path(PlannerInfo *root, LimitPath *limit)
@@ -34,7 +57,7 @@ make_limit_path(PlannerInfo *root, LimitPath *limit)
 	TessPathConfig config = TESS_STRUCT_INITIALIZER(TessPathConfig);
 	Path	   *child = tess_batch_input_path(root, limit->subpath);
 
-	if (child == NULL)
+	if (child == NULL || !worth_limiting(child))
 		return NULL;
 	config.template_path = &limit->path;
 	config.methods = &limit_path_methods;

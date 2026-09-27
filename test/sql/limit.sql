@@ -30,7 +30,8 @@ SELECT count(*), count(b), sum(a) FROM (SELECT a, b FROM limit_t LIMIT 70) AS s;
 EXPLAIN (COSTS OFF)
 SELECT a FROM limit_t ORDER BY a FETCH FIRST 3 ROWS WITH TIES;
 
--- The bound reaches the sort below the pack node: a top-N sort.
+-- Over a sort the core limit stays, since a pack would copy every row it
+-- reads; the sort stays a top-N sort.
 EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT a FROM limit_t ORDER BY a DESC LIMIT 3;
 SELECT a FROM limit_t ORDER BY a DESC LIMIT 3;
