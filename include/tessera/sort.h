@@ -111,4 +111,23 @@ extern TessStatusCode tess_sort_top_push(const TessTableRef *table,
 										 uint64 *len,
 										 TessStatus *status);
 
+/* The most runs one tess_sort_merge takes. */
+#define TESS_SORT_MAX_MERGE_RUNS 256
+
+/*
+ * Merge sorted runs of items: run r's items are words lanes of words,
+ * lanes[r * words + w] word w of its rows from its current one on, left[r]
+ * of them, and more[r] whether blocks of it follow; a run with none left
+ * and more to come must be loaded first. The run of each row put out, in
+ * order, goes to out, up to max_out, and *count gets how many: the merge
+ * stops early after a run's last row in memory when more of it follows,
+ * *refill getting that run (-1 otherwise), which the caller loads before it
+ * merges on. A run's next rows are the ones after those it gave.
+ */
+extern TessStatusCode tess_sort_merge(int nruns, int words,
+									  const uint64 *const *lanes,
+									  const uint32 *left, const bool *more,
+									  uint32 *out, int max_out, int *count,
+									  int *refill, TessStatus *status);
+
 #endif							/* TESSERA_SORT_H */

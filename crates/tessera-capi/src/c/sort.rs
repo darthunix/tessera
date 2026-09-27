@@ -10,7 +10,9 @@ use std::mem::offset_of;
 use std::slice;
 
 use anyhow::{Context, Result, bail, ensure};
-use tessera_kernels::sort::{SortKey, item_words, sort_items, top_candidates};
+use tessera_kernels::sort::{
+    MAX_MERGE_RUNS, SortKey, item_words, merge, sort_items, top_candidates,
+};
 use tessera_kernels::table::{KeyKind, MAX_KEYS};
 
 use super::mask::Mask;
@@ -209,6 +211,64 @@ pub unsafe extern "C" fn tess_sort_top_candidates(
             let worst = values(worst, item_words(keys)?, "worst item")?;
             let count = top_candidates(keys, &batch, &mut rows, worst)?;
             *kept.as_mut().context("a null count")? = count as c_int;
+            Ok(())
+        })
+    }
+}
+
+/// `tess_sort_merge`: merge sorted runs of items by their key lanes.
+///
+/// # Safety
+///
+/// `lanes` must point to `nruns * words` lanes, lane `r * words + w`
+/// valid for `left[r]` words; `left` and `more` to `nruns` values; `out`
+/// to `max_out` writable slots; `count` and `refill` writable; `status`
+/// as for every entry point.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tess_sort_merge(
+    nruns: c_int,
+    words: c_int,
+    lanes: *const *const u64,
+    left: *const u32,
+    more: *const bool,
+    out: *mut u32,
+    max_out: c_int,
+    count: *mut c_int,
+    refill: *mut c_int,
+    status: *mut Status,
+) -> Code {
+    // SAFETY: the caller's contract.
+    unsafe {
+        guard(status, || {
+            let nruns = usize::try_from(nruns).context("a negative run count")?;
+            let words = usize::try_from(words).context("a negative item width")?;
+            ensure!(
+                nruns <= MAX_MERGE_RUNS,
+                "a merge takes up to {MAX_MERGE_RUNS} runs, not {nruns}"
+            );
+            let left = values(left, nruns, "rows left")?;
+            let more = values(more, nruns, "more flags")?;
+            let pointers = values(lanes, nruns * words, "lanes")?;
+            let mut slices = [&[][..]; MAX_MERGE_RUNS * 2];
+            let mut lanes_list: Vec<&[u64]>;
+            let lanes: &[&[u64]] = if nruns * words <= slices.len() {
+                for (index, &pointer) in pointers.iter().enumerate() {
+                    slices[index] = values(pointer, left[index / words] as usize, "lane")?;
+                }
+                &slices[..nruns * words]
+            } else {
+                lanes_list = Vec::with_capacity(nruns * words);
+                for (index, &pointer) in pointers.iter().enumerate() {
+                    lanes_list.push(values(pointer, left[index / words] as usize, "lane")?);
+                }
+                &lanes_list
+            };
+            let max_out = usize::try_from(max_out).context("a negative output count")?;
+            let out = slots(out, max_out, "merge output")?;
+            let merged = merge(words, lanes, left, more, out)?;
+            *count.as_mut().context("a null count")? = merged.count as c_int;
+            *refill.as_mut().context("a null refill")? =
+                merged.refill.map_or(-1, |run| run as c_int);
             Ok(())
         })
     }

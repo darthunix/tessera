@@ -322,6 +322,120 @@ fn candidates_as<K: KeySource + ?Sized, const W: usize>(
     Ok(kept)
 }
 
+/// The most runs one merge takes.
+pub const MAX_MERGE_RUNS: usize = 256;
+
+/// Whether run `a`'s current item orders before run `b`'s: the words of
+/// an item compared from the first, the most significant.
+#[inline(always)]
+fn item_before(lanes: &[&[u64]], words: usize, a: usize, at: usize, b: usize, bt: usize) -> bool {
+    for word in 0..words {
+        let (x, y) = (lanes[a * words + word][at], lanes[b * words + word][bt]);
+        if x != y {
+            return x < y;
+        }
+    }
+    a < b
+}
+
+/// What [`merge`] did: the rows it put out, and the run whose block it
+/// emptied with more blocks to come, which the caller loads before it
+/// merges on.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Merged {
+    pub count: usize,
+    pub refill: Option<usize>,
+}
+
+/// Merge sorted runs: run `r`'s items are `words` lanes of words,
+/// `lanes[r * words + w]` word `w` of its rows from its current one on,
+/// `left[r]` of them, and `more[r]` says whether blocks of it follow. The
+/// run of each row put out, in order, goes to `out`, as many as it takes
+/// or until a run's block is done with more to come; a run's next rows are
+/// the ones after those it gave. Equal items come in run order.
+pub fn merge(
+    words: usize,
+    lanes: &[&[u64]],
+    left: &[u32],
+    more: &[bool],
+    out: &mut [u32],
+) -> Result<Merged> {
+    let runs = left.len();
+    ensure!(
+        (1..=MAX_ITEM_WORDS).contains(&words),
+        "a sort item has 1 to {MAX_ITEM_WORDS} words, not {words}"
+    );
+    ensure!(
+        runs <= MAX_MERGE_RUNS && more.len() == runs && lanes.len() == runs * words,
+        "a merge of {runs} runs takes a flag per run and {words} lanes each, up to {MAX_MERGE_RUNS} runs"
+    );
+    for (run, (&rows, &follows)) in left.iter().zip(more).enumerate() {
+        ensure!(
+            rows > 0 || !follows,
+            "run {run} has no rows in memory and more on disk: load them first"
+        );
+        ensure!(
+            lanes[run * words..(run + 1) * words]
+                .iter()
+                .all(|lane| lane.len() >= rows as usize),
+            "run {run} holds fewer rows than it has left"
+        );
+    }
+    let mut heap = [0_u16; MAX_MERGE_RUNS];
+    let mut at = [0_u32; MAX_MERGE_RUNS];
+    let mut len = 0;
+    for (run, &rows) in left.iter().enumerate() {
+        if rows > 0 {
+            heap[len] = run as u16;
+            len += 1;
+        }
+    }
+    let before = |heap: &[u16], at: &[u32], i: usize, j: usize| {
+        let (a, b) = (heap[i] as usize, heap[j] as usize);
+        item_before(lanes, words, a, at[a] as usize, b, at[b] as usize)
+    };
+    let sift = |heap: &mut [u16], at: &[u32], len: usize, mut i: usize| loop {
+        let (l, r) = (2 * i + 1, 2 * i + 2);
+        let mut least = i;
+        if l < len && before(heap, at, l, least) {
+            least = l;
+        }
+        if r < len && before(heap, at, r, least) {
+            least = r;
+        }
+        if least == i {
+            break;
+        }
+        heap.swap(i, least);
+        i = least;
+    };
+    for i in (0..len / 2).rev() {
+        sift(&mut heap, &at, len, i);
+    }
+    let mut count = 0;
+    while count < out.len() && len > 0 {
+        let run = heap[0] as usize;
+        out[count] = run as u32;
+        count += 1;
+        at[run] += 1;
+        if at[run] == left[run] {
+            if more[run] {
+                return Ok(Merged {
+                    count,
+                    refill: Some(run),
+                });
+            }
+            len -= 1;
+            heap[0] = heap[len];
+        }
+        sift(&mut heap, &at, len, 0);
+    }
+    Ok(Merged {
+        count,
+        refill: None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -352,5 +466,95 @@ mod tests {
         put(&mut item, &mut at, 0xABCD, 16);
         assert_eq!(item, [0xA, 0xBCD << 52]);
         assert_eq!(at, 76);
+    }
+
+    fn random(state: &mut u64) -> u64 {
+        *state ^= *state << 13;
+        *state ^= *state >> 7;
+        *state ^= *state << 17;
+        *state
+    }
+
+    /// Runs of random items of one and three words, cut into blocks of
+    /// a few rows, merge into the order of all the items sorted at once.
+    #[test]
+    fn runs_merge_into_the_order_of_all_their_items() {
+        let mut state = 0x9E37_79B9_7F4A_7C15_u64;
+        for words in [1_usize, 2, 3] {
+            for nruns in [1_usize, 2, 7, 40] {
+                let runs: Vec<Vec<Vec<u64>>> = (0..nruns)
+                    .map(|_| {
+                        let n = (random(&mut state) % 50) as usize;
+                        let mut items: Vec<Vec<u64>> = (0..n)
+                            .map(|_| (0..words).map(|_| random(&mut state) % 5).collect())
+                            .collect();
+                        items.sort();
+                        items
+                    })
+                    .collect();
+                let block = 3;
+                let mut cursor = vec![0_usize; nruns];
+                let mut merged: Vec<Vec<u64>> = Vec::new();
+                loop {
+                    // Each run's current block: its lanes from its cursor on.
+                    let lanes_data: Vec<Vec<u64>> = (0..nruns)
+                        .flat_map(|run| {
+                            let rows = &runs[run];
+                            let start = cursor[run] / block * block;
+                            let end = (start + block).min(rows.len());
+                            let from = cursor[run].min(end);
+                            (0..words)
+                                .map(move |word| {
+                                    rows[from..end].iter().map(|item| item[word]).collect()
+                                })
+                                .collect::<Vec<Vec<u64>>>()
+                        })
+                        .collect();
+                    let lanes: Vec<&[u64]> = lanes_data.iter().map(Vec::as_slice).collect();
+                    let left: Vec<u32> = (0..nruns)
+                        .map(|run| {
+                            let end = ((cursor[run] / block + 1) * block).min(runs[run].len());
+                            (end - cursor[run].min(end)) as u32
+                        })
+                        .collect();
+                    let more: Vec<bool> = (0..nruns)
+                        .map(|run| ((cursor[run] / block + 1) * block) < runs[run].len())
+                        .collect();
+                    // A run whose block is done moves to its next block.
+                    if let Some(run) = (0..nruns).find(|&run| left[run] == 0 && more[run]) {
+                        cursor[run] = (cursor[run] / block + 1) * block;
+                        let _ = run;
+                        continue;
+                    }
+                    let mut out = [0_u32; 8];
+                    let done = merge(words, &lanes, &left, &more, &mut out).unwrap();
+                    if done.count == 0 {
+                        break;
+                    }
+                    for &run in &out[..done.count] {
+                        merged.push(runs[run as usize][cursor[run as usize]].clone());
+                        cursor[run as usize] += 1;
+                    }
+                }
+                let mut all: Vec<Vec<u64>> = runs.concat();
+                all.sort();
+                assert_eq!(merged, all, "{words} words, {nruns} runs");
+            }
+        }
+    }
+
+    #[test]
+    fn a_merge_refuses_a_run_to_load_first() {
+        let lane = [1_u64];
+        let lanes: [&[u64]; 2] = [&lane, &[]];
+        let mut out = [0_u32; 4];
+        assert!(merge(1, &lanes, &[1, 0], &[false, true], &mut out).is_err());
+        assert_eq!(
+            merge(1, &lanes, &[1, 0], &[false, false], &mut out).unwrap(),
+            Merged {
+                count: 1,
+                refill: None
+            }
+        );
     }
 }

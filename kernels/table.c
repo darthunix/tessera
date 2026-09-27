@@ -83,4 +83,5 @@ const TessKernelOps tess_kernel_ops = {
 	.spill_columns_append_partitioned = tess_spill_columns_append_partitioned,
 	.spill_columns_pack = tess_spill_columns_pack,
 	.spill_columns_unpack = tess_spill_columns_unpack,
+	.sort_merge = tess_sort_merge,
 };

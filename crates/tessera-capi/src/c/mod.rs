@@ -48,7 +48,7 @@ pub mod sort_flags {
     pub use super::sort::{DESCENDING, NULLABLE, NULLS_FIRST};
 }
 pub use sort::{
-    CSortKey, tess_sort, tess_sort_item_words, tess_sort_items, tess_sort_layout,
+    CSortKey, tess_sort, tess_sort_item_words, tess_sort_items, tess_sort_layout, tess_sort_merge,
     tess_sort_top_candidates, tess_sort_top_push,
 };
 pub use spill::{
