@@ -264,6 +264,17 @@ WHERE line ~ 'Split Partitions';
 -- Row by row to a sort above, and a rescan with a parameter.
 SELECT k, count(*), sum(v) FROM agg_spill GROUP BY k ORDER BY sum(v) DESC NULLS LAST, k LIMIT 3;
 SELECT agg_same($$SELECT x, (SELECT count(*) FROM (SELECT k FROM agg_spill WHERE k8 < x GROUP BY k) AS q) FROM (VALUES (1), (4)) AS v(x)$$);
+-- A partition merging more groups than its estimate: its index grows in
+-- the middle of a chunk read back, which is no group of the table and
+-- must stay out of the new index (a group found in it was never merged,
+-- and went out twice: 117 of 300000 groups at a hash_mem of 256 kB).
+CREATE TABLE agg_regrow AS SELECT g % 300000 AS k, g AS v FROM generate_series(1, 1000000) AS g;
+ANALYZE agg_regrow;
+SET work_mem = '128kB';
+SET enable_sort = off;
+SELECT agg_same($$SELECT k, count(*), sum(v) FROM agg_regrow GROUP BY k$$) NOT LIKE 'MISMATCH%' AS same;
+RESET enable_sort;
+DROP TABLE agg_regrow;
 RESET work_mem;
 DROP FUNCTION agg_rows();
 DROP TABLE agg_spill;

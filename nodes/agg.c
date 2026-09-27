@@ -2216,9 +2216,19 @@ agg_combine(TessAggState *state, AggSpill *spill, AggPart *part, void *base,
 		{
 			TessTableStats stats = TESS_STRUCT_INITIALIZER(TessTableStats);
 
+			/*
+			 * A new index links every chunk's records: the source's, merged
+			 * or not, are no groups of the table. Hidden, or a group whose
+			 * record the source still holds would be found there and never
+			 * merged into its record of the table.
+			 */
+			state->chunk_bases[AGG_SOURCE] = spill->source_empty;
+			state->chunk_lens[AGG_SOURCE] = TESS_TABLE_CHUNK_HEADER;
 			check(state, state->kernels->table_stats(&state->table, &stats,
 													 &state->status));
 			regrow_table(state, stats.records);
+			state->chunk_bases[AGG_SOURCE] = base;
+			state->chunk_lens[AGG_SOURCE] = len;
 			continue;
 		}
 		if (state->table.nchunks == state->chunk_slots)
