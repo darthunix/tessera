@@ -783,6 +783,12 @@ extern void tess_rows_gather(TessRows *rows, int column, const uint32 *refs,
 extern void tess_rows_sort(TessRows *rows, const TessSortKey *keys,
 						   uint32 *refs);
 
+/*
+ * Whether a row of the mask is NULL by its flag in isnull, one per
+ * physical row: for a caller that keeps a column's NULLs apart.
+ */
+extern bool tess_rows_selected_null(const TessRowMask *mask, const bool *isnull);
+
 /* The records appended, and the bytes the rows take: chunks, values and index. */
 extern uint64 tess_rows_count(const TessRows *rows);
 extern Size tess_rows_memory(const TessRows *rows);

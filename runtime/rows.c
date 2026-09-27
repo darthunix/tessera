@@ -303,12 +303,12 @@ reserve(TessRows *rows, int nrows)
 }
 
 /*
- * Whether a selected row of the mask is NULL: a word of rows at a time,
- * whose 64 flags memchr scans at once, the selected rows checked one by
- * one only where a flag is set.
+ * A full word of rows has its 64 flags scanned at once by memchr; a word
+ * with fewer rows selected, as a filter leaves them, has only those
+ * looked at.
  */
-static bool
-selected_null(const TessRowMask *mask, const bool *isnull)
+bool
+tess_rows_selected_null(const TessRowMask *mask, const bool *isnull)
 {
 	int			nwords = tess_row_mask_word_count(mask->nrows);
 
@@ -317,9 +317,12 @@ selected_null(const TessRowMask *mask, const bool *isnull)
 		uint64		bits = mask->bits[word];
 		const bool *flags = isnull + (Size) word * 64;
 
-		if (bits == 0 ||
-			memchr(flags, true, Min(64, mask->nrows - word * 64)) == NULL)
+		if (bits == ~UINT64CONST(0))
+		{
+			if (memchr(flags, true, 64) != NULL)
+				return true;
 			continue;
+		}
 		for (; bits != 0; bits &= bits - 1)
 			if (flags[pg_rightmost_one_pos64(bits)])
 				return true;
@@ -360,7 +363,7 @@ tess_rows_append(TessRows *rows, const TessTableKey *keys,
 		uint64		bit = UINT64CONST(1) << column;
 
 		if ((rows->null_columns & bit) == 0 &&
-			selected_null(mask, values->isnull))
+			tess_rows_selected_null(mask, values->isnull))
 			rows->null_columns |= bit;
 		*payload = *values;
 		if (!rows->typbyvals[column])
