@@ -133,6 +133,22 @@ typedef struct JoinChunk
 #define JOIN_CHUNK_HEADER MAXALIGN(sizeof(JoinChunk))
 
 /*
+ * A shared table's budget counts, besides its chunks, the index and the
+ * filter SIZE makes for their records: a bucket of 4 bytes, twice the
+ * records rounded up to a power of two (8 to 16 bytes a record), and 16
+ * bits of filter rounded up the same way.
+ */
+#define JOIN_INDEX_PER_RECORD 16
+
+/* The bytes a chunk of records of len bytes costs a shared table's budget. */
+static inline int64
+record_chunk_cost(Size len, Size record_size)
+{
+	return (int64) (JOIN_CHUNK_HEADER + len +
+					JOIN_INDEX_PER_RECORD * (len / Max(record_size, 1)));
+}
+
+/*
  * By-reference inner values live in chunks of their own, the first of
  * JOIN_VALUE_FIRST bytes and the others of JOIN_VALUE_CHUNK, a value
  * larger than a quarter of one getting a chunk of its own: in the node's
@@ -740,6 +756,8 @@ typedef struct TessHashJoinState
 	 */
 	bool		shared_mode;
 	JoinShared *shared;
+	/* A shared table's budget, every participant's hash_mem; 0 without one. */
+	Size		shared_budget;
 	/* The query's shared memory, kept for leaving after the Gather let go of it. */
 	dsa_area   *area;
 	TessBuildParticipant participant;
@@ -1723,6 +1741,13 @@ side_block(SpillSide *side, Size len)
 	return (int64) (side->area != NULL ? JOIN_CHUNK_HEADER + len : len);
 }
 
+/* What a chunk of records of len bytes costs a shared side's budget, its index and filter included. */
+static inline int64
+side_chunk_cost(SpillSide *side, Size len)
+{
+	return record_chunk_cost(len, TYPEALIGN(8, 16 + 8 * side->nkeys + side->payload_size));
+}
+
 /* A block of len bytes: in the query's shared memory after a header, or the side's own. */
 static void *
 side_alloc(SpillSide *side, Size len, dsa_pointer *pointer)
@@ -1761,7 +1786,7 @@ side_free_chunk(SpillSide *side, int partition, int index)
 	side->pointers[index] = InvalidDsaPointer;
 	side->bytes -= side->lens[index];
 	side->parts[partition].bytes -= side->lens[index];
-	side_count(side, partition, -side_block(side, side->lens[index]));
+	side_count(side, partition, -side_chunk_cost(side, side->lens[index]));
 }
 
 /* Free value chunk `number` of a partition, and count it. */
@@ -1837,7 +1862,7 @@ side_add_chunk(TessHashJoinState *state, SpillSide *side, int partition)
 	side->current[partition] = index;
 	part->bytes += side->chunk_len;
 	side->bytes += side->chunk_len;
-	side_count(side, partition, side_block(side, side->chunk_len));
+	side_count(side, partition, side_chunk_cost(side, side->chunk_len));
 	if (side == &state->spill->build)
 		state->counters[JOIN_CHUNKS]++;
 	return index;
@@ -3890,7 +3915,7 @@ add_own_chunk(TessHashJoinState *state)
 	*own_list(state, false) = block;
 	state->own_chunks[state->nown++] = (int) number;
 	state->own_bytes += JOIN_CHUNK_HEADER + len;
-	shared_count(state, (int64) (JOIN_CHUNK_HEADER + len));
+	shared_count(state, record_chunk_cost(len, state->record_size));
 	state->counters[JOIN_CHUNKS]++;
 }
 
@@ -4511,7 +4536,7 @@ shared_switch(TessHashJoinState *state)
 
 		split_chunk(state, (char *) header + JOIN_CHUNK_HEADER, header->len,
 					state->value_bases);
-		shared_count(state, -(int64) (JOIN_CHUNK_HEADER + header->len));
+		shared_count(state, -record_chunk_cost(header->len, state->record_size));
 		dsa_free(area, block);
 		block = next;
 	}
@@ -6701,7 +6726,8 @@ join_counters(TessHashJoinState *state, uint64 *values)
 		values[JOIN_OUTPUT_REMOVED] = removed->batch_removed + removed->row_removed;
 	}
 	values[JOIN_MEMORY] = state->peak_memory;
-	values[JOIN_OVERRUN] = state->peak_memory > limit ?
+	/* A shared table's participants share a budget: EXPLAIN compares the total. */
+	values[JOIN_OVERRUN] = state->shared_budget == 0 && state->peak_memory > limit ?
 		state->peak_memory - limit : 0;
 }
 
@@ -6721,6 +6747,7 @@ join_explain(CustomScanState *css, List *ancestors, ExplainState *es)
 	List	   *context;
 	const uint64 *totals = NULL;
 	uint64		own[JOIN_NCOUNTERS];
+	uint64		overrun;
 
 	context = set_deparse_context_plan(es->deparse_cxt, css->ss.ps.plan,
 									   ancestors);
@@ -6774,9 +6801,13 @@ join_explain(CustomScanState *css, List *ancestors, ExplainState *es)
 						   totals[JOIN_BUCKETS] / totals[JOIN_BUILDS] : 0, es);
 	ExplainPropertyInteger("Memory Usage", "kB",
 						   (totals[JOIN_MEMORY] + 1023) / 1024, es);
-	if (totals[JOIN_OVERRUN] > 0)
-		ExplainPropertyInteger("Overrun", "kB",
-							   (totals[JOIN_OVERRUN] + 1023) / 1024, es);
+	if (state->shared_budget > 0)
+		overrun = totals[JOIN_MEMORY] > state->shared_budget ?
+			totals[JOIN_MEMORY] - state->shared_budget : 0;
+	else
+		overrun = totals[JOIN_OVERRUN];
+	if (overrun > 0)
+		ExplainPropertyInteger("Overrun", "kB", (overrun + 1023) / 1024, es);
 	ExplainPropertyInteger("Builds", NULL, totals[JOIN_BUILDS], es);
 	ExplainPropertyInteger("Build Rows", NULL, totals[JOIN_BUILD_ROWS], es);
 	ExplainPropertyInteger("Chunks", NULL, totals[JOIN_CHUNKS], es);
@@ -6880,6 +6911,7 @@ init_shared(TessHashJoinState *state, int participants, dsm_segment *segment)
 		SharedFileSetDeleteAll(&state->shared->fileset);
 	if (budget > SIZE_MAX / Max(state->shared->participants, 1))
 		budget = SIZE_MAX / Max(state->shared->participants, 1);
+	state->shared_budget = budget * state->shared->participants;
 	check(state, state->kernels->table_spill_init(dsa_get_address(area,
 																  state->shared->spill_words),
 												  state->shared->spill_nwords,
@@ -6963,6 +6995,9 @@ join_initialize_worker(CustomScanState *css, shm_toc *toc, void *coordinate)
 		dsm_segment *segment;
 
 		state->shared = coordinate;
+		state->shared_budget = Min(get_hash_memory_limit(),
+								   SIZE_MAX / Max(state->shared->participants, 1)) *
+			state->shared->participants;
 		/* The files, through the segment the worker already maps. */
 		segment = dsm_find_mapping(state->shared->segment);
 		if (segment == NULL)
