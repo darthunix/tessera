@@ -366,6 +366,34 @@ release, and tells the others it did not, which wait for nothing:
 ready with acquire (`tess_bloom_shared_ready`), and until then the
 participant probes the table without the filter.
 
+## Sorting records
+
+A node that sorts keeps its rows as records whose keys are the sort keys,
+in key order (`TessRows` in `tessera/runtime.h`), and orders them without
+linking them (`tessera/sort.h`, module `sort` of the kernels). Each
+record becomes an item of whole 64-bit words: every key's value as bits
+whose unsigned order is the key's order (an int4 or int8 with its sign
+bit flipped, every bit inverted for a descending key), after one bit
+that puts NULL first or last when the key may be NULL, and the record's
+reference in the last word's low 32 bits. One int4 key, or two that are
+never NULL, make one word; an int8 or up to three int4 keys, two; sixteen
+int8 keys that may be NULL, the most, seventeen.
+
+```c
+kernels->sort_item_words(nkeys, keys, &words, &status);
+kernels->sort_items(&table, nkeys, keys, items, nrecords * words, &count, &status);
+kernels->sort(items, count, words, refs, &status);   /* refs in order */
+```
+
+`sort_items` walks every record of every chunk in the order appended,
+linked or not, and `sort` sorts the items as arrays of words, the first
+word most significant, with the standard library's unstable sort, then
+reads the references out of them. The reference makes equal keys
+distinct, so the order of equal keys is the order of their references.
+The items are the caller's memory; the kernels allocate nothing. A new
+type of key needs only its transform into bits with the order kept: the
+sort itself does not change.
+
 ## Several participants
 
 Over shared memory, several processes may append to chunks of their own

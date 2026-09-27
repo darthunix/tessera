@@ -12,6 +12,7 @@ PG_MODULE_MAGIC;
 
 PG_FUNCTION_INFO_V1(tessera_test_rows_cycle);
 PG_FUNCTION_INFO_V1(tessera_test_rows_error);
+PG_FUNCTION_INFO_V1(tessera_test_rows_sort);
 
 /* The kernels of the table, which this module links. */
 static const TessKernelOps kernels = {
@@ -22,6 +23,9 @@ static const TessKernelOps kernels = {
 	.table_chunk_init = tess_table_chunk_init,
 	.table_append = tess_table_append,
 	.table_gather = tess_table_gather,
+	.sort_item_words = tess_sort_item_words,
+	.sort_items = tess_sort_items,
+	.sort = tess_sort,
 };
 
 #define BATCH 64
@@ -265,4 +269,60 @@ tessera_test_rows_error(PG_FUNCTION_ARGS)
 		(void) tess_rows_create(&config);
 	}
 	PG_RETURN_VOID();
+}
+
+/*
+ * Sort the rows by their key, ascending and then descending, and check
+ * the gathered rows come in the key's order: row i's key is
+ * i * 7919 modulo the rows, a permutation, so the order is strict.
+ */
+Datum
+tessera_test_rows_sort(PG_FUNCTION_ARGS)
+{
+	int			nrows = PG_GETARG_INT32(0);
+	TessRows   *rows = make_rows();
+	uint32	   *refs = palloc(sizeof(uint32) * nrows);
+	uint32	   *sorted;
+	uint64		count;
+	bool		ok = true;
+
+	append_all(rows, nrows, refs);
+	count = tess_rows_count(rows);
+	sorted = palloc(sizeof(uint32) * Max(count, 1));
+	for (int direction = 0; direction < 2 && ok; direction++)
+	{
+		TessSortKey key = {TESS_TABLE_KEY_INT4,
+		direction == 1 ? TESS_SORT_DESCENDING : 0};
+		int64		last = direction == 1 ? PG_INT64_MAX : -1;
+
+		tess_rows_sort(rows, &key, sorted);
+		for (uint64 first = 0; first < count && ok; first += BATCH)
+		{
+			int			n = (int) Min((uint64) BATCH, count - first);
+			uint64		bits[1] = {n == 64 ? ~UINT64CONST(0) : (UINT64CONST(1) << n) - 1};
+			TessRowMask mask = {n, bits};
+			Datum		values[BATCH];
+			bool		nulls[BATCH];
+
+			tess_rows_gather(rows, 0, &sorted[first], &mask, values, nulls);
+			for (int row = 0; row < n; row++)
+			{
+				int64		key_value = (int64) DatumGetInt32(values[row]) * 7919 % nrows;
+
+				if (nulls[row] ||
+					(direction == 0 ? key_value <= last : key_value >= last))
+					ok = false;
+				last = key_value;
+			}
+		}
+	}
+	/* Rows without records sort to nothing. */
+	tess_rows_reset(rows);
+	{
+		TessSortKey key = {TESS_TABLE_KEY_INT4, 0};
+
+		tess_rows_sort(rows, &key, sorted);
+	}
+	tess_rows_free(rows);
+	PG_RETURN_BOOL(ok && count > 0);
 }

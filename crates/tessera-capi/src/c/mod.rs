@@ -1,5 +1,6 @@
-//! The C entry points, declared in `include/tessera/kernels.h` and
-//! `include/tessera/table.h`.
+//! The C entry points, declared in `include/tessera/kernels.h`,
+//! `include/tessera/table.h`, `include/tessera/spill.h` and
+//! `include/tessera/sort.h`.
 //!
 //! Every entry point takes its inputs as the C structures of the batch
 //! contract ([`DatumColumn`], [`Mask`]), runs a kernel under a panic guard,
@@ -15,6 +16,7 @@ mod int32;
 mod int64;
 mod mask;
 mod shared_spill;
+mod sort;
 mod spill;
 mod status;
 mod table;
@@ -41,6 +43,11 @@ pub use shared_spill::{
     tess_table_spill_start, tess_table_spill_take_alone, tess_table_spill_take_file,
     tess_table_spill_words,
 };
+/// The `TESS_SORT_*` flags of a sort key.
+pub mod sort_flags {
+    pub use super::sort::{DESCENDING, NULLABLE, NULLS_FIRST};
+}
+pub use sort::{CSortKey, tess_sort, tess_sort_item_words, tess_sort_items, tess_sort_layout};
 pub use spill::{
     SpillHeader, tess_spill_header_read, tess_spill_header_size, tess_spill_header_write,
     tess_spill_pack, tess_spill_unpack,

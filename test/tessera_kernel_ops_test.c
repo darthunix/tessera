@@ -79,6 +79,9 @@ static const TessKernelOps kernels = {
 	.round_step = tess_round_step,
 	.bloom_shared_add = tess_bloom_shared_add,
 	.table_spill_evictions = tess_table_spill_evictions,
+	.sort_item_words = tess_sort_item_words,
+	.sort_items = tess_sort_items,
+	.sort = tess_sort,
 };
 
 static const TessKernelRegistryOps *

@@ -135,7 +135,7 @@ unsafe fn chunks_of<'a>(table: *const TableRef) -> Result<(&'a TableRef, Chunks<
 /// # Safety
 ///
 /// `table` as for [`chunks_of`], and its index as for [`Table::attach`].
-unsafe fn attach<'a>(table: *const TableRef) -> Result<Table<'a>> {
+pub(super) unsafe fn attach<'a>(table: *const TableRef) -> Result<Table<'a>> {
     // SAFETY: the caller's contract.
     unsafe {
         let (table, chunks) = chunks_of(table)?;
@@ -338,7 +338,11 @@ unsafe fn values<'a, T>(pointer: *const T, nrows: usize, what: &str) -> Result<&
 ///
 /// `pointer` must point to `nrows` initialized, writable values that
 /// nothing else accesses for `'a`, when `nrows` is positive.
-unsafe fn slots<'a, T>(pointer: *mut T, nrows: usize, what: &str) -> Result<&'a mut [T]> {
+pub(super) unsafe fn slots<'a, T>(
+    pointer: *mut T,
+    nrows: usize,
+    what: &str,
+) -> Result<&'a mut [T]> {
     if nrows == 0 {
         return Ok(&mut []);
     }

@@ -403,6 +403,38 @@ tess_rows_gather(TessRows *rows, int column, const uint32 *refs,
 		isnull[row] = (DatumGetUInt64(rows->null_words[row]) >> column) & 1;
 }
 
+void
+tess_rows_sort(TessRows *rows, const TessSortKey *keys, uint32 *refs)
+{
+	int			words;
+	uint64	   *items;
+	uint64		count;
+	Size		nwords;
+
+	check_rows(rows);
+	if (keys == NULL || refs == NULL)
+		elog(ERROR, "Tessera rows sort requires keys and references");
+	if (!TESS_ABI_HAS_FIELD(rows->kernels, TessKernelOps, sort) ||
+		rows->kernels->sort_item_words == NULL ||
+		rows->kernels->sort_items == NULL || rows->kernels->sort == NULL)
+		elog(ERROR, "Tessera rows sort requires the kernels of the sort");
+	if (rows->records == 0)
+		return;
+	check(rows, rows->kernels->sort_item_words(rows->nkeys, keys, &words,
+											   &rows->status));
+	nwords = mul_size((Size) rows->records, (Size) words);
+	items = MemoryContextAllocExtended(rows->context, mul_size(nwords, sizeof(uint64)),
+									   MCXT_ALLOC_HUGE);
+	check(rows, rows->kernels->sort_items(&rows->table, rows->nkeys, keys,
+										  items, nwords, &count, &rows->status));
+	if (count != rows->records)
+		elog(ERROR, "Tessera rows hold " UINT64_FORMAT " records, the sort found " UINT64_FORMAT,
+			 rows->records, count);
+	check(rows, rows->kernels->sort(items, (Size) count, words, refs,
+									&rows->status));
+	pfree(items);
+}
+
 uint64
 tess_rows_count(const TessRows *rows)
 {

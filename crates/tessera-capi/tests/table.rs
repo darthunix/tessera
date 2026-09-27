@@ -4,9 +4,11 @@
 use std::ptr;
 
 use anyhow::Result;
+use tessera_capi::c::sort_flags::{DESCENDING, NULLABLE, NULLS_FIRST};
 use tessera_capi::c::{
-    Code, DatumColumn, Mask, Status, TableKey, TableRecord, TableRef, TableStats, tess_int4_hash,
-    tess_int8_hash, tess_table_accumulate, tess_table_append, tess_table_attach,
+    CSortKey, Code, DatumColumn, Mask, Status, TableKey, TableRecord, TableRef, TableStats,
+    tess_int4_hash, tess_int8_hash, tess_sort, tess_sort_item_words, tess_sort_items,
+    tess_sort_layout, tess_table_accumulate, tess_table_append, tess_table_attach,
     tess_table_chunk_init, tess_table_create, tess_table_find_or_insert, tess_table_format_version,
     tess_table_gather, tess_table_gather_key, tess_table_layout, tess_table_link,
     tess_table_link_grouped, tess_table_next_in_group, tess_table_next_match, tess_table_payload,
@@ -262,6 +264,52 @@ impl CTable {
                 duplicates += repeated;
             }
             duplicates
+        }
+    }
+
+    /// Append the pending rows to chunks of `bytes` bytes, adding them as
+    /// they fill, without linking them: records a sort reads.
+    ///
+    /// # Safety
+    ///
+    /// The arguments as for `tess_table_append`, with no payload.
+    unsafe fn insert_unlinked(
+        &mut self,
+        bytes: usize,
+        hashes: *const u32,
+        key: *const TableKey,
+        pending: *mut Mask,
+        offsets: *mut u32,
+    ) {
+        let mut status = Status::new();
+        // SAFETY: the caller's contract.
+        unsafe {
+            loop {
+                if self.chunks.is_empty() {
+                    self.add_chunk(bytes);
+                }
+                let code = tess_table_append(
+                    self.ptr(),
+                    self.chunks.len() as i32 - 1,
+                    self.payload_size,
+                    hashes,
+                    1,
+                    key,
+                    ptr::null(),
+                    pending,
+                    offsets,
+                    &raw mut status,
+                );
+                assert_eq!(code, Code::Ok, "{}", status.message());
+                let words = ((*pending).nrows as usize).div_ceil(64);
+                if slice_of((*pending).bits, words)
+                    .iter()
+                    .all(|&word| word == 0)
+                {
+                    break;
+                }
+                self.add_chunk(bytes);
+            }
         }
     }
 
@@ -1243,6 +1291,180 @@ fn grouped_insertion_steps_through_a_key_in_one_call_each() -> Result<()> {
             );
             rows_words = found_words;
         }
+    }
+    Ok(())
+}
+
+#[test]
+fn the_sort_layout_probes_match_the_type() {
+    assert_eq!(tess_sort_layout(0), size_of::<CSortKey>());
+    assert_eq!(tess_sort_layout(0), 8);
+    assert_eq!(tess_sort_layout(1), 4);
+    assert_eq!(tess_sort_layout(2), 0);
+}
+
+/// Sort the records of a table through the C entry points, every row with
+/// its NULL (every fifth) last, and check the keys come back in order: the
+/// references are every record's, each once.
+#[test]
+fn the_sort_entry_points_order_every_record() -> Result<()> {
+    let keys = Keys::new(300);
+    let column = keys.column();
+    let key = TableKey {
+        kind: 1,
+        column: &raw const column,
+        prepared: ptr::null(),
+    };
+    let mut status = Status::new();
+    // SAFETY: local buffers of the declared sizes, aliased by nothing else,
+    // throughout this test.
+    unsafe {
+        let mut table = CTable::new(1, 8, 0);
+        let hashes = vec![0_u32; keys.nrows()];
+        let mut pending_words = keys.all_rows();
+        let mut pending = Mask {
+            nrows: keys.nrows() as i32,
+            bits: pending_words.as_mut_ptr(),
+        };
+        let mut offsets = vec![0_u32; keys.nrows()];
+        // Chunks of 64 records: the rows take five, and none is linked.
+        table.insert_unlinked(
+            CHUNK_HEADER + 64 * 32,
+            hashes.as_ptr(),
+            &raw const key,
+            &raw mut pending,
+            offsets.as_mut_ptr(),
+        );
+        for (descending, nulls_first) in [(false, false), (true, true), (true, false)] {
+            let flags = NULLABLE
+                | if descending { DESCENDING } else { 0 }
+                | if nulls_first { NULLS_FIRST } else { 0 };
+            let sort_key = CSortKey { kind: 1, flags };
+            let mut words = 0;
+            let code =
+                tess_sort_item_words(1, &raw const sort_key, &raw mut words, &raw mut status);
+            assert_eq!(code, Code::Ok, "{}", status.message());
+            assert_eq!(
+                words, 2,
+                "an int4 that may be NULL and a reference take 65 bits"
+            );
+            let words = words as usize;
+            let mut items = vec![0_u64; keys.nrows() * words];
+            let mut count = 0;
+            let code = tess_sort_items(
+                table.ptr(),
+                1,
+                &raw const sort_key,
+                items.as_mut_ptr(),
+                items.len(),
+                &raw mut count,
+                &raw mut status,
+            );
+            assert_eq!(code, Code::Ok, "{}", status.message());
+            assert_eq!(count as usize, keys.nrows());
+            let mut refs = vec![0_u32; keys.nrows()];
+            let code = tess_sort(
+                items.as_mut_ptr(),
+                keys.nrows(),
+                words as i32,
+                refs.as_mut_ptr(),
+                &raw mut status,
+            );
+            assert_eq!(code, Code::Ok, "{}", status.message());
+            let mut sorted = refs.clone();
+            sorted.sort_unstable();
+            let mut all = offsets.clone();
+            all.sort_unstable();
+            assert_eq!(sorted, all, "every record once");
+            // Each reference's row, then its key as the model orders it.
+            let order: Vec<Option<i32>> = refs
+                .iter()
+                .map(|reference| {
+                    let row = offsets
+                        .iter()
+                        .position(|offset| offset == reference)
+                        .unwrap();
+                    (!keys.isnull[row]).then_some(keys.values[row])
+                })
+                .collect();
+            let mut expected = order.clone();
+            expected.sort_by(|a, b| {
+                let order = match (a, b) {
+                    (None, None) => std::cmp::Ordering::Equal,
+                    (None, Some(_)) => std::cmp::Ordering::Greater,
+                    (Some(_), None) => std::cmp::Ordering::Less,
+                    (Some(a), Some(b)) => a.cmp(b),
+                };
+                let order = match (a.is_some() && b.is_some(), descending) {
+                    (true, true) => order.reverse(),
+                    _ => order,
+                };
+                match (a.is_none() != b.is_none(), nulls_first) {
+                    (true, true) => order.reverse(),
+                    _ => order,
+                }
+            });
+            assert_eq!(
+                order, expected,
+                "descending {descending}, nulls first {nulls_first}"
+            );
+        }
+
+        // Misuse: unknown flags or kinds, keys that are not the table's,
+        // items too few, a width the items do not have.
+        let bad_flags = CSortKey {
+            kind: 1,
+            flags: 0x8,
+        };
+        let mut words = 0;
+        assert_ne!(
+            tess_sort_item_words(1, &raw const bad_flags, &raw mut words, &raw mut status),
+            Code::Ok
+        );
+        let bad_kind = CSortKey { kind: 3, flags: 0 };
+        assert_ne!(
+            tess_sort_item_words(1, &raw const bad_kind, &raw mut words, &raw mut status),
+            Code::Ok
+        );
+        let int8 = CSortKey {
+            kind: 2,
+            flags: NULLABLE,
+        };
+        let mut items = vec![0_u64; keys.nrows() * 2];
+        let mut count = 0;
+        assert_ne!(
+            tess_sort_items(
+                table.ptr(),
+                1,
+                &raw const int8,
+                items.as_mut_ptr(),
+                items.len(),
+                &raw mut count,
+                &raw mut status
+            ),
+            Code::Ok
+        );
+        let int4 = CSortKey {
+            kind: 1,
+            flags: NULLABLE,
+        };
+        assert_ne!(
+            tess_sort_items(
+                table.ptr(),
+                1,
+                &raw const int4,
+                items.as_mut_ptr(),
+                10,
+                &raw mut count,
+                &raw mut status
+            ),
+            Code::Ok
+        );
+        let mut refs = vec![0_u32; 3];
+        assert_ne!(
+            tess_sort(items.as_mut_ptr(), 3, 0, refs.as_mut_ptr(), &raw mut status),
+            Code::Ok
+        );
     }
     Ok(())
 }

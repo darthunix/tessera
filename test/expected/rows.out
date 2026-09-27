@@ -6,6 +6,10 @@ CREATE FUNCTION tessera_test_rows_cycle(integer)
 RETURNS boolean
 AS :'rows_test', 'tessera_test_rows_cycle'
 LANGUAGE C STRICT;
+CREATE FUNCTION tessera_test_rows_sort(integer)
+RETURNS boolean
+AS :'rows_test', 'tessera_test_rows_sort'
+LANGUAGE C STRICT;
 CREATE FUNCTION tessera_test_rows_error(integer)
 RETURNS void
 AS :'rows_test', 'tessera_test_rows_error'
@@ -22,10 +26,20 @@ SELECT tessera_test_rows_cycle(1) AS one,
  t   | t     | t          | t
 (1 row)
 
+-- The rows sorted by their key, both ways, and read back in that order.
+SELECT tessera_test_rows_sort(1) AS one,
+       tessera_test_rows_sort(65) AS past_batch,
+       tessera_test_rows_sort(100000) AS many;
+ one | past_batch | many 
+-----+------------+------
+ t   | t          | t
+(1 row)
+
 -- Misuse is an ERROR.
 SELECT tessera_test_rows_error(1);
 ERROR:  Tessera rows have no column 3
 SELECT tessera_test_rows_error(2);
 ERROR:  Tessera rows require the kernels of the table
 DROP FUNCTION tessera_test_rows_cycle(integer);
+DROP FUNCTION tessera_test_rows_sort(integer);
 DROP FUNCTION tessera_test_rows_error(integer);

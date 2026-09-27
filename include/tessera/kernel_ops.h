@@ -8,7 +8,8 @@
  * TessKernelOps through the bridge's kernel registry; a node reaches them
  * through tess_runtime_kernels() and calls them by pointer. Every
  * operation has the prototype, arguments and contract of the entry point
- * named in its comment (tessera/kernels.h, tessera/table.h). See
+ * named in its comment (tessera/kernels.h, tessera/table.h,
+ * tessera/spill.h, tessera/sort.h). See
  * docs/bridge.md.
  */
 #ifndef TESSERA_KERNEL_OPS_H
@@ -18,6 +19,7 @@
 
 #include "tessera/abi.h"
 #include "tessera/kernels.h"
+#include "tessera/sort.h"
 #include "tessera/spill.h"
 #include "tessera/table.h"
 
@@ -395,10 +397,29 @@ typedef struct TessKernelOps
 									  const TessRowMask *rows,
 									  uint8 **payloads,
 									  TessStatus *status);
+	/* tess_sort_item_words */
+	TessStatusCode (*sort_item_words) (int nkeys,
+									   const TessSortKey *keys,
+									   int *words,
+									   TessStatus *status);
+	/* tess_sort_items */
+	TessStatusCode (*sort_items) (const TessTableRef *table,
+								  int nkeys,
+								  const TessSortKey *keys,
+								  uint64 *items,
+								  Size nwords,
+								  uint64 *count,
+								  TessStatus *status);
+	/* tess_sort */
+	TessStatusCode (*sort) (uint64 *items,
+							Size nitems,
+							int words,
+							uint32 *refs,
+							TessStatus *status);
 } TessKernelOps;
 
 #define TESS_KERNEL_OPS_MIN_SIZE \
-	TESS_ABI_SIZE_INCLUDING_FIELD(TessKernelOps, table_payloads)
+	TESS_ABI_SIZE_INCLUDING_FIELD(TessKernelOps, sort)
 
 /*
  * The registry of the kernels: one table per backend, installed by the

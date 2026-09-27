@@ -14,6 +14,7 @@
 #include "tessera/batch.h"
 #include "tessera/binding.h"
 #include "tessera/bridge.h"
+#include "tessera/sort.h"
 #include "tessera/spill.h"
 
 /*
@@ -772,6 +773,15 @@ extern void tess_rows_append(TessRows *rows, const TessTableKey *keys,
 extern void tess_rows_gather(TessRows *rows, int column, const uint32 *refs,
 							 const TessRowMask *mask, Datum *values,
 							 bool *isnull);
+
+/*
+ * The references of every record, ordered by keys, one per key of the
+ * rows in key order (tessera/sort.h), into refs, which holds
+ * tess_rows_count of them. The items are allocated for the call and
+ * freed; the kernels need the sort's operations.
+ */
+extern void tess_rows_sort(TessRows *rows, const TessSortKey *keys,
+						   uint32 *refs);
 
 /* The records appended, and the bytes the rows take: chunks, values and index. */
 extern uint64 tess_rows_count(const TessRows *rows);

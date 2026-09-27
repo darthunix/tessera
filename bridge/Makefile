@@ -21,7 +21,9 @@ HEADERS = \
 	../include/tessera/request.h \
 	../include/tessera/row_mask.h \
 	../include/tessera/runtime.h \
+	../include/tessera/sort.h \
 	../include/tessera/source.h \
+	../include/tessera/spill.h \
 	../include/tessera/status.h \
 	../include/tessera/table.h
 PG_CONFIG ?= pg_config

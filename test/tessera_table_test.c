@@ -5,6 +5,7 @@
 #include "fmgr.h"
 
 #include "tessera/kernels.h"
+#include "tessera/sort.h"
 #include "tessera/spill.h"
 #include "tessera/table.h"
 
@@ -341,7 +342,11 @@ tessera_test_table_layout(PG_FUNCTION_ARGS)
 				   sizeof(TessTableRef) &&
 				   tess_table_layout(TESS_TABLE_LAYOUT_REF_NCHUNKS_OFFSET) ==
 				   offsetof(TessTableRef, nchunks) &&
-				   tess_table_layout((TessTableLayoutKind) 99) == 0);
+				   tess_table_layout((TessTableLayoutKind) 99) == 0 &&
+				   tess_sort_layout(TESS_SORT_LAYOUT_KEY_SIZE) == sizeof(TessSortKey) &&
+				   tess_sort_layout(TESS_SORT_LAYOUT_KEY_FLAGS_OFFSET) ==
+				   offsetof(TessSortKey, flags) &&
+				   tess_sort_layout((TessSortLayoutKind) 99) == 0);
 }
 
 /*
