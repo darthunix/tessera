@@ -496,8 +496,8 @@ typedef struct TessKernelOps
 	TessStatusCode (*sort_merge) (int nruns, int words,
 								  const uint64 *const *lanes,
 								  const uint32 *left, const bool *more,
-								  uint32 *out, int max_out, int *count,
-								  int *refill, TessStatus *status);
+								  uint32 *state, uint32 *out, int max_out,
+								  int *count, int *refill, TessStatus *status);
 } TessKernelOps;
 
 #define TESS_KERNEL_OPS_MIN_SIZE \

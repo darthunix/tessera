@@ -1142,14 +1142,23 @@ of block pairs: a block of the by-reference values of some rows, one
 after another, and a chunk of columns (`TESS_SPILL_COLUMNS`) of those
 rows: a lane of the output columns' NULL bits, a lane per output column,
 a by-value Datum or a value's byte in its block of values, and a lane per
-word of the rows' items without the reference (0 in its place), which the
-merge compares. A block holds a 128th of `work_mem`, 64 rows at least.
+word of the rows' items without the reference, which the merge compares:
+the last word goes when it holds no key's bits (an int4 key's 33 bits
+merge as one word, not two), else the reference's bits are 0. With
+by-value columns only, a column goes into its lane a run of rows at a
+time. A block holds a 128th of `work_mem`, 64 rows at least. The runs of
+the input are the partitions of one set of files, and each pass's runs
+of another: a file per run made closing and deleting them 8 % of the
+sort, and 4116 runs at 64 kB twice the core's time.
 
 After the input, the runs merge with the kernel `tess_sort_merge`
 (`tessera/sort.h`): each run's current block in memory, its key lanes
 from its next row on, the kernel putting out the run of each row in order
-and stopping when a run's block is done with more of it to come, which the
-node then reads. A merge takes as many runs as a block pair each fits
+through a loser tree it keeps between calls in the node's words, and
+stopping when a run's block is done with more of it to come, which the
+node then reads. (A heap built anew for every 64 rows took 30 % of the
+sort; a head per run cached as a u128 and compared without branches was
+10 % slower than reading the lanes.) A merge takes as many runs as a block pair each fits
 `work_mem` (the pairs a batch put out points into stay only until the
 next batch), 6 at least as the core's does (a small `work_mem` is passed
 then) and 256 at most; more runs merge in passes into longer runs first.
@@ -1162,10 +1171,11 @@ whose blocks are read by their positions, a window within one block, in
 either direction. A rescan without a changed parameter starts the last
 merge again over the runs on disk; a changed one reads the child anew.
 `EXPLAIN ANALYZE` shows `Sort Method: external merge`, the disk written,
-the runs and the passes. At a `work_mem` of 4 MB, 2 M rows sort in 0.56
-to 0.73 of the core's time (an int4 key and column 118 ms against 205,
-two keys 187 against 331, with text 173 against 237); at 64 kB, where the
-runs are small and the passes many, in 1.2 s against 0.5.
+the runs and the passes. At a `work_mem` of 4 MB, 2 M rows sort in 0.35
+to 0.55 of the core's time (an int4 key and column 81 ms against 203,
+two keys 116 against 328, with text 128 against 232; in memory the first
+takes 58); at 64 kB, where the runs are small and the passes many, 249
+against 390, and with text 535 against 510.
 
 ### Top-N
 

@@ -325,18 +325,12 @@ fn candidates_as<K: KeySource + ?Sized, const W: usize>(
 /// The most runs one merge takes.
 pub const MAX_MERGE_RUNS: usize = 256;
 
-/// Whether run `a`'s current item orders before run `b`'s: the words of
-/// an item compared from the first, the most significant.
-#[inline(always)]
-fn item_before(lanes: &[&[u64]], words: usize, a: usize, at: usize, b: usize, bt: usize) -> bool {
-    for word in 0..words {
-        let (x, y) = (lanes[a * words + word][at], lanes[b * words + word][bt]);
-        if x != y {
-            return x < y;
-        }
-    }
-    a < b
-}
+/// Words of a merge's state: whether its tree is built, the run whose
+/// block ran out last (or none), and a node per run.
+pub const MERGE_STATE_WORDS: usize = 2 + MAX_MERGE_RUNS;
+
+/// No run: an empty place of the tree, or no run to replay.
+const NO_RUN: u32 = u32::MAX;
 
 /// What [`merge`] did: the rows it put out, and the run whose block it
 /// emptied with more blocks to come, which the caller loads before it
@@ -347,17 +341,115 @@ pub struct Merged {
     pub refill: Option<usize>,
 }
 
+/// The heads of the runs as a merge reads them: each run's lanes from its
+/// current row on, and the rows taken from each in this call.
+struct Heads<'a> {
+    words: usize,
+    lanes: &'a [&'a [u64]],
+    left: &'a [u32],
+    at: [u32; MAX_MERGE_RUNS],
+}
+
+impl Heads<'_> {
+    /// Whether run `a`'s head orders before run `b`'s: a run with no row
+    /// left orders last, and equal items in run order. (A head of each run
+    /// kept as one u128, compared without branches, was 10 % slower on 2 M
+    /// rows in 41 runs.)
+    #[inline(always)]
+    fn before(&self, a: u32, b: u32) -> bool {
+        let (a, b) = (a as usize, b as usize);
+        let (at, bt) = (self.at[a] as usize, self.at[b] as usize);
+        if at >= self.left[a] as usize {
+            return false;
+        }
+        if bt >= self.left[b] as usize {
+            return true;
+        }
+        match self.words {
+            1 => {
+                let (x, y) = (self.lanes[a][at], self.lanes[b][bt]);
+                x < y || (x == y && a < b)
+            }
+            2 => {
+                let x = (u128::from(self.lanes[a * 2][at]) << 64)
+                    | u128::from(self.lanes[a * 2 + 1][at]);
+                let y = (u128::from(self.lanes[b * 2][bt]) << 64)
+                    | u128::from(self.lanes[b * 2 + 1][bt]);
+                x < y || (x == y && a < b)
+            }
+            words => {
+                for word in 0..words {
+                    let (x, y) = (
+                        self.lanes[a * words + word][at],
+                        self.lanes[b * words + word][bt],
+                    );
+                    if x != y {
+                        return x < y;
+                    }
+                }
+                a < b
+            }
+        }
+    }
+
+    /// Whether run `run` has no row left in memory.
+    fn done(&self, run: usize) -> bool {
+        self.at[run] >= self.left[run]
+    }
+}
+
+/// Play run `run`'s head up the tree of `runs` leaves from its leaf: at
+/// each node the loser stays, the winner goes on and is returned. Leaf
+/// `r` is place `runs + r`; node `i`'s children are `2i` and `2i + 1`.
+#[inline(always)]
+fn replay(tree: &mut [u32], runs: usize, heads: &Heads<'_>, run: u32) -> u32 {
+    let mut winner = run;
+    let mut node = (run as usize + runs) / 2;
+    while node >= 1 {
+        if heads.before(tree[node], winner) {
+            core::mem::swap(&mut tree[node], &mut winner);
+        }
+        node /= 2;
+    }
+    winner
+}
+
+/// Build the tree over every run's head: each node keeps the loser of its
+/// two sides, and the winner of all is returned.
+fn build(tree: &mut [u32], runs: usize, heads: &Heads<'_>) -> u32 {
+    let mut winners = [0_u32; MAX_MERGE_RUNS];
+    let side = |winners: &[u32; MAX_MERGE_RUNS], child: usize| {
+        if child >= runs {
+            (child - runs) as u32
+        } else {
+            winners[child]
+        }
+    };
+    for node in (1..runs).rev() {
+        let (a, b) = (side(&winners, 2 * node), side(&winners, 2 * node + 1));
+        let (won, lost) = if heads.before(b, a) { (b, a) } else { (a, b) };
+        tree[node] = lost;
+        winners[node] = won;
+    }
+    if runs == 1 { 0 } else { winners[1] }
+}
+
 /// Merge sorted runs: run `r`'s items are `words` lanes of words,
 /// `lanes[r * words + w]` word `w` of its rows from its current one on,
 /// `left[r]` of them, and `more[r]` says whether blocks of it follow. The
 /// run of each row put out, in order, goes to `out`, as many as it takes
 /// or until a run's block is done with more to come; a run's next rows are
-/// the ones after those it gave. Equal items come in run order.
+/// the ones after those it gave. Items compare whole, the caller leaving
+/// out what is no key, such as a reference; equal ones come in run order.
+/// `state`,
+/// [`MERGE_STATE_WORDS`] words, keeps the tree of runs (a loser tree) from
+/// one call to the next; its first word 0 makes it anew.
 pub fn merge(
     words: usize,
     lanes: &[&[u64]],
     left: &[u32],
     more: &[bool],
+    state: &mut [u32],
     out: &mut [u32],
 ) -> Result<Merged> {
     let runs = left.len();
@@ -366,8 +458,13 @@ pub fn merge(
         "a sort item has 1 to {MAX_ITEM_WORDS} words, not {words}"
     );
     ensure!(
-        runs <= MAX_MERGE_RUNS && more.len() == runs && lanes.len() == runs * words,
-        "a merge of {runs} runs takes a flag per run and {words} lanes each, up to {MAX_MERGE_RUNS} runs"
+        (1..=MAX_MERGE_RUNS).contains(&runs) && more.len() == runs && lanes.len() == runs * words,
+        "a merge of {runs} runs takes a flag per run and {words} lanes each, 1 to {MAX_MERGE_RUNS} runs"
+    );
+    ensure!(
+        state.len() >= MERGE_STATE_WORDS,
+        "a merge's state takes {MERGE_STATE_WORDS} words, not {}",
+        state.len()
     );
     for (run, (&rows, &follows)) in left.iter().zip(more).enumerate() {
         ensure!(
@@ -381,55 +478,46 @@ pub fn merge(
             "run {run} holds fewer rows than it has left"
         );
     }
-    let mut heap = [0_u16; MAX_MERGE_RUNS];
-    let mut at = [0_u32; MAX_MERGE_RUNS];
-    let mut len = 0;
-    for (run, &rows) in left.iter().enumerate() {
-        if rows > 0 {
-            heap[len] = run as u16;
-            len += 1;
-        }
-    }
-    let before = |heap: &[u16], at: &[u32], i: usize, j: usize| {
-        let (a, b) = (heap[i] as usize, heap[j] as usize);
-        item_before(lanes, words, a, at[a] as usize, b, at[b] as usize)
+    let mut heads = Heads {
+        words,
+        lanes,
+        left,
+        at: [0; MAX_MERGE_RUNS],
     };
-    let sift = |heap: &mut [u16], at: &[u32], len: usize, mut i: usize| loop {
-        let (l, r) = (2 * i + 1, 2 * i + 2);
-        let mut least = i;
-        if l < len && before(heap, at, l, least) {
-            least = l;
-        }
-        if r < len && before(heap, at, r, least) {
-            least = r;
-        }
-        if least == i {
+    // state[0]: built; state[1]: the run to replay first; tree[0], the
+    // winner; tree[1..runs], the losers.
+    let (flags, tree) = state.split_at_mut(2);
+    let tree = &mut tree[..MAX_MERGE_RUNS];
+    let mut winner = if flags[0] == 0 {
+        flags[0] = 1;
+        build(tree, runs, &heads)
+    } else if flags[1] != NO_RUN {
+        // The run whose block ran out has its next rows now.
+        replay(tree, runs, &heads, flags[1])
+    } else {
+        tree[0]
+    };
+    flags[1] = NO_RUN;
+    let mut count = 0;
+    while count < out.len() && winner != NO_RUN {
+        let run = winner as usize;
+        if heads.done(run) {
             break;
         }
-        heap.swap(i, least);
-        i = least;
-    };
-    for i in (0..len / 2).rev() {
-        sift(&mut heap, &at, len, i);
-    }
-    let mut count = 0;
-    while count < out.len() && len > 0 {
-        let run = heap[0] as usize;
-        out[count] = run as u32;
+        out[count] = winner;
         count += 1;
-        at[run] += 1;
-        if at[run] == left[run] {
-            if more[run] {
-                return Ok(Merged {
-                    count,
-                    refill: Some(run),
-                });
-            }
-            len -= 1;
-            heap[0] = heap[len];
+        heads.at[run] += 1;
+        if heads.at[run] == left[run] && more[run] {
+            flags[1] = winner;
+            tree[0] = winner;
+            return Ok(Merged {
+                count,
+                refill: Some(run),
+            });
         }
-        sift(&mut heap, &at, len, 0);
+        winner = replay(tree, runs, &heads, winner);
     }
+    tree[0] = winner;
     Ok(Merged {
         count,
         refill: None,
@@ -486,13 +574,27 @@ mod tests {
                     .map(|_| {
                         let n = (random(&mut state) % 50) as usize;
                         let mut items: Vec<Vec<u64>> = (0..n)
-                            .map(|_| (0..words).map(|_| random(&mut state) % 5).collect())
+                            .map(|_| {
+                                // Keys, as the node writes them: the
+                                // reference's low 32 bits left out.
+                                (0..words)
+                                    .map(|word| {
+                                        let value = random(&mut state) % 5;
+                                        if word == words - 1 {
+                                            value << 32
+                                        } else {
+                                            value
+                                        }
+                                    })
+                                    .collect()
+                            })
                             .collect();
                         items.sort();
                         items
                     })
                     .collect();
                 let block = 3;
+                let mut state_words = vec![0_u32; MERGE_STATE_WORDS];
                 let mut cursor = vec![0_usize; nruns];
                 let mut merged: Vec<Vec<u64>> = Vec::new();
                 loop {
@@ -527,7 +629,8 @@ mod tests {
                         continue;
                     }
                     let mut out = [0_u32; 8];
-                    let done = merge(words, &lanes, &left, &more, &mut out).unwrap();
+                    let done =
+                        merge(words, &lanes, &left, &more, &mut state_words, &mut out).unwrap();
                     if done.count == 0 {
                         break;
                     }
@@ -548,9 +651,10 @@ mod tests {
         let lane = [1_u64];
         let lanes: [&[u64]; 2] = [&lane, &[]];
         let mut out = [0_u32; 4];
-        assert!(merge(1, &lanes, &[1, 0], &[false, true], &mut out).is_err());
+        let mut state = [0_u32; MERGE_STATE_WORDS];
+        assert!(merge(1, &lanes, &[1, 0], &[false, true], &mut state, &mut out).is_err());
         assert_eq!(
-            merge(1, &lanes, &[1, 0], &[false, false], &mut out).unwrap(),
+            merge(1, &lanes, &[1, 0], &[false, false], &mut state, &mut out).unwrap(),
             Merged {
                 count: 1,
                 refill: None
