@@ -951,22 +951,22 @@ SELECT join_explain($$SELECT count(*) FROM jf JOIN join_many() AS m(k) ON jf.v =
                                  join_explain                                  
 -------------------------------------------------------------------------------
  Custom Scan (TessAgg) (actual rows=1.00 loops=1)
-   Input Batches: 883
+   Input Batches: 773
    Input Rows: 1000
-   Kernel Calls: 883
+   Kernel Calls: 773
    ->  Custom Scan (TessHashJoin) (actual rows=1000.00 loops=1)
          Hash Cond: (jf.v = m.k)
          Buckets: 1024
          Memory Usage: over hash_mem
          Builds: 1
          Build Rows: 20000
-         Chunks: 6060
+         Chunks: 5283
          Batches: 4
-         Resident Partitions: 787
-         Spilled Chunks: 6218
-         Disk Usage: 874 kB
-         Tail Chunks Kept: 3118
-         Split Partitions: 1706
+         Resident Partitions: 689
+         Spilled Chunks: 5473
+         Disk Usage: 806 kB
+         Tail Chunks Kept: 2774
+         Split Partitions: 1491
          Probe Rows: 1000
          Matches: 1000
          Bloom Filters: 1
@@ -1678,11 +1678,11 @@ SELECT join_explain($$SELECT count(*), sum(length(jsb.t)) FROM jsp JOIN jsb ON j
          Memory Usage: within hash_mem
          Builds: 1
          Build Rows: 37648
-         Chunks: 92
+         Chunks: 81
          Batches: 8
          Resident Partitions: 0
-         Spilled Chunks: 689
-         Disk Usage: 2130 kB
+         Spilled Chunks: 686
+         Disk Usage: 2119 kB
          Tail Chunks Kept: 16
          Probe Rows: 100000
          Matches: 171130
@@ -1730,11 +1730,11 @@ SELECT join_explain($$SELECT count(*), count(jsb.n), sum(length(jsb.t)) FROM jsp
          Memory Usage: within hash_mem
          Builds: 1
          Build Rows: 37648
-         Chunks: 100
+         Chunks: 89
          Batches: 8
          Resident Partitions: 0
-         Spilled Chunks: 749
-         Disk Usage: 2211 kB
+         Spilled Chunks: 747
+         Disk Usage: 2203 kB
          Tail Chunks Kept: 16
          Probe Rows: 100000
          Matches: 171130
@@ -1789,9 +1789,9 @@ SELECT join_explain($$SELECT count(*), sum(jskew.w) FROM jsp JOIN jskew() AS jsk
                                  join_explain                                  
 -------------------------------------------------------------------------------
  Custom Scan (TessAgg) (actual rows=1.00 loops=1)
-   Input Batches: 3752
+   Input Batches: 3753
    Input Rows: 240000
-   Kernel Calls: 7504
+   Kernel Calls: 7506
    Computed Datums: 240000
    ->  Custom Scan (TessHashJoin) (actual rows=240000.00 loops=1)
          Hash Cond: (jsp.k = jskew.k)
@@ -1799,7 +1799,7 @@ SELECT join_explain($$SELECT count(*), sum(jskew.w) FROM jsp JOIN jskew() AS jsk
          Memory Usage: within hash_mem
          Builds: 1
          Build Rows: 62000
-         Chunks: 57
+         Chunks: 55
          Batches: 4
          Resident Partitions: 0
          Spilled Chunks: 154
@@ -1808,7 +1808,7 @@ SELECT join_explain($$SELECT count(*), sum(jskew.w) FROM jsp JOIN jskew() AS jsk
          Extra Passes: 3
          Probe Rows: 100000
          Matches: 240000
-         Compact Batches: 3751
+         Compact Batches: 3752
          Bloom Filters: 1
          Rows Removed by Bloom Filter: 90906
          ->  Custom Scan (TessHeapScan) on jsp (actual rows=100000.00 loops=1)
@@ -1869,9 +1869,9 @@ SELECT join_explain($$SELECT count(*), sum(length(w.t)) FROM jsp JOIN jwide() AS
                                  join_explain                                  
 -------------------------------------------------------------------------------
  Custom Scan (TessAgg) (actual rows=1.00 loops=1)
-   Input Batches: 5969
+   Input Batches: 5697
    Input Rows: 363640
-   Kernel Calls: 11936
+   Kernel Calls: 11393
    Computed Datums: 363640
    ->  Custom Scan (TessHashJoin) (actual rows=363640.00 loops=1)
          Hash Cond: (jsp.k = w.k)
@@ -1879,16 +1879,16 @@ SELECT join_explain($$SELECT count(*), sum(length(w.t)) FROM jsp JOIN jwide() AS
          Memory Usage: within hash_mem
          Builds: 1
          Build Rows: 200000
-         Chunks: 499
+         Chunks: 237
          Batches: 8
-         Resident Partitions: 16
-         Spilled Chunks: 3498
-         Disk Usage: 15078 kB
-         Tail Chunks Kept: 70
-         Split Partitions: 10
+         Resident Partitions: 0
+         Spilled Chunks: 3505
+         Disk Usage: 14176 kB
+         Tail Chunks Kept: 68
+         Split Partitions: 4
          Probe Rows: 100000
          Matches: 363640
-         Compact Batches: 3889
+         Compact Batches: 4165
          Bloom Filters: 1
          Rows Removed by Bloom Filter: 0
          ->  Custom Scan (TessHeapScan) on jsp (actual rows=100000.00 loops=1)
@@ -1959,11 +1959,11 @@ SELECT join_explain($$SELECT count(*), count(jsp.s), sum(length(jsb.t)) FROM jsp
          Memory Usage: within hash_mem
          Builds: 1
          Build Rows: 40000
-         Chunks: 89
+         Chunks: 79
          Batches: 8
          Resident Partitions: 0
-         Spilled Chunks: 1173
-         Disk Usage: 2916 kB
+         Spilled Chunks: 1179
+         Disk Usage: 2923 kB
          Tail Chunks Kept: 16
          Probe Rows: 100000
          Matches: 171130
@@ -2006,9 +2006,9 @@ SELECT join_explain($$SELECT count(*), count(jsp.s), sum(jskew.w) FROM jsp RIGHT
                                  join_explain                                  
 -------------------------------------------------------------------------------
  Custom Scan (TessAgg) (actual rows=1.00 loops=1)
-   Input Batches: 3787
+   Input Batches: 3786
    Input Rows: 242000
-   Kernel Calls: 11361
+   Kernel Calls: 11356
    Computed Datums: 484000
    ->  Custom Scan (TessHashJoin) (actual rows=242000.00 loops=1)
          Join Type: Right
@@ -2017,16 +2017,16 @@ SELECT join_explain($$SELECT count(*), count(jsp.s), sum(jskew.w) FROM jsp RIGHT
          Memory Usage: within hash_mem
          Builds: 1
          Build Rows: 62000
-         Chunks: 57
+         Chunks: 55
          Batches: 4
          Resident Partitions: 0
          Spilled Chunks: 154
          Disk Usage: 143 kB
-         Tail Chunks Kept: 9
-         Extra Passes: 4
+         Tail Chunks Kept: 8
+         Extra Passes: 3
          Probe Rows: 100000
          Matches: 240000
-         Compact Batches: 3753
+         Compact Batches: 3752
          Bloom Filters: 1
          Rows Removed by Bloom Filter: 90906
          ->  Custom Scan (TessHeapScan) on jsp (actual rows=100000.00 loops=1)
@@ -2058,9 +2058,9 @@ SELECT join_explain($$SELECT count(*), count(jsp.s), sum(length(w.t)) FROM jsp R
                                  join_explain                                  
 -------------------------------------------------------------------------------
  Custom Scan (TessAgg) (actual rows=1.00 loops=1)
-   Input Batches: 8223
+   Input Batches: 8158
    Input Rows: 483640
-   Kernel Calls: 24655
+   Kernel Calls: 24458
    Computed Datums: 967280
    ->  Custom Scan (TessHashJoin) (actual rows=483640.00 loops=1)
          Join Type: Right
@@ -2069,16 +2069,16 @@ SELECT join_explain($$SELECT count(*), count(jsp.s), sum(length(w.t)) FROM jsp R
          Memory Usage: within hash_mem
          Builds: 1
          Build Rows: 200000
-         Chunks: 657
+         Chunks: 434
          Batches: 8
-         Resident Partitions: 30
-         Spilled Chunks: 4713
-         Disk Usage: 17614 kB
-         Tail Chunks Kept: 77
-         Split Partitions: 15
+         Resident Partitions: 9
+         Spilled Chunks: 4824
+         Disk Usage: 18089 kB
+         Tail Chunks Kept: 91
+         Split Partitions: 11
          Probe Rows: 100000
          Matches: 363640
-         Compact Batches: 729
+         Compact Batches: 891
          Bloom Filters: 1
          Rows Removed by Bloom Filter: 0
          ->  Custom Scan (TessHeapScan) on jsp (actual rows=100000.00 loops=1)

@@ -74,35 +74,53 @@ the query that wrote them, on the same machine, as PostgreSQL's are.
 The runtime library writes and reads the blocks
 (`runtime/spill.c`, declared in `tessera/runtime.h`). A node makes a
 `TessSpill` per level of partitioning, with the table's fingerprint, the
-longest body it accepts and the number of partitions; each partition gets
-a file on its first block, so a partition that never spills has none.
+longest body it accepts, the number of partitions and the bytes of its
+write buffer (`TESS_SPILL_BUFFER_LEN`: a sixteenth of `hash_mem`, 32 to
+256 kB). A set writes one file, made on its first block: the blocks of
+every partition go into it one after another, through the write buffer,
+and the set keeps each partition's list of blocks, where each starts and
+the bytes it takes. A block larger than the buffer is written as it is.
+BufFile, a file per partition written in pieces of 8 kB, is not used:
+one file through a larger buffer took 6–9 % off a spilled join (plan
+item 5.12). A buffer larger still gains little, since a write costs with
+its bytes more than with its calls.
 
-- A **serial** set writes PostgreSQL's temporary files
-  (`BufFileCreateTemp`): the query's temporary tablespaces are looked up
-  when the set is made, `temp_file_limit` applies, and the files are
-  deleted when the set drops them or, after an ERROR, when the query's
+- A **serial** set writes a PostgreSQL temporary file
+  (`OpenTemporaryFile`): the query's temporary tablespaces are looked up
+  when the set is made, `temp_file_limit` applies, and the file is
+  deleted when the set is freed or, after an ERROR, when the query's
   resources are released.
-- A **shared** set writes this participant's files of a `SharedFileSet`
+- A **shared** set writes this participant's file of a `SharedFileSet`
   in the node's chunk of the query's shared memory
   (`tess_spill_shared_init` in the leader, `tess_spill_shared_attach` in a
-  worker), named `<name>.<participant>.<partition>`; every participant
-  opens any participant's file once its writer finished the set, and the
-  files are deleted when the last participant detaches the segment.
+  worker), named `<name>.<participant>`. `tess_spill_finish` writes the
+  lists at the file's end, a count of blocks per partition, then the
+  blocks by partition, then a trailer that says where they start; every
+  participant opens any participant's file once its writer finished the
+  set, and reads its partition's list from there. The files are deleted
+  when the last participant detaches the segment.
 
 A set first writes: `tess_spill_write` puts a header and the body into the
-partition's file and can return where the block starts. After
-`tess_spill_finish` it reads: `tess_spill_open` gives a reader at the
-file's first block, `tess_spill_read_header` the next header, checked
-against the set's fingerprint, longest body, partition and level, then
-`tess_spill_read_body` its body whole; `tess_spill_seek` goes to a block
-by its position, which lets participants take blocks of one file each on
-their own. A serial file has one reader at a time, since the reader moves
-the file's own position; a shared reader opens a handle of its own.
-`tess_spill_drop` deletes a partition's file once it has been read, and
-`tess_spill_stats` gives the blocks and bytes written and the files open,
-each of which holds a buffer of one page. `tess_spill_free` deletes this
-participant's files with the set; `tess_spill_release` only closes a
-shared set's, which the other participants may still read.
+buffer, a chunk of records packed straight into it when its raw bytes fit,
+and can return where the block starts. After `tess_spill_finish` it reads:
+`tess_spill_open` gives a reader at the partition's first block, with a
+buffer of its largest block, so that its memory is known before any read;
+`tess_spill_read_header` reads the next block whole, header and stored
+body, in one read and checks the header against the set's fingerprint,
+longest body, partition, level and the bytes on disk; then
+`tess_spill_read_body` unpacks or copies its body; `tess_spill_seek` goes
+to a block by its position, which lets participants take blocks of one
+partition each on their own. A serial partition has one reader at a time,
+as before; a shared reader of another participant opens a handle of its
+own. `tess_spill_drop` forgets a partition's blocks once they have been
+read; their bytes stay in the file until the set goes, so a level's disk
+is freed with its set, not a partition at a time (every outer row is
+written before any partition is joined, so the peak is the same).
+`tess_spill_stats` gives the blocks and bytes written and the partitions
+with blocks, `tess_spill_memory` the bytes of the buffers now.
+`tess_spill_free` deletes this participant's file with the set;
+`tess_spill_release` only closes a shared set's, which the other
+participants may still read.
 
 These are the only calls of PostgreSQL's file layer for spilling: a core
 with another manager of work files, like Greengage's, replaces this file.

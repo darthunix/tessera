@@ -1813,6 +1813,7 @@ agg_spill_create(TessAggState *state, AggSpill *parent, double expected, uint32 
 	config.npartitions = npartitions;
 	config.level = spill->level;
 	config.max_len = (uint64) MaxAllocHugeSize;
+	config.buffer_len = TESS_SPILL_BUFFER_LEN(get_hash_memory_limit());
 	spill->file = tess_spill_create(&config);
 	state->partitions = Max(state->partitions, (uint64) npartitions);
 	return spill;

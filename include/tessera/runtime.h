@@ -589,14 +589,16 @@ extern void tess_shared_stats_end(TessSharedStats *stats);
 
 /*
  * Temporary files of a node that spills (docs/spill.md): one set per level
- * of partitioning, a file per partition, created on its first block. A
+ * of partitioning, one file per set, created on its first block, into
+ * which the blocks of every partition go one after another through the
+ * set's write buffer; the set keeps each partition's list of blocks. A
  * block is a header (tessera/spill.h) and a chunk of the node's table. A
- * serial set writes PostgreSQL's temporary files, deleted when the set
- * frees them or the query's resources are released; a shared set writes
- * the participant's files of a SharedFileSet in the query's shared
- * memory, named "<name>.<participant>.<partition>", which every
- * participant reads once the writer finished them and which are deleted
- * when the last participant detaches the segment. temp_file_limit and
+ * serial set writes a PostgreSQL temporary file, deleted when the set
+ * frees it or the query's resources are released; a shared set writes
+ * the participant's file of a SharedFileSet in the query's shared
+ * memory, named "<name>.<participant>", with its lists at the end, which
+ * every participant reads once the writer finished it and which is
+ * deleted when the last participant detaches the segment. temp_file_limit and
  * temp_tablespaces apply as to every temporary file. A set writes, then,
  * after tess_spill_finish, reads; the files are this module's only calls
  * of PostgreSQL's file layer.
@@ -624,10 +626,23 @@ typedef struct TessSpillConfig
 	int			participant;
 	/* The prefix of the shared set's names, unique in its file set. */
 	const char *name;
+	/*
+	 * The bytes of the set's write buffer, through which every block goes
+	 * to its file in large writes; 0 for 64 kB.
+	 */
+	Size		buffer_len;
 } TessSpillConfig;
 
 #define TESS_SPILL_CONFIG_MIN_SIZE \
 	TESS_ABI_SIZE_INCLUDING_FIELD(TessSpillConfig, name)
+
+/*
+ * A write buffer for a set of a node whose memory is limit bytes: a
+ * sixteenth of it, 32 to 256 kB. Past a few blocks a larger one gains
+ * little: what a write costs goes with its bytes.
+ */
+#define TESS_SPILL_BUFFER_LEN(limit) \
+	((Size) Min(Max((Size) (limit) / 16, (Size) 32 * 1024), (Size) 256 * 1024))
 
 /* Where a block starts in its file: a file of segments and a byte in one. */
 typedef struct TessSpillPosition
@@ -693,14 +708,22 @@ extern void tess_spill_seek(TessSpillReader *reader,
 extern void tess_spill_close(TessSpillReader *reader);
 
 /*
- * Delete this participant's file of the partition, which no reader may
- * be reading any more; its blocks stay counted.
+ * Forget this participant's blocks of the partition, which no reader of
+ * it may be reading any more; they stay counted, and their bytes stay in
+ * the file until the set goes. A shared set's other participants still
+ * find them.
  */
 extern void tess_spill_drop(TessSpill *spill, int partition);
 
-/* The blocks and bytes this participant wrote and the files it has open. */
+/*
+ * The blocks and bytes this participant wrote and the partitions of it
+ * that have blocks and were not dropped.
+ */
 extern void tess_spill_stats(const TessSpill *spill, uint64 *blocks,
 							 uint64 *bytes, int *files);
+
+/* The bytes of memory the set's buffers take now, its readers' included; 0 for NULL. */
+extern Size tess_spill_memory(const TessSpill *spill);
 
 /* Delete this participant's files and release the set. */
 extern void tess_spill_free(TessSpill *spill);

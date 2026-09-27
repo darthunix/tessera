@@ -1664,6 +1664,7 @@ side_init(TessHashJoinState *state, SpillSide *side, int nkeys, const TessTableK
 	config.level = spill->level;
 	config.fingerprint = side->fingerprint;
 	config.max_len = (uint64) MaxAllocHugeSize;
+	config.buffer_len = TESS_SPILL_BUFFER_LEN(get_hash_memory_limit());
 	side->file = tess_spill_create(&config);
 }
 
@@ -2059,20 +2060,15 @@ spill_memory(JoinSpill *spill, uint64 *resident)
 		*resident = rows;
 	/*
 	 * The levels above keep the tails of their partitions to come; every
-	 * open file keeps a buffer of a page.
+	 * set keeps its write buffer while it writes, and its readers a block.
 	 */
 	for (JoinSpill *level = spill; level != NULL; level = level->parent)
 	{
-		int			build_files;
-		int			probe_files;
-
-		tess_spill_stats(level->build.file, NULL, NULL, &build_files);
-		tess_spill_stats(level->probe.file, NULL, NULL, &probe_files);
 		bytes += level->build.bytes + level->probe.bytes +
 			sizeof(uint64) * level->bloom_words +
 			MemoryContextMemAllocated(level->part_context, true) +
 			MemoryContextMemAllocated(level->block_context, true) +
-			(Size) (build_files + probe_files) * BLCKSZ;
+			tess_spill_memory(level->build.file) + tess_spill_memory(level->probe.file);
 	}
 	return bytes + (spill->indexed ? 0 : rows * sizeof(uint64));
 }
@@ -4332,6 +4328,7 @@ side_share(TessHashJoinState *state, SpillSide *side, const char *prefix, bool m
 	config.shared = &state->shared->fileset;
 	config.participant = state->spill_participant;
 	config.name = psprintf("%s%d", prefix, state->css.ss.ps.plan->plan_node_id);
+	config.buffer_len = TESS_SPILL_BUFFER_LEN(get_hash_memory_limit());
 	side->file = tess_spill_create(&config);
 	side->shared_files = true;
 	if (!memory)
