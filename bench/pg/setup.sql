@@ -61,6 +61,18 @@ CREATE TABLE bench_dup AS
 SELECT g % (25000 * :scale) + 1 AS k, g AS v
 FROM generate_series(1, 100000 * :scale) AS g;
 
+-- The sort family: keys in no order of the rows. The prime 7919 divides no
+-- row count but a multiplier's own multiple of it, so k4 is a permutation
+-- of 0 .. rows - 1; k8 holds the same order past the int4 range, few has
+-- 1000 values, nul is NULL in every 11th row, sorted follows the rows.
+DROP TABLE IF EXISTS bench_sort;
+CREATE TABLE bench_sort AS
+SELECT k4, k4::bigint * 5000000011 AS k8, k4 % 1000 AS few,
+       CASE WHEN g % 11 = 0 THEN NULL ELSE k4 END AS nul,
+       g AS sorted, g AS v, 'row-' || g AS t
+FROM generate_series(1, 2000000 * :scale) AS g,
+     LATERAL (SELECT (g::bigint * 7919 % (2000000 * :scale))::int AS k4) AS key;
+
 -- The grouping cases of the win family group by expressions: statistics
 -- on them give the planner the number of groups, which it would otherwise
 -- take from the unique column underneath.
@@ -73,11 +85,13 @@ VACUUM (ANALYZE) bench_mixed;
 VACUUM (ANALYZE) bench_dim;
 VACUUM (ANALYZE) bench_fact;
 VACUUM (ANALYZE) bench_dup;
+VACUUM (ANALYZE) bench_sort;
 
 SELECT pg_size_pretty(pg_total_relation_size('bench_narrow')) AS narrow,
        pg_size_pretty(pg_total_relation_size('bench_wide')) AS wide,
        pg_size_pretty(pg_total_relation_size('bench_mixed')) AS mixed,
-       pg_size_pretty(pg_total_relation_size('bench_fact')) AS fact;
+       pg_size_pretty(pg_total_relation_size('bench_fact')) AS fact,
+       pg_size_pretty(pg_total_relation_size('bench_sort')) AS sort;
 
 -- Warm the relations in shared buffers.
 SET tessera.enable = off;
@@ -87,3 +101,4 @@ SELECT count(*) FROM bench_mixed;
 SELECT count(*) FROM bench_dim;
 SELECT count(*) FROM bench_fact;
 SELECT count(*) FROM bench_dup;
+SELECT count(*) FROM bench_sort;
