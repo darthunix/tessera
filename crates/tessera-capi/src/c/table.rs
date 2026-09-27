@@ -937,6 +937,34 @@ pub unsafe extern "C" fn tess_table_gather(
     }
 }
 
+/// `tess_table_gather_scattered`: as [`tess_table_gather`], prefetching
+/// the records of a word of rows before reading them.
+///
+/// # Safety
+///
+/// As for [`tess_table_gather`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tess_table_gather_scattered(
+    table: *const TableRef,
+    offsets: *const u32,
+    rows: *const Mask,
+    at: usize,
+    out: *mut u64,
+    status: *mut Status,
+) -> Code {
+    // SAFETY: the caller's contract.
+    unsafe {
+        guard(status, || {
+            let table = attach(table)?;
+            let rows = rows.as_ref().context("a null row mask")?.view()?;
+            let nrows = rows.nrows();
+            let offsets = values(offsets, nrows, "offsets")?;
+            let out = slots(out, nrows, "results")?;
+            table.gather_scattered(offsets, &rows, at, out)
+        })
+    }
+}
+
 /// `tess_table_next_in_group`: step each row to the record right after
 /// its own when that one has the same keys.
 ///

@@ -330,6 +330,19 @@ extern TessStatusCode tess_table_probe(const TessTableRef *table,
 									   TessStatus *status);
 
 /*
+ * As tess_table_gather, for records in no order, as a sort reads them
+ * back: the records of a word of rows are prefetched before any is read.
+ * Records a probe has just read are in the cache, where tess_table_gather
+ * is faster.
+ */
+extern TessStatusCode tess_table_gather_scattered(const TessTableRef *table,
+												  const uint32 *offsets,
+												  const TessRowMask *rows,
+												  Size at,
+												  Datum *values,
+												  TessStatus *status);
+
+/*
  * For each row of rows, replace offsets[row], an offset from a probe or an
  * earlier call, by the offset of the next record in its chain with the
  * same hash, NULL bits and keys; found receives the rows that have one,

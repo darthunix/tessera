@@ -1894,3 +1894,75 @@ fn payload_columns_append_the_records_a_payload_array_does() -> Result<()> {
     );
     Ok(())
 }
+
+/// A scattered gather reads what a gather reads, records in any order and
+/// a mask with holes, and leaves the rows outside the mask alone.
+#[test]
+fn a_scattered_gather_reads_what_a_gather_reads() -> Result<()> {
+    const ROWS: usize = 200;
+    let values: Vec<i32> = (0..ROWS as i32).collect();
+    let keys = [ColumnView::try_new(&values, None)?];
+    let hashes: Vec<u32> = values.iter().map(|&value| hash_i32(value)).collect();
+    let payload: Vec<u8> = (0..ROWS as u64)
+        .flat_map(|row| [row * 11, row << 20].into_iter().flat_map(u64::to_ne_bytes))
+        .collect();
+    let config = TableConfig {
+        keys: &[KeyKind::Int32],
+        payload_size: 16,
+    };
+    let mut table = LocalTable::new(&config, 0, CHUNK)?;
+    let mut pending_words = all_rows(ROWS);
+    let mut offsets = vec![0u32; ROWS];
+    loop {
+        let chunk = match table.chunks() {
+            0 => table.add_chunk()?,
+            n => n - 1,
+        };
+        let mut pending = RowMask::try_new(ROWS, &mut pending_words)?;
+        table.table()?.append(
+            chunk,
+            &hashes,
+            &keys[..],
+            Some(&payload),
+            &mut pending,
+            &mut offsets,
+        )?;
+        if pending_words.iter().all(|&word| word == 0) {
+            break;
+        }
+        table.add_chunk()?;
+    }
+    assert!(table.chunks() > 1, "the records span several chunks");
+    // The records in a shuffled order, every fifth row left out.
+    let shuffled: Vec<u32> = (0..ROWS).map(|row| offsets[row * 7 % ROWS]).collect();
+    let mut selected = all_rows(ROWS);
+    for row in (0..ROWS).step_by(5) {
+        selected[row / 64] &= !(1 << (row % 64));
+    }
+    let rows = RowMaskView::try_new(ROWS, &selected)?;
+    let shared = table.table()?;
+    for at in [0, 8] {
+        let mut plain = vec![u64::MAX; ROWS];
+        let mut scattered = vec![u64::MAX; ROWS];
+        shared.gather(&shuffled, &rows, at, &mut plain)?;
+        shared.gather_scattered(&shuffled, &rows, at, &mut scattered)?;
+        assert_eq!(plain, scattered, "word at {at}");
+        for (row, &got) in scattered.iter().enumerate() {
+            let expected = if row % 5 == 0 {
+                u64::MAX
+            } else if at == 0 {
+                (row * 7 % ROWS) as u64 * 11
+            } else {
+                ((row * 7 % ROWS) as u64) << 20
+            };
+            assert_eq!(got, expected, "row {row}, word at {at}");
+        }
+    }
+    let mut out = vec![0u64; ROWS];
+    assert!(
+        shared
+            .gather_scattered(&shuffled, &rows, 16, &mut out)
+            .is_err()
+    );
+    Ok(())
+}

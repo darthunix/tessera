@@ -791,7 +791,7 @@ pub(super) fn next_match<R: Region>(
 /// For each row of `rows`, the 8 bytes at byte `at` of the payload of the
 /// record at `offsets[row]` into `out[row]`; other rows of `out` keep
 /// their values.
-pub(super) fn gather<R: Region>(
+pub(super) fn gather<R: Region, const PREFETCH: bool>(
     region: &R,
     layout: &Layout,
     offsets: &[u32],
@@ -810,10 +810,23 @@ pub(super) fn gather<R: Region>(
         "a payload word at byte {at} is past the payload of {} bytes",
         layout.payload_size
     );
-    let access = Access::new(region, layout);
-    // The records of a sort's rows lie in no order: every record of a word
-    // of rows is located and its header and word prefetched before any is
-    // read, so that the misses overlap.
+    let mut access = Access::new(region, layout);
+    if !PREFETCH {
+        for index in 0..nrows.div_ceil(64) {
+            for bit in rows_of(rows.word(index).unwrap()) {
+                let row = index * 64 + bit;
+                let payload = access.locate(offsets[row])?.payload();
+                let mut word = [0; 8];
+                word.copy_from_slice(&payload[at..at + 8]);
+                out[row] = u64::from_ne_bytes(word);
+            }
+        }
+        return Ok(());
+    }
+    // Records in no order, as a sort's rows read back: every record of a
+    // word of rows is located and its header and word prefetched before
+    // any is read, so that the misses overlap. Records a probe has just
+    // read are in the cache, where the extra pass only costs.
     let word_at = RECORD_HEADER + 8 * access.nkeys() + at;
     let mut spots = [const { MaybeUninit::<R::Spot>::uninit() }; 64];
     for index in 0..nrows.div_ceil(64) {

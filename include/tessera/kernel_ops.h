@@ -427,10 +427,17 @@ typedef struct TessKernelOps
 											TessRowMask *pending,
 											uint32 *offsets,
 											TessStatus *status);
+	/* tess_table_gather_scattered */
+	TessStatusCode (*table_gather_scattered) (const TessTableRef *table,
+											  const uint32 *offsets,
+											  const TessRowMask *rows,
+											  Size at,
+											  Datum *values,
+											  TessStatus *status);
 } TessKernelOps;
 
 #define TESS_KERNEL_OPS_MIN_SIZE \
-	TESS_ABI_SIZE_INCLUDING_FIELD(TessKernelOps, table_append_columns)
+	TESS_ABI_SIZE_INCLUDING_FIELD(TessKernelOps, table_gather_scattered)
 
 /*
  * The registry of the kernels: one table per backend, installed by the

@@ -62,8 +62,9 @@ pub use table::{
     tess_table_append_partitioned, tess_table_attach, tess_table_bloom, tess_table_bloom_words,
     tess_table_chunk_init, tess_table_combine, tess_table_create, tess_table_find_or_insert,
     tess_table_find_or_insert_partitioned, tess_table_fingerprint, tess_table_format_version,
-    tess_table_gather, tess_table_gather_key, tess_table_layout, tess_table_link,
-    tess_table_link_grouped, tess_table_next_in_group, tess_table_next_match, tess_table_payload,
-    tess_table_payloads, tess_table_probe, tess_table_record, tess_table_regrow, tess_table_scan,
-    tess_table_size, tess_table_split, tess_table_stats, tess_table_try_build_bloom,
+    tess_table_gather, tess_table_gather_key, tess_table_gather_scattered, tess_table_layout,
+    tess_table_link, tess_table_link_grouped, tess_table_next_in_group, tess_table_next_match,
+    tess_table_payload, tess_table_payloads, tess_table_probe, tess_table_record,
+    tess_table_regrow, tess_table_scan, tess_table_size, tess_table_split, tess_table_stats,
+    tess_table_try_build_bloom,
 };

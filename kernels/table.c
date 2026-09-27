@@ -75,4 +75,5 @@ const TessKernelOps tess_kernel_ops = {
 	.sort_items = tess_sort_items,
 	.sort = tess_sort,
 	.table_append_columns = tess_table_append_columns,
+	.table_gather_scattered = tess_table_gather_scattered,
 };

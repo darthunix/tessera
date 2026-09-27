@@ -4,8 +4,9 @@
  * The records lie in chunks the rows allocate, the first of ROWS_FIRST_CHUNK
  * bytes and the others of the most a chunk may have, appended by the
  * kernels from the columns themselves (tess_table_append_columns) and read
- * back by reference (tess_table_gather). A record's payload is a word of its kept columns'
- * NULL bits, then a word per column: a by-value Datum, or the reference of
+ * back by reference, prefetched, since a sort reads them in no order
+ * (tess_table_gather_scattered). A record's payload is a word of its kept
+ * columns' NULL bits, then a word per column: a by-value Datum, or the reference of
  * a by-reference value's copy in the value chunks, the first of
  * ROWS_VALUE_FIRST bytes and the others of ROWS_VALUE_CHUNK, a value
  * larger than a quarter of one getting a chunk of its own. A reference is
@@ -116,13 +117,12 @@ tess_rows_create(const TessRowsConfig *config)
 		config->parent_context == NULL)
 		elog(ERROR, "Tessera rows require a config and a context");
 	if (config->kernels == NULL ||
-		!TESS_ABI_HAS_FIELD(config->kernels, TessKernelOps, table_gather) ||
 		config->kernels->table_size == NULL ||
 		config->kernels->table_create == NULL ||
 		config->kernels->table_chunk_init == NULL ||
-		!TESS_ABI_HAS_FIELD(config->kernels, TessKernelOps, table_append_columns) ||
+		!TESS_ABI_HAS_FIELD(config->kernels, TessKernelOps, table_gather_scattered) ||
 		config->kernels->table_append_columns == NULL ||
-		config->kernels->table_gather == NULL)
+		config->kernels->table_gather_scattered == NULL)
 		elog(ERROR, "Tessera rows require the kernels of the table");
 	if (config->nkeys < 1 || config->nkeys > TESS_TABLE_MAX_KEYS ||
 		config->kinds == NULL)
@@ -420,9 +420,9 @@ tess_rows_gather(TessRows *rows, int column, const uint32 *refs,
 	if (refs == NULL || mask == NULL || values == NULL || isnull == NULL)
 		elog(ERROR, "Tessera rows gather requires references, a mask and outputs");
 	nwords = tess_row_mask_word_count(mask->nrows);
-	check(rows, rows->kernels->table_gather(&rows->table, refs, mask,
-											sizeof(uint64) * (1 + column),
-											values, &rows->status));
+	check(rows, rows->kernels->table_gather_scattered(&rows->table, refs, mask,
+													  sizeof(uint64) * (1 + column),
+													  values, &rows->status));
 	/* A by-reference value's word is its reference: its address here. */
 	bases = rows->values;
 	if (!rows->typbyvals[column])
@@ -448,8 +448,8 @@ tess_rows_gather(TessRows *rows, int column, const uint32 *refs,
 		return;
 	}
 	reserve(rows, mask->nrows);
-	check(rows, rows->kernels->table_gather(&rows->table, refs, mask, 0,
-											rows->null_words, &rows->status));
+	check(rows, rows->kernels->table_gather_scattered(&rows->table, refs, mask, 0,
+													  rows->null_words, &rows->status));
 	for (int word = 0; word < nwords; word++)
 		for (uint64 bits = mask->bits[word]; bits != 0; bits &= bits - 1)
 		{

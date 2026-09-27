@@ -592,7 +592,21 @@ impl<'a> Table<'a> {
         at: usize,
         out: &mut [u64],
     ) -> Result<()> {
-        batch::gather(&self.region, &self.layout, offsets, rows, at, out)
+        batch::gather::<_, false>(&self.region, &self.layout, offsets, rows, at, out)
+    }
+
+    /// As [`Table::gather`], for records in no order, as a sort reads
+    /// them back: those of a word of rows are prefetched before any is
+    /// read. Records just probed are in the cache, where [`Table::gather`]
+    /// is faster.
+    pub fn gather_scattered(
+        &self,
+        offsets: &[u32],
+        rows: &RowMaskView<'_>,
+        at: usize,
+        out: &mut [u64],
+    ) -> Result<()> {
+        batch::gather::<_, true>(&self.region, &self.layout, offsets, rows, at, out)
     }
 
     /// For each row of `rows`, replace `offsets[row]` by the record right

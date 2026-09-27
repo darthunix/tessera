@@ -231,7 +231,13 @@ record at `offsets[row]` into `values[row]`; other rows keep their
 values, and `at + 8` must lie within the payload. A join keeps the
 Datums of its build row as payload words and fetches one column of a
 batch of matches per call, with one check of the header, where a call
-per row would check it per row.
+per row would check it per row. `tess_table_gather_scattered` reads the
+same for records in no order, as a sort reads its rows back: it locates
+every record of a word of rows and prefetches its header and word before
+reading any, so that the cache misses overlap. A join's matches were
+just read by the probe and are in the cache, where the extra pass only
+costs (2–5 % of the join cases that read inner columns), so the join
+keeps `tess_table_gather`.
 
 `tess_table_gather_key(&table, offsets, &rows, key, values, isnull,
 &status)` reads key `key` of each row's record the same way, as its
