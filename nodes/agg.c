@@ -22,6 +22,7 @@
 #include "utils/fmgroids.h"
 #include "utils/memutils.h"
 #include "utils/regproc.h"
+#include "utils/selfuncs.h"
 #include "utils/ruleutils.h"
 
 #include "tessera/expr.h"
@@ -89,6 +90,32 @@ typedef enum AggKind
 	AGG_MAX						/* the greatest partial, NULL without any */
 } AggKind;
 
+/*
+ * DISTINCT in an aggregate: a table of its own, without payload, keyed by
+ * the group's keys and the argument, the argument alone without GROUP BY.
+ * A row goes into the aggregate only when it inserted its pair: the ones
+ * seen before are dropped, and so are NULL arguments, which the aggregate
+ * skips anyway. The table does not spill.
+ */
+typedef struct DistinctSet
+{
+	MemoryContext context;
+	int			nkeys;
+	TessTableKeyKind kinds[TESS_TABLE_MAX_KEYS];
+	TessTableRef table;
+	void	  **bases;
+	Size	   *lens;
+	int			slots;
+	Size		bytes;
+	/* The buffers of a batch, for capacity rows. */
+	int			capacity;
+	uint32	   *hashes;
+	uint32	   *offsets;
+	uint64	   *pending_bits;
+	uint64	   *inserted_bits;
+	uint64	   *call_bits;
+} DistinctSet;
+
 typedef struct AggValue
 {
 	AggKind		kind;
@@ -106,6 +133,9 @@ typedef struct AggValue
 	bool		has_value;
 	/* GROUP BY: how the table folds a row into the group's state. */
 	TessTableAccumulate accumulate;
+	/* DISTINCT: the pairs of group and argument seen, and the argument's kind. */
+	struct DistinctSet *distinct;
+	TessTableKeyKind argument_kind;
 } AggValue;
 
 typedef struct TessAggState
@@ -126,6 +156,11 @@ typedef struct TessAggState
 	bool		done;
 	/* Under a Gather: the values as they are, for the Finalize Aggregate. */
 	bool		partial;
+	/*
+	 * An aggregate has DISTINCT: its pairs of group and argument live in a
+	 * table of their own, which does not spill, so neither do the groups.
+	 */
+	bool		has_distinct;
 	uint64		batches;
 	uint64		rows;
 	uint64		calls;
@@ -208,6 +243,10 @@ typedef struct TessAggState
 } TessAggState;
 
 static const CustomExecMethods agg_exec_methods;
+static TessRowMask distinct_rows(TessAggState *state, AggValue *value, int nrows,
+								 const uint32 *group_hashes,
+								 const TessRowMask *valid,
+								 const TessDatumColumn *argument);
 static create_upper_paths_hook_type previous_create_upper_paths_hook = NULL;
 
 static Plan *agg_plan(PlannerInfo *root, RelOptInfo *rel,
@@ -268,7 +307,7 @@ aggregate_supported(const Aggref *agg)
 	if (agg->agglevelsup != 0 || agg->aggkind != AGGKIND_NORMAL ||
 		(agg->aggsplit != AGGSPLIT_SIMPLE &&
 		 agg->aggsplit != AGGSPLIT_INITIAL_SERIAL) || agg->aggorder != NIL ||
-		agg->aggdistinct != NIL || agg->aggfilter != NULL ||
+		agg->aggfilter != NULL ||
 		agg->aggdirectargs != NIL || agg->aggvariadic ||
 		aggregate_kind(agg->aggfnoid) < 0)
 		return false;
@@ -280,6 +319,9 @@ aggregate_supported(const Aggref *agg)
 	argument = aggregate_argument(agg);
 	if (list_length(agg->args) != 1 || contain_subplans(argument))
 		return false;
+	/* DISTINCT keys a table by the argument: an integer. */
+	if (agg->aggdistinct != NIL)
+		return exprType(argument) == INT4OID || exprType(argument) == INT8OID;
 	return agg->aggfnoid == F_COUNT_ANY || exprType(argument) == INT4OID ||
 		exprType(argument) == INT8OID;
 }
@@ -446,11 +488,17 @@ make_agg_path(PlannerInfo *root, const AggPath *agg, List *tlist, int nkeys)
 	Path	   *child;
 	Path		template;
 
-	child = tess_batch_input_path(root, agg->subpath);
+	child = agg->subpath;
+	/* A sort the core put below for its sorted grouping: hashing needs none. */
+	while (IsA(child, SortPath) || IsA(child, IncrementalSortPath))
+		child = ((SortPath *) child)->subpath;
+	child = tess_batch_input_path(root, child);
 	if (child == NULL || !arguments_available(tlist, child))
 		return NULL;
 	template = agg->path;
 	template.total_cost *= AGG_COST_FACTOR;
+	/* The groups come in no order, whatever order the core's had. */
+	template.pathkeys = NIL;
 	config.template_path = &template;
 	config.methods = &agg_path_methods;
 	config.node = &tess_agg_node;
@@ -532,6 +580,44 @@ create_partial_paths(PlannerInfo *root, RelOptInfo *grouped_rel,
 	}
 }
 
+/* Whether an aggregate of the target list has DISTINCT. */
+static bool
+has_distinct_aggregate(List *tlist)
+{
+	foreach_node(TargetEntry, entry, tlist)
+		if (IsA(entry->expr, Aggref) && ((Aggref *) entry->expr)->aggdistinct != NIL)
+			return true;
+	return false;
+}
+
+/*
+ * Whether the pairs of group and argument of the DISTINCT aggregates fit
+ * hash_mem, as the planner estimates them: their tables do not spill. A
+ * group key fewer than a table's most leaves room for the argument.
+ */
+static bool
+distinct_fits(PlannerInfo *root, RelOptInfo *input_rel, List *keys, List *tlist)
+{
+	double		bytes = 0;
+
+	foreach_node(TargetEntry, entry, tlist)
+	{
+		Aggref	   *agg;
+		double		pairs;
+
+		if (!IsA(entry->expr, Aggref) || ((Aggref *) entry->expr)->aggdistinct == NIL)
+			continue;
+		agg = (Aggref *) entry->expr;
+		if (list_length(keys) >= TESS_TABLE_MAX_KEYS)
+			return false;
+		pairs = estimate_num_groups(root,
+									lappend(list_copy(keys), aggregate_argument(agg)),
+									input_rel->rows, NULL, NULL);
+		bytes += pairs * (16.0 + 8.0 * (list_length(keys) + 1));
+	}
+	return bytes <= (double) get_hash_memory_limit();
+}
+
 /*
  * SELECT DISTINCT is grouping without aggregates: the node's path next to
  * each of the core's hashed distinct paths, over the same input, its keys
@@ -577,6 +663,7 @@ create_upper_paths(PlannerInfo *root, UpperRelationKind stage,
 {
 	List	   *keys = NIL;
 	List	   *tlist = NIL;
+	List	   *templates;
 	AggStrategy strategy = AGG_PLAIN;
 	double		groups = 0;
 
@@ -608,9 +695,19 @@ create_upper_paths(PlannerInfo *root, UpperRelationKind stage,
 		tlist == NIL ||
 		(keys != NIL && list_length(tlist) - list_length(keys) > AGG_MAX_GROUPED))
 		return;
-	/* add_path changes the list: the candidates are taken first. */
-	foreach_ptr(AggPath, agg, aggregate_templates(output_rel->pathlist,
-												  strategy, AGGSPLIT_SIMPLE))
+	if (!distinct_fits(root, input_rel, keys, tlist))
+		return;
+	/*
+	 * add_path changes the list: the candidates are taken first. With
+	 * DISTINCT in an aggregate the core groups only sorted; the node hashes
+	 * in its place, unless hashing is disabled.
+	 */
+	templates = aggregate_templates(output_rel->pathlist, strategy, AGGSPLIT_SIMPLE);
+	if (templates == NIL && strategy == AGG_HASHED && enable_hashagg &&
+		has_distinct_aggregate(tlist))
+		templates = aggregate_templates(output_rel->pathlist, AGG_SORTED,
+										AGGSPLIT_SIMPLE);
+	foreach_ptr(AggPath, agg, templates)
 	{
 		CustomPath *path = make_agg_path(root, agg, tlist, list_length(keys));
 
@@ -860,6 +957,13 @@ agg_begin(CustomScanState *css, EState *estate, int eflags)
 			}
 			value->gathered_values = palloc_array(Datum, 64);
 			value->gathered_isnull = palloc_array(bool, 64);
+			if (agg->aggdistinct != NIL)
+			{
+				value->argument_kind = exprType(argument) == INT8OID ?
+					TESS_TABLE_KEY_INT8 : TESS_TABLE_KEY_INT4;
+				value->distinct = palloc0(sizeof(struct DistinctSet));
+				state->has_distinct = true;
+			}
 		}
 	}
 	if (computed != NIL)
@@ -918,6 +1022,14 @@ agg_begin(CustomScanState *css, EState *estate, int eflags)
 										   Max(state->nvalues, 1) * AGG_GROUP_ROWS);
 		if (state->projection == NULL)
 			elog(ERROR, "TessAgg groups by computed columns");
+	}
+	/* DISTINCT in an aggregate keeps its pairs in tables, with or without groups. */
+	if (state->has_distinct && state->kernels == NULL)
+	{
+		state->kernels = tess_runtime_kernels();
+		if (state->kernels == NULL ||
+			!TESS_ABI_HAS_FIELD(state->kernels, TessKernelOps, table_combine))
+			elog(ERROR, "TessAgg needs the kernels module for DISTINCT");
 	}
 	state->builder = tess_builder_create(&builder);
 	state->output = tess_output_create(estate->es_query_cxt, &css->ss.ps,
@@ -1029,6 +1141,14 @@ accumulate(TessAggState *state, AggValue *value, TessBatch *batch, int nrows)
 	if (computed.values == NULL || computed.isnull == NULL ||
 		computed.nrows != batch->rows.nrows)
 		elog(ERROR, "Tessera projection returned an invalid column");
+	if (value->distinct != NULL)
+	{
+		TessRowMask rows = distinct_rows(state, value, batch->rows.nrows, NULL,
+										 &batch->rows, column);
+
+		evaluate(state, value, column, &rows);
+		return;
+	}
 	if (nrows > AGG_GATHER_ROWS)
 	{
 		evaluate(state, value, column, &batch->rows);
@@ -1044,10 +1164,22 @@ accumulate(TessAggState *state, AggValue *value, TessBatch *batch, int nrows)
 	}
 }
 
+static void distinct_reset(TessAggState *state, AggValue *value);
+
+/* Empty every distinct set, before the input is read. */
+static void
+reset_distinct(TessAggState *state)
+{
+	for (int index = 0; index < state->nvalues; index++)
+		if (state->values[index].distinct != NULL)
+			distinct_reset(state, &state->values[index]);
+}
+
 /* Read every batch of the child into the running values. */
 static void
 drain(TessAggState *state)
 {
+	reset_distinct(state);
 	for (;;)
 	{
 		TessBatch  *batch = tess_input_next(state->input);
@@ -1117,6 +1249,7 @@ check(TessAggState *state, TessStatusCode code)
 }
 
 static Size agg_spill_memory(TessAggState *state);
+static Size distinct_bytes(TessAggState *state);
 
 /*
  * The bytes of the table now, and the most so far; once it spills, the
@@ -1128,6 +1261,8 @@ note_memory(TessAggState *state)
 	Size		memory = state->spill == NULL ? state->table_bytes :
 		agg_spill_memory(state);
 
+	if (state->has_distinct)
+		memory += distinct_bytes(state);
 	state->peak_memory = Max(state->peak_memory, memory);
 }
 
@@ -1266,6 +1401,189 @@ reserve_rows(TessAggState *state, int nrows)
 	state->pending_bits = MemoryContextAlloc(state->table_context, sizeof(uint64) * nwords);
 	state->inserted_bits = MemoryContextAlloc(state->table_context, sizeof(uint64) * nwords);
 	state->capacity = nrows;
+}
+
+/* An index of the pairs for capacity of them in the set's memory. */
+static void *
+distinct_index(TessAggState *state, DistinctSet *set, uint64 capacity, Size *size)
+{
+	check(state, state->kernels->table_size(set->nkeys, set->kinds, 0, capacity,
+											size, &state->status));
+	return MemoryContextAllocExtended(set->context, *size, MCXT_ALLOC_HUGE);
+}
+
+/* An empty set: the groups' keys, then the argument. */
+static void
+distinct_reset(TessAggState *state, AggValue *value)
+{
+	DistinctSet *set = value->distinct;
+	uint64		capacity = AGG_INITIAL_GROUPS;
+	Size		size;
+
+	if (set->context == NULL)
+		set->context = AllocSetContextCreate(state->css.ss.ps.state->es_query_cxt,
+											 "TessAgg distinct",
+											 ALLOCSET_DEFAULT_SIZES);
+	MemoryContextReset(set->context);
+	set->nkeys = state->nkeys + 1;
+	for (int key = 0; key < state->nkeys; key++)
+		set->kinds[key] = state->kinds[key];
+	set->kinds[state->nkeys] = value->argument_kind;
+	set->capacity = 0;
+	set->slots = 16;
+	set->bases = MemoryContextAlloc(set->context, sizeof(void *) * set->slots);
+	set->lens = MemoryContextAlloc(set->context, sizeof(Size) * set->slots);
+	set->table.index = distinct_index(state, set, capacity, &size);
+	set->table.index_len = size;
+	set->table.chunks = set->bases;
+	set->table.chunk_lens = set->lens;
+	set->table.nchunks = 0;
+	set->bytes = size;
+	check(state, state->kernels->table_create(set->table.index, size, set->nkeys,
+											  set->kinds, 0, capacity,
+											  &state->status));
+}
+
+static void
+distinct_add_chunk(TessAggState *state, DistinctSet *set)
+{
+	int			chunk = set->table.nchunks;
+	Size		len = chunk == 0 ? AGG_FIRST_CHUNK : TESS_TABLE_MAX_CHUNK_LEN;
+	void	   *base;
+
+	if (chunk == TESS_TABLE_MAX_CHUNKS)
+		ereport(ERROR,
+				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+				 errmsg("TessAgg distinct table cannot hold more than %d chunks",
+						TESS_TABLE_MAX_CHUNKS)));
+	if (chunk == set->slots)
+	{
+		set->slots *= 2;
+		set->bases = repalloc(set->bases, sizeof(void *) * set->slots);
+		set->lens = repalloc(set->lens, sizeof(Size) * set->slots);
+		set->table.chunks = set->bases;
+		set->table.chunk_lens = set->lens;
+	}
+	base = MemoryContextAlloc(set->context, len);
+	check(state, state->kernels->table_chunk_init(base, len, &state->status));
+	set->bases[chunk] = base;
+	set->lens[chunk] = len;
+	set->table.nchunks++;
+	set->bytes += len;
+}
+
+static void
+distinct_regrow(TessAggState *state, DistinctSet *set, uint64 records)
+{
+	void	   *old = set->table.index;
+	Size		size;
+	void	   *index = distinct_index(state, set, records * 2, &size);
+
+	check(state, state->kernels->table_regrow(&set->table, index, size,
+											  records * 2, &state->status));
+	set->bytes = set->bytes - set->table.index_len + size;
+	set->table.index = index;
+	set->table.index_len = size;
+	pfree(old);
+}
+
+/*
+ * The rows of valid, of a batch of nrows rows, that insert their pair into
+ * the aggregate's set: a mask in the set's buffers. group_hashes are the
+ * rows' hashes of the groups' keys, state->table_keys their keys, or NULL
+ * without GROUP BY.
+ */
+static TessRowMask
+distinct_rows(TessAggState *state, AggValue *value, int nrows,
+			  const uint32 *group_hashes, const TessRowMask *valid,
+			  const TessDatumColumn *argument)
+{
+	DistinctSet *set = value->distinct;
+	int			nwords = tess_row_mask_word_count(nrows);
+	TessTableKey keys[TESS_TABLE_MAX_KEYS];
+	TessRowMask pending;
+	TessRowMask inserted;
+	bool		int8 = value->argument_kind == TESS_TABLE_KEY_INT8;
+
+	if (set->capacity < nrows)
+	{
+		set->hashes = MemoryContextAlloc(set->context, sizeof(uint32) * nrows);
+		set->offsets = MemoryContextAlloc(set->context, sizeof(uint32) * nrows);
+		set->pending_bits = MemoryContextAlloc(set->context, sizeof(uint64) * nwords);
+		set->inserted_bits = MemoryContextAlloc(set->context, sizeof(uint64) * nwords);
+		set->call_bits = MemoryContextAlloc(set->context, sizeof(uint64) * nwords);
+		set->capacity = nrows;
+	}
+	pending = (TessRowMask) {nrows, set->pending_bits};
+	inserted = (TessRowMask) {nrows, set->inserted_bits};
+	memset(set->inserted_bits, 0, sizeof(uint64) * nwords);
+	/* The groups' hashes folded with the argument's; a NULL one drops out. */
+	if (group_hashes != NULL)
+	{
+		memcpy(set->hashes, group_hashes, sizeof(uint32) * nrows);
+		memcpy(set->pending_bits, valid->bits, sizeof(uint64) * nwords);
+		check(state, (int8 ? state->kernels->int8_hash_next :
+					  state->kernels->int4_hash_next) (argument, NULL,
+													   TESS_NULL_KEYS_REJECT,
+													   set->hashes, &pending,
+													   &state->status));
+	}
+	else
+	{
+		memset(set->pending_bits, 0, sizeof(uint64) * nwords);
+		check(state, (int8 ? state->kernels->int8_hash :
+					  state->kernels->int4_hash) (argument, NULL, valid,
+												  TESS_NULL_KEYS_REJECT,
+												  set->hashes, &pending,
+												  &state->status));
+	}
+	for (int key = 0; key < state->nkeys; key++)
+		keys[key] = state->table_keys[key];
+	keys[state->nkeys].kind = value->argument_kind;
+	keys[state->nkeys].column = argument;
+	keys[state->nkeys].prepared = NULL;
+	if (set->table.nchunks == 0)
+		distinct_add_chunk(state, set);
+	for (;;)
+	{
+		TessTableStats stats = TESS_STRUCT_INITIALIZER(TessTableStats);
+		TessRowMask call = {nrows, set->call_bits};
+
+		/*
+		 * Each call fills its mask of new pairs whole: they add up. A mask
+		 * has no bits past its rows on entry, which a longer batch left.
+		 */
+		memset(set->call_bits, 0, sizeof(uint64) * nwords);
+		check(state, state->kernels->table_find_or_insert(&set->table,
+														  set->table.nchunks - 1,
+														  set->hashes, set->nkeys,
+														  keys, &pending,
+														  set->offsets, &call,
+														  &state->status));
+		for (int word = 0; word < nwords; word++)
+			set->inserted_bits[word] |= set->call_bits[word];
+		if (tess_row_mask_count(&pending) == 0)
+			break;
+		check(state, state->kernels->table_stats(&set->table, &stats,
+												 &state->status));
+		if (stats.records * 2 >= stats.buckets)
+			distinct_regrow(state, set, stats.records);
+		else
+			distinct_add_chunk(state, set);
+	}
+	return inserted;
+}
+
+/* The bytes of every distinct set. */
+static Size
+distinct_bytes(TessAggState *state)
+{
+	Size		bytes = 0;
+
+	for (int index = 0; index < state->nvalues; index++)
+		if (state->values[index].distinct != NULL)
+			bytes += state->values[index].distinct->bytes;
+	return bytes;
 }
 
 /*
@@ -2276,12 +2594,17 @@ group_batch(TessAggState *state, TessBatch *batch)
 		AggValue   *value = &state->values[index];
 		TessDatumColumn column;
 
+		TessRowMask rows = valid;
+
 		if (value->computed >= 0)
 			computed_column(state, batch, value->computed,
 							TESS_COLUMN_FOR_PROJECTION, &column);
+		if (value->distinct != NULL)
+			rows = distinct_rows(state, value, nrows, state->hashes, &valid,
+								 &column);
 		state->calls++;
 		check(state, state->kernels->table_accumulate(&state->table,
-													  state->offsets, &valid,
+													  state->offsets, &rows,
 													  value->accumulate,
 													  value->computed >= 0 ? &column : NULL,
 													  NULL,
@@ -2295,6 +2618,7 @@ group_batch(TessAggState *state, TessBatch *batch)
 	 * partial mode they go out instead (group_drain).
 	 */
 	if (state->spill == NULL && (!state->partial || state->partial_spill) &&
+		!state->has_distinct &&
 		state->table_bytes > get_hash_memory_limit() / 8 * 7)
 		agg_start_spill(state);
 	if (state->spill != NULL)
@@ -2307,6 +2631,7 @@ group_drain(TessAggState *state)
 {
 	agg_spill_free(state);
 	create_table(state);
+	reset_distinct(state);
 	for (;;)
 	{
 		TessBatch  *batch;

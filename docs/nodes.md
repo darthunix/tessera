@@ -397,6 +397,20 @@ core's `HashAggregate`: each row finds the record of its keys in the hash
 table of [table.md](table.md), whose payload holds the group's aggregate
 states, and the groups go out in batches when the input ends.
 
+`SELECT DISTINCT` is grouping without aggregates: at the distinct stage
+the node's path stands next to each of the core's hashed distinct paths,
+its keys the distinct expressions (`DISTINCT ON` stays with the core).
+An aggregate with `DISTINCT` over an int4 or int8 argument keeps a table
+of its own, without payload, keyed by the group's keys and the argument
+(the argument alone without `GROUP BY`): a batch's rows go into the
+aggregate only where they inserted their pair, NULL arguments dropped by
+the hash. The core groups such a query only sorted; the node takes its
+`GroupAggregate` or plain `Aggregate` as a template and reads the input
+below the core's sort, unless `enable_hashagg` is off. The pairs' tables
+do not spill, and neither do the groups of a query that has them: the
+node takes the path only when the planner's estimate of the pairs fits
+`hash_mem`, and shows their bytes in `Memory Usage`.
+
 ### Planning
 
 The module's `create_upper_paths` hook, after the hook it replaced and the

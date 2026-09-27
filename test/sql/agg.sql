@@ -299,9 +299,30 @@ EXPLAIN (COSTS OFF) SELECT count(*) FROM agg_t WHERE a > 100;
 SELECT count(*) FROM agg_t WHERE a > 100;
 RESET debug_parallel_query;
 
--- Left to the core: DISTINCT and FILTER in the aggregate, a window
--- function, an empty relation, and the switch.
-EXPLAIN (COSTS OFF) SELECT count(DISTINCT a) FROM agg_t;
+-- DISTINCT in an aggregate: a table of pairs per aggregate, a row going
+-- in only when its pair is new; NULL arguments skipped; without and with
+-- GROUP BY, where the core sorts and the node hashes instead.
+EXPLAIN (COSTS OFF) SELECT count(DISTINCT b) FROM agg_t;
+EXPLAIN (COSTS OFF) SELECT b, count(DISTINCT a % 7) FROM agg_t GROUP BY b;
+SELECT agg_same($$SELECT count(DISTINCT b) FROM agg_t$$);
+SELECT agg_same($$SELECT count(DISTINCT a % 13), sum(DISTINCT a % 13), min(DISTINCT a), max(DISTINCT a) FROM agg_t$$);
+SELECT agg_same($$SELECT count(DISTINCT a % 5), count(DISTINCT b), count(*), sum(a) FROM agg_t$$);
+SELECT agg_same($$SELECT b, count(DISTINCT a % 7), sum(DISTINCT a % 7), count(*) FROM agg_t GROUP BY b$$);
+SELECT agg_same($$SELECT a % 3, count(DISTINCT b), count(DISTINCT a::bigint * 1000000000) FROM agg_t GROUP BY a % 3$$);
+SELECT agg_same($$SELECT count(DISTINCT a) FROM agg_t WHERE a > 280$$);
+SELECT agg_same($$SELECT count(DISTINCT a) FROM agg_t WHERE false$$);
+SELECT agg_same($$SELECT b, count(DISTINCT a) FROM agg_t WHERE a > 280 GROUP BY b HAVING count(DISTINCT a) > 1$$);
+-- Many groups and pairs: the tables grow.
+CREATE TABLE agg_dm AS SELECT g AS k, g * 7919 % 100003 AS v FROM generate_series(1, 200000) AS g;
+ANALYZE agg_dm;
+SELECT agg_same($$SELECT count(*), sum(n) FROM (SELECT k % 1000 AS g, count(DISTINCT v % 97) AS n FROM agg_dm GROUP BY k % 1000) AS s$$);
+SELECT agg_same($$SELECT count(DISTINCT v) FROM agg_dm$$);
+DROP TABLE agg_dm;
+-- Left to the core: a text argument.
+EXPLAIN (COSTS OFF) SELECT count(DISTINCT c) FROM agg_t;
+
+-- Left to the core: FILTER in the aggregate, a window function, an empty
+-- relation, and the switch.
 EXPLAIN (COSTS OFF) SELECT count(*) FILTER (WHERE a > 100) FROM agg_t;
 EXPLAIN (COSTS OFF) SELECT count(*) OVER () FROM agg_t LIMIT 1;
 EXPLAIN (COSTS OFF) SELECT count(*) FROM agg_t WHERE false;
