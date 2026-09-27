@@ -7,7 +7,8 @@ The pack and heap scan nodes below are created by batch parents and need
 no hook; the filter node offers its path to base relations through the
 module's `set_rel_pathlist` hook, the aggregate node to the grouping stage
 through its `create_upper_paths` hook, the hash join node to joins
-through its `set_join_pathlist` hook. It is loaded after the bridge; loading it without
+through its `set_join_pathlist` hook, the sort node to the ordered stage
+through another `create_upper_paths` hook. It is loaded after the bridge; loading it without
 the bridge is an error. A
 running installation preloads both in every session (see
 [bridge.md](bridge.md)):
@@ -1034,3 +1035,66 @@ shared Bloom filter built for all, and by-reference inner
 columns: text in the target and in a join clause, numeric and text with
 NULLs over many value blocks under inner and left joins, a table with
 text past the estimate, and a rescan that frees the blocks and fills new ones.
+
+## TessSort
+
+`TessSort` (`nodes/sort.c`) stands in for the core's full `Sort` under
+`ORDER BY`. It reads every batch of its batch child into `TessRows`
+(records of the table format, [runtime.md](runtime.md), "Keeping rows"),
+each with the sort keys in its slots and every output column in its
+payload, sorts the records with the kernels ([table.md](table.md),
+"Sorting records") and returns them in order.
+
+### Planning
+
+The module's `create_upper_paths` hook looks at the ordered relation: each
+of the core's `SortPath`s there, also one under a `ProjectionPath`, is
+replaced in place by the node's path over `tess_batch_input_path` of the
+sort's input, with the same rows, costs and path keys, when
+
+- every path key orders by an int4 or int8 expression of the sort's
+  input target through the integer operator family, ascending or
+  descending, NULLs first or last, at most 16 keys;
+- the output has 1 to 64 columns;
+- the rows the planner expects fit `work_mem`: a record, the by-reference
+  values at most the row's width, an item and a reference each;
+- the query has no `LIMIT` (the core's sort under a limit is a top-N sort;
+  plan item 5.8 brings the node's own), and the kernels module is loaded.
+
+`IncrementalSort` and the sorts under a `Gather Merge` stay with the core.
+The plan's layout is dense, one column per target; the private data gives
+each target's column in the child's batches and each key's target, kind
+and flags, and `custom_exprs` holds the keys' expressions for `EXPLAIN`.
+The path supports backward scan; mark/restore it does not, so a merge
+join puts `Materialize` above it.
+
+### Execution
+
+The first execution reads the child forward to its end, whatever the
+direction of the fetch, and appends every batch's selected rows; a key
+takes the bit for NULL only when one of its rows held a NULL, so a single
+int4 key without NULLs sorts as one word per row. A batch-aware parent
+then gets batches of 64 rows in order, whose columns are gathered from
+the records when it asks for them; a row-wise parent gets rows one by one,
+forward or backward, from windows of 64 rows. A rescan without a changed
+parameter returns the sorted rows again from the first; a changed
+parameter of the child reads and sorts it anew. `EXPLAIN` shows the keys
+as the core does; `ANALYZE` adds the method, the memory (records, values,
+index, items and references at the sort) and its overrun past `work_mem`,
+and the batches and rows read.
+
+### Tests
+
+`test/sql/sort.sql` compares the rows of every query in order with
+Tessera on and off: int4 and int8 keys ascending and descending with
+NULLs first and last, three keys, a key the query does not return, a key
+the child computes; over a filter keeping no row, one, 64, 65 and more;
+text carried along; a join below, packed; a limit with an offset above,
+which reads the node's batches; 100000 rows with text of up to 300 bytes;
+a merge join above through `Materialize`. It shows the core's plan
+without the kernels module, for a text key, under `LIMIT` and past
+`work_mem`; a scrollable cursor forward and backward across windows and
+past both ends, and one whose first fetch is backward; a correlated
+subquery whose parameter reaches the child, sorted for every outer row,
+and one whose parameter stays above the node, read once; and a generic
+plan with a parameter.

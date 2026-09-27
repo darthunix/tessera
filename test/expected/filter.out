@@ -255,7 +255,7 @@ SELECT o.a, (SELECT count(*) FROM filter_t AS i WHERE i.a > o.a) AS above
 FROM filter_t AS o WHERE o.a > 197 ORDER BY o.a;
                              QUERY PLAN                             
 --------------------------------------------------------------------
- Sort
+ Custom Scan (TessSort)
    Sort Key: o.a
    ->  Custom Scan (TessFilter) on filter_t o
          Batch Filter: (o.a > 197)

@@ -19,7 +19,8 @@ double		tess_join_bloom_ratio = 0.5;
  * node offers its path to base relations through the set_rel_pathlist
  * hook, the aggregate node to the grouping stage through the
  * create_upper_paths hook, the hash join node to joins through the
- * set_join_pathlist hook.
+ * set_join_pathlist hook, the sort node to the ordered stage through the
+ * create_upper_paths hook.
  */
 void
 _PG_init(void)
@@ -40,6 +41,9 @@ _PG_init(void)
 	RegisterCustomScanMethods(&tess_hash_join_scan_methods);
 	api->nodes->add(&tess_hash_join_node);
 	tess_hash_join_planner_init();
+	RegisterCustomScanMethods(&tess_sort_scan_methods);
+	api->nodes->add(&tess_sort_node);
+	tess_sort_planner_init();
 	DefineCustomRealVariable("tessera.join_bloom_ratio",
 							 "Share of probe rows with a pair below which a hash join builds a Bloom filter.",
 							 "After its first probe rows a join builds a Bloom filter of its keys when "

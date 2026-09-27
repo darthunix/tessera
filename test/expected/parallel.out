@@ -297,16 +297,17 @@ RESET plan_cache_mode;
 DEALLOCATE above;
 -- An order above the Gather.
 EXPLAIN (COSTS OFF) SELECT a FROM parallel_t WHERE a > 4990 ORDER BY a;
-                             QUERY PLAN                              
----------------------------------------------------------------------
- Sort
+                                QUERY PLAN                                 
+---------------------------------------------------------------------------
+ Custom Scan (TessSort)
    Sort Key: a
-   ->  Gather
-         Workers Planned: 2
-         ->  Parallel Custom Scan (TessFilter) on parallel_t
-               Batch Filter: (a > 4990)
-               ->  Parallel Custom Scan (TessHeapScan) on parallel_t
-(7 rows)
+   ->  Custom Scan (TessPack)
+         ->  Gather
+               Workers Planned: 2
+               ->  Parallel Custom Scan (TessFilter) on parallel_t
+                     Batch Filter: (a > 4990)
+                     ->  Parallel Custom Scan (TessHeapScan) on parallel_t
+(8 rows)
 
 SELECT parallel_same($$SELECT a FROM parallel_t WHERE a > 4990 ORDER BY a$$);
                        parallel_same                       

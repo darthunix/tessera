@@ -8,6 +8,7 @@
 #define TESS_FILTER_NODE_NAME "tessera.filter"
 #define TESS_AGG_NODE_NAME "tessera.agg"
 #define TESS_HASH_JOIN_NODE_NAME "tessera.hash_join"
+#define TESS_SORT_NODE_NAME "tessera.sort"
 
 /* The plan data of TessFilter and TessHashJoin, written by their planners. */
 #define TESS_AGG_DATA "tessera.agg"
@@ -16,6 +17,8 @@
 #define TESS_FILTER_DATA_VERSION 1
 #define TESS_HASH_JOIN_DATA "tessera.hash_join"
 #define TESS_HASH_JOIN_DATA_VERSION 6
+#define TESS_SORT_DATA "tessera.sort"
+#define TESS_SORT_DATA_VERSION 1
 
 /* Clauses (RestrictInfos) in the order the planner evaluates a plan's quals. */
 extern List *tess_order_clauses(PlannerInfo *root, List *rinfos);
@@ -43,5 +46,9 @@ extern void tess_agg_planner_init(void);
 extern const TessNode tess_hash_join_node;
 extern const CustomScanMethods tess_hash_join_scan_methods;
 extern void tess_hash_join_planner_init(void);
+
+extern const TessNode tess_sort_node;
+extern const CustomScanMethods tess_sort_scan_methods;
+extern void tess_sort_planner_init(void);
 
 #endif							/* TESSERA_NODES_INTERNAL_H */
