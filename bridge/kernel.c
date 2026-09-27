@@ -68,7 +68,10 @@ validate_kernels(const TessKernelOps *ops)
 		ops->sort == NULL || ops->table_append_columns == NULL ||
 		ops->table_gather_scattered == NULL ||
 		ops->sort_top_candidates == NULL || ops->sort_top_push == NULL ||
-		ops->table_append_partitioned_columns == NULL)
+		ops->table_append_partitioned_columns == NULL ||
+		ops->spill_columns_init == NULL ||
+		ops->spill_columns_append_partitioned == NULL ||
+		ops->spill_columns_pack == NULL || ops->spill_columns_unpack == NULL)
 		elog(ERROR, "Tessera kernels must provide every operation");
 }
 

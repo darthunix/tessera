@@ -27,6 +27,9 @@ static const TessKernelOps kernels = {
 	.spill_header_read = tess_spill_header_read,
 	.spill_pack = tess_spill_pack,
 	.spill_unpack = tess_spill_unpack,
+	.spill_columns_init = tess_spill_columns_init,
+	.spill_columns_pack = tess_spill_columns_pack,
+	.spill_columns_unpack = tess_spill_columns_unpack,
 };
 
 /* A block's body: every word names its partition, chunk and place. */

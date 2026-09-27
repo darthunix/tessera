@@ -538,6 +538,7 @@ dependencies = [
  "anyhow",
  "loom",
  "tessera-core",
+ "tessera-spill",
 ]
 
 [[package]]

@@ -24,7 +24,9 @@ typedef enum TessSpillKind
 	/* A chunk of records, its used mark first. */
 	TESS_SPILL_RECORDS = 1,
 	/* A chunk of by-reference values. */
-	TESS_SPILL_VALUES = 2
+	TESS_SPILL_VALUES = 2,
+	/* A chunk of rows by column, always stored packed. */
+	TESS_SPILL_COLUMNS = 3
 } TessSpillKind;
 
 /* The header of a spilled block. */
@@ -90,5 +92,84 @@ extern TessStatusCode tess_spill_pack(const void *chunk, Size len, void *out,
 /* Unpack len bytes tess_spill_pack made into the chunk of chunk_len bytes. */
 extern TessStatusCode tess_spill_unpack(const void *packed, Size len, void *chunk,
 										Size chunk_len, TessStatus *status);
+
+/*
+ * Chunks of rows by column (crates/tessera-spill, columns): the outer rows
+ * a join keeps for their partition, which are only written and read back,
+ * never linked. A chunk is a header of TESS_SPILL_COLUMNS_HEADER bytes (its
+ * row count, then its capacity, a uint32 each, then its stored words and
+ * a magic), then lanes of capacity words each: the rows' NULL bits (bit w
+ * for word w), then one lane per stored word, 0 for a NULL. A row's place
+ * is referred to as (chunk << TESS_SPILL_COLUMNS_PLACE_BITS) | place. On
+ * disk each lane is stored for the chunk's rows only, by frame of
+ * reference; read back, the chunk has a capacity of its rows.
+ */
+#define TESS_SPILL_COLUMNS_HEADER 16
+#define TESS_SPILL_COLUMNS_PLACE_BITS 17
+/* The most a packed chunk takes past the chunk's own bytes. */
+#define TESS_SPILL_COLUMNS_SLACK (8 + 16 * 65)
+
+static inline uint32
+tess_spill_columns_rows(const void *chunk)
+{
+	return ((const uint32 *) chunk)[0];
+}
+
+static inline uint32
+tess_spill_columns_capacity(const void *chunk)
+{
+	return ((const uint32 *) chunk)[1];
+}
+
+/* Lane `lane` of a chunk: 0 the NULL bits, 1 + w stored word w. */
+static inline uint64 *
+tess_spill_columns_lane(void *chunk, int lane)
+{
+	return (uint64 *) ((char *) chunk + TESS_SPILL_COLUMNS_HEADER +
+					   sizeof(uint64) * (Size) tess_spill_columns_capacity(chunk) * lane);
+}
+
+/* The header's bytes (0), where its row count (1) and capacity (2) lie. */
+extern Size tess_spill_columns_layout(int what);
+
+/* Make the len bytes at chunk an empty chunk of words stored words. */
+extern TessStatusCode tess_spill_columns_init(void *chunk, Size len, int words,
+											  Size *capacity, TessStatus *status);
+
+/*
+ * Append the rows of pending to the chunks of their partitions, as
+ * tess_table_append_partitioned_columns appends records: the partition of
+ * a hash is (hash >> shift) & (npartitions - 1) and appends to chunk
+ * partition_chunks[p] of the nchunks at bases, of lens bytes; a row whose
+ * chunk is full stays pending. Appended rows get their places in offsets
+ * and add one to rows[partition].
+ */
+extern TessStatusCode tess_spill_columns_append_partitioned(void *const *bases,
+															const Size *lens,
+															int nchunks,
+															const uint32 *partition_chunks,
+															int npartitions,
+															uint32 shift,
+															const uint32 *hashes,
+															int ncolumns,
+															const TessDatumColumn *columns,
+															TessRowMask *pending,
+															uint32 *offsets,
+															uint64 *rows,
+															TessStatus *status);
+
+/*
+ * Pack the chunk of len bytes at chunk into out, of capacity bytes (len +
+ * TESS_SPILL_COLUMNS_SLACK suffice): *packed gets the packed bytes,
+ * *unpacked the bytes of the chunk it unpacks into.
+ */
+extern TessStatusCode tess_spill_columns_pack(const void *chunk, Size len, void *out,
+											  Size capacity, Size *packed,
+											  Size *unpacked, TessStatus *status);
+
+/* Unpack len bytes tess_spill_columns_pack made into the chunk of chunk_len bytes. */
+extern TessStatusCode tess_spill_columns_unpack(const void *packed, Size len,
+												void *chunk, Size chunk_len,
+												TessStatus *status);
 
 #endif							/* TESSERA_SPILL_H */

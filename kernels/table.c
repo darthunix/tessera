@@ -79,4 +79,8 @@ const TessKernelOps tess_kernel_ops = {
 	.sort_top_candidates = tess_sort_top_candidates,
 	.sort_top_push = tess_sort_top_push,
 	.table_append_partitioned_columns = tess_table_append_partitioned_columns,
+	.spill_columns_init = tess_spill_columns_init,
+	.spill_columns_append_partitioned = tess_spill_columns_append_partitioned,
+	.spill_columns_pack = tess_spill_columns_pack,
+	.spill_columns_unpack = tess_spill_columns_unpack,
 };

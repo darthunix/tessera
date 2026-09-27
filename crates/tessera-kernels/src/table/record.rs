@@ -488,6 +488,14 @@ impl<'a> PayloadColumns<'a> {
         self.nrows
     }
 
+    /// Row `row` of column `column`: its word, 0 for a NULL, and whether
+    /// it is NULL.
+    #[inline(always)]
+    pub fn get(&self, column: usize, row: usize) -> (u64, bool) {
+        let null = self.nulls[column][row];
+        (if null { 0 } else { self.values[column][row] }, null)
+    }
+
     /// Whether the payload has no column, only its word of NULL bits.
     pub fn is_empty(&self) -> bool {
         self.values.is_empty()

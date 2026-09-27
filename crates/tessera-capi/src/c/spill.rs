@@ -2,12 +2,19 @@
 //! headers of spilled blocks ([`tessera_spill`]), which carry a table's
 //! layout fingerprint (`tess_table_fingerprint`).
 
+use std::ffi::c_int;
+use std::mem::MaybeUninit;
 use std::slice;
 
-use anyhow::{Context, bail};
-use tessera_spill::{BlockHeader, BlockKind, HEADER_SIZE};
+use anyhow::{Context, Result, bail, ensure};
+use tessera_kernels::spill_columns::{self, ColumnChunks};
+use tessera_kernels::table::PayloadColumns;
+use tessera_spill::{BlockHeader, BlockKind, HEADER_SIZE, columns};
 
+use super::column::DatumColumn;
+use super::mask::Mask;
 use super::status::{Code, Status, guard};
+use super::table::{slots, values};
 
 /// `TessSpillHeader`: what a spilled block holds.
 #[repr(C)]
@@ -30,6 +37,7 @@ impl SpillHeader {
         let kind = match self.kind {
             1 => BlockKind::Records,
             2 => BlockKind::Values,
+            3 => BlockKind::Columns,
             other => bail!("a spilled block of unknown kind {other}"),
         };
         Ok(BlockHeader {
@@ -193,6 +201,234 @@ pub unsafe extern "C" fn tess_spill_unpack(
                 chunk_len,
             );
             tessera_spill::unpack(packed, chunk)
+        })
+    }
+}
+
+/// `tess_spill_columns_layout`: the bytes of a chunk of columns' header
+/// (0) and where its row count (1) and capacity (2) lie, for the C side's
+/// checks; 0 for another code.
+#[unsafe(no_mangle)]
+pub extern "C" fn tess_spill_columns_layout(what: c_int) -> usize {
+    match what {
+        0 => columns::HEADER,
+        1 => 0,
+        2 => 4,
+        _ => 0,
+    }
+}
+
+/// `tess_spill_columns_init`: make the `len` bytes at `chunk` an empty
+/// chunk of columns of `words` stored words; its capacity into `capacity`.
+///
+/// # Safety
+///
+/// `chunk` must be valid for writes of `len` bytes and `capacity`
+/// writable; `status` as for every entry point.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tess_spill_columns_init(
+    chunk: *mut u8,
+    len: usize,
+    words: c_int,
+    capacity: *mut usize,
+    status: *mut Status,
+) -> Code {
+    // SAFETY: the caller's contract.
+    unsafe {
+        guard(status, || {
+            let chunk = slice::from_raw_parts_mut(
+                (!chunk.is_null())
+                    .then_some(chunk)
+                    .context("a null chunk")?,
+                len,
+            );
+            let words = usize::try_from(words).context("a negative word count")?;
+            *capacity.as_mut().context("a null capacity")? = columns::init(chunk, words)?;
+            Ok(())
+        })
+    }
+}
+
+/// The chunks of columns of a side, by number, as C holds them.
+struct RawChunks<'a> {
+    bases: &'a [*mut u8],
+    lens: &'a [usize],
+}
+
+impl ColumnChunks for RawChunks<'_> {
+    fn chunk(&mut self, index: usize) -> Result<&mut [u8]> {
+        ensure!(
+            index < self.bases.len(),
+            "chunk {index} of {} chunks of columns",
+            self.bases.len()
+        );
+        let base = self.bases[index];
+        ensure!(!base.is_null(), "chunk {index} of columns is gone");
+        // SAFETY: the caller's contract of the entry point: every base is
+        // valid for its length and nothing else accesses it during the
+        // call; the borrow is the only one while it lasts.
+        Ok(unsafe { slice::from_raw_parts_mut(base, self.lens[index]) })
+    }
+}
+
+/// `tess_spill_columns_append_partitioned`: append the rows of `pending`
+/// to the chunks of columns of their partitions, as
+/// `tess_table_append_partitioned_columns` appends records.
+///
+/// # Safety
+///
+/// `bases` and `lens` must point to `nchunks` chunks of columns and their
+/// lengths, each valid for writes and accessed by nothing else during the
+/// call; `partition_chunks` to `npartitions` numbers, `hashes` to a hash
+/// per row of `pending`, a valid mask, `columns` to `ncolumns` columns of
+/// its rows, `offsets` to a slot per row and `rows` to `npartitions`
+/// counts, writable; `status` as for every entry point.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tess_spill_columns_append_partitioned(
+    bases: *const *mut u8,
+    lens: *const usize,
+    nchunks: c_int,
+    partition_chunks: *const u32,
+    npartitions: c_int,
+    shift: u32,
+    hashes: *const u32,
+    ncolumns: c_int,
+    columns_in: *const DatumColumn,
+    pending: *mut Mask,
+    offsets: *mut u32,
+    rows: *mut u64,
+    status: *mut Status,
+) -> Code {
+    // SAFETY: the caller's contract.
+    unsafe {
+        guard(status, || {
+            let nchunks = usize::try_from(nchunks).context("a negative chunk count")?;
+            let npartitions = usize::try_from(npartitions).context("a negative partition count")?;
+            let mut chunks = RawChunks {
+                bases: values(bases, nchunks, "chunk bases")?,
+                lens: values(lens, nchunks, "chunk lengths")?,
+            };
+            let partition_chunks = values(partition_chunks, npartitions, "partition chunks")?;
+            let mut pending = pending.as_mut().context("a null pending mask")?.mask()?;
+            let nrows = pending.as_view().nrows();
+            let hashes = values(hashes, nrows, "hashes")?;
+            let offsets = slots(offsets, nrows, "offsets")?;
+            let rows = slots(rows, npartitions, "partition row counts")?;
+            let ncolumns = usize::try_from(ncolumns).context("a negative column count")?;
+            ensure!(
+                ncolumns <= columns::MAX_WORDS,
+                "a chunk of columns keeps up to {} words, not {ncolumns}",
+                columns::MAX_WORDS
+            );
+            let given = values(columns_in, ncolumns, "columns")?;
+            // Only the columns given are set: a batch of a few rows would
+            // otherwise pay for clearing 64 slices of each kind.
+            let mut words = [const { MaybeUninit::<&[u64]>::uninit() }; 64];
+            let mut flags = [const { MaybeUninit::<&[bool]>::uninit() }; 64];
+            for (index, column) in given.iter().enumerate() {
+                ensure!(
+                    usize::try_from(column.nrows).ok() == Some(nrows),
+                    "column {index} has {} rows, not {nrows}",
+                    column.nrows
+                );
+                words[index].write(values(column.values, nrows, "column values")?);
+                flags[index].write(values(column.isnull, nrows, "column NULL flags")?);
+            }
+            // SAFETY: the loop above initialized the first `ncolumns`
+            // slots of each array, and `ncolumns` is at most 64.
+            let (words, flags) = (
+                &*(&raw const words[..ncolumns] as *const [&[u64]]),
+                &*(&raw const flags[..ncolumns] as *const [&[bool]]),
+            );
+            let payload = PayloadColumns::new(words, flags, nrows)?;
+            spill_columns::append_partitioned(
+                &mut chunks,
+                partition_chunks,
+                shift,
+                hashes,
+                &payload,
+                &mut pending,
+                offsets,
+                rows,
+            )
+            .map(drop)
+        })
+    }
+}
+
+/// `tess_spill_columns_pack`: pack the chunk of columns at `chunk` into
+/// `out`, of `capacity` bytes (the chunk's length and
+/// `TESS_SPILL_COLUMNS_SLACK` suffice): the packed length into `packed`
+/// and the length of the chunk it unpacks into into `unpacked`.
+///
+/// # Safety
+///
+/// `chunk` must be valid for reads of `len` bytes, `out` for writes of
+/// `capacity` bytes, and `packed` and `unpacked` writable; `status` as
+/// for every entry point.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tess_spill_columns_pack(
+    chunk: *const u8,
+    len: usize,
+    out: *mut u8,
+    capacity: usize,
+    packed: *mut usize,
+    unpacked: *mut usize,
+    status: *mut Status,
+) -> Code {
+    // SAFETY: the caller's contract.
+    unsafe {
+        guard(status, || {
+            let chunk = slice::from_raw_parts(
+                (!chunk.is_null())
+                    .then_some(chunk)
+                    .context("a null chunk")?,
+                len,
+            );
+            let out = slice::from_raw_parts_mut(
+                (!out.is_null()).then_some(out).context("a null buffer")?,
+                capacity,
+            );
+            let (bytes, len) = columns::pack(chunk, out)?;
+            *packed.as_mut().context("a null length")? = bytes;
+            *unpacked.as_mut().context("a null length")? = len;
+            Ok(())
+        })
+    }
+}
+
+/// `tess_spill_columns_unpack`: unpack the `len` bytes
+/// `tess_spill_columns_pack` made at `packed` into the chunk of
+/// `chunk_len` bytes at `chunk`, the length it returned.
+///
+/// # Safety
+///
+/// `packed` must be valid for reads of `len` bytes and `chunk` for writes
+/// of `chunk_len` bytes; `status` as for every entry point.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tess_spill_columns_unpack(
+    packed: *const u8,
+    len: usize,
+    chunk: *mut u8,
+    chunk_len: usize,
+    status: *mut Status,
+) -> Code {
+    // SAFETY: the caller's contract.
+    unsafe {
+        guard(status, || {
+            let packed = slice::from_raw_parts(
+                (!packed.is_null())
+                    .then_some(packed)
+                    .context("a null packed body")?,
+                len,
+            );
+            let chunk = slice::from_raw_parts_mut(
+                (!chunk.is_null())
+                    .then_some(chunk)
+                    .context("a null chunk")?,
+                chunk_len,
+            );
+            columns::unpack(packed, chunk)
         })
     }
 }

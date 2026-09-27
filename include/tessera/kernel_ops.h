@@ -467,10 +467,35 @@ typedef struct TessKernelOps
 														uint64 *rows,
 														uint64 *nulls,
 														TessStatus *status);
+	/* tess_spill_columns_init */
+	TessStatusCode (*spill_columns_init) (void *chunk, Size len, int words,
+										  Size *capacity, TessStatus *status);
+	/* tess_spill_columns_append_partitioned */
+	TessStatusCode (*spill_columns_append_partitioned) (void *const *bases,
+														const Size *lens,
+														int nchunks,
+														const uint32 *partition_chunks,
+														int npartitions,
+														uint32 shift,
+														const uint32 *hashes,
+														int ncolumns,
+														const TessDatumColumn *columns,
+														TessRowMask *pending,
+														uint32 *offsets,
+														uint64 *rows,
+														TessStatus *status);
+	/* tess_spill_columns_pack */
+	TessStatusCode (*spill_columns_pack) (const void *chunk, Size len, void *out,
+										  Size capacity, Size *packed,
+										  Size *unpacked, TessStatus *status);
+	/* tess_spill_columns_unpack */
+	TessStatusCode (*spill_columns_unpack) (const void *packed, Size len,
+											void *chunk, Size chunk_len,
+											TessStatus *status);
 } TessKernelOps;
 
 #define TESS_KERNEL_OPS_MIN_SIZE \
-	TESS_ABI_SIZE_INCLUDING_FIELD(TessKernelOps, table_append_partitioned_columns)
+	TESS_ABI_SIZE_INCLUDING_FIELD(TessKernelOps, spill_columns_unpack)
 
 /*
  * The registry of the kernels: one table per backend, installed by the

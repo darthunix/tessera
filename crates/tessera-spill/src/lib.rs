@@ -19,6 +19,7 @@
 
 use anyhow::{Result, bail, ensure};
 
+pub mod columns;
 mod pack;
 pub use pack::{pack, unpack};
 
@@ -43,6 +44,8 @@ pub enum BlockKind {
     Records = 1,
     /// A chunk of by-reference values.
     Values = 2,
+    /// A chunk of rows by column ([`columns`]), always stored packed.
+    Columns = 3,
 }
 
 impl BlockKind {
@@ -50,6 +53,7 @@ impl BlockKind {
         match code {
             1 => Some(Self::Records),
             2 => Some(Self::Values),
+            3 => Some(Self::Columns),
             _ => None,
         }
     }
@@ -114,7 +118,17 @@ impl BlockHeader {
             "a spilled chunk of records has no used mark"
         );
         ensure!(
+            self.kind != BlockKind::Columns
+                || (self.len >= columns::HEADER as u64
+                    && self.packed >= 8
+                    && self.packed.is_multiple_of(8)),
+            "a spilled chunk of columns of {} bytes packed into {} is no packed chunk",
+            self.len,
+            self.packed
+        );
+        ensure!(
             self.packed == 0
+                || self.kind == BlockKind::Columns
                 || (self.kind == BlockKind::Records
                     && self.packed.is_multiple_of(8)
                     && u64::from(self.packed) >= 16

@@ -106,6 +106,7 @@ struct TessSpillReader
 	char	   *buffer;
 	Size		buffer_len;
 	bool		pending;
+	uint32		pending_kind;
 	uint64		pending_len;
 	uint32		pending_packed;
 	TessSpillReader *next_reader;
@@ -341,6 +342,42 @@ tess_spill_write(TessSpill *spill, int partition, TessSpillKind kind,
 	header.fingerprint = spill->fingerprint;
 	header.len = len;
 	header.packed = 0;
+	at = spill->buffer + spill->buffered + sizeof(bytes);
+	/*
+	 * A chunk of columns always goes packed, into the buffer when its bytes
+	 * and the slack fit what is left there, else into an empty buffer, and
+	 * aside only when larger than the buffer; its header names the chunk
+	 * it unpacks into, of its rows only.
+	 */
+	if (kind == TESS_SPILL_COLUMNS)
+	{
+		Size		packed;
+		Size		unpacked;
+		Size		room = len + TESS_SPILL_COLUMNS_SLACK;
+		char	   *out;
+
+		if (spill->buffered + sizeof(bytes) + room > spill->buffer_len &&
+			sizeof(bytes) + room <= spill->buffer_len)
+		{
+			flush(spill);
+			at = spill->buffer + sizeof(bytes);
+		}
+		out = spill->buffered + sizeof(bytes) + room <= spill->buffer_len ?
+			at : scratch(spill, room);
+
+		if (!TESS_ABI_HAS_FIELD(spill->kernels, TessKernelOps, spill_columns_unpack) ||
+			spill->kernels->spill_columns_pack == NULL)
+			elog(ERROR, "Tessera spill set requires the kernels of chunks of columns");
+		if (spill->kernels->spill_columns_pack(body, len, out, room, &packed, &unpacked,
+											   &status) != TESS_OK)
+			tess_status_report(&status);
+		if (packed > PG_UINT32_MAX)
+			elog(ERROR, "Tessera chunk of columns packs into too many bytes");
+		header.len = unpacked;
+		header.packed = (uint32) packed;
+		body = out;
+		len = packed;
+	}
 	/* The header is checked before anything is written. */
 	if (spill->kernels->spill_header_write(bytes, sizeof(bytes), &header,
 										   spill->max_len, &status) != TESS_OK)
@@ -351,7 +388,6 @@ tess_spill_write(TessSpill *spill, int partition, TessSpillKind kind,
 	 * aside first.
 	 */
 	pack = kind == TESS_SPILL_RECORDS && len >= 64 && len <= PG_UINT32_MAX;
-	at = spill->buffer + spill->buffered + sizeof(bytes);
 	if (pack)
 	{
 		Size		packed;
@@ -607,6 +643,7 @@ tess_spill_read_header(TessSpillReader *reader, TessSpillHeader *header)
 				errmsg("Tessera spilled block's header does not match its length on disk"));
 	reader->next++;
 	reader->pending = true;
+	reader->pending_kind = header->kind;
 	reader->pending_len = header->len;
 	reader->pending_packed = header->packed;
 	return true;
@@ -624,7 +661,18 @@ tess_spill_read_body(TessSpillReader *reader, void *body, Size len)
 
 		if (body == NULL)
 			elog(ERROR, "Tessera spilled block's body requires a buffer");
-		if (reader->pending_packed > 0)
+		if (reader->pending_kind == TESS_SPILL_COLUMNS)
+		{
+			TessStatus	status = TESS_STRUCT_INITIALIZER(TessStatus);
+
+			if (!TESS_ABI_HAS_FIELD(reader->spill->kernels, TessKernelOps, spill_columns_unpack) ||
+				reader->spill->kernels->spill_columns_unpack == NULL)
+				elog(ERROR, "Tessera spill set requires the kernels of chunks of columns");
+			if (reader->spill->kernels->spill_columns_unpack(stored, reader->pending_packed,
+															 body, len, &status) != TESS_OK)
+				tess_status_report(&status);
+		}
+		else if (reader->pending_packed > 0)
 		{
 			TessStatus	status = TESS_STRUCT_INITIALIZER(TessStatus);
 

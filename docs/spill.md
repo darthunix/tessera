@@ -19,7 +19,26 @@ A node spills chunks of its table whole, never rows one by one:
   to. A payload word holds a value's reference, the value chunk's number
   plus one and the byte in it, not an address, so the words mean the same
   after the chunk has been on disk; a reading node sets the chunk's base
-  in its array of value bases under the chunk's number.
+  in its array of value bases under the chunk's number;
+- a chunk of **columns**: a join's outer rows that wait for their
+  partition (`crates/tessera-spill/src/columns.rs`, `tessera/spill.h`).
+  They are never linked or probed as records, only written and read back
+  once, so they are kept as a header and then a lane per column of the
+  chunk's capacity: the rows' NULL bits, then a word per stored column (a
+  by-value Datum, or a value's reference as above; 0 for a NULL). A batch
+  appends to its partitions' chunks straight from its columns
+  (`tess_spill_columns_append_partitioned`), and a batch read back takes
+  its columns straight from the lanes, a window of 64 rows at a time: a
+  by-value word where it lies, a reference turned into a pointer. On disk
+  each lane is stored for the chunk's rows only, by frame of reference:
+  the lane's least value and each value's difference from it in 1, 2, 4
+  or 8 bytes, or none when all are equal. The keys are among the stored
+  columns, and their hash is computed again when the rows are probed,
+  which costs little. Before this (plan item 5.12e) the outer rows were
+  records too, and went from columns to records, to lanes when packed,
+  back to records and back to columns: a spilled join at a `work_mem` of
+  1 MB took 45 to 55 ms instead of 67 to 83, and wrote 11.6 MB instead of
+  29.5.
 
 Reading a chunk back gives a chunk that is ready at once: no row is
 allocated, and `tess_table_link` or `tess_table_link_grouped` puts its
@@ -137,9 +156,10 @@ and a level below the bits right above its parent's. A partition's
 chunks are small, `hash_mem / (16 × partitions)` from 8 kB to 1 MB, so
 that every partition's tail on both sides fits in half of `hash_mem`.
 
-**Files.** Each level has two sets: the inner side's partitions and the
-outer rows written, each a table of its own layout and fingerprint.
-Both sides append the same way: a row goes into its partition's chunk,
+**Files.** Each level has two sets: the inner side's partitions, in
+chunks of records, and the outer rows written, in chunks of columns,
+each with its own fingerprint. Both sides append the same way: a row
+goes into its partition's chunk,
 then its by-reference values into the partition's value chunks, and a
 chunk that fills is written after the value chunks opened since the
 last one. A file is therefore a series of groups, value chunks and then
@@ -151,7 +171,7 @@ time, with only that chunk's values in memory.
 **Which partitions stay.** While the build takes more than `hash_mem`,
 counted as the node reports it, the largest resident partition goes to
 disk; room stays for the outer side's tails of the partitions on disk
-only (a chunk of records, one of values when the outer side keeps a
+only (a chunk of columns, one of values when the outer side keeps a
 by-reference column, and a file's buffer), since a resident partition
 writes no outer row. Resident partitions holding less than a quarter of
 the inner rows go to disk too, once that is so: probing them would cost

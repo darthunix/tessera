@@ -1718,3 +1718,124 @@ fn the_partitioned_columns_entry_point_counts_each_partition() -> Result<()> {
     }
     Ok(())
 }
+
+/// Chunks of columns through the C entry points: the header's layout the
+/// C side mirrors, rows appended by partition with a by-value and a
+/// by-reference word, packed and unpacked into a chunk of their rows.
+#[test]
+fn chunks_of_columns_round_trip_through_the_entry_points() -> Result<()> {
+    use tessera_capi::c::{
+        tess_spill_columns_append_partitioned, tess_spill_columns_init, tess_spill_columns_layout,
+        tess_spill_columns_pack, tess_spill_columns_unpack,
+    };
+    assert_eq!(tess_spill_columns_layout(0), 16);
+    assert_eq!(tess_spill_columns_layout(1), 0);
+    assert_eq!(tess_spill_columns_layout(2), 4);
+    let nrows = 50;
+    let first: Vec<u64> = (0..nrows as u64)
+        .map(|row| (row as i64 - 20) as u64)
+        .collect();
+    let second: Vec<u64> = (0..nrows as u64)
+        .map(|row| ((row + 1) << 32) | (row * 8))
+        .collect();
+    let first_nulls: Vec<bool> = (0..nrows).map(|row| row % 9 == 4).collect();
+    let second_nulls = vec![false; nrows];
+    let columns = [
+        DatumColumn {
+            struct_size: size_of::<DatumColumn>(),
+            values: first.as_ptr(),
+            isnull: first_nulls.as_ptr(),
+            nrows: nrows as i32,
+        },
+        DatumColumn {
+            struct_size: size_of::<DatumColumn>(),
+            values: second.as_ptr(),
+            isnull: second_nulls.as_ptr(),
+            nrows: nrows as i32,
+        },
+    ];
+    let mut status = Status::new();
+    // SAFETY: local buffers of the declared sizes, aliased by nothing else,
+    // throughout this test.
+    unsafe {
+        let lens = [16_usize, 16 + 8 * 3 * 40, 16 + 8 * 3 * 40];
+        let mut chunks: Vec<Vec<u64>> = lens.iter().map(|&len| vec![0_u64; len / 8]).collect();
+        for (chunk, &len) in chunks.iter_mut().zip(&lens) {
+            let mut capacity = 0;
+            let code = tess_spill_columns_init(
+                chunk.as_mut_ptr().cast(),
+                len,
+                2,
+                &raw mut capacity,
+                &raw mut status,
+            );
+            assert_eq!(code, Code::Ok, "{}", status.message());
+            assert_eq!(capacity, (len - 16) / 24);
+        }
+        let bases: Vec<*mut u8> = chunks
+            .iter_mut()
+            .map(|chunk| chunk.as_mut_ptr().cast())
+            .collect();
+        let hashes: Vec<u32> = (0..nrows as u32).map(|row| row % 2).collect();
+        let mut pending_words = vec![(1_u64 << nrows) - 1];
+        let mut pending = Mask {
+            nrows: nrows as i32,
+            bits: pending_words.as_mut_ptr(),
+        };
+        let mut offsets = vec![0_u32; nrows];
+        let mut rows = [0_u64; 2];
+        let code = tess_spill_columns_append_partitioned(
+            bases.as_ptr(),
+            lens.as_ptr(),
+            3,
+            [1_u32, 2].as_ptr(),
+            2,
+            0,
+            hashes.as_ptr(),
+            2,
+            columns.as_ptr(),
+            &raw mut pending,
+            offsets.as_mut_ptr(),
+            rows.as_mut_ptr(),
+            &raw mut status,
+        );
+        assert_eq!(code, Code::Ok, "{}", status.message());
+        assert_eq!(rows, [25, 25]);
+        assert_eq!(pending_words, [0]);
+        for (index, chunk) in chunks.iter().enumerate().skip(1) {
+            let bytes: &[u8] = std::slice::from_raw_parts(chunk.as_ptr().cast(), lens[index]);
+            let mut out = vec![0_u8; lens[index] + 8 + 16 * 65];
+            let (mut packed, mut unpacked) = (0, 0);
+            let code = tess_spill_columns_pack(
+                bytes.as_ptr(),
+                bytes.len(),
+                out.as_mut_ptr(),
+                out.len(),
+                &raw mut packed,
+                &raw mut unpacked,
+                &raw mut status,
+            );
+            assert_eq!(code, Code::Ok, "{}", status.message());
+            assert_eq!(unpacked, 16 + 8 * 3 * 25);
+            let mut back = vec![0_u64; unpacked / 8];
+            let code = tess_spill_columns_unpack(
+                out.as_ptr(),
+                packed,
+                back.as_mut_ptr().cast(),
+                unpacked,
+                &raw mut status,
+            );
+            assert_eq!(code, Code::Ok, "{}", status.message());
+            // The rows of the partition in order: nulls, then each word.
+            for place in 0..25 {
+                let row = 2 * place + (index - 1);
+                let null = first_nulls[row];
+                assert_eq!(back[2 + place], u64::from(null), "row {row}");
+                assert_eq!(back[2 + 25 + place], if null { 0 } else { first[row] });
+                assert_eq!(back[2 + 50 + place], second[row]);
+                assert_eq!(offsets[row], ((index as u32) << 17) | place as u32);
+            }
+        }
+    }
+    Ok(())
+}

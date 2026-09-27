@@ -39,4 +39,5 @@ pub mod int64;
 pub mod ops;
 mod simd;
 pub mod sort;
+pub mod spill_columns;
 pub mod table;
