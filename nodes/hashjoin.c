@@ -5805,9 +5805,15 @@ send_requests(TessHashJoinState *state)
 		outer_key = bms_add_member(outer_key, state->outer_keys[key]);
 		inner_key = bms_add_member(inner_key, state->inner_keys[key]);
 	}
-	/* The residual clauses read their columns of the pairs too. */
+	/*
+	 * The residual clauses read their columns of the pairs too, and an outer
+	 * join's filters theirs of the rows it returns, a column no parent may
+	 * ask for, as in WHERE inner.c IS NULL above a left join.
+	 */
 	if (state->qual != NULL)
 		needed = bms_add_members(needed, tess_qual_columns(state->qual));
+	if (state->filter != NULL)
+		needed = bms_add_members(needed, tess_qual_columns(state->filter));
 	if (request->output_mode == TESS_OUTPUT_ROWS)
 	{
 		int			natts = state->css.ss.ps.ps_ResultTupleSlot->tts_tupleDescriptor->natts;
