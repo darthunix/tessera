@@ -101,6 +101,18 @@ SELECT pg_temp.measure_pair('order_out',
 SELECT pg_temp.measure_pair('order_text_out',
     'SELECT count(t) FROM (SELECT k4, t FROM bench_sort ORDER BY k4) AS s',
     :repetitions);
+-- Top-N: the first rows of a sort under LIMIT, few and many, keys in no
+-- order, keys in the reverse of the rows' order, where every row is better
+-- than the ones kept so far, and an offset before the rows returned.
+SELECT pg_temp.measure_pair('topn_few',
+    'SELECT k4, v FROM bench_sort ORDER BY k4 LIMIT 10', :repetitions);
+SELECT pg_temp.measure_pair('topn_many',
+    'SELECT count(v) FROM (SELECT k4, v FROM bench_sort ORDER BY k4 LIMIT 100000) AS s',
+    :repetitions);
+SELECT pg_temp.measure_pair('topn_reverse',
+    'SELECT sorted, v FROM bench_sort ORDER BY sorted DESC LIMIT 10', :repetitions);
+SELECT pg_temp.measure_pair('topn_offset',
+    'SELECT k4, v FROM bench_sort ORDER BY k4 OFFSET 1000 LIMIT 10', :repetitions);
 -- A sort over a filter that keeps one row in ten.
 SELECT pg_temp.measure_pair('order_filter',
     format('SELECT k4, v FROM bench_sort WHERE few < 100 ORDER BY k4 OFFSET %s', :rows),
@@ -125,11 +137,13 @@ SET tessera.enable = on;
 SELECT format('EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE on_%s', name)
 FROM unnest(ARRAY['order_int', 'order_big', 'order_few', 'order_multi', 'order_desc',
                   'order_sorted', 'order_wide', 'order_out', 'order_text_out',
+                  'topn_few', 'topn_many', 'topn_reverse', 'topn_offset',
                   'order_filter']) AS name \gexec
 SET tessera.enable = off;
 SELECT format('EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE off_%s', name)
 FROM unnest(ARRAY['order_int', 'order_big', 'order_few', 'order_multi', 'order_desc',
                   'order_sorted', 'order_wide', 'order_out', 'order_text_out',
+                  'topn_few', 'topn_many', 'topn_reverse', 'topn_offset',
                   'order_filter']) AS name \gexec
 \o
 RESET work_mem;
