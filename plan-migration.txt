@@ -1971,7 +1971,13 @@
   сортирует снова; EXPLAIN — Sort Key как у ядра, ANALYZE — Sort Method: in memory, Memory Usage, Overrun, Input
   Batches/Rows. Тест sort (порядок строк on/off, курсор в обе стороны через окна, rescan обоих видов, generic plan,
   merge join сверху, 100 тыс. строк с text); в filter и parallel вместо Sort ядра теперь TessSort (в parallel —
-  над TessPack над Gather: цена pack проверяется замером). docs/nodes.md «TessSort». Дальше: г) внешняя сортировка:
+  над TessPack над Gather: цена pack проверяется замером). docs/nodes.md «TessSort». Шаги 5–6 (2026-09-27, 076792d):
+  pg-sort-5dPoq7 против ядра в том же прогоне — order_int ×0.46, order_big ×0.51, order_few ×0.52, order_multi ×0.22,
+  order_desc ×0.41, order_sorted ×0.42, order_wide ×0.51, order_filter ×0.34; память на 20–30 % больше ядра (заголовок
+  записи 16 байт с ненужными сортировке хэшем и ссылкой цепочки, слово NULL-битов); tax pg-tax-iV0atq без изменений.
+  Профиль pg-sort-profile-UsW2LR: order_int — sort_unstable 38 %, элементы 6 %, выдача 10 %, добавление в TessRows 25 %,
+  скан 17 %; order_wide — 30/5/7/22/32 %. Порог 30 % пройден: бенч поразрядной сортировки — следующий по условию
+  (решение пользователя: своя LSD или крейт). Дальше: г) внешняя сортировка:
   отсортированные прогоны пишутся блоками tessera-spill (runtime/spill.c из 5.6), k-путевое слияние ядром по словам
   ключей (куча или дерево проигравших — по бенчу), число прогонов в одном слиянии по work_mem, ворота work_mem
   сняты; д) параллельный режим — отсортированный частичный путь в каждом участнике и Gather Merge ядра (у ядра
