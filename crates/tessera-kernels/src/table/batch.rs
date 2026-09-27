@@ -8,7 +8,7 @@ use core::mem::MaybeUninit;
 use anyhow::{Result, ensure};
 use tessera_core::{RowMask, RowMaskView};
 
-use super::header::{CHUNK_HEADER, Layout};
+use super::header::{CHUNK_HEADER, Layout, RECORD_HEADER};
 use super::keys::{KeySource, WordKeys, slot_buffer};
 use super::record::no_chunk;
 use super::record::{Access, PayloadColumns, Place, same_keys};
@@ -810,13 +810,28 @@ pub(super) fn gather<R: Region>(
         "a payload word at byte {at} is past the payload of {} bytes",
         layout.payload_size
     );
-    let mut access = Access::new(region, layout);
+    let access = Access::new(region, layout);
+    // The records of a sort's rows lie in no order: every record of a word
+    // of rows is located and its header and word prefetched before any is
+    // read, so that the misses overlap.
+    let word_at = RECORD_HEADER + 8 * access.nkeys() + at;
+    let mut spots = [const { MaybeUninit::<R::Spot>::uninit() }; 64];
     for index in 0..nrows.div_ceil(64) {
-        let mut bits = rows.word(index).unwrap();
-        while bits != 0 {
-            let row = index * 64 + bits.trailing_zeros() as usize;
-            bits &= bits - 1;
-            let payload = access.locate(offsets[row])?.payload();
+        let selected = rows.word(index).unwrap();
+        for bit in rows_of(selected) {
+            let place = access.place(offsets[index * 64 + bit])?;
+            // SAFETY: `place` accepted it.
+            let spot = unsafe { access.spot(place) };
+            spots[bit].write(spot);
+            access.prefetch_record(spot);
+            access.prefetch_record(R::advance(spot, word_at));
+        }
+        for bit in rows_of(selected) {
+            let row = index * 64 + bit;
+            // SAFETY: the loop above resolved the spot of every row of
+            // `selected` from an offset `place` accepted.
+            let record = unsafe { access.open_at(spots[bit].assume_init(), offsets[row]) }?;
+            let payload = record.payload();
             let mut word = [0; 8];
             word.copy_from_slice(&payload[at..at + 8]);
             out[row] = u64::from_ne_bytes(word);

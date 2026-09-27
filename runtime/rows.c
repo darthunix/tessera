@@ -411,40 +411,52 @@ void
 tess_rows_gather(TessRows *rows, int column, const uint32 *refs,
 				 const TessRowMask *mask, Datum *values, bool *isnull)
 {
-	int			row = -1;
+	int			nwords;
+	char	  **bases;
 
 	check_rows(rows);
 	if (column < 0 || column >= rows->ncolumns)
 		elog(ERROR, "Tessera rows have no column %d", column);
 	if (refs == NULL || mask == NULL || values == NULL || isnull == NULL)
 		elog(ERROR, "Tessera rows gather requires references, a mask and outputs");
+	nwords = tess_row_mask_word_count(mask->nrows);
 	check(rows, rows->kernels->table_gather(&rows->table, refs, mask,
 											sizeof(uint64) * (1 + column),
 											values, &rows->status));
+	/* A by-reference value's word is its reference: its address here. */
+	bases = rows->values;
 	if (!rows->typbyvals[column])
-		while ((row = tess_row_mask_next(mask, row)) >= 0)
-		{
-			uint64		ref = DatumGetUInt64(values[row]);
+		for (int word = 0; word < nwords; word++)
+			for (uint64 bits = mask->bits[word]; bits != 0; bits &= bits - 1)
+			{
+				int			row = word * 64 + pg_rightmost_one_pos64(bits);
+				uint64		ref = DatumGetUInt64(values[row]);
 
-			if (ref == 0)
-				continue;
-			Assert((ref >> 32) - 1 < (uint64) rows->nvalues);
-			values[row] = PointerGetDatum(rows->values[(ref >> 32) - 1] +
-										  (ref & 0xFFFFFFFF));
-		}
-	row = -1;
-	/* A column no row left NULL needs no bits. */
+				if (ref == 0)
+					continue;
+				Assert((ref >> 32) - 1 < (uint64) rows->nvalues);
+				values[row] = PointerGetDatum(bases[(ref >> 32) - 1] +
+											  (ref & 0xFFFFFFFF));
+			}
+	/*
+	 * A column no row left NULL needs no bits: every flag is false, the
+	 * rows outside the mask's too, which a caller may set to anything.
+	 */
 	if (((rows->null_columns >> column) & 1) == 0)
 	{
-		while ((row = tess_row_mask_next(mask, row)) >= 0)
-			isnull[row] = false;
+		memset(isnull, 0, sizeof(bool) * mask->nrows);
 		return;
 	}
 	reserve(rows, mask->nrows);
 	check(rows, rows->kernels->table_gather(&rows->table, refs, mask, 0,
 											rows->null_words, &rows->status));
-	while ((row = tess_row_mask_next(mask, row)) >= 0)
-		isnull[row] = (DatumGetUInt64(rows->null_words[row]) >> column) & 1;
+	for (int word = 0; word < nwords; word++)
+		for (uint64 bits = mask->bits[word]; bits != 0; bits &= bits - 1)
+		{
+			int			row = word * 64 + pg_rightmost_one_pos64(bits);
+
+			isnull[row] = (DatumGetUInt64(rows->null_words[row]) >> column) & 1;
+		}
 }
 
 void

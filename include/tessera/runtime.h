@@ -768,7 +768,8 @@ extern void tess_rows_append(TessRows *rows, const TessTableKey *keys,
 /*
  * Kept column `column` of the records refs[row] for each row of mask into
  * values and isnull: a by-reference value as the address of its copy,
- * valid as long as the rows. Other rows keep their slots.
+ * valid as long as the rows. Other rows keep their values; their NULL
+ * flags may be set false, for all mask->nrows rows at once.
  */
 extern void tess_rows_gather(TessRows *rows, int column, const uint32 *refs,
 							 const TessRowMask *mask, Datum *values,
