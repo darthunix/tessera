@@ -67,14 +67,15 @@ SELECT parallel_same($$SELECT a, c FROM parallel_t WHERE a > 4990 AND c <> 'r499
 (1 row)
 
 EXPLAIN (COSTS OFF) SELECT a + 1 AS next, c || '!' AS shout FROM parallel_t WHERE a > 4990;
-                          QUERY PLAN                           
----------------------------------------------------------------
- Gather
+                             QUERY PLAN                              
+---------------------------------------------------------------------
+ Custom Scan (TessGather)
    Workers Planned: 2
-   ->  Parallel Custom Scan (TessFilter) on parallel_t
-         Batch Filter: (a > 4990)
-         ->  Parallel Custom Scan (TessHeapScan) on parallel_t
-(5 rows)
+   ->  Parallel Custom Scan (TessSend)
+         ->  Parallel Custom Scan (TessFilter) on parallel_t
+               Batch Filter: (a > 4990)
+               ->  Parallel Custom Scan (TessHeapScan) on parallel_t
+(6 rows)
 
 SELECT parallel_same($$SELECT a + 1 AS next, c || '!' AS shout FROM parallel_t WHERE a > 4990$$);
                                                            parallel_same                                                           
@@ -217,18 +218,19 @@ RIGHT JOIN (VALUES (1), (2)) AS v(x) ON true$$);
 
 -- A limit above the Gather stops it early, and a rescan sets it up anew.
 EXPLAIN (COSTS OFF) SELECT count(*) FROM (SELECT a FROM parallel_t WHERE a > 100 LIMIT 3) AS s;
-                                      QUERY PLAN                                       
----------------------------------------------------------------------------------------
+                                         QUERY PLAN                                          
+---------------------------------------------------------------------------------------------
  Custom Scan (TessAgg)
    ->  Custom Scan (TessPack)
          ->  Subquery Scan on s
                ->  Limit
-                     ->  Gather
+                     ->  Custom Scan (TessGather)
                            Workers Planned: 2
-                           ->  Parallel Custom Scan (TessFilter) on parallel_t
-                                 Batch Filter: (parallel_t.a > 100)
-                                 ->  Parallel Custom Scan (TessHeapScan) on parallel_t
-(9 rows)
+                           ->  Parallel Custom Scan (TessSend)
+                                 ->  Parallel Custom Scan (TessFilter) on parallel_t
+                                       Batch Filter: (parallel_t.a > 100)
+                                       ->  Parallel Custom Scan (TessHeapScan) on parallel_t
+(10 rows)
 
 SELECT count(*) FROM (SELECT a FROM parallel_t WHERE a > 100 LIMIT 3) AS s;
  count 
@@ -246,20 +248,21 @@ SELECT plan_property($$SELECT a FROM parallel_t WHERE a > 100 LIMIT 3$$, 'TessHe
 EXPLAIN (COSTS OFF)
 SELECT x, n FROM (SELECT count(*) AS n FROM (SELECT a FROM parallel_t WHERE a > 4997 LIMIT 2) AS l) AS ss
 RIGHT JOIN (VALUES (1), (2)) AS v(x) ON true;
-                                         QUERY PLAN                                          
----------------------------------------------------------------------------------------------
+                                            QUERY PLAN                                             
+---------------------------------------------------------------------------------------------------
  Nested Loop Left Join
    ->  Values Scan on "*VALUES*"
    ->  Custom Scan (TessAgg)
          ->  Custom Scan (TessPack)
                ->  Subquery Scan on l
                      ->  Limit
-                           ->  Gather
+                           ->  Custom Scan (TessGather)
                                  Workers Planned: 2
-                                 ->  Parallel Custom Scan (TessFilter) on parallel_t
-                                       Batch Filter: (parallel_t.a > 4997)
-                                       ->  Parallel Custom Scan (TessHeapScan) on parallel_t
-(11 rows)
+                                 ->  Parallel Custom Scan (TessSend)
+                                       ->  Parallel Custom Scan (TessFilter) on parallel_t
+                                             Batch Filter: (parallel_t.a > 4997)
+                                             ->  Parallel Custom Scan (TessHeapScan) on parallel_t
+(12 rows)
 
 SELECT parallel_same($$SELECT x, n FROM (SELECT count(*) AS n FROM (SELECT a FROM parallel_t WHERE a > 4997 LIMIT 2) AS l) AS ss
 RIGHT JOIN (VALUES (1), (2)) AS v(x) ON true$$);
@@ -716,6 +719,112 @@ EXPLAIN (COSTS OFF) SELECT k, a, t FROM parallel_wide WHERE k % 3 <> 0;
 (5 rows)
 
 RESET tessera.batch_gather;
+-- A projection the workers may compute goes below the gather, and the
+-- batch node there takes it; one of a parallel-restricted function stays
+-- in the leader, above TessGather.
+CREATE FUNCTION parallel_restricted(int) RETURNS int
+LANGUAGE plpgsql PARALLEL RESTRICTED AS $$ BEGIN RETURN $1 * 2; END $$;
+EXPLAIN (COSTS OFF, VERBOSE) SELECT k + 1, a FROM parallel_wide WHERE k % 3 <> 0;
+                                  QUERY PLAN                                   
+-------------------------------------------------------------------------------
+ Custom Scan (TessGather)
+   Output: ((k + 1)), a
+   Workers Planned: 2
+   ->  Parallel Custom Scan (TessSend)
+         Output: ((k + 1)), a
+         ->  Parallel Custom Scan (TessFilter) on public.parallel_wide
+               Output: (k + 1), a
+               Batch Filter: ((parallel_wide.k % 3) <> 0)
+               ->  Parallel Custom Scan (TessHeapScan) on public.parallel_wide
+                     Output: k, a
+(10 rows)
+
+SELECT parallel_same($$SELECT md5(string_agg(q::text, ',' ORDER BY q::text)) FROM (SELECT k + 1, a FROM parallel_wide WHERE k % 3 <> 0 OFFSET 0) AS q$$);
+            parallel_same             
+--------------------------------------
+ {(77d585439d65b1e68910d0bdcd520f6a)}
+(1 row)
+
+EXPLAIN (COSTS OFF) SELECT parallel_restricted(k), a FROM parallel_wide WHERE k % 3 <> 0;
+                                  QUERY PLAN                                  
+------------------------------------------------------------------------------
+ Result
+   ->  Custom Scan (TessGather)
+         Workers Planned: 2
+         ->  Parallel Custom Scan (TessSend)
+               ->  Parallel Custom Scan (TessFilter) on parallel_wide
+                     Batch Filter: ((k % 3) <> 0)
+                     ->  Parallel Custom Scan (TessHeapScan) on parallel_wide
+(7 rows)
+
+SELECT parallel_same($$SELECT md5(string_agg(q::text, ',' ORDER BY q::text)) FROM (SELECT parallel_restricted(k), a FROM parallel_wide WHERE k % 3 <> 0 OFFSET 0) AS q$$);
+            parallel_same             
+--------------------------------------
+ {(e23784cbfcc9542c69d4c90a45fa0f7f)}
+(1 row)
+
+DROP FUNCTION parallel_restricted(int);
+-- Executor parameters: finalize_plan wants one of the core's Gathers over
+-- every parallel-aware node, and the nodes under TessGather hold their
+-- flag back while it runs. An initplan, a subplan run for every outer
+-- row, INTERSECT and a recursive CTE.
+EXPLAIN (COSTS OFF) SELECT k, a FROM parallel_wide WHERE k < (SELECT 1000) ORDER BY k;
+                                  QUERY PLAN                                  
+------------------------------------------------------------------------------
+ Custom Scan (TessGatherMerge)
+   Workers Planned: 2
+   InitPlan expr_1
+     ->  Result
+   ->  Parallel Custom Scan (TessSend)
+         ->  Parallel Custom Scan (TessSort)
+               Sort Key: parallel_wide.k
+               ->  Parallel Custom Scan (TessFilter) on parallel_wide
+                     Batch Filter: (parallel_wide.k < (InitPlan expr_1).col1)
+                     ->  Parallel Custom Scan (TessHeapScan) on parallel_wide
+(10 rows)
+
+SELECT parallel_same($$SELECT md5(string_agg(q::text, ',' ORDER BY q::text)) FROM (SELECT k, a FROM parallel_wide WHERE k < (SELECT 1000) OFFSET 0) AS q$$);
+            parallel_same             
+--------------------------------------
+ {(1ff9cbc1769622a669b8d07d499a5e68)}
+(1 row)
+
+SELECT parallel_same($$SELECT x, (SELECT count(*) FROM parallel_wide WHERE k < x * 1000 AND a >= 0) FROM generate_series(1, 3) AS x$$);
+           parallel_same           
+-----------------------------------
+ {"(1,888)","(2,1777)","(3,2666)"}
+(1 row)
+
+EXPLAIN (COSTS OFF) SELECT k FROM parallel_wide WHERE k < 100 INTERSECT SELECT a FROM parallel_wide WHERE a < 500;
+                                          QUERY PLAN                                          
+----------------------------------------------------------------------------------------------
+ HashSetOp Intersect
+   ->  Custom Scan (TessGather)
+         Workers Planned: 2
+         ->  Parallel Custom Scan (TessSend)
+               ->  Parallel Custom Scan (TessFilter) on parallel_wide
+                     Batch Filter: (parallel_wide.k < 100)
+                     ->  Parallel Custom Scan (TessHeapScan) on parallel_wide
+   ->  Custom Scan (TessGather)
+         Workers Planned: 2
+         ->  Parallel Custom Scan (TessSend)
+               ->  Parallel Custom Scan (TessFilter) on parallel_wide parallel_wide_1
+                     Batch Filter: (parallel_wide_1.a < 500)
+                     ->  Parallel Custom Scan (TessHeapScan) on parallel_wide parallel_wide_1
+(13 rows)
+
+SELECT parallel_same($$SELECT md5(string_agg(q::text, ',' ORDER BY q::text)) FROM (SELECT k FROM parallel_wide WHERE k < 100 INTERSECT SELECT a FROM parallel_wide WHERE a < 500) AS q$$);
+            parallel_same             
+--------------------------------------
+ {(7e1807fe93ae63f2f8e1da6a7485665a)}
+(1 row)
+
+SELECT parallel_same($$WITH RECURSIVE r(n) AS (SELECT k FROM parallel_wide WHERE k < 10 UNION SELECT n + 1 FROM r WHERE n < 20) SELECT count(*) FROM r$$);
+ parallel_same 
+---------------
+ {(20)}
+(1 row)
+
 -- At the core's costs of parallel work the node's own paths cost a row a
 -- quarter of parallel_tuple_cost: a scan returning 8000 rows and a sort of
 -- every row go parallel through TessGather and TessGatherMerge, and stay

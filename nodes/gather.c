@@ -213,6 +213,18 @@ typedef struct TessGatherState
 static const CustomExecMethods send_exec_methods;
 static const CustomExecMethods gather_exec_methods;
 static create_upper_paths_hook_type previous_create_upper_paths_hook = NULL;
+static planner_hook_type previous_planner_hook = NULL;
+
+/*
+ * The parallel-aware plan nodes under a TessGather of the planning under
+ * way, their flag held back until it is done: finalize_plan requires one
+ * of the core's Gathers above every parallel-aware node once a query has
+ * executor parameters, and knows no custom scan that gathers. The flag
+ * gets a node its shared-memory callbacks; the rescan parameter a core
+ * Gather adds for its nodes the node does without, rescanning its child
+ * and reinitializing the shared memory itself.
+ */
+static List *held_parallel_aware = NIL;
 
 static Plan *gather_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 						 List *tlist, List *clauses, List *custom_plans);
@@ -239,29 +251,46 @@ static const CustomPathMethods send_path_methods = {
 /* ---------------------------------------------------------------- planning */
 
 /*
- * The node's path in place of a Gather over a batch path: TessGather over
- * TessSend over the Gather's subpath, with the Gather's rows and costs.
- * NULL where the core's Gather stays: a single copy, no worker, a subpath
- * that is no batch path, or a Gather that projects.
+ * The batch path a gather of subpath reads: subpath itself, or, under a
+ * projection the planner put there for a batch node that projects, a copy
+ * of that node taking the projection's target, as the core's plan would
+ * give it the projection. NULL where the core's gather stays: no worker,
+ * or no batch path the workers may run of 1 to 64 columns.
  */
-static bool
-gathers_batches(Path *gather, Path *subpath, int num_workers)
+static Path *
+gathered_batch_path(Path *subpath, int num_workers)
 {
-	return num_workers > 0 && tess_path_node(subpath) != NULL && subpath->parallel_safe &&
-		subpath->param_info == NULL &&
-		equal(gather->pathtarget->exprs, subpath->pathtarget->exprs) &&
-		list_length(subpath->pathtarget->exprs) > 0 &&
-		list_length(subpath->pathtarget->exprs) <= 64;
+	if (IsA(subpath, ProjectionPath) && ((ProjectionPath *) subpath)->dummypp)
+	{
+		ProjectionPath *projection = (ProjectionPath *) subpath;
+		Path	   *below = projection->subpath;
+		CustomPath *copy;
+
+		if (tess_path_node(below) == NULL || !IsA(below, CustomPath) ||
+			(((CustomPath *) below)->flags & CUSTOMPATH_SUPPORT_PROJECTION) == 0)
+			return NULL;
+		copy = makeNode(CustomPath);
+		*copy = *(CustomPath *) below;
+		copy->path.pathtarget = projection->path.pathtarget;
+		subpath = &copy->path;
+	}
+	if (num_workers <= 0 || tess_path_node(subpath) == NULL || !subpath->parallel_safe ||
+		subpath->param_info != NULL ||
+		list_length(subpath->pathtarget->exprs) == 0 ||
+		list_length(subpath->pathtarget->exprs) > 64)
+		return NULL;
+	return subpath;
 }
 
 /*
  * TessSend over subpath and the gathering node over it, with the core
  * node's rows, costs and path keys; send_data the keys TessSend's messages
- * carry, if any.
+ * carry, if any. A gather that projects, of a target the workers may not
+ * compute, becomes a projection over the node, which emits subpath's.
  */
 static Path *
-make_send_and_gather(Path *gather, Path *subpath, int num_workers, List *send_data,
-					 const CustomPathMethods *methods, const TessNode *node)
+make_send_and_gather(PlannerInfo *root, Path *gather, Path *subpath, int num_workers,
+					 List *send_data, const CustomPathMethods *methods, const TessNode *node)
 {
 	TessPathConfig config = TESS_STRUCT_INITIALIZER(TessPathConfig);
 	CustomPath *send;
@@ -282,16 +311,21 @@ make_send_and_gather(Path *gather, Path *subpath, int num_workers, List *send_da
 	config.children = list_make1(&send->path);
 	config.node_data = (Node *) list_make1(makeInteger(num_workers));
 	path = tess_path_create(&config);
-	return &path->path;
+	if (equal(gather->pathtarget->exprs, subpath->pathtarget->exprs))
+		return &path->path;
+	path->path.pathtarget = subpath->pathtarget;
+	return (Path *) create_projection_path(root, gather->parent, &path->path, gather->pathtarget);
 }
 
 static Path *
 make_gather_path(PlannerInfo *root, GatherPath *gather)
 {
-	if (gather->single_copy ||
-		!gathers_batches(&gather->path, gather->subpath, gather->num_workers))
+	Path	   *subpath = gathered_batch_path(gather->subpath, gather->num_workers);
+
+	/* A single copy runs in one worker without the leader: only the core's plans make it. */
+	if (gather->single_copy || subpath == NULL)
 		return NULL;
-	return make_send_and_gather(&gather->path, gather->subpath, gather->num_workers, NIL,
+	return make_send_and_gather(root, &gather->path, subpath, gather->num_workers, NIL,
 								&gather_path_methods, &tess_gather_node);
 }
 
@@ -304,13 +338,13 @@ static Path *
 make_gather_merge_path(PlannerInfo *root, GatherMergePath *gather)
 {
 	const TessKernelOps *kernels = tess_runtime_kernels();
-	Path	   *subpath = gather->subpath;
+	Path	   *subpath = gathered_batch_path(gather->subpath, gather->num_workers);
 	List	   *places = NIL;
 	List	   *kinds = NIL;
 	List	   *flags = NIL;
 	int			nkeys = list_length(gather->path.pathkeys);
 
-	if (!gathers_batches(&gather->path, subpath, gather->num_workers) ||
+	if (subpath == NULL ||
 		nkeys == 0 || nkeys > TESS_TABLE_MAX_KEYS || kernels == NULL ||
 		!TESS_ABI_HAS_FIELD(kernels, TessKernelOps, sort_key_lanes))
 		return NULL;
@@ -326,7 +360,7 @@ make_gather_merge_path(PlannerInfo *root, GatherMergePath *gather)
 		kinds = lappend_int(kinds, (int) key.kind);
 		flags = lappend_int(flags, (int) key.flags);
 	}
-	return make_send_and_gather(&gather->path, subpath, gather->num_workers,
+	return make_send_and_gather(root, &gather->path, subpath, gather->num_workers,
 								list_make3(places, kinds, flags),
 								&gather_merge_path_methods, &tess_gather_merge_node);
 }
@@ -480,6 +514,29 @@ replace_gathers(PlannerInfo *root, Path *path)
 				join->innerjoinpath = replace_gathers(root, join->innerjoinpath);
 				break;
 			}
+		case T_GroupingSetsPath:
+			((GroupingSetsPath *) path)->subpath =
+				replace_gathers(root, ((GroupingSetsPath *) path)->subpath);
+			break;
+		case T_ModifyTablePath:
+			((ModifyTablePath *) path)->subpath =
+				replace_gathers(root, ((ModifyTablePath *) path)->subpath);
+			break;
+		case T_SetOpPath:
+			((SetOpPath *) path)->leftpath = replace_gathers(root, ((SetOpPath *) path)->leftpath);
+			((SetOpPath *) path)->rightpath = replace_gathers(root, ((SetOpPath *) path)->rightpath);
+			break;
+		case T_RecursiveUnionPath:
+			((RecursiveUnionPath *) path)->leftpath =
+				replace_gathers(root, ((RecursiveUnionPath *) path)->leftpath);
+			((RecursiveUnionPath *) path)->rightpath =
+				replace_gathers(root, ((RecursiveUnionPath *) path)->rightpath);
+			break;
+		case T_MinMaxAggPath:
+			/* Each aggregate's subquery is planned without the final stage's hook. */
+			foreach_node(MinMaxAggInfo, info, ((MinMaxAggPath *) path)->mmaggregates)
+				info->path = replace_gathers(info->subroot, info->path);
+			break;
 		case T_AppendPath:
 			{
 				ListCell   *lc;
@@ -568,6 +625,90 @@ send_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path, List *tlist
 	return tess_plan_create(best_path, tlist, custom_plans, &config);
 }
 
+/* Hold back the parallel-aware flag of plan and the nodes below it. */
+static void
+hold_parallel_aware(Plan *plan)
+{
+	ListCell   *lc;
+
+	if (plan == NULL)
+		return;
+	check_stack_depth();
+	if (plan->parallel_aware)
+	{
+		plan->parallel_aware = false;
+		held_parallel_aware = lappend(held_parallel_aware, plan);
+	}
+	hold_parallel_aware(plan->lefttree);
+	hold_parallel_aware(plan->righttree);
+	switch (nodeTag(plan))
+	{
+		case T_CustomScan:
+			foreach(lc, ((CustomScan *) plan)->custom_plans)
+				hold_parallel_aware(lfirst(lc));
+			break;
+		case T_Append:
+			foreach(lc, ((Append *) plan)->appendplans)
+				hold_parallel_aware(lfirst(lc));
+			break;
+		case T_MergeAppend:
+			foreach(lc, ((MergeAppend *) plan)->mergeplans)
+				hold_parallel_aware(lfirst(lc));
+			break;
+		case T_BitmapAnd:
+			foreach(lc, ((BitmapAnd *) plan)->bitmapplans)
+				hold_parallel_aware(lfirst(lc));
+			break;
+		case T_BitmapOr:
+			foreach(lc, ((BitmapOr *) plan)->bitmapplans)
+				hold_parallel_aware(lfirst(lc));
+			break;
+		case T_SubqueryScan:
+			hold_parallel_aware(((SubqueryScan *) plan)->subplan);
+			break;
+		default:
+			break;
+	}
+}
+
+/* The planning done, the flags held back come back; a nested planning keeps its own. */
+static PlannedStmt *
+gather_planner(Query *parse, const char *query_string, int cursorOptions,
+			   ParamListInfo boundParams
+#if PG_VERSION_NUM >= 190000
+			   ,ExplainState *es
+#endif
+	)
+{
+	List	   *outer = held_parallel_aware;
+	PlannedStmt *result;
+
+	held_parallel_aware = NIL;
+	PG_TRY();
+	{
+#if PG_VERSION_NUM >= 190000
+		result = previous_planner_hook != NULL ?
+			previous_planner_hook(parse, query_string, cursorOptions, boundParams, es) :
+			standard_planner(parse, query_string, cursorOptions, boundParams, es);
+#else
+		result = previous_planner_hook != NULL ?
+			previous_planner_hook(parse, query_string, cursorOptions, boundParams) :
+			standard_planner(parse, query_string, cursorOptions, boundParams);
+#endif
+	}
+	PG_CATCH();
+	{
+		held_parallel_aware = outer;
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+	foreach_ptr(Plan, plan, held_parallel_aware)
+		plan->parallel_aware = true;
+	list_free(held_parallel_aware);
+	held_parallel_aware = outer;
+	return result;
+}
+
 /* TessGather and TessGatherMerge: a column per target, the targets TessSend sends. */
 static Plan *
 gather_plan_of(PlannerInfo *root, CustomPath *best_path, List *tlist, List *custom_plans,
@@ -586,6 +727,8 @@ gather_plan_of(PlannerInfo *root, CustomPath *best_path, List *tlist, List *cust
 	config.layout_policy = TESS_LAYOUT_DENSE;
 	config.scanrelid = 0;
 	config.node_data = (Node *) tess_plan_writer_finish(writer);
+	foreach_ptr(Plan, child, custom_plans)
+		hold_parallel_aware(child);
 	return tess_plan_create(best_path, tlist, custom_plans, &config);
 }
 
@@ -1513,8 +1656,11 @@ merge_next(TessGatherState *state)
 static void
 gather_shutdown_workers(TessGatherState *state)
 {
-	if (state->pei != NULL)
-		ExecParallelFinish(state->pei);
+	/*
+	 * The queues go first, as ExecParallelFinish detaches the core's: a
+	 * worker blocked on a full queue then sees the leader gone and stops,
+	 * where waiting for it to finish would wait forever.
+	 */
 	if (state->readers != NULL)
 	{
 		for (int index = 0; index < state->nreaders; index++)
@@ -1523,6 +1669,8 @@ gather_shutdown_workers(TessGatherState *state)
 		pfree(state->readers);
 		state->readers = NULL;
 	}
+	if (state->pei != NULL)
+		ExecParallelFinish(state->pei);
 	state->nreaders = 0;
 	state->message = NULL;
 	if (state->sources != NULL)
@@ -1701,4 +1849,6 @@ tess_gather_planner_init(void)
 {
 	previous_create_upper_paths_hook = create_upper_paths_hook;
 	create_upper_paths_hook = create_upper_paths;
+	previous_planner_hook = planner_hook;
+	planner_hook = gather_planner;
 }

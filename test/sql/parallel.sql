@@ -219,6 +219,26 @@ RESET parallel_leader_participation;
 SET tessera.batch_gather = off;
 EXPLAIN (COSTS OFF) SELECT k, a, t FROM parallel_wide WHERE k % 3 <> 0;
 RESET tessera.batch_gather;
+-- A projection the workers may compute goes below the gather, and the
+-- batch node there takes it; one of a parallel-restricted function stays
+-- in the leader, above TessGather.
+CREATE FUNCTION parallel_restricted(int) RETURNS int
+LANGUAGE plpgsql PARALLEL RESTRICTED AS $$ BEGIN RETURN $1 * 2; END $$;
+EXPLAIN (COSTS OFF, VERBOSE) SELECT k + 1, a FROM parallel_wide WHERE k % 3 <> 0;
+SELECT parallel_same($$SELECT md5(string_agg(q::text, ',' ORDER BY q::text)) FROM (SELECT k + 1, a FROM parallel_wide WHERE k % 3 <> 0 OFFSET 0) AS q$$);
+EXPLAIN (COSTS OFF) SELECT parallel_restricted(k), a FROM parallel_wide WHERE k % 3 <> 0;
+SELECT parallel_same($$SELECT md5(string_agg(q::text, ',' ORDER BY q::text)) FROM (SELECT parallel_restricted(k), a FROM parallel_wide WHERE k % 3 <> 0 OFFSET 0) AS q$$);
+DROP FUNCTION parallel_restricted(int);
+-- Executor parameters: finalize_plan wants one of the core's Gathers over
+-- every parallel-aware node, and the nodes under TessGather hold their
+-- flag back while it runs. An initplan, a subplan run for every outer
+-- row, INTERSECT and a recursive CTE.
+EXPLAIN (COSTS OFF) SELECT k, a FROM parallel_wide WHERE k < (SELECT 1000) ORDER BY k;
+SELECT parallel_same($$SELECT md5(string_agg(q::text, ',' ORDER BY q::text)) FROM (SELECT k, a FROM parallel_wide WHERE k < (SELECT 1000) OFFSET 0) AS q$$);
+SELECT parallel_same($$SELECT x, (SELECT count(*) FROM parallel_wide WHERE k < x * 1000 AND a >= 0) FROM generate_series(1, 3) AS x$$);
+EXPLAIN (COSTS OFF) SELECT k FROM parallel_wide WHERE k < 100 INTERSECT SELECT a FROM parallel_wide WHERE a < 500;
+SELECT parallel_same($$SELECT md5(string_agg(q::text, ',' ORDER BY q::text)) FROM (SELECT k FROM parallel_wide WHERE k < 100 INTERSECT SELECT a FROM parallel_wide WHERE a < 500) AS q$$);
+SELECT parallel_same($$WITH RECURSIVE r(n) AS (SELECT k FROM parallel_wide WHERE k < 10 UNION SELECT n + 1 FROM r WHERE n < 20) SELECT count(*) FROM r$$);
 -- At the core's costs of parallel work the node's own paths cost a row a
 -- quarter of parallel_tuple_cost: a scan returning 8000 rows and a sort of
 -- every row go parallel through TessGather and TessGatherMerge, and stay

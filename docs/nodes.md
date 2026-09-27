@@ -1239,16 +1239,36 @@ serial one.
 ### Planning
 
 The module's `create_upper_paths` hook, at the final relation, walks the
-tree of each of its paths (projections, sorts, aggregates, window
-functions, unique, limit, row locks, material, memoize, joins, appends
-and custom paths) and replaces a `GatherPath` whose child is a Tessera
-path by `TessGather` over `TessSend` over that child, with the same rows
-and costs, when
+tree of each of its paths (projections, sorts, aggregates, grouping
+sets, window functions, unique, limit, row locks, material, memoize,
+joins, appends, set operations, recursive unions, modifications, the
+subqueries of min/max aggregates, which the core plans without the final
+stage, and custom paths) and replaces a `GatherPath` whose child is a
+Tessera path by `TessGather` over `TessSend` over that child, with the
+same rows and costs, when
 
-- the gather is not single-copy and plans workers;
-- the child is parallel-safe, unparameterized and has the gather's
-  target, of 1 to 64 columns;
+- the gather plans workers (a single copy runs in one worker without the
+  leader; the core makes one only as the plan-level `Gather` of
+  `debug_parallel_query`, outside the paths, and it stays);
+- the child is parallel-safe, unparameterized, of 1 to 64 columns;
 - `tessera.batch_gather` is on (the default).
+
+A projection the core put under the gather, over a Tessera node that
+projects (`dummypp`), goes to a copy of that node, which computes the
+target in the workers, as the core's plan would. A gather that projects
+itself, of a target the workers may not compute (a parallel-restricted
+function), becomes a projection over `TessGather`, computed in the leader
+as the core's `Gather` computes it.
+
+Once a query has executor parameters (an initplan, a subplan, a
+recursive CTE, a set operation), `finalize_plan` requires one of the
+core's Gathers or Gather Merges over every parallel-aware plan node, for
+the rescan parameter it adds, and knows no custom scan that gathers. So
+`TessGather`'s plan holds back the flag of the parallel-aware nodes under
+it, and the module's `planner_hook` gives it back once `standard_planner`
+is done: the flag gets a node its shared-memory callbacks, and the rescan
+parameter the node does without, rescanning its child and reinitializing
+the shared memory itself.
 
 A `GatherMergePath` over a Tessera path becomes `TessGatherMerge` over
 `TessSend` the same way when every path key is one the sort kernels order
@@ -1299,7 +1319,9 @@ While every queue is empty and the leader takes part
 (`parallel_leader_participation`), it reads `TessSend`'s child itself as
 a batch input; when it does not, it waits on its latch. It ends when every
 queue is detached and its own share is read. Without launched workers the
-leader reads the whole child. The shutdown finishes the workers and
+leader reads the whole child. The shutdown detaches the queues first, so
+that a worker blocked on a full one stops (a limit above met), then
+finishes the workers and
 moves their counters into the plan's nodes for `EXPLAIN ANALYZE`; a
 rescan shuts them down and rescans the child, and the next fetch launches
 anew. A bound set by a limit above (`set_tuple_bound`) goes to the
