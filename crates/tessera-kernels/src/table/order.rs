@@ -26,29 +26,54 @@ pub(super) fn items<R: Region>(
         "the sort keys are not the table's keys"
     );
     let encoder = Encoder::new(keys)?;
-    let words = encoder.words();
-    let mut access = Access::for_chunks(region, layout);
+    macro_rules! dispatch {
+        ($($n:literal)*) => {
+            match encoder.words() {
+                $($n => items_as::<R, $n>(region, layout, &encoder, items),)*
+                words => unreachable!("an item has at most 17 words, not {words}"),
+            }
+        };
+    }
+    dispatch!(1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17)
+}
+
+/// [`items`] for items of `W` words: the records of each chunk are read
+/// one after another up to its used mark, which [`Access::room`] checked
+/// to be a record boundary within the chunk.
+fn items_as<R: Region, const W: usize>(
+    region: &R,
+    layout: &Layout,
+    encoder: &Encoder<'_>,
+    items: &mut [u64],
+) -> Result<usize> {
+    let (items, _) = items.as_chunks_mut::<W>();
+    let access = Access::for_chunks(region, layout);
+    let record_size = layout.record_size;
     let mut count = 0;
     for chunk in 0..region.chunks() {
         let (used, _) = access.room(chunk)?;
+        ensure!(
+            items.len() - count >= (used - CHUNK_HEADER) / record_size,
+            "{} items do not hold the table's records",
+            items.len()
+        );
         let mut byte = CHUNK_HEADER;
         while byte < used {
-            let reference = access.reference((chunk, byte));
-            let view = access.locate(reference)?;
-            let at = count * words;
+            // SAFETY: the place lies below the chunk's used mark, a record
+            // boundary `room` checked against the chunk's length, and the
+            // chunk's one writer wrote whole records up to it.
+            let view = unsafe { access.view_at(access.spot((chunk, byte))) };
             ensure!(
-                at + words <= items.len(),
-                "{} words do not hold the items of the table's records",
-                items.len()
+                view.len() == record_size,
+                "table chunk {chunk} holds no record at byte {byte}"
             );
-            encoder.encode(
+            items[count] = encoder.encode::<W>(
                 view.keys(),
                 view.null_bits(),
-                reference,
-                &mut items[at..at + words],
+                access.reference((chunk, byte)),
             )?;
             count += 1;
-            byte += layout.record_size;
+            byte += record_size;
         }
     }
     Ok(count)

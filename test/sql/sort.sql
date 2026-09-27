@@ -81,6 +81,10 @@ SELECT sort_same($$SELECT d, c FROM sort_t WHERE d < 64 ORDER BY d DESC$$);
 SELECT sort_same($$SELECT d, c FROM sort_t WHERE d < 65 ORDER BY d DESC$$);
 SELECT sort_same($$SELECT d, c FROM sort_t WHERE b > 0 ORDER BY d$$);
 EXPLAIN (COSTS OFF) SELECT d FROM sort_t WHERE b > 0 ORDER BY d;
+-- A nullable key over a filter: NULLs among the rows kept, and NULLs only
+-- among the rows the filter removed.
+SELECT sort_same($$SELECT a, d FROM sort_t WHERE d > 250 ORDER BY a NULLS FIRST, d$$);
+SELECT sort_same($$SELECT a, d FROM sort_t WHERE a > -100 ORDER BY a DESC, d$$);
 
 -- A batch-aware parent above: an offset, and an aggregate over a subquery.
 EXPLAIN (COSTS OFF) SELECT d FROM sort_t ORDER BY d OFFSET 490;

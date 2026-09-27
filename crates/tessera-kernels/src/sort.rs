@@ -103,31 +103,32 @@ impl<'k> Encoder<'k> {
         self.words
     }
 
-    /// Write the item of a row with key slots `slots`, the keys whose bit
-    /// is set in `null_bits` NULL, and reference `reference` into `item`,
-    /// of [`Self::words`] words.
-    #[inline]
-    pub(crate) fn encode(
+    /// The item of a row with key slots `slots`, the keys whose bit is set
+    /// in `null_bits` NULL, and reference `reference`: `W` must be
+    /// [`Self::words`]. A fixed width keeps the item in registers, with no
+    /// call to clear it.
+    #[inline(always)]
+    pub(crate) fn encode<const W: usize>(
         &self,
         slots: &[i64],
         null_bits: u32,
         reference: u32,
-        item: &mut [u64],
-    ) -> Result<()> {
-        item.fill(0);
+    ) -> Result<[u64; W]> {
+        debug_assert_eq!(W, self.words);
+        let mut item = [0u64; W];
         let mut at = 0;
         for (index, key) in self.keys.iter().enumerate() {
             let null = (null_bits >> index) & 1 == 1;
             if key.nullable {
-                put(item, &mut at, u64::from(null != key.nulls_first), 1);
+                put(&mut item, &mut at, u64::from(null != key.nulls_first), 1);
             } else if null {
                 bail!("sort key {index} holds a NULL but was declared not nullable");
             }
             let value = if null { 0 } else { key.encode(slots[index]) };
-            put(item, &mut at, value, key.value_bits());
+            put(&mut item, &mut at, value, key.value_bits());
         }
-        item[self.words - 1] |= u64::from(reference);
-        Ok(())
+        item[W - 1] |= u64::from(reference);
+        Ok(item)
     }
 }
 

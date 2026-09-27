@@ -12,6 +12,7 @@
 #include "optimizer/paths.h"
 #include "optimizer/planner.h"
 #include "optimizer/tlist.h"
+#include "port/pg_bitutils.h"
 #include "utils/memutils.h"
 #include "utils/ruleutils.h"
 
@@ -437,6 +438,31 @@ note_memory(TessSortState *state, Size extra)
 	state->counters.memory = Max(state->counters.memory, memory);
 }
 
+/*
+ * Whether a selected row of the batch is NULL in the column: a word of
+ * rows at a time, whose 64 flags memchr scans at once, the selected rows
+ * checked one by one only when a flag is set.
+ */
+static bool
+selected_null(const TessRowMask *rows, const bool *isnull)
+{
+	int			nwords = tess_row_mask_word_count(rows->nrows);
+
+	for (int word = 0; word < nwords; word++)
+	{
+		uint64		bits = rows->bits[word];
+		const bool *flags = isnull + (Size) word * 64;
+
+		if (bits == 0 ||
+			memchr(flags, true, Min(64, rows->nrows - word * 64)) == NULL)
+			continue;
+		for (; bits != 0; bits &= bits - 1)
+			if (flags[pg_rightmost_one_pos64(bits)])
+				return true;
+	}
+	return false;
+}
+
 /* The rows of one batch of the child into records. */
 static void
 append_batch(TessSortState *state, TessBatch *batch)
@@ -458,19 +484,12 @@ append_batch(TessSortState *state, TessBatch *batch)
 	for (int key = 0; key < state->nkeys; key++)
 	{
 		const TessDatumColumn *values = &state->columns[state->key_columns[key]];
-		int			row = -1;
 
 		state->table_keys[key].kind = state->keys[key].kind;
 		state->table_keys[key].column = values;
 		state->table_keys[key].prepared = NULL;
-		if (state->key_nulls[key])
-			continue;
-		while ((row = tess_row_mask_next(&batch->rows, row)) >= 0)
-			if (values->isnull[row])
-			{
-				state->key_nulls[key] = true;
-				break;
-			}
+		if (!state->key_nulls[key])
+			state->key_nulls[key] = selected_null(&batch->rows, values->isnull);
 	}
 	if (nrows > state->capacity)
 	{
