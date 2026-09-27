@@ -339,16 +339,15 @@ join_pathlist(PlannerInfo *root, RelOptInfo *joinrel, RelOptInfo *outerrel,
 						  outer_path, inner_path, false);
 	if (path != NULL)
 		add_path(joinrel, &path->path);
-	/* RIGHT and FULL: every participant would return the records without a pair. */
-	if (jointype == JOIN_RIGHT || jointype == JOIN_FULL)
-		return;
 
 	/*
 	 * Under a Gather: the outer side's cheapest partial path divides the
 	 * rows, and every participant builds the whole inner side, as the
 	 * core's hash join without a shared table does, from the cheapest
 	 * inner path a worker may run. The path is parallel-aware for the
-	 * counters the node shares.
+	 * counters the node shares. RIGHT and FULL take a shared table only,
+	 * as the core does: with a table each, every participant would return
+	 * the records without a pair.
 	 */
 	if (!joinrel->consider_parallel || outerrel->partial_pathlist == NIL ||
 		!bms_is_empty(joinrel->lateral_relids))
@@ -365,8 +364,9 @@ join_pathlist(PlannerInfo *root, RelOptInfo *joinrel, RelOptInfo *outerrel,
 		if (filtered != NULL)
 			outer_path = filtered;
 	}
-	path = make_join_path(root, joinrel, jointype, extra, &keys,
-						  outer_path, inner_path, false);
+	path = jointype == JOIN_RIGHT || jointype == JOIN_FULL ? NULL :
+		make_join_path(root, joinrel, jointype, extra, &keys,
+					   outer_path, inner_path, false);
 	if (path != NULL && path->path.parallel_safe && path->path.parallel_workers > 0)
 	{
 		path->path.parallel_aware = true;

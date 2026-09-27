@@ -2473,6 +2473,70 @@ SELECT join_same($$SELECT count(*), count(jbuild.w), sum(jprobe.v) FROM jprobe L
  1 rows, hash 4c7c7ffc285ce9c86724da09991670a9
 (1 row)
 
+-- RIGHT and FULL take the shared table only: every participant marks the
+-- records of its pairs in shared memory, and the last one to leave the
+-- table returns those without a mark.
+EXPLAIN (COSTS OFF) SELECT count(*), count(jprobe.v) FROM jprobe RIGHT JOIN jbuild ON jprobe.k = jbuild.k;
+                              QUERY PLAN                               
+-----------------------------------------------------------------------
+ Finalize Aggregate
+   ->  Gather
+         Workers Planned: 2
+         ->  Parallel Custom Scan (TessAgg)
+               Partial Mode: Partial
+               ->  Parallel Custom Scan (TessHashJoin)
+                     Join Type: Right
+                     Hash Cond: (jprobe.k = jbuild.k)
+                     Shared Table: true
+                     ->  Parallel Custom Scan (TessHeapScan) on jprobe
+                     ->  Parallel Custom Scan (TessHeapScan) on jbuild
+(11 rows)
+
+SELECT join_same($$SELECT count(*), count(jprobe.v), sum(jbuild.w) FROM jprobe RIGHT JOIN jbuild ON jprobe.k = jbuild.k$$);
+                   join_same                   
+-----------------------------------------------
+ 1 rows, hash 483ddcdcc768e70e2f7a60d3afda2183
+(1 row)
+
+SELECT join_same($$SELECT count(*), count(jprobe.v), count(jbuild.w), sum(jbuild.w) FROM jprobe FULL JOIN jbuild ON jprobe.k = jbuild.k$$);
+                   join_same                   
+-----------------------------------------------
+ 1 rows, hash 2b0ba8bfe01900d619b254b45791aea7
+(1 row)
+
+SELECT join_same($$SELECT jprobe.v, jbuild.w FROM jprobe FULL JOIN jbuild ON jprobe.k = jbuild.k WHERE jbuild.w % 10 = 3 OR jprobe.v % 1000 = 7$$);
+                    join_same                    
+-------------------------------------------------
+ 520 rows, hash 8b2d9a3ddbd12d25b2e640ab60582656
+(1 row)
+
+SELECT join_same($$SELECT count(*), count(jbig.v), count(jgrow.g), sum(jgrow.g) FROM jbig FULL JOIN jgrow ON jbig.fk = jgrow.k$$);
+                   join_same                   
+-----------------------------------------------
+ 1 rows, hash 6e8206c66d79c74fc7f02308b2a45d91
+(1 row)
+
+SELECT join_same($$SELECT count(*), count(jbig.v), count(jd.label), max(jd.label) FROM jbig RIGHT JOIN jd ON jbig.fk = jd.id AND jbig.v % 7 = 0$$);
+                   join_same                   
+-----------------------------------------------
+ 1 rows, hash 62187d4af9d7b035e799b25bb5f759d1
+(1 row)
+
+SET parallel_leader_participation = off;
+SELECT join_same($$SELECT count(*), count(jprobe.v), count(jbuild.w), sum(jbuild.w) FROM jprobe FULL JOIN jbuild ON jprobe.k = jbuild.k$$);
+                   join_same                   
+-----------------------------------------------
+ 1 rows, hash 2b0ba8bfe01900d619b254b45791aea7
+(1 row)
+
+RESET parallel_leader_participation;
+-- A rescan of the Gather builds the table and its marks anew.
+SELECT join_same($$SELECT jsmall.k, (SELECT count(*) FROM jprobe RIGHT JOIN jbuild ON jprobe.k = jbuild.k AND jprobe.v > jsmall.k * 100) FROM jsmall$$);
+                   join_same                    
+------------------------------------------------
+ 10 rows, hash a5fb3f7ac7d91589b53842ffbf5339e8
+(1 row)
+
 -- Duplicate keys: the next record of a key is found down its chain.
 EXPLAIN (COSTS OFF) SELECT count(*), sum(jgrow.g) FROM jbig JOIN jgrow ON jbig.fk = jgrow.k;
                               QUERY PLAN                              
@@ -2781,6 +2845,40 @@ SELECT join_same($$SELECT jsp.s, jsskew.w FROM jsp JOIN jsskew ON jsp.k = jsskew
  180000 rows, hash ed669e9f0bc82792f00f220274071704
 (1 row)
 
+-- RIGHT and FULL: the shared table's tail by the last one to leave it,
+-- a partition's on disk by the participant that joins it, after each
+-- piece.
+SELECT join_property($$SELECT count(*), count(jsp.s), sum(length(jsb.t)) FROM jsp RIGHT JOIN jsb ON jsp.k = jsb.k$$, 'Shared Table') AS shared,
+       join_property($$SELECT count(*), count(jsp.s), sum(length(jsb.t)) FROM jsp RIGHT JOIN jsb ON jsp.k = jsb.k$$, 'Spilled Chunks')::int > 0 AS spilled;
+ shared | spilled 
+--------+---------
+ true   | t
+(1 row)
+
+SELECT join_same($$SELECT count(*), count(jsp.s), sum(length(jsb.t)), sum(jsb.n) FROM jsp RIGHT JOIN jsb ON jsp.k = jsb.k$$);
+                   join_same                   
+-----------------------------------------------
+ 1 rows, hash 1fde106f73a99db25df4570ffab2b254
+(1 row)
+
+SELECT join_same($$SELECT count(*), count(jsp.s), count(jsb.t), sum(jsb.n) FROM jsp FULL JOIN jsb ON jsp.k = jsb.k$$);
+                   join_same                   
+-----------------------------------------------
+ 1 rows, hash 82f73945115e17abebfa925be19ececc
+(1 row)
+
+SELECT join_same($$SELECT jsp.s, jsb.t FROM jsp FULL JOIN jsb ON jsp.k = jsb.k WHERE jsb.n % 100 = 3 OR jsp.s LIKE '%77'$$);
+                    join_same                     
+--------------------------------------------------
+ 3766 rows, hash dd643c48b8933615071d55e7657529c3
+(1 row)
+
+SELECT join_same($$SELECT count(*), count(jsp.s), count(jsskew.w), sum(jsskew.w) FROM jsp FULL JOIN jsskew ON jsp.k = jsskew.k$$);
+                   join_same                   
+-----------------------------------------------
+ 1 rows, hash b4e0ed78f4a3a4c8861e9f5b6d2add82
+(1 row)
+
 -- The workers alone, and a rescan of the Gather: the files go with the
 -- set, and the table spills anew.
 SET parallel_leader_participation = off;
@@ -2794,6 +2892,12 @@ SELECT join_same($$SELECT count(*), count(jsb.n), sum(length(jsb.t)) FROM jsp LE
                    join_same                   
 -----------------------------------------------
  1 rows, hash c5065546b75a2dbf512e64519dbdc6b1
+(1 row)
+
+SELECT join_same($$SELECT count(*), count(jsp.s), count(jsb.t), sum(jsb.n) FROM jsp FULL JOIN jsb ON jsp.k = jsb.k$$);
+                   join_same                   
+-----------------------------------------------
+ 1 rows, hash 82f73945115e17abebfa925be19ececc
 (1 row)
 
 RESET parallel_leader_participation;
@@ -2889,11 +2993,49 @@ SELECT join_same($$SELECT count(*), sum(jsheavy.w) FROM jsouter JOIN jsheavy ON 
  1 rows, hash fc184cd587e6f88232c5c6ff26a957d9
 (1 row)
 
+-- RIGHT and FULL: a round's marks in shared memory, its tail by the last
+-- participant to leave it.
+SELECT join_property($$SELECT count(*), count(jsouter.s), sum(jsheavy.w) FROM jsouter RIGHT JOIN jsheavy ON jsouter.k = jsheavy.k$$, 'Partitions Joined Together')::int > 0 AS together;
+ together 
+----------
+ t
+(1 row)
+
+SELECT join_same($$SELECT count(*), count(jsouter.s), sum(jsheavy.w) FROM jsouter RIGHT JOIN jsheavy ON jsouter.k = jsheavy.k$$, false);
+                   join_same                   
+-----------------------------------------------
+ 1 rows, hash 9e75b6c756997b550390028ac19a3787
+(1 row)
+
+SELECT join_same($$SELECT count(*), count(jsouter.s), count(jsheavy.w), sum(jsheavy.w) FROM jsouter FULL JOIN jsheavy ON jsouter.k = jsheavy.k$$, false);
+                   join_same                   
+-----------------------------------------------
+ 1 rows, hash 7a4d5c73e2ba55b040a7b61b35b7493f
+(1 row)
+
+SELECT join_same($$SELECT jsouter.s, jsheavy.w FROM jsouter FULL JOIN jsheavy ON jsouter.k = jsheavy.k WHERE jsheavy.w % 1000 = 11 OR jsouter.s LIKE '%77'$$, false);
+                    join_same                     
+--------------------------------------------------
+ 3717 rows, hash a9ac8c04dc61f3f71ee1fbc73496b433
+(1 row)
+
+SELECT join_same($$SELECT count(*), count(jsouter.s), sum(jsheavy.w) FROM jsouter RIGHT JOIN jsheavy ON jsouter.k = jsheavy.k AND jsheavy.w % 3 = jsouter.k % 3$$, false);
+                   join_same                   
+-----------------------------------------------
+ 1 rows, hash 8948bac4bf5333e2f7416ba0b6c3f576
+(1 row)
+
 SET parallel_leader_participation = off;
 SELECT join_same($$SELECT count(*), sum(jsheavy.w), sum(length(jsouter.s)) FROM jsouter JOIN jsheavy ON jsouter.k = jsheavy.k$$, false);
                    join_same                   
 -----------------------------------------------
  1 rows, hash c1a85879f5b259b3ae7ea143c8bb8376
+(1 row)
+
+SELECT join_same($$SELECT count(*), count(jsouter.s), count(jsheavy.w), sum(jsheavy.w) FROM jsouter FULL JOIN jsheavy ON jsouter.k = jsheavy.k$$, false);
+                   join_same                   
+-----------------------------------------------
+ 1 rows, hash 7a4d5c73e2ba55b040a7b61b35b7493f
 (1 row)
 
 RESET parallel_leader_participation;

@@ -203,6 +203,8 @@ typedef struct JoinShared
 	dsa_pointer part_stats;
 	dsa_pointer rounds;
 	int			nrounds;
+	/* RIGHT and FULL: the marks of the table's records (mark_words per chunk). */
+	dsa_pointer marks;
 } JoinShared;
 
 /*
@@ -229,6 +231,8 @@ typedef struct JoinRound
 	dsa_pointer directory;
 	dsa_pointer values;
 	pg_atomic_uint32 next_chunk;
+	/* RIGHT and FULL: the marks of its records, as a shared table's. */
+	dsa_pointer marks;
 } JoinRound;
 
 /*
@@ -538,6 +542,15 @@ typedef struct TessHashJoinState
 	uint64	  **marks;
 	int			mark_slots;
 	MemoryContext marks_context;
+	/*
+	 * A shared table's marks are in the query's shared memory, set with an
+	 * atomic OR; the last participant to leave the table returns its tail
+	 * and then frees it (a round's or the build's).
+	 */
+	bool		marks_shared;
+	bool		round_departed;
+	bool		round_free_owed;
+	bool		table_free_owed;
 	Size		record_size;
 	bool		tail;
 	/*
@@ -784,6 +797,8 @@ static bool shared_has_outer(JoinSpill *spill, int partition);
 static void make_rounds(TessHashJoinState *state);
 static void free_rounds(TessHashJoinState *state);
 static void round_leave(TessHashJoinState *state);
+static bool round_depart(TessHashJoinState *state);
+static bool leave_shared(TessHashJoinState *state, bool keep);
 static bool round_next_outer(TessHashJoinState *state);
 static bool shared_next_partition(TessHashJoinState *state);
 static pg_atomic_uint64 *part_stats(TessHashJoinState *state, int partition);
@@ -943,7 +958,19 @@ forget_marks(TessHashJoinState *state)
 		MemoryContextReset(state->marks_context);
 	state->marks = NULL;
 	state->mark_slots = 0;
+	state->marks_shared = false;
 	state->table_tail_done = false;
+}
+
+/* An atomic word of marks is a plain one: none simulated with a lock. */
+StaticAssertDecl(sizeof(pg_atomic_uint64) == sizeof(uint64),
+				 "TessHashJoin needs 64-bit atomics for shared marks");
+
+/* The words of a chunk's marks in shared memory: a bit per record of the largest chunk. */
+static Size
+mark_words(TessHashJoinState *state)
+{
+	return ((TESS_TABLE_MAX_CHUNK_LEN - TESS_TABLE_CHUNK_HEADER) / state->record_size + 63) / 64;
 }
 
 /* Room for the bases and lengths of nchunks chunks in this process. */
@@ -3410,6 +3437,25 @@ matched_word(const JoinSpill *spill, int count)
 }
 
 /*
+ * RIGHT and FULL: whether this participant returns the tail of the table
+ * in memory now: a table of its own's, once; a shared table's, the last
+ * participant to leave it, which the others leave here, their tail done.
+ */
+static bool
+tail_turn(TessHashJoinState *state)
+{
+	if (!state->preserve_inner || state->table_tail_done)
+		return false;
+	if (state->marks_shared &&
+		!(state->round_partition >= 0 ? round_depart(state) : leave_shared(state, true)))
+	{
+		state->table_tail_done = true;
+		return false;
+	}
+	return true;
+}
+
+/*
  * RIGHT and FULL over a table that spills: before the table in memory goes
  * (the resident partitions', a piece's, a partition's), its records
  * without a pair go out; true asks the caller for that tail first.
@@ -3417,7 +3463,7 @@ matched_word(const JoinSpill *spill, int count)
 static bool
 tail_first(TessHashJoinState *state)
 {
-	if (!state->preserve_inner || state->table_tail_done)
+	if (!tail_turn(state))
 		return false;
 	state->tail_request = true;
 	return true;
@@ -3442,7 +3488,8 @@ outer_next(TessHashJoinState *state)
 			batch = shared_resident_next(state);
 			if (batch != NULL)
 				return batch;
-			if (state->holding)
+			/* RIGHT and FULL: the last one to leave the table returns its tail first. */
+			if (state->holding || tail_first(state))
 				return NULL;
 			shared_resident_end(state);
 			continue;
@@ -3495,6 +3542,10 @@ outer_next(TessHashJoinState *state)
 			state->active_bits[0] = active;
 			return &spill->batch;
 		}
+		/* A round's next outer file, probing the same table. */
+		if (state->round_partition >= 0 && !state->round_departed &&
+			round_next_outer(state))
+			continue;
 		/* RIGHT and FULL: the table's records without a pair before it goes. */
 		if (state->holding || tail_first(state))
 			return NULL;
@@ -3611,6 +3662,45 @@ query_dsa(TessHashJoinState *state)
 	if (state->area == NULL)
 		elog(ERROR, "TessHashJoin found no shared memory for its shared table");
 	return state->area;
+}
+
+/*
+ * RIGHT and FULL: the marks of a shared table of nchunks chunks, at
+ * `marks` in the query's shared memory, which every participant sets.
+ */
+static void
+share_marks(TessHashJoinState *state, dsa_pointer marks, int nchunks)
+{
+	uint64	   *words;
+
+	forget_marks(state);
+	if (!state->preserve_inner)
+		return;
+	if (!DsaPointerIsValid(marks))
+		elog(ERROR, "TessHashJoin found no marks of its shared table");
+	if (state->marks_context == NULL)
+		state->marks_context = AllocSetContextCreate(state->css.ss.ps.state->es_query_cxt,
+													 "TessHashJoin marks",
+													 ALLOCSET_DEFAULT_SIZES);
+	state->marks = MemoryContextAlloc(state->marks_context,
+									  sizeof(uint64 *) * Max(nchunks, 1));
+	words = dsa_get_address(query_dsa(state), marks);
+	for (int chunk = 0; chunk < nchunks; chunk++)
+		state->marks[chunk] = words + chunk * mark_words(state);
+	state->mark_slots = nchunks;
+	state->marks_shared = true;
+}
+
+/* The marks of a shared table of nchunks chunks, none set, for the elected participant. */
+static dsa_pointer
+allocate_marks(TessHashJoinState *state, int nchunks)
+{
+	if (!state->preserve_inner)
+		return InvalidDsaPointer;
+	return dsa_allocate_extended(query_dsa(state),
+								 mul_size(mul_size(Max(nchunks, 1), mark_words(state)),
+										  sizeof(uint64)),
+								 DSA_ALLOC_ZERO | DSA_ALLOC_HUGE);
 }
 
 /*
@@ -3886,6 +3976,7 @@ size_shared_table(TessHashJoinState *state)
 			elog(ERROR, "TessHashJoin is missing chunk %llu of its table",
 				 (unsigned long long) chunk);
 	state->shared->nchunks = (int) nchunks;
+	state->shared->marks = allocate_marks(state, (int) nchunks);
 	/* The value chunks' directory: dsa_pointers of their bases by number. */
 	state->shared->nvalue_chunks = (int) state->shared->next_value_chunk;
 	state->shared->value_directory =
@@ -4004,6 +4095,11 @@ free_shared_table(TessHashJoinState *state)
 			dsa_free(query_dsa(state), block);
 		}
 	}
+	if (DsaPointerIsValid(state->shared->marks))
+	{
+		dsa_free(query_dsa(state), state->shared->marks);
+		state->shared->marks = InvalidDsaPointer;
+	}
 	if (DsaPointerIsValid(state->shared->spill_filter))
 	{
 		dsa_free(query_dsa(state), state->shared->spill_filter);
@@ -4111,6 +4207,7 @@ build_shared(TessHashJoinState *state)
 					uint64		nchunks;
 
 					attach_shared_table(state);
+					share_marks(state, state->shared->marks, state->shared->nchunks);
 					/* The whole table's rows and duplicates, every link done. */
 					check(state, state->kernels->build_totals(state->shared->counters,
 															  &records,
@@ -4141,14 +4238,25 @@ build_shared(TessHashJoinState *state)
 	}
 }
 
-/* Leave a shared build after probing; the last one to leave frees the table. */
-static void
-leave_shared(TessHashJoinState *state)
+/*
+ * Leave a shared build after probing; the last one to leave frees the
+ * table, or with `keep`, RIGHT and FULL, owes the free until its tail is
+ * done and the next call. True for the last one.
+ */
+static bool
+leave_shared(TessHashJoinState *state, bool keep)
 {
 	uint32		reply = 0;
 
+	if (state->table_free_owed)
+	{
+		state->table_free_owed = false;
+		state->chain_table = false;
+		free_shared_table(state);
+		return false;
+	}
 	if (!state->participating)
-		return;
+		return false;
 	for (;;)
 	{
 		uint32		action;
@@ -4163,17 +4271,22 @@ leave_shared(TessHashJoinState *state)
 				reply = BarrierArriveAndDetach(&state->shared->build) ? 1 : 0;
 				break;
 			case TESS_BUILD_DO_FREE:
-				free_shared_table(state);
 				state->participating = false;
+				if (keep)
+				{
+					state->table_free_owed = true;
+					return true;
+				}
+				free_shared_table(state);
 				state->chain_table = false;
-				return;
+				return true;
 			case TESS_BUILD_DONE:
 				state->participating = false;
 				state->chain_table = false;
 				state->table.index = NULL;
 				state->table.index_len = 0;
 				state->table.nchunks = 0;
-				return;
+				return false;
 			default:
 				elog(ERROR, "TessHashJoin got build action %u out of order", action);
 		}
@@ -4657,7 +4770,8 @@ shared_resident_end(TessHashJoinState *state)
 	/* The filter goes with the table. */
 	spill->bloom = NULL;
 	spill->bloom_words = 0;
-	leave_shared(state);
+	leave_shared(state, false);
+	forget_marks(state);
 	state->table.index = NULL;
 	state->table.nchunks = 0;
 	state->bloom = NULL;
@@ -4729,6 +4843,11 @@ round_release(dsa_area *area, JoinRound *round)
 	{
 		dsa_free(area, round->index);
 		round->index = InvalidDsaPointer;
+	}
+	if (DsaPointerIsValid(round->marks))
+	{
+		dsa_free(area, round->marks);
+		round->marks = InvalidDsaPointer;
 	}
 }
 
@@ -4819,6 +4938,7 @@ round_allocate(TessHashJoinState *state, JoinRound *round)
 	round->values = dsa_allocate_extended(area,
 										  mul_size(Max(round->nvalues, 1), sizeof(dsa_pointer)),
 										  DSA_ALLOC_ZERO | DSA_ALLOC_HUGE);
+	round->marks = allocate_marks(state, round->nchunks);
 	state->counters[JOIN_ROUNDS]++;
 }
 
@@ -4934,6 +5054,7 @@ round_attach(TessHashJoinState *state, JoinSpill *spill, JoinRound *round)
 	state->bloom_words = 0;
 	state->bloom_decided = true;
 	state->chain_table = true;
+	share_marks(state, round->marks, round->nchunks);
 	note_memory(state);
 }
 
@@ -4988,19 +5109,19 @@ round_join(TessHashJoinState *state, int partition)
 	}
 }
 
-/* Leave the round probed, without waiting; the last one frees it. */
-static void
-round_leave(TessHashJoinState *state)
+/*
+ * Leave the round probed, without waiting: true for the last one, which
+ * frees it; RIGHT and FULL leave before the tail, which the last one
+ * returns first, owing the free.
+ */
+static bool
+round_depart(TessHashJoinState *state)
 {
 	JoinRound  *round = round_of(state, state->round_partition);
 	uint32		reply = 0;
 
-	state->round_partition = -1;
-	state->chain_table = false;
-	state->table.index = NULL;
-	state->table.nchunks = 0;
-	state->value_bases = NULL;
-	state->nvalue_chunks = 0;
+	Assert(!state->round_departed);
+	state->round_departed = true;
 	for (;;)
 	{
 		uint32		action;
@@ -5014,14 +5135,34 @@ round_leave(TessHashJoinState *state)
 				reply = BarrierArriveAndDetach(&round->barrier) ? 1 : 0;
 				break;
 			case TESS_BUILD_DO_FREE:
-				round_release(query_dsa(state), round);
-				return;
+				state->round_free_owed = true;
+				return true;
 			case TESS_BUILD_DONE:
-				return;
+				return false;
 			default:
 				elog(ERROR, "TessHashJoin got round action %u out of order", action);
 		}
 	}
+}
+
+/* Leave the round probed, unless left already; the last one frees it. */
+static void
+round_leave(TessHashJoinState *state)
+{
+	JoinRound  *round = round_of(state, state->round_partition);
+
+	if (!state->round_departed)
+		(void) round_depart(state);
+	if (state->round_free_owed)
+		round_release(query_dsa(state), round);
+	state->round_departed = false;
+	state->round_free_owed = false;
+	state->round_partition = -1;
+	state->chain_table = false;
+	state->table.index = NULL;
+	state->table.nchunks = 0;
+	state->value_bases = NULL;
+	state->nvalue_chunks = 0;
 }
 
 /* The next outer file of the round's partition this participant takes; false when none is left. */
@@ -5062,7 +5203,11 @@ shared_next_partition(TessHashJoinState *state)
 		int			partition = (spill->start + spill->visited++) % spill->npartitions;
 		bool		taken;
 
-		if (spill->build.parts[partition].resident || !shared_has_outer(spill, partition))
+		if (spill->build.parts[partition].resident)
+			continue;
+		/* RIGHT and FULL return a partition's inner rows without outer ones too. */
+		if ((!state->preserve_inner || spill->build.parts[partition].rows == 0) &&
+			!shared_has_outer(spill, partition))
 			continue;
 		if (round_of(state, partition)->together)
 		{
@@ -5774,14 +5919,24 @@ mark_pairs(TessHashJoinState *state)
 			int			chunk = (int) (ref >> TESS_TABLE_UNIT_BITS);
 			Size		byte = (Size) (ref & ((1u << TESS_TABLE_UNIT_BITS) - 1)) * 8;
 			Size		index = (byte - TESS_TABLE_CHUNK_HEADER) / state->record_size;
+			uint64		bit = UINT64CONST(1) << (index % 64);
 
+			/* A shared table's: other participants set bits of the same words. */
+			if (state->marks_shared)
+			{
+				pg_atomic_uint64 *word = (pg_atomic_uint64 *) &state->marks[chunk][index / 64];
+
+				if ((pg_atomic_read_u64(word) & bit) == 0)
+					(void) pg_atomic_fetch_or_u64(word, bit);
+				continue;
+			}
 			if (state->marks[chunk] == NULL)
 				state->marks[chunk] =
 					MemoryContextAllocZero(state->marks_context,
 										   sizeof(uint64) *
 										   ((state->table.chunk_lens[chunk] /
 											 state->record_size + 63) / 64));
-			state->marks[chunk][index / 64] |= UINT64CONST(1) << (index % 64);
+			state->marks[chunk][index / 64] |= bit;
 		}
 }
 
@@ -5873,8 +6028,8 @@ next_output(TessHashJoinState *state)
 		}
 		else if (state->compact ? !fill_compact(state) : !next_round(state))
 		{
-			/* RIGHT and FULL: then the inner rows without a pair. */
-			if (!state->preserve_inner || state->table_tail_done)
+			/* RIGHT and FULL: then the inner rows without a pair, unless asked for already. */
+			if (!state->tail_request && !tail_turn(state))
 				return false;
 			start_tail(state);
 			continue;
@@ -6134,8 +6289,7 @@ read_node_data(TessHashJoinState *state, const List *data)
 		 state->jointype != JOIN_ANTI && state->jointype != JOIN_LEFT) ||
 		(state->filter_batch != NIL &&
 		 state->jointype != JOIN_LEFT && state->jointype != JOIN_ANTI &&
-		 !state->preserve_inner) ||
-		(state->preserve_inner && state->shared_mode))
+		 !state->preserve_inner))
 		elog(ERROR, "TessHashJoin received foreign plan data");
 	for (int key = 0; key < state->nkeys; key++)
 	{
@@ -6400,6 +6554,9 @@ join_rescan(CustomScanState *css)
 	state->tail = false;
 	state->tail_request = false;
 	state->table_tail_done = false;
+	/* A shared table's go with it: the build starts anew. */
+	if (state->marks_shared)
+		forget_marks(state);
 	for (int chunk = 0; state->marks != NULL && chunk < state->mark_slots; chunk++)
 		if (state->marks[chunk] != NULL)
 			memset(state->marks[chunk], 0,
@@ -6419,7 +6576,7 @@ join_rescan(CustomScanState *css)
 	if (state->round_partition >= 0)
 		round_leave(state);
 	if (state->shared != NULL)
-		leave_shared(state);
+		leave_shared(state, false);
 	/*
 	 * A table that spilled is no longer whole: the inner child is read
 	 * again, rescanned here when no parameter of it changed.
@@ -6609,6 +6766,7 @@ init_shared(TessHashJoinState *state, int participants, dsm_segment *segment)
 	state->shared->index_len = 0;
 	state->shared->directory = InvalidDsaPointer;
 	state->shared->nchunks = 0;
+	state->shared->marks = InvalidDsaPointer;
 	state->shared->filter = InvalidDsaPointer;
 	state->shared->filter_words = 0;
 	SpinLockInit(&state->shared->lock);
@@ -6704,7 +6862,7 @@ join_reinitialize_dsm(CustomScanState *css, ParallelContext *pcxt,
 	{
 		if (state->round_partition >= 0)
 			round_leave(state);
-		leave_shared(state);
+		leave_shared(state, false);
 		/* Its files go with the set's. */
 		spill_free(state);
 		free_shared_table(state);
@@ -6745,7 +6903,7 @@ join_shutdown(CustomScanState *css)
 	if (state->round_partition >= 0)
 		round_leave(state);
 	if (state->shared != NULL)
-		leave_shared(state);
+		leave_shared(state, false);
 	if (state->stats == NULL)
 		return;
 	join_counters(state, values);

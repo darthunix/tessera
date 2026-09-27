@@ -691,7 +691,9 @@ offers a second partial path with a shared table: the inner side's
 partial path divides the build among the participants too, into one
 table in the query's dynamic shared memory; its template is the core's
 Parallel Hash join, and the table may take every participant's
-`hash_mem`, as the core's does. The cheaper of the two wins.
+`hash_mem`, as the core's does. The cheaper of the two wins. A right or
+a full join takes the second only, as the core does: with a table each,
+every participant would return the records without a pair.
 
 The plan's scan tuple is the join's columns, the outer side's first, and
 the keys of both sides and the residual clauses' columns, which the
@@ -834,9 +836,18 @@ partition's after its outer rows, each piece of a partition joined in
 passes after its pass, and a level's resident partitions after the outer
 rows of the partition it split; a partition with inner rows and no outer
 ones is loaded for its tail alone. Every table built or loaded starts
-without marks. The path is serial only, since every participant would
-return the same records without a pair. A rescan that keeps the table
-clears the marks.
+without marks. A shared table's marks are in the query's shared memory,
+a bit per record of the largest chunk for each chunk, allocated with the
+directory by the participant SIZE elects (a round's by the one that
+allocates it), and set with an atomic OR after a plain read finds the
+bit clear. Its tail goes out as the core's Parallel Hash Right Join
+returns its unmatched rows: a participant done with its outer rows
+leaves the table (the build barrier, or the round's) without waiting,
+and only the last one to leave returns the records without a mark, then
+frees the table, the free it owes done at its next leave; the others'
+marks are complete once they detached. The partitions on disk of a
+shared table that one participant joins alone are its own tables, as a
+serial join's. A rescan that keeps the table clears the marks.
 
 ### Spilling
 

@@ -473,6 +473,20 @@ SELECT join_same($$SELECT jprobe.v, jbuild.w FROM jprobe JOIN jbuild ON jprobe.k
 SELECT join_same($$SELECT count(*), sum(jprobe.v) FROM jprobe WHERE EXISTS (SELECT 1 FROM jbuild WHERE jbuild.k = jprobe.k)$$);
 SELECT join_same($$SELECT count(*), sum(jprobe.v) FROM jprobe WHERE NOT EXISTS (SELECT 1 FROM jbuild WHERE jbuild.k = jprobe.k)$$);
 SELECT join_same($$SELECT count(*), count(jbuild.w), sum(jprobe.v) FROM jprobe LEFT JOIN jbuild ON jprobe.k = jbuild.k$$);
+-- RIGHT and FULL take the shared table only: every participant marks the
+-- records of its pairs in shared memory, and the last one to leave the
+-- table returns those without a mark.
+EXPLAIN (COSTS OFF) SELECT count(*), count(jprobe.v) FROM jprobe RIGHT JOIN jbuild ON jprobe.k = jbuild.k;
+SELECT join_same($$SELECT count(*), count(jprobe.v), sum(jbuild.w) FROM jprobe RIGHT JOIN jbuild ON jprobe.k = jbuild.k$$);
+SELECT join_same($$SELECT count(*), count(jprobe.v), count(jbuild.w), sum(jbuild.w) FROM jprobe FULL JOIN jbuild ON jprobe.k = jbuild.k$$);
+SELECT join_same($$SELECT jprobe.v, jbuild.w FROM jprobe FULL JOIN jbuild ON jprobe.k = jbuild.k WHERE jbuild.w % 10 = 3 OR jprobe.v % 1000 = 7$$);
+SELECT join_same($$SELECT count(*), count(jbig.v), count(jgrow.g), sum(jgrow.g) FROM jbig FULL JOIN jgrow ON jbig.fk = jgrow.k$$);
+SELECT join_same($$SELECT count(*), count(jbig.v), count(jd.label), max(jd.label) FROM jbig RIGHT JOIN jd ON jbig.fk = jd.id AND jbig.v % 7 = 0$$);
+SET parallel_leader_participation = off;
+SELECT join_same($$SELECT count(*), count(jprobe.v), count(jbuild.w), sum(jbuild.w) FROM jprobe FULL JOIN jbuild ON jprobe.k = jbuild.k$$);
+RESET parallel_leader_participation;
+-- A rescan of the Gather builds the table and its marks anew.
+SELECT join_same($$SELECT jsmall.k, (SELECT count(*) FROM jprobe RIGHT JOIN jbuild ON jprobe.k = jbuild.k AND jprobe.v > jsmall.k * 100) FROM jsmall$$);
 -- Duplicate keys: the next record of a key is found down its chain.
 EXPLAIN (COSTS OFF) SELECT count(*), sum(jgrow.g) FROM jbig JOIN jgrow ON jbig.fk = jgrow.k;
 SELECT join_same($$SELECT count(*), sum(jgrow.g), sum(jbig.v) FROM jbig JOIN jgrow ON jbig.fk = jgrow.k$$);
@@ -561,11 +575,21 @@ SELECT join_property($$SELECT count(*), sum(jsskew.w) FROM jsp JOIN jsskew ON js
        join_property($$SELECT count(*), sum(jsskew.w) FROM jsp JOIN jsskew ON jsp.k = jsskew.k$$, 'Spilled Chunks')::int > 0 AS spilled;
 SELECT join_same($$SELECT count(*), sum(jsskew.w), sum(jsp.k) FROM jsp JOIN jsskew ON jsp.k = jsskew.k$$);
 SELECT join_same($$SELECT jsp.s, jsskew.w FROM jsp JOIN jsskew ON jsp.k = jsskew.k WHERE jsp.s LIKE '%07'$$);
+-- RIGHT and FULL: the shared table's tail by the last one to leave it,
+-- a partition's on disk by the participant that joins it, after each
+-- piece.
+SELECT join_property($$SELECT count(*), count(jsp.s), sum(length(jsb.t)) FROM jsp RIGHT JOIN jsb ON jsp.k = jsb.k$$, 'Shared Table') AS shared,
+       join_property($$SELECT count(*), count(jsp.s), sum(length(jsb.t)) FROM jsp RIGHT JOIN jsb ON jsp.k = jsb.k$$, 'Spilled Chunks')::int > 0 AS spilled;
+SELECT join_same($$SELECT count(*), count(jsp.s), sum(length(jsb.t)), sum(jsb.n) FROM jsp RIGHT JOIN jsb ON jsp.k = jsb.k$$);
+SELECT join_same($$SELECT count(*), count(jsp.s), count(jsb.t), sum(jsb.n) FROM jsp FULL JOIN jsb ON jsp.k = jsb.k$$);
+SELECT join_same($$SELECT jsp.s, jsb.t FROM jsp FULL JOIN jsb ON jsp.k = jsb.k WHERE jsb.n % 100 = 3 OR jsp.s LIKE '%77'$$);
+SELECT join_same($$SELECT count(*), count(jsp.s), count(jsskew.w), sum(jsskew.w) FROM jsp FULL JOIN jsskew ON jsp.k = jsskew.k$$);
 -- The workers alone, and a rescan of the Gather: the files go with the
 -- set, and the table spills anew.
 SET parallel_leader_participation = off;
 SELECT join_same($$SELECT count(*), sum(length(jsb.t)), sum(jsp.k) FROM jsp JOIN jsb ON jsp.k = jsb.k$$);
 SELECT join_same($$SELECT count(*), count(jsb.n), sum(length(jsb.t)) FROM jsp LEFT JOIN jsb ON jsp.k = jsb.k$$);
+SELECT join_same($$SELECT count(*), count(jsp.s), count(jsb.t), sum(jsb.n) FROM jsp FULL JOIN jsb ON jsp.k = jsb.k$$);
 RESET parallel_leader_participation;
 SET enable_material = off;
 SELECT join_same($$SELECT x, n, t FROM (SELECT count(*) AS n, sum(length(jsb.t)) AS t FROM jsp LEFT JOIN jsb ON jsp.k = jsb.k) AS ss
@@ -599,8 +623,16 @@ SELECT join_same($$SELECT jsouter.s FROM jsouter LEFT JOIN jsheavy ON jsouter.k 
 SELECT join_same($$SELECT count(*), sum(length(jsouter.s)) FROM jsouter WHERE EXISTS (SELECT 1 FROM jsheavy WHERE jsheavy.k = jsouter.k)$$, false);
 SELECT join_same($$SELECT jsouter.s FROM jsouter WHERE NOT EXISTS (SELECT 1 FROM jsheavy WHERE jsheavy.k = jsouter.k)$$, false);
 SELECT join_same($$SELECT count(*), sum(jsheavy.w) FROM jsouter JOIN jsheavy ON jsouter.k = jsheavy.k AND jsheavy.w % 3 = jsouter.k % 3$$, false);
+-- RIGHT and FULL: a round's marks in shared memory, its tail by the last
+-- participant to leave it.
+SELECT join_property($$SELECT count(*), count(jsouter.s), sum(jsheavy.w) FROM jsouter RIGHT JOIN jsheavy ON jsouter.k = jsheavy.k$$, 'Partitions Joined Together')::int > 0 AS together;
+SELECT join_same($$SELECT count(*), count(jsouter.s), sum(jsheavy.w) FROM jsouter RIGHT JOIN jsheavy ON jsouter.k = jsheavy.k$$, false);
+SELECT join_same($$SELECT count(*), count(jsouter.s), count(jsheavy.w), sum(jsheavy.w) FROM jsouter FULL JOIN jsheavy ON jsouter.k = jsheavy.k$$, false);
+SELECT join_same($$SELECT jsouter.s, jsheavy.w FROM jsouter FULL JOIN jsheavy ON jsouter.k = jsheavy.k WHERE jsheavy.w % 1000 = 11 OR jsouter.s LIKE '%77'$$, false);
+SELECT join_same($$SELECT count(*), count(jsouter.s), sum(jsheavy.w) FROM jsouter RIGHT JOIN jsheavy ON jsouter.k = jsheavy.k AND jsheavy.w % 3 = jsouter.k % 3$$, false);
 SET parallel_leader_participation = off;
 SELECT join_same($$SELECT count(*), sum(jsheavy.w), sum(length(jsouter.s)) FROM jsouter JOIN jsheavy ON jsouter.k = jsheavy.k$$, false);
+SELECT join_same($$SELECT count(*), count(jsouter.s), count(jsheavy.w), sum(jsheavy.w) FROM jsouter FULL JOIN jsheavy ON jsouter.k = jsheavy.k$$, false);
 RESET parallel_leader_participation;
 SET enable_material = off;
 SELECT join_same($$SELECT x, n, t FROM (SELECT count(*) AS n, sum(jsheavy.w) AS t FROM jsouter LEFT JOIN jsheavy ON jsouter.k = jsheavy.k) AS ss
