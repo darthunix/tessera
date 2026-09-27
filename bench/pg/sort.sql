@@ -93,6 +93,14 @@ SELECT pg_temp.measure_pair('order_sorted',
 SELECT pg_temp.measure_pair('order_wide',
     format('SELECT k4, t, v FROM bench_sort ORDER BY k4 OFFSET %s', :rows),
     :repetitions);
+-- The sorted rows read by a parent: an int column and a text column
+-- gathered from the sort's records, counted by an aggregate above.
+SELECT pg_temp.measure_pair('order_out',
+    'SELECT count(v) FROM (SELECT k4, v FROM bench_sort ORDER BY k4) AS s',
+    :repetitions);
+SELECT pg_temp.measure_pair('order_text_out',
+    'SELECT count(t) FROM (SELECT k4, t FROM bench_sort ORDER BY k4) AS s',
+    :repetitions);
 -- A sort over a filter that keeps one row in ten.
 SELECT pg_temp.measure_pair('order_filter',
     format('SELECT k4, v FROM bench_sort WHERE few < 100 ORDER BY k4 OFFSET %s', :rows),
@@ -116,11 +124,13 @@ ORDER BY test, mode DESC;
 SET tessera.enable = on;
 SELECT format('EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE on_%s', name)
 FROM unnest(ARRAY['order_int', 'order_big', 'order_few', 'order_multi', 'order_desc',
-                  'order_sorted', 'order_wide', 'order_filter']) AS name \gexec
+                  'order_sorted', 'order_wide', 'order_out', 'order_text_out',
+                  'order_filter']) AS name \gexec
 SET tessera.enable = off;
 SELECT format('EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE off_%s', name)
 FROM unnest(ARRAY['order_int', 'order_big', 'order_few', 'order_multi', 'order_desc',
-                  'order_sorted', 'order_wide', 'order_filter']) AS name \gexec
+                  'order_sorted', 'order_wide', 'order_out', 'order_text_out',
+                  'order_filter']) AS name \gexec
 \o
 RESET work_mem;
 DEALLOCATE ALL;

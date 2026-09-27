@@ -53,9 +53,10 @@ query down, and where it can, does it speed one up.
   multiplier, keys in no order of the rows): a unique int4 key, an int8 one
   past the int4 range, a key of 1000 values, two keys, a descending key with
   NULLs last, a key already in the order of the rows, a text column carried
-  along, and a sort over a filter keeping one row in ten. Each query skips
-  every row with `OFFSET`, so the sort's whole output is read and nothing
-  is returned; `work_mem` is 512 MB in both modes, so the core sorts in
+  along, and a sort over a filter keeping one row in ten; each skips every
+  row with `OFFSET`, so the sort's whole output is read and nothing is
+  returned. Two more count an int and a text column of the sorted rows
+  above them, so that the sort's columns are read too; `work_mem` is 512 MB in both modes, so the core sorts in
   memory. A ratio below one is the win.
 - **oltp**: short prepared-statement queries, `pgbench -S`, where the
   planner hooks and the loaded modules must not slow down queries that
