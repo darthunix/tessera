@@ -10,11 +10,12 @@ use std::mem::offset_of;
 use std::slice;
 
 use anyhow::{Context, Result, bail, ensure};
-use tessera_kernels::sort::{SortKey, item_words, sort_items};
+use tessera_kernels::sort::{SortKey, item_words, sort_items, top_candidates};
 use tessera_kernels::table::{KeyKind, MAX_KEYS};
 
+use super::mask::Mask;
 use super::status::{Code, Status, guard};
-use super::table::{TableRef, attach, slots};
+use super::table::{TableKey, TableKeys, TableRef, attach, slots, values};
 
 /// `TESS_SORT_DESCENDING`.
 pub const DESCENDING: u32 = 0x1;
@@ -172,6 +173,87 @@ pub unsafe extern "C" fn tess_sort(
             let items = slots(items, nwords, "items")?;
             let refs = slots(refs, nitems, "references")?;
             sort_items(items, words, refs)
+        })
+    }
+}
+
+/// `tess_sort_top_candidates`: keep in `rows` the rows of a batch whose
+/// keys beat the top item of a full top-N heap.
+///
+/// # Safety
+///
+/// `keys` as for [`sort_keys`]; `table_keys` must point to `nkeys` batch
+/// keys, as for the table's entry points, of the mask's rows; `rows` must
+/// point to a valid mask that nothing else accesses; `worst` must point to
+/// an item's words; `kept` must be writable; `status` as for every entry
+/// point.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tess_sort_top_candidates(
+    nkeys: c_int,
+    keys: *const CSortKey,
+    table_keys: *const TableKey,
+    rows: *mut Mask,
+    worst: *const u64,
+    kept: *mut c_int,
+    status: *mut Status,
+) -> Code {
+    // SAFETY: the caller's contract.
+    unsafe {
+        guard(status, || {
+            let mut decoded = [UNUSED; MAX_KEYS];
+            let nkeys = sort_keys(nkeys, keys, &mut decoded)?;
+            let keys = &decoded[..nkeys];
+            let mut batch = TableKeys::empty();
+            super::table::table_keys(nkeys as c_int, table_keys, &mut batch)?;
+            let mut rows = rows.as_mut().context("a null row mask")?.mask()?;
+            let worst = values(worst, item_words(keys)?, "worst item")?;
+            let count = top_candidates(keys, &batch, &mut rows, worst)?;
+            *kept.as_mut().context("a null count")? = count as c_int;
+            Ok(())
+        })
+    }
+}
+
+/// `tess_sort_top_push`: push the items of records into a top-N heap.
+///
+/// # Safety
+///
+/// `table` as for the table's `attach` during the call; `keys` as for
+/// [`sort_keys`]; `refs` must hold a reference per row of `rows`, a valid
+/// mask; `heap` must point to `capacity` items' writable words that
+/// nothing else accesses; `len` must be writable; `status` as for every
+/// entry point.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tess_sort_top_push(
+    table: *const TableRef,
+    nkeys: c_int,
+    keys: *const CSortKey,
+    refs: *const u32,
+    rows: *const Mask,
+    heap: *mut u64,
+    capacity: usize,
+    len: *mut u64,
+    status: *mut Status,
+) -> Code {
+    // SAFETY: the caller's contract.
+    unsafe {
+        guard(status, || {
+            let table = attach(table)?;
+            let mut decoded = [UNUSED; MAX_KEYS];
+            let nkeys = sort_keys(nkeys, keys, &mut decoded)?;
+            let keys = &decoded[..nkeys];
+            let rows = rows.as_ref().context("a null row mask")?.view()?;
+            let refs = values(refs, rows.nrows(), "references")?;
+            let words = capacity
+                .checked_mul(item_words(keys)?)
+                .context("a heap past the address space")?;
+            let heap = slots(heap, words, "heap")?;
+            let len = len.as_mut().context("a null heap length")?;
+            let mut count =
+                usize::try_from(*len).context("a heap length past the address space")?;
+            table.top_push(keys, refs, &rows, heap, &mut count)?;
+            *len = count as u64;
+            Ok(())
         })
     }
 }

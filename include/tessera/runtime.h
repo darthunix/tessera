@@ -785,6 +785,15 @@ extern void tess_rows_sort(TessRows *rows, const TessSortKey *keys,
 						   uint32 *refs);
 
 /*
+ * Top-N: push the item of each record refs[row] of mask, keyed by keys as
+ * for tess_rows_sort, into a heap of capacity items at heap whose first
+ * *len are the heap (tessera/sort.h, tess_sort_top_push).
+ */
+extern void tess_rows_top_push(TessRows *rows, const TessSortKey *keys,
+							   const uint32 *refs, const TessRowMask *mask,
+							   uint64 *heap, Size capacity, uint64 *len);
+
+/*
  * Whether a row of the mask is NULL by its flag in isnull, one per
  * physical row: for a caller that keeps a column's NULLs apart.
  */

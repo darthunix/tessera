@@ -491,6 +491,20 @@ tess_rows_sort(TessRows *rows, const TessSortKey *keys, uint32 *refs)
 	pfree(items);
 }
 
+void
+tess_rows_top_push(TessRows *rows, const TessSortKey *keys, const uint32 *refs,
+				   const TessRowMask *mask, uint64 *heap, Size capacity,
+				   uint64 *len)
+{
+	check_rows(rows);
+	if (!TESS_ABI_HAS_FIELD(rows->kernels, TessKernelOps, sort_top_push) ||
+		rows->kernels->sort_top_push == NULL)
+		elog(ERROR, "Tessera rows top-N requires the kernels of the sort");
+	check(rows, rows->kernels->sort_top_push(&rows->table, rows->nkeys, keys,
+											 refs, mask, heap, capacity, len,
+											 &rows->status));
+}
+
 uint64
 tess_rows_count(const TessRows *rows)
 {

@@ -270,15 +270,177 @@ SELECT sort_same($$SELECT d, c FROM sort_t ORDER BY d DESC OFFSET 17$$);
  483 rows
 (1 row)
 
--- With LIMIT the core's top-N sort stays.
+-- Top-N: a limit above sets the node a bound, and it keeps the best rows in
+-- a heap; every query orders its rows fully, so that the rows returned do
+-- not depend on which of equal rows a heap keeps.
 EXPLAIN (COSTS OFF) SELECT d FROM sort_t ORDER BY d LIMIT 3;
+                    QUERY PLAN                    
+--------------------------------------------------
+ Custom Scan (TessLimit)
+   ->  Custom Scan (TessSort)
+         Sort Key: d
+         ->  Custom Scan (TessHeapScan) on sort_t
+(4 rows)
+
+SELECT sort_explain($$SELECT d, c FROM sort_t ORDER BY d DESC LIMIT 3$$);
+                                 sort_explain                                  
+-------------------------------------------------------------------------------
+ Custom Scan (TessLimit) (actual rows=3.00 loops=1)
+   Input Batches: 1
+   Input Rows: 3
+   Output Rows: 3
+   ->  Custom Scan (TessSort) (actual rows=3.00 loops=1)
+         Sort Key: d DESC
+         Sort Method: top-N in memory
+         Memory Usage: N kB
+         Input Batches: 11
+         Input Rows: 500
+         ->  Custom Scan (TessHeapScan) on sort_t (actual rows=500.00 loops=1)
+               Batch Size: 64
+               Batches: 11
+               Pages: 4
+               Deformed Datums: 566
+               Restarted Datums: 66
+(16 rows)
+
+SELECT sort_same($$SELECT d, c FROM sort_t ORDER BY d LIMIT 3$$);
+ sort_same 
+-----------
+ 3 rows
+(1 row)
+
+SELECT sort_same($$SELECT a, d FROM sort_t ORDER BY a NULLS FIRST, d LIMIT 20$$);
+ sort_same 
+-----------
+ 20 rows
+(1 row)
+
+SELECT sort_same($$SELECT a, d FROM sort_t ORDER BY a DESC, d DESC LIMIT 64$$);
+ sort_same 
+-----------
+ 64 rows
+(1 row)
+
+SELECT sort_same($$SELECT a, b, d FROM sort_t ORDER BY b, a, d LIMIT 65$$);
+ sort_same 
+-----------
+ 65 rows
+(1 row)
+
+SELECT sort_same($$SELECT d FROM sort_t WHERE b > 0 ORDER BY d DESC LIMIT 7$$);
+ sort_same 
+-----------
+ 7 rows
+(1 row)
+
+-- No row, one, all of them and more; an offset before the rows.
+SELECT sort_same($$SELECT d FROM sort_t ORDER BY d LIMIT 0$$);
+ sort_same 
+-----------
+ 0 rows
+(1 row)
+
+SELECT sort_same($$SELECT d FROM sort_t ORDER BY d LIMIT 1$$);
+ sort_same 
+-----------
+ 1 rows
+(1 row)
+
+SELECT sort_same($$SELECT d FROM sort_t ORDER BY d LIMIT 500$$);
+ sort_same 
+-----------
+ 500 rows
+(1 row)
+
+SELECT sort_same($$SELECT d FROM sort_t ORDER BY d LIMIT 1000$$);
+ sort_same 
+-----------
+ 500 rows
+(1 row)
+
+SELECT sort_same($$SELECT d, c FROM sort_t ORDER BY d DESC OFFSET 490 LIMIT 5$$);
+ sort_same 
+-----------
+ 5 rows
+(1 row)
+
+SELECT sort_same($$SELECT d FROM sort_t WHERE d < 0 ORDER BY d LIMIT 5$$);
+ sort_same 
+-----------
+ 0 rows
+(1 row)
+
+-- WITH TIES passes no bound: the core sorts.
+EXPLAIN (COSTS OFF) SELECT a FROM sort_t ORDER BY a FETCH FIRST 3 ROWS WITH TIES;
            QUERY PLAN           
 --------------------------------
  Limit
    ->  Sort
-         Sort Key: d
+         Sort Key: a
          ->  Seq Scan on sort_t
 (4 rows)
+
+SELECT sort_same($$SELECT a FROM sort_t ORDER BY a FETCH FIRST 3 ROWS WITH TIES$$);
+ sort_same 
+-----------
+ 8 rows
+(1 row)
+
+-- A bound from a parameter, and the node read again for a larger one:
+-- the outer value sets the limit of the inner query at every rescan.
+SET plan_cache_mode = force_generic_plan;
+PREPARE top(int) AS SELECT d FROM sort_t ORDER BY d DESC LIMIT $1;
+EXECUTE top(2);
+  d  
+-----
+ 499
+ 498
+(2 rows)
+
+EXECUTE top(4);
+  d  
+-----
+ 499
+ 498
+ 497
+ 496
+(4 rows)
+
+DEALLOCATE top;
+RESET plan_cache_mode;
+SELECT sort_same($$
+SELECT x, (SELECT array_agg(d) FROM (SELECT d FROM sort_t ORDER BY d LIMIT x) s)
+FROM (VALUES (3), (1), (5), (0), (2)) AS v(x) ORDER BY x$$);
+ sort_same 
+-----------
+ 5 rows
+(1 row)
+
+SELECT sort_explain($$
+SELECT x, (SELECT array_agg(d) FROM (SELECT d FROM sort_t ORDER BY d LIMIT x) s)
+FROM (VALUES (3), (1), (5)) AS v(x)$$);
+                                        sort_explain                                         
+---------------------------------------------------------------------------------------------
+ Values Scan on "*VALUES*" (actual rows=3.00 loops=1)
+   SubPlan expr_1
+     ->  Aggregate (actual rows=1.00 loops=3)
+           ->  Custom Scan (TessLimit) (actual rows=3.00 loops=3)
+                 Input Batches: 1
+                 Input Rows: 5
+                 Output Rows: 5
+                 ->  Custom Scan (TessSort) (actual rows=3.67 loops=3)
+                       Sort Key: sort_t.d
+                       Sort Method: top-N in memory
+                       Memory Usage: N kB
+                       Input Batches: 22
+                       Input Rows: 1000
+                       ->  Custom Scan (TessHeapScan) on sort_t (actual rows=500.00 loops=2)
+                             Batch Size: 64
+                             Batches: 11
+                             Pages: 4
+                             Deformed Datums: 1000
+                             Restarted Datums: 0
+(19 rows)
 
 -- A merge join of the core above: it marks and restores its inner side,
 -- which a Material above the node does.
@@ -344,6 +506,48 @@ SELECT sort_explain($$SELECT k, v FROM sort_big ORDER BY k$$);
          Restarted Datums: 0
 (12 rows)
 
+-- Top-N over keys in the reverse of the rows' order: every row beats the
+-- ones kept, and the records are rebuilt from the heap's as they pile up.
+CREATE TABLE sort_seq AS SELECT i, 'r' || i AS t FROM generate_series(1, 200000) AS i;
+ANALYZE sort_seq;
+-- The node replaces a serial sort: no Gather Merge of the core.
+SET max_parallel_workers_per_gather = 0;
+SELECT sort_same($$SELECT i, t FROM sort_seq ORDER BY i DESC LIMIT 10$$);
+ sort_same 
+-----------
+ 10 rows
+(1 row)
+
+SELECT sort_explain($$SELECT i, t FROM sort_seq ORDER BY i DESC LIMIT 10$$);
+                                    sort_explain                                    
+------------------------------------------------------------------------------------
+ Custom Scan (TessLimit) (actual rows=10.00 loops=1)
+   Input Batches: 1
+   Input Rows: 10
+   Output Rows: 10
+   ->  Custom Scan (TessSort) (actual rows=10.00 loops=1)
+         Sort Key: i DESC
+         Sort Method: top-N in memory
+         Memory Usage: N kB
+         Input Batches: 3244
+         Input Rows: 200000
+         Rows Rebuilt: 3
+         ->  Custom Scan (TessHeapScan) on sort_seq (actual rows=200000.00 loops=1)
+               Batch Size: 64
+               Batches: 3244
+               Pages: 1081
+               Deformed Datums: 400000
+               Restarted Datums: 0
+(17 rows)
+
+SELECT sort_same($$SELECT i, t FROM sort_seq ORDER BY i DESC LIMIT 50000$$);
+ sort_same  
+------------
+ 50000 rows
+(1 row)
+
+RESET max_parallel_workers_per_gather;
+DROP TABLE sort_seq;
 -- Past work_mem the core sorts.
 SET work_mem = '4MB';
 EXPLAIN (COSTS OFF) SELECT k, v FROM sort_big ORDER BY k;

@@ -434,10 +434,28 @@ typedef struct TessKernelOps
 											  Size at,
 											  Datum *values,
 											  TessStatus *status);
+	/* tess_sort_top_candidates */
+	TessStatusCode (*sort_top_candidates) (int nkeys,
+										   const TessSortKey *keys,
+										   const TessTableKey *table_keys,
+										   TessRowMask *rows,
+										   const uint64 *worst,
+										   int *kept,
+										   TessStatus *status);
+	/* tess_sort_top_push */
+	TessStatusCode (*sort_top_push) (const TessTableRef *table,
+									 int nkeys,
+									 const TessSortKey *keys,
+									 const uint32 *refs,
+									 const TessRowMask *rows,
+									 uint64 *heap,
+									 Size capacity,
+									 uint64 *len,
+									 TessStatus *status);
 } TessKernelOps;
 
 #define TESS_KERNEL_OPS_MIN_SIZE \
-	TESS_ABI_SIZE_INCLUDING_FIELD(TessKernelOps, table_gather_scattered)
+	TESS_ABI_SIZE_INCLUDING_FIELD(TessKernelOps, sort_top_push)
 
 /*
  * The registry of the kernels: one table per backend, installed by the

@@ -1058,8 +1058,9 @@ sort's input, with the same rows, costs and path keys, when
 - the output has 1 to 64 columns;
 - the rows the planner expects fit `work_mem`: a record, the by-reference
   values at most the row's width, an item and a reference each;
-- the query has no `LIMIT` (the core's sort under a limit is a top-N sort;
-  plan item 5.8 brings the node's own), and the kernels module is loaded.
+- the query is not `FETCH ... WITH TIES`, which passes no bound, and the
+  kernels module is loaded; under `LIMIT` the rows counted are at most a
+  few times the limit's, which a top-N sort keeps.
 
 `IncrementalSort` and the sorts under a `Gather Merge` stay with the core.
 The plan's layout is dense, one column per target; the private data gives
@@ -1082,6 +1083,24 @@ parameter of the child reads and sorts it anew. `EXPLAIN` shows the keys
 as the core does; `ANALYZE` adds the method, the memory (records, values,
 index, items and references at the sort) and its overrun past `work_mem`,
 and the batches and rows read.
+
+### Top-N
+
+A limit above (`TessLimit`) passes the node its bound, the count plus the
+offset, through `set_tuple_bound` before it fetches. When the bound's heap
+and the records appended before a rebuild fit `work_mem`, the node keeps
+the best rows in a max-heap of their items (`tessera/sort.h`), every key
+with its bit for NULL so that the item's width never changes: a batch's
+key columns are read first, and once the heap is full only the rows whose
+keys beat the worst kept stay in the batch's mask, so only they have
+their other columns read, are appended and go into the heap. When the
+records outnumber four times the bound or 65536, whichever is more, the
+rows are made anew from the heap's (`Rows Rebuilt` in `EXPLAIN ANALYZE`),
+so that keys in the reverse of the order, each row beating the ones kept,
+take bounded memory. At the end the heap's items sorted give the rows in
+order. A rescan with a bound larger than the rows kept reads the child
+again; a smaller one returns the first of them. `Sort Method: top-N in
+memory`.
 
 ### Tests
 

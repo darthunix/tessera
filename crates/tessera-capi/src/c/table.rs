@@ -177,7 +177,7 @@ pub struct TableKeys<'a> {
 
 impl TableKeys<'_> {
     /// No keys yet.
-    fn empty() -> Self {
+    pub(super) fn empty() -> Self {
         Self {
             columns: [const { MaybeUninit::uninit() }; MAX_KEYS],
             nkeys: 0,
@@ -271,7 +271,7 @@ unsafe fn key_kinds(nkeys: c_int, kinds: *const c_uint) -> Result<([KeyKind; MAX
 /// `keys` must point to `nkeys` `TessTableKey`s whose columns satisfy
 /// [`DatumColumn::ints`]'s contract with their `prepared` masks, all valid
 /// and unchanged for `'a`.
-unsafe fn table_keys<'a>(
+pub(super) unsafe fn table_keys<'a>(
     nkeys: c_int,
     keys: *const TableKey,
     result: &mut TableKeys<'a>,
@@ -323,7 +323,7 @@ unsafe fn table_keys<'a>(
 ///
 /// `pointer` must point to `nrows` initialized values, valid and unchanged
 /// for `'a`, when `nrows` is positive.
-unsafe fn values<'a, T>(pointer: *const T, nrows: usize, what: &str) -> Result<&'a [T]> {
+pub(super) unsafe fn values<'a, T>(pointer: *const T, nrows: usize, what: &str) -> Result<&'a [T]> {
     if nrows == 0 {
         return Ok(&[]);
     }

@@ -7,7 +7,9 @@ use anyhow::{Result, ensure};
 use super::header::{CHUNK_HEADER, Layout};
 use super::record::Access;
 use super::region::Region;
-use crate::sort::{Encoder, SortKey};
+use tessera_core::RowMaskView;
+
+use crate::sort::{Encoder, SortKey, heap_push};
 
 /// Write the item of every record into `items`, one after another, and
 /// return the count; `items` must hold them all.
@@ -77,4 +79,73 @@ fn items_as<R: Region, const W: usize>(
         }
     }
     Ok(count)
+}
+
+/// Push the item of each record `refs[row]` of `rows` into a top-N heap:
+/// `heap` holds its capacity of items one after another, the first `*len`
+/// of them the heap; a record better than the top replaces it once the heap
+/// is full (see [`crate::sort::heap_push`]).
+pub(super) fn top_push<R: Region>(
+    region: &R,
+    layout: &Layout,
+    keys: &[SortKey],
+    refs: &[u32],
+    rows: &RowMaskView<'_>,
+    heap: &mut [u64],
+    len: &mut usize,
+) -> Result<()> {
+    ensure!(
+        keys.len() == layout.nkeys
+            && keys
+                .iter()
+                .zip(&layout.kinds[..layout.nkeys])
+                .all(|(key, &kind)| key.kind == kind),
+        "the sort keys are not the table's keys"
+    );
+    ensure!(
+        refs.len() == rows.nrows(),
+        "the references and the mask have different row counts"
+    );
+    let encoder = Encoder::new(keys)?;
+    let words = encoder.words();
+    ensure!(
+        heap.len().is_multiple_of(words) && *len <= heap.len() / words,
+        "a heap of {} words and {} items does not hold items of {words} words",
+        heap.len(),
+        *len
+    );
+    macro_rules! dispatch {
+        ($($n:literal)*) => {
+            match words {
+                $($n => push_as::<R, $n>(region, layout, &encoder, refs, rows, heap, len),)*
+                words => unreachable!("an item has at most 17 words, not {words}"),
+            }
+        };
+    }
+    dispatch!(1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17)
+}
+
+fn push_as<R: Region, const W: usize>(
+    region: &R,
+    layout: &Layout,
+    encoder: &Encoder<'_>,
+    refs: &[u32],
+    rows: &RowMaskView<'_>,
+    heap: &mut [u64],
+    len: &mut usize,
+) -> Result<()> {
+    let (heap, _) = heap.as_chunks_mut::<W>();
+    let mut access = Access::new(region, layout);
+    for index in 0..rows.nrows().div_ceil(64) {
+        let mut bits = rows.word(index).unwrap();
+        while bits != 0 {
+            let row = index * 64 + bits.trailing_zeros() as usize;
+            bits &= bits - 1;
+            let reference = refs[row];
+            let view = access.locate(reference)?;
+            let item = encoder.encode::<W>(view.keys(), view.null_bits(), reference)?;
+            heap_push(heap, len, item);
+        }
+    }
+    Ok(())
 }

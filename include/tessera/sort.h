@@ -78,4 +78,37 @@ extern TessStatusCode tess_sort(uint64 *items,
 								uint32 *refs,
 								TessStatus *status);
 
+/*
+ * Top-N: the best N rows of an input kept as a max-heap of their items in
+ * the caller's words, capacity N items, the worst on top. Once the heap is
+ * full, tess_sort_top_candidates keeps in rows only the rows of a batch
+ * whose keys (table_keys, the batch's key columns, as a table takes them)
+ * order strictly before the top item's, worst; the rows kept, appended as
+ * records, go in by tess_sort_top_push, each replacing the top when it is
+ * better; tess_sort over the heap's *len items gives the best rows in
+ * order. A row whose keys equal the worst's is not taken. *kept receives
+ * the rows kept.
+ */
+extern TessStatusCode tess_sort_top_candidates(int nkeys,
+											   const TessSortKey *keys,
+											   const TessTableKey *table_keys,
+											   TessRowMask *rows,
+											   const uint64 *worst,
+											   int *kept,
+											   TessStatus *status);
+
+/*
+ * Push the item of each record refs[row] of rows into the heap of capacity
+ * items at heap, whose first *len items are the heap.
+ */
+extern TessStatusCode tess_sort_top_push(const TessTableRef *table,
+										 int nkeys,
+										 const TessSortKey *keys,
+										 const uint32 *refs,
+										 const TessRowMask *rows,
+										 uint64 *heap,
+										 Size capacity,
+										 uint64 *len,
+										 TessStatus *status);
+
 #endif							/* TESSERA_SORT_H */

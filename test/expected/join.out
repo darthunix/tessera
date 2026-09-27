@@ -1926,8 +1926,8 @@ EXPLAIN (COSTS OFF)
 SELECT jf.v, jd.label FROM jf JOIN jd ON jf.fk = jd.id ORDER BY jf.v DESC LIMIT 5;
                      QUERY PLAN                     
 ----------------------------------------------------
- Limit
-   ->  Sort
+ Custom Scan (TessLimit)
+   ->  Custom Scan (TessSort)
          Sort Key: jf.v DESC
          ->  Custom Scan (TessHashJoin)
                Hash Cond: (jd.id = jf.fk)

@@ -62,6 +62,25 @@ typedef struct TessSortState
 	/* A key held a NULL: its items take the bit for it. */
 	bool		key_nulls[TESS_TABLE_MAX_KEYS];
 	TessRows   *rows;
+	/* What the rows are made with, to make them anew. */
+	TessRowsConfig rows_config;
+	TessTableKeyKind kinds[TESS_TABLE_MAX_KEYS];
+	/*
+	 * Top-N: the rows a parent needs (-1 for all), as it set them; the
+	 * bound the rows were read under; the heap of the best rows' items,
+	 * its capacity, length and item width; the keys it orders by, every
+	 * one with its bit for NULL, so that the width never changes; the
+	 * rebuilds of the rows from the heap's.
+	 */
+	int64		bound;
+	int64		used_bound;
+	bool		topn;
+	uint64	   *heap;
+	Size		heap_capacity;
+	uint64		heap_len;
+	int			words;
+	TessSortKey top_keys[TESS_TABLE_MAX_KEYS];
+	uint64		compactions;
 	/* The child's columns of a batch, one per output column. */
 	TessDatumColumn *columns;
 	TessTableKey table_keys[TESS_TABLE_MAX_KEYS];
@@ -88,6 +107,7 @@ typedef struct TessSortState
 } TessSortState;
 
 static const CustomExecMethods sort_exec_methods;
+static void reread_child(TessSortState *state);
 static create_upper_paths_hook_type previous_create_upper_paths_hook = NULL;
 
 static Plan *sort_plan(PlannerInfo *root, RelOptInfo *rel,
@@ -148,6 +168,7 @@ make_sort_path(PlannerInfo *root, SortPath *sort)
 	int			nkeys = list_length(sort->path.pathkeys);
 	int			ncolumns = list_length(target->exprs);
 	double		bytes;
+	double		rows;
 	Path	   *child;
 
 	if (nkeys == 0 || nkeys > TESS_TABLE_MAX_KEYS ||
@@ -169,7 +190,11 @@ make_sort_path(PlannerInfo *root, SortPath *sort)
 	 * column, the by-reference values at most the row's width, an item of
 	 * up to two words per key and the reference.
 	 */
-	bytes = input->rows *
+	rows = input->rows;
+	/* Under a limit, a top-N sort keeps its rows and a few times more. */
+	if (root->limit_tuples >= 0)
+		rows = Min(rows, Max(4.0 * root->limit_tuples, 65536.0));
+	bytes = rows *
 		(16.0 + 8.0 * nkeys + 8.0 * (1 + ncolumns) + target->width +
 		 16.0 * nkeys + 8.0 + sizeof(uint32));
 	if (bytes > (double) work_mem * 1024.0)
@@ -189,9 +214,10 @@ make_sort_path(PlannerInfo *root, SortPath *sort)
 
 /*
  * The node's path in place of each of the core's full sorts of the
- * ordered relation, also one under a projection. A query with LIMIT keeps
- * the core's sort, which the limit bounds to a top-N sort; so does a
- * backend without the kernels module.
+ * ordered relation, also one under a projection. Under LIMIT the limit
+ * sets the node a bound at execution and it keeps the best rows in a heap
+ * (top-N); WITH TIES, which passes no bound, keeps the core's sort, as
+ * does a backend without the kernels module.
  */
 static void
 create_upper_paths(PlannerInfo *root, UpperRelationKind stage,
@@ -204,7 +230,7 @@ create_upper_paths(PlannerInfo *root, UpperRelationKind stage,
 		previous_create_upper_paths_hook(root, stage, input_rel, output_rel,
 										 extra);
 	if (!*tess_runtime_api()->settings->enable || stage != UPPERREL_ORDERED ||
-		root->parse->limitCount != NULL)
+		root->parse->limitOption == LIMIT_OPTION_WITH_TIES)
 		return;
 	/* Without the kernels module there is nothing to sort with. */
 	kernels = tess_runtime_kernels();
@@ -362,7 +388,7 @@ sort_begin(CustomScanState *css, EState *estate, int eflags)
 		elog(ERROR, "TessSort received a foreign plan");
 	state->kernels = tess_runtime_kernels();
 	if (state->kernels == NULL ||
-		!TESS_ABI_HAS_FIELD(state->kernels, TessKernelOps, sort))
+		!TESS_ABI_HAS_FIELD(state->kernels, TessKernelOps, sort_top_push))
 		elog(ERROR, "TessSort needs the kernels module");
 
 	/* The child is read forward once, as the core's sort reads its own. */
@@ -401,14 +427,18 @@ sort_begin(CustomScanState *css, EState *estate, int eflags)
 	request.output_mode = TESS_OUTPUT_BATCH;
 	tess_input_set_request(state->input, &request);
 
+	memcpy(state->kinds, kinds, sizeof(TessTableKeyKind) * state->nkeys);
 	rows.parent_context = estate->es_query_cxt;
 	rows.kernels = state->kernels;
 	rows.nkeys = state->nkeys;
-	rows.kinds = kinds;
+	rows.kinds = state->kinds;
 	rows.ncolumns = state->ncolumns;
 	rows.typlens = typlens;
 	rows.typbyvals = typbyvals;
+	state->rows_config = rows;
 	state->rows = tess_rows_create(&rows);
+	state->bound = -1;
+	state->used_bound = -1;
 	state->columns = palloc0_array(TessDatumColumn, state->ncolumns);
 	state->values = palloc_array(Datum *, state->ncolumns);
 	state->isnull = palloc_array(bool *, state->ncolumns);
@@ -437,35 +467,50 @@ note_memory(TessSortState *state, Size extra)
 	state->counters.memory = Max(state->counters.memory, memory);
 }
 
-/* The rows of one batch of the child into records. */
+/* Output column `column` of the batch, for its selected rows. */
 static void
-append_batch(TessSortState *state, TessBatch *batch)
+batch_column(TessSortState *state, TessBatch *batch, int column)
+{
+	TessDatumColumn *values = &state->columns[column];
+
+	*values = (TessDatumColumn) TESS_STRUCT_INITIALIZER(TessDatumColumn);
+	batch->ops->get_datum_column(batch, state->child_columns[column],
+								 &batch->rows, TESS_COLUMN_FOR_PROJECTION,
+								 values);
+	if (values->values == NULL || values->isnull == NULL ||
+		values->nrows != batch->rows.nrows)
+		elog(ERROR, "TessSort child returned an invalid column");
+}
+
+/* The key columns of the batch, as the table takes them. */
+static void
+batch_keys(TessSortState *state, TessBatch *batch)
+{
+	for (int key = 0; key < state->nkeys; key++)
+	{
+		batch_column(state, batch, state->key_columns[key]);
+		state->table_keys[key].kind = state->keys[key].kind;
+		state->table_keys[key].column = &state->columns[state->key_columns[key]];
+		state->table_keys[key].prepared = NULL;
+	}
+}
+
+/* Whether an output column is a key's, fetched with the keys. */
+static bool
+is_key_column(TessSortState *state, int column)
+{
+	for (int key = 0; key < state->nkeys; key++)
+		if (state->key_columns[key] == column)
+			return true;
+	return false;
+}
+
+/* The selected rows of the batch into records, their references into batch_refs. */
+static void
+append_rows(TessSortState *state, TessBatch *batch)
 {
 	int			nrows = batch->rows.nrows;
 
-	for (int column = 0; column < state->ncolumns; column++)
-	{
-		TessDatumColumn *values = &state->columns[column];
-
-		*values = (TessDatumColumn) TESS_STRUCT_INITIALIZER(TessDatumColumn);
-		batch->ops->get_datum_column(batch, state->child_columns[column],
-									 &batch->rows, TESS_COLUMN_FOR_PROJECTION,
-									 values);
-		if (values->values == NULL || values->isnull == NULL ||
-			values->nrows != nrows)
-			elog(ERROR, "TessSort child returned an invalid column");
-	}
-	for (int key = 0; key < state->nkeys; key++)
-	{
-		const TessDatumColumn *values = &state->columns[state->key_columns[key]];
-
-		state->table_keys[key].kind = state->keys[key].kind;
-		state->table_keys[key].column = values;
-		state->table_keys[key].prepared = NULL;
-		if (!state->key_nulls[key])
-			state->key_nulls[key] = tess_rows_selected_null(&batch->rows,
-																	values->isnull);
-	}
 	if (nrows > state->capacity)
 	{
 		state->capacity = Max(nrows, SORT_ROWS);
@@ -476,6 +521,151 @@ append_batch(TessSortState *state, TessBatch *batch)
 	}
 	tess_rows_append(state->rows, state->table_keys, state->columns,
 					 &batch->rows, state->batch_refs);
+}
+
+/* The rows of one batch of the child into records. */
+static void
+append_batch(TessSortState *state, TessBatch *batch)
+{
+	batch_keys(state, batch);
+	for (int column = 0; column < state->ncolumns; column++)
+		if (!is_key_column(state, column))
+			batch_column(state, batch, column);
+	for (int key = 0; key < state->nkeys; key++)
+		if (!state->key_nulls[key])
+			state->key_nulls[key] =
+				tess_rows_selected_null(&batch->rows,
+										state->table_keys[key].column->isnull);
+	append_rows(state, batch);
+}
+
+static void
+check_kernel(TessStatusCode code, TessStatus *status)
+{
+	if (code != TESS_OK)
+		tess_status_report(status);
+}
+
+/* The reference of a heap item: the low 32 bits of its last word. */
+static uint32
+item_ref(TessSortState *state, uint64 item)
+{
+	return (uint32) state->heap[item * state->words + state->words - 1];
+}
+
+/*
+ * The records outnumber what the heap needs: make the rows anew from the
+ * heap's records and the heap from them, so that memory stays bounded when
+ * every row beats the ones kept, as keys in the reverse of the order do.
+ */
+static void
+compact_rows(TessSortState *state)
+{
+	TessRows   *rows = tess_rows_create(&state->rows_config);
+	uint64		len = state->heap_len;
+	uint32	   *kept = palloc_array(uint32, Max(len, 1));
+	uint32		new_refs[SORT_ROWS];
+	Datum		values[TESS_ROWS_MAX_COLUMNS][SORT_ROWS];
+	bool		nulls[TESS_ROWS_MAX_COLUMNS][SORT_ROWS];
+	TessDatumColumn columns[TESS_ROWS_MAX_COLUMNS];
+	TessTableKey keys[TESS_TABLE_MAX_KEYS];
+
+	/* The heap is made anew below: its records are taken first. */
+	for (uint64 item = 0; item < len; item++)
+		kept[item] = item_ref(state, item);
+	state->heap_len = 0;
+	for (uint64 first = 0; first < len; first += SORT_ROWS)
+	{
+		int			n = (int) Min((uint64) SORT_ROWS, len - first);
+		uint64		bits[1] = {n == 64 ? ~UINT64CONST(0) : (UINT64CONST(1) << n) - 1};
+		TessRowMask mask = {n, bits};
+
+		for (int column = 0; column < state->ncolumns; column++)
+		{
+			tess_rows_gather(state->rows, column, &kept[first], &mask,
+							 values[column], nulls[column]);
+			columns[column] = (TessDatumColumn) TESS_STRUCT_INITIALIZER(TessDatumColumn);
+			columns[column].values = values[column];
+			columns[column].isnull = nulls[column];
+			columns[column].nrows = n;
+		}
+		for (int key = 0; key < state->nkeys; key++)
+		{
+			keys[key].kind = state->keys[key].kind;
+			keys[key].column = &columns[state->key_columns[key]];
+			keys[key].prepared = NULL;
+		}
+		tess_rows_append(rows, keys, columns, &mask, new_refs);
+		/* The items of the kept rows go in anew, by their new records. */
+		tess_rows_top_push(rows, state->top_keys, new_refs, &mask, state->heap,
+						   state->heap_capacity, &state->heap_len);
+	}
+	pfree(kept);
+	tess_rows_free(state->rows);
+	state->rows = rows;
+	state->compactions++;
+}
+
+/*
+ * Top-N: a batch's key columns first; once the heap is full, the batch
+ * keeps only the rows whose keys beat the worst kept, and only those have
+ * their other columns read, are appended and go into the heap.
+ */
+static void
+top_batch(TessSortState *state, TessBatch *batch)
+{
+	batch_keys(state, batch);
+	if (state->heap_len == state->heap_capacity)
+	{
+		TessStatus	status = TESS_STRUCT_INITIALIZER(TessStatus);
+		int			kept;
+
+		check_kernel(state->kernels->sort_top_candidates(state->nkeys,
+														 state->top_keys,
+														 state->table_keys,
+														 &batch->rows,
+														 state->heap, &kept,
+														 &status),
+					 &status);
+		if (kept == 0)
+			return;
+	}
+	for (int column = 0; column < state->ncolumns; column++)
+		if (!is_key_column(state, column))
+			batch_column(state, batch, column);
+	append_rows(state, batch);
+	tess_rows_top_push(state->rows, state->top_keys, state->batch_refs,
+					   &batch->rows, state->heap, state->heap_capacity,
+					   &state->heap_len);
+	note_memory(state, state->heap_capacity * state->words * sizeof(uint64));
+	if (tess_rows_count(state->rows) > Max(4 * state->heap_capacity, 65536))
+		compact_rows(state);
+}
+
+/*
+ * Whether a bound makes a top-N sort: its heap and the rows that may be
+ * appended before a rebuild fit work_mem. Every key takes its bit for NULL.
+ */
+static bool
+choose_topn(TessSortState *state)
+{
+	TessStatus	status = TESS_STRUCT_INITIALIZER(TessStatus);
+	double		bytes;
+
+	if (state->bound < 0)
+		return false;
+	for (int key = 0; key < state->nkeys; key++)
+	{
+		state->top_keys[key] = state->keys[key];
+		state->top_keys[key].flags |= TESS_SORT_NULLABLE;
+	}
+	check_kernel(state->kernels->sort_item_words(state->nkeys, state->top_keys,
+												 &state->words, &status),
+				 &status);
+	bytes = (double) state->bound * state->words * sizeof(uint64) +
+		(double) Max(4 * (double) state->bound, 65536.0) *
+		(16.0 + 8.0 * (state->nkeys + 1 + state->ncolumns));
+	return bytes <= (double) work_mem * 1024.0;
 }
 
 /*
@@ -489,8 +679,23 @@ sort_rows(TessSortState *state)
 	ScanDirection direction = estate->es_direction;
 	TessSortKey keys[TESS_TABLE_MAX_KEYS];
 
+	state->topn = choose_topn(state);
+	state->used_bound = state->topn ? state->bound : -1;
+	if (state->topn)
+	{
+		Size		words = mul_size((Size) state->bound, state->words);
+
+		if (state->heap != NULL)
+			pfree(state->heap);
+		state->heap_capacity = (Size) state->bound;
+		state->heap_len = 0;
+		state->heap = MemoryContextAllocExtended(estate->es_query_cxt,
+												 mul_size(Max(words, 1), sizeof(uint64)),
+												 MCXT_ALLOC_HUGE);
+	}
 	estate->es_direction = ForwardScanDirection;
-	for (;;)
+	/* A bound of no rows reads nothing. */
+	while (!(state->topn && state->heap_capacity == 0))
 	{
 		TessBatch  *batch = tess_input_next(state->input);
 		int			rows;
@@ -500,12 +705,35 @@ sort_rows(TessSortState *state)
 		rows = tess_row_mask_count(&batch->rows);
 		state->counters.batches++;
 		state->counters.rows += rows;
-		if (rows > 0)
+		if (rows > 0 && state->topn)
+			top_batch(state, batch);
+		else if (rows > 0)
 			append_batch(state, batch);
 		tess_input_finish(state->input);
 		CHECK_FOR_INTERRUPTS();
 	}
 	estate->es_direction = direction;
+	if (state->topn)
+	{
+		TessStatus	status = TESS_STRUCT_INITIALIZER(TessStatus);
+
+		/* The heap's items, sorted, give the best rows in order. */
+		state->count = state->heap_len;
+		if (state->refs != NULL)
+			pfree(state->refs);
+		state->refs = MemoryContextAllocExtended(estate->es_query_cxt,
+												 mul_size(sizeof(uint32),
+														  Max(state->count, 1)),
+												 MCXT_ALLOC_HUGE);
+		if (state->count > 0)
+			check_kernel(state->kernels->sort(state->heap, (Size) state->count,
+											  state->words, state->refs, &status),
+						 &status);
+		note_memory(state, state->heap_capacity * state->words * sizeof(uint64));
+		state->sorted = true;
+		state->current = -1;
+		return;
+	}
 	state->count = tess_rows_count(state->rows);
 	/* A key takes the bit for NULL only when one of its rows held one. */
 	for (int key = 0; key < state->nkeys; key++)
@@ -615,6 +843,10 @@ sort_exec(CustomScanState *css)
 	bool		rows = tess_output_request(state->output)->output_mode ==
 		TESS_OUTPUT_ROWS;
 
+	/* Rows read for fewer than the parent now needs are read again. */
+	if (state->sorted && state->used_bound >= 0 &&
+		(state->bound < 0 || state->bound > state->used_bound))
+		reread_child(state);
 	if (!state->sorted)
 		sort_rows(state);
 	if (rows)
@@ -634,9 +866,27 @@ sort_end(CustomScanState *css)
 	tess_rows_free(state->rows);
 }
 
+/* Rescan the child and forget the rows, to read and sort them anew. */
+static void
+reread_child(TessSortState *state)
+{
+	tess_output_clear(state->output);
+	state->published = false;
+	state->current = -1;
+	ExecReScan(state->child);
+	tess_input_rescan(state->input);
+	tess_rows_reset(state->rows);
+	memset(state->key_nulls, 0, sizeof(state->key_nulls));
+	state->sorted = false;
+	state->count = 0;
+	state->heap_len = 0;
+}
+
 /*
  * A rescan returns the sorted rows again from the first, unless a
  * parameter of the child changed: then the child is read and sorted anew.
+ * A parent may set another bound before it fetches; the execution reads
+ * again when the rows kept are too few for it.
  */
 static void
 sort_rescan(CustomScanState *css)
@@ -646,6 +896,7 @@ sort_rescan(CustomScanState *css)
 	tess_output_clear(state->output);
 	state->published = false;
 	state->current = -1;
+	state->bound = -1;
 	if (css->ss.ps.chgParam == NULL && state->sorted)
 		return;
 	/* The core passes changed parameters to outer and inner plans only. */
@@ -653,12 +904,15 @@ sort_rescan(CustomScanState *css)
 		UpdateChangedParamSet(state->child, css->ss.ps.chgParam);
 	if (!state->sorted && state->child->chgParam == NULL)
 		return;
-	ExecReScan(state->child);
-	tess_input_rescan(state->input);
-	tess_rows_reset(state->rows);
-	memset(state->key_nulls, 0, sizeof(state->key_nulls));
-	state->sorted = false;
-	state->count = 0;
+	reread_child(state);
+}
+
+static void
+sort_set_tuple_bound(CustomScanState *css, int64 tuples_needed)
+{
+	TessSortState *state = (TessSortState *) css;
+
+	state->bound = tuples_needed < 0 ? -1 : tuples_needed;
 }
 
 static void
@@ -688,7 +942,7 @@ sort_explain(CustomScanState *css, List *ancestors, ExplainState *es)
 	ExplainPropertyList("Sort Key", keys, es);
 	if (!es->analyze || !state->sorted)
 		return;
-	ExplainPropertyText("Sort Method", "in memory", es);
+	ExplainPropertyText("Sort Method", state->topn ? "top-N in memory" : "in memory", es);
 	ExplainPropertyInteger("Memory Usage", "kB",
 						   (state->counters.memory + 1023) / 1024, es);
 	if (state->counters.memory > (Size) work_mem * 1024)
@@ -697,6 +951,8 @@ sort_explain(CustomScanState *css, List *ancestors, ExplainState *es)
 							   es);
 	ExplainPropertyInteger("Input Batches", NULL, state->counters.batches, es);
 	ExplainPropertyInteger("Input Rows", NULL, state->counters.rows, es);
+	if (state->topn && state->compactions > 0)
+		ExplainPropertyInteger("Rows Rebuilt", NULL, state->compactions, es);
 }
 
 static const CustomExecMethods sort_exec_methods = {
@@ -726,6 +982,7 @@ const CustomScanMethods tess_sort_scan_methods = {
 const TessNode tess_sort_node = {
 	TESS_ABI_INITIALIZER(TESS_NODE_ABI_VERSION, TessNode),
 	.name = TESS_SORT_NODE_NAME,
+	.set_tuple_bound = sort_set_tuple_bound,
 };
 
 void

@@ -90,8 +90,40 @@ SELECT sort_same($$SELECT a, d FROM sort_t WHERE a > -100 ORDER BY a DESC, d$$);
 EXPLAIN (COSTS OFF) SELECT d FROM sort_t ORDER BY d OFFSET 490;
 SELECT d FROM sort_t ORDER BY d OFFSET 490;
 SELECT sort_same($$SELECT d, c FROM sort_t ORDER BY d DESC OFFSET 17$$);
--- With LIMIT the core's top-N sort stays.
+-- Top-N: a limit above sets the node a bound, and it keeps the best rows in
+-- a heap; every query orders its rows fully, so that the rows returned do
+-- not depend on which of equal rows a heap keeps.
 EXPLAIN (COSTS OFF) SELECT d FROM sort_t ORDER BY d LIMIT 3;
+SELECT sort_explain($$SELECT d, c FROM sort_t ORDER BY d DESC LIMIT 3$$);
+SELECT sort_same($$SELECT d, c FROM sort_t ORDER BY d LIMIT 3$$);
+SELECT sort_same($$SELECT a, d FROM sort_t ORDER BY a NULLS FIRST, d LIMIT 20$$);
+SELECT sort_same($$SELECT a, d FROM sort_t ORDER BY a DESC, d DESC LIMIT 64$$);
+SELECT sort_same($$SELECT a, b, d FROM sort_t ORDER BY b, a, d LIMIT 65$$);
+SELECT sort_same($$SELECT d FROM sort_t WHERE b > 0 ORDER BY d DESC LIMIT 7$$);
+-- No row, one, all of them and more; an offset before the rows.
+SELECT sort_same($$SELECT d FROM sort_t ORDER BY d LIMIT 0$$);
+SELECT sort_same($$SELECT d FROM sort_t ORDER BY d LIMIT 1$$);
+SELECT sort_same($$SELECT d FROM sort_t ORDER BY d LIMIT 500$$);
+SELECT sort_same($$SELECT d FROM sort_t ORDER BY d LIMIT 1000$$);
+SELECT sort_same($$SELECT d, c FROM sort_t ORDER BY d DESC OFFSET 490 LIMIT 5$$);
+SELECT sort_same($$SELECT d FROM sort_t WHERE d < 0 ORDER BY d LIMIT 5$$);
+-- WITH TIES passes no bound: the core sorts.
+EXPLAIN (COSTS OFF) SELECT a FROM sort_t ORDER BY a FETCH FIRST 3 ROWS WITH TIES;
+SELECT sort_same($$SELECT a FROM sort_t ORDER BY a FETCH FIRST 3 ROWS WITH TIES$$);
+-- A bound from a parameter, and the node read again for a larger one:
+-- the outer value sets the limit of the inner query at every rescan.
+SET plan_cache_mode = force_generic_plan;
+PREPARE top(int) AS SELECT d FROM sort_t ORDER BY d DESC LIMIT $1;
+EXECUTE top(2);
+EXECUTE top(4);
+DEALLOCATE top;
+RESET plan_cache_mode;
+SELECT sort_same($$
+SELECT x, (SELECT array_agg(d) FROM (SELECT d FROM sort_t ORDER BY d LIMIT x) s)
+FROM (VALUES (3), (1), (5), (0), (2)) AS v(x) ORDER BY x$$);
+SELECT sort_explain($$
+SELECT x, (SELECT array_agg(d) FROM (SELECT d FROM sort_t ORDER BY d LIMIT x) s)
+FROM (VALUES (3), (1), (5)) AS v(x)$$);
 
 -- A merge join of the core above: it marks and restores its inner side,
 -- which a Material above the node does.
@@ -115,6 +147,17 @@ ANALYZE sort_big;
 SET work_mem = '64MB';
 SELECT sort_same($$SELECT k, v FROM sort_big ORDER BY k DESC$$);
 SELECT sort_explain($$SELECT k, v FROM sort_big ORDER BY k$$);
+-- Top-N over keys in the reverse of the rows' order: every row beats the
+-- ones kept, and the records are rebuilt from the heap's as they pile up.
+CREATE TABLE sort_seq AS SELECT i, 'r' || i AS t FROM generate_series(1, 200000) AS i;
+ANALYZE sort_seq;
+-- The node replaces a serial sort: no Gather Merge of the core.
+SET max_parallel_workers_per_gather = 0;
+SELECT sort_same($$SELECT i, t FROM sort_seq ORDER BY i DESC LIMIT 10$$);
+SELECT sort_explain($$SELECT i, t FROM sort_seq ORDER BY i DESC LIMIT 10$$);
+SELECT sort_same($$SELECT i, t FROM sort_seq ORDER BY i DESC LIMIT 50000$$);
+RESET max_parallel_workers_per_gather;
+DROP TABLE sort_seq;
 -- Past work_mem the core sorts.
 SET work_mem = '4MB';
 EXPLAIN (COSTS OFF) SELECT k, v FROM sort_big ORDER BY k;

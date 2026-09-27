@@ -47,7 +47,10 @@ pub use shared_spill::{
 pub mod sort_flags {
     pub use super::sort::{DESCENDING, NULLABLE, NULLS_FIRST};
 }
-pub use sort::{CSortKey, tess_sort, tess_sort_item_words, tess_sort_items, tess_sort_layout};
+pub use sort::{
+    CSortKey, tess_sort, tess_sort_item_words, tess_sort_items, tess_sort_layout,
+    tess_sort_top_candidates, tess_sort_top_push,
+};
 pub use spill::{
     SpillHeader, tess_spill_header_read, tess_spill_header_size, tess_spill_header_write,
     tess_spill_pack, tess_spill_unpack,

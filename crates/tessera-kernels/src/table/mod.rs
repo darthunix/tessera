@@ -656,6 +656,21 @@ impl<'a> Table<'a> {
         order::items(&self.region, &self.layout, keys, items)
     }
 
+    /// Push the item of each record `refs[row]` of `rows` into a top-N
+    /// heap of `heap.len() / words` items, whose first `*len` are the heap
+    /// (see [`crate::sort::top_candidates`]); the records need not be
+    /// linked.
+    pub fn top_push(
+        &self,
+        keys: &[crate::sort::SortKey],
+        refs: &[u32],
+        rows: &RowMaskView<'_>,
+        heap: &mut [u64],
+        len: &mut usize,
+    ) -> Result<()> {
+        order::top_push(&self.region, &self.layout, keys, refs, rows, heap, len)
+    }
+
     /// Fill a Bloom filter of [`bloom::words_for`] this table's records
     /// words (or any power of two) with the hash of every record of every
     /// chunk, after clearing it: a probe row it rejects has no record with

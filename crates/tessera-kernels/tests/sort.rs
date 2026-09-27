@@ -278,3 +278,145 @@ fn misuse_is_an_error() -> Result<()> {
     assert!(sort_items(&mut items, MAX_ITEM_WORDS + 1, &mut []).is_err());
     Ok(())
 }
+
+/// The best `n` rows of `rows` by `keys` through a top-N heap: batches of
+/// 64 rows, each narrowed to the candidates once the heap is full, the
+/// candidates appended and pushed; their keys in order.
+fn top_rows(keys: &[SortKey], rows: &Rows, n: usize) -> Result<Vec<Vec<Option<i64>>>> {
+    use tessera_kernels::sort::top_candidates;
+    let nrows = rows.nrows();
+    let config = TableConfig {
+        keys: &rows.kinds,
+        payload_size: 8,
+    };
+    let mut table = LocalTable::new(&config, 0, CHUNK)?;
+    let words = item_words(keys)?;
+    let mut heap = vec![0u64; n * words];
+    let mut len = 0;
+    let mut references = vec![0u32; nrows];
+    let mut appended: Vec<(u32, usize)> = Vec::new();
+    let hashes = vec![0u32; nrows];
+    for first in (0..nrows).step_by(64) {
+        let mut mask_words = vec![0u64; nrows.div_ceil(64)];
+        for row in first..(first + 64).min(nrows) {
+            mask_words[row / 64] |= 1 << (row % 64);
+        }
+        if len == n && n > 0 {
+            let worst = heap[..words].to_vec();
+            let mut mask = RowMask::try_new(nrows, &mut mask_words)?;
+            top_candidates(keys, rows, &mut mask, &worst)?;
+        } else if n == 0 {
+            continue;
+        }
+        let candidates = mask_words.clone();
+        if table.chunks() == 0 {
+            table.add_chunk()?;
+        }
+        let mut pending_words = candidates.clone();
+        loop {
+            let chunk = table.chunks() - 1;
+            {
+                let shared = table.table()?;
+                let mut pending = RowMask::try_new(nrows, &mut pending_words)?;
+                shared.append(chunk, &hashes, rows, None, &mut pending, &mut references)?;
+            }
+            if pending_words.iter().all(|&word| word == 0) {
+                break;
+            }
+            table.add_chunk()?;
+        }
+        for row in first..(first + 64).min(nrows) {
+            if (candidates[row / 64] >> (row % 64)) & 1 == 1 {
+                appended.push((references[row], row));
+            }
+        }
+        let view = tessera_core::RowMaskView::try_new(nrows, &candidates)?;
+        table
+            .table()?
+            .top_push(keys, &references, &view, &mut heap, &mut len)?;
+    }
+    let mut out = vec![0u32; len];
+    sort_items(&mut heap[..len * words], words, &mut out)?;
+    // Only the candidates were appended: their references, row by row.
+    appended.sort_unstable();
+    Ok(out
+        .iter()
+        .map(|reference| {
+            let at = appended
+                .binary_search_by_key(reference, |&(r, _)| r)
+                .unwrap();
+            let row = appended[at].1;
+            (0..keys.len()).map(|key| rows.values[key][row]).collect()
+        })
+        .collect())
+}
+
+#[test]
+fn a_top_n_heap_keeps_the_first_rows_in_order() -> Result<()> {
+    use KeyKind::{Int32, Int64};
+    let sets: [&[SortKey]; 4] = [
+        &[key(Int32, false, false, true)],
+        &[key(Int64, true, true, true)],
+        &[key(Int32, false, true, true), key(Int64, true, false, true)],
+        &[
+            key(Int32, true, false, true),
+            key(Int32, false, false, true),
+        ],
+    ];
+    for (index, keys) in sets.iter().enumerate() {
+        for (nrows, few) in [(500, false), (500, true), (130, false)] {
+            let mut random = Random(300 + index as u64 + nrows as u64);
+            let rows = Rows {
+                kinds: keys.iter().map(|key| key.kind).collect(),
+                values: keys
+                    .iter()
+                    .map(|key| (0..nrows).map(|_| random.value(key.kind, few, 5)).collect())
+                    .collect(),
+            };
+            let mut all: Vec<Vec<Option<i64>>> = (0..nrows)
+                .map(|row| (0..keys.len()).map(|key| rows.values[key][row]).collect())
+                .collect();
+            all.sort_by(|a, b| {
+                keys.iter()
+                    .enumerate()
+                    .map(|(k, key)| compare_key(key, a[k], b[k]))
+                    .find(|order| order.is_ne())
+                    .unwrap_or(Ordering::Equal)
+            });
+            for n in [0, 1, 5, 64, 100, nrows, nrows + 10] {
+                let got = top_rows(keys, &rows, n)?;
+                assert_eq!(
+                    got,
+                    all[..n.min(nrows)],
+                    "keys {keys:?}, {nrows} rows, few {few}, top {n}"
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn a_heap_rejects_the_rows_that_do_not_beat_its_worst() -> Result<()> {
+    use tessera_kernels::sort::top_candidates;
+    let keys = [key(KeyKind::Int32, false, false, true)];
+    let rows = Rows {
+        kinds: vec![KeyKind::Int32],
+        values: vec![vec![Some(1), Some(5), None, Some(4), Some(-3)]],
+    };
+    let words = item_words(&keys)?;
+    // A worst item of key 4: the NULL bit clear, the value's sign flipped.
+    let mut worst = vec![0u64; words];
+    worst[0] = (u64::from(4u32 ^ 0x8000_0000)) << 31;
+    let mut mask_words = vec![0b11111u64];
+    let mut mask = RowMask::try_new(5, &mut mask_words)?;
+    assert_eq!(top_candidates(&keys, &rows, &mut mask, &worst)?, 2);
+    assert_eq!(
+        mask_words[0], 0b10001,
+        "1 and -3 beat 4; 4 ties it; NULL and 5 lose"
+    );
+    let mut short = vec![0b1u64];
+    let mut mask = RowMask::try_new(5, &mut short)?;
+    assert!(top_candidates(&keys, &rows, &mut mask, &worst[..words - 1]).is_err());
+    Ok(())
+}
