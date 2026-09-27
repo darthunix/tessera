@@ -127,7 +127,10 @@ fn sorted_rows(keys: &[SortKey], rows: &Rows) -> Result<(Vec<usize>, Vec<u32>)> 
     assert_eq!(count, nrows, "every record makes an item");
     let mut out = vec![0u32; nrows];
     sort_items(&mut items, words, &mut out)?;
-    let row_of = |reference: u32| references.iter().position(|&r| r == reference).unwrap();
+    // Rows are appended in order, chunk after chunk: their references rise
+    // with the row, and a binary search finds a reference's row.
+    assert!(references.is_sorted(), "references rise with the rows");
+    let row_of = |reference: u32| references.binary_search(&reference).unwrap();
     Ok((out.into_iter().map(row_of).collect(), references))
 }
 
