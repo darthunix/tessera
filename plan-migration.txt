@@ -2082,6 +2082,16 @@
   enable_nestloop = off) по всем видам, дубликаты с обеих сторон, NULL-ключи, пустые стороны, серия равных ключей
   больше work_mem. Когда выигрывает (уже упорядоченные входы, вход больше памяти, где hash join уходит в spill) —
   семейство sort бенчей pg, а не предположение.
+  Шаг 0 (2026-09-27, решение пользователя начать с замера): случаи семейства join full_join, right_join,
+  merge_forced (enable_hashjoin = off), merge_sorted (обе стороны упорядочены индексами, bench_mj_outer 2 млн /
+  bench_mj_inner 200 тыс.); pg-merge_scratch (только эти случаи, 39 с): full_join — Hash Full Join ядра, наш только
+  TessAgg сверху (135 против 145 мс); right_join — Hash Right Join ядра (111 / 124); merge_forced — Merge Join ядра
+  с сортировками, 211 / 220 (искусственный: при включённом hash join наш TessHashJoin ~27 мс); merge_sorted — Merge
+  Join ядра по индексам (59 / 68 мс), а TessHashJoin с запретом merge — 63–76 мс под EXPLAIN ANALYZE, то есть не быстрее.
+  Вывод: своему merge join выигрывать не на чем, пока скан по индексу не пакетный (6.4а); настоящий пробел —
+  RIGHT и FULL JOIN, которых нет у TessHashJoin. Предложение: TessMergeJoin отложить до 6.4а или факта TPC-H, а
+  RIGHT/FULL сделать в hash join (сохраняемая сторона — build: бит «нашлась пара» на запись, несвязанные записи —
+  после внешней стороны).
   11. Операции над множествами: UNION, INTERSECT, EXCEPT (с ALL и без; записано 2026-09-27 по решению пользователя).
   а) UNION ALL — Append ядра над пакетными детьми сейчас рвёт пачки (над каждым ребёнком pack или выдача строками):
   пакетный Append (TessAppend, выдача пачек детей по очереди, с частичным режимом — Parallel Append ядра как образец)

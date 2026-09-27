@@ -73,6 +73,17 @@ SELECT k4, k4::bigint * 5000000011 AS k8, k4 % 1000 AS few,
 FROM generate_series(1, 2000000 * :scale) AS g,
      LATERAL (SELECT (g::bigint * 7919 % (2000000 * :scale))::int AS k4) AS key;
 
+-- The merge join cases: both sides in the order of their key, with an
+-- index on it, ten outer rows per inner key.
+DROP TABLE IF EXISTS bench_mj_outer;
+CREATE TABLE bench_mj_outer AS
+SELECT g / 10 AS k, g AS v FROM generate_series(0, 2000000 * :scale - 1) AS g;
+CREATE INDEX bench_mj_outer_k ON bench_mj_outer (k);
+DROP TABLE IF EXISTS bench_mj_inner;
+CREATE TABLE bench_mj_inner AS
+SELECT g AS k, g % 1000 AS w FROM generate_series(0, 200000 * :scale - 1) AS g;
+CREATE INDEX bench_mj_inner_k ON bench_mj_inner (k);
+
 -- The grouping cases of the win family group by expressions: statistics
 -- on them give the planner the number of groups, which it would otherwise
 -- take from the unique column underneath.
@@ -86,6 +97,8 @@ VACUUM (ANALYZE) bench_dim;
 VACUUM (ANALYZE) bench_fact;
 VACUUM (ANALYZE) bench_dup;
 VACUUM (ANALYZE) bench_sort;
+VACUUM (ANALYZE) bench_mj_outer;
+VACUUM (ANALYZE) bench_mj_inner;
 
 SELECT pg_size_pretty(pg_total_relation_size('bench_narrow')) AS narrow,
        pg_size_pretty(pg_total_relation_size('bench_wide')) AS wide,
@@ -102,3 +115,5 @@ SELECT count(*) FROM bench_dim;
 SELECT count(*) FROM bench_fact;
 SELECT count(*) FROM bench_dup;
 SELECT count(*) FROM bench_sort;
+SELECT count(*) FROM bench_mj_outer;
+SELECT count(*) FROM bench_mj_inner;

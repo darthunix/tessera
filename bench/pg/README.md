@@ -23,7 +23,10 @@ query down, and where it can, does it speed one up.
   range and an int4 key against an int8 one, two keys and a residual join
   clause over columns of both sides, a dimension filtered to one key in a
   hundred and a key that matches nothing, a top-N sort above the
-  join and a join over a join. With Tessera on, `TessHashJoin` builds the
+  join and a join over a join; then where the core may merge: a full and
+  a right join, which the batch hash join does not do, a join with hash
+  joins disabled (`measure_setting`), and sides already in the order of
+  their keys through their indexes (`bench_mj_outer`, `bench_mj_inner`). With Tessera on, `TessHashJoin` builds the
   inner side and probes it with batches of the outer side, under `TessAgg`
   where the query aggregates; with it off, the core's `Hash Join`. A ratio
   below one is the win. `plan_time` plans a join of four relations

@@ -67,6 +67,21 @@ BEGIN
 END
 $function$;
 
+/* A pair under a setting, which holds while both modes plan and run it. */
+CREATE FUNCTION pg_temp.measure_setting(test_name text, sql text, setting text,
+                                        value text, repetitions integer)
+RETURNS void
+LANGUAGE plpgsql
+AS $function$
+DECLARE
+    old text := current_setting(setting);
+BEGIN
+    PERFORM set_config(setting, value, false);
+    PERFORM pg_temp.measure_pair(test_name, sql, repetitions);
+    PERFORM set_config(setting, old, false);
+END
+$function$;
+
 /*
  * Planning alone: EXPLAIN without ANALYZE plans the statement and runs
  * nothing, so its time is the planner's, hooks included. One plan takes
@@ -163,6 +178,21 @@ SELECT pg_temp.measure_pair('left_nulls',
 SELECT pg_temp.measure_pair('left_dup',
     'SELECT count(*), sum(u.v) FROM bench_dim d LEFT JOIN bench_dup u ON d.id = u.k',
     :repetitions);
+-- Where the core may merge: a full and a right join, which the batch hash
+-- join does not do; a join with hash joins disabled; sides already in the
+-- order of their keys, through their indexes.
+SELECT pg_temp.measure_pair('full_join',
+    'SELECT count(*), count(d.d1), count(f.f1) FROM bench_fact f FULL JOIN bench_dim d ON f.fk = d.id',
+    :repetitions);
+SELECT pg_temp.measure_pair('right_join',
+    'SELECT count(*), count(f.f1) FROM bench_fact f RIGHT JOIN bench_dim d ON f.fk = d.id',
+    :repetitions);
+SELECT pg_temp.measure_setting('merge_forced',
+    'SELECT count(*), sum(d.d1) FROM bench_fact f JOIN bench_dim d ON f.fk = d.id',
+    'enable_hashjoin', 'off', :repetitions);
+SELECT pg_temp.measure_pair('merge_sorted',
+    'SELECT count(*), sum(i.w) FROM bench_mj_outer o JOIN bench_mj_inner i ON o.k = i.k',
+    :repetitions);
 -- The planner over four relations, where the hook sees every join order.
 SELECT pg_temp.measure_plan('plan_time',
     'SELECT count(*) FROM bench_fact f JOIN bench_dim d ON f.fk = d.id JOIN bench_dup u ON d.id = u.k JOIN bench_dim e ON u.v = e.id',
@@ -187,11 +217,13 @@ SET tessera.enable = on;
 SELECT format('EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE on_%s', name)
 FROM unnest(ARRAY['fk_count', 'fk_inner_col', 'fk_outer_col', 'int8', 'mixed',
                   'selective', 'miss', 'dup', 'dup_text', 'two_keys', 'residual', 'rows_parent',
-                  'chain', 'semi', 'anti', 'left_nulls', 'left_dup']) AS name \gexec
+                  'chain', 'semi', 'anti', 'left_nulls', 'left_dup', 'full_join', 'right_join',
+                  'merge_forced', 'merge_sorted']) AS name \gexec
 SET tessera.enable = off;
 SELECT format('EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE off_%s', name)
 FROM unnest(ARRAY['fk_count', 'fk_inner_col', 'fk_outer_col', 'int8', 'mixed',
                   'selective', 'miss', 'dup', 'two_keys', 'residual', 'rows_parent',
-                  'chain', 'semi', 'anti', 'left_nulls', 'left_dup']) AS name \gexec
+                  'chain', 'semi', 'anti', 'left_nulls', 'left_dup', 'full_join', 'right_join',
+                  'merge_forced', 'merge_sorted']) AS name \gexec
 \o
 DEALLOCATE ALL;
