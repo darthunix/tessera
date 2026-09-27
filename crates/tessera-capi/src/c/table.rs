@@ -593,18 +593,26 @@ pub unsafe extern "C" fn tess_table_append_columns(
             let hashes = values(hashes, nrows, "hashes")?;
             let offsets = slots(offsets, nrows, "offsets")?;
             let columns = values(columns, ncolumns, "payload columns")?;
-            let mut words: [&[u64]; 64] = [&[]; 64];
-            let mut nulls: [&[bool]; 64] = [&[]; 64];
+            // Only the columns given are set: a batch of a few rows would
+            // otherwise pay for clearing 64 slices of each kind.
+            let mut words = [const { MaybeUninit::<&[u64]>::uninit() }; 64];
+            let mut nulls = [const { MaybeUninit::<&[bool]>::uninit() }; 64];
             for (index, column) in columns.iter().enumerate() {
                 ensure!(
                     usize::try_from(column.nrows).ok() == Some(nrows),
                     "payload column {index} has {} rows, not {nrows}",
                     column.nrows
                 );
-                words[index] = values(column.values, nrows, "payload values")?;
-                nulls[index] = values(column.isnull, nrows, "payload NULL flags")?;
+                words[index].write(values(column.values, nrows, "payload values")?);
+                nulls[index].write(values(column.isnull, nrows, "payload NULL flags")?);
             }
-            let payload = PayloadColumns::new(&words[..ncolumns], &nulls[..ncolumns], nrows)?;
+            // SAFETY: the loop above initialized the first `ncolumns`
+            // slots of each array, and `ncolumns` is at most 64.
+            let (words, nulls) = (
+                &*(&raw const words[..ncolumns] as *const [&[u64]]),
+                &*(&raw const nulls[..ncolumns] as *const [&[bool]]),
+            );
+            let payload = PayloadColumns::new(words, nulls, nrows)?;
             append_columns_to(
                 &config,
                 chunks,

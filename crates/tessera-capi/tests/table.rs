@@ -8,12 +8,12 @@ use tessera_capi::c::sort_flags::{DESCENDING, NULLABLE, NULLS_FIRST};
 use tessera_capi::c::{
     CSortKey, Code, DatumColumn, Mask, Status, TableKey, TableRecord, TableRef, TableStats,
     tess_int4_hash, tess_int8_hash, tess_sort, tess_sort_item_words, tess_sort_items,
-    tess_sort_layout, tess_table_accumulate, tess_table_append, tess_table_attach,
-    tess_table_chunk_init, tess_table_create, tess_table_find_or_insert, tess_table_format_version,
-    tess_table_gather, tess_table_gather_key, tess_table_layout, tess_table_link,
-    tess_table_link_grouped, tess_table_next_in_group, tess_table_next_match, tess_table_payload,
-    tess_table_probe, tess_table_record, tess_table_regrow, tess_table_scan, tess_table_size,
-    tess_table_stats,
+    tess_sort_layout, tess_table_accumulate, tess_table_append, tess_table_append_columns,
+    tess_table_attach, tess_table_chunk_init, tess_table_create, tess_table_find_or_insert,
+    tess_table_format_version, tess_table_gather, tess_table_gather_key, tess_table_layout,
+    tess_table_link, tess_table_link_grouped, tess_table_next_in_group, tess_table_next_match,
+    tess_table_payload, tess_table_probe, tess_table_record, tess_table_regrow, tess_table_scan,
+    tess_table_size, tess_table_stats,
 };
 use tessera_core::{ColumnView, RowMask, RowMaskView};
 use tessera_kernels::int32::{self, NullKeys};
@@ -1463,6 +1463,121 @@ fn the_sort_entry_points_order_every_record() -> Result<()> {
         let mut refs = vec![0_u32; 3];
         assert_ne!(
             tess_sort(items.as_mut_ptr(), 3, 0, refs.as_mut_ptr(), &raw mut status),
+            Code::Ok
+        );
+    }
+    Ok(())
+}
+
+/// Records appended from payload columns through the C entry point hold a
+/// word of each row's NULL bits and a word per column, 0 for a NULL; a
+/// column of another row count is refused.
+#[test]
+fn the_columns_entry_point_writes_each_payload_word() -> Result<()> {
+    let keys = Keys::new(70);
+    let column = keys.column();
+    let key = TableKey {
+        kind: 1,
+        column: &raw const column,
+        prepared: ptr::null(),
+    };
+    let first: Vec<u64> = (0..70).map(|row| row * 3).collect();
+    let second: Vec<u64> = (0..70).map(|row| row << 40).collect();
+    let first_nulls: Vec<bool> = (0..70).map(|row| row % 4 == 1).collect();
+    let second_nulls = [false; 70];
+    let columns = [
+        DatumColumn {
+            struct_size: size_of::<DatumColumn>(),
+            values: first.as_ptr(),
+            isnull: first_nulls.as_ptr(),
+            nrows: 70,
+        },
+        DatumColumn {
+            struct_size: size_of::<DatumColumn>(),
+            values: second.as_ptr(),
+            isnull: second_nulls.as_ptr(),
+            nrows: 70,
+        },
+    ];
+    let mut status = Status::new();
+    // SAFETY: local buffers of the declared sizes, aliased by nothing else,
+    // throughout this test.
+    unsafe {
+        let mut table = CTable::new(1, 24, 0);
+        table.add_chunk(CHUNK_HEADER + 80 * 48);
+        let hashes = vec![0_u32; 70];
+        let mut pending_words = keys.all_rows();
+        let mut pending = Mask {
+            nrows: 70,
+            bits: pending_words.as_mut_ptr(),
+        };
+        let mut offsets = vec![0_u32; 70];
+        let code = tess_table_append_columns(
+            table.ptr(),
+            0,
+            hashes.as_ptr(),
+            1,
+            &raw const key,
+            2,
+            columns.as_ptr(),
+            &raw mut pending,
+            offsets.as_mut_ptr(),
+            &raw mut status,
+        );
+        assert_eq!(code, Code::Ok, "{}", status.message());
+        assert!(pending_words.iter().all(|&word| word == 0));
+        let mut record = TableRecord {
+            struct_size: size_of::<TableRecord>(),
+            hash: 0,
+            null_bits: 0,
+            keys: ptr::null(),
+            payload: ptr::null(),
+            payload_size: 0,
+        };
+        for row in 0..70 {
+            let code =
+                tess_table_record(table.ptr(), offsets[row], &raw mut record, &raw mut status);
+            assert_eq!(code, Code::Ok, "{}", status.message());
+            let words: Vec<u64> = std::slice::from_raw_parts(record.payload, 24)
+                .chunks(8)
+                .map(|word| u64::from_ne_bytes(word.try_into().unwrap()))
+                .collect();
+            let null = first_nulls[row];
+            assert_eq!(
+                words,
+                [
+                    u64::from(null),
+                    if null { 0 } else { first[row] },
+                    second[row]
+                ]
+            );
+        }
+        // A column of another row count is refused.
+        let short = [
+            DatumColumn {
+                nrows: 69,
+                ..columns[0]
+            },
+            DatumColumn { ..columns[1] },
+        ];
+        let mut pending_words = keys.all_rows();
+        let mut pending = Mask {
+            nrows: 70,
+            bits: pending_words.as_mut_ptr(),
+        };
+        assert_ne!(
+            tess_table_append_columns(
+                table.ptr(),
+                0,
+                hashes.as_ptr(),
+                1,
+                &raw const key,
+                2,
+                short.as_ptr(),
+                &raw mut pending,
+                offsets.as_mut_ptr(),
+                &raw mut status,
+            ),
             Code::Ok
         );
     }
