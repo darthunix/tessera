@@ -113,6 +113,17 @@ SELECT pg_temp.measure_pair('topn_reverse',
     'SELECT sorted, v FROM bench_sort ORDER BY sorted DESC LIMIT 10', :repetitions);
 SELECT pg_temp.measure_pair('topn_offset',
     'SELECT k4, v FROM bench_sort ORDER BY k4 OFFSET 1000 LIMIT 10', :repetitions);
+-- Distinct: the distinct values of a key of 1000 values and of a unique
+-- one, counted above; count(DISTINCT) over the whole table and per group.
+SELECT pg_temp.measure_pair('distinct_few',
+    'SELECT count(*) FROM (SELECT DISTINCT few FROM bench_sort) AS s', :repetitions);
+SELECT pg_temp.measure_pair('distinct_many',
+    'SELECT count(*) FROM (SELECT DISTINCT k4 FROM bench_sort) AS s', :repetitions);
+SELECT pg_temp.measure_pair('distinct_agg',
+    'SELECT count(DISTINCT few) FROM bench_sort', :repetitions);
+SELECT pg_temp.measure_pair('distinct_group',
+    'SELECT count(*), sum(n) FROM (SELECT few, count(DISTINCT k4 % 100) AS n FROM bench_sort GROUP BY few) AS s',
+    :repetitions);
 -- A sort over a filter that keeps one row in ten.
 SELECT pg_temp.measure_pair('order_filter',
     format('SELECT k4, v FROM bench_sort WHERE few < 100 ORDER BY k4 OFFSET %s', :rows),
@@ -138,12 +149,14 @@ SELECT format('EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF
 FROM unnest(ARRAY['order_int', 'order_big', 'order_few', 'order_multi', 'order_desc',
                   'order_sorted', 'order_wide', 'order_out', 'order_text_out',
                   'topn_few', 'topn_many', 'topn_reverse', 'topn_offset',
+                  'distinct_few', 'distinct_many', 'distinct_agg', 'distinct_group',
                   'order_filter']) AS name \gexec
 SET tessera.enable = off;
 SELECT format('EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE off_%s', name)
 FROM unnest(ARRAY['order_int', 'order_big', 'order_few', 'order_multi', 'order_desc',
                   'order_sorted', 'order_wide', 'order_out', 'order_text_out',
                   'topn_few', 'topn_many', 'topn_reverse', 'topn_offset',
+                  'distinct_few', 'distinct_many', 'distinct_agg', 'distinct_group',
                   'order_filter']) AS name \gexec
 \o
 RESET work_mem;

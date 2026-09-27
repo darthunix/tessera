@@ -59,7 +59,9 @@ query down, and where it can, does it speed one up.
   above them, so that the sort's columns are read too; four take the first
   rows under `LIMIT` (top-N): 10 and 100000 rows of keys in no order, 10
   rows of keys in the reverse of the rows' order, where every row beats
-  the ones kept so far, and 10 rows after an offset of 1000; `work_mem` is 512 MB in both modes, so the core sorts in
+  the ones kept so far, and 10 rows after an offset of 1000; four count
+  distinct values: `SELECT DISTINCT` of a key of 1000 values and of a
+  unique one, `count(DISTINCT)` over the table and per group of 1000; `work_mem` is 512 MB in both modes, so the core sorts in
   memory. A ratio below one is the win.
 - **oltp**: short prepared-statement queries, `pgbench -S`, where the
   planner hooks and the loaded modules must not slow down queries that
