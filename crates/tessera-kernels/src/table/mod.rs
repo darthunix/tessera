@@ -91,6 +91,7 @@ mod lanes;
 mod local;
 #[cfg(all(test, loom))]
 mod loom;
+mod order;
 pub mod phases;
 mod record;
 mod region;
@@ -578,6 +579,16 @@ impl<'a> Table<'a> {
             values,
             nulls,
         )
+    }
+
+    /// The sort items of every record of every chunk, linked or not, in
+    /// the order appended, one after another in `items` (see
+    /// [`crate::sort`]): `keys` order the table's keys, one each, of its
+    /// kinds. Returns the count; [`crate::sort::sort_items`] then sorts
+    /// them and gives the references in order. The chunks must not change
+    /// meanwhile.
+    pub fn sort_items(&self, keys: &[crate::sort::SortKey], items: &mut [u64]) -> Result<usize> {
+        order::items(&self.region, &self.layout, keys, items)
     }
 
     /// Fill a Bloom filter of [`bloom::words_for`] this table's records

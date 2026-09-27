@@ -25,7 +25,8 @@
 //! hashed with vector code on AArch64, division by a scalar included;
 //! everything else takes the row paths. [`table`] is a hash table in a
 //! region of memory the caller owns, for joins and grouping, addressed by
-//! offsets so that the same bytes serve local and shared memory. `unsafe`
+//! offsets so that the same bytes serve local and shared memory, and
+//! [`sort`] orders a table's records by their integer keys. `unsafe`
 //! is denied crate-wide and allowed only in two isolated modules: [`simd`],
 //! for vector loads, and [`table`], for the region over raw pointers.
 
@@ -37,4 +38,5 @@ pub mod int32;
 pub mod int64;
 pub mod ops;
 mod simd;
+pub mod sort;
 pub mod table;

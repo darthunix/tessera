@@ -117,9 +117,9 @@ tess_rows_create(const TessRowsConfig *config)
 		config->kernels->table_append == NULL ||
 		config->kernels->table_gather == NULL)
 		elog(ERROR, "Tessera rows require the kernels of the table");
-	if (config->nkeys < 0 || config->nkeys > TESS_TABLE_MAX_KEYS ||
-		(config->nkeys > 0 && config->kinds == NULL))
-		elog(ERROR, "Tessera rows take 0..%d keys", TESS_TABLE_MAX_KEYS);
+	if (config->nkeys < 1 || config->nkeys > TESS_TABLE_MAX_KEYS ||
+		config->kinds == NULL)
+		elog(ERROR, "Tessera rows take 1..%d keys", TESS_TABLE_MAX_KEYS);
 	if (config->ncolumns < 0 || config->ncolumns > TESS_ROWS_MAX_COLUMNS ||
 		(config->ncolumns > 0 &&
 		 (config->typlens == NULL || config->typbyvals == NULL)))
@@ -299,7 +299,7 @@ tess_rows_append(TessRows *rows, const TessTableKey *keys,
 	bool		fresh = false;
 
 	check_rows(rows);
-	if (mask == NULL || refs == NULL || (rows->nkeys > 0 && keys == NULL) ||
+	if (mask == NULL || refs == NULL || keys == NULL ||
 		(rows->ncolumns > 0 && columns == NULL))
 		elog(ERROR, "Tessera rows append requires keys, columns, a mask and references");
 	count = tess_row_mask_count(mask);

@@ -735,7 +735,7 @@ typedef struct TessRowsConfig
 	MemoryContext parent_context;
 	/* The table's kernels: size, create, chunk_init, append, gather. */
 	const TessKernelOps *kernels;
-	/* The keys every record holds, in their slots. */
+	/* The keys every record holds, in their slots: one at least. */
 	int			nkeys;
 	const TessTableKeyKind *kinds;
 	/* The kept columns, at most TESS_ROWS_MAX_COLUMNS, and their types. */
