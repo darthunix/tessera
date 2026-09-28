@@ -84,6 +84,8 @@ enum
 	AGG_SPLITS,
 	/* Partial mode: the times the groups went out before the input ended. */
 	AGG_EARLY,
+	/* Generic states past hash_mem: the rows sent to partitions on disk. */
+	AGG_SPILLED_ROWS,
 	AGG_NCOUNTERS
 };
 
@@ -225,6 +227,28 @@ typedef struct TessAggState
 	/* The bytes from a record's start to its payload, once known. */
 	Size		payload_delta;
 	bool		payload_known;
+	/*
+	 * Such groups past hash_mem go the core's way: the table takes no new
+	 * group (frozen), and the rows of the groups it lacks go, their keys'
+	 * and arguments' values, to partitions on disk by bits of their hash,
+	 * each read back later into a table of its own; a partition too large
+	 * again splits by the next bits. The sets of partitions still to read
+	 * wait in a stack, the one being written on top.
+	 */
+	bool		frozen;
+	/* The level a spill made now writes: 0 for the input, one below a partition read. */
+	int			rows_level;
+	struct RowSpill *rows_spill;
+	List	   *rows_pending;
+	struct RowReader *reader;
+	bool		replaying;
+	int			ncomputed;
+	int16	   *computed_lens;
+	bool	   *computed_byvals;
+	TessDatumColumn *computed_columns;
+	uint64	   *missing_bits;
+	int			missing_words;
+	uint64		spilled_rows;
 
 	/*
 	 * GROUP BY: the keys, computed columns before the arguments, and the
@@ -922,8 +946,11 @@ create_upper_paths(PlannerInfo *root, UpperRelationKind stage,
 		return;
 	if (!distinct_fits(root, input_rel, keys, tlist))
 		return;
-	/* Groups of generic aggregates do not spill: their states must fit. */
-	if (keys != NIL && has_generic(tlist) &&
+	/*
+	 * Groups of generic aggregates spill their rows, not their states, but
+	 * not alongside a DISTINCT aggregate's table: then their states must fit.
+	 */
+	if (keys != NIL && has_generic(tlist) && has_distinct_aggregate(tlist) &&
 		!generic_fits(root, output_rel, list_length(keys), tlist))
 		return;
 	/*
@@ -1255,6 +1282,7 @@ generic_accumulate(TessAggState *state, GenericAgg *generic, const TessRowMask *
 }
 
 static inline void check(TessAggState *state, TessStatusCode code);
+static void rows_spill_free(TessAggState *state);
 
 /* The payload of the record at ref, in the chunk's memory, which the node writes. */
 static uint64 *
@@ -1520,6 +1548,17 @@ agg_begin(CustomScanState *css, EState *estate, int eflags)
 				state->has_distinct = true;
 			}
 		}
+	}
+	state->ncomputed = list_length(computed);
+	state->computed_lens = palloc_array(int16, Max(state->ncomputed, 1));
+	state->computed_byvals = palloc_array(bool, Max(state->ncomputed, 1));
+	state->computed_columns = palloc0_array(TessDatumColumn, Max(state->ncomputed, 1));
+	foreach_node(TargetEntry, entry, computed)
+	{
+		int			column = foreach_current_index(entry);
+
+		get_typlenbyval(exprType((Node *) entry->expr), &state->computed_lens[column],
+						&state->computed_byvals[column]);
 	}
 	if (computed != NIL)
 	{
@@ -3101,6 +3140,395 @@ agg_spill_memory(TessAggState *state)
 }
 
 /* A computed column of the projection's wrapper, checked. */
+/* ------------------------------------------------------ rows past hash_mem */
+
+/* Hash bits a level of partitions of rows takes, and the most levels. */
+#define ROWS_PART_BITS 5
+#define ROWS_PARTS (1 << ROWS_PART_BITS)
+#define ROWS_MAX_LEVELS (32 / ROWS_PART_BITS)
+/* Rows of a block, and the first bytes of its values. */
+#define ROWS_BLOCK_ROWS 256
+#define ROWS_BLOCK_VALUES 8192
+
+/* The block a partition fills: its columns and its by-reference values. */
+typedef struct RowWriter
+{
+	void	   *chunk;
+	Size		chunk_len;
+	uint32		capacity;
+	uint32		rows;
+	char	   *values;
+	Size		values_len;
+	Size		values_used;
+	uint64		written;
+} RowWriter;
+
+/* A level of partitions: one set of files, a partition per ROWS_PART_BITS bits. */
+typedef struct RowSpill
+{
+	TessSpill  *file;
+	int			level;
+	RowWriter	writers[ROWS_PARTS];
+	/* Reading: the next partition to read. */
+	int			next;
+} RowSpill;
+
+/* A partition being read back: the block in hand and its next row. */
+typedef struct RowReader
+{
+	TessSpillReader *file;
+	void	   *chunk;
+	Size		chunk_len;
+	char	   *values;
+	Size		values_len;
+	uint32		rows;
+	uint32		next;
+	/* The batch given to group_batch: a window of the block. */
+	TessBatch	batch;
+	uint64		bits;
+	Datum	  **column_values;
+	bool	  **column_isnull;
+} RowReader;
+
+/* Words of a block: one per computed column. */
+static int
+rows_words(TessAggState *state)
+{
+	return state->ncomputed;
+}
+
+static void
+rows_writer_reset(TessAggState *state, RowWriter *writer)
+{
+	Size		capacity;
+
+	check(state, state->kernels->spill_columns_init(writer->chunk, writer->chunk_len,
+													rows_words(state), &capacity,
+													&state->status));
+	writer->capacity = (uint32) capacity;
+	writer->rows = 0;
+	writer->values_used = 0;
+}
+
+/* A level of partitions, their files not made until written. */
+static RowSpill *
+rows_spill_create(TessAggState *state, int level)
+{
+	MemoryContext context = state->css.ss.ps.state->es_query_cxt;
+	TessSpillConfig config = TESS_STRUCT_INITIALIZER(TessSpillConfig);
+	RowSpill   *spill = MemoryContextAllocZero(context, sizeof(RowSpill));
+	int			null_lanes = tess_spill_columns_null_lanes(rows_words(state));
+
+	config.parent_context = context;
+	config.kernels = state->kernels;
+	config.npartitions = ROWS_PARTS;
+	config.level = (uint32) level;
+	config.fingerprint = (uint64) rows_words(state);
+	config.max_len = MaxAllocHugeSize;
+	config.buffer_len = TESS_SPILL_BUFFER_LEN(get_hash_memory_limit());
+	spill->file = tess_spill_create(&config);
+	spill->level = level;
+	for (int part = 0; part < ROWS_PARTS; part++)
+	{
+		RowWriter  *writer = &spill->writers[part];
+
+		writer->chunk_len = TESS_SPILL_COLUMNS_HEADER +
+			sizeof(uint64) * ROWS_BLOCK_ROWS * (null_lanes + rows_words(state));
+		writer->chunk = MemoryContextAlloc(context, writer->chunk_len);
+		writer->values_len = ROWS_BLOCK_VALUES;
+		writer->values = MemoryContextAlloc(context, writer->values_len);
+		rows_writer_reset(state, writer);
+	}
+	state->partitions += ROWS_PARTS;
+	return spill;
+}
+
+/* Write a partition's block: its values, then its columns. */
+static void
+rows_flush(TessAggState *state, RowSpill *spill, int part)
+{
+	RowWriter  *writer = &spill->writers[part];
+
+	if (writer->rows == 0)
+		return;
+	tess_spill_columns_set_rows(writer->chunk, writer->rows);
+	state->disk_bytes += tess_spill_write(spill->file, part, TESS_SPILL_VALUES, 0,
+										  writer->values, writer->values_used, NULL);
+	state->disk_bytes += tess_spill_write(spill->file, part, TESS_SPILL_COLUMNS, 0,
+										  writer->chunk, writer->chunk_len, NULL);
+	state->spilled++;
+	writer->written += writer->rows;
+	rows_writer_reset(state, writer);
+}
+
+/*
+ * The rows of rows to their partitions by the bits of their hash of the
+ * spill's level: the values of every computed column, a by-reference one
+ * copied into the block's values.
+ */
+static void
+rows_write(TessAggState *state, RowSpill *spill, const TessRowMask *rows)
+{
+	int			null_lanes = tess_spill_columns_null_lanes(rows_words(state));
+	int			shift = 32 - ROWS_PART_BITS * (spill->level + 1);
+	int			row = -1;
+
+	while ((row = tess_row_mask_next(rows, row)) >= 0)
+	{
+		int			part = (int) ((state->hashes[row] >> shift) & (ROWS_PARTS - 1));
+		RowWriter  *writer = &spill->writers[part];
+		Size		need = 0;
+		uint64	   *nulls;
+		uint64	   *words;
+
+		for (int column = 0; column < state->ncomputed; column++)
+			if (!state->computed_byvals[column] && !state->computed_columns[column].isnull[row])
+				need += MAXALIGN(datumGetSize(state->computed_columns[column].values[row], false,
+											  state->computed_lens[column]));
+		if (writer->rows == writer->capacity ||
+			(writer->rows > 0 && writer->values_used + need > writer->values_len))
+			rows_flush(state, spill, part);
+		if (writer->values_used + need > writer->values_len)
+		{
+			writer->values_len = Max(writer->values_len * 2, writer->values_used + need);
+			writer->values = repalloc_huge(writer->values, writer->values_len);
+		}
+		nulls = tess_spill_columns_lane(writer->chunk, 0) + writer->rows;
+		words = nulls + (Size) writer->capacity * null_lanes;
+		for (int lane = 0; lane < null_lanes; lane++)
+			nulls[(Size) writer->capacity * lane] = 0;
+		for (int column = 0; column < state->ncomputed; column++)
+		{
+			const TessDatumColumn *from = &state->computed_columns[column];
+			uint64	   *lane = words + (Size) writer->capacity * column;
+
+			if (from->isnull[row])
+			{
+				nulls[(Size) writer->capacity * (column / 64)] |= UINT64CONST(1) << (column % 64);
+				lane[0] = 0;
+			}
+			else if (state->computed_byvals[column])
+				lane[0] = (uint64) from->values[row];
+			else
+			{
+				Size		size = datumGetSize(from->values[row], false,
+												state->computed_lens[column]);
+
+				memcpy(writer->values + writer->values_used,
+					   DatumGetPointer(from->values[row]), size);
+				lane[0] = writer->values_used;
+				writer->values_used += MAXALIGN(size);
+			}
+		}
+		writer->rows++;
+		state->spilled_rows++;
+	}
+}
+
+/* End a level's writes and put it on the stack of partitions to read. */
+static void
+rows_spill_close(TessAggState *state)
+{
+	RowSpill   *spill = state->rows_spill;
+
+	if (spill == NULL)
+		return;
+	for (int part = 0; part < ROWS_PARTS; part++)
+		rows_flush(state, spill, part);
+	tess_spill_finish(spill->file);
+	spill->next = 0;
+	state->rows_pending = lcons(spill, state->rows_pending);
+	state->rows_spill = NULL;
+}
+
+static void
+rows_spill_free_one(RowSpill *spill)
+{
+	for (int part = 0; part < ROWS_PARTS; part++)
+	{
+		pfree(spill->writers[part].chunk);
+		pfree(spill->writers[part].values);
+	}
+	tess_spill_free(spill->file);
+	pfree(spill);
+}
+
+/* Forget every level of partitions and the partition being read. */
+static void
+rows_spill_free(TessAggState *state)
+{
+	if (state->reader != NULL)
+	{
+		if (state->reader->file != NULL)
+			tess_spill_close(state->reader->file);
+		state->reader->file = NULL;
+	}
+	if (state->rows_spill != NULL)
+		rows_spill_free_one(state->rows_spill);
+	state->rows_spill = NULL;
+	foreach_ptr(RowSpill, spill, state->rows_pending)
+		rows_spill_free_one(spill);
+	list_free(state->rows_pending);
+	state->rows_pending = NIL;
+	state->frozen = false;
+	state->replaying = false;
+}
+
+/* A column of the window of rows read back: the computed column it holds. */
+static void
+reader_get_column(TessBatch *batch, int column, const TessRowMask *rows,
+				  TessColumnPurpose purpose, TessDatumColumn *result)
+{
+	TessAggState *state = (TessAggState *) batch->private_data;
+	int			computed = column - state->child_layout.ncolumns;
+
+	if (computed < 0 || computed >= state->ncomputed)
+		elog(ERROR, "TessAgg read back no column %d", column);
+	result->values = state->reader->column_values[computed];
+	result->isnull = state->reader->column_isnull[computed];
+	result->nrows = batch->rows.nrows;
+}
+
+static const TessBatchOps reader_batch_ops = {
+	TESS_ABI_INITIALIZER(TESS_BATCH_OPS_ABI_VERSION, TessBatchOps),
+	.get_datum_column = reader_get_column,
+};
+
+/*
+ * The next window of up to 64 rows of the partition being read, as a
+ * batch whose computed columns are the values written; NULL at the end.
+ */
+static TessBatch *
+reader_next(TessAggState *state)
+{
+	RowReader  *reader = state->reader;
+	int			null_lanes = tess_spill_columns_null_lanes(rows_words(state));
+	uint32		take;
+	Size		capacity;
+
+	while (reader->next >= reader->rows)
+	{
+		TessSpillHeader header;
+
+		if (reader->file == NULL || !tess_spill_read_header(reader->file, &header))
+			return NULL;
+		if (header.kind != TESS_SPILL_VALUES)
+			elog(ERROR, "TessAgg read a damaged partition of rows");
+		if (header.len > reader->values_len)
+		{
+			reader->values_len = Max(header.len, reader->values_len * 2);
+			reader->values = repalloc_huge(reader->values, reader->values_len);
+		}
+		tess_spill_read_body(reader->file, reader->values, header.len);
+		if (!tess_spill_read_header(reader->file, &header) ||
+			header.kind != TESS_SPILL_COLUMNS || header.len > reader->chunk_len)
+			elog(ERROR, "TessAgg read a damaged partition of rows");
+		tess_spill_read_body(reader->file, reader->chunk, header.len);
+		reader->rows = tess_spill_columns_rows(reader->chunk);
+		reader->next = 0;
+	}
+	capacity = tess_spill_columns_capacity(reader->chunk);
+	take = Min(reader->rows - reader->next, 64);
+	for (int column = 0; column < state->ncomputed; column++)
+	{
+		const uint64 *nulls = tess_spill_columns_lane(reader->chunk, 0) +
+			capacity * (column / 64) + reader->next;
+		const uint64 *lane = tess_spill_columns_lane(reader->chunk, 0) +
+			capacity * (null_lanes + column) + reader->next;
+
+		for (uint32 row = 0; row < take; row++)
+		{
+			bool		isnull = ((nulls[row] >> (column % 64)) & 1) != 0;
+
+			reader->column_isnull[column][row] = isnull;
+			reader->column_values[column][row] = isnull ? (Datum) 0 :
+				state->computed_byvals[column] ? (Datum) lane[row] :
+				PointerGetDatum(reader->values + lane[row]);
+		}
+	}
+	reader->next += take;
+	reader->bits = take == 64 ? UINT64_MAX : (UINT64CONST(1) << take) - 1;
+	reader->batch.rows.nrows = (int) take;
+	reader->batch.rows.bits = &reader->bits;
+	return &reader->batch;
+}
+
+/*
+ * Open the next partition to read, depth first: the last level written
+ * first; false when none is left. Its groups start in a table of their
+ * own, and a partition too large again spills into a level below.
+ */
+static bool
+rows_next_partition(TessAggState *state)
+{
+	RowReader  *reader = state->reader;
+
+	if (reader->file != NULL)
+		tess_spill_close(reader->file);
+	reader->file = NULL;
+	while (state->rows_pending != NIL)
+	{
+		RowSpill   *spill = linitial(state->rows_pending);
+
+		while (spill->next < ROWS_PARTS)
+		{
+			int			part = spill->next++;
+
+			if (spill->writers[part].written == 0)
+				continue;
+			reader->file = tess_spill_open(spill->file, 0, part);
+			reader->rows = 0;
+			reader->next = 0;
+			/* The level below takes the next bits, the last level none. */
+			state->rows_level = spill->level + 1;
+			return true;
+		}
+		state->rows_pending = list_delete_first(state->rows_pending);
+		rows_spill_free_one(spill);
+	}
+	return false;
+}
+
+/* The reader's buffers and batch, once. */
+static void
+rows_reader_init(TessAggState *state)
+{
+	MemoryContext context = state->css.ss.ps.state->es_query_cxt;
+	RowReader  *reader = MemoryContextAllocZero(context, sizeof(RowReader));
+	int			null_lanes = tess_spill_columns_null_lanes(rows_words(state));
+
+	reader->chunk_len = TESS_SPILL_COLUMNS_HEADER +
+		sizeof(uint64) * ROWS_BLOCK_ROWS * (null_lanes + rows_words(state));
+	reader->chunk = MemoryContextAlloc(context, reader->chunk_len);
+	reader->values_len = ROWS_BLOCK_VALUES;
+	reader->values = MemoryContextAlloc(context, reader->values_len);
+	reader->column_values = MemoryContextAlloc(context, sizeof(Datum *) * state->ncomputed);
+	reader->column_isnull = MemoryContextAlloc(context, sizeof(bool *) * state->ncomputed);
+	for (int column = 0; column < state->ncomputed; column++)
+	{
+		reader->column_values[column] = MemoryContextAllocZero(context, sizeof(Datum) * 64);
+		reader->column_isnull[column] = MemoryContextAllocZero(context, sizeof(bool) * 64);
+	}
+	reader->batch.abi_version = TESS_BATCH_ABI_VERSION;
+	reader->batch.struct_size = sizeof(TessBatch);
+	reader->batch.ops = &reader_batch_ops;
+	reader->batch.private_data = state;
+	reader->batch.table_oid = InvalidOid;
+	state->reader = reader;
+}
+
+/* The bytes the groups take: the table and, with generic aggregates, their states. */
+static Size
+groups_memory(TessAggState *state)
+{
+	Size		bytes = state->table_bytes;
+
+	if (state->has_generic)
+		bytes += MemoryContextMemAllocated(state->generic_agg->curaggcontext->ecxt_per_tuple_memory,
+										   true);
+	return bytes;
+}
+
 /* The child's columns the node reads, in their order, before it computes anything. */
 static void
 read_in_order(TessAggState *state, TessBatch *batch)
@@ -3146,7 +3574,8 @@ group_batch(TessAggState *state, TessBatch *batch)
 	TessRowMask inserted;
 
 	reserve_rows(state, nrows);
-	read_in_order(state, batch);
+	if (!state->replaying)
+		read_in_order(state, batch);
 	memset(state->valid_bits, 0, sizeof(uint64) * nwords);
 	memset(state->inserted_bits, 0, sizeof(uint64) * nwords);
 	valid = (TessRowMask) {nrows, state->valid_bits};
@@ -3175,11 +3604,49 @@ group_batch(TessAggState *state, TessBatch *batch)
 		state->table_keys[key].prepared = NULL;
 	}
 	memcpy(state->pending_bits, state->valid_bits, sizeof(uint64) * nwords);
-	if (state->spill != NULL)
+	/*
+	 * A frozen table takes no new group: the rows of the groups it has go
+	 * on into them, the others, their computed values, to disk.
+	 */
+	if (state->frozen)
+	{
+		uint64	   *missing_bits;
+		TessRowMask missing;
+
+		if (state->missing_words < nwords)
+		{
+			state->missing_words = nwords;
+			state->missing_bits = state->missing_bits == NULL ?
+				MemoryContextAlloc(state->css.ss.ps.state->es_query_cxt,
+								   sizeof(uint64) * nwords) :
+				repalloc(state->missing_bits, sizeof(uint64) * nwords);
+		}
+		missing_bits = state->missing_bits;
+		missing = (TessRowMask) {nrows, missing_bits};
+
+		check(state, state->kernels->table_probe(&state->table, state->hashes, state->nkeys,
+												 state->table_keys, &valid, state->offsets,
+												 &pending, &state->status));
+		for (int word = 0; word < nwords; word++)
+		{
+			missing_bits[word] = state->valid_bits[word] & ~state->pending_bits[word];
+			state->valid_bits[word] = state->pending_bits[word];
+		}
+		for (int column = 0; column < state->ncomputed; column++)
+		{
+			if (column < state->nkeys)
+				state->computed_columns[column] = state->key_columns[column];
+			else
+				computed_column(state, batch, column, TESS_COLUMN_FOR_PROJECTION,
+								&state->computed_columns[column]);
+		}
+		rows_write(state, state->rows_spill, &missing);
+	}
+	else if (state->spill != NULL)
 		agg_find_partitioned(state, &pending, &inserted);
 	else if (state->table.nchunks == 0)
 		add_chunk(state);
-	for (; state->spill == NULL;)
+	for (; state->spill == NULL && !state->frozen;)
 	{
 		TessTableStats stats = TESS_STRUCT_INITIALIZER(TessTableStats);
 
@@ -3246,6 +3713,14 @@ group_batch(TessAggState *state, TessBatch *batch)
 		!state->has_distinct && !state->has_generic &&
 		state->table_bytes > get_hash_memory_limit() / 8 * 7)
 		agg_start_spill(state);
+	/* Generic states past hash_mem: the table freezes, new groups' rows go to disk. */
+	if (state->has_generic && !state->has_distinct && !state->frozen &&
+		state->rows_level < ROWS_MAX_LEVELS &&
+		groups_memory(state) > get_hash_memory_limit() / 8 * 7)
+	{
+		state->frozen = true;
+		state->rows_spill = rows_spill_create(state, state->rows_level);
+	}
 	if (state->spill != NULL)
 		agg_make_room(state);
 }
@@ -3255,6 +3730,8 @@ static void
 group_drain(TessAggState *state)
 {
 	agg_spill_free(state);
+	rows_spill_free(state);
+	state->rows_level = 0;
 	/* The groups of a previous table and their states go together. */
 	if (state->generic_agg != NULL)
 		ReScanExprContext(state->generic_agg->curaggcontext);
@@ -3362,6 +3839,34 @@ group_value(TessAggState *state, int index, int group, TupleTableSlot *scan)
  * plan's projection, as for the one row without GROUP BY. NULL when the
  * walk is over; a batch HAVING left empty is not returned.
  */
+/*
+ * The rows of the next partition into a table of their own, their groups
+ * from the initial states; false when no partition is left.
+ */
+static bool
+rows_drain(TessAggState *state)
+{
+	TessBatch  *batch;
+
+	rows_spill_close(state);
+	if (state->reader == NULL)
+		rows_reader_init(state);
+	if (!rows_next_partition(state))
+		return false;
+	ReScanExprContext(state->generic_agg->curaggcontext);
+	create_table(state);
+	state->frozen = false;
+	state->replaying = true;
+	while ((batch = reader_next(state)) != NULL)
+	{
+		ResetExprContext(state->css.ss.ps.ps_ExprContext);
+		group_batch(state, batch);
+	}
+	state->replaying = false;
+	state->cursor = 0;
+	return true;
+}
+
 static TessBatch *
 next_groups(TessAggState *state)
 {
@@ -3390,6 +3895,10 @@ next_groups(TessAggState *state)
 				group_drain(state);
 				continue;
 			}
+			/* The next partition of rows of groups a frozen table lacked. */
+			if ((state->rows_spill != NULL || state->rows_pending != NIL) &&
+				rows_drain(state))
+				continue;
 			/* The next partition of a table that spilled. */
 			if (state->spill == NULL || !agg_advance(state))
 				return NULL;
@@ -3524,6 +4033,7 @@ agg_end(CustomScanState *css)
 	tess_output_end(state->output);
 	ExecEndNode(state->child);
 	agg_spill_free(state);
+	rows_spill_free(state);
 	if (state->table_context != NULL)
 		MemoryContextDelete(state->table_context);
 }
@@ -3553,6 +4063,7 @@ agg_rescan(CustomScanState *css)
 	state->calls = 0;
 	/* GROUP BY: the table is built again from the rescanned child. */
 	agg_spill_free(state);
+	rows_spill_free(state);
 	state->drained = false;
 	state->input_done = false;
 	state->published = NULL;
@@ -3584,6 +4095,7 @@ agg_counters(TessAggState *state, uint64 *values)
 	values[AGG_DISK] = state->disk_bytes;
 	values[AGG_SPLITS] = state->splits;
 	values[AGG_EARLY] = state->early_emits;
+	values[AGG_SPILLED_ROWS] = state->spilled_rows;
 }
 
 /* The totals of every participant in a parallel plan, else the node's own. */
@@ -3641,6 +4153,8 @@ agg_explain(CustomScanState *css, List *ancestors, ExplainState *es)
 			ExplainPropertyInteger("Evictions", NULL, totals[AGG_EVICTIONS], es);
 			ExplainPropertyInteger("Spilled Chunks", NULL, totals[AGG_SPILLED], es);
 			ExplainPropertyInteger("Disk Usage", "kB", (totals[AGG_DISK] + 1023) / 1024, es);
+			if (totals[AGG_SPILLED_ROWS] > 0)
+				ExplainPropertyInteger("Spilled Rows", NULL, totals[AGG_SPILLED_ROWS], es);
 			if (totals[AGG_SPLITS] > 0)
 				ExplainPropertyInteger("Split Partitions", NULL, totals[AGG_SPLITS], es);
 		}

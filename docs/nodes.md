@@ -491,11 +491,22 @@ inserts start from the initial value, and each row, in order, since rows
 of one group may follow one another, reads its group's state from the
 record, advances it and writes it back; a group's final value is
 computed when the group goes out, in memory reset per group. Such groups
-cannot spill (the records hold addresses), so the path is taken only
-when the planner's estimate of the groups and their states, a type's
-average width or an internal state's declared space or 1 kB as the core
-estimates them, fits `hash_mem`, and not in a partial plan, whose table
-empties early. For each of the core's plain aggregate paths whose input can be read
+cannot spill as records (they hold addresses), so past seven eighths of
+`hash_mem`, counting the states' memory, they go the core's way: the
+table freezes and takes no new group, the rows of its groups go on into
+them, and the rows of the groups it lacks go, the values of every key
+and argument (`TESS_SPILL_COLUMNS` blocks of 256 rows and blocks of
+their by-reference values), to 32 partitions on disk by five bits of
+their hash. Once the groups in memory are out, each partition is read
+back, 64 rows a batch, into a table of its own with fresh states; one
+that does not fit either spills by the next five bits, depth first, six
+levels at most (`Spilled Rows` in `EXPLAIN ANALYZE`). A group's rows stay
+in their order, as an order-sensitive aggregate such as `string_agg`
+needs. With a `DISTINCT` aggregate alongside, whose table does not
+spill, the path is taken only when the planner's estimate of the groups
+and their states, a type's average width or an internal state's
+declared space or 1 kB as the core estimates them, fits `hash_mem`. Not
+in a partial plan, whose table empties early. For each of the core's plain aggregate paths whose input can be read
 in batches (`tess_batch_input_path`: a batch path as it is, a clause-free
 sequential scan through `TessHeapScan`, anything else through `TessPack`),
 the node's path takes the core path as its template at nine tenths of its

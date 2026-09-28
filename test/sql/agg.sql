@@ -397,10 +397,52 @@ ANALYZE agg_groups;
 SELECT agg_same($$SELECT count(*), max(m), sum(s), max(l) FROM (SELECT g, max(t) AS m, sum(n) AS s, length(string_agg(t, ',')) AS l FROM agg_groups GROUP BY g) AS q$$);
 -- Rescan builds the groups anew.
 SELECT agg_same($$SELECT x, (SELECT max(m) FROM (SELECT g, max(t) AS m FROM agg_groups WHERE g < x GROUP BY g) AS q) FROM generate_series(1, 3) AS x$$);
--- Their states cannot spill: past hash_mem by the planner's estimate the
--- grouping stays with the core.
+-- Past hash_mem the table freezes, as the core's does: the rows of the
+-- groups it has go on into them, the others to partitions on disk, read
+-- back one by one into tables of their own, and split again when one
+-- still does not fit; a group's rows stay in their order.
+CREATE FUNCTION agg_spill(query text) RETURNS text
+LANGUAGE plpgsql AS $$
+DECLARE
+    line text;
+    rows boolean := false;
+    last int := 0;
+    parts int := 0;
+BEGIN
+    -- TessAgg's partitions: its Batches line comes right before Evictions.
+    FOR line IN EXECUTE 'EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) ' || query LOOP
+        rows := rows OR line ~ 'Spilled Rows: [1-9]';
+        IF line ~ '^ *Batches: \d+$' THEN
+            last := substring(line FROM 'Batches: (\d+)')::int;
+        ELSIF line ~ 'Evictions:' THEN
+            parts := last;
+        END IF;
+    END LOOP;
+    RETURN format('rows spilled: %s, levels: %s', rows,
+                  CASE WHEN parts = 0 THEN 'none' WHEN parts > 32 THEN 'several' ELSE 'one' END);
+END
+$$;
 SET work_mem = '64kB';
+SET enable_sort = off;
 EXPLAIN (COSTS OFF) SELECT g, max(t) FROM agg_groups GROUP BY g;
+SELECT agg_spill($$SELECT g, max(t) FROM agg_groups GROUP BY g$$);
+SET work_mem = '1MB';
+SELECT agg_spill($$SELECT g, max(t) FROM agg_groups GROUP BY g$$);
+SELECT agg_same($$SELECT count(*), max(m), sum(s), max(l), sum(c) FROM (SELECT g, max(t) AS m, sum(n) AS s, length(string_agg(t, ',')) AS l, count(*) AS c FROM agg_groups GROUP BY g) AS q$$);
+SET work_mem = '64kB';
+SELECT agg_same($$SELECT count(*), max(m), sum(s), max(l), sum(c) FROM (SELECT g, max(t) AS m, sum(n) AS s, length(string_agg(t, ',')) AS l, count(*) AS c FROM agg_groups GROUP BY g) AS q$$);
+SELECT agg_same($$SELECT g, string_agg(t, ','), array_agg(n) FROM agg_groups WHERE g % 997 = 0 GROUP BY g$$);
+-- A NULL key, and the node's own aggregates alongside.
+SELECT agg_same($$SELECT count(*), sum(c), max(m), sum(x) FROM (SELECT CASE WHEN g % 100 = 0 THEN NULL ELSE g END AS k, count(*) AS c, max(t) AS m, sum(g) AS x FROM agg_groups GROUP BY 1) AS q$$);
+-- Rescan: the partitions of the last scan go.
+SELECT agg_same($$SELECT x, (SELECT count(*) FROM (SELECT g, max(t) FROM agg_groups WHERE g % 3 = x GROUP BY g) AS q) FROM generate_series(0, 2) AS x$$);
+RESET enable_sort;
+RESET work_mem;
+DROP FUNCTION agg_spill(text);
+-- With a DISTINCT aggregate the groups keep no partitions: past hash_mem
+-- by the planner's estimate the grouping stays with the core.
+SET work_mem = '64kB';
+EXPLAIN (COSTS OFF) SELECT g, max(t), count(DISTINCT g) FROM agg_groups GROUP BY g;
 RESET work_mem;
 DROP TABLE agg_groups;
 -- In a parallel plan: each participant's partial state, serialized where

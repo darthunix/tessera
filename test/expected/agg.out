@@ -1403,10 +1403,94 @@ SELECT agg_same($$SELECT x, (SELECT max(m) FROM (SELECT g, max(t) AS m FROM agg_
  {"(1,v80000)","(2,v80000)","(3,v80000)"}
 (1 row)
 
--- Their states cannot spill: past hash_mem by the planner's estimate the
--- grouping stays with the core.
+-- Past hash_mem the table freezes, as the core's does: the rows of the
+-- groups it has go on into them, the others to partitions on disk, read
+-- back one by one into tables of their own, and split again when one
+-- still does not fit; a group's rows stay in their order.
+CREATE FUNCTION agg_spill(query text) RETURNS text
+LANGUAGE plpgsql AS $$
+DECLARE
+    line text;
+    rows boolean := false;
+    last int := 0;
+    parts int := 0;
+BEGIN
+    -- TessAgg's partitions: its Batches line comes right before Evictions.
+    FOR line IN EXECUTE 'EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) ' || query LOOP
+        rows := rows OR line ~ 'Spilled Rows: [1-9]';
+        IF line ~ '^ *Batches: \d+$' THEN
+            last := substring(line FROM 'Batches: (\d+)')::int;
+        ELSIF line ~ 'Evictions:' THEN
+            parts := last;
+        END IF;
+    END LOOP;
+    RETURN format('rows spilled: %s, levels: %s', rows,
+                  CASE WHEN parts = 0 THEN 'none' WHEN parts > 32 THEN 'several' ELSE 'one' END);
+END
+$$;
 SET work_mem = '64kB';
+SET enable_sort = off;
 EXPLAIN (COSTS OFF) SELECT g, max(t) FROM agg_groups GROUP BY g;
+                   QUERY PLAN                   
+------------------------------------------------
+ Custom Scan (TessAgg)
+   Group Key: g
+   ->  Custom Scan (TessHeapScan) on agg_groups
+(3 rows)
+
+SELECT agg_spill($$SELECT g, max(t) FROM agg_groups GROUP BY g$$);
+            agg_spill             
+----------------------------------
+ rows spilled: t, levels: several
+(1 row)
+
+SET work_mem = '1MB';
+SELECT agg_spill($$SELECT g, max(t) FROM agg_groups GROUP BY g$$);
+           agg_spill           
+-------------------------------
+ rows spilled: f, levels: none
+(1 row)
+
+SELECT agg_same($$SELECT count(*), max(m), sum(s), max(l), sum(c) FROM (SELECT g, max(t) AS m, sum(n) AS s, length(string_agg(t, ',')) AS l, count(*) AS c FROM agg_groups GROUP BY g) AS q$$);
+                agg_same                 
+-----------------------------------------
+ {"(20000,v9999,1600020000.0,27,80000)"}
+(1 row)
+
+SET work_mem = '64kB';
+SELECT agg_same($$SELECT count(*), max(m), sum(s), max(l), sum(c) FROM (SELECT g, max(t) AS m, sum(n) AS s, length(string_agg(t, ',')) AS l, count(*) AS c FROM agg_groups GROUP BY g) AS q$$);
+                agg_same                 
+-----------------------------------------
+ {"(20000,v9999,1600020000.0,27,80000)"}
+(1 row)
+
+SELECT agg_same($$SELECT g, string_agg(t, ','), array_agg(n) FROM agg_groups WHERE g % 997 = 0 GROUP BY g$$);
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             agg_same                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ {"(0,\"v20000,v40000,v60000,v80000\",\"{10000.0,20000.0,30000.0,40000.0}\")","(10967,\"v10967,v30967,v50967,v70967\",\"{5483.5,15483.5,25483.5,35483.5}\")","(11964,\"v11964,v31964,v51964,v71964\",\"{5982.0,15982.0,25982.0,35982.0}\")","(12961,\"v12961,v32961,v52961,v72961\",\"{6480.5,16480.5,26480.5,36480.5}\")","(13958,\"v13958,v33958,v53958,v73958\",\"{6979.0,16979.0,26979.0,36979.0}\")","(14955,\"v14955,v34955,v54955,v74955\",\"{7477.5,17477.5,27477.5,37477.5}\")","(15952,\"v15952,v35952,v55952,v75952\",\"{7976.0,17976.0,27976.0,37976.0}\")","(16949,\"v16949,v36949,v56949,v76949\",\"{8474.5,18474.5,28474.5,38474.5}\")","(17946,\"v17946,v37946,v57946,v77946\",\"{8973.0,18973.0,28973.0,38973.0}\")","(18943,\"v18943,v38943,v58943,v78943\",\"{9471.5,19471.5,29471.5,39471.5}\")","(1994,\"v1994,v21994,v41994,v61994\",\"{997.0,10997.0,20997.0,30997.0}\")","(19940,\"v19940,v39940,v59940,v79940\",\"{9970.0,19970.0,29970.0,39970.0}\")","(2991,\"v2991,v22991,v42991,v62991\",\"{1495.5,11495.5,21495.5,31495.5}\")","(3988,\"v3988,v23988,v43988,v63988\",\"{1994.0,11994.0,21994.0,31994.0}\")","(4985,\"v4985,v24985,v44985,v64985\",\"{2492.5,12492.5,22492.5,32492.5}\")","(5982,\"v5982,v25982,v45982,v65982\",\"{2991.0,12991.0,22991.0,32991.0}\")","(6979,\"v6979,v26979,v46979,v66979\",\"{3489.5,13489.5,23489.5,33489.5}\")","(7976,\"v7976,v27976,v47976,v67976\",\"{3988.0,13988.0,23988.0,33988.0}\")","(8973,\"v8973,v28973,v48973,v68973\",\"{4486.5,14486.5,24486.5,34486.5}\")","(997,\"v997,v20997,v40997,v60997\",\"{498.5,10498.5,20498.5,30498.5}\")","(9970,\"v9970,v29970,v49970,v69970\",\"{4985.0,14985.0,24985.0,34985.0}\")"}
+(1 row)
+
+-- A NULL key, and the node's own aggregates alongside.
+SELECT agg_same($$SELECT count(*), sum(c), max(m), sum(x) FROM (SELECT CASE WHEN g % 100 = 0 THEN NULL ELSE g END AS k, count(*) AS c, max(t) AS m, sum(g) AS x FROM agg_groups GROUP BY 1) AS q$$);
+             agg_same              
+-----------------------------------
+ {"(19801,80000,v9999,799960000)"}
+(1 row)
+
+-- Rescan: the partitions of the last scan go.
+SELECT agg_same($$SELECT x, (SELECT count(*) FROM (SELECT g, max(t) FROM agg_groups WHERE g % 3 = x GROUP BY g) AS q) FROM generate_series(0, 2) AS x$$);
+              agg_same              
+------------------------------------
+ {"(0,6667)","(1,6667)","(2,6666)"}
+(1 row)
+
+RESET enable_sort;
+RESET work_mem;
+DROP FUNCTION agg_spill(text);
+-- With a DISTINCT aggregate the groups keep no partitions: past hash_mem
+-- by the planner's estimate the grouping stays with the core.
+SET work_mem = '64kB';
+EXPLAIN (COSTS OFF) SELECT g, max(t), count(DISTINCT g) FROM agg_groups GROUP BY g;
                       QUERY PLAN                      
 ------------------------------------------------------
  GroupAggregate
