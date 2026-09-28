@@ -135,6 +135,8 @@ SELECT pg_column_compression(big) IS NOT NULL AS compressed FROM types_b LIMIT 1
 SELECT types_same($$SELECT v, count(*) FROM types_b GROUP BY v$$);
 SELECT types_same($$SELECT b, count(*), max(id) FROM types_b GROUP BY b$$);
 SELECT types_same($$SELECT length(t), count(*) FROM (SELECT big AS t FROM types_b UNION ALL SELECT repeat('long', 3000) || (i % 7) FROM generate_series(1, 50) AS i) AS q GROUP BY t$$);
+-- Values past a quarter of the dictionary's block of 64 kB are copies of their own.
+SELECT types_same($$SELECT length(t), md5(t), count(*) FROM (SELECT repeat(v, 5000) AS t FROM types_b UNION ALL SELECT v FROM types_b) AS q GROUP BY t$$);
 SELECT types_same($$SELECT length(t), md5(t) FROM (SELECT big AS t FROM types_b INTERSECT ALL SELECT repeat('long', 3000) || (i % 3) FROM generate_series(1, 700) AS i) AS q$$);
 SELECT types_same($$SELECT md5(big) FROM (SELECT big FROM types_b EXCEPT ALL SELECT repeat('long', 3000) || (i % 3) FROM generate_series(1, 700) AS i) AS q$$);
 CREATE COLLATION types_nd (provider = icu, locale = 'und-u-ks-level2', deterministic = false);

@@ -588,7 +588,21 @@ without a call through fmgr, which looked the collation up on every
 call; a compressed or external value takes the functions, and hashes
 alike. Grouping 500 000 rows of text by 99 values took 15 % less, by
 450 000 values 4 % less, `INTERSECT` of texts 10 to 13 % less
-(pg-anykey-2vdcGC, pg-setop-tzlEdr against the build before). The
+(pg-anykey-2vdcGC, pg-setop-tzlEdr against the build before). A
+dictionary past the caches (its values' entries past 1 MB, counted by
+the values held, not by the buckets, which a table made for the
+planner's estimate may have many more of) is looked up a batch at a
+time: a pass of its own asks memory for each row's bucket before the
+lookups, so that the batch's misses overlap. The values' copies go one
+after another into blocks of 64 kB of the dictionary's, without a
+chunk's header each (a value past 16 kB, or an expanded object, is a
+copy of its own), and an entry is 24 bytes, its number 32 bits. Grouping
+by 450 000 values of text took 13 % less, `INTERSECT` of texts 8 % less,
+small dictionaries 1 to 3 % less (pg-anykey-OqakjS, pg-setop-UmZbY2
+against the build before). Both parts matter: the pass alone took 2 to
+3 % off, the blocks and entries alone nothing; hashes kept from the pass
+for the lookups, or a second copy of their loop, made the compiler stop
+inlining them and cost small dictionaries 3 to 4 %. The
 dictionary is the table's: made anew with it, and its memory counted
 with the groups', so such a grouping spills its rows, with the values,
 never its records, and a spilled row's partition is chosen by the hash

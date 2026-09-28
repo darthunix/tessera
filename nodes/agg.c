@@ -196,7 +196,7 @@ typedef struct KeyEntry
 {
 	Datum		value;
 	uint32		hash;
-	int64		number;
+	uint32		number;
 	char		status;
 } KeyEntry;
 
@@ -216,15 +216,29 @@ typedef struct KeyDict
 	 * a call through fmgr, which looked the collation up on every call.
 	 */
 	bool		bytewise;
-	/* The values by their numbers, copies in the context. */
+	/*
+	 * The values by their numbers, copies in the context: one after
+	 * another in blocks of the dictionary's own, without a chunk's header
+	 * each (a text of 14 bytes took 32 through palloc).
+	 */
 	Datum	   *values;
 	int64		count;
 	int64		slots;
+	char	   *block;
+	Size		block_used;
+	Size		block_len;
 	/* A batch's numbers and the values' hashes, for capacity rows. */
 	int			capacity;
 	Datum	   *batch_numbers;
 	uint32	   *batch_hashes;
 } KeyDict;
+
+/* Ask memory for an address the loop reads soon, where the compiler can. */
+#if defined(__GNUC__) || defined(__clang__)
+#define keydict_prefetch(address) __builtin_prefetch(address)
+#else
+#define keydict_prefetch(address) ((void) 0)
+#endif
 
 /* A varlena whose bytes are at hand: not compressed, not external. */
 static inline bool
@@ -3707,6 +3721,63 @@ key_dict_reset(KeyDict *dict, uint64 values)
 	dict->slots = values;
 	dict->values = MemoryContextAlloc(dict->context, sizeof(Datum) * dict->slots);
 	dict->count = 0;
+	dict->block = NULL;
+	dict->block_used = 0;
+	dict->block_len = 0;
+}
+
+#define KEYDICT_BLOCK_LEN (64 * 1024)
+#define KEYDICT_PREFETCH_BYTES (1024 * 1024)
+
+/*
+ * A copy of a by-reference value in the dictionary's blocks, one after
+ * another, each at a MAXALIGN'd place; a value past a quarter of a block,
+ * or an expanded object to flatten, is a copy of its own.
+ */
+static Datum
+keydict_copy(KeyDict *dict, Datum value)
+{
+	Size		size;
+	char	   *copy;
+
+	if (dict->typbyval)
+		return value;
+	if (dict->typlen == -1 &&
+		VARATT_IS_EXTERNAL_EXPANDED(DatumGetPointer(value)))
+		return datumCopy(value, false, -1);
+	size = datumGetSize(value, false, dict->typlen);
+	if (size > KEYDICT_BLOCK_LEN / 4)
+		return datumCopy(value, false, dict->typlen);
+	if (dict->block == NULL || dict->block_used + size > dict->block_len)
+	{
+		dict->block = MemoryContextAlloc(dict->context, KEYDICT_BLOCK_LEN);
+		dict->block_len = KEYDICT_BLOCK_LEN;
+		dict->block_used = 0;
+	}
+	copy = dict->block + dict->block_used;
+	memcpy(copy, DatumGetPointer(value), size);
+	dict->block_used += MAXALIGN(size);
+	return PointerGetDatum(copy);
+}
+
+/*
+ * A dictionary of values past the caches: each row's bucket asked of
+ * memory before the lookups, so that the misses of a batch's rows overlap
+ * rather than each lookup waiting for its own (half a million values of
+ * text: 8 to 11 % of the query). A pass of its own, the hashes computed
+ * again by the lookups, and only by the values held, not the buckets: a
+ * table made for the planner's estimate of 427 000 groups held 99 values,
+ * which the pass cost 8 %.
+ */
+static pg_noinline void
+keydict_prefetch_rows(KeyDict *dict, const TessDatumColumn *column, const TessRowMask *rows)
+{
+	int			row = -1;
+
+	while ((row = tess_row_mask_next(rows, row)) >= 0)
+		if (!column->isnull[row])
+			keydict_prefetch(&dict->table->data[keydict_value_hash(dict, column->values[row]) &
+												 dict->table->sizemask]);
 }
 
 /*
@@ -3721,6 +3792,8 @@ keydict_numbers(KeyDict *dict, const TessDatumColumn *column, const TessRowMask 
 {
 	int			row = -1;
 
+	if (dict->table->members * sizeof(KeyEntry) > KEYDICT_PREFETCH_BYTES)
+		keydict_prefetch_rows(dict, column, rows);
 	while ((row = tess_row_mask_next(rows, row)) >= 0)
 	{
 		Datum		value = column->values[row];
@@ -3745,11 +3818,13 @@ keydict_numbers(KeyDict *dict, const TessDatumColumn *column, const TessRowMask 
 
 				if (dict->count == dict->slots)
 				{
+					if (dict->count == PG_UINT32_MAX)
+						elog(ERROR, "TessAgg numbers at most %u values of a key", PG_UINT32_MAX);
 					dict->slots *= 2;
 					dict->values = repalloc_huge(dict->values, sizeof(Datum) * dict->slots);
 				}
-				entry->value = datumCopy(value, dict->typbyval, dict->typlen);
-				entry->number = dict->count;
+				entry->value = keydict_copy(dict, value);
+				entry->number = (uint32) dict->count;
 				dict->values[dict->count++] = entry->value;
 				MemoryContextSwitchTo(old);
 			}
@@ -3759,7 +3834,7 @@ keydict_numbers(KeyDict *dict, const TessDatumColumn *column, const TessRowMask 
 		{
 			KeyEntry   *entry = keydict_lookup_hash(dict->table, value, hash);
 
-			numbers[row] = Int64GetDatum(entry != NULL ? entry->number : -1);
+			numbers[row] = Int64GetDatum(entry != NULL ? (int64) entry->number : -1);
 		}
 	}
 }
