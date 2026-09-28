@@ -404,6 +404,9 @@ CREATE TABLE agg_groups AS
 SELECT i % 20000 AS g, 'v' || i AS t, (i * 0.5)::numeric AS n FROM generate_series(1, 80000) AS i;
 ANALYZE agg_groups;
 SELECT agg_same($$SELECT count(*), max(m), sum(s), max(l) FROM (SELECT g, max(t) AS m, sum(n) AS s, length(string_agg(t, ',')) AS l FROM agg_groups GROUP BY g) AS q$$);
+-- The groups a batch makes before its chunk runs out start from the
+-- initial value too: a float8 avg's is {0,0,0}, its transition strict.
+SELECT agg_same($$SELECT count(*), sum(round(a::numeric, 6)), sum(round(v::numeric, 6)) FROM (SELECT g, avg(n::float8) AS a, var_pop(n::float8) AS v FROM agg_groups GROUP BY g) AS q$$);
 -- Rescan builds the groups anew.
 SELECT agg_same($$SELECT x, (SELECT max(m) FROM (SELECT g, max(t) AS m FROM agg_groups WHERE g < x GROUP BY g) AS q) FROM generate_series(1, 3) AS x$$);
 -- Past hash_mem the table freezes, as the core's does: the rows of the
