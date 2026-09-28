@@ -1281,7 +1281,7 @@ create_nonunion_paths(PlannerInfo *root, RelOptInfo *output_rel)
 		template.total_cost = left->total_cost + right->total_cost +
 			Max(own, 0) * (dictionary ? SETOP_DICTIONARY_SHARE : SETOP_WORD_SHARE);
 		template.startup_cost = template.total_cost;
-		template.pathkeys = NIL; template.startup_cost *= 0.01; template.total_cost *= 0.01;
+		template.pathkeys = NIL;
 		config.template_path = &template;
 		config.methods = &agg_path_methods;
 		config.node = &tess_agg_node;
