@@ -252,18 +252,20 @@ tess_sort_key_of(PathKey *pathkey, PathTarget *target, Relids relids, int *place
 {
 	EquivalenceClass *ec = pathkey->pk_eclass;
 
-	if (pathkey->pk_opfamily != INTEGER_BTREE_FAM_OID || ec->ec_has_volatile ||
+	if (ec->ec_has_volatile ||
 		(pathkey->pk_cmptype != COMPARE_LT && pathkey->pk_cmptype != COMPARE_GT))
 		return false;
 	foreach_ptr(Expr, expr, target->exprs)
 	{
 		Oid			type = exprType((Node *) expr);
+		TessTableKeyKind kind;
 
-		if ((type != INT4OID && type != INT8OID) ||
+		if (!tess_word_key_order(type, pathkey->pk_opfamily) ||
+			!tess_word_key_kind(type, &kind) ||
 			find_ec_member_matching_expr(ec, expr, relids) == NULL)
 			continue;
 		*place = foreach_current_index(expr);
-		key->kind = type == INT8OID ? TESS_TABLE_KEY_INT8 : TESS_TABLE_KEY_INT4;
+		key->kind = kind;
 		key->flags = (pathkey->pk_cmptype == COMPARE_GT ? TESS_SORT_DESCENDING : 0) |
 			(pathkey->pk_nulls_first ? TESS_SORT_NULLS_FIRST : 0);
 		return true;

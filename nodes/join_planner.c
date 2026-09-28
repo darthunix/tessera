@@ -60,17 +60,35 @@ typedef struct JoinKeys
 	List	   *filters;
 } JoinKeys;
 
-/* The table's kind of a key of this type, or false for another type. */
+/*
+ * Whether an equality compares its operands' words bit for bit, as the
+ * table does: of integers in any combination, since the table keeps int2,
+ * int4 and int8 as 8-byte keys and an int8 in the range of a smaller type
+ * hashes as that type's; of two dates, of two timestamps, of two
+ * timestamps with time zone, of two booleans.
+ */
 static bool
-key_kind(Oid type, TessTableKeyKind *kind)
+word_equality(Oid funcid)
 {
-	if (type == INT4OID)
-		*kind = TESS_TABLE_KEY_INT4;
-	else if (type == INT8OID)
-		*kind = TESS_TABLE_KEY_INT8;
-	else
-		return false;
-	return true;
+	switch (funcid)
+	{
+		case F_INT2EQ:
+		case F_INT4EQ:
+		case F_INT8EQ:
+		case F_INT24EQ:
+		case F_INT42EQ:
+		case F_INT28EQ:
+		case F_INT82EQ:
+		case F_INT48EQ:
+		case F_INT84EQ:
+		case F_DATE_EQ:
+		case F_TIMESTAMP_EQ:
+		case F_TIMESTAMPTZ_EQ:
+		case F_BOOLEQ:
+			return true;
+		default:
+			return false;
+	}
 }
 
 /* A column of the query level: the only operand a key may be. */
@@ -80,11 +98,7 @@ plain_var(Node *node)
 	return IsA(node, Var) && ((Var *) node)->varlevelsup == 0;
 }
 
-/*
- * One clause as a key, when it is an integer equality of a column of each
- * side: int4 and int8 in any combination, since the table keeps both as
- * 8-byte keys and an int8 in the int4 range hashes as the int4.
- */
+/* One clause as a key, when it is an equality of words of a column of each side. */
 static bool
 add_key(RestrictInfo *rinfo, RelOptInfo *outerrel, RelOptInfo *innerrel,
 		JoinKeys *keys)
@@ -102,8 +116,7 @@ add_key(RestrictInfo *rinfo, RelOptInfo *outerrel, RelOptInfo *innerrel,
 		return false;
 	op = (OpExpr *) rinfo->clause;
 	set_opfuncid(op);
-	if (op->opfuncid != F_INT4EQ && op->opfuncid != F_INT8EQ &&
-		op->opfuncid != F_INT48EQ && op->opfuncid != F_INT84EQ)
+	if (!word_equality(op->opfuncid))
 		return false;
 	left = linitial(op->args);
 	right = lsecond(op->args);
@@ -123,8 +136,8 @@ add_key(RestrictInfo *rinfo, RelOptInfo *outerrel, RelOptInfo *innerrel,
 	}
 	else
 		return false;
-	if (!key_kind(outer->vartype, &outer_kind) ||
-		!key_kind(inner->vartype, &inner_kind))
+	if (!tess_word_key_kind(outer->vartype, &outer_kind) ||
+		!tess_word_key_kind(inner->vartype, &inner_kind))
 		return false;
 	keys->rinfos = lappend(keys->rinfos, rinfo);
 	keys->clauses = lappend(keys->clauses, rinfo->clause);

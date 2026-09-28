@@ -439,7 +439,8 @@ node takes the path only when the planner's estimate of the pairs fits
 `UNION` without `ALL` is grouping of the branches' rows by every column:
 at the set operation stage (`UPPERREL_SETOP`) the node's path stands next
 to each of the core's hashed aggregates over the `Append` of the
-branches, its keys the columns, 1 to 16 of them, int4 or int8, and its
+branches, its keys the columns, 1 to 16 of them, of the types a key's
+word holds (see `GROUP BY` below), and its
 child `TessAppend` over the branches' batch paths. Only the set
 operation of the whole query (of a subquery, when it is one) gets it:
 above that the core puts only a sort and a limit, which read columns by
@@ -477,8 +478,13 @@ child only for a changed parameter of its own, a sort in a correlated
 subquery, does rescan the node.
 
 With `GROUP BY` the hook takes the grouping expressions of the query,
-1 to 16 int4 or int8 values the expression compiler accepts (a bare
-column or a chain such as `c % 10`), without grouping sets, and puts them
+1 to 16 values of a type the table keeps in a word, whole and compared
+bit for bit, as PostgreSQL's Datum of the type holds it: int2, int4,
+date and bool, sign-extended as int4 keys, int8, timestamp and
+timestamptz as int8 keys (`tess_word_key_kind`; a text or numeric key
+leaves the grouping to the core). A key is a bare column, a chain the
+expression compiler accepts such as `c % 10`, or any other expression,
+computed row by row, without grouping sets, and the hook puts them
 first in the scan tuple, before the aggregates, which may then number up
 to 64, since each has a flag bit in the group's payload; a grouping
 without aggregates is accepted too. Every expression above the grouping
@@ -667,7 +673,7 @@ leader not taking part.
 
 ## TessHashJoin
 
-`TessHashJoin` joins two batch children on equalities of integer keys,
+`TessHashJoin` joins two batch children on equalities of keys a word holds,
 in place of the core's `Hash Join`: it builds the rows of the inner child
 into the hash table of [table.md](table.md) and probes it with the
 batches of the outer child, so that neither side is handed over one row
@@ -682,8 +688,11 @@ node calls through the bridge's kernel registry (see
 The module's `set_join_pathlist` hook offers the path for an inner, a
 semi, an anti or a left join, the kinds that keep the outer side, which
 the node probes with, and for a right or a full join, which keep the
-inner side too (see "Right and full joins" below), with at least one `int4eq`, `int8eq`, `int48eq` or `int84eq` between a
-column of each side, when the join's target is plain columns and at most
+inner side too (see "Right and full joins" below), with at least one
+equality that compares words bit for bit between a column of each side:
+of integers (int2, int4, int8) in any combination, of two dates, two
+timestamps, two timestamps with time zone or two booleans (a date against
+a timestamp converts, and stays with the core), when the join's target is plain columns and at most
 64 of them, the inner keys and the inner columns of the residual clauses
 are the inner side's. Each such clause, up to 16, is a key of the table;
 the others are residual clauses, evaluated over the joined rows, when
@@ -1135,9 +1144,12 @@ of the core's `SortPath`s there, also one under a `ProjectionPath`, is
 replaced in place by the node's path over `tess_batch_input_path` of the
 sort's input, with the same rows, costs and path keys, when
 
-- every path key orders by an int4 or int8 expression of the sort's
-  input target through the integer operator family, ascending or
-  descending, NULLs first or last, at most 16 keys;
+- every path key orders by an expression of the sort's input target of a
+  type a key's word holds through the operator family whose order the
+  word keeps (`tess_word_key_order`): int2, int4 and int8 through the
+  integer one, date, timestamp and timestamptz through `datetime_ops`,
+  bool through its own, ascending or descending, NULLs first or last, at
+  most 16 keys;
 - the output has 1 to 1664 columns, a tuple's most;
 - the query is not `FETCH ... WITH TIES`, which passes no bound, and the
   kernels module is loaded.
@@ -1389,8 +1401,8 @@ the shared memory itself.
 
 A `GatherMergePath` over a Tessera path becomes `TessGatherMerge` over
 `TessSend` the same way when every path key is one the sort kernels order
-by, an int4 or int8 target through the integer operator family (as for
-`TessSort`, at most 16 keys), and the kernels module is loaded; TessSend's
+by, a target of a type a key's word holds through the family whose order
+the word keeps (as for `TessSort`, at most 16 keys), and the kernels module is loaded; TessSend's
 data then lists each key's target, kind and flags.
 
 That replacement keeps the core's costs, and a `Gather` the core costs at

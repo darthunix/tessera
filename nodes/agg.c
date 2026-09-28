@@ -426,10 +426,11 @@ query_supported(PlannerInfo *root, RelOptInfo *input_rel, RelOptInfo *output_rel
 
 /*
  * The expressions of grouping or distinct clauses when the node can group
- * by them: 1 to 16 int4
- * or int8 values the expression compiler takes, a bare column or a chain
- * such as c % 10. NIL otherwise, also when the planner dropped every
- * grouping clause, as for a constant one.
+ * by them: 1 to 16 values of a type the table keeps in a word
+ * (tess_word_key_kind), a bare column, a chain the expression compiler
+ * takes such as c % 10, or any other expression, computed row by row. NIL
+ * otherwise, also when the planner dropped every grouping clause, as for
+ * a constant one.
  */
 static List *
 clause_keys(PlannerInfo *root, List *clauses)
@@ -442,10 +443,11 @@ clause_keys(PlannerInfo *root, List *clauses)
 	{
 		Node	   *expr = (Node *) get_sortgroupclause_expr(clause,
 															root->processed_tlist);
-		Oid			type = exprType(expr);
+		TessTableKeyKind kind;
 
-		if ((type != INT4OID && type != INT8OID) || contain_subplans(expr) ||
-			contain_volatile_functions(expr) || !tess_expr_supports_value(expr, 0))
+		/* A key the compiler does not take is computed row by row. */
+		if (!tess_word_key_kind(exprType(expr), &kind) || contain_subplans(expr) ||
+			contain_volatile_functions(expr))
 			return NIL;
 		keys = lappend(keys, expr);
 	}
@@ -695,9 +697,9 @@ create_setop_paths(PlannerInfo *root, RelOptInfo *output_rel)
 			continue;
 		foreach_ptr(Node, key, keys)
 		{
-			Oid			type = exprType(key);
+			TessTableKeyKind kind;
 
-			if ((type != INT4OID && type != INT8OID) || !tess_expr_supports_value(key, 0))
+			if (!tess_word_key_kind(exprType(key), &kind))
 			{
 				keys = NIL;
 				break;
@@ -953,8 +955,8 @@ agg_begin(CustomScanState *css, EState *estate, int eflags)
 	{
 		int			position = foreach_current_index(key);
 
-		state->kinds[position] = exprType(key) == INT8OID ?
-			TESS_TABLE_KEY_INT8 : TESS_TABLE_KEY_INT4;
+		if (!tess_word_key_kind(exprType(key), &state->kinds[position]))
+			elog(ERROR, "TessAgg received a key of type %u", exprType(key));
 		computed = lappend(computed,
 						   makeTargetEntry((Expr *) key, position + 1, NULL, false));
 		foreach_ptr(Var, var, pull_var_clause(key, 0))

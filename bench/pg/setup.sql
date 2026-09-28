@@ -100,6 +100,19 @@ END
 $do$;
 INSERT INTO bench_part SELECT g, (g::bigint * 7919 % 1000)::int FROM generate_series(1, 2000000 * :scale) AS g;
 
+-- The wordkey family: keys of types the table keeps in a word besides int4
+-- and int8: a date of five years, a timestamp of one hour steps, an int2 of
+-- 1000 values, a boolean; and a dimension of the days.
+DROP TABLE IF EXISTS bench_dates;
+CREATE TABLE bench_dates AS
+SELECT date '2020-01-01' + (g::bigint * 7919 % 1826)::int AS d,
+       timestamp '2020-01-01' + (g::bigint * 7907 % 43824) * interval '1 hour' AS ts,
+       (g % 1000 - 500)::int2 AS s, g % 3 = 0 AS b, g AS v
+FROM generate_series(1, 2000000 * :scale) AS g;
+DROP TABLE IF EXISTS bench_days;
+CREATE TABLE bench_days AS
+SELECT date '2020-01-01' + g AS d, g AS w FROM generate_series(0, 1825) AS g;
+
 -- The grouping cases of the win family group by expressions: statistics
 -- on them give the planner the number of groups, which it would otherwise
 -- take from the unique column underneath.
@@ -116,6 +129,8 @@ VACUUM (ANALYZE) bench_sort;
 VACUUM (ANALYZE) bench_mj_outer;
 VACUUM (ANALYZE) bench_mj_inner;
 VACUUM (ANALYZE) bench_part;
+VACUUM (ANALYZE) bench_dates;
+VACUUM (ANALYZE) bench_days;
 
 SELECT pg_size_pretty(pg_total_relation_size('bench_narrow')) AS narrow,
        pg_size_pretty(pg_total_relation_size('bench_wide')) AS wide,
@@ -135,3 +150,5 @@ SELECT count(*) FROM bench_sort;
 SELECT count(*) FROM bench_mj_outer;
 SELECT count(*) FROM bench_mj_inner;
 SELECT count(*) FROM bench_part;
+SELECT count(*) FROM bench_dates;
+SELECT count(*) FROM bench_days;

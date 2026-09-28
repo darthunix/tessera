@@ -79,6 +79,12 @@ query down, and where it can, does it speed one up.
   function over every row, and the first row under `LIMIT 1`. With
   Tessera on, the native scan serves the rows; with it off, the core's
   sequential scan. A ratio below one is the win.
+- **wordkey** (`wordkey.sql`): keys of types the hash table and the sort
+  keep in a word besides int4 and int8, over `bench_dates` (2 M rows): a
+  grouping by a date, by a timestamp and by an int2 and a boolean, a join
+  on the date with the 1826 days of `bench_days`, `DISTINCT` of the
+  timestamp and a sort by the date skipped with `OFFSET`. A ratio below
+  one is the win.
 - **oltp**: short prepared-statement queries, `pgbench -S`, where the
   planner hooks and the loaded modules must not slow down queries that
   never use a batch node. Arrives when more than one hook is installed.

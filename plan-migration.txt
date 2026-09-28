@@ -2497,6 +2497,17 @@
   get_datum_columns или порядок «строка снаружи, столбцы внутри» с одним advance до последнего нужного), замер
   row_text/g_three до и после. С шагом 2 этот запрос уходит на пакетный путь (прототип 16.2 мс), но построчная
   выдача нескольких столбцов остаётся под узлами ядра, которых у нас нет.
+  Сделано 1) (2026-09-28): tess_word_key_kind и tess_word_key_order (nodes/internal.h) — int2, int4, date, bool как
+  ключи INT4, int8, timestamp, timestamptz как INT8 (слово с расширением знака, как Datum ядра; ядра на Rust не
+  менялись); TessHashJoin — равенства слов (целые в любом сочетании, date, timestamp, timestamptz, bool; date против
+  timestamp — ядру), GROUP BY/DISTINCT/UNION — ключи этих типов, выражение ключа, которое компилятор не берёт,
+  считается построчно; TessSort, top-N, TessGatherMerge — по их семействам (integer, datetime_ops, bool). oid и
+  "char" не взяты: ключ oid выдавался бы с расширением знака, в отличие от Datum ядра. Тест types (соединения,
+  группировки, DISTINCT, UNION, сортировки с NULL и отрицательными, int2 против int4/int8, date против timestamp —
+  ядру), 38 наборов на release и debug. Семейство wordkey (bench_dates 2 млн, bench_days 1826) pg-wordkey-orRo18,
+  мс вкл/выкл: группировка по date 21.4/98.6 (×0.22), по timestamp 23.7/99.8 (×0.24), по int2 и bool 27.6/102.8
+  (×0.27), соединение по date 22.7/102.8 (×0.22), DISTINCT timestamp 19.9/94.5 (×0.21), сортировка по date
+  39.6/117.4 (×0.34).
 
   Политика разделения, рекурсии и выбора алгоритма остаётся в узле. tessera-spill отвечает только за блоки, буферы и чтение/запись.
 
