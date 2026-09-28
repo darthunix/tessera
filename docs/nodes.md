@@ -698,7 +698,19 @@ states, and each group is built in the scan slot, `HAVING` is evaluated
 over it and the plan's projection runs, the rows that pass going into a
 batch of up to 64 rows: a batch-aware parent reads one batch per call, a
 row-wise one the rows one by one; a batch `HAVING` leaves empty is not
-published. The order of the groups is the table's insertion order and is
+published. When the result is the scan tuple itself (no `HAVING`, no
+projection, no generic aggregate, whose values are made one group at a
+time) the groups go out as the node's own batch instead: its columns are
+the walk's arrays of keys (a dictionary number already its value, which
+the dictionary keeps until the next partition's rows are read, after the
+batch is done with) and of the aggregates' values, without a row built
+or a value copied; the rows of the builder copied every by-reference
+value twice, into the result slot and into the builder, and took 15 % of
+a grouping of 450 000 texts: `any_text_col` (450 000 groups of text)
+took 15 % less, `setop_many` (`UNION` of 2 M integers) 16 % less, the
+other cases of anykey, setop, win and wordkey the same within 3 %
+(pg-anykey-ro4VMq, pg-setop-HkmtA4 against the build before). The order of
+the groups is the table's insertion order and is
 not promised, as for the core's `HashAggregate`. A rescan builds the
 table again from the rescanned child. Rescan passes changed parameters on to the child, since
 the core does that for outer and inner plans only, and resets the values.

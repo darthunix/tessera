@@ -428,6 +428,19 @@ typedef struct TessAggState
 	uint64	   *state_words;
 	TessBatch  *published;
 	int			next_row;
+	/*
+	 * The groups go out as the node's own batch, its columns the keys and
+	 * the aggregates' values of the walk's arrays, when the result is the
+	 * scan tuple itself: no HAVING, no projection, no generic aggregate,
+	 * whose values are made one group at a time. Else as rows of the
+	 * builder, each value copied twice (into the result slot, then into
+	 * the builder), which took 15 % of a grouping of 450 000 texts.
+	 */
+	bool		direct;
+	TessBatch	groups_batch;
+	uint64		groups_bits[1];
+	Datum	   *agg_values;
+	bool	   *agg_isnull;
 
 	/*
 	 * Spilling: the level of partitions being read or given out, NULL
@@ -881,6 +894,7 @@ group_cost(PlannerInfo *root, const Path *child, double groups, int nkeys,
 	result->total_cost = startup + run;
 }
 
+static const TessBatchOps groups_batch_ops;
 static bool key_eqop(Node *key, List *clauses, int *eqop);
 static void create_nonunion_paths(PlannerInfo *root, RelOptInfo *output_rel);
 
@@ -2170,6 +2184,18 @@ agg_begin(CustomScanState *css, EState *estate, int eflags)
 			elog(ERROR, "TessAgg needs the kernels module for DISTINCT");
 	}
 	state->builder = tess_builder_create(&builder);
+	if (state->nkeys > 0 && state->setop < 0 && !state->has_generic &&
+		css->ss.ps.qual == NULL && css->ss.ps.ps_ProjInfo == NULL)
+	{
+		state->direct = true;
+		state->agg_values = palloc0_array(Datum, Max(state->nvalues, 1) * AGG_GROUP_ROWS);
+		state->agg_isnull = palloc0_array(bool, Max(state->nvalues, 1) * AGG_GROUP_ROWS);
+		state->groups_batch.abi_version = TESS_BATCH_ABI_VERSION;
+		state->groups_batch.struct_size = sizeof(TessBatch);
+		state->groups_batch.table_oid = InvalidOid;
+		state->groups_batch.ops = &groups_batch_ops;
+		state->groups_batch.private_data = state;
+	}
 	state->output = tess_output_create(estate->es_query_cxt, &css->ss.ps,
 									   result, &info.layout);
 }
@@ -4605,23 +4631,22 @@ group_drain(TessAggState *state)
  * int4 Datum.
  */
 static void
-group_value(TessAggState *state, int index, int group, TupleTableSlot *scan)
+group_value_into(TessAggState *state, int index, int group, Datum *datum, bool *isnull)
 {
 	AggValue   *value = &state->values[index];
 	uint64		word = state->state_words[index * AGG_GROUP_ROWS + group];
 	bool		seen = ((state->flag_words[group] >> index) & 1) != 0;
-	int			attribute = state->nkeys + index;
 
-	scan->tts_isnull[attribute] = value->kind != AGG_COUNT && !seen;
+	*isnull = value->kind != AGG_COUNT && !seen;
 	switch (value->kind)
 	{
 		case AGG_COUNT:
 		case AGG_SUM:
-			scan->tts_values[attribute] = Int64GetDatum((int64) word);
+			*datum = Int64GetDatum((int64) word);
 			break;
 		case AGG_MIN:
 		case AGG_MAX:
-			scan->tts_values[attribute] = value->wide ?
+			*datum = value->wide ?
 				Int64GetDatum((int64) word) : Int32GetDatum((int32) (int64) word);
 			break;
 		case AGG_GENERIC:
@@ -4630,13 +4655,53 @@ group_value(TessAggState *state, int index, int group, TupleTableSlot *scan)
 
 				value->generic->state = (Datum) word;
 				value->generic->state_null = !seen;
-				scan->tts_values[attribute] = generic_value(value->generic,
-															&scan->tts_isnull[attribute]);
+				*datum = generic_value(value->generic, isnull);
 				MemoryContextSwitchTo(old);
 				break;
 			}
 	}
 }
+
+static void
+group_value(TessAggState *state, int index, int group, TupleTableSlot *scan)
+{
+	int			attribute = state->nkeys + index;
+
+	group_value_into(state, index, group, &scan->tts_values[attribute],
+					 &scan->tts_isnull[attribute]);
+}
+
+/*
+ * A column of the groups' own batch: a key's values as the walk gathered
+ * them (a number already its value, which lives in the dictionary until
+ * the next partition's rows are read, after the batch is done with), or an
+ * aggregate's values.
+ */
+static void
+groups_get_column(TessBatch *batch, int column, const TessRowMask *rows,
+				  TessColumnPurpose purpose, TessDatumColumn *result)
+{
+	TessAggState *state = (TessAggState *) batch->private_data;
+
+	if (column < 0 || column >= state->nkeys + state->nvalues)
+		elog(ERROR, "TessAgg has no column %d", column);
+	if (column < state->nkeys)
+	{
+		result->values = state->key_values[column];
+		result->isnull = state->key_isnull[column];
+	}
+	else
+	{
+		result->values = &state->agg_values[(column - state->nkeys) * AGG_GROUP_ROWS];
+		result->isnull = &state->agg_isnull[(column - state->nkeys) * AGG_GROUP_ROWS];
+	}
+	result->nrows = batch->rows.nrows;
+}
+
+static const TessBatchOps groups_batch_ops = {
+	TESS_ABI_INITIALIZER(TESS_BATCH_OPS_ABI_VERSION, TessBatchOps),
+	.get_datum_column = groups_get_column,
+};
 
 /*
  * The next groups of the walk, up to a batch of them, as result rows:
@@ -4848,6 +4913,23 @@ next_groups(TessAggState *state)
 
 	if (state->setop >= 0)
 		return setop_groups(state);
+	/* The walk's arrays are the batch's columns. */
+	if (state->direct)
+	{
+		int			count = next_chunk(state);
+
+		if (count == 0)
+			return NULL;
+		for (int index = 0; index < state->nvalues; index++)
+			for (int group = 0; group < count; group++)
+				group_value_into(state, index, group,
+								 &state->agg_values[index * AGG_GROUP_ROWS + group],
+								 &state->agg_isnull[index * AGG_GROUP_ROWS + group]);
+		state->groups_bits[0] = count == 64 ? ~UINT64CONST(0) : (UINT64CONST(1) << count) - 1;
+		state->groups_batch.rows.nrows = count;
+		state->groups_batch.rows.bits = state->groups_bits;
+		return &state->groups_batch;
+	}
 	for (;;)
 	{
 		int			count = next_chunk(state);
