@@ -538,8 +538,19 @@ With `GROUP BY` the hook takes the grouping expressions of the query,
 1 to 16 values of a type the table keeps in a word, whole and compared
 bit for bit, as PostgreSQL's Datum of the type holds it: int2, int4,
 date and bool, sign-extended as int4 keys, int8, timestamp and
-timestamptz as int8 keys (`tess_word_key_kind`; a text or numeric key
-leaves the grouping to the core). A key is a bare column, a chain the
+timestamptz as int8 keys (`tess_word_key_kind`), or of any other type
+whose equality hashes (text, numeric, ...): such a key's values get
+numbers through a dictionary of the node's, a `simplehash` table that
+hashes and compares them by the type's own functions (the key's
+equality and its hash function, under the key's collation, so a
+nondeterministic collation groups as the core's does), in the order
+the table first meets them, and the table groups by the numbers as
+int8 keys; a group's key goes out as the value of its number. The
+dictionary is the table's: made anew with it, and its memory counted
+with the groups', so such a grouping spills its rows, with the values,
+never its records, and a spilled row's partition is chosen by the hash
+of its values, not of its numbers (with numbers, every row of a group
+the frozen table lacks would take one partition). A key is a bare column, a chain the
 expression compiler accepts such as `c % 10`, or any other expression,
 computed row by row, without grouping sets, and the hook puts them
 first in the scan tuple, before the aggregates, which may then number up

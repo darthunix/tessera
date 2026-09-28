@@ -24,6 +24,7 @@
 #include "storage/shm_toc.h"
 #include "utils/fmgroids.h"
 #include "utils/syscache.h"
+#include "utils/typcache.h"
 #include "utils/lsyscache.h"
 #include "utils/datum.h"
 #include "utils/builtins.h"
@@ -180,6 +181,68 @@ typedef struct AggValue
 	GenericAgg *generic;
 } AggValue;
 
+/*
+ * A key of a type a word does not hold (text, numeric, ...): its values
+ * get numbers, in the order the table first meets them, through a
+ * dictionary that hashes and compares them by the type's functions (the
+ * key's equality and its hash function, under the key's collation), and
+ * the table groups by the numbers as int8 keys; a group's key goes out as
+ * the value of its number. The dictionary goes with the table it numbers:
+ * made anew with every table, so such groupings spill their rows, with
+ * the values, not their records.
+ */
+typedef struct KeyEntry
+{
+	Datum		value;
+	uint32		hash;
+	int64		number;
+	char		status;
+} KeyEntry;
+
+typedef struct KeyDict
+{
+	struct keydict_hash *table;
+	MemoryContext context;
+	FmgrInfo	hashfn;
+	FmgrInfo	eqfn;
+	Oid			collation;
+	int16		typlen;
+	bool		typbyval;
+	/* The values by their numbers, copies in the context. */
+	Datum	   *values;
+	int64		count;
+	int64		slots;
+	/* A batch's numbers and the values' hashes, for capacity rows. */
+	int			capacity;
+	Datum	   *batch_numbers;
+	uint32	   *batch_hashes;
+} KeyDict;
+
+static uint32
+keydict_value_hash(KeyDict *dict, Datum value)
+{
+	return DatumGetUInt32(FunctionCall1Coll(&dict->hashfn, dict->collation, value));
+}
+
+static bool
+keydict_value_equal(KeyDict *dict, Datum a, Datum b)
+{
+	return DatumGetBool(FunctionCall2Coll(&dict->eqfn, dict->collation, a, b));
+}
+
+#define SH_PREFIX keydict
+#define SH_ELEMENT_TYPE KeyEntry
+#define SH_KEY_TYPE Datum
+#define SH_KEY value
+#define SH_HASH_KEY(tb, key) keydict_value_hash((KeyDict *) (tb)->private_data, key)
+#define SH_EQUAL(tb, a, b) keydict_value_equal((KeyDict *) (tb)->private_data, a, b)
+#define SH_SCOPE static inline
+#define SH_STORE_HASH
+#define SH_GET_HASH(tb, a) a->hash
+#define SH_DEFINE
+#define SH_DECLARE
+#include "lib/simplehash.h"
+
 typedef struct TessAggState
 {
 	CustomScanState css;
@@ -250,6 +313,18 @@ typedef struct TessAggState
 	uint64	   *missing_bits;
 	int			missing_words;
 	uint64		spilled_rows;
+	/*
+	 * Keys through dictionaries: one per such key, NULL for a word key; the
+	 * rows' hashes of their values, which choose their partitions when they
+	 * spill (the numbers are the table's alone); and whether the groups
+	 * spill their rows rather than their records.
+	 */
+	KeyDict    *dicts[TESS_TABLE_MAX_KEYS];
+	bool		has_dicts;
+	bool		row_spill;
+	uint32	   *value_hashes;
+	int			value_hash_rows;
+	TessDatumColumn number_columns[TESS_TABLE_MAX_KEYS];
 
 	/*
 	 * GROUP BY: the keys, computed columns before the arguments, and the
@@ -607,7 +682,7 @@ query_supported(PlannerInfo *root, RelOptInfo *input_rel, RelOptInfo *output_rel
 /*
  * The expressions of grouping or distinct clauses when the node can group
  * by them: 1 to 16 values of a type the table keeps in a word
- * (tess_word_key_kind), a bare column, a chain the expression compiler
+ * (tess_word_key_kind) or of any type its equality hashes, a bare column, a chain the expression compiler
  * takes such as c % 10, or any other expression, computed row by row. NIL
  * otherwise, also when the planner dropped every grouping clause, as for
  * a constant one.
@@ -625,9 +700,13 @@ clause_keys(PlannerInfo *root, List *clauses)
 															root->processed_tlist);
 		TessTableKeyKind kind;
 
-		/* A key the compiler does not take is computed row by row. */
-		if (!tess_word_key_kind(exprType(expr), &kind) || contain_subplans(expr) ||
-			contain_volatile_functions(expr))
+		/*
+		 * A key the compiler does not take is computed row by row; one of a
+		 * type a word does not hold goes through a dictionary of its
+		 * values by its hash and equality functions (KeyDict).
+		 */
+		if ((!tess_word_key_kind(exprType(expr), &kind) && !clause->hashable) ||
+			contain_subplans(expr) || contain_volatile_functions(expr))
 			return NIL;
 		keys = lappend(keys, expr);
 	}
@@ -711,6 +790,16 @@ group_cost(PlannerInfo *root, const Path *child, double groups, int nkeys,
 	entry += 8.0 * naggs + costs.transitionSpace;
 	startup = child->total_cost;
 	startup += cpu_operator_cost * AGG_KEY_SHARE * nkeys * rows;
+	/* A key a word does not hold: its type's hash a row, as the core counts it. */
+	foreach_node(TargetEntry, key, tlist)
+	{
+		TessTableKeyKind kind;
+
+		if (foreach_current_index(key) >= nkeys)
+			break;
+		if (!tess_word_key_kind(exprType((Node *) key->expr), &kind))
+			startup += cpu_operator_cost * rows;
+	}
 	startup += costs.transCost.startup +
 		costs.transCost.per_tuple * (generic ? 1.0 : AGG_KERNEL_SHARE) * rows;
 	/* Groups past hash_mem: their rows to disk and back, once per level. */
@@ -769,6 +858,32 @@ make_agg_path(PlannerInfo *root, const AggPath *agg, List *tlist, int nkeys)
 	config.node_data = (Node *) list_make2_int(nkeys,
 											   (int) Min(agg->path.rows,
 														 (double) PG_INT32_MAX));
+	/*
+	 * Each key's equality, for a key a word does not hold (0 for the
+	 * others): its type's default one, which one of the grouping clauses
+	 * must use, since the clauses may come in another order than the keys.
+	 */
+	foreach_node(TargetEntry, entry, tlist)
+	{
+		TessTableKeyKind kind;
+		TypeCacheEntry *type;
+		bool		used = false;
+
+		if (foreach_current_index(entry) >= nkeys)
+			break;
+		if (tess_word_key_kind(exprType((Node *) entry->expr), &kind))
+		{
+			config.node_data = (Node *) lappend_int((List *) config.node_data, 0);
+			continue;
+		}
+		type = lookup_type_cache(exprType((Node *) entry->expr),
+								 TYPECACHE_EQ_OPR | TYPECACHE_HASH_PROC);
+		foreach_node(SortGroupClause, clause, agg->groupClause)
+			used |= clause->eqop == type->eq_opr && clause->hashable;
+		if (!OidIsValid(type->eq_opr) || !OidIsValid(type->hash_proc) || !used)
+			return NULL;
+		config.node_data = (Node *) lappend_int((List *) config.node_data, (int) type->eq_opr);
+	}
 	return tess_path_create(&config);
 }
 
@@ -814,9 +929,19 @@ create_partial_paths(PlannerInfo *root, RelOptInfo *grouped_rel,
 	if (!collect_aggregates((Node *) partial_rel->reltarget->exprs, keys, &tlist) ||
 		list_length(tlist) == list_length(keys))
 		return;
-	/* A partial grouping empties its table early: generic states would go with it. */
+	/*
+	 * A partial grouping empties its table early: generic states and the
+	 * dictionaries of keys a word does not hold would go with it.
+	 */
 	if (keys != NIL && has_generic(tlist))
 		return;
+	foreach_ptr(Node, key, keys)
+	{
+		TessTableKeyKind kind;
+
+		if (!tess_word_key_kind(exprType(key), &kind))
+			return;
+	}
 	foreach_ptr(AggPath, agg, aggregate_templates(partial_rel->partial_pathlist,
 												  strategy,
 												  AGGSPLIT_INITIAL_SERIAL))
@@ -961,8 +1086,10 @@ create_setop_paths(PlannerInfo *root, RelOptInfo *output_rel)
 		foreach_ptr(Node, key, keys)
 		{
 			TessTableKeyKind kind;
+			SortGroupClause *clause = list_nth_node(SortGroupClause, agg->groupClause,
+													foreach_current_index(key));
 
-			if (!tess_word_key_kind(exprType(key), &kind))
+			if (!tess_word_key_kind(exprType(key), &kind) && !clause->hashable)
 			{
 				keys = NIL;
 				break;
@@ -1180,6 +1307,7 @@ agg_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 	tess_plan_write_list(writer, "more", more);
 	tess_plan_write_list(writer, "keys", keys);
 	tess_plan_write_int(writer, "groups", lsecond_int(path_data));
+	tess_plan_write_int_list(writer, "key_eqops", list_copy_tail(path_data, 2));
 	config.methods = &tess_agg_scan_methods;
 	config.layout_policy = TESS_LAYOUT_DENSE;
 	config.qual = partial ? NIL : (List *) root->parse->havingQual;
@@ -1364,6 +1492,7 @@ generic_accumulate(TessAggState *state, GenericAgg *generic, const TessRowMask *
 }
 
 static inline void check(TessAggState *state, TessStatusCode code);
+static KeyDict *key_dict_create(TessAggState *state, Oid eqop, Oid type, Oid collation);
 static void rows_spill_free(TessAggState *state);
 
 /* The payload of the record at ref, in the chunk's memory, which the node writes. */
@@ -1489,6 +1618,7 @@ agg_begin(CustomScanState *css, EState *estate, int eflags)
 	List	   *computed = NIL;
 	List	   *arguments;
 	List	   *more;
+	List	   *eqops;
 	List	   *keys;
 	TessPlanReader *reader;
 	int			groups;
@@ -1505,6 +1635,7 @@ agg_begin(CustomScanState *css, EState *estate, int eflags)
 									 TESS_AGG_DATA_VERSION);
 	arguments = tess_plan_read_list(reader, "arguments");
 	more = tess_plan_read_list(reader, "more");
+	eqops = tess_plan_read_int_list(reader, "key_eqops");
 	keys = tess_plan_read_list(reader, "keys");
 	groups = tess_plan_read_int(reader, "groups");
 	state->groups_estimate = (uint64) Max(groups, 0);
@@ -1513,7 +1644,8 @@ agg_begin(CustomScanState *css, EState *estate, int eflags)
 	if (state->nkeys > TESS_TABLE_MAX_KEYS ||
 		list_length(arguments) + state->nkeys != list_length(cscan->custom_scan_tlist) ||
 		(state->nkeys == 0 && arguments == NIL) ||
-		list_length(arguments) > AGG_MAX_GROUPED)
+		list_length(arguments) > AGG_MAX_GROUPED ||
+		list_length(eqops) != state->nkeys)
 		elog(ERROR, "TessAgg received a foreign plan");
 	state->child = ExecInitNode(child_plan, estate, eflags);
 	css->custom_ps = list_make1(state->child);
@@ -1528,7 +1660,15 @@ agg_begin(CustomScanState *css, EState *estate, int eflags)
 	{
 		int			position = foreach_current_index(key);
 
-		if (!tess_word_key_kind(exprType(key), &state->kinds[position]))
+		if (list_nth_int(eqops, position) != 0)
+		{
+			state->kinds[position] = TESS_TABLE_KEY_INT8;
+			state->dicts[position] = key_dict_create(state, (Oid) list_nth_int(eqops, position),
+													exprType(key), exprCollation(key));
+			state->has_dicts = true;
+			state->row_spill = true;
+		}
+		else if (!tess_word_key_kind(exprType(key), &state->kinds[position]))
 			elog(ERROR, "TessAgg received a key of type %u", exprType(key));
 		computed = lappend(computed,
 						   makeTargetEntry((Expr *) key, position + 1, NULL, false));
@@ -1569,6 +1709,7 @@ agg_begin(CustomScanState *css, EState *estate, int eflags)
 			if (state->nkeys > 0 && state->generic_output == NULL)
 			{
 				state->has_generic = true;
+				state->row_spill = true;
 				state->generic_output = AllocSetContextCreate(estate->es_query_cxt,
 															  "TessAgg generic values",
 															  ALLOCSET_DEFAULT_SIZES);
@@ -3242,6 +3383,92 @@ agg_spill_memory(TessAggState *state)
 }
 
 /* A computed column of the projection's wrapper, checked. */
+/* ------------------------------------------------------ keys through dictionaries */
+
+static KeyDict *
+key_dict_create(TessAggState *state, Oid eqop, Oid type, Oid collation)
+{
+	EState	   *estate = state->css.ss.ps.state;
+	KeyDict    *dict = MemoryContextAllocZero(estate->es_query_cxt, sizeof(KeyDict));
+	RegProcedure hashproc;
+
+	if (!get_op_hash_functions(eqop, &hashproc, NULL))
+		elog(ERROR, "TessAgg found no hash function of operator %u", eqop);
+	fmgr_info_cxt(get_opcode(eqop), &dict->eqfn, estate->es_query_cxt);
+	fmgr_info_cxt(hashproc, &dict->hashfn, estate->es_query_cxt);
+	dict->collation = collation;
+	get_typlenbyval(type, &dict->typlen, &dict->typbyval);
+	dict->context = AllocSetContextCreate(estate->es_query_cxt, "TessAgg key values",
+										  ALLOCSET_DEFAULT_SIZES);
+	return dict;
+}
+
+/* Forget every value: the table they numbered is made anew. */
+static void
+key_dict_reset(KeyDict *dict)
+{
+	MemoryContextReset(dict->context);
+	dict->table = keydict_create(dict->context, 256, dict);
+	dict->slots = 256;
+	dict->values = MemoryContextAlloc(dict->context, sizeof(Datum) * dict->slots);
+	dict->count = 0;
+}
+
+/*
+ * The numbers of the values of the rows of rows: a value the dictionary
+ * lacks gets the next number, or, with insert false, -1, which no record
+ * has; NULL stays NULL for the table's NULL key. hashes[row] receives the
+ * value's hash, 0 for NULL.
+ */
+static void
+keydict_numbers(KeyDict *dict, const TessDatumColumn *column, const TessRowMask *rows,
+				bool insert, Datum *numbers, uint32 *hashes)
+{
+	int			row = -1;
+
+	while ((row = tess_row_mask_next(rows, row)) >= 0)
+	{
+		Datum		value = column->values[row];
+		uint32		hash;
+
+		if (column->isnull[row])
+		{
+			numbers[row] = (Datum) 0;
+			hashes[row] = 0;
+			continue;
+		}
+		hash = keydict_value_hash(dict, value);
+		hashes[row] = hash;
+		if (insert)
+		{
+			bool		found;
+			KeyEntry   *entry = keydict_insert_hash(dict->table, value, hash, &found);
+
+			if (!found)
+			{
+				MemoryContext old = MemoryContextSwitchTo(dict->context);
+
+				if (dict->count == dict->slots)
+				{
+					dict->slots *= 2;
+					dict->values = repalloc_huge(dict->values, sizeof(Datum) * dict->slots);
+				}
+				entry->value = datumCopy(value, dict->typbyval, dict->typlen);
+				entry->number = dict->count;
+				dict->values[dict->count++] = entry->value;
+				MemoryContextSwitchTo(old);
+			}
+			numbers[row] = Int64GetDatum(entry->number);
+		}
+		else
+		{
+			KeyEntry   *entry = keydict_lookup_hash(dict->table, value, hash);
+
+			numbers[row] = Int64GetDatum(entry != NULL ? entry->number : -1);
+		}
+	}
+}
+
 /* ------------------------------------------------------ rows past hash_mem */
 
 /* Hash bits a level of partitions of rows takes, and the most levels. */
@@ -3375,9 +3602,12 @@ rows_write(TessAggState *state, RowSpill *spill, const TessRowMask *rows)
 	int			shift = 32 - ROWS_PART_BITS * (spill->level + 1);
 	int			row = -1;
 
+	/* By the values' hashes when a key has a dictionary: the numbers are one table's. */
+	const uint32 *hashes = state->has_dicts ? state->value_hashes : state->hashes;
+
 	while ((row = tess_row_mask_next(rows, row)) >= 0)
 	{
-		int			part = (int) ((state->hashes[row] >> shift) & (ROWS_PARTS - 1));
+		int			part = (int) ((hashes[row] >> shift) & (ROWS_PARTS - 1));
 		RowWriter  *writer = &spill->writers[part];
 		Size		need = 0;
 		uint64	   *nulls;
@@ -3628,6 +3858,9 @@ groups_memory(TessAggState *state)
 	if (state->has_generic)
 		bytes += MemoryContextMemAllocated(state->generic_agg->curaggcontext->ecxt_per_tuple_memory,
 										   true);
+	for (int key = 0; key < state->nkeys; key++)
+		if (state->dicts[key] != NULL)
+			bytes += MemoryContextMemAllocated(state->dicts[key]->context, true);
 	return bytes;
 }
 
@@ -3687,8 +3920,26 @@ group_batch(TessAggState *state, TessBatch *batch)
 	{
 		TessDatumColumn *column = &state->key_columns[key];
 		bool		int8 = state->kinds[key] == TESS_TABLE_KEY_INT8;
+		KeyDict    *dict = state->dicts[key];
 
 		computed_column(state, batch, key, TESS_COLUMN_FOR_FILTER, column);
+		/* A key through a dictionary: the table groups by its values' numbers. */
+		if (dict != NULL)
+		{
+			if (dict->capacity < nrows)
+			{
+				MemoryContext query = state->css.ss.ps.state->es_query_cxt;
+
+				dict->capacity = nrows;
+				dict->batch_numbers = MemoryContextAlloc(query, sizeof(Datum) * nrows);
+				dict->batch_hashes = MemoryContextAlloc(query, sizeof(uint32) * nrows);
+			}
+			keydict_numbers(dict, column, &batch->rows, !state->frozen,
+							dict->batch_numbers, dict->batch_hashes);
+			state->number_columns[key] = *column;
+			state->number_columns[key].values = dict->batch_numbers;
+			column = &state->number_columns[key];
+		}
 		if (key == 0)
 			check(state, (int8 ? state->kernels->int8_hash :
 						  state->kernels->int4_hash) (column, NULL, &batch->rows,
@@ -3704,6 +3955,34 @@ group_batch(TessAggState *state, TessBatch *batch)
 		state->table_keys[key].kind = state->kinds[key];
 		state->table_keys[key].column = column;
 		state->table_keys[key].prepared = NULL;
+	}
+	/* A frozen table's rows spill by their values' hashes. */
+	if (state->has_dicts && state->frozen)
+	{
+		int			row = -1;
+
+		if (state->value_hash_rows < nrows)
+		{
+			state->value_hash_rows = nrows;
+			state->value_hashes = MemoryContextAlloc(state->css.ss.ps.state->es_query_cxt,
+													 sizeof(uint32) * nrows);
+		}
+		while ((row = tess_row_mask_next(&batch->rows, row)) >= 0)
+		{
+			uint32		hash = 0;
+
+			for (int key = 0; key < state->nkeys; key++)
+			{
+				const TessDatumColumn *column = &state->key_columns[key];
+				uint32		part = state->dicts[key] != NULL ?
+					state->dicts[key]->batch_hashes[row] :
+					column->isnull[row] ? 0 :
+					(uint32) murmurhash64((uint64) column->values[row]);
+
+				hash = hash_combine(hash, part);
+			}
+			state->value_hashes[row] = hash;
+		}
 	}
 	memcpy(state->pending_bits, state->valid_bits, sizeof(uint64) * nwords);
 	/*
@@ -3812,16 +4091,27 @@ group_batch(TessAggState *state, TessBatch *batch)
 	 * partial mode they go out instead (group_drain).
 	 */
 	if (state->spill == NULL && (!state->partial || state->partial_spill) &&
-		!state->has_distinct && !state->has_generic &&
+		!state->has_distinct && !state->row_spill &&
 		state->table_bytes > get_hash_memory_limit() / 8 * 7)
 		agg_start_spill(state);
 	/* Generic states past hash_mem: the table freezes, new groups' rows go to disk. */
-	if (state->has_generic && !state->has_distinct && !state->frozen &&
+	if (state->row_spill && !state->has_distinct && !state->frozen &&
 		state->rows_level < ROWS_MAX_LEVELS &&
 		groups_memory(state) > get_hash_memory_limit() / 8 * 7)
 	{
-		state->frozen = true;
-		state->rows_spill = rows_spill_create(state, state->rows_level);
+		TessTableStats stats = TESS_STRUCT_INITIALIZER(TessTableStats);
+
+		/*
+		 * A table of fewer groups than a batch's is its own overhead past a
+		 * tiny hash_mem, not groups too many: freezing it would split every
+		 * partition again, level after level.
+		 */
+		check(state, state->kernels->table_stats(&state->table, &stats, &state->status));
+		if (stats.records >= AGG_GROUP_ROWS)
+		{
+			state->frozen = true;
+			state->rows_spill = rows_spill_create(state, state->rows_level);
+		}
 	}
 	if (state->spill != NULL)
 		agg_make_room(state);
@@ -3834,6 +4124,9 @@ group_drain(TessAggState *state)
 	agg_spill_free(state);
 	rows_spill_free(state);
 	state->rows_level = 0;
+	for (int key = 0; key < state->nkeys; key++)
+		if (state->dicts[key] != NULL)
+			key_dict_reset(state->dicts[key]);
 	/* The groups of a previous table and their states go together. */
 	if (state->generic_agg != NULL)
 		ReScanExprContext(state->generic_agg->curaggcontext);
@@ -3955,7 +4248,11 @@ rows_drain(TessAggState *state)
 		rows_reader_init(state);
 	if (!rows_next_partition(state))
 		return false;
-	ReScanExprContext(state->generic_agg->curaggcontext);
+	if (state->generic_agg != NULL)
+		ReScanExprContext(state->generic_agg->curaggcontext);
+	for (int key = 0; key < state->nkeys; key++)
+		if (state->dicts[key] != NULL)
+			key_dict_reset(state->dicts[key]);
 	create_table(state);
 	state->frozen = false;
 	state->replaying = true;
@@ -4011,11 +4308,19 @@ next_groups(TessAggState *state)
 		all = count == 64 ? UINT64_MAX : (UINT64CONST(1) << count) - 1;
 		groups = (TessRowMask) {count, &all};
 		for (int key = 0; key < state->nkeys; key++)
+		{
 			check(state, state->kernels->table_gather_key(&state->table,
 														  state->walked, &groups,
 														  key, state->key_values[key],
 														  state->key_isnull[key],
 														  &state->status));
+			/* A number goes out as its value. */
+			if (state->dicts[key] != NULL)
+				for (int group = 0; group < count; group++)
+					if (!state->key_isnull[key][group])
+						state->key_values[key][group] =
+							state->dicts[key]->values[DatumGetInt64(state->key_values[key][group])];
+		}
 		check(state, state->kernels->table_gather(&state->table,
 												  state->walked, &groups, 0,
 												  (Datum *) state->flag_words,

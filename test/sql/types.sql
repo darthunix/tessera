@@ -97,6 +97,41 @@ SELECT types_order($$SELECT id, tz FROM types_f ORDER BY tz DESC, id$$);
 SELECT types_order($$SELECT id, b FROM types_f ORDER BY b, s, id$$);
 SELECT types_order($$SELECT id, d FROM types_f ORDER BY d DESC, id LIMIT 7$$);
 
+-- Keys a word does not hold: text, numeric, an expression over them; their
+-- values get numbers through a dictionary by the type's hash and equality,
+-- and go out as the values. numeric 1.0 and 1.00 are one group.
+CREATE TABLE types_g AS
+SELECT i AS id,
+       CASE WHEN i % 17 = 0 THEN NULL ELSE 'k' || (i % 40) END AS t,
+       CASE WHEN i % 13 = 0 THEN NULL ELSE ((i % 30) * 1.5)::numeric END AS n,
+       CASE WHEN i % 2 = 0 THEN 1.0 ELSE 1.00 END::numeric AS one,
+       i % 7 AS w, repeat('x', i % 50) || i % 60 AS long
+FROM generate_series(1, 5000) AS i;
+ANALYZE types_g;
+EXPLAIN (COSTS OFF) SELECT t, count(*) FROM types_g GROUP BY t;
+SELECT types_same($$SELECT t, count(*), sum(w), max(n) FROM types_g GROUP BY t$$);
+SELECT types_same($$SELECT n, count(*), max(t) FROM types_g GROUP BY n$$);
+SELECT types_same($$SELECT t, w, n, count(*) FROM types_g GROUP BY t, w, n$$);
+SELECT types_same($$SELECT upper(t), count(*) FROM types_g GROUP BY upper(t)$$);
+SELECT types_same($$SELECT count(*), sum(c) FROM (SELECT one, count(*) AS c FROM types_g GROUP BY one) AS q$$);
+SELECT types_same($$SELECT long, count(*) FROM types_g GROUP BY long HAVING count(*) > 50$$);
+SELECT types_same($$SELECT DISTINCT t FROM types_g$$);
+SELECT types_same($$SELECT DISTINCT n, t FROM types_g$$);
+EXPLAIN (COSTS OFF) SELECT t FROM types_g UNION SELECT label FROM (VALUES ('k1'), ('new')) AS v(label);
+SELECT types_same($$SELECT t FROM types_g UNION SELECT label FROM (VALUES ('k1'), ('new')) AS v(label)$$);
+SELECT types_same($$SELECT n FROM types_g UNION SELECT n * 2 FROM types_g$$);
+-- Past hash_mem the rows spill with their values, by the values' hashes,
+-- and each partition numbers its values anew.
+SET work_mem = '64kB';
+SET enable_sort = off;
+SELECT types_same($$SELECT count(*), sum(c), max(m) FROM (SELECT long, t, count(*) AS c, max(id) AS m FROM types_g GROUP BY long, t) AS q$$);
+SELECT types_same($$SELECT t, n, count(*) FROM types_g GROUP BY t, n$$);
+RESET enable_sort;
+RESET work_mem;
+-- Rescan numbers the values anew.
+SELECT types_same($$SELECT x, (SELECT count(*) FROM (SELECT t FROM types_g WHERE w = x GROUP BY t) AS q) FROM generate_series(0, 3) AS x$$);
+DROP TABLE types_g;
+
 DROP FUNCTION types_order(text);
 DROP FUNCTION types_same(text);
 DROP TABLE types_f, types_d;

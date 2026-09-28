@@ -847,7 +847,8 @@ SELECT union_same($$SELECT count(*), sum(x) FROM (SELECT a * 1000 + b AS x FROM 
 (1 row)
 
 RESET work_mem;
--- A UNION within another set operation, and text columns: the core's.
+-- A UNION within another set operation: the core's. Text columns go through
+-- a dictionary of their values.
 EXPLAIN (COSTS OFF)
 SELECT a FROM union_a UNION SELECT a FROM union_b UNION ALL SELECT a FROM union_empty;
                        QUERY PLAN                        
@@ -880,14 +881,18 @@ SELECT union_same($$SELECT a FROM union_a EXCEPT SELECT a FROM union_b$$);
 (1 row)
 
 EXPLAIN (COSTS OFF) SELECT t FROM union_a UNION SELECT t FROM union_b;
-                    QUERY PLAN                     
----------------------------------------------------
- HashAggregate
-   Group Key: union_a.t
-   ->  Append
-         ->  Custom Scan (TessHeapScan) on union_a
-         ->  Custom Scan (TessHeapScan) on union_b
-(5 rows)
+                       QUERY PLAN                        
+---------------------------------------------------------
+ Custom Scan (TessAgg)
+   Group Key: unnamed_subquery.t
+   ->  Custom Scan (TessAppend)
+         ->  Custom Scan (TessPack)
+               Rows Kept As: forwarded batches
+               ->  Custom Scan (TessHeapScan) on union_a
+         ->  Custom Scan (TessPack)
+               Rows Kept As: forwarded batches
+               ->  Custom Scan (TessHeapScan) on union_b
+(9 rows)
 
 SELECT union_same($$SELECT t FROM union_a UNION SELECT t FROM union_b$$);
  union_same 

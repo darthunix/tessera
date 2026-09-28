@@ -235,7 +235,8 @@ SET work_mem = '64kB';
 SELECT union_same($$SELECT count(*), sum(x) FROM (SELECT a * 1000 + b AS x FROM union_a
                    UNION SELECT a * 1000 + b FROM union_b UNION SELECT generate_series(1, 20000)) AS s$$);
 RESET work_mem;
--- A UNION within another set operation, and text columns: the core's.
+-- A UNION within another set operation: the core's. Text columns go through
+-- a dictionary of their values.
 EXPLAIN (COSTS OFF)
 SELECT a FROM union_a UNION SELECT a FROM union_b UNION ALL SELECT a FROM union_empty;
 SELECT union_same($$SELECT a FROM union_a UNION SELECT a FROM union_b UNION ALL SELECT a FROM union_a WHERE a < 3$$);

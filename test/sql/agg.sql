@@ -280,8 +280,9 @@ DROP TABLE agg_regrow;
 RESET work_mem;
 DROP FUNCTION agg_rows();
 DROP TABLE agg_spill;
--- Left to the core: grouping sets, a text key, a column the primary key
--- makes functionally dependent, and hash aggregation disabled.
+-- Left to the core: grouping sets, a column the primary key makes
+-- functionally dependent, and hash aggregation disabled. A text key goes
+-- through a dictionary of its values (see the types suite).
 EXPLAIN (COSTS OFF) SELECT b, count(*) FROM agg_t GROUP BY GROUPING SETS ((b), ());
 EXPLAIN (COSTS OFF) SELECT c, count(*) FROM agg_t GROUP BY c;
 CREATE TABLE agg_pk (id int PRIMARY KEY, label text);
@@ -302,7 +303,8 @@ EXPLAIN (COSTS OFF) SELECT count(*), sum(b), sum(r) FROM (SELECT DISTINCT b, a %
 SELECT agg_same($$SELECT count(*), sum(x) FROM (SELECT DISTINCT a::bigint * 1000000000 AS x FROM agg_t WHERE a > 250) AS s$$);
 SELECT agg_same($$SELECT count(*) FROM (SELECT DISTINCT a FROM agg_t) AS s$$);
 SELECT agg_same($$SELECT DISTINCT b FROM agg_t WHERE false$$);
--- Left to the core: DISTINCT ON, a text key.
+-- Left to the core: DISTINCT ON; a DISTINCT of text over 300 rows, cheaper
+-- by the planner's estimate.
 EXPLAIN (COSTS OFF) SELECT DISTINCT ON (b) b, a FROM agg_t ORDER BY b, a;
 EXPLAIN (COSTS OFF) SELECT DISTINCT c FROM agg_t;
 
