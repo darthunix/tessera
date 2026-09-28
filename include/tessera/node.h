@@ -83,6 +83,13 @@ typedef struct TessNode
 	 */
 	bool		(*set_key_filter) (CustomScanState *node,
 								   const TessKeyFilter *filter);
+	/*
+	 * Optional: build this kind's path in place of an Append path, over
+	 * batch paths of the Append's children, or NULL when the kind cannot.
+	 * The append node publishes it, and the runtime's tess_batch_input_path
+	 * calls it before it packs an Append's rows.
+	 */
+	CustomPath *(*wrap_append) (PlannerInfo *root, Path *append);
 } TessNode;
 
 #define TESS_NODE_MIN_SIZE \

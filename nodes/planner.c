@@ -42,11 +42,15 @@ const CustomScanMethods tess_filter_scan_methods = {
 	.CreateCustomScanState = tess_filter_create_state,
 };
 
-/* A plain scan of one heap table in a SELECT, with nothing parameterized. */
+/*
+ * A plain scan of one heap table in a SELECT, with nothing parameterized:
+ * a base relation, or a partition or inheritance child, whose clauses the
+ * core translated from its parent's.
+ */
 static bool
 relation_supported(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte)
 {
-	return rel->reloptkind == RELOPT_BASEREL &&
+	return IS_SIMPLE_REL(rel) &&
 		rte->rtekind == RTE_RELATION && rte->relkind == RELKIND_RELATION &&
 		!rte->inh && rte->tablesample == NULL &&
 		root->parse->commandType == CMD_SELECT &&
@@ -200,7 +204,6 @@ tess_filter_row_path(PlannerInfo *root, RelOptInfo *rel, Path *seqscan)
 
 	if (!*tess_runtime_api()->settings->enable || seqscan == NULL ||
 		seqscan->pathtype != T_SeqScan || seqscan->param_info != NULL ||
-		rel->reloptkind != RELOPT_BASEREL ||
 		!relation_supported(root, rel, planner_rt_fetch(rel->relid, root)) ||
 		first_clause(root, rel) == NULL || clauses_supported(root, rel) ||
 		(seqscan->parallel_workers > 0 &&

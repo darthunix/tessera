@@ -27,6 +27,8 @@
 #define TESS_GATHER_DATA_VERSION 1
 #define TESS_SEND_DATA "tessera.send"
 #define TESS_SEND_DATA_VERSION 1
+#define TESS_APPEND_DATA "tessera.append"
+#define TESS_APPEND_DATA_VERSION 1
 
 /* Clauses (RestrictInfos) in the order the planner evaluates a plan's quals. */
 extern List *tess_order_clauses(PlannerInfo *root, List *rinfos);
@@ -39,6 +41,7 @@ extern bool tess_batch_gather;
 
 extern const TessNode tess_pack_node;
 extern const CustomScanMethods tess_pack_scan_methods;
+extern bool tess_pack_forwards(const Path *path);
 
 extern const TessNode tess_heap_scan_node;
 extern const CustomScanMethods tess_heap_scan_scan_methods;
@@ -74,5 +77,8 @@ extern void tess_gather_planner_init(void);
 extern void tess_gather_add_paths(PlannerInfo *root, RelOptInfo *rel);
 extern Path *tess_gather_merge_path(PlannerInfo *root, RelOptInfo *rel, Path *sorted,
 									PathTarget *target);
+
+extern const TessNode tess_append_node;
+extern const CustomScanMethods tess_append_scan_methods;
 
 #endif							/* TESSERA_NODES_INTERNAL_H */

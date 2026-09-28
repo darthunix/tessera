@@ -100,7 +100,7 @@ physical_targets(PlannerInfo *root, const Path *child)
 
 	/* A stand-in path of a test has neither a relation nor a target. */
 	if (root == NULL || rel == NULL || child->pathtarget == NULL ||
-		child->pathtype != T_SeqScan || rel->reloptkind != RELOPT_BASEREL ||
+		child->pathtype != T_SeqScan || !IS_SIMPLE_REL(rel) ||
 		rel->rtekind != RTE_RELATION)
 		return NIL;
 	foreach_ptr(Expr, expr, child->pathtarget->exprs)
@@ -124,10 +124,20 @@ forwardable(const Path *child)
 {
 	const SubqueryScanPath *scan = (const SubqueryScanPath *) child;
 	RelOptInfo *rel = child->parent;
+	Path	   *subpath;
 
 	if (!IsA(child, SubqueryScanPath) || rel == NULL ||
-		rel->baserestrictinfo != NIL || child->pathtarget == NULL ||
-		tess_path_node(scan->subpath) == NULL)
+		rel->baserestrictinfo != NIL || child->pathtarget == NULL)
+		return false;
+	/*
+	 * A projection over a batch path that projects, such as a constant
+	 * among the subquery's targets, goes into that path's plan: the
+	 * subplan is the batch node still.
+	 */
+	subpath = scan->subpath;
+	if (IsA(subpath, ProjectionPath) && ((ProjectionPath *) subpath)->dummypp)
+		subpath = ((ProjectionPath *) subpath)->subpath;
+	if (tess_path_node(subpath) == NULL)
 		return false;
 	foreach_ptr(Expr, expr, child->pathtarget->exprs)
 	{
@@ -138,6 +148,18 @@ forwardable(const Path *child)
 			return false;
 	}
 	return true;
+}
+
+/* Whether a path is the pack node's forwarding the batches of a subquery. */
+bool
+tess_pack_forwards(const Path *path)
+{
+	TessPathInfo info = TESS_STRUCT_INITIALIZER(TessPathInfo);
+
+	if (tess_path_node(path) != &tess_pack_node)
+		return false;
+	tess_path_get_info((const CustomPath *) path, &info);
+	return info.node_data != NULL && intVal(info.node_data) == PACK_FORWARD;
 }
 
 /* The path costs what its child costs: there is no cost model yet. */

@@ -78,11 +78,15 @@ extern void tess_path_get_info(const CustomPath *path, TessPathInfo *result);
 /* The registered node kind that reads a heap relation in batches. */
 #define TESS_HEAP_SCAN_NODE_NAME "tessera.heap_scan"
 
+/* The registered node kind that reads the children of an Append in turn. */
+#define TESS_APPEND_NODE_NAME "tessera.append"
+
 /*
  * A batch path over any path: the path itself when it is one, a batch scan
  * of its relation when the path is a sequential scan of a relation without
- * clauses and a node kind reads batches natively, otherwise the pack node's
- * path over it, so that a batch parent can stand above any core path; the
+ * clauses and a node kind reads batches natively, a node kind's path in
+ * place of an Append path over batch paths of its children when one takes
+ * it, otherwise the pack node's path over it, so that a batch parent can stand above any core path; the
  * pack node forwards the batches of a subquery scan without clauses whose
  * subquery is planned as a batch path, instead of packing its rows. NULL
  * when the path is parameterized, when a pseudoconstant clause makes the

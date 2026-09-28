@@ -1,0 +1,186 @@
+CREATE EXTENSION tessera;
+LOAD 'tessera_nodes';
+LOAD 'tessera_kernels';
+LOAD 'tessera_limit';
+
+-- The same result with Tessera on and off, as text.
+CREATE FUNCTION union_same(query text) RETURNS text
+LANGUAGE plpgsql AS $$
+DECLARE
+    with_tessera text[];
+    without_tessera text[];
+    wrapped text := format('SELECT array_agg(q::text ORDER BY q::text) FROM (%s) AS q', query);
+BEGIN
+    PERFORM set_config('tessera.enable', 'on', true);
+    EXECUTE wrapped INTO with_tessera;
+    PERFORM set_config('tessera.enable', 'off', true);
+    EXECUTE wrapped INTO without_tessera;
+    PERFORM set_config('tessera.enable', 'on', true);
+    IF with_tessera IS DISTINCT FROM without_tessera THEN
+        RETURN format('on: %s off: %s', with_tessera, without_tessera);
+    END IF;
+    RETURN 'same';
+END
+$$;
+
+CREATE TABLE union_a (a int, b bigint, t text);
+INSERT INTO union_a
+SELECT i, i * 10, CASE WHEN i % 7 = 0 THEN NULL ELSE 'a' || i END
+FROM generate_series(1, 1000) AS i;
+CREATE TABLE union_b (a int, b bigint, t text);
+INSERT INTO union_b
+SELECT CASE WHEN i % 5 = 0 THEN NULL ELSE i END, i * 100, 'b' || i
+FROM generate_series(1, 700) AS i;
+CREATE TABLE union_empty (a int, b bigint, t text);
+ANALYZE union_a, union_b, union_empty;
+SET max_parallel_workers_per_gather = 0;
+
+-- An aggregate over UNION ALL of two filtered scans: TessAppend reads the
+-- branches in turn and gives the aggregate their batches, each branch's
+-- through the pack that forwards the batches of its subquery.
+EXPLAIN (COSTS OFF)
+SELECT count(*), sum(a) FROM (SELECT a FROM union_a WHERE a > 100
+                              UNION ALL SELECT a FROM union_b WHERE a < 600) AS s;
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+SELECT count(*), sum(a) FROM (SELECT a FROM union_a WHERE a > 100
+                              UNION ALL SELECT a FROM union_b WHERE a < 600) AS s;
+SELECT union_same($$SELECT count(*), sum(a), count(a) FROM (SELECT a FROM union_a WHERE a > 100
+                   UNION ALL SELECT a FROM union_b WHERE a < 600) AS s$$);
+-- The columns in another order in each branch, one of them unused.
+SELECT union_same($$SELECT count(*), sum(x), sum(y) FROM (SELECT a AS x, b AS y, t FROM union_a
+                   UNION ALL SELECT a, b, t FROM union_b WHERE b > 1000) AS s$$);
+SELECT union_same($$SELECT sum(y), min(x) FROM (SELECT b AS y, a AS x FROM union_a WHERE a < 50
+                   UNION ALL SELECT b, a FROM union_b WHERE a > 650) AS s$$);
+
+-- Five branches: an empty table, a branch without rows, a constant
+-- target, a branch that is a plain scan.
+EXPLAIN (COSTS OFF)
+SELECT count(*), sum(a), sum(k) FROM (
+    SELECT a, 1 AS k FROM union_a WHERE a > 900
+    UNION ALL SELECT a, 2 FROM union_empty
+    UNION ALL SELECT a, 3 FROM union_b WHERE a > 5000
+    UNION ALL SELECT a, 4 FROM union_b
+    UNION ALL SELECT a, 5 FROM union_a WHERE a < 10) AS s;
+SELECT union_same($$SELECT count(*), sum(a), sum(k) FROM (
+    SELECT a, 1 AS k FROM union_a WHERE a > 900
+    UNION ALL SELECT a, 2 FROM union_empty
+    UNION ALL SELECT a, 3 FROM union_b WHERE a > 5000
+    UNION ALL SELECT a, 4 FROM union_b
+    UNION ALL SELECT a, 5 FROM union_a WHERE a < 10) AS s$$);
+-- Every branch empty.
+SELECT count(*), sum(a) FROM (SELECT a FROM union_a WHERE a > 5000
+                              UNION ALL SELECT a FROM union_empty) AS s;
+-- Nested UNION ALL, flattened into one Append.
+SELECT union_same($$SELECT count(*), sum(a) FROM (SELECT a FROM union_a WHERE a > 500
+    UNION ALL (SELECT a FROM union_b WHERE a > 500 UNION ALL SELECT a FROM union_a WHERE a < 20)) AS s$$);
+-- Branches of int4 and int8: a set operation the planner does not
+-- flatten, whose Append stays the core's.
+EXPLAIN (COSTS OFF)
+SELECT count(*), sum(x) FROM (SELECT a AS x FROM union_a WHERE a > 100
+                              UNION ALL SELECT b FROM union_b WHERE b > 100) AS s;
+SELECT union_same($$SELECT count(*), sum(x) FROM (SELECT a AS x FROM union_a WHERE a > 100
+                   UNION ALL SELECT b FROM union_b WHERE b > 100) AS s$$);
+-- Only core paths below: the core's Append, packed.
+EXPLAIN (COSTS OFF)
+SELECT count(*) FROM (SELECT a FROM union_a WHERE t LIKE 'a1%'
+                      UNION ALL SELECT a FROM union_b WHERE t LIKE 'b1%') AS s;
+
+-- Rows to a row-wise parent: the core's Append stays.
+EXPLAIN (COSTS OFF)
+SELECT a FROM union_a WHERE a > 995 UNION ALL SELECT a FROM union_b WHERE a > 695;
+SELECT union_same($$SELECT a, t FROM union_a WHERE a > 995 UNION ALL SELECT a, t FROM union_b WHERE a > 695$$);
+
+-- A hash join whose outer side is UNION ALL, text and NULL keys included.
+EXPLAIN (COSTS OFF)
+SELECT count(*), sum(s.a), count(s.t) FROM (SELECT a, t FROM union_a WHERE a > 300
+                                             UNION ALL SELECT a, t FROM union_b) AS s
+JOIN union_b AS d ON d.a = s.a;
+SELECT union_same($$SELECT count(*), sum(s.a), count(s.t) FROM (SELECT a, t FROM union_a WHERE a > 300
+                   UNION ALL SELECT a, t FROM union_b) AS s JOIN union_b AS d ON d.a = s.a$$);
+-- A sort over UNION ALL, a text column carried along.
+SELECT union_same($$SELECT a, t FROM (SELECT a, t FROM union_a WHERE a > 900
+                   UNION ALL SELECT a, t FROM union_b WHERE a > 600) AS s ORDER BY a, t$$);
+
+-- A limit above: the bound reaches every branch, a top-N sort in each.
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+SELECT count(*) FROM (SELECT a FROM (SELECT a FROM union_a ORDER BY a DESC LIMIT 100) AS x
+                      UNION ALL SELECT a FROM (SELECT a FROM union_b ORDER BY a LIMIT 100) AS y
+                      LIMIT 3) AS s;
+SELECT union_same($$SELECT a FROM (SELECT a FROM (SELECT a FROM union_a ORDER BY a DESC LIMIT 100) AS x
+                   UNION ALL SELECT a FROM (SELECT a FROM union_b WHERE a IS NOT NULL ORDER BY a LIMIT 100) AS y
+                   LIMIT 150) AS s$$);
+
+-- Rescan: a correlated subquery rescans the branches with a new value,
+-- and an initplan's parameter reaches both.
+SELECT g, (SELECT count(*) FROM (SELECT a FROM union_a WHERE a > g
+                                 UNION ALL SELECT a FROM union_b WHERE a > g) AS s) AS n
+FROM generate_series(595, 1005, 100) AS g;
+SELECT union_same($$SELECT g, (SELECT sum(a) FROM (SELECT a FROM union_a WHERE a > g
+                   UNION ALL SELECT a FROM union_b WHERE a > g) AS s) FROM generate_series(0, 1000, 50) AS g$$);
+SELECT union_same($$SELECT count(*), sum(a) FROM (SELECT a FROM union_a WHERE a > (SELECT 990)
+                   UNION ALL SELECT a FROM union_b WHERE a > (SELECT 690)) AS s$$);
+
+-- Inheritance: the parent's rows and a child's, each read by TessFilter.
+CREATE TABLE union_parent (a int, b int);
+CREATE TABLE union_child (c int) INHERITS (union_parent);
+INSERT INTO union_parent SELECT i, i % 10 FROM generate_series(1, 500) AS i;
+INSERT INTO union_child SELECT i, i % 10, i FROM generate_series(501, 1200) AS i;
+ANALYZE union_parent, union_child;
+EXPLAIN (COSTS OFF) SELECT count(*), sum(a) FROM union_parent WHERE b < 3;
+SELECT union_same($$SELECT count(*), sum(a) FROM union_parent WHERE b < 3$$);
+SELECT union_same($$SELECT count(*), sum(a) FROM union_parent$$);
+
+-- Range partitions, one of them partitioned again.
+CREATE TABLE union_part (k int, v int) PARTITION BY RANGE (k);
+CREATE TABLE union_part_1 PARTITION OF union_part FOR VALUES FROM (1) TO (1001);
+CREATE TABLE union_part_2 PARTITION OF union_part FOR VALUES FROM (1001) TO (2001);
+CREATE TABLE union_part_3 PARTITION OF union_part FOR VALUES FROM (2001) TO (4001)
+    PARTITION BY RANGE (k);
+CREATE TABLE union_part_3a PARTITION OF union_part_3 FOR VALUES FROM (2001) TO (3001);
+CREATE TABLE union_part_3b PARTITION OF union_part_3 FOR VALUES FROM (3001) TO (4001);
+INSERT INTO union_part SELECT i, i % 100 FROM generate_series(1, 4000) AS i;
+ANALYZE union_part;
+EXPLAIN (COSTS OFF) SELECT count(*), sum(k) FROM union_part WHERE v < 10;
+SELECT union_same($$SELECT count(*), sum(k) FROM union_part WHERE v < 10$$);
+SELECT union_same($$SELECT count(*), sum(v) FROM union_part$$);
+-- Pruned while planning: two partitions left.
+EXPLAIN (COSTS OFF) SELECT count(*), sum(k) FROM union_part WHERE k > 2500 AND v < 10;
+SELECT union_same($$SELECT count(*), sum(k) FROM union_part WHERE k > 2500 AND v < 10$$);
+-- One partition left: no Append.
+EXPLAIN (COSTS OFF) SELECT count(*) FROM union_part WHERE k < 500 AND v < 10;
+-- Pruned while executing, by a parameter: the core's Append stays.
+PREPARE union_prune(int) AS SELECT count(*), sum(k) FROM union_part WHERE k > $1 AND v < 10;
+SET plan_cache_mode = force_generic_plan;
+EXPLAIN (COSTS OFF) EXECUTE union_prune(3500);
+EXECUTE union_prune(3500);
+RESET plan_cache_mode;
+DEALLOCATE union_prune;
+-- The partitions grouped: TessAgg groups over TessAppend.
+SELECT union_same($$SELECT v % 7 AS g, count(*), sum(k) FROM union_part WHERE v < 50 GROUP BY 1$$);
+
+-- Parallel: the core's Parallel Append, which shares its children out,
+-- stays the core's; a partial Append that is not parallel-aware runs
+-- every child in every participant, each child dividing its own pages,
+-- and becomes TessAppend.
+SET max_parallel_workers_per_gather = 2;
+SET parallel_setup_cost = 0;
+SET parallel_tuple_cost = 0;
+SET min_parallel_table_scan_size = 0;
+EXPLAIN (COSTS OFF) SELECT count(*), sum(k) FROM union_part WHERE v < 10;
+SELECT union_same($$SELECT count(*), sum(k) FROM union_part WHERE v < 10$$);
+SELECT union_same($$SELECT count(*), sum(a) FROM (SELECT a FROM union_a WHERE a > 100
+                   UNION ALL SELECT a FROM union_b WHERE a < 600) AS s$$);
+SET enable_parallel_append = off;
+EXPLAIN (COSTS OFF) SELECT count(*), sum(k) FROM union_part WHERE v < 10;
+SELECT union_same($$SELECT count(*), sum(k) FROM union_part WHERE v < 10$$);
+SELECT union_same($$SELECT count(*), sum(a) FROM (SELECT a FROM union_a WHERE a > 100
+                   UNION ALL SELECT a FROM union_b WHERE a < 600) AS s$$);
+RESET enable_parallel_append;
+RESET max_parallel_workers_per_gather;
+RESET parallel_setup_cost;
+RESET parallel_tuple_cost;
+RESET min_parallel_table_scan_size;
+
+DROP TABLE union_part, union_parent, union_child, union_a, union_b, union_empty;
+DROP FUNCTION union_same(text);
+DROP EXTENSION tessera;

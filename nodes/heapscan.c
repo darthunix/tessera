@@ -151,7 +151,7 @@ plain_heap_scan(PlannerInfo *root, const Path *path)
 	bool		heap;
 
 	if (root == NULL || rel == NULL || path->pathtarget == NULL ||
-		path->pathtype != T_SeqScan || rel->reloptkind != RELOPT_BASEREL ||
+		path->pathtype != T_SeqScan || !IS_SIMPLE_REL(rel) ||
 		rel->rtekind != RTE_RELATION)
 		return false;
 	rte = planner_rt_fetch(rel->relid, root);

@@ -185,6 +185,24 @@ tess_batch_input_path(PlannerInfo *root, Path *path)
 		return path;
 	if (path->param_info != NULL || gated(root, path))
 		return NULL;
+	/* An Append's children are read in turn as batches when a node kind can. */
+	if (IsA(path, AppendPath))
+	{
+		const TessNode *append = tess_runtime_api()->nodes->find(TESS_APPEND_NODE_NAME);
+
+		if (append != NULL && TESS_ABI_HAS_FIELD(append, TessNode, wrap_append) &&
+			append->wrap_append != NULL)
+		{
+			CustomPath *built = append->wrap_append(root, path);
+
+			if (built != NULL)
+			{
+				if (tess_path_node(&built->path) != append)
+					elog(ERROR, "Tessera append node returned a foreign path");
+				return &built->path;
+			}
+		}
+	}
 	/* A relation without clauses is read natively when a node kind can. */
 	if (path->parent != NULL && path->parent->baserestrictinfo == NIL)
 	{
