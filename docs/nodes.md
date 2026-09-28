@@ -439,7 +439,8 @@ of its own, without payload, keyed by the group's keys and the argument
 aggregate only where they inserted their pair, NULL arguments dropped by
 the hash. The core groups such a query only sorted; the node takes its
 `GroupAggregate` or plain `Aggregate` as a template and reads the input
-below the core's sort, unless `enable_hashagg` is off. The pairs' tables
+below the core's sort, unless `enable_hashagg` is off (as for any grouping
+whose hashed path the core dropped). The pairs' tables
 do not spill, and neither do the groups of a query that has them: the
 node takes the path only when the planner's estimate of the pairs fits
 `hash_mem`, and shows their bytes in `Memory Usage`.
@@ -509,8 +510,20 @@ declared space or 1 kB as the core estimates them, fits `hash_mem`. Not
 in a partial plan, whose table empties early. For each of the core's plain aggregate paths whose input can be read
 in batches (`tess_batch_input_path`: a batch path as it is, a clause-free
 sequential scan through `TessHeapScan`, anything else through `TessPack`),
-the node's path takes the core path as its template at nine tenths of its
-cost with the batch child, and `add_path` decides. `PlanCustomPath` makes
+the node's path takes the core path as its template with the batch child,
+and `add_path` decides. A plain aggregate costs nine tenths of the core's.
+A grouping costs the node's own (`group_cost`): the child's cost; per
+input row a quarter of `cpu_operator_cost` a key, as the kernels hash and
+look up a batch's keys at once, and the aggregates' transition costs as
+the core counts them (`get_agg_clause_costs`), a quarter of them when
+the node's kernels fold every aggregate; per group `cpu_tuple_cost` and
+the final costs; and, when the groups at the core's bytes per entry pass
+seven eighths of `hash_mem`, the rows of those that do not fit written
+to 32 partitions and read back once per level, sequentially, with
+`cpu_tuple_cost` a row, without the core's penalty for random writes.
+When the core's sorted grouping has beaten its hashed one out of the
+relation's paths (its spill costs more), the node takes the sorted path
+as its template and reads the input below the sort. `PlanCustomPath` makes
 the distinct aggregates the scan tuple, `custom_scan_tlist` without a
 relation, so that the planner turns the targets and `HAVING` into
 references to it, and keeps one batch column per target. The arguments

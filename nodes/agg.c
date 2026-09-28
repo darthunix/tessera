@@ -18,6 +18,7 @@
 #include "optimizer/pathnode.h"
 #include "optimizer/clauses.h"
 #include "optimizer/planner.h"
+#include "optimizer/prep.h"
 #include "optimizer/tlist.h"
 #include "parser/parse_agg.h"
 #include "storage/shm_toc.h"
@@ -656,6 +657,82 @@ aggregate_templates(const List *pathlist, AggStrategy strategy, AggSplit aggspli
 }
 
 /*
+ * The node's own cost of grouping: its batch kernels hash the keys and
+ * look the groups up for a fraction of the core's cpu_operator_cost a key
+ * and a row, fold its own aggregates for such a fraction too, and call a
+ * generic aggregate's transition function as the core does. Past seven
+ * eighths of hash_mem the rows of the groups that do not fit go to 32
+ * partitions and are read back once per level, their columns written in
+ * blocks sequentially, without the core's penalty for random writes. The
+ * shares are measured: grouping alone took 0.30 of the core's time, with
+ * generic aggregates 0.41 to 0.53, spilling 0.40 to 0.63 (plan 5.13).
+ */
+#define AGG_KEY_SHARE 0.25
+#define AGG_KERNEL_SHARE 0.25
+#define AGG_SPILL_PARTS 32.0
+
+static void
+group_cost(PlannerInfo *root, const Path *child, double groups, int nkeys,
+		   List *tlist, AggSplit split, Path *result)
+{
+	AggClauseCosts costs;
+	double		rows = child->rows;
+	double		width = 0;
+	double		entry = 16.0 + 8.0 * nkeys + 8.0;
+	double		limit = (double) get_hash_memory_limit() / 8 * 7;
+	int			naggs = 0;
+	int			ncolumns = 0;
+	bool		generic = has_generic(tlist);
+	Cost		startup;
+	Cost		run;
+
+	MemSet(&costs, 0, sizeof(costs));
+	if (root->parse->hasAggs)
+		get_agg_clause_costs(root, split, &costs);
+	foreach_node(TargetEntry, entry_node, tlist)
+	{
+		List	   *exprs = IsA(entry_node->expr, Aggref) ?
+			list_copy((List *) ((Aggref *) entry_node->expr)->args) :
+			list_make1(makeTargetEntry(entry_node->expr, 1, NULL, false));
+
+		if (IsA(entry_node->expr, Aggref))
+			naggs++;
+		foreach_node(TargetEntry, arg, exprs)
+		{
+			Oid			type = exprType((Node *) arg->expr);
+			int16		len;
+			bool		byval;
+
+			ncolumns++;
+			get_typlenbyval(type, &len, &byval);
+			width += 8.0 + (byval ? 0 : get_typavgwidth(type, exprTypmod((Node *) arg->expr)));
+		}
+	}
+	entry += 8.0 * naggs + costs.transitionSpace;
+	startup = child->total_cost;
+	startup += cpu_operator_cost * AGG_KEY_SHARE * nkeys * rows;
+	startup += costs.transCost.startup +
+		costs.transCost.per_tuple * (generic ? 1.0 : AGG_KERNEL_SHARE) * rows;
+	/* Groups past hash_mem: their rows to disk and back, once per level. */
+	if (groups * entry > limit && ncolumns > 0)
+	{
+		double		share = 1.0 - limit / (groups * entry);
+		double		depth = ceil(log(groups * entry / limit) / log(AGG_SPILL_PARTS));
+		double		spilled = rows * share * Max(depth, 1.0);
+		double		pages = spilled * width / BLCKSZ;
+
+		startup += pages * seq_page_cost + spilled * cpu_tuple_cost;
+		run = pages * seq_page_cost + spilled * cpu_tuple_cost;
+	}
+	else
+		run = 0;
+	startup += costs.finalCost.startup;
+	run += costs.finalCost.per_tuple * groups + cpu_tuple_cost * groups;
+	result->startup_cost = startup;
+	result->total_cost = startup + run;
+}
+
+/*
  * The node's path in place of the core's aggregate path: the same planner
  * properties and rows, a lower cost, the batch child over the core path's
  * input, the grouping expressions and the aggregates it computes; the
@@ -677,7 +754,11 @@ make_agg_path(PlannerInfo *root, const AggPath *agg, List *tlist, int nkeys)
 	if (child == NULL || !arguments_available(tlist, child))
 		return NULL;
 	template = agg->path;
-	template.total_cost *= AGG_COST_FACTOR;
+	/* Grouping costs the node's own; a plain aggregate a share of the core's. */
+	if (nkeys > 0)
+		group_cost(root, child, agg->path.rows, nkeys, tlist, agg->aggsplit, &template);
+	else
+		template.total_cost *= AGG_COST_FACTOR;
 	/* The groups come in no order, whatever order the core's had. */
 	template.pathkeys = NIL;
 	config.template_path = &template;
@@ -953,14 +1034,15 @@ create_upper_paths(PlannerInfo *root, UpperRelationKind stage,
 	if (keys != NIL && has_generic(tlist) && has_distinct_aggregate(tlist) &&
 		!generic_fits(root, output_rel, list_length(keys), tlist))
 		return;
-	/*
-	 * add_path changes the list: the candidates are taken first. With
-	 * DISTINCT in an aggregate the core groups only sorted; the node hashes
-	 * in its place, unless hashing is disabled.
-	 */
+	/* add_path changes the list: the candidates are taken first. */
 	templates = aggregate_templates(output_rel->pathlist, strategy, AGGSPLIT_SIMPLE);
-	if (templates == NIL && strategy == AGG_HASHED && enable_hashagg &&
-		has_distinct_aggregate(tlist))
+	/*
+	 * The core's sorted grouping may have beaten its hashed one out of the
+	 * list, as its spill costs more (and with DISTINCT in an aggregate it
+	 * groups only sorted): the node hashes in its place at its own cost,
+	 * reading the input below the sort, unless hashing is disabled.
+	 */
+	if (templates == NIL && strategy == AGG_HASHED && enable_hashagg)
 		templates = aggregate_templates(output_rel->pathlist, AGG_SORTED,
 										AGGSPLIT_SIMPLE);
 	foreach_ptr(AggPath, agg, templates)
@@ -1578,9 +1660,29 @@ agg_begin(CustomScanState *css, EState *estate, int eflags)
 	}
 	/* Whole batches; the arguments' columns only for the surviving rows. */
 	request.projection_columns = projection;
-	state->read_columns = palloc_array(int, Max(bms_num_members(projection), 1));
-	for (int column = -1; (column = bms_next_member(projection, column)) >= 0;)
-		state->read_columns[state->nread_columns++] = column;
+	/*
+	 * Read in order only when the keys and the arguments, as computed, would
+	 * first ask for a column before one they asked for already: else the
+	 * provider walks each row once anyway, and the calls are wasted.
+	 */
+	{
+		int			last = -1;
+		bool		ascending = true;
+
+		foreach_node(TargetEntry, entry, computed)
+			foreach_node(Var, var, pull_var_clause((Node *) entry->expr, 0))
+			{
+				int			column = var->varno == INDEX_VAR ?
+					tess_layout_column(&state->child_layout, var->varattno - 1) : -1;
+
+				if (column >= 0 && column < last)
+					ascending = false;
+				last = Max(last, column);
+			}
+		state->read_columns = palloc_array(int, Max(bms_num_members(projection), 1));
+		for (int column = -1; !ascending && (column = bms_next_member(projection, column)) >= 0;)
+			state->read_columns[state->nread_columns++] = column;
+	}
 	request.output_mode = TESS_OUTPUT_BATCH;
 	tess_input_set_request(state->input, &request);
 	builder.parent_context = estate->es_query_cxt;
