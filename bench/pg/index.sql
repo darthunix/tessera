@@ -1,9 +1,10 @@
 -- The index family: reads through indexes of bench_idx (2 M rows per
 -- multiplier): a bitmap of the scattered k, whose pages hold few of the
 -- rows each at 1 % and more at 5 and 15 %, BitmapAnd and BitmapOr of k and
--- w, and rows of a bitmap returned to a limit. The core reads the pages of
--- the bitmap in both modes; with Tessera its rows come in batches, a
--- filter above rechecking every clause. A ratio below one is the win.
+-- w, and rows of a bitmap returned to a limit; index scans of the ordered
+-- id. The core reads the pages of the bitmap, or the index, in both modes;
+-- with Tessera the rows come in batches, a filter above rechecking every
+-- clause. A ratio below one is the win.
 \set ON_ERROR_STOP on
 \if :{?repetitions}
 \else
@@ -63,6 +64,10 @@ AS $function$
 BEGIN
     EXECUTE format('PREPARE on_%I AS %s', test_name, sql);
     EXECUTE format('PREPARE off_%I AS %s', test_name, sql);
+    -- run.sh measure with CASES: only the cases it matches are timed.
+    IF test_name !~ coalesce(nullif(current_setting('bench.cases', true), ''), '.') THEN
+        RETURN;
+    END IF;
     PERFORM pg_temp.measure(test_name, 'on', 'on_' || test_name, repetitions);
     PERFORM pg_temp.measure(test_name, 'off', 'off_' || test_name, repetitions);
 END
@@ -82,6 +87,21 @@ SELECT pg_temp.measure_pair('bm_either',
 -- The rows of a bitmap of 5 %, skipped by a limit's offset.
 SELECT pg_temp.measure_pair('bm_rows',
     format('SELECT id, t FROM bench_idx WHERE k < %s OFFSET %s', :rows / 20, :rows), :repetitions);
+-- Index scans of the ordered id, which the core reads a row at a time in
+-- both modes: 10 and 3 % of the rows aggregated, 5 % returned to a limit's
+-- offset, a range in the index's order, a range with a clause on another
+-- column.
+SELECT pg_temp.measure_pair('ix_range',
+    format('SELECT count(*), sum(w) FROM bench_idx WHERE id < %s', :rows / 10), :repetitions);
+SELECT pg_temp.measure_pair('ix_short',
+    format('SELECT count(*), sum(w) FROM bench_idx WHERE id < %s', :rows * 3 / 100), :repetitions);
+SELECT pg_temp.measure_pair('ix_rows',
+    format('SELECT id, t FROM bench_idx WHERE id < %s OFFSET %s', :rows / 20, :rows), :repetitions);
+SELECT pg_temp.measure_pair('ix_order',
+    format('SELECT id, t FROM bench_idx WHERE id BETWEEN %s AND %s ORDER BY id OFFSET %s',
+           :rows / 4, :rows / 4 + :rows * 3 / 100, :rows), :repetitions);
+SELECT pg_temp.measure_pair('ix_filter',
+    format('SELECT count(*), sum(k) FROM bench_idx WHERE id < %s AND w < 50', :rows / 20), :repetitions);
 
 \copy timings TO 'timings.csv' CSV HEADER
 
@@ -100,10 +120,12 @@ ORDER BY test, mode DESC;
 \o plans.txt
 SET tessera.enable = on;
 SELECT format('EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE on_%s', name)
-FROM unnest(ARRAY['bm_sparse', 'bm_mid', 'bm_dense', 'bm_both', 'bm_either', 'bm_rows']) AS name \gexec
+FROM unnest(ARRAY['bm_sparse', 'bm_mid', 'bm_dense', 'bm_both', 'bm_either', 'bm_rows',
+                   'ix_range', 'ix_short', 'ix_rows', 'ix_order', 'ix_filter']) AS name \gexec
 SET tessera.enable = off;
 SELECT format('EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE off_%s', name)
-FROM unnest(ARRAY['bm_sparse', 'bm_mid', 'bm_dense', 'bm_both', 'bm_either', 'bm_rows']) AS name \gexec
+FROM unnest(ARRAY['bm_sparse', 'bm_mid', 'bm_dense', 'bm_both', 'bm_either', 'bm_rows',
+                   'ix_range', 'ix_short', 'ix_rows', 'ix_order', 'ix_filter']) AS name \gexec
 \o
 RESET work_mem;
 DEALLOCATE ALL;

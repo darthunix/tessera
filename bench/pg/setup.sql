@@ -128,8 +128,8 @@ FROM generate_series(1, 2000000 * :scale) AS g,
                      END AS fk) AS key;
 
 -- The index family: reads through indexes. k is scattered over the pages
--- (a bitmap of it names rows of many pages), w has 97 values, d is a day
--- in the order of the rows (for BRIN), t text.
+-- (a bitmap of it names rows of many pages), w has 97 values, id and d are
+-- in the order of the rows (a btree of id, a BRIN of d), t text.
 DROP TABLE IF EXISTS bench_idx;
 CREATE TABLE bench_idx AS
 SELECT g AS id, (g::bigint * 7919 % (2000000 * :scale))::int AS k, g % 97 AS w,
@@ -138,6 +138,7 @@ FROM generate_series(1, 2000000 * :scale) AS g;
 CREATE INDEX bench_idx_k ON bench_idx (k);
 CREATE INDEX bench_idx_w ON bench_idx (w);
 CREATE INDEX bench_idx_d ON bench_idx USING brin (d);
+CREATE INDEX bench_idx_id ON bench_idx (id);
 
 -- The grouping cases of the win family group by expressions: statistics
 -- on them give the planner the number of groups, which it would otherwise

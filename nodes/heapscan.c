@@ -5,18 +5,23 @@
 #include "access/relscan.h"
 #include "access/table.h"
 #include "access/tableam.h"
+#include "catalog/pg_am_d.h"
+#include "catalog/pg_statistic.h"
 #include "commands/explain.h"
 #include "commands/explain_format.h"
 #include "executor/executor.h"
 #include "nodes/tidbitmap.h"
 #include "optimizer/cost.h"
 #include "optimizer/optimizer.h"
+#include "optimizer/plancat.h"
 #include "parser/parsetree.h"
 #include "pgstat.h"
 #include "storage/bufmgr.h"
 #include "storage/bufpage.h"
 #include "storage/shm_toc.h"
+#include "utils/lsyscache.h"
 #include "utils/rel.h"
+#include "utils/syscache.h"
 
 #include "tessera/runtime.h"
 
@@ -43,7 +48,13 @@
  * bitmap names, or all of a lossy page's) and leaves them in the page's
  * list, as its page-at-a-time scan does, and the batches are taken from
  * it the same way; a filter above evaluates every clause of the
- * relation, the index's recheck among them. See docs/nodes.md.
+ * relation, the index's recheck among them. With the core's index scan
+ * as its child, stripped of clauses and projection, the node takes the
+ * rows that scan returns, in the index's order, into batches of rows of
+ * any pages, each pinned by the batch: the core keeps the index's keys,
+ * parameters and rechecks, the node saves the slot's rows their copies,
+ * deforms the columns asked for and lets the filter above run in batches.
+ * See docs/nodes.md.
  */
 #define HEAP_SCAN_BATCH_ROWS 64
 
@@ -102,6 +113,8 @@ typedef struct HeapScanState
 	 */
 	PlanState  *bitmap_plan;
 	TIDBitmap  *tbm;
+	/* Index mode: the core's index scan, whose rows the node takes. */
+	PlanState  *index_plan;
 	uint64		exact_pages;
 	uint64		lossy_pages;
 } HeapScanState;
@@ -297,10 +310,93 @@ tess_heap_bitmap_path(PlannerInfo *root, BitmapHeapPath *bitmap, PathTarget *tar
 }
 
 /*
+ * The correlation of a btree index's order with the table's, as the
+ * core's btcost_correlation takes it: its first column's, from the
+ * statistics, three quarters of it for several columns; 0 when unknown.
+ */
+static double
+index_correlation(PlannerInfo *root, IndexOptInfo *index)
+{
+	RangeTblEntry *rte = planner_rt_fetch(index->rel->relid, root);
+	HeapTuple	stats;
+	AttStatsSlot slot;
+	Oid			sortop;
+	double		correlation = 0;
+
+	if (index->relam != BTREE_AM_OID || index->nkeycolumns < 1 ||
+		index->indexkeys[0] <= 0)
+		return 0;
+	stats = SearchSysCache3(STATRELATTINH, ObjectIdGetDatum(rte->relid),
+							Int16GetDatum(index->indexkeys[0]), BoolGetDatum(rte->inh));
+	if (!HeapTupleIsValid(stats))
+		return 0;
+	sortop = get_opfamily_member(index->opfamily[0], index->opcintype[0],
+								 index->opcintype[0], BTLessStrategyNumber);
+	if (OidIsValid(sortop) &&
+		get_attstatsslot(&slot, stats, STATISTIC_KIND_CORRELATION, sortop,
+						 ATTSTATSSLOT_NUMBERS))
+	{
+		correlation = fabs(slot.numbers[0]) * (index->nkeycolumns > 1 ? 0.75 : 1.0);
+		free_attstatsslot(&slot);
+	}
+	ReleaseSysCache(stats);
+	return correlation;
+}
+
+/*
+ * An index scan the node takes: one whose rows come mostly in runs of a
+ * page, where the batch pins a page once for its run (an index of a
+ * scattered column pinned a page a row besides the core scan's pin: 21 %
+ * more than the core's), and many of them, since the node's setup costs
+ * each query a few microseconds more (one row of an index took 11 against
+ * 6, the first 10 of an order 12 against 8): at least
+ * tessera.index_min_correlation (0.8) and tessera.index_min_rows (1000).
+ */
+
+/*
+ * The node over the core's index scan, in its order, with the target
+ * given: the core's path, which the caller copied, is the child, whose
+ * plan the node keeps without clauses and projection; its rows are the
+ * tuples the index's conditions select, before any other clause. NULL for
+ * a relation the node does not read, an ordering by distance, or a scan
+ * the node does not take (above).
+ */
+Path *
+tess_heap_index_path(PlannerInfo *root, IndexPath *index, PathTarget *target)
+{
+	TessPathConfig config = TESS_STRUCT_INITIALIZER(TessPathConfig);
+	RelOptInfo *rel = index->path.parent;
+	Path		template = index->path;
+	CustomPath *scan;
+
+	double		rows = index->indexselectivity * rel->tuples;
+
+	if (root->limit_tuples >= 0)
+		rows = Min(rows, root->limit_tuples);
+	if (index->path.pathtype != T_IndexScan || index->indexorderbys != NIL ||
+		!plain_heap_relation(root, rel, target) || rows < tess_index_min_rows ||
+		(tess_index_min_correlation > 0 &&
+		 index_correlation(root, index->indexinfo) < tess_index_min_correlation))
+		return NULL;
+	template.pathtarget = target;
+	config.template_path = &template;
+	config.methods = &heap_scan_path_methods;
+	config.node = &tess_heap_scan_node;
+	config.flags = CUSTOMPATH_SUPPORT_PROJECTION;
+	config.children = list_make1(index);
+	scan = tess_path_create(&config);
+	scan->path.rows = clamp_row_est(index->indexselectivity * rel->tuples);
+	return &scan->path;
+}
+
+/*
  * Every relation column is a batch column and the relation's row is the
  * scan tuple; the targets, PostgreSQL's projection among them, are derived
  * from it when the plan is read. A bitmap's scan keeps the bitmap's plan
- * of the core's bitmap heap scan as its child, and none of the rest.
+ * of the core's bitmap heap scan as its child, and none of the rest; an
+ * index scan below is kept whole but for its clauses, which the filter
+ * above evaluates, and its projection: its targets are the relation's
+ * columns, so that it returns the tuple as the page holds it.
  */
 static Plan *
 heap_scan_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
@@ -313,10 +409,16 @@ heap_scan_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 	{
 		Plan	   *bitmap = linitial(custom_plans);
 
-		if (list_length(custom_plans) != 1 || !IsA(bitmap, BitmapHeapScan) ||
-			outerPlan(bitmap) == NULL)
+		if (list_length(custom_plans) == 1 && IsA(bitmap, IndexScan))
+		{
+			bitmap->qual = NIL;
+			bitmap->targetlist = build_physical_tlist(root, rel);
+		}
+		else if (list_length(custom_plans) != 1 || !IsA(bitmap, BitmapHeapScan) ||
+				 outerPlan(bitmap) == NULL)
 			elog(ERROR, "TessHeapScan expected the core's bitmap heap scan below");
-		custom_plans = list_make1(outerPlan(bitmap));
+		else
+			custom_plans = list_make1(outerPlan(bitmap));
 	}
 
 	layout.ncolumns = rel->max_attr;
@@ -355,11 +457,24 @@ heap_scan_begin(CustomScanState *css, EState *estate, int eflags)
 		rel == NULL || cscan->custom_scan_tlist != NIL ||
 		info.layout.ncolumns < RelationGetDescr(rel)->natts)
 		elog(ERROR, "TessHeapScan received a foreign plan");
-	/* The bitmap's plan: an index's bitmap scan, or their AND or OR. */
+	/*
+	 * The bitmap's plan (an index's bitmap scan, or their AND or OR), or
+	 * the core's index scan.
+	 */
 	if (info.nchildren == 1)
 	{
-		state->bitmap_plan = ExecInitNode(linitial(cscan->custom_plans), estate, eflags);
-		css->custom_ps = list_make1(state->bitmap_plan);
+		Plan	   *child = linitial(cscan->custom_plans);
+
+		if (IsA(child, IndexScan))
+		{
+			state->index_plan = ExecInitNode(child, estate, eflags);
+			css->custom_ps = list_make1(state->index_plan);
+		}
+		else
+		{
+			state->bitmap_plan = ExecInitNode(child, estate, eflags);
+			css->custom_ps = list_make1(state->bitmap_plan);
+		}
 	}
 	state->layout = info.layout;
 	state->relation = (TessLayout) TESS_STRUCT_INITIALIZER(TessLayout);
@@ -559,7 +674,27 @@ next_batch(HeapScanState *state)
 	}
 	tess_heap_batch_reset(state->heap);
 	hscan = (HeapScanDesc) state->scan;
-	if (state->bitmap_plan != NULL)
+	if (state->index_plan != NULL)
+	{
+		/*
+		 * The index scan's rows, in its order, from any pages: the batch
+		 * keeps each row's tuple where it lies, its page pinned once for
+		 * the rows of it that come in a run.
+		 */
+		while (limit > 0)
+		{
+			TupleTableSlot *slot = ExecProcNode(state->index_plan);
+
+			if (TupIsNull(slot))
+			{
+				state->exhausted = true;
+				break;
+			}
+			tess_heap_batch_append_slot(state->heap, slot);
+			limit--;
+		}
+	}
+	else if (state->bitmap_plan != NULL)
 	{
 		/*
 		 * A bitmap's pages may give a few rows each: a batch takes them
@@ -697,7 +832,7 @@ heap_scan_exec(CustomScanState *css)
 	/* Without a parallel scan from the callbacks, a serial one. */
 	if (state->scan == NULL && state->bitmap_plan != NULL)
 		begin_bitmap_scan(state);
-	else if (state->scan == NULL)
+	else if (state->scan == NULL && state->index_plan == NULL)
 	{
 		EState	   *estate = css->ss.ps.state;
 
@@ -730,6 +865,8 @@ heap_scan_end(CustomScanState *css)
 	end_scan(state);
 	if (state->bitmap_plan != NULL)
 		ExecEndNode(state->bitmap_plan);
+	if (state->index_plan != NULL)
+		ExecEndNode(state->index_plan);
 	/* The relation is closed by the executor. */
 }
 
@@ -759,6 +896,14 @@ heap_scan_rescan(CustomScanState *css)
 			ExecReScan(state->bitmap_plan);
 		state->exact_pages = 0;
 		state->lossy_pages = 0;
+	}
+	else if (state->index_plan != NULL)
+	{
+		/* The index scan computes its keys anew from changed parameters. */
+		if (css->ss.ps.chgParam != NULL)
+			UpdateChangedParamSet(state->index_plan, css->ss.ps.chgParam);
+		if (state->index_plan->chgParam == NULL)
+			ExecReScan(state->index_plan);
 	}
 	else if (state->scan != NULL)
 		table_rescan(state->scan, NULL);
@@ -818,7 +963,8 @@ heap_scan_explain(CustomScanState *css, List *ancestors, ExplainState *es)
 	if (!es->analyze)
 		return;
 	ExplainPropertyInteger("Batches", NULL, totals[HEAP_SCAN_BATCHES], es);
-	ExplainPropertyInteger("Pages", NULL, totals[HEAP_SCAN_PAGES], es);
+	if (state->index_plan == NULL)
+		ExplainPropertyInteger("Pages", NULL, totals[HEAP_SCAN_PAGES], es);
 	if (state->bitmap_plan != NULL)
 	{
 		ExplainPropertyInteger("Exact Heap Blocks", NULL, totals[HEAP_SCAN_EXACT], es);

@@ -356,6 +356,53 @@ add_bitmap_paths(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte)
 	}
 }
 
+/*
+ * The node over each of the core's unparameterized, serial index scans of
+ * the relation, in its order, TessFilter above it when the relation has
+ * clauses: the filter evaluates every clause, the index's too, and the
+ * path costs the filter's fraction of the core's and keeps its order.
+ */
+static void
+add_index_paths(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte)
+{
+	List	   *indexes = NIL;
+
+	if (!*tess_runtime_api()->settings->enable ||
+		!relation_supported(root, rel, rte) ||
+		(rel->baserestrictinfo != NIL && first_clause(root, rel) == NULL))
+		return;
+	/* add_path frees a core path the node's dominates: copies are taken first. */
+	foreach_ptr(Path, path, rel->pathlist)
+	{
+		IndexPath  *copy;
+
+		if (!IsA(path, IndexPath) || path->pathtype != T_IndexScan ||
+			path->param_info != NULL || path->parallel_aware)
+			continue;
+		copy = makeNode(IndexPath);
+		memcpy(copy, path, sizeof(IndexPath));
+		indexes = lappend(indexes, copy);
+	}
+	foreach_ptr(IndexPath, index, indexes)
+	{
+		Path	   *scan;
+
+		if (rel->baserestrictinfo == NIL)
+		{
+			scan = tess_heap_index_path(root, index, rel->reltarget);
+			if (scan != NULL)
+			{
+				scan->total_cost = index->path.total_cost * FILTER_COST_FACTOR;
+				add_path(rel, scan);
+			}
+			continue;
+		}
+		scan = tess_heap_index_path(root, index, filter_input_target(root, rel));
+		if (scan != NULL)
+			add_path(rel, (Path *) make_filter_path(rel, &index->path, scan));
+	}
+}
+
 /* The node's paths, then TessGather over the cheapest partial path, before the core gathers it. */
 static void
 set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
@@ -367,6 +414,7 @@ set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
 	add_row_filter_paths(root, rel, rte);
 	add_scan_paths(root, rel, rte);
 	add_bitmap_paths(root, rel, rte);
+	add_index_paths(root, rel, rte);
 	tess_gather_add_paths(root, rel);
 }
 

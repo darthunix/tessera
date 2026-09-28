@@ -93,6 +93,9 @@ extern double tess_parallel_divisor(const Path *path);
 extern double tess_join_bloom_ratio;
 /* tessera.bitmap_page_rows: see nodes/module.c. */
 extern double tess_bitmap_page_rows;
+/* tessera.index_min_correlation and tessera.index_min_rows: see nodes/module.c. */
+extern double tess_index_min_correlation;
+extern double tess_index_min_rows;
 /* tessera.batch_gather: see nodes/module.c. */
 extern bool tess_batch_gather;
 
@@ -105,6 +108,8 @@ extern const CustomScanMethods tess_heap_scan_scan_methods;
 /* The node's scan of a bitmap's pages in place of the core's bitmap heap scan. */
 extern Path *tess_heap_bitmap_path(PlannerInfo *root, BitmapHeapPath *bitmap,
 								   PathTarget *target);
+/* The node over the core's index scan, in the index's order. */
+extern Path *tess_heap_index_path(PlannerInfo *root, IndexPath *index, PathTarget *target);
 
 extern const TessNode tess_filter_node;
 extern const CustomScanMethods tess_filter_scan_methods;

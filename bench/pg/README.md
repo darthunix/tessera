@@ -81,12 +81,15 @@ query down, and where it can, does it speed one up.
   copies, `INTERSECT` of texts through a dictionary, `INTERSECT ALL` of
   integers. A ratio below one is the win.
 - **index** (`index.sql`): reads through the indexes of `bench_idx` (2 M
-  rows per multiplier, `k` scattered over the pages, `w` of 97 values, a
-  BRIN index of the day `d` in the order of the rows): bitmaps of `k` at 1,
+  rows per multiplier, `k` scattered over the pages, `w` of 97 values,
+  a btree of `id` and a BRIN index of the day `d`, both in the order of the
+  rows): bitmaps of `k` at 1,
   5 and 15 % of the rows, BitmapAnd of `k` and `w`, BitmapOr of them, and
-  the rows of a bitmap skipped by a limit's offset. With Tessera the pages
-  of the bitmap come in batches and a filter rechecks every clause. A
-  ratio below one is the win.
+  the rows of a bitmap skipped by a limit's offset; index scans of the
+  ordered `id`: 10 and 3 % of the rows aggregated, 5 % skipped by an
+  offset, a range in the index's order, a range with a clause on another
+  column. With Tessera the rows come in batches and a filter rechecks every
+  clause. A ratio below one is the win.
 - **rowwise** (`rowwise.sql`): tables without clauses read under a parent
   of the core that takes rows one at a time: `bit_or` of a column and of
   an expression, one column of sixty, `max` of a text column, a window
@@ -145,11 +148,17 @@ bench/pg/run.sh setup          # temporary cluster on port 5433 with data
 bench/pg/run.sh measure tax    # one family; writes target/bench-runs/pg-tax-<id>/
 bench/pg/run.sh measure win 2  # the same with two parallel workers per Gather
                                # in both modes; writes pg-win-w2-<id>/
+CASES='^ix_' REPETITIONS=11 bench/pg/run.sh measure index
+                               # only the cases the pattern matches, 11 runs each
 bench/pg/run.sh stop           # stop and delete the cluster
 SHARED_BUFFERS=4GB bench/pg/run.sh setup 10   # ten times the rows, larger buffers
 ```
 
-`PG_CONFIG` selects the PostgreSQL build; `PGPORT` the port. The cluster's
+`CASES`, a regular expression of case names, times only the cases it
+matches (the plans are still written for every case), and `REPETITIONS`
+the runs of each case in each mode, 31 by default: a development A/B times
+the cases a change touches, fewer times, so that a run takes minutes at
+most. `PG_CONFIG` selects the PostgreSQL build; `PGPORT` the port. The cluster's
 `postgresql.conf` preloads `tessera, tessera_nodes, tessera_kernels,
 tessera_limit` in every session and sets `shared_buffers` to `SHARED_BUFFERS`,
 2GB by default. `setup` takes a multiplier of the base row counts (2 M narrow,

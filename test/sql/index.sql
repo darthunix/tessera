@@ -103,6 +103,75 @@ SELECT index_same($$SELECT x, (SELECT count(*) FROM index_t WHERE w < x + 20 AND
 -- A limit above stops the reads.
 SELECT count(*) FROM (SELECT id FROM index_t WHERE k < 5000 LIMIT 10) AS q;
 
+-- Index Scan: the node takes the core's index scan's rows, in the index's
+-- order, into batches of any pages; only where the index is in the
+-- table's order (correlation 0.8 at least) and a thousand rows come at
+-- least, else the core's scan stays.
+CREATE TABLE index_o AS
+SELECT g AS id, CASE WHEN g % 11 = 0 THEN NULL ELSE g % 50 END AS w, 'o' || g AS t
+FROM generate_series(1, 20000) AS g;
+CREATE INDEX index_o_id ON index_o (id);
+CREATE INDEX index_o_desc ON index_o (id DESC, w);
+VACUUM ANALYZE index_o;
+SET enable_indexscan = on;
+SET enable_bitmapscan = off;
+EXPLAIN (COSTS OFF) SELECT count(*), sum(w), max(t) FROM index_o WHERE id < 5000;
+SELECT index_same($$SELECT count(*), sum(w), count(w), max(t) FROM index_o WHERE id < 5000$$);
+EXPLAIN (COSTS OFF) SELECT id, t FROM index_o WHERE id BETWEEN 3000 AND 6000 AND w < 10 ORDER BY id;
+SELECT index_same($$SELECT string_agg(id::text, ',' ORDER BY n) FROM (SELECT id, row_number() OVER () AS n FROM (SELECT id FROM index_o WHERE id BETWEEN 3000 AND 6000 AND w < 10 ORDER BY id) AS s) AS q$$);
+EXPLAIN (COSTS OFF) SELECT id, t FROM index_o WHERE id > 15000 ORDER BY id DESC;
+SELECT index_same($$SELECT string_agg(t, ',' ORDER BY n) FROM (SELECT t, row_number() OVER () AS n FROM (SELECT id, t FROM index_o WHERE id > 15000 ORDER BY id DESC) AS s) AS q$$);
+SELECT index_same($$SELECT id, upper(t) FROM index_o WHERE id < 2000 AND t LIKE 'o1%'$$);
+-- Without clauses, in the index's order for a merge join or an ordered
+-- aggregate above.
+EXPLAIN (COSTS OFF) SELECT id, t FROM index_o ORDER BY id OFFSET 10;
+SELECT index_same($$SELECT string_agg(t, ',' ORDER BY n) FROM (SELECT t, row_number() OVER () AS n FROM (SELECT id, t FROM index_o ORDER BY id OFFSET 10) AS s) AS q$$);
+-- Short scans and a small limit stay the core's, below
+-- tessera.index_min_rows, and so does an index out of the table's order,
+-- below tessera.index_min_correlation; at 0 the node takes them.
+EXPLAIN (COSTS OFF) SELECT * FROM index_o WHERE id = 77;
+EXPLAIN (COSTS OFF) SELECT id, t FROM index_o WHERE id > 100 ORDER BY id LIMIT 5;
+SET tessera.index_min_rows = 0;
+SET tessera.index_min_correlation = 0;
+EXPLAIN (COSTS OFF) SELECT * FROM index_o WHERE id = 77;
+EXPLAIN (COSTS OFF) SELECT id, t FROM index_o WHERE id > 100 ORDER BY id LIMIT 5;
+SELECT index_same($$SELECT * FROM index_o WHERE id = 77$$);
+SELECT index_same($$SELECT id, t FROM index_o WHERE id > 100 ORDER BY id LIMIT 5$$);
+RESET tessera.index_min_rows;
+RESET tessera.index_min_correlation;
+CREATE TABLE index_s AS
+SELECT g AS id, (g::bigint * 7919 % 20000)::int AS k, 's' || g AS t FROM generate_series(1, 20000) AS g;
+CREATE INDEX index_s_k ON index_s (k);
+VACUUM ANALYZE index_s;
+EXPLAIN (COSTS OFF) SELECT count(*), max(t) FROM index_s WHERE k < 5000;
+SET tessera.index_min_correlation = 0;
+EXPLAIN (COSTS OFF) SELECT count(*), max(t) FROM index_s WHERE k < 5000;
+SELECT index_same($$SELECT count(*), max(t) FROM index_s WHERE k < 5000$$);
+SELECT index_same($$SELECT string_agg(t, ',' ORDER BY n) FROM (SELECT t, row_number() OVER () AS n FROM (SELECT k, t FROM index_s WHERE k < 3000 ORDER BY k) AS s) AS q$$);
+RESET tessera.index_min_correlation;
+DROP TABLE index_s;
+-- Updated rows, and a rescan with a parameter of the index condition.
+UPDATE index_o SET t = t || 'u' WHERE id % 5 = 0;
+SELECT index_same($$SELECT count(*), max(t) FROM index_o WHERE id < 6000$$);
+SET tessera.index_min_rows = 0;
+EXPLAIN (COSTS OFF)
+SELECT x, (SELECT max(t) FROM index_o WHERE id BETWEEN x * 1000 AND x * 1000 + 3000) FROM generate_series(1, 4) AS x;
+SELECT index_same($$SELECT x, (SELECT max(t) FROM index_o WHERE id BETWEEN x * 1000 AND x * 1000 + 3000) FROM generate_series(1, 4) AS x$$);
+RESET tessera.index_min_rows;
+-- A rescan without a parameter in the middle of the index scan: the inner
+-- side of a nested loop, a limit's rows, read again from the first.
+SET enable_hashjoin = off;
+SET enable_mergejoin = off;
+SET enable_material = off;
+EXPLAIN (COSTS OFF)
+SELECT x, count(t), max(t) FROM generate_series(1, 3) AS x LEFT JOIN (SELECT id, t FROM index_o WHERE id < 5000 ORDER BY id LIMIT 2000) AS s ON x > 0 GROUP BY x;
+SELECT index_same($$SELECT x, count(t), max(t) FROM generate_series(1, 3) AS x LEFT JOIN (SELECT id, t FROM index_o WHERE id < 5000 ORDER BY id LIMIT 2000) AS s ON x > 0 GROUP BY x$$);
+RESET enable_hashjoin;
+RESET enable_mergejoin;
+RESET enable_material;
+DROP TABLE index_o;
+RESET enable_bitmapscan;
+
 RESET enable_seqscan;
 RESET enable_indexscan;
 RESET max_parallel_workers_per_gather;

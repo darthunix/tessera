@@ -57,7 +57,8 @@ core's sequential scan itself for any other. The chain of the first
 queries is therefore `TessHeapScan → TessFilter → parent`. With the
 core's plan of an index's bitmap as its child it reads that bitmap's
 pages instead (Bitmap mode below), in place of the core's bitmap heap
-scan.
+scan; with the core's index scan as its child, that scan's rows (Index
+mode below).
 
 ### Planning
 
@@ -208,6 +209,59 @@ at a `work_mem` of 64 kB over 1700 pages whose rows the filter rechecks,
 updated (HOT) and deleted rows, a parameter of the index condition that
 changes per outer row, and a limit above. Mutations fail it: the page's
 first row skipped, the bitmap kept over a rescan.
+
+### Index mode
+
+The same hook takes each of the core's unparameterized, serial index
+scans (`IndexPath` of an `Index Scan`, not an index-only one nor an
+ordering by distance) and adds the node over it (`tess_heap_index_path`),
+`TessFilter` above when the relation has clauses: the core's path is the
+child, and the node's `PlanCustomPath` keeps the core's `IndexScan` plan
+whole but for its clauses, which the filter evaluates, the index's too,
+and its projection, which becomes the relation's columns
+(`build_physical_tlist`), so that the scan returns the tuple as the page
+holds it. The path keeps the index's order (its path keys), so an
+`ORDER BY`, a merge join or a limit above takes it without a sort; its
+rows are the tuples the index's conditions select, the filter's the core
+path's, at nine tenths of its cost.
+
+The node runs the index scan as its child, one `ExecProcNode` a row: the
+core keeps the index's keys, runtime keys and parameters, arrays, rechecks
+of a lossy index and its direction. Each row the scan returns goes into
+the batch as the tuple where it lies (`tess_heap_batch_append_slot`), its
+page pinned by the batch once for a run of rows of it, up to the batch's
+size or the bound of a limit above; the node saves the slot's rows their
+copies, deforms only the columns asked for and lets the filter above run
+in batches. A rescan passes a changed parameter to the child and rescans
+it: a btree scan that reached its end starts again by itself, one a limit
+stopped in the middle does not.
+
+The work that dominates, a descent into the index and a visibility check
+a row, is the core's in both modes, so the gain is smaller than a
+bitmap's, and it turns into a loss where the batch's pins or the node's
+setup outweigh it: an index out of the table's order pins a page a row
+besides the core scan's pin (a scattered index took 21 % more than the
+core's scan), and a few rows pay the setup of the node's plan (one row
+took 11 µs against 6, the first 10 of an order 12 against 8). The path is
+therefore offered only for an index whose order follows the table's by
+at least `tessera.index_min_correlation` (0.8 by default; the core's
+btree estimate: the first column's correlation from the statistics,
+three quarters of it for several columns) and at least
+`tessera.index_min_rows` rows expected (1000, a limit counted); 0
+disables either gate. At 2 M rows of an ordered `id` (bench/pg/index,
+pg-index-MqHyUH, 11 runs): 10 % of the rows aggregated 6.2 ms against 7.2,
+3 % 1.8 against 2.2, 5 % skipped by an offset 2.9 against 3.3, a range in
+the index's order 1.7 against 2.0, a range with a clause on another
+column 3.1 against 3.5.
+
+`test/sql/index.sql` compares with Tessera off: an aggregate over a range,
+a range with a clause on another column in the index's order, a backward
+scan, a row-wise clause, a scan without clauses under an offset, the
+gates (a short scan, a small limit, a scattered index) and the same at 0,
+updated rows, a parameter of the index condition per outer row, and a
+nested loop's inner side under a limit rescanned in its middle.
+Mutations fail it: a row of the scan skipped, the child not rescanned;
+the child's clauses kept only cost time.
 
 ## TessPack
 

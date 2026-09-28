@@ -13,6 +13,8 @@ PGDLLEXPORT void _PG_init(void);
 
 double		tess_join_bloom_ratio = 0.5;
 double		tess_bitmap_page_rows = 2.0;
+double		tess_index_min_correlation = 0.8;
+double		tess_index_min_rows = 1000.0;
 bool		tess_batch_gather = true;
 
 /*
@@ -69,6 +71,20 @@ _PG_init(void)
 							 "when the planner expects at least this many rows of each page: below, a "
 							 "page's pin of the node's own costs more than its batches save. 0 always.",
 							 &tess_bitmap_page_rows, 2.0, 0.0, 1000.0,
+							 PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomRealVariable("tessera.index_min_correlation",
+							 "Correlation of an index's order with the table's for the batch scan of its rows.",
+							 "The node takes the rows of the core's index scan in place of it when the "
+							 "index's order follows the table's at least this much: its rows then come "
+							 "in runs of a page, which a batch pins once. 0 always.",
+							 &tess_index_min_correlation, 0.8, 0.0, 1.0,
+							 PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomRealVariable("tessera.index_min_rows",
+							 "Rows an index scan must give for the batch scan of its rows.",
+							 "The node takes the rows of the core's index scan in place of it when the "
+							 "planner expects at least this many of them, a limit counted: its setup "
+							 "costs a query a few microseconds more. 0 always.",
+							 &tess_index_min_rows, 1000.0, 0.0, 1e15,
 							 PGC_USERSET, 0, NULL, NULL, NULL);
 	DefineCustomBoolVariable("tessera.batch_gather",
 							 "Gathers a parallel batch subtree's rows in batches.",
