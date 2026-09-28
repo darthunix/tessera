@@ -54,7 +54,10 @@ be packed; without a pack node it adds no paths. The
 node over the core's sequential scan, which returned every row through
 `ExecProcNode` into a slot, for a batch-aware parent, and in place of the
 core's sequential scan itself for any other. The chain of the first
-queries is therefore `TessHeapScan → TessFilter → parent`.
+queries is therefore `TessHeapScan → TessFilter → parent`. With the
+core's plan of an index's bitmap as its child it reads that bitmap's
+pages instead (Bitmap mode below), in place of the core's bitmap heap
+scan.
 
 ### Planning
 
@@ -157,6 +160,54 @@ pages add up to the relation's, with workers planned but not launched
 and with the leader not taking part, rescans the `Gather` in a join,
 stops it early with a limit and rescans it then, and passes a generic
 plan's parameter and a worker's error through.
+
+### Bitmap mode
+
+The module's `set_rel_pathlist` hook takes each of the core's
+unparameterized, serial bitmap heap paths of a relation with clauses
+(`BitmapHeapPath`, a copy, since `add_path` frees a path another
+dominates) and adds `TessFilter` over the node's scan of the bitmap's
+pages (`tess_heap_bitmap_path`): the node's path has the core's path as
+its child, the core plans a `BitmapHeapScan` of it, and the node's
+`PlanCustomPath` keeps only that scan's child, the bitmap's plan (a
+`Bitmap Index Scan`, `BitmapAnd` or `BitmapOr`), as its own. The scan's
+rows are the tuples the planner expects of the bitmap's pages
+(`compute_bitmap_pages`), the filter's the core path's, at nine tenths of
+its cost. The filter evaluates every clause of the relation, the index's
+too: a lossy page must be rechecked, an exact one need not be, but a
+clause in batches costs little. The path is offered only where the
+planner expects at least `tessera.bitmap_page_rows` rows a page (2 by
+default, 0 always): the node pins each page of a batch besides the pin of
+the core's scan, and at 1.4 rows a page over 14 500 pages that took 9 %
+more than the core's bitmap heap scan; there the core's scan stays, read
+through the pack node.
+
+The first execution runs the child (`MultiExecProcNode`) for the
+`TIDBitmap` and begins the core's bitmap scan over it
+(`table_beginscan_bm`, `tbm_begin_iterate`). Each call of
+`table_scan_bitmap_next_tuple` brings the next page with a visible tuple
+in, finds its visible tuples (those the bitmap names, HOT chains
+followed, or all of a lossy page's) and leaves them in the scan's list,
+as the page-at-a-time sequential scan does; the node takes them into the
+batch from there, and a batch takes rows from page after page up to its
+size, each page pinned by the batch: one page a batch made 1.6 rows a
+batch of a sparse bitmap. A rescan ends the scan and frees the bitmap,
+passes a changed parameter to the child, and the next execution builds
+the bitmap again. `EXPLAIN ANALYZE` adds `Exact Heap Blocks` and `Lossy
+Heap Blocks`. At 2 M rows (bench/pg/index, pg-index-0vfbEV): a bitmap of
+15 % of the rows 10.0 ms against 14.0 for the core, 5 % 4.3 against 5.5,
+its rows skipped by a limit 4.1 against 5.4, BitmapOr of 2 % about even;
+bitmaps under 2 rows a page stay the core's (about 3 % more through the
+pack than the core alone, as before). A parallel bitmap heap scan
+(a shared bitmap) is the core's.
+
+`test/sql/index.sql` compares with Tessera off: a btree bitmap with NULL
+keys, `IS NULL`, an empty result, computed targets, a row-wise clause,
+BitmapAnd and BitmapOr at `tessera.bitmap_page_rows` 0, a lossy bitmap
+at a `work_mem` of 64 kB over 1700 pages whose rows the filter rechecks,
+updated (HOT) and deleted rows, a parameter of the index condition that
+changes per outer row, and a limit above. Mutations fail it: the page's
+first row skipped, the bitmap kept over a rescan.
 
 ## TessPack
 

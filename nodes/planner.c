@@ -135,6 +135,19 @@ clauses_supported(PlannerInfo *root, RelOptInfo *rel)
 		tess_expr_supports_filter((Node *) first->clause, rel->relid);
 }
 
+/* The relation's targets and the clauses' columns, which the filter reads. */
+static PathTarget *
+filter_input_target(PlannerInfo *root, RelOptInfo *rel)
+{
+	PathTarget *target = copy_pathtarget(rel->reltarget);
+	List	   *clauses = extract_actual_clauses(rel->baserestrictinfo, false);
+
+	add_new_columns_to_pathtarget(target,
+								  pull_var_clause((Node *) clauses,
+												  PVC_RECURSE_PLACEHOLDERS));
+	return set_pathtarget_cost_width(root, target);
+}
+
 /*
  * The batch child over a copy of the scan: add_path frees the core path
  * the node's path dominates. The scan reads the clauses' columns as well
@@ -146,15 +159,10 @@ static Path *
 make_child_path(PlannerInfo *root, RelOptInfo *rel, const Path *seqscan)
 {
 	Path	   *copy = makeNode(Path);
-	PathTarget *target = copy_pathtarget(rel->reltarget);
-	List	   *clauses = extract_actual_clauses(rel->baserestrictinfo, false);
 	Path	   *child;
 
 	*copy = *seqscan;
-	add_new_columns_to_pathtarget(target,
-								  pull_var_clause((Node *) clauses,
-												  PVC_RECURSE_PLACEHOLDERS));
-	copy->pathtarget = set_pathtarget_cost_width(root, target);
+	copy->pathtarget = filter_input_target(root, rel);
 	child = tess_batch_scan_path(root, copy);
 	return child != NULL ? child : tess_batch_input_path(root, copy);
 }
@@ -310,6 +318,44 @@ add_row_filter_paths(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte)
 		add_partial_path(rel, path);
 }
 
+/*
+ * TessFilter over the node's scan of a bitmap's pages in place of each of
+ * the core's bitmap heap scans of the relation, unparameterized and
+ * serial: the filter evaluates every clause, the index's among them,
+ * which a lossy page needs rechecked and an exact one does not (a filter
+ * in batches is cheap), and the path costs the filter's fraction of the
+ * core's.
+ */
+static void
+add_bitmap_paths(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte)
+{
+	List	   *bitmaps = NIL;
+
+	if (!*tess_runtime_api()->settings->enable ||
+		!relation_supported(root, rel, rte) || first_clause(root, rel) == NULL)
+		return;
+	/* add_path frees a core path the node's dominates: copies are taken first. */
+	foreach_ptr(Path, path, rel->pathlist)
+	{
+		BitmapHeapPath *copy;
+
+		if (!IsA(path, BitmapHeapPath) || path->param_info != NULL ||
+			path->parallel_aware)
+			continue;
+		copy = palloc_object(BitmapHeapPath);
+		memcpy(copy, path, sizeof(BitmapHeapPath));
+		bitmaps = lappend(bitmaps, copy);
+	}
+	foreach_ptr(BitmapHeapPath, bitmap, bitmaps)
+	{
+		Path	   *scan = tess_heap_bitmap_path(root, bitmap,
+												 filter_input_target(root, rel));
+
+		if (scan != NULL)
+			add_path(rel, (Path *) make_filter_path(rel, &bitmap->path, scan));
+	}
+}
+
 /* The node's paths, then TessGather over the cheapest partial path, before the core gathers it. */
 static void
 set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
@@ -320,6 +366,7 @@ set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
 	add_filter_paths(root, rel, rte);
 	add_row_filter_paths(root, rel, rte);
 	add_scan_paths(root, rel, rte);
+	add_bitmap_paths(root, rel, rte);
 	tess_gather_add_paths(root, rel);
 }
 

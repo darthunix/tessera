@@ -12,6 +12,7 @@ PG_MODULE_MAGIC;
 PGDLLEXPORT void _PG_init(void);
 
 double		tess_join_bloom_ratio = 0.5;
+double		tess_bitmap_page_rows = 2.0;
 bool		tess_batch_gather = true;
 
 /*
@@ -61,6 +62,13 @@ _PG_init(void)
 							 "fewer of them than this share found a pair: 0 never builds one, 1 builds "
 							 "one at once, whatever the sizes.",
 							 &tess_join_bloom_ratio, 0.5, 0.0, 1.0,
+							 PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomRealVariable("tessera.bitmap_page_rows",
+							 "Rows a page of a bitmap must give for the batch scan of its pages.",
+							 "The node reads a bitmap's pages in place of the core's bitmap heap scan "
+							 "when the planner expects at least this many rows of each page: below, a "
+							 "page's pin of the node's own costs more than its batches save. 0 always.",
+							 &tess_bitmap_page_rows, 2.0, 0.0, 1000.0,
 							 PGC_USERSET, 0, NULL, NULL, NULL);
 	DefineCustomBoolVariable("tessera.batch_gather",
 							 "Gathers a parallel batch subtree's rows in batches.",

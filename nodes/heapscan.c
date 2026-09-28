@@ -8,6 +8,8 @@
 #include "commands/explain.h"
 #include "commands/explain_format.h"
 #include "executor/executor.h"
+#include "nodes/tidbitmap.h"
+#include "optimizer/cost.h"
 #include "optimizer/optimizer.h"
 #include "parser/parsetree.h"
 #include "pgstat.h"
@@ -34,7 +36,14 @@
  * faster than the core's scan there too (docs/nodes.md). Under a Gather,
  * the participants share the core's parallel
  * scan descriptor, which hands each of them its own pages, and the
- * leader reports the counters of all of them. See docs/nodes.md.
+ * leader reports the counters of all of them. With one child, the core's
+ * plan of a bitmap of an index (Bitmap Index Scan, BitmapAnd, BitmapOr),
+ * the node reads the pages of that bitmap instead of all of them: the
+ * core's bitmap scan brings each in, finds its visible tuples (those the
+ * bitmap names, or all of a lossy page's) and leaves them in the page's
+ * list, as its page-at-a-time scan does, and the batches are taken from
+ * it the same way; a filter above evaluates every clause of the
+ * relation, the index's recheck among them. See docs/nodes.md.
  */
 #define HEAP_SCAN_BATCH_ROWS 64
 
@@ -48,6 +57,8 @@ enum
 	HEAP_SCAN_DEFORMED,
 	HEAP_SCAN_RESTARTED,
 	HEAP_SCAN_COMPUTED,
+	HEAP_SCAN_EXACT,
+	HEAP_SCAN_LOSSY,
 	HEAP_SCAN_NCOUNTERS
 };
 
@@ -85,6 +96,14 @@ typedef struct HeapScanState
 	TessBatch  *active;
 	int			next_row;
 	TessDatumColumn *columns;
+	/*
+	 * Bitmap mode: the plan of the bitmap, the bitmap once built, and the
+	 * pages read whole (lossy) and by their tuples (exact).
+	 */
+	PlanState  *bitmap_plan;
+	TIDBitmap  *tbm;
+	uint64		exact_pages;
+	uint64		lossy_pages;
 } HeapScanState;
 
 static CustomPath *heap_scan_rows(PlannerInfo *root, Path *path);
@@ -148,27 +167,24 @@ const TessNode tess_heap_scan_node = {
 };
 
 /*
- * Whether the path is a sequential scan of a plain heap table whose
- * targets are columns of it or expressions over them, which the node
- * computes. A stand-in path of a test has neither a relation nor a target.
+ * Whether the relation is a plain heap table and the target columns of it
+ * or expressions over them, which the node computes.
  */
 static bool
-plain_heap_scan(PlannerInfo *root, const Path *path)
+plain_heap_relation(PlannerInfo *root, RelOptInfo *rel, const PathTarget *target)
 {
-	RelOptInfo *rel = path->parent;
 	RangeTblEntry *rte;
 	Relation	relation;
 	bool		heap;
 
-	if (root == NULL || rel == NULL || path->pathtarget == NULL ||
-		path->pathtype != T_SeqScan || !IS_SIMPLE_REL(rel) ||
+	if (root == NULL || rel == NULL || target == NULL || !IS_SIMPLE_REL(rel) ||
 		rel->rtekind != RTE_RELATION)
 		return false;
 	rte = planner_rt_fetch(rel->relid, root);
 	if (rte->relkind != RELKIND_RELATION || rte->inh ||
 		rte->tablesample != NULL)
 		return false;
-	foreach_ptr(Var, var, pull_var_clause((Node *) path->pathtarget->exprs,
+	foreach_ptr(Var, var, pull_var_clause((Node *) target->exprs,
 										  PVC_RECURSE_AGGREGATES |
 										  PVC_RECURSE_WINDOWFUNCS |
 										  PVC_RECURSE_PLACEHOLDERS))
@@ -182,6 +198,17 @@ plain_heap_scan(PlannerInfo *root, const Path *path)
 	heap = relation->rd_tableam == GetHeapamTableAmRoutine();
 	table_close(relation, NoLock);
 	return heap;
+}
+
+/*
+ * Whether the path is a sequential scan of a plain heap table. A stand-in
+ * path of a test has neither a relation nor a target.
+ */
+static bool
+plain_heap_scan(PlannerInfo *root, const Path *path)
+{
+	return path->pathtype == T_SeqScan &&
+		plain_heap_relation(root, path->parent, path->pathtarget);
 }
 
 /* The core's get_parallel_divisor: the share of one participant. */
@@ -228,9 +255,52 @@ heap_scan_rows(PlannerInfo *root, Path *path)
 }
 
 /*
+ * The node's scan of the pages of a bitmap in place of the core's bitmap
+ * heap scan, with the target given (the relation's columns and the
+ * clauses'): the core's path, which the caller copied (add_path frees a
+ * path another dominates), is the child, whose plan's bitmap the node
+ * takes; its rows are the tuples the bitmap's pages give, before any
+ * clause. NULL for a relation the node does not read, or for a bitmap
+ * whose pages the planner expects to give fewer than two tuples each:
+ * then a page costs the node a pin of its own besides the one the core's
+ * scan takes, which its batches do not make up for (a bitmap of 1.4
+ * tuples a page, 14 500 pages, took 9 % more than the core's scan). The
+ * bound is tessera.bitmap_page_rows, 2 by default.
+ */
+
+Path *
+tess_heap_bitmap_path(PlannerInfo *root, BitmapHeapPath *bitmap, PathTarget *target)
+{
+	TessPathConfig config = TESS_STRUCT_INITIALIZER(TessPathConfig);
+	RelOptInfo *rel = bitmap->path.parent;
+	Path		template = bitmap->path;
+	CustomPath *scan;
+	double		tuples;
+
+	double		pages;
+
+	if (!plain_heap_relation(root, rel, target))
+		return NULL;
+	pages = compute_bitmap_pages(root, rel, bitmap->bitmapqual, 1.0, NULL, &tuples);
+	if (pages <= 0 || tuples / pages < tess_bitmap_page_rows)
+		return NULL;
+	template.pathtarget = target;
+	template.pathkeys = NIL;
+	config.template_path = &template;
+	config.methods = &heap_scan_path_methods;
+	config.node = &tess_heap_scan_node;
+	config.flags = CUSTOMPATH_SUPPORT_PROJECTION;
+	config.children = list_make1(bitmap);
+	scan = tess_path_create(&config);
+	scan->path.rows = clamp_row_est(tuples);
+	return &scan->path;
+}
+
+/*
  * Every relation column is a batch column and the relation's row is the
  * scan tuple; the targets, PostgreSQL's projection among them, are derived
- * from it when the plan is read.
+ * from it when the plan is read. A bitmap's scan keeps the bitmap's plan
+ * of the core's bitmap heap scan as its child, and none of the rest.
  */
 static Plan *
 heap_scan_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
@@ -238,6 +308,16 @@ heap_scan_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 {
 	TessPlanConfig config = TESS_STRUCT_INITIALIZER(TessPlanConfig);
 	TessLayout	layout = TESS_STRUCT_INITIALIZER(TessLayout);
+
+	if (custom_plans != NIL)
+	{
+		Plan	   *bitmap = linitial(custom_plans);
+
+		if (list_length(custom_plans) != 1 || !IsA(bitmap, BitmapHeapScan) ||
+			outerPlan(bitmap) == NULL)
+			elog(ERROR, "TessHeapScan expected the core's bitmap heap scan below");
+		custom_plans = list_make1(outerPlan(bitmap));
+	}
 
 	layout.ncolumns = rel->max_attr;
 	layout.ntargets = rel->max_attr;
@@ -271,10 +351,16 @@ heap_scan_begin(CustomScanState *css, EState *estate, int eflags)
 	if (eflags & (EXEC_FLAG_BACKWARD | EXEC_FLAG_MARK))
 		elog(ERROR, "TessHeapScan supports neither backward scan nor mark/restore");
 	tess_plan_get_info(cscan, &info);
-	if (info.node != &tess_heap_scan_node || info.nchildren != 0 ||
+	if (info.node != &tess_heap_scan_node || info.nchildren > 1 ||
 		rel == NULL || cscan->custom_scan_tlist != NIL ||
 		info.layout.ncolumns < RelationGetDescr(rel)->natts)
 		elog(ERROR, "TessHeapScan received a foreign plan");
+	/* The bitmap's plan: an index's bitmap scan, or their AND or OR. */
+	if (info.nchildren == 1)
+	{
+		state->bitmap_plan = ExecInitNode(linitial(cscan->custom_plans), estate, eflags);
+		css->custom_ps = list_make1(state->bitmap_plan);
+	}
 	state->layout = info.layout;
 	state->relation = (TessLayout) TESS_STRUCT_INITIALIZER(TessLayout);
 	state->relation.ncolumns = RelationGetDescr(rel)->natts;
@@ -338,7 +424,29 @@ begin_scan(HeapScanState *state, TableScanDesc scan)
 	state->pagemode = (scan->rs_flags & SO_ALLOW_PAGEMODE) != 0;
 }
 
-/* Drop the batch's pins and the landing slot's, then the scan. */
+/*
+ * Bitmap mode: build the bitmap from the child's plan and begin the
+ * core's bitmap scan over its pages, which always collects a page's
+ * visible tuples.
+ */
+static void
+begin_bitmap_scan(HeapScanState *state)
+{
+	EState	   *estate = state->css.ss.ps.state;
+	TableScanDesc scan;
+
+	state->tbm = (TIDBitmap *) MultiExecProcNode(state->bitmap_plan);
+	if (state->tbm == NULL || !IsA(state->tbm, TIDBitmap))
+		elog(ERROR, "TessHeapScan bitmap child returned an invalid result");
+	scan = table_beginscan_bm(state->css.ss.ss_currentRelation, estate->es_snapshot,
+							  0, NULL, heap_scan_flags(state));
+	scan->st.rs_tbmiterator = tbm_begin_iterate(state->tbm, estate->es_query_dsa,
+												InvalidDsaPointer);
+	begin_scan(state, scan);
+	state->pagemode = true;
+}
+
+/* Drop the batch's pins and the landing slot's, then the scan and its bitmap. */
 static void
 end_scan(HeapScanState *state)
 {
@@ -346,8 +454,16 @@ end_scan(HeapScanState *state)
 		tess_heap_batch_reset(state->heap);
 	ExecClearTuple(state->landing);
 	if (state->scan != NULL)
+	{
+		if (state->bitmap_plan != NULL &&
+			!tbm_exhausted(&state->scan->st.rs_tbmiterator))
+			tbm_end_iterate(&state->scan->st.rs_tbmiterator);
 		table_endscan(state->scan);
+	}
 	state->scan = NULL;
+	if (state->tbm != NULL)
+		tbm_free(state->tbm);
+	state->tbm = NULL;
 	state->page_active = false;
 }
 
@@ -361,6 +477,25 @@ next_page(HeapScanState *state)
 {
 	HeapScanDesc hscan = (HeapScanDesc) state->scan;
 
+	if (state->bitmap_plan != NULL)
+	{
+		bool		recheck;
+
+		/*
+		 * The next page of the bitmap with a visible tuple; the scan steps
+		 * past the one it returns. A filter above rechecks every row.
+		 */
+		if (state->page_active)
+			hscan->rs_cindex = hscan->rs_ntuples;
+		if (!table_scan_bitmap_next_tuple(state->scan, state->landing, &recheck,
+										  &state->lossy_pages, &state->exact_pages))
+			return false;
+		ExecClearTuple(state->landing);
+		state->page_active = true;
+		state->page_cursor = hscan->rs_cindex - 1;
+		state->pages++;
+		return true;
+	}
 	/* Skip the rest of the current page: the next call fetches another. */
 	if (state->page_active)
 		hscan->rs_cindex = hscan->rs_ntuples - 1;
@@ -374,8 +509,8 @@ next_page(HeapScanState *state)
 	return true;
 }
 
-/* Take up to limit visible tuples of the current page into the batch. */
-static void
+/* Take up to limit visible tuples of the current page into the batch; how many. */
+static int
 fill_from_page(HeapScanState *state, int limit)
 {
 	HeapScanDesc hscan = (HeapScanDesc) state->scan;
@@ -385,14 +520,22 @@ fill_from_page(HeapScanState *state, int limit)
 	tess_heap_batch_append_page(state->heap, hscan->rs_cbuf, hscan->rs_cblock,
 								hscan->rs_vistuples + state->page_cursor, nrows,
 								RelationGetRelid(rel));
-	/* As pgstat_count_heap_getnext; the core counted the page's first tuple. */
+	/*
+	 * As pgstat_count_heap_getnext, or pgstat_count_heap_fetch for a
+	 * bitmap's tuples; the core counted the page's first tuple.
+	 */
 	if (pgstat_should_count_relation(rel))
 	{
+		int			counted = state->page_cursor > 0 ? nrows : nrows - 1;
+
 		Assert(rel->pgstat_info->kind == PGSTAT_KIND_RELATION);
-		rel->pgstat_info->tab.counts.tuples_returned +=
-			state->page_cursor > 0 ? nrows : nrows - 1;
+		if (state->bitmap_plan != NULL)
+			rel->pgstat_info->tab.counts.tuples_fetched += counted;
+		else
+			rel->pgstat_info->tab.counts.tuples_returned += counted;
 	}
 	state->page_cursor += nrows;
+	return nrows;
 }
 
 /* The next batch of the relation's rows, or NULL at the end. */
@@ -416,7 +559,28 @@ next_batch(HeapScanState *state)
 	}
 	tess_heap_batch_reset(state->heap);
 	hscan = (HeapScanDesc) state->scan;
-	if (state->pagemode)
+	if (state->bitmap_plan != NULL)
+	{
+		/*
+		 * A bitmap's pages may give a few rows each: a batch takes them
+		 * from page after page, each page pinned by the batch, up to its
+		 * capacity; one page a batch made 1.6 rows a batch of a sparse
+		 * bitmap, where every batch's cost fell on its few rows.
+		 */
+		while (limit > 0)
+		{
+			if (!state->page_active || state->page_cursor >= hscan->rs_ntuples)
+			{
+				if (!next_page(state))
+				{
+					state->exhausted = true;
+					break;
+				}
+			}
+			limit -= fill_from_page(state, limit);
+		}
+	}
+	else if (state->pagemode)
 	{
 		/* A batch takes the rows of one page, never of two. */
 		if (!state->page_active || state->page_cursor >= hscan->rs_ntuples)
@@ -531,7 +695,9 @@ heap_scan_exec(CustomScanState *css)
 	if (state->request == NULL)
 		heap_scan_start(state);
 	/* Without a parallel scan from the callbacks, a serial one. */
-	if (state->scan == NULL)
+	if (state->scan == NULL && state->bitmap_plan != NULL)
+		begin_bitmap_scan(state);
+	else if (state->scan == NULL)
 	{
 		EState	   *estate = css->ss.ps.state;
 
@@ -562,6 +728,8 @@ heap_scan_end(CustomScanState *css)
 	tess_output_end(state->output);
 	/* The pins of a batch a projection wrapped are the node's to drop. */
 	end_scan(state);
+	if (state->bitmap_plan != NULL)
+		ExecEndNode(state->bitmap_plan);
 	/* The relation is closed by the executor. */
 }
 
@@ -577,7 +745,22 @@ heap_scan_rescan(CustomScanState *css)
 	if (state->heap != NULL)
 		tess_heap_batch_reset(state->heap);
 	ExecClearTuple(state->landing);
-	if (state->scan != NULL)
+	/*
+	 * Bitmap mode: the bitmap is built again at the next execution, from
+	 * the child rescanned, now or by its first execution when a parameter
+	 * of it changed (the core passes those to outer and inner plans only).
+	 */
+	if (state->bitmap_plan != NULL)
+	{
+		end_scan(state);
+		if (css->ss.ps.chgParam != NULL)
+			UpdateChangedParamSet(state->bitmap_plan, css->ss.ps.chgParam);
+		if (state->bitmap_plan->chgParam == NULL)
+			ExecReScan(state->bitmap_plan);
+		state->exact_pages = 0;
+		state->lossy_pages = 0;
+	}
+	else if (state->scan != NULL)
 		table_rescan(state->scan, NULL);
 	state->page_active = false;
 	state->page_cursor = 0;
@@ -609,6 +792,8 @@ heap_scan_counters(HeapScanState *state, uint64 *values)
 
 		values[HEAP_SCAN_COMPUTED] = computed->chain_datums + computed->row_datums;
 	}
+	values[HEAP_SCAN_EXACT] = state->exact_pages;
+	values[HEAP_SCAN_LOSSY] = state->lossy_pages;
 }
 
 /* The totals of every participant in a parallel plan, else the node's own. */
@@ -634,6 +819,11 @@ heap_scan_explain(CustomScanState *css, List *ancestors, ExplainState *es)
 		return;
 	ExplainPropertyInteger("Batches", NULL, totals[HEAP_SCAN_BATCHES], es);
 	ExplainPropertyInteger("Pages", NULL, totals[HEAP_SCAN_PAGES], es);
+	if (state->bitmap_plan != NULL)
+	{
+		ExplainPropertyInteger("Exact Heap Blocks", NULL, totals[HEAP_SCAN_EXACT], es);
+		ExplainPropertyInteger("Lossy Heap Blocks", NULL, totals[HEAP_SCAN_LOSSY], es);
+	}
 	if (totals[HEAP_SCAN_RAN] > 0)
 	{
 		ExplainPropertyInteger("Deformed Datums", NULL, totals[HEAP_SCAN_DEFORMED], es);

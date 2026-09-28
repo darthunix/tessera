@@ -127,6 +127,18 @@ FROM generate_series(1, 2000000 * :scale) AS g,
                           ELSE (g::bigint * 7919 % (100000 * :scale))::int + 1
                      END AS fk) AS key;
 
+-- The index family: reads through indexes. k is scattered over the pages
+-- (a bitmap of it names rows of many pages), w has 97 values, d is a day
+-- in the order of the rows (for BRIN), t text.
+DROP TABLE IF EXISTS bench_idx;
+CREATE TABLE bench_idx AS
+SELECT g AS id, (g::bigint * 7919 % (2000000 * :scale))::int AS k, g % 97 AS w,
+       date '2000-01-01' + g / 2000 AS d, 'row-' || (g % 10000) AS t
+FROM generate_series(1, 2000000 * :scale) AS g;
+CREATE INDEX bench_idx_k ON bench_idx (k);
+CREATE INDEX bench_idx_w ON bench_idx (w);
+CREATE INDEX bench_idx_d ON bench_idx USING brin (d);
+
 -- The grouping cases of the win family group by expressions: statistics
 -- on them give the planner the number of groups, which it would otherwise
 -- take from the unique column underneath.
@@ -150,6 +162,7 @@ VACUUM (ANALYZE) bench_dates;
 VACUUM (ANALYZE) bench_days;
 VACUUM (ANALYZE) bench_tdim;
 VACUUM (ANALYZE) bench_tfact;
+VACUUM (ANALYZE) bench_idx;
 
 SELECT pg_size_pretty(pg_total_relation_size('bench_narrow')) AS narrow,
        pg_size_pretty(pg_total_relation_size('bench_wide')) AS wide,
@@ -171,3 +184,4 @@ SELECT count(*) FROM bench_mj_inner;
 SELECT count(*) FROM bench_part;
 SELECT count(*) FROM bench_dates;
 SELECT count(*) FROM bench_days;
+SELECT count(*) FROM bench_idx;

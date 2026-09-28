@@ -80,6 +80,13 @@ query down, and where it can, does it speed one up.
   integers and a third of them, `EXCEPT ALL` of 1000 values with many
   copies, `INTERSECT` of texts through a dictionary, `INTERSECT ALL` of
   integers. A ratio below one is the win.
+- **index** (`index.sql`): reads through the indexes of `bench_idx` (2 M
+  rows per multiplier, `k` scattered over the pages, `w` of 97 values, a
+  BRIN index of the day `d` in the order of the rows): bitmaps of `k` at 1,
+  5 and 15 % of the rows, BitmapAnd of `k` and `w`, BitmapOr of them, and
+  the rows of a bitmap skipped by a limit's offset. With Tessera the pages
+  of the bitmap come in batches and a filter rechecks every clause. A
+  ratio below one is the win.
 - **rowwise** (`rowwise.sql`): tables without clauses read under a parent
   of the core that takes rows one at a time: `bit_or` of a column and of
   an expression, one column of sixty, `max` of a text column, a window
