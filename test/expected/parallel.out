@@ -30,6 +30,18 @@ BEGIN
         format('$[0]."Plan".** ? (@."Custom Plan Provider" == $p).%I', name)::jsonpath,
         jsonb_build_object('p', provider))::text;
 END $$;
+-- The same of the node's partial grouping under a gather, whatever groups above.
+CREATE FUNCTION partial_property(query text, name text) RETURNS text
+LANGUAGE plpgsql AS $$
+DECLARE
+    plan jsonb;
+BEGIN
+    EXECUTE format('EXPLAIN (ANALYZE, FORMAT JSON, TIMING OFF, SUMMARY OFF, BUFFERS OFF, COSTS OFF) %s', query)
+        INTO plan;
+    RETURN jsonb_path_query_first(plan,
+        format('$[0]."Plan".** ? (@."Custom Plan Provider" == "TessAgg" && @."Partial Mode" == "Partial").%I',
+               name)::jsonpath)::text;
+END $$;
 CREATE TABLE parallel_t (a int, b int, c text);
 INSERT INTO parallel_t
 SELECT CASE WHEN i % 7 = 0 THEN NULL ELSE i END, i % 10, 'r' || i
@@ -467,13 +479,17 @@ EXECUTE shifted(1000);
 
 RESET plan_cache_mode;
 DEALLOCATE shifted;
--- GROUP BY under a Gather: a table of groups in each participant, the
--- core's Finalize HashAggregate merging them and applying HAVING.
+-- GROUP BY under a Gather: a table of groups in each participant, and the
+-- node's grouping over TessGather merging their partial values, counts
+-- and sums added as int8, extremes compared, and applying HAVING, where
+-- the core's Finalize HashAggregate would merge them row by row. A group
+-- of NULL values only (sum, min and max NULL, count(a) 0), int8 extremes.
 EXPLAIN (COSTS OFF) SELECT b, count(*), sum(a), min(a), max(a) FROM parallel_t WHERE a > 100 GROUP BY b;
                                    QUERY PLAN                                    
 ---------------------------------------------------------------------------------
- Finalize HashAggregate
+ Custom Scan (TessAgg)
    Group Key: b
+   Partial Mode: Finalize
    ->  Custom Scan (TessGather)
          Workers Planned: 2
          ->  Parallel Custom Scan (TessSend)
@@ -483,7 +499,7 @@ EXPLAIN (COSTS OFF) SELECT b, count(*), sum(a), min(a), max(a) FROM parallel_t W
                      ->  Parallel Custom Scan (TessFilter) on parallel_t
                            Batch Filter: (a > 100)
                            ->  Parallel Custom Scan (TessHeapScan) on parallel_t
-(11 rows)
+(12 rows)
 
 SELECT parallel_same($$SELECT b, count(*), sum(a), min(a), max(a) FROM parallel_t WHERE a > 100 GROUP BY b$$);
                                                                                                                                   parallel_same                                                                                                                                  
@@ -491,12 +507,65 @@ SELECT parallel_same($$SELECT b, count(*), sum(a), min(a), max(a) FROM parallel_
  {"(0,420,1073100,110,5000)","(1,420,1067220,101,4981)","(2,420,1071140,102,4992)","(3,420,1070160,103,4993)","(4,420,1069180,104,4994)","(5,420,1073100,115,4995)","(6,420,1072120,106,4996)","(7,420,1071140,107,4997)","(8,420,1070160,108,4988)","(9,420,1074080,109,4999)"}
 (1 row)
 
-SELECT parallel_same($$SELECT a % 7, count(*), count(a) FROM parallel_t GROUP BY a % 7 HAVING count(*) > 100$$);
-                                          parallel_same                                           
---------------------------------------------------------------------------------------------------
- {"(,714,0)","(1,715,715)","(2,715,715)","(3,714,714)","(4,714,714)","(5,714,714)","(6,714,714)"}
+SELECT parallel_same($$SELECT a % 7, count(*), count(a) FROM parallel_t GROUP BY a % 7 HAVING count(a) > 100$$);
+                                     parallel_same                                     
+---------------------------------------------------------------------------------------
+ {"(1,715,715)","(2,715,715)","(3,714,714)","(4,714,714)","(5,714,714)","(6,714,714)"}
 (1 row)
 
+EXPLAIN (COSTS OFF) SELECT b, count(*), count(a) FROM parallel_t GROUP BY b HAVING count(a) > 428;
+                                QUERY PLAN                                 
+---------------------------------------------------------------------------
+ Custom Scan (TessAgg)
+   Filter: ((count(a)) > 428)
+   Group Key: b
+   Partial Mode: Finalize
+   ->  Custom Scan (TessGather)
+         Workers Planned: 2
+         ->  Parallel Custom Scan (TessSend)
+               ->  Parallel Custom Scan (TessAgg)
+                     Group Key: b
+                     Partial Mode: Partial
+                     ->  Parallel Custom Scan (TessHeapScan) on parallel_t
+(11 rows)
+
+SELECT parallel_same($$SELECT b, count(*), count(a) FROM parallel_t GROUP BY b HAVING count(a) > 428$$);
+                                     parallel_same                                     
+---------------------------------------------------------------------------------------
+ {"(0,500,429)","(2,500,429)","(3,500,429)","(5,500,429)","(6,500,429)","(9,500,429)"}
+(1 row)
+
+SELECT parallel_same($$SELECT a % 7, count(*), count(a), sum(a), min(a), max(a::bigint * 1000000000000), min(-a::bigint) FROM parallel_t GROUP BY a % 7$$);
+                                                                                                                                               parallel_same                                                                                                                                                
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ {"(,714,0,,,,)","(1,715,715,1787500,1,4999000000000000,-4999)","(2,715,715,1788215,2,5000000000000000,-5000)","(3,714,714,1783929,3,4994000000000000,-4994)","(4,714,714,1784643,4,4995000000000000,-4995)","(5,714,714,1785357,5,4996000000000000,-4996)","(6,714,714,1786071,6,4997000000000000,-4997)"}
+(1 row)
+
+-- With the core's Gather (tessera.batch_gather off) its Finalize
+-- HashAggregate merges them.
+SET tessera.batch_gather = off;
+EXPLAIN (COSTS OFF) SELECT b, count(*), sum(a), min(a), max(a) FROM parallel_t WHERE a > 100 GROUP BY b;
+                                QUERY PLAN                                 
+---------------------------------------------------------------------------
+ Finalize HashAggregate
+   Group Key: b
+   ->  Gather
+         Workers Planned: 2
+         ->  Parallel Custom Scan (TessAgg)
+               Group Key: b
+               Partial Mode: Partial
+               ->  Parallel Custom Scan (TessFilter) on parallel_t
+                     Batch Filter: (a > 100)
+                     ->  Parallel Custom Scan (TessHeapScan) on parallel_t
+(10 rows)
+
+SELECT parallel_same($$SELECT b, count(*), sum(a), min(a), max(a) FROM parallel_t WHERE a > 100 GROUP BY b$$);
+                                                                                                                                  parallel_same                                                                                                                                  
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ {"(0,420,1073100,110,5000)","(1,420,1067220,101,4981)","(2,420,1071140,102,4992)","(3,420,1070160,103,4993)","(4,420,1069180,104,4994)","(5,420,1073100,115,4995)","(6,420,1072120,106,4996)","(7,420,1071140,107,4997)","(8,420,1070160,108,4988)","(9,420,1074080,109,4999)"}
+(1 row)
+
+RESET tessera.batch_gather;
 SELECT plan_property($$SELECT b, sum(a) FROM parallel_t GROUP BY b$$, 'TessAgg', 'Groups') AS groups;
  groups 
 --------
@@ -627,7 +696,8 @@ RESET enable_material;
 SET parallel_tuple_cost = 0;
 DROP TABLE parallel_keys;
 -- Partial groups past hash_mem go out early, and the table starts anew:
--- the Finalize Aggregate merges a group's partials, and nothing is written.
+-- the grouping above merges a group's partials, and the partial writes
+-- nothing (the grouping above, at that hash_mem, spills as a serial one).
 -- A group's rows come together, so a table folds many before it fills.
 CREATE TABLE parallel_groups AS
 SELECT g / 60 AS k, g AS v FROM generate_series(1, 300000) AS g;
@@ -638,8 +708,9 @@ SET enable_sort = off;
 EXPLAIN (COSTS OFF) SELECT k, count(*), sum(v), min(v), max(v) FROM parallel_groups GROUP BY k;
                                    QUERY PLAN                                   
 --------------------------------------------------------------------------------
- Finalize HashAggregate
+ Custom Scan (TessAgg)
    Group Key: k
+   Partial Mode: Finalize
    ->  Custom Scan (TessGather)
          Workers Planned: 2
          ->  Parallel Custom Scan (TessSend)
@@ -647,7 +718,7 @@ EXPLAIN (COSTS OFF) SELECT k, count(*), sum(v), min(v), max(v) FROM parallel_gro
                      Group Key: k
                      Partial Mode: Partial
                      ->  Parallel Custom Scan (TessHeapScan) on parallel_groups
-(9 rows)
+(10 rows)
 
 SELECT parallel_same($$SELECT md5(string_agg(q::text, ',' ORDER BY q::text)) FROM (SELECT k, count(*), sum(v), min(v), max(v) FROM parallel_groups GROUP BY k) AS q$$);
             parallel_same             
@@ -655,17 +726,17 @@ SELECT parallel_same($$SELECT md5(string_agg(q::text, ',' ORDER BY q::text)) FRO
  {(2841b69afcb3605d52b7e9050c3c538a)}
 (1 row)
 
-SELECT plan_property($$SELECT k, count(*) FROM parallel_groups GROUP BY k$$, 'TessAgg', 'Early Emits')::int > 0 AS early,
-       plan_property($$SELECT k, count(*) FROM parallel_groups GROUP BY k$$, 'TessAgg', 'Disk Usage') AS disk;
+SELECT partial_property($$SELECT k, count(*) FROM parallel_groups GROUP BY k$$, 'Early Emits')::int > 0 AS early,
+       partial_property($$SELECT k, count(*) FROM parallel_groups GROUP BY k$$, 'Disk Usage') AS disk;
  early | disk 
 -------+------
  t     | 
 (1 row)
 
 -- Groups spread over the input fold nothing before the table fills, a
--- group per row read: sending the table up would hand the Finalize
--- Aggregate every row. The groups go to disk instead, as a serial node's,
--- and out as partials once the input is done.
+-- group per row read: sending the table up would hand the grouping above
+-- every row. The groups go to disk instead, as a serial node's, and out as
+-- partials once the input is done.
 CREATE TABLE parallel_spread AS
 SELECT g % 5000 AS k, g AS v FROM generate_series(1, 300000) AS g;
 ANALYZE parallel_spread;
@@ -675,8 +746,8 @@ SELECT parallel_same($$SELECT md5(string_agg(q::text, ',' ORDER BY q::text)) FRO
  {(e7471a8f08c3bade7f7219d9a0971914)}
 (1 row)
 
-SELECT plan_property($$SELECT k, count(*) FROM parallel_spread GROUP BY k$$, 'TessAgg', 'Early Emits') IS NULL AS no_early,
-       plan_property($$SELECT k, count(*) FROM parallel_spread GROUP BY k$$, 'TessAgg', 'Disk Usage')::int > 0 AS spilled;
+SELECT partial_property($$SELECT k, count(*) FROM parallel_spread GROUP BY k$$, 'Early Emits') IS NULL AS no_early,
+       partial_property($$SELECT k, count(*) FROM parallel_spread GROUP BY k$$, 'Disk Usage')::int > 0 AS spilled;
  no_early | spilled 
 ----------+---------
  t        | t
@@ -705,7 +776,7 @@ SELECT parallel_same($$SELECT md5(string_agg(q::text, ',' ORDER BY q::text)) FRO
  {(0b91c9028f2190aa0d696f1adadb7d6b)}
 (1 row)
 
-SELECT plan_property($$SELECT k FROM parallel_groups GROUP BY k$$, 'TessAgg', 'Early Emits')::int > 0 AS early;
+SELECT partial_property($$SELECT k FROM parallel_groups GROUP BY k$$, 'Early Emits')::int > 0 AS early;
  early 
 -------
  t
@@ -762,15 +833,19 @@ SET work_mem = '256kB';
 SET enable_sort = off;
 SET cpu_tuple_cost = 0.05;
 EXPLAIN (COSTS OFF) SELECT k, count(*), sum(v), min(v), max(v) FROM parallel_pack GROUP BY k;
-                               QUERY PLAN                               
-------------------------------------------------------------------------
+                                  QUERY PLAN                                  
+------------------------------------------------------------------------------
  Custom Scan (TessAgg)
    Group Key: k
+   Partial Mode: Finalize
    ->  Custom Scan (TessGather)
          Workers Planned: 2
          ->  Parallel Custom Scan (TessSend)
-               ->  Parallel Custom Scan (TessHeapScan) on parallel_pack
-(6 rows)
+               ->  Parallel Custom Scan (TessAgg)
+                     Group Key: k
+                     Partial Mode: Partial
+                     ->  Parallel Custom Scan (TessHeapScan) on parallel_pack
+(10 rows)
 
 SELECT parallel_same($$SELECT md5(string_agg(q::text, ',' ORDER BY q::text)) FROM (SELECT k, count(*), sum(v), min(v), max(v) FROM parallel_pack GROUP BY k) AS q$$);
             parallel_same             
@@ -1114,4 +1189,5 @@ RESET tessera.enable;
 DROP TABLE parallel_t;
 DROP FUNCTION parallel_same(text);
 DROP FUNCTION plan_property(text, text, text);
+DROP FUNCTION partial_property(text, text);
 DROP EXTENSION tessera;

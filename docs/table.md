@@ -277,8 +277,10 @@ other call over it at the same time:
   value_at, flags_at, flag_bit, &status)` folds each selected row into
   the aggregate state of its record, the references
   `tess_table_find_or_insert` gave: `count(*)` and `count(x)` add one to
-  the int8 at byte `value_at`; `sum(int4)`, `min` and `max` of int4 or
-  int8 take the row's non-NULL value, the first one also setting bit
+  the int8 at byte `value_at`; `sum(int4)`, the int8 sum of int8 values
+  (`TESS_TABLE_SUM_INT8`: a parallel grouping's partial counts and sums,
+  merged), `min` and `max` of int4 or int8 take the row's non-NULL
+  value, the first one also setting bit
   `flag_bit` of the word at byte `flags_at`, so a state without the bit
   has seen no value and stands for NULL. The rows of a batch go in row
   order, several of one group in turn, so a sum past the int8 range

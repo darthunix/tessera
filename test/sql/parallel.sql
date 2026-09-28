@@ -33,6 +33,19 @@ BEGIN
         jsonb_build_object('p', provider))::text;
 END $$;
 
+-- The same of the node's partial grouping under a gather, whatever groups above.
+CREATE FUNCTION partial_property(query text, name text) RETURNS text
+LANGUAGE plpgsql AS $$
+DECLARE
+    plan jsonb;
+BEGIN
+    EXECUTE format('EXPLAIN (ANALYZE, FORMAT JSON, TIMING OFF, SUMMARY OFF, BUFFERS OFF, COSTS OFF) %s', query)
+        INTO plan;
+    RETURN jsonb_path_query_first(plan,
+        format('$[0]."Plan".** ? (@."Custom Plan Provider" == "TessAgg" && @."Partial Mode" == "Partial").%I',
+               name)::jsonpath)::text;
+END $$;
+
 CREATE TABLE parallel_t (a int, b int, c text);
 INSERT INTO parallel_t
 SELECT CASE WHEN i % 7 = 0 THEN NULL ELSE i END, i % 10, 'r' || i
@@ -132,11 +145,23 @@ EXECUTE shifted(1);
 EXECUTE shifted(1000);
 RESET plan_cache_mode;
 DEALLOCATE shifted;
--- GROUP BY under a Gather: a table of groups in each participant, the
--- core's Finalize HashAggregate merging them and applying HAVING.
+-- GROUP BY under a Gather: a table of groups in each participant, and the
+-- node's grouping over TessGather merging their partial values, counts
+-- and sums added as int8, extremes compared, and applying HAVING, where
+-- the core's Finalize HashAggregate would merge them row by row. A group
+-- of NULL values only (sum, min and max NULL, count(a) 0), int8 extremes.
 EXPLAIN (COSTS OFF) SELECT b, count(*), sum(a), min(a), max(a) FROM parallel_t WHERE a > 100 GROUP BY b;
 SELECT parallel_same($$SELECT b, count(*), sum(a), min(a), max(a) FROM parallel_t WHERE a > 100 GROUP BY b$$);
-SELECT parallel_same($$SELECT a % 7, count(*), count(a) FROM parallel_t GROUP BY a % 7 HAVING count(*) > 100$$);
+SELECT parallel_same($$SELECT a % 7, count(*), count(a) FROM parallel_t GROUP BY a % 7 HAVING count(a) > 100$$);
+EXPLAIN (COSTS OFF) SELECT b, count(*), count(a) FROM parallel_t GROUP BY b HAVING count(a) > 428;
+SELECT parallel_same($$SELECT b, count(*), count(a) FROM parallel_t GROUP BY b HAVING count(a) > 428$$);
+SELECT parallel_same($$SELECT a % 7, count(*), count(a), sum(a), min(a), max(a::bigint * 1000000000000), min(-a::bigint) FROM parallel_t GROUP BY a % 7$$);
+-- With the core's Gather (tessera.batch_gather off) its Finalize
+-- HashAggregate merges them.
+SET tessera.batch_gather = off;
+EXPLAIN (COSTS OFF) SELECT b, count(*), sum(a), min(a), max(a) FROM parallel_t WHERE a > 100 GROUP BY b;
+SELECT parallel_same($$SELECT b, count(*), sum(a), min(a), max(a) FROM parallel_t WHERE a > 100 GROUP BY b$$);
+RESET tessera.batch_gather;
 SELECT plan_property($$SELECT b, sum(a) FROM parallel_t GROUP BY b$$, 'TessAgg', 'Groups') AS groups;
 SET parallel_leader_participation = off;
 SELECT parallel_same($$SELECT b, sum(a) FROM parallel_t GROUP BY b$$);
@@ -175,7 +200,8 @@ RESET enable_material;
 SET parallel_tuple_cost = 0;
 DROP TABLE parallel_keys;
 -- Partial groups past hash_mem go out early, and the table starts anew:
--- the Finalize Aggregate merges a group's partials, and nothing is written.
+-- the grouping above merges a group's partials, and the partial writes
+-- nothing (the grouping above, at that hash_mem, spills as a serial one).
 -- A group's rows come together, so a table folds many before it fills.
 CREATE TABLE parallel_groups AS
 SELECT g / 60 AS k, g AS v FROM generate_series(1, 300000) AS g;
@@ -185,24 +211,24 @@ SET work_mem = '64kB';
 SET enable_sort = off;
 EXPLAIN (COSTS OFF) SELECT k, count(*), sum(v), min(v), max(v) FROM parallel_groups GROUP BY k;
 SELECT parallel_same($$SELECT md5(string_agg(q::text, ',' ORDER BY q::text)) FROM (SELECT k, count(*), sum(v), min(v), max(v) FROM parallel_groups GROUP BY k) AS q$$);
-SELECT plan_property($$SELECT k, count(*) FROM parallel_groups GROUP BY k$$, 'TessAgg', 'Early Emits')::int > 0 AS early,
-       plan_property($$SELECT k, count(*) FROM parallel_groups GROUP BY k$$, 'TessAgg', 'Disk Usage') AS disk;
+SELECT partial_property($$SELECT k, count(*) FROM parallel_groups GROUP BY k$$, 'Early Emits')::int > 0 AS early,
+       partial_property($$SELECT k, count(*) FROM parallel_groups GROUP BY k$$, 'Disk Usage') AS disk;
 -- Groups spread over the input fold nothing before the table fills, a
--- group per row read: sending the table up would hand the Finalize
--- Aggregate every row. The groups go to disk instead, as a serial node's,
--- and out as partials once the input is done.
+-- group per row read: sending the table up would hand the grouping above
+-- every row. The groups go to disk instead, as a serial node's, and out as
+-- partials once the input is done.
 CREATE TABLE parallel_spread AS
 SELECT g % 5000 AS k, g AS v FROM generate_series(1, 300000) AS g;
 ANALYZE parallel_spread;
 SELECT parallel_same($$SELECT md5(string_agg(q::text, ',' ORDER BY q::text)) FROM (SELECT k, count(*), sum(v), min(v), max(v) FROM parallel_spread GROUP BY k) AS q$$);
-SELECT plan_property($$SELECT k, count(*) FROM parallel_spread GROUP BY k$$, 'TessAgg', 'Early Emits') IS NULL AS no_early,
-       plan_property($$SELECT k, count(*) FROM parallel_spread GROUP BY k$$, 'TessAgg', 'Disk Usage')::int > 0 AS spilled;
+SELECT partial_property($$SELECT k, count(*) FROM parallel_spread GROUP BY k$$, 'Early Emits') IS NULL AS no_early,
+       partial_property($$SELECT k, count(*) FROM parallel_spread GROUP BY k$$, 'Disk Usage')::int > 0 AS spilled;
 -- Without aggregates the same: the groups of the tables emptied early, and
 -- those spilled, come to the node's grouping above more than once each;
 -- the workers alone too.
 EXPLAIN (COSTS OFF) SELECT k FROM parallel_groups GROUP BY k;
 SELECT parallel_same($$SELECT md5(string_agg(q::text, ',' ORDER BY q::text)) FROM (SELECT k FROM parallel_groups GROUP BY k) AS q$$);
-SELECT plan_property($$SELECT k FROM parallel_groups GROUP BY k$$, 'TessAgg', 'Early Emits')::int > 0 AS early;
+SELECT partial_property($$SELECT k FROM parallel_groups GROUP BY k$$, 'Early Emits')::int > 0 AS early;
 SET parallel_tuple_cost = 0.1;
 EXPLAIN (COSTS OFF) SELECT DISTINCT k FROM parallel_spread;
 SELECT parallel_same($$SELECT md5(string_agg(q::text, ',' ORDER BY q::text)) FROM (SELECT DISTINCT k FROM parallel_spread) AS q$$);
@@ -328,4 +354,5 @@ RESET tessera.enable;
 DROP TABLE parallel_t;
 DROP FUNCTION parallel_same(text);
 DROP FUNCTION plan_property(text, text, text);
+DROP FUNCTION partial_property(text, text);
 DROP EXTENSION tessera;

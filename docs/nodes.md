@@ -773,7 +773,25 @@ not (see [spill.md](spill.md), "Partial mode"), and the core's
 `Finalize HashAggregate` over the `Gather` merges them with the
 combine functions and applies `HAVING`; its estimate of the groups is
 taken from the core's grouped paths, since the grouped relation's rows
-are set only after the hook.
+are set only after the hook. Next to that stack the hook builds one that
+merges the groups in batches (`Partial Mode: Finalize`): the same
+partial path, `TessGather` over it, and the node's grouping of the
+serial path's keys and aggregates above, marked final in the private
+data, whose plan takes each aggregate's argument as its partial value, a
+column of the gather (the aggregate with `mark_partial_aggref`, found in
+the child's target), and applies `HAVING`; each value merges as its
+kind does, counts and sums added as int8 (`TESS_TABLE_SUM_INT8`, 22003
+past the range), extremes compared, a group's value NULL without a
+non-NULL partial, and the table spills as a serial one's. The core's
+row-wise `Finalize HashAggregate` over many groups cost more than the
+participants saved: `GROUP BY` over a `UNION ALL` of 2.5 M rows and 2 M
+groups, which the planner took for 200 without statistics, 511–531 ms
+against 480 for the core's own parallel plan; with the node's merge 244
+(220 serial). With two workers (pg-win-w2-DwOrT7, pg-wordkey-w2-9O1UqG
+against the build before, pg-win-w2-oPB3NR, pg-wordkey-w2-r2B2Xl):
+`group_many` (100 000 groups) 25.1 ms against 36.9 before and 128.5 for
+the core, `key_ts_group` (43 824) 14.1 against 23.0 and 47.8; groupings
+of up to 1000 groups the same.
 
 Grouping without aggregates, `GROUP BY` without them and `SELECT
 DISTINCT` (whose partial relation, `UPPERREL_PARTIAL_DISTINCT`, the hook

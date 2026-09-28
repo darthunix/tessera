@@ -847,6 +847,69 @@ fn grouped_states_accumulate_through_the_entry_points() -> Result<()> {
             assert_eq!(sums[group], 10 * group as u64);
             assert_eq!(flags[group], 1 << 3);
         }
+        // sum(int8), the merge of partial counts and sums, at byte 8 again
+        // with flag bit 4: values past the int4 range, NULL skipped, and a
+        // sum past the int8 range refused as the transition would.
+        let wide: Vec<u64> = (0..100_i64)
+            .map(|row| ((row % 10) * 3_000_000_000) as u64)
+            .collect();
+        let mut wide_null = [false; 100];
+        wide_null[0] = true;
+        let wide_column = DatumColumn {
+            struct_size: size_of::<DatumColumn>(),
+            values: wide.as_ptr(),
+            isnull: wide_null.as_ptr(),
+            nrows: 100,
+        };
+        let code = tess_table_accumulate(
+            table.ptr(),
+            offsets.as_ptr(),
+            &raw const rows,
+            8,
+            &raw const wide_column,
+            ptr::null(),
+            8,
+            0,
+            4,
+            &raw mut status,
+        );
+        assert_eq!(code, Code::Ok, "{}", status.message());
+        assert_eq!(
+            tess_table_gather(
+                table.ptr(),
+                offsets.as_ptr(),
+                &raw const groups,
+                8,
+                sums.as_mut_ptr(),
+                &raw mut status
+            ),
+            Code::Ok
+        );
+        for group in 0..10 {
+            // Bit 4 was clear: the first value replaced the int4 sum there.
+            assert_eq!(sums[group] as i64, 10 * group as i64 * 3_000_000_000);
+        }
+        let huge = vec![i64::MAX as u64; 100];
+        let huge_column = DatumColumn {
+            struct_size: size_of::<DatumColumn>(),
+            values: huge.as_ptr(),
+            isnull: isnull.as_ptr(),
+            nrows: 100,
+        };
+        let code = tess_table_accumulate(
+            table.ptr(),
+            offsets.as_ptr(),
+            &raw const rows,
+            8,
+            &raw const huge_column,
+            ptr::null(),
+            8,
+            0,
+            4,
+            &raw mut status,
+        );
+        assert_eq!(code, Code::IntegerOutOfRange);
+        assert_eq!(status.sqlstate(), "22003");
         // An unknown operation is refused.
         let code = tess_table_accumulate(
             table.ptr(),

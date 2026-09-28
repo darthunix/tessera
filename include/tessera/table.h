@@ -510,7 +510,13 @@ typedef enum TessTableAccumulate
 	TESS_TABLE_MIN_INT4 = 4,
 	TESS_TABLE_MAX_INT4 = 5,
 	TESS_TABLE_MIN_INT8 = 6,
-	TESS_TABLE_MAX_INT8 = 7
+	TESS_TABLE_MAX_INT8 = 7,
+	/*
+	 * An int8 sum of int8 values, past its range 22003: the partial counts
+	 * and sums of a parallel grouping, merged. A kernels build older than
+	 * the operation refuses it as unknown (XX000).
+	 */
+	TESS_TABLE_SUM_INT8 = 8
 } TessTableAccumulate;
 
 /*

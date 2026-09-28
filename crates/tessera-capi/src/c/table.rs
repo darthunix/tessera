@@ -1414,6 +1414,7 @@ const ACCUMULATE_MIN_INT4: c_uint = 4;
 const ACCUMULATE_MAX_INT4: c_uint = 5;
 const ACCUMULATE_MIN_INT8: c_uint = 6;
 const ACCUMULATE_MAX_INT8: c_uint = 7;
+const ACCUMULATE_SUM_INT8: c_uint = 8;
 
 /// `tess_table_accumulate`: fold each selected row into the aggregate
 /// state of its record's payload.
@@ -1464,12 +1465,12 @@ pub unsafe extern "C" fn tess_table_accumulate(
                     };
                     table.fold(offsets, &rows, &column, fold, slot)
                 }
-                ACCUMULATE_MIN_INT8 | ACCUMULATE_MAX_INT8 => {
+                ACCUMULATE_MIN_INT8 | ACCUMULATE_MAX_INT8 | ACCUMULATE_SUM_INT8 => {
                     let column = reader::<i64>(column, prepared)?;
-                    let fold = if op == ACCUMULATE_MIN_INT8 {
-                        Fold::Min
-                    } else {
-                        Fold::Max
+                    let fold = match op {
+                        ACCUMULATE_MIN_INT8 => Fold::Min,
+                        ACCUMULATE_MAX_INT8 => Fold::Max,
+                        _ => Fold::Sum,
                     };
                     table.fold(offsets, &rows, &column, fold, slot)
                 }

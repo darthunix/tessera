@@ -68,10 +68,12 @@
 /*
  * A path's flags in its private data: the node is the query's grouping,
  * whose plan applies HAVING (a DISTINCT or a set operation above one must
- * not); the node groups for a Gather, its table emptied early.
+ * not); the node groups for a Gather, its table emptied early; the node
+ * groups above one, merging the participants' partial values.
  */
 #define AGG_PATH_HAVING 0x01
 #define AGG_PATH_PARTIAL 0x02
+#define AGG_PATH_FINALIZE 0x04
 
 /* The counters every participant of a parallel plan shares. */
 enum
@@ -337,6 +339,11 @@ typedef struct TessAggState
 	bool		done;
 	/* Under a Gather: the values as they are, for the Finalize Aggregate. */
 	bool		partial;
+	/*
+	 * Above a gather: each aggregate's argument is the participants'
+	 * partial values, which merge (counts and sums add as int8).
+	 */
+	bool		finalize;
 	/*
 	 * An aggregate has DISTINCT: its pairs of group and argument live in a
 	 * table of their own, which does not spill, so neither do the groups.
@@ -688,6 +695,30 @@ unavailable(Node *node, List *exprs)
 	return expression_tree_walker(node, unavailable, exprs);
 }
 
+/*
+ * Above a gather: whether the child's target gives the keys and each
+ * aggregate's partial value, which the node merges.
+ */
+static bool
+partials_available(const List *tlist, const Path *child)
+{
+	foreach_ptr(TargetEntry, entry, tlist)
+	{
+		Node	   *expr = (Node *) entry->expr;
+
+		if (IsA(expr, Aggref))
+		{
+			Aggref	   *partial = copyObject((Aggref *) expr);
+
+			mark_partial_aggref(partial, AGGSPLIT_INITIAL_SERIAL);
+			expr = (Node *) partial;
+		}
+		if (!list_member(child->pathtarget->exprs, expr))
+			return false;
+	}
+	return true;
+}
+
 /* Whether the child's target gives what the keys and the arguments read. */
 static bool
 arguments_available(const List *tlist, const Path *child)
@@ -935,7 +966,9 @@ make_agg_path(PlannerInfo *root, const AggPath *agg, List *tlist, int nkeys, int
 	while (IsA(child, SortPath) || IsA(child, IncrementalSortPath))
 		child = ((SortPath *) child)->subpath;
 	child = tess_batch_input_path(root, child);
-	if (child == NULL || !arguments_available(tlist, child))
+	if (child == NULL ||
+		!((flags & AGG_PATH_FINALIZE) ? partials_available(tlist, child) :
+		  arguments_available(tlist, child)))
 		return NULL;
 	template = agg->path;
 	/* Grouping costs the node's own; a plain aggregate a share of the core's. */
@@ -1060,14 +1093,17 @@ create_key_stack_paths(PlannerInfo *root, RelOptInfo *partial_rel, RelOptInfo *o
  * partial aggregates as its targets, the core's Gather over it and the
  * core's Finalize Aggregate over that, which combines the participants'
  * values and applies HAVING. With GROUP BY each participant keeps a table
- * of its own groups and the core's Finalize HashAggregate merges them.
- * The path is parallel-aware for the counters the node shares; the child
- * divides the work. Without aggregates the node groups above the gather
- * too (create_key_stack_paths).
+ * of its own groups and the core's Finalize HashAggregate merges them, or
+ * the node itself over TessGather, in batches: its grouping of final_tlist
+ * (the serial path's keys and aggregates), whose arguments are the
+ * aggregates' partial values. The path is parallel-aware for the counters
+ * the node shares; the child divides the work. Without aggregates the node
+ * groups above the gather alone (create_key_stack_paths).
  */
 static void
 create_partial_paths(PlannerInfo *root, RelOptInfo *grouped_rel,
-					 GroupPathExtraData *extra, List *keys, double groups)
+					 GroupPathExtraData *extra, List *keys, List *final_tlist,
+					 double groups)
 {
 	RelOptInfo *partial_rel = partial_upper_rel(root, UPPERREL_PARTIAL_GROUP_AGG, grouped_rel);
 	List	   *tlist = keys != NIL ? add_to_flat_tlist(NIL, keys) : NIL;
@@ -1114,6 +1150,23 @@ create_partial_paths(PlannerInfo *root, RelOptInfo *grouped_rel,
 								&extra->agg_final_costs,
 								keys != NIL ? groups : 1.0);
 		add_path(grouped_rel, &final->path);
+		if (keys != NIL)
+		{
+			Path	   *gathered = tess_gather_path(root, partial_rel, &partial->path);
+			CustomPath *path;
+
+			if (gathered == NULL)
+				continue;
+			final = create_agg_path(root, grouped_rel, gathered, grouped_rel->reltarget,
+									AGG_HASHED, AGGSPLIT_FINAL_DESERIAL,
+									root->processed_groupClause,
+									(List *) extra->havingQual,
+									&extra->agg_final_costs, groups);
+			path = make_agg_path(root, final, final_tlist, list_length(keys),
+								 AGG_PATH_HAVING | AGG_PATH_FINALIZE);
+			if (path != NULL)
+				add_path(grouped_rel, &path->path);
+		}
 	}
 }
 
@@ -1456,7 +1509,7 @@ create_upper_paths(PlannerInfo *root, UpperRelationKind stage,
 	 */
 	foreach_ptr(Path, path, output_rel->pathlist)
 		groups = Max(groups, path->rows);
-	create_partial_paths(root, output_rel, (GroupPathExtraData *) extra, keys,
+	create_partial_paths(root, output_rel, (GroupPathExtraData *) extra, keys, tlist,
 						 groups);
 }
 
@@ -1624,6 +1677,16 @@ agg_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 													  &child));
 			continue;
 		}
+		/* Above a gather: the aggregate's partial value, a column of the child. */
+		if (flags & AGG_PATH_FINALIZE)
+		{
+			Aggref	   *partial = copyObject((Aggref *) entry->expr);
+
+			mark_partial_aggref(partial, AGGSPLIT_INITIAL_SERIAL);
+			arguments = lappend(arguments, resolve_argument((Node *) partial, &child));
+			more = lappend(more, NIL);
+			continue;
+		}
 		argument = aggregate_argument((Aggref *) entry->expr);
 		arguments = lappend(arguments, argument == NULL ?
 							(Node *) makeNullConst(INT4OID, -1, InvalidOid) :
@@ -1653,6 +1716,7 @@ agg_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 							 list_copy_head(list_copy_tail(path_data, 4), nkeys));
 	tess_plan_write_int(writer, "setop", setop);
 	tess_plan_write_int(writer, "partial", (flags & AGG_PATH_PARTIAL) != 0);
+	tess_plan_write_int(writer, "finalize", (flags & AGG_PATH_FINALIZE) != 0);
 	config.methods = &tess_agg_scan_methods;
 	config.layout_policy = TESS_LAYOUT_DENSE;
 	config.qual = (flags & AGG_PATH_HAVING) ? (List *) root->parse->havingQual : NIL;
@@ -1986,7 +2050,10 @@ agg_begin(CustomScanState *css, EState *estate, int eflags)
 	state->groups_estimate = (uint64) Max(groups, 0);
 	state->setop = tess_plan_read_int(reader, "setop");
 	state->partial = tess_plan_read_int(reader, "partial") != 0;
+	state->finalize = tess_plan_read_int(reader, "finalize") != 0;
 	tess_plan_reader_finish(reader);
+	if (state->finalize && (state->partial || state->setop >= 0 || keys == NIL))
+		elog(ERROR, "TessAgg received a foreign plan");
 	if ((state->setop >= 0) != (info.nchildren == 2) ||
 		(state->setop >= 0 && (list_length(arguments) != 2 || list_length(keys) == 0)))
 		elog(ERROR, "TessAgg received a foreign plan");
@@ -2080,14 +2147,18 @@ agg_begin(CustomScanState *css, EState *estate, int eflags)
 															  ALLOCSET_DEFAULT_SIZES);
 			}
 		}
+		/* A partial value is the transition type's: an extreme's, int8 for the rest. */
+		if (state->finalize && (value->kind == AGG_GENERIC || agg->aggdistinct != NIL))
+			elog(ERROR, "TessAgg received a foreign plan");
 		switch (value->kind)
 		{
 			case AGG_COUNT:
-				value->accumulate = agg->args == NIL ? TESS_TABLE_COUNT_ROWS :
-					TESS_TABLE_COUNT;
+				value->accumulate = state->finalize ? TESS_TABLE_SUM_INT8 :
+					agg->args == NIL ? TESS_TABLE_COUNT_ROWS : TESS_TABLE_COUNT;
 				break;
 			case AGG_SUM:
-				value->accumulate = TESS_TABLE_SUM_INT4;
+				value->accumulate = state->finalize ? TESS_TABLE_SUM_INT8 :
+					TESS_TABLE_SUM_INT4;
 				break;
 			case AGG_MIN:
 				value->accumulate = value->wide ? TESS_TABLE_MIN_INT8 :
@@ -2100,7 +2171,7 @@ agg_begin(CustomScanState *css, EState *estate, int eflags)
 			case AGG_GENERIC:
 				break;
 		}
-		if (agg->args != NIL)
+		if (agg->args != NIL || state->finalize)
 		{
 			Node	   *argument = list_nth(arguments, index - 1);
 			List	   *vars = pull_var_clause(argument, 0);
@@ -5269,8 +5340,8 @@ agg_explain(CustomScanState *css, List *ancestors, ExplainState *es)
 								state->setop == SETOPCMD_INTERSECT_ALL ? "Intersect All" :
 								state->setop == SETOPCMD_EXCEPT ? "Except" : "Except All", es);
 	}
-	if (state->partial)
-		ExplainPropertyText("Partial Mode", "Partial", es);
+	if (state->partial || state->finalize)
+		ExplainPropertyText("Partial Mode", state->partial ? "Partial" : "Finalize", es);
 	if (!es->analyze)
 		return;
 	if (state->stats != NULL)
