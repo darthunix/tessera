@@ -208,6 +208,24 @@ typedef struct TessPlanInfo
 /* The names and the layout's map are allocated for the caller. */
 extern void tess_plan_get_info(const CustomScan *scan, TessPlanInfo *result);
 
+/*
+ * A set operation's output columns are Vars of no relation (varno 0),
+ * which a custom scan's target lists cannot carry: setrefs offsets them
+ * as a relation's, and EXPLAIN cannot name them. The core's Append shows
+ * its first child's targets in their place; a batch node over a set
+ * operation's rows does the same: node, or a copy in which such a Var of
+ * column N is the expression of target N of the first plan down from
+ * child (through the first child of each) whose targets are not the set
+ * operation's columns. Nodes above read columns by position, as the
+ * core's Sort and Limit above a set operation do. tess_plan_create
+ * applies it to every list of the plan; a node that matches expressions
+ * to its child's targets before that applies it first.
+ */
+extern Node *tess_plan_setop_columns(Node *node, const Plan *child);
+
+/* Whether node holds a set operation's output column (a Var of varno 0). */
+extern bool tess_plan_has_setop_columns(Node *node);
+
 /* The layout of a plan built here; the map is allocated for the caller. */
 extern void tess_plan_get_layout(const Plan *plan, TessLayout *result);
 

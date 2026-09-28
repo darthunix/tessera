@@ -212,6 +212,43 @@ RESET parallel_setup_cost;
 RESET parallel_tuple_cost;
 RESET min_parallel_table_scan_size;
 
+-- UNION without ALL: TessAgg groups the branches' rows by every column
+-- over TessAppend, in place of the core's HashAggregate over its Append.
+SET max_parallel_workers_per_gather = 0;
+EXPLAIN (COSTS OFF)
+SELECT a FROM union_a WHERE a > 100 UNION SELECT a FROM union_b WHERE a < 600;
+SELECT union_same($$SELECT a FROM union_a WHERE a > 100 UNION SELECT a FROM union_b WHERE a < 600$$);
+-- NULL is a value of its own; duplicates within a branch and across them.
+SELECT union_same($$SELECT a % 50 AS x FROM union_a UNION SELECT a % 70 FROM union_b$$);
+SELECT union_same($$SELECT a, b FROM union_a WHERE a < 300 UNION SELECT a, b / 10 FROM union_b$$);
+SELECT union_same($$SELECT b FROM union_a UNION SELECT b FROM union_b UNION SELECT b FROM union_empty$$);
+-- The plans show the first branch's columns, as the core's Append does.
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT a, b FROM union_a WHERE a < 300 UNION SELECT a, b / 10 FROM union_b WHERE a > 0;
+-- A sort and a limit above.
+EXPLAIN (COSTS OFF)
+SELECT a FROM union_a WHERE a > 100 UNION SELECT a FROM union_b WHERE a < 600 ORDER BY 1 DESC LIMIT 3;
+SELECT a FROM union_a WHERE a > 100 UNION SELECT a FROM union_b WHERE a < 600 ORDER BY 1 DESC LIMIT 3;
+-- In a subquery, and with more groups than work_mem holds.
+SELECT union_same($$SELECT count(*), sum(x) FROM (SELECT a AS x FROM union_a UNION SELECT a FROM union_b) AS s$$);
+SET work_mem = '64kB';
+SELECT union_same($$SELECT count(*), sum(x) FROM (SELECT a * 1000 + b AS x FROM union_a
+                   UNION SELECT a * 1000 + b FROM union_b UNION SELECT generate_series(1, 20000)) AS s$$);
+RESET work_mem;
+-- A UNION within another set operation, and text columns: the core's.
+EXPLAIN (COSTS OFF)
+SELECT a FROM union_a UNION SELECT a FROM union_b UNION ALL SELECT a FROM union_empty;
+SELECT union_same($$SELECT a FROM union_a UNION SELECT a FROM union_b UNION ALL SELECT a FROM union_a WHERE a < 3$$);
+SELECT union_same($$SELECT a FROM union_a INTERSECT SELECT a FROM union_b$$);
+SELECT union_same($$SELECT a FROM union_a EXCEPT SELECT a FROM union_b$$);
+EXPLAIN (COSTS OFF) SELECT t FROM union_a UNION SELECT t FROM union_b;
+SELECT union_same($$SELECT t FROM union_a UNION SELECT t FROM union_b$$);
+-- UNION ALL the planner does not make a relation of, sorted.
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT a FROM union_a WHERE a > 990 UNION ALL SELECT b FROM union_b WHERE b > 69000 ORDER BY 1 LIMIT 4;
+SELECT a FROM union_a WHERE a > 990 UNION ALL SELECT b FROM union_b WHERE b > 69000 ORDER BY 1 LIMIT 4;
+RESET max_parallel_workers_per_gather;
+
 DROP TABLE union_part, union_parent, union_child, union_a, union_b, union_empty;
 DROP FUNCTION union_same(text);
 DROP EXTENSION tessera;

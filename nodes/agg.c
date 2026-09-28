@@ -652,6 +652,66 @@ create_distinct_paths(PlannerInfo *root, RelOptInfo *input_rel,
 	}
 }
 
+/* The relations of a set operation's leaves, the tree's whole in the top one. */
+static Relids
+setop_leaves(Node *node, Relids leaves)
+{
+	if (IsA(node, RangeTblRef))
+		return bms_add_member(leaves, ((RangeTblRef *) node)->rtindex);
+	leaves = setop_leaves(((SetOperationStmt *) node)->larg, leaves);
+	return setop_leaves(((SetOperationStmt *) node)->rarg, leaves);
+}
+
+/*
+ * UNION without ALL is grouping of the branches' rows by every column: the
+ * node's path next to each of the core's hashed aggregate paths over the
+ * Append of the branches, the node's Append below it. Only the set
+ * operation of the whole query: above it the core puts only a sort and a
+ * limit, which read columns by position, where the node's plan shows its
+ * first branch's targets in place of the set operation's columns
+ * (tess_plan_setop_columns); a set operation within another could have a
+ * projection above that looks for the set operation's own.
+ */
+static void
+create_setop_paths(PlannerInfo *root, RelOptInfo *output_rel)
+{
+	SetOperationStmt *top = (SetOperationStmt *) root->parse->setOperations;
+	List	   *keys;
+	List	   *tlist;
+
+	if (top == NULL || IS_DUMMY_REL(output_rel) ||
+		!bms_equal(output_rel->relids, setop_leaves((Node *) top, NULL)))
+		return;
+	/* add_path changes the list: the candidates are taken first. */
+	foreach_ptr(AggPath, agg, aggregate_templates(output_rel->pathlist,
+												  AGG_HASHED, AGGSPLIT_SIMPLE))
+	{
+		CustomPath *path;
+
+		keys = agg->path.pathtarget->exprs;
+		if (!IsA(agg->subpath, AppendPath) || keys == NIL ||
+			list_length(keys) > TESS_TABLE_MAX_KEYS ||
+			list_length(agg->groupClause) != list_length(keys))
+			continue;
+		foreach_ptr(Node, key, keys)
+		{
+			Oid			type = exprType(key);
+
+			if ((type != INT4OID && type != INT8OID) || !tess_expr_supports_value(key, 0))
+			{
+				keys = NIL;
+				break;
+			}
+		}
+		if (keys == NIL)
+			continue;
+		tlist = add_to_flat_tlist(NIL, keys);
+		path = make_agg_path(root, agg, tlist, list_length(keys));
+		if (path != NULL)
+			add_path(output_rel, &path->path);
+	}
+}
+
 /*
  * The node's path in place of each of the core's plain aggregate paths
  * whose input can be read in batches, and the parallel stack in place of
@@ -675,6 +735,11 @@ create_upper_paths(PlannerInfo *root, UpperRelationKind stage,
 	if (stage == UPPERREL_DISTINCT)
 	{
 		create_distinct_paths(root, input_rel, output_rel);
+		return;
+	}
+	if (stage == UPPERREL_SETOP)
+	{
+		create_setop_paths(root, output_rel);
 		return;
 	}
 	if (stage != UPPERREL_GROUP_AGG ||
@@ -799,6 +864,9 @@ agg_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 	tess_path_get_info(best_path, &info);
 	if (!tess_plan_child(best_path, custom_plans, 0, &child))
 		elog(ERROR, "TessAgg expected a batch child");
+	/* Over a set operation's rows: its columns are the child's targets. */
+	tlist = (List *) tess_plan_setop_columns((Node *) tlist, child.plan);
+	info.expressions = (List *) tess_plan_setop_columns((Node *) info.expressions, child.plan);
 	path_data = (List *) info.node_data;
 	nkeys = linitial_int(path_data);
 	foreach_ptr(TargetEntry, entry, info.expressions)

@@ -448,6 +448,9 @@ sort_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 	tess_path_get_info(best_path, &info);
 	if (!tess_plan_child(best_path, custom_plans, 0, &child))
 		elog(ERROR, "TessSort expected a batch child");
+	/* Over a set operation's rows: its columns are the child's targets. */
+	tlist = (List *) tess_plan_setop_columns((Node *) tlist, child.plan);
+	info.expressions = (List *) tess_plan_setop_columns((Node *) info.expressions, child.plan);
 	data = (List *) info.node_data;
 	foreach_node(TargetEntry, entry, tlist)
 	{

@@ -151,13 +151,30 @@ packs_rows(Path *child)
 }
 
 /*
+ * Whether rel is a set operation's, whose targets are its output columns:
+ * Vars of no relation.
+ */
+static bool
+setop_relation(RelOptInfo *rel, PathTarget *target)
+{
+	if (rel->reloptkind != RELOPT_UPPER_REL)
+		return false;
+	foreach_ptr(Node, expr, target->exprs)
+	{
+		if (!IsA(expr, Var) || ((Var *) expr)->varno != 0)
+			return false;
+	}
+	return true;
+}
+
+/*
  * The node's path in place of an Append of a base relation's children: a
  * partitioned table, an inheritance tree, a UNION ALL the planner made a
- * relation of; serial, partial, or parallel-aware as a Parallel Append,
- * whose children before first_partial_path are not partial. When every
- * child has a batch path and one of them at least does more than pack
- * rows; NULL otherwise. The Append of a set operation's own relation,
- * whose targets are Vars of no relation, stays the core's.
+ * relation of; or of a set operation's children, the branches of a UNION
+ * the planner did not make a relation of. Serial, partial, or
+ * parallel-aware as a Parallel Append, whose children before
+ * first_partial_path are not partial. When every child has a batch path
+ * and one of them at least does more than pack rows; NULL otherwise.
  */
 static CustomPath *
 append_wrap(PlannerInfo *root, Path *path)
@@ -171,9 +188,11 @@ append_wrap(PlannerInfo *root, Path *path)
 	Cost		saved;
 
 	if (!*tess_runtime_api()->settings->enable || !IsA(path, AppendPath) ||
-		rel == NULL || !IS_SIMPLE_REL(rel) || root->parse->commandType != CMD_SELECT ||
+		rel == NULL || path->pathtarget == NULL ||
+		!(IS_SIMPLE_REL(rel) || setop_relation(rel, path->pathtarget)) ||
+		root->parse->commandType != CMD_SELECT ||
 		root->parse->rowMarks != NIL || path->param_info != NULL ||
-		list_length(append->subpaths) < 2 || path->pathtarget == NULL ||
+		list_length(append->subpaths) < 2 ||
 		list_length(path->pathtarget->exprs) > MaxTupleAttributeNumber ||
 		prunes_at_execution(rel))
 		return NULL;
@@ -203,7 +222,9 @@ append_wrap(PlannerInfo *root, Path *path)
 
 /*
  * A column per target. The clauses are the parent relation's, which the
- * core translated to every child: the children evaluate them.
+ * core translated to every child: the children evaluate them. A set
+ * operation's columns become its first child's targets, as the core's
+ * Append shows them (tess_plan_create).
  */
 static Plan *
 append_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path, List *tlist,

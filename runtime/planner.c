@@ -1,6 +1,7 @@
 #include "postgres.h"
 
 #include "nodes/makefuncs.h"
+#include "nodes/nodeFuncs.h"
 #include "nodes/value.h"
 #include "optimizer/tlist.h"
 
@@ -221,6 +222,71 @@ tess_batch_input_path(PlannerInfo *root, Path *path)
 	return &wrapped->path;
 }
 
+static Node *
+setop_columns_mutator(Node *node, void *context)
+{
+	const List *targets = (const List *) context;
+
+	if (node == NULL)
+		return NULL;
+	if (IsA(node, Var) && ((Var *) node)->varno == 0 && ((Var *) node)->varlevelsup == 0)
+	{
+		Var		   *var = (Var *) node;
+
+		if (var->varattno < 1 || var->varattno > list_length(targets))
+			elog(ERROR, "Tessera found no child target for column %d of a set operation",
+				 var->varattno);
+		return (Node *) copyObject(((TargetEntry *) list_nth(targets, var->varattno - 1))->expr);
+	}
+	return expression_tree_mutator(node, setop_columns_mutator, context);
+}
+
+static bool
+setop_columns_walker(Node *node, void *context)
+{
+	if (node == NULL)
+		return false;
+	if (IsA(node, Var))
+		return ((Var *) node)->varno == 0 && ((Var *) node)->varlevelsup == 0;
+	return expression_tree_walker(node, setop_columns_walker, context);
+}
+
+bool
+tess_plan_has_setop_columns(Node *node)
+{
+	return setop_columns_walker(node, NULL);
+}
+
+/* The first plan's first child: the one whose targets the plan's show. */
+static const Plan *
+first_child(const Plan *plan)
+{
+	if (IsA(plan, Append))
+		return ((Append *) plan)->appendplans != NIL ?
+			linitial(((Append *) plan)->appendplans) : NULL;
+	if (IsA(plan, MergeAppend))
+		return ((MergeAppend *) plan)->mergeplans != NIL ?
+			linitial(((MergeAppend *) plan)->mergeplans) : NULL;
+	if (IsA(plan, CustomScan))
+		return ((CustomScan *) plan)->custom_plans != NIL ?
+			linitial(((CustomScan *) plan)->custom_plans) : NULL;
+	return plan->lefttree;
+}
+
+Node *
+tess_plan_setop_columns(Node *node, const Plan *child)
+{
+	if (child == NULL || !tess_plan_has_setop_columns(node))
+		return node;
+	while (tess_plan_has_setop_columns((Node *) child->targetlist))
+	{
+		child = first_child(child);
+		if (child == NULL)
+			elog(ERROR, "Tessera found no plan with targets for a set operation's columns");
+	}
+	return setop_columns_mutator(node, (void *) child->targetlist);
+}
+
 static void
 check_layout(const TessLayout *layout)
 {
@@ -317,10 +383,24 @@ tess_plan_create(CustomPath *path, List *targetlist, List *child_plans,
 	List	   *child_names = NIL;
 	List	   *target_columns = NIL;
 	List	   *scan_targetlist;
+	const List *qual = config->qual;
+	const List *expressions = config->expressions;
+	const List *given_scan_targetlist = config->scan_targetlist;
 
 	check_plan_config(config);
 	check_children(path, child_plans);
 	tess_path_get_info(path, &path_info);
+	/* Over a set operation's rows: its columns are the first child's targets. */
+	if (child_plans != NIL)
+	{
+		const Plan *first = linitial(child_plans);
+
+		targetlist = (List *) tess_plan_setop_columns((Node *) targetlist, first);
+		qual = (List *) tess_plan_setop_columns((Node *) config->qual, first);
+		expressions = (List *) tess_plan_setop_columns((Node *) config->expressions, first);
+		given_scan_targetlist = (List *) tess_plan_setop_columns((Node *) config->scan_targetlist,
+																	first);
+	}
 	foreach_ptr(Path, child, path->custom_paths)
 	{
 		const TessNode *node = tess_path_node(child);
@@ -358,8 +438,8 @@ tess_plan_create(CustomPath *path, List *targetlist, List *child_plans,
 			elog(ERROR, "Tessera plan can use the relation as its scan tuple only when projected over a relation");
 		scan_targetlist = NIL;
 	}
-	else if (config->scan_targetlist != NIL)
-		scan_targetlist = copyObject(config->scan_targetlist);
+	else if (given_scan_targetlist != NIL)
+		scan_targetlist = copyObject(given_scan_targetlist);
 	else if (config->layout_policy == TESS_LAYOUT_PRESERVE_CHILD)
 		scan_targetlist = copyObject(((Plan *)
 			list_nth(child_plans, config->layout_child))->targetlist);
@@ -385,9 +465,9 @@ tess_plan_create(CustomPath *path, List *targetlist, List *child_plans,
 	scan->flags = path->flags;
 	scan->scan.scanrelid = config->scanrelid;
 	scan->scan.plan.targetlist = copyObject(targetlist);
-	scan->scan.plan.qual = copyObject(config->qual);
+	scan->scan.plan.qual = copyObject(qual);
 	scan->custom_plans = child_plans;
-	scan->custom_exprs = copyObject(config->expressions);
+	scan->custom_exprs = copyObject(expressions);
 	scan->custom_scan_tlist = scan_targetlist;
 	writer = tess_plan_writer_create(PLAN_DATA_KIND, DATA_VERSION);
 	tess_plan_write_string(writer, "node", path_info.node->name);
