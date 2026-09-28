@@ -268,6 +268,31 @@ heap_scan_rows(PlannerInfo *root, Path *path)
 }
 
 /*
+ * Whether every index of the bitmap is BRIN, whose bitmap names whole
+ * pages (lossy), every row of which the scan reads.
+ */
+static bool
+bitmap_only_brin(Path *bitmapqual)
+{
+	if (IsA(bitmapqual, BitmapAndPath))
+	{
+		foreach_ptr(Path, child, ((BitmapAndPath *) bitmapqual)->bitmapquals)
+			if (!bitmap_only_brin(child))
+				return false;
+		return true;
+	}
+	if (IsA(bitmapqual, BitmapOrPath))
+	{
+		foreach_ptr(Path, child, ((BitmapOrPath *) bitmapqual)->bitmapquals)
+			if (!bitmap_only_brin(child))
+				return false;
+		return true;
+	}
+	return IsA(bitmapqual, IndexPath) &&
+		((IndexPath *) bitmapqual)->indexinfo->relam == BRIN_AM_OID;
+}
+
+/*
  * The node's scan of the pages of a bitmap in place of the core's bitmap
  * heap scan, with the target given (the relation's columns and the
  * clauses'): the core's path, which the caller copied (add_path frees a
@@ -295,6 +320,13 @@ tess_heap_bitmap_path(PlannerInfo *root, BitmapHeapPath *bitmap, PathTarget *tar
 	if (!plain_heap_relation(root, rel, target))
 		return NULL;
 	pages = compute_bitmap_pages(root, rel, bitmap->bitmapqual, 1.0, NULL, &tuples);
+	/*
+	 * A BRIN bitmap's pages give all their rows, which the core's estimate
+	 * of the tuples fetched, the index's selectivity, leaves out: a week of
+	 * 14 000 rows over pages of 138 each looked like fewer than two a page.
+	 */
+	if (bitmap_only_brin(bitmap->bitmapqual) && rel->pages > 0)
+		tuples = pages * rel->tuples / rel->pages;
 	if (pages <= 0 || tuples / pages < tess_bitmap_page_rows)
 		return NULL;
 	template.pathtarget = target;

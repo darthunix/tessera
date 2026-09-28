@@ -2,9 +2,9 @@
 -- multiplier): a bitmap of the scattered k, whose pages hold few of the
 -- rows each at 1 % and more at 5 and 15 %, BitmapAnd and BitmapOr of k and
 -- w, and rows of a bitmap returned to a limit; index scans of the ordered
--- id. The core reads the pages of the bitmap, or the index, in both modes;
--- with Tessera the rows come in batches, a filter above rechecking every
--- clause. A ratio below one is the win.
+-- id; BRIN of the day d. The core reads the pages of the bitmap, or the
+-- index, in both modes; with Tessera the rows come in batches, a filter
+-- above rechecking every clause. A ratio below one is the win.
 \set ON_ERROR_STOP on
 \if :{?repetitions}
 \else
@@ -102,6 +102,18 @@ SELECT pg_temp.measure_pair('ix_order',
            :rows / 4, :rows / 4 + :rows * 3 / 100, :rows), :repetitions);
 SELECT pg_temp.measure_pair('ix_filter',
     format('SELECT count(*), sum(k) FROM bench_idx WHERE id < %s AND w < 50', :rows / 20), :repetitions);
+-- BRIN of the day, in the order of the rows: its bitmap names whole pages,
+-- every row of which the filter rechecks; a week, a month and five months
+-- of days aggregated, and 20 days returned to a limit's offset.
+SELECT pg_temp.measure_pair('brin_week',
+    $q$SELECT count(*), sum(w) FROM bench_idx WHERE d >= '2000-05-01' AND d < '2000-05-08'$q$, :repetitions);
+SELECT pg_temp.measure_pair('brin_month',
+    $q$SELECT count(*), sum(w) FROM bench_idx WHERE d BETWEEN '2000-02-01' AND '2000-03-01'$q$, :repetitions);
+SELECT pg_temp.measure_pair('brin_months',
+    $q$SELECT count(*), sum(w) FROM bench_idx WHERE d BETWEEN '2000-02-01' AND '2000-06-30'$q$, :repetitions);
+SELECT pg_temp.measure_pair('brin_rows',
+    format($q$SELECT id, t FROM bench_idx WHERE d BETWEEN '2000-05-01' AND '2000-05-20' OFFSET %s$q$, :rows),
+    :repetitions);
 
 \copy timings TO 'timings.csv' CSV HEADER
 
@@ -121,11 +133,13 @@ ORDER BY test, mode DESC;
 SET tessera.enable = on;
 SELECT format('EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE on_%s', name)
 FROM unnest(ARRAY['bm_sparse', 'bm_mid', 'bm_dense', 'bm_both', 'bm_either', 'bm_rows',
-                   'ix_range', 'ix_short', 'ix_rows', 'ix_order', 'ix_filter']) AS name \gexec
+                   'ix_range', 'ix_short', 'ix_rows', 'ix_order', 'ix_filter',
+                   'brin_week', 'brin_month', 'brin_months', 'brin_rows']) AS name \gexec
 SET tessera.enable = off;
 SELECT format('EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE off_%s', name)
 FROM unnest(ARRAY['bm_sparse', 'bm_mid', 'bm_dense', 'bm_both', 'bm_either', 'bm_rows',
-                   'ix_range', 'ix_short', 'ix_rows', 'ix_order', 'ix_filter']) AS name \gexec
+                   'ix_range', 'ix_short', 'ix_rows', 'ix_order', 'ix_filter',
+                   'brin_week', 'brin_month', 'brin_months', 'brin_rows']) AS name \gexec
 \o
 RESET work_mem;
 DEALLOCATE ALL;

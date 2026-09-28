@@ -55,6 +55,21 @@ SELECT types_same($$SELECT count(*), sum(types_d.w) FROM types_f JOIN types_d ON
 SELECT types_same($$SELECT count(*) FROM types_f JOIN types_d ON types_f.s = types_d.w$$);
 SELECT types_same($$SELECT count(*) FROM types_f JOIN types_d ON types_f.s = types_d.w::bigint$$);
 SELECT types_same($$SELECT types_f.d, types_d.w FROM types_f LEFT JOIN types_d ON types_f.d = types_d.d WHERE types_f.v < 30$$);
+-- Comparisons of dates, timestamps and timestamps with time zone run in
+-- batches as those of their integers: infinities are the integers'
+-- extremes, NULL is no row.
+EXPLAIN (COSTS OFF) SELECT count(*) FROM types_f WHERE d < '2000-01-05' AND ts >= '2000-01-01 03:00' AND tz <> '2000-01-01 00:05+00';
+SELECT types_same($$SELECT count(*), sum(v) FROM types_f WHERE d < '2000-01-05'$$);
+SELECT types_same($$SELECT count(*), sum(v) FROM types_f WHERE d >= '-infinity' AND d <= 'infinity' AND d <> '1999-12-25'$$);
+SELECT types_same($$SELECT count(*), sum(v) FROM types_f WHERE ts BETWEEN '2000-01-01 02:00' AND '2000-01-01 12:30' OR ts > 'infinity'$$);
+SELECT types_same($$SELECT count(*), sum(v) FROM types_f WHERE tz > '2000-01-01 00:10+00' AND tz <= 'infinity' OR tz = '-infinity'$$);
+SELECT types_same($$SELECT count(*), sum(v) FROM types_f WHERE ts > '2000-01-01 12:00' OR ts = '1999-12-31 20:00' OR tz < '2000-01-01 00:03+00'$$);
+SELECT types_same($$SELECT count(*), sum(v) FROM types_f WHERE ts < '2000-01-01 03:00' AND ts <> '1999-12-31 22:00' AND tz >= '2000-01-01 00:02+00' AND tz <> '2000-01-01 00:07+00'$$);
+CREATE TABLE types_inf AS SELECT d, ts, tz FROM types_d
+UNION ALL SELECT 'infinity', 'infinity', '-infinity' UNION ALL SELECT '-infinity', '-infinity', 'infinity';
+SELECT types_same($$SELECT d, ts, tz FROM types_inf WHERE d > '2000-01-10' AND ts > '2000-01-01 05:00'$$);
+SELECT types_same($$SELECT d FROM types_inf WHERE d < '1999-12-15' OR tz > '2000-01-01 00:30+00'$$);
+DROP TABLE types_inf;
 -- A date against a timestamp compares other than bit for bit: the core's.
 EXPLAIN (COSTS OFF) SELECT count(*) FROM types_f JOIN types_d ON types_f.d = types_d.ts;
 SELECT types_same($$SELECT count(*) FROM types_f JOIN types_d ON types_f.d = types_d.ts$$);

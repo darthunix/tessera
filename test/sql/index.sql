@@ -172,6 +172,37 @@ RESET enable_material;
 DROP TABLE index_o;
 RESET enable_bitmapscan;
 
+-- BRIN: its bitmap names whole ranges of pages (lossy), every row of which
+-- the filter rechecks in batches, dates too. minmax, minmax-multi and bloom
+-- classes; NULL days and IS NULL; rows added after the index's summary.
+CREATE TABLE index_b AS
+SELECT g AS id, CASE WHEN g % 50 = 0 THEN NULL ELSE date '2020-01-01' + g / 100 END AS d,
+       timestamp '2020-01-01' + g * interval '1 minute' AS ts, g % 7 AS w
+FROM generate_series(1, 30000) AS g;
+CREATE INDEX index_b_d ON index_b USING brin (d) WITH (pages_per_range = 1);
+CREATE INDEX index_b_ts ON index_b USING brin (ts timestamp_minmax_multi_ops) WITH (pages_per_range = 4);
+CREATE INDEX index_b_w ON index_b USING brin (w int4_bloom_ops);
+VACUUM ANALYZE index_b;
+SET enable_seqscan = off;
+SET enable_indexscan = off;
+SET enable_bitmapscan = on;
+EXPLAIN (COSTS OFF) SELECT count(*), sum(w) FROM index_b WHERE d BETWEEN '2020-02-01' AND '2020-02-10';
+SELECT line FROM index_explain($$SELECT count(*), sum(w) FROM index_b WHERE d BETWEEN '2020-02-01' AND '2020-02-10'$$) AS line
+WHERE line ~ 'Heap Blocks: [1-9]|Exact Heap Blocks|Rows Removed by Batch Filter: [1-9]';
+SELECT index_same($$SELECT count(*), sum(w) FROM index_b WHERE d BETWEEN '2020-02-01' AND '2020-02-10'$$);
+-- A day of 100 rows, which the core's estimate spreads over a page each:
+-- the ranges' pages give all their rows all the same.
+EXPLAIN (COSTS OFF) SELECT id, d FROM index_b WHERE d = '2020-03-05';
+SELECT index_same($$SELECT id, d FROM index_b WHERE d = '2020-03-05'$$);
+SELECT index_same($$SELECT count(*), max(id) FROM index_b WHERE d IS NULL AND id < 3000$$);
+SELECT index_same($$SELECT count(*), sum(id) FROM index_b WHERE ts >= '2020-01-05 10:00' AND ts < '2020-01-06'$$);
+SELECT index_same($$SELECT count(*), sum(id) FROM index_b WHERE w = 3 AND d < '2020-01-20'$$);
+INSERT INTO index_b SELECT g, date '2020-01-01' + g / 100, timestamp '2020-01-01' + g * interval '1 minute', g % 7
+FROM generate_series(30001, 31000) AS g;
+SELECT index_same($$SELECT count(*), sum(w) FROM index_b WHERE d BETWEEN '2020-02-01' AND '2020-02-10' OR d > '2020-10-20'$$);
+RESET enable_bitmapscan;
+DROP TABLE index_b;
+
 RESET enable_seqscan;
 RESET enable_indexscan;
 RESET max_parallel_workers_per_gather;

@@ -181,7 +181,12 @@ planner expects at least `tessera.bitmap_page_rows` rows a page (2 by
 default, 0 always): the node pins each page of a batch besides the pin of
 the core's scan, and at 1.4 rows a page over 14 500 pages that took 9 %
 more than the core's bitmap heap scan; there the core's scan stays, read
-through the pack node.
+through the pack node. A bitmap of BRIN indexes only (through BitmapAnd
+and BitmapOr too) names whole ranges of pages, all of whose rows are
+read, while the core estimates the tuples by the index's selectivity and
+spreads them over the pages as if at random: a week of 14 000 rows looked
+like fewer than two a page. For such a bitmap the rows of a page are the
+relation's rows a page, `rel->tuples / rel->pages`.
 
 The first execution runs the child (`MultiExecProcNode`) for the
 `TIDBitmap` and begins the core's bitmap scan over it
@@ -199,16 +204,23 @@ Heap Blocks`. At 2 M rows (bench/pg/index, pg-index-0vfbEV): a bitmap of
 15 % of the rows 10.0 ms against 14.0 for the core, 5 % 4.3 against 5.5,
 its rows skipped by a limit 4.1 against 5.4, BitmapOr of 2 % about even;
 bitmaps under 2 rows a page stay the core's (about 3 % more through the
-pack than the core alone, as before). A parallel bitmap heap scan
-(a shared bitmap) is the core's.
+pack than the core alone, as before). BRIN of a day in the order of the
+rows (pg-index-pd1IvS, 11 runs): a week 0.30 ms against 0.92, a month
+0.65 against 2.04, five months 2.8 against 9.3, the rows of 20 days
+returned 0.39 against 1.47, the date clauses rechecked in batches. A parallel
+bitmap heap scan (a shared bitmap) is the core's.
 
 `test/sql/index.sql` compares with Tessera off: a btree bitmap with NULL
 keys, `IS NULL`, an empty result, computed targets, a row-wise clause,
 BitmapAnd and BitmapOr at `tessera.bitmap_page_rows` 0, a lossy bitmap
 at a `work_mem` of 64 kB over 1700 pages whose rows the filter rechecks,
 updated (HOT) and deleted rows, a parameter of the index condition that
-changes per outer row, and a limit above. Mutations fail it: the page's
-first row skipped, the bitmap kept over a rescan.
+changes per outer row, and a limit above; BRIN of a date with NULL days
+(minmax at a range of one page, where a day of 100 rows passes the gate
+only by the relation's rows a page), minmax-multi of a timestamp, bloom
+of an integer, and rows added after the ranges' summary. Mutations fail
+it: the page's first row skipped, the bitmap kept over a rescan, the
+BRIN estimate left out.
 
 ### Index mode
 

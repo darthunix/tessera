@@ -88,8 +88,10 @@ query down, and where it can, does it speed one up.
   the rows of a bitmap skipped by a limit's offset; index scans of the
   ordered `id`: 10 and 3 % of the rows aggregated, 5 % skipped by an
   offset, a range in the index's order, a range with a clause on another
-  column. With Tessera the rows come in batches and a filter rechecks every
-  clause. A ratio below one is the win.
+  column; BRIN bitmaps of the day: a week, a month and five months
+  aggregated, 20 days skipped by an offset. With Tessera the rows come in
+  batches and a filter rechecks every clause, dates too. A ratio below one
+  is the win.
 - **rowwise** (`rowwise.sql`): tables without clauses read under a parent
   of the core that takes rows one at a time: `bit_or` of a column and of
   an expression, one column of sixty, `max` of a text column, a window

@@ -11,6 +11,10 @@
  * equivalents: the int8 function over the int4 argument cast by int8(int4),
  * which the consumer compiles as a step of its own, since an int8 kernel
  * must not read an int4 Datum as a whole word.
+ *
+ * A date is an int32 and a timestamp, with or without time zone, an int64,
+ * whose integer order is the type's, infinities included (the extremes of
+ * the integer): their comparisons are the int4 and int8 ones.
  */
 #include "postgres.h"
 
@@ -127,6 +131,25 @@ static const Function functions[] = {
 	COMPARE(F_INT8LE, TESS_CMP_LE, compare8_evaluate),
 	COMPARE(F_INT8GT, TESS_CMP_GT, compare8_evaluate),
 	COMPARE(F_INT8GE, TESS_CMP_GE, compare8_evaluate),
+	/* date as int4, timestamp and timestamptz as int8 */
+	COMPARE(F_DATE_EQ, TESS_CMP_EQ, compare_evaluate),
+	COMPARE(F_DATE_NE, TESS_CMP_NE, compare_evaluate),
+	COMPARE(F_DATE_LT, TESS_CMP_LT, compare_evaluate),
+	COMPARE(F_DATE_LE, TESS_CMP_LE, compare_evaluate),
+	COMPARE(F_DATE_GT, TESS_CMP_GT, compare_evaluate),
+	COMPARE(F_DATE_GE, TESS_CMP_GE, compare_evaluate),
+	COMPARE(F_TIMESTAMP_EQ, TESS_CMP_EQ, compare8_evaluate),
+	COMPARE(F_TIMESTAMP_NE, TESS_CMP_NE, compare8_evaluate),
+	COMPARE(F_TIMESTAMP_LT, TESS_CMP_LT, compare8_evaluate),
+	COMPARE(F_TIMESTAMP_LE, TESS_CMP_LE, compare8_evaluate),
+	COMPARE(F_TIMESTAMP_GT, TESS_CMP_GT, compare8_evaluate),
+	COMPARE(F_TIMESTAMP_GE, TESS_CMP_GE, compare8_evaluate),
+	COMPARE(F_TIMESTAMPTZ_EQ, TESS_CMP_EQ, compare8_evaluate),
+	COMPARE(F_TIMESTAMPTZ_NE, TESS_CMP_NE, compare8_evaluate),
+	COMPARE(F_TIMESTAMPTZ_LT, TESS_CMP_LT, compare8_evaluate),
+	COMPARE(F_TIMESTAMPTZ_LE, TESS_CMP_LE, compare8_evaluate),
+	COMPARE(F_TIMESTAMPTZ_GT, TESS_CMP_GT, compare8_evaluate),
+	COMPARE(F_TIMESTAMPTZ_GE, TESS_CMP_GE, compare8_evaluate),
 	/* bigint against an integer, an integer against bigint */
 	EQUIVALENT(F_INT84EQ, F_INT8EQ, InvalidOid, F_INT8_INT4),
 	EQUIVALENT(F_INT84NE, F_INT8NE, InvalidOid, F_INT8_INT4),
