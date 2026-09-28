@@ -186,6 +186,19 @@ SELECT union_same($$SELECT count(*), sum(a) FROM (SELECT a FROM union_a WHERE a 
                    UNION ALL SELECT a FROM union_b WHERE a < 200
                    UNION ALL SELECT a FROM union_b WHERE a >= 200 AND a < 400
                    UNION ALL SELECT a FROM union_b WHERE a >= 400) AS s$$);
+-- A worker takes the child that is not partial, the first, while the
+-- leader, which starts from the last, reads the partial one: done with
+-- that, the leader must find the other taken. Sleeps set the order: the
+-- partial child's last page keeps the leader 0.2 s, the other child a
+-- worker 0.5 s. Read twice, the other child's 16 rows would add 160 to
+-- the sum.
+CREATE FUNCTION union_slow(v int, seconds float8) RETURNS int
+LANGUAGE plpgsql PARALLEL SAFE AS $$ BEGIN PERFORM pg_sleep(seconds); RETURN v; END $$;
+EXPLAIN (COSTS OFF)
+SELECT count(*), sum(a) FROM (SELECT a FROM union_a WHERE a > 980 AND union_slow(a, 0.01) > 0
+                              UNION ALL SELECT a FROM union_b WHERE a < 20 AND union_slow(a, 0.03) > 0) AS s;
+SELECT count(*), sum(a) FROM (SELECT a FROM union_a WHERE a > 980 AND union_slow(a, 0.01) > 0
+                              UNION ALL SELECT a FROM union_b WHERE a < 20 AND union_slow(a, 0.03) > 0) AS s;
 -- Without the leader.
 SET parallel_leader_participation = off;
 SELECT union_same($$SELECT count(*), sum(k) FROM union_part WHERE v < 10$$);

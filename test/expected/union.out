@@ -627,6 +627,47 @@ SELECT union_same($$SELECT count(*), sum(a) FROM (SELECT a FROM union_a WHERE a 
  same
 (1 row)
 
+-- A worker takes the child that is not partial, the first, while the
+-- leader, which starts from the last, reads the partial one: done with
+-- that, the leader must find the other taken. Sleeps set the order: the
+-- partial child's last page keeps the leader 0.2 s, the other child a
+-- worker 0.5 s. Read twice, the other child's 16 rows would add 160 to
+-- the sum.
+CREATE FUNCTION union_slow(v int, seconds float8) RETURNS int
+LANGUAGE plpgsql PARALLEL SAFE AS $$ BEGIN PERFORM pg_sleep(seconds); RETURN v; END $$;
+EXPLAIN (COSTS OFF)
+SELECT count(*), sum(a) FROM (SELECT a FROM union_a WHERE a > 980 AND union_slow(a, 0.01) > 0
+                              UNION ALL SELECT a FROM union_b WHERE a < 20 AND union_slow(a, 0.03) > 0) AS s;
+                                         QUERY PLAN                                          
+---------------------------------------------------------------------------------------------
+ Finalize Aggregate
+   ->  Custom Scan (TessGather)
+         Workers Planned: 2
+         ->  Parallel Custom Scan (TessSend)
+               ->  Parallel Custom Scan (TessAgg)
+                     Partial Mode: Partial
+                     ->  Parallel Custom Scan (TessAppend)
+                           ->  Custom Scan (TessPack)
+                                 Rows Kept As: forwarded batches
+                                 ->  Custom Scan (TessFilter) on union_b
+                                       Filter: (union_slow(a, '0.03'::double precision) > 0)
+                                       Batch Filter: (union_b.a < 20)
+                                       ->  Custom Scan (TessHeapScan) on union_b
+                           ->  Custom Scan (TessPack)
+                                 Rows Kept As: forwarded batches
+                                 ->  Parallel Custom Scan (TessFilter) on union_a
+                                       Filter: (union_slow(a, '0.01'::double precision) > 0)
+                                       Batch Filter: (union_a.a > 980)
+                                       ->  Parallel Custom Scan (TessHeapScan) on union_a
+(19 rows)
+
+SELECT count(*), sum(a) FROM (SELECT a FROM union_a WHERE a > 980 AND union_slow(a, 0.01) > 0
+                              UNION ALL SELECT a FROM union_b WHERE a < 20 AND union_slow(a, 0.03) > 0) AS s;
+ count |  sum  
+-------+-------
+    36 | 19970
+(1 row)
+
 -- Without the leader.
 SET parallel_leader_participation = off;
 SELECT union_same($$SELECT count(*), sum(k) FROM union_part WHERE v < 10$$);
