@@ -131,6 +131,83 @@ RESET work_mem;
 -- Rescan numbers the values anew.
 SELECT types_same($$SELECT x, (SELECT count(*) FROM (SELECT t FROM types_g WHERE w = x GROUP BY t) AS q) FROM generate_series(0, 3) AS x$$);
 
+-- Sorts by keys a word does not hold: the kernels order the keys up to
+-- the first such one, whose word is its abbreviated key (numeric, text
+-- under "C", uuid), and the rows whose words are equal are ordered by the
+-- type's comparison; numeric NaN and infinities, 1.0 and 1.00 equal,
+-- text with long common prefixes, two such keys, float8 after an integer.
+CREATE TABLE types_s AS
+SELECT id, t, long, w,
+       CASE WHEN id % 97 = 0 THEN 'NaN'::numeric WHEN id % 89 = 0 THEN 'Infinity'::numeric
+            WHEN id % 83 = 0 THEN '-Infinity'::numeric ELSE n END AS n,
+       one, md5((id % 700)::text)::uuid AS u,
+       CASE WHEN id % 31 = 0 THEN NULL WHEN id % 37 = 0 THEN 'NaN'::float8
+            WHEN id % 41 = 0 THEN '-0'::float8 ELSE (id % 90) / 7.0 END AS f
+FROM types_g;
+ANALYZE types_s;
+EXPLAIN (COSTS OFF) SELECT id, n FROM types_s ORDER BY n, id;
+SELECT types_order($$SELECT id, n FROM types_s ORDER BY n, id$$);
+SELECT types_order($$SELECT id, n FROM types_s ORDER BY n DESC NULLS LAST, id$$);
+SELECT types_order($$SELECT id, one FROM types_s ORDER BY one, id DESC$$);
+EXPLAIN (COSTS OFF) SELECT id, t FROM types_s ORDER BY t COLLATE "C" DESC, id;
+SELECT types_order($$SELECT id, t FROM types_s ORDER BY t COLLATE "C", id$$);
+SELECT types_order($$SELECT id, t FROM types_s ORDER BY t COLLATE "C" DESC NULLS FIRST, id$$);
+SELECT types_order($$SELECT id, long FROM types_s ORDER BY long COLLATE "C", id DESC$$);
+SELECT types_order($$SELECT id, n, t FROM types_s ORDER BY n, t COLLATE "C" DESC, id$$);
+SELECT types_order($$SELECT id, u FROM types_s ORDER BY u DESC, id$$);
+SELECT types_order($$SELECT id, w, t FROM types_s ORDER BY w, t, id$$);
+SELECT types_order($$SELECT id, w, f FROM types_s ORDER BY w DESC, f NULLS FIRST, id$$);
+SELECT types_order($$SELECT id, upper(t) FROM types_s ORDER BY upper(t) COLLATE "C", n, id$$);
+-- The core's sort: a first key without an abbreviated key, and a top-N,
+-- which the node keeps by words only.
+EXPLAIN (COSTS OFF) SELECT id, f FROM types_s ORDER BY f, id;
+EXPLAIN (COSTS OFF) SELECT id, n FROM types_s ORDER BY n, id LIMIT 5;
+SELECT types_order($$SELECT id, n FROM types_s ORDER BY n, id LIMIT 5$$);
+-- Past work_mem: runs on disk, merged in C by the words and the comparisons.
+SET work_mem = '64kB';
+CREATE FUNCTION types_sort_method(query text) RETURNS SETOF text
+LANGUAGE plpgsql AS $$
+DECLARE
+    line text;
+BEGIN
+    FOR line IN EXECUTE 'EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) ' || query
+    LOOP
+        IF line ~ 'TessSort|Sort Method' THEN
+            RETURN NEXT regexp_replace(line, '\d+', 'N', 'g');
+        END IF;
+    END LOOP;
+END
+$$;
+SELECT types_sort_method($$SELECT id, long, n FROM types_s ORDER BY long COLLATE "C", n DESC, id$$);
+SELECT types_order($$SELECT id, long, n FROM types_s ORDER BY long COLLATE "C", n DESC, id$$);
+SELECT types_order($$SELECT id, n FROM types_s ORDER BY n NULLS FIRST, id$$);
+SELECT types_order($$SELECT id, w, t FROM types_s ORDER BY w, t, id$$);
+-- A scrollable cursor over one run read by blocks.
+BEGIN;
+DECLARE c SCROLL CURSOR FOR SELECT id, n FROM types_s ORDER BY n DESC, id;
+FETCH ABSOLUTE 2500 FROM c;
+FETCH BACKWARD 2 FROM c;
+FETCH LAST FROM c;
+FETCH FIRST FROM c;
+CLOSE c;
+COMMIT;
+RESET work_mem;
+-- Rescan with a new parameter sorts anew; workers sort their shares under
+-- the core's Gather Merge.
+SELECT types_order($$SELECT x, (SELECT string_agg(id::text, ',') FROM (SELECT id FROM types_s WHERE w = x ORDER BY n DESC, id) AS q) FROM generate_series(0, 3) AS x$$);
+SET parallel_setup_cost = 0;
+SET parallel_tuple_cost = 0;
+SET min_parallel_table_scan_size = 0;
+SET max_parallel_workers_per_gather = 2;
+EXPLAIN (COSTS OFF) SELECT id, n FROM types_s ORDER BY n, id;
+SELECT types_order($$SELECT id, n FROM types_s ORDER BY n, id$$);
+RESET parallel_setup_cost;
+RESET parallel_tuple_cost;
+RESET min_parallel_table_scan_size;
+SET max_parallel_workers_per_gather = 0;
+DROP TABLE types_s;
+DROP FUNCTION types_sort_method(text);
+
 -- Hash joins by keys a word does not hold: the table keeps the 64-bit hash
 -- of the value, and the equality stays a join clause that decides the
 -- pair; with a word key, every kind of join, NULL keys that never match,

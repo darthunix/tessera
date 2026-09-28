@@ -72,8 +72,9 @@ SELECT sort_same($$SELECT c FROM sort_t ORDER BY d$$);
 EXPLAIN (VERBOSE, COSTS OFF) SELECT c FROM sort_t ORDER BY d;
 -- A key computed by the child.
 SELECT sort_same($$SELECT d, a + d AS x FROM sort_t WHERE a > 0 ORDER BY x, d$$);
--- A text key stays with the core.
-EXPLAIN (COSTS OFF) SELECT d FROM sort_t ORDER BY c, d;
+-- A first key of a type without an abbreviated key (float8) stays with
+-- the core: every row would be one group the node orders as the core does.
+EXPLAIN (COSTS OFF) SELECT d FROM sort_t ORDER BY a::float8, d;
 
 -- Over a filter: no row, one, a batch, a batch and one, and all.
 SELECT sort_same($$SELECT d FROM sort_t WHERE d < 0 ORDER BY d$$);

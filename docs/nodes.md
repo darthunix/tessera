@@ -1229,8 +1229,12 @@ sort's input, with the same rows, costs and path keys, when
   type a key's word holds through the operator family whose order the
   word keeps (`tess_word_key_order`): int2, int4 and int8 through the
   integer one, date, timestamp and timestamptz through `datetime_ops`,
-  bool through its own, ascending or descending, NULLs first or last, at
-  most 16 keys;
+  bool through its own, or of any type with an ordering operator of the
+  path key's operator family (see Other types below), ascending or
+  descending, NULLs first or last, at most 16 keys; the first key of
+  another type has an abbreviated key the node takes, unless a word key
+  comes before it, and there is no `LIMIT` (the top-N heap orders words
+  only, so the core's top-N sorts);
 - the output has 1 to 1664 columns, a tuple's most;
 - the query is not `FETCH ... WITH TIES`, which passes no bound, and the
   kernels module is loaded.
@@ -1251,7 +1255,7 @@ same sort may have lost to a serial sort already. `IncrementalSort` stays
 with the core.
 The plan's layout is dense, one column per target; the private data gives
 each target's column in the child's batches and each key's target, kind
-and flags, and `custom_exprs` holds the keys' expressions for `EXPLAIN`.
+(-1 for another type), flags, ordering operator and collation, and `custom_exprs` holds the keys' expressions for `EXPLAIN`.
 The path supports backward scan; mark/restore it does not, so a merge
 join puts `Materialize` above it.
 
@@ -1269,6 +1273,40 @@ parameter of the child reads and sorts it anew. `EXPLAIN` shows the keys
 as the core does; `ANALYZE` adds the method, the memory (records, values,
 index, items and references at the sort) and its overrun past `work_mem`,
 and the batches and rows read.
+
+### Other types
+
+A key of a type whose word the kernels do not order (numeric, text, uuid,
+float8, ...) orders by its type's sort support
+(`PrepareSortSupportFromOrderingOp` with the path key's ordering
+operator, collation and place of NULLs). The kernels order the keys up to
+the first such key, and its word in the records' slots is its abbreviated
+key made a signed int8 in its order: the comparisons of unsigned 64- or
+32-bit integers (text, uuid, macaddr, inet, bytea) flip the top bit or
+extend, signed ones stay, and numeric's, a signed integer's reversed, is
+inverted (a type check, since its comparison is its own static function,
+checked on two values); a type without an abbreviated key has the word 0.
+The converter runs per batch in a context reset per batch; the node never
+aborts abbreviation, as the core may when it saves little. After the
+kernels sorted the items, each run of items whose words are equal but
+for the reference is a group, whose rows are ordered in C by the type's
+comparison of that key and every key after it: the first key's value in
+a 16-byte row as the core's `SortTuple` keeps it, the others' gathered
+from the records, sorted by the core's sort template
+(`lib/sort_template.h`, comparisons inline). The runs' starts are marked
+in a bitmap first, so that the items are freed before the group's rows
+take their memory. An external sort orders each run the same way, and
+merges runs in C: a binary heap of the inputs, made anew for every 64
+rows, ordered by their next rows' lanes and then by the comparisons, a
+row's values read from its block. A first key of such a type without an
+abbreviated key makes every row one group, which the node sorts as the
+core's sort does, 2 to 7 % slower (text under a libc collation on macOS,
+2 M rows): the planner leaves that case to the core
+(`generic_abbreviates`, sort support prepared in a context of its own).
+`EXPLAIN` shows a key's collation when it is not the default, as the core
+does. At 2 M rows in memory: numeric 125 ms against 296, text under
+`"C"` 187 against 366, text of the default collation after an int4 of
+1000 values 532 against 742 (bench/pg sort, pg-sort-WXjAaO).
 
 ### External sort
 
@@ -1348,11 +1386,19 @@ runs and passes: 100000 rows with text, every class of key both ways
 with NULLs first and last, several keys, equal keys, an empty and a
 one-row input, rescans with and without a changed parameter, and a
 scrollable cursor over one run. It shows the core's plan
-without the kernels module, for a text key and under `LIMIT`; a scrollable cursor forward and backward across windows and
+without the kernels module, for a first float8 key and under `LIMIT`; a scrollable cursor forward and backward across windows and
 past both ends, and one whose first fetch is backward; a correlated
 subquery whose parameter reaches the child, sorted for every outer row,
 and one whose parameter stays above the node, read once; and a generic
-plan with a parameter.
+plan with a parameter. `test/sql/types.sql` compares sorts by numeric (NaN
+and infinities, 1.0 and 1.00 equal), text under `"C"` both ways with long
+common prefixes, uuid, two keys of other types, text and float8 after an
+integer key, an expression; the core's sort for a first float8 key and
+under `LIMIT`; at 64 kB external merges of such keys and a scrollable
+cursor over one run; a rescan with a new parameter; workers under the
+core's `Gather Merge`. Mutations each fail it: groups left unsorted,
+the kernels' merge by words, numeric's words not inverted, the
+comparison of the first generic key only, a merge by words only.
 
 ## TessAppend
 

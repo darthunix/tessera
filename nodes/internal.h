@@ -25,7 +25,7 @@
 #define TESS_HASH_JOIN_DATA "tessera.hash_join"
 #define TESS_HASH_JOIN_DATA_VERSION 7
 #define TESS_SORT_DATA "tessera.sort"
-#define TESS_SORT_DATA_VERSION 1
+#define TESS_SORT_DATA_VERSION 2
 #define TESS_GATHER_DATA "tessera.gather"
 #define TESS_GATHER_DATA_VERSION 1
 #define TESS_SEND_DATA "tessera.send"

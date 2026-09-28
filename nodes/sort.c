@@ -1,5 +1,6 @@
 #include "postgres.h"
 
+#include "catalog/pg_collation_d.h"
 #include "catalog/pg_opfamily_d.h"
 #include "catalog/pg_type_d.h"
 #include "commands/explain.h"
@@ -12,9 +13,13 @@
 #include "optimizer/paths.h"
 #include "optimizer/planner.h"
 #include "optimizer/tlist.h"
+#include "lib/binaryheap.h"
+#include "utils/builtins.h"
 #include "utils/datum.h"
+#include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/ruleutils.h"
+#include "utils/sortsupport.h"
 
 #include "tessera/kernel_ops.h"
 #include "tessera/plan.h"
@@ -29,13 +34,23 @@
  * payload, sorts the records by their keys with the kernels
  * (tessera/sort.h) and returns them in order, in batches whose columns are
  * gathered from the records when a parent asks for them, or row by row,
- * forward and backward, to a row-wise parent. Keys are int4 or int8
- * values of the output. Rows past work_mem are sorted into runs on disk
+ * forward and backward, to a row-wise parent. Keys are values of the
+ * output: the kernels order words (integers, dates, times, booleans); a
+ * key of another type orders by its type's comparison (sort support), its
+ * word its abbreviated key, when it has one, and the rows the words leave
+ * equal by the comparison in C (see "Other types"). Rows past work_mem are sorted into runs on disk
  * and merged (the external sort below). See docs/nodes.md.
  */
 
 /* Rows of an output batch. */
 #define SORT_ROWS 64
+
+/*
+ * The planned kind of a key the kernels do not order by words: its word
+ * is its abbreviated key, an int8, and the type's comparison orders what
+ * the words leave equal.
+ */
+#define SORT_KIND_GENERIC (-1)
 
 /*
  * External sort. Runs are written into sets of files (runtime/spill.c), a
@@ -134,6 +149,18 @@ typedef struct SortCounters
 	Size		memory;
 } SortCounters;
 
+/* How a type's abbreviated key orders, to make it a word the kernels order. */
+typedef enum SortAbbrev
+{
+	SORT_ABBREV_NONE,
+	SORT_ABBREV_UNSIGNED,
+	SORT_ABBREV_SIGNED,
+	/* numeric: the reverse of a signed integer's order. */
+	SORT_ABBREV_REVERSED,
+	SORT_ABBREV_UINT32,
+	SORT_ABBREV_INT32
+} SortAbbrev;
+
 typedef struct TessSortState
 {
 	CustomScanState css;
@@ -150,6 +177,31 @@ typedef struct TessSortState
 	TessSortKey keys[TESS_TABLE_MAX_KEYS];
 	/* A key held a NULL: its items take the bit for it. */
 	bool		key_nulls[TESS_TABLE_MAX_KEYS];
+	/*
+	 * Other types: the kernels order the keys up to the first one they do
+	 * not order by words (generic, -1 for none), nkernel of them, and its
+	 * word is its abbreviated key, or 0 for a type without one; the rows
+	 * whose words are equal are ordered in C by the comparisons of that key
+	 * and the ones after it (ssup, one per key, from generic on). The
+	 * abbreviated keys of a batch, in a context reset per batch; the rows
+	 * of a group, their keys' values and their order.
+	 */
+	int			nkernel;
+	int			generic;
+	SortSupportData *ssup;
+	SortSupportData abbrev;
+	SortAbbrev	abbrev_order;
+	MemoryContext abbrev_context;
+	Datum	   *abbrev_values;
+	bool	   *abbrev_isnull;
+	TessDatumColumn abbrev_column;
+	int			abbrev_capacity;
+	struct TieRow *tie_rows;
+	Datum	   *tie_values;
+	bool	   *tie_isnull;
+	uint64		tie_capacity;
+	binaryheap *merge_heap;
+	MergeInput *merging;
 	TessRows   *rows;
 	/* What the rows are made with, to make them anew. */
 	TessRowsConfig rows_config;
@@ -229,6 +281,7 @@ typedef struct TessSortState
 
 static const CustomExecMethods sort_exec_methods;
 static void reread_child(TessSortState *state);
+static bool generic_abbreviates(Oid sortop, Oid collation, Oid type);
 static void plan_external(TessSortState *state);
 static create_upper_paths_hook_type previous_create_upper_paths_hook = NULL;
 
@@ -274,6 +327,38 @@ tess_sort_key_of(PathKey *pathkey, PathTarget *target, Relids relids, int *place
 }
 
 /*
+ * A key the kernels do not order by words: its expression's place in the
+ * target, the operator that orders it (of the path key's operator family,
+ * < or >) and its collation. False for a volatile key or a type without
+ * one.
+ */
+static bool
+generic_sort_key(PathKey *pathkey, PathTarget *target, Relids relids, int *place,
+				 Oid *sortop, Oid *collation)
+{
+	EquivalenceClass *ec = pathkey->pk_eclass;
+
+	if (ec->ec_has_volatile ||
+		(pathkey->pk_cmptype != COMPARE_LT && pathkey->pk_cmptype != COMPARE_GT))
+		return false;
+	foreach_ptr(Expr, expr, target->exprs)
+	{
+		Oid			type = exprType((Node *) expr);
+
+		if (find_ec_member_matching_expr(ec, expr, relids) == NULL)
+			continue;
+		*sortop = get_opfamily_member_for_cmptype(pathkey->pk_opfamily, type, type,
+												  pathkey->pk_cmptype);
+		if (!OidIsValid(*sortop))
+			continue;
+		*place = foreach_current_index(expr);
+		*collation = ec->ec_collation;
+		return true;
+	}
+	return false;
+}
+
+/*
  * The node's path in place of the core's full sort: the same planner
  * properties over the batch child of the sort's input, with the key
  * expressions, which the sort's targets hold, and their kinds and flags. NULL when a key is not one the
@@ -289,6 +374,9 @@ make_sort_path(PlannerInfo *root, SortPath *sort)
 	List	   *exprs = NIL;
 	List	   *kinds = NIL;
 	List	   *flags = NIL;
+	List	   *sortops = NIL;
+	List	   *collations = NIL;
+	bool		generic = false;
 	int			nkeys = list_length(sort->path.pathkeys);
 	int			ncolumns = list_length(target->exprs);
 	Path	   *child;
@@ -300,13 +388,45 @@ make_sort_path(PlannerInfo *root, SortPath *sort)
 	{
 		TessSortKey key;
 		int			place;
+		Oid			sortop = InvalidOid;
+		Oid			collation = InvalidOid;
 
-		if (!tess_sort_key_of(pathkey, target, input->parent->relids, &place, &key))
+		/*
+		 * A key of another type orders by its type's comparison (sort
+		 * support): the kernels order by its abbreviated key where it has
+		 * one, and equal words by the comparison.
+		 */
+		if (tess_sort_key_of(pathkey, target, input->parent->relids, &place, &key))
+			(void) generic_sort_key(pathkey, target, input->parent->relids, &place,
+									&sortop, &collation);
+		else if (generic_sort_key(pathkey, target, input->parent->relids, &place,
+								  &sortop, &collation))
+		{
+			/*
+			 * The first key without an abbreviated key: every row one
+			 * group, which the node orders as the core's sort does, less
+			 * well; with a key before it, groups of that key's values.
+			 */
+			if (!generic && foreach_current_index(pathkey) == 0 &&
+				!generic_abbreviates(sortop, collation,
+									 exprType(list_nth(target->exprs, place))))
+				return NULL;
+			generic = true;
+			key.kind = SORT_KIND_GENERIC;
+			key.flags = (pathkey->pk_cmptype == COMPARE_GT ? TESS_SORT_DESCENDING : 0) |
+				(pathkey->pk_nulls_first ? TESS_SORT_NULLS_FIRST : 0);
+		}
+		else
 			return NULL;
 		exprs = lappend(exprs, list_nth(target->exprs, place));
 		kinds = lappend_int(kinds, (int) key.kind);
 		flags = lappend_int(flags, (int) key.flags);
+		sortops = lappend_int(sortops, (int) sortop);
+		collations = lappend_int(collations, (int) collation);
 	}
+	/* Under LIMIT the core's top-N, which the node keeps by words only. */
+	if (generic && root->limit_tuples >= 0)
+		return NULL;
 	/* Rows past work_mem go to runs on disk and merge: no gate on the rows. */
 	child = tess_batch_input_path(root, input);
 	if (child == NULL)
@@ -316,7 +436,7 @@ make_sort_path(PlannerInfo *root, SortPath *sort)
 	config.node = &tess_sort_node;
 	config.children = list_make1(child);
 	config.expressions = exprs;
-	config.node_data = (Node *) list_make2(kinds, flags);
+	config.node_data = (Node *) list_make4(kinds, flags, sortops, collations);
 	config.flags = CUSTOMPATH_SUPPORT_BACKWARD_SCAN;
 	return tess_path_create(&config);
 }
@@ -478,6 +598,8 @@ sort_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 	tess_plan_write_int_list(writer, "keys", keys);
 	tess_plan_write_int_list(writer, "kinds", linitial(data));
 	tess_plan_write_int_list(writer, "flags", lsecond(data));
+	tess_plan_write_int_list(writer, "sortops", lthird(data));
+	tess_plan_write_int_list(writer, "collations", lfourth(data));
 	config.methods = &tess_sort_scan_methods;
 	config.layout_policy = TESS_LAYOUT_DENSE;
 	config.expressions = key_exprs;
@@ -513,6 +635,341 @@ static const TessBatchOps sort_batch_ops = {
 	.get_datum_column = sort_get_column,
 };
 
+/*
+ * The order of a type's abbreviated keys, from sort support prepared with
+ * abbreviate: a comparison of unsigned or signed integers, or numeric's,
+ * which is a signed integer's reversed; NONE without one the node takes.
+ */
+static SortAbbrev
+abbrev_order_of(SortSupport abbrev, Oid type)
+{
+	if (abbrev->abbrev_converter == NULL)
+		return SORT_ABBREV_NONE;
+	if (abbrev->comparator == ssup_datum_uint64_cmp)
+		return SORT_ABBREV_UNSIGNED;
+	if (abbrev->comparator == ssup_datum_int64_cmp)
+		return SORT_ABBREV_SIGNED;
+	if (abbrev->comparator == ssup_datum_uint32_cmp)
+		return SORT_ABBREV_UINT32;
+	if (abbrev->comparator == ssup_datum_int32_cmp)
+		return SORT_ABBREV_INT32;
+	if (type == NUMERICOID &&
+		abbrev->comparator(Int64GetDatum(0), Int64GetDatum(1), abbrev) > 0 &&
+		abbrev->comparator(Int64GetDatum(-1), Int64GetDatum(0), abbrev) > 0)
+		return SORT_ABBREV_REVERSED;
+	return SORT_ABBREV_NONE;
+}
+
+/*
+ * Whether a key of the type, ordered by sortop under the collation, has an
+ * abbreviated key the node takes: sort support prepared in a context of
+ * its own, which goes with what the type's support allocated.
+ */
+static bool
+generic_abbreviates(Oid sortop, Oid collation, Oid type)
+{
+	MemoryContext context = AllocSetContextCreate(CurrentMemoryContext,
+												  "TessSort planning",
+												  ALLOCSET_SMALL_SIZES);
+	MemoryContext old = MemoryContextSwitchTo(context);
+	SortSupportData abbrev = {0};
+	bool		result;
+
+	abbrev.ssup_cxt = context;
+	abbrev.ssup_collation = collation;
+	abbrev.abbreviate = true;
+	PrepareSortSupportFromOrderingOp(sortop, &abbrev);
+	result = abbrev_order_of(&abbrev, type) != SORT_ABBREV_NONE;
+	MemoryContextSwitchTo(old);
+	MemoryContextDelete(context);
+	return result;
+}
+
+/*
+ * Other types: the comparison of every key from the first generic one on,
+ * by its ordering operator, collation and place of NULLs, and the
+ * abbreviated key of the first, when the type has one whose order the
+ * node can make a word's: a comparison of unsigned or signed integers, or
+ * numeric's, which is a signed integer's reversed.
+ */
+static void
+generic_begin(TessSortState *state, TupleDesc desc, List *sortops, List *collations)
+{
+	int			first = state->generic;
+	Oid			type = TupleDescAttr(desc, state->key_columns[first])->atttypid;
+	SortSupport abbrev = &state->abbrev;
+
+	state->ssup = palloc0_array(SortSupportData, state->nkeys);
+	for (int key = first; key < state->nkeys; key++)
+	{
+		SortSupport ssup = &state->ssup[key];
+		Oid			sortop = (Oid) list_nth_int(sortops, key);
+
+		if (!OidIsValid(sortop))
+			elog(ERROR, "TessSort received a foreign plan");
+		ssup->ssup_cxt = CurrentMemoryContext;
+		ssup->ssup_collation = (Oid) list_nth_int(collations, key);
+		ssup->ssup_nulls_first = (state->keys[key].flags & TESS_SORT_NULLS_FIRST) != 0;
+		ssup->abbreviate = false;
+		PrepareSortSupportFromOrderingOp(sortop, ssup);
+	}
+	abbrev->ssup_cxt = CurrentMemoryContext;
+	abbrev->ssup_collation = state->ssup[first].ssup_collation;
+	abbrev->ssup_nulls_first = state->ssup[first].ssup_nulls_first;
+	abbrev->abbreviate = true;
+	PrepareSortSupportFromOrderingOp((Oid) list_nth_int(sortops, first), abbrev);
+	state->abbrev_order = abbrev_order_of(abbrev, type);
+	state->abbrev_context = AllocSetContextCreate(CurrentMemoryContext,
+												  "TessSort abbreviated keys",
+												  ALLOCSET_DEFAULT_SIZES);
+}
+
+/*
+ * The first generic key's words of the selected rows of its column: its
+ * abbreviated keys as signed integers in their order, or 0 without one;
+ * NULL kept.
+ */
+static void
+abbreviate_column(TessSortState *state, const TessDatumColumn *column,
+				  const TessRowMask *rows)
+{
+	MemoryContext old;
+	int			row = -1;
+
+	if (column->nrows > state->abbrev_capacity)
+	{
+		MemoryContext context = state->css.ss.ps.state->es_query_cxt;
+
+		if (state->abbrev_values != NULL)
+		{
+			pfree(state->abbrev_values);
+			pfree(state->abbrev_isnull);
+		}
+		state->abbrev_capacity = Max(column->nrows, SORT_ROWS);
+		state->abbrev_values = MemoryContextAllocZero(context,
+													  sizeof(Datum) * state->abbrev_capacity);
+		state->abbrev_isnull = MemoryContextAllocZero(context,
+													  sizeof(bool) * state->abbrev_capacity);
+	}
+	MemoryContextReset(state->abbrev_context);
+	old = MemoryContextSwitchTo(state->abbrev_context);
+	while ((row = tess_row_mask_next(rows, row)) >= 0)
+	{
+		int64		word = 0;
+
+		state->abbrev_isnull[row] = column->isnull[row];
+		if (!column->isnull[row] && state->abbrev_order != SORT_ABBREV_NONE)
+		{
+			Datum		abbreviated = state->abbrev.abbrev_converter(column->values[row],
+																	 &state->abbrev);
+
+			switch (state->abbrev_order)
+			{
+				case SORT_ABBREV_UNSIGNED:
+					word = (int64) (DatumGetUInt64(abbreviated) ^ (UINT64CONST(1) << 63));
+					break;
+				case SORT_ABBREV_SIGNED:
+					word = DatumGetInt64(abbreviated);
+					break;
+				case SORT_ABBREV_REVERSED:
+					word = ~DatumGetInt64(abbreviated);
+					break;
+				case SORT_ABBREV_UINT32:
+					word = (int64) DatumGetUInt32(abbreviated);
+					break;
+				case SORT_ABBREV_INT32:
+					word = (int64) DatumGetInt32(abbreviated);
+					break;
+				case SORT_ABBREV_NONE:
+					break;
+			}
+		}
+		state->abbrev_values[row] = Int64GetDatum(word);
+	}
+	MemoryContextSwitchTo(old);
+	state->abbrev_column = (TessDatumColumn) TESS_STRUCT_INITIALIZER(TessDatumColumn);
+	state->abbrev_column.values = state->abbrev_values;
+	state->abbrev_column.isnull = state->abbrev_isnull;
+	state->abbrev_column.nrows = column->nrows;
+}
+
+/*
+ * A row of a group: the first generic key's value in place, as the core's
+ * SortTuple keeps it, the other keys' values at its row of tie_values.
+ */
+typedef struct TieRow
+{
+	Datum		value;
+	uint32		ref;
+	/* The row in the group, and the value's NULL flag in the top bit. */
+	uint32		row;
+} TieRow;
+
+#define TIE_NULL ((uint32) 1 << 31)
+
+/* The comparison of two rows of a group by the keys from the first generic one on. */
+static inline int
+compare_ties(const TieRow *left, const TieRow *right, TessSortState *state)
+{
+	uint64		n = state->tie_capacity;
+	int			result = ApplySortComparator(left->value, (left->row & TIE_NULL) != 0,
+											 right->value, (right->row & TIE_NULL) != 0,
+											 &state->ssup[state->generic]);
+
+	for (int key = state->generic + 1; result == 0 && key < state->nkeys; key++)
+	{
+		uint64		base = (uint64) (key - state->generic - 1) * n;
+
+		uint32		x = left->row & ~TIE_NULL;
+		uint32		y = right->row & ~TIE_NULL;
+
+		result = ApplySortComparator(state->tie_values[base + x], state->tie_isnull[base + x],
+									 state->tie_values[base + y], state->tie_isnull[base + y],
+									 &state->ssup[key]);
+	}
+	return result;
+}
+
+/*
+ * The core's sort template, as its own sorts use it: the rows swapped as
+ * TieRows and compared inline, not through qsort_arg's bytes and pointer.
+ */
+#define ST_SORT sort_tie_rows
+#define ST_ELEMENT_TYPE TieRow
+#define ST_COMPARE(a, b, state) compare_ties(a, b, state)
+#define ST_COMPARE_ARG_TYPE TessSortState
+#define ST_CHECK_FOR_INTERRUPTS
+#define ST_SCOPE static
+#define ST_DEFINE
+#include "lib/sort_template.h"
+
+/* Order the n records refs of one group of equal words by the comparisons. */
+static void
+sort_group(TessSortState *state, uint32 *refs, uint64 n)
+{
+	int			nafter = state->nkeys - state->generic - 1;
+	TieRow	   *ties;
+
+	if (n >= TIE_NULL)
+		elog(ERROR, "TessSort cannot order " UINT64_FORMAT " rows of equal keys", n);
+	if (n > state->tie_capacity)
+	{
+		MemoryContext context = state->css.ss.ps.state->es_query_cxt;
+		uint64		capacity = Max(n, (uint64) 1024);
+
+		if (state->tie_rows != NULL)
+			pfree(state->tie_rows);
+		if (state->tie_values != NULL)
+		{
+			pfree(state->tie_values);
+			pfree(state->tie_isnull);
+		}
+		state->tie_rows = MemoryContextAllocExtended(context, mul_size(sizeof(TieRow), capacity),
+													 MCXT_ALLOC_HUGE);
+		/* Keys after the first generic one only. */
+		if (nafter > 0)
+		{
+			state->tie_values = MemoryContextAllocExtended(context,
+														   mul_size(sizeof(Datum) * nafter, capacity),
+														   MCXT_ALLOC_HUGE);
+			state->tie_isnull = MemoryContextAllocExtended(context,
+														   mul_size(sizeof(bool) * nafter, capacity),
+														   MCXT_ALLOC_HUGE);
+		}
+		state->tie_capacity = capacity;
+	}
+	ties = state->tie_rows;
+	for (uint64 first = 0; first < n; first += SORT_ROWS)
+	{
+		int			count = (int) Min((uint64) SORT_ROWS, n - first);
+		uint64		bits[1] = {count == 64 ? ~UINT64CONST(0) : (UINT64CONST(1) << count) - 1};
+		TessRowMask mask = {count, bits};
+		Datum		values[SORT_ROWS];
+		bool		isnull[SORT_ROWS];
+
+		tess_rows_gather(state->rows, state->key_columns[state->generic], &refs[first], &mask,
+						 values, isnull);
+		for (int row = 0; row < count; row++)
+		{
+			ties[first + row].value = values[row];
+			ties[first + row].ref = refs[first + row];
+			ties[first + row].row = (uint32) (first + row) | (isnull[row] ? TIE_NULL : 0);
+		}
+		for (int key = state->generic + 1; key < state->nkeys; key++)
+		{
+			uint64		base = (uint64) (key - state->generic - 1) * state->tie_capacity + first;
+
+			tess_rows_gather(state->rows, state->key_columns[key], &refs[first], &mask,
+							 &state->tie_values[base], &state->tie_isnull[base]);
+		}
+	}
+	sort_tie_rows(ties, n, state);
+	for (uint64 row = 0; row < n; row++)
+		refs[row] = ties[row].ref;
+}
+
+/* The rows of groups, freed once the rows are sorted. */
+static void
+free_ties(TessSortState *state)
+{
+	if (state->tie_rows != NULL)
+		pfree(state->tie_rows);
+	if (state->tie_values != NULL)
+	{
+		pfree(state->tie_values);
+		pfree(state->tie_isnull);
+	}
+	state->tie_rows = NULL;
+	state->tie_values = NULL;
+	state->tie_isnull = NULL;
+	state->tie_capacity = 0;
+}
+
+/*
+ * After the kernels sorted count items of words words by the keys up to
+ * the first generic one: the records of each run of items whose keys'
+ * words are equal (all but the reference's 32 bits) ordered by the
+ * comparisons of the keys from that one on. The runs' starts are marked
+ * first, so that a caller done with the items frees them (*items NULL)
+ * before the rows of the runs take their memory.
+ */
+static void
+sort_ties(TessSortState *state, uint64 **items, int words, uint32 *refs, uint64 count,
+		  bool free_items)
+{
+	uint64	   *starts = palloc0_array(uint64, (count + 64) / 64);
+	const uint64 *item = *items;
+	uint64		first = 0;
+
+	for (uint64 place = 1; place < count; place++)
+	{
+		const uint64 *next = item + words;
+
+		if ((words > 1 && memcmp(item, next, sizeof(uint64) * (words - 1)) != 0) ||
+			((item[words - 1] ^ next[words - 1]) >> 32) != 0)
+			starts[place / 64] |= UINT64CONST(1) << (place % 64);
+		item = next;
+	}
+	starts[count / 64] |= UINT64CONST(1) << (count % 64);
+	if (free_items)
+	{
+		pfree(*items);
+		*items = NULL;
+	}
+	while (first < count)
+	{
+		uint64		end = first + 1;
+
+		while (((starts[end / 64] >> (end % 64)) & 1) == 0)
+			end++;
+		if (end - first > 1)
+			sort_group(state, &refs[first], end - first);
+		first = end;
+		CHECK_FOR_INTERRUPTS();
+	}
+	pfree(starts);
+}
+
 static void
 sort_begin(CustomScanState *css, EState *estate, int eflags)
 {
@@ -530,6 +987,8 @@ sort_begin(CustomScanState *css, EState *estate, int eflags)
 	List	   *keys;
 	List	   *key_kinds;
 	List	   *key_flags;
+	List	   *key_sortops;
+	List	   *key_collations;
 	int16	   *typlens;
 	bool	   *typbyvals;
 
@@ -546,6 +1005,8 @@ sort_begin(CustomScanState *css, EState *estate, int eflags)
 	keys = tess_plan_read_int_list(reader, "keys");
 	key_kinds = tess_plan_read_int_list(reader, "kinds");
 	key_flags = tess_plan_read_int_list(reader, "flags");
+	key_sortops = tess_plan_read_int_list(reader, "sortops");
+	key_collations = tess_plan_read_int_list(reader, "collations");
 	tess_plan_reader_finish(reader);
 	state->ncolumns = list_length(columns);
 	state->nkeys = list_length(keys);
@@ -553,7 +1014,9 @@ sort_begin(CustomScanState *css, EState *estate, int eflags)
 		state->ncolumns > TESS_ROWS_MAX_COLUMNS || state->nkeys == 0 ||
 		state->nkeys > TESS_TABLE_MAX_KEYS ||
 		list_length(key_kinds) != state->nkeys ||
-		list_length(key_flags) != state->nkeys)
+		list_length(key_flags) != state->nkeys ||
+		list_length(key_sortops) != state->nkeys ||
+		list_length(key_collations) != state->nkeys)
 		elog(ERROR, "TessSort received a foreign plan");
 	state->kernels = tess_runtime_kernels();
 	if (state->kernels == NULL ||
@@ -580,26 +1043,35 @@ sort_begin(CustomScanState *css, EState *estate, int eflags)
 		typbyvals[index] = attribute->attbyval;
 	}
 	state->key_columns = palloc_array(int, state->nkeys);
+	state->generic = -1;
 	foreach_int(key, keys)
 	{
 		int			index = foreach_current_index(key);
+		int			kind = list_nth_int(key_kinds, index);
 
 		if (key < 0 || key >= state->ncolumns)
 			elog(ERROR, "TessSort received a foreign plan");
 		state->key_columns[index] = key;
-		kinds[index] = (TessTableKeyKind) list_nth_int(key_kinds, index);
+		/* A generic key's word is its abbreviated key, an int8. */
+		if (kind == SORT_KIND_GENERIC && state->generic < 0)
+			state->generic = index;
+		kinds[index] = kind == SORT_KIND_GENERIC ? TESS_TABLE_KEY_INT8 :
+			(TessTableKeyKind) kind;
 		state->keys[index].kind = kinds[index];
 		state->keys[index].flags = (uint32) list_nth_int(key_flags, index);
 	}
+	state->nkernel = state->generic < 0 ? state->nkeys : state->generic + 1;
+	if (state->generic >= 0)
+		generic_begin(state, desc, key_sortops, key_collations);
 	/* Whole batches: every column of the rows kept. */
 	request.projection_columns = projection;
 	request.output_mode = TESS_OUTPUT_BATCH;
 	tess_input_set_request(state->input, &request);
 
-	memcpy(state->kinds, kinds, sizeof(TessTableKeyKind) * state->nkeys);
+	memcpy(state->kinds, kinds, sizeof(TessTableKeyKind) * state->nkernel);
 	rows.parent_context = estate->es_query_cxt;
 	rows.kernels = state->kernels;
-	rows.nkeys = state->nkeys;
+	rows.nkeys = state->nkernel;
 	rows.kinds = state->kinds;
 	rows.ncolumns = state->ncolumns;
 	rows.typlens = typlens;
@@ -655,24 +1127,32 @@ batch_column(TessSortState *state, TessBatch *batch, int column)
 		elog(ERROR, "TessSort child returned an invalid column");
 }
 
-/* The key columns of the batch, as the table takes them. */
+/*
+ * The key columns of the batch the kernels order, as the table takes
+ * them: a generic key's, its abbreviated keys.
+ */
 static void
 batch_keys(TessSortState *state, TessBatch *batch)
 {
-	for (int key = 0; key < state->nkeys; key++)
+	for (int key = 0; key < state->nkernel; key++)
 	{
 		batch_column(state, batch, state->key_columns[key]);
 		state->table_keys[key].kind = state->keys[key].kind;
 		state->table_keys[key].column = &state->columns[state->key_columns[key]];
 		state->table_keys[key].prepared = NULL;
+		if (key == state->generic)
+		{
+			abbreviate_column(state, state->table_keys[key].column, &batch->rows);
+			state->table_keys[key].column = &state->abbrev_column;
+		}
 	}
 }
 
-/* Whether an output column is a key's, fetched with the keys. */
+/* Whether an output column is a key's the kernels order, fetched with the keys. */
 static bool
 is_key_column(TessSortState *state, int column)
 {
-	for (int key = 0; key < state->nkeys; key++)
+	for (int key = 0; key < state->nkernel; key++)
 		if (state->key_columns[key] == column)
 			return true;
 	return false;
@@ -704,7 +1184,7 @@ append_batch(TessSortState *state, TessBatch *batch)
 	for (int column = 0; column < state->ncolumns; column++)
 		if (!is_key_column(state, column))
 			batch_column(state, batch, column);
-	for (int key = 0; key < state->nkeys; key++)
+	for (int key = 0; key < state->nkernel; key++)
 		if (!state->key_nulls[key])
 			state->key_nulls[key] =
 				tess_rows_selected_null(&batch->rows,
@@ -829,7 +1309,8 @@ choose_topn(TessSortState *state)
 	TessStatus	status = TESS_STRUCT_INITIALIZER(TessStatus);
 	double		bytes;
 
-	if (state->bound < 0)
+	/* The heap orders words: a generic key's equal words would be lost. */
+	if (state->bound < 0 || state->generic >= 0)
 		return false;
 	for (int key = 0; key < state->nkeys; key++)
 	{
@@ -1140,6 +1621,8 @@ spill_run(TessSortState *state)
 	items = tess_rows_sort_items(state->rows, state->ext_keys, refs, &words);
 	if (words != state->item_words)
 		elog(ERROR, "TessSort items of %d words, not %d", words, state->item_words);
+	if (state->generic >= 0)
+		sort_ties(state, &items, words, refs, count, false);
 	note_memory(state, mul_size(count, sizeof(uint32) + sizeof(uint64) * words));
 	writer_start(state, &writer, run_create(state));
 	for (uint64 first = 0; first < count; first += SORT_ROWS)
@@ -1186,12 +1669,12 @@ plan_external(TessSortState *state)
 	Size		row_bytes;
 	Size		block_bytes;
 
-	for (int key = 0; key < state->nkeys; key++)
+	for (int key = 0; key < state->nkernel; key++)
 	{
 		state->ext_keys[key] = state->keys[key];
 		state->ext_keys[key].flags |= TESS_SORT_NULLABLE;
 	}
-	check_kernel(state->kernels->sort_item_words(state->nkeys, state->ext_keys,
+	check_kernel(state->kernels->sort_item_words(state->nkernel, state->ext_keys,
 												 &state->item_words, &status),
 				 &status);
 	/*
@@ -1202,7 +1685,7 @@ plan_external(TessSortState *state)
 	{
 		int			bits = 0;
 
-		for (int key = 0; key < state->nkeys; key++)
+		for (int key = 0; key < state->nkernel; key++)
 			bits += (state->ext_keys[key].kind == TESS_TABLE_KEY_INT8 ? 64 : 32) + 1;
 		state->ext_words = bits <= 64 * (state->item_words - 1) ?
 			state->item_words - 1 : state->item_words;
@@ -1339,6 +1822,117 @@ input_take(TessSortState *state, MergeInput *input, uint32 place, int out,
 			keys[word] = words[capacity * (state->ncolumns + word)];
 }
 
+/* Column `column` of the input's row place, as input_take reads it. */
+static Datum
+input_value(TessSortState *state, MergeInput *input, int column, bool *isnull)
+{
+	Size		capacity = tess_spill_columns_capacity(input->chunk);
+	uint64		nulls = tess_spill_columns_lane(input->chunk, 0)[capacity * (column / 64) +
+																input->place];
+	uint64		word = tess_spill_columns_word(input->chunk, 0)[capacity * column + input->place];
+
+	*isnull = (nulls >> (column % 64)) & 1;
+	if (*isnull)
+		return (Datum) 0;
+	if (state->rows_config.typbyvals[column])
+		return (Datum) word;
+	return PointerGetDatum(input->values + word);
+}
+
+/*
+ * The order of two inputs' next rows for a merge of a generic key: their
+ * items' words, then the comparisons of the keys from the first generic
+ * one on; the binary heap keeps the greatest first, so the result is
+ * reversed.
+ */
+static int
+compare_inputs(bh_node_type a, bh_node_type b, void *arg)
+{
+	TessSortState *state = arg;
+	MergeInput *left = &state->merging[DatumGetInt32(a)];
+	MergeInput *right = &state->merging[DatumGetInt32(b)];
+	Size		left_capacity = tess_spill_columns_capacity(left->chunk);
+	Size		right_capacity = tess_spill_columns_capacity(right->chunk);
+	const uint64 *left_words = tess_spill_columns_word(left->chunk, state->ncolumns);
+	const uint64 *right_words = tess_spill_columns_word(right->chunk, state->ncolumns);
+
+	for (int word = 0; word < state->ext_words; word++)
+	{
+		uint64		x = left_words[left_capacity * word + left->place];
+		uint64		y = right_words[right_capacity * word + right->place];
+
+		if (x != y)
+			return x < y ? 1 : -1;
+	}
+	for (int key = state->generic; key < state->nkeys; key++)
+	{
+		int			column = state->key_columns[key];
+		bool		left_null;
+		bool		right_null;
+		Datum		x = input_value(state, left, column, &left_null);
+		Datum		y = input_value(state, right, column, &right_null);
+		int			result = ApplySortComparator(x, left_null, y, right_null,
+												 &state->ssup[key]);
+
+		if (result != 0)
+			return -result;
+	}
+	return 0;
+}
+
+/*
+ * merge_rows for a generic key: the kernels' merge compares words only,
+ * so the inputs' next rows are kept in a binary heap by compare_inputs,
+ * which is made anew at every call.
+ */
+static int
+merge_rows_generic(TessSortState *state, MergeInput *inputs, int ninputs, int max,
+				   Datum *const *values, bool *const *isnull,
+				   uint64 (*keys)[TESS_SORT_MAX_ITEM_WORDS])
+{
+	binaryheap *heap;
+	int			taken = 0;
+
+	if (state->merge_heap == NULL || state->merge_heap->bh_space < ninputs)
+	{
+		MemoryContext old = MemoryContextSwitchTo(state->css.ss.ps.state->es_query_cxt);
+
+		if (state->merge_heap != NULL)
+			binaryheap_free(state->merge_heap);
+		state->merge_heap = binaryheap_allocate(ninputs, compare_inputs, state);
+		MemoryContextSwitchTo(old);
+	}
+	heap = state->merge_heap;
+	binaryheap_reset(heap);
+	state->merging = inputs;
+	for (int input = 0; input < ninputs; input++)
+	{
+		MergeInput *in = &inputs[input];
+
+		if (in->place == in->rows && in->reader != NULL)
+			(void) input_load(state, in);
+		if (in->place < in->rows)
+			binaryheap_add_unordered(heap, Int32GetDatum(input));
+	}
+	binaryheap_build(heap);
+	while (taken < max && !binaryheap_empty(heap))
+	{
+		int			input = DatumGetInt32(binaryheap_first(heap));
+		MergeInput *in = &inputs[input];
+
+		input_take(state, in, in->place++, taken, values, isnull,
+				   keys == NULL ? NULL : keys[taken]);
+		taken++;
+		/* A block given out whole: the next one of the run, if any. */
+		if (in->place == in->rows &&
+			(in->reader == NULL || !input_load(state, in)))
+			(void) binaryheap_remove_first(heap);
+		else
+			binaryheap_replace_first(heap, Int32GetDatum(input));
+	}
+	return taken;
+}
+
 /*
  * Up to max rows in order from the inputs into the columns' arrays, and
  * their items' words when keys is not NULL; 0 once every input is done.
@@ -1355,6 +1949,8 @@ merge_rows(TessSortState *state, MergeInput *inputs, int ninputs, uint32 *tree, 
 	int			taken = 0;
 
 	free_retired(state);
+	if (state->generic >= 0)
+		return merge_rows_generic(state, inputs, ninputs, max, values, isnull, keys);
 	while (taken < max)
 	{
 		TessStatus	status = TESS_STRUCT_INITIALIZER(TessStatus);
@@ -1684,6 +2280,7 @@ sort_rows(TessSortState *state)
 	if (state->external)
 	{
 		spill_run(state);
+		free_ties(state);
 		set_finish(state);
 		merge_runs(state);
 		note_memory(state, (Size) Max(state->ninputs, 1) *
@@ -1719,7 +2316,7 @@ sort_rows(TessSortState *state)
 	}
 	state->count = tess_rows_count(state->rows);
 	/* A key takes the bit for NULL only when one of its rows held one. */
-	for (int key = 0; key < state->nkeys; key++)
+	for (int key = 0; key < state->nkernel; key++)
 	{
 		keys[key] = state->keys[key];
 		if (state->key_nulls[key])
@@ -1736,12 +2333,22 @@ sort_rows(TessSortState *state)
 		int			words;
 		TessStatus	status = TESS_STRUCT_INITIALIZER(TessStatus);
 
-		if (state->kernels->sort_item_words(state->nkeys, keys, &words,
+		if (state->kernels->sort_item_words(state->nkernel, keys, &words,
 											&status) != TESS_OK)
 			tess_status_report(&status);
 		note_memory(state, mul_size(state->count,
 									sizeof(uint32) + sizeof(uint64) * words));
-		tess_rows_sort(state->rows, keys, state->refs);
+		if (state->generic >= 0)
+		{
+			uint64	   *items = tess_rows_sort_items(state->rows, keys, state->refs, &words);
+
+			sort_ties(state, &items, words, state->refs, state->count, true);
+			note_memory(state, mul_size(state->count, sizeof(uint32)) +
+						state->tie_capacity * sizeof(TieRow));
+			free_ties(state);
+		}
+		else
+			tess_rows_sort(state->rows, keys, state->refs);
 	}
 	else
 		note_memory(state, 0);
@@ -1979,7 +2586,14 @@ sort_explain(CustomScanState *css, List *ancestors, ExplainState *es)
 		bool		descending = (flags & TESS_SORT_DESCENDING) != 0;
 		bool		nulls_first = (flags & TESS_SORT_NULLS_FIRST) != 0;
 
+		int			index = foreach_current_index(expr);
+		Oid			collation = state->ssup != NULL && index >= state->generic ?
+			state->ssup[index].ssup_collation : InvalidOid;
+
 		/* As the core shows them: what is not the default is spelled out. */
+		if (OidIsValid(collation) && collation != DEFAULT_COLLATION_OID)
+			key = psprintf("%s COLLATE %s", key,
+						   quote_identifier(get_collation_name(collation)));
 		if (descending)
 			key = psprintf("%s DESC", key);
 		if (nulls_first != descending)
