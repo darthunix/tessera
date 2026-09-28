@@ -574,6 +574,21 @@ position, while a set operation within another could have a projection
 above it that looks for the set operation's own columns, which the
 node's plan shows as its first branch's (see "Building paths" in
 [runtime.md](runtime.md)). The groups spill as those of `GROUP BY` do.
+With workers the node also builds, once per set operation, the stack of
+grouping without aggregates (below): its partial grouping over its
+parallel `TessAppend` of the branches' partial paths, `TessGather`, and
+its grouping of the participants' groups above. The core builds that
+partial `Append` only under its own `Gather`, which gathers every row
+before its `HashAggregate` and rarely survives `add_path`, and keeps it
+nowhere else, so the node builds it as the core does from the first
+partial path of each branch (`union_partial_append`); a branch without
+one leaves the operation serial. The estimate of the groups is the
+core's, the sum of the branches': the stack wins where the branches know
+their values few. With two workers (pg-setop-w2-canmDp, U55gMY against
+the build before, TuDL7B, CguE8e) `UNION` of 2.5 M rows with 1000
+values the statistics know took 18.2 ms against 33.4 before and 128.8
+for the core; the family's other `UNION` cases, whose estimates are
+their rows, stay serial.
 
 `INTERSECT` and `EXCEPT`, with `ALL` or not, are grouping of both sides'
 rows by every column too: the node's path stands next to each of the

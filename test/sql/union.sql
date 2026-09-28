@@ -255,6 +255,30 @@ SELECT a FROM union_a UNION SELECT a FROM union_b UNION ALL SELECT a FROM union_
 SELECT union_same($$SELECT a FROM union_a UNION SELECT a FROM union_b UNION ALL SELECT a FROM union_a WHERE a < 3$$);
 EXPLAIN (COSTS OFF) SELECT t FROM union_a UNION SELECT t FROM union_b;
 SELECT union_same($$SELECT t FROM union_a UNION SELECT t FROM union_b$$);
+-- Under a Gather: the node's partial grouping of every participant's rows
+-- of the branches over its parallel Append, TessGather, and its grouping
+-- of their groups above; at the default costs over 200000 rows whose keys
+-- the planner knows few, read in parallel whatever their size. NULL a
+-- value of its own, two columns, a count above, the workers alone; a
+-- branch without a partial path leaves the UNION serial, as the core's.
+CREATE TABLE union_keys AS
+SELECT i % 10 AS b, CASE WHEN i % 11 = 0 THEN NULL ELSE i % 13 END AS c
+FROM generate_series(1, 200000) AS i;
+ANALYZE union_keys;
+SET max_parallel_workers_per_gather = 2;
+SET min_parallel_table_scan_size = 0;
+EXPLAIN (COSTS OFF) SELECT c, b FROM union_keys WHERE b < 5 UNION SELECT c, b FROM union_keys WHERE b > 3;
+SELECT union_same($$SELECT c, b FROM union_keys WHERE b < 5 UNION SELECT c, b FROM union_keys WHERE b > 3$$);
+SELECT union_same($$SELECT count(*), sum(x) FROM (SELECT c AS x FROM union_keys UNION SELECT b FROM union_keys WHERE c IS NULL) AS s$$);
+SET parallel_leader_participation = off;
+SELECT union_same($$SELECT c, b FROM union_keys WHERE b < 5 UNION SELECT c, b FROM union_keys WHERE b > 3$$);
+RESET parallel_leader_participation;
+ALTER TABLE union_b SET (parallel_workers = 0);
+EXPLAIN (COSTS OFF) SELECT c FROM union_keys UNION SELECT a FROM union_b;
+ALTER TABLE union_b RESET (parallel_workers);
+SET max_parallel_workers_per_gather = 0;
+RESET min_parallel_table_scan_size;
+DROP TABLE union_keys;
 -- INTERSECT and EXCEPT, with ALL or not: grouping of both sides by every
 -- column, the left side's rows first, counting each group's rows and the
 -- right side's; a group goes out as many times as the operation says.

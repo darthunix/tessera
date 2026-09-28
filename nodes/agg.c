@@ -21,6 +21,7 @@
 #include "optimizer/prep.h"
 #include "optimizer/tlist.h"
 #include "parser/parse_agg.h"
+#include "port/pg_bitutils.h"
 #include "storage/shm_toc.h"
 #include "utils/fmgroids.h"
 #include "utils/syscache.h"
@@ -1040,48 +1041,54 @@ partial_keys(List *keys)
 }
 
 /*
- * Grouping without aggregates, by GROUP BY or DISTINCT, in every
- * participant under a gather: for each of the core's partial hashed paths
- * the node's partial path over its batch child, which groups for the
- * gather and empties its table early, TessGather over it, and above that
- * the node's grouping of the participants' groups, where the core would
- * merge them row by row. The final grouping has target, or the partial
- * one's without it, the clauses and the path flags given.
+ * Grouping without aggregates, by GROUP BY, DISTINCT or UNION, in every
+ * participant under a gather: over partial, a partial hashed path of the
+ * core's, the node's partial path over its batch child, which groups for
+ * the gather and empties its table early, TessGather over it, and above
+ * that the node's grouping of the participants' groups, where the core
+ * would merge them row by row; the final grouping has target, or the
+ * partial one's without it, the clauses and the path flags given.
  */
+static void
+add_key_stack_path(PlannerInfo *root, RelOptInfo *partial_rel, RelOptInfo *output_rel,
+				   AggPath *partial, List *keys, PathTarget *target, List *clauses,
+				   int flags, double groups)
+{
+	List	   *tlist = add_to_flat_tlist(NIL, keys);
+	CustomPath *below;
+	CustomPath *path;
+	AggPath    *final;
+	Path	   *gather;
+
+	if (not_from_groups((Node *) partial->path.pathtarget->exprs, keys))
+		return;
+	below = make_agg_path(root, partial, tlist, list_length(keys), AGG_PATH_PARTIAL);
+	if (below == NULL || !below->path.parallel_safe || below->path.parallel_workers <= 0)
+		return;
+	below->path.parallel_aware = true;
+	gather = tess_gather_path(root, partial_rel, &below->path);
+	if (gather == NULL)
+		return;
+	final = create_agg_path(root, output_rel, gather,
+							target != NULL ? target : partial->path.pathtarget,
+							AGG_HASHED, AGGSPLIT_SIMPLE, clauses, NIL, NULL, groups);
+	path = make_agg_path(root, final, tlist, list_length(keys), flags);
+	if (path != NULL)
+		add_path(output_rel, &path->path);
+}
+
+/* The stack over each of the core's partial hashed paths of partial_rel. */
 static void
 create_key_stack_paths(PlannerInfo *root, RelOptInfo *partial_rel, RelOptInfo *output_rel,
 					   AggSplit split, List *keys, PathTarget *target, List *clauses,
 					   int flags, double groups)
 {
-	List	   *tlist = add_to_flat_tlist(NIL, keys);
-
 	if (partial_rel == NULL || keys == NIL || groups <= 0 || !partial_keys(keys))
 		return;
 	foreach_ptr(AggPath, agg, aggregate_templates(partial_rel->partial_pathlist,
 												  AGG_HASHED, split))
-	{
-		CustomPath *partial;
-		CustomPath *path;
-		AggPath    *final;
-		Path	   *gather;
-
-		if (not_from_groups((Node *) agg->path.pathtarget->exprs, keys))
-			continue;
-		partial = make_agg_path(root, agg, tlist, list_length(keys), AGG_PATH_PARTIAL);
-		if (partial == NULL || !partial->path.parallel_safe ||
-			partial->path.parallel_workers <= 0)
-			continue;
-		partial->path.parallel_aware = true;
-		gather = tess_gather_path(root, partial_rel, &partial->path);
-		if (gather == NULL)
-			continue;
-		final = create_agg_path(root, output_rel, gather,
-								target != NULL ? target : agg->path.pathtarget,
-								AGG_HASHED, AGGSPLIT_SIMPLE, clauses, NIL, NULL, groups);
-		path = make_agg_path(root, final, tlist, list_length(keys), flags);
-		if (path != NULL)
-			add_path(output_rel, &path->path);
-	}
+		add_key_stack_path(root, partial_rel, output_rel, agg, keys, target, clauses,
+						   flags, groups);
 }
 
 /*
@@ -1260,6 +1267,42 @@ setop_leaves(Node *node, Relids leaves)
 }
 
 /*
+ * The partial Append of a UNION's branches, as the core builds it for its
+ * Gather (generate_union_paths), which keeps it nowhere else: the first
+ * partial path of each branch of append; NULL when a branch has none or
+ * may not run in parallel.
+ */
+static Path *
+union_partial_append(PlannerInfo *root, RelOptInfo *rel, AppendPath *append)
+{
+	AppendPathInput input = {0};
+	int			workers = 0;
+
+	if (!rel->consider_parallel || max_parallel_workers_per_gather <= 0)
+		return NULL;
+	foreach_ptr(Path, subpath, append->subpaths)
+	{
+		RelOptInfo *branch = subpath->parent;
+		Path	   *partial;
+
+		if (!branch->consider_parallel || branch->partial_pathlist == NIL)
+			return NULL;
+		partial = linitial(branch->partial_pathlist);
+		workers = Max(workers, partial->parallel_workers);
+		input.partial_subpaths = lappend(input.partial_subpaths, partial);
+	}
+	if (enable_parallel_append)
+	{
+		workers = Max(workers, pg_leftmost_one_pos32(list_length(input.partial_subpaths)) + 1);
+		workers = Min(workers, max_parallel_workers_per_gather);
+	}
+	if (workers <= 0)
+		return NULL;
+	return (Path *) create_append_path(root, rel, input, NIL, NULL, workers,
+									   enable_parallel_append, -1);
+}
+
+/*
  * UNION without ALL is grouping of the branches' rows by every column: the
  * node's path next to each of the core's hashed aggregate paths over the
  * Append of the branches, the node's Append below it. Only the set
@@ -1267,7 +1310,10 @@ setop_leaves(Node *node, Relids leaves)
  * limit, which read columns by position, where the node's plan shows its
  * first branch's targets in place of the set operation's columns
  * (tess_plan_setop_columns); a set operation within another could have a
- * projection above that looks for the set operation's own.
+ * projection above that looks for the set operation's own. Once, the
+ * parallel stack over the branches' partial Append: the node's partial
+ * grouping over its parallel Append in every participant, TessGather, and
+ * its grouping of their groups above.
  */
 static void
 create_setop_paths(PlannerInfo *root, RelOptInfo *output_rel)
@@ -1275,6 +1321,7 @@ create_setop_paths(PlannerInfo *root, RelOptInfo *output_rel)
 	SetOperationStmt *top = (SetOperationStmt *) root->parse->setOperations;
 	List	   *keys;
 	List	   *tlist;
+	bool		stacked = false;
 
 	if (top == NULL || IS_DUMMY_REL(output_rel) ||
 		!bms_equal(output_rel->relids, setop_leaves((Node *) top, NULL)))
@@ -1289,9 +1336,13 @@ create_setop_paths(PlannerInfo *root, RelOptInfo *output_rel)
 												  AGG_HASHED, AGGSPLIT_SIMPLE))
 	{
 		CustomPath *path;
+		Path	   *branches = agg->subpath;
 
+		/* The partial Append under the core's Gather. */
+		if (IsA(branches, GatherPath))
+			branches = ((GatherPath *) branches)->subpath;
 		keys = agg->path.pathtarget->exprs;
-		if (!IsA(agg->subpath, AppendPath) || keys == NIL ||
+		if (!IsA(branches, AppendPath) || keys == NIL ||
 			list_length(keys) > TESS_TABLE_MAX_KEYS ||
 			list_length(agg->groupClause) != list_length(keys))
 			continue;
@@ -1308,6 +1359,29 @@ create_setop_paths(PlannerInfo *root, RelOptInfo *output_rel)
 			}
 		}
 		if (keys == NIL)
+			continue;
+		if (!stacked && partial_keys(keys))
+		{
+			/* Under the core's Gather, or as the core would build it. */
+			Path	   *partial_append = branches != agg->subpath ? branches :
+				union_partial_append(root, output_rel, (AppendPath *) branches);
+
+			stacked = true;
+			if (partial_append != NULL)
+			{
+				/* A participant's groups: no more than its rows. */
+				AggPath    *partial = create_agg_path(root, output_rel, partial_append,
+													  agg->path.pathtarget, AGG_HASHED,
+													  AGGSPLIT_SIMPLE, agg->groupClause,
+													  NIL, NULL,
+													  Min(agg->path.rows,
+														  partial_append->rows));
+
+				add_key_stack_path(root, output_rel, output_rel, partial, keys, NULL,
+								   agg->groupClause, 0, agg->path.rows);
+			}
+		}
+		if (branches != agg->subpath)
 			continue;
 		tlist = add_to_flat_tlist(NIL, keys);
 		path = make_agg_path(root, agg, tlist, list_length(keys), 0);
