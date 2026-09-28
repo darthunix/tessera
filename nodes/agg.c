@@ -205,6 +205,14 @@ typedef struct TessAggState
 	uint64		calls;
 	/* The counters of every participant, in a parallel plan. */
 	TessSharedStats *stats;
+	/*
+	 * The child's columns the keys and the arguments read, ascending: read
+	 * first, in that order, so that a provider that deforms a row column
+	 * after column walks it once (a key of a later column read first would
+	 * make it walk the row again for each earlier argument).
+	 */
+	int		   *read_columns;
+	int			nread_columns;
 	/* Generic aggregates: their states' context, and the AggState they see. */
 	AggState   *generic_agg;
 	/*
@@ -1531,6 +1539,9 @@ agg_begin(CustomScanState *css, EState *estate, int eflags)
 	}
 	/* Whole batches; the arguments' columns only for the surviving rows. */
 	request.projection_columns = projection;
+	state->read_columns = palloc_array(int, Max(bms_num_members(projection), 1));
+	for (int column = -1; (column = bms_next_member(projection, column)) >= 0;)
+		state->read_columns[state->nread_columns++] = column;
 	request.output_mode = TESS_OUTPUT_BATCH;
 	tess_input_set_request(state->input, &request);
 	builder.parent_context = estate->es_query_cxt;
@@ -1730,6 +1741,7 @@ accumulate(TessAggState *state, AggValue *value, TessBatch *batch, int nrows)
 	}
 }
 
+static void read_in_order(TessAggState *state, TessBatch *batch);
 static void distinct_reset(TessAggState *state, AggValue *value);
 
 /* Empty every distinct set, before the input is read. */
@@ -1769,6 +1781,7 @@ drain(TessAggState *state)
 			ResetExprContext(state->css.ss.ps.ps_ExprContext);
 			if (state->projection != NULL)
 				input = tess_projection_wrap(state->projection, batch);
+			read_in_order(state, input);
 			for (int index = 0; index < state->nvalues; index++)
 				accumulate(state, &state->values[index], input, rows);
 			if (state->projection != NULL)
@@ -3088,6 +3101,21 @@ agg_spill_memory(TessAggState *state)
 }
 
 /* A computed column of the projection's wrapper, checked. */
+/* The child's columns the node reads, in their order, before it computes anything. */
+static void
+read_in_order(TessAggState *state, TessBatch *batch)
+{
+	if (state->nread_columns < 2)
+		return;
+	for (int index = 0; index < state->nread_columns; index++)
+	{
+		TessDatumColumn column = TESS_STRUCT_INITIALIZER(TessDatumColumn);
+
+		batch->ops->get_datum_column(batch, state->read_columns[index], &batch->rows,
+									 TESS_COLUMN_FOR_PROJECTION, &column);
+	}
+}
+
 static void
 computed_column(TessAggState *state, TessBatch *batch, int computed,
 				TessColumnPurpose purpose, TessDatumColumn *result)
@@ -3118,6 +3146,7 @@ group_batch(TessAggState *state, TessBatch *batch)
 	TessRowMask inserted;
 
 	reserve_rows(state, nrows);
+	read_in_order(state, batch);
 	memset(state->valid_bits, 0, sizeof(uint64) * nwords);
 	memset(state->inserted_bits, 0, sizeof(uint64) * nwords);
 	valid = (TessRowMask) {nrows, state->valid_bits};

@@ -118,6 +118,9 @@ SELECT date '2020-01-01' + g AS d, g AS w FROM generate_series(0, 1825) AS g;
 -- take from the unique column underneath.
 CREATE STATISTICS bench_narrow_c1_mod10 ON (c1 % 10) FROM bench_narrow;
 CREATE STATISTICS bench_narrow_c2_mod1000 ON (c2 % 1000) FROM bench_narrow;
+-- The groupings of the anyagg family.
+CREATE STATISTICS bench_mixed_d_mod100 ON (d % 100) FROM bench_mixed;
+CREATE STATISTICS bench_mixed_a_mod50000 ON (a % 50000) FROM bench_mixed;
 
 VACUUM (ANALYZE) bench_narrow;
 VACUUM (ANALYZE) bench_wide;
