@@ -273,6 +273,14 @@ keydict_value_equal(KeyDict *dict, Datum a, Datum b)
 	return DatumGetBool(FunctionCall2Coll(&dict->eqfn, dict->collation, a, b));
 }
 
+/*
+ * Filled to three quarters, not simplehash's nine tenths: near that the
+ * robin hood runs grow long, and a dictionary of 450 000 values made for
+ * the planner's estimate of as many, 86 % full, took 17 % more of the
+ * grouping (half the fill did no better).
+ */
+#define KEYDICT_FILLFACTOR 0.75
+#define SH_FILLFACTOR (KEYDICT_FILLFACTOR)
 #define SH_PREFIX keydict
 #define SH_ELEMENT_TYPE KeyEntry
 #define SH_KEY_TYPE Datum
@@ -3741,7 +3749,8 @@ key_dict_reset(KeyDict *dict, uint64 values)
 	 * groups is known and within a quarter of hash_mem: a dictionary grown
 	 * from 256 to half a million values took 5 % of an INTERSECT.
 	 */
-	values = Min(values, get_hash_memory_limit() / 4 / (sizeof(KeyEntry) * 2 + sizeof(Datum)));
+	values = Min(values, get_hash_memory_limit() / 4 /
+				 (sizeof(KeyEntry) * 2 / KEYDICT_FILLFACTOR + sizeof(Datum)));
 	values = Max(values, 256);
 	dict->table = keydict_create(dict->context, values, dict);
 	dict->slots = values;
