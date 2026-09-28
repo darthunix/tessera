@@ -2302,6 +2302,11 @@
   было 358.6), setop_few 50.6/95.7 (×0.53, было 94.6); остальное как после шага 2. Открыто: в setop_few ветви —
   подзапросы с выражением (c1 % 1000), спланированные без пакетного родителя: их путь — Seq Scan ядра, pack его
   копирует; нужен пакетный путь ветви (TessHeapScan в подзапросе) — отдельным решением по замеру.
+  Сделано 4) (2026-09-28): docs/nodes.md — раздел TessAppend (планирование, исполнение, параллельный режим, тесты),
+  UNION без ALL в разделе TessAgg, секции у TessHeapScan и TessFilter; docs/node.md — wrap_append;
+  docs/runtime.md — Append в tess_batch_input_path и столбцы операции над множествами (tess_plan_setop_columns);
+  writing-a-node.md — TessAppend как образец узла с несколькими пакетными детьми. Итоговый замер — шаг 3
+  (pg-setop-Fj6KaZ, pg-setop-w2-Nd7k3I).
   4) Документы (docs/nodes.md: TessAppend; writing-a-node.md — узел с несколькими пакетными детьми), итоговый
   замер 0) после и запись «Сделано» сюда. Позже, по фактам: пакетный MergeAppend (слияние по словам ключей, как
   TessGatherMerge) — только если объявится упорядоченный UNION ALL в замерах; на Greengage (7.x) секционированные

@@ -513,8 +513,11 @@ A batch parent may stand above any core path: `tess_batch_input_path`
 returns a batch path over the path it is given, the path itself when it is
 one, the heap scan node's path (through the `scan_rows` callback registered
 under `TESS_HEAP_SCAN_NODE_NAME`) when the path is a sequential scan of a
-plain heap table without clauses, and otherwise the pack node's path over
-it, through the `wrap_rows` callback registered under `TESS_PACK_NODE_NAME`.
+plain heap table without clauses, the append node's path (through the
+`wrap_append` callback registered under `TESS_APPEND_NODE_NAME`) in place
+of an `Append` path whose children it can read as batches, and otherwise
+the pack node's path over it, through the `wrap_rows` callback registered
+under `TESS_PACK_NODE_NAME`.
 A parent that evaluates the relation's clauses itself, as the filter node
 does, asks `tess_batch_scan_path` for the native scan first. Both return
 `NULL` for a parameterized path, for a relation with a pseudoconstant clause
@@ -533,6 +536,19 @@ config.children = list_make1(child);
 A parent that adds its path to the same relation as the child copies the
 child first (`*copy = *seqscan`): `add_path` frees a core path that the new
 path dominates, and the wrapped child must outlive it.
+
+A set operation's output columns are `Var`s of no relation (`varno` 0),
+which the core's `Append` and aggregate above it replace by references to
+their first child's targets, and a custom scan's target lists cannot
+carry: setrefs offsets them as a relation's, and `EXPLAIN` cannot name
+them. `tess_plan_create` replaces each of them in every list of the plan
+by the expression of the target of the same number of the first plan down
+from the first child (through the first child of each) whose targets are
+not the set operation's columns, which is what `EXPLAIN` of the core's
+`Append` shows; the nodes above a set operation, a sort and a limit, read
+columns by position. A node that matches its expressions to its child's
+targets in `PlanCustomPath` first calls `tess_plan_setop_columns` on them
+with the child's plan, as `TessAgg` and `TessSort` do.
 
 The pack node sees through a subquery scan: a `SubqueryScanPath` without
 clauses, whose targets are columns of the subquery and whose subquery is

@@ -197,7 +197,12 @@ the request and fetches. The pack node (`nodes/pack.c`) is the model: it
 binds its result slot in `BeginCustomScan`, creates the provider at the
 first execution once the parent's request is frozen and the child's first
 slot is known, and publishes each batch through the output helper, which
-corrects the instrumentation.
+corrects the instrumentation. `TessAppend` (`nodes/append.c`) is the
+model of a node with several batch children and no batch of its own to
+build: an input per child, each sent the parent's request in its own
+columns at the first execution, and one batch envelope whose column
+callback renumbers the column by the current child's layout and asks
+that child's batch.
 
 ## Testing and measuring
 

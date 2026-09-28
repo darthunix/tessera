@@ -9,7 +9,8 @@ module's `set_rel_pathlist` hook, the aggregate node to the grouping stage
 through its `create_upper_paths` hook, the hash join node to joins
 through its `set_join_pathlist` hook, the sort node to the ordered stage
 through another `create_upper_paths` hook, the gather node to the final
-stage through a third. It is loaded after the bridge; loading it without
+stage through a third. The append node, like the pack node, is created by
+batch parents. It is loaded after the bridge; loading it without
 the bridge is an error. A
 running installation preloads both in every session (see
 [bridge.md](bridge.md)):
@@ -56,8 +57,9 @@ first queries is therefore `TessHeapScan → TessFilter → parent`.
 ### Planning
 
 The node publishes `scan_rows`: a path over a sequential scan of a plain
-heap table (`RELKIND_RELATION`, the heap access method, no inheritance, no
-sampling) whose targets are its columns or expressions over them. `tess_batch_scan_path` builds it
+heap table (`RELKIND_RELATION`, the heap access method, no sampling; a
+partition or an inheritance child, not the parent that has them) whose
+targets are its columns or expressions over them. `tess_batch_scan_path` builds it
 for a parent that evaluates the relation's clauses itself, as the filter
 does, and `tess_batch_input_path` prefers it to the pack node for a
 relation without clauses. A pseudoconstant clause keeps both helpers
@@ -271,8 +273,9 @@ scan: `Seq Scan → TessPack → TessFilter → parent`.
 ### Planning
 
 The module's `set_rel_pathlist` hook, after the hook it replaced and the
-enable switch, considers a plain `SELECT` over one heap table without
-inheritance, sampling, row marks or lateral references, with at least one
+enable switch, considers a plain `SELECT` over one heap table, or a
+partition or inheritance child with the clauses the core translated from
+its parent, without sampling, row marks or lateral references, with at least one
 clause and none pseudoconstant, since the planner gates every scan of such
 a relation with a `Result` node that would stand in place of the node's
 children. The clause the planner evaluates first must be a batch filter,
@@ -411,6 +414,18 @@ below the core's sort, unless `enable_hashagg` is off. The pairs' tables
 do not spill, and neither do the groups of a query that has them: the
 node takes the path only when the planner's estimate of the pairs fits
 `hash_mem`, and shows their bytes in `Memory Usage`.
+
+`UNION` without `ALL` is grouping of the branches' rows by every column:
+at the set operation stage (`UPPERREL_SETOP`) the node's path stands next
+to each of the core's hashed aggregates over the `Append` of the
+branches, its keys the columns, 1 to 16 of them, int4 or int8, and its
+child `TessAppend` over the branches' batch paths. Only the set
+operation of the whole query (of a subquery, when it is one) gets it:
+above that the core puts only a sort and a limit, which read columns by
+position, while a set operation within another could have a projection
+above it that looks for the set operation's own columns, which the
+node's plan shows as its first branch's (see "Building paths" in
+[runtime.md](runtime.md)). The groups spill as those of `GROUP BY` do.
 
 ### Planning
 
@@ -1224,6 +1239,87 @@ past both ends, and one whose first fetch is backward; a correlated
 subquery whose parameter reaches the child, sorted for every outer row,
 and one whose parameter stays above the node, read once; and a generic
 plan with a parameter.
+
+## TessAppend
+
+`TessAppend` (`nodes/append.c`) stands in for the core's `Append` under a
+batch parent: it reads its batch children in turn and gives the parent
+each child's batches as they are. Under the core's `Append` every child's
+batches became rows, and a pack node above made batches of them again:
+13 ms of an aggregate's 31 over two filtered scans of a million rows each
+(the scans alone took 18).
+
+### Planning
+
+The node has no hook. It publishes `wrap_append`, which
+`tess_batch_input_path` calls for an `Append` path under a batch parent,
+so the node never stands under a row-wise one, where the core's `Append`
+passes rows at no cost of its own, and it survives the core rebuilding a
+partitioned table's paths after the scan/join target is applied. It takes
+the `Append` of a base relation's children (a partitioned table, an
+inheritance tree, a `UNION ALL` the planner made a relation of) or of a
+set operation's branches, in a plain `SELECT` without row marks, when the
+path is not parameterized, has two children at least, each of which has
+a batch path (`tess_batch_input_path` again) and one of which at least
+does more than pack rows, and when the core would not prune partitions
+while executing: a clause over a partition key with a parameter or a
+function that is not immutable keeps the core's `Append`, which prunes
+by it (the node would read every partition, correctly but slower). The
+path copies the `Append`'s properties, parallel ones included, and costs
+it less the core's half of `cpu_tuple_cost` a row.
+
+The plan's layout is dense, a column per target; each child's plan has
+as many targets, in the same order. The relation's clauses, which the
+core passes to a custom scan of it, are the children's to evaluate: the
+core translated them to every child. A set operation's columns become the
+first child's targets, as `EXPLAIN` of the core's `Append` shows them.
+
+### Execution
+
+Each child is read through a batch input, which gets the parent's request
+in the child's own columns (every column for a row-wise parent). The
+batch given out is the node's own: the child's row mask and table, and
+`get_datum_column` that renumbers the column by the child's layout and
+asks the child's batch, so nothing is copied. A bound from a limit above
+goes to every child, as `ExecSetTupleBound` passes it to the children of
+an `Append`. A rescan passes the changed parameters to the children,
+rescans them and starts from the first.
+
+In a parallel plan the path is parallel-aware as the core's Parallel
+Append is, and the node shares its children out the same way: in its
+chunk of the query's shared memory, after the rows of its counter
+(`TessSharedStats`, the batches), a lock, the child a worker looks at
+first and a flag per child that needs no more participants. A worker
+takes the first unfinished child from there on, going round to the first
+partial child; the leader takes them from the last down; a child that is
+not partial is finished as soon as someone takes it, a partial one when
+someone reaches its end, while the others still reading it go on. Without
+shared memory the node reads every child in turn. `EXPLAIN ANALYZE` shows
+the `Batches` given out, every participant's.
+
+### Tests
+
+`test/sql/union.sql` shows the plans and compares every result with
+Tessera off: `UNION ALL` of two and of five branches (an empty table, a
+branch without rows, a constant target, a plain scan), columns in another
+order in each branch, nested `UNION ALL`, branches of int4 and int8,
+branches of core scans only (the core's `Append`, packed), rows to a
+row-wise parent (the core's `Append`), a hash join and a sort above,
+a limit whose bound reaches a top-N sort in each branch, a correlated
+subquery and an initplan; an inheritance tree; partitions, one of them
+partitioned again, pruned while planning to two and to one, by a
+parameter while executing (the core's `Append`) and a parameter over
+another column (the node); the parallel plans: the children shared out,
+a child without a partial path, three of them with a partial one, the
+workers alone, a rescan under `TessGather`, and a partial `Append` that
+is not parallel-aware. `UNION` without `ALL` over the node, with NULL,
+duplicates, two columns and three branches, `EXPLAIN VERBOSE`, a sort and
+a limit above, in a subquery, spilling at a `work_mem` of 64 kB; a `UNION`
+within another set operation, text columns, `INTERSECT` and `EXCEPT`
+stay the core's. A mutation that skips resetting the shared memory on a
+rescan gives a wrong result there; one that leaves a child that is not
+partial unfinished once a worker takes it does not show: another
+participant reads it again only while the worker is still reading it.
 
 ## TessGather, TessGatherMerge and TessSend
 
