@@ -103,6 +103,22 @@ SELECT pg_temp.measure_pair('setop_many',
 SELECT pg_temp.measure_pair('setop_like',
     $q$SELECT count(*) FROM (SELECT a FROM bench_mixed WHERE b LIKE 'b-1%' UNION SELECT d FROM bench_mixed WHERE e LIKE 'e-2%') AS s$q$,
     :repetitions);
+-- INTERSECT and EXCEPT, grouping both sides by every column: EXCEPT of
+-- 500 000 integers and a third of them, EXCEPT ALL of 1000 values with
+-- many copies each, INTERSECT of 500 000 texts and computed ones through a
+-- dictionary, INTERSECT ALL of integers of 50 000 and 70 000 values.
+SELECT pg_temp.measure_pair('setop_except',
+    'SELECT count(*) FROM (SELECT a FROM bench_mixed EXCEPT SELECT d FROM bench_mixed WHERE d % 3 = 0) AS s',
+    :repetitions);
+SELECT pg_temp.measure_pair('setop_except_all',
+    'SELECT count(*) FROM (SELECT c1 % 1000 FROM bench_narrow EXCEPT ALL SELECT k % 1000 FROM bench_dup) AS s',
+    :repetitions);
+SELECT pg_temp.measure_pair('setop_intersect_text',
+    $q$SELECT count(*) FROM (SELECT b FROM bench_mixed INTERSECT SELECT 'b-' || (c * 2) FROM bench_mixed) AS s$q$,
+    :repetitions);
+SELECT pg_temp.measure_pair('setop_intersect_all',
+    'SELECT count(*) FROM (SELECT c1 % 50000 FROM bench_narrow INTERSECT ALL SELECT c2 % 70000 FROM bench_narrow) AS s',
+    :repetitions);
 
 \copy timings TO 'timings.csv' CSV HEADER
 
@@ -122,11 +138,13 @@ ORDER BY test, mode DESC;
 SET tessera.enable = on;
 SELECT format('EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE on_%s', name)
 FROM unnest(ARRAY['setop_count', 'setop_join', 'setop_part', 'setop_rows',
-                  'setop_few', 'setop_many', 'setop_like']) AS name \gexec
+                  'setop_few', 'setop_many', 'setop_like', 'setop_except', 'setop_except_all',
+                  'setop_intersect_text', 'setop_intersect_all']) AS name \gexec
 SET tessera.enable = off;
 SELECT format('EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE off_%s', name)
 FROM unnest(ARRAY['setop_count', 'setop_join', 'setop_part', 'setop_rows',
-                  'setop_few', 'setop_many', 'setop_like']) AS name \gexec
+                  'setop_few', 'setop_many', 'setop_like', 'setop_except', 'setop_except_all',
+                  'setop_intersect_text', 'setop_intersect_all']) AS name \gexec
 \o
 RESET work_mem;
 DEALLOCATE ALL;

@@ -248,6 +248,23 @@ typedef struct TessAggState
 	CustomScanState css;
 	PlanState  *child;
 	TessInput  *input;
+	/*
+	 * INTERSECT or EXCEPT (the SetOpCmd, -1 for none): the left side is read
+	 * first, then the right, each through its own input, projection and
+	 * layout, which child, input, projection and child_layout name while
+	 * it is read (side); the groups count their rows and their right
+	 * side's. The group being put out, of the walk's current ones, and the
+	 * copies of it still to go (-1 before they are counted).
+	 */
+	int			setop;
+	int			side;
+	PlanState  *sides[2];
+	TessInput  *side_inputs[2];
+	TessProjection *side_projections[2];
+	TessLayout	side_layouts[2];
+	int			setop_count;
+	int			setop_group;
+	int64		setop_copies;
 	TessOutput *output;
 	TessBuilder *builder;
 	/* The arguments as computed columns after the child's; NULL without any. */
@@ -821,6 +838,9 @@ group_cost(PlannerInfo *root, const Path *child, double groups, int nkeys,
 	result->total_cost = startup + run;
 }
 
+static bool key_eqop(Node *key, List *clauses, int *eqop);
+static void create_nonunion_paths(PlannerInfo *root, RelOptInfo *output_rel);
+
 /*
  * The node's path in place of the core's aggregate path: the same planner
  * properties and rows, a lower cost, the batch child over the core path's
@@ -865,24 +885,13 @@ make_agg_path(PlannerInfo *root, const AggPath *agg, List *tlist, int nkeys)
 	 */
 	foreach_node(TargetEntry, entry, tlist)
 	{
-		TessTableKeyKind kind;
-		TypeCacheEntry *type;
-		bool		used = false;
+		int			eqop;
 
 		if (foreach_current_index(entry) >= nkeys)
 			break;
-		if (tess_word_key_kind(exprType((Node *) entry->expr), &kind))
-		{
-			config.node_data = (Node *) lappend_int((List *) config.node_data, 0);
-			continue;
-		}
-		type = lookup_type_cache(exprType((Node *) entry->expr),
-								 TYPECACHE_EQ_OPR | TYPECACHE_HASH_PROC);
-		foreach_node(SortGroupClause, clause, agg->groupClause)
-			used |= clause->eqop == type->eq_opr && clause->hashable;
-		if (!OidIsValid(type->eq_opr) || !OidIsValid(type->hash_proc) || !used)
+		if (!key_eqop((Node *) entry->expr, agg->groupClause, &eqop))
 			return NULL;
-		config.node_data = (Node *) lappend_int((List *) config.node_data, (int) type->eq_opr);
+		config.node_data = (Node *) lappend_int((List *) config.node_data, eqop);
 	}
 	return tess_path_create(&config);
 }
@@ -1072,6 +1081,11 @@ create_setop_paths(PlannerInfo *root, RelOptInfo *output_rel)
 	if (top == NULL || IS_DUMMY_REL(output_rel) ||
 		!bms_equal(output_rel->relids, setop_leaves((Node *) top, NULL)))
 		return;
+	if (top->op != SETOP_UNION)
+	{
+		create_nonunion_paths(root, output_rel);
+		return;
+	}
 	/* add_path changes the list: the candidates are taken first. */
 	foreach_ptr(AggPath, agg, aggregate_templates(output_rel->pathlist,
 												  AGG_HASHED, AGGSPLIT_SIMPLE))
@@ -1101,6 +1115,115 @@ create_setop_paths(PlannerInfo *root, RelOptInfo *output_rel)
 		path = make_agg_path(root, agg, tlist, list_length(keys));
 		if (path != NULL)
 			add_path(output_rel, &path->path);
+	}
+}
+
+/*
+ * A key's equality for the private data: 0 for a word key, else its type's
+ * default equality, which one of the clauses must use; false when the type
+ * has none that hashes.
+ */
+static bool
+key_eqop(Node *key, List *clauses, int *eqop)
+{
+	TessTableKeyKind kind;
+	TypeCacheEntry *type;
+	bool		used = false;
+
+	*eqop = 0;
+	if (tess_word_key_kind(exprType(key), &kind))
+		return true;
+	type = lookup_type_cache(exprType(key), TYPECACHE_EQ_OPR | TYPECACHE_HASH_PROC);
+	foreach_node(SortGroupClause, clause, clauses)
+		used |= clause->eqop == type->eq_opr && clause->hashable;
+	if (!OidIsValid(type->eq_opr) || !OidIsValid(type->hash_proc) || !used)
+		return false;
+	*eqop = (int) type->eq_opr;
+	return true;
+}
+
+/*
+ * INTERSECT and EXCEPT, with ALL or not, are grouping of both sides' rows
+ * by every column, the left side's first, counting each group's rows and
+ * its right side's; each group then goes out as many times as the
+ * operation says. The node's path next to each of the core's SetOp paths
+ * of the whole query (as for UNION), its two batch children the sides'
+ * paths below any sort; the groups spill past hash_mem, where the core's
+ * hashed SetOp would not be chosen. The private data is the grouping one
+ * with the command last.
+ */
+#define SETOP_WORD_SHARE 0.5
+#define SETOP_DICTIONARY_SHARE 0.9
+
+static void
+create_nonunion_paths(PlannerInfo *root, RelOptInfo *output_rel)
+{
+	foreach_ptr(Path, candidate, list_copy(output_rel->pathlist))
+	{
+		SetOpPath  *setop;
+		TessPathConfig config = TESS_STRUCT_INITIALIZER(TessPathConfig);
+		List	   *keys;
+		List	   *data;
+		Path	   *left;
+		Path	   *right;
+		Path		template;
+		Cost		own;
+		bool		dictionary = false;
+
+		if (!IsA(candidate, SetOpPath))
+			continue;
+		setop = (SetOpPath *) candidate;
+		keys = setop->path.pathtarget->exprs;
+		if (keys == NIL || list_length(keys) > TESS_TABLE_MAX_KEYS ||
+			list_length(setop->groupList) != list_length(keys))
+			continue;
+		data = list_make2_int(list_length(keys),
+							  (int) Min(setop->numGroups, (double) PG_INT32_MAX));
+		foreach_ptr(Node, key, keys)
+		{
+			int			eqop;
+
+			if (!key_eqop(key, setop->groupList, &eqop))
+			{
+				data = NIL;
+				break;
+			}
+			dictionary |= eqop != 0;
+			data = lappend_int(data, eqop);
+		}
+		if (data == NIL)
+			continue;
+		left = setop->leftpath;
+		right = setop->rightpath;
+		/* Sorts the core put below for its sorted SetOp: hashing needs none. */
+		while (IsA(left, SortPath) || IsA(left, IncrementalSortPath))
+			left = ((SortPath *) left)->subpath;
+		while (IsA(right, SortPath) || IsA(right, IncrementalSortPath))
+			right = ((SortPath *) right)->subpath;
+		left = tess_batch_input_path(root, left);
+		right = left == NULL ? NULL : tess_batch_input_path(root, right);
+		if (right == NULL)
+			continue;
+		/*
+		 * The sides' batch paths and a share of what the core's SetOp costs
+		 * over its own: the node's took 0.55 of the core's time with keys of
+		 * words, 0.9 with a key through a dictionary (plan 5.13, step 5).
+		 * All of it before the first row, as the groups are made first.
+		 */
+		own = setop->path.total_cost - setop->leftpath->total_cost -
+			setop->rightpath->total_cost;
+		template = setop->path;
+		template.total_cost = left->total_cost + right->total_cost +
+			Max(own, 0) * (dictionary ? SETOP_DICTIONARY_SHARE : SETOP_WORD_SHARE);
+		template.startup_cost = template.total_cost;
+		template.pathkeys = NIL; template.startup_cost *= 0.01; template.total_cost *= 0.01;
+		config.template_path = &template;
+		config.methods = &agg_path_methods;
+		config.node = &tess_agg_node;
+		config.children = list_make2(left, right);
+		config.expressions = add_to_flat_tlist(NIL, keys);
+		config.node_data = (Node *) lappend_int(data, (int) setop->cmd);
+		add_path(output_rel, &tess_path_create(&config)->path);
 	}
 }
 
@@ -1246,6 +1369,37 @@ collect_params(Node *node, List **params)
  * applies it. The private data carries one argument per aggregate, a NULL
  * constant for count(*).
  */
+/*
+ * A set operation's counts as aggregates of the scan tuple: count(*) of a
+ * group's rows, and sum over the side, 0 for the left and 1 for the right,
+ * which each side's projection computes as a constant of its own.
+ */
+static Aggref *
+setop_count(bool side)
+{
+	Aggref	   *agg = makeNode(Aggref);
+
+	agg->aggfnoid = side ? F_SUM_INT4 : F_COUNT_;
+	agg->aggtype = INT8OID;
+	agg->aggtranstype = INT8OID;
+	agg->aggstar = !side;
+	agg->aggkind = AGGKIND_NORMAL;
+	agg->aggsplit = AGGSPLIT_SIMPLE;
+	agg->aggno = -1;
+	agg->aggtransno = -1;
+	agg->location = -1;
+	if (side)
+	{
+		agg->aggargtypes = list_make1_oid(INT4OID);
+		agg->args = list_make1(makeTargetEntry((Expr *) makeConst(INT4OID, -1, InvalidOid,
+																  sizeof(int32),
+																  Int32GetDatum(0),
+																  false, true),
+											   1, NULL, false));
+	}
+	return agg;
+}
+
 static Plan *
 agg_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 		 List *tlist, List *clauses, List *custom_plans)
@@ -1261,6 +1415,7 @@ agg_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 	TessPlanWriter *writer;
 	bool		partial = false;
 	int			nkeys;
+	int			setop = -1;
 
 	tess_path_get_info(best_path, &info);
 	if (!tess_plan_child(best_path, custom_plans, 0, &child))
@@ -1270,6 +1425,44 @@ agg_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 	info.expressions = (List *) tess_plan_setop_columns((Node *) info.expressions, child.plan);
 	path_data = (List *) info.node_data;
 	nkeys = linitial_int(path_data);
+	/* INTERSECT or EXCEPT: the command after the keys' equalities, and two children. */
+	if (list_length(path_data) > 2 + nkeys)
+	{
+		TessPlanChild right = TESS_STRUCT_INITIALIZER(TessPlanChild);
+		int			position = 0;
+
+		setop = llast_int(path_data);
+		if (!tess_plan_child(best_path, custom_plans, 1, &right))
+			elog(ERROR, "TessAgg expected a second batch child");
+		/*
+		 * The keys are the sides' columns by position, the right side's the
+		 * same types: a key found by its expression in the left side's
+		 * targets could name another column of the right side.
+		 */
+		foreach_node(TargetEntry, entry, child.plan->targetlist)
+		{
+			TargetEntry *other;
+
+			if (entry->resjunk || position == nkeys)
+				continue;
+			other = list_nth_node(TargetEntry, right.plan->targetlist, position);
+			if (exprType((Node *) other->expr) != exprType((Node *) entry->expr))
+				elog(ERROR, "TessAgg sides differ in the type of column %d", position + 1);
+			keys = lappend(keys, makeVar(INDEX_VAR, entry->resno,
+										 exprType((Node *) entry->expr),
+										 exprTypmod((Node *) entry->expr),
+										 exprCollation((Node *) entry->expr), 0));
+			position++;
+		}
+		if (position != nkeys)
+			elog(ERROR, "TessAgg side has %d columns, not %d", position, nkeys);
+		info.expressions = lappend(info.expressions,
+								   makeTargetEntry((Expr *) setop_count(false),
+												   nkeys + 1, NULL, false));
+		info.expressions = lappend(info.expressions,
+								   makeTargetEntry((Expr *) setop_count(true),
+												   nkeys + 2, NULL, false));
+	}
 	foreach_ptr(TargetEntry, entry, info.expressions)
 	{
 		Node	   *argument;
@@ -1277,8 +1470,9 @@ agg_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 		/* The grouping expressions, then the aggregates. */
 		if (foreach_current_index(entry) < nkeys)
 		{
-			keys = lappend(keys, resolve_argument((Node *) copyObject(entry->expr),
-												  &child));
+			if (setop < 0)
+				keys = lappend(keys, resolve_argument((Node *) copyObject(entry->expr),
+													  &child));
 			continue;
 		}
 		partial = DO_AGGSPLIT_SKIPFINAL(((Aggref *) entry->expr)->aggsplit);
@@ -1307,10 +1501,12 @@ agg_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 	tess_plan_write_list(writer, "more", more);
 	tess_plan_write_list(writer, "keys", keys);
 	tess_plan_write_int(writer, "groups", lsecond_int(path_data));
-	tess_plan_write_int_list(writer, "key_eqops", list_copy_tail(path_data, 2));
+	tess_plan_write_int_list(writer, "key_eqops",
+							 list_copy_head(list_copy_tail(path_data, 2), nkeys));
+	tess_plan_write_int(writer, "setop", setop);
 	config.methods = &tess_agg_scan_methods;
 	config.layout_policy = TESS_LAYOUT_DENSE;
-	config.qual = partial ? NIL : (List *) root->parse->havingQual;
+	config.qual = partial || setop >= 0 ? NIL : (List *) root->parse->havingQual;
 	config.expressions = params;
 	config.scan_targetlist = info.expressions;
 	config.scanrelid = 0;
@@ -1628,7 +1824,7 @@ agg_begin(CustomScanState *css, EState *estate, int eflags)
 	if (eflags & (EXEC_FLAG_BACKWARD | EXEC_FLAG_MARK))
 		elog(ERROR, "TessAgg supports neither backward scan nor mark/restore");
 	tess_plan_get_info(cscan, &info);
-	if (info.node != &tess_agg_node || info.nchildren != 1 ||
+	if (info.node != &tess_agg_node || info.nchildren < 1 || info.nchildren > 2 ||
 		info.child_names[0] == NULL || cscan->custom_scan_tlist == NIL)
 		elog(ERROR, "TessAgg received a foreign plan");
 	reader = tess_plan_reader_create((List *) info.node_data, TESS_AGG_DATA,
@@ -1639,7 +1835,11 @@ agg_begin(CustomScanState *css, EState *estate, int eflags)
 	keys = tess_plan_read_list(reader, "keys");
 	groups = tess_plan_read_int(reader, "groups");
 	state->groups_estimate = (uint64) Max(groups, 0);
+	state->setop = tess_plan_read_int(reader, "setop");
 	tess_plan_reader_finish(reader);
+	if ((state->setop >= 0) != (info.nchildren == 2) ||
+		(state->setop >= 0 && (list_length(arguments) != 2 || list_length(keys) == 0)))
+		elog(ERROR, "TessAgg received a foreign plan");
 	state->nkeys = list_length(keys);
 	if (state->nkeys > TESS_TABLE_MAX_KEYS ||
 		list_length(arguments) + state->nkeys != list_length(cscan->custom_scan_tlist) ||
@@ -1652,6 +1852,20 @@ agg_begin(CustomScanState *css, EState *estate, int eflags)
 	state->input = tess_input_create(estate->es_query_cxt, state->child);
 	state->child_layout = (TessLayout) TESS_STRUCT_INITIALIZER(TessLayout);
 	tess_plan_get_layout(child_plan, &state->child_layout);
+	if (state->setop >= 0)
+	{
+		Plan	   *right = lsecond(cscan->custom_plans);
+
+		state->sides[0] = state->child;
+		state->side_inputs[0] = state->input;
+		state->side_layouts[0] = state->child_layout;
+		state->sides[1] = ExecInitNode(right, estate, eflags);
+		css->custom_ps = lappend(css->custom_ps, state->sides[1]);
+		state->side_inputs[1] = tess_input_create(estate->es_query_cxt, state->sides[1]);
+		state->side_layouts[1] = (TessLayout) TESS_STRUCT_INITIALIZER(TessLayout);
+		tess_plan_get_layout(right, &state->side_layouts[1]);
+		state->setop_copies = -1;
+	}
 	state->nvalues = list_length(arguments);
 	state->values = palloc0_array(AggValue, Max(state->nvalues, 1));
 	state->status = (TessStatus) TESS_STRUCT_INITIALIZER(TessStatus);
@@ -1798,6 +2012,44 @@ agg_begin(CustomScanState *css, EState *estate, int eflags)
 		config.base_columns = state->child_layout.ncolumns;
 		config.computed = computed;
 		state->projection = tess_projection_create(&config);
+		/*
+		 * The right side: the same keys, its columns by position, and its
+		 * side a constant 1 where the left side's is 0.
+		 */
+		if (state->setop >= 0)
+		{
+			List	   *right = copyObject(computed);
+			TargetEntry *side = list_nth_node(TargetEntry, right, state->values[1].computed);
+			Plan	   *plan = lsecond(cscan->custom_plans);
+			Bitmapset  *columns = NULL;
+			TessRequest side_request = TESS_STRUCT_INITIALIZER(TessRequest);
+
+			if (!IsA(side->expr, Const))
+				elog(ERROR, "TessAgg received a foreign plan");
+			side->expr = (Expr *) makeConst(INT4OID, -1, InvalidOid, sizeof(int32),
+											Int32GetDatum(1), false, true);
+			state->side_projections[0] = state->projection;
+			config.scan_slot = ExecInitExtraTupleSlot(estate,
+													  ExecTypeFromTL(plan->targetlist),
+													  &TTSOpsVirtual);
+			config.scan_tuple = &state->side_layouts[1];
+			config.base_columns = state->side_layouts[1].ncolumns;
+			config.computed = right;
+			state->side_projections[1] = tess_projection_create(&config);
+			foreach_node(TargetEntry, entry, right)
+				foreach_node(Var, var, pull_var_clause((Node *) entry->expr, 0))
+				{
+					int			column = var->varno == INDEX_VAR ?
+						tess_layout_column(&state->side_layouts[1], var->varattno - 1) : -1;
+
+					if (column < 0)
+						elog(ERROR, "TessAgg key names no column of its right side");
+					columns = bms_add_member(columns, column);
+				}
+			side_request.projection_columns = columns;
+			side_request.output_mode = TESS_OUTPUT_BATCH;
+			tess_input_set_request(state->side_inputs[1], &side_request);
+		}
 	}
 	/* Whole batches; the arguments' columns only for the surviving rows. */
 	request.projection_columns = projection;
@@ -1821,7 +2073,10 @@ agg_begin(CustomScanState *css, EState *estate, int eflags)
 				last = Max(last, column);
 			}
 		state->read_columns = palloc_array(int, Max(bms_num_members(projection), 1));
-		for (int column = -1; !ascending && (column = bms_next_member(projection, column)) >= 0;)
+		/* Two sides of two layouts: their columns come as they are asked for. */
+		for (int column = -1;
+			 !ascending && state->setop < 0 &&
+			 (column = bms_next_member(projection, column)) >= 0;)
 			state->read_columns[state->nread_columns++] = column;
 	}
 	request.output_mode = TESS_OUTPUT_BATCH;
@@ -3405,11 +3660,18 @@ key_dict_create(TessAggState *state, Oid eqop, Oid type, Oid collation)
 
 /* Forget every value: the table they numbered is made anew. */
 static void
-key_dict_reset(KeyDict *dict)
+key_dict_reset(KeyDict *dict, uint64 values)
 {
 	MemoryContextReset(dict->context);
-	dict->table = keydict_create(dict->context, 256, dict);
-	dict->slots = 256;
+	/*
+	 * Room for the values expected, where the planner's estimate of the
+	 * groups is known and within a quarter of hash_mem: a dictionary grown
+	 * from 256 to half a million values took 5 % of an INTERSECT.
+	 */
+	values = Min(values, get_hash_memory_limit() / 4 / (sizeof(KeyEntry) * 2 + sizeof(Datum)));
+	values = Max(values, 256);
+	dict->table = keydict_create(dict->context, values, dict);
+	dict->slots = values;
 	dict->values = MemoryContextAlloc(dict->context, sizeof(Datum) * dict->slots);
 	dict->count = 0;
 }
@@ -3908,6 +4170,15 @@ group_batch(TessAggState *state, TessBatch *batch)
 	TessRowMask pending;
 	TessRowMask inserted;
 
+	/*
+	 * The right side of INTERSECT or EXCEPT while every group of the left
+	 * side is in the table: its rows only count into the groups they find,
+	 * and a row of no group, which cannot change what goes out, is dropped,
+	 * as the core's SetOp does; its values get no numbers either.
+	 */
+	bool		probe = state->setop >= 0 && state->side == 1 && !state->replaying &&
+		!state->frozen && state->spill == NULL;
+
 	reserve_rows(state, nrows);
 	if (!state->replaying)
 		read_in_order(state, batch);
@@ -3934,7 +4205,7 @@ group_batch(TessAggState *state, TessBatch *batch)
 				dict->batch_numbers = MemoryContextAlloc(query, sizeof(Datum) * nrows);
 				dict->batch_hashes = MemoryContextAlloc(query, sizeof(uint32) * nrows);
 			}
-			keydict_numbers(dict, column, &batch->rows, !state->frozen,
+			keydict_numbers(dict, column, &batch->rows, !state->frozen && !probe,
 							dict->batch_numbers, dict->batch_hashes);
 			state->number_columns[key] = *column;
 			state->number_columns[key].values = dict->batch_numbers;
@@ -4023,11 +4294,25 @@ group_batch(TessAggState *state, TessBatch *batch)
 		}
 		rows_write(state, state->rows_spill, &missing);
 	}
+	else if (probe)
+	{
+		/* No chunk yet: an empty left side, no group to find. */
+		if (state->table.nchunks == 0)
+			memset(state->valid_bits, 0, sizeof(uint64) * nwords);
+		else
+		{
+			check(state, state->kernels->table_probe(&state->table, state->hashes,
+													 state->nkeys, state->table_keys,
+													 &valid, state->offsets, &pending,
+													 &state->status));
+			memcpy(state->valid_bits, state->pending_bits, sizeof(uint64) * nwords);
+		}
+	}
 	else if (state->spill != NULL)
 		agg_find_partitioned(state, &pending, &inserted);
 	else if (state->table.nchunks == 0)
 		add_chunk(state);
-	for (; state->spill == NULL && !state->frozen;)
+	for (; !probe && state->spill == NULL && !state->frozen;)
 	{
 		TessTableStats stats = TESS_STRUCT_INITIALIZER(TessTableStats);
 
@@ -4118,6 +4403,17 @@ group_batch(TessAggState *state, TessBatch *batch)
 }
 
 /* Read every batch of the child into the table of groups. */
+/* Read side `side` of INTERSECT or EXCEPT from now on. */
+static void
+setop_side(TessAggState *state, int side)
+{
+	state->side = side;
+	state->child = state->sides[side];
+	state->input = state->side_inputs[side];
+	state->projection = state->side_projections[side];
+	state->child_layout = state->side_layouts[side];
+}
+
 static void
 group_drain(TessAggState *state)
 {
@@ -4126,7 +4422,7 @@ group_drain(TessAggState *state)
 	state->rows_level = 0;
 	for (int key = 0; key < state->nkeys; key++)
 		if (state->dicts[key] != NULL)
-			key_dict_reset(state->dicts[key]);
+			key_dict_reset(state->dicts[key], state->groups_estimate);
 	/* The groups of a previous table and their states go together. */
 	if (state->generic_agg != NULL)
 		ReScanExprContext(state->generic_agg->curaggcontext);
@@ -4167,6 +4463,12 @@ group_drain(TessAggState *state)
 			return;
 		}
 		batch = tess_input_next(state->input);
+		/* INTERSECT or EXCEPT: the right side after the left. */
+		if (batch == NULL && state->setop >= 0 && state->side == 0)
+		{
+			setop_side(state, 1);
+			continue;
+		}
 		if (batch == NULL)
 			break;
 		rows = tess_row_mask_count(&batch->rows);
@@ -4252,7 +4554,7 @@ rows_drain(TessAggState *state)
 		ReScanExprContext(state->generic_agg->curaggcontext);
 	for (int key = 0; key < state->nkeys; key++)
 		if (state->dicts[key] != NULL)
-			key_dict_reset(state->dicts[key]);
+			key_dict_reset(state->dicts[key], 256);
 	create_table(state);
 	state->frozen = false;
 	state->replaying = true;
@@ -4266,22 +4568,23 @@ rows_drain(TessAggState *state)
 	return true;
 }
 
-static TessBatch *
-next_groups(TessAggState *state)
+/*
+ * The walk's next groups, up to a batch of them: their keys (a number as
+ * its value), flags and states gathered into the node's arrays; 0 when
+ * the walk is over, partitions and partial tables included.
+ */
+static int
+next_chunk(TessAggState *state)
 {
-	ExprContext *econtext = state->css.ss.ps.ps_ExprContext;
-	TupleTableSlot *scan = state->css.ss.ss_ScanTupleSlot;
-
 	for (;;)
 	{
 		uint64		all;
 		TessRowMask groups;
 		int			count;
-		TessBatch  *batch;
 
 		/* A table that spilled has no index once every partition is out. */
 		if (state->table.index == NULL)
-			return NULL;
+			return 0;
 		check(state, state->kernels->table_scan(&state->table,
 												&state->cursor, state->walked,
 												AGG_GROUP_ROWS, &count,
@@ -4300,7 +4603,7 @@ next_groups(TessAggState *state)
 				continue;
 			/* The next partition of a table that spilled. */
 			if (state->spill == NULL || !agg_advance(state))
-				return NULL;
+				return 0;
 			state->cursor = 0;
 			continue;
 		}
@@ -4325,13 +4628,126 @@ next_groups(TessAggState *state)
 												  state->walked, &groups, 0,
 												  (Datum *) state->flag_words,
 												  &state->status));
-		tess_builder_reset(state->builder);
 		for (int index = 0; index < state->nvalues; index++)
 			check(state, state->kernels->table_gather(&state->table,
 													  state->walked, &groups,
 													  sizeof(uint64) * (1 + index),
 													  (Datum *) &state->state_words[index * AGG_GROUP_ROWS],
 													  &state->status));
+		return count;
+	}
+}
+
+/*
+ * The copies of a group INTERSECT or EXCEPT puts out, from its rows and
+ * its right side's: EXCEPT a group of the left side alone, INTERSECT one
+ * of both, and with ALL as many as the left side's rows exceed the
+ * right's, or the fewer of the two.
+ */
+static int64
+setop_copies(TessAggState *state, int group)
+{
+	int64		rows = (int64) state->state_words[0 * AGG_GROUP_ROWS + group];
+	int64		right = (int64) state->state_words[1 * AGG_GROUP_ROWS + group];
+	int64		left = rows - right;
+
+	switch ((SetOpCmd) state->setop)
+	{
+		case SETOPCMD_EXCEPT:
+			return left > 0 && right == 0 ? 1 : 0;
+		case SETOPCMD_EXCEPT_ALL:
+			return Max(left - right, 0);
+		case SETOPCMD_INTERSECT:
+			return left > 0 && right > 0 ? 1 : 0;
+		case SETOPCMD_INTERSECT_ALL:
+			return Min(left, right);
+	}
+	return 0;
+}
+
+/*
+ * The next rows of INTERSECT or EXCEPT, up to a batch: each group of the
+ * walk its copies, a group's copies going on into the next batch when
+ * they do not fit; NULL at the end.
+ */
+static TessBatch *
+setop_groups(TessAggState *state)
+{
+	TupleTableSlot *scan = state->css.ss.ss_ScanTupleSlot;
+	int			emitted = 0;
+
+	tess_builder_reset(state->builder);
+	for (;;)
+	{
+		int			group;
+		TupleTableSlot *row;
+
+		if (state->setop_group >= state->setop_count)
+		{
+			/*
+			 * The rows so far go first: the next groups may come from a
+			 * partition whose reading frees the values they point into.
+			 */
+			if (emitted > 0)
+				return tess_builder_finish(state->builder, InvalidOid);
+			state->setop_count = next_chunk(state);
+			state->setop_group = 0;
+			state->setop_copies = -1;
+			if (state->setop_count == 0)
+				return tess_builder_finish(state->builder, InvalidOid);
+		}
+		group = state->setop_group;
+		if (state->setop_copies < 0)
+			state->setop_copies = setop_copies(state, group);
+		if (state->setop_copies > 0)
+		{
+			ExecClearTuple(scan);
+			for (int key = 0; key < state->nkeys; key++)
+			{
+				scan->tts_values[key] = state->key_values[key][group];
+				scan->tts_isnull[key] = state->key_isnull[key][group];
+			}
+			for (int index = 0; index < state->nvalues; index++)
+				group_value(state, index, group, scan);
+			ExecStoreVirtualTuple(scan);
+			ResetExprContext(state->css.ss.ps.ps_ExprContext);
+			state->css.ss.ps.ps_ExprContext->ecxt_scantuple = scan;
+			row = state->css.ss.ps.ps_ProjInfo != NULL ?
+				ExecProject(state->css.ss.ps.ps_ProjInfo) :
+				ExecCopySlot(state->css.ss.ps.ps_ResultTupleSlot, scan);
+			while (state->setop_copies > 0 && emitted < AGG_GROUP_ROWS)
+			{
+				tess_builder_append_slot(state->builder, row);
+				state->setop_copies--;
+				emitted++;
+			}
+		}
+		if (state->setop_copies == 0)
+		{
+			state->setop_group++;
+			state->setop_copies = -1;
+		}
+		if (emitted == AGG_GROUP_ROWS)
+			return tess_builder_finish(state->builder, InvalidOid);
+	}
+}
+
+static TessBatch *
+next_groups(TessAggState *state)
+{
+	ExprContext *econtext = state->css.ss.ps.ps_ExprContext;
+	TupleTableSlot *scan = state->css.ss.ss_ScanTupleSlot;
+
+	if (state->setop >= 0)
+		return setop_groups(state);
+	for (;;)
+	{
+		int			count = next_chunk(state);
+		TessBatch  *batch;
+
+		if (count == 0)
+			return NULL;
+		tess_builder_reset(state->builder);
 		for (int group = 0; group < count; group++)
 		{
 			TupleTableSlot *row;
@@ -4438,7 +4854,13 @@ agg_end(CustomScanState *css)
 	if (state->stats != NULL)
 		tess_shared_stats_end(state->stats);
 	tess_output_end(state->output);
-	ExecEndNode(state->child);
+	if (state->setop >= 0)
+	{
+		ExecEndNode(state->sides[0]);
+		ExecEndNode(state->sides[1]);
+	}
+	else
+		ExecEndNode(state->child);
 	agg_spill_free(state);
 	rows_spill_free(state);
 	if (state->table_context != NULL)
@@ -4451,13 +4873,32 @@ agg_rescan(CustomScanState *css)
 	TessAggState *state = (TessAggState *) css;
 
 	tess_output_clear(state->output);
-	if (state->projection != NULL)
-		tess_projection_reset(state->projection);
-	/* The core passes changed parameters to outer and inner plans only. */
-	if (css->ss.ps.chgParam != NULL)
-		UpdateChangedParamSet(state->child, css->ss.ps.chgParam);
-	ExecReScan(state->child);
-	tess_input_rescan(state->input);
+	/* INTERSECT or EXCEPT: both sides again, from the left. */
+	if (state->setop >= 0)
+	{
+		for (int side = 0; side < 2; side++)
+		{
+			tess_projection_reset(state->side_projections[side]);
+			if (css->ss.ps.chgParam != NULL)
+				UpdateChangedParamSet(state->sides[side], css->ss.ps.chgParam);
+			ExecReScan(state->sides[side]);
+			tess_input_rescan(state->side_inputs[side]);
+		}
+		setop_side(state, 0);
+		state->setop_count = 0;
+		state->setop_group = 0;
+		state->setop_copies = -1;
+	}
+	else
+	{
+		if (state->projection != NULL)
+			tess_projection_reset(state->projection);
+		/* The core passes changed parameters to outer and inner plans only. */
+		if (css->ss.ps.chgParam != NULL)
+			UpdateChangedParamSet(state->child, css->ss.ps.chgParam);
+		ExecReScan(state->child);
+		tess_input_rescan(state->input);
+	}
 	for (int index = 0; index < state->nvalues; index++)
 	{
 		state->values[index].total = 0;
@@ -4487,7 +4928,15 @@ agg_counters(TessAggState *state, uint64 *values)
 	values[AGG_BATCHES] = state->batches;
 	values[AGG_ROWS] = state->rows;
 	values[AGG_CALLS] = state->calls;
-	if (state->projection != NULL)
+	if (state->setop >= 0)
+		for (int side = 0; side < 2; side++)
+		{
+			const TessProjectionStats *computed =
+				tess_projection_stats(state->side_projections[side]);
+
+			values[AGG_COMPUTED] += computed->chain_datums + computed->row_datums;
+		}
+	else if (state->projection != NULL)
 	{
 		const TessProjectionStats *computed = tess_projection_stats(state->projection);
 
@@ -4529,6 +4978,11 @@ agg_explain(CustomScanState *css, List *ancestors, ExplainState *es)
 														false));
 		}
 		ExplainPropertyList("Group Key", keys, es);
+		if (state->setop >= 0)
+			ExplainPropertyText("Set Operation",
+								state->setop == SETOPCMD_INTERSECT ? "Intersect" :
+								state->setop == SETOPCMD_INTERSECT_ALL ? "Intersect All" :
+								state->setop == SETOPCMD_EXCEPT ? "Except" : "Except All", es);
 	}
 	if (state->partial)
 		ExplainPropertyText("Partial Mode", "Partial", es);

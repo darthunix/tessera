@@ -834,22 +834,28 @@ SELECT parallel_same($$SELECT x, (SELECT count(*) FROM parallel_wide WHERE k < x
 (1 row)
 
 EXPLAIN (COSTS OFF) SELECT k FROM parallel_wide WHERE k < 100 INTERSECT SELECT a FROM parallel_wide WHERE a < 500;
-                                          QUERY PLAN                                          
-----------------------------------------------------------------------------------------------
- HashSetOp Intersect
-   ->  Custom Scan (TessGather)
-         Workers Planned: 2
-         ->  Parallel Custom Scan (TessSend)
-               ->  Parallel Custom Scan (TessFilter) on parallel_wide
-                     Batch Filter: (parallel_wide.k < 100)
-                     ->  Parallel Custom Scan (TessHeapScan) on parallel_wide
-   ->  Custom Scan (TessGather)
-         Workers Planned: 2
-         ->  Parallel Custom Scan (TessSend)
-               ->  Parallel Custom Scan (TessFilter) on parallel_wide parallel_wide_1
-                     Batch Filter: (parallel_wide_1.a < 500)
-                     ->  Parallel Custom Scan (TessHeapScan) on parallel_wide parallel_wide_1
-(13 rows)
+                                             QUERY PLAN                                             
+----------------------------------------------------------------------------------------------------
+ Custom Scan (TessAgg)
+   Group Key: unnamed_subquery.k
+   Set Operation: Intersect
+   ->  Custom Scan (TessPack)
+         Rows Kept As: forwarded batches
+         ->  Custom Scan (TessGather)
+               Workers Planned: 2
+               ->  Parallel Custom Scan (TessSend)
+                     ->  Parallel Custom Scan (TessFilter) on parallel_wide
+                           Batch Filter: (parallel_wide.k < 100)
+                           ->  Parallel Custom Scan (TessHeapScan) on parallel_wide
+   ->  Custom Scan (TessPack)
+         Rows Kept As: forwarded batches
+         ->  Custom Scan (TessGather)
+               Workers Planned: 2
+               ->  Parallel Custom Scan (TessSend)
+                     ->  Parallel Custom Scan (TessFilter) on parallel_wide parallel_wide_1
+                           Batch Filter: (parallel_wide_1.a < 500)
+                           ->  Parallel Custom Scan (TessHeapScan) on parallel_wide parallel_wide_1
+(19 rows)
 
 SELECT parallel_same($$SELECT md5(string_agg(q::text, ',' ORDER BY q::text)) FROM (SELECT k FROM parallel_wide WHERE k < 100 INTERSECT SELECT a FROM parallel_wide WHERE a < 500) AS q$$);
             parallel_same             

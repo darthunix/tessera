@@ -75,8 +75,11 @@ query down, and where it can, does it speed one up.
   `UNION ALL`, an aggregate over the four range partitions of
   `bench_part`, a `UNION ALL` returned as rows and skipped with `OFFSET`,
   and `UNION` of 1000 and of 2 M distinct values. With the core's
-  `Append` a batch parent packs the rows of batch children again; a ratio
-  below one is the win.
+  `Append` a batch parent packs the rows of batch children again. Four
+  more group both sides of `INTERSECT` and `EXCEPT`: `EXCEPT` of 500 000
+  integers and a third of them, `EXCEPT ALL` of 1000 values with many
+  copies, `INTERSECT` of texts through a dictionary, `INTERSECT ALL` of
+  integers. A ratio below one is the win.
 - **rowwise** (`rowwise.sql`): tables without clauses read under a parent
   of the core that takes rows one at a time: `bit_or` of a column and of
   an expression, one column of sixty, `max` of a text column, a window

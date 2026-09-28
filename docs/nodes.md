@@ -458,6 +458,39 @@ above it that looks for the set operation's own columns, which the
 node's plan shows as its first branch's (see "Building paths" in
 [runtime.md](runtime.md)). The groups spill as those of `GROUP BY` do.
 
+`INTERSECT` and `EXCEPT`, with `ALL` or not, are grouping of both sides'
+rows by every column too: the node's path stands next to each of the
+core's `SetOp` paths of the whole query, hashed or sorted, with two batch
+children, the sides' paths below any sort, and keys of any type the
+grouping takes (words, or values through a dictionary). The node reads
+the left side, then the right, each through an input, a projection and a
+layout of its own, the keys the sides' columns by position; the scan
+tuple adds two aggregates the plan makes, `count(*)` and `sum` over the
+side, a constant each side's projection computes, 0 for the left and 1
+for the right, so that a spilled row keeps its side. After the input a
+group goes out, as its first key values, `EXCEPT` once when only the left
+side has rows, `EXCEPT ALL` as many times as the left side's rows exceed
+the right's, `INTERSECT` once when both have rows, `INTERSECT ALL` as many
+times as the fewer; copies that do not fit a batch go on into the next,
+and a batch goes out before the walk moves to the next groups, whose
+reading may free the values the batch points into. While no group has
+spilled and the table is not frozen, the right side's rows only find
+their groups (`table_probe`, the dictionary looked up without numbering
+new values) and a row of no group is dropped, as the core's `SetOp` does:
+right-side groups cost 15 % of an `INTERSECT` of text. The groups spill
+past `hash_mem` as those of `GROUP BY` do, where the core's hashed `SetOp`
+would not be chosen. Of equal values of different forms (numeric of other
+scales, text under a case-insensitive collation) a group can go out with
+another form than the core's: a dictionary keeps a value's first form of
+the whole input, the core the group's first row's. A dictionary starts
+with room for the planner's estimate of the groups, within a quarter of
+`hash_mem`. The cost is the sides' batch paths and a share of the
+core's `SetOp` over its own inputs, 0.5 with keys of words and 0.9 with a
+key through a dictionary, as measured: 500 000 integers `EXCEPT` a third
+of them 23.9 ms against 57.8, `EXCEPT ALL` of 1000 values 34.9 against
+95.2, `INTERSECT ALL` 60.1 against 170.5, `INTERSECT` of texts 80.6
+against 89.7 (pg-setop-6kROdR).
+
 ### Planning
 
 The module's `create_upper_paths` hook, after the hook it replaced and the
@@ -1493,8 +1526,14 @@ workers alone, a rescan under `TessGather`, and a partial `Append` that
 is not parallel-aware. `UNION` without `ALL` over the node, with NULL,
 duplicates, two columns and three branches, `EXPLAIN VERBOSE`, a sort and
 a limit above, in a subquery, spilling at a `work_mem` of 64 kB; a `UNION`
-within another set operation, text columns, `INTERSECT` and `EXCEPT`
-stay the core's. A mutation that skips resetting the shared memory on a
+within another set operation stays the core's. `INTERSECT` and `EXCEPT`
+with and without `ALL`: NULL keys, duplicates on both sides, an empty
+side, keys of int2, date, text and numeric, sides of other types, a group
+of 2000 copies, numeric 1.0 against 1.000, a sort and a limit above, one
+within another set operation (the core's inside), both kinds of spill at
+64 kB, a correlated subquery. Mutations fail it: the right side's
+constant 0, a group's copies cut at a batch, `EXCEPT ALL` the left rows
+alone, the right side only probing a table that spilled. A mutation that skips resetting the shared memory on a
 rescan gives a wrong result there; one that leaves a child that is not
 partial unfinished once a worker takes it does not show: another
 participant reads it again only while the worker is still reading it.

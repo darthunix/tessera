@@ -240,10 +240,71 @@ RESET work_mem;
 EXPLAIN (COSTS OFF)
 SELECT a FROM union_a UNION SELECT a FROM union_b UNION ALL SELECT a FROM union_empty;
 SELECT union_same($$SELECT a FROM union_a UNION SELECT a FROM union_b UNION ALL SELECT a FROM union_a WHERE a < 3$$);
-SELECT union_same($$SELECT a FROM union_a INTERSECT SELECT a FROM union_b$$);
-SELECT union_same($$SELECT a FROM union_a EXCEPT SELECT a FROM union_b$$);
 EXPLAIN (COSTS OFF) SELECT t FROM union_a UNION SELECT t FROM union_b;
 SELECT union_same($$SELECT t FROM union_a UNION SELECT t FROM union_b$$);
+-- INTERSECT and EXCEPT, with ALL or not: grouping of both sides by every
+-- column, the left side's rows first, counting each group's rows and the
+-- right side's; a group goes out as many times as the operation says.
+-- NULL equals NULL; duplicates on both sides; an empty side; keys of
+-- words and through dictionaries; sides of other types, cast.
+CREATE TABLE setop_l AS
+SELECT i % 40 AS k, (i % 3)::int2 AS s, CASE WHEN i % 11 = 0 THEN NULL ELSE 'v' || (i % 13) END AS t,
+       ((i % 9) * 0.5)::numeric AS n, date '2020-01-01' + i % 5 AS d
+FROM generate_series(1, 2000) AS i;
+CREATE TABLE setop_r AS
+SELECT i % 25 AS k, (i % 2)::int2 AS s, CASE WHEN i % 7 = 0 THEN NULL ELSE 'v' || (i % 17) END AS t,
+       CASE WHEN i % 2 = 0 THEN ((i % 9) * 0.5)::numeric ELSE ((i % 9) * 0.5)::numeric(10, 3) END AS n,
+       date '2020-01-01' + i % 3 AS d
+FROM generate_series(1, 700) AS i;
+INSERT INTO setop_l VALUES (NULL, NULL, NULL, NULL, NULL), (NULL, NULL, NULL, NULL, NULL);
+INSERT INTO setop_r VALUES (NULL, NULL, NULL, NULL, NULL);
+ANALYZE setop_l, setop_r;
+EXPLAIN (COSTS OFF) SELECT k, t FROM setop_l EXCEPT SELECT k, t FROM setop_r;
+EXPLAIN (COSTS OFF) SELECT k FROM setop_l INTERSECT ALL SELECT k FROM setop_r;
+SELECT union_same($$SELECT k, t FROM setop_l EXCEPT SELECT k, t FROM setop_r$$);
+SELECT union_same($$SELECT k, t FROM setop_l EXCEPT ALL SELECT k, t FROM setop_r$$);
+SELECT union_same($$SELECT k, t FROM setop_l INTERSECT SELECT k, t FROM setop_r$$);
+SELECT union_same($$SELECT k, t FROM setop_l INTERSECT ALL SELECT k, t FROM setop_r$$);
+SELECT union_same($$SELECT k FROM setop_l EXCEPT ALL SELECT k FROM setop_r$$);
+SELECT union_same($$SELECT k FROM setop_r EXCEPT ALL SELECT k FROM setop_l$$);
+SELECT union_same($$SELECT s, d FROM setop_l INTERSECT ALL SELECT s, d FROM setop_r$$);
+SELECT union_same($$SELECT n FROM setop_l EXCEPT SELECT n FROM setop_r$$);
+-- Of equal values of other scales a group's may differ from the core's: a
+-- dictionary keeps a value's first form of the whole input, the core the
+-- group's first row's.
+SELECT union_same($$SELECT round(n, 3), k FROM (SELECT n, k FROM setop_l INTERSECT ALL SELECT n, k FROM setop_r) AS q$$);
+SELECT union_same($$SELECT t FROM setop_l EXCEPT ALL SELECT t FROM setop_r WHERE k > 100$$);
+SELECT union_same($$SELECT t FROM setop_l WHERE k > 100 INTERSECT SELECT t FROM setop_r$$);
+SELECT union_same($$SELECT k, t FROM setop_l EXCEPT SELECT k::bigint, t FROM setop_r$$);
+SELECT union_same($$SELECT k + 1, upper(t) FROM setop_l WHERE s = 1 EXCEPT ALL SELECT k, upper(t) FROM setop_r$$);
+-- A group of 2000 copies: its rows go on across batches.
+SELECT union_same($$SELECT 1 FROM setop_l EXCEPT ALL SELECT 1 FROM setop_r WHERE false$$);
+SELECT union_same($$SELECT s FROM setop_l INTERSECT ALL SELECT s FROM setop_l WHERE k < 20$$);
+-- Numeric 1.0 and 1.000 are one group: the left side's value goes out.
+SELECT union_same($$SELECT n::text FROM (SELECT n FROM setop_r INTERSECT SELECT n FROM setop_l) AS q$$);
+SELECT union_same($$SELECT n::text FROM (SELECT n FROM setop_r INTERSECT ALL SELECT n FROM setop_l) AS q$$);
+-- Above: a sort and a limit; within another set operation, the core's.
+EXPLAIN (COSTS OFF)
+SELECT k FROM setop_l EXCEPT SELECT k FROM setop_r ORDER BY 1 DESC LIMIT 3;
+SELECT k FROM setop_l EXCEPT SELECT k FROM setop_r ORDER BY 1 DESC LIMIT 3;
+EXPLAIN (COSTS OFF)
+SELECT k FROM setop_l EXCEPT SELECT k FROM setop_r EXCEPT SELECT a FROM union_a;
+SELECT union_same($$SELECT k FROM setop_l EXCEPT SELECT k FROM setop_r EXCEPT SELECT a FROM union_a WHERE a < 30$$);
+SELECT union_same($$SELECT k FROM setop_l INTERSECT SELECT k FROM setop_r UNION SELECT a FROM union_b WHERE a < 5$$);
+-- Past hash_mem: the groups of words spill their records, the groups of a
+-- dictionary their rows, each with its side.
+SET work_mem = '64kB';
+SELECT union_same($$SELECT count(*), sum(x) FROM (SELECT g AS x FROM generate_series(1, 30000) AS g
+                   EXCEPT ALL SELECT g * 2 FROM generate_series(1, 10000) AS g) AS s$$);
+SELECT union_same($$SELECT count(*), max(x) FROM (SELECT 'k' || (g % 20000) AS x FROM generate_series(1, 40000) AS g
+                   INTERSECT ALL SELECT 'k' || (g * 3) FROM generate_series(1, 10000) AS g) AS s$$);
+SELECT union_same($$SELECT count(*), max(x) FROM (SELECT 'k' || g AS x FROM generate_series(1, 30000) AS g
+                   EXCEPT SELECT 'k' || (g * 7) FROM generate_series(1, 10000) AS g) AS s$$);
+RESET work_mem;
+-- Rescan: a set operation in a correlated subquery is not the query's own.
+SELECT union_same($$SELECT x, (SELECT count(*) FROM (SELECT k FROM setop_l WHERE s = x
+                   EXCEPT SELECT k FROM setop_r) AS q) FROM generate_series(0, 2) AS x$$);
+DROP TABLE setop_l, setop_r;
 -- UNION ALL the planner does not make a relation of, sorted.
 EXPLAIN (VERBOSE, COSTS OFF)
 SELECT a FROM union_a WHERE a > 990 UNION ALL SELECT b FROM union_b WHERE b > 69000 ORDER BY 1 LIMIT 4;
