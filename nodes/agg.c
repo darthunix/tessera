@@ -973,18 +973,82 @@ make_agg_path(PlannerInfo *root, const AggPath *agg, List *tlist, int nkeys, int
 }
 
 /*
- * The partially grouped relation of the grouped one, when the core built
- * partial aggregate paths for it; PostgreSQL passes it to no hook.
+ * The partial relation (UPPERREL_PARTIAL_GROUP_AGG or
+ * UPPERREL_PARTIAL_DISTINCT) of an upper one, when the core built partial
+ * paths for it; PostgreSQL passes the partially grouped one to no hook.
  */
 static RelOptInfo *
-partial_grouping_rel(PlannerInfo *root, RelOptInfo *grouped_rel)
+partial_upper_rel(PlannerInfo *root, UpperRelationKind kind, RelOptInfo *upper_rel)
 {
-	foreach_ptr(RelOptInfo, rel, root->upper_rels[UPPERREL_PARTIAL_GROUP_AGG])
+	foreach_ptr(RelOptInfo, rel, root->upper_rels[kind])
 	{
-		if (bms_equal(rel->relids, grouped_rel->relids))
+		if (bms_equal(rel->relids, upper_rel->relids))
 			return rel->partial_pathlist != NIL ? rel : NULL;
 	}
 	return NULL;
+}
+
+/*
+ * Whether a partial grouping can key its table by these: the node's
+ * partial table empties early, and the dictionaries of keys a word does
+ * not hold would go with it.
+ */
+static bool
+partial_keys(List *keys)
+{
+	foreach_ptr(Node, key, keys)
+	{
+		TessTableKeyKind kind;
+
+		if (!tess_word_key_kind(exprType(key), &kind))
+			return false;
+	}
+	return true;
+}
+
+/*
+ * Grouping without aggregates, by GROUP BY or DISTINCT, in every
+ * participant under a gather: for each of the core's partial hashed paths
+ * the node's partial path over its batch child, which groups for the
+ * gather and empties its table early, TessGather over it, and above that
+ * the node's grouping of the participants' groups, where the core would
+ * merge them row by row. The final grouping has target, or the partial
+ * one's without it, the clauses and the path flags given.
+ */
+static void
+create_key_stack_paths(PlannerInfo *root, RelOptInfo *partial_rel, RelOptInfo *output_rel,
+					   AggSplit split, List *keys, PathTarget *target, List *clauses,
+					   int flags, double groups)
+{
+	List	   *tlist = add_to_flat_tlist(NIL, keys);
+
+	if (partial_rel == NULL || keys == NIL || groups <= 0 || !partial_keys(keys))
+		return;
+	foreach_ptr(AggPath, agg, aggregate_templates(partial_rel->partial_pathlist,
+												  AGG_HASHED, split))
+	{
+		CustomPath *partial;
+		CustomPath *path;
+		AggPath    *final;
+		Path	   *gather;
+
+		if (not_from_groups((Node *) agg->path.pathtarget->exprs, keys))
+			continue;
+		partial = make_agg_path(root, agg, tlist, list_length(keys), AGG_PATH_PARTIAL);
+		if (partial == NULL || !partial->path.parallel_safe ||
+			partial->path.parallel_workers <= 0)
+			continue;
+		partial->path.parallel_aware = true;
+		gather = tess_gather_path(root, partial_rel, &partial->path);
+		if (gather == NULL)
+			continue;
+		final = create_agg_path(root, output_rel, gather,
+								target != NULL ? target : agg->path.pathtarget,
+								AGG_HASHED, AGGSPLIT_SIMPLE, clauses, NIL, NULL, groups);
+		path = make_agg_path(root, final, tlist, list_length(keys), flags);
+		if (path != NULL)
+			add_path(output_rel, &path->path);
+	}
 }
 
 /*
@@ -998,35 +1062,32 @@ partial_grouping_rel(PlannerInfo *root, RelOptInfo *grouped_rel)
  * values and applies HAVING. With GROUP BY each participant keeps a table
  * of its own groups and the core's Finalize HashAggregate merges them.
  * The path is parallel-aware for the counters the node shares; the child
- * divides the work.
+ * divides the work. Without aggregates the node groups above the gather
+ * too (create_key_stack_paths).
  */
 static void
 create_partial_paths(PlannerInfo *root, RelOptInfo *grouped_rel,
 					 GroupPathExtraData *extra, List *keys, double groups)
 {
-	RelOptInfo *partial_rel = partial_grouping_rel(root, grouped_rel);
+	RelOptInfo *partial_rel = partial_upper_rel(root, UPPERREL_PARTIAL_GROUP_AGG, grouped_rel);
 	List	   *tlist = keys != NIL ? add_to_flat_tlist(NIL, keys) : NIL;
 	AggStrategy strategy = keys != NIL ? AGG_HASHED : AGG_PLAIN;
 
 	if (partial_rel == NULL || extra == NULL || !extra->partial_costs_set ||
 		(keys != NIL && groups <= 0))
 		return;
-	if (!collect_aggregates((Node *) partial_rel->reltarget->exprs, keys, &tlist) ||
-		list_length(tlist) == list_length(keys))
+	if (!collect_aggregates((Node *) partial_rel->reltarget->exprs, keys, &tlist))
 		return;
-	/*
-	 * A partial grouping empties its table early: generic states and the
-	 * dictionaries of keys a word does not hold would go with it.
-	 */
-	if (keys != NIL && has_generic(tlist))
-		return;
-	foreach_ptr(Node, key, keys)
+	if (list_length(tlist) == list_length(keys))
 	{
-		TessTableKeyKind kind;
-
-		if (!tess_word_key_kind(exprType(key), &kind))
-			return;
+		create_key_stack_paths(root, partial_rel, grouped_rel, AGGSPLIT_INITIAL_SERIAL, keys,
+							   grouped_rel->reltarget, root->processed_groupClause,
+							   AGG_PATH_HAVING, groups);
+		return;
 	}
+	/* Generic states would go with a table emptied early too. */
+	if ((keys != NIL && has_generic(tlist)) || !partial_keys(keys))
+		return;
 	foreach_ptr(AggPath, agg, aggregate_templates(partial_rel->partial_pathlist,
 												  strategy,
 												  AGGSPLIT_INITIAL_SERIAL))
@@ -1097,8 +1158,9 @@ distinct_fits(PlannerInfo *root, RelOptInfo *input_rel, List *keys, List *tlist)
 /*
  * SELECT DISTINCT is grouping without aggregates: the node's path next to
  * each of the core's hashed distinct paths, over the same input, its keys
- * the distinct expressions. DISTINCT ON, which keeps other columns of a
- * row of each group, needs the order and stays with the core.
+ * the distinct expressions, and the parallel stack over each of its
+ * partial ones. DISTINCT ON, which keeps other columns of a row of each
+ * group, needs the order and stays with the core.
  */
 static void
 create_distinct_paths(PlannerInfo *root, RelOptInfo *input_rel,
@@ -1106,6 +1168,7 @@ create_distinct_paths(PlannerInfo *root, RelOptInfo *input_rel,
 {
 	List	   *keys;
 	List	   *tlist;
+	double		groups = 0;
 
 	if (root->parse->hasDistinctOn || IS_DUMMY_REL(input_rel))
 		return;
@@ -1126,6 +1189,11 @@ create_distinct_paths(PlannerInfo *root, RelOptInfo *input_rel,
 		if (path != NULL)
 			add_path(output_rel, &path->path);
 	}
+	foreach_ptr(Path, path, output_rel->pathlist)
+		groups = Max(groups, path->rows);
+	create_key_stack_paths(root, partial_upper_rel(root, UPPERREL_PARTIAL_DISTINCT, output_rel),
+						   output_rel, AGGSPLIT_SIMPLE, keys, NULL,
+						   root->processed_distinctClause, 0, groups);
 }
 
 /* The relations of a set operation's leaves, the tree's whole in the top one. */
@@ -1584,6 +1652,7 @@ agg_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 	tess_plan_write_int_list(writer, "key_eqops",
 							 list_copy_head(list_copy_tail(path_data, 4), nkeys));
 	tess_plan_write_int(writer, "setop", setop);
+	tess_plan_write_int(writer, "partial", (flags & AGG_PATH_PARTIAL) != 0);
 	config.methods = &tess_agg_scan_methods;
 	config.layout_policy = TESS_LAYOUT_DENSE;
 	config.qual = (flags & AGG_PATH_HAVING) ? (List *) root->parse->havingQual : NIL;
@@ -1916,6 +1985,7 @@ agg_begin(CustomScanState *css, EState *estate, int eflags)
 	groups = tess_plan_read_int(reader, "groups");
 	state->groups_estimate = (uint64) Max(groups, 0);
 	state->setop = tess_plan_read_int(reader, "setop");
+	state->partial = tess_plan_read_int(reader, "partial") != 0;
 	tess_plan_reader_finish(reader);
 	if ((state->setop >= 0) != (info.nchildren == 2) ||
 		(state->setop >= 0 && (list_length(arguments) != 2 || list_length(keys) == 0)))
@@ -1987,7 +2057,8 @@ agg_begin(CustomScanState *css, EState *estate, int eflags)
 		value = &state->values[index++];
 
 		/* The partial values are the whole ones' types: nothing to convert. */
-		state->partial = DO_AGGSPLIT_SKIPFINAL(agg->aggsplit);
+		if (DO_AGGSPLIT_SKIPFINAL(agg->aggsplit) != state->partial)
+			elog(ERROR, "TessAgg received a foreign plan");
 		value->kind = aggregate_kind(agg->aggfnoid);
 		value->wide = agg->aggtranstype == INT8OID;
 		value->function = tess_runtime_api()->functions->find(agg->aggfnoid);

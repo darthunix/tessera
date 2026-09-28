@@ -20,7 +20,7 @@
 
 /* The plan data of TessFilter and TessHashJoin, written by their planners. */
 #define TESS_AGG_DATA "tessera.agg"
-#define TESS_AGG_DATA_VERSION 4
+#define TESS_AGG_DATA_VERSION 5
 #define TESS_FILTER_DATA "tessera.filter"
 #define TESS_FILTER_DATA_VERSION 1
 #define TESS_HASH_JOIN_DATA "tessera.hash_join"
@@ -165,6 +165,7 @@ extern const TessNode tess_gather_merge_node;
 extern const CustomScanMethods tess_gather_merge_scan_methods;
 extern void tess_gather_planner_init(void);
 extern void tess_gather_add_paths(PlannerInfo *root, RelOptInfo *rel);
+extern Path *tess_gather_path(PlannerInfo *root, RelOptInfo *rel, Path *subpath);
 extern Path *tess_gather_merge_path(PlannerInfo *root, RelOptInfo *rel, Path *sorted,
 									PathTarget *target);
 

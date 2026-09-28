@@ -462,6 +462,29 @@ tess_gather_add_paths(PlannerInfo *root, RelOptInfo *rel)
 }
 
 /*
+ * TessGather over subpath, a partial batch path of rel, at the node's cost
+ * of a row, with subpath's target: for a batch parent above, which the
+ * core's gather would give rows. NULL where the node cannot gather it.
+ */
+Path *
+tess_gather_path(PlannerInfo *root, RelOptInfo *rel, Path *subpath)
+{
+	GatherPath *gather;
+	Path	   *path;
+	double		rows;
+
+	if (!*tess_runtime_api()->settings->enable || !tess_batch_gather)
+		return NULL;
+	rows = compute_gather_rows(subpath);
+	gather = create_gather_path(root, rel, subpath, subpath->pathtarget, NULL, &rows);
+	path = make_gather_path(root, gather);
+	if (path == NULL)
+		return NULL;
+	discount_transfer(path, gather->path.rows, 1.0);
+	return path;
+}
+
+/*
  * TessGatherMerge over sorted, a partial path of the node's sort in the
  * ordered relation, at the node's cost of a row, projected to target when
  * that differs; NULL where the node cannot merge it.

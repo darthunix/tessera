@@ -511,6 +511,121 @@ SELECT parallel_same($$SELECT b, sum(a) FROM parallel_t GROUP BY b$$);
 (1 row)
 
 RESET parallel_leader_participation;
+-- GROUP BY without aggregates and DISTINCT under a Gather: the node's
+-- partial grouping in every participant, TessGather, and the node's own
+-- grouping of their groups above, where the core would merge them row by
+-- row. 200000 rows at the default cost of a gathered row, where the plan
+-- is worth the workers, keys of few values the planner knows; NULL a group
+-- of its own, two keys, an int8 and an expression, a target above the keys,
+-- a count above; the workers alone.
+CREATE TABLE parallel_keys AS
+SELECT CASE WHEN i % 7 = 0 THEN NULL ELSE i END AS a, i % 10 AS b,
+       CASE WHEN i % 11 = 0 THEN NULL ELSE i % 13 END AS c
+FROM generate_series(1, 200000) AS i;
+ANALYZE parallel_keys;
+SET parallel_tuple_cost = 0.1;
+EXPLAIN (COSTS OFF) SELECT b FROM parallel_keys WHERE a > 100 GROUP BY b;
+                                     QUERY PLAN                                     
+------------------------------------------------------------------------------------
+ Custom Scan (TessAgg)
+   Group Key: b
+   ->  Custom Scan (TessGather)
+         Workers Planned: 2
+         ->  Parallel Custom Scan (TessSend)
+               ->  Parallel Custom Scan (TessAgg)
+                     Group Key: b
+                     Partial Mode: Partial
+                     ->  Parallel Custom Scan (TessFilter) on parallel_keys
+                           Batch Filter: (a > 100)
+                           ->  Parallel Custom Scan (TessHeapScan) on parallel_keys
+(11 rows)
+
+SELECT parallel_same($$SELECT b FROM parallel_keys WHERE a > 100 GROUP BY b$$);
+               parallel_same               
+-------------------------------------------
+ {(0),(1),(2),(3),(4),(5),(6),(7),(8),(9)}
+(1 row)
+
+EXPLAIN (COSTS OFF) SELECT DISTINCT c % 5, b FROM parallel_keys;
+                                  QUERY PLAN                                  
+------------------------------------------------------------------------------
+ Custom Scan (TessAgg)
+   Group Key: (c % 5), b
+   ->  Custom Scan (TessGather)
+         Workers Planned: 2
+         ->  Parallel Custom Scan (TessSend)
+               ->  Parallel Custom Scan (TessAgg)
+                     Group Key: (c % 5), b
+                     Partial Mode: Partial
+                     ->  Parallel Custom Scan (TessHeapScan) on parallel_keys
+(9 rows)
+
+SELECT parallel_same($$SELECT DISTINCT c % 5, b FROM parallel_keys$$);
+                                                                                                                                                                                                                                      parallel_same                                                                                                                                                                                                                                      
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ {"(,0)","(,1)","(,2)","(,3)","(,4)","(,5)","(,6)","(,7)","(,8)","(,9)","(0,0)","(0,1)","(0,2)","(0,3)","(0,4)","(0,5)","(0,6)","(0,7)","(0,8)","(0,9)","(1,0)","(1,1)","(1,2)","(1,3)","(1,4)","(1,5)","(1,6)","(1,7)","(1,8)","(1,9)","(2,0)","(2,1)","(2,2)","(2,3)","(2,4)","(2,5)","(2,6)","(2,7)","(2,8)","(2,9)","(3,0)","(3,1)","(3,2)","(3,3)","(3,4)","(3,5)","(3,6)","(3,7)","(3,8)","(3,9)","(4,0)","(4,1)","(4,2)","(4,3)","(4,4)","(4,5)","(4,6)","(4,7)","(4,8)","(4,9)"}
+(1 row)
+
+SELECT parallel_same($$SELECT c % 7 + 1, b::bigint * 10000000000 FROM parallel_keys GROUP BY c % 7, b::bigint * 10000000000$$);
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              parallel_same                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ {"(,0)","(,10000000000)","(,20000000000)","(,30000000000)","(,40000000000)","(,50000000000)","(,60000000000)","(,70000000000)","(,80000000000)","(,90000000000)","(1,0)","(1,10000000000)","(1,20000000000)","(1,30000000000)","(1,40000000000)","(1,50000000000)","(1,60000000000)","(1,70000000000)","(1,80000000000)","(1,90000000000)","(2,0)","(2,10000000000)","(2,20000000000)","(2,30000000000)","(2,40000000000)","(2,50000000000)","(2,60000000000)","(2,70000000000)","(2,80000000000)","(2,90000000000)","(3,0)","(3,10000000000)","(3,20000000000)","(3,30000000000)","(3,40000000000)","(3,50000000000)","(3,60000000000)","(3,70000000000)","(3,80000000000)","(3,90000000000)","(4,0)","(4,10000000000)","(4,20000000000)","(4,30000000000)","(4,40000000000)","(4,50000000000)","(4,60000000000)","(4,70000000000)","(4,80000000000)","(4,90000000000)","(5,0)","(5,10000000000)","(5,20000000000)","(5,30000000000)","(5,40000000000)","(5,50000000000)","(5,60000000000)","(5,70000000000)","(5,80000000000)","(5,90000000000)","(6,0)","(6,10000000000)","(6,20000000000)","(6,30000000000)","(6,40000000000)","(6,50000000000)","(6,60000000000)","(6,70000000000)","(6,80000000000)","(6,90000000000)","(7,0)","(7,10000000000)","(7,20000000000)","(7,30000000000)","(7,40000000000)","(7,50000000000)","(7,60000000000)","(7,70000000000)","(7,80000000000)","(7,90000000000)"}
+(1 row)
+
+SELECT parallel_same($$SELECT count(*), sum(x) FROM (SELECT DISTINCT c * 1000 + b AS x FROM parallel_keys) AS s$$);
+  parallel_same   
+------------------
+ {"(131,780585)"}
+(1 row)
+
+SET parallel_leader_participation = off;
+SELECT parallel_same($$SELECT DISTINCT c % 5, b FROM parallel_keys$$);
+                                                                                                                                                                                                                                      parallel_same                                                                                                                                                                                                                                      
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ {"(,0)","(,1)","(,2)","(,3)","(,4)","(,5)","(,6)","(,7)","(,8)","(,9)","(0,0)","(0,1)","(0,2)","(0,3)","(0,4)","(0,5)","(0,6)","(0,7)","(0,8)","(0,9)","(1,0)","(1,1)","(1,2)","(1,3)","(1,4)","(1,5)","(1,6)","(1,7)","(1,8)","(1,9)","(2,0)","(2,1)","(2,2)","(2,3)","(2,4)","(2,5)","(2,6)","(2,7)","(2,8)","(2,9)","(3,0)","(3,1)","(3,2)","(3,3)","(3,4)","(3,5)","(3,6)","(3,7)","(3,8)","(3,9)","(4,0)","(4,1)","(4,2)","(4,3)","(4,4)","(4,5)","(4,6)","(4,7)","(4,8)","(4,9)"}
+(1 row)
+
+SELECT parallel_same($$SELECT b FROM parallel_keys WHERE a > 100 GROUP BY b$$);
+               parallel_same               
+-------------------------------------------
+ {(0),(1),(2),(3),(4),(5),(6),(7),(8),(9)}
+(1 row)
+
+RESET parallel_leader_participation;
+-- Rescanned in a join: each participant groups its share anew.
+SET enable_material = off;
+EXPLAIN (COSTS OFF)
+SELECT x, n FROM (SELECT count(*) AS n FROM (SELECT DISTINCT c % 5 FROM parallel_keys) AS d) AS ss
+RIGHT JOIN (VALUES (1), (2)) AS v(x) ON true;
+                                              QUERY PLAN                                              
+------------------------------------------------------------------------------------------------------
+ Nested Loop Left Join
+   ->  Values Scan on "*VALUES*"
+   ->  Custom Scan (TessAgg)
+         ->  Custom Scan (TessPack)
+               Rows Kept As: forwarded batches
+               ->  Subquery Scan on d
+                     ->  Custom Scan (TessAgg)
+                           Group Key: (parallel_keys.c % 5)
+                           ->  Custom Scan (TessGather)
+                                 Workers Planned: 2
+                                 ->  Parallel Custom Scan (TessSend)
+                                       ->  Parallel Custom Scan (TessAgg)
+                                             Group Key: (parallel_keys.c % 5)
+                                             Partial Mode: Partial
+                                             ->  Parallel Custom Scan (TessHeapScan) on parallel_keys
+(15 rows)
+
+SELECT parallel_same($$SELECT x, n FROM (SELECT count(*) AS n FROM (SELECT DISTINCT c % 5 FROM parallel_keys) AS d) AS ss
+RIGHT JOIN (VALUES (1), (2), (3)) AS v(x) ON true$$);
+       parallel_same       
+---------------------------
+ {"(1,6)","(2,6)","(3,6)"}
+(1 row)
+
+RESET enable_material;
+SET parallel_tuple_cost = 0;
+DROP TABLE parallel_keys;
 -- Partial groups past hash_mem go out early, and the table starts anew:
 -- the Finalize Aggregate merges a group's partials, and nothing is written.
 -- A group's rows come together, so a table folds many before it fills.
@@ -567,6 +682,71 @@ SELECT plan_property($$SELECT k, count(*) FROM parallel_spread GROUP BY k$$, 'Te
  t        | t
 (1 row)
 
+-- Without aggregates the same: the groups of the tables emptied early, and
+-- those spilled, come to the node's grouping above more than once each;
+-- the workers alone too.
+EXPLAIN (COSTS OFF) SELECT k FROM parallel_groups GROUP BY k;
+                                   QUERY PLAN                                   
+--------------------------------------------------------------------------------
+ Custom Scan (TessAgg)
+   Group Key: k
+   ->  Custom Scan (TessGather)
+         Workers Planned: 2
+         ->  Parallel Custom Scan (TessSend)
+               ->  Parallel Custom Scan (TessAgg)
+                     Group Key: k
+                     Partial Mode: Partial
+                     ->  Parallel Custom Scan (TessHeapScan) on parallel_groups
+(9 rows)
+
+SELECT parallel_same($$SELECT md5(string_agg(q::text, ',' ORDER BY q::text)) FROM (SELECT k FROM parallel_groups GROUP BY k) AS q$$);
+            parallel_same             
+--------------------------------------
+ {(0b91c9028f2190aa0d696f1adadb7d6b)}
+(1 row)
+
+SELECT plan_property($$SELECT k FROM parallel_groups GROUP BY k$$, 'TessAgg', 'Early Emits')::int > 0 AS early;
+ early 
+-------
+ t
+(1 row)
+
+SET parallel_tuple_cost = 0.1;
+EXPLAIN (COSTS OFF) SELECT DISTINCT k FROM parallel_spread;
+                                   QUERY PLAN                                   
+--------------------------------------------------------------------------------
+ Custom Scan (TessAgg)
+   Group Key: k
+   ->  Custom Scan (TessGather)
+         Workers Planned: 2
+         ->  Parallel Custom Scan (TessSend)
+               ->  Parallel Custom Scan (TessAgg)
+                     Group Key: k
+                     Partial Mode: Partial
+                     ->  Parallel Custom Scan (TessHeapScan) on parallel_spread
+(9 rows)
+
+SELECT parallel_same($$SELECT md5(string_agg(q::text, ',' ORDER BY q::text)) FROM (SELECT DISTINCT k FROM parallel_spread) AS q$$);
+            parallel_same             
+--------------------------------------
+ {(92b696476cf8b49b332fe5c775fc1fa6)}
+(1 row)
+
+SET parallel_leader_participation = off;
+SELECT parallel_same($$SELECT md5(string_agg(q::text, ',' ORDER BY q::text)) FROM (SELECT k FROM parallel_groups GROUP BY k) AS q$$);
+            parallel_same             
+--------------------------------------
+ {(0b91c9028f2190aa0d696f1adadb7d6b)}
+(1 row)
+
+SELECT parallel_same($$SELECT md5(string_agg(q::text, ',' ORDER BY q::text)) FROM (SELECT DISTINCT k FROM parallel_spread) AS q$$);
+            parallel_same             
+--------------------------------------
+ {(92b696476cf8b49b332fe5c775fc1fa6)}
+(1 row)
+
+RESET parallel_leader_participation;
+SET parallel_tuple_cost = 0;
 RESET enable_sort;
 RESET work_mem;
 DROP TABLE parallel_groups, parallel_spread;

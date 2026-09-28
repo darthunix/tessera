@@ -775,6 +775,27 @@ combine functions and applies `HAVING`; its estimate of the groups is
 taken from the core's grouped paths, since the grouped relation's rows
 are set only after the hook.
 
+Grouping without aggregates, `GROUP BY` without them and `SELECT
+DISTINCT` (whose partial relation, `UPPERREL_PARTIAL_DISTINCT`, the hook
+finds too), has nothing for the core's `Finalize` stage to combine, and
+that stage would merge the participants' groups row by row: over each
+of the core's partial hashed paths the stack is the node's all the way,
+its partial path, marked partial in the private data, since no aggregate
+says so, `TessGather` over it (`tess_gather_path`, at the node's cost of
+a gathered row) and the node's grouping of the gathered groups above,
+with the grouped relation's target and `HAVING` for `GROUP BY` and the
+partial one's target for `DISTINCT`. Keys of words only, as for the
+partial stack with aggregates: a partial table empties early, and a
+dictionary's values would go with it. With two workers
+(pg-sort-w2-OZRtZQ, pg-wordkey-w2-Pw1uLw against the build before,
+pg-sort-w2-b9yqFo, pg-wordkey-w2-z8KZiK) `DISTINCT` of 1000 values over
+2 M rows took 11.5 ms against 30.5 before (the core's partial
+`HashAggregate`, `Sort`, `Gather Merge` and `Unique`) and 33.9 for the
+core, `DISTINCT` of 43 824 timestamps 12.3 against 19.5 and 43.4;
+`DISTINCT` of 2 M values stays serial by the estimate, 46 ms against
+314. A path's private data carries flags besides: the query's grouping
+applies `HAVING`, a `DISTINCT` or a set operation above one must not.
+
 ### Execution
 
 `BeginCustomScan` creates a projection over the child's target list with

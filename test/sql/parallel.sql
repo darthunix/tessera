@@ -141,6 +141,39 @@ SELECT plan_property($$SELECT b, sum(a) FROM parallel_t GROUP BY b$$, 'TessAgg',
 SET parallel_leader_participation = off;
 SELECT parallel_same($$SELECT b, sum(a) FROM parallel_t GROUP BY b$$);
 RESET parallel_leader_participation;
+-- GROUP BY without aggregates and DISTINCT under a Gather: the node's
+-- partial grouping in every participant, TessGather, and the node's own
+-- grouping of their groups above, where the core would merge them row by
+-- row. 200000 rows at the default cost of a gathered row, where the plan
+-- is worth the workers, keys of few values the planner knows; NULL a group
+-- of its own, two keys, an int8 and an expression, a target above the keys,
+-- a count above; the workers alone.
+CREATE TABLE parallel_keys AS
+SELECT CASE WHEN i % 7 = 0 THEN NULL ELSE i END AS a, i % 10 AS b,
+       CASE WHEN i % 11 = 0 THEN NULL ELSE i % 13 END AS c
+FROM generate_series(1, 200000) AS i;
+ANALYZE parallel_keys;
+SET parallel_tuple_cost = 0.1;
+EXPLAIN (COSTS OFF) SELECT b FROM parallel_keys WHERE a > 100 GROUP BY b;
+SELECT parallel_same($$SELECT b FROM parallel_keys WHERE a > 100 GROUP BY b$$);
+EXPLAIN (COSTS OFF) SELECT DISTINCT c % 5, b FROM parallel_keys;
+SELECT parallel_same($$SELECT DISTINCT c % 5, b FROM parallel_keys$$);
+SELECT parallel_same($$SELECT c % 7 + 1, b::bigint * 10000000000 FROM parallel_keys GROUP BY c % 7, b::bigint * 10000000000$$);
+SELECT parallel_same($$SELECT count(*), sum(x) FROM (SELECT DISTINCT c * 1000 + b AS x FROM parallel_keys) AS s$$);
+SET parallel_leader_participation = off;
+SELECT parallel_same($$SELECT DISTINCT c % 5, b FROM parallel_keys$$);
+SELECT parallel_same($$SELECT b FROM parallel_keys WHERE a > 100 GROUP BY b$$);
+RESET parallel_leader_participation;
+-- Rescanned in a join: each participant groups its share anew.
+SET enable_material = off;
+EXPLAIN (COSTS OFF)
+SELECT x, n FROM (SELECT count(*) AS n FROM (SELECT DISTINCT c % 5 FROM parallel_keys) AS d) AS ss
+RIGHT JOIN (VALUES (1), (2)) AS v(x) ON true;
+SELECT parallel_same($$SELECT x, n FROM (SELECT count(*) AS n FROM (SELECT DISTINCT c % 5 FROM parallel_keys) AS d) AS ss
+RIGHT JOIN (VALUES (1), (2), (3)) AS v(x) ON true$$);
+RESET enable_material;
+SET parallel_tuple_cost = 0;
+DROP TABLE parallel_keys;
 -- Partial groups past hash_mem go out early, and the table starts anew:
 -- the Finalize Aggregate merges a group's partials, and nothing is written.
 -- A group's rows come together, so a table folds many before it fills.
@@ -164,6 +197,20 @@ ANALYZE parallel_spread;
 SELECT parallel_same($$SELECT md5(string_agg(q::text, ',' ORDER BY q::text)) FROM (SELECT k, count(*), sum(v), min(v), max(v) FROM parallel_spread GROUP BY k) AS q$$);
 SELECT plan_property($$SELECT k, count(*) FROM parallel_spread GROUP BY k$$, 'TessAgg', 'Early Emits') IS NULL AS no_early,
        plan_property($$SELECT k, count(*) FROM parallel_spread GROUP BY k$$, 'TessAgg', 'Disk Usage')::int > 0 AS spilled;
+-- Without aggregates the same: the groups of the tables emptied early, and
+-- those spilled, come to the node's grouping above more than once each;
+-- the workers alone too.
+EXPLAIN (COSTS OFF) SELECT k FROM parallel_groups GROUP BY k;
+SELECT parallel_same($$SELECT md5(string_agg(q::text, ',' ORDER BY q::text)) FROM (SELECT k FROM parallel_groups GROUP BY k) AS q$$);
+SELECT plan_property($$SELECT k FROM parallel_groups GROUP BY k$$, 'TessAgg', 'Early Emits')::int > 0 AS early;
+SET parallel_tuple_cost = 0.1;
+EXPLAIN (COSTS OFF) SELECT DISTINCT k FROM parallel_spread;
+SELECT parallel_same($$SELECT md5(string_agg(q::text, ',' ORDER BY q::text)) FROM (SELECT DISTINCT k FROM parallel_spread) AS q$$);
+SET parallel_leader_participation = off;
+SELECT parallel_same($$SELECT md5(string_agg(q::text, ',' ORDER BY q::text)) FROM (SELECT k FROM parallel_groups GROUP BY k) AS q$$);
+SELECT parallel_same($$SELECT md5(string_agg(q::text, ',' ORDER BY q::text)) FROM (SELECT DISTINCT k FROM parallel_spread) AS q$$);
+RESET parallel_leader_participation;
+SET parallel_tuple_cost = 0;
 RESET enable_sort;
 RESET work_mem;
 DROP TABLE parallel_groups, parallel_spread;
