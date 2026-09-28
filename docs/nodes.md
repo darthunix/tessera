@@ -741,8 +741,8 @@ leader not taking part.
 
 ## TessHashJoin
 
-`TessHashJoin` joins two batch children on equalities of keys a word holds,
-in place of the core's `Hash Join`: it builds the rows of the inner child
+`TessHashJoin` joins two batch children on equalities of keys of any
+hashable type, in place of the core's `Hash Join`: it builds the rows of the inner child
 into the hash table of [table.md](table.md) and probes it with the
 batches of the outer child, so that neither side is handed over one row
 at a time and a batch parent such as `TessAgg` reads the joined rows as
@@ -760,10 +760,18 @@ inner side too (see "Right and full joins" below), with at least one
 equality that compares words bit for bit between a column of each side:
 of integers (int2, int4, int8) in any combination, of two dates, two
 timestamps, two timestamps with time zone or two booleans (a date against
-a timestamp converts, and stays with the core), when the join's target is plain columns and at most
+a timestamp converts, and stays with the core), or, for keys a word does
+not hold (text, numeric, ...), the type's default equality, which has a
+64-bit hash function (`hash_extended_proc` of the type cache), between
+two columns of that type, when the join's target is plain columns and at most
 64 of them, the inner keys and the inner columns of the residual clauses
 are the inner side's. Each such clause, up to 16, is a key of the table;
-the others are residual clauses, evaluated over the joined rows, when
+a key a word does not hold is its value's 64-bit hash by that function
+under the clause's collation (seed 0), kept in the table as an int8, and
+its equality is also a residual clause, which decides whether two rows
+of one hash are a pair: the kernels pick candidates by the hashes, and a
+false one is no pair, for every join kind, spilling and the shared table
+alike. The others are residual clauses, evaluated over the joined rows, when
 they read plain columns only (no placeholder) and are not
 pseudoconstant, in the order the core's hash join evaluates them. An
 outer join, left or anti, splits its clauses as the core does: a clause
@@ -1085,7 +1093,8 @@ is built again; a smaller table stays in the cache, where a miss costs
 less than the check. Under a `Gather` each participant decides on the
 filter of its own table by its own rows. The setting at 1 builds the
 filter at the first batch whatever the sizes, at 0 never. An inner or
-semi join, which drops a row without a pair, then hands the filter to
+semi join, which drops a row without a pair and whose keys are all words
+(the child has a hashed key's value, not its hash), then hands the filter to
 its outer child (`tess_input_set_key_filter`): a TessFilter with row-wise
 clauses takes it and removes the rows it rejects before those clauses
 run, and the join checks no more; it takes the filter back before the
@@ -1155,8 +1164,12 @@ table disabled, it compares an aggregate over the node's partial path,
 rows through the `Gather`, rounds, and the leader not taking part, and
 checks that the rows probed and the matches are the totals of every
 participant. It also shows
-the core's plan without the kernels module, for a full join, clauses
-without an integer key, a text key, hash joins disabled and the switch off.
+the core's plan without the kernels module, for a full join, a text key
+the node takes with its equality as a join filter, a key over an
+expression, hash joins disabled and the switch off; `types.sql` compares
+joins by text and numeric keys of every kind, with an integer key, NULL
+keys, numeric 1.0 against 1.00, a case-insensitive collation, spilling,
+the shared table and no Bloom filter below.
 Spilling, at a `work_mem` of 512 kB: an inner side of about 3 MB with
 duplicates, NULL keys and text, joined with the counters shown for an
 inner and a left join, and compared as rows with text of both sides, a

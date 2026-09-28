@@ -94,8 +94,11 @@ query down, and where it can, does it speed one up.
   text and numeric over `bench_mixed`: a text expression of 99 values, a
   text column of 450 000, with aggregates, numeric of 1000 values, and
   `DISTINCT` and `UNION` of text prefixes. Their values get numbers
-  through a dictionary by the type's hash and equality. A ratio below one
-  is the win.
+  through a dictionary by the type's hash and equality. Hash joins of
+  `bench_tfact` (2 000 000 rows) with `bench_tdim` (100 000) by text, by
+  numeric, by text and an integer, and a semi-join by text: the table
+  keeps the 64-bit hashes of the values, and the equality decides each
+  pair. A ratio below one is the win.
 - **oltp**: short prepared-statement queries, `pgbench -S`, where the
   planner hooks and the loaded modules must not slow down queries that
   never use a batch node. Arrives when more than one hook is installed.

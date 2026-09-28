@@ -543,6 +543,18 @@ typedef struct TessHashJoinState
 	int			inner_keys[TESS_TABLE_MAX_KEYS];
 	TessTableKeyKind outer_kinds[TESS_TABLE_MAX_KEYS];
 	TessTableKeyKind inner_kinds[TESS_TABLE_MAX_KEYS];
+	/*
+	 * A key a word does not hold: its type's 64-bit hash function, whose
+	 * value is the table's key, a residual clause deciding the match; the
+	 * hashes of a batch, in a context reset per batch. fn_oid is
+	 * InvalidOid for a word key.
+	 */
+	FmgrInfo	hashers[TESS_TABLE_MAX_KEYS];
+	Oid			collations[TESS_TABLE_MAX_KEYS];
+	bool		hashed_keys;
+	Datum	   *hash_values[TESS_TABLE_MAX_KEYS];
+	bool	   *hash_isnull[TESS_TABLE_MAX_KEYS];
+	MemoryContext hash_context;
 	/* The key columns of the batch being inserted or probed. */
 	TessDatumColumn key_columns[TESS_TABLE_MAX_KEYS];
 	TessTableKey table_keys[TESS_TABLE_MAX_KEYS];
@@ -840,6 +852,32 @@ static void child_column(TessBatch *batch, int column, const TessRowMask *rows,
 						 TessColumnPurpose purpose, TessDatumColumn *result);
 
 /*
+ * Replace the values of a key a word does not hold by their 64-bit hashes
+ * for the rows, NULL kept.
+ */
+static void
+hash_key_column(TessHashJoinState *state, int key, const TessRowMask *rows,
+				TessDatumColumn *column)
+{
+	FmgrInfo   *hasher = &state->hashers[key];
+	Datum	   *values = state->hash_values[key];
+	bool	   *isnull = state->hash_isnull[key];
+	MemoryContext old = MemoryContextSwitchTo(state->hash_context);
+	int			row = -1;
+
+	while ((row = tess_row_mask_next(rows, row)) >= 0)
+	{
+		isnull[row] = column->isnull[row];
+		if (!isnull[row])
+			values[row] = FunctionCall2Coll(hasher, state->collations[key],
+											column->values[row], Int64GetDatum(0));
+	}
+	MemoryContextSwitchTo(old);
+	column->values = values;
+	column->isnull = isnull;
+}
+
+/*
  * The keys of a batch of one side: each key column, read for the selected
  * rows and hashed in key order, the first key's hash folding in the
  * others'; valid gets the rows whose keys are all non-NULL, since an
@@ -856,13 +894,17 @@ batch_keys(TessHashJoinState *state, TessBatch *batch, const int *columns,
 	TessNullKeys nulls = state->preserve_inner && kinds == state->inner_kinds ?
 		TESS_NULL_KEYS_GROUP : TESS_NULL_KEYS_REJECT;
 
+	if (state->hashed_keys)
+		MemoryContextReset(state->hash_context);
 	for (int key = 0; key < state->nkeys; key++)
 	{
 		TessDatumColumn *keys = &state->key_columns[key];
 		bool		int8 = kinds[key] == TESS_TABLE_KEY_INT8;
+		const TessRowMask *rows = key == 0 ? &batch->rows : valid;
 
-		child_column(batch, columns[key], key == 0 ? &batch->rows : valid,
-					 TESS_COLUMN_FOR_FILTER, keys);
+		child_column(batch, columns[key], rows, TESS_COLUMN_FOR_FILTER, keys);
+		if (OidIsValid(state->hashers[key].fn_oid))
+			hash_key_column(state, key, rows, keys);
 		if (key == 0)
 			check(state, (int8 ? state->kernels->int8_hash :
 						  state->kernels->int4_hash) (keys, NULL, &batch->rows,
@@ -925,6 +967,14 @@ reserve_rows(TessHashJoinState *state, int nrows)
 			pfree(state->inner_values[word]);
 			pfree(state->inner_isnull[word]);
 		}
+		for (int key = 0; key < state->nkeys; key++)
+		{
+			if (state->hash_values[key] != NULL)
+			{
+				pfree(state->hash_values[key]);
+				pfree(state->hash_isnull[key]);
+			}
+		}
 	}
 	state->hashes = MemoryContextAllocZero(context, sizeof(uint32) * nrows);
 	state->offsets = MemoryContextAllocZero(context, sizeof(uint32) * nrows);
@@ -950,6 +1000,13 @@ reserve_rows(TessHashJoinState *state, int nrows)
 														   sizeof(Datum) * nrows);
 		state->inner_isnull[word] = MemoryContextAllocZero(context,
 														   sizeof(bool) * nrows);
+	}
+	for (int key = 0; key < state->nkeys; key++)
+	{
+		if (!OidIsValid(state->hashers[key].fn_oid))
+			continue;
+		state->hash_values[key] = MemoryContextAllocZero(context, sizeof(Datum) * nrows);
+		state->hash_isnull[key] = MemoryContextAllocZero(context, sizeof(bool) * nrows);
 	}
 	state->capacity = nrows;
 }
@@ -5549,9 +5606,12 @@ hand_down_bloom(TessHashJoinState *state)
 {
 	TessKeyFilter filter = TESS_STRUCT_INITIALIZER(TessKeyFilter);
 
-	/* A table that spills: the filter knows only the resident rows. */
+	/*
+	 * A table that spills: the filter knows only the resident rows. A
+	 * hashed key: the scan below has the value, not its hash.
+	 */
 	if ((state->jointype != JOIN_INNER && state->jointype != JOIN_SEMI) ||
-		state->spill != NULL)
+		state->spill != NULL || state->hashed_keys)
 		return;
 	filter.nkeys = state->nkeys;
 	filter.columns = state->outer_keys;
@@ -6400,6 +6460,8 @@ read_node_data(TessHashJoinState *state, const List *data)
 	List	   *inner_keys = tess_plan_read_int_list(reader, "inner_keys");
 	List	   *outer_kinds = tess_plan_read_int_list(reader, "outer_kinds");
 	List	   *inner_kinds = tess_plan_read_int_list(reader, "inner_kinds");
+	List	   *hashers = tess_plan_read_int_list(reader, "key_hashers");
+	List	   *collations = tess_plan_read_int_list(reader, "key_collations");
 	ListCell   *side;
 	ListCell   *column;
 	int			index = 0;
@@ -6426,6 +6488,8 @@ read_node_data(TessHashJoinState *state, const List *data)
 		list_length(inner_keys) != state->nkeys ||
 		list_length(outer_kinds) != state->nkeys ||
 		list_length(inner_kinds) != state->nkeys ||
+		list_length(hashers) != state->nkeys ||
+		list_length(collations) != state->nkeys ||
 		(state->jointype != JOIN_INNER && state->jointype != JOIN_SEMI &&
 		 state->jointype != JOIN_ANTI && state->jointype != JOIN_LEFT) ||
 		(state->filter_batch != NIL &&
@@ -6443,7 +6507,21 @@ read_node_data(TessHashJoinState *state, const List *data)
 			(state->inner_kinds[key] != TESS_TABLE_KEY_INT4 &&
 			 state->inner_kinds[key] != TESS_TABLE_KEY_INT8))
 			elog(ERROR, "TessHashJoin received foreign plan data");
+		state->collations[key] = (Oid) list_nth_int(collations, key);
+		state->hashers[key].fn_oid = InvalidOid;
+		if (OidIsValid((Oid) list_nth_int(hashers, key)))
+		{
+			if (state->outer_kinds[key] != TESS_TABLE_KEY_INT8 ||
+				state->inner_kinds[key] != TESS_TABLE_KEY_INT8)
+				elog(ERROR, "TessHashJoin received foreign plan data");
+			fmgr_info((Oid) list_nth_int(hashers, key), &state->hashers[key]);
+			state->hashed_keys = true;
+		}
 	}
+	if (state->hashed_keys)
+		state->hash_context = AllocSetContextCreate(CurrentMemoryContext,
+													"TessHashJoin key hashes",
+													ALLOCSET_DEFAULT_SIZES);
 	state->sides = palloc_array(int, state->ncolumns);
 	state->child_columns = palloc_array(int, state->ncolumns);
 	forboth(side, sides, column, columns)

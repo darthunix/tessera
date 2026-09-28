@@ -130,7 +130,57 @@ RESET enable_sort;
 RESET work_mem;
 -- Rescan numbers the values anew.
 SELECT types_same($$SELECT x, (SELECT count(*) FROM (SELECT t FROM types_g WHERE w = x GROUP BY t) AS q) FROM generate_series(0, 3) AS x$$);
-DROP TABLE types_g;
+
+-- Hash joins by keys a word does not hold: the table keeps the 64-bit hash
+-- of the value, and the equality stays a join clause that decides the
+-- pair; with a word key, every kind of join, NULL keys that never match,
+-- numeric 1.0 equal to 1.00, a case-insensitive collation.
+CREATE COLLATION types_ci (provider = icu, locale = 'und-u-ks-level2', deterministic = false);
+CREATE TABLE types_h AS
+SELECT i AS id,
+       (CASE WHEN i % 2 = 0 THEN upper('k' || (i % 45)) ELSE 'k' || (i % 45) END) COLLATE types_ci AS c,
+       CASE WHEN i % 9 = 0 THEN NULL ELSE 'k' || (i % 45) END AS t,
+       CASE WHEN i % 11 = 0 THEN NULL ELSE ((i % 35) * 1.5)::numeric END AS n,
+       1.00::numeric AS one, i % 7 AS w
+FROM generate_series(1, 400) AS i;
+ANALYZE types_h;
+EXPLAIN (COSTS OFF) SELECT count(*) FROM types_g JOIN types_h ON types_g.t = types_h.t;
+SELECT types_same($$SELECT count(*), sum(types_h.id) FROM types_g JOIN types_h ON types_g.t = types_h.t$$);
+SELECT types_same($$SELECT count(*), sum(types_h.id) FROM types_g JOIN types_h ON types_g.n = types_h.n$$);
+SELECT types_same($$SELECT count(*) FROM types_g JOIN types_h ON types_g.one = types_h.one AND types_g.w = types_h.w$$);
+SELECT types_same($$SELECT count(*), sum(types_h.id) FROM types_g JOIN types_h ON types_g.t = types_h.t AND types_g.w = types_h.w AND types_g.n = types_h.n$$);
+SELECT types_same($$SELECT types_g.id, types_h.id FROM types_g LEFT JOIN types_h ON types_g.t = types_h.t AND types_g.w = types_h.w WHERE types_g.id < 300$$);
+SELECT types_same($$SELECT types_g.id, types_h.id FROM types_g RIGHT JOIN types_h ON types_g.t = types_h.t AND types_g.w = types_h.w WHERE types_h.id < 100$$);
+SELECT types_same($$SELECT count(*), count(types_g.id), count(types_h.id) FROM types_g FULL JOIN types_h ON types_g.n = types_h.n AND types_g.w = types_h.w$$);
+SELECT types_same($$SELECT count(*) FROM types_g WHERE EXISTS (SELECT FROM types_h WHERE types_h.t = types_g.t AND types_h.w = types_g.w)$$);
+SELECT types_same($$SELECT count(*) FROM types_g WHERE NOT EXISTS (SELECT FROM types_h WHERE types_h.t = types_g.t AND types_h.w = types_g.w)$$);
+SELECT types_same($$SELECT count(*) FROM types_g JOIN types_h ON upper(types_g.t) = upper(types_h.t)$$);
+EXPLAIN (COSTS OFF) SELECT count(*) FROM types_h AS a JOIN types_h AS b ON a.c = b.c;
+SELECT types_same($$SELECT count(*) FROM types_h AS a JOIN types_h AS b ON a.c = b.c$$);
+-- No Bloom filter below: the scan has the values, not their hashes.
+SET tessera.join_bloom_ratio = 1;
+SELECT types_same($$SELECT count(*), sum(types_h.id) FROM types_g JOIN types_h ON types_g.t = types_h.t WHERE types_g.long LIKE '%1%'$$);
+SELECT types_same($$SELECT count(*), sum(types_h.id) FROM types_g JOIN types_h ON types_g.w = types_h.w AND types_g.t = types_h.t WHERE types_g.long LIKE '%1%'$$);
+RESET tessera.join_bloom_ratio;
+-- Workers build one shared table of hashes.
+SET parallel_setup_cost = 0;
+SET parallel_tuple_cost = 0;
+SET min_parallel_table_scan_size = 0;
+SET max_parallel_workers_per_gather = 2;
+EXPLAIN (COSTS OFF) SELECT count(*) FROM types_g JOIN types_h ON types_g.t = types_h.t AND types_g.w = types_h.w;
+SELECT types_same($$SELECT count(*), sum(types_h.id) FROM types_g JOIN types_h ON types_g.t = types_h.t AND types_g.w = types_h.w$$);
+SELECT types_same($$SELECT count(*), count(types_h.id) FROM types_g LEFT JOIN types_h ON types_g.n = types_h.n$$);
+RESET parallel_setup_cost;
+RESET parallel_tuple_cost;
+RESET min_parallel_table_scan_size;
+SET max_parallel_workers_per_gather = 0;
+-- Past hash_mem both sides spill with the hashes as keys.
+SET work_mem = '64kB';
+SELECT types_same($$SELECT count(*), sum(b.id) FROM types_g AS a JOIN types_g AS b ON a.long = b.long AND a.t = b.t$$);
+SELECT types_same($$SELECT count(*), count(b.id) FROM types_g AS a LEFT JOIN types_g AS b ON a.long = b.long AND a.w = b.w$$);
+RESET work_mem;
+DROP TABLE types_g, types_h;
+DROP COLLATION types_ci;
 
 DROP FUNCTION types_order(text);
 DROP FUNCTION types_same(text);

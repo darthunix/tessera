@@ -647,10 +647,12 @@ RESET parallel_tuple_cost;
 RESET min_parallel_table_scan_size;
 RESET enable_parallel_hash;
 
--- No path: clauses without an integer key, another key type, the core's
--- hash join disabled, the batch nodes off.
+-- A text key: the table keeps the hash of the value, and the equality
+-- stays a join clause, which decides the pair.
 EXPLAIN (COSTS OFF) SELECT count(*) FROM jf JOIN jd ON jf.v > jd.n AND jf.note = jd.label;
-EXPLAIN (COSTS OFF) SELECT count(*) FROM jf JOIN jd ON jf.note = jd.label;
+-- No path: a key over an expression, the core's hash join disabled, the
+-- batch nodes off.
+EXPLAIN (COSTS OFF) SELECT count(*) FROM jf JOIN jd ON jf.note = upper(jd.label);
 SET enable_hashjoin = off;
 EXPLAIN (COSTS OFF) SELECT count(*) FROM jf JOIN jd ON jf.fk = jd.id;
 RESET enable_hashjoin;

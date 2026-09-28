@@ -10,6 +10,7 @@
 #include "optimizer/paths.h"
 #include "optimizer/restrictinfo.h"
 #include "utils/fmgroids.h"
+#include "utils/typcache.h"
 
 #include "tessera/expr.h"
 #include "tessera/kernel_ops.h"
@@ -51,6 +52,14 @@ typedef struct JoinKeys
 	List	   *inner;
 	List	   *outer_kinds;
 	List	   *inner_kinds;
+	/*
+	 * A key a word does not hold (text, numeric, ...): the table keeps the
+	 * 64-bit hash of its value by its type's function, 0 for a word key, and
+	 * the clause is also a residual one, which decides whether two rows of
+	 * one hash match.
+	 */
+	List	   *hashers;
+	List	   *collations;
 	/* The other join clauses, which decide with the keys whether rows match. */
 	List	   *residual;
 	/*
@@ -98,11 +107,34 @@ plain_var(Node *node)
 	return IsA(node, Var) && ((Var *) node)->varlevelsup == 0;
 }
 
-/* One clause as a key, when it is an equality of words of a column of each side. */
+/*
+ * The 64-bit hash function of a key a word does not hold: the clause is
+ * its type's default equality, which hashes, between two columns of that
+ * type.
+ */
+static Oid
+key_hasher(const OpExpr *op, const Var *left, const Var *right)
+{
+	TypeCacheEntry *type;
+
+	if (left->vartype != right->vartype)
+		return InvalidOid;
+	type = lookup_type_cache(left->vartype,
+							 TYPECACHE_EQ_OPR | TYPECACHE_HASH_EXTENDED_PROC);
+	if (type->eq_opr != op->opno || !OidIsValid(type->hash_extended_proc))
+		return InvalidOid;
+	return type->hash_extended_proc;
+}
+
+/*
+ * One clause as a key, when it is an equality of words of a column of each
+ * side, or of values its type hashes, *hashed then set.
+ */
 static bool
 add_key(RestrictInfo *rinfo, RelOptInfo *outerrel, RelOptInfo *innerrel,
-		JoinKeys *keys)
+		JoinKeys *keys, bool *hashed)
 {
+	Oid			hasher = InvalidOid;
 	OpExpr	   *op;
 	Node	   *left;
 	Node	   *right;
@@ -116,11 +148,12 @@ add_key(RestrictInfo *rinfo, RelOptInfo *outerrel, RelOptInfo *innerrel,
 		return false;
 	op = (OpExpr *) rinfo->clause;
 	set_opfuncid(op);
-	if (!word_equality(op->opfuncid))
-		return false;
 	left = linitial(op->args);
 	right = lsecond(op->args);
 	if (!plain_var(left) || !plain_var(right))
+		return false;
+	if (!word_equality(op->opfuncid) &&
+		!OidIsValid(hasher = key_hasher(op, (Var *) left, (Var *) right)))
 		return false;
 	if (bms_is_subset(rinfo->left_relids, outerrel->relids) &&
 		bms_is_subset(rinfo->right_relids, innerrel->relids))
@@ -136,9 +169,14 @@ add_key(RestrictInfo *rinfo, RelOptInfo *outerrel, RelOptInfo *innerrel,
 	}
 	else
 		return false;
-	if (!tess_word_key_kind(outer->vartype, &outer_kind) ||
-		!tess_word_key_kind(inner->vartype, &inner_kind))
+	if (OidIsValid(hasher))
+		outer_kind = inner_kind = TESS_TABLE_KEY_INT8;
+	else if (!tess_word_key_kind(outer->vartype, &outer_kind) ||
+			 !tess_word_key_kind(inner->vartype, &inner_kind))
 		return false;
+	keys->hashers = lappend_int(keys->hashers, (int) hasher);
+	keys->collations = lappend_int(keys->collations, (int) op->inputcollid);
+	*hashed = OidIsValid(hasher);
 	keys->rinfos = lappend(keys->rinfos, rinfo);
 	keys->clauses = lappend(keys->clauses, rinfo->clause);
 	keys->outer = lappend(keys->outer, outer);
@@ -188,6 +226,8 @@ find_keys(PlannerInfo *root, RelOptInfo *joinrel, List *restrictlist,
 	memset(keys, 0, sizeof(*keys));
 	foreach_node(RestrictInfo, rinfo, restrictlist)
 	{
+		bool		hashed = false;
+
 		if (IS_OUTER_JOIN(jointype) && RINFO_IS_PUSHED_DOWN(rinfo, joinrel->relids))
 		{
 			if (!residual_supported(rinfo))
@@ -196,8 +236,13 @@ find_keys(PlannerInfo *root, RelOptInfo *joinrel, List *restrictlist,
 			continue;
 		}
 		if (keys->nkeys < TESS_TABLE_MAX_KEYS &&
-			add_key(rinfo, outerrel, innerrel, keys))
+			add_key(rinfo, outerrel, innerrel, keys, &hashed))
+		{
+			/* One hash for two values: the equality decides. */
+			if (hashed)
+				residual = lappend(residual, rinfo);
 			continue;
+		}
 		if (!residual_supported(rinfo))
 			return false;
 		residual = lappend(residual, rinfo);
@@ -294,12 +339,13 @@ make_join_path(PlannerInfo *root, RelOptInfo *joinrel, JoinType jointype,
 	config.flags = CUSTOMPATH_SUPPORT_PROJECTION;
 	config.expressions = list_make5(keys->clauses, keys->outer, keys->inner,
 									keys->residual, keys->filters);
-	config.node_data = (Node *) list_make3(keys->outer_kinds, keys->inner_kinds,
+	config.node_data = (Node *) list_make5(keys->outer_kinds, keys->inner_kinds,
 										   list_make4_int(extra->inner_unique ? 1 : 0,
 														  (int) Min(inner_rows,
 																	(double) PG_INT32_MAX),
 														  (int) jointype,
-														  shared ? 1 : 0));
+														  shared ? 1 : 0),
+										   keys->hashers, keys->collations);
 	return tess_path_create(&config);
 }
 
@@ -590,6 +636,8 @@ join_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 	tess_plan_write_int_list(writer, "inner_keys", inner_columns);
 	tess_plan_write_int_list(writer, "outer_kinds", linitial(data));
 	tess_plan_write_int_list(writer, "inner_kinds", lsecond(data));
+	tess_plan_write_int_list(writer, "key_hashers", list_nth(data, 3));
+	tess_plan_write_int_list(writer, "key_collations", list_nth(data, 4));
 	tess_plan_write_int_list(writer, "residual_batch", residual_batch);
 	tess_plan_write_int_list(writer, "filter_batch", filter_batch);
 	tess_plan_write_int(writer, "jointype", lthird_int(lthird(data)));

@@ -1,6 +1,7 @@
 -- The anykey family: groupings, DISTINCT and UNION keyed by types a word
 -- does not hold (text, numeric), whose values get numbers through a
--- dictionary. A ratio below one is the win.
+-- dictionary, and hash joins by such keys, whose table keeps the values'
+-- hashes. A ratio below one is the win.
 \set ON_ERROR_STOP on
 \if :{?repetitions}
 \else
@@ -79,6 +80,16 @@ SELECT pg_temp.measure_pair('any_distinct',
     'SELECT count(*) FROM (SELECT DISTINCT substr(e, 1, 5) FROM bench_mixed) AS q', :repetitions);
 SELECT pg_temp.measure_pair('any_union',
     'SELECT count(*) FROM (SELECT substr(b, 1, 5) FROM bench_mixed UNION SELECT substr(e, 1, 5) FROM bench_mixed) AS q', :repetitions);
+-- Joins of 2 000 000 rows with 100 000 by text, by numeric, by text and
+-- an integer, and a semi-join by text.
+SELECT pg_temp.measure_pair('any_join_text',
+    'SELECT count(*), sum(d.w) FROM bench_tfact AS f JOIN bench_tdim AS d ON f.k = d.k', :repetitions);
+SELECT pg_temp.measure_pair('any_join_numeric',
+    'SELECT count(*), sum(d.w) FROM bench_tfact AS f JOIN bench_tdim AS d ON f.n = d.n', :repetitions);
+SELECT pg_temp.measure_pair('any_join_two',
+    'SELECT count(*), sum(d.w) FROM bench_tfact AS f JOIN bench_tdim AS d ON f.k = d.k AND f.w = d.w', :repetitions);
+SELECT pg_temp.measure_pair('any_join_semi',
+    'SELECT count(*) FROM bench_tfact AS f WHERE EXISTS (SELECT FROM bench_tdim AS d WHERE d.k = f.k AND d.w < 10)', :repetitions);
 
 \copy timings TO 'timings.csv' CSV HEADER
 
@@ -97,10 +108,10 @@ ORDER BY test, mode DESC;
 \o plans.txt
 SET tessera.enable = on;
 SELECT format('EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE on_%s', name)
-FROM unnest(ARRAY['any_text_few', 'any_text_col', 'any_text_agg', 'any_numeric', 'any_distinct', 'any_union']) AS name \gexec
+FROM unnest(ARRAY['any_text_few', 'any_text_col', 'any_text_agg', 'any_numeric', 'any_distinct', 'any_union', 'any_join_text', 'any_join_numeric', 'any_join_two', 'any_join_semi']) AS name \gexec
 SET tessera.enable = off;
 SELECT format('EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE off_%s', name)
-FROM unnest(ARRAY['any_text_few', 'any_text_col', 'any_text_agg', 'any_numeric', 'any_distinct', 'any_union']) AS name \gexec
+FROM unnest(ARRAY['any_text_few', 'any_text_col', 'any_text_agg', 'any_numeric', 'any_distinct', 'any_union', 'any_join_text', 'any_join_numeric', 'any_join_two', 'any_join_semi']) AS name \gexec
 \o
 RESET work_mem;
 DEALLOCATE ALL;

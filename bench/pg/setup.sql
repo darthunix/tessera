@@ -113,6 +113,20 @@ DROP TABLE IF EXISTS bench_days;
 CREATE TABLE bench_days AS
 SELECT date '2020-01-01' + g AS d, g AS w FROM generate_series(0, 1825) AS g;
 
+-- The joins of the anykey family by text and numeric keys: a dimension of
+-- 100 000 keys and a fact table whose keys spread over it, every 13th NULL.
+DROP TABLE IF EXISTS bench_tdim;
+CREATE TABLE bench_tdim AS
+SELECT 'key-' || g AS k, (g * 1.5)::numeric AS n, g % 100 AS w
+FROM generate_series(1, 100000 * :scale) AS g;
+DROP TABLE IF EXISTS bench_tfact;
+CREATE TABLE bench_tfact AS
+SELECT 'key-' || fk AS k, (fk * 1.5)::numeric AS n, fk % 100 AS w, g AS v
+FROM generate_series(1, 2000000 * :scale) AS g,
+     LATERAL (SELECT CASE WHEN g % 13 = 0 THEN NULL
+                          ELSE (g::bigint * 7919 % (100000 * :scale))::int + 1
+                     END AS fk) AS key;
+
 -- The grouping cases of the win family group by expressions: statistics
 -- on them give the planner the number of groups, which it would otherwise
 -- take from the unique column underneath.
@@ -134,6 +148,8 @@ VACUUM (ANALYZE) bench_mj_inner;
 VACUUM (ANALYZE) bench_part;
 VACUUM (ANALYZE) bench_dates;
 VACUUM (ANALYZE) bench_days;
+VACUUM (ANALYZE) bench_tdim;
+VACUUM (ANALYZE) bench_tfact;
 
 SELECT pg_size_pretty(pg_total_relation_size('bench_narrow')) AS narrow,
        pg_size_pretty(pg_total_relation_size('bench_wide')) AS wide,

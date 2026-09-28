@@ -3089,31 +3089,32 @@ RESET parallel_setup_cost;
 RESET parallel_tuple_cost;
 RESET min_parallel_table_scan_size;
 RESET enable_parallel_hash;
--- No path: clauses without an integer key, another key type, the core's
--- hash join disabled, the batch nodes off.
+-- A text key: the table keeps the hash of the value, and the equality
+-- stays a join clause, which decides the pair.
 EXPLAIN (COSTS OFF) SELECT count(*) FROM jf JOIN jd ON jf.v > jd.n AND jf.note = jd.label;
-                        QUERY PLAN                        
-----------------------------------------------------------
+                  QUERY PLAN                  
+----------------------------------------------
  Custom Scan (TessAgg)
-   ->  Custom Scan (TessPack)
-         ->  Hash Join
-               Hash Cond: (jf.note = jd.label)
-               Join Filter: (jf.v > jd.n)
-               ->  Custom Scan (TessHeapScan) on jf
-               ->  Hash
-                     ->  Custom Scan (TessHeapScan) on jd
-(8 rows)
+   ->  Custom Scan (TessHashJoin)
+         Hash Cond: (jf.note = jd.label)
+         Batch Join Filter: (jf.v > jd.n)
+         Join Filter: (jf.note = jd.label)
+         ->  Custom Scan (TessHeapScan) on jf
+         ->  Custom Scan (TessHeapScan) on jd
+(7 rows)
 
-EXPLAIN (COSTS OFF) SELECT count(*) FROM jf JOIN jd ON jf.note = jd.label;
+-- No path: a key over an expression, the core's hash join disabled, the
+-- batch nodes off.
+EXPLAIN (COSTS OFF) SELECT count(*) FROM jf JOIN jd ON jf.note = upper(jd.label);
                         QUERY PLAN                        
 ----------------------------------------------------------
  Custom Scan (TessAgg)
    ->  Custom Scan (TessPack)
          ->  Hash Join
-               Hash Cond: (jf.note = jd.label)
-               ->  Custom Scan (TessHeapScan) on jf
+               Hash Cond: (upper(jd.label) = jf.note)
+               ->  Custom Scan (TessHeapScan) on jd
                ->  Hash
-                     ->  Custom Scan (TessHeapScan) on jd
+                     ->  Custom Scan (TessHeapScan) on jf
 (7 rows)
 
 SET enable_hashjoin = off;
