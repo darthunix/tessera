@@ -29,6 +29,7 @@
 #include "utils/datum.h"
 #include "utils/builtins.h"
 #include "utils/memutils.h"
+#include "utils/pg_locale.h"
 #include "utils/regproc.h"
 #include "utils/selfuncs.h"
 #include "utils/ruleutils.h"
@@ -208,6 +209,13 @@ typedef struct KeyDict
 	Oid			collation;
 	int16		typlen;
 	bool		typbyval;
+	/*
+	 * Equal values are equal bytes, and the hash function hashes them
+	 * (text and varchar under a deterministic collation, bytea): a value
+	 * neither compressed nor external is hashed and compared here, without
+	 * a call through fmgr, which looked the collation up on every call.
+	 */
+	bool		bytewise;
 	/* The values by their numbers, copies in the context. */
 	Datum	   *values;
 	int64		count;
@@ -218,15 +226,36 @@ typedef struct KeyDict
 	uint32	   *batch_hashes;
 } KeyDict;
 
-static uint32
+/* A varlena whose bytes are at hand: not compressed, not external. */
+static inline bool
+keydict_plain(Datum value)
+{
+	struct varlena *pointer = (struct varlena *) DatumGetPointer(value);
+
+	return !VARATT_IS_COMPRESSED(pointer) && !VARATT_IS_EXTERNAL(pointer);
+}
+
+/* As hashtext and hashvarlena hash a value: its bytes, whatever its header. */
+static inline uint32
 keydict_value_hash(KeyDict *dict, Datum value)
 {
+	if (dict->bytewise && keydict_plain(value))
+		return hash_bytes((const unsigned char *) VARDATA_ANY(DatumGetPointer(value)),
+						  VARSIZE_ANY_EXHDR(DatumGetPointer(value)));
 	return DatumGetUInt32(FunctionCall1Coll(&dict->hashfn, dict->collation, value));
 }
 
-static bool
+static inline bool
 keydict_value_equal(KeyDict *dict, Datum a, Datum b)
 {
+	if (dict->bytewise && keydict_plain(a) && keydict_plain(b))
+	{
+		Size		len = VARSIZE_ANY_EXHDR(DatumGetPointer(a));
+
+		return len == VARSIZE_ANY_EXHDR(DatumGetPointer(b)) &&
+			memcmp(VARDATA_ANY(DatumGetPointer(a)), VARDATA_ANY(DatumGetPointer(b)),
+				   len) == 0;
+	}
 	return DatumGetBool(FunctionCall2Coll(&dict->eqfn, dict->collation, a, b));
 }
 
@@ -3652,6 +3681,10 @@ key_dict_create(TessAggState *state, Oid eqop, Oid type, Oid collation)
 	fmgr_info_cxt(get_opcode(eqop), &dict->eqfn, estate->es_query_cxt);
 	fmgr_info_cxt(hashproc, &dict->hashfn, estate->es_query_cxt);
 	dict->collation = collation;
+	dict->bytewise =
+		(get_opcode(eqop) == F_BYTEAEQ && hashproc == F_HASHVARLENA) ||
+		(get_opcode(eqop) == F_TEXTEQ && hashproc == F_HASHTEXT &&
+		 OidIsValid(collation) && pg_newlocale_from_collation(collation)->deterministic);
 	get_typlenbyval(type, &dict->typlen, &dict->typbyval);
 	dict->context = AllocSetContextCreate(estate->es_query_cxt, "TessAgg key values",
 										  ALLOCSET_DEFAULT_SIZES);

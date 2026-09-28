@@ -578,7 +578,17 @@ hashes and compares them by the type's own functions (the key's
 equality and its hash function, under the key's collation, so a
 nondeterministic collation groups as the core's does), in the order
 the table first meets them, and the table groups by the numbers as
-int8 keys; a group's key goes out as the value of its number. The
+int8 keys; a group's key goes out as the value of its number. Where equal
+values are equal bytes and the type's hash function hashes those bytes
+(text and varchar under a deterministic collation, `texteq` and
+`hashtext`; bytea, `byteaeq` and `hashvarlena`), a value neither
+compressed nor external is hashed with `hash_bytes` and compared by its
+length and `memcmp` in the dictionary's loop, as those functions would,
+without a call through fmgr, which looked the collation up on every
+call; a compressed or external value takes the functions, and hashes
+alike. Grouping 500 000 rows of text by 99 values took 15 % less, by
+450 000 values 4 % less, `INTERSECT` of texts 10 to 13 % less
+(pg-anykey-2vdcGC, pg-setop-tzlEdr against the build before). The
 dictionary is the table's: made anew with it, and its memory counted
 with the groups', so such a grouping spills its rows, with the values,
 never its records, and a spilled row's partition is chosen by the hash
