@@ -207,6 +207,16 @@ typedef struct TessAggState
 	TessSharedStats *stats;
 	/* Generic aggregates: their states' context, and the AggState they see. */
 	AggState   *generic_agg;
+	/*
+	 * GROUP BY with a generic aggregate: the groups' states are words of
+	 * their records, a by-reference one the address of its copy, so the
+	 * groups do not spill; a group's final values live until the next.
+	 */
+	bool		has_generic;
+	MemoryContext generic_output;
+	/* The bytes from a record's start to its payload, once known. */
+	Size		payload_delta;
+	bool		payload_known;
 
 	/*
 	 * GROUP BY: the keys, computed columns before the arguments, and the
@@ -355,6 +365,58 @@ batch_aggregate(const Aggref *agg)
 		return true;
 	type = exprType(aggregate_argument(agg));
 	return type == INT4OID || type == INT8OID;
+}
+
+/*
+ * Whether the groups of a grouping with generic aggregates fit hash_mem,
+ * as the planner estimates them, since their states, words of the records
+ * or addresses of copies, keep the groups from spilling: a record, and the
+ * states a word does not hold, each by its type's average width or, for
+ * an internal state, the aggregate's declared space or 1 kB, as the core
+ * estimates its hashed groups.
+ */
+static bool
+generic_fits(PlannerInfo *root, RelOptInfo *output_rel, int nkeys, List *tlist)
+{
+	double		groups = 0;
+	double		bytes;
+
+	foreach_ptr(Path, path, output_rel->pathlist)
+		if (IsA(path, AggPath) && ((AggPath *) path)->aggstrategy == AGG_HASHED)
+			groups = Max(groups, path->rows);
+	if (groups <= 0)
+		return false;
+	bytes = 16.0 + 8.0 * nkeys + 8.0;
+	foreach_node(TargetEntry, entry, tlist)
+	{
+		Aggref	   *agg = (Aggref *) entry->expr;
+		int16		len;
+		bool		byval;
+
+		if (!IsA(agg, Aggref))
+			continue;
+		bytes += 8.0;
+		if (batch_aggregate(agg))
+			continue;
+		get_typlenbyval(agg->aggtranstype, &len, &byval);
+		if (byval)
+			continue;
+		if (agg->aggtranstype == INTERNALOID)
+		{
+			HeapTuple	tuple = SearchSysCache1(AGGFNOID, ObjectIdGetDatum(agg->aggfnoid));
+			int32		space = 0;
+
+			if (HeapTupleIsValid(tuple))
+			{
+				space = ((Form_pg_aggregate) GETSTRUCT(tuple))->aggtransspace;
+				ReleaseSysCache(tuple);
+			}
+			bytes += space > 0 ? space : ALLOCSET_SMALL_INITSIZE;
+		}
+		else
+			bytes += get_typavgwidth(agg->aggtranstype, -1);
+	}
+	return groups * bytes <= (double) get_hash_memory_limit();
 }
 
 /* Whether an aggregate of the target list goes through the core's functions. */
@@ -639,6 +701,9 @@ create_partial_paths(PlannerInfo *root, RelOptInfo *grouped_rel,
 	if (!collect_aggregates((Node *) partial_rel->reltarget->exprs, keys, &tlist) ||
 		list_length(tlist) == list_length(keys))
 		return;
+	/* A partial grouping empties its table early: generic states would go with it. */
+	if (keys != NIL && has_generic(tlist))
+		return;
 	foreach_ptr(AggPath, agg, aggregate_templates(partial_rel->partial_pathlist,
 												  strategy,
 												  AGGSPLIT_INITIAL_SERIAL))
@@ -849,8 +914,9 @@ create_upper_paths(PlannerInfo *root, UpperRelationKind stage,
 		return;
 	if (!distinct_fits(root, input_rel, keys, tlist))
 		return;
-	/* Through the core's functions, only without GROUP BY yet. */
-	if (keys != NIL && has_generic(tlist))
+	/* Groups of generic aggregates do not spill: their states must fit. */
+	if (keys != NIL && has_generic(tlist) &&
+		!generic_fits(root, output_rel, list_length(keys), tlist))
 		return;
 	/*
 	 * add_path changes the list: the candidates are taken first. With
@@ -1121,57 +1187,123 @@ generic_reset(TessAggState *state, GenericAgg *generic)
  * freed. What a call allocates besides goes with the batch's memory.
  */
 static void
-generic_accumulate(TessAggState *state, GenericAgg *generic, const TessRowMask *rows)
+generic_advance(GenericAgg *generic, int row, MemoryContext states, MemoryContext temporary)
 {
 	FunctionCallInfo call = generic->trans_call;
+	Datum		result;
+	bool		skip = false;
+
+	for (int arg = 0; arg < generic->nargs; arg++)
+	{
+		call->args[arg + 1].value = generic->columns[arg].values[row];
+		call->args[arg + 1].isnull = generic->columns[arg].isnull[row];
+		skip |= call->args[arg + 1].isnull;
+	}
+	if (generic->transfn.fn_strict)
+	{
+		if (skip)
+			return;
+		if (generic->state_null)
+		{
+			MemoryContextSwitchTo(states);
+			generic->state = datumCopy(call->args[1].value, generic->transbyval,
+									   generic->translen);
+			generic->state_null = false;
+			MemoryContextSwitchTo(temporary);
+			return;
+		}
+	}
+	call->args[0].value = generic->state;
+	call->args[0].isnull = generic->state_null;
+	call->isnull = false;
+	result = FunctionCallInvoke(call);
+	if (!generic->transbyval &&
+		DatumGetPointer(result) != DatumGetPointer(generic->state))
+	{
+		if (!call->isnull)
+		{
+			MemoryContextSwitchTo(states);
+			result = datumCopy(result, generic->transbyval, generic->translen);
+			MemoryContextSwitchTo(temporary);
+		}
+		if (!generic->state_null)
+			pfree(DatumGetPointer(generic->state));
+	}
+	generic->state = result;
+	generic->state_null = call->isnull;
+}
+
+static void
+generic_accumulate(TessAggState *state, GenericAgg *generic, const TessRowMask *rows)
+{
 	MemoryContext states = state->generic_agg->curaggcontext->ecxt_per_tuple_memory;
-	MemoryContext old =
-		MemoryContextSwitchTo(state->css.ss.ps.ps_ExprContext->ecxt_per_tuple_memory);
+	MemoryContext temporary = state->css.ss.ps.ps_ExprContext->ecxt_per_tuple_memory;
+	MemoryContext old = MemoryContextSwitchTo(temporary);
 	int			row = -1;
 
 	while ((row = tess_row_mask_next(rows, row)) >= 0)
-	{
-		Datum		result;
-		bool		skip = false;
+		generic_advance(generic, row, states, temporary);
+	MemoryContextSwitchTo(old);
+}
 
-		for (int arg = 0; arg < generic->nargs; arg++)
-		{
-			call->args[arg + 1].value = generic->columns[arg].values[row];
-			call->args[arg + 1].isnull = generic->columns[arg].isnull[row];
-			skip |= call->args[arg + 1].isnull;
-		}
-		if (generic->transfn.fn_strict)
-		{
-			if (skip)
-				continue;
-			if (generic->state_null)
-			{
-				MemoryContextSwitchTo(states);
-				generic->state = datumCopy(call->args[1].value, generic->transbyval,
-										   generic->translen);
-				generic->state_null = false;
-				MemoryContextSwitchTo(state->css.ss.ps.ps_ExprContext->ecxt_per_tuple_memory);
-				continue;
-			}
-		}
-		call->args[0].value = generic->state;
-		call->args[0].isnull = generic->state_null;
-		call->isnull = false;
-		result = FunctionCallInvoke(call);
-		if (!generic->transbyval &&
-			DatumGetPointer(result) != DatumGetPointer(generic->state))
-		{
-			if (!call->isnull)
-			{
-				MemoryContextSwitchTo(states);
-				result = datumCopy(result, generic->transbyval, generic->translen);
-				MemoryContextSwitchTo(state->css.ss.ps.ps_ExprContext->ecxt_per_tuple_memory);
-			}
-			if (!generic->state_null)
-				pfree(DatumGetPointer(generic->state));
-		}
-		generic->state = result;
-		generic->state_null = call->isnull;
+static inline void check(TessAggState *state, TessStatusCode code);
+
+/* The payload of the record at ref, in the chunk's memory, which the node writes. */
+static uint64 *
+record_payload(TessAggState *state, uint32 ref)
+{
+	char	   *record = (char *) state->chunk_bases[ref >> TESS_TABLE_UNIT_BITS] +
+		(Size) (ref & ((1u << TESS_TABLE_UNIT_BITS) - 1)) * 8;
+
+	if (!state->payload_known)
+	{
+		TessTableRecord found = TESS_STRUCT_INITIALIZER(TessTableRecord);
+
+		check(state, state->kernels->table_record(&state->table, ref, &found,
+												  &state->status));
+		state->payload_delta = (Size) ((const char *) found.payload - record);
+		state->payload_known = true;
+	}
+	return (uint64 *) (record + state->payload_delta);
+}
+
+/*
+ * The groups' states of a generic aggregate over the rows of a batch:
+ * the groups the batch inserted start from the initial value; then, row
+ * by row, as rows of one group may follow one another, the state is read
+ * from the group's record, advanced and written back, with the
+ * aggregate's flag bit set while it is not NULL.
+ */
+static void
+generic_group_accumulate(TessAggState *state, int index, const TessRowMask *rows,
+						 const TessRowMask *inserted)
+{
+	GenericAgg *generic = state->values[index].generic;
+	MemoryContext states = state->generic_agg->curaggcontext->ecxt_per_tuple_memory;
+	MemoryContext temporary = state->css.ss.ps.ps_ExprContext->ecxt_per_tuple_memory;
+	MemoryContext old = MemoryContextSwitchTo(states);
+	uint64		bit = UINT64CONST(1) << index;
+	int			row = -1;
+
+	while ((row = tess_row_mask_next(inserted, row)) >= 0)
+	{
+		uint64	   *payload = record_payload(state, state->offsets[row]);
+
+		payload[1 + index] = generic->init_null ? 0 :
+			(uint64) datumCopy(generic->init, generic->transbyval, generic->translen);
+		payload[0] = generic->init_null ? payload[0] & ~bit : payload[0] | bit;
+	}
+	MemoryContextSwitchTo(temporary);
+	row = -1;
+	while ((row = tess_row_mask_next(rows, row)) >= 0)
+	{
+		uint64	   *payload = record_payload(state, state->offsets[row]);
+
+		generic->state = (Datum) payload[1 + index];
+		generic->state_null = (payload[0] & bit) == 0;
+		generic_advance(generic, row, states, temporary);
+		payload[1 + index] = generic->state_null ? 0 : (uint64) generic->state;
+		payload[0] = generic->state_null ? payload[0] & ~bit : payload[0] | bit;
 	}
 	MemoryContextSwitchTo(old);
 }
@@ -1310,11 +1442,19 @@ agg_begin(CustomScanState *css, EState *estate, int eflags)
 		value->computed = -1;
 		if (!batch_aggregate(agg))
 		{
-			if (state->nkeys > 0 || !generic_supported(agg))
+			if (!generic_supported(agg) ||
+				(state->nkeys > 0 && DO_AGGSPLIT_SKIPFINAL(agg->aggsplit)))
 				elog(ERROR, "TessAgg has no implementation of %s",
 					 format_procedure(agg->aggfnoid));
 			value->kind = AGG_GENERIC;
 			value->generic = generic_init(state, agg);
+			if (state->nkeys > 0 && state->generic_output == NULL)
+			{
+				state->has_generic = true;
+				state->generic_output = AllocSetContextCreate(estate->es_query_cxt,
+															  "TessAgg generic values",
+															  ALLOCSET_DEFAULT_SIZES);
+			}
 		}
 		switch (value->kind)
 		{
@@ -3046,6 +3186,15 @@ group_batch(TessAggState *state, TessBatch *batch)
 		if (value->computed >= 0)
 			computed_column(state, batch, value->computed,
 							TESS_COLUMN_FOR_PROJECTION, &column);
+		if (value->generic != NULL)
+		{
+			value->generic->columns[0] = column;
+			for (int arg = 1; arg < value->generic->nargs; arg++)
+				computed_column(state, batch, value->computed + arg,
+								TESS_COLUMN_FOR_PROJECTION, &value->generic->columns[arg]);
+			generic_group_accumulate(state, index, &valid, &inserted);
+			continue;
+		}
 		if (value->distinct != NULL)
 			rows = distinct_rows(state, value, nrows, state->hashes, &valid,
 								 &column);
@@ -3065,7 +3214,7 @@ group_batch(TessAggState *state, TessBatch *batch)
 	 * partial mode they go out instead (group_drain).
 	 */
 	if (state->spill == NULL && (!state->partial || state->partial_spill) &&
-		!state->has_distinct &&
+		!state->has_distinct && !state->has_generic &&
 		state->table_bytes > get_hash_memory_limit() / 8 * 7)
 		agg_start_spill(state);
 	if (state->spill != NULL)
@@ -3077,6 +3226,9 @@ static void
 group_drain(TessAggState *state)
 {
 	agg_spill_free(state);
+	/* The groups of a previous table and their states go together. */
+	if (state->generic_agg != NULL)
+		ReScanExprContext(state->generic_agg->curaggcontext);
 	create_table(state);
 	reset_distinct(state);
 	for (;;)
@@ -3162,7 +3314,16 @@ group_value(TessAggState *state, int index, int group, TupleTableSlot *scan)
 				Int64GetDatum((int64) word) : Int32GetDatum((int32) (int64) word);
 			break;
 		case AGG_GENERIC:
-			break;
+			{
+				MemoryContext old = MemoryContextSwitchTo(state->generic_output);
+
+				value->generic->state = (Datum) word;
+				value->generic->state_null = !seen;
+				scan->tts_values[attribute] = generic_value(value->generic,
+															&scan->tts_isnull[attribute]);
+				MemoryContextSwitchTo(old);
+				break;
+			}
 	}
 }
 
@@ -3231,6 +3392,8 @@ next_groups(TessAggState *state)
 			TupleTableSlot *row;
 
 			ExecClearTuple(scan);
+			if (state->generic_output != NULL)
+				MemoryContextReset(state->generic_output);
 			for (int key = 0; key < state->nkeys; key++)
 			{
 				scan->tts_values[key] = state->key_values[key][group];

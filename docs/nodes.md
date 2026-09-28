@@ -483,7 +483,19 @@ function skips a row with a NULL argument and, without an initial value,
 takes the first kept argument as the state; a new by-reference state is
 copied into that context and the old one freed, and what a call
 allocates besides goes with the batch's memory. The arguments after the
-first travel in the private data as `more`. For each of the core's plain aggregate paths whose input can be read
+first travel in the private data as `more`. With `GROUP BY` such an
+aggregate's state is a word of the group's record, the value itself when
+a word holds it, else the address of its copy in that context, with the
+aggregate's flag bit set while it is not NULL: the groups a batch
+inserts start from the initial value, and each row, in order, since rows
+of one group may follow one another, reads its group's state from the
+record, advances it and writes it back; a group's final value is
+computed when the group goes out, in memory reset per group. Such groups
+cannot spill (the records hold addresses), so the path is taken only
+when the planner's estimate of the groups and their states, a type's
+average width or an internal state's declared space or 1 kB as the core
+estimates them, fits `hash_mem`, and not in a partial plan, whose table
+empties early. For each of the core's plain aggregate paths whose input can be read
 in batches (`tess_batch_input_path`: a batch path as it is, a clause-free
 sequential scan through `TessHeapScan`, anything else through `TessPack`),
 the node's path takes the core path as its template at nine tenths of its

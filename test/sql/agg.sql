@@ -374,13 +374,35 @@ SELECT agg_same($$SELECT g, (SELECT string_agg(t, ',') FROM agg_any WHERE a > g 
 SELECT sum(1 / (a - 100)::numeric) FROM agg_any;
 \set VERBOSITY default
 -- Left to the core: ORDER BY and FILTER in an aggregate, DISTINCT over
--- text, an ordered-set aggregate, and grouping.
+-- text, an ordered-set aggregate.
 EXPLAIN (COSTS OFF) SELECT string_agg(t, ',' ORDER BY t) FROM agg_any;
 EXPLAIN (COSTS OFF) SELECT max(t) FILTER (WHERE b) FROM agg_any;
 EXPLAIN (COSTS OFF) SELECT count(DISTINCT t) FROM agg_any;
 SELECT agg_same($$SELECT count(DISTINCT t), count(DISTINCT a), count(DISTINCT d) FROM agg_any$$);
 EXPLAIN (COSTS OFF) SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY f) FROM agg_any;
+-- With GROUP BY: each group's state a word of its record, a by-reference
+-- one the address of its copy; rows of one group follow one another in a
+-- batch, groups start from the initial value.
 EXPLAIN (COSTS OFF) SELECT b, max(t) FROM agg_any GROUP BY b;
+SELECT agg_same($$SELECT b, max(t), min(t), sum(n), avg(f), string_agg(t, ','), array_agg(a) FROM agg_any GROUP BY b$$);
+SELECT agg_same($$SELECT a % 7, max(t), sum(n), stddev(f), bool_and(b), json_agg(d) FROM agg_any GROUP BY a % 7$$);
+-- A group whose arguments are all NULL, a NULL key, groups with the
+-- node's own aggregates and a DISTINCT one, HAVING over a generic one.
+SELECT agg_same($$SELECT a > 0, max(t), count(*), sum(a), count(DISTINCT a), avg(n) FROM agg_any WHERE t IS NULL GROUP BY a > 0$$);
+SELECT agg_same($$SELECT b, max(t) || '!', sum(n) FROM agg_any GROUP BY b HAVING max(t) > 't5'$$);
+-- Many groups: the table grows and adds chunks, which never move.
+CREATE TABLE agg_groups AS
+SELECT i % 20000 AS g, 'v' || i AS t, (i * 0.5)::numeric AS n FROM generate_series(1, 80000) AS i;
+ANALYZE agg_groups;
+SELECT agg_same($$SELECT count(*), max(m), sum(s), max(l) FROM (SELECT g, max(t) AS m, sum(n) AS s, length(string_agg(t, ',')) AS l FROM agg_groups GROUP BY g) AS q$$);
+-- Rescan builds the groups anew.
+SELECT agg_same($$SELECT x, (SELECT max(m) FROM (SELECT g, max(t) AS m FROM agg_groups WHERE g < x GROUP BY g) AS q) FROM generate_series(1, 3) AS x$$);
+-- Their states cannot spill: past hash_mem by the planner's estimate the
+-- grouping stays with the core.
+SET work_mem = '64kB';
+EXPLAIN (COSTS OFF) SELECT g, max(t) FROM agg_groups GROUP BY g;
+RESET work_mem;
+DROP TABLE agg_groups;
 -- In a parallel plan: each participant's partial state, serialized where
 -- the state is internal, for the core's Finalize Aggregate.
 CREATE TABLE agg_any_big AS

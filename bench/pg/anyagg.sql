@@ -71,6 +71,9 @@ SELECT pg_temp.measure_pair('g_avg_float8', 'SELECT avg(a::float8) FROM bench_mi
 SELECT pg_temp.measure_pair('g_bit_or', 'SELECT bit_or(c1) FROM bench_narrow', :repetitions);
 SELECT pg_temp.measure_pair('g_filter', 'SELECT max(b) FROM bench_mixed WHERE a > 250000', :repetitions);
 SELECT pg_temp.measure_pair('g_three', 'SELECT max(b), sum(c), avg(f) FROM bench_mixed', :repetitions);
+-- With GROUP BY: 100 groups and 50 000 groups.
+SELECT pg_temp.measure_pair('g_group_few', 'SELECT count(*), max(m) FROM (SELECT d % 100, max(b) AS m, sum(c), avg(f) FROM bench_mixed GROUP BY 1) AS g', :repetitions);
+SELECT pg_temp.measure_pair('g_group_many', 'SELECT count(*), max(m) FROM (SELECT a % 50000, max(b) AS m, sum(c) FROM bench_mixed GROUP BY 1) AS g', :repetitions);
 
 \copy timings TO 'timings.csv' CSV HEADER
 
@@ -89,9 +92,9 @@ ORDER BY test, mode DESC;
 \o plans.txt
 SET tessera.enable = on;
 SELECT format('EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE on_%s', name)
-FROM unnest(ARRAY['g_max_text', 'g_sum_int8', 'g_avg_int8', 'g_sum_numeric', 'g_avg_float8', 'g_bit_or', 'g_filter', 'g_three']) AS name \gexec
+FROM unnest(ARRAY['g_max_text', 'g_sum_int8', 'g_avg_int8', 'g_sum_numeric', 'g_avg_float8', 'g_bit_or', 'g_filter', 'g_three', 'g_group_few', 'g_group_many']) AS name \gexec
 SET tessera.enable = off;
 SELECT format('EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE off_%s', name)
-FROM unnest(ARRAY['g_max_text', 'g_sum_int8', 'g_avg_int8', 'g_sum_numeric', 'g_avg_float8', 'g_bit_or', 'g_filter', 'g_three']) AS name \gexec
+FROM unnest(ARRAY['g_max_text', 'g_sum_int8', 'g_avg_int8', 'g_sum_numeric', 'g_avg_float8', 'g_bit_or', 'g_filter', 'g_three', 'g_group_few', 'g_group_many']) AS name \gexec
 \o
 DEALLOCATE ALL;
