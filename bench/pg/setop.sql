@@ -110,6 +110,13 @@ SELECT pg_temp.measure_pair('setop_known',
            'UNION SELECT c2 %% 1000 FROM bench_narrow WHERE c1 < %s) AS s',
            500000 * :scale),
     :repetitions);
+-- A set operation within another: UNION of 2.1 M rows with 1000 values
+-- as the left side of EXCEPT.
+SELECT pg_temp.measure_pair('setop_nested',
+    format('SELECT count(*) FROM ((SELECT c1 %% 1000 FROM bench_narrow UNION SELECT k %% 1000 FROM bench_dup) '
+           'EXCEPT SELECT c2 %% 100 FROM bench_narrow WHERE c1 < %s) AS s',
+           100000 * :scale),
+    :repetitions);
 -- UNION of branches whose clauses Tessera does not evaluate in batches.
 SELECT pg_temp.measure_pair('setop_like',
     $q$SELECT count(*) FROM (SELECT a FROM bench_mixed WHERE b LIKE 'b-1%' UNION SELECT d FROM bench_mixed WHERE e LIKE 'e-2%') AS s$q$,
@@ -149,12 +156,12 @@ ORDER BY test, mode DESC;
 SET tessera.enable = on;
 SELECT format('EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE on_%s', name)
 FROM unnest(ARRAY['setop_count', 'setop_join', 'setop_part', 'setop_rows',
-                  'setop_few', 'setop_many', 'setop_known', 'setop_like', 'setop_except', 'setop_except_all',
+                  'setop_few', 'setop_many', 'setop_known', 'setop_nested', 'setop_like', 'setop_except', 'setop_except_all',
                   'setop_intersect_text', 'setop_intersect_all']) AS name \gexec
 SET tessera.enable = off;
 SELECT format('EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE off_%s', name)
 FROM unnest(ARRAY['setop_count', 'setop_join', 'setop_part', 'setop_rows',
-                  'setop_few', 'setop_many', 'setop_known', 'setop_like', 'setop_except', 'setop_except_all',
+                  'setop_few', 'setop_many', 'setop_known', 'setop_nested', 'setop_like', 'setop_except', 'setop_except_all',
                   'setop_intersect_text', 'setop_intersect_all']) AS name \gexec
 \o
 RESET work_mem;

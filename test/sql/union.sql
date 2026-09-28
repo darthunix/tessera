@@ -248,11 +248,20 @@ SET work_mem = '64kB';
 SELECT union_same($$SELECT count(*), sum(x) FROM (SELECT a * 1000 + b AS x FROM union_a
                    UNION SELECT a * 1000 + b FROM union_b UNION SELECT generate_series(1, 20000)) AS s$$);
 RESET work_mem;
--- A UNION within another set operation: the core's. Text columns go through
--- a dictionary of their values.
+-- A UNION within another set operation, whose Append reads its columns by
+-- position: the node's too. Projected to the other's column types (int4
+-- within bigint), the core's: the projection would not find the set
+-- operation's columns in the node's plan. So are the operations of a
+-- recursive union.
 EXPLAIN (COSTS OFF)
 SELECT a FROM union_a UNION SELECT a FROM union_b UNION ALL SELECT a FROM union_empty;
 SELECT union_same($$SELECT a FROM union_a UNION SELECT a FROM union_b UNION ALL SELECT a FROM union_a WHERE a < 3$$);
+EXPLAIN (COSTS OFF)
+SELECT a FROM union_a UNION SELECT a FROM union_b UNION ALL SELECT b FROM union_empty;
+SELECT union_same($$SELECT a FROM union_a UNION SELECT a FROM union_b UNION ALL SELECT b FROM union_a WHERE a < 3$$);
+SELECT union_same($$WITH RECURSIVE r(n) AS ((SELECT a FROM union_a WHERE a < 4 UNION SELECT a FROM union_b WHERE a < 4)
+                   UNION SELECT n + 1 FROM r WHERE n < 10) SELECT count(*), sum(n) FROM r$$);
+-- Text columns go through a dictionary of their values.
 EXPLAIN (COSTS OFF) SELECT t FROM union_a UNION SELECT t FROM union_b;
 SELECT union_same($$SELECT t FROM union_a UNION SELECT t FROM union_b$$);
 -- Under a Gather: the node's partial grouping of every participant's rows
@@ -270,6 +279,11 @@ SET min_parallel_table_scan_size = 0;
 EXPLAIN (COSTS OFF) SELECT c, b FROM union_keys WHERE b < 5 UNION SELECT c, b FROM union_keys WHERE b > 3;
 SELECT union_same($$SELECT c, b FROM union_keys WHERE b < 5 UNION SELECT c, b FROM union_keys WHERE b > 3$$);
 SELECT union_same($$SELECT count(*), sum(x) FROM (SELECT c AS x FROM union_keys UNION SELECT b FROM union_keys WHERE c IS NULL) AS s$$);
+-- The same as the left side of an EXCEPT.
+EXPLAIN (COSTS OFF)
+(SELECT c FROM union_keys WHERE b < 5 UNION SELECT c FROM union_keys WHERE b > 3) EXCEPT SELECT b FROM union_keys WHERE b = 1;
+SELECT union_same($$(SELECT c FROM union_keys WHERE b < 5 UNION SELECT c FROM union_keys WHERE b > 3)
+                   EXCEPT SELECT b FROM union_keys WHERE b = 1$$);
 SET parallel_leader_participation = off;
 SELECT union_same($$SELECT c, b FROM union_keys WHERE b < 5 UNION SELECT c, b FROM union_keys WHERE b > 3$$);
 RESET parallel_leader_participation;
@@ -320,7 +334,9 @@ SELECT union_same($$SELECT s FROM setop_l INTERSECT ALL SELECT s FROM setop_l WH
 -- Numeric 1.0 and 1.000 are one group: the left side's value goes out.
 SELECT union_same($$SELECT n::text FROM (SELECT n FROM setop_r INTERSECT SELECT n FROM setop_l) AS q$$);
 SELECT union_same($$SELECT n::text FROM (SELECT n FROM setop_r INTERSECT ALL SELECT n FROM setop_l) AS q$$);
--- Above: a sort and a limit; within another set operation, the core's.
+-- Above: a sort and a limit; within another set operation, the node's in
+-- the node's: EXCEPT of EXCEPT, INTERSECT within UNION, UNION and
+-- INTERSECT of two columns as the sides of EXCEPT ALL, a count above.
 EXPLAIN (COSTS OFF)
 SELECT k FROM setop_l EXCEPT SELECT k FROM setop_r ORDER BY 1 DESC LIMIT 3;
 SELECT k FROM setop_l EXCEPT SELECT k FROM setop_r ORDER BY 1 DESC LIMIT 3;
@@ -328,6 +344,12 @@ EXPLAIN (COSTS OFF)
 SELECT k FROM setop_l EXCEPT SELECT k FROM setop_r EXCEPT SELECT a FROM union_a;
 SELECT union_same($$SELECT k FROM setop_l EXCEPT SELECT k FROM setop_r EXCEPT SELECT a FROM union_a WHERE a < 30$$);
 SELECT union_same($$SELECT k FROM setop_l INTERSECT SELECT k FROM setop_r UNION SELECT a FROM union_b WHERE a < 5$$);
+EXPLAIN (VERBOSE, COSTS OFF)
+(SELECT k, t FROM setop_l UNION SELECT k, t FROM setop_r) EXCEPT ALL (SELECT a, t FROM union_a INTERSECT SELECT k, t FROM setop_l);
+SELECT union_same($$(SELECT k, t FROM setop_l UNION SELECT k, t FROM setop_r)
+                   EXCEPT ALL (SELECT a, t FROM union_a INTERSECT SELECT k, t FROM setop_l)$$);
+SELECT union_same($$SELECT count(*), sum(x) FROM ((SELECT k AS x FROM setop_l UNION SELECT a FROM union_b)
+                   INTERSECT ALL SELECT a % 50 FROM union_a) AS s$$);
 -- Past hash_mem: the groups of words spill their records, the groups of a
 -- dictionary their rows, each with its side.
 SET work_mem = '64kB';

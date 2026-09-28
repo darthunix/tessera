@@ -567,13 +567,19 @@ at the set operation stage (`UPPERREL_SETOP`) the node's path stands next
 to each of the core's hashed aggregates over the `Append` of the
 branches, its keys the columns, 1 to 16 of them, of the types a key's
 word holds (see `GROUP BY` below), and its
-child `TessAppend` over the branches' batch paths. Only the set
-operation of the whole query (of a subquery, when it is one) gets it:
-above that the core puts only a sort and a limit, which read columns by
-position, while a set operation within another could have a projection
-above it that looks for the set operation's own columns, which the
-node's plan shows as its first branch's (see "Building paths" in
-[runtime.md](runtime.md)). The groups spill as those of `GROUP BY` do.
+child `TessAppend` over the branches' batch paths. The core calls the
+hook for every set operation of the tree, and the node takes the one
+whose leaves are the relation's (a `UNION` of `UNION`s the core folds
+into one is one): above it the core puts a sort and a limit, or the
+`Append`, `SetOp` or aggregate of another set operation, and the node
+its `TessAppend` or `TessAgg`, all of which read its columns by
+position. A set operation within another whose column types differ is
+the core's: the core projects its paths to the other's types before it
+calls the hook, and that projection looks for the set operation's own
+columns, which the node's plan shows as its first branch's (see
+"Building paths" in [runtime.md](runtime.md)); so are the operations of
+a recursive union, whose worktable rescans them. The groups spill as
+those of `GROUP BY` do.
 With workers the node also builds, once per set operation, the stack of
 grouping without aggregates (below): its partial grouping over its
 parallel `TessAppend` of the branches' partial paths, `TessGather`, and
@@ -592,8 +598,9 @@ their rows, stay serial.
 
 `INTERSECT` and `EXCEPT`, with `ALL` or not, are grouping of both sides'
 rows by every column too: the node's path stands next to each of the
-core's `SetOp` paths of the whole query, hashed or sorted, with two batch
-children, the sides' paths below any sort, and keys of any type the
+core's `SetOp` paths of a set operation it takes (as for `UNION`),
+hashed or sorted, with two batch children, the sides' paths below any
+sort, and keys of any type the
 grouping takes (words, or values through a dictionary). The node reads
 the left side, then the right, each through an input, a projection and a
 layout of its own, the keys the sides' columns by position; the scan

@@ -1267,6 +1267,40 @@ setop_leaves(Node *node, Relids leaves)
 }
 
 /*
+ * The set operation of the tree whose leaves are relids, the uppermost of
+ * those the core folds into one (UNION of UNIONs); NULL for none.
+ */
+static SetOperationStmt *
+setop_of(Node *node, Relids relids)
+{
+	SetOperationStmt *op;
+	SetOperationStmt *found;
+
+	if (!IsA(node, SetOperationStmt))
+		return NULL;
+	op = (SetOperationStmt *) node;
+	if (bms_equal(setop_leaves(node, NULL), relids))
+		return op;
+	found = setop_of(op->larg, relids);
+	return found != NULL ? found : setop_of(op->rarg, relids);
+}
+
+/*
+ * Whether the core projected the paths of a set operation within another to
+ * the other's column types: it does so before the hook, so a path added
+ * here would lack the projection, and one over it could not find the set
+ * operation's columns in the node's plan, which shows its first branch's.
+ */
+static bool
+setop_projected(RelOptInfo *rel)
+{
+	foreach_ptr(Path, path, rel->pathlist)
+		if (!equal(path->pathtarget->exprs, rel->reltarget->exprs))
+			return true;
+	return false;
+}
+
+/*
  * The partial Append of a UNION's branches, as the core builds it for its
  * Gather (generate_union_paths), which keeps it nowhere else: the first
  * partial path of each branch of append; NULL when a branch has none or
@@ -1305,12 +1339,13 @@ union_partial_append(PlannerInfo *root, RelOptInfo *rel, AppendPath *append)
 /*
  * UNION without ALL is grouping of the branches' rows by every column: the
  * node's path next to each of the core's hashed aggregate paths over the
- * Append of the branches, the node's Append below it. Only the set
- * operation of the whole query: above it the core puts only a sort and a
- * limit, which read columns by position, where the node's plan shows its
- * first branch's targets in place of the set operation's columns
- * (tess_plan_setop_columns); a set operation within another could have a
- * projection above that looks for the set operation's own. Once, the
+ * Append of the branches, the node's Append below it. Above a set
+ * operation the core puts a sort and a limit, or the Append, SetOp or
+ * aggregate of another, which read its columns by position, where the
+ * node's plan shows its first branch's targets in place of the set
+ * operation's columns (tess_plan_setop_columns); one the core projected to
+ * another's column types stays the core's (setop_projected), and so do the
+ * operations of a recursive union, whose worktable rescans them. Once, the
  * parallel stack over the branches' partial Append: the node's partial
  * grouping over its parallel Append in every participant, TessGather, and
  * its grouping of their groups above.
@@ -1318,13 +1353,16 @@ union_partial_append(PlannerInfo *root, RelOptInfo *rel, AppendPath *append)
 static void
 create_setop_paths(PlannerInfo *root, RelOptInfo *output_rel)
 {
-	SetOperationStmt *top = (SetOperationStmt *) root->parse->setOperations;
+	SetOperationStmt *top;
 	List	   *keys;
 	List	   *tlist;
 	bool		stacked = false;
 
-	if (top == NULL || IS_DUMMY_REL(output_rel) ||
-		!bms_equal(output_rel->relids, setop_leaves((Node *) top, NULL)))
+	if (root->parse->setOperations == NULL || root->hasRecursion ||
+		IS_DUMMY_REL(output_rel))
+		return;
+	top = setop_of(root->parse->setOperations, output_rel->relids);
+	if (top == NULL || setop_projected(output_rel))
 		return;
 	if (top->op != SETOP_UNION)
 	{
@@ -1419,10 +1457,10 @@ key_eqop(Node *key, List *clauses, int *eqop)
  * by every column, the left side's first, counting each group's rows and
  * its right side's; each group then goes out as many times as the
  * operation says. The node's path next to each of the core's SetOp paths
- * of the whole query (as for UNION), its two batch children the sides'
- * paths below any sort; the groups spill past hash_mem, where the core's
- * hashed SetOp would not be chosen. The private data is the grouping one
- * with the command last.
+ * of a set operation the node takes (as for UNION), its two batch children
+ * the sides' paths below any sort; the groups spill past hash_mem, where
+ * the core's hashed SetOp would not be chosen. The private data is the
+ * grouping one with the command in its place.
  */
 #define SETOP_WORD_SHARE 0.5
 #define SETOP_DICTIONARY_SHARE 0.9

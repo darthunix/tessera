@@ -76,7 +76,8 @@ query down, and where it can, does it speed one up.
   `bench_part`, a `UNION ALL` returned as rows and skipped with `OFFSET`,
   and `UNION` of 1000 and of 2 M distinct values, and of 1000 values the
   planner's statistics know (`setop_known`, which workers split where
-  the others stay serial by their estimates). With the core's
+  the others stay serial by their estimates), and a `UNION` as the left
+  side of `EXCEPT` (`setop_nested`). With the core's
   `Append` a batch parent packs the rows of batch children again. Four
   more group both sides of `INTERSECT` and `EXCEPT`: `EXCEPT` of 500 000
   integers and a third of them, `EXCEPT ALL` of 1000 values with many
