@@ -582,14 +582,14 @@ SET work_mem = '256kB';
 SET enable_sort = off;
 SET cpu_tuple_cost = 0.05;
 EXPLAIN (COSTS OFF) SELECT k, count(*), sum(v), min(v), max(v) FROM parallel_pack GROUP BY k;
-                      QUERY PLAN                      
-------------------------------------------------------
+                               QUERY PLAN                               
+------------------------------------------------------------------------
  Custom Scan (TessAgg)
    Group Key: k
-   ->  Custom Scan (TessPack)
-         ->  Gather
-               Workers Planned: 2
-               ->  Parallel Seq Scan on parallel_pack
+   ->  Custom Scan (TessGather)
+         Workers Planned: 2
+         ->  Parallel Custom Scan (TessSend)
+               ->  Parallel Custom Scan (TessHeapScan) on parallel_pack
 (6 rows)
 
 SELECT parallel_same($$SELECT md5(string_agg(q::text, ',' ORDER BY q::text)) FROM (SELECT k, count(*), sum(v), min(v), max(v) FROM parallel_pack GROUP BY k) AS q$$);
@@ -600,14 +600,14 @@ SELECT parallel_same($$SELECT md5(string_agg(q::text, ',' ORDER BY q::text)) FRO
 
 SET tessera.batch_gather = off;
 EXPLAIN (COSTS OFF) SELECT k, count(*), sum(v), min(v), max(v) FROM parallel_pack GROUP BY k;
-                      QUERY PLAN                      
-------------------------------------------------------
+                               QUERY PLAN                               
+------------------------------------------------------------------------
  Custom Scan (TessAgg)
    Group Key: k
    ->  Custom Scan (TessPack)
          ->  Gather
                Workers Planned: 2
-               ->  Parallel Seq Scan on parallel_pack
+               ->  Parallel Custom Scan (TessHeapScan) on parallel_pack
 (6 rows)
 
 SELECT parallel_same($$SELECT md5(string_agg(q::text, ',' ORDER BY q::text)) FROM (SELECT k, count(*), sum(v), min(v), max(v) FROM parallel_pack GROUP BY k) AS q$$);

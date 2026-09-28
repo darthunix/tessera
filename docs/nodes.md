@@ -3,9 +3,10 @@
 `tessera_nodes` (`nodes/`) is the module of Tessera's own batch nodes. It
 links the runtime library statically and, when loaded, registers its node
 kinds in the bridge's node registry and its scan methods with PostgreSQL.
-The pack and heap scan nodes below are created by batch parents and need
-no hook; the filter node offers its path to base relations through the
-module's `set_rel_pathlist` hook, the aggregate node to the grouping stage
+The pack node below is created by batch parents and needs no hook; the
+filter node offers its path to base relations through the module's
+`set_rel_pathlist` hook, which also offers the heap scan node's path for
+a relation without clauses, the aggregate node to the grouping stage
 through its `create_upper_paths` hook, the hash join node to joins
 through its `set_join_pathlist` hook, the sort node to the ordered stage
 through another `create_upper_paths` hook, the gather node to the final
@@ -49,10 +50,11 @@ be packed; without a pack node it adds no paths. The
 
 ## TessHeapScan
 
-`TessHeapScan` reads a plain heap table in batches for a batch-aware
-parent, in place of the pack node over the core's sequential scan, which
-returned every row through `ExecProcNode` into a slot. The chain of the
-first queries is therefore `TessHeapScan → TessFilter → parent`.
+`TessHeapScan` reads a plain heap table in batches, in place of the pack
+node over the core's sequential scan, which returned every row through
+`ExecProcNode` into a slot, for a batch-aware parent, and in place of the
+core's sequential scan itself for any other. The chain of the first
+queries is therefore `TessHeapScan → TessFilter → parent`.
 
 ### Planning
 
@@ -62,7 +64,16 @@ partition or an inheritance child, not the parent that has them) whose
 targets are its columns or expressions over them. `tess_batch_scan_path` builds it
 for a parent that evaluates the relation's clauses itself, as the filter
 does, and `tess_batch_input_path` prefers it to the pack node for a
-relation without clauses. A pseudoconstant clause keeps both helpers
+relation without clauses. For such a relation the module's
+`set_rel_pathlist` hook also adds it to the relation's paths next to the
+core's sequential scan, at the filter's nine tenths of its cost, and a
+partial path next to the parallel one: the node is faster than the core's
+scan under a row-wise parent too (an aggregate the node does not compute
+over 2 M rows took 24.7 ms against 33.1, one column of sixty 5.3 against
+11.9, `bench/pg/rowwise.sql`), since it pins a page once rather than per
+row and deforms only the columns read. So a relation read under any
+parent gets it, a subquery planned apart from a batch parent above it,
+such as a branch of `UNION`, among them. A pseudoconstant clause keeps both helpers
 away: the planner would gate every scan of the relation with a `Result`
 between the parent and the node. The path copies the scan's costs and
 parallel properties: over the core's partial sequential scan it is
@@ -83,8 +94,11 @@ relation, which the executor opens and closes.
 
 ### Execution
 
-The parent's request is frozen at the first execution, and a request
-for rows is an error. The scan is begun with the query's snapshot: in a
+The parent's request is frozen at the first execution. A row-wise parent
+gets the rows of each batch one per call: the columns of the node's
+targets are taken from the batch once, for all its rows, deformed or
+computed, and each call copies a row's values into the node's slot; the
+batch, and its pins, go when the next is read. The scan is begun with the query's snapshot: in a
 serial plan at that first execution; under a `Gather`, in the shared
 memory callbacks, where the leader lays out the core's parallel scan
 descriptor and the rows of the participants' counters
@@ -131,7 +145,12 @@ finished, so the `Pages` of a whole scan equal the relation's pages.
 The filter and limit suites run through the scan; the filter suite adds a
 table with dead tuples and an aborted insert, a page with more visible
 tuples than a batch, values stored outside the page, a column missing
-from older tuples, and a clause the planner folds away. The parallel
+from older tuples, and a clause the planner folds away; and, for a
+row-wise parent, an aggregate the node does not compute, rows to the
+client with computed targets, NULL and text, a sort and a window function
+of the core, a cursor fetching in parts, a rescan per outer row with a
+parameter among the targets, and several pages with dead tuples and
+values stored outside the page. The parallel
 suite (`test/sql/parallel.sql`) runs it under a `Gather` with two workers,
 compares every result with Tessera off, checks that the participants'
 pages add up to the relation's, with workers planned but not launched

@@ -1097,6 +1097,129 @@ SELECT filter_same($$SELECT a FROM filter8_t WHERE a IN (1, 2, 4294967297, 85899
 SELECT a FROM filter8_t WHERE a * 4294967296 > 1;
 ERROR:  bigint out of range
 DROP TABLE filter8_t;
+-- A table without clauses under a row-wise parent: the scan serves the
+-- rows of each batch, the columns of its targets taken once per batch.
+EXPLAIN (COSTS OFF) SELECT bit_or(a), max(c) FROM filter_t;
+                  QUERY PLAN                  
+----------------------------------------------
+ Aggregate
+   ->  Custom Scan (TessHeapScan) on filter_t
+(2 rows)
+
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+SELECT bit_or(a), max(c) FROM filter_t;
+                                QUERY PLAN                                 
+---------------------------------------------------------------------------
+ Aggregate (actual rows=1.00 loops=1)
+   ->  Custom Scan (TessHeapScan) on filter_t (actual rows=200.00 loops=1)
+         Batch Size: 64
+         Batches: 4
+         Pages: 2
+         Deformed Datums: 400
+         Restarted Datums: 0
+(7 rows)
+
+SELECT filter_same($$SELECT bit_or(a), max(c), count(a), count(*) FROM filter_t$$);
+      filter_same      
+-----------------------
+ {"(255,r99,172,200)"}
+(1 row)
+
+-- Rows to the client, targets computed, NULL, a text column and a sort.
+SELECT filter_same($$SELECT md5(string_agg(q::text, ',' ORDER BY q::text)) FROM (SELECT a, b, c FROM filter_t) AS q$$);
+             filter_same              
+--------------------------------------
+ {(296875f4ea060687eebda2ac0348d375)}
+(1 row)
+
+SELECT filter_same($$SELECT md5(string_agg(q::text, ',' ORDER BY q::text)) FROM (SELECT a % 7, c || '!', b * 2 FROM filter_t) AS q$$);
+             filter_same              
+--------------------------------------
+ {(8929b7e9d539fbc0a3a726bbf5063380)}
+(1 row)
+
+EXPLAIN (COSTS OFF) SELECT c FROM filter_t ORDER BY c DESC;
+                  QUERY PLAN                  
+----------------------------------------------
+ Sort
+   Sort Key: c DESC
+   ->  Custom Scan (TessHeapScan) on filter_t
+(3 rows)
+
+SELECT c FROM filter_t ORDER BY c DESC LIMIT 3;
+  c  
+-----
+ r99
+ r98
+ r97
+(3 rows)
+
+-- A window function over the rows.
+SELECT filter_same($$SELECT md5(string_agg(q::text, ',' ORDER BY q::text)) FROM (SELECT a, row_number() OVER (ORDER BY c) FROM filter_t) AS q$$);
+             filter_same              
+--------------------------------------
+ {(dc8ecd39bbf9d8271102e79737c968cd)}
+(1 row)
+
+-- A cursor reads a few rows, then the rest.
+BEGIN;
+DECLARE filter_cursor CURSOR FOR SELECT a, c FROM filter_t;
+FETCH 3 FROM filter_cursor;
+ a | c  
+---+----
+ 1 | r1
+ 2 | r2
+ 3 | r3
+(3 rows)
+
+FETCH 3 FROM filter_cursor;
+ a | c  
+---+----
+ 4 | r4
+ 5 | r5
+ 6 | r6
+(3 rows)
+
+MOVE 60 IN filter_cursor;
+FETCH 3 FROM filter_cursor;
+ a  |  c  
+----+-----
+ 67 | r67
+ 68 | r68
+ 69 | r69
+(3 rows)
+
+MOVE ALL IN filter_cursor;
+FETCH 1 FROM filter_cursor;
+ a | c 
+---+---
+(0 rows)
+
+COMMIT;
+-- Rescanned per outer row, a parameter among the targets.
+SELECT filter_same($$SELECT g, (SELECT bit_xor(a * g) FROM filter_t) FROM generate_series(1, 5) AS g$$);
+                     filter_same                     
+-----------------------------------------------------
+ {"(1,232)","(2,464)","(3,332)","(4,928)","(5,168)"}
+(1 row)
+
+-- Several pages, dead tuples and values stored outside the page.
+CREATE TABLE filter_rows AS SELECT i AS a, repeat('x', i % 50) AS t FROM generate_series(1, 3000) AS i;
+DELETE FROM filter_rows WHERE a % 4 = 0;
+INSERT INTO filter_rows SELECT i, repeat(chr(96 + i % 26), 5000) FROM generate_series(3001, 3010) AS i;
+SELECT filter_same($$SELECT bit_xor(a), max(length(t)), count(*) FROM filter_rows$$);
+     filter_same     
+---------------------
+ {"(127,5000,2260)"}
+(1 row)
+
+SELECT filter_same($$SELECT md5(string_agg(q::text, ',' ORDER BY q::text)) FROM (SELECT a, left(t, 3) FROM filter_rows) AS q$$);
+             filter_same              
+--------------------------------------
+ {(c507628563c3d1649ea54b5d1977d3ec)}
+(1 row)
+
+DROP TABLE filter_rows;
 DROP FUNCTION filter_same(text);
 DROP TABLE filter_t;
 DROP EXTENSION tessera;

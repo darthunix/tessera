@@ -844,14 +844,14 @@ RESET work_mem;
 -- A UNION within another set operation, and text columns: the core's.
 EXPLAIN (COSTS OFF)
 SELECT a FROM union_a UNION SELECT a FROM union_b UNION ALL SELECT a FROM union_empty;
-              QUERY PLAN               
----------------------------------------
+                       QUERY PLAN                        
+---------------------------------------------------------
  Append
    ->  HashAggregate
          Group Key: union_a.a
          ->  Append
-               ->  Seq Scan on union_a
-               ->  Seq Scan on union_b
+               ->  Custom Scan (TessHeapScan) on union_a
+               ->  Custom Scan (TessHeapScan) on union_b
    ->  Seq Scan on union_empty
 (7 rows)
 
@@ -874,13 +874,13 @@ SELECT union_same($$SELECT a FROM union_a EXCEPT SELECT a FROM union_b$$);
 (1 row)
 
 EXPLAIN (COSTS OFF) SELECT t FROM union_a UNION SELECT t FROM union_b;
-           QUERY PLAN            
----------------------------------
+                    QUERY PLAN                     
+---------------------------------------------------
  HashAggregate
    Group Key: union_a.t
    ->  Append
-         ->  Seq Scan on union_a
-         ->  Seq Scan on union_b
+         ->  Custom Scan (TessHeapScan) on union_a
+         ->  Custom Scan (TessHeapScan) on union_b
 (5 rows)
 
 SELECT union_same($$SELECT t FROM union_a UNION SELECT t FROM union_b$$);

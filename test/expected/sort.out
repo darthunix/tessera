@@ -45,11 +45,11 @@ END
 $$;
 -- Without the kernels module there is nothing to sort with: the core sorts.
 EXPLAIN (COSTS OFF) SELECT d FROM sort_t ORDER BY d;
-        QUERY PLAN        
---------------------------
+                 QUERY PLAN                 
+--------------------------------------------
  Sort
    Sort Key: d
-   ->  Seq Scan on sort_t
+   ->  Custom Scan (TessHeapScan) on sort_t
 (3 rows)
 
 LOAD 'tessera_kernels';
@@ -178,11 +178,11 @@ SELECT sort_same($$SELECT d, a + d AS x FROM sort_t WHERE a > 0 ORDER BY x, d$$)
 
 -- A text key stays with the core.
 EXPLAIN (COSTS OFF) SELECT d FROM sort_t ORDER BY c, d;
-        QUERY PLAN        
---------------------------
+                 QUERY PLAN                 
+--------------------------------------------
  Sort
    Sort Key: c, d
-   ->  Seq Scan on sort_t
+   ->  Custom Scan (TessHeapScan) on sort_t
 (3 rows)
 
 -- Over a filter: no row, one, a batch, a batch and one, and all.
@@ -373,12 +373,12 @@ SELECT sort_same($$SELECT d FROM sort_t WHERE d < 0 ORDER BY d LIMIT 5$$);
 
 -- WITH TIES passes no bound: the core sorts.
 EXPLAIN (COSTS OFF) SELECT a FROM sort_t ORDER BY a FETCH FIRST 3 ROWS WITH TIES;
-           QUERY PLAN           
---------------------------------
+                    QUERY PLAN                    
+--------------------------------------------------
  Limit
    ->  Sort
          Sort Key: a
-         ->  Seq Scan on sort_t
+         ->  Custom Scan (TessHeapScan) on sort_t
 (4 rows)
 
 SELECT sort_same($$SELECT a FROM sort_t ORDER BY a FETCH FIRST 3 ROWS WITH TIES$$);

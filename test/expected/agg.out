@@ -25,10 +25,10 @@ SELECT CASE WHEN i % 7 = 0 THEN NULL ELSE i END, i % 10, 'r' || i
 FROM generate_series(1, 300) AS i;
 -- Without the kernels module no aggregate is registered: the core aggregates.
 EXPLAIN (COSTS OFF) SELECT count(*) FROM agg_t;
-       QUERY PLAN        
--------------------------
+                QUERY PLAN                 
+-------------------------------------------
  Aggregate
-   ->  Seq Scan on agg_t
+   ->  Custom Scan (TessHeapScan) on agg_t
 (2 rows)
 
 LOAD 'tessera_kernels';
@@ -390,17 +390,17 @@ SELECT agg_same($$SELECT count(c), count(a), count(*) FROM agg_t WHERE b > 5$$);
 
 -- Left to the core: sum over bigint (numeric), avg.
 EXPLAIN (COSTS OFF) SELECT sum(a::bigint) FROM agg_t;
-       QUERY PLAN        
--------------------------
+                QUERY PLAN                 
+-------------------------------------------
  Aggregate
-   ->  Seq Scan on agg_t
+   ->  Custom Scan (TessHeapScan) on agg_t
 (2 rows)
 
 EXPLAIN (COSTS OFF) SELECT avg(a) FROM agg_t;
-       QUERY PLAN        
--------------------------
+                QUERY PLAN                 
+-------------------------------------------
  Aggregate
-   ->  Seq Scan on agg_t
+   ->  Custom Scan (TessHeapScan) on agg_t
 (2 rows)
 
 -- A bigint column: min and max over int8, the filter and the argument
@@ -951,41 +951,41 @@ DROP TABLE agg_spill;
 -- Left to the core: grouping sets, a text key, a column the primary key
 -- makes functionally dependent, and hash aggregation disabled.
 EXPLAIN (COSTS OFF) SELECT b, count(*) FROM agg_t GROUP BY GROUPING SETS ((b), ());
-       QUERY PLAN        
--------------------------
+                QUERY PLAN                 
+-------------------------------------------
  MixedAggregate
    Hash Key: b
    Group Key: ()
-   ->  Seq Scan on agg_t
+   ->  Custom Scan (TessHeapScan) on agg_t
 (4 rows)
 
 EXPLAIN (COSTS OFF) SELECT c, count(*) FROM agg_t GROUP BY c;
-       QUERY PLAN        
--------------------------
+                QUERY PLAN                 
+-------------------------------------------
  HashAggregate
    Group Key: c
-   ->  Seq Scan on agg_t
+   ->  Custom Scan (TessHeapScan) on agg_t
 (3 rows)
 
 CREATE TABLE agg_pk (id int PRIMARY KEY, label text);
 EXPLAIN (COSTS OFF) SELECT id, label, count(*) FROM agg_pk GROUP BY id;
-        QUERY PLAN        
---------------------------
+                 QUERY PLAN                 
+--------------------------------------------
  HashAggregate
    Group Key: id
-   ->  Seq Scan on agg_pk
+   ->  Custom Scan (TessHeapScan) on agg_pk
 (3 rows)
 
 DROP TABLE agg_pk;
 SET enable_hashagg = off;
 EXPLAIN (COSTS OFF) SELECT b, count(*) FROM agg_t GROUP BY b;
-          QUERY PLAN           
--------------------------------
+                   QUERY PLAN                    
+-------------------------------------------------
  GroupAggregate
    Group Key: b
    ->  Sort
          Sort Key: b
-         ->  Seq Scan on agg_t
+         ->  Custom Scan (TessHeapScan) on agg_t
 (5 rows)
 
 RESET enable_hashagg;
@@ -1049,20 +1049,20 @@ SELECT agg_same($$SELECT DISTINCT b FROM agg_t WHERE false$$);
 
 -- Left to the core: DISTINCT ON, a text key.
 EXPLAIN (COSTS OFF) SELECT DISTINCT ON (b) b, a FROM agg_t ORDER BY b, a;
-          QUERY PLAN           
--------------------------------
+                   QUERY PLAN                    
+-------------------------------------------------
  Unique
    ->  Sort
          Sort Key: b, a
-         ->  Seq Scan on agg_t
+         ->  Custom Scan (TessHeapScan) on agg_t
 (4 rows)
 
 EXPLAIN (COSTS OFF) SELECT DISTINCT c FROM agg_t;
-       QUERY PLAN        
--------------------------
+                QUERY PLAN                 
+-------------------------------------------
  HashAggregate
    Group Key: c
-   ->  Seq Scan on agg_t
+   ->  Custom Scan (TessHeapScan) on agg_t
 (3 rows)
 
 -- Under a single-copy Gather.
@@ -1170,30 +1170,30 @@ SELECT agg_same($$SELECT count(DISTINCT v) FROM agg_dm$$);
 DROP TABLE agg_dm;
 -- Left to the core: a text argument.
 EXPLAIN (COSTS OFF) SELECT count(DISTINCT c) FROM agg_t;
-          QUERY PLAN           
--------------------------------
+                   QUERY PLAN                    
+-------------------------------------------------
  Aggregate
    ->  Sort
          Sort Key: c
-         ->  Seq Scan on agg_t
+         ->  Custom Scan (TessHeapScan) on agg_t
 (4 rows)
 
 -- Left to the core: FILTER in the aggregate, a window function, an empty
 -- relation, and the switch.
 EXPLAIN (COSTS OFF) SELECT count(*) FILTER (WHERE a > 100) FROM agg_t;
-       QUERY PLAN        
--------------------------
+                QUERY PLAN                 
+-------------------------------------------
  Aggregate
-   ->  Seq Scan on agg_t
+   ->  Custom Scan (TessHeapScan) on agg_t
 (2 rows)
 
 EXPLAIN (COSTS OFF) SELECT count(*) OVER () FROM agg_t LIMIT 1;
-          QUERY PLAN           
--------------------------------
+                   QUERY PLAN                    
+-------------------------------------------------
  Limit
    ->  WindowAgg
          Window: w1 AS ()
-         ->  Seq Scan on agg_t
+         ->  Custom Scan (TessHeapScan) on agg_t
 (4 rows)
 
 EXPLAIN (COSTS OFF) SELECT count(*) FROM agg_t WHERE false;

@@ -21,13 +21,18 @@
 #include "internal.h"
 
 /*
- * TessHeapScan reads a heap relation in batches for a batch-aware parent.
+ * TessHeapScan reads a heap relation in batches, for a batch-aware parent
+ * or, row by row from each batch, for any other.
  * It lets the core's scan bring one page at a time into memory, prune it
  * and decide which tuples are visible, then publishes the page's visible
  * tuples as heap batches, up to 64 rows each, that pin the page and
  * deform a column only when a consumer asks for it. The node evaluates no
  * clause: a filter above takes the relation's clauses, or the relation
- * has none. Under a Gather, the participants share the core's parallel
+ * has none. A row-wise parent gets each batch's rows from the columns of
+ * its targets, taken once per batch: the page is still pinned once and a
+ * column deformed only when a target reads it, which makes the node
+ * faster than the core's scan there too (docs/nodes.md). Under a Gather,
+ * the participants share the core's parallel
  * scan descriptor, which hands each of them its own pages, and the
  * leader reports the counters of all of them. See docs/nodes.md.
  */
@@ -75,6 +80,11 @@ typedef struct HeapScanState
 	int64		produced;
 	uint64		batches;
 	uint64		pages;
+	/* A row-wise parent: the batch being served, its next row, its targets' columns. */
+	bool		rows;
+	TessBatch  *active;
+	int			next_row;
+	TessDatumColumn *columns;
 } HeapScanState;
 
 static CustomPath *heap_scan_rows(PlannerInfo *root, Path *path);
@@ -301,8 +311,10 @@ heap_scan_start(HeapScanState *state)
 	state->capacity = state->request->max_batch_rows > 0 ?
 		Min(state->request->max_batch_rows, HEAP_SCAN_BATCH_ROWS) :
 		HEAP_SCAN_BATCH_ROWS;
-	if (state->request->output_mode != TESS_OUTPUT_BATCH)
-		elog(ERROR, "TessHeapScan requires a batch-aware parent");
+	state->rows = state->request->output_mode == TESS_OUTPUT_ROWS;
+	if (state->rows)
+		state->columns = palloc0_array(TessDatumColumn,
+									   Max(state->layout.ntargets, 1));
 	config.parent_context = estate->es_query_cxt;
 	config.ncolumns = state->relation.ncolumns;
 	config.capacity = state->capacity;
@@ -383,29 +395,15 @@ fill_from_page(HeapScanState *state, int limit)
 	state->page_cursor += nrows;
 }
 
-static TupleTableSlot *
-heap_scan_exec(CustomScanState *css)
+/* The next batch of the relation's rows, or NULL at the end. */
+static TessBatch *
+next_batch(HeapScanState *state)
 {
-	HeapScanState *state = (HeapScanState *) css;
+	CustomScanState *css = &state->css;
 	HeapScanDesc hscan;
 	TessBatch  *batch;
 	int			limit;
 
-	if (state->request == NULL)
-		heap_scan_start(state);
-	/* Without a parallel scan from the callbacks, a serial one. */
-	if (state->scan == NULL)
-	{
-		EState	   *estate = css->ss.ps.state;
-
-		begin_scan(state, table_beginscan(css->ss.ss_currentRelation,
-										  estate->es_snapshot, 0, NULL,
-										  heap_scan_flags(state)));
-	}
-	if (!ScanDirectionIsForward(css->ss.ps.state->es_direction))
-		elog(ERROR, "TessHeapScan supports only forward scans");
-	/* Refuses while the parent has not finished the previous batch. */
-	tess_output_release(state->output);
 	if (state->exhausted)
 		return NULL;
 	/* A bounded parent never gets more rows than it asked for. */
@@ -453,6 +451,103 @@ heap_scan_exec(CustomScanState *css)
 	state->batches++;
 	if (state->projection != NULL)
 		batch = tess_projection_wrap(state->projection, batch);
+	return batch;
+}
+
+/* The column of every target, for the batch's rows: deformed or computed once. */
+static void
+fetch_columns(HeapScanState *state, TessBatch *batch)
+{
+	for (int target = 0; target < state->layout.ntargets; target++)
+	{
+		TessDatumColumn *column = &state->columns[target];
+
+		*column = (TessDatumColumn) TESS_STRUCT_INITIALIZER(TessDatumColumn);
+		batch->ops->get_datum_column(batch, tess_layout_column(&state->layout, target),
+									 &batch->rows, TESS_COLUMN_FOR_PROJECTION, column);
+		if (column->values == NULL || column->isnull == NULL ||
+			column->nrows != batch->rows.nrows)
+			elog(ERROR, "TessHeapScan batch returned an invalid column");
+	}
+}
+
+/* Forget the batch being served: the wrapper's values go with it. */
+static void
+drop_active(HeapScanState *state)
+{
+	if (state->active != NULL && state->projection != NULL)
+		state->active->ops->release(state->active);
+	state->active = NULL;
+}
+
+/*
+ * A row-wise parent: the next row of the batch being served, in the
+ * node's slot, which the parent reads before it asks for another; the
+ * batch's pins go when the next batch is read.
+ */
+static TupleTableSlot *
+exec_rows(HeapScanState *state)
+{
+	TupleTableSlot *slot = state->css.ss.ps.ps_ResultTupleSlot;
+
+	for (;;)
+	{
+		int			row;
+
+		if (state->active == NULL)
+		{
+			TessBatch  *batch = next_batch(state);
+
+			if (batch == NULL)
+				return NULL;
+			fetch_columns(state, batch);
+			state->active = batch;
+			state->next_row = tess_row_mask_next(&batch->rows, -1);
+		}
+		if (state->next_row < 0)
+		{
+			drop_active(state);
+			continue;
+		}
+		row = state->next_row;
+		state->next_row = tess_row_mask_next(&state->active->rows, row);
+		ExecClearTuple(slot);
+		for (int target = 0; target < state->layout.ntargets; target++)
+		{
+			slot->tts_values[target] = state->columns[target].values[row];
+			slot->tts_isnull[target] = state->columns[target].isnull[row];
+		}
+		slot->tts_tableOid = state->active->table_oid;
+		return ExecStoreVirtualTuple(slot);
+	}
+}
+
+static TupleTableSlot *
+heap_scan_exec(CustomScanState *css)
+{
+	HeapScanState *state = (HeapScanState *) css;
+	TessBatch  *batch;
+
+	if (state->request == NULL)
+		heap_scan_start(state);
+	/* Without a parallel scan from the callbacks, a serial one. */
+	if (state->scan == NULL)
+	{
+		EState	   *estate = css->ss.ps.state;
+
+		begin_scan(state, table_beginscan(css->ss.ss_currentRelation,
+										  estate->es_snapshot, 0, NULL,
+										  heap_scan_flags(state)));
+	}
+	if (!ScanDirectionIsForward(css->ss.ps.state->es_direction))
+		elog(ERROR, "TessHeapScan supports only forward scans");
+	if (state->rows)
+		return exec_rows(state);
+	/* Refuses while the parent has not finished the previous batch. */
+	tess_output_release(state->output);
+	batch = next_batch(state);
+	if (batch == NULL)
+		return NULL;
 	return tess_output_publish(state->output, batch);
 }
 
@@ -463,6 +558,7 @@ heap_scan_end(CustomScanState *css)
 
 	if (state->stats != NULL)
 		tess_shared_stats_end(state->stats);
+	drop_active(state);
 	tess_output_end(state->output);
 	/* The pins of a batch a projection wrapped are the node's to drop. */
 	end_scan(state);
@@ -475,6 +571,7 @@ heap_scan_rescan(CustomScanState *css)
 	HeapScanState *state = (HeapScanState *) css;
 
 	tess_output_clear(state->output);
+	drop_active(state);
 	if (state->projection != NULL)
 		tess_projection_reset(state->projection);
 	if (state->heap != NULL)

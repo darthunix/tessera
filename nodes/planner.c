@@ -249,6 +249,46 @@ add_filter_paths(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte)
 		add_partial_path(rel, (Path *) make_filter_path(rel, partial, child));
 }
 
+/*
+ * The native scan in place of the sequential scan of a relation without
+ * clauses, and in place of the parallel one: it is faster than the core's
+ * under any parent, a row-wise one included, since it pins a page once
+ * and deforms only the columns read (bench/pg/rowwise). The path costs
+ * the filter's fraction of the scan's: there is no cost model yet.
+ */
+static void
+add_scan_paths(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte)
+{
+	Path	   *seqscan;
+	Path	   *copy;
+	Path	   *scan;
+
+	if (!*tess_runtime_api()->settings->enable ||
+		!relation_supported(root, rel, rte) || rel->baserestrictinfo != NIL)
+		return;
+	seqscan = find_seqscan(rel->pathlist);
+	if (seqscan == NULL)
+		return;
+	/* add_path frees a core path the node's dominates: the node keeps a copy. */
+	copy = makeNode(Path);
+	*copy = *seqscan;
+	scan = tess_batch_scan_path(root, copy);
+	if (scan == NULL)
+		return;
+	scan->total_cost *= FILTER_COST_FACTOR;
+	add_path(rel, scan);
+	seqscan = find_seqscan(rel->partial_pathlist);
+	if (seqscan == NULL || !seqscan->parallel_aware || !rel->consider_parallel)
+		return;
+	copy = makeNode(Path);
+	*copy = *seqscan;
+	scan = tess_batch_scan_path(root, copy);
+	if (scan == NULL)
+		return;
+	scan->total_cost *= FILTER_COST_FACTOR;
+	add_partial_path(rel, scan);
+}
+
 /* The node's paths, then TessGather over the cheapest partial path, before the core gathers it. */
 static void
 set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
@@ -257,6 +297,7 @@ set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
 	if (previous_set_rel_pathlist_hook != NULL)
 		previous_set_rel_pathlist_hook(root, rel, rti, rte);
 	add_filter_paths(root, rel, rte);
+	add_scan_paths(root, rel, rte);
 	tess_gather_add_paths(root, rel);
 }
 

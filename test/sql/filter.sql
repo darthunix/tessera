@@ -297,6 +297,39 @@ SELECT filter_same($$SELECT a FROM filter8_t WHERE a IN (1, 2, 4294967297, 85899
 SELECT a FROM filter8_t WHERE a * 4294967296 > 1;
 DROP TABLE filter8_t;
 
+-- A table without clauses under a row-wise parent: the scan serves the
+-- rows of each batch, the columns of its targets taken once per batch.
+EXPLAIN (COSTS OFF) SELECT bit_or(a), max(c) FROM filter_t;
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+SELECT bit_or(a), max(c) FROM filter_t;
+SELECT filter_same($$SELECT bit_or(a), max(c), count(a), count(*) FROM filter_t$$);
+-- Rows to the client, targets computed, NULL, a text column and a sort.
+SELECT filter_same($$SELECT md5(string_agg(q::text, ',' ORDER BY q::text)) FROM (SELECT a, b, c FROM filter_t) AS q$$);
+SELECT filter_same($$SELECT md5(string_agg(q::text, ',' ORDER BY q::text)) FROM (SELECT a % 7, c || '!', b * 2 FROM filter_t) AS q$$);
+EXPLAIN (COSTS OFF) SELECT c FROM filter_t ORDER BY c DESC;
+SELECT c FROM filter_t ORDER BY c DESC LIMIT 3;
+-- A window function over the rows.
+SELECT filter_same($$SELECT md5(string_agg(q::text, ',' ORDER BY q::text)) FROM (SELECT a, row_number() OVER (ORDER BY c) FROM filter_t) AS q$$);
+-- A cursor reads a few rows, then the rest.
+BEGIN;
+DECLARE filter_cursor CURSOR FOR SELECT a, c FROM filter_t;
+FETCH 3 FROM filter_cursor;
+FETCH 3 FROM filter_cursor;
+MOVE 60 IN filter_cursor;
+FETCH 3 FROM filter_cursor;
+MOVE ALL IN filter_cursor;
+FETCH 1 FROM filter_cursor;
+COMMIT;
+-- Rescanned per outer row, a parameter among the targets.
+SELECT filter_same($$SELECT g, (SELECT bit_xor(a * g) FROM filter_t) FROM generate_series(1, 5) AS g$$);
+-- Several pages, dead tuples and values stored outside the page.
+CREATE TABLE filter_rows AS SELECT i AS a, repeat('x', i % 50) AS t FROM generate_series(1, 3000) AS i;
+DELETE FROM filter_rows WHERE a % 4 = 0;
+INSERT INTO filter_rows SELECT i, repeat(chr(96 + i % 26), 5000) FROM generate_series(3001, 3010) AS i;
+SELECT filter_same($$SELECT bit_xor(a), max(length(t)), count(*) FROM filter_rows$$);
+SELECT filter_same($$SELECT md5(string_agg(q::text, ',' ORDER BY q::text)) FROM (SELECT a, left(t, 3) FROM filter_rows) AS q$$);
+DROP TABLE filter_rows;
+
 DROP FUNCTION filter_same(text);
 
 DROP TABLE filter_t;

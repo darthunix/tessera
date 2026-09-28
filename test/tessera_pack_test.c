@@ -260,8 +260,7 @@ sink_set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
 	const char *name;
 	const TessNode *pack;
 	CustomPath *wrapped;
-	Path	   *seqscan = NULL;
-	Path	   *copy;
+	Path	   *seqscan;
 	Path	   *child;
 	Path		template;
 
@@ -274,23 +273,16 @@ sink_set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
 	name = get_rel_name(rte->relid);
 	if (name == NULL || strncmp(name, "pack_", 5) != 0)
 		return;
-	foreach_ptr(Path, path, rel->pathlist)
-	{
-		if (path->pathtype == T_SeqScan && path->param_info == NULL)
-		{
-			seqscan = path;
-			break;
-		}
-	}
-	if (seqscan == NULL)
-		return;
-	/* add_path frees the dominated core path; the wrapped child is a copy. */
-	copy = makeNode(Path);
-	*copy = *seqscan;
+	/*
+	 * A sequential scan of its own: the one in the path list may have given
+	 * way to the native scan, and add_path frees the paths the sink's
+	 * dominates.
+	 */
+	seqscan = create_seqscan_path(root, rel, NULL, 0);
 	/* The pack node itself: a batch input may prefer a native scan. */
 	pack = tess_runtime_api()->nodes->find(TESS_PACK_NODE_NAME);
 	if (pack == NULL || !TESS_ABI_HAS_FIELD(pack, TessNode, wrap_rows) ||
-		pack->wrap_rows == NULL || (wrapped = pack->wrap_rows(root, copy)) == NULL)
+		pack->wrap_rows == NULL || (wrapped = pack->wrap_rows(root, seqscan)) == NULL)
 		return;
 	child = &wrapped->path;
 	template = *seqscan;

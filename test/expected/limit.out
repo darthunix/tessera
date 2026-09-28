@@ -98,26 +98,31 @@ SELECT count(*), count(b), sum(a) FROM (SELECT a, b FROM limit_t LIMIT 70) AS s;
 -- WITH TIES stays with the core node.
 EXPLAIN (COSTS OFF)
 SELECT a FROM limit_t ORDER BY a FETCH FIRST 3 ROWS WITH TIES;
-           QUERY PLAN            
----------------------------------
+                    QUERY PLAN                     
+---------------------------------------------------
  Limit
    ->  Sort
          Sort Key: a
-         ->  Seq Scan on limit_t
+         ->  Custom Scan (TessHeapScan) on limit_t
 (4 rows)
 
 -- Over a sort the core limit stays, since a pack would copy every row it
 -- reads; the sort stays a top-N sort.
 EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT a FROM limit_t ORDER BY a DESC LIMIT 3;
-                          QUERY PLAN                          
---------------------------------------------------------------
+                                   QUERY PLAN                                   
+--------------------------------------------------------------------------------
  Limit (actual rows=3.00 loops=1)
    ->  Sort (actual rows=3.00 loops=1)
          Sort Key: a DESC
          Sort Method: top-N heapsort  Memory: 25kB
-         ->  Seq Scan on limit_t (actual rows=100.00 loops=1)
-(5 rows)
+         ->  Custom Scan (TessHeapScan) on limit_t (actual rows=100.00 loops=1)
+               Batch Size: 64
+               Batches: 2
+               Pages: 1
+               Deformed Datums: 100
+               Restarted Datums: 0
+(10 rows)
 
 SELECT a FROM limit_t ORDER BY a DESC LIMIT 3;
   a  

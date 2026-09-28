@@ -72,14 +72,14 @@ SET enable_mergejoin = off;
 SET enable_nestloop = off;
 -- Without the kernels there is no path.
 EXPLAIN (COSTS OFF) SELECT count(*) FROM jf JOIN jd ON jf.fk = jd.id;
-             QUERY PLAN             
-------------------------------------
+                     QUERY PLAN                     
+----------------------------------------------------
  Aggregate
    ->  Hash Join
          Hash Cond: (jf.fk = jd.id)
-         ->  Seq Scan on jf
+         ->  Custom Scan (TessHeapScan) on jf
          ->  Hash
-               ->  Seq Scan on jd
+               ->  Custom Scan (TessHeapScan) on jd
 (6 rows)
 
 LOAD 'tessera_kernels';
@@ -996,7 +996,13 @@ RESET work_mem;
 SELECT join_explain($$SELECT jsmall.k, (SELECT count(*) FROM jf JOIN jdup ON jf.fk = jdup.k WHERE jdup.w > jsmall.k) FROM jsmall$$);
                                         join_explain                                        
 --------------------------------------------------------------------------------------------
- Seq Scan on jsmall (actual rows=10.00 loops=1)
+ Custom Scan (TessHeapScan) on jsmall (actual rows=10.00 loops=1)
+   Batch Size: 64
+   Batches: 1
+   Pages: 1
+   Deformed Datums: 10
+   Restarted Datums: 0
+   Computed Datums: 10
    SubPlan expr_1
      ->  Custom Scan (TessAgg) (actual rows=1.00 loops=10)
            Input Batches: 3
@@ -1030,7 +1036,7 @@ SELECT join_explain($$SELECT jsmall.k, (SELECT count(*) FROM jf JOIN jdup ON jf.
                              Pages: 1
                              Deformed Datums: 2615
                              Restarted Datums: 85
-(34 rows)
+(40 rows)
 
 SELECT join_same($$SELECT jsmall.k, (SELECT count(*) FROM jf JOIN jdup ON jf.fk = jdup.k WHERE jdup.w > jsmall.k) FROM jsmall$$);
                    join_same                    
@@ -1041,7 +1047,13 @@ SELECT join_same($$SELECT jsmall.k, (SELECT count(*) FROM jf JOIN jdup ON jf.fk 
 SELECT join_explain($$SELECT jsmall.k, (SELECT count(*) FROM jf JOIN jdup ON jf.fk = jdup.k WHERE jf.v > jsmall.k * 10) FROM jsmall$$);
                                        join_explain                                        
 -------------------------------------------------------------------------------------------
- Seq Scan on jsmall (actual rows=10.00 loops=1)
+ Custom Scan (TessHeapScan) on jsmall (actual rows=10.00 loops=1)
+   Batch Size: 64
+   Batches: 1
+   Pages: 1
+   Deformed Datums: 10
+   Restarted Datums: 0
+   Computed Datums: 10
    SubPlan expr_1
      ->  Custom Scan (TessAgg) (actual rows=1.00 loops=10)
            Input Batches: 2
@@ -1075,7 +1087,7 @@ SELECT join_explain($$SELECT jsmall.k, (SELECT count(*) FROM jf JOIN jdup ON jf.
                        Pages: 1
                        Deformed Datums: 150
                        Restarted Datums: 0
-(34 rows)
+(40 rows)
 
 SELECT join_same($$SELECT jsmall.k, (SELECT count(*) FROM jf JOIN jdup ON jf.fk = jdup.k WHERE jf.v > jsmall.k * 10) FROM jsmall$$);
                    join_same                    
@@ -1311,7 +1323,13 @@ SELECT join_explain($$SELECT count(*) FROM jprobe JOIN jd ON jprobe.k = jd.id$$)
 SELECT join_explain($$SELECT jsmall.k, (SELECT count(*) FROM jprobe JOIN jbuild ON jprobe.k = jbuild.k WHERE jbuild.w > jsmall.k) FROM jsmall$$);
                                          join_explain                                          
 -----------------------------------------------------------------------------------------------
- Seq Scan on jsmall (actual rows=10.00 loops=1)
+ Custom Scan (TessHeapScan) on jsmall (actual rows=10.00 loops=1)
+   Batch Size: 64
+   Batches: 1
+   Pages: 1
+   Deformed Datums: 10
+   Restarted Datums: 0
+   Computed Datums: 10
    SubPlan expr_1
      ->  Custom Scan (TessAgg) (actual rows=1.00 loops=10)
            Input Batches: 128
@@ -1346,7 +1364,7 @@ SELECT join_explain($$SELECT jsmall.k, (SELECT count(*) FROM jprobe JOIN jbuild 
                              Pages: 23
                              Deformed Datums: 99615
                              Restarted Datums: 0
-(35 rows)
+(41 rows)
 
 SELECT join_same($$SELECT jsmall.k, (SELECT count(*) FROM jprobe JOIN jbuild ON jprobe.k = jbuild.k WHERE jbuild.w > jsmall.k) FROM jsmall$$);
                    join_same                    
@@ -3070,28 +3088,28 @@ RESET enable_parallel_hash;
 -- No path: clauses without an integer key, another key type, the core's
 -- hash join disabled, the batch nodes off.
 EXPLAIN (COSTS OFF) SELECT count(*) FROM jf JOIN jd ON jf.v > jd.n AND jf.note = jd.label;
-                  QUERY PLAN                   
------------------------------------------------
+                        QUERY PLAN                        
+----------------------------------------------------------
  Custom Scan (TessAgg)
    ->  Custom Scan (TessPack)
          ->  Hash Join
                Hash Cond: (jf.note = jd.label)
                Join Filter: (jf.v > jd.n)
-               ->  Seq Scan on jf
+               ->  Custom Scan (TessHeapScan) on jf
                ->  Hash
-                     ->  Seq Scan on jd
+                     ->  Custom Scan (TessHeapScan) on jd
 (8 rows)
 
 EXPLAIN (COSTS OFF) SELECT count(*) FROM jf JOIN jd ON jf.note = jd.label;
-                  QUERY PLAN                   
------------------------------------------------
+                        QUERY PLAN                        
+----------------------------------------------------------
  Custom Scan (TessAgg)
    ->  Custom Scan (TessPack)
          ->  Hash Join
                Hash Cond: (jf.note = jd.label)
-               ->  Seq Scan on jf
+               ->  Custom Scan (TessHeapScan) on jf
                ->  Hash
-                     ->  Seq Scan on jd
+                     ->  Custom Scan (TessHeapScan) on jd
 (7 rows)
 
 SET enable_hashjoin = off;
@@ -3102,7 +3120,7 @@ EXPLAIN (COSTS OFF) SELECT count(*) FROM jf JOIN jd ON jf.fk = jd.id;
    ->  Custom Scan (TessPack)
          ->  Nested Loop
                Disabled: true
-               ->  Seq Scan on jf
+               ->  Custom Scan (TessHeapScan) on jf
                ->  Index Only Scan using jd_pkey on jd
                      Index Cond: (id = jf.fk)
 (7 rows)
