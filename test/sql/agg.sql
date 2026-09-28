@@ -303,6 +303,13 @@ EXPLAIN (COSTS OFF) SELECT count(*), sum(b), sum(r) FROM (SELECT DISTINCT b, a %
 SELECT agg_same($$SELECT count(*), sum(x) FROM (SELECT DISTINCT a::bigint * 1000000000 AS x FROM agg_t WHERE a > 250) AS s$$);
 SELECT agg_same($$SELECT count(*) FROM (SELECT DISTINCT a FROM agg_t) AS s$$);
 SELECT agg_same($$SELECT DISTINCT b FROM agg_t WHERE false$$);
+-- Over a grouping with HAVING of an aggregate it does not return: HAVING is
+-- the grouping's, the DISTINCT above has no such aggregate.
+SET enable_sort = off;
+EXPLAIN (COSTS OFF)
+SELECT DISTINCT b, count(*) FROM agg_t WHERE a > 10 GROUP BY b HAVING sum(a) % 3 <> 0;
+SELECT agg_same($$SELECT DISTINCT b, count(*) FROM agg_t WHERE a > 10 GROUP BY b HAVING sum(a) % 3 <> 0$$);
+RESET enable_sort;
 -- Left to the core: DISTINCT ON; a DISTINCT of text over 300 rows, cheaper
 -- by the planner's estimate.
 EXPLAIN (COSTS OFF) SELECT DISTINCT ON (b) b, a FROM agg_t ORDER BY b, a;

@@ -1050,6 +1050,30 @@ SELECT agg_same($$SELECT DISTINCT b FROM agg_t WHERE false$$);
  
 (1 row)
 
+-- Over a grouping with HAVING of an aggregate it does not return: HAVING is
+-- the grouping's, the DISTINCT above has no such aggregate.
+SET enable_sort = off;
+EXPLAIN (COSTS OFF)
+SELECT DISTINCT b, count(*) FROM agg_t WHERE a > 10 GROUP BY b HAVING sum(a) % 3 <> 0;
+                      QUERY PLAN                       
+-------------------------------------------------------
+ Custom Scan (TessAgg)
+   Group Key: b, count(*)
+   ->  Custom Scan (TessAgg)
+         Filter: (((sum(a)) % '3'::bigint) <> 0)
+         Group Key: b
+         ->  Custom Scan (TessFilter) on agg_t
+               Batch Filter: (a > 10)
+               ->  Custom Scan (TessHeapScan) on agg_t
+(8 rows)
+
+SELECT agg_same($$SELECT DISTINCT b, count(*) FROM agg_t WHERE a > 10 GROUP BY b HAVING sum(a) % 3 <> 0$$);
+                        agg_same                         
+---------------------------------------------------------
+ {"(0,25)","(1,25)","(2,25)","(5,25)","(6,25)","(9,25)"}
+(1 row)
+
+RESET enable_sort;
 -- Left to the core: DISTINCT ON; a DISTINCT of text over 300 rows, cheaper
 -- by the planner's estimate.
 EXPLAIN (COSTS OFF) SELECT DISTINCT ON (b) b, a FROM agg_t ORDER BY b, a;

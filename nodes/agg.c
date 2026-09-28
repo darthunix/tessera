@@ -65,6 +65,14 @@
 /* A group's aggregate states have one flag bit each in a payload word. */
 #define AGG_MAX_GROUPED 64
 
+/*
+ * A path's flags in its private data: the node is the query's grouping,
+ * whose plan applies HAVING (a DISTINCT or a set operation above one must
+ * not); the node groups for a Gather, its table emptied early.
+ */
+#define AGG_PATH_HAVING 0x01
+#define AGG_PATH_PARTIAL 0x02
+
 /* The counters every participant of a parallel plan shares. */
 enum
 {
@@ -911,10 +919,12 @@ static void create_nonunion_paths(PlannerInfo *root, RelOptInfo *output_rel);
  * properties and rows, a lower cost, the batch child over the core path's
  * input, the grouping expressions and the aggregates it computes; the
  * groups spill past hash_mem as the core's do. NULL when the input cannot
- * be read in batches or lacks a column.
+ * be read in batches or lacks a column. The private data: the keys, the
+ * groups expected, the set operation's command (-1), the path's flags
+ * (AGG_PATH_*) and each key's equality.
  */
 static CustomPath *
-make_agg_path(PlannerInfo *root, const AggPath *agg, List *tlist, int nkeys)
+make_agg_path(PlannerInfo *root, const AggPath *agg, List *tlist, int nkeys, int flags)
 {
 	TessPathConfig config = TESS_STRUCT_INITIALIZER(TessPathConfig);
 	Path	   *child;
@@ -940,9 +950,10 @@ make_agg_path(PlannerInfo *root, const AggPath *agg, List *tlist, int nkeys)
 	config.node = &tess_agg_node;
 	config.children = list_make1(child);
 	config.expressions = tlist;
-	config.node_data = (Node *) list_make2_int(nkeys,
+	config.node_data = (Node *) list_make4_int(nkeys,
 											   (int) Min(agg->path.rows,
-														 (double) PG_INT32_MAX));
+														 (double) PG_INT32_MAX),
+											   -1, flags);
 	/*
 	 * Each key's equality, for a key a word does not hold (0 for the
 	 * others): its type's default one, which one of the grouping clauses
@@ -1020,7 +1031,8 @@ create_partial_paths(PlannerInfo *root, RelOptInfo *grouped_rel,
 												  strategy,
 												  AGGSPLIT_INITIAL_SERIAL))
 	{
-		CustomPath *partial = make_agg_path(root, agg, tlist, list_length(keys));
+		CustomPath *partial = make_agg_path(root, agg, tlist, list_length(keys),
+											AGG_PATH_PARTIAL);
 		GatherPath *gather;
 		AggPath    *final;
 		double		rows;
@@ -1110,7 +1122,7 @@ create_distinct_paths(PlannerInfo *root, RelOptInfo *input_rel,
 		if (agg->groupClause == NIL ||
 			not_from_groups((Node *) agg->path.pathtarget->exprs, keys))
 			continue;
-		path = make_agg_path(root, agg, tlist, list_length(keys));
+		path = make_agg_path(root, agg, tlist, list_length(keys), 0);
 		if (path != NULL)
 			add_path(output_rel, &path->path);
 	}
@@ -1177,7 +1189,7 @@ create_setop_paths(PlannerInfo *root, RelOptInfo *output_rel)
 		if (keys == NIL)
 			continue;
 		tlist = add_to_flat_tlist(NIL, keys);
-		path = make_agg_path(root, agg, tlist, list_length(keys));
+		path = make_agg_path(root, agg, tlist, list_length(keys), 0);
 		if (path != NULL)
 			add_path(output_rel, &path->path);
 	}
@@ -1242,8 +1254,9 @@ create_nonunion_paths(PlannerInfo *root, RelOptInfo *output_rel)
 		if (keys == NIL || list_length(keys) > TESS_TABLE_MAX_KEYS ||
 			list_length(setop->groupList) != list_length(keys))
 			continue;
-		data = list_make2_int(list_length(keys),
-							  (int) Min(setop->numGroups, (double) PG_INT32_MAX));
+		data = list_make4_int(list_length(keys),
+							  (int) Min(setop->numGroups, (double) PG_INT32_MAX),
+							  (int) setop->cmd, 0);
 		foreach_ptr(Node, key, keys)
 		{
 			int			eqop;
@@ -1287,7 +1300,7 @@ create_nonunion_paths(PlannerInfo *root, RelOptInfo *output_rel)
 		config.node = &tess_agg_node;
 		config.children = list_make2(left, right);
 		config.expressions = add_to_flat_tlist(NIL, keys);
-		config.node_data = (Node *) lappend_int(data, (int) setop->cmd);
+		config.node_data = (Node *) data;
 		add_path(output_rel, &tess_path_create(&config)->path);
 	}
 }
@@ -1362,7 +1375,8 @@ create_upper_paths(PlannerInfo *root, UpperRelationKind stage,
 										AGGSPLIT_SIMPLE);
 	foreach_ptr(AggPath, agg, templates)
 	{
-		CustomPath *path = make_agg_path(root, agg, tlist, list_length(keys));
+		CustomPath *path = make_agg_path(root, agg, tlist, list_length(keys),
+										 AGG_PATH_HAVING);
 
 		if (path != NULL)
 			add_path(output_rel, &path->path);
@@ -1429,10 +1443,11 @@ collect_params(Node *node, List **params)
 /*
  * The scan tuple is the aggregates themselves, so that the planner turns
  * the targets and HAVING into references to it; the child's columns stay
- * hidden. HAVING is the plan's qual, as it is the core aggregate's, except
- * for the partial aggregates of a parallel plan, whose Finalize Aggregate
- * applies it. The private data carries one argument per aggregate, a NULL
- * constant for count(*).
+ * hidden. HAVING is the plan's qual, as it is the core aggregate's, for the
+ * query's grouping only (AGG_PATH_HAVING): not for the partial aggregates of
+ * a parallel plan, whose Finalize Aggregate applies it, nor for a DISTINCT
+ * or a set operation above. The private data carries one argument per
+ * aggregate, a NULL constant for count(*).
  */
 /*
  * A set operation's counts as aggregates of the scan tuple: count(*) of a
@@ -1478,9 +1493,9 @@ agg_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 	List	   *params = NIL;
 	List	   *path_data;
 	TessPlanWriter *writer;
-	bool		partial = false;
 	int			nkeys;
-	int			setop = -1;
+	int			setop;
+	int			flags;
 
 	tess_path_get_info(best_path, &info);
 	if (!tess_plan_child(best_path, custom_plans, 0, &child))
@@ -1490,13 +1505,14 @@ agg_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 	info.expressions = (List *) tess_plan_setop_columns((Node *) info.expressions, child.plan);
 	path_data = (List *) info.node_data;
 	nkeys = linitial_int(path_data);
-	/* INTERSECT or EXCEPT: the command after the keys' equalities, and two children. */
-	if (list_length(path_data) > 2 + nkeys)
+	setop = lthird_int(path_data);
+	flags = lfourth_int(path_data);
+	/* INTERSECT or EXCEPT: the command, and two children. */
+	if (setop >= 0)
 	{
 		TessPlanChild right = TESS_STRUCT_INITIALIZER(TessPlanChild);
 		int			position = 0;
 
-		setop = llast_int(path_data);
 		if (!tess_plan_child(best_path, custom_plans, 1, &right))
 			elog(ERROR, "TessAgg expected a second batch child");
 		/*
@@ -1540,7 +1556,6 @@ agg_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 													  &child));
 			continue;
 		}
-		partial = DO_AGGSPLIT_SKIPFINAL(((Aggref *) entry->expr)->aggsplit);
 		argument = aggregate_argument((Aggref *) entry->expr);
 		arguments = lappend(arguments, argument == NULL ?
 							(Node *) makeNullConst(INT4OID, -1, InvalidOid) :
@@ -1567,11 +1582,11 @@ agg_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 	tess_plan_write_list(writer, "keys", keys);
 	tess_plan_write_int(writer, "groups", lsecond_int(path_data));
 	tess_plan_write_int_list(writer, "key_eqops",
-							 list_copy_head(list_copy_tail(path_data, 2), nkeys));
+							 list_copy_head(list_copy_tail(path_data, 4), nkeys));
 	tess_plan_write_int(writer, "setop", setop);
 	config.methods = &tess_agg_scan_methods;
 	config.layout_policy = TESS_LAYOUT_DENSE;
-	config.qual = partial || setop >= 0 ? NIL : (List *) root->parse->havingQual;
+	config.qual = (flags & AGG_PATH_HAVING) ? (List *) root->parse->havingQual : NIL;
 	config.expressions = params;
 	config.scan_targetlist = info.expressions;
 	config.scanrelid = 0;
