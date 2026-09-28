@@ -1104,7 +1104,7 @@ DROP TABLE filter8_t;
 EXPLAIN (COSTS OFF) SELECT bit_or(a), max(c) FROM filter_t;
                   QUERY PLAN                  
 ----------------------------------------------
- Aggregate
+ Custom Scan (TessAgg)
    ->  Custom Scan (TessHeapScan) on filter_t
 (2 rows)
 
@@ -1112,14 +1112,18 @@ EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT bit_or(a), max(c) FROM filter_t;
                                 QUERY PLAN                                 
 ---------------------------------------------------------------------------
- Aggregate (actual rows=1.00 loops=1)
+ Custom Scan (TessAgg) (actual rows=1.00 loops=1)
+   Input Batches: 4
+   Input Rows: 200
+   Kernel Calls: 0
+   Computed Datums: 400
    ->  Custom Scan (TessHeapScan) on filter_t (actual rows=200.00 loops=1)
          Batch Size: 64
          Batches: 4
          Pages: 2
          Deformed Datums: 400
          Restarted Datums: 0
-(7 rows)
+(11 rows)
 
 SELECT filter_same($$SELECT bit_or(a), max(c), count(a), count(*) FROM filter_t$$);
       filter_same      

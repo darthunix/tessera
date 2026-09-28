@@ -2671,18 +2671,20 @@ SELECT join_same($$SELECT count(*), sum(jbuild.w), sum(jprobe.v) FROM jprobe JOI
 -- By-reference inner columns: their values live in the query's shared
 -- memory, in blocks of each participant's, and the payload holds where.
 EXPLAIN (COSTS OFF) SELECT count(*), max(jd.label) FROM jbig JOIN jd ON jbig.fk = jd.id;
-                             QUERY PLAN                              
----------------------------------------------------------------------
+                                QUERY PLAN                                 
+---------------------------------------------------------------------------
  Finalize Aggregate
-   ->  Gather
+   ->  Custom Scan (TessGather)
          Workers Planned: 2
-         ->  Partial Aggregate
-               ->  Parallel Custom Scan (TessHashJoin)
-                     Hash Cond: (jd.id = jbig.fk)
-                     Shared Table: true
-                     ->  Parallel Custom Scan (TessHeapScan) on jbig
-                     ->  Parallel Custom Scan (TessHeapScan) on jd
-(9 rows)
+         ->  Parallel Custom Scan (TessSend)
+               ->  Parallel Custom Scan (TessAgg)
+                     Partial Mode: Partial
+                     ->  Parallel Custom Scan (TessHashJoin)
+                           Hash Cond: (jd.id = jbig.fk)
+                           Shared Table: true
+                           ->  Parallel Custom Scan (TessHeapScan) on jbig
+                           ->  Parallel Custom Scan (TessHeapScan) on jd
+(11 rows)
 
 SELECT join_same($$SELECT jbig.v, jd.label FROM jbig JOIN jd ON jbig.fk = jd.id$$);
                      join_same                     
@@ -2714,18 +2716,20 @@ ANALYZE jref;
 CREATE TABLE jrefprobe AS SELECT g % 25000 AS k, g AS v FROM generate_series(1, 60000) AS g;
 ANALYZE jrefprobe;
 EXPLAIN (COSTS OFF) SELECT count(*), sum(jref.n), max(jref.t) FROM jrefprobe JOIN jref ON jrefprobe.k = jref.k;
-                                QUERY PLAN                                
---------------------------------------------------------------------------
+                                   QUERY PLAN                                   
+--------------------------------------------------------------------------------
  Finalize Aggregate
-   ->  Gather
+   ->  Custom Scan (TessGather)
          Workers Planned: 2
-         ->  Partial Aggregate
-               ->  Parallel Custom Scan (TessHashJoin)
-                     Hash Cond: (jrefprobe.k = jref.k)
-                     Shared Table: true
-                     ->  Parallel Custom Scan (TessHeapScan) on jrefprobe
-                     ->  Parallel Custom Scan (TessHeapScan) on jref
-(9 rows)
+         ->  Parallel Custom Scan (TessSend)
+               ->  Parallel Custom Scan (TessAgg)
+                     Partial Mode: Partial
+                     ->  Parallel Custom Scan (TessHashJoin)
+                           Hash Cond: (jrefprobe.k = jref.k)
+                           Shared Table: true
+                           ->  Parallel Custom Scan (TessHeapScan) on jrefprobe
+                           ->  Parallel Custom Scan (TessHeapScan) on jref
+(11 rows)
 
 SELECT join_same($$SELECT count(*), sum(jref.n), count(jref.t), sum(length(jref.t)), max(jref.t) FROM jrefprobe JOIN jref ON jrefprobe.k = jref.k$$);
                    join_same                   

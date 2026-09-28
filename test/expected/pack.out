@@ -262,7 +262,11 @@ EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT count(a) FROM pack_t;
                                QUERY PLAN                                
 -------------------------------------------------------------------------
- Aggregate (actual rows=1.00 loops=1)
+ Custom Scan (TessAgg) (actual rows=1.00 loops=1)
+   Input Batches: 2
+   Input Rows: 50
+   Kernel Calls: 0
+   Computed Datums: 50
    ->  Custom Scan (tessera_pack_sink) (actual rows=50.00 loops=1)
          Role: sink
          Requested Rows: 0
@@ -283,7 +287,7 @@ SELECT count(a) FROM pack_t;
                      Deformed Datums: 100
                      Restarted Datums: 0
                      ->  Seq Scan on pack_t (actual rows=100.00 loops=1)
-(21 rows)
+(25 rows)
 
 SELECT count(a), sum(a) FROM pack_t;
  count | sum  
@@ -335,7 +339,11 @@ EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT count(a) FROM pack_t;
                                QUERY PLAN                                
 -------------------------------------------------------------------------
- Aggregate (actual rows=1.00 loops=1)
+ Custom Scan (TessAgg) (actual rows=1.00 loops=1)
+   Input Batches: 1
+   Input Rows: 32
+   Kernel Calls: 0
+   Computed Datums: 32
    ->  Custom Scan (tessera_pack_sink) (actual rows=32.00 loops=1)
          Role: sink
          Requested Rows: 0
@@ -356,7 +364,7 @@ SELECT count(a) FROM pack_t;
                      Deformed Datums: 32
                      Restarted Datums: 0
                      ->  Seq Scan on pack_t (actual rows=32.00 loops=1)
-(21 rows)
+(25 rows)
 
 SELECT count(a), max(a) FROM pack_t;
  count | max 

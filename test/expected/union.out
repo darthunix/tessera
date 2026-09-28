@@ -184,18 +184,19 @@ SELECT union_same($$SELECT count(*), sum(a) FROM (SELECT a FROM union_a WHERE a 
 EXPLAIN (COSTS OFF)
 SELECT count(*), sum(x) FROM (SELECT a AS x FROM union_a WHERE a > 100
                               UNION ALL SELECT b FROM union_b WHERE b > 100) AS s;
-                          QUERY PLAN                           
----------------------------------------------------------------
- Aggregate
-   ->  Append
-         ->  Subquery Scan on unnamed_subquery
-               ->  Custom Scan (TessFilter) on union_a
-                     Batch Filter: (union_a.a > 100)
-                     ->  Custom Scan (TessHeapScan) on union_a
-         ->  Custom Scan (TessFilter) on union_b
-               Batch Filter: (union_b.b > 100)
-               ->  Custom Scan (TessHeapScan) on union_b
-(9 rows)
+                             QUERY PLAN                              
+---------------------------------------------------------------------
+ Custom Scan (TessAgg)
+   ->  Custom Scan (TessPack)
+         ->  Append
+               ->  Subquery Scan on unnamed_subquery
+                     ->  Custom Scan (TessFilter) on union_a
+                           Batch Filter: (union_a.a > 100)
+                           ->  Custom Scan (TessHeapScan) on union_a
+               ->  Custom Scan (TessFilter) on union_b
+                     Batch Filter: (union_b.b > 100)
+                     ->  Custom Scan (TessHeapScan) on union_b
+(10 rows)
 
 SELECT union_same($$SELECT count(*), sum(x) FROM (SELECT a AS x FROM union_a WHERE a > 100
                    UNION ALL SELECT b FROM union_b WHERE b > 100) AS s$$);

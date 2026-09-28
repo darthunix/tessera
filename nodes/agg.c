@@ -1,5 +1,6 @@
 #include "postgres.h"
 
+#include "access/htup_details.h"
 #include "access/parallel.h"
 #include "catalog/pg_aggregate.h"
 #include "catalog/pg_type_d.h"
@@ -18,8 +19,13 @@
 #include "optimizer/clauses.h"
 #include "optimizer/planner.h"
 #include "optimizer/tlist.h"
+#include "parser/parse_agg.h"
 #include "storage/shm_toc.h"
 #include "utils/fmgroids.h"
+#include "utils/syscache.h"
+#include "utils/lsyscache.h"
+#include "utils/datum.h"
+#include "utils/builtins.h"
 #include "utils/memutils.h"
 #include "utils/regproc.h"
 #include "utils/selfuncs.h"
@@ -87,8 +93,40 @@ typedef enum AggKind
 	AGG_COUNT,					/* int8 sum of the partials, 0 without any */
 	AGG_SUM,					/* int8 sum of the partials, NULL without any */
 	AGG_MIN,					/* the least partial, NULL without any */
-	AGG_MAX						/* the greatest partial, NULL without any */
+	AGG_MAX,					/* the greatest partial, NULL without any */
+	AGG_GENERIC					/* the core's functions, over the batch's rows */
 } AggKind;
+
+/*
+ * Any other aggregate without GROUP BY: its transition function called for
+ * each selected row of the arguments' columns of a batch, as the core's
+ * Aggregate calls it per row but without a row handed up, then its final
+ * function, or, in a partial plan, its serialization function for the
+ * Finalize Aggregate above. A transition function that keeps its state in
+ * the aggregate's memory asks for it (AggCheckCallContext): a stand-in
+ * AggState gives the node's context of states.
+ */
+typedef struct GenericAgg
+{
+	FmgrInfo	transfn;
+	FmgrInfo	finalfn;
+	FmgrInfo	serialfn;
+	bool		has_final;
+	bool		has_serial;
+	int			final_nargs;
+	int			nargs;
+	int16		translen;
+	bool		transbyval;
+	Datum		init;
+	bool		init_null;
+	Datum		state;
+	bool		state_null;
+	FunctionCallInfo trans_call;
+	FunctionCallInfo final_call;
+	FunctionCallInfo serial_call;
+	/* The arguments' columns of the batch being added. */
+	TessDatumColumn *columns;
+} GenericAgg;
 
 /*
  * DISTINCT in an aggregate: a table of its own, without payload, keyed by
@@ -136,6 +174,7 @@ typedef struct AggValue
 	/* DISTINCT: the pairs of group and argument seen, and the argument's kind. */
 	struct DistinctSet *distinct;
 	TessTableKeyKind argument_kind;
+	GenericAgg *generic;
 } AggValue;
 
 typedef struct TessAggState
@@ -166,6 +205,8 @@ typedef struct TessAggState
 	uint64		calls;
 	/* The counters of every participant, in a parallel plan. */
 	TessSharedStats *stats;
+	/* Generic aggregates: their states' context, and the AggState they see. */
+	AggState   *generic_agg;
 
 	/*
 	 * GROUP BY: the keys, computed columns before the arguments, and the
@@ -280,6 +321,54 @@ aggregate_kind(Oid aggfnoid)
 	}
 }
 
+static Node *aggregate_argument(const Aggref *agg);
+
+/*
+ * An aggregate the node computes through the core's functions: a whole
+ * one or the partial one of a parallel plan, of arguments without a
+ * subplan, without DISTINCT (its table keys integers only).
+ */
+static bool
+generic_supported(const Aggref *agg)
+{
+	if (agg->aggdistinct != NIL || agg->args == NIL)
+		return false;
+	foreach_node(TargetEntry, entry, agg->args)
+	{
+		if (contain_subplans((Node *) entry->expr))
+			return false;
+	}
+	return true;
+}
+
+/* Whether a batch function computes the aggregate: else the core's do. */
+static bool
+batch_aggregate(const Aggref *agg)
+{
+	const TessFunction *function = tess_runtime_api()->functions->find(agg->aggfnoid);
+	Oid			type;
+
+	if (aggregate_kind(agg->aggfnoid) < 0 || function == NULL ||
+		function->kind != TESS_FUNCTION_AGGREGATE)
+		return false;
+	if (agg->aggfnoid == F_COUNT_ || agg->aggfnoid == F_COUNT_ANY)
+		return true;
+	type = exprType(aggregate_argument(agg));
+	return type == INT4OID || type == INT8OID;
+}
+
+/* Whether an aggregate of the target list goes through the core's functions. */
+static bool
+has_generic(List *tlist)
+{
+	foreach_node(TargetEntry, entry, tlist)
+	{
+		if (IsA(entry->expr, Aggref) && !batch_aggregate((Aggref *) entry->expr))
+			return true;
+	}
+	return false;
+}
+
 /* The aggregated argument, or NULL for count(*). */
 static Node *
 aggregate_argument(const Aggref *agg)
@@ -301,29 +390,25 @@ aggregate_argument(const Aggref *agg)
 static bool
 aggregate_supported(const Aggref *agg)
 {
-	const TessFunction *function;
 	Node	   *argument;
 
 	if (agg->agglevelsup != 0 || agg->aggkind != AGGKIND_NORMAL ||
 		(agg->aggsplit != AGGSPLIT_SIMPLE &&
 		 agg->aggsplit != AGGSPLIT_INITIAL_SERIAL) || agg->aggorder != NIL ||
 		agg->aggfilter != NULL ||
-		agg->aggdirectargs != NIL || agg->aggvariadic ||
-		aggregate_kind(agg->aggfnoid) < 0)
+		agg->aggdirectargs != NIL || agg->aggvariadic)
 		return false;
-	function = tess_runtime_api()->functions->find(agg->aggfnoid);
-	if (function == NULL || function->kind != TESS_FUNCTION_AGGREGATE)
-		return false;
+	if (!batch_aggregate(agg))
+		return generic_supported(agg);
 	if (agg->aggfnoid == F_COUNT_)
 		return agg->aggstar && agg->args == NIL;
 	argument = aggregate_argument(agg);
 	if (list_length(agg->args) != 1 || contain_subplans(argument))
 		return false;
-	/* DISTINCT keys a table by the argument: an integer. */
+	/* DISTINCT keys a table by the argument: an integer, whatever the aggregate. */
 	if (agg->aggdistinct != NIL)
 		return exprType(argument) == INT4OID || exprType(argument) == INT8OID;
-	return agg->aggfnoid == F_COUNT_ANY || exprType(argument) == INT4OID ||
-		exprType(argument) == INT8OID;
+	return true;
 }
 
 /*
@@ -351,7 +436,7 @@ arguments_available(const List *tlist, const Path *child)
 	foreach_ptr(TargetEntry, entry, tlist)
 	{
 		Node	   *argument = IsA(entry->expr, Aggref) ?
-			aggregate_argument((Aggref *) entry->expr) : (Node *) entry->expr;
+			(Node *) ((Aggref *) entry->expr)->args : (Node *) entry->expr;
 
 		if (unavailable(argument, child->pathtarget->exprs))
 			return false;
@@ -764,6 +849,9 @@ create_upper_paths(PlannerInfo *root, UpperRelationKind stage,
 		return;
 	if (!distinct_fits(root, input_rel, keys, tlist))
 		return;
+	/* Through the core's functions, only without GROUP BY yet. */
+	if (keys != NIL && has_generic(tlist))
+		return;
 	/*
 	 * add_path changes the list: the candidates are taken first. With
 	 * DISTINCT in an aggregate the core groups only sorted; the node hashes
@@ -856,6 +944,7 @@ agg_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 	TessPlanConfig config = TESS_STRUCT_INITIALIZER(TessPlanConfig);
 	TessPlanChild child = TESS_STRUCT_INITIALIZER(TessPlanChild);
 	List	   *arguments = NIL;
+	List	   *more = NIL;
 	List	   *keys = NIL;
 	List	   *params = NIL;
 	List	   *path_data;
@@ -887,11 +976,25 @@ agg_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 		arguments = lappend(arguments, argument == NULL ?
 							(Node *) makeNullConst(INT4OID, -1, InvalidOid) :
 							resolve_argument(copyObject(argument), &child));
+		/* The arguments after the first, of an aggregate the core's functions compute. */
+		{
+			List	   *rest = NIL;
+
+			for (int n = 1; n < list_length(((Aggref *) entry->expr)->args); n++)
+				rest = lappend(rest,
+							   resolve_argument((Node *) copyObject(list_nth_node(TargetEntry,
+																				  ((Aggref *) entry->expr)->args,
+																				  n)->expr),
+												&child));
+			more = lappend(more, rest);
+		}
 	}
 	collect_params((Node *) arguments, &params);
+	collect_params((Node *) more, &params);
 	collect_params((Node *) keys, &params);
 	writer = tess_plan_writer_create(TESS_AGG_DATA, TESS_AGG_DATA_VERSION);
 	tess_plan_write_list(writer, "arguments", arguments);
+	tess_plan_write_list(writer, "more", more);
 	tess_plan_write_list(writer, "keys", keys);
 	tess_plan_write_int(writer, "groups", lsecond_int(path_data));
 	config.methods = &tess_agg_scan_methods;
@@ -902,6 +1005,224 @@ agg_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 	config.scanrelid = 0;
 	config.node_data = (Node *) tess_plan_writer_finish(writer);
 	return tess_plan_create(best_path, tlist, custom_plans, &config);
+}
+
+/*
+ * The aggregate's functions and initial value, as the core's ExecInitAgg
+ * reads them; the states live in the context the stand-in AggState gives
+ * the transition functions, one for every generic aggregate of the node.
+ */
+static GenericAgg *
+generic_init(TessAggState *state, Aggref *agg)
+{
+	EState	   *estate = state->css.ss.ps.state;
+	GenericAgg *generic = palloc0_object(GenericAgg);
+	HeapTuple	tuple;
+	Form_pg_aggregate form;
+	Datum		initval;
+	bool		isnull;
+	Oid			inputs[FUNC_MAX_ARGS];
+	int			ninputs = get_aggregate_argtypes(agg, inputs);
+	Expr	   *expr;
+
+	if (state->generic_agg == NULL)
+	{
+		state->generic_agg = makeNode(AggState);
+		state->generic_agg->ss.ps.state = estate;
+		state->generic_agg->curaggcontext = CreateExprContext(estate);
+		state->generic_agg->aggcontexts = palloc_array(ExprContext *, 1);
+		state->generic_agg->aggcontexts[0] = state->generic_agg->curaggcontext;
+	}
+	tuple = SearchSysCache1(AGGFNOID, ObjectIdGetDatum(agg->aggfnoid));
+	if (!HeapTupleIsValid(tuple))
+		elog(ERROR, "cache lookup failed for aggregate %u", agg->aggfnoid);
+	form = (Form_pg_aggregate) GETSTRUCT(tuple);
+	generic->nargs = list_length(agg->args);
+	/* A function of polymorphic arguments asks their types of its call. */
+	fmgr_info_cxt(form->aggtransfn, &generic->transfn, estate->es_query_cxt);
+	build_aggregate_transfn_expr(inputs, ninputs, 0, agg->aggvariadic, agg->aggtranstype,
+								 agg->inputcollid, form->aggtransfn, InvalidOid,
+								 &expr, NULL);
+	fmgr_info_set_expr((Node *) expr, &generic->transfn);
+	/* A partial aggregate goes to the Finalize Aggregate unfinished. */
+	if (DO_AGGSPLIT_SKIPFINAL(agg->aggsplit))
+	{
+		generic->has_serial = DO_AGGSPLIT_SERIALIZE(agg->aggsplit) &&
+			OidIsValid(form->aggserialfn);
+		if (generic->has_serial)
+		{
+			fmgr_info_cxt(form->aggserialfn, &generic->serialfn, estate->es_query_cxt);
+			build_aggregate_serialfn_expr(form->aggserialfn, &expr);
+			fmgr_info_set_expr((Node *) expr, &generic->serialfn);
+		}
+	}
+	else if (OidIsValid(form->aggfinalfn))
+	{
+		generic->has_final = true;
+		fmgr_info_cxt(form->aggfinalfn, &generic->finalfn, estate->es_query_cxt);
+		generic->final_nargs = form->aggfinalextra ? ninputs + 1 : 1;
+		build_aggregate_finalfn_expr(inputs, generic->final_nargs, agg->aggtranstype,
+									 agg->aggtype, agg->inputcollid, form->aggfinalfn,
+									 &expr);
+		fmgr_info_set_expr((Node *) expr, &generic->finalfn);
+	}
+	get_typlenbyval(agg->aggtranstype, &generic->translen, &generic->transbyval);
+	initval = SysCacheGetAttr(AGGFNOID, tuple, Anum_pg_aggregate_agginitval, &isnull);
+	generic->init_null = isnull;
+	if (!isnull)
+	{
+		Oid			input;
+		Oid			ioparam;
+		char	   *string = TextDatumGetCString(initval);
+
+		getTypeInputInfo(agg->aggtranstype, &input, &ioparam);
+		generic->init = OidInputFunctionCall(input, string, ioparam, -1);
+	}
+	ReleaseSysCache(tuple);
+	generic->trans_call = palloc0(SizeForFunctionCallInfo(generic->nargs + 1));
+	InitFunctionCallInfoData(*generic->trans_call, &generic->transfn, generic->nargs + 1,
+							 agg->inputcollid, (Node *) state->generic_agg, NULL);
+	if (generic->has_final)
+	{
+		generic->final_call = palloc0(SizeForFunctionCallInfo(generic->final_nargs));
+		InitFunctionCallInfoData(*generic->final_call, &generic->finalfn,
+								 generic->final_nargs, agg->inputcollid,
+								 (Node *) state->generic_agg, NULL);
+	}
+	if (generic->has_serial)
+	{
+		generic->serial_call = palloc0(SizeForFunctionCallInfo(1));
+		InitFunctionCallInfoData(*generic->serial_call, &generic->serialfn, 1,
+								 InvalidOid, (Node *) state->generic_agg, NULL);
+	}
+	generic->columns = palloc0_array(TessDatumColumn, generic->nargs);
+	return generic;
+}
+
+/* The initial state, in the states' context. */
+static void
+generic_reset(TessAggState *state, GenericAgg *generic)
+{
+	MemoryContext old =
+		MemoryContextSwitchTo(state->generic_agg->curaggcontext->ecxt_per_tuple_memory);
+
+	generic->state_null = generic->init_null;
+	generic->state = generic->init_null ? (Datum) 0 :
+		datumCopy(generic->init, generic->transbyval, generic->translen);
+	MemoryContextSwitchTo(old);
+}
+
+/*
+ * The transition function over the selected rows of the arguments'
+ * columns, as the core's Aggregate calls it per row: a strict function
+ * skips a row with a NULL argument and, without an initial value, takes
+ * the first argument of the first row it keeps as the state; a new
+ * by-reference state is copied into the states' context and the old one
+ * freed. What a call allocates besides goes with the batch's memory.
+ */
+static void
+generic_accumulate(TessAggState *state, GenericAgg *generic, const TessRowMask *rows)
+{
+	FunctionCallInfo call = generic->trans_call;
+	MemoryContext states = state->generic_agg->curaggcontext->ecxt_per_tuple_memory;
+	MemoryContext old =
+		MemoryContextSwitchTo(state->css.ss.ps.ps_ExprContext->ecxt_per_tuple_memory);
+	int			row = -1;
+
+	while ((row = tess_row_mask_next(rows, row)) >= 0)
+	{
+		Datum		result;
+		bool		skip = false;
+
+		for (int arg = 0; arg < generic->nargs; arg++)
+		{
+			call->args[arg + 1].value = generic->columns[arg].values[row];
+			call->args[arg + 1].isnull = generic->columns[arg].isnull[row];
+			skip |= call->args[arg + 1].isnull;
+		}
+		if (generic->transfn.fn_strict)
+		{
+			if (skip)
+				continue;
+			if (generic->state_null)
+			{
+				MemoryContextSwitchTo(states);
+				generic->state = datumCopy(call->args[1].value, generic->transbyval,
+										   generic->translen);
+				generic->state_null = false;
+				MemoryContextSwitchTo(state->css.ss.ps.ps_ExprContext->ecxt_per_tuple_memory);
+				continue;
+			}
+		}
+		call->args[0].value = generic->state;
+		call->args[0].isnull = generic->state_null;
+		call->isnull = false;
+		result = FunctionCallInvoke(call);
+		if (!generic->transbyval &&
+			DatumGetPointer(result) != DatumGetPointer(generic->state))
+		{
+			if (!call->isnull)
+			{
+				MemoryContextSwitchTo(states);
+				result = datumCopy(result, generic->transbyval, generic->translen);
+				MemoryContextSwitchTo(state->css.ss.ps.ps_ExprContext->ecxt_per_tuple_memory);
+			}
+			if (!generic->state_null)
+				pfree(DatumGetPointer(generic->state));
+		}
+		generic->state = result;
+		generic->state_null = call->isnull;
+	}
+	MemoryContextSwitchTo(old);
+}
+
+/*
+ * The aggregate's value: the final function over the state (with NULL
+ * for the extra arguments it asks for), or, in a partial plan, the
+ * state serialized, or the state itself.
+ */
+static Datum
+generic_value(GenericAgg *generic, bool *isnull)
+{
+	FunctionCallInfo call;
+	Datum		result;
+
+	if (generic->has_serial)
+	{
+		if (generic->state_null)
+		{
+			*isnull = true;
+			return (Datum) 0;
+		}
+		call = generic->serial_call;
+		call->args[0].value = generic->state;
+		call->args[0].isnull = false;
+	}
+	else if (generic->has_final)
+	{
+		if (generic->finalfn.fn_strict && generic->state_null)
+		{
+			*isnull = true;
+			return (Datum) 0;
+		}
+		call = generic->final_call;
+		call->args[0].value = generic->state;
+		call->args[0].isnull = generic->state_null;
+		for (int arg = 1; arg < generic->final_nargs; arg++)
+		{
+			call->args[arg].value = (Datum) 0;
+			call->args[arg].isnull = true;
+		}
+	}
+	else
+	{
+		*isnull = generic->state_null;
+		return generic->state;
+	}
+	call->isnull = false;
+	result = FunctionCallInvoke(call);
+	*isnull = call->isnull;
+	return result;
 }
 
 static void
@@ -917,6 +1238,7 @@ agg_begin(CustomScanState *css, EState *estate, int eflags)
 	Bitmapset  *projection = NULL;
 	List	   *computed = NIL;
 	List	   *arguments;
+	List	   *more;
 	List	   *keys;
 	TessPlanReader *reader;
 	int			groups;
@@ -932,6 +1254,7 @@ agg_begin(CustomScanState *css, EState *estate, int eflags)
 	reader = tess_plan_reader_create((List *) info.node_data, TESS_AGG_DATA,
 									 TESS_AGG_DATA_VERSION);
 	arguments = tess_plan_read_list(reader, "arguments");
+	more = tess_plan_read_list(reader, "more");
 	keys = tess_plan_read_list(reader, "keys");
 	groups = tess_plan_read_int(reader, "groups");
 	state->groups_estimate = (uint64) Max(groups, 0);
@@ -984,11 +1307,15 @@ agg_begin(CustomScanState *css, EState *estate, int eflags)
 		value->kind = aggregate_kind(agg->aggfnoid);
 		value->wide = agg->aggtranstype == INT8OID;
 		value->function = tess_runtime_api()->functions->find(agg->aggfnoid);
-		if (value->kind < 0 || value->function == NULL ||
-			value->function->kind != TESS_FUNCTION_AGGREGATE)
-			elog(ERROR, "TessAgg has no batch implementation of %s",
-				 format_procedure(agg->aggfnoid));
 		value->computed = -1;
+		if (!batch_aggregate(agg))
+		{
+			if (state->nkeys > 0 || !generic_supported(agg))
+				elog(ERROR, "TessAgg has no implementation of %s",
+					 format_procedure(agg->aggfnoid));
+			value->kind = AGG_GENERIC;
+			value->generic = generic_init(state, agg);
+		}
 		switch (value->kind)
 		{
 			case AGG_COUNT:
@@ -1006,6 +1333,8 @@ agg_begin(CustomScanState *css, EState *estate, int eflags)
 				value->accumulate = value->wide ? TESS_TABLE_MAX_INT8 :
 					TESS_TABLE_MAX_INT4;
 				break;
+			case AGG_GENERIC:
+				break;
 		}
 		if (agg->args != NIL)
 		{
@@ -1016,6 +1345,14 @@ agg_begin(CustomScanState *css, EState *estate, int eflags)
 			computed = lappend(computed,
 							   makeTargetEntry((Expr *) argument,
 											   value->computed + 1, NULL, false));
+			/* The other arguments of a generic aggregate follow the first. */
+			foreach_ptr(Node, other, (List *) list_nth(more, index - 1))
+			{
+				computed = lappend(computed,
+								   makeTargetEntry((Expr *) other, list_length(computed) + 1,
+												   NULL, false));
+				vars = list_concat(vars, pull_var_clause(other, 0));
+			}
 			foreach_ptr(Var, var, vars)
 			{
 				int			column = var->varno == INDEX_VAR ?
@@ -1161,7 +1498,8 @@ evaluate(TessAggState *state, AggValue *value, const TessDatumColumn *column,
 					 found > value->extreme))
 					value->extreme = found;
 				break;
-			}
+			}		case AGG_GENERIC:
+			break;
 	}
 	value->has_value = true;
 }
@@ -1211,6 +1549,24 @@ accumulate(TessAggState *state, AggValue *value, TessBatch *batch, int nrows)
 	if (computed.values == NULL || computed.isnull == NULL ||
 		computed.nrows != batch->rows.nrows)
 		elog(ERROR, "Tessera projection returned an invalid column");
+	if (value->generic != NULL)
+	{
+		value->generic->columns[0] = computed;
+		for (int arg = 1; arg < value->generic->nargs; arg++)
+		{
+			TessDatumColumn *other = &value->generic->columns[arg];
+
+			*other = (TessDatumColumn) TESS_STRUCT_INITIALIZER(TessDatumColumn);
+			batch->ops->get_datum_column(batch,
+										 state->child_layout.ncolumns + value->computed + arg,
+										 &batch->rows, TESS_COLUMN_FOR_PROJECTION, other);
+			if (other->values == NULL || other->isnull == NULL ||
+				other->nrows != batch->rows.nrows)
+				elog(ERROR, "Tessera projection returned an invalid column");
+		}
+		generic_accumulate(state, value->generic, &batch->rows);
+		return;
+	}
 	if (value->distinct != NULL)
 	{
 		TessRowMask rows = distinct_rows(state, value, batch->rows.nrows, NULL,
@@ -1250,6 +1606,12 @@ static void
 drain(TessAggState *state)
 {
 	reset_distinct(state);
+	/* The states of a previous scan go, with the callbacks they registered. */
+	if (state->generic_agg != NULL)
+		ReScanExprContext(state->generic_agg->curaggcontext);
+	for (int index = 0; index < state->nvalues; index++)
+		if (state->values[index].generic != NULL)
+			generic_reset(state, state->values[index].generic);
 	for (;;)
 	{
 		TessBatch  *batch = tess_input_next(state->input);
@@ -1304,6 +1666,10 @@ result_row(TessAggState *state)
 				scan->tts_values[index] = value->wide ?
 					Int64GetDatum(value->extreme) :
 					Int32GetDatum((int32) value->extreme);
+				break;
+			case AGG_GENERIC:
+				scan->tts_values[index] = generic_value(value->generic,
+														&scan->tts_isnull[index]);
 				break;
 		}
 	}
@@ -2794,6 +3160,8 @@ group_value(TessAggState *state, int index, int group, TupleTableSlot *scan)
 		case AGG_MAX:
 			scan->tts_values[attribute] = value->wide ?
 				Int64GetDatum((int64) word) : Int32GetDatum((int32) (int64) word);
+			break;
+		case AGG_GENERIC:
 			break;
 	}
 }

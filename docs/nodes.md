@@ -417,7 +417,15 @@ a chain the [expression compiler](expr.md) accepts, with constants and
 parameters, by the chain over the batch, anything else row by row (see
 "Computing columns on demand" in [runtime.md](runtime.md)); expressions
 above the aggregates and `HAVING` are left to the plan's own projection
-and qualifier over the aggregates. With `GROUP BY` it stands in for the
+and qualifier over the aggregates. Any other aggregate without `GROUP BY`
+(of text, numeric, float8, int8 states, of several arguments such as
+`string_agg(t, ',')` or `corr(x, y)`, of polymorphic ones such as
+`array_agg`) goes through the core's own functions: its transition
+function is called for each selected row of the arguments' columns of a
+batch, as the core's `Aggregate` calls it per row but without a row
+handed up, then its final function, or, in a partial plan, its
+serialization function for the core's Finalize Aggregate (`bench/pg/
+anyagg.sql`: ×0.36–0.86 against the core). With `GROUP BY` it stands in for the
 core's `HashAggregate`: each row finds the record of its keys in the hash
 table of [table.md](table.md), whose payload holds the group's aggregate
 states, and the groups go out in batches when the input ends.
@@ -461,8 +469,21 @@ partial one of a parallel plan, of an aggregate the node combines and the
 [function registry](function.md) implements over batches (kind
 `TESS_FUNCTION_AGGREGATE`, registered by the kernels module), with an
 int4 or int8 argument (any type for `count`, which reads NULL flags
-alone) without a subplan whose columns, and no placeholder, the batch
-child's target has. For each of the core's plain aggregate paths whose input can be read
+alone), or, without `GROUP BY` and `DISTINCT`, of any other ordinary
+aggregate of one argument or more, through the core's functions, without
+a subplan whose columns, and no placeholder, the batch child's target
+has. For such an aggregate `BeginCustomScan` reads `pg_aggregate` as the
+core's `ExecInitAgg` does: the transition function with the call
+expression a polymorphic one asks its argument types of, the final
+function with its extra arguments, or the serialization function of a
+partial plan, and the initial value. The states live in a context of the
+node's, which a stand-in `AggState` hands the transition functions that
+ask for the aggregate's memory (`AggCheckCallContext`); a strict
+function skips a row with a NULL argument and, without an initial value,
+takes the first kept argument as the state; a new by-reference state is
+copied into that context and the old one freed, and what a call
+allocates besides goes with the batch's memory. The arguments after the
+first travel in the private data as `more`. For each of the core's plain aggregate paths whose input can be read
 in batches (`tess_batch_input_path`: a batch path as it is, a clause-free
 sequential scan through `TessHeapScan`, anything else through `TessPack`),
 the node's path takes the core path as its template at nine tenths of its

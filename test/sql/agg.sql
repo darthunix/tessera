@@ -111,7 +111,8 @@ SELECT agg_same($$SELECT sum(x + y), max(x) FROM (SELECT a + 1 AS x, b * 2 AS y 
 -- count reads no value: any argument type, text included.
 EXPLAIN (COSTS OFF) SELECT count(c) FROM agg_t;
 SELECT agg_same($$SELECT count(c), count(a), count(*) FROM agg_t WHERE b > 5$$);
--- Left to the core: sum over bigint (numeric), avg.
+-- Through the core's functions, over the batches: sum over bigint
+-- (a numeric state), avg.
 EXPLAIN (COSTS OFF) SELECT sum(a::bigint) FROM agg_t;
 EXPLAIN (COSTS OFF) SELECT avg(a) FROM agg_t;
 
@@ -136,7 +137,7 @@ SELECT min(a), max(a), count(c) FROM agg8_t WHERE a > 100;
 RESET debug_parallel_query;
 -- An overflow in the argument chain is the chain's.
 SELECT max(a * 4294967296) FROM agg8_t;
--- Left to the core: sum over bigint.
+-- Through the core's functions: sum over bigint.
 EXPLAIN (COSTS OFF) SELECT sum(a) FROM agg8_t WHERE a > 100;
 DROP TABLE agg8_t;
 -- Pages and batches: wide rows make the scan pin many pages.
@@ -341,6 +342,59 @@ EXPLAIN (COSTS OFF) SELECT count(*) FROM agg_t WHERE false;
 SET tessera.enable = off;
 EXPLAIN (COSTS OFF) SELECT count(*) FROM agg_t;
 RESET tessera.enable;
+
+-- Any other aggregate without GROUP BY: the core's transition function
+-- over the arguments' columns of each batch, then its final function.
+CREATE TABLE agg_any (a int, n numeric, f float8, t text, d date, b bool, j int8);
+INSERT INTO agg_any
+SELECT CASE WHEN i % 7 = 0 THEN NULL ELSE i - 150 END, (i * 1.5)::numeric,
+       CASE WHEN i % 11 = 0 THEN NULL ELSE i / 3.0 END,
+       CASE WHEN i % 5 = 0 THEN NULL ELSE 't' || i END,
+       date '2000-01-01' + i, i % 3 = 0, i::int8 * 100000000000
+FROM generate_series(1, 300) AS i;
+EXPLAIN (COSTS OFF) SELECT max(t), sum(n), avg(f) FROM agg_any;
+EXPLAIN (VERBOSE, COSTS OFF) SELECT max(t), string_agg(t, ',') FROM agg_any WHERE a > 0;
+SELECT agg_same($$SELECT max(t), min(t), sum(n), avg(n), avg(f), stddev(f), sum(j), avg(j), avg(a) FROM agg_any$$);
+-- Arguments of several kinds and polymorphic ones: a delimiter, two
+-- columns, arrays and JSON of any element, booleans, dates.
+SELECT agg_same($$SELECT string_agg(t, '|'), corr(a, f), array_agg(a), array_agg(t), json_agg(d), bool_and(b), bool_or(b), max(d), bit_or(a), every(a > -200) FROM agg_any$$);
+-- Mixed with the node's own aggregates, over a filter, with NULL only.
+SELECT agg_same($$SELECT count(*), sum(a), max(t), avg(f) FROM agg_any WHERE a > 100$$);
+SELECT agg_same($$SELECT max(t), sum(n), array_agg(a) FROM agg_any WHERE t IS NULL$$);
+SELECT agg_same($$SELECT max(t), sum(n), array_agg(a), string_agg(t, ',') FROM agg_any WHERE a > 1000$$);
+-- An expression argument, computed over the batch or row by row.
+SELECT agg_same($$SELECT max(t || '!'), sum(a * 2.5), string_agg(upper(t), ',') FROM agg_any$$);
+-- HAVING and an expression above the aggregates.
+SELECT agg_same($$SELECT max(t) || '?', sum(n) / 2 FROM agg_any HAVING avg(f) > 10$$);
+SELECT agg_same($$SELECT max(t) FROM agg_any HAVING avg(f) > 1000$$);
+-- Rescan: a correlated subquery computes the aggregates anew.
+SELECT agg_same($$SELECT g, (SELECT string_agg(t, ',') FROM agg_any WHERE a > g * 50) FROM generate_series(1, 4) AS g$$);
+-- An error in a transition function is the core's.
+\set VERBOSITY terse
+SELECT sum(1 / (a - 100)::numeric) FROM agg_any;
+\set VERBOSITY default
+-- Left to the core: ORDER BY and FILTER in an aggregate, DISTINCT over
+-- text, an ordered-set aggregate, and grouping.
+EXPLAIN (COSTS OFF) SELECT string_agg(t, ',' ORDER BY t) FROM agg_any;
+EXPLAIN (COSTS OFF) SELECT max(t) FILTER (WHERE b) FROM agg_any;
+EXPLAIN (COSTS OFF) SELECT count(DISTINCT t) FROM agg_any;
+SELECT agg_same($$SELECT count(DISTINCT t), count(DISTINCT a), count(DISTINCT d) FROM agg_any$$);
+EXPLAIN (COSTS OFF) SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY f) FROM agg_any;
+EXPLAIN (COSTS OFF) SELECT b, max(t) FROM agg_any GROUP BY b;
+-- In a parallel plan: each participant's partial state, serialized where
+-- the state is internal, for the core's Finalize Aggregate.
+CREATE TABLE agg_any_big AS
+SELECT i AS a, (i * 1.5)::numeric AS n, 't' || i AS t FROM generate_series(1, 200000) AS i;
+ANALYZE agg_any_big;
+SET max_parallel_workers_per_gather = 2;
+SET parallel_setup_cost = 0;
+SET parallel_tuple_cost = 0;
+EXPLAIN (COSTS OFF) SELECT max(t), sum(n), avg(n), string_agg(t, ',') IS NOT NULL FROM agg_any_big;
+SELECT agg_same($$SELECT max(t), sum(n), avg(n), length(string_agg(t, ',')), array_length(array_agg(a), 1) FROM agg_any_big$$);
+RESET max_parallel_workers_per_gather;
+RESET parallel_setup_cost;
+RESET parallel_tuple_cost;
+DROP TABLE agg_any, agg_any_big;
 
 DROP TABLE agg_t;
 DROP FUNCTION agg_same(text);

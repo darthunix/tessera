@@ -85,6 +85,11 @@ query down, and where it can, does it speed one up.
   on the date with the 1826 days of `bench_days`, `DISTINCT` of the
   timestamp and a sort by the date skipped with `OFFSET`. A ratio below
   one is the win.
+- **anyagg** (`anyagg.sql`): aggregates without `GROUP BY` that `TessAgg`
+  computes through the core's transition and final functions over the
+  batches: `max` of text, `sum` and `avg` of int8, `sum` of numeric, `avg`
+  of float8, `bit_or` over 2 M rows, `max` of text over a filter and three
+  aggregates together. A ratio below one is the win.
 - **oltp**: short prepared-statement queries, `pgbench -S`, where the
   planner hooks and the loaded modules must not slow down queries that
   never use a batch node. Arrives when more than one hook is installed.
