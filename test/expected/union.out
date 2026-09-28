@@ -469,6 +469,35 @@ EXPLAIN (COSTS OFF) SELECT count(*) FROM union_part WHERE k < 500 AND v < 10;
                ->  Custom Scan (TessHeapScan) on union_part_1
 (5 rows)
 
+-- A parameter in a clause of another column prunes nothing.
+EXPLAIN (COSTS OFF)
+SELECT g, (SELECT count(*) FROM union_part WHERE v < g) FROM generate_series(1, 3) AS g;
+                                     QUERY PLAN                                     
+------------------------------------------------------------------------------------
+ Function Scan on generate_series g
+   SubPlan expr_1
+     ->  Custom Scan (TessAgg)
+           ->  Custom Scan (TessAppend)
+                 ->  Custom Scan (TessFilter) on union_part_1
+                       Batch Filter: (union_part_1.v < g.g)
+                       ->  Custom Scan (TessHeapScan) on union_part_1
+                 ->  Custom Scan (TessFilter) on union_part_2
+                       Batch Filter: (union_part_2.v < g.g)
+                       ->  Custom Scan (TessHeapScan) on union_part_2
+                 ->  Custom Scan (TessFilter) on union_part_3a union_part_3
+                       Batch Filter: (union_part_3.v < g.g)
+                       ->  Custom Scan (TessHeapScan) on union_part_3a union_part_3
+                 ->  Custom Scan (TessFilter) on union_part_3b union_part_4
+                       Batch Filter: (union_part_4.v < g.g)
+                       ->  Custom Scan (TessHeapScan) on union_part_3b union_part_4
+(16 rows)
+
+SELECT union_same($$SELECT g, (SELECT count(*) FROM union_part WHERE v < g) FROM generate_series(1, 5) AS g$$);
+ union_same 
+------------
+ same
+(1 row)
+
 -- Pruned while executing, by a parameter: the core's Append stays.
 PREPARE union_prune(int) AS SELECT count(*), sum(k) FROM union_part WHERE k > $1 AND v < 10;
 SET plan_cache_mode = force_generic_plan;
@@ -499,38 +528,35 @@ SELECT union_same($$SELECT v % 7 AS g, count(*), sum(k) FROM union_part WHERE v 
  same
 (1 row)
 
--- Parallel: the core's Parallel Append, which shares its children out,
--- stays the core's; a partial Append that is not parallel-aware runs
--- every child in every participant, each child dividing its own pages,
--- and becomes TessAppend.
+-- Parallel: in place of the core's Parallel Append, TessAppend shares the
+-- children out among the participants, a partial child to any of them.
 SET max_parallel_workers_per_gather = 2;
 SET parallel_setup_cost = 0;
 SET parallel_tuple_cost = 0;
 SET min_parallel_table_scan_size = 0;
 EXPLAIN (COSTS OFF) SELECT count(*), sum(k) FROM union_part WHERE v < 10;
-                                                 QUERY PLAN                                                  
--------------------------------------------------------------------------------------------------------------
+                                              QUERY PLAN                                               
+-------------------------------------------------------------------------------------------------------
  Finalize Aggregate
    ->  Custom Scan (TessGather)
          Workers Planned: 2
          ->  Parallel Custom Scan (TessSend)
                ->  Parallel Custom Scan (TessAgg)
                      Partial Mode: Partial
-                     ->  Custom Scan (TessPack)
-                           ->  Parallel Append
-                                 ->  Parallel Custom Scan (TessFilter) on union_part_1
-                                       Batch Filter: (union_part_1.v < 10)
-                                       ->  Parallel Custom Scan (TessHeapScan) on union_part_1
-                                 ->  Parallel Custom Scan (TessFilter) on union_part_2
-                                       Batch Filter: (union_part_2.v < 10)
-                                       ->  Parallel Custom Scan (TessHeapScan) on union_part_2
-                                 ->  Parallel Custom Scan (TessFilter) on union_part_3a union_part_3
-                                       Batch Filter: (union_part_3.v < 10)
-                                       ->  Parallel Custom Scan (TessHeapScan) on union_part_3a union_part_3
-                                 ->  Parallel Custom Scan (TessFilter) on union_part_3b union_part_4
-                                       Batch Filter: (union_part_4.v < 10)
-                                       ->  Parallel Custom Scan (TessHeapScan) on union_part_3b union_part_4
-(20 rows)
+                     ->  Parallel Custom Scan (TessAppend)
+                           ->  Parallel Custom Scan (TessFilter) on union_part_1
+                                 Batch Filter: (union_part_1.v < 10)
+                                 ->  Parallel Custom Scan (TessHeapScan) on union_part_1
+                           ->  Parallel Custom Scan (TessFilter) on union_part_2
+                                 Batch Filter: (union_part_2.v < 10)
+                                 ->  Parallel Custom Scan (TessHeapScan) on union_part_2
+                           ->  Parallel Custom Scan (TessFilter) on union_part_3a union_part_3
+                                 Batch Filter: (union_part_3.v < 10)
+                                 ->  Parallel Custom Scan (TessHeapScan) on union_part_3a union_part_3
+                           ->  Parallel Custom Scan (TessFilter) on union_part_3b union_part_4
+                                 Batch Filter: (union_part_4.v < 10)
+                                 ->  Parallel Custom Scan (TessHeapScan) on union_part_3b union_part_4
+(19 rows)
 
 SELECT union_same($$SELECT count(*), sum(k) FROM union_part WHERE v < 10$$);
  union_same 
@@ -545,6 +571,111 @@ SELECT union_same($$SELECT count(*), sum(a) FROM (SELECT a FROM union_a WHERE a 
  same
 (1 row)
 
+SELECT union_same($$SELECT v % 7 AS g, count(*), sum(k) FROM union_part WHERE v < 50 GROUP BY 1$$);
+ union_same 
+------------
+ same
+(1 row)
+
+-- A child that is not partial, a table no worker may read, goes to one
+-- participant.
+ALTER TABLE union_b SET (parallel_workers = 0);
+EXPLAIN (COSTS OFF)
+SELECT count(*), sum(a) FROM (SELECT a FROM union_a WHERE a > 100
+                              UNION ALL SELECT a FROM union_b WHERE a < 600) AS s;
+                                        QUERY PLAN                                        
+------------------------------------------------------------------------------------------
+ Finalize Aggregate
+   ->  Custom Scan (TessGather)
+         Workers Planned: 2
+         ->  Parallel Custom Scan (TessSend)
+               ->  Parallel Custom Scan (TessAgg)
+                     Partial Mode: Partial
+                     ->  Parallel Custom Scan (TessAppend)
+                           ->  Custom Scan (TessPack)
+                                 Rows Kept As: forwarded batches
+                                 ->  Custom Scan (TessFilter) on union_b
+                                       Batch Filter: (union_b.a < 600)
+                                       ->  Custom Scan (TessHeapScan) on union_b
+                           ->  Custom Scan (TessPack)
+                                 Rows Kept As: forwarded batches
+                                 ->  Parallel Custom Scan (TessFilter) on union_a
+                                       Batch Filter: (union_a.a > 100)
+                                       ->  Parallel Custom Scan (TessHeapScan) on union_a
+(17 rows)
+
+SELECT union_same($$SELECT count(*), sum(a) FROM (SELECT a FROM union_a WHERE a > 100
+                   UNION ALL SELECT a FROM union_b WHERE a < 600) AS s$$);
+ union_same 
+------------
+ same
+(1 row)
+
+-- Three of them and a partial one: each is read once, whoever takes it.
+SELECT union_same($$SELECT count(*), sum(a) FROM (SELECT a FROM union_a WHERE a > 100
+                   UNION ALL SELECT a FROM union_b WHERE a < 200
+                   UNION ALL SELECT a FROM union_b WHERE a >= 200 AND a < 400
+                   UNION ALL SELECT a FROM union_b WHERE a >= 400) AS s$$);
+ union_same 
+------------
+ same
+(1 row)
+
+-- Without the leader.
+SET parallel_leader_participation = off;
+SELECT union_same($$SELECT count(*), sum(k) FROM union_part WHERE v < 10$$);
+ union_same 
+------------
+ same
+(1 row)
+
+SELECT union_same($$SELECT count(*), sum(a) FROM (SELECT a FROM union_a WHERE a > 100
+                   UNION ALL SELECT a FROM union_b WHERE a < 600) AS s$$);
+ union_same 
+------------
+ same
+(1 row)
+
+RESET parallel_leader_participation;
+ALTER TABLE union_b RESET (parallel_workers);
+-- Rescanned under the gather in a join: the children are shared out anew.
+SET enable_material = off;
+EXPLAIN (COSTS OFF)
+SELECT x, n FROM (SELECT count(*) AS n FROM union_part WHERE v < 10) AS ss
+RIGHT JOIN (VALUES (1), (2)) AS v(x) ON true;
+                                                 QUERY PLAN                                                  
+-------------------------------------------------------------------------------------------------------------
+ Nested Loop Left Join
+   ->  Values Scan on "*VALUES*"
+   ->  Finalize Aggregate
+         ->  Custom Scan (TessGather)
+               Workers Planned: 2
+               ->  Parallel Custom Scan (TessSend)
+                     ->  Parallel Custom Scan (TessAgg)
+                           Partial Mode: Partial
+                           ->  Parallel Custom Scan (TessAppend)
+                                 ->  Parallel Custom Scan (TessFilter) on union_part_1
+                                       Batch Filter: (union_part_1.v < 10)
+                                       ->  Parallel Custom Scan (TessHeapScan) on union_part_1
+                                 ->  Parallel Custom Scan (TessFilter) on union_part_2
+                                       Batch Filter: (union_part_2.v < 10)
+                                       ->  Parallel Custom Scan (TessHeapScan) on union_part_2
+                                 ->  Parallel Custom Scan (TessFilter) on union_part_3a union_part_3
+                                       Batch Filter: (union_part_3.v < 10)
+                                       ->  Parallel Custom Scan (TessHeapScan) on union_part_3a union_part_3
+                                 ->  Parallel Custom Scan (TessFilter) on union_part_3b union_part_4
+                                       Batch Filter: (union_part_4.v < 10)
+                                       ->  Parallel Custom Scan (TessHeapScan) on union_part_3b union_part_4
+(21 rows)
+
+SELECT union_same($$SELECT x, n, s FROM (SELECT count(*) AS n, sum(k) AS s FROM union_part WHERE v < 10) AS ss
+RIGHT JOIN (VALUES (1), (2), (3)) AS v(x) ON true$$);
+ union_same 
+------------
+ same
+(1 row)
+
+RESET enable_material;
 SET enable_parallel_append = off;
 EXPLAIN (COSTS OFF) SELECT count(*), sum(k) FROM union_part WHERE v < 10;
                                               QUERY PLAN                                               

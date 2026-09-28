@@ -1,6 +1,7 @@
 #include "postgres.h"
 
 #include "access/htup_details.h"
+#include "access/parallel.h"
 #include "commands/explain.h"
 #include "commands/explain_format.h"
 #include "executor/executor.h"
@@ -10,6 +11,7 @@
 #include "optimizer/optimizer.h"
 #include "optimizer/pathnode.h"
 #include "optimizer/restrictinfo.h"
+#include "storage/lwlock.h"
 
 #include "tessera/plan.h"
 #include "tessera/runtime.h"
@@ -25,11 +27,29 @@
  * made batches again: 13 ms of an aggregate's 31 over two filtered scans
  * of a million rows each. The node's path is built only where a batch
  * parent asks for a batch child over an Append (tess_batch_input_path),
- * so that a row-wise parent keeps the core's Append.
+ * so that a row-wise parent keeps the core's Append. In a parallel plan
+ * the node shares the children out as the core's Parallel Append does: a
+ * child that is not partial goes to one participant, a partial one to any
+ * that comes while it has work, each dividing its pages with the others.
  */
 
 /* The core's cost of a row through an Append (costsize.c), which the node saves. */
 #define APPEND_CPU_COST_MULTIPLIER 0.5
+
+/* The node's counter summed over the participants: the batches given out. */
+#define APPEND_NCOUNTERS 1
+
+/*
+ * The children shared out in a parallel plan, after the counters in the
+ * node's chunk, as the core's ParallelAppendState: the child a worker
+ * looks at first, and the children that need no more participants.
+ */
+typedef struct AppendShared
+{
+	LWLock		lock;
+	int			next_plan;
+	bool		finished[FLEXIBLE_ARRAY_MEMBER];
+} AppendShared;
 
 typedef struct TessAppendState
 {
@@ -40,9 +60,15 @@ typedef struct TessAppendState
 	/* Each child's layout: the column of each of its targets. */
 	TessLayout *layouts;
 	int			ncolumns;
-	/* The child being read, and its batch given out. */
+	/* The children before this one are not partial. */
+	int			first_partial;
+	/* The child being read, -1 before the first, and its batch given out. */
 	int			current;
+	bool		done;
 	TessBatch  *child_batch;
+	/* In a parallel plan: the children shared out and the counters. */
+	AppendShared *shared;
+	TessSharedStats *stats;
 	TessOutput *output;
 	bool		requested;
 	/* The batch given out: the child's rows, its columns renumbered. */
@@ -74,22 +100,44 @@ contains_param(Node *node, void *context)
 	return expression_tree_walker(node, contains_param, context);
 }
 
+static bool
+contains_expr(Node *node, void *context)
+{
+	if (node == NULL)
+		return false;
+	if (equal(node, context))
+		return true;
+	return expression_tree_walker(node, contains_expr, context);
+}
+
 /*
- * Whether the core would prune the partitions of rel while executing, by a
- * clause of a parameter or of a function whose value is known only then:
- * the node reads every child, which is correct, as each child evaluates
- * the clauses, but loses the pruning.
+ * Whether the core might prune the partitions of rel while executing: a
+ * clause over a partition key whose value is known only then, through a
+ * parameter or a function that is not immutable. The node reads every
+ * child, which is correct, as each child evaluates the clauses, but would
+ * lose the pruning.
  */
 static bool
 prunes_at_execution(RelOptInfo *rel)
 {
-	List	   *clauses;
-
-	if (!enable_partition_pruning || rel->part_scheme == NULL)
+	if (!enable_partition_pruning || rel->part_scheme == NULL || rel->partexprs == NULL)
 		return false;
-	clauses = extract_actual_clauses(rel->baserestrictinfo, false);
-	return contains_param((Node *) clauses, NULL) ||
-		contain_mutable_functions((Node *) clauses);
+	foreach_node(RestrictInfo, rinfo, rel->baserestrictinfo)
+	{
+		Node	   *clause = (Node *) rinfo->clause;
+
+		if (!contains_param(clause, NULL) && !contain_mutable_functions(clause))
+			continue;
+		for (int key = 0; key < rel->part_scheme->partnatts; key++)
+		{
+			foreach_ptr(Node, expr, rel->partexprs[key])
+			{
+				if (contains_expr(clause, expr))
+					return true;
+			}
+		}
+	}
+	return false;
 }
 
 /*
@@ -105,7 +153,8 @@ packs_rows(Path *child)
 /*
  * The node's path in place of an Append of a base relation's children: a
  * partitioned table, an inheritance tree, a UNION ALL the planner made a
- * relation of. Serial or partial without parallel awareness, when every
+ * relation of; serial, partial, or parallel-aware as a Parallel Append,
+ * whose children before first_partial_path are not partial. When every
  * child has a batch path and one of them at least does more than pack
  * rows; NULL otherwise. The Append of a set operation's own relation,
  * whose targets are Vars of no relation, stays the core's.
@@ -123,9 +172,8 @@ append_wrap(PlannerInfo *root, Path *path)
 
 	if (!*tess_runtime_api()->settings->enable || !IsA(path, AppendPath) ||
 		rel == NULL || !IS_SIMPLE_REL(rel) || root->parse->commandType != CMD_SELECT ||
-		root->parse->rowMarks != NIL || path->param_info != NULL || path->parallel_aware ||
+		root->parse->rowMarks != NIL || path->param_info != NULL ||
 		list_length(append->subpaths) < 2 || path->pathtarget == NULL ||
-		list_length(path->pathtarget->exprs) == 0 ||
 		list_length(path->pathtarget->exprs) > MaxTupleAttributeNumber ||
 		prunes_at_execution(rel))
 		return NULL;
@@ -145,6 +193,8 @@ append_wrap(PlannerInfo *root, Path *path)
 	config.methods = &append_path_methods;
 	config.node = &tess_append_node;
 	config.children = children;
+	config.node_data = (Node *) makeInteger(path->parallel_aware ?
+											append->first_partial_path : 0);
 	built = tess_path_create(&config);
 	saved = APPEND_CPU_COST_MULTIPLIER * cpu_tuple_cost * path->rows;
 	built->path.total_cost = Max(built->path.startup_cost, built->path.total_cost - saved);
@@ -160,8 +210,10 @@ append_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path, List *tli
 			List *clauses, List *custom_plans)
 {
 	TessPlanConfig config = TESS_STRUCT_INITIALIZER(TessPlanConfig);
+	TessPathInfo info = TESS_STRUCT_INITIALIZER(TessPathInfo);
 	TessPlanWriter *writer;
 
+	tess_path_get_info(best_path, &info);
 	for (int index = 0; index < list_length(custom_plans); index++)
 	{
 		TessPlanChild child = TESS_STRUCT_INITIALIZER(TessPlanChild);
@@ -174,6 +226,7 @@ append_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path, List *tli
 	}
 	writer = tess_plan_writer_create(TESS_APPEND_DATA, TESS_APPEND_DATA_VERSION);
 	tess_plan_write_int(writer, "children", list_length(custom_plans));
+	tess_plan_write_int(writer, "first_partial", intVal(info.node_data));
 	config.methods = &tess_append_scan_methods;
 	config.layout_policy = TESS_LAYOUT_DENSE;
 	config.scanrelid = 0;
@@ -231,8 +284,11 @@ append_begin(CustomScanState *css, EState *estate, int eflags)
 	reader = tess_plan_reader_create((List *) info.node_data, TESS_APPEND_DATA,
 									 TESS_APPEND_DATA_VERSION);
 	state->nchildren = tess_plan_read_int(reader, "children");
+	state->first_partial = tess_plan_read_int(reader, "first_partial");
 	tess_plan_reader_finish(reader);
-	if (state->nchildren != info.nchildren || state->nchildren < 1)
+	state->current = -1;
+	if (state->nchildren != info.nchildren || state->nchildren < 1 ||
+		state->first_partial < 0 || state->first_partial > state->nchildren)
 		elog(ERROR, "TessAppend received a foreign plan");
 	state->ncolumns = css->ss.ps.ps_ResultTupleSlot->tts_tupleDescriptor->natts;
 	state->children = palloc_array(PlanState *, state->nchildren);
@@ -303,7 +359,109 @@ send_requests(TessAppendState *state)
 	state->requested = true;
 }
 
-/* The next child batch with rows, the children in turn; false at the end. */
+/*
+ * The leader's next child in a parallel plan, as the core's
+ * choose_next_subplan_for_leader: from the last child down, so that the
+ * workers, which start from the first, take the costly children that are
+ * not partial and the leader the partial ones, and can stop gathering
+ * early. A child that is not partial is finished once chosen.
+ */
+static bool
+choose_for_leader(TessAppendState *state)
+{
+	AppendShared *shared = state->shared;
+
+	LWLockAcquire(&shared->lock, LW_EXCLUSIVE);
+	if (state->current >= 0)
+		shared->finished[state->current] = true;
+	else
+		state->current = state->nchildren - 1;
+	while (shared->finished[state->current])
+	{
+		if (state->current == 0)
+		{
+			shared->next_plan = -1;
+			state->current = -1;
+			LWLockRelease(&shared->lock);
+			return false;
+		}
+		state->current--;
+	}
+	if (state->current < state->first_partial)
+		shared->finished[state->current] = true;
+	LWLockRelease(&shared->lock);
+	return true;
+}
+
+/* The child after index, or -1: every child is valid, none pruned. */
+static int
+next_child(TessAppendState *state, int index)
+{
+	return index + 1 < state->nchildren ? index + 1 : -1;
+}
+
+/*
+ * A worker's next child in a parallel plan, as the core's
+ * choose_next_subplan_for_worker: the first that is not finished from
+ * next_plan on, going round to the first partial child; next_plan moves
+ * past it.
+ */
+static bool
+choose_for_worker(TessAppendState *state)
+{
+	AppendShared *shared = state->shared;
+	int			start;
+
+	LWLockAcquire(&shared->lock, LW_EXCLUSIVE);
+	if (state->current >= 0)
+		shared->finished[state->current] = true;
+	if (shared->next_plan < 0)
+	{
+		LWLockRelease(&shared->lock);
+		return false;
+	}
+	start = shared->next_plan;
+	while (shared->finished[shared->next_plan])
+	{
+		int			next = next_child(state, shared->next_plan);
+
+		if (next >= 0)
+			shared->next_plan = next;
+		else if (start > state->first_partial)
+		{
+			next = next_child(state, state->first_partial - 1);
+			shared->next_plan = next < 0 ? start : next;
+		}
+		else
+			shared->next_plan = start;
+		if (shared->next_plan == start)
+		{
+			shared->next_plan = -1;
+			LWLockRelease(&shared->lock);
+			return false;
+		}
+	}
+	state->current = shared->next_plan;
+	shared->next_plan = next_child(state, shared->next_plan);
+	if (shared->next_plan < 0)
+		shared->next_plan = next_child(state, state->first_partial - 1);
+	if (state->current < state->first_partial)
+		shared->finished[state->current] = true;
+	LWLockRelease(&shared->lock);
+	return true;
+}
+
+/* The next child to read, the children in turn without shared memory. */
+static bool
+choose_next(TessAppendState *state)
+{
+	if (state->shared != NULL)
+		return IsParallelWorker() ? choose_for_worker(state) : choose_for_leader(state);
+	state->current++;
+	return state->current < state->nchildren;
+}
+
+/* The next child batch with rows; false at the end. */
 static bool
 append_next(TessAppendState *state)
 {
@@ -313,14 +471,25 @@ append_next(TessAppendState *state)
 		tess_input_finish(state->inputs[state->current]);
 		state->child_batch = NULL;
 	}
-	while (state->current < state->nchildren)
+	if (state->done)
+		return false;
+	if (state->current < 0 && !choose_next(state))
+	{
+		state->done = true;
+		return false;
+	}
+	for (;;)
 	{
 		TessInput  *input = state->inputs[state->current];
 		TessBatch  *batch = tess_input_next(input);
 
 		if (batch == NULL)
 		{
-			state->current++;
+			if (!choose_next(state))
+			{
+				state->done = true;
+				return false;
+			}
 			continue;
 		}
 		if (tess_row_mask_count(&batch->rows) == 0)
@@ -334,7 +503,6 @@ append_next(TessAppendState *state)
 		state->batches++;
 		return true;
 	}
-	return false;
 }
 
 static TupleTableSlot *
@@ -372,6 +540,8 @@ append_end(CustomScanState *css)
 {
 	TessAppendState *state = (TessAppendState *) css;
 
+	if (state->stats != NULL)
+		tess_shared_stats_end(state->stats);
 	tess_output_end(state->output);
 	for (int index = 0; index < state->nchildren; index++)
 		ExecEndNode(state->children[index]);
@@ -393,17 +563,95 @@ append_rescan(CustomScanState *css)
 		ExecReScan(state->children[index]);
 		tess_input_rescan(state->inputs[index]);
 	}
-	state->current = 0;
+	state->current = -1;
+	state->done = false;
 	state->batches = 0;
 }
 
+/* The batches given out: every participant's in a parallel plan. */
 static void
 append_explain(CustomScanState *css, List *ancestors, ExplainState *es)
 {
 	TessAppendState *state = (TessAppendState *) css;
+	const uint64 *totals = NULL;
 
-	if (es->analyze)
-		ExplainPropertyInteger("Batches", NULL, state->batches, es);
+	if (!es->analyze)
+		return;
+	if (state->stats != NULL)
+		totals = tess_shared_stats_totals(state->stats);
+	ExplainPropertyInteger("Batches", NULL, totals != NULL ? totals[0] : state->batches, es);
+}
+
+/*
+ * A parallel plan: the node's chunk holds the counters' rows, then the
+ * children shared out. The leader lays both out, a worker attaches.
+ */
+static Size
+shared_size(TessAppendState *state)
+{
+	return MAXALIGN(offsetof(AppendShared, finished) + sizeof(bool) * state->nchildren);
+}
+
+static Size
+append_estimate_dsm(CustomScanState *css, ParallelContext *pcxt)
+{
+	TessAppendState *state = (TessAppendState *) css;
+
+	return add_size(tess_shared_stats_estimate(APPEND_NCOUNTERS, pcxt->nworkers),
+					shared_size(state));
+}
+
+static void
+reset_shared(TessAppendState *state)
+{
+	state->shared->next_plan = 0;
+	memset(state->shared->finished, 0, sizeof(bool) * state->nchildren);
+}
+
+static void
+append_initialize_dsm(CustomScanState *css, ParallelContext *pcxt, void *coordinate)
+{
+	TessAppendState *state = (TessAppendState *) css;
+
+	/* A Gather a limit above shut down sets up anew when rescanned. */
+	if (state->stats != NULL)
+		tess_shared_stats_end(state->stats);
+	state->stats = tess_shared_stats_init(css->ss.ps.state->es_query_cxt, coordinate,
+										  APPEND_NCOUNTERS, pcxt->nworkers, pcxt->seg);
+	state->shared = (AppendShared *) ((char *) coordinate +
+									  tess_shared_stats_size(coordinate));
+	LWLockInitialize(&state->shared->lock, LWTRANCHE_PARALLEL_APPEND);
+	reset_shared(state);
+}
+
+static void
+append_reinitialize_dsm(CustomScanState *css, ParallelContext *pcxt, void *coordinate)
+{
+	TessAppendState *state = (TessAppendState *) css;
+
+	tess_shared_stats_reset(state->stats);
+	reset_shared(state);
+}
+
+static void
+append_initialize_worker(CustomScanState *css, shm_toc *toc, void *coordinate)
+{
+	TessAppendState *state = (TessAppendState *) css;
+
+	state->stats = tess_shared_stats_attach(css->ss.ps.state->es_query_cxt, coordinate,
+											ParallelWorkerNumber + 1);
+	state->shared = (AppendShared *) ((char *) coordinate +
+									  tess_shared_stats_size(coordinate));
+}
+
+static void
+append_shutdown(CustomScanState *css)
+{
+	TessAppendState *state = (TessAppendState *) css;
+	uint64		values[APPEND_NCOUNTERS] = {state->batches};
+
+	if (state->stats != NULL)
+		tess_shared_stats_store(state->stats, values);
 }
 
 /*
@@ -435,6 +683,11 @@ static const CustomExecMethods append_exec_methods = {
 	.EndCustomScan = append_end,
 	.ReScanCustomScan = append_rescan,
 	.ExplainCustomScan = append_explain,
+	.EstimateDSMCustomScan = append_estimate_dsm,
+	.InitializeDSMCustomScan = append_initialize_dsm,
+	.ReInitializeDSMCustomScan = append_reinitialize_dsm,
+	.InitializeWorkerCustomScan = append_initialize_worker,
+	.ShutdownCustomScan = append_shutdown,
 };
 
 const CustomScanMethods tess_append_scan_methods = {

@@ -148,6 +148,10 @@ EXPLAIN (COSTS OFF) SELECT count(*), sum(k) FROM union_part WHERE k > 2500 AND v
 SELECT union_same($$SELECT count(*), sum(k) FROM union_part WHERE k > 2500 AND v < 10$$);
 -- One partition left: no Append.
 EXPLAIN (COSTS OFF) SELECT count(*) FROM union_part WHERE k < 500 AND v < 10;
+-- A parameter in a clause of another column prunes nothing.
+EXPLAIN (COSTS OFF)
+SELECT g, (SELECT count(*) FROM union_part WHERE v < g) FROM generate_series(1, 3) AS g;
+SELECT union_same($$SELECT g, (SELECT count(*) FROM union_part WHERE v < g) FROM generate_series(1, 5) AS g$$);
 -- Pruned while executing, by a parameter: the core's Append stays.
 PREPARE union_prune(int) AS SELECT count(*), sum(k) FROM union_part WHERE k > $1 AND v < 10;
 SET plan_cache_mode = force_generic_plan;
@@ -158,10 +162,8 @@ DEALLOCATE union_prune;
 -- The partitions grouped: TessAgg groups over TessAppend.
 SELECT union_same($$SELECT v % 7 AS g, count(*), sum(k) FROM union_part WHERE v < 50 GROUP BY 1$$);
 
--- Parallel: the core's Parallel Append, which shares its children out,
--- stays the core's; a partial Append that is not parallel-aware runs
--- every child in every participant, each child dividing its own pages,
--- and becomes TessAppend.
+-- Parallel: in place of the core's Parallel Append, TessAppend shares the
+-- children out among the participants, a partial child to any of them.
 SET max_parallel_workers_per_gather = 2;
 SET parallel_setup_cost = 0;
 SET parallel_tuple_cost = 0;
@@ -170,6 +172,35 @@ EXPLAIN (COSTS OFF) SELECT count(*), sum(k) FROM union_part WHERE v < 10;
 SELECT union_same($$SELECT count(*), sum(k) FROM union_part WHERE v < 10$$);
 SELECT union_same($$SELECT count(*), sum(a) FROM (SELECT a FROM union_a WHERE a > 100
                    UNION ALL SELECT a FROM union_b WHERE a < 600) AS s$$);
+SELECT union_same($$SELECT v % 7 AS g, count(*), sum(k) FROM union_part WHERE v < 50 GROUP BY 1$$);
+-- A child that is not partial, a table no worker may read, goes to one
+-- participant.
+ALTER TABLE union_b SET (parallel_workers = 0);
+EXPLAIN (COSTS OFF)
+SELECT count(*), sum(a) FROM (SELECT a FROM union_a WHERE a > 100
+                              UNION ALL SELECT a FROM union_b WHERE a < 600) AS s;
+SELECT union_same($$SELECT count(*), sum(a) FROM (SELECT a FROM union_a WHERE a > 100
+                   UNION ALL SELECT a FROM union_b WHERE a < 600) AS s$$);
+-- Three of them and a partial one: each is read once, whoever takes it.
+SELECT union_same($$SELECT count(*), sum(a) FROM (SELECT a FROM union_a WHERE a > 100
+                   UNION ALL SELECT a FROM union_b WHERE a < 200
+                   UNION ALL SELECT a FROM union_b WHERE a >= 200 AND a < 400
+                   UNION ALL SELECT a FROM union_b WHERE a >= 400) AS s$$);
+-- Without the leader.
+SET parallel_leader_participation = off;
+SELECT union_same($$SELECT count(*), sum(k) FROM union_part WHERE v < 10$$);
+SELECT union_same($$SELECT count(*), sum(a) FROM (SELECT a FROM union_a WHERE a > 100
+                   UNION ALL SELECT a FROM union_b WHERE a < 600) AS s$$);
+RESET parallel_leader_participation;
+ALTER TABLE union_b RESET (parallel_workers);
+-- Rescanned under the gather in a join: the children are shared out anew.
+SET enable_material = off;
+EXPLAIN (COSTS OFF)
+SELECT x, n FROM (SELECT count(*) AS n FROM union_part WHERE v < 10) AS ss
+RIGHT JOIN (VALUES (1), (2)) AS v(x) ON true;
+SELECT union_same($$SELECT x, n, s FROM (SELECT count(*) AS n, sum(k) AS s FROM union_part WHERE v < 10) AS ss
+RIGHT JOIN (VALUES (1), (2), (3)) AS v(x) ON true$$);
+RESET enable_material;
 SET enable_parallel_append = off;
 EXPLAIN (COSTS OFF) SELECT count(*), sum(k) FROM union_part WHERE v < 10;
 SELECT union_same($$SELECT count(*), sum(k) FROM union_part WHERE v < 10$$);
