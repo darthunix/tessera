@@ -46,13 +46,6 @@
 #define SORT_ROWS 64
 
 /*
- * The planned kind of a key the kernels do not order by words: its word
- * is its abbreviated key, an int8, and the type's comparison orders what
- * the words leave equal.
- */
-#define SORT_KIND_GENERIC (-1)
-
-/*
  * External sort. Runs are written into sets of files (runtime/spill.c), a
  * run a partition of its set, the runs of the input into one set, those
  * of a pass that merges them into another: one file each, not one per
@@ -189,8 +182,7 @@ typedef struct TessSortState
 	int			nkernel;
 	int			generic;
 	SortSupportData *ssup;
-	SortSupportData abbrev;
-	SortAbbrev	abbrev_order;
+	TessSortAbbrev abbrev;
 	MemoryContext abbrev_context;
 	Datum	   *abbrev_values;
 	bool	   *abbrev_isnull;
@@ -295,7 +287,6 @@ typedef struct TessSortState
 
 static const CustomExecMethods sort_exec_methods;
 static void reread_child(TessSortState *state);
-static bool generic_abbreviates(Oid sortop, Oid collation, Oid type);
 static void compact_rows(TessSortState *state);
 static void plan_external(TessSortState *state);
 static create_upper_paths_hook_type previous_create_upper_paths_hook = NULL;
@@ -347,9 +338,9 @@ tess_sort_key_of(PathKey *pathkey, PathTarget *target, Relids relids, int *place
  * < or >) and its collation. False for a volatile key or a type without
  * one.
  */
-static bool
-generic_sort_key(PathKey *pathkey, PathTarget *target, Relids relids, int *place,
-				 Oid *sortop, Oid *collation)
+bool
+tess_sort_generic_key(PathKey *pathkey, PathTarget *target, Relids relids, int *place,
+					  Oid *sortop, Oid *collation)
 {
 	EquivalenceClass *ec = pathkey->pk_eclass;
 
@@ -412,9 +403,15 @@ make_sort_path(PlannerInfo *root, SortPath *sort)
 		 * one, and equal words by the comparison.
 		 */
 		if (tess_sort_key_of(pathkey, target, input->parent->relids, &place, &key))
-			(void) generic_sort_key(pathkey, target, input->parent->relids, &place,
-									&sortop, &collation);
-		else if (generic_sort_key(pathkey, target, input->parent->relids, &place,
+		{
+			/* Its comparison, for the rows a generic key before it leaves equal. */
+			Oid			type = exprType(list_nth(target->exprs, place));
+
+			sortop = get_opfamily_member_for_cmptype(pathkey->pk_opfamily, type, type,
+													 pathkey->pk_cmptype);
+			collation = pathkey->pk_eclass->ec_collation;
+		}
+		else if (tess_sort_generic_key(pathkey, target, input->parent->relids, &place,
 								  &sortop, &collation))
 		{
 			/*
@@ -423,11 +420,11 @@ make_sort_path(PlannerInfo *root, SortPath *sort)
 			 * well; with a key before it, groups of that key's values.
 			 */
 			if (!generic && foreach_current_index(pathkey) == 0 &&
-				!generic_abbreviates(sortop, collation,
+				!tess_sort_generic_abbreviates(sortop, collation,
 									 exprType(list_nth(target->exprs, place))))
 				return NULL;
 			generic = true;
-			key.kind = SORT_KIND_GENERIC;
+			key.kind = TESS_SORT_KIND_GENERIC;
 			key.flags = (pathkey->pk_cmptype == COMPARE_GT ? TESS_SORT_DESCENDING : 0) |
 				(pathkey->pk_nulls_first ? TESS_SORT_NULLS_FIRST : 0);
 		}
@@ -677,8 +674,8 @@ abbrev_order_of(SortSupport abbrev, Oid type)
  * abbreviated key the node takes: sort support prepared in a context of
  * its own, which goes with what the type's support allocated.
  */
-static bool
-generic_abbreviates(Oid sortop, Oid collation, Oid type)
+bool
+tess_sort_generic_abbreviates(Oid sortop, Oid collation, Oid type)
 {
 	MemoryContext context = AllocSetContextCreate(CurrentMemoryContext,
 												  "TessSort planning",
@@ -697,6 +694,71 @@ generic_abbreviates(Oid sortop, Oid collation, Oid type)
 	return result;
 }
 
+/* Sort support for a key's comparison: its ordering operator, collation and place of NULLs. */
+void
+tess_sort_support(SortSupport ssup, Oid sortop, Oid collation, bool nulls_first)
+{
+	memset(ssup, 0, sizeof(SortSupportData));
+	ssup->ssup_cxt = CurrentMemoryContext;
+	ssup->ssup_collation = collation;
+	ssup->ssup_nulls_first = nulls_first;
+	ssup->abbreviate = false;
+	PrepareSortSupportFromOrderingOp(sortop, ssup);
+}
+
+/* A key's abbreviated keys, when its type has ones the node takes. */
+void
+tess_sort_abbrev_init(TessSortAbbrev *abbrev, Oid sortop, Oid collation,
+					  bool nulls_first, Oid type)
+{
+	SortSupport ssup = &abbrev->ssup;
+
+	memset(ssup, 0, sizeof(SortSupportData));
+	ssup->ssup_cxt = CurrentMemoryContext;
+	ssup->ssup_collation = collation;
+	ssup->ssup_nulls_first = nulls_first;
+	ssup->abbreviate = true;
+	PrepareSortSupportFromOrderingOp(sortop, ssup);
+	abbrev->order = abbrev_order_of(ssup, type);
+}
+
+bool
+tess_sort_abbreviates(const TessSortAbbrev *abbrev)
+{
+	return abbrev->order != SORT_ABBREV_NONE;
+}
+
+/*
+ * The word of a value that is not NULL: its abbreviated key as a signed
+ * integer in its order, or 0 without one. The converter may allocate in
+ * the current context.
+ */
+int64
+tess_sort_abbrev_word(TessSortAbbrev *abbrev, Datum value)
+{
+	Datum		abbreviated;
+
+	if (abbrev->order == SORT_ABBREV_NONE)
+		return 0;
+	abbreviated = abbrev->ssup.abbrev_converter(value, &abbrev->ssup);
+	switch ((SortAbbrev) abbrev->order)
+	{
+		case SORT_ABBREV_UNSIGNED:
+			return (int64) (DatumGetUInt64(abbreviated) ^ (UINT64CONST(1) << 63));
+		case SORT_ABBREV_SIGNED:
+			return DatumGetInt64(abbreviated);
+		case SORT_ABBREV_REVERSED:
+			return ~DatumGetInt64(abbreviated);
+		case SORT_ABBREV_UINT32:
+			return (int64) DatumGetUInt32(abbreviated);
+		case SORT_ABBREV_INT32:
+			return (int64) DatumGetInt32(abbreviated);
+		case SORT_ABBREV_NONE:
+			break;
+	}
+	return 0;
+}
+
 /*
  * Other types: the comparison of every key from the first generic one on,
  * by its ordering operator, collation and place of NULLs, and the
@@ -709,28 +771,20 @@ generic_begin(TessSortState *state, TupleDesc desc, List *sortops, List *collati
 {
 	int			first = state->generic;
 	Oid			type = TupleDescAttr(desc, state->key_columns[first])->atttypid;
-	SortSupport abbrev = &state->abbrev;
 
 	state->ssup = palloc0_array(SortSupportData, state->nkeys);
 	for (int key = first; key < state->nkeys; key++)
 	{
-		SortSupport ssup = &state->ssup[key];
 		Oid			sortop = (Oid) list_nth_int(sortops, key);
 
 		if (!OidIsValid(sortop))
 			elog(ERROR, "TessSort received a foreign plan");
-		ssup->ssup_cxt = CurrentMemoryContext;
-		ssup->ssup_collation = (Oid) list_nth_int(collations, key);
-		ssup->ssup_nulls_first = (state->keys[key].flags & TESS_SORT_NULLS_FIRST) != 0;
-		ssup->abbreviate = false;
-		PrepareSortSupportFromOrderingOp(sortop, ssup);
+		tess_sort_support(&state->ssup[key], sortop, (Oid) list_nth_int(collations, key),
+						  (state->keys[key].flags & TESS_SORT_NULLS_FIRST) != 0);
 	}
-	abbrev->ssup_cxt = CurrentMemoryContext;
-	abbrev->ssup_collation = state->ssup[first].ssup_collation;
-	abbrev->ssup_nulls_first = state->ssup[first].ssup_nulls_first;
-	abbrev->abbreviate = true;
-	PrepareSortSupportFromOrderingOp((Oid) list_nth_int(sortops, first), abbrev);
-	state->abbrev_order = abbrev_order_of(abbrev, type);
+	tess_sort_abbrev_init(&state->abbrev, (Oid) list_nth_int(sortops, first),
+						  state->ssup[first].ssup_collation,
+						  state->ssup[first].ssup_nulls_first, type);
 	state->abbrev_context = AllocSetContextCreate(CurrentMemoryContext,
 												  "TessSort abbreviated keys",
 												  ALLOCSET_DEFAULT_SIZES);
@@ -767,36 +821,10 @@ abbreviate_column(TessSortState *state, const TessDatumColumn *column,
 	old = MemoryContextSwitchTo(state->abbrev_context);
 	while ((row = tess_row_mask_next(rows, row)) >= 0)
 	{
-		int64		word = 0;
-
 		state->abbrev_isnull[row] = column->isnull[row];
-		if (!column->isnull[row] && state->abbrev_order != SORT_ABBREV_NONE)
-		{
-			Datum		abbreviated = state->abbrev.abbrev_converter(column->values[row],
-																	 &state->abbrev);
-
-			switch (state->abbrev_order)
-			{
-				case SORT_ABBREV_UNSIGNED:
-					word = (int64) (DatumGetUInt64(abbreviated) ^ (UINT64CONST(1) << 63));
-					break;
-				case SORT_ABBREV_SIGNED:
-					word = DatumGetInt64(abbreviated);
-					break;
-				case SORT_ABBREV_REVERSED:
-					word = ~DatumGetInt64(abbreviated);
-					break;
-				case SORT_ABBREV_UINT32:
-					word = (int64) DatumGetUInt32(abbreviated);
-					break;
-				case SORT_ABBREV_INT32:
-					word = (int64) DatumGetInt32(abbreviated);
-					break;
-				case SORT_ABBREV_NONE:
-					break;
-			}
-		}
-		state->abbrev_values[row] = Int64GetDatum(word);
+		state->abbrev_values[row] = Int64GetDatum(column->isnull[row] ? 0 :
+												  tess_sort_abbrev_word(&state->abbrev,
+																		column->values[row]));
 	}
 	MemoryContextSwitchTo(old);
 	state->abbrev_column = (TessDatumColumn) TESS_STRUCT_INITIALIZER(TessDatumColumn);
@@ -1065,9 +1093,9 @@ sort_begin(CustomScanState *css, EState *estate, int eflags)
 			elog(ERROR, "TessSort received a foreign plan");
 		state->key_columns[index] = key;
 		/* A generic key's word is its abbreviated key, an int8. */
-		if (kind == SORT_KIND_GENERIC && state->generic < 0)
+		if (kind == TESS_SORT_KIND_GENERIC && state->generic < 0)
 			state->generic = index;
-		kinds[index] = kind == SORT_KIND_GENERIC ? TESS_TABLE_KEY_INT8 :
+		kinds[index] = kind == TESS_SORT_KIND_GENERIC ? TESS_TABLE_KEY_INT8 :
 			(TessTableKeyKind) kind;
 		state->keys[index].kind = kinds[index];
 		state->keys[index].flags = (uint32) list_nth_int(key_flags, index);

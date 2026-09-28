@@ -207,8 +207,9 @@ FETCH FIRST FROM c;
 CLOSE c;
 COMMIT;
 RESET work_mem;
--- Rescan with a new parameter sorts anew; workers sort their shares under
--- the core's Gather Merge.
+-- Rescan with a new parameter sorts anew; workers sort their shares and
+-- TessGatherMerge merges them by their words and the comparisons, the
+-- leader's share among them, a bound reaching the workers.
 SELECT types_order($$SELECT x, (SELECT string_agg(id::text, ',') FROM (SELECT id FROM types_s WHERE w = x ORDER BY n DESC, id) AS q) FROM generate_series(0, 3) AS x$$);
 SET parallel_setup_cost = 0;
 SET parallel_tuple_cost = 0;
@@ -216,6 +217,30 @@ SET min_parallel_table_scan_size = 0;
 SET max_parallel_workers_per_gather = 2;
 EXPLAIN (COSTS OFF) SELECT id, n FROM types_s ORDER BY n, id;
 SELECT types_order($$SELECT id, n FROM types_s ORDER BY n, id$$);
+SELECT types_order($$SELECT id, n FROM types_s ORDER BY n DESC NULLS LAST, id$$);
+SELECT types_order($$SELECT id, one FROM types_s ORDER BY one, id DESC$$);
+SELECT types_order($$SELECT id, long FROM types_s ORDER BY long COLLATE "C", id$$);
+SELECT types_order($$SELECT id, n, t FROM types_s ORDER BY n, t COLLATE "C" DESC, id$$);
+SELECT types_order($$SELECT id, w, t FROM types_s ORDER BY w, t, id$$);
+EXPLAIN (COSTS OFF) SELECT id, long FROM types_s ORDER BY long COLLATE "C" DESC, id LIMIT 20;
+SELECT types_order($$SELECT id, long FROM types_s ORDER BY long COLLATE "C" DESC, id LIMIT 20$$);
+SELECT types_order($$SELECT id, u FROM types_s ORDER BY u, id LIMIT 700$$);
+-- Two workers' shares of 200000 rows with equal words: numeric of 1000
+-- values, text whose abbreviated keys share a prefix of 21 bytes.
+CREATE TABLE types_p AS
+SELECT i AS id, ((i % 1000) * 1.5)::numeric AS n, 'k' || repeat('x', 20) || (i % 777) AS t
+FROM generate_series(1, 200000) AS i;
+ANALYZE types_p;
+SET parallel_leader_participation = off;
+SELECT types_order($$SELECT id, n FROM types_p ORDER BY n, id$$);
+SELECT types_order($$SELECT id, t FROM types_p ORDER BY t COLLATE "C" DESC, id$$);
+SELECT types_order($$SELECT id, t, n FROM types_p ORDER BY t COLLATE "C", n DESC, id LIMIT 50$$);
+SELECT types_order($$SELECT id, n FROM types_s ORDER BY n, id$$);
+RESET parallel_leader_participation;
+DROP TABLE types_p;
+SET work_mem = '64kB';
+SELECT types_order($$SELECT id, long, n FROM types_s ORDER BY long COLLATE "C", n DESC, id$$);
+RESET work_mem;
 RESET parallel_setup_cost;
 RESET parallel_tuple_cost;
 RESET min_parallel_table_scan_size;

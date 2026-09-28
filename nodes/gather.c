@@ -6,7 +6,9 @@
 #include "commands/explain_format.h"
 #include "executor/execParallel.h"
 #include "executor/executor.h"
+#include "lib/binaryheap.h"
 #include "miscadmin.h"
+#include "nodes/nodeFuncs.h"
 #include "optimizer/cost.h"
 #include "optimizer/optimizer.h"
 #include "optimizer/pathnode.h"
@@ -17,6 +19,7 @@
 #include "storage/proc.h"
 #include "storage/shm_mq.h"
 #include "utils/datum.h"
+#include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/wait_event.h"
 
@@ -47,7 +50,10 @@
  * worker's rows come in order, and its messages carry, after the columns'
  * lanes, a lane per word of the rows' sort items (tessera/sort.h), which
  * the leader merges with the kernel tess_sort_merge, its own rows among
- * them, as the last merge of an external TessSort does.
+ * them, as the last merge of an external TessSort does. A key of another
+ * type ends the keys the words hold: its word is its abbreviated key, and
+ * the leader merges in C, by the words and then the types' comparisons of
+ * that key and the ones after it (TessSort's "Other types").
  */
 
 /* Rows of a batch given out, and the most rows of a message. */
@@ -108,6 +114,9 @@ typedef struct MessageBuilder
 	int			selected;
 	uint64	   *key_lanes;
 	int			key_capacity;
+	/* A generic key's words of the batch. */
+	Datum	   *abbrev_values;
+	bool	   *abbrev_isnull;
 	bool		exhausted;
 } MessageBuilder;
 
@@ -131,6 +140,16 @@ typedef struct TessSendState
 	TessSortKey keys[TESS_TABLE_MAX_KEYS];
 	int			key_words;
 	const TessKernelOps *kernels;
+	/*
+	 * A key of another type: the first one (-1 for none), the keys the
+	 * words hold, up to it, its abbreviated keys in a context reset per
+	 * batch, and the comparisons of it and the keys after it.
+	 */
+	int			generic;
+	int			nkernel;
+	TessSortAbbrev abbrev;
+	MemoryContext abbrev_context;
+	SortSupportData *ssup;
 	/* The lanes of a message: NULL bits, the columns, the keys' words. */
 	int			null_lanes;
 	int			nlanes;
@@ -213,6 +232,8 @@ typedef struct TessGatherState
 	int			nsources;
 	uint32		merge_state[TESS_SORT_MERGE_STATE_WORDS];
 	MessageBuilder local_builder;
+	/* A generic key's merge: the sources with rows in hand, by their next rows. */
+	binaryheap *merge_heap;
 } TessGatherState;
 
 static const CustomExecMethods send_exec_methods;
@@ -347,6 +368,9 @@ make_gather_merge_path(PlannerInfo *root, GatherMergePath *gather)
 	List	   *places = NIL;
 	List	   *kinds = NIL;
 	List	   *flags = NIL;
+	List	   *sortops = NIL;
+	List	   *collations = NIL;
+	bool		generic = false;
 	int			nkeys = list_length(gather->path.pathkeys);
 
 	if (subpath == NULL ||
@@ -357,16 +381,42 @@ make_gather_merge_path(PlannerInfo *root, GatherMergePath *gather)
 	{
 		TessSortKey key;
 		int			place;
+		Oid			sortop = InvalidOid;
+		Oid			collation = InvalidOid;
 
-		if (!tess_sort_key_of(pathkey, subpath->pathtarget, subpath->parent->relids,
-							  &place, &key))
+		/* As TessSort takes them: a key of another type by its comparison. */
+		if (tess_sort_key_of(pathkey, subpath->pathtarget, subpath->parent->relids,
+							 &place, &key))
+		{
+			Oid			type = exprType(list_nth(subpath->pathtarget->exprs, place));
+
+			sortop = get_opfamily_member_for_cmptype(pathkey->pk_opfamily, type, type,
+													 pathkey->pk_cmptype);
+			collation = pathkey->pk_eclass->ec_collation;
+		}
+		else if (tess_sort_generic_key(pathkey, subpath->pathtarget,
+									   subpath->parent->relids, &place, &sortop, &collation))
+		{
+			if (!generic && foreach_current_index(pathkey) == 0 &&
+				!tess_sort_generic_abbreviates(sortop, collation,
+											   exprType(list_nth(subpath->pathtarget->exprs,
+																 place))))
+				return NULL;
+			generic = true;
+			key.kind = TESS_SORT_KIND_GENERIC;
+			key.flags = (pathkey->pk_cmptype == COMPARE_GT ? TESS_SORT_DESCENDING : 0) |
+				(pathkey->pk_nulls_first ? TESS_SORT_NULLS_FIRST : 0);
+		}
+		else
 			return NULL;
 		places = lappend_int(places, place);
 		kinds = lappend_int(kinds, (int) key.kind);
 		flags = lappend_int(flags, (int) key.flags);
+		sortops = lappend_int(sortops, (int) sortop);
+		collations = lappend_int(collations, (int) collation);
 	}
 	return make_send_and_gather(root, &gather->path, subpath, gather->num_workers,
-								list_make3(places, kinds, flags),
+								list_make5(places, kinds, flags, sortops, collations),
 								&gather_merge_path_methods, &tess_gather_merge_node);
 }
 
@@ -622,6 +672,8 @@ send_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path, List *tlist
 	tess_plan_write_int_list(writer, "keys", data == NIL ? NIL : linitial(data));
 	tess_plan_write_int_list(writer, "kinds", data == NIL ? NIL : lsecond(data));
 	tess_plan_write_int_list(writer, "flags", data == NIL ? NIL : lthird(data));
+	tess_plan_write_int_list(writer, "sortops", data == NIL ? NIL : lfourth(data));
+	tess_plan_write_int_list(writer, "collations", data == NIL ? NIL : list_nth(data, 4));
 	config.methods = &tess_send_scan_methods;
 	config.layout_policy = TESS_LAYOUT_PRESERVE_CHILD;
 	config.layout_child = 0;
@@ -814,6 +866,8 @@ send_begin(CustomScanState *css, EState *estate, int eflags)
 	List	   *places;
 	List	   *kinds;
 	List	   *flags;
+	List	   *sortops;
+	List	   *collations;
 
 	tess_plan_get_info(cscan, &info);
 	if (info.node != &tess_send_node || info.nchildren != 1 ||
@@ -824,6 +878,8 @@ send_begin(CustomScanState *css, EState *estate, int eflags)
 	places = tess_plan_read_int_list(reader, "keys");
 	kinds = tess_plan_read_int_list(reader, "kinds");
 	flags = tess_plan_read_int_list(reader, "flags");
+	sortops = tess_plan_read_int_list(reader, "sortops");
+	collations = tess_plan_read_int_list(reader, "collations");
 	tess_plan_reader_finish(reader);
 	state->bound = -1;
 	state->child = ExecInitNode(linitial(cscan->custom_plans), estate, eflags);
@@ -842,15 +898,44 @@ send_begin(CustomScanState *css, EState *estate, int eflags)
 	}
 	state->nkeys = list_length(places);
 	if (state->nkeys > TESS_TABLE_MAX_KEYS || list_length(kinds) != state->nkeys ||
-		list_length(flags) != state->nkeys)
+		list_length(flags) != state->nkeys || list_length(sortops) != state->nkeys ||
+		list_length(collations) != state->nkeys)
 		elog(ERROR, "TessSend received a foreign plan");
+	state->generic = -1;
 	for (int key = 0; key < state->nkeys; key++)
 	{
+		int			kind = list_nth_int(kinds, key);
+
 		state->key_places[key] = list_nth_int(places, key);
-		state->keys[key].kind = (TessTableKeyKind) list_nth_int(kinds, key);
+		if (kind == TESS_SORT_KIND_GENERIC && state->generic < 0)
+			state->generic = key;
+		state->keys[key].kind = kind == TESS_SORT_KIND_GENERIC ? TESS_TABLE_KEY_INT8 :
+			(TessTableKeyKind) kind;
 		state->keys[key].flags = (uint32) list_nth_int(flags, key);
 		if (state->key_places[key] < 0 || state->key_places[key] >= state->ncolumns)
 			elog(ERROR, "TessSend received a foreign plan");
+	}
+	state->nkernel = state->generic < 0 ? state->nkeys : state->generic + 1;
+	if (state->generic >= 0)
+	{
+		int			first = state->generic;
+
+		state->ssup = palloc0_array(SortSupportData, state->nkeys);
+		for (int key = first; key < state->nkeys; key++)
+		{
+			if (!OidIsValid((Oid) list_nth_int(sortops, key)))
+				elog(ERROR, "TessSend received a foreign plan");
+			tess_sort_support(&state->ssup[key], (Oid) list_nth_int(sortops, key),
+							  (Oid) list_nth_int(collations, key),
+							  (state->keys[key].flags & TESS_SORT_NULLS_FIRST) != 0);
+		}
+		tess_sort_abbrev_init(&state->abbrev, (Oid) list_nth_int(sortops, first),
+							  state->ssup[first].ssup_collation,
+							  state->ssup[first].ssup_nulls_first,
+							  TupleDescAttr(desc, state->key_places[first])->atttypid);
+		state->abbrev_context = AllocSetContextCreate(CurrentMemoryContext,
+													  "TessSend abbreviated keys",
+													  ALLOCSET_DEFAULT_SIZES);
 	}
 	if (state->nkeys > 0)
 	{
@@ -858,7 +943,7 @@ send_begin(CustomScanState *css, EState *estate, int eflags)
 		if (state->kernels == NULL ||
 			!TESS_ABI_HAS_FIELD(state->kernels, TessKernelOps, sort_key_lanes))
 			elog(ERROR, "TessSend needs the Tessera kernels module");
-		state->key_words = merge_key_words(state->kernels, state->nkeys, state->keys);
+		state->key_words = merge_key_words(state->kernels, state->nkernel, state->keys);
 	}
 	state->null_lanes = GATHER_NULL_LANES(state->ncolumns);
 	state->nlanes = state->null_lanes + state->ncolumns + state->key_words;
@@ -948,24 +1033,56 @@ fill_message(TessSendState *send, MessageBuilder *builder, TessInput *input,
 				uint64	   *key_lanes[TESS_SORT_MAX_ITEM_WORDS];
 				int			count;
 
+				TessDatumColumn abbreviated = TESS_STRUCT_INITIALIZER(TessDatumColumn);
+
 				if (batch->rows.nrows > builder->key_capacity)
 				{
 					if (builder->key_lanes != NULL)
 						pfree(builder->key_lanes);
+					if (builder->abbrev_values != NULL)
+					{
+						pfree(builder->abbrev_values);
+						pfree(builder->abbrev_isnull);
+					}
 					builder->key_capacity = Max(batch->rows.nrows, GATHER_ROWS);
 					builder->key_lanes = MemoryContextAlloc(context, sizeof(uint64) *
 															send->key_words *
 															builder->key_capacity);
+					builder->abbrev_values = MemoryContextAllocZero(context, sizeof(Datum) *
+																	builder->key_capacity);
+					builder->abbrev_isnull = MemoryContextAllocZero(context, sizeof(bool) *
+																	builder->key_capacity);
 				}
-				for (int key = 0; key < send->nkeys; key++)
+				for (int key = 0; key < send->nkernel; key++)
 				{
 					table_keys[key].kind = send->keys[key].kind;
 					table_keys[key].column = &columns[send->key_places[key]];
 					table_keys[key].prepared = NULL;
 				}
+				/* A generic key's word: its abbreviated key. */
+				if (send->generic >= 0)
+				{
+					const TessDatumColumn *column = &columns[send->key_places[send->generic]];
+					MemoryContext old;
+
+					MemoryContextReset(send->abbrev_context);
+					old = MemoryContextSwitchTo(send->abbrev_context);
+					for (int at = -1; (at = tess_row_mask_next(&batch->rows, at)) >= 0;)
+					{
+						builder->abbrev_isnull[at] = column->isnull[at];
+						builder->abbrev_values[at] = Int64GetDatum(column->isnull[at] ? 0 :
+																   tess_sort_abbrev_word(&send->abbrev,
+																						 column->values[at]));
+					}
+					MemoryContextSwitchTo(old);
+					abbreviated.values = builder->abbrev_values;
+					abbreviated.isnull = builder->abbrev_isnull;
+					abbreviated.nrows = batch->rows.nrows;
+					table_keys[send->generic].column = &abbreviated;
+				}
 				for (int word = 0; word < send->key_words; word++)
 					key_lanes[word] = builder->key_lanes + (Size) word * builder->key_capacity;
-				check_kernel(send->kernels->sort_key_lanes(send->nkeys, send->keys, table_keys,
+				check_kernel(send->kernels->sort_key_lanes(send->nkernel, send->keys, table_keys,
 														   &batch->rows, send->key_words,
 														   key_lanes, builder->key_capacity,
 														   &count, &status),
@@ -1599,6 +1716,107 @@ merge_take(TessGatherState *state, int index, uint32 place, int out)
 		state->worker_rows++;
 }
 
+/* Column `column` of source index's row place, as merge_take reads it. */
+static Datum
+source_value(TessGatherState *state, const MergeSource *source, int column, uint32 place,
+			 bool *isnull)
+{
+	const uint64 *lanes = (const uint64 *) (source->message + MAXALIGN(sizeof(GatherHeader)));
+	uint64		word = lanes[(Size) source->stride * (state->send->null_lanes + column) + place];
+
+	*isnull = (lanes[(Size) source->stride * (column / 64) + place] >> (column % 64)) & 1;
+	if (*isnull)
+		return (Datum) 0;
+	if (state->typbyvals[column])
+		return (Datum) word;
+	return PointerGetDatum(source->values + word);
+}
+
+/*
+ * The order of two sources' next rows under a generic key: their key
+ * words, then the comparisons; the binary heap keeps the greatest first,
+ * so the result is reversed.
+ */
+static int
+compare_sources(bh_node_type a, bh_node_type b, void *arg)
+{
+	TessGatherState *state = arg;
+	TessSendState *send = state->send;
+	const MergeSource *left = &state->sources[DatumGetInt32(a)];
+	const MergeSource *right = &state->sources[DatumGetInt32(b)];
+	const uint64 *left_lanes = (const uint64 *) (left->message + MAXALIGN(sizeof(GatherHeader)));
+	const uint64 *right_lanes = (const uint64 *) (right->message + MAXALIGN(sizeof(GatherHeader)));
+	int			first = send->null_lanes + state->ncolumns;
+
+	for (int word = 0; word < send->key_words; word++)
+	{
+		uint64		x = left_lanes[(Size) left->stride * (first + word) + left->place];
+		uint64		y = right_lanes[(Size) right->stride * (first + word) + right->place];
+
+		if (x != y)
+			return x < y ? 1 : -1;
+	}
+	for (int key = send->generic; key < send->nkeys; key++)
+	{
+		bool		left_null;
+		bool		right_null;
+		Datum		x = source_value(state, left, send->key_places[key], left->place, &left_null);
+		Datum		y = source_value(state, right, send->key_places[key], right->place,
+									 &right_null);
+		int			result = ApplySortComparator(x, left_null, y, right_null, &send->ssup[key]);
+
+		if (result != 0)
+			return -result;
+	}
+	return 0;
+}
+
+/*
+ * The merge of a generic key: rows from the source with the least next
+ * row, by a binary heap made anew for every batch, until the batch is full
+ * or a source's rows in hand run out with more of it to come.
+ */
+static int
+merge_generic(TessGatherState *state)
+{
+	binaryheap *heap;
+	int			taken = 0;
+
+	/* A rescan may launch more workers than before. */
+	if (state->merge_heap == NULL || state->merge_heap->bh_space < state->nsources)
+	{
+		MemoryContext old = MemoryContextSwitchTo(state->css.ss.ps.state->es_query_cxt);
+
+		if (state->merge_heap != NULL)
+			binaryheap_free(state->merge_heap);
+		state->merge_heap = binaryheap_allocate(state->nsources, compare_sources, state);
+		MemoryContextSwitchTo(old);
+	}
+	heap = state->merge_heap;
+	binaryheap_reset(heap);
+	for (int index = 0; index < state->nsources; index++)
+		if (state->sources[index].place < state->sources[index].rows)
+			binaryheap_add_unordered(heap, Int32GetDatum(index));
+	binaryheap_build(heap);
+	while (taken < GATHER_ROWS && !binaryheap_empty(heap))
+	{
+		int			index = DatumGetInt32(binaryheap_first(heap));
+		MergeSource *source = &state->sources[index];
+
+		merge_take(state, index, source->place++, taken++);
+		if (source->place < source->rows)
+			binaryheap_replace_first(heap, Int32GetDatum(index));
+		else
+		{
+			(void) binaryheap_remove_first(heap);
+			/* Its next rows come with the next batch, loaded then. */
+			if (!source->done)
+				break;
+		}
+	}
+	return taken;
+}
+
 /*
  * The next batch in order: up to 64 rows merged from the sources by their
  * key words. A source whose rows ran out loads the next only here, once
@@ -1632,7 +1850,9 @@ merge_next(TessGatherState *state)
 			continue;
 		merge_load(state, index);
 	}
-	while (taken < GATHER_ROWS)
+	if (send->generic >= 0)
+		taken = merge_generic(state);
+	while (send->generic < 0 && taken < GATHER_ROWS)
 	{
 		TessStatus	status = TESS_STRUCT_INITIALIZER(TessStatus);
 		int			count;

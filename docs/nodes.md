@@ -1545,10 +1545,13 @@ parameter the node does without, rescanning its child and reinitializing
 the shared memory itself.
 
 A `GatherMergePath` over a Tessera path becomes `TessGatherMerge` over
-`TessSend` the same way when every path key is one the sort kernels order
-by, a target of a type a key's word holds through the family whose order
-the word keeps (as for `TessSort`, at most 16 keys), and the kernels module is loaded; TessSend's
-data then lists each key's target, kind and flags.
+`TessSend` the same way when every path key is one `TessSort` takes: a
+target of a type a key's word holds through the family whose order the
+word keeps, or of another type by its ordering operator, the first such
+key with an abbreviated key unless a word key comes before it (as for
+`TessSort`, "Other types", at most 16 keys), and the kernels module is
+loaded; TessSend's data then lists each key's target, kind, flags,
+ordering operator and collation.
 
 That replacement keeps the core's costs, and a `Gather` the core costs at
 `parallel_tuple_cost` a row has often lost to a serial path by then.
@@ -1623,6 +1626,19 @@ stream whose message ran out loads the next only when the next batch is
 asked for, once the rows pointing into it are consumed, so the merge
 stops at a stream's last row in hand and the batch goes out shorter.
 
+With a key of another type the lanes hold the keys up to it, its word
+its abbreviated key (each process makes them alike: the node never
+aborts abbreviation), and the leader merges in C: a binary heap of the
+streams with rows in hand, made anew for every batch, ordered by their
+next rows' lanes and then by the comparisons of that key and the ones
+after it, their values read from the messages; the batch stops at a
+stream's last row in hand as above. A limit's bound reaches the workers'
+`TessSort`s, which keep top-N heaps. With two workers, 2 M rows: numeric
+118 ms against 291 for the core (serial 125), text under `"C"` 152
+against 385, the first 10 rows by numeric 38 against 66, where the core's
+`Limit` over its `Gather Merge` over the node's sorts took 57
+(pg-sort-w2-lg8fvZ).
+
 With two workers, 2 M rows ordered by an int4 key take 61 ms against 100
 for the core's `Gather Merge` over the same `TessSort`s and 81 for a
 serial `TessSort` (with text 76 against 120 and 113; two keys 77 against
@@ -1640,7 +1656,10 @@ core's `Gather` over the same nodes and 317 for the core's plan, with four
 ### Tests
 
 `test/sql/sort.sql` compares the rows of `TessGatherMerge` in order with
-Tessera off: keys of both kinds, both directions and places of NULL, text
+Tessera off (`test/sql/types.sql` for keys of other types: numeric,
+text under `"C"`, two such keys, text after an integer, limits, the
+workers alone over 200000 rows whose words are equal, past `work_mem`;
+a merge by the words only fails it): keys of both kinds, both directions and places of NULL, text
 and values of 2000 bytes carried along, sorts past `work_mem`, the
 workers alone, a limit and an offset, a rescan, and the core's
 `Gather Merge` with `tessera.batch_gather` off.
