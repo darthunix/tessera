@@ -58,6 +58,10 @@ AS $function$
 BEGIN
     EXECUTE format('PREPARE on_%I AS %s', test_name, sql);
     EXECUTE format('PREPARE off_%I AS %s', test_name, sql);
+    -- run.sh measure with CASES: only the cases it matches are timed.
+    IF test_name !~ coalesce(nullif(current_setting('bench.cases', true), ''), '.') THEN
+        RETURN;
+    END IF;
     PERFORM pg_temp.measure(test_name, 'on', 'on_' || test_name, repetitions);
     PERFORM pg_temp.measure(test_name, 'off', 'off_' || test_name, repetitions);
 END

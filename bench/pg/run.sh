@@ -5,6 +5,11 @@
 # data set at its base size or a multiple of it. See README.md. Run from
 # the repository root:
 #   bench/pg/run.sh setup [scale] | measure <family> [workers] | stop
+# measure takes CASES, a regular expression of the case names to time
+# (every case by default; the plans are written for all of them), and
+# REPETITIONS, the runs of each case in each mode (the family's own, 31,
+# by default): a development A/B times the cases a change touches, fewer
+# times, to stay within minutes.
 set -eu
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 HERE=$ROOT/bench/pg
@@ -48,6 +53,8 @@ measure)
     {
         echo "HEAD $(git -C "$ROOT" rev-parse HEAD)"
         echo "workers $WORKERS"
+        echo "cases ${CASES:-all}"
+        echo "repetitions ${REPETITIONS:-default}"
         echo "scale $("$BIN/psql" -X -tAc 'SELECT scale FROM bench_scale')"
         echo "shared_buffers $("$BIN/psql" -X -tAc 'SHOW shared_buffers')"
         echo "status:"; git -C "$ROOT" status --short
@@ -57,8 +64,9 @@ measure)
             "$LIB/libtessera_runtime.a" "$BIN/postgres"
     } > "$OUT/source.txt"
     { pmset -g batt 2>/dev/null | head -2; date; } > "$OUT/power.txt"
-    (cd "$OUT" && "$BIN/psql" -X -v workers="$WORKERS" -f "$HERE/$FAMILY.sql" \
-        > run.log 2>&1)
+    (cd "$OUT" && PGOPTIONS="-c bench.cases=${CASES:-}" "$BIN/psql" -X \
+        -v workers="$WORKERS" ${REPETITIONS:+-v repetitions="$REPETITIONS"} \
+        -f "$HERE/$FAMILY.sql" > run.log 2>&1)
     cat "$OUT/summary.txt"
     echo "results: $OUT"
     ;;
