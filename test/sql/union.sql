@@ -80,7 +80,7 @@ SELECT count(*), sum(x) FROM (SELECT a AS x FROM union_a WHERE a > 100
                               UNION ALL SELECT b FROM union_b WHERE b > 100) AS s;
 SELECT union_same($$SELECT count(*), sum(x) FROM (SELECT a AS x FROM union_a WHERE a > 100
                    UNION ALL SELECT b FROM union_b WHERE b > 100) AS s$$);
--- Only core paths below: the core's Append, packed.
+-- Clauses that run row by row: TessFilter in each branch, forwarded.
 EXPLAIN (COSTS OFF)
 SELECT count(*) FROM (SELECT a FROM union_a WHERE t LIKE 'a1%'
                       UNION ALL SELECT a FROM union_b WHERE t LIKE 'b1%') AS s;

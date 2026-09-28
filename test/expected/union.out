@@ -204,22 +204,27 @@ SELECT union_same($$SELECT count(*), sum(x) FROM (SELECT a AS x FROM union_a WHE
  same
 (1 row)
 
--- Only core paths below: the core's Append, packed.
+-- Clauses that run row by row: TessFilter in each branch, forwarded.
 EXPLAIN (COSTS OFF)
 SELECT count(*) FROM (SELECT a FROM union_a WHERE t LIKE 'a1%'
                       UNION ALL SELECT a FROM union_b WHERE t LIKE 'b1%') AS s;
-                      QUERY PLAN                       
--------------------------------------------------------
+                             QUERY PLAN                              
+---------------------------------------------------------------------
  Custom Scan (TessAgg)
-   ->  Custom Scan (TessPack)
-         ->  Append
+   ->  Custom Scan (TessAppend)
+         ->  Custom Scan (TessPack)
+               Rows Kept As: forwarded batches
                ->  Subquery Scan on unnamed_subquery
-                     ->  Seq Scan on union_a
+                     ->  Custom Scan (TessFilter) on union_a
                            Filter: (t ~~ 'a1%'::text)
+                           ->  Custom Scan (TessHeapScan) on union_a
+         ->  Custom Scan (TessPack)
+               Rows Kept As: forwarded batches
                ->  Subquery Scan on unnamed_subquery_1
-                     ->  Seq Scan on union_b
+                     ->  Custom Scan (TessFilter) on union_b
                            Filter: (t ~~ 'b1%'::text)
-(9 rows)
+                           ->  Custom Scan (TessHeapScan) on union_b
+(14 rows)
 
 -- Rows to a row-wise parent: the core's Append stays.
 EXPLAIN (COSTS OFF)

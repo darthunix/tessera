@@ -2378,6 +2378,13 @@
   TessAppend мог бы отсекать сам (ExecFindMatchingSubPlans, как ядро); 6) упорядоченный UNION ALL (MergeAppend) —
   отложен до замеров; 7) setop на масштабе 10 не мерили; 8) мутация «рабочий не помечает непараллельную ветвь»
   тестами не ловится (гонка); 9) коммиты 2026-09-28 без подписи. INTERSECT/EXCEPT — пункт в).
+  Сделано 1) (2026-09-28): хук set_rel_pathlist кладёт TessFilter с построчными условиями (tess_filter_row_path)
+  в список вариантов таблицы и частичный путь рядом с параллельным. Замер: база pg-rowwise-U5yNz0 и
+  pg-setop-lJbsIM (новые случаи row_like, row_like_count, setop_like), после — pg-rowwise-yREACa и pg-setop-mCNkdq: row_like
+  (bit_or под LIKE, родитель ядра) 11.07 → 9.41 мс (выкл 11.17, ×0.84), row_like_count (TessAgg) 11.23 → 8.99
+  (выкл 11.62, ×0.77), setop_like (UNION двух ветвей с LIKE) 27.4 → 23.6 (выкл 36.1, ×0.65). Выигрыш скромный:
+  время уходит на сам LIKE. Планы тестов agg, filter, join, limit, union: pack над Seq Scan с построчным
+  условием стал TessFilter над TessHeapScan; комментарии тестов, где изменился смысл, поправлены.
   4) Документы (docs/nodes.md: TessAppend; writing-a-node.md — узел с несколькими пакетными детьми), итоговый
   замер 0) после и запись «Сделано» сюда. Позже, по фактам: пакетный MergeAppend (слияние по словам ключей, как
   TessGatherMerge) — только если объявится упорядоченный UNION ALL в замерах; на Greengage (7.x) секционированные

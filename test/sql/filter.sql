@@ -26,7 +26,8 @@ BEGIN
 END
 $$;
 
--- Without the kernels module the registry knows no predicate: no batch path.
+-- Without the kernels module the registry knows no predicate: no batch
+-- filter, and the node runs the clause row by row over the native scan.
 EXPLAIN (COSTS OFF) SELECT a FROM filter_t WHERE a > 100;
 
 LOAD 'tessera_kernels';

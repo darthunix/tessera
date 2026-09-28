@@ -315,14 +315,16 @@ scan below divides the work. Without a `Gather` of its own, an aggregate
 above the relation gets the core's partial aggregate over the node's rows
 in each worker.
 
-A relation whose clauses all run row by row gets no such path, since the
-node would have no batch work of its own; but an inner or semi hash join
-takes one for its outer side (`tess_filter_row_path`), over the
-relation's sequential scan or partial one when that is the cheapest path:
-the join's Bloom filter then reaches the rows before the row-wise
-clauses, and even without it the node's lazy columns cost less than the
-core scan's tuples under the pack node (plan item 5.2). Such a node shows
-no `Batch Filter`.
+A relation whose clauses all run row by row (`LIKE`, a text comparison,
+the plain clauses without the kernels module) gets the node's path too,
+over the native scan, at the same nine tenths of the sequential scan's
+cost, and a partial path next to the parallel one
+(`tess_filter_row_path`): the node's rows cost less than the core scan's
+under any parent, a row-wise one included (`bench/pg/rowwise.sql`:
+`bit_or` over `LIKE` 9.4 ms against 11.2), and a batch parent above reads
+its batches instead of a pack's copies. An inner or semi hash join above
+it hands it its Bloom filter, which then reaches the rows before the
+row-wise clauses (plan item 5.2). Such a node shows no `Batch Filter`.
 
 Two things make the node possible before that scan. The planner gives
 every scan of the relation its clauses, so `PlanCustomPath` takes them

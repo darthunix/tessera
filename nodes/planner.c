@@ -191,11 +191,9 @@ find_seqscan(const List *pathlist)
 /*
  * TessFilter over a base relation whose clauses all run row by row, in
  * place of its sequential scan (a partial one gives a partial path), or
- * NULL. Such a node has no batch work of its own, so the relation does not
- * get it as a path, but an inner or semi hash join takes it for its outer
- * side: the join's Bloom filter then removes rows before the row-wise
- * clauses run, and even without one the node's lazy columns cost less
- * than a core scan's tuples under the pack node.
+ * NULL. The relation gets it as a path (add_row_filter_paths), and an
+ * inner or semi hash join takes it for its outer side: the join's Bloom
+ * filter then removes rows before the row-wise clauses run.
  */
 Path *
 tess_filter_row_path(PlannerInfo *root, RelOptInfo *rel, Path *seqscan)
@@ -289,6 +287,29 @@ add_scan_paths(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte)
 	add_partial_path(rel, scan);
 }
 
+/*
+ * TessFilter over a relation whose clauses all run row by row, in place
+ * of its sequential scan and its parallel one: the node's rows cost less
+ * than the core's scan under any parent (bench/pg/rowwise), and a batch
+ * parent above reads its batches instead of a pack's copies.
+ */
+static void
+add_row_filter_paths(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte)
+{
+	Path	   *path;
+
+	if (!*tess_runtime_api()->settings->enable ||
+		!relation_supported(root, rel, rte) || rel->baserestrictinfo == NIL)
+		return;
+	path = tess_filter_row_path(root, rel, find_seqscan(rel->pathlist));
+	if (path == NULL)
+		return;
+	add_path(rel, path);
+	path = tess_filter_row_path(root, rel, find_seqscan(rel->partial_pathlist));
+	if (path != NULL)
+		add_partial_path(rel, path);
+}
+
 /* The node's paths, then TessGather over the cheapest partial path, before the core gathers it. */
 static void
 set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
@@ -297,6 +318,7 @@ set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
 	if (previous_set_rel_pathlist_hook != NULL)
 		previous_set_rel_pathlist_hook(root, rel, rti, rte);
 	add_filter_paths(root, rel, rte);
+	add_row_filter_paths(root, rel, rte);
 	add_scan_paths(root, rel, rte);
 	tess_gather_add_paths(root, rel);
 }

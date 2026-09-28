@@ -293,9 +293,9 @@ SELECT join_same($$SELECT jprobe.v FROM jprobe WHERE jprobe.v > 0 AND jprobe.v::
 SELECT join_same($$SELECT jprobe.v, jbuild.w FROM jprobe LEFT JOIN jbuild ON jprobe.k = jbuild.k WHERE jprobe.v > 0 AND jprobe.v::text LIKE '%1%'$$);
 -- Each table built for a parameter takes its filter back before it goes.
 SELECT join_same($$SELECT jsmall.k, (SELECT count(*) FROM jprobe JOIN jbuild ON jprobe.k = jbuild.k WHERE jbuild.w > jsmall.k AND jprobe.v > 0 AND jprobe.v::text LIKE '%1%') FROM jsmall$$);
--- Only row-wise clauses: for an inner or semi join TessFilter takes them
--- from the core scan, so that the filter below reaches them; an anti join
--- keeps the core's scan.
+-- Only row-wise clauses: TessFilter takes them from the core scan, as the
+-- relation's own path, so that for an inner or semi join the filter below
+-- reaches them; an anti join reads the same node without it.
 SELECT join_explain($$SELECT count(*), sum(jbuild.w) FROM jprobe JOIN jbuild ON jprobe.k = jbuild.k WHERE jprobe.v::text LIKE '%1%'$$);
 SELECT join_same($$SELECT jprobe.v, jbuild.w FROM jprobe JOIN jbuild ON jprobe.k = jbuild.k WHERE jprobe.v::text LIKE '%1%'$$);
 SELECT join_same($$SELECT jprobe.v FROM jprobe WHERE jprobe.v::text LIKE '%1%' AND EXISTS (SELECT 1 FROM jbuild WHERE jbuild.k = jprobe.k)$$);

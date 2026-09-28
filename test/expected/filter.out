@@ -23,13 +23,15 @@ BEGIN
     RETURN with_tessera::text;
 END
 $$;
--- Without the kernels module the registry knows no predicate: no batch path.
+-- Without the kernels module the registry knows no predicate: no batch
+-- filter, and the node runs the clause row by row over the native scan.
 EXPLAIN (COSTS OFF) SELECT a FROM filter_t WHERE a > 100;
-      QUERY PLAN      
-----------------------
- Seq Scan on filter_t
+                  QUERY PLAN                  
+----------------------------------------------
+ Custom Scan (TessFilter) on filter_t
    Filter: (a > 100)
-(2 rows)
+   ->  Custom Scan (TessHeapScan) on filter_t
+(3 rows)
 
 LOAD 'tessera_kernels';
 -- The clauses move from the scan to the node.

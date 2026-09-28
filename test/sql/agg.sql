@@ -30,7 +30,8 @@ FROM generate_series(1, 300) AS i;
 EXPLAIN (COSTS OFF) SELECT count(*) FROM agg_t;
 LOAD 'tessera_kernels';
 
--- The node above the native scan, above the filter, above pack.
+-- The node above the native scan, above the filter with a batch clause and
+-- with a row-wise one.
 EXPLAIN (COSTS OFF) SELECT count(*) FROM agg_t;
 EXPLAIN (COSTS OFF) SELECT count(*) FROM agg_t WHERE a > 100;
 EXPLAIN (COSTS OFF) SELECT count(*) FROM agg_t WHERE c <> 'r5';

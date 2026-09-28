@@ -78,6 +78,12 @@ SELECT pg_temp.measure_pair('row_text',
 SELECT pg_temp.measure_pair('row_window',
     'SELECT max(n) FROM (SELECT c1, row_number() OVER () AS n FROM bench_narrow) AS s',
     :repetitions);
+-- A clause Tessera does not evaluate in batches (LIKE over text), one row in
+-- nine kept: under an aggregate of the core, and under TessAgg.
+SELECT pg_temp.measure_pair('row_like',
+    $q$SELECT bit_or(a) FROM bench_mixed WHERE b LIKE 'b-1%'$q$, :repetitions);
+SELECT pg_temp.measure_pair('row_like_count',
+    $q$SELECT count(*), sum(d) FROM bench_mixed WHERE b LIKE 'b-1%'$q$, :repetitions);
 -- The first row only.
 SELECT pg_temp.measure_pair('row_first',
     'SELECT c1 FROM bench_narrow LIMIT 1', :repetitions);
@@ -100,10 +106,10 @@ ORDER BY test, mode DESC;
 SET tessera.enable = on;
 SELECT format('EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE on_%s', name)
 FROM unnest(ARRAY['row_column', 'row_expr', 'row_wide', 'row_text', 'row_window',
-                  'row_first']) AS name \gexec
+                  'row_like', 'row_like_count', 'row_first']) AS name \gexec
 SET tessera.enable = off;
 SELECT format('EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE off_%s', name)
 FROM unnest(ARRAY['row_column', 'row_expr', 'row_wide', 'row_text', 'row_window',
-                  'row_first']) AS name \gexec
+                  'row_like', 'row_like_count', 'row_first']) AS name \gexec
 \o
 DEALLOCATE ALL;

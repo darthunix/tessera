@@ -99,6 +99,10 @@ SELECT pg_temp.measure_pair('setop_many',
            'UNION SELECT c2 FROM bench_narrow WHERE c2 > %s) AS s',
            1500000 * :scale, 1000000 * :scale),
     :repetitions);
+-- UNION of branches whose clauses Tessera does not evaluate in batches.
+SELECT pg_temp.measure_pair('setop_like',
+    $q$SELECT count(*) FROM (SELECT a FROM bench_mixed WHERE b LIKE 'b-1%' UNION SELECT d FROM bench_mixed WHERE e LIKE 'e-2%') AS s$q$,
+    :repetitions);
 
 \copy timings TO 'timings.csv' CSV HEADER
 
@@ -118,11 +122,11 @@ ORDER BY test, mode DESC;
 SET tessera.enable = on;
 SELECT format('EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE on_%s', name)
 FROM unnest(ARRAY['setop_count', 'setop_join', 'setop_part', 'setop_rows',
-                  'setop_few', 'setop_many']) AS name \gexec
+                  'setop_few', 'setop_many', 'setop_like']) AS name \gexec
 SET tessera.enable = off;
 SELECT format('EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE off_%s', name)
 FROM unnest(ARRAY['setop_count', 'setop_join', 'setop_part', 'setop_rows',
-                  'setop_few', 'setop_many']) AS name \gexec
+                  'setop_few', 'setop_many', 'setop_like']) AS name \gexec
 \o
 RESET work_mem;
 DEALLOCATE ALL;

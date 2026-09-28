@@ -225,15 +225,15 @@ COMMIT;
 -- A parallel worker runs the node from the plan's text form.
 SET debug_parallel_query = on;
 EXPLAIN (COSTS OFF) SELECT a FROM limit_t WHERE a > 90 LIMIT 3;
-              QUERY PLAN               
----------------------------------------
+                       QUERY PLAN                        
+---------------------------------------------------------
  Gather
    Workers Planned: 1
    Single Copy: true
    ->  Custom Scan (TessLimit)
-         ->  Custom Scan (TessPack)
-               ->  Seq Scan on limit_t
-                     Filter: (a > 90)
+         ->  Custom Scan (TessFilter) on limit_t
+               Filter: (a > 90)
+               ->  Custom Scan (TessHeapScan) on limit_t
 (7 rows)
 
 SELECT a FROM limit_t WHERE a > 90 LIMIT 3;

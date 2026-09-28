@@ -32,7 +32,8 @@ EXPLAIN (COSTS OFF) SELECT count(*) FROM agg_t;
 (2 rows)
 
 LOAD 'tessera_kernels';
--- The node above the native scan, above the filter, above pack.
+-- The node above the native scan, above the filter with a batch clause and
+-- with a row-wise one.
 EXPLAIN (COSTS OFF) SELECT count(*) FROM agg_t;
                 QUERY PLAN                 
 -------------------------------------------
@@ -50,12 +51,12 @@ EXPLAIN (COSTS OFF) SELECT count(*) FROM agg_t WHERE a > 100;
 (4 rows)
 
 EXPLAIN (COSTS OFF) SELECT count(*) FROM agg_t WHERE c <> 'r5';
-               QUERY PLAN                
------------------------------------------
+                   QUERY PLAN                    
+-------------------------------------------------
  Custom Scan (TessAgg)
-   ->  Custom Scan (TessPack)
-         ->  Seq Scan on agg_t
-               Filter: (c <> 'r5'::text)
+   ->  Custom Scan (TessFilter) on agg_t
+         Filter: (c <> 'r5'::text)
+         ->  Custom Scan (TessHeapScan) on agg_t
 (4 rows)
 
 SELECT agg_same($$SELECT count(*) FROM agg_t$$);

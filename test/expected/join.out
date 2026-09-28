@@ -1492,9 +1492,9 @@ SELECT join_same($$SELECT jsmall.k, (SELECT count(*) FROM jprobe JOIN jbuild ON 
  10 rows, hash 03078623f913892deabc346e22e06589
 (1 row)
 
--- Only row-wise clauses: for an inner or semi join TessFilter takes them
--- from the core scan, so that the filter below reaches them; an anti join
--- keeps the core's scan.
+-- Only row-wise clauses: TessFilter takes them from the core scan, as the
+-- relation's own path, so that for an inner or semi join the filter below
+-- reaches them; an anti join reads the same node without it.
 SELECT join_explain($$SELECT count(*), sum(jbuild.w) FROM jprobe JOIN jbuild ON jprobe.k = jbuild.k WHERE jprobe.v::text LIKE '%1%'$$);
                                      join_explain                                      
 ---------------------------------------------------------------------------------------
@@ -1555,9 +1555,9 @@ EXPLAIN (COSTS OFF) SELECT count(*) FROM jprobe WHERE jprobe.v::text LIKE '%1%' 
    ->  Custom Scan (TessHashJoin)
          Join Type: Anti
          Hash Cond: (jbuild.k = jprobe.k)
-         ->  Custom Scan (TessPack)
-               ->  Seq Scan on jprobe
-                     Filter: ((v)::text ~~ '%1%'::text)
+         ->  Custom Scan (TessFilter) on jprobe
+               Filter: ((v)::text ~~ '%1%'::text)
+               ->  Custom Scan (TessHeapScan) on jprobe
          ->  Custom Scan (TessHeapScan) on jbuild
 (8 rows)
 
