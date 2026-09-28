@@ -84,6 +84,22 @@ CREATE TABLE bench_mj_inner AS
 SELECT g AS k, g % 1000 AS w FROM generate_series(0, 200000 * :scale - 1) AS g;
 CREATE INDEX bench_mj_inner_k ON bench_mj_inner (k);
 
+-- The setop family: a table of four range partitions over its key, v of
+-- 1000 values.
+DROP TABLE IF EXISTS bench_part;
+CREATE TABLE bench_part (k int, v int) PARTITION BY RANGE (k);
+DO $do$
+DECLARE
+    part int := 500000 * (SELECT scale FROM bench_scale);
+BEGIN
+    FOR i IN 0..3 LOOP
+        EXECUTE format('CREATE TABLE bench_part_%s PARTITION OF bench_part FOR VALUES FROM (%s) TO (%s)',
+                       i, i * part + 1, (i + 1) * part + 1);
+    END LOOP;
+END
+$do$;
+INSERT INTO bench_part SELECT g, (g::bigint * 7919 % 1000)::int FROM generate_series(1, 2000000 * :scale) AS g;
+
 -- The grouping cases of the win family group by expressions: statistics
 -- on them give the planner the number of groups, which it would otherwise
 -- take from the unique column underneath.
@@ -99,6 +115,7 @@ VACUUM (ANALYZE) bench_dup;
 VACUUM (ANALYZE) bench_sort;
 VACUUM (ANALYZE) bench_mj_outer;
 VACUUM (ANALYZE) bench_mj_inner;
+VACUUM (ANALYZE) bench_part;
 
 SELECT pg_size_pretty(pg_total_relation_size('bench_narrow')) AS narrow,
        pg_size_pretty(pg_total_relation_size('bench_wide')) AS wide,
@@ -117,3 +134,4 @@ SELECT count(*) FROM bench_dup;
 SELECT count(*) FROM bench_sort;
 SELECT count(*) FROM bench_mj_outer;
 SELECT count(*) FROM bench_mj_inner;
+SELECT count(*) FROM bench_part;

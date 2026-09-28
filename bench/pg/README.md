@@ -66,6 +66,13 @@ query down, and where it can, does it speed one up.
   distinct values: `SELECT DISTINCT` of a key of 1000 values and of a
   unique one, `count(DISTINCT)` over the table and per group of 1000; `work_mem` is 512 MB in both modes, so the core sorts in
   memory. A ratio below one is the win.
+- **setop** (`setop.sql`): `UNION ALL` and `UNION` over batch scans: an
+  aggregate over two filtered scans, a hash join whose outer side is a
+  `UNION ALL`, an aggregate over the four range partitions of
+  `bench_part`, a `UNION ALL` returned as rows and skipped with `OFFSET`,
+  and `UNION` of 1000 and of 2 M distinct values. With the core's
+  `Append` a batch parent packs the rows of batch children again; a ratio
+  below one is the win.
 - **oltp**: short prepared-statement queries, `pgbench -S`, where the
   planner hooks and the loaded modules must not slow down queries that
   never use a batch node. Arrives when more than one hook is installed.

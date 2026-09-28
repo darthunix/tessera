@@ -1,0 +1,128 @@
+-- The setop family: UNION ALL and UNION over batch scans. The core's
+-- Append takes rows from its children, so a batch parent above it packs
+-- them again; the cases measure that break and, with TessAppend, its
+-- removal: an aggregate and a hash join over UNION ALL, an aggregate over
+-- a partitioned table, UNION ALL returned as rows, and UNION with few and
+-- many distinct values. A ratio below one is the win.
+\set ON_ERROR_STOP on
+\if :{?repetitions}
+\else
+\set repetitions 31
+\endif
+\if :{?workers}
+\else
+\set workers 0
+\endif
+SET jit = off;
+-- Parallel workers per Gather, for both modes; none unless asked for.
+SET max_parallel_workers_per_gather = :workers;
+SET work_mem = '256MB';
+SELECT scale FROM bench_scale \gset
+
+CREATE TEMP TABLE timings
+(
+    test text,
+    mode text,
+    run integer,
+    milliseconds numeric
+);
+
+/*
+ * A prepared statement without parameters is planned at its first
+ * execution and cached, so the mode set here decides its plan for good:
+ * every statement is prepared twice, once per mode.
+ */
+CREATE FUNCTION pg_temp.measure(test_name text, mode text,
+                                statement_name text, repetitions integer)
+RETURNS void
+LANGUAGE plpgsql
+AS $function$
+DECLARE
+    started_at timestamptz;
+BEGIN
+    PERFORM set_config('tessera.enable', mode, false);
+    FOR warmup IN 1..5 LOOP
+        EXECUTE format('EXECUTE %I', statement_name);
+    END LOOP;
+    FOR sample IN 1..repetitions LOOP
+        started_at := clock_timestamp();
+        EXECUTE format('EXECUTE %I', statement_name);
+        INSERT INTO timings
+        VALUES (test_name, mode, sample,
+                1000 * extract(epoch FROM clock_timestamp() - started_at));
+    END LOOP;
+END
+$function$;
+
+CREATE FUNCTION pg_temp.measure_pair(test_name text, sql text,
+                                     repetitions integer)
+RETURNS void
+LANGUAGE plpgsql
+AS $function$
+BEGIN
+    EXECUTE format('PREPARE on_%I AS %s', test_name, sql);
+    EXECUTE format('PREPARE off_%I AS %s', test_name, sql);
+    PERFORM pg_temp.measure(test_name, 'on', 'on_' || test_name, repetitions);
+    PERFORM pg_temp.measure(test_name, 'off', 'off_' || test_name, repetitions);
+END
+$function$;
+
+-- An aggregate over UNION ALL of two filtered scans, a million rows each.
+SELECT pg_temp.measure_pair('setop_count',
+    format('SELECT count(*), sum(c) FROM (SELECT c2 AS c FROM bench_narrow WHERE c1 > %s '
+           'UNION ALL SELECT f1 FROM bench_fact WHERE f1 > %s) AS s',
+           1000000 * :scale, 1000000 * :scale),
+    :repetitions);
+-- UNION ALL as the outer side of a hash join, one branch a plain scan.
+SELECT pg_temp.measure_pair('setop_join',
+    format('SELECT count(*), sum(d.d1) FROM (SELECT fk FROM bench_fact WHERE f1 > %s '
+           'UNION ALL SELECT k FROM bench_dup) AS s JOIN bench_dim AS d ON d.id = s.fk',
+           1000000 * :scale),
+    :repetitions);
+-- An aggregate over the four partitions of bench_part, one row in ten kept.
+SELECT pg_temp.measure_pair('setop_part',
+    'SELECT count(*), sum(k) FROM bench_part WHERE v < 100',
+    :repetitions);
+-- UNION ALL returned as rows: the offset skips all of them.
+SELECT pg_temp.measure_pair('setop_rows',
+    format('SELECT c1 FROM bench_narrow WHERE c1 > %s UNION ALL '
+           'SELECT f1 FROM bench_fact WHERE f1 > %s OFFSET %s',
+           1000000 * :scale, 1000000 * :scale, 2000000 * :scale),
+    :repetitions);
+-- UNION of 2.1 M rows with 1000 distinct values.
+SELECT pg_temp.measure_pair('setop_few',
+    'SELECT count(*) FROM (SELECT c1 % 1000 FROM bench_narrow UNION SELECT k % 1000 FROM bench_dup) AS s',
+    :repetitions);
+-- UNION of two filtered scans, 2.5 M rows with 2 M distinct values.
+SELECT pg_temp.measure_pair('setop_many',
+    format('SELECT count(*) FROM (SELECT c1 FROM bench_narrow WHERE c1 <= %s '
+           'UNION SELECT c2 FROM bench_narrow WHERE c2 > %s) AS s',
+           1500000 * :scale, 1000000 * :scale),
+    :repetitions);
+
+\copy timings TO 'timings.csv' CSV HEADER
+
+\o summary.txt
+SELECT test, mode, count(*) AS runs,
+       round(min(milliseconds), 3) AS min_ms,
+       round(percentile_disc(0.5) WITHIN GROUP (ORDER BY milliseconds), 3) AS median_ms,
+       round(percentile_disc(0.1) WITHIN GROUP (ORDER BY milliseconds), 3) AS p10_ms,
+       round(percentile_disc(0.9) WITHIN GROUP (ORDER BY milliseconds), 3) AS p90_ms
+FROM timings
+GROUP BY test, mode
+ORDER BY test, mode DESC;
+\o
+
+-- The cached plans of both modes.
+\o plans.txt
+SET tessera.enable = on;
+SELECT format('EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE on_%s', name)
+FROM unnest(ARRAY['setop_count', 'setop_join', 'setop_part', 'setop_rows',
+                  'setop_few', 'setop_many']) AS name \gexec
+SET tessera.enable = off;
+SELECT format('EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE off_%s', name)
+FROM unnest(ARRAY['setop_count', 'setop_join', 'setop_part', 'setop_rows',
+                  'setop_few', 'setop_many']) AS name \gexec
+\o
+RESET work_mem;
+DEALLOCATE ALL;
