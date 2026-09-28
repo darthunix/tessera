@@ -1233,8 +1233,7 @@ sort's input, with the same rows, costs and path keys, when
   path key's operator family (see Other types below), ascending or
   descending, NULLs first or last, at most 16 keys; the first key of
   another type has an abbreviated key the node takes, unless a word key
-  comes before it, and there is no `LIMIT` (the top-N heap orders words
-  only, so the core's top-N sorts);
+  comes before it;
 - the output has 1 to 1664 columns, a tuple's most;
 - the query is not `FETCH ... WITH TIES`, which passes no bound, and the
   kernels module is loaded.
@@ -1304,7 +1303,8 @@ core's sort does, 2 to 7 % slower (text under a libc collation on macOS,
 2 M rows): the planner leaves that case to the core
 (`generic_abbreviates`, sort support prepared in a context of its own).
 `EXPLAIN` shows a key's collation when it is not the default, as the core
-does. At 2 M rows in memory: numeric 125 ms against 296, text under
+does. Under a limit the top-N heap of such keys is the node's, in C (see
+Top-N). At 2 M rows in memory: numeric 125 ms against 296, text under
 `"C"` 187 against 366, text of the default collation after an int4 of
 1000 values 532 against 742 (bench/pg sort, pg-sort-WXjAaO).
 
@@ -1373,6 +1373,18 @@ order. A rescan with a bound larger than the rows kept reads the child
 again; a smaller one returns the first of them. `Sort Method: top-N in
 memory`.
 
+With a key of another type the heap is the node's, in C, as the core's
+bounded heap: slots of the items' words (the kernels' layout, from
+`tess_sort_key_lanes` over a batch's keys) and the values of the keys
+from the first generic one on, pointers into the records, with a spare
+slot for the row coming in. Once the heap is full a batch keeps the rows
+whose lanes order before the worst's, or, when they are equal, whose
+values do by the comparisons; those are appended and pushed one by one.
+A rebuild keeps the slots in place with their new references and values.
+At the end the kernels sort the heap's items and the groups of equal
+words are ordered as in a full sort. The first 10 of 2 M rows: numeric
+90 ms against 159, text under `"C"` 49 against 94 (pg-sort-kLXeKY).
+
 ### Tests
 
 `test/sql/sort.sql` compares the rows of every query in order with
@@ -1396,9 +1408,15 @@ common prefixes, uuid, two keys of other types, text and float8 after an
 integer key, an expression; the core's sort for a first float8 key and
 under `LIMIT`; at 64 kB external merges of such keys and a scrollable
 cursor over one run; a rescan with a new parameter; workers under the
-core's `Gather Merge`. Mutations each fail it: groups left unsorted,
-the kernels' merge by words, numeric's words not inverted, the
-comparison of the first generic key only, a merge by words only.
+core's `Gather Merge`; top-N with equal words (1.0 and 1.00, a long
+common prefix), an offset, a bound past the rows, a bound of 0, rebuilds
+with the best rows arriving first. Mutations each fail it: groups left
+unsorted, the kernels' merge by words, numeric's words not inverted, the
+comparison of the first generic key only, a merge by words only, and for
+top-N the batch filter or the heap by words only, the heap's groups
+left unsorted, a rebuild that keeps the old references. A rebuild that
+keeps the old values reads freed memory that still holds them in a
+build without assertions, and passes.
 
 ## TessAppend
 

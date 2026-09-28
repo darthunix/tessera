@@ -129,14 +129,18 @@ SELECT pg_temp.measure_pair('order_filter',
     format('SELECT k4, v FROM bench_sort WHERE few < 100 ORDER BY k4 OFFSET %s', :rows),
     :repetitions);
 -- Keys of other types: numeric and text under "C", whose words are their
--- abbreviated keys, and text of the default collation after an int4 of
--- 1000 values.
+-- abbreviated keys, also under LIMIT (top-N), and text of the default
+-- collation after an int4 of 1000 values.
 SELECT pg_temp.measure_pair('order_numeric',
     format('SELECT k4::numeric * 1.5 AS n, v FROM bench_sort ORDER BY n OFFSET %s', :rows),
     :repetitions);
 SELECT pg_temp.measure_pair('order_text_c',
     format('SELECT t, v FROM bench_sort ORDER BY t COLLATE "C" OFFSET %s', :rows),
     :repetitions);
+SELECT pg_temp.measure_pair('topn_numeric',
+    'SELECT k4::numeric * 1.5 AS n, v FROM bench_sort ORDER BY n LIMIT 10', :repetitions);
+SELECT pg_temp.measure_pair('topn_text_c',
+    'SELECT t, v FROM bench_sort ORDER BY t COLLATE "C" LIMIT 10', :repetitions);
 SELECT pg_temp.measure_pair('order_few_text',
     format('SELECT few, t, v FROM bench_sort ORDER BY few, t OFFSET %s', :rows),
     :repetitions);
@@ -162,14 +166,14 @@ FROM unnest(ARRAY['order_int', 'order_big', 'order_few', 'order_multi', 'order_d
                   'order_sorted', 'order_wide', 'order_out', 'order_text_out',
                   'topn_few', 'topn_many', 'topn_reverse', 'topn_offset',
                   'distinct_few', 'distinct_many', 'distinct_agg', 'distinct_group',
-                  'order_filter', 'order_numeric', 'order_text_c', 'order_few_text']) AS name \gexec
+                  'order_filter', 'order_numeric', 'order_text_c', 'order_few_text', 'topn_numeric', 'topn_text_c']) AS name \gexec
 SET tessera.enable = off;
 SELECT format('EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE off_%s', name)
 FROM unnest(ARRAY['order_int', 'order_big', 'order_few', 'order_multi', 'order_desc',
                   'order_sorted', 'order_wide', 'order_out', 'order_text_out',
                   'topn_few', 'topn_many', 'topn_reverse', 'topn_offset',
                   'distinct_few', 'distinct_many', 'distinct_agg', 'distinct_group',
-                  'order_filter', 'order_numeric', 'order_text_c', 'order_few_text']) AS name \gexec
+                  'order_filter', 'order_numeric', 'order_text_c', 'order_few_text', 'topn_numeric', 'topn_text_c']) AS name \gexec
 \o
 RESET work_mem;
 DEALLOCATE ALL;

@@ -65,9 +65,10 @@ query down, and where it can, does it speed one up.
   the ones kept so far, and 10 rows after an offset of 1000; four count
   distinct values: `SELECT DISTINCT` of a key of 1000 values and of a
   unique one, `count(DISTINCT)` over the table and per group of 1000;
-  three sort by keys of other types: numeric, text under `"C"` (their
-  words are their abbreviated keys) and text of the default collation
-  after the key of 1000 values. `work_mem` is 512 MB in both modes, so the
+  five sort by keys of other types: numeric, text under `"C"` (their
+  words are their abbreviated keys), both also as the first 10 rows
+  under `LIMIT`, and text of the default collation after the key of 1000
+  values. `work_mem` is 512 MB in both modes, so the
   core sorts in memory. A ratio below one is the win.
 - **setop** (`setop.sql`): `UNION ALL` and `UNION` over batch scans: an
   aggregate over two filtered scans, a hash join whose outer side is a

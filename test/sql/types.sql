@@ -1,6 +1,7 @@
 CREATE EXTENSION tessera;
 LOAD 'tessera_nodes';
 LOAD 'tessera_kernels';
+LOAD 'tessera_limit';
 
 -- The same result with Tessera on and off, as text.
 CREATE FUNCTION types_same(query text) RETURNS text
@@ -158,13 +159,6 @@ SELECT types_order($$SELECT id, u FROM types_s ORDER BY u DESC, id$$);
 SELECT types_order($$SELECT id, w, t FROM types_s ORDER BY w, t, id$$);
 SELECT types_order($$SELECT id, w, f FROM types_s ORDER BY w DESC, f NULLS FIRST, id$$);
 SELECT types_order($$SELECT id, upper(t) FROM types_s ORDER BY upper(t) COLLATE "C", n, id$$);
--- The core's sort: a first key without an abbreviated key, and a top-N,
--- which the node keeps by words only.
-EXPLAIN (COSTS OFF) SELECT id, f FROM types_s ORDER BY f, id;
-EXPLAIN (COSTS OFF) SELECT id, n FROM types_s ORDER BY n, id LIMIT 5;
-SELECT types_order($$SELECT id, n FROM types_s ORDER BY n, id LIMIT 5$$);
--- Past work_mem: runs on disk, merged in C by the words and the comparisons.
-SET work_mem = '64kB';
 CREATE FUNCTION types_sort_method(query text) RETURNS SETOF text
 LANGUAGE plpgsql AS $$
 DECLARE
@@ -172,12 +166,33 @@ DECLARE
 BEGIN
     FOR line IN EXECUTE 'EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) ' || query
     LOOP
-        IF line ~ 'TessSort|Sort Method' THEN
+        IF line ~ 'TessSort|Sort Method|Rebuilt' THEN
             RETURN NEXT regexp_replace(line, '\d+', 'N', 'g');
         END IF;
     END LOOP;
 END
 $$;
+-- The core's sort for a first key without an abbreviated key.
+EXPLAIN (COSTS OFF) SELECT id, f FROM types_s ORDER BY f, id;
+-- Top-N: a heap in C by the items' words and then the comparisons; rows
+-- whose words equal the worst's are compared by value (1.0 and 1.00, text
+-- with a common prefix of 45 bytes), a bound past the rows, an offset,
+-- keys in the reverse of the rows' order, rebuilt past 65536 records.
+EXPLAIN (COSTS OFF) SELECT id, n FROM types_s ORDER BY n, id LIMIT 5;
+SELECT types_order($$SELECT id, n FROM types_s ORDER BY n, id LIMIT 5$$);
+SELECT types_order($$SELECT id, n FROM types_s ORDER BY n DESC NULLS LAST, id LIMIT 40$$);
+SELECT types_order($$SELECT id, one FROM types_s ORDER BY one, id DESC LIMIT 3$$);
+SELECT types_order($$SELECT id, long FROM types_s ORDER BY long COLLATE "C" DESC, id LIMIT 25$$);
+SELECT types_order($$SELECT id, n, t FROM types_s ORDER BY n, t COLLATE "C" DESC, id LIMIT 30 OFFSET 7$$);
+SELECT types_order($$SELECT id, w, t FROM types_s ORDER BY w, t, id LIMIT 100$$);
+SELECT types_order($$SELECT id, u FROM types_s ORDER BY u, id LIMIT 6000$$);
+SELECT types_order($$SELECT id FROM types_s ORDER BY t COLLATE "C" NULLS FIRST, id LIMIT 0$$);
+SELECT types_order($$SELECT i, s FROM (SELECT i, (-i)::numeric AS s FROM generate_series(1, 200000) AS i) AS q ORDER BY s, i LIMIT 10$$);
+SELECT types_sort_method($$SELECT i, s FROM (SELECT i, (-i)::numeric AS s FROM generate_series(1, 200000) AS i) AS q ORDER BY s, i LIMIT 10$$);
+-- The five best rows come first and outlive every rebuild.
+SELECT types_order($$SELECT i, s FROM (SELECT i, CASE WHEN i <= 5 THEN -1000000 - i ELSE -i END::numeric AS s FROM generate_series(1, 200000) AS i) AS q ORDER BY s, i LIMIT 10$$);
+-- Past work_mem: runs on disk, merged in C by the words and the comparisons.
+SET work_mem = '64kB';
 SELECT types_sort_method($$SELECT id, long, n FROM types_s ORDER BY long COLLATE "C", n DESC, id$$);
 SELECT types_order($$SELECT id, long, n FROM types_s ORDER BY long COLLATE "C", n DESC, id$$);
 SELECT types_order($$SELECT id, n FROM types_s ORDER BY n NULLS FIRST, id$$);
