@@ -192,3 +192,23 @@ evaluated for every row it sees, here over every selected row. With
 failures on different rows the error reported may differ, since the
 compiler computes one call over the whole batch before the next, and the
 executor one row after another.
+
+## Coverage
+
+An expression of an ordinary query meets one of three levels. In batches,
+the compiler takes it and kernels run over a batch's columns. Row by row,
+a batch node keeps it and the core's interpreter evaluates it a row: a
+condition of TessFilter shown as `Filter` rather than `Batch Filter`, a
+target, an aggregate's argument, a generic aggregate. Or a node leaves it
+to the core: the whole aggregation, sort or join is the core's over batch
+children. The row level still gains on the scan and on the batches
+around it; the batch level gains three to four times as much (plan 4.21:
+a condition over integers or dates took 0.18 of the core's time, the same
+table's `bool`, `int2`, `numeric` and text conditions 0.44 to 0.70).
+
+`test/sql/coverage.sql` prints the level of each of about 120 conditions
+and query forms of ordinary queries over one table of the common types:
+conditions as `batch`, `row`, `both` or `core`, queries as `tess` or the
+core's nodes in their plans. A change of the planner or of the compiler
+shows there, for better or worse; plan 4.21 takes the gaps it lists in
+order.

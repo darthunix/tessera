@@ -1,0 +1,174 @@
+-- The level of expressions and query forms of ordinary queries (plan
+-- 4.21): a condition runs in batches (kernels over a batch's columns), row
+-- by row inside TessFilter (the core's interpreter a row), or the table is
+-- read without TessFilter; a query's nodes are all Tessera's, or some are
+-- the core's. Each case prints its level, so a change of the planner or of
+-- the expression compiler shows here, for better or worse. A collation is
+-- named where it decides and the cluster's own would.
+CREATE EXTENSION tessera;
+LOAD 'tessera_nodes';
+LOAD 'tessera_kernels';
+LOAD 'tessera_limit';
+SET max_parallel_workers_per_gather = 0;
+CREATE TABLE cov AS
+SELECT g AS i4, g::bigint * 1000 AS i8, (g % 100)::smallint AS i2,
+       g / 7.0::float8 AS f8, (g / 3.0)::float4 AS f4, (g / 7.0)::numeric(15,2) AS n,
+       'name ' || g AS t, ('v' || g % 50)::varchar(20) AS vc, ('c' || g % 5)::char(10) AS bc,
+       date '2020-01-01' + g % 1500 AS d, timestamp '2020-01-01' + g * interval '1 minute' AS ts,
+       timestamptz '2020-01-01 00:00+00' + g * interval '1 minute' AS tz,
+       g % 3 = 0 AS b, (g % 40) * interval '1 hour' AS iv,
+       CASE WHEN g % 11 = 0 THEN NULL ELSE g % 10 END AS nul
+FROM generate_series(1, 50000) AS g;
+ANALYZE cov;
+
+-- A condition's level: batch, row, both (some clauses each way), or core
+-- (the table read without TessFilter).
+CREATE FUNCTION cov_where(condition text) RETURNS text
+LANGUAGE plpgsql AS $$
+DECLARE
+    plan jsonb;
+    node jsonb;
+BEGIN
+    EXECUTE format('EXPLAIN (FORMAT JSON, COSTS OFF) SELECT count(*) FROM cov WHERE %s', condition)
+        INTO plan;
+    node := jsonb_path_query_first(plan, '$[0]."Plan".** ? (@."Custom Plan Provider" == "TessFilter")');
+    RETURN CASE WHEN node IS NULL THEN 'core'
+                WHEN node ? 'Batch Filter' AND node ? 'Filter' THEN 'both'
+                WHEN node ? 'Batch Filter' THEN 'batch'
+                ELSE 'row' END;
+END $$;
+-- A query's level: tess when every node of its plan is Tessera's, else the
+-- core's nodes in it.
+CREATE FUNCTION cov_query(query text) RETURNS text
+LANGUAGE plpgsql AS $$
+DECLARE
+    plan jsonb;
+    core text;
+BEGIN
+    EXECUTE format('EXPLAIN (FORMAT JSON, COSTS OFF) %s', query) INTO plan;
+    SELECT string_agg(node ->> 'Node Type', ', ') INTO core
+    FROM jsonb_path_query(plan, 'strict $[0]."Plan".** ? (exists (@."Node Type"))') AS node
+    WHERE node ->> 'Node Type' NOT IN ('Custom Scan', 'Result');
+    RETURN coalesce('core: ' || core, 'tess');
+END $$;
+
+-- Conditions: integers, int2, bool, NULLs and choices, floats and
+-- numeric, text, dates and times, subexpressions without a column.
+SELECT cov_where(c) AS level, c AS condition
+FROM unnest(ARRAY[
+    $$i4 > 10$$, $$i4 BETWEEN 10 AND 20$$, $$i4 IN (1, 5, 9)$$, $$i4 NOT IN (1, 5, 9)$$,
+    $$i4 = ANY('{1,2,3}'::int[])$$, $$i4 % 7 = 0$$, $$i4 * 2 + i8 > 100$$, $$i8 >= 1000$$,
+    $$i4 IN (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33)$$,
+    $$abs(i4 - 500) < 10$$, $$greatest(i4, i2) > 10$$,
+    $$i2 = 5$$, $$i2 + 1 > 5$$,
+    $$b$$, $$NOT b$$, $$b IS TRUE$$, $$b = true$$,
+    $$nul IS NULL$$, $$nul IS NOT DISTINCT FROM 3$$, $$coalesce(nul, 0) > 5$$,
+    $$nullif(nul, 3) = 4$$, $$CASE WHEN i4 > 10 THEN 1 ELSE 0 END = 1$$,
+    $$(i4 > 10 OR i2 = 5) AND NOT b$$,
+    $$f8 > 100.5$$, $$f8 * 2 < 300$$, $$f4 > 10$$, $$f8::int = 5$$,
+    $$n > 100.25$$, $$n * 2 > 300$$, $$n BETWEEN 10 AND 20$$, $$round(n) = 10$$,
+    $$i4::numeric > 10.5$$,
+    $$t = 'name 5'$$, $$t <> 'name 5'$$, $$t IN ('name 1', 'name 2')$$,
+    $$t COLLATE "C" > 'name 5'$$, $$t LIKE 'name 1%'$$, $$t LIKE '%99'$$,
+    $$t LIKE '%9%'$$, $$t NOT LIKE '%9%'$$, $$t ILIKE 'NAME 1%'$$, $$t ~ '^name 1'$$,
+    $$length(t) > 8$$, $$substring(t FROM 1 FOR 4) = 'name'$$, $$starts_with(t, 'name 1')$$,
+    $$upper(t) = 'NAME 5'$$, $$t || 'x' = 'name 5x'$$,
+    $$vc = 'v5'$$, $$vc LIKE 'v1%'$$, $$bc = 'c1'$$,
+    $$d > date '2021-01-01'$$, $$d BETWEEN date '2021-01-01' AND date '2021-12-31'$$,
+    $$d >= date '2021-01-01' + interval '1 month'$$, $$d + 30 > date '2022-01-01'$$,
+    $$extract(year FROM d) = 2021$$, $$date_trunc('month', d) = date '2021-03-01'$$,
+    $$ts > timestamp '2020-01-10'$$, $$ts::date = date '2020-01-10'$$,
+    $$tz > timestamptz '2020-01-10 00:00+00'$$, $$iv > interval '10 hours'$$,
+    $$d > current_date - 1000$$, $$ts > localtimestamp - interval '1 day'$$,
+    $$i4 > (SELECT 10)$$, $$i4 > abs(-10)$$, $$md5(t) = 'x'$$
+]) WITH ORDINALITY AS c(c, o)
+ORDER BY o;
+
+-- Aggregates, grouping and DISTINCT.
+SELECT cov_query(q) AS level, q AS query
+FROM unnest(ARRAY[
+    $$SELECT count(*), sum(i4), avg(i4), min(i4), max(i4) FROM cov$$,
+    $$SELECT sum(i8), avg(i8), sum(i2) FROM cov$$,
+    $$SELECT sum(f8), avg(f8), min(f8), max(f4) FROM cov$$,
+    $$SELECT sum(n), avg(n), min(n), max(n) FROM cov$$,
+    $$SELECT min(t), max(t), min(d), max(ts) FROM cov$$,
+    $$SELECT bool_and(b), bool_or(b), stddev(i4), variance(f8) FROM cov$$,
+    $$SELECT string_agg(t, ','), array_agg(i4) FROM cov$$,
+    $$SELECT sum(i4 * 2 + 1), sum(CASE WHEN b THEN i4 ELSE 0 END) FROM cov$$,
+    $$SELECT count(DISTINCT i4) FROM cov$$,
+    $$SELECT count(DISTINCT t) FROM cov$$,
+    $$SELECT count(DISTINCT d), sum(DISTINCT n) FROM cov$$,
+    $$SELECT i2, count(DISTINCT vc) FROM cov GROUP BY i2$$,
+    $$SELECT sum(i4) FILTER (WHERE b) FROM cov$$,
+    $$SELECT i2, count(*) FILTER (WHERE i4 > 5) FROM cov GROUP BY i2$$,
+    $$SELECT string_agg(t, ',' ORDER BY i4) FROM cov$$,
+    $$SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY f8) FROM cov$$,
+    $$SELECT i4 % 10, count(*) FROM cov GROUP BY 1$$,
+    $$SELECT i2, count(*) FROM cov GROUP BY 1$$,
+    $$SELECT t, count(*) FROM cov GROUP BY 1$$,
+    $$SELECT vc, count(*) FROM cov GROUP BY 1$$,
+    $$SELECT bc, count(*) FROM cov GROUP BY 1$$,
+    $$SELECT n, count(*) FROM cov GROUP BY 1$$,
+    $$SELECT d, b, count(*) FROM cov GROUP BY 1, 2$$,
+    $$SELECT extract(year FROM d), count(*) FROM cov GROUP BY 1$$,
+    $$SELECT date_trunc('month', ts), sum(i4) FROM cov GROUP BY 1$$,
+    $$SELECT i2, bc, sum(n), avg(f8) FROM cov GROUP BY 1, 2$$,
+    $$SELECT i2, sum(i4) FROM cov GROUP BY 1 HAVING sum(i4) > 100$$,
+    $$SELECT i2, count(*) FROM cov GROUP BY ROLLUP (i2)$$,
+    $$SELECT DISTINCT i2 FROM cov$$,
+    $$SELECT DISTINCT vc FROM cov$$,
+    $$SELECT DISTINCT bc FROM cov$$,
+    $$SELECT DISTINCT n FROM cov$$,
+    $$SELECT DISTINCT bc, i2 FROM cov$$,
+    $$SELECT vc FROM cov GROUP BY vc$$
+]) WITH ORDINALITY AS c(q, o)
+ORDER BY o;
+
+-- Sorts and top-N.
+SELECT cov_query(q) AS level, q AS query
+FROM unnest(ARRAY[
+    $$SELECT i4 FROM cov ORDER BY i4 DESC LIMIT 10$$,
+    $$SELECT d, i4 FROM cov ORDER BY d, i4 DESC LIMIT 10$$,
+    $$SELECT i4 FROM cov ORDER BY i4 % 100, i4 LIMIT 10$$,
+    $$SELECT n FROM cov ORDER BY n LIMIT 10$$,
+    $$SELECT t FROM cov ORDER BY t COLLATE "C" LIMIT 10$$,
+    $$SELECT t FROM cov ORDER BY t COLLATE "und-x-icu" LIMIT 10$$,
+    $$SELECT vc FROM cov ORDER BY vc COLLATE "C" LIMIT 10$$,
+    $$SELECT bc FROM cov ORDER BY bc COLLATE "C" LIMIT 10$$,
+    $$SELECT f8 FROM cov ORDER BY f8 LIMIT 10$$,
+    $$SELECT i4, f8 FROM cov ORDER BY i4, f8 LIMIT 10$$,
+    $$SELECT f8, i4 FROM cov ORDER BY f8, i4$$
+]) WITH ORDINALITY AS c(q, o)
+ORDER BY o;
+
+-- Joins: keys of words, of hashed types, of expressions and casts.
+SELECT cov_query(q) AS level, q AS query
+FROM unnest(ARRAY[
+    $$SELECT count(*) FROM cov a JOIN cov b ON a.i4 = b.i4$$,
+    $$SELECT count(*) FROM cov a JOIN cov b ON a.d = b.d AND a.i2 = b.i2$$,
+    $$SELECT count(*) FROM cov a JOIN cov b ON a.t = b.t$$,
+    $$SELECT count(*) FROM cov a JOIN cov b ON a.bc = b.bc$$,
+    $$SELECT count(*) FROM cov a JOIN cov b ON a.vc = b.vc$$,
+    $$SELECT count(*) FROM cov a JOIN cov b ON a.n = b.n$$,
+    $$SELECT count(*) FROM cov a JOIN cov b ON a.f8 = b.f8$$,
+    $$SELECT count(*) FROM cov a JOIN cov b ON a.i4 = b.i4 + 1$$,
+    $$SELECT count(*) FROM cov a JOIN cov b ON a.d = b.ts::date$$,
+    $$SELECT count(*) FROM cov a JOIN cov b ON a.i4 = b.i4 WHERE a.t LIKE 'name 1%'$$,
+    $$SELECT count(*) FROM cov a LEFT JOIN cov b ON a.i4 = b.i4 AND b.b$$,
+    $$SELECT count(*) FROM cov WHERE i4 IN (SELECT i4 FROM cov WHERE i2 = 3)$$,
+    $$SELECT count(*) FROM cov WHERE i4 > (SELECT avg(i4) FROM cov)$$
+]) WITH ORDINALITY AS c(q, o)
+ORDER BY o;
+
+-- Window functions: no node of Tessera's yet.
+SELECT cov_query(q) AS level, q AS query
+FROM unnest(ARRAY[
+    $$SELECT i4, sum(i4) OVER (PARTITION BY i2) FROM cov$$,
+    $$SELECT i4, row_number() OVER (ORDER BY i4) FROM cov$$
+]) WITH ORDINALITY AS c(q, o)
+ORDER BY o;
+
+DROP FUNCTION cov_where(text);
+DROP FUNCTION cov_query(text);
+DROP TABLE cov;
+DROP EXTENSION tessera;
