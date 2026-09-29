@@ -3,7 +3,8 @@
 -- them again; the cases measure that break and, with TessAppend, its
 -- removal: an aggregate and a hash join over UNION ALL, an aggregate over
 -- a partitioned table, UNION ALL returned as rows, and UNION with few and
--- many distinct values. A ratio below one is the win.
+-- many distinct values; partitions pruned while executing. A ratio below
+-- one is the win.
 \set ON_ERROR_STOP on
 \if :{?repetitions}
 \else
@@ -17,6 +18,9 @@ SET jit = off;
 -- Parallel workers per Gather, for both modes; none unless asked for.
 SET max_parallel_workers_per_gather = :workers;
 SET work_mem = '256MB';
+-- A statement with parameters runs its generic plan, whose partitions are
+-- pruned while executing; one without is planned once either way.
+SET plan_cache_mode = force_generic_plan;
 SELECT scale FROM bench_scale \gset
 
 CREATE TEMP TABLE timings
@@ -28,12 +32,14 @@ CREATE TEMP TABLE timings
 );
 
 /*
- * A prepared statement without parameters is planned at its first
- * execution and cached, so the mode set here decides its plan for good:
- * every statement is prepared twice, once per mode.
+ * A prepared statement is planned at its first execution and cached, so
+ * the mode set here decides its plan for good: every statement is
+ * prepared twice, once per mode; arguments, as '(1, 2)', go with each
+ * execution of one with parameters.
  */
 CREATE FUNCTION pg_temp.measure(test_name text, mode text,
-                                statement_name text, repetitions integer)
+                                statement_name text, repetitions integer,
+                                arguments text DEFAULT '')
 RETURNS void
 LANGUAGE plpgsql
 AS $function$
@@ -42,11 +48,11 @@ DECLARE
 BEGIN
     PERFORM set_config('tessera.enable', mode, false);
     FOR warmup IN 1..5 LOOP
-        EXECUTE format('EXECUTE %I', statement_name);
+        EXECUTE format('EXECUTE %I%s', statement_name, arguments);
     END LOOP;
     FOR sample IN 1..repetitions LOOP
         started_at := clock_timestamp();
-        EXECUTE format('EXECUTE %I', statement_name);
+        EXECUTE format('EXECUTE %I%s', statement_name, arguments);
         INSERT INTO timings
         VALUES (test_name, mode, sample,
                 1000 * extract(epoch FROM clock_timestamp() - started_at));
@@ -55,19 +61,21 @@ END
 $function$;
 
 CREATE FUNCTION pg_temp.measure_pair(test_name text, sql text,
-                                     repetitions integer)
+                                     repetitions integer,
+                                     parameters text DEFAULT '',
+                                     arguments text DEFAULT '')
 RETURNS void
 LANGUAGE plpgsql
 AS $function$
 BEGIN
-    EXECUTE format('PREPARE on_%I AS %s', test_name, sql);
-    EXECUTE format('PREPARE off_%I AS %s', test_name, sql);
+    EXECUTE format('PREPARE on_%I%s AS %s', test_name, parameters, sql);
+    EXECUTE format('PREPARE off_%I%s AS %s', test_name, parameters, sql);
     -- run.sh measure with CASES: only the cases it matches are timed.
     IF test_name !~ coalesce(nullif(current_setting('bench.cases', true), ''), '.') THEN
         RETURN;
     END IF;
-    PERFORM pg_temp.measure(test_name, 'on', 'on_' || test_name, repetitions);
-    PERFORM pg_temp.measure(test_name, 'off', 'off_' || test_name, repetitions);
+    PERFORM pg_temp.measure(test_name, 'on', 'on_' || test_name, repetitions, arguments);
+    PERFORM pg_temp.measure(test_name, 'off', 'off_' || test_name, repetitions, arguments);
 END
 $function$;
 
@@ -138,6 +146,21 @@ SELECT pg_temp.measure_pair('setop_intersect_all',
     'SELECT count(*) FROM (SELECT c1 % 50000 FROM bench_narrow INTERSECT ALL SELECT c2 % 70000 FROM bench_narrow) AS s',
     :repetitions);
 
+-- Partitions pruned while executing, half of bench_part's read: by a
+-- generic plan's parameter (at the start), by an InitPlan's value (at the
+-- first read), and of a UNION ALL of the table with itself, two
+-- hierarchies.
+SELECT pg_temp.measure_pair('setop_prune_init',
+    'SELECT count(*), sum(v) FROM bench_part WHERE k >= $1',
+    :repetitions, '(int)', format('(%s)', 1000000 * :scale + 1));
+SELECT pg_temp.measure_pair('setop_prune_exec',
+    format('SELECT count(*), sum(v) FROM bench_part WHERE k >= (SELECT %s)', 1000000 * :scale + 1),
+    :repetitions);
+SELECT pg_temp.measure_pair('setop_prune_union',
+    format('SELECT count(*), sum(v) FROM (SELECT k, v FROM bench_part UNION ALL SELECT k, v FROM bench_part) AS u WHERE k >= (SELECT %s)',
+           1500000 * :scale + 1),
+    :repetitions);
+
 \copy timings TO 'timings.csv' CSV HEADER
 
 \o summary.txt
@@ -154,15 +177,20 @@ ORDER BY test, mode DESC;
 -- The cached plans of both modes.
 \o plans.txt
 SET tessera.enable = on;
-SELECT format('EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE on_%s', name)
+SELECT format('EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE on_%s%s', name,
+              CASE name WHEN 'setop_prune_init' THEN format('(%s)', 1000000 * :scale + 1) ELSE '' END)
 FROM unnest(ARRAY['setop_count', 'setop_join', 'setop_part', 'setop_rows',
                   'setop_few', 'setop_many', 'setop_known', 'setop_nested', 'setop_like', 'setop_except', 'setop_except_all',
-                  'setop_intersect_text', 'setop_intersect_all']) AS name \gexec
+                  'setop_intersect_text', 'setop_intersect_all', 'setop_prune_init', 'setop_prune_exec',
+                  'setop_prune_union']) AS name \gexec
 SET tessera.enable = off;
-SELECT format('EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE off_%s', name)
+SELECT format('EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE off_%s%s', name,
+              CASE name WHEN 'setop_prune_init' THEN format('(%s)', 1000000 * :scale + 1) ELSE '' END)
 FROM unnest(ARRAY['setop_count', 'setop_join', 'setop_part', 'setop_rows',
                   'setop_few', 'setop_many', 'setop_known', 'setop_nested', 'setop_like', 'setop_except', 'setop_except_all',
-                  'setop_intersect_text', 'setop_intersect_all']) AS name \gexec
+                  'setop_intersect_text', 'setop_intersect_all', 'setop_prune_init', 'setop_prune_exec',
+                  'setop_prune_union']) AS name \gexec
 \o
 RESET work_mem;
+RESET plan_cache_mode;
 DEALLOCATE ALL;
