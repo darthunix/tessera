@@ -25,7 +25,8 @@ SELECT set_config('bench.repetitions', :'repetitions', false);
 SELECT set_config('bench.parallel_setup_cost', current_setting('tessera.scan_parallel_setup_cost'), false),
        set_config('bench.worker_page_cost', current_setting('tessera.scan_worker_page_cost'), false),
        set_config('bench.bitmap_build_cost', current_setting('tessera.bitmap_build_cost'), false),
-       set_config('bench.bitmap_build_scatter_cost', current_setting('tessera.bitmap_build_scatter_cost'), false);
+       set_config('bench.bitmap_build_scatter_cost', current_setting('tessera.bitmap_build_scatter_cost'), false),
+       set_config('bench.index_worker_share', current_setting('tessera.index_worker_share'), false);
 
 -- One sample a query: its plan's scan node, its cost, pages and rows.
 CREATE TEMP TABLE samples
@@ -279,6 +280,7 @@ BEGIN
         PERFORM set_config('tessera.scan_worker_page_cost', '0', false);
         PERFORM set_config('tessera.bitmap_build_cost', '0', false);
         PERFORM set_config('tessera.bitmap_build_scatter_cost', '0', false);
+        PERFORM set_config('tessera.index_worker_share', '1', false);
         PERFORM pg_temp.only('seq');
         FOREACH relation IN ARRAY ARRAY['bench_narrow', 'bench_fact', 'bench_sort', 'bench_idx',
                                         'bench_mixed', 'bench_wide'] LOOP
@@ -303,6 +305,17 @@ BEGIN
                 format('SELECT count(*), sum(w) FROM bench_idx WHERE id < %s', round(rows * share)),
                 repetitions);
         END LOOP;
+        -- The index scans with two workers, at the serial samples' shares.
+        FOREACH share IN ARRAY ARRAY[0.01, 0.05, 0.1, 0.2, 0.3, 0.5] LOOP
+            PERFORM pg_temp.only('ios');
+            PERFORM pg_temp.parallel_sample(mode || ' ios', 'bench_idx', share, true,
+                format('SELECT count(*) FROM bench_idx WHERE k < %s', round(rows * share)),
+                repetitions);
+            PERFORM pg_temp.only('index');
+            PERFORM pg_temp.parallel_sample(mode || ' index', 'bench_idx', share, true,
+                format('SELECT count(*), sum(w) FROM bench_idx WHERE id < %s', round(rows * share)),
+                repetitions);
+        END LOOP;
         PERFORM set_config('max_parallel_workers_per_gather', '0', false);
         PERFORM set_config('parallel_setup_cost', '1000', false);
         PERFORM set_config('parallel_tuple_cost', '0.1', false);
@@ -315,6 +328,8 @@ BEGIN
                            current_setting('bench.bitmap_build_cost'), false);
         PERFORM set_config('tessera.bitmap_build_scatter_cost',
                            current_setting('bench.bitmap_build_scatter_cost'), false);
+        PERFORM set_config('tessera.index_worker_share',
+                           current_setting('bench.index_worker_share'), false);
     END LOOP;
     PERFORM set_config('tessera.enable', 'on', false);
 END
@@ -327,6 +342,7 @@ RESET tessera.scan_parallel_setup_cost;
 RESET tessera.scan_worker_page_cost;
 RESET tessera.bitmap_build_cost;
 RESET tessera.bitmap_build_scatter_cost;
+RESET tessera.index_worker_share;
 RESET enable_seqscan;
 RESET enable_indexonlyscan;
 RESET enable_indexscan;
@@ -536,6 +552,31 @@ SELECT round((b.build_ms * 1e6)::numeric, 1) AS build_ns, round((b.scatter_ms * 
        round((b.build_ms / u.unit_ms)::numeric, 4) AS "tessera.bitmap_build_cost",
        round((b.scatter_ms / u.unit_ms)::numeric, 4) AS "tessera.bitmap_build_scatter_cost"
 FROM bitmap_build_fit AS b, model_unit AS u;
+
+-- A worker's share of the leader's pace in a parallel index or index-only
+-- scan, which takes the index's leaf pages one at a time: the share, in
+-- steps of 0.01, whose times T = L + max(S - L / 2, 0) / (1 + n share),
+-- the leader reading alone while the workers start, come nearest the
+-- parallel samples' (least squares of the relative errors).
+CREATE TEMP VIEW index_share_fit AS
+WITH pairs AS (
+    SELECT p.milliseconds AS measured, s.milliseconds AS serial, p.workers
+    FROM parallel_samples AS p
+    JOIN samples AS s ON s.method = p.method AND s.relation = p.relation AND s.share = p.share
+    WHERE p.method IN ('on ios', 'on index') AND p.workers > 0
+), predicted AS (
+    SELECT g.g / 100.0 AS share, q.measured,
+           f.l_ms + greatest(q.serial - f.l_ms / 2, 0) / (1 + q.workers * g.g / 100.0) AS time
+    FROM generate_series(10, 100) AS g(g) CROSS JOIN pairs AS q CROSS JOIN parallel_fit AS f
+    WHERE f.mode = 'on'
+)
+SELECT share, sqrt(avg(((time - measured) / measured) ^ 2)) AS error
+FROM predicted
+GROUP BY share
+ORDER BY error
+LIMIT 1;
+SELECT round(share, 2) AS "tessera.index_worker_share", round(error::numeric, 3) AS error
+FROM index_share_fit;
 
 -- The model of the filter: each sample's time over its table's base,
 -- fitted by its rows: a column past a varlena from the samples of that
