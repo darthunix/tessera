@@ -142,6 +142,13 @@ typedef enum FastKind
 	FAST_MAX
 } FastKind;
 
+/* A numeric of at most 18 digits (tessera/decimal.h): its value at its display scale. */
+typedef struct FastDecimal
+{
+	int64		value;
+	int			scale;
+} FastDecimal;
+
 /*
  * The state of such an aggregate, in the states' context. sum and avg: the
  * decimals' sum (numeric values of at most 18 digits, integers at scale 0)
@@ -164,7 +171,7 @@ typedef struct FastState
 	bool		has_extreme;
 	Datum		extreme;
 	bool		decimal_valid;
-	TessDecimal decimal;
+	FastDecimal decimal;
 	float8		n;
 	float8		sx;
 	float8		sxx;
@@ -202,6 +209,21 @@ typedef struct GenericAgg
 	bool		fast_int8_result;
 	/* A float argument: FLOAT8OID or FLOAT4OID, else InvalidOid. */
 	Oid			fast_float;
+	/*
+	 * A numeric argument's decimals of the batch being added, read by the
+	 * kernels for decimal_capacity rows: the values and scales, the rows
+	 * that are decimals, and the rows read (those without the column's own
+	 * decimals).
+	 */
+	const TessKernelOps *kernels;
+	Datum	   *decimal_values;
+	uint8	   *decimal_scales;
+	uint64	   *decimal_bits;
+	uint64	   *decimal_pending;
+	/* The rows the kernels' sum of a batch left to the node. */
+	uint64	   *decimal_rest;
+	int			decimal_capacity;
+	TessStatus	decimal_status;
 } GenericAgg;
 
 /*
@@ -2126,17 +2148,17 @@ fast_kind(const Aggref *agg, GenericAgg *generic)
 		case F_MAX_FLOAT4:
 			return FAST_MAX;
 		case F_SUM_NUMERIC:
-			generic->fast_numeric = true;
-			return FAST_SUM;
 		case F_AVG_NUMERIC:
-			generic->fast_numeric = true;
-			return FAST_AVG;
 		case F_MIN_NUMERIC:
-			generic->fast_numeric = true;
-			return FAST_MIN;
 		case F_MAX_NUMERIC:
+			/* The decimals are the kernels': without them, the core's functions. */
+			generic->kernels = tess_runtime_kernels();
+			if (generic->kernels == NULL)
+				return FAST_NONE;
 			generic->fast_numeric = true;
-			return FAST_MAX;
+			return agg->aggfnoid == F_SUM_NUMERIC ? FAST_SUM :
+				agg->aggfnoid == F_AVG_NUMERIC ? FAST_AVG :
+				agg->aggfnoid == F_MIN_NUMERIC ? FAST_MIN : FAST_MAX;
 		case F_SUM_INT8:
 			generic->fast_wide = true;
 			return FAST_SUM;
@@ -2158,6 +2180,18 @@ fast_kind(const Aggref *agg, GenericAgg *generic)
 
 #ifdef HAVE_INT128
 
+/* 10^0 through 10^18: a decimal's scale changed exactly. */
+static const int64 fast_powers[TESS_DECIMAL_DIGITS + 1] = {
+	INT64CONST(1), INT64CONST(10), INT64CONST(100), INT64CONST(1000),
+	INT64CONST(10000), INT64CONST(100000), INT64CONST(1000000),
+	INT64CONST(10000000), INT64CONST(100000000), INT64CONST(1000000000),
+	INT64CONST(10000000000), INT64CONST(100000000000),
+	INT64CONST(1000000000000), INT64CONST(10000000000000),
+	INT64CONST(100000000000000), INT64CONST(1000000000000000),
+	INT64CONST(10000000000000000), INT64CONST(100000000000000000),
+	INT64CONST(1000000000000000000)
+};
+
 /* The bound of a decimals' sum: 10^36, with room for one more term. */
 #define FAST_BOUND ((int128) INT64CONST(1000000000000000000) * INT64CONST(1000000000000000000))
 
@@ -2168,7 +2202,7 @@ fast_kind(const Aggref *agg, GenericAgg *generic)
 static Datum
 fast_numeric(int128 value, int scale)
 {
-	int64		unit = tess_powers_of_ten[TESS_DECIMAL_DIGITS];
+	int64		unit = fast_powers[TESS_DECIMAL_DIGITS];
 
 	if (value >= PG_INT64_MIN && value <= PG_INT64_MAX)
 		return NumericGetDatum(int64_div_fast_to_numeric((int64) value, scale));
@@ -2217,13 +2251,13 @@ fast_flush(FastState *fast, MemoryContext states)
  * term would take past the bound goes to the rest first.
  */
 static void
-fast_add(FastState *fast, TessDecimal decimal, MemoryContext states)
+fast_add(FastState *fast, FastDecimal decimal, MemoryContext states)
 {
 	int128		term = decimal.value;
 
 	if (decimal.scale > fast->scale)
 	{
-		int128		factor = tess_powers_of_ten[decimal.scale - fast->scale];
+		int128		factor = fast_powers[decimal.scale - fast->scale];
 
 		if (fast->sum >= FAST_BOUND / factor || fast->sum <= -FAST_BOUND / factor)
 			fast_flush(fast, states);
@@ -2231,7 +2265,7 @@ fast_add(FastState *fast, TessDecimal decimal, MemoryContext states)
 		fast->scale = decimal.scale;
 	}
 	else
-		term *= tess_powers_of_ten[fast->scale - decimal.scale];
+		term *= fast_powers[fast->scale - decimal.scale];
 	fast->sum += term;
 	if (fast->sum >= FAST_BOUND || fast->sum <= -FAST_BOUND)
 		fast_flush(fast, states);
@@ -2245,7 +2279,7 @@ fast_add(FastState *fast, TessDecimal decimal, MemoryContext states)
  */
 static void
 fast_extreme(GenericAgg *generic, FastState *fast, Datum value,
-			 const TessDecimal *decimal, MemoryContext states)
+			 const FastDecimal *decimal, MemoryContext states)
 {
 	MemoryContext old;
 
@@ -2257,9 +2291,9 @@ fast_extreme(GenericAgg *generic, FastState *fast, Datum value,
 		{
 			int			scale = Max(decimal->scale, fast->decimal.scale);
 			int128		left = (int128) decimal->value *
-				tess_powers_of_ten[scale - decimal->scale];
+				fast_powers[scale - decimal->scale];
 			int128		right = (int128) fast->decimal.value *
-				tess_powers_of_ten[scale - fast->decimal.scale];
+				fast_powers[scale - fast->decimal.scale];
 
 			cmp = left < right ? -1 : left > right;
 		}
@@ -2336,13 +2370,26 @@ fast_float_advance(GenericAgg *generic, FastState *fast, bool first, Datum value
 	}
 }
 
+/* The numeric of a decimal into out, TESS_DECIMAL_NUMERIC_MAX bytes, by the kernels. */
+static void
+fast_write_numeric(GenericAgg *generic, const FastDecimal *decimal, void *out)
+{
+	TessStatus	status = TESS_STRUCT_INITIALIZER(TessStatus);
+	Size		size;
+
+	if (generic->kernels->decimal_write_datum(decimal->value, decimal->scale, out,
+											  TESS_DECIMAL_NUMERIC_MAX, &size,
+											  &status) != TESS_OK)
+		tess_status_report(&status);
+}
+
 /*
  * min and max of a decimal whose numeric was never made: compared as
  * fast_extreme compares, the numeric of a new extreme made in the states'
  * context from the decimal, as the core would have kept it.
  */
 static void
-fast_decimal_extreme(GenericAgg *generic, FastState *fast, const TessDecimal *decimal,
+fast_decimal_extreme(GenericAgg *generic, FastState *fast, const FastDecimal *decimal,
 					 MemoryContext states)
 {
 	char	   *numeric;
@@ -2355,9 +2402,9 @@ fast_decimal_extreme(GenericAgg *generic, FastState *fast, const TessDecimal *de
 		{
 			int			scale = Max(decimal->scale, fast->decimal.scale);
 			int128		left = (int128) decimal->value *
-				tess_powers_of_ten[scale - decimal->scale];
+				fast_powers[scale - decimal->scale];
 			int128		right = (int128) fast->decimal.value *
-				tess_powers_of_ten[scale - fast->decimal.scale];
+				fast_powers[scale - fast->decimal.scale];
 
 			cmp = left < right ? -1 : left > right;
 		}
@@ -2365,7 +2412,7 @@ fast_decimal_extreme(GenericAgg *generic, FastState *fast, const TessDecimal *de
 		{
 			char		buffer[TESS_DECIMAL_NUMERIC_MAX] pg_attribute_aligned(MAXIMUM_ALIGNOF);
 
-			(void) tess_decimal_write_numeric(decimal->value, decimal->scale, buffer);
+			fast_write_numeric(generic, decimal, buffer);
 			cmp = DatumGetInt32(DirectFunctionCall2(numeric_cmp, PointerGetDatum(buffer),
 													 fast->extreme));
 		}
@@ -2374,11 +2421,207 @@ fast_decimal_extreme(GenericAgg *generic, FastState *fast, const TessDecimal *de
 		pfree(DatumGetPointer(fast->extreme));
 	}
 	numeric = MemoryContextAlloc(states, TESS_DECIMAL_NUMERIC_MAX);
-	(void) tess_decimal_write_numeric(decimal->value, decimal->scale, numeric);
+	fast_write_numeric(generic, decimal, numeric);
 	fast->extreme = PointerGetDatum(numeric);
 	fast->has_extreme = true;
 	fast->decimal_valid = true;
 	fast->decimal = *decimal;
+}
+
+/* The node's arrays of a batch's decimals, for rows rows. */
+static void
+fast_scratch(GenericAgg *generic, int rows)
+{
+	MemoryContext context = GetMemoryChunkContext(generic);
+	int			capacity = Max(rows, 64);
+	int			words = tess_row_mask_word_count(capacity);
+
+	if (rows <= generic->decimal_capacity)
+		return;
+	if (generic->decimal_values != NULL)
+	{
+		pfree(generic->decimal_values);
+		pfree(generic->decimal_scales);
+		pfree(generic->decimal_bits);
+		pfree(generic->decimal_pending);
+		pfree(generic->decimal_rest);
+	}
+	generic->decimal_values = MemoryContextAlloc(context, sizeof(Datum) * capacity);
+	generic->decimal_scales = MemoryContextAlloc(context, capacity);
+	generic->decimal_bits = MemoryContextAlloc(context, sizeof(uint64) * words);
+	generic->decimal_pending = MemoryContextAlloc(context, sizeof(uint64) * words);
+	generic->decimal_rest = MemoryContextAlloc(context, sizeof(uint64) * words);
+	generic->decimal_capacity = capacity;
+	generic->decimal_status = (TessStatus) TESS_STRUCT_INITIALIZER(TessStatus);
+}
+
+/*
+ * A numeric argument's decimals over the rows of a batch, read by the
+ * kernels once, for the rows the column does not hold as decimals itself.
+ */
+static void
+fast_read(GenericAgg *generic, const TessRowMask *rows)
+{
+	const TessDatumColumn *column = &generic->columns[0];
+	const uint64 *side = tess_column_decimal_rows(column);
+	int			nwords = tess_row_mask_word_count(rows->nrows);
+	TessRowMask pending = {rows->nrows, NULL};
+	TessRowMask decimals = {rows->nrows, NULL};
+	uint64		any = 0;
+
+	fast_scratch(generic, rows->nrows);
+	pending.bits = generic->decimal_pending;
+	decimals.bits = generic->decimal_bits;
+	for (int word = 0; word < nwords; word++)
+	{
+		pending.bits[word] = rows->bits[word] & ~(side != NULL ? side[word] : 0);
+		decimals.bits[word] = 0;
+		any |= pending.bits[word];
+	}
+	if (any != 0 &&
+		generic->kernels->decimal_read(column, &pending, NULL, generic->decimal_values,
+									   generic->decimal_scales, &decimals,
+									   &generic->decimal_status) != TESS_OK)
+		tess_status_report(&generic->decimal_status);
+}
+
+/*
+ * sum and avg of a numeric argument without groups: a batch's decimals
+ * added to the state by the kernels in one pass, as fast_add adds them
+ * (the largest scale, below 10^36); the rows they leave (NaN, longer
+ * values, a sum at its bound) are returned for the row-by-row path. The
+ * state is made when the batch has a decimal.
+ */
+static TessRowMask
+fast_sum(GenericAgg *generic, const TessRowMask *rows, MemoryContext states)
+{
+	FastState  *fast = generic->state_null ? NULL : (FastState *) DatumGetPointer(generic->state);
+	TessDecimalSum sum = {0};
+	TessRowMask rest = {rows->nrows, NULL};
+
+	fast_scratch(generic, rows->nrows);
+	rest.bits = generic->decimal_rest;
+	/* An output mask comes clean: a smaller batch after a larger one. */
+	memset(rest.bits, 0, sizeof(uint64) * tess_row_mask_word_count(rows->nrows));
+	if (fast != NULL)
+	{
+		sum.low = (uint64) fast->sum;
+		sum.high = (int64) (fast->sum >> 64);
+		sum.scale = fast->scale;
+		sum.count = fast->count;
+	}
+	if (generic->kernels->decimal_sum(&generic->columns[0], rows, &sum, &rest,
+									  &generic->decimal_status) != TESS_OK)
+		tess_status_report(&generic->decimal_status);
+	if (fast == NULL && sum.count > 0)
+	{
+		generic->state = PointerGetDatum(MemoryContextAllocZero(states, sizeof(FastState)));
+		generic->state_null = false;
+		fast = (FastState *) DatumGetPointer(generic->state);
+	}
+	if (fast != NULL)
+	{
+		fast->sum = (int128) (((uint128) (uint64) sum.high << 64) | sum.low);
+		fast->scale = sum.scale;
+		fast->count = sum.count;
+	}
+	return rest;
+}
+
+/* The order of two decimals, exactly: at the larger scale in int128. */
+static inline int
+fast_decimal_cmp(const FastDecimal *left, const FastDecimal *right)
+{
+	int128		a;
+	int128		b;
+	int			scale;
+
+	if (left->scale == right->scale)
+		return left->value < right->value ? -1 : left->value > right->value;
+	scale = Max(left->scale, right->scale);
+	a = (int128) left->value * fast_powers[scale - left->scale];
+	b = (int128) right->value * fast_powers[scale - right->scale];
+	return a < b ? -1 : a > b;
+}
+
+/* A row's decimal: the column's own, or the one the kernels read (fast_read). */
+static inline bool
+fast_row_decimal(const GenericAgg *generic, uint64 side, uint64 read, int row, FastDecimal *decimal)
+{
+	uint64		bit = UINT64CONST(1) << (row % 64);
+
+	if ((side & bit) != 0)
+	{
+		decimal->value = DatumGetInt64(generic->columns[0].values[row]);
+		decimal->scale = generic->columns[0].decimal_scale;
+		return true;
+	}
+	if ((read & bit) != 0)
+	{
+		decimal->value = DatumGetInt64(generic->decimal_values[row]);
+		decimal->scale = generic->decimal_scales[row];
+		return true;
+	}
+	return false;
+}
+
+/*
+ * min and max of a numeric argument without groups: the batch's extreme
+ * decimal found in one pass, a later row taking an equal value as
+ * numeric_larger and numeric_smaller do, and folded in once. A batch with
+ * a non-NULL row that is not a decimal goes row by row, in its order.
+ */
+static bool
+fast_extreme_batch(GenericAgg *generic, const TessRowMask *rows, MemoryContext states)
+{
+	const TessDatumColumn *column = &generic->columns[0];
+	const uint64 *side = tess_column_decimal_rows(column);
+	bool		max = generic->fast == FAST_MAX;
+	int			nwords = tess_row_mask_word_count(rows->nrows);
+	FastDecimal best = {0};
+	int			best_row = -1;
+	FastState  *fast;
+
+	for (int word = 0; word < nwords; word++)
+	{
+		uint64		side_bits = side != NULL ? side[word] : 0;
+		uint64		read_bits = generic->decimal_bits[word];
+
+		for (uint64 look = rows->bits[word]; look != 0; look &= look - 1)
+		{
+			int			row = word * 64 + pg_rightmost_one_pos64(look);
+			FastDecimal decimal;
+			int			cmp;
+
+			if (!fast_row_decimal(generic, side_bits, read_bits, row, &decimal))
+			{
+				if (column->isnull[row])
+					continue;
+				return false;
+			}
+			if (best_row >= 0)
+			{
+				cmp = fast_decimal_cmp(&decimal, &best);
+				if (max ? cmp < 0 : cmp > 0)
+					continue;
+			}
+			best = decimal;
+			best_row = row;
+		}
+	}
+	if (best_row < 0)
+		return true;
+	if (generic->state_null)
+	{
+		generic->state = PointerGetDatum(MemoryContextAllocZero(states, sizeof(FastState)));
+		generic->state_null = false;
+	}
+	fast = (FastState *) DatumGetPointer(generic->state);
+	if (side != NULL && ((side[best_row / 64] >> (best_row % 64)) & 1) != 0)
+		fast_decimal_extreme(generic, fast, &best, states);
+	else
+		fast_extreme(generic, fast, column->values[best_row], &best, states);
+	return true;
 }
 
 /* One row into the state, the first non-NULL one making it. */
@@ -2389,7 +2632,7 @@ fast_advance(GenericAgg *generic, int row, MemoryContext states)
 	const uint64 *decimal_rows = tess_column_decimal_rows(column);
 	FastState  *fast;
 	Datum		value;
-	TessDecimal decimal;
+	FastDecimal decimal;
 	bool		decimal_valid = true;
 
 	if (column->isnull[row])
@@ -2425,7 +2668,15 @@ fast_advance(GenericAgg *generic, int row, MemoryContext states)
 		}
 	}
 	else if (generic->fast_numeric)
-		decimal_valid = tess_decimal_of(value, &decimal);
+	{
+		/* A numeric the kernels read for the batch (fast_read), or the rest. */
+		decimal_valid = ((generic->decimal_bits[row / 64] >> (row % 64)) & 1) != 0;
+		if (decimal_valid)
+		{
+			decimal.value = DatumGetInt64(generic->decimal_values[row]);
+			decimal.scale = generic->decimal_scales[row];
+		}
+	}
 	else
 	{
 		decimal.value = generic->fast_wide ? DatumGetInt64(value) : DatumGetInt32(value);
@@ -2658,6 +2909,26 @@ generic_accumulate(TessAggState *state, GenericAgg *generic, const TessRowMask *
 	MemoryContext old = MemoryContextSwitchTo(temporary);
 	int			row = -1;
 
+#ifdef HAVE_INT128
+	TessRowMask rest;
+
+	if (generic->fast != FAST_NONE && generic->fast_numeric)
+	{
+		/* Without groups, sum and avg leave the kernels a few rows at most. */
+		if (generic->fast == FAST_SUM || generic->fast == FAST_AVG)
+		{
+			rest = fast_sum(generic, rows, states);
+			rows = &rest;
+		}
+		fast_read(generic, rows);
+		if ((generic->fast == FAST_MIN || generic->fast == FAST_MAX) &&
+			fast_extreme_batch(generic, rows, states))
+		{
+			MemoryContextSwitchTo(old);
+			return;
+		}
+	}
+#endif
 	while ((row = tess_row_mask_next(rows, row)) >= 0)
 		generic_advance(generic, row, states, temporary);
 	MemoryContextSwitchTo(old);
@@ -2690,6 +2961,65 @@ record_payload(TessAggState *state, uint32 ref)
 	return (uint64 *) (record + state->payload_delta);
 }
 
+#ifdef HAVE_INT128
+/*
+ * The rows of a batch into the groups' states of a numeric aggregate the
+ * node folds itself, its decimals read (fast_read): a decimal goes straight
+ * into its group's state, made at its first one, and any other row
+ * through fast_advance.
+ */
+static void
+fast_group_decimals(TessAggState *state, int index, const TessRowMask *rows,
+					MemoryContext states, MemoryContext temporary)
+{
+	GenericAgg *generic = state->values[index].generic;
+	const TessDatumColumn *column = &generic->columns[0];
+	const uint64 *side = tess_column_decimal_rows(column);
+	bool		extreme = generic->fast == FAST_MIN || generic->fast == FAST_MAX;
+	uint64		bit = UINT64CONST(1) << index;
+	int			nwords = tess_row_mask_word_count(rows->nrows);
+
+	for (int word = 0; word < nwords; word++)
+	{
+		uint64		side_bits = side != NULL ? side[word] : 0;
+		uint64		read_bits = generic->decimal_bits[word];
+
+		for (uint64 look = rows->bits[word]; look != 0; look &= look - 1)
+		{
+			int			row = word * 64 + pg_rightmost_one_pos64(look);
+			uint64	   *payload = record_payload(state, state->offsets[row]);
+			FastDecimal decimal;
+			FastState  *fast;
+
+			if (!fast_row_decimal(generic, side_bits, read_bits, row, &decimal))
+			{
+				generic->state = (Datum) payload[1 + index];
+				generic->state_null = (payload[0] & bit) == 0;
+				generic_advance(generic, row, states, temporary);
+				payload[1 + index] = generic->state_null ? 0 : (uint64) generic->state;
+				payload[0] = generic->state_null ? payload[0] & ~bit : payload[0] | bit;
+				continue;
+			}
+			if ((payload[0] & bit) == 0)
+			{
+				payload[1 + index] = (uint64) MemoryContextAllocZero(states, sizeof(FastState));
+				payload[0] |= bit;
+			}
+			fast = (FastState *) payload[1 + index];
+			if (!extreme)
+			{
+				fast->count++;
+				fast_add(fast, decimal, states);
+			}
+			else if (((side_bits >> (row % 64)) & 1) != 0)
+				fast_decimal_extreme(generic, fast, &decimal, states);
+			else
+				fast_extreme(generic, fast, column->values[row], &decimal, states);
+		}
+	}
+}
+#endif
+
 /*
  * The groups' states of a generic aggregate over the rows of a batch:
  * the groups the batch inserted start from the initial value; then, row
@@ -2717,6 +3047,15 @@ generic_group_accumulate(TessAggState *state, int index, const TessRowMask *rows
 		payload[0] = generic->init_null ? payload[0] & ~bit : payload[0] | bit;
 	}
 	MemoryContextSwitchTo(temporary);
+#ifdef HAVE_INT128
+	if (generic->fast != FAST_NONE && generic->fast_numeric)
+	{
+		fast_read(generic, rows);
+		fast_group_decimals(state, index, rows, states, temporary);
+		MemoryContextSwitchTo(old);
+		return;
+	}
+#endif
 	row = -1;
 	while ((row = tess_row_mask_next(rows, row)) >= 0)
 	{

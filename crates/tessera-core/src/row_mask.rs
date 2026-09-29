@@ -59,6 +59,7 @@ pub struct RowMaskView<'a> {
 
 impl<'a> RowMaskView<'a> {
     /// Borrow words, rejecting an incorrect word count or nonzero padding bits.
+    #[inline]
     pub fn try_new(nrows: usize, words: &'a [u64]) -> Result<Self> {
         validate_words(nrows, words)?;
         Ok(Self {
@@ -183,6 +184,7 @@ impl<'a> RowMask<'a> {
     /// Borrow words exclusively, rejecting bad dimensions or padding bits.
     ///
     /// Validation never modifies the supplied words, including on error.
+    #[inline]
     pub fn try_new(nrows: usize, words: &'a mut [u64]) -> Result<Self> {
         validate_words(nrows, words)?;
         Ok(Self { nrows, words })

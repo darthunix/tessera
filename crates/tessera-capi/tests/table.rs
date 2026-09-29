@@ -920,9 +920,9 @@ fn grouped_states_accumulate_through_the_entry_points() -> Result<()> {
             ),
             Code::Ok
         );
-        for group in 0..10 {
+        for (group, &sum) in sums.iter().take(10).enumerate() {
             // Bit 4 was clear: the first value replaced the int4 sum there.
-            assert_eq!(sums[group] as i64, 10 * group as i64 * 3_000_000_000);
+            assert_eq!(sum as i64, 10 * group as i64 * 3_000_000_000);
         }
         let huge = vec![i64::MAX as u64; 100];
         let huge_column = DatumColumn {

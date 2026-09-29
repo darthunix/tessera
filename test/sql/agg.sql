@@ -547,14 +547,39 @@ SELECT agg_same($$SELECT sum(n), avg(n), min(n), max(n), sum(u), avg(u), min(u),
 SELECT agg_same($$SELECT g, max(u) FILTER (WHERE u < 2), min(u) FILTER (WHERE u > 0.5 AND u < 2), sum(n) FILTER (WHERE n <> 'NaN'), avg(u) FILTER (WHERE u < 'Infinity' AND u > '-Infinity') FROM agg_fast GROUP BY g$$);
 SELECT agg_same($$SELECT g, sum(DISTINCT b), avg(DISTINCT i4 % 100), sum(DISTINCT s % 10) FROM agg_fast GROUP BY g$$);
 SELECT agg_same($$SELECT id % 1000, sum(n), avg(u), max(u), sum(b) FROM agg_fast WHERE id % 1000 IN (0, 13, 17, 26, 34) GROUP BY 1$$);
+-- One aggregate a column: the aggregate reads its decimals itself, a
+-- batch's sum by the kernels and a batch's extreme in one pass without
+-- groups (a batch with NaN or a longer value row by row), each decimal
+-- straight into its group's state with them; equal extremes of 1.0 and
+-- 1.00 keep the last, across batches too.
+SELECT agg_same($$SELECT sum(n) FROM agg_fast WHERE n <> 'NaN'$$);
+SELECT agg_same($$SELECT sum(n) FROM agg_fast$$);
+SELECT agg_same($$SELECT avg(u) FROM agg_fast WHERE u < 'Infinity' AND u > '-Infinity'$$);
+SELECT agg_same($$SELECT max(n) FROM agg_fast$$);
+SELECT agg_same($$SELECT min(n) FROM agg_fast$$);
+SELECT agg_same($$SELECT max(u) FROM agg_fast WHERE u <= 1$$);
+SELECT agg_same($$SELECT min(u) FROM agg_fast WHERE u >= 1$$);
+SELECT agg_same($$SELECT g, sum(u) FROM agg_fast GROUP BY g$$);
+SELECT agg_same($$SELECT g, avg(n) FROM agg_fast WHERE n <> 'NaN' GROUP BY g$$);
+SELECT agg_same($$SELECT g, max(u) FROM agg_fast WHERE u <= 1 GROUP BY g$$);
+SELECT agg_same($$SELECT g, min(n) FROM agg_fast GROUP BY g$$);
 -- A sum at scale 0 of 2 * 10^20 that a value of scale 18 would take past
 -- int128: to the numeric rest first; NaN and infinities in a group.
 CREATE TABLE agg_bound (k int, v numeric);
 INSERT INTO agg_bound SELECT 1, 999999999999999999 FROM generate_series(1, 200);
 INSERT INTO agg_bound VALUES (1, 0.000000000000000001), (1, 999999999999999999), (2, 0.5), (2, 'NaN'),
     (3, 'Infinity'), (3, '-Infinity'), (4, 'Infinity'), (4, 2.25);
+-- A sum at scale 18 whose next values of scale 0 would pass 10^36: each
+-- to the numeric rest, the batch's sum by the kernels too; equal extremes
+-- of two scales in one batch, the last kept.
+INSERT INTO agg_bound VALUES (5, 0.000000000000000001);
+INSERT INTO agg_bound SELECT 5, 999999999999999999 FROM generate_series(1, 200);
+INSERT INTO agg_bound VALUES (6, 1.0), (6, 1.00), (6, 0.5), (6, -1.00), (6, -1.0);
 SELECT agg_same($$SELECT k, sum(v), avg(v), min(v), max(v) FROM agg_bound GROUP BY k$$);
 SELECT agg_same($$SELECT sum(v), avg(v) FROM agg_bound WHERE k = 1$$);
+SELECT agg_same($$SELECT sum(v) FROM agg_bound WHERE k = 5$$);
+SELECT agg_same($$SELECT max(v) FROM agg_bound WHERE k = 6$$);
+SELECT agg_same($$SELECT min(v) FROM agg_bound WHERE k = 6$$);
 DROP TABLE agg_bound;
 SELECT agg_same($$SELECT g, sum(v), avg(v) FROM (SELECT g, u * 1000000000000000000 AS v FROM agg_fast WHERE u < 1e6) AS t GROUP BY g$$);
 -- Past hash_mem: the rows of new groups to disk and back.

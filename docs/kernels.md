@@ -161,3 +161,53 @@ Datum, so an int8 result column is a Datum column:
   22003, "integer out of range", as the cast `int4(bigint)` does. It
   serves an explicit cast only, row by row: the functions over an int4 and
   an int8 widen instead ([function.md](function.md)).
+
+## Decimals
+
+`tessera/decimal.h` declares the kernels of decimals: numeric values of at
+most 18 digits as an int64 at their display scale
+(`tessera_kernels::decimal`). They read a numeric Datum in place, from a
+varlena of either header (a compressed or external one is not read), and
+refuse what is not a decimal: NaN, an infinity, a display scale past 18, a
+value of more than 18 digits; such a row is left to the caller, which
+takes it by the core's function. They read the selected rows alone, so a
+selected row's NULL flag and non-NULL value must be initialized, and a
+column's decimal side (`TessDatumColumn.decimal_rows`, see
+[batch.md](batch.md)) is read as decimals. An argument (`TessDecimalArg`)
+is a column or, without one, a scalar numeric.
+
+- `tess_decimal_filter(op, left, right, rows, rest, status)`: narrow `rows`
+  to the rows where the comparison (`TessCompareOp`) of two decimals holds,
+  in `numeric_cmp`'s exact order; a row with a NULL leaves, a row whose
+  arguments are not both decimals leaves too and is set in `rest`.
+- `tess_decimal_compute(op, left, right, rows, scale, values, scales,
+  non_nulls, decimals, rest, status)`: `+`, `-`, `*` (`right` of them),
+  negation and `abs`: each row of `non_nulls` not in `rest` gets its exact
+  result's value and scale (the larger for `+` and `-`, the sum for `*`, up
+  to 36), a result at `scale` also its bit in `decimals`; an argument that
+  is not a decimal, or a result past 18 digits, is left in `rest`.
+- `tess_decimal_to_int4` and `tess_decimal_to_int8(arg, rows, values,
+  non_nulls, rest, status)`: the casts, rounding half away from zero; a
+  value outside the int4 range is left in `rest`, where the core raises
+  its error.
+- `tess_decimal_read(column, rows, scale, values, scales, decimals,
+  status)`: a column's decimals into `values` (a Datum holding the int64,
+  the other rows' Datums copied) with their bits: of one scale (`*scale`,
+  the first decimal's when -1) when `scales` is NULL, else every one with
+  its scale in `scales`.
+- `tess_decimal_sum(column, rows, sum, rest, status)`: the rows' decimals
+  added to a running sum (`TessDecimalSum`: an int128 at the largest scale
+  met, below 10^36, and a count); a row that is not a decimal, or that
+  would take the sum to the bound, is left in `rest`.
+- `tess_decimal_write(values, scales, scale, rows, space, len, used,
+  status)`: each row's decimal replaced by the pointer to its numeric,
+  written as `make_result` writes it into `space` at MAXALIGN'd offsets;
+  `tess_decimal_read_datum` and `tess_decimal_write_datum` read and write
+  one numeric.
+
+The functions of numeric (`kernels/numeric.c`) call them for a batch at a
+time and take the rows they leave by the core's functions; the batch of a
+heap scan reads a shared column's decimals, the aggregate node sums and
+reads its argument's, and the expression compiler reads a constant's scale
+and writes the numerics of a chain's decimals, through `TessKernelOps`.
+A call costs about 10 ns besides its rows, so the callers make one a batch.

@@ -1811,22 +1811,117 @@ SELECT agg_same($$SELECT id % 1000, sum(n), avg(u), max(u), sum(b) FROM agg_fast
  {"(0,37850.00,0.00000000000000000000,0.00000000000000000000,46116860184258879035)","(13,7047.35,4970370325637037032514.9800000000000000,24851851628185185162570,46116860184263814035)","(17,8631.15,87.2800000000000000,431.0000000000000000,46116860184263794035)","(26,-7805.30,Infinity,Infinity,46116860184263749035)","(34,-14900.16,2553086396775308639654.2400000000000000,12765431983876543198260,36893488147411967228)"}
 (1 row)
 
+-- One aggregate a column: the aggregate reads its decimals itself, a
+-- batch's sum by the kernels and a batch's extreme in one pass without
+-- groups (a batch with NaN or a longer value row by row), each decimal
+-- straight into its group's state with them; equal extremes of 1.0 and
+-- 1.00 keep the last, across batches too.
+SELECT agg_same($$SELECT sum(n) FROM agg_fast WHERE n <> 'NaN'$$);
+    agg_same    
+----------------
+ {(-392219.54)}
+(1 row)
+
+SELECT agg_same($$SELECT sum(n) FROM agg_fast$$);
+ agg_same 
+----------
+ {(NaN)}
+(1 row)
+
+SELECT agg_same($$SELECT avg(u) FROM agg_fast WHERE u < 'Infinity' AND u > '-Infinity'$$);
+                    agg_same                     
+-------------------------------------------------
+ {(2393796080637681494917.20664570230607966457)}
+(1 row)
+
+SELECT agg_same($$SELECT max(n) FROM agg_fast$$);
+ agg_same 
+----------
+ {(NaN)}
+(1 row)
+
+SELECT agg_same($$SELECT min(n) FROM agg_fast$$);
+   agg_same   
+--------------
+ {(-9993.21)}
+(1 row)
+
+SELECT agg_same($$SELECT max(u) FROM agg_fast WHERE u <= 1$$);
+ agg_same 
+----------
+ {(1.0)}
+(1 row)
+
+SELECT agg_same($$SELECT min(u) FROM agg_fast WHERE u >= 1$$);
+ agg_same 
+----------
+ {(1.0)}
+(1 row)
+
+SELECT agg_same($$SELECT g, sum(u) FROM agg_fast GROUP BY g$$);
+                      agg_same                       
+-----------------------------------------------------
+ {"(0,NaN)","(1,NaN)","(2,NaN)","(3,NaN)","(4,NaN)"}
+(1 row)
+
+SELECT agg_same($$SELECT g, avg(n) FROM agg_fast WHERE n <> 'NaN' GROUP BY g$$);
+                                                                 agg_same                                                                  
+-------------------------------------------------------------------------------------------------------------------------------------------
+ {"(0,-51.3491200828157350)","(1,-149.1237305699481865)","(2,-65.1775051759834369)","(3,-57.2702173913043478)","(4,-83.2581677018633540)"}
+(1 row)
+
+SELECT agg_same($$SELECT g, max(u) FROM agg_fast WHERE u <= 1 GROUP BY g$$);
+                       agg_same                       
+------------------------------------------------------
+ {"(0,1.0)","(1,1.00)","(2,1.0)","(3,1.0)","(4,1.0)"}
+(1 row)
+
+SELECT agg_same($$SELECT g, min(n) FROM agg_fast GROUP BY g$$);
+                                   agg_same                                   
+------------------------------------------------------------------------------
+ {"(0,-9888.00)","(1,-9993.21)","(2,-9923.07)","(3,-9992.08)","(4,-9967.19)"}
+(1 row)
+
 -- A sum at scale 0 of 2 * 10^20 that a value of scale 18 would take past
 -- int128: to the numeric rest first; NaN and infinities in a group.
 CREATE TABLE agg_bound (k int, v numeric);
 INSERT INTO agg_bound SELECT 1, 999999999999999999 FROM generate_series(1, 200);
 INSERT INTO agg_bound VALUES (1, 0.000000000000000001), (1, 999999999999999999), (2, 0.5), (2, 'NaN'),
     (3, 'Infinity'), (3, '-Infinity'), (4, 'Infinity'), (4, 2.25);
+-- A sum at scale 18 whose next values of scale 0 would pass 10^36: each
+-- to the numeric rest, the batch's sum by the kernels too; equal extremes
+-- of two scales in one batch, the last kept.
+INSERT INTO agg_bound VALUES (5, 0.000000000000000001);
+INSERT INTO agg_bound SELECT 5, 999999999999999999 FROM generate_series(1, 200);
+INSERT INTO agg_bound VALUES (6, 1.0), (6, 1.00), (6, 0.5), (6, -1.00), (6, -1.0);
 SELECT agg_same($$SELECT k, sum(v), avg(v), min(v), max(v) FROM agg_bound GROUP BY k$$);
-                                                                                                          agg_same                                                                                                           
------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
- {"(1,200999999999999999799.000000000000000001,995049504950495048.509900990099009901,0.000000000000000001,999999999999999999)","(2,NaN,NaN,0.5,NaN)","(3,NaN,NaN,-Infinity,Infinity)","(4,Infinity,Infinity,2.25,Infinity)"}
+                                                                                                                                                                                               agg_same                                                                                                                                                                                               
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ {"(1,200999999999999999799.000000000000000001,995049504950495048.509900990099009901,0.000000000000000001,999999999999999999)","(2,NaN,NaN,0.5,NaN)","(3,NaN,NaN,-Infinity,Infinity)","(4,Infinity,Infinity,2.25,Infinity)","(5,199999999999999999800.000000000000000001,995024875621890546.268656716417910448,0.000000000000000001,999999999999999999)","(6,0.50,0.10000000000000000000,-1.0,1.00)"}
 (1 row)
 
 SELECT agg_same($$SELECT sum(v), avg(v) FROM agg_bound WHERE k = 1$$);
                                        agg_same                                       
 --------------------------------------------------------------------------------------
  {"(200999999999999999799.000000000000000001,995049504950495048.509900990099009901)"}
+(1 row)
+
+SELECT agg_same($$SELECT sum(v) FROM agg_bound WHERE k = 5$$);
+                   agg_same                   
+----------------------------------------------
+ {(199999999999999999800.000000000000000001)}
+(1 row)
+
+SELECT agg_same($$SELECT max(v) FROM agg_bound WHERE k = 6$$);
+ agg_same 
+----------
+ {(1.00)}
+(1 row)
+
+SELECT agg_same($$SELECT min(v) FROM agg_bound WHERE k = 6$$);
+ agg_same 
+----------
+ {(-1.0)}
 (1 row)
 
 DROP TABLE agg_bound;

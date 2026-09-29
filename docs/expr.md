@@ -41,10 +41,12 @@ An expression is supported when it is built from
   that scale, which the next such step reads without a numeric in between:
   a column of `numeric(p, s)` has `s`, a constant its own, `+` and `-` the
   larger of their arguments', `*` their sum up to 18, negation and `abs`
-  their argument's, `numeric(integer)` 0 (`numeric_scale`); a row past 18
-  digits, NaN or of another scale comes as a numeric among the decimals.
-  A step or a consumer that reads no decimals gets numerics made from them
-  into an array of their own (`tess_expr_get_column`), which leaves the
+  their argument's, `numeric(integer)` 0 (`numeric_scale`, a constant's
+  read by the kernels); a row past 18 digits, NaN or of another scale
+  comes as a numeric among the decimals. A step or a consumer that reads
+  no decimals gets numerics made from them by the kernels
+  (`tess_decimal_write`) into an array of their own
+  (`tess_expr_get_column`), which leaves the
   decimals for a consumer that asks for them (`tess_expr_get_decimal_column`,
   a projection's column with `accept_decimals`): `n * 2 - 1 > 100000` over
   2 M rows of `numeric(15,2)` 62 ms before and 32 after, `sum(n * (1 -

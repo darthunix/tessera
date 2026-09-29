@@ -1,9 +1,11 @@
 use anyhow::{Result, ensure};
 
+#[inline]
 pub(crate) fn word_count(nrows: usize) -> usize {
     nrows.div_ceil(64)
 }
 
+#[inline]
 pub(crate) fn validate_words(nrows: usize, words: &[u64]) -> Result<()> {
     let expected = word_count(nrows);
     ensure!(

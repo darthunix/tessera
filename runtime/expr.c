@@ -17,6 +17,7 @@
 #include "tessera/decimal.h"
 #include "tessera/expr.h"
 #include "tessera/function.h"
+#include "tessera/kernel_ops.h"
 #include "tessera/runtime.h"
 
 #define MAX_ARGS 3
@@ -1011,12 +1012,18 @@ numeric_scale(Node *node)
 	}
 	if (IsA(node, Const))
 	{
-		TessDecimal decimal;
+		const TessKernelOps *kernels = tess_runtime_kernels();
+		TessStatus	status = TESS_STRUCT_INITIALIZER(TessStatus);
+		int64		value;
+		int			scale;
+		bool		found;
 
-		if (((Const *) node)->constisnull ||
-			!tess_decimal_of(((Const *) node)->constvalue, &decimal))
+		if (((Const *) node)->constisnull || kernels == NULL)
 			return -1;
-		return decimal.scale;
+		if (kernels->decimal_read_datum(((Const *) node)->constvalue, &value, &scale,
+										&found, &status) != TESS_OK)
+			tess_status_report(&status);
+		return found ? scale : -1;
 	}
 	if (!IsA(node, OpExpr) && !IsA(node, FuncExpr))
 		return -1;
@@ -1743,36 +1750,28 @@ call_predicate(TessExpr *value, const TessFunction *function,
 static void
 make_numerics(TessExpr *expr, const TessDatumColumn *from, TessDatumColumn *to)
 {
-	const uint64 *decimals = from->decimal_rows;
+	const TessKernelOps *kernels = tess_runtime_kernels();
+	TessStatus	status = TESS_STRUCT_INITIALIZER(TessStatus);
+	TessRowMask decimals = {from->nrows, (uint64 *) from->decimal_rows};
 	int			nrows = from->nrows;
-	int			nwords = tess_row_mask_word_count(nrows);
 	Datum	   *numerics = expr->numerics;
-	int			scale = from->decimal_scale;
+	Size		len = (Size) tess_row_mask_count(&decimals) * TESS_DECIMAL_NUMERIC_MAX;
+	Size		used;
 
+	/* Decimals come from the kernels' functions: they are installed. */
+	if (kernels == NULL)
+		elog(ERROR, "Tessera decimals need the kernels");
 	memcpy(numerics, from->values, sizeof(Datum) * nrows);
 	/* A bare column's decimals come before any step has made the context. */
 	if (expr->values_context == NULL)
 		expr->values_context = AllocSetContextCreate(expr->context,
 													 "Tessera expression values",
 													 ALLOCSET_DEFAULT_SIZES);
-	for (int word = 0; word < nwords; word++)
-	{
-		uint64		bits = decimals[word];
-		char	   *space;
-
-		if (bits == 0)
-			continue;
-		space = MemoryContextAlloc(expr->values_context,
-								   (Size) pg_popcount64(bits) * TESS_DECIMAL_NUMERIC_MAX);
-		for (; bits != 0; bits &= bits - 1)
-		{
-			int			row = word * 64 + pg_rightmost_one_pos64(bits);
-
-			(void) tess_decimal_write_numeric(DatumGetInt64(numerics[row]), scale, space);
-			numerics[row] = PointerGetDatum(space);
-			space += TESS_DECIMAL_NUMERIC_MAX;
-		}
-	}
+	if (len > 0 &&
+		kernels->decimal_write(numerics, NULL, from->decimal_scale, &decimals,
+							   MemoryContextAlloc(expr->values_context, len), len,
+							   &used, &status) != TESS_OK)
+		tess_status_report(&status);
 	*to = *from;
 	to->values = numerics;
 	to->decimal_rows = NULL;

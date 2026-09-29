@@ -91,6 +91,11 @@ static const TessKernelOps kernels = {
 	.spill_columns_unpack = tess_spill_columns_unpack,
 	.sort_merge = tess_sort_merge,
 	.sort_key_lanes = tess_sort_key_lanes,
+	.decimal_read = tess_decimal_read,
+	.decimal_write = tess_decimal_write,
+	.decimal_read_datum = tess_decimal_read_datum,
+	.decimal_write_datum = tess_decimal_write_datum,
+	.decimal_sum = tess_decimal_sum,
 };
 
 static const TessKernelRegistryOps *

@@ -1,6 +1,6 @@
 //! The C entry points, declared in `include/tessera/kernels.h`,
-//! `include/tessera/table.h`, `include/tessera/spill.h` and
-//! `include/tessera/sort.h`.
+//! `include/tessera/decimal.h`, `include/tessera/table.h`,
+//! `include/tessera/spill.h` and `include/tessera/sort.h`.
 //!
 //! Every entry point takes its inputs as the C structures of the batch
 //! contract ([`DatumColumn`], [`Mask`]), runs a kernel under a panic guard,
@@ -12,6 +12,7 @@ mod args;
 mod cast;
 mod column;
 mod count;
+mod decimal;
 mod int32;
 mod int64;
 mod mask;
@@ -24,6 +25,11 @@ mod table;
 pub use cast::{tess_int4_to_int8, tess_int8_to_int4};
 pub use column::DatumColumn;
 pub use count::tess_count;
+pub use decimal::{
+    DecimalArg, DecimalSum, tess_decimal_compute, tess_decimal_filter, tess_decimal_read,
+    tess_decimal_read_datum, tess_decimal_sum, tess_decimal_to_int4, tess_decimal_to_int8,
+    tess_decimal_write, tess_decimal_write_datum,
+};
 pub use int32::{
     tess_int4_arith_columns, tess_int4_arith_scalar, tess_int4_arith_scalar_left,
     tess_int4_compare_columns, tess_int4_filter, tess_int4_hash, tess_int4_hash_next,

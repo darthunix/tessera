@@ -6,8 +6,8 @@
 #include "storage/bufmgr.h"
 #include "utils/memutils.h"
 
-#include "tessera/decimal.h"
 #include "tessera/heap_deform.h"
+#include "tessera/kernel_ops.h"
 #include "tessera/runtime.h"
 
 struct TessHeapBatch
@@ -45,6 +45,11 @@ struct TessHeapBatch
 	uint64	  **decimal_read;
 	uint64	  **decimal_rows;
 	int		   *decimal_scale;
+	/* The rows a request reads that the column's decimals do not have yet. */
+	uint64	   *decimal_pending;
+	/* The kernels that read them, found once, and their status. */
+	const TessKernelOps *kernels;
+	TessStatus	decimal_status;
 	uint64	   *selection;
 	int			ncolumns;
 	int			capacity;
@@ -152,24 +157,25 @@ deform_cached(TessHeapBatch *heap, int column, const TessRowMask *rows,
 }
 
 /*
- * A numeric column's requested rows read as decimals, once a batch: a
- * value of at most 18 digits at the scale of the batch's first decimal
- * goes as its int64 and its bit, any other (NULL, NaN, longer, of another
- * scale) as its numeric, so every consumer of the column's decimals reads
- * the same values without reading a numeric again.
+ * A numeric column's requested rows read as decimals by the kernels, once
+ * a batch: a value of at most 18 digits at the scale of the batch's first
+ * decimal goes as its int64 and its bit, any other (NULL, NaN, longer, of
+ * another scale) as its numeric, so every consumer of the column's
+ * decimals reads the same values without reading a numeric again. Without
+ * the kernels the column goes without decimals.
  */
 static void
 decimal_column(TessHeapBatch *heap, int column, const TessRowMask *rows,
 			   TessDatumColumn *result)
 {
-	const Datum *values = &heap->values[(Size) column * heap->capacity];
-	const bool *isnull = &heap->isnull[(Size) column * heap->capacity];
-	Datum	   *decimals;
+	TessDatumColumn source = TESS_STRUCT_INITIALIZER(TessDatumColumn);
+	TessRowMask pending;
+	TessRowMask decimals;
 	uint64	   *read;
-	uint64	   *bits;
-	int			scale;
 	int			nwords = tess_row_mask_word_count(rows->nrows);
 
+	if (heap->kernels == NULL && (heap->kernels = tess_runtime_kernels()) == NULL)
+		return;
 	if (heap->decimal_values == NULL)
 	{
 		MemoryContext context = GetMemoryChunkContext(heap);
@@ -178,6 +184,8 @@ decimal_column(TessHeapBatch *heap, int column, const TessRowMask *rows,
 		heap->decimal_read = MemoryContextAllocZero(context, sizeof(uint64 *) * heap->ncolumns);
 		heap->decimal_rows = MemoryContextAllocZero(context, sizeof(uint64 *) * heap->ncolumns);
 		heap->decimal_scale = MemoryContextAlloc(context, sizeof(int) * heap->ncolumns);
+		heap->decimal_pending = MemoryContextAllocZero(context, sizeof(uint64) * heap->nwords);
+		heap->decimal_status = (TessStatus) TESS_STRUCT_INITIALIZER(TessStatus);
 		for (int index = 0; index < heap->ncolumns; index++)
 			heap->decimal_scale[index] = -1;
 	}
@@ -192,41 +200,23 @@ decimal_column(TessHeapBatch *heap, int column, const TessRowMask *rows,
 		heap->decimal_rows[column] = MemoryContextAllocZero(context,
 															sizeof(uint64) * heap->nwords);
 	}
-	decimals = heap->decimal_values[column];
 	read = heap->decimal_read[column];
-	bits = heap->decimal_rows[column];
-	scale = heap->decimal_scale[column];
+	pending = (TessRowMask) {rows->nrows, heap->decimal_pending};
 	for (int word = 0; word < nwords; word++)
-	{
-		uint64		pending = rows->bits[word] & ~read[word];
-		uint64		found = 0;
-
-		for (; pending != 0; pending &= pending - 1)
-		{
-			int			bit = pg_rightmost_one_pos64(pending);
-			int			row = word * 64 + bit;
-			Datum		value = values[row];
-			TessDecimal decimal;
-
-			if (!isnull[row] && tess_decimal_of(value, &decimal))
-			{
-				if (scale < 0)
-					scale = decimal.scale;
-				if (decimal.scale == scale)
-				{
-					value = Int64GetDatum(decimal.value);
-					found |= UINT64CONST(1) << bit;
-				}
-			}
-			decimals[row] = value;
-		}
-		bits[word] |= found;
+		pending.bits[word] = rows->bits[word] & ~read[word];
+	source.values = &heap->values[(Size) column * heap->capacity];
+	source.isnull = &heap->isnull[(Size) column * heap->capacity];
+	source.nrows = rows->nrows;
+	decimals = (TessRowMask) {rows->nrows, heap->decimal_rows[column]};
+	if (heap->kernels->decimal_read(&source, &pending, &heap->decimal_scale[column],
+							  heap->decimal_values[column], NULL, &decimals,
+							  &heap->decimal_status) != TESS_OK)
+		tess_status_report(&heap->decimal_status);
+	for (int word = 0; word < nwords; word++)
 		read[word] |= rows->bits[word];
-	}
-	heap->decimal_scale[column] = scale;
-	result->values = decimals;
-	result->decimal_rows = bits;
-	result->decimal_scale = scale;
+	result->values = heap->decimal_values[column];
+	result->decimal_rows = heap->decimal_rows[column];
+	result->decimal_scale = heap->decimal_scale[column];
 }
 
 static void

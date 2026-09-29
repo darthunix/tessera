@@ -8,8 +8,8 @@
  * TessKernelOps through the bridge's kernel registry; a node reaches them
  * through tess_runtime_kernels() and calls them by pointer. Every
  * operation has the prototype, arguments and contract of the entry point
- * named in its comment (tessera/kernels.h, tessera/table.h,
- * tessera/spill.h, tessera/sort.h). See
+ * named in its comment (tessera/kernels.h, tessera/decimal.h,
+ * tessera/table.h, tessera/spill.h, tessera/sort.h). See
  * docs/bridge.md.
  */
 #ifndef TESSERA_KERNEL_OPS_H
@@ -18,6 +18,7 @@
 #include "postgres.h"
 
 #include "tessera/abi.h"
+#include "tessera/decimal.h"
 #include "tessera/kernels.h"
 #include "tessera/sort.h"
 #include "tessera/spill.h"
@@ -488,10 +489,33 @@ typedef struct TessKernelOps
 									  const TessRowMask *rows, int words,
 									  uint64 *const *lanes, Size capacity,
 									  int *count, TessStatus *status);
+	/* tess_decimal_read */
+	TessStatusCode (*decimal_read) (const TessDatumColumn *column,
+									const TessRowMask *rows, int *scale,
+									Datum *values, uint8 *scales,
+									TessRowMask *decimals, TessStatus *status);
+	/* tess_decimal_write */
+	TessStatusCode (*decimal_write) (Datum *values, const uint8 *scales,
+									 int scale, const TessRowMask *rows,
+									 void *space, Size len, Size *used,
+									 TessStatus *status);
+	/* tess_decimal_read_datum */
+	TessStatusCode (*decimal_read_datum) (Datum datum, int64 *value,
+										  int *scale, bool *found,
+										  TessStatus *status);
+	/* tess_decimal_write_datum */
+	TessStatusCode (*decimal_write_datum) (int64 value, int scale, void *out,
+										   Size len, Size *size,
+										   TessStatus *status);
+	/* tess_decimal_sum */
+	TessStatusCode (*decimal_sum) (const TessDatumColumn *column,
+								   const TessRowMask *rows,
+								   TessDecimalSum *sum, TessRowMask *rest,
+								   TessStatus *status);
 } TessKernelOps;
 
 #define TESS_KERNEL_OPS_MIN_SIZE \
-	TESS_ABI_SIZE_INCLUDING_FIELD(TessKernelOps, sort_key_lanes)
+	TESS_ABI_SIZE_INCLUDING_FIELD(TessKernelOps, decimal_sum)
 
 /*
  * The registry of the kernels: one table per backend, installed by the

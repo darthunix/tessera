@@ -155,14 +155,15 @@ for an oscillating field of infinity kept; the numeric comparisons
 `numeric_eq` … `numeric_ge`, `numeric_add`, `numeric_sub`, `numeric_mul`,
 `numeric_uminus`, `numeric_abs`, `int4(numeric)` and `int8(numeric)` in
 every shape: a value of at most 18 digits (what a column of
-`numeric(18, s)` or less holds) is read as an int64 of its display scale
-from the stored header and digits of base 10000, without detoasting a
-short varlena; two such compare in int128 at the larger scale, + and -
-keep the larger scale and * the sum of scales as the core's `add_var` and
-`mul_var`, a cast rounds halves away from zero, and a result of at most 18
-digits is written as `make_result` writes it into blocks of the call's
-context; NaN, an infinity, a longer value or result goes to the core's
-function a row (`numeric_cmp` keeping its result for pairs where one side
+`numeric(18, s)` or less holds) is a decimal, an int64 of its display
+scale, which the Rust kernels read from the stored header and digits of
+base 10000 without detoasting a short varlena, compare exactly, add,
+subtract and multiply (+ and - keep the larger scale and * the sum of
+scales as the core's `add_var` and `mul_var`) and cast rounding halves
+away from zero, a batch a call ([kernels.md](kernels.md)); a result of at
+most 18 digits is written as `make_result` writes it into a block of the
+call's context; NaN, an infinity, a longer value or result goes to the
+core's function a row (`numeric_cmp` keeping its result for pairs where one side
 is a cached numeric); and the casts `numeric(int2)`, `numeric(int4)`,
 `numeric(int8)`. A
 numeric of an integer from -1024 to 4095 comes from a block of the

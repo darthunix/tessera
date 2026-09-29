@@ -19,6 +19,7 @@ pub struct Mask {
 
 impl Mask {
     /// The row count and the number of words.
+    #[inline]
     fn dimensions(&self) -> Result<(usize, usize)> {
         let nrows = usize::try_from(self.nrows).context("a row mask has a negative row count")?;
         let words = nrows.div_ceil(64);
@@ -35,6 +36,7 @@ impl Mask {
     ///
     /// `bits` must point to `nrows.div_ceil(64)` initialized words that stay
     /// valid and unchanged for the borrow.
+    #[inline]
     pub unsafe fn view(&self) -> Result<RowMaskView<'_>> {
         let (nrows, words) = self.dimensions()?;
         let bits = if words == 0 {
@@ -52,6 +54,7 @@ impl Mask {
     ///
     /// As for [`Mask::view`], and nothing else may access the words for the
     /// borrow.
+    #[inline]
     pub unsafe fn mask(&mut self) -> Result<RowMask<'_>> {
         let (nrows, words) = self.dimensions()?;
         let bits = if words == 0 {

@@ -1,17 +1,15 @@
 /*
- * The numeric functions as batch functions, row by row in C over the
- * Datums: the six comparisons, + - * and negation and abs, the casts of
- * integers to numeric and of numeric to int4 and int8.
+ * The numeric functions as batch functions: the six comparisons, + - *
+ * and negation and abs, the casts of integers to numeric and of numeric
+ * to int4 and int8.
  *
  * A value of at most 18 digits, which a column of numeric(18, s) or less
- * always holds, is read as a decimal: an int64 of its display scale, from
- * the stored header and digits of base 10000 without detoasting a short
- * varlena. Two decimals compare in int128 at the larger scale; + and -
- * keep the larger scale and * the sum of scales, as the core's add_var
- * and mul_var, and a result of at most 18 digits is written as
- * make_result writes it (leading and trailing zero digits dropped, the
- * short header) into blocks of the call's context. A NaN, an infinity, a
- * longer value or a longer result goes to the core's function a row
+ * always holds, is a decimal (tessera/decimal.h): the Rust kernels read it
+ * from the stored form without detoasting a short varlena, compare and
+ * compute a batch of them exactly, and write a result of at most 18
+ * digits as make_result writes it, into the call's context, or leave it a
+ * decimal where the call asks for them. A row they leave (NaN, an
+ * infinity, a longer value or result) goes to the core's function
  * (numeric_cmp, numeric_add, ...), whose comparison a call keeps for the
  * pairs of pointers it met when one is a numeric of the cache below
  * (which repeats as its pointer).
@@ -29,8 +27,6 @@
 #include "utils/fmgroids.h"
 #include "utils/fmgrprotos.h"
 #include "utils/memutils.h"
-#include "common/int.h"
-#include "common/int128.h"
 #include "utils/numeric.h"
 #include "varatt.h"
 
@@ -109,65 +105,6 @@ static const NumericFunction numeric_functions[] = {
 	NUMERIC_VALUE(F_INT4_NUMERIC, NUMERIC_TO_INT4, TESS_RESULT_INT32),
 	NUMERIC_VALUE(F_INT8_NUMERIC, NUMERIC_TO_INT8, TESS_RESULT_DATUM),
 };
-
-/* A decimal at a larger scale, exactly: at most 36 digits fit int128. */
-static inline INT128
-decimal_at(TessDecimal decimal, int scale)
-{
-	INT128		result = int64_to_int128(0);
-
-	int128_add_int64_mul_int64(&result, decimal.value,
-							   tess_powers_of_ten[scale - decimal.scale]);
-	return result;
-}
-
-/* Memory for a call's results, carved from blocks of its context. */
-typedef struct NumericArena
-{
-	MemoryContext context;
-	char	   *next;
-	Size		left;
-} NumericArena;
-
-static void *
-arena_alloc(NumericArena *arena, Size size)
-{
-	void	   *result;
-
-	size = MAXALIGN(size);
-	if (size > arena->left)
-	{
-		Size		block = Max(size, 8192);
-
-		arena->next = MemoryContextAlloc(arena->context, block);
-		arena->left = block;
-	}
-	result = arena->next;
-	arena->next += size;
-	arena->left -= size;
-	return result;
-}
-
-/*
- * The numeric of value / 10^scale with that display scale, as make_result
- * writes it (tess_decimal_write_numeric), in the arena: a small integer
- * from the process's cache.
- */
-static Datum
-numeric_of(int64 value, int scale, NumericArena *arena)
-{
-	char	   *result;
-	Size		size;
-
-	if (scale == 0)
-		return NumericGetDatum(tess_numeric_from_int64(value, arena->context));
-	result = arena_alloc(arena, TESS_DECIMAL_NUMERIC_MAX);
-	size = MAXALIGN(tess_decimal_write_numeric(value, scale, result));
-	/* The last block's unused tail goes back to the arena. */
-	arena->next -= TESS_DECIMAL_NUMERIC_MAX - size;
-	arena->left += TESS_DECIMAL_NUMERIC_MAX - size;
-	return PointerGetDatum(result);
-}
 
 /*
  * The small integers the cache keeps (days, months, years, and around),
@@ -251,18 +188,55 @@ numeric_call_valid(const TessFunctionCall *call, int nargs)
 }
 
 /*
- * An argument of a call: a column, with the rows whose Datum is a decimal
- * when it has them, or a scalar, read as a decimal once.
+ * Scratch of a call: masks and scales on the stack for a batch of up to
+ * this many rows, from the call's context (or the current one) beyond.
  */
-typedef struct NumericArg
+#define SCRATCH_ROWS 2048
+
+typedef struct Scratch
 {
-	const TessDatumColumn *column;
-	const uint64 *decimal_rows;
-	int			decimal_scale;
-	Datum		scalar;
-	bool		scalar_decimal;
-	TessDecimal scalar_value;
-} NumericArg;
+	uint64		words[3][SCRATCH_ROWS / 64];
+	uint8		scales[SCRATCH_ROWS];
+} Scratch;
+
+static void *
+scratch(Size size, void *local, Size local_size)
+{
+	return size <= local_size ? local : palloc(size);
+}
+
+static void
+scratch_free(void *pointer, void *local)
+{
+	if (pointer != local)
+		pfree(pointer);
+}
+
+/* An empty mask of the batch's rows over scratch words. */
+static TessRowMask
+scratch_mask(Scratch *space, int index, int nrows)
+{
+	int			nwords = tess_row_mask_word_count(nrows);
+	uint64	   *words = scratch(sizeof(uint64) * nwords, space->words[index],
+								sizeof(space->words[index]));
+
+	/* A batch is a word or a few: no call to memset. */
+	for (int word = 0; word < nwords; word++)
+		words[word] = 0;
+	return (TessRowMask) {nrows, words};
+}
+
+static void
+scratch_mask_free(Scratch *space, int index, TessRowMask *mask)
+{
+	scratch_free(mask->bits, space->words[index]);
+}
+
+static TessDecimalArg
+decimal_arg(const TessFunctionArg *arg)
+{
+	return (TessDecimalArg) {arg->column, arg->scalar};
+}
 
 /* A numeric made on the stack, for the core's function to read. */
 typedef union NumericBuffer
@@ -271,109 +245,24 @@ typedef union NumericBuffer
 	int64		align;
 } NumericBuffer;
 
-static void
-numeric_arg(const TessFunctionArg *arg, NumericArg *result)
+/* A row's value as a numeric Datum: a decimal of the column's written into buffer. */
+static Datum
+arg_numeric(const TessFunctionArg *arg, int row, NumericBuffer *buffer)
 {
-	result->column = arg->column;
-	result->decimal_rows = arg->column != NULL ? tess_column_decimal_rows(arg->column) : NULL;
-	result->decimal_scale = result->decimal_rows != NULL ? arg->column->decimal_scale : 0;
-	result->scalar = arg->scalar;
-	result->scalar_decimal = arg->column == NULL &&
-		tess_decimal_of(arg->scalar, &result->scalar_value);
-}
+	const uint64 *decimals;
+	TessStatus	status = {.struct_size = sizeof(TessStatus)};
+	Size		size;
 
-static inline bool
-arg_null(const NumericArg *arg, int row)
-{
-	return arg->column != NULL && arg->column->isnull[row];
-}
-
-static inline bool
-arg_is_decimal(const NumericArg *arg, int row)
-{
-	return arg->decimal_rows != NULL && ((arg->decimal_rows[row / 64] >> (row % 64)) & 1) != 0;
-}
-
-/* A row's value as a decimal: the column's own, its numeric read, the scalar's. */
-static inline bool
-arg_decimal(const NumericArg *arg, int row, TessDecimal *decimal)
-{
-	if (arg->column == NULL)
-	{
-		*decimal = arg->scalar_value;
-		return arg->scalar_decimal;
-	}
-	if (arg_is_decimal(arg, row))
-	{
-		decimal->value = DatumGetInt64(arg->column->values[row]);
-		decimal->scale = arg->decimal_scale;
-		return true;
-	}
-	return tess_decimal_of(arg->column->values[row], decimal);
-}
-
-/* A row's value as a numeric Datum: a decimal written into buffer. */
-static inline Datum
-arg_numeric(const NumericArg *arg, int row, NumericBuffer *buffer)
-{
 	if (arg->column == NULL)
 		return arg->scalar;
-	if (arg_is_decimal(arg, row))
-	{
-		(void) tess_decimal_write_numeric(DatumGetInt64(arg->column->values[row]),
-										  arg->decimal_scale, buffer->bytes);
-		return PointerGetDatum(buffer->bytes);
-	}
-	return arg->column->values[row];
-}
-
-/* Where a call writes its results: numerics, or decimals where it asks. */
-typedef struct NumericResults
-{
-	Datum	   *values;
-	uint64	   *decimal_bits;
-	int			scale;
-	NumericArena arena;
-} NumericResults;
-
-static void
-results_init(TessFunctionCall *call, NumericResults *out)
-{
-	out->values = (Datum *) call->values;
-	out->decimal_bits = NULL;
-	out->scale = 0;
-	if (call->struct_size >= TESS_FUNCTION_CALL_DECIMALS_SIZE && call->decimal_rows != NULL)
-	{
-		out->decimal_bits = call->decimal_rows->bits;
-		out->scale = call->result_scale;
-	}
-	out->arena.context = call->context;
-	out->arena.next = NULL;
-	out->arena.left = 0;
-}
-
-/*
- * A row's exact result at a scale: a decimal where the call takes one of
- * that scale, else its numeric; false past 18 digits, for the core's
- * function.
- */
-static inline bool
-out_result(NumericResults *out, int row, INT128 value, int scale)
-{
-	int64		result;
-
-	if (int128_compare(value, int64_to_int128(-tess_powers_of_ten[TESS_DECIMAL_DIGITS] + 1)) < 0 ||
-		int128_compare(value, int64_to_int128(tess_powers_of_ten[TESS_DECIMAL_DIGITS] - 1)) > 0)
-		return false;
-	result = int128_to_int64(value);
-	if (out->decimal_bits != NULL && scale == out->scale)
-	{
-		out->values[row] = Int64GetDatum(result);
-		out->decimal_bits[row / 64] |= UINT64CONST(1) << (row % 64);
-	}
-	else
-		out->values[row] = numeric_of(result, scale, &out->arena);
-	return true;
+	decimals = tess_column_decimal_rows(arg->column);
+	if (decimals == NULL || ((decimals[row / 64] >> (row % 64)) & 1) == 0)
+		return arg->column->values[row];
+	if (tess_decimal_write_datum(DatumGetInt64(arg->column->values[row]),
+								 arg->column->decimal_scale, buffer->bytes,
+								 sizeof(buffer->bytes), &size, &status) != TESS_OK)
+		elog(ERROR, "Tessera could not write a decimal: %s", status.message);
+	return PointerGetDatum(buffer->bytes);
 }
 
 /* The comparisons a call remembers, by the pair of pointers. */
@@ -387,99 +276,95 @@ typedef struct ComparePair
 	bool		valid;
 } ComparePair;
 
+static bool
+compare_holds(NumericOp op, int32 order)
+{
+	switch (op)
+	{
+		case NUMERIC_EQ:
+			return order == 0;
+		case NUMERIC_NE:
+			return order != 0;
+		case NUMERIC_LT:
+			return order < 0;
+		case NUMERIC_LE:
+			return order <= 0;
+		case NUMERIC_GT:
+			return order > 0;
+		default:
+			return order >= 0;
+	}
+}
+
 /*
- * numeric =, <>, <, <=, > and >= of columns or a column and a scalar,
- * NaN equal to itself and above every number as the core orders it.
+ * numeric =, <>, <, <=, > and >= of columns or a column and a scalar:
+ * the decimals by the kernels, the rest by numeric_cmp, NaN equal to
+ * itself and above every number as the core orders it.
  */
 static TessStatusCode
 numeric_compare_evaluate(TessFunctionCall *call)
 {
+	static const TessCompareOp compares[] = {
+		[NUMERIC_EQ] = TESS_CMP_EQ, [NUMERIC_NE] = TESS_CMP_NE,
+		[NUMERIC_LT] = TESS_CMP_LT, [NUMERIC_LE] = TESS_CMP_LE,
+		[NUMERIC_GT] = TESS_CMP_GT, [NUMERIC_GE] = TESS_CMP_GE,
+	};
 	NumericOp	op;
 	ComparePair cache[COMPARE_CACHE_SIZE] = {{0}};
-	NumericArg	args[2];
+	TessDecimalArg args[2];
+	Scratch		space;
+	TessRowMask rest;
+	TessStatusCode code;
 	int			nwords;
 
 	if (!numeric_call_valid(call, 2))
 		return numeric_invalid(call, "a numeric comparison takes two arguments");
 	op = numeric_op(call);
-	numeric_arg(&call->args[0], &args[0]);
-	numeric_arg(&call->args[1], &args[1]);
+	args[0] = decimal_arg(&call->args[0]);
+	args[1] = decimal_arg(&call->args[1]);
+	rest = scratch_mask(&space, 0, call->rows->nrows);
+	code = tess_decimal_filter(compares[op], &args[0], &args[1], call->rows, &rest,
+							   call->status);
+	if (code != TESS_OK)
+	{
+		scratch_mask_free(&space, 0, &rest);
+		return code;
+	}
 	nwords = tess_row_mask_word_count(call->rows->nrows);
 	for (int word = 0; word < nwords; word++)
 	{
-		uint64		look = call->rows->bits[word];
-		uint64		keep = 0;
-
-		for (; look != 0; look &= look - 1)
+		for (uint64 look = rest.bits[word]; look != 0; look &= look - 1)
 		{
 			int			bit = pg_rightmost_one_pos64(look);
 			int			row = word * 64 + bit;
-			TessDecimal left_decimal;
-			TessDecimal right_decimal;
-			int32		last;
-			bool		result;
+			NumericBuffer left_buffer;
+			NumericBuffer right_buffer;
+			Datum		left = arg_numeric(&call->args[0], row, &left_buffer);
+			Datum		right = arg_numeric(&call->args[1], row, &right_buffer);
+			int32		order;
 
-			if (arg_null(&args[0], row) || arg_null(&args[1], row))
-				continue;
-			if (arg_decimal(&args[0], row, &left_decimal) &&
-				arg_decimal(&args[1], row, &right_decimal))
-			{
-				int			scale = Max(left_decimal.scale, right_decimal.scale);
-
-				last = int128_compare(decimal_at(left_decimal, scale),
-									  decimal_at(right_decimal, scale));
-			}
+			/* A table's values rarely repeat a pointer: only the cache's are kept. */
+			if (!small_numeric(left) && !small_numeric(right))
+				order = DatumGetInt32(DirectFunctionCall2(numeric_cmp, left, right));
 			else
 			{
-				NumericBuffer left_buffer;
-				NumericBuffer right_buffer;
-				Datum		left = arg_numeric(&args[0], row, &left_buffer);
-				Datum		right = arg_numeric(&args[1], row, &right_buffer);
+				/* Slots are 16 bytes apart: the bits above tell them apart. */
+				ComparePair *pair = &cache[((left ^ right) >> 4) % COMPARE_CACHE_SIZE];
 
-				/* A table's values rarely repeat a pointer: only the cache's are kept. */
-				if (!small_numeric(left) && !small_numeric(right))
-					last = DatumGetInt32(DirectFunctionCall2(numeric_cmp, left, right));
-				else
+				if (!pair->valid || pair->left != left || pair->right != right)
 				{
-					/* Slots are 16 bytes apart: the bits above tell them apart. */
-					ComparePair *pair = &cache[((left ^ right) >> 4) % COMPARE_CACHE_SIZE];
-
-					if (!pair->valid || pair->left != left || pair->right != right)
-					{
-						pair->result = DatumGetInt32(DirectFunctionCall2(numeric_cmp, left, right));
-						pair->left = left;
-						pair->right = right;
-						pair->valid = true;
-					}
-					last = pair->result;
+					pair->result = DatumGetInt32(DirectFunctionCall2(numeric_cmp, left, right));
+					pair->left = left;
+					pair->right = right;
+					pair->valid = true;
 				}
+				order = pair->result;
 			}
-			switch (op)
-			{
-				case NUMERIC_EQ:
-					result = last == 0;
-					break;
-				case NUMERIC_NE:
-					result = last != 0;
-					break;
-				case NUMERIC_LT:
-					result = last < 0;
-					break;
-				case NUMERIC_LE:
-					result = last <= 0;
-					break;
-				case NUMERIC_GT:
-					result = last > 0;
-					break;
-				default:
-					result = last >= 0;
-					break;
-			}
-			if (result)
-				keep |= UINT64CONST(1) << bit;
+			if (compare_holds(op, order))
+				call->rows->bits[word] |= UINT64CONST(1) << bit;
 		}
-		call->rows->bits[word] = keep;
 	}
+	scratch_mask_free(&space, 0, &rest);
 	return TESS_OK;
 }
 
@@ -492,7 +377,8 @@ numeric_cast_evaluate(TessFunctionCall *call)
 {
 	const TessDatumColumn *column;
 	bool		wide;
-	NumericResults	out;
+	Datum	   *values;
+	uint64	   *decimals = NULL;
 	int			nwords;
 
 	if (!numeric_call_valid(call, 1) || call->values == NULL ||
@@ -501,7 +387,10 @@ numeric_cast_evaluate(TessFunctionCall *call)
 		return numeric_invalid(call, "a numeric cast takes a column");
 	column = call->args[0].column;
 	wide = numeric_op(call) == NUMERIC_FROM_INT8;
-	results_init(call, &out);
+	values = (Datum *) call->values;
+	if (call->struct_size >= TESS_FUNCTION_CALL_DECIMALS_SIZE && call->decimal_rows != NULL &&
+		call->result_scale == 0)
+		decimals = call->decimal_rows->bits;
 	nwords = tess_row_mask_word_count(call->rows->nrows);
 	for (int word = 0; word < nwords; word++)
 	{
@@ -518,77 +407,18 @@ numeric_cast_evaluate(TessFunctionCall *call)
 				continue;
 			value = wide ? DatumGetInt64(column->values[row]) :
 				DatumGetInt32(column->values[row]);
-			if (out.decimal_bits != NULL && out.scale == 0)
+			if (decimals != NULL)
 			{
-				out.values[row] = Int64GetDatum(value);
-				out.decimal_bits[word] |= UINT64CONST(1) << bit;
+				values[row] = Int64GetDatum(value);
+				decimals[word] |= UINT64CONST(1) << bit;
 			}
 			else
-				out.values[row] = NumericGetDatum(tess_numeric_from_int64(value, call->context));
+				values[row] = NumericGetDatum(tess_numeric_from_int64(value, call->context));
 			present |= UINT64CONST(1) << bit;
 		}
 		call->non_nulls->bits[word] = present;
 	}
 	return TESS_OK;
-}
-
-/*
- * One row's result by the decimals: + and - at the larger scale, * at the
- * sum of scales, as add_var and mul_var; int4 and int8 rounded half away
- * from zero, as round_var. False for the core's function.
- */
-static inline bool
-decimal_value(NumericOp op, TessDecimal left, TessDecimal right, NumericResults *out, int row)
-{
-	INT128		value = int64_to_int128(0);
-	int			scale;
-
-	switch (op)
-	{
-		case NUMERIC_ADD:
-		case NUMERIC_SUB:
-			scale = Max(left.scale, right.scale);
-			int128_add_int64_mul_int64(&value, left.value, tess_powers_of_ten[scale - left.scale]);
-			if (op == NUMERIC_ADD)
-				int128_add_int64_mul_int64(&value, right.value,
-										   tess_powers_of_ten[scale - right.scale]);
-			else
-				int128_sub_int64_mul_int64(&value, right.value,
-										   tess_powers_of_ten[scale - right.scale]);
-			return out_result(out, row, value, scale);
-		case NUMERIC_MUL:
-			int128_add_int64_mul_int64(&value, left.value, right.value);
-			return out_result(out, row, value, left.scale + right.scale);
-		case NUMERIC_NEGATE:
-			int128_sub_int64_mul_int64(&value, left.value, 1);
-			return out_result(out, row, value, left.scale);
-		case NUMERIC_ABS:
-			if (left.value < 0)
-				int128_sub_int64_mul_int64(&value, left.value, 1);
-			else
-				value = int64_to_int128(left.value);
-			return out_result(out, row, value, left.scale);
-		default:
-			{
-				int64		unit = tess_powers_of_ten[left.scale];
-				int64		whole = left.value / unit;
-				int64		rest = left.value % unit;
-
-				if (rest * 2 >= unit)
-					whole++;
-				else if (rest * 2 <= -unit)
-					whole--;
-				if (op == NUMERIC_TO_INT4)
-				{
-					if (whole < PG_INT32_MIN || whole > PG_INT32_MAX)
-						return false;
-					((int32 *) out->values)[row] = (int32) whole;
-				}
-				else
-					out->values[row] = Int64GetDatum(whole);
-				return true;
-			}
-	}
 }
 
 /* The core's function of the operation, for a row the decimals do not take. */
@@ -615,17 +445,65 @@ numeric_core(NumericOp op, Datum left, Datum right)
 }
 
 /*
+ * The numerics of the results the call does not keep as decimals: a small
+ * integer from the cache, the others written by the kernels into one block
+ * of the call's context.
+ */
+static TessStatusCode
+write_numerics(TessFunctionCall *call, const uint8 *scales, TessRowMask *write)
+{
+	Datum	   *values = (Datum *) call->values;
+	int			nwords = tess_row_mask_word_count(write->nrows);
+	uint64		count = 0;
+	char	   *space;
+	Size		used;
+	TessStatusCode code;
+
+	for (int word = 0; word < nwords; word++)
+	{
+		for (uint64 look = write->bits[word]; look != 0; look &= look - 1)
+		{
+			int			bit = pg_rightmost_one_pos64(look);
+			int			row = word * 64 + bit;
+			int64		value = DatumGetInt64(values[row]);
+
+			if (scales[row] == 0 && value >= SMALL_NUMERIC_MIN && value < SMALL_NUMERIC_MAX)
+			{
+				values[row] = NumericGetDatum(tess_numeric_from_int64(value, call->context));
+				write->bits[word] &= ~(UINT64CONST(1) << bit);
+			}
+		}
+		count += pg_popcount64(write->bits[word]);
+	}
+	if (count == 0)
+		return TESS_OK;
+	space = MemoryContextAlloc(call->context, count * TESS_DECIMAL_NUMERIC_MAX);
+	code = tess_decimal_write(values, scales, -1, write, space,
+							  count * TESS_DECIMAL_NUMERIC_MAX, &used, call->status);
+	return code;
+}
+
+/*
  * numeric + - * of any shape, unary - and abs, int4(numeric) and
- * int8(numeric): the decimals where both arguments are and the result
- * fits, the core's function in the call's context otherwise.
+ * int8(numeric): the decimals by the kernels where both arguments are
+ * decimals and the result fits, the core's function in the call's context
+ * for the rest.
  */
 static TessStatusCode
 numeric_value_evaluate(TessFunctionCall *call)
 {
+	static const TessDecimalOp operations[] = {
+		[NUMERIC_ADD] = TESS_DECIMAL_ADD, [NUMERIC_SUB] = TESS_DECIMAL_SUB,
+		[NUMERIC_MUL] = TESS_DECIMAL_MUL, [NUMERIC_NEGATE] = TESS_DECIMAL_NEGATE,
+		[NUMERIC_ABS] = TESS_DECIMAL_ABS,
+	};
 	NumericOp	op;
 	int			nargs;
-	NumericArg	args[2];
-	NumericResults	out;
+	int			nrows;
+	TessDecimalArg args[2];
+	Scratch		space;
+	TessRowMask rest;
+	TessStatusCode code;
 	MemoryContext old;
 	int			nwords;
 
@@ -636,47 +514,67 @@ numeric_value_evaluate(TessFunctionCall *call)
 	if (!numeric_call_valid(call, nargs) || call->values == NULL ||
 		call->non_nulls == NULL || call->context == NULL)
 		return numeric_invalid(call, "a numeric function takes its arguments");
-	numeric_arg(&call->args[0], &args[0]);
-	if (nargs == 2)
-		numeric_arg(&call->args[1], &args[1]);
-	results_init(call, &out);
+	args[0] = decimal_arg(&call->args[0]);
+	args[1] = nargs == 2 ? decimal_arg(&call->args[1]) : args[0];
+	nrows = call->rows->nrows;
+	rest = scratch_mask(&space, 0, nrows);
+	if (op == NUMERIC_TO_INT4)
+		code = tess_decimal_to_int4(&args[0], call->rows, (int32 *) call->values,
+									call->non_nulls, &rest, call->status);
+	else if (op == NUMERIC_TO_INT8)
+		code = tess_decimal_to_int8(&args[0], call->rows, (int64 *) call->values,
+									call->non_nulls, &rest, call->status);
+	else
+	{
+		bool		asks = call->struct_size >= TESS_FUNCTION_CALL_DECIMALS_SIZE &&
+			call->decimal_rows != NULL;
+		TessRowMask decimals = asks ? *call->decimal_rows : scratch_mask(&space, 1, nrows);
+		TessRowMask write = scratch_mask(&space, 2, nrows);
+		uint8	   *scales = scratch(nrows, space.scales, sizeof(space.scales));
+
+		code = tess_decimal_compute(operations[op], &args[0], &args[1], call->rows,
+									asks ? call->result_scale : -1,
+									(int64 *) call->values, scales, call->non_nulls,
+									&decimals, &rest, call->status);
+		if (code == TESS_OK)
+		{
+			for (int word = 0; word < tess_row_mask_word_count(nrows); word++)
+				write.bits[word] = call->non_nulls->bits[word] & ~rest.bits[word] &
+					~decimals.bits[word];
+			code = write_numerics(call, scales, &write);
+		}
+		scratch_free(scales, space.scales);
+		scratch_mask_free(&space, 2, &write);
+		if (!asks)
+			scratch_mask_free(&space, 1, &decimals);
+	}
+	if (code != TESS_OK)
+	{
+		scratch_mask_free(&space, 0, &rest);
+		return code;
+	}
 	old = MemoryContextSwitchTo(call->context);
-	nwords = tess_row_mask_word_count(call->rows->nrows);
+	nwords = tess_row_mask_word_count(nrows);
 	for (int word = 0; word < nwords; word++)
 	{
-		uint64		look = call->rows->bits[word];
-		uint64		present = 0;
-
-		for (; look != 0; look &= look - 1)
+		for (uint64 look = rest.bits[word]; look != 0; look &= look - 1)
 		{
-			int			bit = pg_rightmost_one_pos64(look);
-			int			row = word * 64 + bit;
-			TessDecimal left = {0};
-			TessDecimal right = {0};
+			int			row = word * 64 + pg_rightmost_one_pos64(look);
+			NumericBuffer left_buffer;
+			NumericBuffer right_buffer;
+			Datum		result;
 
-			if (arg_null(&args[0], row) || (nargs == 2 && arg_null(&args[1], row)))
-				continue;
-			if (!arg_decimal(&args[0], row, &left) ||
-				(nargs == 2 && !arg_decimal(&args[1], row, &right)) ||
-				!decimal_value(op, left, right, &out, row))
-			{
-				NumericBuffer left_buffer;
-				NumericBuffer right_buffer;
-				Datum		result;
-
-				result = numeric_core(op, arg_numeric(&args[0], row, &left_buffer),
-									  nargs == 2 ? arg_numeric(&args[1], row, &right_buffer) :
-									  (Datum) 0);
-				if (op == NUMERIC_TO_INT4)
-					((int32 *) call->values)[row] = DatumGetInt32(result);
-				else
-					out.values[row] = result;
-			}
-			present |= UINT64CONST(1) << bit;
+			result = numeric_core(op, arg_numeric(&call->args[0], row, &left_buffer),
+								  nargs == 2 ? arg_numeric(&call->args[1], row, &right_buffer) :
+								  (Datum) 0);
+			if (op == NUMERIC_TO_INT4)
+				((int32 *) call->values)[row] = DatumGetInt32(result);
+			else
+				((Datum *) call->values)[row] = result;
 		}
-		call->non_nulls->bits[word] = present;
 	}
 	MemoryContextSwitchTo(old);
+	scratch_mask_free(&space, 0, &rest);
 	return TESS_OK;
 }
 

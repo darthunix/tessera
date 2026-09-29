@@ -1,197 +1,193 @@
 /*
- * A numeric of at most 18 digits read as an int64 of its display scale,
- * straight from its stored form, for the batch functions of numeric and
- * the aggregates that fold numeric values themselves.
+ * Decimals: numeric values of at most 18 digits as an int64 at their
+ * display scale, read straight from the stored form of numeric, computed
+ * exactly and written back as the core's make_result writes them. The C
+ * entry points of the Rust kernels (tessera_kernels::decimal), for the
+ * batch functions of numeric, a heap batch's decimals and the aggregates
+ * that fold numeric values themselves; modules that do not link the
+ * kernels reach the ones they need through TessKernelOps.
  *
- * The stored form is the core's (utils/adt/numeric.c): after the varlena
- * header, a short header word (0x8000 set: 0x2000 the sign, 0x1F80 the
- * display scale, 0x0040 and 0x003F the weight) or a long one (the sign in
- * 0xC000, the display scale in 0x3FFF, then an int16 weight), then the
- * digits of base 10000 from the highest, each at 10000^(weight - i); a
- * header 0xC000 and above is NaN or an infinity. A value of a short
- * varlena, as a table's usually is, is read in place.
+ * A numeric is read in place from a varlena of either header: after it, a
+ * short header word (0x8000 set: 0x2000 the sign, 0x1F80 the display
+ * scale, 0x0040 and 0x003F the weight) or a long one (the sign in 0xC000,
+ * the display scale in 0x3FFF, then an int16 weight), then the digits of
+ * base 10000 from the highest. A compressed or external value, NaN, an
+ * infinity, a display scale past 18 and a value of more than 18 digits are
+ * not decimals: the calls leave such a row to the caller, which takes it
+ * by the core's function. A result keeps the core's scale: + and - the
+ * larger, * the sum (up to 36), a cast to an integer rounds half away from
+ * zero.
+ *
+ * The calls follow tessera/kernels.h: they never raise ERROR nor call
+ * PostgreSQL, and return a status. They read the selected rows alone: the
+ * NULL flag of each must be initialized, and a non-NULL value must be a
+ * numeric Datum pointing to a whole varlena or, in the column's decimal
+ * side (TessDatumColumn.decimal_rows), the decimal itself. Every mask has
+ * the row count of the selection, and so has every array.
  */
 #ifndef TESSERA_DECIMAL_H
 #define TESSERA_DECIMAL_H
 
 #include "postgres.h"
 
-#include "common/int.h"
-#include "varatt.h"
+#include "tessera/kernels.h"
 
-/* A numeric of at most 18 digits: its value at its display scale. */
-typedef struct TessDecimal
-{
-	int64		value;
-	int			scale;
-} TessDecimal;
-
+/* The most digits of a decimal. */
 #define TESS_DECIMAL_DIGITS 18
 
-static const int64 tess_powers_of_ten[TESS_DECIMAL_DIGITS + 1] = {
-	INT64CONST(1), INT64CONST(10), INT64CONST(100), INT64CONST(1000),
-	INT64CONST(10000), INT64CONST(100000), INT64CONST(1000000),
-	INT64CONST(10000000), INT64CONST(100000000), INT64CONST(1000000000),
-	INT64CONST(10000000000), INT64CONST(100000000000),
-	INT64CONST(1000000000000), INT64CONST(10000000000000),
-	INT64CONST(100000000000000), INT64CONST(1000000000000000),
-	INT64CONST(10000000000000000), INT64CONST(100000000000000000),
-	INT64CONST(1000000000000000000)
-};
-
-/*
- * The decimal of a numeric Datum, read from its stored header (short:
- * sign, display scale and weight in one word; long: sign and scale, then
- * the weight) and its digits of base 10000, each the value's digits at
- * 10000^(weight - i); false for a compressed or external value, NaN, an
- * infinity, a scale past 18 or a value of more than 18 digits.
- */
-static inline bool
-tess_decimal_of(Datum datum, TessDecimal *result)
-{
-	struct varlena *pointer = (struct varlena *) DatumGetPointer(datum);
-	const char *data;
-	int			len;
-	uint16		header;
-	int			weight;
-	int			scale;
-	int			offset;
-	int			ndigits;
-	int			exponent;
-	bool		negative;
-	int64		value = 0;
-
-	if (VARATT_IS_EXTENDED(pointer) && !VARATT_IS_SHORT(pointer))
-		return false;
-	data = VARDATA_ANY(pointer);
-	len = VARSIZE_ANY_EXHDR(pointer);
-	if (len < (int) sizeof(uint16))
-		return false;
-	memcpy(&header, data, sizeof(uint16));
-	if ((header & 0xC000) == 0xC000)
-		return false;			/* NaN or an infinity */
-	if ((header & 0x8000) != 0)
-	{
-		/* Short: 0x2000 the sign, 0x1F80 the scale, 0x0040 and 0x003F the weight. */
-		negative = (header & 0x2000) != 0;
-		scale = (header & 0x1F80) >> 7;
-		weight = (header & 0x0040) != 0 ? (int) (~0x003F | (header & 0x003F)) :
-			(int) (header & 0x003F);
-		offset = sizeof(uint16);
-	}
-	else
-	{
-		int16		long_weight;
-
-		if (len < (int) (2 * sizeof(uint16)))
-			return false;
-		negative = (header & 0xC000) == 0x4000;
-		scale = header & 0x3FFF;
-		memcpy(&long_weight, data + sizeof(uint16), sizeof(int16));
-		weight = long_weight;
-		offset = 2 * sizeof(uint16);
-	}
-	ndigits = (len - offset) / (int) sizeof(int16);
-	if (scale > TESS_DECIMAL_DIGITS || ndigits > 5)
-		return false;
-	for (int at = 0; at < ndigits; at++)
-	{
-		int16		digit;
-
-		memcpy(&digit, data + offset + at * sizeof(int16), sizeof(int16));
-		/* Four digits of base 10000 are 16 decimal ones: the fifth is checked. */
-		if (at < 4)
-			value = value * 10000 + digit;
-		else if (pg_mul_s64_overflow(value, 10000, &value) ||
-				 pg_add_s64_overflow(value, digit, &value))
-			return false;
-	}
-	/* The last digit stands at 10000^(weight - ndigits + 1): to the display scale. */
-	exponent = 4 * (weight - ndigits + 1) + scale;
-	if (ndigits == 0)
-		value = 0;
-	else if (exponent >= 0)
-	{
-		if (exponent > TESS_DECIMAL_DIGITS ||
-			pg_mul_s64_overflow(value, tess_powers_of_ten[exponent], &value) ||
-			value >= tess_powers_of_ten[TESS_DECIMAL_DIGITS])
-			return false;
-	}
-	else
-	{
-		/* Digits past the display scale: only zeros the scale does not show. */
-		if (exponent < -TESS_DECIMAL_DIGITS || value % tess_powers_of_ten[-exponent] != 0)
-			return false;
-		value /= tess_powers_of_ten[-exponent];
-	}
-	result->value = negative ? -value : value;
-	result->scale = scale;
-	return true;
-}
-
-/* The most bytes a numeric of an int64 at a scale up to 63 takes. */
+/* The most bytes of a numeric the calls write, varlena header included. */
 #define TESS_DECIMAL_NUMERIC_MAX 32
 
-/*
- * Write the numeric of value / 10^scale with that display scale into out,
- * at least TESS_DECIMAL_NUMERIC_MAX bytes aligned for an int32, as the
- * core's make_result writes it: the digits of base 10000 aligned to the
- * decimal point, leading and trailing zero digits dropped, zero positive at
- * weight 0, the short header, which such a weight and a scale up to 63
- * always fit. The varlena's size is returned.
- */
-static inline Size
-tess_decimal_write_numeric(int64 value, int scale, void *out)
+/* An argument: a column, or a scalar numeric (never NULL) without one. */
+typedef struct TessDecimalArg
 {
-	int16		digits[8];
-	int			ndigits = 0;
-	int			first;
-	int			weight;
-	int			part = scale % 4;
-	int			pad = (4 - part) % 4;
-	uint64		magnitude = value < 0 ? -(uint64) value : (uint64) value;
-	Size		size;
-	char	   *data = (char *) out + VARHDRSZ;
-	uint16		header;
+	const TessDatumColumn *column;
+	Datum		scalar;
+} TessDecimalArg;
 
-	/*
-	 * Digits from the lowest: first the fraction's partial group, its part
-	 * digits padded to four, then whole groups; the lowest (scale + pad) / 4
-	 * are the fraction's.
-	 */
-	if (part != 0)
-	{
-		digits[ndigits++] = (int16) ((magnitude % tess_powers_of_ten[part]) *
-									 tess_powers_of_ten[pad]);
-		magnitude /= tess_powers_of_ten[part];
-	}
-	while (magnitude != 0)
-	{
-		digits[ndigits++] = (int16) (magnitude % 10000);
-		magnitude /= 10000;
-	}
-	/* A partial group of zeros under nothing else: the value is zero. */
-	while (ndigits > 0 && digits[ndigits - 1] == 0)
-		ndigits--;
-	weight = ndigits - (scale + pad) / 4 - 1;
-	/* Trailing zero digits are the lowest: skip them. */
-	first = 0;
-	while (first < ndigits && digits[first] == 0)
-		first++;
-	if (first == ndigits)
-	{
-		ndigits = 0;
-		weight = 0;
-	}
-	size = VARHDRSZ + sizeof(uint16) + (ndigits - first) * sizeof(int16);
-	SET_VARSIZE(out, size);
-	header = 0x8000 | (value < 0 && ndigits > 0 ? 0x2000 : 0) |
-		(scale << 7) | (weight < 0 ? 0x0040 : 0) | (weight & 0x003F);
-	memcpy(data, &header, sizeof(uint16));
-	/* The highest digit first. */
-	for (int at = ndigits - 1, index = 0; at >= first; at--, index++)
-		memcpy(data + sizeof(uint16) + index * sizeof(int16), &digits[at], sizeof(int16));
-	return size;
-}
+/* An operation of tess_decimal_compute. */
+typedef enum TessDecimalOp
+{
+	TESS_DECIMAL_ADD = 0,
+	TESS_DECIMAL_SUB = 1,
+	TESS_DECIMAL_MUL = 2,
+	TESS_DECIMAL_NEGATE = 3,
+	TESS_DECIMAL_ABS = 4
+} TessDecimalOp;
+
+/*
+ * Narrow rows to the rows where the comparison of two decimals holds, in
+ * numeric_cmp's exact order. A row with a NULL argument leaves; a row whose
+ * arguments are not both decimals leaves too and is set in rest, whose
+ * other bits are cleared, for the caller to compare by the core.
+ */
+extern TessStatusCode tess_decimal_filter(TessCompareOp op,
+										  const TessDecimalArg *left,
+										  const TessDecimalArg *right,
+										  TessRowMask *rows,
+										  TessRowMask *rest,
+										  TessStatus *status);
+
+/*
+ * An operation over the selected rows. non_nulls gets the rows without a
+ * NULL argument, rest the ones of them left to the caller (an argument
+ * that is not a decimal, a result past 18 digits), and every other row of
+ * non_nulls its result: the value in values, the scale in scales, and,
+ * when the scale is scale (not negative), its bit in decimals, whose other
+ * bits are cleared. right is ignored by NEGATE and ABS. Values and scales
+ * of other rows are unspecified.
+ */
+extern TessStatusCode tess_decimal_compute(TessDecimalOp op,
+										   const TessDecimalArg *left,
+										   const TessDecimalArg *right,
+										   const TessRowMask *rows,
+										   int scale,
+										   int64 *values,
+										   uint8 *scales,
+										   TessRowMask *non_nulls,
+										   TessRowMask *decimals,
+										   TessRowMask *rest,
+										   TessStatus *status);
+
+/*
+ * int4(numeric) over the selected rows, rounded half away from zero, with
+ * the masks of tess_decimal_compute: a row that is not a decimal, or whose
+ * integer passes the int4 range, is left in rest, where the core's
+ * function raises its error.
+ */
+extern TessStatusCode tess_decimal_to_int4(const TessDecimalArg *arg,
+										   const TessRowMask *rows,
+										   int32 *values,
+										   TessRowMask *non_nulls,
+										   TessRowMask *rest,
+										   TessStatus *status);
+
+/* int8(numeric), as tess_decimal_to_int4; every decimal's integer fits. */
+extern TessStatusCode tess_decimal_to_int8(const TessDecimalArg *arg,
+										   const TessRowMask *rows,
+										   int64 *values,
+										   TessRowMask *non_nulls,
+										   TessRowMask *rest,
+										   TessStatus *status);
+
+/*
+ * Read the selected rows of a numeric column as decimals: a row taken gets
+ * the Datum of its int64 in values and its bit set in decimals; every
+ * other selected row (NULL, not a decimal, of another scale) gets its
+ * Datum copied into values and its bit cleared; the bits of rows outside
+ * the selection stay. With scales, every decimal is taken and its scale
+ * written there; without, the decimals of *scale, the first decimal's
+ * when it is -1, which is left there. The column's decimal side is read as
+ * decimals.
+ */
+extern TessStatusCode tess_decimal_read(const TessDatumColumn *column,
+										const TessRowMask *rows,
+										int *scale,
+										Datum *values,
+										uint8 *scales,
+										TessRowMask *decimals,
+										TessStatus *status);
+
+/*
+ * A running sum of decimals as the core's numeric sum and avg keep it: the
+ * int128 value (high * 2^64 + low) at the largest display scale met,
+ * below 10^36 in magnitude, and the decimals added.
+ */
+typedef struct TessDecimalSum
+{
+	uint64		low;
+	int64		high;
+	int			scale;
+	int64		count;
+} TessDecimalSum;
+
+/*
+ * Add the selected rows' decimals to *sum, NULL rows skipped: a row that
+ * is not a decimal, or whose addition (or the sum's rescaling to its
+ * scale) would reach 10^36, is set in rest, whose other bits are cleared,
+ * for the caller to add by the core's means. *sum is written on success
+ * only; a sum past its bound or of a scale past 18 is an invalid argument.
+ */
+extern TessStatusCode tess_decimal_sum(const TessDatumColumn *column,
+									   const TessRowMask *rows,
+									   TessDecimalSum *sum,
+									   TessRowMask *rest,
+									   TessStatus *status);
+
+/*
+ * Replace each selected row's decimal in values (an int64 at its scale in
+ * scales, or at scale for every row when scales is NULL) by the pointer to
+ * its numeric, written into space one after another at MAXALIGN'd
+ * offsets. space must be MAXALIGN'd; TESS_DECIMAL_NUMERIC_MAX bytes a row
+ * always suffice, and *used gets the bytes taken.
+ */
+extern TessStatusCode tess_decimal_write(Datum *values,
+										 const uint8 *scales,
+										 int scale,
+										 const TessRowMask *rows,
+										 void *space,
+										 Size len,
+										 Size *used,
+										 TessStatus *status);
+
+/* A numeric Datum as a decimal; *found is false when it is none. */
+extern TessStatusCode tess_decimal_read_datum(Datum datum,
+											  int64 *value,
+											  int *scale,
+											  bool *found,
+											  TessStatus *status);
+
+/*
+ * The numeric of value / 10^scale with that display scale into out, len
+ * bytes of at least TESS_DECIMAL_NUMERIC_MAX aligned for an int32; *size
+ * gets its size. A value of more than 18 digits or a scale outside 0..36
+ * is an invalid argument.
+ */
+extern TessStatusCode tess_decimal_write_datum(int64 value,
+											   int scale,
+											   void *out,
+											   Size len,
+											   Size *size,
+											   TessStatus *status);
 
 #endif							/* TESSERA_DECIMAL_H */

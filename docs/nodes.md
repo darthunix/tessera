@@ -184,7 +184,9 @@ TOAST pointers included, are read from the page as a slot would give them.
 A numeric column the batch reads as decimals too, once a batch, for a
 consumer that asks (`accept_decimals`): the rows of at most 18 digits at the
 scale of the batch's first such value as their int64, the others as their
-numerics, the rows read kept for the next request. The expressions of a
+numerics, the rows read kept for the next request; the kernels read them
+(`tess_decimal_read` through `TessKernelOps`), and without the kernels the
+column goes without decimals. The expressions of a
 node ask for them only for a column two or more of them read
 (`tess_expr_share_inputs`, called by the projection and the qual over their
 expressions), where one decode serves all: `sum(n)`, `avg(n)`, `min(n)` and
@@ -1048,7 +1050,14 @@ approximate type and the core's own parallel plans do; the node has no
 reason to yet, its time a row going to reading the rows, not to adding.
 Against the core's functions over the same scan (2 M rows of
 `numeric(15,2)`): `sum` and `avg` by 100 groups 80 ms and 55, `sum`, `avg`,
-`min` and `max` without groups 101 and 56. A numeric aggregate of its own,
+`min` and `max` without groups 101 and 56. The values' decimals the Rust
+kernels read, a batch a call: without groups, `sum` and `avg` add a
+batch's decimals to the state in the same pass (`tess_decimal_sum`, the
+rows it leaves row by row), and `min` and `max` find the batch's extreme
+decimal in one pass, a later row taking an equal value, and fold it in
+once (a batch with a value that is not a decimal goes row by row, in its
+order); with groups each decimal goes straight into its group's state.
+The kernels without, the numeric aggregates are the core's. A numeric aggregate of its own,
 not DISTINCT, asks the projection for its argument's decimals
 (`accept_decimals`) and folds a numeric chain's int64 values without a
 numeric made or read: `min(n * 1.08)`, `max(n - 0.5)` by 10 groups 97 ms
