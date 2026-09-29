@@ -257,13 +257,16 @@ DROP TABLE index_b;
 RESET enable_seqscan;
 RESET enable_indexscan;
 
--- The full scan against the index scans, ranked by the node's times
--- (tessera.scan_page_cost and the rest): the node's full scan is faster
--- than its index scans far below the share of rows where the core's are
--- equal, so past that share it costs just below them. k scattered, id
--- in the table's order, both indexed; a few rows keep the index, many
--- take the full scan, an index-only scan, an index scan and a bitmap
--- alike; an order with a limit keeps the index.
+-- The scans ranked by the node's times (tessera.scan_page_cost and the
+-- rest): the node's full scan is faster than its index scans far below
+-- the share of rows where the core's are equal, so past that share it
+-- costs just below them. k scattered, id in the table's order, both
+-- indexed; a few rows keep the index, many take the full scan, an
+-- index-only scan, an index scan and a bitmap alike; an order with a
+-- limit keeps the index. A bitmap of the ordered id reads the pages its
+-- rows fill in order, fewer than the core estimates for rows at random,
+-- and is faster than the index scan: the node's bitmap takes its place,
+-- though the core's add_path had dropped the core's.
 CREATE TABLE index_r AS
 SELECT g AS id, (g::bigint * 7919 % 60000)::int AS k, g % 97 AS w FROM generate_series(1, 60000) AS g;
 CREATE INDEX index_r_id ON index_r (id);
@@ -282,6 +285,25 @@ EXPLAIN (COSTS OFF) SELECT count(*), sum(w) FROM index_r WHERE k < 36000;
 SELECT index_same($$SELECT count(*), sum(w) FROM index_r WHERE k < 36000$$);
 RESET enable_indexscan;
 EXPLAIN (COSTS OFF) SELECT k FROM index_r WHERE k < 36000 ORDER BY k LIMIT 10;
+SELECT index_same($$SELECT count(*), sum(w) FROM index_r WHERE id < 3000$$);
+-- With workers, past that share the node's partial full scan in place of
+-- the core's parallel index scans (the core dropped its serial and its
+-- partial sequential scans for them).
+SET max_parallel_workers_per_gather = 2;
+SET parallel_setup_cost = 0;
+SET parallel_tuple_cost = 0;
+SET min_parallel_table_scan_size = 0;
+SET min_parallel_index_scan_size = 0;
+EXPLAIN (COSTS OFF) SELECT count(*), sum(w) FROM index_r WHERE id < 21000;
+SELECT index_same($$SELECT count(*), sum(w) FROM index_r WHERE id < 21000$$);
+EXPLAIN (COSTS OFF) SELECT count(*) FROM index_r WHERE k < 21000;
+SELECT index_same($$SELECT count(*), sum(k) FROM index_r WHERE k < 21000$$);
+RESET max_parallel_workers_per_gather;
+RESET parallel_setup_cost;
+RESET parallel_tuple_cost;
+RESET min_parallel_table_scan_size;
+RESET min_parallel_index_scan_size;
+SET max_parallel_workers_per_gather = 0;
 -- A table past effective_cache_size keeps the core's costs: its pages
 -- may come from the disk, where reading few of them counts.
 SET effective_cache_size = '64kB';

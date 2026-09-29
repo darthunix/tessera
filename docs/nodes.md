@@ -340,45 +340,72 @@ of the rows where the full scan wins from a quarter (15.1 ms against
 (18.7 against 9.0), an index scan of the ordered `id` up to half where it
 wins from 13 % (28.9 against 8.9).
 
-So after the node's paths of a relation are added, the hook ranks them
-by a model of their times (the parameters above, which `bench/pg/scancost`
+So after the node's paths of a relation are added, the hook ranks the
+paths of its serial list, and then of its partial list, by a model of
+their times (the parameters above, which `bench/pg/scancost`
 fits by least squares): the full scan by the table's pages and rows; an
 index-only scan and an index scan by the rows the index's conditions
 select (an index-only scan's rows on pages not all visible, `allvisfrac`,
-as an index scan's); a bitmap by the pages the core estimates it names
-(`compute_bitmap_pages`) and its rows, a row costing more for an index
-out of the table's order, whose bitmap is built from rows in no order of
-their pages. On this machine (pg-scancost-PdAvZF) the full scan took
+as an index scan's); a bitmap by its pages and rows, a row costing more
+for an index out of the table's order, whose bitmap is built from rows in
+no order of their pages. A bitmap's pages are the core's estimate for
+rows at random places (`compute_bitmap_pages`), moved toward the pages
+its rows fill in the table's order by the square of the index's
+correlation, as the core weighs an index scan's reads: the core
+estimated all 14 500 pages of `bench_idx` for a bitmap of 10 % of the
+ordered `id`, which read 1 450. A scan in the partial list counts a
+participant's share, the time over the path's divisor of participants.
+A scan of the core's is timed as the node's of the same kind, which is
+a floor of the core's own time: the node reads each faster. On this machine (pg-scancost-PdAvZF) the full scan took
 0.26 µs a page and 2 ns a row (its six tables within 12 %), the
 index-only scan 15 ns a row, the index scan 29 (both within 4 %), the
 bitmap 0.17 µs a page and 19 ns a row, 8 more for a scattered column
-(within 5 % but at 1 %). Where the model finds the full scan faster than
-a serial, unparameterized scan of the relation, the full scan costs just
-below it (0.99), never lower, so that the relation's cheapest cost, which
-the joins above read, hardly moves; an ordered index scan stays beside it
-for a sort's comparison. The full scan is made anew where add_path
-dropped it, and from a sequential scan of the node's own where the
-core's add_path dropped the core's for an index scan it costs less. The
-core's scans are left out: its time a unit of cost varied four times
-over its bitmaps, and those the node leaves to the core are short. So is
-a table past `effective_cache_size`, whose pages may come from the disk,
-and a full scan with a clause row by row, which costs more a row than
-the model counts. The bitmap's pages are the core's estimate for rows at
-random; `bench_idx`'s `k` holds its rows in fewer pages (9 300 of 14 500
-at 10 %), so there the full scan is taken for a bitmap somewhat faster
-(8.1 ms against 7.0). Over `bench_idx` (bench/pg/index, pg-index-rwNxrI
+(within 5 % but at 1 %). From the slowest by the model, each of the
+node's unparameterized paths costs just below (0.99) the cheapest of
+those the model finds slower, never lower, so that the relation's
+cheapest cost, which the joins above read, hardly moves; a path above
+that cost is added again at it, and an ordered index scan stays beside
+an unordered path for a sort's comparison. Paths the core's add_path
+dropped join the ranking, made anew: the full scan, from a sequential
+scan of the node's own where the core had dropped its own for an index
+scan it costs less, serial or partial alike, and the node's bitmap of an
+index whose serial scan the list holds, where the core had dropped its
+bitmap for the ordered index scan (a bitmap of 10 % of the ordered `id`
+took 4.0 ms, the index scan 5.7). The node's partial full scan no longer
+waits for the core's serial sequential scan, which the core drops while
+keeping the partial one. The core's own costs do not rank: its time a
+unit of cost varied four times over its bitmaps. Left alone are a table
+past `effective_cache_size`, whose pages may come from the disk, and a
+relation with a clause row by row, which costs more a row than the
+model counts. `bench_idx`'s scattered `k`, of correlation near 0, holds
+its rows in fewer pages than rows at random would fill (9 300 of 14 500
+at 10 %), which the correlation does not tell, so there the full scan is
+taken for a bitmap somewhat faster (8.1 ms against 7.0). Over `bench_idx` (bench/pg/index, pg-index-rwNxrI
 before, pg-index-2VuaPl after, 11 runs, the core's time in the second):
 a bitmap of 30 % 18.3 ms before, 9.1 after (26.8), of 15 % 9.5 and 8.5
 (13.5), an index scan of half the rows 28.9 and 9.1 (35.3), an
 index-only scan of half 15.2 and 7.8 (21.9); the other cases kept their
-plans.
+plans. The whole ranking, pages by correlation and the partial list
+(pg-index-HNnncD and pg-index-w2-I2dXyl before, pg-index-9NpKug and
+pg-index-w2-CpwKrS after, 11 runs): serially the ordered `id` at 10 %
+5.6 ms before, 4.0 after, through the bitmap (the core's 7.0), at 3 %
+1.7 and 1.2, 5 % under an offset 2.7 and 1.8; with two workers a bitmap
+of 30 % 16.7 and 7.7, an index scan of 30 and 50 % 11.0 and 16.5, 7.5
+and 7.7, an index-only scan of half 11.7 and 7.1, the ordered `id` at
+10 % 5.7 and 4.0, where the core's parallel index scan took 5.2.
 
-`test/sql/index.sql` ranks a table of 60 000 rows: a few rows of each
-index keep it, most rows take the full scan, an index-only scan, an
-index scan and a bitmap alike, an order under a limit keeps the index,
-and a table past `effective_cache_size` keeps the core's costs.
-Mutations fail it: no ranking, a ranking without the times, no full
-scan made where the core had dropped its own, no check of the cache.
+`test/sql/index.sql` ranks a table of 60 000 rows: a few rows of the
+scattered index keep it and of the ordered one take its bitmap, most
+rows take the full scan, an index-only scan, an index scan and a bitmap
+alike, an order under a limit keeps the index, with two workers the
+node's partial full scan stands in place of the core's parallel index
+and index-only scans at 35 % of the rows, and a table past
+`effective_cache_size` keeps the core's costs. Mutations fail it: no
+ranking, a ranking without the times, no full scan made where the core
+had dropped its own, no check of the cache, no ranking of the partial
+list, no correlation in a bitmap's pages, the full scan alone ranked, no
+bitmap made where the core had dropped its own, and the partial full
+scan waiting for the serial sequential scan.
 
 ### Index-only mode
 
