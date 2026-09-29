@@ -3,11 +3,17 @@
  * over the words of the columns, a date its days since 2000-01-01 and a
  * timestamp its microseconds: a date plus or minus days and the days
  * between two dates, the casts between date and timestamp, and date_trunc
- * of a timestamp. Each raises what the core's function raises, at the
+ * of a timestamp, a timestamp or a date plus or minus an interval. Each
+ * raises what the core's function raises, at the
  * first row it would: 22008 "date out of range" past the dates, "cannot
  * subtract infinite dates", "timestamp out of range" for a truncation
  * below the first timestamp. An infinite value stays infinite where the
  * core keeps it.
+ *
+ * An interval adds its months through the calendar, clamped to the
+ * month's last day, then its days through the Julian day, then its
+ * microseconds, each step checked, as timestamp_pl_interval does; a date
+ * becomes its timestamp first, as date_pl_interval makes it.
  *
  * date_trunc parses its unit once a call, as the core does a row, and
  * truncates by calendar arithmetic: the time units by the microseconds of
@@ -41,7 +47,11 @@ typedef enum DateOp
 	DATE_MINUS_DATE,
 	TIMESTAMP_TO_DATE,
 	DATE_TO_TIMESTAMP,
-	TIMESTAMP_TRUNC
+	TIMESTAMP_TRUNC,
+	TIMESTAMP_PLUS_INTERVAL,
+	TIMESTAMP_MINUS_INTERVAL,
+	DATE_PLUS_INTERVAL,
+	DATE_MINUS_INTERVAL
 } DateOp;
 
 typedef struct DateFunction
@@ -52,6 +62,7 @@ typedef struct DateFunction
 
 static TessStatusCode date_evaluate(TessFunctionCall *call);
 static TessStatusCode trunc_evaluate(TessFunctionCall *call);
+static TessStatusCode interval_evaluate(TessFunctionCall *call);
 
 #define DATE_FUNCTION(oid, code, format, evaluator) \
 	{{TESS_ABI_INITIALIZER(TESS_FUNCTION_ABI_VERSION, TessFunction), \
@@ -69,6 +80,14 @@ static const DateFunction date_functions[] = {
 	DATE_FUNCTION(F_TIMESTAMP_DATE, DATE_TO_TIMESTAMP, TESS_RESULT_DATUM, date_evaluate),
 	DATE_FUNCTION(F_DATE_TRUNC_TEXT_TIMESTAMP, TIMESTAMP_TRUNC, TESS_RESULT_DATUM,
 				  trunc_evaluate),
+	DATE_FUNCTION(F_TIMESTAMP_PL_INTERVAL, TIMESTAMP_PLUS_INTERVAL, TESS_RESULT_DATUM,
+				  interval_evaluate),
+	DATE_FUNCTION(F_TIMESTAMP_MI_INTERVAL, TIMESTAMP_MINUS_INTERVAL, TESS_RESULT_DATUM,
+				  interval_evaluate),
+	DATE_FUNCTION(F_DATE_PL_INTERVAL, DATE_PLUS_INTERVAL, TESS_RESULT_DATUM,
+				  interval_evaluate),
+	DATE_FUNCTION(F_DATE_MI_INTERVAL, DATE_MINUS_INTERVAL, TESS_RESULT_DATUM,
+				  interval_evaluate),
 };
 
 static DateOp
@@ -410,6 +429,179 @@ trunc_evaluate(TessFunctionCall *call)
 			else if (TIMESTAMP_NOT_FINITE(timestamp))
 				result = timestamp;
 			else if (!truncate_timestamp(timestamp, unit, &result))
+			{
+				call->non_nulls->bits[word] = present;
+				return date_out_of_range(call, "timestamp out of range");
+			}
+			values[row] = TimestampGetDatum(result);
+			present |= UINT64CONST(1) << bit;
+		}
+		call->non_nulls->bits[word] = present;
+	}
+	return TESS_OK;
+}
+
+/* span negated, as interval_um_internal: false when a field overflows. */
+static bool
+negate_interval(const Interval *span, Interval *result)
+{
+	if (INTERVAL_IS_NOBEGIN(span))
+		INTERVAL_NOEND(result);
+	else if (INTERVAL_IS_NOEND(span))
+		INTERVAL_NOBEGIN(result);
+	else if (pg_sub_s64_overflow(INT64CONST(0), span->time, &result->time) ||
+			 pg_sub_s32_overflow(0, span->day, &result->day) ||
+			 pg_sub_s32_overflow(0, span->month, &result->month) ||
+			 INTERVAL_NOT_FINITE(result))
+		return false;
+	return true;
+}
+
+/*
+ * timestamp + span, as timestamp_pl_interval: an infinite interval makes
+ * its infinity, an infinite timestamp stays; false out of range.
+ */
+static bool
+timestamp_plus(Timestamp timestamp, const Interval *span, Timestamp *result)
+{
+	if (INTERVAL_IS_NOBEGIN(span))
+	{
+		if (TIMESTAMP_IS_NOEND(timestamp))
+			return false;
+		TIMESTAMP_NOBEGIN(*result);
+		return true;
+	}
+	if (INTERVAL_IS_NOEND(span))
+	{
+		if (TIMESTAMP_IS_NOBEGIN(timestamp))
+			return false;
+		TIMESTAMP_NOEND(*result);
+		return true;
+	}
+	if (TIMESTAMP_NOT_FINITE(timestamp))
+	{
+		*result = timestamp;
+		return true;
+	}
+	if (span->month != 0)
+	{
+		int64		time;
+		int64		day = timestamp_day(timestamp, &time);
+		int			year;
+		int			month;
+		int			mday;
+
+		/* The date's fields as timestamp2tm gives them, the time kept. */
+		j2date((int) (day + POSTGRES_EPOCH_JDATE), &year, &month, &mday);
+		if (pg_add_s32_overflow(month, span->month, &month))
+			return false;
+		if (month > MONTHS_PER_YEAR)
+		{
+			year += (month - 1) / MONTHS_PER_YEAR;
+			month = ((month - 1) % MONTHS_PER_YEAR) + 1;
+		}
+		else if (month < 1)
+		{
+			year += month / MONTHS_PER_YEAR - 1;
+			month = month % MONTHS_PER_YEAR + MONTHS_PER_YEAR;
+		}
+		if (mday > day_tab[isleap(year)][month - 1])
+			mday = day_tab[isleap(year)][month - 1];
+		/* tm2timestamp's checks. */
+		if (!IS_VALID_JULIAN(year, month, mday) ||
+			pg_mul_s64_overflow((int64) date2j(year, month, mday) - POSTGRES_EPOCH_JDATE,
+								USECS_PER_DAY, &timestamp) ||
+			pg_add_s64_overflow(timestamp, time, &timestamp) ||
+			!IS_VALID_TIMESTAMP(timestamp))
+			return false;
+	}
+	if (span->day != 0)
+	{
+		int64		time;
+		int64		day = timestamp_day(timestamp, &time);
+		int32		julian;
+
+		/* A Julian day from 0 on, as j2date takes; its timestamp in range. */
+		if (pg_add_s32_overflow((int32) (day + POSTGRES_EPOCH_JDATE), span->day, &julian) ||
+			julian < 0 ||
+			pg_mul_s64_overflow((int64) julian - POSTGRES_EPOCH_JDATE, USECS_PER_DAY,
+								&timestamp) ||
+			pg_add_s64_overflow(timestamp, time, &timestamp) ||
+			!IS_VALID_TIMESTAMP(timestamp))
+			return false;
+	}
+	if (pg_add_s64_overflow(timestamp, span->time, &timestamp) ||
+		!IS_VALID_TIMESTAMP(timestamp))
+		return false;
+	*result = timestamp;
+	return true;
+}
+
+/*
+ * A timestamp or a date plus or minus an interval, a timestamp: either
+ * argument a column or a scalar.
+ */
+static TessStatusCode
+interval_evaluate(TessFunctionCall *call)
+{
+	DateOp		op;
+	bool		from_date;
+	bool		minus;
+	Datum	   *values;
+	int			nwords;
+
+	if (!date_call_valid(call, 2))
+		return date_invalid(call, "an interval sum takes two arguments");
+	op = date_op(call);
+	from_date = op == DATE_PLUS_INTERVAL || op == DATE_MINUS_INTERVAL;
+	minus = op == TIMESTAMP_MINUS_INTERVAL || op == DATE_MINUS_INTERVAL;
+	values = (Datum *) call->values;
+	nwords = tess_row_mask_word_count(call->rows->nrows);
+	for (int word = 0; word < nwords; word++)
+	{
+		uint64		look = call->rows->bits[word];
+		uint64		present = 0;
+
+		for (; look != 0; look &= look - 1)
+		{
+			int			bit = pg_rightmost_one_pos64(look);
+			int			row = word * 64 + bit;
+			const Interval *span;
+			Interval	negated;
+			Timestamp	timestamp;
+			Timestamp	result;
+
+			if (arg_null(&call->args[0], row) || arg_null(&call->args[1], row))
+				continue;
+			if (from_date)
+			{
+				DateADT		date = DatumGetDateADT(arg_datum(&call->args[0], row));
+
+				if (DATE_IS_NOBEGIN(date))
+					TIMESTAMP_NOBEGIN(timestamp);
+				else if (DATE_IS_NOEND(date))
+					TIMESTAMP_NOEND(timestamp);
+				else if (date >= (TIMESTAMP_END_JULIAN - POSTGRES_EPOCH_JDATE))
+				{
+					call->non_nulls->bits[word] = present;
+					return date_out_of_range(call, "date out of range for timestamp");
+				}
+				else
+					timestamp = (Timestamp) date * USECS_PER_DAY;
+			}
+			else
+				timestamp = DatumGetTimestamp(arg_datum(&call->args[0], row));
+			span = DatumGetIntervalP(arg_datum(&call->args[1], row));
+			if (minus)
+			{
+				if (!negate_interval(span, &negated))
+				{
+					call->non_nulls->bits[word] = present;
+					return date_out_of_range(call, "interval out of range");
+				}
+				span = &negated;
+			}
+			if (!timestamp_plus(timestamp, span, &result))
 			{
 				call->non_nulls->bits[word] = present;
 				return date_out_of_range(call, "timestamp out of range");

@@ -772,7 +772,9 @@ SELECT types_same($$SELECT count(*) FROM types_t WHERE t COLLATE types_tci = 'KE
 DROP COLLATION types_tci;
 DROP TABLE types_t;
 -- Dates and timestamps in batches: a date plus or minus days, the days
--- between dates, the casts between date and timestamp, date_trunc of a
+-- between dates, the casts between date and timestamp, a timestamp or a
+-- date plus or minus an interval (months clamped to the month's last
+-- day, days, microseconds; infinite intervals), date_trunc of a
 -- timestamp by every unit it knows (a week to its Monday, a decade,
 -- century and millennium as the core rounds years, 1 BC being year 0),
 -- a unit that is a column or one it does not know through the core's
@@ -790,16 +792,18 @@ SELECT i AS id,
                                                         secs => (i * 104729) % 86400000 / 1000.0) END AS ts,
        (ARRAY['week', 'month', 'quarter', 'year', 'decade', 'century', 'millennium', 'day',
               'hour', 'minute', 'second', 'milliseconds', 'us'])[i % 13 + 1] AS unit,
-       i % 400 - 200 AS n
+       i % 400 - 200 AS n,
+       CASE WHEN i % 43 = 0 THEN NULL
+            ELSE make_interval(months => i % 25 - 12, days => i % 61 - 30, secs => i % 1000 * 37.5) END AS iv
 FROM generate_series(1, 4000) AS i;
-INSERT INTO types_dt (id, d, d2, ts, unit, n) VALUES
-    (5001, 'infinity', '-infinity', 'infinity', 'year', 1),
-    (5002, '-infinity', 'infinity', '-infinity', 'week', -1),
-    (5003, '0001-01-01 BC', '0001-12-31 BC', '0001-12-31 23:59:59.999999 BC', 'decade', 0),
-    (5004, '4713-01-01 BC', '2000-12-31', '4713-01-01 12:00 BC', 'century', 3),
-    (5005, '2020-12-28', '2021-01-03', '2021-01-03 23:00', 'week', 7),
-    (5006, '2027-01-01', '2026-12-31', '2026-12-31 23:59:59.5', 'week', 5),
-    (5007, '294276-12-31', '1999-12-31', '294276-12-31 23:59:59.999999', 'millennium', 2);
+INSERT INTO types_dt (id, d, d2, ts, unit, n, iv) VALUES
+    (5001, 'infinity', '-infinity', 'infinity', 'year', 1, '-infinity'),
+    (5002, '-infinity', 'infinity', '-infinity', 'week', -1, 'infinity'),
+    (5003, '0001-01-01 BC', '0001-12-31 BC', '0001-12-31 23:59:59.999999 BC', 'decade', 0, '1 month'),
+    (5004, '4713-01-01 BC', '2000-12-31', '4713-01-01 12:00 BC', 'century', 3, '1 month'),
+    (5005, '2020-12-28', '2021-01-03', '2021-01-03 23:00', 'week', 7, '1 month'),
+    (5006, '2027-01-01', '2026-12-31', '2026-12-31 23:59:59.5', 'week', 5, '1 month'),
+    (5007, '294276-12-31', '1999-12-31', '294276-12-31 23:59:59.999999', 'millennium', 2, '1 month');
 ANALYZE types_dt;
 EXPLAIN (COSTS OFF) SELECT count(*) FROM types_dt WHERE d + 30 > date '2000-01-01' AND d - n < d2 AND d - d2 > 5 AND ts::date = d AND d2::timestamp < date_trunc('month', ts);
                                                                                          QUERY PLAN                                                                                         
@@ -870,6 +874,46 @@ SELECT types_same($$SELECT count(*) FROM types_dt WHERE date_trunc('week', d::ti
  same
 (1 row)
 
+EXPLAIN (COSTS OFF) SELECT ts + interval '1 day 02:00', d - interval '1 month', count(*) FROM types_dt WHERE ts - iv > timestamp '2000-01-01' GROUP BY 1, 2;
+                                         QUERY PLAN                                          
+---------------------------------------------------------------------------------------------
+ Custom Scan (TessAgg)
+   Group Key: (ts + '@ 1 day 2 hours'::interval), (d - '@ 1 mon'::interval)
+   ->  Custom Scan (TessFilter) on types_dt
+         Batch Filter: ((ts - iv) > 'Sat Jan 01 00:00:00 2000'::timestamp without time zone)
+         ->  Custom Scan (TessHeapScan) on types_dt
+(5 rows)
+
+SELECT types_same($$SELECT ts + interval '1 day 02:00', ts - interval '1 month', d + interval '1 month', d - interval '3 days 12:00', count(*) FROM types_dt WHERE id <> 5007 GROUP BY 1, 2, 3, 4$$);
+ types_same 
+------------
+ same
+(1 row)
+
+SELECT types_same($$SELECT ts + interval '1 year 2 months 3 days 04:05:06.789', ts - interval '-13 months -40 days', interval '1 month' + ts, count(*) FROM types_dt WHERE id <> 5007 GROUP BY 1, 2, 3$$);
+ types_same 
+------------
+ same
+(1 row)
+
+SELECT types_same($$SELECT ts + iv, d - iv, ts - iv, count(*) FROM types_dt WHERE id < 5000 GROUP BY 1, 2, 3$$);
+ types_same 
+------------
+ same
+(1 row)
+
+SELECT types_same($$SELECT ts + interval 'infinity', d - interval 'infinity', count(*) FROM types_dt WHERE id NOT IN (5001, 5002) GROUP BY 1, 2$$);
+ types_same 
+------------
+ same
+(1 row)
+
+SELECT types_same($$SELECT count(*) FROM types_dt WHERE id <> 5007 AND (ts + interval '30 days' > timestamp '2000-01-01' OR d - iv < timestamp '1990-01-01')$$);
+ types_same 
+------------
+ same
+(1 row)
+
 \set VERBOSITY terse
 SELECT count(*) FROM types_dt WHERE d + 2147483000 > d;
 ERROR:  date out of range
@@ -887,6 +931,14 @@ SELECT count(*) FROM types_dt WHERE date_trunc('fortnight', ts) > ts;
 ERROR:  unit "fortnight" not recognized for type timestamp without time zone
 SELECT count(*) FROM types_dt WHERE date_trunc('dow', ts) > ts;
 ERROR:  unit "dow" not recognized for type timestamp without time zone
+SELECT count(*) FROM types_dt WHERE ts + interval '300000 years' > ts;
+ERROR:  timestamp out of range
+SELECT count(*) FROM types_dt WHERE ts - make_interval(months => -2147483648) > ts;
+ERROR:  interval out of range
+SELECT count(*) FROM types_dt WHERE id = 5001 AND ts + iv > ts;
+ERROR:  timestamp out of range
+SELECT count(*) FROM types_dt WHERE id = 5007 AND (d + 1) + interval '1 day' > ts;
+ERROR:  date out of range for timestamp
 SET tessera.enable = off;
 SELECT count(*) FROM types_dt WHERE d + 2147483000 > d;
 ERROR:  date out of range
@@ -904,6 +956,14 @@ SELECT count(*) FROM types_dt WHERE date_trunc('fortnight', ts) > ts;
 ERROR:  unit "fortnight" not recognized for type timestamp without time zone
 SELECT count(*) FROM types_dt WHERE date_trunc('dow', ts) > ts;
 ERROR:  unit "dow" not recognized for type timestamp without time zone
+SELECT count(*) FROM types_dt WHERE ts + interval '300000 years' > ts;
+ERROR:  timestamp out of range
+SELECT count(*) FROM types_dt WHERE ts - make_interval(months => -2147483648) > ts;
+ERROR:  interval out of range
+SELECT count(*) FROM types_dt WHERE id = 5001 AND ts + iv > ts;
+ERROR:  timestamp out of range
+SELECT count(*) FROM types_dt WHERE id = 5007 AND (d + 1) + interval '1 day' > ts;
+ERROR:  date out of range for timestamp
 RESET tessera.enable;
 \set VERBOSITY default
 DROP TABLE types_dt;

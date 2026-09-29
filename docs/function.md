@@ -137,7 +137,13 @@ unit is parsed once a call and applied by calendar arithmetic (a week to
 its Monday, the years of a decade, century and millennium as the core
 rounds them, "timestamp out of range" below the first timestamp), a unit
 that is a column or one it does not know going to the core's
-`timestamp_trunc` a row;
+`timestamp_trunc` a row; and `timestamp_pl_interval`,
+`timestamp_mi_interval`, `date_pl_interval` and `date_mi_interval`, a
+timestamp: the interval's months through the calendar, clamped to the
+month's last day, then its days through the Julian day, then its
+microseconds, each step checked as the core checks it ("timestamp out of
+range", "interval out of range" negating one, "date out of range for
+timestamp"), an infinite interval making its infinity;
 and `count(*)`,
 `count(any)`, `sum(int4)`, `min(int4)`, `max(int4)`, `min(int8)` and
 `max(int8)` as aggregates, by the aggregate's own OID. An int4 column
