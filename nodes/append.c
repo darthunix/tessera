@@ -862,9 +862,54 @@ const CustomScanMethods tess_append_scan_methods = {
 	.CreateCustomScanState = append_create_state,
 };
 
+/*
+ * A parent's key filter, handed to every child it reads in the child's own
+ * columns: the node takes it only when every child does, since the parent
+ * checks no more rows once a node below took it; otherwise the children
+ * that took it give it back. NULL takes it back from all.
+ */
+static bool
+append_set_key_filter(CustomScanState *css, const TessKeyFilter *filter)
+{
+	TessAppendState *state = (TessAppendState *) css;
+	int			columns[TESS_TABLE_MAX_KEYS];
+	int			taken = 0;
+
+	if (filter == NULL)
+	{
+		for (int index = 0; index < state->nchildren; index++)
+			(void) tess_input_set_key_filter(state->inputs[index], NULL);
+		return true;
+	}
+	if (state->nchildren < 1 || filter->nkeys < 1 || filter->nkeys > TESS_TABLE_MAX_KEYS)
+		return false;
+	for (; taken < state->nchildren; taken++)
+	{
+		TessKeyFilter child = *filter;
+		bool		mapped = true;
+
+		for (int key = 0; key < filter->nkeys; key++)
+		{
+			if (filter->columns[key] < 0 || filter->columns[key] >= state->ncolumns)
+				mapped = false;
+			else
+				columns[key] = tess_layout_column(&state->layouts[taken], filter->columns[key]);
+		}
+		child.columns = columns;
+		if (!mapped || !tess_input_set_key_filter(state->inputs[taken], &child))
+			break;
+	}
+	if (taken == state->nchildren)
+		return true;
+	for (int index = 0; index < taken; index++)
+		(void) tess_input_set_key_filter(state->inputs[index], NULL);
+	return false;
+}
+
 const TessNode tess_append_node = {
 	TESS_ABI_INITIALIZER(TESS_NODE_ABI_VERSION, TessNode),
 	.name = TESS_APPEND_NODE_NAME,
 	.set_tuple_bound = append_set_tuple_bound,
+	.set_key_filter = append_set_key_filter,
 	.wrap_append = append_wrap,
 };

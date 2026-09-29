@@ -1661,6 +1661,89 @@ SELECT join_explain($$SELECT count(*), sum(jbuild.w) FROM jprobe JOIN jbuild ON 
 (35 rows)
 
 RESET tessera.join_bloom_ratio;
+-- A partitioned outer side: TessAppend hands the filter to every partition
+-- in the partition's own columns (the second's columns in another order),
+-- and takes it only when every one does, since the join checks no more
+-- rows once a node below took it.
+CREATE TABLE jpprobe (v int, k int) PARTITION BY RANGE (v);
+CREATE TABLE jpprobe_1 PARTITION OF jpprobe FOR VALUES FROM (1) TO (10001);
+CREATE TABLE jpprobe_2 (k int, v int);
+ALTER TABLE jpprobe ATTACH PARTITION jpprobe_2 FOR VALUES FROM (10001) TO (20001);
+INSERT INTO jpprobe SELECT g, CASE WHEN g % 97 = 0 THEN NULL ELSE g * 37 % 20011 END FROM generate_series(1, 20000) AS g;
+ANALYZE jpprobe;
+SELECT join_explain($$SELECT count(*), sum(jbuild.w) FROM jpprobe JOIN jbuild ON jpprobe.k = jbuild.k WHERE jpprobe.v > 0 AND jpprobe.v::text LIKE '%1%'$$);
+                                          join_explain                                          
+------------------------------------------------------------------------------------------------
+ Custom Scan (TessAgg) (actual rows=1.00 loops=1)
+   Input Batches: 142
+   Input Rows: 143
+   Kernel Calls: 145
+   Computed Datums: 143
+   ->  Custom Scan (TessHashJoin) (actual rows=143.00 loops=1)
+         Hash Cond: (jpprobe.k = jbuild.k)
+         Buckets: 16384
+         Memory Usage: within hash_mem
+         Builds: 1
+         Build Rows: 5000
+         Chunks: 2
+         Probe Rows: 4287
+         Matches: 143
+         Bloom Filters: 1
+         Bloom Filter Below: true
+         ->  Custom Scan (TessAppend) (actual rows=4287.00 loops=1)
+               Batches: 286
+               ->  Custom Scan (TessFilter) on jpprobe_1 (actual rows=3440.00 loops=1)
+                     Filter: ((v)::text ~~ '%1%'::text)
+                     Rows Removed by Filter: 6560
+                     Batch Filter: (jpprobe_1.v > 0)
+                     Rows Removed by Batch Filter: 0
+                     Rows Removed by Residual Filter: 6560
+                     Input Batches: 177
+                     Input Rows: 10000
+                     Output Rows: 3440
+                     ->  Custom Scan (TessHeapScan) on jpprobe_1 (actual rows=10000.00 loops=1)
+                           Batch Size: 64
+                           Batches: 177
+                           Pages: 45
+                           Deformed Datums: 13440
+                           Restarted Datums: 0
+               ->  Custom Scan (TessFilter) on jpprobe_2 (actual rows=847.00 loops=1)
+                     Filter: ((v)::text ~~ '%1%'::text)
+                     Rows Removed by Filter: 9153
+                     Batch Filter: (jpprobe_2.v > 0)
+                     Rows Removed by Batch Filter: 0
+                     Rows Removed by Bloom Filter: 9153
+                     Rows Removed by Residual Filter: 0
+                     Input Batches: 177
+                     Input Rows: 10000
+                     Output Rows: 847
+                     ->  Custom Scan (TessHeapScan) on jpprobe_2 (actual rows=10000.00 loops=1)
+                           Batch Size: 64
+                           Batches: 177
+                           Pages: 45
+                           Deformed Datums: 20000
+                           Restarted Datums: 103
+         ->  Custom Scan (TessHeapScan) on jbuild (actual rows=5000.00 loops=1)
+               Batch Size: 64
+               Batches: 89
+               Pages: 23
+               Deformed Datums: 10000
+               Restarted Datums: 0
+(55 rows)
+
+SELECT join_same($$SELECT jpprobe.v, jbuild.w FROM jpprobe JOIN jbuild ON jpprobe.k = jbuild.k WHERE jpprobe.v > 0 AND jpprobe.v::text LIKE '%1%'$$);
+                    join_same                    
+-------------------------------------------------
+ 143 rows, hash 1c85371b834a88e12228c7a69f379674
+(1 row)
+
+SELECT join_same($$SELECT jpprobe.v FROM jpprobe WHERE jpprobe.v > 0 AND jpprobe.v::text LIKE '%1%' AND EXISTS (SELECT 1 FROM jbuild WHERE jbuild.k = jpprobe.k)$$);
+                    join_same                    
+-------------------------------------------------
+ 143 rows, hash aad6cd60043daffde9ab19256618b64f
+(1 row)
+
+DROP TABLE jpprobe;
 -- Spilling: an inner side of about 3 MB with duplicates, NULL keys and
 -- text of 1 to 60 bytes, past a hash_mem of 1 MB. The first partitions
 -- stay in memory, the others go to disk with the outer rows of theirs,

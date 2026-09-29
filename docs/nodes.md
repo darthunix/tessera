@@ -2148,6 +2148,20 @@ table with itself 14.6 and 5.1, the core's 29 (pg-setop-xT3wei,
 pg-setop-LpWP7U); with two workers 7.4, 7.3 and 9.6 before, 4.8 to 4.9
 after, the core's 13 (pg-setop-w2-xKCerq, pg-setop-w2-z1nyzp).
 
+### A join's key filter
+
+A hash join above hands its Bloom filter down (`set_key_filter`, TessHashJoin),
+which a child with row-wise clauses checks before them. The node hands
+it to every child it reads, in the child's own columns (the child's
+layout maps the node's columns to its batch's), and takes it only when
+every child does: the join checks no more rows once a node below took
+it, so the children that took it give it back when one does not.
+Before, the filter stopped at the node, and a partitioned outer side
+checked its row-wise clauses on every row. `test/sql/join.sql` hands it
+to two partitions, the second with its columns in another order and the
+join key apart from the partition key; mutations fail it: the node's
+columns handed down as they are, no hand-down.
+
 ### Tests
 
 `test/sql/union.sql` shows the plans and compares every result with

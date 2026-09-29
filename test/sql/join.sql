@@ -309,6 +309,20 @@ SELECT join_same($$SELECT jf.v, jd.label FROM jf JOIN jd ON jf.fk = jd.id WHERE 
 SET tessera.join_bloom_ratio = 0;
 SELECT join_explain($$SELECT count(*), sum(jbuild.w) FROM jprobe JOIN jbuild ON jprobe.k = jbuild.k WHERE jprobe.v > 0 AND jprobe.v::text LIKE '%1%'$$);
 RESET tessera.join_bloom_ratio;
+-- A partitioned outer side: TessAppend hands the filter to every partition
+-- in the partition's own columns (the second's columns in another order),
+-- and takes it only when every one does, since the join checks no more
+-- rows once a node below took it.
+CREATE TABLE jpprobe (v int, k int) PARTITION BY RANGE (v);
+CREATE TABLE jpprobe_1 PARTITION OF jpprobe FOR VALUES FROM (1) TO (10001);
+CREATE TABLE jpprobe_2 (k int, v int);
+ALTER TABLE jpprobe ATTACH PARTITION jpprobe_2 FOR VALUES FROM (10001) TO (20001);
+INSERT INTO jpprobe SELECT g, CASE WHEN g % 97 = 0 THEN NULL ELSE g * 37 % 20011 END FROM generate_series(1, 20000) AS g;
+ANALYZE jpprobe;
+SELECT join_explain($$SELECT count(*), sum(jbuild.w) FROM jpprobe JOIN jbuild ON jpprobe.k = jbuild.k WHERE jpprobe.v > 0 AND jpprobe.v::text LIKE '%1%'$$);
+SELECT join_same($$SELECT jpprobe.v, jbuild.w FROM jpprobe JOIN jbuild ON jpprobe.k = jbuild.k WHERE jpprobe.v > 0 AND jpprobe.v::text LIKE '%1%'$$);
+SELECT join_same($$SELECT jpprobe.v FROM jpprobe WHERE jpprobe.v > 0 AND jpprobe.v::text LIKE '%1%' AND EXISTS (SELECT 1 FROM jbuild WHERE jbuild.k = jpprobe.k)$$);
+DROP TABLE jpprobe;
 
 -- Spilling: an inner side of about 3 MB with duplicates, NULL keys and
 -- text of 1 to 60 bytes, past a hash_mem of 1 MB. The first partitions
