@@ -1442,7 +1442,14 @@ a timestamp converts, and stays with the core), or, for keys a word does
 not hold (text, numeric, ...), the type's default equality, which has a
 64-bit hash function (`hash_extended_proc` of the type cache), between
 two columns compared as that type (a column under a binary coercion is
-the column: varchar compared as text, a domain as its base type), when
+the column: varchar compared as text, a domain as its base type), or an
+expression of a side's columns, without a volatile function, a subplan
+or a placeholder and of columns no outer join below nulls, which that
+side's batch child computes as a target of its own (a copy of its path
+with the expression added to its target, where it projects): `f.fk =
+d.id + 1`, `f.fk::int8 = d.id8`, `lower(f.k) = lower(d.k)` (2 M rows
+against 100 000: 217 ms by the core's hash join over the same scans and
+59.6 by the node, 110 and 30.9, 950 and 957), when
 the join's target is plain columns and at most
 64 of them, the inner keys and the inner columns of the residual clauses
 are the inner side's. Each such clause, up to 16, is a key of the table;

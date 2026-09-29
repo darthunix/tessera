@@ -276,21 +276,21 @@ FROM unnest(ARRAY[
     $$SELECT count(*) FROM cov WHERE i4 > (SELECT avg(i4) FROM cov)$$
 ]) WITH ORDINALITY AS c(q, o)
 ORDER BY o;
-         level         |                                     query                                     
------------------------+-------------------------------------------------------------------------------
- tess                  | SELECT count(*) FROM cov a JOIN cov b ON a.i4 = b.i4
- tess                  | SELECT count(*) FROM cov a JOIN cov b ON a.d = b.d AND a.i2 = b.i2
- tess                  | SELECT count(*) FROM cov a JOIN cov b ON a.t = b.t
- tess                  | SELECT count(*) FROM cov a JOIN cov b ON a.bc = b.bc
- tess                  | SELECT count(*) FROM cov a JOIN cov b ON a.vc = b.vc
- tess                  | SELECT count(*) FROM cov a JOIN cov b ON a.n = b.n
- tess                  | SELECT count(*) FROM cov a JOIN cov b ON a.f8 = b.f8
- core: Hash Join, Hash | SELECT count(*) FROM cov a JOIN cov b ON a.i4 = b.i4 + 1
- core: Hash Join, Hash | SELECT count(*) FROM cov a JOIN cov b ON a.d = b.ts::date
- tess                  | SELECT count(*) FROM cov a JOIN cov b ON a.i4 = b.i4 WHERE a.t LIKE 'name 1%'
- tess                  | SELECT count(*) FROM cov a LEFT JOIN cov b ON a.i4 = b.i4 AND b.b
- tess                  | SELECT count(*) FROM cov WHERE i4 IN (SELECT i4 FROM cov WHERE i2 = 3)
- tess                  | SELECT count(*) FROM cov WHERE i4 > (SELECT avg(i4) FROM cov)
+ level |                                     query                                     
+-------+-------------------------------------------------------------------------------
+ tess  | SELECT count(*) FROM cov a JOIN cov b ON a.i4 = b.i4
+ tess  | SELECT count(*) FROM cov a JOIN cov b ON a.d = b.d AND a.i2 = b.i2
+ tess  | SELECT count(*) FROM cov a JOIN cov b ON a.t = b.t
+ tess  | SELECT count(*) FROM cov a JOIN cov b ON a.bc = b.bc
+ tess  | SELECT count(*) FROM cov a JOIN cov b ON a.vc = b.vc
+ tess  | SELECT count(*) FROM cov a JOIN cov b ON a.n = b.n
+ tess  | SELECT count(*) FROM cov a JOIN cov b ON a.f8 = b.f8
+ tess  | SELECT count(*) FROM cov a JOIN cov b ON a.i4 = b.i4 + 1
+ tess  | SELECT count(*) FROM cov a JOIN cov b ON a.d = b.ts::date
+ tess  | SELECT count(*) FROM cov a JOIN cov b ON a.i4 = b.i4 WHERE a.t LIKE 'name 1%'
+ tess  | SELECT count(*) FROM cov a LEFT JOIN cov b ON a.i4 = b.i4 AND b.b
+ tess  | SELECT count(*) FROM cov WHERE i4 IN (SELECT i4 FROM cov WHERE i2 = 3)
+ tess  | SELECT count(*) FROM cov WHERE i4 > (SELECT avg(i4) FROM cov)
 (13 rows)
 
 -- Window functions: no node of Tessera's yet.

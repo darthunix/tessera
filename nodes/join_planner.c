@@ -7,12 +7,15 @@
 #include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
 #include "optimizer/appendinfo.h"
+#include "optimizer/clauses.h"
 #include "optimizer/cost.h"
 #include "optimizer/optimizer.h"
 #include "optimizer/paramassign.h"
 #include "optimizer/pathnode.h"
 #include "optimizer/paths.h"
 #include "optimizer/restrictinfo.h"
+#include "optimizer/tlist.h"
+#include "optimizer/tlist.h"
 #include "partitioning/partprune.h"
 #include "utils/datum.h"
 #include "utils/fmgroids.h"
@@ -127,6 +130,46 @@ strip_relabel(Node *node)
 	return node;
 }
 
+/* Whether an expression holds a placeholder, which no batch child computes. */
+static bool
+has_placeholder(Node *node, void *context)
+{
+	if (node == NULL)
+		return false;
+	if (IsA(node, PlaceHolderVar))
+		return true;
+	return expression_tree_walker(node, has_placeholder, context);
+}
+
+/*
+ * A key's operand: a column under binary coercions, or an expression of
+ * the side's columns that the side's batch child computes as a target of
+ * its own (a.k = b.k + 1, a.d = b.ts::date, lower(a.t) = lower(b.t)),
+ * without a volatile function, a subplan or a placeholder, and of columns
+ * no outer join below nulls. NULL for anything else.
+ */
+static Node *
+key_operand(Node *node)
+{
+	Node	   *bare = strip_relabel(node);
+	List	   *vars;
+
+	if (plain_var(bare))
+		return bare;
+	if (contain_volatile_functions(node) || contain_subplans(node) ||
+		has_placeholder(node, NULL))
+		return NULL;
+	vars = pull_var_clause(node, 0);
+	if (vars == NIL)
+		return NULL;
+	foreach_node(Var, var, vars)
+	{
+		if (!bms_is_empty(var->varnullingrels))
+			return NULL;
+	}
+	return node;
+}
+
 /*
  * The 64-bit hash function of a key a word does not hold: the clause is
  * the default equality of the type both operands are compared as, which
@@ -157,8 +200,8 @@ add_key(RestrictInfo *rinfo, RelOptInfo *outerrel, RelOptInfo *innerrel,
 	OpExpr	   *op;
 	Node	   *outer_arg;
 	Node	   *inner_arg;
-	Var		   *outer;
-	Var		   *inner;
+	Node	   *outer;
+	Node	   *inner;
 	TessTableKeyKind outer_kind;
 	TessTableKeyKind inner_kind;
 
@@ -181,10 +224,10 @@ add_key(RestrictInfo *rinfo, RelOptInfo *outerrel, RelOptInfo *innerrel,
 	}
 	else
 		return false;
-	/* The columns, the types those of the operands the equality compares. */
-	outer = (Var *) strip_relabel(outer_arg);
-	inner = (Var *) strip_relabel(inner_arg);
-	if (!plain_var((Node *) outer) || !plain_var((Node *) inner))
+	/* The columns or expressions, the types those the equality compares. */
+	outer = key_operand(outer_arg);
+	inner = key_operand(inner_arg);
+	if (outer == NULL || inner == NULL)
 		return false;
 	if (!word_equality(op->opfuncid) &&
 		!OidIsValid(hasher = key_hasher(op, exprType(outer_arg), exprType(inner_arg))))
@@ -296,15 +339,22 @@ target_supported(RelOptInfo *joinrel, RelOptInfo *innerrel, const JoinKeys *keys
 		if (!bms_is_member(var->varno, innerrel->relids))
 			continue;
 		(*ninner)++;
-		foreach_node(Var, key, keys->inner)
+		foreach_ptr(Node, key, keys->inner)
 		{
-			if (var->varno == key->varno && var->varattno == key->varattno)
+			if (IsA(key, Var) && var->varno == ((Var *) key)->varno &&
+				var->varattno == ((Var *) key)->varattno)
 				inner_keys = bms_add_member(inner_keys,
 											foreach_current_index(key));
 		}
 	}
-	/* Keys outside the target are columns of the scan tuple too. */
-	*ninner += keys->nkeys - bms_num_members(inner_keys);
+	/* Keys outside the target are columns of the scan tuple too, an expression's own. */
+	foreach_ptr(Node, key, keys->inner)
+	{
+		if (!IsA(key, Var))
+			*ninner += list_length(pull_var_clause(key, 0));
+		else if (!bms_is_member(foreach_current_index(key), inner_keys))
+			(*ninner)++;
+	}
 	/* So are the clauses' inner columns, counted generously. */
 	foreach_node(Var, var, pull_var_clause((Node *) list_make2(keys->residual,
 															   keys->filters), 0))
@@ -392,9 +442,10 @@ prune_key(PlannerInfo *root, RelOptInfo *rel, List *clauses, List *outer_keys,
 	for (int key = 0; key < list_length(outer_keys); key++)
 	{
 		OpExpr	   *clause = list_nth_node(OpExpr, clauses, key);
-		Var		   *outer = list_nth_node(Var, outer_keys, key);
+		Var		   *outer = list_nth(outer_keys, key);
 
-		if (list_nth_int(hashers, key) != 0 || list_length(clause->args) != 2)
+		if (list_nth_int(hashers, key) != 0 || list_length(clause->args) != 2 ||
+			!IsA(outer, Var))
 			continue;
 		*scheme = key_partitioning(root, rel, outer, outer_operator(clause, outer));
 		if (*scheme != NULL)
@@ -591,6 +642,9 @@ expected_leaves(PlannerInfo *root, RelOptInfo *outerrel, const JoinKeys *keys,
 	key = prune_key(root, outerrel, keys->clauses, keys->outer, keys->hashers, &scheme);
 	if (key < 0)
 		return NULL;
+	/* The bounds of the inner side's column; an expression has none known. */
+	if (!IsA(list_nth(keys->inner, key), Var))
+		return NULL;
 	bounds = inner_key_bounds(root, scheme, list_nth_node(Var, keys->outer, key),
 							  list_nth_node(Var, keys->inner, key));
 	if (bounds == NIL)
@@ -665,6 +719,41 @@ divided_append(PlannerInfo *root, RelOptInfo *rel, AppendPath *append)
 }
 
 /*
+ * A batch child with the join's key expressions among its targets, which
+ * it computes as it projects (a copy, the child left as it is); the child
+ * itself where every key is a column or a target already; NULL where it
+ * does not project.
+ */
+static Path *
+with_key_targets(PlannerInfo *root, Path *child, List *keys)
+{
+	List	   *missing = NIL;
+	CustomPath *copy;
+	PathTarget *target;
+
+	foreach_ptr(Node, key, keys)
+	{
+		if (!IsA(key, Var) && !list_member(child->pathtarget->exprs, key))
+			missing = lappend(missing, key);
+	}
+	if (missing == NIL)
+		return child;
+	if (!IsA(child, CustomPath) ||
+		(((CustomPath *) child)->flags & CUSTOMPATH_SUPPORT_PROJECTION) == 0)
+		return NULL;
+	copy = makeNode(CustomPath);
+	memcpy(copy, child, sizeof(CustomPath));
+	target = copy_pathtarget(child->pathtarget);
+	foreach_ptr(Node, key, missing)
+		add_new_column_to_pathtarget(target, (Expr *) key);
+	set_pathtarget_cost_width(root, target);
+	copy->path.pathtarget = target;
+	copy->path.total_cost += (target->cost.per_tuple - child->pathtarget->cost.per_tuple) *
+		child->rows;
+	return &copy->path;
+}
+
+/*
  * The path: the core's hash join of the same inputs as the template, at a
  * lower cost, over batch paths of them; the template's cost counts the
  * batches the core would write, and the node spills as the core does, a
@@ -691,6 +780,11 @@ make_join_path(PlannerInfo *root, RelOptInfo *joinrel, JoinType jointype,
 
 	outer = tess_batch_input_path(root, outer_path);
 	inner = tess_batch_input_path(root, inner_path);
+	/* A key that is an expression: its side's child computes it. */
+	if (outer != NULL)
+		outer = with_key_targets(root, outer, keys->outer);
+	if (inner != NULL)
+		inner = with_key_targets(root, inner, keys->inner);
 	if (outer == NULL || inner == NULL)
 		return NULL;
 	priced = tess_path_node(outer) == &tess_append_node ?
@@ -867,10 +961,15 @@ join_pathlist(PlannerInfo *root, RelOptInfo *joinrel, RelOptInfo *outerrel,
 }
 
 
-/* The target entry of a child's plan that is this column, or NULL. */
+/* The target entry of a child's plan that is this column or expression, or NULL. */
 static TargetEntry *
-child_entry(const Plan *child, const Var *var)
+child_entry(const Plan *child, const Node *node)
 {
+	const Var  *var = (const Var *) node;
+
+	/* A key's expression, a target the child computes. */
+	if (!IsA(node, Var))
+		return tlist_member((Expr *) node, child->targetlist);
 	foreach_ptr(TargetEntry, entry, child->targetlist)
 	{
 		Var		   *other = (Var *) entry->expr;
@@ -883,9 +982,9 @@ child_entry(const Plan *child, const Var *var)
 	return NULL;
 }
 
-/* The batch column of a child that holds this column. */
+/* The batch column of a child that holds this column or computes this key. */
 static int
-child_column(const TessPlanChild *child, const Var *var)
+child_column(const TessPlanChild *child, const Node *var)
 {
 	TargetEntry *entry = child_entry(child->plan, var);
 	int			column = entry == NULL ? -1 :
@@ -951,15 +1050,15 @@ align_nullingrels(Node *node, List *scan)
  */
 /* A parameter of execution of the inner key's type, which the join sets. */
 static Param *
-prune_param(PlannerInfo *root, const Var *inner)
+prune_param(PlannerInfo *root, Node *inner)
 {
 	Param	   *param = makeNode(Param);
 
 	param->paramkind = PARAM_EXEC;
 	param->paramid = assign_special_exec_param(root);
-	param->paramtype = inner->vartype;
-	param->paramtypmod = inner->vartypmod;
-	param->paramcollid = inner->varcollid;
+	param->paramtype = exprType(inner);
+	param->paramtypmod = exprTypmod(inner);
+	param->paramcollid = exprCollation(inner);
 	param->location = -1;
 	return param;
 }
@@ -1030,7 +1129,7 @@ write_join_prune(TessPlanWriter *writer, PlannerInfo *root, const TessPlanChild 
 		List	   *children = ((CustomPath *) outer->path)->custom_paths;
 		OpExpr	   *clause = list_nth_node(OpExpr, hash_clauses, key);
 		Var		   *outer_var = copyObject(list_nth_node(Var, outer_keys, key));
-		Var		   *inner_var = list_nth_node(Var, inner_keys, key);
+		Node	   *inner_var = list_nth(inner_keys, key);
 		Param	   *value = prune_param(root, inner_var);
 		Param	   *low = prune_param(root, inner_var);
 		Param	   *high = prune_param(root, inner_var);
@@ -1048,10 +1147,10 @@ write_join_prune(TessPlanWriter *writer, PlannerInfo *root, const TessPlanChild 
 														   outer_var, value)));
 		if (values != NULL)
 		{
-			lower = prune_clause(get_opfamily_member(family, type, inner_var->vartype,
+			lower = prune_clause(get_opfamily_member(family, type, exprType(inner_var),
 													 BTGreaterEqualStrategyNumber),
 								 outer_var, low);
-			upper = prune_clause(get_opfamily_member(family, type, inner_var->vartype,
+			upper = prune_clause(get_opfamily_member(family, type, exprType(inner_var),
 													 BTLessEqualStrategyNumber),
 								 outer_var, high);
 			if (lower != NULL && upper != NULL)
@@ -1129,8 +1228,9 @@ join_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 			wanted = lappend(wanted, makeTargetEntry((Expr *) var, 0, NULL, true));
 		foreach_node(Var, var, pull_var_clause((Node *) tlist, 0))
 			wanted = lappend(wanted, makeTargetEntry((Expr *) var, 0, NULL, true));
-		foreach_node(Var, key, side == 0 ? outer_keys : inner_keys)
-			wanted = lappend(wanted, makeTargetEntry((Expr *) key, 0, NULL, true));
+		foreach_ptr(Node, key, side == 0 ? outer_keys : inner_keys)
+			foreach_node(Var, var, pull_var_clause(key, 0))
+				wanted = lappend(wanted, makeTargetEntry((Expr *) var, 0, NULL, true));
 		/* The clauses' columns, which the quals refer to. */
 		foreach_node(Var, var, pull_var_clause((Node *) list_make2(residual, filters), 0))
 			wanted = lappend(wanted, makeTargetEntry((Expr *) var, 0, NULL, true));
@@ -1148,7 +1248,7 @@ join_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 												 false));
 			sides = lappend_int(sides, side);
 			columns = lappend_int(columns,
-								  child_column(side == 0 ? &outer : &inner, var));
+								  child_column(side == 0 ? &outer : &inner, (Node *) var));
 		}
 	}
 	layout.ncolumns = list_length(scan);
@@ -1158,9 +1258,9 @@ join_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 									 TESS_HASH_JOIN_DATA_VERSION);
 	tess_plan_write_int_list(writer, "sides", sides);
 	tess_plan_write_int_list(writer, "child_columns", columns);
-	foreach_node(Var, key, outer_keys)
+	foreach_ptr(Node, key, outer_keys)
 		outer_columns = lappend_int(outer_columns, child_column(&outer, key));
-	foreach_node(Var, key, inner_keys)
+	foreach_ptr(Node, key, inner_keys)
 		inner_columns = lappend_int(inner_columns, child_column(&inner, key));
 	tess_plan_write_int_list(writer, "outer_keys", outer_columns);
 	tess_plan_write_int_list(writer, "inner_keys", inner_columns);

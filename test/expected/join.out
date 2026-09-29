@@ -3639,20 +3639,79 @@ EXPLAIN (COSTS OFF) SELECT count(*) FROM jf JOIN jd ON jf.v > jd.n AND jf.note =
          ->  Custom Scan (TessHeapScan) on jd
 (7 rows)
 
--- No path: a key over an expression, the core's hash join disabled, the
--- batch nodes off.
+-- A key over an expression or a cast: its side's child computes it as a
+-- target of its own, a word or a hashed value; on either side, both, in
+-- a left and an anti join. A volatile one stays with the core.
 EXPLAIN (COSTS OFF) SELECT count(*) FROM jf JOIN jd ON jf.note = upper(jd.label);
-                        QUERY PLAN                        
-----------------------------------------------------------
+                    QUERY PLAN                    
+--------------------------------------------------
+ Custom Scan (TessAgg)
+   ->  Custom Scan (TessHashJoin)
+         Hash Cond: (jf.note = upper(jd.label))
+         Join Filter: (jf.note = upper(jd.label))
+         ->  Custom Scan (TessHeapScan) on jd
+         ->  Custom Scan (TessHeapScan) on jf
+(6 rows)
+
+SELECT join_same($$SELECT jf.v, jd.id FROM jf JOIN jd ON upper(jf.note) = replace(upper(jd.label), 'D', 'F')$$);
+                    join_same                    
+-------------------------------------------------
+ 300 rows, hash 27ac8052ffb83d4e5f0ebd7375c7f868
+(1 row)
+
+EXPLAIN (COSTS OFF) SELECT count(*) FROM jf JOIN jd ON jf.fk = jd.id + 1;
+                  QUERY PLAN                  
+----------------------------------------------
+ Custom Scan (TessAgg)
+   ->  Custom Scan (TessHashJoin)
+         Hash Cond: (jf.fk = (jd.id + 1))
+         ->  Custom Scan (TessHeapScan) on jd
+         ->  Custom Scan (TessHeapScan) on jf
+(5 rows)
+
+SELECT join_same($$SELECT jf.v, jd.id FROM jf JOIN jd ON jf.fk = jd.id + 1$$);
+                    join_same                    
+-------------------------------------------------
+ 765 rows, hash dd5ddc92cf9bd68d1b21a75dcd629d39
+(1 row)
+
+SELECT join_same($$SELECT jf.v, jd.id FROM jf JOIN jd ON jf.fk - 1 = jd.id * 2 AND jf.fk8 = jd.id8 * 2 + 1$$);
+                    join_same                    
+-------------------------------------------------
+ 443 rows, hash ecbacfdf906ea595f1ee519c04d35677
+(1 row)
+
+SELECT join_same($$SELECT jf.v, jd.label FROM jf JOIN jd ON jf.fk::int8 = jd.id8 AND 'd' || jf.fk = lower(jd.label)$$);
+                    join_same                    
+-------------------------------------------------
+ 764 rows, hash 502cdcf2660012b6fa7901734864d9a6
+(1 row)
+
+SELECT join_same($$SELECT jf.v, jd.id FROM jf LEFT JOIN jd ON jf.fk = jd.id + 1$$);
+                    join_same                     
+--------------------------------------------------
+ 1000 rows, hash ee8786dbfa54eeeb1a32fed164e07079
+(1 row)
+
+SELECT join_same($$SELECT jf.v FROM jf WHERE NOT EXISTS (SELECT 1 FROM jd WHERE jd.id * 2 = jf.fk)$$);
+                    join_same                    
+-------------------------------------------------
+ 556 rows, hash c893d487e79a125bd3e282eb3153f256
+(1 row)
+
+EXPLAIN (COSTS OFF) SELECT count(*) FROM jf JOIN jd ON jf.fk = jd.id + (random() * 0)::int;
+                                          QUERY PLAN                                          
+----------------------------------------------------------------------------------------------
  Custom Scan (TessAgg)
    ->  Custom Scan (TessPack)
-         ->  Hash Join
-               Hash Cond: (upper(jd.label) = jf.note)
+         ->  Nested Loop
+               Disabled: true
+               Join Filter: (jf.fk = (jd.id + ((random() * '0'::double precision))::integer))
                ->  Custom Scan (TessHeapScan) on jd
-               ->  Hash
-                     ->  Custom Scan (TessHeapScan) on jf
+               ->  Custom Scan (TessHeapScan) on jf
 (7 rows)
 
+-- No path: the core's hash join disabled, the batch nodes off.
 SET enable_hashjoin = off;
 EXPLAIN (COSTS OFF) SELECT count(*) FROM jf JOIN jd ON jf.fk = jd.id;
                       QUERY PLAN                       

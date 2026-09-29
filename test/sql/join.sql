@@ -869,9 +869,19 @@ RESET enable_parallel_hash;
 -- A text key: the table keeps the hash of the value, and the equality
 -- stays a join clause, which decides the pair.
 EXPLAIN (COSTS OFF) SELECT count(*) FROM jf JOIN jd ON jf.v > jd.n AND jf.note = jd.label;
--- No path: a key over an expression, the core's hash join disabled, the
--- batch nodes off.
+-- A key over an expression or a cast: its side's child computes it as a
+-- target of its own, a word or a hashed value; on either side, both, in
+-- a left and an anti join. A volatile one stays with the core.
 EXPLAIN (COSTS OFF) SELECT count(*) FROM jf JOIN jd ON jf.note = upper(jd.label);
+SELECT join_same($$SELECT jf.v, jd.id FROM jf JOIN jd ON upper(jf.note) = replace(upper(jd.label), 'D', 'F')$$);
+EXPLAIN (COSTS OFF) SELECT count(*) FROM jf JOIN jd ON jf.fk = jd.id + 1;
+SELECT join_same($$SELECT jf.v, jd.id FROM jf JOIN jd ON jf.fk = jd.id + 1$$);
+SELECT join_same($$SELECT jf.v, jd.id FROM jf JOIN jd ON jf.fk - 1 = jd.id * 2 AND jf.fk8 = jd.id8 * 2 + 1$$);
+SELECT join_same($$SELECT jf.v, jd.label FROM jf JOIN jd ON jf.fk::int8 = jd.id8 AND 'd' || jf.fk = lower(jd.label)$$);
+SELECT join_same($$SELECT jf.v, jd.id FROM jf LEFT JOIN jd ON jf.fk = jd.id + 1$$);
+SELECT join_same($$SELECT jf.v FROM jf WHERE NOT EXISTS (SELECT 1 FROM jd WHERE jd.id * 2 = jf.fk)$$);
+EXPLAIN (COSTS OFF) SELECT count(*) FROM jf JOIN jd ON jf.fk = jd.id + (random() * 0)::int;
+-- No path: the core's hash join disabled, the batch nodes off.
 SET enable_hashjoin = off;
 EXPLAIN (COSTS OFF) SELECT count(*) FROM jf JOIN jd ON jf.fk = jd.id;
 RESET enable_hashjoin;
