@@ -316,6 +316,18 @@ SELECT types_same($$SELECT count(*) FROM types_g WHERE NOT EXISTS (SELECT FROM t
 SELECT types_same($$SELECT count(*) FROM types_g JOIN types_h ON upper(types_g.t) = upper(types_h.t)$$);
 EXPLAIN (COSTS OFF) SELECT count(*) FROM types_h AS a JOIN types_h AS b ON a.c = b.c;
 SELECT types_same($$SELECT count(*) FROM types_h AS a JOIN types_h AS b ON a.c = b.c$$);
+-- A column under a binary coercion is the column: varchar compared as
+-- text, with varchar and with text; a domain over int4 as a word.
+CREATE DOMAIN types_pos AS int CHECK (VALUE >= 0);
+CREATE TABLE types_v AS SELECT id, t::varchar(10) AS v, w::types_pos AS p FROM types_h;
+ANALYZE types_v;
+EXPLAIN (COSTS OFF) SELECT count(*) FROM types_v AS a JOIN types_v AS b ON a.v = b.v;
+SELECT types_same($$SELECT count(*), sum(b.id) FROM types_v AS a JOIN types_v AS b ON a.v = b.v$$);
+SELECT types_same($$SELECT count(*), sum(types_g.id) FROM types_g JOIN types_v ON types_g.t = types_v.v$$);
+SELECT types_same($$SELECT count(*), sum(types_g.id) FROM types_g JOIN types_v ON types_g.w = types_v.p$$);
+EXPLAIN (COSTS OFF) SELECT count(*) FROM types_g JOIN types_v ON types_g.w = types_v.p;
+DROP TABLE types_v;
+DROP DOMAIN types_pos;
 -- No Bloom filter below: the scan has the values, not their hashes.
 SET tessera.join_bloom_ratio = 1;
 SELECT types_same($$SELECT count(*), sum(types_h.id) FROM types_g JOIN types_h ON types_g.t = types_h.t WHERE types_g.long LIKE '%1%'$$);

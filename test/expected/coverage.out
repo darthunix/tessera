@@ -282,7 +282,7 @@ ORDER BY o;
  tess                  | SELECT count(*) FROM cov a JOIN cov b ON a.d = b.d AND a.i2 = b.i2
  tess                  | SELECT count(*) FROM cov a JOIN cov b ON a.t = b.t
  tess                  | SELECT count(*) FROM cov a JOIN cov b ON a.bc = b.bc
- core: Hash Join, Hash | SELECT count(*) FROM cov a JOIN cov b ON a.vc = b.vc
+ tess                  | SELECT count(*) FROM cov a JOIN cov b ON a.vc = b.vc
  tess                  | SELECT count(*) FROM cov a JOIN cov b ON a.n = b.n
  tess                  | SELECT count(*) FROM cov a JOIN cov b ON a.f8 = b.f8
  core: Hash Join, Hash | SELECT count(*) FROM cov a JOIN cov b ON a.i4 = b.i4 + 1

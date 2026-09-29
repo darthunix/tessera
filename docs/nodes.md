@@ -1391,7 +1391,9 @@ timestamps, two timestamps with time zone or two booleans (a date against
 a timestamp converts, and stays with the core), or, for keys a word does
 not hold (text, numeric, ...), the type's default equality, which has a
 64-bit hash function (`hash_extended_proc` of the type cache), between
-two columns of that type, when the join's target is plain columns and at most
+two columns compared as that type (a column under a binary coercion is
+the column: varchar compared as text, a domain as its base type), when
+the join's target is plain columns and at most
 64 of them, the inner keys and the inner columns of the residual clauses
 are the inner side's. Each such clause, up to 16, is a key of the table;
 a key a word does not hold is its value's 64-bit hash by that function

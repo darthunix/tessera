@@ -29,11 +29,12 @@
 
 /*
  * The planner of TessHashJoin: through set_join_pathlist_hook it offers
- * the node for an inner join with an equality of an int4 or int8 column
- * of each side, the others such keys too or residual clauses over the
- * joined rows, with a cost below the core's hash join of
- * the same inputs, which serves as the template. The children are batch
- * paths over the sides' cheapest paths. See docs/nodes.md.
+ * the node for a join with an equality of a column of each side, of words
+ * or of a type whose equality hashes, the others such keys too or
+ * residual clauses over the joined rows, with a cost below the core's
+ * hash join of the same inputs, which serves as the template. The
+ * children are batch paths over the sides' cheapest paths. See
+ * docs/nodes.md.
  */
 /* The executor keeps each inner column in a payload word; see hashjoin.c. */
 #define JOIN_MAX_INNER_COLUMNS 64
@@ -115,19 +116,30 @@ plain_var(Node *node)
 }
 
 /*
+ * An operand under a binary coercion, which changes no value: a varchar
+ * column compared as text is the column.
+ */
+static Node *
+strip_relabel(Node *node)
+{
+	while (IsA(node, RelabelType))
+		node = (Node *) ((RelabelType *) node)->arg;
+	return node;
+}
+
+/*
  * The 64-bit hash function of a key a word does not hold: the clause is
- * its type's default equality, which hashes, between two columns of that
- * type.
+ * the default equality of the type both operands are compared as, which
+ * hashes.
  */
 static Oid
-key_hasher(const OpExpr *op, const Var *left, const Var *right)
+key_hasher(const OpExpr *op, Oid left, Oid right)
 {
 	TypeCacheEntry *type;
 
-	if (left->vartype != right->vartype)
+	if (left != right)
 		return InvalidOid;
-	type = lookup_type_cache(left->vartype,
-							 TYPECACHE_EQ_OPR | TYPECACHE_HASH_EXTENDED_PROC);
+	type = lookup_type_cache(left, TYPECACHE_EQ_OPR | TYPECACHE_HASH_EXTENDED_PROC);
 	if (type->eq_opr != op->opno || !OidIsValid(type->hash_extended_proc))
 		return InvalidOid;
 	return type->hash_extended_proc;
@@ -143,8 +155,8 @@ add_key(RestrictInfo *rinfo, RelOptInfo *outerrel, RelOptInfo *innerrel,
 {
 	Oid			hasher = InvalidOid;
 	OpExpr	   *op;
-	Node	   *left;
-	Node	   *right;
+	Node	   *outer_arg;
+	Node	   *inner_arg;
 	Var		   *outer;
 	Var		   *inner;
 	TessTableKeyKind outer_kind;
@@ -155,31 +167,32 @@ add_key(RestrictInfo *rinfo, RelOptInfo *outerrel, RelOptInfo *innerrel,
 		return false;
 	op = (OpExpr *) rinfo->clause;
 	set_opfuncid(op);
-	left = linitial(op->args);
-	right = lsecond(op->args);
-	if (!plain_var(left) || !plain_var(right))
-		return false;
-	if (!word_equality(op->opfuncid) &&
-		!OidIsValid(hasher = key_hasher(op, (Var *) left, (Var *) right)))
-		return false;
 	if (bms_is_subset(rinfo->left_relids, outerrel->relids) &&
 		bms_is_subset(rinfo->right_relids, innerrel->relids))
 	{
-		outer = (Var *) left;
-		inner = (Var *) right;
+		outer_arg = linitial(op->args);
+		inner_arg = lsecond(op->args);
 	}
 	else if (bms_is_subset(rinfo->left_relids, innerrel->relids) &&
 			 bms_is_subset(rinfo->right_relids, outerrel->relids))
 	{
-		outer = (Var *) right;
-		inner = (Var *) left;
+		outer_arg = lsecond(op->args);
+		inner_arg = linitial(op->args);
 	}
 	else
 		return false;
+	/* The columns, the types those of the operands the equality compares. */
+	outer = (Var *) strip_relabel(outer_arg);
+	inner = (Var *) strip_relabel(inner_arg);
+	if (!plain_var((Node *) outer) || !plain_var((Node *) inner))
+		return false;
+	if (!word_equality(op->opfuncid) &&
+		!OidIsValid(hasher = key_hasher(op, exprType(outer_arg), exprType(inner_arg))))
+		return false;
 	if (OidIsValid(hasher))
 		outer_kind = inner_kind = TESS_TABLE_KEY_INT8;
-	else if (!tess_word_key_kind(outer->vartype, &outer_kind) ||
-			 !tess_word_key_kind(inner->vartype, &inner_kind))
+	else if (!tess_word_key_kind(exprType(outer_arg), &outer_kind) ||
+			 !tess_word_key_kind(exprType(inner_arg), &inner_kind))
 		return false;
 	keys->hashers = lappend_int(keys->hashers, (int) hasher);
 	keys->collations = lappend_int(keys->collations, (int) op->inputcollid);
