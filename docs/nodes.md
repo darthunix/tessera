@@ -83,6 +83,7 @@ and prints them:
 | `tessera.deform_varlena_cost` | 0.017 | a row of a clause's column past one of varying length, deformed |
 | `tessera.bitmap_build_cost` | 0.038 | a row of a partial bitmap's building, which one participant does |
 | `tessera.bitmap_build_scatter_cost` | 0.054 | what building takes more a row, times 1 - c² for the correlation c of the index's first column |
+| `tessera.index_worker_share` | 0.5 | the share of the leader's pace a worker of a partial index or index-only scan reads at (a share, not a time) |
 
 Constants that repeat the core's (half of `cpu_tuple_cost` a row an
 `Append` saves) or that shape execution rather than planning (chunk
@@ -300,9 +301,11 @@ time in the second): 10 % of the ordered id 4.4 ms before, 3.8 after
 order), where a correlation of 0 counted all 14 511 pages for 2 304. A
 scattered column's bitmap stays serial or gives way to the partial full
 scan: its pages give a dozen rows each, and the pages a worker takes one
-by one from the shared iterator cost it more than the rows; at 15 % of
-the ordered id the parallel index scan is taken for the parallel bitmap,
-5.7 ms against 5.5, the model counting the index scan 0.4 ms short.
+by one from the shared iterator cost it more than the rows. At 15 % of
+the ordered id the parallel bitmap is taken, 5.4 ms against 5.7 for the
+parallel index scan, since the model of a partial index scan counts a
+worker's share of the leader's pace (Ranking the full scan); the toll a
+page before had counted the index scan 0.4 ms short, and it was taken.
 
 `test/sql/index.sql` compares with Tessera off: a btree bitmap with NULL
 keys, `IS NULL`, an empty result, computed targets, a row-wise clause,
@@ -415,9 +418,16 @@ workers' start and finish, then its serial time shared among the
 participants: the leader reads a page in the serial time c a page, a
 worker in c and a toll for a page of the shared buffers it reads first,
 so a worker counts c / (c + toll) of the leader; the pages are the
-table's, the bitmap's, or the index's share of its pages and, for the
-rows an index scan fetches from the table, the pages a bitmap of the
-index would read. A worker is a process begun for the query, and fork
+table's or the bitmap's. A partial index or index-only scan counts
+instead a worker at `tessera.index_worker_share` of the leader's pace
+(the core's parallel btree scan hands its leaf pages on one at a time),
+the leader reading alone while the workers start, half the start and
+finish: two workers sped 30 % of the ordered `id` 1.7 times and 20 % of
+the scattered `k`'s index-only scan 1.4 times, where the toll a page
+counted 2.1 and 2.2 and put the parallel index scan of 15 % 0.4 ms
+short, before the parallel bitmap (`bench/pg/scancost`, pg-scancost-paePJX:
+0.50 within 4 % of ten samples; with the choice at 15 % the parallel
+bitmap, 5.4 ms against 5.7). A worker is a process begun for the query, and fork
 gives it no mapping of the leader's pages: the core's workers pay the
 toll alike, but a page of the node's full scan takes a quarter of the
 core's time, and two workers sped the node's full scan of `bench_idx`
@@ -526,7 +536,12 @@ their small tables serial. Mutations fail them: no tie of the partial
 list to the serial one, no rise of a partial path's cost, no toll, no
 start, the core's divisor of participants; no filter in the model, no
 selectivity of the earlier clauses, an index's conditions counted again,
-no deforming past a varlena, no operators of a clause by rows.
+no deforming past a varlena, no operators of a clause by rows. In
+`test/sql/index.sql` at a start of 380 the node's parallel index-only
+scan is taken where a worker keeps the leader's pace, the leader's head
+start deciding it, and the partial full scan at a tenth of it; mutations
+fail it: no head start, the worker's share left out, the toll a page in
+its place.
 
 ### Index-only mode
 

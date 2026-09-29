@@ -316,11 +316,26 @@ SELECT index_same($$SELECT count(*), sum(k) FROM index_r WHERE k < 21000$$);
 SET enable_bitmapscan = off;
 RESET tessera.scan_parallel_setup_cost;
 EXPLAIN (COSTS OFF) SELECT count(*) FROM index_r WHERE k < 9000;
+-- A worker at the leader's pace too, which keeps these index scans of a
+-- small table clear of the partial full scan.
 SET tessera.scan_parallel_setup_cost = 0;
+SET tessera.index_worker_share = 1;
 EXPLAIN (COSTS OFF) SELECT count(*) FROM index_r WHERE k < 9000;
 SELECT index_same($$SELECT count(*), sum(k) FROM index_r WHERE k < 9000$$);
 EXPLAIN (COSTS OFF) SELECT count(*), sum(w) FROM index_r WHERE id < 3000;
 SELECT index_same($$SELECT count(*), sum(w) FROM index_r WHERE id < 3000$$);
+-- A worker of a parallel index scan reads at tessera.index_worker_share of
+-- the leader's pace, the leader alone while the workers start: at a start
+-- of 380 the node's parallel index-only scan of 9000 rows is taken where a
+-- worker keeps the leader's pace, the leader's head start deciding it; at
+-- a tenth of it the partial full scan takes its place.
+SET tessera.scan_parallel_setup_cost = 380;
+SET tessera.index_worker_share = 1;
+EXPLAIN (COSTS OFF) SELECT count(*) FROM index_r WHERE k < 9000;
+SET tessera.index_worker_share = 0.1;
+EXPLAIN (COSTS OFF) SELECT count(*) FROM index_r WHERE k < 9000;
+SET tessera.index_worker_share = 1;
+SET tessera.scan_parallel_setup_cost = 0;
 SET parallel_leader_participation = off;
 SELECT index_same($$SELECT count(*), sum(k) FROM index_r WHERE k < 9000$$);
 SELECT index_same($$SELECT count(*), sum(w) FROM index_r WHERE id < 3000$$);
@@ -375,6 +390,7 @@ SET max_parallel_workers_per_gather = 2;
 DROP TABLE index_rb;
 RESET tessera.bitmap_build_cost;
 RESET tessera.bitmap_build_scatter_cost;
+RESET tessera.index_worker_share;
 RESET tessera.scan_parallel_setup_cost;
 RESET tessera.scan_worker_page_cost;
 RESET enable_bitmapscan;

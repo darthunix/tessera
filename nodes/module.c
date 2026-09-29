@@ -34,6 +34,7 @@ double		tess_filter_row_operator_cost = 0.018;
 double		tess_deform_varlena_cost = 0.017;
 double		tess_bitmap_build_cost = 0.038;
 double		tess_bitmap_build_scatter_cost = 0.054;
+double		tess_index_worker_share = 0.5;
 double		tess_join_bloom_ratio = 0.5;
 double		tess_bitmap_page_rows = 2.0;
 double		tess_index_min_correlation = 0.8;
@@ -235,6 +236,11 @@ _PG_init(void)
 							 "What building a bitmap takes more a row for an index out of the table's order.",
 							 "Scaled by 1 - c * c for the correlation c of the index's first column.",
 							 &tess_bitmap_build_scatter_cost, 0.054, 0.0, 1e10,
+							 PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomRealVariable("tessera.index_worker_share",
+							 "The share of the leader's pace a worker of a parallel index or index-only scan reads at.",
+							 "The leader reads alone while the workers start, half of tessera.scan_parallel_setup_cost.",
+							 &tess_index_worker_share, 0.5, 0.0, 10.0,
 							 PGC_USERSET, 0, NULL, NULL, NULL);
 	DefineCustomBoolVariable("tessera.batch_gather",
 							 "Gathers a parallel batch subtree's rows in batches.",

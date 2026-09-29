@@ -120,6 +120,7 @@ extern double tess_filter_row_operator_cost;
 extern double tess_deform_varlena_cost;
 extern double tess_bitmap_build_cost;
 extern double tess_bitmap_build_scatter_cost;
+extern double tess_index_worker_share;
 /* The correlation of an index's order with the table's: see heapscan.c. */
 extern double tess_index_correlation(PlannerInfo *root, IndexOptInfo *index);
 /* Whether every index of a bitmap is BRIN, whose bitmap names whole pages: see heapscan.c. */

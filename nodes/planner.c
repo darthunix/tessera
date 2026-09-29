@@ -627,6 +627,27 @@ partial_time(double time, double pages, int workers)
 }
 
 /*
+ * A partial index or index-only scan's time, from the serial time: the
+ * workers' start and finish, and the serial time past what the leader
+ * reads alone while the workers start (half the start and finish), shared
+ * among the participants, a worker reading at tessera.index_worker_share
+ * of the leader's pace: the core's parallel btree scan hands its leaf
+ * pages on one at a time. Two workers read 30 % of bench_idx's ordered id
+ * 1.7 times as fast as the leader alone and 20 % of the scattered k's
+ * index 1.4 times, where the toll a page counted 2.1 and 2.2
+ * (bench/pg/scancost).
+ */
+static double
+partial_index_time(double time, int workers)
+{
+	double		head = parallel_leader_participation ? tess_scan_parallel_setup_cost / 2 : 0;
+	double		divisor = (parallel_leader_participation ? 1.0 : 0.0) +
+		workers * tess_index_worker_share;
+
+	return tess_scan_parallel_setup_cost + (divisor > 0 ? Max(time - head, 0) / divisor : time);
+}
+
+/*
  * The time a scan of the relation takes the node, which is also a floor
  * of the core's own scan of the same kind: a full scan by the table's
  * pages and rows; an index-only or index scan by the rows the index's
@@ -635,11 +656,10 @@ partial_time(double time, double pages, int workers)
  * (bitmap_pages) and rows, a row of an index out of the table's order
  * taking more, its bitmap built from rows in no order of their pages;
  * each with the filter's time over the rows entering it (filter_time); a
- * partial scan's by partial_time, from the pages the scan touches: the
- * table's, the bitmap's, the index's share of its pages and the table's
- * pages its rows fill as a bitmap of the index would read them (for an
- * index-only scan the share of them not all visible). -1 for a
- * parameterized path or one of another kind. The core's own cost does not
+ * partial full scan's or bitmap's by partial_time, from the pages the scan
+ * touches, the table's or the bitmap's, a partial bitmap's building by one
+ * participant; a partial index or index-only scan's by partial_index_time.
+ * -1 for a parameterized path or one of another kind. The core's own cost does not
  * serve: its time a unit of cost varied four times over its bitmaps
  * (bench/pg/scancost).
  */
@@ -673,15 +693,14 @@ scan_time(PlannerInfo *root, RelOptInfo *rel, Path *path)
 	{
 		IndexPath  *index = (IndexPath *) scan;
 		double		visible = scan->pathtype == T_IndexOnlyScan ? rel->allvisfrac : 0;
-		double		tuples;
 
 		time = index->indexselectivity * rel->tuples *
 			(visible * tess_index_only_tuple_cost + (1.0 - visible) * tess_index_tuple_cost) +
 			filter_time(root, rel, index->indexselectivity * rel->tuples,
 						scan->pathtype == T_IndexScan, index_conditions(scan));
-		pages = index->indexselectivity * index->indexinfo->pages;
-		if (path->parallel_workers > 0 && visible < 1.0)
-			pages += (1.0 - visible) * bitmap_pages(root, rel, scan, &tuples);
+		if (path->parallel_workers > 0)
+			return partial_index_time(time, path->parallel_workers);
+		pages = 0;
 	}
 	else if (IsA(scan, BitmapHeapPath))
 	{
