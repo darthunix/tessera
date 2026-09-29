@@ -3,9 +3,10 @@
 -- docs/nodes.md): a full scan with TessFilter above over tables of other
 -- widths; an index-only scan, the index mode and a bitmap at shares of
 -- bench_idx's rows, the bitmap of the scattered k and of the ordered id;
--- and the core's scans, as time per unit of their cost. Each sample is
--- the minimum of its runs. The summary gives the fitted times and the
--- parameters' values, a page of the full scan being 1.
+-- the core's scans, as time per unit of their cost; and the full scans
+-- again with two parallel workers, for the model of a partial scan. Each
+-- sample is the minimum of its runs. The summary gives the fitted times
+-- and the parameters' values, a page of the full scan being 1.
 \set ON_ERROR_STOP on
 \if :{?repetitions}
 \else
@@ -51,6 +52,21 @@ BEGIN
     RETURN best;
 END
 $function$;
+
+/*
+ * The parallel samples: the full scans with two workers, without the
+ * leader and with it, and bench_tiny's count, next to nothing to read, for
+ * the workers' start and finish alone.
+ */
+CREATE TEMP TABLE parallel_samples
+(
+    method text,
+    relation text,
+    leader boolean,
+    workers integer,
+    pages float8,
+    milliseconds float8
+);
 
 /* Only the scans of a kind: seq, index-only, index, bitmap, as enable_* allow them. */
 CREATE FUNCTION pg_temp.only(kind text)
@@ -103,6 +119,33 @@ BEGIN
 END
 $function$;
 
+/* A parallel sample: the query timed, and the workers its plan launched. */
+CREATE FUNCTION pg_temp.parallel_sample(method text, relation text, leader boolean, query text,
+                                        repetitions integer)
+RETURNS void
+LANGUAGE plpgsql
+AS $function$
+DECLARE
+    plan json;
+    node json;
+    launched integer;
+BEGIN
+    PERFORM set_config('parallel_leader_participation', leader::text, false);
+    EXECUTE 'EXPLAIN (ANALYZE, FORMAT JSON, TIMING OFF, SUMMARY OFF, BUFFERS OFF) ' || query INTO plan;
+    node := plan -> 0 -> 'Plan';
+    WHILE node IS NOT NULL AND launched IS NULL LOOP
+        launched := (node ->> 'Workers Launched')::integer;
+        node := node -> 'Plans' -> 0;
+    END LOOP;
+    INSERT INTO parallel_samples
+    SELECT method, relation, leader, coalesce(launched, 0), c.relpages,
+           pg_temp.fastest(query, repetitions)
+    FROM pg_class AS c
+    WHERE c.relname = relation;
+    PERFORM set_config('parallel_leader_participation', 'on', false);
+END
+$function$;
+
 DO $do$
 DECLARE
     rows bigint := current_setting('bench.rows')::bigint;
@@ -110,6 +153,7 @@ DECLARE
     share numeric;
     mode text;
     relation text;
+    leader boolean;
 BEGIN
     FOREACH mode IN ARRAY ARRAY['on', 'off'] LOOP
         PERFORM set_config('tessera.enable', mode, false);
@@ -140,16 +184,47 @@ BEGIN
                                    format('SELECT count(*), sum(w) FROM bench_idx WHERE id < %s', round(rows * share)),
                                    repetitions);
         END LOOP;
+        -- The full scans again with two workers, which the core's costs
+        -- and the node's model are set to allow.
+        PERFORM set_config('max_parallel_workers_per_gather', '2', false);
+        PERFORM set_config('parallel_setup_cost', '0', false);
+        PERFORM set_config('parallel_tuple_cost', '0', false);
+        PERFORM set_config('min_parallel_table_scan_size', '0', false);
+        PERFORM set_config('tessera.scan_parallel_setup_cost', '0', false);
+        PERFORM pg_temp.only('seq');
+        FOREACH relation IN ARRAY ARRAY['bench_narrow', 'bench_fact', 'bench_sort', 'bench_idx',
+                                        'bench_mixed', 'bench_wide'] LOOP
+            FOREACH leader IN ARRAY ARRAY[false, true] LOOP
+                PERFORM pg_temp.parallel_sample(mode || ' seq', relation, leader,
+                                                format('SELECT count(*) FROM %I WHERE %I > -1', relation,
+                                                       (SELECT attname FROM pg_attribute
+                                                        WHERE attrelid = relation::regclass AND attnum = 1)),
+                                                repetitions);
+            END LOOP;
+        END LOOP;
+        PERFORM pg_temp.parallel_sample(mode || ' start', 'bench_tiny', true,
+                                        'SELECT count(*) FROM bench_tiny', repetitions);
+        PERFORM set_config('max_parallel_workers_per_gather', '0', false);
+        PERFORM set_config('parallel_setup_cost', '1000', false);
+        PERFORM set_config('parallel_tuple_cost', '0.1', false);
+        PERFORM set_config('min_parallel_table_scan_size', '8MB', false);
+        PERFORM set_config('tessera.scan_parallel_setup_cost', '8000', false);
     END LOOP;
     PERFORM set_config('tessera.enable', 'on', false);
 END
 $do$;
+RESET max_parallel_workers_per_gather;
+RESET parallel_setup_cost;
+RESET parallel_tuple_cost;
+RESET min_parallel_table_scan_size;
+RESET tessera.scan_parallel_setup_cost;
 RESET enable_seqscan;
 RESET enable_indexonlyscan;
 RESET enable_indexscan;
 RESET enable_bitmapscan;
 
 \copy samples TO 'timings.csv' CSV HEADER
+\copy parallel_samples TO 'parallel.csv' CSV HEADER
 
 \o summary.txt
 -- The samples, then the fits: the full scan by pages and tuples, the
@@ -239,4 +314,75 @@ SELECT s.method, s.relation, s.share, round(s.milliseconds::numeric, 3) AS ms,
 FROM samples AS s, fits AS f
 WHERE s.method LIKE 'on %'
 ORDER BY s.method, s.relation, s.share;
+
+-- The model of a partial scan, by mode (docs/nodes.md): L, the time of
+-- bench_tiny's parallel count, the workers' start and finish; phi, the
+-- toll a page a worker reads, fitted over the samples without the leader,
+-- whose n workers read P / n pages each at c + phi for the serial time a
+-- page c = S / P (T - L - S / n = phi P / n, least squares through zero);
+-- h, what the leader reads before the workers come, from the samples
+-- with it: T = L + (S - h) / D, D = 1 + n c / (c + phi), averaged.
+SELECT method, relation, leader, workers, pages, round(milliseconds::numeric, 3) AS ms
+FROM parallel_samples ORDER BY method, relation, leader;
+
+CREATE TEMP VIEW parallel_fit AS
+WITH serial AS (
+    SELECT split_part(method, ' ', 1) AS mode, relation, milliseconds AS s
+    FROM samples WHERE method LIKE '% seq'
+), parallel AS (
+    SELECT split_part(p.method, ' ', 1) AS mode, p.*, se.s
+    FROM parallel_samples AS p
+    JOIN serial AS se ON se.mode = split_part(p.method, ' ', 1) AND se.relation = p.relation
+    WHERE p.method LIKE '% seq' AND p.workers > 0
+), start AS (
+    SELECT split_part(method, ' ', 1) AS mode, milliseconds AS l
+    FROM parallel_samples WHERE method LIKE '% start'
+), toll AS (
+    SELECT p.mode,
+           sum((p.pages / p.workers) * (p.milliseconds - st.l - p.s / p.workers)) /
+           sum((p.pages / p.workers) ^ 2) AS phi_ms
+    FROM parallel AS p JOIN start AS st USING (mode)
+    WHERE NOT p.leader
+    GROUP BY p.mode
+), head AS (
+    SELECT p.mode,
+           avg(p.s - (p.milliseconds - st.l) *
+               (1 + p.workers * (p.s / p.pages) / (p.s / p.pages + t.phi_ms))) AS h_ms
+    FROM parallel AS p JOIN start AS st USING (mode) JOIN toll AS t USING (mode)
+    WHERE p.leader
+    GROUP BY p.mode
+)
+SELECT st.mode, st.l AS l_ms, t.phi_ms, h.h_ms
+FROM start AS st JOIN toll AS t USING (mode) JOIN head AS h USING (mode);
+
+SELECT mode, round(l_ms::numeric, 3) AS start_ms, round((phi_ms * 1000)::numeric, 4) AS page_toll_us,
+       round(h_ms::numeric, 3) AS head_start_ms
+FROM parallel_fit ORDER BY mode DESC;
+-- In the units of the model in force: the time of a full scan's page as
+-- the current tessera.scan_page_cost and scan_tuple_cost give it, the
+-- median over the serial full scans (the unit a fit of this run gives
+-- moves from run to run, and with it the parameters above).
+SELECT round((p.l_ms / u.unit_ms)::numeric) AS "tessera.scan_parallel_setup_cost",
+       round((p.phi_ms / u.unit_ms)::numeric, 2) AS "tessera.scan_worker_page_cost",
+       round((p.h_ms / u.unit_ms)::numeric) AS head_start,
+       round((u.unit_ms * 1000)::numeric, 4) AS unit_us
+FROM parallel_fit AS p,
+     (SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY milliseconds /
+                 (pages * current_setting('tessera.scan_page_cost')::float8 +
+                  tuples * current_setting('tessera.scan_tuple_cost')::float8)) AS unit_ms
+      FROM samples WHERE method = 'on seq') AS u
+WHERE p.mode = 'on';
+-- How well each parallel sample of the node fits, predicted against measured.
+SELECT p.relation, p.leader, round(p.milliseconds::numeric, 3) AS ms,
+       round((f.l_ms + CASE
+           WHEN p.leader THEN (se.milliseconds - f.h_ms) /
+               (1 + p.workers * (se.milliseconds / p.pages) / (se.milliseconds / p.pages + f.phi_ms))
+           ELSE (se.milliseconds + p.pages * f.phi_ms) / p.workers
+       END)::numeric, 3) AS predicted_ms,
+       round(se.milliseconds::numeric, 3) AS serial_ms
+FROM parallel_samples AS p
+JOIN samples AS se ON se.method = 'on seq' AND se.relation = p.relation
+JOIN parallel_fit AS f ON f.mode = 'on'
+WHERE p.method = 'on seq'
+ORDER BY p.relation, p.leader;
 \o

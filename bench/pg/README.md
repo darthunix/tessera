@@ -106,8 +106,13 @@ query down, and where it can, does it speed one up.
   row of either index scan, a page, a row and a scattered row of a
   bitmap, the core's time per unit of its cost), prints the parameters
   `tessera.scan_page_cost` and the rest they give, a full scan's page
-  being 1, and each sample against its prediction. Run it on another
-  machine to set the parameters there.
+  being 1, and each sample against its prediction. The full scans run
+  again with two workers, without the leader and with it, and a count of
+  `bench_tiny` times the workers' start and finish: they fit the model of
+  a partial scan (the start, a worker's toll a page, the leader's head
+  start) and print `tessera.scan_parallel_setup_cost` and
+  `tessera.scan_worker_page_cost`. Run it on another machine to set the
+  parameters there.
 - **rowwise** (`rowwise.sql`): tables without clauses read under a parent
   of the core that takes rows one at a time: `bit_or` of a column and of
   an expression, one column of sixty, `max` of a text column, a window

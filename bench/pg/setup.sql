@@ -140,6 +140,12 @@ CREATE INDEX bench_idx_w ON bench_idx (w);
 CREATE INDEX bench_idx_d ON bench_idx USING brin (d);
 CREATE INDEX bench_idx_id ON bench_idx (id);
 
+-- The scancost family's parallel query with next to nothing to read: the
+-- workers' start and finish alone.
+DROP TABLE IF EXISTS bench_tiny;
+CREATE TABLE bench_tiny AS SELECT g AS a FROM generate_series(1, 1000) AS g;
+ALTER TABLE bench_tiny SET (parallel_workers = 2);
+
 -- The grouping cases of the win family group by expressions: statistics
 -- on them give the planner the number of groups, which it would otherwise
 -- take from the unique column underneath.
@@ -164,6 +170,7 @@ VACUUM (ANALYZE) bench_days;
 VACUUM (ANALYZE) bench_tdim;
 VACUUM (ANALYZE) bench_tfact;
 VACUUM (ANALYZE) bench_idx;
+VACUUM (ANALYZE) bench_tiny;
 
 SELECT pg_size_pretty(pg_total_relation_size('bench_narrow')) AS narrow,
        pg_size_pretty(pg_total_relation_size('bench_wide')) AS wide,
