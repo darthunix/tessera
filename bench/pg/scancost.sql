@@ -23,7 +23,9 @@ SELECT set_config('bench.repetitions', :'repetitions', false);
 -- The model's parallel parameters in force, which the parallel samples set
 -- to zero for a while to run in parallel at all.
 SELECT set_config('bench.parallel_setup_cost', current_setting('tessera.scan_parallel_setup_cost'), false),
-       set_config('bench.worker_page_cost', current_setting('tessera.scan_worker_page_cost'), false);
+       set_config('bench.worker_page_cost', current_setting('tessera.scan_worker_page_cost'), false),
+       set_config('bench.bitmap_build_cost', current_setting('tessera.bitmap_build_cost'), false),
+       set_config('bench.bitmap_build_scatter_cost', current_setting('tessera.bitmap_build_scatter_cost'), false);
 
 -- One sample a query: its plan's scan node, its cost, pages and rows.
 CREATE TEMP TABLE samples
@@ -67,6 +69,7 @@ CREATE TEMP TABLE parallel_samples
 (
     method text,
     relation text,
+    share numeric,
     leader boolean,
     workers integer,
     pages float8,
@@ -144,8 +147,8 @@ END
 $function$;
 
 /* A parallel sample: the query timed, and the workers its plan launched. */
-CREATE FUNCTION pg_temp.parallel_sample(method text, relation text, leader boolean, query text,
-                                        repetitions integer)
+CREATE FUNCTION pg_temp.parallel_sample(method text, relation text, share numeric, leader boolean,
+                                        query text, repetitions integer)
 RETURNS void
 LANGUAGE plpgsql
 AS $function$
@@ -162,7 +165,7 @@ BEGIN
         node := node -> 'Plans' -> 0;
     END LOOP;
     INSERT INTO parallel_samples
-    SELECT method, relation, leader, coalesce(launched, 0), c.relpages,
+    SELECT method, relation, share, leader, coalesce(launched, 0), c.relpages,
            pg_temp.fastest(query, repetitions)
     FROM pg_class AS c
     WHERE c.relname = relation;
@@ -274,19 +277,32 @@ BEGIN
         PERFORM set_config('min_parallel_table_scan_size', '0', false);
         PERFORM set_config('tessera.scan_parallel_setup_cost', '0', false);
         PERFORM set_config('tessera.scan_worker_page_cost', '0', false);
+        PERFORM set_config('tessera.bitmap_build_cost', '0', false);
+        PERFORM set_config('tessera.bitmap_build_scatter_cost', '0', false);
         PERFORM pg_temp.only('seq');
         FOREACH relation IN ARRAY ARRAY['bench_narrow', 'bench_fact', 'bench_sort', 'bench_idx',
                                         'bench_mixed', 'bench_wide'] LOOP
             FOREACH leader IN ARRAY ARRAY[false, true] LOOP
-                PERFORM pg_temp.parallel_sample(mode || ' seq', relation, leader,
+                PERFORM pg_temp.parallel_sample(mode || ' seq', relation, 1, leader,
                                                 format('SELECT count(*) FROM %I WHERE %I > -1', relation,
                                                        (SELECT attname FROM pg_attribute
                                                         WHERE attrelid = relation::regclass AND attnum = 1)),
                                                 repetitions);
             END LOOP;
         END LOOP;
-        PERFORM pg_temp.parallel_sample(mode || ' start', 'bench_tiny', true,
+        PERFORM pg_temp.parallel_sample(mode || ' start', 'bench_tiny', 1, true,
                                         'SELECT count(*) FROM bench_tiny', repetitions);
+        -- The bitmaps with two workers, at the serial samples' shares: one
+        -- participant builds each, the others waiting.
+        PERFORM pg_temp.only('bitmap');
+        FOREACH share IN ARRAY ARRAY[0.01, 0.05, 0.1, 0.2, 0.3, 0.5] LOOP
+            PERFORM pg_temp.parallel_sample(mode || ' bitmap scattered', 'bench_idx', share, true,
+                format('SELECT count(*), sum(w) FROM bench_idx WHERE k < %s', round(rows * share)),
+                repetitions);
+            PERFORM pg_temp.parallel_sample(mode || ' bitmap ordered', 'bench_idx', share, true,
+                format('SELECT count(*), sum(w) FROM bench_idx WHERE id < %s', round(rows * share)),
+                repetitions);
+        END LOOP;
         PERFORM set_config('max_parallel_workers_per_gather', '0', false);
         PERFORM set_config('parallel_setup_cost', '1000', false);
         PERFORM set_config('parallel_tuple_cost', '0.1', false);
@@ -295,6 +311,10 @@ BEGIN
                            current_setting('bench.parallel_setup_cost'), false);
         PERFORM set_config('tessera.scan_worker_page_cost',
                            current_setting('bench.worker_page_cost'), false);
+        PERFORM set_config('tessera.bitmap_build_cost',
+                           current_setting('bench.bitmap_build_cost'), false);
+        PERFORM set_config('tessera.bitmap_build_scatter_cost',
+                           current_setting('bench.bitmap_build_scatter_cost'), false);
     END LOOP;
     PERFORM set_config('tessera.enable', 'on', false);
 END
@@ -305,6 +325,8 @@ RESET parallel_tuple_cost;
 RESET min_parallel_table_scan_size;
 RESET tessera.scan_parallel_setup_cost;
 RESET tessera.scan_worker_page_cost;
+RESET tessera.bitmap_build_cost;
+RESET tessera.bitmap_build_scatter_cost;
 RESET enable_seqscan;
 RESET enable_indexonlyscan;
 RESET enable_indexscan;
@@ -410,8 +432,8 @@ ORDER BY s.method, s.relation, s.share;
 -- page c = S / P (T - L - S / n = phi P / n, least squares through zero);
 -- h, what the leader reads before the workers come, from the samples
 -- with it: T = L + (S - h) / D, D = 1 + n c / (c + phi), averaged.
-SELECT method, relation, leader, workers, pages, round(milliseconds::numeric, 3) AS ms
-FROM parallel_samples ORDER BY method, relation, leader;
+SELECT method, relation, share, leader, workers, pages, round(milliseconds::numeric, 3) AS ms
+FROM parallel_samples ORDER BY method, relation, share, leader;
 
 CREATE TEMP VIEW parallel_fit AS
 WITH serial AS (
@@ -474,6 +496,46 @@ JOIN samples AS se ON se.method = 'on seq' AND se.relation = p.relation
 JOIN parallel_fit AS f ON f.mode = 'on'
 WHERE p.method = 'on seq'
 ORDER BY p.relation, p.leader;
+
+-- A partial bitmap's building, which one participant does while the
+-- workers start: a row's price and what a row out of the table's order
+-- adds, times 1 - c² for the column's correlation c, found over a grid of
+-- 0.5 ns steps as the pair whose times T = L + max(B - L / 2, 0) +
+-- (S - B) / D, D over the serial sample's pages, come nearest the
+-- parallel samples' (least squares of the relative errors).
+CREATE TEMP VIEW bitmap_build_fit AS
+WITH pairs AS (
+    SELECT p.milliseconds AS measured, s.milliseconds AS serial, s.pages, s.rows, p.workers,
+           1 - coalesce(st.correlation, 0) ^ 2 AS scatter
+    FROM parallel_samples AS p
+    JOIN samples AS s ON s.method = p.method AND s.relation = p.relation AND s.share = p.share
+    LEFT JOIN pg_stats AS st
+        ON st.tablename = 'bench_idx'
+       AND st.attname = CASE WHEN p.method LIKE '%ordered' THEN 'id' ELSE 'k' END
+    WHERE p.method LIKE 'on bitmap%' AND p.workers > 0 AND s.pages > 0
+), grid AS (
+    SELECT b.b * 0.5e-6 AS build_ms, x.x * 0.5e-6 AS scatter_ms
+    FROM generate_series(0, 60) AS b(b), generate_series(0, 160) AS x(x)
+), predicted AS (
+    SELECT g.build_ms, g.scatter_ms, q.measured, t.time
+    FROM grid AS g CROSS JOIN pairs AS q
+    CROSS JOIN parallel_fit AS f
+    CROSS JOIN LATERAL (SELECT least(q.serial, q.rows * (g.build_ms + g.scatter_ms * q.scatter)) AS b) AS b
+    CROSS JOIN LATERAL (SELECT (q.serial - b.b) / q.pages AS c) AS c
+    CROSS JOIN LATERAL (SELECT f.l_ms + greatest(b.b - f.l_ms / 2, 0) +
+                               (q.serial - b.b) / (1 + q.workers * c.c / (c.c + f.phi_ms)) AS time) AS t
+    WHERE f.mode = 'on'
+)
+SELECT build_ms, scatter_ms, sqrt(avg(((time - measured) / measured) ^ 2)) AS error
+FROM predicted
+GROUP BY build_ms, scatter_ms
+ORDER BY error
+LIMIT 1;
+SELECT round((b.build_ms * 1e6)::numeric, 1) AS build_ns, round((b.scatter_ms * 1e6)::numeric, 1) AS build_scatter_ns,
+       round(b.error::numeric, 3) AS error,
+       round((b.build_ms / u.unit_ms)::numeric, 4) AS "tessera.bitmap_build_cost",
+       round((b.scatter_ms / u.unit_ms)::numeric, 4) AS "tessera.bitmap_build_scatter_cost"
+FROM bitmap_build_fit AS b, model_unit AS u;
 
 -- The model of the filter: each sample's time over its table's base,
 -- fitted by its rows: a column past a varlena from the samples of that
