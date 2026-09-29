@@ -1026,6 +1026,15 @@ the count by `numeric_div`, as `numeric_avg` and `int8_avg` divide it;
 `min` and `max` keep a copy of the extreme, a tie replacing it as
 `numeric_smaller` and `numeric_larger` keep their second argument, two
 decimals compared at the larger scale and anything else by `numeric_cmp`.
+`sum`, `avg`, `min` and `max` of float8 and float4 it folds too, row by
+row in the rows' order as the core's functions do, so to the last bit:
+`sum` from the first value (a `-0` stays) by `float8_pl` or, for float4,
+`float4_pl`, `avg` by the sums `float8_accum` keeps, whose overflow from
+finite values fails as the core's, `min` and `max` keeping the new value
+unless the state beats it (`float8smaller`, `float8larger`). A float sum
+may add in another order, which SQL leaves to the implementation for an
+approximate type and the core's own parallel plans do; the node has no
+reason to yet, its time a row going to reading the rows, not to adding.
 Against the core's functions over the same scan (2 M rows of
 `numeric(15,2)`): `sum` and `avg` by 100 groups 80 ms and 55, `sum`, `avg`,
 `min` and `max` without groups 101 and 56. A partial aggregate stays with

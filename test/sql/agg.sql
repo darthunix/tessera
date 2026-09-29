@@ -577,6 +577,38 @@ RESET tessera.scan_worker_page_cost;
 RESET parallel_tuple_cost;
 RESET min_parallel_table_scan_size;
 DROP TABLE agg_fast;
+-- sum, avg, min and max of float8 and float4, in the rows' order as the
+-- core's functions: the sum from the first value (-0 stays), float4's
+-- in float4, avg by float8_accum's sums, whose overflow fails as the
+-- core's; NaN, infinities, ties of 0 and -0 kept as the core keeps them.
+CREATE TABLE agg_float (id int, g int, f8 float8, f4 float4);
+INSERT INTO agg_float
+SELECT i, i % 5,
+       CASE WHEN i % 41 = 0 THEN NULL WHEN i % 97 = 0 THEN 'NaN' WHEN i % 89 = 0 THEN 'Infinity'
+            WHEN i % 83 = 0 THEN '-Infinity' WHEN i % 13 = 0 THEN '-0' WHEN i % 17 = 0 THEN '0'
+            ELSE ((i * 7919) % 2000000 - 1000000) / 7.0 END,
+       CASE WHEN i % 43 = 0 THEN NULL WHEN i % 101 = 0 THEN 'NaN' WHEN i % 19 = 0 THEN '-0'
+            ELSE ((i * 104729) % 200000 - 100000) / 3.0 END
+FROM generate_series(1, 5000) AS i;
+INSERT INTO agg_float VALUES (6001, 10, '-0', '-0'), (6002, 11, 1e308, 3e38), (6003, 11, 1e308, 3e38),
+    (6004, 12, 1e200, 1), (6005, 12, -1e200, 2), (6006, 13, 0, 0), (6007, 13, '-0', '-0');
+ANALYZE agg_float;
+EXPLAIN (COSTS OFF) SELECT g, sum(f8), avg(f8), min(f8), max(f8), sum(f4), avg(f4), min(f4), max(f4) FROM agg_float GROUP BY g;
+SELECT agg_same($$SELECT g, sum(f8), avg(f8), min(f8), max(f8), sum(f4), avg(f4), min(f4), max(f4) FROM agg_float WHERE id < 6002 OR id > 6005 GROUP BY g$$);
+SELECT agg_same($$SELECT sum(f8), avg(f8), min(f8), max(f8), sum(f4), avg(f4), min(f4), max(f4) FROM agg_float WHERE id < 6000$$);
+SELECT agg_same($$SELECT g, sum(f8) FILTER (WHERE f8 < 'Infinity' AND f8 > '-Infinity'), avg(f4) FILTER (WHERE f4 <> 'NaN'), max(f8) FILTER (WHERE f8 < 1000) FROM agg_float WHERE id < 6000 GROUP BY g$$);
+SELECT agg_same($$SELECT g, sum(f4), max(f8), min(f4) FROM agg_float WHERE id IN (6001, 6006, 6007) GROUP BY g$$);
+\set VERBOSITY terse
+SELECT sum(f8) FROM agg_float WHERE g = 11;
+SELECT avg(f8) FROM agg_float WHERE g = 12;
+SELECT sum(f4) FROM agg_float WHERE g = 11;
+SET tessera.enable = off;
+SELECT sum(f8) FROM agg_float WHERE g = 11;
+SELECT avg(f8) FROM agg_float WHERE g = 12;
+SELECT sum(f4) FROM agg_float WHERE g = 11;
+RESET tessera.enable;
+\set VERBOSITY default
+DROP TABLE agg_float;
 
 DROP TABLE agg_t;
 DROP FUNCTION agg_same(text);

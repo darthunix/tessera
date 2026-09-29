@@ -24,6 +24,7 @@
 #include "parser/parse_agg.h"
 #include "port/pg_bitutils.h"
 #include "storage/shm_toc.h"
+#include "utils/float.h"
 #include "utils/fmgroids.h"
 #include "utils/syscache.h"
 #include "utils/typcache.h"
@@ -128,7 +129,9 @@ typedef enum AggKind
  * A generic aggregate the node folds itself, its state its own in place of
  * the core's transition functions, its value the core's final function's:
  * sum and avg of numeric, bigint, integer and smallint, min and max of
- * numeric. The rest go through the core's functions.
+ * numeric; sum, avg, min and max of float8 and float4, row by row in the
+ * rows' order as the core's functions, so to the last bit. The rest go
+ * through the core's functions.
  */
 typedef enum FastKind
 {
@@ -145,7 +148,9 @@ typedef enum FastKind
  * at the largest scale met, below 10^36 in magnitude, the count, and the
  * numeric sum of the rest, NaN, infinities, longer values and the
  * decimals' sums past the bound. min and max: a copy of the extreme and its
- * decimal, when it has one.
+ * decimal, when it has one. A float's: the count, sum and sum of squared
+ * deviations float8_accum keeps (the sum of a float4 in float4), or the
+ * extreme.
  */
 typedef struct FastState
 {
@@ -160,6 +165,10 @@ typedef struct FastState
 	Datum		extreme;
 	bool		decimal_valid;
 	TessDecimal decimal;
+	float8		n;
+	float8		sx;
+	float8		sxx;
+	float4		sx4;
 } FastState;
 
 typedef struct GenericAgg
@@ -191,6 +200,8 @@ typedef struct GenericAgg
 	bool		fast_numeric;
 	bool		fast_wide;
 	bool		fast_int8_result;
+	/* A float argument: FLOAT8OID or FLOAT4OID, else InvalidOid. */
+	Oid			fast_float;
 } GenericAgg;
 
 /*
@@ -2082,8 +2093,38 @@ fast_kind(const Aggref *agg, GenericAgg *generic)
 	generic->fast_numeric = false;
 	generic->fast_wide = false;
 	generic->fast_int8_result = false;
+	generic->fast_float = InvalidOid;
 	switch (agg->aggfnoid)
 	{
+		case F_SUM_FLOAT8:
+		case F_AVG_FLOAT8:
+		case F_MIN_FLOAT8:
+		case F_MAX_FLOAT8:
+			generic->fast_float = FLOAT8OID;
+			break;
+		case F_SUM_FLOAT4:
+		case F_AVG_FLOAT4:
+		case F_MIN_FLOAT4:
+		case F_MAX_FLOAT4:
+			generic->fast_float = FLOAT4OID;
+			break;
+		default:
+			break;
+	}
+	switch (agg->aggfnoid)
+	{
+		case F_SUM_FLOAT8:
+		case F_SUM_FLOAT4:
+			return FAST_SUM;
+		case F_AVG_FLOAT8:
+		case F_AVG_FLOAT4:
+			return FAST_AVG;
+		case F_MIN_FLOAT8:
+		case F_MIN_FLOAT4:
+			return FAST_MIN;
+		case F_MAX_FLOAT8:
+		case F_MAX_FLOAT4:
+			return FAST_MAX;
 		case F_SUM_NUMERIC:
 			generic->fast_numeric = true;
 			return FAST_SUM;
@@ -2237,6 +2278,64 @@ fast_extreme(GenericAgg *generic, FastState *fast, Datum value,
 		fast->decimal = *decimal;
 }
 
+/*
+ * A float row into the state, as the core's functions take it: sum the
+ * first value, then float8pl or float4pl (22003 on overflow); avg as
+ * float8_accum and float4_accum, the Youngs-Cramer sums whose overflow
+ * from finite values fails; min and max as float8smaller and
+ * float8larger, the new value unless the state beats it.
+ */
+static void
+fast_float_advance(GenericAgg *generic, FastState *fast, bool first, Datum value)
+{
+	bool		single = generic->fast_float == FLOAT4OID;
+	float8		number = single ? (float8) DatumGetFloat4(value) : DatumGetFloat8(value);
+
+	switch (generic->fast)
+	{
+		case FAST_SUM:
+			if (single)
+				fast->sx4 = first ? DatumGetFloat4(value) :
+					float4_pl(fast->sx4, DatumGetFloat4(value));
+			else
+				fast->sx = first ? number : float8_pl(fast->sx, number);
+			break;
+		case FAST_AVG:
+			{
+				float8		previous_n = fast->n;
+				float8		previous_sx = fast->sx;
+
+				fast->n += 1.0;
+				fast->sx += number;
+				if (previous_n > 0.0)
+				{
+					float8		deviation = number * fast->n - fast->sx;
+
+					fast->sxx += deviation * deviation / (fast->n * previous_n);
+					if (isinf(fast->sx) || isinf(fast->sxx))
+					{
+						if (!isinf(previous_sx) && !isinf(number))
+							float_overflow_error();
+						fast->sxx = get_float8_nan();
+					}
+				}
+				else if (isnan(number) || isinf(number))
+					fast->sxx = get_float8_nan();
+				break;
+			}
+		default:
+			if (first ||
+				!(generic->fast == FAST_MAX ?
+				  (single ? float4_gt(fast->sx4, DatumGetFloat4(value)) : float8_gt(fast->sx, number)) :
+				  (single ? float4_lt(fast->sx4, DatumGetFloat4(value)) : float8_lt(fast->sx, number))))
+			{
+				fast->sx = number;
+				fast->sx4 = single ? DatumGetFloat4(value) : 0;
+			}
+			break;
+	}
+}
+
 /* One row into the state, the first non-NULL one making it. */
 static void
 fast_advance(GenericAgg *generic, int row, MemoryContext states)
@@ -2254,8 +2353,19 @@ fast_advance(GenericAgg *generic, int row, MemoryContext states)
 	{
 		generic->state = PointerGetDatum(MemoryContextAllocZero(states, sizeof(FastState)));
 		generic->state_null = false;
+		if (OidIsValid(generic->fast_float))
+		{
+			fast_float_advance(generic, (FastState *) DatumGetPointer(generic->state), true,
+							   value);
+			return;
+		}
 	}
 	fast = (FastState *) DatumGetPointer(generic->state);
+	if (OidIsValid(generic->fast_float))
+	{
+		fast_float_advance(generic, fast, false, value);
+		return;
+	}
 	if (generic->fast_numeric)
 		decimal_valid = tess_decimal_of(value, &decimal);
 	else
@@ -2292,6 +2402,14 @@ fast_value(GenericAgg *generic, bool *isnull)
 	if (generic->state_null)
 		return (Datum) 0;
 	fast = (FastState *) DatumGetPointer(generic->state);
+	/* A float's: float8_avg's Sx / N, the sum or the extreme of its type. */
+	if (OidIsValid(generic->fast_float))
+	{
+		if (generic->fast == FAST_AVG)
+			return Float8GetDatum(fast->sx / fast->n);
+		return generic->fast_float == FLOAT4OID ? Float4GetDatum(fast->sx4) :
+			Float8GetDatum(fast->sx);
+	}
 	if (generic->fast == FAST_MIN || generic->fast == FAST_MAX)
 		return fast->extreme;
 	if (generic->fast_int8_result)
