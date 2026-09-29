@@ -343,27 +343,28 @@ SELECT a FROM filter_t WHERE a > 100 LIMIT 3;
 
 -- Each clause runs in batches if the compiler takes it, else row-wise,
 -- in the planner's order, over the rows the clauses before it kept.
-EXPLAIN (COSTS OFF) SELECT a FROM filter_t WHERE a > 100 AND c = 'r150';
+EXPLAIN (COSTS OFF) SELECT a FROM filter_t WHERE a > 100 AND upper(c) = 'R150';
                   QUERY PLAN                  
 ----------------------------------------------
  Custom Scan (TessFilter) on filter_t
-   Filter: (c = 'r150'::text)
+   Filter: (upper(c) = 'R150'::text)
    Batch Filter: (a > 100)
    ->  Custom Scan (TessHeapScan) on filter_t
 (4 rows)
 
-SELECT filter_same($$SELECT a FROM filter_t WHERE a > 100 AND c = 'r150'$$);
+SELECT filter_same($$SELECT a FROM filter_t WHERE a > 100 AND upper(c) = 'R150'$$);
  filter_same 
 -------------
  {(150)}
 (1 row)
 
--- The planner orders the text comparison after the cheaper int4 one.
-EXPLAIN (COSTS OFF) SELECT a FROM filter_t WHERE c = 'r150' AND a > 100;
+-- The planner orders the text function's comparison after the cheaper
+-- int4 one.
+EXPLAIN (COSTS OFF) SELECT a FROM filter_t WHERE upper(c) = 'R150' AND a > 100;
                   QUERY PLAN                  
 ----------------------------------------------
  Custom Scan (TessFilter) on filter_t
-   Filter: (c = 'r150'::text)
+   Filter: (upper(c) = 'R150'::text)
    Batch Filter: (a > 100)
    ->  Custom Scan (TessHeapScan) on filter_t
 (4 rows)
@@ -398,11 +399,11 @@ SELECT filter_same($$SELECT a FROM filter_t WHERE filter_slow(a) AND a > 190$$);
 DROP FUNCTION filter_slow(int);
 -- Rows removed by each part, and a column only the row-wise clause reads.
 EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
-SELECT a FROM filter_t WHERE a > 100 AND c <> 'r150';
+SELECT a FROM filter_t WHERE a > 100 AND upper(c) <> 'R150';
                                 QUERY PLAN                                 
 ---------------------------------------------------------------------------
  Custom Scan (TessFilter) on filter_t (actual rows=85.00 loops=1)
-   Filter: (c <> 'r150'::text)
+   Filter: (upper(c) <> 'R150'::text)
    Rows Removed by Filter: 115
    Batch Filter: (a > 100)
    Rows Removed by Batch Filter: 114
@@ -418,7 +419,7 @@ SELECT a FROM filter_t WHERE a > 100 AND c <> 'r150';
          Restarted Datums: 0
 (15 rows)
 
-SELECT filter_same($$SELECT count(*) FROM filter_t WHERE a > 100 AND c <> 'r150'$$);
+SELECT filter_same($$SELECT count(*) FROM filter_t WHERE a > 100 AND upper(c) <> 'R150'$$);
  filter_same 
 -------------
  {(85)}
@@ -427,7 +428,7 @@ SELECT filter_same($$SELECT count(*) FROM filter_t WHERE a > 100 AND c <> 'r150'
 -- The pack node keeps the scan's tuples: a batch clause deforms its column
 -- for every row, the residual its column for the rows that survived.
 EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
-SELECT count(*) FROM filter_t WHERE a > 100 AND c <> 'r150';
+SELECT count(*) FROM filter_t WHERE a > 100 AND upper(c) <> 'R150';
                                    QUERY PLAN                                    
 ---------------------------------------------------------------------------------
  Custom Scan (TessAgg) (actual rows=1.00 loops=1)
@@ -435,7 +436,7 @@ SELECT count(*) FROM filter_t WHERE a > 100 AND c <> 'r150';
    Input Rows: 85
    Kernel Calls: 3
    ->  Custom Scan (TessFilter) on filter_t (actual rows=85.00 loops=1)
-         Filter: (c <> 'r150'::text)
+         Filter: (upper(c) <> 'R150'::text)
          Rows Removed by Filter: 115
          Batch Filter: (a > 100)
          Rows Removed by Batch Filter: 114
@@ -514,11 +515,8 @@ SELECT count(*) FROM filter_temp WHERE a > 90 AND c <> 'r95';
    Input Rows: 9
    Kernel Calls: 1
    ->  Custom Scan (TessFilter) on filter_temp (actual rows=9.00 loops=1)
-         Filter: (c <> 'r95'::text)
-         Rows Removed by Filter: 91
-         Batch Filter: (a > 90)
-         Rows Removed by Batch Filter: 90
-         Rows Removed by Residual Filter: 1
+         Batch Filter: ((a > 90) AND (c <> 'r95'::text))
+         Rows Removed by Batch Filter: 91
          Input Batches: 2
          Input Rows: 100
          Output Rows: 9
@@ -528,7 +526,7 @@ SELECT count(*) FROM filter_temp WHERE a > 90 AND c <> 'r95';
                Pages: 1
                Deformed Datums: 110
                Restarted Datums: 0
-(19 rows)
+(16 rows)
 
 SELECT filter_same($$SELECT c FROM filter_temp WHERE a > 90 AND c <> 'r95'$$);
                        filter_same                        
@@ -648,11 +646,11 @@ SELECT filter_same($$SELECT count(*) FROM filter_t WHERE a > 0 AND (b # 0) <> 0 
 (1 row)
 
 EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
-SELECT a FROM filter_t WHERE a > 100 AND c <> 'r150' AND b < 5;
+SELECT a FROM filter_t WHERE a > 100 AND upper(c) <> 'R150' AND b < 5;
                                 QUERY PLAN                                 
 ---------------------------------------------------------------------------
  Custom Scan (TessFilter) on filter_t (actual rows=43.00 loops=1)
-   Filter: (c <> 'r150'::text)
+   Filter: (upper(c) <> 'R150'::text)
    Rows Removed by Filter: 157
    Batch Filter: ((a > 100) AND (b < 5))
    Rows Removed by Batch Filter: 156
@@ -664,11 +662,11 @@ SELECT a FROM filter_t WHERE a > 100 AND c <> 'r150' AND b < 5;
          Batch Size: 64
          Batches: 4
          Pages: 2
-         Deformed Datums: 371
+         Deformed Datums: 330
          Restarted Datums: 0
 (15 rows)
 
-SELECT filter_same($$SELECT a FROM filter_t WHERE a > 100 AND c <> 'r150' AND b < 5$$);
+SELECT filter_same($$SELECT a FROM filter_t WHERE a > 100 AND upper(c) <> 'R150' AND b < 5$$);
                                                                                                                              filter_same                                                                                                                             
 ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  {(101),(102),(103),(104),(110),(111),(113),(114),(120),(121),(122),(123),(124),(130),(131),(132),(134),(141),(142),(143),(144),(151),(152),(153),(160),(162),(163),(164),(170),(171),(172),(173),(174),(180),(181),(183),(184),(190),(191),(192),(193),(194),(200)}

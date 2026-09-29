@@ -156,6 +156,51 @@ SELECT types_same(format($$SELECT count(*), sum(v) FROM types_f WHERE (v % 100):
 SELECT types_same(format($$SELECT count(*), sum(v) FROM types_f WHERE d IN (%s)$$, (SELECT string_agg(quote_literal(date '1999-12-10' + g), ',') FROM generate_series(0, 38) AS g)));
 SELECT types_same(format($$SELECT sum(CASE WHEN v IN (%s) THEN 1 ELSE 0 END), count(*) FROM types_f$$, types_list(11, 0, 50)));
 DROP FUNCTION types_list(int, int, int, text);
+-- Text in batches under a deterministic collation, where equal strings are
+-- equal bytes: equality and inequality of text, varchar and char(n), whose
+-- trailing spaces do not count, a constant on either side or two columns,
+-- IN and NOT IN through them; starts_with; LIKE and NOT LIKE by the
+-- pattern's pieces (a prefix, a suffix, one inside, several, an exact
+-- string, '%' alone, the empty one, multibyte text), another pattern (_ or
+-- an escape) through the core's function a row; the lengths; values
+-- compressed and stored outside the row; a nondeterministic collation
+-- row by row.
+CREATE TABLE types_t (id int, t text, t2 text, vc varchar(10), bc char(6), long text, ext text, u text);
+ALTER TABLE types_t ALTER COLUMN ext SET STORAGE EXTERNAL;
+INSERT INTO types_t
+SELECT i, CASE WHEN i % 13 = 0 THEN NULL ELSE 'key-' || (i % 97) END,
+       CASE WHEN i % 5 = 0 THEN 'key-' || (i % 96) ELSE 'key-' || (i % 97) END,
+       ('v' || i % 30)::varchar(10),
+       CASE WHEN i % 17 = 0 THEN NULL ELSE ('c' || i % 7)::char(6) END,
+       CASE WHEN i % 50 = 0 THEN repeat('xy', 3000) || i ELSE 'short' || i END,
+       CASE WHEN i % 60 = 0 THEN repeat('z', 3000) || i ELSE 'e' || i END,
+       'ключ-' || i % 11
+FROM generate_series(1, 3000) AS i;
+ANALYZE types_t;
+EXPLAIN (COSTS OFF) SELECT count(*) FROM types_t WHERE t = 'key-5' AND vc <> 'v3' AND bc = 'c1' AND t LIKE 'key-1%';
+SELECT types_same($$SELECT count(*), sum(id) FROM types_t WHERE t = 'key-5' OR 'key-50' = t$$);
+SELECT types_same($$SELECT count(*), sum(id) FROM types_t WHERE t <> 'key-5' AND t = t2$$);
+SELECT types_same($$SELECT count(*), sum(id) FROM types_t WHERE t <> t2 OR vc = 'v3'$$);
+SELECT types_same($$SELECT count(*), sum(id) FROM types_t WHERE bc = 'c1' OR bc = 'c2    ' OR bc <> 'c3'$$);
+SELECT types_same($$SELECT count(*), sum(id) FROM types_t WHERE t IN ('key-1', 'key-2', 'key-50') OR vc IN ('v7', 'v8')$$);
+SELECT types_same($$SELECT count(*), sum(id) FROM types_t WHERE t NOT IN ('key-1', 'key-2')$$);
+SELECT types_same($$SELECT count(*), sum(id) FROM types_t WHERE t NOT IN ('key-1', NULL)$$);
+SELECT types_same($$SELECT count(*), sum(id) FROM types_t WHERE starts_with(t, 'key-1') OR t ^@ 'key-2'$$);
+SELECT types_same($$SELECT count(*), sum(id) FROM types_t WHERE t LIKE 'key-1%'$$);
+SELECT types_same($$SELECT count(*), sum(id) FROM types_t WHERE t LIKE '%-5' OR t LIKE '%y-9%'$$);
+SELECT types_same($$SELECT count(*), sum(id) FROM types_t WHERE t LIKE 'key-%1%' OR t LIKE 'k%y%-%9'$$);
+SELECT types_same($$SELECT count(*), sum(id) FROM types_t WHERE t LIKE 'key-50' OR t LIKE '%' OR t LIKE ''$$);
+SELECT types_same($$SELECT count(*), sum(id) FROM types_t WHERE t LIKE 'key_1%' OR t LIKE 'key\-2%'$$);
+SELECT types_same($$SELECT count(*), sum(id) FROM types_t WHERE t NOT LIKE '%9%' AND t NOT LIKE 'key-1_'$$);
+SELECT types_same($$SELECT count(*), sum(id) FROM types_t WHERE bc LIKE 'c1%' OR bc LIKE '%2 ' OR vc LIKE 'v1%'$$);
+SELECT types_same($$SELECT count(*), sum(id) FROM types_t WHERE u LIKE 'клю%' AND u LIKE '%ч-1%' AND u NOT LIKE '%-1'$$);
+SELECT types_same($$SELECT length(t), length(bc), octet_length(bc), char_length(u), octet_length(u), length(long), octet_length(ext) FROM types_t WHERE id % 10 = 0$$);
+SELECT types_same($$SELECT count(*) FROM types_t WHERE long LIKE 'xyxy%50' OR long = repeat('xy', 3000) || '100' OR ext LIKE '%zzz6%' OR length(ext) > 3000$$);
+CREATE COLLATION types_tci (provider = icu, locale = 'und-u-ks-level2', deterministic = false);
+EXPLAIN (COSTS OFF) SELECT count(*) FROM types_t WHERE t COLLATE types_tci = 'KEY-5';
+SELECT types_same($$SELECT count(*) FROM types_t WHERE t COLLATE types_tci = 'KEY-5'$$);
+DROP COLLATION types_tci;
+DROP TABLE types_t;
 -- A date against a timestamp compares other than bit for bit: the core's.
 EXPLAIN (COSTS OFF) SELECT count(*) FROM types_f JOIN types_d ON types_f.d = types_d.ts;
 SELECT types_same($$SELECT count(*) FROM types_f JOIN types_d ON types_f.d = types_d.ts$$);

@@ -34,10 +34,10 @@ LOAD 'tessera_kernels';
 -- with a row-wise one.
 EXPLAIN (COSTS OFF) SELECT count(*) FROM agg_t;
 EXPLAIN (COSTS OFF) SELECT count(*) FROM agg_t WHERE a > 100;
-EXPLAIN (COSTS OFF) SELECT count(*) FROM agg_t WHERE c <> 'r5';
+EXPLAIN (COSTS OFF) SELECT count(*) FROM agg_t WHERE upper(c) <> 'R5';
 SELECT agg_same($$SELECT count(*) FROM agg_t$$);
 SELECT agg_same($$SELECT count(*) FROM agg_t WHERE a > 100$$);
-SELECT agg_same($$SELECT count(*) FROM agg_t WHERE c <> 'r5'$$);
+SELECT agg_same($$SELECT count(*) FROM agg_t WHERE upper(c) <> 'R5'$$);
 -- The same aggregate twice is one column of the scan tuple; expressions
 -- above the aggregates are the plan's projection over that tuple.
 SELECT agg_same($$SELECT count(*), count(*) FROM agg_t WHERE a > 290$$);

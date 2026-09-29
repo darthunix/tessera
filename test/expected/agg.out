@@ -50,12 +50,12 @@ EXPLAIN (COSTS OFF) SELECT count(*) FROM agg_t WHERE a > 100;
          ->  Custom Scan (TessHeapScan) on agg_t
 (4 rows)
 
-EXPLAIN (COSTS OFF) SELECT count(*) FROM agg_t WHERE c <> 'r5';
+EXPLAIN (COSTS OFF) SELECT count(*) FROM agg_t WHERE upper(c) <> 'R5';
                    QUERY PLAN                    
 -------------------------------------------------
  Custom Scan (TessAgg)
    ->  Custom Scan (TessFilter) on agg_t
-         Filter: (c <> 'r5'::text)
+         Filter: (upper(c) <> 'R5'::text)
          ->  Custom Scan (TessHeapScan) on agg_t
 (4 rows)
 
@@ -71,7 +71,7 @@ SELECT agg_same($$SELECT count(*) FROM agg_t WHERE a > 100$$);
  {(172)}
 (1 row)
 
-SELECT agg_same($$SELECT count(*) FROM agg_t WHERE c <> 'r5'$$);
+SELECT agg_same($$SELECT count(*) FROM agg_t WHERE upper(c) <> 'R5'$$);
  agg_same 
 ----------
  {(299)}

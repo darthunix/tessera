@@ -1585,33 +1585,29 @@ SELECT join_explain($$SELECT count(*), sum(jd.n) FROM jf JOIN jd ON jf.fk = jd.i
          Builds: 1
          Build Rows: 300
          Chunks: 1
-         Probe Rows: 88
+         Probe Rows: 112
          Matches: 87
          Bloom Filters: 1
-         Bloom Filter Below: true
-         ->  Custom Scan (TessFilter) on jf (actual rows=88.00 loops=1)
-               Filter: (note ~~ 'f1%'::text)
-               Rows Removed by Filter: 912
-               Batch Filter: (jf.v > 0)
-               Rows Removed by Batch Filter: 0
-               Rows Removed by Bloom Filter: 224
-               Rows Removed by Residual Filter: 688
+         Rows Removed by Bloom Filter: 13
+         ->  Custom Scan (TessFilter) on jf (actual rows=112.00 loops=1)
+               Batch Filter: ((jf.v > 0) AND (jf.note ~~ 'f1%'::text))
+               Rows Removed by Batch Filter: 888
                Input Batches: 18
                Input Rows: 1000
-               Output Rows: 88
+               Output Rows: 112
                ->  Custom Scan (TessHeapScan) on jf (actual rows=1000.00 loops=1)
                      Batch Size: 64
                      Batches: 18
                      Pages: 9
-                     Deformed Datums: 2723
-                     Restarted Datums: 105
+                     Deformed Datums: 2112
+                     Restarted Datums: 12
          ->  Custom Scan (TessHeapScan) on jd (actual rows=300.00 loops=1)
                Batch Size: 64
                Batches: 6
                Pages: 3
                Deformed Datums: 600
                Restarted Datums: 0
-(38 rows)
+(34 rows)
 
 SELECT join_same($$SELECT jf.v, jd.label FROM jf JOIN jd ON jf.fk = jd.id WHERE jf.v > 0 AND jf.note LIKE 'f1%'$$);
                    join_same                    
@@ -3628,16 +3624,15 @@ RESET enable_parallel_hash;
 -- A text key: the table keeps the hash of the value, and the equality
 -- stays a join clause, which decides the pair.
 EXPLAIN (COSTS OFF) SELECT count(*) FROM jf JOIN jd ON jf.v > jd.n AND jf.note = jd.label;
-                  QUERY PLAN                  
-----------------------------------------------
+                             QUERY PLAN                              
+---------------------------------------------------------------------
  Custom Scan (TessAgg)
    ->  Custom Scan (TessHashJoin)
          Hash Cond: (jf.note = jd.label)
-         Batch Join Filter: (jf.v > jd.n)
-         Join Filter: (jf.note = jd.label)
+         Batch Join Filter: ((jf.v > jd.n) AND (jf.note = jd.label))
          ->  Custom Scan (TessHeapScan) on jf
          ->  Custom Scan (TessHeapScan) on jd
-(7 rows)
+(6 rows)
 
 -- A key over an expression or a cast: its side's child computes it as a
 -- target of its own, a word or a hashed value; on either side, both, in

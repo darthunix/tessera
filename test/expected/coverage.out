@@ -115,24 +115,24 @@ ORDER BY o;
  row   | n BETWEEN 10 AND 20
  row   | round(n) = 10
  row   | i4::numeric > 10.5
- row   | t = 'name 5'
- row   | t <> 'name 5'
- row   | t IN ('name 1', 'name 2')
+ batch | t = 'name 5'
+ batch | t <> 'name 5'
+ batch | t IN ('name 1', 'name 2')
  row   | t COLLATE "C" > 'name 5'
- row   | t LIKE 'name 1%'
- row   | t LIKE '%99'
- row   | t LIKE '%9%'
- row   | t NOT LIKE '%9%'
+ batch | t LIKE 'name 1%'
+ batch | t LIKE '%99'
+ batch | t LIKE '%9%'
+ batch | t NOT LIKE '%9%'
  row   | t ILIKE 'NAME 1%'
  row   | t ~ '^name 1'
- row   | length(t) > 8
+ batch | length(t) > 8
  row   | substring(t FROM 1 FOR 4) = 'name'
- row   | starts_with(t, 'name 1')
+ batch | starts_with(t, 'name 1')
  row   | upper(t) = 'NAME 5'
  row   | t || 'x' = 'name 5x'
- row   | vc = 'v5'
- row   | vc LIKE 'v1%'
- row   | bc = 'c1'
+ batch | vc = 'v5'
+ batch | vc LIKE 'v1%'
+ batch | bc = 'c1'
  batch | d > date '2021-01-01'
  batch | d BETWEEN date '2021-01-01' AND date '2021-12-31'
  batch | d >= date '2021-01-01' + interval '1 month'

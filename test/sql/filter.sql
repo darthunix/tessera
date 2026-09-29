@@ -105,10 +105,11 @@ SELECT a FROM filter_t WHERE a > 100 LIMIT 3;
 
 -- Each clause runs in batches if the compiler takes it, else row-wise,
 -- in the planner's order, over the rows the clauses before it kept.
-EXPLAIN (COSTS OFF) SELECT a FROM filter_t WHERE a > 100 AND c = 'r150';
-SELECT filter_same($$SELECT a FROM filter_t WHERE a > 100 AND c = 'r150'$$);
--- The planner orders the text comparison after the cheaper int4 one.
-EXPLAIN (COSTS OFF) SELECT a FROM filter_t WHERE c = 'r150' AND a > 100;
+EXPLAIN (COSTS OFF) SELECT a FROM filter_t WHERE a > 100 AND upper(c) = 'R150';
+SELECT filter_same($$SELECT a FROM filter_t WHERE a > 100 AND upper(c) = 'R150'$$);
+-- The planner orders the text function's comparison after the cheaper
+-- int4 one.
+EXPLAIN (COSTS OFF) SELECT a FROM filter_t WHERE upper(c) = 'R150' AND a > 100;
 -- A null test costs nothing and comes first; it runs in batches too.
 EXPLAIN (COSTS OFF) SELECT a FROM filter_t WHERE a > 100 AND c IS NOT NULL;
 -- An expensive clause moves behind a cheap batch one.
@@ -119,13 +120,13 @@ SELECT filter_same($$SELECT a FROM filter_t WHERE filter_slow(a) AND a > 190$$);
 DROP FUNCTION filter_slow(int);
 -- Rows removed by each part, and a column only the row-wise clause reads.
 EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
-SELECT a FROM filter_t WHERE a > 100 AND c <> 'r150';
-SELECT filter_same($$SELECT count(*) FROM filter_t WHERE a > 100 AND c <> 'r150'$$);
+SELECT a FROM filter_t WHERE a > 100 AND upper(c) <> 'R150';
+SELECT filter_same($$SELECT count(*) FROM filter_t WHERE a > 100 AND upper(c) <> 'R150'$$);
 
 -- The pack node keeps the scan's tuples: a batch clause deforms its column
 -- for every row, the residual its column for the rows that survived.
 EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
-SELECT count(*) FROM filter_t WHERE a > 100 AND c <> 'r150';
+SELECT count(*) FROM filter_t WHERE a > 100 AND upper(c) <> 'R150';
 -- A column the query returns is deformed for the rows served.
 EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT b FROM filter_t WHERE a > 190;
@@ -188,8 +189,8 @@ RESET tessera.enable;
 EXPLAIN (COSTS OFF) SELECT count(*) FROM filter_t WHERE a > 0 AND (b # 0) <> 0 AND 10 / b > 1;
 SELECT filter_same($$SELECT count(*) FROM filter_t WHERE a > 0 AND (b # 0) <> 0 AND 10 / b > 1$$);
 EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
-SELECT a FROM filter_t WHERE a > 100 AND c <> 'r150' AND b < 5;
-SELECT filter_same($$SELECT a FROM filter_t WHERE a > 100 AND c <> 'r150' AND b < 5$$);
+SELECT a FROM filter_t WHERE a > 100 AND upper(c) <> 'R150' AND b < 5;
+SELECT filter_same($$SELECT a FROM filter_t WHERE a > 100 AND upper(c) <> 'R150' AND b < 5$$);
 -- A policy's clauses come before the user's, whatever their costs: the
 -- cheaper division waits for the policy's row-wise guard.
 CREATE TABLE filter_rls AS SELECT i AS a, i % 10 AS b FROM generate_series(1, 200) AS i;

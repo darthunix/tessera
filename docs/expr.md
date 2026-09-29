@@ -30,8 +30,10 @@ An expression is supported when it is built from
   `CaseTestExpr` keeps it from being one);
 - calls, `OpExpr` or `FuncExpr`, whose function the registry implements as
   a `TESS_FUNCTION_VALUE` that is strict and either insensitive to the
-  input collation or given none, with one or two arguments that are
-  themselves supported;
+  input collation, given none, or indifferent among deterministic
+  collations and given one (`t = 'x'`, `t LIKE 'x%'` under the default
+  collation, but not under a nondeterministic ICU one), with one or two
+  arguments that are themselves supported;
 - calls of an equivalent ([function.md](function.md)), such as
   `int48pl(a, b8)`: the compiler replaces the call by the function it
   stands for over the cast arguments, `int8pl(int8(a), b8)`, before
@@ -231,7 +233,8 @@ to the core: the whole aggregation, sort or join is the core's over batch
 children. The row level still gains on the scan and on the batches
 around it; the batch level gains three to four times as much (plan 4.21:
 a condition over integers or dates took 0.18 of the core's time, the same
-table's `bool`, `int2`, `numeric` and text conditions 0.44 to 0.70).
+table's `bool`, `int2`, `numeric` and text conditions 0.44 to 0.70; the
+text conditions in batches 0.31 to 0.58).
 
 `test/sql/coverage.sql` prints the level of each of about 120 conditions
 and query forms of ordinary queries over one table of the common types:

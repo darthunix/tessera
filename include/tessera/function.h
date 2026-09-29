@@ -68,6 +68,12 @@ typedef enum TessResultFormat
  * column first through the operator's commutator from the catalog.
  */
 #define TESS_FUNCTION_ANY_SHAPE 0x4
+/*
+ * The result is the function's under a deterministic input collation, where
+ * equal strings are equal bytes (texteq, LIKE): a consumer uses the
+ * implementation only then, and leaves another collation to the executor.
+ */
+#define TESS_FUNCTION_DETERMINISTIC_COLLATION 0x8
 
 /* The most arguments an equivalent's casts describe. */
 #define TESS_FUNCTION_MAX_ARGS 2

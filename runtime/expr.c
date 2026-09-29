@@ -532,14 +532,20 @@ expand(Node *node)
 								 COERCE_EXPLICIT_CALL);
 }
 
-/* Strict, insensitive to the collation or given none, of the kind wanted. */
+/*
+ * Strict, of the kind wanted, and right under the input collation:
+ * insensitive to it, given none, or deterministic where the implementation
+ * compares bytes (TESS_FUNCTION_DETERMINISTIC_COLLATION).
+ */
 static bool
 usable(const TessFunction *function, Oid inputcollid, TessFunctionKind kind)
 {
 	return function != NULL && function->kind == kind &&
 		(function->flags & TESS_FUNCTION_STRICT) != 0 &&
 		((function->flags & TESS_FUNCTION_COLLATION_INSENSITIVE) != 0 ||
-		 !OidIsValid(inputcollid));
+		 !OidIsValid(inputcollid) ||
+		 ((function->flags & TESS_FUNCTION_DETERMINISTIC_COLLATION) != 0 &&
+		  get_collation_isdeterministic(inputcollid)));
 }
 
 /* The implementation of the operator's commutator, for the column first. */

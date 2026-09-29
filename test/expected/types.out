@@ -507,6 +507,162 @@ SELECT types_same(format($$SELECT sum(CASE WHEN v IN (%s) THEN 1 ELSE 0 END), co
 (1 row)
 
 DROP FUNCTION types_list(int, int, int, text);
+-- Text in batches under a deterministic collation, where equal strings are
+-- equal bytes: equality and inequality of text, varchar and char(n), whose
+-- trailing spaces do not count, a constant on either side or two columns,
+-- IN and NOT IN through them; starts_with; LIKE and NOT LIKE by the
+-- pattern's pieces (a prefix, a suffix, one inside, several, an exact
+-- string, '%' alone, the empty one, multibyte text), another pattern (_ or
+-- an escape) through the core's function a row; the lengths; values
+-- compressed and stored outside the row; a nondeterministic collation
+-- row by row.
+CREATE TABLE types_t (id int, t text, t2 text, vc varchar(10), bc char(6), long text, ext text, u text);
+ALTER TABLE types_t ALTER COLUMN ext SET STORAGE EXTERNAL;
+INSERT INTO types_t
+SELECT i, CASE WHEN i % 13 = 0 THEN NULL ELSE 'key-' || (i % 97) END,
+       CASE WHEN i % 5 = 0 THEN 'key-' || (i % 96) ELSE 'key-' || (i % 97) END,
+       ('v' || i % 30)::varchar(10),
+       CASE WHEN i % 17 = 0 THEN NULL ELSE ('c' || i % 7)::char(6) END,
+       CASE WHEN i % 50 = 0 THEN repeat('xy', 3000) || i ELSE 'short' || i END,
+       CASE WHEN i % 60 = 0 THEN repeat('z', 3000) || i ELSE 'e' || i END,
+       'ключ-' || i % 11
+FROM generate_series(1, 3000) AS i;
+ANALYZE types_t;
+EXPLAIN (COSTS OFF) SELECT count(*) FROM types_t WHERE t = 'key-5' AND vc <> 'v3' AND bc = 'c1' AND t LIKE 'key-1%';
+                                                          QUERY PLAN                                                          
+------------------------------------------------------------------------------------------------------------------------------
+ Custom Scan (TessAgg)
+   ->  Custom Scan (TessFilter) on types_t
+         Batch Filter: (((vc)::text <> 'v3'::text) AND (t ~~ 'key-1%'::text) AND (t = 'key-5'::text) AND (bc = 'c1'::bpchar))
+         ->  Custom Scan (TessHeapScan) on types_t
+(4 rows)
+
+SELECT types_same($$SELECT count(*), sum(id) FROM types_t WHERE t = 'key-5' OR 'key-50' = t$$);
+ types_same 
+------------
+ same
+(1 row)
+
+SELECT types_same($$SELECT count(*), sum(id) FROM types_t WHERE t <> 'key-5' AND t = t2$$);
+ types_same 
+------------
+ same
+(1 row)
+
+SELECT types_same($$SELECT count(*), sum(id) FROM types_t WHERE t <> t2 OR vc = 'v3'$$);
+ types_same 
+------------
+ same
+(1 row)
+
+SELECT types_same($$SELECT count(*), sum(id) FROM types_t WHERE bc = 'c1' OR bc = 'c2    ' OR bc <> 'c3'$$);
+ types_same 
+------------
+ same
+(1 row)
+
+SELECT types_same($$SELECT count(*), sum(id) FROM types_t WHERE t IN ('key-1', 'key-2', 'key-50') OR vc IN ('v7', 'v8')$$);
+ types_same 
+------------
+ same
+(1 row)
+
+SELECT types_same($$SELECT count(*), sum(id) FROM types_t WHERE t NOT IN ('key-1', 'key-2')$$);
+ types_same 
+------------
+ same
+(1 row)
+
+SELECT types_same($$SELECT count(*), sum(id) FROM types_t WHERE t NOT IN ('key-1', NULL)$$);
+ types_same 
+------------
+ same
+(1 row)
+
+SELECT types_same($$SELECT count(*), sum(id) FROM types_t WHERE starts_with(t, 'key-1') OR t ^@ 'key-2'$$);
+ types_same 
+------------
+ same
+(1 row)
+
+SELECT types_same($$SELECT count(*), sum(id) FROM types_t WHERE t LIKE 'key-1%'$$);
+ types_same 
+------------
+ same
+(1 row)
+
+SELECT types_same($$SELECT count(*), sum(id) FROM types_t WHERE t LIKE '%-5' OR t LIKE '%y-9%'$$);
+ types_same 
+------------
+ same
+(1 row)
+
+SELECT types_same($$SELECT count(*), sum(id) FROM types_t WHERE t LIKE 'key-%1%' OR t LIKE 'k%y%-%9'$$);
+ types_same 
+------------
+ same
+(1 row)
+
+SELECT types_same($$SELECT count(*), sum(id) FROM types_t WHERE t LIKE 'key-50' OR t LIKE '%' OR t LIKE ''$$);
+ types_same 
+------------
+ same
+(1 row)
+
+SELECT types_same($$SELECT count(*), sum(id) FROM types_t WHERE t LIKE 'key_1%' OR t LIKE 'key\-2%'$$);
+ types_same 
+------------
+ same
+(1 row)
+
+SELECT types_same($$SELECT count(*), sum(id) FROM types_t WHERE t NOT LIKE '%9%' AND t NOT LIKE 'key-1_'$$);
+ types_same 
+------------
+ same
+(1 row)
+
+SELECT types_same($$SELECT count(*), sum(id) FROM types_t WHERE bc LIKE 'c1%' OR bc LIKE '%2 ' OR vc LIKE 'v1%'$$);
+ types_same 
+------------
+ same
+(1 row)
+
+SELECT types_same($$SELECT count(*), sum(id) FROM types_t WHERE u LIKE 'клю%' AND u LIKE '%ч-1%' AND u NOT LIKE '%-1'$$);
+ types_same 
+------------
+ same
+(1 row)
+
+SELECT types_same($$SELECT length(t), length(bc), octet_length(bc), char_length(u), octet_length(u), length(long), octet_length(ext) FROM types_t WHERE id % 10 = 0$$);
+ types_same 
+------------
+ same
+(1 row)
+
+SELECT types_same($$SELECT count(*) FROM types_t WHERE long LIKE 'xyxy%50' OR long = repeat('xy', 3000) || '100' OR ext LIKE '%zzz6%' OR length(ext) > 3000$$);
+ types_same 
+------------
+ same
+(1 row)
+
+CREATE COLLATION types_tci (provider = icu, locale = 'und-u-ks-level2', deterministic = false);
+EXPLAIN (COSTS OFF) SELECT count(*) FROM types_t WHERE t COLLATE types_tci = 'KEY-5';
+                    QUERY PLAN                     
+---------------------------------------------------
+ Custom Scan (TessAgg)
+   ->  Custom Scan (TessFilter) on types_t
+         Filter: ((t)::text = 'KEY-5'::text)
+         ->  Custom Scan (TessHeapScan) on types_t
+(4 rows)
+
+SELECT types_same($$SELECT count(*) FROM types_t WHERE t COLLATE types_tci = 'KEY-5'$$);
+ types_same 
+------------
+ same
+(1 row)
+
+DROP COLLATION types_tci;
+DROP TABLE types_t;
 -- A date against a timestamp compares other than bit for bit: the core's.
 EXPLAIN (COSTS OFF) SELECT count(*) FROM types_f JOIN types_d ON types_f.d = types_d.ts;
                        QUERY PLAN                        
@@ -1314,12 +1470,12 @@ SELECT i AS id,
 FROM generate_series(1, 400) AS i;
 ANALYZE types_h;
 EXPLAIN (COSTS OFF) SELECT count(*) FROM types_g JOIN types_h ON types_g.t = types_h.t;
-                    QUERY PLAN                     
----------------------------------------------------
+                     QUERY PLAN                     
+----------------------------------------------------
  Custom Scan (TessAgg)
    ->  Custom Scan (TessHashJoin)
          Hash Cond: (types_g.t = types_h.t)
-         Join Filter: (types_g.t = types_h.t)
+         Batch Join Filter: (types_g.t = types_h.t)
          ->  Custom Scan (TessHeapScan) on types_g
          ->  Custom Scan (TessHeapScan) on types_h
 (6 rows)
@@ -1407,12 +1563,12 @@ CREATE DOMAIN types_pos AS int CHECK (VALUE >= 0);
 CREATE TABLE types_v AS SELECT id, t::varchar(10) AS v, w::types_pos AS p FROM types_h;
 ANALYZE types_v;
 EXPLAIN (COSTS OFF) SELECT count(*) FROM types_v AS a JOIN types_v AS b ON a.v = b.v;
-                     QUERY PLAN                      
------------------------------------------------------
+                       QUERY PLAN                       
+--------------------------------------------------------
  Custom Scan (TessAgg)
    ->  Custom Scan (TessHashJoin)
          Hash Cond: ((a.v)::text = (b.v)::text)
-         Join Filter: ((a.v)::text = (b.v)::text)
+         Batch Join Filter: ((a.v)::text = (b.v)::text)
          ->  Custom Scan (TessHeapScan) on types_v a
          ->  Custom Scan (TessHeapScan) on types_v b
 (6 rows)
@@ -1481,7 +1637,7 @@ EXPLAIN (COSTS OFF) SELECT count(*) FROM types_g JOIN types_h ON types_g.t = typ
                      ->  Parallel Custom Scan (TessHashJoin)
                            Hash Cond: ((types_g.t = types_h.t) AND (types_g.w = types_h.w))
                            Shared Table: true
-                           Join Filter: (types_g.t = types_h.t)
+                           Batch Join Filter: (types_g.t = types_h.t)
                            ->  Parallel Custom Scan (TessHeapScan) on types_g
                            ->  Parallel Custom Scan (TessHeapScan) on types_h
 (12 rows)

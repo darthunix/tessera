@@ -586,12 +586,11 @@ EXPLAIN (COSTS OFF) SELECT w, t, x FROM index_i WHERE w < 20 AND t LIKE 'i1%';
                        QUERY PLAN                        
 ---------------------------------------------------------
  Custom Scan (TessFilter) on index_i
-   Filter: (t ~~ 'i1%'::text)
-   Batch Filter: (w < 20)
+   Batch Filter: ((w < 20) AND (t ~~ 'i1%'::text))
    ->  Custom Scan (TessHeapScan) on index_i
          ->  Index Only Scan using index_i_wt on index_i
                Index Cond: (w < 20)
-(6 rows)
+(5 rows)
 
 SELECT index_same($$SELECT w, t, x FROM index_i WHERE w < 20 AND t LIKE 'i1%'$$);
  index_same 

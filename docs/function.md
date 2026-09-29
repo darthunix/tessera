@@ -109,6 +109,18 @@ comparison keeps once a call, as a date is its days since 2000-01-01
 (`d < T` keeps `d < ceil(T / day)`, `d = T` none where `T` is past a
 midnight), an infinite timestamp the infinite date and a date past the
 timestamps' range above every finite bound, as the core orders them;
+the string functions of `text` and `bpchar` (`char(n)`, and `varchar`
+through its binary cast to text) with `TESS_FUNCTION_DETERMINISTIC_COLLATION`
+as predicates: `texteq`, `textne`, `bpchareq` and `bpcharne` in every
+shape, comparing bytes and a bpchar without its trailing spaces;
+`starts_with`, `textlike`, `textnlike`, `bpcharlike` and `bpcharnlike`
+with a column and a pattern constant, a pattern of literals and `%`
+matched by its pieces between the `%`s once split a call, one with `_` or
+an escape, or in a multibyte encoding other than UTF-8, by the core's
+`textlike` a row; and the lengths `length`, `char_length`,
+`character_length` and `octet_length` of text and bpchar as values with
+`TESS_RESULT_INT32`, characters counted by the database encoding and a
+bpchar's without trailing spaces;
 and `count(*)`,
 `count(any)`, `sum(int4)`, `min(int4)`, `max(int4)`, `min(int8)` and
 `max(int8)` as aggregates, by the aggregate's own OID. An int4 column
@@ -131,8 +143,13 @@ other types and from other extensions use the same structure.
   argument makes a NULL result, or a false predicate. The consumer folds NULL
   scalars before calling, so an implementation never sees one.
 - **Collation.** `TESS_FUNCTION_COLLATION_INSENSITIVE` says the input
-  collation cannot change the result. Without it the consumer passes
-  `inputcollid` and the implementation must honor it or fail.
+  collation cannot change the result. `TESS_FUNCTION_DETERMINISTIC_COLLATION`
+  says the result is the same under every deterministic collation, where
+  equal strings are equal bytes, as for equality and LIKE; the consumer
+  keeps a call under a nondeterministic collation away from it. Without
+  either, the expression compiler leaves a call under a collation row by
+  row; the call still carries `inputcollid`, which an implementation used
+  by another consumer must honor or fail.
 - **Shape.** With `TESS_FUNCTION_ANY_SHAPE` every combination of column and
   scalar arguments is accepted. Without it, `args[0]` is the only column and
   the others are scalars: the consumer moves the column first through the

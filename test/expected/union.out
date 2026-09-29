@@ -207,8 +207,8 @@ SELECT union_same($$SELECT count(*), sum(x) FROM (SELECT a AS x FROM union_a WHE
 
 -- Clauses that run row by row: TessFilter in each branch, forwarded.
 EXPLAIN (COSTS OFF)
-SELECT count(*) FROM (SELECT a FROM union_a WHERE t LIKE 'a1%'
-                      UNION ALL SELECT a FROM union_b WHERE t LIKE 'b1%') AS s;
+SELECT count(*) FROM (SELECT a FROM union_a WHERE upper(t) LIKE 'A1%'
+                      UNION ALL SELECT a FROM union_b WHERE upper(t) LIKE 'B1%') AS s;
                              QUERY PLAN                              
 ---------------------------------------------------------------------
  Custom Scan (TessAgg)
@@ -217,13 +217,13 @@ SELECT count(*) FROM (SELECT a FROM union_a WHERE t LIKE 'a1%'
                Rows Kept As: forwarded batches
                ->  Subquery Scan on unnamed_subquery
                      ->  Custom Scan (TessFilter) on union_a
-                           Filter: (t ~~ 'a1%'::text)
+                           Filter: (upper(t) ~~ 'A1%'::text)
                            ->  Custom Scan (TessHeapScan) on union_a
          ->  Custom Scan (TessPack)
                Rows Kept As: forwarded batches
                ->  Subquery Scan on unnamed_subquery_1
                      ->  Custom Scan (TessFilter) on union_b
-                           Filter: (t ~~ 'b1%'::text)
+                           Filter: (upper(t) ~~ 'B1%'::text)
                            ->  Custom Scan (TessHeapScan) on union_b
 (14 rows)
 

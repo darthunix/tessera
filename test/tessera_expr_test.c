@@ -306,7 +306,7 @@ tessera_test_expr_supports(PG_FUNCTION_ARGS)
 	/* Something unsupported inside an operand rejects the whole. */
 	result &= check(41, !tess_expr_supports_value(op("*", op("+", a(), int4(1)), text_length()), 0));
 	/* A conditional value with an unsupported condition or branch. */
-	result &= check(52, !tess_expr_supports_value(case_of(list_make2(op("=", var(3, TEXTOID), (Node *) makeConst(TEXTOID, -1, DEFAULT_COLLATION_OID, -1, CStringGetTextDatum("x"), false, false)), a()), int4(0), INT4OID), 0));
+	result &= check(52, !tess_expr_supports_value(case_of(list_make2(op(">", var(3, TEXTOID), (Node *) makeConst(TEXTOID, -1, DEFAULT_COLLATION_OID, -1, CStringGetTextDatum("x"), false, false)), a()), int4(0), INT4OID), 0));
 	result &= check(53, !tess_expr_supports_value(case_of(list_make2(op(">", a(), int4(5)), text_length()), int4(0), INT4OID), 0));
 	result &= check(54, tess_expr_supports_value(nullif_of(a(), op("/", var(2, INT4OID), int4(2))), 0));
 	null_test->arg = (Expr *) a();
@@ -352,9 +352,12 @@ tessera_test_expr_supports(PG_FUNCTION_ARGS)
 		result &= check(49, !tess_expr_supports_filter((Node *) param_array, 0));
 		row_test->argisrow = true;
 		result &= check(50, !tess_expr_supports_filter((Node *) row_test, 0));
-		result &= check(51, !tess_expr_supports_filter(or2(op(">", a(), int4(5)), op("=", var(3, TEXTOID), (Node *) makeConst(TEXTOID, -1, DEFAULT_COLLATION_OID, -1, CStringGetTextDatum("x"), false, false))), 0));
+		result &= check(51, !tess_expr_supports_filter(or2(op(">", a(), int4(5)), op(">", var(3, TEXTOID), (Node *) makeConst(TEXTOID, -1, DEFAULT_COLLATION_OID, -1, CStringGetTextDatum("x"), false, false))), 0));
 	}
-	result &= check(27, !tess_expr_supports_filter(op("=", var(3, TEXTOID), (Node *) makeConst(TEXTOID, -1, DEFAULT_COLLATION_OID, -1, CStringGetTextDatum("x"), false, false)), 0));
+	/* A text ordering, which depends on the collation's order: no implementation. */
+	result &= check(27, !tess_expr_supports_filter(op(">", var(3, TEXTOID), (Node *) makeConst(TEXTOID, -1, DEFAULT_COLLATION_OID, -1, CStringGetTextDatum("x"), false, false)), 0));
+	/* Text equality under the default, deterministic, collation: bytes. */
+	result &= check(60, tess_expr_supports_filter(op("=", var(3, TEXTOID), (Node *) makeConst(TEXTOID, -1, DEFAULT_COLLATION_OID, -1, CStringGetTextDatum("x"), false, false)), 0));
 	/* A subexpression without a column: a scalar computed once, unless volatile. */
 	{
 		Node	   *abs_call = (Node *) makeFuncExpr(F_INT4ABS, INT4OID, list_make1(int4(-7)),
