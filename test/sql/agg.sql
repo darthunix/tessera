@@ -310,10 +310,11 @@ EXPLAIN (COSTS OFF)
 SELECT DISTINCT b, count(*) FROM agg_t WHERE a > 10 GROUP BY b HAVING sum(a) % 3 <> 0;
 SELECT agg_same($$SELECT DISTINCT b, count(*) FROM agg_t WHERE a > 10 GROUP BY b HAVING sum(a) % 3 <> 0$$);
 RESET enable_sort;
--- Left to the core: DISTINCT ON; a DISTINCT of text over 300 rows, cheaper
--- by the planner's estimate.
+-- Left to the core: DISTINCT ON. A DISTINCT of text goes through the
+-- dictionary, which costs less than the core's hashing.
 EXPLAIN (COSTS OFF) SELECT DISTINCT ON (b) b, a FROM agg_t ORDER BY b, a;
 EXPLAIN (COSTS OFF) SELECT DISTINCT c FROM agg_t;
+SELECT agg_same($$SELECT count(*), min(c), max(c) FROM (SELECT DISTINCT c FROM agg_t) AS q$$);
 
 -- Under a single-copy Gather.
 SET debug_parallel_query = on;

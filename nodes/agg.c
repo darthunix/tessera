@@ -945,7 +945,15 @@ group_cost(PlannerInfo *root, const Path *child, double groups, int nkeys,
 	entry += 8.0 * naggs + costs.transitionSpace;
 	startup = child->total_cost;
 	startup += cpu_operator_cost * tess_agg_key_share * nkeys * rows;
-	/* A key a word does not hold: its type's hash a row, as the core counts it. */
+	/*
+	 * A key a word does not hold: its type's hash and the dictionary's
+	 * lookup a row, tessera.agg_dictionary_share (0.65) past the key's
+	 * share, 0.9 of the core's cpu_operator_cost with it, as the set
+	 * operations' dictionary measured (plan 5.13, step 5): SELECT DISTINCT
+	 * through the dictionary took 0.45 to 0.84 of the core's hashed time
+	 * over the same scan with text, varchar and char keys, the same with
+	 * numeric (plan 4.21 а).
+	 */
 	foreach_node(TargetEntry, key, tlist)
 	{
 		TessTableKeyKind kind;
@@ -953,7 +961,7 @@ group_cost(PlannerInfo *root, const Path *child, double groups, int nkeys,
 		if (foreach_current_index(key) >= nkeys)
 			break;
 		if (!tess_word_key_kind(exprType((Node *) key->expr), &kind))
-			startup += cpu_operator_cost * rows;
+			startup += cpu_operator_cost * tess_agg_dictionary_share * rows;
 	}
 	startup += costs.transCost.startup +
 		costs.transCost.per_tuple * (generic ? 1.0 : tess_agg_kernel_share) * rows;

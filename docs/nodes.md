@@ -56,6 +56,7 @@ core's own cost parameters do:
 | `tessera.join_cost_factor` | 0.9 | the core's cost of a hash join, for TessHashJoin |
 | `tessera.agg_cost_factor` | 0.9 | the core's cost of an aggregation without `GROUP BY`, for TessAgg |
 | `tessera.agg_key_share` | 0.25 | `cpu_operator_cost` a key of a row TessAgg groups |
+| `tessera.agg_dictionary_share` | 0.65 | more of it for a key through a dictionary (text, numeric, ...) |
 | `tessera.agg_kernel_share` | 0.25 | the core's transition cost a row of TessAgg's own aggregates |
 | `tessera.setop_word_share` | 0.5 | the core's own cost of `INTERSECT` or `EXCEPT` with keys of words |
 | `tessera.setop_dictionary_share` | 0.9 | the same with a key through a dictionary |
@@ -1030,7 +1031,11 @@ the node's path takes the core path as its template with the batch child,
 and `add_path` decides. A plain aggregate costs nine tenths of the core's.
 A grouping costs the node's own (`group_cost`): the child's cost; per
 input row a quarter of `cpu_operator_cost` a key, as the kernels hash and
-look up a batch's keys at once, and the aggregates' transition costs as
+look up a batch's keys at once, a key through a dictionary 0.65 more
+(`tessera.agg_dictionary_share`: its type's hash and the lookup, 0.9 of
+the core's with the quarter, as `SELECT DISTINCT` through the dictionary
+took 0.45 to 0.84 of the core's hashed time over the same scan with text,
+varchar and char keys, the same with numeric), and the aggregates' transition costs as
 the core counts them (`get_agg_clause_costs`), a quarter of them when
 the node's kernels fold every aggregate; per group `cpu_tuple_cost` and
 the final costs; and, when the groups at the core's bytes per entry pass

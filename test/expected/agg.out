@@ -1074,8 +1074,8 @@ SELECT agg_same($$SELECT DISTINCT b, count(*) FROM agg_t WHERE a > 10 GROUP BY b
 (1 row)
 
 RESET enable_sort;
--- Left to the core: DISTINCT ON; a DISTINCT of text over 300 rows, cheaper
--- by the planner's estimate.
+-- Left to the core: DISTINCT ON. A DISTINCT of text goes through the
+-- dictionary, which costs less than the core's hashing.
 EXPLAIN (COSTS OFF) SELECT DISTINCT ON (b) b, a FROM agg_t ORDER BY b, a;
                    QUERY PLAN                    
 -------------------------------------------------
@@ -1088,10 +1088,16 @@ EXPLAIN (COSTS OFF) SELECT DISTINCT ON (b) b, a FROM agg_t ORDER BY b, a;
 EXPLAIN (COSTS OFF) SELECT DISTINCT c FROM agg_t;
                 QUERY PLAN                 
 -------------------------------------------
- HashAggregate
+ Custom Scan (TessAgg)
    Group Key: c
    ->  Custom Scan (TessHeapScan) on agg_t
 (3 rows)
+
+SELECT agg_same($$SELECT count(*), min(c), max(c) FROM (SELECT DISTINCT c FROM agg_t) AS q$$);
+     agg_same     
+------------------
+ {"(300,r1,r99)"}
+(1 row)
 
 -- Under a single-copy Gather.
 SET debug_parallel_query = on;

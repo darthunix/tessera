@@ -15,6 +15,7 @@ double		tess_scan_cost_factor = 0.9;
 double		tess_join_cost_factor = 0.9;
 double		tess_agg_cost_factor = 0.9;
 double		tess_agg_key_share = 0.25;
+double		tess_agg_dictionary_share = 0.65;
 double		tess_agg_kernel_share = 0.25;
 double		tess_setop_word_share = 0.5;
 double		tess_setop_dictionary_share = 0.9;
@@ -134,6 +135,11 @@ _PG_init(void)
 							 "Share of cpu_operator_cost TessAgg costs a key of a row it groups.",
 							 NULL,
 							 &tess_agg_key_share, 0.25, 0.0, 10.0,
+							 PGC_USERSET, GUC_NOT_IN_SAMPLE, NULL, NULL, NULL);
+	DefineCustomRealVariable("tessera.agg_dictionary_share",
+							 "Share of cpu_operator_cost TessAgg costs a row's key through a dictionary, past agg_key_share.",
+							 NULL,
+							 &tess_agg_dictionary_share, 0.65, 0.0, 10.0,
 							 PGC_USERSET, GUC_NOT_IN_SAMPLE, NULL, NULL, NULL);
 	DefineCustomRealVariable("tessera.agg_kernel_share",
 							 "Share of the core's transition cost a row of TessAgg's own aggregates costs.",

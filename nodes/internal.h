@@ -97,6 +97,7 @@ extern double tess_scan_cost_factor;
 extern double tess_join_cost_factor;
 extern double tess_agg_cost_factor;
 extern double tess_agg_key_share;
+extern double tess_agg_dictionary_share;
 extern double tess_agg_kernel_share;
 extern double tess_setop_word_share;
 extern double tess_setop_dictionary_share;

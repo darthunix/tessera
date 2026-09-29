@@ -220,11 +220,11 @@ ORDER BY o;
  tess                  | SELECT i2, sum(i4) FROM cov GROUP BY 1 HAVING sum(i4) > 100
  core: Aggregate       | SELECT i2, count(*) FROM cov GROUP BY ROLLUP (i2)
  tess                  | SELECT DISTINCT i2 FROM cov
- core: Aggregate       | SELECT DISTINCT vc FROM cov
- core: Aggregate       | SELECT DISTINCT bc FROM cov
- core: Aggregate       | SELECT DISTINCT n FROM cov
+ tess                  | SELECT DISTINCT vc FROM cov
+ tess                  | SELECT DISTINCT bc FROM cov
+ tess                  | SELECT DISTINCT n FROM cov
  tess                  | SELECT DISTINCT bc, i2 FROM cov
- core: Aggregate       | SELECT vc FROM cov GROUP BY vc
+ tess                  | SELECT vc FROM cov GROUP BY vc
 (34 rows)
 
 -- Sorts and top-N.
