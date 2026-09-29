@@ -210,8 +210,15 @@ BEGIN
     END LOOP;
 END
 $$;
--- The core's sort for a first key without an abbreviated key.
+-- A first key without an abbreviated key (float8; text under a collation
+-- of libc too): every row one group, which the comparison orders, NaN
+-- last, -0 equal to 0, NULLs at their place. varchar by text's family.
 EXPLAIN (COSTS OFF) SELECT id, f FROM types_s ORDER BY f, id;
+SELECT types_order($$SELECT id, f FROM types_s ORDER BY f, id$$);
+SELECT types_order($$SELECT id, f FROM types_s ORDER BY f DESC NULLS LAST, id LIMIT 30$$);
+SELECT types_order($$SELECT id, f, n FROM types_s ORDER BY f NULLS FIRST, n DESC, id LIMIT 200$$);
+EXPLAIN (COSTS OFF) SELECT id FROM types_s ORDER BY t::varchar COLLATE "C", id;
+SELECT types_order($$SELECT id, t::varchar FROM types_s ORDER BY t::varchar COLLATE "C" DESC, id$$);
 -- Top-N: a heap in C by the items' words and then the comparisons; rows
 -- whose words equal the worst's are compared by value (1.0 and 1.00, text
 -- with a common prefix of 45 bytes), a bound past the rows, an offset,
@@ -265,6 +272,9 @@ SELECT types_order($$SELECT id, w, t FROM types_s ORDER BY w, t, id$$);
 EXPLAIN (COSTS OFF) SELECT id, long FROM types_s ORDER BY long COLLATE "C" DESC, id LIMIT 20;
 SELECT types_order($$SELECT id, long FROM types_s ORDER BY long COLLATE "C" DESC, id LIMIT 20$$);
 SELECT types_order($$SELECT id, u FROM types_s ORDER BY u, id LIMIT 700$$);
+-- A first key without an abbreviated key: the merge by the comparison.
+EXPLAIN (COSTS OFF) SELECT id, f FROM types_s ORDER BY f DESC, id;
+SELECT types_order($$SELECT id, f FROM types_s ORDER BY f DESC, id$$);
 -- Two workers' shares of 200000 rows with equal words: numeric of 1000
 -- values, text whose abbreviated keys share a prefix of 21 bytes.
 CREATE TABLE types_p AS

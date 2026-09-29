@@ -251,11 +251,11 @@ ORDER BY o;
  tess              | SELECT n FROM cov ORDER BY n LIMIT 10
  tess              | SELECT t FROM cov ORDER BY t COLLATE "C" LIMIT 10
  tess              | SELECT t FROM cov ORDER BY t COLLATE "und-x-icu" LIMIT 10
- core: Limit, Sort | SELECT vc FROM cov ORDER BY vc COLLATE "C" LIMIT 10
+ tess              | SELECT vc FROM cov ORDER BY vc COLLATE "C" LIMIT 10
  tess              | SELECT bc FROM cov ORDER BY bc COLLATE "C" LIMIT 10
  core: Limit, Sort | SELECT f8 FROM cov ORDER BY f8 LIMIT 10
  tess              | SELECT i4, f8 FROM cov ORDER BY i4, f8 LIMIT 10
- core: Sort        | SELECT f8, i4 FROM cov ORDER BY f8, i4
+ tess              | SELECT f8, i4 FROM cov ORDER BY f8, i4
 (11 rows)
 
 -- Joins: keys of words, of hashed types, of expressions and casts.

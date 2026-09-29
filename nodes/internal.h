@@ -187,7 +187,6 @@ typedef struct TessSortAbbrev
 
 extern bool tess_sort_generic_key(PathKey *pathkey, PathTarget *target, Relids relids,
 								  int *place, Oid *sortop, Oid *collation);
-extern bool tess_sort_generic_abbreviates(Oid sortop, Oid collation, Oid type);
 extern void tess_sort_support(SortSupport ssup, Oid sortop, Oid collation, bool nulls_first);
 extern void tess_sort_abbrev_init(TessSortAbbrev *abbrev, Oid sortop, Oid collation,
 								  bool nulls_first, Oid type);

@@ -1959,10 +1959,11 @@ sort's input, with the same rows, costs and path keys, when
   word keeps (`tess_word_key_order`): int2, int4 and int8 through the
   integer one, date, timestamp and timestamptz through `datetime_ops`,
   bool through its own, or of any type with an ordering operator of the
-  path key's operator family (see Other types below), ascending or
-  descending, NULLs first or last, at most 16 keys; the first key of
-  another type has an abbreviated key the node takes, unless a word key
-  comes before it;
+  path key's operator family for the type that family compares it as
+  (varchar as text; see Other types below), ascending or
+  descending, NULLs first or last, at most 16 keys; under a limit, the
+  first key of another type is not one passed by value without an
+  abbreviated key (float8), unless a word key comes before it;
 - the output has 1 to 1664 columns, a tuple's most;
 - the query is not `FETCH ... WITH TIES`, which passes no bound, and the
   kernels module is loaded.
@@ -2027,10 +2028,15 @@ take their memory. An external sort orders each run the same way, and
 merges runs in C: a binary heap of the inputs, made anew for every 64
 rows, ordered by their next rows' lanes and then by the comparisons, a
 row's values read from its block. A first key of such a type without an
-abbreviated key makes every row one group, which the node sorts as the
-core's sort does, 2 to 7 % slower (text under a libc collation on macOS,
-2 M rows): the planner leaves that case to the core
-(`generic_abbreviates`, sort support prepared in a context of its own).
+abbreviated key makes every row one group, which the node sorts by the
+comparison as the core's sort does: over the same scan of a million
+rows, text under a libc collation 2712 ms by the core and 2640 by the
+node, float8 90.7 and 89.1, float8 and an integer 125.0 and 92.6 (plan
+4.21 а; an earlier measurement over 2 M rows of text had the node 2 to 7
+% slower and left the case to the core). Under a limit, a type passed by
+value compares cheaply, and the core's bounded heap of tuples stays
+ahead (float8, `LIMIT 10`: 10.5 ms against 16.5; text 132.7 against
+117.0 the other way): the planner leaves that case to the core.
 `EXPLAIN` shows a key's collation when it is not the default, as the core
 does. Under a limit the top-N heap of such keys is the node's, in C (see
 Top-N). At 2 M rows in memory: numeric 125 ms against 296, text under
@@ -2359,8 +2365,7 @@ the shared memory itself.
 A `GatherMergePath` over a Tessera path becomes `TessGatherMerge` over
 `TessSend` the same way when every path key is one `TessSort` takes: a
 target of a type a key's word holds through the family whose order the
-word keeps, or of another type by its ordering operator, the first such
-key with an abbreviated key unless a word key comes before it (as for
+word keeps, or of another type by its ordering operator (as for
 `TessSort`, "Other types", at most 16 keys), and the kernels module is
 loaded; TessSend's data then lists each key's target, kind, flags,
 ordering operator and collation.

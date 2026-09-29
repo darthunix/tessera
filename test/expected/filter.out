@@ -1158,7 +1158,7 @@ SELECT filter_same($$SELECT md5(string_agg(q::text, ',' ORDER BY q::text)) FROM 
 EXPLAIN (COSTS OFF) SELECT c FROM filter_t ORDER BY c DESC;
                   QUERY PLAN                  
 ----------------------------------------------
- Sort
+ Custom Scan (TessSort)
    Sort Key: c DESC
    ->  Custom Scan (TessHeapScan) on filter_t
 (3 rows)

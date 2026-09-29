@@ -621,14 +621,48 @@ BEGIN
     END LOOP;
 END
 $$;
--- The core's sort for a first key without an abbreviated key.
+-- A first key without an abbreviated key (float8; text under a collation
+-- of libc too): every row one group, which the comparison orders, NaN
+-- last, -0 equal to 0, NULLs at their place. varchar by text's family.
 EXPLAIN (COSTS OFF) SELECT id, f FROM types_s ORDER BY f, id;
                  QUERY PLAN                  
 ---------------------------------------------
- Sort
+ Custom Scan (TessSort)
    Sort Key: f, id
    ->  Custom Scan (TessHeapScan) on types_s
 (3 rows)
+
+SELECT types_order($$SELECT id, f FROM types_s ORDER BY f, id$$);
+ types_order 
+-------------
+ same
+(1 row)
+
+SELECT types_order($$SELECT id, f FROM types_s ORDER BY f DESC NULLS LAST, id LIMIT 30$$);
+ types_order 
+-------------
+ same
+(1 row)
+
+SELECT types_order($$SELECT id, f, n FROM types_s ORDER BY f NULLS FIRST, n DESC, id LIMIT 200$$);
+ types_order 
+-------------
+ same
+(1 row)
+
+EXPLAIN (COSTS OFF) SELECT id FROM types_s ORDER BY t::varchar COLLATE "C", id;
+                      QUERY PLAN                      
+------------------------------------------------------
+ Custom Scan (TessSort)
+   Sort Key: ((t)::character varying) COLLATE "C", id
+   ->  Custom Scan (TessHeapScan) on types_s
+(3 rows)
+
+SELECT types_order($$SELECT id, t::varchar FROM types_s ORDER BY t::varchar COLLATE "C" DESC, id$$);
+ types_order 
+-------------
+ same
+(1 row)
 
 -- Top-N: a heap in C by the items' words and then the comparisons; rows
 -- whose words equal the worst's are compared by value (1.0 and 1.00, text
@@ -851,6 +885,24 @@ SELECT types_order($$SELECT id, long FROM types_s ORDER BY long COLLATE "C" DESC
 (1 row)
 
 SELECT types_order($$SELECT id, u FROM types_s ORDER BY u, id LIMIT 700$$);
+ types_order 
+-------------
+ same
+(1 row)
+
+-- A first key without an abbreviated key: the merge by the comparison.
+EXPLAIN (COSTS OFF) SELECT id, f FROM types_s ORDER BY f DESC, id;
+                            QUERY PLAN                            
+------------------------------------------------------------------
+ Custom Scan (TessGatherMerge)
+   Workers Planned: 2
+   ->  Parallel Custom Scan (TessSend)
+         ->  Parallel Custom Scan (TessSort)
+               Sort Key: f DESC, id
+               ->  Parallel Custom Scan (TessHeapScan) on types_s
+(6 rows)
+
+SELECT types_order($$SELECT id, f FROM types_s ORDER BY f DESC, id$$);
  types_order 
 -------------
  same

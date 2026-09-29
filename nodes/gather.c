@@ -370,7 +370,6 @@ make_gather_merge_path(PlannerInfo *root, GatherMergePath *gather)
 	List	   *flags = NIL;
 	List	   *sortops = NIL;
 	List	   *collations = NIL;
-	bool		generic = false;
 	int			nkeys = list_length(gather->path.pathkeys);
 
 	if (subpath == NULL ||
@@ -397,12 +396,6 @@ make_gather_merge_path(PlannerInfo *root, GatherMergePath *gather)
 		else if (tess_sort_generic_key(pathkey, subpath->pathtarget,
 									   subpath->parent->relids, &place, &sortop, &collation))
 		{
-			if (!generic && foreach_current_index(pathkey) == 0 &&
-				!tess_sort_generic_abbreviates(sortop, collation,
-											   exprType(list_nth(subpath->pathtarget->exprs,
-																 place))))
-				return NULL;
-			generic = true;
 			key.kind = TESS_SORT_KIND_GENERIC;
 			key.flags = (pathkey->pk_cmptype == COMPARE_GT ? TESS_SORT_DESCENDING : 0) |
 				(pathkey->pk_nulls_first ? TESS_SORT_NULLS_FIRST : 0);
