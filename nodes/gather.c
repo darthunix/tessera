@@ -66,11 +66,11 @@
 #define GATHER_QUEUE_SIZE (256 * 1024)
 
 /*
- * The share of parallel_tuple_cost a row costs through TessGather, where
- * the node's own paths are offered: 13.3 M rows took the leader at most
- * 3.5 ns each against 14 through the core's Gather over the same nodes.
+ * A row costs through TessGather, where the node's own paths are offered,
+ * a share of parallel_tuple_cost, tessera.gather_tuple_share (0.25): 13.3 M
+ * rows took the leader at most 3.5 ns each against 14 through the core's
+ * Gather over the same nodes.
  */
-#define GATHER_TUPLE_COST_SHARE 0.25
 
 /* What a message starts with; its lanes and values follow, aligned to 8. */
 typedef struct GatherHeader
@@ -427,7 +427,7 @@ make_gather_merge_path(PlannerInfo *root, GatherMergePath *gather)
 static void
 discount_transfer(Path *path, double rows, double factor)
 {
-	path->total_cost -= (1.0 - GATHER_TUPLE_COST_SHARE) * factor * parallel_tuple_cost * rows;
+	path->total_cost -= (1.0 - tess_gather_tuple_share) * factor * parallel_tuple_cost * rows;
 }
 
 /*

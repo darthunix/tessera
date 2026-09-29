@@ -30,6 +30,42 @@ LOAD 'tessera_nodes';
 Every node here keeps the obligations of [node.md](node.md) and is built
 with the runtime library's helpers described in [runtime.md](runtime.md).
 
+## Parameters
+
+Besides `tessera.enable`, which the bridge defines, the module defines
+these parameters, every one settable by any user in a session. The
+gates and switches:
+
+| Parameter | Default | What it decides |
+|---|---|---|
+| `tessera.batch_gather` | on | TessGather and TessGatherMerge in place of the core's `Gather` and `Gather Merge` over a batch subtree |
+| `tessera.bitmap_page_rows` | 2 | rows a page of a bitmap must give for the node to read its pages (Bitmap mode) |
+| `tessera.index_min_correlation` | 0.8 | correlation an index's order must have with the table's for the node to take its rows (Index mode) |
+| `tessera.index_min_rows` | 1000 | rows an index scan must give for the node to take it, a limit counted (Index and Index-only modes) |
+| `tessera.join_bloom_ratio` | 0.5 | share of probe rows with a pair below which a hash join builds a Bloom filter |
+
+The planner's calibration of the nodes' costs against the core's, each
+measured where its node's section says; they are left out of the sample
+configuration file, as the calibration is the project's, not a
+deployment's, though another machine may call for other values, as the
+core's own cost parameters do:
+
+| Parameter | Default | What it scales |
+|---|---|---|
+| `tessera.scan_cost_factor` | 0.9 | the core's cost of a sequential, bitmap, index or index-only scan, for TessHeapScan with TessFilter above |
+| `tessera.join_cost_factor` | 0.9 | the core's cost of a hash join, for TessHashJoin |
+| `tessera.agg_cost_factor` | 0.9 | the core's cost of an aggregation without `GROUP BY`, for TessAgg |
+| `tessera.agg_key_share` | 0.25 | `cpu_operator_cost` a key of a row TessAgg groups |
+| `tessera.agg_kernel_share` | 0.25 | the core's transition cost a row of TessAgg's own aggregates |
+| `tessera.setop_word_share` | 0.5 | the core's own cost of `INTERSECT` or `EXCEPT` with keys of words |
+| `tessera.setop_dictionary_share` | 0.9 | the same with a key through a dictionary |
+| `tessera.gather_tuple_share` | 0.25 | `parallel_tuple_cost` a row through TessGather |
+
+Constants that repeat the core's (half of `cpu_tuple_cost` a row an
+`Append` saves) or that shape execution rather than planning (chunk
+sizes, a dictionary's fill, the Bloom filter's sample, 64 rows a batch)
+stay in the code.
+
 ## Independent example: TessLimit
 
 `examples/limit/` is a node built outside this module, against the public

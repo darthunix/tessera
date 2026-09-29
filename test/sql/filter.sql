@@ -34,6 +34,11 @@ LOAD 'tessera_kernels';
 -- The clauses move from the scan to the node.
 EXPLAIN (COSTS OFF) SELECT a FROM filter_t WHERE a > 100 AND b < 5;
 SELECT filter_same($$SELECT count(*), sum(a) FROM filter_t WHERE a > 100 AND b < 5$$);
+-- The node's path costs tessera.scan_cost_factor of the core's scan: past
+-- 1 the core's scan is the cheaper.
+SET tessera.scan_cost_factor = 1.5;
+EXPLAIN (COSTS OFF) SELECT a FROM filter_t WHERE a > 100 AND b < 5;
+RESET tessera.scan_cost_factor;
 
 -- Every comparison, a chain, the commutator, the unary minus.
 SELECT filter_same($$SELECT count(*) FROM filter_t WHERE a = 50$$);

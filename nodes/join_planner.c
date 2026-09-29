@@ -27,7 +27,6 @@
  * the same inputs, which serves as the template. The children are batch
  * paths over the sides' cheapest paths. See docs/nodes.md.
  */
-#define JOIN_COST_FACTOR 0.9
 /* The executor keeps each inner column in a payload word; see hashjoin.c. */
 #define JOIN_MAX_INNER_COLUMNS 64
 
@@ -330,7 +329,8 @@ make_join_path(PlannerInfo *root, RelOptInfo *joinrel, JoinType jointype,
 	template = create_hashjoin_path(root, joinrel, jointype, &workspace,
 									extra, outer_path, inner_path, shared,
 									extra->restrictlist, NULL, hashclauses);
-	template->jpath.path.total_cost *= JOIN_COST_FACTOR;
+	/* A share of the core's cost, tessera.join_cost_factor (0.9). */
+	template->jpath.path.total_cost *= tess_join_cost_factor;
 	config.template_path = &template->jpath.path;
 	config.methods = &join_path_methods;
 	config.node = &tess_hash_join_node;

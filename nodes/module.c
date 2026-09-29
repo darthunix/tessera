@@ -11,6 +11,14 @@ PG_MODULE_MAGIC;
 
 PGDLLEXPORT void _PG_init(void);
 
+double		tess_scan_cost_factor = 0.9;
+double		tess_join_cost_factor = 0.9;
+double		tess_agg_cost_factor = 0.9;
+double		tess_agg_key_share = 0.25;
+double		tess_agg_kernel_share = 0.25;
+double		tess_setop_word_share = 0.5;
+double		tess_setop_dictionary_share = 0.9;
+double		tess_gather_tuple_share = 0.25;
 double		tess_join_bloom_ratio = 0.5;
 double		tess_bitmap_page_rows = 2.0;
 double		tess_index_min_correlation = 0.8;
@@ -86,6 +94,51 @@ _PG_init(void)
 							 "costs a query a few microseconds more. 0 always.",
 							 &tess_index_min_rows, 1000.0, 0.0, 1e15,
 							 PGC_USERSET, 0, NULL, NULL, NULL);
+	/*
+	 * The planner's calibration of the nodes' costs against the core's,
+	 * each measured where the node's code says; not in the sample file.
+	 */
+	DefineCustomRealVariable("tessera.scan_cost_factor",
+							 "Share of the core's cost of a scan that the node's scan costs.",
+							 "TessHeapScan, with TessFilter above for the relation's clauses, in "
+							 "place of the core's sequential, bitmap, index or index-only scan.",
+							 &tess_scan_cost_factor, 0.9, 0.0, 10.0,
+							 PGC_USERSET, GUC_NOT_IN_SAMPLE, NULL, NULL, NULL);
+	DefineCustomRealVariable("tessera.join_cost_factor",
+							 "Share of the core's cost of a hash join that TessHashJoin costs.",
+							 NULL,
+							 &tess_join_cost_factor, 0.9, 0.0, 10.0,
+							 PGC_USERSET, GUC_NOT_IN_SAMPLE, NULL, NULL, NULL);
+	DefineCustomRealVariable("tessera.agg_cost_factor",
+							 "Share of the core's cost of an aggregation without GROUP BY that TessAgg costs.",
+							 NULL,
+							 &tess_agg_cost_factor, 0.9, 0.0, 10.0,
+							 PGC_USERSET, GUC_NOT_IN_SAMPLE, NULL, NULL, NULL);
+	DefineCustomRealVariable("tessera.agg_key_share",
+							 "Share of cpu_operator_cost TessAgg costs a key of a row it groups.",
+							 NULL,
+							 &tess_agg_key_share, 0.25, 0.0, 10.0,
+							 PGC_USERSET, GUC_NOT_IN_SAMPLE, NULL, NULL, NULL);
+	DefineCustomRealVariable("tessera.agg_kernel_share",
+							 "Share of the core's transition cost a row of TessAgg's own aggregates costs.",
+							 NULL,
+							 &tess_agg_kernel_share, 0.25, 0.0, 10.0,
+							 PGC_USERSET, GUC_NOT_IN_SAMPLE, NULL, NULL, NULL);
+	DefineCustomRealVariable("tessera.setop_word_share",
+							 "Share of the core's own cost of INTERSECT or EXCEPT TessAgg costs with keys of words.",
+							 NULL,
+							 &tess_setop_word_share, 0.5, 0.0, 10.0,
+							 PGC_USERSET, GUC_NOT_IN_SAMPLE, NULL, NULL, NULL);
+	DefineCustomRealVariable("tessera.setop_dictionary_share",
+							 "Share of the core's own cost of INTERSECT or EXCEPT TessAgg costs with a key through a dictionary.",
+							 NULL,
+							 &tess_setop_dictionary_share, 0.9, 0.0, 10.0,
+							 PGC_USERSET, GUC_NOT_IN_SAMPLE, NULL, NULL, NULL);
+	DefineCustomRealVariable("tessera.gather_tuple_share",
+							 "Share of parallel_tuple_cost a row costs through TessGather.",
+							 NULL,
+							 &tess_gather_tuple_share, 0.25, 0.0, 10.0,
+							 PGC_USERSET, GUC_NOT_IN_SAMPLE, NULL, NULL, NULL);
 	DefineCustomBoolVariable("tessera.batch_gather",
 							 "Gathers a parallel batch subtree's rows in batches.",
 							 "TessGather stands in for the core's Gather over a batch path: the workers "

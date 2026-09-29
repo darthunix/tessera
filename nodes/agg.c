@@ -57,7 +57,6 @@
  * group's aggregate states, and the groups go out in batches when the
  * input ends. See docs/nodes.md.
  */
-#define AGG_COST_FACTOR 0.9
 /* A batch with at most this many survivors is gathered for one call later. */
 #define AGG_GATHER_ROWS 8
 /* Groups per output batch. */
@@ -900,11 +899,10 @@ aggregate_templates(const List *pathlist, AggStrategy strategy, AggSplit aggspli
  * eighths of hash_mem the rows of the groups that do not fit go to 32
  * partitions and are read back once per level, their columns written in
  * blocks sequentially, without the core's penalty for random writes. The
- * shares are measured: grouping alone took 0.30 of the core's time, with
- * generic aggregates 0.41 to 0.53, spilling 0.40 to 0.63 (plan 5.13).
+ * shares, tessera.agg_key_share and tessera.agg_kernel_share (0.25 each),
+ * are measured: grouping alone took 0.30 of the core's time, with generic
+ * aggregates 0.41 to 0.53, spilling 0.40 to 0.63 (plan 5.13).
  */
-#define AGG_KEY_SHARE 0.25
-#define AGG_KERNEL_SHARE 0.25
 #define AGG_SPILL_PARTS 32.0
 
 static void
@@ -946,7 +944,7 @@ group_cost(PlannerInfo *root, const Path *child, double groups, int nkeys,
 	}
 	entry += 8.0 * naggs + costs.transitionSpace;
 	startup = child->total_cost;
-	startup += cpu_operator_cost * AGG_KEY_SHARE * nkeys * rows;
+	startup += cpu_operator_cost * tess_agg_key_share * nkeys * rows;
 	/* A key a word does not hold: its type's hash a row, as the core counts it. */
 	foreach_node(TargetEntry, key, tlist)
 	{
@@ -958,7 +956,7 @@ group_cost(PlannerInfo *root, const Path *child, double groups, int nkeys,
 			startup += cpu_operator_cost * rows;
 	}
 	startup += costs.transCost.startup +
-		costs.transCost.per_tuple * (generic ? 1.0 : AGG_KERNEL_SHARE) * rows;
+		costs.transCost.per_tuple * (generic ? 1.0 : tess_agg_kernel_share) * rows;
 	/* Groups past hash_mem: their rows to disk and back, once per level. */
 	if (groups * entry > limit && ncolumns > 0)
 	{
@@ -1008,11 +1006,14 @@ make_agg_path(PlannerInfo *root, const AggPath *agg, List *tlist, int nkeys, int
 		  arguments_available(tlist, child)))
 		return NULL;
 	template = agg->path;
-	/* Grouping costs the node's own; a plain aggregate a share of the core's. */
+	/*
+	 * Grouping costs the node's own; a plain aggregate a share of the
+	 * core's, tessera.agg_cost_factor (0.9).
+	 */
 	if (nkeys > 0)
 		group_cost(root, child, agg->path.rows, nkeys, tlist, agg->aggsplit, &template);
 	else
-		template.total_cost *= AGG_COST_FACTOR;
+		template.total_cost *= tess_agg_cost_factor;
 	/* The groups come in no order, whatever order the core's had. */
 	template.pathkeys = NIL;
 	config.template_path = &template;
@@ -1498,8 +1499,6 @@ key_eqop(Node *key, List *clauses, int *eqop)
  * the core's hashed SetOp would not be chosen. The private data is the
  * grouping one with the command in its place.
  */
-#define SETOP_WORD_SHARE 0.5
-#define SETOP_DICTIONARY_SHARE 0.9
 
 static void
 create_nonunion_paths(PlannerInfo *root, RelOptInfo *output_rel)
@@ -1553,15 +1552,17 @@ create_nonunion_paths(PlannerInfo *root, RelOptInfo *output_rel)
 			continue;
 		/*
 		 * The sides' batch paths and a share of what the core's SetOp costs
-		 * over its own: the node's took 0.55 of the core's time with keys of
-		 * words, 0.9 with a key through a dictionary (plan 5.13, step 5).
+		 * over its own, tessera.setop_word_share (0.5) and
+		 * tessera.setop_dictionary_share (0.9): the node's took 0.55 of the
+		 * core's time with keys of words, 0.9 with a key through a dictionary
+		 * (plan 5.13, step 5).
 		 * All of it before the first row, as the groups are made first.
 		 */
 		own = setop->path.total_cost - setop->leftpath->total_cost -
 			setop->rightpath->total_cost;
 		template = setop->path;
 		template.total_cost = left->total_cost + right->total_cost +
-			Max(own, 0) * (dictionary ? SETOP_DICTIONARY_SHARE : SETOP_WORD_SHARE);
+			Max(own, 0) * (dictionary ? tess_setop_dictionary_share : tess_setop_word_share);
 		template.startup_cost = template.total_cost;
 		template.pathkeys = NIL;
 		config.template_path = &template;

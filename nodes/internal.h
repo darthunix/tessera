@@ -89,6 +89,18 @@ tess_word_key_order(Oid type, Oid opfamily)
 extern List *tess_order_clauses(PlannerInfo *root, List *rinfos);
 extern double tess_parallel_divisor(const Path *path);
 
+/*
+ * The planner's cost calibration, tessera.scan_cost_factor and the rest:
+ * see nodes/module.c, and each one's measurement where it is used.
+ */
+extern double tess_scan_cost_factor;
+extern double tess_join_cost_factor;
+extern double tess_agg_cost_factor;
+extern double tess_agg_key_share;
+extern double tess_agg_kernel_share;
+extern double tess_setop_word_share;
+extern double tess_setop_dictionary_share;
+extern double tess_gather_tuple_share;
 /* tessera.join_bloom_ratio: see nodes/module.c. */
 extern double tess_join_bloom_ratio;
 /* tessera.bitmap_page_rows: see nodes/module.c. */

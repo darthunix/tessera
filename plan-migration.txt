@@ -3375,6 +3375,11 @@
   Порядок работ теперь — три коммита: 0) множители узлов в параметры, без изменения значений и планов, docs/nodes.md
   и docs/runtime.md (раздел параметров); а) семейство bench/pg/scancost и случаи index с замером «до»; б) модель
   скана с параметрами и пересчёт в set_rel_pathlist, тест index, docs, запись здесь.
+  Сделано 0) (2026-09-29): восемь множителей — параметры tessera.scan_cost_factor (бывший FILTER_COST_FACTOR: полное
+  чтение, битовая карта, индексы), join_cost_factor, agg_cost_factor, agg_key_share, agg_kernel_share,
+  setop_word_share, setop_dictionary_share, gather_tuple_share; значения прежние, GUC_NOT_IN_SAMPLE, объяснение
+  замера у места использования. docs/nodes.md — раздел «Parameters» со всеми параметрами модуля узлов. Тест filter:
+  при scan_cost_factor 1.5 план — Seq Scan ядра. Все 39 наборов на release и debug, планы прежние.
   6.4в. Пакетный Gather и Gather Merge (обсуждение 2026-09-27, после параллельной сортировки 5.7д; кода нет).
   Факты: Gather и Gather Merge ядра передают строки по одной — воркер формирует MinimalTuple и кладёт его в shm_mq
   (TupleQueueDestReceiver), ведущий читает и разбирает; Gather Merge ещё и сливает кучей со сравнением слотов.

@@ -23,8 +23,10 @@
  * rest row by row, in the planner's order. See docs/nodes.md.
  */
 
-/* The path costs a fraction of the scan's: there is no cost model yet. */
-#define FILTER_COST_FACTOR 0.9
+/*
+ * The paths cost a fraction of the core's scan, tessera.scan_cost_factor
+ * (0.9): there is no cost model yet.
+ */
 
 static set_rel_pathlist_hook_type previous_set_rel_pathlist_hook = NULL;
 
@@ -174,7 +176,7 @@ make_filter_path(RelOptInfo *rel, const Path *seqscan, Path *child)
 	TessPathConfig config = TESS_STRUCT_INITIALIZER(TessPathConfig);
 	Path		template = *seqscan;
 
-	template.total_cost *= FILTER_COST_FACTOR;
+	template.total_cost *= tess_scan_cost_factor;
 	config.template_path = &template;
 	config.methods = &filter_path_methods;
 	config.node = &tess_filter_node;
@@ -281,7 +283,7 @@ add_scan_paths(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte)
 	scan = tess_batch_scan_path(root, copy);
 	if (scan == NULL)
 		return;
-	scan->total_cost *= FILTER_COST_FACTOR;
+	scan->total_cost *= tess_scan_cost_factor;
 	add_path(rel, scan);
 	seqscan = find_seqscan(rel->partial_pathlist);
 	if (seqscan == NULL || !seqscan->parallel_aware || !rel->consider_parallel)
@@ -291,7 +293,7 @@ add_scan_paths(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte)
 	scan = tess_batch_scan_path(root, copy);
 	if (scan == NULL)
 		return;
-	scan->total_cost *= FILTER_COST_FACTOR;
+	scan->total_cost *= tess_scan_cost_factor;
 	add_partial_path(rel, scan);
 }
 
@@ -394,7 +396,7 @@ add_index_paths(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte)
 			scan = tess_heap_index_path(root, index, rel->reltarget);
 			if (scan != NULL)
 			{
-				scan->total_cost = index->path.total_cost * FILTER_COST_FACTOR;
+				scan->total_cost = index->path.total_cost * tess_scan_cost_factor;
 				add_path(rel, scan);
 			}
 			continue;
