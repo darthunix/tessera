@@ -155,9 +155,7 @@ of 8. `tess_table_create(index, len, nkeys, kinds, payload_size,
 capacity, &status)` lays the index out; a table holds more records than
 its capacity, in more chunks, but its chains grow longer past it.
 `tess_table_chunk_init(base, len, &status)` makes a block an empty
-chunk. `tess_table_attach(&table, &status)` only checks that the
-reference holds a table of this format, and `tess_table_stats` reports
-the record count, the bucket count, the bytes of the index in use and
+chunk. `tess_table_stats` reports the record count, the bucket count, the bytes of the index in use and
 its length, for planning and `EXPLAIN`.
 
 Every call attaches anew and checks the whole header: the magic and the
@@ -271,8 +269,6 @@ other call over it at the same time:
   every record up, which is why it belongs to one writer: a serial join
   links its whole table with it once the inner side is read, and a
   table without duplicates needs no second round at all;
-- `tess_table_payload(&table, offset, &payload, &status)` hands out a
-  payload to change in place;
 - `tess_table_accumulate(&table, offsets, &rows, op, column, prepared,
   value_at, flags_at, flag_bit, &status)` folds each selected row into
   the aggregate state of its record, the references
@@ -310,15 +306,14 @@ buckets take the hash's high bits, so the first level takes its low ones
 and a partition split further takes the bits above them. Two calls work
 on chunks alone, without the index, as `tess_table_append` does:
 
-- `tess_table_append_partitioned` appends a batch's rows each to the
-  current chunk of its partition, given as a chunk number per partition.
-  A row whose partition's chunk is full stays pending while the rows
-  after it go on, so the node gives every such partition a new chunk and
-  calls again. `tess_table_append_partitioned_columns` does the same with
-  the payload taken from columns, as `tess_table_append_columns` takes
-  it, and also adds each appended row to its partition's count and ORs
-  the rows' NULL bits into a word, so it takes 64 columns at most: a
-  spilling join appends a batch
+- `tess_table_append_partitioned_columns` appends a batch's rows each to
+  the current chunk of its partition, given as a chunk number per
+  partition. A row whose partition's chunk is full stays pending while the
+  rows after it go on, so the node gives every such partition a new chunk
+  and calls again. The payload is taken from columns, as
+  `tess_table_append_columns` takes it, and each appended row adds to its
+  partition's count and ORs its NULL bits into a word, so it takes 64
+  columns at most: a spilling join appends a batch
   without a pass of its own over the rows (plan item 5.12, a fifth off a
   spilled join).
 - `tess_table_split` copies the records of one chunk, whole and in order,

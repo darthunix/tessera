@@ -303,36 +303,11 @@ pub struct Split {
 
 /// Append the rows of `pending` as records of a table of `config`, each
 /// to the chunk of its hash's partition, before the table has an index:
-/// as [`append_to`], except that a row whose partition's chunk is full
-/// stays pending while the rows after it go on. The caller must be the
+/// as [`append_columns_to`], each row's payload taken from `columns`,
+/// except that a row whose partition's chunk is full stays pending while
+/// the rows after it go on; every row appended counts in `rows` at its
+/// partition, and its NULL bits go into `nulls`. The caller must be the
 /// one writer of every partition's chunk.
-#[allow(clippy::too_many_arguments)]
-pub fn append_partitioned_to<K: KeySource + ?Sized>(
-    config: &TableConfig<'_>,
-    chunks: Chunks<'_>,
-    partitions: &Partitions<'_>,
-    hashes: &[u32],
-    keys: &K,
-    payload: Option<&[u8]>,
-    pending: &mut RowMask<'_>,
-    offsets: &mut [u32],
-) -> Result<usize> {
-    let layout = header::chunk_layout(config)?;
-    batch::append_partitioned(
-        &chunk_region(&chunks),
-        &layout,
-        partitions,
-        hashes,
-        keys,
-        payload,
-        pending,
-        offsets,
-    )
-}
-
-/// As [`append_partitioned_to`], each row's payload taken from `columns`
-/// as [`append_columns_to`] takes it: every row appended counts in `rows`
-/// at its partition, and its NULL bits go into `nulls`.
 #[allow(clippy::too_many_arguments)]
 pub fn append_partitioned_columns_to<K: KeySource + ?Sized>(
     config: &TableConfig<'_>,
@@ -1140,56 +1115,6 @@ mod tests {
     }
 
     #[test]
-    fn rows_append_to_the_chunks_of_their_partitions() {
-        let (keys, hashes, payload) = partition_rows();
-        let column = [ColumnView::try_new(&keys, None).unwrap()];
-        let mut blocks = Blocks::new();
-        // Room for 8 records each: the partitions fill and take more.
-        let len = CHUNK_HEADER + 8 * 32;
-        let mut current: Vec<u32> = (0..4).map(|_| blocks.add(len)).collect();
-        let mut owner = vec![0, 1, 2, 3];
-        let mut words = vec![u64::MAX, u64::MAX, u64::MAX, (1 << 8) - 1];
-        let mut offsets = vec![0; 200];
-        let mut total = 0;
-        loop {
-            let mut pending = RowMask::try_new(200, &mut words).unwrap();
-            let partitions = Partitions {
-                shift: 5,
-                chunks: &current,
-            };
-            total += append_partitioned_to(
-                &PARTITION_CONFIG,
-                blocks.chunks(),
-                &partitions,
-                &hashes,
-                &column[..],
-                Some(&payload),
-                &mut pending,
-                &mut offsets,
-            )
-            .unwrap();
-            if words.iter().all(|&word| word == 0) {
-                break;
-            }
-            // A new chunk for every partition whose rows are left.
-            let mut full = [false; 4];
-            for row in 0..200 {
-                if words[row / 64] >> (row % 64) & 1 == 1 {
-                    full[((hashes[row] >> 5) & 3) as usize] = true;
-                }
-            }
-            for partition in 0..4 {
-                if full[partition] {
-                    current[partition] = blocks.add(len);
-                    owner.push(partition as u32);
-                }
-            }
-        }
-        assert_eq!(total, 200);
-        check_partitioned(&blocks, &owner, 5, &keys);
-    }
-
-    #[test]
     fn a_chunk_splits_into_the_chunks_of_its_partitions() {
         let (keys, hashes, payload) = partition_rows();
         let column = [ColumnView::try_new(&keys, None).unwrap()];
@@ -1251,13 +1176,11 @@ mod tests {
 
     #[test]
     fn partitions_past_the_hash_or_the_chunks_are_refused() {
-        let (keys, hashes, payload) = partition_rows();
-        let column = [ColumnView::try_new(&keys, None).unwrap()];
         let mut blocks = Blocks::new();
-        for _ in 0..4 {
+        // Four chunks for partitions and a fifth, the source of a split.
+        for _ in 0..5 {
             blocks.add(CHUNK_HEADER + 256 * 32);
         }
-        let mut offsets = vec![0; 200];
         let cases: [(u32, &[u32], &str); 4] = [
             (0, &[0, 1, 2], "power of two"),
             (31, &[0, 1, 2, 3], "past the 32 bits"),
@@ -1265,17 +1188,15 @@ mod tests {
             (32, &[0], "past the 32 bits"),
         ];
         for (shift, chunks, message) in cases {
-            let mut words = vec![u64::MAX, u64::MAX, u64::MAX, (1 << 8) - 1];
-            let mut pending = RowMask::try_new(200, &mut words).unwrap();
-            let error = append_partitioned_to(
+            let mut from = CHUNK_HEADER;
+            let error = split_to(
                 &PARTITION_CONFIG,
                 blocks.chunks(),
                 &Partitions { shift, chunks },
-                &hashes,
-                &column[..],
-                Some(&payload),
-                &mut pending,
-                &mut offsets,
+                4,
+                &mut from,
+                &mut [0; 4],
+                &mut [0; 4],
             )
             .unwrap_err();
             assert!(error.to_string().contains(message), "{error}");

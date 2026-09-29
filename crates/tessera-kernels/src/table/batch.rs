@@ -297,105 +297,12 @@ pub(super) fn check_partitions<R: Region>(region: &R, partitions: &Partitions<'_
 
 /// Append the rows of `pending`, in row order, as records each to the
 /// chunk of its hash's partition, whose one writer the caller is, as long
-/// as whole records fit there: appended rows leave `pending` and get their
-/// references in `offsets`; a row whose partition's chunk is full stays
-/// pending, and the rows after it go on. The count appended is returned.
-#[allow(clippy::too_many_arguments)]
-pub(super) fn append_partitioned<R: Region, K: KeySource + ?Sized>(
-    region: &R,
-    layout: &Layout,
-    partitions: &Partitions<'_>,
-    hashes: &[u32],
-    keys: &K,
-    payload: Option<&[u8]>,
-    pending: &mut RowMask<'_>,
-    offsets: &mut [u32],
-) -> Result<usize> {
-    let nrows = pending.as_view().nrows();
-    check(layout, keys, nrows, hashes.len(), offsets.len())?;
-    check_payload(payload, nrows, layout.payload_size)?;
-    let mask = check_partitions(region, partitions)?;
-    shaped!(
-        layout.nkeys,
-        layout.tail_words(),
-        append_partitioned_rows(
-            region, layout, partitions, mask, hashes, keys, payload, pending, offsets
-        )
-    )
-}
-
-/// The rows of [`append_partitioned`], shaped as [`append_rows`].
-#[inline(never)]
-#[allow(clippy::too_many_arguments)]
-fn append_partitioned_rows<
-    R: Region,
-    K: KeySource + ?Sized,
-    const N: usize,
-    const T: usize,
-    const L: usize,
->(
-    region: &R,
-    layout: &Layout,
-    partitions: &Partitions<'_>,
-    mask: u32,
-    hashes: &[u32],
-    keys: &K,
-    payload: Option<&[u8]>,
-    pending: &mut RowMask<'_>,
-    offsets: &mut [u32],
-) -> Result<usize> {
-    let access = Access::for_chunks(region, layout);
-    let record_size = access.record_size();
-    let nrows = pending.as_view().nrows();
-    let payload_size = access.payload_size();
-    let shift = partitions.shift;
-    let mut buffer = slot_buffer::<L>();
-    let mut word_keys = WordKeys::new(&mut buffer, access.nkeys());
-    let mut appended = 0;
-    for index in 0..nrows.div_ceil(64) {
-        let selected = pending.as_view().word(index).unwrap();
-        if selected == 0 {
-            continue;
-        }
-        word_keys.load(keys, index, selected)?;
-        let mut bits = selected;
-        let mut done = 0;
-        while bits != 0 {
-            let bit = bits.trailing_zeros() as usize;
-            bits &= bits - 1;
-            let row = index * 64 + bit;
-            let partition = (hashes[row] >> shift) & mask;
-            // Checked: every partition's chunk exists.
-            let chunk = partitions.chunks[partition as usize] as usize;
-            let (used, room) = access.room(chunk)?;
-            if room == 0 {
-                continue;
-            }
-            // SAFETY: as in `append_rows`.
-            let row_payload = payload.map(|payload| unsafe {
-                payload.get_unchecked(row * payload_size..(row + 1) * payload_size)
-            });
-            // SAFETY: the place lies past the used mark and within the
-            // chunk, as `room` counted; the buffer and the shape are this
-            // table's.
-            unsafe {
-                access.write::<N, T>((chunk, used), hashes[row], &word_keys, bit, row_payload)
-            };
-            offsets[row] = access.reference((chunk, used));
-            // SAFETY: the caller is the chunk's one writer, and the record
-            // just written ends at the new mark.
-            unsafe { access.set_used(chunk, used + record_size) };
-            done |= 1 << bit;
-            appended += 1;
-        }
-        pending.intersect_word(index, !done)?;
-    }
-    Ok(appended)
-}
-
-/// As [`append_partitioned`], each row's payload taken from `columns` as
-/// [`append_columns`] takes it: every row appended counts in `rows` at its
-/// partition, and its NULL bits go into `nulls`.
+/// as whole records fit there, each row's payload taken from `columns` as
+/// [`append_columns`] takes it: appended rows leave `pending`, get their
+/// references in `offsets` and count in `rows` at their partition, and
+/// their NULL bits go into `nulls`; a row whose partition's chunk is full
+/// stays pending, and the rows after it go on. The count appended is
+/// returned.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn append_partitioned_columns<R: Region, K: KeySource + ?Sized>(
     region: &R,

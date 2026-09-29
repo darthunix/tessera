@@ -6,12 +6,12 @@ use std::ptr;
 
 use tessera_capi::c::{
     Code, DatumColumn, Mask, Status, tess_count, tess_int4_arith_columns, tess_int4_arith_scalar,
-    tess_int4_arith_scalar_left, tess_int4_compare_columns, tess_int4_count, tess_int4_filter,
-    tess_int4_hash, tess_int4_hash_next, tess_int4_max, tess_int4_min, tess_int4_sum,
-    tess_int4_to_int8, tess_int8_arith_columns, tess_int8_arith_scalar,
-    tess_int8_arith_scalar_left, tess_int8_compare_columns, tess_int8_filter, tess_int8_hash,
-    tess_int8_hash_next, tess_int8_max, tess_int8_min, tess_int8_to_int4, tess_kernels_abi_version,
-    tess_kernels_layout, tess_kernels_test_panic,
+    tess_int4_arith_scalar_left, tess_int4_compare_columns, tess_int4_filter, tess_int4_hash,
+    tess_int4_hash_next, tess_int4_max, tess_int4_min, tess_int4_sum, tess_int4_to_int8,
+    tess_int8_arith_columns, tess_int8_arith_scalar, tess_int8_arith_scalar_left,
+    tess_int8_compare_columns, tess_int8_filter, tess_int8_hash, tess_int8_hash_next,
+    tess_int8_max, tess_int8_min, tess_int8_to_int4, tess_kernels_abi_version, tess_kernels_layout,
+    tess_kernels_test_panic,
 };
 use tessera_kernels::int32::{hash_combine, murmurhash32};
 
@@ -311,7 +311,7 @@ fn aggregates_match_a_scalar_loop_and_are_null_without_rows() {
         let column = &raw const column;
         let rows = &raw const rows;
         assert_eq!(
-            tess_int4_count(
+            tess_count(
                 column,
                 ptr::null(),
                 rows,
@@ -368,7 +368,7 @@ fn aggregates_match_a_scalar_loop_and_are_null_without_rows() {
         let column = &raw const column;
         let rows = &raw const rows;
         assert_eq!(
-            tess_int4_count(
+            tess_count(
                 column,
                 ptr::null(),
                 rows,
@@ -419,7 +419,7 @@ fn aggregates_match_a_scalar_loop_and_are_null_without_rows() {
     got_count = 7;
     // SAFETY: rejected before any read.
     let code = unsafe {
-        tess_int4_count(
+        tess_count(
             &raw const column,
             ptr::null(),
             &raw const rows,

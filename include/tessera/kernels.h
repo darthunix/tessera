@@ -110,13 +110,6 @@ extern TessStatusCode tess_int4_compare_columns(const TessDatumColumn *left,
 												TessCompareOp op,
 												TessStatus *status);
 
-/* The number of selected non-NULL values. */
-extern TessStatusCode tess_int4_count(const TessDatumColumn *column,
-									  const TessRowMask *prepared,
-									  const TessRowMask *rows,
-									  int64 *count,
-									  TessStatus *status);
-
 /*
  * The int8 sum of the selected non-NULL values; without any, isnull is set
  * and sum is 0. The sum of one batch cannot overflow; adding batches may,

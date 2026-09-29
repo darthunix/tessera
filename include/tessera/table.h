@@ -180,10 +180,6 @@ extern TessStatusCode tess_table_create(void *index,
 										uint64 capacity,
 										TessStatus *status);
 
-/* Check that table is a table of this format. */
-extern TessStatusCode tess_table_attach(const TessTableRef *table,
-										TessStatus *status);
-
 /* The counts of the table as of now. */
 extern TessStatusCode tess_table_stats(const TessTableRef *table,
 									   TessTableStats *stats,
@@ -244,28 +240,12 @@ extern TessStatusCode tess_table_append_columns(const TessTableRef *table,
  *
  * Append the rows of pending as records, each to the chunk of its hash's
  * partition, in row order, as long as whole records fit there: as
- * tess_table_append, except that a row whose partition's chunk is full
- * stays pending while the rows after it go on; the caller gives those
- * partitions new chunks and calls again. The caller is the one writer of
- * every partition's chunk.
- */
-extern TessStatusCode tess_table_append_partitioned(const TessTableRef *table,
-													const uint32 *partition_chunks,
-													int npartitions,
-													uint32 shift,
-													Size payload_size,
-													const uint32 *hashes,
-													int nkeys,
-													const TessTableKey *keys,
-													const uint8 *payload,
-													TessRowMask *pending,
-													uint32 *offsets,
-													TessStatus *status);
-
-/*
- * As tess_table_append_partitioned, each row's payload taken from columns
- * as tess_table_append_columns takes it (the table's payload is a word of
- * NULL bits and a word per column): every row appended adds one to
+ * tess_table_append_columns, except that a row whose partition's chunk is
+ * full stays pending while the rows after it go on; the caller gives
+ * those partitions new chunks and calls again. The caller is the one
+ * writer of every partition's chunk. Each row's payload is taken from
+ * columns as tess_table_append_columns takes it (the table's payload is a
+ * word of NULL bits and a word per column): every row appended adds one to
  * rows[partition], and its NULL bits are ORed into *nulls.
  */
 extern TessStatusCode tess_table_append_partitioned_columns(const TessTableRef *table,
@@ -755,17 +735,9 @@ extern TessStatusCode tess_build_step(TessBuildParticipant *participant,
 									  uint32 *action, TessStatus *status);
 
 /*
- * The payload of the record at a reference, to change in place:
- * payload_size bytes valid as long as the record's chunk.
- */
-extern TessStatusCode tess_table_payload(const TessTableRef *table,
-										 uint32 offset,
-										 uint8 **payload,
-										 TessStatus *status);
-
-/*
  * The payload of the record of each row of rows, at offsets[row], into
- * payloads[row]: tess_table_payload for a batch in one call.
+ * payloads[row], to change in place: payload_size bytes each, valid as long
+ * as the record's chunk.
  */
 extern TessStatusCode tess_table_payloads(const TessTableRef *table,
 										  const uint32 *offsets,

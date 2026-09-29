@@ -9,11 +9,11 @@ use tessera_capi::c::{
     CSortKey, Code, DatumColumn, Mask, Status, TableKey, TableRecord, TableRef, TableStats,
     tess_int4_hash, tess_int8_hash, tess_sort, tess_sort_item_words, tess_sort_items,
     tess_sort_layout, tess_table_accumulate, tess_table_append, tess_table_append_columns,
-    tess_table_append_partitioned_columns, tess_table_attach, tess_table_chunk_init,
-    tess_table_create, tess_table_find_or_insert, tess_table_format_version, tess_table_gather,
-    tess_table_gather_key, tess_table_layout, tess_table_link, tess_table_link_grouped,
-    tess_table_next_in_group, tess_table_next_match, tess_table_payload, tess_table_probe,
-    tess_table_record, tess_table_regrow, tess_table_scan, tess_table_size, tess_table_stats,
+    tess_table_append_partitioned_columns, tess_table_chunk_init, tess_table_create,
+    tess_table_find_or_insert, tess_table_format_version, tess_table_gather, tess_table_gather_key,
+    tess_table_layout, tess_table_link, tess_table_link_grouped, tess_table_next_in_group,
+    tess_table_next_match, tess_table_payloads, tess_table_probe, tess_table_record,
+    tess_table_regrow, tess_table_scan, tess_table_size, tess_table_stats,
 };
 use tessera_core::{ColumnView, RowMask, RowMaskView};
 use tessera_kernels::int32::{self, NullKeys};
@@ -357,6 +357,44 @@ unsafe fn slice_of<'a>(bits: *const u64, words: usize) -> &'a [u64] {
     unsafe { std::slice::from_raw_parts(bits, words) }
 }
 
+/// Whether the reference holds a table of this format, as every call
+/// checks: its counts read.
+///
+/// # Safety
+///
+/// As for [`tess_table_stats`].
+unsafe fn attach(table: *const TableRef, status: *mut Status) -> Code {
+    let mut stats = TableStats {
+        struct_size: size_of::<TableStats>(),
+        records: 0,
+        buckets: 0,
+        bytes_used: 0,
+        region_len: 0,
+    };
+    // SAFETY: the caller's contract, the counts local.
+    unsafe { tess_table_stats(table, &raw mut stats, status) }
+}
+
+/// The payload of the record at `offset`, through the call for a batch.
+///
+/// # Safety
+///
+/// As for [`tess_table_payloads`] over one row.
+unsafe fn payload_of(
+    table: *const TableRef,
+    offset: u32,
+    payload: *mut *mut u8,
+    status: *mut Status,
+) -> Code {
+    let mut word = 1_u64;
+    let rows = Mask {
+        nrows: 1,
+        bits: &raw mut word,
+    };
+    // SAFETY: the caller's contract, the offset and the mask local.
+    unsafe { tess_table_payloads(table, &raw const offset, &raw const rows, payload, status) }
+}
+
 /// Insert every valid row of a batch and probe it back: the offsets, the
 /// found words and the matches.
 fn round_trip<K: tessera_kernels::table::KeySource + ?Sized>(
@@ -453,7 +491,7 @@ fn the_entry_points_round_trip() -> Result<()> {
         assert_eq!((code, status.code), (Code::Ok, Code::Ok));
         assert_eq!(size, index_size(&CONFIG, 100)?);
         let mut table = CTable::new(1, 8, 100);
-        assert_eq!(tess_table_attach(table.ptr(), &raw mut status), Code::Ok);
+        assert_eq!(attach(table.ptr(), &raw mut status), Code::Ok);
 
         // Hashes under the reject policy: NULL rows leave the valid mask.
         let mut hashes = vec![0; 100];
@@ -637,19 +675,13 @@ fn the_entry_points_round_trip() -> Result<()> {
         // past the chunks, the wrong key count or kind, an undersized
         // structure, a corrupt version.
         let invalid = Code::InvalidArgument;
-        assert_eq!(tess_table_attach(ptr::null(), &raw mut status), invalid);
+        assert_eq!(attach(ptr::null(), &raw mut status), invalid);
         let base = table.table.index;
         let mut other = TableRef { ..table.table };
         other.index_len = size - 8;
-        assert_eq!(
-            tess_table_attach(&raw const other, &raw mut status),
-            invalid
-        );
+        assert_eq!(attach(&raw const other, &raw mut status), invalid);
         other.index = base.add(8);
-        assert_eq!(
-            tess_table_attach(&raw const other, &raw mut status),
-            invalid
-        );
+        assert_eq!(attach(&raw const other, &raw mut status), invalid);
         assert!(status.message().contains("does not hold a table"));
         other = TableRef { ..table.table };
         other.nchunks = 1;
@@ -712,14 +744,14 @@ fn the_entry_points_round_trip() -> Result<()> {
         );
         let version = base.add(8).cast::<u32>();
         version.write_unaligned(2);
-        assert_eq!(tess_table_attach(table.ptr(), &raw mut status), invalid);
+        assert_eq!(attach(table.ptr(), &raw mut status), invalid);
         assert!(
             status.message().contains("version 2"),
             "{}",
             status.message()
         );
         version.write_unaligned(1);
-        assert_eq!(tess_table_attach(table.ptr(), &raw mut status), Code::Ok);
+        assert_eq!(attach(table.ptr(), &raw mut status), Code::Ok);
     }
     Ok(())
 }
@@ -1047,8 +1079,7 @@ fn the_writer_entry_points_round_trip() -> Result<()> {
         for row in 0..100 {
             assert_eq!(offsets[row], offsets[row % 10]);
             let mut payload: *mut u8 = ptr::null_mut();
-            let code =
-                tess_table_payload(table.ptr(), offsets[row], &raw mut payload, &raw mut status);
+            let code = payload_of(table.ptr(), offsets[row], &raw mut payload, &raw mut status);
             assert_eq!(code, Code::Ok);
             let counter = payload.cast::<u64>();
             counter.write_unaligned(counter.read_unaligned() + row as u64);
@@ -1117,7 +1148,7 @@ fn the_writer_entry_points_round_trip() -> Result<()> {
         );
         assert_eq!(code, Code::InvalidArgument);
         let mut payload: *mut u8 = ptr::null_mut();
-        let code = tess_table_payload(
+        let code = payload_of(
             table.ptr(),
             offsets[0] + 1,
             &raw mut payload,

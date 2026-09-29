@@ -111,6 +111,25 @@ typedef struct Table
 } Table;
 
 /* An empty table whose index is sized for capacity records. */
+/* The payload of the record at offset, through the call for a batch. */
+static TessStatusCode
+payload_of(const TessTableRef *table, uint32 offset, uint8 **payload, TessStatus *status)
+{
+	uint64		word = 1;
+	TessRowMask one = {1, &word};
+
+	return tess_table_payloads(table, &offset, &one, payload, status);
+}
+
+/* Whether the reference holds a table of this format, as every call checks. */
+static TessStatusCode
+attach(const TessTableRef *table, TessStatus *status)
+{
+	TessTableStats stats = {.struct_size = sizeof(TessTableStats)};
+
+	return tess_table_stats(table, &stats, status);
+}
+
 static Table *
 make_table(uint64 capacity)
 {
@@ -379,7 +398,7 @@ tessera_test_table_cycle(PG_FUNCTION_ARGS)
 		PG_RETURN_BOOL(false);
 	table = make_table(NROWS);
 	if (table == NULL ||
-		tess_table_attach(&table->ref, &status) != TESS_OK ||
+		attach(&table->ref, &status) != TESS_OK ||
 		!stats_of(table, &stats) || stats.records != 0 ||
 		stats.region_len != table->ref.index_len)
 		PG_RETURN_BOOL(false);
@@ -549,8 +568,7 @@ tessera_test_table_groups(PG_FUNCTION_ARGS)
 		uint64		counter;
 
 		if (offsets[row] != offsets[row % 10] ||
-			tess_table_payload(&table->ref, offsets[row], &payload,
-							   &status) != TESS_OK)
+			payload_of(&table->ref, offsets[row], &payload, &status) != TESS_OK)
 			PG_RETURN_BOOL(false);
 		memcpy(&counter, payload, sizeof(counter));
 		counter += row;
@@ -814,7 +832,7 @@ tessera_test_table_errors(PG_FUNCTION_ARGS)
 	other.chunks = NULL;
 	other.chunk_lens = NULL;
 	other.nchunks = 0;
-	if (tess_table_attach(&other, &status) != TESS_ERROR_INVALID_ARGUMENT ||
+	if (attach(&other, &status) != TESS_ERROR_INVALID_ARGUMENT ||
 		strstr(status.message, "does not hold a table") == NULL ||
 		strcmp(status.sqlstate, "XX000") != 0)
 		PG_RETURN_BOOL(false);
@@ -831,20 +849,20 @@ tessera_test_table_errors(PG_FUNCTION_ARGS)
 	version = (uint32 *) ((char *) table->ref.index +
 						  tess_table_layout(TESS_TABLE_LAYOUT_VERSION_OFFSET));
 	*version = TESS_TABLE_FORMAT_VERSION + 1;
-	if (tess_table_attach(&table->ref, &status) != TESS_ERROR_INVALID_ARGUMENT ||
+	if (attach(&table->ref, &status) != TESS_ERROR_INVALID_ARGUMENT ||
 		strstr(status.message, "version") == NULL)
 		PG_RETURN_BOOL(false);
 	*version = TESS_TABLE_FORMAT_VERSION;
 	other = table->ref;
 	other.index = (char *) table->ref.index + 4;
 	other.index_len = size - 4;
-	if (tess_table_attach(&table->ref, &status) != TESS_OK ||
-		tess_table_attach(&other, &status) != TESS_ERROR_INVALID_ARGUMENT)
+	if (attach(&table->ref, &status) != TESS_OK ||
+		attach(&other, &status) != TESS_ERROR_INVALID_ARGUMENT)
 		PG_RETURN_BOOL(false);
 	other = table->ref;
 	other.index_len = size - 8;
-	if (tess_table_attach(&other, &status) != TESS_ERROR_INVALID_ARGUMENT ||
-		tess_table_attach(NULL, &status) != TESS_ERROR_INVALID_ARGUMENT)
+	if (attach(&other, &status) != TESS_ERROR_INVALID_ARGUMENT ||
+		attach(NULL, &status) != TESS_ERROR_INVALID_ARGUMENT)
 		PG_RETURN_BOOL(false);
 
 	/*
@@ -986,9 +1004,8 @@ partitioned_rows(Table *table, Batch *batch, const uint32 *offsets,
 }
 
 /*
- * A table that spills: the valid rows appended each to the chunk of its
- * partition, chunks added as partitions fill; then a chunk of every row
- * split into four partitions by the next bits. Every row lands once, in
+ * A table that spills: a chunk of every row split into four partitions by
+ * bits 9 and 10, chunks added as partitions fill. Every row lands once, in
  * its partition; a bad partition count and a source among the partitions
  * are refused.
  */
@@ -997,11 +1014,9 @@ tessera_test_table_partitions(PG_FUNCTION_ARGS)
 {
 	TessStatus	status = TESS_STRUCT_INITIALIZER(TessStatus);
 	Batch	   *batch = palloc0(sizeof(Batch));
-	Table	   *table = make_table(256);
 	Table	   *whole = make_table(256);
 	uint64		pending_words[NWORDS];
 	uint32		offsets[NROWS];
-	uint32		partitions[NROWS];
 	uint32		chunks[4];
 	uint32		split_offsets[NROWS];
 	uint32		split_hashes[NROWS];
@@ -1011,51 +1026,9 @@ tessera_test_table_partitions(PG_FUNCTION_ARGS)
 	Size		from = TESS_TABLE_CHUNK_HEADER;
 	TessRowMask pending = {NROWS, pending_words};
 
-	if (table == NULL || whole == NULL ||
-		!prepare(batch, TESS_NULL_KEYS_REJECT, 0, false))
+	if (whole == NULL || !prepare(batch, TESS_NULL_KEYS_REJECT, 0, false))
 		PG_RETURN_BOOL(false);
 	nvalid = count_bits(batch->valid);
-	/* Chunks of 16 records: each partition fills several. */
-	for (int partition = 0; partition < 4; partition++)
-	{
-		if (!add_chunk(table, TESS_TABLE_CHUNK_HEADER + 16 * 32))
-			PG_RETURN_BOOL(false);
-		chunks[partition] = table->ref.nchunks - 1;
-	}
-	memcpy(pending_words, batch->valid, sizeof(pending_words));
-	for (;;)
-	{
-		if (tess_table_append_partitioned(&table->ref, chunks, 4, 7, 8,
-										  batch->hashes, 1, &batch->key,
-										  (const uint8 *) batch->payload,
-										  &pending, offsets, &status) != TESS_OK)
-			PG_RETURN_BOOL(false);
-		if (count_bits(pending_words) == 0)
-			break;
-		{
-			bool		full[4] = {false};
-
-			for (int row = 0; row < NROWS; row++)
-				if (has_bit(pending_words, row))
-					full[(batch->hashes[row] >> 7) & 3] = true;
-			for (int partition = 0; partition < 4; partition++)
-				if (full[partition])
-				{
-					if (!add_chunk(table, TESS_TABLE_CHUNK_HEADER + 16 * 32))
-						PG_RETURN_BOOL(false);
-					chunks[partition] = table->ref.nchunks - 1;
-				}
-		}
-	}
-	for (int row = 0, i = 0; row < NROWS; row++)
-		if (has_bit(batch->valid, row))
-		{
-			partitions[i] = (batch->hashes[row] >> 7) & 3;
-			offsets[i++] = offsets[row];
-		}
-	if (!partitioned_rows(table, batch, offsets, partitions, nvalid, 7))
-		PG_RETURN_BOOL(false);
-
 	/* One chunk of every row, split by bits 9 and 10. */
 	if (!add_chunk(whole, TESS_TABLE_CHUNK_HEADER + NROWS * 32))
 		PG_RETURN_BOOL(false);
@@ -1098,9 +1071,9 @@ tessera_test_table_partitions(PG_FUNCTION_ARGS)
 
 	/* Three partitions, and the source among them, are refused. */
 	from = TESS_TABLE_CHUNK_HEADER;
-	if (tess_table_append_partitioned(&table->ref, chunks, 3, 7, 8, batch->hashes, 1,
-									  &batch->key, (const uint8 *) batch->payload,
-									  &pending, offsets, &status) != TESS_ERROR_INVALID_ARGUMENT ||
+	if (tess_table_split(&whole->ref, 1, one_int4, 8, chunks, 3, 9, 0, &from, NROWS,
+						 split_offsets, split_hashes, &copied, &copied,
+						 &status) != TESS_ERROR_INVALID_ARGUMENT ||
 		strstr(status.message, "power of two") == NULL)
 		PG_RETURN_BOOL(false);
 	chunks[0] = 0;
@@ -1109,7 +1082,6 @@ tessera_test_table_partitions(PG_FUNCTION_ARGS)
 						 &status) != TESS_ERROR_INVALID_ARGUMENT ||
 		strstr(status.message, "into itself") == NULL)
 		PG_RETURN_BOOL(false);
-	free_table(table);
 	free_table(whole);
 	pfree(batch);
 	PG_RETURN_BOOL(true);
@@ -1147,7 +1119,7 @@ set_states(Table *table, Batch *batch, const uint32 *offsets)
 		if (!has_bit(batch->valid, row))
 			continue;
 		states[2] = states[3] = states[4] = DatumGetInt32(batch->values[row]);
-		if (tess_table_payload(&table->ref, offsets[row], &payload, &status) != TESS_OK)
+		if (payload_of(&table->ref, offsets[row], &payload, &status) != TESS_OK)
 			return false;
 		memcpy(payload, states, sizeof(states));
 	}

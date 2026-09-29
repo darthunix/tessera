@@ -1,7 +1,8 @@
 //! Signed int32 kernels without PostgreSQL type dispatch: comparisons
-//! ([`filter`]), aggregates ([`count`], [`sum`], [`min`], [`max`]),
-//! arithmetic ([`arith_scalar`], [`arith_scalar_left`], [`arith_columns`])
-//! and key hashes ([`hash`], [`hash_next`]).
+//! ([`filter`]), aggregates ([`sum`], [`min`], [`max`]; the count is
+//! [`crate::count::count`]'s), arithmetic ([`arith_scalar`],
+//! [`arith_scalar_left`], [`arith_columns`]) and key hashes ([`hash`],
+//! [`hash_next`]).
 //!
 //! A physical int32 representation does not select PostgreSQL semantics:
 //! the future caller must choose kernels by logical type and operation.
@@ -14,7 +15,7 @@ mod filter;
 pub(crate) mod hash;
 
 pub use crate::ops::{ArithOp, ArithmeticError, CompareOp};
-pub use aggregate::{count, max, min, sum};
+pub use aggregate::{max, min, sum};
 pub(crate) use arith::Side;
 pub use arith::{arith_columns, arith_scalar, arith_scalar_left};
 pub use compare::compare_columns;

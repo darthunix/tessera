@@ -102,8 +102,6 @@ inside a kernel.
   rows, op, status)`: keep in `rows` the selected rows where both columns
   are non-NULL and `left op right`, each column read with its own
   readiness; `tess_int8_compare_columns` compares two int8 columns alike.
-- `tess_int4_count(column, prepared, rows, count, status)`: the number of
-  selected non-NULL values, as `count(column)`.
 - `tess_int4_sum(column, prepared, rows, isnull, sum, status)`: the int8
   sum of the selected non-NULL values, NULL without any; one batch's sum
   cannot overflow, the caller checks the running total across batches.

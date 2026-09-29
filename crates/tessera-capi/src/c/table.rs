@@ -15,8 +15,7 @@ use tessera_core::ColumnReader;
 use tessera_kernels::table::{
     Chunks, Combine, CombineStop, Cursor, FORMAT_VERSION, Fold, HEADER_SIZE, KeyKind, KeySource,
     MAX_KEYS, MAX_PAYLOAD_COLUMNS, Partitions, PayloadColumns, Slot, Table, TableConfig, TableMut,
-    UNIT_BITS, VERSION_OFFSET, append_columns_to, append_partitioned_columns_to,
-    append_partitioned_to, append_to,
+    UNIT_BITS, VERSION_OFFSET, append_columns_to, append_partitioned_columns_to, append_to,
     bloom::SharedFilter,
     index_size, init_chunk, normalize_word, payload_null_words,
     phases::{Participant, SharedCounters},
@@ -413,18 +412,6 @@ pub unsafe extern "C" fn tess_table_create(
     }
 }
 
-/// `tess_table_attach`: check that the region holds a table.
-///
-/// # Safety
-///
-/// `table` as for [`attach`] during the call; `status` as for
-/// every entry point.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn tess_table_attach(table: *const TableRef, status: *mut Status) -> Code {
-    // SAFETY: the caller's contract.
-    unsafe { guard(status, || attach(table).map(drop)) }
-}
-
 /// `tess_table_stats`: the counts of the table.
 ///
 /// # Safety
@@ -663,84 +650,17 @@ unsafe fn partitions<'a>(
     Ok(Partitions { shift, chunks })
 }
 
-/// `tess_table_append_partitioned`: append the rows of `pending`, each to
-/// the chunk of its hash's partition, as long as whole records fit there.
+/// `tess_table_append_partitioned_columns`: append the rows of `pending`,
+/// each to the chunk of its hash's partition, as long as whole records fit
+/// there, each row's payload taken from `columns` as
+/// [`tess_table_append_columns`] takes it; every row appended counts in
+/// `rows` at its partition, and its NULL bits go into `*nulls`.
 ///
 /// # Safety
 ///
-/// As for [`tess_table_append`], the caller being the one writer of every
-/// partition's chunk; `partition_chunks` as for [`partitions`].
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn tess_table_append_partitioned(
-    table: *const TableRef,
-    partition_chunks: *const u32,
-    npartitions: c_int,
-    shift: u32,
-    payload_size: usize,
-    hashes: *const u32,
-    nkeys: c_int,
-    keys: *const TableKey,
-    payload: *const u8,
-    pending: *mut Mask,
-    offsets: *mut u32,
-    status: *mut Status,
-) -> Code {
-    // SAFETY: the caller's contract.
-    unsafe {
-        guard(status, || {
-            let (_, chunks) = chunks_of(table)?;
-            let partitions = partitions(partition_chunks, npartitions, shift)?;
-            let mut decoded = TableKeys::empty();
-            table_keys(nkeys, keys, &mut decoded)?;
-            let key_list = slice::from_raw_parts(keys, decoded.nkeys);
-            let mut kinds = [KeyKind::Int32; MAX_KEYS];
-            for (slot, key) in kinds.iter_mut().zip(key_list) {
-                *slot = if key.kind == 2 {
-                    KeyKind::Int64
-                } else {
-                    KeyKind::Int32
-                };
-            }
-            let config = TableConfig {
-                keys: &kinds[..decoded.nkeys],
-                payload_size,
-            };
-            let mut pending = pending.as_mut().context("a null pending mask")?.mask()?;
-            let nrows = pending.as_view().nrows();
-            let hashes = values(hashes, nrows, "hashes")?;
-            let offsets = slots(offsets, nrows, "offsets")?;
-            let payload = if payload.is_null() {
-                None
-            } else {
-                let bytes = nrows
-                    .checked_mul(payload_size)
-                    .context("the payload does not fit in memory")?;
-                Some(values(payload, bytes, "payload")?)
-            };
-            append_partitioned_to(
-                &config,
-                chunks,
-                &partitions,
-                hashes,
-                &decoded,
-                payload,
-                &mut pending,
-                offsets,
-            )
-            .map(drop)
-        })
-    }
-}
-
-/// `tess_table_append_partitioned_columns`: as
-/// [`tess_table_append_partitioned`], each row's payload taken from
-/// `columns` as [`tess_table_append_columns`] takes it; every row appended
-/// counts in `rows` at its partition, and its NULL bits go into `*nulls`.
-///
-/// # Safety
-///
-/// As for [`tess_table_append_partitioned`] and
-/// [`tess_table_append_columns`]; `rows` must point to `npartitions`
+/// As for [`tess_table_append_columns`], the caller being the one writer
+/// of every partition's chunk; `partition_chunks` as for [`partitions`];
+/// `rows` must point to `npartitions`
 /// counts and `nulls` to a word, both writable and not accessed by
 /// anything else during the call.
 #[unsafe(no_mangle)]
@@ -1289,34 +1209,8 @@ pub unsafe extern "C" fn tess_table_combine(
     }
 }
 
-/// `tess_table_payload`: the payload of a record, to change in place.
-///
-/// # Safety
-///
-/// `table` as for [`attach_mut`] during the call and until the
-/// caller is done with the pointer it receives; `payload` must be null or
-/// writable; `status` as for every entry point.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn tess_table_payload(
-    table: *const TableRef,
-    offset: u32,
-    payload: *mut *mut u8,
-    status: *mut Status,
-) -> Code {
-    // SAFETY: the caller's contract.
-    unsafe {
-        guard(status, || {
-            let mut table = attach_mut(table)?;
-            let bytes = table.payload_mut(offset)?.as_mut_ptr();
-            *payload.as_mut().context("a null payload pointer")? = bytes;
-            Ok(())
-        })
-    }
-}
-
 /// `tess_table_payloads`: the payload of the record of each selected
-/// row, to change in place: one call for a batch, where
-/// `tess_table_payload` takes one per record.
+/// row, to change in place, in one call for a batch.
 ///
 /// # Safety
 ///

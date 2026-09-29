@@ -2,7 +2,8 @@
 
 use anyhow::Result;
 use tessera_core::{ColumnReader, ColumnView, RowMaskView};
-use tessera_kernels::int32::{count, max, min, sum};
+use tessera_kernels::count::count;
+use tessera_kernels::int32::{max, min, sum};
 
 /// The same values without bulk storage: every call takes the row path.
 struct RowsOnly<'a>(ColumnView<'a, i32>);

@@ -1,7 +1,8 @@
 //! Aggregates over selected int4 values with PostgreSQL's NULL rules.
 //!
-//! NULL rows are skipped. [`count`] is the number of selected non-NULL rows;
-//! `count(*)` is [`RowMaskView::selected_count`]. [`sum`] is the int8 sum of
+//! NULL rows are skipped; [`crate::count::count`] counts the selected
+//! non-NULL rows of any type and `count(*)` is
+//! [`RowMaskView::selected_count`]. [`sum`] is the int8 sum of
 //! the int4 values and `None` without a non-NULL row; within one call it
 //! cannot overflow (at most 2^31 rows of magnitude at most 2^31), so overflow
 //! checking belongs to whoever adds calls together, where PostgreSQL raises
@@ -24,39 +25,12 @@ use tessera_core::{ColumnReader, RowMaskView, WordBlock};
 
 use super::BULK_MIN_ROWS;
 
-/// Count the selected non-NULL rows.
-///
-/// # Errors
-///
-/// Different row counts and unprepared selected rows fail as in
-/// [`ColumnReader::try_fold_selected`]; rows already counted are not reported.
-///
-/// ```
-/// use tessera_core::{ColumnView, RowMaskView};
-/// use tessera_kernels::int32::count;
-///
-/// let values = [10, 20, 30, 40];
-/// let non_nulls = RowMaskView::try_new(4, &[0b1101])?;
-/// let column = ColumnView::try_new(&values, Some(non_nulls))?;
-/// let rows = RowMaskView::try_new(4, &[0b0111])?;
-/// assert_eq!(count(&column, &rows)?, 2);
-/// # Ok::<(), anyhow::Error>(())
-/// ```
-pub fn count<C: ColumnReader<Value = i32>>(column: &C, rows: &RowMaskView<'_>) -> Result<usize> {
-    aggregate(
-        column,
-        rows,
-        0,
-        |count, value| count + usize::from(value.is_some()),
-        |count, block, selected| count + bulk::count(block, selected),
-    )
-}
-
 /// Sum the selected non-NULL values as int8, `None` without any.
 ///
 /// # Errors
 ///
-/// As for [`count`].
+/// Different row counts and unprepared selected rows fail as in
+/// [`ColumnReader::try_fold_selected`]; rows already summed are not reported.
 ///
 /// ```
 /// use tessera_core::{ColumnView, RowMaskView};
@@ -95,7 +69,7 @@ pub fn sum<C: ColumnReader<Value = i32>>(
 ///
 /// # Errors
 ///
-/// As for [`count`].
+/// As for [`sum`].
 ///
 /// ```
 /// use tessera_core::{ColumnView, RowMaskView};
@@ -136,7 +110,7 @@ pub fn min<C: ColumnReader<Value = i32>>(
 ///
 /// # Errors
 ///
-/// As for [`count`].
+/// As for [`sum`].
 pub fn max<C: ColumnReader<Value = i32>>(
     column: &C,
     rows: &RowMaskView<'_>,
@@ -231,14 +205,6 @@ mod bulk {
     }
 
     #[inline]
-    pub fn count(block: WordBlock<'_, i32>, selected: u64) -> usize {
-        match block {
-            WordBlock::Dense { non_nulls, .. } => (selected & non_nulls).count_ones() as usize,
-            WordBlock::Datum { isnull, .. } => simd::count_datum(isnull, selected),
-        }
-    }
-
-    #[inline]
     pub fn sum(block: WordBlock<'_, i32>, selected: u64) -> (usize, i64) {
         let mask = present(&block, selected);
         let total = match block {
@@ -274,10 +240,6 @@ mod bulk {
 #[cfg(not(all(target_arch = "aarch64", not(miri))))]
 mod bulk {
     use tessera_core::WordBlock;
-
-    pub fn count(_: WordBlock<'_, i32>, _: u64) -> usize {
-        unreachable!("no whole-word kernels on this target")
-    }
 
     pub fn sum(_: WordBlock<'_, i32>, _: u64) -> (usize, i64) {
         unreachable!("no whole-word kernels on this target")

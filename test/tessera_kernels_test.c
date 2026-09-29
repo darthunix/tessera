@@ -296,7 +296,7 @@ tessera_test_kernels_aggregates(PG_FUNCTION_ARGS)
 			greatest = Max(greatest, value);
 		}
 	}
-	if (tess_int4_count(&column, NULL, &rows, &got_count, &status) != TESS_OK ||
+	if (tess_count(&column, NULL, &rows, &got_count, &status) != TESS_OK ||
 		tess_int4_sum(&column, NULL, &rows, &sum_null, &got_sum,
 					  &status) != TESS_OK ||
 		tess_int4_min(&column, NULL, &rows, &min_null, &got_min,
@@ -309,7 +309,7 @@ tessera_test_kernels_aggregates(PG_FUNCTION_ARGS)
 
 	/* Without selected rows: count 0, the rest NULL. */
 	memset(words, 0, sizeof(words));
-	if (tess_int4_count(&column, NULL, &rows, &got_count, NULL) != TESS_OK ||
+	if (tess_count(&column, NULL, &rows, &got_count, NULL) != TESS_OK ||
 		tess_int4_sum(&column, NULL, &rows, &sum_null, &got_sum,
 					  NULL) != TESS_OK ||
 		tess_int4_min(&column, NULL, &rows, &min_null, &got_min,
@@ -322,8 +322,8 @@ tessera_test_kernels_aggregates(PG_FUNCTION_ARGS)
 	/* A dimension error writes no result. */
 	column.nrows = NROWS - 1;
 	got_count = 7;
-	if (tess_int4_count(&column, NULL, &rows, &got_count,
-						&status) != TESS_ERROR_INVALID_ARGUMENT ||
+	if (tess_count(&column, NULL, &rows, &got_count,
+				   &status) != TESS_ERROR_INVALID_ARGUMENT ||
 		got_count != 7)
 		PG_RETURN_BOOL(false);
 

@@ -360,38 +360,13 @@ pub(super) fn arith_op(op: c_uint) -> Result<ArithOp> {
     })
 }
 
-/// `tess_int4_count`: the number of selected non-NULL values.
-///
-/// # Safety
-///
-/// As for [`inputs`]; `count` must be writable; `status` as for every
-/// entry point.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn tess_int4_count(
-    column: *const DatumColumn,
-    prepared: *const Mask,
-    rows: *const Mask,
-    count: *mut i64,
-    status: *mut Status,
-) -> Code {
-    // SAFETY: the caller's contract.
-    unsafe {
-        guard(status, || {
-            let out = count.as_mut().context("a null result")?;
-            let (column, rows) = inputs(column, prepared, rows)?;
-            let value = int32::count(&column, &rows)?;
-            *out = i64::try_from(value)?;
-            Ok(())
-        })
-    }
-}
-
 /// `tess_int4_sum`: the int8 sum of the selected non-NULL values, NULL
 /// without any.
 ///
 /// # Safety
 ///
-/// As for [`tess_int4_count`], with `isnull` and `sum` writable.
+/// As for [`inputs`]; `isnull` and `sum` must be writable; `status` as
+/// for every entry point.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn tess_int4_sum(
     column: *const DatumColumn,

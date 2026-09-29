@@ -2,7 +2,7 @@
 //! ([`tessera_spill::columns`]): a join's outer rows that wait for their
 //! partition, kept without the table's records. Each row goes to the
 //! current chunk of its hash's partition, as
-//! [`crate::table::append_partitioned_to`] appends records, in row order
+//! [`crate::table::append_partitioned_columns_to`] appends records, in row order
 //! as long as the chunk has room: a row whose chunk is full stays pending
 //! while the rows after it go on. A row's place is referred to as the
 //! table refers to a record, by the chunk's number above

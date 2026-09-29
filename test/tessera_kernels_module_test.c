@@ -859,8 +859,13 @@ tessera_test_kernels_module_table(PG_FUNCTION_ARGS)
 		pending_word != 0 || inserted_word != (UINT64CONST(0xf) << 16) ||
 		offsets[37] != offsets[17])
 		cycle_failed("grouping", &status);
-	if (ops->table_payload(&table, offsets[17], &state, &status) != TESS_OK)
-		cycle_failed("payload in place", &status);
+	{
+		uint64		word = 1;
+		TessRowMask one = {1, &word};
+
+		if (ops->table_payloads(&table, &offsets[17], &one, &state, &status) != TESS_OK)
+			cycle_failed("payload in place", &status);
+	}
 	memset(state, 0x5a, 8);
 	if (ops->table_record(&table, offsets[37], &record,
 						  &status) != TESS_OK ||

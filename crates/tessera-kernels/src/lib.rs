@@ -6,8 +6,9 @@
 //! Mutating a row mask requires exclusive access. Concurrent calls must use
 //! disjoint mutable masks and respect the chosen reader's sharing guarantees.
 //!
-//! [`int32::filter`] implements scalar comparisons, [`int32::count`],
-//! [`int32::sum`], [`int32::min`] and [`int32::max`] the aggregates and
+//! [`int32::filter`] implements scalar comparisons, [`count::count`] the
+//! non-NULL count of any type, [`int32::sum`], [`int32::min`] and
+//! [`int32::max`] the aggregates and
 //! [`int32::arith_scalar`] and its siblings the arithmetic with PostgreSQL's
 //! error codes, and [`int32::hash`] and [`int32::hash_next`] the key hashes
 //! of joins and grouping, all through [`tessera_core::ColumnReader`],

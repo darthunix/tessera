@@ -152,11 +152,6 @@ typedef struct TessKernelOps
 											uint32 *offsets,
 											TessRowMask *inserted,
 											TessStatus *status);
-	/* tess_table_payload */
-	TessStatusCode (*table_payload) (const TessTableRef *table,
-									 uint32 offset,
-									 uint8 **payload,
-									 TessStatus *status);
 	/* tess_table_scan */
 	TessStatusCode (*table_scan) (const TessTableRef *table,
 								  uint64 *cursor,
@@ -262,17 +257,6 @@ typedef struct TessKernelOps
 										 uint64 fingerprint, uint64 max_len,
 										 TessSpillHeader *header,
 										 TessStatus *status);
-	/* tess_table_append_partitioned */
-	TessStatusCode (*table_append_partitioned) (const TessTableRef *table,
-												const uint32 *partition_chunks,
-												int npartitions, uint32 shift,
-												Size payload_size,
-												const uint32 *hashes, int nkeys,
-												const TessTableKey *keys,
-												const uint8 *payload,
-												TessRowMask *pending,
-												uint32 *offsets,
-												TessStatus *status);
 	/* tess_table_split */
 	TessStatusCode (*table_split) (const TessTableRef *table, int nkeys,
 								   const TessTableKeyKind *kinds,
