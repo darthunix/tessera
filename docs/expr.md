@@ -158,8 +158,7 @@ applying one after another to the same batch; each sees the rows the
 previous ones kept. A predicate that does not accept any shape takes the
 column first, so `7 < a` is compiled through the operator's commutator
 from the catalog into `a > 7`; without a commutator whose function is
-implemented, the filter is not supported. What a filter cannot express,
-a boolean column, stays with `ExecQual` over the rows that survive.
+implemented, the filter is not supported.
 
 ## Conditions
 
@@ -186,7 +185,11 @@ an `OR` where the left one is not true, of an `AND` where the left one is
 not false, so `b = 0 OR 10 / b > 1` divides no row by zero, and `a = 3 AND
 10 / (a - 3) > 1` fails on the row where `a` is 3, as in the executor.
 The unknown mask is computed only where a `NOT`, a boolean test or an
-inner `AND` needs it. A boolean column (`WHERE flag`) waits for the type.
+inner `AND` needs it. A boolean column is a condition too (`WHERE
+flag`, `flag IS TRUE`): the compiler reads it as `flag = true` through the
+registered boolean equality, unknown where it is NULL, and `NOT flag` as
+`flag = false`, the same in three-valued logic without the unknown rows a
+`NOT` asks its argument for (12.9 ms against 8.2 over 2 M rows).
 
 ## Errors
 

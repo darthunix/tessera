@@ -1,5 +1,6 @@
 #include "postgres.h"
 
+#include "catalog/pg_operator_d.h"
 #include "catalog/pg_type_d.h"
 #include "utils/array.h"
 #include "executor/executor.h"
@@ -457,6 +458,33 @@ shape_fits(const TessFunction *function, int column_arg, int nargs,
 static bool analyze_cond(Node *node, Index relid);
 
 /*
+ * A boolean column as a condition: column = true through the registered
+ * boolean equality, unknown where the column is NULL, as the executor
+ * reads it, and NOT column = false, the same in three-valued logic without
+ * the unknown rows a NOT asks its argument for; any other node as it is.
+ */
+static Node *
+bool_condition(Node *node)
+{
+	Node	   *bare = strip_relabel(node);
+	bool		value = true;
+	OpExpr	   *clause;
+
+	if (IsA(bare, BoolExpr) && ((BoolExpr *) bare)->boolop == NOT_EXPR)
+	{
+		bare = strip_relabel(linitial(((BoolExpr *) bare)->args));
+		value = false;
+	}
+	if (!IsA(bare, Var) || exprType(bare) != BOOLOID)
+		return node;
+	clause = (OpExpr *) make_opclause(BooleanEqualOperator, BOOLOID, false, (Expr *) bare,
+									  (Expr *) makeBoolConst(value, false), InvalidOid,
+									  InvalidOid);
+	set_opfuncid(clause);
+	return (Node *) clause;
+}
+
+/*
  * Whether a conditional value is supported: a searched CASE whose
  * conditions are supported conditions and whose values are supported
  * values, a COALESCE of supported values, a NULLIF of two supported values
@@ -602,8 +630,8 @@ tess_expr_supports_value(Node *node, Index relid)
 }
 
 /*
- * Whether node is a supported condition: a filter, or AND, OR and NOT
- * over supported conditions, IS [NOT] NULL over a supported value (a bare
+ * Whether node is a supported condition: a filter, a boolean column, or
+ * AND, OR and NOT over supported conditions, IS [NOT] NULL over a supported value (a bare
  * column of any type among them), IS [NOT] TRUE, FALSE or UNKNOWN over a
  * supported condition, and an ANY or ALL over a short constant array.
  */
@@ -618,6 +646,7 @@ analyze_cond(Node *node, Index relid)
 	node = expand(node);
 	if (node == NULL)
 		return false;
+	node = bool_condition(node);
 	if (IsA(node, BoolExpr))
 	{
 		foreach_ptr(Node, arg, ((BoolExpr *) node)->args)
@@ -859,7 +888,7 @@ compile_cond(Node *node, PlanState *parent, TessExprResolveVar resolve,
 	int			column_operand;
 
 	check_stack_depth();
-	node = expand(node);
+	node = bool_condition(expand(node));
 	if (IsA(node, BoolExpr))
 	{
 		BoolExpr   *bool_expr = (BoolExpr *) node;

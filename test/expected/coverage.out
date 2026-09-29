@@ -94,18 +94,18 @@ ORDER BY o;
  row   | i4 IN (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33)
  row   | abs(i4 - 500) < 10
  row   | greatest(i4, i2) > 10
- row   | i2 = 5
- row   | i2 + 1 > 5
- row   | b
- row   | NOT b
- row   | b IS TRUE
- row   | b = true
+ batch | i2 = 5
+ batch | i2 + 1 > 5
+ batch | b
+ batch | NOT b
+ batch | b IS TRUE
+ batch | b = true
  batch | nul IS NULL
  row   | nul IS NOT DISTINCT FROM 3
  batch | coalesce(nul, 0) > 5
  batch | nullif(nul, 3) = 4
  batch | CASE WHEN i4 > 10 THEN 1 ELSE 0 END = 1
- row   | (i4 > 10 OR i2 = 5) AND NOT b
+ batch | (i4 > 10 OR i2 = 5) AND NOT b
  row   | f8 > 100.5
  row   | f8 * 2 < 300
  row   | f4 > 10

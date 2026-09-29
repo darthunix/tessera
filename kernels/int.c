@@ -14,11 +14,17 @@
  *
  * A date is an int32 and a timestamp, with or without time zone, an int64,
  * whose integer order is the type's, infinities included (the extremes of
- * the integer): their comparisons are the int4 and int8 ones.
+ * the integer): their comparisons are the int4 and int8 ones. A smallint
+ * is its value sign-extended in the word and a boolean 0 or 1, which the
+ * int4 kernels read as int32: their comparisons are the int4 ones, and a
+ * smallint's arithmetic the int4 one, whose results a smallint result
+ * checks against its range, 22003 "smallint out of range" past it (no
+ * operation of two smallints overflows an int32 first).
  */
 #include "postgres.h"
 
 #include "fmgr.h"
+#include "port/pg_bitutils.h"
 #include "utils/fmgroids.h"
 
 #include "tessera/bridge.h"
@@ -46,6 +52,10 @@ static TessStatusCode arith8_evaluate(TessFunctionCall *call);
 static TessStatusCode negate8_evaluate(TessFunctionCall *call);
 static TessStatusCode cast_evaluate(TessFunctionCall *call);
 static TessStatusCode narrow_evaluate(TessFunctionCall *call);
+static TessStatusCode arith2_evaluate(TessFunctionCall *call);
+static TessStatusCode negate2_evaluate(TessFunctionCall *call);
+static TessStatusCode widen2_evaluate(TessFunctionCall *call);
+static TessStatusCode narrow2_evaluate(TessFunctionCall *call);
 
 /* The aggregate an AGGREGATE description computes. */
 typedef enum Aggregate
@@ -189,6 +199,86 @@ static const Function functions[] = {
 	VALUE(F_INT4_INT8, 0, TESS_RESULT_INT32, 0, narrow_evaluate),
 	AGGREGATE(F_MIN_INT8, AGG_MIN_INT8),
 	AGGREGATE(F_MAX_INT8, AGG_MAX_INT8),
+	/* boolean as int4: 0 and 1 */
+	COMPARE(F_BOOLEQ, TESS_CMP_EQ, compare_evaluate),
+	COMPARE(F_BOOLNE, TESS_CMP_NE, compare_evaluate),
+	COMPARE(F_BOOLLT, TESS_CMP_LT, compare_evaluate),
+	COMPARE(F_BOOLLE, TESS_CMP_LE, compare_evaluate),
+	COMPARE(F_BOOLGT, TESS_CMP_GT, compare_evaluate),
+	COMPARE(F_BOOLGE, TESS_CMP_GE, compare_evaluate),
+	/* smallint as int4, against smallint and integer */
+	COMPARE(F_INT2EQ, TESS_CMP_EQ, compare_evaluate),
+	COMPARE(F_INT2NE, TESS_CMP_NE, compare_evaluate),
+	COMPARE(F_INT2LT, TESS_CMP_LT, compare_evaluate),
+	COMPARE(F_INT2LE, TESS_CMP_LE, compare_evaluate),
+	COMPARE(F_INT2GT, TESS_CMP_GT, compare_evaluate),
+	COMPARE(F_INT2GE, TESS_CMP_GE, compare_evaluate),
+	COMPARE(F_INT24EQ, TESS_CMP_EQ, compare_evaluate),
+	COMPARE(F_INT24NE, TESS_CMP_NE, compare_evaluate),
+	COMPARE(F_INT24LT, TESS_CMP_LT, compare_evaluate),
+	COMPARE(F_INT24LE, TESS_CMP_LE, compare_evaluate),
+	COMPARE(F_INT24GT, TESS_CMP_GT, compare_evaluate),
+	COMPARE(F_INT24GE, TESS_CMP_GE, compare_evaluate),
+	COMPARE(F_INT42EQ, TESS_CMP_EQ, compare_evaluate),
+	COMPARE(F_INT42NE, TESS_CMP_NE, compare_evaluate),
+	COMPARE(F_INT42LT, TESS_CMP_LT, compare_evaluate),
+	COMPARE(F_INT42LE, TESS_CMP_LE, compare_evaluate),
+	COMPARE(F_INT42GT, TESS_CMP_GT, compare_evaluate),
+	COMPARE(F_INT42GE, TESS_CMP_GE, compare_evaluate),
+	/* smallint arithmetic: the int4 one within the smallint range */
+	VALUE(F_INT2PL, TESS_ARITH_ADD, TESS_RESULT_INT32, TESS_FUNCTION_ANY_SHAPE,
+		  arith2_evaluate),
+	VALUE(F_INT2MI, TESS_ARITH_SUB, TESS_RESULT_INT32, TESS_FUNCTION_ANY_SHAPE,
+		  arith2_evaluate),
+	VALUE(F_INT2MUL, TESS_ARITH_MUL, TESS_RESULT_INT32, TESS_FUNCTION_ANY_SHAPE,
+		  arith2_evaluate),
+	VALUE(F_INT2DIV, TESS_ARITH_DIV, TESS_RESULT_INT32, TESS_FUNCTION_ANY_SHAPE,
+		  arith2_evaluate),
+	VALUE(F_INT2MOD, TESS_ARITH_MOD, TESS_RESULT_INT32, TESS_FUNCTION_ANY_SHAPE,
+		  arith2_evaluate),
+	VALUE(F_INT2UM, TESS_ARITH_SUB, TESS_RESULT_INT32, 0, negate2_evaluate),
+	/* smallint with integer: the int4 arithmetic, an integer result */
+	VALUE(F_INT24PL, TESS_ARITH_ADD, TESS_RESULT_INT32, TESS_FUNCTION_ANY_SHAPE,
+		  arith_evaluate),
+	VALUE(F_INT24MI, TESS_ARITH_SUB, TESS_RESULT_INT32, TESS_FUNCTION_ANY_SHAPE,
+		  arith_evaluate),
+	VALUE(F_INT24MUL, TESS_ARITH_MUL, TESS_RESULT_INT32, TESS_FUNCTION_ANY_SHAPE,
+		  arith_evaluate),
+	VALUE(F_INT24DIV, TESS_ARITH_DIV, TESS_RESULT_INT32, TESS_FUNCTION_ANY_SHAPE,
+		  arith_evaluate),
+	VALUE(F_INT42PL, TESS_ARITH_ADD, TESS_RESULT_INT32, TESS_FUNCTION_ANY_SHAPE,
+		  arith_evaluate),
+	VALUE(F_INT42MI, TESS_ARITH_SUB, TESS_RESULT_INT32, TESS_FUNCTION_ANY_SHAPE,
+		  arith_evaluate),
+	VALUE(F_INT42MUL, TESS_ARITH_MUL, TESS_RESULT_INT32, TESS_FUNCTION_ANY_SHAPE,
+		  arith_evaluate),
+	VALUE(F_INT42DIV, TESS_ARITH_DIV, TESS_RESULT_INT32, TESS_FUNCTION_ANY_SHAPE,
+		  arith_evaluate),
+	/* smallint with bigint: the int8 function over the smallint widened */
+	VALUE(F_INT8_INT2, 0, TESS_RESULT_DATUM, 0, cast_evaluate),
+	EQUIVALENT(F_INT28EQ, F_INT8EQ, F_INT8_INT2, InvalidOid),
+	EQUIVALENT(F_INT28NE, F_INT8NE, F_INT8_INT2, InvalidOid),
+	EQUIVALENT(F_INT28LT, F_INT8LT, F_INT8_INT2, InvalidOid),
+	EQUIVALENT(F_INT28LE, F_INT8LE, F_INT8_INT2, InvalidOid),
+	EQUIVALENT(F_INT28GT, F_INT8GT, F_INT8_INT2, InvalidOid),
+	EQUIVALENT(F_INT28GE, F_INT8GE, F_INT8_INT2, InvalidOid),
+	EQUIVALENT(F_INT82EQ, F_INT8EQ, InvalidOid, F_INT8_INT2),
+	EQUIVALENT(F_INT82NE, F_INT8NE, InvalidOid, F_INT8_INT2),
+	EQUIVALENT(F_INT82LT, F_INT8LT, InvalidOid, F_INT8_INT2),
+	EQUIVALENT(F_INT82LE, F_INT8LE, InvalidOid, F_INT8_INT2),
+	EQUIVALENT(F_INT82GT, F_INT8GT, InvalidOid, F_INT8_INT2),
+	EQUIVALENT(F_INT82GE, F_INT8GE, InvalidOid, F_INT8_INT2),
+	EQUIVALENT(F_INT28PL, F_INT8PL, F_INT8_INT2, InvalidOid),
+	EQUIVALENT(F_INT28MI, F_INT8MI, F_INT8_INT2, InvalidOid),
+	EQUIVALENT(F_INT28MUL, F_INT8MUL, F_INT8_INT2, InvalidOid),
+	EQUIVALENT(F_INT28DIV, F_INT8DIV, F_INT8_INT2, InvalidOid),
+	EQUIVALENT(F_INT82PL, F_INT8PL, InvalidOid, F_INT8_INT2),
+	EQUIVALENT(F_INT82MI, F_INT8MI, InvalidOid, F_INT8_INT2),
+	EQUIVALENT(F_INT82MUL, F_INT8MUL, InvalidOid, F_INT8_INT2),
+	EQUIVALENT(F_INT82DIV, F_INT8DIV, InvalidOid, F_INT8_INT2),
+	/* int4(int2) the same value, int2(int4) within the smallint range */
+	VALUE(F_INT4_INT2, 0, TESS_RESULT_INT32, 0, widen2_evaluate),
+	VALUE(F_INT2_INT4, 0, TESS_RESULT_INT32, 0, narrow2_evaluate),
 };
 
 /* The operation of the description a call names. */
@@ -420,6 +510,88 @@ narrow_evaluate(TessFunctionCall *call)
 	return tess_int8_to_int4(call->args[0].column, call->args[0].prepared,
 							 call->rows, (int32 *) call->values,
 							 call->non_nulls, call->status);
+}
+
+/*
+ * A smallint result: the int4 kernel's values of the rows it computed,
+ * 22003 "smallint out of range" for one past the smallint range.
+ */
+static TessStatusCode
+smallint_range(TessFunctionCall *call, TessStatusCode code)
+{
+	const int32 *values = (const int32 *) call->values;
+	int			nwords;
+	bool		outside = false;
+
+	if (code != TESS_OK)
+		return code;
+	nwords = tess_row_mask_word_count(call->non_nulls->nrows);
+	/* A whole word without a branch a row; a partial one row by row. */
+	for (int word = 0; word < nwords && !outside; word++)
+	{
+		uint64		bits = call->non_nulls->bits[word];
+		const int32 *value = values + (Size) word * 64;
+
+		if (bits == UINT64_MAX)
+		{
+			for (int bit = 0; bit < 64; bit++)
+				outside |= (value[bit] < PG_INT16_MIN) | (value[bit] > PG_INT16_MAX);
+		}
+		else
+		{
+			for (; bits != 0; bits &= bits - 1)
+			{
+				int			bit = pg_rightmost_one_pos64(bits);
+
+				outside |= (value[bit] < PG_INT16_MIN) | (value[bit] > PG_INT16_MAX);
+			}
+		}
+	}
+	if (outside)
+	{
+		if (call->status != NULL && call->status->struct_size >= TESS_STATUS_MIN_SIZE)
+		{
+			call->status->code = TESS_ERROR_INTEGER_OUT_OF_RANGE;
+			strlcpy(call->status->sqlstate, "22003", sizeof(call->status->sqlstate));
+			strlcpy(call->status->message, "smallint out of range",
+					sizeof(call->status->message));
+		}
+		return TESS_ERROR_INTEGER_OUT_OF_RANGE;
+	}
+	return TESS_OK;
+}
+
+static TessStatusCode
+arith2_evaluate(TessFunctionCall *call)
+{
+	return smallint_range(call, arith_evaluate(call));
+}
+
+static TessStatusCode
+negate2_evaluate(TessFunctionCall *call)
+{
+	return smallint_range(call, negate_evaluate(call));
+}
+
+/* The column's int32 values as they are: x + 0. */
+static TessStatusCode
+widen2_evaluate(TessFunctionCall *call)
+{
+	if (call == NULL || call->struct_size < TESS_FUNCTION_CALL_MIN_SIZE ||
+		call->nargs != 1 || call->args == NULL ||
+		call->args[0].struct_size < TESS_FUNCTION_ARG_MIN_SIZE)
+		return invalid(call, "the cast between smallint and integer takes one argument");
+	if (call->args[0].column == NULL)
+		return invalid(call, "the cast between smallint and integer takes a column");
+	return tess_int4_arith_scalar(TESS_ARITH_ADD, call->args[0].column, 0,
+								  call->args[0].prepared, call->rows,
+								  (int32 *) call->values, call->non_nulls, call->status);
+}
+
+static TessStatusCode
+narrow2_evaluate(TessFunctionCall *call)
+{
+	return smallint_range(call, widen2_evaluate(call));
 }
 
 /*

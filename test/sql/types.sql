@@ -70,6 +70,30 @@ UNION ALL SELECT 'infinity', 'infinity', '-infinity' UNION ALL SELECT '-infinity
 SELECT types_same($$SELECT d, ts, tz FROM types_inf WHERE d > '2000-01-10' AND ts > '2000-01-01 05:00'$$);
 SELECT types_same($$SELECT d FROM types_inf WHERE d < '1999-12-15' OR tz > '2000-01-01 00:30+00'$$);
 DROP TABLE types_inf;
+-- A smallint is its value sign-extended in the word and a boolean 0 or 1:
+-- their comparisons run in batches as int4's; a smallint's arithmetic as
+-- int4's, a smallint result checked against its range (22003), with an
+-- integer as int4's, with a bigint as int8's over the smallint widened;
+-- a boolean column is a condition, true where it is true, unknown where
+-- NULL.
+EXPLAIN (COSTS OFF) SELECT count(*) FROM types_f WHERE s > 5 AND b AND s * 2 + 1 < 40;
+SELECT types_same($$SELECT count(*), sum(v) FROM types_f WHERE s > 5$$);
+SELECT types_same($$SELECT count(*), sum(v) FROM types_f WHERE s = -3::int2 OR s <> 7 AND s < 20::int8$$);
+SELECT types_same($$SELECT count(*), sum(v) FROM types_f WHERE s * 2 + 1 < 40 AND s - v::int2 > -1000 AND -s < 10$$);
+SELECT types_same($$SELECT count(*), sum(v) FROM types_f WHERE s / 3 = 2 OR s % 7 = 1 OR s + 100000 > 100010 OR s * 3::int8 < -60$$);
+SELECT types_same($$SELECT count(*), sum(v) FROM types_f WHERE s::int4 > 10 OR (v % 100)::int2 = 42$$);
+SELECT types_same($$SELECT s * 1000, s + 32000, s::int8 - 5, s * 40 FROM types_f WHERE v < 50$$);
+\set VERBOSITY terse
+SELECT count(*) FROM types_f WHERE s * 2000::int2 > 0;
+SELECT count(*) FROM types_f WHERE (v * 100)::int2 > 0;
+SELECT count(*) FROM types_f WHERE s / (s - s) > 0;
+\set VERBOSITY default
+SELECT types_same($$SELECT count(*), sum(v) FROM types_f WHERE b$$);
+SELECT types_same($$SELECT count(*), sum(v) FROM types_f WHERE NOT b$$);
+SELECT types_same($$SELECT count(*), sum(v) FROM types_f WHERE b IS NOT TRUE AND b IS NOT UNKNOWN$$);
+SELECT types_same($$SELECT count(*), sum(v) FROM types_f WHERE b = false OR b < true AND s > 0$$);
+SELECT types_same($$SELECT count(*), sum(v) FROM types_f WHERE (b OR s > 20) AND NOT (b AND s < -20)$$);
+SELECT types_same($$SELECT CASE WHEN b THEN v ELSE -v END, count(*) FROM types_f GROUP BY 1$$);
 -- A date against a timestamp compares other than bit for bit: the core's.
 EXPLAIN (COSTS OFF) SELECT count(*) FROM types_f JOIN types_d ON types_f.d = types_d.ts;
 SELECT types_same($$SELECT count(*) FROM types_f JOIN types_d ON types_f.d = types_d.ts$$);
