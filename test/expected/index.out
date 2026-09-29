@@ -919,12 +919,12 @@ SELECT index_same($$SELECT count(*), sum(w) FROM index_r WHERE id < 3000$$);
 -- A clause by rows past the index's sees the rows the index gives, as it
 -- sees those the full scan's first clause leaves: it keeps the full scan
 -- at a quarter of the rows.
-EXPLAIN (COSTS OFF) SELECT count(*), sum(w) FROM index_r WHERE id < 15000 AND w::numeric > -1;
+EXPLAIN (COSTS OFF) SELECT count(*), sum(w) FROM index_r WHERE id < 15000 AND (w # 0) > -1;
                     QUERY PLAN                     
 ---------------------------------------------------
  Custom Scan (TessAgg)
    ->  Custom Scan (TessFilter) on index_r
-         Filter: ((w)::numeric > '-1'::numeric)
+         Filter: ((w # 0) > '-1'::integer)
          Batch Filter: (id < 15000)
          ->  Custom Scan (TessHeapScan) on index_r
 (5 rows)

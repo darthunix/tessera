@@ -289,7 +289,7 @@ SELECT index_same($$SELECT count(*), sum(w) FROM index_r WHERE id < 3000$$);
 -- A clause by rows past the index's sees the rows the index gives, as it
 -- sees those the full scan's first clause leaves: it keeps the full scan
 -- at a quarter of the rows.
-EXPLAIN (COSTS OFF) SELECT count(*), sum(w) FROM index_r WHERE id < 15000 AND w::numeric > -1;
+EXPLAIN (COSTS OFF) SELECT count(*), sum(w) FROM index_r WHERE id < 15000 AND (w # 0) > -1;
 -- With workers, past that share the node's partial full scan in place of
 -- the core's parallel index scans (the core dropped its serial and its
 -- partial sequential scans for them). The workers start at no cost in the

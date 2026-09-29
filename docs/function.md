@@ -143,7 +143,21 @@ timestamp: the interval's months through the calendar, clamped to the
 month's last day, then its days through the Julian day, then its
 microseconds, each step checked as the core checks it ("timestamp out of
 range", "interval out of range" negating one, "date out of range for
-timestamp"), an infinite interval making its infinity;
+timestamp"), an infinite interval making its infinity; `extract(text,
+date)` and `extract(text, timestamp)`, numeric values: the integer fields
+of a finite value (day, month, quarter, week, year, decade, century,
+millennium, isoyear, dow, isodow, doy, and a date's julian and epoch, a
+timestamp's hour, minute and microseconds) by calendar arithmetic, a
+timestamp's seconds and milliseconds with their fraction, anything else
+(an infinite value, a unit that is a column or one it does not know, a
+timestamp's julian and epoch) by the core's function a row, its NULL
+for an oscillating field of infinity kept; the numeric comparisons
+`numeric_eq` … `numeric_ge` in every shape by the core's `numeric_cmp`,
+a call keeping the result for pairs where one side is a cached numeric;
+and the casts `numeric(int2)`, `numeric(int4)`, `numeric(int8)`. A
+numeric of an integer from -1024 to 4095 comes from a block of the
+process made once in `TopMemoryContext`, the same pointer every time, so
+years and months neither allocate nor compare twice;
 and `count(*)`,
 `count(any)`, `sum(int4)`, `min(int4)`, `max(int4)`, `min(int8)` and
 `max(int8)` as aggregates, by the aggregate's own OID. An int4 column

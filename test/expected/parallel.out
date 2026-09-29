@@ -1228,7 +1228,7 @@ EXPLAIN (COSTS OFF) SELECT count(*) FROM parallel_wide WHERE k > 0 AND c1 > 0;
          ->  Custom Scan (TessHeapScan) on parallel_wide
 (4 rows)
 
-EXPLAIN (COSTS OFF) SELECT count(*) FROM parallel_wide WHERE k > 0 AND c1::numeric > 0;
+EXPLAIN (COSTS OFF) SELECT count(*) FROM parallel_wide WHERE k > 0 AND (c1 # 0) > 0;
                                      QUERY PLAN                                     
 ------------------------------------------------------------------------------------
  Finalize Aggregate
@@ -1238,7 +1238,7 @@ EXPLAIN (COSTS OFF) SELECT count(*) FROM parallel_wide WHERE k > 0 AND c1::numer
                ->  Parallel Custom Scan (TessAgg)
                      Partial Mode: Partial
                      ->  Parallel Custom Scan (TessFilter) on parallel_wide
-                           Filter: ((c1)::numeric > '0'::numeric)
+                           Filter: ((c1 # 0) > 0)
                            Batch Filter: (k > 0)
                            ->  Parallel Custom Scan (TessHeapScan) on parallel_wide
 (10 rows)

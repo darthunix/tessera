@@ -230,7 +230,10 @@ DROP TABLE types_t;
 -- Dates and timestamps in batches: a date plus or minus days, the days
 -- between dates, the casts between date and timestamp, a timestamp or a
 -- date plus or minus an interval (months clamped to the month's last
--- day, days, microseconds; infinite intervals), date_trunc of a
+-- day, days, microseconds; infinite intervals), extract of every field
+-- (a numeric, NULL or an infinity for an infinite value), numeric
+-- comparisons (NaN and infinities among the values) and casts of integers
+-- to numeric, date_trunc of a
 -- timestamp by every unit it knows (a week to its Monday, a decade,
 -- century and millennium as the core rounds years, 1 BC being year 0),
 -- a unit that is a column or one it does not know through the core's
@@ -250,7 +253,9 @@ SELECT i AS id,
               'hour', 'minute', 'second', 'milliseconds', 'us'])[i % 13 + 1] AS unit,
        i % 400 - 200 AS n,
        CASE WHEN i % 43 = 0 THEN NULL
-            ELSE make_interval(months => i % 25 - 12, days => i % 61 - 30, secs => i % 1000 * 37.5) END AS iv
+            ELSE make_interval(months => i % 25 - 12, days => i % 61 - 30, secs => i % 1000 * 37.5) END AS iv,
+       CASE WHEN i % 47 = 0 THEN NULL WHEN i % 53 = 0 THEN 'NaN' WHEN i % 59 = 0 THEN 'Infinity'
+            WHEN i % 61 = 0 THEN '-Infinity' ELSE (i % 1000 - 500) / 7.0 END AS num
 FROM generate_series(1, 4000) AS i;
 INSERT INTO types_dt (id, d, d2, ts, unit, n, iv) VALUES
     (5001, 'infinity', '-infinity', 'infinity', 'year', 1, '-infinity'),
@@ -278,6 +283,23 @@ SELECT types_same($$SELECT ts + interval '1 year 2 months 3 days 04:05:06.789', 
 SELECT types_same($$SELECT ts + iv, d - iv, ts - iv, count(*) FROM types_dt WHERE id < 5000 GROUP BY 1, 2, 3$$);
 SELECT types_same($$SELECT ts + interval 'infinity', d - interval 'infinity', count(*) FROM types_dt WHERE id NOT IN (5001, 5002) GROUP BY 1, 2$$);
 SELECT types_same($$SELECT count(*) FROM types_dt WHERE id <> 5007 AND (ts + interval '30 days' > timestamp '2000-01-01' OR d - iv < timestamp '1990-01-01')$$);
+EXPLAIN (COSTS OFF) SELECT extract(year FROM d), count(*) FROM types_dt WHERE extract(month FROM ts) > 6 AND num > 10.5 AND n::numeric <> num GROUP BY 1;
+SELECT types_same($$SELECT extract(year FROM d), extract(month FROM d), extract(day FROM d), extract(quarter FROM d), count(*) FROM types_dt GROUP BY 1, 2, 3, 4$$);
+SELECT types_same($$SELECT extract(week FROM d), extract(isoyear FROM d), extract(dow FROM d), extract(isodow FROM d), count(*) FROM types_dt GROUP BY 1, 2, 3, 4$$);
+SELECT types_same($$SELECT extract(doy FROM d), extract(decade FROM d), extract(century FROM d), extract(millennium FROM d), count(*) FROM types_dt GROUP BY 1, 2, 3, 4$$);
+SELECT types_same($$SELECT extract(julian FROM d), extract(epoch FROM d), count(*) FROM types_dt GROUP BY 1, 2$$);
+SELECT types_same($$SELECT extract(year FROM ts), extract(month FROM ts), extract(day FROM ts), extract(hour FROM ts), count(*) FROM types_dt GROUP BY 1, 2, 3, 4$$);
+SELECT types_same($$SELECT extract(minute FROM ts), extract(second FROM ts), extract(milliseconds FROM ts), extract(microseconds FROM ts), count(*) FROM types_dt GROUP BY 1, 2, 3, 4$$);
+SELECT types_same($$SELECT extract(week FROM ts), extract(isoyear FROM ts), extract(dow FROM ts), extract(isodow FROM ts), extract(doy FROM ts), count(*) FROM types_dt GROUP BY 1, 2, 3, 4, 5$$);
+SELECT types_same($$SELECT extract(decade FROM ts), extract(century FROM ts), extract(millennium FROM ts), extract(quarter FROM ts), count(*) FROM types_dt GROUP BY 1, 2, 3, 4$$);
+SELECT types_same($$SELECT extract(julian FROM ts), extract(epoch FROM ts), count(*) FROM types_dt GROUP BY 1, 2$$);
+SELECT types_same($$SELECT "extract"(unit, ts), count(*) FROM types_dt GROUP BY 1$$);
+SELECT types_same($$SELECT count(*), sum(id) FROM types_dt WHERE extract(year FROM d) = 2021 OR extract(month FROM ts) > 10 OR extract(dow FROM d) IN (0, 6)$$);
+SELECT types_same($$SELECT count(*), sum(id) FROM types_dt WHERE num > 10.5 OR num = 'NaN' OR num <= -2$$);
+SELECT types_same($$SELECT count(*), sum(id) FROM types_dt WHERE num <> 3 AND num >= '-Infinity' AND num < 'Infinity' AND 20 > num$$);
+SELECT types_same($$SELECT count(*), sum(id) FROM types_dt WHERE num > n::numeric OR n::int2::numeric = 7 OR (id::int8 * 1000000)::numeric > 3.5e9$$);
+SELECT types_same($$SELECT n::numeric, (id * 100000)::numeric, count(*) FROM types_dt GROUP BY 1, 2$$);
+SELECT types_same($$SELECT count(*), sum(id) FROM types_dt WHERE (id % 5)::numeric < (id % 3 * 16)::numeric OR (id % 5)::numeric = (id % 2 * 16 + 4)::numeric$$);
 \set VERBOSITY terse
 SELECT count(*) FROM types_dt WHERE d + 2147483000 > d;
 SELECT count(*) FROM types_dt WHERE d - (-2147483648) > d;
@@ -291,6 +313,9 @@ SELECT count(*) FROM types_dt WHERE ts + interval '300000 years' > ts;
 SELECT count(*) FROM types_dt WHERE ts - make_interval(months => -2147483648) > ts;
 SELECT count(*) FROM types_dt WHERE id = 5001 AND ts + iv > ts;
 SELECT count(*) FROM types_dt WHERE id = 5007 AND (d + 1) + interval '1 day' > ts;
+SELECT count(*) FROM types_dt WHERE extract(hour FROM d) > 1;
+SELECT count(*) FROM types_dt WHERE extract(timezone FROM ts) > 1;
+SELECT count(*) FROM types_dt WHERE extract(fortnight FROM d) > 1;
 SET tessera.enable = off;
 SELECT count(*) FROM types_dt WHERE d + 2147483000 > d;
 SELECT count(*) FROM types_dt WHERE d - (-2147483648) > d;
@@ -304,6 +329,9 @@ SELECT count(*) FROM types_dt WHERE ts + interval '300000 years' > ts;
 SELECT count(*) FROM types_dt WHERE ts - make_interval(months => -2147483648) > ts;
 SELECT count(*) FROM types_dt WHERE id = 5001 AND ts + iv > ts;
 SELECT count(*) FROM types_dt WHERE id = 5007 AND (d + 1) + interval '1 day' > ts;
+SELECT count(*) FROM types_dt WHERE extract(hour FROM d) > 1;
+SELECT count(*) FROM types_dt WHERE extract(timezone FROM ts) > 1;
+SELECT count(*) FROM types_dt WHERE extract(fortnight FROM d) > 1;
 RESET tessera.enable;
 \set VERBOSITY default
 DROP TABLE types_dt;

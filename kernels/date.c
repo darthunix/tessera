@@ -15,6 +15,14 @@
  * microseconds, each step checked, as timestamp_pl_interval does; a date
  * becomes its timestamp first, as date_pl_interval makes it.
  *
+ * extract of a date or a timestamp, a numeric: the integer fields of a
+ * finite value by calendar arithmetic (a numeric of a small integer from
+ * the cache of numeric.c), seconds and milliseconds of a timestamp with
+ * their fraction; an infinite value, the Julian day and epoch of a
+ * timestamp, a unit it does not know or a unit that is a column by the
+ * core's function a row, its NULL for an oscillating field of infinity
+ * kept.
+ *
  * date_trunc parses its unit once a call, as the core does a row, and
  * truncates by calendar arithmetic: the time units by the microseconds of
  * the unit, a week to its Monday, the larger units through the year,
@@ -33,6 +41,8 @@
 #include "utils/date.h"
 #include "utils/datetime.h"
 #include "utils/fmgroids.h"
+#include "utils/memutils.h"
+#include "utils/numeric.h"
 #include "utils/timestamp.h"
 #include "varatt.h"
 
@@ -51,7 +61,9 @@ typedef enum DateOp
 	TIMESTAMP_PLUS_INTERVAL,
 	TIMESTAMP_MINUS_INTERVAL,
 	DATE_PLUS_INTERVAL,
-	DATE_MINUS_INTERVAL
+	DATE_MINUS_INTERVAL,
+	DATE_EXTRACT,
+	TIMESTAMP_EXTRACT
 } DateOp;
 
 typedef struct DateFunction
@@ -63,6 +75,7 @@ typedef struct DateFunction
 static TessStatusCode date_evaluate(TessFunctionCall *call);
 static TessStatusCode trunc_evaluate(TessFunctionCall *call);
 static TessStatusCode interval_evaluate(TessFunctionCall *call);
+static TessStatusCode extract_evaluate(TessFunctionCall *call);
 
 #define DATE_FUNCTION(oid, code, format, evaluator) \
 	{{TESS_ABI_INITIALIZER(TESS_FUNCTION_ABI_VERSION, TessFunction), \
@@ -88,6 +101,9 @@ static const DateFunction date_functions[] = {
 				  interval_evaluate),
 	DATE_FUNCTION(F_DATE_MI_INTERVAL, DATE_MINUS_INTERVAL, TESS_RESULT_DATUM,
 				  interval_evaluate),
+	DATE_FUNCTION(F_EXTRACT_TEXT_DATE, DATE_EXTRACT, TESS_RESULT_DATUM, extract_evaluate),
+	DATE_FUNCTION(F_EXTRACT_TEXT_TIMESTAMP, TIMESTAMP_EXTRACT, TESS_RESULT_DATUM,
+				  extract_evaluate),
 };
 
 static DateOp
@@ -611,6 +627,249 @@ interval_evaluate(TessFunctionCall *call)
 		}
 		call->non_nulls->bits[word] = present;
 	}
+	return TESS_OK;
+}
+
+/* A core function of two arguments on one row, its NULL result allowed. */
+static Datum
+call_core(PGFunction function, Datum first, Datum second, bool *isnull)
+{
+	LOCAL_FCINFO(fcinfo, 2);
+	Datum		result;
+
+	InitFunctionCallInfoData(*fcinfo, NULL, 2, InvalidOid, NULL, NULL);
+	fcinfo->args[0].value = first;
+	fcinfo->args[0].isnull = false;
+	fcinfo->args[1].value = second;
+	fcinfo->args[1].isnull = false;
+	result = (*function) (fcinfo);
+	*isnull = fcinfo->isnull;
+	return result;
+}
+
+/* Whether extract computes the field of a finite value itself. */
+static bool
+extract_native(bool timestamp, int type, int val)
+{
+	if (type == RESERV)
+		return !timestamp && val == DTK_EPOCH;
+	if (type != UNITS)
+		return false;
+	switch (val)
+	{
+		case DTK_DAY:
+		case DTK_MONTH:
+		case DTK_QUARTER:
+		case DTK_WEEK:
+		case DTK_YEAR:
+		case DTK_DECADE:
+		case DTK_CENTURY:
+		case DTK_MILLENNIUM:
+		case DTK_ISOYEAR:
+		case DTK_DOW:
+		case DTK_ISODOW:
+		case DTK_DOY:
+			return true;
+		case DTK_JULIAN:
+			return !timestamp;
+		case DTK_MICROSEC:
+		case DTK_MILLISEC:
+		case DTK_SECOND:
+		case DTK_MINUTE:
+		case DTK_HOUR:
+			return timestamp;
+		default:
+			return false;
+	}
+}
+
+/* The last day whose calendar fields were computed, for the next row. */
+typedef struct DayFields
+{
+	int64		day;
+	bool		valid;
+	int			year;
+	int			month;
+	int			mday;
+} DayFields;
+
+/*
+ * The field of a finite day (days since 2000-01-01) and the microseconds
+ * into it, as extract_date and timestamp_part_common compute it.
+ */
+static Numeric
+extract_field(int type, int val, int64 day, int64 time, DayFields *fields,
+			  MemoryContext context)
+{
+	int			julian = (int) (day + POSTGRES_EPOCH_JDATE);
+	int64		result;
+
+	if (type == RESERV)
+		return tess_numeric_from_int64((day + POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE) *
+									   SECS_PER_DAY, context);
+	switch (val)
+	{
+		case DTK_MICROSEC:
+			return tess_numeric_from_int64(time % USECS_PER_MINUTE, context);
+		case DTK_MILLISEC:
+		case DTK_SECOND:
+			{
+				MemoryContext old = MemoryContextSwitchTo(context);
+				Numeric		fraction;
+
+				fraction = int64_div_fast_to_numeric(time % USECS_PER_MINUTE,
+													 val == DTK_SECOND ? 6 : 3);
+				MemoryContextSwitchTo(old);
+				return fraction;
+			}
+		case DTK_MINUTE:
+			return tess_numeric_from_int64((time / USECS_PER_MINUTE) % MINS_PER_HOUR, context);
+		case DTK_HOUR:
+			return tess_numeric_from_int64(time / USECS_PER_HOUR, context);
+		case DTK_JULIAN:
+			return tess_numeric_from_int64(julian, context);
+		case DTK_DOW:
+		case DTK_ISODOW:
+			result = j2day(julian);
+			if (val == DTK_ISODOW && result == 0)
+				result = 7;
+			return tess_numeric_from_int64(result, context);
+		default:
+			break;
+	}
+	if (!fields->valid || fields->day != day)
+	{
+		j2date(julian, &fields->year, &fields->month, &fields->mday);
+		fields->day = day;
+		fields->valid = true;
+	}
+	switch (val)
+	{
+		case DTK_DAY:
+			result = fields->mday;
+			break;
+		case DTK_MONTH:
+			result = fields->month;
+			break;
+		case DTK_QUARTER:
+			result = (fields->month - 1) / 3 + 1;
+			break;
+		case DTK_WEEK:
+			result = date2isoweek(fields->year, fields->month, fields->mday);
+			break;
+		case DTK_YEAR:
+			/* There is no year 0, just 1 BC and 1 AD. */
+			result = fields->year > 0 ? fields->year : fields->year - 1;
+			break;
+		case DTK_DECADE:
+			result = fields->year >= 0 ? fields->year / 10 :
+				-((8 - (fields->year - 1)) / 10);
+			break;
+		case DTK_CENTURY:
+			result = fields->year > 0 ? (fields->year + 99) / 100 :
+				-((99 - (fields->year - 1)) / 100);
+			break;
+		case DTK_MILLENNIUM:
+			result = fields->year > 0 ? (fields->year + 999) / 1000 :
+				-((999 - (fields->year - 1)) / 1000);
+			break;
+		case DTK_ISOYEAR:
+			result = date2isoyear(fields->year, fields->month, fields->mday);
+			if (result <= 0)
+				result -= 1;
+			break;
+		default:
+			/* DTK_DOY */
+			result = julian - date2j(fields->year, 1, 1) + 1;
+			break;
+	}
+	return tess_numeric_from_int64(result, context);
+}
+
+/*
+ * extract(unit from date) and extract(unit from timestamp): a known unit
+ * constant over a finite value by extract_field, anything else by the
+ * core's function a row, in the call's context either way.
+ */
+static TessStatusCode
+extract_evaluate(TessFunctionCall *call)
+{
+	const TessFunctionArg *units;
+	const TessFunctionArg *stamps;
+	bool		timestamp;
+	PGFunction	core;
+	Datum	   *values;
+	int			type = UNKNOWN_FIELD;
+	int			val = 0;
+	bool		native = false;
+	DayFields	fields = {0};
+	MemoryContext old;
+	int			nwords;
+
+	if (!date_call_valid(call, 2) || call->context == NULL)
+		return date_invalid(call, "extract takes a unit and a date or a timestamp");
+	units = &call->args[0];
+	stamps = &call->args[1];
+	timestamp = date_op(call) == TIMESTAMP_EXTRACT;
+	core = timestamp ? extract_timestamp : extract_date;
+	values = (Datum *) call->values;
+	old = MemoryContextSwitchTo(call->context);
+	if (units->column == NULL)
+	{
+		text	   *text_units = DatumGetTextPP(units->scalar);
+		char	   *lowunits;
+
+		lowunits = downcase_truncate_identifier(VARDATA_ANY(text_units),
+												VARSIZE_ANY_EXHDR(text_units), false);
+		type = DecodeUnits(0, lowunits, &val);
+		if (type == UNKNOWN_FIELD)
+			type = DecodeSpecial(0, lowunits, &val);
+		native = extract_native(timestamp, type, val);
+	}
+	nwords = tess_row_mask_word_count(call->rows->nrows);
+	for (int word = 0; word < nwords; word++)
+	{
+		uint64		look = call->rows->bits[word];
+		uint64		present = 0;
+
+		for (; look != 0; look &= look - 1)
+		{
+			int			bit = pg_rightmost_one_pos64(look);
+			int			row = word * 64 + bit;
+			Datum		value;
+			int64		day;
+			int64		time = 0;
+			bool		finite;
+
+			if (arg_null(units, row) || arg_null(stamps, row))
+				continue;
+			value = arg_datum(stamps, row);
+			if (timestamp)
+			{
+				finite = !TIMESTAMP_NOT_FINITE(DatumGetTimestamp(value));
+				day = finite ? timestamp_day(DatumGetTimestamp(value), &time) : 0;
+			}
+			else
+			{
+				finite = !DATE_NOT_FINITE(DatumGetDateADT(value));
+				day = DatumGetDateADT(value);
+			}
+			if (native && finite)
+				values[row] = NumericGetDatum(extract_field(type, val, day, time, &fields,
+															call->context));
+			else
+			{
+				bool		isnull;
+
+				values[row] = call_core(core, arg_datum(units, row), value, &isnull);
+				if (isnull)
+					continue;
+			}
+			present |= UINT64CONST(1) << bit;
+		}
+		call->non_nulls->bits[word] = present;
+	}
+	MemoryContextSwitchTo(old);
 	return TESS_OK;
 }
 

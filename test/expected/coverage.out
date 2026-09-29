@@ -110,11 +110,11 @@ ORDER BY o;
  row   | f8 * 2 < 300
  row   | f4 > 10
  row   | f8::int = 5
- row   | n > 100.25
+ batch | n > 100.25
  row   | n * 2 > 300
- row   | n BETWEEN 10 AND 20
+ batch | n BETWEEN 10 AND 20
  row   | round(n) = 10
- row   | i4::numeric > 10.5
+ batch | i4::numeric > 10.5
  batch | t = 'name 5'
  batch | t <> 'name 5'
  batch | t IN ('name 1', 'name 2')
@@ -137,7 +137,7 @@ ORDER BY o;
  batch | d BETWEEN date '2021-01-01' AND date '2021-12-31'
  batch | d >= date '2021-01-01' + interval '1 month'
  batch | d + 30 > date '2022-01-01'
- row   | extract(year FROM d) = 2021
+ batch | extract(year FROM d) = 2021
  row   | date_trunc('month', d) = date '2021-03-01'
  batch | ts > timestamp '2020-01-10'
  batch | ts::date = date '2020-01-10'

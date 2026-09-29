@@ -366,7 +366,7 @@ EXPLAIN (COSTS OFF) SELECT k, a, t FROM parallel_wide WHERE k < 8000;
 RESET tessera.scan_parallel_setup_cost;
 RESET tessera.scan_worker_page_cost;
 EXPLAIN (COSTS OFF) SELECT count(*) FROM parallel_wide WHERE k > 0 AND c1 > 0;
-EXPLAIN (COSTS OFF) SELECT count(*) FROM parallel_wide WHERE k > 0 AND c1::numeric > 0;
+EXPLAIN (COSTS OFF) SELECT count(*) FROM parallel_wide WHERE k > 0 AND (c1 # 0) > 0;
 SET tessera.scan_parallel_setup_cost = 2500;
 EXPLAIN (COSTS OFF) SELECT count(*) FROM parallel_wide WHERE k > 0;
 EXPLAIN (COSTS OFF) SELECT count(*) FROM parallel_wide WHERE c16 > 0;

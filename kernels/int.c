@@ -805,4 +805,5 @@ _PG_init(void)
 		api->functions->add(&functions[i].function);
 	tess_register_text_functions(api->functions);
 	tess_register_date_functions(api->functions);
+	tess_register_numeric_functions(api->functions);
 }
