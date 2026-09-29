@@ -33,6 +33,7 @@ static set_rel_pathlist_hook_type previous_set_rel_pathlist_hook = NULL;
 static Plan *filter_plan(PlannerInfo *root, RelOptInfo *rel,
 						 CustomPath *best_path, List *tlist, List *clauses,
 						 List *custom_plans);
+static double scan_time(PlannerInfo *root, RelOptInfo *rel, Path *path);
 
 static const CustomPathMethods filter_path_methods = {
 	.CustomName = "TessFilter",
@@ -368,25 +369,38 @@ add_bitmap_paths(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte)
  * index-only scans of the relation, in its order, TessFilter above it when
  * the relation has clauses: the filter evaluates every clause, the index's
  * too, and the path costs the filter's fraction of the core's and keeps
- * its order.
+ * its order. With partial, over the core's parallel ones, whose scan
+ * divides the work among the participants, which makes the node's path
+ * over it partial: only where the model finds a participant's time and
+ * the workers' start (tessera.scan_parallel_setup_cost) below serial_time,
+ * the relation's fastest serial scan, or where serial_time is negative, no
+ * model ranking the relation. The core's cost does not tell: at 10 % of
+ * bench_idx the node's parallel index-only scan took 3.3 ms against 3.0
+ * serially, at 15 % 4.1 against 4.5, and its parallel index scan of 10 %
+ * 4.8 against 4.0 for its serial bitmap.
  */
 static void
-add_index_paths(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte)
+add_index_paths(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte,
+				bool partial, double serial_time)
 {
 	List	   *indexes = NIL;
 
 	if (!*tess_runtime_api()->settings->enable ||
 		!relation_supported(root, rel, rte) ||
-		(rel->baserestrictinfo != NIL && first_clause(root, rel) == NULL))
+		(rel->baserestrictinfo != NIL && first_clause(root, rel) == NULL) ||
+		(partial && !rel->consider_parallel))
 		return;
 	/* add_path frees a core path the node's dominates: copies are taken first. */
-	foreach_ptr(Path, path, rel->pathlist)
+	foreach_ptr(Path, path, partial ? rel->partial_pathlist : rel->pathlist)
 	{
 		IndexPath  *copy;
 
 		if (!IsA(path, IndexPath) ||
 			(path->pathtype != T_IndexScan && path->pathtype != T_IndexOnlyScan) ||
-			path->param_info != NULL || path->parallel_aware)
+			path->param_info != NULL || path->parallel_aware != partial)
+			continue;
+		if (partial && serial_time >= 0 &&
+			scan_time(root, rel, path) + tess_scan_parallel_setup_cost >= serial_time)
 			continue;
 		copy = makeNode(IndexPath);
 		memcpy(copy, path, sizeof(IndexPath));
@@ -399,16 +413,21 @@ add_index_paths(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte)
 		if (rel->baserestrictinfo == NIL)
 		{
 			scan = tess_heap_index_path(root, index, rel->reltarget);
-			if (scan != NULL)
-			{
-				scan->total_cost = index->path.total_cost * tess_scan_cost_factor;
-				add_path(rel, scan);
-			}
-			continue;
+			if (scan == NULL)
+				continue;
+			scan->total_cost = index->path.total_cost * tess_scan_cost_factor;
 		}
-		scan = tess_heap_index_path(root, index, filter_input_target(root, rel));
-		if (scan != NULL)
-			add_path(rel, (Path *) make_filter_path(rel, &index->path, scan));
+		else
+		{
+			scan = tess_heap_index_path(root, index, filter_input_target(root, rel));
+			if (scan == NULL)
+				continue;
+			scan = (Path *) make_filter_path(rel, &index->path, scan);
+		}
+		if (partial)
+			add_partial_path(rel, scan);
+		else
+			add_path(rel, scan);
 	}
 }
 
@@ -567,7 +586,8 @@ full_scan_path(PlannerInfo *root, RelOptInfo *rel, Path *seqscan, Cost cost)
  * participant's time. Only for a table the cache holds (the core's
  * effective_cache_size), which the model measured, and a relation whose
  * clauses all run in batches (a clause row by row costs more a row than
- * the model counts).
+ * the model counts). Returns the least time of a scan the list holds
+ * after the ranking, -1 where the relation is not ranked.
  */
 /* The core's path under the node's, or the path itself. */
 static Path *
@@ -629,7 +649,7 @@ compare_ranked(const void *a, const void *b)
 	return ta > tb ? -1 : ta < tb ? 1 : 0;
 }
 
-static void
+static double
 rank_scans(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte, Path *seqscan, bool partial)
 {
 	List	   *pathlist = partial ? rel->partial_pathlist : rel->pathlist;
@@ -641,7 +661,7 @@ rank_scans(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte, Path *seqscan
 		!relation_supported(root, rel, rte) || rel->pages > (BlockNumber) effective_cache_size ||
 		(rel->baserestrictinfo != NIL && !clauses_supported(root, rel)) ||
 		(partial && !rel->consider_parallel))
-		return;
+		return -1;
 	if (seqscan == NULL)
 	{
 		int			workers = partial ?
@@ -731,6 +751,12 @@ rank_scans(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte, Path *seqscan
 		else
 			add_path(rel, path);
 	}
+	for (int i = count - 1; i >= 0; i--)
+	{
+		if (scans[i].cost >= 0)
+			return scans[i].time;
+	}
+	return -1;
 }
 
 /*
@@ -744,6 +770,7 @@ set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
 	Path	   *seqscan;
 	Path	   *copy = NULL;
 	Path	   *partial = NULL;
+	double		serial_time;
 
 	if (previous_set_rel_pathlist_hook != NULL)
 		previous_set_rel_pathlist_hook(root, rel, rti, rte);
@@ -764,8 +791,9 @@ set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
 	add_row_filter_paths(root, rel, rte);
 	add_scan_paths(root, rel, rte);
 	add_bitmap_paths(root, rel, rte);
-	add_index_paths(root, rel, rte);
-	rank_scans(root, rel, rte, copy, false);
+	add_index_paths(root, rel, rte, false, -1);
+	serial_time = rank_scans(root, rel, rte, copy, false);
+	add_index_paths(root, rel, rte, true, serial_time);
 	rank_scans(root, rel, rte, partial, true);
 	tess_gather_add_paths(root, rel);
 }

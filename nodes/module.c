@@ -26,6 +26,7 @@ double		tess_index_tuple_cost = 0.112;
 double		tess_bitmap_page_cost = 0.665;
 double		tess_bitmap_tuple_cost = 0.075;
 double		tess_bitmap_scatter_cost = 0.031;
+double		tess_scan_parallel_setup_cost = 8000.0;
 double		tess_join_bloom_ratio = 0.5;
 double		tess_bitmap_page_rows = 2.0;
 double		tess_index_min_correlation = 0.8;
@@ -185,6 +186,12 @@ _PG_init(void)
 							 "The node's time a row of a bitmap takes more for an index out of the table's order.",
 							 "Scaled by 1 - c * c for the correlation c of the index's first column.",
 							 &tess_bitmap_scatter_cost, 0.031, 0.0, 1e10,
+							 PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomRealVariable("tessera.scan_parallel_setup_cost",
+							 "The time a parallel scan of the node takes to start its workers.",
+							 "A partial index scan of the node is planned only where its time and this "
+							 "beat the relation's fastest serial scan.",
+							 &tess_scan_parallel_setup_cost, 8000.0, 0.0, 1e10,
 							 PGC_USERSET, 0, NULL, NULL, NULL);
 	DefineCustomBoolVariable("tessera.batch_gather",
 							 "Gathers a parallel batch subtree's rows in batches.",

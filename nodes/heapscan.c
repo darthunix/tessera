@@ -438,7 +438,13 @@ tess_heap_index_path(PlannerInfo *root, IndexPath *index, PathTarget *target)
 	config.flags = CUSTOMPATH_SUPPORT_PROJECTION;
 	config.children = list_make1(index);
 	scan = tess_path_create(&config);
-	scan->path.rows = clamp_row_est(index->indexselectivity * rel->tuples);
+	/*
+	 * A parallel index scan's path gives each participant its share, and so
+	 * does the node over it; its callbacks keep only the shared counters.
+	 */
+	scan->path.rows = clamp_row_est(index->indexselectivity * rel->tuples /
+									(index->path.parallel_workers > 0 ?
+									 tess_parallel_divisor(&index->path) : 1.0));
 	return &scan->path;
 }
 
@@ -1212,14 +1218,27 @@ shared_scan(void *coordinate)
 		((char *) coordinate + tess_shared_stats_size(coordinate));
 }
 
+/*
+ * In the index modes the core's parallel index scan below divides the
+ * work, through its own shared memory: the node's chunk holds only the
+ * counters, and the node begins no parallel scan of the heap.
+ */
+static bool
+reads_heap_itself(HeapScanState *state)
+{
+	return state->index_plan == NULL && state->ios_plan == NULL;
+}
+
 static Size
 heap_scan_estimate_dsm(CustomScanState *css, ParallelContext *pcxt)
 {
 	EState	   *estate = css->ss.ps.state;
+	Size		size = tess_shared_stats_estimate(HEAP_SCAN_NCOUNTERS, pcxt->nworkers);
 
-	return add_size(tess_shared_stats_estimate(HEAP_SCAN_NCOUNTERS, pcxt->nworkers),
-					table_parallelscan_estimate(css->ss.ss_currentRelation,
-												estate->es_snapshot));
+	if (!reads_heap_itself((HeapScanState *) css))
+		return size;
+	return add_size(size, table_parallelscan_estimate(css->ss.ss_currentRelation,
+													  estate->es_snapshot));
 }
 
 static void
@@ -1238,6 +1257,8 @@ heap_scan_initialize_dsm(CustomScanState *css, ParallelContext *pcxt,
 	state->stats = tess_shared_stats_init(estate->es_query_cxt, coordinate,
 										  HEAP_SCAN_NCOUNTERS, pcxt->nworkers,
 										  pcxt->seg);
+	if (!reads_heap_itself(state))
+		return;
 	pscan = shared_scan(coordinate);
 	table_parallelscan_initialize(rel, pscan, estate->es_snapshot);
 	begin_scan(state, table_beginscan_parallel(rel, pscan, heap_scan_flags(state)));
@@ -1249,8 +1270,9 @@ heap_scan_reinitialize_dsm(CustomScanState *css, ParallelContext *pcxt,
 {
 	HeapScanState *state = (HeapScanState *) css;
 
-	table_parallelscan_reinitialize(css->ss.ss_currentRelation,
-									shared_scan(coordinate));
+	if (reads_heap_itself(state))
+		table_parallelscan_reinitialize(css->ss.ss_currentRelation,
+										shared_scan(coordinate));
 	tess_shared_stats_reset(state->stats);
 }
 
@@ -1264,8 +1286,9 @@ heap_scan_initialize_worker(CustomScanState *css, shm_toc *toc,
 
 	state->stats = tess_shared_stats_attach(estate->es_query_cxt, coordinate,
 											ParallelWorkerNumber + 1);
-	begin_scan(state, table_beginscan_parallel(rel, shared_scan(coordinate),
-											   heap_scan_flags(state)));
+	if (reads_heap_itself(state))
+		begin_scan(state, table_beginscan_parallel(rel, shared_scan(coordinate),
+												   heap_scan_flags(state)));
 }
 
 /*

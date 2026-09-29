@@ -298,6 +298,33 @@ EXPLAIN (COSTS OFF) SELECT count(*), sum(w) FROM index_r WHERE id < 21000;
 SELECT index_same($$SELECT count(*), sum(w) FROM index_r WHERE id < 21000$$);
 EXPLAIN (COSTS OFF) SELECT count(*) FROM index_r WHERE k < 21000;
 SELECT index_same($$SELECT count(*), sum(k) FROM index_r WHERE k < 21000$$);
+-- Below it, the node over the core's parallel index-only and index scans,
+-- which divide the work among the participants through their own shared
+-- memory: the node's chunk holds only its counters. Without the leader,
+-- and rescanned under the gather in a join. Only where the model finds
+-- the participant's time and the workers' start below the fastest serial
+-- scan: at the default start the node takes no parallel scan of so small
+-- a table, and the core's stands under TessPack (parallel_setup_cost is 0
+-- here).
+SET enable_bitmapscan = off;
+EXPLAIN (COSTS OFF) SELECT count(*) FROM index_r WHERE k < 9000;
+SET tessera.scan_parallel_setup_cost = 0;
+EXPLAIN (COSTS OFF) SELECT count(*) FROM index_r WHERE k < 9000;
+SELECT index_same($$SELECT count(*), sum(k) FROM index_r WHERE k < 9000$$);
+EXPLAIN (COSTS OFF) SELECT count(*), sum(w) FROM index_r WHERE id < 3000;
+SELECT index_same($$SELECT count(*), sum(w) FROM index_r WHERE id < 3000$$);
+SET parallel_leader_participation = off;
+SELECT index_same($$SELECT count(*), sum(k) FROM index_r WHERE k < 9000$$);
+SELECT index_same($$SELECT count(*), sum(w) FROM index_r WHERE id < 3000$$);
+RESET parallel_leader_participation;
+SET enable_material = off;
+EXPLAIN (COSTS OFF)
+SELECT x, n FROM (SELECT count(*) AS n FROM index_r WHERE k < 9000) AS ss RIGHT JOIN (VALUES (1), (2)) AS v(x) ON true;
+SELECT index_same($$SELECT x, n, s FROM (SELECT count(*) AS n, sum(k) AS s FROM index_r WHERE k < 9000) AS ss
+                    RIGHT JOIN (VALUES (1), (2), (3)) AS v(x) ON true$$);
+RESET enable_material;
+RESET tessera.scan_parallel_setup_cost;
+RESET enable_bitmapscan;
 RESET max_parallel_workers_per_gather;
 RESET parallel_setup_cost;
 RESET parallel_tuple_cost;

@@ -75,6 +75,7 @@ and prints them:
 | `tessera.bitmap_page_cost` | 0.665 | a page of a bitmap |
 | `tessera.bitmap_tuple_cost` | 0.075 | a row of a bitmap |
 | `tessera.bitmap_scatter_cost` | 0.031 | what a row of a bitmap takes more, times 1 - c² for the correlation c of the index's first column |
+| `tessera.scan_parallel_setup_cost` | 8000 | the start of the workers of a parallel index or index-only scan, about 2 ms here (bench/pg/index with two workers measured it, not scancost: Index-only mode) |
 
 Constants that repeat the core's (half of `cpu_tuple_cost` a row an
 `Append` saves) or that shape execution rather than planning (chunk
@@ -399,13 +400,19 @@ scattered index keep it and of the ordered one take its bitmap, most
 rows take the full scan, an index-only scan, an index scan and a bitmap
 alike, an order under a limit keeps the index, with two workers the
 node's partial full scan stands in place of the core's parallel index
-and index-only scans at 35 % of the rows, and a table past
-`effective_cache_size` keeps the core's costs. Mutations fail it: no
+and index-only scans at 35 % of the rows, below it the node over the
+core's parallel index-only scan at 15 % and parallel index scan at 5 %,
+without the leader too and rescanned under the gather in a join, but not
+over the core's parallel index-only scan of so small a table at the
+workers' default start, and a table past `effective_cache_size` keeps
+the core's costs. Mutations fail it: no
 ranking, a ranking without the times, no full scan made where the core
 had dropped its own, no check of the cache, no ranking of the partial
 list, no correlation in a bitmap's pages, the full scan alone ranked, no
-bitmap made where the core had dropped its own, and the partial full
-scan waiting for the serial sequential scan.
+bitmap made where the core had dropped its own, the partial full scan
+waiting for the serial sequential scan, no node over the core's
+parallel index scans, such a path in the serial list, and the workers'
+start not counted.
 
 ### Index-only mode
 
@@ -439,7 +446,31 @@ relation's columns and that the index returns). The child's
 instrumentation counts the rows a batch at a time, so `EXPLAIN ANALYZE`
 shows them and the core's `Heap Fetches` under the node. A rescan passes
 a changed parameter to the child and rescans it at once: the node never
-calls it, which would rescan it on changed parameters. At 2 M rows
+calls it, which would rescan it on changed parameters. In a parallel plan
+the node stands over the core's parallel index-only scan, and in the
+index mode over its parallel index scan, as a partial path beside the
+core's (`add_index_paths`, the index mode's gates, `tessera.scan_cost_factor`
+of its cost, a participant's rows): the core's scan divides the index
+among the participants through its own shared memory, which the walk of
+the plan's nodes sets up since it goes into the node's children, and
+the index-only scan's descriptor comes begun from there
+(`index_beginscan_parallel`). The node is parallel-aware for its shared
+counters alone: its callbacks begin no parallel scan of the heap in
+these modes. The partial path is made only where the model finds a
+participant's time and the workers' start
+(`tessera.scan_parallel_setup_cost`) below the relation's fastest serial
+scan, the serial ranking's (Ranking the full scan): the core's costs,
+which the node's paths take a share of, weigh the start against the
+core's own slower rows, and at 10 % of bench_idx the node's parallel
+index-only scan took 3.3 ms against 3.0 serially, its parallel index
+scan of the ordered id 4.8 against 4.0 for its serial bitmap. The start
+was fitted as the time of the parallel scan less the serial one over
+2.4 participants: 2.0 to 2.5 ms at 10 to 20 % of the rows, which the
+model's unit of 0.26 µs makes 8000. With two workers (bench/pg/index,
+pg-index-w2-J73BSo, 11 runs, the core's in parallel after): 20 % of k
+counted in 5.2 ms, 6.2 serially, the core's 6.2; at 10 % the serial
+scans stay, counted in 3.1 ms (4.1) and a range of id aggregated by the
+node's bitmap in 4.0 (5.5). At 2 M rows
 (bench/pg/index, pg-index-fiwEia before, pg-index-EG1H30 after, 11 runs,
 the core's time in the second run): 10 % of a scattered k counted 3.9 ms
 before, 3.1 after, the core's 4.3; 1 % 0.39 and 0.31 (0.42); half of it
