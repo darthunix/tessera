@@ -386,6 +386,62 @@ FROM unnest(ARRAY['UTC', 'America/New_York', 'Asia/Kolkata', 'Australia/Lord_How
                   'America/Sao_Paulo', 'Europe/Amsterdam']) AS zone;
 DROP FUNCTION types_zone(text);
 DROP TABLE types_tz;
+
+-- Floats in batches: comparisons of float8, float4 and the two, NaN equal
+-- to itself and above every number, -0 equal to 0; arithmetic, negation
+-- and abs; casts between floats and integers, rounding halves to even;
+-- overflow, underflow and division by zero raising the core's errors.
+CREATE TABLE types_fl AS
+SELECT i AS id,
+       (CASE WHEN i % 37 = 0 THEN NULL WHEN i % 41 = 0 THEN 'NaN' WHEN i % 43 = 0 THEN 'Infinity'
+             WHEN i % 47 = 0 THEN '-Infinity' WHEN i % 53 = 0 THEN '-0'
+             ELSE (((i * 7919) % 20000 - 10000) / 8.0)::text END)::float8 AS f8,
+       (CASE WHEN i % 31 = 0 THEN NULL WHEN i % 59 = 0 THEN 'NaN'
+             ELSE (((i * 104729) % 2000 - 1000) / 4.0)::text END)::float4 AS f4,
+       i % 200 - 100 AS n, (i % 200 - 100)::int8 * 100000000000 AS n8, (i % 200 - 100)::int2 AS n2
+FROM generate_series(1, 3000) AS i;
+INSERT INTO types_fl VALUES (5001, 1e300, 1e30, 1, 1, 1), (5002, 1e-300, 1e-30, 2, 2, 2),
+    (5003, 2147483646.5, 32767.5, 3, 3, 3), (5004, -2147483648.5, -32768.5, 4, 4, 4);
+ANALYZE types_fl;
+EXPLAIN (COSTS OFF) SELECT id % 10, min(f8 * 2), sum(f4::int) FROM types_fl WHERE f8 > 100.5 AND f4 < f8 AND f8::int % 2 = 0 GROUP BY 1;
+SELECT types_same($$SELECT count(*), sum(id) FROM types_fl WHERE f8 > 100.5 OR f8 = 'NaN' OR f8 <= -2 OR f8 = 0$$);
+SELECT types_same($$SELECT count(*), sum(id) FROM types_fl WHERE f8 <> 'Infinity' AND f8 >= '-Infinity' AND f8 < 'NaN' AND 50 > f8$$);
+SELECT types_same($$SELECT count(*), sum(id) FROM types_fl WHERE f4 > 10 OR f4 = 'NaN' OR f4 < f8 OR f8 >= f4 AND f4 <> 0$$);
+-- The values through our aggregation (a float key or DISTINCT goes to
+-- the core's): min and max of each expression, NaN and infinities among
+-- them, by a key of integers; every row by exact sums of the finite
+-- values scaled to integers.
+SELECT types_same($$SELECT id % 10, min(f8 * 2), max(f8 + f4), min(f8 - 1.5), max(f8 / 3), min(f8 / 3) FROM types_fl WHERE id < 5000 GROUP BY 1$$);
+SELECT types_same($$SELECT id % 10, sum((f8 * 2 * 1000)::int8), sum(((f8 + f4) * 1000)::int8), sum(((f8 - 1.5) * 1000)::int8), sum((f8 / 3 * 1000)::int8) FROM types_fl WHERE id < 5000 AND f8 BETWEEN -1e6 AND 1e6 AND f4 BETWEEN -1e6 AND 1e6 GROUP BY 1$$);
+SELECT types_same($$SELECT id % 10, min(f4 * 2::float4), max(f4 + f4), min(f4 - 1.5::float4), max(f4 / 3::float4), min(f4 * f8) FROM types_fl WHERE id < 5000 GROUP BY 1$$);
+SELECT types_same($$SELECT id % 10, sum((f4 * 2::float4 * 1000::float4)::int8), sum(((f4 - 1.5::float4) * 1000::float4)::int8), sum((f4 / 3::float4 * 1000::float4)::int8), sum((f4 * f8 * 1000)::int8) FROM types_fl WHERE id < 5000 AND f8 BETWEEN -1e6 AND 1e6 AND f4 BETWEEN -1e6 AND 1e6 GROUP BY 1$$);
+SELECT types_same($$SELECT id % 10, min(-f8), max(abs(f8)), min(@ f4), max(-f4), min(f8 / f4), max(f8 / f4) FROM types_fl WHERE id < 5000 AND f4 <> 0 GROUP BY 1$$);
+SELECT types_same($$SELECT id % 10, sum((-f8 * 1000)::int8), sum((abs(f8) * 1000)::int8), sum((@ f4 * 1000::float4)::int8), sum((f8 / f4 * 1000)::int8) FROM types_fl WHERE id < 5000 AND f4 <> 0 AND f8 BETWEEN -1e6 AND 1e6 AND f4 BETWEEN -1e6 AND 1e6 GROUP BY 1$$);
+SELECT types_same($$SELECT id % 10, min(n::float8), max(n8::float8), min(n2::float8), max(n::float4), min(n8::float4), max(n2::float4), min(f4::float8), sum((n8::float8 / 7)::int8), sum((n::float4 / 7::float4 * 1000::float4)::int8), sum((f4::float8 * 1000)::int8) FROM types_fl WHERE f4 BETWEEN -1e6 AND 1e6 GROUP BY 1$$);
+SELECT types_same($$SELECT id % 10, sum((f8::float4 * 1000::float4)::int8), sum(f8::int), sum(f8::int8), sum(f4::int), sum(f4::int2), sum(f4::int8) FROM types_fl WHERE id < 5000 AND f8 BETWEEN -30000 AND 30000 AND f4 BETWEEN -30000 AND 30000 GROUP BY 1$$);
+SELECT types_same($$SELECT id % 10, sum((f8 / 4 + 0.125)::int), sum((f4 / 4 + 0.125::float4)::int2) FROM types_fl WHERE id < 5000 AND f8 BETWEEN -30000 AND 30000 AND f4 BETWEEN -30000 AND 30000 GROUP BY 1$$);
+SELECT types_same($$SELECT id % 10, sum(f8::int), sum(f8::int8), sum(f4::int) FROM types_fl WHERE id IN (5003, 5004) OR id = 7 GROUP BY 1$$);
+\set VERBOSITY terse
+SELECT count(*) FROM types_fl WHERE id = 5001 AND f8 * 1e300 > 0;
+SELECT count(*) FROM types_fl WHERE id = 5002 AND f8 * 1e-300 > 0;
+SELECT count(*) FROM types_fl WHERE id < 5000 AND f8 / (n - n) > 0;
+SELECT count(*) FROM types_fl WHERE id = 5001 AND f8::int > 0;
+SELECT count(*) FROM types_fl WHERE id = 5001 AND f8::float4 > 0;
+SELECT count(*) FROM types_fl WHERE id = 5002 AND f8::float4 > 0;
+SELECT count(*) FROM types_fl WHERE id = 5001 AND f4 * f4 > 0;
+SELECT count(*) FROM types_fl WHERE id = 5003 AND f4::int2 > 0;
+SET tessera.enable = off;
+SELECT count(*) FROM types_fl WHERE id = 5001 AND f8 * 1e300 > 0;
+SELECT count(*) FROM types_fl WHERE id = 5002 AND f8 * 1e-300 > 0;
+SELECT count(*) FROM types_fl WHERE id < 5000 AND f8 / (n - n) > 0;
+SELECT count(*) FROM types_fl WHERE id = 5001 AND f8::int > 0;
+SELECT count(*) FROM types_fl WHERE id = 5001 AND f8::float4 > 0;
+SELECT count(*) FROM types_fl WHERE id = 5002 AND f8::float4 > 0;
+SELECT count(*) FROM types_fl WHERE id = 5001 AND f4 * f4 > 0;
+SELECT count(*) FROM types_fl WHERE id = 5003 AND f4::int2 > 0;
+RESET tessera.enable;
+\set VERBOSITY default
+DROP TABLE types_fl;
 -- A date against a timestamp compares other than bit for bit: the core's.
 EXPLAIN (COSTS OFF) SELECT count(*) FROM types_f JOIN types_d ON types_f.d = types_d.ts;
 SELECT types_same($$SELECT count(*) FROM types_f JOIN types_d ON types_f.d = types_d.ts$$);

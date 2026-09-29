@@ -106,10 +106,10 @@ ORDER BY o;
  batch | nullif(nul, 3) = 4
  batch | CASE WHEN i4 > 10 THEN 1 ELSE 0 END = 1
  batch | (i4 > 10 OR i2 = 5) AND NOT b
- row   | f8 > 100.5
- row   | f8 * 2 < 300
- row   | f4 > 10
- row   | f8::int = 5
+ batch | f8 > 100.5
+ batch | f8 * 2 < 300
+ batch | f4 > 10
+ batch | f8::int = 5
  batch | n > 100.25
  row   | n * 2 > 300
  batch | n BETWEEN 10 AND 20

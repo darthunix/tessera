@@ -1,5 +1,5 @@
 MODULE_big = tessera_kernels
-OBJS = int.o table.o text.o date.o numeric.o
+OBJS = int.o table.o text.o date.o numeric.o float.o
 PG_CPPFLAGS = -I$(srcdir)/../include
 
 PG_CONFIG ?= pg_config

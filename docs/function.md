@@ -166,7 +166,15 @@ over the span up to its next transition (`pg_next_dst_boundary`, as
 `pg_localtime` picks it; 32 spans of the zone kept by the process) and a
 local day's midnight by `DetermineTimeZoneOffset` (1024 days kept), and
 leaving to the core's function a row with an infinity, an unknown unit, a
-day before the Julian day 0 or a result out of range;
+day before the Julian day 0 or a result out of range; the float functions
+in every shape: the comparisons of float8, float4 and the two
+(`float8eq` …, `float4eq` …, `float48eq` …, `float84eq` …) in the core's
+NaN-aware order, a float4 widened, the arithmetic `float8pl` … `float8div`,
+`float4pl` …, `float48pl` …, `float84pl` …, `float8um`, `float8abs`,
+`float4um`, `float4abs` by the core's inline functions of `utils/float.h`
+(22003 "value out of range: overflow" and "underflow", 22012 at the row
+that meets them), and the casts between floats and integers, a float to
+an integer rounded to even and checked as `dtoi4` checks it;
 and `count(*)`,
 `count(any)`, `sum(int4)`, `min(int4)`, `max(int4)`, `min(int8)` and
 `max(int8)` as aggregates, by the aggregate's own OID. An int4 column

@@ -184,7 +184,7 @@ tessera_test_kernels_module_registry(PG_FUNCTION_ARGS)
 			PG_RETURN_BOOL(false);
 	}
 	/* A function no module registers. */
-	PG_RETURN_BOOL(functions->find(F_FLOAT8PL) == NULL);
+	PG_RETURN_BOOL(functions->find(F_MD5_TEXT) == NULL);
 }
 
 Datum
