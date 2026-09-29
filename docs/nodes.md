@@ -1758,6 +1758,49 @@ and filter of the elected one. Under a `Gather` the counters are the totals of
 every participant, and the bucket count is the mean over the tables
 built.
 
+### Pruning the outer side's partitions
+
+When the outer side is `TessAppend` over a partitioned table whose
+partition key is the outer side of a key of words, and the join keeps no
+outer row without a pair (inner, semi, and right joins, where the inner
+side is kept), the table's keys tell which partitions can pair: the others
+are not read. The core prunes at execution only by the parameters of an
+`Append` (a nested loop's inner side, which a batch node leaves to the
+core); a patch for hash joins (2023–2024) pruned for every row the build
+inserted, which cost as much as the insertion, and was returned. The
+planner (`write_join_prune` in `join_planner.c`, at the join's
+`PlanCustomPath`, the children planned, as Greengage's
+`joinpartprune.c` decides at `create_plan`) makes the core's pruning
+descriptions for `key = $p` and, where the key's btree family compares
+the two types, `key >= $lo AND key <= $hi`, over three parameters of
+execution of its own (`assign_special_exec_param`): the core's pruning
+takes no column of another relation, and the parameters stand for the
+inner side's values, so the core is left as it is (Greengage changed
+its pruning to take the inner side's columns). At the start the join
+hands them to `TessAppend` (`tess_append_join_prune_begin`), which makes
+their pruning states as its own over every planned child. The build
+notes the key of each inner row, the NULL ones apart: the lowest and
+the highest, and the keys themselves while the inner side has at most
+1024 rows with one; a shared table's participants add theirs under a
+lock before the build's barrier. Once built, before the outer side is
+read, the join hands the keys down (`tess_append_join_prune`): each
+distinct key of a list sets `$p` and prunes, the children added up,
+stopping once every child is needed; past the list the range prunes,
+where there is one; no key pairs with no partition. The work is a key
+an inner row at the build and a pruning a distinct key after it, as
+DuckDB passes a list of a few keys and their range. `TessAppend`
+intersects the children it reads with those left and shows `Subplans
+Removed by Join` with `ANALYZE`; the children kept are the same in every
+participant. A table kept over a rescan keeps them; a table built anew
+hands its own. The choice of plan does not count the pruning (the join's
+cost is the core's hash join's share, as before). Over `bench_part`, four
+partitions of 500 000 rows by ranges of `k`, joined with a dimension of
+100 000 keys that reach the first (bench/pg join, `part_prune`, 11 runs,
+medians, the core's time after): 16.1 ms before, 5.3 after (78.4); with a
+thousand keys 13.7 and 3.7 (65.4); with two workers 11.1 and 6.0 (39.8),
+8.8 and 4.2 (27.9), where the planner, not counting the pruning, keeps
+the parallel plan the one partition left does not need.
+
 ### Tests
 
 `test/sql/join.sql` compares the rows of every join with Tessera on and
@@ -1836,6 +1879,19 @@ shared Bloom filter built for all, and by-reference inner
 columns: text in the target and in a join clause, numeric and text with
 NULLs over many value blocks under inner and left joins, a table with
 text past the estimate, and a rescan that frees the blocks and fills new ones.
+Pruning the outer side's partitions: a range partitioning with a default
+partition and a NULL key, by a list of keys and by the range of 2000,
+by an int8 key, by two keys of two partitions, a list partitioning by
+keys at its two ends, a hash one by listed keys and past them (none),
+the second level of two; semi and right joins prune, left and anti ones
+do not, keys all NULL prune every partition; a table kept for the outer
+side's new parameter and one built anew for the inner side's, the
+partitions no execution read counted; a spilling table; under the
+`Gather` a shared table and tables of every participant, the leader not
+taking part. Mutations fail it: no pruning, every join type, the last
+key's partitions alone, the range for a list, no shared keys, NULL keys
+counted; the stop once every child is needed leaves the results as they
+are.
 
 ## TessSort
 
@@ -2148,7 +2204,15 @@ table with itself 14.6 and 5.1, the core's 29 (pg-setop-xT3wei,
 pg-setop-LpWP7U); with two workers 7.4, 7.3 and 9.6 before, 4.8 to 4.9
 after, the core's 13 (pg-setop-w2-xKCerq, pg-setop-w2-z1nyzp).
 
-### A join's key filter
+### A join's keys
+
+A hash join above may prune the node's children by the keys of its table
+(TessHashJoin, Pruning the outer side's partitions): it hands the node the
+pruning descriptions it planned, whose states the node makes as its own,
+and after its build the keys, by which the node finds the children left
+before its first choice, their numbers the planned ones mapped to its
+own; it intersects them with those of its own pruning, over a rescan
+too, until the join's next build.
 
 A hash join above hands its Bloom filter down (`set_key_filter`, TessHashJoin),
 which a child with row-wise clauses checks before them. The node hands

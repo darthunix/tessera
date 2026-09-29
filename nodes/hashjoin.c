@@ -53,6 +53,12 @@
  */
 #define JOIN_BLOOM_SAMPLE 4096
 #define JOIN_BLOOM_MIN_ROWS 4096
+/*
+ * Pruning of the outer side's partitions: the keys are listed, each
+ * pruning by itself, while the inner side has at most this many rows with
+ * a key; past them the lowest and the highest prune as a range.
+ */
+#define JOIN_PRUNE_VALUES 1024
 
 /* The counters every participant of a parallel plan shares. */
 enum
@@ -221,6 +227,18 @@ typedef struct JoinShared
 	int			nrounds;
 	/* RIGHT and FULL: the marks of the table's records (mark_words per chunk). */
 	dsa_pointer marks;
+	/*
+	 * Pruning of the outer side's partitions: the inner rows with a key, the
+	 * lowest and the highest, and the keys while at most JOIN_PRUNE_VALUES
+	 * (-1 past them); every participant adds its own at the end of its
+	 * build, under prune_lock, so that they are whole past the barrier.
+	 */
+	slock_t		prune_lock;
+	uint64		prune_rows;
+	int64		prune_min;
+	int64		prune_max;
+	int			prune_nvalues;
+	int64		prune_values[JOIN_PRUNE_VALUES];
 } JoinShared;
 
 /*
@@ -642,6 +660,20 @@ typedef struct TessHashJoinState
 	bool		bloom_ready;
 	/* The outer child checks its rows against the filter: the join does not. */
 	bool		bloom_below;
+	/*
+	 * Pruning of the outer side's partitions (TessAppend, docs/nodes.md):
+	 * the key's number, -1 for none, the planned descriptions and their
+	 * parameters, whether the outer node took them, the keys of this build
+	 * (this participant's share of a shared one) and whether the outer node
+	 * has them since the last rescan.
+	 */
+	int			prune_key;
+	PartitionPruneInfo *prune_values;
+	PartitionPruneInfo *prune_range;
+	int			prune_params[3];
+	bool		prune_on;
+	TessJoinKeys prune_keys;
+	bool		prune_sent;
 	uint64		sample_rows;
 	uint64		sample_found;
 
@@ -1526,6 +1558,107 @@ insert_batch(TessHashJoinState *state, TessBatch *batch)
 }
 
 /* Read every batch of the inner child into a new table. */
+/* This build's keys for the outer side's pruning: none seen yet. */
+static void
+reset_prune_keys(TessHashJoinState *state)
+{
+	state->prune_keys.rows = 0;
+	state->prune_keys.min = PG_INT64_MAX;
+	state->prune_keys.max = PG_INT64_MIN;
+	state->prune_keys.nvalues = 0;
+	state->prune_sent = false;
+}
+
+/*
+ * The keys of an inner batch's rows for the outer side's pruning: the
+ * lowest and the highest, and the keys themselves while the build has at
+ * most JOIN_PRUNE_VALUES rows with one. A NULL key pairs with nothing.
+ */
+static void
+note_prune_keys(TessHashJoinState *state, TessBatch *batch)
+{
+	TessJoinKeys *keys = &state->prune_keys;
+	TessDatumColumn column;
+	int			row = -1;
+
+	if (!state->prune_on)
+		return;
+	child_column(batch, state->inner_keys[state->prune_key], &batch->rows,
+				 TESS_COLUMN_FOR_FILTER, &column);
+	while ((row = tess_row_mask_next(&batch->rows, row)) >= 0)
+	{
+		int64		value;
+
+		if (column.isnull[row])
+			continue;
+		value = keys->int8 ? DatumGetInt64(column.values[row]) :
+			(int64) DatumGetInt32(column.values[row]);
+		keys->min = Min(keys->min, value);
+		keys->max = Max(keys->max, value);
+		keys->rows++;
+		if (keys->nvalues >= 0 && keys->nvalues < JOIN_PRUNE_VALUES)
+			keys->values[keys->nvalues++] = value;
+		else
+			keys->nvalues = -1;
+	}
+}
+
+/*
+ * A shared build: this participant's keys added to every participant's,
+ * whole once the build's barrier is passed.
+ */
+static void
+share_prune_keys(TessHashJoinState *state)
+{
+	TessJoinKeys *keys = &state->prune_keys;
+	JoinShared *shared = state->shared;
+
+	if (!state->prune_on || keys->rows == 0)
+		return;
+	SpinLockAcquire(&shared->prune_lock);
+	shared->prune_rows += keys->rows;
+	shared->prune_min = Min(shared->prune_min, keys->min);
+	shared->prune_max = Max(shared->prune_max, keys->max);
+	if (shared->prune_nvalues >= 0 &&
+		(keys->nvalues < 0 || shared->prune_nvalues + keys->nvalues > JOIN_PRUNE_VALUES))
+		shared->prune_nvalues = -1;
+	else if (shared->prune_nvalues >= 0)
+	{
+		memcpy(&shared->prune_values[shared->prune_nvalues], keys->values,
+			   sizeof(int64) * keys->nvalues);
+		shared->prune_nvalues += keys->nvalues;
+	}
+	SpinLockRelease(&shared->prune_lock);
+}
+
+/*
+ * The table built: the outer side's partitions its keys cannot pair with
+ * are pruned before the outer node is read, once a build (a shared table's
+ * keys are every participant's); a table kept over a rescan keeps them.
+ */
+static void
+prune_outer(TessHashJoinState *state)
+{
+	if (!state->prune_on || state->prune_sent)
+		return;
+	if (state->shared != NULL)
+	{
+		JoinShared *shared = state->shared;
+		TessJoinKeys *keys = &state->prune_keys;
+
+		SpinLockAcquire(&shared->prune_lock);
+		keys->rows = shared->prune_rows;
+		keys->min = shared->prune_min;
+		keys->max = shared->prune_max;
+		keys->nvalues = shared->prune_nvalues;
+		if (keys->nvalues > 0)
+			memcpy(keys->values, shared->prune_values, sizeof(int64) * keys->nvalues);
+		SpinLockRelease(&shared->prune_lock);
+	}
+	tess_append_join_prune(state->outer, &state->prune_keys);
+	state->prune_sent = true;
+}
+
 static void
 build_table(TessHashJoinState *state)
 {
@@ -1540,6 +1673,7 @@ build_table(TessHashJoinState *state)
 	if (state->inner_isnull != NULL && state->capacity > 0)
 		for (int word = 0; word < state->npayload; word++)
 			memset(state->inner_isnull[word], 0, sizeof(bool) * state->capacity);
+	reset_prune_keys(state);
 	for (;;)
 	{
 		TessBatch  *batch = tess_input_next(state->inner_input);
@@ -1547,7 +1681,10 @@ build_table(TessHashJoinState *state)
 		if (batch == NULL)
 			break;
 		if (tess_row_mask_count(&batch->rows) > 0)
+		{
+			note_prune_keys(state, batch);
 			insert_batch(state, batch);
+		}
 		tess_input_finish(state->inner_input);
 	}
 	if (state->spill != NULL)
@@ -4062,6 +4199,7 @@ build_shared_inner(TessHashJoinState *state)
 			break;
 		if (tess_row_mask_count(&batch->rows) > 0)
 		{
+			note_prune_keys(state, batch);
 			if (state->spill != NULL)
 				insert_spill(state, batch);
 			else
@@ -4070,6 +4208,7 @@ build_shared_inner(TessHashJoinState *state)
 		}
 		tess_input_finish(state->inner_input);
 	}
+	share_prune_keys(state);
 	check(state, state->kernels->build_report(state->shared->counters,
 											  state->appended,
 											  state->null_columns,
@@ -4342,6 +4481,7 @@ build_shared(TessHashJoinState *state)
 	state->null_columns = 0;
 	state->spill_participant = IsParallelWorker() ? ParallelWorkerNumber + 1 : 0;
 	state->round_partition = -1;
+	reset_prune_keys(state);
 	state->spill_words = NULL;
 	state->spill_seen = 0;
 	state->spill_over = false;
@@ -6462,6 +6602,7 @@ read_node_data(TessHashJoinState *state, const List *data)
 	List	   *inner_kinds = tess_plan_read_int_list(reader, "inner_kinds");
 	List	   *hashers = tess_plan_read_int_list(reader, "key_hashers");
 	List	   *collations = tess_plan_read_int_list(reader, "key_collations");
+	List	   *prune_params;
 	ListCell   *side;
 	ListCell   *column;
 	int			index = 0;
@@ -6479,8 +6620,21 @@ read_node_data(TessHashJoinState *state, const List *data)
 	state->inner_unique = tess_plan_read_int(reader, "inner_unique") != 0;
 	state->inner_rows = tess_plan_read_int(reader, "inner_rows");
 	state->shared_mode = tess_plan_read_int(reader, "shared") != 0;
+	state->prune_key = tess_plan_read_int(reader, "prune_key");
+	prune_params = tess_plan_read_int_list(reader, "prune_params");
+	state->prune_values = (PartitionPruneInfo *) tess_plan_read_node(reader, "prune_values");
+	state->prune_range = (PartitionPruneInfo *) tess_plan_read_node(reader, "prune_range");
 	state->round_partition = -1;
 	tess_plan_reader_finish(reader);
+	if (state->prune_key >= 0)
+	{
+		if (list_length(prune_params) != 3 || state->prune_values == NULL ||
+			!IsA(state->prune_values, PartitionPruneInfo) ||
+			(state->prune_range != NULL && !IsA(state->prune_range, PartitionPruneInfo)))
+			elog(ERROR, "TessHashJoin received foreign plan data");
+		for (int param = 0; param < 3; param++)
+			state->prune_params[param] = list_nth_int(prune_params, param);
+	}
 	state->nkeys = list_length(outer_keys);
 	if (list_length(sides) != state->ncolumns ||
 		list_length(columns) != state->ncolumns ||
@@ -6518,6 +6672,9 @@ read_node_data(TessHashJoinState *state, const List *data)
 			state->hashed_keys = true;
 		}
 	}
+	if (state->prune_key >= state->nkeys ||
+		(state->prune_key >= 0 && OidIsValid(state->hashers[state->prune_key].fn_oid)))
+		elog(ERROR, "TessHashJoin received foreign plan data");
 	if (state->hashed_keys)
 		state->hash_context = AllocSetContextCreate(CurrentMemoryContext,
 													"TessHashJoin key hashes",
@@ -6577,6 +6734,14 @@ join_begin(CustomScanState *css, EState *estate, int eflags)
 	state->outer = ExecInitNode(linitial(cscan->custom_plans), estate, eflags);
 	state->inner = ExecInitNode(lsecond(cscan->custom_plans), estate, eflags);
 	css->custom_ps = list_make2(state->outer, state->inner);
+	if (state->prune_key >= 0 &&
+		tess_append_join_prune_begin(state->outer, state->prune_values, state->prune_range,
+									 state->prune_params))
+	{
+		state->prune_on = true;
+		state->prune_keys.int8 = state->inner_kinds[state->prune_key] == TESS_TABLE_KEY_INT8;
+		state->prune_keys.values = palloc_array(int64, JOIN_PRUNE_VALUES);
+	}
 	state->outer_input = tess_input_create(estate->es_query_cxt, state->outer);
 	state->inner_input = tess_input_create(estate->es_query_cxt, state->inner);
 	state->layout = info.layout;
@@ -6717,6 +6882,7 @@ join_exec(CustomScanState *css)
 		if (state->done)
 			return NULL;
 	}
+	prune_outer(state);
 	/*
 	 * Nothing to match: the outer child is never read, as in the core,
 	 * unless its rows go out without a match (LEFT, ANTI).
@@ -7041,6 +7207,11 @@ init_shared(TessHashJoinState *state, int participants, dsm_segment *segment)
 	state->shared->spill_filter = InvalidDsaPointer;
 	state->shared->spill_filter_words = 0;
 	state->shared->resident_rows = 0;
+	SpinLockInit(&state->shared->prune_lock);
+	state->shared->prune_rows = 0;
+	state->shared->prune_min = PG_INT64_MAX;
+	state->shared->prune_max = PG_INT64_MIN;
+	state->shared->prune_nvalues = 0;
 	memset(&state->participant, 0, sizeof(state->participant));
 	state->participating = false;
 }

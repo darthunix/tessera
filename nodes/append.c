@@ -81,6 +81,20 @@ typedef struct TessAppendState
 	bool		exec_prune;
 	bool		valid_known;
 	Bitmapset  *valid;
+	/*
+	 * Pruning by a hash join's keys (TessHashJoin): each planned child's
+	 * number here, -1 for one the initial pruning removed; the core's states
+	 * of the join's descriptions over the planned children, by the join's
+	 * parameters (a key, the lowest, the highest); once the join set them,
+	 * the children its keys left and how many they removed.
+	 */
+	int		   *planned_child;
+	PartitionPruneState *join_values;
+	PartitionPruneState *join_range;
+	int			join_params[3];
+	bool		join_set;
+	Bitmapset  *join_valid;
+	int			join_removed;
 	/* The child being read, -1 before the first, and its batch given out. */
 	int			current;
 	bool		done;
@@ -397,14 +411,17 @@ append_begin(CustomScanState *css, EState *estate, int eflags)
 	state->children = palloc_array(PlanState *, Max(state->nchildren, 1));
 	state->inputs = palloc_array(TessInput *, Max(state->nchildren, 1));
 	state->layouts = palloc_array(TessLayout, Max(state->nchildren, 1));
+	state->planned_child = palloc_array(int, state->nplanned);
 	foreach_ptr(Plan, plan, cscan->custom_plans)
 	{
 		int			planned_index = foreach_current_index(plan);
 
 		if (info.child_names[planned_index] == NULL)
 			elog(ERROR, "TessAppend expected batch children");
+		state->planned_child[planned_index] = -1;
 		if (!bms_is_member(planned_index, valid))
 			continue;
+		state->planned_child[planned_index] = index;
 		if (planned_index >= first_partial && index < state->first_partial)
 			state->first_partial = index;
 		state->children[index] = ExecInitNode(plan, estate, eflags);
@@ -478,9 +495,12 @@ send_requests(TessAppendState *state)
 static void
 find_valid(TessAppendState *state)
 {
-	if (!state->exec_prune || state->valid_known)
+	if ((!state->exec_prune && !state->join_set) || state->valid_known)
 		return;
-	state->valid = ExecFindMatchingSubPlans(state->prune, false, NULL);
+	state->valid = state->exec_prune ? ExecFindMatchingSubPlans(state->prune, false, NULL) :
+		bms_add_range(NULL, 0, state->nchildren - 1);
+	if (state->join_set)
+		state->valid = bms_int_members(state->valid, state->join_valid);
 	state->valid_known = true;
 	if (state->shared != NULL)
 	{
@@ -533,7 +553,7 @@ choose_for_leader(TessAppendState *state)
 static int
 next_child(TessAppendState *state, int index)
 {
-	if (state->exec_prune)
+	if (state->exec_prune || state->join_set)
 		return bms_next_member(state->valid, index);
 	return index + 1 < state->nchildren ? index + 1 : -1;
 }
@@ -704,6 +724,17 @@ append_rescan(CustomScanState *css)
 		state->valid = NULL;
 		state->valid_known = false;
 	}
+	/*
+	 * The children a join's keys left stay until its next build sets them
+	 * anew, which may come before the node's rescan: the core rescans a
+	 * child at its first call after the parent's. They are intersected again.
+	 */
+	if (state->join_set)
+	{
+		bms_free(state->valid);
+		state->valid = NULL;
+		state->valid_known = false;
+	}
 	for (int index = 0; index < state->nchildren; index++)
 	{
 		/* The core passes changed parameters to outer and inner plans only. */
@@ -733,6 +764,8 @@ append_explain(CustomScanState *css, List *ancestors, ExplainState *es)
 							   state->nplanned - state->nchildren, es);
 	if (!es->analyze)
 		return;
+	if (state->join_values != NULL)
+		ExplainPropertyInteger("Subplans Removed by Join", NULL, state->join_removed, es);
 	if (state->stats != NULL)
 		totals = tess_shared_stats_totals(state->stats);
 	ExplainPropertyInteger("Batches", NULL, totals != NULL ? totals[0] : state->batches, es);
@@ -792,7 +825,7 @@ append_reinitialize_dsm(CustomScanState *css, ParallelContext *pcxt, void *coord
 	 * ones before, finds them anew to finish the others, where the core's
 	 * would leave that to the workers, new in every scan.
 	 */
-	if (state->exec_prune)
+	if (state->exec_prune || state->join_set)
 	{
 		bms_free(state->valid);
 		state->valid = NULL;
@@ -861,6 +894,103 @@ const CustomScanMethods tess_append_scan_methods = {
 	.CustomName = "TessAppend",
 	.CreateCustomScanState = append_create_state,
 };
+
+/*
+ * Pruning by a hash join's keys (docs/nodes.md, TessHashJoin): the join
+ * above hands the node the descriptions it planned for the relation's
+ * partitions, by its parameters, and the node makes their pruning states
+ * as its own (prune_start: over every planned child, whose numbers the
+ * join's keys then prune). False where node is not TessAppend.
+ */
+bool
+tess_append_join_prune_begin(PlanState *node, const PartitionPruneInfo *values,
+							 const PartitionPruneInfo *range, const int *params)
+{
+	TessAppendState *state = (TessAppendState *) node;
+	Bitmapset  *all;
+
+	if (tess_batch_node_of(node) != &tess_append_node || values == NULL)
+		return false;
+	all = bms_add_range(NULL, 0, state->nplanned - 1);
+	state->join_values = prune_start(state, values, &all);
+	if (range != NULL)
+		state->join_range = prune_start(state, range, &all);
+	memcpy(state->join_params, params, sizeof(state->join_params));
+	return true;
+}
+
+/* A key's value as a parameter of the join's pruning. */
+static void
+set_join_param(TessAppendState *state, int which, int64 value, bool int8)
+{
+	ParamExecData *param = &state->css.ss.ps.state->es_param_exec_vals[state->join_params[which]];
+
+	param->execPlan = NULL;
+	param->value = int8 ? Int64GetDatum(value) : Int32GetDatum((int32) value);
+	param->isnull = false;
+}
+
+static int
+compare_keys(const void *a, const void *b)
+{
+	int64		left = *(const int64 *) a;
+	int64		right = *(const int64 *) b;
+
+	return left < right ? -1 : left > right ? 1 : 0;
+}
+
+/*
+ * The join built its table: the children its keys may pair with, before
+ * the node's first choice. Each distinct key of a short list prunes by the
+ * description of `key = $p`, the children it leaves added up, until every
+ * child is needed; past the list the lowest and the highest by the one of
+ * the range, where the key's family has one; a key the join did not see
+ * leaves no child.
+ */
+void
+tess_append_join_prune(PlanState *node, const TessJoinKeys *keys)
+{
+	TessAppendState *state = (TessAppendState *) node;
+	Bitmapset  *planned = NULL;
+	int			child = -1;
+
+	if (keys->rows == 0)
+		planned = NULL;
+	else if (keys->nvalues >= 0)
+	{
+		qsort(keys->values, keys->nvalues, sizeof(int64), compare_keys);
+		for (int index = 0; index < keys->nvalues; index++)
+		{
+			if (index > 0 && keys->values[index] == keys->values[index - 1])
+				continue;
+			set_join_param(state, 0, keys->values[index], keys->int8);
+			planned = bms_join(planned, ExecFindMatchingSubPlans(state->join_values, false, NULL));
+			if (bms_num_members(planned) >= state->nplanned)
+				break;
+		}
+	}
+	else if (state->join_range != NULL)
+	{
+		set_join_param(state, 1, keys->min, keys->int8);
+		set_join_param(state, 2, keys->max, keys->int8);
+		planned = ExecFindMatchingSubPlans(state->join_range, false, NULL);
+	}
+	else
+		planned = bms_add_range(NULL, 0, state->nplanned - 1);
+	bms_free(state->join_valid);
+	state->join_valid = NULL;
+	while ((child = bms_next_member(planned, child)) >= 0)
+	{
+		if (child < state->nplanned && state->planned_child[child] >= 0)
+			state->join_valid = bms_add_member(state->join_valid, state->planned_child[child]);
+	}
+	bms_free(planned);
+	state->join_removed = state->nchildren - bms_num_members(state->join_valid);
+	state->join_set = true;
+	bms_free(state->valid);
+	state->valid = NULL;
+	state->valid_known = false;
+}
 
 /*
  * A parent's key filter, handed to every child it reads in the child's own

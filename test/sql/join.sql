@@ -324,6 +324,115 @@ SELECT join_same($$SELECT jpprobe.v, jbuild.w FROM jpprobe JOIN jbuild ON jpprob
 SELECT join_same($$SELECT jpprobe.v FROM jpprobe WHERE jpprobe.v > 0 AND jpprobe.v::text LIKE '%1%' AND EXISTS (SELECT 1 FROM jbuild WHERE jbuild.k = jpprobe.k)$$);
 DROP TABLE jpprobe;
 
+-- Pruning by the join's keys: an outer side partitioned by the join key,
+-- whose partitions the inner side's keys cannot pair with are pruned once
+-- the table is built, before the outer side is read (Subplans Removed by
+-- Join, the others never executed). A short inner side lists its keys,
+-- each pruning by itself; past 1024 rows with a key the lowest and the
+-- highest prune as a range, which a hash-partitioned side has none of.
+CREATE FUNCTION join_pruned(query text) RETURNS text
+LANGUAGE plpgsql AS $$
+DECLARE
+    plan jsonb;
+BEGIN
+    EXECUTE format('EXPLAIN (ANALYZE, FORMAT JSON, TIMING OFF, SUMMARY OFF, BUFFERS OFF, COSTS OFF) %s', query)
+        INTO plan;
+    RETURN jsonb_path_query_first(plan,
+        '$[0]."Plan".** ? (@."Custom Plan Provider" == "TessAppend")."Subplans Removed by Join"')::text;
+END $$;
+-- The partitions of jpr no execution read.
+CREATE FUNCTION join_unread(query text) RETURNS bigint
+LANGUAGE plpgsql AS $$
+DECLARE
+    plan jsonb;
+BEGIN
+    EXECUTE format('EXPLAIN (ANALYZE, FORMAT JSON, TIMING OFF, SUMMARY OFF, BUFFERS OFF, COSTS OFF) %s', query)
+        INTO plan;
+    RETURN (SELECT count(DISTINCT node ->> 'Relation Name')
+            FROM jsonb_path_query(plan, 'strict $[0]."Plan".**') AS node
+            WHERE node ->> 'Relation Name' LIKE 'jpr%' AND (node ->> 'Actual Loops')::numeric = 0);
+END $$;
+CREATE TABLE jpr (k int, v int) PARTITION BY RANGE (k);
+CREATE TABLE jpr_1 PARTITION OF jpr FOR VALUES FROM (1) TO (10001);
+CREATE TABLE jpr_2 PARTITION OF jpr FOR VALUES FROM (10001) TO (20001);
+CREATE TABLE jpr_3 PARTITION OF jpr FOR VALUES FROM (20001) TO (30001);
+CREATE TABLE jpr_d PARTITION OF jpr DEFAULT;
+INSERT INTO jpr SELECT g, g % 7 FROM generate_series(1, 32000) AS g;
+INSERT INTO jpr VALUES (NULL, 1);
+CREATE TABLE jpl (k int, v int) PARTITION BY LIST (k);
+CREATE TABLE jpl_1 PARTITION OF jpl FOR VALUES IN (1, 2, 3);
+CREATE TABLE jpl_2 PARTITION OF jpl FOR VALUES IN (4, 5, 6);
+CREATE TABLE jpl_3 PARTITION OF jpl FOR VALUES IN (7, 8, 9);
+INSERT INTO jpl SELECT g % 9 + 1, g FROM generate_series(1, 9000) AS g;
+CREATE TABLE jph (k int, v int) PARTITION BY HASH (k);
+CREATE TABLE jph_0 PARTITION OF jph FOR VALUES WITH (MODULUS 4, REMAINDER 0);
+CREATE TABLE jph_1 PARTITION OF jph FOR VALUES WITH (MODULUS 4, REMAINDER 1);
+CREATE TABLE jph_2 PARTITION OF jph FOR VALUES WITH (MODULUS 4, REMAINDER 2);
+CREATE TABLE jph_3 PARTITION OF jph FOR VALUES WITH (MODULUS 4, REMAINDER 3);
+INSERT INTO jph SELECT g, g % 7 FROM generate_series(1, 20000) AS g;
+-- Two levels: by v, then by the join key k.
+CREATE TABLE jp2 (k int, v int) PARTITION BY RANGE (v);
+CREATE TABLE jp2_a PARTITION OF jp2 FOR VALUES FROM (0) TO (4) PARTITION BY RANGE (k);
+CREATE TABLE jp2_a1 PARTITION OF jp2_a FOR VALUES FROM (1) TO (10001);
+CREATE TABLE jp2_a2 PARTITION OF jp2_a FOR VALUES FROM (10001) TO (20001);
+CREATE TABLE jp2_b PARTITION OF jp2 FOR VALUES FROM (4) TO (7) PARTITION BY RANGE (k);
+CREATE TABLE jp2_b1 PARTITION OF jp2_b FOR VALUES FROM (1) TO (10001);
+CREATE TABLE jp2_b2 PARTITION OF jp2_b FOR VALUES FROM (10001) TO (20001);
+INSERT INTO jp2 SELECT g, g % 7 FROM generate_series(1, 20000) AS g;
+CREATE TABLE jkf AS SELECT g AS k, g % 5 AS w FROM generate_series(10001, 10500) AS g;
+INSERT INTO jkf VALUES (NULL, 1), (NULL, 2);
+CREATE TABLE jkm AS SELECT g AS k, g % 5 AS w FROM generate_series(20001, 22000) AS g;
+CREATE TABLE jk8 AS SELECT g::bigint AS k FROM generate_series(10001, 10300) AS g;
+CREATE TABLE jkn (k int, w int);
+INSERT INTO jkn VALUES (NULL, 1), (NULL, 2);
+CREATE TABLE jkl AS SELECT g AS k FROM generate_series(4, 5) AS g;
+CREATE TABLE jk2 AS SELECT k FROM (VALUES (5), (15005)) AS v(k);
+CREATE TABLE jk19 AS SELECT k FROM (VALUES (1), (9)) AS v(k);
+ANALYZE jpr, jpl, jph, jp2, jkf, jkm, jk8, jkn, jkl, jk2, jk19;
+SELECT join_explain($$SELECT count(*), sum(jpr.v) FROM jpr JOIN jkf ON jpr.k = jkf.k$$);
+SELECT join_same($$SELECT jpr.k, jpr.v, jkf.w FROM jpr JOIN jkf ON jpr.k = jkf.k$$);
+-- By the range of 2000 keys; by an int8 key; by two keys of two
+-- partitions, which add up; a list partitioning by keys at its two ends,
+-- which a range would not prune; a hash one by the listed keys and past
+-- them; the second level of two.
+SELECT join_pruned($$SELECT count(*), sum(jpr.v) FROM jpr JOIN jkm ON jpr.k = jkm.k$$) AS range,
+       join_pruned($$SELECT count(*) FROM jpr JOIN jk8 ON jpr.k = jk8.k$$) AS int8,
+       join_pruned($$SELECT count(*), sum(jpr.v) FROM jpr JOIN jk2 ON jpr.k = jk2.k$$) AS two_keys,
+       join_pruned($$SELECT count(*), sum(jpl.v) FROM jpl JOIN jk19 ON jpl.k = jk19.k$$) AS list,
+       join_pruned($$SELECT count(*), sum(jph.v) FROM jph JOIN jkl ON jph.k = jkl.k$$) AS hash_listed,
+       join_pruned($$SELECT count(*), sum(jph.v) FROM jph JOIN jkm ON jph.k = jkm.k$$) AS hash_range,
+       join_pruned($$SELECT count(*), sum(jp2.v) FROM jp2 JOIN jkf ON jp2.k = jkf.k$$) AS two_levels;
+SELECT join_same($$SELECT jpr.k, jpr.v FROM jpr JOIN jkm ON jpr.k = jkm.k$$);
+SELECT join_same($$SELECT jpr.k, jpr.v FROM jpr JOIN jk8 ON jpr.k = jk8.k$$);
+SELECT join_same($$SELECT jpr.k, jpr.v FROM jpr JOIN jk2 ON jpr.k = jk2.k$$);
+SELECT join_same($$SELECT jpl.k, jpl.v FROM jpl JOIN jk19 ON jpl.k = jk19.k$$);
+SELECT join_same($$SELECT jph.k, jph.v FROM jph JOIN jkl ON jph.k = jkl.k$$);
+SELECT join_same($$SELECT jp2.k, jp2.v FROM jp2 JOIN jkf ON jp2.k = jkf.k$$);
+-- SEMI and RIGHT keep no outer row without a pair and prune; LEFT and ANTI
+-- keep every outer row and do not. Keys that are all NULL pair with no
+-- partition.
+SELECT join_pruned($$SELECT count(*) FROM jpr WHERE EXISTS (SELECT 1 FROM jkf WHERE jkf.k = jpr.k)$$) AS semi,
+       join_pruned($$SELECT count(*), count(jpr.v) FROM jpr RIGHT JOIN jkf ON jpr.k = jkf.k$$) AS right_join,
+       join_pruned($$SELECT count(*), count(jkf.w) FROM jpr LEFT JOIN jkf ON jpr.k = jkf.k$$) AS left_join,
+       join_pruned($$SELECT count(*) FROM jpr WHERE NOT EXISTS (SELECT 1 FROM jkf WHERE jkf.k = jpr.k)$$) AS anti,
+       join_pruned($$SELECT count(*), sum(jpr.v) FROM jpr JOIN jkn ON jpr.k = jkn.k$$) AS all_null;
+SELECT join_same($$SELECT jpr.k FROM jpr WHERE EXISTS (SELECT 1 FROM jkf WHERE jkf.k = jpr.k)$$);
+SELECT join_same($$SELECT jpr.k, jkf.k, jkf.w FROM jpr RIGHT JOIN jkf ON jpr.k = jkf.k$$);
+SELECT join_same($$SELECT jpr.k, jkf.w FROM jpr LEFT JOIN jkf ON jpr.k = jkf.k$$);
+SELECT join_same($$SELECT jpr.k FROM jpr WHERE NOT EXISTS (SELECT 1 FROM jkf WHERE jkf.k = jpr.k)$$);
+-- A rescan: a table kept for the outer side's new parameter prunes again
+-- by the same keys, which go down anew; a table built anew for the inner
+-- side's parameter by its own (the second outer row's pairs with none).
+SELECT join_unread($$SELECT jkl.k, (SELECT count(*) FROM jpr JOIN jkf ON jpr.k = jkf.k WHERE jpr.v = jkl.k) FROM jkl$$) AS kept,
+       join_unread($$SELECT jkl.k, (SELECT count(*) FROM jpr JOIN jkm ON jpr.k = jkm.k WHERE jkm.w = jkl.k) FROM jkl$$) AS rebuilt;
+SELECT join_same($$SELECT jkl.k, (SELECT count(*) FROM jpr JOIN jkf ON jpr.k = jkf.k WHERE jpr.v = jkl.k) FROM jkl$$);
+SELECT join_same($$SELECT jkl.k, (SELECT count(*) FROM jpr JOIN jkm ON jpr.k = jkm.k WHERE jkm.w = jkl.k) FROM jkl$$);
+-- A table that spills keeps its range.
+SET work_mem = '64kB';
+SELECT join_pruned($$SELECT count(*), sum(jpr.v) FROM jpr JOIN jkm ON jpr.k = jkm.k$$) AS spilled;
+SELECT join_same($$SELECT jpr.k, jpr.v, jkm.w FROM jpr JOIN jkm ON jpr.k = jkm.k$$);
+RESET work_mem;
+
 -- Spilling: an inner side of about 3 MB with duplicates, NULL keys and
 -- text of 1 to 60 bytes, past a hash_mem of 1 MB. The first partitions
 -- stay in memory, the others go to disk with the outer rows of theirs,
@@ -660,6 +769,24 @@ RIGHT JOIN (VALUES (1), (2)) AS v(x) ON true$$, false);
 RESET enable_material;
 SELECT count(*) AS temporary_files FROM pg_ls_tmpdir();
 RESET work_mem;
+-- Pruning by the join's keys in parallel: every participant prunes its
+-- partitions alike, by the keys of a shared table, which each adds its
+-- share of before the build's barrier, or of a table of its own; with the
+-- leader and without.
+SET enable_parallel_hash = on;
+SELECT join_pruned($$SELECT count(*), sum(jpr.v) FROM jpr JOIN jkm ON jpr.k = jkm.k$$) AS shared_range,
+       join_pruned($$SELECT count(*), sum(jpr.v) FROM jpr JOIN jkf ON jpr.k = jkf.k$$) AS shared_listed,
+       join_property($$SELECT count(*), sum(jpr.v) FROM jpr JOIN jkm ON jpr.k = jkm.k$$, 'Shared Table') AS shared;
+SELECT join_same($$SELECT jpr.k, jpr.v, jkm.w FROM jpr JOIN jkm ON jpr.k = jkm.k$$);
+SELECT join_same($$SELECT jpr.k, jpr.v, jkf.w FROM jpr JOIN jkf ON jpr.k = jkf.k$$);
+SET enable_parallel_hash = off;
+SELECT join_pruned($$SELECT count(*), sum(jpr.v) FROM jpr JOIN jkm ON jpr.k = jkm.k$$) AS own_range;
+SELECT join_same($$SELECT jpr.k, jpr.v, jkm.w FROM jpr JOIN jkm ON jpr.k = jkm.k$$);
+SET enable_parallel_hash = on;
+SET parallel_leader_participation = off;
+SELECT join_same($$SELECT jpr.k, jpr.v, jkm.w FROM jpr JOIN jkm ON jpr.k = jkm.k$$);
+SELECT join_same($$SELECT jpr.k, jpr.v, jkf.w FROM jpr JOIN jkf ON jpr.k = jkf.k$$);
+RESET parallel_leader_participation;
 RESET enable_parallel_hash;
 RESET max_parallel_workers_per_gather;
 RESET parallel_setup_cost;
@@ -683,6 +810,7 @@ EXPLAIN (COSTS OFF) SELECT count(*) FROM jf JOIN jd ON jf.fk = jd.id;
 RESET tessera.enable;
 
 DROP TABLE jd, jf, jdup, jsmall, jempty, jgrow, jbig, jpair, jbuild, jprobe, jhit, jref, jrefprobe, jrefgrow, jsb, jsp, jsskew, jsouter, jsheavy;
+DROP TABLE jpr, jpl, jph, jp2, jkf, jkm, jk8, jkn, jkl, jk2, jk19;
 DROP FUNCTION jskew();
 DROP FUNCTION jwide();
 DROP FUNCTION join_property(text, text);

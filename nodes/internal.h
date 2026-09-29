@@ -24,7 +24,7 @@
 #define TESS_FILTER_DATA "tessera.filter"
 #define TESS_FILTER_DATA_VERSION 1
 #define TESS_HASH_JOIN_DATA "tessera.hash_join"
-#define TESS_HASH_JOIN_DATA_VERSION 7
+#define TESS_HASH_JOIN_DATA_VERSION 8
 #define TESS_SORT_DATA "tessera.sort"
 #define TESS_SORT_DATA_VERSION 2
 #define TESS_GATHER_DATA "tessera.gather"
@@ -206,6 +206,25 @@ extern Path *tess_gather_merge_path(PlannerInfo *root, RelOptInfo *rel, Path *so
 									PathTarget *target);
 
 extern const TessNode tess_append_node;
+/*
+ * A hash join's keys of the column that prunes its outer side's partitions,
+ * once built (hashjoin.c): the inner rows with a key, whether its words are
+ * 8 bytes, the lowest and the highest, and the keys themselves while few
+ * (nvalues, -1 past them).
+ */
+typedef struct TessJoinKeys
+{
+	uint64		rows;
+	bool		int8;
+	int64		min;
+	int64		max;
+	int			nvalues;
+	int64	   *values;
+} TessJoinKeys;
+/* TessAppend's pruning by a hash join's keys: see append.c. */
+extern bool tess_append_join_prune_begin(PlanState *node, const PartitionPruneInfo *values,
+										 const PartitionPruneInfo *range, const int *params);
+extern void tess_append_join_prune(PlanState *node, const TessJoinKeys *keys);
 extern const CustomScanMethods tess_append_scan_methods;
 
 #endif							/* TESSERA_NODES_INTERNAL_H */

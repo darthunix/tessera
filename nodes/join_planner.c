@@ -1,15 +1,19 @@
 #include "postgres.h"
 
+#include "access/stratnum.h"
 #include "catalog/pg_type_d.h"
 #include "miscadmin.h"
 #include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
 #include "optimizer/cost.h"
 #include "optimizer/optimizer.h"
+#include "optimizer/paramassign.h"
 #include "optimizer/pathnode.h"
 #include "optimizer/paths.h"
 #include "optimizer/restrictinfo.h"
+#include "partitioning/partprune.h"
 #include "utils/fmgroids.h"
+#include "utils/lsyscache.h"
 #include "utils/typcache.h"
 
 #include "tessera/expr.h"
@@ -541,6 +545,131 @@ align_nullingrels(Node *node, List *scan)
  * keys and the residual clauses' columns, which custom_exprs refers to; the node's targets are columns of it. Each entry is a column
  * of one child's batches, which the plan data records.
  */
+/* A parameter of execution of the inner key's type, which the join sets. */
+static Param *
+prune_param(PlannerInfo *root, const Var *inner)
+{
+	Param	   *param = makeNode(Param);
+
+	param->paramkind = PARAM_EXEC;
+	param->paramid = assign_special_exec_param(root);
+	param->paramtype = inner->vartype;
+	param->paramtypmod = inner->vartypmod;
+	param->paramcollid = inner->varcollid;
+	param->location = -1;
+	return param;
+}
+
+/* outer op param, op an operator of the given strategy of the family, or NULL. */
+static Expr *
+prune_clause(Oid opno, Var *outer, Param *param)
+{
+	Expr	   *clause;
+
+	if (!OidIsValid(opno))
+		return NULL;
+	clause = make_opclause(opno, BOOLOID, false, (Expr *) copyObject(outer), (Expr *) param,
+						   InvalidOid, param->paramcollid);
+	set_opfuncid((OpExpr *) clause);
+	return clause;
+}
+
+/*
+ * The core's pruning description of the relation's partitions for
+ * clauses, as prune_info of append.c makes it, off the planner's list; NULL
+ * where the clauses prune none.
+ */
+static PartitionPruneInfo *
+prune_description(PlannerInfo *root, RelOptInfo *rel, List *children, List *clauses)
+{
+	int			index = make_partition_pruneinfo(root, rel, children, clauses);
+	PartitionPruneInfo *info;
+
+	if (index < 0)
+		return NULL;
+	info = llast_node(PartitionPruneInfo, root->partPruneInfos);
+	if (index != list_length(root->partPruneInfos) - 1 ||
+		!bms_equal(info->relids, rel->relids))
+		elog(ERROR, "TessHashJoin found another pruning description than its own");
+	root->partPruneInfos = list_delete_last(root->partPruneInfos);
+	return info;
+}
+
+/*
+ * Pruning of a partitioned outer side by the inner side's keys: where the
+ * outer path is TessAppend over a partitioned relation, the join keeps no
+ * outer row without a pair (INNER, SEMI, RIGHT) and a key of words has the
+ * partition key on its outer side, the core's pruning steps for
+ * `key = $p` and for `key >= $lo AND key <= $hi` (where the key's btree
+ * family compares the two types), over parameters of execution the join
+ * sets from its keys once built (docs/nodes.md). No change of the core's
+ * pruning, which takes no column of another relation: the parameters stand
+ * for the inner side's values. Its plan data: the key's number, the three
+ * parameters and the two descriptions; -1 as the key where none prunes.
+ */
+static void
+write_join_prune(TessPlanWriter *writer, PlannerInfo *root, const TessPlanChild *outer,
+				 List *hash_clauses, List *outer_keys, List *inner_keys, List *hashers,
+				 JoinType jointype)
+{
+	RelOptInfo *rel = outer->path->parent;
+	List	   *children;
+
+	if (enable_partition_pruning && tess_path_node(outer->path) == &tess_append_node &&
+		IS_SIMPLE_REL(rel) && rel->part_scheme != NULL && rel->part_scheme->partnatts > 0 &&
+		(jointype == JOIN_INNER || jointype == JOIN_SEMI || jointype == JOIN_RIGHT))
+	{
+		children = ((CustomPath *) outer->path)->custom_paths;
+		for (int key = 0; key < list_length(outer_keys); key++)
+		{
+			OpExpr	   *clause = list_nth_node(OpExpr, hash_clauses, key);
+			Var		   *outer_var = copyObject(list_nth_node(Var, outer_keys, key));
+			Var		   *inner_var = list_nth_node(Var, inner_keys, key);
+			Node	   *left = strip_implicit_coercions(linitial(clause->args));
+			Oid			opno = IsA(left, Var) && ((Var *) left)->varno == outer_var->varno &&
+				((Var *) left)->varattno == outer_var->varattno ?
+				clause->opno : get_commutator(clause->opno);
+			Param	   *value = prune_param(root, inner_var);
+			Param	   *low = prune_param(root, inner_var);
+			Param	   *high = prune_param(root, inner_var);
+			Oid			family = rel->part_scheme->partopfamily[0];
+			Oid			type = rel->part_scheme->partopcintype[0];
+			Expr	   *lower;
+			Expr	   *upper;
+			PartitionPruneInfo *values;
+			PartitionPruneInfo *range = NULL;
+
+			if (list_nth_int(hashers, key) != 0 || list_length(clause->args) != 2)
+				continue;
+			/* The partition key as the relation's scan sees it, below any outer join. */
+			outer_var->varnullingrels = NULL;
+			values = prune_description(root, rel, children,
+									   list_make1(prune_clause(opno, outer_var, value)));
+			if (values == NULL)
+				continue;
+			lower = prune_clause(get_opfamily_member(family, type, inner_var->vartype,
+													 BTGreaterEqualStrategyNumber),
+								 outer_var, low);
+			upper = prune_clause(get_opfamily_member(family, type, inner_var->vartype,
+													 BTLessEqualStrategyNumber),
+								 outer_var, high);
+			if (lower != NULL && upper != NULL)
+				range = prune_description(root, rel, children, list_make2(lower, upper));
+			tess_plan_write_int(writer, "prune_key", key);
+			tess_plan_write_int_list(writer, "prune_params",
+									 list_make3_int(value->paramid, low->paramid,
+													high->paramid));
+			tess_plan_write_node(writer, "prune_values", (Node *) values);
+			tess_plan_write_node(writer, "prune_range", (Node *) range);
+			return;
+		}
+	}
+	tess_plan_write_int(writer, "prune_key", -1);
+	tess_plan_write_int_list(writer, "prune_params", NIL);
+	tess_plan_write_node(writer, "prune_values", NULL);
+	tess_plan_write_node(writer, "prune_range", NULL);
+}
+
 static Plan *
 join_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 		  List *tlist, List *clauses, List *custom_plans)
@@ -645,6 +774,8 @@ join_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 	tess_plan_write_int(writer, "inner_rows", lsecond_int(lthird(data)));
 	tess_plan_write_int(writer, "shared", list_length(lthird(data)) > 3 ?
 						lfourth_int(lthird(data)) : 0);
+	write_join_prune(writer, root, &outer, hash_clauses, outer_keys, inner_keys,
+					 list_nth(data, 3), (JoinType) lthird_int(lthird(data)));
 
 	config.methods = &tess_hash_join_scan_methods;
 	config.layout_policy = TESS_LAYOUT_PROJECTED;
