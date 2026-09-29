@@ -181,6 +181,17 @@ past the page so that the core fetches another. The batch pins the page
 until it is released, so a column is deformed only when a consumer asks
 for it, for the rows it asks for, and by-reference values, external
 TOAST pointers included, are read from the page as a slot would give them.
+A numeric column the batch reads as decimals too, once a batch, for a
+consumer that asks (`accept_decimals`): the rows of at most 18 digits at the
+scale of the batch's first such value as their int64, the others as their
+numerics, the rows read kept for the next request. The expressions of a
+node ask for them only for a column two or more of them read
+(`tess_expr_share_inputs`, called by the projection and the qual over their
+expressions), where one decode serves all: `sum(n)`, `avg(n)`, `min(n)` and
+`max(n)` over 2 M rows of `numeric(15,2)` 59 ms before and 46 after,
+`min(n * 1.08)`, `max(n - 0.5)` 71 and 67, `n BETWEEN 20000 AND 60000` 29
+and 27; a column one expression reads it decodes itself, as before, since
+the batch's pass costs a write and a read more a row.
 A scan the core does not run in page mode, which a non-MVCC snapshot
 would give, is read one tuple at a time through the same batch. Computed
 targets are the projection provider's ([runtime.md](runtime.md)): the

@@ -181,6 +181,12 @@ struct TessExpr
 	Datum	   *numerics;
 	TessDatumColumn result_numerics;
 	bool		numerics_ready;
+	/*
+	 * Another expression of the same node reads the input column too
+	 * (tess_expr_share_inputs): its provider's decimals, read once a batch,
+	 * serve both, where one reader would decode it cheaper itself.
+	 */
+	bool		input_shared;
 	TessRowMask non_nulls;
 	bool		ready;
 	/* A bare column's mask is built when asked for: a filter never asks. */
@@ -1560,6 +1566,75 @@ finish_step(TessExpr *expr, int set, TessResultFormat format)
 }
 
 /*
+ * Whether a consumer of decimals should read expr's: a chain's are made
+ * anyway, a bare column's cost its provider a pass that pays only when
+ * another expression reads the column too.
+ */
+static inline bool
+wants_decimals(const TessExpr *expr)
+{
+	return expr->nsteps > 0 || expr->input_shared;
+}
+
+static void collect_cond_inputs(Cond *cond, List **inputs);
+
+/* The expressions of a tree that read a column of the batch. */
+static void
+collect_inputs(TessExpr *expr, List **inputs)
+{
+	if (expr == NULL)
+		return;
+	if (expr->column >= 0)
+		*inputs = lappend(*inputs, expr);
+	for (int index = 0; index < expr->nsteps; index++)
+		collect_inputs(expr->steps[index].operand, inputs);
+	if (expr->filter)
+		collect_inputs(expr->predicate.operand, inputs);
+	if (expr->cond != NULL)
+		collect_cond_inputs(expr->cond, inputs);
+	if (expr->choice != NULL)
+	{
+		Choice	   *choice = expr->choice;
+
+		for (int index = 0; index < choice->nvalues; index++)
+		{
+			collect_inputs(choice->values[index], inputs);
+			if (choice->conds != NULL && index < choice->nvalues - 1)
+				collect_cond_inputs(choice->conds[index], inputs);
+		}
+		collect_inputs(choice->right, inputs);
+	}
+}
+
+static void
+collect_cond_inputs(Cond *cond, List **inputs)
+{
+	if (cond == NULL)
+		return;
+	collect_inputs(cond->expr, inputs);
+	for (int index = 0; index < cond->nargs; index++)
+		collect_cond_inputs(cond->args[index], inputs);
+}
+
+void
+tess_expr_share_inputs(TessExpr **exprs, int nexprs)
+{
+	List	   *inputs = NIL;
+
+	for (int index = 0; index < nexprs; index++)
+		collect_inputs(exprs[index], &inputs);
+	foreach_ptr(TessExpr, reader, inputs)
+	{
+		int			readers = 0;
+
+		foreach_ptr(TessExpr, other, inputs)
+			readers += other->column == reader->column;
+		reader->input_shared = readers > 1;
+	}
+	list_free(inputs);
+}
+
+/*
  * The call's arguments: the column, the operand computed over the current
  * selection, and the scalars; true when a scalar is NULL.
  */
@@ -1579,7 +1654,7 @@ build_args(TessExpr *expr, Step *step, const TessDatumColumn *column,
 		{
 			/* The selection may have narrowed since the operand was computed. */
 			step->operand->ready = false;
-			args[position].column = step->reads_decimals ?
+			args[position].column = step->reads_decimals && wants_decimals(step->operand) ?
 				tess_expr_get_decimal_column(step->operand) :
 				tess_expr_get_column(step->operand);
 		}
@@ -1675,6 +1750,11 @@ make_numerics(TessExpr *expr, const TessDatumColumn *from, TessDatumColumn *to)
 	int			scale = from->decimal_scale;
 
 	memcpy(numerics, from->values, sizeof(Datum) * nrows);
+	/* A bare column's decimals come before any step has made the context. */
+	if (expr->values_context == NULL)
+		expr->values_context = AllocSetContextCreate(expr->context,
+													 "Tessera expression values",
+													 ALLOCSET_DEFAULT_SIZES);
 	for (int word = 0; word < nwords; word++)
 	{
 		uint64		bits = decimals[word];
@@ -1731,6 +1811,14 @@ expr_column(TessExpr *expr, bool decimals)
 	ensure_capacity(expr, nrows);
 	if (expr->column >= 0)
 	{
+		/*
+		 * A numeric column another expression of the node reads too: its
+		 * decimals, read once a batch by its provider, for a first step
+		 * that reads them, or for the consumer of the bare column that
+		 * asked.
+		 */
+		current.accept_decimals = expr->input_shared &&
+			(expr->nsteps > 0 ? expr->steps[0].reads_decimals : decimals);
 		batch->ops->get_datum_column(batch, expr->column, expr->rows,
 									 expr->purpose, &current);
 		if (current.values == NULL || current.isnull == NULL ||
@@ -2009,7 +2097,8 @@ eval_cond(Cond *cond, const TessRowMask *rows, bool want_unknown)
 				/* x once, over the selection. */
 				memcpy(rest, rows->bits, sizeof(uint64) * nwords);
 				bind_selection(cond->expr, &cond->rest);
-				column = (cond->function->flags & TESS_FUNCTION_DECIMALS) != 0 ?
+				column = (cond->function->flags & TESS_FUNCTION_DECIMALS) != 0 &&
+					wants_decimals(cond->expr) ?
 					tess_expr_get_decimal_column(cond->expr) :
 					tess_expr_get_column(cond->expr);
 				if (want_unknown)
@@ -2504,7 +2593,7 @@ tess_expr_apply_filter(TessExpr *expr)
 				   sizeof(uint64) * tess_row_mask_word_count(expr->rows->nrows));
 		return;
 	}
-	column = expr_column(expr, expr->predicate.reads_decimals);
+	column = expr_column(expr, expr->predicate.reads_decimals && wants_decimals(expr));
 	if (build_args(expr, &expr->predicate, column, args))
 	{
 		/* A NULL scalar makes the strict predicate false everywhere. */

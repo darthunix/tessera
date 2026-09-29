@@ -148,6 +148,16 @@ tess_qual_create(const TessQualConfig *config)
 		}
 		first = end;
 	}
+	{
+		TessExpr  **filters = palloc_array(TessExpr *, Max(nclauses, 1));
+		int			nfilters = 0;
+
+		for (int stage = 0; stage < qual->nstages; stage++)
+			for (int filter = 0; filter < qual->stages[stage].nfilters; filter++)
+				filters[nfilters++] = qual->stages[stage].filters[filter];
+		tess_expr_share_inputs(filters, nfilters);
+		pfree(filters);
+	}
 	MemoryContextSwitchTo(oldcontext);
 	return qual;
 }

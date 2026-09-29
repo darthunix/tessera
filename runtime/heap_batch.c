@@ -1,10 +1,12 @@
 #include "postgres.h"
 
 #include "access/htup_details.h"
+#include "catalog/pg_type_d.h"
 #include "executor/tuptable.h"
 #include "storage/bufmgr.h"
 #include "utils/memutils.h"
 
+#include "tessera/decimal.h"
 #include "tessera/heap_deform.h"
 #include "tessera/runtime.h"
 
@@ -32,6 +34,17 @@ struct TessHeapBatch
 	bool	   *isnull;
 	/* Per column, the rows whose value was deformed: column * nwords. */
 	uint64	   *deformed;
+	/*
+	 * A numeric column's decimals, made once a batch for a consumer that
+	 * reads them (TessDatumColumn.accept_decimals): per column, allocated
+	 * at its first such request, the values with a decimal's int64 in place
+	 * of its numeric, the rows read, those that are decimals, and the scale
+	 * the batch's first decimal fixed (-1 before it).
+	 */
+	Datum	  **decimal_values;
+	uint64	  **decimal_read;
+	uint64	  **decimal_rows;
+	int		   *decimal_scale;
 	uint64	   *selection;
 	int			ncolumns;
 	int			capacity;
@@ -138,6 +151,84 @@ deform_cached(TessHeapBatch *heap, int column, const TessRowMask *rows,
 	}
 }
 
+/*
+ * A numeric column's requested rows read as decimals, once a batch: a
+ * value of at most 18 digits at the scale of the batch's first decimal
+ * goes as its int64 and its bit, any other (NULL, NaN, longer, of another
+ * scale) as its numeric, so every consumer of the column's decimals reads
+ * the same values without reading a numeric again.
+ */
+static void
+decimal_column(TessHeapBatch *heap, int column, const TessRowMask *rows,
+			   TessDatumColumn *result)
+{
+	const Datum *values = &heap->values[(Size) column * heap->capacity];
+	const bool *isnull = &heap->isnull[(Size) column * heap->capacity];
+	Datum	   *decimals;
+	uint64	   *read;
+	uint64	   *bits;
+	int			scale;
+	int			nwords = tess_row_mask_word_count(rows->nrows);
+
+	if (heap->decimal_values == NULL)
+	{
+		MemoryContext context = GetMemoryChunkContext(heap);
+
+		heap->decimal_values = MemoryContextAllocZero(context, sizeof(Datum *) * heap->ncolumns);
+		heap->decimal_read = MemoryContextAllocZero(context, sizeof(uint64 *) * heap->ncolumns);
+		heap->decimal_rows = MemoryContextAllocZero(context, sizeof(uint64 *) * heap->ncolumns);
+		heap->decimal_scale = MemoryContextAlloc(context, sizeof(int) * heap->ncolumns);
+		for (int index = 0; index < heap->ncolumns; index++)
+			heap->decimal_scale[index] = -1;
+	}
+	if (heap->decimal_values[column] == NULL)
+	{
+		MemoryContext context = GetMemoryChunkContext(heap);
+
+		heap->decimal_values[column] = MemoryContextAllocZero(context,
+															  sizeof(Datum) * heap->capacity);
+		heap->decimal_read[column] = MemoryContextAllocZero(context,
+															sizeof(uint64) * heap->nwords);
+		heap->decimal_rows[column] = MemoryContextAllocZero(context,
+															sizeof(uint64) * heap->nwords);
+	}
+	decimals = heap->decimal_values[column];
+	read = heap->decimal_read[column];
+	bits = heap->decimal_rows[column];
+	scale = heap->decimal_scale[column];
+	for (int word = 0; word < nwords; word++)
+	{
+		uint64		pending = rows->bits[word] & ~read[word];
+		uint64		found = 0;
+
+		for (; pending != 0; pending &= pending - 1)
+		{
+			int			bit = pg_rightmost_one_pos64(pending);
+			int			row = word * 64 + bit;
+			Datum		value = values[row];
+			TessDecimal decimal;
+
+			if (!isnull[row] && tess_decimal_of(value, &decimal))
+			{
+				if (scale < 0)
+					scale = decimal.scale;
+				if (decimal.scale == scale)
+				{
+					value = Int64GetDatum(decimal.value);
+					found |= UINT64CONST(1) << bit;
+				}
+			}
+			decimals[row] = value;
+		}
+		bits[word] |= found;
+		read[word] |= rows->bits[word];
+	}
+	heap->decimal_scale[column] = scale;
+	result->values = decimals;
+	result->decimal_rows = bits;
+	result->decimal_scale = scale;
+}
+
 static void
 heap_get_datum_column(TessBatch *batch, int column, const TessRowMask *rows,
 					  TessColumnPurpose purpose, TessDatumColumn *result)
@@ -180,6 +271,13 @@ heap_get_datum_column(TessBatch *batch, int column, const TessRowMask *rows,
 	result->values = &heap->values[(Size) column * heap->capacity];
 	result->isnull = &heap->isnull[(Size) column * heap->capacity];
 	result->nrows = batch->rows.nrows;
+	if (result->struct_size >= TESS_DATUM_COLUMN_DECIMALS_SIZE)
+	{
+		result->decimal_rows = NULL;
+		if (result->accept_decimals && heap->tuple_desc != NULL &&
+			TupleDescAttr(heap->tuple_desc, column)->atttypid == NUMERICOID)
+			decimal_column(heap, column, rows, result);
+	}
 }
 
 static void
@@ -299,6 +397,15 @@ tess_heap_batch_reset(TessHeapBatch *heap)
 {
 	unpin(heap);
 	memset(heap->deformed, 0, sizeof(uint64) * (Size) heap->ncolumns * heap->nwords);
+	if (heap->decimal_values != NULL)
+		for (int column = 0; column < heap->ncolumns; column++)
+		{
+			heap->decimal_scale[column] = -1;
+			if (heap->decimal_values[column] == NULL)
+				continue;
+			memset(heap->decimal_read[column], 0, sizeof(uint64) * heap->nwords);
+			memset(heap->decimal_rows[column], 0, sizeof(uint64) * heap->nwords);
+		}
 	heap->nrows = 0;
 	heap->sealed = false;
 	heap->batch.rows.nrows = 0;

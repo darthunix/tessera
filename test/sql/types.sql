@@ -492,6 +492,10 @@ SELECT types_same($$SELECT g, sum(p * (1 - d3)), avg(p * 2), min(p * 1.08), max(
 SELECT types_same($$SELECT g, sum(wide * wide), max(wide * 1000), min(wide * -1000), avg(wide * wide) FROM types_nm GROUP BY 1$$);
 SELECT types_same($$SELECT sum(p * (1 - d3)), avg(p * 2), min(p * 1.08), max(p - 0.5), sum(wide * wide), max(wide * d3) FROM types_nm WHERE p <> 'NaN'$$);
 SELECT types_same($$SELECT p * 2, count(*), max(p * 2), sum(p * 2) FROM types_nm GROUP BY 1$$);
+-- A column read as decimals once a batch, by every consumer that asks: its
+-- aggregates and its expressions, while its key gets its numerics.
+SELECT types_same($$SELECT p, count(*), sum(p), max(p), min(p * 2), avg(p - d3) FROM types_nm GROUP BY 1$$);
+SELECT types_same($$SELECT g, sum(p), avg(p), min(p), max(p), sum(p * 1.5), max(p - 1) FROM types_nm WHERE p > -500 GROUP BY 1$$);
 SELECT types_same($$SELECT g, sum(DISTINCT p * 2), variance(p * 3), max(CASE WHEN g > 5 THEN p * 2 ELSE p - 1 END) FROM types_nm WHERE p <> 'NaN' GROUP BY 1$$);
 SET work_mem = '64kB';
 SELECT types_same($$SELECT count(*), sum(x), max(y) FROM (SELECT id, sum(p * 2) AS x, max(p * d3) AS y FROM types_nm GROUP BY id) AS t$$);

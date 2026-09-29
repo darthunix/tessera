@@ -140,6 +140,16 @@ tess_projection_create(const TessProjectionConfig *config)
 												  sizeof(Computed) * projection->ncomputed);
 	foreach_ptr(TargetEntry, entry, config->computed)
 		init_computed(&projection->computed[index++], (Node *) entry->expr, config);
+	{
+		TessExpr  **chains = palloc_array(TessExpr *, Max(projection->ncomputed, 1));
+		int			nchains = 0;
+
+		for (int computed = 0; computed < projection->ncomputed; computed++)
+			if (projection->computed[computed].chain != NULL)
+				chains[nchains++] = projection->computed[computed].chain;
+		tess_expr_share_inputs(chains, nchains);
+		pfree(chains);
+	}
 	projection->batch.abi_version = TESS_BATCH_ABI_VERSION;
 	projection->batch.struct_size = sizeof(TessBatch);
 	projection->batch.ops = &projection_ops;

@@ -78,6 +78,14 @@ extern const TessDatumColumn *tess_expr_get_column(TessExpr *expr);
  */
 extern const TessDatumColumn *tess_expr_get_decimal_column(TessExpr *expr);
 
+/*
+ * Mark the expressions of one node whose input column another of them
+ * reads too: those ask the column's provider for its decimals, read once
+ * a batch for all of them, where a single reader decodes its numerics
+ * itself.
+ */
+extern void tess_expr_share_inputs(TessExpr **exprs, int nexprs);
+
 /* The selected rows whose result is not NULL. */
 extern const TessRowMask *tess_expr_non_nulls(TessExpr *expr);
 
