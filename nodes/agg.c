@@ -1,6 +1,7 @@
 #include "postgres.h"
 
 #include "access/htup_details.h"
+#include "access/nbtree.h"
 #include "access/parallel.h"
 #include "catalog/pg_aggregate.h"
 #include "catalog/pg_type_d.h"
@@ -202,6 +203,14 @@ typedef struct AggValue
  * the value of its number. The dictionary goes with the table it numbers:
  * made anew with every table, so such groupings spill their rows, with
  * the values, not their records.
+ *
+ * Equal values may differ in form (numeric 1.0 and 1.00, float8 -0 and 0,
+ * text under a case-insensitive collation), and a number keeps the first
+ * form of the whole input, which with several keys need not be a group's
+ * first row's, the form the core's hashed grouping puts out. A group made
+ * by a row of another form keeps that form, by its record, among the
+ * dictionary's forms; a single key's group is its value's, its first row
+ * the value's first.
  */
 typedef struct KeyEntry
 {
@@ -210,6 +219,13 @@ typedef struct KeyEntry
 	uint32		number;
 	char		status;
 } KeyEntry;
+
+typedef struct KeyForm
+{
+	uint32		ref;
+	char		status;
+	Datum		value;
+} KeyForm;
 
 typedef struct KeyDict
 {
@@ -242,6 +258,13 @@ typedef struct KeyDict
 	int			capacity;
 	Datum	   *batch_numbers;
 	uint32	   *batch_hashes;
+	/*
+	 * A key of several in a grouping whose equal values may differ in form:
+	 * the groups whose first row's form is not their number's, by their
+	 * records, a copy of the form each; NULL while there is none.
+	 */
+	bool		forms;
+	struct keyform_hash *form_table;
 } KeyDict;
 
 /* Ask memory for an address the loop reads soon, where the compiler can. */
@@ -301,6 +324,17 @@ keydict_value_equal(KeyDict *dict, Datum a, Datum b)
 #define SH_SCOPE static inline
 #define SH_STORE_HASH
 #define SH_GET_HASH(tb, a) a->hash
+#define SH_DEFINE
+#define SH_DECLARE
+#include "lib/simplehash.h"
+
+#define SH_PREFIX keyform
+#define SH_ELEMENT_TYPE KeyForm
+#define SH_KEY_TYPE uint32
+#define SH_KEY ref
+#define SH_HASH_KEY(tb, key) murmurhash32(key)
+#define SH_EQUAL(tb, a, b) ((a) == (b))
+#define SH_SCOPE static inline
 #define SH_DEFINE
 #define SH_DECLARE
 #include "lib/simplehash.h"
@@ -405,6 +439,7 @@ typedef struct TessAggState
 	 */
 	KeyDict    *dicts[TESS_TABLE_MAX_KEYS];
 	bool		has_dicts;
+	bool		has_forms;
 	bool		row_spill;
 	uint32	   *value_hashes;
 	int			value_hash_rows;
@@ -2210,6 +2245,7 @@ agg_begin(CustomScanState *css, EState *estate, int eflags)
 			state->dicts[position] = key_dict_create(state, (Oid) list_nth_int(eqops, position),
 													exprType(key), exprCollation(key));
 			state->has_dicts = true;
+			state->has_forms |= state->dicts[position]->forms;
 			state->row_spill = true;
 		}
 		else if (!tess_word_key_kind(exprType(key), &state->kinds[position]))
@@ -3988,6 +4024,28 @@ agg_spill_memory(TessAggState *state)
 /* A computed column of the projection's wrapper, checked. */
 /* ------------------------------------------------------ keys through dictionaries */
 
+/*
+ * Whether equal values of the key's type are equal bytes: compared by
+ * them (text under a deterministic collation, bytea), or so under any
+ * collation by the type's default B-tree family (btequalimage: oid, uuid,
+ * ...). Not for numeric, float, text under a nondeterministic collation
+ * (text_pattern_ops says so of its bytewise order only), bpchar, whose
+ * equality ignores trailing blanks, arrays, ranges or a family that does
+ * not say.
+ */
+static bool
+key_dict_images_equal(KeyDict *dict, Oid type)
+{
+	TypeCacheEntry *entry;
+
+	if (dict->bytewise)
+		return true;
+	entry = lookup_type_cache(type, TYPECACHE_BTREE_OPFAMILY);
+	return OidIsValid(entry->btree_opf) &&
+		get_opfamily_proc(entry->btree_opf, entry->btree_opintype, entry->btree_opintype,
+						  BTEQUALIMAGE_PROC) == F_BTEQUALIMAGE;
+}
+
 static KeyDict *
 key_dict_create(TessAggState *state, Oid eqop, Oid type, Oid collation)
 {
@@ -4005,6 +4063,7 @@ key_dict_create(TessAggState *state, Oid eqop, Oid type, Oid collation)
 		(get_opcode(eqop) == F_TEXTEQ && hashproc == F_HASHTEXT &&
 		 OidIsValid(collation) && pg_newlocale_from_collation(collation)->deterministic);
 	get_typlenbyval(type, &dict->typlen, &dict->typbyval);
+	dict->forms = state->nkeys > 1 && !key_dict_images_equal(dict, type);
 	dict->context = AllocSetContextCreate(estate->es_query_cxt, "TessAgg key values",
 										  ALLOCSET_DEFAULT_SIZES);
 	return dict;
@@ -4030,6 +4089,7 @@ key_dict_reset(KeyDict *dict, uint64 values)
 	dict->block = NULL;
 	dict->block_used = 0;
 	dict->block_len = 0;
+	dict->form_table = NULL;
 }
 
 #define KEYDICT_BLOCK_LEN (64 * 1024)
@@ -4141,6 +4201,60 @@ keydict_numbers(KeyDict *dict, const TessDatumColumn *column, const TessRowMask 
 			KeyEntry   *entry = keydict_lookup_hash(dict->table, value, hash);
 
 			numbers[row] = Int64GetDatum(entry != NULL ? (int64) entry->number : -1);
+		}
+	}
+}
+
+/* As datum_image_eq, without its calls for a value whose bytes are at hand. */
+static inline bool
+keydict_same_image(KeyDict *dict, Datum a, Datum b)
+{
+	if (dict->typbyval)
+		return a == b;
+	if (dict->typlen == -1 && keydict_plain(a) && keydict_plain(b))
+	{
+		Size		len = VARSIZE_ANY_EXHDR(DatumGetPointer(a));
+
+		return len == VARSIZE_ANY_EXHDR(DatumGetPointer(b)) &&
+			memcmp(VARDATA_ANY(DatumGetPointer(a)), VARDATA_ANY(DatumGetPointer(b)),
+				   len) == 0;
+	}
+	return datum_image_eq(a, b, dict->typbyval, dict->typlen);
+}
+
+/*
+ * The groups the rows of inserted made, by keys of several forms: a group
+ * whose row came in another form than its number's first keeps a copy of
+ * it by its record. Once per group, so a copy per group at most.
+ */
+static void
+key_forms(TessAggState *state, const TessRowMask *inserted)
+{
+	for (int key = 0; key < state->nkeys; key++)
+	{
+		KeyDict    *dict = state->dicts[key];
+		const TessDatumColumn *column = &state->key_columns[key];
+		int			row = -1;
+
+		if (dict == NULL || !dict->forms)
+			continue;
+		while ((row = tess_row_mask_next(inserted, row)) >= 0)
+		{
+			Datum		value = column->values[row];
+			MemoryContext old;
+			KeyForm    *form;
+			bool		found;
+
+			if (column->isnull[row] ||
+				keydict_same_image(dict, value,
+								   dict->values[DatumGetInt64(dict->batch_numbers[row])]))
+				continue;
+			old = MemoryContextSwitchTo(dict->context);
+			if (dict->form_table == NULL)
+				dict->form_table = keyform_create(dict->context, 64, NULL);
+			form = keyform_insert(dict->form_table, state->offsets[row], &found);
+			form->value = keydict_copy(dict, value);
+			MemoryContextSwitchTo(old);
 		}
 	}
 }
@@ -4762,6 +4876,8 @@ group_batch(TessAggState *state, TessBatch *batch)
 		else
 			add_chunk(state);
 	}
+	if (state->has_forms)
+		key_forms(state, &inserted);
 	for (int index = 0; index < state->nvalues; index++)
 	{
 		AggValue   *value = &state->values[index];
@@ -5080,12 +5196,23 @@ next_chunk(TessAggState *state)
 														  key, state->key_values[key],
 														  state->key_isnull[key],
 														  &state->status));
-			/* A number goes out as its value. */
+			/* A number goes out as its value, or as the group's own form. */
 			if (state->dicts[key] != NULL)
+			{
+				KeyDict    *dict = state->dicts[key];
+
 				for (int group = 0; group < count; group++)
 					if (!state->key_isnull[key][group])
 						state->key_values[key][group] =
-							state->dicts[key]->values[DatumGetInt64(state->key_values[key][group])];
+							dict->values[DatumGetInt64(state->key_values[key][group])];
+				for (int group = 0; dict->form_table != NULL && group < count; group++)
+				{
+					KeyForm    *form = keyform_lookup(dict->form_table, state->walked[group]);
+
+					if (form != NULL)
+						state->key_values[key][group] = form->value;
+				}
+			}
 		}
 		check(state, state->kernels->table_gather(&state->table,
 												  state->walked, &groups, 0,

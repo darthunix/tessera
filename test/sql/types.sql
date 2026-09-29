@@ -335,6 +335,33 @@ SELECT types_same($$SELECT count(*), sum(b.id) FROM types_g AS a JOIN types_g AS
 SELECT types_same($$SELECT count(*), count(b.id) FROM types_g AS a LEFT JOIN types_g AS b ON a.long = b.long AND a.w = b.w$$);
 RESET work_mem;
 DROP TABLE types_g, types_h;
+
+-- Equal values of other forms: numeric 1.0, 1.00 and 1.000, float8 -0
+-- and 0, text of either case under a case-insensitive collation. A group
+-- of several keys goes out in its first row's form, as the core's hashed
+-- grouping puts it out, though its value's number keeps the first form of
+-- the whole input; a single key's group is its value's.
+CREATE TABLE types_v AS
+SELECT i AS id, i % 7 AS w,
+       CASE i % 3 WHEN 0 THEN 1.0 WHEN 1 THEN 1.00 ELSE 1.000 END::numeric AS n,
+       CASE WHEN i % 4 < 2 THEN '-0'::float8 ELSE 0::float8 END AS f,
+       (CASE WHEN i % 5 < 2 THEN 'K' ELSE 'k' END || i % 2) COLLATE types_ci AS c
+FROM generate_series(1, 3000) AS i;
+ANALYZE types_v;
+SET enable_sort = off;
+EXPLAIN (COSTS OFF) SELECT w, n, count(*) FROM types_v GROUP BY w, n;
+SELECT types_same($$SELECT w, n, count(*) FROM types_v GROUP BY w, n$$);
+SELECT types_same($$SELECT w, f, count(*) FROM types_v GROUP BY w, f$$);
+SELECT types_same($$SELECT w, c, count(*) FROM types_v GROUP BY w, c$$);
+SELECT types_same($$SELECT DISTINCT n, f, c FROM types_v$$);
+SELECT types_same($$SELECT n, count(*) FROM types_v GROUP BY n$$);
+SELECT types_same($$SELECT w, n, f FROM types_v INTERSECT SELECT w, n, f FROM types_v WHERE id > 1000$$);
+-- Past hash_mem: a partition's groups by a dictionary of its own.
+SET work_mem = '64kB';
+SELECT types_same($$SELECT id % 500, n, count(*) FROM types_v GROUP BY 1, 2$$);
+RESET work_mem;
+RESET enable_sort;
+DROP TABLE types_v;
 DROP COLLATION types_ci;
 
 DROP FUNCTION types_order(text);

@@ -320,10 +320,11 @@ SELECT union_same($$SELECT k FROM setop_l EXCEPT ALL SELECT k FROM setop_r$$);
 SELECT union_same($$SELECT k FROM setop_r EXCEPT ALL SELECT k FROM setop_l$$);
 SELECT union_same($$SELECT s, d FROM setop_l INTERSECT ALL SELECT s, d FROM setop_r$$);
 SELECT union_same($$SELECT n FROM setop_l EXCEPT SELECT n FROM setop_r$$);
--- Of equal values of other scales a group's may differ from the core's: a
--- dictionary keeps a value's first form of the whole input, the core the
--- group's first row's.
-SELECT union_same($$SELECT round(n, 3), k FROM (SELECT n, k FROM setop_l INTERSECT ALL SELECT n, k FROM setop_r) AS q$$);
+-- Of equal values of other scales a group goes out in its first row's, as
+-- the core's does, though the dictionary keeps a value's first form of the
+-- whole input.
+SELECT union_same($$SELECT n, k FROM setop_l INTERSECT ALL SELECT n, k FROM setop_r$$);
+SELECT union_same($$SELECT n, k FROM setop_r EXCEPT SELECT n, k FROM setop_l WHERE k > 10$$);
 SELECT union_same($$SELECT t FROM setop_l EXCEPT ALL SELECT t FROM setop_r WHERE k > 100$$);
 SELECT union_same($$SELECT t FROM setop_l WHERE k > 100 INTERSECT SELECT t FROM setop_r$$);
 SELECT union_same($$SELECT k, t FROM setop_l EXCEPT SELECT k::bigint, t FROM setop_r$$);

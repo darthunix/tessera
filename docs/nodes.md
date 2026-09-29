@@ -619,9 +619,9 @@ new values) and a row of no group is dropped, as the core's `SetOp` does:
 right-side groups cost 15 % of an `INTERSECT` of text. The groups spill
 past `hash_mem` as those of `GROUP BY` do, where the core's hashed `SetOp`
 would not be chosen. Of equal values of different forms (numeric of other
-scales, text under a case-insensitive collation) a group can go out with
-another form than the core's: a dictionary keeps a value's first form of
-the whole input, the core the group's first row's. A dictionary starts
+scales, text under a case-insensitive collation) a group goes out in its
+first row's, the left side's, as the core's hashed `SetOp` puts it out
+(see the keys' forms below). A dictionary starts
 with room for the planner's estimate of the groups, within a quarter of
 `hash_mem`. The cost is the sides' batch paths and a share of the
 core's `SetOp` over its own inputs, 0.5 with keys of words and 0.9 with a
@@ -660,7 +660,9 @@ first travel in the private data as `more`. With `GROUP BY` such an
 aggregate's state is a word of the group's record, the value itself when
 a word holds it, else the address of its copy in that context, with the
 aggregate's flag bit set while it is not NULL: the groups a batch
-inserts start from the initial value, and each row, in order, since rows
+inserts start from the initial value (the batch's new groups of every
+call that looks its rows up, which a chunk that runs out or an index
+that grows splits into several), and each row, in order, since rows
 of one group may follow one another, reads its group's state from the
 record, advances it and writes it back; a group's final value is
 computed when the group goes out, in memory reset per group. Such groups
@@ -751,7 +753,32 @@ dictionary is the table's: made anew with it, and its memory counted
 with the groups', so such a grouping spills its rows, with the values,
 never its records, and a spilled row's partition is chosen by the hash
 of its values, not of its numbers (with numbers, every row of a group
-the frozen table lacks would take one partition). A key is a bare column, a chain the
+the frozen table lacks would take one partition).
+
+Equal values may differ in form: numeric 1.0, 1.00 and 1.000, float8 -0
+and 0, text of either case under a case-insensitive collation, bpchar
+with trailing blanks. A number keeps its value's first form of the whole
+input, and a group of a single key is its value's, so its first row is
+the value's first; but with several keys a value's number is shared by
+groups, and the core's hashed grouping puts each group out in its own
+first row's form. So with several keys, a key through a dictionary whose
+type's equal values need not be equal bytes (not compared by bytes, and
+not so by the type's default B-tree family, `btequalimage`: text under a
+nondeterministic collation, numeric, float, bpchar, arrays, ranges) has
+its forms kept: after a batch's rows found their groups, each group the
+batch made compares its row's value with its number's first form by
+bytes (`datum_image_eq`, inline for a value at hand), and one of another
+form is copied into the dictionary's blocks and kept by the group's
+record, a `simplehash` table of the dictionary's, which it goes with; a
+group goes out as its own form when it has one. Records never move, so a
+record's reference is the group's name for the table's life. The cost is
+per group, not per row: grouping 2 000 000 rows by a numeric and an
+integer into 700 000 groups took 5 % more (133 against 140 ms, about 10
+ns a group, core 316), into 100 000 groups the same, into 300 000 groups
+half of which have another form 1 to 2 % more; a grouping of one key or
+of keys whose equal values are equal bytes does nothing new. Keeping
+each row's first form from the dictionary's lookup instead of reading it
+by the number did no better. A key is a bare column, a chain the
 expression compiler accepts such as `c % 10`, or any other expression,
 computed row by row, without grouping sets, and the hook puts them
 first in the scan tuple, before the aggregates, which may then number up
@@ -980,7 +1007,14 @@ with NULL keys and values, with the counters, every group compared by an md5 of
 them all for the four aggregates, two keys and `HAVING`, ten hot groups among
 the rare ones, no split where each partition's groups fit however often they
 went to disk, 200 000 groups the planner expects 10 of (a level below), a sort
-above reading the groups row by row and a rescan with a parameter; and the core keeping grouping sets, a text key, a
+above reading the groups row by row and a rescan with a parameter; 20 000
+groups of `avg` and `var_pop` over float8, whose initial value is not NULL
+and whose transition is strict, past the first chunk (a group made before
+a chunk ran out, left without its initial value, crashed the backend);
+`test/sql/types.sql` groups by two keys with numeric 1.0, 1.00 and 1.000,
+float8 -0 and 0 and text under a case-insensitive collation, `DISTINCT`
+over three such, one key, `INTERSECT` of three columns and spilling at
+64 kB, each against the core's hashed grouping; and the core keeping grouping sets, a text key, a
 functionally dependent column and a disabled hash aggregation. The parallel
 suite (`test/sql/parallel.sql`) runs the node under a `Gather` with two
 workers: the five aggregates with and without a clause, chains and
@@ -1748,7 +1782,8 @@ a limit above, in a subquery, spilling at a `work_mem` of 64 kB; a `UNION`
 within another set operation stays the core's. `INTERSECT` and `EXCEPT`
 with and without `ALL`: NULL keys, duplicates on both sides, an empty
 side, keys of int2, date, text and numeric, sides of other types, a group
-of 2000 copies, numeric 1.0 against 1.000, a sort and a limit above, one
+of 2000 copies, numeric 1.0 against 1.000 alone and with another column
+(the group's first row's form, as the core's), a sort and a limit above, one
 within another set operation (the core's inside), both kinds of spill at
 64 kB, a correlated subquery. Mutations fail it: the right side's
 constant 0, a group's copies cut at a batch, `EXCEPT ALL` the left rows
