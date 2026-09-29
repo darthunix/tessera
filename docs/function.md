@@ -127,6 +127,17 @@ detoasting; and the pieces of a string as text values (`TESS_RESULT_DATUM`,
 and `right` of either sign, counted in characters as the core counts
 them, a negative length failing with 22011 as `substring` does, and
 `rtrim`, `ltrim` and `btrim` of spaces, `text(bpchar)` being `rtrim`;
+the date functions in every shape: `date_pli`, `date_mii` (a date plus or
+minus days, an infinite date kept, 22008 "date out of range" past the
+dates) and `date_mi` (the days between, "cannot subtract infinite dates")
+as values with `TESS_RESULT_INT32`, the casts `date(timestamp)` (the day,
+rounded down) and `timestamp(date)` ("date out of range for timestamp"
+past the timestamps), and `date_trunc(text, timestamp)`, whose constant
+unit is parsed once a call and applied by calendar arithmetic (a week to
+its Monday, the years of a decade, century and millennium as the core
+rounds them, "timestamp out of range" below the first timestamp), a unit
+that is a column or one it does not know going to the core's
+`timestamp_trunc` a row;
 and `count(*)`,
 `count(any)`, `sum(int4)`, `min(int4)`, `max(int4)`, `min(int8)` and
 `max(int8)` as aggregates, by the aggregate's own OID. An int4 column

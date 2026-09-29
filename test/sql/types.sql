@@ -226,6 +226,69 @@ EXPLAIN (COSTS OFF) SELECT count(*) FROM types_t WHERE t COLLATE types_tci = 'KE
 SELECT types_same($$SELECT count(*) FROM types_t WHERE t COLLATE types_tci = 'KEY-5'$$);
 DROP COLLATION types_tci;
 DROP TABLE types_t;
+
+-- Dates and timestamps in batches: a date plus or minus days, the days
+-- between dates, the casts between date and timestamp, date_trunc of a
+-- timestamp by every unit it knows (a week to its Monday, a decade,
+-- century and millennium as the core rounds years, 1 BC being year 0),
+-- a unit that is a column or one it does not know through the core's
+-- function a row; over dates and times before 2000, before Christ and
+-- around the years' ends, infinities kept; the errors as the core's,
+-- shown with the node and without.
+CREATE TABLE types_dt AS
+SELECT i AS id,
+       CASE WHEN i % 31 = 0 THEN NULL
+            ELSE date '2000-01-01' + ((i * 7919) % 300000 - 150000) END AS d,
+       CASE WHEN i % 37 = 0 THEN NULL
+            ELSE date '2000-01-01' + (i * 104729) % 3000 - 1500 END AS d2,
+       CASE WHEN i % 41 = 0 THEN NULL
+            ELSE timestamp '2000-01-01' + make_interval(days => (i * 7919) % 300000 - 150000,
+                                                        secs => (i * 104729) % 86400000 / 1000.0) END AS ts,
+       (ARRAY['week', 'month', 'quarter', 'year', 'decade', 'century', 'millennium', 'day',
+              'hour', 'minute', 'second', 'milliseconds', 'us'])[i % 13 + 1] AS unit,
+       i % 400 - 200 AS n
+FROM generate_series(1, 4000) AS i;
+INSERT INTO types_dt (id, d, d2, ts, unit, n) VALUES
+    (5001, 'infinity', '-infinity', 'infinity', 'year', 1),
+    (5002, '-infinity', 'infinity', '-infinity', 'week', -1),
+    (5003, '0001-01-01 BC', '0001-12-31 BC', '0001-12-31 23:59:59.999999 BC', 'decade', 0),
+    (5004, '4713-01-01 BC', '2000-12-31', '4713-01-01 12:00 BC', 'century', 3),
+    (5005, '2020-12-28', '2021-01-03', '2021-01-03 23:00', 'week', 7),
+    (5006, '2027-01-01', '2026-12-31', '2026-12-31 23:59:59.5', 'week', 5),
+    (5007, '294276-12-31', '1999-12-31', '294276-12-31 23:59:59.999999', 'millennium', 2);
+ANALYZE types_dt;
+EXPLAIN (COSTS OFF) SELECT count(*) FROM types_dt WHERE d + 30 > date '2000-01-01' AND d - n < d2 AND d - d2 > 5 AND ts::date = d AND d2::timestamp < date_trunc('month', ts);
+SELECT types_same($$SELECT count(*), sum(id) FROM types_dt WHERE d + 30 > date '2000-01-01' OR d - n < d2 OR 7 + d2 = date '2001-01-01'$$);
+SELECT types_same($$SELECT d + n, d - n, d2 - d, count(*) FROM types_dt WHERE d > '-infinity' AND d < 'infinity' AND d2 > '-infinity' AND d2 < 'infinity' GROUP BY 1, 2, 3$$);
+SELECT types_same($$SELECT d2 + 30, d2 - 30, date '2000-01-01' + n, count(*) FROM types_dt GROUP BY 1, 2, 3$$);
+SELECT types_same($$SELECT ts::date, d::timestamp, count(*) FROM types_dt WHERE id <> 5007 GROUP BY 1, 2$$);
+SELECT types_same($$SELECT date_trunc('week', ts), date_trunc('month', ts), date_trunc('quarter', ts), count(*) FROM types_dt GROUP BY 1, 2, 3$$);
+SELECT types_same($$SELECT date_trunc('year', ts), date_trunc('decade', ts), date_trunc('century', ts), count(*) FROM types_dt WHERE id <> 5004 GROUP BY 1, 2, 3$$);
+SELECT types_same($$SELECT date_trunc('millennium', ts), date_trunc('day', ts), date_trunc('hour', ts), count(*) FROM types_dt WHERE id <> 5004 GROUP BY 1, 2, 3$$);
+SELECT types_same($$SELECT date_trunc('minute', ts), date_trunc('SECOND', ts), date_trunc('milliseconds', ts), date_trunc('us', ts), count(*) FROM types_dt GROUP BY 1, 2, 3, 4$$);
+SELECT types_same($$SELECT date_trunc(unit, ts), count(*) FROM types_dt WHERE id <> 5004 GROUP BY 1$$);
+SELECT types_same($$SELECT count(*) FROM types_dt WHERE date_trunc('week', d::timestamp) = d::timestamp OR date_trunc('month', ts) > timestamp '2000-01-01'$$);
+\set VERBOSITY terse
+SELECT count(*) FROM types_dt WHERE d + 2147483000 > d;
+SELECT count(*) FROM types_dt WHERE d - (-2147483648) > d;
+SELECT count(*) FROM types_dt WHERE d2 + 2146000000 > d2;
+SELECT count(*) FROM types_dt WHERE id > 5000 AND d - d2 > 0;
+SELECT count(*) FROM types_dt WHERE id = 5007 AND (d + 1)::timestamp > ts;
+SELECT count(*) FROM types_dt WHERE id = 5004 AND date_trunc('century', ts) > ts;
+SELECT count(*) FROM types_dt WHERE date_trunc('fortnight', ts) > ts;
+SELECT count(*) FROM types_dt WHERE date_trunc('dow', ts) > ts;
+SET tessera.enable = off;
+SELECT count(*) FROM types_dt WHERE d + 2147483000 > d;
+SELECT count(*) FROM types_dt WHERE d - (-2147483648) > d;
+SELECT count(*) FROM types_dt WHERE d2 + 2146000000 > d2;
+SELECT count(*) FROM types_dt WHERE id > 5000 AND d - d2 > 0;
+SELECT count(*) FROM types_dt WHERE id = 5007 AND (d + 1)::timestamp > ts;
+SELECT count(*) FROM types_dt WHERE id = 5004 AND date_trunc('century', ts) > ts;
+SELECT count(*) FROM types_dt WHERE date_trunc('fortnight', ts) > ts;
+SELECT count(*) FROM types_dt WHERE date_trunc('dow', ts) > ts;
+RESET tessera.enable;
+\set VERBOSITY default
+DROP TABLE types_dt;
 -- A date against a timestamp compares other than bit for bit: the core's.
 EXPLAIN (COSTS OFF) SELECT count(*) FROM types_f JOIN types_d ON types_f.d = types_d.ts;
 SELECT types_same($$SELECT count(*) FROM types_f JOIN types_d ON types_f.d = types_d.ts$$);

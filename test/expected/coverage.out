@@ -136,11 +136,11 @@ ORDER BY o;
  batch | d > date '2021-01-01'
  batch | d BETWEEN date '2021-01-01' AND date '2021-12-31'
  batch | d >= date '2021-01-01' + interval '1 month'
- row   | d + 30 > date '2022-01-01'
+ batch | d + 30 > date '2022-01-01'
  row   | extract(year FROM d) = 2021
  row   | date_trunc('month', d) = date '2021-03-01'
  batch | ts > timestamp '2020-01-10'
- row   | ts::date = date '2020-01-10'
+ batch | ts::date = date '2020-01-10'
  batch | tz > timestamptz '2020-01-10 00:00+00'
  row   | iv > interval '10 hours'
  batch | d > current_date - 1000
