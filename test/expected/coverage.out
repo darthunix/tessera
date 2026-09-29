@@ -135,7 +135,7 @@ ORDER BY o;
  row   | bc = 'c1'
  batch | d > date '2021-01-01'
  batch | d BETWEEN date '2021-01-01' AND date '2021-12-31'
- row   | d >= date '2021-01-01' + interval '1 month'
+ batch | d >= date '2021-01-01' + interval '1 month'
  row   | d + 30 > date '2022-01-01'
  row   | extract(year FROM d) = 2021
  row   | date_trunc('month', d) = date '2021-03-01'

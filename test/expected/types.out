@@ -164,6 +164,110 @@ SELECT types_same($$SELECT d FROM types_inf WHERE d < '1999-12-15' OR tz > '2000
 (1 row)
 
 DROP TABLE types_inf;
+-- A date against a timestamp constant: the timestamp made the date bound
+-- each comparison keeps, a midnight or within a day, infinities the
+-- dates', dates past the timestamps' range above every finite timestamp
+-- and below infinity, the constant on either side; a timestamp column
+-- stays row by row.
+EXPLAIN (COSTS OFF) SELECT count(*) FROM types_f WHERE d >= date '2000-01-01' + interval '1 day';
+                                      QUERY PLAN                                      
+--------------------------------------------------------------------------------------
+ Custom Scan (TessAgg)
+   ->  Custom Scan (TessFilter) on types_f
+         Batch Filter: (d >= 'Sun Jan 02 00:00:00 2000'::timestamp without time zone)
+         ->  Custom Scan (TessHeapScan) on types_f
+(4 rows)
+
+SELECT types_same($$SELECT count(*), sum(v) FROM types_f WHERE d >= date '1999-12-25' + interval '1 day' AND d < timestamp '2000-01-10 12:00'$$);
+ types_same 
+------------
+ same
+(1 row)
+
+SELECT types_same($$SELECT count(*), sum(v) FROM types_f WHERE d > timestamp '2000-01-03 12:00' OR d <= timestamp '1999-12-20 00:00:01'$$);
+ types_same 
+------------
+ same
+(1 row)
+
+SELECT types_same($$SELECT count(*), sum(v) FROM types_f WHERE d = timestamp '2000-01-03' OR d = timestamp '2000-01-04 00:00:01'$$);
+ types_same 
+------------
+ same
+(1 row)
+
+SELECT types_same($$SELECT count(*), sum(v) FROM types_f WHERE d <> timestamp '2000-01-03' AND d <> timestamp '2000-01-05 06:00'$$);
+ types_same 
+------------
+ same
+(1 row)
+
+SELECT types_same($$SELECT count(*), sum(v) FROM types_f WHERE timestamp '2000-01-02 06:00' < d AND timestamp '2000-01-12' >= d$$);
+ types_same 
+------------
+ same
+(1 row)
+
+SELECT types_same($$SELECT count(*), sum(v) FROM types_f WHERE d < timestamp '1999-12-31 23:00' OR d > timestamp '1999-12-11 00:00' - interval '1 hour'$$);
+ types_same 
+------------
+ same
+(1 row)
+
+CREATE TABLE types_dinf AS SELECT d FROM types_d
+UNION ALL SELECT 'infinity' UNION ALL SELECT '-infinity' UNION ALL SELECT '294277-01-01' UNION ALL SELECT '5874897-12-31';
+SELECT types_same($$SELECT d FROM types_dinf WHERE d < 'infinity'::timestamp$$);
+ types_same 
+------------
+ same
+(1 row)
+
+SELECT types_same($$SELECT d FROM types_dinf WHERE d > '294276-12-31 23:59'::timestamp$$);
+ types_same 
+------------
+ same
+(1 row)
+
+SELECT types_same($$SELECT d FROM types_dinf WHERE d = 'infinity'::timestamp OR d = '-infinity'::timestamp$$);
+ types_same 
+------------
+ same
+(1 row)
+
+SELECT types_same($$SELECT d FROM types_dinf WHERE d >= '-infinity'::timestamp AND d <= '2000-01-01'::timestamp$$);
+ types_same 
+------------
+ same
+(1 row)
+
+SELECT types_same($$SELECT d FROM types_dinf WHERE d <> 'infinity'::timestamp AND d > '1999-12-31 12:00'::timestamp$$);
+ types_same 
+------------
+ same
+(1 row)
+
+SELECT types_same($$SELECT d FROM types_dinf WHERE d = '2000-01-01 06:00'::timestamp$$);
+ types_same 
+------------
+ same
+(1 row)
+
+SELECT types_same($$SELECT d FROM types_dinf WHERE d <> '1999-12-31 18:00'::timestamp$$);
+ types_same 
+------------
+ same
+(1 row)
+
+DROP TABLE types_dinf;
+EXPLAIN (COSTS OFF) SELECT count(*) FROM types_f WHERE d > ts;
+                    QUERY PLAN                     
+---------------------------------------------------
+ Custom Scan (TessAgg)
+   ->  Custom Scan (TessFilter) on types_f
+         Filter: (d > ts)
+         ->  Custom Scan (TessHeapScan) on types_f
+(4 rows)
+
 -- A smallint is its value sign-extended in the word and a boolean 0 or 1:
 -- their comparisons run in batches as int4's; a smallint's arithmetic as
 -- int4's, a smallint result checked against its range (22003), with an

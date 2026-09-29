@@ -23,9 +23,12 @@
  */
 #include "postgres.h"
 
+#include "datatype/timestamp.h"
 #include "fmgr.h"
 #include "port/pg_bitutils.h"
+#include "utils/date.h"
 #include "utils/fmgroids.h"
+#include "utils/timestamp.h"
 
 #include "tessera/bridge.h"
 #include "tessera/kernels.h"
@@ -56,6 +59,7 @@ static TessStatusCode arith2_evaluate(TessFunctionCall *call);
 static TessStatusCode negate2_evaluate(TessFunctionCall *call);
 static TessStatusCode widen2_evaluate(TessFunctionCall *call);
 static TessStatusCode narrow2_evaluate(TessFunctionCall *call);
+static TessStatusCode date_timestamp_evaluate(TessFunctionCall *call);
 
 /* The aggregate an AGGREGATE description computes. */
 typedef enum Aggregate
@@ -79,6 +83,14 @@ typedef enum Aggregate
 	  .result_format = TESS_RESULT_DATUM, \
 	  .flags = TESS_FUNCTION_STRICT | TESS_FUNCTION_COLLATION_INSENSITIVE | \
 	  TESS_FUNCTION_ANY_SHAPE, \
+	  .evaluate = (fn)}, (code)}
+
+/* A comparison of a column, first, with a scalar, or through the commutator. */
+#define COMPARE_SCALAR(oid, code, fn) \
+	{{TESS_ABI_INITIALIZER(TESS_FUNCTION_ABI_VERSION, TessFunction), \
+	  .funcid = (oid), .kind = TESS_FUNCTION_PREDICATE, \
+	  .result_format = TESS_RESULT_DATUM, \
+	  .flags = TESS_FUNCTION_STRICT | TESS_FUNCTION_COLLATION_INSENSITIVE, \
 	  .evaluate = (fn)}, (code)}
 
 /* A value function of the given result format and extra flags. */
@@ -276,6 +288,17 @@ static const Function functions[] = {
 	EQUIVALENT(F_INT82MI, F_INT8MI, InvalidOid, F_INT8_INT2),
 	EQUIVALENT(F_INT82MUL, F_INT8MUL, InvalidOid, F_INT8_INT2),
 	EQUIVALENT(F_INT82DIV, F_INT8DIV, InvalidOid, F_INT8_INT2),
+	/*
+	 * a date column against a timestamp scalar, the timestamp made the
+	 * date bound the comparison keeps (timestamp < date through the
+	 * commutator)
+	 */
+	COMPARE_SCALAR(F_DATE_EQ_TIMESTAMP, TESS_CMP_EQ, date_timestamp_evaluate),
+	COMPARE_SCALAR(F_DATE_NE_TIMESTAMP, TESS_CMP_NE, date_timestamp_evaluate),
+	COMPARE_SCALAR(F_DATE_LT_TIMESTAMP, TESS_CMP_LT, date_timestamp_evaluate),
+	COMPARE_SCALAR(F_DATE_LE_TIMESTAMP, TESS_CMP_LE, date_timestamp_evaluate),
+	COMPARE_SCALAR(F_DATE_GT_TIMESTAMP, TESS_CMP_GT, date_timestamp_evaluate),
+	COMPARE_SCALAR(F_DATE_GE_TIMESTAMP, TESS_CMP_GE, date_timestamp_evaluate),
 	/* int4(int2) the same value, int2(int4) within the smallint range */
 	VALUE(F_INT4_INT2, 0, TESS_RESULT_INT32, 0, widen2_evaluate),
 	VALUE(F_INT2_INT4, 0, TESS_RESULT_INT32, 0, narrow2_evaluate),
@@ -592,6 +615,68 @@ static TessStatusCode
 narrow2_evaluate(TessFunctionCall *call)
 {
 	return smallint_range(call, widen2_evaluate(call));
+}
+
+/*
+ * A date column against a timestamp scalar: the date d is the timestamp
+ * d days since 2000-01-01, so d op T is d op' B for the date bound B of T,
+ * once a call, and the int4 filter compares: d < T keeps d < ceil(T / day),
+ * d <= T d <= floor, d > T d > floor, d >= T d >= ceil, d = T d = T / day
+ * where T is a midnight and no date else, d <> T its complement. An
+ * infinite timestamp is the infinite date of its sign, which a date
+ * infinity equals; a finite date past the timestamps' range stays above
+ * every finite bound and below infinity, as date_cmp_timestamp orders it.
+ */
+static TessStatusCode
+date_timestamp_evaluate(TessFunctionCall *call)
+{
+	TessCompareOp op;
+	Timestamp	timestamp;
+	int32		bound;
+
+	if (!valid_call(call))
+		return invalid(call, "a date against a timestamp takes two arguments");
+	if (call->args[0].column == NULL || call->args[1].column != NULL)
+		return invalid(call, "a date against a timestamp takes a date column and a scalar");
+	op = (TessCompareOp) operation(call);
+	timestamp = DatumGetTimestamp(call->args[1].scalar);
+	if (TIMESTAMP_IS_NOBEGIN(timestamp))
+		bound = DATEVAL_NOBEGIN;
+	else if (TIMESTAMP_IS_NOEND(timestamp))
+		bound = DATEVAL_NOEND;
+	else
+	{
+		int64		days = timestamp / USECS_PER_DAY;
+		int64		rest = timestamp % USECS_PER_DAY;
+
+		if (rest < 0)
+		{
+			days--;
+			rest += USECS_PER_DAY;
+		}
+		bound = (int32) days;
+		switch (op)
+		{
+			case TESS_CMP_LT:
+			case TESS_CMP_GE:
+				bound += rest > 0 ? 1 : 0;
+				break;
+			case TESS_CMP_EQ:
+			case TESS_CMP_NE:
+				/* No date is a timestamp past a midnight: none, or every one. */
+				if (rest > 0)
+				{
+					op = op == TESS_CMP_EQ ? TESS_CMP_LT : TESS_CMP_GE;
+					bound = PG_INT32_MIN;
+				}
+				break;
+			case TESS_CMP_LE:
+			case TESS_CMP_GT:
+				break;
+		}
+	}
+	return tess_int4_filter(call->args[0].column, call->args[0].prepared, call->rows, op,
+							bound, call->status);
 }
 
 /*

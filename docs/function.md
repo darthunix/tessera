@@ -101,7 +101,15 @@ past it, and with an integer (`int24pl` …, `int42pl` …) as int4's; the
 casts `int8(int2)` as `int8(int4)`, `int4(int2)` and `int2(int4)`, the
 last checked as the smallint arithmetic; the functions of a smallint and a
 bigint (`int28eq` …, `int82eq` …, `int28pl` …, `int82pl` …) as equivalents
-of the int8 function over `int8(int2)`; and `count(*)`,
+of the int8 function over `int8(int2)`; the six comparisons of a date
+against a timestamp (`date_eq_timestamp` … `date_ge_timestamp`, and
+`timestamp_lt_date` and its siblings through their commutators) with a
+date column and a timestamp scalar, which becomes the date bound the
+comparison keeps once a call, as a date is its days since 2000-01-01
+(`d < T` keeps `d < ceil(T / day)`, `d = T` none where `T` is past a
+midnight), an infinite timestamp the infinite date and a date past the
+timestamps' range above every finite bound, as the core orders them;
+and `count(*)`,
 `count(any)`, `sum(int4)`, `min(int4)`, `max(int4)`, `min(int8)` and
 `max(int8)` as aggregates, by the aggregate's own OID. An int4 column
 against a bigint constant is therefore widened and compared as int8. The
