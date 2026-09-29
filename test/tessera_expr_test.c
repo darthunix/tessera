@@ -342,7 +342,9 @@ tessera_test_expr_supports(PG_FUNCTION_ARGS)
 		for (int index = 0; index < MAX_ARRAY; index++)
 			many[index] = index;
 		result &= check(47, tess_expr_supports_filter(array_op("=", a(), true, few, NULL, 3), 0));
-		result &= check(48, !tess_expr_supports_filter(array_op("=", a(), true, many, NULL, MAX_ARRAY), 0));
+		/* A longer list of integers is a set; of another comparison, nothing. */
+		result &= check(48, tess_expr_supports_filter(array_op("=", a(), true, many, NULL, MAX_ARRAY), 0));
+		result &= check(59, !tess_expr_supports_filter(array_op("<", a(), true, many, NULL, MAX_ARRAY), 0));
 		param_array = (ScalarArrayOpExpr *) array_op("=", a(), true, few, NULL, 3);
 		lsecond(param_array->args) = makeNode(Param);
 		((Param *) lsecond(param_array->args))->paramkind = PARAM_EXTERN;

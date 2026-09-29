@@ -48,7 +48,8 @@ typedef enum CondKind
 	COND_NOT,
 	COND_NULL_TEST,				/* IS [NOT] NULL over a value */
 	COND_BOOL_TEST,				/* IS [NOT] TRUE, FALSE or UNKNOWN */
-	COND_ARRAY					/* x op ANY or ALL of a constant array */
+	COND_ARRAY,					/* x op ANY or ALL of a constant array */
+	COND_SET					/* x IN or NOT IN a longer array of integer words */
 } CondKind;
 
 typedef struct Cond
@@ -71,6 +72,13 @@ typedef struct Cond
 	bool	   *element_nulls;
 	int			nelements;
 	bool		has_null;
+	/*
+	 * SET: the elements' values as int64, sorted, without repeats; whether
+	 * x's words are int64 (else int32, sign-extended).
+	 */
+	int64	   *keys;
+	int			nkeys;
+	bool		wide;
 	/*
 	 * Per evaluation over a selection: the rows where the condition is
 	 * true, those where it is unknown (NULL), and scratch for the rows a
@@ -330,6 +338,130 @@ array_clauses(ScalarArrayOpExpr *array_op)
 		clauses = lappend(clauses, expand((Node *) clause));
 	}
 	return clauses;
+}
+
+/*
+ * A type a set of words holds: its values as int32 (int2, int4, date,
+ * bool) or int64 (int8, timestamp, timestamptz), whose equality is the
+ * integers'.
+ */
+static bool
+set_key_kind(Oid type, bool *wide)
+{
+	switch (type)
+	{
+		case INT2OID:
+		case INT4OID:
+		case DATEOID:
+		case BOOLOID:
+			*wide = false;
+			return true;
+		case INT8OID:
+		case TIMESTAMPOID:
+		case TIMESTAMPTZOID:
+			*wide = true;
+			return true;
+		default:
+			return false;
+	}
+}
+
+/*
+ * The comparison of x IN (…) (= ANY) or x NOT IN (…) (<> ALL) of such
+ * types, integers of any widths among them, which is their integers'.
+ */
+static bool
+set_function(Oid funcid, bool use_or)
+{
+	switch (funcid)
+	{
+		case F_INT2EQ:
+		case F_INT4EQ:
+		case F_INT8EQ:
+		case F_INT24EQ:
+		case F_INT42EQ:
+		case F_INT28EQ:
+		case F_INT82EQ:
+		case F_INT48EQ:
+		case F_INT84EQ:
+		case F_DATE_EQ:
+		case F_TIMESTAMP_EQ:
+		case F_TIMESTAMPTZ_EQ:
+		case F_BOOLEQ:
+			return use_or;
+		case F_INT2NE:
+		case F_INT4NE:
+		case F_INT8NE:
+		case F_INT24NE:
+		case F_INT42NE:
+		case F_INT28NE:
+		case F_INT82NE:
+		case F_INT48NE:
+		case F_INT84NE:
+		case F_DATE_NE:
+		case F_TIMESTAMP_NE:
+		case F_TIMESTAMPTZ_NE:
+		case F_BOOLNE:
+			return !use_or;
+		default:
+			return false;
+	}
+}
+
+/* A value of a set's word as the int64 of its integer. */
+static inline int64
+set_key(Datum value, bool wide)
+{
+	return wide ? DatumGetInt64(value) : (int64) DatumGetInt32(value);
+}
+
+/*
+ * Whether x IN or NOT IN a constant array too long for an OR of
+ * comparisons is a set: of integer words on both sides, x a supported
+ * value.
+ */
+static bool
+set_supported(ScalarArrayOpExpr *array_op, Index relid)
+{
+	Const	   *array = (Const *) strip_relabel(lsecond(array_op->args));
+	Node	   *left = linitial(array_op->args);
+	bool		wide;
+	int			nvars;
+
+	set_opfuncid((OpExpr *) array_op);
+	return IsA(array, Const) && !array->constisnull &&
+		set_function(array_op->opfuncid, array_op->useOr) &&
+		set_key_kind(exprType(left), &wide) &&
+		set_key_kind(ARR_ELEMTYPE(DatumGetArrayTypeP(array->constvalue)), &wide) &&
+		analyze_value(left, relid, &nvars) && nvars > 0;
+}
+
+static int
+compare_keys(const void *a, const void *b)
+{
+	int64		left = *(const int64 *) a;
+	int64		right = *(const int64 *) b;
+
+	return left < right ? -1 : left > right ? 1 : 0;
+}
+
+/* Whether the sorted keys hold key. */
+static bool
+set_contains(const int64 *keys, int nkeys, int64 key)
+{
+	int			low = 0;
+	int			high = nkeys;
+
+	while (low < high)
+	{
+		int			middle = low + (high - low) / 2;
+
+		if (keys[middle] < key)
+			low = middle + 1;
+		else
+			high = middle;
+	}
+	return low < nkeys && keys[low] == key;
 }
 
 /*
@@ -776,10 +908,12 @@ analyze_cond(Node *node, Index relid)
 	{
 		List	   *clauses = array_clauses((ScalarArrayOpExpr *) node);
 
+		/* A longer list of integer words: a set. */
+		if (clauses == NIL)
+			return set_supported((ScalarArrayOpExpr *) node, relid);
 		/* x op element in the shape of a filter: x first, a scalar after. */
-		return clauses != NIL &&
-			analyze_filter(linitial(clauses), relid, &column_arg,
-						   &column_operand) &&
+		return analyze_filter(linitial(clauses), relid, &column_arg,
+							  &column_operand) &&
 			column_arg == 0 && column_operand < 0;
 	}
 	return analyze_filter(node, relid, &column_arg, &column_operand);
@@ -1041,6 +1175,50 @@ compile_cond(Node *node, PlanState *parent, TessExprResolveVar resolve,
 		cond->args = palloc_array(Cond *, 1);
 		cond->args[0] = compile_cond((Node *) test->arg, parent, resolve,
 									 context);
+	}
+	else if (IsA(node, ScalarArrayOpExpr) &&
+			 array_clauses((ScalarArrayOpExpr *) node) == NIL)
+	{
+		ScalarArrayOpExpr *array_op = (ScalarArrayOpExpr *) node;
+		Const	   *array = (Const *) strip_relabel(lsecond(array_op->args));
+		ArrayType  *elements = DatumGetArrayTypeP(array->constvalue);
+		Oid			element_type = ARR_ELEMTYPE(elements);
+		bool		element_wide;
+		int16		typlen;
+		bool		byval;
+		char		align;
+		Datum	   *values;
+		bool	   *nulls;
+		int			count;
+
+		if (!set_supported(array_op, 0) || !set_key_kind(element_type, &element_wide))
+			elog(ERROR, "Tessera received an unsupported batch condition");
+		cond->kind = COND_SET;
+		cond->use_or = array_op->useOr;
+		(void) set_key_kind(exprType(linitial(array_op->args)), &cond->wide);
+		get_typlenbyvalalign(element_type, &typlen, &byval, &align);
+		deconstruct_array(elements, element_type, typlen, byval, align, &values, &nulls,
+						  &count);
+		cond->keys = palloc_array(int64, Max(count, 1));
+		for (int index = 0; index < count; index++)
+		{
+			if (nulls[index])
+				cond->has_null = true;
+			else
+				cond->keys[cond->nkeys++] = set_key(values[index], element_wide);
+		}
+		qsort(cond->keys, cond->nkeys, sizeof(int64), compare_keys);
+		/* Without repeats. */
+		{
+			int			kept = 0;
+
+			for (int index = 0; index < cond->nkeys; index++)
+				if (kept == 0 || cond->keys[kept - 1] != cond->keys[index])
+					cond->keys[kept++] = cond->keys[index];
+			cond->nkeys = kept;
+		}
+		cond->expr = tess_expr_compile_value(linitial(array_op->args), parent, resolve,
+											 context);
 	}
 	else if (IsA(node, ScalarArrayOpExpr))
 	{
@@ -1673,6 +1851,60 @@ eval_cond(Cond *cond, const TessRowMask *rows, bool want_unknown)
 						if (want_unknown)
 							unknown[word] = rows->bits[word] &
 								(~present[word] | (cond->has_null ? work[word] : 0));
+					}
+				}
+				break;
+			}
+		case COND_SET:
+			{
+				const TessDatumColumn *column;
+				uint64	   *present = cond->all_true.bits;
+				uint64	   *found = cond->work.bits;
+
+				/* x once, over the selection; each row's word looked up. */
+				memcpy(rest, rows->bits, sizeof(uint64) * nwords);
+				bind_selection(cond->expr, &cond->rest);
+				column = tess_expr_get_column(cond->expr);
+				memcpy(present, tess_expr_non_nulls(cond->expr)->bits, sizeof(uint64) * nwords);
+				for (int word = 0; word < nwords; word++)
+				{
+					uint64		look = rows->bits[word] & present[word];
+					uint64		hits = 0;
+
+					for (; look != 0; look &= look - 1)
+					{
+						int			bit = pg_rightmost_one_pos64(look);
+
+						if (set_contains(cond->keys, cond->nkeys,
+										 set_key(column->values[word * 64 + bit], cond->wide)))
+							hits |= UINT64CONST(1) << bit;
+					}
+					found[word] = hits;
+				}
+				/*
+				 * IN: true where found; unknown where x is NULL, or not found
+				 * with a NULL in the list. NOT IN: true where x differs from
+				 * every element and the list has no NULL; unknown where x is
+				 * NULL, or it differs from every element but the NULL.
+				 */
+				for (int word = 0; word < nwords; word++)
+				{
+					uint64		row_bits = rows->bits[word];
+					uint64		differs = row_bits & present[word] & ~found[word];
+
+					if (cond->use_or)
+					{
+						truth[word] = found[word];
+						if (want_unknown)
+							unknown[word] = row_bits & (~present[word] |
+														(cond->has_null ? differs : 0));
+					}
+					else
+					{
+						truth[word] = cond->has_null ? 0 : differs;
+						if (want_unknown)
+							unknown[word] = row_bits & (~present[word] |
+														(cond->has_null ? differs : 0));
 					}
 				}
 				break;

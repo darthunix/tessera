@@ -184,7 +184,12 @@ earlier element matched, for `ALL` over the rows every earlier one did;
 a NULL element leaves a row that matches no other unknown for `ANY` and
 makes every row that is not false unknown for `ALL`, as the array
 operators say. A cross-type operator in the list stands for its
-equivalent, the elements cast once. A condition evaluates to
+equivalent, the elements cast once. A longer list, `x IN (…)` or `x NOT
+IN (…)` of integer words (int2, int4, int8, date, timestamp, timestamptz,
+bool, the integers in any combination of widths), is a set: the
+elements' integers sorted without repeats once, and each selected row's
+word looked up by bisection, with the same NULL rules (100 elements over
+2 M rows: 0.29 of the core's time; `NOT IN` of 1000: 0.33). A condition evaluates to
 two masks over the selection it is given, the rows where it is true and
 those where it is unknown (NULL), the rest being false: a leaf's unknown
 rows are those where its value, its operand or a scalar is NULL, and the

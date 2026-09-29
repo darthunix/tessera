@@ -136,6 +136,26 @@ SELECT count(*) FROM types_min WHERE abs(x) > 0;
 SELECT count(*) FROM types_min WHERE abs(y) > 0;
 \set VERBOSITY default
 DROP TABLE types_min;
+-- IN and NOT IN of more constants than an OR of comparisons takes: a set
+-- of the integer words, sorted, each row's word looked up; NULL x
+-- unknown, a NULL in the list making every miss unknown, for a smallint,
+-- an integer, a date and a bigint expression, under NOT and in a CASE.
+EXPLAIN (COSTS OFF) SELECT count(*) FROM types_f WHERE v IN (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33);
+CREATE FUNCTION types_list(step int, first int, count int, quote text DEFAULT '') RETURNS text
+LANGUAGE sql AS $$
+SELECT string_agg(quote || (first + g * step)::text || quote, ',') FROM generate_series(0, count - 1) AS g
+$$;
+SELECT types_same(format($$SELECT count(*), sum(v) FROM types_f WHERE v IN (%s)$$, types_list(7, 3, 40)));
+SELECT types_same(format($$SELECT count(*), sum(v) FROM types_f WHERE v NOT IN (%s)$$, types_list(7, 3, 40)));
+SELECT types_same(format($$SELECT count(*), sum(v) FROM types_f WHERE v IN (%s, %s)$$, types_list(-7, 300, 40), types_list(13, 5, 20)));
+SELECT types_same(format($$SELECT count(*), sum(v) FROM types_f WHERE v NOT IN (%s, NULL)$$, types_list(7, 3, 40)));
+SELECT types_same(format($$SELECT count(*), sum(v) FROM types_f WHERE v IN (%s, NULL) OR v < 5$$, types_list(7, 3, 40)));
+SELECT types_same(format($$SELECT count(*), sum(v) FROM types_f WHERE s IN (%s)$$, types_list(3, -20, 40)));
+SELECT types_same(format($$SELECT count(*), sum(v) FROM types_f WHERE NOT (s IN (%s, NULL))$$, types_list(3, -20, 40)));
+SELECT types_same(format($$SELECT count(*), sum(v) FROM types_f WHERE (v % 100)::int8 IN (%s)$$, types_list(3, 1, 40)));
+SELECT types_same(format($$SELECT count(*), sum(v) FROM types_f WHERE d IN (%s)$$, (SELECT string_agg(quote_literal(date '1999-12-10' + g), ',') FROM generate_series(0, 38) AS g)));
+SELECT types_same(format($$SELECT sum(CASE WHEN v IN (%s) THEN 1 ELSE 0 END), count(*) FROM types_f$$, types_list(11, 0, 50)));
+DROP FUNCTION types_list(int, int, int, text);
 -- A date against a timestamp compares other than bit for bit: the core's.
 EXPLAIN (COSTS OFF) SELECT count(*) FROM types_f JOIN types_d ON types_f.d = types_d.ts;
 SELECT types_same($$SELECT count(*) FROM types_f JOIN types_d ON types_f.d = types_d.ts$$);
