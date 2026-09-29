@@ -2336,11 +2336,57 @@ fast_float_advance(GenericAgg *generic, FastState *fast, bool first, Datum value
 	}
 }
 
+/*
+ * min and max of a decimal whose numeric was never made: compared as
+ * fast_extreme compares, the numeric of a new extreme made in the states'
+ * context from the decimal, as the core would have kept it.
+ */
+static void
+fast_decimal_extreme(GenericAgg *generic, FastState *fast, const TessDecimal *decimal,
+					 MemoryContext states)
+{
+	char	   *numeric;
+
+	if (fast->has_extreme)
+	{
+		int			cmp;
+
+		if (fast->decimal_valid)
+		{
+			int			scale = Max(decimal->scale, fast->decimal.scale);
+			int128		left = (int128) decimal->value *
+				tess_powers_of_ten[scale - decimal->scale];
+			int128		right = (int128) fast->decimal.value *
+				tess_powers_of_ten[scale - fast->decimal.scale];
+
+			cmp = left < right ? -1 : left > right;
+		}
+		else
+		{
+			char		buffer[TESS_DECIMAL_NUMERIC_MAX] pg_attribute_aligned(MAXIMUM_ALIGNOF);
+
+			(void) tess_decimal_write_numeric(decimal->value, decimal->scale, buffer);
+			cmp = DatumGetInt32(DirectFunctionCall2(numeric_cmp, PointerGetDatum(buffer),
+													 fast->extreme));
+		}
+		if (generic->fast == FAST_MAX ? cmp < 0 : cmp > 0)
+			return;
+		pfree(DatumGetPointer(fast->extreme));
+	}
+	numeric = MemoryContextAlloc(states, TESS_DECIMAL_NUMERIC_MAX);
+	(void) tess_decimal_write_numeric(decimal->value, decimal->scale, numeric);
+	fast->extreme = PointerGetDatum(numeric);
+	fast->has_extreme = true;
+	fast->decimal_valid = true;
+	fast->decimal = *decimal;
+}
+
 /* One row into the state, the first non-NULL one making it. */
 static void
 fast_advance(GenericAgg *generic, int row, MemoryContext states)
 {
 	const TessDatumColumn *column = &generic->columns[0];
+	const uint64 *decimal_rows = tess_column_decimal_rows(column);
 	FastState  *fast;
 	Datum		value;
 	TessDecimal decimal;
@@ -2366,7 +2412,19 @@ fast_advance(GenericAgg *generic, int row, MemoryContext states)
 		fast_float_advance(generic, fast, false, value);
 		return;
 	}
-	if (generic->fast_numeric)
+	if (generic->fast_numeric && decimal_rows != NULL &&
+		((decimal_rows[row / 64] >> (row % 64)) & 1) != 0)
+	{
+		/* A decimal of the argument's chain: its numeric was never made. */
+		decimal.value = DatumGetInt64(value);
+		decimal.scale = column->decimal_scale;
+		if (generic->fast == FAST_MIN || generic->fast == FAST_MAX)
+		{
+			fast_decimal_extreme(generic, fast, &decimal, states);
+			return;
+		}
+	}
+	else if (generic->fast_numeric)
 		decimal_valid = tess_decimal_of(value, &decimal);
 	else
 	{
@@ -3247,6 +3305,18 @@ filtered_rows(TessAggState *state, TessBatch *batch, int filter, const TessRowMa
 }
 
 /*
+ * Whether an aggregate reads its argument's decimals (TessDatumColumn): a
+ * numeric one the node folds itself, not DISTINCT, whose pairs hash the
+ * argument's Datums.
+ */
+static inline bool
+fast_decimals(const AggValue *value)
+{
+	return value->generic != NULL && value->generic->fast != FAST_NONE &&
+		value->generic->fast_numeric && value->distinct == NULL;
+}
+
+/*
  * Add one batch to the aggregate: its partial through the batch function,
  * or, for a batch with few survivors, their values gathered into a column
  * of the aggregate's own, since a call costs more than the rows it would
@@ -3271,6 +3341,8 @@ accumulate(TessAggState *state, AggValue *value, TessBatch *batch, int nrows)
 		evaluate(state, value, NULL, &rows);
 		return;
 	}
+	/* A numeric aggregate of its own reads its argument's decimals. */
+	computed.accept_decimals = fast_decimals(value);
 	batch->ops->get_datum_column(batch,
 								 state->child_layout.ncolumns + value->computed,
 								 &rows, TESS_COLUMN_FOR_PROJECTION, &computed);
@@ -5361,9 +5433,10 @@ read_in_order(TessAggState *state, TessBatch *batch)
 
 static void
 computed_column(TessAggState *state, TessBatch *batch, int computed,
-				TessColumnPurpose purpose, TessDatumColumn *result)
+				TessColumnPurpose purpose, bool decimals, TessDatumColumn *result)
 {
 	*result = (TessDatumColumn) TESS_STRUCT_INITIALIZER(TessDatumColumn);
+	result->accept_decimals = decimals;
 	batch->ops->get_datum_column(batch, state->child_layout.ncolumns + computed,
 								 &batch->rows, purpose, result);
 	if (result->values == NULL || result->isnull == NULL ||
@@ -5411,7 +5484,7 @@ group_batch(TessAggState *state, TessBatch *batch)
 		bool		int8 = state->kinds[key] == TESS_TABLE_KEY_INT8;
 		KeyDict    *dict = state->dicts[key];
 
-		computed_column(state, batch, key, TESS_COLUMN_FOR_FILTER, column);
+		computed_column(state, batch, key, TESS_COLUMN_FOR_FILTER, false, column);
 		/* A key through a dictionary: the table groups by its values' numbers. */
 		if (dict != NULL)
 		{
@@ -5507,7 +5580,7 @@ group_batch(TessAggState *state, TessBatch *batch)
 			if (column < state->nkeys)
 				state->computed_columns[column] = state->key_columns[column];
 			else
-				computed_column(state, batch, column, TESS_COLUMN_FOR_PROJECTION,
+				computed_column(state, batch, column, TESS_COLUMN_FOR_PROJECTION, false,
 								&state->computed_columns[column]);
 		}
 		rows_write(state, state->rows_spill, &missing);
@@ -5579,13 +5652,14 @@ group_batch(TessAggState *state, TessBatch *batch)
 
 		if (value->computed >= 0)
 			computed_column(state, batch, value->computed,
-							TESS_COLUMN_FOR_PROJECTION, &column);
+							TESS_COLUMN_FOR_PROJECTION, fast_decimals(value), &column);
 		if (value->generic != NULL)
 		{
 			value->generic->columns[0] = column;
 			for (int arg = 1; arg < value->generic->nargs; arg++)
 				computed_column(state, batch, value->computed + arg,
-								TESS_COLUMN_FOR_PROJECTION, &value->generic->columns[arg]);
+								TESS_COLUMN_FOR_PROJECTION, false,
+								&value->generic->columns[arg]);
 			if (value->distinct != NULL)
 				rows = distinct_rows(state, value, nrows, state->hashes, &rows, &column);
 			generic_group_accumulate(state, index, &rows, &inserted);

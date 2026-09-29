@@ -214,7 +214,15 @@ compute_chain(TessProjection *projection, Computed *computed,
 		projection->stats.chain_datums +=
 			tess_row_mask_count(&projection->child->rows);
 	}
-	column = tess_expr_get_column(computed->chain);
+	/* A consumer of decimals gets those of a numeric chain in place. */
+	if (result->struct_size >= TESS_DATUM_COLUMN_DECIMALS_SIZE && result->accept_decimals)
+	{
+		column = tess_expr_get_decimal_column(computed->chain);
+		result->decimal_rows = column->decimal_rows;
+		result->decimal_scale = column->decimal_scale;
+	}
+	else
+		column = tess_expr_get_column(computed->chain);
 	result->values = column->values;
 	result->isnull = column->isnull;
 }
@@ -301,6 +309,8 @@ projection_get_datum_column(TessBatch *batch, int column,
 		return;
 	}
 	computed = &projection->computed[column - projection->base_columns];
+	if (result->struct_size >= TESS_DATUM_COLUMN_DECIMALS_SIZE)
+		result->decimal_rows = NULL;
 	if (computed->chain != NULL)
 		compute_chain(projection, computed, purpose, result);
 	else

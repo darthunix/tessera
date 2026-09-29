@@ -458,7 +458,8 @@ SELECT i AS id,
        i::numeric * 123456789012345678 AS big,
        (CASE WHEN i % 59 = 0 THEN 'Infinity' WHEN i % 61 = 0 THEN '-Infinity' WHEN i % 67 = 0 THEN 'NaN'
              ELSE (i / 7.0)::text END)::numeric AS u,
-       i % 20 AS g
+       i % 20 AS g,
+       (CASE WHEN i % 17 = 0 THEN 9999999999999999.99 ELSE (i * 7919 % 100000) / 10.0 END)::numeric(18, 2) AS wide
 FROM generate_series(1, 3000) AS i;
 ANALYZE types_nm;
 EXPLAIN (COSTS OFF) SELECT g, min(p * d3), sum(p + d3) FROM types_nm WHERE p > 10.5 AND d3 <> 0 GROUP BY 1;
@@ -477,6 +478,24 @@ SELECT count(*) FROM types_nm WHERE p::int > 0;
 SELECT count(*) FROM types_nm WHERE u::int8 > 0;
 RESET tessera.enable;
 \set VERBOSITY default
+-- The steps of a numeric chain pass decimals, integers of the scale the
+-- plan fixes (numeric(15,2) * numeric(6,3) at 5), without the numerics in
+-- between; a row past 18 digits (wide * wide) or NaN goes as a numeric
+-- among the decimals. A consumer of decimals reads them (a comparison, a
+-- cast to int, sum, avg, min and max of the node's own); any other gets
+-- numerics made from them: a grouping key, the core's aggregate, DISTINCT,
+-- CASE, rows written to disk.
+EXPLAIN (COSTS OFF) SELECT g, sum(p * (1 - d3)), max(p * 2) FROM types_nm WHERE p * 2 - 1 > 10 GROUP BY 1;
+SELECT types_same($$SELECT g, count(*) FILTER (WHERE p * 2 - 1 > 1000), count(*) FILTER (WHERE p * d3 + 1 < 0), count(*) FILTER (WHERE -p * 3 >= abs(d3 - 2)), count(*) FILTER (WHERE wide * wide > 1e30), count(*) FILTER (WHERE p <> 'NaN' AND (p * 1000)::int > 5), count(*) FILTER (WHERE (wide * 3)::int8 < 1000) FROM types_nm GROUP BY 1$$);
+SELECT types_same($$SELECT g, sum(p * (1 - d3)), avg(p * 2), min(p * 1.08), max(p - 0.5), min(-p), max(abs(p - 500)) FROM types_nm WHERE p <> 'NaN' GROUP BY 1$$);
+SELECT types_same($$SELECT g, sum(p * (1 - d3)), avg(p * 2), min(p * 1.08), max(p - 0.5) FROM types_nm GROUP BY 1$$);
+SELECT types_same($$SELECT g, sum(wide * wide), max(wide * 1000), min(wide * -1000), avg(wide * wide) FROM types_nm GROUP BY 1$$);
+SELECT types_same($$SELECT sum(p * (1 - d3)), avg(p * 2), min(p * 1.08), max(p - 0.5), sum(wide * wide), max(wide * d3) FROM types_nm WHERE p <> 'NaN'$$);
+SELECT types_same($$SELECT p * 2, count(*), max(p * 2), sum(p * 2) FROM types_nm GROUP BY 1$$);
+SELECT types_same($$SELECT g, sum(DISTINCT p * 2), variance(p * 3), max(CASE WHEN g > 5 THEN p * 2 ELSE p - 1 END) FROM types_nm WHERE p <> 'NaN' GROUP BY 1$$);
+SET work_mem = '64kB';
+SELECT types_same($$SELECT count(*), sum(x), max(y) FROM (SELECT id, sum(p * 2) AS x, max(p * d3) AS y FROM types_nm GROUP BY id) AS t$$);
+RESET work_mem;
 DROP TABLE types_nm;
 -- A date against a timestamp compares other than bit for bit: the core's.
 EXPLAIN (COSTS OFF) SELECT count(*) FROM types_f JOIN types_d ON types_f.d = types_d.ts;

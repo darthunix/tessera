@@ -71,6 +71,13 @@ extern void tess_expr_bind(TessExpr *expr, TessBatch *batch,
  */
 extern const TessDatumColumn *tess_expr_get_column(TessExpr *expr);
 
+/*
+ * The same results with the decimals a numeric chain wrote left in place
+ * (TessDatumColumn.decimal_rows), for a consumer that reads them; a later
+ * tess_expr_get_column still gets numerics.
+ */
+extern const TessDatumColumn *tess_expr_get_decimal_column(TessExpr *expr);
+
 /* The selected rows whose result is not NULL. */
 extern const TessRowMask *tess_expr_non_nulls(TessExpr *expr);
 

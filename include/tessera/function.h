@@ -74,6 +74,12 @@ typedef enum TessResultFormat
  * implementation only then, and leaves another collation to the executor.
  */
 #define TESS_FUNCTION_DETERMINISTIC_COLLATION 0x8
+/*
+ * A numeric function that reads the decimals of its column arguments
+ * (TessDatumColumn) and, a VALUE, writes decimals where the call asks
+ * (TessFunctionCall.decimal_rows).
+ */
+#define TESS_FUNCTION_DECIMALS 0x10
 
 /* The most arguments an equivalent's casts describe. */
 #define TESS_FUNCTION_MAX_ARGS 2
@@ -132,10 +138,19 @@ typedef struct TessFunctionCall
 	MemoryContext context;
 	/* Filled on failure, as by the kernels. */
 	TessStatus *status;
+	/*
+	 * VALUE of TESS_FUNCTION_DECIMALS, when not NULL: the rows whose result
+	 * the function wrote as a decimal, an int64 of result_scale in values
+	 * (TessDatumColumn), the others as numerics; the caller clears it.
+	 */
+	TessRowMask *decimal_rows;
+	int			result_scale;
 } TessFunctionCall;
 
 #define TESS_FUNCTION_CALL_MIN_SIZE \
 	TESS_ABI_SIZE_INCLUDING_FIELD(TessFunctionCall, status)
+#define TESS_FUNCTION_CALL_DECIMALS_SIZE \
+	TESS_ABI_SIZE_INCLUDING_FIELD(TessFunctionCall, result_scale)
 
 /*
  * The description of one implementation. The provider owns it and keeps it

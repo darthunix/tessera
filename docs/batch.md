@@ -29,6 +29,16 @@ initialized memory and a consumer passes the kernels no readiness mask
 rows uninitialized must say so before a consumer may rely on it, and none
 exists yet.
 
+A numeric column may come as decimals. A consumer that reads them sets
+`accept_decimals`; a provider that has them (a projection's numeric chain,
+see [expr.md](expr.md)) then answers with `decimal_rows`, the rows whose
+Datum holds not a numeric but the int64 value times `10^decimal_scale`,
+the value's display scale, of at most 18 digits; the other rows hold
+numerics. A provider that does not know decimals, or a consumer that did
+not ask, leaves `decimal_rows` NULL. The fields follow `nrows`, so an array
+of columns, as the kernels read one, has the size of the whole structure:
+the Rust mirror (`DatumColumn`) carries them too.
+
 `TessColumnPurpose` tells the provider whether the values are needed for a
 filter or a later projection. It may affect preparation strategy but never the
 values returned.

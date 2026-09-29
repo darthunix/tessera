@@ -62,6 +62,7 @@ impl Keys {
             values: self.datums.as_ptr(),
             isnull: self.isnull.as_ptr(),
             nrows: self.nrows() as i32,
+            ..DatumColumn::EMPTY
         }
     }
 
@@ -774,6 +775,7 @@ fn grouped_states_accumulate_through_the_entry_points() -> Result<()> {
         values: values.as_ptr(),
         isnull: isnull.as_ptr(),
         nrows: 100,
+        ..DatumColumn::EMPTY
     };
     let key = TableKey {
         kind: 1,
@@ -892,6 +894,7 @@ fn grouped_states_accumulate_through_the_entry_points() -> Result<()> {
             values: wide.as_ptr(),
             isnull: wide_null.as_ptr(),
             nrows: 100,
+            ..DatumColumn::EMPTY
         };
         let code = tess_table_accumulate(
             table.ptr(),
@@ -927,6 +930,7 @@ fn grouped_states_accumulate_through_the_entry_points() -> Result<()> {
             values: huge.as_ptr(),
             isnull: isnull.as_ptr(),
             nrows: 100,
+            ..DatumColumn::EMPTY
         };
         let code = tess_table_accumulate(
             table.ptr(),
@@ -969,6 +973,7 @@ fn the_writer_entry_points_round_trip() -> Result<()> {
         values: values.as_ptr(),
         isnull: isnull.as_ptr(),
         nrows: 100,
+        ..DatumColumn::EMPTY
     };
     let key = TableKey {
         kind: 1,
@@ -1251,6 +1256,7 @@ fn int4_keys_find_the_records_of_int8_keys() -> Result<()> {
         values: datums.as_ptr(),
         isnull: isnull.as_ptr(),
         nrows: 64,
+        ..DatumColumn::EMPTY
     };
     let (built_column, probed_column) = (column(&built_datums), column(&probed_datums));
     let mut status = Status::new();
@@ -1328,6 +1334,7 @@ fn grouped_insertion_steps_through_a_key_in_one_call_each() -> Result<()> {
         values: datums.as_ptr(),
         isnull: isnull.as_ptr(),
         nrows: 64,
+        ..DatumColumn::EMPTY
     };
     let key = TableKey {
         kind: 1,
@@ -1586,12 +1593,14 @@ fn the_columns_entry_point_writes_each_payload_word() -> Result<()> {
             values: first.as_ptr(),
             isnull: first_nulls.as_ptr(),
             nrows: 70,
+            ..DatumColumn::EMPTY
         },
         DatumColumn {
             struct_size: size_of::<DatumColumn>(),
             values: second.as_ptr(),
             isnull: second_nulls.as_ptr(),
             nrows: 70,
+            ..DatumColumn::EMPTY
         },
     ];
     let mut status = Status::new();
@@ -1702,12 +1711,14 @@ fn the_partitioned_columns_entry_point_counts_each_partition() -> Result<()> {
             values: first.as_ptr(),
             isnull: first_nulls.as_ptr(),
             nrows: 70,
+            ..DatumColumn::EMPTY
         },
         DatumColumn {
             struct_size: size_of::<DatumColumn>(),
             values: second.as_ptr(),
             isnull: second_nulls.as_ptr(),
             nrows: 70,
+            ..DatumColumn::EMPTY
         },
     ];
     // Partition bits 3 and 4 of the hash; partition 3 has room for 5 records.
@@ -1840,12 +1851,14 @@ fn chunks_of_columns_round_trip_through_the_entry_points() -> Result<()> {
             values: first.as_ptr(),
             isnull: first_nulls.as_ptr(),
             nrows: nrows as i32,
+            ..DatumColumn::EMPTY
         },
         DatumColumn {
             struct_size: size_of::<DatumColumn>(),
             values: second.as_ptr(),
             isnull: second_nulls.as_ptr(),
             nrows: nrows as i32,
+            ..DatumColumn::EMPTY
         },
     ];
     let mut status = Status::new();

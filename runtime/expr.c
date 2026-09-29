@@ -14,6 +14,7 @@
 #include "utils/memutils.h"
 #include "utils/typcache.h"
 
+#include "tessera/decimal.h"
 #include "tessera/expr.h"
 #include "tessera/function.h"
 #include "tessera/runtime.h"
@@ -37,6 +38,13 @@ typedef struct Step
 	TessExpr   *operand;
 	/* The other arguments, evaluated per computation. */
 	ExprState  *scalars[MAX_ARGS];
+	/*
+	 * The function reads the decimals of its column arguments
+	 * (TESS_FUNCTION_DECIMALS), and the display scale of the decimals it
+	 * writes, which the plan fixes (numeric_scale), or -1: numerics only.
+	 */
+	bool		reads_decimals;
+	int			scale;
 } Step;
 
 /* A node of a condition over the batch, in three-valued logic. */
@@ -161,8 +169,18 @@ struct TessExpr
 	bool	   *isnull[2];
 	int32	   *ints[2];
 	uint64	   *bits[2];
-	/* The results, valid while ready. */
+	/* The rows of a set whose Datum is a decimal of the step that wrote it. */
+	uint64	   *decimals[2];
+	/*
+	 * The results, valid while ready, with their decimals when a step wrote
+	 * them; and, once a consumer of numerics asks, the same values with the
+	 * decimals made numerics, which leaves the decimals' own for a consumer
+	 * of those.
+	 */
 	TessDatumColumn result;
+	Datum	   *numerics;
+	TessDatumColumn result_numerics;
+	bool		numerics_ready;
 	TessRowMask non_nulls;
 	bool		ready;
 	/* A bare column's mask is built when asked for: a filter never asks. */
@@ -949,6 +967,81 @@ static void eval_choice(TessExpr *expr);
 static void eval_cond(Cond *cond, const TessRowMask *rows, bool want_unknown);
 
 /*
+ * The display scale every value of a numeric expression has, as the core
+ * computes it, when the plan fixes it: a column of numeric(p, s) has s,
+ * which a value of the column is stored with, a constant its own, + and -
+ * the larger of their arguments', * their sum, negation and abs their
+ * argument's, numeric of an integer 0; -1 when it depends on the row (a
+ * numeric without a typmod, a parameter), passes 18, or for anything else.
+ * A row whose value turns out of another scale is written as a numeric,
+ * so the scale only chooses where decimals go.
+ */
+static int
+numeric_scale(Node *node)
+{
+	const TessFunction *function;
+	List	   *args;
+	Oid			opno;
+	Oid			inputcollid;
+	int			left;
+	int			right;
+
+	check_stack_depth();
+	node = expand(node);
+	if (node == NULL)
+		return -1;
+	node = strip_relabel(node);
+	if (exprType(node) != NUMERICOID)
+		return -1;
+	if (IsA(node, Var))
+	{
+		int32		typmod = ((Var *) node)->vartypmod;
+		int			scale;
+
+		if (typmod < (int32) VARHDRSZ)
+			return -1;
+		scale = ((((typmod - VARHDRSZ) & 0x7ff) ^ 1024) - 1024);
+		return scale >= 0 && scale <= TESS_DECIMAL_DIGITS ? scale : -1;
+	}
+	if (IsA(node, Const))
+	{
+		TessDecimal decimal;
+
+		if (((Const *) node)->constisnull ||
+			!tess_decimal_of(((Const *) node)->constvalue, &decimal))
+			return -1;
+		return decimal.scale;
+	}
+	if (!IsA(node, OpExpr) && !IsA(node, FuncExpr))
+		return -1;
+	function = call_of(node, &args, &opno, &inputcollid);
+	if (function == NULL)
+		return -1;
+	switch (function->funcid)
+	{
+		case F_NUMERIC_ADD:
+		case F_NUMERIC_SUB:
+		case F_NUMERIC_MUL:
+			left = numeric_scale(linitial(args));
+			right = numeric_scale(lsecond(args));
+			if (left < 0 || right < 0)
+				return -1;
+			if (function->funcid != F_NUMERIC_MUL)
+				return Max(left, right);
+			return left + right <= TESS_DECIMAL_DIGITS ? left + right : -1;
+		case F_NUMERIC_UMINUS:
+		case F_NUMERIC_ABS:
+			return numeric_scale(linitial(args));
+		case F_NUMERIC_INT2:
+		case F_NUMERIC_INT4:
+		case F_NUMERIC_INT8:
+			return 0;
+		default:
+			return -1;
+	}
+}
+
+/*
  * Set up the call of node, whose column argument was compiled already;
  * the operand, when there is one, is compiled here as an expression of
  * its own.
@@ -969,6 +1062,9 @@ init_step(Step *step, Node *node, int column_arg, int column_operand,
 	step->column_arg = column_arg;
 	step->column_operand = column_operand;
 	step->operand = NULL;
+	step->reads_decimals = (function->flags & TESS_FUNCTION_DECIMALS) != 0;
+	step->scale = step->reads_decimals && function->kind == TESS_FUNCTION_VALUE ?
+		numeric_scale(node) : -1;
 	if (column_operand >= 0)
 	{
 		Node	   *operand = list_nth(args, column_operand);
@@ -1388,12 +1484,17 @@ ensure_capacity(TessExpr *expr, int nrows)
 			pfree(expr->isnull[set]);
 			pfree(expr->ints[set]);
 			pfree(expr->bits[set]);
+			pfree(expr->decimals[set]);
 		}
 		expr->values[set] = palloc0_array(Datum, nrows);
 		expr->isnull[set] = palloc0_array(bool, nrows);
 		expr->ints[set] = palloc0_array(int32, nrows);
 		expr->bits[set] = palloc0_array(uint64, nwords);
+		expr->decimals[set] = palloc0_array(uint64, nwords);
 	}
+	if (expr->numerics != NULL)
+		pfree(expr->numerics);
+	expr->numerics = palloc0_array(Datum, nrows);
 	expr->capacity = nrows;
 	MemoryContextSwitchTo(oldcontext);
 }
@@ -1478,7 +1579,9 @@ build_args(TessExpr *expr, Step *step, const TessDatumColumn *column,
 		{
 			/* The selection may have narrowed since the operand was computed. */
 			step->operand->ready = false;
-			args[position].column = tess_expr_get_column(step->operand);
+			args[position].column = step->reads_decimals ?
+				tess_expr_get_decimal_column(step->operand) :
+				tess_expr_get_column(step->operand);
 		}
 		else
 		{
@@ -1496,7 +1599,7 @@ build_args(TessExpr *expr, Step *step, const TessDatumColumn *column,
 /* Run one step over the selected rows; a failure is raised here. */
 static void
 call_step(TessExpr *expr, const Step *step, const TessFunctionArg *args,
-		  void *values, TessRowMask *non_nulls)
+		  void *values, TessRowMask *non_nulls, TessRowMask *decimals)
 {
 	TessFunctionCall call = TESS_STRUCT_INITIALIZER(TessFunctionCall);
 
@@ -1504,6 +1607,13 @@ call_step(TessExpr *expr, const Step *step, const TessFunctionArg *args,
 	if (non_nulls != NULL)
 		memset(non_nulls->bits, 0,
 			   sizeof(uint64) * tess_row_mask_word_count(non_nulls->nrows));
+	if (decimals != NULL)
+	{
+		memset(decimals->bits, 0,
+			   sizeof(uint64) * tess_row_mask_word_count(decimals->nrows));
+		call.decimal_rows = decimals;
+		call.result_scale = step->scale;
+	}
 	call.function = step->function;
 	call.nargs = step->nargs;
 	call.args = args;
@@ -1549,8 +1659,53 @@ call_predicate(TessExpr *value, const TessFunction *function,
 		tess_status_report(&value->status);
 }
 
-const TessDatumColumn *
-tess_expr_get_column(TessExpr *expr)
+/*
+ * A column's decimals made numerics into the expression's array of
+ * numerics, the other rows' Datums copied: the column's own arrays stay
+ * as they are for a consumer of the decimals. The numerics go with the
+ * batch's memory.
+ */
+static void
+make_numerics(TessExpr *expr, const TessDatumColumn *from, TessDatumColumn *to)
+{
+	const uint64 *decimals = from->decimal_rows;
+	int			nrows = from->nrows;
+	int			nwords = tess_row_mask_word_count(nrows);
+	Datum	   *numerics = expr->numerics;
+	int			scale = from->decimal_scale;
+
+	memcpy(numerics, from->values, sizeof(Datum) * nrows);
+	for (int word = 0; word < nwords; word++)
+	{
+		uint64		bits = decimals[word];
+		char	   *space;
+
+		if (bits == 0)
+			continue;
+		space = MemoryContextAlloc(expr->values_context,
+								   (Size) pg_popcount64(bits) * TESS_DECIMAL_NUMERIC_MAX);
+		for (; bits != 0; bits &= bits - 1)
+		{
+			int			row = word * 64 + pg_rightmost_one_pos64(bits);
+
+			(void) tess_decimal_write_numeric(DatumGetInt64(numerics[row]), scale, space);
+			numerics[row] = PointerGetDatum(space);
+			space += TESS_DECIMAL_NUMERIC_MAX;
+		}
+	}
+	*to = *from;
+	to->values = numerics;
+	to->decimal_rows = NULL;
+	to->decimal_scale = 0;
+}
+
+/*
+ * The expression's column over the bound selection, computed once: with
+ * the decimals its steps wrote when the consumer reads them, else with
+ * numerics in their place.
+ */
+static const TessDatumColumn *
+expr_column(TessExpr *expr, bool decimals)
 {
 	TessBatch  *batch = expr->batch;
 	TessDatumColumn current = TESS_STRUCT_INITIALIZER(TessDatumColumn);
@@ -1562,7 +1717,16 @@ tess_expr_get_column(TessExpr *expr)
 	if (expr->cond != NULL)
 		elog(ERROR, "Tessera condition has no value column");
 	if (expr->ready)
-		return &expr->result;
+	{
+		if (decimals || expr->result.decimal_rows == NULL)
+			return &expr->result;
+		if (!expr->numerics_ready)
+		{
+			make_numerics(expr, &expr->result, &expr->result_numerics);
+			expr->numerics_ready = true;
+		}
+		return &expr->result_numerics;
+	}
 	nrows = expr->rows->nrows;
 	ensure_capacity(expr, nrows);
 	if (expr->column >= 0)
@@ -1601,20 +1765,28 @@ tess_expr_get_column(TessExpr *expr)
 		int			set = index % 2;
 		TessFunctionArg args[MAX_ARGS];
 		TessRowMask non_nulls = {nrows, expr->bits[set]};
+		TessRowMask decimal_rows = {nrows, expr->decimals[set]};
+		bool		wrote_decimals = false;
 
+		/* A step that reads no decimals gets numerics in their place. */
+		if (!step->reads_decimals && current.decimal_rows != NULL)
+			make_numerics(expr, &current, &current);
 		if (build_args(expr, step, &current, args))
 			fill_scalar(expr, set, (Datum) 0, true);
 		else
 		{
+			wrote_decimals = step->scale >= 0;
 			call_step(expr, step, args,
 					  step->function->result_format == TESS_RESULT_INT32 ?
 					  (void *) expr->ints[set] : (void *) expr->values[set],
-					  &non_nulls);
+					  &non_nulls, wrote_decimals ? &decimal_rows : NULL);
 			finish_step(expr, set, step->function->result_format);
 		}
 		current.values = expr->values[set];
 		current.isnull = expr->isnull[set];
 		current.nrows = nrows;
+		current.decimal_rows = wrote_decimals ? expr->decimals[set] : NULL;
+		current.decimal_scale = wrote_decimals ? step->scale : 0;
 		current_bits = expr->bits[set];
 	}
 	expr->result = current;
@@ -1622,13 +1794,26 @@ tess_expr_get_column(TessExpr *expr)
 	expr->non_nulls.bits = current_bits;
 	expr->non_nulls_pending = current_bits == NULL;
 	expr->ready = true;
-	return &expr->result;
+	expr->numerics_ready = false;
+	return expr_column(expr, decimals);
+}
+
+const TessDatumColumn *
+tess_expr_get_column(TessExpr *expr)
+{
+	return expr_column(expr, false);
+}
+
+const TessDatumColumn *
+tess_expr_get_decimal_column(TessExpr *expr)
+{
+	return expr_column(expr, true);
 }
 
 const TessRowMask *
 tess_expr_non_nulls(TessExpr *expr)
 {
-	(void) tess_expr_get_column(expr);
+	(void) expr_column(expr, true);
 	if (expr->non_nulls_pending)
 	{
 		const TessRowMask *rows = expr->rows;
@@ -1824,7 +2009,9 @@ eval_cond(Cond *cond, const TessRowMask *rows, bool want_unknown)
 				/* x once, over the selection. */
 				memcpy(rest, rows->bits, sizeof(uint64) * nwords);
 				bind_selection(cond->expr, &cond->rest);
-				column = tess_expr_get_column(cond->expr);
+				column = (cond->function->flags & TESS_FUNCTION_DECIMALS) != 0 ?
+					tess_expr_get_decimal_column(cond->expr) :
+					tess_expr_get_column(cond->expr);
 				if (want_unknown)
 					memcpy(present, tess_expr_non_nulls(cond->expr)->bits,
 						   sizeof(uint64) * nwords);
@@ -2317,7 +2504,7 @@ tess_expr_apply_filter(TessExpr *expr)
 				   sizeof(uint64) * tess_row_mask_word_count(expr->rows->nrows));
 		return;
 	}
-	column = tess_expr_get_column(expr);
+	column = expr_column(expr, expr->predicate.reads_decimals);
 	if (build_args(expr, &expr->predicate, column, args))
 	{
 		/* A NULL scalar makes the strict predicate false everywhere. */
@@ -2328,7 +2515,7 @@ tess_expr_apply_filter(TessExpr *expr)
 			memset(rows->bits, 0, sizeof(uint64) * nwords);
 	}
 	else
-		call_step(expr, &expr->predicate, args, NULL, NULL);
+		call_step(expr, &expr->predicate, args, NULL, NULL, NULL);
 	/* The value was computed over the wider selection. */
 	expr->ready = false;
 }

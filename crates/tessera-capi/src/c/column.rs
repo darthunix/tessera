@@ -22,11 +22,29 @@ pub struct DatumColumn {
     pub isnull: *const bool,
     /// The number of rows.
     pub nrows: c_int,
+    /// A numeric column's decimals: whether the consumer reads them. The
+    /// kernels here read none, so an array of columns keeps C's layout.
+    pub accept_decimals: bool,
+    /// The rows whose Datum holds a decimal, or null.
+    pub decimal_rows: *const u64,
+    /// The decimals' scale.
+    pub decimal_scale: c_int,
 }
 
 impl DatumColumn {
     /// The size through `nrows` (`TESS_DATUM_COLUMN_MIN_SIZE`).
     pub const MIN_SIZE: usize = offset_of!(DatumColumn, nrows) + size_of::<c_int>();
+
+    /// A column of no rows and no decimals, to complete a literal with.
+    pub const EMPTY: DatumColumn = DatumColumn {
+        struct_size: size_of::<DatumColumn>(),
+        values: std::ptr::null(),
+        isnull: std::ptr::null(),
+        nrows: 0,
+        accept_decimals: false,
+        decimal_rows: std::ptr::null(),
+        decimal_scale: 0,
+    };
 
     /// Read the column as integers of one width with `prepared` as its
     /// readiness.
@@ -113,7 +131,8 @@ mod tests {
 
     #[test]
     fn layout_matches_the_header() {
-        assert_eq!(size_of::<DatumColumn>(), 32);
+        assert_eq!(size_of::<DatumColumn>(), 48);
         assert_eq!(DatumColumn::MIN_SIZE, 28);
+        assert_eq!(std::mem::offset_of!(DatumColumn, decimal_rows), 32);
     }
 }

@@ -129,4 +129,69 @@ tess_decimal_of(Datum datum, TessDecimal *result)
 	return true;
 }
 
+/* The most bytes a numeric of an int64 at a scale up to 63 takes. */
+#define TESS_DECIMAL_NUMERIC_MAX 32
+
+/*
+ * Write the numeric of value / 10^scale with that display scale into out,
+ * at least TESS_DECIMAL_NUMERIC_MAX bytes aligned for an int32, as the
+ * core's make_result writes it: the digits of base 10000 aligned to the
+ * decimal point, leading and trailing zero digits dropped, zero positive at
+ * weight 0, the short header, which such a weight and a scale up to 63
+ * always fit. The varlena's size is returned.
+ */
+static inline Size
+tess_decimal_write_numeric(int64 value, int scale, void *out)
+{
+	int16		digits[8];
+	int			ndigits = 0;
+	int			first;
+	int			weight;
+	int			part = scale % 4;
+	int			pad = (4 - part) % 4;
+	uint64		magnitude = value < 0 ? -(uint64) value : (uint64) value;
+	Size		size;
+	char	   *data = (char *) out + VARHDRSZ;
+	uint16		header;
+
+	/*
+	 * Digits from the lowest: first the fraction's partial group, its part
+	 * digits padded to four, then whole groups; the lowest (scale + pad) / 4
+	 * are the fraction's.
+	 */
+	if (part != 0)
+	{
+		digits[ndigits++] = (int16) ((magnitude % tess_powers_of_ten[part]) *
+									 tess_powers_of_ten[pad]);
+		magnitude /= tess_powers_of_ten[part];
+	}
+	while (magnitude != 0)
+	{
+		digits[ndigits++] = (int16) (magnitude % 10000);
+		magnitude /= 10000;
+	}
+	/* A partial group of zeros under nothing else: the value is zero. */
+	while (ndigits > 0 && digits[ndigits - 1] == 0)
+		ndigits--;
+	weight = ndigits - (scale + pad) / 4 - 1;
+	/* Trailing zero digits are the lowest: skip them. */
+	first = 0;
+	while (first < ndigits && digits[first] == 0)
+		first++;
+	if (first == ndigits)
+	{
+		ndigits = 0;
+		weight = 0;
+	}
+	size = VARHDRSZ + sizeof(uint16) + (ndigits - first) * sizeof(int16);
+	SET_VARSIZE(out, size);
+	header = 0x8000 | (value < 0 && ndigits > 0 ? 0x2000 : 0) |
+		(scale << 7) | (weight < 0 ? 0x0040 : 0) | (weight & 0x003F);
+	memcpy(data, &header, sizeof(uint16));
+	/* The highest digit first. */
+	for (int at = ndigits - 1, index = 0; at >= first; at--, index++)
+		memcpy(data + sizeof(uint16) + index * sizeof(int16), &digits[at], sizeof(int16));
+	return size;
+}
+
 #endif							/* TESSERA_DECIMAL_H */

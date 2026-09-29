@@ -42,10 +42,31 @@ typedef struct TessDatumColumn
 	const Datum *values;
 	const bool *isnull;
 	int			nrows;
+	/*
+	 * A numeric column's decimals, which a consumer that reads them asks for
+	 * by setting accept_decimals: the provider may then answer with
+	 * decimal_rows, the rows whose Datum holds not a numeric but the int64
+	 * value * 10^decimal_scale, the value's display scale, of at most 18
+	 * digits; the other rows hold numerics. A provider that does not know
+	 * decimals, or a consumer that did not ask, leaves decimal_rows NULL.
+	 */
+	bool		accept_decimals;
+	const uint64 *decimal_rows;
+	int			decimal_scale;
 } TessDatumColumn;
 
 #define TESS_DATUM_COLUMN_MIN_SIZE \
 	TESS_ABI_SIZE_INCLUDING_FIELD(TessDatumColumn, nrows)
+#define TESS_DATUM_COLUMN_DECIMALS_SIZE \
+	TESS_ABI_SIZE_INCLUDING_FIELD(TessDatumColumn, decimal_scale)
+
+/* The decimal rows of a column, or NULL: a column of the size that has them. */
+static inline const uint64 *
+tess_column_decimal_rows(const TessDatumColumn *column)
+{
+	return column->struct_size >= TESS_DATUM_COLUMN_DECIMALS_SIZE ?
+		column->decimal_rows : NULL;
+}
 
 /*
  * Operations supplied by the owner of a batch's physical representation.

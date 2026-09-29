@@ -214,6 +214,11 @@ other types and from other extensions use the same structure.
   either, the expression compiler leaves a call under a collation row by
   row; the call still carries `inputcollid`, which an implementation used
   by another consumer must honor or fail.
+- **Decimals.** `TESS_FUNCTION_DECIMALS` says a numeric function reads the
+  decimals of its column arguments (`TessDatumColumn.decimal_rows`) and, a
+  value, writes decimals where the call asks: with `decimal_rows` set, a
+  row's result of at most 18 digits at `result_scale` goes into `values` as
+  its int64 and its bit into `decimal_rows`, any other as a numeric.
 - **Shape.** With `TESS_FUNCTION_ANY_SHAPE` every combination of column and
   scalar arguments is accepted. Without it, `args[0]` is the only column and
   the others are scalars: the consumer moves the column first through the

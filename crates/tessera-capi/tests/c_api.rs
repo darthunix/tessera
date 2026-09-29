@@ -46,6 +46,7 @@ impl Fixture {
             values: self.values.as_ptr(),
             isnull: self.isnull.as_ptr(),
             nrows: self.values.len() as i32,
+            ..DatumColumn::EMPTY
         }
     }
 
@@ -491,6 +492,7 @@ fn arithmetic_writes_results_and_reports_postgresql_codes() {
         values: datums.as_ptr(),
         isnull: isnull.as_ptr(),
         nrows: 3,
+        ..DatumColumn::EMPTY
     };
     let mut selection = [selected];
     let rows = Mask {
@@ -543,6 +545,7 @@ fn arithmetic_writes_results_and_reports_postgresql_codes() {
         values: datums.as_ptr(),
         isnull: isnull.as_ptr(),
         nrows: 3,
+        ..DatumColumn::EMPTY
     };
     let mut selection = [selected];
     let rows = Mask {
@@ -581,6 +584,7 @@ fn arithmetic_writes_results_and_reports_postgresql_codes() {
         values: datums.as_ptr(),
         isnull: isnull.as_ptr(),
         nrows: 3,
+        ..DatumColumn::EMPTY
     };
     let mut selection = [selected];
     let rows = Mask {
@@ -654,6 +658,7 @@ fn int8_arithmetic_writes_whole_results_and_reports_bigint_codes() {
         values: datums.as_ptr(),
         isnull: isnull.as_ptr(),
         nrows: 3,
+        ..DatumColumn::EMPTY
     };
     let mut selection = [0b111];
     let rows = Mask {
@@ -707,6 +712,7 @@ fn int8_arithmetic_writes_whole_results_and_reports_bigint_codes() {
         values: datums.as_ptr(),
         isnull: isnull.as_ptr(),
         nrows: 3,
+        ..DatumColumn::EMPTY
     };
     // SAFETY: as above.
     let code = unsafe {
@@ -830,6 +836,7 @@ fn int8_extremes_and_the_count_of_any_type_match_a_scalar_loop() {
         values: pointers.as_ptr(),
         isnull: fixture.isnull.as_ptr(),
         nrows: 200,
+        ..DatumColumn::EMPTY
     };
     let rows = fixture.mask();
     // SAFETY: as above.
@@ -956,6 +963,7 @@ fn narrowing_writes_int4_values_and_fails_past_the_range() {
         values: datums.as_ptr(),
         isnull: isnull.as_ptr(),
         nrows: 4,
+        ..DatumColumn::EMPTY
     };
     let mut values = [0i32; 4];
     let mut result_words = [0u64];
@@ -1001,6 +1009,7 @@ fn hashes_follow_pg_batch_and_the_null_policy() {
         values: datums.as_ptr(),
         isnull: isnull.as_ptr(),
         nrows: 3,
+        ..DatumColumn::EMPTY
     };
     let mut selection = [selected];
     let rows = Mask {
@@ -1092,6 +1101,7 @@ fn int8_hashes_fold_as_hashint8_and_chain_with_int4() {
         values: datums.as_ptr(),
         isnull: isnull.as_ptr(),
         nrows: 3,
+        ..DatumColumn::EMPTY
     };
     let mut selection = [0b111];
     let rows = Mask {
@@ -1127,6 +1137,7 @@ fn int8_hashes_fold_as_hashint8_and_chain_with_int4() {
         values: int4_datums.as_ptr(),
         isnull: int4_isnull.as_ptr(),
         nrows: 3,
+        ..DatumColumn::EMPTY
     };
     let int8_datums = [1_u64, 7, 42];
     let int8_column = DatumColumn {
@@ -1226,6 +1237,7 @@ fn column_comparisons_over_datum_storage_match_a_model() {
             values: values.as_ptr(),
             isnull: isnull.as_ptr(),
             nrows: nrows as i32,
+            ..DatumColumn::EMPTY
         };
         let (lhs, rhs) = (
             column(&left_datums, &left_null),

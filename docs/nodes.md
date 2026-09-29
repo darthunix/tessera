@@ -1037,7 +1037,12 @@ approximate type and the core's own parallel plans do; the node has no
 reason to yet, its time a row going to reading the rows, not to adding.
 Against the core's functions over the same scan (2 M rows of
 `numeric(15,2)`): `sum` and `avg` by 100 groups 80 ms and 55, `sum`, `avg`,
-`min` and `max` without groups 101 and 56. A partial aggregate stays with
+`min` and `max` without groups 101 and 56. A numeric aggregate of its own,
+not DISTINCT, asks the projection for its argument's decimals
+(`accept_decimals`) and folds a numeric chain's int64 values without a
+numeric made or read: `min(n * 1.08)`, `max(n - 0.5)` by 10 groups 97 ms
+before and 69 after, `sum(n * 1.08)`, `avg(n - 0.5)` by 100 groups 99 and
+70. A partial aggregate stays with
 the core's functions, whose state the Finalize Aggregate combines. The
 arguments after the first travel in the private data as `more`. With `GROUP BY` such an
 aggregate's state is a word of the group's record, the value itself when
