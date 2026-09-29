@@ -197,6 +197,17 @@ SELECT pg_temp.measure_setting('merge_forced',
 SELECT pg_temp.measure_pair('merge_sorted',
     'SELECT count(*), sum(i.w) FROM bench_mj_outer o JOIN bench_mj_inner i ON o.k = i.k',
     :repetitions);
+-- A partitioned outer side keyed by the join key: bench_part's four
+-- partitions of 500 000 rows by ranges of k, of which the dimension's keys
+-- reach only the first; every key of the dimension, and a thousand of
+-- them.
+SELECT pg_temp.measure_pair('part_prune',
+    'SELECT count(*), sum(p.v) FROM bench_part p JOIN bench_dim d ON p.k = d.id',
+    :repetitions);
+SELECT pg_temp.measure_pair('part_prune_few',
+    format('SELECT count(*), sum(p.v) FROM bench_part p JOIN bench_dim d ON p.k = d.id WHERE d.d1 <= %s',
+           1000 * :scale),
+    :repetitions);
 -- The planner over four relations, where the hook sees every join order.
 SELECT pg_temp.measure_plan('plan_time',
     'SELECT count(*) FROM bench_fact f JOIN bench_dim d ON f.fk = d.id JOIN bench_dup u ON d.id = u.k JOIN bench_dim e ON u.v = e.id',
@@ -222,12 +233,12 @@ SELECT format('EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF
 FROM unnest(ARRAY['fk_count', 'fk_inner_col', 'fk_outer_col', 'int8', 'mixed',
                   'selective', 'miss', 'dup', 'dup_text', 'two_keys', 'residual', 'rows_parent',
                   'chain', 'semi', 'anti', 'left_nulls', 'left_dup', 'full_join', 'right_join',
-                  'merge_forced', 'merge_sorted']) AS name \gexec
+                  'merge_forced', 'merge_sorted', 'part_prune', 'part_prune_few']) AS name \gexec
 SET tessera.enable = off;
 SELECT format('EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE off_%s', name)
 FROM unnest(ARRAY['fk_count', 'fk_inner_col', 'fk_outer_col', 'int8', 'mixed',
                   'selective', 'miss', 'dup', 'two_keys', 'residual', 'rows_parent',
                   'chain', 'semi', 'anti', 'left_nulls', 'left_dup', 'full_join', 'right_join',
-                  'merge_forced', 'merge_sorted']) AS name \gexec
+                  'merge_forced', 'merge_sorted', 'part_prune', 'part_prune_few']) AS name \gexec
 \o
 DEALLOCATE ALL;

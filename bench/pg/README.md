@@ -26,7 +26,10 @@ query down, and where it can, does it speed one up.
   join and a join over a join; then where the core may merge: a full and
   a right join, which the batch hash join does not do, a join with hash
   joins disabled (`measure_setting`), and sides already in the order of
-  their keys through their indexes (`bench_mj_outer`, `bench_mj_inner`). With Tessera on, `TessHashJoin` builds the
+  their keys through their indexes (`bench_mj_outer`, `bench_mj_inner`);
+  the partitioned `bench_part` keyed by the join key against every key of
+  the dimension and a thousand of them, which reach one partition of
+  four. With Tessera on, `TessHashJoin` builds the
   inner side and probes it with batches of the outer side, under `TessAgg`
   where the query aggregates; with it off, the core's `Hash Join`. A ratio
   below one is the win. `plan_time` plans a join of four relations
