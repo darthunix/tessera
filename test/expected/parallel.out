@@ -1174,6 +1174,64 @@ RESET tessera.batch_gather;
 SET parallel_setup_cost = 0;
 SET parallel_tuple_cost = 0;
 DROP TABLE parallel_wide;
+-- A parallel-aware node of the core below that allocates in the query's
+-- dynamic shared memory, the shared bitmap of a Parallel Bitmap Heap
+-- Scan: the leader's own part runs with it installed, as under the core's
+-- Gather and Gather Merge (it found none and crashed).
+CREATE TABLE parallel_bitmap AS
+SELECT g AS id, (g::bigint * 7919 % 200000)::int AS k, g % 97 AS w FROM generate_series(1, 200000) AS g;
+CREATE INDEX parallel_bitmap_k ON parallel_bitmap (k);
+VACUUM ANALYZE parallel_bitmap;
+SET enable_seqscan = off;
+SET enable_indexscan = off;
+SET enable_indexonlyscan = off;
+EXPLAIN (COSTS OFF) SELECT count(*), sum(w) FROM parallel_bitmap WHERE k < 60000;
+                                 QUERY PLAN                                 
+----------------------------------------------------------------------------
+ Finalize Aggregate
+   ->  Custom Scan (TessGather)
+         Workers Planned: 2
+         ->  Parallel Custom Scan (TessSend)
+               ->  Parallel Custom Scan (TessAgg)
+                     Partial Mode: Partial
+                     ->  Custom Scan (TessPack)
+                           ->  Parallel Bitmap Heap Scan on parallel_bitmap
+                                 Recheck Cond: (k < 60000)
+                                 ->  Bitmap Index Scan on parallel_bitmap_k
+                                       Index Cond: (k < 60000)
+(11 rows)
+
+SELECT parallel_same($$SELECT count(*), sum(w) FROM parallel_bitmap WHERE k < 60000$$);
+    parallel_same    
+---------------------
+ {"(60000,2879316)"}
+(1 row)
+
+EXPLAIN (COSTS OFF) SELECT k, w FROM parallel_bitmap WHERE k < 60000 ORDER BY k;
+                              QUERY PLAN                              
+----------------------------------------------------------------------
+ Custom Scan (TessGatherMerge)
+   Workers Planned: 2
+   ->  Parallel Custom Scan (TessSend)
+         ->  Parallel Custom Scan (TessSort)
+               Sort Key: k
+               ->  Custom Scan (TessPack)
+                     ->  Parallel Bitmap Heap Scan on parallel_bitmap
+                           Recheck Cond: (k < 60000)
+                           ->  Bitmap Index Scan on parallel_bitmap_k
+                                 Index Cond: (k < 60000)
+(10 rows)
+
+SELECT parallel_same($$SELECT md5(string_agg(k || ':' || w, ',' ORDER BY n)) FROM (SELECT k, w, row_number() OVER () AS n FROM (SELECT k, w FROM parallel_bitmap WHERE k < 60000 ORDER BY k, w) AS s) AS q$$);
+            parallel_same             
+--------------------------------------
+ {(9683660de6399478eed379c28d7fd057)}
+(1 row)
+
+RESET enable_seqscan;
+RESET enable_indexscan;
+RESET enable_indexonlyscan;
+DROP TABLE parallel_bitmap;
 -- The switch off.
 SET tessera.enable = off;
 EXPLAIN (COSTS OFF) SELECT a, b FROM parallel_t WHERE a > 4990;

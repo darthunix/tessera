@@ -1611,6 +1611,25 @@ show_message_window(TessGatherState *state)
 }
 
 /*
+ * The leader runs its own part of the subtree with the query's dynamic
+ * shared memory installed, as the core's Gather and Gather Merge do only
+ * while they run the plan: a parallel-aware node of the core below
+ * allocates there (a Parallel Bitmap Heap Scan's shared bitmap, a Parallel
+ * Hash's table), and found none.
+ */
+static void
+install_query_dsa(TessGatherState *state)
+{
+	state->css.ss.ps.state->es_query_dsa = state->pei != NULL ? state->pei->area : NULL;
+}
+
+static void
+remove_query_dsa(TessGatherState *state)
+{
+	state->css.ss.ps.state->es_query_dsa = NULL;
+}
+
+/*
  * The next batch to give out: the rest of the message in hand, the next
  * message of a worker, or, while none is waiting, the leader's own; the
  * leader waits for the workers once its own part is done. False at the end.
@@ -1636,7 +1655,11 @@ gather_next(TessGatherState *state)
 			continue;
 		if (!state->local_done)
 		{
-			TessBatch  *batch = tess_input_next(state->local);
+			TessBatch  *batch;
+
+			install_query_dsa(state);
+			batch = tess_input_next(state->local);
+			remove_query_dsa(state);
 
 			if (batch == NULL)
 			{
@@ -1698,8 +1721,10 @@ merge_load(TessGatherState *state, int index)
 		state->messages++;
 		return;
 	}
+	install_query_dsa(state);
 	(void) fill_message(send, &state->local_builder, state->local,
 						state->css.ss.ps.state->es_query_cxt);
+	remove_query_dsa(state);
 	if (state->local_builder.rows == 0)
 	{
 		source->done = true;

@@ -346,6 +346,25 @@ RESET tessera.batch_gather;
 SET parallel_setup_cost = 0;
 SET parallel_tuple_cost = 0;
 DROP TABLE parallel_wide;
+-- A parallel-aware node of the core below that allocates in the query's
+-- dynamic shared memory, the shared bitmap of a Parallel Bitmap Heap
+-- Scan: the leader's own part runs with it installed, as under the core's
+-- Gather and Gather Merge (it found none and crashed).
+CREATE TABLE parallel_bitmap AS
+SELECT g AS id, (g::bigint * 7919 % 200000)::int AS k, g % 97 AS w FROM generate_series(1, 200000) AS g;
+CREATE INDEX parallel_bitmap_k ON parallel_bitmap (k);
+VACUUM ANALYZE parallel_bitmap;
+SET enable_seqscan = off;
+SET enable_indexscan = off;
+SET enable_indexonlyscan = off;
+EXPLAIN (COSTS OFF) SELECT count(*), sum(w) FROM parallel_bitmap WHERE k < 60000;
+SELECT parallel_same($$SELECT count(*), sum(w) FROM parallel_bitmap WHERE k < 60000$$);
+EXPLAIN (COSTS OFF) SELECT k, w FROM parallel_bitmap WHERE k < 60000 ORDER BY k;
+SELECT parallel_same($$SELECT md5(string_agg(k || ':' || w, ',' ORDER BY n)) FROM (SELECT k, w, row_number() OVER () AS n FROM (SELECT k, w FROM parallel_bitmap WHERE k < 60000 ORDER BY k, w) AS s) AS q$$);
+RESET enable_seqscan;
+RESET enable_indexscan;
+RESET enable_indexonlyscan;
+DROP TABLE parallel_bitmap;
 -- The switch off.
 SET tessera.enable = off;
 EXPLAIN (COSTS OFF) SELECT a, b FROM parallel_t WHERE a > 4990;
