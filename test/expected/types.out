@@ -516,7 +516,7 @@ DROP FUNCTION types_list(int, int, int, text);
 -- an escape) through the core's function a row; the lengths; values
 -- compressed and stored outside the row; a nondeterministic collation
 -- row by row.
-CREATE TABLE types_t (id int, t text, t2 text, vc varchar(10), bc char(6), long text, ext text, u text);
+CREATE TABLE types_t (id int, t text, t2 text, vc varchar(10), bc char(6), long text, ext text, u text, sp text);
 ALTER TABLE types_t ALTER COLUMN ext SET STORAGE EXTERNAL;
 INSERT INTO types_t
 SELECT i, CASE WHEN i % 13 = 0 THEN NULL ELSE 'key-' || (i % 97) END,
@@ -525,7 +525,8 @@ SELECT i, CASE WHEN i % 13 = 0 THEN NULL ELSE 'key-' || (i % 97) END,
        CASE WHEN i % 17 = 0 THEN NULL ELSE ('c' || i % 7)::char(6) END,
        CASE WHEN i % 50 = 0 THEN repeat('xy', 3000) || i ELSE 'short' || i END,
        CASE WHEN i % 60 = 0 THEN repeat('z', 3000) || i ELSE 'e' || i END,
-       'ключ-' || i % 11
+       'ключ-' || i % 11,
+       repeat(' ', i % 3) || 'p' || i % 5 || repeat(' ', i % 4)
 FROM generate_series(1, 3000) AS i;
 ANALYZE types_t;
 EXPLAIN (COSTS OFF) SELECT count(*) FROM types_t WHERE t = 'key-5' AND vc <> 'v3' AND bc = 'c1' AND t LIKE 'key-1%';
@@ -633,7 +634,13 @@ SELECT types_same($$SELECT count(*), sum(id) FROM types_t WHERE u LIKE 'клю%'
  same
 (1 row)
 
-SELECT types_same($$SELECT length(t), length(bc), octet_length(bc), char_length(u), octet_length(u), length(long), octet_length(ext) FROM types_t WHERE id % 10 = 0$$);
+SELECT types_same($$SELECT length(t), length(bc), octet_length(bc), char_length(u), count(*) FROM types_t GROUP BY 1, 2, 3, 4$$);
+ types_same 
+------------
+ same
+(1 row)
+
+SELECT types_same($$SELECT octet_length(u), length(long), octet_length(ext), character_length(ext), count(*) FROM types_t GROUP BY 1, 2, 3, 4$$);
  types_same 
 ------------
  same
@@ -645,6 +652,107 @@ SELECT types_same($$SELECT count(*) FROM types_t WHERE long LIKE 'xyxy%50' OR lo
  same
 (1 row)
 
+-- Pieces of a string as text values of the batch: substring from and for
+-- (a start before the first character, a length past the end, zero or
+-- overflowing, none), substr, left and right of either sign, the trims of
+-- spaces, char(n) as text; compared, in an IN list, grouped and returned,
+-- over multibyte, compressed and external strings; a negative length
+-- fails as the core's.
+EXPLAIN (COSTS OFF) SELECT count(*) FROM types_t WHERE substring(t, 1, 5) = 'key-5' AND left(u, 3) = 'клю' AND rtrim(sp) = 'p1';
+                                                          QUERY PLAN                                                          
+------------------------------------------------------------------------------------------------------------------------------
+ Custom Scan (TessAgg)
+   ->  Custom Scan (TessFilter) on types_t
+         Batch Filter: (("substring"(t, 1, 5) = 'key-5'::text) AND ("left"(u, 3) = 'клю'::text) AND (rtrim(sp) = 'p1'::text))
+         ->  Custom Scan (TessHeapScan) on types_t
+(4 rows)
+
+EXPLAIN (COSTS OFF) SELECT left(t, 5), count(*) FROM types_t GROUP BY 1;
+                 QUERY PLAN                  
+---------------------------------------------
+ Custom Scan (TessAgg)
+   Group Key: "left"(t, 5)
+   ->  Custom Scan (TessHeapScan) on types_t
+(3 rows)
+
+SELECT types_same($$SELECT count(*), sum(id) FROM types_t WHERE substring(t, 1, 5) = 'key-5' OR substr(t, 5) = '7' OR substring(t FROM 0 FOR 3) = 'ke'$$);
+ types_same 
+------------
+ same
+(1 row)
+
+EXPLAIN (COSTS OFF) SELECT substring(t, -1, 4), substring(t, 3, 2147483647), substring(t, 2147483647, 5), count(*) FROM types_t GROUP BY 1, 2, 3;
+                                                 QUERY PLAN                                                  
+-------------------------------------------------------------------------------------------------------------
+ Custom Scan (TessAgg)
+   Group Key: "substring"(t, '-1'::integer, 4), "substring"(t, 3, 2147483647), "substring"(t, 2147483647, 5)
+   ->  Custom Scan (TessHeapScan) on types_t
+(3 rows)
+
+SELECT types_same($$SELECT substring(t, -1, 4), substring(t, 3, 2147483647), substring(t, 2147483647, 5), count(*) FROM types_t GROUP BY 1, 2, 3$$);
+ types_same 
+------------
+ same
+(1 row)
+
+SELECT types_same($$SELECT substring(t, 4, 0), substring(t, -5, 3), substring(u, 2, 3), count(*) FROM types_t GROUP BY 1, 2, 3$$);
+ types_same 
+------------
+ same
+(1 row)
+
+SELECT types_same($$SELECT substr(u, 6), left(u, -2), left(u, -20), count(*) FROM types_t GROUP BY 1, 2, 3$$);
+ types_same 
+------------
+ same
+(1 row)
+
+SELECT types_same($$SELECT right(u, 3), right(u, -3), right(u, 20), count(*) FROM types_t GROUP BY 1, 2, 3$$);
+ types_same 
+------------
+ same
+(1 row)
+
+SELECT types_same($$SELECT left(t, 0), right(t, -2147483648), left(t, 5), count(*) FROM types_t GROUP BY 1, 2, 3$$);
+ types_same 
+------------
+ same
+(1 row)
+
+SELECT types_same($$SELECT substring(u FROM 1 FOR 4), count(*) FROM types_t WHERE substring(u FROM 1 FOR 4) IN ('ключ', 'x') AND length(substring(t, 2)) > 4 GROUP BY 1$$);
+ types_same 
+------------
+ same
+(1 row)
+
+SELECT types_same($$SELECT bc::text, rtrim(sp), ltrim(sp), count(*) FROM types_t GROUP BY 1, 2, 3$$);
+ types_same 
+------------
+ same
+(1 row)
+
+SELECT types_same($$SELECT btrim(sp), rtrim(bc), count(*) FROM types_t GROUP BY 1, 2$$);
+ types_same 
+------------
+ same
+(1 row)
+
+SELECT types_same($$SELECT count(*) FROM types_t WHERE bc::text = 'c1' OR btrim(sp) = 'p2' OR substring(long, 5990, 20) LIKE '%xy%' OR substring(ext, 2990) = 'zzzzzzzzzz60'$$);
+ types_same 
+------------
+ same
+(1 row)
+
+\set VERBOSITY terse
+SELECT count(*) FROM types_t WHERE substring(t, 2, -1) = 'x';
+ERROR:  negative substring length not allowed
+SELECT count(*) FROM types_t WHERE t IS NULL AND substring(t, 2, -1) = 'x';
+ count 
+-------
+     0
+(1 row)
+
+\set VERBOSITY default
 CREATE COLLATION types_tci (provider = icu, locale = 'und-u-ks-level2', deterministic = false);
 EXPLAIN (COSTS OFF) SELECT count(*) FROM types_t WHERE t COLLATE types_tci = 'KEY-5';
                     QUERY PLAN                     

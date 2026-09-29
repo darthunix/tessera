@@ -18,7 +18,7 @@
 #include "tessera/function.h"
 #include "tessera/runtime.h"
 
-#define MAX_ARGS 2
+#define MAX_ARGS 3
 /* The most elements of an IN list compiled as an OR of comparisons. */
 #define MAX_ARRAY_ELEMENTS 32
 
@@ -130,6 +130,12 @@ typedef struct Choice
 struct TessExpr
 {
 	MemoryContext context;
+	/*
+	 * The steps' by-reference results, made when a step first runs and
+	 * reset when the expression is bound to the next batch: they live as
+	 * long as the value arrays that point to them.
+	 */
+	MemoryContext values_context;
 	/*
 	 * The batch column the chain starts from, or -1 with scalar_value, or
 	 * a conditional value whose result the chain starts from.
@@ -1339,6 +1345,8 @@ tess_expr_bind(TessExpr *expr, TessBatch *batch, ExprContext *econtext,
 	expr->batch = batch;
 	expr->econtext = econtext;
 	expr->purpose = purpose;
+	if (expr->values_context != NULL)
+		MemoryContextReset(expr->values_context);
 	for (int index = 0; index < expr->nsteps; index++)
 		if (expr->steps[index].operand != NULL)
 			tess_expr_bind(expr->steps[index].operand, batch, econtext, purpose);
@@ -1503,7 +1511,11 @@ call_step(TessExpr *expr, const Step *step, const TessFunctionArg *args,
 	call.rows = expr->rows;
 	call.values = values;
 	call.non_nulls = non_nulls;
-	call.context = expr->context;
+	if (expr->values_context == NULL)
+		expr->values_context = AllocSetContextCreate(expr->context,
+													 "Tessera expression values",
+													 ALLOCSET_DEFAULT_SIZES);
+	call.context = expr->values_context;
 	call.status = &expr->status;
 	if (step->function->evaluate(&call) != TESS_OK)
 		tess_status_report(&expr->status);

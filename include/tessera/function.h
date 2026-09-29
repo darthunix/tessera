@@ -123,7 +123,12 @@ typedef struct TessFunctionCall
 	 * mask of one row, set when the partial is not NULL.
 	 */
 	TessRowMask *non_nulls;
-	/* VALUE with TESS_RESULT_DATUM: where by-reference results are allocated. */
+	/*
+	 * VALUE with TESS_RESULT_DATUM: where by-reference results are
+	 * allocated. It lives until the consumer is done with the results (the
+	 * expression compiler resets it at the next batch), so scratch the
+	 * implementation allocates there, or anywhere, it frees itself.
+	 */
 	MemoryContext context;
 	/* Filled on failure, as by the kernels. */
 	TessStatus *status;

@@ -73,6 +73,7 @@ undefined behavior where it cannot (overlap, dangling pointers).
 | `TESS_ERROR_INTEGER_OUT_OF_RANGE` | `22003` | An int4 or int8 result does not fit (`integer out of range`, `bigint out of range`). |
 | `TESS_ERROR_DIVISION_BY_ZERO` | `22012` | A zero divisor. |
 | `TESS_ERROR_PANIC` | `XX000` | A Rust panic was caught; `message` holds its text. |
+| `TESS_ERROR_DATA_EXCEPTION` | the function's | Another error of a batch function, as the function it implements raises it (`22011` `negative substring length not allowed`). |
 
 A `NULL` or undersized status (its `struct_size` below
 `TESS_STATUS_MIN_SIZE`) is left alone; the return value still carries the

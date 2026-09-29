@@ -120,7 +120,13 @@ an escape, or in a multibyte encoding other than UTF-8, by the core's
 `textlike` a row; and the lengths `length`, `char_length`,
 `character_length` and `octet_length` of text and bpchar as values with
 `TESS_RESULT_INT32`, characters counted by the database encoding and a
-bpchar's without trailing spaces;
+bpchar's without trailing spaces, `octet_length` from the header without
+detoasting; and the pieces of a string as text values (`TESS_RESULT_DATUM`,
+`TESS_FUNCTION_COLLATION_INSENSITIVE`) of a column by constants:
+`substring` and `substr` from a start, for a length or to the end, `left`
+and `right` of either sign, counted in characters as the core counts
+them, a negative length failing with 22011 as `substring` does, and
+`rtrim`, `ltrim` and `btrim` of spaces, `text(bpchar)` being `rtrim`;
 and `count(*)`,
 `count(any)`, `sum(int4)`, `min(int4)`, `max(int4)`, `min(int8)` and
 `max(int8)` as aggregates, by the aggregate's own OID. An int4 column
@@ -168,7 +174,11 @@ the function's kind:
   into `values`, an array of one slot per batch row in the description's
   `result_format`, and names those rows in `non_nulls`; other slots are
   unspecified and need no initialization. With `TESS_RESULT_DATUM`,
-  by-reference values are allocated in the call's `context`.
+  by-reference values are allocated in the call's `context`, which lives
+  until the consumer is done with the results: the expression compiler
+  resets it when it binds the expression to the next batch, as long as its
+  value arrays live. Scratch memory, such as a detoasted argument, the
+  implementation frees itself after the row, wherever it allocated it.
 - `TESS_FUNCTION_AGGREGATE` computes a partial aggregate over the selected
   rows of the batch, with no argument for `count(*)` or one column: one
   Datum of the aggregate's transition type into `values`, and the only bit

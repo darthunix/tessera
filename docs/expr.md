@@ -32,8 +32,10 @@ An expression is supported when it is built from
   a `TESS_FUNCTION_VALUE` that is strict and either insensitive to the
   input collation, given none, or indifferent among deterministic
   collations and given one (`t = 'x'`, `t LIKE 'x%'` under the default
-  collation, but not under a nondeterministic ICU one), with one or two
-  arguments that are themselves supported;
+  collation, but not under a nondeterministic ICU one), with one to three
+  arguments that are themselves supported; a by-reference result
+  (`substring(t, 1, 2)`, a text) lives in the expression's memory for
+  the bound batch, reset at the next;
 - calls of an equivalent ([function.md](function.md)), such as
   `int48pl(a, b8)`: the compiler replaces the call by the function it
   stands for over the cast arguments, `int8pl(int8(a), b8)`, before

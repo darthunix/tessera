@@ -126,7 +126,7 @@ ORDER BY o;
  row   | t ILIKE 'NAME 1%'
  row   | t ~ '^name 1'
  batch | length(t) > 8
- row   | substring(t FROM 1 FOR 4) = 'name'
+ batch | substring(t FROM 1 FOR 4) = 'name'
  batch | starts_with(t, 'name 1')
  row   | upper(t) = 'NAME 5'
  row   | t || 'x' = 'name 5x'
@@ -176,6 +176,7 @@ FROM unnest(ARRAY[
     $$SELECT bc, count(*) FROM cov GROUP BY 1$$,
     $$SELECT n, count(*) FROM cov GROUP BY 1$$,
     $$SELECT d, b, count(*) FROM cov GROUP BY 1, 2$$,
+    $$SELECT substring(t FROM 1 FOR 6), count(*) FROM cov GROUP BY 1$$,
     $$SELECT extract(year FROM d), count(*) FROM cov GROUP BY 1$$,
     $$SELECT date_trunc('month', ts), sum(i4) FROM cov GROUP BY 1$$,
     $$SELECT i2, bc, sum(n), avg(f8) FROM cov GROUP BY 1, 2$$,
@@ -214,6 +215,7 @@ ORDER BY o;
  tess                  | SELECT bc, count(*) FROM cov GROUP BY 1
  tess                  | SELECT n, count(*) FROM cov GROUP BY 1
  tess                  | SELECT d, b, count(*) FROM cov GROUP BY 1, 2
+ tess                  | SELECT substring(t FROM 1 FOR 6), count(*) FROM cov GROUP BY 1
  tess                  | SELECT extract(year FROM d), count(*) FROM cov GROUP BY 1
  tess                  | SELECT date_trunc('month', ts), sum(i4) FROM cov GROUP BY 1
  tess                  | SELECT i2, bc, sum(n), avg(f8) FROM cov GROUP BY 1, 2
@@ -225,7 +227,7 @@ ORDER BY o;
  tess                  | SELECT DISTINCT n FROM cov
  tess                  | SELECT DISTINCT bc, i2 FROM cov
  tess                  | SELECT vc FROM cov GROUP BY vc
-(34 rows)
+(35 rows)
 
 -- Sorts and top-N.
 SELECT cov_query(q) AS level, q AS query

@@ -2,13 +2,15 @@
  * The text functions as batch functions, over the Datums of a column, row
  * by row in C: equality and inequality of text (varchar through it) and of
  * bpchar, whose trailing spaces do not count, starts_with, LIKE and NOT
- * LIKE of a constant pattern, and the lengths. Each is registered with
+ * LIKE of a constant pattern, and the lengths, registered with
  * TESS_FUNCTION_DETERMINISTIC_COLLATION: under a deterministic collation
  * equal strings are equal bytes and LIKE matches bytes, which is all these
- * compare; a consumer leaves any other collation to the executor.
+ * compare; a consumer leaves any other collation to the executor. And the
+ * pieces of a string, substring, left, right and the trims of spaces, text
+ * values allocated in the call's context, which no collation changes.
  *
- * A compressed or external value is detoasted into the call's context; the
- * others are read in place. A pattern of literals and % is matched by its
+ * A compressed or external value is detoasted for its row and freed after
+ * it; the others are read in place. A pattern of literals and % is matched by its
  * pieces: the first against the start, the last against the end, the
  * others found in order between; any other pattern (_ or an escape) goes
  * to the core's function a row, which the batch saves the interpreter of.
@@ -16,6 +18,7 @@
 #include "postgres.h"
 
 #include "access/detoast.h"
+#include "common/int.h"
 #include "fmgr.h"
 #include "mb/pg_wchar.h"
 #include "port/pg_bitutils.h"
@@ -39,7 +42,13 @@ typedef enum TextOp
 	TEXT_NOT_LIKE,
 	TEXT_CHARS,
 	BPCHAR_CHARS,
-	TEXT_OCTETS
+	TEXT_OCTETS,
+	TEXT_SUBSTR,
+	TEXT_LEFT,
+	TEXT_RIGHT,
+	TEXT_RTRIM,
+	TEXT_LTRIM,
+	TEXT_BTRIM
 } TextOp;
 
 typedef struct TextFunction
@@ -51,6 +60,7 @@ typedef struct TextFunction
 static TessStatusCode text_compare_evaluate(TessFunctionCall *call);
 static TessStatusCode text_pattern_evaluate(TessFunctionCall *call);
 static TessStatusCode text_length_evaluate(TessFunctionCall *call);
+static TessStatusCode text_piece_evaluate(TessFunctionCall *call);
 
 #define TEXT_FLAGS (TESS_FUNCTION_STRICT | TESS_FUNCTION_DETERMINISTIC_COLLATION)
 
@@ -78,6 +88,14 @@ static TessStatusCode text_length_evaluate(TessFunctionCall *call);
 	  .flags = TEXT_FLAGS, \
 	  .evaluate = text_length_evaluate}, (code)}
 
+/* A piece of the string column, a text; the other arguments constants. */
+#define TEXT_PIECE(oid, code) \
+	{{TESS_ABI_INITIALIZER(TESS_FUNCTION_ABI_VERSION, TessFunction), \
+	  .funcid = (oid), .kind = TESS_FUNCTION_VALUE, \
+	  .result_format = TESS_RESULT_DATUM, \
+	  .flags = TESS_FUNCTION_STRICT | TESS_FUNCTION_COLLATION_INSENSITIVE, \
+	  .evaluate = text_piece_evaluate}, (code)}
+
 static const TextFunction text_functions[] = {
 	TEXT_COMPARE(F_TEXTEQ, TEXT_EQ),
 	TEXT_COMPARE(F_TEXTNE, TEXT_NE),
@@ -95,6 +113,16 @@ static const TextFunction text_functions[] = {
 	TEXT_LENGTH(F_CHAR_LENGTH_BPCHAR, BPCHAR_CHARS),
 	TEXT_LENGTH(F_OCTET_LENGTH_TEXT, TEXT_OCTETS),
 	TEXT_LENGTH(F_OCTET_LENGTH_BPCHAR, TEXT_OCTETS),
+	TEXT_PIECE(F_SUBSTRING_TEXT_INT4_INT4, TEXT_SUBSTR),
+	TEXT_PIECE(F_SUBSTRING_TEXT_INT4, TEXT_SUBSTR),
+	TEXT_PIECE(F_SUBSTR_TEXT_INT4_INT4, TEXT_SUBSTR),
+	TEXT_PIECE(F_SUBSTR_TEXT_INT4, TEXT_SUBSTR),
+	TEXT_PIECE(F_LEFT, TEXT_LEFT),
+	TEXT_PIECE(F_RIGHT, TEXT_RIGHT),
+	TEXT_PIECE(F_TEXT_BPCHAR, TEXT_RTRIM),
+	TEXT_PIECE(F_RTRIM_TEXT, TEXT_RTRIM),
+	TEXT_PIECE(F_LTRIM_TEXT, TEXT_LTRIM),
+	TEXT_PIECE(F_BTRIM_TEXT, TEXT_BTRIM),
 };
 
 static TextOp
@@ -157,6 +185,69 @@ trimmed(const char *data, int len)
 	while (len > 0 && data[len - 1] == ' ')
 		len--;
 	return len;
+}
+
+/*
+ * How the database encoding counts characters: a byte each, UTF-8 by its
+ * lead bytes without a call per character, or the encoding's pg_mblen.
+ */
+typedef enum CharCount
+{
+	CHARS_BYTES,
+	CHARS_UTF8,
+	CHARS_MBLEN
+} CharCount;
+
+static CharCount
+char_count(void)
+{
+	if (pg_database_encoding_max_length() == 1)
+		return CHARS_BYTES;
+	return GetDatabaseEncoding() == PG_UTF8 ? CHARS_UTF8 : CHARS_MBLEN;
+}
+
+/* The characters of the bytes: in UTF-8 the bytes that do not continue one. */
+static inline int
+string_chars(const char *data, int len, CharCount count)
+{
+	int			chars = 0;
+
+	if (count == CHARS_BYTES)
+		return len;
+	if (count == CHARS_MBLEN)
+		return pg_mbstrlen_with_len(data, len);
+	for (int at = 0; at < len; at++)
+		chars += ((unsigned char) data[at] & 0xC0) != 0x80;
+	return chars;
+}
+
+/* A UTF-8 character's length by its lead byte, as pg_utf_mblen. */
+static inline int
+utf8_length(unsigned char lead)
+{
+	if ((lead & 0x80) == 0)
+		return 1;
+	if ((lead & 0xE0) == 0xC0)
+		return 2;
+	if ((lead & 0xF0) == 0xE0)
+		return 3;
+	if ((lead & 0xF8) == 0xF0)
+		return 4;
+	return 1;
+}
+
+/* The byte offset past the first chars characters of the bytes, at most len. */
+static inline int
+char_offset(const char *data, int len, int64 chars, CharCount count)
+{
+	int			offset = 0;
+
+	if (count == CHARS_BYTES)
+		return (int) Max(Min((int64) len, chars), 0);
+	for (; chars > 0 && offset < len; chars--)
+		offset += count == CHARS_UTF8 ? utf8_length((unsigned char) data[offset]) :
+			pg_mblen(data + offset);
+	return Min(offset, len);
 }
 
 /* One side of a comparison: a column, or a scalar's bytes read once. */
@@ -447,7 +538,7 @@ text_length_evaluate(TessFunctionCall *call)
 	const TessDatumColumn *column;
 	int32	   *values;
 	TextOp		op;
-	bool		multibyte = pg_database_encoding_max_length() != 1;
+	CharCount	count = char_count();
 	int			nwords;
 
 	if (!text_call_valid(call, 1) || call->values == NULL || call->non_nulls == NULL)
@@ -483,8 +574,178 @@ text_length_evaluate(TessFunctionCall *call)
 			copy = string_bytes(column->values[row], &string, &len);
 			if (op == BPCHAR_CHARS)
 				len = trimmed(string, len);
-			values[row] = multibyte ? pg_mbstrlen_with_len(string, len) : len;
+			values[row] = string_chars(string, len, count);
 			string_free(copy);
+		}
+		call->non_nulls->bits[word] = present;
+	}
+	return TESS_OK;
+}
+
+/*
+ * Memory for a batch's text results, carved from blocks of the call's
+ * context: a palloc per row costs as much as the piece.
+ */
+typedef struct TextArena
+{
+	MemoryContext context;
+	char	   *next;
+	Size		left;
+} TextArena;
+
+static text *
+arena_text(TextArena *arena, int len)
+{
+	Size		size = MAXALIGN(VARHDRSZ + len);
+	text	   *result;
+
+	if (size > arena->left)
+	{
+		Size		block = Max(size, 8192);
+
+		arena->next = MemoryContextAlloc(arena->context, block);
+		arena->left = block;
+	}
+	result = (text *) arena->next;
+	arena->next += size;
+	arena->left -= size;
+	SET_VARSIZE(result, VARHDRSZ + len);
+	return result;
+}
+
+/*
+ * The first character and the count of characters a piece takes, as the
+ * core's text_substring, text_left and text_right count them: substring
+ * from start for length (none: to the end) begins at Max(start, 1) and
+ * ends before start + length, an overflow running to the end; left of n
+ * < 0 drops the last -n characters and right of n < 0 the first -n, a
+ * string's length in characters counted only then. False for a negative
+ * substring length, 22011.
+ */
+static bool
+piece_bounds(TextOp op, const TessFunctionCall *call, const char *data, int len,
+			 CharCount count, int64 *skip, int64 *take)
+{
+	int32		n = DatumGetInt32(call->args[1].scalar);
+
+	*skip = 0;
+	*take = PG_INT64_MAX;
+	if (op == TEXT_SUBSTR)
+	{
+		int32		end;
+
+		*skip = Max(n, 1) - 1;
+		if (call->nargs < 3)
+			return true;
+		if (DatumGetInt32(call->args[2].scalar) < 0)
+			return false;
+		if (!pg_add_s32_overflow(n, DatumGetInt32(call->args[2].scalar), &end))
+			*take = end < 1 ? 0 : end - Max(n, 1);
+	}
+	else if (op == TEXT_LEFT)
+	{
+		if (n >= 0)
+			*take = n;
+		else
+			*take = string_chars(data, len, count) + (int64) n;
+	}
+	else
+	{
+		/* -n in 64 bits: right(-2147483648) skips it all, as the core clamps. */
+		if (n < 0)
+			*skip = -(int64) n;
+		else
+			*skip = string_chars(data, len, count) - (int64) n;
+	}
+	return true;
+}
+
+/*
+ * substring, substr, left and right of a string column by constants, and
+ * rtrim, ltrim and btrim of spaces (text(bpchar) is rtrim): a text value
+ * per row in the call's context.
+ */
+static TessStatusCode
+text_piece_evaluate(TessFunctionCall *call)
+{
+	const TessDatumColumn *column;
+	Datum	   *values;
+	TextOp		op;
+	CharCount	count = char_count();
+	TextArena	arena = {0};
+	int			nwords;
+
+	if (call == NULL || call->struct_size < TESS_FUNCTION_CALL_MIN_SIZE ||
+		call->nargs < 1 || call->nargs > 3 || call->args == NULL || call->rows == NULL ||
+		call->values == NULL || call->non_nulls == NULL || call->context == NULL)
+		return text_invalid(call, "a string piece takes a column and constants");
+	for (int arg = 0; arg < call->nargs; arg++)
+		if (call->args[arg].struct_size < TESS_FUNCTION_ARG_MIN_SIZE ||
+			(call->args[arg].column != NULL) != (arg == 0))
+			return text_invalid(call, "a string piece takes a column and constants");
+	column = call->args[0].column;
+	op = text_op(call);
+	if (call->nargs != (op == TEXT_SUBSTR ? Max(call->nargs, 2) :
+						op == TEXT_LEFT || op == TEXT_RIGHT ? 2 : 1))
+		return text_invalid(call, "a string piece takes a column and constants");
+	values = (Datum *) call->values;
+	arena.context = call->context;
+	nwords = tess_row_mask_word_count(call->rows->nrows);
+	for (int word = 0; word < nwords; word++)
+	{
+		uint64		look = call->rows->bits[word];
+		uint64		present = 0;
+
+		for (; look != 0; look &= look - 1)
+		{
+			int			bit = pg_rightmost_one_pos64(look);
+			int			row = word * 64 + bit;
+			const char *string;
+			int			len;
+			struct varlena *copy;
+			int			from = 0;
+			int			to;
+			text	   *result;
+
+			if (column->isnull[row])
+				continue;
+			copy = string_bytes(column->values[row], &string, &len);
+			to = len;
+			if (op == TEXT_RTRIM || op == TEXT_BTRIM)
+				to = trimmed(string, len);
+			if (op == TEXT_LTRIM || op == TEXT_BTRIM)
+				while (from < to && string[from] == ' ')
+					from++;
+			if (op == TEXT_SUBSTR || op == TEXT_LEFT || op == TEXT_RIGHT)
+			{
+				int64		skip;
+				int64		take;
+
+				if (!piece_bounds(op, call, string, len, count, &skip, &take))
+				{
+					string_free(copy);
+					call->non_nulls->bits[word] = present;
+					if (call->status != NULL &&
+						call->status->struct_size >= TESS_STATUS_MIN_SIZE)
+					{
+						call->status->code = TESS_ERROR_DATA_EXCEPTION;
+						strlcpy(call->status->sqlstate, "22011",
+								sizeof(call->status->sqlstate));
+						strlcpy(call->status->message,
+								"negative substring length not allowed",
+								sizeof(call->status->message));
+					}
+					return TESS_ERROR_DATA_EXCEPTION;
+				}
+				from = char_offset(string, len, skip, count);
+				to = take <= 0 ? from :
+					from + char_offset(string + from, len - from, take, count);
+			}
+			result = arena_text(&arena, to - from);
+			memcpy(VARDATA(result), string + from, to - from);
+			string_free(copy);
+			values[row] = PointerGetDatum(result);
+			present |= UINT64CONST(1) << bit;
 		}
 		call->non_nulls->bits[word] = present;
 	}

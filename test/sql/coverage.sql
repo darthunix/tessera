@@ -110,6 +110,7 @@ FROM unnest(ARRAY[
     $$SELECT bc, count(*) FROM cov GROUP BY 1$$,
     $$SELECT n, count(*) FROM cov GROUP BY 1$$,
     $$SELECT d, b, count(*) FROM cov GROUP BY 1, 2$$,
+    $$SELECT substring(t FROM 1 FOR 6), count(*) FROM cov GROUP BY 1$$,
     $$SELECT extract(year FROM d), count(*) FROM cov GROUP BY 1$$,
     $$SELECT date_trunc('month', ts), sum(i4) FROM cov GROUP BY 1$$,
     $$SELECT i2, bc, sum(n), avg(f8) FROM cov GROUP BY 1, 2$$,
