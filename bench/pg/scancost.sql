@@ -3,7 +3,8 @@
 -- docs/nodes.md): a full scan with TessFilter above over tables of other
 -- widths; an index-only scan, the index mode and a bitmap at shares of
 -- bench_idx's rows, the bitmap of the scattered k and of the ordered id;
--- the core's scans, as time per unit of their cost; and the full scans
+-- the core's scans, as time per unit of their cost; full scans with
+-- clauses past the first, for the model of the filter; and the full scans
 -- again with two parallel workers, for the model of a partial scan. Each
 -- sample is the minimum of its runs. The summary gives the fitted times
 -- and the parameters' values, a page of the full scan being 1.
@@ -19,6 +20,10 @@ SET work_mem = '256MB';
 -- variable within its dollar quotes.
 SELECT set_config('bench.rows', (2000000 * scale)::text, false) FROM bench_scale;
 SELECT set_config('bench.repetitions', :'repetitions', false);
+-- The model's parallel parameters in force, which the parallel samples set
+-- to zero for a while to run in parallel at all.
+SELECT set_config('bench.parallel_setup_cost', current_setting('tessera.scan_parallel_setup_cost'), false),
+       set_config('bench.worker_page_cost', current_setting('tessera.scan_worker_page_cost'), false);
 
 -- One sample a query: its plan's scan node, its cost, pages and rows.
 CREATE TEMP TABLE samples
@@ -65,6 +70,25 @@ CREATE TEMP TABLE parallel_samples
     leader boolean,
     workers integer,
     pages float8,
+    milliseconds float8
+);
+
+/*
+ * The filter's samples: full scans of bench_mixed and bench_narrow, with
+ * the rows reaching a batch clause past the first (batch), deforming a
+ * column past a varlena (varlena), reaching a clause by rows (row_rows)
+ * and those rows times the clause's operators by the core's cost
+ * (operators); 'base' is each table's scan with one clause on its first
+ * column, which the model of the scan counts.
+ */
+CREATE TEMP TABLE filter_samples
+(
+    name text,
+    relation text,
+    batch float8,
+    varlena float8,
+    row_rows float8,
+    operators float8,
     milliseconds float8
 );
 
@@ -146,6 +170,20 @@ BEGIN
 END
 $function$;
 
+/* A filter sample: the query timed, with its rows reaching each kind of work. */
+CREATE FUNCTION pg_temp.filter_sample(name text, relation text, query text, batch float8,
+                                      varlena float8, row_rows float8, operators float8,
+                                      repetitions integer)
+RETURNS void
+LANGUAGE plpgsql
+AS $function$
+BEGIN
+    INSERT INTO filter_samples
+    VALUES (name, relation, batch, varlena, row_rows, operators,
+            pg_temp.fastest(query, repetitions));
+END
+$function$;
+
 DO $do$
 DECLARE
     rows bigint := current_setting('bench.rows')::bigint;
@@ -154,6 +192,9 @@ DECLARE
     mode text;
     relation text;
     leader boolean;
+    mixed float8;
+    narrow float8;
+    half float8;
 BEGIN
     FOREACH mode IN ARRAY ARRAY['on', 'off'] LOOP
         PERFORM set_config('tessera.enable', mode, false);
@@ -184,6 +225,47 @@ BEGIN
                                    format('SELECT count(*), sum(w) FROM bench_idx WHERE id < %s', round(rows * share)),
                                    repetitions);
         END LOOP;
+        -- The filter: later clauses in batches, a column past a varlena
+        -- (bench_mixed's b, a text, precedes c, d and e), clauses by rows,
+        -- on every row and on the half the first clause leaves.
+        IF mode = 'on' THEN
+            PERFORM pg_temp.only('seq');
+            SELECT count(*) INTO mixed FROM bench_mixed;
+            SELECT count(*) INTO half FROM bench_mixed WHERE a > (SELECT count(*) / 2 FROM bench_mixed);
+            PERFORM pg_temp.filter_sample('base', 'bench_mixed',
+                'SELECT count(*) FROM bench_mixed WHERE a > -1', 0, 0, 0, 0, repetitions);
+            PERFORM pg_temp.filter_sample('varlena first', 'bench_mixed',
+                'SELECT count(*) FROM bench_mixed WHERE d > -1', 0, mixed, 0, 0, repetitions);
+            PERFORM pg_temp.filter_sample('batch varlena', 'bench_mixed',
+                'SELECT count(*) FROM bench_mixed WHERE a > -1 AND d > -1', mixed, mixed, 0, 0, repetitions);
+            PERFORM pg_temp.filter_sample('batch varlena half', 'bench_mixed',
+                format('SELECT count(*) FROM bench_mixed WHERE a > %s AND d > -1', (SELECT count(*) / 2 FROM bench_mixed)),
+                half, half, 0, 0, repetitions);
+            PERFORM pg_temp.filter_sample('batch int8 varlena', 'bench_mixed',
+                'SELECT count(*) FROM bench_mixed WHERE a > -1 AND c > -1', mixed, mixed, 0, 0, repetitions);
+            PERFORM pg_temp.filter_sample('row text', 'bench_mixed',
+                $q$SELECT count(*) FROM bench_mixed WHERE a > -1 AND b <> 'x'$q$, 0, 0, mixed, mixed, repetitions);
+            PERFORM pg_temp.filter_sample('row text half', 'bench_mixed',
+                format($q$SELECT count(*) FROM bench_mixed WHERE a > %s AND b <> 'x'$q$, (SELECT count(*) / 2 FROM bench_mixed)),
+                0, 0, half, half, repetitions);
+            PERFORM pg_temp.filter_sample('row text varlena', 'bench_mixed',
+                $q$SELECT count(*) FROM bench_mixed WHERE a > -1 AND e <> 'x'$q$, 0, mixed, mixed, mixed, repetitions);
+            SELECT count(*) INTO narrow FROM bench_narrow;
+            SELECT count(*) INTO half FROM bench_narrow WHERE c1 > (SELECT count(*) / 2 FROM bench_narrow);
+            PERFORM pg_temp.filter_sample('base', 'bench_narrow',
+                'SELECT count(*) FROM bench_narrow WHERE c1 > -1', 0, 0, 0, 0, repetitions);
+            PERFORM pg_temp.filter_sample('batch', 'bench_narrow',
+                'SELECT count(*) FROM bench_narrow WHERE c1 > -1 AND c2 > -1', narrow, 0, 0, 0, repetitions);
+            PERFORM pg_temp.filter_sample('batch half', 'bench_narrow',
+                format('SELECT count(*) FROM bench_narrow WHERE c1 > %s AND c2 > -1', (SELECT count(*) / 2 FROM bench_narrow)),
+                half, 0, 0, 0, repetitions);
+            PERFORM pg_temp.filter_sample('batch two', 'bench_narrow',
+                'SELECT count(*) FROM bench_narrow WHERE c1 > -1 AND c2 > -1 AND c3 > -1', 2 * narrow, 0, 0, 0,
+                repetitions);
+            PERFORM pg_temp.filter_sample('row numeric', 'bench_narrow',
+                'SELECT count(*) FROM bench_narrow WHERE c1 > -1 AND c2::numeric > -1', 0, 0, narrow, 2 * narrow,
+                repetitions);
+        END IF;
         -- The full scans again with two workers, which the core's costs
         -- and the node's model are set to allow.
         PERFORM set_config('max_parallel_workers_per_gather', '2', false);
@@ -191,6 +273,7 @@ BEGIN
         PERFORM set_config('parallel_tuple_cost', '0', false);
         PERFORM set_config('min_parallel_table_scan_size', '0', false);
         PERFORM set_config('tessera.scan_parallel_setup_cost', '0', false);
+        PERFORM set_config('tessera.scan_worker_page_cost', '0', false);
         PERFORM pg_temp.only('seq');
         FOREACH relation IN ARRAY ARRAY['bench_narrow', 'bench_fact', 'bench_sort', 'bench_idx',
                                         'bench_mixed', 'bench_wide'] LOOP
@@ -208,7 +291,10 @@ BEGIN
         PERFORM set_config('parallel_setup_cost', '1000', false);
         PERFORM set_config('parallel_tuple_cost', '0.1', false);
         PERFORM set_config('min_parallel_table_scan_size', '8MB', false);
-        PERFORM set_config('tessera.scan_parallel_setup_cost', '8000', false);
+        PERFORM set_config('tessera.scan_parallel_setup_cost',
+                           current_setting('bench.parallel_setup_cost'), false);
+        PERFORM set_config('tessera.scan_worker_page_cost',
+                           current_setting('bench.worker_page_cost'), false);
     END LOOP;
     PERFORM set_config('tessera.enable', 'on', false);
 END
@@ -218,6 +304,7 @@ RESET parallel_setup_cost;
 RESET parallel_tuple_cost;
 RESET min_parallel_table_scan_size;
 RESET tessera.scan_parallel_setup_cost;
+RESET tessera.scan_worker_page_cost;
 RESET enable_seqscan;
 RESET enable_indexonlyscan;
 RESET enable_indexscan;
@@ -225,6 +312,7 @@ RESET enable_bitmapscan;
 
 \copy samples TO 'timings.csv' CSV HEADER
 \copy parallel_samples TO 'parallel.csv' CSV HEADER
+\copy filter_samples TO 'filter.csv' CSV HEADER
 
 \o summary.txt
 -- The samples, then the fits: the full scan by pages and tuples, the
@@ -362,15 +450,16 @@ FROM parallel_fit ORDER BY mode DESC;
 -- the current tessera.scan_page_cost and scan_tuple_cost give it, the
 -- median over the serial full scans (the unit a fit of this run gives
 -- moves from run to run, and with it the parameters above).
+CREATE TEMP VIEW model_unit AS
+SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY milliseconds /
+           (pages * current_setting('tessera.scan_page_cost')::float8 +
+            tuples * current_setting('tessera.scan_tuple_cost')::float8)) AS unit_ms
+FROM samples WHERE method = 'on seq';
 SELECT round((p.l_ms / u.unit_ms)::numeric) AS "tessera.scan_parallel_setup_cost",
        round((p.phi_ms / u.unit_ms)::numeric, 2) AS "tessera.scan_worker_page_cost",
        round((p.h_ms / u.unit_ms)::numeric) AS head_start,
        round((u.unit_ms * 1000)::numeric, 4) AS unit_us
-FROM parallel_fit AS p,
-     (SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY milliseconds /
-                 (pages * current_setting('tessera.scan_page_cost')::float8 +
-                  tuples * current_setting('tessera.scan_tuple_cost')::float8)) AS unit_ms
-      FROM samples WHERE method = 'on seq') AS u
+FROM parallel_fit AS p, model_unit AS u
 WHERE p.mode = 'on';
 -- How well each parallel sample of the node fits, predicted against measured.
 SELECT p.relation, p.leader, round(p.milliseconds::numeric, 3) AS ms,
@@ -385,4 +474,49 @@ JOIN samples AS se ON se.method = 'on seq' AND se.relation = p.relation
 JOIN parallel_fit AS f ON f.mode = 'on'
 WHERE p.method = 'on seq'
 ORDER BY p.relation, p.leader;
+
+-- The model of the filter: each sample's time over its table's base,
+-- fitted by its rows: a column past a varlena from the samples of that
+-- alone, a later batch clause from those of batch clauses alone, then a
+-- clause by rows and its operators from the samples by rows, less their
+-- deforming (least squares through zero).
+CREATE TEMP VIEW filter_excess AS
+SELECT f.*, f.milliseconds - b.milliseconds AS excess
+FROM filter_samples AS f
+JOIN filter_samples AS b ON b.relation = f.relation AND b.name = 'base'
+WHERE f.name <> 'base';
+CREATE TEMP VIEW filter_fit AS
+WITH v AS (
+    SELECT sum(varlena * excess) / sum(varlena ^ 2) AS varlena_ms
+    FROM filter_excess WHERE batch = 0 AND row_rows = 0
+), b AS (
+    SELECT sum(batch * excess) / sum(batch ^ 2) AS batch_ms
+    FROM filter_excess WHERE varlena = 0 AND row_rows = 0
+), r AS (
+    SELECT sum(row_rows * row_rows) AS a11, sum(row_rows * operators) AS a12,
+           sum(operators * operators) AS a22,
+           sum(row_rows * (excess - v.varlena_ms * varlena)) AS b1,
+           sum(operators * (excess - v.varlena_ms * varlena)) AS b2
+    FROM filter_excess, v WHERE row_rows > 0 AND batch = 0
+)
+SELECT v.varlena_ms, b.batch_ms,
+       (r.b1 * r.a22 - r.a12 * r.b2) / (r.a11 * r.a22 - r.a12 * r.a12) AS row_ms,
+       (r.a11 * r.b2 - r.a12 * r.b1) / (r.a11 * r.a22 - r.a12 * r.a12) AS operator_ms
+FROM v, b, r;
+SELECT round((batch_ms * 1e6)::numeric, 3) AS batch_clause_ns,
+       round((varlena_ms * 1e6)::numeric, 3) AS varlena_ns,
+       round((row_ms * 1e6)::numeric, 3) AS row_clause_ns,
+       round((operator_ms * 1e6)::numeric, 3) AS row_operator_ns
+FROM filter_fit;
+SELECT round((f.batch_ms / u.unit_ms)::numeric, 5) AS "tessera.filter_clause_cost",
+       round((f.row_ms / u.unit_ms)::numeric, 5) AS "tessera.filter_row_clause_cost",
+       round((f.operator_ms / u.unit_ms)::numeric, 5) AS "tessera.filter_row_operator_cost",
+       round((f.varlena_ms / u.unit_ms)::numeric, 5) AS "tessera.deform_varlena_cost"
+FROM filter_fit AS f, model_unit AS u;
+-- How well each filter sample fits, its time over the base against the model's.
+SELECT e.relation, e.name, round(e.excess::numeric, 3) AS excess_ms,
+       round((e.batch * f.batch_ms + e.varlena * f.varlena_ms + e.row_rows * f.row_ms +
+              e.operators * f.operator_ms)::numeric, 3) AS predicted_ms
+FROM filter_excess AS e, filter_fit AS f
+ORDER BY e.relation, e.name;
 \o

@@ -106,7 +106,11 @@ query down, and where it can, does it speed one up.
   row of either index scan, a page, a row and a scattered row of a
   bitmap, the core's time per unit of its cost), prints the parameters
   `tessera.scan_page_cost` and the rest they give, a full scan's page
-  being 1, and each sample against its prediction. The full scans run
+  being 1, and each sample against its prediction. Full scans of
+  `bench_mixed` and `bench_narrow` with clauses past the first (in
+  batches and by rows, on a column past a varlena, on every row and on
+  half) fit the model of the filter and print
+  `tessera.filter_clause_cost` and the rest. The full scans run
   again with two workers, without the leader and with it, and a count of
   `bench_tiny` times the workers' start and finish: they fit the model of
   a partial scan (the start, a worker's toll a page, the leader's head
