@@ -28,6 +28,10 @@ double		tess_bitmap_tuple_cost = 0.075;
 double		tess_bitmap_scatter_cost = 0.031;
 double		tess_scan_parallel_setup_cost = 7000.0;
 double		tess_scan_worker_page_cost = 3.15;
+double		tess_filter_clause_cost = 0.0053;
+double		tess_filter_row_clause_cost = 0.022;
+double		tess_filter_row_operator_cost = 0.018;
+double		tess_deform_varlena_cost = 0.017;
 double		tess_join_bloom_ratio = 0.5;
 double		tess_bitmap_page_rows = 2.0;
 double		tess_index_min_correlation = 0.8;
@@ -199,6 +203,26 @@ _PG_init(void)
 							 "A worker begun for the query maps every page of the shared buffers it "
 							 "reads; near zero with huge pages.",
 							 &tess_scan_worker_page_cost, 3.15, 0.0, 1e10,
+							 PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomRealVariable("tessera.filter_clause_cost",
+							 "The node's time for a row of a batch clause past the filter's first.",
+							 NULL,
+							 &tess_filter_clause_cost, 0.0053, 0.0, 1e10,
+							 PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomRealVariable("tessera.filter_row_clause_cost",
+							 "The node's time for a row of a clause the filter evaluates row by row.",
+							 NULL,
+							 &tess_filter_row_clause_cost, 0.022, 0.0, 1e10,
+							 PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomRealVariable("tessera.filter_row_operator_cost",
+							 "The node's time for a row of an operator of a clause evaluated row by row.",
+							 "Counted as the core's cost of the clause over cpu_operator_cost.",
+							 &tess_filter_row_operator_cost, 0.018, 0.0, 1e10,
+							 PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomRealVariable("tessera.deform_varlena_cost",
+							 "The node's time for a row to deform a column past one of varying length.",
+							 NULL,
+							 &tess_deform_varlena_cost, 0.017, 0.0, 1e10,
 							 PGC_USERSET, 0, NULL, NULL, NULL);
 	DefineCustomBoolVariable("tessera.batch_gather",
 							 "Gathers a parallel batch subtree's rows in batches.",

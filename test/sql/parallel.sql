@@ -359,6 +359,17 @@ SET tessera.scan_worker_page_cost = 0;
 EXPLAIN (COSTS OFF) SELECT k, a, t FROM parallel_wide WHERE k < 8000;
 SET tessera.scan_worker_page_cost = 10;
 EXPLAIN (COSTS OFF) SELECT k, a, t FROM parallel_wide WHERE k < 8000;
+-- The filter's work counts in the scan's time: at the model's defaults a
+-- clause by rows past the first makes the workers worth their start,
+-- where a batch clause does not; and at a lower start so does a first
+-- clause on a column past a varlena (t precedes c16).
+RESET tessera.scan_parallel_setup_cost;
+RESET tessera.scan_worker_page_cost;
+EXPLAIN (COSTS OFF) SELECT count(*) FROM parallel_wide WHERE k > 0 AND c1 > 0;
+EXPLAIN (COSTS OFF) SELECT count(*) FROM parallel_wide WHERE k > 0 AND c1::numeric > 0;
+SET tessera.scan_parallel_setup_cost = 2500;
+EXPLAIN (COSTS OFF) SELECT count(*) FROM parallel_wide WHERE k > 0;
+EXPLAIN (COSTS OFF) SELECT count(*) FROM parallel_wide WHERE c16 > 0;
 SET parallel_setup_cost = 0;
 SET tessera.scan_parallel_setup_cost = 0;
 SET tessera.scan_worker_page_cost = 0;

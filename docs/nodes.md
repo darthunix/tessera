@@ -77,6 +77,10 @@ and prints them:
 | `tessera.bitmap_scatter_cost` | 0.031 | what a row of a bitmap takes more, times 1 - c² for the correlation c of the index's first column |
 | `tessera.scan_parallel_setup_cost` | 7000 | the start and finish of a partial scan's workers, 1.85 ms here |
 | `tessera.scan_worker_page_cost` | 3.15 | what a worker takes more for a page of the shared buffers it reads first, 0.83 µs here; near 0 with huge pages |
+| `tessera.filter_clause_cost` | 0.0053 | a row of a batch clause past the filter's first |
+| `tessera.filter_row_clause_cost` | 0.022 | a row of a clause the filter evaluates row by row |
+| `tessera.filter_row_operator_cost` | 0.018 | a row of an operator of such a clause, by the core's cost of it |
+| `tessera.deform_varlena_cost` | 0.017 | a row of a clause's column past one of varying length, deformed |
 
 Constants that repeat the core's (half of `cpu_tuple_cost` a row an
 `Append` saves) or that shape execution rather than planning (chunk
@@ -350,7 +354,16 @@ index-only scan and an index scan by the rows the index's conditions
 select (an index-only scan's rows on pages not all visible, `allvisfrac`,
 as an index scan's); a bitmap by its pages and rows, a row costing more
 for an index out of the table's order, whose bitmap is built from rows in
-no order of their pages. A bitmap's pages are the core's estimate for
+no order of their pages. Those prices hold one batch clause on a column
+no varlena precedes; the filter's further work counts over the rows
+entering it (all the table's for a full scan, those the index gives
+otherwise): each later clause, in the planner's order, over the rows the
+earlier ones left (an index's own conditions leaving every row it gave),
+a batch clause at 1.4 ns a row, a clause by rows at 5.8 and 4.8 an
+operator of the core's cost of it, and a clause's column past a varlena
+at 4.5 to deform, the first clause's too (pg-scancost-JFWpYj: full scans
+of `bench_mixed` and `bench_narrow` with such clauses, on every row and
+on half, within 0.6 ms of their times). A bitmap's pages are the core's estimate for
 rows at random places (`compute_bitmap_pages`), moved toward the pages
 its rows fill in the table's order by the square of the index's
 correlation, as the core weighs an index scan's reads: the core
@@ -433,12 +446,14 @@ scattered `k` 8.9 ms before, 7.1 after, through the partial full scan;
 10 % of it counted 3.2 and 2.9, summed 3.3 and 2.9, through the parallel
 index-only scan; the wide table 4.1 and 3.8, serially; the ordered `id`
 at 10 % 4.1 and 4.3, through the parallel index scan for the serial
-bitmap. The model's full scan is a count with one clause on the first
-column, and a query that reads more of a row takes longer than it
-counts: over `bench_mixed` a clause on a text column after a clause on
+bitmap. The model's full scan was a count with one clause on the first
+column then, and a query that read more of a row took longer than it
+counted: over `bench_mixed` a clause by rows on a text after a clause on
 the first took 5.1 ms serially against 2.2 by the model, which kept it
 serial, 5.0 ms against 4.0 in parallel before, and two clauses on the
-first and the fourth column 3.6 against 3.5.
+first and the fourth column 3.6 against 3.5. With the filter's work
+counted (pg-win-w2-ZR6Igm) both go parallel again, 4.2 and 3.3 ms; the
+serial runs and the index family kept every plan.
 
 `test/sql/index.sql` ranks a table of 60 000 rows: a few rows of the
 scattered index keep it and of the ordered one take its bitmap, most
@@ -457,13 +472,19 @@ list, no correlation in a bitmap's pages, the full scan alone ranked, no
 bitmap made where the core had dropped its own, the partial full scan
 waiting for the serial sequential scan, no node over the core's
 parallel index scans, such a path in the serial list, and the workers'
-start not counted. `test/sql/parallel.sql` shows a scan of 200 000 rows
-serial at the model's default start, parallel at a lower start without
-the toll and serial again at a toll of 10 a page; the other parallel
+start not counted, and a clause by rows past an index's condition keeps
+the full scan at a quarter of the rows. `test/sql/parallel.sql` shows a
+scan of 200 000 rows serial at the model's default start, parallel at a
+lower start without the toll and serial again at a toll of 10 a page,
+parallel at the defaults with a clause by rows past the first where a
+batch clause keeps it serial, and at a lower start with a first clause
+past a varlena where one on the first column keeps it serial; the other parallel
 cases of the suites set the start and the toll to 0, which would keep
 their small tables serial. Mutations fail them: no tie of the partial
 list to the serial one, no rise of a partial path's cost, no toll, no
-start, the core's divisor of participants.
+start, the core's divisor of participants; no filter in the model, no
+selectivity of the earlier clauses, an index's conditions counted again,
+no deforming past a varlena, no operators of a clause by rows.
 
 ### Index-only mode
 

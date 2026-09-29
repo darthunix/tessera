@@ -1,5 +1,7 @@
 #include "postgres.h"
 
+#include "access/sysattr.h"
+#include "access/table.h"
 #include "catalog/pg_class.h"
 #include "optimizer/cost.h"
 #include "optimizer/optimizer.h"
@@ -8,6 +10,7 @@
 #include "optimizer/restrictinfo.h"
 #include "optimizer/tlist.h"
 #include "parser/parsetree.h"
+#include "utils/rel.h"
 
 #include "tessera/expr.h"
 #include "tessera/plan.h"
@@ -488,6 +491,106 @@ bitmap_pages(PlannerInfo *root, RelOptInfo *rel, Path *bitmapqual, double *tuple
 }
 
 /*
+ * The first attribute of the relation whose values vary in length, past
+ * which a column's offset in a row is not known before the row is read;
+ * 0 without one.
+ */
+static AttrNumber
+first_varlena(PlannerInfo *root, RelOptInfo *rel)
+{
+	Relation	relation = table_open(planner_rt_fetch(rel->relid, root)->relid, NoLock);
+	TupleDesc	desc = RelationGetDescr(relation);
+	AttrNumber	first = 0;
+
+	for (int i = 0; i < desc->natts && first == 0; i++)
+	{
+		if (TupleDescCompactAttr(desc, i)->attlen < 0)
+			first = i + 1;
+	}
+	table_close(relation, NoLock);
+	return first;
+}
+
+/*
+ * The filter's time past what a scan's time a row counts, for the rows
+ * entering it (bench/pg/scancost fits it): the scan's price of a row
+ * holds one batch clause on a column no varlena precedes. Each later
+ * clause, in the planner's order, sees the rows the earlier ones left:
+ * one in batches tessera.filter_clause_cost of them a row, one by rows
+ * tessera.filter_row_clause_cost and tessera.filter_row_operator_cost an
+ * operator of the core's cost; a clause on a column past a varlena, the
+ * first too, deforms it for the rows it sees, tessera.deform_varlena_cost
+ * a row, unless an earlier clause did (deform, false for an index-only
+ * scan, whose rows come from the index). A clause among conditions, the
+ * clauses an index answers, leaves every row the index gave. The model's
+ * full scan without it took 2.2 ms for bench_mixed's rows with a clause
+ * by rows on a text after the first clause, which took 5.1.
+ */
+static double
+filter_time(PlannerInfo *root, RelOptInfo *rel, double rows, bool deform, List *conditions)
+{
+	AttrNumber	varlena = deform && rel->baserestrictinfo != NIL ? first_varlena(root, rel) : 0;
+	Bitmapset  *deformed = NULL;
+	double		time = 0;
+	bool		first = true;
+
+	foreach_node(RestrictInfo, rinfo, tess_order_clauses(root, rel->baserestrictinfo))
+	{
+		Bitmapset  *columns = NULL;
+		bool		past = false;
+		int			member = -1;
+
+		pull_varattnos((Node *) rinfo->clause, rel->relid, &columns);
+		while ((member = bms_next_member(columns, member)) >= 0)
+		{
+			if (varlena > 0 && member + FirstLowInvalidHeapAttributeNumber > varlena &&
+				!bms_is_member(member, deformed))
+				past = true;
+			deformed = bms_add_member(deformed, member);
+		}
+		if (past)
+			time += rows * tess_deform_varlena_cost;
+		if (!first && tess_expr_supports_filter((Node *) rinfo->clause, rel->relid))
+			time += rows * tess_filter_clause_cost;
+		else if (!first)
+		{
+			QualCost	cost;
+
+			cost_qual_eval_node(&cost, (Node *) rinfo->clause, root);
+			time += rows * (tess_filter_row_clause_cost +
+							tess_filter_row_operator_cost * cost.per_tuple / cpu_operator_cost);
+		}
+		if (!list_member_ptr(conditions, rinfo))
+			rows *= clause_selectivity(root, (Node *) rinfo, 0, JOIN_INNER, NULL);
+		first = false;
+	}
+	return time;
+}
+
+/*
+ * The relation's clauses an index scan or a bitmap answers: an index's
+ * conditions, those of every index of a BitmapAnd; a BitmapOr's none of
+ * the relation's own.
+ */
+static List *
+index_conditions(Path *path)
+{
+	List	   *conditions = NIL;
+
+	if (IsA(path, IndexPath))
+	{
+		foreach_node(IndexClause, clause, ((IndexPath *) path)->indexclauses)
+			conditions = lappend(conditions, clause->rinfo);
+	}
+	else if (IsA(path, BitmapAndPath))
+	{
+		foreach_ptr(Path, child, ((BitmapAndPath *) path)->bitmapquals)
+			conditions = list_concat(conditions, index_conditions(child));
+	}
+	return conditions;
+}
+
+/*
  * A partial scan's time, from the serial time and the pages the scan
  * touches: the workers' start and finish (tessera.scan_parallel_setup_cost),
  * then the serial time shared among the participants, the leader reading
@@ -517,7 +620,8 @@ partial_time(double time, double pages, int workers)
  * conditions select (an index-only scan's rows on pages not all visible
  * read the table as an index scan's do); a bitmap by its pages
  * (bitmap_pages) and rows, a row of an index out of the table's order
- * taking more, its bitmap built from rows in no order of their pages; a
+ * taking more, its bitmap built from rows in no order of their pages;
+ * each with the filter's time over the rows entering it (filter_time); a
  * partial scan's by partial_time, from the pages the scan touches: the
  * table's, the bitmap's, the index's share of its pages and the table's
  * pages its rows fill as a bitmap of the index would read them (for an
@@ -548,7 +652,7 @@ scan_time(PlannerInfo *root, RelOptInfo *rel, Path *path)
 		return -1;
 	if (scan == NULL || scan->pathtype == T_SeqScan)
 	{
-		time = full_scan_time(rel);
+		time = full_scan_time(rel) + filter_time(root, rel, rel->tuples, true, NIL);
 		pages = rel->pages;
 	}
 	else if (IsA(scan, IndexPath) &&
@@ -559,7 +663,9 @@ scan_time(PlannerInfo *root, RelOptInfo *rel, Path *path)
 		double		tuples;
 
 		time = index->indexselectivity * rel->tuples *
-			(visible * tess_index_only_tuple_cost + (1.0 - visible) * tess_index_tuple_cost);
+			(visible * tess_index_only_tuple_cost + (1.0 - visible) * tess_index_tuple_cost) +
+			filter_time(root, rel, index->indexselectivity * rel->tuples,
+						scan->pathtype == T_IndexScan, index_conditions(scan));
 		pages = index->indexselectivity * index->indexinfo->pages;
 		if (path->parallel_workers > 0 && visible < 1.0)
 			pages += (1.0 - visible) * bitmap_pages(root, rel, scan, &tuples);
@@ -574,7 +680,8 @@ scan_time(PlannerInfo *root, RelOptInfo *rel, Path *path)
 		pages = bitmap_pages(root, rel, bitmapqual, &tuples);
 		time = pages * tess_bitmap_page_cost +
 			tuples * (tess_bitmap_tuple_cost +
-					  tess_bitmap_scatter_cost * (1.0 - correlation * correlation));
+					  tess_bitmap_scatter_cost * (1.0 - correlation * correlation)) +
+			filter_time(root, rel, tuples, true, index_conditions(bitmapqual));
 	}
 	else
 		return -1;
@@ -633,8 +740,8 @@ full_scan_path(PlannerInfo *root, RelOptInfo *rel, Path *seqscan, Cost cost)
  * core's parallel index scan beat a serial bitmap at 15 % of the ordered
  * id of bench_idx, 6.85 ms against 6.1. Only for a table the cache holds
  * (the core's effective_cache_size), which the model measured, and a
- * relation whose clauses all run in batches (a clause row by row costs
- * more a row than the model counts).
+ * relation whose first clause runs in batches (filter_time counts the
+ * later ones, in batches or by rows).
  */
 /* The core's path under the node's, or the path itself. */
 static Path *
