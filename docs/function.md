@@ -151,7 +151,13 @@ timestamp's hour, minute and microseconds) by calendar arithmetic, a
 timestamp's seconds and milliseconds with their fraction, anything else
 (an infinite value, a unit that is a column or one it does not know, a
 timestamp's julian and epoch) by the core's function a row, its NULL
-for an oscillating field of infinity kept; the numeric comparisons
+for an oscillating field of infinity kept; extract writes decimals
+(`TESS_FUNCTION_DECIMALS`) where the call asks, so `extract(second FROM
+ts) > 30` compares scaled integers. The calendar of these functions is
+the Rust kernels' (`tessera/calendar.h`, [kernels.md](kernels.md)), a
+batch a call, the core's Julian day routines to the integer; the
+constant unit names, the session's time zone and the rows the kernels
+leave stay in C. The numeric comparisons
 `numeric_eq` … `numeric_ge`, `numeric_add`, `numeric_sub`, `numeric_mul`,
 `numeric_uminus`, `numeric_abs`, `int4(numeric)` and `int8(numeric)` in
 every shape: a value of at most 18 digits (what a column of

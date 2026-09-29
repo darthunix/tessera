@@ -295,6 +295,11 @@ SELECT types_same($$SELECT extract(decade FROM ts), extract(century FROM ts), ex
 SELECT types_same($$SELECT extract(julian FROM ts), extract(epoch FROM ts), count(*) FROM types_dt GROUP BY 1, 2$$);
 SELECT types_same($$SELECT "extract"(unit, ts), count(*) FROM types_dt GROUP BY 1$$);
 SELECT types_same($$SELECT count(*), sum(id) FROM types_dt WHERE extract(year FROM d) = 2021 OR extract(month FROM ts) > 10 OR extract(dow FROM d) IN (0, 6)$$);
+-- extract's decimals for a numeric consumer: a field of the scale the plan
+-- fixes (seconds 6, milliseconds 3, the others 0) as its scaled integer, a
+-- chain on it, a field the core computes (a timestamp's epoch) a numeric.
+SELECT types_same($$SELECT count(*), sum(id) FROM types_dt WHERE extract(second FROM ts) > 30.5 OR extract(milliseconds FROM ts) * 2 < 5000 OR extract(epoch FROM d) > 1.6e9 OR extract(julian FROM d) - 2459000 BETWEEN 0 AND 100$$);
+SELECT types_same($$SELECT count(*), sum(id) FROM types_dt WHERE extract(epoch FROM ts) > 1.6e9 OR extract(doy FROM ts) + extract(second FROM ts) > 300 OR extract(microseconds FROM ts) < 1000000$$);
 SELECT types_same($$SELECT count(*), sum(id) FROM types_dt WHERE num > 10.5 OR num = 'NaN' OR num <= -2$$);
 SELECT types_same($$SELECT count(*), sum(id) FROM types_dt WHERE num <> 3 AND num >= '-Infinity' AND num < 'Infinity' AND 20 > num$$);
 SELECT types_same($$SELECT count(*), sum(id) FROM types_dt WHERE num > n::numeric OR n::int2::numeric = 7 OR (id::int8 * 1000000)::numeric > 3.5e9$$);
@@ -371,7 +376,8 @@ BEGIN
         $q$SELECT d::timestamptz, tz::date, count(*) FROM types_tz GROUP BY 1, 2$q$,
         $q$SELECT extract(hour FROM tz), extract(minute FROM tz), extract(second FROM tz), extract(day FROM tz), count(*) FROM types_tz GROUP BY 1, 2, 3, 4$q$,
         $q$SELECT extract(dow FROM tz), extract(doy FROM tz), extract(year FROM tz), extract(week FROM tz), extract(timezone FROM tz), count(*) FROM types_tz GROUP BY 1, 2, 3, 4, 5$q$,
-        $q$SELECT count(*), sum(id) FROM types_tz WHERE date_trunc('month', tz) < timestamptz '1990-01-01 00:00+00' OR tz::date = d OR extract(hour FROM tz) = 3$q$
+        $q$SELECT count(*), sum(id) FROM types_tz WHERE date_trunc('month', tz) < timestamptz '1990-01-01 00:00+00' OR tz::date = d OR extract(hour FROM tz) = 3$q$,
+        $q$SELECT count(*), sum(id) FROM types_tz WHERE extract(second FROM tz) > 29.5 OR extract(hour FROM tz) * 60 + extract(minute FROM tz) < 90$q$
     ] LOOP
         result := types_same(query);
         IF result <> 'same' THEN

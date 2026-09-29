@@ -19,7 +19,9 @@
 //! [`decimal`] reads PostgreSQL's numeric of at most 18 digits as an `i64`
 //! at its display scale from the stored bytes, computes with it exactly and
 //! writes the numeric back, a batch at a time over a caller's source of
-//! rows, leaving to the caller every row it does not take.
+//! rows, leaving to the caller every row it does not take. [`calendar`]
+//! is PostgreSQL's calendar of dates and timestamps: its Julian day
+//! routines, the truncations, intervals and fields of the date functions.
 //! Errors do not roll back previously completed words; callers must discard a
 //! partial selection after failure. This crate does not introduce a C entry
 //! point or catch panics. The future C boundary remains responsible for panic
@@ -37,6 +39,7 @@
 
 #![deny(unsafe_code)]
 
+pub mod calendar;
 pub mod cast;
 pub mod count;
 pub mod decimal;

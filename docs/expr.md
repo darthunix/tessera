@@ -41,8 +41,9 @@ An expression is supported when it is built from
   that scale, which the next such step reads without a numeric in between:
   a column of `numeric(p, s)` has `s`, a constant its own, `+` and `-` the
   larger of their arguments', `*` their sum up to 18, negation and `abs`
-  their argument's, `numeric(integer)` 0 (`numeric_scale`, a constant's
-  read by the kernels); a row past 18 digits, NaN or of another scale
+  their argument's, `numeric(integer)` 0, `extract` its field's (6 for
+  seconds, 3 for milliseconds, 0 for the others it computes) (`numeric_scale`,
+  a constant's read by the kernels); a row past 18 digits, NaN or of another scale
   comes as a numeric among the decimals. A step or a consumer that reads
   no decimals gets numerics made from them by the kernels
   (`tess_decimal_write`) into an array of their own

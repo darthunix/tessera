@@ -17,4 +17,14 @@ extern void tess_register_float_functions(const struct TessFunctionRegistryOps *
 /* A numeric of an integer: a small one from the process's cache, else made in context. */
 extern struct NumericData *tess_numeric_from_int64(int64 value, MemoryContext context);
 
+/*
+ * The numerics of the rows of write, each an int64 in values at its scale
+ * in scales, replacing it: a small integer from the cache, the others
+ * written by the kernels into one block of context; write is narrowed to
+ * the rows the kernels wrote.
+ */
+extern TessStatusCode tess_numeric_results(MemoryContext context, Datum *values,
+										   const uint8 *scales, TessRowMask *write,
+										   TessStatus *status);
+
 #endif							/* TESSERA_KERNELS_INTERNAL_H */

@@ -5,6 +5,7 @@ use std::mem::offset_of;
 use std::panic::{self, AssertUnwindSafe};
 
 use anyhow::Result;
+use tessera_kernels::calendar::CalendarError;
 use tessera_kernels::int32::ArithmeticError;
 
 /// The outcome of an entry point, as `TessStatusCode`.
@@ -21,6 +22,8 @@ pub enum Code {
     DivisionByZero = 3,
     /// A panic was caught; the library remains usable.
     Panic = 4,
+    /// Another error of the data, its SQLSTATE and message in the status.
+    DataException = 5,
 }
 
 /// Bytes of the message buffer, terminator included
@@ -109,7 +112,14 @@ pub(super) unsafe fn guard(status: *mut Status, body: impl FnOnce() -> Result<()
                 arithmetic.sqlstate(),
                 arithmetic.to_string(),
             ),
-            None => (Code::InvalidArgument, "XX000", format!("{error:#}")),
+            None => match error.downcast_ref::<CalendarError>() {
+                Some(calendar) => (
+                    Code::DataException,
+                    calendar.sqlstate(),
+                    calendar.to_string(),
+                ),
+                None => (Code::InvalidArgument, "XX000", format!("{error:#}")),
+            },
         },
         Err(payload) => {
             let message = payload

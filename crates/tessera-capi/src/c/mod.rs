@@ -1,5 +1,6 @@
 //! The C entry points, declared in `include/tessera/kernels.h`,
-//! `include/tessera/decimal.h`, `include/tessera/table.h`,
+//! `include/tessera/decimal.h`, `include/tessera/calendar.h`,
+//! `include/tessera/table.h`,
 //! `include/tessera/spill.h` and `include/tessera/sort.h`.
 //!
 //! Every entry point takes its inputs as the C structures of the batch
@@ -9,6 +10,7 @@
 //! contract, in `docs/kernels.md`.
 
 mod args;
+mod calendar;
 mod cast;
 mod column;
 mod count;
@@ -22,6 +24,11 @@ mod spill;
 mod status;
 mod table;
 
+pub use calendar::{
+    CalendarArg, tess_date_add_interval, tess_date_arith, tess_date_extract,
+    tess_date_to_timestamp, tess_timestamp_add_interval, tess_timestamp_extract,
+    tess_timestamp_to_date, tess_timestamp_trunc, tess_timestamp_trunc_local,
+};
 pub use cast::{tess_int4_to_int8, tess_int8_to_int4};
 pub use column::DatumColumn;
 pub use count::tess_count;

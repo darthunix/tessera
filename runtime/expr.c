@@ -3,12 +3,14 @@
 #include "catalog/pg_operator_d.h"
 #include "catalog/pg_type_d.h"
 #include "utils/array.h"
+#include "utils/datetime.h"
 #include "executor/executor.h"
 #include "miscadmin.h"
 #include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
 #include "port/pg_bitutils.h"
 #include "optimizer/optimizer.h"
+#include "parser/scansup.h"
 #include "utils/fmgroids.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
@@ -974,11 +976,77 @@ static void eval_choice(TessExpr *expr);
 static void eval_cond(Cond *cond, const TessRowMask *rows, bool want_unknown);
 
 /*
+ * The display scale of extract's value of a unit the kernels compute (see
+ * kernels/date.c): 6 for seconds, 3 for milliseconds, 0 for the other
+ * fields and a date's epoch and Julian day; -1 for a unit that is not a
+ * constant or that the core's function computes.
+ */
+static int
+extract_scale(Node *unit, bool timestamp)
+{
+	text	   *units;
+	char	   *lowunits;
+	int			type;
+	int			val = 0;
+	int			scale = -1;
+
+	unit = strip_relabel(unit);
+	if (!IsA(unit, Const) || ((Const *) unit)->constisnull)
+		return -1;
+	units = DatumGetTextPP(((Const *) unit)->constvalue);
+	lowunits = downcase_truncate_identifier(VARDATA_ANY(units), VARSIZE_ANY_EXHDR(units), false);
+	type = DecodeUnits(0, lowunits, &val);
+	if (type == UNKNOWN_FIELD)
+		type = DecodeSpecial(0, lowunits, &val);
+	if (type == RESERV)
+		scale = !timestamp && val == DTK_EPOCH ? 0 : -1;
+	else if (type == UNITS)
+	{
+		switch (val)
+		{
+			case DTK_SECOND:
+				scale = timestamp ? 6 : -1;
+				break;
+			case DTK_MILLISEC:
+				scale = timestamp ? 3 : -1;
+				break;
+			case DTK_MICROSEC:
+			case DTK_MINUTE:
+			case DTK_HOUR:
+				scale = timestamp ? 0 : -1;
+				break;
+			case DTK_JULIAN:
+				scale = timestamp ? -1 : 0;
+				break;
+			case DTK_DAY:
+			case DTK_MONTH:
+			case DTK_QUARTER:
+			case DTK_WEEK:
+			case DTK_YEAR:
+			case DTK_DECADE:
+			case DTK_CENTURY:
+			case DTK_MILLENNIUM:
+			case DTK_ISOYEAR:
+			case DTK_DOW:
+			case DTK_ISODOW:
+			case DTK_DOY:
+				scale = 0;
+				break;
+			default:
+				break;
+		}
+	}
+	pfree(lowunits);
+	return scale;
+}
+
+/*
  * The display scale every value of a numeric expression has, as the core
  * computes it, when the plan fixes it: a column of numeric(p, s) has s,
  * which a value of the column is stored with, a constant its own, + and -
  * the larger of their arguments', * their sum, negation and abs their
- * argument's, numeric of an integer 0; -1 when it depends on the row (a
+ * argument's, numeric of an integer 0, extract its field's
+ * (extract_scale); -1 when it depends on the row (a
  * numeric without a typmod, a parameter), passes 18, or for anything else.
  * A row whose value turns out of another scale is written as a numeric,
  * so the scale only chooses where decimals go.
@@ -1049,6 +1117,11 @@ numeric_scale(Node *node)
 		case F_NUMERIC_INT4:
 		case F_NUMERIC_INT8:
 			return 0;
+		case F_EXTRACT_TEXT_DATE:
+			return extract_scale(linitial(args), false);
+		case F_EXTRACT_TEXT_TIMESTAMP:
+		case F_EXTRACT_TEXT_TIMESTAMPTZ:
+			return extract_scale(linitial(args), true);
 		default:
 			return -1;
 	}

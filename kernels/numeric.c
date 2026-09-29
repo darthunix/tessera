@@ -444,20 +444,14 @@ numeric_core(NumericOp op, Datum left, Datum right)
 	}
 }
 
-/*
- * The numerics of the results the call does not keep as decimals: a small
- * integer from the cache, the others written by the kernels into one block
- * of the call's context.
- */
-static TessStatusCode
-write_numerics(TessFunctionCall *call, const uint8 *scales, TessRowMask *write)
+TessStatusCode
+tess_numeric_results(MemoryContext context, Datum *values, const uint8 *scales,
+					 TessRowMask *write, TessStatus *status)
 {
-	Datum	   *values = (Datum *) call->values;
 	int			nwords = tess_row_mask_word_count(write->nrows);
 	uint64		count = 0;
 	char	   *space;
 	Size		used;
-	TessStatusCode code;
 
 	for (int word = 0; word < nwords; word++)
 	{
@@ -469,7 +463,7 @@ write_numerics(TessFunctionCall *call, const uint8 *scales, TessRowMask *write)
 
 			if (scales[row] == 0 && value >= SMALL_NUMERIC_MIN && value < SMALL_NUMERIC_MAX)
 			{
-				values[row] = NumericGetDatum(tess_numeric_from_int64(value, call->context));
+				values[row] = NumericGetDatum(tess_numeric_from_int64(value, context));
 				write->bits[word] &= ~(UINT64CONST(1) << bit);
 			}
 		}
@@ -477,10 +471,9 @@ write_numerics(TessFunctionCall *call, const uint8 *scales, TessRowMask *write)
 	}
 	if (count == 0)
 		return TESS_OK;
-	space = MemoryContextAlloc(call->context, count * TESS_DECIMAL_NUMERIC_MAX);
-	code = tess_decimal_write(values, scales, -1, write, space,
-							  count * TESS_DECIMAL_NUMERIC_MAX, &used, call->status);
-	return code;
+	space = MemoryContextAlloc(context, count * TESS_DECIMAL_NUMERIC_MAX);
+	return tess_decimal_write(values, scales, -1, write, space,
+							  count * TESS_DECIMAL_NUMERIC_MAX, &used, status);
 }
 
 /*
@@ -541,7 +534,8 @@ numeric_value_evaluate(TessFunctionCall *call)
 			for (int word = 0; word < tess_row_mask_word_count(nrows); word++)
 				write.bits[word] = call->non_nulls->bits[word] & ~rest.bits[word] &
 					~decimals.bits[word];
-			code = write_numerics(call, scales, &write);
+			code = tess_numeric_results(call->context, (Datum *) call->values, scales, &write,
+										call->status);
 		}
 		scratch_free(scales, space.scales);
 		scratch_mask_free(&space, 2, &write);

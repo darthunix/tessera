@@ -211,3 +211,38 @@ heap scan reads a shared column's decimals, the aggregate node sums and
 reads its argument's, and the expression compiler reads a constant's scale
 and writes the numerics of a chain's decimals, through `TessKernelOps`.
 A call costs about 10 ns besides its rows, so the callers make one a batch.
+
+## Calendar
+
+`tessera/calendar.h` declares the kernels of dates and timestamps
+(`tessera_kernels::calendar`) the date functions of `kernels/date.c` call,
+a batch a call: a date is an int4 Datum, a timestamp an int8 Datum, an
+interval a pointer to the core's `Interval`, and an argument
+(`TessCalendarArg`) a column or a scalar. The Julian day routines are the
+core's arithmetic (`date2j`, `j2date`, `j2day`, `date2isoweek`,
+`date2isoyear`), tested against another derivation on every day of the
+first three million and the last two million and a million between. A
+call fails where the core raises, with `TESS_ERROR_DATA_EXCEPTION`,
+SQLSTATE 22008 and the core's message, at the first row the core would.
+
+- `tess_date_arith(op, left, right, rows, values, non_nulls, status)`: a
+  date plus or minus days, the days between dates.
+- `tess_date_to_timestamp` and `tess_timestamp_to_date(arg, rows, values,
+  non_nulls, status)`: the casts.
+- `tess_timestamp_trunc(unit, arg, rows, values, non_nulls, status)`:
+  `date_trunc` of a timestamp; `tess_timestamp_trunc_local(unit, locals,
+  rows, values, days, rest, status)` the same over local times, a unit of a
+  day and above giving the Julian day of the period's first day for the
+  caller to find its midnight in its zone.
+- `tess_timestamp_add_interval` and `tess_date_add_interval(minus, left,
+  right, rows, values, non_nulls, status)`: an interval added as
+  `timestamp_pl_interval` adds it, months clamped to the month's last day,
+  then days, then microseconds.
+- `tess_date_extract` and `tess_timestamp_extract(field, arg, rows, values,
+  scales, non_nulls, rest, status)`: the fields of `extract`, each a value
+  at a scale (6 for seconds, 3 for milliseconds, else 0), an infinite value
+  left in `rest`.
+
+The session's time zone stays in C: the local times of a timestamptz, the
+midnights of local days (both kept in caches of the process), the unit
+names and the rows the kernels leave.
