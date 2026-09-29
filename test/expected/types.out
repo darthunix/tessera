@@ -1090,6 +1090,75 @@ ERROR:  unit "fortnight" not recognized for type date
 RESET tessera.enable;
 \set VERBOSITY default
 DROP TABLE types_dt;
+-- A timestamp with time zone in the session's zone, as the core reads it:
+-- date_trunc of a timestamptz and of a date (which becomes the
+-- timestamptz of its local midnight), extract of a timestamptz, the casts
+-- between date and timestamptz; in zones with daylight saving, a half-hour
+-- offset, a half-hour shift, a shift at midnight (no 00:00 that day) and
+-- local mean time before 1900; infinities kept, the rest by the core.
+CREATE TABLE types_tz AS
+SELECT i AS id,
+       CASE WHEN i % 29 = 0 THEN NULL
+            ELSE timestamptz '2000-01-01 00:00+00' + make_interval(days => (i * 7919) % 60000 - 30000,
+                                                                   secs => (i * 104729) % 86400000 / 1000.0) END AS tz,
+       CASE WHEN i % 31 = 0 THEN NULL ELSE date '2000-01-01' + (i * 7919) % 60000 - 30000 END AS d
+FROM generate_series(1, 3000) AS i;
+INSERT INTO types_tz VALUES
+    (5001, 'infinity', 'infinity'), (5002, '-infinity', '-infinity'),
+    (5003, '1850-06-15 12:34:56.789+00', '1850-06-15'), (5004, '1937-07-01 00:00:10+00', '1937-07-01'),
+    (5005, '2018-11-04 02:59:59+00', '2018-11-04'), (5006, '2018-11-04 03:00:00+00', '2019-02-17');
+ANALYZE types_tz;
+EXPLAIN (COSTS OFF) SELECT date_trunc('month', d), extract(hour FROM tz), count(*) FROM types_tz WHERE tz::date > date '2000-01-01' GROUP BY 1, 2;
+                                          QUERY PLAN                                          
+----------------------------------------------------------------------------------------------
+ Custom Scan (TessAgg)
+   Group Key: date_trunc('month'::text, (d)::timestamp with time zone), EXTRACT(hour FROM tz)
+   ->  Custom Scan (TessFilter) on types_tz
+         Batch Filter: ((tz)::date > '01-01-2000'::date)
+         ->  Custom Scan (TessHeapScan) on types_tz
+(5 rows)
+
+CREATE FUNCTION types_zone(zone text) RETURNS text
+LANGUAGE plpgsql AS $$
+DECLARE
+    query text;
+    result text;
+    failures text := '';
+BEGIN
+    PERFORM set_config('timezone', zone, true);
+    FOREACH query IN ARRAY ARRAY[
+        $q$SELECT date_trunc('day', tz), date_trunc('week', tz), date_trunc('month', tz), count(*) FROM types_tz GROUP BY 1, 2, 3$q$,
+        $q$SELECT date_trunc('quarter', tz), date_trunc('year', tz), date_trunc('decade', tz), date_trunc('century', tz), count(*) FROM types_tz GROUP BY 1, 2, 3, 4$q$,
+        $q$SELECT date_trunc('hour', tz), date_trunc('minute', tz), date_trunc('second', tz), date_trunc('ms', tz), count(*) FROM types_tz GROUP BY 1, 2, 3, 4$q$,
+        $q$SELECT date_trunc('month', d), date_trunc('week', d), date_trunc('day', d), date_trunc('year', d), count(*) FROM types_tz GROUP BY 1, 2, 3, 4$q$,
+        $q$SELECT d::timestamptz, tz::date, count(*) FROM types_tz GROUP BY 1, 2$q$,
+        $q$SELECT extract(hour FROM tz), extract(minute FROM tz), extract(second FROM tz), extract(day FROM tz), count(*) FROM types_tz GROUP BY 1, 2, 3, 4$q$,
+        $q$SELECT extract(dow FROM tz), extract(doy FROM tz), extract(year FROM tz), extract(week FROM tz), extract(timezone FROM tz), count(*) FROM types_tz GROUP BY 1, 2, 3, 4, 5$q$,
+        $q$SELECT count(*), sum(id) FROM types_tz WHERE date_trunc('month', tz) < timestamptz '1990-01-01 00:00+00' OR tz::date = d OR extract(hour FROM tz) = 3$q$
+    ] LOOP
+        result := types_same(query);
+        IF result <> 'same' THEN
+            failures := failures || query || ': ' || result || E'\n';
+        END IF;
+    END LOOP;
+    RETURN CASE WHEN failures = '' THEN 'same' ELSE failures END;
+END
+$$;
+SELECT zone, types_zone(zone)
+FROM unnest(ARRAY['UTC', 'America/New_York', 'Asia/Kolkata', 'Australia/Lord_Howe',
+                  'America/Sao_Paulo', 'Europe/Amsterdam']) AS zone;
+        zone         | types_zone 
+---------------------+------------
+ UTC                 | same
+ America/New_York    | same
+ Asia/Kolkata        | same
+ Australia/Lord_Howe | same
+ America/Sao_Paulo   | same
+ Europe/Amsterdam    | same
+(6 rows)
+
+DROP FUNCTION types_zone(text);
+DROP TABLE types_tz;
 -- A date against a timestamp compares other than bit for bit: the core's.
 EXPLAIN (COSTS OFF) SELECT count(*) FROM types_f JOIN types_d ON types_f.d = types_d.ts;
                        QUERY PLAN                        

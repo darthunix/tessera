@@ -157,7 +157,16 @@ a call keeping the result for pairs where one side is a cached numeric;
 and the casts `numeric(int2)`, `numeric(int4)`, `numeric(int8)`. A
 numeric of an integer from -1024 to 4095 comes from a block of the
 process made once in `TopMemoryContext`, the same pointer every time, so
-years and months neither allocate nor compare twice;
+years and months neither allocate nor compare twice; the functions of a
+timestamp with time zone in the session's zone: `date_trunc(text,
+timestamptz)` (and so `date_trunc('month', d)` over a date, which the
+parser casts), `extract(text, timestamptz)`, `timestamptz(date)` and
+`date(timestamptz)`, reading an instant's local time by the zone's offset
+over the span up to its next transition (`pg_next_dst_boundary`, as
+`pg_localtime` picks it; 32 spans of the zone kept by the process) and a
+local day's midnight by `DetermineTimeZoneOffset` (1024 days kept), and
+leaving to the core's function a row with an infinity, an unknown unit, a
+day before the Julian day 0 or a result out of range;
 and `count(*)`,
 `count(any)`, `sum(int4)`, `min(int4)`, `max(int4)`, `min(int8)` and
 `max(int8)` as aggregates, by the aggregate's own OID. An int4 column

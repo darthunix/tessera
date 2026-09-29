@@ -23,6 +23,16 @@
  * core's function a row, its NULL for an oscillating field of infinity
  * kept.
  *
+ * A timestamp with time zone is read in the session's zone: its local
+ * time is the instant plus the offset pg_localtime gives, as timestamp2tm
+ * reads it, the offset kept for the span of instants up to the zone's
+ * next transition that pg_next_dst_boundary names; a local day's midnight is the instant DetermineTimeZoneOffset
+ * makes of it, kept for the next rows of that day in a cache of the
+ * process for the zone. So date_trunc('month', d), where the date becomes
+ * a timestamptz, converts each date once and each month once. Where the
+ * Julian day routines do not reach or a result falls out of range, the
+ * core's function takes the row and raises its own error.
+ *
  * date_trunc parses its unit once a call, as the core does a row, and
  * truncates by calendar arithmetic: the time units by the microseconds of
  * the unit, a week to its Monday, the larger units through the year,
@@ -36,6 +46,7 @@
 #include "datatype/timestamp.h"
 #include "fmgr.h"
 #include "parser/scansup.h"
+#include "pgtime.h"
 #include "port/pg_bitutils.h"
 #include "utils/builtins.h"
 #include "utils/date.h"
@@ -63,7 +74,11 @@ typedef enum DateOp
 	DATE_PLUS_INTERVAL,
 	DATE_MINUS_INTERVAL,
 	DATE_EXTRACT,
-	TIMESTAMP_EXTRACT
+	TIMESTAMP_EXTRACT,
+	TIMESTAMPTZ_TRUNC,
+	TIMESTAMPTZ_EXTRACT,
+	DATE_TO_TIMESTAMPTZ,
+	TIMESTAMPTZ_TO_DATE
 } DateOp;
 
 typedef struct DateFunction
@@ -76,6 +91,7 @@ static TessStatusCode date_evaluate(TessFunctionCall *call);
 static TessStatusCode trunc_evaluate(TessFunctionCall *call);
 static TessStatusCode interval_evaluate(TessFunctionCall *call);
 static TessStatusCode extract_evaluate(TessFunctionCall *call);
+static TessStatusCode zone_cast_evaluate(TessFunctionCall *call);
 
 #define DATE_FUNCTION(oid, code, format, evaluator) \
 	{{TESS_ABI_INITIALIZER(TESS_FUNCTION_ABI_VERSION, TessFunction), \
@@ -104,6 +120,14 @@ static const DateFunction date_functions[] = {
 	DATE_FUNCTION(F_EXTRACT_TEXT_DATE, DATE_EXTRACT, TESS_RESULT_DATUM, extract_evaluate),
 	DATE_FUNCTION(F_EXTRACT_TEXT_TIMESTAMP, TIMESTAMP_EXTRACT, TESS_RESULT_DATUM,
 				  extract_evaluate),
+	DATE_FUNCTION(F_DATE_TRUNC_TEXT_TIMESTAMPTZ, TIMESTAMPTZ_TRUNC, TESS_RESULT_DATUM,
+				  trunc_evaluate),
+	DATE_FUNCTION(F_EXTRACT_TEXT_TIMESTAMPTZ, TIMESTAMPTZ_EXTRACT, TESS_RESULT_DATUM,
+				  extract_evaluate),
+	DATE_FUNCTION(F_TIMESTAMPTZ_DATE, DATE_TO_TIMESTAMPTZ, TESS_RESULT_DATUM,
+				  zone_cast_evaluate),
+	DATE_FUNCTION(F_DATE_TIMESTAMPTZ, TIMESTAMPTZ_TO_DATE, TESS_RESULT_INT32,
+				  zone_cast_evaluate),
 };
 
 static DateOp
@@ -310,6 +334,27 @@ date_evaluate(TessFunctionCall *call)
 }
 
 /*
+ * The year and month that start the period of unit (DTK_MONTH and up)
+ * holding them, as timestamp_trunc rounds years, 1 BC being year 0.
+ */
+static void
+truncate_fields(int unit, int *year, int *month)
+{
+	if (unit == DTK_MILLENNIUM)
+		*year = *year > 0 ? ((*year + 999) / 1000) * 1000 - 999 :
+			-((999 - (*year - 1)) / 1000) * 1000 + 1;
+	else if (unit == DTK_CENTURY)
+		*year = *year > 0 ? ((*year + 99) / 100) * 100 - 99 :
+			-((99 - (*year - 1)) / 100) * 100 + 1;
+	else if (unit == DTK_DECADE)
+		*year = *year > 0 ? (*year / 10) * 10 : -((8 - (*year - 1)) / 10) * 10;
+	if (unit != DTK_QUARTER && unit != DTK_MONTH)
+		*month = 1;
+	else if (unit == DTK_QUARTER)
+		*month = 3 * ((*month - 1) / 3) + 1;
+}
+
+/*
  * A finite timestamp truncated to unit (a DTK_* of DecodeUnits), as
  * timestamp_trunc truncates its fields: false below the first timestamp.
  */
@@ -347,19 +392,7 @@ truncate_timestamp(Timestamp timestamp, int unit, Timestamp *result)
 			break;
 		default:
 			j2date((int) (day + POSTGRES_EPOCH_JDATE), &year, &month, &mday);
-			/* The years as timestamp_trunc rounds them, 1 BC being year 0. */
-			if (unit == DTK_MILLENNIUM)
-				year = year > 0 ? ((year + 999) / 1000) * 1000 - 999 :
-					-((999 - (year - 1)) / 1000) * 1000 + 1;
-			else if (unit == DTK_CENTURY)
-				year = year > 0 ? ((year + 99) / 100) * 100 - 99 :
-					-((99 - (year - 1)) / 100) * 100 + 1;
-			else if (unit == DTK_DECADE)
-				year = year > 0 ? (year / 10) * 10 : -((8 - (year - 1)) / 10) * 10;
-			if (unit != DTK_QUARTER && unit != DTK_MONTH)
-				month = 1;
-			else if (unit == DTK_QUARTER)
-				month = 3 * ((month - 1) / 3) + 1;
+			truncate_fields(unit, &year, &month);
 			if (!IS_VALID_JULIAN(year, month, 1))
 				return false;
 			day = date2j(year, month, 1) - POSTGRES_EPOCH_JDATE;
@@ -370,8 +403,200 @@ truncate_timestamp(Timestamp timestamp, int unit, Timestamp *result)
 }
 
 /*
- * date_trunc(unit, timestamp): a known unit constant by calendar
- * arithmetic, anything else by the core's timestamp_trunc a row.
+ * Spans of instants [start, end) over which the zone keeps one offset:
+ * pg_next_dst_boundary gives the offset at an instant, the one localsub
+ * picks for pg_localtime, and the next transition, where the span ends;
+ * an earlier instant with the same next transition and offset lies in the
+ * same segment and moves the span's start down.
+ */
+#define ZONE_SPANS 32
+
+typedef struct ZoneSpan
+{
+	pg_time_t	start;
+	pg_time_t	end;
+	long int	offset;
+} ZoneSpan;
+
+static const pg_tz *span_zone;
+static ZoneSpan spans[ZONE_SPANS];
+static int	nspans;
+static int	last_span;
+static int	next_victim;
+
+static long int
+zone_offset(pg_time_t instant, const pg_tz *zone)
+{
+	long int	before;
+	long int	after;
+	int			before_isdst;
+	int			after_isdst;
+	pg_time_t	boundary;
+	pg_time_t	end;
+	int			found;
+	int			slot;
+
+	if (zone != span_zone)
+	{
+		nspans = 0;
+		last_span = 0;
+		span_zone = zone;
+	}
+	if (last_span < nspans && instant >= spans[last_span].start &&
+		instant < spans[last_span].end)
+		return spans[last_span].offset;
+	for (int span = 0; span < nspans; span++)
+		if (instant >= spans[span].start && instant < spans[span].end)
+		{
+			last_span = span;
+			return spans[span].offset;
+		}
+	found = pg_next_dst_boundary(&instant, &before, &before_isdst, &boundary,
+								 &after, &after_isdst, zone);
+	if (found < 0)
+		return pg_localtime(&instant, zone)->tm_gmtoff;
+	end = found == 0 ? PG_INT64_MAX : boundary;
+	for (int span = 0; span < nspans; span++)
+		if (spans[span].end == end && spans[span].offset == before)
+		{
+			spans[span].start = Min(spans[span].start, instant);
+			last_span = span;
+			return before;
+		}
+	slot = nspans < ZONE_SPANS ? nspans++ : next_victim++ % ZONE_SPANS;
+	spans[slot].start = instant;
+	spans[slot].end = end;
+	spans[slot].offset = before;
+	last_span = slot;
+	return before;
+}
+
+/*
+ * A finite timestamptz in the zone's local time, as timestamp2tm reads it:
+ * the instant plus the zone's offset at its second.
+ */
+static inline Timestamp
+local_timestamp(TimestampTz timestamp, const pg_tz *zone)
+{
+	pg_time_t	utime;
+	int64		seconds = timestamp / USECS_PER_SEC;
+
+	if (timestamp % USECS_PER_SEC < 0)
+		seconds--;
+	utime = (pg_time_t) (seconds + (POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE) * SECS_PER_DAY);
+	return timestamp + (int64) zone_offset(utime, zone) * USECS_PER_SEC;
+}
+
+/* The local midnights met in the zone, by day. */
+#define MIDNIGHTS 1024
+
+typedef struct Midnight
+{
+	int64		day;
+	TimestampTz instant;
+	bool		valid;
+} Midnight;
+
+static pg_tz *midnight_zone;
+static Midnight midnights[MIDNIGHTS];
+
+/*
+ * The instant of a day's 00:00 in the zone, as date2timestamptz and
+ * timestamptz_trunc make it: false out of range, where the caller leaves
+ * the row to the core.
+ */
+static bool
+local_midnight(int year, int month, int mday, pg_tz *zone, TimestampTz *result)
+{
+	int64		day;
+	Midnight   *slot;
+	struct pg_tm tm;
+	int			offset;
+
+	if (!IS_VALID_JULIAN(year, month, mday))
+		return false;
+	day = date2j(year, month, mday) - POSTGRES_EPOCH_JDATE;
+	if (zone != midnight_zone)
+	{
+		memset(midnights, 0, sizeof(midnights));
+		midnight_zone = zone;
+	}
+	slot = &midnights[(uint64) day % MIDNIGHTS];
+	if (slot->valid && slot->day == day)
+	{
+		*result = slot->instant;
+		return true;
+	}
+	memset(&tm, 0, sizeof(tm));
+	tm.tm_year = year;
+	tm.tm_mon = month;
+	tm.tm_mday = mday;
+	offset = DetermineTimeZoneOffset(&tm, zone);
+	if (pg_mul_s64_overflow(day, USECS_PER_DAY, result) ||
+		pg_add_s64_overflow(*result, (int64) offset * USECS_PER_SEC, result) ||
+		!IS_VALID_TIMESTAMP(*result))
+		return false;
+	slot->day = day;
+	slot->instant = *result;
+	slot->valid = true;
+	return true;
+}
+
+/*
+ * A finite timestamptz truncated to unit in the zone, as
+ * timestamptz_trunc_internal: the local fields truncated, a unit below a
+ * day kept at the instant's offset, a day and above at its first day's
+ * midnight. False where the core must take the row.
+ */
+static bool
+truncate_zoned(TimestampTz timestamp, int unit, pg_tz *zone, TimestampTz *result)
+{
+	Timestamp	local = local_timestamp(timestamp, zone);
+	int64		time;
+	int64		day = timestamp_day(local, &time);
+	int			year;
+	int			month;
+	int			mday;
+
+	if (day + POSTGRES_EPOCH_JDATE < 0)
+		return false;
+	switch (unit)
+	{
+		case DTK_MICROSEC:
+		case DTK_MILLISEC:
+		case DTK_SECOND:
+		case DTK_MINUTE:
+		case DTK_HOUR:
+			{
+				int64		size = unit == DTK_MICROSEC ? 1 : unit == DTK_MILLISEC ? 1000 :
+					unit == DTK_SECOND ? USECS_PER_SEC :
+					unit == DTK_MINUTE ? USECS_PER_MINUTE : USECS_PER_HOUR;
+
+				*result = day * USECS_PER_DAY + (time / size) * size - (local - timestamp);
+				return IS_VALID_TIMESTAMP(*result);
+			}
+		case DTK_WEEK:
+			day -= ((day + 5) % 7 + 7) % 7;
+			if (day + POSTGRES_EPOCH_JDATE < 0)
+				return false;
+			j2date((int) (day + POSTGRES_EPOCH_JDATE), &year, &month, &mday);
+			break;
+		default:
+			j2date((int) (day + POSTGRES_EPOCH_JDATE), &year, &month, &mday);
+			if (unit != DTK_DAY)
+			{
+				truncate_fields(unit, &year, &month);
+				mday = 1;
+			}
+			break;
+	}
+	return local_midnight(year, month, mday, zone, result);
+}
+
+/*
+ * date_trunc(unit, timestamp) and date_trunc(unit, timestamptz): a known
+ * unit constant by calendar arithmetic, anything else by the core's
+ * function a row.
  */
 static TessStatusCode
 trunc_evaluate(TessFunctionCall *call)
@@ -379,6 +604,7 @@ trunc_evaluate(TessFunctionCall *call)
 	const TessFunctionArg *units;
 	const TessFunctionArg *stamps;
 	Datum	   *values;
+	bool		zoned;
 	int			unit = -1;
 	int			nwords;
 
@@ -387,6 +613,7 @@ trunc_evaluate(TessFunctionCall *call)
 	units = &call->args[0];
 	stamps = &call->args[1];
 	values = (Datum *) call->values;
+	zoned = date_op(call) == TIMESTAMPTZ_TRUNC;
 	if (units->column == NULL)
 	{
 		text	   *text_units = DatumGetTextPP(units->scalar);
@@ -438,7 +665,15 @@ trunc_evaluate(TessFunctionCall *call)
 			if (arg_null(units, row) || arg_null(stamps, row))
 				continue;
 			timestamp = DatumGetTimestamp(arg_datum(stamps, row));
-			if (unit < 0)
+			if (zoned)
+			{
+				if (unit < 0 || TIMESTAMP_NOT_FINITE(timestamp) ||
+					!truncate_zoned(timestamp, unit, session_timezone, &result))
+					result = DatumGetTimestampTz(DirectFunctionCall2(timestamptz_trunc,
+																	 arg_datum(units, row),
+																	 TimestampTzGetDatum(timestamp)));
+			}
+			else if (unit < 0)
 				result = DatumGetTimestamp(DirectFunctionCall2(timestamp_trunc,
 															   arg_datum(units, row),
 															   TimestampGetDatum(timestamp)));
@@ -797,6 +1032,7 @@ extract_evaluate(TessFunctionCall *call)
 	const TessFunctionArg *units;
 	const TessFunctionArg *stamps;
 	bool		timestamp;
+	bool		zoned;
 	PGFunction	core;
 	Datum	   *values;
 	int			type = UNKNOWN_FIELD;
@@ -810,8 +1046,9 @@ extract_evaluate(TessFunctionCall *call)
 		return date_invalid(call, "extract takes a unit and a date or a timestamp");
 	units = &call->args[0];
 	stamps = &call->args[1];
-	timestamp = date_op(call) == TIMESTAMP_EXTRACT;
-	core = timestamp ? extract_timestamp : extract_date;
+	zoned = date_op(call) == TIMESTAMPTZ_EXTRACT;
+	timestamp = zoned || date_op(call) == TIMESTAMP_EXTRACT;
+	core = zoned ? extract_timestamptz : timestamp ? extract_timestamp : extract_date;
 	values = (Datum *) call->values;
 	old = MemoryContextSwitchTo(call->context);
 	if (units->column == NULL)
@@ -846,8 +1083,14 @@ extract_evaluate(TessFunctionCall *call)
 			value = arg_datum(stamps, row);
 			if (timestamp)
 			{
-				finite = !TIMESTAMP_NOT_FINITE(DatumGetTimestamp(value));
-				day = finite ? timestamp_day(DatumGetTimestamp(value), &time) : 0;
+				Timestamp	local = DatumGetTimestamp(value);
+
+				finite = !TIMESTAMP_NOT_FINITE(local);
+				/* A timestamptz's fields are its local time's. */
+				if (finite && zoned)
+					local = local_timestamp(local, session_timezone);
+				day = finite ? timestamp_day(local, &time) : 0;
+				finite = finite && day + POSTGRES_EPOCH_JDATE >= 0;
 			}
 			else
 			{
@@ -870,6 +1113,87 @@ extract_evaluate(TessFunctionCall *call)
 		call->non_nulls->bits[word] = present;
 	}
 	MemoryContextSwitchTo(old);
+	return TESS_OK;
+}
+
+/*
+ * timestamptz(date), a date's local midnight, and date(timestamptz), an
+ * instant's local day; an infinity kept, the rest by the core's function.
+ */
+static TessStatusCode
+zone_cast_evaluate(TessFunctionCall *call)
+{
+	const TessFunctionArg *arg;
+	bool		to_instant;
+	int			nwords;
+
+	if (!date_call_valid(call, 1))
+		return date_invalid(call, "a zone cast takes one argument");
+	arg = &call->args[0];
+	to_instant = date_op(call) == DATE_TO_TIMESTAMPTZ;
+	nwords = tess_row_mask_word_count(call->rows->nrows);
+	for (int word = 0; word < nwords; word++)
+	{
+		uint64		look = call->rows->bits[word];
+		uint64		present = 0;
+
+		for (; look != 0; look &= look - 1)
+		{
+			int			bit = pg_rightmost_one_pos64(look);
+			int			row = word * 64 + bit;
+			Datum		value;
+
+			if (arg_null(arg, row))
+				continue;
+			value = arg_datum(arg, row);
+			if (to_instant)
+			{
+				DateADT		date = DatumGetDateADT(value);
+				TimestampTz instant;
+				int			year;
+				int			month;
+				int			mday;
+
+				if (DATE_IS_NOBEGIN(date))
+					TIMESTAMP_NOBEGIN(instant);
+				else if (DATE_IS_NOEND(date))
+					TIMESTAMP_NOEND(instant);
+				else
+				{
+					bool		done = false;
+
+					if (date < (TIMESTAMP_END_JULIAN - POSTGRES_EPOCH_JDATE))
+					{
+						j2date(date + POSTGRES_EPOCH_JDATE, &year, &month, &mday);
+						done = local_midnight(year, month, mday, session_timezone, &instant);
+					}
+					if (!done)
+						instant = DatumGetTimestampTz(DirectFunctionCall1(date_timestamptz, value));
+				}
+				((Datum *) call->values)[row] = TimestampTzGetDatum(instant);
+			}
+			else
+			{
+				TimestampTz instant = DatumGetTimestampTz(value);
+				int64		time;
+				int64		day = 0;
+				DateADT		date;
+
+				if (TIMESTAMP_IS_NOBEGIN(instant))
+					DATE_NOBEGIN(date);
+				else if (TIMESTAMP_IS_NOEND(instant))
+					DATE_NOEND(date);
+				else if ((day = timestamp_day(local_timestamp(instant, session_timezone),
+											  &time)) + POSTGRES_EPOCH_JDATE >= 0)
+					date = (DateADT) day;
+				else
+					date = DatumGetDateADT(DirectFunctionCall1(timestamptz_date, value));
+				((int32 *) call->values)[row] = date;
+			}
+			present |= UINT64CONST(1) << bit;
+		}
+		call->non_nulls->bits[word] = present;
+	}
 	return TESS_OK;
 }
 
