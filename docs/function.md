@@ -127,6 +127,10 @@ detoasting; and the pieces of a string as text values (`TESS_RESULT_DATUM`,
 and `right` of either sign, counted in characters as the core counts
 them, a negative length failing with 22011 as `substring` does, and
 `rtrim`, `ltrim` and `btrim` of spaces, `text(bpchar)` being `rtrim`;
+their bytes are the Rust kernels' (`tessera/text.h`, [kernels.md](kernels.md)),
+a batch a call, a compressed or external string detoasted here for its row
+and handed back alone, and the characters of a multibyte encoding other
+than UTF-8 counted by the core's functions a row;
 the date functions in every shape: `date_pli`, `date_mii` (a date plus or
 minus days, an infinite date kept, 22008 "date out of range" past the
 dates) and `date_mi` (the days between, "cannot subtract infinite dates")

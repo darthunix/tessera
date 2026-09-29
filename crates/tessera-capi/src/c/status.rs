@@ -7,6 +7,7 @@ use std::panic::{self, AssertUnwindSafe};
 use anyhow::Result;
 use tessera_kernels::calendar::CalendarError;
 use tessera_kernels::int32::ArithmeticError;
+use tessera_kernels::text::TextError;
 
 /// The outcome of an entry point, as `TessStatusCode`.
 #[repr(C)]
@@ -112,14 +113,19 @@ pub(super) unsafe fn guard(status: *mut Status, body: impl FnOnce() -> Result<()
                 arithmetic.sqlstate(),
                 arithmetic.to_string(),
             ),
-            None => match error.downcast_ref::<CalendarError>() {
-                Some(calendar) => (
-                    Code::DataException,
-                    calendar.sqlstate(),
-                    calendar.to_string(),
-                ),
-                None => (Code::InvalidArgument, "XX000", format!("{error:#}")),
-            },
+            None => {
+                if let Some(calendar) = error.downcast_ref::<CalendarError>() {
+                    (
+                        Code::DataException,
+                        calendar.sqlstate(),
+                        calendar.to_string(),
+                    )
+                } else if let Some(text) = error.downcast_ref::<TextError>() {
+                    (Code::DataException, text.sqlstate(), text.to_string())
+                } else {
+                    (Code::InvalidArgument, "XX000", format!("{error:#}"))
+                }
+            }
         },
         Err(payload) => {
             let message = payload

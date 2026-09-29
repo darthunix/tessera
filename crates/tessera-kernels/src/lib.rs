@@ -22,6 +22,8 @@
 //! rows, leaving to the caller every row it does not take. [`calendar`]
 //! is PostgreSQL's calendar of dates and timestamps: its Julian day
 //! routines, the truncations, intervals and fields of the date functions.
+//! [`text`] compares strings, matches LIKE patterns of literals and `%`,
+//! and counts and cuts characters over their bytes.
 //! Errors do not roll back previously completed words; callers must discard a
 //! partial selection after failure. This crate does not introduce a C entry
 //! point or catch panics. The future C boundary remains responsible for panic
@@ -50,3 +52,4 @@ mod simd;
 pub mod sort;
 pub mod spill_columns;
 pub mod table;
+pub mod text;

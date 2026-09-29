@@ -34,6 +34,7 @@ use tessera_kernels::decimal::{
 use super::column::DatumColumn;
 use super::mask::Mask;
 use super::status::{Code, Status, guard};
+use super::varlena::varlena_data;
 
 /// `TessDecimalArg`: a column, or a scalar numeric when it is null.
 #[repr(C)]
@@ -45,50 +46,15 @@ pub struct DecimalArg {
     pub scalar: u64,
 }
 
-/// The bytes after a numeric's varlena header, or `None` for a compressed
-/// or external value.
-///
-/// # Safety
-///
-/// `datum` must be null or point to a whole varlena that stays valid and
-/// unchanged for `'a`.
-#[inline(always)]
-unsafe fn numeric_data<'a>(datum: u64) -> Option<&'a [u8]> {
-    let pointer = datum as usize as *const u8;
-    if pointer.is_null() {
-        return None;
-    }
-    // SAFETY: the caller guarantees a whole varlena at `pointer`; its
-    // header states the size of the bytes that follow.
-    unsafe {
-        let first = *pointer;
-        if first & 0x01 == 0x01 {
-            if first == 0x01 {
-                return None;
-            }
-            let size = usize::from(first >> 1);
-            Some(slice::from_raw_parts(pointer.add(1), size - 1))
-        } else if first & 0x03 == 0x00 {
-            let size = (pointer.cast::<u32>().read_unaligned() >> 2) as usize;
-            if size < 4 {
-                return None;
-            }
-            Some(slice::from_raw_parts(pointer.add(4), size - 4))
-        } else {
-            None
-        }
-    }
-}
-
 /// The decimal of a numeric Datum.
 ///
 /// # Safety
 ///
-/// As for [`numeric_data`].
+/// As for [`varlena_data`].
 #[inline(always)]
 unsafe fn read_numeric(datum: u64) -> Arg {
     // SAFETY: the caller's contract.
-    match unsafe { numeric_data(datum) }.and_then(Decimal::read) {
+    match unsafe { varlena_data(datum) }.and_then(Decimal::read) {
         Some(decimal) => Arg::Decimal(decimal),
         None => Arg::Other,
     }
@@ -171,7 +137,7 @@ impl<'a> Column<'a> {
     /// `isnull` hold its row count of elements, `decimal_rows`, when set,
     /// its words, all valid and unchanged for `'a`. A row the calls read
     /// (a selected row) must have an initialized flag and, when not NULL,
-    /// an initialized value: a numeric Datum satisfying [`numeric_data`],
+    /// an initialized value: a numeric Datum satisfying [`varlena_data`],
     /// or, in the decimal side, the decimal's value.
     #[inline]
     unsafe fn new(column: *const DatumColumn, nrows: usize) -> Result<Self> {
@@ -247,7 +213,7 @@ impl Input<'_> {
     /// # Safety
     ///
     /// `arg` must point to a valid `TessDecimalArg`: its column satisfies
-    /// [`Column::new`], or its scalar [`numeric_data`], for the call.
+    /// [`Column::new`], or its scalar [`varlena_data`], for the call.
     #[inline]
     unsafe fn new(arg: *const DecimalArg, nrows: usize) -> Result<Self> {
         // SAFETY: the caller's contract.
@@ -827,7 +793,8 @@ pub unsafe extern "C" fn tess_decimal_write_datum(
 
 #[cfg(test)]
 mod tests {
-    use super::{DECIMALS_SIZE, DecimalArg, numeric_data};
+    use super::{DECIMALS_SIZE, DecimalArg};
+    use crate::c::varlena::varlena_data;
 
     #[test]
     fn layout_matches_the_header() {
@@ -843,7 +810,7 @@ mod tests {
         let short = [0x07_u8, 0xAA, 0xBB];
         // SAFETY: a whole varlena.
         assert_eq!(
-            unsafe { numeric_data(short.as_ptr() as u64) },
+            unsafe { varlena_data(short.as_ptr() as u64) },
             Some(&[0xAA, 0xBB][..])
         );
         // A 4-byte header: size 6 with the header.
@@ -852,7 +819,7 @@ mod tests {
         long[4..6].copy_from_slice(&[1, 2]);
         // SAFETY: a whole varlena, aligned or not.
         assert_eq!(
-            unsafe { numeric_data(long.as_ptr() as u64) },
+            unsafe { varlena_data(long.as_ptr() as u64) },
             Some(&[1, 2][..])
         );
         // An external pointer, a compressed value, a null pointer.
@@ -860,9 +827,9 @@ mod tests {
         let compressed = [0x02_u8, 0, 0, 0];
         // SAFETY: only the first byte of each is read.
         unsafe {
-            assert_eq!(numeric_data(external.as_ptr() as u64), None);
-            assert_eq!(numeric_data(compressed.as_ptr() as u64), None);
-            assert_eq!(numeric_data(0), None);
+            assert_eq!(varlena_data(external.as_ptr() as u64), None);
+            assert_eq!(varlena_data(compressed.as_ptr() as u64), None);
+            assert_eq!(varlena_data(0), None);
         }
     }
 }

@@ -246,3 +246,29 @@ SQLSTATE 22008 and the core's message, at the first row the core would.
 The session's time zone stays in C: the local times of a timestamptz, the
 midnights of local days (both kept in caches of the process), the unit
 names and the rows the kernels leave.
+
+## Text
+
+`tessera/text.h` declares the kernels of strings (`tessera_kernels::text`)
+the text functions of `kernels/text.c` call, a batch a call. A string is
+read in place behind its Datum, a varlena of either header; a compressed or
+external one the kernels leave in `rest`, and the caller detoasts it for
+its row and calls again with a column of that one row, so no batch holds
+more than one detoasted value. Characters count as the database encoding
+counts them (`TessTextChars`: a byte each, or UTF-8 by its lead bytes).
+
+- `tess_text_compare(equal, bpchar, left, right, rows, rest, status)`:
+  equality or inequality of text, or of bpchar without trailing spaces.
+- `tess_text_starts_with(column, prefix, len, rows, rest, status)` and
+  `tess_text_like(column, pattern, len, negate, rows, rest, simple,
+  status)`: a prefix, and a LIKE pattern of literals and `%` matched by its
+  pieces (the search for a piece's first byte by the `memchr` crate, which
+  matched the C library's `memchr` where the standard library's search was
+  9 % slower on `LIKE '%12%'`); `*simple` false for a pattern with `_` or an
+  escape, which the core's function matches.
+- `tess_text_lengths(length, chars, column, rows, values, non_nulls, rest,
+  status)`: characters, a bpchar's characters, or bytes.
+- `tess_text_pieces(piece, first, second, has_second, chars, column, rows,
+  starts, lengths, non_nulls, rest, status)`: the bounds of `substring`,
+  `left`, `right` and the trims, which the caller copies; a substring of
+  negative length fails with 22011 at the first row without NULL.
