@@ -212,7 +212,8 @@ SELECT round((scan_page_ms * 1000)::numeric, 4) AS scan_page_us,
        round((bitmap_scatter_ms * 1000)::numeric, 5) AS bitmap_scatter_us,
        round((core_cost_ms * 1000)::numeric, 4) AS core_cost_us
 FROM fits;
--- The core's time per unit of its cost, by scan: one value serves them all.
+-- The core's time per unit of its cost, by scan, which the model does not
+-- use: it varies too much over the bitmaps.
 SELECT regexp_replace(method, ' (ordered|scattered)$', '') AS core_scan,
        round((sum(milliseconds) / sum(cost) * 1000)::numeric, 4) AS us_per_cost_unit
 FROM samples WHERE method LIKE 'off %' GROUP BY 1 ORDER BY 1;
@@ -222,8 +223,7 @@ SELECT 1.0 AS "tessera.scan_page_cost",
        round((index_row_ms / scan_page_ms)::numeric, 4) AS "tessera.index_tuple_cost",
        round((bitmap_page_ms / scan_page_ms)::numeric, 4) AS "tessera.bitmap_page_cost",
        round((bitmap_row_ms / scan_page_ms)::numeric, 4) AS "tessera.bitmap_tuple_cost",
-       round((bitmap_scatter_ms / scan_page_ms)::numeric, 4) AS "tessera.bitmap_scatter_cost",
-       round((core_cost_ms / scan_page_ms)::numeric, 4) AS "tessera.core_scan_cost"
+       round((bitmap_scatter_ms / scan_page_ms)::numeric, 4) AS "tessera.bitmap_scatter_cost"
 FROM fits;
 -- How well each sample of the node fits, predicted against measured.
 SELECT s.method, s.relation, s.share, round(s.milliseconds::numeric, 3) AS ms,

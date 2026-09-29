@@ -364,8 +364,8 @@ tess_heap_bitmap_path(PlannerInfo *root, BitmapHeapPath *bitmap, PathTarget *tar
  * core's btcost_correlation takes it: its first column's, from the
  * statistics, three quarters of it for several columns; 0 when unknown.
  */
-static double
-index_correlation(PlannerInfo *root, IndexOptInfo *index)
+double
+tess_index_correlation(PlannerInfo *root, IndexOptInfo *index)
 {
 	RangeTblEntry *rte = planner_rt_fetch(index->rel->relid, root);
 	HeapTuple	stats;
@@ -429,7 +429,7 @@ tess_heap_index_path(PlannerInfo *root, IndexPath *index, PathTarget *target)
 		index->indexorderbys != NIL || !plain_heap_relation(root, rel, target) ||
 		rows < tess_index_min_rows ||
 		(index->path.pathtype == T_IndexScan && tess_index_min_correlation > 0 &&
-		 index_correlation(root, index->indexinfo) < tess_index_min_correlation))
+		 tess_index_correlation(root, index->indexinfo) < tess_index_min_correlation))
 		return NULL;
 	template.pathtarget = target;
 	config.template_path = &template;

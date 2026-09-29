@@ -256,6 +256,39 @@ DROP TABLE index_b;
 
 RESET enable_seqscan;
 RESET enable_indexscan;
+
+-- The full scan against the index scans, ranked by the node's times
+-- (tessera.scan_page_cost and the rest): the node's full scan is faster
+-- than its index scans far below the share of rows where the core's are
+-- equal, so past that share it costs just below them. k scattered, id
+-- in the table's order, both indexed; a few rows keep the index, many
+-- take the full scan, an index-only scan, an index scan and a bitmap
+-- alike; an order with a limit keeps the index.
+CREATE TABLE index_r AS
+SELECT g AS id, (g::bigint * 7919 % 60000)::int AS k, g % 97 AS w FROM generate_series(1, 60000) AS g;
+CREATE INDEX index_r_id ON index_r (id);
+CREATE INDEX index_r_k ON index_r (k);
+VACUUM ANALYZE index_r;
+SET tessera.index_min_rows = 0;
+EXPLAIN (COSTS OFF) SELECT count(*) FROM index_r WHERE k < 3000;
+EXPLAIN (COSTS OFF) SELECT count(*) FROM index_r WHERE k < 36000;
+SELECT index_same($$SELECT count(*), sum(k) FROM index_r WHERE k < 36000$$);
+EXPLAIN (COSTS OFF) SELECT count(*), sum(w) FROM index_r WHERE id < 3000;
+EXPLAIN (COSTS OFF) SELECT count(*), sum(w) FROM index_r WHERE id < 36000;
+SELECT index_same($$SELECT count(*), sum(w) FROM index_r WHERE id < 36000$$);
+SET enable_indexscan = off;
+EXPLAIN (COSTS OFF) SELECT count(*), sum(w) FROM index_r WHERE k < 3000;
+EXPLAIN (COSTS OFF) SELECT count(*), sum(w) FROM index_r WHERE k < 36000;
+SELECT index_same($$SELECT count(*), sum(w) FROM index_r WHERE k < 36000$$);
+RESET enable_indexscan;
+EXPLAIN (COSTS OFF) SELECT k FROM index_r WHERE k < 36000 ORDER BY k LIMIT 10;
+-- A table past effective_cache_size keeps the core's costs: its pages
+-- may come from the disk, where reading few of them counts.
+SET effective_cache_size = '64kB';
+EXPLAIN (COSTS OFF) SELECT count(*) FROM index_r WHERE k < 36000;
+RESET effective_cache_size;
+RESET tessera.index_min_rows;
+DROP TABLE index_r;
 RESET max_parallel_workers_per_gather;
 DROP TABLE index_t;
 DROP FUNCTION index_explain(text);

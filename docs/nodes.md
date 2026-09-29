@@ -61,6 +61,21 @@ core's own cost parameters do:
 | `tessera.setop_dictionary_share` | 0.9 | the same with a key through a dictionary |
 | `tessera.gather_tuple_share` | 0.25 | `parallel_tuple_cost` a row through TessGather |
 
+The model of the node's scans, by which the planner ranks its full scan
+against its index scans (TessHeapScan, Ranking the full scan), in units
+of a page of the full scan; `bench/pg/scancost` fits them on a machine
+and prints them:
+
+| Parameter | Default | The node's time for |
+|---|---|---|
+| `tessera.scan_page_cost` | 1 | a page of a full scan, the unit |
+| `tessera.scan_tuple_cost` | 0.0077 | a row of a full scan with its filter |
+| `tessera.index_only_tuple_cost` | 0.058 | a row of an index-only scan |
+| `tessera.index_tuple_cost` | 0.112 | a row of an index scan |
+| `tessera.bitmap_page_cost` | 0.665 | a page of a bitmap |
+| `tessera.bitmap_tuple_cost` | 0.075 | a row of a bitmap |
+| `tessera.bitmap_scatter_cost` | 0.031 | what a row of a bitmap takes more, times 1 - c² for the correlation c of the index's first column |
+
 Constants that repeat the core's (half of `cpu_tuple_cost` a row an
 `Append` saves) or that shape execution rather than planning (chunk
 sizes, a dictionary's fill, the Bloom filter's sample, 64 rows a batch)
@@ -310,6 +325,60 @@ updated rows, a parameter of the index condition per outer row, and a
 nested loop's inner side under a limit rescanned in its middle.
 Mutations fail it: a row of the scan skipped, the child not rescanned;
 the child's clauses kept only cost time.
+
+### Ranking the full scan
+
+The node's paths cost a share of the core's (`tessera.scan_cost_factor`),
+but the node's full scan exceeds the core's by far more than its index
+scans do: over `bench_idx` (2 M rows) the full scan with its filter took
+7.6 ms against the core's 27 to 38, its index scans 1.2 to 1.4 times the
+core's speed. Costed as the core's, the index scans kept the ranking the
+core gives them, and the planner took them far past the share of rows
+where the node's full scan is the faster: an index-only scan up to half
+of the rows where the full scan wins from a quarter (15.1 ms against
+7.6), a bitmap of the scattered `k` up to 30 % where it wins from 12 %
+(18.7 against 9.0), an index scan of the ordered `id` up to half where it
+wins from 13 % (28.9 against 8.9).
+
+So after the node's paths of a relation are added, the hook ranks them
+by a model of their times (the parameters above, which `bench/pg/scancost`
+fits by least squares): the full scan by the table's pages and rows; an
+index-only scan and an index scan by the rows the index's conditions
+select (an index-only scan's rows on pages not all visible, `allvisfrac`,
+as an index scan's); a bitmap by the pages the core estimates it names
+(`compute_bitmap_pages`) and its rows, a row costing more for an index
+out of the table's order, whose bitmap is built from rows in no order of
+their pages. On this machine (pg-scancost-PdAvZF) the full scan took
+0.26 µs a page and 2 ns a row (its six tables within 12 %), the
+index-only scan 15 ns a row, the index scan 29 (both within 4 %), the
+bitmap 0.17 µs a page and 19 ns a row, 8 more for a scattered column
+(within 5 % but at 1 %). Where the model finds the full scan faster than
+a serial, unparameterized scan of the relation, the full scan costs just
+below it (0.99), never lower, so that the relation's cheapest cost, which
+the joins above read, hardly moves; an ordered index scan stays beside it
+for a sort's comparison. The full scan is made anew where add_path
+dropped it, and from a sequential scan of the node's own where the
+core's add_path dropped the core's for an index scan it costs less. The
+core's scans are left out: its time a unit of cost varied four times
+over its bitmaps, and those the node leaves to the core are short. So is
+a table past `effective_cache_size`, whose pages may come from the disk,
+and a full scan with a clause row by row, which costs more a row than
+the model counts. The bitmap's pages are the core's estimate for rows at
+random; `bench_idx`'s `k` holds its rows in fewer pages (9 300 of 14 500
+at 10 %), so there the full scan is taken for a bitmap somewhat faster
+(8.1 ms against 7.0). Over `bench_idx` (bench/pg/index, pg-index-rwNxrI
+before, pg-index-2VuaPl after, 11 runs, the core's time in the second):
+a bitmap of 30 % 18.3 ms before, 9.1 after (26.8), of 15 % 9.5 and 8.5
+(13.5), an index scan of half the rows 28.9 and 9.1 (35.3), an
+index-only scan of half 15.2 and 7.8 (21.9); the other cases kept their
+plans.
+
+`test/sql/index.sql` ranks a table of 60 000 rows: a few rows of each
+index keep it, most rows take the full scan, an index-only scan, an
+index scan and a bitmap alike, an order under a limit keeps the index,
+and a table past `effective_cache_size` keeps the core's costs.
+Mutations fail it: no ranking, a ranking without the times, no full
+scan made where the core had dropped its own, no check of the cache.
 
 ### Index-only mode
 

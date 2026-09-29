@@ -101,6 +101,19 @@ extern double tess_agg_kernel_share;
 extern double tess_setop_word_share;
 extern double tess_setop_dictionary_share;
 extern double tess_gather_tuple_share;
+/*
+ * The model of the node's scans, tessera.scan_page_cost and the rest: see
+ * nodes/module.c and nodes/planner.c.
+ */
+extern double tess_scan_page_cost;
+extern double tess_scan_tuple_cost;
+extern double tess_index_only_tuple_cost;
+extern double tess_index_tuple_cost;
+extern double tess_bitmap_page_cost;
+extern double tess_bitmap_tuple_cost;
+extern double tess_bitmap_scatter_cost;
+/* The correlation of a btree index's order with the table's: see heapscan.c. */
+extern double tess_index_correlation(PlannerInfo *root, IndexOptInfo *index);
 /* tessera.join_bloom_ratio: see nodes/module.c. */
 extern double tess_join_bloom_ratio;
 /* tessera.bitmap_page_rows: see nodes/module.c. */

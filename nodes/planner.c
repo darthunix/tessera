@@ -407,18 +407,169 @@ add_index_paths(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte)
 	}
 }
 
-/* The node's paths, then TessGather over the cheapest partial path, before the core gathers it. */
+/*
+ * The model of the node's scans (bench/pg/scancost fits it, docs/nodes.md
+ * explains it): a scan's time in units of a page of the node's full scan,
+ * by which the planner ranks the node's full scan against the index
+ * scans. The core costs them all for its own speeds, and the node's full
+ * scan exceeds the core's by far more than its index scans do (3.5 to 4.5
+ * times against 1.2 to 1.4): at a share of the core's cost each, a full
+ * scan of 2 M rows lost to an index scan of up to half of them, which took
+ * 3.2 times as long.
+ */
+static double
+full_scan_time(RelOptInfo *rel)
+{
+	return rel->pages * tess_scan_page_cost + rel->tuples * tess_scan_tuple_cost;
+}
+
+/*
+ * The node's full scan: the heap scan without a child, or the filter over
+ * it.
+ */
+static bool
+is_full_scan(Path *path)
+{
+	if (tess_path_node(path) == &tess_filter_node)
+		path = linitial(((CustomPath *) path)->custom_paths);
+	return tess_path_node(path) == &tess_heap_scan_node &&
+		((CustomPath *) path)->custom_paths == NIL;
+}
+
+/*
+ * The time of a serial, unparameterized scan of the relation: the node's
+ * full scan by its pages and rows; its index-only and index scans by the
+ * rows the index's conditions select (the index-only scan's rows on pages
+ * not all visible read the table as an index scan's do); its bitmap by the
+ * pages the bitmap names (compute_bitmap_pages, as the core estimates
+ * them) and its rows, a row of a bitmap of an index out of the table's
+ * order taking more, as its bitmap is built from rows in no order of
+ * their pages. -1 for any other path, the core's among them: the core's
+ * time a unit of its cost varied four times over its bitmaps (0.14 to
+ * 0.57 us, bench/pg/scancost), and the scans the node leaves to the core,
+ * the short ones, are fast anyway.
+ */
+static double
+scan_time(PlannerInfo *root, RelOptInfo *rel, Path *path)
+{
+	Path	   *child;
+
+	if (path->param_info != NULL || path->parallel_aware || path->parallel_workers > 0)
+		return -1;
+	if (tess_path_node(path) == &tess_filter_node)
+		path = linitial(((CustomPath *) path)->custom_paths);
+	if (tess_path_node(path) == &tess_heap_scan_node)
+	{
+		if (((CustomPath *) path)->custom_paths == NIL)
+			return full_scan_time(rel);
+		child = linitial(((CustomPath *) path)->custom_paths);
+		if (IsA(child, IndexPath))
+		{
+			double		rows = ((IndexPath *) child)->indexselectivity * rel->tuples;
+
+			if (child->pathtype == T_IndexOnlyScan)
+				return rows * (rel->allvisfrac * tess_index_only_tuple_cost +
+							   (1.0 - rel->allvisfrac) * tess_index_tuple_cost);
+			return rows * tess_index_tuple_cost;
+		}
+		if (IsA(child, BitmapHeapPath))
+		{
+			Path	   *bitmapqual = ((BitmapHeapPath *) child)->bitmapqual;
+			double		correlation = IsA(bitmapqual, IndexPath) ?
+				tess_index_correlation(root, ((IndexPath *) bitmapqual)->indexinfo) : 0;
+			Cost		unused;
+			double		tuples;
+			double		pages = compute_bitmap_pages(root, rel, bitmapqual, 1.0, &unused, &tuples);
+
+			return pages * tess_bitmap_page_cost +
+				tuples * (tess_bitmap_tuple_cost +
+						  tess_bitmap_scatter_cost * (1.0 - correlation * correlation));
+		}
+		return -1;
+	}
+	return -1;
+}
+
+/*
+ * The node's full scan ranked below every scan of the relation the model
+ * says is slower: its cost becomes just below theirs, never lower, so that
+ * the relation's cheapest cost, which the joins above read, hardly moves;
+ * an ordered index scan stays beside it for a sort's comparison. Only for
+ * a table the cache holds (the core's effective_cache_size), which the
+ * model measured, and a full scan whose clauses all run in batches (a
+ * clause row by row costs more a row than the model counts). add_path may
+ * have dropped the full scan for a cheaper path, and the core's sequential
+ * scan for the full scan: it is made anew from seqscan, the core's path
+ * copied before, or from a sequential scan made here where the core's
+ * add_path had dropped its own for an index scan it costs less.
+ */
+static void
+rank_full_scan(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte, Path *seqscan)
+{
+	double		full = full_scan_time(rel);
+	Cost		bound = -1;
+	Path	   *scan;
+
+	if (!*tess_runtime_api()->settings->enable ||
+		!relation_supported(root, rel, rte) || rel->pages > (BlockNumber) effective_cache_size ||
+		(rel->baserestrictinfo != NIL && !clauses_supported(root, rel)))
+		return;
+	foreach_ptr(Path, path, rel->pathlist)
+	{
+		if (scan_time(root, rel, path) > full && (bound < 0 || path->total_cost < bound))
+			bound = path->total_cost;
+	}
+	if (bound < 0)
+		return;
+	bound *= 0.99;
+	foreach_ptr(Path, path, rel->pathlist)
+	{
+		if (is_full_scan(path) && path->total_cost <= bound)
+			return;
+	}
+	if (seqscan == NULL)
+		seqscan = create_seqscan_path(root, rel, NULL, 0);
+	if (rel->baserestrictinfo == NIL)
+		scan = tess_batch_scan_path(root, seqscan);
+	else
+	{
+		Path	   *child = make_child_path(root, rel, seqscan);
+
+		scan = child != NULL ? (Path *) make_filter_path(rel, seqscan, child) : NULL;
+	}
+	if (scan == NULL)
+		return;
+	scan->startup_cost = Min(scan->startup_cost, bound);
+	scan->total_cost = bound;
+	add_path(rel, scan);
+}
+
+/*
+ * The node's paths, the full scan ranked against the index scans, then
+ * TessGather over the cheapest partial path, before the core gathers it.
+ */
 static void
 set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
 				 RangeTblEntry *rte)
 {
+	Path	   *seqscan;
+	Path	   *copy = NULL;
+
 	if (previous_set_rel_pathlist_hook != NULL)
 		previous_set_rel_pathlist_hook(root, rel, rti, rte);
+	/* add_path frees a core path the node's dominates: the ranking keeps a copy. */
+	seqscan = find_seqscan(rel->pathlist);
+	if (seqscan != NULL)
+	{
+		copy = makeNode(Path);
+		*copy = *seqscan;
+	}
 	add_filter_paths(root, rel, rte);
 	add_row_filter_paths(root, rel, rte);
 	add_scan_paths(root, rel, rte);
 	add_bitmap_paths(root, rel, rte);
 	add_index_paths(root, rel, rte);
+	rank_full_scan(root, rel, rte, copy);
 	tess_gather_add_paths(root, rel);
 }
 
