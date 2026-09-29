@@ -56,6 +56,8 @@ SELECT pg_relation_size('parallel_t') / current_setting('block_size')::int AS pa
 -- Two workers even for a small table, in both modes.
 SET max_parallel_workers_per_gather = 2;
 SET parallel_setup_cost = 0;
+SET tessera.scan_parallel_setup_cost = 0;
+SET tessera.scan_worker_page_cost = 0;
 SET parallel_tuple_cost = 0;
 SET min_parallel_table_scan_size = 0;
 
@@ -331,10 +333,13 @@ EXPLAIN (COSTS OFF) SELECT k FROM parallel_wide WHERE k < 100 INTERSECT SELECT a
 SELECT parallel_same($$SELECT md5(string_agg(q::text, ',' ORDER BY q::text)) FROM (SELECT k FROM parallel_wide WHERE k < 100 INTERSECT SELECT a FROM parallel_wide WHERE a < 500) AS q$$);
 SELECT parallel_same($$WITH RECURSIVE r(n) AS (SELECT k FROM parallel_wide WHERE k < 10 UNION SELECT n + 1 FROM r WHERE n < 20) SELECT count(*) FROM r$$);
 -- At the core's costs of parallel work the node's own paths cost a row a
--- quarter of parallel_tuple_cost: a scan returning 8000 rows and a sort of
--- every row go parallel through TessGather and TessGatherMerge, and stay
--- serial with tessera.batch_gather off, where a row costs the core's
--- Gather the whole.
+-- quarter of parallel_tuple_cost: a sort of every row goes parallel
+-- through TessGatherMerge, and stays serial with tessera.batch_gather off,
+-- where a row costs the core's Gather Merge the whole; a scan returning
+-- 8000 rows goes parallel through TessGather, and through the core's
+-- Gather too while the node's model of a partial scan starts the workers
+-- at no cost. At the model's default start the scan of so small a table
+-- stays serial.
 RESET parallel_setup_cost;
 RESET parallel_tuple_cost;
 EXPLAIN (COSTS OFF) SELECT k, a, t FROM parallel_wide WHERE k < 8000;
@@ -343,7 +348,20 @@ SET tessera.batch_gather = off;
 EXPLAIN (COSTS OFF) SELECT k, a, t FROM parallel_wide WHERE k < 8000;
 EXPLAIN (COSTS OFF) SELECT k, a FROM parallel_wide ORDER BY a, k;
 RESET tessera.batch_gather;
+RESET tessera.scan_parallel_setup_cost;
+RESET tessera.scan_worker_page_cost;
+EXPLAIN (COSTS OFF) SELECT k, a, t FROM parallel_wide WHERE k < 8000;
+-- A worker's toll a page it reads first counts against the workers too:
+-- at a lower start the scan goes parallel without the toll, and stays
+-- serial at a toll of 10 a page.
+SET tessera.scan_parallel_setup_cost = 1500;
+SET tessera.scan_worker_page_cost = 0;
+EXPLAIN (COSTS OFF) SELECT k, a, t FROM parallel_wide WHERE k < 8000;
+SET tessera.scan_worker_page_cost = 10;
+EXPLAIN (COSTS OFF) SELECT k, a, t FROM parallel_wide WHERE k < 8000;
 SET parallel_setup_cost = 0;
+SET tessera.scan_parallel_setup_cost = 0;
+SET tessera.scan_worker_page_cost = 0;
 SET parallel_tuple_cost = 0;
 DROP TABLE parallel_wide;
 -- A parallel-aware node of the core below that allocates in the query's

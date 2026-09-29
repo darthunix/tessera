@@ -371,9 +371,9 @@ add_bitmap_paths(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte)
  * too, and the path costs the filter's fraction of the core's and keeps
  * its order. With partial, over the core's parallel ones, whose scan
  * divides the work among the participants, which makes the node's path
- * over it partial: only where the model finds a participant's time and
- * the workers' start (tessera.scan_parallel_setup_cost) below serial_time,
- * the relation's fastest serial scan, or where serial_time is negative, no
+ * over it partial: only where the model's time of the partial scan
+ * (partial_time, the workers' start in it) is below serial_time, the
+ * relation's fastest serial scan, or where serial_time is negative, no
  * model ranking the relation. The core's cost does not tell: at 10 % of
  * bench_idx the node's parallel index-only scan took 3.3 ms against 3.0
  * serially, at 15 % 4.1 against 4.5, and its parallel index scan of 10 %
@@ -399,8 +399,7 @@ add_index_paths(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte,
 			(path->pathtype != T_IndexScan && path->pathtype != T_IndexOnlyScan) ||
 			path->param_info != NULL || path->parallel_aware != partial)
 			continue;
-		if (partial && serial_time >= 0 &&
-			scan_time(root, rel, path) + tess_scan_parallel_setup_cost >= serial_time)
+		if (partial && serial_time >= 0 && scan_time(root, rel, path) >= serial_time)
 			continue;
 		copy = makeNode(IndexPath);
 		memcpy(copy, path, sizeof(IndexPath));
@@ -489,6 +488,29 @@ bitmap_pages(PlannerInfo *root, RelOptInfo *rel, Path *bitmapqual, double *tuple
 }
 
 /*
+ * A partial scan's time, from the serial time and the pages the scan
+ * touches: the workers' start and finish (tessera.scan_parallel_setup_cost),
+ * then the serial time shared among the participants, the leader reading
+ * a page in its serial time c, a worker in c and the toll of a page it
+ * touches first (tessera.scan_worker_page_cost): a worker is a process
+ * begun for the query, which maps every page of the shared buffers it
+ * reads (fork gives it none of the leader's), so it counts c / (c + toll)
+ * of the leader. The toll is the core's too, but a page of the node's full
+ * scan takes a quarter of the core's time: two workers sped the node's
+ * scan of bench_idx 1.2 times and the core's 1.9 times
+ * (target/bench-runs/pg-workers-nIhBf4, bench/pg/scancost).
+ */
+static double
+partial_time(double time, double pages, int workers)
+{
+	double		page = pages > 0 ? time / pages : 0;
+	double		share = page > 0 ? page / (page + tess_scan_worker_page_cost) : 1;
+	double		divisor = (parallel_leader_participation ? 1.0 : 0.0) + workers * share;
+
+	return tess_scan_parallel_setup_cost + (divisor > 0 ? time / divisor : time);
+}
+
+/*
  * The time a scan of the relation takes the node, which is also a floor
  * of the core's own scan of the same kind: a full scan by the table's
  * pages and rows; an index-only or index scan by the rows the index's
@@ -496,15 +518,20 @@ bitmap_pages(PlannerInfo *root, RelOptInfo *rel, Path *bitmapqual, double *tuple
  * read the table as an index scan's do); a bitmap by its pages
  * (bitmap_pages) and rows, a row of an index out of the table's order
  * taking more, its bitmap built from rows in no order of their pages; a
- * partial scan's by a participant's share. -1 for a parameterized path or
- * one of another kind. The core's own cost does not serve: its time a
- * unit of cost varied four times over its bitmaps (bench/pg/scancost).
+ * partial scan's by partial_time, from the pages the scan touches: the
+ * table's, the bitmap's, the index's share of its pages and the table's
+ * pages its rows fill as a bitmap of the index would read them (for an
+ * index-only scan the share of them not all visible). -1 for a
+ * parameterized path or one of another kind. The core's own cost does not
+ * serve: its time a unit of cost varied four times over its bitmaps
+ * (bench/pg/scancost).
  */
 static double
 scan_time(PlannerInfo *root, RelOptInfo *rel, Path *path)
 {
 	Path	   *scan = path;
 	double		time;
+	double		pages;
 
 	if (path->param_info != NULL)
 		return -1;
@@ -520,21 +547,31 @@ scan_time(PlannerInfo *root, RelOptInfo *rel, Path *path)
 	else if (tess_path_node(scan) != NULL)
 		return -1;
 	if (scan == NULL || scan->pathtype == T_SeqScan)
+	{
 		time = full_scan_time(rel);
-	else if (IsA(scan, IndexPath) && scan->pathtype == T_IndexOnlyScan)
-		time = ((IndexPath *) scan)->indexselectivity * rel->tuples *
-			(rel->allvisfrac * tess_index_only_tuple_cost +
-			 (1.0 - rel->allvisfrac) * tess_index_tuple_cost);
-	else if (IsA(scan, IndexPath) && scan->pathtype == T_IndexScan)
-		time = ((IndexPath *) scan)->indexselectivity * rel->tuples * tess_index_tuple_cost;
+		pages = rel->pages;
+	}
+	else if (IsA(scan, IndexPath) &&
+			 (scan->pathtype == T_IndexOnlyScan || scan->pathtype == T_IndexScan))
+	{
+		IndexPath  *index = (IndexPath *) scan;
+		double		visible = scan->pathtype == T_IndexOnlyScan ? rel->allvisfrac : 0;
+		double		tuples;
+
+		time = index->indexselectivity * rel->tuples *
+			(visible * tess_index_only_tuple_cost + (1.0 - visible) * tess_index_tuple_cost);
+		pages = index->indexselectivity * index->indexinfo->pages;
+		if (path->parallel_workers > 0 && visible < 1.0)
+			pages += (1.0 - visible) * bitmap_pages(root, rel, scan, &tuples);
+	}
 	else if (IsA(scan, BitmapHeapPath))
 	{
 		Path	   *bitmapqual = ((BitmapHeapPath *) scan)->bitmapqual;
 		double		correlation = IsA(bitmapqual, IndexPath) ?
 			tess_index_correlation(root, ((IndexPath *) bitmapqual)->indexinfo) : 0;
 		double		tuples;
-		double		pages = bitmap_pages(root, rel, bitmapqual, &tuples);
 
+		pages = bitmap_pages(root, rel, bitmapqual, &tuples);
 		time = pages * tess_bitmap_page_cost +
 			tuples * (tess_bitmap_tuple_cost +
 					  tess_bitmap_scatter_cost * (1.0 - correlation * correlation));
@@ -542,7 +579,7 @@ scan_time(PlannerInfo *root, RelOptInfo *rel, Path *path)
 	else
 		return -1;
 	if (path->parallel_workers > 0)
-		time /= tess_parallel_divisor(path);
+		time = partial_time(time, pages, path->parallel_workers);
 	return time;
 }
 
@@ -582,12 +619,22 @@ full_scan_path(PlannerInfo *root, RelOptInfo *rel, Path *seqscan, Cost cost)
  * joins the ranking where add_path had dropped it: made anew from
  * seqscan, the core's path copied before, or from a sequential scan made
  * here where the core's add_path had dropped its own for an index scan
- * it costs less. The partial list is ranked the same way by a
- * participant's time. Only for a table the cache holds (the core's
- * effective_cache_size), which the model measured, and a relation whose
- * clauses all run in batches (a clause row by row costs more a row than
- * the model counts). Returns the least time of a scan the list holds
- * after the ranking, -1 where the relation is not ranked.
+ * it costs less. The serial ranking leaves in serial the time and cost
+ * of the fastest scan the list holds, -1 as the time where the relation
+ * is not ranked. The partial list is ranked by a partial scan's time
+ * (partial_time), and its costs follow the serial list's: each of the
+ * node's partial paths costs its time at serial's cost a unit of time,
+ * less parallel_setup_cost, which the gather over it adds, so that the
+ * core's choice between the gather and a serial path follows the model,
+ * rising where the model finds the workers not worth their start (the
+ * path leaves the list and is added again at its cost), still below the
+ * slower scans and below a core's scan the model times alike. The core's
+ * own costs made that choice before: a partial full scan at 0.99 of the
+ * core's parallel index scan beat a serial bitmap at 15 % of the ordered
+ * id of bench_idx, 6.85 ms against 6.1. Only for a table the cache holds
+ * (the core's effective_cache_size), which the model measured, and a
+ * relation whose clauses all run in batches (a clause row by row costs
+ * more a row than the model counts).
  */
 /* The core's path under the node's, or the path itself. */
 static Path *
@@ -635,10 +682,21 @@ typedef struct RankedScan
 {
 	double		time;
 	Cost		cost;
+	/* The path in the list, NULL for one to be made. */
+	Path	   *path;
 	/* The node's path, copied before add_path may free the original. */
 	Path	   *copy;
 	bool		full;
+	/* The copy costs anew and is added again. */
+	bool		again;
 } RankedScan;
+
+/* The serial list's fastest scan after its ranking: its time and cost. */
+typedef struct SerialScan
+{
+	double		time;
+	Cost		cost;
+} SerialScan;
 
 static int
 compare_ranked(const void *a, const void *b)
@@ -649,8 +707,9 @@ compare_ranked(const void *a, const void *b)
 	return ta > tb ? -1 : ta < tb ? 1 : 0;
 }
 
-static double
-rank_scans(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte, Path *seqscan, bool partial)
+static void
+rank_scans(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte, Path *seqscan, bool partial,
+		   SerialScan *serial)
 {
 	List	   *pathlist = partial ? rel->partial_pathlist : rel->pathlist;
 	RankedScan *scans;
@@ -661,7 +720,7 @@ rank_scans(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte, Path *seqscan
 		!relation_supported(root, rel, rte) || rel->pages > (BlockNumber) effective_cache_size ||
 		(rel->baserestrictinfo != NIL && !clauses_supported(root, rel)) ||
 		(partial && !rel->consider_parallel))
-		return -1;
+		return;
 	if (seqscan == NULL)
 	{
 		int			workers = partial ?
@@ -679,6 +738,7 @@ rank_scans(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte, Path *seqscan
 		if (scan->time < 0)
 			continue;
 		scan->cost = path->total_cost;
+		scan->path = path;
 		scan->full = is_full_scan(path);
 		if (is_node_scan(path))
 		{
@@ -723,40 +783,87 @@ rank_scans(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte, Path *seqscan
 	for (int i = 0; i < count; i++)
 	{
 		Cost		bound = -1;
-		Path	   *path;
+		Cost		cost;
 
 		if (scans[i].copy == NULL && !(scans[i].full && scans[i].cost < 0))
 			continue;
-		for (int j = 0; j < i; j++)
+		/*
+		 * The slower scans bound it, and in the partial list a core's scan
+		 * the model times alike, a floor of the core's: the node's path over
+		 * it, or its full scan beside the core's, costs no more.
+		 */
+		for (int j = 0; j < count; j++)
 		{
-			if (scans[j].time > scans[i].time && scans[j].cost >= 0 &&
+			if (j != i && scans[j].cost >= 0 &&
+				(scans[j].time > scans[i].time ||
+				 (partial && scans[j].time == scans[i].time &&
+				  scans[j].path != NULL && scans[j].copy == NULL)) &&
 				(bound < 0 || scans[j].cost < bound))
 				bound = scans[j].cost;
 		}
-		if (bound < 0 || (scans[i].cost >= 0 && scans[i].cost <= 0.99 * bound))
-			continue;
-		bound *= 0.99;
-		if (scans[i].copy != NULL)
+		if (partial && serial->time > 0)
 		{
-			path = scans[i].copy;
-			path->startup_cost = Min(path->startup_cost, bound);
-			path->total_cost = bound;
+			/*
+			 * A partial scan costs its time at the serial list's price of
+			 * a unit of time, less what a gather adds for the start: the
+			 * gather over it costs the serial list's fastest scan's cost
+			 * as their times compare.
+			 */
+			cost = Max(serial->cost / serial->time * scans[i].time - parallel_setup_cost, 0);
+			if (bound >= 0)
+				cost = Min(cost, 0.99 * bound);
+			if (scans[i].cost >= 0 && fabs(cost - scans[i].cost) <= 1e-9 * Max(cost, 1))
+				continue;
 		}
-		else if (seqscan == NULL ||
-				 (path = full_scan_path(root, rel, seqscan, bound)) == NULL)
-			continue;
-		scans[i].cost = bound;
-		if (partial)
-			add_partial_path(rel, path);
 		else
-			add_path(rel, path);
+		{
+			if (bound < 0 || (scans[i].cost >= 0 && scans[i].cost <= 0.99 * bound))
+				continue;
+			cost = 0.99 * bound;
+		}
+		if (scans[i].copy == NULL &&
+			(seqscan == NULL || (scans[i].copy = full_scan_path(root, rel, seqscan, cost)) == NULL))
+			continue;
+		scans[i].copy->startup_cost = Min(scans[i].copy->startup_cost, cost);
+		scans[i].copy->total_cost = cost;
+		scans[i].cost = cost;
+		scans[i].again = true;
 	}
-	for (int i = count - 1; i >= 0; i--)
+	/*
+	 * A partial path whose cost rises leaves the list first, add_partial_path
+	 * keeping the cheaper original otherwise; the list holds every original
+	 * yet, no path added here having freed one.
+	 */
+	if (partial)
 	{
-		if (scans[i].cost >= 0)
-			return scans[i].time;
+		for (int i = 0; i < count; i++)
+		{
+			if (scans[i].again && scans[i].path != NULL)
+				rel->partial_pathlist = list_delete_ptr(rel->partial_pathlist, scans[i].path);
+		}
 	}
-	return -1;
+	for (int i = 0; i < count; i++)
+	{
+		if (!scans[i].again)
+			continue;
+		if (partial)
+			add_partial_path(rel, scans[i].copy);
+		else
+			add_path(rel, scans[i].copy);
+	}
+	if (!partial)
+	{
+		serial->time = -1;
+		for (int i = count - 1; i >= 0; i--)
+		{
+			if (scans[i].cost >= 0)
+			{
+				serial->time = scans[i].time;
+				serial->cost = scans[i].cost;
+				break;
+			}
+		}
+	}
 }
 
 /*
@@ -770,7 +877,7 @@ set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
 	Path	   *seqscan;
 	Path	   *copy = NULL;
 	Path	   *partial = NULL;
-	double		serial_time;
+	SerialScan	serial = {-1, 0};
 
 	if (previous_set_rel_pathlist_hook != NULL)
 		previous_set_rel_pathlist_hook(root, rel, rti, rte);
@@ -792,9 +899,9 @@ set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
 	add_scan_paths(root, rel, rte);
 	add_bitmap_paths(root, rel, rte);
 	add_index_paths(root, rel, rte, false, -1);
-	serial_time = rank_scans(root, rel, rte, copy, false);
-	add_index_paths(root, rel, rte, true, serial_time);
-	rank_scans(root, rel, rte, partial, true);
+	rank_scans(root, rel, rte, copy, false, &serial);
+	add_index_paths(root, rel, rte, true, serial.time);
+	rank_scans(root, rel, rte, partial, true, &serial);
 	tess_gather_add_paths(root, rel);
 }
 

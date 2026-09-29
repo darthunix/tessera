@@ -780,6 +780,8 @@ SELECT types_order($$SELECT x, (SELECT string_agg(id::text, ',') FROM (SELECT id
 (1 row)
 
 SET parallel_setup_cost = 0;
+SET tessera.scan_parallel_setup_cost = 0;
+SET tessera.scan_worker_page_cost = 0;
 SET parallel_tuple_cost = 0;
 SET min_parallel_table_scan_size = 0;
 SET max_parallel_workers_per_gather = 2;
@@ -896,6 +898,8 @@ SELECT types_order($$SELECT id, long, n FROM types_s ORDER BY long COLLATE "C", 
 
 RESET work_mem;
 RESET parallel_setup_cost;
+RESET tessera.scan_parallel_setup_cost;
+RESET tessera.scan_worker_page_cost;
 RESET parallel_tuple_cost;
 RESET min_parallel_table_scan_size;
 SET max_parallel_workers_per_gather = 0;
@@ -1019,6 +1023,8 @@ SELECT types_same($$SELECT count(*), sum(types_h.id) FROM types_g JOIN types_h O
 RESET tessera.join_bloom_ratio;
 -- Workers build one shared table of hashes.
 SET parallel_setup_cost = 0;
+SET tessera.scan_parallel_setup_cost = 0;
+SET tessera.scan_worker_page_cost = 0;
 SET parallel_tuple_cost = 0;
 SET min_parallel_table_scan_size = 0;
 SET max_parallel_workers_per_gather = 2;
@@ -1052,6 +1058,8 @@ SELECT types_same($$SELECT count(*), count(types_h.id) FROM types_g LEFT JOIN ty
 (1 row)
 
 RESET parallel_setup_cost;
+RESET tessera.scan_parallel_setup_cost;
+RESET tessera.scan_worker_page_cost;
 RESET parallel_tuple_cost;
 RESET min_parallel_table_scan_size;
 SET max_parallel_workers_per_gather = 0;

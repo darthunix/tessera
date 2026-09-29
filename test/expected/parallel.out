@@ -51,6 +51,8 @@ SELECT pg_relation_size('parallel_t') / current_setting('block_size')::int AS pa
 -- Two workers even for a small table, in both modes.
 SET max_parallel_workers_per_gather = 2;
 SET parallel_setup_cost = 0;
+SET tessera.scan_parallel_setup_cost = 0;
+SET tessera.scan_worker_page_cost = 0;
 SET parallel_tuple_cost = 0;
 SET min_parallel_table_scan_size = 0;
 -- The partial path: the node in every participant over its share of the pages.
@@ -1125,10 +1127,13 @@ SELECT parallel_same($$WITH RECURSIVE r(n) AS (SELECT k FROM parallel_wide WHERE
 (1 row)
 
 -- At the core's costs of parallel work the node's own paths cost a row a
--- quarter of parallel_tuple_cost: a scan returning 8000 rows and a sort of
--- every row go parallel through TessGather and TessGatherMerge, and stay
--- serial with tessera.batch_gather off, where a row costs the core's
--- Gather the whole.
+-- quarter of parallel_tuple_cost: a sort of every row goes parallel
+-- through TessGatherMerge, and stays serial with tessera.batch_gather off,
+-- where a row costs the core's Gather Merge the whole; a scan returning
+-- 8000 rows goes parallel through TessGather, and through the core's
+-- Gather too while the node's model of a partial scan starts the workers
+-- at no cost. At the model's default start the scan of so small a table
+-- stays serial.
 RESET parallel_setup_cost;
 RESET parallel_tuple_cost;
 EXPLAIN (COSTS OFF) SELECT k, a, t FROM parallel_wide WHERE k < 8000;
@@ -1155,12 +1160,14 @@ EXPLAIN (COSTS OFF) SELECT k, a FROM parallel_wide ORDER BY a, k;
 
 SET tessera.batch_gather = off;
 EXPLAIN (COSTS OFF) SELECT k, a, t FROM parallel_wide WHERE k < 8000;
-                    QUERY PLAN                     
----------------------------------------------------
- Custom Scan (TessFilter) on parallel_wide
-   Batch Filter: (k < 8000)
-   ->  Custom Scan (TessHeapScan) on parallel_wide
-(3 rows)
+                            QUERY PLAN                            
+------------------------------------------------------------------
+ Gather
+   Workers Planned: 2
+   ->  Parallel Custom Scan (TessFilter) on parallel_wide
+         Batch Filter: (k < 8000)
+         ->  Parallel Custom Scan (TessHeapScan) on parallel_wide
+(5 rows)
 
 EXPLAIN (COSTS OFF) SELECT k, a FROM parallel_wide ORDER BY a, k;
                     QUERY PLAN                     
@@ -1171,7 +1178,44 @@ EXPLAIN (COSTS OFF) SELECT k, a FROM parallel_wide ORDER BY a, k;
 (3 rows)
 
 RESET tessera.batch_gather;
+RESET tessera.scan_parallel_setup_cost;
+RESET tessera.scan_worker_page_cost;
+EXPLAIN (COSTS OFF) SELECT k, a, t FROM parallel_wide WHERE k < 8000;
+                    QUERY PLAN                     
+---------------------------------------------------
+ Custom Scan (TessFilter) on parallel_wide
+   Batch Filter: (k < 8000)
+   ->  Custom Scan (TessHeapScan) on parallel_wide
+(3 rows)
+
+-- A worker's toll a page it reads first counts against the workers too:
+-- at a lower start the scan goes parallel without the toll, and stays
+-- serial at a toll of 10 a page.
+SET tessera.scan_parallel_setup_cost = 1500;
+SET tessera.scan_worker_page_cost = 0;
+EXPLAIN (COSTS OFF) SELECT k, a, t FROM parallel_wide WHERE k < 8000;
+                               QUERY PLAN                               
+------------------------------------------------------------------------
+ Custom Scan (TessGather)
+   Workers Planned: 2
+   ->  Parallel Custom Scan (TessSend)
+         ->  Parallel Custom Scan (TessFilter) on parallel_wide
+               Batch Filter: (k < 8000)
+               ->  Parallel Custom Scan (TessHeapScan) on parallel_wide
+(6 rows)
+
+SET tessera.scan_worker_page_cost = 10;
+EXPLAIN (COSTS OFF) SELECT k, a, t FROM parallel_wide WHERE k < 8000;
+                    QUERY PLAN                     
+---------------------------------------------------
+ Custom Scan (TessFilter) on parallel_wide
+   Batch Filter: (k < 8000)
+   ->  Custom Scan (TessHeapScan) on parallel_wide
+(3 rows)
+
 SET parallel_setup_cost = 0;
+SET tessera.scan_parallel_setup_cost = 0;
+SET tessera.scan_worker_page_cost = 0;
 SET parallel_tuple_cost = 0;
 DROP TABLE parallel_wide;
 -- A parallel-aware node of the core below that allocates in the query's

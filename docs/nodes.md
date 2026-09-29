@@ -75,7 +75,8 @@ and prints them:
 | `tessera.bitmap_page_cost` | 0.665 | a page of a bitmap |
 | `tessera.bitmap_tuple_cost` | 0.075 | a row of a bitmap |
 | `tessera.bitmap_scatter_cost` | 0.031 | what a row of a bitmap takes more, times 1 - c² for the correlation c of the index's first column |
-| `tessera.scan_parallel_setup_cost` | 8000 | the start of the workers of a parallel index or index-only scan, about 2 ms here (bench/pg/index with two workers measured it, not scancost: Index-only mode) |
+| `tessera.scan_parallel_setup_cost` | 7000 | the start and finish of a partial scan's workers, 1.85 ms here |
+| `tessera.scan_worker_page_cost` | 3.15 | what a worker takes more for a page of the shared buffers it reads first, 0.83 µs here; near 0 with huge pages |
 
 Constants that repeat the core's (half of `cpu_tuple_cost` a row an
 `Append` saves) or that shape execution rather than planning (chunk
@@ -354,8 +355,18 @@ rows at random places (`compute_bitmap_pages`), moved toward the pages
 its rows fill in the table's order by the square of the index's
 correlation, as the core weighs an index scan's reads: the core
 estimated all 14 500 pages of `bench_idx` for a bitmap of 10 % of the
-ordered `id`, which read 1 450. A scan in the partial list counts a
-participant's share, the time over the path's divisor of participants.
+ordered `id`, which read 1 450. A scan in the partial list takes the
+workers' start and finish, then its serial time shared among the
+participants: the leader reads a page in the serial time c a page, a
+worker in c and a toll for a page of the shared buffers it reads first,
+so a worker counts c / (c + toll) of the leader; the pages are the
+table's, the bitmap's, or the index's share of its pages and, for the
+rows an index scan fetches from the table, the pages a bitmap of the
+index would read. A worker is a process begun for the query, and fork
+gives it no mapping of the leader's pages: the core's workers pay the
+toll alike, but a page of the node's full scan takes a quarter of the
+core's time, and two workers sped the node's full scan of `bench_idx`
+1.2 times, the core's 1.9 (target/bench-runs/pg-workers-nIhBf4).
 A scan of the core's is timed as the node's of the same kind, which is
 a floor of the core's own time: the node reads each faster. On this machine (pg-scancost-PdAvZF) the full scan took
 0.26 µs a page and 2 ns a row (its six tables within 12 %), the
@@ -395,6 +406,40 @@ of 30 % 16.7 and 7.7, an index scan of 30 and 50 % 11.0 and 16.5, 7.5
 and 7.7, an index-only scan of half 11.7 and 7.1, the ordered `id` at
 10 % 5.7 and 4.0, where the core's parallel index scan took 5.2.
 
+The two lists compare by the model as well. The serial ranking leaves
+the fastest serial scan's time and cost, their ratio the serial list's
+price of a unit of time, and each of the node's partial paths costs its
+time at that price, less `parallel_setup_cost`, which the gather over it
+adds back: the core's choice between the gather and a serial path then
+follows the model, and a partial path the model finds not worth its
+workers rises, leaving the list to be added again at its cost, since
+add_partial_path would keep the cheaper original. It stays below the
+slower scans and below a core's scan the model times alike, a floor of
+the core's, so the core's own partial scan never costs less beside it.
+Before, the partial list's costs followed the core's partial paths, and
+the choice followed the core's, whose rows take four times as long: a
+partial full scan at 0.99 of the core's parallel index scan beat a
+serial bitmap at 15 % of the ordered `id`, 6.85 ms against 6.1, a serial
+full scan stayed where the partial one was faster. `bench/pg/scancost`
+fits the start and the toll from the full scans with two workers, with
+the leader and without it, and a parallel count of `bench_tiny`
+(pg-scancost-oxfz57: 1.85 ms and 0.83 µs a page, the core's 1.79 and
+1.01; the leader's head start while the workers start, 0.2 ms, is left
+out; the model's times within 0.4 ms of five tables' of six, and the
+toll ≈0.6 µs where the rows go uncounted by a clause). With two workers
+(bench/pg/index and win, pg-index-w2-h9uCys and pg-win-w2-6HsOzQ before,
+pg-index-w2-8FhAwh and pg-win-w2-WBSDeP after, 11 runs): 15 % of the
+scattered `k` 8.9 ms before, 7.1 after, through the partial full scan;
+10 % of it counted 3.2 and 2.9, summed 3.3 and 2.9, through the parallel
+index-only scan; the wide table 4.1 and 3.8, serially; the ordered `id`
+at 10 % 4.1 and 4.3, through the parallel index scan for the serial
+bitmap. The model's full scan is a count with one clause on the first
+column, and a query that reads more of a row takes longer than it
+counts: over `bench_mixed` a clause on a text column after a clause on
+the first took 5.1 ms serially against 2.2 by the model, which kept it
+serial, 5.0 ms against 4.0 in parallel before, and two clauses on the
+first and the fourth column 3.6 against 3.5.
+
 `test/sql/index.sql` ranks a table of 60 000 rows: a few rows of the
 scattered index keep it and of the ordered one take its bitmap, most
 rows take the full scan, an index-only scan, an index scan and a bitmap
@@ -412,7 +457,13 @@ list, no correlation in a bitmap's pages, the full scan alone ranked, no
 bitmap made where the core had dropped its own, the partial full scan
 waiting for the serial sequential scan, no node over the core's
 parallel index scans, such a path in the serial list, and the workers'
-start not counted.
+start not counted. `test/sql/parallel.sql` shows a scan of 200 000 rows
+serial at the model's default start, parallel at a lower start without
+the toll and serial again at a toll of 10 a page; the other parallel
+cases of the suites set the start and the toll to 0, which would keep
+their small tables serial. Mutations fail them: no tie of the partial
+list to the serial one, no rise of a partial path's cost, no toll, no
+start, the core's divisor of participants.
 
 ### Index-only mode
 
@@ -456,21 +507,19 @@ the plan's nodes sets up since it goes into the node's children, and
 the index-only scan's descriptor comes begun from there
 (`index_beginscan_parallel`). The node is parallel-aware for its shared
 counters alone: its callbacks begin no parallel scan of the heap in
-these modes. The partial path is made only where the model finds a
-participant's time and the workers' start
-(`tessera.scan_parallel_setup_cost`) below the relation's fastest serial
-scan, the serial ranking's (Ranking the full scan): the core's costs,
-which the node's paths take a share of, weigh the start against the
-core's own slower rows, and at 10 % of bench_idx the node's parallel
-index-only scan took 3.3 ms against 3.0 serially, its parallel index
-scan of the ordered id 4.8 against 4.0 for its serial bitmap. The start
-was fitted as the time of the parallel scan less the serial one over
-2.4 participants: 2.0 to 2.5 ms at 10 to 20 % of the rows, which the
-model's unit of 0.26 µs makes 8000. With two workers (bench/pg/index,
-pg-index-w2-J73BSo, 11 runs, the core's in parallel after): 20 % of k
-counted in 5.2 ms, 6.2 serially, the core's 6.2; at 10 % the serial
-scans stay, counted in 3.1 ms (4.1) and a range of id aggregated by the
-node's bitmap in 4.0 (5.5). At 2 M rows
+these modes. The partial path is made only where the model's time of
+the partial scan, the workers' start in it (Ranking the full scan), is
+below the relation's fastest serial scan, the serial ranking's: the
+core's costs, which the node's paths took a share of, weighed the start
+against the core's own slower rows, and at 10 % of bench_idx the node's
+parallel index-only scan took 3.3 ms against 3.0 serially, its parallel
+index scan of the ordered id 4.8 against 4.0 for its serial bitmap, with
+the modules loaded in every worker then. With two workers
+(bench/pg/index, pg-index-w2-J73BSo, 11 runs, the core's in parallel
+after): 20 % of k counted in 5.2 ms, 6.2 serially, the core's 6.2; with
+the modules preloaded into the postmaster and the model of a partial
+scan (pg-index-w2-8FhAwh) 10 % of k is counted in parallel too, 2.9 ms
+against 3.2 serially (3.4). At 2 M rows
 (bench/pg/index, pg-index-fiwEia before, pg-index-EG1H30 after, 11 runs,
 the core's time in the second run): 10 % of a scattered k counted 3.9 ms
 before, 3.1 after, the core's 4.3; 1 % 0.39 and 0.31 (0.42); half of it

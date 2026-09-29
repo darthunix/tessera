@@ -222,6 +222,8 @@ SELECT union_same($$SELECT v % 7 AS g, count(*), sum(k) FROM union_part WHERE v 
 -- children out among the participants, a partial child to any of them.
 SET max_parallel_workers_per_gather = 2;
 SET parallel_setup_cost = 0;
+SET tessera.scan_parallel_setup_cost = 0;
+SET tessera.scan_worker_page_cost = 0;
 SET parallel_tuple_cost = 0;
 SET min_parallel_table_scan_size = 0;
 EXPLAIN (COSTS OFF) SELECT count(*), sum(k) FROM union_part WHERE v < 10;
@@ -298,6 +300,8 @@ SELECT union_same($$SELECT count(*), sum(a) FROM (SELECT a FROM union_a WHERE a 
 RESET enable_parallel_append;
 RESET max_parallel_workers_per_gather;
 RESET parallel_setup_cost;
+RESET tessera.scan_parallel_setup_cost;
+RESET tessera.scan_worker_page_cost;
 RESET parallel_tuple_cost;
 RESET min_parallel_table_scan_size;
 
@@ -352,6 +356,9 @@ FROM generate_series(1, 200000) AS i;
 ANALYZE union_keys;
 SET max_parallel_workers_per_gather = 2;
 SET min_parallel_table_scan_size = 0;
+-- The node's model of a partial scan would keep so small a table serial.
+SET tessera.scan_parallel_setup_cost = 0;
+SET tessera.scan_worker_page_cost = 0;
 EXPLAIN (COSTS OFF) SELECT c, b FROM union_keys WHERE b < 5 UNION SELECT c, b FROM union_keys WHERE b > 3;
 SELECT union_same($$SELECT c, b FROM union_keys WHERE b < 5 UNION SELECT c, b FROM union_keys WHERE b > 3$$);
 SELECT union_same($$SELECT count(*), sum(x) FROM (SELECT c AS x FROM union_keys UNION SELECT b FROM union_keys WHERE c IS NULL) AS s$$);
@@ -368,6 +375,8 @@ EXPLAIN (COSTS OFF) SELECT c FROM union_keys UNION SELECT a FROM union_b;
 ALTER TABLE union_b RESET (parallel_workers);
 SET max_parallel_workers_per_gather = 0;
 RESET min_parallel_table_scan_size;
+RESET tessera.scan_parallel_setup_cost;
+RESET tessera.scan_worker_page_cost;
 DROP TABLE union_keys;
 -- INTERSECT and EXCEPT, with ALL or not: grouping of both sides by every
 -- column, the left side's rows first, counting each group's rows and the

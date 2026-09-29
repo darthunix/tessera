@@ -113,6 +113,7 @@ extern double tess_bitmap_page_cost;
 extern double tess_bitmap_tuple_cost;
 extern double tess_bitmap_scatter_cost;
 extern double tess_scan_parallel_setup_cost;
+extern double tess_scan_worker_page_cost;
 /* The correlation of a btree index's order with the table's: see heapscan.c. */
 extern double tess_index_correlation(PlannerInfo *root, IndexOptInfo *index);
 /* tessera.join_bloom_ratio: see nodes/module.c. */

@@ -217,6 +217,8 @@ RESET work_mem;
 -- the counters it shares.
 SET max_parallel_workers_per_gather = 2;
 SET parallel_setup_cost = 0;
+SET tessera.scan_parallel_setup_cost = 0;
+SET tessera.scan_worker_page_cost = 0;
 SET parallel_tuple_cost = 0;
 SET min_parallel_table_scan_size = 0;
 EXPLAIN (COSTS OFF) SELECT k, v FROM sort_big ORDER BY k;
@@ -268,6 +270,8 @@ DROP TABLE sort_par;
 RESET min_parallel_table_scan_size;
 RESET parallel_tuple_cost;
 RESET parallel_setup_cost;
+RESET tessera.scan_parallel_setup_cost;
+RESET tessera.scan_worker_page_cost;
 RESET max_parallel_workers_per_gather;
 
 -- A scrollable cursor: forward and backward, across batches and past both ends.
@@ -353,6 +357,8 @@ SELECT sort_explain($$SELECT * FROM sort_many ORDER BY k DESC$$);
 RESET work_mem;
 SET max_parallel_workers_per_gather = 2;
 SET parallel_setup_cost = 0;
+SET tessera.scan_parallel_setup_cost = 0;
+SET tessera.scan_worker_page_cost = 0;
 SET parallel_tuple_cost = 0;
 SET min_parallel_table_scan_size = 0;
 EXPLAIN (COSTS OFF) SELECT * FROM sort_many ORDER BY k;
@@ -360,6 +366,8 @@ SELECT sort_same($$SELECT * FROM sort_many ORDER BY k$$);
 RESET min_parallel_table_scan_size;
 RESET parallel_tuple_cost;
 RESET parallel_setup_cost;
+RESET tessera.scan_parallel_setup_cost;
+RESET tessera.scan_worker_page_cost;
 RESET max_parallel_workers_per_gather;
 DROP TABLE sort_many;
 

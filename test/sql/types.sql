@@ -250,6 +250,8 @@ RESET work_mem;
 -- leader's share among them, a bound reaching the workers.
 SELECT types_order($$SELECT x, (SELECT string_agg(id::text, ',') FROM (SELECT id FROM types_s WHERE w = x ORDER BY n DESC, id) AS q) FROM generate_series(0, 3) AS x$$);
 SET parallel_setup_cost = 0;
+SET tessera.scan_parallel_setup_cost = 0;
+SET tessera.scan_worker_page_cost = 0;
 SET parallel_tuple_cost = 0;
 SET min_parallel_table_scan_size = 0;
 SET max_parallel_workers_per_gather = 2;
@@ -280,6 +282,8 @@ SET work_mem = '64kB';
 SELECT types_order($$SELECT id, long, n FROM types_s ORDER BY long COLLATE "C", n DESC, id$$);
 RESET work_mem;
 RESET parallel_setup_cost;
+RESET tessera.scan_parallel_setup_cost;
+RESET tessera.scan_worker_page_cost;
 RESET parallel_tuple_cost;
 RESET min_parallel_table_scan_size;
 SET max_parallel_workers_per_gather = 0;
@@ -319,6 +323,8 @@ SELECT types_same($$SELECT count(*), sum(types_h.id) FROM types_g JOIN types_h O
 RESET tessera.join_bloom_ratio;
 -- Workers build one shared table of hashes.
 SET parallel_setup_cost = 0;
+SET tessera.scan_parallel_setup_cost = 0;
+SET tessera.scan_worker_page_cost = 0;
 SET parallel_tuple_cost = 0;
 SET min_parallel_table_scan_size = 0;
 SET max_parallel_workers_per_gather = 2;
@@ -326,6 +332,8 @@ EXPLAIN (COSTS OFF) SELECT count(*) FROM types_g JOIN types_h ON types_g.t = typ
 SELECT types_same($$SELECT count(*), sum(types_h.id) FROM types_g JOIN types_h ON types_g.t = types_h.t AND types_g.w = types_h.w$$);
 SELECT types_same($$SELECT count(*), count(types_h.id) FROM types_g LEFT JOIN types_h ON types_g.n = types_h.n$$);
 RESET parallel_setup_cost;
+RESET tessera.scan_parallel_setup_cost;
+RESET tessera.scan_worker_page_cost;
 RESET parallel_tuple_cost;
 RESET min_parallel_table_scan_size;
 SET max_parallel_workers_per_gather = 0;

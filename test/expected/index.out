@@ -919,12 +919,15 @@ SELECT index_same($$SELECT count(*), sum(w) FROM index_r WHERE id < 3000$$);
 
 -- With workers, past that share the node's partial full scan in place of
 -- the core's parallel index scans (the core dropped its serial and its
--- partial sequential scans for them).
+-- partial sequential scans for them). The workers start at no cost in the
+-- node's model either, which would keep so small a table serial.
 SET max_parallel_workers_per_gather = 2;
 SET parallel_setup_cost = 0;
 SET parallel_tuple_cost = 0;
 SET min_parallel_table_scan_size = 0;
 SET min_parallel_index_scan_size = 0;
+SET tessera.scan_parallel_setup_cost = 0;
+SET tessera.scan_worker_page_cost = 0;
 EXPLAIN (COSTS OFF) SELECT count(*), sum(w) FROM index_r WHERE id < 21000;
                                   QUERY PLAN                                  
 ------------------------------------------------------------------------------
@@ -974,6 +977,7 @@ SELECT index_same($$SELECT count(*), sum(k) FROM index_r WHERE k < 21000$$);
 -- a table, and the core's stands under TessPack (parallel_setup_cost is 0
 -- here).
 SET enable_bitmapscan = off;
+RESET tessera.scan_parallel_setup_cost;
 EXPLAIN (COSTS OFF) SELECT count(*) FROM index_r WHERE k < 9000;
                                     QUERY PLAN                                     
 -----------------------------------------------------------------------------------
@@ -1076,6 +1080,7 @@ SELECT index_same($$SELECT x, n, s FROM (SELECT count(*) AS n, sum(k) AS s FROM 
 
 RESET enable_material;
 RESET tessera.scan_parallel_setup_cost;
+RESET tessera.scan_worker_page_cost;
 RESET enable_bitmapscan;
 RESET max_parallel_workers_per_gather;
 RESET parallel_setup_cost;

@@ -437,6 +437,8 @@ CREATE TABLE jbig AS SELECT g % 350 + 1 AS fk, g AS v FROM generate_series(1, 20
 ANALYZE jbig;
 SET max_parallel_workers_per_gather = 2;
 SET parallel_setup_cost = 0;
+SET tessera.scan_parallel_setup_cost = 0;
+SET tessera.scan_worker_page_cost = 0;
 SET parallel_tuple_cost = 0;
 SET min_parallel_table_scan_size = 0;
 -- The core's shared table divides the build among the participants and
@@ -596,9 +598,13 @@ SELECT join_same($$SELECT x, n, t FROM (SELECT count(*) AS n, sum(length(jsb.t))
 RIGHT JOIN (VALUES (1), (2)) AS v(x) ON true$$);
 RESET enable_material;
 -- Semi and anti joins keep no inner column: jsp's keys, the larger side,
--- are the table.
+-- are the table. The core's right anti join, which hashes the smaller jsb,
+-- costs less than the node's share of the core's anti join at these
+-- partial scans' costs: a lower share keeps the node's.
+SET tessera.join_cost_factor = 0.7;
 SELECT join_property($$SELECT count(*), sum(length(jsb.t)) FROM jsb WHERE EXISTS (SELECT 1 FROM jsp WHERE jsp.k = jsb.k)$$, 'Spilled Chunks')::int > 0 AS semi_spilled,
        join_property($$SELECT jsb.t FROM jsb WHERE NOT EXISTS (SELECT 1 FROM jsp WHERE jsp.k = jsb.k)$$, 'Spilled Chunks')::int > 0 AS anti_spilled;
+RESET tessera.join_cost_factor;
 SELECT join_same($$SELECT count(*), sum(length(jsb.t)) FROM jsb WHERE EXISTS (SELECT 1 FROM jsp WHERE jsp.k = jsb.k)$$);
 SELECT join_same($$SELECT jsb.t, jsb.n FROM jsb WHERE NOT EXISTS (SELECT 1 FROM jsp WHERE jsp.k = jsb.k)$$);
 -- Rounds: at a hash_mem of 2 MB a partition on disk that fits in one
@@ -643,6 +649,8 @@ RESET work_mem;
 RESET enable_parallel_hash;
 RESET max_parallel_workers_per_gather;
 RESET parallel_setup_cost;
+RESET tessera.scan_parallel_setup_cost;
+RESET tessera.scan_worker_page_cost;
 RESET parallel_tuple_cost;
 RESET min_parallel_table_scan_size;
 RESET enable_parallel_hash;

@@ -26,7 +26,8 @@ double		tess_index_tuple_cost = 0.112;
 double		tess_bitmap_page_cost = 0.665;
 double		tess_bitmap_tuple_cost = 0.075;
 double		tess_bitmap_scatter_cost = 0.031;
-double		tess_scan_parallel_setup_cost = 8000.0;
+double		tess_scan_parallel_setup_cost = 7000.0;
+double		tess_scan_worker_page_cost = 3.15;
 double		tess_join_bloom_ratio = 0.5;
 double		tess_bitmap_page_rows = 2.0;
 double		tess_index_min_correlation = 0.8;
@@ -188,10 +189,16 @@ _PG_init(void)
 							 &tess_bitmap_scatter_cost, 0.031, 0.0, 1e10,
 							 PGC_USERSET, 0, NULL, NULL, NULL);
 	DefineCustomRealVariable("tessera.scan_parallel_setup_cost",
-							 "The time a parallel scan of the node takes to start its workers.",
-							 "A partial index scan of the node is planned only where its time and this "
-							 "beat the relation's fastest serial scan.",
-							 &tess_scan_parallel_setup_cost, 8000.0, 0.0, 1e10,
+							 "The time a parallel scan of the node takes to start and finish its workers.",
+							 "Part of a partial scan's time, which the planner weighs against the "
+							 "relation's fastest serial scan.",
+							 &tess_scan_parallel_setup_cost, 7000.0, 0.0, 1e10,
+							 PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomRealVariable("tessera.scan_worker_page_cost",
+							 "The time a parallel worker takes more for a page it reads first.",
+							 "A worker begun for the query maps every page of the shared buffers it "
+							 "reads; near zero with huge pages.",
+							 &tess_scan_worker_page_cost, 3.15, 0.0, 1e10,
 							 PGC_USERSET, 0, NULL, NULL, NULL);
 	DefineCustomBoolVariable("tessera.batch_gather",
 							 "Gathers a parallel batch subtree's rows in batches.",

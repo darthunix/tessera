@@ -464,11 +464,15 @@ SELECT i AS a, (i * 1.5)::numeric AS n, 't' || i AS t FROM generate_series(1, 20
 ANALYZE agg_any_big;
 SET max_parallel_workers_per_gather = 2;
 SET parallel_setup_cost = 0;
+SET tessera.scan_parallel_setup_cost = 0;
+SET tessera.scan_worker_page_cost = 0;
 SET parallel_tuple_cost = 0;
 EXPLAIN (COSTS OFF) SELECT max(t), sum(n), avg(n), string_agg(t, ',') IS NOT NULL FROM agg_any_big;
 SELECT agg_same($$SELECT max(t), sum(n), avg(n), length(string_agg(t, ',')), array_length(array_agg(a), 1) FROM agg_any_big$$);
 RESET max_parallel_workers_per_gather;
 RESET parallel_setup_cost;
+RESET tessera.scan_parallel_setup_cost;
+RESET tessera.scan_worker_page_cost;
 RESET parallel_tuple_cost;
 DROP TABLE agg_any, agg_any_big;
 
