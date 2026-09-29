@@ -152,9 +152,19 @@ timestamp's seconds and milliseconds with their fraction, anything else
 (an infinite value, a unit that is a column or one it does not know, a
 timestamp's julian and epoch) by the core's function a row, its NULL
 for an oscillating field of infinity kept; the numeric comparisons
-`numeric_eq` … `numeric_ge` in every shape by the core's `numeric_cmp`,
-a call keeping the result for pairs where one side is a cached numeric;
-and the casts `numeric(int2)`, `numeric(int4)`, `numeric(int8)`. A
+`numeric_eq` … `numeric_ge`, `numeric_add`, `numeric_sub`, `numeric_mul`,
+`numeric_uminus`, `numeric_abs`, `int4(numeric)` and `int8(numeric)` in
+every shape: a value of at most 18 digits (what a column of
+`numeric(18, s)` or less holds) is read as an int64 of its display scale
+from the stored header and digits of base 10000, without detoasting a
+short varlena; two such compare in int128 at the larger scale, + and -
+keep the larger scale and * the sum of scales as the core's `add_var` and
+`mul_var`, a cast rounds halves away from zero, and a result of at most 18
+digits is written as `make_result` writes it into blocks of the call's
+context; NaN, an infinity, a longer value or result goes to the core's
+function a row (`numeric_cmp` keeping its result for pairs where one side
+is a cached numeric); and the casts `numeric(int2)`, `numeric(int4)`,
+`numeric(int8)`. A
 numeric of an integer from -1024 to 4095 comes from a block of the
 process made once in `TopMemoryContext`, the same pointer every time, so
 years and months neither allocate nor compare twice; the functions of a

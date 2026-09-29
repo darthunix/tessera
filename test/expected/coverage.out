@@ -111,7 +111,7 @@ ORDER BY o;
  batch | f4 > 10
  batch | f8::int = 5
  batch | n > 100.25
- row   | n * 2 > 300
+ batch | n * 2 > 300
  batch | n BETWEEN 10 AND 20
  row   | round(n) = 10
  batch | i4::numeric > 10.5
