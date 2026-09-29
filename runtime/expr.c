@@ -60,7 +60,7 @@ typedef enum CondKind
 	COND_NULL_TEST,				/* IS [NOT] NULL over a value */
 	COND_BOOL_TEST,				/* IS [NOT] TRUE, FALSE or UNKNOWN */
 	COND_ARRAY,					/* x op ANY or ALL of a constant array */
-	COND_SET					/* x IN or NOT IN a longer array of integer words */
+	COND_SET					/* x IN or NOT IN an array of integer words */
 } CondKind;
 
 typedef struct Cond
@@ -84,12 +84,15 @@ typedef struct Cond
 	int			nelements;
 	bool		has_null;
 	/*
-	 * SET: the elements' values as int64, sorted, without repeats; whether
-	 * x's words are int64 (else int32, sign-extended).
+	 * SET: the elements' values in x's width, sorted, without repeats:
+	 * int64 when x's words are int8 (wide), else int32, those beyond its
+	 * range dropped; the kernels that look them up.
 	 */
 	int64	   *keys;
+	int32	   *narrow_keys;
 	int			nkeys;
 	bool		wide;
+	const TessKernelOps *kernels;
 	/*
 	 * Per evaluation over a selection: the rows where the condition is
 	 * true, those where it is unknown (NULL), and scratch for the rows a
@@ -449,9 +452,8 @@ set_key(Datum value, bool wide)
 }
 
 /*
- * Whether x IN or NOT IN a constant array too long for an OR of
- * comparisons is a set: of integer words on both sides, x a supported
- * value.
+ * Whether x IN or NOT IN a constant array is a set, looked up by the
+ * kernels: of integer words on both sides, x a supported value.
  */
 static bool
 set_supported(ScalarArrayOpExpr *array_op, Index relid)
@@ -462,7 +464,8 @@ set_supported(ScalarArrayOpExpr *array_op, Index relid)
 	int			nvars;
 
 	set_opfuncid((OpExpr *) array_op);
-	return IsA(array, Const) && !array->constisnull &&
+	return tess_runtime_kernels() != NULL &&
+		IsA(array, Const) && !array->constisnull &&
 		set_function(array_op->opfuncid, array_op->useOr) &&
 		set_key_kind(exprType(left), &wide) &&
 		set_key_kind(ARR_ELEMTYPE(DatumGetArrayTypeP(array->constvalue)), &wide) &&
@@ -476,25 +479,6 @@ compare_keys(const void *a, const void *b)
 	int64		right = *(const int64 *) b;
 
 	return left < right ? -1 : left > right ? 1 : 0;
-}
-
-/* Whether the sorted keys hold key. */
-static bool
-set_contains(const int64 *keys, int nkeys, int64 key)
-{
-	int			low = 0;
-	int			high = nkeys;
-
-	while (low < high)
-	{
-		int			middle = low + (high - low) / 2;
-
-		if (keys[middle] < key)
-			low = middle + 1;
-		else
-			high = middle;
-	}
-	return low < nkeys && keys[low] == key;
 }
 
 /*
@@ -945,14 +929,16 @@ analyze_cond(Node *node, Index relid)
 		return analyze_cond((Node *) ((BooleanTest *) node)->arg, relid);
 	if (IsA(node, ScalarArrayOpExpr))
 	{
-		List	   *clauses = array_clauses((ScalarArrayOpExpr *) node);
+		List	   *clauses;
 
-		/* A longer list of integer words: a set. */
-		if (clauses == NIL)
-			return set_supported((ScalarArrayOpExpr *) node, relid);
+		/* A list of integer words: a set. */
+		if (set_supported((ScalarArrayOpExpr *) node, relid))
+			return true;
+		clauses = array_clauses((ScalarArrayOpExpr *) node);
 		/* x op element in the shape of a filter: x first, a scalar after. */
-		return analyze_filter(linitial(clauses), relid, &column_arg,
-							  &column_operand) &&
+		return clauses != NIL &&
+			analyze_filter(linitial(clauses), relid, &column_arg,
+						   &column_operand) &&
 			column_arg == 0 && column_operand < 0;
 	}
 	return analyze_filter(node, relid, &column_arg, &column_operand);
@@ -1371,7 +1357,7 @@ compile_cond(Node *node, PlanState *parent, TessExprResolveVar resolve,
 									 context);
 	}
 	else if (IsA(node, ScalarArrayOpExpr) &&
-			 array_clauses((ScalarArrayOpExpr *) node) == NIL)
+			 set_supported((ScalarArrayOpExpr *) node, 0))
 	{
 		ScalarArrayOpExpr *array_op = (ScalarArrayOpExpr *) node;
 		Const	   *array = (Const *) strip_relabel(lsecond(array_op->args));
@@ -1385,10 +1371,11 @@ compile_cond(Node *node, PlanState *parent, TessExprResolveVar resolve,
 		bool	   *nulls;
 		int			count;
 
-		if (!set_supported(array_op, 0) || !set_key_kind(element_type, &element_wide))
+		if (!set_key_kind(element_type, &element_wide))
 			elog(ERROR, "Tessera received an unsupported batch condition");
 		cond->kind = COND_SET;
 		cond->use_or = array_op->useOr;
+		cond->kernels = tess_runtime_kernels();
 		(void) set_key_kind(exprType(linitial(array_op->args)), &cond->wide);
 		get_typlenbyvalalign(element_type, &typlen, &byval, &align);
 		deconstruct_array(elements, element_type, typlen, byval, align, &values, &nulls,
@@ -1402,13 +1389,24 @@ compile_cond(Node *node, PlanState *parent, TessExprResolveVar resolve,
 				cond->keys[cond->nkeys++] = set_key(values[index], element_wide);
 		}
 		qsort(cond->keys, cond->nkeys, sizeof(int64), compare_keys);
-		/* Without repeats. */
+		/* Without repeats; an int4 value equals no key beyond its range. */
 		{
 			int			kept = 0;
 
+			if (!cond->wide)
+				cond->narrow_keys = palloc_array(int32, Max(cond->nkeys, 1));
 			for (int index = 0; index < cond->nkeys; index++)
-				if (kept == 0 || cond->keys[kept - 1] != cond->keys[index])
-					cond->keys[kept++] = cond->keys[index];
+			{
+				int64		key = cond->keys[index];
+
+				if (kept > 0 && cond->keys[kept - 1] == key)
+					continue;
+				if (!cond->wide && (key < PG_INT32_MIN || key > PG_INT32_MAX))
+					continue;
+				if (!cond->wide)
+					cond->narrow_keys[kept] = (int32) key;
+				cond->keys[kept++] = key;
+			}
 			cond->nkeys = kept;
 		}
 		cond->expr = tess_expr_compile_value(linitial(array_op->args), parent, resolve,
@@ -2231,22 +2229,15 @@ eval_cond(Cond *cond, const TessRowMask *rows, bool want_unknown)
 				memcpy(rest, rows->bits, sizeof(uint64) * nwords);
 				bind_selection(cond->expr, &cond->rest);
 				column = tess_expr_get_column(cond->expr);
-				memcpy(present, tess_expr_non_nulls(cond->expr)->bits, sizeof(uint64) * nwords);
-				for (int word = 0; word < nwords; word++)
-				{
-					uint64		look = rows->bits[word] & present[word];
-					uint64		hits = 0;
-
-					for (; look != 0; look &= look - 1)
-					{
-						int			bit = pg_rightmost_one_pos64(look);
-
-						if (set_contains(cond->keys, cond->nkeys,
-										 set_key(column->values[word * 64 + bit], cond->wide)))
-							hits |= UINT64CONST(1) << bit;
-					}
-					found[word] = hits;
-				}
+				if ((cond->wide ?
+					 cond->kernels->int8_in_set(column, NULL, cond->keys, cond->nkeys,
+												rows, &cond->work, &cond->all_true,
+												&cond->expr->status) :
+					 cond->kernels->int4_in_set(column, NULL, cond->narrow_keys,
+												cond->nkeys, rows, &cond->work,
+												&cond->all_true,
+												&cond->expr->status)) != TESS_OK)
+					tess_status_report(&cond->expr->status);
 				/*
 				 * IN: true where found; unknown where x is NULL, or not found
 				 * with a NULL in the list. NOT IN: true where x differs from

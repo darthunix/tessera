@@ -200,19 +200,21 @@ NOT NULL` over a supported value, a bare column of any type among them,
 since only its NULL flags are read; `IS [NOT] TRUE`, `IS [NOT] FALSE` and
 `IS [NOT] UNKNOWN` over a supported condition; and `x op ANY (array)` or
 `x op ALL (array)` over a constant array of at most 32 elements, so `a IN
-(1, 3, 5)` and `a NOT IN (1, NULL)` are covered: `x` is computed once over
+(1.5, 3)` and `a NOT IN ('x', 'y')` are covered: `x` is computed once over
 the selection, as the executor computes it once per row, and the
 predicate compared against each element, for `ANY` over the rows no
 earlier element matched, for `ALL` over the rows every earlier one did;
 a NULL element leaves a row that matches no other unknown for `ANY` and
 makes every row that is not false unknown for `ALL`, as the array
 operators say. A cross-type operator in the list stands for its
-equivalent, the elements cast once. A longer list, `x IN (…)` or `x NOT
-IN (…)` of integer words (int2, int4, int8, date, timestamp, timestamptz,
-bool, the integers in any combination of widths), is a set: the
-elements' integers sorted without repeats once, and each selected row's
-word looked up by bisection, with the same NULL rules (100 elements over
-2 M rows: 0.29 of the core's time; `NOT IN` of 1000: 0.33). A condition evaluates to
+equivalent, the elements cast once. A list of any length, `x IN (…)` or
+`x NOT IN (…)`, of integer words (int2, int4, int8, date, timestamp,
+timestamptz, bool, the integers in any combination of widths) is a set:
+the elements' integers sorted without repeats once, in `x`'s width (an
+int4 `x` equals no element beyond its range), and one kernel call a
+batch finds the rows whose word the set holds ([kernels.md](kernels.md),
+Sets), with the same NULL rules (2 to 100 elements over 2 M rows: 0.20
+to 0.28 of the core's time). A condition evaluates to
 two masks over the selection it is given, the rows where it is true and
 those where it is unknown (NULL), the rest being false: a leaf's unknown
 rows are those where its value, its operand or a scalar is NULL, and the

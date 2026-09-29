@@ -136,10 +136,10 @@ SELECT count(*) FROM types_min WHERE abs(x) > 0;
 SELECT count(*) FROM types_min WHERE abs(y) > 0;
 \set VERBOSITY default
 DROP TABLE types_min;
--- IN and NOT IN of more constants than an OR of comparisons takes: a set
--- of the integer words, sorted, each row's word looked up; NULL x
--- unknown, a NULL in the list making every miss unknown, for a smallint,
--- an integer, a date and a bigint expression, under NOT and in a CASE.
+-- IN and NOT IN of integer constants: a set of the integer words, sorted,
+-- each row's word looked up; NULL x unknown, a NULL in the list making
+-- every miss unknown, for a smallint, an integer, a date and a bigint
+-- expression, under NOT and in a CASE.
 EXPLAIN (COSTS OFF) SELECT count(*) FROM types_f WHERE v IN (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33);
 CREATE FUNCTION types_list(step int, first int, count int, quote text DEFAULT '') RETURNS text
 LANGUAGE sql AS $$
@@ -152,9 +152,23 @@ SELECT types_same(format($$SELECT count(*), sum(v) FROM types_f WHERE v NOT IN (
 SELECT types_same(format($$SELECT count(*), sum(v) FROM types_f WHERE v IN (%s, NULL) OR v < 5$$, types_list(7, 3, 40)));
 SELECT types_same(format($$SELECT count(*), sum(v) FROM types_f WHERE s IN (%s)$$, types_list(3, -20, 40)));
 SELECT types_same(format($$SELECT count(*), sum(v) FROM types_f WHERE NOT (s IN (%s, NULL))$$, types_list(3, -20, 40)));
-SELECT types_same(format($$SELECT count(*), sum(v) FROM types_f WHERE (v % 100)::int8 IN (%s)$$, types_list(3, 1, 40)));
+SELECT types_same(format($$SELECT count(*), sum(v) FROM types_f WHERE (v %% 100)::int8 IN (%s)$$, types_list(3, 1, 40)));
 SELECT types_same(format($$SELECT count(*), sum(v) FROM types_f WHERE d IN (%s)$$, (SELECT string_agg(quote_literal(date '1999-12-10' + g), ',') FROM generate_series(0, 38) AS g)));
 SELECT types_same(format($$SELECT sum(CASE WHEN v IN (%s) THEN 1 ELSE 0 END), count(*) FROM types_f$$, types_list(11, 0, 50)));
+-- A short list is a set too: a whole word compares its values with every
+-- key at once, up to 64 int4 or 16 int8 keys, a longer list halves; an
+-- int4 value equals no key beyond its range, for IN and for NOT IN.
+EXPLAIN (COSTS OFF) SELECT count(*) FROM types_f WHERE s IN (-3, 7);
+SELECT types_same(format($$SELECT count(*), sum(v) FROM types_f WHERE v IN (%s)$$, types_list(3, 1, 80)));
+SELECT types_same(format($$SELECT count(*), sum(v) FROM types_f WHERE v NOT IN (%s)$$, types_list(3, 1, 80)));
+SELECT types_same($$SELECT count(*), sum(v) FROM types_f WHERE v IN (900, 4294967301)$$);
+SELECT types_same($$SELECT count(*), sum(v) FROM types_f WHERE v NOT IN (-4294967291, 4294967301, 7)$$);
+SELECT types_same($$SELECT count(*), sum(v) FROM types_f WHERE s IN (-3, 7, NULL) OR s NOT IN (1, 2, 3)$$);
+SELECT types_same(format($$SELECT count(*), sum(v) FROM types_f WHERE (v %% 100)::int8 IN (%s)$$, types_list(9, 2, 12)));
+SELECT types_same(format($$SELECT count(*), sum(v) FROM types_f WHERE (v %% 100)::int8 NOT IN (%s, NULL) IS NULL$$, types_list(9, 2, 12)));
+SELECT types_same($$SELECT count(*), sum(v) FROM types_f WHERE ts IN (timestamp '2000-01-01 02:00', timestamp '1999-12-31 20:00') OR b IN (true)$$);
+SELECT types_same($$SELECT count(*), sum(v) FROM types_f WHERE d NOT IN (date '2000-01-05', date '1999-12-20')$$);
+SELECT types_same($$SELECT count(*), sum(v) FROM types_f WHERE tz IN (timestamptz '2000-01-01 00:05+00', timestamptz '2000-01-01 00:17+00')$$);
 DROP FUNCTION types_list(int, int, int, text);
 -- Text in batches under a deterministic collation, where equal strings are
 -- equal bytes: equality and inequality of text, varchar and char(n), whose

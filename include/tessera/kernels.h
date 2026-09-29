@@ -336,4 +336,30 @@ extern TessStatusCode tess_int8_to_int4(const TessDatumColumn *column,
 										TessRowMask *non_nulls,
 										TessStatus *status);
 
+/*
+ * x IN (keys) of int4 values: of the selected rows, found gets the rows
+ * whose value one of the nkeys keys, sorted in increasing order without
+ * repeats, equals and present the rows whose value is not NULL; every row
+ * bit of both is written. The caller makes IN and NOT IN, and their NULLs,
+ * of the two; int2, date and bool words are read as their int4.
+ */
+extern TessStatusCode tess_int4_in_set(const TessDatumColumn *column,
+									   const TessRowMask *prepared,
+									   const int32 *keys,
+									   int nkeys,
+									   const TessRowMask *rows,
+									   TessRowMask *found,
+									   TessRowMask *present,
+									   TessStatus *status);
+
+/* The same over int8 values: int8, timestamp and timestamptz words. */
+extern TessStatusCode tess_int8_in_set(const TessDatumColumn *column,
+									   const TessRowMask *prepared,
+									   const int64 *keys,
+									   int nkeys,
+									   const TessRowMask *rows,
+									   TessRowMask *found,
+									   TessRowMask *present,
+									   TessStatus *status);
+
 #endif							/* TESSERA_KERNELS_H */

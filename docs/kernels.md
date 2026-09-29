@@ -162,6 +162,32 @@ Datum, so an int8 result column is a Datum column:
   serves an explicit cast only, row by row: the functions over an int4 and
   an int8 widen instead ([function.md](function.md)).
 
+## Sets
+
+`x IN (…)` and `x NOT IN (…)` of integer constants
+(`tessera_kernels::set`, declared in `kernels.h`) take the constants once
+a plan, in the value's width, sorted in increasing order without repeats:
+
+- `tess_int4_in_set(column, prepared, keys, nkeys, rows, found, present,
+  status)`: of the selected rows, `found` gets those whose int4 value one
+  of the int32 keys equals and `present` those whose value is not NULL;
+  every row bit of both is written. int2, date and bool words are read as
+  their int4; a key beyond the int4 range equals no value and is left out
+  by the caller.
+- `tess_int8_in_set(…)`: the same over int8 values with int64 keys, for
+  int8, timestamp and timestamptz words.
+
+The caller makes IN and NOT IN, and their NULLs, of the two masks. A full
+word of at least a dozen selected rows is compared with vector code while
+the keys are few: its 64 lanes stay in registers while each key goes by,
+up to 64 int4 or 16 int8 keys (four int4 lanes to a vector against two
+int8 ones; beyond these bounds halving costs a row less). Every other word
+is read at its selected rows: up to 16 keys compared all, without a branch
+a key; more searched by halving, the comparison picking the half as data,
+so that a row costs the same whatever its value. Over 2 M rows an int4 `IN`
+of 2 to 100 constants costs 1.02 to 1.35 times a single comparison, and
+runs 0.20 to 0.28 of the core's time.
+
 ## Decimals
 
 `tessera/decimal.h` declares the kernels of decimals: numeric values of at

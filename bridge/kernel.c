@@ -75,7 +75,8 @@ validate_kernels(const TessKernelOps *ops)
 		ops->sort_merge == NULL || ops->sort_key_lanes == NULL ||
 		ops->decimal_read == NULL || ops->decimal_write == NULL ||
 		ops->decimal_read_datum == NULL || ops->decimal_write_datum == NULL ||
-		ops->decimal_sum == NULL)
+		ops->decimal_sum == NULL || ops->int4_in_set == NULL ||
+		ops->int8_in_set == NULL)
 		elog(ERROR, "Tessera kernels must provide every operation");
 }
 

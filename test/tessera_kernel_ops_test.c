@@ -96,6 +96,8 @@ static const TessKernelOps kernels = {
 	.decimal_read_datum = tess_decimal_read_datum,
 	.decimal_write_datum = tess_decimal_write_datum,
 	.decimal_sum = tess_decimal_sum,
+	.int4_in_set = tess_int4_in_set,
+	.int8_in_set = tess_int8_in_set,
 };
 
 static const TessKernelRegistryOps *

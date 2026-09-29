@@ -19,6 +19,7 @@ mod decimal;
 mod int32;
 mod int64;
 mod mask;
+mod set;
 mod shared_spill;
 mod sort;
 mod spill;
@@ -52,6 +53,7 @@ pub use int64::{
     tess_int8_max, tess_int8_min,
 };
 pub use mask::Mask;
+pub use set::{tess_int4_in_set, tess_int8_in_set};
 pub use shared_spill::{
     tess_bloom_shared_add, tess_round_step, tess_table_spill_add_bytes, tess_table_spill_evict,
     tess_table_spill_evictions, tess_table_spill_flags, tess_table_spill_init,
