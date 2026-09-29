@@ -19,10 +19,14 @@
 #include "pgstat.h"
 #include "storage/bufmgr.h"
 #include "storage/bufpage.h"
+#include "storage/condition_variable.h"
 #include "storage/shm_toc.h"
+#include "storage/spin.h"
 #include "utils/lsyscache.h"
 #include "utils/rel.h"
 #include "utils/syscache.h"
+#include "utils/typcache.h"
+#include "utils/wait_event.h"
 
 #include "tessera/runtime.h"
 
@@ -62,6 +66,26 @@
  * See docs/nodes.md.
  */
 #define HEAP_SCAN_BATCH_ROWS 64
+
+/*
+ * A parallel bitmap's shared state, as the core's ParallelBitmapHeapState
+ * (private to nodeBitmapHeapscan.c): the shared iterator in the query's
+ * shared memory once the bitmap is built, and who builds it.
+ */
+typedef enum SharedBitmapBuild
+{
+	BITMAP_INITIAL,
+	BITMAP_BUILDING,
+	BITMAP_BUILT,
+} SharedBitmapBuild;
+
+typedef struct SharedBitmap
+{
+	dsa_pointer iterator;
+	slock_t		mutex;
+	SharedBitmapBuild build;
+	ConditionVariable cv;
+} SharedBitmap;
 
 /* The counters every participant of a parallel scan shares. */
 enum
@@ -113,11 +137,13 @@ typedef struct HeapScanState
 	int			next_row;
 	TessDatumColumn *columns;
 	/*
-	 * Bitmap mode: the plan of the bitmap, the bitmap once built, and the
-	 * pages read whole (lossy) and by their tuples (exact).
+	 * Bitmap mode: the plan of the bitmap, the bitmap once built (by this
+	 * participant), the shared state of a parallel one, and the pages read
+	 * whole (lossy) and by their tuples (exact).
 	 */
 	PlanState  *bitmap_plan;
 	TIDBitmap  *tbm;
+	SharedBitmap *shared_bitmap;
 	/* Index mode: the core's index scan, whose rows the node takes. */
 	PlanState  *index_plan;
 	/*
@@ -289,20 +315,20 @@ heap_scan_rows(PlannerInfo *root, Path *path)
  * Whether every index of the bitmap is BRIN, whose bitmap names whole
  * pages (lossy), every row of which the scan reads.
  */
-static bool
-bitmap_only_brin(Path *bitmapqual)
+bool
+tess_bitmap_only_brin(Path *bitmapqual)
 {
 	if (IsA(bitmapqual, BitmapAndPath))
 	{
 		foreach_ptr(Path, child, ((BitmapAndPath *) bitmapqual)->bitmapquals)
-			if (!bitmap_only_brin(child))
+			if (!tess_bitmap_only_brin(child))
 				return false;
 		return true;
 	}
 	if (IsA(bitmapqual, BitmapOrPath))
 	{
 		foreach_ptr(Path, child, ((BitmapOrPath *) bitmapqual)->bitmapquals)
-			if (!bitmap_only_brin(child))
+			if (!tess_bitmap_only_brin(child))
 				return false;
 		return true;
 	}
@@ -343,7 +369,7 @@ tess_heap_bitmap_path(PlannerInfo *root, BitmapHeapPath *bitmap, PathTarget *tar
 	 * of the tuples fetched, the index's selectivity, leaves out: a week of
 	 * 14 000 rows over pages of 138 each looked like fewer than two a page.
 	 */
-	if (bitmap_only_brin(bitmap->bitmapqual) && rel->pages > 0)
+	if (tess_bitmap_only_brin(bitmap->bitmapqual) && rel->pages > 0)
 		tuples = pages * rel->tuples / rel->pages;
 	if (pages <= 0 || tuples / pages < tess_bitmap_page_rows)
 		return NULL;
@@ -355,7 +381,9 @@ tess_heap_bitmap_path(PlannerInfo *root, BitmapHeapPath *bitmap, PathTarget *tar
 	config.flags = CUSTOMPATH_SUPPORT_PROJECTION;
 	config.children = list_make1(bitmap);
 	scan = tess_path_create(&config);
-	scan->path.rows = clamp_row_est(tuples);
+	/* A partial bitmap's path gives each participant its share, as the node's does. */
+	scan->path.rows = clamp_row_est(tuples / (bitmap->path.parallel_workers > 0 ?
+											  tess_parallel_divisor(&bitmap->path) : 1.0));
 	return &scan->path;
 }
 
@@ -363,6 +391,11 @@ tess_heap_bitmap_path(PlannerInfo *root, BitmapHeapPath *bitmap, PathTarget *tar
  * The correlation of a btree index's order with the table's, as the
  * core's btcost_correlation takes it: its first column's, from the
  * statistics, three quarters of it for several columns; 0 when unknown.
+ * Another kind of index, BRIN above all, takes its first column's by the
+ * type's default order: rows its conditions select lie as closely in the
+ * table's pages whatever the index (a BRIN bitmap of five months of
+ * bench_idx's ordered days read 2 304 pages, which the correlation of 0
+ * put at all 14 511).
  */
 double
 tess_index_correlation(PlannerInfo *root, IndexOptInfo *index)
@@ -373,15 +406,16 @@ tess_index_correlation(PlannerInfo *root, IndexOptInfo *index)
 	Oid			sortop;
 	double		correlation = 0;
 
-	if (index->relam != BTREE_AM_OID || index->nkeycolumns < 1 ||
-		index->indexkeys[0] <= 0)
+	if (index->nkeycolumns < 1 || index->indexkeys[0] <= 0)
 		return 0;
 	stats = SearchSysCache3(STATRELATTINH, ObjectIdGetDatum(rte->relid),
 							Int16GetDatum(index->indexkeys[0]), BoolGetDatum(rte->inh));
 	if (!HeapTupleIsValid(stats))
 		return 0;
-	sortop = get_opfamily_member(index->opfamily[0], index->opcintype[0],
-								 index->opcintype[0], BTLessStrategyNumber);
+	sortop = index->relam == BTREE_AM_OID ?
+		get_opfamily_member(index->opfamily[0], index->opcintype[0],
+							index->opcintype[0], BTLessStrategyNumber) :
+		lookup_type_cache(index->opcintype[0], TYPECACHE_LT_OPR)->lt_opr;
 	if (OidIsValid(sortop) &&
 		get_attstatsslot(&slot, stats, STATISTIC_KIND_CORRELATION, sortop,
 						 ATTSTATSSLOT_NUMBERS))
@@ -666,22 +700,76 @@ begin_scan(HeapScanState *state, TableScanDesc scan)
 }
 
 /*
+ * A parallel bitmap: whether this participant builds it, as the core's
+ * BitmapShouldInitializeSharedState: the first to come does, the others
+ * wait until it is built.
+ */
+static bool
+should_build_bitmap(SharedBitmap *shared)
+{
+	SharedBitmapBuild seen;
+
+	for (;;)
+	{
+		SpinLockAcquire(&shared->mutex);
+		seen = shared->build;
+		if (shared->build == BITMAP_INITIAL)
+			shared->build = BITMAP_BUILDING;
+		SpinLockRelease(&shared->mutex);
+		if (seen != BITMAP_BUILDING)
+			break;
+		ConditionVariableSleep(&shared->cv, WAIT_EVENT_PARALLEL_BITMAP_SCAN);
+	}
+	ConditionVariableCancelSleep();
+	return seen == BITMAP_INITIAL;
+}
+
+/* A parallel bitmap is built: the waiting participants may iterate it. */
+static void
+bitmap_built(SharedBitmap *shared)
+{
+	SpinLockAcquire(&shared->mutex);
+	shared->build = BITMAP_BUILT;
+	SpinLockRelease(&shared->mutex);
+	ConditionVariableBroadcast(&shared->cv);
+}
+
+/* The bitmap of the child's plan. */
+static void
+build_bitmap(HeapScanState *state)
+{
+	state->tbm = (TIDBitmap *) MultiExecProcNode(state->bitmap_plan);
+	if (state->tbm == NULL || !IsA(state->tbm, TIDBitmap))
+		elog(ERROR, "TessHeapScan bitmap child returned an invalid result");
+}
+
+/*
  * Bitmap mode: build the bitmap from the child's plan and begin the
  * core's bitmap scan over its pages, which always collects a page's
- * visible tuples.
+ * visible tuples. A parallel one, as the core's Parallel Bitmap Heap
+ * Scan: the participant that builds it, into the query's shared memory
+ * (the core's plan of a partial bitmap marks its child shared), prepares
+ * a shared iterator, which every participant then takes pages from.
  */
 static void
 begin_bitmap_scan(HeapScanState *state)
 {
 	EState	   *estate = state->css.ss.ps.state;
+	SharedBitmap *shared = state->shared_bitmap;
 	TableScanDesc scan;
 
-	state->tbm = (TIDBitmap *) MultiExecProcNode(state->bitmap_plan);
-	if (state->tbm == NULL || !IsA(state->tbm, TIDBitmap))
-		elog(ERROR, "TessHeapScan bitmap child returned an invalid result");
+	if (shared == NULL)
+		build_bitmap(state);
+	else if (should_build_bitmap(shared))
+	{
+		build_bitmap(state);
+		shared->iterator = tbm_prepare_shared_iterate(state->tbm);
+		bitmap_built(shared);
+	}
 	scan = table_beginscan_bm(state->css.ss.ss_currentRelation, estate->es_snapshot,
 							  0, NULL, heap_scan_flags(state));
 	scan->st.rs_tbmiterator = tbm_begin_iterate(state->tbm, estate->es_query_dsa,
+												shared != NULL ? shared->iterator :
 												InvalidDsaPointer);
 	begin_scan(state, scan);
 	state->pagemode = true;
@@ -1218,15 +1306,26 @@ shared_scan(void *coordinate)
 		((char *) coordinate + tess_shared_stats_size(coordinate));
 }
 
+/* The shared state of a parallel bitmap, past the counters. */
+static SharedBitmap *
+shared_bitmap(void *coordinate)
+{
+	return (SharedBitmap *)
+		((char *) coordinate + tess_shared_stats_size(coordinate));
+}
+
 /*
- * In the index modes the core's parallel index scan below divides the
- * work, through its own shared memory: the node's chunk holds only the
- * counters, and the node begins no parallel scan of the heap.
+ * The full scan divides the heap's pages through a parallel scan of it in
+ * the node's chunk, a bitmap through its shared state there; in the index
+ * modes the core's parallel index scan below divides the work, through
+ * its own shared memory: the node's chunk holds only the counters, and
+ * the node begins no parallel scan of the heap.
  */
 static bool
 reads_heap_itself(HeapScanState *state)
 {
-	return state->index_plan == NULL && state->ios_plan == NULL;
+	return state->index_plan == NULL && state->ios_plan == NULL &&
+		state->bitmap_plan == NULL;
 }
 
 static Size
@@ -1235,6 +1334,8 @@ heap_scan_estimate_dsm(CustomScanState *css, ParallelContext *pcxt)
 	EState	   *estate = css->ss.ps.state;
 	Size		size = tess_shared_stats_estimate(HEAP_SCAN_NCOUNTERS, pcxt->nworkers);
 
+	if (((HeapScanState *) css)->bitmap_plan != NULL)
+		return add_size(size, MAXALIGN(sizeof(SharedBitmap)));
 	if (!reads_heap_itself((HeapScanState *) css))
 		return size;
 	return add_size(size, table_parallelscan_estimate(css->ss.ss_currentRelation,
@@ -1257,6 +1358,17 @@ heap_scan_initialize_dsm(CustomScanState *css, ParallelContext *pcxt,
 	state->stats = tess_shared_stats_init(estate->es_query_cxt, coordinate,
 										  HEAP_SCAN_NCOUNTERS, pcxt->nworkers,
 										  pcxt->seg);
+	if (state->bitmap_plan != NULL)
+	{
+		SharedBitmap *shared = shared_bitmap(coordinate);
+
+		shared->iterator = InvalidDsaPointer;
+		SpinLockInit(&shared->mutex);
+		shared->build = BITMAP_INITIAL;
+		ConditionVariableInit(&shared->cv);
+		state->shared_bitmap = shared;
+		return;
+	}
 	if (!reads_heap_itself(state))
 		return;
 	pscan = shared_scan(coordinate);
@@ -1270,7 +1382,16 @@ heap_scan_reinitialize_dsm(CustomScanState *css, ParallelContext *pcxt,
 {
 	HeapScanState *state = (HeapScanState *) css;
 
-	if (reads_heap_itself(state))
+	/* A bitmap is built anew, its shared area freed, as the core's. */
+	if (state->shared_bitmap != NULL)
+	{
+		state->shared_bitmap->build = BITMAP_INITIAL;
+		if (DsaPointerIsValid(state->shared_bitmap->iterator))
+			tbm_free_shared_area(css->ss.ps.state->es_query_dsa,
+								 state->shared_bitmap->iterator);
+		state->shared_bitmap->iterator = InvalidDsaPointer;
+	}
+	else if (reads_heap_itself(state))
 		table_parallelscan_reinitialize(css->ss.ss_currentRelation,
 										shared_scan(coordinate));
 	tess_shared_stats_reset(state->stats);
@@ -1286,7 +1407,9 @@ heap_scan_initialize_worker(CustomScanState *css, shm_toc *toc,
 
 	state->stats = tess_shared_stats_attach(estate->es_query_cxt, coordinate,
 											ParallelWorkerNumber + 1);
-	if (reads_heap_itself(state))
+	if (state->bitmap_plan != NULL)
+		state->shared_bitmap = shared_bitmap(coordinate);
+	else if (reads_heap_itself(state))
 		begin_scan(state, table_beginscan_parallel(rel, shared_scan(coordinate),
 												   heap_scan_flags(state)));
 }

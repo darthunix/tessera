@@ -81,6 +81,8 @@ and prints them:
 | `tessera.filter_row_clause_cost` | 0.022 | a row of a clause the filter evaluates row by row |
 | `tessera.filter_row_operator_cost` | 0.018 | a row of an operator of such a clause, by the core's cost of it |
 | `tessera.deform_varlena_cost` | 0.017 | a row of a clause's column past one of varying length, deformed |
+| `tessera.bitmap_build_cost` | 0.038 | a row of a partial bitmap's building, which one participant does |
+| `tessera.bitmap_build_scatter_cost` | 0.054 | what building takes more a row, times 1 - c² for the correlation c of the index's first column |
 
 Constants that repeat the core's (half of `cpu_tuple_cost` a row an
 `Append` saves) or that shape execution rather than planning (chunk
@@ -265,8 +267,42 @@ bitmaps under 2 rows a page stay the core's (about 3 % more through the
 pack than the core alone, as before). BRIN of a day in the order of the
 rows (pg-index-pd1IvS, 11 runs): a week 0.30 ms against 0.92, a month
 0.65 against 2.04, five months 2.8 against 9.3, the rows of 20 days
-returned 0.39 against 1.47, the date clauses rechecked in batches. A parallel
-bitmap heap scan (a shared bitmap) is the core's.
+returned 0.39 against 1.47, the date clauses rechecked in batches.
+
+A partial path stands in place of the core's parallel bitmap heap scan
+(`add_bitmap_paths` over the partial list, a participant's rows), and
+the ranking of the partial list makes one of an index whose parallel
+index scan pushed the core's partial bitmap out (as for the serial list,
+Ranking the full scan; its workers by the bitmap's pages, as
+`create_partial_bitmap_paths` counts them). The core's plan of a partial
+bitmap marks its child shared, so the `TIDBitmap` lies in the query's
+shared memory. The node's chunk of shared memory holds, past the shared
+counters, the state the core's `ParallelBitmapHeapState` holds (private
+to `nodeBitmapHeapscan.c`, so the node's own): the first participant to
+begin builds the bitmap and prepares a shared iterator
+(`tbm_prepare_shared_iterate`), the others waiting on a condition
+variable, and every participant iterates it (`tbm_begin_iterate` with
+the iterator's pointer): `table_scan_bitmap_next_tuple` gives each the
+next page none has taken. Reinitialized for a rescan, the state returns
+to the start and the shared area is freed, as the core's. A partial
+bitmap's time in the model shares only the reading of its pages: one
+participant builds the bitmap, `tessera.bitmap_build_cost` a row and
+`tessera.bitmap_build_scatter_cost` more for an index out of the table's
+order, while the workers start (half the start and finish, fitted 0.9
+ms of 1.85), a BRIN bitmap at no cost, built by ranges; `bench/pg/scancost`
+fits the two from the bitmaps with two workers (pg-scancost-gMuktx: 11
+and 15.5 ns a row, the samples within 8 %). With two workers
+(pg-index-w2-gkDMPq before, pg-index-w2-1wVXKK after, 11 runs, the core's
+time in the second): 10 % of the ordered id 4.4 ms before, 3.8 after
+(4.9); five months of BRIN days 7.2 and 2.8 (5.6), serially 9.4 and 2.8
+(9.1), since the BRIN bitmap's pages now follow the column's correlation
+(tess_index_correlation takes an index not btree by its type's default
+order), where a correlation of 0 counted all 14 511 pages for 2 304. A
+scattered column's bitmap stays serial or gives way to the partial full
+scan: its pages give a dozen rows each, and the pages a worker takes one
+by one from the shared iterator cost it more than the rows; at 15 % of
+the ordered id the parallel index scan is taken for the parallel bitmap,
+5.7 ms against 5.5, the model counting the index scan 0.4 ms short.
 
 `test/sql/index.sql` compares with Tessera off: a btree bitmap with NULL
 keys, `IS NULL`, an empty result, computed targets, a row-wise clause,
@@ -276,9 +312,15 @@ updated (HOT) and deleted rows, a parameter of the index condition that
 changes per outer row, and a limit above; BRIN of a date with NULL days
 (minmax at a range of one page, where a day of 100 rows passes the gate
 only by the relation's rows a page), minmax-multi of a timestamp, bloom
-of an integer, and rows added after the ranges' summary. Mutations fail
-it: the page's first row skipped, the bitmap kept over a rescan, the
-BRIN estimate left out.
+of an integer, and rows added after the ranges' summary; with two
+workers the node's parallel bitmap of the ordered id, made where the
+core had dropped its partial bitmap, and of the scattered k, without the
+leader too and rescanned under the gather in a join; a BRIN bitmap in
+parallel, and serially in place of the full scan at 15 % of the rows.
+Mutations fail it: the page's first row skipped, the bitmap kept over a
+rescan, the BRIN estimate left out; every participant building its own
+bitmap, no waiting for the bitmap, no reinitialization, no partial
+bitmap made, a correlation of 0 for an index not btree.
 
 ### Index mode
 

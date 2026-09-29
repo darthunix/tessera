@@ -331,6 +331,50 @@ SELECT x, n FROM (SELECT count(*) AS n FROM index_r WHERE k < 9000) AS ss RIGHT 
 SELECT index_same($$SELECT x, n, s FROM (SELECT count(*) AS n, sum(k) AS s FROM index_r WHERE k < 9000) AS ss
                     RIGHT JOIN (VALUES (1), (2), (3)) AS v(x) ON true$$);
 RESET enable_material;
+-- The node's parallel bitmap: one participant builds the bitmap into the
+-- query's shared memory, the others waiting, and all take its pages
+-- through a shared iterator. The ordered id's is made where the core's
+-- parallel index scan pushed the core's partial bitmap out; the scattered
+-- k's (the full scan off) without the leader too, and rescanned under the
+-- gather in a join, built anew.
+RESET enable_bitmapscan;
+SET tessera.bitmap_build_cost = 0;
+SET tessera.bitmap_build_scatter_cost = 0;
+EXPLAIN (COSTS OFF) SELECT count(*), sum(w) FROM index_r WHERE id < 9000;
+SELECT index_same($$SELECT count(*), sum(w) FROM index_r WHERE id < 9000$$);
+SET enable_indexscan = off;
+SET enable_seqscan = off;
+EXPLAIN (COSTS OFF) SELECT count(*), sum(w) FROM index_r WHERE k < 9000;
+SELECT index_same($$SELECT count(*), sum(w), min(id) FROM index_r WHERE k < 9000$$);
+SET parallel_leader_participation = off;
+SELECT index_same($$SELECT count(*), sum(w) FROM index_r WHERE id < 9000$$);
+SELECT index_same($$SELECT count(*), sum(w), min(id) FROM index_r WHERE k < 9000$$);
+RESET parallel_leader_participation;
+SET enable_material = off;
+EXPLAIN (COSTS OFF)
+SELECT x, n FROM (SELECT count(*) AS n FROM index_r WHERE k < 9000) AS ss RIGHT JOIN (VALUES (1), (2)) AS v(x) ON true;
+SELECT index_same($$SELECT x, n, s FROM (SELECT count(*) AS n, sum(w) AS s FROM index_r WHERE k < 9000) AS ss
+                    RIGHT JOIN (VALUES (1), (2), (3)) AS v(x) ON true$$);
+RESET enable_material;
+RESET enable_indexscan;
+RESET enable_seqscan;
+-- BRIN: its pages lie as its column's correlation lays them, as a btree's
+-- do: serially the node's BRIN bitmap of 15 % of the rows beats the full
+-- scan, which the correlation of 0 of an index not btree took for all
+-- the pages; with workers, the parallel BRIN bitmap.
+CREATE TABLE index_rb AS SELECT g AS id, g % 97 AS w FROM generate_series(1, 60000) AS g;
+CREATE INDEX index_rb_id ON index_rb USING brin (id) WITH (pages_per_range = 4);
+VACUUM ANALYZE index_rb;
+EXPLAIN (COSTS OFF) SELECT count(*), sum(w) FROM index_rb WHERE id BETWEEN 30000 AND 38999;
+SELECT index_same($$SELECT count(*), sum(w) FROM index_rb WHERE id BETWEEN 30000 AND 38999$$);
+SET max_parallel_workers_per_gather = 0;
+RESET tessera.scan_parallel_setup_cost;
+RESET tessera.scan_worker_page_cost;
+EXPLAIN (COSTS OFF) SELECT count(*), sum(w) FROM index_rb WHERE id BETWEEN 30000 AND 38999;
+SET max_parallel_workers_per_gather = 2;
+DROP TABLE index_rb;
+RESET tessera.bitmap_build_cost;
+RESET tessera.bitmap_build_scatter_cost;
 RESET tessera.scan_parallel_setup_cost;
 RESET tessera.scan_worker_page_cost;
 RESET enable_bitmapscan;

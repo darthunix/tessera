@@ -118,8 +118,12 @@ extern double tess_filter_clause_cost;
 extern double tess_filter_row_clause_cost;
 extern double tess_filter_row_operator_cost;
 extern double tess_deform_varlena_cost;
-/* The correlation of a btree index's order with the table's: see heapscan.c. */
+extern double tess_bitmap_build_cost;
+extern double tess_bitmap_build_scatter_cost;
+/* The correlation of an index's order with the table's: see heapscan.c. */
 extern double tess_index_correlation(PlannerInfo *root, IndexOptInfo *index);
+/* Whether every index of a bitmap is BRIN, whose bitmap names whole pages: see heapscan.c. */
+extern bool tess_bitmap_only_brin(Path *bitmapqual);
 /* tessera.join_bloom_ratio: see nodes/module.c. */
 extern double tess_join_bloom_ratio;
 /* tessera.bitmap_page_rows: see nodes/module.c. */

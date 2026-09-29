@@ -335,23 +335,31 @@ add_row_filter_paths(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte)
  * serial: the filter evaluates every clause, the index's among them,
  * which a lossy page needs rechecked and an exact one does not (a filter
  * in batches is cheap), and the path costs the filter's fraction of the
- * core's.
+ * core's. With partial, in place of the core's parallel ones, whose bitmap
+ * the participants share, the node's scan dividing its pages among them:
+ * only where the model's time of the partial scan is below serial_time,
+ * the relation's fastest serial scan, or where serial_time is negative, no
+ * model ranking the relation.
  */
 static void
-add_bitmap_paths(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte)
+add_bitmap_paths(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte,
+				 bool partial, double serial_time)
 {
 	List	   *bitmaps = NIL;
 
 	if (!*tess_runtime_api()->settings->enable ||
-		!relation_supported(root, rel, rte) || first_clause(root, rel) == NULL)
+		!relation_supported(root, rel, rte) || first_clause(root, rel) == NULL ||
+		(partial && !rel->consider_parallel))
 		return;
 	/* add_path frees a core path the node's dominates: copies are taken first. */
-	foreach_ptr(Path, path, rel->pathlist)
+	foreach_ptr(Path, path, partial ? rel->partial_pathlist : rel->pathlist)
 	{
 		BitmapHeapPath *copy;
 
 		if (!IsA(path, BitmapHeapPath) || path->param_info != NULL ||
-			path->parallel_aware)
+			path->parallel_aware != partial)
+			continue;
+		if (partial && serial_time >= 0 && scan_time(root, rel, path) >= serial_time)
 			continue;
 		copy = palloc_object(BitmapHeapPath);
 		memcpy(copy, path, sizeof(BitmapHeapPath));
@@ -362,8 +370,13 @@ add_bitmap_paths(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte)
 		Path	   *scan = tess_heap_bitmap_path(root, bitmap,
 												 filter_input_target(root, rel));
 
-		if (scan != NULL)
-			add_path(rel, (Path *) make_filter_path(rel, &bitmap->path, scan));
+		if (scan == NULL)
+			continue;
+		scan = (Path *) make_filter_path(rel, &bitmap->path, scan);
+		if (partial)
+			add_partial_path(rel, scan);
+		else
+			add_path(rel, scan);
 	}
 }
 
@@ -675,13 +688,29 @@ scan_time(PlannerInfo *root, RelOptInfo *rel, Path *path)
 		Path	   *bitmapqual = ((BitmapHeapPath *) scan)->bitmapqual;
 		double		correlation = IsA(bitmapqual, IndexPath) ?
 			tess_index_correlation(root, ((IndexPath *) bitmapqual)->indexinfo) : 0;
+		double		scatter = 1.0 - correlation * correlation;
 		double		tuples;
 
 		pages = bitmap_pages(root, rel, bitmapqual, &tuples);
 		time = pages * tess_bitmap_page_cost +
-			tuples * (tess_bitmap_tuple_cost +
-					  tess_bitmap_scatter_cost * (1.0 - correlation * correlation)) +
+			tuples * (tess_bitmap_tuple_cost + tess_bitmap_scatter_cost * scatter) +
 			filter_time(root, rel, tuples, true, index_conditions(bitmapqual));
+		/*
+		 * A partial bitmap is built by one participant, the others waiting:
+		 * only the reading of its pages is shared, and the building overlaps
+		 * the workers' start, half the start and finish (bench/pg/scancost
+		 * fitted 0.9 ms of 1.85). A BRIN bitmap is built by ranges of
+		 * pages, at next to no cost.
+		 */
+		if (path->parallel_workers > 0)
+		{
+			double		build = tess_bitmap_only_brin(bitmapqual) ? 0 :
+				Min(time, tuples * (tess_bitmap_build_cost +
+									tess_bitmap_build_scatter_cost * scatter));
+
+			return partial_time(time - build, pages, path->parallel_workers) +
+				Max(build - tess_scan_parallel_setup_cost / 2, 0);
+		}
 	}
 	else
 		return -1;
@@ -755,23 +784,27 @@ core_scan(Path *path)
 }
 
 /*
- * The node's bitmap of an index whose serial scan the list holds, where
- * the list holds no bitmap of it: the core's add_path dropped it for the
- * ordered index scan it costs less (a bitmap of the ordered id of
- * bench_idx took 4.0 ms at 10 % against 5.7 for the index scan). Not added
- * yet; NULL where there is a bitmap of the index, or the node takes none.
+ * The node's bitmap of an index whose serial scan the serial list holds,
+ * where the list holds no bitmap of it: the core's add_path dropped it for
+ * the ordered index scan it costs less (a bitmap of the ordered id of
+ * bench_idx took 4.0 ms at 10 % against 5.7 for the index scan), and its
+ * add_partial_path the partial bitmap for the parallel index scan, as
+ * create_partial_bitmap_paths makes it (its workers by the bitmap's pages).
+ * Not added yet; NULL where there is a bitmap of the index, or the node
+ * takes none.
  */
 static Path *
-missing_bitmap(PlannerInfo *root, RelOptInfo *rel, IndexPath *index)
+missing_bitmap(PlannerInfo *root, RelOptInfo *rel, IndexPath *index, bool partial)
 {
 	BitmapHeapPath *bitmap;
 	Path	   *scan;
+	int			workers = 0;
 
 	if (index->path.pathtype != T_IndexScan || index->path.param_info != NULL ||
 		index->path.parallel_workers > 0 || index->indexorderbys != NIL ||
 		!index->indexinfo->amhasgetbitmap)
 		return NULL;
-	foreach_ptr(Path, path, rel->pathlist)
+	foreach_ptr(Path, path, partial ? rel->partial_pathlist : rel->pathlist)
 	{
 		Path	   *child = core_scan(path);
 
@@ -779,7 +812,15 @@ missing_bitmap(PlannerInfo *root, RelOptInfo *rel, IndexPath *index)
 			((IndexPath *) ((BitmapHeapPath *) child)->bitmapqual)->indexinfo == index->indexinfo)
 			return NULL;
 	}
-	bitmap = create_bitmap_heap_path(root, rel, (Path *) index, NULL, 1.0, 0);
+	if (partial)
+	{
+		workers = compute_parallel_worker(rel, compute_bitmap_pages(root, rel, (Path *) index,
+																	1.0, NULL, NULL),
+										  -1, max_parallel_workers_per_gather);
+		if (workers <= 0)
+			return NULL;
+	}
+	bitmap = create_bitmap_heap_path(root, rel, (Path *) index, NULL, 1.0, workers);
 	scan = tess_heap_bitmap_path(root, bitmap, filter_input_target(root, rel));
 	return scan != NULL ? (Path *) make_filter_path(rel, &bitmap->path, scan) : NULL;
 }
@@ -836,7 +877,8 @@ rank_scans(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte, Path *seqscan
 		if (!partial || workers > 0)
 			seqscan = create_seqscan_path(root, rel, NULL, workers);
 	}
-	scans = palloc0_array(RankedScan, 2 * list_length(pathlist) + 1);
+	/* The list's scans, a bitmap made for each serial path at most, the full scan. */
+	scans = palloc0_array(RankedScan, list_length(pathlist) + list_length(rel->pathlist) + 1);
 	foreach_ptr(Path, path, pathlist)
 	{
 		RankedScan *scan = &scans[count];
@@ -855,21 +897,27 @@ rank_scans(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte, Path *seqscan
 		have_full |= scan->full;
 		count++;
 	}
-	/* The bitmaps of the indexes the core's add_path dropped, to be added. */
-	if (!partial && rel->baserestrictinfo != NIL)
+	/*
+	 * The bitmaps of the indexes the core's add_path or add_partial_path
+	 * dropped, to be added: of an index the serial list scans, or holds a
+	 * bitmap of.
+	 */
+	if (rel->baserestrictinfo != NIL)
 	{
 		List	   *indexes = NIL;
 
-		foreach_ptr(Path, path, pathlist)
+		foreach_ptr(Path, path, rel->pathlist)
 		{
 			Path	   *child = core_scan(path);
 			Path	   *bitmap;
 
+			if (IsA(child, BitmapHeapPath))
+				child = ((BitmapHeapPath *) child)->bitmapqual;
 			if (!IsA(child, IndexPath) ||
 				list_member_ptr(indexes, ((IndexPath *) child)->indexinfo))
 				continue;
 			indexes = lappend(indexes, ((IndexPath *) child)->indexinfo);
-			bitmap = missing_bitmap(root, rel, (IndexPath *) child);
+			bitmap = missing_bitmap(root, rel, (IndexPath *) child, partial);
 			if (bitmap == NULL)
 				continue;
 			scans[count].time = scan_time(root, rel, bitmap);
@@ -1004,10 +1052,11 @@ set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
 	add_filter_paths(root, rel, rte);
 	add_row_filter_paths(root, rel, rte);
 	add_scan_paths(root, rel, rte);
-	add_bitmap_paths(root, rel, rte);
+	add_bitmap_paths(root, rel, rte, false, -1);
 	add_index_paths(root, rel, rte, false, -1);
 	rank_scans(root, rel, rte, copy, false, &serial);
 	add_index_paths(root, rel, rte, true, serial.time);
+	add_bitmap_paths(root, rel, rte, true, serial.time);
 	rank_scans(root, rel, rte, partial, true, &serial);
 	tess_gather_add_paths(root, rel);
 }
