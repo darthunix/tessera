@@ -341,8 +341,9 @@ ANALYZE agg_dm;
 SELECT agg_same($$SELECT count(*), sum(n) FROM (SELECT k % 1000 AS g, count(DISTINCT v % 97) AS n FROM agg_dm GROUP BY k % 1000) AS s$$);
 SELECT agg_same($$SELECT count(DISTINCT v) FROM agg_dm$$);
 DROP TABLE agg_dm;
--- Left to the core: a text argument.
+-- A text argument through a dictionary of its values.
 EXPLAIN (COSTS OFF) SELECT count(DISTINCT c) FROM agg_t;
+SELECT agg_same($$SELECT count(DISTINCT c), count(DISTINCT c || 'x') FROM agg_t$$);
 
 -- Left to the core: a window function, an empty relation, and the switch.
 EXPLAIN (COSTS OFF) SELECT count(*) OVER () FROM agg_t LIMIT 1;
@@ -381,11 +382,27 @@ SELECT agg_same($$SELECT g, (SELECT string_agg(t, ',') FROM agg_any WHERE a > g 
 \set VERBOSITY terse
 SELECT sum(1 / (a - 100)::numeric) FROM agg_any;
 \set VERBOSITY default
--- Left to the core: ORDER BY in an aggregate, DISTINCT over text, an
--- ordered-set aggregate.
-EXPLAIN (COSTS OFF) SELECT string_agg(t, ',' ORDER BY t) FROM agg_any;
+-- DISTINCT of any type whose equality hashes: count through a dictionary
+-- of the values a word does not hold, the pairs of group and number;
+-- words (dates, booleans, int2) as they are; sum and avg over integers
+-- through the core's functions; NULL never counted; with FILTER and
+-- GROUP BY; under a case-insensitive collation equal values count once.
 EXPLAIN (COSTS OFF) SELECT count(DISTINCT t) FROM agg_any;
 SELECT agg_same($$SELECT count(DISTINCT t), count(DISTINCT a), count(DISTINCT d) FROM agg_any$$);
+SELECT agg_same($$SELECT count(DISTINCT n), count(DISTINCT f), count(DISTINCT b), count(DISTINCT (a % 9)::int2), count(DISTINCT t || n) FROM agg_any$$);
+SELECT agg_same($$SELECT sum(DISTINCT abs(a) % 20), avg(DISTINCT abs(a) % 20), sum(DISTINCT j % 7), avg(DISTINCT j % 11), sum(DISTINCT (abs(a) % 9)::int2), avg(DISTINCT (abs(a) % 9)::int2) FROM agg_any$$);
+SELECT agg_same($$SELECT b, count(DISTINCT t), count(DISTINCT n) FILTER (WHERE a > 0), sum(DISTINCT abs(a) % 10), avg(DISTINCT j % 11) FROM agg_any GROUP BY b$$);
+SELECT agg_same($$SELECT g, (SELECT count(DISTINCT t) FROM agg_any WHERE a > g * 50) FROM generate_series(1, 4) AS g$$);
+SELECT agg_same($$SELECT a % 5, count(DISTINCT t), count(DISTINCT d), count(DISTINCT f) FROM agg_any GROUP BY 1$$);
+CREATE COLLATION agg_ci (provider = icu, locale = 'und-u-ks-level2', deterministic = false);
+SELECT agg_same($$SELECT count(DISTINCT t COLLATE agg_ci), count(DISTINCT (CASE WHEN a % 2 = 0 THEN upper(t) ELSE t END) COLLATE agg_ci) FROM agg_any$$);
+DROP COLLATION agg_ci;
+-- Left to the core: DISTINCT whose value the order or the form of the
+-- values changes (string_agg, a numeric sum's scale, 1.0 and 1.00),
+-- ORDER BY in an aggregate, an ordered-set aggregate.
+EXPLAIN (COSTS OFF) SELECT string_agg(DISTINCT t, ',') FROM agg_any;
+EXPLAIN (COSTS OFF) SELECT sum(DISTINCT n) FROM agg_any;
+EXPLAIN (COSTS OFF) SELECT string_agg(t, ',' ORDER BY t) FROM agg_any;
 EXPLAIN (COSTS OFF) SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY f) FROM agg_any;
 -- With GROUP BY: each group's state a word of its record, a by-reference
 -- one the address of its copy; rows of one group follow one another in a

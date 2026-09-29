@@ -189,9 +189,14 @@ typedef struct AggValue
 	bool		has_value;
 	/* GROUP BY: how the table folds a row into the group's state. */
 	TessTableAccumulate accumulate;
-	/* DISTINCT: the pairs of group and argument seen, and the argument's kind. */
+	/*
+	 * DISTINCT: the pairs of group and argument seen, and the argument's
+	 * kind; an argument a word does not hold goes by its number in a
+	 * dictionary of its values of the aggregate's own.
+	 */
 	struct DistinctSet *distinct;
 	TessTableKeyKind argument_kind;
+	struct KeyDict *distinct_dict;
 	GenericAgg *generic;
 } AggValue;
 
@@ -581,12 +586,12 @@ static Node *aggregate_argument(const Aggref *agg);
 /*
  * An aggregate the node computes through the core's functions: a whole
  * one or the partial one of a parallel plan, of arguments without a
- * subplan, without DISTINCT (its table keys integers only).
+ * subplan (DISTINCT: distinct_supported).
  */
 static bool
 generic_supported(const Aggref *agg)
 {
-	if (agg->aggdistinct != NIL || agg->args == NIL)
+	if (agg->args == NIL)
 		return false;
 	foreach_node(TargetEntry, entry, agg->args)
 	{
@@ -594,6 +599,45 @@ generic_supported(const Aggref *agg)
 			return false;
 	}
 	return true;
+}
+
+/*
+ * DISTINCT in an aggregate of one argument: a table of the pairs of group
+ * and argument seen. count over any type whose equality hashes, a value a
+ * word does not hold by its number in a dictionary; sum, avg, min and max
+ * over integers, whose value neither the order of the values nor which of
+ * equal ones comes first changes, unlike string_agg's order, a float's
+ * sum or the scale of a numeric one.
+ */
+static bool
+distinct_supported(const Aggref *agg)
+{
+	SortGroupClause *clause;
+	TessTableKeyKind kind;
+	RegProcedure hashproc;
+
+	if (list_length(agg->args) != 1 || list_length(agg->aggdistinct) != 1)
+		return false;
+	clause = linitial_node(SortGroupClause, agg->aggdistinct);
+	switch (agg->aggfnoid)
+	{
+		case F_COUNT_ANY:
+			return tess_word_key_kind(exprType(aggregate_argument(agg)), &kind) ||
+				(OidIsValid(clause->eqop) && get_op_hash_functions(clause->eqop, &hashproc, NULL));
+		case F_SUM_INT2:
+		case F_SUM_INT4:
+		case F_SUM_INT8:
+		case F_AVG_INT2:
+		case F_AVG_INT4:
+		case F_AVG_INT8:
+		case F_MIN_INT4:
+		case F_MIN_INT8:
+		case F_MAX_INT4:
+		case F_MAX_INT8:
+			return true;
+		default:
+			return false;
+	}
 }
 
 /* Whether a batch function computes the aggregate: else the core's do. */
@@ -703,7 +747,8 @@ aggregate_supported(const Aggref *agg)
 		(agg->aggsplit != AGGSPLIT_SIMPLE &&
 		 agg->aggsplit != AGGSPLIT_INITIAL_SERIAL) || agg->aggorder != NIL ||
 		contain_subplans((Node *) agg->aggfilter) ||
-		agg->aggdirectargs != NIL || agg->aggvariadic)
+		agg->aggdirectargs != NIL || agg->aggvariadic ||
+		(agg->aggdistinct != NIL && !distinct_supported(agg)))
 		return false;
 	if (!batch_aggregate(agg))
 		return generic_supported(agg);
@@ -712,9 +757,6 @@ aggregate_supported(const Aggref *agg)
 	argument = aggregate_argument(agg);
 	if (list_length(agg->args) != 1 || contain_subplans(argument))
 		return false;
-	/* DISTINCT keys a table by the argument: an integer, whatever the aggregate. */
-	if (agg->aggdistinct != NIL)
-		return exprType(argument) == INT4OID || exprType(argument) == INT8OID;
 	return true;
 }
 
@@ -1263,6 +1305,17 @@ distinct_fits(PlannerInfo *root, RelOptInfo *input_rel, List *keys, List *tlist)
 									lappend(list_copy(keys), aggregate_argument(agg)),
 									input_rel->rows, NULL, NULL);
 		bytes += pairs * (16.0 + 8.0 * (list_length(keys) + 1));
+		/* A dictionary of the values a word does not hold: an entry and a copy each. */
+		{
+			Node	   *argument = aggregate_argument(agg);
+			TessTableKeyKind kind;
+
+			if (!tess_word_key_kind(exprType(argument), &kind))
+				bytes += estimate_num_groups(root, list_make1(argument), input_rel->rows,
+											 NULL, NULL) *
+					(sizeof(KeyEntry) * 2 + sizeof(Datum) +
+					 get_typavgwidth(exprType(argument), exprTypmod(argument)));
+		}
 	}
 	return bytes <= (double) get_hash_memory_limit();
 }
@@ -2136,6 +2189,10 @@ generic_accumulate(TessAggState *state, GenericAgg *generic, const TessRowMask *
 
 static inline void check(TessAggState *state, TessStatusCode code);
 static KeyDict *key_dict_create(TessAggState *state, Oid eqop, Oid type, Oid collation);
+static void key_dict_reset(KeyDict *dict, uint64 values);
+static void keydict_numbers(KeyDict *dict, const TessDatumColumn *column,
+							const TessRowMask *rows, bool insert, Datum *numbers,
+							uint32 *hashes);
 static void rows_spill_free(TessAggState *state);
 
 /* The payload of the record at ref, in the chunk's memory, which the node writes. */
@@ -2440,8 +2497,17 @@ agg_begin(CustomScanState *css, EState *estate, int eflags)
 			value->gathered_isnull = palloc_array(bool, 64);
 			if (agg->aggdistinct != NIL)
 			{
-				value->argument_kind = exprType(argument) == INT8OID ?
-					TESS_TABLE_KEY_INT8 : TESS_TABLE_KEY_INT4;
+				SortGroupClause *clause = linitial_node(SortGroupClause, agg->aggdistinct);
+
+				if (!tess_word_key_kind(exprType(argument), &value->argument_kind))
+				{
+					value->argument_kind = TESS_TABLE_KEY_INT8;
+					value->distinct_dict = key_dict_create(state, clause->eqop,
+														   exprType(argument),
+														   exprCollation(argument));
+					/* Only the count of the values matters, not a form to put out. */
+					value->distinct_dict->forms = false;
+				}
 				value->distinct = palloc0(sizeof(struct DistinctSet));
 				state->has_distinct = true;
 			}
@@ -2803,7 +2869,14 @@ accumulate(TessAggState *state, AggValue *value, TessBatch *batch, int nrows)
 				other->nrows != batch->rows.nrows)
 				elog(ERROR, "Tessera projection returned an invalid column");
 		}
-		generic_accumulate(state, value->generic, &rows);
+		if (value->distinct != NULL)
+		{
+			TessRowMask pairs = distinct_rows(state, value, rows.nrows, NULL, &rows, column);
+
+			generic_accumulate(state, value->generic, &pairs);
+		}
+		else
+			generic_accumulate(state, value->generic, &rows);
 		return;
 	}
 	if (value->distinct != NULL)
@@ -3119,6 +3192,8 @@ distinct_reset(TessAggState *state, AggValue *value)
 	check(state, state->kernels->table_create(set->table.index, size, set->nkeys,
 											  set->kinds, 0, capacity,
 											  &state->status));
+	if (value->distinct_dict != NULL)
+		key_dict_reset(value->distinct_dict, 256);
 }
 
 static void
@@ -3180,8 +3255,27 @@ distinct_rows(TessAggState *state, AggValue *value, int nrows,
 	TessTableKey keys[TESS_TABLE_MAX_KEYS];
 	TessRowMask pending;
 	TessRowMask inserted;
+	TessDatumColumn numbers;
 	bool		int8 = value->argument_kind == TESS_TABLE_KEY_INT8;
 
+	/* A value a word does not hold: the pairs take its number in the dictionary. */
+	if (value->distinct_dict != NULL)
+	{
+		KeyDict    *dict = value->distinct_dict;
+
+		if (dict->capacity < nrows)
+		{
+			MemoryContext query = state->css.ss.ps.state->es_query_cxt;
+
+			dict->capacity = nrows;
+			dict->batch_numbers = MemoryContextAlloc(query, sizeof(Datum) * nrows);
+			dict->batch_hashes = MemoryContextAlloc(query, sizeof(uint32) * nrows);
+		}
+		keydict_numbers(dict, argument, valid, true, dict->batch_numbers, dict->batch_hashes);
+		numbers = *argument;
+		numbers.values = dict->batch_numbers;
+		argument = &numbers;
+	}
 	if (set->capacity < nrows)
 	{
 		set->hashes = MemoryContextAlloc(set->context, sizeof(uint32) * nrows);
@@ -3258,8 +3352,14 @@ distinct_bytes(TessAggState *state)
 	Size		bytes = 0;
 
 	for (int index = 0; index < state->nvalues; index++)
-		if (state->values[index].distinct != NULL)
-			bytes += state->values[index].distinct->bytes;
+	{
+		AggValue   *value = &state->values[index];
+
+		if (value->distinct != NULL)
+			bytes += value->distinct->bytes;
+		if (value->distinct_dict != NULL)
+			bytes += MemoryContextMemAllocated(value->distinct_dict->context, true);
+	}
 	return bytes;
 }
 
@@ -5063,6 +5163,8 @@ group_batch(TessAggState *state, TessBatch *batch)
 			for (int arg = 1; arg < value->generic->nargs; arg++)
 				computed_column(state, batch, value->computed + arg,
 								TESS_COLUMN_FOR_PROJECTION, &value->generic->columns[arg]);
+			if (value->distinct != NULL)
+				rows = distinct_rows(state, value, nrows, state->hashes, &rows, &column);
 			generic_group_accumulate(state, index, &rows, &inserted);
 			continue;
 		}

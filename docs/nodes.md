@@ -893,11 +893,24 @@ states, and the groups go out in batches when the input ends.
 `SELECT DISTINCT` is grouping without aggregates: at the distinct stage
 the node's path stands next to each of the core's hashed distinct paths,
 its keys the distinct expressions (`DISTINCT ON` stays with the core).
-An aggregate with `DISTINCT` over an int4 or int8 argument keeps a table
-of its own, without payload, keyed by the group's keys and the argument
-(the argument alone without `GROUP BY`): a batch's rows go into the
-aggregate only where they inserted their pair, NULL arguments dropped by
-the hash. The core groups such a query only sorted; the node takes its
+An aggregate with `DISTINCT` of one argument keeps a table of its own,
+without payload, keyed by the group's keys and the argument (the argument
+alone without `GROUP BY`): a batch's rows go into the aggregate only
+where they inserted their pair, NULL arguments dropped by the hash. An
+argument a word holds (int2, int4, int8, date, timestamp, bool) is its
+word; another of a type whose equality hashes (text, numeric, float8,
+under its collation, a nondeterministic one too) goes by its number in a
+dictionary of its values of the aggregate's own, as a grouping key does,
+made anew with the pairs; that holds for `count`, while `sum` and `avg`
+(through the core's functions) and `min` and `max` take integers only,
+whose value neither the order of the values nor which of equal ones comes
+first changes: `string_agg`, `array_agg`, a float's sum and a numeric
+one's scale (1.0 and 1.00) would, and stay with the core, which feeds a
+`DISTINCT` aggregate its values sorted. Against the core's sorted
+`DISTINCT` over the same scan (2 M rows, medians of 7, ms): `count` of
+100 000 texts 646 and 62, of numerics 287 and 110, of dates 61 and 20;
+grouped by int2, of dates 325 and 54, by int4 of texts 699 and 88;
+`sum` and `avg` of int4 71 and 38. The core groups such a query only sorted; the node takes its
 `GroupAggregate` or plain `Aggregate` as a template and reads the input
 below the core's sort, unless `enable_hashagg` is off (as for any grouping
 whose hashed path the core dropped). The pairs' tables
@@ -1369,8 +1382,11 @@ overflow of a bigint chain; `FILTER` over the node's own, generic and
 row, guarding an argument's division by zero, keeping NULL arguments
 (`array_agg`, `json_agg`), with and without `GROUP BY`, keys of words and
 through a dictionary, under `HAVING`, over rows on disk and in a parallel
-plan; and the core keeping `DISTINCT` over text and `ORDER BY` in the
-aggregate, a window function, an empty relation,
+plan; `DISTINCT` of text, numeric, float8, dates, booleans and int2 by
+`count`, of integers by `sum` and `avg`, grouped and with `FILTER`, under
+a case-insensitive collation, in a rescanned subquery; and the core
+keeping `string_agg` and a numeric `sum` with `DISTINCT` and `ORDER BY`
+in the aggregate, a window function, an empty relation,
 `sum` over bigint, `avg`, the switch off and the kernels module absent.
 With `GROUP BY`: a bare key and an expression key (computed by the scan),
 NULL keys as one group, two keys, expressions over the keys and the

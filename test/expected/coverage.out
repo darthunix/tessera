@@ -200,9 +200,9 @@ ORDER BY o;
  tess                  | SELECT string_agg(t, ','), array_agg(i4) FROM cov
  tess                  | SELECT sum(i4 * 2 + 1), sum(CASE WHEN b THEN i4 ELSE 0 END) FROM cov
  tess                  | SELECT count(DISTINCT i4) FROM cov
- core: Aggregate, Sort | SELECT count(DISTINCT t) FROM cov
+ tess                  | SELECT count(DISTINCT t) FROM cov
  core: Aggregate, Sort | SELECT count(DISTINCT d), sum(DISTINCT n) FROM cov
- core: Aggregate, Sort | SELECT i2, count(DISTINCT vc) FROM cov GROUP BY i2
+ tess                  | SELECT i2, count(DISTINCT vc) FROM cov GROUP BY i2
  tess                  | SELECT sum(i4) FILTER (WHERE b) FROM cov
  tess                  | SELECT i2, count(*) FILTER (WHERE i4 > 5) FROM cov GROUP BY i2
  core: Aggregate, Sort | SELECT string_agg(t, ',' ORDER BY i4) FROM cov
