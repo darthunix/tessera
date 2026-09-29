@@ -1783,7 +1783,9 @@ notes the key of each inner row, the NULL ones apart: the lowest and
 the highest, and the keys themselves while the inner side has at most
 1024 rows with one; a shared table's participants add theirs under a
 lock before the build's barrier. Once built, before the outer side is
-read, the join hands the keys down (`tess_append_join_prune`): each
+read (a shared table that spills reads it in the build's phases, to the
+partitions on disk: past the barrier, there), the join hands the keys
+down (`tess_append_join_prune`): each
 distinct key of a list sets `$p` and prunes, the children added up,
 stopping once every child is needed; past the list the range prunes,
 where there is one; no key pairs with no partition. The work is a key
@@ -1887,8 +1889,9 @@ the second level of two; semi and right joins prune, left and anti ones
 do not, keys all NULL prune every partition; a table kept for the outer
 side's new parameter and one built anew for the inner side's, the
 partitions no execution read counted; a spilling table; under the
-`Gather` a shared table and tables of every participant, the leader not
-taking part. Mutations fail it: no pruning, every join type, the last
+`Gather` a shared table, one that spills (the partitions no execution
+read counted), and tables of every participant, the leader not taking
+part. Mutations fail it: no pruning, every join type, the last
 key's partitions alone, the range for a list, no shared keys, NULL keys
 counted; the stop once every child is needed leaves the results as they
 are.

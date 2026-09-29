@@ -4940,6 +4940,8 @@ shared_outer(TessHashJoinState *state)
 	if (shared_partitions(state) == 0)
 		return;
 	shared_join(state);
+	/* Past the build's barrier, the keys are every participant's. */
+	prune_outer(state);
 	spill = state->spill;
 	for (;;)
 	{

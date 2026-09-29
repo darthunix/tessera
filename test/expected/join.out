@@ -1808,7 +1808,8 @@ INSERT INTO jkn VALUES (NULL, 1), (NULL, 2);
 CREATE TABLE jkl AS SELECT g AS k FROM generate_series(4, 5) AS g;
 CREATE TABLE jk2 AS SELECT k FROM (VALUES (5), (15005)) AS v(k);
 CREATE TABLE jk19 AS SELECT k FROM (VALUES (1), (9)) AS v(k);
-ANALYZE jpr, jpl, jph, jp2, jkf, jkm, jk8, jkn, jkl, jk2, jk19;
+CREATE TABLE jkw AS SELECT g AS k FROM generate_series(20001, 30000) AS g;
+ANALYZE jpr, jpl, jph, jp2, jkf, jkm, jk8, jkn, jkl, jk2, jk19, jkw;
 SELECT join_explain($$SELECT count(*), sum(jpr.v) FROM jpr JOIN jkf ON jpr.k = jkf.k$$);
                                      join_explain                                     
 --------------------------------------------------------------------------------------
@@ -3437,6 +3438,27 @@ SELECT join_same($$SELECT jpr.k, jpr.v, jkf.w FROM jpr JOIN jkf ON jpr.k = jkf.k
  500 rows, hash 6e5739a0dd0556e176bbcd5bd913ee36
 (1 row)
 
+-- A shared table that spills reads the outer side in the build's phases,
+-- each participant its share to the partitions: pruned there, once the
+-- build's barrier has every participant's keys.
+SET work_mem = '64kB';
+SET hash_mem_multiplier = 1;
+SELECT join_unread($$SELECT count(*) FROM jpr JOIN jkw ON jpr.k = jkw.k$$) AS shared_spilled,
+       join_property($$SELECT count(*) FROM jpr JOIN jkw ON jpr.k = jkw.k$$, 'Shared Table') AS shared,
+       join_property($$SELECT count(*) FROM jpr JOIN jkw ON jpr.k = jkw.k$$, 'Spilled Chunks')::int > 0 AS spilled;
+ shared_spilled | shared | spilled 
+----------------+--------+---------
+              3 | true   | t
+(1 row)
+
+SELECT join_same($$SELECT jpr.k, jpr.v FROM jpr JOIN jkw ON jpr.k = jkw.k$$);
+                     join_same                     
+---------------------------------------------------
+ 10000 rows, hash 5f30aeba664333286faaebf53a48034d
+(1 row)
+
+RESET hash_mem_multiplier;
+RESET work_mem;
 SET enable_parallel_hash = off;
 SELECT join_pruned($$SELECT count(*), sum(jpr.v) FROM jpr JOIN jkm ON jpr.k = jkm.k$$) AS own_range;
  own_range 
@@ -3529,7 +3551,7 @@ EXPLAIN (COSTS OFF) SELECT count(*) FROM jf JOIN jd ON jf.fk = jd.id;
 
 RESET tessera.enable;
 DROP TABLE jd, jf, jdup, jsmall, jempty, jgrow, jbig, jpair, jbuild, jprobe, jhit, jref, jrefprobe, jrefgrow, jsb, jsp, jsskew, jsouter, jsheavy;
-DROP TABLE jpr, jpl, jph, jp2, jkf, jkm, jk8, jkn, jkl, jk2, jk19;
+DROP TABLE jpr, jpl, jph, jp2, jkf, jkm, jk8, jkn, jkl, jk2, jk19, jkw;
 DROP FUNCTION jskew();
 DROP FUNCTION jwide();
 DROP FUNCTION join_property(text, text);
