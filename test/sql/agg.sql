@@ -517,6 +517,67 @@ RESET tessera.scan_worker_page_cost;
 RESET parallel_tuple_cost;
 DROP TABLE agg_any, agg_any_big;
 
+
+-- sum and avg of numeric, bigint, integer and smallint, min and max of
+-- numeric, folded by the node itself: the decimals' sum (numeric values of
+-- at most 18 digits read from their stored form, integers) in int128 at
+-- the largest scale met, the rest (NaN, infinities, longer values, sums
+-- past 10^36) in a numeric sum; the value as the core's final functions
+-- make it, the scale of a sum the largest of its values'; min and max
+-- keep the last of equal extremes, as the core's do (1.0 or 1.00). With
+-- and without GROUP BY, FILTER, DISTINCT, rows past hash_mem, workers.
+CREATE TABLE agg_fast (id int, g int, n numeric(15, 2), u numeric, b bigint, i4 int, s int2);
+INSERT INTO agg_fast
+SELECT i, i % 5,
+       CASE WHEN i % 41 = 0 THEN NULL WHEN i % 97 = 0 THEN 'NaN'
+            ELSE ((i * 7919) % 2000000 - 1000000) / 100.0 END,
+       CASE WHEN i % 43 = 0 THEN NULL WHEN i % 89 = 0 THEN 'Infinity' WHEN i % 83 = 0 THEN '-Infinity'
+            WHEN i % 7 = 0 THEN (i / 7.0)::numeric WHEN i % 11 = 0 THEN i::numeric * 12345678901234567890
+            WHEN i % 13 = 0 THEN 1.0 WHEN i % 17 = 0 THEN 1.00 ELSE (i % 1000) / 10.0 END,
+       CASE WHEN i % 37 = 0 THEN NULL ELSE 9223372036854775807 - i * 1000 END,
+       CASE WHEN i % 31 = 0 THEN NULL ELSE i * 7919 % 100000 - 50000 END,
+       CASE WHEN i % 29 = 0 THEN NULL ELSE (i % 60000 - 30000)::int2 END
+FROM generate_series(1, 5000) AS i;
+ANALYZE agg_fast;
+EXPLAIN (COSTS OFF) SELECT g, sum(n), avg(n), min(n), max(n), sum(b), avg(i4), avg(s), sum(s) FROM agg_fast GROUP BY g;
+SELECT agg_same($$SELECT g, sum(n), avg(n), min(n), max(n) FROM agg_fast GROUP BY g$$);
+SELECT agg_same($$SELECT g, sum(u), avg(u), min(u), max(u) FROM agg_fast GROUP BY g$$);
+SELECT agg_same($$SELECT g, sum(b), avg(b), avg(i4), avg(s), sum(s) FROM agg_fast GROUP BY g$$);
+SELECT agg_same($$SELECT sum(n), avg(n), min(n), max(n), sum(u), avg(u), min(u), max(u), sum(b), avg(b), avg(i4), avg(s), sum(s) FROM agg_fast$$);
+SELECT agg_same($$SELECT g, max(u) FILTER (WHERE u < 2), min(u) FILTER (WHERE u > 0.5 AND u < 2), sum(n) FILTER (WHERE n <> 'NaN'), avg(u) FILTER (WHERE u < 'Infinity' AND u > '-Infinity') FROM agg_fast GROUP BY g$$);
+SELECT agg_same($$SELECT g, sum(DISTINCT b), avg(DISTINCT i4 % 100), sum(DISTINCT s % 10) FROM agg_fast GROUP BY g$$);
+SELECT agg_same($$SELECT id % 1000, sum(n), avg(u), max(u), sum(b) FROM agg_fast WHERE id % 1000 IN (0, 13, 17, 26, 34) GROUP BY 1$$);
+-- A sum at scale 0 of 2 * 10^20 that a value of scale 18 would take past
+-- int128: to the numeric rest first; NaN and infinities in a group.
+CREATE TABLE agg_bound (k int, v numeric);
+INSERT INTO agg_bound SELECT 1, 999999999999999999 FROM generate_series(1, 200);
+INSERT INTO agg_bound VALUES (1, 0.000000000000000001), (1, 999999999999999999), (2, 0.5), (2, 'NaN'),
+    (3, 'Infinity'), (3, '-Infinity'), (4, 'Infinity'), (4, 2.25);
+SELECT agg_same($$SELECT k, sum(v), avg(v), min(v), max(v) FROM agg_bound GROUP BY k$$);
+SELECT agg_same($$SELECT sum(v), avg(v) FROM agg_bound WHERE k = 1$$);
+DROP TABLE agg_bound;
+SELECT agg_same($$SELECT g, sum(v), avg(v) FROM (SELECT g, u * 1000000000000000000 AS v FROM agg_fast WHERE u < 1e6) AS t GROUP BY g$$);
+-- Past hash_mem: the rows of new groups to disk and back.
+SET work_mem = '64kB';
+SELECT agg_same($$SELECT count(*), sum(x), sum(y) FROM (SELECT id, sum(n) AS x, max(u) AS y FROM agg_fast GROUP BY id) AS t$$);
+RESET work_mem;
+-- With workers, a partial aggregate is the core's state: the core's functions.
+SET max_parallel_workers_per_gather = 2;
+SET parallel_setup_cost = 0;
+SET tessera.scan_parallel_setup_cost = 0;
+SET tessera.scan_worker_page_cost = 0;
+SET parallel_tuple_cost = 0;
+SET min_parallel_table_scan_size = 0;
+EXPLAIN (COSTS OFF) SELECT sum(n), avg(b), max(u) FROM agg_fast;
+SELECT agg_same($$SELECT sum(n), avg(b), max(u), min(n) FROM agg_fast$$);
+RESET max_parallel_workers_per_gather;
+RESET parallel_setup_cost;
+RESET tessera.scan_parallel_setup_cost;
+RESET tessera.scan_worker_page_cost;
+RESET parallel_tuple_cost;
+RESET min_parallel_table_scan_size;
+DROP TABLE agg_fast;
+
 DROP TABLE agg_t;
 DROP FUNCTION agg_same(text);
 DROP EXTENSION tessera;

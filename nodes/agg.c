@@ -31,11 +31,13 @@
 #include "utils/datum.h"
 #include "utils/builtins.h"
 #include "utils/memutils.h"
+#include "utils/numeric.h"
 #include "utils/pg_locale.h"
 #include "utils/regproc.h"
 #include "utils/selfuncs.h"
 #include "utils/ruleutils.h"
 
+#include "tessera/decimal.h"
 #include "tessera/expr.h"
 #include "tessera/function.h"
 #include "tessera/kernel_ops.h"
@@ -122,6 +124,44 @@ typedef enum AggKind
  * the aggregate's memory asks for it (AggCheckCallContext): a stand-in
  * AggState gives the node's context of states.
  */
+/*
+ * A generic aggregate the node folds itself, its state its own in place of
+ * the core's transition functions, its value the core's final function's:
+ * sum and avg of numeric, bigint, integer and smallint, min and max of
+ * numeric. The rest go through the core's functions.
+ */
+typedef enum FastKind
+{
+	FAST_NONE,
+	FAST_SUM,
+	FAST_AVG,
+	FAST_MIN,
+	FAST_MAX
+} FastKind;
+
+/*
+ * The state of such an aggregate, in the states' context. sum and avg: the
+ * decimals' sum (numeric values of at most 18 digits, integers at scale 0)
+ * at the largest scale met, below 10^36 in magnitude, the count, and the
+ * numeric sum of the rest, NaN, infinities, longer values and the
+ * decimals' sums past the bound. min and max: a copy of the extreme and its
+ * decimal, when it has one.
+ */
+typedef struct FastState
+{
+#ifdef HAVE_INT128
+	int128		sum;
+#endif
+	int			scale;
+	int64		count;
+	bool		has_rest;
+	Datum		rest;
+	bool		has_extreme;
+	Datum		extreme;
+	bool		decimal_valid;
+	TessDecimal decimal;
+} FastState;
+
 typedef struct GenericAgg
 {
 	FmgrInfo	transfn;
@@ -142,6 +182,15 @@ typedef struct GenericAgg
 	FunctionCallInfo serial_call;
 	/* The arguments' columns of the batch being added. */
 	TessDatumColumn *columns;
+	/*
+	 * FAST_NONE, or the node folds the aggregate itself over a numeric
+	 * argument or an integer one (an int8 word when wide), sum(int2) giving
+	 * an int8.
+	 */
+	FastKind	fast;
+	bool		fast_numeric;
+	bool		fast_wide;
+	bool		fast_int8_result;
 } GenericAgg;
 
 /*
@@ -2019,6 +2068,245 @@ agg_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
  * reads them; the states live in the context the stand-in AggState gives
  * the transition functions, one for every generic aggregate of the node.
  */
+/*
+ * Whether the node folds a whole aggregate itself (a partial one goes to
+ * the Finalize Aggregate as the core's state, which only its functions
+ * make), and over which argument.
+ */
+static FastKind
+fast_kind(const Aggref *agg, GenericAgg *generic)
+{
+#ifdef HAVE_INT128
+	if (agg->aggsplit != AGGSPLIT_SIMPLE || list_length(agg->args) != 1)
+		return FAST_NONE;
+	generic->fast_numeric = false;
+	generic->fast_wide = false;
+	generic->fast_int8_result = false;
+	switch (agg->aggfnoid)
+	{
+		case F_SUM_NUMERIC:
+			generic->fast_numeric = true;
+			return FAST_SUM;
+		case F_AVG_NUMERIC:
+			generic->fast_numeric = true;
+			return FAST_AVG;
+		case F_MIN_NUMERIC:
+			generic->fast_numeric = true;
+			return FAST_MIN;
+		case F_MAX_NUMERIC:
+			generic->fast_numeric = true;
+			return FAST_MAX;
+		case F_SUM_INT8:
+			generic->fast_wide = true;
+			return FAST_SUM;
+		case F_AVG_INT8:
+			generic->fast_wide = true;
+			return FAST_AVG;
+		case F_SUM_INT2:
+			generic->fast_int8_result = true;
+			return FAST_SUM;
+		case F_AVG_INT4:
+		case F_AVG_INT2:
+			return FAST_AVG;
+		default:
+			break;
+	}
+#endif
+	return FAST_NONE;
+}
+
+#ifdef HAVE_INT128
+
+/* The bound of a decimals' sum: 10^36, with room for one more term. */
+#define FAST_BOUND ((int128) INT64CONST(1000000000000000000) * INT64CONST(1000000000000000000))
+
+/*
+ * The numeric of an int128 at a scale, with that display scale, as the
+ * core makes one of an int128 sum: a part of 18 digits and the rest.
+ */
+static Datum
+fast_numeric(int128 value, int scale)
+{
+	int64		unit = tess_powers_of_ten[TESS_DECIMAL_DIGITS];
+
+	if (value >= PG_INT64_MIN && value <= PG_INT64_MAX)
+		return NumericGetDatum(int64_div_fast_to_numeric((int64) value, scale));
+	return DirectFunctionCall2(numeric_add,
+							   NumericGetDatum(int64_div_fast_to_numeric((int64) (value / unit),
+																		 scale - TESS_DECIMAL_DIGITS)),
+							   NumericGetDatum(int64_div_fast_to_numeric((int64) (value % unit),
+																		 scale)));
+}
+
+/* A numeric added to the rest's sum, in the states' context. */
+static void
+fast_rest(FastState *fast, Datum value, MemoryContext states)
+{
+	MemoryContext old = MemoryContextSwitchTo(states);
+
+	if (!fast->has_rest)
+		fast->rest = PointerGetDatum(pg_detoast_datum_copy((struct varlena *) DatumGetPointer(value)));
+	else
+	{
+		Datum		sum = DirectFunctionCall2(numeric_add, fast->rest, value);
+
+		pfree(DatumGetPointer(fast->rest));
+		fast->rest = sum;
+	}
+	fast->has_rest = true;
+	MemoryContextSwitchTo(old);
+}
+
+/* The decimals' sum moved to the rest's, before it passes the bound. */
+static void
+fast_flush(FastState *fast, MemoryContext states)
+{
+	MemoryContext old = MemoryContextSwitchTo(states);
+	Datum		sum = fast_numeric(fast->sum, fast->scale);
+
+	MemoryContextSwitchTo(old);
+	fast_rest(fast, sum, states);
+	pfree(DatumGetPointer(sum));
+	fast->sum = 0;
+}
+
+/*
+ * A decimal added at the larger of its scale and the sum's, as the core's
+ * accumulation keeps the largest display scale; a sum a larger scale or a
+ * term would take past the bound goes to the rest first.
+ */
+static void
+fast_add(FastState *fast, TessDecimal decimal, MemoryContext states)
+{
+	int128		term = decimal.value;
+
+	if (decimal.scale > fast->scale)
+	{
+		int128		factor = tess_powers_of_ten[decimal.scale - fast->scale];
+
+		if (fast->sum >= FAST_BOUND / factor || fast->sum <= -FAST_BOUND / factor)
+			fast_flush(fast, states);
+		fast->sum *= factor;
+		fast->scale = decimal.scale;
+	}
+	else
+		term *= tess_powers_of_ten[fast->scale - decimal.scale];
+	fast->sum += term;
+	if (fast->sum >= FAST_BOUND || fast->sum <= -FAST_BOUND)
+		fast_flush(fast, states);
+}
+
+/*
+ * min and max: a value that beats the extreme, or equals it, replaces it,
+ * as numeric_smaller and numeric_larger return their second argument on a
+ * tie; two decimals compare at the larger scale, anything else by
+ * numeric_cmp.
+ */
+static void
+fast_extreme(GenericAgg *generic, FastState *fast, Datum value,
+			 const TessDecimal *decimal, MemoryContext states)
+{
+	MemoryContext old;
+
+	if (fast->has_extreme)
+	{
+		int			cmp;
+
+		if (decimal != NULL && fast->decimal_valid)
+		{
+			int			scale = Max(decimal->scale, fast->decimal.scale);
+			int128		left = (int128) decimal->value *
+				tess_powers_of_ten[scale - decimal->scale];
+			int128		right = (int128) fast->decimal.value *
+				tess_powers_of_ten[scale - fast->decimal.scale];
+
+			cmp = left < right ? -1 : left > right;
+		}
+		else
+			cmp = DatumGetInt32(DirectFunctionCall2(numeric_cmp, value, fast->extreme));
+		if (generic->fast == FAST_MAX ? cmp < 0 : cmp > 0)
+			return;
+		pfree(DatumGetPointer(fast->extreme));
+	}
+	old = MemoryContextSwitchTo(states);
+	fast->extreme = PointerGetDatum(pg_detoast_datum_copy((struct varlena *) DatumGetPointer(value)));
+	MemoryContextSwitchTo(old);
+	fast->has_extreme = true;
+	fast->decimal_valid = decimal != NULL;
+	if (decimal != NULL)
+		fast->decimal = *decimal;
+}
+
+/* One row into the state, the first non-NULL one making it. */
+static void
+fast_advance(GenericAgg *generic, int row, MemoryContext states)
+{
+	const TessDatumColumn *column = &generic->columns[0];
+	FastState  *fast;
+	Datum		value;
+	TessDecimal decimal;
+	bool		decimal_valid = true;
+
+	if (column->isnull[row])
+		return;
+	value = column->values[row];
+	if (generic->state_null)
+	{
+		generic->state = PointerGetDatum(MemoryContextAllocZero(states, sizeof(FastState)));
+		generic->state_null = false;
+	}
+	fast = (FastState *) DatumGetPointer(generic->state);
+	if (generic->fast_numeric)
+		decimal_valid = tess_decimal_of(value, &decimal);
+	else
+	{
+		decimal.value = generic->fast_wide ? DatumGetInt64(value) : DatumGetInt32(value);
+		decimal.scale = 0;
+	}
+	if (generic->fast == FAST_MIN || generic->fast == FAST_MAX)
+	{
+		fast_extreme(generic, fast, value, decimal_valid ? &decimal : NULL, states);
+		return;
+	}
+	fast->count++;
+	if (decimal_valid)
+		fast_add(fast, decimal, states);
+	else
+		fast_rest(fast, value, states);
+}
+
+/*
+ * The value, as the core's final functions make it: sum the decimals'
+ * sum at its scale plus the rest's (numeric_add keeps NaN and the
+ * infinities as the core's sum does), sum(int2) its int8, avg that sum
+ * divided by the count as numeric_avg and int8_avg divide it, min and max
+ * the extreme.
+ */
+static Datum
+fast_value(GenericAgg *generic, bool *isnull)
+{
+	FastState  *fast;
+	Datum		sum;
+
+	*isnull = generic->state_null;
+	if (generic->state_null)
+		return (Datum) 0;
+	fast = (FastState *) DatumGetPointer(generic->state);
+	if (generic->fast == FAST_MIN || generic->fast == FAST_MAX)
+		return fast->extreme;
+	if (generic->fast_int8_result)
+		return Int64GetDatum((int64) fast->sum);
+	sum = fast_numeric(fast->sum, fast->scale);
+	if (fast->has_rest)
+		sum = DirectFunctionCall2(numeric_add, fast->rest, sum);
+	if (generic->fast == FAST_SUM)
+		return sum;
+	return DirectFunctionCall2(numeric_div, sum,
+							   NumericGetDatum(int64_to_numeric(fast->count)));
+}
+
+#endif							/* HAVE_INT128 */
+
 static GenericAgg *
 generic_init(TessAggState *state, Aggref *agg)
 {
@@ -2103,6 +2391,10 @@ generic_init(TessAggState *state, Aggref *agg)
 								 InvalidOid, (Node *) state->generic_agg, NULL);
 	}
 	generic->columns = palloc0_array(TessDatumColumn, generic->nargs);
+	generic->fast = fast_kind(agg, generic);
+	/* Its state starts empty, as the core's of these but avg(int4)'s. */
+	if (generic->fast != FAST_NONE)
+		generic->init_null = true;
 	return generic;
 }
 
@@ -2133,6 +2425,14 @@ generic_advance(GenericAgg *generic, int row, MemoryContext states, MemoryContex
 	FunctionCallInfo call = generic->trans_call;
 	Datum		result;
 	bool		skip = false;
+
+#ifdef HAVE_INT128
+	if (generic->fast != FAST_NONE)
+	{
+		fast_advance(generic, row, states);
+		return;
+	}
+#endif
 
 	for (int arg = 0; arg < generic->nargs; arg++)
 	{
@@ -2265,6 +2565,11 @@ generic_value(GenericAgg *generic, bool *isnull)
 {
 	FunctionCallInfo call;
 	Datum		result;
+
+#ifdef HAVE_INT128
+	if (generic->fast != FAST_NONE)
+		return fast_value(generic, isnull);
+#endif
 
 	if (generic->has_serial)
 	{

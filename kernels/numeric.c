@@ -35,6 +35,7 @@
 #include "varatt.h"
 
 #include "tessera/bridge.h"
+#include "tessera/decimal.h"
 
 #include "internal.h"
 
@@ -108,124 +109,14 @@ static const NumericFunction numeric_functions[] = {
 	NUMERIC_VALUE(F_INT8_NUMERIC, NUMERIC_TO_INT8, TESS_RESULT_DATUM),
 };
 
-/* A numeric of at most 18 digits: its value at its display scale. */
-typedef struct Decimal
-{
-	int64		value;
-	int			scale;
-} Decimal;
-
-#define DECIMAL_DIGITS 18
-
-static const int64 powers_of_ten[DECIMAL_DIGITS + 1] = {
-	INT64CONST(1), INT64CONST(10), INT64CONST(100), INT64CONST(1000),
-	INT64CONST(10000), INT64CONST(100000), INT64CONST(1000000),
-	INT64CONST(10000000), INT64CONST(100000000), INT64CONST(1000000000),
-	INT64CONST(10000000000), INT64CONST(100000000000),
-	INT64CONST(1000000000000), INT64CONST(10000000000000),
-	INT64CONST(100000000000000), INT64CONST(1000000000000000),
-	INT64CONST(10000000000000000), INT64CONST(100000000000000000),
-	INT64CONST(1000000000000000000)
-};
-
-/*
- * The decimal of a numeric Datum, read from its stored header (short:
- * sign, display scale and weight in one word; long: sign and scale, then
- * the weight) and its digits of base 10000, each the value's digits at
- * 10000^(weight - i); false for a compressed or external value, NaN, an
- * infinity, a scale past 18 or a value of more than 18 digits.
- */
-static bool
-decimal_of(Datum datum, Decimal *result)
-{
-	struct varlena *pointer = (struct varlena *) DatumGetPointer(datum);
-	const char *data;
-	int			len;
-	uint16		header;
-	int			weight;
-	int			scale;
-	int			offset;
-	int			ndigits;
-	int			exponent;
-	bool		negative;
-	int64		value = 0;
-
-	if (VARATT_IS_EXTENDED(pointer) && !VARATT_IS_SHORT(pointer))
-		return false;
-	data = VARDATA_ANY(pointer);
-	len = VARSIZE_ANY_EXHDR(pointer);
-	if (len < (int) sizeof(uint16))
-		return false;
-	memcpy(&header, data, sizeof(uint16));
-	if ((header & 0xC000) == 0xC000)
-		return false;			/* NaN or an infinity */
-	if ((header & 0x8000) != 0)
-	{
-		/* Short: 0x2000 the sign, 0x1F80 the scale, 0x0040 and 0x003F the weight. */
-		negative = (header & 0x2000) != 0;
-		scale = (header & 0x1F80) >> 7;
-		weight = (header & 0x0040) != 0 ? (int) (~0x003F | (header & 0x003F)) :
-			(int) (header & 0x003F);
-		offset = sizeof(uint16);
-	}
-	else
-	{
-		int16		long_weight;
-
-		if (len < (int) (2 * sizeof(uint16)))
-			return false;
-		negative = (header & 0xC000) == 0x4000;
-		scale = header & 0x3FFF;
-		memcpy(&long_weight, data + sizeof(uint16), sizeof(int16));
-		weight = long_weight;
-		offset = 2 * sizeof(uint16);
-	}
-	ndigits = (len - offset) / (int) sizeof(int16);
-	if (scale > DECIMAL_DIGITS || ndigits > 5)
-		return false;
-	for (int at = 0; at < ndigits; at++)
-	{
-		int16		digit;
-
-		memcpy(&digit, data + offset + at * sizeof(int16), sizeof(int16));
-		/* Four digits of base 10000 are 16 decimal ones: the fifth is checked. */
-		if (at < 4)
-			value = value * 10000 + digit;
-		else if (pg_mul_s64_overflow(value, 10000, &value) ||
-				 pg_add_s64_overflow(value, digit, &value))
-			return false;
-	}
-	/* The last digit stands at 10000^(weight - ndigits + 1): to the display scale. */
-	exponent = 4 * (weight - ndigits + 1) + scale;
-	if (ndigits == 0)
-		value = 0;
-	else if (exponent >= 0)
-	{
-		if (exponent > DECIMAL_DIGITS ||
-			pg_mul_s64_overflow(value, powers_of_ten[exponent], &value) ||
-			value >= powers_of_ten[DECIMAL_DIGITS])
-			return false;
-	}
-	else
-	{
-		/* Digits past the display scale: only zeros the scale does not show. */
-		if (exponent < -DECIMAL_DIGITS || value % powers_of_ten[-exponent] != 0)
-			return false;
-		value /= powers_of_ten[-exponent];
-	}
-	result->value = negative ? -value : value;
-	result->scale = scale;
-	return true;
-}
-
 /* A decimal at a larger scale, exactly: at most 36 digits fit int128. */
 static inline INT128
-decimal_at(Decimal decimal, int scale)
+decimal_at(TessDecimal decimal, int scale)
 {
 	INT128		result = int64_to_int128(0);
 
 	int128_add_int64_mul_int64(&result, decimal.value,
-							   powers_of_ten[scale - decimal.scale]);
+							   tess_powers_of_ten[scale - decimal.scale]);
 	return result;
 }
 
@@ -284,8 +175,8 @@ numeric_of(int64 value, int scale, NumericArena *arena)
 	 */
 	if (part != 0)
 	{
-		digits[ndigits++] = (int16) ((magnitude % powers_of_ten[part]) * powers_of_ten[pad]);
-		magnitude /= powers_of_ten[part];
+		digits[ndigits++] = (int16) ((magnitude % tess_powers_of_ten[part]) * tess_powers_of_ten[pad]);
+		magnitude /= tess_powers_of_ten[part];
 	}
 	while (magnitude != 0)
 	{
@@ -434,7 +325,7 @@ numeric_compare_evaluate(TessFunctionCall *call)
 {
 	NumericOp	op;
 	ComparePair cache[COMPARE_CACHE_SIZE] = {{0}};
-	Decimal		scalars[2];
+	TessDecimal		scalars[2];
 	bool		decimal_scalar[2] = {false, false};
 	int			nwords;
 
@@ -443,7 +334,7 @@ numeric_compare_evaluate(TessFunctionCall *call)
 	op = numeric_op(call);
 	for (int arg = 0; arg < 2; arg++)
 		if (call->args[arg].column == NULL)
-			decimal_scalar[arg] = decimal_of(call->args[arg].scalar, &scalars[arg]);
+			decimal_scalar[arg] = tess_decimal_of(call->args[arg].scalar, &scalars[arg]);
 	nwords = tess_row_mask_word_count(call->rows->nrows);
 	for (int word = 0; word < nwords; word++)
 	{
@@ -464,8 +355,8 @@ numeric_compare_evaluate(TessFunctionCall *call)
 				continue;
 			left = arg_datum(&call->args[0], row);
 			right = arg_datum(&call->args[1], row);
-			if ((call->args[0].column != NULL ? decimal_of(left, &scalars[0]) : decimal_scalar[0]) &&
-				(call->args[1].column != NULL ? decimal_of(right, &scalars[1]) : decimal_scalar[1]))
+			if ((call->args[0].column != NULL ? tess_decimal_of(left, &scalars[0]) : decimal_scalar[0]) &&
+				(call->args[1].column != NULL ? tess_decimal_of(right, &scalars[1]) : decimal_scalar[1]))
 			{
 				int			scale = Max(scalars[0].scale, scalars[1].scale);
 
@@ -559,7 +450,7 @@ numeric_cast_evaluate(TessFunctionCall *call)
 
 /* One row's result by the decimals, or false for the core's function. */
 static bool
-decimal_value(NumericOp op, Decimal left, Decimal right, NumericArena *arena,
+decimal_value(NumericOp op, TessDecimal left, TessDecimal right, NumericArena *arena,
 			  Datum *result)
 {
 	INT128		sum = int64_to_int128(0);
@@ -570,13 +461,13 @@ decimal_value(NumericOp op, Decimal left, Decimal right, NumericArena *arena,
 		case NUMERIC_ADD:
 		case NUMERIC_SUB:
 			scale = Max(left.scale, right.scale);
-			int128_add_int64_mul_int64(&sum, left.value, powers_of_ten[scale - left.scale]);
+			int128_add_int64_mul_int64(&sum, left.value, tess_powers_of_ten[scale - left.scale]);
 			if (op == NUMERIC_ADD)
 				int128_add_int64_mul_int64(&sum, right.value,
-										   powers_of_ten[scale - right.scale]);
+										   tess_powers_of_ten[scale - right.scale]);
 			else
 				int128_sub_int64_mul_int64(&sum, right.value,
-										   powers_of_ten[scale - right.scale]);
+										   tess_powers_of_ten[scale - right.scale]);
 			break;
 		case NUMERIC_MUL:
 			scale = left.scale + right.scale;
@@ -591,7 +482,7 @@ decimal_value(NumericOp op, Decimal left, Decimal right, NumericArena *arena,
 		default:
 			{
 				/* int4 and int8: rounded half away from zero, as round_var. */
-				int64		unit = powers_of_ten[left.scale];
+				int64		unit = tess_powers_of_ten[left.scale];
 				int64		whole = left.value / unit;
 				int64		rest = left.value % unit;
 
@@ -607,8 +498,8 @@ decimal_value(NumericOp op, Decimal left, Decimal right, NumericArena *arena,
 			}
 	}
 	/* A result of at most 18 digits, as a numeric of that scale. */
-	if (int128_compare(sum, int64_to_int128(-powers_of_ten[DECIMAL_DIGITS] + 1)) < 0 ||
-		int128_compare(sum, int64_to_int128(powers_of_ten[DECIMAL_DIGITS] - 1)) > 0)
+	if (int128_compare(sum, int64_to_int128(-tess_powers_of_ten[TESS_DECIMAL_DIGITS] + 1)) < 0 ||
+		int128_compare(sum, int64_to_int128(tess_powers_of_ten[TESS_DECIMAL_DIGITS] - 1)) > 0)
 		return false;
 	*result = numeric_of(int128_to_int64(sum), scale, arena);
 	return true;
@@ -647,7 +538,7 @@ numeric_value_evaluate(TessFunctionCall *call)
 {
 	NumericOp	op;
 	int			nargs;
-	Decimal		scalars[2] = {{0}};
+	TessDecimal		scalars[2] = {{0}};
 	bool		decimal_scalar[2] = {false, false};
 	NumericArena arena = {0};
 	MemoryContext old;
@@ -662,7 +553,7 @@ numeric_value_evaluate(TessFunctionCall *call)
 		return numeric_invalid(call, "a numeric function takes its arguments");
 	for (int arg = 0; arg < nargs; arg++)
 		if (call->args[arg].column == NULL)
-			decimal_scalar[arg] = decimal_of(call->args[arg].scalar, &scalars[arg]);
+			decimal_scalar[arg] = tess_decimal_of(call->args[arg].scalar, &scalars[arg]);
 	arena.context = call->context;
 	old = MemoryContextSwitchTo(call->context);
 	nwords = tess_row_mask_word_count(call->rows->nrows);
@@ -684,13 +575,13 @@ numeric_value_evaluate(TessFunctionCall *call)
 				(nargs == 2 && arg_null(&call->args[1], row)))
 				continue;
 			left = arg_datum(&call->args[0], row);
-			decimals = call->args[0].column != NULL ? decimal_of(left, &scalars[0]) :
+			decimals = call->args[0].column != NULL ? tess_decimal_of(left, &scalars[0]) :
 				decimal_scalar[0];
 			if (nargs == 2)
 			{
 				right = arg_datum(&call->args[1], row);
 				decimals = decimals &&
-					(call->args[1].column != NULL ? decimal_of(right, &scalars[1]) :
+					(call->args[1].column != NULL ? tess_decimal_of(right, &scalars[1]) :
 					 decimal_scalar[1]);
 			}
 			if (!decimals ||

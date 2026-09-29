@@ -1011,8 +1011,26 @@ ask for the aggregate's memory (`AggCheckCallContext`); a strict
 function skips a row with a NULL argument and, without an initial value,
 takes the first kept argument as the state; a new by-reference state is
 copied into that context and the old one freed, and what a call
-allocates besides goes with the batch's memory. The arguments after the
-first travel in the private data as `more`. With `GROUP BY` such an
+allocates besides goes with the batch's memory. A whole `sum` or `avg` of
+numeric, bigint, integer or smallint, and `min` or `max` of numeric, the
+node folds itself in place of the transition function, its state its own
+in that context: the sum of the values that are decimals (a numeric of at
+most 18 digits read from its stored form, an integer at scale 0) in an
+int128 at the largest scale met, kept below 10^36 in magnitude, the count,
+and the numeric sum of the rest (NaN, infinities, longer values, the
+decimals' sums past the bound); the value is the core's final
+function's: the decimals' sum plus the rest's by `numeric_add` (NaN and
+the infinities as the core's sum keeps them, the display scale the
+largest of the values'), `sum(int2)` its int8, `avg` the sum divided by
+the count by `numeric_div`, as `numeric_avg` and `int8_avg` divide it;
+`min` and `max` keep a copy of the extreme, a tie replacing it as
+`numeric_smaller` and `numeric_larger` keep their second argument, two
+decimals compared at the larger scale and anything else by `numeric_cmp`.
+Against the core's functions over the same scan (2 M rows of
+`numeric(15,2)`): `sum` and `avg` by 100 groups 80 ms and 55, `sum`, `avg`,
+`min` and `max` without groups 101 and 56. A partial aggregate stays with
+the core's functions, whose state the Finalize Aggregate combines. The
+arguments after the first travel in the private data as `more`. With `GROUP BY` such an
 aggregate's state is a word of the group's record, the value itself when
 a word holds it, else the address of its copy in that context, with the
 aggregate's flag bit set while it is not NULL: the groups a batch
