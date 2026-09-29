@@ -1,5 +1,6 @@
 #include "postgres.h"
 
+#include "access/genam.h"
 #include "access/heapam.h"
 #include "access/parallel.h"
 #include "access/relscan.h"
@@ -54,6 +55,10 @@
  * any pages, each pinned by the batch: the core keeps the index's keys,
  * parameters and rechecks, the node saves the slot's rows their copies,
  * deforms the columns asked for and lets the filter above run in batches.
+ * With the core's index-only scan as its child, the node drives that
+ * scan itself, as IndexOnlyNext does but without its ExecScan and a call
+ * of the node a row: the table AM fills the child's slot from the index
+ * tuple, and the node copies it into a batch of the index's columns.
  * See docs/nodes.md.
  */
 #define HEAP_SCAN_BATCH_ROWS 64
@@ -115,11 +120,24 @@ typedef struct HeapScanState
 	TIDBitmap  *tbm;
 	/* Index mode: the core's index scan, whose rows the node takes. */
 	PlanState  *index_plan;
+	/*
+	 * Index-only mode: the core's index-only scan, whose scan the node
+	 * drives; a builder of batches of the index's columns, the batch it
+	 * finished, and the batch given out, whose column n is the relation's
+	 * attribute n + 1, the index's column index_columns[n] (-1 for one the
+	 * index does not return).
+	 */
+	IndexOnlyScanState *ios_plan;
+	TessBuilder *builder;
+	TessBatch  *built;
+	TessBatch	ios_batch;
+	int		   *index_columns;
 	uint64		exact_pages;
 	uint64		lossy_pages;
 } HeapScanState;
 
 static CustomPath *heap_scan_rows(PlannerInfo *root, Path *path);
+static int *index_only_columns(HeapScanState *state, IndexOnlyScan *plan);
 static Plan *heap_scan_plan(PlannerInfo *root, RelOptInfo *rel,
 							CustomPath *best_path, List *tlist, List *clauses,
 							List *custom_plans);
@@ -383,15 +401,17 @@ index_correlation(PlannerInfo *root, IndexOptInfo *index)
  * each query a few microseconds more (one row of an index took 11 against
  * 6, the first 10 of an order 12 against 8): at least
  * tessera.index_min_correlation (0.8) and tessera.index_min_rows (1000).
+ * An index-only scan pins no page of the table for its rows: any
+ * correlation will do.
  */
 
 /*
- * The node over the core's index scan, in its order, with the target
- * given: the core's path, which the caller copied, is the child, whose
- * plan the node keeps without clauses and projection; its rows are the
- * tuples the index's conditions select, before any other clause. NULL for
- * a relation the node does not read, an ordering by distance, or a scan
- * the node does not take (above).
+ * The node over the core's index scan or index-only scan, in its order,
+ * with the target given: the core's path, which the caller copied, is the
+ * child, whose plan the node keeps without clauses (and, for an index
+ * scan, its projection); its rows are the tuples the index's conditions
+ * select, before any other clause. NULL for a relation the node does not
+ * read, an ordering by distance, or a scan the node does not take (above).
  */
 Path *
 tess_heap_index_path(PlannerInfo *root, IndexPath *index, PathTarget *target)
@@ -405,9 +425,10 @@ tess_heap_index_path(PlannerInfo *root, IndexPath *index, PathTarget *target)
 
 	if (root->limit_tuples >= 0)
 		rows = Min(rows, root->limit_tuples);
-	if (index->path.pathtype != T_IndexScan || index->indexorderbys != NIL ||
-		!plain_heap_relation(root, rel, target) || rows < tess_index_min_rows ||
-		(tess_index_min_correlation > 0 &&
+	if ((index->path.pathtype != T_IndexScan && index->path.pathtype != T_IndexOnlyScan) ||
+		index->indexorderbys != NIL || !plain_heap_relation(root, rel, target) ||
+		rows < tess_index_min_rows ||
+		(index->path.pathtype == T_IndexScan && tess_index_min_correlation > 0 &&
 		 index_correlation(root, index->indexinfo) < tess_index_min_correlation))
 		return NULL;
 	template.pathtarget = target;
@@ -446,6 +467,8 @@ heap_scan_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 			bitmap->qual = NIL;
 			bitmap->targetlist = build_physical_tlist(root, rel);
 		}
+		else if (list_length(custom_plans) == 1 && IsA(bitmap, IndexOnlyScan))
+			bitmap->qual = NIL;
 		else if (list_length(custom_plans) != 1 || !IsA(bitmap, BitmapHeapScan) ||
 				 outerPlan(bitmap) == NULL)
 			elog(ERROR, "TessHeapScan expected the core's bitmap heap scan below");
@@ -502,6 +525,12 @@ heap_scan_begin(CustomScanState *css, EState *estate, int eflags)
 			state->index_plan = ExecInitNode(child, estate, eflags);
 			css->custom_ps = list_make1(state->index_plan);
 		}
+		else if (IsA(child, IndexOnlyScan))
+		{
+			state->ios_plan = castNode(IndexOnlyScanState, ExecInitNode(child, estate, eflags));
+			css->custom_ps = list_make1(state->ios_plan);
+			state->index_columns = index_only_columns(state, (IndexOnlyScan *) child);
+		}
 		else
 		{
 			state->bitmap_plan = ExecInitNode(child, estate, eflags);
@@ -532,6 +561,49 @@ heap_scan_begin(CustomScanState *css, EState *estate, int eflags)
 	state->tuples_needed = -1;
 }
 
+/*
+ * The index's column of each of the relation's attributes: the index's
+ * targets that are the relation's columns and that the index returns (it
+ * marks the others resjunk); -1 for the rest.
+ */
+static int *
+index_only_columns(HeapScanState *state, IndexOnlyScan *plan)
+{
+	int			natts = RelationGetDescr(state->css.ss.ss_currentRelation)->natts;
+	int		   *columns = palloc_array(int, natts);
+
+	for (int attribute = 0; attribute < natts; attribute++)
+		columns[attribute] = -1;
+	foreach_node(TargetEntry, entry, plan->indextlist)
+	{
+		Var		   *var = (Var *) entry->expr;
+
+		if (!entry->resjunk && IsA(var, Var) && var->varattno > 0 &&
+			var->varattno <= natts)
+			columns[var->varattno - 1] = foreach_current_index(entry);
+	}
+	return columns;
+}
+
+/* An index-only batch's column: the built batch's of the index's column. */
+static void
+index_only_get_column(TessBatch *batch, int column, const TessRowMask *rows,
+					  TessColumnPurpose purpose, TessDatumColumn *result)
+{
+	HeapScanState *state = (HeapScanState *) batch->private_data;
+	int			index_column = column >= 0 && column < state->relation.ncolumns ?
+		state->index_columns[column] : -1;
+
+	if (index_column < 0 || state->built == NULL)
+		elog(ERROR, "TessHeapScan's index returns no column %d", column);
+	state->built->ops->get_datum_column(state->built, index_column, rows, purpose, result);
+}
+
+static const TessBatchOps index_only_batch_ops = {
+	TESS_ABI_INITIALIZER(TESS_BATCH_OPS_ABI_VERSION, TessBatchOps),
+	.get_datum_column = index_only_get_column,
+};
+
 /* Freeze the parent's request and create the provider. */
 static void
 heap_scan_start(HeapScanState *state)
@@ -548,6 +620,22 @@ heap_scan_start(HeapScanState *state)
 	if (state->rows)
 		state->columns = palloc0_array(TessDatumColumn,
 									   Max(state->layout.ntargets, 1));
+	/* Index-only mode: batches of the index's columns, copied from its slot. */
+	if (state->ios_plan != NULL)
+	{
+		TessBuilderConfig builder = TESS_STRUCT_INITIALIZER(TessBuilderConfig);
+
+		builder.parent_context = estate->es_query_cxt;
+		builder.tuple_desc = state->ios_plan->ss.ss_ScanTupleSlot->tts_tupleDescriptor;
+		builder.ncolumns = builder.tuple_desc->natts;
+		builder.capacity = state->capacity;
+		state->builder = tess_builder_create(&builder);
+		state->ios_batch.abi_version = TESS_BATCH_ABI_VERSION;
+		state->ios_batch.struct_size = sizeof(TessBatch);
+		state->ios_batch.ops = &index_only_batch_ops;
+		state->ios_batch.private_data = state;
+		return;
+	}
 	config.parent_context = estate->es_query_cxt;
 	config.ncolumns = state->relation.ncolumns;
 	config.capacity = state->capacity;
@@ -685,6 +773,92 @@ fill_from_page(HeapScanState *state, int limit)
 	return nrows;
 }
 
+/* A batch to give out, NULL for none: counted, and wrapped by the projection. */
+static TessBatch *
+give_out(HeapScanState *state, TessBatch *batch)
+{
+	if (batch == NULL)
+		return NULL;
+	state->produced += tess_row_mask_count(&batch->rows);
+	state->batches++;
+	if (state->projection != NULL)
+		batch = tess_projection_wrap(state->projection, batch);
+	return batch;
+}
+
+/*
+ * Index-only mode: up to limit rows of the core's index-only scan, which
+ * the node drives as IndexOnlyNext does, but not through its ExecScan and
+ * a call of the node a row: the table AM finds the next index entry,
+ * reads the table's page only where the visibility map does not show it
+ * all visible, and fills the child's slot from the index tuple, which the
+ * builder copies, values by reference too, since the index tuples live
+ * only until the scan leaves their page. The child's instrumentation
+ * counts the rows, as its own execution would.
+ */
+static TessBatch *
+index_only_batch(HeapScanState *state, int limit)
+{
+	IndexOnlyScanState *ios = state->ios_plan;
+	EState	   *estate = state->css.ss.ps.state;
+	TupleTableSlot *slot = ios->ss.ss_ScanTupleSlot;
+	ExprContext *econtext = ios->ss.ps.ps_ExprContext;
+	ScanDirection direction =
+		ScanDirectionCombine(estate->es_direction,
+							 castNode(IndexOnlyScan, ios->ss.ps.plan)->indexorderdir);
+	IndexScanDesc scan;
+	int			nrows = 0;
+
+	/* As ExecIndexOnlyScan: runtime keys computed before the first row. */
+	if (ios->ioss_NumRuntimeKeys != 0 && !ios->ioss_RuntimeKeysReady)
+		ExecReScan(&ios->ss.ps);
+	scan = ios->ioss_ScanDesc;
+	if (scan == NULL)
+	{
+		scan = index_beginscan(ios->ss.ss_currentRelation, ios->ioss_RelationDesc, true,
+							   estate->es_snapshot, ios->ioss_Instrument,
+							   ios->ioss_NumScanKeys, ios->ioss_NumOrderByKeys,
+							   ScanRelIsReadOnly(&ios->ss) ? SO_HINT_REL_READ_ONLY : SO_NONE);
+		ios->ioss_ScanDesc = scan;
+		if (ios->ioss_NumRuntimeKeys == 0 || ios->ioss_RuntimeKeysReady)
+			index_rescan(scan, ios->ioss_ScanKeys, ios->ioss_NumScanKeys,
+						 ios->ioss_OrderByKeys, ios->ioss_NumOrderByKeys);
+	}
+	tess_builder_reset(state->builder);
+	state->built = NULL;
+	if (ios->ss.ps.instrument != NULL)
+		InstrStartNode(ios->ss.ps.instrument);
+	while (nrows < limit)
+	{
+		if (!table_index_getnext_slot(scan, direction, slot))
+		{
+			state->exhausted = true;
+			break;
+		}
+		/* A lossy index's condition, rechecked on the index's columns. */
+		if (scan->xs_recheck)
+		{
+			econtext->ecxt_scantuple = slot;
+			if (!ExecQualAndReset(ios->recheckqual, econtext))
+			{
+				InstrCountFiltered2(ios, 1);
+				continue;
+			}
+		}
+		tess_builder_append_slot(state->builder, slot);
+		nrows++;
+	}
+	if (ios->ss.ps.instrument != NULL)
+		InstrStopNode(ios->ss.ps.instrument, nrows);
+	state->built = tess_builder_finish(state->builder,
+									   RelationGetRelid(state->css.ss.ss_currentRelation));
+	if (state->built == NULL)
+		return NULL;
+	state->ios_batch.rows = state->built->rows;
+	state->ios_batch.table_oid = state->built->table_oid;
+	return &state->ios_batch;
+}
+
 /* The next batch of the relation's rows, or NULL at the end. */
 static TessBatch *
 next_batch(HeapScanState *state)
@@ -704,6 +878,8 @@ next_batch(HeapScanState *state)
 			return NULL;
 		limit = (int) Min((int64) limit, state->tuples_needed - state->produced);
 	}
+	if (state->ios_plan != NULL)
+		return give_out(state, index_only_batch(state, limit));
 	tess_heap_batch_reset(state->heap);
 	hscan = (HeapScanDesc) state->scan;
 	if (state->index_plan != NULL)
@@ -776,13 +952,7 @@ next_batch(HeapScanState *state)
 	}
 	batch = tess_heap_batch_finish(state->heap,
 								   RelationGetRelid(css->ss.ss_currentRelation));
-	if (batch == NULL)
-		return NULL;
-	state->produced += tess_row_mask_count(&batch->rows);
-	state->batches++;
-	if (state->projection != NULL)
-		batch = tess_projection_wrap(state->projection, batch);
-	return batch;
+	return give_out(state, batch);
 }
 
 /* The column of every target, for the batch's rows: deformed or computed once. */
@@ -864,7 +1034,7 @@ heap_scan_exec(CustomScanState *css)
 	/* Without a parallel scan from the callbacks, a serial one. */
 	if (state->scan == NULL && state->bitmap_plan != NULL)
 		begin_bitmap_scan(state);
-	else if (state->scan == NULL && state->index_plan == NULL)
+	else if (state->scan == NULL && state->index_plan == NULL && state->ios_plan == NULL)
 	{
 		EState	   *estate = css->ss.ps.state;
 
@@ -899,6 +1069,8 @@ heap_scan_end(CustomScanState *css)
 		ExecEndNode(state->bitmap_plan);
 	if (state->index_plan != NULL)
 		ExecEndNode(state->index_plan);
+	if (state->ios_plan != NULL)
+		ExecEndNode(&state->ios_plan->ss.ps);
 	/* The relation is closed by the executor. */
 }
 
@@ -936,6 +1108,19 @@ heap_scan_rescan(CustomScanState *css)
 			UpdateChangedParamSet(state->index_plan, css->ss.ps.chgParam);
 		if (state->index_plan->chgParam == NULL)
 			ExecReScan(state->index_plan);
+	}
+	else if (state->ios_plan != NULL)
+	{
+		/*
+		 * The index-only scan too, now: the node never calls it, which
+		 * would rescan it on changed parameters.
+		 */
+		if (css->ss.ps.chgParam != NULL)
+			UpdateChangedParamSet(&state->ios_plan->ss.ps, css->ss.ps.chgParam);
+		ExecReScan(&state->ios_plan->ss.ps);
+		if (state->builder != NULL)
+			tess_builder_reset(state->builder);
+		state->built = NULL;
 	}
 	else if (state->scan != NULL)
 		table_rescan(state->scan, NULL);
@@ -995,14 +1180,14 @@ heap_scan_explain(CustomScanState *css, List *ancestors, ExplainState *es)
 	if (!es->analyze)
 		return;
 	ExplainPropertyInteger("Batches", NULL, totals[HEAP_SCAN_BATCHES], es);
-	if (state->index_plan == NULL)
+	if (state->index_plan == NULL && state->ios_plan == NULL)
 		ExplainPropertyInteger("Pages", NULL, totals[HEAP_SCAN_PAGES], es);
 	if (state->bitmap_plan != NULL)
 	{
 		ExplainPropertyInteger("Exact Heap Blocks", NULL, totals[HEAP_SCAN_EXACT], es);
 		ExplainPropertyInteger("Lossy Heap Blocks", NULL, totals[HEAP_SCAN_LOSSY], es);
 	}
-	if (totals[HEAP_SCAN_RAN] > 0)
+	if (totals[HEAP_SCAN_RAN] > 0 && state->ios_plan == NULL)
 	{
 		ExplainPropertyInteger("Deformed Datums", NULL, totals[HEAP_SCAN_DEFORMED], es);
 		ExplainPropertyInteger("Restarted Datums", NULL, totals[HEAP_SCAN_RESTARTED], es);

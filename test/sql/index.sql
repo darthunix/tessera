@@ -172,6 +172,57 @@ RESET enable_material;
 DROP TABLE index_o;
 RESET enable_bitmapscan;
 
+-- Index Only Scan: the node drives the core's index-only scan, the table
+-- AM filling its slot from the index tuple, and copies the rows into
+-- batches of the index's columns, in the index's order; the filter above
+-- evaluates every clause. Any correlation will do: an all-visible row
+-- reads no page of the table.
+CREATE TABLE index_i AS
+SELECT g AS id, CASE WHEN g % 17 = 0 THEN NULL ELSE (g::bigint * 7919 % 20000)::int END AS k,
+       g % 50 AS w, 'i' || (g % 3000) AS t, g * 2 AS x
+FROM generate_series(1, 20000) AS g;
+CREATE INDEX index_i_k ON index_i (k);
+CREATE INDEX index_i_wt ON index_i (w, t) INCLUDE (x);
+CREATE INDEX index_i_t ON index_i (t);
+VACUUM ANALYZE index_i;
+SET enable_bitmapscan = off;
+EXPLAIN (COSTS OFF) SELECT count(*), sum(k) FROM index_i WHERE k < 5000;
+SELECT index_explain($$SELECT count(*), sum(k) FROM index_i WHERE k < 5000$$);
+SELECT index_same($$SELECT count(*), sum(k), count(k) FROM index_i WHERE k < 5000$$);
+SELECT index_same($$SELECT count(*) FROM index_i WHERE k IS NULL$$);
+-- In the index's order and backwards, to a limit.
+SELECT index_same($$SELECT string_agg(k::text, ',' ORDER BY n) FROM (SELECT k, row_number() OVER () AS n FROM (SELECT k FROM index_i WHERE k < 3000 ORDER BY k LIMIT 1500) AS s) AS q$$);
+SELECT index_same($$SELECT string_agg(k::text, ',' ORDER BY n) FROM (SELECT k, row_number() OVER () AS n FROM (SELECT k FROM index_i WHERE k > 15000 ORDER BY k DESC LIMIT 1500) AS s) AS q$$);
+-- A composite index with an included column: a clause on its second
+-- column, text keys copied as the scan moves from page to page.
+EXPLAIN (COSTS OFF) SELECT w, t, x FROM index_i WHERE w < 20 AND t LIKE 'i1%';
+SELECT index_same($$SELECT w, t, x FROM index_i WHERE w < 20 AND t LIKE 'i1%'$$);
+SELECT index_same($$SELECT w, count(*), max(t), sum(x) FROM index_i WHERE w < 25 GROUP BY w$$);
+SELECT index_same($$SELECT string_agg(t, ',' ORDER BY n) FROM (SELECT t, row_number() OVER () AS n FROM (SELECT t FROM index_i WHERE t > 'i2' ORDER BY t) AS s) AS q$$);
+-- Rows to a row-wise parent.
+SELECT index_same($$SELECT k FROM index_i WHERE k BETWEEN 1000 AND 4000$$);
+-- Short scans stay the core's, below tessera.index_min_rows.
+EXPLAIN (COSTS OFF) SELECT k FROM index_i WHERE k = 77;
+-- Pages not all visible: the table AM reads them for the rows' visibility.
+UPDATE index_i SET x = x + 1 WHERE id % 7 = 0;
+DELETE FROM index_i WHERE id % 11 = 0;
+SELECT index_explain($$SELECT count(*), sum(k) FROM index_i WHERE k < 5000$$);
+SELECT index_same($$SELECT count(*), sum(k) FROM index_i WHERE k < 5000$$);
+SELECT index_same($$SELECT w, count(*), sum(x) FROM index_i WHERE w < 25 GROUP BY w$$);
+-- Rescan with a parameter of the index condition for every outer row, and
+-- an initplan's value as a key, whose rows the planner guesses few.
+SET tessera.index_min_rows = 0;
+EXPLAIN (COSTS OFF)
+SELECT y, (SELECT count(*) FROM index_i WHERE k BETWEEN y * 1000 AND y * 1000 + 4000) FROM generate_series(1, 4) AS y;
+SELECT index_same($$SELECT y, (SELECT count(*) FROM index_i WHERE k BETWEEN y * 1000 AND y * 1000 + 4000) FROM generate_series(1, 4) AS y$$);
+EXPLAIN (COSTS OFF) SELECT count(*), sum(k) FROM index_i WHERE k < (SELECT 6000);
+SELECT index_same($$SELECT count(*), sum(k) FROM index_i WHERE k < (SELECT 6000)$$);
+RESET tessera.index_min_rows;
+-- Nothing found.
+SELECT index_same($$SELECT count(*), max(k) FROM index_i WHERE k < 0$$);
+RESET enable_bitmapscan;
+DROP TABLE index_i;
+
 -- BRIN: its bitmap names whole ranges of pages (lossy), every row of which
 -- the filter rechecks in batches, dates too. minmax, minmax-multi and bloom
 -- classes; NULL days and IS NULL; rows added after the index's summary.

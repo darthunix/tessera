@@ -357,10 +357,11 @@ add_bitmap_paths(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte)
 }
 
 /*
- * The node over each of the core's unparameterized, serial index scans of
- * the relation, in its order, TessFilter above it when the relation has
- * clauses: the filter evaluates every clause, the index's too, and the
- * path costs the filter's fraction of the core's and keeps its order.
+ * The node over each of the core's unparameterized, serial index scans and
+ * index-only scans of the relation, in its order, TessFilter above it when
+ * the relation has clauses: the filter evaluates every clause, the index's
+ * too, and the path costs the filter's fraction of the core's and keeps
+ * its order.
  */
 static void
 add_index_paths(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte)
@@ -376,7 +377,8 @@ add_index_paths(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte)
 	{
 		IndexPath  *copy;
 
-		if (!IsA(path, IndexPath) || path->pathtype != T_IndexScan ||
+		if (!IsA(path, IndexPath) ||
+			(path->pathtype != T_IndexScan && path->pathtype != T_IndexOnlyScan) ||
 			path->param_info != NULL || path->parallel_aware)
 			continue;
 		copy = makeNode(IndexPath);

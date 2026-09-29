@@ -58,6 +58,7 @@ queries is therefore `TessHeapScan → TessFilter → parent`. With the
 core's plan of an index's bitmap as its child it reads that bitmap's
 pages instead (Bitmap mode below), in place of the core's bitmap heap
 scan; with the core's index scan as its child, that scan's rows (Index
+mode below); with the core's index-only scan, the index's (Index-only
 mode below).
 
 ### Planning
@@ -225,8 +226,7 @@ BRIN estimate left out.
 ### Index mode
 
 The same hook takes each of the core's unparameterized, serial index
-scans (`IndexPath` of an `Index Scan`, not an index-only one nor an
-ordering by distance) and adds the node over it (`tess_heap_index_path`),
+scans (`IndexPath` of an `Index Scan`, not an ordering by distance) and adds the node over it (`tess_heap_index_path`),
 `TessFilter` above when the relation has clauses: the core's path is the
 child, and the node's `PlanCustomPath` keeps the core's `IndexScan` plan
 whole but for its clauses, which the filter evaluates, the index's too,
@@ -274,6 +274,58 @@ updated rows, a parameter of the index condition per outer row, and a
 nested loop's inner side under a limit rescanned in its middle.
 Mutations fail it: a row of the scan skipped, the child not rescanned;
 the child's clauses kept only cost time.
+
+### Index-only mode
+
+The hook takes the core's unparameterized, serial index-only scans the
+same way (`IndexPath` of an `Index Only Scan`), with the index-mode gates
+but for the correlation: an all-visible row reads no page of the table.
+The plan keeps the core's `IndexOnlyScan` without its clauses, which the
+filter above evaluates. Under a pack the core's scan cost as much as
+without Tessera (×0.89–1.01, pg-index-fiwEia): a profile of 10 % of 2 M
+rows counted gave the index's own work, reading its leaf pages and
+checking its condition, 35 %, the visibility map 8 %, filling the slot
+from the index tuple 14 %, and the executor's round a row (`ExecScan`,
+`IndexOnlyNext`, the expression context reset, the projection, the call
+of the node) 30 %, the pack 8 %.
+
+The node drives the child's scan itself, as `IndexOnlyNext` does, but
+not through its `ExecScan` and a call of the node a row: it computes the
+runtime keys when they are not ready (as `ExecIndexOnlyScan` does),
+begins the scan with the child's keys and instrumentation, and takes
+`table_index_getnext_slot` into the child's slot, in the child's
+direction, up to the batch's size or a limit's bound: the table AM finds
+the next index entry, reads the table's page only where the visibility
+map does not show it all visible, takes the page's predicate lock and
+fills the slot from the index tuple; a lossy index's condition is
+rechecked on the slot, as there. A builder copies the slot's columns, the
+index's, into a batch, by-reference values too, since the index tuples
+live only until the scan leaves their page; the batch given out is the
+node's own, whose column n, the relation's attribute n + 1, is the
+index's column that holds it (the index's targets that are the
+relation's columns and that the index returns). The child's
+instrumentation counts the rows a batch at a time, so `EXPLAIN ANALYZE`
+shows them and the core's `Heap Fetches` under the node. A rescan passes
+a changed parameter to the child and rescans it at once: the node never
+calls it, which would rescan it on changed parameters. At 2 M rows
+(bench/pg/index, pg-index-fiwEia before, pg-index-EG1H30 after, 11 runs,
+the core's time in the second run): 10 % of a scattered k counted 3.9 ms
+before, 3.1 after, the core's 4.3; 1 % 0.39 and 0.31 (0.42); half of it
+19.6 and 15.6 (22.0); summed 3.7 and 3.2 (4.3); 5 % under an offset 1.6
+and 1.5 (1.6); the first 5 % in the index's order to a limit 2.0 and 1.6
+(2.2); w grouped 4.0 and 3.4 (4.4).
+
+`test/sql/index.sql` compares with Tessera off: a range counted and
+summed with `EXPLAIN ANALYZE`, NULL keys, the index's order forward and
+backward to a limit, a composite index with an included column and a
+clause on its second column, text keys in and out of order, rows to a
+row-wise parent, the gate of a short scan, pages not all visible after
+updates and deletes (the heap fetches shown), a parameter of the index
+condition per outer row and an initplan's value as a key, and nothing
+found. Mutations fail it: the child rescanned only without changed
+parameters, the direction always forward, the runtime keys not computed
+first, the rows not counted, every attribute taken from the index's
+first column.
 
 ## TessPack
 
