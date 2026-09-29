@@ -7,13 +7,13 @@ use anyhow::Result;
 use tessera_capi::c::sort_flags::{DESCENDING, NULLABLE, NULLS_FIRST};
 use tessera_capi::c::{
     CSortKey, Code, DatumColumn, Mask, Status, TableKey, TableRecord, TableRef, TableStats,
-    tess_int4_hash, tess_int8_hash, tess_sort, tess_sort_item_words, tess_sort_items,
-    tess_sort_layout, tess_table_accumulate, tess_table_append, tess_table_append_columns,
-    tess_table_append_partitioned_columns, tess_table_chunk_init, tess_table_create,
-    tess_table_find_or_insert, tess_table_format_version, tess_table_gather, tess_table_gather_key,
-    tess_table_layout, tess_table_link, tess_table_link_grouped, tess_table_next_in_group,
-    tess_table_next_match, tess_table_payloads, tess_table_probe, tess_table_record,
-    tess_table_regrow, tess_table_scan, tess_table_size, tess_table_stats,
+    TableSumArg, tess_int4_hash, tess_int8_hash, tess_sort, tess_sort_item_words, tess_sort_items,
+    tess_sort_layout, tess_table_accumulate, tess_table_accumulate_sums, tess_table_append,
+    tess_table_append_columns, tess_table_append_partitioned_columns, tess_table_chunk_init,
+    tess_table_create, tess_table_find_or_insert, tess_table_format_version, tess_table_gather,
+    tess_table_gather_key, tess_table_layout, tess_table_link, tess_table_link_grouped,
+    tess_table_next_in_group, tess_table_next_match, tess_table_payloads, tess_table_probe,
+    tess_table_record, tess_table_regrow, tess_table_scan, tess_table_size, tess_table_stats,
 };
 use tessera_core::{ColumnView, RowMask, RowMaskView};
 use tessera_kernels::int32::{self, NullKeys};
@@ -957,6 +957,225 @@ fn grouped_states_accumulate_through_the_entry_points() -> Result<()> {
             8,
             0,
             3,
+            &raw mut status,
+        );
+        assert_eq!(code, Code::InvalidArgument);
+    }
+    Ok(())
+}
+
+/// Sum states of three kinds through the entry point, as C calls it: a
+/// numeric column with its decimals at scale 2 and a NaN, int4 words with
+/// a NULL, int8 words with one past 18 digits, which goes to the rest.
+#[test]
+fn sum_states_accumulate_through_the_entry_point() -> Result<()> {
+    use tessera_kernels::decimal::SumState;
+
+    let nrows = 100;
+    let keys: Vec<u64> = (0..nrows as u64).map(|row| row % 4).collect();
+    let no_nulls = vec![false; nrows];
+    let key_column = DatumColumn {
+        struct_size: size_of::<DatumColumn>(),
+        values: keys.as_ptr(),
+        isnull: no_nulls.as_ptr(),
+        nrows: nrows as i32,
+        ..DatumColumn::EMPTY
+    };
+    let key = TableKey {
+        kind: 1,
+        column: &raw const key_column,
+        prepared: ptr::null(),
+    };
+    let hashes: Vec<u32> = keys
+        .iter()
+        .map(|&value| int32::murmurhash32(value as u32))
+        .collect();
+    // NaN as a short varlena: a 1-byte header of 3 bytes, the header word 0xC000.
+    let nan = [7_u8, 0x00, 0xC0, 0];
+    let numerics: Vec<u64> = (0..nrows as i64)
+        .map(|row| {
+            if row == 5 {
+                nan.as_ptr() as u64
+            } else {
+                (row * 25) as u64
+            }
+        })
+        .collect();
+    let mut decimal_rows = [u64::MAX, (1 << 36) - 1];
+    decimal_rows[0] &= !(1 << 5);
+    let numeric_column = DatumColumn {
+        struct_size: size_of::<DatumColumn>(),
+        values: numerics.as_ptr(),
+        isnull: no_nulls.as_ptr(),
+        nrows: nrows as i32,
+        accept_decimals: true,
+        decimal_rows: decimal_rows.as_ptr(),
+        decimal_scale: 2,
+    };
+    let int4s: Vec<u64> = (0..nrows as i64)
+        .map(|row| u64::from((row as i32 - 50) as u32) | 0xABCD << 40)
+        .collect();
+    let mut int4_nulls = vec![false; nrows];
+    int4_nulls[7] = true;
+    let int4_column = DatumColumn {
+        struct_size: size_of::<DatumColumn>(),
+        values: int4s.as_ptr(),
+        isnull: int4_nulls.as_ptr(),
+        nrows: nrows as i32,
+        ..DatumColumn::EMPTY
+    };
+    let int8s: Vec<u64> = (0..nrows as i64)
+        .map(|row| {
+            if row == 9 {
+                i64::MAX as u64
+            } else {
+                (row << 33) as u64
+            }
+        })
+        .collect();
+    let int8_column = DatumColumn {
+        struct_size: size_of::<DatumColumn>(),
+        values: int8s.as_ptr(),
+        isnull: no_nulls.as_ptr(),
+        nrows: nrows as i32,
+        ..DatumColumn::EMPTY
+    };
+    let mut status = Status::new();
+    let mut all = [u64::MAX, (1 << 36) - 1];
+    // SAFETY: local buffers of the declared sizes, aliased by nothing else,
+    // throughout this test.
+    unsafe {
+        let mut table = CTable::new(1, 8 + 32 * 3, 16);
+        table.add_chunk(8192);
+        let mut pending_words = all;
+        let mut pending = Mask {
+            nrows: nrows as i32,
+            bits: pending_words.as_mut_ptr(),
+        };
+        let mut inserted_words = [0; 2];
+        let mut inserted = Mask {
+            nrows: nrows as i32,
+            bits: inserted_words.as_mut_ptr(),
+        };
+        let mut offsets = vec![0; nrows];
+        let code = tess_table_find_or_insert(
+            table.ptr(),
+            0,
+            hashes.as_ptr(),
+            1,
+            &raw const key,
+            &raw mut pending,
+            offsets.as_mut_ptr(),
+            &raw mut inserted,
+            &raw mut status,
+        );
+        assert_eq!(code, Code::Ok, "{}", status.message());
+        let rows = Mask {
+            nrows: nrows as i32,
+            bits: all.as_mut_ptr(),
+        };
+        let mut rest_words = [[0_u64; 2]; 3];
+        let [first, second, third] = &mut rest_words;
+        let mut rests = [first, second, third].map(|words| Mask {
+            nrows: nrows as i32,
+            bits: words.as_mut_ptr(),
+        });
+        let sums: Vec<TableSumArg> = [
+            (0, &raw const numeric_column),
+            (1, &raw const int4_column),
+            (2, &raw const int8_column),
+        ]
+        .into_iter()
+        .zip(rests.iter_mut())
+        .enumerate()
+        .map(|(sum, ((kind, column), rest))| TableSumArg {
+            kind,
+            column,
+            value_at: 8 + 32 * sum,
+            rest,
+        })
+        .collect();
+        let code = tess_table_accumulate_sums(
+            table.ptr(),
+            offsets.as_ptr(),
+            &raw const rows,
+            3,
+            sums.as_ptr(),
+            &raw mut status,
+        );
+        assert_eq!(code, Code::Ok, "{}", status.message());
+        assert_eq!(rest_words[0], [0, 0]);
+        assert_eq!(rest_words[1], [0, 0]);
+        assert_eq!(rest_words[2], [1 << 9, 0], "the int8 of 19 digits");
+        // The first four rows' records are the four groups.
+        let mut four = [0xf_u64];
+        let groups = Mask {
+            nrows: 4,
+            bits: four.as_mut_ptr(),
+        };
+        for sum in 0..3 {
+            let mut words = [[0_u64; 4]; 4];
+            for (word, out) in words.iter_mut().enumerate() {
+                assert_eq!(
+                    tess_table_gather(
+                        table.ptr(),
+                        offsets.as_ptr(),
+                        &raw const groups,
+                        8 + 32 * sum + 8 * word,
+                        out.as_mut_ptr(),
+                        &raw mut status
+                    ),
+                    Code::Ok
+                );
+            }
+            let states: [SumState; 4] = std::array::from_fn(|group| {
+                SumState::from_words(std::array::from_fn(|word| words[word][group]))
+            });
+            for (group, state) in states.iter().enumerate() {
+                let rows = (0..nrows as i64).filter(|row| row % 4 == group as i64);
+                let (value, count, scale, nan) = match sum {
+                    0 => (
+                        rows.clone()
+                            .filter(|&row| row != 5)
+                            .map(|row| row * 25)
+                            .sum::<i64>(),
+                        rows.clone().filter(|&row| row != 5).count(),
+                        2,
+                        group == 1,
+                    ),
+                    1 => (
+                        rows.clone()
+                            .filter(|&row| row != 7)
+                            .map(|row| row - 50)
+                            .sum(),
+                        rows.clone().filter(|&row| row != 7).count(),
+                        0,
+                        false,
+                    ),
+                    _ => (
+                        rows.clone()
+                            .filter(|&row| row != 9)
+                            .map(|row| row << 33)
+                            .sum(),
+                        rows.clone().filter(|&row| row != 9).count(),
+                        0,
+                        false,
+                    ),
+                };
+                assert_eq!(
+                    (state.sum.value, state.sum.count, state.sum.scale, state.nan),
+                    (i128::from(value), count as u64, scale, nan),
+                    "sum {sum}, group {group}"
+                );
+            }
+        }
+        // More sums than a call takes are refused.
+        let code = tess_table_accumulate_sums(
+            table.ptr(),
+            offsets.as_ptr(),
+            &raw const rows,
+            33,
+            sums.as_ptr(),
             &raw mut status,
         );
         assert_eq!(code, Code::InvalidArgument);

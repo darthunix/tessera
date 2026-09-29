@@ -1056,7 +1056,9 @@ batch's decimals to the state in the same pass (`tess_decimal_sum`, the
 rows it leaves row by row), and `min` and `max` find the batch's extreme
 decimal in one pass, a later row taking an equal value, and fold it in
 once (a batch with a value that is not a decimal goes row by row, in its
-order); with groups each decimal goes straight into its group's state.
+order); with groups `min` and `max` put each decimal straight into its
+group's state, and `sum` and `avg` keep theirs in the group's record
+(below).
 The kernels without, the numeric aggregates are the core's. A numeric aggregate of its own,
 not DISTINCT, asks the projection for its argument's decimals
 (`accept_decimals`) and folds a numeric chain's int64 values without a
@@ -1073,7 +1075,25 @@ call that looks its rows up, which a chunk that runs out or an index
 that grows splits into several), and each row, in order, since rows
 of one group may follow one another, reads its group's state from the
 record, advances it and writes it back; a group's final value is
-computed when the group goes out, in memory reset per group. Such groups
+computed when the group goes out, in memory reset per group. A whole
+`sum` or `avg` of numeric or bigint, or `avg` of integer or smallint,
+keeps five words of the record instead (plan 4.23, item 4a): the state of
+`tess_table_accumulate_sums` ([table.md](table.md), One writer), the
+values' int128 sum at the largest scale met, their count and whether NaN,
++Infinity and -Infinity were met, as the core's `NumericAggState` counts
+them apart, then the address of a numeric rest, 0 without one. The
+kernels fold a batch into the states of all such aggregates of the rows
+every one takes (without FILTER or DISTINCT) in one call, each group's
+record found once a batch, and leave the rows they cannot add exactly (a
+numeric not read in place or longer than 18 digits, a sum at its bound)
+to the node, which adds them to the rest by `numeric_add`; the value is
+`numeric_sum`'s, `numeric_avg`'s or `int8_avg`'s from the words and the
+rest. Against the fold into a state of the node's own it replaced (2 M
+rows, eight rounds, medians): even for numeric (`sum(n)`, `avg(n)`,
+`sum(n * 2)` by 10 groups 58.0 ms and 58.9), 0.87 for `sum` and `avg` of
+bigint, the time going to reading the values, not to adding them. The
+words hold no address while there is no rest, the ground of partial
+states and of groups that spill as records. Such groups
 cannot spill as records (they hold addresses), so past seven eighths of
 `hash_mem`, counting the states' memory, they go the core's way: the
 table freezes and takes no new group, the rows of its groups go on into

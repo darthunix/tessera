@@ -10,6 +10,7 @@
 use anyhow::{Result, ensure};
 use tessera_core::{ColumnReader, RowMask, RowMaskView};
 
+use crate::decimal::{self, SumState, Term, Terms};
 use crate::ops::ArithmeticError;
 
 use super::Partitions;
@@ -448,13 +449,39 @@ fn payload_at<'r, R: Region>(
     layout: &Layout,
     offset: u32,
 ) -> Result<&'r mut [u8]> {
+    let spot = payload_spot(access, region, layout, offset)?;
+    // SAFETY: the spot is this record's payload, just checked; the slice is
+    // dropped before the next row's is made.
+    Ok(unsafe { payload_of(region, layout, spot) })
+}
+
+/// Where the payload of the record at `offset` starts, the record checked.
+#[inline(always)]
+fn payload_spot<'r, R: Region>(
+    access: &mut Access<'r, R>,
+    region: &'r R,
+    layout: &Layout,
+    offset: u32,
+) -> Result<R::Spot> {
     access.locate(offset)?;
     let (chunk, byte) = access.place(offset)?;
     let start = byte + RECORD_HEADER + layout.nkeys * KEY_SLOT;
-    // SAFETY: the caller has the table to itself, and the payload lies
-    // within a record that `locate` accepted; the slice is dropped before
-    // the next row's is made.
-    Ok(unsafe { region.record_mut(region.spot(chunk, start), layout.payload_size) })
+    // SAFETY: the payload lies within a record that `locate` accepted.
+    Ok(unsafe { region.spot(chunk, start) })
+}
+
+/// The payload at a spot [`payload_spot`] gave, to change in place.
+///
+/// # Safety
+///
+/// The spot comes from [`payload_spot`] during this operation, the caller
+/// has the table to itself, and no other slice of the same payload is
+/// alive while this one is.
+#[inline(always)]
+#[allow(clippy::mut_from_ref)]
+unsafe fn payload_of<'r, R: Region>(region: &'r R, layout: &Layout, spot: R::Spot) -> &'r mut [u8] {
+    // SAFETY: the caller's contract.
+    unsafe { region.record_mut(spot, layout.payload_size) }
 }
 
 #[inline(always)]
@@ -592,6 +619,276 @@ where
             };
             write_word(payload, slot.value_at, next as u64);
             write_word(payload, slot.flags_at, flags | flag);
+        }
+    }
+    Ok(())
+}
+
+/// The most sums [`sum_terms`] folds in a call.
+pub const MAX_SUMS: usize = 32;
+
+/// A sum or an average whose [`SumState`] a record keeps at byte `at` of
+/// its payload, the terms of its rows, and the mask of the rows it leaves
+/// to the caller.
+pub struct SumSlot<'a, T: ?Sized> {
+    /// The rows' terms.
+    pub terms: &'a T,
+    /// The state's first byte in the payload.
+    pub at: usize,
+    /// The rows the state does not take; every word is written.
+    pub rest: RowMask<'a>,
+}
+
+/// Groups a word of rows folds first among themselves, before their
+/// records: past them, a word's rows go to their records one by one.
+const LOCAL_GROUPS: usize = 16;
+
+/// Slots of the hash of a word's groups: twice the groups, so that a probe
+/// ends.
+const LOCAL_SLOTS: usize = 2 * LOCAL_GROUPS;
+
+/// The decimals one group's rows of a word gave one sum, added up: their
+/// sum at their scale and how many.
+#[derive(Clone, Copy, Debug, Default)]
+struct Local {
+    value: i128,
+    count: u64,
+    scale: u32,
+}
+
+/// The group of a word's record `offset`, a new one while there is room;
+/// `None` once the word has [`LOCAL_GROUPS`] groups and this is another.
+#[inline(always)]
+fn local_group(
+    slots: &mut [u8; LOCAL_SLOTS],
+    groups: &mut [u32; LOCAL_GROUPS],
+    ngroups: &mut usize,
+    offset: u32,
+) -> Option<usize> {
+    let mut slot =
+        (offset.wrapping_mul(0x9E37_79B1) >> (32 - LOCAL_SLOTS.trailing_zeros())) as usize;
+    loop {
+        let entry = slots[slot];
+        if entry == 0 {
+            if *ngroups == LOCAL_GROUPS {
+                return None;
+            }
+            groups[*ngroups] = offset;
+            *ngroups += 1;
+            slots[slot] = *ngroups as u8;
+            return Some(*ngroups - 1);
+        }
+        if groups[usize::from(entry) - 1] == offset {
+            return Some(usize::from(entry) - 1);
+        }
+        slot = (slot + 1) % LOCAL_SLOTS;
+    }
+}
+
+/// Fold one term into the [`SumState`] at byte `at` of a payload: false
+/// when the state does not take it.
+#[inline(always)]
+fn fold_term(payload: &mut [u8], at: usize, term: Term) -> Result<bool> {
+    // One check for the four words, then words at fixed places.
+    let slots: &mut [u8; 8 * SumState::WORDS] =
+        (&mut payload[at..at + 8 * SumState::WORDS]).try_into()?;
+    let mut words: [u64; SumState::WORDS] = std::array::from_fn(|word| read_word(slots, 8 * word));
+    let taken = SumState::add_to(&mut words, term);
+    if taken {
+        for (word, value) in words.into_iter().enumerate() {
+            write_word(slots, 8 * word, value);
+        }
+    }
+    Ok(taken)
+}
+
+/// Fold each selected row's terms into the [`SumState`]s of its record's
+/// payload, as if row by row: a decimal into the sum, NaN or an infinity
+/// into its flag, NULL skipped. A row a state does not take (a longer
+/// value, a decimal the sum refuses) goes to that sum's rest, for the
+/// caller to add by the core's means.
+///
+/// A word's rows are first added up by group, for up to [`LOCAL_GROUPS`]
+/// groups a word, whose records are found once: for each sum, the decimals
+/// of one scale a group's rows give make one local sum, which goes into the
+/// record once. The rows a source hands over in bulk (decimals of one scale
+/// without NULL, integers) are added by a loop over their values alone; the
+/// others go term by term, and a term that is no such decimal goes to the
+/// record directly, as do the rows of further groups. Exact sums add in any
+/// order; a local sum the state refuses at its bound is taken again row by
+/// row, so that the rows it refuses go to the rest.
+pub(super) fn sum_terms<R: Region, T: Terms>(
+    region: &R,
+    layout: &Layout,
+    offsets: &[u32],
+    rows: &RowMaskView<'_>,
+    sums: &mut [SumSlot<'_, T>],
+) -> Result<()> {
+    let nrows = rows.nrows();
+    let nsums = sums.len();
+    ensure!(nsums <= MAX_SUMS, "{nsums} sums in a call, past {MAX_SUMS}");
+    ensure!(
+        offsets.len() == nrows,
+        "the offsets and mask of the batch have different row counts"
+    );
+    for sum in sums.iter() {
+        let words: [usize; SumState::WORDS] = std::array::from_fn(|word| sum.at + 8 * word);
+        check_accumulate(layout, offsets.len(), nrows, &words)?;
+        ensure!(
+            sum.rest.as_view().nrows() == nrows,
+            "the rest and the selection of a sum have different row counts"
+        );
+    }
+    let mut access = Access::new(region, layout);
+    let mut others = [0_u64; MAX_SUMS];
+    let mut groups = [0_u32; LOCAL_GROUPS];
+    let mut spots: [Option<R::Spot>; LOCAL_GROUPS] = [None; LOCAL_GROUPS];
+    let mut locals = [Local::default(); LOCAL_GROUPS];
+    let mut row_groups = [0_u8; 64];
+    let mut group_rows = [0_u64; LOCAL_GROUPS];
+    let mut bulk = [0_i128; LOCAL_GROUPS];
+    for index in 0..nrows.div_ceil(64) {
+        let selected = rows.word(index).unwrap();
+        // The word's groups, and the rows of the groups that fit.
+        let mut slots = [0_u8; LOCAL_SLOTS];
+        let mut ngroups = 0;
+        let mut local_rows = 0_u64;
+        let mut look = selected;
+        while look != 0 {
+            let bit = look.trailing_zeros() as usize;
+            look &= look - 1;
+            match local_group(
+                &mut slots,
+                &mut groups,
+                &mut ngroups,
+                offsets[index * 64 + bit],
+            ) {
+                Some(group) => {
+                    row_groups[bit] = group as u8;
+                    local_rows |= 1 << bit;
+                }
+                None => break,
+            }
+        }
+        group_rows[..ngroups].fill(0);
+        let mut look = local_rows;
+        while look != 0 {
+            let bit = look.trailing_zeros() as usize;
+            look &= look - 1;
+            group_rows[usize::from(row_groups[bit]) % LOCAL_GROUPS] |= 1 << bit;
+        }
+        for (spot, &offset) in spots.iter_mut().zip(&groups[..ngroups]) {
+            *spot = Some(payload_spot(&mut access, region, layout, offset)?);
+        }
+        for (sum, other) in sums.iter().zip(others.iter_mut()) {
+            *other = 0;
+            locals[..ngroups].fill(Local::default());
+            let mut taken = 0_u64;
+            // The rows handed over in bulk: their values alone, added up by
+            // group as the source reads them, counted by the groups' rows.
+            bulk[..ngroups].fill(0);
+            if let Some(word) = sum.terms.fold_decimals(index, local_rows, |bit, value| {
+                bulk[usize::from(row_groups[bit % 64]) % LOCAL_GROUPS] += i128::from(value);
+            }) {
+                ensure!(
+                    word.rows & !local_rows == 0 && word.scale <= decimal::MAX_READ_SCALE,
+                    "a source handed over rows it was not asked for"
+                );
+                for ((local, &value), &rows) in locals[..ngroups]
+                    .iter_mut()
+                    .zip(&bulk[..ngroups])
+                    .zip(&group_rows[..ngroups])
+                {
+                    *local = Local {
+                        value,
+                        count: u64::from((rows & word.rows).count_ones()),
+                        scale: word.scale,
+                    };
+                }
+                taken = word.rows;
+            }
+            // The other rows of the word's groups, term by term.
+            let mut look = local_rows & !taken;
+            while look != 0 {
+                let bit = look.trailing_zeros() as usize;
+                look &= look - 1;
+                let group = usize::from(row_groups[bit]);
+                let term = sum.terms.term(index * 64 + bit);
+                let local = &mut locals[group];
+                match term {
+                    Term::Null => {}
+                    Term::Decimal(decimal)
+                        if decimal.scale() <= decimal::MAX_READ_SCALE
+                            && (local.count == 0 || local.scale == decimal.scale()) =>
+                    {
+                        local.value += i128::from(decimal.value());
+                        local.count += 1;
+                        local.scale = decimal.scale();
+                        taken |= 1 << bit;
+                    }
+                    _ => {
+                        let spot = spots[group].unwrap();
+                        // SAFETY: the group's spot was found in this call;
+                        // the slice goes before another is made.
+                        let payload = unsafe { payload_of(region, layout, spot) };
+                        if !fold_term(payload, sum.at, term)? {
+                            *other |= 1 << bit;
+                        }
+                    }
+                }
+            }
+            // Each group's local sum into its record.
+            for (group, local) in locals[..ngroups].iter().enumerate() {
+                if local.count == 0 {
+                    continue;
+                }
+                let spot = spots[group].unwrap();
+                // SAFETY: as above.
+                let payload = unsafe { payload_of(region, layout, spot) };
+                let slots: &mut [u8; 8 * SumState::WORDS] =
+                    (&mut payload[sum.at..sum.at + 8 * SumState::WORDS]).try_into()?;
+                let mut words: [u64; SumState::WORDS] =
+                    std::array::from_fn(|word| read_word(slots, 8 * word));
+                if SumState::add_many_to(&mut words, local.value, local.scale, local.count) {
+                    for (word, value) in words.into_iter().enumerate() {
+                        write_word(slots, 8 * word, value);
+                    }
+                    continue;
+                }
+                // At the bound: the rows that made the local sum, one by one;
+                // one that is no decimal of its scale goes to the rest.
+                let mut again = taken;
+                while again != 0 {
+                    let bit = again.trailing_zeros() as usize;
+                    again &= again - 1;
+                    if usize::from(row_groups[bit]) != group {
+                        continue;
+                    }
+                    let term = sum.terms.term(index * 64 + bit);
+                    let decimal =
+                        matches!(term, Term::Decimal(decimal) if decimal.scale() == local.scale);
+                    if !decimal || !fold_term(payload, sum.at, term)? {
+                        *other |= 1 << bit;
+                    }
+                }
+            }
+        }
+        // The rows of further groups, each to its record.
+        let mut look = selected & !local_rows;
+        while look != 0 {
+            let bit = look.trailing_zeros() as usize;
+            look &= look - 1;
+            let row = index * 64 + bit;
+            let payload = payload_at(&mut access, region, layout, offsets[row])?;
+            for (sum, other) in sums.iter().zip(others.iter_mut()) {
+                let term = sum.terms.term(row);
+                if !matches!(term, Term::Null) && !fold_term(payload, sum.at, term)? {
+                    *other |= 1 << bit;
+                }
+            }
+        }
+        for (sum, &other) in sums.iter_mut().zip(others.iter()) {
+            sum.rest.set_word(index, other)?;
         }
     }
     Ok(())

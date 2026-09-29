@@ -524,10 +524,17 @@ typedef struct TessKernelOps
 								   const int64 *keys, int nkeys,
 								   const TessRowMask *rows, TessRowMask *found,
 								   TessRowMask *present, TessStatus *status);
+	/* tess_table_accumulate_sums */
+	TessStatusCode (*table_accumulate_sums) (const TessTableRef *table,
+											 const uint32 *offsets,
+											 const TessRowMask *rows,
+											 int nsums,
+											 const TessTableSumArg *sums,
+											 TessStatus *status);
 } TessKernelOps;
 
 #define TESS_KERNEL_OPS_MIN_SIZE \
-	TESS_ABI_SIZE_INCLUDING_FIELD(TessKernelOps, int8_in_set)
+	TESS_ABI_SIZE_INCLUDING_FIELD(TessKernelOps, table_accumulate_sums)
 
 /*
  * The registry of the kernels: one table per backend, installed by the

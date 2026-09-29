@@ -14,8 +14,9 @@ use anyhow::{Context, Result, bail, ensure};
 use tessera_core::ColumnReader;
 use tessera_kernels::table::{
     Chunks, Combine, CombineStop, Cursor, FORMAT_VERSION, Fold, HEADER_SIZE, KeyKind, KeySource,
-    MAX_KEYS, MAX_PAYLOAD_COLUMNS, Partitions, PayloadColumns, Slot, Table, TableConfig, TableMut,
-    UNIT_BITS, VERSION_OFFSET, append_columns_to, append_partitioned_columns_to, append_to,
+    MAX_KEYS, MAX_PAYLOAD_COLUMNS, MAX_SUMS, Partitions, PayloadColumns, Slot, SumSlot, Table,
+    TableConfig, TableMut, UNIT_BITS, VERSION_OFFSET, append_columns_to,
+    append_partitioned_columns_to, append_to,
     bloom::SharedFilter,
     index_size, init_chunk, normalize_word, payload_null_words,
     phases::{Participant, SharedCounters},
@@ -24,6 +25,7 @@ use tessera_kernels::table::{
 
 use super::args::reader;
 use super::column::DatumColumn;
+use super::decimal::{SumColumn, SumInput};
 use super::mask::Mask;
 use super::status::{Code, Status, guard};
 use crate::{DatumInt32Column, DatumInt64Column};
@@ -1370,6 +1372,86 @@ pub unsafe extern "C" fn tess_table_accumulate(
                 }
                 other => bail!("unknown accumulation {other}"),
             }
+        })
+    }
+}
+
+/// `TessTableSumInput`: the values `tess_table_accumulate_sums` reads.
+const SUM_NUMERIC: c_uint = 0;
+const SUM_INT4: c_uint = 1;
+const SUM_INT8: c_uint = 2;
+
+/// `TessTableSumArg`: a sum of `tess_table_accumulate_sums`.
+#[repr(C)]
+#[derive(Debug)]
+pub struct TableSumArg {
+    /// A `TessTableSumInput`.
+    pub kind: c_uint,
+    /// Its column.
+    pub column: *const DatumColumn,
+    /// Its state's first byte in the payload.
+    pub value_at: usize,
+    /// The rows the state does not take.
+    pub rest: *mut Mask,
+}
+
+/// `tess_table_accumulate_sums`: fold each selected row into the sum or
+/// average states of its record's payload, the rows a state does not take
+/// into its sum's rest.
+///
+/// # Safety
+///
+/// `table` as for [`attach_mut`] during the call; `rows` must point to a
+/// valid mask; `offsets` must hold an initialized offset per row; `sums`
+/// must point to `nsums` sums, each with a valid `TessDatumColumn` of the
+/// rows' count whose selected rows have initialized flags and, when not
+/// NULL, values of the kind (numeric Datums read in place, or its
+/// decimals, or integer words), and a valid rest mask that nothing else
+/// accesses; `status` as for every entry point.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tess_table_accumulate_sums(
+    table: *const TableRef,
+    offsets: *const u32,
+    rows: *const Mask,
+    nsums: c_int,
+    sums: *const TableSumArg,
+    status: *mut Status,
+) -> Code {
+    // SAFETY: the caller's contract.
+    unsafe {
+        guard(status, || {
+            let mut table = attach_mut(table)?;
+            let rows = rows.as_ref().context("a null row mask")?.view()?;
+            let nrows = rows.nrows();
+            let offsets = values(offsets, nrows, "offsets")?;
+            let nsums = usize::try_from(nsums).context("a negative sum count")?;
+            ensure!(nsums <= MAX_SUMS, "{nsums} sums in a call, past {MAX_SUMS}");
+            let args = values(sums, nsums, "sums")?;
+            // Only the sums given are set, as in the partitioned appends.
+            let mut columns = [const { MaybeUninit::<SumColumn<'_>>::uninit() }; MAX_SUMS];
+            for (arg, column) in args.iter().zip(columns.iter_mut()) {
+                let input = match arg.kind {
+                    SUM_NUMERIC => SumInput::Numeric,
+                    SUM_INT4 => SumInput::Int4,
+                    SUM_INT8 => SumInput::Int8,
+                    other => bail!("unknown sum input {other}"),
+                };
+                column.write(SumColumn::new(input, arg.column, nrows)?);
+            }
+            // SAFETY: the loop above initialized the first `nsums` columns.
+            let columns = &*(&raw const columns[..nsums] as *const [SumColumn<'_>]);
+            let mut slots =
+                [const { MaybeUninit::<SumSlot<'_, SumColumn<'_>>>::uninit() }; MAX_SUMS];
+            for ((arg, column), slot) in args.iter().zip(columns).zip(slots.iter_mut()) {
+                slot.write(SumSlot {
+                    terms: column,
+                    at: arg.value_at,
+                    rest: arg.rest.as_mut().context("a null rest mask")?.mask()?,
+                });
+            }
+            // SAFETY: as above, and the slots own nothing to drop.
+            let slots = &mut *(&raw mut slots[..nsums] as *mut [SumSlot<'_, SumColumn<'_>>]);
+            table.sum_terms(offsets, &rows, slots)
         })
     }
 }

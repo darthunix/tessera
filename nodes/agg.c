@@ -64,6 +64,8 @@
 #define AGG_GATHER_ROWS 8
 /* Groups per output batch. */
 #define AGG_GROUP_ROWS 64
+/* A generic sum state's payload words: the kernels' state, then the rest's address. */
+#define AGG_SUM_STATE_WORDS (TESS_TABLE_SUM_WORDS + 1)
 /* The table's first capacity when the planner expects fewer groups. */
 #define AGG_INITIAL_GROUPS 256
 /* A group's aggregate states have one flag bit each in a payload word. */
@@ -224,6 +226,15 @@ typedef struct GenericAgg
 	uint64	   *decimal_rest;
 	int			decimal_capacity;
 	TessStatus	decimal_status;
+	/*
+	 * GROUP BY, sum and avg of numeric and bigint, avg of integer and
+	 * smallint: the group's state is TESS_TABLE_SUM_WORDS words of its
+	 * record, which the kernels fold a batch into, reading sum_input, and
+	 * then the address of the numeric sum of the rows they leave to the
+	 * node, 0 without any (sum_state).
+	 */
+	bool		sum_state;
+	TessTableSumInput sum_input;
 } GenericAgg;
 
 /*
@@ -271,6 +282,11 @@ typedef struct AggValue
 	bool		has_value;
 	/* GROUP BY: how the table folds a row into the group's state. */
 	TessTableAccumulate accumulate;
+	/*
+	 * GROUP BY: the payload word where the state starts, after the word of
+	 * flags; a word, or a generic sum state's AGG_SUM_STATE_WORDS.
+	 */
+	int			slot;
 	/*
 	 * DISTINCT: the pairs of group and argument seen, and the argument's
 	 * kind; an argument a word does not hold goes by its number in a
@@ -536,9 +552,14 @@ typedef struct TessAggState
 	/*
 	 * GROUP BY: the keys, computed columns before the arguments, and the
 	 * table of groups: a record per group, its payload a word of flags
-	 * (bit i: aggregate i has a value) and a word per aggregate.
+	 * (bit i: aggregate i has a value) and each aggregate's state from its
+	 * slot, payload_size bytes in all; the rows a batch's sum states left
+	 * to the node.
 	 */
 	int			nkeys;
+	Size		payload_size;
+	uint64	   *sum_rest_bits;
+	int		   *sum_indexes;
 	TessTableKeyKind kinds[TESS_TABLE_MAX_KEYS];
 	const TessKernelOps *kernels;
 	MemoryContext table_context;
@@ -2822,6 +2843,14 @@ generic_init(TessAggState *state, Aggref *agg)
 	/* Its state starts empty, as the core's of these but avg(int4)'s. */
 	if (generic->fast != FAST_NONE)
 		generic->init_null = true;
+#ifdef HAVE_INT128
+	/* A group's sum or average of a number, whole: words of its record. */
+	generic->sum_state = state->nkeys > 0 &&
+		(generic->fast == FAST_SUM || generic->fast == FAST_AVG) &&
+		!OidIsValid(generic->fast_float) && !generic->fast_int8_result;
+	generic->sum_input = generic->fast_numeric ? TESS_TABLE_SUM_OF_NUMERIC :
+		generic->fast_wide ? TESS_TABLE_SUM_OF_INT8 : TESS_TABLE_SUM_OF_INT4;
+#endif
 	return generic;
 }
 
@@ -2973,6 +3002,7 @@ fast_group_decimals(TessAggState *state, int index, const TessRowMask *rows,
 					MemoryContext states, MemoryContext temporary)
 {
 	GenericAgg *generic = state->values[index].generic;
+	int			slot = state->values[index].slot;
 	const TessDatumColumn *column = &generic->columns[0];
 	const uint64 *side = tess_column_decimal_rows(column);
 	bool		extreme = generic->fast == FAST_MIN || generic->fast == FAST_MAX;
@@ -2993,19 +3023,19 @@ fast_group_decimals(TessAggState *state, int index, const TessRowMask *rows,
 
 			if (!fast_row_decimal(generic, side_bits, read_bits, row, &decimal))
 			{
-				generic->state = (Datum) payload[1 + index];
+				generic->state = (Datum) payload[slot];
 				generic->state_null = (payload[0] & bit) == 0;
 				generic_advance(generic, row, states, temporary);
-				payload[1 + index] = generic->state_null ? 0 : (uint64) generic->state;
+				payload[slot] = generic->state_null ? 0 : (uint64) generic->state;
 				payload[0] = generic->state_null ? payload[0] & ~bit : payload[0] | bit;
 				continue;
 			}
 			if ((payload[0] & bit) == 0)
 			{
-				payload[1 + index] = (uint64) MemoryContextAllocZero(states, sizeof(FastState));
+				payload[slot] = (uint64) MemoryContextAllocZero(states, sizeof(FastState));
 				payload[0] |= bit;
 			}
-			fast = (FastState *) payload[1 + index];
+			fast = (FastState *) payload[slot];
 			if (!extreme)
 			{
 				fast->count++;
@@ -3017,6 +3047,166 @@ fast_group_decimals(TessAggState *state, int index, const TessRowMask *rows,
 				fast_extreme(generic, fast, column->values[row], &decimal, states);
 		}
 	}
+}
+#endif
+
+#ifdef HAVE_INT128
+/* A special value of numeric, made as the core makes it from its text. */
+static Datum
+sum_state_special(const char *name)
+{
+	return DirectFunctionCall3(numeric_in, CStringGetDatum(name),
+							   ObjectIdGetDatum(InvalidOid), Int32GetDatum(-1));
+}
+
+/* A row the kernels left to a sum state, as a numeric. */
+static Datum
+sum_state_term(const GenericAgg *generic, const TessDatumColumn *column, int row)
+{
+	Datum		value = column->values[row];
+	const uint64 *side = tess_column_decimal_rows(column);
+
+	switch (generic->sum_input)
+	{
+		case TESS_TABLE_SUM_OF_INT4:
+			return NumericGetDatum(int64_to_numeric(DatumGetInt32(value)));
+		case TESS_TABLE_SUM_OF_INT8:
+			return NumericGetDatum(int64_to_numeric(DatumGetInt64(value)));
+		default:
+			if (side != NULL && ((side[row / 64] >> (row % 64)) & 1) != 0)
+				return NumericGetDatum(int64_div_fast_to_numeric(DatumGetInt64(value),
+																 column->decimal_scale));
+			return value;
+	}
+}
+
+/*
+ * A row the kernels left to a sum state, by the core's means: NaN or an
+ * infinity into its bit, any other value counted and added to the group's
+ * rest, a numeric in the states' context whose address is the word after
+ * the kernels' state.
+ */
+static void
+sum_state_rest(TessAggState *state, const GenericAgg *generic, int slot, int row,
+			   MemoryContext states)
+{
+	uint64	   *words = record_payload(state, state->offsets[row]) + slot;
+	Numeric		number = DatumGetNumeric(sum_state_term(generic, &generic->columns[0], row));
+	MemoryContext old;
+
+	if (numeric_is_nan(number))
+	{
+		words[3] |= TESS_TABLE_SUM_NAN;
+		return;
+	}
+	if (numeric_is_inf(number))
+	{
+		bool		positive = DatumGetInt32(DirectFunctionCall2(numeric_cmp,
+																 NumericGetDatum(number),
+																 NumericGetDatum(int64_to_numeric(0)))) > 0;
+
+		words[3] |= positive ? TESS_TABLE_SUM_POSITIVE_INFINITY :
+			TESS_TABLE_SUM_NEGATIVE_INFINITY;
+		return;
+	}
+	words[2]++;
+	old = MemoryContextSwitchTo(states);
+	if (words[TESS_TABLE_SUM_WORDS] == 0)
+		words[TESS_TABLE_SUM_WORDS] =
+			(uint64) DatumGetPointer(datumCopy(NumericGetDatum(number), false, -1));
+	else
+	{
+		Datum		sum = DirectFunctionCall2(numeric_add,
+											  (Datum) words[TESS_TABLE_SUM_WORDS],
+											  NumericGetDatum(number));
+
+		pfree((void *) words[TESS_TABLE_SUM_WORDS]);
+		words[TESS_TABLE_SUM_WORDS] = (uint64) DatumGetPointer(sum);
+	}
+	MemoryContextSwitchTo(old);
+}
+
+/*
+ * The rows of a batch into the groups' sum states of the aggregates at
+ * indexes, words of their records: the kernels fold what they can, the
+ * record found once a row for all of them (tess_table_accumulate_sums),
+ * and leave the rest here (sum_state_rest). A new group's words are zeros,
+ * the empty state.
+ */
+static void
+sum_states_accumulate(TessAggState *state, int nsums, const int *indexes,
+					  const TessRowMask *rows)
+{
+	MemoryContext states = state->generic_agg->curaggcontext->ecxt_per_tuple_memory;
+	int			nwords = tess_row_mask_word_count(rows->nrows);
+
+	for (int first = 0; first < nsums; first += TESS_TABLE_MAX_SUMS)
+	{
+		int			count = Min(nsums - first, TESS_TABLE_MAX_SUMS);
+		TessTableSumArg args[TESS_TABLE_MAX_SUMS];
+		TessRowMask rests[TESS_TABLE_MAX_SUMS];
+
+		for (int sum = 0; sum < count; sum++)
+		{
+			AggValue   *value = &state->values[indexes[first + sum]];
+
+			rests[sum] = (TessRowMask) {rows->nrows, state->sum_rest_bits + sum * nwords};
+			memset(rests[sum].bits, 0, sizeof(uint64) * nwords);
+			args[sum] = (TessTableSumArg) {
+				.kind = value->generic->sum_input,
+				.column = &value->generic->columns[0],
+				.value_at = sizeof(uint64) * value->slot,
+				.rest = &rests[sum],
+			};
+		}
+		check(state, state->kernels->table_accumulate_sums(&state->table, state->offsets, rows,
+														   count, args, &state->status));
+		for (int sum = 0; sum < count; sum++)
+		{
+			AggValue   *value = &state->values[indexes[first + sum]];
+			int			row = -1;
+
+			while ((row = tess_row_mask_next(&rests[sum], row)) >= 0)
+				sum_state_rest(state, value->generic, value->slot, row, states);
+		}
+	}
+}
+
+/*
+ * A group's sum or average from its sum state, as the core's numeric_sum,
+ * numeric_avg, numeric_poly_sum, numeric_poly_avg and int8_avg finish
+ * theirs: NULL without a value, NaN after NaN or both infinities, an
+ * infinity after one, else the sum at its scale plus the rest, the
+ * average that divided by the count.
+ */
+static Datum
+sum_state_value(const GenericAgg *generic, const uint64 *words, bool *isnull)
+{
+	uint64		flags = words[3];
+	int64		count = (int64) words[2];
+	int128		value = (int128) (((uint128) words[1] << 64) | words[0]);
+	Datum		sum;
+
+	*isnull = false;
+	if ((flags & TESS_TABLE_SUM_NAN) != 0 ||
+		((flags & TESS_TABLE_SUM_POSITIVE_INFINITY) != 0 &&
+		 (flags & TESS_TABLE_SUM_NEGATIVE_INFINITY) != 0))
+		return sum_state_special("NaN");
+	if ((flags & TESS_TABLE_SUM_POSITIVE_INFINITY) != 0)
+		return sum_state_special("Infinity");
+	if ((flags & TESS_TABLE_SUM_NEGATIVE_INFINITY) != 0)
+		return sum_state_special("-Infinity");
+	if (count == 0)
+	{
+		*isnull = true;
+		return (Datum) 0;
+	}
+	sum = fast_numeric(value, (int) (flags & TESS_TABLE_SUM_SCALE_MASK));
+	if (words[TESS_TABLE_SUM_WORDS] != 0)
+		sum = DirectFunctionCall2(numeric_add, (Datum) words[TESS_TABLE_SUM_WORDS], sum);
+	if (generic->fast == FAST_SUM)
+		return sum;
+	return DirectFunctionCall2(numeric_div, sum, NumericGetDatum(int64_to_numeric(count)));
 }
 #endif
 
@@ -3032,17 +3222,27 @@ generic_group_accumulate(TessAggState *state, int index, const TessRowMask *rows
 						 const TessRowMask *inserted)
 {
 	GenericAgg *generic = state->values[index].generic;
+	int			slot = state->values[index].slot;
 	MemoryContext states = state->generic_agg->curaggcontext->ecxt_per_tuple_memory;
 	MemoryContext temporary = state->css.ss.ps.ps_ExprContext->ecxt_per_tuple_memory;
-	MemoryContext old = MemoryContextSwitchTo(states);
+	MemoryContext old;
 	uint64		bit = UINT64CONST(1) << index;
 	int			row = -1;
+
+#ifdef HAVE_INT128
+	if (generic->sum_state)
+	{
+		sum_states_accumulate(state, 1, &index, rows);
+		return;
+	}
+#endif
+	old = MemoryContextSwitchTo(states);
 
 	while ((row = tess_row_mask_next(inserted, row)) >= 0)
 	{
 		uint64	   *payload = record_payload(state, state->offsets[row]);
 
-		payload[1 + index] = generic->init_null ? 0 :
+		payload[slot] = generic->init_null ? 0 :
 			(uint64) datumCopy(generic->init, generic->transbyval, generic->translen);
 		payload[0] = generic->init_null ? payload[0] & ~bit : payload[0] | bit;
 	}
@@ -3061,10 +3261,10 @@ generic_group_accumulate(TessAggState *state, int index, const TessRowMask *rows
 	{
 		uint64	   *payload = record_payload(state, state->offsets[row]);
 
-		generic->state = (Datum) payload[1 + index];
+		generic->state = (Datum) payload[slot];
 		generic->state_null = (payload[0] & bit) == 0;
 		generic_advance(generic, row, states, temporary);
-		payload[1 + index] = generic->state_null ? 0 : (uint64) generic->state;
+		payload[slot] = generic->state_null ? 0 : (uint64) generic->state;
 		payload[0] = generic->state_null ? payload[0] & ~bit : payload[0] | bit;
 	}
 	MemoryContextSwitchTo(old);
@@ -3446,6 +3646,21 @@ agg_begin(CustomScanState *css, EState *estate, int eflags)
 			 (column = bms_next_member(projection, column)) >= 0;)
 			state->read_columns[state->nread_columns++] = column;
 	}
+	/* The states' places in a record: a word each, a sum state's more. */
+	{
+		int			slot = 1;
+
+		for (int index = 0; index < state->nvalues; index++)
+		{
+			AggValue   *value = &state->values[index];
+
+			value->slot = slot;
+			slot += value->generic != NULL && value->generic->sum_state ?
+				AGG_SUM_STATE_WORDS : 1;
+		}
+		state->payload_size = sizeof(uint64) * slot;
+		state->sum_indexes = palloc_array(int, Max(state->nvalues, 1));
+	}
 	request.output_mode = TESS_OUTPUT_BATCH;
 	tess_input_set_request(state->input, &request);
 	builder.parent_context = estate->es_query_cxt;
@@ -3470,14 +3685,14 @@ agg_begin(CustomScanState *css, EState *estate, int eflags)
 				state->values[value].kind == AGG_MIN ? TESS_TABLE_COMBINE_MIN :
 				TESS_TABLE_COMBINE_MAX;
 		if (state->kernels->table_size(state->nkeys, state->kinds,
-									   sizeof(uint64) * (1 + state->nvalues),
+									   state->payload_size,
 									   AGG_INITIAL_GROUPS, &state->layout_len,
 									   &state->status) != TESS_OK)
 			tess_status_report(&state->status);
 		state->layout_index = palloc0(state->layout_len);
 		if (state->kernels->table_create(state->layout_index, state->layout_len,
 										 state->nkeys, state->kinds,
-										 sizeof(uint64) * (1 + state->nvalues),
+										 state->payload_size,
 										 AGG_INITIAL_GROUPS, &state->status) != TESS_OK)
 			tess_status_report(&state->status);
 		state->state_words = palloc0_array(uint64,
@@ -3874,7 +4089,7 @@ first_capacity(uint64 capacity)
 static void *
 new_index(TessAggState *state, uint64 capacity, Size *size)
 {
-	Size		payload_size = sizeof(uint64) * (1 + state->nvalues);
+	Size		payload_size = state->payload_size;
 
 	check(state, state->kernels->table_size(state->nkeys, state->kinds,
 											payload_size, capacity, size,
@@ -3886,7 +4101,7 @@ new_index(TessAggState *state, uint64 capacity, Size *size)
 static void
 create_table(TessAggState *state)
 {
-	Size		payload_size = sizeof(uint64) * (1 + state->nvalues);
+	Size		payload_size = state->payload_size;
 	uint64		capacity = first_capacity(state->groups_estimate);
 	Size		size;
 
@@ -3984,6 +4199,8 @@ reserve_rows(TessAggState *state, int nrows)
 	state->pending_bits = MemoryContextAlloc(state->table_context, sizeof(uint64) * nwords);
 	state->inserted_bits = MemoryContextAlloc(state->table_context, sizeof(uint64) * nwords);
 	state->call_bits = MemoryContextAlloc(state->table_context, sizeof(uint64) * nwords);
+	state->sum_rest_bits = MemoryContextAlloc(state->table_context,
+											  sizeof(uint64) * nwords * TESS_TABLE_MAX_SUMS);
 	state->capacity = nrows;
 }
 
@@ -4289,11 +4506,11 @@ agg_chunk_used(const void *base)
 	return (Size) *(const uint64 *) base;
 }
 
-/* The bytes of a record: header, key slots, flags and a word per aggregate. */
+/* The bytes of a record: header, key slots, flags and the states. */
 static Size
 agg_record_size(TessAggState *state)
 {
-	return 16 + 8 * state->nkeys + sizeof(uint64) * (1 + state->nvalues);
+	return 16 + 8 * state->nkeys + state->payload_size;
 }
 
 static void
@@ -4475,7 +4692,7 @@ agg_split(TessAggState *state, AggSpill *spill, void *base, Size len, bool keep)
 		int			full;
 
 		check(state, state->kernels->table_split(&ref, state->nkeys, state->kinds,
-												 sizeof(uint64) * (1 + state->nvalues),
+												 state->payload_size,
 												 spill->current, spill->npartitions,
 												 spill->shift, AGG_SOURCE, &from,
 												 AGG_GROUP_ROWS, offsets, hashes,
@@ -4531,7 +4748,7 @@ agg_split(TessAggState *state, AggSpill *spill, void *base, Size len, bool keep)
 static void
 agg_table_from_parts(TessAggState *state, AggSpill *spill, uint64 capacity)
 {
-	Size		payload_size = sizeof(uint64) * (1 + state->nvalues);
+	Size		payload_size = state->payload_size;
 	int			nchunks = 2;
 	Size		size;
 	void	   *old = state->table.index;
@@ -4884,7 +5101,7 @@ static void
 agg_merge(TessAggState *state, AggSpill *spill, int partition)
 {
 	AggPart    *part = &spill->parts[partition];
-	Size		payload_size = sizeof(uint64) * (1 + state->nvalues);
+	Size		payload_size = state->payload_size;
 	uint64		capacity = first_capacity(part_groups(part));
 	bool		unique = spill->parent == NULL;
 	void	  **split = NULL;
@@ -5799,6 +6016,7 @@ group_batch(TessAggState *state, TessBatch *batch)
 	TessRowMask valid;
 	TessRowMask pending;
 	TessRowMask inserted;
+	int			nsums;
 
 	/*
 	 * The right side of INTERSECT or EXCEPT while every group of the left
@@ -5980,6 +6198,7 @@ group_batch(TessAggState *state, TessBatch *batch)
 	}
 	if (state->has_forms)
 		key_forms(state, &inserted);
+	nsums = 0;
 	for (int index = 0; index < state->nvalues; index++)
 	{
 		AggValue   *value = &state->values[index];
@@ -5999,6 +6218,12 @@ group_batch(TessAggState *state, TessBatch *batch)
 				computed_column(state, batch, value->computed + arg,
 								TESS_COLUMN_FOR_PROJECTION, false,
 								&value->generic->columns[arg]);
+			/* The sum states over every valid row go in one call, below. */
+			if (value->generic->sum_state && value->filter < 0 && value->distinct == NULL)
+			{
+				state->sum_indexes[nsums++] = index;
+				continue;
+			}
 			if (value->distinct != NULL)
 				rows = distinct_rows(state, value, nrows, state->hashes, &rows, &column);
 			generic_group_accumulate(state, index, &rows, &inserted);
@@ -6013,10 +6238,14 @@ group_batch(TessAggState *state, TessBatch *batch)
 													  value->accumulate,
 													  value->computed >= 0 ? &column : NULL,
 													  NULL,
-													  sizeof(uint64) * (1 + index),
+													  sizeof(uint64) * value->slot,
 													  0, (uint32) index,
 													  &state->status));
 	}
+#ifdef HAVE_INT128
+	if (nsums > 0)
+		sum_states_accumulate(state, nsums, state->sum_indexes, &valid);
+#endif
 	/*
 	 * Past seven eighths of hash_mem, the rest left for a batch's chunk and
 	 * index: the groups go into partitions, and the largest to disk; in
@@ -6166,6 +6395,17 @@ group_value_into(TessAggState *state, int index, int group, Datum *datum, bool *
 			{
 				MemoryContext old = MemoryContextSwitchTo(state->generic_output);
 
+#ifdef HAVE_INT128
+				if (value->generic->sum_state)
+				{
+					*datum = sum_state_value(value->generic,
+											 record_payload(state, state->walked[group]) +
+											 value->slot,
+											 isnull);
+					MemoryContextSwitchTo(old);
+					break;
+				}
+#endif
 				value->generic->state = (Datum) word;
 				value->generic->state_null = !seen;
 				*datum = generic_value(value->generic, isnull);
@@ -6328,7 +6568,7 @@ next_chunk(TessAggState *state)
 		for (int index = 0; index < state->nvalues; index++)
 			check(state, state->kernels->table_gather(&state->table,
 													  state->walked, &groups,
-													  sizeof(uint64) * (1 + index),
+													  sizeof(uint64) * state->values[index].slot,
 													  (Datum *) &state->state_words[index * AGG_GROUP_ROWS],
 													  &state->status));
 		return count;

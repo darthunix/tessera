@@ -103,7 +103,7 @@ use core::ops::Deref;
 use anyhow::{Result, ensure};
 use tessera_core::{ColumnReader, RowMask, RowMaskView};
 
-pub use exclusive::{Combine, CombineStop, Cursor, Fold, Slot};
+pub use exclusive::{Combine, CombineStop, Cursor, Fold, MAX_SUMS, Slot, SumSlot};
 pub use header::{
     CHUNK_HEADER, FORMAT_VERSION, HEADER_SIZE, KeyKind, MAX_CHUNK_LEN, MAX_CHUNKS, MAX_KEYS,
     TableConfig, UNIT_BITS, VERSION_OFFSET, index_size, record_bytes,
@@ -883,6 +883,19 @@ impl<'a> TableMut<'a> {
             fold,
             slot,
         )
+    }
+
+    /// Fold each selected row's terms into the sum or average states of
+    /// its record's payload ([`crate::decimal::SumState`]), the record
+    /// found once a row: the rows a state does not take go to its sum's
+    /// rest for the caller.
+    pub fn sum_terms<T: crate::decimal::Terms>(
+        &mut self,
+        offsets: &[u32],
+        rows: &RowMaskView<'_>,
+        sums: &mut [SumSlot<'_, T>],
+    ) -> Result<()> {
+        exclusive::sum_terms(&self.0.region, &self.0.layout, offsets, rows, sums)
     }
 
     /// Visit the records from `cursor` on, chunk by chunk in the order

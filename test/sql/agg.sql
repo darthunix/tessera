@@ -580,11 +580,23 @@ SELECT agg_same($$SELECT sum(v), avg(v) FROM agg_bound WHERE k = 1$$);
 SELECT agg_same($$SELECT sum(v) FROM agg_bound WHERE k = 5$$);
 SELECT agg_same($$SELECT max(v) FROM agg_bound WHERE k = 6$$);
 SELECT agg_same($$SELECT min(v) FROM agg_bound WHERE k = 6$$);
+-- A value not read in place, stored compressed: to the rest, its scale
+-- the sum's too.
+ALTER TABLE agg_bound ALTER COLUMN v SET STORAGE MAIN;
+INSERT INTO agg_bound VALUES (7, 10::numeric ^ 12000 + 0.125), (7, 1.5), (7, -(10::numeric ^ 12000)),
+    (8, 2.5), (8, 10::numeric ^ 12000 + 0.125);
+SELECT k, pg_column_compression(v) IS NOT NULL AS compressed FROM agg_bound WHERE k = 7 ORDER BY v;
+SELECT agg_same($$SELECT k, sum(v), avg(v) FROM agg_bound WHERE k = 7 GROUP BY k$$);
+SELECT agg_same($$SELECT k, sum(v) - 10::numeric ^ 12000, avg(v) * 2 - 10::numeric ^ 12000 FROM agg_bound WHERE k = 8 GROUP BY k$$);
 DROP TABLE agg_bound;
 SELECT agg_same($$SELECT g, sum(v), avg(v) FROM (SELECT g, u * 1000000000000000000 AS v FROM agg_fast WHERE u < 1e6) AS t GROUP BY g$$);
 -- Past hash_mem: the rows of new groups to disk and back.
 SET work_mem = '64kB';
 SELECT agg_same($$SELECT count(*), sum(x), sum(y) FROM (SELECT id, sum(n) AS x, max(u) AS y FROM agg_fast GROUP BY id) AS t$$);
+-- Groups whose states hold a rest (longer values, a bigint past 18
+-- digits), NaN and infinities, their rows to disk and back.
+SELECT agg_same($$SELECT count(*), sum(x), sum(y), sum(z) FROM (SELECT id % 2000 AS k, sum(u) AS x, avg(u) AS y, avg(b) AS z FROM agg_fast GROUP BY id % 2000) AS t WHERE x NOT IN ('NaN', 'Infinity', '-Infinity')$$);
+SELECT agg_same($$SELECT x, count(*) FROM (SELECT id % 2000 AS k, sum(u) AS x FROM agg_fast GROUP BY id % 2000) AS t WHERE x IN ('NaN', 'Infinity', '-Infinity') GROUP BY x$$);
 RESET work_mem;
 -- With workers, a partial aggregate is the core's state: the core's functions.
 SET max_parallel_workers_per_gather = 2;

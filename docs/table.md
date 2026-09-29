@@ -282,6 +282,26 @@ other call over it at the same time:
   order, several of one group in turn, so a sum past the int8 range
   fails with 22003 "bigint out of range" where the row-wise transition
   would; one check of the header per batch, as for `tess_table_gather`;
+- `tess_table_accumulate_sums(&table, offsets, &rows, nsums, sums,
+  &status)` folds each selected row into the sum or average states of up
+  to `TESS_TABLE_MAX_SUMS` (32) aggregates of its record, each
+  `TESS_TABLE_SUM_WORDS` (4) words at its `value_at`: the int128 sum of
+  the values below 10^36 in magnitude at the largest display scale met
+  (two words, low half first), their count, and a word of that scale
+  (bits 0 to 7) and whether NaN, +Infinity and -Infinity were met (bits
+  8, 9 and 10), as `tessera_kernels::decimal::SumState` keeps it; all
+  zeros is the empty state a new record has. A sum's column is numeric
+  (read in place, or its decimals), int4 or int8 words (an integer is a
+  decimal at scale 0). A row a state does not take, a numeric not read
+  in place or of more than 18 digits or a display scale past 18, or one
+  the sum would carry to its bound, is set in that sum's `rest` mask for
+  the caller. Within a batch the rows of up to 16 groups are added up by
+  group first, the decimals a source hands over in bulk by a loop over
+  their values, and each group's record is found once and changed once a
+  sum; the rows of further groups go to their records one by one. Exact
+  sums add in any order; a group's batch sum the state refuses at its
+  bound is taken again row by row, so the rows it refuses are the ones a
+  row-by-row fold would;
 - `tess_table_scan(&table, &cursor, offsets, capacity, &count, &status)`
   visits the records chunk by chunk in the order they were appended, up
   to `capacity` per call, from a cursor the caller starts at 0 and keeps

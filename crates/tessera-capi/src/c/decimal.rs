@@ -25,10 +25,11 @@ use std::marker::PhantomData;
 use std::mem::{MaybeUninit, offset_of};
 use std::slice;
 
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result, bail, ensure};
 use tessera_core::{RowMask, RowMaskView};
 use tessera_kernels::decimal::{
-    self, Arg, Compare, Decimal, MAX_SCALE, NUMERIC_MAX, Op, Results, Scales, Source, Sum,
+    self, Arg, Compare, Decimal, DecimalWord, MAX_SCALE, NUMERIC_MAX, Op, Results, Scales, Source,
+    Special, Sum, Term, Terms,
 };
 
 use super::column::DatumColumn;
@@ -63,7 +64,7 @@ unsafe fn read_numeric(datum: u64) -> Arg {
 /// A column's values and flags by row, read through raw pointers behind
 /// one check of the row against the row count, which bounds every array;
 /// fewer live lengths keep the loops in registers.
-struct Plain<'a> {
+pub(super) struct Plain<'a> {
     values: *const u64,
     isnull: *const u8,
     nrows: usize,
@@ -97,7 +98,7 @@ impl Plain<'_> {
 
 /// A column with its decimal side: the rows whose value is a decimal of
 /// one scale, not a numeric.
-struct Side<'a> {
+pub(super) struct Side<'a> {
     column: Plain<'a>,
     decimals: *const u64,
     scale: u32,
@@ -239,6 +240,275 @@ impl Source for Side<'_> {
     #[inline(always)]
     fn get(&self, row: usize) -> Arg {
         Side::get(self, row)
+    }
+}
+
+/// The term of a sum of a numeric Datum: a decimal, NaN or an infinity,
+/// or a value the caller adds.
+///
+/// # Safety
+///
+/// As for [`varlena_data`].
+#[inline(always)]
+unsafe fn numeric_term(datum: u64) -> Term {
+    // SAFETY: the caller's contract.
+    match unsafe { varlena_data(datum) } {
+        None => Term::Other,
+        Some(data) => match Decimal::read(data) {
+            Some(decimal) => Term::Decimal(decimal),
+            None => Special::read(data).map_or(Term::Other, Term::Special),
+        },
+    }
+}
+
+impl Terms for Plain<'_> {
+    /// The rows among `rows` whose numeric is a decimal of the scale of the
+    /// word's first one, handed on.
+    #[inline(always)]
+    fn fold_decimals(
+        &self,
+        index: usize,
+        rows: u64,
+        mut add: impl FnMut(usize, i64),
+    ) -> Option<DecimalWord> {
+        let base = index * 64;
+        let mut scale = None;
+        let mut bulk = 0;
+        let mut look = rows;
+        while look != 0 {
+            let bit = look.trailing_zeros() as usize;
+            look &= look - 1;
+            let row = base + bit;
+            assert!(row < self.nrows, "a decimal row past its column");
+            // SAFETY: as for `Plain::get`.
+            let decimal = unsafe {
+                if *self.isnull.add(row) != 0 {
+                    continue;
+                }
+                varlena_data(*self.values.add(row)).and_then(Decimal::read)
+            };
+            if let Some(decimal) = decimal
+                && *scale.get_or_insert(decimal.scale()) == decimal.scale()
+            {
+                add(bit, decimal.value());
+                bulk |= 1 << bit;
+            }
+        }
+        Some(DecimalWord {
+            rows: bulk,
+            scale: scale.unwrap_or(0),
+        })
+    }
+
+    #[inline(always)]
+    fn term(&self, row: usize) -> Term {
+        assert!(row < self.nrows, "a decimal row past its column");
+        // SAFETY: as for `Plain::get`.
+        unsafe {
+            if *self.isnull.add(row) != 0 {
+                return Term::Null;
+            }
+            numeric_term(*self.values.add(row))
+        }
+    }
+}
+
+/// Whether a value is a decimal's, below 10^18 in magnitude.
+#[inline(always)]
+fn decimal_value(value: i64) -> bool {
+    const LIMIT: i64 = decimal::POWERS[decimal::DIGITS as usize];
+    value.unsigned_abs() < LIMIT as u64
+}
+
+impl Terms for Side<'_> {
+    /// The side's rows among `rows` with a decimal, not NULL, handed on.
+    #[inline(always)]
+    fn fold_decimals(
+        &self,
+        index: usize,
+        rows: u64,
+        mut add: impl FnMut(usize, i64),
+    ) -> Option<DecimalWord> {
+        let base = index * 64;
+        let column = &self.column;
+        // SAFETY: the side's words cover the rows, and a selected row's
+        // flag and value are initialized (the constructor's contract); rows
+        // are read only among those asked for, each checked against the
+        // row count.
+        unsafe {
+            let mut bulk = 0;
+            let mut look = rows & *self.decimals.add(index);
+            while look != 0 {
+                let bit = look.trailing_zeros() as usize;
+                look &= look - 1;
+                let row = base + bit;
+                assert!(row < column.nrows, "a decimal row past its column");
+                let value = *column.values.add(row) as i64;
+                if *column.isnull.add(row) == 0 && decimal_value(value) {
+                    add(bit, value);
+                    bulk |= 1 << bit;
+                }
+            }
+            Some(DecimalWord {
+                rows: bulk,
+                scale: self.scale,
+            })
+        }
+    }
+
+    #[inline(always)]
+    fn term(&self, row: usize) -> Term {
+        assert!(row < self.column.nrows, "a decimal row past its column");
+        // SAFETY: as for `Side::get`.
+        unsafe {
+            if *self.column.isnull.add(row) != 0 {
+                return Term::Null;
+            }
+            let value = *self.column.values.add(row);
+            if *self.decimals.add(row / 64) >> (row % 64) & 1 == 1 {
+                return Decimal::new(value as i64, self.scale).map_or(Term::Other, Term::Decimal);
+            }
+            numeric_term(value)
+        }
+    }
+}
+
+/// An integer column's terms: each value a decimal at scale 0, an int8
+/// of 19 digits one the caller adds; int4 words (`WIDE` false) read as
+/// their low half.
+pub(super) struct Integers<'a, const WIDE: bool> {
+    column: Plain<'a>,
+}
+
+impl<const WIDE: bool> Terms for Integers<'_, WIDE> {
+    /// Every row among `rows` that is not NULL, of a decimal's magnitude,
+    /// handed on.
+    #[inline(always)]
+    fn fold_decimals(
+        &self,
+        index: usize,
+        rows: u64,
+        mut add: impl FnMut(usize, i64),
+    ) -> Option<DecimalWord> {
+        let column = &self.column;
+        let base = index * 64;
+        // SAFETY: a selected row's flag and value are initialized (the
+        // constructor's contract); rows are read only among those asked
+        // for, each checked against the row count.
+        unsafe {
+            let mut bulk = 0;
+            let mut look = rows;
+            while look != 0 {
+                let bit = look.trailing_zeros() as usize;
+                look &= look - 1;
+                let row = base + bit;
+                assert!(row < column.nrows, "an integer row past its column");
+                let word = *column.values.add(row);
+                let value = if WIDE {
+                    word as i64
+                } else {
+                    i64::from(word as i32)
+                };
+                if *column.isnull.add(row) == 0 && decimal_value(value) {
+                    add(bit, value);
+                    bulk |= 1 << bit;
+                }
+            }
+            Some(DecimalWord {
+                rows: bulk,
+                scale: 0,
+            })
+        }
+    }
+
+    #[inline(always)]
+    fn term(&self, row: usize) -> Term {
+        let column = &self.column;
+        assert!(row < column.nrows, "an integer row past its column");
+        // SAFETY: as for `Plain::get`; a word is read whatever it holds.
+        unsafe {
+            if *column.isnull.add(row) != 0 {
+                return Term::Null;
+            }
+            let word = *column.values.add(row);
+            let value = if WIDE {
+                word as i64
+            } else {
+                i64::from(word as i32)
+            };
+            Decimal::new(value, 0).map_or(Term::Other, Term::Decimal)
+        }
+    }
+}
+
+/// How `tess_table_accumulate_sums` reads a column.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum SumInput {
+    /// numeric Datums, with or without the column's decimals.
+    Numeric,
+    /// int4 words (int2 too, as the column holds it).
+    Int4,
+    /// int8 words.
+    Int8,
+}
+
+/// A sum's column, read by its kind: one loop runs over the sums of a
+/// call, so the kind is matched a row.
+pub(super) enum SumColumn<'a> {
+    Numeric(Plain<'a>),
+    Side(Side<'a>),
+    Int4(Integers<'a, false>),
+    Int8(Integers<'a, true>),
+}
+
+impl Terms for SumColumn<'_> {
+    #[inline(always)]
+    fn fold_decimals(
+        &self,
+        index: usize,
+        rows: u64,
+        add: impl FnMut(usize, i64),
+    ) -> Option<DecimalWord> {
+        match self {
+            Self::Numeric(column) => column.fold_decimals(index, rows, add),
+            Self::Side(side) => side.fold_decimals(index, rows, add),
+            Self::Int4(column) => column.fold_decimals(index, rows, add),
+            Self::Int8(column) => column.fold_decimals(index, rows, add),
+        }
+    }
+
+    #[inline(always)]
+    fn term(&self, row: usize) -> Term {
+        match self {
+            Self::Numeric(column) => column.term(row),
+            Self::Side(side) => side.term(row),
+            Self::Int4(column) => column.term(row),
+            Self::Int8(column) => column.term(row),
+        }
+    }
+}
+
+impl<'a> SumColumn<'a> {
+    /// A sum's column of `nrows` rows.
+    ///
+    /// # Safety
+    ///
+    /// `column` must satisfy [`Column::new`] for `nrows` rows, with values
+    /// of `input`'s kind, for `'a`.
+    pub(super) unsafe fn new(
+        input: SumInput,
+        column: *const DatumColumn,
+        nrows: usize,
+    ) -> Result<Self> {
+        // SAFETY: the caller's contract.
+        let column = unsafe { Column::new(column, nrows)? };
+        Ok(match (input, column) {
+            (SumInput::Numeric, Column::Plain(column)) => Self::Numeric(column),
+            (SumInput::Numeric, Column::Side(side)) => Self::Side(side),
+            (SumInput::Int4, Column::Plain(column)) => Self::Int4(Integers { column }),
+            (SumInput::Int8, Column::Plain(column)) => Self::Int8(Integers { column }),
+            (_, Column::Side(_)) => bail!("an integer column with decimals"),
+        })
     }
 }
 

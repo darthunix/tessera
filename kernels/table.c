@@ -90,4 +90,5 @@ const TessKernelOps tess_kernel_ops = {
 	.decimal_sum = tess_decimal_sum,
 	.int4_in_set = tess_int4_in_set,
 	.int8_in_set = tess_int8_in_set,
+	.table_accumulate_sums = tess_table_accumulate_sums,
 };

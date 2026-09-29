@@ -2,11 +2,13 @@
 
 use anyhow::Result;
 use tessera_core::{ColumnReader, ColumnView, RowMask, RowMaskView};
+use tessera_kernels::decimal::{self, Decimal, DecimalWord, Special, SumState, Term, Terms};
 use tessera_kernels::int32::{self, NullKeys, hash_combine, murmurhash32};
 use tessera_kernels::ops::ArithmeticError;
 use tessera_kernels::table::{
     CHUNK_HEADER, Cursor, FORMAT_VERSION, Fold, KeyKind, KeySource, LocalTable, MAX_CHUNK_LEN,
-    MAX_KEYS, Slot, Table, TableConfig, UNIT_BITS, bloom, index_size, normalize_word, record_bytes,
+    MAX_KEYS, Slot, SumSlot, Table, TableConfig, UNIT_BITS, bloom, index_size, normalize_word,
+    record_bytes,
 };
 
 /// Bytes of the header, as the format fixes it.
@@ -1619,6 +1621,209 @@ fn grouped_states_follow_a_row_by_row_model() -> Result<()> {
             max8: state(2, 5),
         };
         assert_eq!(Some(&found), model.get(&key), "group {key:?}");
+    }
+    Ok(())
+}
+
+/// Terms of a sum by row, as a batch source gives them: some only term by
+/// term, some also in bulk, the decimals of one scale.
+struct TermColumn {
+    terms: Vec<Term>,
+    bulk: Option<u32>,
+}
+
+impl Terms for TermColumn {
+    fn term(&self, row: usize) -> Term {
+        self.terms[row]
+    }
+
+    fn fold_decimals(
+        &self,
+        index: usize,
+        rows: u64,
+        mut add: impl FnMut(usize, i64),
+    ) -> Option<DecimalWord> {
+        let scale = self.bulk?;
+        let mut bulk = 0;
+        for bit in (0..64).filter(|bit| rows >> bit & 1 == 1) {
+            if let Term::Decimal(decimal) = self.terms[index * 64 + bit]
+                && decimal.scale() == scale
+            {
+                add(bit, decimal.value());
+                bulk |= 1 << bit;
+            }
+        }
+        Some(DecimalWord { rows: bulk, scale })
+    }
+}
+
+/// The terms of one sum of a model: row `row` of `column`.
+fn model_term(column: usize, row: usize) -> Term {
+    match (row + 3 * column) % 29 {
+        0 => Term::Null,
+        1 => Term::Other,
+        2 => Term::Special(Special::NaN),
+        3 if row.is_multiple_of(2) => Term::Special(Special::PositiveInfinity),
+        3 => Term::Special(Special::NegativeInfinity),
+        // A scale past 18 the sum refuses.
+        4 => Term::Decimal(Decimal::new(5, 20).unwrap()),
+        // Values near 10^18 at scale 0, which pass the bound at scale 18.
+        5 => Term::Decimal(Decimal::new(999_999_999_999_999_999, 0).unwrap()),
+        // Another scale within a word's group now and then.
+        6 | 7 => Term::Decimal(Decimal::new(row as i64 - 150, 3).unwrap()),
+        _ => Term::Decimal(
+            Decimal::new(
+                (row as i64 * 7919 + column as i64) % 20001 - 10000,
+                u32::from(column == 1) * 2,
+            )
+            .unwrap(),
+        ),
+    }
+}
+
+/// Sums and averages kept in records, three to a call: every group's
+/// states are the ones a row-by-row model adds up, and the rows a state
+/// refuses go to its rest, whether a word's groups fit the local sums (few
+/// keys) or not (many), a group's state starting at the bound or not.
+#[test]
+fn sum_states_follow_a_row_by_row_model() -> Result<()> {
+    const SUMS: usize = 3;
+    for (distinct, near_bound) in [(5, false), (11, true), (200, false), (200, true)] {
+        let config = TableConfig {
+            keys: &[KeyKind::Int32],
+            payload_size: 8 + 8 * SumState::WORDS * SUMS,
+        };
+        let nrows: usize = 300;
+        let keys: Vec<i32> = (0..nrows)
+            .map(|row| ((row * 7) % distinct) as i32)
+            .collect();
+        let key_column = [ColumnView::try_new(&keys, None)?];
+        let hashes: Vec<u32> = keys.iter().map(|&key| hash_i32(key)).collect();
+        // Sum 0 term by term; sums 1 and 2 in bulk at scales 2 and 0, their
+        // other terms one by one.
+        let terms = |column: usize| (0..nrows).map(|row| model_term(column, row)).collect();
+        let columns = [
+            TermColumn {
+                terms: terms(0),
+                bulk: None,
+            },
+            TermColumn {
+                terms: terms(1),
+                bulk: Some(2),
+            },
+            TermColumn {
+                terms: terms(2),
+                bulk: Some(0),
+            },
+        ];
+        let mut table = LocalTable::new(&config, 256, CHUNK_HEADER + 64 * 128)?;
+        let (offsets, _) = resolve_all(&mut table, &hashes, &key_column[..])?;
+        let at = |sum: usize| 8 + 8 * SumState::WORDS * sum;
+        let mut model: std::collections::HashMap<i32, [SumState; SUMS]> = Default::default();
+        if near_bound {
+            // Within 10^20 of the bound at scale 3, the largest of the terms.
+            let first = SumState {
+                sum: decimal::Sum {
+                    value: decimal::SUM_BOUND - 100_000_000_000_000_000_000,
+                    scale: 3,
+                    count: 1,
+                },
+                ..SumState::default()
+            };
+            // Every group starts there.
+            let mut writer = table.table_mut()?;
+            for (row, &offset) in offsets.iter().enumerate() {
+                if model.contains_key(&keys[row]) {
+                    continue;
+                }
+                let payload = writer.payload_mut(offset)?;
+                for sum in 0..SUMS {
+                    for (word, value) in first.to_words().into_iter().enumerate() {
+                        payload[at(sum) + 8 * word..at(sum) + 8 * word + 8]
+                            .copy_from_slice(&value.to_ne_bytes());
+                    }
+                }
+                model.insert(keys[row], [first; SUMS]);
+            }
+        }
+        let mut refused = [false; SUMS];
+        // Two batches over the same rows, the second over odd rows only.
+        for pass in 0..2 {
+            let mut selection: Vec<u64> = vec![
+                if pass == 0 {
+                    u64::MAX
+                } else {
+                    0xAAAA_AAAA_AAAA_AAAA
+                };
+                nrows.div_ceil(64)
+            ];
+            *selection.last_mut().unwrap() &= (1 << (nrows % 64)) - 1;
+            let rows = RowMaskView::try_new(nrows, &selection)?;
+            let mut rest_words = vec![vec![0_u64; nrows.div_ceil(64)]; SUMS];
+            {
+                let mut slots: Vec<SumSlot<'_, TermColumn>> = rest_words
+                    .iter_mut()
+                    .zip(&columns)
+                    .enumerate()
+                    .map(|(sum, (words, terms))| {
+                        Ok(SumSlot {
+                            terms,
+                            at: at(sum),
+                            rest: RowMask::try_new(nrows, words)?,
+                        })
+                    })
+                    .collect::<Result<_>>()?;
+                table.table_mut()?.sum_terms(&offsets, &rows, &mut slots)?;
+            }
+            let mut expected = vec![vec![0_u64; nrows.div_ceil(64)]; SUMS];
+            for row in rows_of(&rows) {
+                let states = model.entry(keys[row]).or_default();
+                for (sum, state) in states.iter_mut().enumerate() {
+                    if !state.add(columns[sum].terms[row]) {
+                        expected[sum][row / 64] |= 1 << (row % 64);
+                    }
+                }
+            }
+            for sum in 0..SUMS {
+                assert_eq!(
+                    rest_words[sum], expected[sum],
+                    "rest of sum {sum}, pass {pass}, {distinct} keys"
+                );
+                refused[sum] |= (0..nrows).any(|row| {
+                    expected[sum][row / 64] >> (row % 64) & 1 == 1
+                        && columns[sum].terms[row] != Term::Other
+                        && !matches!(columns[sum].terms[row], Term::Decimal(decimal) if decimal.scale() > 18)
+                });
+            }
+        }
+        assert_eq!(
+            refused.iter().any(|&sum| sum),
+            near_bound,
+            "a sum at its bound"
+        );
+        let groups = scan_all(&mut table, 5)?;
+        assert_eq!(groups.len(), model.len());
+        let table = table.table()?;
+        let all = all_rows(groups.len());
+        let rows = RowMaskView::try_new(groups.len(), &all)?;
+        let mut key_values = vec![0; groups.len()];
+        let mut key_nulls = vec![false; groups.len()];
+        table.gather_key(&groups, &rows, 0, &mut key_values, &mut key_nulls)?;
+        for sum in 0..SUMS {
+            let mut fields = [(); SumState::WORDS].map(|_| vec![0u64; groups.len()]);
+            for (index, field) in fields.iter_mut().enumerate() {
+                table.gather(&groups, &rows, at(sum) + index * 8, field)?;
+            }
+            for group in 0..groups.len() {
+                let found = SumState::from_words(std::array::from_fn(|word| fields[word][group]));
+                let key = key_values[group] as i64 as i32;
+                assert_eq!(
+                    Some(&found),
+                    model.get(&key).map(|states| &states[sum]),
+                    "group {key}, sum {sum}, {distinct} keys"
+                );
+            }
+        }
     }
     Ok(())
 }

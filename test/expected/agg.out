@@ -1924,6 +1924,31 @@ SELECT agg_same($$SELECT min(v) FROM agg_bound WHERE k = 6$$);
  {(-1.0)}
 (1 row)
 
+-- A value not read in place, stored compressed: to the rest, its scale
+-- the sum's too.
+ALTER TABLE agg_bound ALTER COLUMN v SET STORAGE MAIN;
+INSERT INTO agg_bound VALUES (7, 10::numeric ^ 12000 + 0.125), (7, 1.5), (7, -(10::numeric ^ 12000)),
+    (8, 2.5), (8, 10::numeric ^ 12000 + 0.125);
+SELECT k, pg_column_compression(v) IS NOT NULL AS compressed FROM agg_bound WHERE k = 7 ORDER BY v;
+ k | compressed 
+---+------------
+ 7 | f
+ 7 | f
+ 7 | t
+(3 rows)
+
+SELECT agg_same($$SELECT k, sum(v), avg(v) FROM agg_bound WHERE k = 7 GROUP BY k$$);
+               agg_same               
+--------------------------------------
+ {"(7,1.625,0.54166666666666666667)"}
+(1 row)
+
+SELECT agg_same($$SELECT k, sum(v) - 10::numeric ^ 12000, avg(v) * 2 - 10::numeric ^ 12000 FROM agg_bound WHERE k = 8 GROUP BY k$$);
+      agg_same       
+---------------------
+ {"(8,2.625,2.626)"}
+(1 row)
+
 DROP TABLE agg_bound;
 SELECT agg_same($$SELECT g, sum(v), avg(v) FROM (SELECT g, u * 1000000000000000000 AS v FROM agg_fast WHERE u < 1e6) AS t GROUP BY g$$);
                                                               agg_same                                                               
@@ -1937,6 +1962,20 @@ SELECT agg_same($$SELECT count(*), sum(x), sum(y) FROM (SELECT id, sum(n) AS x, 
       agg_same      
 --------------------
  {"(5000,NaN,NaN)"}
+(1 row)
+
+-- Groups whose states hold a rest (longer values, a bigint past 18
+-- digits), NaN and infinities, their rows to disk and back.
+SELECT agg_same($$SELECT count(*), sum(x), sum(y), sum(z) FROM (SELECT id % 2000 AS k, sum(u) AS x, avg(u) AS y, avg(b) AS z FROM agg_fast GROUP BY id % 2000) AS t WHERE x NOT IN ('NaN', 'Infinity', '-Infinity')$$);
+                                                             agg_same                                                              
+-----------------------------------------------------------------------------------------------------------------------------------
+ {"(1887,11064506073258950607605735.00000000000000000000,4552347695654384769680223.34999999999999906666,17404503033540243904809)"}
+(1 row)
+
+SELECT agg_same($$SELECT x, count(*) FROM (SELECT id % 2000 AS k, sum(u) AS x FROM agg_fast GROUP BY id % 2000) AS t WHERE x IN ('NaN', 'Infinity', '-Infinity') GROUP BY x$$);
+                   agg_same                   
+----------------------------------------------
+ {"(-Infinity,58)","(Infinity,54)","(NaN,1)"}
 (1 row)
 
 RESET work_mem;

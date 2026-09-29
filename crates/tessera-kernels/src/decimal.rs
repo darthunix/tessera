@@ -742,6 +742,9 @@ impl Sum {
         let (value, scale) = if decimal.scale == self.scale {
             (self.value + term, self.scale)
         } else if decimal.scale > self.scale {
+            if decimal.scale > MAX_READ_SCALE {
+                return false;
+            }
             let Some(&factor) = POWERS.get((decimal.scale - self.scale) as usize) else {
                 return false;
             };
@@ -762,6 +765,46 @@ impl Sum {
         self.value = value;
         self.scale = scale;
         self.count += 1;
+        true
+    }
+
+    /// Add the sum `value` of `count` values at `scale`, as [`Sum::add`]
+    /// adds one: false, the sum unchanged, when the result or the rescaled
+    /// sum would reach [`SUM_BOUND`], a term rescaled would overflow, or a
+    /// scale passes 18.
+    #[inline(always)]
+    pub fn add_many(&mut self, value: i128, scale: u32, count: u64) -> bool {
+        if scale > MAX_READ_SCALE {
+            return false;
+        }
+        let (sum, scale) = if scale == self.scale {
+            (self.value.checked_add(value), self.scale)
+        } else if scale > self.scale {
+            let Some(&factor) = POWERS.get((scale - self.scale) as usize) else {
+                return false;
+            };
+            let factor = i128::from(factor);
+            if self.value.abs() >= SUM_BOUND / factor {
+                return false;
+            }
+            ((self.value * factor).checked_add(value), scale)
+        } else {
+            let Some(&factor) = POWERS.get((self.scale - scale) as usize) else {
+                return false;
+            };
+            (
+                value
+                    .checked_mul(i128::from(factor))
+                    .and_then(|term| self.value.checked_add(term)),
+                self.scale,
+            )
+        };
+        let Some(sum) = sum.filter(|sum| sum.abs() < SUM_BOUND) else {
+            return false;
+        };
+        self.value = sum;
+        self.scale = scale;
+        self.count += count;
         true
     }
 }
@@ -802,6 +845,207 @@ pub fn sum(
     })?;
     *total = sum;
     Ok(())
+}
+
+/// A value of numeric that is not a number, told by its header word.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Special {
+    /// NaN (0xC000).
+    NaN,
+    /// +Infinity (0xD000).
+    PositiveInfinity,
+    /// -Infinity (0xF000).
+    NegativeInfinity,
+}
+
+impl Special {
+    /// The special value of a numeric's bytes after the varlena header,
+    /// `None` for a number or bytes too short for a header.
+    #[inline(always)]
+    pub fn read(data: &[u8]) -> Option<Self> {
+        match u16::from_ne_bytes(*data.first_chunk::<2>()?) {
+            0xC000 => Some(Self::NaN),
+            0xD000 => Some(Self::PositiveInfinity),
+            0xF000 => Some(Self::NegativeInfinity),
+            _ => None,
+        }
+    }
+}
+
+/// A row's argument of a sum or an average whose state a record keeps
+/// ([`SumState`]).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Term {
+    /// SQL NULL: skipped.
+    Null,
+    /// A decimal, an integer being one at scale 0.
+    Decimal(Decimal),
+    /// NaN or an infinity, which the state counts apart.
+    Special(Special),
+    /// A value the caller must add by the core's means: a longer value, a
+    /// stored form not read in place.
+    Other,
+}
+
+/// The rows of a word whose terms a source hands over in bulk, decimals
+/// of one scale none of which is NULL.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DecimalWord {
+    /// The rows, among those asked for.
+    pub rows: u64,
+    /// Their scale, at most [`MAX_READ_SCALE`].
+    pub scale: u32,
+}
+
+/// The terms of a batch by row, as [`Source`] gives arguments. The batch
+/// functions ask only for selected rows, each at most once a call.
+pub trait Terms {
+    /// The term of a row.
+    fn term(&self, row: usize) -> Term;
+
+    /// Of the rows `rows` of word `index`, hand those whose terms are
+    /// decimals of one scale to `add`, the row's bit and value, in bulk: the
+    /// term [`Terms::term`] would give such a row is `Decimal` of that value
+    /// and scale. The rows handed and their scale are returned; the other
+    /// rows go through [`Terms::term`]. `None` hands over none.
+    #[inline(always)]
+    fn fold_decimals(
+        &self,
+        index: usize,
+        rows: u64,
+        add: impl FnMut(usize, i64),
+    ) -> Option<DecimalWord>
+    where
+        Self: Sized,
+    {
+        let _ = (index, rows, add);
+        None
+    }
+}
+
+/// The state of a sum or an average of numeric (or of integers, as
+/// decimals at scale 0) that a record keeps in [`SumState::WORDS`] words,
+/// as the core's `NumericAggState` keeps it without its moving-aggregate
+/// fields: the finite values' [`Sum`], and whether NaN, +Infinity and
+/// -Infinity were met, which the core counts apart from the finite ones.
+/// The words: the sum's `i128` low and high halves, the count, then the
+/// scale in bits 0 to 7 with NaN, +Infinity and -Infinity at bits 8, 9
+/// and 10. All zeros is the empty state.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct SumState {
+    /// The finite values added.
+    pub sum: Sum,
+    /// NaN was met.
+    pub nan: bool,
+    /// +Infinity was met.
+    pub positive_infinity: bool,
+    /// -Infinity was met.
+    pub negative_infinity: bool,
+}
+
+impl SumState {
+    /// The words of a state.
+    pub const WORDS: usize = 4;
+
+    /// The state of its words.
+    #[inline(always)]
+    pub fn from_words(words: [u64; Self::WORDS]) -> Self {
+        let value = (u128::from(words[1]) << 64 | u128::from(words[0])) as i128;
+        Self {
+            sum: Sum {
+                value,
+                scale: (words[3] & 0xFF) as u32,
+                count: words[2],
+            },
+            nan: words[3] & 1 << 8 != 0,
+            positive_infinity: words[3] & 1 << 9 != 0,
+            negative_infinity: words[3] & 1 << 10 != 0,
+        }
+    }
+
+    /// The words of the state.
+    #[inline(always)]
+    pub fn to_words(self) -> [u64; Self::WORDS] {
+        let value = self.sum.value as u128;
+        [
+            value as u64,
+            (value >> 64) as u64,
+            self.sum.count,
+            u64::from(self.sum.scale)
+                | u64::from(self.nan) << 8
+                | u64::from(self.positive_infinity) << 9
+                | u64::from(self.negative_infinity) << 10,
+        ]
+    }
+
+    /// Add the sum `value` of `count` decimals at `scale` to a state's
+    /// words in place, as [`Sum::add_many`] adds it: false, the words
+    /// unchanged, when the sum refuses it.
+    #[inline(always)]
+    pub fn add_many_to(
+        words: &mut [u64; Self::WORDS],
+        value: i128,
+        scale: u32,
+        count: u64,
+    ) -> bool {
+        let mut state = Self::from_words(*words);
+        let taken = state.sum.add_many(value, scale, count);
+        if taken {
+            *words = state.to_words();
+        }
+        taken
+    }
+
+    /// Take a term into a state's words in place, as [`Self::add`] takes
+    /// it: a decimal of the sum's scale is added to the words without
+    /// decoding the rest of the state.
+    #[inline(always)]
+    pub fn add_to(words: &mut [u64; Self::WORDS], term: Term) -> bool {
+        if let Term::Decimal(decimal) = term
+            && u64::from(decimal.scale) == words[3] & 0xFF
+        {
+            let value = (u128::from(words[1]) << 64 | u128::from(words[0])) as i128
+                + i128::from(decimal.value);
+            // Below the bound in magnitude, both signs in one comparison.
+            if (value + (SUM_BOUND - 1)) as u128 > (2 * (SUM_BOUND - 1)) as u128 {
+                return false;
+            }
+            words[0] = value as u64;
+            words[1] = ((value as u128) >> 64) as u64;
+            words[2] += 1;
+            return true;
+        }
+        let mut state = Self::from_words(*words);
+        let taken = state.add(term);
+        if taken {
+            *words = state.to_words();
+        }
+        taken
+    }
+
+    /// Take a term: false, the state unchanged, for one the caller adds by
+    /// the core's means (a longer value, or a decimal [`Sum::add`]
+    /// refuses); NULL changes nothing.
+    #[inline(always)]
+    pub fn add(&mut self, term: Term) -> bool {
+        match term {
+            Term::Null => true,
+            Term::Decimal(decimal) => self.sum.add(decimal),
+            Term::Special(Special::NaN) => {
+                self.nan = true;
+                true
+            }
+            Term::Special(Special::PositiveInfinity) => {
+                self.positive_infinity = true;
+                true
+            }
+            Term::Special(Special::NegativeInfinity) => {
+                self.negative_infinity = true;
+                true
+            }
+            Term::Other => false,
+        }
+    }
 }
 
 /// The scales [`read`] keeps.
@@ -1043,9 +1287,18 @@ mod tests {
             Decimal::new(0, 7)
         );
         // NaN, +Infinity, -Infinity.
-        for special in [0xC000_u16, 0xD000, 0xF000] {
+        for (special, value) in [
+            (0xC000_u16, Special::NaN),
+            (0xD000, Special::PositiveInfinity),
+            (0xF000, Special::NegativeInfinity),
+        ] {
             assert_eq!(Decimal::read(&special.to_ne_bytes()), None);
+            assert_eq!(Special::read(&special.to_ne_bytes()), Some(value));
         }
+        // A number's header, a header of special bits no value has, no header.
+        assert_eq!(Special::read(&long_form(false, 7, 40, &[])), None);
+        assert_eq!(Special::read(&0xE000_u16.to_ne_bytes()), None);
+        assert_eq!(Special::read(&[0xC0]), None);
         // A scale past 18, seven digit groups, 19 digits, a digit out of range.
         assert_eq!(Decimal::read(&long_form(false, 19, 0, &[1])), None);
         assert_eq!(Decimal::read(&long_form(false, 0, 5, &[1; 7])), None);
@@ -1201,6 +1454,77 @@ mod tests {
             (LIMIT as i128 - 1) * LIMIT as i128 + LIMIT as i128 - 1
         );
         assert!(!wide.add(Decimal::new(1, 36).unwrap()));
+        // A scale past 18 is refused whatever the sum's scale.
+        let mut scaled = Sum {
+            value: 5,
+            scale: 3,
+            count: 1,
+        };
+        assert!(!scaled.add(Decimal::new(1, 20).unwrap()));
+        assert_eq!((scaled.value, scaled.scale), (5, 3));
+    }
+
+    #[test]
+    fn sum_states_keep_specials_and_round_trip_their_words() {
+        let mut state = SumState::default();
+        assert_eq!(state.to_words(), [0; SumState::WORDS]);
+        assert!(state.add(Term::Null));
+        assert!(state.add(Term::Decimal(Decimal::new(-15, 1).unwrap())));
+        assert!(state.add(Term::Special(Special::NegativeInfinity)));
+        assert!(!state.add(Term::Other));
+        assert!(state.add(Term::Special(Special::NaN)));
+        assert_eq!(
+            (state.sum.value, state.sum.scale, state.sum.count),
+            (-15, 1, 1)
+        );
+        assert!(state.nan && state.negative_infinity && !state.positive_infinity);
+        for sample in [
+            state,
+            SumState {
+                sum: Sum {
+                    value: -(SUM_BOUND - 1),
+                    scale: 18,
+                    count: u64::MAX,
+                },
+                positive_infinity: true,
+                ..SumState::default()
+            },
+        ] {
+            assert_eq!(SumState::from_words(sample.to_words()), sample);
+        }
+        assert_eq!(
+            state.to_words()[3],
+            1 | 1 << 8 | 1 << 10,
+            "scale 1 with NaN and -Infinity"
+        );
+        // A term of the sum's scale in place: added below the bound of
+        // either sign, refused at it, the words unchanged.
+        for sign in [1, -1] {
+            let near = SumState {
+                sum: Sum {
+                    value: sign * (SUM_BOUND - 10),
+                    scale: 2,
+                    count: 3,
+                },
+                ..SumState::default()
+            };
+            let mut words = near.to_words();
+            assert!(SumState::add_to(
+                &mut words,
+                Term::Decimal(Decimal::new(sign as i64 * 9, 2).unwrap())
+            ));
+            assert_eq!(
+                SumState::from_words(words).sum.value,
+                sign * (SUM_BOUND - 1)
+            );
+            assert_eq!(SumState::from_words(words).sum.count, 4);
+            let before = words;
+            assert!(!SumState::add_to(
+                &mut words,
+                Term::Decimal(Decimal::new(sign as i64, 2).unwrap())
+            ));
+            assert_eq!(words, before);
+        }
     }
 
     #[test]

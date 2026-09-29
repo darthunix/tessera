@@ -522,6 +522,64 @@ extern TessStatusCode tess_table_accumulate(const TessTableRef *table,
 											TessStatus *status);
 
 /*
+ * The state of a sum or an average of numeric, or of integers as numerics
+ * at scale 0, that tess_table_accumulate_sum keeps in TESS_TABLE_SUM_WORDS
+ * words of a payload, as the core's NumericAggState without its moving-
+ * aggregate fields: words 0 and 1 the finite values' sum, an int128 (low
+ * half first) below 10^36 in magnitude at the largest display scale met;
+ * word 2 the finite values' count; word 3 that scale (bits 0 to 7) and
+ * whether NaN (bit 8), +Infinity (bit 9) and -Infinity (bit 10) were met.
+ * All zeros is the empty state. See docs/table.md.
+ */
+#define TESS_TABLE_SUM_WORDS 4
+#define TESS_TABLE_SUM_SCALE_MASK UINT64CONST(0xFF)
+#define TESS_TABLE_SUM_NAN (UINT64CONST(1) << 8)
+#define TESS_TABLE_SUM_POSITIVE_INFINITY (UINT64CONST(1) << 9)
+#define TESS_TABLE_SUM_NEGATIVE_INFINITY (UINT64CONST(1) << 10)
+
+/* The values tess_table_accumulate_sum reads. */
+typedef enum TessTableSumInput
+{
+	/* numeric Datums, with the column's decimals when it has them */
+	TESS_TABLE_SUM_OF_NUMERIC = 0,
+	/* int4 words (int2 too) */
+	TESS_TABLE_SUM_OF_INT4 = 1,
+	/* int8 words */
+	TESS_TABLE_SUM_OF_INT8 = 2
+} TessTableSumInput;
+
+/* A sum of tess_table_accumulate_sums: its column, state and rest. */
+typedef struct TessTableSumArg
+{
+	TessTableSumInput kind;
+	const TessDatumColumn *column;
+	/* The state's first byte in the payload, 8-byte aligned. */
+	Size		value_at;
+	TessRowMask *rest;
+} TessTableSumArg;
+
+/* The most sums a call folds. */
+#define TESS_TABLE_MAX_SUMS 32
+
+/*
+ * Fold each selected row of rows into the sum states of the payload of its
+ * record, the offset in offsets from tess_table_find_or_insert, the record
+ * found once a row for all nsums sums: a decimal (an integer at scale 0)
+ * into the sum and the count, NaN or an infinity into its bit, NULL
+ * skipped. A row a state does not take, a numeric not read in place or of
+ * more than 18 digits or a display scale past 18, or one the sum would
+ * carry to its bound, is set in that sum's rest, whose other bits are
+ * cleared, for the caller to add by the core's means. One writer, as for
+ * the other grouping calls.
+ */
+extern TessStatusCode tess_table_accumulate_sums(const TessTableRef *table,
+												 const uint32 *offsets,
+												 const TessRowMask *rows,
+												 int nsums,
+												 const TessTableSumArg *sums,
+												 TessStatus *status);
+
+/*
  * For each row of rows, key `key` of the record at offsets[row]: its
  * Datum into values[row] (an int4 key sign-extended, as Int32GetDatum
  * makes it) and whether it is NULL into isnull[row]; rows outside rows
