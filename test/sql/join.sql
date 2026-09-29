@@ -833,6 +833,30 @@ SET parallel_leader_participation = off;
 SELECT join_same($$SELECT jpr.k, jpr.v, jkm.w FROM jpr JOIN jkm ON jpr.k = jkm.k$$);
 SELECT join_same($$SELECT jpr.k, jpr.v, jkf.w FROM jpr JOIN jkf ON jpr.k = jkf.k$$);
 RESET parallel_leader_participation;
+-- With a worker's start in the partial scans' cost, the core's Append
+-- gives jpr's partitions whole to one participant each. Where one
+-- partition is expected to be left, fewer than the participants, the
+-- join's outer side divides every partition among them instead (join_
+-- divided: its Append's children are partial); where every partition is
+-- left, the core's Append stays, the divided one counting a start once a
+-- partition.
+CREATE FUNCTION join_divided(query text) RETURNS text
+LANGUAGE plpgsql AS $$
+DECLARE
+    plan jsonb;
+BEGIN
+    EXECUTE format('EXPLAIN (FORMAT JSON, COSTS OFF) %s', query) INTO plan;
+    RETURN jsonb_path_query_first(plan,
+        '$[0]."Plan".** ? (@."Custom Plan Provider" == "TessHashJoin")."Plans"[0]."Plans"[0]."Parallel Aware"')::text;
+END $$;
+SET tessera.scan_parallel_setup_cost = 150;
+EXPLAIN (COSTS OFF) SELECT count(*) FROM jpr JOIN jkx ON jpr.k = jkx.k;
+SELECT join_divided($$SELECT count(*) FROM jpr JOIN jkx ON jpr.k = jkx.k$$) AS one_left,
+       join_divided($$SELECT count(*) FROM jpr JOIN jkwide ON jpr.k = jkwide.k WHERE jkwide.k % 10 = 0$$) AS every_one_left,
+       join_unread($$SELECT count(*) FROM jpr JOIN jkx ON jpr.k = jkx.k$$) AS unread;
+SELECT join_same($$SELECT jpr.k, jpr.v FROM jpr JOIN jkx ON jpr.k = jkx.k$$);
+SELECT join_same($$SELECT jpr.k, jkwide.k FROM jpr JOIN jkwide ON jpr.k = jkwide.k WHERE jkwide.k % 10 = 0$$);
+SET tessera.scan_parallel_setup_cost = 0;
 RESET enable_parallel_hash;
 RESET max_parallel_workers_per_gather;
 RESET parallel_setup_cost;

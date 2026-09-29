@@ -3559,6 +3559,64 @@ SELECT join_same($$SELECT jpr.k, jpr.v, jkf.w FROM jpr JOIN jkf ON jpr.k = jkf.k
 (1 row)
 
 RESET parallel_leader_participation;
+-- With a worker's start in the partial scans' cost, the core's Append
+-- gives jpr's partitions whole to one participant each. Where one
+-- partition is expected to be left, fewer than the participants, the
+-- join's outer side divides every partition among them instead (join_
+-- divided: its Append's children are partial); where every partition is
+-- left, the core's Append stays, the divided one counting a start once a
+-- partition.
+CREATE FUNCTION join_divided(query text) RETURNS text
+LANGUAGE plpgsql AS $$
+DECLARE
+    plan jsonb;
+BEGIN
+    EXECUTE format('EXPLAIN (FORMAT JSON, COSTS OFF) %s', query) INTO plan;
+    RETURN jsonb_path_query_first(plan,
+        '$[0]."Plan".** ? (@."Custom Plan Provider" == "TessHashJoin")."Plans"[0]."Plans"[0]."Parallel Aware"')::text;
+END $$;
+SET tessera.scan_parallel_setup_cost = 150;
+EXPLAIN (COSTS OFF) SELECT count(*) FROM jpr JOIN jkx ON jpr.k = jkx.k;
+                                       QUERY PLAN                                       
+----------------------------------------------------------------------------------------
+ Finalize Aggregate
+   ->  Custom Scan (TessGather)
+         Workers Planned: 2
+         ->  Parallel Custom Scan (TessSend)
+               ->  Parallel Custom Scan (TessAgg)
+                     Partial Mode: Partial
+                     ->  Parallel Custom Scan (TessHashJoin)
+                           Hash Cond: (jpr.k = jkx.k)
+                           Shared Table: true
+                           ->  Parallel Custom Scan (TessAppend)
+                                 ->  Parallel Custom Scan (TessHeapScan) on jpr_1
+                                 ->  Parallel Custom Scan (TessHeapScan) on jpr_2
+                                 ->  Parallel Custom Scan (TessHeapScan) on jpr_3
+                                 ->  Parallel Custom Scan (TessHeapScan) on jpr_d jpr_4
+                           ->  Parallel Custom Scan (TessHeapScan) on jkx
+(15 rows)
+
+SELECT join_divided($$SELECT count(*) FROM jpr JOIN jkx ON jpr.k = jkx.k$$) AS one_left,
+       join_divided($$SELECT count(*) FROM jpr JOIN jkwide ON jpr.k = jkwide.k WHERE jkwide.k % 10 = 0$$) AS every_one_left,
+       join_unread($$SELECT count(*) FROM jpr JOIN jkx ON jpr.k = jkx.k$$) AS unread;
+ one_left | every_one_left | unread 
+----------+----------------+--------
+ true     | false          |      3
+(1 row)
+
+SELECT join_same($$SELECT jpr.k, jpr.v FROM jpr JOIN jkx ON jpr.k = jkx.k$$);
+                     join_same                     
+---------------------------------------------------
+ 50000 rows, hash b7bb240c55d5ecda2dbceab7687233aa
+(1 row)
+
+SELECT join_same($$SELECT jpr.k, jkwide.k FROM jpr JOIN jkwide ON jpr.k = jkwide.k WHERE jkwide.k % 10 = 0$$);
+                     join_same                     
+---------------------------------------------------
+ 10000 rows, hash 918e27637945c31cc95ebe35428bd51d
+(1 row)
+
+SET tessera.scan_parallel_setup_cost = 0;
 RESET enable_parallel_hash;
 RESET max_parallel_workers_per_gather;
 RESET parallel_setup_cost;

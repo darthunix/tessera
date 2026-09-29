@@ -619,6 +619,39 @@ pruned_append(PlannerInfo *root, Path *path, Relids leaves)
 }
 
 /*
+ * The outer side's parallel Append that divides every partition among
+ * the participants, over the partitions' cheapest partial paths, as the
+ * core builds it before its add_partial_path may keep instead the Append
+ * that gives some partitions whole to one participant each: our partial
+ * scan's cost carries a worker's start (planner.c), which the core's
+ * Append adds up once a partition. The path itself where it divides
+ * every partition already; NULL where a partition has no partial path.
+ */
+static Path *
+divided_append(PlannerInfo *root, RelOptInfo *rel, AppendPath *append)
+{
+	AppendPathInput input = {0};
+
+	if (append->first_partial_path == 0)
+		return &append->path;
+	foreach_ptr(Path, subpath, append->subpaths)
+	{
+		RelOptInfo *child = subpath->parent;
+
+		if (foreach_current_index(subpath) >= append->first_partial_path)
+			input.partial_subpaths = lappend(input.partial_subpaths, subpath);
+		else if (child->part_scheme == NULL && child->partial_pathlist != NIL)
+			input.partial_subpaths = lappend(input.partial_subpaths,
+											 linitial(child->partial_pathlist));
+		else
+			return NULL;
+	}
+	input.child_append_relid_sets = append->child_append_relid_sets;
+	return (Path *) create_append_path(root, rel, input, NIL, NULL,
+									   append->path.parallel_workers, true, -1);
+}
+
+/*
  * The path: the core's hash join of the same inputs as the template, at a
  * lower cost, over batch paths of them; the template's cost counts the
  * batches the core would write, and the node spills as the core does, a
@@ -678,6 +711,50 @@ make_join_path(PlannerInfo *root, RelOptInfo *joinrel, JoinType jointype,
 	return tess_path_create(&config);
 }
 
+/*
+ * The partial paths over a partial outer path, every participant building
+ * the whole inner side, as the core's hash join without a shared table
+ * does, from the cheapest inner path a worker may run; and a shared
+ * table, where the core offers a Parallel Hash: the inner side's partial
+ * path divides the build among the participants too, into one table in
+ * the query's shared memory. The paths are parallel-aware for the
+ * counters the node shares. RIGHT and FULL take a shared table only, as
+ * the core does: with a table each, every participant would return the
+ * records without a pair.
+ */
+static void
+add_partial_join_paths(PlannerInfo *root, RelOptInfo *joinrel, RelOptInfo *innerrel,
+					   JoinType jointype, JoinPathExtraData *extra, const JoinKeys *keys,
+					   Path *outer_path, Path *inner_path, Relids leaves)
+{
+	CustomPath *path;
+
+	if (jointype == JOIN_INNER || jointype == JOIN_SEMI)
+	{
+		Path	   *filtered = tess_filter_row_path(root, outer_path->parent, outer_path);
+
+		if (filtered != NULL)
+			outer_path = filtered;
+	}
+	path = jointype == JOIN_RIGHT || jointype == JOIN_FULL ? NULL :
+		make_join_path(root, joinrel, jointype, extra, keys,
+					   outer_path, inner_path, false, leaves);
+	if (path != NULL && path->path.parallel_safe && path->path.parallel_workers > 0)
+	{
+		path->path.parallel_aware = true;
+		add_partial_path(joinrel, &path->path);
+	}
+	if (!enable_parallel_hash || innerrel->partial_pathlist == NIL)
+		return;
+	path = make_join_path(root, joinrel, jointype, extra, keys,
+						  outer_path, linitial(innerrel->partial_pathlist), true, leaves);
+	if (path == NULL || !path->path.parallel_safe ||
+		path->path.parallel_workers <= 0)
+		return;
+	path->path.parallel_aware = true;
+	add_partial_path(joinrel, &path->path);
+}
+
 static void
 add_join_paths(PlannerInfo *root, RelOptInfo *joinrel, RelOptInfo *outerrel,
 			   RelOptInfo *innerrel, JoinType jointype,
@@ -729,12 +806,12 @@ add_join_paths(PlannerInfo *root, RelOptInfo *joinrel, RelOptInfo *outerrel,
 
 	/*
 	 * Under a Gather: the outer side's cheapest partial path divides the
-	 * rows, and every participant builds the whole inner side, as the
-	 * core's hash join without a shared table does, from the cheapest
-	 * inner path a worker may run. The path is parallel-aware for the
-	 * counters the node shares. RIGHT and FULL take a shared table only,
-	 * as the core does: with a table each, every participant would return
-	 * the records without a pair.
+	 * rows. A join expected to prune its partitions divides each among
+	 * the participants: the core's Append may give a partition whole to
+	 * one participant, which leaves the others nothing to read once fewer
+	 * partitions are left than participants; with at least as many left,
+	 * the core's Append competes, the divided one's cost counting a
+	 * worker's start once a partition.
 	 */
 	if (!joinrel->consider_parallel || outerrel->partial_pathlist == NIL ||
 		!bms_is_empty(joinrel->lateral_relids))
@@ -744,36 +821,23 @@ add_join_paths(PlannerInfo *root, RelOptInfo *joinrel, RelOptInfo *outerrel,
 	if (inner_path == NULL)
 		return;
 	outer_path = linitial(outerrel->partial_pathlist);
-	if (jointype == JOIN_INNER || jointype == JOIN_SEMI)
+	if (leaves != NULL && IsA(outer_path, AppendPath))
 	{
-		Path	   *filtered = tess_filter_row_path(root, outerrel, outer_path);
+		Path	   *divided = divided_append(root, outerrel, (AppendPath *) outer_path);
+		AppendPath *left = (AppendPath *) pruned_append(root, outer_path, leaves);
+		int			participants = outer_path->parallel_workers +
+			(parallel_leader_participation ? 1 : 0);
 
-		if (filtered != NULL)
-			outer_path = filtered;
+		if (divided != NULL && divided != outer_path)
+		{
+			add_partial_join_paths(root, joinrel, innerrel, jointype, extra, &keys,
+								   divided, inner_path, leaves);
+			if (list_length(left->subpaths) < participants)
+				return;
+		}
 	}
-	path = jointype == JOIN_RIGHT || jointype == JOIN_FULL ? NULL :
-		make_join_path(root, joinrel, jointype, extra, &keys,
-					   outer_path, inner_path, false, leaves);
-	if (path != NULL && path->path.parallel_safe && path->path.parallel_workers > 0)
-	{
-		path->path.parallel_aware = true;
-		add_partial_path(joinrel, &path->path);
-	}
-
-	/*
-	 * A shared table, where the core offers a Parallel Hash: the inner
-	 * side's partial path divides the build among the participants too,
-	 * into one table in the query's shared memory.
-	 */
-	if (!enable_parallel_hash || innerrel->partial_pathlist == NIL)
-		return;
-	path = make_join_path(root, joinrel, jointype, extra, &keys,
-						  outer_path, linitial(innerrel->partial_pathlist), true, leaves);
-	if (path == NULL || !path->path.parallel_safe ||
-		path->path.parallel_workers <= 0)
-		return;
-	path->path.parallel_aware = true;
-	add_partial_path(joinrel, &path->path);
+	add_partial_join_paths(root, joinrel, innerrel, jointype, extra, &keys,
+						   outer_path, inner_path, leaves);
 }
 
 /* The node's paths, then TessGather over the cheapest partial path, before the core gathers it. */

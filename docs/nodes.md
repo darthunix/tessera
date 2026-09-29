@@ -1810,13 +1810,24 @@ the join's child keeps every partition and prunes at execution. A hash
 partitioning expects nothing (the range prunes none of it), nor does a
 dimension whose clauses are on other columns (a star's `year = 2024`):
 the planner cannot tie them to the key's range, and the cost is the
-whole side's, as before. Over `bench_part`, four
+whole side's, as before. Under a `Gather`, the core's parallel `Append`
+may give a partition whole to one participant, since our partial scan's
+cost carries a worker's start (`tessera.scan_parallel_setup_cost`),
+which the `Append` adds up once a partition: with fewer partitions left
+than participants, the others have nothing to read. A join expected to
+prune its outer side takes an `Append` over the partitions' partial
+paths instead, every partition divided among the participants
+(`divided_append`); with at least as many left, the core's competes.
+Measured (medians, ms): one partition of four left, serial 5.10, whole
+partitions 5.83, divided 5.45; the same with five times the data 36.6,
+34.4 and 23.6; every partition left 16.4, 10.8 and 10.4. Over `bench_part`, four
 partitions of 500 000 rows by ranges of `k`, joined with a dimension of
 100 000 keys that reach the first (bench/pg join, `part_prune`, 11 runs,
 medians, the core's time after): 16.1 ms before, 5.3 after (78.4); with a
 thousand keys 13.7 and 3.7 (65.4); with two workers 11.1 and 6.0 (39.8),
 8.8 and 4.2 (27.9), where the planner, not counting the pruning, kept
-the parallel plan the one partition left does not need.
+the parallel plan the one partition left does not need; counting it,
+the plan is serial there too, 5.4 and 4.0.
 
 ### Tests
 
@@ -1907,13 +1918,17 @@ partitions no execution read counted; the planner's expectation, a side
 larger than the partitioned one built over it when its keys reach one
 partition by their statistics, by a clause on the inner key (either
 way round), or at the second level, and not when its keys reach every
-partition or the partitioning is by hash; a spilling table; under the
+partition or the partitioning is by hash, and under the `Gather`, with
+a worker's start in the scans' cost, the partitions divided among the
+participants where one is left and whole where every one is; a spilling
+table; under the
 `Gather` a shared table, one that spills (the partitions no execution
 read counted), and tables of every participant, the leader not taking
 part. Mutations fail it: no pruning, every join type, the last
 key's partitions alone, the range for a list, no shared keys, NULL keys
 counted, no expectation, no clause carried over, no key at the second
-level, the second level's clauses left out; the stop once every child
+level, the second level's clauses left out, the divided Append never,
+the core's never beside it or always; the stop once every child
 is needed leaves the results as they are.
 
 ## TessSort
