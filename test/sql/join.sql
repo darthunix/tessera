@@ -428,6 +428,40 @@ SELECT join_unread($$SELECT jkl.k, (SELECT count(*) FROM jpr JOIN jkf ON jpr.k =
        join_unread($$SELECT jkl.k, (SELECT count(*) FROM jpr JOIN jkm ON jpr.k = jkm.k WHERE jkm.w = jkl.k) FROM jkl$$) AS rebuilt;
 SELECT join_same($$SELECT jkl.k, (SELECT count(*) FROM jpr JOIN jkf ON jpr.k = jkf.k WHERE jpr.v = jkl.k) FROM jkl$$);
 SELECT join_same($$SELECT jkl.k, (SELECT count(*) FROM jpr JOIN jkm ON jpr.k = jkm.k WHERE jkm.w = jkl.k) FROM jkl$$);
+-- The planner expects the pruning. A side larger than jpr whose keys
+-- reach jpr_3 alone is built, and jpr, pruned to that partition, probes
+-- it: without the expectation the smaller jpr would be built and nothing
+-- pruned, as for a side whose keys reach every partition. The bounds come
+-- from the inner side's statistics and from its clauses on the key,
+-- carried over to the outer key (the core carries no inequality), and
+-- prune at the second level of jp2 too; a hash partitioning expects none,
+-- and jph is built. join_outer: the relation of the join's outer child,
+-- or of an Append's first child.
+CREATE FUNCTION join_outer(query text) RETURNS text
+LANGUAGE plpgsql AS $$
+DECLARE
+    plan jsonb;
+BEGIN
+    EXECUTE format('EXPLAIN (FORMAT JSON, COSTS OFF) %s', query) INTO plan;
+    RETURN (SELECT coalesce(child ->> 'Relation Name', child #>> '{Plans,0,Relation Name}')
+            FROM jsonb_path_query_first(plan,
+                '$[0]."Plan".** ? (@."Custom Plan Provider" == "TessHashJoin")."Plans"[0]') AS child);
+END $$;
+CREATE TABLE jkx AS SELECT 20001 + g % 10000 AS k, 10001 + g % 10000 AS k2 FROM generate_series(1, 50000) AS g;
+CREATE TABLE jkwide AS SELECT 1 + g % 32000 AS k FROM generate_series(1, 100000) AS g;
+ANALYZE jkx, jkwide;
+EXPLAIN (COSTS OFF) SELECT count(*) FROM jpr JOIN jkx ON jpr.k = jkx.k;
+SELECT join_outer($$SELECT count(*) FROM jpr JOIN jkwide ON jpr.k = jkwide.k$$) AS every_partition,
+       join_outer($$SELECT count(*) FROM jpr JOIN jkwide ON jpr.k = jkwide.k WHERE jkwide.k > 20000$$) AS clause,
+       join_outer($$SELECT count(*) FROM jpr JOIN jkwide ON jpr.k = jkwide.k WHERE 20000 < jkwide.k$$) AS commuted,
+       join_outer($$SELECT count(*) FROM jp2 JOIN jkx ON jp2.k = jkx.k2$$) AS second_level,
+       join_outer($$SELECT count(*) FROM jph JOIN jkx ON jph.k = jkx.k2$$) AS hash;
+SELECT join_pruned($$SELECT count(*) FROM jpr JOIN jkx ON jpr.k = jkx.k$$) AS statistics,
+       join_pruned($$SELECT count(*) FROM jpr JOIN jkwide ON jpr.k = jkwide.k WHERE jkwide.k > 20000$$) AS clause,
+       join_pruned($$SELECT count(*) FROM jp2 JOIN jkx ON jp2.k = jkx.k2$$) AS second_level;
+SELECT join_same($$SELECT jpr.k, jpr.v FROM jpr JOIN jkx ON jpr.k = jkx.k$$);
+SELECT join_same($$SELECT jpr.k, jkwide.k FROM jpr JOIN jkwide ON jpr.k = jkwide.k WHERE jkwide.k > 20000$$);
+SELECT join_same($$SELECT jp2.k, jp2.v FROM jp2 JOIN jkx ON jp2.k = jkx.k2$$);
 -- A table that spills keeps its range.
 SET work_mem = '64kB';
 SELECT join_pruned($$SELECT count(*), sum(jpr.v) FROM jpr JOIN jkm ON jpr.k = jkm.k$$) AS spilled;
@@ -822,7 +856,7 @@ EXPLAIN (COSTS OFF) SELECT count(*) FROM jf JOIN jd ON jf.fk = jd.id;
 RESET tessera.enable;
 
 DROP TABLE jd, jf, jdup, jsmall, jempty, jgrow, jbig, jpair, jbuild, jprobe, jhit, jref, jrefprobe, jrefgrow, jsb, jsp, jsskew, jsouter, jsheavy;
-DROP TABLE jpr, jpl, jph, jp2, jkf, jkm, jk8, jkn, jkl, jk2, jk19, jkw;
+DROP TABLE jpr, jpl, jph, jp2, jkf, jkm, jk8, jkn, jkl, jk2, jk19, jkw, jkx, jkwide;
 DROP FUNCTION jskew();
 DROP FUNCTION jwide();
 DROP FUNCTION join_property(text, text);

@@ -1,10 +1,12 @@
 #include "postgres.h"
 
 #include "access/stratnum.h"
+#include "catalog/pg_statistic.h"
 #include "catalog/pg_type_d.h"
 #include "miscadmin.h"
 #include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
+#include "optimizer/appendinfo.h"
 #include "optimizer/cost.h"
 #include "optimizer/optimizer.h"
 #include "optimizer/paramassign.h"
@@ -12,8 +14,10 @@
 #include "optimizer/paths.h"
 #include "optimizer/restrictinfo.h"
 #include "partitioning/partprune.h"
+#include "utils/datum.h"
 #include "utils/fmgroids.h"
 #include "utils/lsyscache.h"
+#include "utils/selfuncs.h"
 #include "utils/typcache.h"
 
 #include "tessera/expr.h"
@@ -298,16 +302,334 @@ target_supported(RelOptInfo *joinrel, RelOptInfo *innerrel, const JoinKeys *keys
 	return *ninner <= JOIN_MAX_INNER_COLUMNS;
 }
 
+/* Whether a node is the column. */
+static bool
+same_column(const Node *node, const Var *var)
+{
+	return IsA(node, Var) && ((const Var *) node)->varno == var->varno &&
+		((const Var *) node)->varattno == var->varattno &&
+		((const Var *) node)->varlevelsup == 0;
+}
+
+/* The operator of `outer op inner` for a key clause of the two columns. */
+static Oid
+outer_operator(const OpExpr *clause, const Var *outer)
+{
+	return same_column(strip_implicit_coercions(linitial(clause->args)), outer) ?
+		clause->opno : get_commutator(clause->opno);
+}
+
+/* A column of a partitioned relation as its partition, a relation of the hierarchy, sees it. */
+static Var *
+partition_column(PlannerInfo *root, RelOptInfo *child, Var *var)
+{
+	AppendRelInfo *appinfo = root->append_rel_array[child->relid];
+
+	return (Var *) adjust_appendrel_attrs(root, (Node *) var, 1, &appinfo);
+}
+
+/*
+ * The partitioning of the relation or of a partitioned partition of it
+ * whose key's first column is the column, compared by the operator's
+ * family, and a hash one by that column alone: the core's pruning then
+ * has steps for `column op value`, as it matches a clause to a key. NULL
+ * where none is.
+ */
+static PartitionScheme
+key_partitioning(PlannerInfo *root, RelOptInfo *rel, Var *column, Oid opno)
+{
+	PartitionScheme scheme = rel->part_scheme;
+	int			part = -1;
+
+	if (scheme == NULL || scheme->partnatts == 0)
+		return NULL;
+	if ((scheme->strategy != PARTITION_STRATEGY_HASH || scheme->partnatts == 1) &&
+		op_in_opfamily(opno, scheme->partopfamily[0]))
+	{
+		foreach_ptr(Node, expr, rel->partexprs[0])
+		{
+			if (same_column(expr, column))
+				return scheme;
+		}
+	}
+	while ((part = bms_next_member(rel->live_parts, part)) >= 0)
+	{
+		RelOptInfo *child = rel->part_rels[part];
+		PartitionScheme found;
+
+		if (child == NULL || child->part_scheme == NULL)
+			continue;
+		found = key_partitioning(root, child, partition_column(root, child, column),
+								 opno);
+		if (found != NULL)
+			return found;
+	}
+	return NULL;
+}
+
+/*
+ * The key the join prunes its outer side by, at planning and at execution
+ * alike: the first key of words whose outer column is a partition key
+ * (key_partitioning), or -1; *scheme then that partitioning.
+ */
+static int
+prune_key(PlannerInfo *root, RelOptInfo *rel, List *clauses, List *outer_keys,
+		  List *hashers, PartitionScheme *scheme)
+{
+	for (int key = 0; key < list_length(outer_keys); key++)
+	{
+		OpExpr	   *clause = list_nth_node(OpExpr, clauses, key);
+		Var		   *outer = list_nth_node(Var, outer_keys, key);
+
+		if (list_nth_int(hashers, key) != 0 || list_length(clause->args) != 2)
+			continue;
+		*scheme = key_partitioning(root, rel, outer, outer_operator(clause, outer));
+		if (*scheme != NULL)
+			return key;
+	}
+	return -1;
+}
+
+/* `outer op value` for op of the strategy in the family of the partitioning, or NULL. */
+static Expr *
+bound_clause(PartitionScheme scheme, int strategy, Var *outer, Const *value)
+{
+	Oid			opno = get_opfamily_member(scheme->partopfamily[0],
+										   scheme->partopcintype[0],
+										   value->consttype, strategy);
+	Expr	   *clause;
+
+	if (!OidIsValid(opno))
+		return NULL;
+	clause = make_opclause(opno, BOOLOID, false, (Expr *) copyObject(outer),
+						   (Expr *) copyObject(value), InvalidOid, value->constcollid);
+	set_opfuncid((OpExpr *) clause);
+	return clause;
+}
+
+/*
+ * The clauses on the outer key the inner key's values keep to, as far as
+ * the planner knows them before execution: between the lowest and the
+ * highest value of its statistics (the histogram's ends and the common
+ * values), and its relation's clauses `key op constant`, carried over to
+ * the outer key, which the core does for no inequality. NIL where it knows
+ * nothing.
+ */
+static List *
+inner_key_bounds(PlannerInfo *root, PartitionScheme scheme, Var *outer, Var *inner)
+{
+	Oid			family = scheme->partopfamily[0];
+	Oid			less = get_opfamily_member(family, inner->vartype, inner->vartype,
+										   BTLessStrategyNumber);
+	VariableStatData vardata;
+	List	   *bounds = NIL;
+
+	examine_variable(root, (Node *) inner, 0, &vardata);
+	if (OidIsValid(less) && HeapTupleIsValid(vardata.statsTuple) && vardata.acl_ok)
+	{
+		FmgrInfo	compare;
+		AttStatsSlot slot;
+		bool		found = false;
+		Datum		low = 0;
+		Datum		high = 0;
+		int16		typlen;
+		bool		typbyval;
+
+		fmgr_info(get_opcode(less), &compare);
+		get_typlenbyval(inner->vartype, &typlen, &typbyval);
+		/* The histogram is sorted by the type's <, which the family has. */
+		if (get_attstatsslot(&slot, vardata.statsTuple, STATISTIC_KIND_HISTOGRAM, less,
+							 ATTSTATSSLOT_VALUES))
+		{
+			if (slot.nvalues > 0)
+			{
+				low = datumCopy(slot.values[0], typbyval, typlen);
+				high = datumCopy(slot.values[slot.nvalues - 1], typbyval, typlen);
+				found = true;
+			}
+			free_attstatsslot(&slot);
+		}
+		if (get_attstatsslot(&slot, vardata.statsTuple, STATISTIC_KIND_MCV, InvalidOid,
+							 ATTSTATSSLOT_VALUES))
+		{
+			for (int i = 0; i < slot.nvalues; i++)
+			{
+				Datum		value = slot.values[i];
+
+				if (!found || DatumGetBool(FunctionCall2Coll(&compare, inner->varcollid,
+															 value, low)))
+					low = datumCopy(value, typbyval, typlen);
+				if (!found || DatumGetBool(FunctionCall2Coll(&compare, inner->varcollid,
+															 high, value)))
+					high = datumCopy(value, typbyval, typlen);
+				found = true;
+			}
+			free_attstatsslot(&slot);
+		}
+		if (found)
+		{
+			Expr	   *lower = bound_clause(scheme, BTGreaterEqualStrategyNumber, outer,
+											 makeConst(inner->vartype, inner->vartypmod,
+													   inner->varcollid, typlen, low,
+													   false, typbyval));
+			Expr	   *upper = bound_clause(scheme, BTLessEqualStrategyNumber, outer,
+											 makeConst(inner->vartype, inner->vartypmod,
+													   inner->varcollid, typlen, high,
+													   false, typbyval));
+
+			if (lower != NULL && upper != NULL)
+				bounds = list_make2(lower, upper);
+		}
+	}
+	ReleaseVariableStats(vardata);
+	foreach_node(RestrictInfo, rinfo, find_base_rel(root, inner->varno)->baserestrictinfo)
+	{
+		OpExpr	   *op = (OpExpr *) rinfo->clause;
+		Node	   *left;
+		Node	   *right;
+		Const	   *value;
+		int			strategy;
+		Expr	   *bound;
+
+		if (!IsA(op, OpExpr) || list_length(op->args) != 2)
+			continue;
+		left = strip_implicit_coercions(linitial(op->args));
+		right = strip_implicit_coercions(lsecond(op->args));
+		strategy = get_op_opfamily_strategy(op->opno, family);
+		if (same_column(left, inner) && IsA(right, Const))
+			value = (Const *) right;
+		else if (same_column(right, inner) && IsA(left, Const))
+		{
+			/* `value op key` is `key op' value`, op' the commuted strategy. */
+			value = (Const *) left;
+			strategy = BTMaxStrategyNumber + 1 - strategy;
+		}
+		else
+			continue;
+		if (value->constisnull || strategy < BTLessStrategyNumber ||
+			strategy > BTMaxStrategyNumber)
+			continue;
+		bound = bound_clause(scheme, strategy, outer, value);
+		if (bound != NULL)
+			bounds = lappend(bounds, bound);
+	}
+	return bounds;
+}
+
+/*
+ * The partitions of the relation that clauses on its columns leave, by the
+ * core's pruning at planning, at each level: the leaves, and the
+ * partitioned partitions with a leaf left.
+ */
+static Relids
+leaves_left(PlannerInfo *root, RelOptInfo *rel, List *clauses)
+{
+	RelOptInfo	pruned = *rel;
+	Relids		leaves = NULL;
+	Bitmapset  *parts;
+	int			part = -1;
+
+	/* The core's pruning at planning reads the relation's own clauses. */
+	pruned.baserestrictinfo = clauses;
+	parts = bms_intersect(prune_append_rel_partitions(&pruned), rel->live_parts);
+	while ((part = bms_next_member(parts, part)) >= 0)
+	{
+		RelOptInfo *child = rel->part_rels[part];
+
+		if (child == NULL)
+			continue;
+		if (child->part_scheme != NULL)
+		{
+			AppendRelInfo *appinfo = root->append_rel_array[child->relid];
+			Relids		below = leaves_left(root, child,
+											(List *) adjust_appendrel_attrs(root,
+																			(Node *) clauses,
+																			1, &appinfo));
+
+			if (below != NULL)
+				leaves = bms_add_members(bms_add_members(leaves, below), child->relids);
+		}
+		else
+			leaves = bms_add_members(leaves, child->relids);
+	}
+	return leaves;
+}
+
+/*
+ * The partitions of the outer side the join's pruning is expected to
+ * leave, as it prunes at execution (write_join_prune): an inner, semi or
+ * right join over a partitioned relation, by the prune key and the bounds
+ * the planner knows of the inner key's values. NULL where it expects to
+ * prune none, or knows nothing.
+ */
+static Relids
+expected_leaves(PlannerInfo *root, RelOptInfo *outerrel, const JoinKeys *keys,
+				JoinType jointype)
+{
+	PartitionScheme scheme = NULL;
+	int			key;
+	List	   *bounds;
+	Relids		leaves;
+
+	if (!enable_partition_pruning || !IS_SIMPLE_REL(outerrel) ||
+		outerrel->part_scheme == NULL ||
+		(jointype != JOIN_INNER && jointype != JOIN_SEMI && jointype != JOIN_RIGHT))
+		return NULL;
+	key = prune_key(root, outerrel, keys->clauses, keys->outer, keys->hashers, &scheme);
+	if (key < 0)
+		return NULL;
+	bounds = inner_key_bounds(root, scheme, list_nth_node(Var, keys->outer, key),
+							  list_nth_node(Var, keys->inner, key));
+	if (bounds == NIL)
+		return NULL;
+	leaves = leaves_left(root, outerrel, bounds);
+	/* Every partition pruned: a set no relation is in, NULL being no estimate. */
+	return leaves != NULL ? leaves : bms_make_singleton(0);
+}
+
+/*
+ * The core's Append path of the outer side over the partitions expected
+ * to be left, with its cost and rows by the core's costing, for the
+ * template's cost only: the join's child keeps every partition, which it
+ * prunes at execution. The path itself where it is no Append.
+ */
+static Path *
+pruned_append(PlannerInfo *root, Path *path, Relids leaves)
+{
+	AppendPath *append = (AppendPath *) path;
+	AppendPath *pruned;
+
+	if (leaves == NULL || !IsA(path, AppendPath))
+		return path;
+	pruned = makeNode(AppendPath);
+	*pruned = *append;
+	pruned->subpaths = NIL;
+	pruned->first_partial_path = 0;
+	foreach_ptr(Path, subpath, append->subpaths)
+	{
+		if (!bms_is_subset(subpath->parent->relids, leaves))
+			continue;
+		pruned->subpaths = lappend(pruned->subpaths, subpath);
+		if (foreach_current_index(subpath) < append->first_partial_path)
+			pruned->first_partial_path++;
+	}
+	cost_append(pruned, root);
+	pruned->path.rows = clamp_row_est(pruned->path.rows);
+	return &pruned->path;
+}
+
 /*
  * The path: the core's hash join of the same inputs as the template, at a
  * lower cost, over batch paths of them; the template's cost counts the
  * batches the core would write, and the node spills as the core does, a
- * shared table past every participant's hash_mem too.
+ * shared table past every participant's hash_mem too. Where the join
+ * prunes its outer TessAppend, the template reads only the partitions
+ * expected to be left (leaves, expected_leaves).
  */
 static CustomPath *
 make_join_path(PlannerInfo *root, RelOptInfo *joinrel, JoinType jointype,
 			   JoinPathExtraData *extra, const JoinKeys *keys,
-			   Path *outer_path, Path *inner_path, bool shared)
+			   Path *outer_path, Path *inner_path, bool shared, Relids leaves)
 {
 	TessPathConfig config = TESS_STRUCT_INITIALIZER(TessPathConfig);
 	JoinCostWorkspace workspace;
@@ -315,23 +637,26 @@ make_join_path(PlannerInfo *root, RelOptInfo *joinrel, JoinType jointype,
 	HashPath   *template;
 	Path	   *outer;
 	Path	   *inner;
+	Path	   *priced;
 
 	/* A partial inner path's rows are one participant's share. */
 	double		inner_rows = shared ?
 		inner_path->rows * tess_parallel_divisor(inner_path) : inner_path->rows;
 
-	initial_cost_hashjoin(root, &workspace, jointype, hashclauses,
-						  outer_path, inner_path, extra, shared);
 	outer = tess_batch_input_path(root, outer_path);
 	inner = tess_batch_input_path(root, inner_path);
 	if (outer == NULL || inner == NULL)
 		return NULL;
+	priced = tess_path_node(outer) == &tess_append_node ?
+		pruned_append(root, outer_path, leaves) : outer_path;
+	initial_cost_hashjoin(root, &workspace, jointype, hashclauses,
+						  priced, inner_path, extra, shared);
 	/* The core's clause sides, which its costing reads. */
 	foreach_node(RestrictInfo, rinfo, keys->rinfos)
 		rinfo->outer_is_left = bms_is_subset(rinfo->left_relids,
 											 outer_path->parent->relids);
 	template = create_hashjoin_path(root, joinrel, jointype, &workspace,
-									extra, outer_path, inner_path, shared,
+									extra, priced, inner_path, shared,
 									extra->restrictlist, NULL, hashclauses);
 	/* A share of the core's cost, tessera.join_cost_factor (0.9). */
 	template->jpath.path.total_cost *= tess_join_cost_factor;
@@ -363,6 +688,7 @@ add_join_paths(PlannerInfo *root, RelOptInfo *joinrel, RelOptInfo *outerrel,
 	Path	   *outer_path = outerrel->cheapest_total_path;
 	Path	   *inner_path = innerrel->cheapest_total_path;
 	CustomPath *path;
+	Relids		leaves;
 
 	/*
 	 * The core offers no hash join either without PGS_HASHJOIN. The kinds
@@ -383,6 +709,7 @@ add_join_paths(PlannerInfo *root, RelOptInfo *joinrel, RelOptInfo *outerrel,
 		PATH_REQ_OUTER(outer_path) != NULL || PATH_REQ_OUTER(inner_path) != NULL ||
 		tess_runtime_kernels() == NULL)
 		return;
+	leaves = expected_leaves(root, outerrel, &keys, jointype);
 	/*
 	 * An inner or semi join drops an outer row without a pair: over a
 	 * relation whose clauses all run row by row, TessFilter takes them
@@ -396,7 +723,7 @@ add_join_paths(PlannerInfo *root, RelOptInfo *joinrel, RelOptInfo *outerrel,
 			outer_path = filtered;
 	}
 	path = make_join_path(root, joinrel, jointype, extra, &keys,
-						  outer_path, inner_path, false);
+						  outer_path, inner_path, false, leaves);
 	if (path != NULL)
 		add_path(joinrel, &path->path);
 
@@ -426,7 +753,7 @@ add_join_paths(PlannerInfo *root, RelOptInfo *joinrel, RelOptInfo *outerrel,
 	}
 	path = jointype == JOIN_RIGHT || jointype == JOIN_FULL ? NULL :
 		make_join_path(root, joinrel, jointype, extra, &keys,
-					   outer_path, inner_path, false);
+					   outer_path, inner_path, false, leaves);
 	if (path != NULL && path->path.parallel_safe && path->path.parallel_workers > 0)
 	{
 		path->path.parallel_aware = true;
@@ -441,7 +768,7 @@ add_join_paths(PlannerInfo *root, RelOptInfo *joinrel, RelOptInfo *outerrel,
 	if (!enable_parallel_hash || innerrel->partial_pathlist == NIL)
 		return;
 	path = make_join_path(root, joinrel, jointype, extra, &keys,
-						  outer_path, linitial(innerrel->partial_pathlist), true);
+						  outer_path, linitial(innerrel->partial_pathlist), true, leaves);
 	if (path == NULL || !path->path.parallel_safe ||
 		path->path.parallel_workers <= 0)
 		return;
@@ -601,7 +928,8 @@ prune_description(PlannerInfo *root, RelOptInfo *rel, List *children, List *clau
  * outer row without a pair (INNER, SEMI, RIGHT) and a key of words has the
  * partition key on its outer side, the core's pruning steps for
  * `key = $p` and for `key >= $lo AND key <= $hi` (where the key's btree
- * family compares the two types), over parameters of execution the join
+ * family compares the two types), for the key prune_key chooses, as the
+ * planning of the path expects (expected_leaves), over parameters of execution the join
  * sets from its keys once built (docs/nodes.md). No change of the core's
  * pruning, which takes no column of another relation: the parameters stand
  * for the inner side's values. Its plan data: the key's number, the three
@@ -613,40 +941,36 @@ write_join_prune(TessPlanWriter *writer, PlannerInfo *root, const TessPlanChild 
 				 JoinType jointype)
 {
 	RelOptInfo *rel = outer->path->parent;
-	List	   *children;
+	PartitionScheme scheme = NULL;
+	int			key = -1;
 
 	if (enable_partition_pruning && tess_path_node(outer->path) == &tess_append_node &&
-		IS_SIMPLE_REL(rel) && rel->part_scheme != NULL && rel->part_scheme->partnatts > 0 &&
+		IS_SIMPLE_REL(rel) && rel->part_scheme != NULL &&
 		(jointype == JOIN_INNER || jointype == JOIN_SEMI || jointype == JOIN_RIGHT))
+		key = prune_key(root, rel, hash_clauses, outer_keys, hashers, &scheme);
+	if (key >= 0)
 	{
-		children = ((CustomPath *) outer->path)->custom_paths;
-		for (int key = 0; key < list_length(outer_keys); key++)
-		{
-			OpExpr	   *clause = list_nth_node(OpExpr, hash_clauses, key);
-			Var		   *outer_var = copyObject(list_nth_node(Var, outer_keys, key));
-			Var		   *inner_var = list_nth_node(Var, inner_keys, key);
-			Node	   *left = strip_implicit_coercions(linitial(clause->args));
-			Oid			opno = IsA(left, Var) && ((Var *) left)->varno == outer_var->varno &&
-				((Var *) left)->varattno == outer_var->varattno ?
-				clause->opno : get_commutator(clause->opno);
-			Param	   *value = prune_param(root, inner_var);
-			Param	   *low = prune_param(root, inner_var);
-			Param	   *high = prune_param(root, inner_var);
-			Oid			family = rel->part_scheme->partopfamily[0];
-			Oid			type = rel->part_scheme->partopcintype[0];
-			Expr	   *lower;
-			Expr	   *upper;
-			PartitionPruneInfo *values;
-			PartitionPruneInfo *range = NULL;
+		List	   *children = ((CustomPath *) outer->path)->custom_paths;
+		OpExpr	   *clause = list_nth_node(OpExpr, hash_clauses, key);
+		Var		   *outer_var = copyObject(list_nth_node(Var, outer_keys, key));
+		Var		   *inner_var = list_nth_node(Var, inner_keys, key);
+		Param	   *value = prune_param(root, inner_var);
+		Param	   *low = prune_param(root, inner_var);
+		Param	   *high = prune_param(root, inner_var);
+		Oid			family = scheme->partopfamily[0];
+		Oid			type = scheme->partopcintype[0];
+		Expr	   *lower;
+		Expr	   *upper;
+		PartitionPruneInfo *values;
+		PartitionPruneInfo *range = NULL;
 
-			if (list_nth_int(hashers, key) != 0 || list_length(clause->args) != 2)
-				continue;
-			/* The partition key as the relation's scan sees it, below any outer join. */
-			outer_var->varnullingrels = NULL;
-			values = prune_description(root, rel, children,
-									   list_make1(prune_clause(opno, outer_var, value)));
-			if (values == NULL)
-				continue;
+		/* The partition key as the relation's scan sees it, below any outer join. */
+		outer_var->varnullingrels = NULL;
+		values = prune_description(root, rel, children,
+								   list_make1(prune_clause(outer_operator(clause, outer_var),
+														   outer_var, value)));
+		if (values != NULL)
+		{
 			lower = prune_clause(get_opfamily_member(family, type, inner_var->vartype,
 													 BTGreaterEqualStrategyNumber),
 								 outer_var, low);

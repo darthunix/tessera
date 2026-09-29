@@ -1794,13 +1794,28 @@ DuckDB passes a list of a few keys and their range. `TessAppend`
 intersects the children it reads with those left and shows `Subplans
 Removed by Join` with `ANALYZE`; the children kept are the same in every
 participant. A table kept over a rescan keeps them; a table built anew
-hands its own. The choice of plan does not count the pruning (the join's
-cost is the core's hash join's share, as before). Over `bench_part`, four
+hands its own.
+
+The planner expects the pruning (`expected_leaves`): by the same key
+(`prune_key`, which the plan's pruning takes too), it bounds the inner
+key's values by what it knows before execution, the lowest and the
+highest of the column's statistics (the histogram's ends and the common
+values) and its relation's clauses `key op constant`, carried over to
+the outer key (the core carries no inequality across a join), and prunes
+the outer relation by them with the core's pruning at planning
+(`prune_append_rel_partitions`), level by level. The template of the
+join's cost then reads the partitions left: a copy of the core's
+`Append` path with their subpaths, costed by the core (`cost_append`);
+the join's child keeps every partition and prunes at execution. A hash
+partitioning expects nothing (the range prunes none of it), nor does a
+dimension whose clauses are on other columns (a star's `year = 2024`):
+the planner cannot tie them to the key's range, and the cost is the
+whole side's, as before. Over `bench_part`, four
 partitions of 500 000 rows by ranges of `k`, joined with a dimension of
 100 000 keys that reach the first (bench/pg join, `part_prune`, 11 runs,
 medians, the core's time after): 16.1 ms before, 5.3 after (78.4); with a
 thousand keys 13.7 and 3.7 (65.4); with two workers 11.1 and 6.0 (39.8),
-8.8 and 4.2 (27.9), where the planner, not counting the pruning, keeps
+8.8 and 4.2 (27.9), where the planner, not counting the pruning, kept
 the parallel plan the one partition left does not need.
 
 ### Tests
@@ -1888,13 +1903,18 @@ keys at its two ends, a hash one by listed keys and past them (none),
 the second level of two; semi and right joins prune, left and anti ones
 do not, keys all NULL prune every partition; a table kept for the outer
 side's new parameter and one built anew for the inner side's, the
-partitions no execution read counted; a spilling table; under the
+partitions no execution read counted; the planner's expectation, a side
+larger than the partitioned one built over it when its keys reach one
+partition by their statistics, by a clause on the inner key (either
+way round), or at the second level, and not when its keys reach every
+partition or the partitioning is by hash; a spilling table; under the
 `Gather` a shared table, one that spills (the partitions no execution
 read counted), and tables of every participant, the leader not taking
 part. Mutations fail it: no pruning, every join type, the last
 key's partitions alone, the range for a list, no shared keys, NULL keys
-counted; the stop once every child is needed leaves the results as they
-are.
+counted, no expectation, no clause carried over, no key at the second
+level, the second level's clauses left out; the stop once every child
+is needed leaves the results as they are.
 
 ## TessSort
 
