@@ -203,8 +203,8 @@ ORDER BY o;
  core: Aggregate, Sort | SELECT count(DISTINCT t) FROM cov
  core: Aggregate, Sort | SELECT count(DISTINCT d), sum(DISTINCT n) FROM cov
  core: Aggregate, Sort | SELECT i2, count(DISTINCT vc) FROM cov GROUP BY i2
- core: Aggregate       | SELECT sum(i4) FILTER (WHERE b) FROM cov
- core: Aggregate       | SELECT i2, count(*) FILTER (WHERE i4 > 5) FROM cov GROUP BY i2
+ tess                  | SELECT sum(i4) FILTER (WHERE b) FROM cov
+ tess                  | SELECT i2, count(*) FILTER (WHERE i4 > 5) FROM cov GROUP BY i2
  core: Aggregate, Sort | SELECT string_agg(t, ',' ORDER BY i4) FROM cov
  core: Aggregate       | SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY f8) FROM cov
  tess                  | SELECT i4 % 10, count(*) FROM cov GROUP BY 1

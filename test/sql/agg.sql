@@ -344,9 +344,7 @@ DROP TABLE agg_dm;
 -- Left to the core: a text argument.
 EXPLAIN (COSTS OFF) SELECT count(DISTINCT c) FROM agg_t;
 
--- Left to the core: FILTER in the aggregate, a window function, an empty
--- relation, and the switch.
-EXPLAIN (COSTS OFF) SELECT count(*) FILTER (WHERE a > 100) FROM agg_t;
+-- Left to the core: a window function, an empty relation, and the switch.
 EXPLAIN (COSTS OFF) SELECT count(*) OVER () FROM agg_t LIMIT 1;
 EXPLAIN (COSTS OFF) SELECT count(*) FROM agg_t WHERE false;
 SET tessera.enable = off;
@@ -383,10 +381,9 @@ SELECT agg_same($$SELECT g, (SELECT string_agg(t, ',') FROM agg_any WHERE a > g 
 \set VERBOSITY terse
 SELECT sum(1 / (a - 100)::numeric) FROM agg_any;
 \set VERBOSITY default
--- Left to the core: ORDER BY and FILTER in an aggregate, DISTINCT over
--- text, an ordered-set aggregate.
+-- Left to the core: ORDER BY in an aggregate, DISTINCT over text, an
+-- ordered-set aggregate.
 EXPLAIN (COSTS OFF) SELECT string_agg(t, ',' ORDER BY t) FROM agg_any;
-EXPLAIN (COSTS OFF) SELECT max(t) FILTER (WHERE b) FROM agg_any;
 EXPLAIN (COSTS OFF) SELECT count(DISTINCT t) FROM agg_any;
 SELECT agg_same($$SELECT count(DISTINCT t), count(DISTINCT a), count(DISTINCT d) FROM agg_any$$);
 EXPLAIN (COSTS OFF) SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY f) FROM agg_any;
@@ -400,6 +397,26 @@ SELECT agg_same($$SELECT a % 7, max(t), sum(n), stddev(f), bool_and(b), json_agg
 -- node's own aggregates and a DISTINCT one, HAVING over a generic one.
 SELECT agg_same($$SELECT a > 0, max(t), count(*), sum(a), count(DISTINCT a), avg(n) FROM agg_any WHERE t IS NULL GROUP BY a > 0$$);
 SELECT agg_same($$SELECT b, max(t) || '!', sum(n) FROM agg_any GROUP BY b HAVING max(t) > 't5'$$);
+-- FILTER (WHERE ...): the condition a computed column of its own, true or
+-- NULL, over the batch where the compiler takes it, else row by row. An
+-- aggregate reads the rows it keeps, its arguments computed over those
+-- alone, as the executor evaluates them, so a row it drops raises no
+-- error; a group all of whose rows it drops has the value of no row.
+-- Without GROUP BY and with it, by words and through a dictionary, the
+-- node's own aggregates, generic ones and DISTINCT ones, under HAVING.
+EXPLAIN (COSTS OFF) SELECT count(*) FILTER (WHERE a > 100), sum(a) FILTER (WHERE b) FROM agg_any;
+SELECT agg_same($$SELECT count(*) FILTER (WHERE a > 100), sum(a) FILTER (WHERE b), max(a) FILTER (WHERE t LIKE 't1%'), count(a) FILTER (WHERE a IS NULL), sum(a) FILTER (WHERE a > 10000), count(*) FILTER (WHERE false) FROM agg_any$$);
+SELECT agg_same($$SELECT max(t) FILTER (WHERE b), sum(n) FILTER (WHERE a < 0), md5(string_agg(t, ',') FILTER (WHERE a % 2 = 0)), avg(f) FILTER (WHERE t IS NOT NULL) FROM agg_any$$);
+SELECT agg_same($$SELECT sum(1000 / a) FILTER (WHERE a <> 0), sum(1000 / (a - 1)::numeric) FILTER (WHERE a <> 1) FROM agg_any$$);
+SELECT agg_same($$SELECT count(DISTINCT a) FILTER (WHERE b), count(DISTINCT a % 10) FILTER (WHERE a > 0) FROM agg_any$$);
+EXPLAIN (COSTS OFF) SELECT b, count(*) FILTER (WHERE a > 0) FROM agg_any GROUP BY b;
+SELECT agg_same($$SELECT b, count(*) FILTER (WHERE a > 0), sum(a) FILTER (WHERE a % 3 = 0), max(t) FILTER (WHERE a > 100), sum(1000 / a) FILTER (WHERE a <> 0), count(DISTINCT a) FILTER (WHERE a < 0) FROM agg_any GROUP BY b$$);
+SELECT agg_same($$SELECT t IS NULL, max(a) FILTER (WHERE a > 1000), string_agg(t, ',') FILTER (WHERE false), count(*) FILTER (WHERE b) FROM agg_any GROUP BY 1$$);
+-- Aggregates that keep NULL arguments read the kept rows alone too.
+SELECT agg_same($$SELECT b, md5((array_agg(a) FILTER (WHERE a % 4 = 0))::text), md5((json_agg(t) FILTER (WHERE a < -100))::text) FROM agg_any GROUP BY b$$);
+SELECT agg_same($$SELECT array_agg(a) FILTER (WHERE a % 40 = 0), md5((json_agg(d) FILTER (WHERE a > 140))::text) FROM agg_any$$);
+SELECT agg_same($$SELECT count(*), sum(c), sum(s), count(s) FROM (SELECT t, count(*) FILTER (WHERE a > 0) AS c, sum(n) FILTER (WHERE b) AS s FROM agg_any GROUP BY t) AS q$$);
+SELECT agg_same($$SELECT b, count(*) FILTER (WHERE a > 0) FROM agg_any GROUP BY b HAVING sum(a) FILTER (WHERE a < 0) < -100$$);
 -- Many groups: the table grows and adds chunks, which never move.
 CREATE TABLE agg_groups AS
 SELECT i % 20000 AS g, 'v' || i AS t, (i * 0.5)::numeric AS n FROM generate_series(1, 80000) AS i;
@@ -449,6 +466,10 @@ SELECT agg_same($$SELECT g, string_agg(t, ','), array_agg(n) FROM agg_groups WHE
 SELECT agg_same($$SELECT count(*), sum(c), max(m), sum(x) FROM (SELECT CASE WHEN g % 100 = 0 THEN NULL ELSE g END AS k, count(*) AS c, max(t) AS m, sum(g) AS x FROM agg_groups GROUP BY 1) AS q$$);
 -- Rescan: the partitions of the last scan go.
 SELECT agg_same($$SELECT x, (SELECT count(*) FROM (SELECT g, max(t) FROM agg_groups WHERE g % 3 = x GROUP BY g) AS q) FROM generate_series(0, 2) AS x$$);
+-- FILTER over rows on disk: a dropped row's arguments go as NULL, never
+-- computed.
+SELECT agg_spill($$SELECT g, count(*) FILTER (WHERE n > 100), max(t) FILTER (WHERE g % 2 = 0), sum(1000 / (g % 5)) FILTER (WHERE g % 5 <> 0) FROM agg_groups GROUP BY g$$);
+SELECT agg_same($$SELECT count(*), sum(c), max(m), sum(x) FROM (SELECT g, count(*) FILTER (WHERE n > 100) AS c, max(t) FILTER (WHERE g % 2 = 0) AS m, sum(1000 / (g % 5)) FILTER (WHERE g % 5 <> 0) AS x FROM agg_groups GROUP BY g) AS q$$);
 RESET enable_sort;
 RESET work_mem;
 DROP FUNCTION agg_spill(text);
@@ -470,6 +491,8 @@ SET tessera.scan_worker_page_cost = 0;
 SET parallel_tuple_cost = 0;
 EXPLAIN (COSTS OFF) SELECT max(t), sum(n), avg(n), string_agg(t, ',') IS NOT NULL FROM agg_any_big;
 SELECT agg_same($$SELECT max(t), sum(n), avg(n), length(string_agg(t, ',')), array_length(array_agg(a), 1) FROM agg_any_big$$);
+EXPLAIN (COSTS OFF) SELECT count(*) FILTER (WHERE a % 3 = 0), sum(n) FILTER (WHERE a > 1000) FROM agg_any_big;
+SELECT agg_same($$SELECT count(*) FILTER (WHERE a % 3 = 0), sum(n) FILTER (WHERE a > 1000), max(t) FILTER (WHERE a < 500), sum(a) FILTER (WHERE t LIKE '%7') FROM agg_any_big$$);
 RESET max_parallel_workers_per_gather;
 RESET parallel_setup_cost;
 RESET tessera.scan_parallel_setup_cost;

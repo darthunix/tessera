@@ -1212,15 +1212,7 @@ EXPLAIN (COSTS OFF) SELECT count(DISTINCT c) FROM agg_t;
          ->  Custom Scan (TessHeapScan) on agg_t
 (4 rows)
 
--- Left to the core: FILTER in the aggregate, a window function, an empty
--- relation, and the switch.
-EXPLAIN (COSTS OFF) SELECT count(*) FILTER (WHERE a > 100) FROM agg_t;
-                QUERY PLAN                 
--------------------------------------------
- Aggregate
-   ->  Custom Scan (TessHeapScan) on agg_t
-(2 rows)
-
+-- Left to the core: a window function, an empty relation, and the switch.
 EXPLAIN (COSTS OFF) SELECT count(*) OVER () FROM agg_t LIMIT 1;
                    QUERY PLAN                    
 -------------------------------------------------
@@ -1341,8 +1333,8 @@ SELECT agg_same($$SELECT g, (SELECT string_agg(t, ',') FROM agg_any WHERE a > g 
 SELECT sum(1 / (a - 100)::numeric) FROM agg_any;
 ERROR:  division by zero
 \set VERBOSITY default
--- Left to the core: ORDER BY and FILTER in an aggregate, DISTINCT over
--- text, an ordered-set aggregate.
+-- Left to the core: ORDER BY in an aggregate, DISTINCT over text, an
+-- ordered-set aggregate.
 EXPLAIN (COSTS OFF) SELECT string_agg(t, ',' ORDER BY t) FROM agg_any;
                     QUERY PLAN                     
 ---------------------------------------------------
@@ -1351,13 +1343,6 @@ EXPLAIN (COSTS OFF) SELECT string_agg(t, ',' ORDER BY t) FROM agg_any;
          Sort Key: t
          ->  Custom Scan (TessHeapScan) on agg_any
 (4 rows)
-
-EXPLAIN (COSTS OFF) SELECT max(t) FILTER (WHERE b) FROM agg_any;
-                 QUERY PLAN                  
----------------------------------------------
- Aggregate
-   ->  Custom Scan (TessHeapScan) on agg_any
-(2 rows)
 
 EXPLAIN (COSTS OFF) SELECT count(DISTINCT t) FROM agg_any;
                     QUERY PLAN                     
@@ -1416,6 +1401,89 @@ SELECT agg_same($$SELECT b, max(t) || '!', sum(n) FROM agg_any GROUP BY b HAVING
                 agg_same                 
 -----------------------------------------
  {"(f,t98!,45000.0)","(t,t99!,22725.0)"}
+(1 row)
+
+-- FILTER (WHERE ...): the condition a computed column of its own, true or
+-- NULL, over the batch where the compiler takes it, else row by row. An
+-- aggregate reads the rows it keeps, its arguments computed over those
+-- alone, as the executor evaluates them, so a row it drops raises no
+-- error; a group all of whose rows it drops has the value of no row.
+-- Without GROUP BY and with it, by words and through a dictionary, the
+-- node's own aggregates, generic ones and DISTINCT ones, under HAVING.
+EXPLAIN (COSTS OFF) SELECT count(*) FILTER (WHERE a > 100), sum(a) FILTER (WHERE b) FROM agg_any;
+                 QUERY PLAN                  
+---------------------------------------------
+ Custom Scan (TessAgg)
+   ->  Custom Scan (TessHeapScan) on agg_any
+(2 rows)
+
+SELECT agg_same($$SELECT count(*) FILTER (WHERE a > 100), sum(a) FILTER (WHERE b), max(a) FILTER (WHERE t LIKE 't1%'), count(a) FILTER (WHERE a IS NULL), sum(a) FILTER (WHERE a > 10000), count(*) FILTER (WHERE false) FROM agg_any$$);
+      agg_same       
+---------------------
+ {"(43,45,49,0,,0)"}
+(1 row)
+
+SELECT agg_same($$SELECT max(t) FILTER (WHERE b), sum(n) FILTER (WHERE a < 0), md5(string_agg(t, ',') FILTER (WHERE a % 2 = 0)), avg(f) FILTER (WHERE t IS NOT NULL) FROM agg_any$$);
+                               agg_same                               
+----------------------------------------------------------------------
+ {"(t99,14337.0,acfd58a614c88ec345951fa3cc15bc64,49.94954128440367)"}
+(1 row)
+
+SELECT agg_same($$SELECT sum(1000 / a) FILTER (WHERE a <> 0), sum(1000 / (a - 1)::numeric) FILTER (WHERE a <> 1) FROM agg_any$$);
+            agg_same             
+---------------------------------
+ {"(108,-108.1304608859612841)"}
+(1 row)
+
+SELECT agg_same($$SELECT count(DISTINCT a) FILTER (WHERE b), count(DISTINCT a % 10) FILTER (WHERE a > 0) FROM agg_any$$);
+  agg_same   
+-------------
+ {"(86,10)"}
+(1 row)
+
+EXPLAIN (COSTS OFF) SELECT b, count(*) FILTER (WHERE a > 0) FROM agg_any GROUP BY b;
+                 QUERY PLAN                  
+---------------------------------------------
+ Custom Scan (TessAgg)
+   Group Key: b
+   ->  Custom Scan (TessHeapScan) on agg_any
+(3 rows)
+
+SELECT agg_same($$SELECT b, count(*) FILTER (WHERE a > 0), sum(a) FILTER (WHERE a % 3 = 0), max(t) FILTER (WHERE a > 100), sum(1000 / a) FILTER (WHERE a <> 0), count(DISTINCT a) FILTER (WHERE a < 0) FROM agg_any GROUP BY b$$);
+                     agg_same                     
+--------------------------------------------------
+ {"(f,86,,t299,-205,86)","(t,43,45,t297,313,42)"}
+(1 row)
+
+SELECT agg_same($$SELECT t IS NULL, max(a) FILTER (WHERE a > 1000), string_agg(t, ',') FILTER (WHERE false), count(*) FILTER (WHERE b) FROM agg_any GROUP BY 1$$);
+        agg_same         
+-------------------------
+ {"(f,,,80)","(t,,,20)"}
+(1 row)
+
+-- Aggregates that keep NULL arguments read the kept rows alone too.
+SELECT agg_same($$SELECT b, md5((array_agg(a) FILTER (WHERE a % 4 = 0))::text), md5((json_agg(t) FILTER (WHERE a < -100))::text) FROM agg_any GROUP BY b$$);
+                                                                     agg_same                                                                      
+---------------------------------------------------------------------------------------------------------------------------------------------------
+ {"(f,37ce9154bd4420ca00e03dee6c4ed78c,c328cc7b6c74fa3acf508226e130eef4)","(t,9c938fef7f1cd289f0fd9cc49cd64a44,e48d5a275c121cfa9fe713d8d86aff28)"}
+(1 row)
+
+SELECT agg_same($$SELECT array_agg(a) FILTER (WHERE a % 40 = 0), md5((json_agg(d) FILTER (WHERE a > 140))::text) FROM agg_any$$);
+                             agg_same                              
+-------------------------------------------------------------------
+ {"(\"{-120,-40,0,40,80,120}\",64e545e4b193dcd7d4b4be450f314ba4)"}
+(1 row)
+
+SELECT agg_same($$SELECT count(*), sum(c), sum(s), count(s) FROM (SELECT t, count(*) FILTER (WHERE a > 0) AS c, sum(n) FILTER (WHERE b) AS s FROM agg_any GROUP BY t) AS q$$);
+         agg_same         
+--------------------------
+ {"(241,129,22725.0,81)"}
+(1 row)
+
+SELECT agg_same($$SELECT b, count(*) FILTER (WHERE a > 0) FROM agg_any GROUP BY b HAVING sum(a) FILTER (WHERE a < 0) < -100$$);
+      agg_same       
+---------------------
+ {"(f,86)","(t,43)"}
 (1 row)
 
 -- Many groups: the table grows and adds chunks, which never move.
@@ -1524,6 +1592,20 @@ SELECT agg_same($$SELECT x, (SELECT count(*) FROM (SELECT g, max(t) FROM agg_gro
  {"(0,6667)","(1,6667)","(2,6666)"}
 (1 row)
 
+-- FILTER over rows on disk: a dropped row's arguments go as NULL, never
+-- computed.
+SELECT agg_spill($$SELECT g, count(*) FILTER (WHERE n > 100), max(t) FILTER (WHERE g % 2 = 0), sum(1000 / (g % 5)) FILTER (WHERE g % 5 <> 0) FROM agg_groups GROUP BY g$$);
+          agg_spill           
+------------------------------
+ rows spilled: t, levels: one
+(1 row)
+
+SELECT agg_same($$SELECT count(*), sum(c), max(m), sum(x) FROM (SELECT g, count(*) FILTER (WHERE n > 100) AS c, max(t) FILTER (WHERE g % 2 = 0) AS m, sum(1000 / (g % 5)) FILTER (WHERE g % 5 <> 0) AS x FROM agg_groups GROUP BY g) AS q$$);
+             agg_same             
+----------------------------------
+ {"(20000,79800,v9998,33328000)"}
+(1 row)
+
 RESET enable_sort;
 RESET work_mem;
 DROP FUNCTION agg_spill(text);
@@ -1568,6 +1650,24 @@ SELECT agg_same($$SELECT max(t), sum(n), avg(n), length(string_agg(t, ',')), arr
                            agg_same                            
 ---------------------------------------------------------------
  {"(t99999,30000150000.0,150000.750000000000,1488894,200000)"}
+(1 row)
+
+EXPLAIN (COSTS OFF) SELECT count(*) FILTER (WHERE a % 3 = 0), sum(n) FILTER (WHERE a > 1000) FROM agg_any_big;
+                                 QUERY PLAN                                 
+----------------------------------------------------------------------------
+ Finalize Aggregate
+   ->  Custom Scan (TessGather)
+         Workers Planned: 1
+         ->  Parallel Custom Scan (TessSend)
+               ->  Parallel Custom Scan (TessAgg)
+                     Partial Mode: Partial
+                     ->  Parallel Custom Scan (TessHeapScan) on agg_any_big
+(7 rows)
+
+SELECT agg_same($$SELECT count(*) FILTER (WHERE a % 3 = 0), sum(n) FILTER (WHERE a > 1000), max(t) FILTER (WHERE a < 500), sum(a) FILTER (WHERE t LIKE '%7') FROM agg_any_big$$);
+                 agg_same                 
+------------------------------------------
+ {"(66666,29999399250.0,t99,2000040000)"}
 (1 row)
 
 RESET max_parallel_workers_per_gather;

@@ -980,7 +980,7 @@ enable switch, acts on the grouping stage of the main grouping relation
 for a query with aggregates and no `GROUP BY`, grouping sets or window
 functions, over an input that is not known to be empty. It collects the
 aggregates of the target and `HAVING` and accepts them when every one is a
-plain call, without `DISTINCT`, `ORDER BY` or `FILTER`, whole or the
+plain call, without `ORDER BY` (with `FILTER`, see below), whole or the
 partial one of a parallel plan, of an aggregate the node combines and the
 [function registry](function.md) implements over batches (kind
 `TESS_FUNCTION_AGGREGATE`, registered by the kernels module), with an
@@ -1024,7 +1024,31 @@ needs. With a `DISTINCT` aggregate alongside, whose table does not
 spill, the path is taken only when the planner's estimate of the groups
 and their states, a type's average width or an internal state's
 declared space or 1 kB as the core estimates them, fits `hash_mem`. Not
-in a partial plan, whose table empties early. For each of the core's plain aggregate paths whose input can be read
+in a partial plan, whose table empties early.
+
+An aggregate with `FILTER (WHERE condition)` reads the rows the condition
+keeps: the condition is a computed column of the projection of its own,
+over the batch as `CASE WHEN condition THEN true END` where the
+expression compiler takes it, else the condition itself, which the
+executor evaluates a row without a `CASE` around it; the aggregate's rows
+are the batch's rows (or a group's) where that column is true, a whole
+word of 64 rows at a time without a branch, which its kernel, its
+transition function or its `DISTINCT` table reads. An argument that is an
+expression is `CASE WHEN condition THEN argument END`: a chain computes a
+branch over the rows it takes only, as the executor evaluates the
+arguments of the rows it keeps alone, so `sum(1000 / a) FILTER (WHERE a
+<> 0)` divides no row by zero, whether in batches, row by row or over
+rows written to disk; a column or a constant, which no row makes fail,
+stays as it is. A group all of whose rows the filter drops keeps the
+aggregate's value of no row. The conditions travel in the private data
+as `filters` (version 7), NULL for an aggregate without one; a subplan in
+a condition keeps the aggregation with the core. Against the core's
+aggregation over the same scan (2 M rows, medians of 9, ms): integer
+conditions 57.4 and 31.5, a `bool` column 23.7 and 7.8, `bool` and
+`int2` conditions 36.0 and 23.7, grouped by `int2` 104.5 and 37.5 and by
+text 141.4 and 115.1, two text conditions row by row 57.4 and 55.4.
+
+For each of the core's plain aggregate paths whose input can be read
 in batches (`tess_batch_input_path`: a batch path as it is, a clause-free
 sequential scan through `TessHeapScan`, anything else through `TessPack`),
 the node's path takes the core path as its template with the batch child,
@@ -1340,8 +1364,13 @@ chain; `count` of a text column; a bigint column with `min`, `max` and
 `count`, the filter and the argument chains through the mixed operators
 of bigint with an integer constant, the cast of an int4 column as an
 argument, the bigint extremes under a single-copy `Gather` and the
-overflow of a bigint chain; and the core keeping `DISTINCT` and `FILTER`
-in the aggregate, a window function, an empty relation,
+overflow of a bigint chain; `FILTER` over the node's own, generic and
+`DISTINCT` aggregates, by batch and row-wise conditions, dropping every
+row, guarding an argument's division by zero, keeping NULL arguments
+(`array_agg`, `json_agg`), with and without `GROUP BY`, keys of words and
+through a dictionary, under `HAVING`, over rows on disk and in a parallel
+plan; and the core keeping `DISTINCT` over text and `ORDER BY` in the
+aggregate, a window function, an empty relation,
 `sum` over bigint, `avg`, the switch off and the kernels module absent.
 With `GROUP BY`: a bare key and an expression key (computed by the scan),
 NULL keys as one group, two keys, expressions over the keys and the

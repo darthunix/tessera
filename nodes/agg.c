@@ -176,6 +176,8 @@ typedef struct AggValue
 	const TessFunction *function;
 	/* The argument's computed column of the projection, or -1 for count(*). */
 	int			computed;
+	/* FILTER (WHERE ...): its computed column, true or NULL, or -1. */
+	int			filter;
 	/* The argument's values of sparse batches, a column of their own. */
 	Datum	   *gathered_values;
 	bool	   *gathered_isnull;
@@ -474,6 +476,9 @@ typedef struct TessAggState
 	uint64	   *pending_bits;
 	uint64	   *inserted_bits;
 	uint64	   *call_bits;
+	/* The rows an aggregate's FILTER keeps, for the aggregate at hand. */
+	uint64	   *filter_bits;
+	int			filter_words;
 	TessDatumColumn key_columns[TESS_TABLE_MAX_KEYS];
 	TessTableKey table_keys[TESS_TABLE_MAX_KEYS];
 	/* The output: the walk over the groups, the batch a row parent reads. */
@@ -685,9 +690,9 @@ aggregate_argument(const Aggref *agg)
  * the registry implements over batches, with no argument for count(*),
  * one expression of any type for count (the count reads NULL flags
  * alone) or one int4 or int8 expression for the others, which the
- * projection provider computes by a chain or row by row; a subplan in it
- * would need fixing against the scan tuple, which the arguments do not go
- * through.
+ * projection provider computes by a chain or row by row, and a FILTER
+ * condition, which it computes too; a subplan in them would need fixing
+ * against the scan tuple, which the arguments do not go through.
  */
 static bool
 aggregate_supported(const Aggref *agg)
@@ -697,7 +702,7 @@ aggregate_supported(const Aggref *agg)
 	if (agg->agglevelsup != 0 || agg->aggkind != AGGKIND_NORMAL ||
 		(agg->aggsplit != AGGSPLIT_SIMPLE &&
 		 agg->aggsplit != AGGSPLIT_INITIAL_SERIAL) || agg->aggorder != NIL ||
-		agg->aggfilter != NULL ||
+		contain_subplans((Node *) agg->aggfilter) ||
 		agg->aggdirectargs != NIL || agg->aggvariadic)
 		return false;
 	if (!batch_aggregate(agg))
@@ -762,7 +767,9 @@ arguments_available(const List *tlist, const Path *child)
 	foreach_ptr(TargetEntry, entry, tlist)
 	{
 		Node	   *argument = IsA(entry->expr, Aggref) ?
-			(Node *) ((Aggref *) entry->expr)->args : (Node *) entry->expr;
+			(Node *) list_make2(((Aggref *) entry->expr)->args,
+								((Aggref *) entry->expr)->aggfilter) :
+			(Node *) entry->expr;
 
 		if (unavailable(argument, child->pathtarget->exprs))
 			return false;
@@ -1725,7 +1732,8 @@ collect_params(Node *node, List **params)
  * query's grouping only (AGG_PATH_HAVING): not for the partial aggregates of
  * a parallel plan, whose Finalize Aggregate applies it, nor for a DISTINCT
  * or a set operation above. The private data carries one argument per
- * aggregate, a NULL constant for count(*).
+ * aggregate, a NULL constant for count(*), and one FILTER condition, NULL
+ * without one.
  */
 /*
  * A set operation's counts as aggregates of the scan tuple: count(*) of a
@@ -1758,6 +1766,60 @@ setop_count(bool side)
 	return agg;
 }
 
+/*
+ * An argument of an aggregate with FILTER: an expression's value where the
+ * condition holds, else NULL, so that a row the filter drops is never
+ * computed, as the executor evaluates the arguments of the rows it keeps
+ * alone; a chain computes a CASE branch over the rows it takes only. A
+ * column or a constant, which no row makes fail, stays as it is, the
+ * condition not computed again.
+ */
+static Node *
+filtered_argument(Expr *condition, Node *argument)
+{
+	CaseExpr   *choice;
+	CaseWhen   *when;
+
+	if (IsA(argument, Var) || IsA(argument, Const))
+		return argument;
+	choice = makeNode(CaseExpr);
+	when = makeNode(CaseWhen);
+
+	when->expr = (Expr *) copyObject(condition);
+	when->result = (Expr *) argument;
+	when->location = -1;
+	choice->casetype = exprType(argument);
+	choice->casecollid = exprCollation(argument);
+	choice->args = list_make1(when);
+	choice->defresult = (Expr *) makeNullConst(exprType(argument), exprTypmod(argument),
+											   exprCollation(argument));
+	choice->location = -1;
+	return (Node *) choice;
+}
+
+/*
+ * A FILTER condition as a value the projection computes, true where it
+ * holds: over the batch as `CASE WHEN condition THEN true END`, which the
+ * expression compiler takes where it takes the condition, else the
+ * condition itself, which the executor evaluates a row without the CASE.
+ */
+static Node *
+filter_value(Expr *condition)
+{
+	CaseExpr   *choice = makeNode(CaseExpr);
+	CaseWhen   *when = makeNode(CaseWhen);
+
+	when->expr = condition;
+	when->result = (Expr *) makeBoolConst(true, false);
+	when->location = -1;
+	choice->casetype = BOOLOID;
+	choice->casecollid = InvalidOid;
+	choice->args = list_make1(when);
+	choice->defresult = (Expr *) makeNullConst(BOOLOID, -1, InvalidOid);
+	choice->location = -1;
+	return tess_expr_supports_value((Node *) choice, 0) ? (Node *) choice : (Node *) condition;
+}
+
 static Plan *
 agg_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 		 List *tlist, List *clauses, List *custom_plans)
@@ -1767,6 +1829,7 @@ agg_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 	TessPlanChild child = TESS_STRUCT_INITIALIZER(TessPlanChild);
 	List	   *arguments = NIL;
 	List	   *more = NIL;
+	List	   *filters = NIL;
 	List	   *keys = NIL;
 	List	   *params = NIL;
 	List	   *path_data;
@@ -1825,6 +1888,7 @@ agg_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 	foreach_ptr(TargetEntry, entry, info.expressions)
 	{
 		Node	   *argument;
+		Expr	   *filter;
 
 		/* The grouping expressions, then the aggregates. */
 		if (foreach_current_index(entry) < nkeys)
@@ -1842,31 +1906,44 @@ agg_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 			mark_partial_aggref(partial, AGGSPLIT_INITIAL_SERIAL);
 			arguments = lappend(arguments, resolve_argument((Node *) partial, &child));
 			more = lappend(more, NIL);
+			filters = lappend(filters, NULL);
 			continue;
 		}
+		/* FILTER (WHERE ...): which rows the aggregate reads, NULL for every row. */
+		filter = ((Aggref *) entry->expr)->aggfilter;
+		filters = lappend(filters, filter == NULL ? NULL :
+						  resolve_argument(filter_value(copyObject(filter)), &child));
 		argument = aggregate_argument((Aggref *) entry->expr);
 		arguments = lappend(arguments, argument == NULL ?
 							(Node *) makeNullConst(INT4OID, -1, InvalidOid) :
-							resolve_argument(copyObject(argument), &child));
+							resolve_argument(filter == NULL ? copyObject(argument) :
+											 filtered_argument(filter, copyObject(argument)),
+											 &child));
 		/* The arguments after the first, of an aggregate the core's functions compute. */
 		{
 			List	   *rest = NIL;
 
 			for (int n = 1; n < list_length(((Aggref *) entry->expr)->args); n++)
-				rest = lappend(rest,
-							   resolve_argument((Node *) copyObject(list_nth_node(TargetEntry,
-																				  ((Aggref *) entry->expr)->args,
-																				  n)->expr),
-												&child));
+			{
+				Node	   *other = (Node *) copyObject(list_nth_node(TargetEntry,
+																	  ((Aggref *) entry->expr)->args,
+																	  n)->expr);
+
+				rest = lappend(rest, resolve_argument(filter == NULL ? other :
+													  filtered_argument(filter, other),
+													  &child));
+			}
 			more = lappend(more, rest);
 		}
 	}
 	collect_params((Node *) arguments, &params);
 	collect_params((Node *) more, &params);
+	collect_params((Node *) filters, &params);
 	collect_params((Node *) keys, &params);
 	writer = tess_plan_writer_create(TESS_AGG_DATA, TESS_AGG_DATA_VERSION);
 	tess_plan_write_list(writer, "arguments", arguments);
 	tess_plan_write_list(writer, "more", more);
+	tess_plan_write_list(writer, "filters", filters);
 	tess_plan_write_list(writer, "keys", keys);
 	tess_plan_write_int(writer, "groups", lsecond_int(path_data));
 	tess_plan_write_int_list(writer, "key_eqops",
@@ -2184,6 +2261,7 @@ agg_begin(CustomScanState *css, EState *estate, int eflags)
 	List	   *computed = NIL;
 	List	   *arguments;
 	List	   *more;
+	List	   *filters;
 	List	   *eqops;
 	List	   *keys;
 	TessPlanReader *reader;
@@ -2201,6 +2279,7 @@ agg_begin(CustomScanState *css, EState *estate, int eflags)
 									 TESS_AGG_DATA_VERSION);
 	arguments = tess_plan_read_list(reader, "arguments");
 	more = tess_plan_read_list(reader, "more");
+	filters = tess_plan_read_list(reader, "filters");
 	eqops = tess_plan_read_int_list(reader, "key_eqops");
 	keys = tess_plan_read_list(reader, "keys");
 	groups = tess_plan_read_int(reader, "groups");
@@ -2219,6 +2298,7 @@ agg_begin(CustomScanState *css, EState *estate, int eflags)
 		list_length(arguments) + state->nkeys != list_length(cscan->custom_scan_tlist) ||
 		(state->nkeys == 0 && arguments == NIL) ||
 		list_length(arguments) > AGG_MAX_GROUPED ||
+		list_length(filters) != list_length(arguments) ||
 		list_length(eqops) != state->nkeys)
 		elog(ERROR, "TessAgg received a foreign plan");
 	state->child = ExecInitNode(child_plan, estate, eflags);
@@ -2288,6 +2368,7 @@ agg_begin(CustomScanState *css, EState *estate, int eflags)
 		value->wide = agg->aggtranstype == INT8OID;
 		value->function = tess_runtime_api()->functions->find(agg->aggfnoid);
 		value->computed = -1;
+		value->filter = -1;
 		if (!batch_aggregate(agg))
 		{
 			if (!generic_supported(agg) ||
@@ -2364,6 +2445,26 @@ agg_begin(CustomScanState *css, EState *estate, int eflags)
 				value->distinct = palloc0(sizeof(struct DistinctSet));
 				state->has_distinct = true;
 			}
+		}
+	}
+	/* The FILTER conditions, computed columns after every argument. */
+	foreach_ptr(Node, filter, filters)
+	{
+		AggValue   *value = &state->values[foreach_current_index(filter)];
+
+		if (filter == NULL)
+			continue;
+		value->filter = list_length(computed);
+		computed = lappend(computed,
+						   makeTargetEntry((Expr *) filter, value->filter + 1, NULL, false));
+		foreach_ptr(Var, var, pull_var_clause(filter, 0))
+		{
+			int			column = var->varno == INDEX_VAR ?
+				tess_layout_column(&state->child_layout, var->varattno - 1) : -1;
+
+			if (column < 0)
+				elog(ERROR, "TessAgg filter names no column of its child");
+			projection = bms_add_member(projection, column);
 		}
 	}
 	state->ncomputed = list_length(computed);
@@ -2604,6 +2705,59 @@ flush_gathered(TessAggState *state, AggValue *value)
 }
 
 /*
+ * The rows of those given that an aggregate's FILTER keeps: its computed
+ * column is true there and NULL elsewhere (filter_value), asked for those
+ * rows only; in the node's buffer, which the aggregate uses before the
+ * next one asks.
+ */
+static TessRowMask
+filtered_rows(TessAggState *state, TessBatch *batch, int filter, const TessRowMask *rows)
+{
+	TessDatumColumn column = TESS_STRUCT_INITIALIZER(TessDatumColumn);
+	int			nwords = tess_row_mask_word_count(rows->nrows);
+	int			row = -1;
+
+	if (state->filter_words < nwords)
+	{
+		state->filter_bits = MemoryContextAlloc(state->css.ss.ps.state->es_query_cxt,
+												sizeof(uint64) * nwords);
+		state->filter_words = nwords;
+	}
+	batch->ops->get_datum_column(batch, state->child_layout.ncolumns + filter, rows,
+								 TESS_COLUMN_FOR_FILTER, &column);
+	if (column.values == NULL || column.isnull == NULL || column.nrows != rows->nrows)
+		elog(ERROR, "Tessera projection returned an invalid column");
+	for (int word = 0; word < nwords; word++)
+	{
+		uint64		selected = rows->bits[word];
+		uint64		kept = 0;
+		int			base = word * 64;
+
+		/* A whole word without a branch a row; a partial one row by row. */
+		if (selected == UINT64_MAX)
+		{
+			for (int bit = 0; bit < 64; bit++)
+				kept |= (uint64) (!column.isnull[base + bit] &
+								  (DatumGetBool(column.values[base + bit]) ? 1 : 0)) << bit;
+		}
+		else
+		{
+			while (selected != 0)
+			{
+				int			bit = pg_rightmost_one_pos64(selected);
+
+				row = base + bit;
+				if (!column.isnull[row] && DatumGetBool(column.values[row]))
+					kept |= UINT64CONST(1) << bit;
+				selected &= selected - 1;
+			}
+		}
+		state->filter_bits[word] = kept;
+	}
+	return (TessRowMask) {rows->nrows, state->filter_bits};
+}
+
+/*
  * Add one batch to the aggregate: its partial through the batch function,
  * or, for a batch with few survivors, their values gathered into a column
  * of the aggregate's own, since a call costs more than the rows it would
@@ -2615,17 +2769,22 @@ accumulate(TessAggState *state, AggValue *value, TessBatch *batch, int nrows)
 {
 	TessDatumColumn computed = TESS_STRUCT_INITIALIZER(TessDatumColumn);
 	const TessDatumColumn *column = &computed;
+	TessRowMask rows = batch->rows;
 	int			row = -1;
 
+	if (value->filter >= 0)
+	{
+		rows = filtered_rows(state, batch, value->filter, &batch->rows);
+		nrows = tess_row_mask_count(&rows);
+	}
 	if (value->computed < 0)
 	{
-		evaluate(state, value, NULL, &batch->rows);
+		evaluate(state, value, NULL, &rows);
 		return;
 	}
 	batch->ops->get_datum_column(batch,
 								 state->child_layout.ncolumns + value->computed,
-								 &batch->rows, TESS_COLUMN_FOR_PROJECTION,
-								 &computed);
+								 &rows, TESS_COLUMN_FOR_PROJECTION, &computed);
 	if (computed.values == NULL || computed.isnull == NULL ||
 		computed.nrows != batch->rows.nrows)
 		elog(ERROR, "Tessera projection returned an invalid column");
@@ -2639,28 +2798,27 @@ accumulate(TessAggState *state, AggValue *value, TessBatch *batch, int nrows)
 			*other = (TessDatumColumn) TESS_STRUCT_INITIALIZER(TessDatumColumn);
 			batch->ops->get_datum_column(batch,
 										 state->child_layout.ncolumns + value->computed + arg,
-										 &batch->rows, TESS_COLUMN_FOR_PROJECTION, other);
+										 &rows, TESS_COLUMN_FOR_PROJECTION, other);
 			if (other->values == NULL || other->isnull == NULL ||
 				other->nrows != batch->rows.nrows)
 				elog(ERROR, "Tessera projection returned an invalid column");
 		}
-		generic_accumulate(state, value->generic, &batch->rows);
+		generic_accumulate(state, value->generic, &rows);
 		return;
 	}
 	if (value->distinct != NULL)
 	{
-		TessRowMask rows = distinct_rows(state, value, batch->rows.nrows, NULL,
-										 &batch->rows, column);
+		TessRowMask pairs = distinct_rows(state, value, rows.nrows, NULL, &rows, column);
 
-		evaluate(state, value, column, &rows);
+		evaluate(state, value, column, &pairs);
 		return;
 	}
 	if (nrows > AGG_GATHER_ROWS)
 	{
-		evaluate(state, value, column, &batch->rows);
+		evaluate(state, value, column, &rows);
 		return;
 	}
-	while ((row = tess_row_mask_next(&batch->rows, row)) >= 0)
+	while ((row = tess_row_mask_next(&rows, row)) >= 0)
 	{
 		if (value->ngathered == 64)
 			flush_gathered(state, value);
@@ -4892,7 +5050,9 @@ group_batch(TessAggState *state, TessBatch *batch)
 		AggValue   *value = &state->values[index];
 		TessDatumColumn column;
 
-		TessRowMask rows = valid;
+		/* FILTER: the rows it keeps; the groups those rows made count still. */
+		TessRowMask rows = value->filter >= 0 ?
+			filtered_rows(state, batch, value->filter, &valid) : valid;
 
 		if (value->computed >= 0)
 			computed_column(state, batch, value->computed,
@@ -4903,11 +5063,11 @@ group_batch(TessAggState *state, TessBatch *batch)
 			for (int arg = 1; arg < value->generic->nargs; arg++)
 				computed_column(state, batch, value->computed + arg,
 								TESS_COLUMN_FOR_PROJECTION, &value->generic->columns[arg]);
-			generic_group_accumulate(state, index, &valid, &inserted);
+			generic_group_accumulate(state, index, &rows, &inserted);
 			continue;
 		}
 		if (value->distinct != NULL)
-			rows = distinct_rows(state, value, nrows, state->hashes, &valid,
+			rows = distinct_rows(state, value, nrows, state->hashes, &rows,
 								 &column);
 		state->calls++;
 		check(state, state->kernels->table_accumulate(&state->table,
