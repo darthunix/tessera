@@ -91,7 +91,7 @@ query down, and where it can, does it speed one up.
   and the rows of a bitmap skipped by a limit's offset; index scans of the
   ordered `id`: 10, 3 and 50 % of the rows aggregated, 5 % skipped by an
   offset, a range in the index's order, a range with a clause on another
-  column; index-only scans of `k` and `w`: 10, 1 and 50 % counted, summed,
+  column; index-only scans of `k` and `w`: 10, 1, 20 and 50 % counted, summed,
   skipped by an offset, in the index's order to a limit, grouped; BRIN
   bitmaps of the day: a week, a month and five months aggregated, 20 days
   skipped by an offset. With Tessera the rows come in batches and a filter
