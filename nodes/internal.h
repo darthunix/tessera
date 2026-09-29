@@ -32,7 +32,7 @@
 #define TESS_SEND_DATA "tessera.send"
 #define TESS_SEND_DATA_VERSION 2
 #define TESS_APPEND_DATA "tessera.append"
-#define TESS_APPEND_DATA_VERSION 1
+#define TESS_APPEND_DATA_VERSION 2
 
 /*
  * The table's kind of a key of this type: a value its word holds whole and

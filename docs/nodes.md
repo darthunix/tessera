@@ -1725,12 +1725,11 @@ inheritance tree, a `UNION ALL` the planner made a relation of) or of a
 set operation's branches, in a plain `SELECT` without row marks, when the
 path is not parameterized, has two children at least, each of which has
 a batch path (`tess_batch_input_path` again) and one of which at least
-does more than pack rows, and when the core would not prune partitions
-while executing: a clause over a partition key with a parameter or a
-function that is not immutable keeps the core's `Append`, which prunes
-by it (the node would read every partition, correctly but slower). The
-path copies the `Append`'s properties, parallel ones included, and costs
-it less the core's half of `cpu_tuple_cost` a row.
+does more than pack rows. The path copies the `Append`'s properties,
+parallel ones included, and costs it less the core's half of
+`cpu_tuple_cost` a row. The plan data keep the core's description of
+pruning the partitions while executing where the relation's clauses make
+one (see below).
 
 The plan's layout is dense, a column per target; each child's plan has
 as many targets, in the same order. The relation's clauses, which the
@@ -1761,6 +1760,52 @@ someone reaches its end, while the others still reading it go on. Without
 shared memory the node reads every child in turn. `EXPLAIN ANALYZE` shows
 the `Batches` given out, every participant's.
 
+### Pruning while executing
+
+The core prunes partitions twice. While planning, by constants: the
+partitions pruned get no path, so the node's children are those left.
+While executing, only its `Append` and `MergeAppend` do, and so does the
+node: at the start by the query's parameters and stable functions (a
+generic plan's `$1`, `now()`), and at the first read by the parameters of
+execution (an initplan's value, a correlated subquery's parameter),
+again after a rescan that changed them. The planner makes the
+description as `create_append_plan` does, `make_partition_pruneinfo`
+over the relation's clauses and the children's paths (whose parents are
+the partitions), for any base relation, a `UNION ALL` of partitioned
+tables included (a hierarchy each); where it makes one, the node takes it
+off the planner's list into its plan data, since `set_plan_references`
+carries into the statement only those of `Append` and `MergeAppend`
+(`register_partpruneinfo`). The description's range table numbers are
+then the node's query's own: at the start the node shifts a copy by the
+offset `set_plan_references` added to its `custom_relids`, which the core
+fills with the relation's (a wrong shift is the core's error "trying to
+open a pruned relation"). The core makes the pruning states of the
+statement's descriptions only, before the nodes start
+(`ExecDoInitialPruning`), and gives a node its own by number
+(`ExecInitPartitionExecPruning`): the node calls both over the EState's
+lists holding its description alone, and puts the lists back. The
+children the initial pruning left are the only ones started, numbered
+anew, the first partial of them found again, as `ExecInitAppend` does;
+none may be left, and the node then gives nothing. With pruning by the
+parameters of execution, the valid children (`ExecFindMatchingSubPlans`)
+are found at the first read and again after a rescan whose changed
+parameters are the pruning's, and the node goes over them alone. In a
+parallel plan each participant finds them at its first choice, under the
+lock, and finishes the others for all, as the core's
+`mark_invalid_subplans_as_finished`; the leader finds them anew when the
+shared memory is reset for a rescan, where the core's leaves that to the
+workers, new in every scan. `EXPLAIN` shows the children the initial
+pruning removed as `Subplans Removed`, as for the core's `Append`; the
+children pruned while running are `never executed`. Before, such a
+clause kept the core's `Append`, whose rows a pack made batches again,
+and a `UNION ALL` of partitioned tables, whose parent has no partition
+key, read every partition. Half of a partitioned table of 2 000 000
+rows read through the node, serially: by a generic plan's parameter 11.6
+ms before, 5.1 after, by an initplan 12.1 and 5.1, a `UNION ALL` of the
+table with itself 14.6 and 5.1, the core's 29 (pg-setop-xT3wei,
+pg-setop-LpWP7U); with two workers 7.4, 7.3 and 9.6 before, 4.8 to 4.9
+after, the core's 13 (pg-setop-w2-xKCerq, pg-setop-w2-z1nyzp).
+
 ### Tests
 
 `test/sql/union.sql` shows the plans and compares every result with
@@ -1772,11 +1817,20 @@ row-wise parent (the core's `Append`), a hash join and a sort above,
 a limit whose bound reaches a top-N sort in each branch, a correlated
 subquery and an initplan; an inheritance tree; partitions, one of them
 partitioned again, pruned while planning to two and to one, by a
-parameter while executing (the core's `Append`) and a parameter over
-another column (the node); the parallel plans: the children shared out,
+parameter over another column (the node); pruned while executing (the
+children read shown by `EXPLAIN ANALYZE`): by a generic plan's parameter
+(two, three and every child removed, none), with `EXPLAIN (GENERIC_PLAN)`
+removing none, by a stable function, by an initplan, anew for each value
+of a correlated subquery's parameter, a `UNION ALL` of two partitioned
+tables, within a sublink and a materialized CTE (queries whose range
+table the statement offsets); the parallel plans: the children shared out,
 a child without a partial path, three of them with a partial one, the
-workers alone, a rescan under `TessGather`, and a partial `Append` that
-is not parallel-aware. `UNION` without `ALL` over the node, with NULL,
+workers alone, a rescan under `TessGather`, each pruned by a stable
+function and an initplan too, and a partial `Append` that is not
+parallel-aware. Mutations of the pruning fail it: no initial pruning, no
+pruning while running, the valid children kept over a rescan with new
+parameters, the invalid ones left unfinished in a parallel plan or after
+its reset, the range table numbers unshifted. `UNION` without `ALL` over the node, with NULL,
 duplicates, two columns and three branches, `EXPLAIN VERBOSE`, a sort and
 a limit above, in a subquery, spilling at a `work_mem` of 64 kB; a `UNION`
 within another set operation stays the core's. `INTERSECT` and `EXCEPT`

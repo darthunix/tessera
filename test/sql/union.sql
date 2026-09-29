@@ -152,13 +152,69 @@ EXPLAIN (COSTS OFF) SELECT count(*) FROM union_part WHERE k < 500 AND v < 10;
 EXPLAIN (COSTS OFF)
 SELECT g, (SELECT count(*) FROM union_part WHERE v < g) FROM generate_series(1, 3) AS g;
 SELECT union_same($$SELECT g, (SELECT count(*) FROM union_part WHERE v < g) FROM generate_series(1, 5) AS g$$);
--- Pruned while executing, by a parameter: the core's Append stays.
+-- Pruned while executing, as the core's Append prunes: the node shows
+-- which children it read.
+CREATE FUNCTION union_run(query text) RETURNS SETOF text
+LANGUAGE plpgsql AS $$
+DECLARE
+    line text;
+BEGIN
+    FOR line IN EXECUTE 'EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) ' || query LOOP
+        IF line ~ 'Append|Subplans Removed|TessHeapScan|^ *(InitPlan|SubPlan) ' THEN
+            RETURN NEXT regexp_replace(line, '\(actual rows=[0-9.]+ loops=([0-9]+)\)', '(loops=\1)');
+        END IF;
+    END LOOP;
+END
+$$;
+-- At the start, by a generic plan's parameter: the children it prunes are
+-- not even started, all of them for a bound past every partition, the
+-- sub-partitioned one's for a bound within it.
 PREPARE union_prune(int) AS SELECT count(*), sum(k) FROM union_part WHERE k > $1 AND v < 10;
+SET tessera.enable = off;
+PREPARE union_prune_core(int) AS SELECT count(*), sum(k) FROM union_part WHERE k > $1 AND v < 10;
+SET tessera.enable = on;
 SET plan_cache_mode = force_generic_plan;
+EXPLAIN (COSTS OFF) EXECUTE union_prune(2500);
+EXECUTE union_prune(2500);
+EXECUTE union_prune_core(2500);
 EXPLAIN (COSTS OFF) EXECUTE union_prune(3500);
 EXECUTE union_prune(3500);
+EXECUTE union_prune_core(3500);
+EXPLAIN (COSTS OFF) EXECUTE union_prune(5000);
+EXECUTE union_prune(5000);
+EXECUTE union_prune(0);
+EXECUTE union_prune_core(0);
+-- Planned without the values, nothing is pruned.
+EXPLAIN (GENERIC_PLAN, COSTS OFF) SELECT count(*) FROM union_part WHERE k > $1 AND v < 10;
 RESET plan_cache_mode;
 DEALLOCATE union_prune;
+DEALLOCATE union_prune_core;
+-- At the start, by a stable function's value.
+SET union_test.bound = '2500';
+EXPLAIN (COSTS OFF)
+SELECT count(*), sum(k) FROM union_part WHERE k > current_setting('union_test.bound')::int AND v < 10;
+SELECT union_same($$SELECT count(*), sum(k) FROM union_part WHERE k > current_setting('union_test.bound')::int AND v < 10$$);
+-- At the first read, by an InitPlan's value.
+SELECT union_run($$SELECT count(*), sum(k) FROM union_part WHERE k > (SELECT 2500) AND v < 10$$);
+SELECT union_same($$SELECT count(*), sum(k) FROM union_part WHERE k > (SELECT 2500) AND v < 10$$);
+SELECT union_same($$SELECT count(*), sum(k) FROM union_part WHERE k > (SELECT 9000) AND v < 10$$);
+-- Anew for every value of a correlated subquery's parameter, as it
+-- rescans the node: each partition read for the values that reach it.
+SELECT union_run($$SELECT g, (SELECT count(*) FROM union_part WHERE k > g * 1000 AND v < 10) FROM generate_series(0, 4) AS g$$);
+SELECT union_same($$SELECT g, (SELECT count(*) FROM union_part WHERE k > g * 1000 AND v < 10) FROM generate_series(0, 4) AS g$$);
+-- UNION ALL of two partitioned tables, two hierarchies pruned.
+SELECT union_run($$SELECT count(*), sum(k) FROM (SELECT k, v FROM union_part UNION ALL SELECT k, v FROM union_part) AS u
+                   WHERE k > (SELECT 3500) AND v < 10$$);
+SELECT union_same($$SELECT count(*), sum(k) FROM (SELECT k, v FROM union_part UNION ALL SELECT k, v FROM union_part) AS u
+                    WHERE k > (SELECT 3500) AND v < 10$$);
+-- In a subquery of its own, whose range table the statement's offsets:
+-- a sublink's InitPlan and a materialized CTE.
+SELECT union_run($$SELECT x FROM generate_series(1, 3) AS x
+                   WHERE x * 10 < (SELECT count(*) FROM union_part WHERE k > current_setting('union_test.bound')::int AND v < 10)$$);
+SELECT union_same($$SELECT x FROM generate_series(1, 30) AS x
+                    WHERE x * 10 < (SELECT count(*) FROM union_part WHERE k > current_setting('union_test.bound')::int AND v < 10)$$);
+SELECT union_same($$WITH c AS MATERIALIZED (SELECT k, v FROM union_part WHERE k > (SELECT 1500) AND v < 20)
+                    SELECT count(*), sum(k) FROM c JOIN union_a ON c.k = union_a.a$$);
 -- The partitions grouped: TessAgg groups over TessAppend.
 SELECT union_same($$SELECT v % 7 AS g, count(*), sum(k) FROM union_part WHERE v < 50 GROUP BY 1$$);
 
@@ -173,6 +229,17 @@ SELECT union_same($$SELECT count(*), sum(k) FROM union_part WHERE v < 10$$);
 SELECT union_same($$SELECT count(*), sum(a) FROM (SELECT a FROM union_a WHERE a > 100
                    UNION ALL SELECT a FROM union_b WHERE a < 600) AS s$$);
 SELECT union_same($$SELECT v % 7 AS g, count(*), sum(k) FROM union_part WHERE v < 50 GROUP BY 1$$);
+-- Pruned while executing: at the start by a stable function, then by an
+-- InitPlan; every participant finds the valid children and finishes the
+-- others for all.
+SELECT regexp_replace(line, 'loops=[0-9]+', 'loops=n')
+FROM union_run($$SELECT count(*), sum(k) FROM union_part WHERE k > current_setting('union_test.bound')::int AND v < 10$$) AS line;
+SELECT union_same($$SELECT count(*), sum(k) FROM union_part WHERE k > current_setting('union_test.bound')::int AND v < 10$$);
+SELECT regexp_replace(line, 'loops=[0-9]+', 'loops=n')
+FROM union_run($$SELECT count(*), sum(k) FROM union_part WHERE k > (SELECT 2500) AND v < 10$$) AS line;
+SELECT union_same($$SELECT count(*), sum(k) FROM union_part WHERE k > (SELECT 2500) AND v < 10$$);
+SELECT union_same($$SELECT count(*), sum(k) FROM (SELECT k, v FROM union_part UNION ALL SELECT k, v FROM union_part) AS u
+                    WHERE k > (SELECT 3500) AND v < 10$$);
 -- A child that is not partial, a table no worker may read, goes to one
 -- participant.
 ALTER TABLE union_b SET (parallel_workers = 0);
@@ -202,6 +269,9 @@ SELECT count(*), sum(a) FROM (SELECT a FROM union_a WHERE a > 980 AND union_slow
 -- Without the leader.
 SET parallel_leader_participation = off;
 SELECT union_same($$SELECT count(*), sum(k) FROM union_part WHERE v < 10$$);
+SELECT regexp_replace(line, 'loops=[0-9]+', 'loops=n')
+FROM union_run($$SELECT count(*), sum(k) FROM union_part WHERE k > (SELECT 2500) AND v < 10$$) AS line;
+SELECT union_same($$SELECT count(*), sum(k) FROM union_part WHERE k > (SELECT 2500) AND v < 10$$);
 SELECT union_same($$SELECT count(*), sum(a) FROM (SELECT a FROM union_a WHERE a > 100
                    UNION ALL SELECT a FROM union_b WHERE a < 600) AS s$$);
 RESET parallel_leader_participation;
@@ -212,6 +282,12 @@ EXPLAIN (COSTS OFF)
 SELECT x, n FROM (SELECT count(*) AS n FROM union_part WHERE v < 10) AS ss
 RIGHT JOIN (VALUES (1), (2)) AS v(x) ON true;
 SELECT union_same($$SELECT x, n, s FROM (SELECT count(*) AS n, sum(k) AS s FROM union_part WHERE v < 10) AS ss
+RIGHT JOIN (VALUES (1), (2), (3)) AS v(x) ON true$$);
+-- Pruned by an InitPlan: the leader finds the valid children anew.
+SELECT regexp_replace(line, 'loops=[0-9]+', 'loops=n')
+FROM union_run($$SELECT x, n FROM (SELECT count(*) AS n FROM union_part WHERE k > (SELECT 2500) AND v < 10) AS ss
+                 RIGHT JOIN (VALUES (1), (2)) AS v(x) ON true$$) AS line;
+SELECT union_same($$SELECT x, n, s FROM (SELECT count(*) AS n, sum(k) AS s FROM union_part WHERE k > (SELECT 2500) AND v < 10) AS ss
 RIGHT JOIN (VALUES (1), (2), (3)) AS v(x) ON true$$);
 RESET enable_material;
 SET enable_parallel_append = off;
@@ -373,4 +449,6 @@ RESET max_parallel_workers_per_gather;
 
 DROP TABLE union_part, union_parent, union_child, union_a, union_b, union_empty;
 DROP FUNCTION union_same(text);
+DROP FUNCTION union_run(text);
+RESET union_test.bound;
 DROP EXTENSION tessera;

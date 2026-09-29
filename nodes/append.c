@@ -4,6 +4,7 @@
 #include "access/parallel.h"
 #include "commands/explain.h"
 #include "commands/explain_format.h"
+#include "executor/execPartition.h"
 #include "executor/executor.h"
 #include "miscadmin.h"
 #include "nodes/nodeFuncs.h"
@@ -11,6 +12,7 @@
 #include "optimizer/optimizer.h"
 #include "optimizer/pathnode.h"
 #include "optimizer/restrictinfo.h"
+#include "partitioning/partprune.h"
 #include "storage/lwlock.h"
 
 #include "tessera/plan.h"
@@ -31,6 +33,9 @@
  * the node shares the children out as the core's Parallel Append does: a
  * child that is not partial goes to one participant, a partial one to any
  * that comes while it has work, each dividing its pages with the others.
+ * The node prunes the partitions while executing as the core's Append
+ * does, through the core's pruning state: at its start by the query's
+ * parameters and stable functions, then by the parameters of execution.
  */
 
 /* The core's cost of a row through an Append (costsize.c), which the node saves. */
@@ -54,6 +59,11 @@ typedef struct AppendShared
 typedef struct TessAppendState
 {
 	CustomScanState css;
+	/*
+	 * The children the plan has, and of them those the initial pruning
+	 * left, which the node initialized and reads.
+	 */
+	int			nplanned;
 	int			nchildren;
 	PlanState **children;
 	TessInput **inputs;
@@ -62,6 +72,15 @@ typedef struct TessAppendState
 	int			ncolumns;
 	/* The children before this one are not partial. */
 	int			first_partial;
+	/*
+	 * Pruning while executing: the core's state, NULL without it; with
+	 * pruning by the parameters of execution, the children valid for the
+	 * current ones, once known.
+	 */
+	PartitionPruneState *prune;
+	bool		exec_prune;
+	bool		valid_known;
+	Bitmapset  *valid;
 	/* The child being read, -1 before the first, and its batch given out. */
 	int			current;
 	bool		done;
@@ -89,56 +108,6 @@ static const CustomPathMethods append_path_methods = {
 };
 
 /* ---------------------------------------------------------------- planning */
-
-static bool
-contains_param(Node *node, void *context)
-{
-	if (node == NULL)
-		return false;
-	if (IsA(node, Param))
-		return true;
-	return expression_tree_walker(node, contains_param, context);
-}
-
-static bool
-contains_expr(Node *node, void *context)
-{
-	if (node == NULL)
-		return false;
-	if (equal(node, context))
-		return true;
-	return expression_tree_walker(node, contains_expr, context);
-}
-
-/*
- * Whether the core might prune the partitions of rel while executing: a
- * clause over a partition key whose value is known only then, through a
- * parameter or a function that is not immutable. The node reads every
- * child, which is correct, as each child evaluates the clauses, but would
- * lose the pruning.
- */
-static bool
-prunes_at_execution(RelOptInfo *rel)
-{
-	if (!enable_partition_pruning || rel->part_scheme == NULL || rel->partexprs == NULL)
-		return false;
-	foreach_node(RestrictInfo, rinfo, rel->baserestrictinfo)
-	{
-		Node	   *clause = (Node *) rinfo->clause;
-
-		if (!contains_param(clause, NULL) && !contain_mutable_functions(clause))
-			continue;
-		for (int key = 0; key < rel->part_scheme->partnatts; key++)
-		{
-			foreach_ptr(Node, expr, rel->partexprs[key])
-			{
-				if (contains_expr(clause, expr))
-					return true;
-			}
-		}
-	}
-	return false;
-}
 
 /*
  * Whether a batch child only packs the rows of a core path: a pack over a
@@ -193,8 +162,7 @@ append_wrap(PlannerInfo *root, Path *path)
 		root->parse->commandType != CMD_SELECT ||
 		root->parse->rowMarks != NIL || path->param_info != NULL ||
 		list_length(append->subpaths) < 2 ||
-		list_length(path->pathtarget->exprs) > MaxTupleAttributeNumber ||
-		prunes_at_execution(rel))
+		list_length(path->pathtarget->exprs) > MaxTupleAttributeNumber)
 		return NULL;
 	foreach_ptr(Path, subpath, append->subpaths)
 	{
@@ -218,6 +186,38 @@ append_wrap(PlannerInfo *root, Path *path)
 	saved = APPEND_CPU_COST_MULTIPLIER * cpu_tuple_cost * path->rows;
 	built->path.total_cost = Max(built->path.startup_cost, built->path.total_cost - saved);
 	return built;
+}
+
+/*
+ * The core's description of pruning the children while executing, made as
+ * create_append_plan makes it, from the relation's clauses and the paths
+ * of the children (whose parents are the partitions); NULL where the
+ * clauses prune nothing then. The planner keeps such descriptions for
+ * set_plan_references, which carries into the plan those of Append and
+ * MergeAppend only: the node takes its own off the list, into its plan
+ * data.
+ */
+static PartitionPruneInfo *
+prune_info(PlannerInfo *root, RelOptInfo *rel, List *children)
+{
+	List	   *clauses;
+	int			index;
+	PartitionPruneInfo *info;
+
+	if (!enable_partition_pruning || !IS_SIMPLE_REL(rel))
+		return NULL;
+	clauses = extract_actual_clauses(rel->baserestrictinfo, false);
+	if (clauses == NIL)
+		return NULL;
+	index = make_partition_pruneinfo(root, rel, children, clauses);
+	if (index < 0)
+		return NULL;
+	info = llast_node(PartitionPruneInfo, root->partPruneInfos);
+	if (index != list_length(root->partPruneInfos) - 1 ||
+		!bms_equal(info->relids, rel->relids))
+		elog(ERROR, "TessAppend found another pruning description than its own");
+	root->partPruneInfos = list_delete_last(root->partPruneInfos);
+	return info;
 }
 
 /*
@@ -248,6 +248,8 @@ append_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path, List *tli
 	writer = tess_plan_writer_create(TESS_APPEND_DATA, TESS_APPEND_DATA_VERSION);
 	tess_plan_write_int(writer, "children", list_length(custom_plans));
 	tess_plan_write_int(writer, "first_partial", intVal(info.node_data));
+	tess_plan_write_node(writer, "prune",
+						 (Node *) prune_info(root, rel, best_path->custom_paths));
 	config.methods = &tess_append_scan_methods;
 	config.layout_policy = TESS_LAYOUT_DENSE;
 	config.scanrelid = 0;
@@ -287,6 +289,68 @@ static const TessBatchOps append_batch_ops = {
 	.get_datum_column = append_get_column,
 };
 
+/*
+ * The core's pruning state over the plan's description, whose range table
+ * numbers are the node's query's own: set_plan_references added the
+ * offset of the query's range table in the statement's to the node's
+ * custom_relids, the relation's (create_customscan_plan), not to the plan
+ * data, so a copy gets it here. The core makes the states of the
+ * statement's descriptions only (ExecDoInitialPruning, before the nodes
+ * start) and hands a node its own by number (ExecInitPartitionExecPruning):
+ * the EState's lists hold this one alone for the two calls. The initial
+ * pruning is done: valid receives the children to initialize.
+ */
+static PartitionPruneState *
+prune_start(TessAppendState *state, const PartitionPruneInfo *planned, Bitmapset **valid)
+{
+	EState	   *estate = state->css.ss.ps.state;
+	CustomScan *cscan = castNode(CustomScan, state->css.ss.ps.plan);
+	PartitionPruneInfo *info = copyObject(planned);
+	int			offset = bms_next_member(cscan->custom_relids, -1) -
+		bms_next_member(info->relids, -1);
+	Bitmapset  *relids = NULL;
+	int			member = -1;
+	List	   *infos = estate->es_part_prune_infos;
+	List	   *states = estate->es_part_prune_states;
+	List	   *results = estate->es_part_prune_results;
+	PartitionPruneState *prune;
+
+	while ((member = bms_next_member(info->relids, member)) >= 0)
+		relids = bms_add_member(relids, member + offset);
+	if (!bms_equal(relids, cscan->custom_relids))
+		elog(ERROR, "TessAppend's pruning description is not its relation's");
+	info->relids = relids;
+	foreach_node(List, hierarchy, info->prune_infos)
+	{
+		foreach_node(PartitionedRelPruneInfo, rel, hierarchy)
+		{
+			rel->rtindex += offset;
+			for (int part = 0; part < rel->nparts; part++)
+			{
+				if (rel->leafpart_rti_map[part] != 0)
+					rel->leafpart_rti_map[part] += offset;
+			}
+		}
+	}
+	estate->es_part_prune_infos = list_make1(info);
+	estate->es_part_prune_states = NIL;
+	estate->es_part_prune_results = NIL;
+	PG_TRY();
+	{
+		ExecDoInitialPruning(estate);
+		prune = ExecInitPartitionExecPruning(&state->css.ss.ps, state->nplanned, 0,
+											 info->relids, valid);
+	}
+	PG_FINALLY();
+	{
+		estate->es_part_prune_infos = infos;
+		estate->es_part_prune_states = states;
+		estate->es_part_prune_results = results;
+	}
+	PG_END_TRY();
+	return prune;
+}
+
 static void
 append_begin(CustomScanState *css, EState *estate, int eflags)
 {
@@ -294,6 +358,9 @@ append_begin(CustomScanState *css, EState *estate, int eflags)
 	CustomScan *cscan = castNode(CustomScan, css->ss.ps.plan);
 	TessPlanInfo info = TESS_STRUCT_INITIALIZER(TessPlanInfo);
 	TessPlanReader *reader;
+	PartitionPruneInfo *planned;
+	Bitmapset  *valid;
+	int			first_partial;
 	int			index = 0;
 
 	/* The planner puts Material above a batch subtree for these. */
@@ -304,21 +371,42 @@ append_begin(CustomScanState *css, EState *estate, int eflags)
 		elog(ERROR, "TessAppend received a foreign plan");
 	reader = tess_plan_reader_create((List *) info.node_data, TESS_APPEND_DATA,
 									 TESS_APPEND_DATA_VERSION);
-	state->nchildren = tess_plan_read_int(reader, "children");
-	state->first_partial = tess_plan_read_int(reader, "first_partial");
+	state->nplanned = tess_plan_read_int(reader, "children");
+	first_partial = tess_plan_read_int(reader, "first_partial");
+	planned = (PartitionPruneInfo *) tess_plan_read_node(reader, "prune");
 	tess_plan_reader_finish(reader);
 	state->current = -1;
-	if (state->nchildren != info.nchildren || state->nchildren < 1 ||
-		state->first_partial < 0 || state->first_partial > state->nchildren)
+	if (state->nplanned != info.nchildren || state->nplanned < 1 ||
+		first_partial < 0 || first_partial > state->nplanned ||
+		(planned != NULL && !IsA(planned, PartitionPruneInfo)))
 		elog(ERROR, "TessAppend received a foreign plan");
+	/*
+	 * As the core's Append: the children the initial pruning left, none
+	 * possibly, the first partial of them, and whether the parameters of
+	 * execution prune further.
+	 */
+	valid = bms_add_range(NULL, 0, state->nplanned - 1);
+	if (planned != NULL)
+	{
+		state->prune = prune_start(state, planned, &valid);
+		state->exec_prune = state->prune->do_exec_prune;
+	}
+	state->nchildren = bms_num_members(valid);
+	state->first_partial = state->nchildren;
 	state->ncolumns = css->ss.ps.ps_ResultTupleSlot->tts_tupleDescriptor->natts;
-	state->children = palloc_array(PlanState *, state->nchildren);
-	state->inputs = palloc_array(TessInput *, state->nchildren);
-	state->layouts = palloc_array(TessLayout, state->nchildren);
+	state->children = palloc_array(PlanState *, Max(state->nchildren, 1));
+	state->inputs = palloc_array(TessInput *, Max(state->nchildren, 1));
+	state->layouts = palloc_array(TessLayout, Max(state->nchildren, 1));
 	foreach_ptr(Plan, plan, cscan->custom_plans)
 	{
-		if (info.child_names[index] == NULL)
+		int			planned_index = foreach_current_index(plan);
+
+		if (info.child_names[planned_index] == NULL)
 			elog(ERROR, "TessAppend expected batch children");
+		if (!bms_is_member(planned_index, valid))
+			continue;
+		if (planned_index >= first_partial && index < state->first_partial)
+			state->first_partial = index;
 		state->children[index] = ExecInitNode(plan, estate, eflags);
 		css->custom_ps = lappend(css->custom_ps, state->children[index]);
 		state->inputs[index] = tess_input_create(estate->es_query_cxt,
@@ -381,6 +469,30 @@ send_requests(TessAppendState *state)
 }
 
 /*
+ * The children valid for the parameters of execution, once per set of
+ * them (ExecFindMatchingSubPlans, numbered among the children the node
+ * initialized); in a parallel plan the others are finished for every
+ * participant, the lock held, as the core's
+ * mark_invalid_subplans_as_finished does.
+ */
+static void
+find_valid(TessAppendState *state)
+{
+	if (!state->exec_prune || state->valid_known)
+		return;
+	state->valid = ExecFindMatchingSubPlans(state->prune, false, NULL);
+	state->valid_known = true;
+	if (state->shared != NULL)
+	{
+		for (int index = 0; index < state->nchildren; index++)
+		{
+			if (!bms_is_member(index, state->valid))
+				state->shared->finished[index] = true;
+		}
+	}
+}
+
+/*
  * The leader's next child in a parallel plan, as the core's
  * choose_next_subplan_for_leader: from the last child down, so that the
  * workers, which start from the first, take the costly children that are
@@ -396,7 +508,10 @@ choose_for_leader(TessAppendState *state)
 	if (state->current >= 0)
 		shared->finished[state->current] = true;
 	else
+	{
 		state->current = state->nchildren - 1;
+		find_valid(state);
+	}
 	while (shared->finished[state->current])
 	{
 		if (state->current == 0)
@@ -414,10 +529,12 @@ choose_for_leader(TessAppendState *state)
 	return true;
 }
 
-/* The child after index, or -1: every child is valid, none pruned. */
+/* The valid child after index, or -1. */
 static int
 next_child(TessAppendState *state, int index)
 {
+	if (state->exec_prune)
+		return bms_next_member(state->valid, index);
 	return index + 1 < state->nchildren ? index + 1 : -1;
 }
 
@@ -436,6 +553,8 @@ choose_for_worker(TessAppendState *state)
 	LWLockAcquire(&shared->lock, LW_EXCLUSIVE);
 	if (state->current >= 0)
 		shared->finished[state->current] = true;
+	else
+		find_valid(state);
 	if (shared->next_plan < 0)
 	{
 		LWLockRelease(&shared->lock);
@@ -478,8 +597,9 @@ choose_next(TessAppendState *state)
 {
 	if (state->shared != NULL)
 		return IsParallelWorker() ? choose_for_worker(state) : choose_for_leader(state);
-	state->current++;
-	return state->current < state->nchildren;
+	find_valid(state);
+	state->current = next_child(state, state->current);
+	return state->current >= 0;
 }
 
 /* The next child batch with rows; false at the end. */
@@ -492,7 +612,8 @@ append_next(TessAppendState *state)
 		tess_input_finish(state->inputs[state->current]);
 		state->child_batch = NULL;
 	}
-	if (state->done)
+	/* Initial pruning may leave no child. */
+	if (state->done || state->nchildren == 0)
 		return false;
 	if (state->current < 0 && !choose_next(state))
 	{
@@ -576,6 +697,13 @@ append_rescan(CustomScanState *css)
 	tess_output_clear(state->output);
 	state->published = false;
 	state->child_batch = NULL;
+	/* Parameters of the pruning changed: the valid children are found anew. */
+	if (state->exec_prune && bms_overlap(css->ss.ps.chgParam, state->prune->execparamids))
+	{
+		bms_free(state->valid);
+		state->valid = NULL;
+		state->valid_known = false;
+	}
 	for (int index = 0; index < state->nchildren; index++)
 	{
 		/* The core passes changed parameters to outer and inner plans only. */
@@ -589,13 +717,20 @@ append_rescan(CustomScanState *css)
 	state->batches = 0;
 }
 
-/* The batches given out: every participant's in a parallel plan. */
+/*
+ * The children the initial pruning removed; with ANALYZE, the batches
+ * given out, every participant's in a parallel plan.
+ */
 static void
 append_explain(CustomScanState *css, List *ancestors, ExplainState *es)
 {
 	TessAppendState *state = (TessAppendState *) css;
 	const uint64 *totals = NULL;
 
+	/* As the core's Append shows the children the initial pruning removed. */
+	if (state->nchildren < state->nplanned)
+		ExplainPropertyInteger("Subplans Removed", NULL,
+							   state->nplanned - state->nchildren, es);
 	if (!es->analyze)
 		return;
 	if (state->stats != NULL)
@@ -652,6 +787,17 @@ append_reinitialize_dsm(CustomScanState *css, ParallelContext *pcxt, void *coord
 
 	tess_shared_stats_reset(state->stats);
 	reset_shared(state);
+	/*
+	 * The children are unfinished again: the leader, which found the valid
+	 * ones before, finds them anew to finish the others, where the core's
+	 * would leave that to the workers, new in every scan.
+	 */
+	if (state->exec_prune)
+	{
+		bms_free(state->valid);
+		state->valid = NULL;
+		state->valid_known = false;
+	}
 }
 
 static void
