@@ -93,8 +93,8 @@ SELECT pg_temp.measure_pair('bm_rows',
     format('SELECT id, t FROM bench_idx WHERE k < %s OFFSET %s', :rows / 20, :rows), :repetitions);
 -- Index scans of the ordered id, which the core reads a row at a time in
 -- both modes: 10 and 3 % of the rows aggregated, 5 % returned to a limit's
--- offset, a range in the index's order, half of them, where the full scan
--- is the faster, a range with a clause on another column.
+-- offset, a range in the index's order, 30 % and half of them, where the
+-- full scan is the faster, a range with a clause on another column.
 SELECT pg_temp.measure_pair('ix_range',
     format('SELECT count(*), sum(w) FROM bench_idx WHERE id < %s', :rows / 10), :repetitions);
 SELECT pg_temp.measure_pair('ix_short',
@@ -104,6 +104,8 @@ SELECT pg_temp.measure_pair('ix_rows',
 SELECT pg_temp.measure_pair('ix_order',
     format('SELECT id, t FROM bench_idx WHERE id BETWEEN %s AND %s ORDER BY id OFFSET %s',
            :rows / 4, :rows / 4 + :rows * 3 / 100, :rows), :repetitions);
+SELECT pg_temp.measure_pair('ix_third',
+    format('SELECT count(*), sum(w) FROM bench_idx WHERE id < %s', :rows * 3 / 10), :repetitions);
 SELECT pg_temp.measure_pair('ix_half',
     format('SELECT count(*), sum(w) FROM bench_idx WHERE id < %s', :rows / 2), :repetitions);
 SELECT pg_temp.measure_pair('ix_filter',
@@ -157,13 +159,13 @@ ORDER BY test, mode DESC;
 SET tessera.enable = on;
 SELECT format('EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE on_%s', name)
 FROM unnest(ARRAY['bm_sparse', 'bm_mid', 'bm_dense', 'bm_third', 'bm_both', 'bm_either', 'bm_rows',
-                   'ix_range', 'ix_short', 'ix_rows', 'ix_order', 'ix_half', 'ix_filter',
+                   'ix_range', 'ix_short', 'ix_rows', 'ix_order', 'ix_third', 'ix_half', 'ix_filter',
                    'ios_count', 'ios_sparse', 'ios_half', 'ios_sum', 'ios_rows', 'ios_order', 'ios_group',
                    'brin_week', 'brin_month', 'brin_months', 'brin_rows']) AS name \gexec
 SET tessera.enable = off;
 SELECT format('EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE off_%s', name)
 FROM unnest(ARRAY['bm_sparse', 'bm_mid', 'bm_dense', 'bm_third', 'bm_both', 'bm_either', 'bm_rows',
-                   'ix_range', 'ix_short', 'ix_rows', 'ix_order', 'ix_half', 'ix_filter',
+                   'ix_range', 'ix_short', 'ix_rows', 'ix_order', 'ix_third', 'ix_half', 'ix_filter',
                    'ios_count', 'ios_sparse', 'ios_half', 'ios_sum', 'ios_rows', 'ios_order', 'ios_group',
                    'brin_week', 'brin_month', 'brin_months', 'brin_rows']) AS name \gexec
 \o
