@@ -87,14 +87,27 @@ query down, and where it can, does it speed one up.
   rows per multiplier, `k` scattered over the pages, `w` of 97 values,
   a btree of `id` and a BRIN index of the day `d`, both in the order of the
   rows): bitmaps of `k` at 1,
-  5 and 15 % of the rows, BitmapAnd of `k` and `w`, BitmapOr of them, and
-  the rows of a bitmap skipped by a limit's offset; index scans of the
-  ordered `id`: 10 and 3 % of the rows aggregated, 5 % skipped by an
+  5, 15 and 30 % of the rows, BitmapAnd of `k` and `w`, BitmapOr of them,
+  and the rows of a bitmap skipped by a limit's offset; index scans of the
+  ordered `id`: 10, 3 and 50 % of the rows aggregated, 5 % skipped by an
   offset, a range in the index's order, a range with a clause on another
-  column; BRIN bitmaps of the day: a week, a month and five months
-  aggregated, 20 days skipped by an offset. With Tessera the rows come in
-  batches and a filter rechecks every clause, dates too. A ratio below one
-  is the win.
+  column; index-only scans of `k` and `w`: 10, 1 and 50 % counted, summed,
+  skipped by an offset, in the index's order to a limit, grouped; BRIN
+  bitmaps of the day: a week, a month and five months aggregated, 20 days
+  skipped by an offset. With Tessera the rows come in batches and a filter
+  rechecks every clause, dates too. At 30 and 50 % the full scan is the
+  faster, which the planner's choice shows. A ratio below one is the win.
+- **scancost** (`scancost.sql`): not a comparison but the calibration of
+  the planner's model of the node's scans: the full scan with a filter
+  over six tables of 30 to 140 rows a page, the index-only scan, the
+  index mode and bitmaps of the ordered `id` and the scattered `k` of
+  `bench_idx` at 1 to 50 % of its rows, and the core's scans with Tessera
+  off. The summary fits the times (a page and a row of the full scan, a
+  row of either index scan, a page, a row and a scattered row of a
+  bitmap, the core's time per unit of its cost), prints the parameters
+  `tessera.scan_page_cost` and the rest they give, a full scan's page
+  being 1, and each sample against its prediction. Run it on another
+  machine to set the parameters there.
 - **rowwise** (`rowwise.sql`): tables without clauses read under a parent
   of the core that takes rows one at a time: `bit_or` of a column and of
   an expression, one column of sixty, `max` of a text column, a window
