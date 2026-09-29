@@ -117,6 +117,25 @@ SELECT types_same($$SELECT count(*), sum(v) FROM types_f WHERE b IS NOT TRUE AND
 SELECT types_same($$SELECT count(*), sum(v) FROM types_f WHERE b = false OR b < true AND s > 0$$);
 SELECT types_same($$SELECT count(*), sum(v) FROM types_f WHERE (b OR s > 20) AND NOT (b AND s < -20)$$);
 SELECT types_same($$SELECT CASE WHEN b THEN v ELSE -v END, count(*) FROM types_f GROUP BY 1$$);
+-- GREATEST and LEAST in batches: the argument that beats the result so
+-- far by the type's comparison, NULLs aside, a scalar among them; abs of
+-- an integer as GREATEST(x, -x), the smallest one failing as abs does;
+-- IS [NOT] DISTINCT FROM as a condition of its parts.
+EXPLAIN (COSTS OFF) SELECT count(*) FROM types_f WHERE greatest(s, v % 7, 3) > 5 AND abs(s) < 10 AND s IS DISTINCT FROM 4;
+SELECT types_same($$SELECT greatest(s, v % 7), least(s, v % 7, 0), greatest(s::int, NULL, v % 5), least(d, date '2000-01-05'), greatest(ts, timestamp '2000-01-01 05:00') FROM types_f WHERE v < 60$$);
+SELECT types_same($$SELECT count(*), sum(v) FROM types_f WHERE greatest(s, v % 7, 3) > 5 AND least(s, 0) < -10$$);
+SELECT types_same($$SELECT abs(s), abs(v - 500), abs((v - 500)::int8) FROM types_f WHERE v < 40 OR v > 980$$);
+SELECT types_same($$SELECT count(*), sum(v) FROM types_f WHERE abs(s) < 10 AND abs(v - 500) > 400$$);
+SELECT types_same($$SELECT count(*), sum(v) FROM types_f WHERE s IS DISTINCT FROM 4$$);
+SELECT types_same($$SELECT count(*), sum(v) FROM types_f WHERE s IS NOT DISTINCT FROM 4 OR b IS DISTINCT FROM true$$);
+SELECT types_same($$SELECT count(*), sum(v) FROM types_f WHERE d IS DISTINCT FROM date '2000-01-03' AND (s + 1) IS DISTINCT FROM (v % 3)$$);
+SELECT types_same($$SELECT count(*), sum(v) FROM types_f WHERE s IS DISTINCT FROM (CASE WHEN v > 2000 THEN s END)$$);
+CREATE TABLE types_min AS SELECT -2147483648 AS x, (-32768)::int2 AS y;
+\set VERBOSITY terse
+SELECT count(*) FROM types_min WHERE abs(x) > 0;
+SELECT count(*) FROM types_min WHERE abs(y) > 0;
+\set VERBOSITY default
+DROP TABLE types_min;
 -- A date against a timestamp compares other than bit for bit: the core's.
 EXPLAIN (COSTS OFF) SELECT count(*) FROM types_f JOIN types_d ON types_f.d = types_d.ts;
 SELECT types_same($$SELECT count(*) FROM types_f JOIN types_d ON types_f.d = types_d.ts$$);

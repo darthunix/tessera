@@ -152,15 +152,15 @@ SELECT join_same($$SELECT sum(CASE WHEN jf.v > jd.n THEN 1 ELSE 0 END), count(*)
 -- A condition of several parts over both sides, NULLs in jd.n.
 EXPLAIN (COSTS OFF) SELECT count(*) FROM jf JOIN jd ON jf.fk = jd.id AND (jf.v > jd.n OR jd.n IS NULL);
 SELECT join_same($$SELECT jf.v, jd.n FROM jf JOIN jd ON jf.fk = jd.id AND (jf.v > jd.n OR jd.n IS NULL)$$);
--- The residual clauses in the core's order, by cost: the guard, row-wise,
--- before the division in batches, however they are written; without the
--- guard the division fails.
+-- The residual clauses in the core's order, by cost: the guard, row-wise
+-- (a bitwise xor), before the division in batches, however they are
+-- written; without the guard the division fails.
 CREATE TABLE jguard AS
 SELECT g AS k, CASE WHEN g % 4 = 0 THEN g ELSE g % 3 END AS d FROM generate_series(1, 300) AS g;
 ANALYZE jguard;
-EXPLAIN (COSTS OFF) SELECT count(*) FROM jguard JOIN jd ON jguard.k = jd.id AND 1000 / (jd.id - jguard.d) > 5 AND jd.id IS DISTINCT FROM jguard.d;
-SELECT join_same($$SELECT jguard.d, jd.id FROM jguard JOIN jd ON jguard.k = jd.id AND 1000 / (jd.id - jguard.d) > 5 AND jd.id IS DISTINCT FROM jguard.d$$);
-SELECT join_same($$SELECT jguard.d, jd.id FROM jguard JOIN jd ON jguard.k = jd.id AND jd.id IS DISTINCT FROM jguard.d AND 1000 / (jd.id - jguard.d) > 5$$);
+EXPLAIN (COSTS OFF) SELECT count(*) FROM jguard JOIN jd ON jguard.k = jd.id AND 1000 / (jd.id - jguard.d) > 5 AND (jd.id # jguard.d) <> 0;
+SELECT join_same($$SELECT jguard.d, jd.id FROM jguard JOIN jd ON jguard.k = jd.id AND 1000 / (jd.id - jguard.d) > 5 AND (jd.id # jguard.d) <> 0$$);
+SELECT join_same($$SELECT jguard.d, jd.id FROM jguard JOIN jd ON jguard.k = jd.id AND (jd.id # jguard.d) <> 0 AND 1000 / (jd.id - jguard.d) > 5$$);
 \set VERBOSITY terse
 SELECT count(*) FROM jguard JOIN jd ON jguard.k = jd.id AND 1000 / (jd.id - jguard.d) > 5;
 \set VERBOSITY default

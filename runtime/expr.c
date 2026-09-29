@@ -9,8 +9,10 @@
 #include "nodes/nodeFuncs.h"
 #include "port/pg_bitutils.h"
 #include "optimizer/optimizer.h"
+#include "utils/fmgroids.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
+#include "utils/typcache.h"
 
 #include "tessera/expr.h"
 #include "tessera/function.h"
@@ -87,7 +89,8 @@ typedef enum ChoiceKind
 {
 	CHOICE_CASE,				/* CASE WHEN c THEN v ... ELSE d END */
 	CHOICE_COALESCE,			/* the first non-NULL argument */
-	CHOICE_NULLIF				/* the first argument, NULL where it equals the second */
+	CHOICE_NULLIF,				/* the first argument, NULL where it equals the second */
+	CHOICE_MINMAX				/* GREATEST or LEAST: the one no other beats, NULLs aside */
 } ChoiceKind;
 
 typedef struct Choice
@@ -100,8 +103,13 @@ typedef struct Choice
 	struct Cond **conds;
 	TessExpr  **values;
 	int			nvalues;
-	/* NULLIF: the equality and its second argument, a value or a scalar. */
+	/*
+	 * NULLIF: the equality and its second argument, a value or a scalar.
+	 * MINMAX: the comparison by which an argument beats the result so far
+	 * (> for GREATEST), and the one by which the result loses to a scalar.
+	 */
 	const TessFunction *function;
+	const TessFunction *loses;
 	Oid			inputcollid;
 	TessExpr   *right;
 	ExprState  *right_scalar;
@@ -345,6 +353,28 @@ expand(Node *node)
 		return NULL;
 	if (IsA(node, CaseExpr) && ((CaseExpr *) node)->arg != NULL)
 		return searched_case((CaseExpr *) node);
+	/* abs(x) of an integer is GREATEST(x, -x): -x of the smallest one fails as abs does. */
+	if (IsA(node, FuncExpr) && list_length(((FuncExpr *) node)->args) == 1)
+	{
+		FuncExpr   *func = (FuncExpr *) node;
+		Oid			negate = func->funcid == F_ABS_INT4 || func->funcid == F_INT4ABS ? F_INT4UM :
+			func->funcid == F_ABS_INT8 || func->funcid == F_INT8ABS ? F_INT8UM :
+			func->funcid == F_ABS_INT2 || func->funcid == F_INT2ABS ? F_INT2UM : InvalidOid;
+
+		if (OidIsValid(negate))
+		{
+			MinMaxExpr *minmax = makeNode(MinMaxExpr);
+			Node	   *arg = linitial(func->args);
+
+			minmax->minmaxtype = func->funcresulttype;
+			minmax->op = IS_GREATEST;
+			minmax->args = list_make2(arg, makeFuncExpr(negate, func->funcresulttype,
+														list_make1(arg), InvalidOid,
+														InvalidOid, COERCE_EXPLICIT_CALL));
+			minmax->location = -1;
+			return (Node *) minmax;
+		}
+	}
 	function = call_of(node, &args, &opno, &inputcollid);
 	if (function == NULL || function->kind != TESS_FUNCTION_EQUIVALENT ||
 		function->struct_size < TESS_FUNCTION_EQUIVALENT_MIN_SIZE ||
@@ -485,6 +515,62 @@ bool_condition(Node *node)
 }
 
 /*
+ * GREATEST's or LEAST's comparisons of its type under its collation, as
+ * the registry implements them: an argument beats the result so far by >
+ * (< for LEAST), and the result loses to a scalar by the other one.
+ */
+static void
+minmax_functions(MinMaxExpr *minmax, const TessFunction **beats, const TessFunction **loses)
+{
+	TypeCacheEntry *type = lookup_type_cache(minmax->minmaxtype,
+											 TYPECACHE_LT_OPR | TYPECACHE_GT_OPR);
+	const TessFunctionRegistryOps *functions = tess_runtime_api()->functions;
+	Oid			greater = OidIsValid(type->gt_opr) ? get_opcode(type->gt_opr) : InvalidOid;
+	Oid			less = OidIsValid(type->lt_opr) ? get_opcode(type->lt_opr) : InvalidOid;
+
+	*beats = functions->find(minmax->op == IS_GREATEST ? greater : less);
+	*loses = functions->find(minmax->op == IS_GREATEST ? less : greater);
+}
+
+/*
+ * x IS DISTINCT FROM y as a condition of supported parts: (x = y) IS NOT
+ * TRUE AND NOT (x IS NULL AND y IS NULL), true where exactly one is NULL
+ * or both are not and differ; any other node as it is.
+ */
+static Node *
+distinct_condition(Node *node)
+{
+	DistinctExpr *distinct;
+	OpExpr	   *equal;
+	BooleanTest *not_true;
+	NullTest   *nulls[2];
+
+	if (!IsA(node, DistinctExpr))
+		return node;
+	distinct = (DistinctExpr *) node;
+	if (list_length(distinct->args) != 2)
+		return node;
+	equal = (OpExpr *) make_opclause(distinct->opno, BOOLOID, false,
+									 linitial(distinct->args), lsecond(distinct->args),
+									 InvalidOid, distinct->inputcollid);
+	set_opfuncid(equal);
+	not_true = makeNode(BooleanTest);
+	not_true->arg = (Expr *) equal;
+	not_true->booltesttype = IS_NOT_TRUE;
+	not_true->location = -1;
+	for (int side = 0; side < 2; side++)
+	{
+		nulls[side] = makeNode(NullTest);
+		nulls[side]->arg = list_nth(distinct->args, side);
+		nulls[side]->nulltesttype = IS_NULL;
+		nulls[side]->location = -1;
+	}
+	return (Node *) make_andclause(list_make2(not_true,
+											  make_notclause((Expr *) make_andclause(list_make2(nulls[0],
+																								nulls[1])))));
+}
+
+/*
  * Whether a conditional value is supported: a searched CASE whose
  * conditions are supported conditions and whose values are supported
  * values, a COALESCE of supported values, a NULLIF of two supported values
@@ -518,6 +604,26 @@ analyze_choice(Node *node, Index relid, int *nvars)
 	if (IsA(node, CoalesceExpr))
 	{
 		foreach_ptr(Node, arg, ((CoalesceExpr *) node)->args)
+		{
+			if (!analyze_value(arg, relid, &part_vars))
+				return false;
+			*nvars |= part_vars;
+		}
+		return true;
+	}
+	if (IsA(node, MinMaxExpr))
+	{
+		MinMaxExpr *minmax = (MinMaxExpr *) node;
+		const TessFunction *beats;
+		const TessFunction *loses;
+
+		minmax_functions(minmax, &beats, &loses);
+		if (!usable(beats, minmax->inputcollid, TESS_FUNCTION_PREDICATE) ||
+			!usable(loses, minmax->inputcollid, TESS_FUNCTION_PREDICATE) ||
+			(beats->flags & TESS_FUNCTION_ANY_SHAPE) == 0 ||
+			(loses->flags & TESS_FUNCTION_ANY_SHAPE) == 0)
+			return false;
+		foreach_ptr(Node, arg, minmax->args)
 		{
 			if (!analyze_value(arg, relid, &part_vars))
 				return false;
@@ -577,7 +683,8 @@ analyze_value(Node *node, Index relid, int *nvars)
 		*nvars = 0;
 		return true;
 	}
-	if (IsA(node, CaseExpr) || IsA(node, CoalesceExpr) || IsA(node, NullIfExpr))
+	if (IsA(node, CaseExpr) || IsA(node, CoalesceExpr) || IsA(node, NullIfExpr) ||
+		IsA(node, MinMaxExpr))
 		return analyze_choice(node, relid, nvars);
 	function = call_of(node, &args, &opno, &inputcollid);
 	if (!usable(function, inputcollid, TESS_FUNCTION_VALUE) ||
@@ -646,7 +753,7 @@ analyze_cond(Node *node, Index relid)
 	node = expand(node);
 	if (node == NULL)
 		return false;
-	node = bool_condition(node);
+	node = distinct_condition(bool_condition(node));
 	if (IsA(node, BoolExpr))
 	{
 		foreach_ptr(Node, arg, ((BoolExpr *) node)->args)
@@ -779,7 +886,8 @@ compile_value(TessExpr *expr, Node *node, PlanState *parent,
 		expr->scalar_value = ExecInitExpr((Expr *) node, parent);
 		return;
 	}
-	if (IsA(node, CaseExpr) || IsA(node, CoalesceExpr) || IsA(node, NullIfExpr))
+	if (IsA(node, CaseExpr) || IsA(node, CoalesceExpr) || IsA(node, NullIfExpr) ||
+		IsA(node, MinMaxExpr))
 	{
 		expr->choice = compile_choice(node, parent, resolve, context);
 		return;
@@ -817,6 +925,19 @@ compile_choice(Node *node, PlanState *parent, TessExprResolveVar resolve,
 		}
 		choice->values[index] = tess_expr_compile_value((Node *) case_expr->defresult,
 														parent, resolve, context);
+	}
+	else if (IsA(node, MinMaxExpr))
+	{
+		MinMaxExpr *minmax = (MinMaxExpr *) node;
+
+		choice->kind = CHOICE_MINMAX;
+		minmax_functions(minmax, &choice->function, &choice->loses);
+		choice->inputcollid = minmax->inputcollid;
+		choice->nvalues = list_length(minmax->args);
+		choice->values = palloc_array(TessExpr *, choice->nvalues);
+		foreach_ptr(Node, arg, minmax->args)
+			choice->values[index++] = tess_expr_compile_value(arg, parent, resolve,
+															  context);
 	}
 	else if (IsA(node, CoalesceExpr))
 	{
@@ -888,7 +1009,7 @@ compile_cond(Node *node, PlanState *parent, TessExprResolveVar resolve,
 	int			column_operand;
 
 	check_stack_depth();
-	node = bool_condition(expand(node));
+	node = distinct_condition(bool_condition(expand(node)));
 	if (IsA(node, BoolExpr))
 	{
 		BoolExpr   *bool_expr = (BoolExpr *) node;
@@ -1835,6 +1956,54 @@ eval_choice(TessExpr *expr)
 					rest[word] &= ~part[word];
 			}
 			break;
+		case CHOICE_MINMAX:
+			{
+				TessDatumColumn result = TESS_STRUCT_INITIALIZER(TessDatumColumn);
+
+				/* The result so far, the scratch set blend writes. */
+				result.values = expr->values[1];
+				result.isnull = expr->isnull[1];
+				result.nrows = nrows;
+				for (int index = 0; index < choice->nvalues; index++)
+				{
+					TessExpr   *arg = choice->values[index];
+
+					/* part: where the result so far is not NULL, which a comparison needs. */
+					for (int word = 0; word < nwords; word++)
+						part[word] = rows->bits[word] & expr->bits[1][word];
+					if (arg->scalar_value != NULL && arg->nsteps == 0 && arg->choice == NULL)
+					{
+						bool		null;
+						Datum		scalar = ExecEvalExprSwitchContext(arg->scalar_value,
+																	   arg->econtext, &null);
+
+						if (null)
+							continue;
+						/* The scalar where the result loses to it or is NULL. */
+						if (!mask_empty(&choice->part))
+							call_predicate(expr, choice->loses, choice->inputcollid, &result,
+										   NULL, scalar, &choice->part);
+						for (int word = 0; word < nwords; word++)
+							part[word] |= rows->bits[word] & ~expr->bits[1][word];
+						blend_scalar(expr, arg, part);
+					}
+					else
+					{
+						const TessDatumColumn *column;
+
+						bind_selection(arg, &choice->rest);
+						column = tess_expr_get_column(arg);
+						/* Where the argument beats the result, or the result is NULL. */
+						if (!mask_empty(&choice->part))
+							call_predicate(expr, choice->function, choice->inputcollid, column,
+										   &result, (Datum) 0, &choice->part);
+						for (int word = 0; word < nwords; word++)
+							part[word] |= rows->bits[word] & ~expr->bits[1][word];
+						blend(expr, column, part);
+					}
+				}
+				break;
+			}
 		case CHOICE_NULLIF:
 			{
 				const TessDatumColumn *left;

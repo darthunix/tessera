@@ -132,6 +132,15 @@ be of any type the parts support, a text column or constant among them;
 a by-reference result points into the batch or the plan, borrowed as any
 result is.
 
+`GREATEST(a, b, …)` and `LEAST(a, b, …)` are values too, where the
+registry implements the type's `>` and `<` in any shape (integers, dates,
+timestamps, booleans): every argument is computed over every row, as the
+executor does, and the result starts as the first; an argument replaces
+it where it beats it (`>` for `GREATEST`) or where the result is NULL, a
+scalar where the result loses to it, so NULLs count only where every
+argument is NULL. `abs(x)` of an integer is `GREATEST(x, -x)`, whose
+negation of the smallest value fails as `abs` does (22003).
+
 ## Filters
 
 A filter is a boolean call of a function the registry implements as a
@@ -185,7 +194,10 @@ an `OR` where the left one is not true, of an `AND` where the left one is
 not false, so `b = 0 OR 10 / b > 1` divides no row by zero, and `a = 3 AND
 10 / (a - 3) > 1` fails on the row where `a` is 3, as in the executor.
 The unknown mask is computed only where a `NOT`, a boolean test or an
-inner `AND` needs it. A boolean column is a condition too (`WHERE
+inner `AND` needs it. `x IS DISTINCT FROM y` is the condition `(x = y)
+IS NOT TRUE AND NOT (x IS NULL AND y IS NULL)` of supported parts, true
+where exactly one is NULL or both are not and differ, and `IS NOT
+DISTINCT FROM` its `NOT`. A boolean column is a condition too (`WHERE
 flag`, `flag IS TRUE`): the compiler reads it as `flag = true` through the
 registered boolean equality, unknown where it is NULL, and `NOT flag` as
 `flag = false`, the same in three-valued logic without the unknown rows a

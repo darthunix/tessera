@@ -184,9 +184,9 @@ SELECT count(*) FROM filter_t WHERE 10 / (a - 5) > 0;
 RESET tessera.enable;
 \set VERBOSITY default
 -- A batch clause after a row-wise one: the guard, which the compiler does
--- not take, still runs before the division.
-EXPLAIN (COSTS OFF) SELECT count(*) FROM filter_t WHERE a > 0 AND b IS DISTINCT FROM 0 AND 10 / b > 1;
-SELECT filter_same($$SELECT count(*) FROM filter_t WHERE a > 0 AND b IS DISTINCT FROM 0 AND 10 / b > 1$$);
+-- not take (a bitwise xor), still runs before the division.
+EXPLAIN (COSTS OFF) SELECT count(*) FROM filter_t WHERE a > 0 AND (b # 0) <> 0 AND 10 / b > 1;
+SELECT filter_same($$SELECT count(*) FROM filter_t WHERE a > 0 AND (b # 0) <> 0 AND 10 / b > 1$$);
 EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT a FROM filter_t WHERE a > 100 AND c <> 'r150' AND b < 5;
 SELECT filter_same($$SELECT a FROM filter_t WHERE a > 100 AND c <> 'r150' AND b < 5$$);
@@ -194,7 +194,7 @@ SELECT filter_same($$SELECT a FROM filter_t WHERE a > 100 AND c <> 'r150' AND b 
 -- cheaper division waits for the policy's row-wise guard.
 CREATE TABLE filter_rls AS SELECT i AS a, i % 10 AS b FROM generate_series(1, 200) AS i;
 ALTER TABLE filter_rls ENABLE ROW LEVEL SECURITY;
-CREATE POLICY filter_rls_visible ON filter_rls USING (a > 0 AND b * 1 + 0 IS DISTINCT FROM 0);
+CREATE POLICY filter_rls_visible ON filter_rls USING (a > 0 AND ((b * 1 + 0) # 0) <> 0);
 CREATE ROLE regress_tessera_rls;
 GRANT SELECT ON filter_rls TO regress_tessera_rls;
 SET ROLE regress_tessera_rls;
