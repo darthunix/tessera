@@ -2,9 +2,10 @@
 -- multiplier): a bitmap of the scattered k, whose pages hold few of the
 -- rows each at 1 % and more at 5 and 15 %, BitmapAnd and BitmapOr of k and
 -- w, and rows of a bitmap returned to a limit; index scans of the ordered
--- id; BRIN of the day d. The core reads the pages of the bitmap, or the
--- index, in both modes; with Tessera the rows come in batches, a filter
--- above rechecking every clause. A ratio below one is the win.
+-- id; index-only scans of k and w; BRIN of the day d. The core reads the
+-- pages of the bitmap, or the index, in both modes; with Tessera the rows
+-- come in batches, a filter above rechecking every clause. A ratio below
+-- one is the win.
 \set ON_ERROR_STOP on
 \if :{?repetitions}
 \else
@@ -102,6 +103,24 @@ SELECT pg_temp.measure_pair('ix_order',
            :rows / 4, :rows / 4 + :rows * 3 / 100, :rows), :repetitions);
 SELECT pg_temp.measure_pair('ix_filter',
     format('SELECT count(*), sum(k) FROM bench_idx WHERE id < %s AND w < 50', :rows / 20), :repetitions);
+-- Index-only scans, the table all visible after VACUUM: k at 10, 1 and
+-- 50 % of the rows counted, summed, returned to a limit's offset and in
+-- the index's order to a limit, w grouped.
+SELECT pg_temp.measure_pair('ios_count',
+    format('SELECT count(*) FROM bench_idx WHERE k < %s', :rows / 10), :repetitions);
+SELECT pg_temp.measure_pair('ios_sparse',
+    format('SELECT count(*) FROM bench_idx WHERE k < %s', :rows / 100), :repetitions);
+SELECT pg_temp.measure_pair('ios_half',
+    format('SELECT count(*) FROM bench_idx WHERE k < %s', :rows / 2), :repetitions);
+SELECT pg_temp.measure_pair('ios_sum',
+    format('SELECT sum(k) FROM bench_idx WHERE k < %s', :rows / 10), :repetitions);
+SELECT pg_temp.measure_pair('ios_rows',
+    format('SELECT k FROM bench_idx WHERE k < %s OFFSET %s', :rows / 20, :rows), :repetitions);
+SELECT pg_temp.measure_pair('ios_order',
+    format('SELECT sum(k) FROM (SELECT k FROM bench_idx WHERE k < %s ORDER BY k LIMIT %s) AS s',
+           :rows / 10, :rows / 20), :repetitions);
+SELECT pg_temp.measure_pair('ios_group',
+    'SELECT w, count(*) FROM bench_idx WHERE w < 10 GROUP BY w', :repetitions);
 -- BRIN of the day, in the order of the rows: its bitmap names whole pages,
 -- every row of which the filter rechecks; a week, a month and five months
 -- of days aggregated, and 20 days returned to a limit's offset.
@@ -134,11 +153,13 @@ SET tessera.enable = on;
 SELECT format('EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE on_%s', name)
 FROM unnest(ARRAY['bm_sparse', 'bm_mid', 'bm_dense', 'bm_both', 'bm_either', 'bm_rows',
                    'ix_range', 'ix_short', 'ix_rows', 'ix_order', 'ix_filter',
+                   'ios_count', 'ios_sparse', 'ios_half', 'ios_sum', 'ios_rows', 'ios_order', 'ios_group',
                    'brin_week', 'brin_month', 'brin_months', 'brin_rows']) AS name \gexec
 SET tessera.enable = off;
 SELECT format('EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE off_%s', name)
 FROM unnest(ARRAY['bm_sparse', 'bm_mid', 'bm_dense', 'bm_both', 'bm_either', 'bm_rows',
                    'ix_range', 'ix_short', 'ix_rows', 'ix_order', 'ix_filter',
+                   'ios_count', 'ios_sparse', 'ios_half', 'ios_sum', 'ios_rows', 'ios_order', 'ios_group',
                    'brin_week', 'brin_month', 'brin_months', 'brin_rows']) AS name \gexec
 \o
 RESET work_mem;
