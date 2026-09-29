@@ -13,11 +13,11 @@ through another `create_upper_paths` hook, the gather node to the final
 stage through a third. The append node, like the pack node, is created by
 batch parents. It is loaded after the bridge; loading it without
 the bridge is an error. A
-running installation preloads both in every session (see
-[bridge.md](bridge.md)):
+running installation preloads both into the server, so that the workers of
+a parallel query have them from their start (see [bridge.md](bridge.md)):
 
 ```
-session_preload_libraries = 'tessera, tessera_nodes, tessera_kernels'
+shared_preload_libraries = 'tessera, tessera_nodes, tessera_kernels'
 ```
 
 Tests and one-off sessions load them by hand instead:

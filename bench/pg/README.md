@@ -1,7 +1,7 @@
 # PostgreSQL-level benchmarks
 
 These benchmarks measure whole queries on a temporary PostgreSQL cluster
-with the Tessera modules preloaded, with `tessera.enable` on and off in one
+with the Tessera modules preloaded into the server, with `tessera.enable` on and off in one
 session, so that the batch plan and the core plan run on the same data in
 the same backend. They answer one question at a time: does Tessera slow a
 query down, and where it can, does it speed one up.
@@ -178,8 +178,12 @@ the runs of each case in each mode, 31 by default: a development A/B times
 the cases a change touches, fewer times, so that a run takes minutes at
 most. `PG_CONFIG` selects the PostgreSQL build; `PGPORT` the port. The cluster's
 `postgresql.conf` preloads `tessera, tessera_nodes, tessera_kernels,
-tessera_limit` in every session and sets `shared_buffers` to `SHARED_BUFFERS`,
-2GB by default. `setup` takes a multiplier of the base row counts (2 M narrow,
+tessera_limit` into the postmaster (`shared_preload_libraries`, so that
+parallel workers do not load them again in every query) and sets
+`shared_buffers` to `SHARED_BUFFERS`, 2GB by default; `measure` restarts
+the server before it runs, so that the modules installed last are the ones
+measured, and every case's warm-up runs bring its tables back into
+the buffers. `setup` takes a multiplier of the base row counts (2 M narrow,
 250 k wide, 500 k mixed, 100 k dimension, 2 M fact, 100 k with duplicate
 keys), stored in the table `bench_scale`; the win and join families
 multiply their selection constants and key ranges by it, so that every case keeps its

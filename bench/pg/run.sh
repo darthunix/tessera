@@ -1,9 +1,11 @@
 #!/bin/sh
 # PostgreSQL-level benchmarks: a temporary cluster with the Tessera modules
-# preloaded, a data set, and one family of queries measured with Tessera
-# on and off, serially or with parallel workers in both modes, over the
-# data set at its base size or a multiple of it. See README.md. Run from
-# the repository root:
+# preloaded into the postmaster, a data set, and one family of queries
+# measured with Tessera on and off, serially or with parallel workers in
+# both modes, over the data set at its base size or a multiple of it.
+# measure restarts the server first, so that it runs the modules installed
+# last: the postmaster holds the ones it loaded, and every backend is
+# forked from it. See README.md. Run from the repository root:
 #   bench/pg/run.sh setup [scale] | measure <family> [workers] | stop
 # measure takes CASES, a regular expression of the case names to time
 # (every case by default; the plans are written for all of them), and
@@ -27,7 +29,7 @@ setup)
     rm -rf "$DATA"
     "$BIN/initdb" -D "$DATA" -A trust > "$RUNS/initdb.log" 2>&1
     cat >> "$DATA/postgresql.conf" <<CONF
-session_preload_libraries = 'tessera, tessera_nodes, tessera_kernels, tessera_limit'
+shared_preload_libraries = 'tessera, tessera_nodes, tessera_kernels, tessera_limit'
 shared_buffers = ${SHARED_BUFFERS:-2GB}
 jit = off
 max_parallel_workers_per_gather = 0
@@ -47,6 +49,7 @@ measure)
     else
         OUT=$RUNS/pg-$FAMILY-$ID
     fi
+    "$BIN/pg_ctl" -D "$DATA" -l "$RUNS/server.log" -m fast -w restart > /dev/null
     mkdir -p "$OUT/source"
     cp "$HERE/README.md" "$OUT/protocol.md"
     cp "$HERE/setup.sql" "$HERE/$FAMILY.sql" "$OUT/source/"

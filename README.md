@@ -50,17 +50,19 @@ through Cargo with the toolchain the repository selects.
    runtime static library with the public headers, the nodes module and the
    example limit node. Clean and rebuild when switching installations.
 
-2. Get a server that loads the modules in every session. Either add the
-   preload line to your cluster's `postgresql.conf` and start it:
+2. Get a server that loads the modules at its start. Either add the
+   preload line to your cluster's `postgresql.conf` and restart it:
 
    ```
-   session_preload_libraries = 'tessera, tessera_nodes, tessera_kernels, tessera_limit'
+   shared_preload_libraries = 'tessera, tessera_nodes, tessera_kernels, tessera_limit'
    ```
 
    (the bridge first, since the modules need it; `tessera_limit` is the
-   example node and optional), or let the benchmark runner create a
-   temporary cluster on port 5433 with that line and three tables of 2 M,
-   250 k and 500 k rows:
+   example node and optional; restart the server after installing the
+   modules again, see [docs/bridge.md](docs/bridge.md) for the
+   `session_preload_libraries` alternative), or let the benchmark runner
+   create a temporary cluster on port 5433 with that line and three tables
+   of 2 M, 250 k and 500 k rows:
 
    ```sh
    bench/pg/run.sh setup

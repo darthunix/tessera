@@ -101,20 +101,36 @@ LOAD '$libdir/tessera';
 ```
 
 The recommended arrangement for a running installation is to preload the
-bridge and the modules in every session from `postgresql.conf`:
+bridge and the modules into the server from `postgresql.conf`:
+
+```
+shared_preload_libraries = 'tessera, tessera_nodes, tessera_kernels, tessera_limit'
+```
+
+The bridge comes first: the initialization of the node and kernel modules
+requires it, and the list is loaded in order; `tessera_limit`, the example
+node, is optional. The postmaster loads them at its start, and every
+backend, forked from it, has the bridge, the registries and the modules
+from its start. That includes the workers of a parallel query, which is why
+this is the recommendation: a worker loads every library its leader has
+loaded that it has not, so with the modules loaded per session instead,
+every worker of every parallel query loads them again, which took two
+workers 2.65 ms to start and finish against 1.84 with the modules in the
+postmaster (target/bench-runs/pg-workers-nIhBf4). The price is a restart:
+after the modules are installed again, backends forked from a running
+postmaster still run the code it loaded.
 
 ```
 session_preload_libraries = 'tessera, tessera_nodes, tessera_kernels, tessera_limit'
 ```
 
-The bridge comes first: the initialization of the node and kernel modules
-requires it, and the list is loaded in order; `tessera_limit`, the example
-node, is optional. Every backend then has the
-bridge, the registries and the modules from the start of its session.
+works as well, in the same order, and suits development: a new session
+loads the modules installed last, at the cost of that start in every
+parallel query. Tessera reserves no shared memory at startup, so either
+line may change with a reload or a restart as the setting requires.
 `CREATE EXTENSION tessera` remains the one-time action in a database, and
 the way tests and one-off sessions load the bridge; it does not replace the
-preload. `shared_preload_libraries` works as well but is not required, since
-Tessera reserves no shared memory at startup.
+preload.
 
 `CREATE EXTENSION IF NOT EXISTS tessera` is not a substitute when the
 extension already exists: its creation script will not run again. Loading

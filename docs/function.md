@@ -97,7 +97,7 @@ against a bigint constant is therefore widened and compared as int8. The
 module also installs the key hashes and the hash table in the bridge's
 kernel registry, for nodes that do not link the kernels (see
 [bridge.md](bridge.md)). Load the bridge first, then `LOAD 'tessera_kernels'`, or preload both through
-`session_preload_libraries` as [bridge.md](bridge.md) recommends. The
+`shared_preload_libraries` as [bridge.md](bridge.md) recommends. The
 description does not depend on the argument types, so implementations for
 other types and from other extensions use the same structure.
 
