@@ -628,20 +628,18 @@ DEALLOCATE union_prune_core;
 SET union_test.bound = '2500';
 EXPLAIN (COSTS OFF)
 SELECT count(*), sum(k) FROM union_part WHERE k > current_setting('union_test.bound')::int AND v < 10;
-                                    QUERY PLAN                                    
-----------------------------------------------------------------------------------
+                                                           QUERY PLAN                                                            
+---------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (TessAgg)
    ->  Custom Scan (TessAppend)
          Subplans Removed: 2
          ->  Custom Scan (TessFilter) on union_part_3a union_part_1
-               Filter: (k > (current_setting('union_test.bound'::text))::integer)
-               Batch Filter: (union_part_1.v < 10)
+               Batch Filter: ((union_part_1.v < 10) AND (union_part_1.k > (current_setting('union_test.bound'::text))::integer))
                ->  Custom Scan (TessHeapScan) on union_part_3a union_part_1
          ->  Custom Scan (TessFilter) on union_part_3b union_part_2
-               Filter: (k > (current_setting('union_test.bound'::text))::integer)
-               Batch Filter: (union_part_2.v < 10)
+               Batch Filter: ((union_part_2.v < 10) AND (union_part_2.k > (current_setting('union_test.bound'::text))::integer))
                ->  Custom Scan (TessHeapScan) on union_part_3b union_part_2
-(11 rows)
+(9 rows)
 
 SELECT union_same($$SELECT count(*), sum(k) FROM union_part WHERE k > current_setting('union_test.bound')::int AND v < 10$$);
  union_same 

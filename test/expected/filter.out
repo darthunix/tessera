@@ -241,6 +241,40 @@ EXECUTE above(NULL);
      0
 (1 row)
 
+-- A subexpression without a column is a scalar computed once a batch,
+-- of any function but a volatile one: abs($1), and a stable function.
+PREPARE above_abs(int) AS SELECT count(*) FROM filter_t WHERE a > abs($1) AND a < 1000 + length(current_user);
+EXPLAIN (COSTS OFF) EXECUTE above_abs(-150);
+                                      QUERY PLAN                                       
+---------------------------------------------------------------------------------------
+ Custom Scan (TessAgg)
+   ->  Custom Scan (TessFilter) on filter_t
+         Batch Filter: ((a > abs($1)) AND (a < (1000 + length((CURRENT_USER)::text))))
+         ->  Custom Scan (TessHeapScan) on filter_t
+(4 rows)
+
+EXECUTE above_abs(-150);
+ count 
+-------
+    43
+(1 row)
+
+EXECUTE above_abs(NULL);
+ count 
+-------
+     0
+(1 row)
+
+DEALLOCATE above_abs;
+EXPLAIN (COSTS OFF) SELECT count(*) FROM filter_t WHERE a > (random() * 0)::int;
+                             QUERY PLAN                              
+---------------------------------------------------------------------
+ Custom Scan (TessAgg)
+   ->  Custom Scan (TessFilter) on filter_t
+         Filter: (a > ((random() * '0'::double precision))::integer)
+         ->  Custom Scan (TessHeapScan) on filter_t
+(4 rows)
+
 -- A pseudoconstant clause gates the scan: the node stays away.
 PREPARE gated(int) AS SELECT count(*) FROM filter_t WHERE a > 150 AND $1 > 0;
 EXPLAIN (COSTS OFF) EXECUTE gated(1);

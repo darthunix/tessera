@@ -143,8 +143,8 @@ ORDER BY o;
  row   | ts::date = date '2020-01-10'
  batch | tz > timestamptz '2020-01-10 00:00+00'
  row   | iv > interval '10 hours'
- row   | d > current_date - 1000
- row   | ts > localtimestamp - interval '1 day'
+ batch | d > current_date - 1000
+ batch | ts > localtimestamp - interval '1 day'
  batch | i4 > (SELECT 10)
  batch | i4 > abs(-10)
  row   | md5(t) = 'x'

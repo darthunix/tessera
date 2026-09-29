@@ -21,7 +21,13 @@ An expression is supported when it is built from
   the operand, which is a supported expression of its own: a bare column
   (`a + b`, `(a + 1) * b`, `b - a`) or a computed one (`(a + 1) * (b + 2)`,
   `a - b * 2`, `(a + 1) * (b + a * 2)`), so an expression is a tree;
-- `Const` and `Param` scalars, external or execution parameters;
+- scalars: `Const`, `Param` (external or execution parameters), and any
+  subexpression without a Var of theirs, a function the registry does not
+  know among them, when no function in it is volatile: `current_date -
+  30`, `localtimestamp - interval '1 day'`, `abs($1)`, which the executor
+  evaluates once a computation, as a stable function returns the same
+  within a statement (a placeholder, a subplan, an aggregate or a
+  `CaseTestExpr` keeps it from being one);
 - calls, `OpExpr` or `FuncExpr`, whose function the registry implements as
   a `TESS_FUNCTION_VALUE` that is strict and either insensitive to the
   input collation or given none, with one or two arguments that are
@@ -37,10 +43,11 @@ An expression is supported when it is built from
 The column must be the first argument of every call that takes it unless
 the implementation accepts any shape, or the call is an operator whose
 commutator's function is implemented: `100 - a` is fine because the int4
-and int8 arithmetic accept any shape; `7 < a` becomes `a > 7`. A scalar argument
-may be an expression of its own without a Var; the executor evaluates it
-whole. An expression with no Var at all is a scalar broadcast over the
-rows. `RelabelType` is transparent. A value may also be conditional,
+and int8 arithmetic accept any shape; `7 < a` becomes `a > 7`. A scalar
+argument may be an expression of its own without a Var; the executor
+evaluates it whole. An expression with no Var at all is a scalar
+broadcast over the rows; a volatile one (`random()`) is not, as the
+executor calls it a row. `RelabelType` is transparent. A value may also be conditional,
 `CASE`, `COALESCE` or `NULLIF` (below). Everything else in a value, a
 function the registry does not know,
 anywhere in the tree, is left to the row-wise executor for the whole

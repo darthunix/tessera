@@ -165,19 +165,50 @@ valid_var(const Var *var, Index relid)
 		(relid == 0 || var->varno == relid);
 }
 
+/* A parameter the executor gives an expression: of the query or of a plan's execution. */
+static bool
+scalar_param(const Node *node)
+{
+	const Param *param = (const Param *) node;
+
+	return param->paramkind == PARAM_EXTERN || param->paramkind == PARAM_EXEC;
+}
+
+/*
+ * A node that keeps a subtree from being a scalar: a column, something
+ * only a row or a plan evaluates, a parameter of another kind.
+ */
+static bool
+not_scalar(Node *node, void *context)
+{
+	if (node == NULL)
+		return false;
+	if (IsA(node, Var) || IsA(node, PlaceHolderVar) || IsA(node, CaseTestExpr) ||
+		IsA(node, CoerceToDomainValue) || IsA(node, SubPlan) ||
+		IsA(node, AlternativeSubPlan) || IsA(node, SubLink) || IsA(node, Aggref) ||
+		IsA(node, WindowFunc) || IsA(node, GroupingFunc) || IsA(node, CurrentOfExpr))
+		return true;
+	if (IsA(node, Param))
+		return !scalar_param(node);
+	return expression_tree_walker(node, not_scalar, context);
+}
+
+/*
+ * A value the same for every row, computed once a computation: a
+ * constant, a parameter, or a subexpression of them without a volatile
+ * function, which the executor would call a row (current_date - 30,
+ * localtimestamp - interval '1 day', abs($1)); a stable function returns
+ * the same within a statement.
+ */
 static bool
 scalar_leaf(const Node *node)
 {
 	if (IsA(node, Const))
 		return true;
 	if (IsA(node, Param))
-	{
-		const Param *param = (const Param *) node;
-
-		return param->paramkind == PARAM_EXTERN ||
-			param->paramkind == PARAM_EXEC;
-	}
-	return false;
+		return scalar_param(node);
+	return !not_scalar((Node *) node, NULL) &&
+		!contain_volatile_functions((Node *) node);
 }
 
 /* The registered implementation behind an operator or function call. */

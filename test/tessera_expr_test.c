@@ -353,6 +353,19 @@ tessera_test_expr_supports(PG_FUNCTION_ARGS)
 		result &= check(51, !tess_expr_supports_filter(or2(op(">", a(), int4(5)), op("=", var(3, TEXTOID), (Node *) makeConst(TEXTOID, -1, DEFAULT_COLLATION_OID, -1, CStringGetTextDatum("x"), false, false))), 0));
 	}
 	result &= check(27, !tess_expr_supports_filter(op("=", var(3, TEXTOID), (Node *) makeConst(TEXTOID, -1, DEFAULT_COLLATION_OID, -1, CStringGetTextDatum("x"), false, false)), 0));
+	/* A subexpression without a column: a scalar computed once, unless volatile. */
+	{
+		Node	   *abs_call = (Node *) makeFuncExpr(F_INT4ABS, INT4OID, list_make1(int4(-7)),
+													 InvalidOid, InvalidOid, COERCE_EXPLICIT_CALL);
+		Node	   *random_int = (Node *) makeFuncExpr(F_RANDOM_INT4_INT4, INT4OID,
+													   list_make2(int4(1), int4(9)),
+													   InvalidOid, InvalidOid, COERCE_EXPLICIT_CALL);
+
+		result &= check(55, tess_expr_supports_filter(op(">", a(), abs_call), 0));
+		result &= check(56, tess_expr_supports_value(op("+", a(), abs_call), 0));
+		result &= check(57, tess_expr_supports_value(abs_call, 0));
+		result &= check(58, !tess_expr_supports_filter(op(">", a(), random_int), 0));
+	}
 	PG_RETURN_BOOL(result);
 }
 
@@ -690,6 +703,13 @@ tessera_test_expr_filters(PG_FUNCTION_ARGS)
 	batch = filtered(op("<", int4(7), a()), econtext);
 	other = filtered(op(">", a(), int4(7)), econtext);
 	result &= check(203, tess_row_mask_count(&batch->rows) == 50 &&
+		batch->rows.bits[0] == other->rows.bits[0] &&
+		batch->rows.bits[1] == other->rows.bits[1]);
+	/* A scalar of an unregistered function over a constant: abs(-7) is 7. */
+	batch = filtered(op(">", a(), (Node *) makeFuncExpr(F_INT4ABS, INT4OID, list_make1(int4(-7)),
+														InvalidOid, InvalidOid,
+														COERCE_EXPLICIT_CALL)), econtext);
+	result &= check(236, tess_row_mask_count(&batch->rows) == 50 &&
 		batch->rows.bits[0] == other->rows.bits[0] &&
 		batch->rows.bits[1] == other->rows.bits[1]);
 	/* A second filter narrows the selection further, in place. */

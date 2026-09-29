@@ -76,6 +76,14 @@ PREPARE above(int) AS SELECT count(*) FROM filter_t WHERE a > $1;
 EXPLAIN (COSTS OFF) EXECUTE above(150);
 EXECUTE above(150);
 EXECUTE above(NULL);
+-- A subexpression without a column is a scalar computed once a batch,
+-- of any function but a volatile one: abs($1), and a stable function.
+PREPARE above_abs(int) AS SELECT count(*) FROM filter_t WHERE a > abs($1) AND a < 1000 + length(current_user);
+EXPLAIN (COSTS OFF) EXECUTE above_abs(-150);
+EXECUTE above_abs(-150);
+EXECUTE above_abs(NULL);
+DEALLOCATE above_abs;
+EXPLAIN (COSTS OFF) SELECT count(*) FROM filter_t WHERE a > (random() * 0)::int;
 -- A pseudoconstant clause gates the scan: the node stays away.
 PREPARE gated(int) AS SELECT count(*) FROM filter_t WHERE a > 150 AND $1 > 0;
 EXPLAIN (COSTS OFF) EXECUTE gated(1);
