@@ -136,18 +136,6 @@ text_op(const TessFunctionCall *call)
 									offsetof(TextFunction, function)))->op;
 }
 
-static TessStatusCode
-text_invalid(TessFunctionCall *call, const char *message)
-{
-	if (call->status != NULL && call->status->struct_size >= TESS_STATUS_MIN_SIZE)
-	{
-		call->status->code = TESS_ERROR_INVALID_ARGUMENT;
-		strlcpy(call->status->sqlstate, "XX000", sizeof(call->status->sqlstate));
-		strlcpy(call->status->message, message, sizeof(call->status->message));
-	}
-	return TESS_ERROR_INVALID_ARGUMENT;
-}
-
 static bool
 text_call_valid(const TessFunctionCall *call, int nargs)
 {
@@ -206,32 +194,6 @@ typedef struct TextScratch
 	int32		starts[SCRATCH_ROWS];
 	int32		lengths[SCRATCH_ROWS];
 } TextScratch;
-
-static void *
-scratch_alloc(Size size, void *local, Size local_size)
-{
-	return size <= local_size ? local : palloc(size);
-}
-
-static void
-scratch_release(void *pointer, void *local)
-{
-	if (pointer != local)
-		pfree(pointer);
-}
-
-/* An empty mask of the batch's rows over scratch words. */
-static TessRowMask
-scratch_mask(TextScratch *space, int index, int nrows)
-{
-	int			nwords = tess_row_mask_word_count(nrows);
-	uint64	   *words = scratch_alloc(sizeof(uint64) * nwords, space->words[index],
-									  sizeof(space->words[index]));
-
-	for (int word = 0; word < nwords; word++)
-		words[word] = 0;
-	return (TessRowMask) {nrows, words};
-}
 
 /*
  * A row's string detoasted, as a column of that one row for the kernels,
@@ -313,15 +275,15 @@ text_compare_evaluate(TessFunctionCall *call)
 	int			nwords;
 
 	if (!text_call_valid(call, 2))
-		return text_invalid(call, "a string comparison takes two arguments");
+		return tess_call_invalid(call, "a string comparison takes two arguments");
 	if (call->args[0].column == NULL && call->args[1].column == NULL)
-		return text_invalid(call, "a string comparison needs a column argument");
+		return tess_call_invalid(call, "a string comparison needs a column argument");
 	op = text_op(call);
 	bpchar = op == BPCHAR_EQ || op == BPCHAR_NE;
 	equal = op == TEXT_EQ || op == BPCHAR_EQ;
 	left = text_arg(&call->args[0], &left_copy);
 	right = text_arg(&call->args[1], &right_copy);
-	rest = scratch_mask(&space, 0, call->rows->nrows);
+	rest = tess_scratch_mask(space.words[0], sizeof(space.words[0]), call->rows->nrows);
 	code = tess_text_compare(equal, bpchar, &left, &right, call->rows, &rest, call->status);
 	nwords = tess_row_mask_word_count(call->rows->nrows);
 	for (int word = 0; code == TESS_OK && word < nwords; word++)
@@ -350,7 +312,7 @@ text_compare_evaluate(TessFunctionCall *call)
 			one_row_free(&right_row);
 		}
 	}
-	scratch_release(rest.bits, space.words[0]);
+	tess_scratch_release(rest.bits, space.words[0]);
 	string_free(left_copy);
 	string_free(right_copy);
 	return code;
@@ -378,14 +340,14 @@ text_pattern_evaluate(TessFunctionCall *call)
 	int			nwords;
 
 	if (!text_call_valid(call, 2))
-		return text_invalid(call, "a string pattern takes two arguments");
+		return tess_call_invalid(call, "a string pattern takes two arguments");
 	column = call->args[0].column;
 	if (column == NULL || call->args[1].column != NULL)
-		return text_invalid(call, "a string pattern takes a column and a constant");
+		return tess_call_invalid(call, "a string pattern takes a column and a constant");
 	op = text_op(call);
 	pattern_copy = string_bytes(call->args[1].scalar, &pattern, &plen);
 	pattern_datum = pattern_copy != NULL ? PointerGetDatum(pattern_copy) : call->args[1].scalar;
-	rest = scratch_mask(&space, 0, call->rows->nrows);
+	rest = tess_scratch_mask(space.words[0], sizeof(space.words[0]), call->rows->nrows);
 	nwords = tess_row_mask_word_count(call->rows->nrows);
 	if (op == TEXT_STARTS_WITH)
 	{
@@ -431,7 +393,7 @@ text_pattern_evaluate(TessFunctionCall *call)
 				call->rows->bits[word] |= UINT64CONST(1) << bit;
 		}
 	}
-	scratch_release(rest.bits, space.words[0]);
+	tess_scratch_release(rest.bits, space.words[0]);
 	string_free(pattern_copy);
 	return code;
 }
@@ -455,10 +417,10 @@ text_length_evaluate(TessFunctionCall *call)
 	int			nwords;
 
 	if (!text_call_valid(call, 1) || call->values == NULL || call->non_nulls == NULL)
-		return text_invalid(call, "a string length takes one argument");
+		return tess_call_invalid(call, "a string length takes one argument");
 	column = call->args[0].column;
 	if (column == NULL)
-		return text_invalid(call, "a string length takes a column");
+		return tess_call_invalid(call, "a string length takes a column");
 	op = text_op(call);
 	values = (int32 *) call->values;
 	length = op == TEXT_OCTETS ? TESS_LENGTH_OCTETS :
@@ -485,7 +447,7 @@ text_length_evaluate(TessFunctionCall *call)
 		}
 		return TESS_OK;
 	}
-	rest = scratch_mask(&space, 0, call->rows->nrows);
+	rest = tess_scratch_mask(space.words[0], sizeof(space.words[0]), call->rows->nrows);
 	code = tess_text_lengths(length, chars < 0 ? TESS_CHARS_BYTES : chars, column, call->rows,
 							 values, call->non_nulls, &rest, call->status);
 	for (int word = 0; code == TESS_OK && word < nwords; word++)
@@ -511,7 +473,7 @@ text_length_evaluate(TessFunctionCall *call)
 			one_row_free(&one);
 		}
 	}
-	scratch_release(rest.bits, space.words[0]);
+	tess_scratch_release(rest.bits, space.words[0]);
 	return code;
 }
 
@@ -595,16 +557,16 @@ text_piece_evaluate(TessFunctionCall *call)
 	if (call == NULL || call->struct_size < TESS_FUNCTION_CALL_MIN_SIZE ||
 		call->nargs < 1 || call->nargs > 3 || call->args == NULL || call->rows == NULL ||
 		call->values == NULL || call->non_nulls == NULL || call->context == NULL)
-		return text_invalid(call, "a string piece takes a column and constants");
+		return tess_call_invalid(call, "a string piece takes a column and constants");
 	for (int arg = 0; arg < call->nargs; arg++)
 		if (call->args[arg].struct_size < TESS_FUNCTION_ARG_MIN_SIZE ||
 			(call->args[arg].column != NULL) != (arg == 0))
-			return text_invalid(call, "a string piece takes a column and constants");
+			return tess_call_invalid(call, "a string piece takes a column and constants");
 	column = call->args[0].column;
 	op = text_op(call);
 	if (call->nargs != (op == TEXT_SUBSTR ? Max(call->nargs, 2) :
 						op == TEXT_LEFT || op == TEXT_RIGHT ? 2 : 1))
-		return text_invalid(call, "a string piece takes a column and constants");
+		return tess_call_invalid(call, "a string piece takes a column and constants");
 	values = (Datum *) call->values;
 	arena.context = call->context;
 	nrows = call->rows->nrows;
@@ -637,9 +599,9 @@ text_piece_evaluate(TessFunctionCall *call)
 		MemoryContextSwitchTo(old);
 		return TESS_OK;
 	}
-	rest = scratch_mask(&space, 0, nrows);
-	starts = scratch_alloc(sizeof(int32) * nrows, space.starts, sizeof(space.starts));
-	lengths = scratch_alloc(sizeof(int32) * nrows, space.lengths, sizeof(space.lengths));
+	rest = tess_scratch_mask(space.words[0], sizeof(space.words[0]), nrows);
+	starts = tess_scratch_alloc(sizeof(int32) * nrows, space.starts, sizeof(space.starts));
+	lengths = tess_scratch_alloc(sizeof(int32) * nrows, space.lengths, sizeof(space.lengths));
 	code = tess_text_pieces(pieces[op], first, second, call->nargs == 3,
 							chars < 0 ? TESS_CHARS_BYTES : chars, column, call->rows, starts,
 							lengths, call->non_nulls, &rest, call->status);
@@ -674,9 +636,9 @@ text_piece_evaluate(TessFunctionCall *call)
 			one_row_free(&one);
 		}
 	}
-	scratch_release(lengths, space.lengths);
-	scratch_release(starts, space.starts);
-	scratch_release(rest.bits, space.words[0]);
+	tess_scratch_release(lengths, space.lengths);
+	tess_scratch_release(starts, space.starts);
+	tess_scratch_release(rest.bits, space.words[0]);
 	return code;
 }
 

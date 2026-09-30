@@ -314,19 +314,6 @@ operation(const TessFunctionCall *call)
 	return entry->op;
 }
 
-/* Fail a call with an invalid argument before any kernel runs. */
-static TessStatusCode
-invalid(TessFunctionCall *call, const char *message)
-{
-	if (call->status != NULL && call->status->struct_size >= TESS_STATUS_MIN_SIZE)
-	{
-		call->status->code = TESS_ERROR_INVALID_ARGUMENT;
-		strlcpy(call->status->sqlstate, "XX000", sizeof(call->status->sqlstate));
-		strlcpy(call->status->message, message, sizeof(call->status->message));
-	}
-	return TESS_ERROR_INVALID_ARGUMENT;
-}
-
 static bool
 valid_call(const TessFunctionCall *call)
 {
@@ -364,7 +351,7 @@ compare_evaluate(TessFunctionCall *call)
 	TessCompareOp op;
 
 	if (!valid_call(call))
-		return invalid(call, "an int4 comparison takes two arguments");
+		return tess_call_invalid(call, "an int4 comparison takes two arguments");
 	left = &call->args[0];
 	right = &call->args[1];
 	op = (TessCompareOp) operation(call);
@@ -379,7 +366,7 @@ compare_evaluate(TessFunctionCall *call)
 		return tess_int4_filter(right->column, right->prepared, call->rows,
 								flip(op), DatumGetInt32(left->scalar),
 								call->status);
-	return invalid(call, "an int4 comparison needs a column argument");
+	return tess_call_invalid(call, "an int4 comparison needs a column argument");
 }
 
 /* Any shape but two scalars, which the consumer folds itself. */
@@ -391,7 +378,7 @@ arith_evaluate(TessFunctionCall *call)
 	TessArithOp op;
 
 	if (!valid_call(call))
-		return invalid(call, "int4 arithmetic takes two arguments");
+		return tess_call_invalid(call, "int4 arithmetic takes two arguments");
 	left = &call->args[0];
 	right = &call->args[1];
 	op = (TessArithOp) operation(call);
@@ -411,7 +398,7 @@ arith_evaluate(TessFunctionCall *call)
 										   right->column, right->prepared,
 										   call->rows, (int32 *) call->values,
 										   call->non_nulls, call->status);
-	return invalid(call, "int4 arithmetic needs a column argument");
+	return tess_call_invalid(call, "int4 arithmetic needs a column argument");
 }
 
 /* -x is 0 - x, including the overflow of the smallest value. */
@@ -421,9 +408,9 @@ negate_evaluate(TessFunctionCall *call)
 	if (call == NULL || call->struct_size < TESS_FUNCTION_CALL_MIN_SIZE ||
 		call->nargs != 1 || call->args == NULL ||
 		call->args[0].struct_size < TESS_FUNCTION_ARG_MIN_SIZE)
-		return invalid(call, "int4 negation takes one argument");
+		return tess_call_invalid(call, "int4 negation takes one argument");
 	if (call->args[0].column == NULL)
-		return invalid(call, "int4 negation takes a column");
+		return tess_call_invalid(call, "int4 negation takes a column");
 	return tess_int4_arith_scalar_left(TESS_ARITH_SUB, 0, call->args[0].column,
 									   call->args[0].prepared, call->rows,
 									   (int32 *) call->values, call->non_nulls,
@@ -439,7 +426,7 @@ compare8_evaluate(TessFunctionCall *call)
 	TessCompareOp op;
 
 	if (!valid_call(call))
-		return invalid(call, "an int8 comparison takes two arguments");
+		return tess_call_invalid(call, "an int8 comparison takes two arguments");
 	left = &call->args[0];
 	right = &call->args[1];
 	op = (TessCompareOp) operation(call);
@@ -454,7 +441,7 @@ compare8_evaluate(TessFunctionCall *call)
 		return tess_int8_filter(right->column, right->prepared, call->rows,
 								flip(op), DatumGetInt64(left->scalar),
 								call->status);
-	return invalid(call, "an int8 comparison needs a column argument");
+	return tess_call_invalid(call, "an int8 comparison needs a column argument");
 }
 
 /* Any shape but two scalars, into a column of int8 Datums. */
@@ -466,7 +453,7 @@ arith8_evaluate(TessFunctionCall *call)
 	TessArithOp op;
 
 	if (!valid_call(call))
-		return invalid(call, "int8 arithmetic takes two arguments");
+		return tess_call_invalid(call, "int8 arithmetic takes two arguments");
 	left = &call->args[0];
 	right = &call->args[1];
 	op = (TessArithOp) operation(call);
@@ -486,7 +473,7 @@ arith8_evaluate(TessFunctionCall *call)
 										   right->column, right->prepared,
 										   call->rows, (int64 *) call->values,
 										   call->non_nulls, call->status);
-	return invalid(call, "int8 arithmetic needs a column argument");
+	return tess_call_invalid(call, "int8 arithmetic needs a column argument");
 }
 
 /* -x is 0 - x over int8 values, including the overflow of the smallest. */
@@ -496,9 +483,9 @@ negate8_evaluate(TessFunctionCall *call)
 	if (call == NULL || call->struct_size < TESS_FUNCTION_CALL_MIN_SIZE ||
 		call->nargs != 1 || call->args == NULL ||
 		call->args[0].struct_size < TESS_FUNCTION_ARG_MIN_SIZE)
-		return invalid(call, "int8 negation takes one argument");
+		return tess_call_invalid(call, "int8 negation takes one argument");
 	if (call->args[0].column == NULL)
-		return invalid(call, "int8 negation takes a column");
+		return tess_call_invalid(call, "int8 negation takes a column");
 	return tess_int8_arith_scalar_left(TESS_ARITH_SUB, 0, call->args[0].column,
 									   call->args[0].prepared, call->rows,
 									   (int64 *) call->values, call->non_nulls,
@@ -512,9 +499,9 @@ cast_evaluate(TessFunctionCall *call)
 	if (call == NULL || call->struct_size < TESS_FUNCTION_CALL_MIN_SIZE ||
 		call->nargs != 1 || call->args == NULL ||
 		call->args[0].struct_size < TESS_FUNCTION_ARG_MIN_SIZE)
-		return invalid(call, "the cast to int8 takes one argument");
+		return tess_call_invalid(call, "the cast to int8 takes one argument");
 	if (call->args[0].column == NULL)
-		return invalid(call, "the cast to int8 takes a column");
+		return tess_call_invalid(call, "the cast to int8 takes a column");
 	return tess_int4_to_int8(call->args[0].column, call->args[0].prepared,
 							 call->rows, call->values, call->non_nulls,
 							 call->status);
@@ -527,9 +514,9 @@ narrow_evaluate(TessFunctionCall *call)
 	if (call == NULL || call->struct_size < TESS_FUNCTION_CALL_MIN_SIZE ||
 		call->nargs != 1 || call->args == NULL ||
 		call->args[0].struct_size < TESS_FUNCTION_ARG_MIN_SIZE)
-		return invalid(call, "the cast to int4 takes one argument");
+		return tess_call_invalid(call, "the cast to int4 takes one argument");
 	if (call->args[0].column == NULL)
-		return invalid(call, "the cast to int4 takes a column");
+		return tess_call_invalid(call, "the cast to int4 takes a column");
 	return tess_int8_to_int4(call->args[0].column, call->args[0].prepared,
 							 call->rows, (int32 *) call->values,
 							 call->non_nulls, call->status);
@@ -571,16 +558,8 @@ smallint_range(TessFunctionCall *call, TessStatusCode code)
 		}
 	}
 	if (outside)
-	{
-		if (call->status != NULL && call->status->struct_size >= TESS_STATUS_MIN_SIZE)
-		{
-			call->status->code = TESS_ERROR_INTEGER_OUT_OF_RANGE;
-			strlcpy(call->status->sqlstate, "22003", sizeof(call->status->sqlstate));
-			strlcpy(call->status->message, "smallint out of range",
-					sizeof(call->status->message));
-		}
-		return TESS_ERROR_INTEGER_OUT_OF_RANGE;
-	}
+		return tess_call_fail(call, TESS_ERROR_INTEGER_OUT_OF_RANGE, "22003",
+							  "smallint out of range");
 	return TESS_OK;
 }
 
@@ -603,9 +582,9 @@ widen2_evaluate(TessFunctionCall *call)
 	if (call == NULL || call->struct_size < TESS_FUNCTION_CALL_MIN_SIZE ||
 		call->nargs != 1 || call->args == NULL ||
 		call->args[0].struct_size < TESS_FUNCTION_ARG_MIN_SIZE)
-		return invalid(call, "the cast between smallint and integer takes one argument");
+		return tess_call_invalid(call, "the cast between smallint and integer takes one argument");
 	if (call->args[0].column == NULL)
-		return invalid(call, "the cast between smallint and integer takes a column");
+		return tess_call_invalid(call, "the cast between smallint and integer takes a column");
 	return tess_int4_arith_scalar(TESS_ARITH_ADD, call->args[0].column, 0,
 								  call->args[0].prepared, call->rows,
 								  (int32 *) call->values, call->non_nulls, call->status);
@@ -635,9 +614,9 @@ date_timestamp_evaluate(TessFunctionCall *call)
 	int32		bound;
 
 	if (!valid_call(call))
-		return invalid(call, "a date against a timestamp takes two arguments");
+		return tess_call_invalid(call, "a date against a timestamp takes two arguments");
 	if (call->args[0].column == NULL || call->args[1].column != NULL)
-		return invalid(call, "a date against a timestamp takes a date column and a scalar");
+		return tess_call_invalid(call, "a date against a timestamp takes a date column and a scalar");
 	op = (TessCompareOp) operation(call);
 	timestamp = DatumGetTimestamp(call->args[1].scalar);
 	if (TIMESTAMP_IS_NOBEGIN(timestamp))
@@ -695,12 +674,12 @@ aggregate_evaluate(TessFunctionCall *call)
 		call->rows == NULL || call->values == NULL ||
 		call->non_nulls == NULL || call->non_nulls->nrows != 1 ||
 		call->non_nulls->bits == NULL)
-		return invalid(call, "an aggregate needs a Datum and a mask of one row");
+		return tess_call_invalid(call, "an aggregate needs a Datum and a mask of one row");
 	result = call->values;
 	if (operation(call) == AGG_COUNT_ROWS)
 	{
 		if (call->nargs != 0)
-			return invalid(call, "count(*) takes no argument");
+			return tess_call_invalid(call, "count(*) takes no argument");
 		*result = Int64GetDatum((int64) tess_row_mask_count(call->rows));
 		call->non_nulls->bits[0] = 1;
 		return TESS_OK;
@@ -708,7 +687,7 @@ aggregate_evaluate(TessFunctionCall *call)
 	if (call->nargs != 1 || call->args == NULL ||
 		call->args[0].struct_size < TESS_FUNCTION_ARG_MIN_SIZE ||
 		call->args[0].column == NULL)
-		return invalid(call, "an aggregate takes one column");
+		return tess_call_invalid(call, "an aggregate takes one column");
 	arg = &call->args[0];
 	switch (operation(call))
 	{
@@ -758,7 +737,7 @@ aggregate_evaluate(TessFunctionCall *call)
 				break;
 			}
 		default:
-			return invalid(call, "unknown aggregate");
+			return tess_call_invalid(call, "unknown aggregate");
 	}
 	if (code == TESS_OK)
 		call->non_nulls->bits[0] = isnull ? 0 : 1;

@@ -130,19 +130,6 @@ float_function(const TessFunctionCall *call)
 									offsetof(FloatFunction, function));
 }
 
-static TessStatusCode
-float_invalid(TessFunctionCall *call, const char *message)
-{
-	if (call != NULL && call->status != NULL &&
-		call->status->struct_size >= TESS_STATUS_MIN_SIZE)
-	{
-		call->status->code = TESS_ERROR_INVALID_ARGUMENT;
-		strlcpy(call->status->sqlstate, "XX000", sizeof(call->status->sqlstate));
-		strlcpy(call->status->message, message, sizeof(call->status->message));
-	}
-	return TESS_ERROR_INVALID_ARGUMENT;
-}
-
 static bool
 float_call_valid(const TessFunctionCall *call, int nargs)
 {
@@ -182,7 +169,7 @@ float_compare_evaluate(TessFunctionCall *call)
 	int			nwords;
 
 	if (!float_call_valid(call, 2))
-		return float_invalid(call, "a float comparison takes two arguments");
+		return tess_call_invalid(call, "a float comparison takes two arguments");
 	function = float_function(call);
 	nwords = tess_row_mask_word_count(call->rows->nrows);
 	for (int word = 0; word < nwords; word++)
@@ -343,11 +330,11 @@ float_value_evaluate(TessFunctionCall *call)
 	int			nwords;
 
 	if (call == NULL || call->function == NULL)
-		return float_invalid(call, "a float function takes its arguments");
+		return tess_call_invalid(call, "a float function takes its arguments");
 	function = float_function(call);
 	nargs = function->op >= FLOAT_UM ? 1 : 2;
 	if (!float_call_valid(call, nargs) || call->values == NULL || call->non_nulls == NULL)
-		return float_invalid(call, "a float function takes its arguments");
+		return tess_call_invalid(call, "a float function takes its arguments");
 	nwords = tess_row_mask_word_count(call->rows->nrows);
 	for (int word = 0; word < nwords; word++)
 	{

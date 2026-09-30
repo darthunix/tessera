@@ -134,26 +134,6 @@ date_op(const TessFunctionCall *call)
 									offsetof(DateFunction, function)))->op;
 }
 
-static TessStatusCode
-date_fail(TessFunctionCall *call, TessStatusCode code, const char *sqlstate,
-		  const char *message)
-{
-	if (call != NULL && call->status != NULL &&
-		call->status->struct_size >= TESS_STATUS_MIN_SIZE)
-	{
-		call->status->code = code;
-		strlcpy(call->status->sqlstate, sqlstate, sizeof(call->status->sqlstate));
-		strlcpy(call->status->message, message, sizeof(call->status->message));
-	}
-	return code;
-}
-
-static TessStatusCode
-date_invalid(TessFunctionCall *call, const char *message)
-{
-	return date_fail(call, TESS_ERROR_INVALID_ARGUMENT, "XX000", message);
-}
-
 static bool
 date_call_valid(const TessFunctionCall *call, int nargs)
 {
@@ -217,7 +197,7 @@ date_evaluate(TessFunctionCall *call)
 	op = call != NULL && call->function != NULL ? date_op(call) : DATE_PLUS_DAYS;
 	nargs = op == TIMESTAMP_TO_DATE || op == DATE_TO_TIMESTAMP ? 1 : 2;
 	if (!date_call_valid(call, nargs))
-		return date_invalid(call, "a date function takes its arguments");
+		return tess_call_invalid(call, "a date function takes its arguments");
 	left = calendar_arg(&call->args[0]);
 	right = nargs == 2 ? calendar_arg(&call->args[1]) : left;
 	switch (op)
@@ -238,7 +218,7 @@ date_evaluate(TessFunctionCall *call)
 			return tess_date_to_timestamp(&left, call->rows, (int64 *) call->values,
 										  call->non_nulls, call->status);
 		default:
-			return date_invalid(call, "not a date function");
+			return tess_call_invalid(call, "not a date function");
 	}
 }
 
@@ -396,32 +376,6 @@ typedef struct DateScratch
 	uint8		scales[SCRATCH_ROWS];
 } DateScratch;
 
-static void *
-scratch_alloc(Size size, void *local, Size local_size)
-{
-	return size <= local_size ? local : palloc(size);
-}
-
-static void
-scratch_release(void *pointer, void *local)
-{
-	if (pointer != local)
-		pfree(pointer);
-}
-
-/* An empty mask of the batch's rows over scratch words. */
-static TessRowMask
-scratch_mask(DateScratch *space, int index, int nrows)
-{
-	int			nwords = tess_row_mask_word_count(nrows);
-	uint64	   *words = scratch_alloc(sizeof(uint64) * nwords, space->words[index],
-									  sizeof(space->words[index]));
-
-	for (int word = 0; word < nwords; word++)
-		words[word] = 0;
-	return (TessRowMask) {nrows, words};
-}
-
 /*
  * The session zone's local times of a timestamptz column's selected
  * non-NULL rows into locals, an infinity kept: a column of them with the
@@ -502,9 +456,9 @@ trunc_zoned(TessFunctionCall *call, TessCalendarUnit unit)
 	int			nrows = call->rows->nrows;
 	int			nwords = tess_row_mask_word_count(nrows);
 	DateScratch space;
-	int64	   *locals = scratch_alloc(sizeof(int64) * nrows, space.locals, sizeof(space.locals));
-	TessRowMask days = scratch_mask(&space, 0, nrows);
-	TessRowMask rest = scratch_mask(&space, 1, nrows);
+	int64	   *locals = tess_scratch_alloc(sizeof(int64) * nrows, space.locals, sizeof(space.locals));
+	TessRowMask days = tess_scratch_mask(space.words[0], sizeof(space.words[0]), nrows);
+	TessRowMask rest = tess_scratch_mask(space.words[1], sizeof(space.words[1]), nrows);
 	TessDatumColumn local = local_column(column, call->rows, locals);
 	TessStatusCode code;
 
@@ -541,9 +495,9 @@ trunc_zoned(TessFunctionCall *call, TessCalendarUnit unit)
 		}
 		call->non_nulls->bits[word] = present;
 	}
-	scratch_release(rest.bits, space.words[1]);
-	scratch_release(days.bits, space.words[0]);
-	scratch_release(locals, space.locals);
+	tess_scratch_release(rest.bits, space.words[1]);
+	tess_scratch_release(days.bits, space.words[0]);
+	tess_scratch_release(locals, space.locals);
 	return code;
 }
 
@@ -562,7 +516,7 @@ trunc_evaluate(TessFunctionCall *call)
 	int			nwords;
 
 	if (!date_call_valid(call, 2))
-		return date_invalid(call, "date_trunc takes a unit and a timestamp");
+		return tess_call_invalid(call, "date_trunc takes a unit and a timestamp");
 	units = &call->args[0];
 	stamps = &call->args[1];
 	values = (Datum *) call->values;
@@ -625,7 +579,7 @@ interval_evaluate(TessFunctionCall *call)
 	TessCalendarArg right;
 
 	if (!date_call_valid(call, 2))
-		return date_invalid(call, "an interval sum takes two arguments");
+		return tess_call_invalid(call, "an interval sum takes two arguments");
 	op = date_op(call);
 	minus = op == TIMESTAMP_MINUS_INTERVAL || op == DATE_MINUS_INTERVAL;
 	left = calendar_arg(&call->args[0]);
@@ -763,7 +717,7 @@ extract_evaluate(TessFunctionCall *call)
 	MemoryContext old;
 
 	if (!date_call_valid(call, 2) || call->context == NULL)
-		return date_invalid(call, "extract takes a unit and a date or a timestamp");
+		return tess_call_invalid(call, "extract takes a unit and a date or a timestamp");
 	units = &call->args[0];
 	stamps = &call->args[1];
 	zoned = date_op(call) == TIMESTAMPTZ_EXTRACT;
@@ -794,14 +748,14 @@ extract_evaluate(TessFunctionCall *call)
 		MemoryContextSwitchTo(old);
 		return TESS_OK;
 	}
-	scales = scratch_alloc(nrows, space.scales, sizeof(space.scales));
+	scales = tess_scratch_alloc(nrows, space.scales, sizeof(space.scales));
 	locals = NULL;
-	rest = scratch_mask(&space, 0, nrows);
-	write = scratch_mask(&space, 1, nrows);
+	rest = tess_scratch_mask(space.words[0], sizeof(space.words[0]), nrows);
+	write = tess_scratch_mask(space.words[1], sizeof(space.words[1]), nrows);
 	arg = calendar_arg(stamps);
 	if (zoned && stamps->column != NULL)
 	{
-		locals = scratch_alloc(sizeof(int64) * nrows, space.locals, sizeof(space.locals));
+		locals = tess_scratch_alloc(sizeof(int64) * nrows, space.locals, sizeof(space.locals));
 		local_stamps = local_column(stamps->column, call->rows, locals);
 		arg.column = &local_stamps;
 	}
@@ -841,10 +795,10 @@ extract_evaluate(TessFunctionCall *call)
 	if (code == TESS_OK)
 		extract_core(call, core, &rest);
 	if (locals != NULL)
-		scratch_release(locals, space.locals);
-	scratch_release(write.bits, space.words[1]);
-	scratch_release(rest.bits, space.words[0]);
-	scratch_release(scales, space.scales);
+		tess_scratch_release(locals, space.locals);
+	tess_scratch_release(write.bits, space.words[1]);
+	tess_scratch_release(rest.bits, space.words[0]);
+	tess_scratch_release(scales, space.scales);
 	MemoryContextSwitchTo(old);
 	return code;
 }
@@ -861,7 +815,7 @@ zone_cast_evaluate(TessFunctionCall *call)
 	int			nwords;
 
 	if (!date_call_valid(call, 1))
-		return date_invalid(call, "a zone cast takes one argument");
+		return tess_call_invalid(call, "a zone cast takes one argument");
 	arg = &call->args[0];
 	to_instant = date_op(call) == DATE_TO_TIMESTAMPTZ;
 	nwords = tess_row_mask_word_count(call->rows->nrows);

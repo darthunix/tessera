@@ -384,6 +384,18 @@ tessera_test_kernels_module_aggregates(PG_FUNCTION_ARGS)
 	PG_RETURN_BOOL(true);
 }
 
+/* A function of each evaluator of the module, from int.c, text.c, numeric.c, float.c and date.c. */
+static const Oid null_call_refused[] = {
+	F_INT4EQ, F_INT4PL, F_INT4UM, F_COUNT_, F_INT8EQ, F_INT8PL, F_INT8UM,
+	F_INT8_INT4, F_INT4_INT8, F_INT2PL, F_INT2UM, F_DATE_EQ_TIMESTAMP,
+	F_INT4_INT2, F_INT2_INT4,
+	F_TEXTEQ, F_STARTS_WITH, F_LENGTH_TEXT, F_SUBSTRING_TEXT_INT4_INT4,
+	F_NUMERIC_EQ, F_NUMERIC_INT2, F_NUMERIC_ADD,
+	F_FLOAT8EQ, F_FLOAT8UM,
+	F_DATE_PLI, F_DATE_TRUNC_TEXT_TIMESTAMP, F_TIMESTAMP_PL_INTERVAL,
+	F_EXTRACT_TEXT_DATE, F_TIMESTAMPTZ_DATE,
+};
+
 Datum
 tessera_test_kernels_module_errors(PG_FUNCTION_ARGS)
 {
@@ -429,6 +441,15 @@ tessera_test_kernels_module_errors(PG_FUNCTION_ARGS)
 					 &selection, values, &non_nulls,
 					 &status) != TESS_ERROR_INVALID_ARGUMENT)
 		PG_RETURN_BOOL(false);
+	/* Every evaluator of the module refuses a NULL call, never reading it. */
+	for (int i = 0; i < lengthof(null_call_refused); i++)
+	{
+		const TessFunction *function = functions->find(null_call_refused[i]);
+
+		if (function == NULL ||
+			function->evaluate(NULL) != TESS_ERROR_INVALID_ARGUMENT)
+			PG_RETURN_BOOL(false);
+	}
 	PG_RETURN_BOOL(true);
 }
 

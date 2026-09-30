@@ -162,19 +162,6 @@ numeric_op(const TessFunctionCall *call)
 									   offsetof(NumericFunction, function)))->op;
 }
 
-static TessStatusCode
-numeric_invalid(TessFunctionCall *call, const char *message)
-{
-	if (call != NULL && call->status != NULL &&
-		call->status->struct_size >= TESS_STATUS_MIN_SIZE)
-	{
-		call->status->code = TESS_ERROR_INVALID_ARGUMENT;
-		strlcpy(call->status->sqlstate, "XX000", sizeof(call->status->sqlstate));
-		strlcpy(call->status->message, message, sizeof(call->status->message));
-	}
-	return TESS_ERROR_INVALID_ARGUMENT;
-}
-
 static bool
 numeric_call_valid(const TessFunctionCall *call, int nargs)
 {
@@ -198,39 +185,6 @@ typedef struct Scratch
 	uint64		words[3][SCRATCH_ROWS / 64];
 	uint8		scales[SCRATCH_ROWS];
 } Scratch;
-
-static void *
-scratch(Size size, void *local, Size local_size)
-{
-	return size <= local_size ? local : palloc(size);
-}
-
-static void
-scratch_free(void *pointer, void *local)
-{
-	if (pointer != local)
-		pfree(pointer);
-}
-
-/* An empty mask of the batch's rows over scratch words. */
-static TessRowMask
-scratch_mask(Scratch *space, int index, int nrows)
-{
-	int			nwords = tess_row_mask_word_count(nrows);
-	uint64	   *words = scratch(sizeof(uint64) * nwords, space->words[index],
-								sizeof(space->words[index]));
-
-	/* A batch is a word or a few: no call to memset. */
-	for (int word = 0; word < nwords; word++)
-		words[word] = 0;
-	return (TessRowMask) {nrows, words};
-}
-
-static void
-scratch_mask_free(Scratch *space, int index, TessRowMask *mask)
-{
-	scratch_free(mask->bits, space->words[index]);
-}
 
 static TessDecimalArg
 decimal_arg(const TessFunctionArg *arg)
@@ -318,16 +272,16 @@ numeric_compare_evaluate(TessFunctionCall *call)
 	int			nwords;
 
 	if (!numeric_call_valid(call, 2))
-		return numeric_invalid(call, "a numeric comparison takes two arguments");
+		return tess_call_invalid(call, "a numeric comparison takes two arguments");
 	op = numeric_op(call);
 	args[0] = decimal_arg(&call->args[0]);
 	args[1] = decimal_arg(&call->args[1]);
-	rest = scratch_mask(&space, 0, call->rows->nrows);
+	rest = tess_scratch_mask(space.words[0], sizeof(space.words[0]), call->rows->nrows);
 	code = tess_decimal_filter(compares[op], &args[0], &args[1], call->rows, &rest,
 							   call->status);
 	if (code != TESS_OK)
 	{
-		scratch_mask_free(&space, 0, &rest);
+		tess_scratch_release(rest.bits, space.words[0]);
 		return code;
 	}
 	nwords = tess_row_mask_word_count(call->rows->nrows);
@@ -364,7 +318,7 @@ numeric_compare_evaluate(TessFunctionCall *call)
 				call->rows->bits[word] |= UINT64CONST(1) << bit;
 		}
 	}
-	scratch_mask_free(&space, 0, &rest);
+	tess_scratch_release(rest.bits, space.words[0]);
 	return TESS_OK;
 }
 
@@ -384,7 +338,7 @@ numeric_cast_evaluate(TessFunctionCall *call)
 	if (!numeric_call_valid(call, 1) || call->values == NULL ||
 		call->non_nulls == NULL || call->context == NULL ||
 		call->args[0].column == NULL)
-		return numeric_invalid(call, "a numeric cast takes a column");
+		return tess_call_invalid(call, "a numeric cast takes a column");
 	column = call->args[0].column;
 	wide = numeric_op(call) == NUMERIC_FROM_INT8;
 	values = (Datum *) call->values;
@@ -501,16 +455,16 @@ numeric_value_evaluate(TessFunctionCall *call)
 	int			nwords;
 
 	if (call == NULL || call->function == NULL)
-		return numeric_invalid(call, "a numeric function takes its arguments");
+		return tess_call_invalid(call, "a numeric function takes its arguments");
 	op = numeric_op(call);
 	nargs = op == NUMERIC_ADD || op == NUMERIC_SUB || op == NUMERIC_MUL ? 2 : 1;
 	if (!numeric_call_valid(call, nargs) || call->values == NULL ||
 		call->non_nulls == NULL || call->context == NULL)
-		return numeric_invalid(call, "a numeric function takes its arguments");
+		return tess_call_invalid(call, "a numeric function takes its arguments");
 	args[0] = decimal_arg(&call->args[0]);
 	args[1] = nargs == 2 ? decimal_arg(&call->args[1]) : args[0];
 	nrows = call->rows->nrows;
-	rest = scratch_mask(&space, 0, nrows);
+	rest = tess_scratch_mask(space.words[0], sizeof(space.words[0]), nrows);
 	if (op == NUMERIC_TO_INT4)
 		code = tess_decimal_to_int4(&args[0], call->rows, (int32 *) call->values,
 									call->non_nulls, &rest, call->status);
@@ -521,9 +475,10 @@ numeric_value_evaluate(TessFunctionCall *call)
 	{
 		bool		asks = call->struct_size >= TESS_FUNCTION_CALL_DECIMALS_SIZE &&
 			call->decimal_rows != NULL;
-		TessRowMask decimals = asks ? *call->decimal_rows : scratch_mask(&space, 1, nrows);
-		TessRowMask write = scratch_mask(&space, 2, nrows);
-		uint8	   *scales = scratch(nrows, space.scales, sizeof(space.scales));
+		TessRowMask decimals = asks ? *call->decimal_rows :
+			tess_scratch_mask(space.words[1], sizeof(space.words[1]), nrows);
+		TessRowMask write = tess_scratch_mask(space.words[2], sizeof(space.words[2]), nrows);
+		uint8	   *scales = tess_scratch_alloc(nrows, space.scales, sizeof(space.scales));
 
 		code = tess_decimal_compute(operations[op], &args[0], &args[1], call->rows,
 									asks ? call->result_scale : -1,
@@ -537,14 +492,14 @@ numeric_value_evaluate(TessFunctionCall *call)
 			code = tess_numeric_results(call->context, (Datum *) call->values, scales, &write,
 										call->status);
 		}
-		scratch_free(scales, space.scales);
-		scratch_mask_free(&space, 2, &write);
+		tess_scratch_release(scales, space.scales);
+		tess_scratch_release(write.bits, space.words[2]);
 		if (!asks)
-			scratch_mask_free(&space, 1, &decimals);
+			tess_scratch_release(decimals.bits, space.words[1]);
 	}
 	if (code != TESS_OK)
 	{
-		scratch_mask_free(&space, 0, &rest);
+		tess_scratch_release(rest.bits, space.words[0]);
 		return code;
 	}
 	old = MemoryContextSwitchTo(call->context);
@@ -568,7 +523,7 @@ numeric_value_evaluate(TessFunctionCall *call)
 		}
 	}
 	MemoryContextSwitchTo(old);
-	scratch_mask_free(&space, 0, &rest);
+	tess_scratch_release(rest.bits, space.words[0]);
 	return TESS_OK;
 }
 
