@@ -1280,32 +1280,63 @@ The partial values are the whole ones' types, int8 for `count` and
 `sum`, the argument's for `min` and `max`, so the node computes them as it
 computes the whole ones, and a participant without rows gives a count of 0 and
 NULL otherwise, which the strict combine functions skip. With `GROUP BY`
-the stack is the same over the core's partial hashed aggregate paths:
-each participant keeps a table of its own groups, sent up early when it
-fills and folds, and written to disk as a serial node's when it does
-not (see [spill.md](spill.md), "Partial mode"), and the core's
-`Finalize HashAggregate` over the `Gather` merges them with the
-combine functions and applies `HAVING`; its estimate of the groups is
-taken from the core's grouped paths, since the grouped relation's rows
-are set only after the hook. Next to that stack the hook builds one that
-merges the groups in batches (`Partial Mode: Finalize`): the same
-partial path, `TessGather` over it, and the node's grouping of the
+the node's partial path is the same over the core's partial hashed
+aggregate paths: each participant keeps a table of its own groups, sent
+up early when it fills and folds, and written to disk as a serial
+node's when it does not (see [spill.md](spill.md), "Partial mode"). The
+node merges them itself, in batches (`Partial Mode: Finalize`):
+`TessGather` over the partial path, and the node's grouping of the
 serial path's keys and aggregates above, marked final in the private
 data, whose plan takes each aggregate's argument as its partial value, a
 column of the gather (the aggregate with `mark_partial_aggref`, found in
 the child's target), and applies `HAVING`; each value merges as its
 kind does, counts and sums added as int8 (`TESS_TABLE_SUM_INT8`, 22003
 past the range), extremes compared, a group's value NULL without a
-non-NULL partial, and the table spills as a serial one's. The core's
-row-wise `Finalize HashAggregate` over many groups cost more than the
-participants saved: `GROUP BY` over a `UNION ALL` of 2.5 M rows and 2 M
-groups, which the planner took for 200 without statistics, 511–531 ms
-against 480 for the core's own parallel plan; with the node's merge 244
-(220 serial). With two workers (pg-win-w2-DwOrT7, pg-wordkey-w2-9O1UqG
-against the build before, pg-win-w2-oPB3NR, pg-wordkey-w2-r2B2Xl):
-`group_many` (100 000 groups) 25.1 ms against 36.9 before and 128.5 for
-the core, `key_ts_group` (43 824) 14.1 against 23.0 and 47.8; groupings
-of up to 1000 groups the same.
+non-NULL partial, and the table spills as a serial one's; its estimate
+of the groups is taken from the core's grouped paths, since the grouped
+relation's rows are set only after the hook. Only without `TessGather`
+(`tessera.batch_gather` off) do the core's `Gather` and
+`Finalize HashAggregate` merge the groups row by row with the combine
+functions, for the node's own aggregates alone. The core's row-wise
+merge over many groups cost more than the participants saved, and the
+hook built it next to the node's until plan 4.23, item 4b, where the
+planner always took the node's: `GROUP BY` over a `UNION ALL` of 2.5 M
+rows and 2 M groups, which the planner took for 200 without statistics,
+511–531 ms against 480 for the core's own parallel plan; with the node's
+merge 244 (220 serial). With two workers (pg-win-w2-DwOrT7,
+pg-wordkey-w2-9O1UqG against the build before, pg-win-w2-oPB3NR,
+pg-wordkey-w2-r2B2Xl): `group_many` (100 000 groups) 25.1 ms against
+36.9 before and 128.5 for the core, `key_ts_group` (43 824) 14.1 against
+23.0 and 47.8; groupings of up to 1000 groups the same.
+
+Sum states go under a `Gather` the same way (plan 4.23, item 4b): a
+grouping whose aggregates are the node's own or sum states (`sum` and
+`avg` of numeric and bigint, `avg` of integer and smallint) takes the
+partial path, marked in the private data as one whose sum states go up
+in the node's own format (`AGG_PATH_OWN_STATES`), which only the node's
+final grouping reads, so without `TessGather` there is no such stack.
+Each participant folds its rows into the states of its records as the
+serial node does, and a group's partial value is its state
+(`TessTableSumInput`): a bytea of the tag `TESS_TABLE_SUM_STATE_TAG`,
+the four words and the numeric rest whole, NULL for an empty state; for
+`avg` of integer or smallint the core's int8[] of the count and the sum,
+the partial value's type. The final grouping merges a batch of them in
+one call (`tess_table_accumulate_sums`, the sums at the larger scale, the
+counts added, NaN and the infinities kept, see [table.md](table.md)), and
+merges a state with a rest, or one whose sum would take the group's past
+10^36, by the core's means: its flags and count into the words, its sum
+at its scale and its rest into the group's rest; the value is the serial
+one's. The partial groups spill no state and no rows: they go up
+whenever the table fills, their rests' memory counted. The core's own
+serialized states of these aggregates are internal and differ between
+the cores (PostgreSQL writes the sum with `numericvar_serialize`, which
+Greengage 7 lacks); the node's format is the same on both. `sum(n)`,
+`avg(n)`, `sum(n * 2)` and `count(*)` by 10 groups of `numeric(15,2)`
+(pg-4b-stack-sFA7zF and pg-4b-stack-w4-h7bQpD against pg-4b-before-xg7XXl,
+medians): over 2 M rows with two workers 24.7 ms, where the core's
+parallel plan took 68.8 before and takes 67.9 without Tessera (serial
+61.4); over 20 M rows with two workers 224.6 against 636.9 before and
+730.8 for the core (serial 650.6), with four 137.9 against 438.5.
 
 Grouping without aggregates, `GROUP BY` without them and `SELECT
 DISTINCT` (whose partial relation, `UPPERREL_PARTIAL_DISTINCT`, the hook

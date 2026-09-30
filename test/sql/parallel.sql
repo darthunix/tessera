@@ -168,6 +168,63 @@ SELECT plan_property($$SELECT b, sum(a) FROM parallel_t GROUP BY b$$, 'TessAgg',
 SET parallel_leader_participation = off;
 SELECT parallel_same($$SELECT b, sum(a) FROM parallel_t GROUP BY b$$);
 RESET parallel_leader_participation;
+-- Sum states under a Gather (plan 4.23, item 4b): sum and avg of numeric
+-- and bigint, avg of integer and smallint fold into each participant's
+-- records and go up as partial values of the node's own format (bytea: a
+-- tag, the state's words, then its numeric rest; avg of integers the
+-- core's int8[] of the count and the sum), which the node's grouping over
+-- TessGather merges: the kernels add the sums at the larger scale and keep
+-- NaN and the infinities; a state with a rest, or one past the bound of
+-- 10^36 at the group's scale, merges by the core's means. Groups: 0 plain,
+-- 1 with NaN, 2 with +Infinity and values of more than 18 digits (rests,
+-- the flag merged with them), 3 with both infinities (NaN), 4 with such
+-- values (rests), 5 whose sum at scale 0 meets a value at scale 18 (past
+-- the bound), 6 of NULL values only; half the bigint values have 19
+-- digits (rests).
+CREATE TABLE parallel_sums AS
+SELECT i AS id, i % 7 AS g,
+       (CASE i % 7
+            WHEN 1 THEN CASE WHEN i % 997 = 1 THEN 'NaN' ELSE (i / 4.0)::numeric(12, 2) END
+            WHEN 2 THEN CASE WHEN i % 991 = 2 THEN 'Infinity'
+                             WHEN i % 13 = 2 THEN i * 12345678901234567890.5
+                             ELSE (i / 4.0)::numeric(12, 2) END
+            WHEN 3 THEN CASE WHEN i % 983 = 3 THEN 'Infinity'
+                             WHEN i % 977 = 3 THEN '-Infinity' ELSE (i / 4.0)::numeric(12, 2) END
+            WHEN 4 THEN CASE WHEN i % 11 = 4 THEN i * 12345678901234567890.5
+                             ELSE (i / 4.0)::numeric(12, 2) END
+            WHEN 5 THEN CASE WHEN i = 19997 THEN 0.000000000000000001 ELSE 999999999999999999 END
+            WHEN 6 THEN NULL
+            ELSE (((i * 7919) % 2000000 - 1000000) / 100.0)::numeric(12, 2)
+        END)::numeric AS n,
+       CASE WHEN i % 7 = 6 THEN NULL WHEN i % 2 = 0 THEN i * 1000
+            ELSE 9223372036854775807 - i * 1000 END AS b,
+       CASE WHEN i % 7 = 6 THEN NULL ELSE i * 7919 % 100000 - 50000 END AS i4,
+       CASE WHEN i % 7 = 6 THEN NULL ELSE (i % 60000 - 30000)::int2 END AS s
+FROM generate_series(1, 20000) AS i;
+ANALYZE parallel_sums;
+EXPLAIN (COSTS OFF)
+SELECT g, sum(n), avg(n), sum(b), avg(b), avg(i4), avg(s), count(*) FROM parallel_sums GROUP BY g;
+SELECT parallel_same($$SELECT g, sum(n), avg(n), sum(b), avg(b), avg(i4), avg(s), count(*) FROM parallel_sums GROUP BY g$$);
+SELECT parallel_same($$SELECT g, avg(i4), sum(n) FROM parallel_sums GROUP BY g HAVING avg(n) > 0$$);
+SELECT parallel_same($$SELECT g, sum(n) FILTER (WHERE i4 > 0), avg(b) FILTER (WHERE s < 0), avg(i4) FILTER (WHERE id % 3 = 0) FROM parallel_sums GROUP BY g$$);
+SELECT parallel_same($$SELECT id % 1000, sum(n), avg(i4) FROM parallel_sums WHERE g IN (0, 4) GROUP BY 1$$);
+SET parallel_leader_participation = off;
+SELECT parallel_same($$SELECT g, sum(n), avg(n), sum(b), avg(b), avg(i4), avg(s), count(*) FROM parallel_sums GROUP BY g$$);
+RESET parallel_leader_participation;
+-- Rescanned in a join: each participant folds its share anew.
+SET enable_material = off;
+EXPLAIN (COSTS OFF)
+SELECT x, t FROM (SELECT sum(q) AS t FROM (SELECT g, sum(n) AS q FROM parallel_sums WHERE g IN (0, 4, 5) GROUP BY g) AS q) AS ss
+RIGHT JOIN (VALUES (1), (2)) AS v(x) ON true;
+SELECT parallel_same($$SELECT x, t FROM (SELECT sum(q) AS t FROM (SELECT g, sum(n) AS q FROM parallel_sums WHERE g IN (0, 4, 5) GROUP BY g) AS q) AS ss
+RIGHT JOIN (VALUES (1), (2), (3)) AS v(x) ON true$$);
+RESET enable_material;
+-- Without TessGather no Finalize reads the node's format: no stack of the node's.
+SET tessera.batch_gather = off;
+EXPLAIN (COSTS OFF)
+SELECT g, sum(n), avg(i4) FROM parallel_sums GROUP BY g;
+RESET tessera.batch_gather;
+DROP TABLE parallel_sums;
 -- GROUP BY without aggregates and DISTINCT under a Gather: the node's
 -- partial grouping in every participant, TessGather, and the node's own
 -- grouping of their groups above, where the core would merge them row by
@@ -215,6 +272,13 @@ EXPLAIN (COSTS OFF) SELECT k, count(*), sum(v), min(v), max(v) FROM parallel_gro
 SELECT parallel_same($$SELECT md5(string_agg(q::text, ',' ORDER BY q::text)) FROM (SELECT k, count(*), sum(v), min(v), max(v) FROM parallel_groups GROUP BY k) AS q$$);
 SELECT partial_property($$SELECT k, count(*) FROM parallel_groups GROUP BY k$$, 'Early Emits')::int > 0 AS early,
        partial_property($$SELECT k, count(*) FROM parallel_groups GROUP BY k$$, 'Disk Usage') AS disk;
+-- Sum states go out early the same, their rests with them.
+SELECT parallel_same($$SELECT md5(string_agg(q::text, ',' ORDER BY q::text)) FROM (SELECT k, sum(v::numeric / 3), avg(v::bigint * 10000000000000), avg(v) FROM parallel_groups GROUP BY k) AS q$$);
+SELECT partial_property($$SELECT k, sum(v::numeric / 3) FROM parallel_groups GROUP BY k$$, 'Early Emits')::int > 0 AS early;
+-- A state's rest counts in the memory that sends the groups up: a hundred
+-- groups of sums of 2000 digits outgrow hash_mem in their rests alone.
+SELECT parallel_same($$SELECT md5(string_agg(q::text, ',' ORDER BY q::text)) FROM (SELECT k % 100, sum(v * (10::numeric ^ 2000 - 1)) FROM parallel_groups GROUP BY 1) AS q$$);
+SELECT partial_property($$SELECT k % 100, sum(v * (10::numeric ^ 2000 - 1)) FROM parallel_groups GROUP BY 1$$, 'Early Emits')::int > 0 AS early;
 -- Groups spread over the input fold nothing before the table fills, a
 -- group per row read: sending the table up would hand the grouping above
 -- every row. The groups go to disk instead, as a serial node's, and out as
@@ -225,6 +289,11 @@ ANALYZE parallel_spread;
 SELECT parallel_same($$SELECT md5(string_agg(q::text, ',' ORDER BY q::text)) FROM (SELECT k, count(*), sum(v), min(v), max(v) FROM parallel_spread GROUP BY k) AS q$$);
 SELECT partial_property($$SELECT k, count(*) FROM parallel_spread GROUP BY k$$, 'Early Emits') IS NULL AS no_early,
        partial_property($$SELECT k, count(*) FROM parallel_spread GROUP BY k$$, 'Disk Usage')::int > 0 AS spilled;
+-- Sum states spill no state (their records merge a word an aggregate):
+-- such groups go up early instead, every time the table fills.
+SELECT parallel_same($$SELECT md5(string_agg(q::text, ',' ORDER BY q::text)) FROM (SELECT k, sum(v::numeric), avg(v) FROM parallel_spread GROUP BY k) AS q$$);
+SELECT partial_property($$SELECT k, sum(v::numeric) FROM parallel_spread GROUP BY k$$, 'Early Emits')::int > 0 AS early,
+       partial_property($$SELECT k, sum(v::numeric) FROM parallel_spread GROUP BY k$$, 'Disk Usage') IS NULL AS no_disk;
 -- Without aggregates the same: the groups of the tables emptied early, and
 -- those spilled, come to the node's grouping above more than once each;
 -- the workers alone too.

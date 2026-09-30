@@ -615,16 +615,21 @@ RESET parallel_tuple_cost;
 RESET min_parallel_table_scan_size;
 DROP TABLE agg_fast;
 -- Sum states cost as the node's own aggregates do, a quarter of the
--- core's transition cost and five words of a record: with two workers
--- at the default costs, the node's grouping of a million rows costs less
--- than the core's parallel plan, which took it while they cost as the
--- core's own.
+-- core's transition cost and five words of a record: with two workers at
+-- the default costs and without TessGather (whose absence leaves sum
+-- states no parallel stack of the node's), the node's grouping of a
+-- million rows costs less than the core's parallel plan, which took it
+-- while they cost as the core's own. With TessGather the node's parallel
+-- stack takes it (see the parallel suite).
 CREATE TABLE agg_sums AS
 SELECT i % 5 AS g, (((i::bigint * 7919) % 2000000 - 1000000) / 100.0)::numeric(15, 2) AS n,
        i::bigint * 1000 AS b, i AS i4
 FROM generate_series(1, 1000000) AS i;
 ANALYZE agg_sums;
 SET max_parallel_workers_per_gather = 2;
+SET tessera.batch_gather = off;
+EXPLAIN (COSTS OFF) SELECT g, sum(n), avg(n), sum(b), avg(i4) FROM agg_sums GROUP BY g;
+RESET tessera.batch_gather;
 EXPLAIN (COSTS OFF) SELECT g, sum(n), avg(n), sum(b), avg(i4) FROM agg_sums GROUP BY g;
 SELECT agg_same($$SELECT g, sum(n), avg(n), sum(b), avg(i4) FROM agg_sums GROUP BY g$$);
 RESET max_parallel_workers_per_gather;

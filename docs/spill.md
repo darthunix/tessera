@@ -309,7 +309,10 @@ read, and sending them up would hand the Finalize Aggregate every row
 the node spills from then on, as a serial one, and gives its groups out
 as partials once the input is done, as the core's partial hash
 aggregate does: that grouping ran in 1.03 s instead of 2.04 (the core
-1.35–1.51).
+1.35–1.51). Groups of sum states (plan 4.23, item 4b) spill no state,
+since a merge of spilled records takes a word an aggregate, nor rows, which
+the table sent up would lose: they go up every time the table fills,
+their rests' memory counted, and the grouping above merges them.
 
 **Memory.** The first index takes at most a quarter of `hash_mem`, a
 chunk an eighth; the node acts at seven eighths, the rest left for a
