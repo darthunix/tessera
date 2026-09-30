@@ -91,6 +91,9 @@ typedef struct AggSpill
 	uint64		empty[1];
 } AggSpill;
 
+static bool agg_evict(TessAggState *state, Size extra);
+static uint64 agg_records(AggSpill *spill);
+
 static inline uint32
 agg_partition(const AggSpill *spill, uint32 hash)
 {
@@ -400,9 +403,6 @@ agg_table_from_parts(TessAggState *state, AggSpill *spill, uint64 capacity)
 	state->table_bytes += size;
 	note_memory(state);
 }
-
-static bool agg_evict(TessAggState *state, Size extra);
-static uint64 agg_records(AggSpill *spill);
 
 /*
  * The table outgrew hash_mem: the first level of partitions, for twice the
@@ -944,7 +944,6 @@ agg_spill_memory(TessAggState *state)
 	return memory;
 }
 
-/* A computed column of the projection's wrapper, checked. */
 /* ------------------------------------------------------ rows past hash_mem */
 
 /* Rows of a block, and the first bytes of its values. */

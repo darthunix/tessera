@@ -104,7 +104,7 @@ extern double tess_setop_dictionary_share;
 extern double tess_gather_tuple_share;
 /*
  * The model of the node's scans, tessera.scan_page_cost and the rest: see
- * nodes/module.c and nodes/planner.c.
+ * nodes/module.c and nodes/scan_planner.c.
  */
 extern double tess_scan_page_cost;
 extern double tess_scan_tuple_cost;

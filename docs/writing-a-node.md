@@ -26,6 +26,18 @@ where a parent finds the request binding. Plan data travels in
 `custom_private` through the named codec, so cached plans and parallel
 workers read exactly what the planner wrote.
 
+The two sides live in files of their own: a node's planner, its paths,
+costs, hook and plan writing, in `nodes/<node>_planner.c`, its executor in
+`nodes/<node>.c` (`TessFilter`'s planner is the scan planner,
+`nodes/scan_planner.c`). An executor that grows past a few thousand lines
+splits by phase into `nodes/<node>_<phase>.c`, sharing its state and the
+functions it calls across in `nodes/<node>.h`: the grouping's spill
+(`agg_spill.c`), the join's spill and parallel build (`hashjoin_spill.c`,
+`hashjoin_shared.c`). A function called per row across such a seam is
+`static inline` in the header, since the module is built without link-time
+optimization; one called per batch or chunk is an ordinary call. Forward
+declarations stand at the top of a file or in its header.
+
 ## Registering the node
 
 The module registers its kind of node with the bridge and its scan methods
@@ -180,7 +192,7 @@ may have changed, and raises the core node's errors for negative values.
 helper's statistics give the batches and rows read and the rows kept. The
 node never touches instrumentation itself.
 
-`TessFilter` (`nodes/filter.c`, `nodes/planner.c`) is the second node on
+`TessFilter` (`nodes/filter.c`, `nodes/scan_planner.c`) is the second node on
 the helper and the first with a `set_rel_pathlist` hook: it takes the
 clauses of a base relation, applies those the expression compiler
 supports as batch filters and the others row by row through `ExecQual`,

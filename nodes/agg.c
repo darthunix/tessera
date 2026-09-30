@@ -76,7 +76,6 @@ enum
 	AGG_NCOUNTERS
 };
 
-
 /*
  * Any other aggregate without GROUP BY: its transition function called for
  * each selected row of the arguments' columns of a batch, as the core's
@@ -412,18 +411,21 @@ keydict_value_equal(KeyDict *dict, Datum a, Datum b)
 #define SH_DECLARE
 #include "lib/simplehash.h"
 
-
 static const CustomExecMethods agg_exec_methods;
 static const TessBatchOps groups_batch_ops;
 static TessRowMask distinct_rows(TessAggState *state, AggValue *value, int nrows,
 								 const uint32 *group_hashes,
 								 const TessRowMask *valid,
 								 const TessDatumColumn *argument);
-/*
- * The aggregate's functions and initial value, as the core's ExecInitAgg
- * reads them; the states live in the context the stand-in AggState gives
- * the transition functions, one for every generic aggregate of the node.
- */
+static KeyDict *key_dict_create(TessAggState *state, Oid eqop, Oid type, Oid collation);
+static void key_dict_reset(KeyDict *dict, uint64 values);
+static void keydict_numbers(KeyDict *dict, const TessDatumColumn *column,
+							const TessRowMask *rows, bool insert, Datum *numbers,
+							uint32 *hashes);
+static void read_in_order(TessAggState *state, TessBatch *batch);
+static void distinct_reset(TessAggState *state, AggValue *value);
+static Size distinct_bytes(TessAggState *state);
+
 /*
  * Whether the node folds an aggregate itself, and over which argument: a
  * whole one, or a partial one whose state the node writes as the final
@@ -1143,6 +1145,11 @@ fast_partial(GenericAgg *generic, bool *isnull)
 
 #endif							/* HAVE_INT128 */
 
+/*
+ * The aggregate's functions and initial value, as the core's ExecInitAgg
+ * reads them; the states live in the context the stand-in AggState gives
+ * the transition functions, one for every generic aggregate of the node.
+ */
 static GenericAgg *
 generic_init(TessAggState *state, Aggref *agg)
 {
@@ -1457,12 +1464,6 @@ generic_accumulate(TessAggState *state, GenericAgg *generic, const TessRowMask *
 		generic_advance(generic, row, states, temporary);
 	MemoryContextSwitchTo(old);
 }
-
-static KeyDict *key_dict_create(TessAggState *state, Oid eqop, Oid type, Oid collation);
-static void key_dict_reset(KeyDict *dict, uint64 values);
-static void keydict_numbers(KeyDict *dict, const TessDatumColumn *column,
-							const TessRowMask *rows, bool insert, Datum *numbers,
-							uint32 *hashes);
 
 /* The payload of the record at ref, in the chunk's memory, which the node writes. */
 static uint64 *
@@ -2671,9 +2672,6 @@ accumulate(TessAggState *state, AggValue *value, TessBatch *batch, int nrows)
 	}
 }
 
-static void read_in_order(TessAggState *state, TessBatch *batch);
-static void distinct_reset(TessAggState *state, AggValue *value);
-
 /* Empty every distinct set, before the input is read. */
 static void
 reset_distinct(TessAggState *state)
@@ -2758,8 +2756,6 @@ result_row(TessAggState *state)
 	}
 	return ExecStoreVirtualTuple(scan);
 }
-
-static Size distinct_bytes(TessAggState *state);
 
 /*
  * The bytes of the table now, and the most so far; once it spills, the
@@ -3393,6 +3389,7 @@ read_in_order(TessAggState *state, TessBatch *batch)
 	}
 }
 
+/* A computed column of the projection's wrapper, checked. */
 static void
 computed_column(TessAggState *state, TessBatch *batch, int computed,
 				TessColumnPurpose purpose, bool decimals, TessDatumColumn *result)

@@ -2134,7 +2134,7 @@ is needed leaves the results as they are.
 
 ## TessSort
 
-`TessSort` (`nodes/sort.c`) stands in for the core's full `Sort` under
+`TessSort` (`nodes/sort.c`, its planner `nodes/sort_planner.c`) stands in for the core's full `Sort` under
 `ORDER BY`. It reads every batch of its batch child into `TessRows`
 (records of the table format, [runtime.md](runtime.md), "Keeping rows"),
 each with the sort keys in its slots and every output column in its
@@ -2522,7 +2522,7 @@ participant reads it again only while the worker is still reading it.
 
 ## TessGather, TessGatherMerge and TessSend
 
-`TessGather` (`nodes/gather.c`) stands in for the core's `Gather` over a
+`TessGather` (`nodes/gather.c`, its planner `nodes/gather_planner.c`) stands in for the core's `Gather` over a
 batch subtree, `TessGatherMerge` for its `Gather Merge`, and `TessSend` is
 the subtree's top in every worker. The
 core's `Gather` passes rows one by one: a worker forms a minimal tuple of

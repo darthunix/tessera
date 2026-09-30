@@ -690,7 +690,7 @@ pruned_append(PlannerInfo *root, Path *path, Relids leaves)
  * the participants, over the partitions' cheapest partial paths, as the
  * core builds it before its add_partial_path may keep instead the Append
  * that gives some partitions whole to one participant each: our partial
- * scan's cost carries a worker's start (planner.c), which the core's
+ * scan's cost carries a worker's start (scan_planner.c), which the core's
  * Append adds up once a partition. The path itself where it divides
  * every partition already; NULL where a partition has no partial path.
  */

@@ -30,6 +30,9 @@ static const TessBatchOps spill_batch_ops = {
  * before its records.
  */
 
+static void split_table(TessHashJoinState *state);
+static Size spill_room(TessHashJoinState *state);
+
 void
 part_open(PartReader *reader, TessSpill *file, int partition, int writers)
 {
@@ -98,7 +101,6 @@ grow_ints(MemoryContext context, int **array, int *slots, int needed)
 		repalloc(*array, sizeof(int) * grown);
 	*slots = grown;
 }
-
 
 /* The partition of a hash on a side, which may have fewer partitions than its level. */
 static inline uint32
@@ -725,14 +727,6 @@ make_room(TessHashJoinState *state, bool building)
 }
 
 /*
- * The table outgrew hash_mem: choose the partitions, the power of two
- * that makes the expected inner side about half of hash_mem per
- * partition, and chunks that let every partition's tail fit; set both
- * sides up, and move the table built so far into the partitions.
- */
-static void split_table(TessHashJoinState *state);
-
-/*
  * A level of partitions by the hash bits from shift, for an inner side
  * of expected bytes, as the current one: the power of two of them that
  * makes each about half of hash_mem, as long as the bits last and each
@@ -1046,6 +1040,10 @@ split_chunk(TessHashJoinState *state, void *base, Size len, char *const *values)
 	side_compact(side);
 }
 
+/*
+ * Move the table built so far into the partitions of the first level,
+ * its by-reference values into their value chunks, and free it.
+ */
 static void
 split_table(TessHashJoinState *state)
 {
@@ -1526,7 +1524,6 @@ add_loaded_values(JoinSpill *spill, uint32 number, void *body)
  * groups as room allows (all of them when it does), and once the file is
  * done its tail, indexed as a table of its own.
  */
-static Size spill_room(TessHashJoinState *state);
 
 static void
 load_piece(TessHashJoinState *state, int partition, bool whole)

@@ -57,6 +57,10 @@ static const CustomPathMethods agg_path_methods = {
 	.PlanCustomPath = agg_plan,
 };
 
+static Node *aggregate_argument(const Aggref *agg);
+static bool key_eqop(Node *key, List *clauses, int *eqop);
+static void create_nonunion_paths(PlannerInfo *root, RelOptInfo *output_rel);
+
 /* The kind of a supported aggregate, or -1: the node knows how to combine these. */
 int
 aggregate_kind(Oid aggfnoid)
@@ -78,8 +82,6 @@ aggregate_kind(Oid aggfnoid)
 			return -1;
 	}
 }
-
-static Node *aggregate_argument(const Aggref *agg);
 
 /*
  * An aggregate the node computes through the core's functions: a whole
@@ -613,9 +615,6 @@ group_cost(PlannerInfo *root, const Path *child, double groups, int nkeys,
 	result->startup_cost = startup;
 	result->total_cost = startup + run;
 }
-
-static bool key_eqop(Node *key, List *clauses, int *eqop);
-static void create_nonunion_paths(PlannerInfo *root, RelOptInfo *output_rel);
 
 /*
  * The node's path in place of the core's aggregate path: the same planner
