@@ -12,6 +12,7 @@
 //! a call of the driver for its width.
 
 mod aggregate;
+mod arith;
 mod compare;
 mod filter;
 mod hash;
@@ -19,13 +20,18 @@ mod hash;
 #[cfg(all(target_arch = "aarch64", not(miri)))]
 pub(crate) use aggregate::present;
 pub(crate) use aggregate::{aggregate, max, min};
+pub(crate) use arith::{Evaluate, arith_columns, arith_scalar, arith_scalar_left};
 pub(crate) use compare::compare_columns;
 pub(crate) use filter::filter;
 pub(crate) use hash::{hash, hash_next};
 
 use tessera_core::WordBlock;
 
-use crate::ops::CompareOp;
+use std::mem::MaybeUninit;
+
+use anyhow::Result;
+
+use crate::ops::{ArithOp, ArithmeticError, CompareOp};
 
 /// A whole-word operand: the storage of a full prepared word, or a constant.
 #[derive(Clone, Copy, Debug)]
@@ -52,9 +58,45 @@ impl<T: IntLane> Side<'_, T> {
 /// where the drivers found whole words, on AArch64; elsewhere it is never
 /// called.
 pub(crate) trait IntLane: Copy + Ord + core::fmt::Debug + 'static {
+    /// A scalar divisor prepared for division by multiplication.
+    type Divisor;
+
     /// The least and the greatest value, the identities of `max` and `min`.
     const MIN: Self;
     const MAX: Self;
+    /// The placeholder pair of a NULL row in the arithmetic, `ZERO op ONE`,
+    /// which fails in no operation.
+    const ZERO: Self;
+    const ONE: Self;
+    /// The width's operations on two non-NULL values, as PostgreSQL's
+    /// operators of the width define them: an overflow fails with the
+    /// width's out-of-range error, a zero divisor with division by zero,
+    /// and `x % -1` is 0. Each is the width's own function, not a generic
+    /// one over checked operations, whose `Option` the row loops kept.
+    fn add(a: Self, b: Self) -> Result<Self, ArithmeticError>;
+    fn sub(a: Self, b: Self) -> Result<Self, ArithmeticError>;
+    fn mul(a: Self, b: Self) -> Result<Self, ArithmeticError>;
+    fn div(a: Self, b: Self) -> Result<Self, ArithmeticError>;
+    fn rem(a: Self, b: Self) -> Result<Self, ArithmeticError>;
+
+    /// A scalar divisor of magnitude at least two, prepared once per call;
+    /// `None` for 0 and ±1.
+    fn divisor(d: Self) -> Option<Self::Divisor>;
+
+    /// `lhs op rhs` over the present rows of a whole word into `out`, with
+    /// the prepared divisor of a division by a scalar: each width's own mix
+    /// of vector code and lanes one by one. An overflow fails with
+    /// `OUT_OF_RANGE`.
+    #[allow(clippy::too_many_arguments)]
+    fn arith_block<E: Evaluate<Self>>(
+        op: ArithOp,
+        lhs: Side<'_, Self>,
+        rhs: Side<'_, Self>,
+        present: u64,
+        divisor: &Option<Self::Divisor>,
+        out: &mut [MaybeUninit<Self>; 64],
+        evaluate: &E,
+    ) -> Result<()>;
 
     /// The value a Datum holds: its low 32 bits for int4, as
     /// `DatumGetInt32`, its whole word for int8, as `DatumGetInt64`.

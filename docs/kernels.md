@@ -132,7 +132,12 @@ inside a kernel.
 
 The int8 family reads a column whose Datums hold an int8, the whole word
 as `DatumGetInt64`, with int64 scalars, values and results; an int8 is its
-Datum, so an int8 result column is a Datum column:
+Datum, so an int8 result column is a Datum column. The two families share
+every driver in `tessera_kernels::int`, generic over the lane type (the
+choice between whole words and rows, the row loops, the loops over whole
+words); each keeps its lane: the Datum's reading, the operations with
+their error, and the vector code of a whole word, whose lanes and gaps
+differ (plan 4.25):
 
 - `tess_int8_filter(column, prepared, rows, op, scalar, status)`: as
   `tess_int4_filter` over int8 values.
