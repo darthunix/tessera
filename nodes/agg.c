@@ -760,12 +760,41 @@ batch_aggregate(const Aggref *agg)
 }
 
 /*
+ * Whether a grouping keeps the aggregate as a sum state, words of the
+ * group's record that the kernels fold (generic_init): sum and avg of
+ * numeric, with the kernels module, and of bigint, avg of integer and
+ * smallint. The planner costs such an aggregate as the node's own.
+ */
+static bool
+sum_state_aggregate(const Aggref *agg)
+{
+#ifdef HAVE_INT128
+	if (list_length(agg->args) != 1)
+		return false;
+	switch (agg->aggfnoid)
+	{
+		case F_SUM_NUMERIC:
+		case F_AVG_NUMERIC:
+			return tess_runtime_kernels() != NULL;
+		case F_SUM_INT8:
+		case F_AVG_INT8:
+		case F_AVG_INT4:
+		case F_AVG_INT2:
+			return true;
+		default:
+			break;
+	}
+#endif
+	return false;
+}
+
+/*
  * Whether the groups of a grouping with generic aggregates fit hash_mem,
  * as the planner estimates them, since their states, words of the records
- * or addresses of copies, keep the groups from spilling: a record, and the
- * states a word does not hold, each by its type's average width or, for
- * an internal state, the aggregate's declared space or 1 kB, as the core
- * estimates its hashed groups.
+ * or addresses of copies, keep the groups from spilling: a record, a sum
+ * state's four more words, and the states a word does not hold, each by
+ * its type's average width or, for an internal state, the aggregate's
+ * declared space or 1 kB, as the core estimates its hashed groups.
  */
 static bool
 generic_fits(PlannerInfo *root, RelOptInfo *output_rel, int nkeys, List *tlist)
@@ -790,6 +819,11 @@ generic_fits(PlannerInfo *root, RelOptInfo *output_rel, int nkeys, List *tlist)
 		bytes += 8.0;
 		if (batch_aggregate(agg))
 			continue;
+		if (sum_state_aggregate(agg))
+		{
+			bytes += 8.0 * (AGG_SUM_STATE_WORDS - 1);
+			continue;
+		}
 		get_typlenbyval(agg->aggtranstype, &len, &byval);
 		if (byval)
 			continue;
@@ -821,6 +855,28 @@ has_generic(List *tlist)
 			return true;
 	}
 	return false;
+}
+
+/*
+ * The sum states a grouping of the target list keeps, or -1 when another
+ * aggregate of it calls the core's transition function row by row.
+ */
+static int
+sum_states(List *tlist)
+{
+	int			count = 0;
+
+	foreach_node(TargetEntry, entry, tlist)
+	{
+		Aggref	   *agg = (Aggref *) entry->expr;
+
+		if (!IsA(agg, Aggref) || batch_aggregate(agg))
+			continue;
+		if (!sum_state_aggregate(agg))
+			return -1;
+		count++;
+	}
+	return count;
 }
 
 /* The aggregated argument, or NULL for count(*). */
@@ -1046,8 +1102,10 @@ aggregate_templates(const List *pathlist, AggStrategy strategy, AggSplit aggspli
 /*
  * The node's own cost of grouping: its batch kernels hash the keys and
  * look the groups up for a fraction of the core's cpu_operator_cost a key
- * and a row, fold its own aggregates for such a fraction too, and call a
- * generic aggregate's transition function as the core does. Past seven
+ * and a row, fold its own aggregates and sum states for such a fraction
+ * too, and call a generic aggregate's transition function as the core
+ * does. A sum state is five words of the group's record, not the core's
+ * estimate of its transition state (128 bytes for numeric's). Past seven
  * eighths of hash_mem the rows of the groups that do not fit go to 32
  * partitions and are read back once per level, their columns written in
  * blocks sequentially, without the core's penalty for random writes. The
@@ -1068,7 +1126,7 @@ group_cost(PlannerInfo *root, const Path *child, double groups, int nkeys,
 	double		limit = (double) get_hash_memory_limit() / 8 * 7;
 	int			naggs = 0;
 	int			ncolumns = 0;
-	bool		generic = has_generic(tlist);
+	int			nsums = sum_states(tlist);
 	Cost		startup;
 	Cost		run;
 
@@ -1094,7 +1152,8 @@ group_cost(PlannerInfo *root, const Path *child, double groups, int nkeys,
 			width += 8.0 + (byval ? 0 : get_typavgwidth(type, exprTypmod((Node *) arg->expr)));
 		}
 	}
-	entry += 8.0 * naggs + costs.transitionSpace;
+	entry += 8.0 * naggs + (nsums < 0 ? costs.transitionSpace :
+							8.0 * (AGG_SUM_STATE_WORDS - 1) * nsums);
 	startup = child->total_cost;
 	startup += cpu_operator_cost * tess_agg_key_share * nkeys * rows;
 	/*
@@ -1116,7 +1175,7 @@ group_cost(PlannerInfo *root, const Path *child, double groups, int nkeys,
 			startup += cpu_operator_cost * tess_agg_dictionary_share * rows;
 	}
 	startup += costs.transCost.startup +
-		costs.transCost.per_tuple * (generic ? 1.0 : tess_agg_kernel_share) * rows;
+		costs.transCost.per_tuple * (nsums < 0 ? 1.0 : tess_agg_kernel_share) * rows;
 	/* Groups past hash_mem: their rows to disk and back, once per level. */
 	if (groups * entry > limit && ncolumns > 0)
 	{
@@ -2845,9 +2904,8 @@ generic_init(TessAggState *state, Aggref *agg)
 		generic->init_null = true;
 #ifdef HAVE_INT128
 	/* A group's sum or average of a number, whole: words of its record. */
-	generic->sum_state = state->nkeys > 0 &&
-		(generic->fast == FAST_SUM || generic->fast == FAST_AVG) &&
-		!OidIsValid(generic->fast_float) && !generic->fast_int8_result;
+	generic->sum_state = state->nkeys > 0 && generic->fast != FAST_NONE &&
+		sum_state_aggregate(agg);
 	generic->sum_input = generic->fast_numeric ? TESS_TABLE_SUM_OF_NUMERIC :
 		generic->fast_wide ? TESS_TABLE_SUM_OF_INT8 : TESS_TABLE_SUM_OF_INT4;
 #endif

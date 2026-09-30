@@ -1146,11 +1146,20 @@ the core's with the quarter, as `SELECT DISTINCT` through the dictionary
 took 0.45 to 0.84 of the core's hashed time over the same scan with text,
 varchar and char keys, the same with numeric), and the aggregates' transition costs as
 the core counts them (`get_agg_clause_costs`), a quarter of them when
-the node's kernels fold every aggregate; per group `cpu_tuple_cost` and
-the final costs; and, when the groups at the core's bytes per entry pass
+the node's kernels fold every aggregate, the sum states of `sum` and
+`avg` of numeric and bigint and `avg` of integer and smallint included
+(see below); per group `cpu_tuple_cost` and
+the final costs; and, when the groups at the core's bytes per entry (a
+sum state's five words of the record, not the core's estimate of its
+transition state, 128 bytes for numeric's) pass
 seven eighths of `hash_mem`, the rows of those that do not fit written
 to 32 partitions and read back once per level, sequentially, with
 `cpu_tuple_cost` a row, without the core's penalty for random writes.
+While sum states cost as the core's own states, two workers allowed made
+the planner take the core's parallel plan of `sum(n)`, `avg(n)`,
+`sum(n * 2)` and `count(*)` by 10 groups over 2 M rows, 68.8 ms against
+57.1 for the node's serial path; at the kernels' share it takes the
+node's (60.1 ms in the run after, both modes 4 % slower).
 When the core's sorted grouping has beaten its hashed one out of the
 relation's paths (its spill costs more), the node takes the sorted path
 as its template and reads the input below the sort. `PlanCustomPath` makes

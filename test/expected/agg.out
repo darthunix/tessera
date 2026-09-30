@@ -2011,6 +2011,33 @@ RESET tessera.scan_worker_page_cost;
 RESET parallel_tuple_cost;
 RESET min_parallel_table_scan_size;
 DROP TABLE agg_fast;
+-- Sum states cost as the node's own aggregates do, a quarter of the
+-- core's transition cost and five words of a record: with two workers
+-- at the default costs, the node's grouping of a million rows costs less
+-- than the core's parallel plan, which took it while they cost as the
+-- core's own.
+CREATE TABLE agg_sums AS
+SELECT i % 5 AS g, (((i::bigint * 7919) % 2000000 - 1000000) / 100.0)::numeric(15, 2) AS n,
+       i::bigint * 1000 AS b, i AS i4
+FROM generate_series(1, 1000000) AS i;
+ANALYZE agg_sums;
+SET max_parallel_workers_per_gather = 2;
+EXPLAIN (COSTS OFF) SELECT g, sum(n), avg(n), sum(b), avg(i4) FROM agg_sums GROUP BY g;
+                  QUERY PLAN                  
+----------------------------------------------
+ Custom Scan (TessAgg)
+   Group Key: g
+   ->  Custom Scan (TessHeapScan) on agg_sums
+(3 rows)
+
+SELECT agg_same($$SELECT g, sum(n), avg(n), sum(b), avg(i4) FROM agg_sums GROUP BY g$$);
+                                                                                                                                                                                         agg_same                                                                                                                                                                                         
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ {"(0,-125000.00,-0.62500000000000000000,100000500000000,500002.500000000000)","(1,-217000.00,-1.0850000000000000,99999700000000,499998.500000000000)","(2,-159000.00,-0.79500000000000000000,99999900000000,499999.500000000000)","(3,-161000.00,-0.80500000000000000000,100000100000000,500000.500000000000)","(4,-223000.00,-1.1150000000000000,100000300000000,500001.500000000000)"}
+(1 row)
+
+RESET max_parallel_workers_per_gather;
+DROP TABLE agg_sums;
 -- sum, avg, min and max of float8 and float4, in the rows' order as the
 -- core's functions: the sum from the first value (-0 stays), float4's
 -- in float4, avg by float8_accum's sums, whose overflow fails as the
