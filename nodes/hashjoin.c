@@ -1216,6 +1216,7 @@ index_table(TessHashJoinState *state)
 		Size		from = TESS_TABLE_CHUNK_HEADER;
 		uint64		duplicates;
 
+		CHECK_FOR_INTERRUPTS();
 		check(state, state->kernels->table_link_grouped(&state->table, chunk,
 														&from, NULL,
 														&duplicates,
@@ -1732,6 +1733,8 @@ part_header(PartReader *reader, TessSpillHeader *header)
 		return false;
 	for (;;)
 	{
+		/* Every block read back from disk passes here: a block at a time. */
+		CHECK_FOR_INTERRUPTS();
 		if (reader->reader == NULL)
 		{
 			if (reader->next >= reader->writers)
@@ -3816,6 +3819,8 @@ outer_next(TessHashJoinState *state)
 		JoinSpill  *spill = state->spill;
 		TessBatch  *batch = NULL;
 
+		/* Outer rows read back from disk come through no child that checks. */
+		CHECK_FOR_INTERRUPTS();
 		/* A shared table answers its rows first, then goes: not while a compact batch holds its pairs. */
 		if (spill != NULL && spill->shared && !spill->resident_done)
 		{
@@ -5319,6 +5324,7 @@ round_load(TessHashJoinState *state, JoinSpill *spill, int partition, JoinRound 
 		TessSpillHeader header;
 		uint32		writer;
 
+		CHECK_FOR_INTERRUPTS();
 		check(state, state->kernels->table_spill_take_file(shared_words(state),
 														   state->shared->spill_nwords,
 														   partition, false, &writer,
@@ -5926,6 +5932,7 @@ next_round(TessHashJoinState *state)
 		TessBatch  *batch;
 		bool		found;
 
+		CHECK_FOR_INTERRUPTS();
 		if (state->outer_batch != NULL && !state->null_round)
 		{
 			int			nrows = state->outer_batch->rows.nrows;
@@ -6151,6 +6158,7 @@ next_matches(TessHashJoinState *state)
 		int			nwords;
 		uint64		any = 0;
 
+		CHECK_FOR_INTERRUPTS();
 		if (state->outer_batch != NULL)
 		{
 			outer_finish(state, state->outer_batch);
@@ -6178,6 +6186,7 @@ next_matches(TessHashJoinState *state)
 					TessRowMask rest = {nrows, state->next_bits};
 					uint64		left = 0;
 
+					CHECK_FOR_INTERRUPTS();
 					start_round(state);
 					ResetExprContext(econtext);
 					(void) tess_qual_apply(state->qual, &state->batch, econtext,
@@ -6353,6 +6362,12 @@ next_output(TessHashJoinState *state)
 		return next_matches(state);
 	for (;;)
 	{
+		/*
+		 * Rounds go on without a return to the executor while the join's
+		 * clauses reject their rows: in the tail, and over outer rows read
+		 * back from disk, no child checks for interrupts. A round at a time.
+		 */
+		CHECK_FOR_INTERRUPTS();
 		if (state->tail)
 		{
 			if (!next_tail(state))

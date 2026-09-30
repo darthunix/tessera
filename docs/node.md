@@ -246,6 +246,18 @@ become `ereport` after the entry point has returned (see
 [kernels.md](kernels.md)); the bridge raises `ERROR` itself for invalid
 operations. No Rust frame is on the stack when `ERROR` is raised.
 
+A cancel or a timeout reaches a node through `CHECK_FOR_INTERRUPTS`, which
+`ExecCustomScan` calls once for every call of the node and the core calls
+for every page its scans read. A loop that does not return to the executor
+— groups given out while `HAVING` rejects them, partitions merged, rounds
+of a join over rows read back from disk or of its tail — checks once per
+chunk, round or block itself, in C, between kernel calls, never inside one
+(plan 4.24, review item 11: a grouping of 20 M groups spilled to disk ran
+0.66 s past a cancel to its end without one, 15 ms with it;
+test/sql/interrupts.sql marks a cancel pending from a condition, as SIGINT
+does, and expects the node to stop within 64 of its calls). A single long
+kernel call, such as the sort of `tess_rows_sort`, is not interrupted.
+
 ### Tests of every node
 
 Each node comes with regression tests of a batch-aware parent and a
@@ -268,6 +280,7 @@ counterpart exists.
 - Rescan in the fixed order; clear outputs in both end and rescan paths.
 - Leave backward scan and mark/restore undeclared; check the flags in
   `BeginCustomScan`.
+- Check for interrupts in every loop that does not return to the executor.
 - Build partial paths from the core's partial paths; declare
   `parallel_aware` only with the five callbacks, sum counters through
   `TessSharedStats`, and release what refers to DSM from

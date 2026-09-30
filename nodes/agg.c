@@ -5721,6 +5721,7 @@ agg_merge(TessAggState *state, AggSpill *spill, int partition)
 	dest = nchunks - 1;
 	for (int chunk = 0; chunk < nsplit; chunk++)
 	{
+		CHECK_FOR_INTERRUPTS();
 		agg_combine(state, spill, part, split[chunk], spill->chunk_len, &dest);
 		pfree(split[chunk]);
 	}
@@ -5729,10 +5730,11 @@ agg_merge(TessAggState *state, AggSpill *spill, int partition)
 	reader = tess_spill_open(spill->file, 0, partition);
 	while (reader != NULL && tess_spill_read_header(reader, &header))
 	{
-		void	   *body = MemoryContextAllocExtended(spill->block_context,
-													  Max(header.len, 8),
-													  MCXT_ALLOC_HUGE);
+		void	   *body;
 
+		CHECK_FOR_INTERRUPTS();
+		body = MemoryContextAllocExtended(spill->block_context, Max(header.len, 8),
+										  MCXT_ALLOC_HUGE);
 		tess_spill_read_body(reader, body, header.len);
 		agg_combine(state, spill, part, body, header.len, &dest);
 		MemoryContextReset(spill->block_context);
@@ -5785,10 +5787,11 @@ agg_split_level(TessAggState *state, AggSpill *spill, int partition)
 	state->splits++;
 	while (reader != NULL && tess_spill_read_header(reader, &header))
 	{
-		void	   *body = MemoryContextAllocExtended(level->block_context,
-													  Max(header.len, 8),
-													  MCXT_ALLOC_HUGE);
+		void	   *body;
 
+		CHECK_FOR_INTERRUPTS();
+		body = MemoryContextAllocExtended(level->block_context, Max(header.len, 8),
+										  MCXT_ALLOC_HUGE);
 		tess_spill_read_body(reader, body, header.len);
 		agg_split(state, level, body, header.len, false);
 		MemoryContextReset(level->block_context);
@@ -5796,7 +5799,10 @@ agg_split_level(TessAggState *state, AggSpill *spill, int partition)
 	if (reader != NULL)
 		tess_spill_close(reader);
 	for (int chunk = 0; chunk < part->nchunks; chunk++)
+	{
+		CHECK_FOR_INTERRUPTS();
 		agg_split(state, level, part->chunks[chunk], spill->chunk_len, false);
+	}
 	part_release(spill, part);
 	tess_spill_drop(spill->file, partition);
 	level->done_input = true;
@@ -5824,6 +5830,8 @@ agg_advance(TessAggState *state)
 		AggPart    *part;
 		Size		others = 0;
 		Size		size;
+
+		CHECK_FOR_INTERRUPTS();
 
 		if (spill->given)
 			part_release(spill, &spill->parts[spill->partition]);
@@ -6412,6 +6420,7 @@ reader_next(TessAggState *state)
 	{
 		TessSpillHeader header;
 
+		CHECK_FOR_INTERRUPTS();
 		if (reader->file == NULL || !tess_spill_read_header(reader->file, &header))
 			return NULL;
 		if (header.kind != TESS_SPILL_VALUES)
@@ -7076,6 +7085,12 @@ next_chunk(TessAggState *state)
 		uint64		all;
 		TessRowMask groups;
 		int			count;
+
+		/*
+		 * The groups go out without a return to the executor while HAVING
+		 * rejects them, and partitions merge on the way: a chunk at a time.
+		 */
+		CHECK_FOR_INTERRUPTS();
 
 		/* A table that spilled has no index once every partition is out. */
 		if (state->table.index == NULL)
