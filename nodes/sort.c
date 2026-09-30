@@ -653,6 +653,9 @@ static const TessBatchOps sort_batch_ops = {
  * The order of a type's abbreviated keys, from sort support prepared with
  * abbreviate: a comparison of unsigned or signed integers, or numeric's,
  * which is a signed integer's reversed; NONE without one the node takes.
+ * The comparators carry master's names (since 2026-08); PostgreSQL 15 to
+ * 18 call them ssup_datum_unsigned_cmp, ssup_datum_signed_cmp and
+ * ssup_datum_int32_cmp, without a uint32 one, and older cores have none.
  */
 static SortAbbrev
 abbrev_order_of(SortSupport abbrev, Oid type)

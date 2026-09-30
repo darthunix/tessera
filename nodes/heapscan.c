@@ -268,7 +268,12 @@ plain_heap_scan(PlannerInfo *root, const Path *path)
 		plain_heap_relation(root, path->parent, path->pathtarget);
 }
 
-/* The core's get_parallel_divisor: the share of one participant. */
+/*
+ * The core's get_parallel_divisor: the share of one participant. A copy of
+ * the function of optimizer/path/costsize.c, static there; keep it in step
+ * with the core, whose body is the same from PostgreSQL 12 to 20devel
+ * (checked 2026-09-30).
+ */
 double
 tess_parallel_divisor(const Path *path)
 {
@@ -702,7 +707,10 @@ begin_scan(HeapScanState *state, TableScanDesc scan)
 /*
  * A parallel bitmap: whether this participant builds it, as the core's
  * BitmapShouldInitializeSharedState: the first to come does, the others
- * wait until it is built.
+ * wait until it is built. The same protocol over the node's own shared
+ * state as the function of executor/nodeBitmapHeapscan.c, static there,
+ * whose body is the same from PostgreSQL 12 to 20devel (checked
+ * 2026-09-30).
  */
 static bool
 should_build_bitmap(SharedBitmap *shared)

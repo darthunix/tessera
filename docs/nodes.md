@@ -2141,6 +2141,15 @@ each with the sort keys in its slots and every output column in its
 payload, sorts the records with the kernels ([table.md](table.md),
 "Sorting records") and returns them in order.
 
+The node is not a copy of the core's tuplesort: the records, the key
+words, the sort, the merge of runs and the top-N filter of a batch are
+Tessera's own, in C and Rust. What it takes from the core is sort
+support (the comparators and the abbreviated keys of a type, through
+`PrepareSortSupportFromOrderingOp`), `lib/binaryheap.h` for the merge of
+runs whose keys the kernels do not compare, and `lib/sort_template.h` for
+the ties of such keys; the one algorithm repeated in C is the heap of the
+top-N sort over such keys.
+
 ### Planning
 
 The module's `create_upper_paths` hook looks at the ordered relation: each

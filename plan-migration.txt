@@ -1837,6 +1837,10 @@
   Сделано 3) (2026-09-30): bridge/registry.c — список реестра (find по ключу, add с отказом другому элементу под
   тем же ключом, remove по адресу); node.c, source.c и function.c на нём, сообщения о дубликате — у вызывающих
   (функция — по OID). Реестр источников остаётся до 6.5 (docs/bridge.md). Мутации (3) пойманы.
+  Сделано 4) (2026-09-30): шапки копий ядра — tess_order_clauses (createplan.c), tess_parallel_divisor (costsize.c),
+  should_build_bitmap (nodeBitmapHeapscan.c), gather_launch и gather_shutdown_workers (nodeGather.c): откуда,
+  static там, тела ядра одинаковы с PG 12 по 20devel (сверено 2026-09-30); abbrev_order_of — об именах
+  компараторов по версиям; docs/nodes.md — что TessSort берёт у ядра; §7 — расхождения API сортировки.
   Порядок (решение 2026-09-20): после 4.14 выполняются остаток 6.3 (ленивая проекция), затем 3.9 (AVX2), 4.15 и раздел 5 —
   чтобы узлы раздела 5 мерялись на реальном конвейере, и их ядра писались сразу для обеих архитектур. Уточнения
   (2026-09-20): после профиля 4.16 вперёд вытянуты 6.1 и ленивый pack (4.17), а затем, по второму замеру win, и 6.2 — всё
@@ -5075,7 +5079,10 @@
   с лишним bool streaming, table_beginscan(_parallel), типизированные колбэки expression_tree_walker/mutator,
   pg_always_inline/pg_assume; только в тестах — InstrAllocNode, PG_FINALLY, TupleDescFinalize. Наш код опирается и на
   поля master, которых нет в PostgreSQL 18: firstNonGuaranteedAttr, tts_first_nonguaranteed, fetch_att_noerr,
-  first_null_attr, align_fetch_then_add, ScanRelIsReadOnly.
+  first_null_attr, align_fetch_then_add, ScanRelIsReadOnly. Сортировка (дополнено 2026-09-30 по ревью 4.25, п. 37):
+  abbrev_order_of сравнивает компараторы с ssup_datum_uint64/int64/uint32/int32_cmp — имена master с 2026-08, в
+  PG 15–18 это ssup_datum_unsigned/signed/int32_cmp, до PG 15 их нет; lib/sort_template.h — с PG 13;
+  get_opfamily_member_for_cmptype — с PG 18.
 
   Что в форке иначе по существу. (1) ORCA включена по умолчанию и обходит хуки путей целиком (planner.c:380-406):
   нужен optimizer = off. (2) Параллельных запросов PostgreSQL нет (parallelModeOK = false, planner.c:483-503): слой DSM

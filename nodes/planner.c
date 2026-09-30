@@ -68,6 +68,12 @@ relation_supported(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte)
  * order_qual_clauses sorts a plan's quals: by cost within security
  * levels, a cheap leakproof clause counting as level zero, equals in
  * their order; an insertion sort, which keeps them so.
+ *
+ * A copy of order_qual_clauses (optimizer/plan/createplan.c, static there)
+ * over RestrictInfos, returning a new list; keep it in step with the core.
+ * The core's body is the same from PostgreSQL 12 to 20devel (checked
+ * 2026-09-30). The order decides the gate and the cost of a path only: the
+ * plan keeps the core's ordered quals, so a difference costs no rows.
  */
 List *
 tess_order_clauses(PlannerInfo *root, List *rinfos)

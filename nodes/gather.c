@@ -1402,7 +1402,13 @@ gather_begin(CustomScanState *css, EState *estate, int eflags)
 									   css->ss.ps.ps_ResultTupleSlot, &info.layout);
 }
 
-/* Launch the workers on the first execution, as ExecGather does. */
+/*
+ * Launch the workers on the first execution, as ExecGather does
+ * (executor/nodeGather.c); the core's code is static and tied to its
+ * tuple queues, so this one follows it through the exported parallel
+ * executor calls, over queues of batches. PostgreSQL 18 added the
+ * workers' counters of the estate, kept under PG_VERSION_NUM below.
+ */
 static void
 gather_launch(TessGatherState *state)
 {
@@ -1914,7 +1920,11 @@ merge_next(TessGatherState *state)
 	return true;
 }
 
-/* Stop the workers and take their instrumentation, as ExecShutdownGatherWorkers does. */
+/*
+ * Stop the workers and take their instrumentation, as the static
+ * ExecShutdownGatherWorkers of executor/nodeGather.c does, whose body is
+ * the same from PostgreSQL 12 to 20devel (checked 2026-09-30).
+ */
 static void
 gather_shutdown_workers(TessGatherState *state)
 {
