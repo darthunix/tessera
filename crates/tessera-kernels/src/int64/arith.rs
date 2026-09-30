@@ -161,7 +161,7 @@ where
     /// computed from the placeholder pair (0, 1), whatever the other operand
     /// holds: 0 op 1 fails in no operation, so the loop has no branch on
     /// nullness, and only the error check branches, which a NULL row never
-    /// takes (`i32::MAX + NULL` is NULL, not an overflow). The pair is built
+    /// takes (`i64::MAX + NULL` is NULL, not an overflow). The pair is built
     /// from two scalars, not an `Option` of a tuple, which the compiler kept
     /// on the stack.
     #[inline(always)]

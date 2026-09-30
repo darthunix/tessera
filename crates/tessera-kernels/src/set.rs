@@ -17,12 +17,10 @@
 use anyhow::{Result, ensure};
 use tessera_core::{ColumnReader, RowMask, RowMaskView, WordBlock};
 
+use crate::BULK_MIN_ROWS;
+
 /// At most this many keys are compared all at a row; more are searched.
 const LINEAR_KEYS: usize = 16;
-
-/// Selected rows of a word from which it is compared whole, as the
-/// filters decide (`int32::BULK_MIN_ROWS`).
-const BULK_MIN_ROWS: u32 = 12;
 
 /// Constants sorted in increasing order, without repeats.
 #[derive(Clone, Copy, Debug)]

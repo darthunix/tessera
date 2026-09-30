@@ -7,7 +7,8 @@ use std::mem::MaybeUninit;
 use anyhow::Result;
 use tessera_capi::{DatumInt64Column, DatumNullsColumn, DenseInt64Column};
 use tessera_core::{ColumnReader, RowMaskView};
-use tessera_kernels::int64::{count, max, min};
+use tessera_kernels::count::count;
+use tessera_kernels::int64::{max, min};
 
 fn words_for(flags: &[bool]) -> Vec<u64> {
     let mut words = vec![0; flags.len().div_ceil(64)];

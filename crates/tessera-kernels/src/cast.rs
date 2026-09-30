@@ -21,7 +21,7 @@ use std::mem::MaybeUninit;
 use anyhow::{Result, ensure};
 use tessera_core::{ColumnReader, RowMask, RowMaskView};
 
-use crate::int32::BULK_MIN_ROWS;
+use crate::BULK_MIN_ROWS;
 use crate::ops::ArithmeticError;
 
 /// Widen the selected int4 values into `values` and `non_nulls`.

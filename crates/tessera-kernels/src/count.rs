@@ -12,7 +12,7 @@
 use anyhow::Result;
 use tessera_core::{ColumnReader, RowMaskView, WordBlock};
 
-use crate::int32::BULK_MIN_ROWS;
+use crate::BULK_MIN_ROWS;
 
 /// Count the selected non-NULL rows.
 ///

@@ -6,9 +6,8 @@ use anyhow::{Context, Result};
 use tessera_core::RowMaskView;
 use tessera_kernels::int64;
 
-use super::args::{inputs, outputs, reader};
+use super::args::{arith_op, compare_op, hash_outputs, inputs, null_keys, outputs, reader};
 use super::column::DatumColumn;
-use super::int32::{arith_op, compare_op, hash_outputs, null_keys};
 use super::mask::Mask;
 use super::status::{Code, Status, guard};
 use crate::DatumInt64Column;

@@ -10,14 +10,13 @@
 //! hold an int8 whole.
 
 use core::arch::aarch64::{
-    int64x2_t, uint32x4_t, uint64x2_t, vaddq_s64, vandq_u64, vbicq_u64, vceqq_s64, vdupq_n_s64,
-    vdupq_n_u64, vget_low_s32, vld1q_s64, vmaxvq_u32, vminvq_u32, vmovl_high_s32, vmovl_s32,
-    vorrq_u64, vqaddq_s64, vqsubq_s64, vreinterpretq_s32_u32, vreinterpretq_u32_u64,
-    vreinterpretq_u64_s64, vst1q_s64, vsubq_s64,
+    int64x2_t, uint64x2_t, vaddq_s64, vandq_u64, vbicq_u64, vceqq_s64, vdupq_n_s64, vdupq_n_u64,
+    vld1q_s64, vmaxvq_u32, vminvq_u32, vorrq_u64, vqaddq_s64, vqsubq_s64, vreinterpretq_u32_u64,
+    vst1q_s64, vsubq_s64,
 };
 use std::mem::MaybeUninit;
 
-use super::{byte_weights, lane_masks};
+use super::{byte_weights, lane_masks, widen};
 use crate::int64::Side;
 
 /// `lhs + rhs` into `out`; true when a masked lane overflowed.
@@ -100,18 +99,6 @@ fn dispatch(
         (Side::Scalar(a), Side::Datum(b)) => apply(mask, out, &op, scalar(a), datum(b)),
         (Side::Scalar(_), Side::Scalar(_)) => unreachable!("two scalar operands"),
     }
-}
-
-/// Four rows of lane masks widened to two pairs: an all-ones 32-bit lane
-/// sign-extends to an all-ones 64-bit one.
-#[inline]
-#[target_feature(enable = "neon")]
-fn widen(rows: uint32x4_t) -> (uint64x2_t, uint64x2_t) {
-    let rows = vreinterpretq_s32_u32(rows);
-    (
-        vreinterpretq_u64_s64(vmovl_s32(vget_low_s32(rows))),
-        vreinterpretq_u64_s64(vmovl_high_s32(rows)),
-    )
 }
 
 /// Every pair of lanes: operate, store, and keep the overflow of the lanes

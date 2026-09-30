@@ -42,6 +42,12 @@
 
 #![deny(unsafe_code)]
 
+/// Selected rows in the first multi-row word from which whole-word kernels
+/// pay for the call, for every width: on an M5 Pro an int4 word costs 19
+/// cycles dense and 27 cycles Datum, an int8 word 24 and 29 (compare-ZxCFic),
+/// against about 2.4 to 2.5 cycles per selected row on the row path.
+pub(crate) const BULK_MIN_ROWS: u32 = 12;
+
 pub mod calendar;
 pub mod cast;
 pub mod count;

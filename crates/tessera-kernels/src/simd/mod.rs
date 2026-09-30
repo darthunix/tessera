@@ -27,10 +27,11 @@ mod set;
 mod table;
 
 use core::arch::aarch64::{
-    int32x4_t, uint8x8_t, uint32x4_t, vaddv_u8, vandq_u8, vceqzq_u8, vdup_n_u8, vget_high_s16,
-    vget_high_u8, vget_low_s16, vget_low_u8, vld1_u8, vld1q_s32, vld1q_u8, vld1q_u64, vmovl_s8,
-    vmovl_s16, vreinterpret_s8_u8, vreinterpretq_s32_u64, vreinterpretq_u32_s32, vtst_u8,
-    vuzp1q_s32,
+    int32x4_t, uint8x8_t, uint32x4_t, uint64x2_t, vaddv_u8, vandq_u8, vceqzq_u8, vdup_n_u8,
+    vget_high_s16, vget_high_u8, vget_low_s16, vget_low_s32, vget_low_u8, vld1_u8, vld1q_s32,
+    vld1q_u8, vld1q_u64, vmovl_high_s32, vmovl_s8, vmovl_s16, vmovl_s32, vreinterpret_s8_u8,
+    vreinterpretq_s32_u32, vreinterpretq_s32_u64, vreinterpretq_u32_s32, vreinterpretq_u64_s64,
+    vtst_u8, vuzp1q_s32,
 };
 
 pub use aggregate::{
@@ -136,4 +137,16 @@ unsafe fn load_datums(values: &[u64; 64], group: usize) -> int32x4_t {
         (vld1q_u64(start), vld1q_u64(start.add(2)))
     };
     vuzp1q_s32(vreinterpretq_s32_u64(first), vreinterpretq_s32_u64(second))
+}
+
+/// Four rows of lane masks widened to two pairs: an all-ones 32-bit lane
+/// sign-extends to an all-ones 64-bit one.
+#[inline]
+#[target_feature(enable = "neon")]
+fn widen(rows: uint32x4_t) -> (uint64x2_t, uint64x2_t) {
+    let rows = vreinterpretq_s32_u32(rows);
+    (
+        vreinterpretq_u64_s64(vmovl_s32(vget_low_s32(rows))),
+        vreinterpretq_u64_s64(vmovl_high_s32(rows)),
+    )
 }

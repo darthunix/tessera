@@ -23,7 +23,4 @@ pub(crate) use divisor::Divisor;
 pub use filter::filter;
 pub use hash::{NullKeys, hash, hash_combine, hash_next, murmurhash32};
 
-/// Selected rows in the first multi-row word from which whole-word kernels
-/// pay for the call: on an M5 Pro a word costs 19 cycles dense and 27 cycles
-/// Datum against about 2.5 cycles per selected row on the row path.
-pub(crate) const BULK_MIN_ROWS: u32 = 12;
+pub(crate) use crate::BULK_MIN_ROWS;

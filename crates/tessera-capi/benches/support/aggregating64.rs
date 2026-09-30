@@ -24,7 +24,7 @@ pub fn max<C: ColumnReader<Value = i64>>(input: &Input<'_, C>) -> Result<Option<
 
 #[inline(never)]
 pub fn count<C: ColumnReader<Value = i64>>(input: &Input<'_, C>) -> Result<usize> {
-    int64::count(input.column, &input.rows)
+    tessera_kernels::count::count(input.column, &input.rows)
 }
 
 /// The fixture's selected non-NULL values, in row order.

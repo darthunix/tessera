@@ -9,12 +9,10 @@
 //! scalar code; four accumulators keep the chain short, as for int4.
 
 use core::arch::aarch64::{
-    int64x2_t, uint32x4_t, uint64x2_t, vbslq_s64, vcgtq_s64, vdupq_n_s64, vget_low_s32,
-    vgetq_lane_s64, vld1q_s64, vmovl_high_s32, vmovl_s32, vreinterpretq_s32_u32,
-    vreinterpretq_u64_s64,
+    int64x2_t, vbslq_s64, vcgtq_s64, vdupq_n_s64, vgetq_lane_s64, vld1q_s64,
 };
 
-use super::{byte_weights, lane_masks};
+use super::{byte_weights, lane_masks, widen};
 
 /// Least masked row of a dense block; `i64::MAX` for an empty mask.
 #[inline]
@@ -100,18 +98,6 @@ fn reduce_min(lanes: int64x2_t) -> i64 {
 #[target_feature(enable = "neon")]
 fn reduce_max(lanes: int64x2_t) -> i64 {
     vgetq_lane_s64::<0>(lanes).max(vgetq_lane_s64::<1>(lanes))
-}
-
-/// Four rows of lane masks widened to two pairs: an all-ones 32-bit lane
-/// sign-extends to an all-ones 64-bit one.
-#[inline]
-#[target_feature(enable = "neon")]
-fn widen(rows: uint32x4_t) -> (uint64x2_t, uint64x2_t) {
-    let rows = vreinterpretq_s32_u32(rows);
-    (
-        vreinterpretq_u64_s64(vmovl_s32(vget_low_s32(rows))),
-        vreinterpretq_u64_s64(vmovl_high_s32(rows)),
-    )
 }
 
 /// Lane-wise `combine` over the pairs in four accumulators, with masked
