@@ -512,26 +512,9 @@ typedef enum JoinSide
 	JOIN_SIDE_INNER = 1
 } JoinSide;
 
-typedef struct TessHashJoinState
+/* The keys of both sides and, for keys a word does not hold, their hashes. */
+typedef struct JoinKeyState
 {
-	CustomScanState css;
-	const TessKernelOps *kernels;
-	PlanState  *outer;
-	PlanState  *inner;
-	TessInput  *outer_input;
-	TessInput  *inner_input;
-	TessOutput *output;
-	/* The node's layout: which scan tuple column each target is. */
-	TessLayout	layout;
-	/* The parent's request, frozen at the first execution; NULL before. */
-	const TessRequest *request;
-
-	/* Per scan tuple column: its side and its column in that child's batches. */
-	int			ncolumns;
-	int		   *sides;
-	int		   *child_columns;
-	/* Per scan tuple column: 1 + its payload word, or 0 when not kept. */
-	int		   *payload_words;
 	/* The key's column in each child's batches, and its kind there. */
 	/* The keys: each one's column in each child's batches, and its kind there. */
 	int			nkeys;
@@ -554,6 +537,198 @@ typedef struct TessHashJoinState
 	/* The key columns of the batch being inserted or probed. */
 	TessDatumColumn key_columns[TESS_TABLE_MAX_KEYS];
 	TessTableKey table_keys[TESS_TABLE_MAX_KEYS];
+} JoinKeyState;
+
+/* The tail: the inner rows without a pair, given out after the outer side. */
+typedef struct JoinTail
+{
+	bool		on;
+	/*
+	 * The tail of the table in memory is done; a spilling join asks for
+	 * one before each table it drops: the resident partitions', each
+	 * piece's, each partition's.
+	 */
+	bool		table_done;
+	bool		request;
+	int			chunk;
+	Size		byte;
+	uint32		refs[JOIN_COMPACT_ROWS];
+	uint64		bits[1];
+} JoinTail;
+
+/* The Bloom filter of the inner keys, decided by a sample of the probe. */
+typedef struct JoinBloom
+{
+	/*
+	 * The Bloom filter of the table's keys, or NULL; whether the first
+	 * probes decided on it, and the valid rows and matches they counted.
+	 */
+	uint64	   *bits;
+	Size		nwords;
+	bool		decided;
+	/* The filter is a shared table's, and whether it was seen ready. */
+	bool		shared;
+	bool		ready;
+	/* The outer child checks its rows against the filter: the join does not. */
+	bool		below;
+} JoinBloom;
+
+/* The pruning of the outer side's partitions by the inner keys. */
+typedef struct JoinPrune
+{
+	/*
+	 * Pruning of the outer side's partitions (TessAppend, docs/nodes.md):
+	 * the key's number, -1 for none, the planned descriptions and their
+	 * parameters, whether the outer node took them, the keys of this build
+	 * (this participant's share of a shared one) and whether the outer node
+	 * has them since the last rescan.
+	 */
+	int			key;
+	PartitionPruneInfo *values;
+	PartitionPruneInfo *range;
+	int			params[3];
+	bool		on;
+	TessJoinKeys keys;
+	bool		sent;
+} JoinPrune;
+
+/* The buffers of one batch of either side. */
+typedef struct JoinProbe
+{
+	/* Buffers for one batch of either side, for capacity rows. */
+	int			capacity;
+	uint32	   *hashes;
+	/* Insertion: each row's new record; probing: each row's match. */
+	uint32	   *offsets;
+	uint64	   *valid_bits;
+	uint64	   *pending_bits;
+	/* The payload of every row of an inner batch, one after another. */
+	uint64	   *payload;
+	/* The rows of the current round, and a copy the next step reads. */
+	uint64	   *round_bits;
+	uint64	   *next_bits;
+	/* The published batch's mask, which the parent may narrow. */
+	uint64	   *published_bits;
+	/* Per row of the round: its record's NULL bits, then each kept column. */
+	Datum	   *null_words;
+	Datum	  **inner_values;
+	bool	  **inner_isnull;
+	/* What this round already gathered from the records. */
+	bool		nulls_gathered;
+	bool	   *gathered;
+} JoinProbe;
+
+/* Compact mode, for a table with duplicate keys. */
+typedef struct JoinCompact
+{
+	/*
+	 * Compact mode, for a table with duplicate keys: the pairs of the
+	 * rounds are copied one after another into batches of
+	 * JOIN_COMPACT_ROWS rows, the outer columns by value, the inner ones
+	 * gathered from the pairs' records, instead of publishing every round
+	 * over the outer batch's rows with a quarter of them selected.
+	 */
+	bool		on;
+	/* The outer scan columns the parent asked for, all passed by value. */
+	int			nouter;
+	int		   *outer_columns;
+	/* Per scan column: its values in the compact batch; outer ones only. */
+	Datum	  **values;
+	bool	  **isnull;
+	uint32		offsets[JOIN_COMPACT_ROWS];
+	uint64		bits[1];
+	/* The round being copied: its rows not yet copied, its outer columns. */
+	bool		round_open;
+	uint64	   *taken_bits;
+	TessDatumColumn *round_columns;
+} JoinCompact;
+
+/* The chunks of by-reference values of the table. */
+typedef struct JoinValues
+{
+	/*
+	 * The chunks of by-reference values: their bases in this process by
+	 * number, with room for value_slots; the chunk values are copied into
+	 * and its length and bytes used; the chunks this process made and the
+	 * bytes they take.
+	 */
+	char	  **bases;
+	int			nchunks;
+	int			slots;
+	int			current;
+	Size		len;
+	Size		used;
+	int			own;
+	Size		bytes;
+} JoinValues;
+
+/* A shared build, its spill and its rounds, in a parallel plan. */
+typedef struct JoinParallel
+{
+	/*
+	 * A shared build: the plan asks for one; the shared state in the DSM
+	 * chunk, NULL when the plan runs without one (a Gather that launched
+	 * no workers), and then the node builds a table of its own; this
+	 * participant, whether it is attached to the build barrier, the chunk
+	 * it appends to, the numbers of its chunks and their bytes, and the
+	 * records it appended.
+	 */
+	bool		shared_mode;
+	JoinShared *shared;
+	/* A shared table's budget, every participant's hash_mem; 0 without one. */
+	Size		shared_budget;
+	/* The query's shared memory, kept for leaving after the Gather let go of it. */
+	dsa_area   *area;
+	TessBuildParticipant participant;
+	bool		participating;
+	void	   *own_base;
+	Size		own_len;
+	int		   *own_chunks;
+	int			nown;
+	int			own_slots;
+	Size		own_bytes;
+	uint64		appended;
+	/*
+	 * A shared table that spills: the words of its spilling, mapped here;
+	 * this participant's number in the files' names, the partitions sent
+	 * to disk it saw, and whether the chunks passed the budget before the
+	 * table was split.
+	 */
+	uint64	   *spill_words;
+	int			spill_participant;
+	uint64		spill_seen;
+	bool		spill_over;
+	/*
+	 * The table probed is shared, the build's or a round's, whose chains are
+	 * walked; the round this participant takes part in, -1 for none, and
+	 * its place in the round's phases.
+	 */
+	bool		chain_table;
+	int			round_partition;
+	TessBuildParticipant round_participant;
+} JoinParallel;
+
+typedef struct TessHashJoinState
+{
+	CustomScanState css;
+	const TessKernelOps *kernels;
+	PlanState  *outer;
+	PlanState  *inner;
+	TessInput  *outer_input;
+	TessInput  *inner_input;
+	TessOutput *output;
+	/* The node's layout: which scan tuple column each target is. */
+	TessLayout	layout;
+	/* The parent's request, frozen at the first execution; NULL before. */
+	const TessRequest *request;
+
+	/* Per scan tuple column: its side and its column in that child's batches. */
+	int			ncolumns;
+	int		   *sides;
+	int		   *child_columns;
+	/* Per scan tuple column: 1 + its payload word, or 0 when not kept. */
+	int		   *payload_words;
+	JoinKeyState keys;
 	/* Every outer row matches at most one inner row: no second round. */
 	bool		inner_unique;
 	/*
@@ -583,18 +758,7 @@ typedef struct TessHashJoinState
 	bool		round_free_owed;
 	bool		table_free_owed;
 	Size		record_size;
-	bool		tail;
-	/*
-	 * The tail of the table in memory is done; a spilling join asks for
-	 * one before each table it drops: the resident partitions', each
-	 * piece's, each partition's.
-	 */
-	bool		table_tail_done;
-	bool		tail_request;
-	int			tail_chunk;
-	Size		tail_byte;
-	uint32		tail_refs[JOIN_COMPACT_ROWS];
-	uint64		tail_bits[1];
+	JoinTail tail;
 	/* Per filter of an outer join in evaluation order: whether it runs in batches. */
 	List	   *filter_batch;
 	/* The residual clauses after the keys that run in batches, first. */
@@ -626,56 +790,12 @@ typedef struct TessHashJoinState
 	int			chunk_slots;
 	Size		table_bytes;
 	bool		built;
-	/*
-	 * The Bloom filter of the table's keys, or NULL; whether the first
-	 * probes decided on it, and the valid rows and matches they counted.
-	 */
-	uint64	   *bloom;
-	Size		bloom_words;
-	bool		bloom_decided;
-	/* The filter is a shared table's, and whether it was seen ready. */
-	bool		bloom_shared;
-	bool		bloom_ready;
-	/* The outer child checks its rows against the filter: the join does not. */
-	bool		bloom_below;
-	/*
-	 * Pruning of the outer side's partitions (TessAppend, docs/nodes.md):
-	 * the key's number, -1 for none, the planned descriptions and their
-	 * parameters, whether the outer node took them, the keys of this build
-	 * (this participant's share of a shared one) and whether the outer node
-	 * has them since the last rescan.
-	 */
-	int			prune_key;
-	PartitionPruneInfo *prune_values;
-	PartitionPruneInfo *prune_range;
-	int			prune_params[3];
-	bool		prune_on;
-	TessJoinKeys prune_keys;
-	bool		prune_sent;
+	JoinBloom bloom;
+	JoinPrune prune;
 	uint64		sample_rows;
 	uint64		sample_found;
 
-	/* Buffers for one batch of either side, for capacity rows. */
-	int			capacity;
-	uint32	   *hashes;
-	/* Insertion: each row's new record; probing: each row's match. */
-	uint32	   *offsets;
-	uint64	   *valid_bits;
-	uint64	   *pending_bits;
-	/* The payload of every row of an inner batch, one after another. */
-	uint64	   *payload;
-	/* The rows of the current round, and a copy the next step reads. */
-	uint64	   *round_bits;
-	uint64	   *next_bits;
-	/* The published batch's mask, which the parent may narrow. */
-	uint64	   *published_bits;
-	/* Per row of the round: its record's NULL bits, then each kept column. */
-	Datum	   *null_words;
-	Datum	  **inner_values;
-	bool	  **inner_isnull;
-	/* What this round already gathered from the records. */
-	bool		nulls_gathered;
-	bool	   *gathered;
+	JoinProbe probe;
 
 	/* The copies of the compact batch's by-reference outer values. */
 	MemoryContext compact_context;
@@ -685,26 +805,7 @@ typedef struct TessHashJoinState
 	uint32	   *current_offsets;
 	uint64	   *current_bits;
 
-	/*
-	 * Compact mode, for a table with duplicate keys: the pairs of the
-	 * rounds are copied one after another into batches of
-	 * JOIN_COMPACT_ROWS rows, the outer columns by value, the inner ones
-	 * gathered from the pairs' records, instead of publishing every round
-	 * over the outer batch's rows with a quarter of them selected.
-	 */
-	bool		compact;
-	/* The outer scan columns the parent asked for, all passed by value. */
-	int			nouter;
-	int		   *outer_columns;
-	/* Per scan column: its values in the compact batch; outer ones only. */
-	Datum	  **compact_values;
-	bool	  **compact_isnull;
-	uint32		compact_offsets[JOIN_COMPACT_ROWS];
-	uint64		compact_bits[1];
-	/* The round being copied: its rows not yet copied, its outer columns. */
-	bool		round_open;
-	uint64	   *taken_bits;
-	TessDatumColumn *round_columns;
+	JoinCompact compact;
 
 	/* The outer batch whose rounds are being published, or NULL. */
 	TessBatch  *outer_batch;
@@ -768,61 +869,8 @@ typedef struct TessHashJoinState
 	/* The counters of every participant, in a parallel plan. */
 	TessSharedStats *stats;
 
-	/*
-	 * A shared build: the plan asks for one; the shared state in the DSM
-	 * chunk, NULL when the plan runs without one (a Gather that launched
-	 * no workers), and then the node builds a table of its own; this
-	 * participant, whether it is attached to the build barrier, the chunk
-	 * it appends to, the numbers of its chunks and their bytes, and the
-	 * records it appended.
-	 */
-	bool		shared_mode;
-	JoinShared *shared;
-	/* A shared table's budget, every participant's hash_mem; 0 without one. */
-	Size		shared_budget;
-	/* The query's shared memory, kept for leaving after the Gather let go of it. */
-	dsa_area   *area;
-	TessBuildParticipant participant;
-	bool		participating;
-	void	   *own_base;
-	Size		own_len;
-	int		   *own_chunks;
-	int			nown;
-	int			own_slots;
-	Size		own_bytes;
-	uint64		appended;
-	/*
-	 * The chunks of by-reference values: their bases in this process by
-	 * number, with room for value_slots; the chunk values are copied into
-	 * and its length and bytes used; the chunks this process made and the
-	 * bytes they take.
-	 */
-	char	  **value_bases;
-	int			nvalue_chunks;
-	int			value_slots;
-	int			value_current;
-	Size		value_len;
-	Size		value_used;
-	int			value_own;
-	Size		value_bytes;
-	/*
-	 * A shared table that spills: the words of its spilling, mapped here;
-	 * this participant's number in the files' names, the partitions sent
-	 * to disk it saw, and whether the chunks passed the budget before the
-	 * table was split.
-	 */
-	uint64	   *spill_words;
-	int			spill_participant;
-	uint64		spill_seen;
-	bool		spill_over;
-	/*
-	 * The table probed is shared, the build's or a round's, whose chains are
-	 * walked; the round this participant takes part in, -1 for none, and
-	 * its place in the round's phases.
-	 */
-	bool		chain_table;
-	int			round_partition;
-	TessBuildParticipant round_participant;
+	JoinParallel parallel;
+	JoinValues values;
 } TessHashJoinState;
 
 /* Raise the error a kernel stored, if the call failed. */
