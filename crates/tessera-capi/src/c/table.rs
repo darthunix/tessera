@@ -25,7 +25,7 @@ use tessera_kernels::table::{
 
 use super::args::reader;
 use super::column::DatumColumn;
-use super::decimal::{SumColumn, SumInput};
+use super::decimal::{PartialColumn, SumColumn, SumInput};
 use super::mask::Mask;
 use super::status::{Code, Status, guard};
 use crate::{DatumInt32Column, DatumInt64Column};
@@ -1380,6 +1380,8 @@ pub unsafe extern "C" fn tess_table_accumulate(
 const SUM_NUMERIC: c_uint = 0;
 const SUM_INT4: c_uint = 1;
 const SUM_INT8: c_uint = 2;
+const SUM_STATE: c_uint = 3;
+const SUM_PAIR: c_uint = 4;
 
 /// `TessTableSumArg`: a sum of `tess_table_accumulate_sums`.
 #[repr(C)]
@@ -1397,7 +1399,9 @@ pub struct TableSumArg {
 
 /// `tess_table_accumulate_sums`: fold each selected row into the sum or
 /// average states of its record's payload, the rows a state does not take
-/// into its sum's rest.
+/// into its sum's rest; or, when every sum's input is a partial state,
+/// merge each selected row's states into them, the states the table does
+/// not merge into their sums' rests.
 ///
 /// # Safety
 ///
@@ -1406,8 +1410,9 @@ pub struct TableSumArg {
 /// must point to `nsums` sums, each with a valid `TessDatumColumn` of the
 /// rows' count whose selected rows have initialized flags and, when not
 /// NULL, values of the kind (numeric Datums read in place, or its
-/// decimals, or integer words), and a valid rest mask that nothing else
-/// accesses; `status` as for every entry point.
+/// decimals, integer words, or varlena Datums of partial states), and a
+/// valid rest mask that nothing else accesses; `status` as for every
+/// entry point.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn tess_table_accumulate_sums(
     table: *const TableRef,
@@ -1427,15 +1432,46 @@ pub unsafe extern "C" fn tess_table_accumulate_sums(
             let nsums = usize::try_from(nsums).context("a negative sum count")?;
             ensure!(nsums <= MAX_SUMS, "{nsums} sums in a call, past {MAX_SUMS}");
             let args = values(sums, nsums, "sums")?;
-            // Only the sums given are set, as in the partitioned appends.
-            let mut columns = [const { MaybeUninit::<SumColumn<'_>>::uninit() }; MAX_SUMS];
-            for (arg, column) in args.iter().zip(columns.iter_mut()) {
-                let input = match arg.kind {
+            let mut inputs = [SumInput::Numeric; MAX_SUMS];
+            for (arg, input) in args.iter().zip(inputs.iter_mut()) {
+                *input = match arg.kind {
                     SUM_NUMERIC => SumInput::Numeric,
                     SUM_INT4 => SumInput::Int4,
                     SUM_INT8 => SumInput::Int8,
+                    SUM_STATE => SumInput::State,
+                    SUM_PAIR => SumInput::Pair,
                     other => bail!("unknown sum input {other}"),
                 };
+            }
+            let inputs = &inputs[..nsums];
+            if inputs
+                .iter()
+                .any(|input| matches!(input, SumInput::State | SumInput::Pair))
+            {
+                let mut columns = [const { MaybeUninit::<PartialColumn<'_>>::uninit() }; MAX_SUMS];
+                for ((arg, &input), column) in args.iter().zip(inputs).zip(columns.iter_mut()) {
+                    column.write(PartialColumn::new(input, arg.column, nrows)?);
+                }
+                // SAFETY: the loop above initialized the first `nsums`
+                // columns; a column that failed returned before this.
+                let columns = &*(&raw const columns[..nsums] as *const [PartialColumn<'_>]);
+                let mut slots =
+                    [const { MaybeUninit::<SumSlot<'_, PartialColumn<'_>>>::uninit() }; MAX_SUMS];
+                for ((arg, column), slot) in args.iter().zip(columns).zip(slots.iter_mut()) {
+                    slot.write(SumSlot {
+                        terms: column,
+                        at: arg.value_at,
+                        rest: arg.rest.as_mut().context("a null rest mask")?.mask()?,
+                    });
+                }
+                // SAFETY: as above, and the slots own nothing to drop.
+                let slots =
+                    &mut *(&raw mut slots[..nsums] as *mut [SumSlot<'_, PartialColumn<'_>>]);
+                return table.sum_partials(offsets, &rows, slots);
+            }
+            // Only the sums given are set, as in the partitioned appends.
+            let mut columns = [const { MaybeUninit::<SumColumn<'_>>::uninit() }; MAX_SUMS];
+            for ((arg, &input), column) in args.iter().zip(inputs).zip(columns.iter_mut()) {
                 column.write(SumColumn::new(input, arg.column, nrows)?);
             }
             // SAFETY: the loop above initialized the first `nsums` columns.

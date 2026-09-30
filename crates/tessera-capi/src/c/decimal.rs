@@ -28,8 +28,8 @@ use std::slice;
 use anyhow::{Context, Result, bail, ensure};
 use tessera_core::{RowMask, RowMaskView};
 use tessera_kernels::decimal::{
-    self, Arg, Compare, Decimal, DecimalWord, MAX_SCALE, NUMERIC_MAX, Op, Results, Scales, Source,
-    Special, Sum, Term, Terms,
+    self, Arg, Compare, Decimal, DecimalWord, MAX_SCALE, NUMERIC_MAX, Op, Partial, Partials,
+    Results, Scales, Source, Special, Sum, SumState, Term, Terms,
 };
 
 use super::column::DatumColumn;
@@ -93,6 +93,14 @@ impl Plain<'_> {
         assert!(row < self.nrows, "a decimal row past its column");
         // SAFETY: as for `get`; a NULL row's placeholder is initialized too.
         unsafe { *self.values.add(row) }
+    }
+
+    /// The row's Datum, `None` for NULL.
+    #[inline(always)]
+    fn value(&self, row: usize) -> Option<u64> {
+        assert!(row < self.nrows, "a decimal row past its column");
+        // SAFETY: as for `get`.
+        unsafe { (*self.isnull.add(row) == 0).then(|| *self.values.add(row)) }
     }
 }
 
@@ -450,6 +458,12 @@ pub(super) enum SumInput {
     Int4,
     /// int8 words.
     Int8,
+    /// Partial sum states of the node's own format, bytea Datums
+    /// ([`state_partial`]).
+    State,
+    /// Partial states of `avg(int4)` and `avg(int2)`, int8[] Datums of the
+    /// count and the sum ([`pair_partial`]).
+    Pair,
 }
 
 /// A sum's column, read by its kind: one loop runs over the sums of a
@@ -503,11 +517,129 @@ impl<'a> SumColumn<'a> {
         // SAFETY: the caller's contract.
         let column = unsafe { Column::new(column, nrows)? };
         Ok(match (input, column) {
+            (SumInput::State | SumInput::Pair, _) => bail!("partial states among a call's terms"),
             (SumInput::Numeric, Column::Plain(column)) => Self::Numeric(column),
             (SumInput::Numeric, Column::Side(side)) => Self::Side(side),
             (SumInput::Int4, Column::Plain(column)) => Self::Int4(Integers { column }),
             (SumInput::Int8, Column::Plain(column)) => Self::Int8(Integers { column }),
             (_, Column::Side(_)) => bail!("an integer column with decimals"),
+        })
+    }
+}
+
+/// `TESS_TABLE_SUM_STATE_TAG`: the first bytes of a partial sum state.
+const STATE_TAG: u32 = 0x5453_4D31;
+
+/// The bytes after the varlena header of a partial sum state without a
+/// rest: the tag and the state's words.
+const STATE_BYTES: usize = 4 + 8 * SumState::WORDS;
+
+/// The flags word's bits a state may set: the scale and the three flags.
+const STATE_FLAG_BITS: u64 = 0x7FF;
+
+/// A partial sum state of the node's own format, the bytes after a bytea's
+/// header: the tag, the state's words in the machine's order, then its
+/// numeric rest, whole with its header, when it has one, which the caller
+/// merges.
+fn state_partial(data: &[u8]) -> Result<Partial> {
+    ensure!(
+        data.len() >= STATE_BYTES
+            && data.first_chunk::<4>().map(|tag| u32::from_ne_bytes(*tag)) == Some(STATE_TAG),
+        "a partial sum state of another format"
+    );
+    if data.len() > STATE_BYTES {
+        return Ok(Partial::Other);
+    }
+    let words: [u64; SumState::WORDS] = std::array::from_fn(|word| {
+        let at = 4 + 8 * word;
+        u64::from_ne_bytes(data[at..at + 8].try_into().unwrap())
+    });
+    let state = SumState::from_words(words);
+    ensure!(
+        words[3] & !STATE_FLAG_BITS == 0
+            && state.sum.scale <= decimal::MAX_READ_SCALE
+            && state.sum.value.abs() < decimal::SUM_BOUND,
+        "a partial sum state out of its range"
+    );
+    Ok(Partial::State(state))
+}
+
+/// `INT8OID`.
+const INT8_OID: i32 = 20;
+
+/// The partial state of `avg(int4)` or `avg(int2)`, the core's int8[] of
+/// the count and the sum, the bytes after its varlena header: one
+/// dimension, no NULL bitmap (data offset 0), element type int8, a length
+/// of 2 and its lower bound, then the two int8.
+fn pair_partial(data: &[u8]) -> Result<Partial> {
+    let int = |at: usize| i32::from_ne_bytes(data[at..at + 4].try_into().unwrap());
+    let int8 = |at: usize| i64::from_ne_bytes(data[at..at + 8].try_into().unwrap());
+    ensure!(
+        data.len() == 36 && int(0) == 1 && int(4) == 0 && int(8) == INT8_OID && int(12) == 2,
+        "a partial average of another format"
+    );
+    let count = u64::try_from(int8(20)).context("a partial average of a negative count")?;
+    Ok(Partial::State(SumState {
+        sum: Sum {
+            value: i128::from(int8(28)),
+            scale: 0,
+            count,
+        },
+        ..SumState::default()
+    }))
+}
+
+/// A sum's column of partial states, read by its kind.
+pub(super) enum PartialColumn<'a> {
+    /// The node's own partial sum states.
+    State(Plain<'a>),
+    /// The int8[] pairs of `avg(int4)` and `avg(int2)`.
+    Pair(Plain<'a>),
+}
+
+/// A reader of a partial state's bytes after the varlena header.
+type ReadPartial = fn(&[u8]) -> Result<Partial>;
+
+impl Partials for PartialColumn<'_> {
+    #[inline]
+    fn partial(&self, row: usize) -> Result<Partial> {
+        let (column, read): (&Plain<'_>, ReadPartial) = match self {
+            Self::State(column) => (column, state_partial),
+            Self::Pair(column) => (column, pair_partial),
+        };
+        let Some(datum) = column.value(row) else {
+            return Ok(Partial::Null);
+        };
+        // SAFETY: the constructor's caller guarantees a whole varlena
+        // behind a selected row's Datum.
+        match unsafe { varlena_data(datum) } {
+            None => Ok(Partial::Other),
+            Some(data) => read(data),
+        }
+    }
+}
+
+impl<'a> PartialColumn<'a> {
+    /// A sum's column of partial states of `nrows` rows.
+    ///
+    /// # Safety
+    ///
+    /// `column` must satisfy [`Column::new`] for `nrows` rows, its values
+    /// varlena Datums of `input`'s kind, for `'a`.
+    pub(super) unsafe fn new(
+        input: SumInput,
+        column: *const DatumColumn,
+        nrows: usize,
+    ) -> Result<Self> {
+        // SAFETY: the caller's contract.
+        let column = unsafe { Column::new(column, nrows)? };
+        Ok(match (input, column) {
+            (SumInput::State, Column::Plain(column)) => Self::State(column),
+            (SumInput::Pair, Column::Plain(column)) => Self::Pair(column),
+            (SumInput::State | SumInput::Pair, Column::Side(_)) => {
+                bail!("a column of partial states with decimals")
+            }
+            _ => bail!("terms among a call's partial states"),
         })
     }
 }

@@ -301,7 +301,25 @@ other call over it at the same time:
   sum; the rows of further groups go to their records one by one. Exact
   sums add in any order; a group's batch sum the state refuses at its
   bound is taken again row by row, so the rows it refuses are the ones a
-  row-by-row fold would;
+  row-by-row fold would. When every sum's column holds partial states,
+  the same call merges them into the records' states instead, as a final
+  grouping merges the partial groupings' groups
+  (`tessera_kernels::decimal::SumState::merge`, `sum_partials`): the
+  sums added at the larger of their scales, the count added, the flags
+  kept, NULL skipped, each row's record found once for all its sums (the
+  rows of a batch are one participant's groups, so they are not added up
+  by group first). A partial state is `TESS_TABLE_SUM_OF_STATE`, the
+  node's own bytea: after the varlena header (4 bytes or 1) the tag
+  `TESS_TABLE_SUM_STATE_TAG`, the state's four words in the machine's
+  order, then, when the state has one, its numeric rest whole with its
+  header; or `TESS_TABLE_SUM_OF_PAIR`, the core's int8[] of the count and
+  the sum of `avg(int4)` and `avg(int2)` (one dimension of 2, no NULL
+  bitmap), a sum at scale 0. A state with a rest, one not read in place,
+  or one the record's sum refuses at its bound is set in the sum's
+  `rest` for the caller to merge, the record's state unchanged; a value
+  of another tag, words out of range (a scale past 18, a sum at 10^36) or
+  another array fails the call, as do partial states and other sums in
+  one call;
 - `tess_table_scan(&table, &cursor, offsets, capacity, &count, &status)`
   visits the records chunk by chunk in the order they were appended, up
   to `capacity` per call, from a cursor the caller starts at 0 and keeps

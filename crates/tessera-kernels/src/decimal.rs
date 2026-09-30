@@ -923,6 +923,30 @@ pub trait Terms {
     }
 }
 
+/// A row's partial state of a sum or an average, as a partial grouping
+/// hands it to the final one, which merges it ([`SumState::merge`]).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Partial {
+    /// SQL NULL, an empty state: skipped.
+    Null,
+    /// A state to merge.
+    State(SumState),
+    /// A state the caller must merge by the core's means: one with a
+    /// numeric rest, a stored form not read in place.
+    Other,
+}
+
+/// The partial states of a batch by row. The batch functions ask only for
+/// selected rows, each at most once a call.
+pub trait Partials {
+    /// The partial state of a row.
+    ///
+    /// # Errors
+    ///
+    /// A value of another format.
+    fn partial(&self, row: usize) -> Result<Partial>;
+}
+
 /// The state of a sum or an average of numeric (or of integers, as
 /// decimals at scale 0) that a record keeps in [`SumState::WORDS`] words,
 /// as the core's `NumericAggState` keeps it without its moving-aggregate
@@ -1021,6 +1045,25 @@ impl SumState {
             *words = state.to_words();
         }
         taken
+    }
+
+    /// Merge another state into this one, as the core's combine function
+    /// merges two: the other's sum added at the larger of their scales
+    /// ([`Sum::add_many`]), NaN and the infinities met in either kept;
+    /// false, the state unchanged, when the sum refuses the other's at its
+    /// bound.
+    #[inline(always)]
+    pub fn merge(&mut self, other: Self) -> bool {
+        if !self
+            .sum
+            .add_many(other.sum.value, other.sum.scale, other.sum.count)
+        {
+            return false;
+        }
+        self.nan |= other.nan;
+        self.positive_infinity |= other.positive_infinity;
+        self.negative_infinity |= other.negative_infinity;
+        true
     }
 
     /// Take a term: false, the state unchanged, for one the caller adds by

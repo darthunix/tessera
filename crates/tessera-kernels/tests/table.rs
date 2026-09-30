@@ -2,7 +2,9 @@
 
 use anyhow::Result;
 use tessera_core::{ColumnReader, ColumnView, RowMask, RowMaskView};
-use tessera_kernels::decimal::{self, Decimal, DecimalWord, Special, SumState, Term, Terms};
+use tessera_kernels::decimal::{
+    self, Decimal, DecimalWord, Partial, Partials, Special, SumState, Term, Terms,
+};
 use tessera_kernels::int32::{self, NullKeys, hash_combine, murmurhash32};
 use tessera_kernels::ops::ArithmeticError;
 use tessera_kernels::table::{
@@ -1826,6 +1828,256 @@ fn sum_states_follow_a_row_by_row_model() -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Partial states of sums by row, as a final grouping's batch gives them.
+struct PartialColumn(Vec<Partial>);
+
+impl Partials for PartialColumn {
+    fn partial(&self, row: usize) -> Result<Partial> {
+        Ok(self.0[row])
+    }
+}
+
+/// Partial states of three participants, each folding its share of the
+/// rows into states of its own, merged into one table: a record's state is
+/// the merge of its partial states in row order, NULL skipped, a state with
+/// a rest or one past the record's bound left in the rest; and where no
+/// state went to a rest, the merged state is the one of all the rows at
+/// once, as exact sums are whatever the split.
+#[test]
+fn partial_states_merge_as_the_rows_would() -> Result<()> {
+    const SUMS: usize = 3;
+    const PARTICIPANTS: usize = 3;
+    for (distinct, near_bound) in [(5, false), (11, true), (200, false)] {
+        let config = TableConfig {
+            keys: &[KeyKind::Int32],
+            payload_size: 8 + 8 * SumState::WORDS * SUMS,
+        };
+        let nrows: usize = 600;
+        let key = |row: usize| ((row * 7) % distinct) as i32;
+        // Each participant's states by key, and whether a term went to
+        // its rest; the states of all rows at once, the same way.
+        let mut partials: Vec<std::collections::BTreeMap<i32, [(SumState, bool); SUMS]>> =
+            vec![Default::default(); PARTICIPANTS];
+        let mut whole: std::collections::HashMap<i32, [(SumState, bool); SUMS]> =
+            Default::default();
+        // Sum 0 has the model's terms, rests among them; sums 1 and 2 only
+        // decimals of scales 0 to 2, NULL and NaN or -Infinity, which every
+        // state takes.
+        let term = |sum: usize, row: usize| match (sum, (row + sum) % 17) {
+            (0, _) => model_term(0, row),
+            (_, 0) => Term::Null,
+            (1, 1) => Term::Special(Special::NaN),
+            (2, 1) if row.is_multiple_of(3) => Term::Special(Special::NegativeInfinity),
+            _ => Term::Decimal(
+                Decimal::new(
+                    (row as i64 * 7919 + sum as i64) % 20001 - 10000,
+                    (row % 3) as u32,
+                )
+                .unwrap(),
+            ),
+        };
+        for row in 0..nrows {
+            let states = partials[row % PARTICIPANTS].entry(key(row)).or_default();
+            let all = whole.entry(key(row)).or_default();
+            for sum in 0..SUMS {
+                let term = term(sum, row);
+                if !states[sum].0.add(term) {
+                    states[sum].1 = true;
+                }
+                if !all[sum].0.add(term) {
+                    all[sum].1 = true;
+                }
+            }
+        }
+        // The final grouping's rows: a participant's groups in turn, an
+        // empty state as NULL.
+        let mut keys = Vec::new();
+        let mut columns: [Vec<Partial>; SUMS] = Default::default();
+        for participant in &partials {
+            for (&key, states) in participant {
+                keys.push(key);
+                for (column, &(state, rest)) in columns.iter_mut().zip(states) {
+                    column.push(if rest {
+                        Partial::Other
+                    } else if state == SumState::default() {
+                        Partial::Null
+                    } else {
+                        Partial::State(state)
+                    });
+                }
+            }
+        }
+        let nfinal = keys.len();
+        let key_column = [ColumnView::try_new(&keys, None)?];
+        let hashes: Vec<u32> = keys.iter().map(|&key| hash_i32(key)).collect();
+        let mut table = LocalTable::new(&config, 512, CHUNK_HEADER + 64 * 128)?;
+        let (offsets, _) = resolve_all(&mut table, &hashes, &key_column[..])?;
+        let at = |sum: usize| 8 + 8 * SumState::WORDS * sum;
+        let mut model: std::collections::HashMap<i32, [SumState; SUMS]> = Default::default();
+        if near_bound {
+            // Every group starts within 10^20 of the bound at scale 0: a
+            // partial sum of a larger scale takes it past the bound.
+            let first = SumState {
+                sum: decimal::Sum {
+                    value: decimal::SUM_BOUND - 100_000_000_000_000_000_000,
+                    scale: 0,
+                    count: 1,
+                },
+                ..SumState::default()
+            };
+            let mut writer = table.table_mut()?;
+            for (row, &offset) in offsets.iter().enumerate() {
+                if model.contains_key(&keys[row]) {
+                    continue;
+                }
+                let payload = writer.payload_mut(offset)?;
+                for sum in 0..SUMS {
+                    for (word, value) in first.to_words().into_iter().enumerate() {
+                        payload[at(sum) + 8 * word..at(sum) + 8 * word + 8]
+                            .copy_from_slice(&value.to_ne_bytes());
+                    }
+                }
+                model.insert(keys[row], [first; SUMS]);
+            }
+        }
+        let columns = columns.map(PartialColumn);
+        let selection = all_rows(nfinal);
+        let rows = RowMaskView::try_new(nfinal, &selection)?;
+        let mut rest_words = vec![vec![0_u64; nfinal.div_ceil(64)]; SUMS];
+        {
+            let mut slots: Vec<SumSlot<'_, PartialColumn>> = rest_words
+                .iter_mut()
+                .zip(&columns)
+                .enumerate()
+                .map(|(sum, (words, terms))| {
+                    Ok(SumSlot {
+                        terms,
+                        at: at(sum),
+                        rest: RowMask::try_new(nfinal, words)?,
+                    })
+                })
+                .collect::<Result<_>>()?;
+            table
+                .table_mut()?
+                .sum_partials(&offsets, &rows, &mut slots)?;
+        }
+        let mut expected = vec![vec![0_u64; nfinal.div_ceil(64)]; SUMS];
+        let mut refused = false;
+        for row in 0..nfinal {
+            let states = model.entry(keys[row]).or_default();
+            for (sum, state) in states.iter_mut().enumerate() {
+                let taken = match columns[sum].0[row] {
+                    Partial::Null => true,
+                    Partial::State(partial) => {
+                        let merged = state.merge(partial);
+                        refused |= !merged;
+                        merged
+                    }
+                    Partial::Other => false,
+                };
+                if !taken {
+                    expected[sum][row / 64] |= 1 << (row % 64);
+                }
+            }
+        }
+        assert_eq!(refused, near_bound, "a merge past the bound");
+        for sum in 0..SUMS {
+            assert_eq!(
+                rest_words[sum], expected[sum],
+                "rest of sum {sum}, {distinct} keys"
+            );
+        }
+        let groups = scan_all(&mut table, 7)?;
+        assert_eq!(groups.len(), model.len());
+        let table = table.table()?;
+        let all = all_rows(groups.len());
+        let rows = RowMaskView::try_new(groups.len(), &all)?;
+        let mut key_values = vec![0; groups.len()];
+        let mut key_nulls = vec![false; groups.len()];
+        table.gather_key(&groups, &rows, 0, &mut key_values, &mut key_nulls)?;
+        let mut matched_whole = 0;
+        for sum in 0..SUMS {
+            let mut fields = [(); SumState::WORDS].map(|_| vec![0u64; groups.len()]);
+            for (index, field) in fields.iter_mut().enumerate() {
+                table.gather(&groups, &rows, at(sum) + index * 8, field)?;
+            }
+            for group in 0..groups.len() {
+                let found = SumState::from_words(std::array::from_fn(|word| fields[word][group]));
+                let key = key_values[group] as i64 as i32;
+                assert_eq!(
+                    Some(&found),
+                    model.get(&key).map(|states| &states[sum]),
+                    "group {key}, sum {sum}, {distinct} keys"
+                );
+                // Without a rest anywhere, the merge is the whole fold.
+                let (all, rest) = whole[&key][sum];
+                let any_rest = partials
+                    .iter()
+                    .any(|participant| participant.get(&key).is_some_and(|states| states[sum].1));
+                if !near_bound && !rest && !any_rest {
+                    assert_eq!(
+                        found, all,
+                        "group {key}, sum {sum}: the merge is the whole fold"
+                    );
+                    matched_whole += 1;
+                }
+            }
+        }
+        assert!(
+            near_bound || matched_whole > 0,
+            "some groups merged without a rest"
+        );
+    }
+    Ok(())
+}
+
+/// A merge adds the sums at the larger scale and keeps the flags; one past
+/// the bound leaves the state as it was.
+#[test]
+fn a_state_merges_another() {
+    let state = |value: i128, scale: u32, count: u64| SumState {
+        sum: decimal::Sum {
+            value,
+            scale,
+            count,
+        },
+        ..SumState::default()
+    };
+    let mut ours = state(125, 2, 3);
+    assert!(ours.merge(SumState {
+        nan: true,
+        ..state(-7, 3, 2)
+    }));
+    assert_eq!(
+        ours,
+        SumState {
+            nan: true,
+            ..state(1243, 3, 5)
+        }
+    );
+    // An empty state changes nothing; one of flags alone adds its flags.
+    assert!(ours.merge(SumState::default()));
+    assert!(ours.merge(SumState {
+        negative_infinity: true,
+        ..SumState::default()
+    }));
+    assert_eq!(
+        ours,
+        SumState {
+            nan: true,
+            negative_infinity: true,
+            ..state(1243, 3, 5)
+        }
+    );
+    // Past the bound: refused, unchanged.
+    let before = ours;
+    assert!(!ours.merge(SumState {
+        positive_infinity: true,
+        ..state(decimal::SUM_BOUND - 1, 3, 1)
+    }));
+    assert_eq!(ours, before);
 }
 
 #[test]

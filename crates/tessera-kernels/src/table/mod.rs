@@ -898,6 +898,19 @@ impl<'a> TableMut<'a> {
         exclusive::sum_terms(&self.0.region, &self.0.layout, offsets, rows, sums)
     }
 
+    /// Merge each selected row's partial states into the sum or average
+    /// states of its record's payload ([`crate::decimal::SumState::merge`]),
+    /// the record found once a row: the states the table does not merge go
+    /// to their sum's rest for the caller.
+    pub fn sum_partials<P: crate::decimal::Partials>(
+        &mut self,
+        offsets: &[u32],
+        rows: &RowMaskView<'_>,
+        sums: &mut [SumSlot<'_, P>],
+    ) -> Result<()> {
+        exclusive::sum_partials(&self.0.region, &self.0.layout, offsets, rows, sums)
+    }
+
     /// Visit the records from `cursor` on, chunk by chunk in the order
     /// they were appended, as many as `out` holds: their references fill
     /// `out`, the count is returned and the cursor moves past them; 0

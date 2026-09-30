@@ -537,6 +537,16 @@ extern TessStatusCode tess_table_accumulate(const TessTableRef *table,
 #define TESS_TABLE_SUM_POSITIVE_INFINITY (UINT64CONST(1) << 9)
 #define TESS_TABLE_SUM_NEGATIVE_INFINITY (UINT64CONST(1) << 10)
 
+/*
+ * A sum state as a partial aggregate's value, a bytea between the node's
+ * partial grouping and its final one: after the varlena header the tag
+ * TESS_TABLE_SUM_STATE_TAG (4 bytes), the state's TESS_TABLE_SUM_WORDS
+ * words in the machine's order, then, when the state has one, its numeric
+ * rest, whole with its header. An empty state is NULL.
+ */
+#define TESS_TABLE_SUM_STATE_TAG 0x54534D31
+#define TESS_TABLE_SUM_STATE_BYTES (4 + 8 * TESS_TABLE_SUM_WORDS)
+
 /* The values tess_table_accumulate_sum reads. */
 typedef enum TessTableSumInput
 {
@@ -545,7 +555,14 @@ typedef enum TessTableSumInput
 	/* int4 words (int2 too) */
 	TESS_TABLE_SUM_OF_INT4 = 1,
 	/* int8 words */
-	TESS_TABLE_SUM_OF_INT8 = 2
+	TESS_TABLE_SUM_OF_INT8 = 2,
+	/* partial sum states, bytea Datums of the format above */
+	TESS_TABLE_SUM_OF_STATE = 3,
+	/*
+	 * partial states of avg(int4) and avg(int2), the core's int8[] of the
+	 * count and the sum
+	 */
+	TESS_TABLE_SUM_OF_PAIR = 4
 } TessTableSumInput;
 
 /* A sum of tess_table_accumulate_sums: its column, state and rest. */
@@ -570,7 +587,13 @@ typedef struct TessTableSumArg
  * more than 18 digits or a display scale past 18, or one the sum would
  * carry to its bound, is set in that sum's rest, whose other bits are
  * cleared, for the caller to add by the core's means. One writer, as for
- * the other grouping calls.
+ * the other grouping calls. When every sum's column holds partial states
+ * (TESS_TABLE_SUM_OF_STATE, TESS_TABLE_SUM_OF_PAIR), each selected row's
+ * states merge into its record's instead, the sums added at the larger
+ * scale and the flags kept, NULL skipped; a state with a rest, or one the
+ * record's sum refuses at its bound, is set in the rest for the caller to
+ * merge, the record's state unchanged. A value of another format fails
+ * the call; so do partial states and other sums in one call.
  */
 extern TessStatusCode tess_table_accumulate_sums(const TessTableRef *table,
 												 const uint32 *offsets,

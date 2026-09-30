@@ -1183,6 +1183,290 @@ fn sum_states_accumulate_through_the_entry_point() -> Result<()> {
     Ok(())
 }
 
+/// A varlena of `body` behind a 4-byte header, or a 1-byte one.
+fn varlena(body: Vec<u8>, short: bool) -> Vec<u8> {
+    let mut out = Vec::new();
+    if short {
+        out.push((((body.len() + 1) << 1) | 1) as u8);
+    } else {
+        out.extend_from_slice(&(((body.len() + 4) as u32) << 2).to_ne_bytes());
+    }
+    out.extend(body);
+    out
+}
+
+/// A partial sum state as the node writes it, under `tag`, with `rest`
+/// bytes of a numeric rest after the words.
+fn partial_state(
+    state: tessera_kernels::decimal::SumState,
+    tag: u32,
+    short: bool,
+    rest: usize,
+) -> Vec<u8> {
+    let mut body = tag.to_ne_bytes().to_vec();
+    for word in state.to_words() {
+        body.extend_from_slice(&word.to_ne_bytes());
+    }
+    body.extend(std::iter::repeat_n(0xAB, rest));
+    varlena(body, short)
+}
+
+/// The core's int8[] pair of a partial average: one dimension of 2 from
+/// 1, no NULL bitmap, elements of type `elemtype`.
+fn partial_pair(count: i64, sum: i64, elemtype: i32) -> Vec<u8> {
+    let mut body = Vec::new();
+    for int in [1_i32, 0, elemtype, 2, 1] {
+        body.extend_from_slice(&int.to_ne_bytes());
+    }
+    body.extend_from_slice(&count.to_ne_bytes());
+    body.extend_from_slice(&sum.to_ne_bytes());
+    varlena(body, false)
+}
+
+/// Partial states through the entry point, as a final grouping calls it:
+/// the node's own states behind either header, NULL, one with a rest
+/// (to the rest), and the core's int8[] pairs of an average, merged into
+/// two groups; a value of another format, and partial states with other
+/// sums in one call, fail.
+#[test]
+fn partial_states_merge_through_the_entry_point() -> Result<()> {
+    use tessera_kernels::decimal::{Sum, SumState};
+
+    const TAG: u32 = 0x5453_4D31;
+    let state = |value: i128, scale: u32, count: u64| SumState {
+        sum: Sum {
+            value,
+            scale,
+            count,
+        },
+        ..SumState::default()
+    };
+    let nrows = 8;
+    let keys: Vec<u64> = (0..nrows as u64).map(|row| row % 2).collect();
+    let no_nulls = vec![false; nrows];
+    let key_column = DatumColumn {
+        struct_size: size_of::<DatumColumn>(),
+        values: keys.as_ptr(),
+        isnull: no_nulls.as_ptr(),
+        nrows: nrows as i32,
+        ..DatumColumn::EMPTY
+    };
+    let key = TableKey {
+        kind: 1,
+        column: &raw const key_column,
+        prepared: ptr::null(),
+    };
+    let hashes: Vec<u32> = keys
+        .iter()
+        .map(|&value| int32::murmurhash32(value as u32))
+        .collect();
+    let states = [
+        partial_state(state(1250, 2, 3), TAG, false, 0),
+        partial_state(
+            SumState {
+                nan: true,
+                ..state(-5, 1, 1)
+            },
+            TAG,
+            true,
+            0,
+        ),
+        partial_state(state(7, 3, 2), TAG, false, 0),
+        Vec::new(),
+        partial_state(state(9, 0, 1), TAG, false, 8),
+        partial_state(
+            SumState {
+                positive_infinity: true,
+                ..state(1, 0, 1)
+            },
+            TAG,
+            false,
+            0,
+        ),
+        partial_state(state(99, 0, 1), TAG, false, 0),
+        partial_state(SumState::default(), TAG, true, 0),
+    ];
+    let mut state_nulls = vec![false; nrows];
+    state_nulls[3] = true;
+    let state_datums: Vec<u64> = states.iter().map(|bytes| bytes.as_ptr() as u64).collect();
+    let state_column = DatumColumn {
+        struct_size: size_of::<DatumColumn>(),
+        values: state_datums.as_ptr(),
+        isnull: state_nulls.as_ptr(),
+        nrows: nrows as i32,
+        ..DatumColumn::EMPTY
+    };
+    let pairs = [
+        partial_pair(2, 100, 20),
+        partial_pair(1, -7, 20),
+        partial_pair(3, 30, 20),
+        Vec::new(),
+        partial_pair(1, 5, 20),
+        partial_pair(0, 0, 20),
+        partial_pair(8, 800, 20),
+        partial_pair(4, 40, 20),
+    ];
+    let pair_datums: Vec<u64> = pairs.iter().map(|bytes| bytes.as_ptr() as u64).collect();
+    let pair_column = DatumColumn {
+        struct_size: size_of::<DatumColumn>(),
+        values: pair_datums.as_ptr(),
+        isnull: state_nulls.as_ptr(),
+        nrows: nrows as i32,
+        ..DatumColumn::EMPTY
+    };
+    let mut status = Status::new();
+    // SAFETY: local buffers of the declared sizes, aliased by nothing else,
+    // throughout this test.
+    unsafe {
+        let mut table = CTable::new(1, 8 + 32 * 2, 16);
+        table.add_chunk(8192);
+        let mut pending_words = [(1 << nrows) - 1];
+        let mut pending = Mask {
+            nrows: nrows as i32,
+            bits: pending_words.as_mut_ptr(),
+        };
+        let mut inserted_words = [0];
+        let mut inserted = Mask {
+            nrows: nrows as i32,
+            bits: inserted_words.as_mut_ptr(),
+        };
+        let mut offsets = vec![0; nrows];
+        let code = tess_table_find_or_insert(
+            table.ptr(),
+            0,
+            hashes.as_ptr(),
+            1,
+            &raw const key,
+            &raw mut pending,
+            offsets.as_mut_ptr(),
+            &raw mut inserted,
+            &raw mut status,
+        );
+        assert_eq!(code, Code::Ok, "{}", status.message());
+        // Row 6 is not selected.
+        let mut selected = [0xBF_u64];
+        let rows = Mask {
+            nrows: nrows as i32,
+            bits: selected.as_mut_ptr(),
+        };
+        let mut rest_words = [[0_u64; 1]; 2];
+        let [first, second] = &mut rest_words;
+        let mut rests = [first, second].map(|words| Mask {
+            nrows: nrows as i32,
+            bits: words.as_mut_ptr(),
+        });
+        let sums: Vec<TableSumArg> = [(3, &raw const state_column), (4, &raw const pair_column)]
+            .into_iter()
+            .zip(rests.iter_mut())
+            .enumerate()
+            .map(|(sum, ((kind, column), rest))| TableSumArg {
+                kind,
+                column,
+                value_at: 8 + 32 * sum,
+                rest,
+            })
+            .collect();
+        let code = tess_table_accumulate_sums(
+            table.ptr(),
+            offsets.as_ptr(),
+            &raw const rows,
+            2,
+            sums.as_ptr(),
+            &raw mut status,
+        );
+        assert_eq!(code, Code::Ok, "{}", status.message());
+        assert_eq!(rest_words, [[1 << 4], [0]], "the state with a rest");
+        let mut two = [0b11_u64];
+        let groups = Mask {
+            nrows: 2,
+            bits: two.as_mut_ptr(),
+        };
+        let found = |sum: usize, status: &mut Status| -> [SumState; 2] {
+            let mut words = [[0_u64; 2]; 4];
+            for (word, out) in words.iter_mut().enumerate() {
+                assert_eq!(
+                    tess_table_gather(
+                        table.ptr(),
+                        offsets.as_ptr(),
+                        &raw const groups,
+                        8 + 32 * sum + 8 * word,
+                        out.as_mut_ptr(),
+                        status
+                    ),
+                    Code::Ok
+                );
+            }
+            std::array::from_fn(|group| {
+                SumState::from_words(std::array::from_fn(|word| words[word][group]))
+            })
+        };
+        assert_eq!(
+            found(0, &mut status),
+            [
+                state(12507, 3, 5),
+                SumState {
+                    nan: true,
+                    positive_infinity: true,
+                    ..state(5, 1, 2)
+                }
+            ]
+        );
+        assert_eq!(found(1, &mut status), [state(135, 0, 6), state(33, 0, 5)]);
+        // Another tag, a scale past 18, another element type, and a term
+        // among the states.
+        for (bytes, kind) in [
+            (partial_state(state(1, 0, 1), TAG + 1, false, 0), 3),
+            (partial_state(state(1, 25, 1), TAG, false, 0), 3),
+            (partial_pair(1, 1, 23), 4),
+        ] {
+            let datums = vec![bytes.as_ptr() as u64; nrows];
+            let column = DatumColumn {
+                values: datums.as_ptr(),
+                ..state_column
+            };
+            let arg = TableSumArg {
+                kind,
+                column: &raw const column,
+                value_at: 8,
+                rest: rests.as_mut_ptr(),
+            };
+            let code = tess_table_accumulate_sums(
+                table.ptr(),
+                offsets.as_ptr(),
+                &raw const rows,
+                1,
+                &raw const arg,
+                &raw mut status,
+            );
+            assert_ne!(code, Code::Ok, "kind {kind}");
+        }
+        let mixed = [
+            TableSumArg {
+                kind: 3,
+                column: &raw const state_column,
+                value_at: 8,
+                rest: rests.as_mut_ptr(),
+            },
+            TableSumArg {
+                kind: 1,
+                column: &raw const key_column,
+                value_at: 40,
+                rest: rests.as_mut_ptr().add(1),
+            },
+        ];
+        let code = tess_table_accumulate_sums(
+            table.ptr(),
+            offsets.as_ptr(),
+            &raw const rows,
+            2,
+            mixed.as_ptr(),
+            &raw mut status,
+        );
+        assert_ne!(code, Code::Ok, "partial states with terms");
+    }
+    Ok(())
+}
+
 #[test]
 fn the_writer_entry_points_round_trip() -> Result<()> {
     let values: Vec<u64> = (0..100_i64).map(|row| (row % 10) as u64).collect();

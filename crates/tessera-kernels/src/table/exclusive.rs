@@ -10,7 +10,7 @@
 use anyhow::{Result, ensure};
 use tessera_core::{ColumnReader, RowMask, RowMaskView};
 
-use crate::decimal::{self, SumState, Term, Terms};
+use crate::decimal::{self, Partial, Partials, SumState, Term, Terms};
 use crate::ops::ArithmeticError;
 
 use super::Partitions;
@@ -628,10 +628,10 @@ where
 pub const MAX_SUMS: usize = 32;
 
 /// A sum or an average whose [`SumState`] a record keeps at byte `at` of
-/// its payload, the terms of its rows, and the mask of the rows it leaves
-/// to the caller.
+/// its payload, the terms of its rows ([`Terms`], or their partial states,
+/// [`Partials`]), and the mask of the rows it leaves to the caller.
 pub struct SumSlot<'a, T: ?Sized> {
-    /// The rows' terms.
+    /// The rows' terms or partial states.
     pub terms: &'a T,
     /// The state's first byte in the payload.
     pub at: usize,
@@ -884,6 +884,70 @@ pub(super) fn sum_terms<R: Region, T: Terms>(
                 let term = sum.terms.term(row);
                 if !matches!(term, Term::Null) && !fold_term(payload, sum.at, term)? {
                     *other |= 1 << bit;
+                }
+            }
+        }
+        for (sum, &other) in sums.iter_mut().zip(others.iter()) {
+            sum.rest.set_word(index, other)?;
+        }
+    }
+    Ok(())
+}
+
+/// Merge each selected row's partial states into the [`SumState`]s of its
+/// record's payload ([`SumState::merge`]), the record found once a row:
+/// NULL skipped, a state left to the caller ([`Partial::Other`]) or one
+/// whose sum the record's refuses at its bound set in that sum's rest, the
+/// record's state unchanged. A final grouping's rows come a group's partial
+/// state from each participant, the groups of a batch from one: its rows
+/// are not added up by group first, as [`sum_terms`] adds up terms.
+pub(super) fn sum_partials<R: Region, P: Partials>(
+    region: &R,
+    layout: &Layout,
+    offsets: &[u32],
+    rows: &RowMaskView<'_>,
+    sums: &mut [SumSlot<'_, P>],
+) -> Result<()> {
+    let nrows = rows.nrows();
+    let nsums = sums.len();
+    ensure!(nsums <= MAX_SUMS, "{nsums} sums in a call, past {MAX_SUMS}");
+    for sum in sums.iter() {
+        let words: [usize; SumState::WORDS] = std::array::from_fn(|word| sum.at + 8 * word);
+        check_accumulate(layout, offsets.len(), nrows, &words)?;
+        ensure!(
+            sum.rest.as_view().nrows() == nrows,
+            "the rest and the selection of a sum have different row counts"
+        );
+    }
+    let mut access = Access::new(region, layout);
+    let mut others = [0_u64; MAX_SUMS];
+    for index in 0..nrows.div_ceil(64) {
+        others[..nsums].fill(0);
+        let mut look = rows.word(index).unwrap();
+        while look != 0 {
+            let bit = look.trailing_zeros() as usize;
+            look &= look - 1;
+            let row = index * 64 + bit;
+            let payload = payload_at(&mut access, region, layout, offsets[row])?;
+            for (sum, other) in sums.iter().zip(others.iter_mut()) {
+                let state = match sum.terms.partial(row)? {
+                    Partial::Null => continue,
+                    Partial::State(state) => state,
+                    Partial::Other => {
+                        *other |= 1 << bit;
+                        continue;
+                    }
+                };
+                let slots: &mut [u8; 8 * SumState::WORDS] =
+                    (&mut payload[sum.at..sum.at + 8 * SumState::WORDS]).try_into()?;
+                let mut ours =
+                    SumState::from_words(std::array::from_fn(|word| read_word(slots, 8 * word)));
+                if !ours.merge(state) {
+                    *other |= 1 << bit;
+                    continue;
+                }
+                for (word, value) in ours.to_words().into_iter().enumerate() {
+                    write_word(slots, 8 * word, value);
                 }
             }
         }
