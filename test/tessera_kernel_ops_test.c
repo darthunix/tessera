@@ -214,7 +214,10 @@ tessera_test_foreign_table_format(PG_FUNCTION_ARGS)
 
 /*
  * A failed kernel call through the table, reported with the SQLSTATE and
- * message it stored (0), and a status naming another SQLSTATE (1).
+ * message it stored (0), a status naming another SQLSTATE (1), a status
+ * that reports success, though it holds a SQLSTATE (2), and one whose
+ * SQLSTATE is not five characters of [0-9A-Z] (3): the last two raise
+ * XX000.
  */
 Datum
 tessera_test_status_report(PG_FUNCTION_ARGS)
@@ -228,10 +231,21 @@ tessera_test_status_report(PG_FUNCTION_ARGS)
 		if (kernels.table_size(0, &kind, 8, 10, &size, &status) == TESS_OK)
 			elog(ERROR, "Tessera test sized a table without keys");
 	}
-	else
+	else if (PG_GETARG_INT32(0) == 1)
 	{
 		status.code = TESS_ERROR_DIVISION_BY_ZERO;
 		strlcpy(status.sqlstate, "22012", sizeof(status.sqlstate));
+		strlcpy(status.message, "division by zero", sizeof(status.message));
+	}
+	else if (PG_GETARG_INT32(0) == 2)
+	{
+		strlcpy(status.sqlstate, "22012", sizeof(status.sqlstate));
+		strlcpy(status.message, "division by zero", sizeof(status.message));
+	}
+	else if (PG_GETARG_INT32(0) == 3)
+	{
+		status.code = TESS_ERROR_DATA_EXCEPTION;
+		strlcpy(status.sqlstate, "22a12", sizeof(status.sqlstate));
 		strlcpy(status.message, "division by zero", sizeof(status.message));
 	}
 	tess_status_report(&status);

@@ -51,7 +51,7 @@ ERROR:  Tessera equivalent has no evaluate callback
 SELECT tessera_test_invalid_function(11);
 ERROR:  incompatible Tessera function ABI
 SELECT tessera_test_duplicate_function();
-ERROR:  Tessera function float8pl(double precision,double precision) is already registered
+ERROR:  Tessera function with OID 218 is already registered
 \set VERBOSITY default
 DROP FUNCTION tessera_test_duplicate_function();
 DROP FUNCTION tessera_test_invalid_function(integer);

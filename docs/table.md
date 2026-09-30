@@ -161,10 +161,14 @@ its length, for planning and `EXPLAIN`.
 Every call attaches anew and checks the whole header: the magic and the
 version, the sizes, that the buckets are a power of two inside the
 index; and the chunks: aligned, at most 1 MiB, a multiple of 8. Every
-reference a call follows is checked against its chunk's number, length
-and used mark and the record length, and a chain is walked at most as
-many steps as there are records. A corrupt table is therefore a status,
-never a crash or a hang. `tess_table_format_version` and
+reference a call follows is checked against its chunk's number and
+length and the record length, and a chain is walked at most as many
+steps as there are records. A corrupt table is therefore a status,
+never a crash or a hang. The used mark is not a bound: references come
+from calls over the same table, and reading the mark would race with the
+participants appending to a shared table, so a reference past it reads
+the chunk's unused bytes, never memory outside the chunk (plan 4.24,
+review item 12). `tess_table_format_version` and
 `tess_table_layout` let a C test compare the format and the structures
 with what the library was built with.
 

@@ -243,7 +243,9 @@ node; a planner hook asks before it offers a path that needs them, and
 the executor asks again. A node module thus calls the hashes and the hash
 table (`docs/table.md`) without linking Rust. `tess_status_report(status)`
 raises the `ERROR` a failed kernel call stored in its `TessStatus`, with
-its SQLSTATE and message, after the call returned.
+its SQLSTATE and message, after the call returned; a status that reports
+success or holds no five-character SQLSTATE of `[0-9A-Z]` raises `XX000`
+`Tessera call failed without a valid status` instead.
 
 ## Reading batches from a child
 

@@ -28,6 +28,11 @@
  * in units of 8 bytes; 0 is none. Records never move: a chunk fills and
  * the caller adds another, and when the records outgrow the buckets only
  * the index is made anew over the same chunks (tess_table_regrow).
+ * A reference is checked against its chunk's length, not the chunk's used
+ * mark: a caller passes only references that calls over the same table
+ * returned, and reading the mark would race with participants appending to
+ * a shared table; a reference past the mark reads the chunk's unused bytes,
+ * never memory outside the chunk.
  * A batch brings its hashes (from tess_int4_hash, tess_int8_hash and their
  * _next forms, which apply the NULL policy), its keys as Datum columns and
  * a row mask. An int8 inside the int4 range hashes as the int4, so int4

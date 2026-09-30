@@ -158,9 +158,9 @@ pub(super) trait Spill: Words {
     fn add_bytes(&self, delta: i64, partition: Option<u32>) -> Result<bool> {
         if let Some(partition) = partition {
             self.check_partition(partition)?;
-            self.add_signed(self.part(partition, 0), delta);
+            self.add_signed(self.part(partition, 0), delta)?;
         }
-        let total = self.add_signed(1, delta);
+        let total = self.add_signed(1, delta)?;
         Ok(total > self.load(2))
     }
 
@@ -255,13 +255,21 @@ pub(super) trait Spill: Words {
         HEAD_WORDS + PART_WORDS * partition as usize + field
     }
 
-    /// Add a signed delta to a counter; the new value.
-    fn add_signed(&self, index: usize, delta: i64) -> u64 {
+    /// Add a signed delta to a counter; the new value. Callers take away
+    /// only what they added, so a counter below zero is an error of the
+    /// accounting, reported rather than wrapped; the counter is then left
+    /// wrapped, and the query fails with it.
+    fn add_signed(&self, index: usize, delta: i64) -> Result<u64> {
+        let amount = delta.unsigned_abs();
         if delta >= 0 {
-            self.fetch_add(index, delta as u64) + delta as u64
-        } else {
-            self.fetch_sub(index, delta.unsigned_abs()) - delta.unsigned_abs()
+            return Ok(self.fetch_add(index, amount) + amount);
         }
+        let before = self.fetch_sub(index, amount);
+        ensure!(
+            before >= amount,
+            "a spill counter went below zero: {before} bytes less {amount}"
+        );
+        Ok(before - amount)
     }
 
     fn check_partition(&self, partition: u32) -> Result<()> {
@@ -386,5 +394,25 @@ mod tests {
         assert_eq!(spill.records(0).unwrap(), 7);
         let starts: Vec<u32> = (0..5).map(|_| spill.start()).collect();
         assert_eq!(starts, [0, 1, 2, 3, 0]);
+    }
+
+    #[test]
+    fn a_counter_never_goes_below_zero() {
+        let mut words = Vec::new();
+        let spill = spill(&mut words, 4, 100);
+        spill.add_bytes(10, None).unwrap();
+        assert!(spill.add_bytes(-10, None).is_ok(), "down to zero");
+        assert_eq!(spill.bytes(), 0);
+        spill.add_bytes(10, None).unwrap();
+        let error = spill.add_bytes(-20, None).unwrap_err();
+        assert!(error.to_string().contains("below zero"), "{error}");
+        let spill = self::spill(&mut words, 4, 100);
+        spill.split(4).unwrap();
+        spill.add_bytes(50, Some(0)).unwrap();
+        spill.add_bytes(10, Some(1)).unwrap();
+        assert!(
+            spill.add_bytes(-20, Some(1)).is_err(),
+            "a partition's bytes, while the table's total still covers them"
+        );
     }
 }

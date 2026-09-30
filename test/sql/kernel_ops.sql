@@ -48,8 +48,13 @@ SELECT tessera_test_kernel_registry() AS kernel_registry_after \gset
 \set VERBOSITY sqlstate
 SELECT tessera_test_status_report(0);
 SELECT tessera_test_status_report(1);
+SELECT tessera_test_status_report(2);
+SELECT tessera_test_status_report(3);
 \set VERBOSITY terse
 SELECT tessera_test_status_report(1);
+-- Neither a success nor a malformed SQLSTATE is reported as is.
+SELECT tessera_test_status_report(2);
+SELECT tessera_test_status_report(3);
 \set VERBOSITY default
 
 DROP FUNCTION tessera_test_status_report(integer);

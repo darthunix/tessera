@@ -173,6 +173,11 @@ impl<'r, R: Region> Access<'r, R> {
     /// Where the record at `offset` lies, which must be within its chunk
     /// past the used mark's word; the first half of [`Self::locate`], which
     /// reads nothing of the record, so that a caller can prefetch it.
+    ///
+    /// The bound is the chunk's length, not its used mark: references come
+    /// from calls over the same table, and reading the mark would race with
+    /// the participants appending to a shared table. A reference past the
+    /// mark reads the chunk's unused bytes, never memory outside it.
     #[inline(always)]
     pub(super) fn place(&self, offset: u32) -> Result<Place> {
         let (chunk, byte) = placement(offset);

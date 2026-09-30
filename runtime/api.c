@@ -77,14 +77,39 @@ tess_runtime_kernels(void)
 	return ops;
 }
 
+/* Whether a status is a failure with a five-character SQLSTATE of [0-9A-Z]. */
+static bool
+status_valid(const TessStatus *status)
+{
+	if (status->code == TESS_OK)
+		return false;
+	for (int i = 0; i < 5; i++)
+	{
+		char		c = status->sqlstate[i];
+
+		if (!((c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z')))
+			return false;
+	}
+	return true;
+}
+
+/*
+ * A status that is not a failure with a valid SQLSTATE, a caller's or a
+ * kernel's mistake, still raises an ERROR, XX000, rather than a code made of
+ * whatever the status holds.
+ */
 void
 tess_status_report(const TessStatus *status)
 {
 	const char *sqlstate = status->sqlstate;
 
+	if (!status_valid(status))
+		ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("Tessera call failed without a valid status")));
 	ereport(ERROR,
 			(errcode(MAKE_SQLSTATE(sqlstate[0], sqlstate[1], sqlstate[2],
 								   sqlstate[3], sqlstate[4])),
-			 errmsg("%s", status->message)));
+			 errmsg("%.*s", TESS_STATUS_MESSAGE_SIZE, status->message)));
 	pg_unreachable();
 }

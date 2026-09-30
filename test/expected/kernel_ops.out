@@ -49,9 +49,18 @@ SELECT tessera_test_status_report(0);
 ERROR:  XX000
 SELECT tessera_test_status_report(1);
 ERROR:  22012
+SELECT tessera_test_status_report(2);
+ERROR:  XX000
+SELECT tessera_test_status_report(3);
+ERROR:  XX000
 \set VERBOSITY terse
 SELECT tessera_test_status_report(1);
 ERROR:  division by zero
+-- Neither a success nor a malformed SQLSTATE is reported as is.
+SELECT tessera_test_status_report(2);
+ERROR:  Tessera call failed without a valid status
+SELECT tessera_test_status_report(3);
+ERROR:  Tessera call failed without a valid status
 \set VERBOSITY default
 DROP FUNCTION tessera_test_status_report(integer);
 DROP FUNCTION tessera_test_foreign_table_format();

@@ -2,7 +2,6 @@
 
 #include "nodes/pg_list.h"
 #include "utils/memutils.h"
-#include "utils/regproc.h"
 
 #include "internal.h"
 
@@ -82,10 +81,14 @@ add_function(const TessFunction *function)
 			continue;
 		if (existing == function)
 			return;
+		/*
+		 * The OID only: registration runs in _PG_init, in the postmaster
+		 * too, where the catalog cannot be read to name the function.
+		 */
 		ereport(ERROR,
 				(errcode(ERRCODE_DUPLICATE_OBJECT),
-				 errmsg("Tessera function %s is already registered",
-						format_procedure(function->funcid))));
+				 errmsg("Tessera function with OID %u is already registered",
+						function->funcid)));
 	}
 
 	oldcontext = MemoryContextSwitchTo(TopMemoryContext);
