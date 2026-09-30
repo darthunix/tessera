@@ -21,6 +21,23 @@ use std::{
     time::Instant,
 };
 
+/// The benchmarks of tessera-capi (its `[[bench]]` targets), in the order a full run takes them.
+const BENCHES: [&str; 13] = [
+    "column_reader",
+    "filter_int32",
+    "compare_int32",
+    "aggregate_int32",
+    "arith_int32",
+    "hash_int32",
+    "filter_int64",
+    "arith_int64",
+    "aggregate_int64",
+    "hash_int64",
+    "cast_int32",
+    "table_int32",
+    "table_large",
+];
+
 #[derive(Parser, Debug)]
 #[command(
     about = "Compare compatible Rust revisions by PMU counters (before/after per case, repeated).",
@@ -31,7 +48,7 @@ struct Options {
     base: String,
     #[arg(long, value_name = "REF", default_value = "WORKTREE")]
     candidate: String,
-    #[arg(long, value_parser = ["column_reader", "filter_int32", "compare_int32", "aggregate_int32", "arith_int32", "hash_int32", "filter_int64", "arith_int64", "aggregate_int64", "hash_int64", "cast_int32", "table_int32", "table_large"])]
+    #[arg(long, value_parser = clap::builder::PossibleValuesParser::new(BENCHES))]
     bench: Option<String>,
     #[arg(long, value_name = "SUBSTRING")]
     filter: Vec<String>,
@@ -341,26 +358,10 @@ fn compare(repo: &Path, root: &Path, options: &Options, timing: &mut Timing) -> 
             "cycle_fail":report::CYCLE_FAIL,"cycle_fail_cycles":report::CYCLE_FAIL_CYCLES,
             "modes_limit":report::MODES_LIMIT}}),
     )?;
-    let benches: Vec<_> = options.bench.as_deref().map_or_else(
-        || {
-            vec![
-                "column_reader",
-                "filter_int32",
-                "compare_int32",
-                "aggregate_int32",
-                "arith_int32",
-                "hash_int32",
-                "filter_int64",
-                "arith_int64",
-                "aggregate_int64",
-                "hash_int64",
-                "cast_int32",
-                "table_int32",
-                "table_large",
-            ]
-        },
-        |bench| vec![bench],
-    );
+    let benches: Vec<_> = options
+        .bench
+        .as_deref()
+        .map_or_else(|| BENCHES.to_vec(), |bench| vec![bench]);
     // Finish every build and listing before starting any measuring process.
     let mut binaries = Binaries::new();
     let mut cases = Vec::new();
@@ -478,6 +479,23 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_benchmarks_are_the_targets_of_tessera_capi() {
+        let manifest = include_str!("../../../crates/tessera-capi/Cargo.toml");
+        let targets: BTreeSet<_> = manifest
+            .split("[[bench]]")
+            .skip(1)
+            .map(|target| {
+                let name = target
+                    .lines()
+                    .find_map(|line| line.trim().strip_prefix("name = "));
+                name.expect("a bench target has a name").trim_matches('"')
+            })
+            .collect();
+        assert_eq!(targets, BENCHES.into_iter().collect::<BTreeSet<_>>());
+        assert_eq!(targets.len(), BENCHES.len(), "each benchmark once");
+    }
 
     #[test]
     fn cli_requires_a_baseline_and_bounds_the_selected_benchmarks() {
