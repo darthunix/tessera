@@ -1,7 +1,6 @@
 #include "postgres.h"
 
 #include "nodes/pg_list.h"
-#include "utils/memutils.h"
 
 #include "internal.h"
 
@@ -38,44 +37,28 @@ validate_node(const TessNode *node)
 		elog(ERROR, "Tessera node must have a name");
 }
 
+/* Whether a registered node has the name. */
+static bool
+same_name(const void *entry, const void *name)
+{
+	return strcmp(((const TessNode *) entry)->name, name) == 0;
+}
+
 static void
 add_node(const TessNode *node)
 {
-	MemoryContext oldcontext;
-
 	validate_node(node);
-	foreach_ptr(const TessNode, existing, nodes)
-	{
-		if (strcmp(existing->name, node->name) != 0)
-			continue;
-		if (existing == node)
-			return;
+	if (!tess_registry_add(&nodes, node, same_name, node->name))
 		ereport(ERROR,
 				(errcode(ERRCODE_DUPLICATE_OBJECT),
 				 errmsg("Tessera node \"%s\" is already registered",
 						node->name)));
-	}
-
-	oldcontext = MemoryContextSwitchTo(TopMemoryContext);
-	nodes = lappend(nodes, (void *) node);
-	MemoryContextSwitchTo(oldcontext);
 }
 
 static void
 remove_node(const TessNode *node)
 {
-	ListCell   *cell;
-
-	if (node == NULL)
-		return;
-	foreach(cell, nodes)
-	{
-		if (lfirst(cell) == node)
-		{
-			nodes = foreach_delete_current(nodes, cell);
-			return;
-		}
-	}
+	tess_registry_remove(&nodes, node);
 }
 
 static const TessNode *
@@ -83,10 +66,5 @@ find_node(const char *name)
 {
 	if (name == NULL || name[0] == '\0')
 		return NULL;
-	foreach_ptr(const TessNode, node, nodes)
-	{
-		if (strcmp(node->name, name) == 0)
-			return node;
-	}
-	return NULL;
+	return tess_registry_find(nodes, same_name, name);
 }

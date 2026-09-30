@@ -1,5 +1,5 @@
 MODULE_big = tessera
-OBJS = binding.o bridge.o function.o kernel.o node.o source.o
+OBJS = binding.o bridge.o function.o kernel.o node.o registry.o source.o
 PG_CPPFLAGS = -I$(srcdir)/../include
 
 EXTENSION = tessera

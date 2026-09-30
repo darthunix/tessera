@@ -1,7 +1,6 @@
 #include "postgres.h"
 
 #include "nodes/pg_list.h"
-#include "utils/memutils.h"
 
 #include "internal.h"
 
@@ -69,48 +68,32 @@ validate_function(const TessFunction *function)
 		elog(ERROR, "Tessera function must be strict");
 }
 
+/* Whether a registered function implements the OID. */
+static bool
+same_funcid(const void *entry, const void *funcid)
+{
+	return ((const TessFunction *) entry)->funcid == *(const Oid *) funcid;
+}
+
 static void
 add_function(const TessFunction *function)
 {
-	MemoryContext oldcontext;
-
 	validate_function(function);
-	foreach_ptr(const TessFunction, existing, functions)
-	{
-		if (existing->funcid != function->funcid)
-			continue;
-		if (existing == function)
-			return;
-		/*
-		 * The OID only: registration runs in _PG_init, in the postmaster
-		 * too, where the catalog cannot be read to name the function.
-		 */
+	/*
+	 * The OID only: registration runs in _PG_init, in the postmaster too,
+	 * where the catalog cannot be read to name the function.
+	 */
+	if (!tess_registry_add(&functions, function, same_funcid, &function->funcid))
 		ereport(ERROR,
 				(errcode(ERRCODE_DUPLICATE_OBJECT),
 				 errmsg("Tessera function with OID %u is already registered",
 						function->funcid)));
-	}
-
-	oldcontext = MemoryContextSwitchTo(TopMemoryContext);
-	functions = lappend(functions, (void *) function);
-	MemoryContextSwitchTo(oldcontext);
 }
 
 static void
 remove_function(const TessFunction *function)
 {
-	ListCell   *cell;
-
-	if (function == NULL)
-		return;
-	foreach(cell, functions)
-	{
-		if (lfirst(cell) == function)
-		{
-			functions = foreach_delete_current(functions, cell);
-			return;
-		}
-	}
+	tess_registry_remove(&functions, function);
 }
 
 /*
@@ -123,10 +106,5 @@ find_function(Oid funcid)
 {
 	if (!OidIsValid(funcid))
 		return NULL;
-	foreach_ptr(const TessFunction, function, functions)
-	{
-		if (function->funcid == funcid)
-			return function;
-	}
-	return NULL;
+	return tess_registry_find(functions, same_funcid, &funcid);
 }
