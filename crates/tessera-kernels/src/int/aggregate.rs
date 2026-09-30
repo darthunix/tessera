@@ -56,7 +56,10 @@ pub(crate) fn max<T: IntLane, C: ColumnReader<Value = T>>(
 
 /// Run one aggregate: `fold` takes a row's value, `block` a whole word with
 /// its selection. The first word decides the strategy for the call; deciding
-/// once keeps the loops free of per-word bookkeeping.
+/// once keeps the loops free of per-word bookkeeping. Inlined into its
+/// caller, as it was when each family had its own: called, it returned the
+/// count and the result through memory, 13 more instructions a call.
+#[inline(always)]
 pub(crate) fn aggregate<T: IntLane, C: ColumnReader<Value = T>, B: Copy>(
     column: &C,
     rows: &RowMaskView<'_>,
