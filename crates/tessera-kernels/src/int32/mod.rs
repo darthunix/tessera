@@ -28,6 +28,9 @@ pub(crate) use crate::BULK_MIN_ROWS;
 use tessera_core::WordBlock;
 
 impl crate::int::IntLane for i32 {
+    const MIN: i32 = i32::MIN;
+    const MAX: i32 = i32::MAX;
+
     #[inline(always)]
     fn from_datum(word: u64) -> i32 {
         word as i32
@@ -68,6 +71,42 @@ impl crate::int::IntLane for i32 {
         #[cfg(not(all(target_arch = "aarch64", not(miri))))]
         {
             let _ = (block, scalar, op);
+            unreachable!("no whole-word kernels on this target")
+        }
+    }
+
+    #[inline]
+    fn min_block(block: WordBlock<'_, Self>, selected: u64) -> (usize, i32) {
+        #[cfg(all(target_arch = "aarch64", not(miri)))]
+        {
+            let mask = crate::int::present(&block, selected);
+            let least = match block {
+                WordBlock::Dense { values, .. } => crate::simd::min_dense(values, mask),
+                WordBlock::Datum { values, .. } => crate::simd::min_datum(values, mask),
+            };
+            (mask.count_ones() as usize, least)
+        }
+        #[cfg(not(all(target_arch = "aarch64", not(miri))))]
+        {
+            let _ = (block, selected);
+            unreachable!("no whole-word kernels on this target")
+        }
+    }
+
+    #[inline]
+    fn max_block(block: WordBlock<'_, Self>, selected: u64) -> (usize, i32) {
+        #[cfg(all(target_arch = "aarch64", not(miri)))]
+        {
+            let mask = crate::int::present(&block, selected);
+            let greatest = match block {
+                WordBlock::Dense { values, .. } => crate::simd::max_dense(values, mask),
+                WordBlock::Datum { values, .. } => crate::simd::max_datum(values, mask),
+            };
+            (mask.count_ones() as usize, greatest)
+        }
+        #[cfg(not(all(target_arch = "aarch64", not(miri))))]
+        {
+            let _ = (block, selected);
             unreachable!("no whole-word kernels on this target")
         }
     }

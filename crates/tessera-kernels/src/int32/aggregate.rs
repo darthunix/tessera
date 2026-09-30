@@ -21,9 +21,7 @@
 //! branch, so the accumulator's dependency chain stays short.
 
 use anyhow::Result;
-use tessera_core::{ColumnReader, RowMaskView, WordBlock};
-
-use super::BULK_MIN_ROWS;
+use tessera_core::{ColumnReader, RowMaskView};
 
 /// Sum the selected non-NULL values as int8, `None` without any.
 ///
@@ -47,7 +45,7 @@ pub fn sum<C: ColumnReader<Value = i32>>(
     column: &C,
     rows: &RowMaskView<'_>,
 ) -> Result<Option<i64>> {
-    let (count, total) = aggregate(
+    let (count, total) = crate::int::aggregate(
         column,
         rows,
         (0_usize, 0_i64),
@@ -87,23 +85,7 @@ pub fn min<C: ColumnReader<Value = i32>>(
     column: &C,
     rows: &RowMaskView<'_>,
 ) -> Result<Option<i32>> {
-    // A NULL row contributes the identity of the operation.
-    let (count, least) = aggregate(
-        column,
-        rows,
-        (0_usize, i32::MAX),
-        |(count, least), value| {
-            (
-                count + usize::from(value.is_some()),
-                least.min(value.unwrap_or(i32::MAX)),
-            )
-        },
-        |(count, least), block, selected| {
-            let (present, part) = bulk::min(block, selected);
-            (count + present, least.min(part))
-        },
-    )?;
-    Ok((count > 0).then_some(least))
+    crate::int::min(column, rows)
 }
 
 /// The greatest selected non-NULL value, `None` without any.
@@ -115,94 +97,17 @@ pub fn max<C: ColumnReader<Value = i32>>(
     column: &C,
     rows: &RowMaskView<'_>,
 ) -> Result<Option<i32>> {
-    let (count, greatest) = aggregate(
-        column,
-        rows,
-        (0_usize, i32::MIN),
-        |(count, greatest), value| {
-            (
-                count + usize::from(value.is_some()),
-                greatest.max(value.unwrap_or(i32::MIN)),
-            )
-        },
-        |(count, greatest), block, selected| {
-            let (present, part) = bulk::max(block, selected);
-            (count + present, greatest.max(part))
-        },
-    )?;
-    Ok((count > 0).then_some(greatest))
+    crate::int::max(column, rows)
 }
 
-/// Run one aggregate: `fold` takes a row's value, `block` a whole word with
-/// its selection. The first word decides the strategy for the call; deciding
-/// once keeps the loops free of per-word bookkeeping.
-fn aggregate<C: ColumnReader<Value = i32>, B: Copy>(
-    column: &C,
-    rows: &RowMaskView<'_>,
-    init: B,
-    mut fold: impl FnMut(B, Option<i32>) -> B,
-    block: impl for<'a> FnMut(B, WordBlock<'a, i32>, u64) -> B,
-) -> Result<B> {
-    let bulk = cfg!(all(target_arch = "aarch64", not(miri)))
-        && rows.nrows() >= 64
-        && rows.word(0).is_some_and(|selected| {
-            (selected == u64::MAX
-                || (!selected.is_power_of_two() && selected.count_ones() >= BULK_MIN_ROWS))
-                && column.word_block(0).is_some()
-        });
-    if bulk {
-        aggregate_bulk(column, rows, init, fold, block)
-    } else {
-        column.try_fold_selected(rows, init, |acc, _, value| Ok(fold(acc, value)))
-    }
-}
-
-/// Whole words where the reader exposes them; single rows through `get`,
-/// the tail and refused words through the word iterator's bulk fold.
-#[inline(never)]
-fn aggregate_bulk<C: ColumnReader<Value = i32>, B: Copy>(
-    column: &C,
-    rows: &RowMaskView<'_>,
-    init: B,
-    mut fold: impl FnMut(B, Option<i32>) -> B,
-    mut block: impl for<'a> FnMut(B, WordBlock<'a, i32>, u64) -> B,
-) -> Result<B> {
-    let mut acc = init;
-    for index in 0..rows.nrows().div_ceil(64) {
-        let selected = rows.word(index).unwrap();
-        if selected == 0 {
-            continue;
-        }
-        if selected.is_power_of_two() {
-            let row = index * 64 + selected.trailing_zeros() as usize;
-            acc = fold(acc, column.get(row)?);
-        } else if let Some(word) = column.word_block(index) {
-            acc = block(acc, word, selected);
-        } else {
-            acc = column
-                .word_values(index, selected)?
-                .fold(acc, |acc, (_, value)| fold(acc, value));
-        }
-    }
-    Ok(acc)
-}
-
-/// Whole-word kernels: the present rows of a word are its selected non-NULL
-/// rows, and each kernel returns their count with its result. Inlined into
-/// the generic loop so that the block stays in registers.
+/// The whole-word sum: the present rows of a word are its selected
+/// non-NULL rows, and the kernel returns their count with its result.
 #[cfg(all(target_arch = "aarch64", not(miri)))]
 mod bulk {
     use tessera_core::WordBlock;
 
+    use crate::int::present;
     use crate::simd;
-
-    #[inline(always)]
-    fn present(block: &WordBlock<'_, i32>, selected: u64) -> u64 {
-        match block {
-            WordBlock::Dense { non_nulls, .. } => selected & non_nulls,
-            WordBlock::Datum { isnull, .. } => selected & simd::non_null_bits(isnull),
-        }
-    }
 
     #[inline]
     pub fn sum(block: WordBlock<'_, i32>, selected: u64) -> (usize, i64) {
@@ -213,43 +118,15 @@ mod bulk {
         };
         (mask.count_ones() as usize, total)
     }
-
-    #[inline]
-    pub fn min(block: WordBlock<'_, i32>, selected: u64) -> (usize, i32) {
-        let mask = present(&block, selected);
-        let least = match block {
-            WordBlock::Dense { values, .. } => simd::min_dense(values, mask),
-            WordBlock::Datum { values, .. } => simd::min_datum(values, mask),
-        };
-        (mask.count_ones() as usize, least)
-    }
-
-    #[inline]
-    pub fn max(block: WordBlock<'_, i32>, selected: u64) -> (usize, i32) {
-        let mask = present(&block, selected);
-        let greatest = match block {
-            WordBlock::Dense { values, .. } => simd::max_dense(values, mask),
-            WordBlock::Datum { values, .. } => simd::max_datum(values, mask),
-        };
-        (mask.count_ones() as usize, greatest)
-    }
 }
 
-/// Without vector code no call takes the whole-word path; these keep the
-/// callers compiling and are never reached.
+/// Without vector code no call takes the whole-word path; this keeps the
+/// caller compiling and is never reached.
 #[cfg(not(all(target_arch = "aarch64", not(miri))))]
 mod bulk {
     use tessera_core::WordBlock;
 
     pub fn sum(_: WordBlock<'_, i32>, _: u64) -> (usize, i64) {
-        unreachable!("no whole-word kernels on this target")
-    }
-
-    pub fn min(_: WordBlock<'_, i32>, _: u64) -> (usize, i32) {
-        unreachable!("no whole-word kernels on this target")
-    }
-
-    pub fn max(_: WordBlock<'_, i32>, _: u64) -> (usize, i32) {
         unreachable!("no whole-word kernels on this target")
     }
 }

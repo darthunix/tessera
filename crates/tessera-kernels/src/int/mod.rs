@@ -11,9 +11,13 @@
 //! [`crate::int32`] and [`crate::int64`] keep the public entry points, each
 //! a call of the driver for its width.
 
+mod aggregate;
 mod compare;
 mod filter;
 
+#[cfg(all(target_arch = "aarch64", not(miri)))]
+pub(crate) use aggregate::present;
+pub(crate) use aggregate::{aggregate, max, min};
 pub(crate) use compare::compare_columns;
 pub(crate) use filter::filter;
 
@@ -46,6 +50,10 @@ impl<T: IntLane> Side<'_, T> {
 /// where the drivers found whole words, on AArch64; elsewhere it is never
 /// called.
 pub(crate) trait IntLane: Copy + Ord + core::fmt::Debug + 'static {
+    /// The least and the greatest value, the identities of `max` and `min`.
+    const MIN: Self;
+    const MAX: Self;
+
     /// The value a Datum holds: its low 32 bits for int4, as
     /// `DatumGetInt32`, its whole word for int8, as `DatumGetInt64`.
     fn from_datum(word: u64) -> Self;
@@ -63,4 +71,12 @@ pub(crate) trait IntLane: Copy + Ord + core::fmt::Debug + 'static {
 
     /// The non-NULL rows of a whole word where `value op scalar`.
     fn filter_block(block: WordBlock<'_, Self>, scalar: Self, op: CompareOp) -> u64;
+
+    /// The count of a whole word's selected non-NULL rows and the least of
+    /// them, `MAX` without any.
+    fn min_block(block: WordBlock<'_, Self>, selected: u64) -> (usize, Self);
+
+    /// The count of a whole word's selected non-NULL rows and the greatest
+    /// of them, `MIN` without any.
+    fn max_block(block: WordBlock<'_, Self>, selected: u64) -> (usize, Self);
 }
