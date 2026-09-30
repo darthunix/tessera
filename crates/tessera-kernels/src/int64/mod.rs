@@ -4,13 +4,14 @@
 //! which PostgreSQL computes in numeric) and key hashes ([`hash`],
 //! [`hash_next`]), which agree with the int4 hashes on the int4 range.
 //!
-//! The family mirrors [`crate::int32`] kernel by kernel rather than sharing
-//! a generic implementation over the lane type: the shape of every int32
-//! loop was settled with the disassembler and the counters, and a
-//! generalization would reshape both. What the families share is the
-//! vocabulary of [`crate::ops`]. A physical int64 representation does not
-//! select PostgreSQL semantics: the caller chooses kernels by logical type
-//! and operation, and a Datum holds an int8 as its whole word.
+//! The family shares with [`crate::int32`] the vocabulary of [`crate::ops`]
+//! and the drivers of `crate::int`, generic over the lane type, which each
+//! kernel moves to as a commit of its own (plan 4.25): the comparison of two
+//! columns so far; the others still mirror int32 kernel by kernel. What
+//! stays the family's own is the vector code of a whole word (`simd`), whose
+//! lanes and gaps differ. A physical int64 representation does not select
+//! PostgreSQL semantics: the caller chooses kernels by logical type and
+//! operation, and a Datum holds an int8 as its whole word.
 
 mod aggregate;
 mod arith;
@@ -30,3 +31,34 @@ pub use hash::{NullKeys, fold, hash, hash_combine, hash_next, murmurhash32};
 pub use crate::ops::{ArithOp, ArithmeticError, CompareOp};
 
 pub(crate) use crate::BULK_MIN_ROWS;
+
+#[cfg(all(target_arch = "aarch64", not(miri)))]
+use tessera_core::WordBlock;
+
+impl crate::int::IntLane for i64 {
+    #[inline(always)]
+    fn from_datum(word: u64) -> i64 {
+        word as i64
+    }
+
+    #[cfg(all(target_arch = "aarch64", not(miri)))]
+    fn side(block: WordBlock<'_, Self>) -> (Side<'_>, u64) {
+        match block {
+            WordBlock::Dense { values, non_nulls } => (Side::Dense(values), non_nulls),
+            WordBlock::Datum { values, isnull } => {
+                (Side::Datum(values), crate::simd::non_null_bits(isnull))
+            }
+        }
+    }
+
+    #[inline(always)]
+    fn compare_sides(left: Side<'_>, right: Side<'_>, op: CompareOp) -> u64 {
+        #[cfg(all(target_arch = "aarch64", not(miri)))]
+        return crate::simd::compare_sides64(left, right, op);
+        #[cfg(not(all(target_arch = "aarch64", not(miri))))]
+        {
+            let _ = (left, right, op);
+            unreachable!("no whole-word kernels on this target")
+        }
+    }
+}

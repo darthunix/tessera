@@ -52,6 +52,7 @@ pub mod calendar;
 pub mod cast;
 pub mod count;
 pub mod decimal;
+mod int;
 pub mod int32;
 pub mod int64;
 pub mod ops;

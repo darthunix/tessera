@@ -1,11 +1,10 @@
 //! The vocabulary every integer kernel family shares: the comparison and
 //! arithmetic operations and the arithmetic failure with its SQLSTATE.
 //!
-//! The families ([`crate::int32`] and the ones that follow it) keep their
-//! own kernels, since a generic implementation over the lane type would
-//! reshape the vector code each family has verified; what they share is
-//! the meaning of an operation and the error the C boundary reports, which
-//! recognizes exactly one error type.
+//! The families ([`crate::int32`] and [`crate::int64`]) keep their own
+//! vector code, whose lanes differ, and share the drivers around it; what
+//! they share here is the meaning of an operation and the error the C
+//! boundary reports, which recognizes exactly one error type.
 
 use std::fmt;
 

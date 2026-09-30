@@ -120,25 +120,9 @@ where
     run(op, Operands::Columns(left, right), rows, values, non_nulls)
 }
 
-/// A whole-word operand: the storage of a full prepared word, or a constant.
-#[derive(Clone, Copy, Debug)]
-pub(crate) enum Side<'a> {
-    Dense(&'a [i32; 64]),
-    Datum(&'a [u64; 64]),
-    Scalar(i32),
-}
-
-impl Side<'_> {
-    /// One lane as int4; a Datum's low 32 bits, as `DatumGetInt32`.
-    #[inline(always)]
-    fn lane(self, lane: usize) -> i32 {
-        match self {
-            Self::Dense(values) => values[lane],
-            Self::Datum(values) => values[lane] as i32,
-            Self::Scalar(value) => value,
-        }
-    }
-}
+/// A whole-word operand of int4: the storage of a full prepared word, or a
+/// constant.
+pub(crate) type Side<'a> = crate::int::Side<'a, i32>;
 
 /// The operands of one call.
 enum Operands<'a, L, R> {

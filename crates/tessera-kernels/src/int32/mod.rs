@@ -24,3 +24,34 @@ pub use filter::filter;
 pub use hash::{NullKeys, hash, hash_combine, hash_next, murmurhash32};
 
 pub(crate) use crate::BULK_MIN_ROWS;
+
+#[cfg(all(target_arch = "aarch64", not(miri)))]
+use tessera_core::WordBlock;
+
+impl crate::int::IntLane for i32 {
+    #[inline(always)]
+    fn from_datum(word: u64) -> i32 {
+        word as i32
+    }
+
+    #[cfg(all(target_arch = "aarch64", not(miri)))]
+    fn side(block: WordBlock<'_, Self>) -> (Side<'_>, u64) {
+        match block {
+            WordBlock::Dense { values, non_nulls } => (Side::Dense(values), non_nulls),
+            WordBlock::Datum { values, isnull } => {
+                (Side::Datum(values), crate::simd::non_null_bits(isnull))
+            }
+        }
+    }
+
+    #[inline(always)]
+    fn compare_sides(left: Side<'_>, right: Side<'_>, op: CompareOp) -> u64 {
+        #[cfg(all(target_arch = "aarch64", not(miri)))]
+        return crate::simd::compare_sides(left, right, op);
+        #[cfg(not(all(target_arch = "aarch64", not(miri))))]
+        {
+            let _ = (left, right, op);
+            unreachable!("no whole-word kernels on this target")
+        }
+    }
+}
