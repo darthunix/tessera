@@ -80,12 +80,8 @@ struct TessRows
 	TessStatus	status;
 };
 
-static void
-check(TessRows *rows, TessStatusCode code)
-{
-	if (code != TESS_OK)
-		tess_status_report(&rows->status);
-}
+/* Raise the error a kernel stored, if the call failed. */
+#define check(rows, code) tess_status_check((code), &(rows)->status)
 
 static void
 check_rows(const TessRows *rows)

@@ -756,7 +756,8 @@ static void
 append_explain(CustomScanState *css, List *ancestors, ExplainState *es)
 {
 	TessAppendState *state = (TessAppendState *) css;
-	const uint64 *totals = NULL;
+	uint64		own = state->batches;
+	const uint64 *totals;
 
 	/* As the core's Append shows the children the initial pruning removed. */
 	if (state->nchildren < state->nplanned)
@@ -766,9 +767,8 @@ append_explain(CustomScanState *css, List *ancestors, ExplainState *es)
 		return;
 	if (state->join_values != NULL)
 		ExplainPropertyInteger("Subplans Removed by Join", NULL, state->join_removed, es);
-	if (state->stats != NULL)
-		totals = tess_shared_stats_totals(state->stats);
-	ExplainPropertyInteger("Batches", NULL, totals != NULL ? totals[0] : state->batches, es);
+	totals = tess_shared_stats_totals_or(state->stats, &own);
+	ExplainPropertyInteger("Batches", NULL, totals[0], es);
 }
 
 /*
@@ -802,11 +802,9 @@ append_initialize_dsm(CustomScanState *css, ParallelContext *pcxt, void *coordin
 {
 	TessAppendState *state = (TessAppendState *) css;
 
-	/* A Gather a limit above shut down sets up anew when rescanned. */
-	if (state->stats != NULL)
-		tess_shared_stats_end(state->stats);
-	state->stats = tess_shared_stats_init(css->ss.ps.state->es_query_cxt, coordinate,
-										  APPEND_NCOUNTERS, pcxt->nworkers, pcxt->seg);
+	state->stats = tess_shared_stats_setup(state->stats, css->ss.ps.state->es_query_cxt,
+										   coordinate, APPEND_NCOUNTERS, pcxt->nworkers,
+										   pcxt->seg);
 	state->shared = (AppendShared *) ((char *) coordinate +
 									  tess_shared_stats_size(coordinate));
 	LWLockInitialize(&state->shared->lock, LWTRANCHE_PARALLEL_APPEND);
@@ -864,16 +862,7 @@ append_set_tuple_bound(CustomScanState *css, int64 tuples_needed)
 	TessAppendState *state = (TessAppendState *) css;
 
 	for (int index = 0; index < state->nchildren; index++)
-	{
-		PlanState  *child = state->children[index];
-		const TessNode *node = tess_batch_node_of(child);
-
-		if (node != NULL && TESS_ABI_HAS_FIELD(node, TessNode, set_tuple_bound) &&
-			node->set_tuple_bound != NULL)
-			node->set_tuple_bound((CustomScanState *) child, tuples_needed);
-		else
-			ExecSetTupleBound(tuples_needed, child);
-	}
+		tess_set_child_bound(state->children[index], tuples_needed);
 }
 
 static const CustomExecMethods append_exec_methods = {

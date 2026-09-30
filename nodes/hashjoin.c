@@ -873,12 +873,7 @@ static bool shared_next_partition(TessHashJoinState *state);
 static pg_atomic_uint64 *part_stats(TessHashJoinState *state, int partition);
 
 /* Raise the error a kernel stored, if the call failed. */
-static inline void
-check(TessHashJoinState *state, TessStatusCode code)
-{
-	if (code != TESS_OK)
-		tess_status_report(&state->status);
-}
+#define check(state, code) tess_status_check((code), &(state)->status)
 
 static void child_column(TessBatch *batch, int column, const TessRowMask *rows,
 						 TessColumnPurpose purpose, TessDatumColumn *result);
@@ -7042,7 +7037,7 @@ join_explain(CustomScanState *css, List *ancestors, ExplainState *es)
 	CustomScan *cscan = castNode(CustomScan, css->ss.ps.plan);
 	bool		useprefix = es->rtable_size > 1 || es->verbose;
 	List	   *context;
-	const uint64 *totals = NULL;
+	const uint64 *totals;
 	uint64		own[JOIN_NCOUNTERS];
 	uint64		overrun;
 
@@ -7086,13 +7081,8 @@ join_explain(CustomScanState *css, List *ancestors, ExplainState *es)
 	}
 	if (!es->analyze)
 		return;
-	if (state->stats != NULL)
-		totals = tess_shared_stats_totals(state->stats);
-	if (totals == NULL)
-	{
-		join_counters(state, own);
-		totals = own;
-	}
+	join_counters(state, own);
+	totals = tess_shared_stats_totals_or(state->stats, own);
 	ExplainPropertyInteger("Buckets", NULL,
 						   totals[JOIN_BUILDS] > 0 ?
 						   totals[JOIN_BUCKETS] / totals[JOIN_BUILDS] : 0, es);
@@ -7253,12 +7243,10 @@ join_initialize_dsm(CustomScanState *css, ParallelContext *pcxt,
 		state->shared = coordinate;
 		init_shared(state, pcxt->nworkers + 1, pcxt->seg);
 	}
-	/* A Gather a limit above shut down sets up anew when rescanned. */
-	if (state->stats != NULL)
-		tess_shared_stats_end(state->stats);
-	state->stats = tess_shared_stats_init(css->ss.ps.state->es_query_cxt,
-										  (char *) coordinate + shared_size(state),
-										  JOIN_NCOUNTERS, pcxt->nworkers, pcxt->seg);
+	state->stats = tess_shared_stats_setup(state->stats,
+										   css->ss.ps.state->es_query_cxt,
+										   (char *) coordinate + shared_size(state),
+										   JOIN_NCOUNTERS, pcxt->nworkers, pcxt->seg);
 }
 
 /*

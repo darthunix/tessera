@@ -1825,6 +1825,11 @@
   трёх файлах — hashjoin.h, hashjoin_spill.c, hashjoin_shared.c; 16) поля состояния соединения по режимам; 17) по
   файлу планировщика на узел — scan_planner.c, sort_planner.c, gather_planner.c. Не делаем: обобщение
   tests/benchmark.rs, tuplesort вместо sort.c, удаление реестра источников; пилот NEON-примитивов — в своей очереди.
+  Сделано 1) (2026-09-30): tess_status_check (runtime.h, static inline) вместо шести check()/check_kernel() — в
+  agg, filter, hashjoin и rows.c осталась строчная подстановка check(state, code); tess_set_child_bound
+  (runtime/input.c) вместо копий в gather, append и tess_unary_set_tuple_bound; tess_shared_stats_setup (конец
+  прежних счётчиков и начало новых, комментарий про Gather под лимитом — один) и tess_shared_stats_totals_or для
+  EXPLAIN в шести узлах; docs/runtime.md.
   Порядок (решение 2026-09-20): после 4.14 выполняются остаток 6.3 (ленивая проекция), затем 3.9 (AVX2), 4.15 и раздел 5 —
   чтобы узлы раздела 5 мерялись на реальном конвейере, и их ядра писались сразу для обеих архитектур. Уточнения
   (2026-09-20): после профиля 4.16 вперёд вытянуты 6.1 и ленивый pack (4.17), а затем, по второму замеру win, и 6.2 — всё
@@ -5102,7 +5107,7 @@
     attbyval, !atthasmissing; где доказать нельзя — 0). heap_deform.h и heap_batch.c читают только этот слой и
     публичные макросы tupmacs.h; зависимость от master снимается и для чистого PostgreSQL 18. Быстрая ветка через
     CompactAttribute остаётся под TESS_COMPACT_ATTRS, только если замер tax/win покажет потерю без неё.
-  - Параллельный слой под TESS_PARALLEL_QUERY: shared_stats.c, пять DSM-колбэков трёх узлов, parallel_divisor,
+  - Параллельный слой под TESS_PARALLEL_QUERY: shared_stats.c, пять DSM-колбэков шести узлов, parallel_divisor,
     частичные пути в nodes/planner.c и create_partial_paths в nodes/agg.c; в публичном заголовке storage/dsm.h и
     tess_shared_stats_* под тем же признаком. На Greengage счётчики узла локальны для сегмента.
   - Источники — отдельные модули, общий вход: узлы nodes/ общие; источники форка — модуль sources/aocs/

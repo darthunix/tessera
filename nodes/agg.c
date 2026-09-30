@@ -71,6 +71,8 @@
 #define AGG_INITIAL_GROUPS 256
 /* A group's aggregate states have one flag bit each in a payload word. */
 #define AGG_MAX_GROUPED 64
+/* Raise the error a kernel or table call stored, if it failed. */
+#define check(state, code) tess_status_check((code), &(state)->status)
 
 /*
  * A path's flags in its private data: the node is the query's grouping,
@@ -3297,7 +3299,6 @@ generic_accumulate(TessAggState *state, GenericAgg *generic, const TessRowMask *
 	MemoryContextSwitchTo(old);
 }
 
-static inline void check(TessAggState *state, TessStatusCode code);
 static KeyDict *key_dict_create(TessAggState *state, Oid eqop, Oid type, Oid collation);
 static void key_dict_reset(KeyDict *dict, uint64 values);
 static void keydict_numbers(KeyDict *dict, const TessDatumColumn *column,
@@ -4598,14 +4599,6 @@ result_row(TessAggState *state)
 		}
 	}
 	return ExecStoreVirtualTuple(scan);
-}
-
-/* Raise the error a table call stored, if it failed. */
-static inline void
-check(TessAggState *state, TessStatusCode code)
-{
-	if (code != TESS_OK)
-		tess_status_report(&state->status);
 }
 
 static Size agg_spill_memory(TessAggState *state);
@@ -7497,7 +7490,7 @@ static void
 agg_explain(CustomScanState *css, List *ancestors, ExplainState *es)
 {
 	TessAggState *state = (TessAggState *) css;
-	const uint64 *totals = NULL;
+	const uint64 *totals;
 	uint64		own[AGG_NCOUNTERS];
 
 	if (state->nkeys > 0)
@@ -7526,13 +7519,8 @@ agg_explain(CustomScanState *css, List *ancestors, ExplainState *es)
 		ExplainPropertyText("Partial Mode", state->partial ? "Partial" : "Finalize", es);
 	if (!es->analyze)
 		return;
-	if (state->stats != NULL)
-		totals = tess_shared_stats_totals(state->stats);
-	if (totals == NULL)
-	{
-		agg_counters(state, own);
-		totals = own;
-	}
+	agg_counters(state, own);
+	totals = tess_shared_stats_totals_or(state->stats, own);
 	ExplainPropertyInteger("Input Batches", NULL, totals[AGG_BATCHES], es);
 	ExplainPropertyInteger("Input Rows", NULL, totals[AGG_ROWS], es);
 	ExplainPropertyInteger("Kernel Calls", NULL, totals[AGG_CALLS], es);
@@ -7577,12 +7565,10 @@ agg_initialize_dsm(CustomScanState *css, ParallelContext *pcxt,
 {
 	TessAggState *state = (TessAggState *) css;
 
-	/* A Gather a limit above shut down sets up anew when rescanned. */
-	if (state->stats != NULL)
-		tess_shared_stats_end(state->stats);
-	state->stats = tess_shared_stats_init(css->ss.ps.state->es_query_cxt,
-										  coordinate, AGG_NCOUNTERS,
-										  pcxt->nworkers, pcxt->seg);
+	state->stats = tess_shared_stats_setup(state->stats,
+										   css->ss.ps.state->es_query_cxt,
+										   coordinate, AGG_NCOUNTERS,
+										   pcxt->nworkers, pcxt->seg);
 }
 
 static void

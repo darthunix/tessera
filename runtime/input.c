@@ -55,6 +55,18 @@ tess_input_binding(TessInput *input)
 }
 
 void
+tess_set_child_bound(PlanState *child, int64 bound)
+{
+	const TessNode *node = tess_batch_node_of(child);
+
+	if (node != NULL && TESS_ABI_HAS_FIELD(node, TessNode, set_tuple_bound) &&
+		node->set_tuple_bound != NULL)
+		node->set_tuple_bound((CustomScanState *) child, bound);
+	else
+		ExecSetTupleBound(bound, child);
+}
+
+void
 tess_input_set_request(TessInput *input, const TessRequest *request)
 {
 	input->ops->set_request(input->request_binding, request);

@@ -187,11 +187,30 @@ tess_shared_stats_collect(TessSharedStats *stats)
 	stats->shared = NULL;
 }
 
+TessSharedStats *
+tess_shared_stats_setup(TessSharedStats *previous, MemoryContext parent_context,
+						void *coordinate, int ncounters, int nworkers,
+						dsm_segment *segment)
+{
+	if (previous != NULL)
+		tess_shared_stats_end(previous);
+	return tess_shared_stats_init(parent_context, coordinate, ncounters,
+								  nworkers, segment);
+}
+
 const uint64 *
 tess_shared_stats_totals(const TessSharedStats *stats)
 {
 	check_stats(stats);
 	return stats->collected ? stats->totals : NULL;
+}
+
+const uint64 *
+tess_shared_stats_totals_or(const TessSharedStats *stats, const uint64 *own)
+{
+	const uint64 *totals = stats != NULL ? tess_shared_stats_totals(stats) : NULL;
+
+	return totals != NULL ? totals : own;
 }
 
 void

@@ -1257,16 +1257,11 @@ static void
 heap_scan_explain(CustomScanState *css, List *ancestors, ExplainState *es)
 {
 	HeapScanState *state = (HeapScanState *) css;
-	const uint64 *totals = NULL;
+	const uint64 *totals;
 	uint64		own[HEAP_SCAN_NCOUNTERS];
 
-	if (state->stats != NULL)
-		totals = tess_shared_stats_totals(state->stats);
-	if (totals == NULL)
-	{
-		heap_scan_counters(state, own);
-		totals = own;
-	}
+	heap_scan_counters(state, own);
+	totals = tess_shared_stats_totals_or(state->stats, own);
 	/* The parent's request, and so the size, is known once executed. */
 	if (totals[HEAP_SCAN_RAN] > 0)
 		ExplainPropertyInteger("Batch Size", NULL,
@@ -1353,11 +1348,9 @@ heap_scan_initialize_dsm(CustomScanState *css, ParallelContext *pcxt,
 
 	/* A Gather a limit above shut down sets up anew when rescanned. */
 	end_scan(state);
-	if (state->stats != NULL)
-		tess_shared_stats_end(state->stats);
-	state->stats = tess_shared_stats_init(estate->es_query_cxt, coordinate,
-										  HEAP_SCAN_NCOUNTERS, pcxt->nworkers,
-										  pcxt->seg);
+	state->stats = tess_shared_stats_setup(state->stats, estate->es_query_cxt,
+										   coordinate, HEAP_SCAN_NCOUNTERS,
+										   pcxt->nworkers, pcxt->seg);
 	if (state->bitmap_plan != NULL)
 	{
 		SharedBitmap *shared = shared_bitmap(coordinate);

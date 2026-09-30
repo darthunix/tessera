@@ -120,17 +120,7 @@ tess_unary_stop(TessUnary *unary)
 void
 tess_unary_set_tuple_bound(TessUnary *unary, int64 tuples_needed)
 {
-	PlanState  *child = unary->child;
-	/* A batch node built by the plan helpers may take the bound itself. */
-	const TessNode *node = tess_batch_node_of(child);
-
-	if (node != NULL && TESS_ABI_HAS_FIELD(node, TessNode, set_tuple_bound) &&
-		node->set_tuple_bound != NULL)
-	{
-		node->set_tuple_bound((CustomScanState *) child, tuples_needed);
-		return;
-	}
-	ExecSetTupleBound(tuples_needed, child);
+	tess_set_child_bound(unary->child, tuples_needed);
 }
 
 /* Derive the child's request from the parent's and the node's own. */

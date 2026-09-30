@@ -41,6 +41,14 @@ extern const TessKernelOps *tess_runtime_kernels(void);
  */
 pg_noreturn extern void tess_status_report(const TessStatus *status);
 
+/* Raise the ERROR a call stored in status if its code says it failed. */
+static inline void
+tess_status_check(TessStatusCode code, const TessStatus *status)
+{
+	if (code != TESS_OK)
+		tess_status_report(status);
+}
+
 /*
  * A builder collects rows from tuple slots into an owned column-major Datum
  * batch: one Datum and one NULL flag per row for each of the leading
@@ -433,6 +441,12 @@ extern bool tess_input_set_key_filter(TessInput *input,
 extern const TessNode *tess_batch_node_of(PlanState *state);
 
 /*
+ * Pass a bound to a child, as ExecSetTupleBound would; a batch node built
+ * by the plan helpers takes it through its kind's set_tuple_bound.
+ */
+extern void tess_set_child_bound(PlanState *child, int64 bound);
+
+/*
  * A unary node has one batch child and only removes rows from its batches:
  * a limit, a filter. The helper joins the output and input sides: it takes
  * the parent's request on the node's result slot, derives the child's
@@ -554,6 +568,17 @@ extern TessSharedStats *tess_shared_stats_init(MemoryContext parent_context,
 											   int ncounters, int nworkers,
 											   dsm_segment *segment);
 
+/*
+ * tess_shared_stats_init that ends the handle of an earlier call first, if
+ * any: a Gather or Gather Merge that a limit above shut down sets the plan
+ * up anew when rescanned, calling InitializeDSMCustomScan again.
+ */
+extern TessSharedStats *tess_shared_stats_setup(TessSharedStats *previous,
+												MemoryContext parent_context,
+												void *coordinate,
+												int ncounters, int nworkers,
+												dsm_segment *segment);
+
 /* The bytes the rows laid out in the chunk take: what follows them starts there. */
 extern Size tess_shared_stats_size(const void *coordinate);
 
@@ -579,6 +604,13 @@ extern void tess_shared_stats_collect(TessSharedStats *stats);
 
 /* The ncounters totals after a collection, or NULL before one. */
 extern const uint64 *tess_shared_stats_totals(const TessSharedStats *stats);
+
+/*
+ * For EXPLAIN: the totals of every participant once a parallel plan
+ * collected them, else own, the node's own counters; stats may be NULL.
+ */
+extern const uint64 *tess_shared_stats_totals_or(const TessSharedStats *stats,
+												 const uint64 *own);
 
 /*
  * EndCustomScan: the leader sums the rows if they are still mapped, since

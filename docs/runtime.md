@@ -246,6 +246,8 @@ raises the `ERROR` a failed kernel call stored in its `TessStatus`, with
 its SQLSTATE and message, after the call returned; a status that reports
 success or holds no five-character SQLSTATE of `[0-9A-Z]` raises `XX000`
 `Tessera call failed without a valid status` instead.
+`tess_status_check(code, status)` raises it only when the code says the
+call failed: the check a node makes after every kernel call.
 
 ## Reading batches from a child
 
@@ -338,7 +340,9 @@ so with `tess_unary_set_tuple_bound`, the helper's form of
 optional `set_tuple_bound` callback of its `TessNode`) receives it and
 forwards it below, as the pack node does, so a sort under the limit stays a
 top-N sort and the pack node pulls no more rows than the bound; any other
-child goes to `ExecSetTupleBound` itself.
+child goes to `ExecSetTupleBound` itself. A node with several children or
+a child outside the helper, such as an append or a gather, passes the bound
+with `tess_set_child_bound(child, bound)`, which chooses the same way.
 
 `tess_input_set_key_filter(input, filter)` hands the input's child a key
 filter (`TessKeyFilter`, [node.md](node.md)) through its kind's
@@ -370,8 +374,9 @@ installs the five callbacks:
 /* EstimateDSMCustomScan */
 return tess_shared_stats_estimate(NCOUNTERS, pcxt->nworkers);
 /* InitializeDSMCustomScan */
-state->stats = tess_shared_stats_init(estate->es_query_cxt, coordinate,
-                                      NCOUNTERS, pcxt->nworkers, pcxt->seg);
+state->stats = tess_shared_stats_setup(state->stats, estate->es_query_cxt,
+                                       coordinate, NCOUNTERS, pcxt->nworkers,
+                                       pcxt->seg);
 /* ReInitializeDSMCustomScan */
 tess_shared_stats_reset(state->stats);
 /* InitializeWorkerCustomScan */
@@ -380,6 +385,10 @@ state->stats = tess_shared_stats_attach(estate->es_query_cxt, coordinate,
 /* ShutdownCustomScan */
 tess_shared_stats_store(state->stats, values);
 ```
+
+`tess_shared_stats_setup` is `tess_shared_stats_init` that ends the
+handle of an earlier call first: a `Gather` that a limit above shut down
+sets the plan up anew when rescanned, calling the callback again.
 
 A node with other shared state, such as a parallel scan descriptor, puts
 the rows after it in the same chunk and adds the estimate to its size.
@@ -393,9 +402,9 @@ stops it early, the leader detaches its ends of the tuple queues first,
 which ends the workers' plans normally, so the totals are complete either
 way. When the leader's node ends while the rows are still mapped, as the
 children of a `Gather` end before it destroys the segment, `end` sums them
-then and cancels the callback. `EXPLAIN` prints the totals when
-`tess_shared_stats_totals` returns them and the node's own counters
-otherwise, in a serial plan. A rescan of the `Gather` reinitializes the
+then and cancels the callback. `EXPLAIN` prints
+`tess_shared_stats_totals_or(state->stats, own)`: the totals once
+collected, and the node's own counters otherwise, in a serial plan. A rescan of the `Gather` reinitializes the
 chunk and zeroes every row.
 
 ## Keeping rows

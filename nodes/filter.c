@@ -111,12 +111,7 @@ const TessNode tess_filter_node = {
 };
 
 /* Raise the error a kernel stored, if the call failed. */
-static inline void
-check(FilterState *state, TessStatusCode code)
-{
-	if (code != TESS_OK)
-		tess_status_report(&state->status);
-}
+#define check(state, code) tess_status_check((code), &(state)->status)
 
 /*
  * The parent's key filter over the rows the batch clauses kept: the keys
@@ -395,7 +390,7 @@ filter_explain(CustomScanState *css, List *ancestors, ExplainState *es)
 	CustomScan *cscan = castNode(CustomScan, css->ss.ps.plan);
 	List	   *context;
 	bool		useprefix = es->rtable_size > 1 || es->verbose;
-	const uint64 *totals = NULL;
+	const uint64 *totals;
 	uint64		own[FILTER_NCOUNTERS];
 
 	context = set_deparse_context_plan(es->deparse_cxt, css->ss.ps.plan,
@@ -406,13 +401,8 @@ filter_explain(CustomScanState *css, List *ancestors, ExplainState *es)
 											   context, useprefix, false), es);
 	if (!es->analyze)
 		return;
-	if (state->stats != NULL)
-		totals = tess_shared_stats_totals(state->stats);
-	if (totals == NULL)
-	{
-		filter_counters(state, own);
-		totals = own;
-	}
+	filter_counters(state, own);
+	totals = tess_shared_stats_totals_or(state->stats, own);
 	if (cscan->custom_exprs != NIL)
 		show_removed("Rows Removed by Batch Filter", totals[FILTER_BATCH_REMOVED],
 					 css, es);
@@ -447,12 +437,10 @@ filter_initialize_dsm(CustomScanState *css, ParallelContext *pcxt,
 {
 	FilterState *state = (FilterState *) css;
 
-	/* A Gather a limit above shut down sets up anew when rescanned. */
-	if (state->stats != NULL)
-		tess_shared_stats_end(state->stats);
-	state->stats = tess_shared_stats_init(css->ss.ps.state->es_query_cxt,
-										  coordinate, FILTER_NCOUNTERS,
-										  pcxt->nworkers, pcxt->seg);
+	state->stats = tess_shared_stats_setup(state->stats,
+										   css->ss.ps.state->es_query_cxt,
+										   coordinate, FILTER_NCOUNTERS,
+										   pcxt->nworkers, pcxt->seg);
 }
 
 static void

@@ -821,13 +821,6 @@ gather_merge_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path, Lis
 
 /* ---------------------------------------------------------------- TessSend */
 
-static void
-check_kernel(TessStatusCode code, TessStatus *status)
-{
-	if (code != TESS_OK)
-		tess_status_report(status);
-}
-
 /*
  * The words of the items a merge compares, as a run of an external
  * TessSort keeps them: every key takes its bit for NULL, and the last word
@@ -845,21 +838,8 @@ merge_key_words(const TessKernelOps *kernels, int nkeys, TessSortKey *keys)
 		keys[key].flags |= TESS_SORT_NULLABLE;
 		bits += (keys[key].kind == TESS_TABLE_KEY_INT8 ? 64 : 32) + 1;
 	}
-	check_kernel(kernels->sort_item_words(nkeys, keys, &words, &status), &status);
+	tess_status_check(kernels->sort_item_words(nkeys, keys, &words, &status), &status);
 	return bits <= 64 * (words - 1) ? words - 1 : words;
-}
-
-/* Pass a bound to a child, as ExecSetTupleBound would, a batch node's through its kind. */
-static void
-set_child_bound(PlanState *child, int64 bound)
-{
-	const TessNode *node = tess_batch_node_of(child);
-
-	if (node != NULL && TESS_ABI_HAS_FIELD(node, TessNode, set_tuple_bound) &&
-		node->set_tuple_bound != NULL)
-		node->set_tuple_bound((CustomScanState *) child, bound);
-	else
-		ExecSetTupleBound(bound, child);
 }
 
 static Node *
@@ -1098,11 +1078,11 @@ fill_message(TessSendState *send, MessageBuilder *builder, TessInput *input,
 				}
 				for (int word = 0; word < send->key_words; word++)
 					key_lanes[word] = builder->key_lanes + (Size) word * builder->key_capacity;
-				check_kernel(send->kernels->sort_key_lanes(send->nkernel, send->keys, table_keys,
-														   &batch->rows, send->key_words,
-														   key_lanes, builder->key_capacity,
-														   &count, &status),
-							 &status);
+				tess_status_check(send->kernels->sort_key_lanes(send->nkernel, send->keys, table_keys,
+																&batch->rows, send->key_words,
+																key_lanes, builder->key_capacity,
+																&count, &status),
+								  &status);
 			}
 			builder->batch = batch;
 			builder->row = -1;
@@ -1303,7 +1283,7 @@ send_initialize_worker(CustomScanState *css, shm_toc *toc, void *coordinate)
 	state->queue = shm_mq_attach(queue, segment, NULL);
 	/* A worker's share needs no more rows than the whole. */
 	if (shared->bound >= 0)
-		set_child_bound(state->child, shared->bound);
+		tess_set_child_bound(state->child, shared->bound);
 }
 
 static void
@@ -1911,10 +1891,10 @@ merge_next(TessGatherState *state)
 					(Size) source->stride * (send->null_lanes + state->ncolumns + word) +
 					source->place;
 		}
-		check_kernel(send->kernels->sort_merge(state->nsources, send->key_words, lanes, left,
-											   more, state->merge_state, order,
-											   GATHER_ROWS - taken, &count, &refill, &status),
-					 &status);
+		tess_status_check(send->kernels->sort_merge(state->nsources, send->key_words, lanes, left,
+													more, state->merge_state, order,
+													GATHER_ROWS - taken, &count, &refill, &status),
+						  &status);
 		for (int row = 0; row < count; row++)
 		{
 			MergeSource *source = &state->sources[order[row]];
@@ -2062,7 +2042,7 @@ gather_set_tuple_bound(CustomScanState *css, int64 tuples_needed)
 	TessGatherState *state = (TessGatherState *) css;
 
 	state->bound = tuples_needed < 0 ? -1 : tuples_needed;
-	set_child_bound(state->send->child, state->bound);
+	tess_set_child_bound(state->send->child, state->bound);
 }
 
 static const CustomExecMethods gather_exec_methods = {

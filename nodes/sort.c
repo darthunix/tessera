@@ -1212,13 +1212,6 @@ append_batch(TessSortState *state, TessBatch *batch)
 	append_rows(state, batch);
 }
 
-static void
-check_kernel(TessStatusCode code, TessStatus *status)
-{
-	if (code != TESS_OK)
-		tess_status_report(status);
-}
-
 /* The reference of a heap item: the low 32 bits of its last word. */
 static uint32
 item_ref(TessSortState *state, uint64 item)
@@ -1399,11 +1392,11 @@ top_batch_generic(TessSortState *state, TessBatch *batch)
 	batch_keys(state, batch);
 	for (int key = state->generic + 1; key < state->nkeys; key++)
 		batch_column(state, batch, state->key_columns[key]);
-	check_kernel(state->kernels->sort_key_lanes(state->nkernel, state->top_keys,
-												state->table_keys, &batch->rows, words,
-												state->top_lanes, state->top_batch_capacity,
-												&count, &status),
-				 &status);
+	tess_status_check(state->kernels->sort_key_lanes(state->nkernel, state->top_keys,
+													 state->table_keys, &batch->rows, words,
+													 state->top_lanes, state->top_batch_capacity,
+													 &count, &status),
+					  &status);
 	while ((row = tess_row_mask_next(&batch->rows, row)) >= 0)
 		state->top_lane_of[row] = lane++;
 	if (state->heap_len == state->heap_capacity)
@@ -1575,13 +1568,13 @@ top_batch(TessSortState *state, TessBatch *batch)
 		TessStatus	status = TESS_STRUCT_INITIALIZER(TessStatus);
 		int			kept;
 
-		check_kernel(state->kernels->sort_top_candidates(state->nkernel,
-														 state->top_keys,
-														 state->table_keys,
-														 &batch->rows,
-														 state->heap, &kept,
-														 &status),
-					 &status);
+		tess_status_check(state->kernels->sort_top_candidates(state->nkernel,
+															  state->top_keys,
+															  state->table_keys,
+															  &batch->rows,
+															  state->heap, &kept,
+															  &status),
+						  &status);
 		if (kept == 0)
 			return;
 	}
@@ -1614,9 +1607,9 @@ choose_topn(TessSortState *state)
 		state->top_keys[key] = state->keys[key];
 		state->top_keys[key].flags |= TESS_SORT_NULLABLE;
 	}
-	check_kernel(state->kernels->sort_item_words(state->nkernel, state->top_keys,
-												 &state->words, &status),
-				 &status);
+	tess_status_check(state->kernels->sort_item_words(state->nkernel, state->top_keys,
+													  &state->words, &status),
+					  &status);
 	bytes = (double) state->bound * state->words * sizeof(uint64) +
 		(double) Max(4 * (double) state->bound, 65536.0) *
 		(16.0 + 8.0 * (state->nkernel + (state->ncolumns + 63) / 64 + state->ncolumns));
@@ -1710,10 +1703,10 @@ writer_reset_chunk(TessSortState *state, RunWriter *writer)
 	TessStatus	status = TESS_STRUCT_INITIALIZER(TessStatus);
 	Size		capacity;
 
-	check_kernel(state->kernels->spill_columns_init(writer->chunk, writer->chunk_len,
-													run_words(state), &capacity,
-													&status),
-				 &status);
+	tess_status_check(state->kernels->spill_columns_init(writer->chunk, writer->chunk_len,
+														 run_words(state), &capacity,
+														 &status),
+					  &status);
 	writer->capacity = (uint32) capacity;
 	writer->rows = 0;
 	writer->values_used = 0;
@@ -1976,9 +1969,9 @@ plan_external(TessSortState *state)
 		state->ext_keys[key] = state->keys[key];
 		state->ext_keys[key].flags |= TESS_SORT_NULLABLE;
 	}
-	check_kernel(state->kernels->sort_item_words(state->nkernel, state->ext_keys,
-												 &state->item_words, &status),
-				 &status);
+	tess_status_check(state->kernels->sort_item_words(state->nkernel, state->ext_keys,
+													  &state->item_words, &status),
+					  &status);
 	/*
 	 * A run keeps its items' words without the reference: the last word
 	 * goes when it holds no key's bits, as an int4 key's 33 bits leave it,
@@ -2272,10 +2265,10 @@ merge_rows(TessSortState *state, MergeInput *inputs, int ninputs, uint32 *tree, 
 				lanes[input * state->ext_words + word] = left[input] == 0 ? NULL :
 					tess_spill_columns_word(in->chunk, state->ncolumns + word) + in->place;
 		}
-		check_kernel(state->kernels->sort_merge(ninputs, state->ext_words, lanes, left, more,
-												tree, order, max - taken, &count, &refill,
-												&status),
-					 &status);
+		tess_status_check(state->kernels->sort_merge(ninputs, state->ext_words, lanes, left, more,
+													 tree, order, max - taken, &count, &refill,
+													 &status),
+						  &status);
 		for (int row = 0; row < count; row++)
 		{
 			MergeInput *in = &inputs[order[row]];
@@ -2628,9 +2621,9 @@ sort_rows(TessSortState *state)
 														  Max(state->count, 1)),
 												 MCXT_ALLOC_HUGE);
 		if (state->count > 0)
-			check_kernel(state->kernels->sort(state->heap, (Size) state->count,
-											  state->words, state->refs, &status),
-						 &status);
+			tess_status_check(state->kernels->sort(state->heap, (Size) state->count,
+												   state->words, state->refs, &status),
+							  &status);
 		/* Items of equal words by the comparisons, as a full sort orders them. */
 		if (state->count > 0 && state->generic >= 0)
 		{
@@ -2906,7 +2899,7 @@ sort_explain(CustomScanState *css, List *ancestors, ExplainState *es)
 												   css->ss.ps.plan, ancestors);
 	bool		useprefix = es->rtable_size > 1 || es->verbose;
 	List	   *keys = NIL;
-	const uint64 *totals = NULL;
+	const uint64 *totals;
 	uint64		own[SORT_NCOUNTERS];
 
 	foreach_ptr(Node, expr, cscan->custom_exprs)
@@ -2933,13 +2926,8 @@ sort_explain(CustomScanState *css, List *ancestors, ExplainState *es)
 	ExplainPropertyList("Sort Key", keys, es);
 	if (!es->analyze)
 		return;
-	if (state->stats != NULL)
-		totals = tess_shared_stats_totals(state->stats);
-	if (totals == NULL)
-	{
-		sort_counters(state, own);
-		totals = own;
-	}
+	sort_counters(state, own);
+	totals = tess_shared_stats_totals_or(state->stats, own);
 	if (totals[SORT_SORTED] == 0)
 		return;
 	ExplainPropertyText("Sort Method", totals[SORT_TOPN] > 0 ? "top-N in memory" :
@@ -2976,11 +2964,9 @@ sort_initialize_dsm(CustomScanState *css, ParallelContext *pcxt, void *coordinat
 {
 	TessSortState *state = (TessSortState *) css;
 
-	/* A Gather Merge a limit above shut down sets up anew when rescanned. */
-	if (state->stats != NULL)
-		tess_shared_stats_end(state->stats);
-	state->stats = tess_shared_stats_init(css->ss.ps.state->es_query_cxt, coordinate,
-										  SORT_NCOUNTERS, pcxt->nworkers, pcxt->seg);
+	state->stats = tess_shared_stats_setup(state->stats, css->ss.ps.state->es_query_cxt,
+										   coordinate, SORT_NCOUNTERS, pcxt->nworkers,
+										   pcxt->seg);
 }
 
 static void
