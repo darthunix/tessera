@@ -35,7 +35,12 @@ SELECT tessera_test_settings() AS enabled \gset
 RESET tessera.enable;
 SELECT tessera_test_settings() AS enabled \gset
 \echo :enabled
+-- A misspelled tessera.* name: with the bridge alone it is a placeholder
+-- still; tessera_nodes reserves the prefix once its settings are defined,
+-- removing it with a WARNING, and refuses a new one (see settings.sql).
 \set VERBOSITY terse
+SET tessera.enabel = off;
+LOAD 'tessera_nodes';
 SET tessera.enabel = off;
 \set VERBOSITY default
 

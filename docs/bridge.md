@@ -108,8 +108,9 @@ shared_preload_libraries = 'tessera, tessera_nodes, tessera_kernels, tessera_lim
 ```
 
 The bridge comes first: the initialization of the node and kernel modules
-requires it, and the list is loaded in order; `tessera_limit`, the example
-node, is optional. The postmaster loads them at its start, and every
+requires it, and the list is loaded in order; a module loaded without it
+fails with the hint to load `tessera` first (`LOAD 'tessera'`, or first in
+the list). `tessera_limit`, the example node, is optional. The postmaster loads them at its start, and every
 backend, forked from it, has the bridge, the registries and the modules
 from its start. That includes the workers of a parallel query, which is why
 this is the recommendation: a worker loads every library its leader has
@@ -168,8 +169,16 @@ own.
 configuration variables: `enable` is the GUC `tessera.enable`, the switch
 every planner hook checks (see [node.md](node.md)). The bridge defines the
 variables because a GUC can be defined once per backend while several
-independent modules read it; the prefix `tessera` is reserved, so a
-misspelled parameter is an error rather than a placeholder.
+independent modules read it. The prefix `tessera` is reserved by
+`tessera_nodes` once it has defined the other `tessera.*` settings, not by
+the bridge: the configuration file, `ALTER SYSTEM`, `ALTER ROLE` and
+`PGOPTIONS` are read before the libraries load, and a reservation made
+before the settings exist drops their values as unknown placeholders (plan
+4.24, review item 9: a `tessera.gather_tuple_share` in
+`postgresql.auto.conf` was 0.25 after a restart, with a WARNING; now it is
+0.5). From then on a misspelled `tessera.*` parameter is removed with a
+WARNING, and a new one is an error rather than a placeholder; with the
+bridge alone loaded the prefix is left unreserved (test/sql/settings.sql).
 
 The current root requires `binding_ops`, `sources`, `nodes`, `functions`
 and `settings` to be non-null. A consumer first checks the root's ABI

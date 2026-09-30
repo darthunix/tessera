@@ -777,7 +777,8 @@ _PG_init(void)
 	if (api == NULL)
 		ereport(ERROR,
 				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
-				 errmsg("Tessera bridge must be loaded before tessera_kernels")));
+				 errmsg("Tessera bridge must be loaded before tessera_kernels"),
+				 errhint("Load the tessera library first: LOAD 'tessera', or list tessera first in shared_preload_libraries or session_preload_libraries.")));
 	if (api->abi_version != TESS_API_ABI_VERSION ||
 		api->struct_size < TESS_API_MIN_SIZE ||
 		api->functions == NULL ||

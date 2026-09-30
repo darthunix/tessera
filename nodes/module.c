@@ -55,7 +55,7 @@ bool		tess_batch_gather = true;
 void
 _PG_init(void)
 {
-	/* Raises ERROR without the bridge: CREATE EXTENSION tessera first. */
+	/* Raises ERROR without the bridge, which must be loaded first. */
 	const TessApi *api = tess_runtime_api();
 
 	RegisterCustomScanMethods(&tess_pack_scan_methods);
@@ -253,4 +253,12 @@ _PG_init(void)
 							 "TessGather stands in for the core's Gather over a batch path: the workers "
 							 "send batches of rows instead of a tuple each.",
 							 &tess_batch_gather, true, PGC_USERSET, 0, NULL, NULL, NULL);
+
+	/*
+	 * Every tessera.* setting is defined now (tessera.enable by the bridge,
+	 * the rest above), so each took the value given for it before this
+	 * module loaded; a name no module defines is removed with a WARNING, and
+	 * a new one is refused from now on.
+	 */
+	MarkGUCPrefixReserved("tessera");
 }

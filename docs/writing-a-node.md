@@ -50,10 +50,12 @@ _PG_init(void)
 }
 ```
 
-`tess_runtime_api` raises an error when the bridge is not loaded, so a
-missing `CREATE EXTENSION tessera` or a wrong preload order fails at load
-time. A node module defines no setting of its own: `tessera.enable`, which
-the bridge defines, turns every batch node off.
+`tess_runtime_api` raises an error when the bridge is not loaded, with the
+hint to load `tessera` first, so a wrong preload order or a module loaded
+alone fails at load time. A node module defines no setting of its own:
+`tessera.enable`, which the bridge defines, turns every batch node off; a
+module of another extension with settings uses a prefix of its own, since
+`tessera_nodes` reserves `tessera` once it has defined its settings.
 
 ## Building the path
 

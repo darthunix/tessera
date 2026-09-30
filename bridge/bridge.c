@@ -33,11 +33,16 @@ _PG_init(void)
 {
 	void	  **rendezvous;
 
+	/*
+	 * The prefix is reserved by tessera_nodes, once it has defined the other
+	 * tessera.* settings: reserved here, before they exist, it would drop
+	 * the values given for them earlier, in postgresql.conf, ALTER SYSTEM,
+	 * ALTER ROLE or a SET before the modules load, as unknown placeholders.
+	 */
 	DefineCustomBoolVariable("tessera.enable",
 							 "Adds Tessera batch paths to query plans.",
 							 NULL, &tess_enable, true, PGC_USERSET, 0,
 							 NULL, NULL, NULL);
-	MarkGUCPrefixReserved("tessera");
 	rendezvous = find_rendezvous_variable(TESS_API_RENDEZVOUS);
 	if (*rendezvous != NULL && *rendezvous != &tess_api)
 		elog(ERROR, "Tessera API rendezvous variable is already in use");

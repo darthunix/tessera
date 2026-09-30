@@ -24,7 +24,7 @@ const TessNode tess_limit_node = {
 void
 _PG_init(void)
 {
-	/* Raises ERROR without the bridge: CREATE EXTENSION tessera first. */
+	/* Raises ERROR without the bridge, which must be loaded first. */
 	const TessApi *api = tess_runtime_api();
 
 	api->nodes->add(&tess_limit_node);

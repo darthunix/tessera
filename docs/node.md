@@ -213,7 +213,9 @@ publishes its value through `api->settings->enable`. Every hook first calls
 the hook it replaced, then checks the switch, and only then adds paths. A
 node module never defines `tessera.enable` itself: several independent
 modules install hooks, and a GUC can be defined once per backend. Other
-GUCs are added only with a measurement that justifies them.
+GUCs are added only with a measurement that justifies them; the module
+that defines the last of them reserves the prefix (`tessera_nodes`), so
+values given before it loads are kept.
 
 ### Memory
 

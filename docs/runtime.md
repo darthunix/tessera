@@ -230,7 +230,9 @@ the end and rescan paths; `tess_output_end` also detaches the binding and
 must precede destroying the slot.
 
 `tess_runtime_api()` returns the bridge's API, validated once per backend;
-the bridge must be loaded first (`CREATE EXTENSION tessera`).
+the bridge must be loaded first (`LOAD 'tessera'`, which `CREATE EXTENSION
+tessera` does in its own backend, or first in the preload list), and the
+error without it says so.
 
 `tess_runtime_kernels()` returns the operations of the Rust kernels
 (`tessera/kernel_ops.h`) that the `tessera_kernels` module installed in

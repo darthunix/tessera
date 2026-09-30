@@ -33,8 +33,10 @@ with the runtime library's helpers described in [runtime.md](runtime.md).
 ## Parameters
 
 Besides `tessera.enable`, which the bridge defines, the module defines
-these parameters, every one settable by any user in a session. The
-gates and switches:
+these parameters, every one settable by any user in a session, and then
+reserves the prefix `tessera`: a value given before the module loads (the
+configuration file, `ALTER SYSTEM`, a `SET` before `LOAD`) is kept (see
+[bridge.md](bridge.md)). The gates and switches:
 
 | Parameter | Default | What it decides |
 |---|---|---|
