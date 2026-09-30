@@ -177,10 +177,12 @@ where
     /// One word row by row. The three operand shapes give three loops of
     /// one body; two columns are zipped word by word, which the trait
     /// guarantees to yield the same rows in the same order. A NULL row is
-    /// computed from a placeholder pair that no operation rejects, so that
-    /// the loop has no branch on nullness; only the error check branches,
-    /// and it never goes. The pair is built from two scalars, not an
-    /// `Option` of a tuple, which the compiler kept on the stack.
+    /// computed from the placeholder pair (0, 1), whatever the other operand
+    /// holds: 0 op 1 fails in no operation, so the loop has no branch on
+    /// nullness, and only the error check branches, which a NULL row never
+    /// takes (`i32::MAX + NULL` is NULL, not an overflow). The pair is built
+    /// from two scalars, not an `Option` of a tuple, which the compiler kept
+    /// on the stack.
     #[inline(always)]
     fn word<E: Evaluate>(
         &self,
@@ -205,7 +207,8 @@ where
             Self::ScalarColumn(scalar, right) => {
                 for (row, value) in right.word_values(index, selected)? {
                     let some = value.is_some();
-                    output.values[row].write(evaluate(*scalar, value.unwrap_or(1))?);
+                    let a = if some { *scalar } else { 0 };
+                    output.values[row].write(evaluate(a, value.unwrap_or(1))?);
                     present |= u64::from(some) << (row % 64);
                 }
             }
@@ -215,8 +218,9 @@ where
                     .zip(right.word_values(index, selected)?);
                 for ((row, a), (_, b)) in pairs {
                     let some = a.is_some() && b.is_some();
+                    let a = if some { a.unwrap_or(0) } else { 0 };
                     let b = if some { b.unwrap_or(1) } else { 1 };
-                    output.values[row].write(evaluate(a.unwrap_or(0), b)?);
+                    output.values[row].write(evaluate(a, b)?);
                     present |= u64::from(some) << (row % 64);
                 }
             }

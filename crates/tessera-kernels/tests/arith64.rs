@@ -507,6 +507,78 @@ fn division_by_scalars_agrees_on_whole_words_with_extremes() -> Result<()> {
     Ok(())
 }
 
+/// A NULL row never fails, whatever the other operand holds: an extreme
+/// scalar or column value beside a NULL computes nothing, on the row path
+/// (five rows, every target) and on whole words, a word of a single row
+/// and a partial tail (3·64 + 5 rows); beside non-NULL rows of a harmless
+/// value the model decides. `MAX + NULL` is NULL, as in PostgreSQL.
+#[test]
+fn a_null_row_never_fails_whatever_the_other_operand() -> Result<()> {
+    for nrows in [5_usize, 3 * 64 + 5] {
+        let mut selection = vec![u64::MAX; nrows.div_ceil(64)];
+        if nrows > 64 {
+            selection[1] = 1 << 7;
+        }
+        if nrows % 64 != 0 {
+            *selection.last_mut().unwrap() &= (1 << (nrows % 64)) - 1;
+        }
+        let rows = RowMaskView::try_new(nrows, &selection)?;
+        let selected = |row: usize| selection[row / 64] >> (row % 64) & 1 == 1;
+        let none = vec![0; nrows.div_ceil(64)];
+        let mixed_flags: Vec<bool> = (0..nrows).map(|row| row % 3 != 0).collect();
+        let mixed_words = words_for(&mixed_flags);
+        for extreme in [i64::MIN, i64::MAX] {
+            let extremes = vec![extreme; nrows];
+            let nulls = ColumnView::try_new(&extremes, Some(RowMaskView::try_new(nrows, &none)?))?;
+            let extreme_column = ColumnView::try_new(&extremes, None)?;
+            for op in OPS {
+                // A value that no operation with the extreme rejects.
+                let harmless = if matches!(op, ArithOp::Div | ArithOp::Mod) {
+                    1
+                } else {
+                    0
+                };
+                let mixed_values: Vec<i64> = mixed_flags
+                    .iter()
+                    .map(|&flag| if flag { harmless } else { i64::MIN })
+                    .collect();
+                let mixed = ColumnView::try_new(
+                    &mixed_values,
+                    Some(RowMaskView::try_new(nrows, &mixed_words)?),
+                )?;
+                for runner in [run, run_rows] {
+                    for shape in [
+                        Shape::ScalarColumn(extreme, &nulls),
+                        Shape::Columns(&extreme_column, &nulls),
+                        Shape::Columns(&nulls, &extreme_column),
+                        Shape::ColumnScalar(&nulls, extreme),
+                    ] {
+                        let (_, words) = runner(op, shape, &rows)?;
+                        assert!(words.iter().all(|&word| word == 0), "{op:?} {extreme}");
+                    }
+                    let expected: Vec<_> = (0..nrows)
+                        .map(|row| {
+                            (selected(row) && mixed_flags[row])
+                                .then(|| model(op, extreme, harmless))
+                        })
+                        .collect();
+                    check(
+                        op,
+                        runner(op, Shape::ScalarColumn(extreme, &mixed), &rows),
+                        &expected,
+                    );
+                    check(
+                        op,
+                        runner(op, Shape::Columns(&extreme_column, &mixed), &rows),
+                        &expected,
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 #[test]
 fn overflow_in_null_or_unselected_lanes_is_not_an_error() -> Result<()> {
     // Word 0 is full of extremes in its NULL rows; word 1 is not selected.

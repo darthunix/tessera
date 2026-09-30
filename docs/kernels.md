@@ -116,7 +116,10 @@ inside a kernel.
   operands are non-NULL and `values` their results; other rows of `values`
   are unspecified and need no initialization, and words without selected
   rows get a cleared `non_nulls` word. Overflow reports `22003`, a zero
-  divisor `22012`; `MIN / -1` is out of range and `x % -1` is 0.
+  divisor `22012`; `MIN / -1` is out of range and `x % -1` is 0. A row with
+  a NULL operand never fails, whatever the other operand holds
+  (`2147483647 + NULL` is NULL): the row path computes it from the pair
+  (0, 1), the whole-word path masks its lanes out of the checks.
 - `tess_int4_hash(column, prepared, rows, nulls, hashes, valid, status)`
   and `tess_int4_hash_next(column, prepared, nulls, hashes, valid, status)`:
   the 32-bit key hashes of pg_batch (`murmurhash32`, further keys folded in

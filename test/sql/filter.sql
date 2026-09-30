@@ -311,6 +311,27 @@ SELECT filter_same($$SELECT a FROM filter8_t WHERE a IN (1, 2, 4294967297, 85899
 -- An overflow in a bigint chain is reported as bigint's.
 SELECT a FROM filter8_t WHERE a * 4294967296 > 1;
 DROP TABLE filter8_t;
+-- A NULL operand beside an extreme is NULL, never an overflow, whatever
+-- the operand shape, the constant on the left too, and past the whole
+-- words of a batch (200 rows end in a partial word): every clause keeps
+-- the rows without NULL (plan 4.24, review item 8).
+CREATE TABLE filter_null_arith (i int, a int, b int, c bigint, e bigint, d smallint);
+INSERT INTO filter_null_arith
+SELECT i, CASE WHEN i % 3 = 0 THEN NULL ELSE 0 END, 2147483647,
+       CASE WHEN i % 3 = 0 THEN NULL ELSE 0 END, 9223372036854775807,
+       CASE WHEN i % 3 = 0 THEN NULL ELSE 0 END
+FROM generate_series(1, 200) AS i;
+ANALYZE filter_null_arith;
+EXPLAIN (COSTS OFF) SELECT i FROM filter_null_arith WHERE 2147483647 + a > 0;
+SELECT filter_same($$SELECT count(*) FROM filter_null_arith WHERE 2147483647 + a > 0$$);
+SELECT filter_same($$SELECT count(*) FROM filter_null_arith WHERE (-2147483647 - 1) - a < 0$$);
+SELECT filter_same($$SELECT count(*) FROM filter_null_arith WHERE b + a > 0$$);
+SELECT filter_same($$SELECT count(*) FROM filter_null_arith WHERE 9223372036854775807 + c > 0$$);
+SELECT filter_same($$SELECT count(*) FROM filter_null_arith WHERE e + c > 0$$);
+SELECT filter_same($$SELECT count(*) FROM filter_null_arith WHERE b + d > 0$$);
+SELECT filter_same($$SELECT count(*) FROM filter_null_arith WHERE 2147483647 + d > 0$$);
+SELECT filter_same($$SELECT i, 2147483647 + a, e + c FROM filter_null_arith WHERE i > 190$$);
+DROP TABLE filter_null_arith;
 
 -- A table without clauses under a row-wise parent: the scan serves the
 -- rows of each batch, the columns of its targets taken once per batch.

@@ -1142,6 +1142,74 @@ SELECT filter_same($$SELECT a FROM filter8_t WHERE a IN (1, 2, 4294967297, 85899
 SELECT a FROM filter8_t WHERE a * 4294967296 > 1;
 ERROR:  bigint out of range
 DROP TABLE filter8_t;
+-- A NULL operand beside an extreme is NULL, never an overflow, whatever
+-- the operand shape, the constant on the left too, and past the whole
+-- words of a batch (200 rows end in a partial word): every clause keeps
+-- the rows without NULL (plan 4.24, review item 8).
+CREATE TABLE filter_null_arith (i int, a int, b int, c bigint, e bigint, d smallint);
+INSERT INTO filter_null_arith
+SELECT i, CASE WHEN i % 3 = 0 THEN NULL ELSE 0 END, 2147483647,
+       CASE WHEN i % 3 = 0 THEN NULL ELSE 0 END, 9223372036854775807,
+       CASE WHEN i % 3 = 0 THEN NULL ELSE 0 END
+FROM generate_series(1, 200) AS i;
+ANALYZE filter_null_arith;
+EXPLAIN (COSTS OFF) SELECT i FROM filter_null_arith WHERE 2147483647 + a > 0;
+                      QUERY PLAN                       
+-------------------------------------------------------
+ Custom Scan (TessFilter) on filter_null_arith
+   Batch Filter: ((2147483647 + a) > 0)
+   ->  Custom Scan (TessHeapScan) on filter_null_arith
+(3 rows)
+
+SELECT filter_same($$SELECT count(*) FROM filter_null_arith WHERE 2147483647 + a > 0$$);
+ filter_same 
+-------------
+ {(134)}
+(1 row)
+
+SELECT filter_same($$SELECT count(*) FROM filter_null_arith WHERE (-2147483647 - 1) - a < 0$$);
+ filter_same 
+-------------
+ {(134)}
+(1 row)
+
+SELECT filter_same($$SELECT count(*) FROM filter_null_arith WHERE b + a > 0$$);
+ filter_same 
+-------------
+ {(134)}
+(1 row)
+
+SELECT filter_same($$SELECT count(*) FROM filter_null_arith WHERE 9223372036854775807 + c > 0$$);
+ filter_same 
+-------------
+ {(134)}
+(1 row)
+
+SELECT filter_same($$SELECT count(*) FROM filter_null_arith WHERE e + c > 0$$);
+ filter_same 
+-------------
+ {(134)}
+(1 row)
+
+SELECT filter_same($$SELECT count(*) FROM filter_null_arith WHERE b + d > 0$$);
+ filter_same 
+-------------
+ {(134)}
+(1 row)
+
+SELECT filter_same($$SELECT count(*) FROM filter_null_arith WHERE 2147483647 + d > 0$$);
+ filter_same 
+-------------
+ {(134)}
+(1 row)
+
+SELECT filter_same($$SELECT i, 2147483647 + a, e + c FROM filter_null_arith WHERE i > 190$$);
+                                                                                                                                                   filter_same                                                                                                                                                    
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ {"(191,2147483647,9223372036854775807)","(192,,)","(193,2147483647,9223372036854775807)","(194,2147483647,9223372036854775807)","(195,,)","(196,2147483647,9223372036854775807)","(197,2147483647,9223372036854775807)","(198,,)","(199,2147483647,9223372036854775807)","(200,2147483647,9223372036854775807)"}
+(1 row)
+
+DROP TABLE filter_null_arith;
 -- A table without clauses under a row-wise parent: the scan serves the
 -- rows of each batch, the columns of its targets taken once per batch.
 EXPLAIN (COSTS OFF) SELECT bit_or(a), max(c) FROM filter_t;
