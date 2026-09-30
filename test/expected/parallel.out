@@ -199,7 +199,12 @@ RIGHT JOIN (VALUES (1), (2)) AS v(x) ON true;
 ---------------------------------------------------------------------------------------------------------------------
  Nested Loop Left Join (actual rows=2.00 loops=1)
    ->  Values Scan on "*VALUES*" (actual rows=2.00 loops=1)
-   ->  Finalize Aggregate (actual rows=1.00 loops=2)
+   ->  Custom Scan (TessAgg) (actual rows=1.00 loops=2)
+         Partial Mode: Finalize
+         Input Batches: 3
+         Input Rows: 3
+         Kernel Calls: 0
+         Computed Datums: 6
          ->  Custom Scan (TessGather) (actual rows=3.00 loops=2)
                Workers Planned: 2
                Workers Launched: 2
@@ -221,7 +226,7 @@ RIGHT JOIN (VALUES (1), (2)) AS v(x) ON true;
                                        Pages: 28
                                        Deformed Datums: 10000
                                        Restarted Datums: 0
-(24 rows)
+(29 rows)
 
 SELECT parallel_same($$SELECT x, n FROM (SELECT count(*) AS n FROM parallel_t WHERE a > 4997) AS ss
 RIGHT JOIN (VALUES (1), (2)) AS v(x) ON true$$);
@@ -292,7 +297,8 @@ SET plan_cache_mode = force_generic_plan;
 EXPLAIN (COSTS OFF) EXECUTE above(4990);
                                    QUERY PLAN                                    
 ---------------------------------------------------------------------------------
- Finalize Aggregate
+ Custom Scan (TessAgg)
+   Partial Mode: Finalize
    ->  Custom Scan (TessGather)
          Workers Planned: 2
          ->  Parallel Custom Scan (TessSend)
@@ -301,7 +307,7 @@ EXPLAIN (COSTS OFF) EXECUTE above(4990);
                      ->  Parallel Custom Scan (TessFilter) on parallel_t
                            Batch Filter: (a > $1)
                            ->  Parallel Custom Scan (TessHeapScan) on parallel_t
-(9 rows)
+(10 rows)
 
 EXECUTE above(4990);
  count | min  
@@ -346,7 +352,8 @@ EXPLAIN (COSTS OFF)
 SELECT count(*), count(a), sum(a), min(a), max(b) FROM parallel_t WHERE a > 100;
                                    QUERY PLAN                                    
 ---------------------------------------------------------------------------------
- Finalize Aggregate
+ Custom Scan (TessAgg)
+   Partial Mode: Finalize
    ->  Custom Scan (TessGather)
          Workers Planned: 2
          ->  Parallel Custom Scan (TessSend)
@@ -355,7 +362,7 @@ SELECT count(*), count(a), sum(a), min(a), max(b) FROM parallel_t WHERE a > 100;
                      ->  Parallel Custom Scan (TessFilter) on parallel_t
                            Batch Filter: (a > 100)
                            ->  Parallel Custom Scan (TessHeapScan) on parallel_t
-(9 rows)
+(10 rows)
 
 SELECT parallel_same($$SELECT count(*), count(a), sum(a), min(a), max(b) FROM parallel_t WHERE a > 100$$);
          parallel_same          
@@ -366,14 +373,15 @@ SELECT parallel_same($$SELECT count(*), count(a), sum(a), min(a), max(b) FROM pa
 EXPLAIN (COSTS OFF) SELECT count(*), sum(a) FROM parallel_t;
                                 QUERY PLAN                                 
 ---------------------------------------------------------------------------
- Finalize Aggregate
+ Custom Scan (TessAgg)
+   Partial Mode: Finalize
    ->  Custom Scan (TessGather)
          Workers Planned: 2
          ->  Parallel Custom Scan (TessSend)
                ->  Parallel Custom Scan (TessAgg)
                      Partial Mode: Partial
                      ->  Parallel Custom Scan (TessHeapScan) on parallel_t
-(7 rows)
+(8 rows)
 
 SELECT parallel_same($$SELECT count(*), sum(a) FROM parallel_t$$);
     parallel_same    
@@ -385,7 +393,12 @@ EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT sum(a) FROM parallel_t WHERE a > 100;
                                                   QUERY PLAN                                                   
 ---------------------------------------------------------------------------------------------------------------
- Finalize Aggregate (actual rows=1.00 loops=1)
+ Custom Scan (TessAgg) (actual rows=1.00 loops=1)
+   Partial Mode: Finalize
+   Input Batches: 3
+   Input Rows: 3
+   Kernel Calls: 0
+   Computed Datums: 3
    ->  Custom Scan (TessGather) (actual rows=3.00 loops=1)
          Workers Planned: 2
          Workers Launched: 2
@@ -408,7 +421,7 @@ SELECT sum(a) FROM parallel_t WHERE a > 100;
                                  Pages: 28
                                  Deformed Datums: 5000
                                  Restarted Datums: 0
-(23 rows)
+(28 rows)
 
 -- Chains and row-wise expressions as arguments, expressions above, HAVING.
 SELECT parallel_same($$SELECT sum(a + b), max(a * 2), min(-a), sum(CASE WHEN b > 5 THEN a ELSE 0 END)
@@ -451,7 +464,7 @@ SELECT parallel_same($$SELECT count(*), sum(a), min(a), max(a) FROM parallel_t W
 
 -- The leader does not take part: the aggregate's rows are the workers' alone.
 SET parallel_leader_participation = off;
-SELECT plan_property($$SELECT count(*) FROM parallel_t WHERE a > 100$$, 'TessAgg', 'Input Rows') AS agg_rows;
+SELECT partial_property($$SELECT count(*) FROM parallel_t WHERE a > 100$$, 'Input Rows') AS agg_rows;
  agg_rows 
 ----------
  4200
@@ -582,6 +595,42 @@ SELECT parallel_same($$SELECT b, sum(a) FROM parallel_t GROUP BY b$$);
 (1 row)
 
 RESET parallel_leader_participation;
+-- Over the node's partial aggregate, always the node's final one (plan
+-- 4.23, item 4b), even where the core's Gather would cost less: without
+-- GROUP BY the node's stack still, with it the core's own parallel plan,
+-- never the node's partial aggregate under the core's Finalize, which is
+-- built only without TessGather.
+SET parallel_tuple_cost = 0.1;
+SET tessera.gather_tuple_share = 10;
+EXPLAIN (COSTS OFF) SELECT count(*), sum(a) FROM parallel_t WHERE a > 100;
+                                   QUERY PLAN                                    
+---------------------------------------------------------------------------------
+ Custom Scan (TessAgg)
+   Partial Mode: Finalize
+   ->  Custom Scan (TessGather)
+         Workers Planned: 2
+         ->  Parallel Custom Scan (TessSend)
+               ->  Parallel Custom Scan (TessAgg)
+                     Partial Mode: Partial
+                     ->  Parallel Custom Scan (TessFilter) on parallel_t
+                           Batch Filter: (a > 100)
+                           ->  Parallel Custom Scan (TessHeapScan) on parallel_t
+(10 rows)
+
+EXPLAIN (COSTS OFF) SELECT b, count(*), sum(a) FROM parallel_t GROUP BY b;
+                             QUERY PLAN                              
+---------------------------------------------------------------------
+ Finalize HashAggregate
+   Group Key: b
+   ->  Gather
+         Workers Planned: 2
+         ->  Partial HashAggregate
+               Group Key: b
+               ->  Parallel Custom Scan (TessHeapScan) on parallel_t
+(7 rows)
+
+RESET tessera.gather_tuple_share;
+SET parallel_tuple_cost = 0;
 -- Sum states under a Gather (plan 4.23, item 4b): sum and avg of numeric
 -- and bigint, avg of integer and smallint fold into each participant's
 -- records and go up as partial values of the node's own format (bytea: a
@@ -1074,7 +1123,8 @@ DROP TABLE parallel_pack;
 EXPLAIN (COSTS OFF) SELECT count(c), count(*) FROM parallel_t WHERE a > 100;
                                    QUERY PLAN                                    
 ---------------------------------------------------------------------------------
- Finalize Aggregate
+ Custom Scan (TessAgg)
+   Partial Mode: Finalize
    ->  Custom Scan (TessGather)
          Workers Planned: 2
          ->  Parallel Custom Scan (TessSend)
@@ -1083,7 +1133,7 @@ EXPLAIN (COSTS OFF) SELECT count(c), count(*) FROM parallel_t WHERE a > 100;
                      ->  Parallel Custom Scan (TessFilter) on parallel_t
                            Batch Filter: (a > 100)
                            ->  Parallel Custom Scan (TessHeapScan) on parallel_t
-(9 rows)
+(10 rows)
 
 SELECT parallel_same($$SELECT count(c), count(*) FROM parallel_t WHERE a > 100$$);
   parallel_same  
@@ -1409,7 +1459,8 @@ EXPLAIN (COSTS OFF) SELECT count(*) FROM parallel_wide WHERE k > 0 AND c1 > 0;
 EXPLAIN (COSTS OFF) SELECT count(*) FROM parallel_wide WHERE k > 0 AND (c1 # 0) > 0;
                                      QUERY PLAN                                     
 ------------------------------------------------------------------------------------
- Finalize Aggregate
+ Custom Scan (TessAgg)
+   Partial Mode: Finalize
    ->  Custom Scan (TessGather)
          Workers Planned: 2
          ->  Parallel Custom Scan (TessSend)
@@ -1419,7 +1470,7 @@ EXPLAIN (COSTS OFF) SELECT count(*) FROM parallel_wide WHERE k > 0 AND (c1 # 0) 
                            Filter: ((c1 # 0) > 0)
                            Batch Filter: (k > 0)
                            ->  Parallel Custom Scan (TessHeapScan) on parallel_wide
-(10 rows)
+(11 rows)
 
 SET tessera.scan_parallel_setup_cost = 2500;
 EXPLAIN (COSTS OFF) SELECT count(*) FROM parallel_wide WHERE k > 0;
@@ -1434,7 +1485,8 @@ EXPLAIN (COSTS OFF) SELECT count(*) FROM parallel_wide WHERE k > 0;
 EXPLAIN (COSTS OFF) SELECT count(*) FROM parallel_wide WHERE c16 > 0;
                                      QUERY PLAN                                     
 ------------------------------------------------------------------------------------
- Finalize Aggregate
+ Custom Scan (TessAgg)
+   Partial Mode: Finalize
    ->  Custom Scan (TessGather)
          Workers Planned: 2
          ->  Parallel Custom Scan (TessSend)
@@ -1443,7 +1495,7 @@ EXPLAIN (COSTS OFF) SELECT count(*) FROM parallel_wide WHERE c16 > 0;
                      ->  Parallel Custom Scan (TessFilter) on parallel_wide
                            Batch Filter: (c16 > 0)
                            ->  Parallel Custom Scan (TessHeapScan) on parallel_wide
-(9 rows)
+(10 rows)
 
 SET parallel_setup_cost = 0;
 SET tessera.scan_parallel_setup_cost = 0;
@@ -1464,7 +1516,8 @@ SET enable_indexonlyscan = off;
 EXPLAIN (COSTS OFF) SELECT count(*), sum(w) FROM parallel_bitmap WHERE k < 60000;
                                  QUERY PLAN                                 
 ----------------------------------------------------------------------------
- Finalize Aggregate
+ Custom Scan (TessAgg)
+   Partial Mode: Finalize
    ->  Custom Scan (TessGather)
          Workers Planned: 2
          ->  Parallel Custom Scan (TessSend)
@@ -1475,7 +1528,7 @@ EXPLAIN (COSTS OFF) SELECT count(*), sum(w) FROM parallel_bitmap WHERE k < 60000
                                  Recheck Cond: (k < 60000)
                                  ->  Bitmap Index Scan on parallel_bitmap_k
                                        Index Cond: (k < 60000)
-(11 rows)
+(12 rows)
 
 SELECT parallel_same($$SELECT count(*), sum(w) FROM parallel_bitmap WHERE k < 60000$$);
     parallel_same    

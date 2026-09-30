@@ -1701,14 +1701,15 @@ SET parallel_tuple_cost = 0;
 EXPLAIN (COSTS OFF) SELECT max(t), sum(n), avg(n), string_agg(t, ',') IS NOT NULL FROM agg_any_big;
                                  QUERY PLAN                                 
 ----------------------------------------------------------------------------
- Finalize Aggregate
+ Custom Scan (TessAgg)
+   Partial Mode: Finalize
    ->  Custom Scan (TessGather)
          Workers Planned: 1
          ->  Parallel Custom Scan (TessSend)
                ->  Parallel Custom Scan (TessAgg)
                      Partial Mode: Partial
                      ->  Parallel Custom Scan (TessHeapScan) on agg_any_big
-(7 rows)
+(8 rows)
 
 SELECT agg_same($$SELECT max(t), sum(n), avg(n), length(string_agg(t, ',')), array_length(array_agg(a), 1) FROM agg_any_big$$);
                            agg_same                            
@@ -1719,14 +1720,15 @@ SELECT agg_same($$SELECT max(t), sum(n), avg(n), length(string_agg(t, ',')), arr
 EXPLAIN (COSTS OFF) SELECT count(*) FILTER (WHERE a % 3 = 0), sum(n) FILTER (WHERE a > 1000) FROM agg_any_big;
                                  QUERY PLAN                                 
 ----------------------------------------------------------------------------
- Finalize Aggregate
+ Custom Scan (TessAgg)
+   Partial Mode: Finalize
    ->  Custom Scan (TessGather)
          Workers Planned: 1
          ->  Parallel Custom Scan (TessSend)
                ->  Parallel Custom Scan (TessAgg)
                      Partial Mode: Partial
                      ->  Parallel Custom Scan (TessHeapScan) on agg_any_big
-(7 rows)
+(8 rows)
 
 SELECT agg_same($$SELECT count(*) FILTER (WHERE a % 3 = 0), sum(n) FILTER (WHERE a > 1000), max(t) FILTER (WHERE a < 500), sum(a) FILTER (WHERE t LIKE '%7') FROM agg_any_big$$);
                  agg_same                 
@@ -1989,14 +1991,15 @@ SET min_parallel_table_scan_size = 0;
 EXPLAIN (COSTS OFF) SELECT sum(n), avg(b), max(u) FROM agg_fast;
                                QUERY PLAN                                
 -------------------------------------------------------------------------
- Finalize Aggregate
+ Custom Scan (TessAgg)
+   Partial Mode: Finalize
    ->  Custom Scan (TessGather)
          Workers Planned: 2
          ->  Parallel Custom Scan (TessSend)
                ->  Parallel Custom Scan (TessAgg)
                      Partial Mode: Partial
                      ->  Parallel Custom Scan (TessHeapScan) on agg_fast
-(7 rows)
+(8 rows)
 
 SELECT agg_same($$SELECT sum(n), avg(b), max(u), min(n) FROM agg_fast$$);
                     agg_same                     

@@ -897,8 +897,8 @@ and qualifier over the aggregates. Any other aggregate without `GROUP BY`
 function is called for each selected row of the arguments' columns of a
 batch, as the core's `Aggregate` calls it per row but without a row
 handed up, then its final function, or, in a partial plan, its
-serialization function for the core's Finalize Aggregate (`bench/pg/
-anyagg.sql`: ×0.36–0.86 against the core). With `GROUP BY` it stands in for the
+serialization function for the final aggregation above, which combines
+the states (`bench/pg/anyagg.sql`: ×0.36–0.86 against the core). With `GROUP BY` it stands in for the
 core's `HashAggregate`: each row finds the record of its keys in the hash
 table of [table.md](table.md), whose payload holds the group's aggregate
 states, and the groups go out in batches when the input ends.
@@ -1065,7 +1065,8 @@ not DISTINCT, asks the projection for its argument's decimals
 numeric made or read: `min(n * 1.08)`, `max(n - 0.5)` by 10 groups 97 ms
 before and 69 after, `sum(n * 1.08)`, `avg(n - 0.5)` by 100 groups 99 and
 70. A partial aggregate stays with
-the core's functions, whose state the Finalize Aggregate combines. The
+the core's functions, whose state the node's final aggregation combines
+by the aggregate's combine function. The
 arguments after the first travel in the private data as `more`. With `GROUP BY` such an
 aggregate's state is a word of the group's record, the value itself when
 a word holds it, else the address of its copy in that context, with the
@@ -1270,16 +1271,28 @@ aggregate paths, builds the whole stack: the node's partial path over the
 batch child of the core path's input (a partial `TessFilter`, a
 clause-free scan through `TessHeapScan`, anything else through
 `TessPack`), with the partial aggregates of that relation's target as its
-scan tuple, the core's `Gather` over it and the core's
-`Finalize Aggregate` over that, which combines the participants' values
-with the aggregates' combine functions and applies `HAVING`; `add_path`
-decides against the core's stack and the node's serial path. The partial
-path is parallel-aware for the counters the node shares, and the plan's
-qualifier is empty, since `HAVING` belongs to the `Finalize Aggregate`.
-The partial values are the whole ones' types, int8 for `count` and
-`sum`, the argument's for `min` and `max`, so the node computes them as it
-computes the whole ones, and a participant without rows gives a count of 0 and
-NULL otherwise, which the strict combine functions skip. With `GROUP BY`
+scan tuple, `TessGather` over it and the node's final aggregation over
+that (`Partial Mode: Finalize`), which merges the participants' values
+and applies `HAVING`; `add_path` decides against the core's own parallel
+plan and the node's serial path. Over the node's partial aggregate the
+final one is always the node's (plan 4.23, item 4b): the core's `Gather`
+and `Finalize Aggregate` are built only without `TessGather`
+(`tessera.batch_gather` off). The partial path is parallel-aware for the
+counters the node shares, and the plan's qualifier is empty, since
+`HAVING` belongs to the final aggregation. The partial values are the
+whole ones' types, int8 for `count` and `sum`, the argument's for `min`
+and `max`, so the node computes them as it computes the whole ones, and
+a participant without rows gives a count of 0 and NULL otherwise. Without
+`GROUP BY` the final aggregation takes a row a participant: counts and
+sums added as int8 (22003 past the range), NULL skipped, extremes
+compared, not the batch functions, which would count the participants;
+a generic aggregate's partial state, the core's (serialized when
+internal), goes into its state as the core's `Finalize Aggregate` merges
+it, deserialized first, then by the combine function, which, strict,
+skips NULL and takes the first value as the state, and the final
+function makes the value. It costs the core's `Finalize Aggregate` over
+`TessGather`, not a share of it: a share would take a tenth off the
+partial stack below. With `GROUP BY`
 the node's partial path is the same over the core's partial hashed
 aggregate paths: each participant keeps a table of its own groups, sent
 up early when it fills and folds, and written to disk as a serial

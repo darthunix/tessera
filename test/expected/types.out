@@ -2519,7 +2519,8 @@ SET max_parallel_workers_per_gather = 2;
 EXPLAIN (COSTS OFF) SELECT count(*) FROM types_g JOIN types_h ON types_g.t = types_h.t AND types_g.w = types_h.w;
                                          QUERY PLAN                                         
 --------------------------------------------------------------------------------------------
- Finalize Aggregate
+ Custom Scan (TessAgg)
+   Partial Mode: Finalize
    ->  Custom Scan (TessGather)
          Workers Planned: 2
          ->  Parallel Custom Scan (TessSend)
@@ -2531,7 +2532,7 @@ EXPLAIN (COSTS OFF) SELECT count(*) FROM types_g JOIN types_h ON types_g.t = typ
                            Batch Join Filter: (types_g.t = types_h.t)
                            ->  Parallel Custom Scan (TessHeapScan) on types_g
                            ->  Parallel Custom Scan (TessHeapScan) on types_h
-(12 rows)
+(13 rows)
 
 SELECT types_same($$SELECT count(*), sum(types_h.id) FROM types_g JOIN types_h ON types_g.t = types_h.t AND types_g.w = types_h.w$$);
  types_same 

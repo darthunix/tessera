@@ -137,7 +137,7 @@ SELECT parallel_same($$SELECT count(*), sum(a), min(a), max(a) FROM parallel_t W
 SELECT parallel_same($$SELECT count(*), sum(a), min(a), max(a) FROM parallel_t WHERE a > 1000000$$);
 -- The leader does not take part: the aggregate's rows are the workers' alone.
 SET parallel_leader_participation = off;
-SELECT plan_property($$SELECT count(*) FROM parallel_t WHERE a > 100$$, 'TessAgg', 'Input Rows') AS agg_rows;
+SELECT partial_property($$SELECT count(*) FROM parallel_t WHERE a > 100$$, 'Input Rows') AS agg_rows;
 SELECT parallel_same($$SELECT count(*), sum(a) FROM parallel_t WHERE a > 100$$);
 RESET parallel_leader_participation;
 -- A parameter of a generic plan in an argument.
@@ -168,6 +168,17 @@ SELECT plan_property($$SELECT b, sum(a) FROM parallel_t GROUP BY b$$, 'TessAgg',
 SET parallel_leader_participation = off;
 SELECT parallel_same($$SELECT b, sum(a) FROM parallel_t GROUP BY b$$);
 RESET parallel_leader_participation;
+-- Over the node's partial aggregate, always the node's final one (plan
+-- 4.23, item 4b), even where the core's Gather would cost less: without
+-- GROUP BY the node's stack still, with it the core's own parallel plan,
+-- never the node's partial aggregate under the core's Finalize, which is
+-- built only without TessGather.
+SET parallel_tuple_cost = 0.1;
+SET tessera.gather_tuple_share = 10;
+EXPLAIN (COSTS OFF) SELECT count(*), sum(a) FROM parallel_t WHERE a > 100;
+EXPLAIN (COSTS OFF) SELECT b, count(*), sum(a) FROM parallel_t GROUP BY b;
+RESET tessera.gather_tuple_share;
+SET parallel_tuple_cost = 0;
 -- Sum states under a Gather (plan 4.23, item 4b): sum and avg of numeric
 -- and bigint, avg of integer and smallint fold into each participant's
 -- records and go up as partial values of the node's own format (bytea: a

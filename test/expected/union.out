@@ -759,7 +759,8 @@ SET min_parallel_table_scan_size = 0;
 EXPLAIN (COSTS OFF) SELECT count(*), sum(k) FROM union_part WHERE v < 10;
                                               QUERY PLAN                                               
 -------------------------------------------------------------------------------------------------------
- Finalize Aggregate
+ Custom Scan (TessAgg)
+   Partial Mode: Finalize
    ->  Custom Scan (TessGather)
          Workers Planned: 2
          ->  Parallel Custom Scan (TessSend)
@@ -778,7 +779,7 @@ EXPLAIN (COSTS OFF) SELECT count(*), sum(k) FROM union_part WHERE v < 10;
                            ->  Parallel Custom Scan (TessFilter) on union_part_3b union_part_4
                                  Batch Filter: (union_part_4.v < 10)
                                  ->  Parallel Custom Scan (TessHeapScan) on union_part_3b union_part_4
-(19 rows)
+(20 rows)
 
 SELECT union_same($$SELECT count(*), sum(k) FROM union_part WHERE v < 10$$);
  union_same 
@@ -851,7 +852,8 @@ SELECT count(*), sum(a) FROM (SELECT a FROM union_a WHERE a > 100
                               UNION ALL SELECT a FROM union_b WHERE a < 600) AS s;
                                         QUERY PLAN                                        
 ------------------------------------------------------------------------------------------
- Finalize Aggregate
+ Custom Scan (TessAgg)
+   Partial Mode: Finalize
    ->  Custom Scan (TessGather)
          Workers Planned: 2
          ->  Parallel Custom Scan (TessSend)
@@ -868,7 +870,7 @@ SELECT count(*), sum(a) FROM (SELECT a FROM union_a WHERE a > 100
                                  ->  Parallel Custom Scan (TessFilter) on union_a
                                        Batch Filter: (union_a.a > 100)
                                        ->  Parallel Custom Scan (TessHeapScan) on union_a
-(17 rows)
+(18 rows)
 
 SELECT union_same($$SELECT count(*), sum(a) FROM (SELECT a FROM union_a WHERE a > 100
                    UNION ALL SELECT a FROM union_b WHERE a < 600) AS s$$);
@@ -900,7 +902,8 @@ SELECT count(*), sum(a) FROM (SELECT a FROM union_a WHERE a > 980 AND union_slow
                               UNION ALL SELECT a FROM union_b WHERE a < 20 AND union_slow(a, 0.03) > 0) AS s;
                                          QUERY PLAN                                          
 ---------------------------------------------------------------------------------------------
- Finalize Aggregate
+ Custom Scan (TessAgg)
+   Partial Mode: Finalize
    ->  Custom Scan (TessGather)
          Workers Planned: 2
          ->  Parallel Custom Scan (TessSend)
@@ -919,7 +922,7 @@ SELECT count(*), sum(a) FROM (SELECT a FROM union_a WHERE a > 980 AND union_slow
                                        Filter: (union_slow(a, '0.01'::double precision) > 0)
                                        Batch Filter: (union_a.a > 980)
                                        ->  Parallel Custom Scan (TessHeapScan) on union_a
-(19 rows)
+(20 rows)
 
 SELECT count(*), sum(a) FROM (SELECT a FROM union_a WHERE a > 980 AND union_slow(a, 0.01) > 0
                               UNION ALL SELECT a FROM union_b WHERE a < 20 AND union_slow(a, 0.03) > 0) AS s;
@@ -972,7 +975,8 @@ RIGHT JOIN (VALUES (1), (2)) AS v(x) ON true;
 -------------------------------------------------------------------------------------------------------------
  Nested Loop Left Join
    ->  Values Scan on "*VALUES*"
-   ->  Finalize Aggregate
+   ->  Custom Scan (TessAgg)
+         Partial Mode: Finalize
          ->  Custom Scan (TessGather)
                Workers Planned: 2
                ->  Parallel Custom Scan (TessSend)
@@ -991,7 +995,7 @@ RIGHT JOIN (VALUES (1), (2)) AS v(x) ON true;
                                  ->  Parallel Custom Scan (TessFilter) on union_part_3b union_part_4
                                        Batch Filter: (union_part_4.v < 10)
                                        ->  Parallel Custom Scan (TessHeapScan) on union_part_3b union_part_4
-(21 rows)
+(22 rows)
 
 SELECT union_same($$SELECT x, n, s FROM (SELECT count(*) AS n, sum(k) AS s FROM union_part WHERE v < 10) AS ss
 RIGHT JOIN (VALUES (1), (2), (3)) AS v(x) ON true$$);
@@ -1026,7 +1030,8 @@ SET enable_parallel_append = off;
 EXPLAIN (COSTS OFF) SELECT count(*), sum(k) FROM union_part WHERE v < 10;
                                               QUERY PLAN                                               
 -------------------------------------------------------------------------------------------------------
- Finalize Aggregate
+ Custom Scan (TessAgg)
+   Partial Mode: Finalize
    ->  Custom Scan (TessGather)
          Workers Planned: 2
          ->  Parallel Custom Scan (TessSend)
@@ -1045,7 +1050,7 @@ EXPLAIN (COSTS OFF) SELECT count(*), sum(k) FROM union_part WHERE v < 10;
                            ->  Parallel Custom Scan (TessFilter) on union_part_3b union_part_4
                                  Batch Filter: (union_part_4.v < 10)
                                  ->  Parallel Custom Scan (TessHeapScan) on union_part_3b union_part_4
-(19 rows)
+(20 rows)
 
 SELECT union_same($$SELECT count(*), sum(k) FROM union_part WHERE v < 10$$);
  union_same 

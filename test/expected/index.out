@@ -943,7 +943,8 @@ SET tessera.scan_worker_page_cost = 0;
 EXPLAIN (COSTS OFF) SELECT count(*), sum(w) FROM index_r WHERE id < 21000;
                                   QUERY PLAN                                  
 ------------------------------------------------------------------------------
- Finalize Aggregate
+ Custom Scan (TessAgg)
+   Partial Mode: Finalize
    ->  Custom Scan (TessGather)
          Workers Planned: 2
          ->  Parallel Custom Scan (TessSend)
@@ -952,7 +953,7 @@ EXPLAIN (COSTS OFF) SELECT count(*), sum(w) FROM index_r WHERE id < 21000;
                      ->  Parallel Custom Scan (TessFilter) on index_r
                            Batch Filter: (id < 21000)
                            ->  Parallel Custom Scan (TessHeapScan) on index_r
-(9 rows)
+(10 rows)
 
 SELECT index_same($$SELECT count(*), sum(w) FROM index_r WHERE id < 21000$$);
  index_same 
@@ -963,7 +964,8 @@ SELECT index_same($$SELECT count(*), sum(w) FROM index_r WHERE id < 21000$$);
 EXPLAIN (COSTS OFF) SELECT count(*) FROM index_r WHERE k < 21000;
                                   QUERY PLAN                                  
 ------------------------------------------------------------------------------
- Finalize Aggregate
+ Custom Scan (TessAgg)
+   Partial Mode: Finalize
    ->  Custom Scan (TessGather)
          Workers Planned: 2
          ->  Parallel Custom Scan (TessSend)
@@ -972,7 +974,7 @@ EXPLAIN (COSTS OFF) SELECT count(*) FROM index_r WHERE k < 21000;
                      ->  Parallel Custom Scan (TessFilter) on index_r
                            Batch Filter: (k < 21000)
                            ->  Parallel Custom Scan (TessHeapScan) on index_r
-(9 rows)
+(10 rows)
 
 SELECT index_same($$SELECT count(*), sum(k) FROM index_r WHERE k < 21000$$);
  index_same 
@@ -993,7 +995,8 @@ RESET tessera.scan_parallel_setup_cost;
 EXPLAIN (COSTS OFF) SELECT count(*) FROM index_r WHERE k < 9000;
                                     QUERY PLAN                                     
 -----------------------------------------------------------------------------------
- Finalize Aggregate
+ Custom Scan (TessAgg)
+   Partial Mode: Finalize
    ->  Custom Scan (TessGather)
          Workers Planned: 2
          ->  Parallel Custom Scan (TessSend)
@@ -1002,7 +1005,7 @@ EXPLAIN (COSTS OFF) SELECT count(*) FROM index_r WHERE k < 9000;
                      ->  Custom Scan (TessPack)
                            ->  Parallel Index Only Scan using index_r_k on index_r
                                  Index Cond: (k < 9000)
-(9 rows)
+(10 rows)
 
 -- A worker at the leader's pace too, which keeps these index scans of a
 -- small table clear of the partial full scan.
@@ -1011,7 +1014,8 @@ SET tessera.index_worker_share = 1;
 EXPLAIN (COSTS OFF) SELECT count(*) FROM index_r WHERE k < 9000;
                                        QUERY PLAN                                        
 -----------------------------------------------------------------------------------------
- Finalize Aggregate
+ Custom Scan (TessAgg)
+   Partial Mode: Finalize
    ->  Custom Scan (TessGather)
          Workers Planned: 2
          ->  Parallel Custom Scan (TessSend)
@@ -1022,7 +1026,7 @@ EXPLAIN (COSTS OFF) SELECT count(*) FROM index_r WHERE k < 9000;
                            ->  Parallel Custom Scan (TessHeapScan) on index_r
                                  ->  Parallel Index Only Scan using index_r_k on index_r
                                        Index Cond: (k < 9000)
-(11 rows)
+(12 rows)
 
 SELECT index_same($$SELECT count(*), sum(k) FROM index_r WHERE k < 9000$$);
  index_same 
@@ -1033,7 +1037,8 @@ SELECT index_same($$SELECT count(*), sum(k) FROM index_r WHERE k < 9000$$);
 EXPLAIN (COSTS OFF) SELECT count(*), sum(w) FROM index_r WHERE id < 3000;
                                      QUERY PLAN                                      
 -------------------------------------------------------------------------------------
- Finalize Aggregate
+ Custom Scan (TessAgg)
+   Partial Mode: Finalize
    ->  Custom Scan (TessGather)
          Workers Planned: 2
          ->  Parallel Custom Scan (TessSend)
@@ -1044,7 +1049,7 @@ EXPLAIN (COSTS OFF) SELECT count(*), sum(w) FROM index_r WHERE id < 3000;
                            ->  Parallel Custom Scan (TessHeapScan) on index_r
                                  ->  Parallel Index Scan using index_r_id on index_r
                                        Index Cond: (id < 3000)
-(11 rows)
+(12 rows)
 
 SELECT index_same($$SELECT count(*), sum(w) FROM index_r WHERE id < 3000$$);
  index_same 
@@ -1062,7 +1067,8 @@ SET tessera.index_worker_share = 1;
 EXPLAIN (COSTS OFF) SELECT count(*) FROM index_r WHERE k < 9000;
                                        QUERY PLAN                                        
 -----------------------------------------------------------------------------------------
- Finalize Aggregate
+ Custom Scan (TessAgg)
+   Partial Mode: Finalize
    ->  Custom Scan (TessGather)
          Workers Planned: 2
          ->  Parallel Custom Scan (TessSend)
@@ -1073,13 +1079,14 @@ EXPLAIN (COSTS OFF) SELECT count(*) FROM index_r WHERE k < 9000;
                            ->  Parallel Custom Scan (TessHeapScan) on index_r
                                  ->  Parallel Index Only Scan using index_r_k on index_r
                                        Index Cond: (k < 9000)
-(11 rows)
+(12 rows)
 
 SET tessera.index_worker_share = 0.1;
 EXPLAIN (COSTS OFF) SELECT count(*) FROM index_r WHERE k < 9000;
                                   QUERY PLAN                                  
 ------------------------------------------------------------------------------
- Finalize Aggregate
+ Custom Scan (TessAgg)
+   Partial Mode: Finalize
    ->  Custom Scan (TessGather)
          Workers Planned: 2
          ->  Parallel Custom Scan (TessSend)
@@ -1088,7 +1095,7 @@ EXPLAIN (COSTS OFF) SELECT count(*) FROM index_r WHERE k < 9000;
                      ->  Parallel Custom Scan (TessFilter) on index_r
                            Batch Filter: (k < 9000)
                            ->  Parallel Custom Scan (TessHeapScan) on index_r
-(9 rows)
+(10 rows)
 
 SET tessera.index_worker_share = 1;
 SET tessera.scan_parallel_setup_cost = 0;
@@ -1113,7 +1120,8 @@ SELECT x, n FROM (SELECT count(*) AS n FROM index_r WHERE k < 9000) AS ss RIGHT 
 -----------------------------------------------------------------------------------------------
  Nested Loop Left Join
    ->  Values Scan on "*VALUES*"
-   ->  Finalize Aggregate
+   ->  Custom Scan (TessAgg)
+         Partial Mode: Finalize
          ->  Custom Scan (TessGather)
                Workers Planned: 2
                ->  Parallel Custom Scan (TessSend)
@@ -1124,7 +1132,7 @@ SELECT x, n FROM (SELECT count(*) AS n FROM index_r WHERE k < 9000) AS ss RIGHT 
                                  ->  Parallel Custom Scan (TessHeapScan) on index_r
                                        ->  Parallel Index Only Scan using index_r_k on index_r
                                              Index Cond: (k < 9000)
-(13 rows)
+(14 rows)
 
 SELECT index_same($$SELECT x, n, s FROM (SELECT count(*) AS n, sum(k) AS s FROM index_r WHERE k < 9000) AS ss
                     RIGHT JOIN (VALUES (1), (2), (3)) AS v(x) ON true$$);
@@ -1146,7 +1154,8 @@ SET tessera.bitmap_build_scatter_cost = 0;
 EXPLAIN (COSTS OFF) SELECT count(*), sum(w) FROM index_r WHERE id < 9000;
                                   QUERY PLAN                                  
 ------------------------------------------------------------------------------
- Finalize Aggregate
+ Custom Scan (TessAgg)
+   Partial Mode: Finalize
    ->  Custom Scan (TessGather)
          Workers Planned: 2
          ->  Parallel Custom Scan (TessSend)
@@ -1157,7 +1166,7 @@ EXPLAIN (COSTS OFF) SELECT count(*), sum(w) FROM index_r WHERE id < 9000;
                            ->  Parallel Custom Scan (TessHeapScan) on index_r
                                  ->  Bitmap Index Scan on index_r_id
                                        Index Cond: (id < 9000)
-(11 rows)
+(12 rows)
 
 SELECT index_same($$SELECT count(*), sum(w) FROM index_r WHERE id < 9000$$);
  index_same 
@@ -1170,7 +1179,8 @@ SET enable_seqscan = off;
 EXPLAIN (COSTS OFF) SELECT count(*), sum(w) FROM index_r WHERE k < 9000;
                                   QUERY PLAN                                  
 ------------------------------------------------------------------------------
- Finalize Aggregate
+ Custom Scan (TessAgg)
+   Partial Mode: Finalize
    ->  Custom Scan (TessGather)
          Workers Planned: 2
          ->  Parallel Custom Scan (TessSend)
@@ -1181,7 +1191,7 @@ EXPLAIN (COSTS OFF) SELECT count(*), sum(w) FROM index_r WHERE k < 9000;
                            ->  Parallel Custom Scan (TessHeapScan) on index_r
                                  ->  Bitmap Index Scan on index_r_k
                                        Index Cond: (k < 9000)
-(11 rows)
+(12 rows)
 
 SELECT index_same($$SELECT count(*), sum(w), min(id) FROM index_r WHERE k < 9000$$);
  index_same 
@@ -1210,7 +1220,8 @@ SELECT x, n FROM (SELECT count(*) AS n FROM index_r WHERE k < 9000) AS ss RIGHT 
 ------------------------------------------------------------------------------------
  Nested Loop Left Join
    ->  Values Scan on "*VALUES*"
-   ->  Finalize Aggregate
+   ->  Custom Scan (TessAgg)
+         Partial Mode: Finalize
          ->  Custom Scan (TessGather)
                Workers Planned: 2
                ->  Parallel Custom Scan (TessSend)
@@ -1221,7 +1232,7 @@ SELECT x, n FROM (SELECT count(*) AS n FROM index_r WHERE k < 9000) AS ss RIGHT 
                                  ->  Parallel Custom Scan (TessHeapScan) on index_r
                                        ->  Bitmap Index Scan on index_r_k
                                              Index Cond: (k < 9000)
-(13 rows)
+(14 rows)
 
 SELECT index_same($$SELECT x, n, s FROM (SELECT count(*) AS n, sum(w) AS s FROM index_r WHERE k < 9000) AS ss
                     RIGHT JOIN (VALUES (1), (2), (3)) AS v(x) ON true$$);
@@ -1243,7 +1254,8 @@ VACUUM ANALYZE index_rb;
 EXPLAIN (COSTS OFF) SELECT count(*), sum(w) FROM index_rb WHERE id BETWEEN 30000 AND 38999;
                                      QUERY PLAN                                      
 -------------------------------------------------------------------------------------
- Finalize Aggregate
+ Custom Scan (TessAgg)
+   Partial Mode: Finalize
    ->  Custom Scan (TessGather)
          Workers Planned: 2
          ->  Parallel Custom Scan (TessSend)
@@ -1254,7 +1266,7 @@ EXPLAIN (COSTS OFF) SELECT count(*), sum(w) FROM index_rb WHERE id BETWEEN 30000
                            ->  Parallel Custom Scan (TessHeapScan) on index_rb
                                  ->  Bitmap Index Scan on index_rb_id
                                        Index Cond: ((id >= 30000) AND (id <= 38999))
-(11 rows)
+(12 rows)
 
 SELECT index_same($$SELECT count(*), sum(w) FROM index_rb WHERE id BETWEEN 30000 AND 38999$$);
  index_same 

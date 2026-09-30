@@ -191,6 +191,16 @@ typedef struct GenericAgg
 	FmgrInfo	serialfn;
 	bool		has_final;
 	bool		has_serial;
+	/*
+	 * Above a gather without groups: the participants' partial values go
+	 * into the state by the combine function, deserialized first by the
+	 * deserialization function when the state is internal.
+	 */
+	FmgrInfo	combinefn;
+	FmgrInfo	deserialfn;
+	bool		has_deserial;
+	FunctionCallInfo combine_call;
+	FunctionCallInfo deserial_call;
 	int			final_nargs;
 	int			nargs;
 	int16		translen;
@@ -1241,11 +1251,13 @@ make_agg_path(PlannerInfo *root, const AggPath *agg, List *tlist, int nkeys, int
 	template = agg->path;
 	/*
 	 * Grouping costs the node's own; a plain aggregate a share of the
-	 * core's, tessera.agg_cost_factor (0.9).
+	 * core's, tessera.agg_cost_factor (0.9), but a final one the core's:
+	 * its work is a row a participant, and the share would take a tenth
+	 * off the partial stack below it.
 	 */
 	if (nkeys > 0)
 		group_cost(root, child, agg->path.rows, nkeys, tlist, agg->aggsplit, &template);
-	else
+	else if ((flags & AGG_PATH_FINALIZE) == 0)
 		template.total_cost *= tess_agg_cost_factor;
 	/* The groups come in no order, whatever order the core's had. */
 	template.pathkeys = NIL;
@@ -1367,19 +1379,20 @@ create_key_stack_paths(PlannerInfo *root, RelOptInfo *partial_rel, RelOptInfo *o
  * and builds the Gather and the Finalize Aggregate before it calls this
  * one, so the node builds the whole stack for each of the core's partial
  * aggregate paths: its own partial path over the batch child, with the
- * partial aggregates as its targets, the core's Gather over it and the
- * core's Finalize Aggregate over that, which combines the participants'
- * values and applies HAVING. With GROUP BY each participant keeps a table
- * of its own groups and the node merges them over TessGather, in batches:
- * its grouping of final_tlist (the serial path's keys and aggregates),
- * whose arguments are the aggregates' partial values; the aggregates are
- * the node's own and sum states, whose partial values are the node's own
- * format, which the core's Finalize does not read (plan 4.23, item 4b).
- * Only without TessGather (tessera.batch_gather off) do the core's Gather
- * and Finalize HashAggregate merge them, and then the node's own
- * aggregates alone. The path is parallel-aware for the counters the node
- * shares; the child divides the work. Without aggregates the node groups
- * above the gather alone (create_key_stack_paths).
+ * partial aggregates as its targets, TessGather over it and the node's
+ * final aggregation of final_tlist (the serial path's keys and
+ * aggregates) above, whose arguments are the aggregates' partial values
+ * and which applies HAVING (plan 4.23, item 4b: over the node's partial
+ * aggregate, always the node's final one). Without GROUP BY it merges one
+ * row a participant, a generic aggregate's by its combine function; with
+ * GROUP BY each participant keeps a table of its own groups, which it
+ * merges in batches, the aggregates the node's own and sum states, whose
+ * partial values are the node's own format, which the core's Finalize
+ * does not read. Only without TessGather (tessera.batch_gather off) do
+ * the core's Gather and Finalize Aggregate merge them, and then not sum
+ * states. The path is parallel-aware for the counters the node shares;
+ * the child divides the work. Without aggregates the node groups above
+ * the gather alone (create_key_stack_paths).
  */
 static void
 create_partial_paths(PlannerInfo *root, RelOptInfo *grouped_rel,
@@ -1418,6 +1431,8 @@ create_partial_paths(PlannerInfo *root, RelOptInfo *grouped_rel,
 		CustomPath *partial = make_agg_path(root, agg, tlist, list_length(keys),
 											AGG_PATH_PARTIAL |
 											(nsums > 0 ? AGG_PATH_OWN_STATES : 0));
+		Path	   *gathered;
+		CustomPath *path;
 		GatherPath *gather;
 		AggPath    *final;
 		double		rows;
@@ -1426,29 +1441,26 @@ create_partial_paths(PlannerInfo *root, RelOptInfo *grouped_rel,
 			partial->path.parallel_workers <= 0)
 			continue;
 		partial->path.parallel_aware = true;
-		/* With GROUP BY the node merges the groups above TessGather. */
-		if (keys != NIL)
+		/* The node merges the participants' values itself, above TessGather. */
+		gathered = tess_gather_path(root, partial_rel, &partial->path);
+		if (gathered != NULL)
 		{
-			Path	   *gathered = tess_gather_path(root, partial_rel, &partial->path);
-			CustomPath *path;
-
-			if (gathered != NULL)
+			final = create_agg_path(root, grouped_rel, gathered, grouped_rel->reltarget,
+									strategy, AGGSPLIT_FINAL_DESERIAL,
+									keys != NIL ? root->processed_groupClause : NIL,
+									(List *) extra->havingQual,
+									&extra->agg_final_costs, keys != NIL ? groups : 1.0);
+			path = make_agg_path(root, final, final_tlist, list_length(keys),
+								 AGG_PATH_HAVING | AGG_PATH_FINALIZE);
+			if (path != NULL)
 			{
-				final = create_agg_path(root, grouped_rel, gathered, grouped_rel->reltarget,
-										AGG_HASHED, AGGSPLIT_FINAL_DESERIAL,
-										root->processed_groupClause,
-										(List *) extra->havingQual,
-										&extra->agg_final_costs, groups);
-				path = make_agg_path(root, final, final_tlist, list_length(keys),
-									 AGG_PATH_HAVING | AGG_PATH_FINALIZE);
-				if (path != NULL)
-					add_path(grouped_rel, &path->path);
+				add_path(grouped_rel, &path->path);
 				continue;
 			}
-			/* The core's Finalize reads no sum state of the node's format. */
-			if (nsums > 0)
-				continue;
 		}
+		/* The core's Finalize reads no sum state of the node's format. */
+		if (nsums > 0)
+			continue;
 		rows = compute_gather_rows(&partial->path);
 		gather = create_gather_path(root, partial_rel, &partial->path,
 									partial->path.pathtarget, NULL, &rows);
@@ -2881,6 +2893,33 @@ generic_init(TessAggState *state, Aggref *agg)
 								 agg->inputcollid, form->aggtransfn, InvalidOid,
 								 &expr, NULL);
 	fmgr_info_set_expr((Node *) expr, &generic->transfn);
+	/* Above a gather without groups, the participants' partial values. */
+	if (state->finalize && state->nkeys == 0)
+	{
+		/* Two arguments of the transition type, as the core's ExecInitAgg builds it. */
+		Oid			states[2] = {agg->aggtranstype, agg->aggtranstype};
+
+		if (!OidIsValid(form->aggcombinefn))
+			elog(ERROR, "TessAgg received a foreign plan");
+		fmgr_info_cxt(form->aggcombinefn, &generic->combinefn, estate->es_query_cxt);
+		build_aggregate_transfn_expr(states, 2, 0, agg->aggvariadic, agg->aggtranstype,
+									 agg->inputcollid, form->aggcombinefn, InvalidOid,
+									 &expr, NULL);
+		fmgr_info_set_expr((Node *) expr, &generic->combinefn);
+		generic->combine_call = palloc0(SizeForFunctionCallInfo(2));
+		InitFunctionCallInfoData(*generic->combine_call, &generic->combinefn, 2,
+								 agg->inputcollid, (Node *) state->generic_agg, NULL);
+		generic->has_deserial = OidIsValid(form->aggdeserialfn);
+		if (generic->has_deserial)
+		{
+			fmgr_info_cxt(form->aggdeserialfn, &generic->deserialfn, estate->es_query_cxt);
+			build_aggregate_deserialfn_expr(form->aggdeserialfn, &expr);
+			fmgr_info_set_expr((Node *) expr, &generic->deserialfn);
+			generic->deserial_call = palloc0(SizeForFunctionCallInfo(2));
+			InitFunctionCallInfoData(*generic->deserial_call, &generic->deserialfn, 2,
+									 InvalidOid, (Node *) state->generic_agg, NULL);
+		}
+	}
 	/* A partial aggregate goes to the Finalize Aggregate unfinished. */
 	if (DO_AGGSPLIT_SKIPFINAL(agg->aggsplit))
 	{
@@ -2933,7 +2972,9 @@ generic_init(TessAggState *state, Aggref *agg)
 								 InvalidOid, (Node *) state->generic_agg, NULL);
 	}
 	generic->columns = palloc0_array(TessDatumColumn, generic->nargs);
-	generic->fast = fast_kind(agg, generic, state->own_states);
+	/* A final plain aggregate combines the core's partial states. */
+	generic->fast = state->finalize && state->nkeys == 0 ? FAST_NONE :
+		fast_kind(agg, generic, state->own_states);
 	/* Its state starts empty, as the core's of these but avg(int4)'s. */
 	if (generic->fast != FAST_NONE)
 		generic->init_null = true;
@@ -3026,6 +3067,73 @@ generic_advance(GenericAgg *generic, int row, MemoryContext states, MemoryContex
 	}
 	generic->state = result;
 	generic->state_null = call->isnull;
+}
+
+/*
+ * A participant's partial value into a generic aggregate's state, as the
+ * core's Finalize Aggregate combines one: deserialized first when the
+ * state is internal (a strict deserialization function keeps NULL), then
+ * the combine function, which, strict, skips NULL and takes the first
+ * value as the state; a new by-reference state is copied into the states'
+ * context and the old one freed, as generic_advance does.
+ */
+static void
+generic_combine(TessAggState *state, GenericAgg *generic, Datum value, bool isnull)
+{
+	MemoryContext states = state->generic_agg->curaggcontext->ecxt_per_tuple_memory;
+	MemoryContext old =
+		MemoryContextSwitchTo(state->css.ss.ps.ps_ExprContext->ecxt_per_tuple_memory);
+	FunctionCallInfo call;
+	Datum		result;
+
+	if (generic->has_deserial && !(isnull && generic->deserialfn.fn_strict))
+	{
+		call = generic->deserial_call;
+		call->args[0].value = value;
+		call->args[0].isnull = isnull;
+		call->args[1].value = (Datum) 0;
+		call->args[1].isnull = false;
+		call->isnull = false;
+		value = FunctionCallInvoke(call);
+		isnull = call->isnull;
+	}
+	if (generic->combinefn.fn_strict)
+	{
+		if (isnull)
+		{
+			MemoryContextSwitchTo(old);
+			return;
+		}
+		if (generic->state_null)
+		{
+			MemoryContextSwitchTo(states);
+			generic->state = datumCopy(value, generic->transbyval, generic->translen);
+			generic->state_null = false;
+			MemoryContextSwitchTo(old);
+			return;
+		}
+	}
+	call = generic->combine_call;
+	call->args[0].value = generic->state;
+	call->args[0].isnull = generic->state_null;
+	call->args[1].value = value;
+	call->args[1].isnull = isnull;
+	call->isnull = false;
+	result = FunctionCallInvoke(call);
+	if (!generic->transbyval &&
+		DatumGetPointer(result) != DatumGetPointer(generic->state))
+	{
+		if (!call->isnull)
+		{
+			MemoryContextSwitchTo(states);
+			result = datumCopy(result, generic->transbyval, generic->translen);
+		}
+		if (!generic->state_null)
+			pfree(DatumGetPointer(generic->state));
+	}
+	generic->state = result;
+	generic->state_null = call->isnull;
+	MemoryContextSwitchTo(old);
 }
 
 static void
@@ -3581,7 +3689,7 @@ agg_begin(CustomScanState *css, EState *estate, int eflags)
 	state->own_states = tess_plan_read_int(reader, "own_states") != 0;
 	state->finalize = tess_plan_read_int(reader, "finalize") != 0;
 	tess_plan_reader_finish(reader);
-	if (state->finalize && (state->partial || state->setop >= 0 || keys == NIL))
+	if (state->finalize && (state->partial || state->setop >= 0))
 		elog(ERROR, "TessAgg received a foreign plan");
 	if (state->own_states && (!state->partial || keys == NIL))
 		elog(ERROR, "TessAgg received a foreign plan");
@@ -3684,9 +3792,12 @@ agg_begin(CustomScanState *css, EState *estate, int eflags)
 		}
 		/*
 		 * A partial value is the transition type's: an extreme's, int8 for
-		 * the rest; a sum state's the node's own (TessTableSumInput).
+		 * the rest; with groups a sum state's the node's own
+		 * (TessTableSumInput), without them a generic one's the core's,
+		 * which its combine function takes.
 		 */
-		if (state->finalize && ((value->kind == AGG_GENERIC && !value->generic->sum_state) ||
+		if (state->finalize && ((value->kind == AGG_GENERIC && state->nkeys > 0 &&
+								 !value->generic->sum_state) ||
 								agg->aggdistinct != NIL))
 			elog(ERROR, "TessAgg received a foreign plan");
 		if (state->partial && value->kind == AGG_GENERIC && state->nkeys > 0 &&
@@ -3952,6 +4063,42 @@ agg_begin(CustomScanState *css, EState *estate, int eflags)
 }
 
 /*
+ * A partial value into the running value, a batch's or, above a gather, a
+ * participant's: counts and sums added as int8, 22003 past the range,
+ * extremes compared.
+ */
+static void
+join_partial(AggValue *value, Datum partial)
+{
+	switch (value->kind)
+	{
+		case AGG_COUNT:
+		case AGG_SUM:
+			if (pg_add_s64_overflow(value->total, DatumGetInt64(partial),
+									&value->total))
+				ereport(ERROR,
+						(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+						 errmsg("bigint out of range")));
+			break;
+		case AGG_MIN:
+		case AGG_MAX:
+			{
+				int64		found = value->wide ? DatumGetInt64(partial) :
+					(int64) DatumGetInt32(partial);
+
+				if (!value->has_value ||
+					(value->kind == AGG_MIN ? found < value->extreme :
+					 found > value->extreme))
+					value->extreme = found;
+				break;
+			}
+		case AGG_GENERIC:
+			break;
+	}
+	value->has_value = true;
+}
+
+/*
  * One call of the aggregate's batch function over a column, or over rows
  * alone for count(*); the partial joins the running value. No readiness
  * mask: the column's rows are all initialized memory (tessera/batch.h),
@@ -3985,31 +4132,7 @@ evaluate(TessAggState *state, AggValue *value, const TessDatumColumn *column,
 		tess_status_report(&state->status);
 	if ((word & 1) == 0)
 		return;
-	switch (value->kind)
-	{
-		case AGG_COUNT:
-		case AGG_SUM:
-			if (pg_add_s64_overflow(value->total, DatumGetInt64(partial),
-									&value->total))
-				ereport(ERROR,
-						(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
-						 errmsg("bigint out of range")));
-			break;
-		case AGG_MIN:
-		case AGG_MAX:
-			{
-				int64		found = value->wide ? DatumGetInt64(partial) :
-					(int64) DatumGetInt32(partial);
-
-				if (!value->has_value ||
-					(value->kind == AGG_MIN ? found < value->extreme :
-					 found > value->extreme))
-					value->extreme = found;
-				break;
-			}		case AGG_GENERIC:
-			break;
-	}
-	value->has_value = true;
+	join_partial(value, partial);
 }
 
 /* The gathered values as a column with every row selected, in one call. */
@@ -4129,6 +4252,23 @@ accumulate(TessAggState *state, AggValue *value, TessBatch *batch, int nrows)
 	if (computed.values == NULL || computed.isnull == NULL ||
 		computed.nrows != batch->rows.nrows)
 		elog(ERROR, "Tessera projection returned an invalid column");
+	/*
+	 * Above a gather: a row a participant's partial value, NULL skipped (a
+	 * participant without rows gives a count of 0 and NULL otherwise), not
+	 * the rows a batch function would count.
+	 */
+	if (state->finalize)
+	{
+		while ((row = tess_row_mask_next(&rows, row)) >= 0)
+		{
+			if (value->kind == AGG_GENERIC)
+				generic_combine(state, value->generic, computed.values[row],
+								computed.isnull[row]);
+			else if (!computed.isnull[row])
+				join_partial(value, computed.values[row]);
+		}
+		return;
+	}
 	if (value->generic != NULL)
 	{
 		value->generic->columns[0] = computed;
