@@ -254,6 +254,8 @@ typedef struct GenericAgg
 	 * core's int8[] of the count and the sum (sum_state_partial).
 	 */
 	bool		sum_pair;
+	/* A partial aggregate's: its value is its state (fast_partial). */
+	bool		partial;
 } GenericAgg;
 
 /*
@@ -810,6 +812,30 @@ sum_state_aggregate(const Aggref *agg)
 	}
 #endif
 	return false;
+}
+
+/*
+ * Whether a plain partial aggregate the node folds itself goes up in the
+ * node's own format (fast_partial): sum and avg of numeric and bigint, whose
+ * state in the core is internal, which only the core's functions write.
+ * The node writes the others' states as the core's own transition values.
+ */
+static bool
+own_partial_aggregate(const Aggref *agg)
+{
+	return agg->aggtranstype == INTERNALOID && sum_state_aggregate(agg);
+}
+
+/* The aggregates of the target list whose partial values are the node's own format. */
+static int
+own_partials(List *tlist)
+{
+	int			count = 0;
+
+	foreach_node(TargetEntry, entry, tlist)
+		if (IsA(entry->expr, Aggref) && own_partial_aggregate((Aggref *) entry->expr))
+			count++;
+	return count;
 }
 
 /*
@@ -1403,6 +1429,7 @@ create_partial_paths(PlannerInfo *root, RelOptInfo *grouped_rel,
 	List	   *tlist = keys != NIL ? add_to_flat_tlist(NIL, keys) : NIL;
 	AggStrategy strategy = keys != NIL ? AGG_HASHED : AGG_PLAIN;
 	int			nsums = 0;
+	int			nown = 0;
 
 	if (partial_rel == NULL || extra == NULL || !extra->partial_costs_set ||
 		(keys != NIL && groups <= 0))
@@ -1418,10 +1445,13 @@ create_partial_paths(PlannerInfo *root, RelOptInfo *grouped_rel,
 	}
 	/*
 	 * Generic states would go with a table emptied early too: with GROUP BY
-	 * the aggregates are the node's own and sum states.
+	 * the aggregates are the node's own and sum states. Without it, the
+	 * numeric and bigint sums go up in the node's own format too.
 	 */
 	if (keys != NIL)
 		nsums = sum_states(tlist);
+	else
+		nown = own_partials(tlist);
 	if (nsums < 0 || !partial_keys(keys))
 		return;
 	foreach_ptr(AggPath, agg, aggregate_templates(partial_rel->partial_pathlist,
@@ -1430,7 +1460,8 @@ create_partial_paths(PlannerInfo *root, RelOptInfo *grouped_rel,
 	{
 		CustomPath *partial = make_agg_path(root, agg, tlist, list_length(keys),
 											AGG_PATH_PARTIAL |
-											(nsums > 0 ? AGG_PATH_OWN_STATES : 0));
+											(nsums > 0 || nown > 0 ?
+											 AGG_PATH_OWN_STATES : 0));
 		Path	   *gathered;
 		CustomPath *path;
 		GatherPath *gather;
@@ -1451,7 +1482,8 @@ create_partial_paths(PlannerInfo *root, RelOptInfo *grouped_rel,
 									(List *) extra->havingQual,
 									&extra->agg_final_costs, keys != NIL ? groups : 1.0);
 			path = make_agg_path(root, final, final_tlist, list_length(keys),
-								 AGG_PATH_HAVING | AGG_PATH_FINALIZE);
+								 AGG_PATH_HAVING | AGG_PATH_FINALIZE |
+								 (nown > 0 ? AGG_PATH_OWN_STATES : 0));
 			if (path != NULL)
 			{
 				add_path(grouped_rel, &path->path);
@@ -1461,6 +1493,13 @@ create_partial_paths(PlannerInfo *root, RelOptInfo *grouped_rel,
 		/* The core's Finalize reads no sum state of the node's format. */
 		if (nsums > 0)
 			continue;
+		if (nown > 0)
+		{
+			partial = make_agg_path(root, agg, tlist, 0, AGG_PATH_PARTIAL);
+			if (partial == NULL)
+				continue;
+			partial->path.parallel_aware = true;
+		}
 		rows = compute_gather_rows(&partial->path);
 		gather = create_gather_path(root, partial_rel, &partial->path,
 									partial->path.pathtarget, NULL, &rows);
@@ -2225,18 +2264,19 @@ agg_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
  * the transition functions, one for every generic aggregate of the node.
  */
 /*
- * Whether the node folds a whole aggregate itself, and over which
- * argument: a partial one goes to the Finalize Aggregate as the core's
- * state, which only its functions make, but a grouping's sum state as the
- * node's own (own_states), for its final grouping.
+ * Whether the node folds an aggregate itself, and over which argument: a
+ * whole one, or a partial one whose state the node writes as the final
+ * aggregation above reads it: the core's own transition value, for a
+ * state that is not internal, or the node's own format (own_states), for
+ * the node's final aggregation (fast_partial, sum_state_partial).
  */
 static FastKind
 fast_kind(const Aggref *agg, GenericAgg *generic, bool own_states)
 {
 #ifdef HAVE_INT128
 	if ((agg->aggsplit != AGGSPLIT_SIMPLE &&
-		 !(own_states && agg->aggsplit == AGGSPLIT_INITIAL_SERIAL &&
-		   sum_state_aggregate(agg))) ||
+		 !(agg->aggsplit == AGGSPLIT_INITIAL_SERIAL &&
+		   (agg->aggtranstype != INTERNALOID || own_states))) ||
 		list_length(agg->args) != 1)
 		return FAST_NONE;
 	generic->fast_numeric = false;
@@ -2859,6 +2899,87 @@ fast_value(GenericAgg *generic, bool *isnull)
 							   NumericGetDatum(int64_to_numeric(fast->count)));
 }
 
+/*
+ * A sum state as the node's own partial value (TessTableSumInput): a bytea
+ * of the tag, the words and the rest whole with its header.
+ */
+static Datum
+sum_state_bytes(const uint64 *words, const struct varlena *rest)
+{
+	uint32		tag = TESS_TABLE_SUM_STATE_TAG;
+	Size		len = VARHDRSZ + TESS_TABLE_SUM_STATE_BYTES +
+		(rest != NULL ? VARSIZE_ANY(rest) : 0);
+	bytea	   *result = palloc(len);
+
+	SET_VARSIZE(result, len);
+	memcpy(VARDATA(result), &tag, sizeof(tag));
+	memcpy(VARDATA(result) + sizeof(tag), words, sizeof(uint64) * TESS_TABLE_SUM_WORDS);
+	if (rest != NULL)
+		memcpy(VARDATA(result) + TESS_TABLE_SUM_STATE_BYTES, rest, VARSIZE_ANY(rest));
+	return PointerGetDatum(result);
+}
+
+/*
+ * A plain partial aggregate's value from its state, for the final
+ * aggregation above: a numeric or bigint sum or average (an internal state
+ * in the core) in the node's own format, its sum's words, the count of
+ * every value taken and its scale, NaN and the infinities in its rest, NULL
+ * for an empty state; the others as the core's own transition value, which
+ * any final aggregation reads, the initial value for an empty state: a
+ * float's sum or extreme, the float8[] of avg's N, Sx and Sxx, the int8[]
+ * of avg of integers' count and sum (its int8 wrapping as the core's
+ * does), sum(int2)'s int8, a numeric extreme.
+ */
+static Datum
+fast_partial(GenericAgg *generic, bool *isnull)
+{
+	FastState  *fast = generic->state_null ? NULL :
+		(FastState *) DatumGetPointer(generic->state);
+	uint64		words[TESS_TABLE_SUM_WORDS];
+
+	*isnull = false;
+	if (OidIsValid(generic->fast_float) && generic->fast == FAST_AVG)
+	{
+		Datum		items[3] = {
+			Float8GetDatum(fast != NULL ? fast->n : 0),
+			Float8GetDatum(fast != NULL ? fast->sx : 0),
+			Float8GetDatum(fast != NULL ? fast->sxx : 0)
+		};
+
+		return PointerGetDatum(construct_array(items, 3, FLOAT8OID, sizeof(float8),
+											   FLOAT8PASSBYVAL, TYPALIGN_DOUBLE));
+	}
+	if (generic->fast == FAST_AVG && !generic->fast_numeric && !generic->fast_wide &&
+		!OidIsValid(generic->fast_float))
+	{
+		Datum		items[2] = {
+			Int64GetDatum(fast != NULL ? fast->count : 0),
+			Int64GetDatum(fast != NULL ? (int64) fast->sum : 0)
+		};
+
+		return PointerGetDatum(construct_array(items, 2, INT8OID, sizeof(int64),
+											   FLOAT8PASSBYVAL, TYPALIGN_DOUBLE));
+	}
+	if (fast == NULL)
+	{
+		*isnull = true;
+		return (Datum) 0;
+	}
+	if (OidIsValid(generic->fast_float))
+		return generic->fast_float == FLOAT4OID ? Float4GetDatum(fast->sx4) :
+			Float8GetDatum(fast->sx);
+	if (generic->fast == FAST_MIN || generic->fast == FAST_MAX)
+		return fast->extreme;
+	if (generic->fast_int8_result)
+		return Int64GetDatum((int64) fast->sum);
+	words[0] = (uint64) fast->sum;
+	words[1] = (uint64) ((uint128) fast->sum >> 64);
+	words[2] = (uint64) fast->count;
+	words[3] = (uint64) fast->scale;
+	return sum_state_bytes(words, fast->has_rest ?
+						   (const struct varlena *) DatumGetPointer(fast->rest) : NULL);
+}
+
 #endif							/* HAVE_INT128 */
 
 static GenericAgg *
@@ -2972,9 +3093,16 @@ generic_init(TessAggState *state, Aggref *agg)
 								 InvalidOid, (Node *) state->generic_agg, NULL);
 	}
 	generic->columns = palloc0_array(TessDatumColumn, generic->nargs);
-	/* A final plain aggregate combines the core's partial states. */
-	generic->fast = state->finalize && state->nkeys == 0 ? FAST_NONE :
-		fast_kind(agg, generic, state->own_states);
+	/*
+	 * A final plain aggregate combines the core's partial states, but the
+	 * node's own (own_states) of a numeric or bigint sum or average.
+	 */
+	if (state->finalize && state->nkeys == 0)
+		generic->fast = state->own_states && own_partial_aggregate(agg) ?
+			fast_kind(agg, generic, false) : FAST_NONE;
+	else
+		generic->fast = fast_kind(agg, generic, state->own_states);
+	generic->partial = DO_AGGSPLIT_SKIPFINAL(agg->aggsplit);
 	/* Its state starts empty, as the core's of these but avg(int4)'s. */
 	if (generic->fast != FAST_NONE)
 		generic->init_null = true;
@@ -3333,6 +3461,34 @@ sum_state_rest(TessAggState *state, const GenericAgg *generic, int slot, int row
 }
 
 /*
+ * A partial sum state of the node's own format (TessTableSumInput): its
+ * words, and its rest, copied out to a place of its own in the current
+ * context, or 0 without one.
+ */
+static void
+sum_state_read(Datum value, uint64 *words, Datum *rest)
+{
+	bytea	   *bytes = DatumGetByteaPP(value);
+	const char *data = VARDATA_ANY(bytes);
+	Size		len = VARSIZE_ANY_EXHDR(bytes);
+	uint32		tag;
+
+	if (len >= TESS_TABLE_SUM_STATE_BYTES)
+		memcpy(&tag, data, sizeof(tag));
+	if (len < TESS_TABLE_SUM_STATE_BYTES || tag != TESS_TABLE_SUM_STATE_TAG)
+		elog(ERROR, "TessAgg received a partial sum state of another format");
+	memcpy(words, data + sizeof(tag), sizeof(uint64) * TESS_TABLE_SUM_WORDS);
+	*rest = (Datum) 0;
+	if (len > TESS_TABLE_SUM_STATE_BYTES)
+	{
+		char	   *copy = palloc(len - TESS_TABLE_SUM_STATE_BYTES);
+
+		memcpy(copy, data + TESS_TABLE_SUM_STATE_BYTES, len - TESS_TABLE_SUM_STATE_BYTES);
+		*rest = PointerGetDatum(copy);
+	}
+}
+
+/*
  * A partial state the kernels left to a final grouping's sum state, merged
  * by the core's means: one with a numeric rest, or one whose sum would
  * take the group's past its bound. Its flags and its count go into the
@@ -3364,26 +3520,7 @@ sum_state_merge_rest(TessAggState *state, const GenericAgg *generic, int slot, i
 		theirs[3] = 0;
 	}
 	else
-	{
-		bytea	   *bytes = DatumGetByteaPP(value);
-		const char *data = VARDATA_ANY(bytes);
-		Size		len = VARSIZE_ANY_EXHDR(bytes);
-		uint32		tag;
-
-		if (len >= TESS_TABLE_SUM_STATE_BYTES)
-			memcpy(&tag, data, sizeof(tag));
-		if (len < TESS_TABLE_SUM_STATE_BYTES || tag != TESS_TABLE_SUM_STATE_TAG)
-			elog(ERROR, "TessAgg received a partial sum state of another format");
-		memcpy(theirs, data + sizeof(tag), sizeof(theirs));
-		/* The rest, copied out of the partial value to a place of its own. */
-		if (len > TESS_TABLE_SUM_STATE_BYTES)
-		{
-			char	   *copy = palloc(len - TESS_TABLE_SUM_STATE_BYTES);
-
-			memcpy(copy, data + TESS_TABLE_SUM_STATE_BYTES, len - TESS_TABLE_SUM_STATE_BYTES);
-			rest = PointerGetDatum(copy);
-		}
-	}
+		sum_state_read(value, theirs, &rest);
 	words[3] |= theirs[3] & (TESS_TABLE_SUM_NAN | TESS_TABLE_SUM_POSITIVE_INFINITY |
 							 TESS_TABLE_SUM_NEGATIVE_INFINITY);
 	words[2] += theirs[2];
@@ -3402,6 +3539,69 @@ sum_state_merge_rest(TessAggState *state, const GenericAgg *generic, int slot, i
 		pfree((void *) words[TESS_TABLE_SUM_WORDS]);
 		words[TESS_TABLE_SUM_WORDS] = (uint64) DatumGetPointer(total);
 	}
+	MemoryContextSwitchTo(old);
+}
+
+/*
+ * A sum of decimals at scale `from` brought to scale `to`, not smaller: false,
+ * the sum unchanged, when it would pass the bound.
+ */
+static bool
+fast_rescale(int128 *sum, int from, int to)
+{
+	int128		factor = fast_powers[to - from];
+
+	if (*sum >= FAST_BOUND / factor || *sum <= -FAST_BOUND / factor)
+		return false;
+	*sum *= factor;
+	return true;
+}
+
+/*
+ * A participant's partial state of the node's own format into a plain
+ * final aggregation's state (fast_partial): its count added, its sum at the
+ * larger of the two scales, or, when either sum would pass the bound at
+ * it, to the rest at its own scale (the rest's display scale keeps it),
+ * and its rest to the rest.
+ */
+static void
+fast_merge(TessAggState *state, GenericAgg *generic, Datum value, bool isnull)
+{
+	MemoryContext states = state->generic_agg->curaggcontext->ecxt_per_tuple_memory;
+	MemoryContext old;
+	uint64		words[TESS_TABLE_SUM_WORDS];
+	Datum		rest;
+	FastState  *fast;
+	int128		term;
+	int			scale;
+
+	if (isnull)
+		return;
+	old = MemoryContextSwitchTo(state->css.ss.ps.ps_ExprContext->ecxt_per_tuple_memory);
+	sum_state_read(value, words, &rest);
+	scale = (int) (words[3] & TESS_TABLE_SUM_SCALE_MASK);
+	if ((words[3] & ~TESS_TABLE_SUM_SCALE_MASK) != 0 || scale > TESS_DECIMAL_DIGITS)
+		elog(ERROR, "TessAgg received a partial sum state of another format");
+	if (generic->state_null)
+	{
+		generic->state = PointerGetDatum(MemoryContextAllocZero(states, sizeof(FastState)));
+		generic->state_null = false;
+	}
+	fast = (FastState *) DatumGetPointer(generic->state);
+	fast->count += (int64) words[2];
+	term = (int128) (((uint128) words[1] << 64) | words[0]);
+	if (scale > fast->scale ? fast_rescale(&fast->sum, fast->scale, scale) :
+		fast_rescale(&term, scale, fast->scale))
+	{
+		fast->scale = Max(fast->scale, scale);
+		fast->sum += term;
+		if (fast->sum >= FAST_BOUND || fast->sum <= -FAST_BOUND)
+			fast_flush(fast, states);
+	}
+	else
+		fast_rest(fast, fast_numeric(term, scale), states);
+	if (rest != (Datum) 0)
+		fast_rest(fast, rest, states);
 	MemoryContextSwitchTo(old);
 }
 
@@ -3505,9 +3705,6 @@ static Datum
 sum_state_partial(const GenericAgg *generic, const uint64 *words, bool *isnull)
 {
 	const struct varlena *rest = (const struct varlena *) words[TESS_TABLE_SUM_WORDS];
-	uint32		tag = TESS_TABLE_SUM_STATE_TAG;
-	Size		len;
-	bytea	   *result;
 
 	*isnull = false;
 	if (generic->sum_pair)
@@ -3522,14 +3719,7 @@ sum_state_partial(const GenericAgg *generic, const uint64 *words, bool *isnull)
 		*isnull = true;
 		return (Datum) 0;
 	}
-	len = VARHDRSZ + TESS_TABLE_SUM_STATE_BYTES + (rest != NULL ? VARSIZE_ANY(rest) : 0);
-	result = palloc(len);
-	SET_VARSIZE(result, len);
-	memcpy(VARDATA(result), &tag, sizeof(tag));
-	memcpy(VARDATA(result) + sizeof(tag), words, sizeof(uint64) * TESS_TABLE_SUM_WORDS);
-	if (rest != NULL)
-		memcpy(VARDATA(result) + TESS_TABLE_SUM_STATE_BYTES, rest, VARSIZE_ANY(rest));
-	return PointerGetDatum(result);
+	return sum_state_bytes(words, rest);
 }
 #endif
 
@@ -3606,7 +3796,7 @@ generic_value(GenericAgg *generic, bool *isnull)
 
 #ifdef HAVE_INT128
 	if (generic->fast != FAST_NONE)
-		return fast_value(generic, isnull);
+		return generic->partial ? fast_partial(generic, isnull) : fast_value(generic, isnull);
 #endif
 
 	if (generic->has_serial)
@@ -3691,7 +3881,7 @@ agg_begin(CustomScanState *css, EState *estate, int eflags)
 	tess_plan_reader_finish(reader);
 	if (state->finalize && (state->partial || state->setop >= 0))
 		elog(ERROR, "TessAgg received a foreign plan");
-	if (state->own_states && (!state->partial || keys == NIL))
+	if (state->own_states && !state->partial && !(state->finalize && keys == NIL))
 		elog(ERROR, "TessAgg received a foreign plan");
 	if ((state->setop >= 0) != (info.nchildren == 2) ||
 		(state->setop >= 0 && (list_length(arguments) != 2 || list_length(keys) == 0)))
@@ -4261,6 +4451,12 @@ accumulate(TessAggState *state, AggValue *value, TessBatch *batch, int nrows)
 	{
 		while ((row = tess_row_mask_next(&rows, row)) >= 0)
 		{
+#ifdef HAVE_INT128
+			if (value->kind == AGG_GENERIC && value->generic->fast != FAST_NONE)
+				fast_merge(state, value->generic, computed.values[row],
+						   computed.isnull[row]);
+			else
+#endif
 			if (value->kind == AGG_GENERIC)
 				generic_combine(state, value->generic, computed.values[row],
 								computed.isnull[row]);

@@ -312,7 +312,9 @@ other call over it at the same time:
   node's own bytea: after the varlena header (4 bytes or 1) the tag
   `TESS_TABLE_SUM_STATE_TAG`, the state's four words in the machine's
   order, then, when the state has one, its numeric rest whole with its
-  header; or `TESS_TABLE_SUM_OF_PAIR`, the core's int8[] of the count and
+  header (a plain aggregate's, which TessAgg merges itself, counts every
+  value taken in word 2 and keeps NaN and the infinities in its rest, word
+  3 its scale alone); or `TESS_TABLE_SUM_OF_PAIR`, the core's int8[] of the count and
   the sum of `avg(int4)` and `avg(int2)` (one dimension of 2, no NULL
   bitmap), a sum at scale 0. A state with a rest, one not read in place,
   or one the record's sum refuses at its bound is set in the sum's

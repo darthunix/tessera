@@ -496,8 +496,10 @@ SET work_mem = '64kB';
 EXPLAIN (COSTS OFF) SELECT g, max(t), count(DISTINCT g) FROM agg_groups GROUP BY g;
 RESET work_mem;
 DROP TABLE agg_groups;
--- In a parallel plan: each participant's partial state, serialized where
--- the state is internal, for the core's Finalize Aggregate.
+-- In a parallel plan: each participant's partial state, the core's
+-- serialized where the state is internal and the node does not fold it
+-- (the node's own format for numeric sums), for the node's final
+-- aggregation.
 CREATE TABLE agg_any_big AS
 SELECT i AS a, (i * 1.5)::numeric AS n, 't' || i AS t FROM generate_series(1, 200000) AS i;
 ANALYZE agg_any_big;
@@ -598,7 +600,8 @@ SELECT agg_same($$SELECT count(*), sum(x), sum(y) FROM (SELECT id, sum(n) AS x, 
 SELECT agg_same($$SELECT count(*), sum(x), sum(y), sum(z) FROM (SELECT id % 2000 AS k, sum(u) AS x, avg(u) AS y, avg(b) AS z FROM agg_fast GROUP BY id % 2000) AS t WHERE x NOT IN ('NaN', 'Infinity', '-Infinity')$$);
 SELECT agg_same($$SELECT x, count(*) FROM (SELECT id % 2000 AS k, sum(u) AS x FROM agg_fast GROUP BY id % 2000) AS t WHERE x IN ('NaN', 'Infinity', '-Infinity') GROUP BY x$$);
 RESET work_mem;
--- With workers, a partial aggregate is the core's state: the core's functions.
+-- With workers, a partial aggregate the node folds itself too: numeric and
+-- bigint sums in the node's own format, extremes as the core's values.
 SET max_parallel_workers_per_gather = 2;
 SET parallel_setup_cost = 0;
 SET tessera.scan_parallel_setup_cost = 0;

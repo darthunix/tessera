@@ -117,8 +117,8 @@ EXPLAIN (COSTS OFF) SELECT a FROM parallel_t WHERE a > 4990 ORDER BY a;
 SELECT parallel_same($$SELECT a FROM parallel_t WHERE a > 4990 ORDER BY a$$);
 -- An error raised in a worker reaches the client.
 SELECT a + 2147483647 FROM parallel_t WHERE a > 4990;
--- The partial aggregate in every participant, the core's Finalize Aggregate
--- combining their values above the Gather; without clauses, over the scan.
+-- The partial aggregate in every participant, the node's final one merging
+-- their values above TessGather; without clauses, over the scan.
 EXPLAIN (COSTS OFF)
 SELECT count(*), count(a), sum(a), min(a), max(b) FROM parallel_t WHERE a > 100;
 SELECT parallel_same($$SELECT count(*), count(a), sum(a), min(a), max(b) FROM parallel_t WHERE a > 100$$);
@@ -140,6 +140,50 @@ SET parallel_leader_participation = off;
 SELECT partial_property($$SELECT count(*) FROM parallel_t WHERE a > 100$$, 'Input Rows') AS agg_rows;
 SELECT parallel_same($$SELECT count(*), sum(a) FROM parallel_t WHERE a > 100$$);
 RESET parallel_leader_participation;
+-- The aggregates the node folds itself, in every participant too (plan
+-- 4.23, item 4b): sum and avg of numeric and bigint go up in the node's own
+-- format, their words, the count of every value and the rest (longer
+-- values, NaN, infinities), which the node's final aggregation merges at
+-- the larger scale, the part past the bound to the rest; the others as the
+-- core's own transition values, which the core's Finalize reads too: a
+-- float's sum and extremes, avg's float8[] of N, Sx and Sxx, avg of
+-- integers' int8[] of the count and the sum, sum(int2)'s int8, a numeric
+-- extreme. The first half of the rows has scale 1, the second scale 3;
+-- rows 1 to 300 are sums near the bound at scale 0 that one value of scale
+-- 18 at the end meets; floats are halves, exact in any order.
+CREATE TABLE parallel_fast AS
+SELECT i AS id,
+       (CASE WHEN i <= 300 THEN 999999999999999999
+             WHEN i = 20000 THEN 0.000000000000000001
+             WHEN i <= 10000 THEN (i / 10.0)::numeric(12, 1)
+             ELSE (i / 1000.0)::numeric(12, 3) END)::numeric AS n,
+       (CASE WHEN i % 997 = 0 THEN 'NaN' WHEN i % 13 = 0 THEN i * 12345678901234567890.5
+             ELSE (i / 4.0)::numeric(12, 2) END)::numeric AS u,
+       CASE WHEN i % 2 = 0 THEN i::bigint * 1000 ELSE 9223372036854775807 - i * 1000 END AS b,
+       CASE WHEN i % 7 = 0 THEN NULL ELSE i * 7919 % 100000 - 50000 END AS i4,
+       (i % 60000 - 30000)::int2 AS s,
+       i / 2.0::float8 AS f8, (i % 1000) / 4.0::float4 AS f4
+FROM generate_series(1, 20000) AS i;
+ANALYZE parallel_fast;
+EXPLAIN (COSTS OFF) SELECT sum(n), avg(u), sum(b), avg(i4), sum(s), max(f8) FROM parallel_fast;
+SELECT parallel_same($$SELECT sum(n), avg(n), sum(u), avg(u), min(u), max(u), sum(b), avg(b) FROM parallel_fast$$);
+SELECT parallel_same($$SELECT avg(i4), avg(s), sum(s), sum(f8), avg(f8), min(f8), max(f8), sum(f4), avg(f4), min(f4), max(f4) FROM parallel_fast$$);
+SELECT parallel_same($$SELECT sum(n), avg(n) FROM parallel_fast WHERE id > 300$$);
+SELECT parallel_same($$SELECT sum(u), avg(u), min(u) FROM parallel_fast WHERE u <> 'NaN'$$);
+-- Participants without rows, and none at all.
+SELECT parallel_same($$SELECT sum(n), avg(u), sum(b), avg(i4), sum(s), avg(f8), max(f4), min(n) FROM parallel_fast WHERE id > 19995$$);
+SELECT parallel_same($$SELECT sum(n), avg(u), sum(b), avg(i4), sum(s), avg(f8), max(f4), min(n) FROM parallel_fast WHERE id < 0$$);
+SET parallel_leader_participation = off;
+SELECT parallel_same($$SELECT sum(n), avg(u), sum(b), avg(i4), avg(f8) FROM parallel_fast$$);
+RESET parallel_leader_participation;
+-- With the core's Gather its Finalize Aggregate reads the core's own
+-- transition values; numeric and bigint sums then go through the core's
+-- functions, serialized.
+SET tessera.batch_gather = off;
+EXPLAIN (COSTS OFF) SELECT sum(n), avg(i4), avg(f8), max(f4) FROM parallel_fast;
+SELECT parallel_same($$SELECT sum(n), avg(u), sum(b), avg(i4), avg(s), sum(s), avg(f8), max(f4), min(u) FROM parallel_fast$$);
+RESET tessera.batch_gather;
+DROP TABLE parallel_fast;
 -- A parameter of a generic plan in an argument.
 PREPARE shifted(int) AS SELECT sum(a + $1) FROM parallel_t WHERE a > 4990;
 SET plan_cache_mode = force_generic_plan;

@@ -542,7 +542,9 @@ extern TessStatusCode tess_table_accumulate(const TessTableRef *table,
  * partial grouping and its final one: after the varlena header the tag
  * TESS_TABLE_SUM_STATE_TAG (4 bytes), the state's TESS_TABLE_SUM_WORDS
  * words in the machine's order, then, when the state has one, its numeric
- * rest, whole with its header. An empty state is NULL.
+ * rest, whole with its header. An empty state is NULL. A plain aggregate's
+ * state, which TessAgg merges itself, counts every value in word 2 and
+ * keeps NaN and the infinities in its rest, word 3 its scale alone.
  */
 #define TESS_TABLE_SUM_STATE_TAG 0x54534D31
 #define TESS_TABLE_SUM_STATE_BYTES (4 + 8 * TESS_TABLE_SUM_WORDS)

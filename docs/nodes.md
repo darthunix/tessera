@@ -1064,9 +1064,21 @@ not DISTINCT, asks the projection for its argument's decimals
 (`accept_decimals`) and folds a numeric chain's int64 values without a
 numeric made or read: `min(n * 1.08)`, `max(n - 0.5)` by 10 groups 97 ms
 before and 69 after, `sum(n * 1.08)`, `avg(n - 0.5)` by 100 groups 99 and
-70. A partial aggregate stays with
-the core's functions, whose state the node's final aggregation combines
-by the aggregate's combine function. The
+70. A partial aggregate folds its
+rows the same way (plan 4.23, item 4b) and goes up as its state: sum and
+avg of numeric and bigint, whose state in the core is internal, in the
+node's own format (the sum's words, the count of every value taken, its
+scale, and the rest, NaN and the infinities among it, see
+`TessTableSumInput`), which only the node's final aggregation reads; the
+others as the core's own transition value, which any final aggregation
+reads: a float's sum or extreme, avg's float8[] of N, Sx and Sxx, avg of
+integers' int8[] of the count and the sum, sum(int2)'s int8, a numeric
+extreme, and for an empty state the core's initial value. Under the
+core's `Finalize Aggregate` (`tessera.batch_gather` off) numeric and
+bigint sums stay with the core's functions, serialized. `sum(n)` over
+20 M rows of numeric(15,2) with two workers: 88.5 ms against 136.8 with
+the core's functions in the participants and 212.6 for the core (serial
+237.5, pg-4b-fast-plain-z1sPW2); over 2 M rows 10.2 against 15.2. The
 arguments after the first travel in the private data as `more`. With `GROUP BY` such an
 aggregate's state is a word of the group's record, the value itself when
 a word holds it, else the address of its copy in that context, with the
@@ -1290,7 +1302,10 @@ a generic aggregate's partial state, the core's (serialized when
 internal), goes into its state as the core's `Finalize Aggregate` merges
 it, deserialized first, then by the combine function, which, strict,
 skips NULL and takes the first value as the state, and the final
-function makes the value. It costs the core's `Finalize Aggregate` over
+function makes the value; a numeric or bigint sum's, the node's own
+format, goes into a state of the node's (`fast_merge`): the counts added,
+the sums at the larger scale, one that either sum would take past the
+bound at it to the rest at its own scale, the rests added. It costs the core's `Finalize Aggregate` over
 `TessGather`, not a share of it: a share would take a tenth off the
 partial stack below. With `GROUP BY`
 the node's partial path is the same over the core's partial hashed
