@@ -14,12 +14,14 @@
 mod aggregate;
 mod compare;
 mod filter;
+mod hash;
 
 #[cfg(all(target_arch = "aarch64", not(miri)))]
 pub(crate) use aggregate::present;
 pub(crate) use aggregate::{aggregate, max, min};
 pub(crate) use compare::compare_columns;
 pub(crate) use filter::filter;
+pub(crate) use hash::{hash, hash_next};
 
 use tessera_core::WordBlock;
 
@@ -71,6 +73,18 @@ pub(crate) trait IntLane: Copy + Ord + core::fmt::Debug + 'static {
 
     /// The non-NULL rows of a whole word where `value op scalar`.
     fn filter_block(block: WordBlock<'_, Self>, scalar: Self, op: CompareOp) -> u64;
+
+    /// A key's 32 bits for its hash: int4's value, int8's folded as
+    /// `hashint8` folds it.
+    fn key(self) -> u32;
+
+    /// The hashes of a whole word's keys into `out`; with `_nulls`, a NULL
+    /// row's hash is the group key's; with `combine`, each is folded into
+    /// the hash already in `out`.
+    fn hash_block(keys: Side<'_, Self>, out: &mut [u32; 64]);
+    fn hash_nulls_block(keys: Side<'_, Self>, non_null: u64, out: &mut [u32; 64]);
+    fn combine_block(keys: Side<'_, Self>, out: &mut [u32; 64]);
+    fn combine_nulls_block(keys: Side<'_, Self>, non_null: u64, out: &mut [u32; 64]);
 
     /// The count of a whole word's selected non-NULL rows and the least of
     /// them, `MAX` without any.

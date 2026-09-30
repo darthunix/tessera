@@ -7,9 +7,10 @@
 //! The family shares with [`crate::int32`] the vocabulary of [`crate::ops`]
 //! and the drivers of `crate::int`, generic over the lane type, which each
 //! kernel moves to as a commit of its own (plan 4.25): the comparisons of a
-//! column with a scalar and of two columns and the extremes so far; the
-//! others still mirror int32 kernel by kernel. What stays the family's own
-//! is the vector code of a whole word (`simd`), whose lanes and gaps differ. A physical int64 representation does not select
+//! column with a scalar and of two columns, the extremes and the key
+//! hashes so far; the arithmetic still mirrors int32. What stays the
+//! family's own is the vector code of a whole word (`simd`), whose lanes
+//! and gaps differ. A physical int64 representation does not select
 //! PostgreSQL semantics: the caller chooses kernels by logical type and
 //! operation, and a Datum holds an int8 as its whole word.
 
@@ -114,6 +115,55 @@ impl crate::int::IntLane for i64 {
         #[cfg(not(all(target_arch = "aarch64", not(miri))))]
         {
             let _ = (block, selected);
+            unreachable!("no whole-word kernels on this target")
+        }
+    }
+
+    #[inline(always)]
+    fn key(self) -> u32 {
+        fold(self)
+    }
+
+    #[inline(always)]
+    fn hash_block(keys: Side<'_>, out: &mut [u32; 64]) {
+        #[cfg(all(target_arch = "aarch64", not(miri)))]
+        crate::simd::hash64(keys, out);
+        #[cfg(not(all(target_arch = "aarch64", not(miri))))]
+        {
+            let _ = (keys, out);
+            unreachable!("no whole-word kernels on this target")
+        }
+    }
+
+    #[inline(always)]
+    fn hash_nulls_block(keys: Side<'_>, non_null: u64, out: &mut [u32; 64]) {
+        #[cfg(all(target_arch = "aarch64", not(miri)))]
+        crate::simd::hash_nulls64(keys, non_null, out);
+        #[cfg(not(all(target_arch = "aarch64", not(miri))))]
+        {
+            let _ = (keys, non_null, out);
+            unreachable!("no whole-word kernels on this target")
+        }
+    }
+
+    #[inline(always)]
+    fn combine_block(keys: Side<'_>, out: &mut [u32; 64]) {
+        #[cfg(all(target_arch = "aarch64", not(miri)))]
+        crate::simd::combine64(keys, out);
+        #[cfg(not(all(target_arch = "aarch64", not(miri))))]
+        {
+            let _ = (keys, out);
+            unreachable!("no whole-word kernels on this target")
+        }
+    }
+
+    #[inline(always)]
+    fn combine_nulls_block(keys: Side<'_>, non_null: u64, out: &mut [u32; 64]) {
+        #[cfg(all(target_arch = "aarch64", not(miri)))]
+        crate::simd::combine_nulls64(keys, non_null, out);
+        #[cfg(not(all(target_arch = "aarch64", not(miri))))]
+        {
+            let _ = (keys, non_null, out);
             unreachable!("no whole-word kernels on this target")
         }
     }

@@ -110,4 +110,53 @@ impl crate::int::IntLane for i32 {
             unreachable!("no whole-word kernels on this target")
         }
     }
+
+    #[inline(always)]
+    fn key(self) -> u32 {
+        self as u32
+    }
+
+    #[inline(always)]
+    fn hash_block(keys: Side<'_>, out: &mut [u32; 64]) {
+        #[cfg(all(target_arch = "aarch64", not(miri)))]
+        crate::simd::hash(keys, out);
+        #[cfg(not(all(target_arch = "aarch64", not(miri))))]
+        {
+            let _ = (keys, out);
+            unreachable!("no whole-word kernels on this target")
+        }
+    }
+
+    #[inline(always)]
+    fn hash_nulls_block(keys: Side<'_>, non_null: u64, out: &mut [u32; 64]) {
+        #[cfg(all(target_arch = "aarch64", not(miri)))]
+        crate::simd::hash_nulls(keys, non_null, out);
+        #[cfg(not(all(target_arch = "aarch64", not(miri))))]
+        {
+            let _ = (keys, non_null, out);
+            unreachable!("no whole-word kernels on this target")
+        }
+    }
+
+    #[inline(always)]
+    fn combine_block(keys: Side<'_>, out: &mut [u32; 64]) {
+        #[cfg(all(target_arch = "aarch64", not(miri)))]
+        crate::simd::combine(keys, out);
+        #[cfg(not(all(target_arch = "aarch64", not(miri))))]
+        {
+            let _ = (keys, out);
+            unreachable!("no whole-word kernels on this target")
+        }
+    }
+
+    #[inline(always)]
+    fn combine_nulls_block(keys: Side<'_>, non_null: u64, out: &mut [u32; 64]) {
+        #[cfg(all(target_arch = "aarch64", not(miri)))]
+        crate::simd::combine_nulls(keys, non_null, out);
+        #[cfg(not(all(target_arch = "aarch64", not(miri))))]
+        {
+            let _ = (keys, non_null, out);
+            unreachable!("no whole-word kernels on this target")
+        }
+    }
 }
