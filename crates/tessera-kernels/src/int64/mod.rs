@@ -6,10 +6,10 @@
 //!
 //! The family shares with [`crate::int32`] the vocabulary of [`crate::ops`]
 //! and the drivers of `crate::int`, generic over the lane type, which each
-//! kernel moves to as a commit of its own (plan 4.25): the comparison of two
-//! columns so far; the others still mirror int32 kernel by kernel. What
-//! stays the family's own is the vector code of a whole word (`simd`), whose
-//! lanes and gaps differ. A physical int64 representation does not select
+//! kernel moves to as a commit of its own (plan 4.25): the comparisons of a
+//! column with a scalar and of two columns so far; the others still mirror
+//! int32 kernel by kernel. What stays the family's own is the vector code
+//! of a whole word (`simd`), whose lanes and gaps differ. A physical int64 representation does not select
 //! PostgreSQL semantics: the caller chooses kernels by logical type and
 //! operation, and a Datum holds an int8 as its whole word.
 
@@ -32,7 +32,6 @@ pub use crate::ops::{ArithOp, ArithmeticError, CompareOp};
 
 pub(crate) use crate::BULK_MIN_ROWS;
 
-#[cfg(all(target_arch = "aarch64", not(miri)))]
 use tessera_core::WordBlock;
 
 impl crate::int::IntLane for i64 {
@@ -58,6 +57,24 @@ impl crate::int::IntLane for i64 {
         #[cfg(not(all(target_arch = "aarch64", not(miri))))]
         {
             let _ = (left, right, op);
+            unreachable!("no whole-word kernels on this target")
+        }
+    }
+
+    #[inline(always)]
+    fn filter_block(block: WordBlock<'_, Self>, scalar: Self, op: CompareOp) -> u64 {
+        #[cfg(all(target_arch = "aarch64", not(miri)))]
+        return match block {
+            WordBlock::Dense { values, non_nulls } => {
+                crate::simd::filter_dense64(values, scalar, op) & non_nulls
+            }
+            WordBlock::Datum { values, isnull } => {
+                crate::simd::filter_datum64(values, isnull, scalar, op)
+            }
+        };
+        #[cfg(not(all(target_arch = "aarch64", not(miri))))]
+        {
+            let _ = (block, scalar, op);
             unreachable!("no whole-word kernels on this target")
         }
     }

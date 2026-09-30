@@ -12,10 +12,11 @@
 //! a call of the driver for its width.
 
 mod compare;
+mod filter;
 
 pub(crate) use compare::compare_columns;
+pub(crate) use filter::filter;
 
-#[cfg(all(target_arch = "aarch64", not(miri)))]
 use tessera_core::WordBlock;
 
 use crate::ops::CompareOp;
@@ -59,4 +60,7 @@ pub(crate) trait IntLane: Copy + Ord + core::fmt::Debug + 'static {
     /// The rows of a whole word where `left op right`, NULL rows
     /// included; the caller masks them.
     fn compare_sides(left: Side<'_, Self>, right: Side<'_, Self>, op: CompareOp) -> u64;
+
+    /// The non-NULL rows of a whole word where `value op scalar`.
+    fn filter_block(block: WordBlock<'_, Self>, scalar: Self, op: CompareOp) -> u64;
 }

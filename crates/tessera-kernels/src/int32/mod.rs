@@ -25,7 +25,6 @@ pub use hash::{NullKeys, hash, hash_combine, hash_next, murmurhash32};
 
 pub(crate) use crate::BULK_MIN_ROWS;
 
-#[cfg(all(target_arch = "aarch64", not(miri)))]
 use tessera_core::WordBlock;
 
 impl crate::int::IntLane for i32 {
@@ -51,6 +50,24 @@ impl crate::int::IntLane for i32 {
         #[cfg(not(all(target_arch = "aarch64", not(miri))))]
         {
             let _ = (left, right, op);
+            unreachable!("no whole-word kernels on this target")
+        }
+    }
+
+    #[inline(always)]
+    fn filter_block(block: WordBlock<'_, Self>, scalar: Self, op: CompareOp) -> u64 {
+        #[cfg(all(target_arch = "aarch64", not(miri)))]
+        return match block {
+            WordBlock::Dense { values, non_nulls } => {
+                crate::simd::filter_dense(values, scalar, op) & non_nulls
+            }
+            WordBlock::Datum { values, isnull } => {
+                crate::simd::filter_datum(values, isnull, scalar, op)
+            }
+        };
+        #[cfg(not(all(target_arch = "aarch64", not(miri))))]
+        {
+            let _ = (block, scalar, op);
             unreachable!("no whole-word kernels on this target")
         }
     }
