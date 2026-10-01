@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 use anyhow::Result;
+use proptest::prelude::*;
 use tessera_core::{ColumnReader, ColumnView, RowMask, RowMaskView};
 use tessera_kernels::decimal::{
     self, Decimal, DecimalWord, Partial, Partials, Special, SumState, Term, Terms,
@@ -12,6 +13,7 @@ use tessera_kernels::table::{
     MAX_KEYS, Slot, SumSlot, Table, TableConfig, UNIT_BITS, bloom, index_size, normalize_word,
     record_bytes,
 };
+use tessera_testing::{edge, flags, integer, property, values, words};
 
 /// Bytes of the header, as the format fixes it.
 const HEADER: usize = 96;
@@ -1174,14 +1176,6 @@ fn regrowing_keeps_records_and_their_references() -> Result<()> {
     Ok(())
 }
 
-/// A xorshift generator for test values.
-fn random(state: &mut u64) -> u64 {
-    *state ^= *state >> 12;
-    *state ^= *state << 25;
-    *state ^= *state >> 27;
-    state.wrapping_mul(0x2545_F491_4F6C_DD1D)
-}
-
 /// A column that hides its storage, so that every word goes row by row.
 struct RowsOnly<C>(C);
 
@@ -1205,21 +1199,38 @@ impl<C: ColumnReader> ColumnReader for RowsOnly<C> {
     }
 }
 
+/// A key column, its non-NULL flags (values under NULL are edges) and a
+/// selection to normalize besides the fixed ones.
+fn key_columns() -> impl Strategy<Value = (Vec<i32>, Vec<bool>, Vec<bool>)> {
+    (1..=200_usize)
+        .prop_flat_map(|nrows| (flags(nrows), flags(nrows)))
+        .prop_flat_map(|(non_null, selected)| {
+            (
+                values(&non_null, &integer::<i32>()),
+                Just(non_null),
+                Just(selected),
+            )
+        })
+}
+
 #[test]
-fn whole_words_normalize_like_rows() -> Result<()> {
-    let mut state = 0x1234_5678_9abc_def1;
-    for nrows in [64, 65, 130, 200] {
-        let values: Vec<i32> = (0..nrows).map(|_| random(&mut state) as i32).collect();
-        let mut non_nulls = all_rows(nrows);
-        for (index, word) in non_nulls.iter_mut().enumerate() {
-            *word &= random(&mut state) | 1 << (index % 64);
-        }
-        let dense = ColumnView::try_new(&values, Some(RowMaskView::try_new(nrows, &non_nulls)?))?;
+fn whole_words_normalize_like_rows() {
+    property(key_columns(), |(values, non_null, selected)| {
+        whole_words_normalize_like(&values, &non_null, &selected)
+    });
+}
+
+fn whole_words_normalize_like(values: &[i32], non_null: &[bool], selected: &[bool]) -> Result<()> {
+    let nrows = values.len();
+    let non_nulls = words(non_null);
+    let drawn = words(selected);
+    {
+        let dense = ColumnView::try_new(values, Some(RowMaskView::try_new(nrows, &non_nulls)?))?;
         let rows = RowsOnly(ColumnView::try_new(
-            &values,
+            values,
             Some(RowMaskView::try_new(nrows, &non_nulls)?),
         )?);
-        for index in 0..nrows.div_ceil(64) {
+        for (index, &drawn) in drawn.iter().enumerate() {
             let width = (nrows - index * 64).min(64);
             let full = if width == 64 {
                 u64::MAX
@@ -1230,6 +1241,7 @@ fn whole_words_normalize_like_rows() -> Result<()> {
                 full,
                 full & 0x5555_5555_5555_5555,
                 full & 0x8000_0000_0000_0001,
+                drawn,
             ] {
                 let (mut from_block, mut from_rows) = ([7; 64], [7; 64]);
                 let block_bits = normalize_word(&dense, index, selected, &mut from_block)?;
@@ -1284,25 +1296,31 @@ fn a_word_probed_at_once_answers_as_rows_probed_alone() -> Result<()> {
     let mut table = local(&ONE_INT4, 3000)?;
     insert_all(&mut table, &hashes, &keys[..], None)?;
     let table = table.table()?;
-    let mut state = 0x0bad_5eed;
-    let probe_values: Vec<i32> = (0..500)
-        .map(|_| (random(&mut state) % 2000) as i32)
-        .collect();
-    let probe_keys = [ColumnView::try_new(&probe_values, None)?];
-    let probe_hashes: Vec<u32> = probe_values.iter().map(|&value| hash_i32(value)).collect();
-    let all = all_rows(500);
-    let (found, matches) = probe_rows(&table, &probe_hashes, &probe_keys, &all)?;
-    for row in 0..500 {
-        let mut one = vec![0; all.len()];
-        one[row / 64] = 1 << (row % 64);
-        let (alone, alone_matches) = probe_rows(&table, &probe_hashes, &probe_keys, &one)?;
-        let hit = alone[row / 64] >> (row % 64) & 1;
-        assert_eq!(found[row / 64] >> (row % 64) & 1, hit, "row {row}");
-        if hit == 1 {
-            assert_eq!(matches[row], alone_matches[row], "row {row}");
+    // Present keys, absent ones past them, and edges.
+    let probes = proptest::collection::vec(prop_oneof![0..2000, edge::<i32>()], 0..=200);
+    property(probes, |probe_values| -> Result<()> {
+        let nrows = probe_values.len();
+        let probe_keys = [ColumnView::try_new(&probe_values, None)?];
+        let probe_hashes: Vec<u32> = probe_values.iter().map(|&value| hash_i32(value)).collect();
+        let all = all_rows(nrows);
+        let (found, matches) = probe_rows(&table, &probe_hashes, &probe_keys, &all)?;
+        for row in 0..nrows {
+            let mut one = vec![0; all.len()];
+            one[row / 64] = 1 << (row % 64);
+            let (alone, alone_matches) = probe_rows(&table, &probe_hashes, &probe_keys, &one)?;
+            let hit = alone[row / 64] >> (row % 64) & 1;
+            assert_eq!(found[row / 64] >> (row % 64) & 1, hit, "row {row}");
+            assert_eq!(
+                hit == 1,
+                (0..1700).contains(&probe_values[row]),
+                "row {row}"
+            );
+            if hit == 1 {
+                assert_eq!(matches[row], alone_matches[row], "row {row}");
+            }
         }
-    }
-    assert!(found.iter().map(|word| word.count_ones()).sum::<u32>() > 300);
+        Ok(())
+    });
     Ok(())
 }
 

@@ -2,15 +2,12 @@
 //! dynamic programming over the pattern, pieces over the string's
 //! characters.
 
+use anyhow::Result;
+use proptest::collection::vec;
+use proptest::prelude::*;
+use proptest::sample::select;
 use tessera_kernels::text::{Chars, Like, Piece, char_count};
-
-/// xorshift64*, fixed seed.
-fn random(state: &mut u64) -> u64 {
-    *state ^= *state >> 12;
-    *state ^= *state << 25;
-    *state ^= *state >> 27;
-    state.wrapping_mul(0x2545_F491_4F6C_DD1D)
-}
+use tessera_testing::{edge, property};
 
 /// LIKE of literals and `%` by dynamic programming: `matched[i][j]` when
 /// the first `i` pattern bytes match the first `j` string bytes.
@@ -29,28 +26,27 @@ fn like_reference(pattern: &[u8], string: &[u8]) -> bool {
     matched[pattern.len()][string.len()]
 }
 
+/// Patterns of `a`, `b` and `%` against strings of `a` and `b`, short
+/// enough that every way to split a match occurs.
 #[test]
 fn like_matches_as_dynamic_programming() {
-    let mut state = 0x7E57_11CE_0000_0042;
-    let alphabet = b"ab%";
-    for _ in 0..200_000 {
-        let plen = (random(&mut state) % 8) as usize;
-        let slen = (random(&mut state) % 10) as usize;
-        let pattern: Vec<u8> = (0..plen)
-            .map(|_| alphabet[(random(&mut state) % 3) as usize])
-            .collect();
-        let string: Vec<u8> = (0..slen)
-            .map(|_| alphabet[(random(&mut state) % 2) as usize])
-            .collect();
-        let like = Like::parse(&pattern).unwrap();
-        assert_eq!(
-            like.matches(&string),
-            like_reference(&pattern, &string),
-            "{} {}",
-            String::from_utf8_lossy(&pattern),
-            String::from_utf8_lossy(&string)
-        );
-    }
+    let pair = (
+        vec(select(b"ab%".to_vec()), 0..8),
+        vec(select(b"ab".to_vec()), 0..10),
+    );
+    property(vec(pair, 0..64), |pairs| -> Result<()> {
+        for (pattern, string) in pairs {
+            let like = Like::parse(&pattern).unwrap();
+            assert_eq!(
+                like.matches(&string),
+                like_reference(&pattern, &string),
+                "{} {}",
+                String::from_utf8_lossy(&pattern),
+                String::from_utf8_lossy(&string)
+            );
+        }
+        Ok(())
+    });
 }
 
 /// A piece by the string's characters, as the core's functions describe it.
@@ -84,38 +80,46 @@ fn piece_reference(piece: Piece, string: &str) -> String {
     }
 }
 
+/// A count or position of a piece: small, around the string's length, or
+/// an edge of int4.
+fn count() -> BoxedStrategy<i32> {
+    prop_oneof![3 => -15..=15, 1 => edge::<i32>()].boxed()
+}
+
+fn pieces() -> impl Strategy<Value = Piece> {
+    prop_oneof![
+        (count(), proptest::option::of(count())).prop_map(|(start, length)| Piece::Substring {
+            start,
+            length: length.map(i32::saturating_abs)
+        }),
+        count().prop_map(Piece::Left),
+        count().prop_map(Piece::Right),
+        Just(Piece::Rtrim),
+        Just(Piece::Ltrim),
+        Just(Piece::Btrim),
+    ]
+}
+
+/// Strings of spaces and characters of one to four UTF-8 bytes.
+fn strings() -> impl Strategy<Value = String> {
+    vec(select(vec![" ", "a", "é", "€", "𝄞"]), 0..12).prop_map(|chars| chars.concat())
+}
+
 #[test]
 fn pieces_match_the_characters() {
-    let mut state = 0x0DDC_0FFE_E000_0007;
-    let alphabet = [" ", "a", "é", "€", "𝄞"];
-    for _ in 0..100_000 {
-        let len = (random(&mut state) % 12) as usize;
-        let string: String = (0..len)
-            .map(|_| alphabet[(random(&mut state) % 5) as usize])
-            .collect();
-        let small = |state: &mut u64| (random(state) % 31) as i32 - 15;
-        let piece = match random(&mut state) % 6 {
-            0 => Piece::Substring {
-                start: small(&mut state),
-                length: random(&mut state)
-                    .is_multiple_of(2)
-                    .then(|| small(&mut state).abs()),
-            },
-            1 => Piece::Left(small(&mut state)),
-            2 => Piece::Right(small(&mut state)),
-            3 => Piece::Rtrim,
-            4 => Piece::Ltrim,
-            _ => Piece::Btrim,
-        };
-        let (from, to) = piece.bounds(string.as_bytes(), Chars::Utf8).unwrap();
-        assert_eq!(
-            &string.as_bytes()[from..to],
-            piece_reference(piece, &string).as_bytes(),
-            "{piece:?} {string:?}"
-        );
-        assert_eq!(
-            char_count(string.as_bytes(), Chars::Utf8),
-            string.chars().count() as i64
-        );
-    }
+    property(vec((pieces(), strings()), 0..64), |cases| -> Result<()> {
+        for (piece, string) in cases {
+            let (from, to) = piece.bounds(string.as_bytes(), Chars::Utf8)?;
+            assert_eq!(
+                &string.as_bytes()[from..to],
+                piece_reference(piece, &string).as_bytes(),
+                "{piece:?} {string:?}"
+            );
+            assert_eq!(
+                char_count(string.as_bytes(), Chars::Utf8),
+                string.chars().count() as i64
+            );
+        }
+        Ok(())
+    });
 }

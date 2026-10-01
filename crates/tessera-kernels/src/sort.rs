@@ -604,6 +604,10 @@ pub fn merge(
 
 #[cfg(test)]
 mod tests {
+    use proptest::collection::vec;
+    use proptest::prelude::*;
+    use tessera_testing::property;
+
     use super::*;
 
     const ASC: SortKey = SortKey {
@@ -634,94 +638,81 @@ mod tests {
         assert_eq!(at, 76);
     }
 
-    fn random(state: &mut u64) -> u64 {
-        *state ^= *state << 13;
-        *state ^= *state >> 7;
-        *state ^= *state << 17;
-        *state
+    /// Sorted runs of items of `words` words from a few values, many of
+    /// them equal; the last word is a key as the node writes it, the
+    /// reference's low 32 bits left out.
+    fn runs() -> impl Strategy<Value = (usize, Vec<Vec<Vec<u64>>>)> {
+        (1..=3_usize).prop_flat_map(|words| {
+            let item = vec(0_u64..5, words).prop_map(move |mut item| {
+                item[words - 1] <<= 32;
+                item
+            });
+            let run = vec(item, 0..50).prop_map(|mut items| {
+                items.sort();
+                items
+            });
+            (Just(words), vec(run, 1..=40))
+        })
     }
 
-    /// Runs of random items of one and three words, cut into blocks of
-    /// a few rows, merge into the order of all the items sorted at once.
+    /// Runs of items of one to three words, cut into blocks of a few rows,
+    /// merge into the order of all the items sorted at once.
     #[test]
     fn runs_merge_into_the_order_of_all_their_items() {
-        let mut state = 0x9E37_79B9_7F4A_7C15_u64;
-        for words in [1_usize, 2, 3] {
-            for nruns in [1_usize, 2, 7, 40] {
-                let runs: Vec<Vec<Vec<u64>>> = (0..nruns)
-                    .map(|_| {
-                        let n = (random(&mut state) % 50) as usize;
-                        let mut items: Vec<Vec<u64>> = (0..n)
-                            .map(|_| {
-                                // Keys, as the node writes them: the
-                                // reference's low 32 bits left out.
-                                (0..words)
-                                    .map(|word| {
-                                        let value = random(&mut state) % 5;
-                                        if word == words - 1 {
-                                            value << 32
-                                        } else {
-                                            value
-                                        }
-                                    })
-                                    .collect()
-                            })
-                            .collect();
-                        items.sort();
-                        items
-                    })
-                    .collect();
-                let block = 3;
-                let mut state_words = vec![0_u32; MERGE_STATE_WORDS];
-                let mut cursor = vec![0_usize; nruns];
-                let mut merged: Vec<Vec<u64>> = Vec::new();
-                loop {
-                    // Each run's current block: its lanes from its cursor on.
-                    let lanes_data: Vec<Vec<u64>> = (0..nruns)
-                        .flat_map(|run| {
-                            let rows = &runs[run];
-                            let start = cursor[run] / block * block;
-                            let end = (start + block).min(rows.len());
-                            let from = cursor[run].min(end);
-                            (0..words)
-                                .map(move |word| {
-                                    rows[from..end].iter().map(|item| item[word]).collect()
-                                })
-                                .collect::<Vec<Vec<u64>>>()
-                        })
-                        .collect();
-                    let lanes: Vec<&[u64]> = lanes_data.iter().map(Vec::as_slice).collect();
-                    let left: Vec<u32> = (0..nruns)
-                        .map(|run| {
-                            let end = ((cursor[run] / block + 1) * block).min(runs[run].len());
-                            (end - cursor[run].min(end)) as u32
-                        })
-                        .collect();
-                    let more: Vec<bool> = (0..nruns)
-                        .map(|run| ((cursor[run] / block + 1) * block) < runs[run].len())
-                        .collect();
-                    // A run whose block is done moves to its next block.
-                    if let Some(run) = (0..nruns).find(|&run| left[run] == 0 && more[run]) {
-                        cursor[run] = (cursor[run] / block + 1) * block;
-                        let _ = run;
-                        continue;
-                    }
-                    let mut out = [0_u32; 8];
-                    let done =
-                        merge(words, &lanes, &left, &more, &mut state_words, &mut out).unwrap();
-                    if done.count == 0 {
-                        break;
-                    }
-                    for &run in &out[..done.count] {
-                        merged.push(runs[run as usize][cursor[run as usize]].clone());
-                        cursor[run as usize] += 1;
-                    }
-                }
-                let mut all: Vec<Vec<u64>> = runs.concat();
-                all.sort();
-                assert_eq!(merged, all, "{words} words, {nruns} runs");
+        property(runs(), |(words, runs)| -> Result<()> {
+            runs_merge(words, &runs);
+            Ok(())
+        });
+    }
+
+    fn runs_merge(words: usize, runs: &[Vec<Vec<u64>>]) {
+        let nruns = runs.len();
+        let block = 3;
+        let mut state_words = vec![0_u32; MERGE_STATE_WORDS];
+        let mut cursor = vec![0_usize; nruns];
+        let mut merged: Vec<Vec<u64>> = Vec::new();
+        loop {
+            // Each run's current block: its lanes from its cursor on.
+            let lanes_data: Vec<Vec<u64>> = (0..nruns)
+                .flat_map(|run| {
+                    let rows = &runs[run];
+                    let start = cursor[run] / block * block;
+                    let end = (start + block).min(rows.len());
+                    let from = cursor[run].min(end);
+                    (0..words)
+                        .map(move |word| rows[from..end].iter().map(|item| item[word]).collect())
+                        .collect::<Vec<Vec<u64>>>()
+                })
+                .collect();
+            let lanes: Vec<&[u64]> = lanes_data.iter().map(Vec::as_slice).collect();
+            let left: Vec<u32> = (0..nruns)
+                .map(|run| {
+                    let end = ((cursor[run] / block + 1) * block).min(runs[run].len());
+                    (end - cursor[run].min(end)) as u32
+                })
+                .collect();
+            let more: Vec<bool> = (0..nruns)
+                .map(|run| ((cursor[run] / block + 1) * block) < runs[run].len())
+                .collect();
+            // A run whose block is done moves to its next block.
+            if let Some(run) = (0..nruns).find(|&run| left[run] == 0 && more[run]) {
+                cursor[run] = (cursor[run] / block + 1) * block;
+                let _ = run;
+                continue;
+            }
+            let mut out = [0_u32; 8];
+            let done = merge(words, &lanes, &left, &more, &mut state_words, &mut out).unwrap();
+            if done.count == 0 {
+                break;
+            }
+            for &run in &out[..done.count] {
+                merged.push(runs[run as usize][cursor[run as usize]].clone());
+                cursor[run as usize] += 1;
             }
         }
+        let mut all: Vec<Vec<u64>> = runs.concat();
+        all.sort();
+        assert_eq!(merged, all, "{words} words, {nruns} runs");
     }
 
     #[test]

@@ -134,32 +134,35 @@ pub(super) fn groups(
 
 #[cfg(test)]
 mod tests {
+    use anyhow::Result;
+    use proptest::collection::vec;
+    use proptest::prelude::*;
+    use tessera_testing::{integer, property};
+
     use super::{combine, combine_nulls, hash, hash_nulls};
     use crate::int32::{Side, hash_combine, murmurhash32};
 
-    fn keys() -> [i32; 64] {
-        let mut state = 0x9E37_79B9_7F4A_7C15_u64;
-        std::array::from_fn(|lane| {
-            state ^= state >> 12;
-            state ^= state << 25;
-            state ^= state >> 27;
-            match lane % 8 {
-                0 => i32::MIN,
-                1 => i32::MAX,
-                2 => 0,
-                3 => -1,
-                _ => (state.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 32) as i32,
-            }
-        })
-    }
-
+    /// Any word of keys leaning to the edges, any NULL lanes and any
+    /// previous hashes.
     #[test]
     fn lanes_match_the_scalar_functions_on_both_storages() {
-        let dense = keys();
+        let cases = (
+            vec(integer::<i32>(), 64),
+            any::<u64>(),
+            vec(any::<u32>(), 64),
+        );
+        property(cases, |(keys, non_nulls, previous)| -> Result<()> {
+            lanes_match(
+                keys.try_into().unwrap(),
+                non_nulls,
+                previous.try_into().unwrap(),
+            );
+            Ok(())
+        });
+    }
+
+    fn lanes_match(dense: [i32; 64], non_nulls: u64, previous: [u32; 64]) {
         let datums = dense.map(|key| i64::from(key) as u64);
-        let non_nulls = 0xF0F0_0FF0_1234_5678_u64;
-        let previous: [u32; 64] =
-            std::array::from_fn(|lane| (lane as u32).wrapping_mul(0x9e37_79b9));
         let expected_hash = dense.map(|key| murmurhash32(key as u32));
         let expected_hash_nulls: [u32; 64] = std::array::from_fn(|lane| {
             if non_nulls & (1 << lane) != 0 {

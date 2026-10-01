@@ -241,8 +241,12 @@ fn apply(
 mod tests {
     use std::mem::MaybeUninit;
 
+    use anyhow::Result;
+    use proptest::collection::vec;
+    use tessera_testing::{integer, property};
+
     use super::{div, rem};
-    use crate::int32::divisor::tests::{dividends, divisors};
+    use crate::int32::divisor::tests::{any_divisor, dividends, divisors};
     use crate::int32::{Divisor, Side};
 
     fn written(out: &[MaybeUninit<i32>; 64]) -> [i32; 64] {
@@ -255,22 +259,36 @@ mod tests {
     #[test]
     fn vector_lanes_match_the_scalar_formula() {
         for d in divisors() {
-            let divisor = Divisor::new(d).unwrap();
             for block in dividends(d).chunks(64) {
                 let mut dense = [0; 64];
                 dense[..block.len()].copy_from_slice(block);
-                // PostgreSQL's Int32GetDatum sign-extends.
-                let datums = dense.map(|n| i64::from(n) as u64);
-                let quotients = dense.map(|n| divisor.quotient(n));
-                let remainders = dense.map(|n| divisor.remainder(n));
-                for lhs in [Side::Dense(&dense), Side::Datum(&datums)] {
-                    let mut out = [MaybeUninit::uninit(); 64];
-                    div(lhs, &divisor, &mut out);
-                    assert_eq!(written(&out), quotients, "{d}");
-                    rem(lhs, &divisor, &mut out);
-                    assert_eq!(written(&out), remainders, "{d}");
-                }
+                lanes_match_the_scalar_formula(d, dense);
             }
+        }
+    }
+
+    /// Any word of dividends leaning to the edges, by any prepared divisor.
+    #[test]
+    fn any_word_matches_the_scalar_formula() {
+        let cases = (any_divisor(), vec(integer::<i32>(), 64));
+        property(cases, |(d, dividends)| -> Result<()> {
+            lanes_match_the_scalar_formula(d, dividends.try_into().unwrap());
+            Ok(())
+        });
+    }
+
+    fn lanes_match_the_scalar_formula(d: i32, dense: [i32; 64]) {
+        let divisor = Divisor::new(d).unwrap();
+        // PostgreSQL's Int32GetDatum sign-extends.
+        let datums = dense.map(|n| i64::from(n) as u64);
+        let quotients = dense.map(|n| divisor.quotient(n));
+        let remainders = dense.map(|n| divisor.remainder(n));
+        for lhs in [Side::Dense(&dense), Side::Datum(&datums)] {
+            let mut out = [MaybeUninit::uninit(); 64];
+            div(lhs, &divisor, &mut out);
+            assert_eq!(written(&out), quotients, "{d}");
+            rem(lhs, &divisor, &mut out);
+            assert_eq!(written(&out), remainders, "{d}");
         }
     }
 }

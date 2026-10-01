@@ -3,14 +3,19 @@
 use std::cmp::Ordering;
 
 use anyhow::Result;
+use proptest::collection::vec;
+use proptest::prelude::*;
+use proptest::sample::select;
 use tessera_core::RowMask;
 use tessera_kernels::sort::{MAX_ITEM_WORDS, SortKey, item_words, sort_items};
 use tessera_kernels::table::{KeyKind, KeySource, LocalTable, TableConfig};
+use tessera_testing::{flags, integer, nrows, property, words};
 
 /// Chunks of the tests: small, so that most row sets span several.
 const CHUNK: usize = 4096;
 
 /// Rows of keys, each one a value or NULL, as a key source.
+#[derive(Clone, Debug)]
 struct Rows {
     kinds: Vec<KeyKind>,
     /// Per key, per row.
@@ -42,36 +47,51 @@ impl KeySource for Rows {
     }
 }
 
-/// A generator of reproducible values.
-struct Random(u64);
+/// A key of either kind, direction and NULL place, nullable or not.
+fn sort_key() -> impl Strategy<Value = SortKey> {
+    (
+        select(vec![KeyKind::Int32, KeyKind::Int64]),
+        any::<bool>(),
+        any::<bool>(),
+        any::<bool>(),
+    )
+        .prop_map(|(kind, descending, nulls_first, nullable)| {
+            key(kind, descending, nulls_first, nullable)
+        })
+}
 
-impl Random {
-    fn next(&mut self) -> u64 {
-        self.0 ^= self.0 << 13;
-        self.0 ^= self.0 >> 7;
-        self.0 ^= self.0 << 17;
-        self.0
+/// A value of the kind: from -3 to 3 when `few`, so that later keys
+/// decide, else leaning to the edges of the kind; NULL one time in five
+/// when the key is nullable.
+fn value(key: &SortKey, few: bool) -> BoxedStrategy<Option<i64>> {
+    let value = match (few, key.kind) {
+        (true, _) => (-3_i64..=3).boxed(),
+        (false, KeyKind::Int32) => integer::<i32>().prop_map(i64::from).boxed(),
+        (false, KeyKind::Int64) => integer::<i64>(),
+    };
+    if key.nullable {
+        prop_oneof![1 => Just(None), 4 => value.prop_map(Some)].boxed()
+    } else {
+        value.prop_map(Some).boxed()
     }
+}
 
-    /// A value of the kind, from a small range when `few`, else from the
-    /// whole range with its edges likelier; NULL in about one row in
-    /// `null_every` when that is not 0.
-    fn value(&mut self, kind: KeyKind, few: bool, null_every: u64) -> Option<i64> {
-        if null_every != 0 && self.next().is_multiple_of(null_every) {
-            return None;
-        }
-        let raw = self.next();
-        let value = match (kind, few, raw % 16) {
-            (_, true, _) => (raw % 7) as i64 - 3,
-            (KeyKind::Int32, false, 0) => i64::from(i32::MIN),
-            (KeyKind::Int32, false, 1) => i64::from(i32::MAX),
-            (KeyKind::Int32, false, _) => i64::from((raw >> 8) as i32),
-            (KeyKind::Int64, false, 0) => i64::MIN,
-            (KeyKind::Int64, false, 1) => i64::MAX,
-            (KeyKind::Int64, false, _) => (raw >> 4) as i64 ^ (raw << 60) as i64,
-        };
-        Some(value)
-    }
+/// Rows for `keys`.
+fn rows(keys: &[SortKey], nrows: usize, few: bool) -> impl Strategy<Value = Rows> + use<> {
+    let kinds = keys.iter().map(|key| key.kind).collect();
+    let values: Vec<_> = keys.iter().map(|key| vec(value(key, few), nrows)).collect();
+    values.prop_map(move |values| Rows {
+        kinds: Vec::clone(&kinds),
+        values,
+    })
+}
+
+/// Key sets of `nkeys` keys and rows for them: around word borders, or a
+/// few hundred one time in four; few values or values leaning to the edges.
+fn cases(nkeys: std::ops::RangeInclusive<usize>) -> impl Strategy<Value = (Vec<SortKey>, Rows)> {
+    let sizes = prop_oneof![3 => nrows().prop_map(|nrows| nrows.max(1)), 1 => 300..=600_usize];
+    (vec(sort_key(), nkeys), sizes, any::<bool>())
+        .prop_flat_map(|(keys, nrows, few)| (Just(keys.clone()), rows(&keys, nrows, few)))
 }
 
 /// PostgreSQL's order of one key: NULL first or last whatever the
@@ -134,23 +154,12 @@ fn sorted_rows(keys: &[SortKey], rows: &Rows) -> Result<(Vec<usize>, Vec<u32>)> 
     Ok((out.into_iter().map(row_of).collect(), references))
 }
 
-/// Sort random rows by `keys` and check the order against the model: the
+/// Sort the rows by `keys` and check the order against the model: the
 /// keys by PostgreSQL's rules, then the reference, which the items end
 /// with.
-fn check(keys: &[SortKey], nrows: usize, few: bool, seed: u64) -> Result<()> {
-    let mut random = Random(seed);
-    let rows = Rows {
-        kinds: keys.iter().map(|key| key.kind).collect(),
-        values: keys
-            .iter()
-            .map(|key| {
-                (0..nrows)
-                    .map(|_| random.value(key.kind, few, if key.nullable { 5 } else { 0 }))
-                    .collect()
-            })
-            .collect(),
-    };
-    let (got, references) = sorted_rows(keys, &rows)?;
+fn check(keys: &[SortKey], rows: &Rows) -> Result<()> {
+    let nrows = rows.nrows();
+    let (got, references) = sorted_rows(keys, rows)?;
     let mut expected: Vec<usize> = (0..nrows).collect();
     expected.sort_by(|&a, &b| {
         keys.iter()
@@ -159,7 +168,7 @@ fn check(keys: &[SortKey], nrows: usize, few: bool, seed: u64) -> Result<()> {
             .find(|order| order.is_ne())
             .unwrap_or_else(|| references[a].cmp(&references[b]))
     });
-    assert_eq!(got, expected, "keys {keys:?}, {nrows} rows, few {few}");
+    assert_eq!(got, expected, "keys {keys:?}, {nrows} rows");
     Ok(())
 }
 
@@ -173,64 +182,15 @@ fn key(kind: KeyKind, descending: bool, nulls_first: bool, nullable: bool) -> So
 }
 
 #[test]
-fn one_key_every_direction_and_null_place() -> Result<()> {
-    for kind in [KeyKind::Int32, KeyKind::Int64] {
-        for descending in [false, true] {
-            for nulls_first in [false, true] {
-                for nullable in [false, true] {
-                    for (nrows, few) in [(1, false), (64, false), (65, true), (1000, false)] {
-                        check(
-                            &[key(kind, descending, nulls_first, nullable)],
-                            nrows,
-                            few,
-                            7 + nrows as u64,
-                        )?;
-                    }
-                }
-            }
-        }
-    }
-    Ok(())
+fn one_key_every_direction_and_null_place() {
+    property(cases(1..=1), |(keys, rows)| check(&keys, &rows));
 }
 
+/// Two to four keys of both kinds: items of one to three words, keys that
+/// cross word boundaries.
 #[test]
-fn several_keys_across_word_boundaries() -> Result<()> {
-    use KeyKind::{Int32, Int64};
-    let sets: [&[SortKey]; 6] = [
-        // Two int4 keys and a reference: one word.
-        &[
-            key(Int32, false, false, false),
-            key(Int32, true, false, false),
-        ],
-        // Two nullable int4 keys: 66 bits and a reference, two words.
-        &[
-            key(Int32, false, true, true),
-            key(Int32, false, false, true),
-        ],
-        // Three int4 keys, exactly two words.
-        &[
-            key(Int32, false, false, false),
-            key(Int32, true, false, false),
-            key(Int32, false, false, false),
-        ],
-        // An int8 and an int4, both nullable: keys cross the first word.
-        &[key(Int64, true, true, true), key(Int32, false, false, true)],
-        // Two nullable int8 keys: three words.
-        &[key(Int64, false, false, true), key(Int64, true, true, true)],
-        // Four keys of both kinds.
-        &[
-            key(Int32, false, false, true),
-            key(Int64, false, true, true),
-            key(Int32, true, true, false),
-            key(Int64, true, false, true),
-        ],
-    ];
-    for (index, keys) in sets.iter().enumerate() {
-        // Few values, so that the later keys decide.
-        check(keys, 500, true, 100 + index as u64)?;
-        check(keys, 500, false, 200 + index as u64)?;
-    }
-    Ok(())
+fn several_keys_across_word_boundaries() {
+    property(cases(2..=4), |(keys, rows)| check(&keys, &rows));
 }
 
 #[test]
@@ -352,48 +312,29 @@ fn top_rows(keys: &[SortKey], rows: &Rows, n: usize) -> Result<Vec<Vec<Option<i6
 }
 
 #[test]
-fn a_top_n_heap_keeps_the_first_rows_in_order() -> Result<()> {
-    use KeyKind::{Int32, Int64};
-    let sets: [&[SortKey]; 4] = [
-        &[key(Int32, false, false, true)],
-        &[key(Int64, true, true, true)],
-        &[key(Int32, false, true, true), key(Int64, true, false, true)],
-        &[
-            key(Int32, true, false, true),
-            key(Int32, false, false, true),
-        ],
-    ];
-    for (index, keys) in sets.iter().enumerate() {
-        for (nrows, few) in [(500, false), (500, true), (130, false)] {
-            let mut random = Random(300 + index as u64 + nrows as u64);
-            let rows = Rows {
-                kinds: keys.iter().map(|key| key.kind).collect(),
-                values: keys
-                    .iter()
-                    .map(|key| (0..nrows).map(|_| random.value(key.kind, few, 5)).collect())
-                    .collect(),
-            };
-            let mut all: Vec<Vec<Option<i64>>> = (0..nrows)
-                .map(|row| (0..keys.len()).map(|key| rows.values[key][row]).collect())
-                .collect();
-            all.sort_by(|a, b| {
-                keys.iter()
-                    .enumerate()
-                    .map(|(k, key)| compare_key(key, a[k], b[k]))
-                    .find(|order| order.is_ne())
-                    .unwrap_or(Ordering::Equal)
-            });
-            for n in [0, 1, 5, 64, 100, nrows, nrows + 10] {
-                let got = top_rows(keys, &rows, n)?;
-                assert_eq!(
-                    got,
-                    all[..n.min(nrows)],
-                    "keys {keys:?}, {nrows} rows, few {few}, top {n}"
-                );
-            }
+fn a_top_n_heap_keeps_the_first_rows_in_order() {
+    property(cases(1..=2), |(keys, rows)| -> Result<()> {
+        let nrows = rows.nrows();
+        let mut all: Vec<Vec<Option<i64>>> = (0..nrows)
+            .map(|row| (0..keys.len()).map(|key| rows.values[key][row]).collect())
+            .collect();
+        all.sort_by(|a, b| {
+            keys.iter()
+                .enumerate()
+                .map(|(k, key)| compare_key(key, a[k], b[k]))
+                .find(|order| order.is_ne())
+                .unwrap_or(Ordering::Equal)
+        });
+        for n in [0, 1, 5, 64, 100, nrows, nrows + 10] {
+            let got = top_rows(&keys, &rows, n)?;
+            assert_eq!(
+                got,
+                all[..n.min(nrows)],
+                "keys {keys:?}, {nrows} rows, top {n}"
+            );
         }
-    }
-    Ok(())
+        Ok(())
+    });
 }
 
 #[test]
@@ -422,69 +363,54 @@ fn a_heap_rejects_the_rows_that_do_not_beat_its_worst() -> Result<()> {
 }
 
 #[test]
-fn key_lanes_order_the_selected_rows_as_their_keys() -> Result<()> {
-    use KeyKind::{Int32, Int64};
+fn key_lanes_order_the_selected_rows_as_their_keys() {
+    let cases = (vec(sort_key(), 1..=3), 1..=150_usize).prop_flat_map(|(keys, nrows)| {
+        (Just(keys.clone()), rows(&keys, nrows, true), flags(nrows))
+    });
+    property(cases, |(keys, rows, selection)| -> Result<()> {
+        key_lanes_order(&keys, &rows, &selection)
+    });
+}
+
+fn key_lanes_order(keys: &[SortKey], rows: &Rows, selection: &[bool]) -> Result<()> {
     use tessera_kernels::sort::key_lanes;
-    let sets: [&[SortKey]; 3] = [
-        &[key(Int32, false, false, true)],
-        &[key(Int64, true, true, true), key(Int32, false, false, true)],
-        &[
-            key(Int32, true, false, true),
-            key(Int64, false, true, true),
-            key(Int64, true, true, true),
-        ],
-    ];
-    for (set, keys) in sets.iter().enumerate() {
-        let nrows = 150;
-        let mut random = Random(11 + set as u64);
-        let rows = Rows {
-            kinds: keys.iter().map(|key| key.kind).collect(),
-            values: keys
+    let nrows = rows.nrows();
+    let mut mask_words = words(selection);
+    let selected: Vec<usize> = (0..nrows).filter(|&row| selection[row]).collect();
+    let mask = RowMask::try_new(nrows, &mut mask_words)?;
+    let words = item_words(keys)?;
+    let mut storage = vec![vec![0u64; nrows]; words];
+    let mut lanes: Vec<&mut [u64]> = storage.iter_mut().map(Vec::as_mut_slice).collect();
+    assert_eq!(
+        key_lanes(keys, rows, &mask.as_view(), &mut lanes)?,
+        selected.len()
+    );
+    let item = |at: usize| -> Vec<u64> { storage.iter().map(|lane| lane[at]).collect() };
+    for a in 0..selected.len() {
+        for b in 0..selected.len() {
+            let expected = keys
                 .iter()
-                .map(|key| {
-                    (0..nrows)
-                        .map(|_| random.value(key.kind, true, 5))
-                        .collect()
+                .enumerate()
+                .map(|(k, key)| {
+                    compare_key(
+                        key,
+                        rows.values[k][selected[a]],
+                        rows.values[k][selected[b]],
+                    )
                 })
-                .collect(),
-        };
-        let mut mask_words = vec![random.next(), random.next(), random.next() & 0x3F_FFFF];
-        let selected: Vec<usize> = (0..nrows)
-            .filter(|row| (mask_words[row / 64] >> (row % 64)) & 1 == 1)
-            .collect();
-        let mask = RowMask::try_new(nrows, &mut mask_words)?;
-        let words = item_words(keys)?;
-        let mut storage = vec![vec![0u64; nrows]; words];
-        let mut lanes: Vec<&mut [u64]> = storage.iter_mut().map(Vec::as_mut_slice).collect();
-        assert_eq!(
-            key_lanes(keys, &rows, &mask.as_view(), &mut lanes)?,
-            selected.len()
-        );
-        let item = |at: usize| -> Vec<u64> { storage.iter().map(|lane| lane[at]).collect() };
-        for a in 0..selected.len() {
-            for b in 0..selected.len() {
-                let expected = keys
-                    .iter()
-                    .enumerate()
-                    .map(|(k, key)| {
-                        compare_key(
-                            key,
-                            rows.values[k][selected[a]],
-                            rows.values[k][selected[b]],
-                        )
-                    })
-                    .find(|order| order.is_ne())
-                    .unwrap_or(Ordering::Equal);
-                assert_eq!(
-                    item(a).cmp(&item(b)),
-                    expected,
-                    "keys {keys:?}, rows {a} and {b}"
-                );
-            }
+                .find(|order| order.is_ne())
+                .unwrap_or(Ordering::Equal);
+            assert_eq!(
+                item(a).cmp(&item(b)),
+                expected,
+                "keys {keys:?}, rows {a} and {b}"
+            );
         }
+    }
+    if !selected.is_empty() {
         let mut short = vec![vec![0u64; selected.len() - 1]; words];
         let mut lanes: Vec<&mut [u64]> = short.iter_mut().map(Vec::as_mut_slice).collect();
-        assert!(key_lanes(keys, &rows, &mask.as_view(), &mut lanes).is_err());
+        assert!(key_lanes(keys, rows, &mask.as_view(), &mut lanes).is_err());
     }
     Ok(())
 }

@@ -83,6 +83,11 @@ impl Divisor {
 
 #[cfg(test)]
 mod tests {
+    use anyhow::Result;
+    use proptest::collection::vec;
+    use proptest::prelude::*;
+    use tessera_testing::{integer, property};
+
     use super::Divisor;
 
     /// Divisors of every shape: small, around powers of two, past the int4
@@ -114,7 +119,7 @@ mod tests {
 
     /// Dividends where a wrong multiplier or bias shows: a window around
     /// zero, the ends of the range, the neighbours of multiples of `d`
-    /// including the largest ones, and a fixed random sample.
+    /// including the largest ones; any dividend is the property below.
     fn dividends(d: i64) -> Vec<i64> {
         let wide = i128::from(d);
         let mut dividends: Vec<i64> = (-(1 << 15)..=1 << 15).collect();
@@ -130,13 +135,6 @@ mod tests {
                 }
             }
         }
-        let mut state = 0x9E37_79B9_7F4A_7C15_u64 ^ (d as u64);
-        dividends.extend((0..1 << 15).map(|_| {
-            state ^= state >> 12;
-            state ^= state << 25;
-            state ^= state >> 27;
-            state.wrapping_mul(0x2545_F491_4F6C_DD1D) as i64
-        }));
         dividends
     }
 
@@ -171,6 +169,32 @@ mod tests {
             (min.magic, min.shift, min.bias, min.sign),
             (0, 63, i64::MAX, -1)
         );
+    }
+
+    /// A divisor a word divides by, any but 0 and ±1: a power of two or
+    /// its neighbour of either sign, or a value leaning to the ends of the
+    /// range.
+    fn any_divisor() -> impl Strategy<Value = i64> {
+        let near_power =
+            (1..63_u32, -1_i64..=1, any::<bool>()).prop_map(|(shift, step, negative)| {
+                let d = (1_i64 << shift) + step;
+                if negative { -d } else { d }
+            });
+        prop_oneof![near_power, integer::<i64>()]
+            .prop_filter("a prepared divisor", |&d| Divisor::new(d).is_some())
+    }
+
+    #[test]
+    fn any_dividend_divides_as_the_operators() {
+        let cases = (any_divisor(), vec(integer::<i64>(), 0..256));
+        property(cases, |(d, dividends)| -> Result<()> {
+            let divisor = Divisor::new(d).unwrap();
+            for n in dividends {
+                assert_eq!(divisor.quotient(n), n / d, "{n} / {d}");
+                assert_eq!(divisor.remainder(n), n % d, "{n} % {d}");
+            }
+            Ok(())
+        });
     }
 
     #[test]

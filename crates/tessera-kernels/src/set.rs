@@ -199,39 +199,46 @@ where
 
 #[cfg(test)]
 mod tests {
+    use anyhow::Result;
+    use proptest::collection::vec;
+    use proptest::prelude::*;
     use tessera_core::ColumnView;
+    use tessera_testing::{edge, property};
 
     use super::*;
 
-    /// xorshift64*, fixed seed.
-    fn random(state: &mut u64) -> u64 {
-        *state ^= *state >> 12;
-        *state ^= *state << 25;
-        *state ^= *state >> 27;
-        state.wrapping_mul(0x2545_F491_4F6C_DD1D)
+    /// Keys from a narrow range, so that probes hit them, and edges; a set
+    /// of up to a thousand, the sizes where a set compares all its keys or
+    /// halves its range.
+    fn keys() -> impl Strategy<Value = Vec<i64>> {
+        let key = prop_oneof![8 => -1500_i64..1500, 1 => edge::<i64>()];
+        let count = prop_oneof![0..=70_usize, 0..=1000_usize];
+        count
+            .prop_flat_map(move |count| vec(key.clone(), count))
+            .prop_map(|mut keys| {
+                keys.sort_unstable();
+                keys.dedup();
+                keys
+            })
     }
 
     #[test]
     fn membership_as_a_linear_scan() {
-        let mut state = 0x05E7_0F12_3456_78AB;
-        for count in [0, 1, 2, 7, 16, 17, 33, 64, 100, 1000] {
-            let mut keys: Vec<i64> = (0..count)
-                .map(|_| (random(&mut state) % 3000) as i64 - 1500)
-                .collect();
-            keys.sort_unstable();
-            keys.dedup();
-            keys.extend([i64::MIN, i64::MAX].iter().filter(|_| count > 50));
-            keys.sort_unstable();
-            keys.dedup();
+        let probes = vec(prop_oneof![-1600_i64..1600, edge::<i64>()], 0..256);
+        property((keys(), probes), |(keys, probes)| -> Result<()> {
             let set = KeySet::new(&keys);
-            for value in (-1600..1600).chain([i64::MIN, i64::MAX, i64::MIN + 1]) {
-                assert_eq!(
-                    set.contains(value),
-                    keys.contains(&value),
-                    "{count} {value}"
-                );
+            for &value in probes.iter().chain(&keys) {
+                for value in [value.saturating_sub(1), value, value.saturating_add(1)] {
+                    assert_eq!(
+                        set.contains(value),
+                        keys.contains(&value),
+                        "{} keys, {value}",
+                        keys.len()
+                    );
+                }
             }
-        }
+            Ok(())
+        });
     }
 
     /// Values of a column of either storage, NULLs among them.
