@@ -4,7 +4,7 @@
 //! code.
 
 use anyhow::{Result, ensure};
-use tessera_core::{ColumnReader, RowMask, RowMaskView, WordBlock};
+use tessera_core::{ColumnReader, RowMask, RowMaskView};
 
 use super::{IntLane, Side};
 use crate::BULK_MIN_ROWS;
@@ -183,6 +183,8 @@ fn block<T: IntLane, C: ColumnReader<Value = T>>(
     column: &C,
     index: usize,
 ) -> Option<(Side<'_, T>, u64)> {
+    use tessera_core::WordBlock;
+
     Some(match column.word_block(index)? {
         WordBlock::Dense { values, non_nulls } => (Side::Dense(values), non_nulls),
         WordBlock::Datum { values, isnull } => {

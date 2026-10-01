@@ -34,7 +34,9 @@ use anyhow::Result;
 use crate::ops::{ArithOp, ArithmeticError, CompareOp};
 
 /// A whole-word operand: the storage of a full prepared word, or a constant.
+/// Only the vector code builds one, so elsewhere it is dead.
 #[derive(Clone, Copy, Debug)]
+#[cfg_attr(not(all(target_arch = "aarch64", not(miri))), allow(dead_code))]
 pub(crate) enum Side<'a, T> {
     Dense(&'a [T; 64]),
     Datum(&'a [u64; 64]),
@@ -44,6 +46,7 @@ pub(crate) enum Side<'a, T> {
 impl<T: IntLane> Side<'_, T> {
     /// One lane of the width, a Datum's as the width reads it.
     #[inline(always)]
+    #[cfg_attr(not(all(target_arch = "aarch64", not(miri))), allow(dead_code))]
     pub(crate) fn lane(self, lane: usize) -> T {
         match self {
             Self::Dense(values) => values[lane],
@@ -99,6 +102,7 @@ pub(crate) trait IntLane: Copy + Ord + core::fmt::Debug + 'static {
 
     /// The value a Datum holds: its low 32 bits for int4, as
     /// `DatumGetInt32`, its whole word for int8, as `DatumGetInt64`.
+    #[cfg_attr(not(all(target_arch = "aarch64", not(miri))), allow(dead_code))]
     fn from_datum(word: u64) -> Self;
 
     /// A whole word of a column as an operand, with its non-NULL rows.
@@ -113,6 +117,7 @@ pub(crate) trait IntLane: Copy + Ord + core::fmt::Debug + 'static {
     fn compare_sides(left: Side<'_, Self>, right: Side<'_, Self>, op: CompareOp) -> u64;
 
     /// The non-NULL rows of a whole word where `value op scalar`.
+    #[cfg_attr(not(all(target_arch = "aarch64", not(miri))), allow(dead_code))]
     fn filter_block(block: WordBlock<'_, Self>, scalar: Self, op: CompareOp) -> u64;
 
     /// A key's 32 bits for its hash: int4's value, int8's folded as

@@ -4,7 +4,7 @@
 
 use std::mem::MaybeUninit;
 
-use anyhow::{Result, ensure};
+use anyhow::Result;
 use tessera_core::WordBlock;
 
 use super::fold;
@@ -202,6 +202,7 @@ impl IntLane for i64 {
         #[cfg(all(target_arch = "aarch64", not(miri)))]
         {
             use crate::simd;
+            use anyhow::ensure;
             let mut lanes = present;
             match (op, divisor) {
                 (ArithOp::Add, _) => {

@@ -4,7 +4,7 @@
 
 use std::mem::MaybeUninit;
 
-use anyhow::{Result, ensure};
+use anyhow::Result;
 use tessera_core::WordBlock;
 
 use super::{CompareOp, Divisor, Side};
@@ -199,6 +199,7 @@ impl IntLane for i32 {
         #[cfg(all(target_arch = "aarch64", not(miri)))]
         {
             use crate::simd;
+            use anyhow::ensure;
             // A word without rows to divide divides nothing: a division is
             // too dear to spend on absent lanes, and a whole word of them is
             // a NULL column.

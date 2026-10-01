@@ -66,6 +66,7 @@ impl Divisor {
     /// below the truncated quotient's shifted form for negative dividends,
     /// which the bias corrects before the shift.
     #[inline(always)]
+    #[cfg_attr(not(all(target_arch = "aarch64", not(miri))), allow(dead_code))]
     pub(crate) fn quotient(self, n: i64) -> i64 {
         let high = ((i128::from(self.magic) * i128::from(n)) >> 64) as i64;
         let mut q = high.wrapping_add(n);
@@ -76,6 +77,7 @@ impl Divisor {
 
     /// `n % d`, with the dividend's sign.
     #[inline(always)]
+    #[cfg_attr(not(all(target_arch = "aarch64", not(miri))), allow(dead_code))]
     pub(crate) fn remainder(self, n: i64) -> i64 {
         n.wrapping_sub(self.quotient(n).wrapping_mul(self.value))
     }
