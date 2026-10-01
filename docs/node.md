@@ -135,6 +135,21 @@ and counts removed rows with `InstrCountFiltered1`; a node never adjusts
 instrumentation itself, so `EXPLAIN ANALYZE` row counts stay right in every
 node.
 
+### Errors
+
+`elog(ERROR)` is for what a correct build never meets: a broken
+invariant, a foreign plan, a helper called out of turn; it reports
+`XX000`, an internal error. What the data, the files or a limit can cause
+goes through `ereport` with its SQLSTATE: a spilled block or run read back
+that is not what was written, `ERRCODE_DATA_CORRUPTED` (`XX001`), as the
+kernels report damaged spilled bytes (`TESS_ERROR_DATA_CORRUPTED`); a
+file the node cannot create or read, `errcode_for_file_access()` with
+`%m`; a size past what the node handles, `ERRCODE_PROGRAM_LIMIT_EXCEEDED`;
+a feature a plan cannot have, `ERRCODE_FEATURE_NOT_SUPPORTED`. A kernel's
+failure goes through `tess_status_report` with the kernel's SQLSTATE. The
+nodes raise no `WARNING` or `NOTICE`: a plan the core runs instead is no
+event for the user.
+
 ### Rescan
 
 `ReScanCustomScan` runs in one fixed order: clear the node's output,

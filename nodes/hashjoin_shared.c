@@ -1372,14 +1372,18 @@ round_load(TessHashJoinState *state, JoinSpill *spill, int partition, JoinRound 
 			{
 				if (header.number >= (uint32) round->nvalues ||
 					DsaPointerIsValid(values[header.number]))
-					elog(ERROR, "TessHashJoin read value chunk %u of a round twice or past its values",
-						 header.number);
+					ereport(ERROR,
+							errcode(ERRCODE_DATA_CORRUPTED),
+							errmsg("TessHashJoin read value chunk %u of a round twice or past its values",
+								header.number));
 				values[header.number] = block;
 				continue;
 			}
 			slot = pg_atomic_fetch_add_u32(&round->next_chunk, 1);
 			if (slot >= (uint32) round->nchunks)
-				elog(ERROR, "TessHashJoin read more chunks of a round than were written");
+				ereport(ERROR,
+						errcode(ERRCODE_DATA_CORRUPTED),
+						errmsg("TessHashJoin read more chunks of a round than were written"));
 			chunks[slot] = block;
 			lens[slot] = header.len;
 			spill->round_bases[slot] = body;

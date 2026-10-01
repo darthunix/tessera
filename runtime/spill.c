@@ -222,7 +222,9 @@ set_file(TessSpill *spill)
 		spill->file = FileSetCreate(&spill->shared->fs, name);
 	}
 	if (spill->file <= 0)
-		elog(ERROR, "could not create Tessera spill file");
+		ereport(ERROR,
+				errcode_for_file_access(),
+				errmsg("could not create Tessera spill file: %m"));
 	return spill->file;
 }
 

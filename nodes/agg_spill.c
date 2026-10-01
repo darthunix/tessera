@@ -1217,7 +1217,9 @@ reader_next(TessAggState *state)
 		if (reader->file == NULL || !tess_spill_read_header(reader->file, &header))
 			return NULL;
 		if (header.kind != TESS_SPILL_VALUES)
-			elog(ERROR, "TessAgg read a damaged partition of rows");
+			ereport(ERROR,
+					errcode(ERRCODE_DATA_CORRUPTED),
+					errmsg("TessAgg read a damaged partition of rows"));
 		if (header.len > reader->values_len)
 		{
 			reader->values_len = Max(header.len, reader->values_len * 2);
@@ -1226,7 +1228,9 @@ reader_next(TessAggState *state)
 		tess_spill_read_body(reader->file, reader->values, header.len);
 		if (!tess_spill_read_header(reader->file, &header) ||
 			header.kind != TESS_SPILL_COLUMNS || header.len > reader->chunk_len)
-			elog(ERROR, "TessAgg read a damaged partition of rows");
+			ereport(ERROR,
+					errcode(ERRCODE_DATA_CORRUPTED),
+					errmsg("TessAgg read a damaged partition of rows"));
 		tess_spill_read_body(reader->file, reader->chunk, header.len);
 		reader->rows = tess_spill_columns_rows(reader->chunk);
 		reader->next = 0;

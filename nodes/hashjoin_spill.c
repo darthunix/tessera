@@ -1510,7 +1510,9 @@ add_loaded_values(JoinSpill *spill, uint32 number, void *body)
 {
 	/* Another participant's number may be past this one's. */
 	if (number >= INT_MAX - 1)
-		elog(ERROR, "TessHashJoin read back a value chunk it never wrote");
+		ereport(ERROR,
+				errcode(ERRCODE_DATA_CORRUPTED),
+				errmsg("TessHashJoin read back a value chunk it never wrote"));
 	side_value_slot(&spill->build, (int) number);
 	spill->build.nvalues = Max(spill->build.nvalues, (int) number + 1);
 	spill->build.value_bases[number] = body;
@@ -1920,7 +1922,9 @@ next_spilled(TessHashJoinState *state, JoinSpill *spill)
 						}
 						if ((ref >> 32) - 1 >= (uint64) side->nvalues ||
 							side->value_bases[(ref >> 32) - 1] == NULL)
-							elog(ERROR, "TessHashJoin read back a value it did not keep");
+							ereport(ERROR,
+									errcode(ERRCODE_DATA_CORRUPTED),
+									errmsg("TessHashJoin read back a value it did not keep"));
 						spill->values[word][row] =
 							PointerGetDatum(side->value_bases[(ref >> 32) - 1] +
 											(ref & 0xFFFFFFFF));
@@ -1949,7 +1953,9 @@ next_spilled(TessHashJoinState *state, JoinSpill *spill)
 				{
 					/* Another writer's number may be past this one's. */
 					if (header.number >= INT_MAX - 1)
-						elog(ERROR, "TessHashJoin read back a value chunk it never wrote");
+						ereport(ERROR,
+								errcode(ERRCODE_DATA_CORRUPTED),
+								errmsg("TessHashJoin read back a value chunk it never wrote"));
 					side_value_slot(side, (int) header.number);
 					side->nvalues = Max(side->nvalues, (int) header.number + 1);
 					side->value_bases[header.number] = body;
