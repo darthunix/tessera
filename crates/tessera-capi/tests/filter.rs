@@ -1,12 +1,18 @@
-//! The int32 filter over the capi representations: full prepared words take
-//! the vector path, words with an unprepared row the row path, and both must
-//! match the scalar model.
+//! The int4 and int8 filters over the capi representations: full prepared
+//! words take the vector path, words with an unprepared row the row path,
+//! and both must match the scalar model; NULL and unselected cells hold
+//! edges that some comparison would keep if they were read.
 
-use std::mem::MaybeUninit;
+mod support;
 
-use tessera_capi::{DatumInt32Column, DenseInt32Column};
-use tessera_core::{RowMask, RowMaskView};
-use tessera_kernels::int32::{CompareOp, filter};
+use anyhow::Result;
+use proptest::prelude::*;
+use tessera_core::{ColumnReader, RowMask};
+use tessera_kernels::ops::CompareOp;
+use tessera_kernels::{int32, int64};
+use tessera_testing::{edge, integer, property, words};
+
+use support::{Batch, Storage, Width, batches};
 
 const OPS: [CompareOp; 6] = [
     CompareOp::Eq,
@@ -17,7 +23,51 @@ const OPS: [CompareOp; 6] = [
     CompareOp::Ge,
 ];
 
-fn compare(value: i32, op: CompareOp, scalar: i32) -> bool {
+/// One width under test and its filter.
+trait Lane: Width {
+    /// Values close to each other: -3 to 3, and for int8 also the same with
+    /// a high half, which a 32-bit comparison would call equal.
+    fn near() -> BoxedStrategy<Self>;
+
+    fn filter<C: ColumnReader<Value = Self>>(
+        column: &C,
+        rows: &mut RowMask<'_>,
+        op: CompareOp,
+        scalar: Self,
+    ) -> Result<()>;
+}
+
+impl Lane for i32 {
+    fn near() -> BoxedStrategy<Self> {
+        (-3..=3).boxed()
+    }
+
+    fn filter<C: ColumnReader<Value = Self>>(
+        column: &C,
+        rows: &mut RowMask<'_>,
+        op: CompareOp,
+        scalar: Self,
+    ) -> Result<()> {
+        int32::filter(column, rows, op, scalar)
+    }
+}
+
+impl Lane for i64 {
+    fn near() -> BoxedStrategy<Self> {
+        prop_oneof![-3_i64..=3, (-3_i64..=3).prop_map(|value| value << 32)].boxed()
+    }
+
+    fn filter<C: ColumnReader<Value = Self>>(
+        column: &C,
+        rows: &mut RowMask<'_>,
+        op: CompareOp,
+        scalar: Self,
+    ) -> Result<()> {
+        int64::filter(column, rows, op, scalar)
+    }
+}
+
+fn compare<T: Ord>(value: T, op: CompareOp, scalar: T) -> bool {
     match op {
         CompareOp::Eq => value == scalar,
         CompareOp::Ne => value != scalar,
@@ -28,113 +78,56 @@ fn compare(value: i32, op: CompareOp, scalar: i32) -> bool {
     }
 }
 
-fn words_for(flags: &[bool]) -> Vec<u64> {
-    let mut words = vec![0; flags.len().div_ceil(64)];
-    for (row, &flag) in flags.iter().enumerate() {
-        if flag {
-            words[row / 64] |= 1 << (row % 64);
-        }
-    }
-    words
+fn comparable<T: Lane>() -> BoxedStrategy<T> {
+    prop_oneof![1 => edge::<T>(), 2 => T::near(), 1 => integer::<T>()].boxed()
 }
 
-fn random(state: &mut u64) -> u64 {
-    *state ^= *state >> 12;
-    *state ^= *state << 25;
-    *state ^= *state >> 27;
-    state.wrapping_mul(0x2545_F491_4F6C_DD1D)
+fn check<T: Lane, C: ColumnReader<Value = T>>(
+    column: &C,
+    batch: &Batch<T>,
+    selection: &[u64],
+    scalar: T,
+    what: &str,
+) -> Result<()> {
+    let nrows = batch.values.len();
+    for op in OPS {
+        let expected: Vec<bool> = (0..nrows)
+            .map(|row| batch.read(row) && compare(batch.values[row], op, scalar))
+            .collect();
+        let mut kept = selection.to_vec();
+        T::filter(column, &mut RowMask::try_new(nrows, &mut kept)?, op, scalar)?;
+        assert_eq!(kept, words(&expected), "{what} {op:?}");
+    }
+    Ok(())
+}
+
+fn representations_match_the_scalar_model<T: Lane>() {
+    let cases = (batches(comparable::<T>()), comparable::<T>());
+    property(cases, |(batch, scalar)| -> Result<()> {
+        let storage = Storage::new(&batch);
+        check(
+            &storage.dense(),
+            &batch,
+            &storage.selection,
+            scalar,
+            "dense",
+        )?;
+        check(
+            &storage.datum(),
+            &batch,
+            &storage.selection,
+            scalar,
+            "datum",
+        )
+    });
 }
 
 #[test]
-fn representations_match_the_scalar_model_on_bulk_and_row_words() {
-    let mut state = 0x2545_F491_4F6C_DD1D;
-    let nrows = 3 * 64 + 5;
-    let boundary = [i32::MIN, -1, 0, 1, i32::MAX];
-    let values: Vec<i32> = (0..nrows)
-        .map(|_| {
-            let draw = random(&mut state);
-            if draw.is_multiple_of(5) {
-                boundary[(draw >> 8) as usize % boundary.len()]
-            } else {
-                (draw >> 8) as i32 % 50
-            }
-        })
-        .collect();
-    let non_null: Vec<bool> = (0..nrows)
-        .map(|_| !random(&mut state).is_multiple_of(3))
-        .collect();
-    // Word 1 has an unprepared row and takes the row path; the others are bulk.
-    for gap in [None, Some(64 + 30)] {
-        let ready: Vec<bool> = (0..nrows).map(|row| Some(row) != gap).collect();
-        let mut dense_values = vec![MaybeUninit::uninit(); nrows];
-        let mut datum_values = vec![MaybeUninit::uninit(); nrows];
-        let mut isnull = vec![MaybeUninit::uninit(); nrows];
-        for row in (0..nrows).filter(|&row| ready[row]) {
-            isnull[row].write(!non_null[row]);
-            // A NULL row holds a placeholder that would pass any comparison
-            // if it were not masked.
-            dense_values[row].write(if non_null[row] { values[row] } else { 0 });
-            datum_values[row].write(if non_null[row] {
-                // High bits are not part of an int4 Datum and must be ignored.
-                (values[row] as u32 as u64) | (random(&mut state) << 32)
-            } else {
-                0
-            });
-        }
-        let ready_words = words_for(&ready);
-        let non_null_words = words_for(&non_null);
-        let prepared = gap.map(|_| RowMaskView::try_new(nrows, &ready_words).unwrap());
-        let non_nulls = RowMaskView::try_new(nrows, &non_null_words).unwrap();
-        // SAFETY: every prepared row has a value and a flag; the gap is unprepared.
-        let dense =
-            unsafe { DenseInt32Column::try_new(&dense_values, Some(non_nulls), prepared) }.unwrap();
-        // SAFETY: the same holds for Datums and flags.
-        let datum = unsafe { DatumInt32Column::try_new(&datum_values, &isnull, prepared) }.unwrap();
-        for op in OPS {
-            for (scalar, density) in [
-                (i32::MIN, 2),
-                (-50, 2),
-                (-1, 8),
-                (0, 2),
-                (1, 5),
-                (25, 2),
-                (49, 6),
-                (i32::MAX, 2),
-            ] {
-                // Denser selections take the bulk path, sparser ones the rows.
-                let selected: Vec<bool> = (0..nrows)
-                    .map(|row| ready[row] && random(&mut state).is_multiple_of(density))
-                    .collect();
-                let expected: Vec<bool> = (0..nrows)
-                    .map(|row| selected[row] && non_null[row] && compare(values[row], op, scalar))
-                    .collect();
-                let mut dense_words = words_for(&selected);
-                filter(
-                    &dense,
-                    &mut RowMask::try_new(nrows, &mut dense_words).unwrap(),
-                    op,
-                    scalar,
-                )
-                .unwrap();
-                assert_eq!(
-                    dense_words,
-                    words_for(&expected),
-                    "dense {op:?} {scalar} {gap:?}"
-                );
-                let mut datum_words = words_for(&selected);
-                filter(
-                    &datum,
-                    &mut RowMask::try_new(nrows, &mut datum_words).unwrap(),
-                    op,
-                    scalar,
-                )
-                .unwrap();
-                assert_eq!(
-                    datum_words,
-                    words_for(&expected),
-                    "datum {op:?} {scalar} {gap:?}"
-                );
-            }
-        }
-    }
+fn representations_match_the_scalar_model_int4() {
+    representations_match_the_scalar_model::<i32>();
+}
+
+#[test]
+fn representations_match_the_scalar_model_int8() {
+    representations_match_the_scalar_model::<i64>();
 }

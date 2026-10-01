@@ -16,9 +16,11 @@ tessera-kernels.workspace = true
 tessera-spill.workspace = true
 
 [dev-dependencies]
+proptest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tessera-pmu.workspace = true
+tessera-testing.workspace = true
 
 [lints]
 workspace = true
