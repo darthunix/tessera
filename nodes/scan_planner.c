@@ -1,5 +1,7 @@
 #include "postgres.h"
 
+#include <math.h>
+
 #include "access/sysattr.h"
 #include "access/table.h"
 #include "catalog/pg_class.h"

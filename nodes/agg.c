@@ -2342,9 +2342,9 @@ agg_begin(CustomScanState *css, EState *estate, int eflags)
 	{
 		int			slot = 1;
 
-		for (int index = 0; index < state->nvalues; index++)
+		for (int number = 0; number < state->nvalues; number++)
 		{
-			AggValue   *value = &state->values[index];
+			AggValue   *value = &state->values[number];
 
 			value->slot = slot;
 			slot += value->generic != NULL && value->generic->sum_state ?
@@ -2540,7 +2540,7 @@ filtered_rows(TessAggState *state, TessBatch *batch, int filter, const TessRowMa
 		if (selected == UINT64_MAX)
 		{
 			for (int bit = 0; bit < 64; bit++)
-				kept |= (uint64) (!column.isnull[base + bit] &
+				kept |= (uint64) ((!column.isnull[base + bit]) &
 								  (DatumGetBool(column.values[base + bit]) ? 1 : 0)) << bit;
 		}
 		else

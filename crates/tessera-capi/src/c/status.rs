@@ -81,7 +81,8 @@ fn text(chars: &[c_char]) -> String {
     let bytes: Vec<u8> = chars
         .iter()
         .take_while(|&&c| c != 0)
-        .map(|&c| c as u8)
+        // c_char is i8 on some targets and u8 on others (AArch64 Linux).
+        .map(|&c| c.to_ne_bytes()[0])
         .collect();
     String::from_utf8_lossy(&bytes).into_owned()
 }

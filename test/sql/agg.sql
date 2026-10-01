@@ -485,8 +485,10 @@ SELECT agg_same($$SELECT count(*), sum(c), max(m), sum(x) FROM (SELECT CASE WHEN
 -- Rescan: the partitions of the last scan go.
 SELECT agg_same($$SELECT x, (SELECT count(*) FROM (SELECT g, max(t) FROM agg_groups WHERE g % 3 = x GROUP BY g) AS q) FROM generate_series(0, 2) AS x$$);
 -- FILTER over rows on disk: a dropped row's arguments go as NULL, never
--- computed.
-SELECT agg_spill($$SELECT g, count(*) FILTER (WHERE n > 100), max(t) FILTER (WHERE g % 2 = 0), sum(1000 / (g % 5)) FILTER (WHERE g % 5 <> 0) FROM agg_groups GROUP BY g$$);
+-- computed. The levels are left out: this grouping's partitions sit near
+-- the bound between one level and several, and a server built with
+-- assertions, whose memory chunks are larger, crosses it.
+SELECT split_part(agg_spill($$SELECT g, count(*) FILTER (WHERE n > 100), max(t) FILTER (WHERE g % 2 = 0), sum(1000 / (g % 5)) FILTER (WHERE g % 5 <> 0) FROM agg_groups GROUP BY g$$), ',', 1) AS spill;
 SELECT agg_same($$SELECT count(*), sum(c), max(m), sum(x) FROM (SELECT g, count(*) FILTER (WHERE n > 100) AS c, max(t) FILTER (WHERE g % 2 = 0) AS m, sum(1000 / (g % 5)) FILTER (WHERE g % 5 <> 0) AS x FROM agg_groups GROUP BY g) AS q$$);
 RESET enable_sort;
 RESET work_mem;

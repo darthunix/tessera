@@ -1,5 +1,7 @@
 #include "postgres.h"
 
+#include <math.h>
+
 #include "access/htup_details.h"
 #include "catalog/pg_aggregate.h"
 #include "catalog/pg_language.h"

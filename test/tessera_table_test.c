@@ -1250,7 +1250,7 @@ tessera_test_table_shared_spill(PG_FUNCTION_ARGS)
 	TessBuildParticipant participant = {0};
 	Batch	   *batch = palloc0(sizeof(Batch));
 	TessRowMask valid = {NROWS, batch->valid};
-	uint64		found_words[NWORDS];
+	uint64		found_words[NWORDS] = {0};
 	TessRowMask found = {NROWS, found_words};
 	uint64	   *words;
 	uint64	   *filter;

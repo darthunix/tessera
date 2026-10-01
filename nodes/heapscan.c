@@ -1,5 +1,7 @@
 #include "postgres.h"
 
+#include <math.h>
+
 #include "access/genam.h"
 #include "access/heapam.h"
 #include "access/parallel.h"
