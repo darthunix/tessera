@@ -27,8 +27,10 @@
  */
 
 /*
- * The paths cost a fraction of the core's scan, tessera.scan_cost_factor
- * (0.9): there is no cost model yet.
+ * A path's cost starts as a share of the core scan's, tessera.scan_cost_factor
+ * (0.9) of its start and its total alike; the scan model below (rank_scans,
+ * the times of bench/pg/scancost) then ranks the node's scans of a
+ * relation against one another and against the core's.
  */
 
 static set_rel_pathlist_hook_type previous_set_rel_pathlist_hook = NULL;
@@ -275,7 +277,7 @@ add_filter_paths(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte)
  * clauses, and in place of the parallel one: it is faster than the core's
  * under any parent, a row-wise one included, since it pins a page once
  * and deforms only the columns read (bench/pg/rowwise). The path costs
- * the filter's fraction of the scan's: there is no cost model yet.
+ * the share of the core scan's, which rank_scans then sets by the model.
  */
 static void
 add_scan_paths(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte)

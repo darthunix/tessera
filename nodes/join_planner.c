@@ -791,7 +791,11 @@ make_join_path(PlannerInfo *root, RelOptInfo *joinrel, JoinType jointype,
 		pruned_append(root, outer_path, leaves) : outer_path;
 	initial_cost_hashjoin(root, &workspace, jointype, hashclauses,
 						  priced, inner_path, extra, shared);
-	/* The core's clause sides, which its costing reads. */
+	/*
+	 * The clauses' sides for this join, which the core's costing reads: a
+	 * field of the join being costed, which the core sets the same way
+	 * before it costs each one (clause_sides_match_join).
+	 */
 	foreach_node(RestrictInfo, rinfo, keys->rinfos)
 		rinfo->outer_is_left = bms_is_subset(rinfo->left_relids,
 											 outer_path->parent->relids);
@@ -1083,7 +1087,10 @@ prune_clause(Oid opno, Var *outer, Param *param)
 
 /*
  * The core's pruning description of the relation's partitions for
- * clauses, as prune_info of append.c makes it, off the planner's list; NULL
+ * clauses, as prune_info of append.c makes it, taken off the planner's
+ * list: setrefs registers the descriptions of Appends alone, so the node
+ * keeps it in its plan data and makes its state itself (TessAppend's
+ * prune_start, plan 4.30); NULL
  * where the clauses prune none.
  */
 static PartitionPruneInfo *
