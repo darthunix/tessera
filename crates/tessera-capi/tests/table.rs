@@ -17,7 +17,7 @@ use tessera_capi::c::{
 };
 use tessera_core::{ColumnView, RowMask, RowMaskView};
 use tessera_kernels::int32::{self, NullKeys};
-use tessera_kernels::table::{CHUNK_HEADER, KeyKind, LocalTable, TableConfig, index_size};
+use tessera_kernels::table::{Batch, CHUNK_HEADER, KeyKind, LocalTable, TableConfig, index_size};
 
 /// int4 keys with every fifth row NULL and every value twice: as Datum
 /// words with flags, and as dense values with a non-NULL mask.
@@ -408,7 +408,10 @@ fn round_trip<K: tessera_kernels::table::KeySource + ?Sized>(
     let mut pending_words = valid.to_vec();
     let mut pending = RowMask::try_new(nrows, &mut pending_words)?;
     let mut offsets = vec![0; nrows];
-    owner.insert(hashes, keys, None, &mut pending, &mut offsets)?;
+    owner.insert(
+        None,
+        &mut Batch::new(hashes, keys, &mut pending, &mut offsets)?,
+    )?;
     assert_eq!(pending.as_view().selected_count(), 0);
     let table = owner.table()?;
     let rows = RowMaskView::try_new(nrows, valid)?;

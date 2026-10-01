@@ -13,9 +13,9 @@ use std::slice;
 use anyhow::{Context, Result, bail, ensure};
 use tessera_core::ColumnReader;
 use tessera_kernels::table::{
-    Chunks, Combine, CombineStop, Cursor, FORMAT_VERSION, Fold, HEADER_SIZE, KeyKind, KeySource,
-    MAX_KEYS, MAX_PAYLOAD_COLUMNS, MAX_SUMS, Partitions, PayloadColumns, Slot, SumSlot, Table,
-    TableConfig, TableMut, UNIT_BITS, VERSION_OFFSET, append_columns_to,
+    Appended, Batch, Chunks, Combine, CombineStop, Cursor, FORMAT_VERSION, Fold, HEADER_SIZE,
+    KeyKind, KeySource, MAX_KEYS, MAX_PAYLOAD_COLUMNS, MAX_SUMS, Partitions, PayloadColumns, Slot,
+    SumSlot, Table, TableConfig, TableMut, UNIT_BITS, VERSION_OFFSET, append_columns_to,
     append_partitioned_columns_to, append_to,
     bloom::SharedFilter,
     index_size, init_chunk, normalize_word, payload_null_words,
@@ -518,17 +518,8 @@ pub unsafe extern "C" fn tess_table_append(
                     .context("the payload does not fit in memory")?;
                 Some(values(payload, bytes, "payload")?)
             };
-            append_to(
-                &config,
-                chunks,
-                chunk,
-                hashes,
-                &decoded,
-                payload,
-                &mut pending,
-                offsets,
-            )
-            .map(drop)
+            let mut batch = Batch::new(hashes, &decoded, &mut pending, offsets)?;
+            append_to(&config, chunks, chunk, payload, &mut batch).map(drop)
         })
     }
 }
@@ -620,17 +611,8 @@ pub unsafe extern "C" fn tess_table_append_columns(
                 (wide_words.as_slice(), wide_nulls.as_slice())
             };
             let payload = PayloadColumns::new(words, nulls, nrows)?;
-            append_columns_to(
-                &config,
-                chunks,
-                chunk,
-                hashes,
-                &decoded,
-                &payload,
-                &mut pending,
-                offsets,
-            )
-            .map(drop)
+            let mut batch = Batch::new(hashes, &decoded, &mut pending, offsets)?;
+            append_columns_to(&config, chunks, chunk, &payload, &mut batch).map(drop)
         })
     }
 }
@@ -733,17 +715,14 @@ pub unsafe extern "C" fn tess_table_append_partitioned_columns(
                 &*(&raw const flags[..ncolumns] as *const [&[bool]]),
             );
             let payload = PayloadColumns::new(words, flags, nrows)?;
+            let mut batch = Batch::new(hashes, &decoded, &mut pending, offsets)?;
             append_partitioned_columns_to(
                 &config,
                 chunks,
                 &partitions,
-                hashes,
-                &decoded,
                 &payload,
-                &mut pending,
-                offsets,
-                rows,
-                nulls,
+                &mut batch,
+                &mut Appended { rows, nulls },
             )
             .map(drop)
         })
@@ -1095,15 +1074,9 @@ pub unsafe extern "C" fn tess_table_find_or_insert(
             let nrows = pending.as_view().nrows();
             let hashes = values(hashes, nrows, "hashes")?;
             let offsets = slots(offsets, nrows, "offsets")?;
+            let mut batch = Batch::new(hashes, &decoded, &mut pending, offsets)?;
             table
-                .find_or_insert(
-                    chunk,
-                    hashes,
-                    &decoded,
-                    &mut pending,
-                    offsets,
-                    &mut inserted,
-                )
+                .find_or_insert(chunk, &mut batch, &mut inserted)
                 .map(drop)
         })
     }
@@ -1142,15 +1115,9 @@ pub unsafe extern "C" fn tess_table_find_or_insert_partitioned(
             let nrows = pending.as_view().nrows();
             let hashes = values(hashes, nrows, "hashes")?;
             let offsets = slots(offsets, nrows, "offsets")?;
+            let mut batch = Batch::new(hashes, &decoded, &mut pending, offsets)?;
             table
-                .find_or_insert_partitioned(
-                    &partitions,
-                    hashes,
-                    &decoded,
-                    &mut pending,
-                    offsets,
-                    &mut inserted,
-                )
+                .find_or_insert_partitioned(&partitions, &mut batch, &mut inserted)
                 .map(drop)
         })
     }

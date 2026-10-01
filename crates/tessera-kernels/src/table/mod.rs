@@ -48,7 +48,7 @@
 //! and benchmarks build tables with it.
 //!
 //! ```
-//! use tessera_kernels::table::{KeyKind, LocalTable, TableConfig};
+//! use tessera_kernels::table::{Batch, KeyKind, LocalTable, TableConfig};
 //!
 //! let config = TableConfig { keys: &[KeyKind::Int32], payload_size: 8 };
 //! let mut table = LocalTable::new(&config, 100, 4096)?;
@@ -63,7 +63,8 @@
 //! let mut pending = [0b111];
 //! let mut offsets = [0; 3];
 //! let mut mask = RowMask::try_new(3, &mut pending)?;
-//! table.insert(&hashes, &keys[..], Some(&payload), &mut mask, &mut offsets)?;
+//! let mut batch = Batch::new(&hashes, &keys[..], &mut mask, &mut offsets)?;
+//! table.insert(Some(&payload), &mut batch)?;
 //! assert_eq!(pending, [0], "every row found room");
 //!
 //! // The first row's key has two records; the second row's has one.
@@ -114,6 +115,54 @@ pub use local::LocalTable;
 use record::Access;
 pub use record::{MAX_PAYLOAD_COLUMNS, PayloadColumns, Record, payload_null_words};
 use region::{RawRegion, Region};
+
+/// The rows of a call that places them in a table: each row's hash and
+/// keys, the rows still to place, which leave `pending` as the call
+/// places them, and the reference of each placed row's record, at its
+/// row in `offsets`. A batch may go through several calls, each placing
+/// what it can.
+pub struct Batch<'b, 'm, K: ?Sized> {
+    hashes: &'b [u32],
+    keys: &'b K,
+    pending: &'b mut RowMask<'m>,
+    offsets: &'b mut [u32],
+}
+
+impl<'b, 'm, K: KeySource + ?Sized> Batch<'b, 'm, K> {
+    /// The rows of `pending`, whose row count the keys, the hashes and the
+    /// offsets must have.
+    pub fn new(
+        hashes: &'b [u32],
+        keys: &'b K,
+        pending: &'b mut RowMask<'m>,
+        offsets: &'b mut [u32],
+    ) -> Result<Self> {
+        let nrows = pending.as_view().nrows();
+        ensure!(
+            keys.nrows() == nrows && hashes.len() == nrows && offsets.len() == nrows,
+            "the keys, hashes, mask and offsets of the batch have different row counts"
+        );
+        Ok(Self {
+            hashes,
+            keys,
+            pending,
+            offsets,
+        })
+    }
+
+    /// The rows still to place.
+    pub fn pending(&self) -> RowMaskView<'_> {
+        self.pending.as_view()
+    }
+}
+
+/// What a call that appends to partitions counts: the rows appended to
+/// each partition, at its number in `rows`, and the NULL bits of every row
+/// appended, or-ed into `nulls`. The counts add up over calls.
+pub struct Appended<'a> {
+    pub rows: &'a mut [u64],
+    pub nulls: &'a mut u64,
+}
 
 /// What a table holds, for planning and EXPLAIN.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -223,60 +272,34 @@ fn chunk_region(chunks: &Chunks<'_>) -> RawRegion {
     }
 }
 
-/// Append the rows of `pending` as records of a table of `config` to chunk
+/// Append the rows of `batch` as records of a table of `config` to chunk
 /// `chunk` of `chunks`, as [`Table::append`] does, before the table has an
 /// index: the participants of a shared build append their share first,
 /// and one of them sizes the index for the records once all are counted.
 /// The caller must be the chunk's one writer.
-#[allow(clippy::too_many_arguments)]
 pub fn append_to<K: KeySource + ?Sized>(
     config: &TableConfig<'_>,
     chunks: Chunks<'_>,
     chunk: usize,
-    hashes: &[u32],
-    keys: &K,
     payload: Option<&[u8]>,
-    pending: &mut RowMask<'_>,
-    offsets: &mut [u32],
+    batch: &mut Batch<'_, '_, K>,
 ) -> Result<usize> {
     let layout = header::chunk_layout(config)?;
-    batch::append(
-        &chunk_region(&chunks),
-        &layout,
-        chunk,
-        hashes,
-        keys,
-        payload,
-        pending,
-        offsets,
-    )
+    batch::append(&chunk_region(&chunks), &layout, chunk, payload, batch)
 }
 
 /// As [`append_to`], with each row's payload taken from `columns`: a word
 /// of its NULL bits, then a word per column, which must be the table's
 /// whole payload.
-#[allow(clippy::too_many_arguments)]
 pub fn append_columns_to<K: KeySource + ?Sized>(
     config: &TableConfig<'_>,
     chunks: Chunks<'_>,
     chunk: usize,
-    hashes: &[u32],
-    keys: &K,
     columns: &PayloadColumns<'_>,
-    pending: &mut RowMask<'_>,
-    offsets: &mut [u32],
+    batch: &mut Batch<'_, '_, K>,
 ) -> Result<usize> {
     let layout = header::chunk_layout(config)?;
-    batch::append_columns(
-        &chunk_region(&chunks),
-        &layout,
-        chunk,
-        hashes,
-        keys,
-        columns,
-        pending,
-        offsets,
-    )
+    batch::append_columns(&chunk_region(&chunks), &layout, chunk, columns, batch)
 }
 
 /// The most partitions one split makes.
@@ -301,38 +324,28 @@ pub struct Split {
     pub full: Option<u32>,
 }
 
-/// Append the rows of `pending` as records of a table of `config`, each
-/// to the chunk of its hash's partition, before the table has an index:
-/// as [`append_columns_to`], each row's payload taken from `columns`,
-/// except that a row whose partition's chunk is full stays pending while
-/// the rows after it go on; every row appended counts in `rows` at its
-/// partition, and its NULL bits go into `nulls`. The caller must be the
-/// one writer of every partition's chunk.
-#[allow(clippy::too_many_arguments)]
+/// Append the rows of `batch` as records of a table of `config`, each to
+/// the chunk of its hash's partition, before the table has an index: as
+/// [`append_columns_to`], each row's payload taken from `columns`, except
+/// that a row whose partition's chunk is full stays pending while the rows
+/// after it go on; every row appended counts in `appended`. The caller
+/// must be the one writer of every partition's chunk.
 pub fn append_partitioned_columns_to<K: KeySource + ?Sized>(
     config: &TableConfig<'_>,
     chunks: Chunks<'_>,
     partitions: &Partitions<'_>,
-    hashes: &[u32],
-    keys: &K,
     columns: &PayloadColumns<'_>,
-    pending: &mut RowMask<'_>,
-    offsets: &mut [u32],
-    rows: &mut [u64],
-    nulls: &mut u64,
+    batch: &mut Batch<'_, '_, K>,
+    appended: &mut Appended<'_>,
 ) -> Result<usize> {
     let layout = header::chunk_layout(config)?;
     batch::append_partitioned_columns(
         &chunk_region(&chunks),
         &layout,
         partitions,
-        hashes,
-        keys,
         columns,
-        pending,
-        offsets,
-        rows,
-        nulls,
+        batch,
+        appended,
     )
 }
 
@@ -477,33 +490,21 @@ impl<'a> Table<'a> {
         }
     }
 
-    /// Append the rows of `pending` as records to chunk `chunk`, in row
-    /// order, as long as whole records fit: each row appended leaves
-    /// `pending` and gets the reference of its record in `offsets`; the
+    /// Append the pending rows of `batch` as records to chunk `chunk`, in
+    /// row order, as long as whole records fit: each row appended leaves
+    /// the batch's pending rows and gets the reference of its record; the
     /// count appended is returned, and rows still pending need another
-    /// chunk. `hashes` has one hash per physical row, `keys` the table's
-    /// keys, `payload` the payload of every physical row one after another
-    /// or `None` for zeros. The records are not in the buckets until
-    /// linked. The caller must be the chunk's one writer.
+    /// chunk. The batch's keys are the table's keys; `payload` is the
+    /// payload of every physical row one after another, or `None` for
+    /// zeros. The records are not in the buckets until linked. The caller
+    /// must be the chunk's one writer.
     pub fn append<K: KeySource + ?Sized>(
         &self,
         chunk: usize,
-        hashes: &[u32],
-        keys: &K,
         payload: Option<&[u8]>,
-        pending: &mut RowMask<'_>,
-        offsets: &mut [u32],
+        batch: &mut Batch<'_, '_, K>,
     ) -> Result<usize> {
-        batch::append(
-            &self.region,
-            &self.layout,
-            chunk,
-            hashes,
-            keys,
-            payload,
-            pending,
-            offsets,
-        )
+        batch::append(&self.region, &self.layout, chunk, payload, batch)
     }
 
     /// As [`Table::append`], with each row's payload taken from `columns`:
@@ -512,22 +513,10 @@ impl<'a> Table<'a> {
     pub fn append_columns<K: KeySource + ?Sized>(
         &self,
         chunk: usize,
-        hashes: &[u32],
-        keys: &K,
         columns: &PayloadColumns<'_>,
-        pending: &mut RowMask<'_>,
-        offsets: &mut [u32],
+        batch: &mut Batch<'_, '_, K>,
     ) -> Result<usize> {
-        batch::append_columns(
-            &self.region,
-            &self.layout,
-            chunk,
-            hashes,
-            keys,
-            columns,
-            pending,
-            offsets,
-        )
+        batch::append_columns(&self.region, &self.layout, chunk, columns, batch)
     }
 
     /// Link the records of chunk `chunk` from byte `*from` to its used
@@ -745,35 +734,23 @@ impl<'a> TableMut<'a> {
         unsafe { Table::attach(index, len, chunks) }.map(Self)
     }
 
-    /// Give each row of `pending` the record of its keys, creating one
-    /// with a zero payload in chunk `chunk` where none exists, in row
+    /// Give each pending row of `batch` the record of its keys, creating
+    /// one with a zero payload in chunk `chunk` where none exists, in row
     /// order, until the chunk has no room or the index holds records for
-    /// half its buckets: resolved rows leave `pending` and get their record
-    /// references in `offsets`, the rows whose record this call created
-    /// form `inserted`, and the count resolved is returned. Rows left
-    /// pending need another chunk or a larger index ([`TableMut::regrow`]).
+    /// half its buckets: resolved rows leave the pending rows and get their
+    /// record references, the rows whose record this call created form
+    /// `inserted`, and the count resolved is returned. Rows left pending
+    /// need another chunk or a larger index ([`TableMut::regrow`]).
     pub fn find_or_insert<K: KeySource + ?Sized>(
         &mut self,
         chunk: usize,
-        hashes: &[u32],
-        keys: &K,
-        pending: &mut RowMask<'_>,
-        offsets: &mut [u32],
+        batch: &mut Batch<'_, '_, K>,
         inserted: &mut RowMask<'_>,
     ) -> Result<usize> {
-        exclusive::find_or_insert(
-            &self.0.region,
-            &self.0.layout,
-            chunk,
-            hashes,
-            keys,
-            pending,
-            offsets,
-            inserted,
-        )
+        exclusive::find_or_insert(&self.0.region, &self.0.layout, chunk, batch, inserted)
     }
 
-    /// Give each row of `pending` the record of its keys, as
+    /// Give each pending row of `batch` the record of its keys, as
     /// [`TableMut::find_or_insert`] does, but a new record goes to the chunk
     /// of its hash's partition: a row whose partition's chunk is full stays
     /// pending while the rows after it go on, and all stop once the records
@@ -781,20 +758,14 @@ impl<'a> TableMut<'a> {
     pub fn find_or_insert_partitioned<K: KeySource + ?Sized>(
         &mut self,
         partitions: &Partitions<'_>,
-        hashes: &[u32],
-        keys: &K,
-        pending: &mut RowMask<'_>,
-        offsets: &mut [u32],
+        batch: &mut Batch<'_, '_, K>,
         inserted: &mut RowMask<'_>,
     ) -> Result<usize> {
         exclusive::find_or_insert_partitioned(
             &self.0.region,
             &self.0.layout,
             partitions,
-            hashes,
-            keys,
-            pending,
-            offsets,
+            batch,
             inserted,
         )
     }
@@ -985,7 +956,10 @@ mod tests {
         let mut pending = RowMask::try_new(count as usize, &mut pending_words).unwrap();
         let mut offsets = vec![0; count as usize];
         let inserted = table
-            .insert(&hashes, &column[..], None, &mut pending, &mut offsets)
+            .insert(
+                None,
+                &mut Batch::new(&hashes, &column[..], &mut pending, &mut offsets).unwrap(),
+            )
             .unwrap();
         assert_eq!(inserted, count as usize);
         assert!(table.chunks() > 1, "the records span chunks");
@@ -1151,11 +1125,8 @@ mod tests {
             &PARTITION_CONFIG,
             blocks.chunks(),
             source as usize,
-            &hashes,
-            &column[..],
             Some(&payload),
-            &mut pending,
-            &mut offsets,
+            &mut Batch::new(&hashes, &column[..], &mut pending, &mut offsets).unwrap(),
         )
         .unwrap();
         let len = CHUNK_HEADER + 8 * 32;
@@ -1281,10 +1252,7 @@ mod tests {
                             shift: 3,
                             chunks: &current,
                         },
-                        &hashes,
-                        &column[..],
-                        &mut pending,
-                        &mut offsets,
+                        &mut Batch::new(&hashes, &column[..], &mut pending, &mut offsets).unwrap(),
                         &mut inserted,
                     )
                     .unwrap();
@@ -1348,10 +1316,13 @@ mod tests {
         let mut offsets = vec![0; keys.len()];
         table
             .find_or_insert(
-                &hashes,
-                &column[..],
-                &mut RowMask::try_new(keys.len(), &mut pending_words).unwrap(),
-                &mut offsets,
+                &mut Batch::new(
+                    &hashes,
+                    &column[..],
+                    &mut RowMask::try_new(keys.len(), &mut pending_words).unwrap(),
+                    &mut offsets,
+                )
+                .unwrap(),
                 &mut RowMask::try_new(keys.len(), &mut inserted_words).unwrap(),
             )
             .unwrap();
@@ -1414,10 +1385,13 @@ mod tests {
         let mut inserted_words = vec![0; pending_words.len()];
         let mut offsets = vec![0; keys.len()];
         into.find_or_insert(
-            &hashes,
-            &column[..],
-            &mut RowMask::try_new(keys.len(), &mut pending_words).unwrap(),
-            &mut offsets,
+            &mut Batch::new(
+                &hashes,
+                &column[..],
+                &mut RowMask::try_new(keys.len(), &mut pending_words).unwrap(),
+                &mut offsets,
+            )
+            .unwrap(),
             &mut RowMask::try_new(keys.len(), &mut inserted_words).unwrap(),
         )
         .unwrap();

@@ -9,9 +9,9 @@ use tessera_kernels::decimal::{
 use tessera_kernels::int32::{self, NullKeys, hash_combine, murmurhash32};
 use tessera_kernels::ops::ArithmeticError;
 use tessera_kernels::table::{
-    CHUNK_HEADER, Cursor, FORMAT_VERSION, Fold, KeyKind, KeySource, LocalTable, MAX_CHUNK_LEN,
-    MAX_KEYS, Slot, SumSlot, Table, TableConfig, UNIT_BITS, bloom, index_size, normalize_word,
-    record_bytes,
+    Batch, CHUNK_HEADER, Cursor, FORMAT_VERSION, Fold, KeyKind, KeySource, LocalTable,
+    MAX_CHUNK_LEN, MAX_KEYS, Slot, SumSlot, Table, TableConfig, UNIT_BITS, bloom, index_size,
+    normalize_word, record_bytes,
 };
 use tessera_testing::{edge, flags, integer, property, values, words};
 
@@ -309,7 +309,10 @@ fn insert_all<K: KeySource + ?Sized>(
     let mut pending_words = all_rows(nrows);
     let mut pending = RowMask::try_new(nrows, &mut pending_words)?;
     let mut offsets = vec![0; nrows];
-    let inserted = table.insert(hashes, keys, payload, &mut pending, &mut offsets)?;
+    let inserted = table.insert(
+        payload,
+        &mut Batch::new(hashes, keys, &mut pending, &mut offsets)?,
+    )?;
     assert_eq!(inserted, nrows);
     assert_eq!(pending.as_view().selected_count(), 0);
     Ok(offsets)
@@ -462,7 +465,10 @@ fn a_null_key_groups_apart_from_the_value_it_hashes_like() -> Result<()> {
 
     let mut table = local(&ONE_INT4, 2)?;
     let mut offsets = [0; 2];
-    table.insert(&hashes, &keys[..], None, &mut valid, &mut offsets)?;
+    table.insert(
+        None,
+        &mut Batch::new(&hashes, &keys[..], &mut valid, &mut offsets)?,
+    )?;
     let table = table.table()?;
     assert_eq!(table.stats().records, 2);
     let (found, matches) = probe_all(&table, &hashes, &keys[..])?;
@@ -492,7 +498,10 @@ fn a_null_key_groups_apart_from_the_value_it_hashes_like() -> Result<()> {
         &mut rejected,
     )?;
     let mut table = local(&ONE_INT4, 2)?;
-    table.insert(&hashes, &keys[..], None, &mut rejected, &mut offsets)?;
+    table.insert(
+        None,
+        &mut Batch::new(&hashes, &keys[..], &mut rejected, &mut offsets)?,
+    )?;
     let table = table.table()?;
     assert_eq!(
         table.stats().records,
@@ -564,12 +573,19 @@ fn a_full_chunk_leaves_the_rest_pending_until_linked_elsewhere() -> Result<()> {
     {
         let shared = table.table()?;
         let mut pending = RowMask::try_new(100, &mut pending_words)?;
-        let appended =
-            shared.append(chunk, &hashes, &keys[..], None, &mut pending, &mut offsets)?;
+        let appended = shared.append(
+            chunk,
+            None,
+            &mut Batch::new(&hashes, &keys[..], &mut pending, &mut offsets)?,
+        )?;
         assert_eq!(appended, 16, "a chunk of sixteen records holds sixteen");
         assert_eq!(rows_of(&pending.as_view()), (16..100).collect::<Vec<_>>());
         assert_eq!(
-            shared.append(chunk, &hashes, &keys[..], None, &mut pending, &mut offsets)?,
+            shared.append(
+                chunk,
+                None,
+                &mut Batch::new(&hashes, &keys[..], &mut pending, &mut offsets)?
+            )?,
             0
         );
         assert_eq!(
@@ -593,7 +609,11 @@ fn a_full_chunk_leaves_the_rest_pending_until_linked_elsewhere() -> Result<()> {
     let second = table.add_chunk()?;
     let shared = table.table()?;
     let mut pending = RowMask::try_new(100, &mut pending_words)?;
-    shared.append(second, &hashes, &keys[..], None, &mut pending, &mut offsets)?;
+    shared.append(
+        second,
+        None,
+        &mut Batch::new(&hashes, &keys[..], &mut pending, &mut offsets)?,
+    )?;
     let mut from = CHUNK_HEADER;
     shared.link(second, &mut from)?;
     assert_eq!(placement(offsets[16]), (second, CHUNK_HEADER));
@@ -603,7 +623,11 @@ fn a_full_chunk_leaves_the_rest_pending_until_linked_elsewhere() -> Result<()> {
     // inside a record or past the used mark, fails.
     assert!(
         shared
-            .append(9, &hashes, &keys[..], None, &mut pending, &mut offsets)
+            .append(
+                9,
+                None,
+                &mut Batch::new(&hashes, &keys[..], &mut pending, &mut offsets).unwrap()
+            )
             .is_err()
     );
     let mut from = CHUNK_HEADER;
@@ -630,7 +654,11 @@ fn linking_counts_the_records_whose_keys_were_there_already() -> Result<()> {
         let mut pending_words = all_rows(values.len());
         let mut pending = RowMask::try_new(values.len(), &mut pending_words)?;
         let mut offsets = vec![0; values.len()];
-        shared.append(*chunk, &hashes, &keys[..], None, &mut pending, &mut offsets)?;
+        shared.append(
+            *chunk,
+            None,
+            &mut Batch::new(&hashes, &keys[..], &mut pending, &mut offsets)?,
+        )?;
     }
     let mut from = [CHUNK_HEADER; 2];
     assert_eq!(shared.link_counting(chunks[0], &mut from[0])?, (50, 10));
@@ -654,7 +682,10 @@ fn a_record_larger_than_a_chunk_is_refused() -> Result<()> {
     let mut pending_words = [1];
     let mut pending = RowMask::try_new(1, &mut pending_words)?;
     let error = table
-        .insert(&[hash_i32(1)], &keys[..], None, &mut pending, &mut [0])
+        .insert(
+            None,
+            &mut Batch::new(&[hash_i32(1)], &keys[..], &mut pending, &mut [0]).unwrap(),
+        )
         .unwrap_err();
     assert!(error.to_string().contains("does not fit"), "{error}");
     Ok(())
@@ -724,47 +755,20 @@ fn dimension_errors_come_before_any_change() -> Result<()> {
             shared
                 .append(
                     chunk,
-                    &hashes,
-                    &one_key[..],
                     None,
-                    &mut pending,
-                    &mut offsets
+                    &mut Batch::new(&hashes, &one_key[..], &mut pending, &mut offsets).unwrap()
                 )
                 .is_err()
         );
+        // Row counts that differ are refused as the batch is made.
+        assert!(Batch::new(&hashes[..69], &two_keys[..], &mut pending, &mut offsets).is_err());
+        assert!(Batch::new(&hashes, &two_keys[..], &mut pending, &mut offsets[..69]).is_err());
         assert!(
             shared
                 .append(
                     chunk,
-                    &hashes[..69],
-                    &two_keys[..],
-                    None,
-                    &mut pending,
-                    &mut offsets
-                )
-                .is_err()
-        );
-        assert!(
-            shared
-                .append(
-                    chunk,
-                    &hashes,
-                    &two_keys[..],
-                    None,
-                    &mut pending,
-                    &mut offsets[..69]
-                )
-                .is_err()
-        );
-        assert!(
-            shared
-                .append(
-                    chunk,
-                    &hashes,
-                    &two_keys[..],
                     Some(&payload[..8]),
-                    &mut pending,
-                    &mut offsets
+                    &mut Batch::new(&hashes, &two_keys[..], &mut pending, &mut offsets).unwrap()
                 )
                 .is_err()
         );
@@ -811,11 +815,8 @@ fn dimension_errors_come_before_any_change() -> Result<()> {
     let mut pending = RowMask::try_new(70, &mut pending_words)?;
     assert_eq!(
         table.insert(
-            &hashes,
-            &two_keys[..],
             Some(&payload),
-            &mut pending,
-            &mut offsets
+            &mut Batch::new(&hashes, &two_keys[..], &mut pending, &mut offsets)?
         )?,
         70
     );
@@ -906,7 +907,10 @@ fn resolve_all<K: KeySource + ?Sized>(
     let mut offsets = vec![0; nrows];
     let mut inserted_words = vec![0; nrows.div_ceil(64)];
     let mut inserted = RowMask::try_new(nrows, &mut inserted_words)?;
-    let resolved = table.find_or_insert(hashes, keys, &mut pending, &mut offsets, &mut inserted)?;
+    let resolved = table.find_or_insert(
+        &mut Batch::new(hashes, keys, &mut pending, &mut offsets)?,
+        &mut inserted,
+    )?;
     assert_eq!(resolved, nrows);
     assert_eq!(pending.as_view().selected_count(), 0);
     let created = rows_of(&inserted.as_view());
@@ -1001,10 +1005,7 @@ fn a_full_chunk_resolves_known_keys_only() -> Result<()> {
         let mut inserted = RowMask::try_new(20, &mut inserted_words)?;
         let resolved = writer.find_or_insert(
             chunk,
-            &hashes,
-            &keys[..],
-            &mut pending,
-            &mut offsets,
+            &mut Batch::new(&hashes, &keys[..], &mut pending, &mut offsets)?,
             &mut inserted,
         )?;
         assert_eq!(resolved, 4);
@@ -1020,10 +1021,12 @@ fn a_full_chunk_resolves_known_keys_only() -> Result<()> {
     let mut created = [0];
     let resolved = table.table_mut()?.find_or_insert(
         chunk,
-        &known_hashes,
-        &known_keys[..],
-        &mut RowMask::try_new(5, &mut known_pending)?,
-        &mut known_offsets,
+        &mut Batch::new(
+            &known_hashes,
+            &known_keys[..],
+            &mut RowMask::try_new(5, &mut known_pending)?,
+            &mut known_offsets,
+        )?,
         &mut RowMask::try_new(5, &mut created)?,
     )?;
     assert_eq!(resolved, 5, "no room is needed for known keys");
@@ -1047,10 +1050,12 @@ fn an_index_takes_records_up_to_half_its_buckets_and_regrows() -> Result<()> {
     let mut inserted_words = all_rows(1500);
     let resolved = table.table_mut()?.find_or_insert(
         chunk,
-        &hashes,
-        &keys[..],
-        &mut RowMask::try_new(1500, &mut pending_words)?,
-        &mut offsets,
+        &mut Batch::new(
+            &hashes,
+            &keys[..],
+            &mut RowMask::try_new(1500, &mut pending_words)?,
+            &mut offsets,
+        )?,
         &mut RowMask::try_new(1500, &mut inserted_words)?,
     )?;
     assert_eq!(resolved, 512, "1024 buckets take 512 records");
@@ -1415,8 +1420,10 @@ fn insert_grouped_rows(
         pending_words[row / 64] |= 1 << (row % 64);
     }
     let mut pending = RowMask::try_new(nrows, &mut pending_words)?;
-    let (inserted, duplicates) =
-        table.insert_grouped(hashes, keys, Some(payload), &mut pending, offsets)?;
+    let (inserted, duplicates) = table.insert_grouped(
+        Some(payload),
+        &mut Batch::new(hashes, keys, &mut pending, offsets)?,
+    )?;
     assert_eq!(inserted, rows.len());
     assert_eq!(pending.as_view().selected_count(), 0);
     Ok(duplicates)
@@ -2322,20 +2329,14 @@ fn payload_columns_of(ncolumns: usize) -> Result<()> {
             if from_columns {
                 shared.append_columns(
                     chunk,
-                    &hashes,
-                    &keys[..],
                     &columns,
-                    &mut pending,
-                    &mut offsets,
+                    &mut Batch::new(&hashes, &keys[..], &mut pending, &mut offsets)?,
                 )?;
             } else {
                 shared.append(
                     chunk,
-                    &hashes,
-                    &keys[..],
                     Some(&payload_bytes),
-                    &mut pending,
-                    &mut offsets,
+                    &mut Batch::new(&hashes, &keys[..], &mut pending, &mut offsets)?,
                 )?;
             }
             if pending_words.iter().all(|&word| word == 0) {
@@ -2371,7 +2372,11 @@ fn payload_columns_of(ncolumns: usize) -> Result<()> {
     assert!(
         table
             .table()?
-            .append_columns(chunk, &hashes, &keys[..], &two, &mut pending, &mut offsets)
+            .append_columns(
+                chunk,
+                &two,
+                &mut Batch::new(&hashes, &keys[..], &mut pending, &mut offsets).unwrap()
+            )
             .is_err()
     );
     Ok(())
@@ -2403,11 +2408,8 @@ fn a_scattered_gather_reads_what_a_gather_reads() -> Result<()> {
         let mut pending = RowMask::try_new(ROWS, &mut pending_words)?;
         table.table()?.append(
             chunk,
-            &hashes,
-            &keys[..],
             Some(&payload),
-            &mut pending,
-            &mut offsets,
+            &mut Batch::new(&hashes, &keys[..], &mut pending, &mut offsets)?,
         )?;
         if pending_words.iter().all(|&word| word == 0) {
             break;

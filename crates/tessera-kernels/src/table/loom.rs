@@ -33,7 +33,7 @@ use super::phases::{Action, Counters, Participant};
 use super::record::Access;
 use super::region::{Region, order};
 use super::shared_spill::{Spill, Words};
-use super::{batch, index_size, init};
+use super::{Batch, batch, index_size, init};
 
 /// The orderings of the bucket heads: the region's, or relaxed ones that
 /// break publication, for the test that the model notices.
@@ -318,16 +318,8 @@ fn append(region: &LoomRegion, layout: &Layout, chunk: usize, keys: &[i32]) -> R
     let mut pending = RowMask::try_new(nrows, &mut pending_bits)?;
     let mut offsets = vec![0; nrows];
     let payload = payload(keys);
-    batch::append(
-        region,
-        layout,
-        chunk,
-        &hashes,
-        &columns[..],
-        Some(&payload),
-        &mut pending,
-        &mut offsets,
-    )
+    let mut rows = Batch::new(&hashes, &columns[..], &mut pending, &mut offsets)?;
+    batch::append(region, layout, chunk, Some(&payload), &mut rows)
 }
 
 /// Link a chunk's records from its start; the count linked is returned.

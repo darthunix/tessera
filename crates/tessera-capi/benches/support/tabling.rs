@@ -15,7 +15,7 @@
 use anyhow::{Result, ensure};
 use tessera_core::{ColumnReader, RowMask, RowMaskView};
 use tessera_kernels::int32::{self, NullKeys};
-use tessera_kernels::table::{KeyKind, KeySource, LocalTable, TableConfig, normalize_word};
+use tessera_kernels::table::{Batch, KeyKind, KeySource, LocalTable, TableConfig, normalize_word};
 
 use crate::reading::Input;
 use crate::support::{fixture::Fixture, runner::Runner};
@@ -95,9 +95,10 @@ pub fn insert_all<K: KeySource>(setup: &mut Setup, keys: &K) -> Result<()> {
     setup.table.reset()?;
     setup.pending.copy_from_slice(&setup.valid);
     let mut pending = RowMask::try_new(nrows, &mut setup.pending)?;
-    setup
-        .table
-        .insert(&setup.hashes, keys, None, &mut pending, &mut setup.offsets)?;
+    setup.table.insert(
+        None,
+        &mut Batch::new(&setup.hashes, keys, &mut pending, &mut setup.offsets)?,
+    )?;
     Ok(())
 }
 
@@ -121,10 +122,7 @@ pub fn resolve_all<K: KeySource>(setup: &mut Setup, keys: &K) -> Result<()> {
     let chunk = setup.table.chunks() - 1;
     setup.table.table_mut()?.find_or_insert(
         chunk,
-        &setup.hashes,
-        keys,
-        &mut pending,
-        &mut setup.offsets,
+        &mut Batch::new(&setup.hashes, keys, &mut pending, &mut setup.offsets)?,
         &mut inserted,
     )?;
     Ok(())

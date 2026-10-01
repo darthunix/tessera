@@ -22,7 +22,7 @@
 use anyhow::{Result, ensure};
 use tessera_core::{ColumnView, RowMask, RowMaskView};
 use tessera_kernels::int32::murmurhash32;
-use tessera_kernels::table::{KeyKind, LocalTable, MAX_CHUNK_LEN, TableConfig, bloom};
+use tessera_kernels::table::{Batch, KeyKind, LocalTable, MAX_CHUNK_LEN, TableConfig, bloom};
 
 use crate::support::runner::Runner;
 
@@ -212,11 +212,13 @@ impl Setup {
                 let mut pending_words = [u64::MAX; BATCH / 64];
                 let mut pending = RowMask::try_new(BATCH, &mut pending_words)?;
                 table.insert(
-                    &inserted_hashes[rows],
-                    &column[..],
                     None,
-                    &mut pending,
-                    &mut offsets,
+                    &mut Batch::new(
+                        &inserted_hashes[rows],
+                        &column[..],
+                        &mut pending,
+                        &mut offsets,
+                    )?,
                 )?;
                 ensure!(
                     pending_words == [0; BATCH / 64],
@@ -338,10 +340,12 @@ pub fn resolve(setup: &mut Setup, batch: usize) -> Result<()> {
     let mut inserted = RowMask::try_new(BATCH, &mut setup.inserted)?;
     table.find_or_insert(
         chunk,
-        &setup.present_hashes[rows],
-        &column[..],
-        &mut pending,
-        &mut setup.matches,
+        &mut Batch::new(
+            &setup.present_hashes[rows],
+            &column[..],
+            &mut pending,
+            &mut setup.matches,
+        )?,
         &mut inserted,
     )?;
     Ok(())

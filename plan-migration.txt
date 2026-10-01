@@ -2040,6 +2040,20 @@
   Приёмка: loom (19 моделей) прошёл; при codegen-units=1 бенчи table_int32 и table_large совпадают с базой тело в
   тело, tess_table_scan тоже; изменились только точки входа tess_table_spill_* (обобщённые методы встроились в
   них вместо вызова обёрток) — холодные вызовы, раз на кусок или раунд, замер не нужен.
+  Сделано 7) (2026-10-01): table::Batch — хэши, ключи, pending и offsets одного вызова; длины проверяет
+  Batch::new, вызов — только ключи против таблицы (check_keys); партия идёт через несколько вызовов (&mut Batch),
+  остаток виден через pending(). table::Appended — счётчики разделов (rows, nulls). На них append_to,
+  append_columns_to, append_partitioned_columns_to (было 10 параметров, стало 6), Table::append и append_columns,
+  TableMut::find_or_insert и find_or_insert_partitioned, LocalTable::insert, insert_grouped и find_or_insert, точки
+  входа batch.rs и exclusive.rs; spill_columns::append_partitioned берёт Partitions вместо пары (чанки, сдвиг).
+  Внутренние функции строк (append_rows, append_column_rows, append_partitioned_column_rows, resolve_rows) остались
+  с позиционными аргументами: их циклы держат каждую часть в регистре. allow(too_many_arguments): 16 → 4 в src.
+  Сверка при codegen-units=1: в статической библиотеке горячие функции строк совпадают с базой, изменились только
+  входы tess_table_append*, tess_table_find_or_insert* (−6…+2 инструкции на вызов) и точки входа сброса из шага 6.
+  В бенчах table_int32 и table_large тела отличаются из-за межпроцедурных оптимизаций LLVM под граф вызовов бенча
+  (исходник этих функций не менялся, прежний порядок проверок во входах отличий не убирает): WordKeys::load 310 →
+  238 инструкций (меньше проверок границ), resolve_rows −2…−11, append_rows +4…+10, probe_rows +1. Нужен PMU-замер
+  пользователя: tessera-bench --base c941893 на table_int32 и table_large; при проигрыше шаг откатывается.
   Порядок (решение 2026-09-20): после 4.14 выполняются остаток 6.3 (ленивая проекция), затем 3.9 (AVX2), 4.15 и раздел 5 —
   чтобы узлы раздела 5 мерялись на реальном конвейере, и их ядра писались сразу для обеих архитектур. Уточнения
   (2026-09-20): после профиля 4.16 вперёд вытянуты 6.1 и ленивый pack (4.17), а затем, по второму замеру win, и 6.2 — всё

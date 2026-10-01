@@ -13,13 +13,13 @@ use tessera_core::{ColumnReader, RowMask, RowMaskView};
 use crate::decimal::{self, Partial, Partials, SumState, Term, Terms};
 use crate::ops::ArithmeticError;
 
-use super::Partitions;
-use super::batch::{Lanes, VERTICAL_MIN_ROWS, check, check_partitions, probe_word, shaped};
+use super::batch::{Lanes, VERTICAL_MIN_ROWS, check_keys, check_partitions, probe_word, shaped};
 use super::batch::{check_record, unlinked};
 use super::header::{CHUNK_HEADER, Header, KEY_SLOT, Layout, RECORD_HEADER};
 use super::keys::{KeySource, WordKeys, slot_buffer};
 use super::record::{Access, same_keys};
 use super::region::Region;
+use super::{Batch, Partitions};
 
 /// Where a walk over the records stands: the chunk of the next record to
 /// visit in the high 32 bits, its byte there in the low ones.
@@ -56,24 +56,27 @@ impl Cursor {
     }
 }
 
-/// Give each row of `pending` the record of its keys, creating one with a
-/// zero payload in chunk `chunk` where none exists, until the chunk has no
-/// room for a new one or the index holds as many records as half its
-/// buckets: resolved rows leave `pending`, get their references in
-/// `offsets`, and the rows whose record this call created form `inserted`.
-#[allow(clippy::too_many_arguments)]
+/// Give each pending row of `batch` the record of its keys, creating one
+/// with a zero payload in chunk `chunk` where none exists, until the chunk
+/// has no room for a new one or the index holds as many records as half
+/// its buckets: resolved rows leave the pending rows and get their
+/// references, and the rows whose record this call created form
+/// `inserted`.
 pub(super) fn find_or_insert<R: Region, K: KeySource + ?Sized>(
     region: &R,
     layout: &Layout,
     chunk: usize,
-    hashes: &[u32],
-    keys: &K,
-    pending: &mut RowMask<'_>,
-    offsets: &mut [u32],
+    batch: &mut Batch<'_, '_, K>,
     inserted: &mut RowMask<'_>,
 ) -> Result<usize> {
-    let nrows = pending.as_view().nrows();
-    check(layout, keys, nrows, hashes.len(), offsets.len())?;
+    let Batch {
+        hashes,
+        keys,
+        pending,
+        offsets,
+    } = batch;
+    let nrows = offsets.len();
+    check_keys(layout, *keys)?;
     ensure!(
         inserted.as_view().nrows() == nrows,
         "the inserted mask has {} rows, the batch {nrows}",
@@ -83,7 +86,7 @@ pub(super) fn find_or_insert<R: Region, K: KeySource + ?Sized>(
         layout.nkeys,
         layout.tail_words(),
         resolve_rows(
-            region, layout, chunk, None, hashes, keys, pending, offsets, inserted
+            region, layout, chunk, None, hashes, *keys, pending, offsets, inserted
         )
     )
 }
@@ -92,19 +95,21 @@ pub(super) fn find_or_insert<R: Region, K: KeySource + ?Sized>(
 /// hash's partition, whose one writer the caller is: a row whose
 /// partition's chunk is full stays pending while the rows after it go on,
 /// and all stop once the index holds as many records as half its buckets.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn find_or_insert_partitioned<R: Region, K: KeySource + ?Sized>(
     region: &R,
     layout: &Layout,
     partitions: &Partitions<'_>,
-    hashes: &[u32],
-    keys: &K,
-    pending: &mut RowMask<'_>,
-    offsets: &mut [u32],
+    batch: &mut Batch<'_, '_, K>,
     inserted: &mut RowMask<'_>,
 ) -> Result<usize> {
-    let nrows = pending.as_view().nrows();
-    check(layout, keys, nrows, hashes.len(), offsets.len())?;
+    let Batch {
+        hashes,
+        keys,
+        pending,
+        offsets,
+    } = batch;
+    let nrows = offsets.len();
+    check_keys(layout, *keys)?;
     ensure!(
         inserted.as_view().nrows() == nrows,
         "the inserted mask has {} rows, the batch {nrows}",
@@ -120,7 +125,7 @@ pub(super) fn find_or_insert_partitioned<R: Region, K: KeySource + ?Sized>(
             0,
             Some((partitions, mask)),
             hashes,
-            keys,
+            *keys,
             pending,
             offsets,
             inserted

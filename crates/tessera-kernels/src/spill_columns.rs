@@ -12,7 +12,7 @@ use anyhow::{Result, ensure};
 use tessera_core::RowMask;
 use tessera_spill::columns;
 
-use crate::table::{MAX_PARTITIONS, PayloadColumns};
+use crate::table::{MAX_PARTITIONS, Partitions, PayloadColumns};
 
 /// Bits of a row's place in a reference; the chunk's number is above them.
 pub const PLACE_BITS: u32 = 17;
@@ -34,23 +34,25 @@ impl ColumnChunks for [Vec<u8>] {
     }
 }
 
-/// Append the rows of `pending` to the chunks of their partitions: the
-/// partition of a hash is `(hash >> shift) & (partitions - 1)`, and
-/// partition `p` appends to chunk `partition_chunks[p]`. A row takes its
-/// words from `columns`, one per stored word of the chunk, and its NULL
-/// bits; appended rows leave `pending`, get their references in `offsets`
-/// and count in `rows` at their partition. The count appended is returned.
-#[allow(clippy::too_many_arguments)]
+/// Append the rows of `pending` to the chunks of their partitions, as
+/// [`Partitions`] places a hash: partition `p` appends to the chunk
+/// numbered `partitions.chunks[p]`. A row takes its words from `columns`,
+/// one per stored word of the chunk, and its NULL bits; appended rows
+/// leave `pending`, get their references in `offsets` and count in `rows`
+/// at their partition. The count appended is returned.
 pub fn append_partitioned<C: ColumnChunks + ?Sized>(
     chunks: &mut C,
-    partition_chunks: &[u32],
-    shift: u32,
+    partitions: &Partitions<'_>,
     hashes: &[u32],
     columns: &PayloadColumns<'_>,
     pending: &mut RowMask<'_>,
     offsets: &mut [u32],
     rows: &mut [u64],
 ) -> Result<usize> {
+    let Partitions {
+        shift,
+        chunks: partition_chunks,
+    } = *partitions;
     let nrows = pending.as_view().nrows();
     let count = partition_chunks.len();
     ensure!(
@@ -165,8 +167,10 @@ mod tests {
         let mut rows = [0_u64; 4];
         let appended = append_partitioned(
             chunks.as_mut_slice(),
-            &[0, 1, 2, 3],
-            2,
+            &Partitions {
+                shift: 2,
+                chunks: &[0, 1, 2, 3],
+            },
             &hashes,
             &payload,
             &mut pending,
@@ -212,8 +216,10 @@ mod tests {
         assert!(
             append_partitioned(
                 chunks.as_mut_slice(),
-                &[0],
-                0,
+                &Partitions {
+                    shift: 0,
+                    chunks: &[0],
+                },
                 &[0],
                 &payload,
                 &mut pending,
@@ -225,8 +231,10 @@ mod tests {
         assert!(
             append_partitioned(
                 chunks.as_mut_slice(),
-                &[0, 0, 0],
-                0,
+                &Partitions {
+                    shift: 0,
+                    chunks: &[0, 0, 0],
+                },
                 &[0],
                 &payload,
                 &mut pending,

@@ -8,7 +8,7 @@ use std::slice;
 
 use anyhow::{Context, Result, bail, ensure};
 use tessera_kernels::spill_columns::{self, ColumnChunks};
-use tessera_kernels::table::PayloadColumns;
+use tessera_kernels::table::{Partitions, PayloadColumns};
 use tessera_spill::{BlockHeader, BlockKind, HEADER_SIZE, columns};
 
 use super::column::DatumColumn;
@@ -343,8 +343,10 @@ pub unsafe extern "C" fn tess_spill_columns_append_partitioned(
             let payload = PayloadColumns::new(words, flags, nrows)?;
             spill_columns::append_partitioned(
                 &mut chunks,
-                partition_chunks,
-                shift,
+                &Partitions {
+                    shift,
+                    chunks: partition_chunks,
+                },
                 hashes,
                 &payload,
                 &mut pending,

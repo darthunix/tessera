@@ -8,7 +8,7 @@ use proptest::prelude::*;
 use proptest::sample::select;
 use tessera_core::RowMask;
 use tessera_kernels::sort::{MAX_ITEM_WORDS, SortKey, item_words, sort_items};
-use tessera_kernels::table::{KeyKind, KeySource, LocalTable, TableConfig};
+use tessera_kernels::table::{Batch, KeyKind, KeySource, LocalTable, TableConfig};
 use tessera_testing::{flags, integer, nrows, property, words};
 
 /// Chunks of the tests: small, so that most row sets span several.
@@ -133,7 +133,11 @@ fn sorted_rows(keys: &[SortKey], rows: &Rows) -> Result<(Vec<usize>, Vec<u32>)> 
             {
                 let shared = table.table()?;
                 let mut pending = RowMask::try_new(nrows, &mut pending_words)?;
-                shared.append(chunk, &hashes, rows, None, &mut pending, &mut references)?;
+                shared.append(
+                    chunk,
+                    None,
+                    &mut Batch::new(&hashes, rows, &mut pending, &mut references)?,
+                )?;
             }
             if pending_words.iter().all(|&word| word == 0) {
                 break;
@@ -278,7 +282,11 @@ fn top_rows(keys: &[SortKey], rows: &Rows, n: usize) -> Result<Vec<Vec<Option<i6
             {
                 let shared = table.table()?;
                 let mut pending = RowMask::try_new(nrows, &mut pending_words)?;
-                shared.append(chunk, &hashes, rows, None, &mut pending, &mut references)?;
+                shared.append(
+                    chunk,
+                    None,
+                    &mut Batch::new(&hashes, rows, &mut pending, &mut references)?,
+                )?;
             }
             if pending_words.iter().all(|&word| word == 0) {
                 break;

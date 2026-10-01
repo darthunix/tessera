@@ -11,8 +11,8 @@ use anyhow::{Result, ensure};
 use tessera_core::RowMask;
 
 use super::{
-    CHUNK_HEADER, Chunks, KeySource, MAX_CHUNK_LEN, MAX_CHUNKS, Table, TableConfig, TableMut,
-    index_size, init_chunk,
+    Batch, CHUNK_HEADER, Chunks, KeySource, MAX_CHUNK_LEN, MAX_CHUNKS, Table, TableConfig,
+    TableMut, index_size, init_chunk,
 };
 
 /// A block of words owned through a raw pointer.
@@ -212,18 +212,15 @@ impl LocalTable {
         Ok(())
     }
 
-    /// Append the rows of `pending` to the last chunk, adding chunks as they
-    /// fill, and link them: the count inserted is returned, and every row
-    /// leaves `pending` with its reference in `offsets`.
+    /// Append the pending rows of `batch` to the last chunk, adding chunks
+    /// as they fill, and link them: the count inserted is returned, and
+    /// every row leaves the pending rows with its reference.
     pub fn insert<K: KeySource + ?Sized>(
         &mut self,
-        hashes: &[u32],
-        keys: &K,
         payload: Option<&[u8]>,
-        pending: &mut RowMask<'_>,
-        offsets: &mut [u32],
+        batch: &mut Batch<'_, '_, K>,
     ) -> Result<usize> {
-        let appended = self.append_all(hashes, keys, payload, pending, offsets)?;
+        let appended = self.append_all(payload, batch)?;
         let mut linked = core::mem::take(&mut self.linked);
         let result = (|| {
             let table = self.table()?;
@@ -242,13 +239,10 @@ impl LocalTable {
     /// and, of them, those whose keys the table held already.
     pub fn insert_grouped<K: KeySource + ?Sized>(
         &mut self,
-        hashes: &[u32],
-        keys: &K,
         payload: Option<&[u8]>,
-        pending: &mut RowMask<'_>,
-        offsets: &mut [u32],
+        batch: &mut Batch<'_, '_, K>,
     ) -> Result<(usize, usize)> {
-        let appended = self.append_all(hashes, keys, payload, pending, offsets)?;
+        let appended = self.append_all(payload, batch)?;
         let mut linked = core::mem::take(&mut self.linked);
         let mut duplicates = 0;
         let result = (|| {
@@ -263,14 +257,11 @@ impl LocalTable {
         Ok((appended, duplicates))
     }
 
-    /// Append every row of `pending`, adding chunks as they fill.
+    /// Append every pending row of `batch`, adding chunks as they fill.
     fn append_all<K: KeySource + ?Sized>(
         &mut self,
-        hashes: &[u32],
-        keys: &K,
         payload: Option<&[u8]>,
-        pending: &mut RowMask<'_>,
-        offsets: &mut [u32],
+        batch: &mut Batch<'_, '_, K>,
     ) -> Result<usize> {
         let mut appended = 0;
         loop {
@@ -278,11 +269,9 @@ impl LocalTable {
                 self.add_chunk()?;
             }
             let chunk = self.chunks.len() - 1;
-            let count = self
-                .table()?
-                .append(chunk, hashes, keys, payload, pending, offsets)?;
+            let count = self.table()?.append(chunk, payload, batch)?;
             appended += count;
-            if pending.as_view().selected_count() == 0 {
+            if batch.pending().selected_count() == 0 {
                 return Ok(appended);
             }
             ensure!(
@@ -298,18 +287,15 @@ impl LocalTable {
         self.chunks[chunk].words_mut()[0] == CHUNK_HEADER as u64
     }
 
-    /// Give each row of `pending` the record of its keys, as
+    /// Give each pending row of `batch` the record of its keys, as
     /// [`TableMut::find_or_insert`] does, adding chunks and building a
-    /// larger index as needed: every row leaves `pending`.
+    /// larger index as needed: every row leaves the pending rows.
     pub fn find_or_insert<K: KeySource + ?Sized>(
         &mut self,
-        hashes: &[u32],
-        keys: &K,
-        pending: &mut RowMask<'_>,
-        offsets: &mut [u32],
+        batch: &mut Batch<'_, '_, K>,
         inserted: &mut RowMask<'_>,
     ) -> Result<usize> {
-        let nrows = pending.as_view().nrows();
+        let nrows = batch.pending().nrows();
         let mut words = vec![0u64; nrows.div_ceil(64)];
         for index in 0..words.len() {
             inserted.set_word(index, 0)?;
@@ -321,20 +307,15 @@ impl LocalTable {
             }
             let chunk = self.chunks.len() - 1;
             let mut created = RowMask::try_new(nrows, &mut words)?;
-            let count = self.table_mut()?.find_or_insert(
-                chunk,
-                hashes,
-                keys,
-                pending,
-                offsets,
-                &mut created,
-            )?;
+            let count = self
+                .table_mut()?
+                .find_or_insert(chunk, batch, &mut created)?;
             resolved += count;
             for (index, word) in words.iter().enumerate() {
                 let merged = inserted.as_view().word(index).unwrap() | word;
                 inserted.set_word(index, merged)?;
             }
-            if pending.as_view().selected_count() == 0 {
+            if batch.pending().selected_count() == 0 {
                 return Ok(resolved);
             }
             let stats = self.table()?.stats();

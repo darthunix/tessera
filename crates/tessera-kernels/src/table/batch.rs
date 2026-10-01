@@ -13,7 +13,7 @@ use super::keys::{KeySource, WordKeys, slot_buffer};
 use super::record::no_chunk;
 use super::record::{Access, PayloadColumns, Place, same_keys};
 use super::region::Region;
-use super::{MAX_PARTITIONS, Partitions, Split};
+use super::{Appended, Batch, MAX_PARTITIONS, Partitions, Split};
 
 /// Call `$f` specialized for the common shapes of a table: one or two
 /// keys, one or two words after them; 0 stands for any other count, read
@@ -43,15 +43,22 @@ pub(super) fn check<K: KeySource + ?Sized>(
     hashes: usize,
     out: usize,
 ) -> Result<()> {
+    check_keys(layout, keys)?;
+    ensure!(
+        keys.nrows() == nrows && hashes == nrows && out == nrows,
+        "the keys, hashes, mask and offsets of the batch have different row counts"
+    );
+    Ok(())
+}
+
+/// Reject keys that are not the table's, before anything is read or
+/// changed; a [`Batch`] checked its row counts when it was made.
+pub(super) fn check_keys<K: KeySource + ?Sized>(layout: &Layout, keys: &K) -> Result<()> {
     ensure!(
         keys.nkeys() == layout.nkeys,
         "the table has {} keys, the batch {}",
         layout.nkeys,
         keys.nkeys()
-    );
-    ensure!(
-        keys.nrows() == nrows && hashes == nrows && out == nrows,
-        "the keys, hashes, mask and offsets of the batch have different row counts"
     );
     Ok(())
 }
@@ -69,37 +76,40 @@ fn check_payload(payload: Option<&[u8]>, nrows: usize, payload_size: usize) -> R
     Ok(())
 }
 
-/// Append the rows of `pending`, in row order, as records to chunk
+/// Append the pending rows of `batch`, in row order, as records to chunk
 /// `chunk`, whose one writer the caller is, as long as whole records fit:
-/// appended rows leave `pending` and get their references in `offsets`,
-/// and the chunk's used mark moves past them. The records are not linked
-/// into the buckets: [`link`] does that. The count appended is returned;
-/// rows left pending need another chunk.
-#[allow(clippy::too_many_arguments)]
+/// appended rows leave the pending rows and get their references, and the
+/// chunk's used mark moves past them. The records are not linked into the
+/// buckets: [`link`] does that. The count appended is returned; rows left
+/// pending need another chunk.
 pub(super) fn append<R: Region, K: KeySource + ?Sized>(
     region: &R,
     layout: &Layout,
     chunk: usize,
-    hashes: &[u32],
-    keys: &K,
     payload: Option<&[u8]>,
-    pending: &mut RowMask<'_>,
-    offsets: &mut [u32],
+    batch: &mut Batch<'_, '_, K>,
 ) -> Result<usize> {
-    let nrows = pending.as_view().nrows();
-    check(layout, keys, nrows, hashes.len(), offsets.len())?;
-    check_payload(payload, nrows, layout.payload_size)?;
+    check_keys(layout, batch.keys)?;
+    check_payload(payload, batch.offsets.len(), layout.payload_size)?;
+    let Batch {
+        hashes,
+        keys,
+        pending,
+        offsets,
+    } = batch;
     shaped!(
         layout.nkeys,
         layout.tail_words(),
         append_rows(
-            region, layout, chunk, hashes, keys, payload, pending, offsets
+            region, layout, chunk, hashes, *keys, payload, pending, offsets
         )
     )
 }
 
 /// The rows of [`append`] for a table of `N` keys and `T` words after
-/// them, 0 for either when it is not one of the specialized shapes.
+/// them, 0 for either when it is not one of the specialized shapes. The
+/// row functions take the batch's parts one by one, as their loops keep
+/// each in a register.
 #[inline(never)]
 #[allow(clippy::too_many_arguments)]
 fn append_rows<R: Region, K: KeySource + ?Sized, const N: usize, const T: usize, const L: usize>(
@@ -170,19 +180,21 @@ fn append_rows<R: Region, K: KeySource + ?Sized, const N: usize, const T: usize,
 /// As [`append`], with each row's payload taken from `columns`: a word of
 /// its NULL bits, then a word per column. The table's payload must be
 /// exactly those words.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn append_columns<R: Region, K: KeySource + ?Sized>(
     region: &R,
     layout: &Layout,
     chunk: usize,
-    hashes: &[u32],
-    keys: &K,
     columns: &PayloadColumns<'_>,
-    pending: &mut RowMask<'_>,
-    offsets: &mut [u32],
+    batch: &mut Batch<'_, '_, K>,
 ) -> Result<usize> {
-    let nrows = pending.as_view().nrows();
-    check(layout, keys, nrows, hashes.len(), offsets.len())?;
+    let Batch {
+        hashes,
+        keys,
+        pending,
+        offsets,
+    } = batch;
+    let nrows = offsets.len();
+    check_keys(layout, *keys)?;
     ensure!(
         layout.payload_size == 8 * (columns.null_words() + columns.len()),
         "the table's payload has {} bytes, not its words of NULL bits and {} columns",
@@ -197,7 +209,7 @@ pub(super) fn append_columns<R: Region, K: KeySource + ?Sized>(
         layout.nkeys,
         layout.tail_words(),
         append_column_rows(
-            region, layout, chunk, hashes, keys, columns, pending, offsets
+            region, layout, chunk, hashes, *keys, columns, pending, offsets
         )
     )
 }
@@ -295,29 +307,30 @@ pub(super) fn check_partitions<R: Region>(region: &R, partitions: &Partitions<'_
     Ok((count - 1) as u32)
 }
 
-/// Append the rows of `pending`, in row order, as records each to the
-/// chunk of its hash's partition, whose one writer the caller is, as long
-/// as whole records fit there, each row's payload taken from `columns` as
-/// [`append_columns`] takes it: appended rows leave `pending`, get their
-/// references in `offsets` and count in `rows` at their partition, and
-/// their NULL bits go into `nulls`; a row whose partition's chunk is full
-/// stays pending, and the rows after it go on. The count appended is
-/// returned.
-#[allow(clippy::too_many_arguments)]
+/// Append the pending rows of `batch`, in row order, as records each to
+/// the chunk of its hash's partition, whose one writer the caller is, as
+/// long as whole records fit there, each row's payload taken from
+/// `columns` as [`append_columns`] takes it: appended rows leave the
+/// pending rows, get their references and count in `appended`; a row whose
+/// partition's chunk is full stays pending, and the rows after it go on.
+/// The count appended is returned.
 pub(super) fn append_partitioned_columns<R: Region, K: KeySource + ?Sized>(
     region: &R,
     layout: &Layout,
     partitions: &Partitions<'_>,
-    hashes: &[u32],
-    keys: &K,
     columns: &PayloadColumns<'_>,
-    pending: &mut RowMask<'_>,
-    offsets: &mut [u32],
-    rows: &mut [u64],
-    nulls: &mut u64,
+    batch: &mut Batch<'_, '_, K>,
+    appended: &mut Appended<'_>,
 ) -> Result<usize> {
-    let nrows = pending.as_view().nrows();
-    check(layout, keys, nrows, hashes.len(), offsets.len())?;
+    let Batch {
+        hashes,
+        keys,
+        pending,
+        offsets,
+    } = batch;
+    let Appended { rows, nulls } = appended;
+    let nrows = offsets.len();
+    check_keys(layout, *keys)?;
     ensure!(
         layout.payload_size == 8 * (1 + columns.len()) && columns.len() <= 64,
         "the table's payload has {} bytes, not a word of NULL bits and {} columns, 64 at most",
@@ -339,7 +352,7 @@ pub(super) fn append_partitioned_columns<R: Region, K: KeySource + ?Sized>(
         layout.nkeys,
         layout.tail_words(),
         append_partitioned_column_rows(
-            region, layout, partitions, mask, hashes, keys, columns, pending, offsets, rows, nulls
+            region, layout, partitions, mask, hashes, *keys, columns, pending, offsets, rows, nulls
         )
     )
 }
