@@ -428,11 +428,13 @@ Records never move and are named by their 32-bit references:
 rows = tess_rows_create(&config);   /* keys, kept columns and their types */
 tess_rows_append(rows, keys, columns, &mask, refs);   /* refs[row] per row */
 tess_rows_gather(rows, column, refs, &mask, values, isnull);
+tess_rows_gather_columns(rows, refs, &mask, values_by_column, isnull_by_column);
 ```
 
 `tess_rows_gather` reads any rows in any order, a batch at a time, and
 gives a by-reference value as the address of its copy, valid as long as
-the rows. The index holds only the layout: nothing is linked or hashed.
+the rows; `tess_rows_gather_columns` reads every column of them in one
+call of the kernels, each record located once. The index holds only the layout: nothing is linked or hashed.
 `tess_rows_reset` forgets every record for a rescan. `TessHashJoin` keeps
 its rows in the same format with code of its own, which also shares them
 between processes and partitions.

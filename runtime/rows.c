@@ -5,7 +5,8 @@
  * bytes and the others of the most a chunk may have, appended by the
  * kernels from the columns themselves (tess_table_append_columns) and read
  * back by reference, prefetched, since a sort reads them in no order
- * (tess_table_gather_scattered). A record's payload is a word of its kept
+ * (tess_table_gather_scattered, or tess_table_gather_words for every
+ * column of a batch at once). A record's payload is a word of its kept
  * columns' NULL bits per 64 of them (column c takes bit c % 64 of word
  * c / 64), then a word per column: a by-value Datum, or the reference of
  * a by-reference value's copy in the value chunks, the first of
@@ -122,9 +123,10 @@ tess_rows_create(const TessRowsConfig *config)
 		config->kernels->table_size == NULL ||
 		config->kernels->table_create == NULL ||
 		config->kernels->table_chunk_init == NULL ||
-		!TESS_ABI_HAS_FIELD(config->kernels, TessKernelOps, table_gather_scattered) ||
+		!TESS_ABI_HAS_FIELD(config->kernels, TessKernelOps, table_gather_words) ||
 		config->kernels->table_append_columns == NULL ||
-		config->kernels->table_gather_scattered == NULL)
+		config->kernels->table_gather_scattered == NULL ||
+		config->kernels->table_gather_words == NULL)
 		elog(ERROR, "Tessera rows require the kernels of the table");
 	if (config->nkeys < 1 || config->nkeys > TESS_TABLE_MAX_KEYS ||
 		config->kinds == NULL)
@@ -419,50 +421,43 @@ tess_rows_append(TessRows *rows, const TessTableKey *keys,
 	rows->records += count;
 }
 
-void
-tess_rows_gather(TessRows *rows, int column, const uint32 *refs,
-				 const TessRowMask *mask, Datum *values, bool *isnull)
+/* A by-reference value's word is its reference: its address here. */
+static void
+resolve_copies(TessRows *rows, const TessRowMask *mask, Datum *values)
 {
-	int			nwords;
-	char	  **bases;
+	int			nwords = tess_row_mask_word_count(mask->nrows);
+	char	  **bases = rows->values;
 
-	check_rows(rows);
-	if (column < 0 || column >= rows->ncolumns)
-		elog(ERROR, "Tessera rows have no column %d", column);
-	if (refs == NULL || mask == NULL || values == NULL || isnull == NULL)
-		elog(ERROR, "Tessera rows gather requires references, a mask and outputs");
-	nwords = tess_row_mask_word_count(mask->nrows);
-	check(rows, rows->kernels->table_gather_scattered(&rows->table, refs, mask,
-													  sizeof(uint64) * (rows->null_words + column),
-													  values, &rows->status));
-	/* A by-reference value's word is its reference: its address here. */
-	bases = rows->values;
-	if (!rows->typbyvals[column])
-		for (int word = 0; word < nwords; word++)
-			for (uint64 bits = mask->bits[word]; bits != 0; bits &= bits - 1)
-			{
-				int			row = word * 64 + pg_rightmost_one_pos64(bits);
-				uint64		ref = DatumGetUInt64(values[row]);
+	for (int word = 0; word < nwords; word++)
+		for (uint64 bits = mask->bits[word]; bits != 0; bits &= bits - 1)
+		{
+			int			row = word * 64 + pg_rightmost_one_pos64(bits);
+			uint64		ref = DatumGetUInt64(values[row]);
 
-				if (ref == 0)
-					continue;
-				Assert((ref >> 32) - 1 < (uint64) rows->nvalues);
-				values[row] = PointerGetDatum(bases[(ref >> 32) - 1] +
-											  (ref & 0xFFFFFFFF));
-			}
-	/*
-	 * A column no row left NULL needs no bits: every flag is false, the
-	 * rows outside the mask's too, which a caller may set to anything.
-	 */
+			if (ref == 0)
+				continue;
+			Assert((ref >> 32) - 1 < (uint64) rows->nvalues);
+			values[row] = PointerGetDatum(bases[(ref >> 32) - 1] +
+										  (ref & 0xFFFFFFFF));
+		}
+}
+
+/*
+ * A column's NULL flags from its word of NULL bits, which rows->null_bits
+ * holds for the rows of mask. A column no row left NULL needs no bits:
+ * every flag is false, the rows outside the mask's too, which a caller may
+ * set to anything.
+ */
+static void
+null_flags(TessRows *rows, int column, const TessRowMask *mask, bool *isnull)
+{
+	int			nwords = tess_row_mask_word_count(mask->nrows);
+
 	if (((rows->null_columns[column / 64] >> (column % 64)) & 1) == 0)
 	{
 		memset(isnull, 0, sizeof(bool) * mask->nrows);
 		return;
 	}
-	reserve(rows, mask->nrows);
-	check(rows, rows->kernels->table_gather_scattered(&rows->table, refs, mask,
-													  sizeof(uint64) * (column / 64),
-													  rows->null_bits, &rows->status));
 	for (int word = 0; word < nwords; word++)
 		for (uint64 bits = mask->bits[word]; bits != 0; bits &= bits - 1)
 		{
@@ -470,6 +465,57 @@ tess_rows_gather(TessRows *rows, int column, const uint32 *refs,
 
 			isnull[row] = (DatumGetUInt64(rows->null_bits[row]) >> (column % 64)) & 1;
 		}
+}
+
+/* Word `word` of the records' NULL bits into rows->null_bits. */
+static void
+gather_null_word(TessRows *rows, int word, const uint32 *refs, const TessRowMask *mask)
+{
+	reserve(rows, mask->nrows);
+	check(rows, rows->kernels->table_gather_scattered(&rows->table, refs, mask,
+													  sizeof(uint64) * word,
+													  rows->null_bits, &rows->status));
+}
+
+void
+tess_rows_gather(TessRows *rows, int column, const uint32 *refs,
+				 const TessRowMask *mask, Datum *values, bool *isnull)
+{
+	check_rows(rows);
+	if (column < 0 || column >= rows->ncolumns)
+		elog(ERROR, "Tessera rows have no column %d", column);
+	if (refs == NULL || mask == NULL || values == NULL || isnull == NULL)
+		elog(ERROR, "Tessera rows gather requires references, a mask and outputs");
+	check(rows, rows->kernels->table_gather_scattered(&rows->table, refs, mask,
+													  sizeof(uint64) * (rows->null_words + column),
+													  values, &rows->status));
+	if (!rows->typbyvals[column])
+		resolve_copies(rows, mask, values);
+	if ((rows->null_columns[column / 64] >> (column % 64)) & 1)
+		gather_null_word(rows, column / 64, refs, mask);
+	null_flags(rows, column, mask, isnull);
+}
+
+void
+tess_rows_gather_columns(TessRows *rows, const uint32 *refs, const TessRowMask *mask,
+						 Datum *const *values, bool *const *isnull)
+{
+	check_rows(rows);
+	if (refs == NULL || mask == NULL || values == NULL || isnull == NULL)
+		elog(ERROR, "Tessera rows gather requires references, a mask and outputs");
+	if (rows->ncolumns == 0)
+		return;
+	check(rows, rows->kernels->table_gather_words(&rows->table, refs, mask, rows->null_words,
+												  rows->ncolumns, values, &rows->status));
+	for (int column = 0; column < rows->ncolumns; column++)
+	{
+		if (!rows->typbyvals[column])
+			resolve_copies(rows, mask, values[column]);
+		/* A word of NULL bits serves its 64 columns: gathered at the first. */
+		if (column % 64 == 0 && rows->null_columns[column / 64] != 0)
+			gather_null_word(rows, column / 64, refs, mask);
+		null_flags(rows, column, mask, isnull[column]);
+	}
 }
 
 uint64 *

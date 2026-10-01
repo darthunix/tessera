@@ -100,6 +100,7 @@ static const TessKernelOps kernels = {
 	.int8_in_set = tess_int8_in_set,
 	.table_accumulate_sums = tess_table_accumulate_sums,
 	.table_clear_key = tess_table_clear_key,
+	.table_gather_words = tess_table_gather_words,
 };
 
 static const TessKernelRegistryOps *

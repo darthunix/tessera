@@ -980,6 +980,55 @@ pub unsafe extern "C" fn tess_table_gather_scattered(
     }
 }
 
+/// Output words [`tess_table_gather_words`] passes the kernel at a time.
+const GATHER_WORDS: usize = 16;
+
+/// `tess_table_gather_words`: payload words `first` to `first + nwords - 1`
+/// of each selected row's record, word `first + n` into `out[n]`, the
+/// records of a word of rows prefetched as [`tess_table_gather_scattered`]
+/// does, each located once for all its words.
+///
+/// # Safety
+///
+/// As for [`tess_table_gather`], with `out` pointing to `nwords` pointers,
+/// each to an initialized, writable word per row of its own that nothing
+/// else accesses.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tess_table_gather_words(
+    table: *const TableRef,
+    offsets: *const u32,
+    rows: *const Mask,
+    first: usize,
+    nwords: usize,
+    out: *const *mut u64,
+    status: *mut Status,
+) -> Code {
+    // SAFETY: the caller's contract.
+    unsafe {
+        guard(status, || {
+            let table = attach(table)?;
+            let rows = rows.as_ref().context("a null row mask")?.view()?;
+            let nrows = rows.nrows();
+            let offsets = values(offsets, nrows, "offsets")?;
+            ensure!(nwords > 0, "no payload words to gather");
+            let pointers = values(out, nwords, "outputs")?;
+            let mut words: [&mut [u64]; GATHER_WORDS] = Default::default();
+            for (group, pointers) in pointers.chunks(GATHER_WORDS).enumerate() {
+                for (slot, &pointer) in words.iter_mut().zip(pointers) {
+                    *slot = slots(pointer, nrows, "output words")?;
+                }
+                table.gather_words(
+                    offsets,
+                    &rows,
+                    first + group * GATHER_WORDS,
+                    &mut words[..pointers.len()],
+                )?;
+            }
+            Ok(())
+        })
+    }
+}
+
 /// `tess_table_next_in_group`: step each row to the record right after
 /// its own when that one has the same keys.
 ///

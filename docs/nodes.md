@@ -2211,8 +2211,15 @@ direction of the fetch, and appends every batch's selected rows; a key
 takes the bit for NULL only when one of its rows held a NULL, so a single
 int4 key without NULLs sorts as one word per row. A batch-aware parent
 then gets batches of 64 rows in order, whose columns are gathered from
-the records when it asks for them; a row-wise parent gets rows one by one,
-forward or backward, from windows of 64 rows. A rescan without a changed
+the records when it asks for them: a column at a time while the parent
+reads one column of a batch, every column in one call of the kernels
+(`tess_rows_gather_columns`) once it read more than one, as a row-wise
+parent reads them all; a row-wise parent gets rows one by one, forward
+or backward, from windows of 64 rows. A column at a time, each call
+located the batch's records anew and checked every chunk of the table:
+under a window function the gathering of eight columns took 46 ms of 2 M
+rows, in one call 14 (plan 4.28); a parent reading one column of two
+took 1–1.5 % longer with both gathered. A rescan without a changed
 parameter returns the sorted rows again from the first; a changed
 parameter of the child reads and sorts it anew. `EXPLAIN` shows the keys
 as the core does; `ANALYZE` adds the method, the memory (records, values,

@@ -603,6 +603,22 @@ impl<'a> Table<'a> {
         batch::gather::<_, true>(&self.region, &self.layout, offsets, rows, at, out)
     }
 
+    /// For each row of `rows`, payload word `first + n` (in 8-byte units)
+    /// of the record at `offsets[row]` into `out[n][row]`, native-endian,
+    /// for every `out[n]` of a row each, records in no order as
+    /// [`Table::gather_scattered`] reads them: one call for every column a
+    /// sort's batch serves, a record located once for all of them. Rows
+    /// outside `rows` keep their values.
+    pub fn gather_words(
+        &self,
+        offsets: &[u32],
+        rows: &RowMaskView<'_>,
+        first: usize,
+        out: &mut [&mut [u64]],
+    ) -> Result<()> {
+        batch::gather_words(&self.region, &self.layout, offsets, rows, first, out)
+    }
+
     /// For each row of `rows`, replace `offsets[row]` by the record right
     /// after it when that one has the same hash, null bits and keys, and
     /// put the row in `found`; other rows keep theirs. In a table linked by

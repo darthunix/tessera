@@ -2420,8 +2420,9 @@ fn payload_columns_of(ncolumns: usize) -> Result<()> {
     Ok(())
 }
 
-/// A scattered gather reads what a gather reads, records in any order and
-/// a mask with holes, and leaves the rows outside the mask alone.
+/// A scattered gather, and one of several words, read what a gather reads,
+/// records in any order and a mask with holes, and leave the rows outside
+/// the mask alone.
 #[test]
 fn a_scattered_gather_reads_what_a_gather_reads() -> Result<()> {
     const ROWS: usize = 200;
@@ -2484,6 +2485,33 @@ fn a_scattered_gather_reads_what_a_gather_reads() -> Result<()> {
     assert!(
         shared
             .gather_scattered(&shuffled, &rows, 16, &mut out)
+            .is_err()
+    );
+    // Both words in one call read what a word at a time reads.
+    let mut first = vec![u64::MAX; ROWS];
+    let mut second = vec![u64::MAX; ROWS];
+    shared.gather_words(&shuffled, &rows, 0, &mut [&mut first, &mut second])?;
+    for (word, got) in [first, second].iter().enumerate() {
+        let mut expected = vec![u64::MAX; ROWS];
+        shared.gather(&shuffled, &rows, 8 * word, &mut expected)?;
+        assert_eq!(got, &expected, "word {word}");
+    }
+    let mut second = vec![u64::MAX; ROWS];
+    shared.gather_words(&shuffled, &rows, 1, &mut [&mut second])?;
+    let mut expected = vec![u64::MAX; ROWS];
+    shared.gather(&shuffled, &rows, 8, &mut expected)?;
+    assert_eq!(second, expected);
+    // No words, words past the payload, outputs of another row count.
+    let (mut a, mut b, mut short) = (vec![0; ROWS], vec![0; ROWS], vec![0; ROWS - 1]);
+    assert!(shared.gather_words(&shuffled, &rows, 0, &mut []).is_err());
+    assert!(
+        shared
+            .gather_words(&shuffled, &rows, 1, &mut [&mut a, &mut b])
+            .is_err()
+    );
+    assert!(
+        shared
+            .gather_words(&shuffled, &rows, 0, &mut [&mut a, &mut short])
             .is_err()
     );
     Ok(())

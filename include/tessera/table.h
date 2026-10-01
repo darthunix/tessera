@@ -352,6 +352,21 @@ extern TessStatusCode tess_table_gather_scattered(const TessTableRef *table,
 												  TessStatus *status);
 
 /*
+ * As tess_table_gather_scattered, for payload words first to
+ * first + nwords - 1 at once, word first + n into values[n][row]: each
+ * record is located and prefetched once for all its words, as a sort's
+ * batch reads every column it serves. Each values[n] has a word per row
+ * of its own.
+ */
+extern TessStatusCode tess_table_gather_words(const TessTableRef *table,
+											  const uint32 *offsets,
+											  const TessRowMask *rows,
+											  Size first,
+											  Size nwords,
+											  Datum *const *values,
+											  TessStatus *status);
+
+/*
  * For each row of rows, replace offsets[row], an offset from a probe or an
  * earlier call, by the offset of the next record in its chain with the
  * same hash, NULL bits and keys; found receives the rows that have one,

@@ -11,9 +11,10 @@ use tessera_capi::c::{
     tess_sort_layout, tess_table_accumulate, tess_table_accumulate_sums, tess_table_append,
     tess_table_append_columns, tess_table_append_partitioned_columns, tess_table_chunk_init,
     tess_table_create, tess_table_find_or_insert, tess_table_format_version, tess_table_gather,
-    tess_table_gather_key, tess_table_layout, tess_table_link, tess_table_link_grouped,
-    tess_table_next_in_group, tess_table_next_match, tess_table_payloads, tess_table_probe,
-    tess_table_record, tess_table_regrow, tess_table_scan, tess_table_size, tess_table_stats,
+    tess_table_gather_key, tess_table_gather_words, tess_table_layout, tess_table_link,
+    tess_table_link_grouped, tess_table_next_in_group, tess_table_next_match, tess_table_payloads,
+    tess_table_probe, tess_table_record, tess_table_regrow, tess_table_scan, tess_table_size,
+    tess_table_stats,
 };
 use tessera_core::{ColumnView, RowMask, RowMaskView};
 use tessera_kernels::int32::{self, NullKeys};
@@ -2190,6 +2191,112 @@ fn the_columns_entry_point_writes_each_payload_word() -> Result<()> {
             ),
             Code::Ok
         );
+    }
+    Ok(())
+}
+
+/// The payload words of records in another order, every column of a row
+/// in one call, past the kernel's group of sixteen words: each row's words
+/// as appended, the rows outside the mask untouched; no words, a null
+/// output and words past the payload are refused.
+#[test]
+fn the_words_entry_point_gathers_every_column() -> Result<()> {
+    const COLUMNS: usize = 19;
+    let keys = Keys::new(70);
+    let column = keys.column();
+    let key = TableKey {
+        kind: 1,
+        column: &raw const column,
+        prepared: ptr::null(),
+    };
+    let values: Vec<Vec<u64>> = (0..COLUMNS as u64)
+        .map(|column| (0..70).map(|row| row * 100 + column).collect())
+        .collect();
+    let no_nulls = [false; 70];
+    let columns: Vec<DatumColumn> = values
+        .iter()
+        .map(|column| DatumColumn {
+            struct_size: size_of::<DatumColumn>(),
+            values: column.as_ptr(),
+            isnull: no_nulls.as_ptr(),
+            nrows: 70,
+            ..DatumColumn::EMPTY
+        })
+        .collect();
+    let mut status = Status::new();
+    // SAFETY: local buffers of the declared sizes, aliased by nothing else,
+    // throughout this test.
+    unsafe {
+        let mut table = CTable::new(1, 8 * (1 + COLUMNS), 0);
+        table.add_chunk(CHUNK_HEADER + 70 * 192);
+        let hashes = vec![0_u32; 70];
+        let mut pending_words = keys.all_rows();
+        let mut pending = Mask {
+            nrows: 70,
+            bits: pending_words.as_mut_ptr(),
+        };
+        let mut offsets = vec![0_u32; 70];
+        let code = tess_table_append_columns(
+            table.ptr(),
+            0,
+            hashes.as_ptr(),
+            1,
+            &raw const key,
+            COLUMNS as i32,
+            columns.as_ptr(),
+            &raw mut pending,
+            offsets.as_mut_ptr(),
+            &raw mut status,
+        );
+        assert_eq!(code, Code::Ok, "{}", status.message());
+        // The records last first, every third row left out.
+        let reversed: Vec<u32> = offsets.iter().rev().copied().collect();
+        let mut selected = keys.all_rows();
+        for row in (0..70).step_by(3) {
+            selected[row / 64] &= !(1 << (row % 64));
+        }
+        let rows = Mask {
+            nrows: 70,
+            bits: selected.as_mut_ptr(),
+        };
+        let mut out = vec![vec![u64::MAX; 70]; COLUMNS];
+        let pointers: Vec<*mut u64> = out.iter_mut().map(|words| words.as_mut_ptr()).collect();
+        let code = tess_table_gather_words(
+            table.ptr(),
+            reversed.as_ptr(),
+            &raw const rows,
+            1,
+            COLUMNS,
+            pointers.as_ptr(),
+            &raw mut status,
+        );
+        assert_eq!(code, Code::Ok, "{}", status.message());
+        for (column, words) in out.iter().enumerate() {
+            for (row, &word) in words.iter().enumerate() {
+                let expected = if row % 3 == 0 {
+                    u64::MAX
+                } else {
+                    values[column][69 - row]
+                };
+                assert_eq!(word, expected, "column {column}, row {row}");
+            }
+        }
+        for (first, nwords, pointers) in [
+            (1, 0, pointers.as_ptr()),
+            (1, COLUMNS, ptr::null()),
+            (2, COLUMNS, pointers.as_ptr()),
+        ] {
+            let code = tess_table_gather_words(
+                table.ptr(),
+                reversed.as_ptr(),
+                &raw const rows,
+                first,
+                nwords,
+                pointers,
+                &raw mut status,
+            );
+            assert_ne!(code, Code::Ok, "{first} {nwords}");
+        }
     }
     Ok(())
 }

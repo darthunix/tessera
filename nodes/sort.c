@@ -246,6 +246,12 @@ typedef struct TessSortState
 	Datum	  **values;
 	bool	  **isnull;
 	bool	   *gathered;
+	/*
+	 * Columns gathered for the parent of the batch shown, and of the one
+	 * before: all of them once it read more than one.
+	 */
+	int			columns_read;
+	int			columns_read_before;
 	SortCounters counters;
 	/*
 	 * External sort: the flags the node began with; whether the rows went
@@ -295,12 +301,28 @@ sort_get_column(TessBatch *batch, int column, const TessRowMask *rows,
 
 	if (column < 0 || column >= state->ncolumns)
 		elog(ERROR, "TessSort has no column %d", column);
-	/* The whole batch at once: at most SORT_ROWS rows. */
+	/*
+	 * The whole batch at once, at most SORT_ROWS rows; and every column
+	 * with the first when the parent read more than one of the batch
+	 * before, as a row-wise parent reads them all: a record is located once
+	 * for all of them. A parent reading one column has it alone.
+	 */
 	if (!state->gathered[column])
 	{
-		tess_rows_gather(state->rows, column, &state->refs[state->start],
-						 &window, state->values[column], state->isnull[column]);
-		state->gathered[column] = true;
+		if (state->columns_read_before > 1)
+		{
+			tess_rows_gather_columns(state->rows, &state->refs[state->start], &window,
+									 state->values, state->isnull);
+			memset(state->gathered, true, sizeof(bool) * state->ncolumns);
+			state->columns_read = state->ncolumns;
+		}
+		else
+		{
+			tess_rows_gather(state->rows, column, &state->refs[state->start],
+							 &window, state->values[column], state->isnull[column]);
+			state->gathered[column] = true;
+			state->columns_read++;
+		}
 	}
 	result->values = state->values[column];
 	result->isnull = state->isnull[column];
@@ -1622,9 +1644,7 @@ spill_run(TessSortState *state)
 		uint64		bits[1] = {n == 64 ? ~UINT64CONST(0) : (UINT64CONST(1) << n) - 1};
 		TessRowMask mask = {n, bits};
 
-		for (int column = 0; column < state->ncolumns; column++)
-			tess_rows_gather(state->rows, column, &refs[first], &mask,
-							 values[column], nulls[column]);
+		tess_rows_gather_columns(state->rows, &refs[first], &mask, values, nulls);
 		/* The reference left out: its word dropped, or its bits zeroed in a copy. */
 		for (int row = 0; row < n; row++)
 		{
@@ -2386,6 +2406,8 @@ show_window(TessSortState *state, uint64 start)
 	state->batch.rows.nrows = n;
 	state->batch.rows.bits = state->window_bits;
 	memset(state->gathered, 0, sizeof(bool) * state->ncolumns);
+	state->columns_read_before = state->columns_read;
+	state->columns_read = 0;
 }
 
 /* The next batch of rows in order for a batch-aware parent, or NULL. */

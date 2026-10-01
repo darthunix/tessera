@@ -888,6 +888,67 @@ pub(super) fn gather<R: Region, const PREFETCH: bool>(
     Ok(())
 }
 
+/// For each row of `rows`, payload word `first + n` (in 8-byte units) of
+/// the record at `offsets[row]` into `out[n][row]` for every `out[n]`,
+/// records in no order, as [`gather`] with its prefetch reads one: a
+/// record is located once for all its words, and every cache line they lie
+/// on prefetched. Other slots of `out` keep their values.
+pub(super) fn gather_words<R: Region>(
+    region: &R,
+    layout: &Layout,
+    offsets: &[u32],
+    rows: &RowMaskView<'_>,
+    first: usize,
+    out: &mut [&mut [u64]],
+) -> Result<()> {
+    let nrows = rows.nrows();
+    ensure!(
+        offsets.len() == nrows && out.iter().all(|words| words.len() == nrows),
+        "the offsets, mask and outputs of the batch have different row counts"
+    );
+    ensure!(
+        !out.is_empty()
+            && first
+                .checked_add(out.len())
+                .and_then(|end| end.checked_mul(8))
+                .is_some_and(|end| end <= layout.payload_size),
+        "{} payload words from word {first} are none or past the payload of {} bytes",
+        out.len(),
+        layout.payload_size
+    );
+    let access = Access::new(region, layout);
+    let first_at = RECORD_HEADER + 8 * (access.nkeys() + first);
+    let last_at = first_at + 8 * (out.len() - 1);
+    let mut spots = [const { MaybeUninit::<R::Spot>::uninit() }; 64];
+    for index in 0..nrows.div_ceil(64) {
+        let selected = rows.word(index).unwrap();
+        for bit in rows_of(selected) {
+            let place = access.place(offsets[index * 64 + bit])?;
+            // SAFETY: `place` accepted it.
+            let spot = unsafe { access.spot(place) };
+            spots[bit].write(spot);
+            access.prefetch_record(spot);
+            let mut line = first_at;
+            while line < last_at {
+                access.prefetch_record(R::advance(spot, line));
+                line += 64;
+            }
+            access.prefetch_record(R::advance(spot, last_at));
+        }
+        for bit in rows_of(selected) {
+            let row = index * 64 + bit;
+            // SAFETY: the loop above resolved the spot of every row of
+            // `selected` from an offset `place` accepted.
+            let record = unsafe { access.open_at(spots[bit].assume_init(), offsets[row]) }?;
+            let payload = &record.payload()[8 * first..8 * (first + out.len())];
+            for (words, bytes) in out.iter_mut().zip(payload.as_chunks::<8>().0) {
+                words[row] = u64::from_ne_bytes(*bytes);
+            }
+        }
+    }
+    Ok(())
+}
+
 /// For each row of `rows`, the record right after `offsets[row]` in its
 /// chain when it has the same hash, null bits and keys: the next record of
 /// the key in a table built by grouped insertion, where they lie next to

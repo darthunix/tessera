@@ -799,7 +799,10 @@ typedef struct TessRowsConfig
 	Size		struct_size;
 	/* Owns the rows, their chunks and their values. */
 	MemoryContext parent_context;
-	/* The table's kernels: size, create, chunk_init, append_columns, gather_scattered. */
+	/*
+	 * The table's kernels: size, create, chunk_init, append_columns,
+	 * gather_scattered, gather_words.
+	 */
 	const TessKernelOps *kernels;
 	/* The keys every record holds, in their slots: one at least. */
 	int			nkeys;
@@ -845,6 +848,16 @@ extern void tess_rows_append(TessRows *rows, const TessTableKey *keys,
 extern void tess_rows_gather(TessRows *rows, int column, const uint32 *refs,
 							 const TessRowMask *mask, Datum *values,
 							 bool *isnull);
+
+/*
+ * Every kept column of the records refs[row] for each row of mask, column
+ * c into values[c] and isnull[c], as tess_rows_gather leaves one: the
+ * payload's words in one call of the kernels, each record located once,
+ * as a sort's batch serves all its columns.
+ */
+extern void tess_rows_gather_columns(TessRows *rows, const uint32 *refs,
+									 const TessRowMask *mask,
+									 Datum *const *values, bool *const *isnull);
 
 /*
  * The references of every record, ordered by keys, one per key of the

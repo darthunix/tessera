@@ -37,6 +37,7 @@ static const TessKernelOps kernels = {
 	.spill_columns_unpack = tess_spill_columns_unpack,
 	.sort_merge = tess_sort_merge,
 	.sort_key_lanes = tess_sort_key_lanes,
+	.table_gather_words = tess_table_gather_words,
 };
 
 #define BATCH 64
@@ -159,20 +160,62 @@ append_all(TessRows *rows, int nrows, uint32 *refs)
 	MemoryContextDelete(scratch);
 }
 
+/* Whether column `column` of rows index[0..n) reads as appended. */
+static bool
+check_column(int column, int n, const int *index, const Datum *values, const bool *nulls)
+{
+	for (int row = 0; row < n; row++)
+	{
+		int			j = index[row];
+
+		if (column == 0 &&
+			(nulls[row] || DatumGetInt32(values[row]) != j))
+			return false;
+		if (column == 1)
+		{
+			text	   *expected;
+
+			if (nulls[row] != text_null(j))
+				return false;
+			if (nulls[row])
+				continue;
+			expected = text_value(j);
+			if (VARSIZE_ANY(DatumGetPointer(values[row])) != VARSIZE_ANY(expected) ||
+				memcmp(DatumGetPointer(values[row]), expected,
+					   VARSIZE_ANY(expected)) != 0)
+				return false;
+			pfree(expected);
+		}
+		if (column == 2 &&
+			(nulls[row] != int8_null(j) ||
+			 (!nulls[row] && DatumGetInt64(values[row]) != ((int64) j << 33))))
+			return false;
+	}
+	return true;
+}
+
 /*
  * Read every appended row back, BATCH at a time from the last one down, a
- * gather's rows in an order other than their appending, and compare.
+ * gather's rows in an order other than their appending, and compare: all
+ * the columns in one call, then a column at a time.
  */
 static bool
 check_all(TessRows *rows, int nrows, const uint32 *refs)
 {
 	uint32		batch_refs[BATCH];
 	int			index[BATCH];
-	Datum		values[BATCH];
-	bool		nulls[BATCH];
+	Datum		values[NCOLUMNS][BATCH];
+	bool		nulls[NCOLUMNS][BATCH];
+	Datum	   *value_columns[NCOLUMNS];
+	bool	   *null_columns[NCOLUMNS];
 	uint64		bits[1];
 	int			i = nrows - 1;
 
+	for (int column = 0; column < NCOLUMNS; column++)
+	{
+		value_columns[column] = values[column];
+		null_columns[column] = nulls[column];
+	}
 	while (i >= 0)
 	{
 		int			n = 0;
@@ -191,37 +234,18 @@ check_all(TessRows *rows, int nrows, const uint32 *refs)
 		if (n == 0)
 			break;
 		mask.nrows = n;
+		memset(nulls, true, sizeof(nulls));
+		tess_rows_gather_columns(rows, batch_refs, &mask, value_columns, null_columns);
+		for (int column = 0; column < NCOLUMNS; column++)
+			if (!check_column(column, n, index, values[column], nulls[column]))
+				return false;
+		memset(values, 0, sizeof(values));
+		memset(nulls, true, sizeof(nulls));
 		for (int column = 0; column < NCOLUMNS; column++)
 		{
-			memset(nulls, true, sizeof(nulls));
-			tess_rows_gather(rows, column, batch_refs, &mask, values, nulls);
-			for (int row = 0; row < n; row++)
-			{
-				int			j = index[row];
-
-				if (column == 0 &&
-					(nulls[row] || DatumGetInt32(values[row]) != j))
-					return false;
-				if (column == 1)
-				{
-					text	   *expected;
-
-					if (nulls[row] != text_null(j))
-						return false;
-					if (nulls[row])
-						continue;
-					expected = text_value(j);
-					if (VARSIZE_ANY(DatumGetPointer(values[row])) != VARSIZE_ANY(expected) ||
-						memcmp(DatumGetPointer(values[row]), expected,
-							   VARSIZE_ANY(expected)) != 0)
-						return false;
-					pfree(expected);
-				}
-				if (column == 2 &&
-					(nulls[row] != int8_null(j) ||
-					 (!nulls[row] && DatumGetInt64(values[row]) != ((int64) j << 33))))
-					return false;
-			}
+			tess_rows_gather(rows, column, batch_refs, &mask, values[column], nulls[column]);
+			if (!check_column(column, n, index, values[column], nulls[column]))
+				return false;
 		}
 	}
 	return true;
