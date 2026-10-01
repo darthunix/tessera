@@ -123,9 +123,8 @@ remove_function(const TessFunction *function)
 }
 
 /*
- * The registry answers first. A later version will also ask the function's
- * planner support function (pg_proc.prosupport) with an ExtensibleNode
- * request named "tessera.batch_function" and cache its answer by OID.
+ * The registry alone answers: a function's planner support function
+ * (pg_proc.prosupport) is not asked (docs/function.md).
  */
 static const TessFunction *
 find_function(Oid funcid)

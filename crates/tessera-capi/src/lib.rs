@@ -22,13 +22,16 @@
 //! [`anyhow::Error`] may allocate.
 //!
 //! The Rust value type describes reading, not PostgreSQL operator semantics.
-//! Future C dispatch must choose by PostgreSQL type, operation, collation, and
-//! physical format. For example, an int32 buffer for `date` must not select an
-//! int4 operator merely because the storage width matches.
+//! The C side chooses a kernel by the PostgreSQL function it implements (the
+//! function registry, `docs/function.md`), which fixes the type, the operation
+//! and what the collation may change; the physical format never chooses: an
+//! int32 buffer for `date` must not select an int4 operator merely because
+//! the storage width matches.
 //!
 //! # Safety and errors at the C boundary
 //!
-//! Unsafe code is limited to this crate and future isolated SIMD modules.
+//! Unsafe code is limited to this crate and two isolated modules of
+//! `tessera-kernels`: its vector code and its hash table's region.
 //! Every unsafe block must have a `SAFETY` comment explaining its invariants.
 //! The workspace enforces `unsafe_op_in_unsafe_fn = "deny"`.
 //!
@@ -41,8 +44,8 @@
 //!   use `panic = "unwind"`; overriding this with `panic = "abort"` is unsupported.
 //! - Entry points use `extern "C"`, not `extern "C-unwind"`. All potentially
 //!   panicking work must run inside [`std::panic::catch_unwind`] within the Rust
-//!   entry point. A caught panic becomes an error in the future `TessStatus`
-//!   interface. `extern "C"` alone does not recover from a panic: an escaping
+//!   entry point. A caught panic becomes an error in the caller's `TessStatus`
+//!   ([`c`]'s guard). `extern "C"` alone does not recover from a panic: an escaping
 //!   panic aborts the process.
 //! - Expected errors use `Result` and status returns, not panics. Catching a panic
 //!   does not undo mutations: partial outputs must not be returned, and affected

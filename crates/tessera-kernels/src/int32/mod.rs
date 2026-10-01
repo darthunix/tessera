@@ -8,8 +8,8 @@
 //! `crate::int`, generic over the lane type; the family's own is its lane
 //! (`lane.rs`): how a Datum holds an int4, its operations and their error,
 //! and the vector code of a whole word. A physical int32 representation
-//! does not select PostgreSQL semantics: the future caller must choose
-//! kernels by logical type and operation.
+//! does not select PostgreSQL semantics: the caller chooses kernels by
+//! logical type and operation.
 
 mod aggregate;
 mod arith;

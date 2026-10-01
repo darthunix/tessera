@@ -17,9 +17,8 @@
  * structure or name string. The structure and name string must remain valid
  * from add until remove returns. The provider must ensure that all consumers
  * have finished using their borrowed pointers before remove, then may free
- * its allocations.
- * Source capabilities will be added as separate interfaces when there is
- * an executor consumer for them.
+ * its allocations. A source has no capabilities beyond its name: no node
+ * reads a source through the registry.
  */
 typedef struct TessSource
 {

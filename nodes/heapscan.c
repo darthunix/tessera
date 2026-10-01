@@ -292,9 +292,11 @@ tess_parallel_divisor(const Path *path)
 }
 
 /*
- * The path costs what the scan costs: there is no cost model yet. A
- * partial scan's path is parallel-aware, as the template is, and gives
- * each participant its share of the rows.
+ * The path starts at the core scan's cost: a parent that asked for a
+ * batch input over the scan costs its own work, and the scan planner
+ * prices the scans it adds by the scan model (scan_planner.c,
+ * rank_scans). A partial scan's path is parallel-aware, as the template
+ * is, and gives each participant its share of the rows.
  */
 static CustomPath *
 heap_scan_rows(PlannerInfo *root, Path *path)

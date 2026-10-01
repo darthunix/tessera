@@ -1,9 +1,9 @@
 # Source registry
 
 The source registry lets independently built extensions publish and find
-batch sources without linking to one another. A source currently has only a
-stable name. Planning and execution interfaces will be added when a scan node
-can use them.
+batch sources without linking to one another. A source has only a stable
+name: no node reads a source through the registry, so it offers no planning
+or execution interface.
 
 Get the registry once during module initialization and keep its operation
 table:

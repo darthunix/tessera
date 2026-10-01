@@ -2315,10 +2315,10 @@ join_counters(TessHashJoinState *state, uint64 *values)
 
 /*
  * The join clause; with ANALYZE, the table and the rows through it, the
- * totals of every participant in a parallel plan, each of which builds a
- * table of its own. The memory is the most the tables and the copies of
- * inner values took, and Overrun what of it exceeded hash_mem: the node
- * keeps the whole inner side in memory rather than spilling it.
+ * totals of every participant in a parallel plan. The memory is the most
+ * the tables, the copies of inner values and spilling took, and Overrun
+ * what of it exceeded hash_mem, which happens only where a partition on
+ * disk larger than hash_mem is joined whole (docs/nodes.md).
  */
 static void
 join_explain(CustomScanState *css, List *ancestors, ExplainState *es)
@@ -2435,10 +2435,12 @@ join_explain(CustomScanState *css, List *ancestors, ExplainState *es)
 }
 
 /*
- * A parallel plan: the outer child divides the rows, and every
- * participant builds the whole inner side into a table of its own, as the
- * core's hash join without a shared table does. The node shares only its
- * counters, in the rows of its chunk.
+ * A parallel plan: the outer child divides the rows. Without a shared
+ * table every participant builds the whole inner side into a table of its
+ * own, as the core's hash join without a shared table does, and the chunk
+ * holds only the counters, in the rows of the participants; with one
+ * (Shared Table), the chunk holds the shared build's state before them,
+ * and the participants build one table together (hashjoin_shared.c).
  */
 /* The bytes of the chunk a shared build takes before the counters. */
 static Size

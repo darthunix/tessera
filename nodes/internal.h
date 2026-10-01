@@ -19,7 +19,7 @@
 #define TESS_SEND_NODE_NAME "tessera.send"
 #define TESS_GATHER_MERGE_NODE_NAME "tessera.gather_merge"
 
-/* The plan data of TessFilter and TessHashJoin, written by their planners. */
+/* The plan data of the nodes of this module, written by their planners. */
 #define TESS_AGG_DATA "tessera.agg"
 #define TESS_AGG_DATA_VERSION 8
 #define TESS_FILTER_DATA "tessera.filter"

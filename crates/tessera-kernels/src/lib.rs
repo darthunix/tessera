@@ -27,8 +27,7 @@
 //! (…)` of integer constants.
 //! Errors do not roll back previously completed words; callers must discard a
 //! partial selection after failure. This crate does not introduce a C entry
-//! point or catch panics. The future C boundary remains responsible for panic
-//! handling.
+//! point or catch panics: the C boundary, `tessera-capi`, does.
 //!
 //! Full prepared words of representations that expose their storage
 //! ([`tessera_core::WordBlock`]) are compared, aggregated, computed and

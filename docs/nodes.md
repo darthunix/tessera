@@ -772,9 +772,9 @@ and the error of a parent asking for rows. The GUCs `pack_test.batch_rows`,
 planner's order: those the [expression compiler](expr.md) supports run as
 batch filters over the function registry, the others row by row, each over
 the rows the ones before it kept.
-It is the first node of the chain that does work on batches, and until a
-native batch scan exists it stands above a pack node above the sequential
-scan: `Seq Scan → TessPack → TessFilter → parent`.
+It is the first node of the chain that does work on batches and stands
+above the native scan, which reads the table's pages itself or the rows of
+the core's index scan: `TessHeapScan → TessFilter → parent`.
 
 ### Planning
 
@@ -789,9 +789,11 @@ which needs the kernels module loaded at planning time: `order_qual_clauses`
 is private, so the hook repeats its key, the lowest cost within the lowest
 security level, a cheap leakproof clause counting as level zero, the first
 of equals. With a non-parameterized sequential scan in the path list, the
-hook adds a path over a batch input over a copy of that scan, at nine
-tenths of the scan's cost: there is no cost model yet, and the node is
-expected to lose until the native scan arrives (see `bench/pg/`). When
+hook adds a path over a batch input over a copy of that scan, the native
+scan, at first at `tessera.scan_cost_factor` (0.9) of the scan's cost;
+the scan model then ranks the node's scans of the relation, full and by
+index, against one another and the core's ([Ranking the full
+scan](#ranking-the-full-scan)). When
 the relation may be scanned in parallel, the hook adds a partial path the
 same way over the core's partial sequential scan, so that a `Gather`
 above runs the node in every participant over that participant's share

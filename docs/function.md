@@ -272,11 +272,10 @@ unspecified.
 
 ## Functions of other extensions
 
-A later version will let an extension attach a batch implementation to its
-own function through PostgreSQL's planner support functions
-(`CREATE FUNCTION ... SUPPORT`): `find` will ask the function's support
-function with an `ExtensibleNode` request named `tessera.batch_function`,
-carrying the request's ABI version and size, the `funcid` and the input
-collation, and cache the returned `TessFunction` by OID until the function's
-catalog entry changes. The description is the same structure as a registered
-one.
+An extension attaches a batch implementation to its own function by
+registering it, as above. `find` does not ask a function's planner support
+function (`CREATE FUNCTION ... SUPPORT`). A way it could, not implemented:
+an `ExtensibleNode` request named `tessera.batch_function`, carrying the
+request's ABI version and size, the `funcid` and the input collation,
+answered with the same `TessFunction` a registration gives and cached by OID
+until the function's catalog entry changes.

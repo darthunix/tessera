@@ -65,9 +65,10 @@ consumed. Releasing an empty binding is safe, and cleanup may release an
 unconsumed batch. `detach` releases an active batch before removing the
 binding.
 
-These operations do not change the visible row in `TupleTableSlot`. A later
-runtime adapter will handle row materialization and the requirements of
-PostgreSQL's scalar executor interface.
+These operations do not change the visible row in `TupleTableSlot`. Serving
+rows to a parent that reads the slot is the runtime's output helper's work
+(`runtime/output.c`; [runtime guide](runtime.md), "Publishing batches and
+serving rows").
 
 A slot-context reset removes only the weak lookup entry. It cannot safely
 call the batch release operation because the batch owner's context may
