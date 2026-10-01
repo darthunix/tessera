@@ -2344,6 +2344,33 @@
   Не делаем: WARNING и NOTICE (сообщать нечего); полное разделение заголовков ядер на типы и extern — если
   выбран малый разрез.
   Замеров не требуется: правки не на горячем пути (4) меняет только путь ошибки).
+  Сделано (2026-10-01, коммиты c02956e..b3204c9, без подписи; решение пользователя: все предложения):
+  1) ставятся все заголовки; test/installed (его запускает make installcheck верхнего уровня) компилирует каждый
+     установленный заголовок отдельно с -I$(includedir_server)/extension и собирает пример TessLimit из копии
+     исходников против установленных заголовков и libtessera_runtime.a (TESSERA_INSTALLED в его Makefile). Без
+     decimal.h проверка падает на kernel_ops.h. docs/runtime.md, docs/bridge.md — путь -I.
+  2) bridge.h объявляет TessKernelOps и TessKernelRegistryOps вперёд; tessera/table_key.h — виды ключей,
+     TESS_TABLE_MAX_KEYS и TessTableKey (их берут table.h и node.h); runtime.h — сводка над runtime_api.h,
+     _builder, _heap_batch, _project, _qual, _output, _input, _unary, _shared_stats, _spill, _rows. Строк
+     заголовков Tessera под bridge.h: 3409 → 951, под node.h: 1424 → 416; заголовков, компилирующихся
+     отдельно, — 36.
+  3) 13 проверок TESS_ABI_HAS_FIELD для TessKernelOps убраны; правило одной сборки — в kernel_ops.h и
+     docs/bridge.md; NULL-проверки таблиц, переданных строкам и сбросу (тесты строят их частично), и список
+     моста остались.
+  4) tessera_kernels::error: трейт SqlError у трёх семейств и classify — единственная точка; tessera_spill::Damaged
+     (макрос intact!) для байтов, прочитанных с диска и не прошедших проверки; новый код
+     TESS_ERROR_DATA_CORRUPTED, XX001; короткий буфер вызывающего остаётся XX000. Тесты: Rust (крейт spill,
+     capi spill), C (table).
+  5) kernels.h, function.h, docs/kernels.md: «не бросает» — про точки входа Rust; evaluate может бросить ERROR.
+  6) ereport с ERRCODE_DATA_CORRUPTED: повреждённый раздел TessAgg, потерянные блоки и прогоны TessSort,
+     блок с другим числом строк, фрагменты значений TessHashJoin, раунды общего соединения; создание файла сброса —
+     errcode_for_file_access; более 2^31 равных ключей в группе TessSort — PROGRAM_LIMIT_EXCEEDED. Правило —
+     в docs/node.md («Errors»). Повредить временный файл из SQL нельзя: проверено на уровне ядер.
+  7) TessLayoutKind → TessKernelsProbe (TESS_PROBE_*, tess_kernels_probe); T_FLOAT8… → FLOAT_TYPE_*;
+     TessSpillPosition без segment; коды tess_spill_columns_layout — TessSpillColumnsField и константы Rust,
+     C-тест сверяет их со встроенными читателями spill.h.
+  42 набора SQL прошли (release и debug), тесты Rust прошли, проверка установленного набора прошла. Пункт 4.31
+  выполнен.
   Порядок (решение 2026-09-20): после 4.14 выполняются остаток 6.3 (ленивая проекция), затем 3.9 (AVX2), 4.15 и раздел 5 —
   чтобы узлы раздела 5 мерялись на реальном конвейере, и их ядра писались сразу для обеих архитектур. Уточнения
   (2026-09-20): после профиля 4.16 вперёд вытянуты 6.1 и ленивый pack (4.17), а затем, по второму замеру win, и 6.2 — всё
