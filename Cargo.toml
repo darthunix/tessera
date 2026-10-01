@@ -14,6 +14,8 @@ resolver = "3"
 # The C modules report the same version (TESS_VERSION, include/tessera/abi.h).
 version = "0.1.0"
 edition = "2024"
+# The toolchain of rust-toolchain.toml: the one compiler the repository builds
+# and tests with, so no older one is promised.
 rust-version = "1.98.1"
 license = "PostgreSQL"
 publish = false
