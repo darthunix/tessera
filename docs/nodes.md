@@ -2608,9 +2608,18 @@ core's Gathers or Gather Merges over every parallel-aware plan node, for
 the rescan parameter it adds, and knows no custom scan that gathers. So
 `TessGather`'s plan holds back the flag of the parallel-aware nodes under
 it, and the module's `planner_hook` gives it back once `standard_planner`
-is done: the flag gets a node its shared-memory callbacks, and the rescan
-parameter the node does without, rescanning its child and reinitializing
-the shared memory itself.
+is done: the flag gets a node its shared-memory callbacks. The rescan
+parameter comes from the node instead: its plan takes one
+(`assign_special_exec_param`), and the hook, after `standard_planner`,
+adds it to the external and all parameters of every node between the
+gather and the parallel-aware nodes below it, as `finalize_plan` does
+under a core's Gather. A rescan of the gather passes its changed
+parameters (an initplan's) and that one to the leader's own part, which
+rescans at its first fetch, after the launch set the workers' shared state
+up again: without it the leader's part kept its rows of the last scan (a
+sort its share, a shared table its build), while the workers scanned
+anew, and a subquery run again for each outer row gave wrong results
+(plan 4.32).
 
 A `GatherMergePath` over a Tessera path becomes `TessGatherMerge` over
 `TessSend` the same way when every path key is one `TessSort` takes: a
@@ -2668,7 +2677,7 @@ leader reads the whole child. The shutdown detaches the queues first, so
 that a worker blocked on a full one stops (a limit above met), then
 finishes the workers and
 moves their counters into the plan's nodes for `EXPLAIN ANALYZE`; a
-rescan shuts them down and rescans the child, and the next fetch launches
+rescan shuts them down and marks the child to rescan (above), and the next fetch launches
 anew. A bound set by a limit above (`set_tuple_bound`) goes to the
 leader's child and, through TessSend's shared memory, to every worker's,
 so that a sort below keeps a top-N heap in each participant; the core's

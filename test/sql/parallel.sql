@@ -528,6 +528,26 @@ RESET enable_seqscan;
 RESET enable_indexscan;
 RESET enable_indexonlyscan;
 DROP TABLE parallel_bitmap;
+-- A gather run again, in a subquery that runs once for each x: the
+-- leader's own part rescans with the workers, which share the scans anew,
+-- as under the core's Gather and its rescan parameter, and an initplan's
+-- value that changed with x reaches it. Before, a shared table built for
+-- the first x stayed (0 rows past it), and a sort kept the leader's share
+-- of the first scan (the sum of its rows twice).
+CREATE TABLE parallel_rescan AS SELECT g AS k, g % 1000 AS v FROM generate_series(1, 200000) AS g;
+CREATE TABLE parallel_rescan_keys AS SELECT g AS k, g % 7 AS w FROM generate_series(1, 100000) AS g;
+ANALYZE parallel_rescan;
+ANALYZE parallel_rescan_keys;
+EXPLAIN (COSTS OFF)
+SELECT x, (SELECT count(*) FROM parallel_rescan AS b JOIN parallel_rescan_keys AS m ON b.k = m.k WHERE m.w = (SELECT x)) FROM generate_series(1, 4) AS x;
+SELECT parallel_same($$SELECT x, (SELECT count(*) FROM parallel_rescan AS b JOIN parallel_rescan_keys AS m ON b.k = m.k WHERE m.w = (SELECT x)) FROM generate_series(1, 4) AS x$$);
+EXPLAIN (COSTS OFF)
+SELECT x, (SELECT sum(k) FROM (SELECT k FROM parallel_rescan WHERE v < (SELECT x * 100) ORDER BY k DESC OFFSET 10) AS q) FROM generate_series(1, 4) AS x;
+SELECT parallel_same($$SELECT x, (SELECT sum(k) FROM (SELECT k FROM parallel_rescan WHERE v < (SELECT x * 100) ORDER BY k DESC OFFSET 10) AS q) FROM generate_series(1, 4) AS x$$);
+EXPLAIN (COSTS OFF)
+SELECT x, (SELECT sum(k) + x FROM (SELECT k FROM parallel_rescan ORDER BY k DESC OFFSET 10) AS q) FROM generate_series(1, 6) AS x;
+SELECT parallel_same($$SELECT x, (SELECT sum(k) + x FROM (SELECT k FROM parallel_rescan ORDER BY k DESC OFFSET 10) AS q) FROM generate_series(1, 6) AS x$$);
+DROP TABLE parallel_rescan, parallel_rescan_keys;
 -- The switch off.
 SET tessera.enable = off;
 EXPLAIN (COSTS OFF) SELECT a, b FROM parallel_t WHERE a > 4990;

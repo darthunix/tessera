@@ -175,6 +175,8 @@ typedef struct TessGatherState
 	TessSendState  *send;
 	bool		merge;
 	int			num_workers;
+	/* The parameter that tells the leader's own part to rescan. */
+	int			rescan_param;
 	int64		bound;
 	TessOutput *output;
 	int			ncolumns;
@@ -769,6 +771,7 @@ gather_begin(CustomScanState *css, EState *estate, int eflags)
 	reader = tess_plan_reader_create((List *) info.node_data, TESS_GATHER_DATA,
 									 TESS_GATHER_DATA_VERSION);
 	state->num_workers = tess_plan_read_int(reader, "workers");
+	state->rescan_param = tess_plan_read_int(reader, "rescan_param");
 	tess_plan_reader_finish(reader);
 	send = ExecInitNode(linitial(cscan->custom_plans), estate, eflags);
 	css->custom_ps = list_make1(send);
@@ -823,7 +826,8 @@ gather_launch(TessGatherState *state)
 	if (state->num_workers > 0 && estate->es_use_parallel_mode)
 	{
 		ParallelContext *pcxt;
-		Bitmapset  *params = bms_copy(send->plan->extParam);
+		Bitmapset  *params = bms_del_member(bms_copy(send->plan->extParam),
+											state->rescan_param);
 
 		/* The initplans' values below go to the workers, as a Gather's initParam. */
 		state->send->bound = state->bound;
@@ -1428,7 +1432,20 @@ gather_rescan(CustomScanState *css)
 	gather_shutdown_workers(state);
 	state->initialized = false;
 	state->from_local = false;
-	ExecReScan(state->send->child);
+	/*
+	 * As ExecReScanGather: the leader's own part may give other rows next
+	 * time, the workers sharing the scans anew, and a changed parameter (an
+	 * initplan's) reaches it; it takes both in its chgParam and rescans at
+	 * its first fetch, after the launch set the workers' shared state up
+	 * again (ExecParallelReinitialize), not before.
+	 */
+	if (css->ss.ps.chgParam != NULL)
+		UpdateChangedParamSet(state->send->child, css->ss.ps.chgParam);
+	if (state->rescan_param >= 0)
+		state->send->child->chgParam = bms_add_member(state->send->child->chgParam,
+													  state->rescan_param);
+	if (state->send->child->chgParam == NULL)
+		ExecReScan(state->send->child);
 	tess_input_rescan(state->local);
 }
 

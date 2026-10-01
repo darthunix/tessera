@@ -29,7 +29,7 @@
 #define TESS_SORT_DATA "tessera.sort"
 #define TESS_SORT_DATA_VERSION 2
 #define TESS_GATHER_DATA "tessera.gather"
-#define TESS_GATHER_DATA_VERSION 1
+#define TESS_GATHER_DATA_VERSION 2
 #define TESS_SEND_DATA "tessera.send"
 #define TESS_SEND_DATA_VERSION 2
 #define TESS_APPEND_DATA "tessera.append"

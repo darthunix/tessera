@@ -4,6 +4,7 @@
 #include "nodes/nodeFuncs.h"
 #include "optimizer/cost.h"
 #include "optimizer/optimizer.h"
+#include "optimizer/paramassign.h"
 #include "optimizer/pathnode.h"
 #include "optimizer/planner.h"
 #include "storage/proc.h"
@@ -526,6 +527,116 @@ hold_parallel_aware(Plan *plan)
 	}
 }
 
+/*
+ * Whether plan or a node below it is parallel-aware; if so, plan takes
+ * param among its external and all parameters, as finalize_plan gives the
+ * nodes between a Gather and the parallel-aware nodes below it the
+ * Gather's rescan_param, so that a rescan of the gather reaches them.
+ */
+static bool
+take_rescan_param(Plan *plan, int param)
+{
+	bool		aware;
+	ListCell   *lc;
+
+	if (plan == NULL)
+		return false;
+	check_stack_depth();
+	aware = plan->parallel_aware;
+	aware |= take_rescan_param(plan->lefttree, param);
+	aware |= take_rescan_param(plan->righttree, param);
+	switch (nodeTag(plan))
+	{
+		case T_CustomScan:
+			foreach(lc, ((CustomScan *) plan)->custom_plans)
+				aware |= take_rescan_param(lfirst(lc), param);
+			break;
+		case T_Append:
+			foreach(lc, ((Append *) plan)->appendplans)
+				aware |= take_rescan_param(lfirst(lc), param);
+			break;
+		case T_MergeAppend:
+			foreach(lc, ((MergeAppend *) plan)->mergeplans)
+				aware |= take_rescan_param(lfirst(lc), param);
+			break;
+		case T_BitmapAnd:
+			foreach(lc, ((BitmapAnd *) plan)->bitmapplans)
+				aware |= take_rescan_param(lfirst(lc), param);
+			break;
+		case T_BitmapOr:
+			foreach(lc, ((BitmapOr *) plan)->bitmapplans)
+				aware |= take_rescan_param(lfirst(lc), param);
+			break;
+		case T_SubqueryScan:
+			aware |= take_rescan_param(((SubqueryScan *) plan)->subplan, param);
+			break;
+		default:
+			break;
+	}
+	if (aware)
+	{
+		plan->extParam = bms_add_member(plan->extParam, param);
+		plan->allParam = bms_add_member(plan->allParam, param);
+	}
+	return aware;
+}
+
+/*
+ * Every TessGather and TessGatherMerge at or below plan gives its rescan
+ * parameter to the nodes below it, as finalize_plan would have, had it
+ * known the node for a gather: it saw no parallel-aware node under it
+ * (hold_parallel_aware).
+ */
+static void
+give_rescan_params(Plan *plan)
+{
+	ListCell   *lc;
+
+	if (plan == NULL)
+		return;
+	check_stack_depth();
+	if (IsA(plan, CustomScan) &&
+		(((CustomScan *) plan)->methods == &tess_gather_scan_methods ||
+		 ((CustomScan *) plan)->methods == &tess_gather_merge_scan_methods))
+	{
+		CustomScan *cscan = (CustomScan *) plan;
+		TessPlanInfo info = TESS_STRUCT_INITIALIZER(TessPlanInfo);
+		TessPlanReader *reader;
+		int			param;
+
+		tess_plan_get_info(cscan, &info);
+		reader = tess_plan_reader_create((List *) info.node_data, TESS_GATHER_DATA,
+										 TESS_GATHER_DATA_VERSION);
+		(void) tess_plan_read_int(reader, "workers");
+		param = tess_plan_read_int(reader, "rescan_param");
+		tess_plan_reader_finish(reader);
+		take_rescan_param(linitial(cscan->custom_plans), param);
+		return;
+	}
+	give_rescan_params(plan->lefttree);
+	give_rescan_params(plan->righttree);
+	switch (nodeTag(plan))
+	{
+		case T_CustomScan:
+			foreach(lc, ((CustomScan *) plan)->custom_plans)
+				give_rescan_params(lfirst(lc));
+			break;
+		case T_Append:
+			foreach(lc, ((Append *) plan)->appendplans)
+				give_rescan_params(lfirst(lc));
+			break;
+		case T_MergeAppend:
+			foreach(lc, ((MergeAppend *) plan)->mergeplans)
+				give_rescan_params(lfirst(lc));
+			break;
+		case T_SubqueryScan:
+			give_rescan_params(((SubqueryScan *) plan)->subplan);
+			break;
+		default:
+			break;
+	}
+}
+
 /* The planning done, the flags held back come back; a nested planning keeps its own. */
 static PlannedStmt *
 gather_planner(Query *parse, const char *query_string, int cursorOptions,
@@ -561,6 +672,10 @@ gather_planner(Query *parse, const char *query_string, int cursorOptions,
 		plan->parallel_aware = true;
 	list_free(held_parallel_aware);
 	held_parallel_aware = outer;
+	/* The statement's plan and its subplans: initplans and subplans alike. */
+	give_rescan_params(result->planTree);
+	foreach_ptr(Plan, subplan, result->subplans)
+		give_rescan_params(subplan);
 	return result;
 }
 
@@ -578,6 +693,8 @@ gather_plan_of(PlannerInfo *root, CustomPath *best_path, List *tlist, List *cust
 	root->glob->parallelModeNeeded = true;
 	writer = tess_plan_writer_create(TESS_GATHER_DATA, TESS_GATHER_DATA_VERSION);
 	tess_plan_write_int(writer, "workers", intVal(linitial((List *) info.node_data)));
+	/* The parameter that tells the leader's own part to rescan, a Gather's rescan_param. */
+	tess_plan_write_int(writer, "rescan_param", assign_special_exec_param(root));
 	config.methods = methods;
 	config.layout_policy = TESS_LAYOUT_DENSE;
 	config.scanrelid = 0;

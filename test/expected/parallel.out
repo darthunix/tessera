@@ -1706,6 +1706,95 @@ RESET enable_seqscan;
 RESET enable_indexscan;
 RESET enable_indexonlyscan;
 DROP TABLE parallel_bitmap;
+-- A gather run again, in a subquery that runs once for each x: the
+-- leader's own part rescans with the workers, which share the scans anew,
+-- as under the core's Gather and its rescan parameter, and an initplan's
+-- value that changed with x reaches it. Before, a shared table built for
+-- the first x stayed (0 rows past it), and a sort kept the leader's share
+-- of the first scan (the sum of its rows twice).
+CREATE TABLE parallel_rescan AS SELECT g AS k, g % 1000 AS v FROM generate_series(1, 200000) AS g;
+CREATE TABLE parallel_rescan_keys AS SELECT g AS k, g % 7 AS w FROM generate_series(1, 100000) AS g;
+ANALYZE parallel_rescan;
+ANALYZE parallel_rescan_keys;
+EXPLAIN (COSTS OFF)
+SELECT x, (SELECT count(*) FROM parallel_rescan AS b JOIN parallel_rescan_keys AS m ON b.k = m.k WHERE m.w = (SELECT x)) FROM generate_series(1, 4) AS x;
+                                                QUERY PLAN                                                 
+-----------------------------------------------------------------------------------------------------------
+ Function Scan on generate_series x
+   SubPlan expr_1
+     ->  Custom Scan (TessAgg)
+           Partial Mode: Finalize
+           InitPlan expr_2
+             ->  Result
+           ->  Custom Scan (TessGather)
+                 Workers Planned: 2
+                 ->  Parallel Custom Scan (TessSend)
+                       ->  Parallel Custom Scan (TessAgg)
+                             Partial Mode: Partial
+                             ->  Parallel Custom Scan (TessHashJoin)
+                                   Hash Cond: (b.k = m.k)
+                                   Shared Table: true
+                                   ->  Parallel Custom Scan (TessHeapScan) on parallel_rescan b
+                                   ->  Parallel Custom Scan (TessFilter) on parallel_rescan_keys m
+                                         Batch Filter: (m.w = (InitPlan expr_2).col1)
+                                         ->  Parallel Custom Scan (TessHeapScan) on parallel_rescan_keys m
+(18 rows)
+
+SELECT parallel_same($$SELECT x, (SELECT count(*) FROM parallel_rescan AS b JOIN parallel_rescan_keys AS m ON b.k = m.k WHERE m.w = (SELECT x)) FROM generate_series(1, 4) AS x$$);
+                   parallel_same                   
+---------------------------------------------------
+ {"(1,14286)","(2,14286)","(3,14286)","(4,14286)"}
+(1 row)
+
+EXPLAIN (COSTS OFF)
+SELECT x, (SELECT sum(k) FROM (SELECT k FROM parallel_rescan WHERE v < (SELECT x * 100) ORDER BY k DESC OFFSET 10) AS q) FROM generate_series(1, 4) AS x;
+                                             QUERY PLAN                                             
+----------------------------------------------------------------------------------------------------
+ Function Scan on generate_series x
+   SubPlan expr_1
+     ->  Aggregate
+           ->  Limit
+                 InitPlan expr_2
+                   ->  Result
+                 ->  Custom Scan (TessGatherMerge)
+                       Workers Planned: 2
+                       ->  Parallel Custom Scan (TessSend)
+                             ->  Parallel Custom Scan (TessSort)
+                                   Sort Key: parallel_rescan.k DESC
+                                   ->  Parallel Custom Scan (TessFilter) on parallel_rescan
+                                         Batch Filter: (parallel_rescan.v < (InitPlan expr_2).col1)
+                                         ->  Parallel Custom Scan (TessHeapScan) on parallel_rescan
+(14 rows)
+
+SELECT parallel_same($$SELECT x, (SELECT sum(k) FROM (SELECT k FROM parallel_rescan WHERE v < (SELECT x * 100) ORDER BY k DESC OFFSET 10) AS q) FROM generate_series(1, 4) AS x$$);
+                             parallel_same                             
+-----------------------------------------------------------------------
+ {"(1,1989198145)","(2,3982187245)","(3,5977176345)","(4,7974165445)"}
+(1 row)
+
+EXPLAIN (COSTS OFF)
+SELECT x, (SELECT sum(k) + x FROM (SELECT k FROM parallel_rescan ORDER BY k DESC OFFSET 10) AS q) FROM generate_series(1, 6) AS x;
+                                          QUERY PLAN                                          
+----------------------------------------------------------------------------------------------
+ Function Scan on generate_series x
+   SubPlan expr_1
+     ->  Aggregate
+           ->  Limit
+                 ->  Custom Scan (TessGatherMerge)
+                       Workers Planned: 2
+                       ->  Parallel Custom Scan (TessSend)
+                             ->  Parallel Custom Scan (TessSort)
+                                   Sort Key: parallel_rescan.k DESC
+                                   ->  Parallel Custom Scan (TessHeapScan) on parallel_rescan
+(10 rows)
+
+SELECT parallel_same($$SELECT x, (SELECT sum(k) + x FROM (SELECT k FROM parallel_rescan ORDER BY k DESC OFFSET 10) AS q) FROM generate_series(1, 6) AS x$$);
+                                                 parallel_same                                                 
+---------------------------------------------------------------------------------------------------------------
+ {"(1,19998100046)","(2,19998100047)","(3,19998100048)","(4,19998100049)","(5,19998100050)","(6,19998100051)"}
+(1 row)
+
+DROP TABLE parallel_rescan, parallel_rescan_keys;
 -- The switch off.
 SET tessera.enable = off;
 EXPLAIN (COSTS OFF) SELECT a, b FROM parallel_t WHERE a > 4990;
