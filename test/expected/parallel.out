@@ -252,7 +252,7 @@ EXPLAIN (COSTS OFF) SELECT count(*) FROM (SELECT a FROM parallel_t WHERE a > 100
  Custom Scan (TessAgg)
    ->  Custom Scan (TessPack)
          ->  Subquery Scan on s
-               ->  Limit
+               ->  Custom Scan (TessLimit)
                      ->  Custom Scan (TessGather)
                            Workers Planned: 2
                            ->  Parallel Custom Scan (TessSend)
@@ -284,7 +284,7 @@ RIGHT JOIN (VALUES (1), (2)) AS v(x) ON true;
    ->  Custom Scan (TessAgg)
          ->  Custom Scan (TessPack)
                ->  Subquery Scan on l
-                     ->  Limit
+                     ->  Custom Scan (TessLimit)
                            ->  Custom Scan (TessGather)
                                  Workers Planned: 2
                                  ->  Parallel Custom Scan (TessSend)
@@ -1748,23 +1748,24 @@ SELECT parallel_same($$SELECT x, (SELECT count(*) FROM parallel_rescan AS b JOIN
 
 EXPLAIN (COSTS OFF)
 SELECT x, (SELECT sum(k) FROM (SELECT k FROM parallel_rescan WHERE v < (SELECT x * 100) ORDER BY k DESC OFFSET 10) AS q) FROM generate_series(1, 4) AS x;
-                                             QUERY PLAN                                             
-----------------------------------------------------------------------------------------------------
+                                                QUERY PLAN                                                
+----------------------------------------------------------------------------------------------------------
  Function Scan on generate_series x
    SubPlan expr_1
-     ->  Aggregate
-           ->  Limit
-                 InitPlan expr_2
-                   ->  Result
-                 ->  Custom Scan (TessGatherMerge)
-                       Workers Planned: 2
-                       ->  Parallel Custom Scan (TessSend)
-                             ->  Parallel Custom Scan (TessSort)
-                                   Sort Key: parallel_rescan.k DESC
-                                   ->  Parallel Custom Scan (TessFilter) on parallel_rescan
-                                         Batch Filter: (parallel_rescan.v < (InitPlan expr_2).col1)
-                                         ->  Parallel Custom Scan (TessHeapScan) on parallel_rescan
-(14 rows)
+     ->  Custom Scan (TessAgg)
+           ->  Custom Scan (TessPack)
+                 ->  Custom Scan (TessLimit)
+                       InitPlan expr_2
+                         ->  Result
+                       ->  Custom Scan (TessGatherMerge)
+                             Workers Planned: 2
+                             ->  Parallel Custom Scan (TessSend)
+                                   ->  Parallel Custom Scan (TessSort)
+                                         Sort Key: parallel_rescan.k DESC
+                                         ->  Parallel Custom Scan (TessFilter) on parallel_rescan
+                                               Batch Filter: (parallel_rescan.v < (InitPlan expr_2).col1)
+                                               ->  Parallel Custom Scan (TessHeapScan) on parallel_rescan
+(15 rows)
 
 SELECT parallel_same($$SELECT x, (SELECT sum(k) FROM (SELECT k FROM parallel_rescan WHERE v < (SELECT x * 100) ORDER BY k DESC OFFSET 10) AS q) FROM generate_series(1, 4) AS x$$);
                              parallel_same                             
@@ -1774,19 +1775,20 @@ SELECT parallel_same($$SELECT x, (SELECT sum(k) FROM (SELECT k FROM parallel_res
 
 EXPLAIN (COSTS OFF)
 SELECT x, (SELECT sum(k) + x FROM (SELECT k FROM parallel_rescan ORDER BY k DESC OFFSET 10) AS q) FROM generate_series(1, 6) AS x;
-                                          QUERY PLAN                                          
-----------------------------------------------------------------------------------------------
+                                             QUERY PLAN                                             
+----------------------------------------------------------------------------------------------------
  Function Scan on generate_series x
    SubPlan expr_1
-     ->  Aggregate
-           ->  Limit
-                 ->  Custom Scan (TessGatherMerge)
-                       Workers Planned: 2
-                       ->  Parallel Custom Scan (TessSend)
-                             ->  Parallel Custom Scan (TessSort)
-                                   Sort Key: parallel_rescan.k DESC
-                                   ->  Parallel Custom Scan (TessHeapScan) on parallel_rescan
-(10 rows)
+     ->  Custom Scan (TessAgg)
+           ->  Custom Scan (TessPack)
+                 ->  Custom Scan (TessLimit)
+                       ->  Custom Scan (TessGatherMerge)
+                             Workers Planned: 2
+                             ->  Parallel Custom Scan (TessSend)
+                                   ->  Parallel Custom Scan (TessSort)
+                                         Sort Key: parallel_rescan.k DESC
+                                         ->  Parallel Custom Scan (TessHeapScan) on parallel_rescan
+(11 rows)
 
 SELECT parallel_same($$SELECT x, (SELECT sum(k) + x FROM (SELECT k FROM parallel_rescan ORDER BY k DESC OFFSET 10) AS q) FROM generate_series(1, 6) AS x$$);
                                                  parallel_same                                                 

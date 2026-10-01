@@ -1,6 +1,5 @@
 CREATE EXTENSION tessera;
 LOAD 'tessera_nodes';
-LOAD 'tessera_limit';
 
 -- a: NULL in every 7th row and each value in several rows; b: an int8
 -- past the int4 range; c: text; d: unique, in no order of the rows.

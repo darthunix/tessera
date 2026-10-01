@@ -1,5 +1,4 @@
 CREATE EXTENSION tessera;
-LOAD 'tessera_limit';
 CREATE TABLE limit_t (a int, b text);
 INSERT INTO limit_t
 SELECT i, CASE WHEN i % 10 = 0 THEN NULL ELSE 'row' || i END

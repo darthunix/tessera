@@ -5,7 +5,7 @@
 
 #include "tessera/runtime.h"
 
-#include "internal.h"
+#include "limit.h"
 
 static create_upper_paths_hook_type previous_create_upper_paths_hook = NULL;
 
@@ -16,6 +16,12 @@ static Plan *limit_plan(PlannerInfo *root, RelOptInfo *rel,
 static const CustomPathMethods limit_path_methods = {
 	.CustomName = "TessLimit",
 	.PlanCustomPath = limit_plan,
+};
+
+/* The node's kind; tessera.enable turns it off with every other batch node. */
+const TessNode tess_limit_node = {
+	TESS_ABI_INITIALIZER(TESS_NODE_ABI_VERSION, TessNode),
+	.name = TESS_LIMIT_NODE_NAME,
 };
 
 const CustomScanMethods tess_limit_scan_methods = {

@@ -108,13 +108,13 @@ The recommended arrangement for a running installation is to preload the
 bridge and the modules into the server from `postgresql.conf`:
 
 ```
-shared_preload_libraries = 'tessera, tessera_nodes, tessera_kernels, tessera_limit'
+shared_preload_libraries = 'tessera, tessera_nodes, tessera_kernels'
 ```
 
 The bridge comes first: the initialization of the node and kernel modules
 requires it, and the list is loaded in order; a module loaded without it
 fails with the hint to load `tessera` first (`LOAD 'tessera'`, or first in
-the list). `tessera_limit`, the example node, is optional. The postmaster loads them at its start, and every
+the list). The postmaster loads them at its start, and every
 backend, forked from it, has the bridge, the registries and the modules
 from its start. That includes the workers of a parallel query, which is why
 this is the recommendation: a worker loads every library its leader has
@@ -126,7 +126,7 @@ after the modules are installed again, backends forked from a running
 postmaster still run the code it loaded.
 
 ```
-session_preload_libraries = 'tessera, tessera_nodes, tessera_kernels, tessera_limit'
+session_preload_libraries = 'tessera, tessera_nodes, tessera_kernels'
 ```
 
 works as well, in the same order, and suits development: a new session

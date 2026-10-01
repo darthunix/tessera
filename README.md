@@ -54,11 +54,10 @@ through Cargo with the toolchain the repository selects.
    preload line to your cluster's `postgresql.conf` and restart it:
 
    ```
-   shared_preload_libraries = 'tessera, tessera_nodes, tessera_kernels, tessera_limit'
+   shared_preload_libraries = 'tessera, tessera_nodes, tessera_kernels'
    ```
 
-   (the bridge first, since the modules need it; `tessera_limit` is the
-   example node and optional; restart the server after installing the
+   (the bridge first, since the modules need it; restart the server after installing the
    modules again, see [docs/bridge.md](docs/bridge.md) for the
    `session_preload_libraries` alternative), or let the benchmark runner
    create a temporary cluster on port 5433 with that line and three tables

@@ -6,6 +6,7 @@
 #include "tessera/runtime.h"
 
 #include "internal.h"
+#include "limit.h"
 
 PG_MODULE_MAGIC;
 
@@ -52,6 +53,9 @@ bool		tess_batch_gather = true;
  * set_join_pathlist hook, the sort node to the ordered stage through the
  * create_upper_paths hook. The append node stands in for an Append under
  * a batch parent, through tess_batch_input_path, and needs no hook either.
+ * The limit node takes the final relation's limits through the
+ * create_upper_paths hook: the core's ExecSetTupleBound reaches no custom
+ * scan, so a sort below gets its bound for a top-N heap from it alone.
  */
 void
 _PG_init(void)
@@ -84,6 +88,13 @@ _PG_init(void)
 	tess_gather_planner_init();
 	RegisterCustomScanMethods(&tess_append_scan_methods);
 	api->nodes->add(&tess_append_node);
+	/*
+	 * The limit last: its hook runs after the others' and takes the final
+	 * relation's limits over the paths they made (the scan methods it
+	 * registers itself).
+	 */
+	api->nodes->add(&tess_limit_node);
+	tess_limit_planner_init();
 	DefineCustomRealVariable("tessera.join_bloom_ratio",
 							 "Share of probe rows with a pair below which a hash join builds a Bloom filter.",
 							 "After its first probe rows a join builds a Bloom filter of its keys when "

@@ -1,9 +1,11 @@
 # Writing a batch node
 
 This guide walks through a batch node from the planner hook to the
-regression test, using `TessLimit` (`examples/limit/`) as the running
-example: a node built against the public headers and the runtime library
-alone, as a node of another extension would be. The rules every node keeps
+regression test, using `TessLimit` (`nodes/limit.c`,
+`nodes/limit_planner.c`) as the running example: a node written against
+the public headers and the runtime library alone, as a node of another
+extension would be; `make installcheck` builds its files into a module of
+their own outside the tree (`test/installed`), as such an extension would. The rules every node keeps
 are in [node.md](node.md); the helpers are described in
 [runtime.md](runtime.md); the bridge's contract in [bridge.md](bridge.md).
 
@@ -42,7 +44,10 @@ declarations stand at the top of a file or in its header.
 
 The module registers its kind of node with the bridge and its scan methods
 with PostgreSQL, and installs its planner hook, calling the previous hook
-first and checking `tessera.enable` before adding paths:
+first and checking `tessera.enable` before adding paths. A module of
+another extension does it in its `_PG_init`, as below
+(`test/installed/limit_module.c` does it for TessLimit's files built
+outside the tree); in this tree `nodes/module.c` does it for every node:
 
 ```c
 const TessNode tess_limit_node = {

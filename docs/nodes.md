@@ -95,12 +95,18 @@ Constants that repeat the core's (half of `cpu_tuple_cost` a row an
 sizes, a dictionary's fill, the Bloom filter's sample, 64 rows a batch)
 stay in the code.
 
-## Independent example: TessLimit
+## TessLimit
 
-`examples/limit/` is a node built outside this module, against the public
-headers and the runtime library alone, as a node of another extension
-would be: the module `tessera_limit` registers the kind `tessera.limit`,
-installs its own `create_upper_paths` hook and replaces the core limit path
+`TessLimit` (`nodes/limit.c`, its planner `nodes/limit_planner.c`) is
+written against the public headers and the runtime library alone, as a
+node of another extension would be, and `make installcheck` builds its
+files into a module of their own outside the tree (`test/installed`); it
+was that module, `tessera_limit`, until plan 4.32 moved it into this one:
+a sort below gets its bound for a top-N heap from it alone, since the
+core's `ExecSetTupleBound` reaches no custom scan, so a missing module
+made `ORDER BY ... LIMIT` sort every row. It registers the kind
+`tessera.limit`, installs its own `create_upper_paths` hook, the last of
+the module's, and replaces the core limit path
 in the final relation with a batch limit above a batch input over the
 limit's child, so an ordinary scan gets a pack node below. Over any other
 row-wise child (a sort, an aggregate, a join) the core limit stays: a pack
@@ -108,9 +114,7 @@ there would copy every row the limit reads. It stands on
 the unary helper, removes the offset's rows and the rows past the count,
 stops the input once the count is reached, and passes the tuple bound to
 the child, through the pack node when there is one.
-`WITH TIES` and parameterized inputs stay with the core node. Load it
-after the bridge, and after the nodes module when ordinary children should
-be packed; without a pack node it adds no paths. The
+`WITH TIES` and parameterized inputs stay with the core node. The
 [node-writing guide](writing-a-node.md) walks through it.
 
 ## TessHeapScan

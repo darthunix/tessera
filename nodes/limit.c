@@ -6,7 +6,7 @@
 
 #include "tessera/runtime.h"
 
-#include "internal.h"
+#include "limit.h"
 
 /*
  * TessLimit stands on the unary helper: it removes the offset's rows and

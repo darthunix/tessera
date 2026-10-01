@@ -1,6 +1,5 @@
 CREATE EXTENSION tessera;
 LOAD 'tessera_nodes';
-LOAD 'tessera_limit';
 LOAD 'tessera_kernels';
 -- The same result with Tessera on and off, as text.
 CREATE FUNCTION project_same(query text) RETURNS text

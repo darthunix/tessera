@@ -1,20 +1,21 @@
 # A module outside the tree builds against the installed Tessera alone: every
 # installed header compiles by itself, with the include path the
-# documentation gives, and the TessLimit example builds from a copy of its
-# sources against the installed headers and runtime library. Run after
-# make install.
+# documentation gives, and TessLimit's sources (nodes/limit*.c), which take
+# the public headers and the runtime library alone, build into a module of
+# their own from copies against the installed headers and runtime library.
+# Run after make install.
 PG_CONFIG ?= pg_config
 PGXS := $(shell $(PG_CONFIG) --pgxs)
 include $(PGXS)
 
 TESSERA_INCLUDE = $(includedir_server)/extension
 INSTALLED_HEADERS = $(sort $(wildcard $(TESSERA_INCLUDE)/tessera/*.h))
-EXAMPLE = $(srcdir)/../../examples/limit
+NODES = $(srcdir)/../../nodes
 WORK = installed-work
 
-.PHONY: installcheck installcheck-headers installcheck-example clean-installed
+.PHONY: installcheck installcheck-headers installcheck-limit clean-installed
 
-installcheck: installcheck-headers installcheck-example
+installcheck: installcheck-headers installcheck-limit
 
 installcheck-headers:
 	@test -n "$(INSTALLED_HEADERS)" || { echo "no Tessera headers in $(TESSERA_INCLUDE)/tessera"; exit 1; }
@@ -26,10 +27,16 @@ installcheck-headers:
 	done
 	@echo "$(words $(INSTALLED_HEADERS)) installed headers compile alone"
 
-installcheck-example:
+installcheck-limit:
 	rm -rf $(WORK) && mkdir $(WORK)
-	cp $(EXAMPLE)/Makefile $(EXAMPLE)/*.c $(EXAMPLE)/*.h $(WORK)/
-	$(MAKE) -C $(WORK) PG_CONFIG="$(PG_CONFIG)" TESSERA_INSTALLED=1
+	cp $(NODES)/limit.c $(NODES)/limit_planner.c $(NODES)/limit.h $(srcdir)/limit_module.c $(WORK)/
+	printf '%s\n' 'MODULE_big = tessera_limit_check' \
+		'OBJS = limit_module.o limit.o limit_planner.o' \
+		'PG_CPPFLAGS = -I$$(includedir_server)/extension' \
+		'SHLIB_LINK += $$(pkglibdir)/libtessera_runtime.a' \
+		'PGXS := $$(shell $$(PG_CONFIG) --pgxs)' \
+		'include $$(PGXS)' > $(WORK)/Makefile
+	$(MAKE) -C $(WORK) PG_CONFIG="$(PG_CONFIG)"
 	rm -rf $(WORK)
 
 clean-installed:

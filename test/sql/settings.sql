@@ -5,7 +5,6 @@ SELECT current_setting('shared_preload_libraries') !~ 'tessera'
 -- A module without the bridge: the bridge must be loaded first, and the
 -- failed load leaves nothing behind, so it can be loaded again after it.
 LOAD 'tessera_nodes';
-LOAD 'tessera_limit';
 LOAD 'tessera_kernels';
 -- Settings given before the modules that define them keep their values:
 -- the prefix is reserved only once tessera_nodes has defined every
@@ -20,7 +19,6 @@ SHOW tessera.gather_tuple_share;
 SHOW tessera.scan_cost_factor;
 -- The prefix is reserved now.
 SET tessera.misspelt_again = 1;
-LOAD 'tessera_limit';
 LOAD 'tessera_kernels';
 -- Every setting changes plans: EXPLAIN (SETTINGS) lists the ones not at
 -- their defaults, tessera.enable among them.

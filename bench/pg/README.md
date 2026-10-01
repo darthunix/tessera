@@ -199,8 +199,8 @@ matches (the plans are still written for every case), and `REPETITIONS`
 the runs of each case in each mode, 31 by default: a development A/B times
 the cases a change touches, fewer times, so that a run takes minutes at
 most. `PG_CONFIG` selects the PostgreSQL build; `PGPORT` the port. The cluster's
-`postgresql.conf` preloads `tessera, tessera_nodes, tessera_kernels,
-tessera_limit` into the postmaster (`shared_preload_libraries`, so that
+`postgresql.conf` preloads `tessera, tessera_nodes, tessera_kernels`
+into the postmaster (`shared_preload_libraries`, so that
 parallel workers do not load them again in every query) and sets
 `shared_buffers` to `SHARED_BUFFERS`, 2GB by default; `measure` restarts
 the server before it runs, so that the modules installed last are the ones

@@ -12,9 +12,6 @@ SELECT current_setting('shared_preload_libraries') !~ 'tessera'
 LOAD 'tessera_nodes';
 ERROR:  Tessera bridge is not loaded
 HINT:  Load the tessera library first: LOAD 'tessera', or list tessera first in shared_preload_libraries or session_preload_libraries.
-LOAD 'tessera_limit';
-ERROR:  Tessera bridge is not loaded
-HINT:  Load the tessera library first: LOAD 'tessera', or list tessera first in shared_preload_libraries or session_preload_libraries.
 LOAD 'tessera_kernels';
 ERROR:  Tessera bridge must be loaded before tessera_kernels
 HINT:  Load the tessera library first: LOAD 'tessera', or list tessera first in shared_preload_libraries or session_preload_libraries.
@@ -50,7 +47,6 @@ SHOW tessera.scan_cost_factor;
 SET tessera.misspelt_again = 1;
 ERROR:  invalid configuration parameter name "tessera.misspelt_again"
 DETAIL:  "tessera" is a reserved prefix.
-LOAD 'tessera_limit';
 LOAD 'tessera_kernels';
 -- Every setting changes plans: EXPLAIN (SETTINGS) lists the ones not at
 -- their defaults, tessera.enable among them.

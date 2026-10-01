@@ -1,5 +1,5 @@
 MODULE_big = tessera_nodes
-OBJS = agg.o agg_planner.o agg_spill.o append.o filter.o gather.o gather_planner.o hashjoin.o hashjoin_shared.o hashjoin_spill.o heapscan.o join_planner.o module.o pack.o scan_planner.o sort.o sort_planner.o
+OBJS = agg.o agg_planner.o agg_spill.o append.o filter.o gather.o gather_planner.o hashjoin.o hashjoin_shared.o hashjoin_spill.o heapscan.o join_planner.o limit.o limit_planner.o module.o pack.o scan_planner.o sort.o sort_planner.o
 PG_CPPFLAGS = -I$(srcdir)/../include
 
 PG_CONFIG ?= pg_config
@@ -13,4 +13,4 @@ $(RUNTIME_LIB):
 SHLIB_LINK += $(RUNTIME_LIB)
 $(shlib): $(RUNTIME_LIB)
 
-$(OBJS): $(srcdir)/internal.h $(srcdir)/agg.h $(srcdir)/hashjoin.h $(wildcard $(srcdir)/../include/tessera/*.h)
+$(OBJS): $(srcdir)/internal.h $(srcdir)/agg.h $(srcdir)/hashjoin.h $(srcdir)/limit.h $(wildcard $(srcdir)/../include/tessera/*.h)

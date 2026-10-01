@@ -1,4 +1,4 @@
-SUBDIRS = bridge kernels runtime nodes examples/limit test
+SUBDIRS = bridge kernels runtime nodes test
 PG_CONFIG ?= pg_config
 CARGO ?= cargo
 
@@ -12,8 +12,8 @@ $(SUBDIRS):
 
 # Modules link the runtime archive and the tests link it and the Rust
 # library, so a parallel make must build those first.
-nodes examples/limit: runtime
-test: runtime kernels nodes examples/limit
+nodes: runtime
+test: runtime kernels nodes
 
 clean:
 	@for dir in $(SUBDIRS); do \
@@ -25,7 +25,6 @@ install:
 	$(MAKE) -C kernels PG_CONFIG="$(PG_CONFIG)" install
 	$(MAKE) -C runtime PG_CONFIG="$(PG_CONFIG)" install
 	$(MAKE) -C nodes PG_CONFIG="$(PG_CONFIG)" install
-	$(MAKE) -C examples/limit PG_CONFIG="$(PG_CONFIG)" install
 
 installcheck: all
 	$(MAKE) -C test PG_CONFIG="$(PG_CONFIG)" installcheck

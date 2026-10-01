@@ -156,9 +156,12 @@ EXPLAIN (VERBOSE, ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT a FROM pack_t LIMIT 3;
                                QUERY PLAN                                
 -------------------------------------------------------------------------
- Limit (actual rows=3.00 loops=1)
+ Custom Scan (TessLimit) (actual rows=3.00 loops=1)
    Output: a
-   ->  Custom Scan (tessera_pack_sink) (actual rows=3.00 loops=1)
+   Input Batches: 1
+   Input Rows: 64
+   Output Rows: 3
+   ->  Custom Scan (tessera_pack_sink) (actual rows=64.00 loops=1)
          Output: a
          Role: sink
          Requested Rows: 0
@@ -171,11 +174,11 @@ SELECT a FROM pack_t LIMIT 3;
                Batch Size: 64
                Rows Kept As: heap tuples
                Batches: 1
-               Deformed Datums: 64
+               Deformed Datums: 3
                Restarted Datums: 0
                ->  Seq Scan on public.pack_t (actual rows=64.00 loops=1)
                      Output: a, b
-(19 rows)
+(22 rows)
 
 SELECT a FROM pack_t LIMIT 3;
  a 

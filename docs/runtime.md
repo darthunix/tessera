@@ -22,9 +22,10 @@ SHLIB_LINK += $(shell $(PG_CONFIG) --pkglibdir)/libtessera_runtime.a
 ```
 
 `make installcheck` checks that this is enough: every installed header
-compiles by itself, and the TessLimit example (`examples/limit`) builds
-from a copy of its sources against the installed headers and library
-(`test/installed`).
+compiles by itself, and TessLimit's files (`nodes/limit.c`,
+`nodes/limit_planner.c`), written against the public headers and the
+runtime library alone, build into a module of their own from copies
+against the installed headers and library (`test/installed`).
 
 ## Building a batch from rows
 

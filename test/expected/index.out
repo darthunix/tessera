@@ -1,7 +1,6 @@
 CREATE EXTENSION tessera;
 LOAD 'tessera_nodes';
 LOAD 'tessera_kernels';
-LOAD 'tessera_limit';
 -- The same rows with Tessera on and off, as text, in the same multiset.
 CREATE FUNCTION index_same(query text) RETURNS text
 LANGUAGE plpgsql AS $$

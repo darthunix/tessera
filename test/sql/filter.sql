@@ -1,6 +1,5 @@
 CREATE EXTENSION tessera;
 LOAD 'tessera_nodes';
-LOAD 'tessera_limit';
 
 CREATE TABLE filter_t (a int, b int, c text);
 INSERT INTO filter_t

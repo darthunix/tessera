@@ -1,6 +1,5 @@
 CREATE EXTENSION tessera;
 LOAD 'tessera_nodes';
-LOAD 'tessera_limit';
 -- The rows of a query with the batch nodes and without them, sorted. With
 -- core_parallel_hash off the core answers without its shared hash table:
 -- on a key most inner rows share it splits its batches without end (a

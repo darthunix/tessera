@@ -8,7 +8,6 @@
 CREATE EXTENSION tessera;
 LOAD 'tessera_nodes';
 LOAD 'tessera_kernels';
-LOAD 'tessera_limit';
 SET max_parallel_workers_per_gather = 0;
 CREATE TABLE cov AS
 SELECT g AS i4, g::bigint * 1000 AS i8, (g % 100)::smallint AS i2,

@@ -1,7 +1,6 @@
 CREATE EXTENSION tessera;
 LOAD 'tessera_nodes';
 LOAD 'tessera_kernels';
-LOAD 'tessera_limit';
 -- The same result with Tessera on and off, as text.
 CREATE FUNCTION union_same(query text) RETURNS text
 LANGUAGE plpgsql AS $$
