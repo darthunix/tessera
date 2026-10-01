@@ -694,6 +694,25 @@ DROP AGGREGATE agg_sql_sum(integer);
 DROP FUNCTION agg_c_add(bigint, integer);
 DROP FUNCTION agg_sql_add(bigint, integer);
 
+-- A path's start costs no more than its whole: the share of the core's
+-- cost takes both alike (an aggregate without GROUP BY starts with nearly
+-- all of its cost), in every node of the plan.
+CREATE FUNCTION agg_costs_ordered(query text) RETURNS boolean
+LANGUAGE plpgsql AS $$
+DECLARE
+    plan jsonb;
+BEGIN
+    EXECUTE 'EXPLAIN (FORMAT JSON) ' || query INTO plan;
+    RETURN NOT EXISTS (
+        SELECT 1 FROM jsonb_path_query(plan, 'strict $.**') AS node
+        WHERE jsonb_typeof(node) = 'object' AND node ? 'Startup Cost'
+          AND (node ->> 'Startup Cost')::numeric > (node ->> 'Total Cost')::numeric);
+END $$;
+SELECT agg_costs_ordered($$SELECT count(*), sum(a), max(c) FROM agg_t$$) AS plain,
+       agg_costs_ordered($$SELECT b, count(*), sum(a) FROM agg_t GROUP BY b$$) AS grouped,
+       agg_costs_ordered($$SELECT count(*) FROM agg_t WHERE a > 10$$) AS filtered;
+DROP FUNCTION agg_costs_ordered(text);
+
 DROP TABLE agg_t;
 DROP FUNCTION agg_same(text);
 DROP EXTENSION tessera;

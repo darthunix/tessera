@@ -752,7 +752,11 @@ make_agg_path(PlannerInfo *root, const AggPath *agg, List *tlist, int nkeys, int
 		if (tess_path_node(child) == &tess_pack_node && !tess_pack_forwards(child))
 			plain_cost(root, child, tlist, agg->aggsplit, &template);
 		else
+		{
+			/* Of the start and the total alike: a plain aggregate's start is nearly all of it. */
+			template.startup_cost *= tess_agg_cost_factor;
 			template.total_cost *= tess_agg_cost_factor;
+		}
 	}
 	/* The groups come in no order, whatever order the core's had. */
 	template.pathkeys = NIL;

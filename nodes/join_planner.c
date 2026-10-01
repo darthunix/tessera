@@ -798,7 +798,11 @@ make_join_path(PlannerInfo *root, RelOptInfo *joinrel, JoinType jointype,
 	template = create_hashjoin_path(root, joinrel, jointype, &workspace,
 									extra, priced, inner_path, shared,
 									extra->restrictlist, NULL, hashclauses);
-	/* A share of the core's cost, tessera.join_cost_factor (0.9). */
+	/*
+	 * A share of the core's cost, tessera.join_cost_factor (0.9), of its
+	 * start and its total alike: the build stays within the whole.
+	 */
+	template->jpath.path.startup_cost *= tess_join_cost_factor;
 	template->jpath.path.total_cost *= tess_join_cost_factor;
 	config.template_path = &template->jpath.path;
 	config.methods = &join_path_methods;

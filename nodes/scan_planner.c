@@ -186,6 +186,7 @@ make_filter_path(RelOptInfo *rel, const Path *seqscan, Path *child)
 	TessPathConfig config = TESS_STRUCT_INITIALIZER(TessPathConfig);
 	Path		template = *seqscan;
 
+	template.startup_cost *= tess_scan_cost_factor;
 	template.total_cost *= tess_scan_cost_factor;
 	config.template_path = &template;
 	config.methods = &filter_path_methods;
@@ -296,6 +297,7 @@ add_scan_paths(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte)
 		scan = tess_batch_scan_path(root, copy);
 		if (scan != NULL)
 		{
+			scan->startup_cost *= tess_scan_cost_factor;
 			scan->total_cost *= tess_scan_cost_factor;
 			add_path(rel, scan);
 		}
@@ -308,6 +310,7 @@ add_scan_paths(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte)
 	scan = tess_batch_scan_path(root, copy);
 	if (scan == NULL)
 		return;
+	scan->startup_cost *= tess_scan_cost_factor;
 	scan->total_cost *= tess_scan_cost_factor;
 	add_partial_path(rel, scan);
 }
@@ -436,6 +439,7 @@ add_index_paths(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte,
 			scan = tess_heap_index_path(root, index, rel->reltarget);
 			if (scan == NULL)
 				continue;
+			scan->startup_cost = index->path.startup_cost * tess_scan_cost_factor;
 			scan->total_cost = index->path.total_cost * tess_scan_cost_factor;
 		}
 		else
