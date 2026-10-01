@@ -368,6 +368,11 @@ EXPLAIN (VERBOSE, COSTS OFF) SELECT max(t), string_agg(t, ',') FROM agg_any WHER
 -- add the core's float8 accumulation does in two on x86-64): checks with
 -- it compare with the core exactly and show no rows.
 SELECT agg_same($$SELECT max(t), min(t), sum(n), avg(n), avg(f), stddev(f), sum(j), avg(j), avg(a) FROM agg_any$$) !~ '^MISMATCH' AS same;
+-- More aggregates than the node takes (64) stay with the core, without
+-- groups too: the planner built such a plain aggregate, which the node
+-- then refused at the start of execution.
+SELECT agg_same((SELECT 'SELECT ' || string_agg(format('sum(a + %s)', g), ', ') || ' FROM agg_any'
+                 FROM generate_series(1, 65) AS g)) !~ '^MISMATCH' AS same;
 -- Arguments of several kinds and polymorphic ones: a delimiter, two
 -- columns, arrays and JSON of any element, booleans, dates.
 SELECT agg_same($$SELECT string_agg(t, '|'), corr(a, f), array_agg(a), array_agg(t), json_agg(d), bool_and(b), bool_or(b), max(d), bit_or(a), every(a > -200) FROM agg_any$$);

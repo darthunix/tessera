@@ -1302,6 +1302,16 @@ SELECT agg_same($$SELECT max(t), min(t), sum(n), avg(n), avg(f), stddev(f), sum(
  t
 (1 row)
 
+-- More aggregates than the node takes (64) stay with the core, without
+-- groups too: the planner built such a plain aggregate, which the node
+-- then refused at the start of execution.
+SELECT agg_same((SELECT 'SELECT ' || string_agg(format('sum(a + %s)', g), ', ') || ' FROM agg_any'
+                 FROM generate_series(1, 65) AS g)) !~ '^MISMATCH' AS same;
+ same 
+------
+ t
+(1 row)
+
 -- Arguments of several kinds and polymorphic ones: a delimiter, two
 -- columns, arrays and JSON of any element, booleans, dates.
 SELECT agg_same($$SELECT string_agg(t, '|'), corr(a, f), array_agg(a), array_agg(t), json_agg(d), bool_and(b), bool_or(b), max(d), bit_or(a), every(a > -200) FROM agg_any$$);

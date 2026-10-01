@@ -1403,11 +1403,12 @@ create_upper_paths(PlannerInfo *root, UpperRelationKind stage,
 		tlist = add_to_flat_tlist(NIL, keys);
 		strategy = AGG_HASHED;
 	}
+	/* The node takes AGG_MAX_GROUPED aggregates at most, with groups or without. */
 	if (!collect_aggregates((Node *) list_make2(output_rel->reltarget->exprs,
 												root->parse->havingQual),
 							keys, &tlist) ||
 		tlist == NIL ||
-		(keys != NIL && list_length(tlist) - list_length(keys) > AGG_MAX_GROUPED))
+		list_length(tlist) - list_length(keys) > AGG_MAX_GROUPED)
 		return;
 	if (!distinct_fits(root, input_rel, keys, tlist))
 		return;
