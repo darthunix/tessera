@@ -181,14 +181,14 @@ FROM generate_series(1, 3) AS g;
            ->  Custom Scan (tessera_pack_sink) (actual rows=2.00 loops=3)
                  Role: sink
                  Requested Rows: 0
-                 Input Batches: 1
-                 Input Rows: 3
-                 Output Rows: 3
+                 Input Batches: 3
+                 Input Rows: 6
+                 Output Rows: 6
                  Child Request: filter {} projection {} max 0
                  ->  Custom Scan (TessPack) (actual rows=2.00 loops=3)
                        Batch Size: 64
                        Rows Kept As: heap tuples
-                       Batches: 1
+                       Batches: 3
                        Deformed Datums: 0
                        Restarted Datums: 0
                        ->  Seq Scan on pack_t p (actual rows=2.00 loops=3)

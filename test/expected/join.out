@@ -1005,9 +1005,9 @@ SELECT join_explain($$SELECT jsmall.k, (SELECT count(*) FROM jf JOIN jdup ON jf.
    Computed Datums: 10
    SubPlan expr_1
      ->  Custom Scan (TessAgg) (actual rows=1.00 loops=10)
-           Input Batches: 3
-           Input Rows: 191
-           Kernel Calls: 3
+           Input Batches: 46
+           Input Rows: 2640
+           Kernel Calls: 46
            ->  Custom Scan (TessHashJoin) (actual rows=264.00 loops=10)
                  Hash Cond: (jf.fk = jdup.k)
                  Buckets: 1024
@@ -1020,20 +1020,20 @@ SELECT join_explain($$SELECT jsmall.k, (SELECT count(*) FROM jf JOIN jdup ON jf.
                  Compact Batches: 46
                  ->  Custom Scan (TessHeapScan) on jf (actual rows=1000.00 loops=10)
                        Batch Size: 64
-                       Batches: 18
-                       Pages: 9
+                       Batches: 180
+                       Pages: 90
                        Deformed Datums: 10000
                        Restarted Datums: 0
                  ->  Custom Scan (TessFilter) on jdup (actual rows=111.50 loops=10)
                        Batch Filter: (jdup.w > jsmall.k)
                        Rows Removed by Batch Filter: 38
-                       Input Batches: 3
-                       Input Rows: 150
-                       Output Rows: 80
+                       Input Batches: 30
+                       Input Rows: 1500
+                       Output Rows: 1115
                        ->  Custom Scan (TessHeapScan) on jdup (actual rows=150.00 loops=10)
                              Batch Size: 64
-                             Batches: 3
-                             Pages: 1
+                             Batches: 30
+                             Pages: 10
                              Deformed Datums: 2615
                              Restarted Datums: 85
 (40 rows)
@@ -1056,9 +1056,9 @@ SELECT join_explain($$SELECT jsmall.k, (SELECT count(*) FROM jf JOIN jdup ON jf.
    Computed Datums: 10
    SubPlan expr_1
      ->  Custom Scan (TessAgg) (actual rows=1.00 loops=10)
-           Input Batches: 2
-           Input Rows: 104
-           Kernel Calls: 2
+           Input Batches: 39
+           Input Rows: 2165
+           Kernel Calls: 39
            ->  Custom Scan (TessHashJoin) (actual rows=216.50 loops=10)
                  Hash Cond: (jf.fk = jdup.k)
                  Buckets: 1024
@@ -1072,13 +1072,13 @@ SELECT join_explain($$SELECT jsmall.k, (SELECT count(*) FROM jf JOIN jdup ON jf.
                  ->  Custom Scan (TessFilter) on jf (actual rows=615.00 loops=10)
                        Batch Filter: (jf.v > (jsmall.k * 10))
                        Rows Removed by Batch Filter: 385
-                       Input Batches: 18
-                       Input Rows: 1000
-                       Output Rows: 300
+                       Input Batches: 180
+                       Input Rows: 10000
+                       Output Rows: 6150
                        ->  Custom Scan (TessHeapScan) on jf (actual rows=1000.00 loops=10)
                              Batch Size: 64
-                             Batches: 18
-                             Pages: 9
+                             Batches: 180
+                             Pages: 90
                              Deformed Datums: 16150
                              Restarted Datums: 687
                  ->  Custom Scan (TessHeapScan) on jdup (actual rows=150.00 loops=1)
@@ -1332,9 +1332,9 @@ SELECT join_explain($$SELECT jsmall.k, (SELECT count(*) FROM jprobe JOIN jbuild 
    Computed Datums: 10
    SubPlan expr_1
      ->  Custom Scan (TessAgg) (actual rows=1.00 loops=10)
-           Input Batches: 128
-           Input Rows: 128
-           Kernel Calls: 128
+           Input Batches: 1595
+           Input Rows: 1595
+           Kernel Calls: 1595
            ->  Custom Scan (TessHashJoin) (actual rows=159.50 loops=10)
                  Hash Cond: (jprobe.k = jbuild.k)
                  Buckets: 16384
@@ -1348,20 +1348,20 @@ SELECT join_explain($$SELECT jsmall.k, (SELECT count(*) FROM jprobe JOIN jbuild 
                  Rows Removed by Bloom Filter: 154713
                  ->  Custom Scan (TessHeapScan) on jprobe (actual rows=20000.00 loops=10)
                        Batch Size: 64
-                       Batches: 354
-                       Pages: 89
+                       Batches: 3540
+                       Pages: 890
                        Deformed Datums: 200000
                        Restarted Datums: 0
                  ->  Custom Scan (TessFilter) on jbuild (actual rows=4961.50 loops=10)
                        Batch Filter: (jbuild.w > jsmall.k)
                        Rows Removed by Batch Filter: 38
-                       Input Batches: 89
-                       Input Rows: 5000
-                       Output Rows: 4930
+                       Input Batches: 890
+                       Input Rows: 50000
+                       Output Rows: 49615
                        ->  Custom Scan (TessHeapScan) on jbuild (actual rows=5000.00 loops=10)
                              Batch Size: 64
-                             Batches: 89
-                             Pages: 23
+                             Batches: 890
+                             Pages: 230
                              Deformed Datums: 99615
                              Restarted Datums: 0
 (41 rows)

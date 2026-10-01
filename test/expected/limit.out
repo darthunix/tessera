@@ -142,13 +142,13 @@ FROM generate_series(1, 3) AS g;
    SubPlan expr_1
      ->  Aggregate (actual rows=1.00 loops=3)
            ->  Custom Scan (TessLimit) (actual rows=2.00 loops=3)
-                 Input Batches: 1
-                 Input Rows: 3
-                 Output Rows: 3
+                 Input Batches: 3
+                 Input Rows: 6
+                 Output Rows: 6
                  ->  Custom Scan (TessHeapScan) on limit_t (actual rows=2.00 loops=3)
                        Batch Size: 64
-                       Batches: 1
-                       Pages: 1
+                       Batches: 3
+                       Pages: 3
                        Deformed Datums: 0
                        Restarted Datums: 0
                        Computed Datums: 6

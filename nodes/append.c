@@ -745,7 +745,7 @@ append_rescan(CustomScanState *css)
 	}
 	state->current = -1;
 	state->done = false;
-	state->batches = 0;
+	/* The batches total every scan, as the core's instrumentation does. */
 }
 
 /*

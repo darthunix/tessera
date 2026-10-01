@@ -317,5 +317,5 @@ tess_unary_rescan(TessUnary *unary)
 	unary->active_batch = NULL;
 	unary->next_row = -1;
 	unary->stopped = false;
-	MemSet(&unary->stats, 0, sizeof(unary->stats));
+	/* The counters total every scan, as the core's instrumentation does. */
 }

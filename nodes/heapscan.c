@@ -1185,8 +1185,6 @@ heap_scan_rescan(CustomScanState *css)
 			UpdateChangedParamSet(state->bitmap_plan, css->ss.ps.chgParam);
 		if (state->bitmap_plan->chgParam == NULL)
 			ExecReScan(state->bitmap_plan);
-		state->exact_pages = 0;
-		state->lossy_pages = 0;
 	}
 	else if (state->index_plan != NULL)
 	{
@@ -1214,9 +1212,8 @@ heap_scan_rescan(CustomScanState *css)
 	state->page_active = false;
 	state->page_cursor = 0;
 	state->exhausted = false;
+	/* The rows of this scan, for its bound; EXPLAIN's counters total every scan. */
 	state->produced = 0;
-	state->batches = 0;
-	state->pages = 0;
 }
 
 /* This participant's counters; a node that never ran counts nothing. */

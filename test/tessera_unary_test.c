@@ -272,16 +272,19 @@ tessera_test_unary_batches(PG_FUNCTION_ARGS)
 	result &= stats->input_batches == 3 && stats->input_rows == 5 &&
 		stats->output_rows == 2;
 
-	/* After a rescan the batches flow again until the node stops. */
+	/*
+	 * After a rescan the batches flow again until the node stops; the
+	 * counters total both scans, as the core's instrumentation does.
+	 */
 	tess_unary_rescan(unary);
-	result &= stats->input_batches == 0;
+	result &= stats->input_batches == 3;
 	slot = tess_unary_exec(unary);
 	batch = slot == NULL ? NULL : ops->get_batch(ops->find(slot));
 	result &= batch != NULL && batch_holds(batch, 1, &two);
 	tess_unary_stop(unary);
 	ops->mark_consumed(ops->find(slot));
 	result &= tess_unary_exec(unary) == NULL && calls == 4 &&
-		stats->input_batches == 1 && stats->output_rows == 1;
+		stats->input_batches == 4 && stats->output_rows == 3;
 	tess_unary_end(unary);
 	result &= ops->find(node->ss.ps.ps_ResultTupleSlot) == NULL;
 	tess_output_end(child->output);

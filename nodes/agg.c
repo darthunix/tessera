@@ -4276,17 +4276,17 @@ agg_rescan(CustomScanState *css)
 		state->values[index].ngathered = 0;
 	}
 	state->done = false;
-	state->batches = 0;
-	state->rows = 0;
-	state->calls = 0;
 	/* GROUP BY: the table is built again from the rescanned child. */
 	agg_spill_free(state);
 	rows_spill_free(state);
 	state->drained = false;
 	state->input_done = false;
 	state->published = NULL;
-	state->groups = 0;
-	state->emit_rows = 0;
+	/*
+	 * EXPLAIN's counters total every scan, as the core's instrumentation
+	 * does; the early emits count this scan's rows from here.
+	 */
+	state->emit_rows = state->rows;
 	state->partial_spill = false;
 }
 

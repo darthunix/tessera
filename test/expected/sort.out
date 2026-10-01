@@ -432,17 +432,17 @@ FROM (VALUES (3), (1), (5)) AS v(x)$$);
  Values Scan on "*VALUES*" (actual rows=3.00 loops=1)
    SubPlan expr_1
      ->  Custom Scan (TessAgg) (actual rows=1.00 loops=3)
-           Input Batches: 1
-           Input Rows: 5
+           Input Batches: 3
+           Input Rows: 9
            Kernel Calls: 0
            Computed Datums: 9
            ->  Custom Scan (TessPack) (actual rows=3.00 loops=3)
                  Rows Kept As: forwarded batches
-                 Batches: 1
+                 Batches: 3
                  ->  Custom Scan (TessLimit) (actual rows=3.00 loops=3)
-                       Input Batches: 1
-                       Input Rows: 5
-                       Output Rows: 5
+                       Input Batches: 3
+                       Input Rows: 11
+                       Output Rows: 9
                        ->  Custom Scan (TessSort) (actual rows=3.67 loops=3)
                              Sort Key: sort_t.d
                              Sort Method: top-N in memory
@@ -451,8 +451,8 @@ FROM (VALUES (3), (1), (5)) AS v(x)$$);
                              Input Rows: 1000
                              ->  Custom Scan (TessHeapScan) on sort_t (actual rows=500.00 loops=2)
                                    Batch Size: 64
-                                   Batches: 11
-                                   Pages: 4
+                                   Batches: 22
+                                   Pages: 8
                                    Deformed Datums: 1000
                                    Restarted Datums: 0
 (26 rows)
@@ -1222,13 +1222,13 @@ FROM generate_series(1, 3) AS x$$);
  Function Scan on generate_series x (actual rows=3.00 loops=1)
    SubPlan expr_1
      ->  Custom Scan (TessAgg) (actual rows=1.00 loops=3)
-           Input Batches: 1
-           Input Rows: 4
+           Input Batches: 3
+           Input Rows: 12
            Kernel Calls: 0
            Computed Datums: 12
            ->  Custom Scan (TessPack) (actual rows=4.00 loops=3)
                  Rows Kept As: forwarded batches
-                 Batches: 1
+                 Batches: 3
                  ->  Custom Scan (TessSort) (actual rows=4.00 loops=3)
                        Sort Key: sort_t.d DESC
                        Sort Method: in memory

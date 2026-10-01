@@ -493,8 +493,8 @@ pack_rescan(CustomScanState *css)
 		UpdateChangedParamSet(state->child, css->ss.ps.chgParam);
 	ExecReScan(state->child);
 	state->exhausted = false;
+	/* The rows of this scan, for its bound; EXPLAIN's batches total every scan. */
 	state->produced = 0;
-	state->batches = 0;
 }
 
 static void

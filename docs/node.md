@@ -137,7 +137,10 @@ node.
 `ReScanCustomScan` runs in one fixed order: clear the node's output,
 releasing an active batch; finish the node's input; rescan the children
 with `ExecReScan`; reset the input, which forgets cached slot and binding
-pointers; then reset the node's counters and state. Nothing is restored:
+pointers; then reset the node's state. The counters `EXPLAIN ANALYZE`
+shows are kept: they total every scan, as the core's instrumentation does
+under a nested loop, and a counter the scan itself needs, such as the
+rows given under a tuple bound, resets with the state. Nothing is restored:
 cleared selection bits never come back, and a new scan starts from a fresh
 batch. End and rescan paths both clear outputs.
 
