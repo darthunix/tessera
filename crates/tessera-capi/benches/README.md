@@ -59,8 +59,8 @@ explain most cycle-only differences.
 
 ## Running
 
-The benchmarks run locally on macOS with Apple silicon; Linux and CI are
-not planned. Counters need root. Run from the repository root:
+The benchmarks run locally on macOS with Apple silicon: the counters come
+from kperf and need root. CI checks correctness, not speed. Run from the repository root:
 
 ```sh
 # Correctness checks of every case without counters or root.

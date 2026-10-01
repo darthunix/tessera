@@ -89,9 +89,10 @@ through Cargo with the toolchain the repository selects.
    and `max` over int4 and int8, a limit) is in the
    [nodes guide](docs/nodes.md).
 
-4. Run the regression tests, thirty suites, against a running server
-   (`PGPORT` and `PGHOST` in the environment) or in a temporary instance,
-   as the [bridge guide](docs/bridge.md) shows:
+4. Run the regression suites against a running server (`PGPORT` and
+   `PGHOST` in the environment) or in a temporary instance, as the
+   [bridge guide](docs/bridge.md) shows; CI runs them on Linux and macOS
+   against the PostgreSQL revisions in `.github/postgres.env`:
 
    ```sh
    make installcheck

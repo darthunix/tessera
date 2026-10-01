@@ -1,0 +1,80 @@
+# Correctness on every push: the Rust workspace on x86_64 Linux (the scalar
+# kernels) and on arm64 macOS (the NEON kernels), and the PostgreSQL modules
+# with every regression suite against the revisions in postgres.env.
+# Performance is measured locally (crates/tessera-capi/benches, bench/pg).
+name: CI
+
+on:
+  push:
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust:
+    name: Rust (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain of rust-toolchain.toml
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - name: Format, Clippy, debug and release tests
+        run: make rust-check
+
+  postgres:
+    name: PostgreSQL ${{ matrix.postgres }} (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-24.04, postgres: MASTER }
+          - { os: macos-15, postgres: MASTER }
+    runs-on: ${{ matrix.os }}
+    env:
+      # The temporary instance's locale (test/Makefile).
+      LANG: C.UTF-8
+    steps:
+      - uses: actions/checkout@v4
+      - name: Revision
+        id: revision
+        run: |
+          . .github/postgres.env
+          eval "echo revision=\$POSTGRES_${{ matrix.postgres }}" >> "$GITHUB_OUTPUT"
+          echo "PG_CONFIG=$HOME/postgres/bin/pg_config" >> "$GITHUB_ENV"
+      - name: Build tools (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq bison flex libicu-dev libreadline-dev zlib1g-dev pkg-config
+      - name: Build tools (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install icu4c pkgconf
+          echo "PKG_CONFIG_PATH=$(brew --prefix icu4c)/lib/pkgconfig" >> "$GITHUB_ENV"
+      - uses: actions/cache@v4
+        id: postgres
+        with:
+          path: ~/postgres
+          key: postgres-${{ runner.os }}-${{ runner.arch }}-${{ steps.revision.outputs.revision }}-${{ hashFiles('.github/scripts/build-postgres.sh') }}
+      - name: Build PostgreSQL
+        if: steps.postgres.outputs.cache-hit != 'true'
+        run: .github/scripts/build-postgres.sh ${{ steps.revision.outputs.revision }} "$HOME/postgres"
+      - name: Toolchain of rust-toolchain.toml
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - name: Build and install Tessera
+        run: |
+          make
+          make install
+      - name: Regression suites and the installed set
+        run: make installcheck EXTRA_REGRESS_OPTS="--temp-instance=$RUNNER_TEMP/cluster"
+      - name: Differences
+        if: failure()
+        run: cat test/regression.diffs 2>/dev/null || true
