@@ -83,7 +83,10 @@ enum
  * function, or, in a partial plan, its serialization function for the
  * Finalize Aggregate above. A transition function that keeps its state in
  * the aggregate's memory asks for it (AggCheckCallContext): a stand-in
- * AggState gives the node's context of states.
+ * AggState gives the node's context of states, and its temporary one
+ * (AggGetTempMemoryContext). It has no Aggref (AggGetAggref): an
+ * aggregate with a C function of a loadable library, which may ask for
+ * one, stays the core's (generic_supported).
  */
 /*
  * A generic aggregate the node folds itself, its state its own in place of
@@ -1170,6 +1173,8 @@ generic_init(TessAggState *state, Aggref *agg)
 		state->generic_agg->curaggcontext = CreateExprContext(estate);
 		state->generic_agg->aggcontexts = palloc_array(ExprContext *, 1);
 		state->generic_agg->aggcontexts[0] = state->generic_agg->curaggcontext;
+		/* AggGetTempMemoryContext: the node's own, reset a batch at a time. */
+		state->generic_agg->tmpcontext = state->css.ss.ps.ps_ExprContext;
 	}
 	tuple = SearchSysCache1(AGGFNOID, ObjectIdGetDatum(agg->aggfnoid));
 	if (!HeapTupleIsValid(tuple))

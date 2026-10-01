@@ -2,6 +2,8 @@
 
 #include "access/htup_details.h"
 #include "catalog/pg_aggregate.h"
+#include "catalog/pg_language.h"
+#include "catalog/pg_proc.h"
 #include "miscadmin.h"
 #include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
@@ -83,15 +85,50 @@ aggregate_kind(Oid aggfnoid)
 	}
 }
 
+/* Whether a function is a C function of a loadable library. */
+static bool
+library_function(Oid function)
+{
+	HeapTuple	tuple;
+	bool		library;
+
+	if (!OidIsValid(function))
+		return false;
+	tuple = SearchSysCache1(PROCOID, ObjectIdGetDatum(function));
+	if (!HeapTupleIsValid(tuple))
+		elog(ERROR, "cache lookup failed for function %u", function);
+	library = ((Form_pg_proc) GETSTRUCT(tuple))->prolang == ClanguageId;
+	ReleaseSysCache(tuple);
+	return library;
+}
+
 /*
  * An aggregate the node computes through the core's functions: a whole
  * one or the partial one of a parallel plan, of arguments without a
- * subplan (DISTINCT: distinct_supported).
+ * subplan (DISTINCT: distinct_supported). Not one whose functions include
+ * a C function of a loadable library, as an extension's are (the core's
+ * own are internal): it may ask its call context for more than the
+ * node's stand-in AggState holds (AggGetAggref has no Aggref there), so
+ * the core's aggregate computes it.
  */
 bool
 generic_supported(const Aggref *agg)
 {
+	HeapTuple	tuple;
+	Form_pg_aggregate form;
+	bool		library;
+
 	if (agg->args == NIL)
+		return false;
+	tuple = SearchSysCache1(AGGFNOID, ObjectIdGetDatum(agg->aggfnoid));
+	if (!HeapTupleIsValid(tuple))
+		elog(ERROR, "cache lookup failed for aggregate %u", agg->aggfnoid);
+	form = (Form_pg_aggregate) GETSTRUCT(tuple);
+	library = library_function(form->aggtransfn) || library_function(form->aggfinalfn) ||
+		library_function(form->aggcombinefn) || library_function(form->aggserialfn) ||
+		library_function(form->aggdeserialfn);
+	ReleaseSysCache(tuple);
+	if (library)
 		return false;
 	foreach_node(TargetEntry, entry, agg->args)
 	{

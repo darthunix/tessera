@@ -672,6 +672,28 @@ RESET tessera.enable;
 \set VERBOSITY default
 DROP TABLE agg_float;
 
+-- An aggregate whose transition is a C function of a loadable library may
+-- ask its call context for its Aggref, which the node's stand-in has not:
+-- the core's aggregate computes it. One of a function in SQL is the node's.
+\getenv libdir PG_LIBDIR
+\getenv dlsuffix PG_DLSUFFIX
+\set function_test :libdir '/tessera_function_test' :dlsuffix
+CREATE FUNCTION agg_c_add(bigint, integer) RETURNS bigint
+AS :'function_test', 'tessera_test_int8_add_int4'
+LANGUAGE C STRICT;
+CREATE AGGREGATE agg_c_sum(integer) (SFUNC = agg_c_add, STYPE = bigint, INITCOND = '0');
+CREATE FUNCTION agg_sql_add(bigint, integer) RETURNS bigint
+LANGUAGE SQL STRICT AS 'SELECT $1 + $2';
+CREATE AGGREGATE agg_sql_sum(integer) (SFUNC = agg_sql_add, STYPE = bigint, INITCOND = '0');
+EXPLAIN (COSTS OFF) SELECT agg_c_sum(a) FROM agg_t;
+EXPLAIN (COSTS OFF) SELECT b, agg_c_sum(a) FROM agg_t GROUP BY b;
+EXPLAIN (COSTS OFF) SELECT agg_sql_sum(a) FROM agg_t;
+SELECT agg_same($$SELECT agg_c_sum(a), agg_sql_sum(a), sum(a) FROM agg_t$$);
+DROP AGGREGATE agg_c_sum(integer);
+DROP AGGREGATE agg_sql_sum(integer);
+DROP FUNCTION agg_c_add(bigint, integer);
+DROP FUNCTION agg_sql_add(bigint, integer);
+
 DROP TABLE agg_t;
 DROP FUNCTION agg_same(text);
 DROP EXTENSION tessera;

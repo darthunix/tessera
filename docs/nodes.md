@@ -1030,7 +1030,12 @@ expression a polymorphic one asks its argument types of, the final
 function with its extra arguments, or the serialization function of a
 partial plan, and the initial value. The states live in a context of the
 node's, which a stand-in `AggState` hands the transition functions that
-ask for the aggregate's memory (`AggCheckCallContext`); a strict
+ask for the aggregate's memory (`AggCheckCallContext`), with the node's
+temporary context for `AggGetTempMemoryContext`. It holds no `Aggref`
+for `AggGetAggref`, which the core's own functions ask for only in
+ordered-set aggregates the node does not take; an aggregate with a C
+function of a loadable library among its functions, as an extension's,
+may ask, and stays the core's. A strict
 function skips a row with a NULL argument and, without an initial value,
 takes the first kept argument as the state; a new by-reference state is
 copied into that context and the old one freed, and what a call

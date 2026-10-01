@@ -11,6 +11,14 @@ PG_FUNCTION_INFO_V1(tessera_test_function_registry);
 PG_FUNCTION_INFO_V1(tessera_test_function_sizes);
 PG_FUNCTION_INFO_V1(tessera_test_invalid_function);
 PG_FUNCTION_INFO_V1(tessera_test_duplicate_function);
+PG_FUNCTION_INFO_V1(tessera_test_int8_add_int4);
+
+/* A C function of a loadable library, an aggregate's transition in tests. */
+Datum
+tessera_test_int8_add_int4(PG_FUNCTION_ARGS)
+{
+	PG_RETURN_INT64(PG_GETARG_INT64(0) + PG_GETARG_INT32(1));
+}
 
 static TessStatusCode
 noop_evaluate(TessFunctionCall *call)
