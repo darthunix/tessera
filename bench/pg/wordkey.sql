@@ -99,10 +99,10 @@ ORDER BY test, mode DESC;
 -- The cached plans of both modes.
 \o plans.txt
 SET tessera.enable = on;
-SELECT format('EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE on_%s', name)
+SELECT format('EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE on_%s', name)
 FROM unnest(ARRAY['key_date_group', 'key_ts_group', 'key_int2_group', 'key_date_join', 'key_ts_distinct', 'key_date_order']) AS name \gexec
 SET tessera.enable = off;
-SELECT format('EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE off_%s', name)
+SELECT format('EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE off_%s', name)
 FROM unnest(ARRAY['key_date_group', 'key_ts_group', 'key_int2_group', 'key_date_join', 'key_ts_distinct', 'key_date_order']) AS name \gexec
 \o
 RESET work_mem;

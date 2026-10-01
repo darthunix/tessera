@@ -160,13 +160,13 @@ ORDER BY test, mode DESC;
 -- The cached plans of both modes.
 \o plans.txt
 SET tessera.enable = on;
-SELECT format('EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE on_%s', name)
+SELECT format('EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE on_%s', name)
 FROM unnest(ARRAY['bm_sparse', 'bm_mid', 'bm_dense', 'bm_third', 'bm_both', 'bm_either', 'bm_rows',
                    'ix_range', 'ix_short', 'ix_rows', 'ix_order', 'ix_third', 'ix_half', 'ix_filter',
                    'ios_count', 'ios_sparse', 'ios_fifth', 'ios_half', 'ios_sum', 'ios_rows', 'ios_order', 'ios_group',
                    'brin_week', 'brin_month', 'brin_months', 'brin_rows']) AS name \gexec
 SET tessera.enable = off;
-SELECT format('EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE off_%s', name)
+SELECT format('EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE off_%s', name)
 FROM unnest(ARRAY['bm_sparse', 'bm_mid', 'bm_dense', 'bm_third', 'bm_both', 'bm_either', 'bm_rows',
                    'ix_range', 'ix_short', 'ix_rows', 'ix_order', 'ix_third', 'ix_half', 'ix_filter',
                    'ios_count', 'ios_sparse', 'ios_fifth', 'ios_half', 'ios_sum', 'ios_rows', 'ios_order', 'ios_group',

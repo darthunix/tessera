@@ -165,14 +165,14 @@ ORDER BY test, mode DESC;
 -- The cached plans of both modes, with the sort method and memory of each.
 \o plans.txt
 SET tessera.enable = on;
-SELECT format('EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE on_%s', name)
+SELECT format('EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE on_%s', name)
 FROM unnest(ARRAY['order_int', 'order_big', 'order_few', 'order_multi', 'order_desc',
                   'order_sorted', 'order_wide', 'order_out', 'order_text_out',
                   'topn_few', 'topn_many', 'topn_reverse', 'topn_offset',
                   'distinct_few', 'distinct_many', 'distinct_agg', 'distinct_group',
                   'order_filter', 'order_numeric', 'order_text_c', 'order_few_text', 'topn_numeric', 'topn_text_c']) AS name \gexec
 SET tessera.enable = off;
-SELECT format('EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE off_%s', name)
+SELECT format('EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE off_%s', name)
 FROM unnest(ARRAY['order_int', 'order_big', 'order_few', 'order_multi', 'order_desc',
                   'order_sorted', 'order_wide', 'order_out', 'order_text_out',
                   'topn_few', 'topn_many', 'topn_reverse', 'topn_offset',

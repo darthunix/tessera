@@ -119,9 +119,9 @@ ORDER BY test, mode DESC;
 \o plans.txt
 SELECT format('SET work_mem = %L', work_mem),
        'SET tessera.enable = on',
-       format('EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE on_%s', test),
+       format('EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE on_%s', test),
        'SET tessera.enable = off',
-       format('EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE off_%s', test)
+       format('EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE off_%s', test)
 FROM cases \gexec
 \o
 RESET work_mem;

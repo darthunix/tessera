@@ -174,9 +174,9 @@ cached. `jit` is off, autovacuum is off, the tables are warm in
 `Gather` is given; then both modes run with it, and the on plan must show
 the batch nodes under the `Gather` with that many workers launched. The machine is idle and the power source is
 recorded; nothing is retried or discarded, and a bad run is kept and
-explained. The plans of both modes are recorded with `EXPLAIN ANALYZE`
-and checked by eye: the on plan must contain the batch nodes, the off plan
-must not.
+explained. The plans of both modes are recorded with `EXPLAIN (ANALYZE,
+VERBOSE)`, which the batch nodes' counters need, and checked by eye: the
+on plan must contain the batch nodes, the off plan must not.
 
 ## Running
 

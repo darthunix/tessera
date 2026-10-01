@@ -158,11 +158,11 @@ ORDER BY test, mode DESC;
 SELECT format('SET work_mem = %L', work_mem),
        'SET tessera.enable = on',
        CASE WHEN prepared
-            THEN format('EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE on_%s', test)
+            THEN format('EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE on_%s', test)
        END,
        'SET tessera.enable = off',
        CASE WHEN prepared
-            THEN format('EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE off_%s', test)
+            THEN format('EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE off_%s', test)
        END
 FROM cases \gexec
 \o
