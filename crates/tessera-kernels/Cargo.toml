@@ -12,6 +12,10 @@ memchr.workspace = true
 tessera-core.workspace = true
 tessera-spill.workspace = true
 
+[dev-dependencies]
+proptest.workspace = true
+tessera-testing.workspace = true
+
 [target.'cfg(loom)'.dev-dependencies]
 loom = "0.7"
 

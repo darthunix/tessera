@@ -8,17 +8,17 @@ use std::mem::MaybeUninit;
 use std::ops::{Add, Rem, Shl, Sub};
 
 use anyhow::Result;
+use proptest::prelude::*;
 use tessera_core::{ColumnReader, ColumnView, RowMask, RowMaskView};
 use tessera_kernels::ops::{ArithOp, ArithmeticError};
 use tessera_kernels::{int32, int64};
+use tessera_testing::{Int, flags, integer, nrows, property, small, values, words};
 
 /// One integer width under test: its kernels, its error, and the values its
 /// checks use beyond those shared by both widths.
 trait Lane:
-    Copy
-    + Debug
+    Int
     + Display
-    + PartialEq
     + From<i32>
     + Into<i128>
     + TryFrom<i128>
@@ -38,21 +38,8 @@ trait Lane:
     const PRODUCT_PAST_MAX: (Self, Self);
     /// Semantics cases past the int4 range, so that a 32-bit slip shows.
     const CASES_PAST_INT4: &'static [Case<Self>];
-    /// Scalars past the int4 range, appended to the scalar sets.
-    const SCALARS_PAST_INT4: &'static [Self];
-    /// Divisors past the int4 range, before the extremes and ±1, 0.
-    const DIVISORS_PAST_INT4: &'static [Self];
-    /// A large left scalar for a column of small divisors.
-    const LARGE_LEFT_SCALAR: Self;
-    /// The shift of the random left column of the model check.
-    const RANDOM_LEFT_SHIFT: u32;
-    /// The shift of the random left column of the whole-word check.
-    const WHOLE_WORD_LEFT_SHIFT: u32;
-
-    /// The low bits of a random number, as `as` casts them.
-    fn truncate(bits: u64) -> Self;
-    /// A random number spread over the whole width.
-    fn full_range(random: u64) -> Self;
+    /// The bits of the width.
+    const BITS: u32;
 
     fn arith_scalar<C: ColumnReader<Value = Self>>(
         op: ArithOp,
@@ -123,18 +110,7 @@ impl Lane for i32 {
     const OUT_OF_RANGE: ArithmeticError = ArithmeticError::IntegerOutOfRange;
     const PRODUCT_PAST_MAX: (Self, Self) = (65536, 32768);
     const CASES_PAST_INT4: &'static [Case<Self>] = &[];
-    const SCALARS_PAST_INT4: &'static [Self] = &[];
-    const DIVISORS_PAST_INT4: &'static [Self] = &[];
-    const LARGE_LEFT_SCALAR: Self = 1_000_000;
-    const RANDOM_LEFT_SHIFT: u32 = 0;
-    const WHOLE_WORD_LEFT_SHIFT: u32 = 0;
-
-    fn truncate(bits: u64) -> Self {
-        bits as i32
-    }
-    fn full_range(random: u64) -> Self {
-        (random >> 32) as i32
-    }
+    const BITS: u32 = 32;
     kernels!(int32);
 }
 
@@ -149,19 +125,7 @@ impl Lane for i64 {
         (ArithOp::Add, 1 << 40, 1 << 40, Ok(1 << 41)),
         (ArithOp::Mul, 1 << 31, 1 << 31, Ok(1 << 62)),
     ];
-    const SCALARS_PAST_INT4: &'static [Self] = &[1 << 40];
-    const DIVISORS_PAST_INT4: &'static [Self] = &[1 << 40, (1 << 40) + 1];
-    const LARGE_LEFT_SCALAR: Self = 1_000_000_000_000;
-    /// Beyond the int4 range on the left, so that a 32-bit slip shows.
-    const RANDOM_LEFT_SHIFT: u32 = 33;
-    const WHOLE_WORD_LEFT_SHIFT: u32 = 25;
-
-    fn truncate(bits: u64) -> Self {
-        bits as i64
-    }
-    fn full_range(random: u64) -> Self {
-        random as i64
-    }
+    const BITS: u32 = 64;
     kernels!(int64);
 }
 
@@ -187,14 +151,9 @@ for_both_widths! {
     nulls_propagate_and_unselected_rows_stay_unmarked:
         nulls_propagate_and_unselected_rows_stay_unmarked_int4,
         nulls_propagate_and_unselected_rows_stay_unmarked_int8;
-    random_data_matches_the_model_in_every_shape:
-        random_data_matches_the_model_in_every_shape_int4,
-        random_data_matches_the_model_in_every_shape_int8;
-    whole_words_agree_with_the_row_path:
-        whole_words_agree_with_the_row_path_int4, whole_words_agree_with_the_row_path_int8;
-    division_by_scalars_agrees_on_whole_words_with_extremes:
-        division_by_scalars_agrees_on_whole_words_with_extremes_int4,
-        division_by_scalars_agrees_on_whole_words_with_extremes_int8;
+    every_shape_matches_the_model_on_both_paths:
+        every_shape_matches_the_model_on_both_paths_int4,
+        every_shape_matches_the_model_on_both_paths_int8;
     a_null_row_never_fails_whatever_the_other_operand:
         a_null_row_never_fails_whatever_the_other_operand_int4,
         a_null_row_never_fails_whatever_the_other_operand_int8;
@@ -240,23 +199,6 @@ type Case<T> = (ArithOp, T, T, Result<T, ArithmeticError>);
 /// A small constant in the width under test.
 fn int<T: Lane>(value: i32) -> T {
     T::from(value)
-}
-
-fn words_for(flags: &[bool]) -> Vec<u64> {
-    let mut words = vec![0; flags.len().div_ceil(64)];
-    for (row, &flag) in flags.iter().enumerate() {
-        if flag {
-            words[row / 64] |= 1 << (row % 64);
-        }
-    }
-    words
-}
-
-fn random(state: &mut u64) -> u64 {
-    *state ^= *state >> 12;
-    *state ^= *state << 25;
-    *state ^= *state >> 27;
-    state.wrapping_mul(0x2545_F491_4F6C_DD1D)
 }
 
 /// PostgreSQL's int4 and int8 arithmetic on i128, with its errors.
@@ -421,75 +363,134 @@ fn nulls_propagate_and_unselected_rows_stay_unmarked<T: Lane>() -> Result<()> {
     Ok(())
 }
 
-fn random_data_matches_the_model_in_every_shape<T: Lane>() -> Result<()> {
-    let mut state = 0x9E37_79B9_7F4A_7C15;
-    let nrows = 3 * 64 + 7;
-    // Small enough not to overflow with the scalars below, and full-range
-    // divisors so that both signs and large quotients occur.
-    let left: Vec<T> = (0..nrows)
-        .map(|_| (T::truncate(random(&mut state) >> 8) % int(100_000)) << T::RANDOM_LEFT_SHIFT)
-        .collect();
-    let right: Vec<T> = (0..nrows)
-        .map(|_| match random(&mut state) % 4 {
-            0 => T::truncate(random(&mut state) >> 8),
-            _ => T::truncate(random(&mut state) >> 8) % int(50) - int(25),
+/// One batch of a property: the selection, both columns with their non-NULL
+/// flags, and a scalar. Rows that a shape reads hold values of one kind per
+/// batch — small, so that most calls succeed, or leaning to the edges, so
+/// that most fail — and the other rows hold edges.
+#[derive(Clone, Debug)]
+struct Batch<T> {
+    selected: Vec<bool>,
+    left: Vec<T>,
+    left_non_null: Vec<bool>,
+    right: Vec<T>,
+    right_non_null: Vec<bool>,
+    scalar: T,
+}
+
+/// A scalar: a value leaning to the edges, or a power of two and its
+/// neighbours of either sign, where a prepared reciprocal goes wrong.
+fn scalar<T: Lane>() -> BoxedStrategy<T> {
+    let near_power =
+        (1..T::BITS - 1, -1_i32..=1, any::<bool>()).prop_map(|(shift, step, negative)| {
+            let power = (int::<T>(1) << shift) + int(step);
+            if negative { int::<T>(0) - power } else { power }
+        });
+    prop_oneof![3 => integer::<T>(), 1 => near_power].boxed()
+}
+
+/// Batches of up to three words and a tail, as [`Batch`] describes them.
+fn batches<T: Lane>() -> impl Strategy<Value = Batch<T>> {
+    nrows()
+        .prop_flat_map(|nrows| (flags(nrows), flags(nrows), flags(nrows), any::<bool>()))
+        .prop_flat_map(|(selected, left_non_null, right_non_null, edgy)| {
+            let live = if edgy { integer::<T>() } else { small::<T>() };
+            let read = |non_null: &[bool]| -> Vec<bool> {
+                selected
+                    .iter()
+                    .zip(non_null)
+                    .map(|(&s, &n)| s && n)
+                    .collect()
+            };
+            (
+                values(&read(&left_non_null), &live),
+                values(&read(&right_non_null), &live),
+                scalar::<T>(),
+                Just((selected.clone(), left_non_null, right_non_null)),
+            )
         })
-        .collect();
-    let non_null: Vec<bool> = (0..nrows)
-        .map(|_| !random(&mut state).is_multiple_of(4))
-        .collect();
-    let selected: Vec<bool> = (0..nrows)
-        .map(|_| random(&mut state).is_multiple_of(2))
-        .collect();
-    let non_null_words = words_for(&non_null);
-    let left_column =
-        ColumnView::try_new(&left, Some(RowMaskView::try_new(nrows, &non_null_words)?))?;
-    let right_column = ColumnView::try_new(&right, None)?;
-    let selected_words = words_for(&selected);
-    let rows = RowMaskView::try_new(nrows, &selected_words)?;
-    let mut scalars = vec![int(-7), int(3)];
-    scalars.extend_from_slice(T::SCALARS_PAST_INT4);
-    for op in OPS {
-        for &scalar in &scalars {
-            let expected: Vec<Option<Result<T, ArithmeticError>>> = (0..nrows)
-                .map(|row| (selected[row] && non_null[row]).then(|| model(op, left[row], scalar)))
-                .collect();
-            check(
-                op,
-                run(op, Shape::ColumnScalar(&left_column, scalar), &rows),
-                &expected,
-            );
-            let expected: Vec<Option<Result<T, ArithmeticError>>> = (0..nrows)
-                .map(|row| (selected[row] && non_null[row]).then(|| model(op, scalar, left[row])))
-                .collect();
-            check(
-                op,
-                run(op, Shape::ScalarColumn(scalar, &left_column), &rows),
-                &expected,
-            );
+        .prop_map(
+            |(left, right, scalar, (selected, left_non_null, right_non_null))| Batch {
+                selected,
+                left,
+                left_non_null,
+                right,
+                right_non_null,
+                scalar,
+            },
+        )
+}
+
+/// Every operation in every operand shape matches the model, on the
+/// whole-word path of `ColumnView` and on the row path alike.
+fn every_shape_matches_the_model_on_both_paths<T: Lane>() -> Result<()> {
+    property(batches::<T>(), |batch| -> Result<()> {
+        let nrows = batch.selected.len();
+        let selection = words(&batch.selected);
+        let rows = RowMaskView::try_new(nrows, &selection)?;
+        let left_words = words(&batch.left_non_null);
+        let left =
+            ColumnView::try_new(&batch.left, Some(RowMaskView::try_new(nrows, &left_words)?))?;
+        let right_words = words(&batch.right_non_null);
+        let right = ColumnView::try_new(
+            &batch.right,
+            Some(RowMaskView::try_new(nrows, &right_words)?),
+        )?;
+        let scalar = batch.scalar;
+        for op in OPS {
+            let shapes = [
+                Shape::ColumnScalar(&left, scalar),
+                Shape::ScalarColumn(scalar, &right),
+                Shape::Columns(&left, &right),
+            ];
+            for shape in shapes {
+                let expected: Vec<Option<Result<T, ArithmeticError>>> = (0..nrows)
+                    .map(|row| {
+                        let (a, b, read) = match shape {
+                            Shape::ColumnScalar(..) => {
+                                (batch.left[row], scalar, batch.left_non_null[row])
+                            }
+                            Shape::ScalarColumn(..) => {
+                                (scalar, batch.right[row], batch.right_non_null[row])
+                            }
+                            Shape::Columns(..) => (
+                                batch.left[row],
+                                batch.right[row],
+                                batch.left_non_null[row] && batch.right_non_null[row],
+                            ),
+                        };
+                        (batch.selected[row] && read).then(|| model(op, a, b))
+                    })
+                    .collect();
+                check(op, run(op, shape, &rows), &expected);
+                check(op, run_rows(op, shape, &rows), &expected);
+            }
         }
-        let expected: Vec<Option<Result<T, ArithmeticError>>> = (0..nrows)
-            .map(|row| (selected[row] && non_null[row]).then(|| model(op, left[row], right[row])))
-            .collect();
-        check(
-            op,
-            run(op, Shape::Columns(&left_column, &right_column), &rows),
-            &expected,
-        );
-    }
+        Ok(())
+    });
     Ok(())
 }
 
-/// The kernel fails exactly when the model fails somewhere in the selection;
-/// otherwise every selected non-NULL row matches and the mask says which.
+/// The kernel fails exactly when the model fails somewhere in the selection,
+/// with one of the model's errors; otherwise every selected non-NULL row
+/// matches and the mask says which.
 fn check<T: Lane>(
     op: ArithOp,
     outcome: Result<(Vec<T>, Vec<u64>)>,
     expected: &[Option<Result<T, ArithmeticError>>],
 ) {
-    let first_error = expected.iter().flatten().find_map(|result| result.err());
-    match (first_error, outcome) {
-        (Some(_), Err(failure)) => assert!(arithmetic_error(&failure).is_some(), "{op:?}"),
+    let errors: Vec<ArithmeticError> = expected
+        .iter()
+        .flatten()
+        .filter_map(|result| result.err())
+        .collect();
+    match (errors.first(), outcome) {
+        (Some(_), Err(failure)) => {
+            let error = arithmetic_error(&failure);
+            assert!(
+                error.is_some_and(|error| errors.contains(&error)),
+                "{op:?}: kernel {failure:?}, model {errors:?}"
+            );
+        }
         (None, Ok((values, words))) => {
             let non_nulls = RowMaskView::try_new(expected.len(), &words).unwrap();
             for (row, expected) in expected.iter().enumerate() {
@@ -539,139 +540,6 @@ fn run_rows<T: Lane>(
     Ok((values.iter().map(written).collect(), words))
 }
 
-fn whole_words_agree_with_the_row_path<T: Lane>() -> Result<()> {
-    let mut state = 0x2545_F491_4F6C_DD1D;
-    let nrows = 4 * 64 + 11;
-    let left: Vec<T> = (0..nrows)
-        .map(|_| (T::truncate(random(&mut state) >> 8) % int(40_000)) << T::WHOLE_WORD_LEFT_SHIFT)
-        .collect();
-    let right: Vec<T> = (0..nrows)
-        .map(|_| T::truncate(random(&mut state) >> 8) % int(30) - int(15))
-        .collect();
-    let non_null: Vec<bool> = (0..nrows)
-        .map(|_| !random(&mut state).is_multiple_of(5))
-        .collect();
-    let non_null_words = words_for(&non_null);
-    let left_column =
-        ColumnView::try_new(&left, Some(RowMaskView::try_new(nrows, &non_null_words)?))?;
-    let right_column = ColumnView::try_new(&right, None)?;
-    // A full first word puts the call on the whole-word path; later words
-    // range from full to sparse, single-row and empty, then the tail.
-    let selected: Vec<bool> = (0..nrows)
-        .map(|row| match row / 64 {
-            0 => true,
-            1 => random(&mut state).is_multiple_of(2),
-            2 => row % 64 == 5,
-            3 => false,
-            _ => row % 2 == 0,
-        })
-        .collect();
-    let words = words_for(&selected);
-    let rows = RowMaskView::try_new(nrows, &words)?;
-    let scalars = [int(3), int(-7), int(2), int(-4), int(641)]
-        .into_iter()
-        .chain(T::SCALARS_PAST_INT4.iter().copied());
-    let mut shapes: Vec<Shape<'_, T>> = scalars
-        .map(|scalar| Shape::ColumnScalar(&left_column, scalar))
-        .collect();
-    shapes.push(Shape::ScalarColumn(T::LARGE_LEFT_SCALAR, &right_column));
-    shapes.push(Shape::Columns(&left_column, &right_column));
-    for op in OPS {
-        for &shape in &shapes {
-            let whole = run(op, shape, &rows);
-            let by_rows = run_rows(op, shape, &rows);
-            match (whole, by_rows) {
-                (Ok((values, words)), Ok((row_values, row_words))) => {
-                    assert_eq!(words, row_words, "{op:?}");
-                    let non_nulls = RowMaskView::try_new(nrows, &words)?;
-                    for row in non_nulls.selected_indices() {
-                        assert_eq!(values[row], row_values[row], "{op:?} row {row}");
-                    }
-                }
-                (Err(whole), Err(by_rows)) => {
-                    assert_eq!(
-                        arithmetic_error(&whole),
-                        arithmetic_error(&by_rows),
-                        "{op:?}"
-                    );
-                    assert!(arithmetic_error(&whole).is_some(), "{op:?}");
-                }
-                (whole, by_rows) => panic!("{op:?}: whole {whole:?}, rows {by_rows:?}"),
-            }
-        }
-    }
-    Ok(())
-}
-
-/// Division by a scalar on whole words multiplies by a prepared reciprocal;
-/// the dividends where a wrong multiplier shows are the extremes, and the
-/// divisors 0 and ±1 keep their checks.
-fn division_by_scalars_agrees_on_whole_words_with_extremes<T: Lane>() -> Result<()> {
-    let extremes: [T; 8] = [
-        T::MIN,
-        T::MIN + int(1),
-        int(-1),
-        int(0),
-        int(1),
-        T::MAX - int(1),
-        T::MAX,
-        int(-7),
-    ];
-    let mut state = 0x2545_F491_4F6C_DD1D_u64;
-    let nrows = 2 * 64 + 9;
-    let values: Vec<T> = (0..nrows)
-        .map(|row| {
-            if row % 3 == 0 {
-                extremes[row / 3 % extremes.len()]
-            } else {
-                T::full_range(random(&mut state))
-            }
-        })
-        .collect();
-    // A full first word puts the call on the whole-word path.
-    let selected: Vec<bool> = (0..nrows).map(|row| row < 64 || row % 5 != 0).collect();
-    let words = words_for(&selected);
-    let rows = RowMaskView::try_new(nrows, &words)?;
-    let divisors: Vec<T> = [2, -2, 3, -7, 4, -4, 641, 1 << 30]
-        .into_iter()
-        .map(int)
-        .chain(T::DIVISORS_PAST_INT4.iter().copied())
-        .chain([T::MIN, T::MAX, int(1), int(-1), int(0)])
-        .collect();
-    // Scattered NULLs, and a first word of nothing but NULLs, which divides
-    // nothing and leaves the divisor to be prepared at the second word.
-    let patterns: [fn(usize) -> bool; 2] = [|row| row % 11 != 4, |row| row >= 64 && row % 11 != 4];
-    for pattern in patterns {
-        let non_null: Vec<bool> = (0..nrows).map(pattern).collect();
-        let non_null_words = words_for(&non_null);
-        let column =
-            ColumnView::try_new(&values, Some(RowMaskView::try_new(nrows, &non_null_words)?))?;
-        for op in [ArithOp::Div, ArithOp::Mod] {
-            for &scalar in &divisors {
-                let shape = Shape::ColumnScalar(&column, scalar);
-                let expected: Vec<Option<Result<T, ArithmeticError>>> = (0..nrows)
-                    .map(|row| {
-                        (selected[row] && non_null[row]).then(|| model(op, values[row], scalar))
-                    })
-                    .collect();
-                check(op, run(op, shape, &rows), &expected);
-                check(op, run_rows(op, shape, &rows), &expected);
-            }
-        }
-    }
-    let non_null: Vec<bool> = (0..nrows).map(patterns[0]).collect();
-    let non_null_words = words_for(&non_null);
-    let column = ColumnView::try_new(&values, Some(RowMaskView::try_new(nrows, &non_null_words)?))?;
-    let failure = run(ArithOp::Div, Shape::ColumnScalar(&column, int(-1)), &rows).unwrap_err();
-    assert_eq!(arithmetic_error(&failure), Some(T::OUT_OF_RANGE));
-    let failure = run(ArithOp::Mod, Shape::ColumnScalar(&column, int(0)), &rows).unwrap_err();
-    assert_eq!(
-        arithmetic_error(&failure),
-        Some(ArithmeticError::DivisionByZero)
-    );
-    Ok(())
-}
-
 /// A NULL row never fails, whatever the other operand holds: an extreme
 /// scalar or column value beside a NULL computes nothing, on the row path
 /// (five rows, every target) and on whole words, a word of a single row
@@ -690,7 +558,7 @@ fn a_null_row_never_fails_whatever_the_other_operand<T: Lane>() -> Result<()> {
         let selected = |row: usize| selection[row / 64] >> (row % 64) & 1 == 1;
         let none = vec![0; nrows.div_ceil(64)];
         let mixed_flags: Vec<bool> = (0..nrows).map(|row| row % 3 != 0).collect();
-        let mixed_words = words_for(&mixed_flags);
+        let mixed_words = words(&mixed_flags);
         for extreme in [T::MIN, T::MAX] {
             let extremes = vec![extreme; nrows];
             let nulls = ColumnView::try_new(&extremes, Some(RowMaskView::try_new(nrows, &none)?))?;
@@ -749,7 +617,7 @@ fn overflow_in_null_or_unselected_lanes_is_not_an_error<T: Lane>() -> Result<()>
         .map(|row| if row % 2 == 0 { int(3) } else { T::MAX })
         .collect();
     let non_null: Vec<bool> = (0..128).map(|row| row % 2 == 0 || row >= 64).collect();
-    let non_null_words = words_for(&non_null);
+    let non_null_words = words(&non_null);
     let column = ColumnView::try_new(&values, Some(RowMaskView::try_new(128, &non_null_words)?))?;
     let all = RowMaskView::try_new(128, &[u64::MAX, 0])?;
     for op in [ArithOp::Add, ArithOp::Sub, ArithOp::Mul] {

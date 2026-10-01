@@ -113,6 +113,12 @@ make rust-clean    # Remove Cargo build products
 cargo doc --workspace --no-deps --open
 ```
 
+Property tests (proptest, with the strategies of `crates/tessera-testing`)
+draw new cases on every run. `PROPTEST_CASES=10000` runs more of them and
+`PROPTEST_RNG_SEED=<n>` repeats one run. A failing case shrinks to a small one
+and is kept in `<test file>.proptest-regressions` beside the test, which is
+committed so that every later run replays it first.
+
 API details, examples, and safety requirements live in the Rust documentation.
 See the [benchmark guide](crates/tessera-capi/benches/README.md) for performance
 checks.
