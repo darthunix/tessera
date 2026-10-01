@@ -29,6 +29,7 @@ install:
 
 installcheck: all
 	$(MAKE) -C test PG_CONFIG="$(PG_CONFIG)" installcheck
+	$(MAKE) -C test/installed PG_CONFIG="$(PG_CONFIG)" installcheck
 
 rust:
 	$(CARGO) build --workspace --locked

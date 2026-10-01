@@ -39,8 +39,12 @@ make install PG_CONFIG="$TESS_PG_CONFIG"
 ```
 
 Installation requires write access to the selected PostgreSQL installation.
-It installs the bridge, extension files, and public headers. The test
-libraries remain in the build's `test` directory; they are not installed.
+It installs the bridge, extension files, and public headers, the last into
+`$(includedir_server)/extension/tessera`: a module built outside this tree
+puts `-I$(includedir_server)/extension` on its include path (see
+[runtime.md](runtime.md)), and `make installcheck` checks that every
+installed header compiles that way. The test libraries remain in the
+build's `test` directory; they are not installed.
 Always clean and rebuild when switching PostgreSQL installations, including
 between builds with and without assertions. Run the suites against a
 PostgreSQL configured with `--enable-cassert` as well before changing a

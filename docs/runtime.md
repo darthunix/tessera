@@ -6,12 +6,21 @@ and input sides, the unary node helper over both, the named plan-data codec,
 the path and plan helpers, and the batch expression compiler. It is a static library, installed next to the bridge in
 `pkglibdir` with its header `tessera/runtime.h`; a node module links it
 rather than calling through the bridge, so the bridge stays a small contract
-and the helpers can change with the nodes that use them:
+and the helpers can change with the nodes that use them. The headers go
+with the bridge into `$(includedir_server)/extension/tessera`, and a
+module includes them as `tessera/...` with that directory's parent on its
+include path:
 
 ```make
 MODULE_big = my_node
+PG_CPPFLAGS = -I$(shell $(PG_CONFIG) --includedir-server)/extension
 SHLIB_LINK += $(shell $(PG_CONFIG) --pkglibdir)/libtessera_runtime.a
 ```
+
+`make installcheck` checks that this is enough: every installed header
+compiles by itself, and the TessLimit example (`examples/limit`) builds
+from a copy of its sources against the installed headers and library
+(`test/installed`).
 
 ## Building a batch from rows
 
