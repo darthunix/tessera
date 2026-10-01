@@ -39,6 +39,17 @@
 //! [`sort`] orders a table's records by their integer keys. `unsafe`
 //! is denied crate-wide and allowed only in two isolated modules: [`simd`],
 //! for vector loads, and [`table`], for the region over raw pointers.
+//!
+//! Code shape. `#[inline(always)]` and `#[inline(never)]` on a hot path
+//! record a decision checked in the disassembly of the bench binaries or by
+//! their PMU counters (`crates/tessera-capi/benches/README.md`): the comment
+//! of the function or of its group gives the reason, and the attribute goes
+//! only after the same check. Most such decisions concern the code LLVM
+//! makes and hold on any target; a few were taken by timing on an Apple M5
+//! Pro and are to be measured again on x86 with the AVX2 kernels:
+//! `BULK_MIN_ROWS`, the bounds of [`set::SetValue::WORD_KEYS`] and the
+//! branch-free compares of [`set`], and in `tessera-capi` the counted loop
+//! of a full word and the branch-free read of a NULL slot.
 
 #![deny(unsafe_code)]
 

@@ -232,6 +232,13 @@ impl<'a> WordKeys<'a> {
     /// Whether row `bit` has the null bits and keys of a record; `N` is
     /// the key count when the caller knows it, 0 for this buffer's.
     ///
+    /// The keys are read unchecked: the record's key count is known only
+    /// at run time, so indexing keeps a bounds check per key even when `N`
+    /// is a constant (at `N = 1`, three more panic paths in each
+    /// `probe_rows` and `resolve_rows` and 53 more instructions in
+    /// `probe_rows` with one codegen unit; a slice of `nkeys` keys zipped
+    /// with the slots, 52 more).
+    ///
     /// # Safety
     ///
     /// The record belongs to a table of this buffer's key count, and `N`
