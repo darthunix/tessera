@@ -36,7 +36,7 @@ BEGIN
                 ELSE 'row' END;
 END $$;
 -- A query's level: tess when every node of its plan is Tessera's, else the
--- core's nodes in it.
+-- core's nodes in it, a join's type when it is not an inner join.
 CREATE FUNCTION cov_query(query text) RETURNS text
 LANGUAGE plpgsql AS $$
 DECLARE
@@ -44,7 +44,8 @@ DECLARE
     core text;
 BEGIN
     EXECUTE format('EXPLAIN (FORMAT JSON, COSTS OFF) %s', query) INTO plan;
-    SELECT string_agg(node ->> 'Node Type', ', ') INTO core
+    SELECT string_agg(node ->> 'Node Type' ||
+                      coalesce(' (' || nullif(node ->> 'Join Type', 'Inner') || ')', ''), ', ') INTO core
     FROM jsonb_path_query(plan, 'strict $[0]."Plan".** ? (exists (@."Node Type"))') AS node
     WHERE node ->> 'Node Type' NOT IN ('Custom Scan', 'Result');
     RETURN coalesce('core: ' || core, 'tess');
@@ -307,6 +308,84 @@ ORDER BY o;
  core: WindowAgg, Sort | SELECT i4, row_number() OVER (ORDER BY i4) FROM cov
 (2 rows)
 
+-- Query forms that stay with the core, each a line of docs/limitations.md:
+-- statements that write or lock, sampling, DISTINCT ON, WITH TIES.
+CREATE TABLE cov_sink (i4 int);
+SELECT cov_query(q) AS level, q AS query
+FROM unnest(ARRAY[
+    $$SELECT i4 FROM cov WHERE i4 > 49990 FOR UPDATE$$,
+    $$INSERT INTO cov_sink SELECT i4 FROM cov WHERE i4 > 10$$,
+    $$INSERT INTO cov_sink SELECT count(*) FROM cov WHERE i4 > 10 GROUP BY i2$$,
+    $$UPDATE cov SET i2 = i2 WHERE i4 > 49990$$,
+    $$DELETE FROM cov WHERE i4 > 49990$$,
+    $$SELECT count(*) FROM cov TABLESAMPLE SYSTEM (10) WHERE i4 > 10$$,
+    $$SELECT DISTINCT ON (i2) i2, i4 FROM cov ORDER BY i2, i4$$,
+    $$SELECT i4 FROM cov ORDER BY i4 FETCH FIRST 10 ROWS WITH TIES$$
+]) WITH ORDINALITY AS c(q, o)
+ORDER BY o;
+              level               |                                  query                                  
+----------------------------------+-------------------------------------------------------------------------
+ core: LockRows, Seq Scan         | SELECT i4 FROM cov WHERE i4 > 49990 FOR UPDATE
+ core: ModifyTable, Seq Scan      | INSERT INTO cov_sink SELECT i4 FROM cov WHERE i4 > 10
+ core: ModifyTable, Subquery Scan | INSERT INTO cov_sink SELECT count(*) FROM cov WHERE i4 > 10 GROUP BY i2
+ core: ModifyTable, Seq Scan      | UPDATE cov SET i2 = i2 WHERE i4 > 49990
+ core: ModifyTable, Seq Scan      | DELETE FROM cov WHERE i4 > 49990
+ core: Sample Scan                | SELECT count(*) FROM cov TABLESAMPLE SYSTEM (10) WHERE i4 > 10
+ core: Unique, Sort               | SELECT DISTINCT ON (i2) i2, i4 FROM cov ORDER BY i2, i4
+ core: Limit, Sort                | SELECT i4 FROM cov ORDER BY i4 FETCH FIRST 10 ROWS WITH TIES
+(8 rows)
+
+DROP TABLE cov_sink;
+-- Many aggregates and many grouping keys.
+SELECT cov_query('SELECT ' || string_agg(format('sum(i4 + %s)', g), ', ') || ' FROM cov') AS level,
+       'sum(i4 + 1), …, sum(i4 + 65)' AS query
+FROM generate_series(1, 65) AS g;
+      level      |            query             
+-----------------+------------------------------
+ core: Aggregate | sum(i4 + 1), …, sum(i4 + 65)
+(1 row)
+
+SELECT cov_query('SELECT count(*) FROM cov GROUP BY ' || string_agg(format('i4 + %s', g), ', ')) AS level,
+       'GROUP BY i4 + 1, …, i4 + ' || max(g) AS query
+FROM generate_series(1, 16) AS g
+UNION ALL
+SELECT cov_query('SELECT count(*) FROM cov GROUP BY ' || string_agg(format('i4 + %s', g), ', ')),
+       'GROUP BY i4 + 1, …, i4 + ' || max(g)
+FROM generate_series(1, 17) AS g;
+      level      |            query            
+-----------------+-----------------------------
+ tess            | GROUP BY i4 + 1, …, i4 + 16
+ core: Aggregate | GROUP BY i4 + 1, …, i4 + 17
+(2 rows)
+
+-- Over an index: incremental sort and a parameterized inner side of a
+-- nested loop; and a merge join, whose sorts must restore.
+CREATE INDEX cov_i4 ON cov (i4);
+ANALYZE cov;
+SELECT cov_query(q) AS level, q AS query
+FROM unnest(ARRAY[
+    $$SELECT i4, i2 FROM cov ORDER BY i4, i2 LIMIT 10$$,
+    $$SELECT a.i2, b.i2 FROM cov a JOIN cov b ON a.i4 = b.i4 WHERE a.i4 < 3$$
+]) WITH ORDINALITY AS c(q, o)
+ORDER BY o;
+                   level                   |                                 query                                 
+-------------------------------------------+-----------------------------------------------------------------------
+ core: Limit, Incremental Sort, Index Scan | SELECT i4, i2 FROM cov ORDER BY i4, i2 LIMIT 10
+ core: Nested Loop, Index Scan, Index Scan | SELECT a.i2, b.i2 FROM cov a JOIN cov b ON a.i4 = b.i4 WHERE a.i4 < 3
+(2 rows)
+
+SET enable_hashjoin = off;
+SET enable_nestloop = off;
+SELECT cov_query($$SELECT count(*) FROM cov a JOIN cov b ON a.i8 = b.i8$$) AS level,
+       'merge join' AS query;
+            level             |   query    
+------------------------------+------------
+ core: Merge Join, Sort, Sort | merge join
+(1 row)
+
+RESET enable_hashjoin;
+RESET enable_nestloop;
+DROP INDEX cov_i4;
 DROP FUNCTION cov_where(text);
 DROP FUNCTION cov_query(text);
 DROP TABLE cov;

@@ -1,5 +1,8 @@
 # Nodes module
 
+What the nodes leave to PostgreSQL's own nodes is listed in
+[what stays with the core](limitations.md).
+
 `tessera_nodes` (`nodes/`) is the module of Tessera's own batch nodes. It
 links the runtime library statically and, when loaded, registers its node
 kinds in the bridge's node registry and its scan methods with PostgreSQL.

@@ -23,8 +23,9 @@ implementations of PostgreSQL functions are registered and called, the
 filters over a batch through them, and the
 [runtime guide](docs/runtime.md) the static library a node links for
 building and passing batches. The [nodes guide](docs/nodes.md) describes the
-module of Tessera's own batch nodes, `TessHeapScan`, `TessPack`,
-`TessFilter` and `TessAgg`, serial and under PostgreSQL's parallel query,
+module of Tessera's own batch nodes, serial and under PostgreSQL's parallel
+query, and [what stays with the core](docs/limitations.md) what they leave
+to PostgreSQL's own nodes,
 the [table guide](docs/table.md) the hash table of joins and grouping in a
 region of memory a node owns, the [spill guide](docs/spill.md) how parts
 of that table go to temporary files, and the
@@ -83,11 +84,10 @@ through Cargo with the toolchain the repository selects.
    calls. `SET tessera.enable = off` gives the core's plan for comparison.
    With `max_parallel_workers_per_gather` above zero, on a table larger than
    8 MB, the same query runs in every worker under a `Gather`:
-   `Finalize Aggregate → Gather → Parallel Custom Scan (TessAgg) → …`. What
-   the nodes handle today (one table, int4 and int8 filters as batch chains
-   with the rest row by row, `count` over any type, `sum` over int4, `min`
-   and `max` over int4 and int8, a limit) is in the
-   [nodes guide](docs/nodes.md).
+   `Finalize Aggregate → Gather → Parallel Custom Scan (TessAgg) → …`. The
+   [nodes guide](docs/nodes.md) describes what each node handles, and
+   [what stays with the core](docs/limitations.md) lists the queries and
+   expressions PostgreSQL's own nodes keep.
 
 4. Run the regression suites against a running server (`PGPORT` and
    `PGHOST` in the environment) or in a temporary instance, as the
