@@ -312,8 +312,15 @@ static const TessBatchOps append_batch_ops = {
  * statement's descriptions only (ExecDoInitialPruning, before the nodes
  * start) and hands a node its own by number (ExecInitPartitionExecPruning):
  * the EState's lists hold this one alone for the two calls. The initial
- * pruning is done: valid receives the children to initialize.
+ * pruning is done: valid receives the children to initialize. The core
+ * exports no other way to make a pruning state, and a CustomScan's
+ * description never reaches the statement's list (setrefs registers an
+ * Append's alone). What the second call leaves besides the state: the
+ * leaf partitions it kept join es_unpruned_relids, as an Append's do.
  */
+#if PG_VERSION_NUM < 180000
+#error "TessAppend prunes through ExecDoInitialPruning and the EState's pruning lists of PostgreSQL 18"
+#endif
 static PartitionPruneState *
 prune_start(TessAppendState *state, const PartitionPruneInfo *planned, Bitmapset **valid)
 {
@@ -809,6 +816,11 @@ append_initialize_dsm(CustomScanState *css, ParallelContext *pcxt, void *coordin
 										   pcxt->seg);
 	state->shared = (AppendShared *) ((char *) coordinate +
 									  tess_shared_stats_size(coordinate));
+	/*
+	 * The lock of a parallel append, which this is: its waits show as the
+	 * core's ParallelAppend. A tranche of the node's own would be taken
+	 * once a cluster, which a module loaded per session cannot do.
+	 */
 	LWLockInitialize(&state->shared->lock, LWTRANCHE_PARALLEL_APPEND);
 	reset_shared(state);
 }
