@@ -4,6 +4,12 @@
 
 #include "postgres.h"
 
+/*
+ * The version of Tessera's modules, which PG_MODULE_MAGIC_EXT records: the
+ * workspace's version in Cargo.toml.
+ */
+#define TESS_VERSION "0.1.0"
+
 /* Size in bytes needed to include field and all preceding fields. */
 #define TESS_ABI_SIZE_INCLUDING_FIELD(type, field) \
 	(offsetof(type, field) + sizeof(((type *) 0)->field))

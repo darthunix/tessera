@@ -20,6 +20,9 @@ SHOW tessera.scan_cost_factor;
 -- The prefix is reserved now.
 SET tessera.misspelt_again = 1;
 LOAD 'tessera_kernels';
+-- Each module reports its name and version (PG_MODULE_MAGIC_EXT).
+SELECT module_name, version FROM pg_get_loaded_modules()
+WHERE module_name LIKE 'tessera%' ORDER BY module_name;
 -- Every setting changes plans: EXPLAIN (SETTINGS) lists the ones not at
 -- their defaults, tessera.enable among them.
 SELECT name FROM pg_settings

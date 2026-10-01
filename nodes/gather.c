@@ -813,8 +813,8 @@ gather_begin(CustomScanState *css, EState *estate, int eflags)
  * Launch the workers on the first execution, as ExecGather does
  * (executor/nodeGather.c); the core's code is static and tied to its
  * tuple queues, so this one follows it through the exported parallel
- * executor calls, over queues of batches. PostgreSQL 18 added the
- * workers' counters of the estate, kept under PG_VERSION_NUM below.
+ * executor calls, over queues of batches, and counts the workers in the
+ * estate as it does.
  */
 static void
 gather_launch(TessGatherState *state)
@@ -839,10 +839,8 @@ gather_launch(TessGatherState *state)
 		pcxt = state->pei->pcxt;
 		LaunchParallelWorkers(pcxt);
 		state->nworkers_launched = pcxt->nworkers_launched;
-#if PG_VERSION_NUM >= 180000
 		estate->es_parallel_workers_to_launch += pcxt->nworkers_to_launch;
 		estate->es_parallel_workers_launched += pcxt->nworkers_launched;
-#endif
 		if (pcxt->nworkers_launched > 0)
 		{
 			state->readers = palloc_array(shm_mq_handle *, pcxt->nworkers_launched);

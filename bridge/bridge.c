@@ -7,7 +7,7 @@
 
 #include "internal.h"
 
-PG_MODULE_MAGIC;
+PG_MODULE_MAGIC_EXT(.name = "tessera", .version = TESS_VERSION);
 
 PGDLLEXPORT void _PG_init(void);
 

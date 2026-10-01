@@ -8,7 +8,7 @@
 #include "internal.h"
 #include "limit.h"
 
-PG_MODULE_MAGIC;
+PG_MODULE_MAGIC_EXT(.name = "tessera_nodes", .version = TESS_VERSION);
 
 PGDLLEXPORT void _PG_init(void);
 

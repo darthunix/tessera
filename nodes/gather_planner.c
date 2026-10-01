@@ -640,11 +640,7 @@ give_rescan_params(Plan *plan)
 /* The planning done, the flags held back come back; a nested planning keeps its own. */
 static PlannedStmt *
 gather_planner(Query *parse, const char *query_string, int cursorOptions,
-			   ParamListInfo boundParams
-#if PG_VERSION_NUM >= 190000
-			   ,ExplainState *es
-#endif
-	)
+			   ParamListInfo boundParams, ExplainState *es)
 {
 	List	   *outer = held_parallel_aware;
 	PlannedStmt *result;
@@ -652,15 +648,9 @@ gather_planner(Query *parse, const char *query_string, int cursorOptions,
 	held_parallel_aware = NIL;
 	PG_TRY();
 	{
-#if PG_VERSION_NUM >= 190000
 		result = previous_planner_hook != NULL ?
 			previous_planner_hook(parse, query_string, cursorOptions, boundParams, es) :
 			standard_planner(parse, query_string, cursorOptions, boundParams, es);
-#else
-		result = previous_planner_hook != NULL ?
-			previous_planner_hook(parse, query_string, cursorOptions, boundParams) :
-			standard_planner(parse, query_string, cursorOptions, boundParams);
-#endif
 	}
 	PG_CATCH();
 	{

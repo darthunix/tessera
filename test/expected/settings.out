@@ -48,6 +48,16 @@ SET tessera.misspelt_again = 1;
 ERROR:  invalid configuration parameter name "tessera.misspelt_again"
 DETAIL:  "tessera" is a reserved prefix.
 LOAD 'tessera_kernels';
+-- Each module reports its name and version (PG_MODULE_MAGIC_EXT).
+SELECT module_name, version FROM pg_get_loaded_modules()
+WHERE module_name LIKE 'tessera%' ORDER BY module_name;
+   module_name   | version 
+-----------------+---------
+ tessera         | 0.1.0
+ tessera_kernels | 0.1.0
+ tessera_nodes   | 0.1.0
+(3 rows)
+
 -- Every setting changes plans: EXPLAIN (SETTINGS) lists the ones not at
 -- their defaults, tessera.enable among them.
 SELECT name FROM pg_settings
