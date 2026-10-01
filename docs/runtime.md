@@ -219,7 +219,11 @@ consumed when done, and the node's next `release` or `publish` returns the
 storage, refusing while the batch is unconsumed. A row-wise parent sees one row per call: the node walks the
 selection with `tess_row_mask_next`, shows each row with
 `tess_output_select`, and marks the batch consumed itself with
-`tess_output_finish` before fetching the next.
+`tess_output_finish` before fetching the next. The output reads the
+column of every slot attribute once per batch, for all its selected
+rows, at the first row it shows, and then only copies values; a node
+with a row mode of its own reads them the same way with
+`tess_batch_target_columns`.
 
 In batch mode one `ExecProcNode` call returns the whole batch, which the
 executor's instrumentation counts as one row; `publish` therefore adds the

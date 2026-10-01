@@ -172,27 +172,6 @@ forward_request(TessUnary *unary)
 	bms_free(projection);
 }
 
-/* Row mode: the column of every slot attribute, for the whole batch. */
-static void
-fetch_columns(TessUnary *unary, TessBatch *batch)
-{
-	int			natts = unary->node->ss.ps.ps_ResultTupleSlot->tts_tupleDescriptor->natts;
-
-	for (int attribute = 0; attribute < natts; attribute++)
-	{
-		TessDatumColumn *column = &unary->columns[attribute];
-
-		*column = (TessDatumColumn) TESS_STRUCT_INITIALIZER(TessDatumColumn);
-		batch->ops->get_datum_column(batch,
-									 tess_layout_column(&unary->layout, attribute),
-									 &batch->rows, TESS_COLUMN_FOR_PROJECTION,
-									 column);
-		if (column->values == NULL || column->isnull == NULL ||
-			column->nrows != batch->rows.nrows)
-			elog(ERROR, "Tessera batch returned an invalid column");
-	}
-}
-
 /* Make the next batch with rows active, or return false at the end. */
 static bool
 fetch_batch(TessUnary *unary)
@@ -232,8 +211,11 @@ fetch_batch(TessUnary *unary)
 		}
 		if (unary->projection != NULL)
 			batch = tess_projection_wrap(unary->projection, batch);
+		/* Row mode: the column of every slot attribute, for the whole batch. */
 		if (unary->request->output_mode == TESS_OUTPUT_ROWS)
-			fetch_columns(unary, batch);
+			tess_batch_target_columns(batch, &unary->layout,
+									  unary->node->ss.ps.ps_ResultTupleSlot->tts_tupleDescriptor->natts,
+									  unary->columns);
 		unary->stats.output_rows += kept;
 		unary->active_batch = batch;
 		unary->next_row = tess_row_mask_next(&batch->rows, -1);

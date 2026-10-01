@@ -1057,23 +1057,6 @@ next_batch(HeapScanState *state)
 	return give_out(state, batch);
 }
 
-/* The column of every target, for the batch's rows: deformed or computed once. */
-static void
-fetch_columns(HeapScanState *state, TessBatch *batch)
-{
-	for (int target = 0; target < state->layout.ntargets; target++)
-	{
-		TessDatumColumn *column = &state->columns[target];
-
-		*column = (TessDatumColumn) TESS_STRUCT_INITIALIZER(TessDatumColumn);
-		batch->ops->get_datum_column(batch, tess_layout_column(&state->layout, target),
-									 &batch->rows, TESS_COLUMN_FOR_PROJECTION, column);
-		if (column->values == NULL || column->isnull == NULL ||
-			column->nrows != batch->rows.nrows)
-			elog(ERROR, "TessHeapScan batch returned an invalid column");
-	}
-}
-
 /* Forget the batch being served: the wrapper's values go with it. */
 static void
 drop_active(HeapScanState *state)
@@ -1103,7 +1086,9 @@ exec_rows(HeapScanState *state)
 
 			if (batch == NULL)
 				return NULL;
-			fetch_columns(state, batch);
+			/* The column of every target, for the batch's rows: deformed or computed once. */
+			tess_batch_target_columns(batch, &state->layout, state->layout.ntargets,
+									  state->columns);
 			state->active = batch;
 			state->next_row = tess_row_mask_next(&batch->rows, -1);
 		}

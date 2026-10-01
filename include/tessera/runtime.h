@@ -373,6 +373,15 @@ extern TupleTableSlot *tess_output_publish(TessOutput *output, TessBatch *batch)
 /* Show another selected row of the active batch for a row-wise parent. */
 extern TupleTableSlot *tess_output_select(TessOutput *output, int row);
 
+/*
+ * The column of each of the first ntargets targets of layout for the
+ * selected rows of batch, into columns: what a node serving rows one at a
+ * time reads once per batch, then copies row by row. A column the batch
+ * gives without values, flags or its row count is an error.
+ */
+extern void tess_batch_target_columns(TessBatch *batch, const TessLayout *layout,
+									  int ntargets, TessDatumColumn *columns);
+
 /* Mark the active batch consumed on behalf of a row-wise parent; repeatable. */
 extern void tess_output_finish(TessOutput *output);
 

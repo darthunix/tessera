@@ -13,44 +13,59 @@ struct TessOutput
 	PlanState  *ps;
 	TupleTableSlot *slot;
 	TessBinding *binding;
-	/* The batch column of each slot attribute. */
+	/* The batch column of each slot attribute, as a layout of the slot. */
 	int		   *batch_columns;
+	TessLayout	layout;
+	/*
+	 * Row mode: every attribute's column for the selected rows of the
+	 * published batch, taken at its first row and forgotten when another
+	 * batch is published or the batch is released.
+	 */
+	TessDatumColumn *columns;
+	bool		columns_ready;
 };
 
-/* Show one selected row of the batch in the slot. */
+void
+tess_batch_target_columns(TessBatch *batch, const TessLayout *layout, int ntargets,
+						  TessDatumColumn *columns)
+{
+	for (int target = 0; target < ntargets; target++)
+	{
+		TessDatumColumn *column = &columns[target];
+
+		*column = (TessDatumColumn) TESS_STRUCT_INITIALIZER(TessDatumColumn);
+		batch->ops->get_datum_column(batch, tess_layout_column(layout, target),
+									 &batch->rows, TESS_COLUMN_FOR_PROJECTION, column);
+		if (column->values == NULL || column->isnull == NULL ||
+			column->nrows != batch->rows.nrows)
+			elog(ERROR, "Tessera batch returned an invalid column");
+	}
+}
+
+/*
+ * Show one selected row of the batch in the slot: the attributes' columns
+ * are read once for all the batch's selected rows, then copied row by row.
+ */
 static void
 select_row(TessOutput *output, TessBatch *batch, int row)
 {
 	TupleTableSlot *slot = output->slot;
-	TupleDesc	desc = slot->tts_tupleDescriptor;
-	int			nwords = tess_row_mask_word_count(batch->rows.nrows);
-	uint64		local = 0;
-	uint64	   *bits;
-	TessRowMask one;
-	int			attribute;
+	int			natts = output->layout.ntargets;
 
 	if (row < 0 || row >= batch->rows.nrows ||
 		!tess_row_mask_contains(&batch->rows, row))
 		elog(ERROR, "Tessera output row %d is not selected", row);
-	ExecClearTuple(slot);
-	bits = nwords == 1 ? &local : palloc0_array(uint64, nwords);
-	bits[row / 64] = UINT64CONST(1) << (row % 64);
-	one.nrows = batch->rows.nrows;
-	one.bits = bits;
-	for (attribute = 0; attribute < desc->natts; attribute++)
+	if (!output->columns_ready)
 	{
-		TessDatumColumn column = TESS_STRUCT_INITIALIZER(TessDatumColumn);
-
-		batch->ops->get_datum_column(batch, output->batch_columns[attribute],
-									 &one, TESS_COLUMN_FOR_PROJECTION, &column);
-		if (column.values == NULL || column.isnull == NULL ||
-			column.nrows != batch->rows.nrows)
-			elog(ERROR, "Tessera batch returned an invalid column");
-		slot->tts_values[attribute] = column.values[row];
-		slot->tts_isnull[attribute] = column.isnull[row];
+		tess_batch_target_columns(batch, &output->layout, natts, output->columns);
+		output->columns_ready = true;
 	}
-	if (nwords > 1)
-		pfree(bits);
+	ExecClearTuple(slot);
+	for (int attribute = 0; attribute < natts; attribute++)
+	{
+		slot->tts_values[attribute] = output->columns[attribute].values[row];
+		slot->tts_isnull[attribute] = output->columns[attribute].isnull[row];
+	}
 	slot->tts_tableOid = batch->table_oid;
 	ExecStoreVirtualTuple(slot);
 }
@@ -89,6 +104,12 @@ tess_output_create(MemoryContext parent_context, PlanState *ps,
 				 attribute + 1);
 		output->batch_columns[attribute] = column;
 	}
+	output->layout = (TessLayout) TESS_STRUCT_INITIALIZER(TessLayout);
+	output->layout.ncolumns = layout->ncolumns;
+	output->layout.ntargets = natts;
+	output->layout.target_columns = output->batch_columns;
+	output->columns = MemoryContextAllocZero(parent_context,
+											 mul_size(sizeof(TessDatumColumn), Max(natts, 1)));
 	output->binding = output->ops->attach(slot, layout);
 	return output;
 }
@@ -109,6 +130,7 @@ tess_output_request(TessOutput *output)
 static void
 recycle(TessOutput *output, bool require_consumed)
 {
+	output->columns_ready = false;
 	if (output->ops->get_batch(output->binding) == NULL)
 		return;
 	if (require_consumed && !output->ops->is_consumed(output->binding))
@@ -135,6 +157,7 @@ tess_output_publish(TessOutput *output, TessBatch *batch)
 	if (first < 0)
 		elog(ERROR, "Tessera output cannot publish an empty selection");
 	recycle(output, true);
+	output->columns_ready = false;
 	output->ops->publish_batch(output->binding, batch);
 	request = output->ops->freeze_request(output->binding);
 	if (request->output_mode == TESS_OUTPUT_BATCH)
