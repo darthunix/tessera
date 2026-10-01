@@ -2287,6 +2287,63 @@
      (none). TessAppend: комментарий о подмене отсечения и es_unpruned_relids, сборка на ядре старше 18 —
      #error с причиной; транш LWLock оставлен с объяснением.
   42 набора SQL прошли (release и debug). Пункт 4.30 выполнен.
+  31. Ревью, пункты 26–32: заголовки, слоистость контракта, ABI таблицы ядер, ошибки на границе, имена (запрос
+  пользователя 2026-10-01: сверить и запланировать). Каждое утверждение проверено по коду (номера строк ревью —
+  от другой ревизии, места те же). Вердикты:
+  26 — верно. bridge/Makefile ставит 21 заголовок из 24: нет calendar.h, decimal.h, text.h, а kernel_ops.h
+    включает tessera/decimal.h. Опыт: файл с одним #include "tessera/runtime.h" (или bridge.h) против
+    установленных заголовков падает на tessera/decimal.h; node.h, table.h, kernels.h, batch.h компилируются. PGXS
+    кладёт их в <includedir_server>/extension/tessera/, путь -I<includedir_server>/extension нигде не описан.
+    Пример TessLimit собирается из дерева (-I../../include), поэтому внешняя сборка ничем не проверяется.
+  27 — верно. bridge.h → kernel_ops.h (579 строк) → table.h (1000), sort.h, spill.h, decimal.h, kernels.h:
+    ≈2500 строк и 113 extern tess_*, которые линкует только tessera_kernels, в каждом потребителе моста. node.h
+    включает table.h ради TessTableKeyKind. runtime.h — 911 строк, 97 extern (сборщик, вход, выход, unary,
+    проекция, выражения, план, строки, сброс, общие счётчики).
+  28 — верно. TESS_KERNEL_OPS_MIN_SIZE доходит до последнего поля (table_gather_words), мост проверяет на NULL все
+    83 указателя, поэтому 13 проверок TESS_ABI_HAS_FIELD(…, TessKernelOps, …) в runtime и nodes всегда истинны
+    (две из них добавлены в 4.27–4.28). Таблица ядер на деле — контракт одной сборки: модуль ядер и runtime
+    собираются вместе.
+  29 — в основном верно. Три enum (ArithmeticError, CalendarError, TextError) со своим sqlstate(), остальное —
+    anyhow; c/status.rs пробует их по одному, всё прочее — INVALID_ARGUMENT и XX000: ошибка вызывающего и порча
+    таблицы или файла сброса неразличимы. Неверно про decimal: значение, не влезшее в слово, ошибкой не
+    становится — строка уходит в остаток, который считают функции numeric ядра. Комментарий ops.rs («exactly one
+    error type») устарел.
+  30 — частично. «Never raises» в kernels.h относится к точкам входа Rust и верно; обёртки TessFunction.evaluate
+    в kernels/*.c зовут функции ядра (textlike, text_substr, float8_*, numeric_*, детоаст) для строк остатка и
+    бросают ERROR, как сама функция, — function.h это и обещает («raises the same errors»), но kernels.h и
+    docs/kernels.md читаются как общее правило. Утечки нет: scratch сверх SCRATCH_ROWS (1024) берётся в текущем
+    контексте и уходит с ним при ERROR, а пачки не длиннее 64 строк туда и не попадают.
+  31 — частично. 397 elog(ERROR) против 47 ereport (в runtime 196 против 20); почти все elog — проверки
+    инвариантов, это правильная форма. Но часть достижима без ошибки в коде: «TessAgg read a damaged partition of
+    rows», «could not create Tessera spill file», чтение раундов общего соединения — им нужны
+    ERRCODE_DATA_CORRUPTED и errcode_for_file_access. WARNING и NOTICE нет — сообщать пользователю нечего, это
+    не недостаток.
+  32 — верно. TessLayout (карта таргетов) и TessLayoutKind (размеры структур Rust), и у обоих префикс TESS_LAYOUT_
+    (TESS_LAYOUT_EXPLICIT в planner.h и TESS_LAYOUT_STATUS_SIZE в kernels.h); T_FLOAT8/T_INT4 в kernels/float.c —
+    в стиле NodeTag ядра; TessSpillPosition.segment всегда 0 (файл сброса один, смещение 64-битное);
+    tess_spill_columns_layout отвечает на коды 0–3 без имён.
+  Предлагаемые коммиты:
+  1) заголовки ставятся все (список — по маске include/tessera/*.h); проверка внешней сборки: каждый
+     установленный заголовок компилируется один, против установленного дерева, и пример TessLimit собирается
+     против установленных заголовков и libtessera_runtime.a; docs/runtime.md и docs/bridge.md — путь
+     -I$(includedir_server)/extension.
+  2) слоистость, малый разрез: bridge.h объявляет TessKernelOps вперёд и не включает kernel_ops.h (его включает
+     тот, кто зовёт ядра); TessTableKeyKind — в отдельный маленький заголовок для node.h; runtime.h — зонтик над
+     заголовками подсистем (builder, output, input, unary, project, expr, planner, rows, spill, shared_stats).
+  3) таблица ядер — контракт одной сборки: 13 проверок TESS_ABI_HAS_FIELD для TessKernelOps убираются, правило
+     записывается в kernel_ops.h и docs/kernels.md; список NULL-проверок моста остаётся (он и ловит забытое поле,
+     как при table_gather_words).
+  4) ошибки на границе: одна точка классификации в status.rs, общий трейт (sqlstate и код) у трёх семейств;
+     новый вид — порча данных (таблица, файл сброса): новый код TESS_ERROR_DATA_CORRUPTED, XX001; ошибка
+     вызывающего остаётся XX000; комментарий ops.rs.
+  5) kernels.h и docs/kernels.md: «не бросает» — про точки входа Rust; evaluate может бросить ERROR, как функция.
+  6) ereport с кодом для достижимых условий: повреждённые разделы и раунды — DATA_CORRUPTED, создание файлов —
+     errcode_for_file_access; в docs/node.md — правило (elog только для инвариантов).
+  7) имена: TessLayoutKind → TessKernelsProbe (TESS_PROBE_*), tess_kernels_layout → tess_kernels_probe; T_FLOAT8 →
+     FLOAT_ARG_*; TessSpillPosition без segment; коды tess_spill_columns_layout — enum в spill.h и константы Rust.
+  Не делаем: WARNING и NOTICE (сообщать нечего); полное разделение заголовков ядер на типы и extern — если
+  выбран малый разрез.
+  Замеров не требуется: правки не на горячем пути (4) меняет только путь ошибки).
   Порядок (решение 2026-09-20): после 4.14 выполняются остаток 6.3 (ленивая проекция), затем 3.9 (AVX2), 4.15 и раздел 5 —
   чтобы узлы раздела 5 мерялись на реальном конвейере, и их ядра писались сразу для обеих архитектур. Уточнения
   (2026-09-20): после профиля 4.16 вперёд вытянуты 6.1 и ленивый pack (4.17), а затем, по второму замеру win, и 6.2 — всё
@@ -2344,6 +2401,10 @@
   Порядок (решение пользователя 2026-10-01): 4.30 (ревью «H», пункты 46–47) — сейчас, перед 8.1; внутренние
   счётчики — под VERBOSE (не своей опцией: в 3) и 6) вместо TESSERA — VERBOSE на всех ядрах); агрегаты с
   C-функциями расширений — ядру (5) как предложено).
+  Порядок (2026-10-01, ждёт решения пользователя): 4.31 (ревью, пункты 26–32); решения: (а) разрез заголовков —
+  малый (2) или полный (типы отдельно от extern в заголовках ядер); (б) таблица ядер — контракт одной сборки
+  (3) или необязательные операции с откатом; (в) ошибки — общий трейт и код порчи (4) или один enum на все
+  семейства; (г) сейчас, перед 8.1, или позже.
 
   ### 5. Узлы с состоянием и временное хранение
 
