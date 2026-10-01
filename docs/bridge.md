@@ -152,10 +152,12 @@ described in [binding.md](binding.md). `TessSourceRegistryOps` implements the
 source registry described in [source.md](source.md). `TessNodeRegistryOps`
 implements the node registry described in [node.md](node.md).
 `TessFunctionRegistryOps` implements the registry of batch implementations of
-PostgreSQL functions described in [function.md](function.md). The three
-registries keep their entries on one list (`bridge/registry.c`): `add`
-accepts the same entry again and refuses another under its key, a name or
-an OID, `remove` goes by address and `find` by key. No module consumes the
+PostgreSQL functions described in [function.md](function.md). The node
+and source registries keep their entries on a list (`bridge/registry.c`),
+the function registry, over two hundred entries that expressions look up
+many times while they are planned, in a hash table by OID: `add` accepts
+the same entry again and refuses another under its key, a name or an OID,
+`remove` removes only that entry and `find` goes by key. No module consumes the
 source registry yet; it waits for the first columnar source (plan 6.5).
 `TessKernelRegistryOps` holds the one table of Rust kernel operations
 (`TessKernelOps`, `tessera/kernel_ops.h`) of a backend: the key hashes and

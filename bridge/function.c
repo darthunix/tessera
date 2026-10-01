@@ -1,11 +1,22 @@
 #include "postgres.h"
 
-#include "nodes/pg_list.h"
+#include "utils/hsearch.h"
+#include "utils/memutils.h"
 
 #include "internal.h"
 
-/* Borrowed function descriptions; only the list cells belong to the bridge. */
-static List *functions = NIL;
+/*
+ * Borrowed function descriptions by OID; only the table's entries belong
+ * to the bridge. Expressions look functions up many times while they are
+ * planned, over two hundred registered: a hash table, not a list.
+ */
+typedef struct FunctionEntry
+{
+	Oid			funcid;
+	const TessFunction *function;
+} FunctionEntry;
+
+static HTAB *functions = NULL;
 
 static void add_function(const TessFunction *function);
 static void remove_function(const TessFunction *function);
@@ -68,32 +79,47 @@ validate_function(const TessFunction *function)
 		elog(ERROR, "Tessera function must be strict");
 }
 
-/* Whether a registered function implements the OID. */
-static bool
-same_funcid(const void *entry, const void *funcid)
-{
-	return ((const TessFunction *) entry)->funcid == *(const Oid *) funcid;
-}
-
 static void
 add_function(const TessFunction *function)
 {
+	FunctionEntry *entry;
+	bool		found;
+
 	validate_function(function);
+	if (functions == NULL)
+	{
+		HASHCTL		ctl = {0};
+
+		ctl.keysize = sizeof(Oid);
+		ctl.entrysize = sizeof(FunctionEntry);
+		ctl.hcxt = TopMemoryContext;
+		functions = hash_create("Tessera functions", 256, &ctl,
+								HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+	}
+	entry = hash_search(functions, &function->funcid, HASH_ENTER, &found);
 	/*
 	 * The OID only: registration runs in _PG_init, in the postmaster too,
-	 * where the catalog cannot be read to name the function.
+	 * where the catalog cannot be read to name the function. The same
+	 * description again is no error.
 	 */
-	if (!tess_registry_add(&functions, function, same_funcid, &function->funcid))
+	if (found && entry->function != function)
 		ereport(ERROR,
 				(errcode(ERRCODE_DUPLICATE_OBJECT),
 				 errmsg("Tessera function with OID %u is already registered",
 						function->funcid)));
+	entry->function = function;
 }
 
 static void
 remove_function(const TessFunction *function)
 {
-	tess_registry_remove(&functions, function);
+	FunctionEntry *entry;
+
+	if (function == NULL || functions == NULL)
+		return;
+	entry = hash_search(functions, &function->funcid, HASH_FIND, NULL);
+	if (entry != NULL && entry->function == function)
+		hash_search(functions, &function->funcid, HASH_REMOVE, NULL);
 }
 
 /*
@@ -104,7 +130,10 @@ remove_function(const TessFunction *function)
 static const TessFunction *
 find_function(Oid funcid)
 {
-	if (!OidIsValid(funcid))
+	FunctionEntry *entry;
+
+	if (!OidIsValid(funcid) || functions == NULL)
 		return NULL;
-	return tess_registry_find(functions, same_funcid, &funcid);
+	entry = hash_search(functions, &funcid, HASH_FIND, NULL);
+	return entry != NULL ? entry->function : NULL;
 }
