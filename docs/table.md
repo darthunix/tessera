@@ -437,7 +437,7 @@ participant probes the table without the filter.
 ## Sorting records
 
 A node that sorts keeps its rows as records whose keys are the sort keys,
-in key order (`TessRows` in `tessera/runtime.h`), and orders them without
+in key order (`TessRows` in `tessera/runtime_rows.h`), and orders them without
 linking them (`tessera/sort.h`, module `sort` of the kernels). Each
 record becomes an item of whole 64-bit words: every key's value as bits
 whose unsigned order is the key's order (an int4 or int8 with its sign

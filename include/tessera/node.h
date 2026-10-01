@@ -8,7 +8,7 @@
 #include "nodes/pathnodes.h"
 
 #include "tessera/abi.h"
-#include "tessera/table.h"
+#include "tessera/table_key.h"
 
 #define TESS_NODE_ABI_VERSION 0
 #define TESS_NODE_REGISTRY_OPS_ABI_VERSION 0

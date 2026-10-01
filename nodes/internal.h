@@ -6,6 +6,7 @@
 #include "utils/sortsupport.h"
 #include "utils/typcache.h"
 
+#include "tessera/kernel_ops.h"
 #include "tessera/node.h"
 #include "tessera/planner.h"
 #include "tessera/sort.h"

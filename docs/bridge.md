@@ -164,7 +164,11 @@ the same entry again and refuses another under its key, a name or an OID,
 `remove` removes only that entry and `find` goes by key. No module consumes the
 source registry yet; it waits for the first columnar source (plan 6.5).
 `TessKernelRegistryOps` holds the one table of Rust kernel operations
-(`TessKernelOps`, `tessera/kernel_ops.h`) of a backend: the key hashes and
+(`TessKernelOps`, `tessera/kernel_ops.h`) of a backend. `tessera/bridge.h`
+only declares the two types: a module that calls the kernels includes
+`tessera/kernel_ops.h`, and the bridge's other consumers do not get the
+kernels' headers (some 2500 lines and a hundred functions only
+`tessera_kernels` links). The operations are the key hashes and
 the hash table of [table.md](table.md), which only the `tessera_kernels`
 module links. That module installs the table with `set` when it is
 loaded; a node module reads it with `get`, through

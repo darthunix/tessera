@@ -92,7 +92,7 @@ the query that wrote them, on the same machine, as PostgreSQL's are.
 ## Files
 
 The runtime library writes and reads the blocks
-(`runtime/spill.c`, declared in `tessera/runtime.h`). A node makes a
+(`runtime/spill.c`, declared in `tessera/runtime_spill.h`). A node makes a
 `TessSpill` per level of partitioning, with the table's fingerprint, the
 longest body it accepts, the number of partitions and the bytes of its
 write buffer (`TESS_SPILL_BUFFER_LEN`: a sixteenth of `hash_mem`, 32 to

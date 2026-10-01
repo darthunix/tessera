@@ -4,7 +4,11 @@
 beyond the bridge's contract: building batches from rows, the node's output
 and input sides, the unary node helper over both, the named plan-data codec,
 the path and plan helpers, and the batch expression compiler. It is a static library, installed next to the bridge in
-`pkglibdir` with its header `tessera/runtime.h`; a node module links it
+`pkglibdir` with its headers, one a part (`tessera/runtime_api.h`,
+`runtime_builder.h`, `runtime_heap_batch.h`, `runtime_project.h`,
+`runtime_qual.h`, `runtime_output.h`, `runtime_input.h`, `runtime_unary.h`,
+`runtime_shared_stats.h`, `runtime_spill.h`, `runtime_rows.h`) and
+`tessera/runtime.h`, which includes them all; a node module links it
 rather than calling through the bridge, so the bridge stays a small contract
 and the helpers can change with the nodes that use them. The headers go
 with the bridge into `$(includedir_server)/extension/tessera`, and a
@@ -423,7 +427,7 @@ chunk and zeroes every row.
 ## Keeping rows
 
 A node that must hold every row of its input before it returns one, such
-as a sort, keeps them in `TessRows` (`tessera/runtime.h`): records of the
+as a sort, keeps them in `TessRows` (`tessera/runtime_rows.h`): records of the
 kernels' table format ([table.md](table.md)) in chunks of its memory, each
 with the row's keys in their slots and a payload of the kept columns, a
 word of their NULL bits per 64 of them and then a word each, up to the

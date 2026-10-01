@@ -12,13 +12,20 @@
 #include "tessera/abi.h"
 #include "tessera/binding.h"
 #include "tessera/function.h"
-#include "tessera/kernel_ops.h"
 #include "tessera/node.h"
 #include "tessera/source.h"
 
 #define TESS_API_RENDEZVOUS "tessera.api.v0"
 #define TESS_API_ABI_VERSION 0
 #define TESS_SETTINGS_ABI_VERSION 0
+
+/*
+ * The kernels' operations and their registry, defined in
+ * tessera/kernel_ops.h, which a module that calls the kernels includes:
+ * the bridge's contract carries only the pointer, not the kernels' surface.
+ */
+typedef struct TessKernelOps TessKernelOps;
+typedef struct TessKernelRegistryOps TessKernelRegistryOps;
 
 /*
  * Borrowed, read-only pointers to the bridge's configuration variables.

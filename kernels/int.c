@@ -31,6 +31,7 @@
 #include "utils/timestamp.h"
 
 #include "tessera/bridge.h"
+#include "tessera/kernel_ops.h"
 #include "tessera/kernels.h"
 
 #include "internal.h"

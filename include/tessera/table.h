@@ -8,6 +8,7 @@
 #include "tessera/batch.h"
 #include "tessera/row_mask.h"
 #include "tessera/status.h"
+#include "tessera/table_key.h"
 
 /*
  * The table (crates/tessera-kernels, module table) is an index and the
@@ -50,9 +51,6 @@
 /* The format of the table this header describes. */
 #define TESS_TABLE_FORMAT_VERSION 1
 
-/* The most keys a record holds. */
-#define TESS_TABLE_MAX_KEYS 16
-
 /*
  * Chunks: at most TESS_TABLE_MAX_CHUNKS of at most TESS_TABLE_MAX_CHUNK_LEN
  * bytes each, a multiple of 8; the first TESS_TABLE_CHUNK_HEADER bytes of a
@@ -64,26 +62,6 @@
 #define TESS_TABLE_MAX_CHUNK_LEN (1024 * 1024)
 #define TESS_TABLE_CHUNK_HEADER 8
 
-/* What a key column holds; every key takes an 8-byte slot in a record. */
-typedef enum TessTableKeyKind
-{
-	/* An int4 Datum, sign-extended into its slot. */
-	TESS_TABLE_KEY_INT4 = 1,
-	/* An int8 Datum. */
-	TESS_TABLE_KEY_INT8 = 2
-} TessTableKeyKind;
-
-/*
- * One key of a batch: a Datum column of the kind, with prepared as its
- * readiness (NULL when the whole column is initialized), as for the
- * kernels. Every key column has the batch's row count.
- */
-typedef struct TessTableKey
-{
-	TessTableKeyKind kind;
-	const TessDatumColumn *column;
-	const TessRowMask *prepared;
-} TessTableKey;
 
 /*
  * A table as this process sees it: the index, and the chunks by number.

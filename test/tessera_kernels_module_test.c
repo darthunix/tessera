@@ -10,6 +10,7 @@
 #include "utils/lsyscache.h"
 
 #include "tessera/bridge.h"
+#include "tessera/kernel_ops.h"
 
 PG_MODULE_MAGIC;
 

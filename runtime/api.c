@@ -2,6 +2,7 @@
 
 #include "fmgr.h"
 
+#include "tessera/kernel_ops.h"
 #include "tessera/runtime.h"
 
 /* The validated API, found once per backend. */

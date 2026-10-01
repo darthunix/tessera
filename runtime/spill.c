@@ -25,6 +25,7 @@
 #include "utils/memutils.h"
 #include "utils/wait_event.h"
 
+#include "tessera/kernel_ops.h"
 #include "tessera/runtime.h"
 
 /* The write buffer when the config gives none. */
