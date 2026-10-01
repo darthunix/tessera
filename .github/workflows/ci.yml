@@ -75,6 +75,10 @@ jobs:
           make install
       - name: Regression suites and the installed set
         run: make installcheck EXTRA_REGRESS_OPTS="--temp-instance=$RUNNER_TEMP/cluster"
-      - name: Differences
+      - name: Differences and the server's log
         if: failure()
-        run: cat test/regression.diffs 2>/dev/null || true
+        run: |
+          cat test/regression.diffs 2>/dev/null || true
+          # A failed assertion or a signal, with the trace that follows it.
+          grep -n -A30 -E 'TRAP:|terminated by signal' test/log/postmaster.log 2>/dev/null | head -300 || true
+          tail -n 50 test/log/postmaster.log 2>/dev/null || true
