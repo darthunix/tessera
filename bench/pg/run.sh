@@ -66,7 +66,7 @@ measure)
         echo "repetitions ${REPETITIONS:-default}"
         echo "scale $("$BIN/psql" -X -tAc 'SELECT scale FROM bench_scale')"
         echo "shared_buffers $("$BIN/psql" -X -tAc 'SHOW shared_buffers')"
-        echo "status:"; git -C "$ROOT" status --short
+        echo "status:"; git -C "$ROOT" status --short --untracked-files=no
         echo "sha256:"
         $SHA256 "$LIB/tessera$DLSUFFIX" "$LIB/tessera_nodes$DLSUFFIX" \
             "$LIB/tessera_kernels$DLSUFFIX" \

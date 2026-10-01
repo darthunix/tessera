@@ -1,0 +1,13 @@
+HEAD 0e27e8e391fab866be949ba1dd39d6f99bbf9109
+workers 0
+cases all
+repetitions default
+scale 10
+shared_buffers 2GB
+status: no changes to tracked files
+sha256:
+7d88b75f0c31e60e4218be5e38c971a61a8f2de67d96955475d97f928358e47a  $PREFIX/lib/tessera.dylib
+c4ad0901cd52c0fead4bf4e54280b75e4d9dd55d46e99ff04409699687d05082  $PREFIX/lib/tessera_nodes.dylib
+cbb5a4a58953250771331f8dc14aeefc94d15a949b37e0903411de6899946f9e  $PREFIX/lib/tessera_kernels.dylib
+b6ee31b5b2f36a2bfd60c63d08ec3206d9ecb7b17b8f047134b6a73cc9bbb769  $PREFIX/lib/libtessera_runtime.a
+753ce236dff3eb515f21ba16ac975f7570da4aa4b9a582b0328b8a58ce2746f4  $PREFIX/bin/postgres
