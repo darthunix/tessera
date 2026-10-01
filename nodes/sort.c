@@ -733,8 +733,7 @@ sort_begin(CustomScanState *css, EState *estate, int eflags)
 		list_length(key_collations) != state->nkeys)
 		elog(ERROR, "TessSort received a foreign plan");
 	state->kernels = tess_runtime_kernels();
-	if (state->kernels == NULL ||
-		!TESS_ABI_HAS_FIELD(state->kernels, TessKernelOps, sort_top_push))
+	if (state->kernels == NULL)
 		elog(ERROR, "TessSort needs the kernels module");
 
 	/* The child is read forward once, as the core's sort reads its own. */

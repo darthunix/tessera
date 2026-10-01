@@ -30,6 +30,15 @@
 /*
  * The operations of one build of the kernels. The provider owns the table
  * and keeps it valid and unchanged from installation until it clears it.
+ *
+ * The table is the contract of one build: the module that links the
+ * kernels and the runtime and node modules that call them come from one
+ * source tree. TESS_KERNEL_OPS_MIN_SIZE reaches the last field and the
+ * bridge requires every operation, so a caller reads any field without
+ * TESS_ABI_HAS_FIELD; a new operation is a new last field, the minimum
+ * size moves to it, and the bridge's check of the operations gets it.
+ * (A caller handed a table of its own, a test's, checks the operations it
+ * calls for NULL.)
  */
 typedef struct TessKernelOps
 {

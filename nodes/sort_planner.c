@@ -206,7 +206,7 @@ create_upper_paths(PlannerInfo *root, UpperRelationKind stage,
 		return;
 	/* Without the kernels module there is nothing to sort with. */
 	kernels = tess_runtime_kernels();
-	if (kernels == NULL || !TESS_ABI_HAS_FIELD(kernels, TessKernelOps, sort))
+	if (kernels == NULL)
 		return;
 	foreach(lc, output_rel->pathlist)
 	{

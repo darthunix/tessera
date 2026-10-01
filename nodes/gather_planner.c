@@ -156,8 +156,7 @@ make_gather_merge_path(PlannerInfo *root, GatherMergePath *gather)
 	int			nkeys = list_length(gather->path.pathkeys);
 
 	if (subpath == NULL ||
-		nkeys == 0 || nkeys > TESS_TABLE_MAX_KEYS || kernels == NULL ||
-		!TESS_ABI_HAS_FIELD(kernels, TessKernelOps, sort_key_lanes))
+		nkeys == 0 || nkeys > TESS_TABLE_MAX_KEYS || kernels == NULL)
 		return NULL;
 	foreach_node(PathKey, pathkey, gather->path.pathkeys)
 	{

@@ -205,7 +205,11 @@ Optional fields are appended to the root. A consumer checks
 table itself. `kernels`, the kernel registry, is the first optional field:
 a bridge built before it lacks the field, and a consumer then behaves as if
 no kernels were installed. The current required fields are covered by `TESS_API_MIN_SIZE`
-and do not need separate field checks.
+and do not need separate field checks. The kernels' table itself
+(`TessKernelOps`) is the contract of one build, not an append-only one:
+its minimum size reaches its last field and the registry refuses a table
+missing any operation, so a caller reads every field without
+`TESS_ABI_HAS_FIELD`, and a new operation moves the minimum size to it.
 
 After loading the bridge, the [producer example](../test/tessera_producer_test.c)
 uses a local helper to obtain and validate the slot-binding table:

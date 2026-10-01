@@ -341,8 +341,7 @@ send_begin(CustomScanState *css, EState *estate, int eflags)
 	if (state->nkeys > 0)
 	{
 		state->kernels = tess_runtime_kernels();
-		if (state->kernels == NULL ||
-			!TESS_ABI_HAS_FIELD(state->kernels, TessKernelOps, sort_key_lanes))
+		if (state->kernels == NULL)
 			elog(ERROR, "TessSend needs the Tessera kernels module");
 		state->key_words = merge_key_words(state->kernels, state->nkernel, state->keys);
 	}

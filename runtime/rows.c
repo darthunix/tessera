@@ -123,7 +123,6 @@ tess_rows_create(const TessRowsConfig *config)
 		config->kernels->table_size == NULL ||
 		config->kernels->table_create == NULL ||
 		config->kernels->table_chunk_init == NULL ||
-		!TESS_ABI_HAS_FIELD(config->kernels, TessKernelOps, table_gather_words) ||
 		config->kernels->table_append_columns == NULL ||
 		config->kernels->table_gather_scattered == NULL ||
 		config->kernels->table_gather_words == NULL)
@@ -529,8 +528,7 @@ tess_rows_sort_items(TessRows *rows, const TessSortKey *keys, uint32 *refs,
 	check_rows(rows);
 	if (keys == NULL || refs == NULL || words == NULL)
 		elog(ERROR, "Tessera rows sort requires keys, references and a width");
-	if (!TESS_ABI_HAS_FIELD(rows->kernels, TessKernelOps, sort) ||
-		rows->kernels->sort_item_words == NULL ||
+	if (rows->kernels->sort_item_words == NULL ||
 		rows->kernels->sort_items == NULL || rows->kernels->sort == NULL)
 		elog(ERROR, "Tessera rows sort requires the kernels of the sort");
 	check(rows, rows->kernels->sort_item_words(rows->nkeys, keys, words,
@@ -566,8 +564,7 @@ tess_rows_top_push(TessRows *rows, const TessSortKey *keys, const uint32 *refs,
 				   uint64 *len)
 {
 	check_rows(rows);
-	if (!TESS_ABI_HAS_FIELD(rows->kernels, TessKernelOps, sort_top_push) ||
-		rows->kernels->sort_top_push == NULL)
+	if (rows->kernels->sort_top_push == NULL)
 		elog(ERROR, "Tessera rows top-N requires the kernels of the sort");
 	check(rows, rows->kernels->sort_top_push(&rows->table, rows->nkeys, keys,
 											 refs, mask, heap, capacity, len,
@@ -580,8 +577,7 @@ tess_rows_clear_key(TessRows *rows, int key)
 	uint64		count;
 
 	check_rows(rows);
-	if (!TESS_ABI_HAS_FIELD(rows->kernels, TessKernelOps, table_clear_key) ||
-		rows->kernels->table_clear_key == NULL)
+	if (rows->kernels->table_clear_key == NULL)
 		elog(ERROR, "Tessera rows require the kernel that clears a key");
 	if (rows->table.nchunks == 0)
 		return;

@@ -2362,8 +2362,7 @@ agg_begin(CustomScanState *css, EState *estate, int eflags)
 	if (state->nkeys > 0)
 	{
 		state->kernels = tess_runtime_kernels();
-		if (state->kernels == NULL ||
-			!TESS_ABI_HAS_FIELD(state->kernels, TessKernelOps, table_combine))
+		if (state->kernels == NULL)
 			elog(ERROR, "TessAgg needs the kernels module for GROUP BY");
 		state->table_context = AllocSetContextCreate(estate->es_query_cxt,
 													 "TessAgg groups",
@@ -2396,8 +2395,7 @@ agg_begin(CustomScanState *css, EState *estate, int eflags)
 	if (state->has_distinct && state->kernels == NULL)
 	{
 		state->kernels = tess_runtime_kernels();
-		if (state->kernels == NULL ||
-			!TESS_ABI_HAS_FIELD(state->kernels, TessKernelOps, table_combine))
+		if (state->kernels == NULL)
 			elog(ERROR, "TessAgg needs the kernels module for DISTINCT");
 	}
 	state->builder = tess_builder_create(&builder);

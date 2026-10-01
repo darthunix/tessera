@@ -160,10 +160,8 @@ tess_spill_create(const TessSpillConfig *config)
 		config->parent_context == NULL)
 		elog(ERROR, "Tessera spill set requires a config and a context");
 	if (config->kernels == NULL ||
-		!TESS_ABI_HAS_FIELD(config->kernels, TessKernelOps, spill_header_read) ||
 		config->kernels->spill_header_write == NULL ||
 		config->kernels->spill_header_read == NULL ||
-		!TESS_ABI_HAS_FIELD(config->kernels, TessKernelOps, spill_unpack) ||
 		config->kernels->spill_pack == NULL || config->kernels->spill_unpack == NULL)
 		elog(ERROR, "Tessera spill set requires the kernels of spilled blocks");
 	if (config->npartitions <= 0 || config->level >= 32)
@@ -366,8 +364,7 @@ tess_spill_write(TessSpill *spill, int partition, TessSpillKind kind,
 		out = spill->buffered + sizeof(bytes) + room <= spill->buffer_len ?
 			at : scratch(spill, room);
 
-		if (!TESS_ABI_HAS_FIELD(spill->kernels, TessKernelOps, spill_columns_unpack) ||
-			spill->kernels->spill_columns_pack == NULL)
+		if (spill->kernels->spill_columns_pack == NULL)
 			elog(ERROR, "Tessera spill set requires the kernels of chunks of columns");
 		if (spill->kernels->spill_columns_pack(body, len, out, room, &packed, &unpacked,
 											   &status) != TESS_OK)
@@ -666,8 +663,7 @@ tess_spill_read_body(TessSpillReader *reader, void *body, Size len)
 		{
 			TessStatus	status = TESS_STRUCT_INITIALIZER(TessStatus);
 
-			if (!TESS_ABI_HAS_FIELD(reader->spill->kernels, TessKernelOps, spill_columns_unpack) ||
-				reader->spill->kernels->spill_columns_unpack == NULL)
+			if (reader->spill->kernels->spill_columns_unpack == NULL)
 				elog(ERROR, "Tessera spill set requires the kernels of chunks of columns");
 			if (reader->spill->kernels->spill_columns_unpack(stored, reader->pending_packed,
 															 body, len, &status) != TESS_OK)
