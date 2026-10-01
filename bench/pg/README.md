@@ -146,6 +146,16 @@ query down, and where it can, does it speed one up.
   numeric, by text and an integer, and a semi-join by text: the table
   keeps the 64-bit hashes of the values, and the equality decides each
   pair. A ratio below one is the win.
+- **exec** (`exec.sql`): the execution costs of plan item 4.27 (review
+  section G), at 11 repetitions: rows a sort (eight columns) and a
+  grouping serve one at a time to a window function of the core; ORDER BY
+  text whose first nine bytes are the same, under an ICU collation and
+  under "C", and an ICU control whose abbreviated keys tell rows apart
+  (`bench_prefix`, 1 000 000 rows, made by the family); a join at a
+  work_mem of 1 MB whose outer keys are half one key (`bench_skew`, made
+  by the family) and a control without the skew; and the planning alone
+  of thirty aggregates of expressions (EXPLAIN, unprepared). A ratio below
+  one is the win.
 - **oltp**: short prepared-statement queries, `pgbench -S`, where the
   planner hooks and the loaded modules must not slow down queries that
   never use a batch node. Arrives when more than one hook is installed.
