@@ -21,15 +21,26 @@ pub extern "C" fn tess_kernels_abi_version() -> u32 {
     ABI_VERSION
 }
 
-/// `tess_kernels_layout`: the size or offset for a `TessLayoutKind`, or 0.
+/// `TessKernelsProbe`: a `TessRowMask`'s size.
+pub const PROBE_ROW_MASK_SIZE: c_uint = 0;
+/// A `TessDatumColumn`'s size.
+pub const PROBE_DATUM_COLUMN_SIZE: c_uint = 1;
+/// The offset of a `TessDatumColumn`'s `nrows`.
+pub const PROBE_DATUM_COLUMN_NROWS_OFFSET: c_uint = 2;
+/// A `TessStatus`'s size.
+pub const PROBE_STATUS_SIZE: c_uint = 3;
+/// The offset of a `TessStatus`'s `message`.
+pub const PROBE_STATUS_MESSAGE_OFFSET: c_uint = 4;
+
+/// `tess_kernels_probe`: the size or offset for a `TessKernelsProbe`, or 0.
 #[unsafe(no_mangle)]
-pub extern "C" fn tess_kernels_layout(kind: c_uint) -> usize {
+pub extern "C" fn tess_kernels_probe(kind: c_uint) -> usize {
     match kind {
-        0 => size_of::<Mask>(),
-        1 => size_of::<DatumColumn>(),
-        2 => std::mem::offset_of!(DatumColumn, nrows),
-        3 => size_of::<Status>(),
-        4 => std::mem::offset_of!(Status, message),
+        PROBE_ROW_MASK_SIZE => size_of::<Mask>(),
+        PROBE_DATUM_COLUMN_SIZE => size_of::<DatumColumn>(),
+        PROBE_DATUM_COLUMN_NROWS_OFFSET => std::mem::offset_of!(DatumColumn, nrows),
+        PROBE_STATUS_SIZE => size_of::<Status>(),
+        PROBE_STATUS_MESSAGE_OFFSET => std::mem::offset_of!(Status, message),
         _ => 0,
     }
 }

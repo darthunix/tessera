@@ -434,10 +434,7 @@ tess_spill_write(TessSpill *spill, int partition, TessSpillKind kind,
 	spill->end += stored;
 	add_block(spill, partition, offset, stored);
 	if (position != NULL)
-	{
-		position->segment = 0;
 		position->offset = (int64) offset;
-	}
 	spill->blocks++;
 	spill->bytes += stored;
 	return stored;
@@ -703,7 +700,7 @@ tess_spill_seek(TessSpillReader *reader, TessSpillPosition position)
 		else
 			high = middle;
 	}
-	if (position.segment != 0 || low >= reader->count ||
+	if (low >= reader->count ||
 		reader->blocks[low].offset != (uint64) position.offset)
 		ereport(ERROR,
 				errcode(ERRCODE_DATA_CORRUPTED),

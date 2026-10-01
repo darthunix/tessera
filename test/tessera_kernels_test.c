@@ -5,6 +5,7 @@
 #include "fmgr.h"
 
 #include "tessera/kernels.h"
+#include "tessera/spill.h"
 
 PG_MODULE_MAGIC;
 
@@ -106,17 +107,31 @@ Datum
 tessera_test_kernels_layout(PG_FUNCTION_ARGS)
 {
 	PG_RETURN_BOOL(tess_kernels_abi_version() == TESS_KERNELS_ABI_VERSION &&
-				   tess_kernels_layout(TESS_LAYOUT_ROW_MASK_SIZE) ==
+				   tess_kernels_probe(TESS_PROBE_ROW_MASK_SIZE) ==
 				   sizeof(TessRowMask) &&
-				   tess_kernels_layout(TESS_LAYOUT_DATUM_COLUMN_SIZE) ==
+				   tess_kernels_probe(TESS_PROBE_DATUM_COLUMN_SIZE) ==
 				   sizeof(TessDatumColumn) &&
-				   tess_kernels_layout(TESS_LAYOUT_DATUM_COLUMN_NROWS_OFFSET) ==
+				   tess_kernels_probe(TESS_PROBE_DATUM_COLUMN_NROWS_OFFSET) ==
 				   offsetof(TessDatumColumn, nrows) &&
-				   tess_kernels_layout(TESS_LAYOUT_STATUS_SIZE) ==
+				   tess_kernels_probe(TESS_PROBE_STATUS_SIZE) ==
 				   sizeof(TessStatus) &&
-				   tess_kernels_layout(TESS_LAYOUT_STATUS_MESSAGE_OFFSET) ==
+				   tess_kernels_probe(TESS_PROBE_STATUS_MESSAGE_OFFSET) ==
 				   offsetof(TessStatus, message) &&
-				   tess_kernels_layout((TessLayoutKind) 99) == 0);
+				   tess_kernels_probe((TessKernelsProbe) 99) == 0 &&
+	/*
+	 * The header of a chunk of columns as the inline readers of
+	 * tessera/spill.h take it: the row count, the capacity and the stored
+	 * words, a uint32 each from the start.
+	 */
+				   tess_spill_columns_layout(TESS_SPILL_COLUMNS_HEADER_SIZE) ==
+				   TESS_SPILL_COLUMNS_HEADER &&
+				   tess_spill_columns_layout(TESS_SPILL_COLUMNS_ROWS_OFFSET) ==
+				   0 * sizeof(uint32) &&
+				   tess_spill_columns_layout(TESS_SPILL_COLUMNS_CAPACITY_OFFSET) ==
+				   1 * sizeof(uint32) &&
+				   tess_spill_columns_layout(TESS_SPILL_COLUMNS_WORDS_OFFSET) ==
+				   2 * sizeof(uint32) &&
+				   tess_spill_columns_layout(99) == 0);
 }
 
 Datum

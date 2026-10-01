@@ -68,20 +68,20 @@ typedef enum TessNullKeys
 } TessNullKeys;
 
 /* Sizes and offsets the Rust side was built with, for layout checks. */
-typedef enum TessLayoutKind
+typedef enum TessKernelsProbe
 {
-	TESS_LAYOUT_ROW_MASK_SIZE = 0,
-	TESS_LAYOUT_DATUM_COLUMN_SIZE = 1,
-	TESS_LAYOUT_DATUM_COLUMN_NROWS_OFFSET = 2,
-	TESS_LAYOUT_STATUS_SIZE = 3,
-	TESS_LAYOUT_STATUS_MESSAGE_OFFSET = 4
-} TessLayoutKind;
+	TESS_PROBE_ROW_MASK_SIZE = 0,
+	TESS_PROBE_DATUM_COLUMN_SIZE = 1,
+	TESS_PROBE_DATUM_COLUMN_NROWS_OFFSET = 2,
+	TESS_PROBE_STATUS_SIZE = 3,
+	TESS_PROBE_STATUS_MESSAGE_OFFSET = 4
+} TessKernelsProbe;
 
 /* The ABI version the library implements; must equal the header's. */
 extern uint32 tess_kernels_abi_version(void);
 
 /* The size or offset for kind, or 0 for an unknown kind. */
-extern Size tess_kernels_layout(TessLayoutKind kind);
+extern Size tess_kernels_probe(TessKernelsProbe kind);
 
 /*
  * Raise and catch a panic, returning TESS_ERROR_PANIC: verifies that the

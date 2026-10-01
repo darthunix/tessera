@@ -42,11 +42,11 @@ typedef enum FloatOp
 /* How a Datum holds a number: float8, float4, an int4 word (int2 too), int8. */
 typedef enum FloatType
 {
-	T_FLOAT8,
-	T_FLOAT4,
-	T_INT4,
-	T_INT2,
-	T_INT8
+	FLOAT_TYPE_FLOAT8,
+	FLOAT_TYPE_FLOAT4,
+	FLOAT_TYPE_INT4,
+	FLOAT_TYPE_INT2,
+	FLOAT_TYPE_INT8
 } FloatType;
 
 typedef struct FloatFunction
@@ -68,12 +68,12 @@ static TessStatusCode float_value_evaluate(TessFunctionCall *call);
 	{{TESS_ABI_INITIALIZER(TESS_FUNCTION_ABI_VERSION, TessFunction), \
 	  .funcid = (oid), .kind = TESS_FUNCTION_PREDICATE, \
 	  .result_format = TESS_RESULT_DATUM, .flags = FLOAT_FLAGS, \
-	  .evaluate = float_compare_evaluate}, (code), (l), (r), T_FLOAT8}
+	  .evaluate = float_compare_evaluate}, (code), (l), (r), FLOAT_TYPE_FLOAT8}
 
 #define FLOAT_VALUE(oid, code, l, r, res) \
 	{{TESS_ABI_INITIALIZER(TESS_FUNCTION_ABI_VERSION, TessFunction), \
 	  .funcid = (oid), .kind = TESS_FUNCTION_VALUE, \
-	  .result_format = (res) == T_INT4 || (res) == T_INT2 ? TESS_RESULT_INT32 : TESS_RESULT_DATUM, \
+	  .result_format = (res) == FLOAT_TYPE_INT4 || (res) == FLOAT_TYPE_INT2 ? TESS_RESULT_INT32 : TESS_RESULT_DATUM, \
 	  .flags = FLOAT_FLAGS, \
 	  .evaluate = float_value_evaluate}, (code), (l), (r), (res)}
 
@@ -88,39 +88,39 @@ static TessStatusCode float_value_evaluate(TessFunctionCall *call);
 
 static const FloatFunction float_functions[] = {
 	FLOAT_COMPARES(F_FLOAT8EQ, F_FLOAT8NE, F_FLOAT8LT, F_FLOAT8LE, F_FLOAT8GT, F_FLOAT8GE,
-				   T_FLOAT8, T_FLOAT8),
+				   FLOAT_TYPE_FLOAT8, FLOAT_TYPE_FLOAT8),
 	FLOAT_COMPARES(F_FLOAT4EQ, F_FLOAT4NE, F_FLOAT4LT, F_FLOAT4LE, F_FLOAT4GT, F_FLOAT4GE,
-				   T_FLOAT4, T_FLOAT4),
+				   FLOAT_TYPE_FLOAT4, FLOAT_TYPE_FLOAT4),
 	FLOAT_COMPARES(F_FLOAT48EQ, F_FLOAT48NE, F_FLOAT48LT, F_FLOAT48LE, F_FLOAT48GT,
-				   F_FLOAT48GE, T_FLOAT4, T_FLOAT8),
+				   F_FLOAT48GE, FLOAT_TYPE_FLOAT4, FLOAT_TYPE_FLOAT8),
 	FLOAT_COMPARES(F_FLOAT84EQ, F_FLOAT84NE, F_FLOAT84LT, F_FLOAT84LE, F_FLOAT84GT,
-				   F_FLOAT84GE, T_FLOAT8, T_FLOAT4),
+				   F_FLOAT84GE, FLOAT_TYPE_FLOAT8, FLOAT_TYPE_FLOAT4),
 	FLOAT_ARITHMETIC(F_FLOAT8PL, F_FLOAT8MI, F_FLOAT8MUL, F_FLOAT8DIV,
-					 T_FLOAT8, T_FLOAT8, T_FLOAT8),
+					 FLOAT_TYPE_FLOAT8, FLOAT_TYPE_FLOAT8, FLOAT_TYPE_FLOAT8),
 	FLOAT_ARITHMETIC(F_FLOAT4PL, F_FLOAT4MI, F_FLOAT4MUL, F_FLOAT4DIV,
-					 T_FLOAT4, T_FLOAT4, T_FLOAT4),
+					 FLOAT_TYPE_FLOAT4, FLOAT_TYPE_FLOAT4, FLOAT_TYPE_FLOAT4),
 	FLOAT_ARITHMETIC(F_FLOAT48PL, F_FLOAT48MI, F_FLOAT48MUL, F_FLOAT48DIV,
-					 T_FLOAT4, T_FLOAT8, T_FLOAT8),
+					 FLOAT_TYPE_FLOAT4, FLOAT_TYPE_FLOAT8, FLOAT_TYPE_FLOAT8),
 	FLOAT_ARITHMETIC(F_FLOAT84PL, F_FLOAT84MI, F_FLOAT84MUL, F_FLOAT84DIV,
-					 T_FLOAT8, T_FLOAT4, T_FLOAT8),
-	FLOAT_VALUE(F_FLOAT8UM, FLOAT_UM, T_FLOAT8, T_FLOAT8, T_FLOAT8),
-	FLOAT_VALUE(F_FLOAT8ABS, FLOAT_ABS, T_FLOAT8, T_FLOAT8, T_FLOAT8),
-	FLOAT_VALUE(F_FLOAT4UM, FLOAT_UM, T_FLOAT4, T_FLOAT4, T_FLOAT4),
-	FLOAT_VALUE(F_FLOAT4ABS, FLOAT_ABS, T_FLOAT4, T_FLOAT4, T_FLOAT4),
-	FLOAT_VALUE(F_FLOAT8_INT4, FLOAT_CAST, T_INT4, T_INT4, T_FLOAT8),
-	FLOAT_VALUE(F_FLOAT8_INT2, FLOAT_CAST, T_INT4, T_INT4, T_FLOAT8),
-	FLOAT_VALUE(F_FLOAT8_INT8, FLOAT_CAST, T_INT8, T_INT8, T_FLOAT8),
-	FLOAT_VALUE(F_FLOAT8_FLOAT4, FLOAT_CAST, T_FLOAT4, T_FLOAT4, T_FLOAT8),
-	FLOAT_VALUE(F_FLOAT4_INT4, FLOAT_CAST, T_INT4, T_INT4, T_FLOAT4),
-	FLOAT_VALUE(F_FLOAT4_INT2, FLOAT_CAST, T_INT4, T_INT4, T_FLOAT4),
-	FLOAT_VALUE(F_FLOAT4_INT8, FLOAT_CAST, T_INT8, T_INT8, T_FLOAT4),
-	FLOAT_VALUE(F_FLOAT4_FLOAT8, FLOAT_CAST, T_FLOAT8, T_FLOAT8, T_FLOAT4),
-	FLOAT_VALUE(F_INT4_FLOAT8, FLOAT_CAST, T_FLOAT8, T_FLOAT8, T_INT4),
-	FLOAT_VALUE(F_INT2_FLOAT8, FLOAT_CAST, T_FLOAT8, T_FLOAT8, T_INT2),
-	FLOAT_VALUE(F_INT8_FLOAT8, FLOAT_CAST, T_FLOAT8, T_FLOAT8, T_INT8),
-	FLOAT_VALUE(F_INT4_FLOAT4, FLOAT_CAST, T_FLOAT4, T_FLOAT4, T_INT4),
-	FLOAT_VALUE(F_INT2_FLOAT4, FLOAT_CAST, T_FLOAT4, T_FLOAT4, T_INT2),
-	FLOAT_VALUE(F_INT8_FLOAT4, FLOAT_CAST, T_FLOAT4, T_FLOAT4, T_INT8),
+					 FLOAT_TYPE_FLOAT8, FLOAT_TYPE_FLOAT4, FLOAT_TYPE_FLOAT8),
+	FLOAT_VALUE(F_FLOAT8UM, FLOAT_UM, FLOAT_TYPE_FLOAT8, FLOAT_TYPE_FLOAT8, FLOAT_TYPE_FLOAT8),
+	FLOAT_VALUE(F_FLOAT8ABS, FLOAT_ABS, FLOAT_TYPE_FLOAT8, FLOAT_TYPE_FLOAT8, FLOAT_TYPE_FLOAT8),
+	FLOAT_VALUE(F_FLOAT4UM, FLOAT_UM, FLOAT_TYPE_FLOAT4, FLOAT_TYPE_FLOAT4, FLOAT_TYPE_FLOAT4),
+	FLOAT_VALUE(F_FLOAT4ABS, FLOAT_ABS, FLOAT_TYPE_FLOAT4, FLOAT_TYPE_FLOAT4, FLOAT_TYPE_FLOAT4),
+	FLOAT_VALUE(F_FLOAT8_INT4, FLOAT_CAST, FLOAT_TYPE_INT4, FLOAT_TYPE_INT4, FLOAT_TYPE_FLOAT8),
+	FLOAT_VALUE(F_FLOAT8_INT2, FLOAT_CAST, FLOAT_TYPE_INT4, FLOAT_TYPE_INT4, FLOAT_TYPE_FLOAT8),
+	FLOAT_VALUE(F_FLOAT8_INT8, FLOAT_CAST, FLOAT_TYPE_INT8, FLOAT_TYPE_INT8, FLOAT_TYPE_FLOAT8),
+	FLOAT_VALUE(F_FLOAT8_FLOAT4, FLOAT_CAST, FLOAT_TYPE_FLOAT4, FLOAT_TYPE_FLOAT4, FLOAT_TYPE_FLOAT8),
+	FLOAT_VALUE(F_FLOAT4_INT4, FLOAT_CAST, FLOAT_TYPE_INT4, FLOAT_TYPE_INT4, FLOAT_TYPE_FLOAT4),
+	FLOAT_VALUE(F_FLOAT4_INT2, FLOAT_CAST, FLOAT_TYPE_INT4, FLOAT_TYPE_INT4, FLOAT_TYPE_FLOAT4),
+	FLOAT_VALUE(F_FLOAT4_INT8, FLOAT_CAST, FLOAT_TYPE_INT8, FLOAT_TYPE_INT8, FLOAT_TYPE_FLOAT4),
+	FLOAT_VALUE(F_FLOAT4_FLOAT8, FLOAT_CAST, FLOAT_TYPE_FLOAT8, FLOAT_TYPE_FLOAT8, FLOAT_TYPE_FLOAT4),
+	FLOAT_VALUE(F_INT4_FLOAT8, FLOAT_CAST, FLOAT_TYPE_FLOAT8, FLOAT_TYPE_FLOAT8, FLOAT_TYPE_INT4),
+	FLOAT_VALUE(F_INT2_FLOAT8, FLOAT_CAST, FLOAT_TYPE_FLOAT8, FLOAT_TYPE_FLOAT8, FLOAT_TYPE_INT2),
+	FLOAT_VALUE(F_INT8_FLOAT8, FLOAT_CAST, FLOAT_TYPE_FLOAT8, FLOAT_TYPE_FLOAT8, FLOAT_TYPE_INT8),
+	FLOAT_VALUE(F_INT4_FLOAT4, FLOAT_CAST, FLOAT_TYPE_FLOAT4, FLOAT_TYPE_FLOAT4, FLOAT_TYPE_INT4),
+	FLOAT_VALUE(F_INT2_FLOAT4, FLOAT_CAST, FLOAT_TYPE_FLOAT4, FLOAT_TYPE_FLOAT4, FLOAT_TYPE_INT2),
+	FLOAT_VALUE(F_INT8_FLOAT4, FLOAT_CAST, FLOAT_TYPE_FLOAT4, FLOAT_TYPE_FLOAT4, FLOAT_TYPE_INT8),
 };
 
 static const FloatFunction *
@@ -158,7 +158,7 @@ arg_null(const TessFunctionArg *arg, int row)
 static inline float8
 as_float8(Datum value, FloatType type)
 {
-	return type == T_FLOAT4 ? (float8) DatumGetFloat4(value) : DatumGetFloat8(value);
+	return type == FLOAT_TYPE_FLOAT4 ? (float8) DatumGetFloat4(value) : DatumGetFloat8(value);
 }
 
 /* Float comparisons of any shape, in the core's NaN-aware order. */
@@ -267,28 +267,28 @@ float_to_integer(float8 number, FloatType from, FloatType to)
 	bool		fits;
 
 	/* rint of the float4 itself, as ftoi4 rounds it, then its range. */
-	if (from == T_FLOAT4)
+	if (from == FLOAT_TYPE_FLOAT4)
 	{
 		float4		single = rintf((float4) number);
 
 		number = single;
 		fits = !isnan(single) &&
-			(to == T_INT4 ? FLOAT4_FITS_IN_INT32(single) :
-			 to == T_INT2 ? FLOAT4_FITS_IN_INT16(single) : FLOAT4_FITS_IN_INT64(single));
+			(to == FLOAT_TYPE_INT4 ? FLOAT4_FITS_IN_INT32(single) :
+			 to == FLOAT_TYPE_INT2 ? FLOAT4_FITS_IN_INT16(single) : FLOAT4_FITS_IN_INT64(single));
 	}
 	else
 	{
 		number = rint(number);
 		fits = !isnan(number) &&
-			(to == T_INT4 ? FLOAT8_FITS_IN_INT32(number) :
-			 to == T_INT2 ? FLOAT8_FITS_IN_INT16(number) : FLOAT8_FITS_IN_INT64(number));
+			(to == FLOAT_TYPE_INT4 ? FLOAT8_FITS_IN_INT32(number) :
+			 to == FLOAT_TYPE_INT2 ? FLOAT8_FITS_IN_INT16(number) : FLOAT8_FITS_IN_INT64(number));
 	}
 	if (unlikely(!fits))
 		ereport(ERROR,
 				(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
-				 errmsg(to == T_INT4 ? "integer out of range" :
-						to == T_INT2 ? "smallint out of range" : "bigint out of range")));
-	return to == T_INT8 ? Int64GetDatum((int64) number) : Int32GetDatum((int32) number);
+				 errmsg(to == FLOAT_TYPE_INT4 ? "integer out of range" :
+						to == FLOAT_TYPE_INT2 ? "smallint out of range" : "bigint out of range")));
+	return to == FLOAT_TYPE_INT8 ? Int64GetDatum((int64) number) : Int32GetDatum((int32) number);
 }
 
 /* A cast's result from one row's argument. */
@@ -297,12 +297,12 @@ float_cast(Datum value, FloatType from, FloatType to)
 {
 	switch (to)
 	{
-		case T_FLOAT8:
-			return Float8GetDatum(from == T_INT4 ? (float8) DatumGetInt32(value) :
-								  from == T_INT8 ? (float8) DatumGetInt64(value) :
+		case FLOAT_TYPE_FLOAT8:
+			return Float8GetDatum(from == FLOAT_TYPE_INT4 ? (float8) DatumGetInt32(value) :
+								  from == FLOAT_TYPE_INT8 ? (float8) DatumGetInt64(value) :
 								  (float8) DatumGetFloat4(value));
-		case T_FLOAT4:
-			if (from == T_FLOAT8)
+		case FLOAT_TYPE_FLOAT4:
+			if (from == FLOAT_TYPE_FLOAT8)
 			{
 				float8		number = DatumGetFloat8(value);
 				float4		single = (float4) number;
@@ -314,7 +314,7 @@ float_cast(Datum value, FloatType from, FloatType to)
 					float_underflow_error();
 				return Float4GetDatum(single);
 			}
-			return Float4GetDatum(from == T_INT4 ? (float4) DatumGetInt32(value) :
+			return Float4GetDatum(from == FLOAT_TYPE_INT4 ? (float4) DatumGetInt32(value) :
 								  (float4) DatumGetInt64(value));
 		default:
 			return float_to_integer(as_float8(value, from), from, to);
@@ -357,7 +357,7 @@ float_value_evaluate(TessFunctionCall *call)
 				right = arg_datum(&call->args[1], row);
 			if (function->op == FLOAT_CAST)
 				result = float_cast(left, function->left, function->result);
-			else if (function->result == T_FLOAT4)
+			else if (function->result == FLOAT_TYPE_FLOAT4)
 				result = Float4GetDatum(float4_value(function->op, DatumGetFloat4(left),
 													 nargs == 2 ? DatumGetFloat4(right) : 0));
 			else
@@ -365,7 +365,7 @@ float_value_evaluate(TessFunctionCall *call)
 													 as_float8(left, function->left),
 													 nargs == 2 ?
 													 as_float8(right, function->right) : 0));
-			if (function->result == T_INT4 || function->result == T_INT2)
+			if (function->result == FLOAT_TYPE_INT4 || function->result == FLOAT_TYPE_INT2)
 				((int32 *) call->values)[row] = DatumGetInt32(result);
 			else
 				((Datum *) call->values)[row] = result;

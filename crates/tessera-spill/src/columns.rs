@@ -50,9 +50,12 @@ pub fn pack_slack(words: usize) -> usize {
     8 + 16 * lanes(words)
 }
 
-const ROWS_AT: usize = 0;
-const CAPACITY_AT: usize = 4;
-const WORDS_AT: usize = 8;
+/// Where the header's row count lies (a `u32`).
+pub const ROWS_AT: usize = 0;
+/// Where its capacity lies.
+pub const CAPACITY_AT: usize = 4;
+/// Where its count of stored words lies.
+pub const WORDS_AT: usize = 8;
 const MAGIC_AT: usize = 12;
 const MAGIC: u32 = u32::from_le_bytes(*b"COLS");
 

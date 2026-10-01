@@ -45,7 +45,7 @@ if (tess_int4_filter(&column, NULL, &batch->rows, TESS_CMP_GT, 0,
 ```
 
 `tess_kernels_abi_version()` must equal `TESS_KERNELS_ABI_VERSION` of the
-header the caller was compiled with, and `tess_kernels_layout()` returns the
+header the caller was compiled with, and `tess_kernels_probe()` returns the
 sizes and offsets the library was built with, for a check at load time.
 
 ## Readiness: the `prepared` mask

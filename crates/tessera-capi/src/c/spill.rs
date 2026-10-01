@@ -205,16 +205,25 @@ pub unsafe extern "C" fn tess_spill_unpack(
     }
 }
 
-/// `tess_spill_columns_layout`: the bytes of a chunk of columns' header
-/// (0) and where its row count (1), capacity (2) and stored words (3) lie,
-/// for the C side's checks; 0 for another code.
+/// `TessSpillColumnsField`: the bytes of a chunk of columns' header.
+pub const COLUMNS_HEADER_SIZE: c_int = 0;
+/// Where a chunk's row count lies.
+pub const COLUMNS_ROWS_OFFSET: c_int = 1;
+/// Where its capacity lies.
+pub const COLUMNS_CAPACITY_OFFSET: c_int = 2;
+/// Where its count of stored words lies.
+pub const COLUMNS_WORDS_OFFSET: c_int = 3;
+
+/// `tess_spill_columns_layout`: the size or offset of a
+/// `TessSpillColumnsField` of a chunk of columns' header, for the C
+/// side's inline readers to check; 0 for another code.
 #[unsafe(no_mangle)]
 pub extern "C" fn tess_spill_columns_layout(what: c_int) -> usize {
     match what {
-        0 => columns::HEADER,
-        1 => 0,
-        2 => 4,
-        3 => 8,
+        COLUMNS_HEADER_SIZE => columns::HEADER,
+        COLUMNS_ROWS_OFFSET => columns::ROWS_AT,
+        COLUMNS_CAPACITY_OFFSET => columns::CAPACITY_AT,
+        COLUMNS_WORDS_OFFSET => columns::WORDS_AT,
         _ => 0,
     }
 }

@@ -10,7 +10,7 @@ use tessera_capi::c::{
     tess_int4_hash_next, tess_int4_max, tess_int4_min, tess_int4_sum, tess_int4_to_int8,
     tess_int8_arith_columns, tess_int8_arith_scalar, tess_int8_arith_scalar_left,
     tess_int8_compare_columns, tess_int8_filter, tess_int8_hash, tess_int8_hash_next,
-    tess_int8_max, tess_int8_min, tess_int8_to_int4, tess_kernels_abi_version, tess_kernels_layout,
+    tess_int8_max, tess_int8_min, tess_int8_to_int4, tess_kernels_abi_version, tess_kernels_probe,
     tess_kernels_test_panic,
 };
 use tessera_kernels::int32::{hash_combine, murmurhash32};
@@ -73,12 +73,12 @@ impl Fixture {
 #[test]
 fn abi_and_layout_match_the_rust_types() {
     assert_eq!(tess_kernels_abi_version(), 0);
-    assert_eq!(tess_kernels_layout(0), size_of::<Mask>());
-    assert_eq!(tess_kernels_layout(1), size_of::<DatumColumn>());
-    assert_eq!(tess_kernels_layout(2), 24);
-    assert_eq!(tess_kernels_layout(3), size_of::<Status>());
-    assert_eq!(tess_kernels_layout(4), 18);
-    assert_eq!(tess_kernels_layout(5), 0);
+    assert_eq!(tess_kernels_probe(0), size_of::<Mask>());
+    assert_eq!(tess_kernels_probe(1), size_of::<DatumColumn>());
+    assert_eq!(tess_kernels_probe(2), 24);
+    assert_eq!(tess_kernels_probe(3), size_of::<Status>());
+    assert_eq!(tess_kernels_probe(4), 18);
+    assert_eq!(tess_kernels_probe(5), 0);
 }
 
 #[test]

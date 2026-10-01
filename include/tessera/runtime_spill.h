@@ -70,10 +70,9 @@ typedef struct TessSpillConfig
 #define TESS_SPILL_BUFFER_LEN(limit) \
 	((Size) Min(Max((Size) (limit) / 16, (Size) BLCKSZ), (Size) 256 * 1024))
 
-/* Where a block starts in its file: a file of segments and a byte in one. */
+/* Where a block starts in its file, which is one file of 64-bit offsets. */
 typedef struct TessSpillPosition
 {
-	int			segment;
 	int64		offset;
 } TessSpillPosition;
 

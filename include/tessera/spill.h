@@ -165,9 +165,20 @@ tess_spill_columns_word(void *chunk, int word)
 								   word);
 }
 
+/* What tess_spill_columns_layout gives the size or offset of. */
+typedef enum TessSpillColumnsField
+{
+	/* The header's bytes, TESS_SPILL_COLUMNS_HEADER. */
+	TESS_SPILL_COLUMNS_HEADER_SIZE = 0,
+	/* Where the row count, the capacity and the stored words lie. */
+	TESS_SPILL_COLUMNS_ROWS_OFFSET = 1,
+	TESS_SPILL_COLUMNS_CAPACITY_OFFSET = 2,
+	TESS_SPILL_COLUMNS_WORDS_OFFSET = 3
+} TessSpillColumnsField;
+
 /*
- * The header's bytes (0), where its row count (1), capacity (2) and stored
- * words (3) lie.
+ * The size or offset of a field of the header as the Rust side lays it
+ * out, which the inline readers above take for granted; 0 for another code.
  */
 extern Size tess_spill_columns_layout(int what);
 
