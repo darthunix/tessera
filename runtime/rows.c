@@ -528,6 +528,23 @@ tess_rows_top_push(TessRows *rows, const TessSortKey *keys, const uint32 *refs,
 											 &rows->status));
 }
 
+void
+tess_rows_clear_key(TessRows *rows, int key)
+{
+	uint64		count;
+
+	check_rows(rows);
+	if (!TESS_ABI_HAS_FIELD(rows->kernels, TessKernelOps, table_clear_key) ||
+		rows->kernels->table_clear_key == NULL)
+		elog(ERROR, "Tessera rows require the kernel that clears a key");
+	if (rows->table.nchunks == 0)
+		return;
+	check(rows, rows->kernels->table_clear_key(&rows->table, key, &count, &rows->status));
+	if (count != rows->records)
+		elog(ERROR, "Tessera rows hold " UINT64_FORMAT " records, the key was cleared in " UINT64_FORMAT,
+			 rows->records, count);
+}
+
 uint64
 tess_rows_count(const TessRows *rows)
 {

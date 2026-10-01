@@ -330,6 +330,11 @@ other call over it at the same time:
   visits the records chunk by chunk in the order they were appended, up
   to `capacity` per call, from a cursor the caller starts at 0 and keeps
   between calls; a count of 0 ends the walk;
+- `tess_table_clear_key(&table, key, &count, &status)` writes 0 into
+  key `key` of every record, its NULL bit kept, and counts the records:
+  the key then orders no two records that are not NULL. For records
+  nothing looks up by their keys: a sort's rows give up their abbreviated
+  keys this way;
 - `tess_table_regrow(&table, index, len, capacity, &status)` moves the
   table to a new index of `len` bytes for `capacity` records: the
   buckets are filled anew from the records, which stay where they are

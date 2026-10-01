@@ -1212,6 +1212,32 @@ pub unsafe extern "C" fn tess_table_payloads(
     }
 }
 
+/// `tess_table_clear_key`: write 0 into key `key` of every record, its
+/// NULL bit kept; the count of records into `count`.
+///
+/// # Safety
+///
+/// `table` as for [`attach_mut`] during the call; `count` must be
+/// writable; `status` as for every entry point.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tess_table_clear_key(
+    table: *const TableRef,
+    key: c_int,
+    count: *mut u64,
+    status: *mut Status,
+) -> Code {
+    // SAFETY: the caller's contract.
+    unsafe {
+        guard(status, || {
+            let mut table = attach_mut(table)?;
+            let key = usize::try_from(key).context("a negative key")?;
+            let cleared = table.clear_key(key)?;
+            *count.as_mut().context("a null count")? = cleared;
+            Ok(())
+        })
+    }
+}
+
 /// `tess_table_scan`: the next records in insertion order.
 ///
 /// # Safety

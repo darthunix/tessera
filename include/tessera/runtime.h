@@ -878,6 +878,13 @@ extern void tess_rows_top_push(TessRows *rows, const TessSortKey *keys,
  */
 extern bool tess_rows_selected_null(const TessRowMask *mask, const bool *isnull);
 
+/*
+ * Write 0 into key key of every record, its NULL bit kept: the key then
+ * orders no two records that are not NULL. A sort that gives up a key's
+ * abbreviated values does this to the records it holds.
+ */
+extern void tess_rows_clear_key(TessRows *rows, int key);
+
 /* The records appended, and the bytes the rows take: chunks, values and index. */
 extern uint64 tess_rows_count(const TessRows *rows);
 extern Size tess_rows_memory(const TessRows *rows);

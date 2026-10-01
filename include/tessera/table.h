@@ -834,6 +834,15 @@ extern TessStatusCode tess_table_payloads(const TessTableRef *table,
 										  TessStatus *status);
 
 /*
+ * Write 0 into key slot key of every record, its NULL bit kept, and the
+ * count of records into count: the key then orders no two records that
+ * are not NULL. For records nothing looks up by their keys, such as a
+ * sort's giving up a key's abbreviated values.
+ */
+extern TessStatusCode tess_table_clear_key(const TessTableRef *table, int key,
+										   uint64 *count, TessStatus *status);
+
+/*
  * Visit the records from the cursor on, chunk by chunk in the order they
  * were appended, up to capacity of them: their references fill offsets,
  * count receives how many, and the cursor moves past them. The caller

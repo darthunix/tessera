@@ -808,6 +808,14 @@ impl<'a> TableMut<'a> {
         exclusive::payload_mut(&self.0.region, &self.0.layout, offset)
     }
 
+    /// Write 0 into key `key` of every record, its NULL bit kept; the count
+    /// of records is returned. The key then orders no two records that are
+    /// not NULL, and a probe by it no longer finds them: for records nothing
+    /// looks up by their keys, such as a sort's.
+    pub fn clear_key(&mut self, key: usize) -> Result<u64> {
+        exclusive::clear_key(&self.0.region, &self.0.layout, key)
+    }
+
     /// Add one to the `i64` at byte `at` of the payload of each selected
     /// row's record: `count(*)` of a grouped aggregate, whose rows hold
     /// the references [`TableMut::find_or_insert`] gave them.

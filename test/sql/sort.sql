@@ -275,6 +275,24 @@ RESET tessera.scan_parallel_setup_cost;
 RESET tessera.scan_worker_page_cost;
 RESET max_parallel_workers_per_gather;
 
+-- Text whose first nine bytes are the same: its abbreviated keys tell no
+-- row apart, and the sort gives them up as tuplesort does, past a hundred
+-- rows; the comparisons order the rows, NULL in every 13th, also after an
+-- int key of five values. A control whose first bytes differ keeps them.
+CREATE TABLE sort_prefix AS
+SELECT CASE WHEN i % 13 = 0 THEN NULL
+            ELSE 'customer#' || lpad((i * 7919 % 3000)::text, 9, '0') END AS p,
+       i % 5 AS k, i AS v
+FROM generate_series(1, 3000) AS i;
+ANALYZE sort_prefix;
+SELECT sort_explain($$SELECT p, v FROM sort_prefix ORDER BY p COLLATE "C", v$$);
+SELECT sort_same($$SELECT p, v FROM sort_prefix ORDER BY p COLLATE "C", v$$);
+SELECT sort_same($$SELECT p, v FROM sort_prefix ORDER BY p COLLATE "C" DESC NULLS LAST, v$$);
+SELECT sort_same($$SELECT k, p, v FROM sort_prefix ORDER BY k, p COLLATE "C", v$$);
+SELECT sort_explain($$SELECT p, v FROM sort_prefix ORDER BY reverse(p) COLLATE "C", v$$);
+SELECT sort_same($$SELECT p, v FROM sort_prefix ORDER BY reverse(p) COLLATE "C", v$$);
+DROP TABLE sort_prefix;
+
 -- A scrollable cursor: forward and backward, across batches and past both ends.
 EXPLAIN (COSTS OFF) DECLARE c SCROLL CURSOR FOR SELECT d, a FROM sort_t ORDER BY d;
 BEGIN;

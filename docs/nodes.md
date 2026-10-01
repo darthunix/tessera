@@ -2218,8 +2218,16 @@ key made a signed int8 in its order: the comparisons of unsigned 64- or
 extend, signed ones stay, and numeric's, a signed integer's reversed, is
 inverted (a type check, since its comparison is its own static function,
 checked on two values); a type without an abbreviated key has the word 0.
-The converter runs per batch in a context reset per batch; the node never
-aborts abbreviation, as the core may when it saves little. After the
+The converter runs per batch in a context reset per batch. As tuplesort,
+the node gives the abbreviated keys up when the type's abort test
+(`abbrev_abort`) finds them telling too few rows apart, at 10, 20, 40, ...
+rows abbreviated, while every row is still in memory (a run on disk keeps
+its items): the words the records hold become 0
+(`tess_table_clear_key`), the next rows' are 0 without a conversion, and
+the groups of equal words, the comparisons, decide; EXPLAIN ANALYZE says
+"Abbreviated Keys: given up". Text whose first nine bytes are the same
+under an ICU collation, a million rows: 684 ms before, 627 after, the
+core 669-698 (bench family exec, `prefix_icu`). After the
 kernels sorted the items, each run of items whose words are equal but
 for the reference is a group, whose rows are ordered in C by the type's
 comparison of that key and every key after it: the first key's value in
@@ -2647,8 +2655,9 @@ asked for, once the rows pointing into it are consumed, so the merge
 stops at a stream's last row in hand and the batch goes out shorter.
 
 With a key of another type the lanes hold the keys up to it, its word
-its abbreviated key (each process makes them alike: the node never
-aborts abbreviation), and the leader merges in C: a binary heap of the
+its abbreviated key (each process makes them alike from the values:
+`TessSend` never gives them up, whatever its `TessSort` did), and the
+leader merges in C: a binary heap of the
 streams with rows in hand, made anew for every batch, ordered by their
 next rows' lanes and then by the comparisons of that key and the ones
 after it, their values read from the messages; the batch stops at a

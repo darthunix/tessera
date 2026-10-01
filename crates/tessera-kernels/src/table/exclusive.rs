@@ -335,6 +335,34 @@ pub(super) fn payload_mut<'r, R: Region>(
     Ok(unsafe { region.record_mut(region.spot(chunk, start), layout.payload_size) })
 }
 
+/// Write 0 into key slot `key` of every record, its NULL bit kept, and
+/// return the count of records: the key then orders no two records that
+/// are not NULL. For records nothing finds by their keys, such as a
+/// sort's, which gives up a key's abbreviated values this way.
+pub(super) fn clear_key<R: Region>(region: &R, layout: &Layout, key: usize) -> Result<u64> {
+    ensure!(
+        key < layout.nkeys,
+        "key {key} of a table of {} keys",
+        layout.nkeys
+    );
+    let access = Access::new(region, layout);
+    let mut count = 0;
+    for chunk in 0..region.chunks() {
+        let (used, _) = access.room(chunk)?;
+        let mut byte = CHUNK_HEADER;
+        while byte < used {
+            check_record(&access, (chunk, byte))?;
+            let slot = byte + RECORD_HEADER + key * KEY_SLOT;
+            // SAFETY: the caller has the table to itself, and the slot lies
+            // within a record that `check_record` accepted.
+            unsafe { region.record_mut(region.spot(chunk, slot), KEY_SLOT) }.fill(0);
+            byte += layout.record_size;
+            count += 1;
+        }
+    }
+    Ok(count)
+}
+
 /// Visit the records from `cursor` on, chunk by chunk and in the order
 /// they were appended, as many as `out` holds; the count visited is
 /// returned and the cursor moves past them.

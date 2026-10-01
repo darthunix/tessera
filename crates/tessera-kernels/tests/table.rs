@@ -513,6 +513,44 @@ fn a_null_key_groups_apart_from_the_value_it_hashes_like() -> Result<()> {
     Ok(())
 }
 
+/// A key cleared in every record holds 0, NULL or not, its NULL bit
+/// kept, and the other key and the payload are untouched; the records of
+/// several chunks are all visited, and a key past the table's is refused.
+#[test]
+fn a_cleared_key_is_zero_in_every_record() -> Result<()> {
+    let config = TableConfig {
+        keys: &[KeyKind::Int32, KeyKind::Int64],
+        payload_size: 8,
+    };
+    let nrows: usize = 300;
+    let first: Vec<i32> = (0..nrows).map(|row| row as i32 % 7 - 3).collect();
+    let second: Vec<i64> = (0..nrows)
+        .map(|row| row as i64 * 1_000_000_007 - 5)
+        .collect();
+    let non_null = words(&(0..nrows).map(|row| row % 3 != 1).collect::<Vec<_>>());
+    let non_nulls = RowMaskView::try_new(nrows, &non_null)?;
+    let hashes: Vec<u32> = (0..nrows as u32).collect();
+    let keys = Mixed(vec![
+        Key::Int4(ColumnView::try_new(&first, None)?),
+        Key::Int8(ColumnView::try_new(&second, Some(non_nulls))?),
+    ]);
+    let payload = payload_for(nrows);
+    let mut table = LocalTable::new(&config, nrows as u64, CHUNK_HEADER + 64 * 48)?;
+    let offsets = insert_all(&mut table, &hashes, &keys, Some(&payload))?;
+    assert!(table.chunks() > 1, "the records span chunks");
+    assert_eq!(table.table_mut()?.clear_key(1)?, nrows as u64);
+    assert!(table.table_mut()?.clear_key(2).is_err());
+    let table = table.table()?;
+    for (row, &offset) in offsets.iter().enumerate() {
+        let record = table.record(offset)?;
+        let null = !non_nulls.contains(row)?;
+        assert_eq!(record.keys, &[i64::from(first[row]), 0], "row {row}");
+        assert_eq!(record.null_bits, u32::from(null) << 1, "row {row}");
+        assert_eq!(record.payload, &payload[row * 8..row * 8 + 8], "row {row}");
+    }
+    Ok(())
+}
+
 #[test]
 fn two_keys_of_different_kinds_compare_whole() -> Result<()> {
     let config = TableConfig {

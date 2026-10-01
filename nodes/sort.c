@@ -104,7 +104,7 @@ typedef struct MergeInput
  * (TessSharedStats): the batches and rows read, memory and its overrun
  * past each one's work_mem, the participants that sorted, sorted
  * externally or kept a top-N heap, the runs, passes and bytes written, the
- * rows rebuilt.
+ * rows rebuilt, the participants that gave up abbreviated keys.
  */
 enum
 {
@@ -119,6 +119,7 @@ enum
 	SORT_PASSES,
 	SORT_DISK,
 	SORT_REBUILT,
+	SORT_ABBREV_GIVEN_UP,
 	SORT_NCOUNTERS
 };
 
@@ -176,6 +177,13 @@ typedef struct TessSortState
 	bool	   *abbrev_isnull;
 	TessDatumColumn abbrev_column;
 	int			abbrev_capacity;
+	/*
+	 * The rows whose abbreviated keys were made, and the count at which
+	 * the type's abort test runs next; whether the keys were given up.
+	 */
+	uint64		abbrev_rows;
+	uint64		abbrev_next;
+	bool		abbrev_given_up;
 	struct TieRow *tie_rows;
 	Datum	   *tie_values;
 	bool	   *tie_isnull;
@@ -426,6 +434,8 @@ generic_begin(TessSortState *state, TupleDesc desc, List *sortops, List *collati
 	state->abbrev_context = AllocSetContextCreate(CurrentMemoryContext,
 												  "TessSort abbreviated keys",
 												  ALLOCSET_DEFAULT_SIZES);
+	/* As tuplesort: the first test at ten rows. */
+	state->abbrev_next = 10;
 }
 
 /*
@@ -463,6 +473,7 @@ abbreviate_column(TessSortState *state, const TessDatumColumn *column,
 		state->abbrev_values[row] = Int64GetDatum(column->isnull[row] ? 0 :
 												  tess_sort_abbrev_word(&state->abbrev,
 																		column->values[row]));
+		state->abbrev_rows += !column->isnull[row];
 	}
 	MemoryContextSwitchTo(old);
 	state->abbrev_column = (TessDatumColumn) TESS_STRUCT_INITIALIZER(TessDatumColumn);
@@ -854,10 +865,37 @@ append_rows(TessSortState *state, TessBatch *batch)
 					 &batch->rows, state->batch_refs);
 }
 
+/*
+ * Give up the abbreviated keys, as tuplesort does, when the type's abort
+ * test finds them telling too few rows apart, at 10, 20, 40, ... rows
+ * abbreviated: only while every row is in memory, since a run on disk
+ * keeps its items. The keys the records hold become 0, and the next rows'
+ * are 0 without a conversion, so the comparisons of the group of equal
+ * words order the rows, as the core's full comparator does.
+ */
+static void
+consider_abbrev_abort(TessSortState *state)
+{
+	SortSupport ssup = &state->abbrev.ssup;
+
+	if (state->external || !tess_sort_abbreviates(&state->abbrev) ||
+		ssup->abbrev_abort == NULL || state->abbrev_rows < state->abbrev_next)
+		return;
+	while (state->abbrev_next <= state->abbrev_rows)
+		state->abbrev_next *= 2;
+	if (!ssup->abbrev_abort((int) Min(state->abbrev_rows, (uint64) INT_MAX), ssup))
+		return;
+	state->abbrev.order = SORT_ABBREV_NONE;
+	tess_rows_clear_key(state->rows, state->generic);
+	state->abbrev_given_up = true;
+}
+
 /* The rows of one batch of the child into records. */
 static void
 append_batch(TessSortState *state, TessBatch *batch)
 {
+	if (state->generic >= 0)
+		consider_abbrev_abort(state);
 	batch_keys(state, batch);
 	for (int column = 0; column < state->ncolumns; column++)
 		if (!is_key_column(state, column))
@@ -2546,6 +2584,7 @@ sort_counters(TessSortState *state, uint64 *values)
 	values[SORT_PASSES] = (uint64) state->merge_passes;
 	values[SORT_DISK] = state->disk_bytes;
 	values[SORT_REBUILT] = state->topn ? state->compactions : 0;
+	values[SORT_ABBREV_GIVEN_UP] = state->abbrev_given_up ? 1 : 0;
 }
 
 static void
@@ -2604,6 +2643,8 @@ sort_explain(CustomScanState *css, List *ancestors, ExplainState *es)
 	ExplainPropertyInteger("Input Rows", NULL, totals[SORT_INPUT_ROWS], es);
 	if (totals[SORT_REBUILT] > 0)
 		ExplainPropertyInteger("Rows Rebuilt", NULL, totals[SORT_REBUILT], es);
+	if (totals[SORT_ABBREV_GIVEN_UP] > 0)
+		ExplainPropertyText("Abbreviated Keys", "given up", es);
 }
 
 /*
