@@ -36,7 +36,9 @@ Besides `tessera.enable`, which the bridge defines, the module defines
 these parameters, every one settable by any user in a session, and then
 reserves the prefix `tessera`: a value given before the module loads (the
 configuration file, `ALTER SYSTEM`, a `SET` before `LOAD`) is kept (see
-[bridge.md](bridge.md)). The gates and switches:
+[bridge.md](bridge.md)). Every one of them, `tessera.enable` too, can
+change a plan, and `EXPLAIN (SETTINGS)` lists those not at their
+defaults. The gates and switches:
 
 | Parameter | Default | What it decides |
 |---|---|---|
@@ -47,10 +49,9 @@ configuration file, `ALTER SYSTEM`, a `SET` before `LOAD`) is kept (see
 | `tessera.join_bloom_ratio` | 0.5 | share of probe rows with a pair below which a hash join builds a Bloom filter |
 
 The planner's calibration of the nodes' costs against the core's, each
-measured where its node's section says; they are left out of the sample
-configuration file, as the calibration is the project's, not a
-deployment's, though another machine may call for other values, as the
-core's own cost parameters do:
+measured where its node's section says; the calibration is the
+project's, not a deployment's, though another machine may call for other
+values, as the core's own cost parameters do:
 
 | Parameter | Default | What it scales |
 |---|---|---|

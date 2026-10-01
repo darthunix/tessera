@@ -90,83 +90,84 @@ _PG_init(void)
 							 "fewer of them than this share found a pair: 0 never builds one, 1 builds "
 							 "one at once, whatever the sizes.",
 							 &tess_join_bloom_ratio, 0.5, 0.0, 1.0,
-							 PGC_USERSET, 0, NULL, NULL, NULL);
+							 PGC_USERSET, GUC_EXPLAIN, NULL, NULL, NULL);
 	DefineCustomRealVariable("tessera.bitmap_page_rows",
 							 "Rows a page of a bitmap must give for the batch scan of its pages.",
 							 "The node reads a bitmap's pages in place of the core's bitmap heap scan "
 							 "when the planner expects at least this many rows of each page: below, a "
 							 "page's pin of the node's own costs more than its batches save. 0 always.",
 							 &tess_bitmap_page_rows, 2.0, 0.0, 1000.0,
-							 PGC_USERSET, 0, NULL, NULL, NULL);
+							 PGC_USERSET, GUC_EXPLAIN, NULL, NULL, NULL);
 	DefineCustomRealVariable("tessera.index_min_correlation",
 							 "Correlation of an index's order with the table's for the batch scan of its rows.",
 							 "The node takes the rows of the core's index scan in place of it when the "
 							 "index's order follows the table's at least this much: its rows then come "
 							 "in runs of a page, which a batch pins once. 0 always.",
 							 &tess_index_min_correlation, 0.8, 0.0, 1.0,
-							 PGC_USERSET, 0, NULL, NULL, NULL);
+							 PGC_USERSET, GUC_EXPLAIN, NULL, NULL, NULL);
 	DefineCustomRealVariable("tessera.index_min_rows",
 							 "Rows an index scan must give for the batch scan of its rows.",
 							 "The node takes the rows of the core's index scan in place of it when the "
 							 "planner expects at least this many of them, a limit counted: its setup "
 							 "costs a query a few microseconds more. 0 always.",
 							 &tess_index_min_rows, 1000.0, 0.0, 1e15,
-							 PGC_USERSET, 0, NULL, NULL, NULL);
+							 PGC_USERSET, GUC_EXPLAIN, NULL, NULL, NULL);
 	/*
 	 * The planner's calibration of the nodes' costs against the core's,
-	 * each measured where the node's code says; not in the sample file.
+	 * each measured where the node's code says. Every setting here changes
+	 * plans: EXPLAIN (SETTINGS) shows the ones not at their defaults.
 	 */
 	DefineCustomRealVariable("tessera.scan_cost_factor",
 							 "Share of the core's cost of a scan that the node's scan costs.",
 							 "TessHeapScan, with TessFilter above for the relation's clauses, in "
 							 "place of the core's sequential, bitmap, index or index-only scan.",
 							 &tess_scan_cost_factor, 0.9, 0.0, 10.0,
-							 PGC_USERSET, GUC_NOT_IN_SAMPLE, NULL, NULL, NULL);
+							 PGC_USERSET, GUC_EXPLAIN, NULL, NULL, NULL);
 	DefineCustomRealVariable("tessera.join_cost_factor",
 							 "Share of the core's cost of a hash join that TessHashJoin costs.",
 							 NULL,
 							 &tess_join_cost_factor, 0.9, 0.0, 10.0,
-							 PGC_USERSET, GUC_NOT_IN_SAMPLE, NULL, NULL, NULL);
+							 PGC_USERSET, GUC_EXPLAIN, NULL, NULL, NULL);
 	DefineCustomRealVariable("tessera.agg_cost_factor",
 							 "Share of the core's cost of an aggregation without GROUP BY that TessAgg costs.",
 							 NULL,
 							 &tess_agg_cost_factor, 0.9, 0.0, 10.0,
-							 PGC_USERSET, GUC_NOT_IN_SAMPLE, NULL, NULL, NULL);
+							 PGC_USERSET, GUC_EXPLAIN, NULL, NULL, NULL);
 	DefineCustomRealVariable("tessera.agg_key_share",
 							 "Share of cpu_operator_cost TessAgg costs a key of a row it groups.",
 							 NULL,
 							 &tess_agg_key_share, 0.25, 0.0, 10.0,
-							 PGC_USERSET, GUC_NOT_IN_SAMPLE, NULL, NULL, NULL);
+							 PGC_USERSET, GUC_EXPLAIN, NULL, NULL, NULL);
 	DefineCustomRealVariable("tessera.agg_dictionary_share",
 							 "Share of cpu_operator_cost TessAgg costs a row's key through a dictionary, past agg_key_share.",
 							 NULL,
 							 &tess_agg_dictionary_share, 0.65, 0.0, 10.0,
-							 PGC_USERSET, GUC_NOT_IN_SAMPLE, NULL, NULL, NULL);
+							 PGC_USERSET, GUC_EXPLAIN, NULL, NULL, NULL);
 	DefineCustomRealVariable("tessera.agg_kernel_share",
 							 "Share of the core's transition cost a row of TessAgg's own aggregates costs.",
 							 NULL,
 							 &tess_agg_kernel_share, 0.25, 0.0, 10.0,
-							 PGC_USERSET, GUC_NOT_IN_SAMPLE, NULL, NULL, NULL);
+							 PGC_USERSET, GUC_EXPLAIN, NULL, NULL, NULL);
 	DefineCustomRealVariable("tessera.setop_word_share",
 							 "Share of the core's own cost of INTERSECT or EXCEPT TessAgg costs with keys of words.",
 							 NULL,
 							 &tess_setop_word_share, 0.5, 0.0, 10.0,
-							 PGC_USERSET, GUC_NOT_IN_SAMPLE, NULL, NULL, NULL);
+							 PGC_USERSET, GUC_EXPLAIN, NULL, NULL, NULL);
 	DefineCustomRealVariable("tessera.setop_dictionary_share",
 							 "Share of the core's own cost of INTERSECT or EXCEPT TessAgg costs with a key through a dictionary.",
 							 NULL,
 							 &tess_setop_dictionary_share, 0.9, 0.0, 10.0,
-							 PGC_USERSET, GUC_NOT_IN_SAMPLE, NULL, NULL, NULL);
+							 PGC_USERSET, GUC_EXPLAIN, NULL, NULL, NULL);
 	DefineCustomRealVariable("tessera.gather_tuple_share",
 							 "Share of parallel_tuple_cost a row costs through TessGather.",
 							 NULL,
 							 &tess_gather_tuple_share, 0.25, 0.0, 10.0,
-							 PGC_USERSET, GUC_NOT_IN_SAMPLE, NULL, NULL, NULL);
+							 PGC_USERSET, GUC_EXPLAIN, NULL, NULL, NULL);
 	DefineCustomRealVariable("tessera.pack_value_share",
 							 "Share of cpu_operator_cost TessPack costs a value it copies into a batch.",
 							 NULL,
 							 &tess_pack_value_share, 0.4, 0.0, 10.0,
-							 PGC_USERSET, GUC_NOT_IN_SAMPLE, NULL, NULL, NULL);
+							 PGC_USERSET, GUC_EXPLAIN, NULL, NULL, NULL);
 	/*
 	 * The model of the node's scans, by which the planner orders them
 	 * against one another (bench/pg/scancost fits it): a full scan's page is
@@ -176,89 +177,89 @@ _PG_init(void)
 							 "The node's time to read a page of a full scan, the model's unit.",
 							 NULL,
 							 &tess_scan_page_cost, 1.0, 0.0, 1e10,
-							 PGC_USERSET, 0, NULL, NULL, NULL);
+							 PGC_USERSET, GUC_EXPLAIN, NULL, NULL, NULL);
 	DefineCustomRealVariable("tessera.scan_tuple_cost",
 							 "The node's time for a row of a full scan with its filter.",
 							 NULL,
 							 &tess_scan_tuple_cost, 0.0077, 0.0, 1e10,
-							 PGC_USERSET, 0, NULL, NULL, NULL);
+							 PGC_USERSET, GUC_EXPLAIN, NULL, NULL, NULL);
 	DefineCustomRealVariable("tessera.index_only_tuple_cost",
 							 "The node's time for a row of an index-only scan.",
 							 NULL,
 							 &tess_index_only_tuple_cost, 0.058, 0.0, 1e10,
-							 PGC_USERSET, 0, NULL, NULL, NULL);
+							 PGC_USERSET, GUC_EXPLAIN, NULL, NULL, NULL);
 	DefineCustomRealVariable("tessera.index_tuple_cost",
 							 "The node's time for a row of an index scan.",
 							 NULL,
 							 &tess_index_tuple_cost, 0.112, 0.0, 1e10,
-							 PGC_USERSET, 0, NULL, NULL, NULL);
+							 PGC_USERSET, GUC_EXPLAIN, NULL, NULL, NULL);
 	DefineCustomRealVariable("tessera.bitmap_page_cost",
 							 "The node's time to read a page of a bitmap.",
 							 NULL,
 							 &tess_bitmap_page_cost, 0.665, 0.0, 1e10,
-							 PGC_USERSET, 0, NULL, NULL, NULL);
+							 PGC_USERSET, GUC_EXPLAIN, NULL, NULL, NULL);
 	DefineCustomRealVariable("tessera.bitmap_tuple_cost",
 							 "The node's time for a row of a bitmap.",
 							 NULL,
 							 &tess_bitmap_tuple_cost, 0.075, 0.0, 1e10,
-							 PGC_USERSET, 0, NULL, NULL, NULL);
+							 PGC_USERSET, GUC_EXPLAIN, NULL, NULL, NULL);
 	DefineCustomRealVariable("tessera.bitmap_scatter_cost",
 							 "The node's time a row of a bitmap takes more for an index out of the table's order.",
 							 "Scaled by 1 - c * c for the correlation c of the index's first column.",
 							 &tess_bitmap_scatter_cost, 0.031, 0.0, 1e10,
-							 PGC_USERSET, 0, NULL, NULL, NULL);
+							 PGC_USERSET, GUC_EXPLAIN, NULL, NULL, NULL);
 	DefineCustomRealVariable("tessera.scan_parallel_setup_cost",
 							 "The time a parallel scan of the node takes to start and finish its workers.",
 							 "Part of a partial scan's time, which the planner weighs against the "
 							 "relation's fastest serial scan.",
 							 &tess_scan_parallel_setup_cost, 7000.0, 0.0, 1e10,
-							 PGC_USERSET, 0, NULL, NULL, NULL);
+							 PGC_USERSET, GUC_EXPLAIN, NULL, NULL, NULL);
 	DefineCustomRealVariable("tessera.scan_worker_page_cost",
 							 "The time a parallel worker takes more for a page it reads first.",
 							 "A worker begun for the query maps every page of the shared buffers it "
 							 "reads; near zero with huge pages.",
 							 &tess_scan_worker_page_cost, 3.15, 0.0, 1e10,
-							 PGC_USERSET, 0, NULL, NULL, NULL);
+							 PGC_USERSET, GUC_EXPLAIN, NULL, NULL, NULL);
 	DefineCustomRealVariable("tessera.filter_clause_cost",
 							 "The node's time for a row of a batch clause past the filter's first.",
 							 NULL,
 							 &tess_filter_clause_cost, 0.0053, 0.0, 1e10,
-							 PGC_USERSET, 0, NULL, NULL, NULL);
+							 PGC_USERSET, GUC_EXPLAIN, NULL, NULL, NULL);
 	DefineCustomRealVariable("tessera.filter_row_clause_cost",
 							 "The node's time for a row of a clause the filter evaluates row by row.",
 							 NULL,
 							 &tess_filter_row_clause_cost, 0.022, 0.0, 1e10,
-							 PGC_USERSET, 0, NULL, NULL, NULL);
+							 PGC_USERSET, GUC_EXPLAIN, NULL, NULL, NULL);
 	DefineCustomRealVariable("tessera.filter_row_operator_cost",
 							 "The node's time for a row of an operator of a clause evaluated row by row.",
 							 "Counted as the core's cost of the clause over cpu_operator_cost.",
 							 &tess_filter_row_operator_cost, 0.018, 0.0, 1e10,
-							 PGC_USERSET, 0, NULL, NULL, NULL);
+							 PGC_USERSET, GUC_EXPLAIN, NULL, NULL, NULL);
 	DefineCustomRealVariable("tessera.deform_varlena_cost",
 							 "The node's time for a row to deform a column past one of varying length.",
 							 NULL,
 							 &tess_deform_varlena_cost, 0.017, 0.0, 1e10,
-							 PGC_USERSET, 0, NULL, NULL, NULL);
+							 PGC_USERSET, GUC_EXPLAIN, NULL, NULL, NULL);
 	DefineCustomRealVariable("tessera.bitmap_build_cost",
 							 "The node's time for a row to build a bitmap, which one participant does.",
 							 "A partial bitmap shares only the reading of its pages among the participants.",
 							 &tess_bitmap_build_cost, 0.038, 0.0, 1e10,
-							 PGC_USERSET, 0, NULL, NULL, NULL);
+							 PGC_USERSET, GUC_EXPLAIN, NULL, NULL, NULL);
 	DefineCustomRealVariable("tessera.bitmap_build_scatter_cost",
 							 "What building a bitmap takes more a row for an index out of the table's order.",
 							 "Scaled by 1 - c * c for the correlation c of the index's first column.",
 							 &tess_bitmap_build_scatter_cost, 0.054, 0.0, 1e10,
-							 PGC_USERSET, 0, NULL, NULL, NULL);
+							 PGC_USERSET, GUC_EXPLAIN, NULL, NULL, NULL);
 	DefineCustomRealVariable("tessera.index_worker_share",
 							 "The share of the leader's pace a worker of a parallel index or index-only scan reads at.",
 							 "The leader reads alone while the workers start, half of tessera.scan_parallel_setup_cost.",
 							 &tess_index_worker_share, 0.5, 0.0, 10.0,
-							 PGC_USERSET, 0, NULL, NULL, NULL);
+							 PGC_USERSET, GUC_EXPLAIN, NULL, NULL, NULL);
 	DefineCustomBoolVariable("tessera.batch_gather",
 							 "Gathers a parallel batch subtree's rows in batches.",
 							 "TessGather stands in for the core's Gather over a batch path: the workers "
 							 "send batches of rows instead of a tuple each.",
-							 &tess_batch_gather, true, PGC_USERSET, 0, NULL, NULL, NULL);
+							 &tess_batch_gather, true, PGC_USERSET, GUC_EXPLAIN, NULL, NULL, NULL);
 
 	/*
 	 * Every tessera.* setting is defined now (tessera.enable by the bridge,

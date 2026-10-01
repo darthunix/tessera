@@ -22,3 +22,12 @@ SHOW tessera.scan_cost_factor;
 SET tessera.misspelt_again = 1;
 LOAD 'tessera_limit';
 LOAD 'tessera_kernels';
+-- Every setting changes plans: EXPLAIN (SETTINGS) lists the ones not at
+-- their defaults, tessera.enable among them.
+SELECT name FROM pg_settings
+WHERE name LIKE 'tessera.%'
+  AND (NOT 'EXPLAIN' = ANY (pg_settings_get_flags(name))
+       OR 'NOT_IN_SAMPLE' = ANY (pg_settings_get_flags(name)));
+SET tessera.enable = off;
+EXPLAIN (COSTS OFF, SETTINGS) SELECT 1;
+RESET tessera.enable;
