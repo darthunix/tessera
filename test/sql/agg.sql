@@ -364,7 +364,10 @@ SELECT CASE WHEN i % 7 = 0 THEN NULL ELSE i - 150 END, (i * 1.5)::numeric,
 FROM generate_series(1, 300) AS i;
 EXPLAIN (COSTS OFF) SELECT max(t), sum(n), avg(f) FROM agg_any;
 EXPLAIN (VERBOSE, COSTS OFF) SELECT max(t), string_agg(t, ',') FROM agg_any WHERE a > 0;
-SELECT agg_same($$SELECT max(t), min(t), sum(n), avg(n), avg(f), stddev(f), sum(j), avg(j), avg(a) FROM agg_any$$);
+-- stddev's last digit is the platform's (AArch64 fuses a multiply and an
+-- add the core's float8 accumulation does in two on x86-64): checks with
+-- it compare with the core exactly and show no rows.
+SELECT agg_same($$SELECT max(t), min(t), sum(n), avg(n), avg(f), stddev(f), sum(j), avg(j), avg(a) FROM agg_any$$) !~ '^MISMATCH' AS same;
 -- Arguments of several kinds and polymorphic ones: a delimiter, two
 -- columns, arrays and JSON of any element, booleans, dates.
 SELECT agg_same($$SELECT string_agg(t, '|'), corr(a, f), array_agg(a), array_agg(t), json_agg(d), bool_and(b), bool_or(b), max(d), bit_or(a), every(a > -200) FROM agg_any$$);
@@ -410,7 +413,7 @@ EXPLAIN (COSTS OFF) SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY f) FROM a
 -- batch, groups start from the initial value.
 EXPLAIN (COSTS OFF) SELECT b, max(t) FROM agg_any GROUP BY b;
 SELECT agg_same($$SELECT b, max(t), min(t), sum(n), avg(f), string_agg(t, ','), array_agg(a) FROM agg_any GROUP BY b$$);
-SELECT agg_same($$SELECT a % 7, max(t), sum(n), stddev(f), bool_and(b), json_agg(d) FROM agg_any GROUP BY a % 7$$);
+SELECT agg_same($$SELECT a % 7, max(t), sum(n), stddev(f), bool_and(b), json_agg(d) FROM agg_any GROUP BY a % 7$$) !~ '^MISMATCH' AS same;
 -- A group whose arguments are all NULL, a NULL key, groups with the
 -- node's own aggregates and a DISTINCT one, HAVING over a generic one.
 SELECT agg_same($$SELECT a > 0, max(t), count(*), sum(a), count(DISTINCT a), avg(n) FROM agg_any WHERE t IS NULL GROUP BY a > 0$$);
