@@ -25,17 +25,39 @@ use anyhow::{Result, ensure};
 use super::MAX_PARTITIONS;
 use super::region::order;
 
+pub(super) use sealed::Words;
+
 /// The flag of a partition that went to disk.
 const ON_DISK: u64 = 1;
 /// The flag of a partition one participant takes whole.
 const ALONE: u64 = 2;
 
-/// Words before the partitions': the partitions, the bytes in memory, the
-/// budget, the counter that spreads the participants over the partitions,
-/// and the partitions sent to disk so far.
+// The words before the partitions': the partitions in force (0 while the
+// table is whole), the bytes of chunks in memory of every participant,
+// their budget, the counter that spreads the participants over the
+// partitions, and the partitions sent to disk so far.
+const PARTITIONS: usize = 0;
+const BYTES: usize = 1;
+const BUDGET: usize = 2;
+const START: usize = 3;
+const EVICTIONS: usize = 4;
 const HEAD_WORDS: usize = 5;
-/// Words per partition: bytes in memory, records, flags, the next inner
-/// file and the next outer file to take.
+
+/// A word of a partition, after the head's.
+#[derive(Clone, Copy)]
+enum Field {
+    /// The bytes of its chunks in memory.
+    Bytes,
+    /// Its records, in memory or on disk.
+    Records,
+    /// [`ON_DISK`] and [`ALONE`].
+    Flags,
+    /// The next file of its inner rows to take.
+    NextInner,
+    /// The next file of its outer rows to take.
+    NextOuter,
+}
+
 const PART_WORDS: usize = 5;
 
 /// The words of the shared state for up to `partitions` partitions, and
@@ -49,56 +71,61 @@ pub fn words_for(partitions: usize) -> Result<usize> {
     Ok(HEAD_WORDS + PART_WORDS * (partitions + 1))
 }
 
-/// The atomic words a participant sees, by index; [`SharedSpill`] and the
-/// loom model share the logic over them.
-pub(super) trait Words {
-    fn load(&self, index: usize) -> u64;
-    fn store(&self, index: usize, value: u64);
-    fn fetch_add(&self, index: usize, delta: u64) -> u64;
-    fn fetch_sub(&self, index: usize, delta: u64) -> u64;
-    fn fetch_or(&self, index: usize, bits: u64) -> u64;
-    /// Replace `current` by `new`: `Ok` with the value replaced, `Err` with
-    /// the value found.
-    fn compare_exchange(&self, index: usize, current: u64, new: u64) -> Result<u64, u64>;
-    /// The most partitions the words hold, besides the resident ones.
-    fn capacity(&self) -> usize;
+mod sealed {
+    /// The atomic words a participant sees, by index: those of memory
+    /// several processes map, or the loom model's.
+    pub trait Words {
+        fn load(&self, index: usize) -> u64;
+        fn store(&self, index: usize, value: u64);
+        fn fetch_add(&self, index: usize, delta: u64) -> u64;
+        fn fetch_sub(&self, index: usize, delta: u64) -> u64;
+        fn fetch_or(&self, index: usize, bits: u64) -> u64;
+        /// Replace `current` by `new`: `Ok` with the value replaced, `Err`
+        /// with the value found.
+        fn compare_exchange(&self, index: usize, current: u64, new: u64) -> Result<u64, u64>;
+        /// The most partitions the words hold, besides the resident ones.
+        fn capacity(&self) -> usize;
+    }
 }
 
-/// The shared state in memory several participants map.
-#[derive(Debug)]
-pub struct SharedSpill<'a> {
-    words: &'a [AtomicU64],
-}
-
-impl Words for SharedSpill<'_> {
+impl Words for &[AtomicU64] {
     fn load(&self, index: usize) -> u64 {
-        self.words[index].load(order::LOAD)
+        self[index].load(order::LOAD)
     }
 
     fn store(&self, index: usize, value: u64) {
-        self.words[index].store(value, order::STORE);
+        self[index].store(value, order::STORE);
     }
 
     fn fetch_add(&self, index: usize, delta: u64) -> u64 {
-        self.words[index].fetch_add(delta, order::ADD)
+        self[index].fetch_add(delta, order::ADD)
     }
 
     fn fetch_sub(&self, index: usize, delta: u64) -> u64 {
-        self.words[index].fetch_sub(delta, order::ADD)
+        self[index].fetch_sub(delta, order::ADD)
     }
 
     fn fetch_or(&self, index: usize, bits: u64) -> u64 {
-        self.words[index].fetch_or(bits, order::CAS)
+        self[index].fetch_or(bits, order::CAS)
     }
 
     fn compare_exchange(&self, index: usize, current: u64, new: u64) -> Result<u64, u64> {
-        self.words[index].compare_exchange(current, new, order::CAS, order::CAS_FAILED)
+        self[index].compare_exchange(current, new, order::CAS, order::CAS_FAILED)
     }
 
     fn capacity(&self) -> usize {
-        (self.words.len() - HEAD_WORDS) / PART_WORDS - 1
+        (self.len() - HEAD_WORDS) / PART_WORDS - 1
     }
 }
+
+/// The shared state of a spill over its words.
+#[derive(Debug)]
+pub struct Spill<W> {
+    words: W,
+}
+
+/// The shared state in memory several participants map.
+pub type SharedSpill<'a> = Spill<&'a [AtomicU64]>;
 
 impl<'a> SharedSpill<'a> {
     /// Attach to the `nwords` words at `words`, as [`words_for`] sized them.
@@ -124,135 +151,157 @@ impl<'a> SharedSpill<'a> {
     }
 }
 
-/// The logic, over any [`Words`].
-pub(super) trait Spill: Words {
+impl<W: Words> Spill<W> {
+    /// The state over `words`, which [`Spill::init`] clears.
+    #[cfg(all(test, loom))]
+    pub(super) fn over(words: W) -> Self {
+        Self { words }
+    }
+
     /// Clear the state for a budget of bytes, before any participant uses it.
-    fn init(&self, budget: u64) {
-        for index in 0..HEAD_WORDS + PART_WORDS * (self.capacity() + 1) {
-            self.store(index, 0);
+    pub fn init(&self, budget: u64) {
+        for index in 0..HEAD_WORDS + PART_WORDS * (self.words.capacity() + 1) {
+            self.words.store(index, 0);
         }
-        self.store(2, budget);
+        self.words.store(BUDGET, budget);
     }
 
     /// The partitions, or 0 while the table is whole.
-    fn partitions(&self) -> u32 {
-        self.load(0) as u32
+    pub fn partitions(&self) -> u32 {
+        self.words.load(PARTITIONS) as u32
     }
 
     /// Split the table into `partitions`, a power of two, unless another
     /// participant did: the partitions in force are returned.
-    fn split(&self, partitions: u32) -> Result<u32> {
+    pub fn split(&self, partitions: u32) -> Result<u32> {
         ensure!(
-            partitions.is_power_of_two() && partitions as usize <= self.capacity(),
+            partitions.is_power_of_two() && partitions as usize <= self.words.capacity(),
             "{partitions} partitions are not a power of two up to {}",
-            self.capacity()
+            self.words.capacity()
         );
-        Ok(match self.compare_exchange(0, 0, u64::from(partitions)) {
-            Ok(_) => partitions,
-            Err(current) => current as u32,
-        })
+        Ok(
+            match self
+                .words
+                .compare_exchange(PARTITIONS, 0, u64::from(partitions))
+            {
+                Ok(_) => partitions,
+                Err(current) => current as u32,
+            },
+        )
     }
 
     /// Add `delta` bytes of chunks in memory, of `partition` once the
     /// table is split; true when the chunks take more than the budget.
-    fn add_bytes(&self, delta: i64, partition: Option<u32>) -> Result<bool> {
+    pub fn add_bytes(&self, delta: i64, partition: Option<u32>) -> Result<bool> {
         if let Some(partition) = partition {
             self.check_partition(partition)?;
-            self.add_signed(self.part(partition, 0), delta)?;
+            self.add_signed(self.part(partition, Field::Bytes), delta)?;
         }
-        let total = self.add_signed(1, delta)?;
-        Ok(total > self.load(2))
+        let total = self.add_signed(BYTES, delta)?;
+        Ok(total > self.words.load(BUDGET))
     }
 
     /// The bytes of chunks in memory, of every participant.
-    fn bytes(&self) -> u64 {
-        self.load(1)
+    pub fn bytes(&self) -> u64 {
+        self.words.load(BYTES)
     }
 
     /// Send the partition in memory with the most bytes to disk: its
     /// number for the participant that marked it, `None` for any other or
     /// when none is left in memory.
-    fn evict_largest(&self) -> Option<u32> {
+    pub fn evict_largest(&self) -> Option<u32> {
         let partitions = self.partitions();
         let mut largest = None;
         let mut bytes = 0;
         for partition in 0..partitions {
-            if self.load(self.part(partition, 2)) & ON_DISK != 0 {
+            if self.words.load(self.part(partition, Field::Flags)) & ON_DISK != 0 {
                 continue;
             }
-            let held = self.load(self.part(partition, 0));
+            let held = self.words.load(self.part(partition, Field::Bytes));
             if held > bytes {
                 largest = Some(partition);
                 bytes = held;
             }
         }
         let partition = largest?;
-        let before = self.fetch_or(self.part(partition, 2), ON_DISK);
+        let before = self
+            .words
+            .fetch_or(self.part(partition, Field::Flags), ON_DISK);
         if before & ON_DISK != 0 {
             return None;
         }
-        self.fetch_add(4, 1);
+        self.words.fetch_add(EVICTIONS, 1);
         Some(partition)
     }
 
     /// The partitions sent to disk so far: a participant that saw fewer
     /// writes its chunks of the new ones.
-    fn evictions(&self) -> u64 {
-        self.load(4)
+    pub fn evictions(&self) -> u64 {
+        self.words.load(EVICTIONS)
     }
 
     /// Whether the partition went to disk.
-    fn on_disk(&self, partition: u32) -> Result<bool> {
+    pub fn on_disk(&self, partition: u32) -> Result<bool> {
         self.check_partition(partition)?;
-        Ok(self.load(self.part(partition, 2)) & ON_DISK != 0)
+        Ok(self.words.load(self.part(partition, Field::Flags)) & ON_DISK != 0)
     }
 
     /// Count records of a partition, in memory or on disk.
-    fn add_records(&self, partition: u32, records: u64) -> Result<()> {
+    pub fn add_records(&self, partition: u32, records: u64) -> Result<()> {
         self.check_partition(partition)?;
-        self.fetch_add(self.part(partition, 1), records);
+        self.words
+            .fetch_add(self.part(partition, Field::Records), records);
         Ok(())
     }
 
     /// The records of a partition, once the build is over.
-    fn records(&self, partition: u32) -> Result<u64> {
+    pub fn records(&self, partition: u32) -> Result<u64> {
         self.check_partition(partition)?;
-        Ok(self.load(self.part(partition, 1)))
+        Ok(self.words.load(self.part(partition, Field::Records)))
     }
 
     /// The partition a participant starts its rounds at, spread over them.
-    fn start(&self) -> u32 {
+    pub fn start(&self) -> u32 {
         let partitions = u64::from(self.partitions().max(1));
-        (self.fetch_add(3, 1) % partitions) as u32
+        (self.words.fetch_add(START, 1) % partitions) as u32
     }
 
     /// Take the next file of a partition's inner rows, or of its outer
     /// rows: each number goes to one participant; `partition` may be the
     /// partitions' count, for the outer rows of those kept in memory.
-    fn take_file(&self, partition: u32, outer: bool) -> Result<u32> {
+    pub fn take_file(&self, partition: u32, outer: bool) -> Result<u32> {
         ensure!(
             partition <= self.partitions(),
             "partition {partition} is past the {} of the table",
             self.partitions()
         );
-        Ok(self.fetch_add(self.part(partition, if outer { 4 } else { 3 }), 1) as u32)
+        let field = if outer {
+            Field::NextOuter
+        } else {
+            Field::NextInner
+        };
+        Ok(self.words.fetch_add(self.part(partition, field), 1) as u32)
     }
 
     /// Take a partition whole: true for the one participant that did.
-    fn take_alone(&self, partition: u32) -> Result<bool> {
+    pub fn take_alone(&self, partition: u32) -> Result<bool> {
         self.check_partition(partition)?;
-        Ok(self.fetch_or(self.part(partition, 2), ALONE) & ALONE == 0)
+        Ok(self
+            .words
+            .fetch_or(self.part(partition, Field::Flags), ALONE)
+            & ALONE
+            == 0)
     }
 
     /// Whether one participant took the partition whole.
-    fn alone(&self, partition: u32) -> Result<bool> {
+    pub fn alone(&self, partition: u32) -> Result<bool> {
         self.check_partition(partition)?;
-        Ok(self.load(self.part(partition, 2)) & ALONE != 0)
+        Ok(self.words.load(self.part(partition, Field::Flags)) & ALONE != 0)
     }
 
-    /// The index of a partition's field.
-    fn part(&self, partition: u32, field: usize) -> usize {
-        HEAD_WORDS + PART_WORDS * partition as usize + field
+    /// The index of a partition's word.
+    fn part(&self, partition: u32, field: Field) -> usize {
+        HEAD_WORDS + PART_WORDS * partition as usize + field as usize
     }
 
     /// Add a signed delta to a counter; the new value. Callers take away
@@ -262,9 +311,9 @@ pub(super) trait Spill: Words {
     fn add_signed(&self, index: usize, delta: i64) -> Result<u64> {
         let amount = delta.unsigned_abs();
         if delta >= 0 {
-            return Ok(self.fetch_add(index, amount) + amount);
+            return Ok(self.words.fetch_add(index, amount) + amount);
         }
-        let before = self.fetch_sub(index, amount);
+        let before = self.words.fetch_sub(index, amount);
         ensure!(
             before >= amount,
             "a spill counter went below zero: {before} bytes less {amount}"
@@ -279,67 +328,6 @@ pub(super) trait Spill: Words {
             self.partitions()
         );
         Ok(())
-    }
-}
-
-impl<W: Words + ?Sized> Spill for W {}
-
-impl SharedSpill<'_> {
-    /// See [`Spill::init`].
-    pub fn init(&self, budget: u64) {
-        Spill::init(self, budget);
-    }
-    /// See [`Spill::partitions`].
-    pub fn partitions(&self) -> u32 {
-        Spill::partitions(self)
-    }
-    /// See [`Spill::split`].
-    pub fn split(&self, partitions: u32) -> Result<u32> {
-        Spill::split(self, partitions)
-    }
-    /// See [`Spill::add_bytes`].
-    pub fn add_bytes(&self, delta: i64, partition: Option<u32>) -> Result<bool> {
-        Spill::add_bytes(self, delta, partition)
-    }
-    /// See [`Spill::bytes`].
-    pub fn bytes(&self) -> u64 {
-        Spill::bytes(self)
-    }
-    /// See [`Spill::evict_largest`].
-    pub fn evict_largest(&self) -> Option<u32> {
-        Spill::evict_largest(self)
-    }
-    /// See [`Spill::evictions`].
-    pub fn evictions(&self) -> u64 {
-        Spill::evictions(self)
-    }
-    /// See [`Spill::on_disk`].
-    pub fn on_disk(&self, partition: u32) -> Result<bool> {
-        Spill::on_disk(self, partition)
-    }
-    /// See [`Spill::add_records`].
-    pub fn add_records(&self, partition: u32, records: u64) -> Result<()> {
-        Spill::add_records(self, partition, records)
-    }
-    /// See [`Spill::records`].
-    pub fn records(&self, partition: u32) -> Result<u64> {
-        Spill::records(self, partition)
-    }
-    /// See [`Spill::start`].
-    pub fn start(&self) -> u32 {
-        Spill::start(self)
-    }
-    /// See [`Spill::take_file`].
-    pub fn take_file(&self, partition: u32, outer: bool) -> Result<u32> {
-        Spill::take_file(self, partition, outer)
-    }
-    /// See [`Spill::take_alone`].
-    pub fn take_alone(&self, partition: u32) -> Result<bool> {
-        Spill::take_alone(self, partition)
-    }
-    /// See [`Spill::alone`].
-    pub fn alone(&self, partition: u32) -> Result<bool> {
-        Spill::alone(self, partition)
     }
 }
 

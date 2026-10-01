@@ -896,25 +896,28 @@ fn linking_before_the_index_is_made_breaks_the_table() {
     shared_build(2, &[1, 2, 3], Some(super::phases::SIZE), 2);
 }
 
-/// The shared state of a spill over loom atomics, for `capacity`
+/// The words of a shared spill as loom atomics, for `capacity`
 /// partitions and the resident ones.
-struct LoomSpill {
+#[derive(Debug)]
+struct LoomWords {
     words: Vec<AtomicU64>,
     capacity: usize,
 }
 
-impl LoomSpill {
-    fn new(capacity: usize, budget: u64) -> Self {
-        let words = (0..super::shared_spill::words_for(capacity).unwrap())
-            .map(|_| AtomicU64::new(0))
-            .collect();
-        let spill = Self { words, capacity };
-        spill.init(budget);
-        spill
-    }
+/// The shared state of a spill over loom atomics.
+type LoomSpill = Spill<LoomWords>;
+
+/// A cleared spill state for `capacity` partitions and a budget.
+fn loom_spill(capacity: usize, budget: u64) -> LoomSpill {
+    let words = (0..super::shared_spill::words_for(capacity).unwrap())
+        .map(|_| AtomicU64::new(0))
+        .collect();
+    let spill = Spill::over(LoomWords { words, capacity });
+    spill.init(budget);
+    spill
 }
 
-impl Words for LoomSpill {
+impl Words for LoomWords {
     fn load(&self, index: usize) -> u64 {
         self.words[index].load(order::LOAD)
     }
@@ -941,7 +944,7 @@ impl Words for LoomSpill {
 #[test]
 fn participants_past_the_budget_agree_on_one_split() {
     ::loom::model(|| {
-        let spill = Arc::new(LoomSpill::new(8, 100));
+        let spill = Arc::new(loom_spill(8, 100));
         let threads: Vec<_> = [4_u32, 8]
             .into_iter()
             .map(|wanted| {
@@ -970,7 +973,7 @@ fn participants_past_the_budget_agree_on_one_split() {
 #[test]
 fn a_partition_goes_to_disk_once() {
     ::loom::model(|| {
-        let spill = Arc::new(LoomSpill::new(4, 10));
+        let spill = Arc::new(loom_spill(4, 10));
         spill.split(4).unwrap();
         spill.add_bytes(30, Some(1)).unwrap();
         spill.add_bytes(20, Some(2)).unwrap();
@@ -1009,7 +1012,7 @@ struct Round {
 impl Round {
     fn new(files: &'static [&'static [i32]], participants: usize, skip: Option<u32>) -> Self {
         let keys = files.iter().map(|file| file.len()).sum();
-        let spill = LoomSpill::new(1, 0);
+        let spill = loom_spill(1, 0);
         spill.split(1).unwrap();
         Self {
             files,

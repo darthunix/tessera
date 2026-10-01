@@ -485,7 +485,6 @@ impl<'a> Table<'a> {
     /// keys, `payload` the payload of every physical row one after another
     /// or `None` for zeros. The records are not in the buckets until
     /// linked. The caller must be the chunk's one writer.
-    #[allow(clippy::too_many_arguments)]
     pub fn append<K: KeySource + ?Sized>(
         &self,
         chunk: usize,
@@ -779,7 +778,6 @@ impl<'a> TableMut<'a> {
     /// of its hash's partition: a row whose partition's chunk is full stays
     /// pending while the rows after it go on, and all stop once the records
     /// reach half the buckets. For a grouping that spills.
-    #[allow(clippy::too_many_arguments)]
     pub fn find_or_insert_partitioned<K: KeySource + ?Sized>(
         &mut self,
         partitions: &Partitions<'_>,

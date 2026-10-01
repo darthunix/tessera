@@ -29,7 +29,20 @@ pub struct Cursor(u64);
 impl Cursor {
     /// Before the first record.
     pub fn start() -> Self {
-        Self(CHUNK_HEADER as u64)
+        Self::at(0, CHUNK_HEADER)
+    }
+
+    /// At byte `byte` of chunk `chunk`.
+    fn at(chunk: usize, byte: usize) -> Self {
+        Self((chunk as u64) << 32 | byte as u64)
+    }
+
+    fn chunk(self) -> usize {
+        (self.0 >> 32) as usize
+    }
+
+    fn byte(self) -> usize {
+        (self.0 & u64::from(u32::MAX)) as usize
     }
 
     /// The cursor a caller stored as an integer.
@@ -327,8 +340,7 @@ pub(super) fn scan<R: Region>(
     out: &mut [u32],
 ) -> Result<usize> {
     let access = Access::new(region, layout);
-    let mut chunk = (cursor.0 >> 32) as usize;
-    let mut byte = (cursor.0 & u64::from(u32::MAX)) as usize;
+    let (mut chunk, mut byte) = (cursor.chunk(), cursor.byte());
     ensure!(
         byte >= CHUNK_HEADER
             && (byte - CHUNK_HEADER).is_multiple_of(layout.record_size)
@@ -349,7 +361,7 @@ pub(super) fn scan<R: Region>(
         count += 1;
         byte += layout.record_size;
     }
-    cursor.0 = ((chunk as u64) << 32) | byte as u64;
+    *cursor = Cursor::at(chunk, byte);
     Ok(count)
 }
 

@@ -87,7 +87,6 @@ pub(crate) trait IntLane: Copy + Ord + core::fmt::Debug + 'static {
     /// the prepared divisor of a division by a scalar: each width's own mix
     /// of vector code and lanes one by one. An overflow fails with
     /// `OUT_OF_RANGE`.
-    #[allow(clippy::too_many_arguments)]
     fn arith_block<E: Evaluate<Self>>(
         op: ArithOp,
         lhs: Side<'_, Self>,
