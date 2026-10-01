@@ -2237,8 +2237,13 @@ parameter of the child reads and sorts it anew. `EXPLAIN` shows the keys
 as the core does; `ANALYZE` adds the method, the memory (records, values,
 index, items and references at the sort), its overrun past `work_mem`
 and the disk written, and with `VERBOSE` the runs and merge passes of an
-external sort, the batches and rows read, the rows a top-N rebuilt and
-whether abbreviated keys were given up.
+external sort, the batches and rows read, the rows a top-N rebuilt and,
+for a key of another type, `Abbreviated Keys`: the order of the type's
+abbreviated keys the node took (`unsigned`, `signed`, `reversed` for
+numeric's, `uint32`, `int32`), `none`, or `given up`. The node knows the
+order by the core's comparator function, which has no other interface: a
+core that renamed its comparators would show `none` and sort slower but
+right, and the types suite checks text, numeric and uuid for it.
 
 ### Other types
 
@@ -2258,7 +2263,7 @@ the node gives the abbreviated keys up when the type's abort test
 rows abbreviated, while every row is still in memory (a run on disk keeps
 its items): the words the records hold become 0
 (`tess_table_clear_key`), the next rows' are 0 without a conversion, and
-the groups of equal words, the comparisons, decide; EXPLAIN ANALYZE says
+the groups of equal words, the comparisons, decide; EXPLAIN (ANALYZE, VERBOSE) says
 "Abbreviated Keys: given up". Text whose first nine bytes are the same
 under an ICU collation, a million rows: 684 ms before, 627 after, the
 core 669-698 (bench family exec, `prefix_icu`). After the

@@ -184,6 +184,8 @@ typedef struct TessSortState
 	uint64		abbrev_rows;
 	uint64		abbrev_next;
 	bool		abbrev_given_up;
+	/* The order of the type's abbreviated keys the node took, for EXPLAIN. */
+	SortAbbrev	abbrev_taken;
 	struct TieRow *tie_rows;
 	Datum	   *tie_values;
 	bool	   *tie_isnull;
@@ -453,6 +455,7 @@ generic_begin(TessSortState *state, TupleDesc desc, List *sortops, List *collati
 	tess_sort_abbrev_init(&state->abbrev, (Oid) list_nth_int(sortops, first),
 						  state->ssup[first].ssup_collation,
 						  state->ssup[first].ssup_nulls_first, type);
+	state->abbrev_taken = (SortAbbrev) state->abbrev.order;
 	state->abbrev_context = AllocSetContextCreate(CurrentMemoryContext,
 												  "TessSort abbreviated keys",
 												  ALLOCSET_DEFAULT_SIZES);
@@ -2669,8 +2672,20 @@ sort_explain(CustomScanState *css, List *ancestors, ExplainState *es)
 	ExplainPropertyInteger("Input Rows", NULL, totals[SORT_INPUT_ROWS], es);
 	if (totals[SORT_REBUILT] > 0)
 		ExplainPropertyInteger("Rows Rebuilt", NULL, totals[SORT_REBUILT], es);
-	if (totals[SORT_ABBREV_GIVEN_UP] > 0)
-		ExplainPropertyText("Abbreviated Keys", "given up", es);
+	/*
+	 * A key of another type: the order of its abbreviated keys, which the
+	 * node knows by the core's comparator (abbrev_order_of), or none, and
+	 * whether it gave them up; a core that renamed its comparators shows
+	 * none here, a sort slower but right.
+	 */
+	if (state->generic >= 0)
+		ExplainPropertyText("Abbreviated Keys",
+							totals[SORT_ABBREV_GIVEN_UP] > 0 ? "given up" :
+							state->abbrev_taken == SORT_ABBREV_UNSIGNED ? "unsigned" :
+							state->abbrev_taken == SORT_ABBREV_SIGNED ? "signed" :
+							state->abbrev_taken == SORT_ABBREV_REVERSED ? "reversed" :
+							state->abbrev_taken == SORT_ABBREV_UINT32 ? "uint32" :
+							state->abbrev_taken == SORT_ABBREV_INT32 ? "int32" : "none", es);
 }
 
 /*

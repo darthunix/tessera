@@ -2,9 +2,9 @@
 #ifndef TESSERA_NODES_INTERNAL_H
 #define TESSERA_NODES_INTERNAL_H
 
-#include "catalog/pg_opfamily_d.h"
 #include "catalog/pg_type_d.h"
 #include "utils/sortsupport.h"
+#include "utils/typcache.h"
 
 #include "tessera/node.h"
 #include "tessera/planner.h"
@@ -63,26 +63,18 @@ tess_word_key_kind(Oid type, TessTableKeyKind *kind)
 	}
 }
 
-/* The B-tree family whose order the key's word keeps, for a sort key. */
+/*
+ * Whether a sort key's B-tree family orders as the key's word does: the
+ * default family of a type a word holds (integer_ops, datetime_ops,
+ * bool_ops), its ordinary order, which the word's keeps.
+ */
 static inline bool
 tess_word_key_order(Oid type, Oid opfamily)
 {
-	switch (type)
-	{
-		case INT2OID:
-		case INT4OID:
-		case INT8OID:
-			return opfamily == INTEGER_BTREE_FAM_OID;
-		case DATEOID:
-		case TIMESTAMPOID:
-		case TIMESTAMPTZOID:
-			/* datetime_ops */
-			return opfamily == 434;
-		case BOOLOID:
-			return opfamily == BOOL_BTREE_FAM_OID;
-		default:
-			return false;
-	}
+	TessTableKeyKind kind;
+
+	return tess_word_key_kind(type, &kind) &&
+		opfamily == lookup_type_cache(type, TYPECACHE_BTREE_OPFAMILY)->btree_opf;
 }
 
 /* Clauses (RestrictInfos) in the order the planner evaluates a plan's quals. */

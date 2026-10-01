@@ -966,6 +966,7 @@ SELECT sort_explain($$SELECT p, v FROM sort_prefix ORDER BY reverse(p) COLLATE "
    Memory Usage: N kB
    Input Batches: 64
    Input Rows: 3000
+   Abbreviated Keys: unsigned
    ->  Custom Scan (TessHeapScan) on public.sort_prefix (actual rows=3000.00 loops=1)
          Batch Size: 64
          Batches: 64
@@ -973,7 +974,7 @@ SELECT sort_explain($$SELECT p, v FROM sort_prefix ORDER BY reverse(p) COLLATE "
          Deformed Datums: 6000
          Restarted Datums: 0
          Computed Datums: 3000
-(13 rows)
+(14 rows)
 
 SELECT sort_same($$SELECT p, v FROM sort_prefix ORDER BY reverse(p) COLLATE "C", v$$);
  sort_same 

@@ -690,6 +690,31 @@ SELECT types_order($$SELECT i, s FROM (SELECT i, CASE WHEN i <= 5 THEN -1000000 
 -- Past work_mem: runs on disk, merged in C by the words and the comparisons.
 SET work_mem = '64kB';
 SELECT types_sort_method($$SELECT id, long, n FROM types_s ORDER BY long COLLATE "C", n DESC, id$$);
+-- The order of a type's abbreviated keys, which the node knows by the
+-- core's comparator: a core that renamed its comparators would show none
+-- here and sort slower, unseen otherwise. float8 has none; long text of
+-- a common prefix gives them up.
+CREATE FUNCTION types_abbrev(query text) RETURNS text
+LANGUAGE plpgsql AS $$
+DECLARE
+    line text;
+BEGIN
+    FOR line IN EXECUTE 'EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) ' || query
+    LOOP
+        IF line ~ 'Abbreviated Keys: ' THEN
+            RETURN substring(line FROM 'Abbreviated Keys: (.*)$');
+        END IF;
+    END LOOP;
+    RETURN NULL;
+END
+$$;
+SELECT types_abbrev($$SELECT id, n FROM types_s ORDER BY n, id$$) AS numeric_keys,
+       types_abbrev($$SELECT id, u FROM types_s ORDER BY u, id$$) AS uuid_keys,
+       types_abbrev($$SELECT id, t FROM types_s ORDER BY t COLLATE "C", id$$) AS text_keys,
+       types_abbrev($$SELECT id, long FROM types_s ORDER BY long COLLATE "C", id$$) AS long_text_keys,
+       types_abbrev($$SELECT id, f FROM types_s ORDER BY f, id$$) AS float8_keys,
+       types_abbrev($$SELECT id FROM types_s ORDER BY id$$) AS int_keys;
+DROP FUNCTION types_abbrev(text);
 SELECT types_order($$SELECT id, long, n FROM types_s ORDER BY long COLLATE "C", n DESC, id$$);
 SELECT types_order($$SELECT id, n FROM types_s ORDER BY n NULLS FIRST, id$$);
 SELECT types_order($$SELECT id, w, t FROM types_s ORDER BY w, t, id$$);
