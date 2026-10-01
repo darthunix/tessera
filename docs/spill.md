@@ -251,6 +251,15 @@ holds up one participant, not all. A participant that releases its set leaves it
 the others (`tess_spill_release`); the set deletes them when the last
 participant detaches, or at a rescan.
 
+There is no skew table as the core's hash join keeps (the inner rows of
+the outer side's most common keys held in memory, so that their outer
+rows are not written): an outer row of a hot key goes to its partition
+on disk like any other. Measured, it costs no loss to the core: half the
+outer rows of one key, joined with 100 000 inner rows at a work_mem of
+1 MB (8 partitions, 9 MB on disk), take 43 ms against the core's 139,
+and the same join without the skew 46 against 164 (bench family exec,
+`skew_join` and `even_join`, plan 4.27).
+
 ## In the grouping
 
 TessAgg spills a table of its own ([nodes.md](nodes.md), "Spilling"
