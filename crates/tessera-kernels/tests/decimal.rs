@@ -3,33 +3,17 @@
 
 use std::mem::MaybeUninit;
 
+use anyhow::Result;
+use proptest::prelude::*;
 use tessera_core::{RowMask, RowMaskView};
 use tessera_kernels::decimal::{
     self, Arg, Compare, Decimal, MAX_READ_SCALE, MAX_SCALE, Op, POWERS, Results, SUM_BOUND, Scales,
     Source, Sum,
 };
-
-/// xorshift64*, fixed seed: the same data on every run.
-fn random(state: &mut u64) -> u64 {
-    *state ^= *state >> 12;
-    *state ^= *state << 25;
-    *state ^= *state >> 27;
-    state.wrapping_mul(0x2545_F491_4F6C_DD1D)
-}
-
-/// A decimal of up to 18 digits at a scale up to `max_scale`.
-fn random_decimal(state: &mut u64, max_scale: u32) -> Decimal {
-    let digits = (random(state) % 19) as usize;
-    let magnitude = (random(state) % POWERS[digits] as u64) as i64;
-    let value = if random(state).is_multiple_of(2) {
-        magnitude
-    } else {
-        -magnitude
-    };
-    Decimal::new(value, (random(state) % u64::from(max_scale + 1)) as u32).unwrap()
-}
+use tessera_testing::{decimal_parts, flags, nrows, property};
 
 /// A column of arguments by row.
+#[derive(Clone, Debug)]
 struct Column(Vec<Arg>);
 
 impl Source for Column {
@@ -38,16 +22,27 @@ impl Source for Column {
     }
 }
 
-fn random_column(state: &mut u64, nrows: usize) -> Column {
-    Column(
-        (0..nrows)
-            .map(|_| match random(state) % 10 {
-                0 => Arg::Null,
-                1 => Arg::Other,
-                _ => Arg::Decimal(random_decimal(state, MAX_READ_SCALE)),
-            })
-            .collect(),
-    )
+/// An argument: NULL or not a decimal one time in ten each, otherwise a
+/// decimal leaning to the digit edges at a scale the batch reads.
+fn arg() -> BoxedStrategy<Arg> {
+    let decimal = decimal_parts(MAX_READ_SCALE)
+        .prop_map(|(value, scale)| Arg::Decimal(Decimal::new(value, scale).unwrap()));
+    prop_oneof![1 => Just(Arg::Null), 1 => Just(Arg::Other), 8 => decimal].boxed()
+}
+
+/// Two columns of one row count and a selection.
+fn pairs() -> impl Strategy<Value = (Column, Column, Vec<bool>)> {
+    nrows().prop_flat_map(|nrows| {
+        (
+            proptest::collection::vec(arg(), nrows).prop_map(Column),
+            proptest::collection::vec(arg(), nrows).prop_map(Column),
+            flags(nrows),
+        )
+    })
+}
+
+fn selection(selected: &[bool]) -> Vec<u64> {
+    words(selected.len(), |row| selected[row])
 }
 
 fn words(nrows: usize, bits: impl Fn(usize) -> bool) -> Vec<u64> {
@@ -87,11 +82,14 @@ fn reference(op: Op, left: Decimal, right: Decimal) -> Option<Decimal> {
 
 #[test]
 fn filter_keeps_the_rows_that_hold_and_leaves_the_rest() {
-    let mut state = 0xDEAD_BEEF_CAFE_F00D;
-    let nrows = 1000;
-    let left = random_column(&mut state, nrows);
-    let right = random_column(&mut state, nrows);
-    let selected = words(nrows, |row| row % 7 != 3);
+    property(pairs(), |(left, right, selected)| -> Result<()> {
+        filter_keeps(&left, &right, &selection(&selected));
+        Ok(())
+    });
+}
+
+fn filter_keeps(left: &Column, right: &Column, selected: &[u64]) {
+    let nrows = left.0.len();
     for (op, holds) in [
         (Compare::Eq, [false, true, false]),
         (Compare::Ne, [true, false, true]),
@@ -100,20 +98,20 @@ fn filter_keeps_the_rows_that_hold_and_leaves_the_rest() {
         (Compare::Gt, [false, false, true]),
         (Compare::Ge, [false, true, true]),
     ] {
-        let mut kept = selected.clone();
+        let mut kept = selected.to_vec();
         // Every bit of the rest is written, set ones included.
         let mut rest = words(nrows, |_| true);
         decimal::filter(
             op,
-            &left,
-            &right,
+            left,
+            right,
             &mut RowMask::try_new(nrows, &mut kept).unwrap(),
             &mut RowMask::try_new(nrows, &mut rest).unwrap(),
         )
         .unwrap();
         for row in 0..nrows {
             let (keep, other) = match (left.0[row], right.0[row]) {
-                _ if !bit(&selected, row) => (false, false),
+                _ if !bit(selected, row) => (false, false),
                 (Arg::Null, _) | (_, Arg::Null) => (false, false),
                 (Arg::Decimal(l), Arg::Decimal(r)) => {
                     (holds[(l.compare(r) as i8 + 1) as usize], false)
@@ -131,11 +129,18 @@ fn filter_keeps_the_rows_that_hold_and_leaves_the_rest() {
 
 #[test]
 fn compute_writes_results_decimals_and_the_rest() {
-    let mut state = 0x0BAD_C0DE_1234_5678;
-    let nrows = 777;
-    let left = random_column(&mut state, nrows);
-    let right = random_column(&mut state, nrows);
-    let selected = words(nrows, |row| row % 5 != 2);
+    let cases = (
+        pairs(),
+        prop_oneof![Just(None), (0..=MAX_SCALE).prop_map(Some)],
+    );
+    property(cases, |((left, right, selected), scale)| -> Result<()> {
+        compute_writes(&left, &right, &selection(&selected), scale);
+        Ok(())
+    });
+}
+
+fn compute_writes(left: &Column, right: &Column, selected: &[u64], scale: Option<u32>) {
+    let nrows = left.0.len();
     for op in [Op::Add, Op::Sub, Op::Mul, Op::Negate, Op::Abs] {
         let mut values = vec![MaybeUninit::uninit(); nrows];
         let mut scales = vec![MaybeUninit::uninit(); nrows];
@@ -149,13 +154,13 @@ fn compute_writes_results_decimals_and_the_rest() {
             decimals: RowMask::try_new(nrows, &mut decimals).unwrap(),
             rest: RowMask::try_new(nrows, &mut rest).unwrap(),
         };
-        let rows = RowMaskView::try_new(nrows, &selected).unwrap();
-        decimal::compute(op, &left, &right, rows, Some(4), &mut results).unwrap();
+        let rows = RowMaskView::try_new(nrows, selected).unwrap();
+        decimal::compute(op, left, right, rows, scale, &mut results).unwrap();
         for row in 0..nrows {
             let flags = (bit(&present, row), bit(&rest, row), bit(&decimals, row));
             let l = left.0[row];
             let r = if op.binary() { right.0[row] } else { l };
-            if !bit(&selected, row) || l == Arg::Null || r == Arg::Null {
+            if !bit(selected, row) || l == Arg::Null || r == Arg::Null {
                 assert_eq!(flags, (false, false, false), "{op:?} {row}");
                 continue;
             }
@@ -165,7 +170,11 @@ fn compute_writes_results_decimals_and_the_rest() {
             };
             match expected {
                 Some(result) => {
-                    assert_eq!(flags, (true, false, result.scale() == 4), "{op:?} {row}");
+                    assert_eq!(
+                        flags,
+                        (true, false, Some(result.scale()) == scale),
+                        "{op:?} {row}"
+                    );
                     // SAFETY: the call wrote the result of every computed row.
                     let (value, scale) =
                         unsafe { (values[row].assume_init(), scales[row].assume_init()) };
@@ -318,10 +327,14 @@ fn different_row_counts_fail_before_writing() {
 
 #[test]
 fn sum_adds_every_decimal_and_leaves_the_rest() {
-    let mut state = 0x5EED_0F5A_5A5A_A5A5;
-    let nrows = 900;
-    let column = random_column(&mut state, nrows);
-    let selected = words(nrows, |row| row % 9 != 4);
+    property(pairs(), |(column, _, selected)| -> Result<()> {
+        sum_adds(&column, &selection(&selected));
+        Ok(())
+    });
+}
+
+fn sum_adds(column: &Column, selected: &[u64]) {
+    let nrows = column.0.len();
     let mut total = Sum::default();
     let mut rest = words(nrows, |_| true);
     // Two calls over halves of the selection, as batches come.
@@ -333,7 +346,7 @@ fn sum_adds_every_decimal_and_leaves_the_rest() {
             .collect();
         let mut left = words(nrows, |_| false);
         decimal::sum(
-            &column,
+            column,
             RowMaskView::try_new(nrows, &part).unwrap(),
             &mut total,
             &mut RowMask::try_new(nrows, &mut left).unwrap(),
@@ -345,17 +358,33 @@ fn sum_adds_every_decimal_and_leaves_the_rest() {
             }
         }
     }
+    // The model adds in the calls' order, even words before odd ones, and
+    // leaves to the caller a decimal whose sum, or the sum rescaled to it,
+    // would reach the bound.
     let (mut value, mut scale, mut count) = (0_i128, 0_u32, 0_u64);
-    for row in 0..nrows {
+    let order = (0..nrows)
+        .filter(|row| row / 64 % 2 == 0)
+        .chain((0..nrows).filter(|row| row / 64 % 2 == 1));
+    for row in order {
         let (taken, other) = match column.0[row] {
-            _ if !bit(&selected, row) => (false, false),
+            _ if !bit(selected, row) => (false, false),
             Arg::Decimal(decimal) => {
                 let at = scale.max(decimal.scale());
-                value = value * 10_i128.pow(at - scale)
-                    + i128::from(decimal.value()) * 10_i128.pow(at - decimal.scale());
-                scale = at;
-                count += 1;
-                (true, false)
+                let sum = value
+                    .checked_mul(10_i128.pow(at - scale))
+                    .filter(|rescaled| rescaled.abs() < SUM_BOUND)
+                    .map(|rescaled| {
+                        rescaled + i128::from(decimal.value()) * 10_i128.pow(at - decimal.scale())
+                    })
+                    .filter(|sum| sum.abs() < SUM_BOUND);
+                match sum {
+                    Some(sum) => {
+                        (value, scale) = (sum, at);
+                        count += 1;
+                        (true, false)
+                    }
+                    None => (false, true),
+                }
             }
             Arg::Other => (false, true),
             Arg::Null => (false, false),
@@ -374,8 +403,8 @@ fn sum_adds_every_decimal_and_leaves_the_rest() {
     };
     assert!(
         decimal::sum(
-            &column,
-            RowMaskView::try_new(nrows, &selected).unwrap(),
+            column,
+            RowMaskView::try_new(nrows, selected).unwrap(),
             &mut past,
             &mut RowMask::try_new(nrows, &mut rest).unwrap(),
         )

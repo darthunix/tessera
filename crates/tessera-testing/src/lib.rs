@@ -88,6 +88,22 @@ pub fn integer<T: Int>() -> BoxedStrategy<T> {
     prop_oneof![1 => edge::<T>(), 2 => small::<T>(), 1 => T::any()].boxed()
 }
 
+/// The value and scale of a decimal of at most 18 digits: values at the
+/// digit edges (0, ±1, ±10^k, ±(10^k − 1)) one time in two, otherwise any
+/// value of a random digit count; scales of 0, of `max_scale` and of
+/// anything up to it.
+pub fn decimal_parts(max_scale: u32) -> BoxedStrategy<(i64, u32)> {
+    let power = |digits: u32| 10_i64.pow(digits);
+    let edge = (0..=18_u32, -1_i64..=0, any::<bool>()).prop_map(move |(digits, step, negative)| {
+        let magnitude = (power(digits) + step).min(power(18) - 1);
+        if negative { -magnitude } else { magnitude }
+    });
+    let spread =
+        (0..=18_u32).prop_flat_map(move |digits| -(power(digits) - 1)..power(digits).max(1));
+    let scale = prop_oneof![Just(0), Just(max_scale), 0..=max_scale];
+    (prop_oneof![edge, spread], scale).boxed()
+}
+
 /// A batch's row count: none or a few, around one word and around two, or
 /// anything up to three words and a tail.
 pub fn nrows() -> BoxedStrategy<usize> {

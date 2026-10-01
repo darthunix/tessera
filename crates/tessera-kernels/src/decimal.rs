@@ -1177,26 +1177,16 @@ fn read_with(
 
 #[cfg(test)]
 mod tests {
+    use proptest::prelude::*;
+    use tessera_testing::{decimal_parts, property};
+
     use super::*;
 
-    /// xorshift64*, fixed seed: the same values on every run.
-    fn random(state: &mut u64) -> u64 {
-        *state ^= *state >> 12;
-        *state ^= *state << 25;
-        *state ^= *state >> 27;
-        state.wrapping_mul(0x2545_F491_4F6C_DD1D)
-    }
-
-    /// A decimal of up to `digits` digits at a scale up to `max_scale`.
-    fn random_decimal(state: &mut u64, max_scale: u32) -> Decimal {
-        let digits = (random(state) % 19) as usize;
-        let magnitude = (random(state) % POWERS[digits] as u64) as i64;
-        let value = if random(state).is_multiple_of(2) {
-            magnitude
-        } else {
-            -magnitude
-        };
-        Decimal::new(value, (random(state) % u64::from(max_scale + 1)) as u32).unwrap()
+    /// Decimals leaning to the digit edges at a scale up to `max_scale`.
+    fn decimals(max_scale: u32) -> impl Strategy<Value = Vec<Decimal>> {
+        let decimal =
+            decimal_parts(max_scale).prop_map(|(value, scale)| Decimal::new(value, scale).unwrap());
+        proptest::collection::vec(decimal, 0..256)
     }
 
     /// The numeric of a decimal the way the core's `make_result` reaches
@@ -1272,8 +1262,7 @@ mod tests {
 
     #[test]
     fn writes_as_make_result_and_reads_back() {
-        let mut state = 0x9E37_79B9_7F4A_7C15;
-        let mut cases: Vec<Decimal> = [
+        let cases: Vec<Decimal> = [
             (0, 0),
             (0, 2),
             (0, 18),
@@ -1295,7 +1284,14 @@ mod tests {
         .into_iter()
         .map(|(value, scale)| Decimal::new(value, scale).unwrap())
         .collect();
-        cases.extend((0..200_000).map(|_| random_decimal(&mut state, MAX_SCALE)));
+        writes_and_reads_back(cases);
+        property(decimals(MAX_SCALE), |cases| -> Result<()> {
+            writes_and_reads_back(cases);
+            Ok(())
+        });
+    }
+
+    fn writes_and_reads_back(cases: Vec<Decimal>) {
         for decimal in cases {
             let bytes = written(decimal);
             assert_eq!(bytes, reference_numeric(decimal), "{decimal:?}");
@@ -1423,21 +1419,26 @@ mod tests {
 
     #[test]
     fn operations_are_exact() {
-        let mut state = 0x1234_5678_9ABC_DEF1;
-        for _ in 0..200_000 {
-            let left = random_decimal(&mut state, MAX_READ_SCALE);
-            let right = random_decimal(&mut state, MAX_READ_SCALE);
-            let scale = left.scale.max(right.scale);
-            let expected = (i128::from(left.value) * 10_i128.pow(scale - left.scale))
-                .cmp(&(i128::from(right.value) * 10_i128.pow(scale - right.scale)));
-            assert_eq!(left.compare(right), expected, "{left:?} {right:?}");
-            for op in [Op::Add, Op::Sub, Op::Mul, Op::Negate, Op::Abs] {
-                assert_eq!(
-                    apply(op, left, right),
-                    reference(op, left, right),
-                    "{op:?} {left:?} {right:?}"
-                );
+        let pairs = (decimals(MAX_READ_SCALE), decimals(MAX_READ_SCALE));
+        property(pairs, |(lefts, rights)| -> Result<()> {
+            for (left, right) in lefts.into_iter().zip(rights) {
+                operation_is_exact(left, right);
             }
+            Ok(())
+        });
+    }
+
+    fn operation_is_exact(left: Decimal, right: Decimal) {
+        let scale = left.scale.max(right.scale);
+        let expected = (i128::from(left.value) * 10_i128.pow(scale - left.scale))
+            .cmp(&(i128::from(right.value) * 10_i128.pow(scale - right.scale)));
+        assert_eq!(left.compare(right), expected, "{left:?} {right:?}");
+        for op in [Op::Add, Op::Sub, Op::Mul, Op::Negate, Op::Abs] {
+            assert_eq!(
+                apply(op, left, right),
+                reference(op, left, right),
+                "{op:?} {left:?} {right:?}"
+            );
         }
     }
 

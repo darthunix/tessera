@@ -1013,6 +1013,11 @@ pub fn extract_timestamps(
 
 #[cfg(test)]
 mod tests {
+    use anyhow::Result;
+    use proptest::prelude::*;
+    use proptest::sample::select;
+    use tessera_testing::property;
+
     use super::*;
 
     /// Days since 1970-01-01 to the proleptic Gregorian date, by Howard
@@ -1035,26 +1040,40 @@ mod tests {
         (y as i32, m as i32, d as i32)
     }
 
-    /// xorshift64*, fixed seed.
-    fn random(state: &mut u64) -> u64 {
-        *state ^= *state >> 12;
-        *state ^= *state << 25;
-        *state ^= *state >> 27;
-        state.wrapping_mul(0x2545_F491_4F6C_DD1D)
+    /// A Julian day of the dates: near an epoch or an end one time in two,
+    /// any day otherwise.
+    fn julian() -> BoxedStrategy<i32> {
+        let marks = [
+            0,
+            UNIX_EPOCH_JDATE,
+            POSTGRES_EPOCH_JDATE,
+            TIMESTAMP_END_JULIAN,
+            DATE_END_JULIAN - 1,
+        ];
+        let near = (select(marks.to_vec()), -400_i32..=400)
+            .prop_map(|(mark, step)| mark.saturating_add(step).clamp(0, DATE_END_JULIAN - 1));
+        prop_oneof![near, 0..DATE_END_JULIAN].boxed()
+    }
+
+    fn julian_day_matches_the_calendar(julian: i32) {
+        let (year, month, day) = julian_to_date(julian);
+        assert_eq!((year, month, day), reference(julian), "{julian}");
+        assert_eq!(date_to_julian(year, month, day), julian, "{julian}");
+        assert!((1..=days_in_month(year, month)).contains(&day));
     }
 
     #[test]
     fn julian_days_match_the_calendar_and_round_trip() {
-        let mut state = 0x0DDB_A11D_A7E5_0F00;
-        let samples = (0..3_000_000)
+        (0..3_000_000)
             .chain((DATE_END_JULIAN - 2_000_000)..DATE_END_JULIAN)
-            .chain((0..1_000_000).map(|_| (random(&mut state) % DATE_END_JULIAN as u64) as i32));
-        for julian in samples {
-            let (year, month, day) = julian_to_date(julian);
-            assert_eq!((year, month, day), reference(julian), "{julian}");
-            assert_eq!(date_to_julian(year, month, day), julian, "{julian}");
-            assert!((1..=days_in_month(year, month)).contains(&day));
-        }
+            .for_each(julian_day_matches_the_calendar);
+        property(
+            proptest::collection::vec(julian(), 0..256),
+            |days| -> Result<()> {
+                days.into_iter().for_each(julian_day_matches_the_calendar);
+                Ok(())
+            },
+        );
         assert_eq!(date_to_julian(2000, 1, 1), POSTGRES_EPOCH_JDATE);
         assert_eq!(date_to_julian(1970, 1, 1), UNIX_EPOCH_JDATE);
         assert_eq!(date_to_julian(5_874_898, 1, 1), DATE_END_JULIAN);
@@ -1273,45 +1292,47 @@ mod tests {
             .ok_or(out)
     }
 
+    /// A part of an interval: zero, small, of a middle size or any value.
+    fn part<T: Arbitrary + Copy + core::fmt::Debug + From<i8> + 'static>(
+        small: impl Strategy<Value = T> + 'static,
+        middle: impl Strategy<Value = T> + 'static,
+    ) -> BoxedStrategy<T> {
+        prop_oneof![Just(T::from(0)), small, middle, any::<T>()].boxed()
+    }
+
+    fn intervals() -> impl Strategy<Value = Interval> {
+        (
+            part(0_i64..1_000_000, -(1_i64 << 39)..(1 << 39)),
+            part(-200_i32..200, -50_000_i32..50_000),
+            part(-20_i32..20, -5_000_i32..5_000),
+        )
+            .prop_map(|(time, day, month)| Interval { time, day, month })
+    }
+
+    /// A timestamp near either end of the range, within a century of the
+    /// epoch, or infinite.
+    fn timestamps() -> impl Strategy<Value = i64> {
+        prop_oneof![
+            4 => (0..1_i64 << 50).prop_map(|offset| MIN_TIMESTAMP + offset),
+            4 => (0..1_i64 << 50).prop_map(|offset| END_TIMESTAMP - 1 - offset),
+            4 => -(100 * 365 * USECS_PER_DAY)..(100 * 365 * USECS_PER_DAY),
+            1 => select(vec![TIMESTAMP_NOBEGIN, TIMESTAMP_NOEND]),
+        ]
+    }
+
     #[test]
     fn intervals_add_as_the_core_steps_them() {
-        let mut state = 0x1A7E_5EED_0000_0001;
-        let span_of = |state: &mut u64| {
-            let pick = random(state);
-            Interval {
-                time: match pick % 4 {
-                    0 => 0,
-                    1 => (random(state) % (1 << 40)) as i64 - (1 << 39),
-                    2 => random(state) as i64,
-                    _ => (random(state) % 1_000_000) as i64,
-                },
-                day: match (pick >> 2) % 4 {
-                    0 => 0,
-                    1 => (random(state) % 100_000) as i32 - 50_000,
-                    2 => random(state) as i32,
-                    _ => (random(state) % 400) as i32 - 200,
-                },
-                month: match (pick >> 4) % 4 {
-                    0 => 0,
-                    1 => (random(state) % 10_000) as i32 - 5_000,
-                    2 => random(state) as i32,
-                    _ => (random(state) % 40) as i32 - 20,
-                },
+        let cases = proptest::collection::vec((timestamps(), intervals()), 0..256);
+        property(cases, |cases| -> Result<()> {
+            for (timestamp, span) in cases {
+                assert_eq!(
+                    add_interval(timestamp, span),
+                    add_interval_reference(timestamp, span),
+                    "{timestamp} {span:?}"
+                );
             }
-        };
-        for _ in 0..1_000_000 {
-            let timestamp = match random(&mut state) % 3 {
-                0 => MIN_TIMESTAMP + (random(&mut state) % (1 << 50)) as i64,
-                1 => END_TIMESTAMP - 1 - (random(&mut state) % (1 << 50)) as i64,
-                _ => (random(&mut state) as i64) % (100 * 365 * USECS_PER_DAY),
-            };
-            let span = span_of(&mut state);
-            assert_eq!(
-                add_interval(timestamp, span),
-                add_interval_reference(timestamp, span),
-                "{timestamp} {span:?}"
-            );
-        }
+            Ok(())
+        });
     }
 
     #[test]
