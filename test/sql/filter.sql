@@ -366,6 +366,19 @@ SELECT filter_same($$SELECT bit_xor(a), max(length(t)), count(*) FROM filter_row
 SELECT filter_same($$SELECT md5(string_agg(q::text, ',' ORDER BY q::text)) FROM (SELECT a, left(t, 3) FROM filter_rows) AS q$$);
 DROP TABLE filter_rows;
 
+-- The rows read count as the core counts them, a tuple each: both modes
+-- add the same to the table's statistics.
+BEGIN;
+SELECT seq_tup_read AS before FROM pg_stat_xact_user_tables WHERE relname = 'filter_t' \gset
+SET LOCAL tessera.enable = on;
+SELECT count(*) FROM filter_t WHERE a > 100;
+SELECT seq_tup_read - :before AS read FROM pg_stat_xact_user_tables WHERE relname = 'filter_t' \gset
+SET LOCAL tessera.enable = off;
+SELECT count(*) FROM filter_t WHERE a > 100;
+SELECT :read AS read_on, seq_tup_read - :before - :read AS read_off
+FROM pg_stat_xact_user_tables WHERE relname = 'filter_t';
+COMMIT;
+
 DROP FUNCTION filter_same(text);
 
 DROP TABLE filter_t;

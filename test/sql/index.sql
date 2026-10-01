@@ -58,6 +58,18 @@ SET max_parallel_workers_per_gather = 0;
 EXPLAIN (COSTS OFF) SELECT count(*), sum(w) FROM index_t WHERE k < 500;
 SELECT index_explain($$SELECT count(*), sum(w) FROM index_t WHERE k < 500$$);
 SELECT index_same($$SELECT count(*), sum(w) FROM index_t WHERE k < 500$$);
+-- The rows of the bitmap's pages count as the core counts them, a fetch
+-- each: both modes add the same to the table's statistics.
+BEGIN;
+SELECT idx_tup_fetch AS before FROM pg_stat_xact_user_tables WHERE relname = 'index_t' \gset
+SET LOCAL tessera.enable = on;
+SELECT count(*) FROM index_t WHERE k < 500;
+SELECT idx_tup_fetch - :before AS fetched FROM pg_stat_xact_user_tables WHERE relname = 'index_t' \gset
+SET LOCAL tessera.enable = off;
+SELECT count(*) FROM index_t WHERE k < 500;
+SELECT :fetched AS fetched_on, idx_tup_fetch - :before - :fetched AS fetched_off
+FROM pg_stat_xact_user_tables WHERE relname = 'index_t';
+COMMIT;
 SELECT index_same($$SELECT id, k, t FROM index_t WHERE k < 300$$);
 SELECT index_same($$SELECT id, k + w, upper(t) FROM index_t WHERE k BETWEEN 1000 AND 1300$$);
 SELECT index_same($$SELECT count(*), max(id) FROM index_t WHERE k IS NULL$$);

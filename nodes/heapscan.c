@@ -805,6 +805,16 @@ end_scan(HeapScanState *state)
 }
 
 /*
+ * The page at a time. heapam has no call that gives a page's visible
+ * tuples at once, so the node reads its scan descriptor (HeapScanDescData,
+ * access/heapam.h), here and in fill_from_page alone: in page mode the
+ * scan keeps the page's visible tuples in rs_vistuples, rs_ntuples of
+ * them, the one it returned last at rs_cindex, the page pinned in rs_cbuf,
+ * its number in rs_cblock; the node writes only rs_cindex, so that the
+ * scan's next call fetches the next page. fill_from_page checks the
+ * bounds it reads within; another core's descriptor goes through the
+ * compatibility layer (plan item 7.1).
+ *
  * Move the core's scan to the next page with visible tuples: it brings
  * the page in, prunes it, checks visibility and returns the first visible
  * tuple, which is left in the page's list for the batch. False at the end.
@@ -846,31 +856,45 @@ next_page(HeapScanState *state)
 	return true;
 }
 
+/*
+ * Add count rows to the table's statistics, as count calls of
+ * pgstat_count_heap_getnext would, or of pgstat_count_heap_fetch for a
+ * bitmap's rows (pgstat.h): the same test and counters, the macros'
+ * bodies, a page's rows at once. Called a row at a time, the macros took
+ * 15 % of count(*) over 2 M rows (5.3 against 6.4 ms) and 7 to 15 % of
+ * other full scans (plan 4.30).
+ */
+static inline void
+count_heap_rows(Relation rel, bool fetched, int count)
+{
+	if (count <= 0 || !pgstat_should_count_relation(rel))
+		return;
+	Assert(rel->pgstat_info->kind == PGSTAT_KIND_RELATION);
+	if (fetched)
+		rel->pgstat_info->tab.counts.tuples_fetched += count;
+	else
+		rel->pgstat_info->tab.counts.tuples_returned += count;
+}
+
 /* Take up to limit visible tuples of the current page into the batch; how many. */
 static int
 fill_from_page(HeapScanState *state, int limit)
 {
 	HeapScanDesc hscan = (HeapScanDesc) state->scan;
 	Relation	rel = state->css.ss.ss_currentRelation;
-	int			nrows = Min(limit, hscan->rs_ntuples - state->page_cursor);
+	int			nrows;
 
+	if (hscan->rs_ntuples > MaxHeapTuplesPerPage || state->page_cursor < 0 ||
+		state->page_cursor > (int) hscan->rs_ntuples || !BufferIsValid(hscan->rs_cbuf))
+		elog(ERROR, "TessHeapScan found the heap scan's page at %d of %u tuples",
+			 state->page_cursor, hscan->rs_ntuples);
+	nrows = Min(limit, (int) hscan->rs_ntuples - state->page_cursor);
 	tess_heap_batch_append_page(state->heap, hscan->rs_cbuf, hscan->rs_cblock,
 								hscan->rs_vistuples + state->page_cursor, nrows,
 								RelationGetRelid(rel));
-	/*
-	 * As pgstat_count_heap_getnext, or pgstat_count_heap_fetch for a
-	 * bitmap's tuples; the core counted the page's first tuple.
-	 */
-	if (pgstat_should_count_relation(rel))
-	{
-		int			counted = state->page_cursor > 0 ? nrows : nrows - 1;
-
-		Assert(rel->pgstat_info->kind == PGSTAT_KIND_RELATION);
-		if (state->bitmap_plan != NULL)
-			rel->pgstat_info->tab.counts.tuples_fetched += counted;
-		else
-			rel->pgstat_info->tab.counts.tuples_returned += counted;
-	}
+	/* The rows the scan did not return itself: it counted the page's first. */
+	count_heap_rows(rel, state->bitmap_plan != NULL,
+					state->page_cursor > 0 ? nrows : nrows - 1);
 	state->page_cursor += nrows;
 	return nrows;
 }

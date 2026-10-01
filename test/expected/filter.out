@@ -1357,6 +1357,33 @@ SELECT filter_same($$SELECT md5(string_agg(q::text, ',' ORDER BY q::text)) FROM 
 (1 row)
 
 DROP TABLE filter_rows;
+-- The rows read count as the core counts them, a tuple each: both modes
+-- add the same to the table's statistics.
+BEGIN;
+SELECT seq_tup_read AS before FROM pg_stat_xact_user_tables WHERE relname = 'filter_t' \gset
+SET LOCAL tessera.enable = on;
+SELECT count(*) FROM filter_t WHERE a > 100;
+ count 
+-------
+    86
+(1 row)
+
+SELECT seq_tup_read - :before AS read FROM pg_stat_xact_user_tables WHERE relname = 'filter_t' \gset
+SET LOCAL tessera.enable = off;
+SELECT count(*) FROM filter_t WHERE a > 100;
+ count 
+-------
+    86
+(1 row)
+
+SELECT :read AS read_on, seq_tup_read - :before - :read AS read_off
+FROM pg_stat_xact_user_tables WHERE relname = 'filter_t';
+ read_on | read_off 
+---------+----------
+     200 |      200
+(1 row)
+
+COMMIT;
 DROP FUNCTION filter_same(text);
 DROP TABLE filter_t;
 DROP EXTENSION tessera;

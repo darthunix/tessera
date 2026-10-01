@@ -95,6 +95,33 @@ SELECT index_same($$SELECT count(*), sum(w) FROM index_t WHERE k < 500$$);
  same
 (1 row)
 
+-- The rows of the bitmap's pages count as the core counts them, a fetch
+-- each: both modes add the same to the table's statistics.
+BEGIN;
+SELECT idx_tup_fetch AS before FROM pg_stat_xact_user_tables WHERE relname = 'index_t' \gset
+SET LOCAL tessera.enable = on;
+SELECT count(*) FROM index_t WHERE k < 500;
+ count 
+-------
+   463
+(1 row)
+
+SELECT idx_tup_fetch - :before AS fetched FROM pg_stat_xact_user_tables WHERE relname = 'index_t' \gset
+SET LOCAL tessera.enable = off;
+SELECT count(*) FROM index_t WHERE k < 500;
+ count 
+-------
+   463
+(1 row)
+
+SELECT :fetched AS fetched_on, idx_tup_fetch - :before - :fetched AS fetched_off
+FROM pg_stat_xact_user_tables WHERE relname = 'index_t';
+ fetched_on | fetched_off 
+------------+-------------
+        463 |         463
+(1 row)
+
+COMMIT;
 SELECT index_same($$SELECT id, k, t FROM index_t WHERE k < 300$$);
  index_same 
 ------------
