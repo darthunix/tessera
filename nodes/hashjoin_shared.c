@@ -11,6 +11,8 @@
 #include "internal.h"
 #include "hashjoin.h"
 
+static void shared_join(TessHashJoinState *state);
+
 /*
  * The query's dynamic shared memory, where a shared build keeps its
  * table: the Gather installs it only while it runs the plan, so it is
@@ -574,6 +576,15 @@ build_shared(TessHashJoinState *state)
 					uint64		records;
 					uint64		nchunks;
 
+					/*
+					 * A participant that attaches only now, after the
+					 * table split, takes the table's level first: the
+					 * switch forgets this participant's value chunks, so
+					 * it comes before the attach, which reads every
+					 * participant's from the table.
+					 */
+					if (shared_partitions(state) > 0)
+						shared_join(state);
 					attach_shared_table(state);
 					share_marks(state, state->parallel.shared->marks, state->parallel.shared->nchunks);
 					/* The whole table's rows and duplicates, every link done. */
@@ -1045,6 +1056,7 @@ shared_outer(TessHashJoinState *state)
 /*
  * PROBE of a table that spilled: every participant's files are done; the
  * sizes of the partitions on disk are the table's, not this participant's.
+ * The participant joined the table's level before it attached the table.
  */
 void
 shared_probe_start(TessHashJoinState *state, uint64 records)
@@ -1052,7 +1064,7 @@ shared_probe_start(TessHashJoinState *state, uint64 records)
 	JoinSpill  *spill;
 	Size		record;
 
-	shared_join(state);
+	Assert(state->spill != NULL);
 	spill = state->spill;
 	record = TYPEALIGN(8, 16 + 8 * spill->build.nkeys + spill->build.payload_size);
 	tess_spill_finish(spill->build.file);
