@@ -26,29 +26,29 @@ SELECT a, b FROM pack_t WHERE a > 90;
 SELECT count(*), sum(a), count(b) FROM pack_t;
 
 -- Batches follow the parent's request, at most 64 rows each.
-EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+EXPLAIN (VERBOSE, ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT a FROM pack_t;
 SET pack_test.batch_rows = 10;
-EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+EXPLAIN (VERBOSE, ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT a FROM pack_t;
 SET pack_test.batch_rows = 200;
-EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+EXPLAIN (VERBOSE, ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT a FROM pack_t;
 SET pack_test.batch_rows = 7;
 SELECT count(*), sum(a) FROM pack_t;
 RESET pack_test.batch_rows;
 
 -- An empty child publishes nothing.
-EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+EXPLAIN (VERBOSE, ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT a FROM pack_empty;
 
 -- A limit above stops after the first batch.
-EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+EXPLAIN (VERBOSE, ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT a FROM pack_t LIMIT 3;
 SELECT a FROM pack_t LIMIT 3;
 
 -- Rescan: a correlated subplan runs the node once per outer row.
-EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+EXPLAIN (VERBOSE, ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT g, (SELECT count(*) FROM pack_t AS p WHERE p.a <= g) AS n
 FROM generate_series(1, 3) AS g;
 SELECT g, (SELECT count(*) FROM pack_t AS p WHERE p.a <= g) AS n
@@ -76,24 +76,24 @@ RESET tessera.enable;
 -- first column is at most the setting: the unary helper forwards the
 -- merged request and skips a batch left without rows.
 SET pack_test.trim = 50;
-EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+EXPLAIN (VERBOSE, ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT count(a) FROM pack_t;
 SELECT count(a), sum(a) FROM pack_t;
 SELECT a, b FROM pack_t WHERE a > 45;
 SET pack_test.trim = 0;
-EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+EXPLAIN (VERBOSE, ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT a FROM pack_t;
 -- The trim node stops after its first batch with rows.
 SET pack_test.trim = 80;
 SET pack_test.stop = on;
-EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+EXPLAIN (VERBOSE, ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT count(a) FROM pack_t;
 SELECT count(a), max(a) FROM pack_t;
 RESET pack_test.stop;
 -- The smaller batch limit of the sink and the trim node reaches the pack.
 SET pack_test.trim = 50;
 SET pack_test.batch_rows = 10;
-EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+EXPLAIN (VERBOSE, ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT a, b FROM pack_t WHERE a > 45;
 RESET pack_test.batch_rows;
 RESET pack_test.trim;

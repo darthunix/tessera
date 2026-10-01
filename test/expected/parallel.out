@@ -24,11 +24,24 @@ LANGUAGE plpgsql AS $$
 DECLARE
     plan jsonb;
 BEGIN
-    EXECUTE format('EXPLAIN (ANALYZE, FORMAT JSON, TIMING OFF, SUMMARY OFF, BUFFERS OFF, COSTS OFF) %s', query)
+    EXECUTE format('EXPLAIN (ANALYZE, VERBOSE, FORMAT JSON, TIMING OFF, SUMMARY OFF, BUFFERS OFF, COSTS OFF) %s', query)
         INTO plan;
     RETURN jsonb_path_query_first(plan,
         format('$[0]."Plan".** ? (@."Custom Plan Provider" == $p).%I', name)::jsonpath,
         jsonb_build_object('p', provider))::text;
+END $$;
+-- EXPLAIN ANALYZE VERBOSE without what varies from run to run: each
+-- worker's rows, the rows the gather took from each participant, and the
+-- output lists VERBOSE adds.
+CREATE FUNCTION parallel_explain(query text) RETURNS SETOF text
+LANGUAGE plpgsql AS $$
+DECLARE
+    line text;
+BEGIN
+    FOR line IN EXECUTE 'EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) ' || query LOOP
+        CONTINUE WHEN line ~ '^\s*(Output|Worker \d+|Messages|Rows from Workers|Rows of the Leader):';
+        RETURN NEXT line;
+    END LOOP;
 END $$;
 -- The same of the node's partial grouping under a gather, whatever groups above.
 CREATE FUNCTION partial_property(query text, name text) RETURNS text
@@ -36,7 +49,7 @@ LANGUAGE plpgsql AS $$
 DECLARE
     plan jsonb;
 BEGIN
-    EXECUTE format('EXPLAIN (ANALYZE, FORMAT JSON, TIMING OFF, SUMMARY OFF, BUFFERS OFF, COSTS OFF) %s', query)
+    EXECUTE format('EXPLAIN (ANALYZE, VERBOSE, FORMAT JSON, TIMING OFF, SUMMARY OFF, BUFFERS OFF, COSTS OFF) %s', query)
         INTO plan;
     RETURN jsonb_path_query_first(plan,
         format('$[0]."Plan".** ? (@."Custom Plan Provider" == "TessAgg" && @."Partial Mode" == "Partial").%I',
@@ -104,21 +117,20 @@ SELECT plan_property($$SELECT a FROM parallel_t WHERE a > 0$$, 'TessHeapScan', '
  t
 (1 row)
 
-EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
-SELECT a FROM parallel_t WHERE a > 4990;
-                                            QUERY PLAN                                             
----------------------------------------------------------------------------------------------------
+SELECT parallel_explain($$SELECT a FROM parallel_t WHERE a > 4990$$);
+                                             parallel_explain                                             
+----------------------------------------------------------------------------------------------------------
  Custom Scan (TessGather) (actual rows=8.00 loops=1)
    Workers Planned: 2
    Workers Launched: 2
    ->  Parallel Custom Scan (TessSend) (actual rows=0.00 loops=2)
-         ->  Parallel Custom Scan (TessFilter) on parallel_t (actual rows=2.67 loops=3)
-               Batch Filter: (a > 4990)
+         ->  Parallel Custom Scan (TessFilter) on public.parallel_t (actual rows=2.67 loops=3)
+               Batch Filter: (parallel_t.a > 4990)
                Rows Removed by Batch Filter: 1664
                Input Batches: 82
                Input Rows: 5000
                Output Rows: 8
-               ->  Parallel Custom Scan (TessHeapScan) on parallel_t (actual rows=1666.67 loops=3)
+               ->  Parallel Custom Scan (TessHeapScan) on public.parallel_t (actual rows=1666.67 loops=3)
                      Batch Size: 64
                      Batches: 82
                      Pages: 28
@@ -128,21 +140,20 @@ SELECT a FROM parallel_t WHERE a > 4990;
 
 -- Workers planned but not launched: the leader reads every page alone.
 SET max_parallel_workers = 0;
-EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
-SELECT a FROM parallel_t WHERE a > 4990;
-                                            QUERY PLAN                                             
----------------------------------------------------------------------------------------------------
+SELECT parallel_explain($$SELECT a FROM parallel_t WHERE a > 4990$$);
+                                             parallel_explain                                             
+----------------------------------------------------------------------------------------------------------
  Custom Scan (TessGather) (actual rows=8.00 loops=1)
    Workers Planned: 2
    Workers Launched: 0
    ->  Parallel Custom Scan (TessSend) (never executed)
-         ->  Parallel Custom Scan (TessFilter) on parallel_t (actual rows=8.00 loops=1)
-               Batch Filter: (a > 4990)
+         ->  Parallel Custom Scan (TessFilter) on public.parallel_t (actual rows=8.00 loops=1)
+               Batch Filter: (parallel_t.a > 4990)
                Rows Removed by Batch Filter: 4992
                Input Batches: 82
                Input Rows: 5000
                Output Rows: 8
-               ->  Parallel Custom Scan (TessHeapScan) on parallel_t (actual rows=5000.00 loops=1)
+               ->  Parallel Custom Scan (TessHeapScan) on public.parallel_t (actual rows=5000.00 loops=1)
                      Batch Size: 64
                      Batches: 82
                      Pages: 28
@@ -192,11 +203,10 @@ SELECT parallel_same($$SELECT a, b FROM parallel_t WHERE a > 4990$$);
 RESET parallel_leader_participation;
 -- A Gather rescanned in a join: the shared page handout starts over.
 SET enable_material = off;
-EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
-SELECT x, n FROM (SELECT count(*) AS n FROM parallel_t WHERE a > 4997) AS ss
-RIGHT JOIN (VALUES (1), (2)) AS v(x) ON true;
-                                                     QUERY PLAN                                                      
----------------------------------------------------------------------------------------------------------------------
+SELECT parallel_explain($$SELECT x, n FROM (SELECT count(*) AS n FROM parallel_t WHERE a > 4997) AS ss
+RIGHT JOIN (VALUES (1), (2)) AS v(x) ON true$$);
+                                                      parallel_explain                                                      
+----------------------------------------------------------------------------------------------------------------------------
  Nested Loop Left Join (actual rows=2.00 loops=1)
    ->  Values Scan on "*VALUES*" (actual rows=2.00 loops=1)
    ->  Custom Scan (TessAgg) (actual rows=1.00 loops=2)
@@ -214,13 +224,13 @@ RIGHT JOIN (VALUES (1), (2)) AS v(x) ON true;
                            Input Batches: 2
                            Input Rows: 4
                            Kernel Calls: 2
-                           ->  Parallel Custom Scan (TessFilter) on parallel_t (actual rows=0.67 loops=6)
+                           ->  Parallel Custom Scan (TessFilter) on public.parallel_t (actual rows=0.67 loops=6)
                                  Batch Filter: (parallel_t.a > 4997)
                                  Rows Removed by Batch Filter: 1666
                                  Input Batches: 164
                                  Input Rows: 10000
                                  Output Rows: 4
-                                 ->  Parallel Custom Scan (TessHeapScan) on parallel_t (actual rows=1666.67 loops=6)
+                                 ->  Parallel Custom Scan (TessHeapScan) on public.parallel_t (actual rows=1666.67 loops=6)
                                        Batch Size: 64
                                        Batches: 164
                                        Pages: 56
@@ -389,10 +399,9 @@ SELECT parallel_same($$SELECT count(*), sum(a) FROM parallel_t$$);
  {"(5000,10715715)"}
 (1 row)
 
-EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
-SELECT sum(a) FROM parallel_t WHERE a > 100;
-                                                  QUERY PLAN                                                   
----------------------------------------------------------------------------------------------------------------
+SELECT parallel_explain($$SELECT sum(a) FROM parallel_t WHERE a > 100$$);
+                                                   parallel_explain                                                   
+----------------------------------------------------------------------------------------------------------------------
  Custom Scan (TessAgg) (actual rows=1.00 loops=1)
    Partial Mode: Finalize
    Input Batches: 3
@@ -409,13 +418,13 @@ SELECT sum(a) FROM parallel_t WHERE a > 100;
                      Input Rows: 4200
                      Kernel Calls: 81
                      Computed Datums: 4200
-                     ->  Parallel Custom Scan (TessFilter) on parallel_t (actual rows=1400.00 loops=3)
-                           Batch Filter: (a > 100)
+                     ->  Parallel Custom Scan (TessFilter) on public.parallel_t (actual rows=1400.00 loops=3)
+                           Batch Filter: (parallel_t.a > 100)
                            Rows Removed by Batch Filter: 267
                            Input Batches: 82
                            Input Rows: 5000
                            Output Rows: 4200
-                           ->  Parallel Custom Scan (TessHeapScan) on parallel_t (actual rows=1666.67 loops=3)
+                           ->  Parallel Custom Scan (TessHeapScan) on public.parallel_t (actual rows=1666.67 loops=3)
                                  Batch Size: 64
                                  Batches: 82
                                  Pages: 28
@@ -821,30 +830,41 @@ SELECT parallel_same($$SELECT g, sum(n), avg(n), sum(b), avg(b), avg(i4), avg(s)
 RESET parallel_leader_participation;
 -- Rescanned in a join: each participant folds its share anew.
 SET enable_material = off;
-EXPLAIN (COSTS OFF)
+EXPLAIN (VERBOSE, COSTS OFF)
 SELECT x, t FROM (SELECT sum(q) AS t FROM (SELECT g, sum(n) AS q FROM parallel_sums WHERE g IN (0, 4, 5) GROUP BY g) AS q) AS ss
 RIGHT JOIN (VALUES (1), (2)) AS v(x) ON true;
-                                                   QUERY PLAN                                                   
-----------------------------------------------------------------------------------------------------------------
+                                                    QUERY PLAN                                                     
+-------------------------------------------------------------------------------------------------------------------
  Nested Loop Left Join
+   Output: "*VALUES*".column1, (sum(q.q))
    ->  Values Scan on "*VALUES*"
+         Output: "*VALUES*".column1
    ->  Custom Scan (TessAgg)
+         Output: (sum(q.q))
          ->  Custom Scan (TessPack)
+               Output: q.q
                Rows Kept As: forwarded batches
                ->  Subquery Scan on q
+                     Output: q.q
                      ->  Custom Scan (TessAgg)
+                           Output: parallel_sums.g, (sum(parallel_sums.n))
                            Group Key: parallel_sums.g
                            Partial Mode: Finalize
                            ->  Custom Scan (TessGather)
+                                 Output: parallel_sums.g, (PARTIAL sum(parallel_sums.n))
                                  Workers Planned: 2
                                  ->  Parallel Custom Scan (TessSend)
+                                       Output: parallel_sums.g, (PARTIAL sum(parallel_sums.n))
                                        ->  Parallel Custom Scan (TessAgg)
+                                             Output: parallel_sums.g, (PARTIAL sum(parallel_sums.n))
                                              Group Key: parallel_sums.g
                                              Partial Mode: Partial
-                                             ->  Parallel Custom Scan (TessFilter) on parallel_sums
+                                             ->  Parallel Custom Scan (TessFilter) on public.parallel_sums
+                                                   Output: parallel_sums.g, parallel_sums.n
                                                    Batch Filter: (parallel_sums.g = ANY ('{0,4,5}'::integer[]))
-                                                   ->  Parallel Custom Scan (TessHeapScan) on parallel_sums
-(18 rows)
+                                                   ->  Parallel Custom Scan (TessHeapScan) on public.parallel_sums
+                                                         Output: parallel_sums.g, parallel_sums.n
+(29 rows)
 
 SELECT parallel_same($$SELECT x, t FROM (SELECT sum(q) AS t FROM (SELECT g, sum(n) AS q FROM parallel_sums WHERE g IN (0, 4, 5) GROUP BY g) AS q) AS ss
 RIGHT JOIN (VALUES (1), (2), (3)) AS v(x) ON true$$);
@@ -956,27 +976,35 @@ SELECT parallel_same($$SELECT b FROM parallel_keys WHERE a > 100 GROUP BY b$$);
 RESET parallel_leader_participation;
 -- Rescanned in a join: each participant groups its share anew.
 SET enable_material = off;
-EXPLAIN (COSTS OFF)
+EXPLAIN (VERBOSE, COSTS OFF)
 SELECT x, n FROM (SELECT count(*) AS n FROM (SELECT DISTINCT c % 5 FROM parallel_keys) AS d) AS ss
 RIGHT JOIN (VALUES (1), (2)) AS v(x) ON true;
-                                              QUERY PLAN                                              
-------------------------------------------------------------------------------------------------------
+                                                 QUERY PLAN                                                  
+-------------------------------------------------------------------------------------------------------------
  Nested Loop Left Join
+   Output: "*VALUES*".column1, (count(*))
    ->  Values Scan on "*VALUES*"
+         Output: "*VALUES*".column1
    ->  Custom Scan (TessAgg)
+         Output: (count(*))
          ->  Custom Scan (TessPack)
                Rows Kept As: forwarded batches
                ->  Subquery Scan on d
                      ->  Custom Scan (TessAgg)
+                           Output: ((parallel_keys.c % 5))
                            Group Key: (parallel_keys.c % 5)
                            ->  Custom Scan (TessGather)
+                                 Output: ((parallel_keys.c % 5))
                                  Workers Planned: 2
                                  ->  Parallel Custom Scan (TessSend)
+                                       Output: ((parallel_keys.c % 5))
                                        ->  Parallel Custom Scan (TessAgg)
+                                             Output: ((parallel_keys.c % 5))
                                              Group Key: (parallel_keys.c % 5)
                                              Partial Mode: Partial
-                                             ->  Parallel Custom Scan (TessHeapScan) on parallel_keys
-(15 rows)
+                                             ->  Parallel Custom Scan (TessHeapScan) on public.parallel_keys
+                                                   Output: (parallel_keys.c % 5)
+(23 rows)
 
 SELECT parallel_same($$SELECT x, n FROM (SELECT count(*) AS n FROM (SELECT DISTINCT c % 5 FROM parallel_keys) AS d) AS ss
 RIGHT JOIN (VALUES (1), (2), (3)) AS v(x) ON true$$);
@@ -1424,29 +1452,40 @@ SELECT parallel_same($$SELECT x, (SELECT count(*) FROM parallel_wide WHERE k < x
  {"(1,888)","(2,1777)","(3,2666)"}
 (1 row)
 
-EXPLAIN (COSTS OFF) SELECT k FROM parallel_wide WHERE k < 100 INTERSECT SELECT a FROM parallel_wide WHERE a < 500;
-                                             QUERY PLAN                                             
-----------------------------------------------------------------------------------------------------
+EXPLAIN (VERBOSE, COSTS OFF) SELECT k FROM parallel_wide WHERE k < 100 INTERSECT SELECT a FROM parallel_wide WHERE a < 500;
+                                                QUERY PLAN                                                 
+-----------------------------------------------------------------------------------------------------------
  Custom Scan (TessAgg)
+   Output: unnamed_subquery.k
    Group Key: unnamed_subquery.k
    Set Operation: Intersect
    ->  Custom Scan (TessPack)
+         Output: unnamed_subquery.k
          Rows Kept As: forwarded batches
          ->  Custom Scan (TessGather)
+               Output: parallel_wide.k
                Workers Planned: 2
                ->  Parallel Custom Scan (TessSend)
-                     ->  Parallel Custom Scan (TessFilter) on parallel_wide
+                     Output: parallel_wide.k
+                     ->  Parallel Custom Scan (TessFilter) on public.parallel_wide
+                           Output: parallel_wide.k
                            Batch Filter: (parallel_wide.k < 100)
-                           ->  Parallel Custom Scan (TessHeapScan) on parallel_wide
+                           ->  Parallel Custom Scan (TessHeapScan) on public.parallel_wide
+                                 Output: parallel_wide.k
    ->  Custom Scan (TessPack)
+         Output: unnamed_subquery_1.a
          Rows Kept As: forwarded batches
          ->  Custom Scan (TessGather)
+               Output: parallel_wide_1.a
                Workers Planned: 2
                ->  Parallel Custom Scan (TessSend)
-                     ->  Parallel Custom Scan (TessFilter) on parallel_wide parallel_wide_1
+                     Output: parallel_wide_1.a
+                     ->  Parallel Custom Scan (TessFilter) on public.parallel_wide parallel_wide_1
+                           Output: parallel_wide_1.a
                            Batch Filter: (parallel_wide_1.a < 500)
-                           ->  Parallel Custom Scan (TessHeapScan) on parallel_wide parallel_wide_1
-(19 rows)
+                           ->  Parallel Custom Scan (TessHeapScan) on public.parallel_wide parallel_wide_1
+                                 Output: parallel_wide_1.a
+(30 rows)
 
 SELECT parallel_same($$SELECT md5(string_agg(q::text, ',' ORDER BY q::text)) FROM (SELECT k FROM parallel_wide WHERE k < 100 INTERSECT SELECT a FROM parallel_wide WHERE a < 500) AS q$$);
             parallel_same             
@@ -1683,4 +1722,5 @@ DROP TABLE parallel_t;
 DROP FUNCTION parallel_same(text);
 DROP FUNCTION plan_property(text, text, text);
 DROP FUNCTION partial_property(text, text);
+DROP FUNCTION parallel_explain(text);
 DROP EXTENSION tessera;

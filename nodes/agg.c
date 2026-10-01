@@ -4360,6 +4360,20 @@ agg_explain(CustomScanState *css, List *ancestors, ExplainState *es)
 		return;
 	agg_counters(state, own);
 	totals = tess_shared_stats_totals_or(state->stats, own);
+	/* As the core's hashed aggregate shows its table and its spill. */
+	if (state->nkeys > 0)
+	{
+		ExplainPropertyInteger("Memory Usage", "kB",
+							   (totals[AGG_MEMORY] + 1023) / 1024, es);
+		if (totals[AGG_PARTITIONS] > 0)
+		{
+			ExplainPropertyInteger("Batches", NULL, totals[AGG_PARTITIONS], es);
+			ExplainPropertyInteger("Disk Usage", "kB", (totals[AGG_DISK] + 1023) / 1024, es);
+		}
+	}
+	/* The batches, the kernels and the table's work: VERBOSE only. */
+	if (!es->verbose)
+		return;
 	ExplainPropertyInteger("Input Batches", NULL, totals[AGG_BATCHES], es);
 	ExplainPropertyInteger("Input Rows", NULL, totals[AGG_ROWS], es);
 	ExplainPropertyInteger("Kernel Calls", NULL, totals[AGG_CALLS], es);
@@ -4369,16 +4383,12 @@ agg_explain(CustomScanState *css, List *ancestors, ExplainState *es)
 	{
 		ExplainPropertyInteger("Groups", NULL, totals[AGG_GROUPS], es);
 		ExplainPropertyInteger("Table Grows", NULL, totals[AGG_GROWS], es);
-		ExplainPropertyInteger("Memory Usage", "kB",
-							   (totals[AGG_MEMORY] + 1023) / 1024, es);
 		if (totals[AGG_EARLY] > 0)
 			ExplainPropertyInteger("Early Emits", NULL, totals[AGG_EARLY], es);
 		if (totals[AGG_PARTITIONS] > 0)
 		{
-			ExplainPropertyInteger("Batches", NULL, totals[AGG_PARTITIONS], es);
 			ExplainPropertyInteger("Evictions", NULL, totals[AGG_EVICTIONS], es);
 			ExplainPropertyInteger("Spilled Chunks", NULL, totals[AGG_SPILLED], es);
-			ExplainPropertyInteger("Disk Usage", "kB", (totals[AGG_DISK] + 1023) / 1024, es);
 			if (totals[AGG_SPILLED_ROWS] > 0)
 				ExplainPropertyInteger("Spilled Rows", NULL, totals[AGG_SPILLED_ROWS], es);
 			if (totals[AGG_SPLITS] > 0)

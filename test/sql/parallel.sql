@@ -26,11 +26,25 @@ LANGUAGE plpgsql AS $$
 DECLARE
     plan jsonb;
 BEGIN
-    EXECUTE format('EXPLAIN (ANALYZE, FORMAT JSON, TIMING OFF, SUMMARY OFF, BUFFERS OFF, COSTS OFF) %s', query)
+    EXECUTE format('EXPLAIN (ANALYZE, VERBOSE, FORMAT JSON, TIMING OFF, SUMMARY OFF, BUFFERS OFF, COSTS OFF) %s', query)
         INTO plan;
     RETURN jsonb_path_query_first(plan,
         format('$[0]."Plan".** ? (@."Custom Plan Provider" == $p).%I', name)::jsonpath,
         jsonb_build_object('p', provider))::text;
+END $$;
+
+-- EXPLAIN ANALYZE VERBOSE without what varies from run to run: each
+-- worker's rows, the rows the gather took from each participant, and the
+-- output lists VERBOSE adds.
+CREATE FUNCTION parallel_explain(query text) RETURNS SETOF text
+LANGUAGE plpgsql AS $$
+DECLARE
+    line text;
+BEGIN
+    FOR line IN EXECUTE 'EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) ' || query LOOP
+        CONTINUE WHEN line ~ '^\s*(Output|Worker \d+|Messages|Rows from Workers|Rows of the Leader):';
+        RETURN NEXT line;
+    END LOOP;
 END $$;
 
 -- The same of the node's partial grouping under a gather, whatever groups above.
@@ -39,7 +53,7 @@ LANGUAGE plpgsql AS $$
 DECLARE
     plan jsonb;
 BEGIN
-    EXECUTE format('EXPLAIN (ANALYZE, FORMAT JSON, TIMING OFF, SUMMARY OFF, BUFFERS OFF, COSTS OFF) %s', query)
+    EXECUTE format('EXPLAIN (ANALYZE, VERBOSE, FORMAT JSON, TIMING OFF, SUMMARY OFF, BUFFERS OFF, COSTS OFF) %s', query)
         INTO plan;
     RETURN jsonb_path_query_first(plan,
         format('$[0]."Plan".** ? (@."Custom Plan Provider" == "TessAgg" && @."Partial Mode" == "Partial").%I',
@@ -70,12 +84,10 @@ EXPLAIN (COSTS OFF) SELECT a + 1 AS next, c || '!' AS shout FROM parallel_t WHER
 SELECT parallel_same($$SELECT a + 1 AS next, c || '!' AS shout FROM parallel_t WHERE a > 4990$$);
 -- Every page is read once across the participants: the leader sums their pages.
 SELECT plan_property($$SELECT a FROM parallel_t WHERE a > 0$$, 'TessHeapScan', 'Pages')::int = :pages AS all_pages;
-EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
-SELECT a FROM parallel_t WHERE a > 4990;
+SELECT parallel_explain($$SELECT a FROM parallel_t WHERE a > 4990$$);
 -- Workers planned but not launched: the leader reads every page alone.
 SET max_parallel_workers = 0;
-EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
-SELECT a FROM parallel_t WHERE a > 4990;
+SELECT parallel_explain($$SELECT a FROM parallel_t WHERE a > 4990$$);
 SELECT plan_property($$SELECT a FROM parallel_t WHERE a > 0$$, 'TessHeapScan', 'Pages')::int = :pages AS all_pages;
 SELECT parallel_same($$SELECT a, b FROM parallel_t WHERE a > 4990$$);
 RESET max_parallel_workers;
@@ -88,9 +100,8 @@ SELECT parallel_same($$SELECT a, b FROM parallel_t WHERE a > 4990$$);
 RESET parallel_leader_participation;
 -- A Gather rescanned in a join: the shared page handout starts over.
 SET enable_material = off;
-EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
-SELECT x, n FROM (SELECT count(*) AS n FROM parallel_t WHERE a > 4997) AS ss
-RIGHT JOIN (VALUES (1), (2)) AS v(x) ON true;
+SELECT parallel_explain($$SELECT x, n FROM (SELECT count(*) AS n FROM parallel_t WHERE a > 4997) AS ss
+RIGHT JOIN (VALUES (1), (2)) AS v(x) ON true$$);
 SELECT parallel_same($$SELECT x, n FROM (SELECT count(*) AS n FROM parallel_t WHERE a > 4997) AS ss
 RIGHT JOIN (VALUES (1), (2)) AS v(x) ON true$$);
 -- A limit above the Gather stops it early, and a rescan sets it up anew.
@@ -124,8 +135,7 @@ SELECT count(*), count(a), sum(a), min(a), max(b) FROM parallel_t WHERE a > 100;
 SELECT parallel_same($$SELECT count(*), count(a), sum(a), min(a), max(b) FROM parallel_t WHERE a > 100$$);
 EXPLAIN (COSTS OFF) SELECT count(*), sum(a) FROM parallel_t;
 SELECT parallel_same($$SELECT count(*), sum(a) FROM parallel_t$$);
-EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
-SELECT sum(a) FROM parallel_t WHERE a > 100;
+SELECT parallel_explain($$SELECT sum(a) FROM parallel_t WHERE a > 100$$);
 -- Chains and row-wise expressions as arguments, expressions above, HAVING.
 SELECT parallel_same($$SELECT sum(a + b), max(a * 2), min(-a), sum(CASE WHEN b > 5 THEN a ELSE 0 END)
     FROM parallel_t WHERE a > 100$$);
@@ -268,7 +278,7 @@ SELECT parallel_same($$SELECT g, sum(n), avg(n), sum(b), avg(b), avg(i4), avg(s)
 RESET parallel_leader_participation;
 -- Rescanned in a join: each participant folds its share anew.
 SET enable_material = off;
-EXPLAIN (COSTS OFF)
+EXPLAIN (VERBOSE, COSTS OFF)
 SELECT x, t FROM (SELECT sum(q) AS t FROM (SELECT g, sum(n) AS q FROM parallel_sums WHERE g IN (0, 4, 5) GROUP BY g) AS q) AS ss
 RIGHT JOIN (VALUES (1), (2)) AS v(x) ON true;
 SELECT parallel_same($$SELECT x, t FROM (SELECT sum(q) AS t FROM (SELECT g, sum(n) AS q FROM parallel_sums WHERE g IN (0, 4, 5) GROUP BY g) AS q) AS ss
@@ -305,7 +315,7 @@ SELECT parallel_same($$SELECT b FROM parallel_keys WHERE a > 100 GROUP BY b$$);
 RESET parallel_leader_participation;
 -- Rescanned in a join: each participant groups its share anew.
 SET enable_material = off;
-EXPLAIN (COSTS OFF)
+EXPLAIN (VERBOSE, COSTS OFF)
 SELECT x, n FROM (SELECT count(*) AS n FROM (SELECT DISTINCT c % 5 FROM parallel_keys) AS d) AS ss
 RIGHT JOIN (VALUES (1), (2)) AS v(x) ON true;
 SELECT parallel_same($$SELECT x, n FROM (SELECT count(*) AS n FROM (SELECT DISTINCT c % 5 FROM parallel_keys) AS d) AS ss
@@ -453,7 +463,7 @@ DROP FUNCTION parallel_restricted(int);
 EXPLAIN (COSTS OFF) SELECT k, a FROM parallel_wide WHERE k < (SELECT 1000) ORDER BY k;
 SELECT parallel_same($$SELECT md5(string_agg(q::text, ',' ORDER BY q::text)) FROM (SELECT k, a FROM parallel_wide WHERE k < (SELECT 1000) OFFSET 0) AS q$$);
 SELECT parallel_same($$SELECT x, (SELECT count(*) FROM parallel_wide WHERE k < x * 1000 AND a >= 0) FROM generate_series(1, 3) AS x$$);
-EXPLAIN (COSTS OFF) SELECT k FROM parallel_wide WHERE k < 100 INTERSECT SELECT a FROM parallel_wide WHERE a < 500;
+EXPLAIN (VERBOSE, COSTS OFF) SELECT k FROM parallel_wide WHERE k < 100 INTERSECT SELECT a FROM parallel_wide WHERE a < 500;
 SELECT parallel_same($$SELECT md5(string_agg(q::text, ',' ORDER BY q::text)) FROM (SELECT k FROM parallel_wide WHERE k < 100 INTERSECT SELECT a FROM parallel_wide WHERE a < 500) AS q$$);
 SELECT parallel_same($$WITH RECURSIVE r(n) AS (SELECT k FROM parallel_wide WHERE k < 10 UNION SELECT n + 1 FROM r WHERE n < 20) SELECT count(*) FROM r$$);
 -- At the core's costs of parallel work the node's own paths cost a row a
@@ -527,4 +537,5 @@ DROP TABLE parallel_t;
 DROP FUNCTION parallel_same(text);
 DROP FUNCTION plan_property(text, text, text);
 DROP FUNCTION partial_property(text, text);
+DROP FUNCTION parallel_explain(text);
 DROP EXTENSION tessera;

@@ -123,9 +123,12 @@ node recognizes a batch child; plan data travels in typed,
 
 ### EXPLAIN and EXPLAIN ANALYZE
 
-`ExplainCustomScan` reports the common properties, the batch size, the
-number of batches, the rows read from the source and the rows filtered, and
-the node's own. One `ExecProcNode` call returns a whole batch of N rows, but
+`ExplainCustomScan` reports with `ANALYZE` what the core's node in its
+place reports (a sort's method and memory, a table's memory and its
+spill to disk, the rows removed by each filter, a bitmap's heap blocks),
+and only with `VERBOSE` too the batch size, the number of batches, the
+rows read from the source and the node's other counters of its batches,
+kernels and columns. One `ExecProcNode` call returns a whole batch of N rows, but
 the executor's instrumentation counts one tuple per call. The shared output
 helper adds `rows - 1` to `instrument->tuplecount` when it publishes a batch
 and counts removed rows with `InstrCountFiltered1`; a node never adjusts

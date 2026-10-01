@@ -79,13 +79,13 @@ FROM agg_t AS o WHERE o.a < 3 ORDER BY 1;
 SELECT o.a, (SELECT count(*) FROM (SELECT b FROM agg_t AS i WHERE i.a < o.a GROUP BY b) AS s) AS groups
 FROM agg_t AS o WHERE o.a < 5 ORDER BY 1;
 -- The argument's column is deformed for the surviving rows only.
-EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+EXPLAIN (VERBOSE, ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT sum(b) FROM agg_t WHERE a > 290;
 -- An error in the argument is the chain's.
 SELECT sum(a + 2147483647) FROM agg_t;
 -- Any int4 expression is an argument: a chain over one column as before,
 -- anything else row by row, both through the projection provider.
-EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+EXPLAIN (VERBOSE, ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT sum(a + b), max(a * b), min(CASE WHEN a > 295 THEN b ELSE a END), sum(a + 1)
 FROM agg_t WHERE a > 290;
 SELECT agg_same($$SELECT sum(a + b), max(a * b), min(CASE WHEN a > 295 THEN b ELSE a END), sum(a + 1), count(length(c)) FROM agg_t WHERE a > 290$$);
@@ -105,7 +105,7 @@ FROM (VALUES (1), (2), (3)) AS o(b);
 SELECT agg_same($$SELECT o.b, (SELECT s FROM (SELECT sum(i.a + i.b * o.b) AS s FROM agg_t AS i WHERE i.a < 50) AS x ORDER BY s) FROM (VALUES (1), (2), (3)) AS o(b)$$);
 -- Two computed columns of the subquery's filter, added by the node above
 -- the forwarded batches of its limit.
-EXPLAIN (COSTS OFF)
+EXPLAIN (VERBOSE, COSTS OFF)
 SELECT sum(x + y) FROM (SELECT a + 1 AS x, b * 2 AS y FROM agg_t WHERE a > 100 LIMIT 50) AS s;
 SELECT agg_same($$SELECT sum(x + y), max(x) FROM (SELECT a + 1 AS x, b * 2 AS y FROM agg_t WHERE a > 100 LIMIT 50) AS s$$);
 -- count reads no value: any argument type, text included.
@@ -144,12 +144,12 @@ DROP TABLE agg8_t;
 CREATE TABLE agg_wide AS
 SELECT i AS a, repeat('x', 500) AS pad FROM generate_series(1, 1000) AS i;
 SELECT agg_same($$SELECT count(*) FROM agg_wide WHERE a % 3 = 0$$);
-EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+EXPLAIN (VERBOSE, ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT count(*) FROM agg_wide WHERE a % 3 = 0;
 -- Few survivors per batch are gathered into one call per 64: 333 rows over
 -- 67 batches make six calls of the sum, the last over the 13 left.
 SELECT agg_same($$SELECT sum(a), min(a), max(a), count(a) FROM agg_wide WHERE a % 3 = 0$$);
-EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+EXPLAIN (VERBOSE, ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT sum(a) FROM agg_wide WHERE a % 3 = 0;
 DROP TABLE agg_wide;
 
@@ -190,7 +190,9 @@ DECLARE
     limit_kb bigint := (SELECT setting::bigint FROM pg_settings WHERE name = 'work_mem') *
                        current_setting('hash_mem_multiplier')::float8;
 BEGIN
-    FOR line IN EXECUTE 'EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) ' || query LOOP
+    FOR line IN EXECUTE 'EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) ' || query LOOP
+        -- VERBOSE adds the output lists and each worker's rows: not checked here.
+        CONTINUE WHEN line ~ '^\s*(Output|Worker \d+):';
         -- Overrun repeats what the memory line says.
         CONTINUE WHEN line ~ 'Overrun: \d+ kB';
         IF line ~ 'Memory Usage: \d+ kB' THEN
@@ -299,7 +301,7 @@ EXPLAIN (COSTS OFF) SELECT DISTINCT b FROM agg_t;
 SELECT agg_same($$SELECT DISTINCT b FROM agg_t$$);
 SELECT agg_same($$SELECT DISTINCT a % 13 FROM agg_t$$);
 SELECT agg_same($$SELECT count(*), sum(b), sum(r) FROM (SELECT DISTINCT b, a % 3 AS r FROM agg_t) AS s$$);
-EXPLAIN (COSTS OFF) SELECT count(*), sum(b), sum(r) FROM (SELECT DISTINCT b, a % 3 AS r FROM agg_t) AS s;
+EXPLAIN (VERBOSE, COSTS OFF) SELECT count(*), sum(b), sum(r) FROM (SELECT DISTINCT b, a % 3 AS r FROM agg_t) AS s;
 SELECT agg_same($$SELECT count(*), sum(x) FROM (SELECT DISTINCT a::bigint * 1000000000 AS x FROM agg_t WHERE a > 250) AS s$$);
 SELECT agg_same($$SELECT count(*) FROM (SELECT DISTINCT a FROM agg_t) AS s$$);
 SELECT agg_same($$SELECT DISTINCT b FROM agg_t WHERE false$$);
@@ -457,7 +459,7 @@ DECLARE
     parts int := 0;
 BEGIN
     -- TessAgg's partitions: its Batches line comes right before Evictions.
-    FOR line IN EXECUTE 'EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) ' || query LOOP
+    FOR line IN EXECUTE 'EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) ' || query LOOP
         rows := rows OR line ~ 'Spilled Rows: [1-9]';
         IF line ~ '^ *Batches: \d+$' THEN
             last := substring(line FROM 'Batches: (\d+)')::int;

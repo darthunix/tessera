@@ -412,6 +412,9 @@ filter_explain(CustomScanState *css, List *ancestors, ExplainState *es)
 	if (cscan->scan.plan.qual != NIL)
 		show_removed("Rows Removed by Residual Filter",
 					 totals[FILTER_RESIDUAL_REMOVED], css, es);
+	/* The batches and their columns: VERBOSE only. */
+	if (!es->verbose)
+		return;
 	ExplainPropertyInteger("Input Batches", NULL, totals[FILTER_INPUT_BATCHES], es);
 	ExplainPropertyInteger("Input Rows", NULL, totals[FILTER_INPUT_ROWS], es);
 	ExplainPropertyInteger("Output Rows", NULL, totals[FILTER_OUTPUT_ROWS], es);

@@ -65,9 +65,9 @@ EXPLAIN (COSTS OFF) SELECT a + 1 FROM filter_t WHERE a > 197;
 SELECT a + 1 FROM filter_t WHERE a > 197;
 
 -- More than one batch, batches left without rows, rows removed by count.
-EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+EXPLAIN (VERBOSE, ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT a FROM filter_t WHERE a > 100;
-EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+EXPLAIN (VERBOSE, ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT a FROM filter_t WHERE a > 1000;
 
 -- A parameter, also NULL, through a generic plan.
@@ -119,28 +119,28 @@ EXPLAIN (COSTS OFF) SELECT a FROM filter_t WHERE filter_slow(a) AND a > 190;
 SELECT filter_same($$SELECT a FROM filter_t WHERE filter_slow(a) AND a > 190$$);
 DROP FUNCTION filter_slow(int);
 -- Rows removed by each part, and a column only the row-wise clause reads.
-EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+EXPLAIN (VERBOSE, ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT a FROM filter_t WHERE a > 100 AND upper(c) <> 'R150';
 SELECT filter_same($$SELECT count(*) FROM filter_t WHERE a > 100 AND upper(c) <> 'R150'$$);
 
 -- The pack node keeps the scan's tuples: a batch clause deforms its column
 -- for every row, the residual its column for the rows that survived.
-EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+EXPLAIN (VERBOSE, ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT count(*) FROM filter_t WHERE a > 100 AND upper(c) <> 'R150';
 -- A column the query returns is deformed for the rows served.
-EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+EXPLAIN (VERBOSE, ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT b FROM filter_t WHERE a > 190;
 -- A table with a dropped column is scanned with a projection: rows are copied.
 CREATE TABLE filter_dropped (a int, x int, b int);
 INSERT INTO filter_dropped SELECT i, i, i FROM generate_series(1, 100) AS i;
 ALTER TABLE filter_dropped DROP COLUMN x;
-EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+EXPLAIN (VERBOSE, ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT count(*) FROM filter_dropped WHERE a > 90;
 SELECT filter_same($$SELECT sum(b) FROM filter_dropped WHERE a > 90$$);
 DROP TABLE filter_dropped;
 -- A temporary table lives in local buffers.
 CREATE TEMP TABLE filter_temp AS SELECT i AS a, 'r' || i AS c FROM generate_series(1, 100) AS i;
-EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+EXPLAIN (VERBOSE, ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT count(*) FROM filter_temp WHERE a > 90 AND c <> 'r95';
 SELECT filter_same($$SELECT c FROM filter_temp WHERE a > 90 AND c <> 'r95'$$);
 DROP TABLE filter_temp;
@@ -153,7 +153,7 @@ BEGIN;
 SAVEPOINT aborted;
 INSERT INTO filter_dead SELECT i FROM generate_series(1000, 1099) AS i;
 ROLLBACK TO aborted;
-EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+EXPLAIN (VERBOSE, ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT count(*) FROM filter_dead WHERE a > 0;
 SELECT filter_same($$SELECT count(*), sum(a) FROM filter_dead WHERE a > 150$$);
 COMMIT;
@@ -188,7 +188,7 @@ RESET tessera.enable;
 -- not take (a bitwise xor), still runs before the division.
 EXPLAIN (COSTS OFF) SELECT count(*) FROM filter_t WHERE a > 0 AND (b # 0) <> 0 AND 10 / b > 1;
 SELECT filter_same($$SELECT count(*) FROM filter_t WHERE a > 0 AND (b # 0) <> 0 AND 10 / b > 1$$);
-EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+EXPLAIN (VERBOSE, ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT a FROM filter_t WHERE a > 100 AND upper(c) <> 'R150' AND b < 5;
 SELECT filter_same($$SELECT a FROM filter_t WHERE a > 100 AND upper(c) <> 'R150' AND b < 5$$);
 -- A policy's clauses come before the user's, whatever their costs: the
@@ -336,7 +336,7 @@ DROP TABLE filter_null_arith;
 -- A table without clauses under a row-wise parent: the scan serves the
 -- rows of each batch, the columns of its targets taken once per batch.
 EXPLAIN (COSTS OFF) SELECT bit_or(a), max(c) FROM filter_t;
-EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+EXPLAIN (VERBOSE, ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT bit_or(a), max(c) FROM filter_t;
 SELECT filter_same($$SELECT bit_or(a), max(c), count(a), count(*) FROM filter_t$$);
 -- Rows to the client, targets computed, NULL, a text column and a sort.

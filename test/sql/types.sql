@@ -536,7 +536,7 @@ SELECT types_same($$SELECT b, s, count(*) FROM types_f GROUP BY b, s$$);
 SELECT types_same($$SELECT d + 1, count(*) FROM types_f GROUP BY d + 1$$);
 SELECT types_same($$SELECT DISTINCT d FROM types_f$$);
 SELECT types_same($$SELECT DISTINCT b, ts FROM types_f$$);
-EXPLAIN (COSTS OFF) SELECT d FROM types_f UNION SELECT d FROM types_d;
+EXPLAIN (VERBOSE, COSTS OFF) SELECT d FROM types_f UNION SELECT d FROM types_d;
 SELECT types_same($$SELECT d FROM types_f UNION SELECT d FROM types_d$$);
 SELECT types_same($$SELECT s, b FROM types_f UNION SELECT s, b FROM types_d$$);
 
@@ -584,7 +584,7 @@ SELECT types_same($$SELECT count(*), sum(c) FROM (SELECT one, count(*) AS c FROM
 SELECT types_same($$SELECT long, count(*) FROM types_g GROUP BY long HAVING count(*) > 50$$);
 SELECT types_same($$SELECT DISTINCT t FROM types_g$$);
 SELECT types_same($$SELECT DISTINCT n, t FROM types_g$$);
-EXPLAIN (COSTS OFF) SELECT t FROM types_g UNION SELECT label FROM (VALUES ('k1'), ('new')) AS v(label);
+EXPLAIN (VERBOSE, COSTS OFF) SELECT t FROM types_g UNION SELECT label FROM (VALUES ('k1'), ('new')) AS v(label);
 SELECT types_same($$SELECT t FROM types_g UNION SELECT label FROM (VALUES ('k1'), ('new')) AS v(label)$$);
 SELECT types_same($$SELECT n FROM types_g UNION SELECT n * 2 FROM types_g$$);
 -- Text, varchar and bytea are hashed and compared by their bytes, without
@@ -653,7 +653,7 @@ LANGUAGE plpgsql AS $$
 DECLARE
     line text;
 BEGIN
-    FOR line IN EXECUTE 'EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) ' || query
+    FOR line IN EXECUTE 'EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) ' || query
     LOOP
         IF line ~ 'TessSort|Sort Method|Rebuilt' THEN
             RETURN NEXT regexp_replace(line, '\d+', 'N', 'g');

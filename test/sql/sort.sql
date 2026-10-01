@@ -39,8 +39,10 @@ LANGUAGE plpgsql AS $$
 DECLARE
     line text;
 BEGIN
-    FOR line IN EXECUTE 'EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) ' || query
+    FOR line IN EXECUTE 'EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) ' || query
     LOOP
+        -- VERBOSE adds the output lists and each worker's rows: not checked here.
+        CONTINUE WHEN line ~ '^\s*(Output|Worker \d+):';
         RETURN NEXT regexp_replace(regexp_replace(line, 'Memory Usage: \d+', 'Memory Usage: N'),
                                    '(Disk Usage|Runs|Merge Passes): \d+', '\1: N');
     END LOOP;
@@ -326,7 +328,7 @@ COMMIT;
 SELECT sort_same($$
 SELECT x, (SELECT array_agg(d) FROM (SELECT d FROM sort_t WHERE a = x ORDER BY d DESC) s)
 FROM generate_series(-3, 3) AS x ORDER BY x$$);
-EXPLAIN (COSTS OFF)
+EXPLAIN (VERBOSE, COSTS OFF)
 SELECT x, (SELECT array_agg(d) FROM (SELECT d FROM sort_t WHERE a = x ORDER BY d DESC) s)
 FROM generate_series(-3, 3) AS x;
 SELECT sort_same($$

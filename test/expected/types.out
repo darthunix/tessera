@@ -1631,19 +1631,25 @@ SELECT types_same($$SELECT DISTINCT b, ts FROM types_f$$);
  same
 (1 row)
 
-EXPLAIN (COSTS OFF) SELECT d FROM types_f UNION SELECT d FROM types_d;
-                       QUERY PLAN                        
----------------------------------------------------------
+EXPLAIN (VERBOSE, COSTS OFF) SELECT d FROM types_f UNION SELECT d FROM types_d;
+                           QUERY PLAN                           
+----------------------------------------------------------------
  Custom Scan (TessAgg)
+   Output: unnamed_subquery.d
    Group Key: unnamed_subquery.d
    ->  Custom Scan (TessAppend)
+         Output: unnamed_subquery.d
          ->  Custom Scan (TessPack)
+               Output: unnamed_subquery.d
                Rows Kept As: forwarded batches
-               ->  Custom Scan (TessHeapScan) on types_f
+               ->  Custom Scan (TessHeapScan) on public.types_f
+                     Output: types_f.d
          ->  Custom Scan (TessPack)
+               Output: unnamed_subquery_1.d
                Rows Kept As: forwarded batches
-               ->  Custom Scan (TessHeapScan) on types_d
-(9 rows)
+               ->  Custom Scan (TessHeapScan) on public.types_d
+                     Output: types_d.d
+(15 rows)
 
 SELECT types_same($$SELECT d FROM types_f UNION SELECT d FROM types_d$$);
  types_same 
@@ -1784,18 +1790,24 @@ SELECT types_same($$SELECT DISTINCT n, t FROM types_g$$);
  same
 (1 row)
 
-EXPLAIN (COSTS OFF) SELECT t FROM types_g UNION SELECT label FROM (VALUES ('k1'), ('new')) AS v(label);
-                       QUERY PLAN                        
----------------------------------------------------------
+EXPLAIN (VERBOSE, COSTS OFF) SELECT t FROM types_g UNION SELECT label FROM (VALUES ('k1'), ('new')) AS v(label);
+                           QUERY PLAN                           
+----------------------------------------------------------------
  Custom Scan (TessAgg)
+   Output: unnamed_subquery.t
    Group Key: unnamed_subquery.t
    ->  Custom Scan (TessAppend)
+         Output: unnamed_subquery.t
          ->  Custom Scan (TessPack)
+               Output: unnamed_subquery.t
                Rows Kept As: forwarded batches
-               ->  Custom Scan (TessHeapScan) on types_g
+               ->  Custom Scan (TessHeapScan) on public.types_g
+                     Output: types_g.t
          ->  Custom Scan (TessPack)
+               Output: unnamed_subquery_1.label
                ->  Values Scan on "*VALUES*"
-(8 rows)
+                     Output: "*VALUES*".column1
+(14 rows)
 
 SELECT types_same($$SELECT t FROM types_g UNION SELECT label FROM (VALUES ('k1'), ('new')) AS v(label)$$);
  types_same 
@@ -2003,7 +2015,7 @@ LANGUAGE plpgsql AS $$
 DECLARE
     line text;
 BEGIN
-    FOR line IN EXECUTE 'EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) ' || query
+    FOR line IN EXECUTE 'EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) ' || query
     LOOP
         IF line ~ 'TessSort|Sort Method|Rebuilt' THEN
             RETURN NEXT regexp_replace(line, '\d+', 'N', 'g');

@@ -230,7 +230,7 @@ limit_explain(CustomScanState *css, List *ancestors, ExplainState *es)
 	TessLimitState *state = (TessLimitState *) css;
 	const TessUnaryStats *stats;
 
-	if (!es->analyze)
+	if (!es->analyze || !es->verbose)
 		return;
 	stats = tess_unary_stats(state->unary);
 	ExplainPropertyInteger("Input Batches", NULL, stats->input_batches, es);

@@ -27,8 +27,10 @@ LANGUAGE plpgsql AS $$
 DECLARE
     line text;
 BEGIN
-    FOR line IN EXECUTE 'EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) ' || query
+    FOR line IN EXECUTE 'EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) ' || query
     LOOP
+        -- VERBOSE adds the output lists and each worker's rows: not checked here.
+        CONTINUE WHEN line ~ '^\s*(Output|Worker \d+):';
         RETURN NEXT regexp_replace(line, 'Index Searches: \d+', 'Index Searches: N');
     END LOOP;
 END
@@ -61,29 +63,29 @@ EXPLAIN (COSTS OFF) SELECT count(*), sum(w) FROM index_t WHERE k < 500;
 (6 rows)
 
 SELECT index_explain($$SELECT count(*), sum(w) FROM index_t WHERE k < 500$$);
-                                 index_explain                                  
---------------------------------------------------------------------------------
+                                     index_explain                                     
+---------------------------------------------------------------------------------------
  Custom Scan (TessAgg) (actual rows=1.00 loops=1)
    Input Batches: 8
    Input Rows: 463
    Kernel Calls: 16
    Computed Datums: 463
-   ->  Custom Scan (TessFilter) on index_t (actual rows=463.00 loops=1)
-         Batch Filter: (k < 500)
+   ->  Custom Scan (TessFilter) on public.index_t (actual rows=463.00 loops=1)
+         Batch Filter: (index_t.k < 500)
          Rows Removed by Batch Filter: 0
          Input Batches: 8
          Input Rows: 463
          Output Rows: 463
-         ->  Custom Scan (TessHeapScan) on index_t (actual rows=463.00 loops=1)
+         ->  Custom Scan (TessHeapScan) on public.index_t (actual rows=463.00 loops=1)
+               Exact Heap Blocks: 187
+               Lossy Heap Blocks: 0
                Batch Size: 64
                Batches: 8
                Pages: 187
-               Exact Heap Blocks: 187
-               Lossy Heap Blocks: 0
                Deformed Datums: 926
                Restarted Datums: 0
                ->  Bitmap Index Scan on index_t_k (actual rows=463.00 loops=1)
-                     Index Cond: (k < 500)
+                     Index Cond: (index_t.k < 500)
                      Index Searches: N
 (22 rows)
 
@@ -531,24 +533,24 @@ EXPLAIN (COSTS OFF) SELECT count(*), sum(k) FROM index_i WHERE k < 5000;
 (6 rows)
 
 SELECT index_explain($$SELECT count(*), sum(k) FROM index_i WHERE k < 5000$$);
-                                       index_explain                                        
---------------------------------------------------------------------------------------------
+                                           index_explain                                           
+---------------------------------------------------------------------------------------------------
  Custom Scan (TessAgg) (actual rows=1.00 loops=1)
    Input Batches: 74
    Input Rows: 4706
    Kernel Calls: 148
    Computed Datums: 4706
-   ->  Custom Scan (TessFilter) on index_i (actual rows=4706.00 loops=1)
-         Batch Filter: (k < 5000)
+   ->  Custom Scan (TessFilter) on public.index_i (actual rows=4706.00 loops=1)
+         Batch Filter: (index_i.k < 5000)
          Rows Removed by Batch Filter: 0
          Input Batches: 74
          Input Rows: 4706
          Output Rows: 4706
-         ->  Custom Scan (TessHeapScan) on index_i (actual rows=4706.00 loops=1)
+         ->  Custom Scan (TessHeapScan) on public.index_i (actual rows=4706.00 loops=1)
                Batch Size: 64
                Batches: 74
-               ->  Index Only Scan using index_i_k on index_i (actual rows=4706.00 loops=1)
-                     Index Cond: (k < 5000)
+               ->  Index Only Scan using index_i_k on public.index_i (actual rows=4706.00 loops=1)
+                     Index Cond: (index_i.k < 5000)
                      Heap Fetches: 0
                      Index Searches: N
 (18 rows)
@@ -627,24 +629,24 @@ EXPLAIN (COSTS OFF) SELECT k FROM index_i WHERE k = 77;
 UPDATE index_i SET x = x + 1 WHERE id % 7 = 0;
 DELETE FROM index_i WHERE id % 11 = 0;
 SELECT index_explain($$SELECT count(*), sum(k) FROM index_i WHERE k < 5000$$);
-                                       index_explain                                        
---------------------------------------------------------------------------------------------
+                                           index_explain                                           
+---------------------------------------------------------------------------------------------------
  Custom Scan (TessAgg) (actual rows=1.00 loops=1)
    Input Batches: 67
    Input Rows: 4286
    Kernel Calls: 134
    Computed Datums: 4286
-   ->  Custom Scan (TessFilter) on index_i (actual rows=4286.00 loops=1)
-         Batch Filter: (k < 5000)
+   ->  Custom Scan (TessFilter) on public.index_i (actual rows=4286.00 loops=1)
+         Batch Filter: (index_i.k < 5000)
          Rows Removed by Batch Filter: 0
          Input Batches: 67
          Input Rows: 4286
          Output Rows: 4286
-         ->  Custom Scan (TessHeapScan) on index_i (actual rows=4286.00 loops=1)
+         ->  Custom Scan (TessHeapScan) on public.index_i (actual rows=4286.00 loops=1)
                Batch Size: 64
                Batches: 67
-               ->  Index Only Scan using index_i_k on index_i (actual rows=4286.00 loops=1)
-                     Index Cond: (k < 5000)
+               ->  Index Only Scan using index_i_k on public.index_i (actual rows=4286.00 loops=1)
+                     Index Cond: (index_i.k < 5000)
                      Heap Fetches: 5374
                      Index Searches: N
 (18 rows)

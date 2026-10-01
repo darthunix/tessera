@@ -2653,14 +2653,18 @@ sort_explain(CustomScanState *css, List *ancestors, ExplainState *es)
 						totals[SORT_EXTERNAL] > 0 ? "external merge" : "in memory", es);
 	ExplainPropertyInteger("Memory Usage", "kB", (totals[SORT_MEMORY] + 1023) / 1024, es);
 	if (totals[SORT_EXTERNAL] > 0)
-	{
 		ExplainPropertyInteger("Disk Usage", "kB", (totals[SORT_DISK] + 1023) / 1024, es);
+	if (totals[SORT_OVERRUN] > 0)
+		ExplainPropertyInteger("Overrun", "kB", (totals[SORT_OVERRUN] + 1023) / 1024, es);
+	/* How the node sorted: VERBOSE only. */
+	if (!es->verbose)
+		return;
+	if (totals[SORT_EXTERNAL] > 0)
+	{
 		ExplainPropertyInteger("Runs", NULL, totals[SORT_RUNS], es);
 		if (totals[SORT_PASSES] > 0)
 			ExplainPropertyInteger("Merge Passes", NULL, totals[SORT_PASSES], es);
 	}
-	if (totals[SORT_OVERRUN] > 0)
-		ExplainPropertyInteger("Overrun", "kB", (totals[SORT_OVERRUN] + 1023) / 1024, es);
 	ExplainPropertyInteger("Input Batches", NULL, totals[SORT_BATCHES], es);
 	ExplainPropertyInteger("Input Rows", NULL, totals[SORT_INPUT_ROWS], es);
 	if (totals[SORT_REBUILT] > 0)

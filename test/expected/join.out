@@ -27,15 +27,19 @@ BEGIN
            md5(coalesce(with_tessera::text, ''));
 END $$;
 -- EXPLAIN ANALYZE with the memory as whether it stayed within hash_mem:
--- its bytes depend on the allocator, and an assert build's differ.
-CREATE FUNCTION join_explain(query text) RETURNS SETOF text
+-- its bytes depend on the allocator, and an assert build's differ. With
+-- VERBOSE, unless asked otherwise: the nodes' counters show only with it.
+CREATE FUNCTION join_explain(query text, verbosely boolean DEFAULT true) RETURNS SETOF text
 LANGUAGE plpgsql AS $$
 DECLARE
     line text;
     limit_kb bigint := (SELECT setting::bigint FROM pg_settings WHERE name = 'work_mem') *
                        current_setting('hash_mem_multiplier')::float8;
 BEGIN
-    FOR line IN EXECUTE 'EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) ' || query LOOP
+    FOR line IN EXECUTE format('EXPLAIN (ANALYZE, VERBOSE %s, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) %s',
+                               CASE WHEN verbosely THEN 'on' ELSE 'off' END, query) LOOP
+        -- VERBOSE adds the output lists and each worker's rows: not checked here.
+        CONTINUE WHEN line ~ '^\s*(Output|Worker \d+):';
         -- Overrun repeats what the memory line says.
         CONTINUE WHEN line ~ 'Overrun: \d+ kB';
         IF line ~ 'Memory Usage: \d+ kB' THEN
@@ -196,8 +200,8 @@ SELECT join_same($$SELECT a.w, b.w FROM jdup a JOIN jdup b ON a.k = b.k$$);
 -- (compact mode): outer columns by value, NULLs among them, and text,
 -- whose values are copied.
 SELECT join_explain($$SELECT count(jf.m), sum(jf.m), sum(jdup.w) FROM jf JOIN jdup ON jf.fk = jdup.k$$);
-                                join_explain                                 
------------------------------------------------------------------------------
+                                    join_explain                                    
+------------------------------------------------------------------------------------
  Custom Scan (TessAgg) (actual rows=1.00 loops=1)
    Input Batches: 6
    Input Rows: 357
@@ -213,19 +217,34 @@ SELECT join_explain($$SELECT count(jf.m), sum(jf.m), sum(jdup.w) FROM jf JOIN jd
          Probe Rows: 1000
          Matches: 357
          Compact Batches: 6
-         ->  Custom Scan (TessHeapScan) on jf (actual rows=1000.00 loops=1)
+         ->  Custom Scan (TessHeapScan) on public.jf (actual rows=1000.00 loops=1)
                Batch Size: 64
                Batches: 18
                Pages: 9
                Deformed Datums: 1129
                Restarted Datums: 0
-         ->  Custom Scan (TessHeapScan) on jdup (actual rows=150.00 loops=1)
+         ->  Custom Scan (TessHeapScan) on public.jdup (actual rows=150.00 loops=1)
                Batch Size: 64
                Batches: 3
                Pages: 1
                Deformed Datums: 289
                Restarted Datums: 0
 (27 rows)
+
+-- Without VERBOSE each node shows what the core's node in its place
+-- shows: the join its buckets and memory, the scans and the aggregate
+-- nothing past their rows.
+SELECT join_explain($$SELECT count(jf.m), sum(jf.m), sum(jdup.w) FROM jf JOIN jdup ON jf.fk = jdup.k$$, false);
+                                join_explain                                 
+-----------------------------------------------------------------------------
+ Custom Scan (TessAgg) (actual rows=1.00 loops=1)
+   ->  Custom Scan (TessHashJoin) (actual rows=357.00 loops=1)
+         Hash Cond: (jf.fk = jdup.k)
+         Buckets: 1024
+         Memory Usage: within hash_mem
+         ->  Custom Scan (TessHeapScan) on jf (actual rows=1000.00 loops=1)
+         ->  Custom Scan (TessHeapScan) on jdup (actual rows=150.00 loops=1)
+(7 rows)
 
 SELECT join_same($$SELECT count(jf.m), sum(jf.m), sum(jdup.w) FROM jf JOIN jdup ON jf.fk = jdup.k$$);
                    join_same                   
@@ -234,8 +253,8 @@ SELECT join_same($$SELECT count(jf.m), sum(jf.m), sum(jdup.w) FROM jf JOIN jdup 
 (1 row)
 
 SELECT join_explain($$SELECT count(jf.note), max(jdup.w) FROM jf JOIN jdup ON jf.fk = jdup.k$$);
-                                join_explain                                 
------------------------------------------------------------------------------
+                                    join_explain                                    
+------------------------------------------------------------------------------------
  Custom Scan (TessAgg) (actual rows=1.00 loops=1)
    Input Batches: 6
    Input Rows: 357
@@ -251,13 +270,13 @@ SELECT join_explain($$SELECT count(jf.note), max(jdup.w) FROM jf JOIN jdup ON jf
          Probe Rows: 1000
          Matches: 357
          Compact Batches: 6
-         ->  Custom Scan (TessHeapScan) on jf (actual rows=1000.00 loops=1)
+         ->  Custom Scan (TessHeapScan) on public.jf (actual rows=1000.00 loops=1)
                Batch Size: 64
                Batches: 18
                Pages: 9
                Deformed Datums: 1129
                Restarted Datums: 0
-         ->  Custom Scan (TessHeapScan) on jdup (actual rows=150.00 loops=1)
+         ->  Custom Scan (TessHeapScan) on public.jdup (actual rows=150.00 loops=1)
                Batch Size: 64
                Batches: 3
                Pages: 1
@@ -383,8 +402,8 @@ SELECT join_same($$SELECT jf.v, jd.id FROM jf JOIN jd ON jf.fk = jd.id AND (jf.v
 (1 row)
 
 SELECT join_explain($$SELECT count(*), sum(jdup.w) FROM jf JOIN jdup ON jf.fk = jdup.k AND jf.v > jdup.w$$);
-                                join_explain                                 
------------------------------------------------------------------------------
+                                    join_explain                                    
+------------------------------------------------------------------------------------
  Custom Scan (TessAgg) (actual rows=1.00 loops=1)
    Input Batches: 6
    Input Rows: 324
@@ -395,20 +414,20 @@ SELECT join_explain($$SELECT count(*), sum(jdup.w) FROM jf JOIN jdup ON jf.fk = 
          Batch Join Filter: (jf.v > jdup.w)
          Buckets: 1024
          Memory Usage: within hash_mem
+         Rows Removed by Join Filter: 33
          Builds: 1
          Build Rows: 139
          Chunks: 1
          Probe Rows: 1000
          Matches: 357
-         Rows Removed by Join Filter: 33
          Compact Batches: 6
-         ->  Custom Scan (TessHeapScan) on jf (actual rows=1000.00 loops=1)
+         ->  Custom Scan (TessHeapScan) on public.jf (actual rows=1000.00 loops=1)
                Batch Size: 64
                Batches: 18
                Pages: 9
                Deformed Datums: 1129
                Restarted Datums: 0
-         ->  Custom Scan (TessHeapScan) on jdup (actual rows=150.00 loops=1)
+         ->  Custom Scan (TessHeapScan) on public.jdup (actual rows=150.00 loops=1)
                Batch Size: 64
                Batches: 3
                Pages: 1
@@ -752,8 +771,8 @@ SELECT join_same($$SELECT jf.v, jdup.w, jdup.t FROM jf LEFT JOIN jdup ON jf.fk =
 (1 row)
 
 SELECT join_explain($$SELECT count(*), count(jdup.w), sum(jdup.w) FROM jf LEFT JOIN jdup ON jf.fk = jdup.k$$);
-                                join_explain                                 
------------------------------------------------------------------------------
+                                    join_explain                                    
+------------------------------------------------------------------------------------
  Custom Scan (TessAgg) (actual rows=1.00 loops=1)
    Input Batches: 36
    Input Rows: 1228
@@ -770,13 +789,13 @@ SELECT join_explain($$SELECT count(*), count(jdup.w), sum(jdup.w) FROM jf LEFT J
          Probe Rows: 1000
          Matches: 357
          Compact Batches: 18
-         ->  Custom Scan (TessHeapScan) on jf (actual rows=1000.00 loops=1)
+         ->  Custom Scan (TessHeapScan) on public.jf (actual rows=1000.00 loops=1)
                Batch Size: 64
                Batches: 18
                Pages: 9
                Deformed Datums: 1000
                Restarted Datums: 0
-         ->  Custom Scan (TessHeapScan) on jdup (actual rows=150.00 loops=1)
+         ->  Custom Scan (TessHeapScan) on public.jdup (actual rows=150.00 loops=1)
                Batch Size: 64
                Batches: 3
                Pages: 1
@@ -879,8 +898,8 @@ SELECT join_same($$SELECT count(*), sum(jgrow.g) FROM jd JOIN jgrow ON jd.id = j
 (1 row)
 
 SELECT join_explain($$SELECT count(*) FROM jf JOIN jd ON jf.fk = jd.id$$);
-                                join_explain                                
-----------------------------------------------------------------------------
+                                   join_explain                                    
+-----------------------------------------------------------------------------------
  Custom Scan (TessAgg) (actual rows=1.00 loops=1)
    Input Batches: 18
    Input Rows: 764
@@ -894,13 +913,13 @@ SELECT join_explain($$SELECT count(*) FROM jf JOIN jd ON jf.fk = jd.id$$);
          Chunks: 1
          Probe Rows: 1000
          Matches: 764
-         ->  Custom Scan (TessHeapScan) on jf (actual rows=1000.00 loops=1)
+         ->  Custom Scan (TessHeapScan) on public.jf (actual rows=1000.00 loops=1)
                Batch Size: 64
                Batches: 18
                Pages: 9
                Deformed Datums: 1000
                Restarted Datums: 0
-         ->  Custom Scan (TessHeapScan) on jd (actual rows=300.00 loops=1)
+         ->  Custom Scan (TessHeapScan) on public.jd (actual rows=300.00 loops=1)
                Batch Size: 64
                Batches: 6
                Pages: 3
@@ -910,8 +929,8 @@ SELECT join_explain($$SELECT count(*) FROM jf JOIN jd ON jf.fk = jd.id$$);
 
 -- Rounds: every match of a key with three records counts.
 SELECT join_explain($$SELECT sum(jdup.w) FROM jf JOIN jdup ON jf.fk = jdup.k$$);
-                                join_explain                                 
------------------------------------------------------------------------------
+                                    join_explain                                    
+------------------------------------------------------------------------------------
  Custom Scan (TessAgg) (actual rows=1.00 loops=1)
    Input Batches: 6
    Input Rows: 357
@@ -927,13 +946,13 @@ SELECT join_explain($$SELECT sum(jdup.w) FROM jf JOIN jdup ON jf.fk = jdup.k$$);
          Probe Rows: 1000
          Matches: 357
          Compact Batches: 6
-         ->  Custom Scan (TessHeapScan) on jf (actual rows=1000.00 loops=1)
+         ->  Custom Scan (TessHeapScan) on public.jf (actual rows=1000.00 loops=1)
                Batch Size: 64
                Batches: 18
                Pages: 9
                Deformed Datums: 1000
                Restarted Datums: 0
-         ->  Custom Scan (TessHeapScan) on jdup (actual rows=150.00 loops=1)
+         ->  Custom Scan (TessHeapScan) on public.jdup (actual rows=150.00 loops=1)
                Batch Size: 64
                Batches: 3
                Pages: 1
@@ -948,8 +967,8 @@ CREATE FUNCTION join_many() RETURNS SETOF int LANGUAGE sql ROWS 10
 AS 'SELECT generate_series(1, 20000)';
 SET work_mem = '64kB';
 SELECT join_explain($$SELECT count(*) FROM jf JOIN join_many() AS m(k) ON jf.v = m.k$$);
-                                 join_explain                                  
--------------------------------------------------------------------------------
+                                     join_explain                                     
+--------------------------------------------------------------------------------------
  Custom Scan (TessAgg) (actual rows=1.00 loops=1)
    Input Batches: 21
    Input Rows: 1000
@@ -958,20 +977,20 @@ SELECT join_explain($$SELECT count(*) FROM jf JOIN join_many() AS m(k) ON jf.v =
          Hash Cond: (jf.v = m.k)
          Buckets: 1024
          Memory Usage: within hash_mem
+         Batches: 4
+         Disk Usage: 253 kB
+         Rows Removed by Bloom Filter: 0
          Builds: 1
          Build Rows: 20000
          Chunks: 47
-         Batches: 4
          Resident Partitions: 0
          Spilled Chunks: 200
-         Disk Usage: 253 kB
          Tail Chunks Kept: 0
          Split Partitions: 4
          Probe Rows: 1000
          Matches: 1000
          Bloom Filters: 1
-         Rows Removed by Bloom Filter: 0
-         ->  Custom Scan (TessHeapScan) on jf (actual rows=1000.00 loops=1)
+         ->  Custom Scan (TessHeapScan) on public.jf (actual rows=1000.00 loops=1)
                Batch Size: 64
                Batches: 18
                Pages: 9
@@ -981,8 +1000,9 @@ SELECT join_explain($$SELECT count(*) FROM jf JOIN join_many() AS m(k) ON jf.v =
                Batch Size: 64
                Rows Kept As: copies
                Batches: 313
-               ->  Function Scan on join_many m (actual rows=20000.00 loops=1)
-(32 rows)
+               ->  Function Scan on public.join_many m (actual rows=20000.00 loops=1)
+                     Function Call: join_many()
+(33 rows)
 
 SELECT join_same($$SELECT count(*), sum(m.k) FROM jf JOIN join_many() AS m(k) ON jf.v = m.k$$);
                    join_same                   
@@ -994,9 +1014,9 @@ RESET work_mem;
 -- Rescans: a parameter of the inner side builds the table again, one of
 -- the outer side probes the same table.
 SELECT join_explain($$SELECT jsmall.k, (SELECT count(*) FROM jf JOIN jdup ON jf.fk = jdup.k WHERE jdup.w > jsmall.k) FROM jsmall$$);
-                                        join_explain                                        
---------------------------------------------------------------------------------------------
- Custom Scan (TessHeapScan) on jsmall (actual rows=10.00 loops=1)
+                                           join_explain                                            
+---------------------------------------------------------------------------------------------------
+ Custom Scan (TessHeapScan) on public.jsmall (actual rows=10.00 loops=1)
    Batch Size: 64
    Batches: 1
    Pages: 1
@@ -1018,19 +1038,19 @@ SELECT join_explain($$SELECT jsmall.k, (SELECT count(*) FROM jf JOIN jdup ON jf.
                  Probe Rows: 10000
                  Matches: 2640
                  Compact Batches: 46
-                 ->  Custom Scan (TessHeapScan) on jf (actual rows=1000.00 loops=10)
+                 ->  Custom Scan (TessHeapScan) on public.jf (actual rows=1000.00 loops=10)
                        Batch Size: 64
                        Batches: 180
                        Pages: 90
                        Deformed Datums: 10000
                        Restarted Datums: 0
-                 ->  Custom Scan (TessFilter) on jdup (actual rows=111.50 loops=10)
+                 ->  Custom Scan (TessFilter) on public.jdup (actual rows=111.50 loops=10)
                        Batch Filter: (jdup.w > jsmall.k)
                        Rows Removed by Batch Filter: 38
                        Input Batches: 30
                        Input Rows: 1500
                        Output Rows: 1115
-                       ->  Custom Scan (TessHeapScan) on jdup (actual rows=150.00 loops=10)
+                       ->  Custom Scan (TessHeapScan) on public.jdup (actual rows=150.00 loops=10)
                              Batch Size: 64
                              Batches: 30
                              Pages: 10
@@ -1045,9 +1065,9 @@ SELECT join_same($$SELECT jsmall.k, (SELECT count(*) FROM jf JOIN jdup ON jf.fk 
 (1 row)
 
 SELECT join_explain($$SELECT jsmall.k, (SELECT count(*) FROM jf JOIN jdup ON jf.fk = jdup.k WHERE jf.v > jsmall.k * 10) FROM jsmall$$);
-                                       join_explain                                        
--------------------------------------------------------------------------------------------
- Custom Scan (TessHeapScan) on jsmall (actual rows=10.00 loops=1)
+                                           join_explain                                           
+--------------------------------------------------------------------------------------------------
+ Custom Scan (TessHeapScan) on public.jsmall (actual rows=10.00 loops=1)
    Batch Size: 64
    Batches: 1
    Pages: 1
@@ -1069,19 +1089,19 @@ SELECT join_explain($$SELECT jsmall.k, (SELECT count(*) FROM jf JOIN jdup ON jf.
                  Probe Rows: 6150
                  Matches: 2165
                  Compact Batches: 39
-                 ->  Custom Scan (TessFilter) on jf (actual rows=615.00 loops=10)
+                 ->  Custom Scan (TessFilter) on public.jf (actual rows=615.00 loops=10)
                        Batch Filter: (jf.v > (jsmall.k * 10))
                        Rows Removed by Batch Filter: 385
                        Input Batches: 180
                        Input Rows: 10000
                        Output Rows: 6150
-                       ->  Custom Scan (TessHeapScan) on jf (actual rows=1000.00 loops=10)
+                       ->  Custom Scan (TessHeapScan) on public.jf (actual rows=1000.00 loops=10)
                              Batch Size: 64
                              Batches: 180
                              Pages: 90
                              Deformed Datums: 16150
                              Restarted Datums: 687
-                 ->  Custom Scan (TessHeapScan) on jdup (actual rows=150.00 loops=1)
+                 ->  Custom Scan (TessHeapScan) on public.jdup (actual rows=150.00 loops=1)
                        Batch Size: 64
                        Batches: 3
                        Pages: 1
@@ -1127,8 +1147,8 @@ SELECT CASE WHEN g % 97 = 0 THEN NULL ELSE g END AS k, g AS v FROM generate_seri
 CREATE TABLE jhit AS SELECT (g % 5000 + 1) * 100 AS k, g AS v FROM generate_series(1, 20000) AS g;
 ANALYZE jbuild, jprobe, jhit;
 SELECT join_explain($$SELECT count(*), sum(jbuild.w) FROM jprobe JOIN jbuild ON jprobe.k = jbuild.k$$);
-                                  join_explain                                   
----------------------------------------------------------------------------------
+                                      join_explain                                      
+----------------------------------------------------------------------------------------
  Custom Scan (TessAgg) (actual rows=1.00 loops=1)
    Input Batches: 198
    Input Rows: 198
@@ -1138,20 +1158,20 @@ SELECT join_explain($$SELECT count(*), sum(jbuild.w) FROM jprobe JOIN jbuild ON 
          Hash Cond: (jprobe.k = jbuild.k)
          Buckets: 16384
          Memory Usage: within hash_mem
+         Rows Removed by Bloom Filter: 15463
          Builds: 1
          Build Rows: 5000
          Chunks: 2
          Probe Rows: 20000
          Matches: 198
          Bloom Filters: 1
-         Rows Removed by Bloom Filter: 15463
-         ->  Custom Scan (TessHeapScan) on jprobe (actual rows=20000.00 loops=1)
+         ->  Custom Scan (TessHeapScan) on public.jprobe (actual rows=20000.00 loops=1)
                Batch Size: 64
                Batches: 354
                Pages: 89
                Deformed Datums: 20000
                Restarted Datums: 0
-         ->  Custom Scan (TessHeapScan) on jbuild (actual rows=5000.00 loops=1)
+         ->  Custom Scan (TessHeapScan) on public.jbuild (actual rows=5000.00 loops=1)
                Batch Size: 64
                Batches: 89
                Pages: 23
@@ -1166,8 +1186,8 @@ SELECT join_same($$SELECT jprobe.v, jbuild.w FROM jprobe JOIN jbuild ON jprobe.k
 (1 row)
 
 SELECT join_explain($$SELECT count(*) FROM jprobe WHERE NOT EXISTS (SELECT 1 FROM jbuild WHERE jbuild.k = jprobe.k)$$);
-                                  join_explain                                   
----------------------------------------------------------------------------------
+                                      join_explain                                      
+----------------------------------------------------------------------------------------
  Custom Scan (TessAgg) (actual rows=1.00 loops=1)
    Input Batches: 354
    Input Rows: 19802
@@ -1177,20 +1197,20 @@ SELECT join_explain($$SELECT count(*) FROM jprobe WHERE NOT EXISTS (SELECT 1 FRO
          Hash Cond: (jbuild.k = jprobe.k)
          Buckets: 16384
          Memory Usage: within hash_mem
+         Rows Removed by Bloom Filter: 15463
          Builds: 1
          Build Rows: 5000
          Chunks: 2
          Probe Rows: 20000
          Matches: 0
          Bloom Filters: 1
-         Rows Removed by Bloom Filter: 15463
-         ->  Custom Scan (TessHeapScan) on jprobe (actual rows=20000.00 loops=1)
+         ->  Custom Scan (TessHeapScan) on public.jprobe (actual rows=20000.00 loops=1)
                Batch Size: 64
                Batches: 354
                Pages: 89
                Deformed Datums: 20000
                Restarted Datums: 0
-         ->  Custom Scan (TessHeapScan) on jbuild (actual rows=5000.00 loops=1)
+         ->  Custom Scan (TessHeapScan) on public.jbuild (actual rows=5000.00 loops=1)
                Batch Size: 64
                Batches: 89
                Pages: 23
@@ -1211,8 +1231,8 @@ SELECT join_same($$SELECT jprobe.v FROM jprobe WHERE EXISTS (SELECT 1 FROM jbuil
 (1 row)
 
 SELECT join_explain($$SELECT count(*), count(jbuild.w) FROM jprobe LEFT JOIN jbuild ON jprobe.k = jbuild.k$$);
-                                  join_explain                                   
----------------------------------------------------------------------------------
+                                      join_explain                                      
+----------------------------------------------------------------------------------------
  Custom Scan (TessAgg) (actual rows=1.00 loops=1)
    Input Batches: 552
    Input Rows: 20000
@@ -1223,20 +1243,20 @@ SELECT join_explain($$SELECT count(*), count(jbuild.w) FROM jprobe LEFT JOIN jbu
          Hash Cond: (jprobe.k = jbuild.k)
          Buckets: 16384
          Memory Usage: within hash_mem
+         Rows Removed by Bloom Filter: 15463
          Builds: 1
          Build Rows: 5000
          Chunks: 2
          Probe Rows: 20000
          Matches: 198
          Bloom Filters: 1
-         Rows Removed by Bloom Filter: 15463
-         ->  Custom Scan (TessHeapScan) on jprobe (actual rows=20000.00 loops=1)
+         ->  Custom Scan (TessHeapScan) on public.jprobe (actual rows=20000.00 loops=1)
                Batch Size: 64
                Batches: 354
                Pages: 89
                Deformed Datums: 20000
                Restarted Datums: 0
-         ->  Custom Scan (TessHeapScan) on jbuild (actual rows=5000.00 loops=1)
+         ->  Custom Scan (TessHeapScan) on public.jbuild (actual rows=5000.00 loops=1)
                Batch Size: 64
                Batches: 89
                Pages: 23
@@ -1258,8 +1278,8 @@ SELECT join_same($$SELECT jprobe.v, jbuild.w FROM jprobe LEFT JOIN jbuild ON jpr
 
 -- Every probe row finds its key: no filter.
 SELECT join_explain($$SELECT count(*), sum(jbuild.w) FROM jhit JOIN jbuild ON jhit.k = jbuild.k$$);
-                                  join_explain                                  
---------------------------------------------------------------------------------
+                                     join_explain                                      
+---------------------------------------------------------------------------------------
  Custom Scan (TessAgg) (actual rows=1.00 loops=1)
    Input Batches: 354
    Input Rows: 20000
@@ -1274,13 +1294,13 @@ SELECT join_explain($$SELECT count(*), sum(jbuild.w) FROM jhit JOIN jbuild ON jh
          Chunks: 2
          Probe Rows: 20000
          Matches: 20000
-         ->  Custom Scan (TessHeapScan) on jhit (actual rows=20000.00 loops=1)
+         ->  Custom Scan (TessHeapScan) on public.jhit (actual rows=20000.00 loops=1)
                Batch Size: 64
                Batches: 354
                Pages: 89
                Deformed Datums: 20000
                Restarted Datums: 0
-         ->  Custom Scan (TessHeapScan) on jbuild (actual rows=5000.00 loops=1)
+         ->  Custom Scan (TessHeapScan) on public.jbuild (actual rows=5000.00 loops=1)
                Batch Size: 64
                Batches: 89
                Pages: 23
@@ -1290,8 +1310,8 @@ SELECT join_explain($$SELECT count(*), sum(jbuild.w) FROM jhit JOIN jbuild ON jh
 
 -- A build side that fits in the cache: no filter though most rows miss.
 SELECT join_explain($$SELECT count(*) FROM jprobe JOIN jd ON jprobe.k = jd.id$$);
-                                  join_explain                                   
----------------------------------------------------------------------------------
+                                      join_explain                                      
+----------------------------------------------------------------------------------------
  Custom Scan (TessAgg) (actual rows=1.00 loops=1)
    Input Batches: 6
    Input Rows: 297
@@ -1305,13 +1325,13 @@ SELECT join_explain($$SELECT count(*) FROM jprobe JOIN jd ON jprobe.k = jd.id$$)
          Chunks: 1
          Probe Rows: 20000
          Matches: 297
-         ->  Custom Scan (TessHeapScan) on jprobe (actual rows=20000.00 loops=1)
+         ->  Custom Scan (TessHeapScan) on public.jprobe (actual rows=20000.00 loops=1)
                Batch Size: 64
                Batches: 354
                Pages: 89
                Deformed Datums: 20000
                Restarted Datums: 0
-         ->  Custom Scan (TessHeapScan) on jd (actual rows=300.00 loops=1)
+         ->  Custom Scan (TessHeapScan) on public.jd (actual rows=300.00 loops=1)
                Batch Size: 64
                Batches: 6
                Pages: 3
@@ -1321,9 +1341,9 @@ SELECT join_explain($$SELECT count(*) FROM jprobe JOIN jd ON jprobe.k = jd.id$$)
 
 -- A parameter of the inner side builds each table and decides on its filter again.
 SELECT join_explain($$SELECT jsmall.k, (SELECT count(*) FROM jprobe JOIN jbuild ON jprobe.k = jbuild.k WHERE jbuild.w > jsmall.k) FROM jsmall$$);
-                                         join_explain                                          
------------------------------------------------------------------------------------------------
- Custom Scan (TessHeapScan) on jsmall (actual rows=10.00 loops=1)
+                                             join_explain                                             
+------------------------------------------------------------------------------------------------------
+ Custom Scan (TessHeapScan) on public.jsmall (actual rows=10.00 loops=1)
    Batch Size: 64
    Batches: 1
    Pages: 1
@@ -1339,26 +1359,26 @@ SELECT join_explain($$SELECT jsmall.k, (SELECT count(*) FROM jprobe JOIN jbuild 
                  Hash Cond: (jprobe.k = jbuild.k)
                  Buckets: 16384
                  Memory Usage: within hash_mem
+                 Rows Removed by Bloom Filter: 154713
                  Builds: 10
                  Build Rows: 49615
                  Chunks: 20
                  Probe Rows: 200000
                  Matches: 1595
                  Bloom Filters: 10
-                 Rows Removed by Bloom Filter: 154713
-                 ->  Custom Scan (TessHeapScan) on jprobe (actual rows=20000.00 loops=10)
+                 ->  Custom Scan (TessHeapScan) on public.jprobe (actual rows=20000.00 loops=10)
                        Batch Size: 64
                        Batches: 3540
                        Pages: 890
                        Deformed Datums: 200000
                        Restarted Datums: 0
-                 ->  Custom Scan (TessFilter) on jbuild (actual rows=4961.50 loops=10)
+                 ->  Custom Scan (TessFilter) on public.jbuild (actual rows=4961.50 loops=10)
                        Batch Filter: (jbuild.w > jsmall.k)
                        Rows Removed by Batch Filter: 38
                        Input Batches: 890
                        Input Rows: 50000
                        Output Rows: 49615
-                       ->  Custom Scan (TessHeapScan) on jbuild (actual rows=5000.00 loops=10)
+                       ->  Custom Scan (TessHeapScan) on public.jbuild (actual rows=5000.00 loops=10)
                              Batch Size: 64
                              Batches: 890
                              Pages: 230
@@ -1377,8 +1397,8 @@ SELECT join_same($$SELECT jsmall.k, (SELECT count(*) FROM jprobe JOIN jbuild ON 
 -- INNER and SEMI, where a row without a pair leaves; ANTI and LEFT keep
 -- theirs, and check in the join.
 SELECT join_explain($$SELECT count(*), sum(jbuild.w) FROM jprobe JOIN jbuild ON jprobe.k = jbuild.k WHERE jprobe.v > 0 AND jprobe.v::text LIKE '%1%'$$);
-                                     join_explain                                      
----------------------------------------------------------------------------------------
+                                         join_explain                                         
+----------------------------------------------------------------------------------------------
  Custom Scan (TessAgg) (actual rows=1.00 loops=1)
    Input Batches: 118
    Input Rows: 118
@@ -1395,8 +1415,8 @@ SELECT join_explain($$SELECT count(*), sum(jbuild.w) FROM jprobe JOIN jbuild ON 
          Matches: 118
          Bloom Filters: 1
          Bloom Filter Below: true
-         ->  Custom Scan (TessFilter) on jprobe (actual rows=4295.00 loops=1)
-               Filter: ((v)::text ~~ '%1%'::text)
+         ->  Custom Scan (TessFilter) on public.jprobe (actual rows=4295.00 loops=1)
+               Filter: ((jprobe.v)::text ~~ '%1%'::text)
                Rows Removed by Filter: 15705
                Batch Filter: (jprobe.v > 0)
                Rows Removed by Batch Filter: 0
@@ -1405,13 +1425,13 @@ SELECT join_explain($$SELECT count(*), sum(jbuild.w) FROM jprobe JOIN jbuild ON 
                Input Batches: 354
                Input Rows: 20000
                Output Rows: 4295
-               ->  Custom Scan (TessHeapScan) on jprobe (actual rows=20000.00 loops=1)
+               ->  Custom Scan (TessHeapScan) on public.jprobe (actual rows=20000.00 loops=1)
                      Batch Size: 64
                      Batches: 354
                      Pages: 89
                      Deformed Datums: 33440
                      Restarted Datums: 137
-         ->  Custom Scan (TessHeapScan) on jbuild (actual rows=5000.00 loops=1)
+         ->  Custom Scan (TessHeapScan) on public.jbuild (actual rows=5000.00 loops=1)
                Batch Size: 64
                Batches: 89
                Pages: 23
@@ -1432,8 +1452,8 @@ SELECT join_same($$SELECT jprobe.v FROM jprobe WHERE jprobe.v > 0 AND jprobe.v::
 (1 row)
 
 SELECT join_explain($$SELECT count(*) FROM jprobe WHERE jprobe.v > 0 AND jprobe.v::text LIKE '%1%' AND NOT EXISTS (SELECT 1 FROM jbuild WHERE jbuild.k = jprobe.k)$$);
-                                     join_explain                                      
----------------------------------------------------------------------------------------
+                                         join_explain                                         
+----------------------------------------------------------------------------------------------
  Custom Scan (TessAgg) (actual rows=1.00 loops=1)
    Input Batches: 354
    Input Rows: 13321
@@ -1443,15 +1463,15 @@ SELECT join_explain($$SELECT count(*) FROM jprobe WHERE jprobe.v > 0 AND jprobe.
          Hash Cond: (jbuild.k = jprobe.k)
          Buckets: 16384
          Memory Usage: within hash_mem
+         Rows Removed by Bloom Filter: 9048
          Builds: 1
          Build Rows: 5000
          Chunks: 2
          Probe Rows: 13439
          Matches: 0
          Bloom Filters: 1
-         Rows Removed by Bloom Filter: 9048
-         ->  Custom Scan (TessFilter) on jprobe (actual rows=13439.00 loops=1)
-               Filter: ((v)::text ~~ '%1%'::text)
+         ->  Custom Scan (TessFilter) on public.jprobe (actual rows=13439.00 loops=1)
+               Filter: ((jprobe.v)::text ~~ '%1%'::text)
                Rows Removed by Filter: 6561
                Batch Filter: (jprobe.v > 0)
                Rows Removed by Batch Filter: 0
@@ -1459,13 +1479,13 @@ SELECT join_explain($$SELECT count(*) FROM jprobe WHERE jprobe.v > 0 AND jprobe.
                Input Batches: 354
                Input Rows: 20000
                Output Rows: 13439
-               ->  Custom Scan (TessHeapScan) on jprobe (actual rows=20000.00 loops=1)
+               ->  Custom Scan (TessHeapScan) on public.jprobe (actual rows=20000.00 loops=1)
                      Batch Size: 64
                      Batches: 354
                      Pages: 89
                      Deformed Datums: 33439
                      Restarted Datums: 137
-         ->  Custom Scan (TessHeapScan) on jbuild (actual rows=5000.00 loops=1)
+         ->  Custom Scan (TessHeapScan) on public.jbuild (actual rows=5000.00 loops=1)
                Batch Size: 64
                Batches: 89
                Pages: 23
@@ -1496,8 +1516,8 @@ SELECT join_same($$SELECT jsmall.k, (SELECT count(*) FROM jprobe JOIN jbuild ON 
 -- relation's own path, so that for an inner or semi join the filter below
 -- reaches them; an anti join reads the same node without it.
 SELECT join_explain($$SELECT count(*), sum(jbuild.w) FROM jprobe JOIN jbuild ON jprobe.k = jbuild.k WHERE jprobe.v::text LIKE '%1%'$$);
-                                     join_explain                                      
----------------------------------------------------------------------------------------
+                                         join_explain                                         
+----------------------------------------------------------------------------------------------
  Custom Scan (TessAgg) (actual rows=1.00 loops=1)
    Input Batches: 118
    Input Rows: 118
@@ -1514,21 +1534,21 @@ SELECT join_explain($$SELECT count(*), sum(jbuild.w) FROM jprobe JOIN jbuild ON 
          Matches: 118
          Bloom Filters: 1
          Bloom Filter Below: true
-         ->  Custom Scan (TessFilter) on jprobe (actual rows=4295.00 loops=1)
-               Filter: ((v)::text ~~ '%1%'::text)
+         ->  Custom Scan (TessFilter) on public.jprobe (actual rows=4295.00 loops=1)
+               Filter: ((jprobe.v)::text ~~ '%1%'::text)
                Rows Removed by Filter: 15705
                Rows Removed by Bloom Filter: 9144
                Rows Removed by Residual Filter: 6561
                Input Batches: 354
                Input Rows: 20000
                Output Rows: 4295
-               ->  Custom Scan (TessHeapScan) on jprobe (actual rows=20000.00 loops=1)
+               ->  Custom Scan (TessHeapScan) on public.jprobe (actual rows=20000.00 loops=1)
                      Batch Size: 64
                      Batches: 354
                      Pages: 89
                      Deformed Datums: 24296
                      Restarted Datums: 41
-         ->  Custom Scan (TessHeapScan) on jbuild (actual rows=5000.00 loops=1)
+         ->  Custom Scan (TessHeapScan) on public.jbuild (actual rows=5000.00 loops=1)
                Batch Size: 64
                Batches: 89
                Pages: 23
@@ -1571,8 +1591,8 @@ SELECT join_same($$SELECT jprobe.v FROM jprobe WHERE jprobe.v::text LIKE '%1%' A
 -- 0 none.
 SET tessera.join_bloom_ratio = 1;
 SELECT join_explain($$SELECT count(*), sum(jd.n) FROM jf JOIN jd ON jf.fk = jd.id WHERE jf.v > 0 AND jf.note LIKE 'f1%'$$);
-                                   join_explain                                   
-----------------------------------------------------------------------------------
+                                      join_explain                                       
+-----------------------------------------------------------------------------------------
  Custom Scan (TessAgg) (actual rows=1.00 loops=1)
    Input Batches: 5
    Input Rows: 87
@@ -1582,26 +1602,26 @@ SELECT join_explain($$SELECT count(*), sum(jd.n) FROM jf JOIN jd ON jf.fk = jd.i
          Hash Cond: (jd.id = jf.fk)
          Buckets: 1024
          Memory Usage: within hash_mem
+         Rows Removed by Bloom Filter: 13
          Builds: 1
          Build Rows: 300
          Chunks: 1
          Probe Rows: 112
          Matches: 87
          Bloom Filters: 1
-         Rows Removed by Bloom Filter: 13
-         ->  Custom Scan (TessFilter) on jf (actual rows=112.00 loops=1)
+         ->  Custom Scan (TessFilter) on public.jf (actual rows=112.00 loops=1)
                Batch Filter: ((jf.v > 0) AND (jf.note ~~ 'f1%'::text))
                Rows Removed by Batch Filter: 888
                Input Batches: 18
                Input Rows: 1000
                Output Rows: 112
-               ->  Custom Scan (TessHeapScan) on jf (actual rows=1000.00 loops=1)
+               ->  Custom Scan (TessHeapScan) on public.jf (actual rows=1000.00 loops=1)
                      Batch Size: 64
                      Batches: 18
                      Pages: 9
                      Deformed Datums: 2112
                      Restarted Datums: 12
-         ->  Custom Scan (TessHeapScan) on jd (actual rows=300.00 loops=1)
+         ->  Custom Scan (TessHeapScan) on public.jd (actual rows=300.00 loops=1)
                Batch Size: 64
                Batches: 6
                Pages: 3
@@ -1617,8 +1637,8 @@ SELECT join_same($$SELECT jf.v, jd.label FROM jf JOIN jd ON jf.fk = jd.id WHERE 
 
 SET tessera.join_bloom_ratio = 0;
 SELECT join_explain($$SELECT count(*), sum(jbuild.w) FROM jprobe JOIN jbuild ON jprobe.k = jbuild.k WHERE jprobe.v > 0 AND jprobe.v::text LIKE '%1%'$$);
-                                     join_explain                                      
----------------------------------------------------------------------------------------
+                                         join_explain                                         
+----------------------------------------------------------------------------------------------
  Custom Scan (TessAgg) (actual rows=1.00 loops=1)
    Input Batches: 118
    Input Rows: 118
@@ -1633,8 +1653,8 @@ SELECT join_explain($$SELECT count(*), sum(jbuild.w) FROM jprobe JOIN jbuild ON 
          Chunks: 2
          Probe Rows: 13439
          Matches: 118
-         ->  Custom Scan (TessFilter) on jprobe (actual rows=13439.00 loops=1)
-               Filter: ((v)::text ~~ '%1%'::text)
+         ->  Custom Scan (TessFilter) on public.jprobe (actual rows=13439.00 loops=1)
+               Filter: ((jprobe.v)::text ~~ '%1%'::text)
                Rows Removed by Filter: 6561
                Batch Filter: (jprobe.v > 0)
                Rows Removed by Batch Filter: 0
@@ -1642,13 +1662,13 @@ SELECT join_explain($$SELECT count(*), sum(jbuild.w) FROM jprobe JOIN jbuild ON 
                Input Batches: 354
                Input Rows: 20000
                Output Rows: 13439
-               ->  Custom Scan (TessHeapScan) on jprobe (actual rows=20000.00 loops=1)
+               ->  Custom Scan (TessHeapScan) on public.jprobe (actual rows=20000.00 loops=1)
                      Batch Size: 64
                      Batches: 354
                      Pages: 89
                      Deformed Datums: 33439
                      Restarted Datums: 137
-         ->  Custom Scan (TessHeapScan) on jbuild (actual rows=5000.00 loops=1)
+         ->  Custom Scan (TessHeapScan) on public.jbuild (actual rows=5000.00 loops=1)
                Batch Size: 64
                Batches: 89
                Pages: 23
@@ -1668,8 +1688,8 @@ ALTER TABLE jpprobe ATTACH PARTITION jpprobe_2 FOR VALUES FROM (10001) TO (20001
 INSERT INTO jpprobe SELECT g, CASE WHEN g % 97 = 0 THEN NULL ELSE g * 37 % 20011 END FROM generate_series(1, 20000) AS g;
 ANALYZE jpprobe;
 SELECT join_explain($$SELECT count(*), sum(jbuild.w) FROM jpprobe JOIN jbuild ON jpprobe.k = jbuild.k WHERE jpprobe.v > 0 AND jpprobe.v::text LIKE '%1%'$$);
-                                          join_explain                                          
-------------------------------------------------------------------------------------------------
+                                             join_explain                                              
+-------------------------------------------------------------------------------------------------------
  Custom Scan (TessAgg) (actual rows=1.00 loops=1)
    Input Batches: 142
    Input Rows: 143
@@ -1688,8 +1708,8 @@ SELECT join_explain($$SELECT count(*), sum(jbuild.w) FROM jpprobe JOIN jbuild ON
          Bloom Filter Below: true
          ->  Custom Scan (TessAppend) (actual rows=4287.00 loops=1)
                Batches: 286
-               ->  Custom Scan (TessFilter) on jpprobe_1 (actual rows=3440.00 loops=1)
-                     Filter: ((v)::text ~~ '%1%'::text)
+               ->  Custom Scan (TessFilter) on public.jpprobe_1 (actual rows=3440.00 loops=1)
+                     Filter: ((jpprobe_1.v)::text ~~ '%1%'::text)
                      Rows Removed by Filter: 6560
                      Batch Filter: (jpprobe_1.v > 0)
                      Rows Removed by Batch Filter: 0
@@ -1697,14 +1717,14 @@ SELECT join_explain($$SELECT count(*), sum(jbuild.w) FROM jpprobe JOIN jbuild ON
                      Input Batches: 177
                      Input Rows: 10000
                      Output Rows: 3440
-                     ->  Custom Scan (TessHeapScan) on jpprobe_1 (actual rows=10000.00 loops=1)
+                     ->  Custom Scan (TessHeapScan) on public.jpprobe_1 (actual rows=10000.00 loops=1)
                            Batch Size: 64
                            Batches: 177
                            Pages: 45
                            Deformed Datums: 13440
                            Restarted Datums: 0
-               ->  Custom Scan (TessFilter) on jpprobe_2 (actual rows=847.00 loops=1)
-                     Filter: ((v)::text ~~ '%1%'::text)
+               ->  Custom Scan (TessFilter) on public.jpprobe_2 (actual rows=847.00 loops=1)
+                     Filter: ((jpprobe_2.v)::text ~~ '%1%'::text)
                      Rows Removed by Filter: 9153
                      Batch Filter: (jpprobe_2.v > 0)
                      Rows Removed by Batch Filter: 0
@@ -1713,13 +1733,13 @@ SELECT join_explain($$SELECT count(*), sum(jbuild.w) FROM jpprobe JOIN jbuild ON
                      Input Batches: 177
                      Input Rows: 10000
                      Output Rows: 847
-                     ->  Custom Scan (TessHeapScan) on jpprobe_2 (actual rows=10000.00 loops=1)
+                     ->  Custom Scan (TessHeapScan) on public.jpprobe_2 (actual rows=10000.00 loops=1)
                            Batch Size: 64
                            Batches: 177
                            Pages: 45
                            Deformed Datums: 20000
                            Restarted Datums: 103
-         ->  Custom Scan (TessHeapScan) on jbuild (actual rows=5000.00 loops=1)
+         ->  Custom Scan (TessHeapScan) on public.jbuild (actual rows=5000.00 loops=1)
                Batch Size: 64
                Batches: 89
                Pages: 23
@@ -1751,7 +1771,7 @@ LANGUAGE plpgsql AS $$
 DECLARE
     plan jsonb;
 BEGIN
-    EXECUTE format('EXPLAIN (ANALYZE, FORMAT JSON, TIMING OFF, SUMMARY OFF, BUFFERS OFF, COSTS OFF) %s', query)
+    EXECUTE format('EXPLAIN (ANALYZE, VERBOSE, FORMAT JSON, TIMING OFF, SUMMARY OFF, BUFFERS OFF, COSTS OFF) %s', query)
         INTO plan;
     RETURN jsonb_path_query_first(plan,
         '$[0]."Plan".** ? (@."Custom Plan Provider" == "TessAppend")."Subplans Removed by Join"')::text;
@@ -1762,7 +1782,7 @@ LANGUAGE plpgsql AS $$
 DECLARE
     plan jsonb;
 BEGIN
-    EXECUTE format('EXPLAIN (ANALYZE, FORMAT JSON, TIMING OFF, SUMMARY OFF, BUFFERS OFF, COSTS OFF) %s', query)
+    EXECUTE format('EXPLAIN (ANALYZE, VERBOSE, FORMAT JSON, TIMING OFF, SUMMARY OFF, BUFFERS OFF, COSTS OFF) %s', query)
         INTO plan;
     RETURN (SELECT count(DISTINCT node ->> 'Relation Name')
             FROM jsonb_path_query(plan, 'strict $[0]."Plan".**') AS node
@@ -1807,8 +1827,8 @@ CREATE TABLE jk19 AS SELECT k FROM (VALUES (1), (9)) AS v(k);
 CREATE TABLE jkw AS SELECT g AS k FROM generate_series(20001, 30000) AS g;
 ANALYZE jpr, jpl, jph, jp2, jkf, jkm, jk8, jkn, jkl, jk2, jk19, jkw;
 SELECT join_explain($$SELECT count(*), sum(jpr.v) FROM jpr JOIN jkf ON jpr.k = jkf.k$$);
-                                     join_explain                                     
---------------------------------------------------------------------------------------
+                                        join_explain                                         
+---------------------------------------------------------------------------------------------
  Custom Scan (TessAgg) (actual rows=1.00 loops=1)
    Input Batches: 9
    Input Rows: 500
@@ -1826,22 +1846,22 @@ SELECT join_explain($$SELECT count(*), sum(jpr.v) FROM jpr JOIN jkf ON jpr.k = j
          ->  Custom Scan (TessAppend) (actual rows=10000.00 loops=1)
                Subplans Removed by Join: 3
                Batches: 177
-               ->  Custom Scan (TessHeapScan) on jpr_1 (never executed)
+               ->  Custom Scan (TessHeapScan) on public.jpr_1 (never executed)
                      Batches: 0
                      Pages: 0
-               ->  Custom Scan (TessHeapScan) on jpr_2 (actual rows=10000.00 loops=1)
+               ->  Custom Scan (TessHeapScan) on public.jpr_2 (actual rows=10000.00 loops=1)
                      Batch Size: 64
                      Batches: 177
                      Pages: 45
                      Deformed Datums: 10500
                      Restarted Datums: 0
-               ->  Custom Scan (TessHeapScan) on jpr_3 (never executed)
+               ->  Custom Scan (TessHeapScan) on public.jpr_3 (never executed)
                      Batches: 0
                      Pages: 0
-               ->  Custom Scan (TessHeapScan) on jpr_d jpr_4 (never executed)
+               ->  Custom Scan (TessHeapScan) on public.jpr_d jpr_4 (never executed)
                      Batches: 0
                      Pages: 0
-         ->  Custom Scan (TessHeapScan) on jkf (actual rows=502.00 loops=1)
+         ->  Custom Scan (TessHeapScan) on public.jkf (actual rows=502.00 loops=1)
                Batch Size: 64
                Batches: 10
                Pages: 4
@@ -2075,8 +2095,8 @@ AS 'SELECT CASE WHEN g <= 60000 THEN 7 ELSE g END, g FROM generate_series(1, 620
 ANALYZE jsb, jsp;
 SET work_mem = '512kB';
 SELECT join_explain($$SELECT count(*), sum(length(jsb.t)) FROM jsp JOIN jsb ON jsp.k = jsb.k$$);
-                                 join_explain                                  
--------------------------------------------------------------------------------
+                                     join_explain                                     
+--------------------------------------------------------------------------------------
  Custom Scan (TessAgg) (actual rows=1.00 loops=1)
    Input Batches: 2750
    Input Rows: 171130
@@ -2086,26 +2106,26 @@ SELECT join_explain($$SELECT count(*), sum(length(jsb.t)) FROM jsp JOIN jsb ON j
          Hash Cond: (jsp.k = jsb.k)
          Buckets: 1024
          Memory Usage: within hash_mem
+         Batches: 8
+         Disk Usage: 1753 kB
+         Rows Removed by Bloom Filter: 22727
          Builds: 1
          Build Rows: 37648
          Chunks: 81
-         Batches: 8
          Resident Partitions: 0
          Spilled Chunks: 511
-         Disk Usage: 1753 kB
          Tail Chunks Kept: 0
          Probe Rows: 100000
          Matches: 171130
          Compact Batches: 1602
          Bloom Filters: 1
-         Rows Removed by Bloom Filter: 22727
-         ->  Custom Scan (TessHeapScan) on jsp (actual rows=100000.00 loops=1)
+         ->  Custom Scan (TessHeapScan) on public.jsp (actual rows=100000.00 loops=1)
                Batch Size: 64
                Batches: 1597
                Pages: 532
                Deformed Datums: 100000
                Restarted Datums: 0
-         ->  Custom Scan (TessHeapScan) on jsb (actual rows=40000.00 loops=1)
+         ->  Custom Scan (TessHeapScan) on public.jsb (actual rows=40000.00 loops=1)
                Batch Size: 64
                Batches: 723
                Pages: 362
@@ -2126,8 +2146,8 @@ SELECT join_same($$SELECT jsp.s, jsb.t, jsb.n FROM jsp JOIN jsb ON jsp.k = jsb.k
 (1 row)
 
 SELECT join_explain($$SELECT count(*), count(jsb.n), sum(length(jsb.t)) FROM jsp LEFT JOIN jsb ON jsp.k = jsb.k$$);
-                                 join_explain                                  
--------------------------------------------------------------------------------
+                                     join_explain                                     
+--------------------------------------------------------------------------------------
  Custom Scan (TessAgg) (actual rows=1.00 loops=1)
    Input Batches: 4347
    Input Rows: 202947
@@ -2138,26 +2158,26 @@ SELECT join_explain($$SELECT count(*), count(jsb.n), sum(length(jsb.t)) FROM jsp
          Hash Cond: (jsp.k = jsb.k)
          Buckets: 1024
          Memory Usage: within hash_mem
+         Batches: 8
+         Disk Usage: 1831 kB
+         Rows Removed by Bloom Filter: 22727
          Builds: 1
          Build Rows: 37648
          Chunks: 89
-         Batches: 8
          Resident Partitions: 0
          Spilled Chunks: 572
-         Disk Usage: 1831 kB
          Tail Chunks Kept: 0
          Probe Rows: 100000
          Matches: 171130
          Compact Batches: 1602
          Bloom Filters: 1
-         Rows Removed by Bloom Filter: 22727
-         ->  Custom Scan (TessHeapScan) on jsp (actual rows=100000.00 loops=1)
+         ->  Custom Scan (TessHeapScan) on public.jsp (actual rows=100000.00 loops=1)
                Batch Size: 64
                Batches: 1597
                Pages: 532
                Deformed Datums: 100000
                Restarted Datums: 0
-         ->  Custom Scan (TessHeapScan) on jsb (actual rows=40000.00 loops=1)
+         ->  Custom Scan (TessHeapScan) on public.jsb (actual rows=40000.00 loops=1)
                Batch Size: 64
                Batches: 723
                Pages: 362
@@ -2196,8 +2216,8 @@ SELECT join_same($$SELECT count(*), sum(jsb.n) FROM jsp JOIN jsb ON jsp.k = jsb.
 (1 row)
 
 SELECT join_explain($$SELECT count(*), sum(jskew.w) FROM jsp JOIN jskew() AS jskew ON jsp.k = jskew.k$$);
-                                 join_explain                                  
--------------------------------------------------------------------------------
+                                     join_explain                                     
+--------------------------------------------------------------------------------------
  Custom Scan (TessAgg) (actual rows=1.00 loops=1)
    Input Batches: 3753
    Input Rows: 240000
@@ -2207,21 +2227,21 @@ SELECT join_explain($$SELECT count(*), sum(jskew.w) FROM jsp JOIN jskew() AS jsk
          Hash Cond: (jsp.k = jskew.k)
          Buckets: 1024
          Memory Usage: within hash_mem
+         Batches: 4
+         Disk Usage: 148 kB
+         Rows Removed by Bloom Filter: 90906
          Builds: 1
          Build Rows: 62000
          Chunks: 55
-         Batches: 4
          Resident Partitions: 0
          Spilled Chunks: 159
-         Disk Usage: 148 kB
          Tail Chunks Kept: 0
          Extra Passes: 3
          Probe Rows: 100000
          Matches: 240000
          Compact Batches: 3752
          Bloom Filters: 1
-         Rows Removed by Bloom Filter: 90906
-         ->  Custom Scan (TessHeapScan) on jsp (actual rows=100000.00 loops=1)
+         ->  Custom Scan (TessHeapScan) on public.jsp (actual rows=100000.00 loops=1)
                Batch Size: 64
                Batches: 1597
                Pages: 532
@@ -2231,8 +2251,9 @@ SELECT join_explain($$SELECT count(*), sum(jskew.w) FROM jsp JOIN jskew() AS jsk
                Batch Size: 64
                Rows Kept As: copies
                Batches: 969
-               ->  Function Scan on jskew (actual rows=62000.00 loops=1)
-(34 rows)
+               ->  Function Scan on public.jskew (actual rows=62000.00 loops=1)
+                     Function Call: jskew()
+(35 rows)
 
 SELECT join_same($$SELECT count(*), sum(jskew.w), sum(jsp.k) FROM jsp JOIN jskew() AS jskew ON jsp.k = jskew.k$$);
                    join_same                   
@@ -2276,8 +2297,8 @@ SELECT join_same($$SELECT count(*) FROM jsp JOIN jskew() AS jskew ON jsp.k = jsk
 CREATE FUNCTION jwide() RETURNS TABLE (k int, t text) LANGUAGE sql ROWS 10
 AS 'SELECT g % 50000, repeat(''x'', g % 30) || g FROM generate_series(1, 200000) AS g';
 SELECT join_explain($$SELECT count(*), sum(length(w.t)) FROM jsp JOIN jwide() AS w ON jsp.k = w.k$$);
-                                 join_explain                                  
--------------------------------------------------------------------------------
+                                     join_explain                                     
+--------------------------------------------------------------------------------------
  Custom Scan (TessAgg) (actual rows=1.00 loops=1)
    Input Batches: 5714
    Input Rows: 363640
@@ -2287,21 +2308,21 @@ SELECT join_explain($$SELECT count(*), sum(length(w.t)) FROM jsp JOIN jwide() AS
          Hash Cond: (jsp.k = w.k)
          Buckets: 1024
          Memory Usage: within hash_mem
+         Batches: 8
+         Disk Usage: 13277 kB
+         Rows Removed by Bloom Filter: 0
          Builds: 1
          Build Rows: 200000
          Chunks: 276
-         Batches: 8
          Resident Partitions: 0
          Spilled Chunks: 3182
-         Disk Usage: 13277 kB
          Tail Chunks Kept: 0
          Split Partitions: 4
          Probe Rows: 100000
          Matches: 363640
          Compact Batches: 18
          Bloom Filters: 1
-         Rows Removed by Bloom Filter: 0
-         ->  Custom Scan (TessHeapScan) on jsp (actual rows=100000.00 loops=1)
+         ->  Custom Scan (TessHeapScan) on public.jsp (actual rows=100000.00 loops=1)
                Batch Size: 64
                Batches: 1597
                Pages: 532
@@ -2311,8 +2332,9 @@ SELECT join_explain($$SELECT count(*), sum(length(w.t)) FROM jsp JOIN jwide() AS
                Batch Size: 64
                Rows Kept As: copies
                Batches: 3125
-               ->  Function Scan on jwide w (actual rows=200000.00 loops=1)
-(34 rows)
+               ->  Function Scan on public.jwide w (actual rows=200000.00 loops=1)
+                     Function Call: jwide()
+(35 rows)
 
 SELECT join_same($$SELECT count(*), sum(length(w.t)), sum(jsp.k) FROM jsp JOIN jwide() AS w ON jsp.k = w.k$$);
                    join_same                   
@@ -2355,8 +2377,8 @@ SELECT join_same($$SELECT v.x, (SELECT count(*) FROM jsp JOIN jsb ON jsp.k = jsb
 -- resident partitions', a partition's, each piece of one, and a level's,
 -- returns its records without a pair before it goes.
 SELECT join_explain($$SELECT count(*), count(jsp.s), sum(length(jsb.t)) FROM jsp RIGHT JOIN jsb ON jsp.k = jsb.k$$);
-                                 join_explain                                  
--------------------------------------------------------------------------------
+                                     join_explain                                     
+--------------------------------------------------------------------------------------
  Custom Scan (TessAgg) (actual rows=1.00 loops=1)
    Input Batches: 2728
    Input Rows: 173482
@@ -2367,26 +2389,26 @@ SELECT join_explain($$SELECT count(*), count(jsp.s), sum(length(jsb.t)) FROM jsp
          Hash Cond: (jsp.k = jsb.k)
          Buckets: 1024
          Memory Usage: within hash_mem
+         Batches: 8
+         Disk Usage: 2544 kB
+         Rows Removed by Bloom Filter: 22727
          Builds: 1
          Build Rows: 40000
          Chunks: 79
-         Batches: 8
          Resident Partitions: 0
          Spilled Chunks: 807
-         Disk Usage: 2544 kB
          Tail Chunks Kept: 0
          Probe Rows: 100000
          Matches: 171130
          Compact Batches: 2484
          Bloom Filters: 1
-         Rows Removed by Bloom Filter: 22727
-         ->  Custom Scan (TessHeapScan) on jsp (actual rows=100000.00 loops=1)
+         ->  Custom Scan (TessHeapScan) on public.jsp (actual rows=100000.00 loops=1)
                Batch Size: 64
                Batches: 1597
                Pages: 532
                Deformed Datums: 168183
                Restarted Datums: 0
-         ->  Custom Scan (TessHeapScan) on jsb (actual rows=40000.00 loops=1)
+         ->  Custom Scan (TessHeapScan) on public.jsb (actual rows=40000.00 loops=1)
                Batch Size: 64
                Batches: 723
                Pages: 362
@@ -2413,8 +2435,8 @@ SELECT join_same($$SELECT jsp.s, jsb.t FROM jsp FULL JOIN jsb ON jsp.k = jsb.k W
 (1 row)
 
 SELECT join_explain($$SELECT count(*), count(jsp.s), sum(jskew.w) FROM jsp RIGHT JOIN jskew() AS jskew ON jsp.k = jskew.k$$);
-                                 join_explain                                  
--------------------------------------------------------------------------------
+                                     join_explain                                     
+--------------------------------------------------------------------------------------
  Custom Scan (TessAgg) (actual rows=1.00 loops=1)
    Input Batches: 3786
    Input Rows: 242000
@@ -2425,21 +2447,21 @@ SELECT join_explain($$SELECT count(*), count(jsp.s), sum(jskew.w) FROM jsp RIGHT
          Hash Cond: (jsp.k = jskew.k)
          Buckets: 1024
          Memory Usage: within hash_mem
+         Batches: 4
+         Disk Usage: 148 kB
+         Rows Removed by Bloom Filter: 90906
          Builds: 1
          Build Rows: 62000
          Chunks: 55
-         Batches: 4
          Resident Partitions: 0
          Spilled Chunks: 160
-         Disk Usage: 148 kB
          Tail Chunks Kept: 0
          Extra Passes: 3
          Probe Rows: 100000
          Matches: 240000
          Compact Batches: 3752
          Bloom Filters: 1
-         Rows Removed by Bloom Filter: 90906
-         ->  Custom Scan (TessHeapScan) on jsp (actual rows=100000.00 loops=1)
+         ->  Custom Scan (TessHeapScan) on public.jsp (actual rows=100000.00 loops=1)
                Batch Size: 64
                Batches: 1597
                Pages: 532
@@ -2449,8 +2471,9 @@ SELECT join_explain($$SELECT count(*), count(jsp.s), sum(jskew.w) FROM jsp RIGHT
                Batch Size: 64
                Rows Kept As: copies
                Batches: 969
-               ->  Function Scan on jskew (actual rows=62000.00 loops=1)
-(35 rows)
+               ->  Function Scan on public.jskew (actual rows=62000.00 loops=1)
+                     Function Call: jskew()
+(36 rows)
 
 SELECT join_same($$SELECT count(*), count(jsp.s), sum(jskew.w) FROM jsp RIGHT JOIN jskew() AS jskew ON jsp.k = jskew.k$$);
                    join_same                   
@@ -2465,8 +2488,8 @@ SELECT join_same($$SELECT count(*), count(jsp.s), count(jskew.w), sum(jskew.w) F
 (1 row)
 
 SELECT join_explain($$SELECT count(*), count(jsp.s), sum(length(w.t)) FROM jsp RIGHT JOIN jwide() AS w ON jsp.k = w.k$$);
-                                 join_explain                                  
--------------------------------------------------------------------------------
+                                     join_explain                                     
+--------------------------------------------------------------------------------------
  Custom Scan (TessAgg) (actual rows=1.00 loops=1)
    Input Batches: 7589
    Input Rows: 483640
@@ -2477,21 +2500,21 @@ SELECT join_explain($$SELECT count(*), count(jsp.s), sum(length(w.t)) FROM jsp R
          Hash Cond: (jsp.k = w.k)
          Buckets: 1024
          Memory Usage: within hash_mem
+         Batches: 8
+         Disk Usage: 15091 kB
+         Rows Removed by Bloom Filter: 0
          Builds: 1
          Build Rows: 200000
          Chunks: 275
-         Batches: 8
          Resident Partitions: 0
          Spilled Chunks: 3740
-         Disk Usage: 15091 kB
          Tail Chunks Kept: 0
          Split Partitions: 4
          Probe Rows: 100000
          Matches: 363640
          Compact Batches: 4171
          Bloom Filters: 1
-         Rows Removed by Bloom Filter: 0
-         ->  Custom Scan (TessHeapScan) on jsp (actual rows=100000.00 loops=1)
+         ->  Custom Scan (TessHeapScan) on public.jsp (actual rows=100000.00 loops=1)
                Batch Size: 64
                Batches: 1597
                Pages: 532
@@ -2501,8 +2524,9 @@ SELECT join_explain($$SELECT count(*), count(jsp.s), sum(length(w.t)) FROM jsp R
                Batch Size: 64
                Rows Kept As: copies
                Batches: 3125
-               ->  Function Scan on jwide w (actual rows=200000.00 loops=1)
-(35 rows)
+               ->  Function Scan on public.jwide w (actual rows=200000.00 loops=1)
+                     Function Call: jwide()
+(36 rows)
 
 SELECT join_same($$SELECT count(*), count(jsp.s), sum(length(w.t)) FROM jsp RIGHT JOIN jwide() AS w ON jsp.k = w.k$$);
                    join_same                   
@@ -2721,7 +2745,7 @@ LANGUAGE plpgsql AS $$
 DECLARE
     plan jsonb;
 BEGIN
-    EXECUTE format('EXPLAIN (ANALYZE, FORMAT JSON, TIMING OFF, SUMMARY OFF, BUFFERS OFF, COSTS OFF) %s', query)
+    EXECUTE format('EXPLAIN (ANALYZE, VERBOSE, FORMAT JSON, TIMING OFF, SUMMARY OFF, BUFFERS OFF, COSTS OFF) %s', query)
         INTO plan;
     RETURN jsonb_path_query_first(plan,
         format('$[0]."Plan".** ? (@."Custom Plan Provider" == "TessHashJoin").%I', name)::jsonpath)::text;
@@ -3748,7 +3772,7 @@ DROP TABLE jpr, jpl, jph, jp2, jkf, jkm, jk8, jkn, jkl, jk2, jk19, jkw, jkx, jkw
 DROP FUNCTION jskew();
 DROP FUNCTION jwide();
 DROP FUNCTION join_property(text, text);
-DROP FUNCTION join_explain(text);
+DROP FUNCTION join_explain(text, boolean);
 DROP FUNCTION join_many();
 DROP FUNCTION join_same(text, boolean);
 DROP EXTENSION tessera;

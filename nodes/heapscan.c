@@ -1252,6 +1252,15 @@ heap_scan_explain(CustomScanState *css, List *ancestors, ExplainState *es)
 
 	heap_scan_counters(state, own);
 	totals = tess_shared_stats_totals_or(state->stats, own);
+	/* As the core's bitmap heap scan shows them. */
+	if (es->analyze && state->bitmap_plan != NULL)
+	{
+		ExplainPropertyInteger("Exact Heap Blocks", NULL, totals[HEAP_SCAN_EXACT], es);
+		ExplainPropertyInteger("Lossy Heap Blocks", NULL, totals[HEAP_SCAN_LOSSY], es);
+	}
+	/* The batches and their columns: VERBOSE only. */
+	if (!es->verbose)
+		return;
 	/* The parent's request, and so the size, is known once executed. */
 	if (totals[HEAP_SCAN_RAN] > 0)
 		ExplainPropertyInteger("Batch Size", NULL,
@@ -1261,11 +1270,6 @@ heap_scan_explain(CustomScanState *css, List *ancestors, ExplainState *es)
 	ExplainPropertyInteger("Batches", NULL, totals[HEAP_SCAN_BATCHES], es);
 	if (state->index_plan == NULL && state->ios_plan == NULL)
 		ExplainPropertyInteger("Pages", NULL, totals[HEAP_SCAN_PAGES], es);
-	if (state->bitmap_plan != NULL)
-	{
-		ExplainPropertyInteger("Exact Heap Blocks", NULL, totals[HEAP_SCAN_EXACT], es);
-		ExplainPropertyInteger("Lossy Heap Blocks", NULL, totals[HEAP_SCAN_LOSSY], es);
-	}
 	if (totals[HEAP_SCAN_RAN] > 0 && state->ios_plan == NULL)
 	{
 		ExplainPropertyInteger("Deformed Datums", NULL, totals[HEAP_SCAN_DEFORMED], es);

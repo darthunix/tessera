@@ -29,8 +29,10 @@ LANGUAGE plpgsql AS $$
 DECLARE
     line text;
 BEGIN
-    FOR line IN EXECUTE 'EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) ' || query
+    FOR line IN EXECUTE 'EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) ' || query
     LOOP
+        -- VERBOSE adds the output lists and each worker's rows: not checked here.
+        CONTINUE WHEN line ~ '^\s*(Output|Worker \d+):';
         RETURN NEXT regexp_replace(line, 'Index Searches: \d+', 'Index Searches: N');
     END LOOP;
 END

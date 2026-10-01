@@ -248,57 +248,63 @@ FROM agg_t AS o WHERE o.a < 5 ORDER BY 1;
 (4 rows)
 
 -- The argument's column is deformed for the surviving rows only.
-EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+EXPLAIN (VERBOSE, ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT sum(b) FROM agg_t WHERE a > 290;
-                                  QUERY PLAN                                  
-------------------------------------------------------------------------------
+                                     QUERY PLAN                                      
+-------------------------------------------------------------------------------------
  Custom Scan (TessAgg) (actual rows=1.00 loops=1)
+   Output: (sum(b))
    Input Batches: 1
    Input Rows: 9
    Kernel Calls: 1
    Computed Datums: 9
-   ->  Custom Scan (TessFilter) on agg_t (actual rows=9.00 loops=1)
-         Batch Filter: (a > 290)
+   ->  Custom Scan (TessFilter) on public.agg_t (actual rows=9.00 loops=1)
+         Output: b
+         Batch Filter: (agg_t.a > 290)
          Rows Removed by Batch Filter: 291
          Input Batches: 5
          Input Rows: 300
          Output Rows: 9
-         ->  Custom Scan (TessHeapScan) on agg_t (actual rows=300.00 loops=1)
+         ->  Custom Scan (TessHeapScan) on public.agg_t (actual rows=300.00 loops=1)
+               Output: b, a
                Batch Size: 64
                Batches: 5
                Pages: 2
                Deformed Datums: 309
                Restarted Datums: 0
-(17 rows)
+(20 rows)
 
 -- An error in the argument is the chain's.
 SELECT sum(a + 2147483647) FROM agg_t;
 ERROR:  integer out of range
 -- Any int4 expression is an argument: a chain over one column as before,
 -- anything else row by row, both through the projection provider.
-EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+EXPLAIN (VERBOSE, ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT sum(a + b), max(a * b), min(CASE WHEN a > 295 THEN b ELSE a END), sum(a + 1)
 FROM agg_t WHERE a > 290;
-                                  QUERY PLAN                                  
-------------------------------------------------------------------------------
+                                               QUERY PLAN                                               
+--------------------------------------------------------------------------------------------------------
  Custom Scan (TessAgg) (actual rows=1.00 loops=1)
+   Output: (sum((a + b))), (max((a * b))), (min(CASE WHEN (a > 295) THEN b ELSE a END)), (sum((a + 1)))
    Input Batches: 1
    Input Rows: 9
    Kernel Calls: 4
    Computed Datums: 36
-   ->  Custom Scan (TessFilter) on agg_t (actual rows=9.00 loops=1)
-         Batch Filter: (a > 290)
+   ->  Custom Scan (TessFilter) on public.agg_t (actual rows=9.00 loops=1)
+         Output: a, b
+         Batch Filter: (agg_t.a > 290)
          Rows Removed by Batch Filter: 291
          Input Batches: 5
          Input Rows: 300
          Output Rows: 9
-         ->  Custom Scan (TessHeapScan) on agg_t (actual rows=300.00 loops=1)
+         ->  Custom Scan (TessHeapScan) on public.agg_t (actual rows=300.00 loops=1)
+               Output: a, b
                Batch Size: 64
                Batches: 5
                Pages: 2
                Deformed Datums: 309
                Restarted Datums: 0
-(17 rows)
+(20 rows)
 
 SELECT agg_same($$SELECT sum(a + b), max(a * b), min(CASE WHEN a > 295 THEN b ELSE a END), sum(a + 1), count(length(c)) FROM agg_t WHERE a > 290$$);
          agg_same         
@@ -356,18 +362,23 @@ SELECT agg_same($$SELECT o.b, (SELECT s FROM (SELECT sum(i.a + i.b * o.b) AS s F
 
 -- Two computed columns of the subquery's filter, added by the node above
 -- the forwarded batches of its limit.
-EXPLAIN (COSTS OFF)
+EXPLAIN (VERBOSE, COSTS OFF)
 SELECT sum(x + y) FROM (SELECT a + 1 AS x, b * 2 AS y FROM agg_t WHERE a > 100 LIMIT 50) AS s;
-                         QUERY PLAN                          
--------------------------------------------------------------
+                             QUERY PLAN                             
+--------------------------------------------------------------------
  Custom Scan (TessAgg)
+   Output: (sum((s.x + s.y)))
    ->  Custom Scan (TessPack)
+         Output: s.x, s.y
          Rows Kept As: forwarded batches
          ->  Custom Scan (TessLimit)
-               ->  Custom Scan (TessFilter) on agg_t
+               Output: ((agg_t.a + 1)), ((agg_t.b * 2))
+               ->  Custom Scan (TessFilter) on public.agg_t
+                     Output: (agg_t.a + 1), (agg_t.b * 2)
                      Batch Filter: (agg_t.a > 100)
-                     ->  Custom Scan (TessHeapScan) on agg_t
-(7 rows)
+                     ->  Custom Scan (TessHeapScan) on public.agg_t
+                           Output: agg_t.a, agg_t.b
+(12 rows)
 
 SELECT agg_same($$SELECT sum(x + y), max(x) FROM (SELECT a + 1 AS x, b * 2 AS y FROM agg_t WHERE a > 100 LIMIT 50) AS s$$);
     agg_same    
@@ -499,27 +510,29 @@ SELECT agg_same($$SELECT count(*) FROM agg_wide WHERE a % 3 = 0$$);
  {(333)}
 (1 row)
 
-EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+EXPLAIN (VERBOSE, ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT count(*) FROM agg_wide WHERE a % 3 = 0;
-                                    QUERY PLAN                                    
-----------------------------------------------------------------------------------
+                                       QUERY PLAN                                        
+-----------------------------------------------------------------------------------------
  Custom Scan (TessAgg) (actual rows=1.00 loops=1)
+   Output: (count(*))
    Input Batches: 67
    Input Rows: 333
    Kernel Calls: 67
-   ->  Custom Scan (TessFilter) on agg_wide (actual rows=333.00 loops=1)
-         Batch Filter: ((a % 3) = 0)
+   ->  Custom Scan (TessFilter) on public.agg_wide (actual rows=333.00 loops=1)
+         Batch Filter: ((agg_wide.a % 3) = 0)
          Rows Removed by Batch Filter: 667
          Input Batches: 67
          Input Rows: 1000
          Output Rows: 333
-         ->  Custom Scan (TessHeapScan) on agg_wide (actual rows=1000.00 loops=1)
+         ->  Custom Scan (TessHeapScan) on public.agg_wide (actual rows=1000.00 loops=1)
+               Output: a
                Batch Size: 64
                Batches: 67
                Pages: 67
                Deformed Datums: 1000
                Restarted Datums: 0
-(16 rows)
+(18 rows)
 
 -- Few survivors per batch are gathered into one call per 64: 333 rows over
 -- 67 batches make six calls of the sum, the last over the 13 left.
@@ -529,28 +542,31 @@ SELECT agg_same($$SELECT sum(a), min(a), max(a), count(a) FROM agg_wide WHERE a 
  {"(166833,3,999,333)"}
 (1 row)
 
-EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+EXPLAIN (VERBOSE, ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT sum(a) FROM agg_wide WHERE a % 3 = 0;
-                                    QUERY PLAN                                    
-----------------------------------------------------------------------------------
+                                       QUERY PLAN                                        
+-----------------------------------------------------------------------------------------
  Custom Scan (TessAgg) (actual rows=1.00 loops=1)
+   Output: (sum(a))
    Input Batches: 67
    Input Rows: 333
    Kernel Calls: 6
    Computed Datums: 333
-   ->  Custom Scan (TessFilter) on agg_wide (actual rows=333.00 loops=1)
-         Batch Filter: ((a % 3) = 0)
+   ->  Custom Scan (TessFilter) on public.agg_wide (actual rows=333.00 loops=1)
+         Output: a
+         Batch Filter: ((agg_wide.a % 3) = 0)
          Rows Removed by Batch Filter: 667
          Input Batches: 67
          Input Rows: 1000
          Output Rows: 333
-         ->  Custom Scan (TessHeapScan) on agg_wide (actual rows=1000.00 loops=1)
+         ->  Custom Scan (TessHeapScan) on public.agg_wide (actual rows=1000.00 loops=1)
+               Output: a
                Batch Size: 64
                Batches: 67
                Pages: 67
                Deformed Datums: 1000
                Restarted Datums: 0
-(17 rows)
+(20 rows)
 
 DROP TABLE agg_wide;
 -- A join below: the hash join publishes batches, no pack between.
@@ -650,7 +666,9 @@ DECLARE
     limit_kb bigint := (SELECT setting::bigint FROM pg_settings WHERE name = 'work_mem') *
                        current_setting('hash_mem_multiplier')::float8;
 BEGIN
-    FOR line IN EXECUTE 'EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) ' || query LOOP
+    FOR line IN EXECUTE 'EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) ' || query LOOP
+        -- VERBOSE adds the output lists and each worker's rows: not checked here.
+        CONTINUE WHEN line ~ '^\s*(Output|Worker \d+):';
         -- Overrun repeats what the memory line says.
         CONTINUE WHEN line ~ 'Overrun: \d+ kB';
         IF line ~ 'Memory Usage: \d+ kB' THEN
@@ -670,24 +688,24 @@ EXPLAIN (COSTS OFF) SELECT b, count(*), sum(a), min(a), max(a) FROM agg_t GROUP 
 (3 rows)
 
 SELECT agg_explain($$SELECT b, count(*), sum(a) FROM agg_t WHERE a > 100 GROUP BY b$$);
-                                 agg_explain                                  
-------------------------------------------------------------------------------
+                                     agg_explain                                     
+-------------------------------------------------------------------------------------
  Custom Scan (TessAgg) (actual rows=10.00 loops=1)
-   Group Key: b
+   Group Key: agg_t.b
+   Memory Usage: within hash_mem
    Input Batches: 4
    Input Rows: 172
    Kernel Calls: 8
    Computed Datums: 344
    Groups: 10
    Table Grows: 0
-   Memory Usage: within hash_mem
-   ->  Custom Scan (TessFilter) on agg_t (actual rows=172.00 loops=1)
-         Batch Filter: (a > 100)
+   ->  Custom Scan (TessFilter) on public.agg_t (actual rows=172.00 loops=1)
+         Batch Filter: (agg_t.a > 100)
          Rows Removed by Batch Filter: 128
          Input Batches: 5
          Input Rows: 300
          Output Rows: 172
-         ->  Custom Scan (TessHeapScan) on agg_t (actual rows=300.00 loops=1)
+         ->  Custom Scan (TessHeapScan) on public.agg_t (actual rows=300.00 loops=1)
                Batch Size: 64
                Batches: 5
                Pages: 2
@@ -788,18 +806,18 @@ CREATE TABLE agg_many (k int, v int);
 ANALYZE agg_many;
 INSERT INTO agg_many SELECT g, g % 7 FROM generate_series(1, 200000) AS g;
 SELECT agg_explain($$SELECT k % 100000, sum(v) FROM agg_many GROUP BY k % 100000$$);
-                                 agg_explain                                  
-------------------------------------------------------------------------------
+                                     agg_explain                                     
+-------------------------------------------------------------------------------------
  Custom Scan (TessAgg) (actual rows=100000.00 loops=1)
-   Group Key: (k % 100000)
+   Group Key: (agg_many.k % 100000)
+   Memory Usage: within hash_mem
    Input Batches: 3540
    Input Rows: 200000
    Kernel Calls: 3540
    Computed Datums: 400000
    Groups: 100000
    Table Grows: 8
-   Memory Usage: within hash_mem
-   ->  Custom Scan (TessHeapScan) on agg_many (actual rows=200000.00 loops=1)
+   ->  Custom Scan (TessHeapScan) on public.agg_many (actual rows=200000.00 loops=1)
          Batch Size: 64
          Batches: 3540
          Pages: 885
@@ -840,22 +858,22 @@ SET work_mem = '1MB';
 SELECT regexp_replace(line, '(Table Grows|Batches|Evictions|Spilled Chunks|Disk Usage): \d+', '\1: N')
 FROM agg_explain($$SELECT k, count(*), sum(v) FROM agg_spill GROUP BY k$$) AS line
 WHERE line !~ 'Split Partitions';
-                                regexp_replace                                 
--------------------------------------------------------------------------------
+                                    regexp_replace                                    
+--------------------------------------------------------------------------------------
  Custom Scan (TessAgg) (actual rows=200001.00 loops=1)
-   Group Key: k
+   Group Key: agg_spill.k
+   Memory Usage: within hash_mem
+   Batches: N
+   Disk Usage: N kB
    Input Batches: N
    Input Rows: 600000
    Kernel Calls: 22642
    Computed Datums: 1200000
    Groups: 200001
    Table Grows: N
-   Memory Usage: within hash_mem
-   Batches: N
    Evictions: N
    Spilled Chunks: N
-   Disk Usage: N kB
-   ->  Custom Scan (TessHeapScan) on agg_spill (actual rows=600000.00 loops=1)
+   ->  Custom Scan (TessHeapScan) on public.agg_spill (actual rows=600000.00 loops=1)
          Batch Size: 64
          Batches: N
          Pages: 3774
@@ -1021,16 +1039,20 @@ SELECT agg_same($$SELECT count(*), sum(b), sum(r) FROM (SELECT DISTINCT b, a % 3
  {"(40,180,30)"}
 (1 row)
 
-EXPLAIN (COSTS OFF) SELECT count(*), sum(b), sum(r) FROM (SELECT DISTINCT b, a % 3 AS r FROM agg_t) AS s;
-                      QUERY PLAN                       
--------------------------------------------------------
+EXPLAIN (VERBOSE, COSTS OFF) SELECT count(*), sum(b), sum(r) FROM (SELECT DISTINCT b, a % 3 AS r FROM agg_t) AS s;
+                          QUERY PLAN                          
+--------------------------------------------------------------
  Custom Scan (TessAgg)
+   Output: (count(*)), (sum(s.b)), (sum(s.r))
    ->  Custom Scan (TessPack)
+         Output: s.b, s.r
          Rows Kept As: forwarded batches
          ->  Custom Scan (TessAgg)
+               Output: agg_t.b, ((agg_t.a % 3))
                Group Key: agg_t.b, (agg_t.a % 3)
-               ->  Custom Scan (TessHeapScan) on agg_t
-(6 rows)
+               ->  Custom Scan (TessHeapScan) on public.agg_t
+                     Output: agg_t.b, (agg_t.a % 3)
+(10 rows)
 
 SELECT agg_same($$SELECT count(*), sum(x) FROM (SELECT DISTINCT a::bigint * 1000000000 AS x FROM agg_t WHERE a > 250) AS s$$);
         agg_same         
@@ -1588,7 +1610,7 @@ DECLARE
     parts int := 0;
 BEGIN
     -- TessAgg's partitions: its Batches line comes right before Evictions.
-    FOR line IN EXECUTE 'EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) ' || query LOOP
+    FOR line IN EXECUTE 'EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) ' || query LOOP
         rows := rows OR line ~ 'Spilled Rows: [1-9]';
         IF line ~ '^ *Batches: \d+$' THEN
             last := substring(line FROM 'Batches: (\d+)')::int;

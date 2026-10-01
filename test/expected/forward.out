@@ -29,23 +29,27 @@ FROM generate_series(1, 100) AS i;
 -- scan between the aggregate and the limit. count(*) needs none of its
 -- outputs, so the scan is not trivial and stays in the plan; the pack
 -- forwards the batches of the limit under it, and the scan never runs.
-EXPLAIN (COSTS OFF)
+EXPLAIN (VERBOSE, COSTS OFF)
 SELECT count(*) FROM (SELECT a FROM forward_t LIMIT 70) AS s;
-                           QUERY PLAN                            
------------------------------------------------------------------
+                               QUERY PLAN                               
+------------------------------------------------------------------------
  Custom Scan (TessAgg)
+   Output: (count(*))
    ->  Custom Scan (TessPack)
          Rows Kept As: forwarded batches
          ->  Subquery Scan on s
                ->  Custom Scan (TessLimit)
-                     ->  Custom Scan (TessHeapScan) on forward_t
-(6 rows)
+                     Output: NULL::integer
+                     ->  Custom Scan (TessHeapScan) on public.forward_t
+                           Output: NULL::integer
+(9 rows)
 
-EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+EXPLAIN (VERBOSE, ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT count(*) FROM (SELECT a FROM forward_t LIMIT 70) AS s;
-                                         QUERY PLAN                                          
----------------------------------------------------------------------------------------------
+                                             QUERY PLAN                                             
+----------------------------------------------------------------------------------------------------
  Custom Scan (TessAgg) (actual rows=1.00 loops=1)
+   Output: (count(*))
    Input Batches: 2
    Input Rows: 70
    Kernel Calls: 2
@@ -54,17 +58,19 @@ SELECT count(*) FROM (SELECT a FROM forward_t LIMIT 70) AS s;
          Batches: 2
          ->  Subquery Scan on s (never executed)
                ->  Custom Scan (TessLimit) (actual rows=70.00 loops=1)
+                     Output: NULL::integer
                      Input Batches: 2
                      Input Rows: 70
                      Output Rows: 70
-                     ->  Custom Scan (TessHeapScan) on forward_t (actual rows=70.00 loops=1)
+                     ->  Custom Scan (TessHeapScan) on public.forward_t (actual rows=70.00 loops=1)
+                           Output: NULL::integer
                            Batch Size: 64
                            Batches: 2
                            Pages: 1
                            Deformed Datums: 0
                            Restarted Datums: 0
                            Computed Datums: 0
-(19 rows)
+(22 rows)
 
 SELECT count(*) FROM (SELECT a FROM forward_t LIMIT 70) AS s;
  count 
@@ -74,16 +80,20 @@ SELECT count(*) FROM (SELECT a FROM forward_t LIMIT 70) AS s;
 
 -- Columns through the map: the subquery scan is trivial here, so the
 -- planner drops it and the pack stands above the limit itself.
-EXPLAIN (COSTS OFF)
+EXPLAIN (VERBOSE, COSTS OFF)
 SELECT sum(a), count(a), max(a) FROM (SELECT a FROM forward_t LIMIT 70) AS s;
-                        QUERY PLAN                         
------------------------------------------------------------
+                            QUERY PLAN                            
+------------------------------------------------------------------
  Custom Scan (TessAgg)
+   Output: (sum(s.a)), (count(s.a)), (max(s.a))
    ->  Custom Scan (TessPack)
+         Output: s.a
          Rows Kept As: forwarded batches
          ->  Custom Scan (TessLimit)
-               ->  Custom Scan (TessHeapScan) on forward_t
-(5 rows)
+               Output: forward_t.a
+               ->  Custom Scan (TessHeapScan) on public.forward_t
+                     Output: forward_t.a
+(9 rows)
 
 SELECT sum(a), count(a), max(a) FROM (SELECT a FROM forward_t LIMIT 70) AS s;
  sum  | count | max 
@@ -93,17 +103,22 @@ SELECT sum(a), count(a), max(a) FROM (SELECT a FROM forward_t LIMIT 70) AS s;
 
 -- A target of the subquery that is not its first column, and only some
 -- of its columns used: the scan stays and the map follows the targets.
-EXPLAIN (COSTS OFF)
+EXPLAIN (VERBOSE, COSTS OFF)
 SELECT sum(a), max(a) FROM (SELECT b, a FROM forward_t OFFSET 95) AS s;
-                           QUERY PLAN                            
------------------------------------------------------------------
+                               QUERY PLAN                               
+------------------------------------------------------------------------
  Custom Scan (TessAgg)
+   Output: (sum(s.a)), (max(s.a))
    ->  Custom Scan (TessPack)
+         Output: s.a
          Rows Kept As: forwarded batches
          ->  Subquery Scan on s
+               Output: s.a
                ->  Custom Scan (TessLimit)
-                     ->  Custom Scan (TessHeapScan) on forward_t
-(6 rows)
+                     Output: NULL::text, forward_t.a
+                     ->  Custom Scan (TessHeapScan) on public.forward_t
+                           Output: NULL::text, forward_t.a
+(11 rows)
 
 SELECT sum(a), max(a) FROM (SELECT b, a FROM forward_t OFFSET 95) AS s;
  sum | max 
@@ -119,28 +134,32 @@ SELECT count(*), min(a) FROM (SELECT a FROM forward_t OFFSET 90) AS s;
 
 -- A limit above the subquery: the bound reaches the limit under it, and
 -- the rows are served to the client by the outer limit.
-EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+EXPLAIN (VERBOSE, ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT a FROM (SELECT a FROM forward_t OFFSET 90) AS s LIMIT 3;
-                                       QUERY PLAN                                       
-----------------------------------------------------------------------------------------
+                                          QUERY PLAN                                           
+-----------------------------------------------------------------------------------------------
  Custom Scan (TessLimit) (actual rows=3.00 loops=1)
+   Output: s.a
    Input Batches: 1
    Input Rows: 10
    Output Rows: 3
    ->  Custom Scan (TessPack) (actual rows=10.00 loops=1)
+         Output: s.a
          Rows Kept As: forwarded batches
          Batches: 1
          ->  Custom Scan (TessLimit) (actual rows=10.00 loops=1)
+               Output: forward_t.a
                Input Batches: 2
                Input Rows: 100
                Output Rows: 10
-               ->  Custom Scan (TessHeapScan) on forward_t (actual rows=100.00 loops=1)
+               ->  Custom Scan (TessHeapScan) on public.forward_t (actual rows=100.00 loops=1)
+                     Output: forward_t.a
                      Batch Size: 64
                      Batches: 2
                      Pages: 1
                      Deformed Datums: 3
                      Restarted Datums: 0
-(17 rows)
+(21 rows)
 
 SELECT a FROM (SELECT a FROM forward_t OFFSET 90) AS s LIMIT 3;
  a  
@@ -175,19 +194,23 @@ FROM generate_series(95, 99) AS g;
 
 -- A sort under the limit: a top-N TessSort under TessLimit, whose batches
 -- the pack above the subquery scan forwards.
-EXPLAIN (COSTS OFF)
+EXPLAIN (VERBOSE, COSTS OFF)
 SELECT count(*) FROM (SELECT a FROM forward_t ORDER BY a DESC LIMIT 5) AS s;
-                              QUERY PLAN                               
------------------------------------------------------------------------
+                                  QUERY PLAN                                  
+------------------------------------------------------------------------------
  Custom Scan (TessAgg)
+   Output: (count(*))
    ->  Custom Scan (TessPack)
          Rows Kept As: forwarded batches
          ->  Subquery Scan on s
                ->  Custom Scan (TessLimit)
+                     Output: forward_t.a
                      ->  Custom Scan (TessSort)
+                           Output: forward_t.a
                            Sort Key: forward_t.a DESC
-                           ->  Custom Scan (TessHeapScan) on forward_t
-(8 rows)
+                           ->  Custom Scan (TessHeapScan) on public.forward_t
+                                 Output: forward_t.a
+(12 rows)
 
 SELECT count(*), min(a) FROM (SELECT a FROM forward_t ORDER BY a DESC LIMIT 5) AS s;
  count | min 

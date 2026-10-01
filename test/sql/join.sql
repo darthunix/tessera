@@ -29,15 +29,19 @@ BEGIN
 END $$;
 
 -- EXPLAIN ANALYZE with the memory as whether it stayed within hash_mem:
--- its bytes depend on the allocator, and an assert build's differ.
-CREATE FUNCTION join_explain(query text) RETURNS SETOF text
+-- its bytes depend on the allocator, and an assert build's differ. With
+-- VERBOSE, unless asked otherwise: the nodes' counters show only with it.
+CREATE FUNCTION join_explain(query text, verbosely boolean DEFAULT true) RETURNS SETOF text
 LANGUAGE plpgsql AS $$
 DECLARE
     line text;
     limit_kb bigint := (SELECT setting::bigint FROM pg_settings WHERE name = 'work_mem') *
                        current_setting('hash_mem_multiplier')::float8;
 BEGIN
-    FOR line IN EXECUTE 'EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) ' || query LOOP
+    FOR line IN EXECUTE format('EXPLAIN (ANALYZE, VERBOSE %s, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) %s',
+                               CASE WHEN verbosely THEN 'on' ELSE 'off' END, query) LOOP
+        -- VERBOSE adds the output lists and each worker's rows: not checked here.
+        CONTINUE WHEN line ~ '^\s*(Output|Worker \d+):';
         -- Overrun repeats what the memory line says.
         CONTINUE WHEN line ~ 'Overrun: \d+ kB';
         IF line ~ 'Memory Usage: \d+ kB' THEN
@@ -105,6 +109,10 @@ SELECT join_same($$SELECT a.w, b.w FROM jdup a JOIN jdup b ON a.k = b.k$$);
 -- (compact mode): outer columns by value, NULLs among them, and text,
 -- whose values are copied.
 SELECT join_explain($$SELECT count(jf.m), sum(jf.m), sum(jdup.w) FROM jf JOIN jdup ON jf.fk = jdup.k$$);
+-- Without VERBOSE each node shows what the core's node in its place
+-- shows: the join its buckets and memory, the scans and the aggregate
+-- nothing past their rows.
+SELECT join_explain($$SELECT count(jf.m), sum(jf.m), sum(jdup.w) FROM jf JOIN jdup ON jf.fk = jdup.k$$, false);
 SELECT join_same($$SELECT count(jf.m), sum(jf.m), sum(jdup.w) FROM jf JOIN jdup ON jf.fk = jdup.k$$);
 SELECT join_explain($$SELECT count(jf.note), max(jdup.w) FROM jf JOIN jdup ON jf.fk = jdup.k$$);
 SELECT join_same($$SELECT count(jf.note), max(jdup.w) FROM jf JOIN jdup ON jf.fk = jdup.k$$);
@@ -335,7 +343,7 @@ LANGUAGE plpgsql AS $$
 DECLARE
     plan jsonb;
 BEGIN
-    EXECUTE format('EXPLAIN (ANALYZE, FORMAT JSON, TIMING OFF, SUMMARY OFF, BUFFERS OFF, COSTS OFF) %s', query)
+    EXECUTE format('EXPLAIN (ANALYZE, VERBOSE, FORMAT JSON, TIMING OFF, SUMMARY OFF, BUFFERS OFF, COSTS OFF) %s', query)
         INTO plan;
     RETURN jsonb_path_query_first(plan,
         '$[0]."Plan".** ? (@."Custom Plan Provider" == "TessAppend")."Subplans Removed by Join"')::text;
@@ -346,7 +354,7 @@ LANGUAGE plpgsql AS $$
 DECLARE
     plan jsonb;
 BEGIN
-    EXECUTE format('EXPLAIN (ANALYZE, FORMAT JSON, TIMING OFF, SUMMARY OFF, BUFFERS OFF, COSTS OFF) %s', query)
+    EXECUTE format('EXPLAIN (ANALYZE, VERBOSE, FORMAT JSON, TIMING OFF, SUMMARY OFF, BUFFERS OFF, COSTS OFF) %s', query)
         INTO plan;
     RETURN (SELECT count(DISTINCT node ->> 'Relation Name')
             FROM jsonb_path_query(plan, 'strict $[0]."Plan".**') AS node
@@ -586,7 +594,7 @@ LANGUAGE plpgsql AS $$
 DECLARE
     plan jsonb;
 BEGIN
-    EXECUTE format('EXPLAIN (ANALYZE, FORMAT JSON, TIMING OFF, SUMMARY OFF, BUFFERS OFF, COSTS OFF) %s', query)
+    EXECUTE format('EXPLAIN (ANALYZE, VERBOSE, FORMAT JSON, TIMING OFF, SUMMARY OFF, BUFFERS OFF, COSTS OFF) %s', query)
         INTO plan;
     RETURN jsonb_path_query_first(plan,
         format('$[0]."Plan".** ? (@."Custom Plan Provider" == "TessHashJoin").%I', name)::jsonpath)::text;
@@ -894,7 +902,7 @@ DROP TABLE jpr, jpl, jph, jp2, jkf, jkm, jk8, jkn, jkl, jk2, jk19, jkw, jkx, jkw
 DROP FUNCTION jskew();
 DROP FUNCTION jwide();
 DROP FUNCTION join_property(text, text);
-DROP FUNCTION join_explain(text);
+DROP FUNCTION join_explain(text, boolean);
 DROP FUNCTION join_many();
 DROP FUNCTION join_same(text, boolean);
 DROP EXTENSION tessera;

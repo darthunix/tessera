@@ -767,6 +767,8 @@ append_explain(CustomScanState *css, List *ancestors, ExplainState *es)
 		return;
 	if (state->join_values != NULL)
 		ExplainPropertyInteger("Subplans Removed by Join", NULL, state->join_removed, es);
+	if (!es->verbose)
+		return;
 	totals = tess_shared_stats_totals_or(state->stats, &own);
 	ExplainPropertyInteger("Batches", NULL, totals[0], es);
 }

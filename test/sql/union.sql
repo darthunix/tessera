@@ -38,10 +38,10 @@ SET max_parallel_workers_per_gather = 0;
 -- An aggregate over UNION ALL of two filtered scans: TessAppend reads the
 -- branches in turn and gives the aggregate their batches, each branch's
 -- through the pack that forwards the batches of its subquery.
-EXPLAIN (COSTS OFF)
+EXPLAIN (VERBOSE, COSTS OFF)
 SELECT count(*), sum(a) FROM (SELECT a FROM union_a WHERE a > 100
                               UNION ALL SELECT a FROM union_b WHERE a < 600) AS s;
-EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+EXPLAIN (VERBOSE, ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT count(*), sum(a) FROM (SELECT a FROM union_a WHERE a > 100
                               UNION ALL SELECT a FROM union_b WHERE a < 600) AS s;
 SELECT union_same($$SELECT count(*), sum(a), count(a) FROM (SELECT a FROM union_a WHERE a > 100
@@ -54,7 +54,7 @@ SELECT union_same($$SELECT sum(y), min(x) FROM (SELECT b AS y, a AS x FROM union
 
 -- Five branches: an empty table, a branch without rows, a constant
 -- target, a branch that is a plain scan.
-EXPLAIN (COSTS OFF)
+EXPLAIN (VERBOSE, COSTS OFF)
 SELECT count(*), sum(a), sum(k) FROM (
     SELECT a, 1 AS k FROM union_a WHERE a > 900
     UNION ALL SELECT a, 2 FROM union_empty
@@ -81,7 +81,7 @@ SELECT count(*), sum(x) FROM (SELECT a AS x FROM union_a WHERE a > 100
 SELECT union_same($$SELECT count(*), sum(x) FROM (SELECT a AS x FROM union_a WHERE a > 100
                    UNION ALL SELECT b FROM union_b WHERE b > 100) AS s$$);
 -- Clauses that run row by row: TessFilter in each branch, forwarded.
-EXPLAIN (COSTS OFF)
+EXPLAIN (VERBOSE, COSTS OFF)
 SELECT count(*) FROM (SELECT a FROM union_a WHERE upper(t) LIKE 'A1%'
                       UNION ALL SELECT a FROM union_b WHERE upper(t) LIKE 'B1%') AS s;
 
@@ -91,7 +91,7 @@ SELECT a FROM union_a WHERE a > 995 UNION ALL SELECT a FROM union_b WHERE a > 69
 SELECT union_same($$SELECT a, t FROM union_a WHERE a > 995 UNION ALL SELECT a, t FROM union_b WHERE a > 695$$);
 
 -- A hash join whose outer side is UNION ALL, text and NULL keys included.
-EXPLAIN (COSTS OFF)
+EXPLAIN (VERBOSE, COSTS OFF)
 SELECT count(*), sum(s.a), count(s.t) FROM (SELECT a, t FROM union_a WHERE a > 300
                                              UNION ALL SELECT a, t FROM union_b) AS s
 JOIN union_b AS d ON d.a = s.a;
@@ -102,7 +102,7 @@ SELECT union_same($$SELECT a, t FROM (SELECT a, t FROM union_a WHERE a > 900
                    UNION ALL SELECT a, t FROM union_b WHERE a > 600) AS s ORDER BY a, t$$);
 
 -- A limit above: the bound reaches every branch, a top-N sort in each.
-EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+EXPLAIN (VERBOSE, ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT count(*) FROM (SELECT a FROM (SELECT a FROM union_a ORDER BY a DESC LIMIT 100) AS x
                       UNION ALL SELECT a FROM (SELECT a FROM union_b ORDER BY a LIMIT 100) AS y
                       LIMIT 3) AS s;
@@ -245,7 +245,7 @@ SELECT union_same($$SELECT count(*), sum(k) FROM (SELECT k, v FROM union_part UN
 -- A child that is not partial, a table no worker may read, goes to one
 -- participant.
 ALTER TABLE union_b SET (parallel_workers = 0);
-EXPLAIN (COSTS OFF)
+EXPLAIN (VERBOSE, COSTS OFF)
 SELECT count(*), sum(a) FROM (SELECT a FROM union_a WHERE a > 100
                               UNION ALL SELECT a FROM union_b WHERE a < 600) AS s;
 SELECT union_same($$SELECT count(*), sum(a) FROM (SELECT a FROM union_a WHERE a > 100
@@ -263,7 +263,7 @@ SELECT union_same($$SELECT count(*), sum(a) FROM (SELECT a FROM union_a WHERE a 
 -- the sum.
 CREATE FUNCTION union_slow(v int, seconds float8) RETURNS int
 LANGUAGE plpgsql PARALLEL SAFE AS $$ BEGIN PERFORM pg_sleep(seconds); RETURN v; END $$;
-EXPLAIN (COSTS OFF)
+EXPLAIN (VERBOSE, COSTS OFF)
 SELECT count(*), sum(a) FROM (SELECT a FROM union_a WHERE a > 980 AND union_slow(a, 0.01) > 0
                               UNION ALL SELECT a FROM union_b WHERE a < 20 AND union_slow(a, 0.03) > 0) AS s;
 SELECT count(*), sum(a) FROM (SELECT a FROM union_a WHERE a > 980 AND union_slow(a, 0.01) > 0
@@ -308,7 +308,7 @@ RESET min_parallel_table_scan_size;
 -- UNION without ALL: TessAgg groups the branches' rows by every column
 -- over TessAppend, in place of the core's HashAggregate over its Append.
 SET max_parallel_workers_per_gather = 0;
-EXPLAIN (COSTS OFF)
+EXPLAIN (VERBOSE, COSTS OFF)
 SELECT a FROM union_a WHERE a > 100 UNION SELECT a FROM union_b WHERE a < 600;
 SELECT union_same($$SELECT a FROM union_a WHERE a > 100 UNION SELECT a FROM union_b WHERE a < 600$$);
 -- NULL is a value of its own; duplicates within a branch and across them.
@@ -319,7 +319,7 @@ SELECT union_same($$SELECT b FROM union_a UNION SELECT b FROM union_b UNION SELE
 EXPLAIN (VERBOSE, COSTS OFF)
 SELECT a, b FROM union_a WHERE a < 300 UNION SELECT a, b / 10 FROM union_b WHERE a > 0;
 -- A sort and a limit above.
-EXPLAIN (COSTS OFF)
+EXPLAIN (VERBOSE, COSTS OFF)
 SELECT a FROM union_a WHERE a > 100 UNION SELECT a FROM union_b WHERE a < 600 ORDER BY 1 DESC LIMIT 3;
 SELECT a FROM union_a WHERE a > 100 UNION SELECT a FROM union_b WHERE a < 600 ORDER BY 1 DESC LIMIT 3;
 -- In a subquery, and with more groups than work_mem holds.
@@ -333,7 +333,7 @@ RESET work_mem;
 -- within bigint), the core's: the projection would not find the set
 -- operation's columns in the node's plan. So are the operations of a
 -- recursive union.
-EXPLAIN (COSTS OFF)
+EXPLAIN (VERBOSE, COSTS OFF)
 SELECT a FROM union_a UNION SELECT a FROM union_b UNION ALL SELECT a FROM union_empty;
 SELECT union_same($$SELECT a FROM union_a UNION SELECT a FROM union_b UNION ALL SELECT a FROM union_a WHERE a < 3$$);
 EXPLAIN (COSTS OFF)
@@ -342,7 +342,7 @@ SELECT union_same($$SELECT a FROM union_a UNION SELECT a FROM union_b UNION ALL 
 SELECT union_same($$WITH RECURSIVE r(n) AS ((SELECT a FROM union_a WHERE a < 4 UNION SELECT a FROM union_b WHERE a < 4)
                    UNION SELECT n + 1 FROM r WHERE n < 10) SELECT count(*), sum(n) FROM r$$);
 -- Text columns go through a dictionary of their values.
-EXPLAIN (COSTS OFF) SELECT t FROM union_a UNION SELECT t FROM union_b;
+EXPLAIN (VERBOSE, COSTS OFF) SELECT t FROM union_a UNION SELECT t FROM union_b;
 SELECT union_same($$SELECT t FROM union_a UNION SELECT t FROM union_b$$);
 -- Under a Gather: the node's partial grouping of every participant's rows
 -- of the branches over its parallel Append, TessGather, and its grouping
@@ -359,11 +359,11 @@ SET min_parallel_table_scan_size = 0;
 -- The node's model of a partial scan would keep so small a table serial.
 SET tessera.scan_parallel_setup_cost = 0;
 SET tessera.scan_worker_page_cost = 0;
-EXPLAIN (COSTS OFF) SELECT c, b FROM union_keys WHERE b < 5 UNION SELECT c, b FROM union_keys WHERE b > 3;
+EXPLAIN (VERBOSE, COSTS OFF) SELECT c, b FROM union_keys WHERE b < 5 UNION SELECT c, b FROM union_keys WHERE b > 3;
 SELECT union_same($$SELECT c, b FROM union_keys WHERE b < 5 UNION SELECT c, b FROM union_keys WHERE b > 3$$);
 SELECT union_same($$SELECT count(*), sum(x) FROM (SELECT c AS x FROM union_keys UNION SELECT b FROM union_keys WHERE c IS NULL) AS s$$);
 -- The same as the left side of an EXCEPT.
-EXPLAIN (COSTS OFF)
+EXPLAIN (VERBOSE, COSTS OFF)
 (SELECT c FROM union_keys WHERE b < 5 UNION SELECT c FROM union_keys WHERE b > 3) EXCEPT SELECT b FROM union_keys WHERE b = 1;
 SELECT union_same($$(SELECT c FROM union_keys WHERE b < 5 UNION SELECT c FROM union_keys WHERE b > 3)
                    EXCEPT SELECT b FROM union_keys WHERE b = 1$$);
@@ -371,7 +371,7 @@ SET parallel_leader_participation = off;
 SELECT union_same($$SELECT c, b FROM union_keys WHERE b < 5 UNION SELECT c, b FROM union_keys WHERE b > 3$$);
 RESET parallel_leader_participation;
 ALTER TABLE union_b SET (parallel_workers = 0);
-EXPLAIN (COSTS OFF) SELECT c FROM union_keys UNION SELECT a FROM union_b;
+EXPLAIN (VERBOSE, COSTS OFF) SELECT c FROM union_keys UNION SELECT a FROM union_b;
 ALTER TABLE union_b RESET (parallel_workers);
 SET max_parallel_workers_per_gather = 0;
 RESET min_parallel_table_scan_size;
@@ -395,8 +395,8 @@ FROM generate_series(1, 700) AS i;
 INSERT INTO setop_l VALUES (NULL, NULL, NULL, NULL, NULL), (NULL, NULL, NULL, NULL, NULL);
 INSERT INTO setop_r VALUES (NULL, NULL, NULL, NULL, NULL);
 ANALYZE setop_l, setop_r;
-EXPLAIN (COSTS OFF) SELECT k, t FROM setop_l EXCEPT SELECT k, t FROM setop_r;
-EXPLAIN (COSTS OFF) SELECT k FROM setop_l INTERSECT ALL SELECT k FROM setop_r;
+EXPLAIN (VERBOSE, COSTS OFF) SELECT k, t FROM setop_l EXCEPT SELECT k, t FROM setop_r;
+EXPLAIN (VERBOSE, COSTS OFF) SELECT k FROM setop_l INTERSECT ALL SELECT k FROM setop_r;
 SELECT union_same($$SELECT k, t FROM setop_l EXCEPT SELECT k, t FROM setop_r$$);
 SELECT union_same($$SELECT k, t FROM setop_l EXCEPT ALL SELECT k, t FROM setop_r$$);
 SELECT union_same($$SELECT k, t FROM setop_l INTERSECT SELECT k, t FROM setop_r$$);
@@ -423,10 +423,10 @@ SELECT union_same($$SELECT n::text FROM (SELECT n FROM setop_r INTERSECT ALL SEL
 -- Above: a sort and a limit; within another set operation, the node's in
 -- the node's: EXCEPT of EXCEPT, INTERSECT within UNION, UNION and
 -- INTERSECT of two columns as the sides of EXCEPT ALL, a count above.
-EXPLAIN (COSTS OFF)
+EXPLAIN (VERBOSE, COSTS OFF)
 SELECT k FROM setop_l EXCEPT SELECT k FROM setop_r ORDER BY 1 DESC LIMIT 3;
 SELECT k FROM setop_l EXCEPT SELECT k FROM setop_r ORDER BY 1 DESC LIMIT 3;
-EXPLAIN (COSTS OFF)
+EXPLAIN (VERBOSE, COSTS OFF)
 SELECT k FROM setop_l EXCEPT SELECT k FROM setop_r EXCEPT SELECT a FROM union_a;
 SELECT union_same($$SELECT k FROM setop_l EXCEPT SELECT k FROM setop_r EXCEPT SELECT a FROM union_a WHERE a < 30$$);
 SELECT union_same($$SELECT k FROM setop_l INTERSECT SELECT k FROM setop_r UNION SELECT a FROM union_b WHERE a < 5$$);

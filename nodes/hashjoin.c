@@ -2385,15 +2385,32 @@ join_explain(CustomScanState *css, List *ancestors, ExplainState *es)
 		overrun = totals[JOIN_OVERRUN];
 	if (overrun > 0)
 		ExplainPropertyInteger("Overrun", "kB", (overrun + 1023) / 1024, es);
+	/* As the core's hash shows its batches on disk. */
+	if (totals[JOIN_BATCHES] > 0)
+	{
+		ExplainPropertyInteger("Batches", NULL, totals[JOIN_BATCHES], es);
+		ExplainPropertyInteger("Disk Usage", "kB", (totals[JOIN_DISK] + 1023) / 1024, es);
+	}
+	if (state->qual != NULL)
+		ExplainPropertyInteger("Rows Removed by Join Filter", NULL,
+							   totals[JOIN_FILTER_REMOVED], es);
+	if (state->filter != NULL)
+		ExplainPropertyInteger("Rows Removed by Filter", NULL,
+							   totals[JOIN_OUTPUT_REMOVED], es);
+	if (totals[JOIN_BLOOM_FILTERS] > 0 &&
+		(totals[JOIN_BLOOM_BELOW] == 0 || totals[JOIN_BLOOM_REMOVED] > 0))
+		ExplainPropertyInteger("Rows Removed by Bloom Filter", NULL,
+							   totals[JOIN_BLOOM_REMOVED], es);
+	/* The builds, the table's chunks, the spill and the probe: VERBOSE only. */
+	if (!es->verbose)
+		return;
 	ExplainPropertyInteger("Builds", NULL, totals[JOIN_BUILDS], es);
 	ExplainPropertyInteger("Build Rows", NULL, totals[JOIN_BUILD_ROWS], es);
 	ExplainPropertyInteger("Chunks", NULL, totals[JOIN_CHUNKS], es);
 	if (totals[JOIN_BATCHES] > 0)
 	{
-		ExplainPropertyInteger("Batches", NULL, totals[JOIN_BATCHES], es);
 		ExplainPropertyInteger("Resident Partitions", NULL, totals[JOIN_RESIDENT], es);
 		ExplainPropertyInteger("Spilled Chunks", NULL, totals[JOIN_SPILLED], es);
-		ExplainPropertyInteger("Disk Usage", "kB", (totals[JOIN_DISK] + 1023) / 1024, es);
 		ExplainPropertyInteger("Tail Chunks Kept", NULL, totals[JOIN_TAILS], es);
 		if (totals[JOIN_SPLITS] > 0)
 			ExplainPropertyInteger("Split Partitions", NULL, totals[JOIN_SPLITS], es);
@@ -2406,24 +2423,12 @@ join_explain(CustomScanState *css, List *ancestors, ExplainState *es)
 	}
 	ExplainPropertyInteger("Probe Rows", NULL, totals[JOIN_PROBE_ROWS], es);
 	ExplainPropertyInteger("Matches", NULL, totals[JOIN_MATCHES], es);
-	if (state->qual != NULL)
-		ExplainPropertyInteger("Rows Removed by Join Filter", NULL,
-							   totals[JOIN_FILTER_REMOVED], es);
-	if (state->filter != NULL)
-		ExplainPropertyInteger("Rows Removed by Filter", NULL,
-							   totals[JOIN_OUTPUT_REMOVED], es);
 	if (totals[JOIN_COMPACT_BATCHES] > 0)
 		ExplainPropertyInteger("Compact Batches", NULL,
 							   totals[JOIN_COMPACT_BATCHES], es);
 	if (totals[JOIN_BLOOM_FILTERS] > 0)
-	{
 		ExplainPropertyInteger("Bloom Filters", NULL,
 							   totals[JOIN_BLOOM_FILTERS], es);
-		/* A child that took the filter shows the rows it removed instead. */
-		if (totals[JOIN_BLOOM_BELOW] == 0 || totals[JOIN_BLOOM_REMOVED] > 0)
-			ExplainPropertyInteger("Rows Removed by Bloom Filter", NULL,
-								   totals[JOIN_BLOOM_REMOVED], es);
-	}
 	/* The outer child checked its rows: it shows the rows removed. */
 	if (totals[JOIN_BLOOM_BELOW] > 0)
 		ExplainPropertyBool("Bloom Filter Below", true, es);

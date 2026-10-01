@@ -216,9 +216,11 @@ scan stays, since the executor shuts a plan down after a partial run of
 it too, and a `Gather` a limit above stopped sets the node up anew when
 it is rescanned.
 
-`EXPLAIN` shows `Batch Size` once executed and, with `ANALYZE`, the
-`Batches`, the `Pages` read, the `Deformed Datums`, the `Restarted
-Datums` and, with computed targets, the `Computed Datums`; the row counts
+With `VERBOSE`, `EXPLAIN` shows `Batch Size` once executed and, with
+`ANALYZE`, the `Batches`, the `Pages` read, the `Deformed Datums`, the
+`Restarted Datums` and, with computed targets, the `Computed Datums`;
+without it the node shows what the core's scan in its place shows, the
+heap blocks of a bitmap (below) and nothing else; the row counts
 are corrected by the output helper. In a parallel plan the leader shows
 the totals over every participant, summed once the workers have
 finished, so the `Pages` of a whole scan equal the relation's pages.
@@ -728,7 +730,7 @@ changed parameter reaches the subquery's plan. The subquery scan itself is
 never executed, and `EXPLAIN ANALYZE` shows it so. A bound from a limit
 above reaches the source's node kind.
 
-`EXPLAIN` shows `Batch Size` and `Rows Kept As` (`heap tuples` or
+With `VERBOSE`, `EXPLAIN` shows `Batch Size` and `Rows Kept As` (`heap tuples` or
 `copies`, or `forwarded batches` with the number of `Batches` forwarded
 under `ANALYZE`) once the node has executed, since both follow the parent's
 request and the child's slot, and with `ANALYZE` the number of `Batches`
@@ -855,10 +857,10 @@ row, and the leader shows the totals.
 
 `EXPLAIN` shows the batch clauses as `Batch Filter` and the others as the
 core's `Filter`, each in the planner's order; with `ANALYZE`, the rows removed by each part, per loop,
-the helper's batches and rows and, with computed targets, the `Computed
-Datums`, summed over the participants of a parallel plan, and `Rows
-Removed by Bloom Filter`, the rows a join's filter removed, when there
-are any. The core's
+and `Rows Removed by Bloom Filter`, the rows a join's filter removed,
+when there are any, and with `VERBOSE` too the helper's batches and rows
+and, with computed targets, the `Computed Datums`, all summed over the
+participants of a parallel plan. The core's
 `Rows Removed by Filter` counts both parts, since the helper reports
 every row the node removes.
 
@@ -1124,7 +1126,7 @@ their by-reference values), to 32 partitions on disk by five bits of
 their hash. Once the groups in memory are out, each partition is read
 back, 64 rows a batch, into a table of its own with fresh states; one
 that does not fit either spills by the next five bits, depth first, six
-levels at most (`Spilled Rows` in `EXPLAIN ANALYZE`). A group's rows stay
+levels at most (`Spilled Rows` in `EXPLAIN (ANALYZE, VERBOSE)`). A group's rows stay
 in their order, as an order-sensitive aggregate such as `string_agg`
 needs. With a `DISTINCT` aggregate alongside, whose table does not
 spill, the path is taken only when the planner's estimate of the groups
@@ -1475,15 +1477,17 @@ shows the totals.
 
 `EXPLAIN` shows the grouping expressions as the core's `Group Key`,
 `HAVING` as the core's `Filter` and `Partial Mode: Partial` under a
-`Gather`; with `ANALYZE`, the batches and rows read from the child, the
+`Gather`; with `ANALYZE` and `GROUP BY`, the table's `Memory Usage` and,
+for a table that spilled, `Batches`, the most partitions of a level, and
+`Disk Usage`, the bytes written, as the core's hashed aggregate shows
+them; with `VERBOSE` too, the batches and rows read from the child, the
 batch function calls (per aggregate and batch with `GROUP BY`), the
 `Computed Datums` of the keys and the arguments, by chains and row by row
-together, and with `GROUP BY` the groups, the times the table grew, its
-`Memory Usage`, and for a table that spilled `Batches`, the most
-partitions of a level, `Evictions`, the partitions sent to disk while
-the input was read, `Spilled Chunks` and `Disk Usage`, the chunks and
-bytes written, and `Split Partitions`, those split into a level below,
-summed over the participants of a parallel plan.
+together, and with `GROUP BY` the groups, the times the table grew, and
+for a table that spilled `Evictions`, the partitions sent to disk while
+the input was read, `Spilled Chunks`, the chunks written, and `Split
+Partitions`, those split into a level below; all summed over the
+participants of a parallel plan.
 
 ### Spilling
 
@@ -1946,15 +1950,20 @@ table goes. A left or anti join returns those rows and keeps the filter.
 `EXPLAIN` shows the join type for a semi, anti, left, right or full join, the key
 clauses as `Hash Cond`, `Shared Table` for a shared table, the residual ones that run in batches as `Batch
 Join Filter` and the others as `Join Filter`, and an outer join's filters
-as `Batch Filter` and `Filter`. With `ANALYZE` it adds
-the bucket count of the last table built, `Memory Usage`, the most the
-table, the copies of inner values and spilling took, `Overrun`, what of
-it exceeded `hash_mem` (shown only then: a partition larger than it is
-joined whole), `Builds`, the tables built over the rescans, `Build Rows`,
+as `Batch Filter` and `Filter`. With `ANALYZE` it adds what the core's
+hash join and hash show: the bucket count of the last table built,
+`Memory Usage`, the most the table, the copies of inner values and
+spilling took, `Overrun`, what of it exceeded `hash_mem` (shown only
+then: a partition larger than it is joined whole), for a table that
+spilled `Batches`, its partitions, and `Disk Usage`, the bytes written by
+both sides, `Rows Removed by Join Filter`, `Rows Removed by Filter` and
+`Rows Removed by Bloom Filter`, the valid probe rows the Bloom filter
+rejected (not shown when the outer child took the filter and the join
+removed none). With `VERBOSE` too: `Builds`, the tables built over the rescans, `Build Rows`,
 the inner rows inserted into them, `Chunks`, the chunks of their
-records, and for a table that spilled `Batches`, its partitions,
-`Resident Partitions`, those kept in memory, `Spilled Chunks` and `Disk
-Usage`, the blocks and bytes written by both sides, and `Tail Chunks
+records, and for a table that spilled
+`Resident Partitions`, those kept in memory, `Spilled Chunks`, the
+blocks written by both sides, and `Tail Chunks
 Kept`, the tails joined without being written, `Split Partitions`, the
 partitions split into a level below, `Extra Passes`, the
 passes over outer rows past the first of a partition joined in pieces,
@@ -1962,12 +1971,9 @@ and for a shared table `Partitions Joined Together`, the rounds, and
 `Partitions Joined Alone`, the partitions one participant took whole;
 `Probe Rows`, the outer
 rows probed, and `Matches`, the joined
-rows over every round, `Rows Removed by Join Filter` and `Rows Removed by
-Filter`, and `Compact Batches`, the batches of copied
-pairs, when there are any, and `Bloom Filters`, the filters built, with
-`Rows Removed by Bloom Filter`, the valid probe rows they rejected, when
-one was built (not shown when the outer child took the filter and the
-join removed none), and `Bloom Filter Below` when it did; with a shared table `Builds` counts the one build, and
+rows over every round, `Compact Batches`, the batches of copied
+pairs, when there are any, and `Bloom Filters`, the filters built, and
+`Bloom Filter Below` when the outer child took the filter; with a shared table `Builds` counts the one build, and
 `Memory Usage` each participant's chunks and value blocks, and the index
 and filter of the elected one. Under a `Gather` the counters are the totals of
 every participant, and the bucket count is the mean over the tables
@@ -2224,8 +2230,10 @@ took 1–1.5 % longer with both gathered. A rescan without a changed
 parameter returns the sorted rows again from the first; a changed
 parameter of the child reads and sorts it anew. `EXPLAIN` shows the keys
 as the core does; `ANALYZE` adds the method, the memory (records, values,
-index, items and references at the sort) and its overrun past `work_mem`,
-and the batches and rows read.
+index, items and references at the sort), its overrun past `work_mem`
+and the disk written, and with `VERBOSE` the runs and merge passes of an
+external sort, the batches and rows read, the rows a top-N rebuilt and
+whether abbreviated keys were given up.
 
 ### Other types
 
@@ -2315,8 +2323,8 @@ may scan backward (`EXEC_FLAG_BACKWARD`) merges into one run instead,
 whose blocks are read by their positions, a window within one block, in
 either direction. A rescan without a changed parameter starts the last
 merge again over the runs on disk; a changed one reads the child anew.
-`EXPLAIN ANALYZE` shows `Sort Method: external merge`, the disk written,
-the runs and the passes. At a `work_mem` of 4 MB, 2 M rows sort in 0.35
+`EXPLAIN ANALYZE` shows `Sort Method: external merge` and the disk
+written, `VERBOSE` the runs and the passes. At a `work_mem` of 4 MB, 2 M rows sort in 0.35
 to 0.55 of the core's time (an int4 key and column 81 ms against 203,
 two keys 116 against 328, with text 128 against 232; in memory the first
 takes 58); at 64 kB, where the runs are small and the passes many, 249
@@ -2333,7 +2341,7 @@ key columns are read first, and once the heap is full only the rows whose
 keys beat the worst kept stay in the batch's mask, so only they have
 their other columns read, are appended and go into the heap. When the
 records outnumber four times the bound or 65536, whichever is more, the
-rows are made anew from the heap's (`Rows Rebuilt` in `EXPLAIN ANALYZE`),
+rows are made anew from the heap's (`Rows Rebuilt` in `EXPLAIN (ANALYZE, VERBOSE)`),
 so that keys in the reverse of the order, each row beating the ones kept,
 take bounded memory. At the end the heap's items sorted give the rows in
 order. A rescan with a bound larger than the rows kept reads the child
@@ -2438,8 +2446,8 @@ takes the first unfinished child from there on, going round to the first
 partial child; the leader takes them from the last down; a child that is
 not partial is finished as soon as someone takes it, a partial one when
 someone reaches its end, while the others still reading it go on. Without
-shared memory the node reads every child in turn. `EXPLAIN ANALYZE` shows
-the `Batches` given out, every participant's.
+shared memory the node reads every child in turn. `EXPLAIN (ANALYZE,
+VERBOSE)` shows the `Batches` given out, every participant's.
 
 ### Pruning while executing
 

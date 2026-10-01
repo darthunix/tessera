@@ -39,7 +39,7 @@ SELECT project_same($$SELECT a + b AS s, (a + 1) * b AS p, b - a AS d FROM proje
 -- Plain columns keep the plan they had.
 EXPLAIN (COSTS OFF) SELECT a, c FROM project_t WHERE a > 195;
 -- A limit above narrows the rows before the columns are computed.
-EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+EXPLAIN (VERBOSE, ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT a + 1 AS next, c || '!' AS shout FROM project_t WHERE a > 100 LIMIT 3;
 SELECT a + 1 AS next, c || '!' AS shout FROM project_t WHERE a > 100 LIMIT 3;
 -- An expression failing on a row the filter removed does not fail: a chain,
@@ -65,7 +65,7 @@ SELECT project_same($$SELECT a * 2 AS twice, c FROM project_t WHERE a > 190 AND 
 -- The scan itself computes the targets of a query without clauses.
 EXPLAIN (COSTS OFF, VERBOSE)
 SELECT a * 2 AS twice, c || '!' AS shout FROM project_t LIMIT 3;
-EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+EXPLAIN (VERBOSE, ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT a * 2 AS twice, c || '!' AS shout FROM project_t LIMIT 3;
 SELECT project_same($$SELECT a * 2 AS twice, c || '!' AS shout FROM project_t LIMIT 3$$);
 SELECT project_same($$SELECT count(*) FROM (SELECT a + b AS s FROM project_t LIMIT 150) AS q WHERE s > 100$$);

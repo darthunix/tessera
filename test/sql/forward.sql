@@ -32,28 +32,28 @@ FROM generate_series(1, 100) AS i;
 -- scan between the aggregate and the limit. count(*) needs none of its
 -- outputs, so the scan is not trivial and stays in the plan; the pack
 -- forwards the batches of the limit under it, and the scan never runs.
-EXPLAIN (COSTS OFF)
+EXPLAIN (VERBOSE, COSTS OFF)
 SELECT count(*) FROM (SELECT a FROM forward_t LIMIT 70) AS s;
-EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+EXPLAIN (VERBOSE, ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT count(*) FROM (SELECT a FROM forward_t LIMIT 70) AS s;
 SELECT count(*) FROM (SELECT a FROM forward_t LIMIT 70) AS s;
 
 -- Columns through the map: the subquery scan is trivial here, so the
 -- planner drops it and the pack stands above the limit itself.
-EXPLAIN (COSTS OFF)
+EXPLAIN (VERBOSE, COSTS OFF)
 SELECT sum(a), count(a), max(a) FROM (SELECT a FROM forward_t LIMIT 70) AS s;
 SELECT sum(a), count(a), max(a) FROM (SELECT a FROM forward_t LIMIT 70) AS s;
 
 -- A target of the subquery that is not its first column, and only some
 -- of its columns used: the scan stays and the map follows the targets.
-EXPLAIN (COSTS OFF)
+EXPLAIN (VERBOSE, COSTS OFF)
 SELECT sum(a), max(a) FROM (SELECT b, a FROM forward_t OFFSET 95) AS s;
 SELECT sum(a), max(a) FROM (SELECT b, a FROM forward_t OFFSET 95) AS s;
 SELECT count(*), min(a) FROM (SELECT a FROM forward_t OFFSET 90) AS s;
 
 -- A limit above the subquery: the bound reaches the limit under it, and
 -- the rows are served to the client by the outer limit.
-EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+EXPLAIN (VERBOSE, ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT a FROM (SELECT a FROM forward_t OFFSET 90) AS s LIMIT 3;
 SELECT a FROM (SELECT a FROM forward_t OFFSET 90) AS s LIMIT 3;
 
@@ -66,7 +66,7 @@ FROM generate_series(95, 99) AS g;
 
 -- A sort under the limit: a top-N TessSort under TessLimit, whose batches
 -- the pack above the subquery scan forwards.
-EXPLAIN (COSTS OFF)
+EXPLAIN (VERBOSE, COSTS OFF)
 SELECT count(*) FROM (SELECT a FROM forward_t ORDER BY a DESC LIMIT 5) AS s;
 SELECT count(*), min(a) FROM (SELECT a FROM forward_t ORDER BY a DESC LIMIT 5) AS s;
 

@@ -181,41 +181,45 @@ SELECT a + 1 FROM filter_t WHERE a > 197;
 (3 rows)
 
 -- More than one batch, batches left without rows, rows removed by count.
-EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+EXPLAIN (VERBOSE, ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT a FROM filter_t WHERE a > 100;
-                                QUERY PLAN                                 
----------------------------------------------------------------------------
- Custom Scan (TessFilter) on filter_t (actual rows=86.00 loops=1)
-   Batch Filter: (a > 100)
+                                    QUERY PLAN                                    
+----------------------------------------------------------------------------------
+ Custom Scan (TessFilter) on public.filter_t (actual rows=86.00 loops=1)
+   Output: a
+   Batch Filter: (filter_t.a > 100)
    Rows Removed by Batch Filter: 114
    Input Batches: 4
    Input Rows: 200
    Output Rows: 86
-   ->  Custom Scan (TessHeapScan) on filter_t (actual rows=200.00 loops=1)
+   ->  Custom Scan (TessHeapScan) on public.filter_t (actual rows=200.00 loops=1)
+         Output: a
          Batch Size: 64
          Batches: 4
          Pages: 2
          Deformed Datums: 200
          Restarted Datums: 0
-(12 rows)
+(14 rows)
 
-EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+EXPLAIN (VERBOSE, ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT a FROM filter_t WHERE a > 1000;
-                                QUERY PLAN                                 
----------------------------------------------------------------------------
- Custom Scan (TessFilter) on filter_t (actual rows=0.00 loops=1)
-   Batch Filter: (a > 1000)
+                                    QUERY PLAN                                    
+----------------------------------------------------------------------------------
+ Custom Scan (TessFilter) on public.filter_t (actual rows=0.00 loops=1)
+   Output: a
+   Batch Filter: (filter_t.a > 1000)
    Rows Removed by Batch Filter: 200
    Input Batches: 4
    Input Rows: 200
    Output Rows: 0
-   ->  Custom Scan (TessHeapScan) on filter_t (actual rows=200.00 loops=1)
+   ->  Custom Scan (TessHeapScan) on public.filter_t (actual rows=200.00 loops=1)
+         Output: a
          Batch Size: 64
          Batches: 4
          Pages: 2
          Deformed Datums: 200
          Restarted Datums: 0
-(12 rows)
+(14 rows)
 
 -- A parameter, also NULL, through a generic plan.
 SET plan_cache_mode = force_generic_plan;
@@ -398,26 +402,28 @@ SELECT filter_same($$SELECT a FROM filter_t WHERE filter_slow(a) AND a > 190$$);
 
 DROP FUNCTION filter_slow(int);
 -- Rows removed by each part, and a column only the row-wise clause reads.
-EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+EXPLAIN (VERBOSE, ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT a FROM filter_t WHERE a > 100 AND upper(c) <> 'R150';
-                                QUERY PLAN                                 
----------------------------------------------------------------------------
- Custom Scan (TessFilter) on filter_t (actual rows=85.00 loops=1)
-   Filter: (upper(c) <> 'R150'::text)
+                                    QUERY PLAN                                    
+----------------------------------------------------------------------------------
+ Custom Scan (TessFilter) on public.filter_t (actual rows=85.00 loops=1)
+   Output: a
+   Filter: (upper(filter_t.c) <> 'R150'::text)
    Rows Removed by Filter: 115
-   Batch Filter: (a > 100)
+   Batch Filter: (filter_t.a > 100)
    Rows Removed by Batch Filter: 114
    Rows Removed by Residual Filter: 1
    Input Batches: 4
    Input Rows: 200
    Output Rows: 85
-   ->  Custom Scan (TessHeapScan) on filter_t (actual rows=200.00 loops=1)
+   ->  Custom Scan (TessHeapScan) on public.filter_t (actual rows=200.00 loops=1)
+         Output: a, c
          Batch Size: 64
          Batches: 4
          Pages: 2
          Deformed Datums: 286
          Restarted Datums: 0
-(15 rows)
+(17 rows)
 
 SELECT filter_same($$SELECT count(*) FROM filter_t WHERE a > 100 AND upper(c) <> 'R150'$$);
  filter_same 
@@ -427,75 +433,81 @@ SELECT filter_same($$SELECT count(*) FROM filter_t WHERE a > 100 AND upper(c) <>
 
 -- The pack node keeps the scan's tuples: a batch clause deforms its column
 -- for every row, the residual its column for the rows that survived.
-EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+EXPLAIN (VERBOSE, ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT count(*) FROM filter_t WHERE a > 100 AND upper(c) <> 'R150';
-                                   QUERY PLAN                                    
----------------------------------------------------------------------------------
+                                       QUERY PLAN                                       
+----------------------------------------------------------------------------------------
  Custom Scan (TessAgg) (actual rows=1.00 loops=1)
+   Output: (count(*))
    Input Batches: 3
    Input Rows: 85
    Kernel Calls: 3
-   ->  Custom Scan (TessFilter) on filter_t (actual rows=85.00 loops=1)
-         Filter: (upper(c) <> 'R150'::text)
+   ->  Custom Scan (TessFilter) on public.filter_t (actual rows=85.00 loops=1)
+         Filter: (upper(filter_t.c) <> 'R150'::text)
          Rows Removed by Filter: 115
-         Batch Filter: (a > 100)
+         Batch Filter: (filter_t.a > 100)
          Rows Removed by Batch Filter: 114
          Rows Removed by Residual Filter: 1
          Input Batches: 4
          Input Rows: 200
          Output Rows: 85
-         ->  Custom Scan (TessHeapScan) on filter_t (actual rows=200.00 loops=1)
+         ->  Custom Scan (TessHeapScan) on public.filter_t (actual rows=200.00 loops=1)
+               Output: a, c
                Batch Size: 64
                Batches: 4
                Pages: 2
                Deformed Datums: 286
                Restarted Datums: 0
-(19 rows)
+(21 rows)
 
 -- A column the query returns is deformed for the rows served.
-EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+EXPLAIN (VERBOSE, ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT b FROM filter_t WHERE a > 190;
-                                QUERY PLAN                                 
----------------------------------------------------------------------------
- Custom Scan (TessFilter) on filter_t (actual rows=9.00 loops=1)
-   Batch Filter: (a > 190)
+                                    QUERY PLAN                                    
+----------------------------------------------------------------------------------
+ Custom Scan (TessFilter) on public.filter_t (actual rows=9.00 loops=1)
+   Output: b
+   Batch Filter: (filter_t.a > 190)
    Rows Removed by Batch Filter: 191
    Input Batches: 4
    Input Rows: 200
    Output Rows: 9
-   ->  Custom Scan (TessHeapScan) on filter_t (actual rows=200.00 loops=1)
+   ->  Custom Scan (TessHeapScan) on public.filter_t (actual rows=200.00 loops=1)
+         Output: b, a
          Batch Size: 64
          Batches: 4
          Pages: 2
          Deformed Datums: 209
          Restarted Datums: 0
-(12 rows)
+(14 rows)
 
 -- A table with a dropped column is scanned with a projection: rows are copied.
 CREATE TABLE filter_dropped (a int, x int, b int);
 INSERT INTO filter_dropped SELECT i, i, i FROM generate_series(1, 100) AS i;
 ALTER TABLE filter_dropped DROP COLUMN x;
-EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+EXPLAIN (VERBOSE, ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT count(*) FROM filter_dropped WHERE a > 90;
-                                      QUERY PLAN                                       
----------------------------------------------------------------------------------------
+                                          QUERY PLAN                                          
+----------------------------------------------------------------------------------------------
  Custom Scan (TessAgg) (actual rows=1.00 loops=1)
+   Output: (count(*))
    Input Batches: 1
    Input Rows: 10
    Kernel Calls: 1
-   ->  Custom Scan (TessFilter) on filter_dropped (actual rows=10.00 loops=1)
-         Batch Filter: (a > 90)
+   ->  Custom Scan (TessFilter) on public.filter_dropped (actual rows=10.00 loops=1)
+         Batch Filter: (filter_dropped.a > 90)
          Rows Removed by Batch Filter: 90
          Input Batches: 2
          Input Rows: 100
          Output Rows: 10
-         ->  Custom Scan (TessHeapScan) on filter_dropped (actual rows=100.00 loops=1)
+         ->  Custom Scan (TessHeapScan) on public.filter_dropped (actual rows=100.00 loops=1)
+               Output: a
                Batch Size: 64
                Batches: 2
                Pages: 1
                Deformed Datums: 100
                Restarted Datums: 0
-(16 rows)
+(18 rows)
 
 SELECT filter_same($$SELECT sum(b) FROM filter_dropped WHERE a > 90$$);
  filter_same 
@@ -506,27 +518,29 @@ SELECT filter_same($$SELECT sum(b) FROM filter_dropped WHERE a > 90$$);
 DROP TABLE filter_dropped;
 -- A temporary table lives in local buffers.
 CREATE TEMP TABLE filter_temp AS SELECT i AS a, 'r' || i AS c FROM generate_series(1, 100) AS i;
-EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+EXPLAIN (VERBOSE, ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT count(*) FROM filter_temp WHERE a > 90 AND c <> 'r95';
-                                     QUERY PLAN                                     
-------------------------------------------------------------------------------------
+                                         QUERY PLAN                                         
+--------------------------------------------------------------------------------------------
  Custom Scan (TessAgg) (actual rows=1.00 loops=1)
+   Output: (count(*))
    Input Batches: 1
    Input Rows: 9
    Kernel Calls: 1
-   ->  Custom Scan (TessFilter) on filter_temp (actual rows=9.00 loops=1)
-         Batch Filter: ((a > 90) AND (c <> 'r95'::text))
+   ->  Custom Scan (TessFilter) on pg_temp.filter_temp (actual rows=9.00 loops=1)
+         Batch Filter: ((filter_temp.a > 90) AND (filter_temp.c <> 'r95'::text))
          Rows Removed by Batch Filter: 91
          Input Batches: 2
          Input Rows: 100
          Output Rows: 9
-         ->  Custom Scan (TessHeapScan) on filter_temp (actual rows=100.00 loops=1)
+         ->  Custom Scan (TessHeapScan) on pg_temp.filter_temp (actual rows=100.00 loops=1)
+               Output: a, c
                Batch Size: 64
                Batches: 2
                Pages: 1
                Deformed Datums: 110
                Restarted Datums: 0
-(16 rows)
+(18 rows)
 
 SELECT filter_same($$SELECT c FROM filter_temp WHERE a > 90 AND c <> 'r95'$$);
                        filter_same                        
@@ -543,27 +557,29 @@ BEGIN;
 SAVEPOINT aborted;
 INSERT INTO filter_dead SELECT i FROM generate_series(1000, 1099) AS i;
 ROLLBACK TO aborted;
-EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+EXPLAIN (VERBOSE, ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT count(*) FROM filter_dead WHERE a > 0;
-                                     QUERY PLAN                                     
-------------------------------------------------------------------------------------
+                                        QUERY PLAN                                         
+-------------------------------------------------------------------------------------------
  Custom Scan (TessAgg) (actual rows=1.00 loops=1)
+   Output: (count(*))
    Input Batches: 4
    Input Rows: 200
    Kernel Calls: 4
-   ->  Custom Scan (TessFilter) on filter_dead (actual rows=200.00 loops=1)
-         Batch Filter: (a > 0)
+   ->  Custom Scan (TessFilter) on public.filter_dead (actual rows=200.00 loops=1)
+         Batch Filter: (filter_dead.a > 0)
          Rows Removed by Batch Filter: 0
          Input Batches: 4
          Input Rows: 200
          Output Rows: 200
-         ->  Custom Scan (TessHeapScan) on filter_dead (actual rows=200.00 loops=1)
+         ->  Custom Scan (TessHeapScan) on public.filter_dead (actual rows=200.00 loops=1)
+               Output: a
                Batch Size: 64
                Batches: 4
                Pages: 2
                Deformed Datums: 200
                Restarted Datums: 0
-(16 rows)
+(18 rows)
 
 SELECT filter_same($$SELECT count(*), sum(a) FROM filter_dead WHERE a > 150$$);
    filter_same   
@@ -645,26 +661,28 @@ SELECT filter_same($$SELECT count(*) FROM filter_t WHERE a > 0 AND (b # 0) <> 0 
  {(86)}
 (1 row)
 
-EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+EXPLAIN (VERBOSE, ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT a FROM filter_t WHERE a > 100 AND upper(c) <> 'R150' AND b < 5;
-                                QUERY PLAN                                 
----------------------------------------------------------------------------
- Custom Scan (TessFilter) on filter_t (actual rows=43.00 loops=1)
-   Filter: (upper(c) <> 'R150'::text)
+                                    QUERY PLAN                                    
+----------------------------------------------------------------------------------
+ Custom Scan (TessFilter) on public.filter_t (actual rows=43.00 loops=1)
+   Output: a
+   Filter: (upper(filter_t.c) <> 'R150'::text)
    Rows Removed by Filter: 157
-   Batch Filter: ((a > 100) AND (b < 5))
+   Batch Filter: ((filter_t.a > 100) AND (filter_t.b < 5))
    Rows Removed by Batch Filter: 156
    Rows Removed by Residual Filter: 1
    Input Batches: 4
    Input Rows: 200
    Output Rows: 43
-   ->  Custom Scan (TessHeapScan) on filter_t (actual rows=200.00 loops=1)
+   ->  Custom Scan (TessHeapScan) on public.filter_t (actual rows=200.00 loops=1)
+         Output: a, c, b
          Batch Size: 64
          Batches: 4
          Pages: 2
          Deformed Datums: 330
          Restarted Datums: 0
-(15 rows)
+(17 rows)
 
 SELECT filter_same($$SELECT a FROM filter_t WHERE a > 100 AND upper(c) <> 'R150' AND b < 5$$);
                                                                                                                              filter_same                                                                                                                             
@@ -1219,22 +1237,24 @@ EXPLAIN (COSTS OFF) SELECT bit_or(a), max(c) FROM filter_t;
    ->  Custom Scan (TessHeapScan) on filter_t
 (2 rows)
 
-EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+EXPLAIN (VERBOSE, ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT bit_or(a), max(c) FROM filter_t;
-                                QUERY PLAN                                 
----------------------------------------------------------------------------
+                                    QUERY PLAN                                    
+----------------------------------------------------------------------------------
  Custom Scan (TessAgg) (actual rows=1.00 loops=1)
+   Output: (bit_or(a)), (max(c))
    Input Batches: 4
    Input Rows: 200
    Kernel Calls: 0
    Computed Datums: 400
-   ->  Custom Scan (TessHeapScan) on filter_t (actual rows=200.00 loops=1)
+   ->  Custom Scan (TessHeapScan) on public.filter_t (actual rows=200.00 loops=1)
+         Output: a, c
          Batch Size: 64
          Batches: 4
          Pages: 2
          Deformed Datums: 400
          Restarted Datums: 0
-(11 rows)
+(13 rows)
 
 SELECT filter_same($$SELECT bit_or(a), max(c), count(a), count(*) FROM filter_t$$);
       filter_same      

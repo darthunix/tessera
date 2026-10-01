@@ -35,68 +35,84 @@ SET max_parallel_workers_per_gather = 0;
 -- An aggregate over UNION ALL of two filtered scans: TessAppend reads the
 -- branches in turn and gives the aggregate their batches, each branch's
 -- through the pack that forwards the batches of its subquery.
-EXPLAIN (COSTS OFF)
+EXPLAIN (VERBOSE, COSTS OFF)
 SELECT count(*), sum(a) FROM (SELECT a FROM union_a WHERE a > 100
                               UNION ALL SELECT a FROM union_b WHERE a < 600) AS s;
-                          QUERY PLAN                           
----------------------------------------------------------------
+                              QUERY PLAN                              
+----------------------------------------------------------------------
  Custom Scan (TessAgg)
+   Output: (count(*)), (sum(s.a))
    ->  Custom Scan (TessAppend)
+         Output: s.a
          ->  Custom Scan (TessPack)
+               Output: unnamed_subquery.a
                Rows Kept As: forwarded batches
-               ->  Custom Scan (TessFilter) on union_a
+               ->  Custom Scan (TessFilter) on public.union_a
+                     Output: union_a.a
                      Batch Filter: (union_a.a > 100)
-                     ->  Custom Scan (TessHeapScan) on union_a
+                     ->  Custom Scan (TessHeapScan) on public.union_a
+                           Output: union_a.a
          ->  Custom Scan (TessPack)
+               Output: unnamed_subquery_1.a
                Rows Kept As: forwarded batches
-               ->  Custom Scan (TessFilter) on union_b
+               ->  Custom Scan (TessFilter) on public.union_b
+                     Output: union_b.a
                      Batch Filter: (union_b.a < 600)
-                     ->  Custom Scan (TessHeapScan) on union_b
-(12 rows)
+                     ->  Custom Scan (TessHeapScan) on public.union_b
+                           Output: union_b.a
+(20 rows)
 
-EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+EXPLAIN (VERBOSE, ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT count(*), sum(a) FROM (SELECT a FROM union_a WHERE a > 100
                               UNION ALL SELECT a FROM union_b WHERE a < 600) AS s;
-                                         QUERY PLAN                                          
----------------------------------------------------------------------------------------------
+                                             QUERY PLAN                                             
+----------------------------------------------------------------------------------------------------
  Custom Scan (TessAgg) (actual rows=1.00 loops=1)
+   Output: (count(*)), (sum(s.a))
    Input Batches: 29
    Input Rows: 1380
    Kernel Calls: 58
    Computed Datums: 1380
    ->  Custom Scan (TessAppend) (actual rows=1380.00 loops=1)
+         Output: s.a
          Batches: 29
          ->  Custom Scan (TessPack) (actual rows=900.00 loops=1)
+               Output: unnamed_subquery.a
                Rows Kept As: forwarded batches
                Batches: 18
-               ->  Custom Scan (TessFilter) on union_a (actual rows=900.00 loops=1)
+               ->  Custom Scan (TessFilter) on public.union_a (actual rows=900.00 loops=1)
+                     Output: union_a.a
                      Batch Filter: (union_a.a > 100)
                      Rows Removed by Batch Filter: 100
                      Input Batches: 19
                      Input Rows: 1000
                      Output Rows: 900
-                     ->  Custom Scan (TessHeapScan) on union_a (actual rows=1000.00 loops=1)
+                     ->  Custom Scan (TessHeapScan) on public.union_a (actual rows=1000.00 loops=1)
+                           Output: union_a.a
                            Batch Size: 64
                            Batches: 19
                            Pages: 7
                            Deformed Datums: 1000
                            Restarted Datums: 0
          ->  Custom Scan (TessPack) (actual rows=480.00 loops=1)
+               Output: unnamed_subquery_1.a
                Rows Kept As: forwarded batches
                Batches: 11
-               ->  Custom Scan (TessFilter) on union_b (actual rows=480.00 loops=1)
+               ->  Custom Scan (TessFilter) on public.union_b (actual rows=480.00 loops=1)
+                     Output: union_b.a
                      Batch Filter: (union_b.a < 600)
                      Rows Removed by Batch Filter: 220
                      Input Batches: 13
                      Input Rows: 700
                      Output Rows: 480
-                     ->  Custom Scan (TessHeapScan) on union_b (actual rows=700.00 loops=1)
+                     ->  Custom Scan (TessHeapScan) on public.union_b (actual rows=700.00 loops=1)
+                           Output: union_b.a
                            Batch Size: 64
                            Batches: 13
                            Pages: 5
                            Deformed Datums: 700
                            Restarted Datums: 0
-(37 rows)
+(45 rows)
 
 SELECT union_same($$SELECT count(*), sum(a), count(a) FROM (SELECT a FROM union_a WHERE a > 100
                    UNION ALL SELECT a FROM union_b WHERE a < 600) AS s$$);
@@ -122,35 +138,48 @@ SELECT union_same($$SELECT sum(y), min(x) FROM (SELECT b AS y, a AS x FROM union
 
 -- Five branches: an empty table, a branch without rows, a constant
 -- target, a branch that is a plain scan.
-EXPLAIN (COSTS OFF)
+EXPLAIN (VERBOSE, COSTS OFF)
 SELECT count(*), sum(a), sum(k) FROM (
     SELECT a, 1 AS k FROM union_a WHERE a > 900
     UNION ALL SELECT a, 2 FROM union_empty
     UNION ALL SELECT a, 3 FROM union_b WHERE a > 5000
     UNION ALL SELECT a, 4 FROM union_b
     UNION ALL SELECT a, 5 FROM union_a WHERE a < 10) AS s;
-                               QUERY PLAN                                
--------------------------------------------------------------------------
+                                   QUERY PLAN                                   
+--------------------------------------------------------------------------------
  Custom Scan (TessAgg)
+   Output: (count(*)), (sum(s.a)), (sum(s.k))
    ->  Custom Scan (TessAppend)
+         Output: s.a, s.k
          ->  Custom Scan (TessPack)
+               Output: unnamed_subquery.a, unnamed_subquery.k
                Rows Kept As: forwarded batches
-               ->  Custom Scan (TessFilter) on union_a
+               ->  Custom Scan (TessFilter) on public.union_a
+                     Output: union_a.a, 1
                      Batch Filter: (union_a.a > 900)
-                     ->  Custom Scan (TessHeapScan) on union_a
-         ->  Custom Scan (TessHeapScan) on union_empty
+                     ->  Custom Scan (TessHeapScan) on public.union_a
+                           Output: union_a.a
+         ->  Custom Scan (TessHeapScan) on public.union_empty
+               Output: union_empty.a, 2
          ->  Custom Scan (TessPack)
+               Output: unnamed_subquery_1.a, unnamed_subquery_1."?column?"
                Rows Kept As: forwarded batches
-               ->  Custom Scan (TessFilter) on union_b union_b_1
+               ->  Custom Scan (TessFilter) on public.union_b union_b_1
+                     Output: union_b_1.a, 3
                      Batch Filter: (union_b_1.a > 5000)
-                     ->  Custom Scan (TessHeapScan) on union_b union_b_1
-         ->  Custom Scan (TessHeapScan) on union_b
+                     ->  Custom Scan (TessHeapScan) on public.union_b union_b_1
+                           Output: union_b_1.a
+         ->  Custom Scan (TessHeapScan) on public.union_b
+               Output: union_b.a, 4
          ->  Custom Scan (TessPack)
+               Output: unnamed_subquery_2.a, unnamed_subquery_2."?column?"
                Rows Kept As: forwarded batches
-               ->  Custom Scan (TessFilter) on union_a union_a_1
+               ->  Custom Scan (TessFilter) on public.union_a union_a_1
+                     Output: union_a_1.a, 5
                      Batch Filter: (union_a_1.a < 10)
-                     ->  Custom Scan (TessHeapScan) on union_a union_a_1
-(19 rows)
+                     ->  Custom Scan (TessHeapScan) on public.union_a union_a_1
+                           Output: union_a_1.a
+(32 rows)
 
 SELECT union_same($$SELECT count(*), sum(a), sum(k) FROM (
     SELECT a, 1 AS k FROM union_a WHERE a > 900
@@ -206,26 +235,31 @@ SELECT union_same($$SELECT count(*), sum(x) FROM (SELECT a AS x FROM union_a WHE
 (1 row)
 
 -- Clauses that run row by row: TessFilter in each branch, forwarded.
-EXPLAIN (COSTS OFF)
+EXPLAIN (VERBOSE, COSTS OFF)
 SELECT count(*) FROM (SELECT a FROM union_a WHERE upper(t) LIKE 'A1%'
                       UNION ALL SELECT a FROM union_b WHERE upper(t) LIKE 'B1%') AS s;
-                             QUERY PLAN                              
----------------------------------------------------------------------
+                                 QUERY PLAN                                 
+----------------------------------------------------------------------------
  Custom Scan (TessAgg)
+   Output: (count(*))
    ->  Custom Scan (TessAppend)
          ->  Custom Scan (TessPack)
                Rows Kept As: forwarded batches
                ->  Subquery Scan on unnamed_subquery
-                     ->  Custom Scan (TessFilter) on union_a
-                           Filter: (upper(t) ~~ 'A1%'::text)
-                           ->  Custom Scan (TessHeapScan) on union_a
+                     ->  Custom Scan (TessFilter) on public.union_a
+                           Output: NULL::integer
+                           Filter: (upper(union_a.t) ~~ 'A1%'::text)
+                           ->  Custom Scan (TessHeapScan) on public.union_a
+                                 Output: union_a.t
          ->  Custom Scan (TessPack)
                Rows Kept As: forwarded batches
                ->  Subquery Scan on unnamed_subquery_1
-                     ->  Custom Scan (TessFilter) on union_b
-                           Filter: (upper(t) ~~ 'B1%'::text)
-                           ->  Custom Scan (TessHeapScan) on union_b
-(14 rows)
+                     ->  Custom Scan (TessFilter) on public.union_b
+                           Output: NULL::integer
+                           Filter: (upper(union_b.t) ~~ 'B1%'::text)
+                           ->  Custom Scan (TessHeapScan) on public.union_b
+                                 Output: union_b.t
+(19 rows)
 
 -- Rows to a row-wise parent: the core's Append stays.
 EXPLAIN (COSTS OFF)
@@ -248,24 +282,32 @@ SELECT union_same($$SELECT a, t FROM union_a WHERE a > 995 UNION ALL SELECT a, t
 (1 row)
 
 -- A hash join whose outer side is UNION ALL, text and NULL keys included.
-EXPLAIN (COSTS OFF)
+EXPLAIN (VERBOSE, COSTS OFF)
 SELECT count(*), sum(s.a), count(s.t) FROM (SELECT a, t FROM union_a WHERE a > 300
                                              UNION ALL SELECT a, t FROM union_b) AS s
 JOIN union_b AS d ON d.a = s.a;
-                             QUERY PLAN                              
----------------------------------------------------------------------
+                                 QUERY PLAN                                 
+----------------------------------------------------------------------------
  Custom Scan (TessAgg)
+   Output: (count(*)), (sum(s.a)), (count(s.t))
    ->  Custom Scan (TessHashJoin)
+         Output: s.a, s.t
          Hash Cond: (s.a = d.a)
          ->  Custom Scan (TessAppend)
+               Output: s.a, s.t
                ->  Custom Scan (TessPack)
+                     Output: unnamed_subquery.a, unnamed_subquery.t
                      Rows Kept As: forwarded batches
-                     ->  Custom Scan (TessFilter) on union_a
+                     ->  Custom Scan (TessFilter) on public.union_a
+                           Output: union_a.a, union_a.t
                            Batch Filter: (union_a.a > 300)
-                           ->  Custom Scan (TessHeapScan) on union_a
-               ->  Custom Scan (TessHeapScan) on union_b
-         ->  Custom Scan (TessHeapScan) on union_b d
-(11 rows)
+                           ->  Custom Scan (TessHeapScan) on public.union_a
+                                 Output: union_a.a, union_a.t
+               ->  Custom Scan (TessHeapScan) on public.union_b
+                     Output: union_b.a, union_b.t
+         ->  Custom Scan (TessHeapScan) on public.union_b d
+               Output: d.a
+(19 rows)
 
 SELECT union_same($$SELECT count(*), sum(s.a), count(s.t) FROM (SELECT a, t FROM union_a WHERE a > 300
                    UNION ALL SELECT a, t FROM union_b) AS s JOIN union_b AS d ON d.a = s.a$$);
@@ -283,13 +325,14 @@ SELECT union_same($$SELECT a, t FROM (SELECT a, t FROM union_a WHERE a > 900
 (1 row)
 
 -- A limit above: the bound reaches every branch, a top-N sort in each.
-EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+EXPLAIN (VERBOSE, ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT count(*) FROM (SELECT a FROM (SELECT a FROM union_a ORDER BY a DESC LIMIT 100) AS x
                       UNION ALL SELECT a FROM (SELECT a FROM union_b ORDER BY a LIMIT 100) AS y
                       LIMIT 3) AS s;
-                                                     QUERY PLAN                                                      
----------------------------------------------------------------------------------------------------------------------
+                                                         QUERY PLAN                                                         
+----------------------------------------------------------------------------------------------------------------------------
  Custom Scan (TessAgg) (actual rows=1.00 loops=1)
+   Output: (count(*))
    Input Batches: 1
    Input Rows: 3
    Kernel Calls: 1
@@ -298,43 +341,53 @@ SELECT count(*) FROM (SELECT a FROM (SELECT a FROM union_a ORDER BY a DESC LIMIT
          Batches: 1
          ->  Subquery Scan on s (never executed)
                ->  Custom Scan (TessLimit) (actual rows=3.00 loops=1)
+                     Output: unnamed_subquery.a
                      Input Batches: 1
                      Input Rows: 64
                      Output Rows: 3
                      ->  Custom Scan (TessAppend) (actual rows=64.00 loops=1)
+                           Output: unnamed_subquery.a
                            Batches: 1
                            ->  Custom Scan (TessPack) (actual rows=64.00 loops=1)
+                                 Output: x.a
                                  Rows Kept As: forwarded batches
                                  Batches: 1
                                  ->  Custom Scan (TessLimit) (actual rows=64.00 loops=1)
+                                       Output: union_a.a
                                        Input Batches: 1
                                        Input Rows: 64
                                        Output Rows: 64
                                        ->  Custom Scan (TessSort) (actual rows=64.00 loops=1)
+                                             Output: union_a.a
                                              Sort Key: union_a.a DESC
                                              Sort Method: top-N in memory
                                              Memory Usage: 70 kB
                                              Input Batches: 19
                                              Input Rows: 1000
-                                             ->  Custom Scan (TessHeapScan) on union_a (actual rows=1000.00 loops=1)
+                                             ->  Custom Scan (TessHeapScan) on public.union_a (actual rows=1000.00 loops=1)
+                                                   Output: union_a.a
                                                    Batch Size: 64
                                                    Batches: 19
                                                    Pages: 7
                                                    Deformed Datums: 1000
                                                    Restarted Datums: 0
                            ->  Custom Scan (TessPack) (never executed)
+                                 Output: y.a
                                  Rows Kept As: forwarded batches
                                  Batches: 0
                                  ->  Custom Scan (TessLimit) (never executed)
+                                       Output: union_b.a
                                        Input Batches: 0
                                        Input Rows: 0
                                        Output Rows: 0
                                        ->  Custom Scan (TessSort) (never executed)
+                                             Output: union_b.a
                                              Sort Key: union_b.a
-                                             ->  Custom Scan (TessHeapScan) on union_b (never executed)
+                                             ->  Custom Scan (TessHeapScan) on public.union_b (never executed)
+                                                   Output: union_b.a
                                                    Batches: 0
                                                    Pages: 0
-(45 rows)
+(56 rows)
 
 SELECT union_same($$SELECT a FROM (SELECT a FROM (SELECT a FROM union_a ORDER BY a DESC LIMIT 100) AS x
                    UNION ALL SELECT a FROM (SELECT a FROM union_b WHERE a IS NOT NULL ORDER BY a LIMIT 100) AS y
@@ -847,30 +900,41 @@ SELECT union_same($$SELECT count(*), sum(k) FROM (SELECT k, v FROM union_part UN
 -- A child that is not partial, a table no worker may read, goes to one
 -- participant.
 ALTER TABLE union_b SET (parallel_workers = 0);
-EXPLAIN (COSTS OFF)
+EXPLAIN (VERBOSE, COSTS OFF)
 SELECT count(*), sum(a) FROM (SELECT a FROM union_a WHERE a > 100
                               UNION ALL SELECT a FROM union_b WHERE a < 600) AS s;
-                                        QUERY PLAN                                        
-------------------------------------------------------------------------------------------
+                                           QUERY PLAN                                            
+-------------------------------------------------------------------------------------------------
  Custom Scan (TessAgg)
+   Output: (count(*)), (sum(s.a))
    Partial Mode: Finalize
    ->  Custom Scan (TessGather)
+         Output: (PARTIAL count(*)), (PARTIAL sum(s.a))
          Workers Planned: 2
          ->  Parallel Custom Scan (TessSend)
+               Output: (PARTIAL count(*)), (PARTIAL sum(s.a))
                ->  Parallel Custom Scan (TessAgg)
+                     Output: (PARTIAL count(*)), (PARTIAL sum(s.a))
                      Partial Mode: Partial
                      ->  Parallel Custom Scan (TessAppend)
+                           Output: s.a
                            ->  Custom Scan (TessPack)
+                                 Output: unnamed_subquery_1.a
                                  Rows Kept As: forwarded batches
-                                 ->  Custom Scan (TessFilter) on union_b
+                                 ->  Custom Scan (TessFilter) on public.union_b
+                                       Output: union_b.a
                                        Batch Filter: (union_b.a < 600)
-                                       ->  Custom Scan (TessHeapScan) on union_b
+                                       ->  Custom Scan (TessHeapScan) on public.union_b
+                                             Output: union_b.a
                            ->  Custom Scan (TessPack)
+                                 Output: unnamed_subquery.a
                                  Rows Kept As: forwarded batches
-                                 ->  Parallel Custom Scan (TessFilter) on union_a
+                                 ->  Parallel Custom Scan (TessFilter) on public.union_a
+                                       Output: union_a.a
                                        Batch Filter: (union_a.a > 100)
-                                       ->  Parallel Custom Scan (TessHeapScan) on union_a
-(18 rows)
+                                       ->  Parallel Custom Scan (TessHeapScan) on public.union_a
+                                             Output: union_a.a
+(29 rows)
 
 SELECT union_same($$SELECT count(*), sum(a) FROM (SELECT a FROM union_a WHERE a > 100
                    UNION ALL SELECT a FROM union_b WHERE a < 600) AS s$$);
@@ -897,32 +961,43 @@ SELECT union_same($$SELECT count(*), sum(a) FROM (SELECT a FROM union_a WHERE a 
 -- the sum.
 CREATE FUNCTION union_slow(v int, seconds float8) RETURNS int
 LANGUAGE plpgsql PARALLEL SAFE AS $$ BEGIN PERFORM pg_sleep(seconds); RETURN v; END $$;
-EXPLAIN (COSTS OFF)
+EXPLAIN (VERBOSE, COSTS OFF)
 SELECT count(*), sum(a) FROM (SELECT a FROM union_a WHERE a > 980 AND union_slow(a, 0.01) > 0
                               UNION ALL SELECT a FROM union_b WHERE a < 20 AND union_slow(a, 0.03) > 0) AS s;
-                                         QUERY PLAN                                          
----------------------------------------------------------------------------------------------
+                                             QUERY PLAN                                              
+-----------------------------------------------------------------------------------------------------
  Custom Scan (TessAgg)
+   Output: (count(*)), (sum(s.a))
    Partial Mode: Finalize
    ->  Custom Scan (TessGather)
+         Output: (PARTIAL count(*)), (PARTIAL sum(s.a))
          Workers Planned: 2
          ->  Parallel Custom Scan (TessSend)
+               Output: (PARTIAL count(*)), (PARTIAL sum(s.a))
                ->  Parallel Custom Scan (TessAgg)
+                     Output: (PARTIAL count(*)), (PARTIAL sum(s.a))
                      Partial Mode: Partial
                      ->  Parallel Custom Scan (TessAppend)
+                           Output: s.a
                            ->  Custom Scan (TessPack)
+                                 Output: unnamed_subquery_1.a
                                  Rows Kept As: forwarded batches
-                                 ->  Custom Scan (TessFilter) on union_b
-                                       Filter: (union_slow(a, '0.03'::double precision) > 0)
+                                 ->  Custom Scan (TessFilter) on public.union_b
+                                       Output: union_b.a
+                                       Filter: (union_slow(union_b.a, '0.03'::double precision) > 0)
                                        Batch Filter: (union_b.a < 20)
-                                       ->  Custom Scan (TessHeapScan) on union_b
+                                       ->  Custom Scan (TessHeapScan) on public.union_b
+                                             Output: union_b.a
                            ->  Custom Scan (TessPack)
+                                 Output: unnamed_subquery.a
                                  Rows Kept As: forwarded batches
-                                 ->  Parallel Custom Scan (TessFilter) on union_a
-                                       Filter: (union_slow(a, '0.01'::double precision) > 0)
+                                 ->  Parallel Custom Scan (TessFilter) on public.union_a
+                                       Output: union_a.a
+                                       Filter: (union_slow(union_a.a, '0.01'::double precision) > 0)
                                        Batch Filter: (union_a.a > 980)
-                                       ->  Parallel Custom Scan (TessHeapScan) on union_a
-(20 rows)
+                                       ->  Parallel Custom Scan (TessHeapScan) on public.union_a
+                                             Output: union_a.a
+(31 rows)
 
 SELECT count(*), sum(a) FROM (SELECT a FROM union_a WHERE a > 980 AND union_slow(a, 0.01) > 0
                               UNION ALL SELECT a FROM union_b WHERE a < 20 AND union_slow(a, 0.03) > 0) AS s;
@@ -1075,24 +1150,32 @@ RESET min_parallel_table_scan_size;
 -- UNION without ALL: TessAgg groups the branches' rows by every column
 -- over TessAppend, in place of the core's HashAggregate over its Append.
 SET max_parallel_workers_per_gather = 0;
-EXPLAIN (COSTS OFF)
+EXPLAIN (VERBOSE, COSTS OFF)
 SELECT a FROM union_a WHERE a > 100 UNION SELECT a FROM union_b WHERE a < 600;
-                          QUERY PLAN                           
----------------------------------------------------------------
+                              QUERY PLAN                              
+----------------------------------------------------------------------
  Custom Scan (TessAgg)
+   Output: unnamed_subquery.a
    Group Key: unnamed_subquery.a
    ->  Custom Scan (TessAppend)
+         Output: unnamed_subquery.a
          ->  Custom Scan (TessPack)
+               Output: unnamed_subquery.a
                Rows Kept As: forwarded batches
-               ->  Custom Scan (TessFilter) on union_a
+               ->  Custom Scan (TessFilter) on public.union_a
+                     Output: union_a.a
                      Batch Filter: (union_a.a > 100)
-                     ->  Custom Scan (TessHeapScan) on union_a
+                     ->  Custom Scan (TessHeapScan) on public.union_a
+                           Output: union_a.a
          ->  Custom Scan (TessPack)
+               Output: unnamed_subquery_1.a
                Rows Kept As: forwarded batches
-               ->  Custom Scan (TessFilter) on union_b
+               ->  Custom Scan (TessFilter) on public.union_b
+                     Output: union_b.a
                      Batch Filter: (union_b.a < 600)
-                     ->  Custom Scan (TessHeapScan) on union_b
-(13 rows)
+                     ->  Custom Scan (TessHeapScan) on public.union_b
+                           Output: union_b.a
+(21 rows)
 
 SELECT union_same($$SELECT a FROM union_a WHERE a > 100 UNION SELECT a FROM union_b WHERE a < 600$$);
  union_same 
@@ -1148,27 +1231,37 @@ SELECT a, b FROM union_a WHERE a < 300 UNION SELECT a, b / 10 FROM union_b WHERE
 (21 rows)
 
 -- A sort and a limit above.
-EXPLAIN (COSTS OFF)
+EXPLAIN (VERBOSE, COSTS OFF)
 SELECT a FROM union_a WHERE a > 100 UNION SELECT a FROM union_b WHERE a < 600 ORDER BY 1 DESC LIMIT 3;
-                                QUERY PLAN                                 
----------------------------------------------------------------------------
+                                    QUERY PLAN                                    
+----------------------------------------------------------------------------------
  Custom Scan (TessLimit)
+   Output: unnamed_subquery.a
    ->  Custom Scan (TessSort)
+         Output: unnamed_subquery.a
          Sort Key: unnamed_subquery.a DESC
          ->  Custom Scan (TessAgg)
+               Output: unnamed_subquery.a
                Group Key: unnamed_subquery.a
                ->  Custom Scan (TessAppend)
+                     Output: unnamed_subquery.a
                      ->  Custom Scan (TessPack)
+                           Output: unnamed_subquery.a
                            Rows Kept As: forwarded batches
-                           ->  Custom Scan (TessFilter) on union_a
+                           ->  Custom Scan (TessFilter) on public.union_a
+                                 Output: union_a.a
                                  Batch Filter: (union_a.a > 100)
-                                 ->  Custom Scan (TessHeapScan) on union_a
+                                 ->  Custom Scan (TessHeapScan) on public.union_a
+                                       Output: union_a.a
                      ->  Custom Scan (TessPack)
+                           Output: unnamed_subquery_1.a
                            Rows Kept As: forwarded batches
-                           ->  Custom Scan (TessFilter) on union_b
+                           ->  Custom Scan (TessFilter) on public.union_b
+                                 Output: union_b.a
                                  Batch Filter: (union_b.a < 600)
-                                 ->  Custom Scan (TessHeapScan) on union_b
-(16 rows)
+                                 ->  Custom Scan (TessHeapScan) on public.union_b
+                                       Output: union_b.a
+(26 rows)
 
 SELECT a FROM union_a WHERE a > 100 UNION SELECT a FROM union_b WHERE a < 600 ORDER BY 1 DESC LIMIT 3;
   a   
@@ -1199,22 +1292,29 @@ RESET work_mem;
 -- within bigint), the core's: the projection would not find the set
 -- operation's columns in the node's plan. So are the operations of a
 -- recursive union.
-EXPLAIN (COSTS OFF)
+EXPLAIN (VERBOSE, COSTS OFF)
 SELECT a FROM union_a UNION SELECT a FROM union_b UNION ALL SELECT a FROM union_empty;
-                          QUERY PLAN                           
----------------------------------------------------------------
+                              QUERY PLAN                              
+----------------------------------------------------------------------
  Append
    ->  Custom Scan (TessAgg)
+         Output: unnamed_subquery.a
          Group Key: unnamed_subquery.a
          ->  Custom Scan (TessAppend)
+               Output: unnamed_subquery.a
                ->  Custom Scan (TessPack)
+                     Output: unnamed_subquery.a
                      Rows Kept As: forwarded batches
-                     ->  Custom Scan (TessHeapScan) on union_a
+                     ->  Custom Scan (TessHeapScan) on public.union_a
+                           Output: union_a.a
                ->  Custom Scan (TessPack)
+                     Output: unnamed_subquery_1.a
                      Rows Kept As: forwarded batches
-                     ->  Custom Scan (TessHeapScan) on union_b
-   ->  Seq Scan on union_empty
-(11 rows)
+                     ->  Custom Scan (TessHeapScan) on public.union_b
+                           Output: union_b.a
+   ->  Seq Scan on public.union_empty
+         Output: union_empty.a
+(18 rows)
 
 SELECT union_same($$SELECT a FROM union_a UNION SELECT a FROM union_b UNION ALL SELECT a FROM union_a WHERE a < 3$$);
  union_same 
@@ -1249,19 +1349,25 @@ SELECT union_same($$WITH RECURSIVE r(n) AS ((SELECT a FROM union_a WHERE a < 4 U
 (1 row)
 
 -- Text columns go through a dictionary of their values.
-EXPLAIN (COSTS OFF) SELECT t FROM union_a UNION SELECT t FROM union_b;
-                       QUERY PLAN                        
----------------------------------------------------------
+EXPLAIN (VERBOSE, COSTS OFF) SELECT t FROM union_a UNION SELECT t FROM union_b;
+                           QUERY PLAN                           
+----------------------------------------------------------------
  Custom Scan (TessAgg)
+   Output: unnamed_subquery.t
    Group Key: unnamed_subquery.t
    ->  Custom Scan (TessAppend)
+         Output: unnamed_subquery.t
          ->  Custom Scan (TessPack)
+               Output: unnamed_subquery.t
                Rows Kept As: forwarded batches
-               ->  Custom Scan (TessHeapScan) on union_a
+               ->  Custom Scan (TessHeapScan) on public.union_a
+                     Output: union_a.t
          ->  Custom Scan (TessPack)
+               Output: unnamed_subquery_1.t
                Rows Kept As: forwarded batches
-               ->  Custom Scan (TessHeapScan) on union_b
-(9 rows)
+               ->  Custom Scan (TessHeapScan) on public.union_b
+                     Output: union_b.t
+(15 rows)
 
 SELECT union_same($$SELECT t FROM union_a UNION SELECT t FROM union_b$$);
  union_same 
@@ -1284,29 +1390,40 @@ SET min_parallel_table_scan_size = 0;
 -- The node's model of a partial scan would keep so small a table serial.
 SET tessera.scan_parallel_setup_cost = 0;
 SET tessera.scan_worker_page_cost = 0;
-EXPLAIN (COSTS OFF) SELECT c, b FROM union_keys WHERE b < 5 UNION SELECT c, b FROM union_keys WHERE b > 3;
-                                                QUERY PLAN                                                
-----------------------------------------------------------------------------------------------------------
+EXPLAIN (VERBOSE, COSTS OFF) SELECT c, b FROM union_keys WHERE b < 5 UNION SELECT c, b FROM union_keys WHERE b > 3;
+                                                   QUERY PLAN                                                    
+-----------------------------------------------------------------------------------------------------------------
  Custom Scan (TessAgg)
+   Output: unnamed_subquery.c, unnamed_subquery.b
    Group Key: unnamed_subquery.c, unnamed_subquery.b
    ->  Custom Scan (TessGather)
+         Output: unnamed_subquery.c, unnamed_subquery.b
          Workers Planned: 2
          ->  Parallel Custom Scan (TessSend)
+               Output: unnamed_subquery.c, unnamed_subquery.b
                ->  Parallel Custom Scan (TessAgg)
+                     Output: unnamed_subquery.c, unnamed_subquery.b
                      Group Key: unnamed_subquery.c, unnamed_subquery.b
                      Partial Mode: Partial
                      ->  Parallel Custom Scan (TessAppend)
+                           Output: unnamed_subquery.c, unnamed_subquery.b
                            ->  Custom Scan (TessPack)
+                                 Output: unnamed_subquery.c, unnamed_subquery.b
                                  Rows Kept As: forwarded batches
-                                 ->  Parallel Custom Scan (TessFilter) on union_keys
+                                 ->  Parallel Custom Scan (TessFilter) on public.union_keys
+                                       Output: union_keys.c, union_keys.b
                                        Batch Filter: (union_keys.b < 5)
-                                       ->  Parallel Custom Scan (TessHeapScan) on union_keys
+                                       ->  Parallel Custom Scan (TessHeapScan) on public.union_keys
+                                             Output: union_keys.c, union_keys.b
                            ->  Custom Scan (TessPack)
+                                 Output: unnamed_subquery_1.c, unnamed_subquery_1.b
                                  Rows Kept As: forwarded batches
-                                 ->  Parallel Custom Scan (TessFilter) on union_keys union_keys_1
+                                 ->  Parallel Custom Scan (TessFilter) on public.union_keys union_keys_1
+                                       Output: union_keys_1.c, union_keys_1.b
                                        Batch Filter: (union_keys_1.b > 3)
-                                       ->  Parallel Custom Scan (TessHeapScan) on union_keys union_keys_1
-(19 rows)
+                                       ->  Parallel Custom Scan (TessHeapScan) on public.union_keys union_keys_1
+                                             Output: union_keys_1.c, union_keys_1.b
+(30 rows)
 
 SELECT union_same($$SELECT c, b FROM union_keys WHERE b < 5 UNION SELECT c, b FROM union_keys WHERE b > 3$$);
  union_same 
@@ -1321,41 +1438,58 @@ SELECT union_same($$SELECT count(*), sum(x) FROM (SELECT c AS x FROM union_keys 
 (1 row)
 
 -- The same as the left side of an EXCEPT.
-EXPLAIN (COSTS OFF)
+EXPLAIN (VERBOSE, COSTS OFF)
 (SELECT c FROM union_keys WHERE b < 5 UNION SELECT c FROM union_keys WHERE b > 3) EXCEPT SELECT b FROM union_keys WHERE b = 1;
-                                                   QUERY PLAN                                                   
-----------------------------------------------------------------------------------------------------------------
+                                                      QUERY PLAN                                                       
+-----------------------------------------------------------------------------------------------------------------------
  Custom Scan (TessAgg)
+   Output: unnamed_subquery.c
    Group Key: unnamed_subquery.c
    Set Operation: Except
    ->  Custom Scan (TessAgg)
+         Output: unnamed_subquery.c
          Group Key: unnamed_subquery.c
          ->  Custom Scan (TessGather)
+               Output: unnamed_subquery.c
                Workers Planned: 2
                ->  Parallel Custom Scan (TessSend)
+                     Output: unnamed_subquery.c
                      ->  Parallel Custom Scan (TessAgg)
+                           Output: unnamed_subquery.c
                            Group Key: unnamed_subquery.c
                            Partial Mode: Partial
                            ->  Parallel Custom Scan (TessAppend)
+                                 Output: unnamed_subquery.c
                                  ->  Custom Scan (TessPack)
+                                       Output: unnamed_subquery.c
                                        Rows Kept As: forwarded batches
-                                       ->  Parallel Custom Scan (TessFilter) on union_keys
+                                       ->  Parallel Custom Scan (TessFilter) on public.union_keys
+                                             Output: union_keys.c
                                              Batch Filter: (union_keys.b < 5)
-                                             ->  Parallel Custom Scan (TessHeapScan) on union_keys
+                                             ->  Parallel Custom Scan (TessHeapScan) on public.union_keys
+                                                   Output: union_keys.c, union_keys.b
                                  ->  Custom Scan (TessPack)
+                                       Output: unnamed_subquery_1.c
                                        Rows Kept As: forwarded batches
-                                       ->  Parallel Custom Scan (TessFilter) on union_keys union_keys_1
+                                       ->  Parallel Custom Scan (TessFilter) on public.union_keys union_keys_1
+                                             Output: union_keys_1.c
                                              Batch Filter: (union_keys_1.b > 3)
-                                             ->  Parallel Custom Scan (TessHeapScan) on union_keys union_keys_1
+                                             ->  Parallel Custom Scan (TessHeapScan) on public.union_keys union_keys_1
+                                                   Output: union_keys_1.c, union_keys_1.b
    ->  Custom Scan (TessPack)
+         Output: unnamed_subquery_2.b
          Rows Kept As: forwarded batches
          ->  Custom Scan (TessGather)
+               Output: union_keys_2.b
                Workers Planned: 2
                ->  Parallel Custom Scan (TessSend)
-                     ->  Parallel Custom Scan (TessFilter) on union_keys union_keys_2
+                     Output: union_keys_2.b
+                     ->  Parallel Custom Scan (TessFilter) on public.union_keys union_keys_2
+                           Output: union_keys_2.b
                            Batch Filter: (union_keys_2.b = 1)
-                           ->  Parallel Custom Scan (TessHeapScan) on union_keys union_keys_2
-(30 rows)
+                           ->  Parallel Custom Scan (TessHeapScan) on public.union_keys union_keys_2
+                                 Output: union_keys_2.b
+(47 rows)
 
 SELECT union_same($$(SELECT c FROM union_keys WHERE b < 5 UNION SELECT c FROM union_keys WHERE b > 3)
                    EXCEPT SELECT b FROM union_keys WHERE b = 1$$);
@@ -1373,19 +1507,25 @@ SELECT union_same($$SELECT c, b FROM union_keys WHERE b < 5 UNION SELECT c, b FR
 
 RESET parallel_leader_participation;
 ALTER TABLE union_b SET (parallel_workers = 0);
-EXPLAIN (COSTS OFF) SELECT c FROM union_keys UNION SELECT a FROM union_b;
-                         QUERY PLAN                         
-------------------------------------------------------------
+EXPLAIN (VERBOSE, COSTS OFF) SELECT c FROM union_keys UNION SELECT a FROM union_b;
+                            QUERY PLAN                             
+-------------------------------------------------------------------
  Custom Scan (TessAgg)
+   Output: unnamed_subquery.c
    Group Key: unnamed_subquery.c
    ->  Custom Scan (TessAppend)
+         Output: unnamed_subquery.c
          ->  Custom Scan (TessPack)
+               Output: unnamed_subquery.c
                Rows Kept As: forwarded batches
-               ->  Custom Scan (TessHeapScan) on union_keys
+               ->  Custom Scan (TessHeapScan) on public.union_keys
+                     Output: union_keys.c
          ->  Custom Scan (TessPack)
+               Output: unnamed_subquery_1.a
                Rows Kept As: forwarded batches
-               ->  Custom Scan (TessHeapScan) on union_b
-(9 rows)
+               ->  Custom Scan (TessHeapScan) on public.union_b
+                     Output: union_b.a
+(15 rows)
 
 ALTER TABLE union_b RESET (parallel_workers);
 SET max_parallel_workers_per_gather = 0;
@@ -1410,33 +1550,43 @@ FROM generate_series(1, 700) AS i;
 INSERT INTO setop_l VALUES (NULL, NULL, NULL, NULL, NULL), (NULL, NULL, NULL, NULL, NULL);
 INSERT INTO setop_r VALUES (NULL, NULL, NULL, NULL, NULL);
 ANALYZE setop_l, setop_r;
-EXPLAIN (COSTS OFF) SELECT k, t FROM setop_l EXCEPT SELECT k, t FROM setop_r;
-                     QUERY PLAN                      
------------------------------------------------------
+EXPLAIN (VERBOSE, COSTS OFF) SELECT k, t FROM setop_l EXCEPT SELECT k, t FROM setop_r;
+                         QUERY PLAN                         
+------------------------------------------------------------
  Custom Scan (TessAgg)
+   Output: unnamed_subquery.k, unnamed_subquery.t
    Group Key: unnamed_subquery.k, unnamed_subquery.t
    Set Operation: Except
    ->  Custom Scan (TessPack)
+         Output: unnamed_subquery.k, unnamed_subquery.t
          Rows Kept As: forwarded batches
-         ->  Custom Scan (TessHeapScan) on setop_l
+         ->  Custom Scan (TessHeapScan) on public.setop_l
+               Output: setop_l.k, setop_l.t
    ->  Custom Scan (TessPack)
+         Output: unnamed_subquery_1.k, unnamed_subquery_1.t
          Rows Kept As: forwarded batches
-         ->  Custom Scan (TessHeapScan) on setop_r
-(9 rows)
+         ->  Custom Scan (TessHeapScan) on public.setop_r
+               Output: setop_r.k, setop_r.t
+(14 rows)
 
-EXPLAIN (COSTS OFF) SELECT k FROM setop_l INTERSECT ALL SELECT k FROM setop_r;
-                    QUERY PLAN                     
----------------------------------------------------
+EXPLAIN (VERBOSE, COSTS OFF) SELECT k FROM setop_l INTERSECT ALL SELECT k FROM setop_r;
+                        QUERY PLAN                        
+----------------------------------------------------------
  Custom Scan (TessAgg)
+   Output: unnamed_subquery_1.k
    Group Key: unnamed_subquery_1.k
    Set Operation: Intersect All
    ->  Custom Scan (TessPack)
+         Output: unnamed_subquery_1.k
          Rows Kept As: forwarded batches
-         ->  Custom Scan (TessHeapScan) on setop_r
+         ->  Custom Scan (TessHeapScan) on public.setop_r
+               Output: setop_r.k
    ->  Custom Scan (TessPack)
+         Output: unnamed_subquery.k
          Rows Kept As: forwarded batches
-         ->  Custom Scan (TessHeapScan) on setop_l
-(9 rows)
+         ->  Custom Scan (TessHeapScan) on public.setop_l
+               Output: setop_l.k
+(14 rows)
 
 SELECT union_same($$SELECT k, t FROM setop_l EXCEPT SELECT k, t FROM setop_r$$);
  union_same 
@@ -1554,23 +1704,30 @@ SELECT union_same($$SELECT n::text FROM (SELECT n FROM setop_r INTERSECT ALL SEL
 -- Above: a sort and a limit; within another set operation, the node's in
 -- the node's: EXCEPT of EXCEPT, INTERSECT within UNION, UNION and
 -- INTERSECT of two columns as the sides of EXCEPT ALL, a count above.
-EXPLAIN (COSTS OFF)
+EXPLAIN (VERBOSE, COSTS OFF)
 SELECT k FROM setop_l EXCEPT SELECT k FROM setop_r ORDER BY 1 DESC LIMIT 3;
-                          QUERY PLAN                           
----------------------------------------------------------------
+                              QUERY PLAN                              
+----------------------------------------------------------------------
  Custom Scan (TessLimit)
+   Output: unnamed_subquery.k
    ->  Custom Scan (TessSort)
+         Output: unnamed_subquery.k
          Sort Key: unnamed_subquery.k DESC
          ->  Custom Scan (TessAgg)
+               Output: unnamed_subquery.k
                Group Key: unnamed_subquery.k
                Set Operation: Except
                ->  Custom Scan (TessPack)
+                     Output: unnamed_subquery.k
                      Rows Kept As: forwarded batches
-                     ->  Custom Scan (TessHeapScan) on setop_l
+                     ->  Custom Scan (TessHeapScan) on public.setop_l
+                           Output: setop_l.k
                ->  Custom Scan (TessPack)
+                     Output: unnamed_subquery_1.k
                      Rows Kept As: forwarded batches
-                     ->  Custom Scan (TessHeapScan) on setop_r
-(12 rows)
+                     ->  Custom Scan (TessHeapScan) on public.setop_r
+                           Output: setop_r.k
+(19 rows)
 
 SELECT k FROM setop_l EXCEPT SELECT k FROM setop_r ORDER BY 1 DESC LIMIT 3;
  k  
@@ -1580,26 +1737,34 @@ SELECT k FROM setop_l EXCEPT SELECT k FROM setop_r ORDER BY 1 DESC LIMIT 3;
  37
 (3 rows)
 
-EXPLAIN (COSTS OFF)
+EXPLAIN (VERBOSE, COSTS OFF)
 SELECT k FROM setop_l EXCEPT SELECT k FROM setop_r EXCEPT SELECT a FROM union_a;
-                       QUERY PLAN                        
----------------------------------------------------------
+                           QUERY PLAN                           
+----------------------------------------------------------------
  Custom Scan (TessAgg)
+   Output: unnamed_subquery.k
    Group Key: unnamed_subquery.k
    Set Operation: Except
    ->  Custom Scan (TessAgg)
+         Output: unnamed_subquery.k
          Group Key: unnamed_subquery.k
          Set Operation: Except
          ->  Custom Scan (TessPack)
+               Output: unnamed_subquery.k
                Rows Kept As: forwarded batches
-               ->  Custom Scan (TessHeapScan) on setop_l
+               ->  Custom Scan (TessHeapScan) on public.setop_l
+                     Output: setop_l.k
          ->  Custom Scan (TessPack)
+               Output: unnamed_subquery_1.k
                Rows Kept As: forwarded batches
-               ->  Custom Scan (TessHeapScan) on setop_r
+               ->  Custom Scan (TessHeapScan) on public.setop_r
+                     Output: setop_r.k
    ->  Custom Scan (TessPack)
+         Output: unnamed_subquery_2.a
          Rows Kept As: forwarded batches
-         ->  Custom Scan (TessHeapScan) on union_a
-(15 rows)
+         ->  Custom Scan (TessHeapScan) on public.union_a
+               Output: union_a.a
+(23 rows)
 
 SELECT union_same($$SELECT k FROM setop_l EXCEPT SELECT k FROM setop_r EXCEPT SELECT a FROM union_a WHERE a < 30$$);
  union_same 

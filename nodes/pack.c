@@ -502,6 +502,9 @@ pack_explain(CustomScanState *css, List *ancestors, ExplainState *es)
 {
 	PackState  *state = (PackState *) css;
 
+	/* How the rows became batches: VERBOSE only. */
+	if (!es->verbose)
+		return;
 	if (state->unary != NULL)
 	{
 		ExplainPropertyText("Rows Kept As", "forwarded batches", es);

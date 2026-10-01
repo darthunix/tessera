@@ -59,35 +59,39 @@ SELECT count(*) FROM (SELECT a FROM limit_t LIMIT NULL) AS s;
 (1 row)
 
 -- A count of zero stops before the first batch is read.
-EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+EXPLAIN (VERBOSE, ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT a FROM limit_t LIMIT 0;
-                          QUERY PLAN                          
---------------------------------------------------------------
+                             QUERY PLAN                              
+---------------------------------------------------------------------
  Custom Scan (TessLimit) (actual rows=0.00 loops=1)
+   Output: a
    Input Batches: 0
    Input Rows: 0
    Output Rows: 0
-   ->  Custom Scan (TessHeapScan) on limit_t (never executed)
+   ->  Custom Scan (TessHeapScan) on public.limit_t (never executed)
+         Output: a
          Batches: 0
          Pages: 0
-(7 rows)
+(9 rows)
 
 -- More than one batch, with NULL values passing through.
-EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+EXPLAIN (VERBOSE, ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT a FROM limit_t LIMIT 70;
-                               QUERY PLAN                                
--------------------------------------------------------------------------
+                                   QUERY PLAN                                   
+--------------------------------------------------------------------------------
  Custom Scan (TessLimit) (actual rows=70.00 loops=1)
+   Output: a
    Input Batches: 2
    Input Rows: 70
    Output Rows: 70
-   ->  Custom Scan (TessHeapScan) on limit_t (actual rows=70.00 loops=1)
+   ->  Custom Scan (TessHeapScan) on public.limit_t (actual rows=70.00 loops=1)
+         Output: a
          Batch Size: 64
          Batches: 2
          Pages: 1
          Deformed Datums: 70
          Restarted Datums: 0
-(10 rows)
+(12 rows)
 
 SELECT count(*), count(b), sum(a) FROM (SELECT a, b FROM limit_t LIMIT 70) AS s;
  count | count | sum  
@@ -108,21 +112,24 @@ SELECT a FROM limit_t ORDER BY a FETCH FIRST 3 ROWS WITH TIES;
 
 -- Over a sort the core limit stays, since a pack would copy every row it
 -- reads; the sort stays a top-N sort.
-EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+EXPLAIN (VERBOSE, ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT a FROM limit_t ORDER BY a DESC LIMIT 3;
-                                   QUERY PLAN                                   
---------------------------------------------------------------------------------
+                                      QUERY PLAN                                       
+---------------------------------------------------------------------------------------
  Limit (actual rows=3.00 loops=1)
+   Output: a
    ->  Sort (actual rows=3.00 loops=1)
-         Sort Key: a DESC
+         Output: a
+         Sort Key: limit_t.a DESC
          Sort Method: top-N heapsort  Memory: 25kB
-         ->  Custom Scan (TessHeapScan) on limit_t (actual rows=100.00 loops=1)
+         ->  Custom Scan (TessHeapScan) on public.limit_t (actual rows=100.00 loops=1)
+               Output: a
                Batch Size: 64
                Batches: 2
                Pages: 1
                Deformed Datums: 100
                Restarted Datums: 0
-(10 rows)
+(13 rows)
 
 SELECT a FROM limit_t ORDER BY a DESC LIMIT 3;
   a  
@@ -133,26 +140,31 @@ SELECT a FROM limit_t ORDER BY a DESC LIMIT 3;
 (3 rows)
 
 -- A parameter is re-evaluated on every rescan.
-EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+EXPLAIN (VERBOSE, ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT g, (SELECT count(*) FROM (SELECT a FROM limit_t LIMIT g) AS s) AS n
 FROM generate_series(1, 3) AS g;
-                                      QUERY PLAN                                      
---------------------------------------------------------------------------------------
- Function Scan on generate_series g (actual rows=3.00 loops=1)
+                                         QUERY PLAN                                          
+---------------------------------------------------------------------------------------------
+ Function Scan on pg_catalog.generate_series g (actual rows=3.00 loops=1)
+   Output: g.g, (SubPlan expr_1)
+   Function Call: generate_series(1, 3)
    SubPlan expr_1
      ->  Aggregate (actual rows=1.00 loops=3)
+           Output: count(*)
            ->  Custom Scan (TessLimit) (actual rows=2.00 loops=3)
+                 Output: NULL::integer
                  Input Batches: 3
                  Input Rows: 6
                  Output Rows: 6
-                 ->  Custom Scan (TessHeapScan) on limit_t (actual rows=2.00 loops=3)
+                 ->  Custom Scan (TessHeapScan) on public.limit_t (actual rows=2.00 loops=3)
+                       Output: NULL::integer
                        Batch Size: 64
                        Batches: 3
                        Pages: 3
                        Deformed Datums: 0
                        Restarted Datums: 0
                        Computed Datums: 6
-(14 rows)
+(19 rows)
 
 SELECT g, (SELECT count(*) FROM (SELECT a FROM limit_t LIMIT g) AS s) AS n
 FROM generate_series(1, 3) AS g;
@@ -246,21 +258,23 @@ SELECT a FROM limit_t WHERE a > 90 LIMIT 3;
 
 RESET debug_parallel_query;
 -- An empty child.
-EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+EXPLAIN (VERBOSE, ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT a FROM limit_empty LIMIT 3;
-                                 QUERY PLAN                                 
-----------------------------------------------------------------------------
+                                    QUERY PLAN                                     
+-----------------------------------------------------------------------------------
  Custom Scan (TessLimit) (actual rows=0.00 loops=1)
+   Output: a
    Input Batches: 0
    Input Rows: 0
    Output Rows: 0
-   ->  Custom Scan (TessHeapScan) on limit_empty (actual rows=0.00 loops=1)
+   ->  Custom Scan (TessHeapScan) on public.limit_empty (actual rows=0.00 loops=1)
+         Output: a
          Batch Size: 64
          Batches: 0
          Pages: 0
          Deformed Datums: 0
          Restarted Datums: 0
-(10 rows)
+(12 rows)
 
 SELECT a FROM limit_empty LIMIT 3;
  a 

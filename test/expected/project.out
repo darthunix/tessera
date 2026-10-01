@@ -67,28 +67,31 @@ EXPLAIN (COSTS OFF) SELECT a, c FROM project_t WHERE a > 195;
 (3 rows)
 
 -- A limit above narrows the rows before the columns are computed.
-EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+EXPLAIN (VERBOSE, ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT a + 1 AS next, c || '!' AS shout FROM project_t WHERE a > 100 LIMIT 3;
-                                    QUERY PLAN                                    
-----------------------------------------------------------------------------------
+                                       QUERY PLAN                                        
+-----------------------------------------------------------------------------------------
  Custom Scan (TessLimit) (actual rows=3.00 loops=1)
+   Output: ((a + 1)), ((c || '!'::text))
    Input Batches: 1
    Input Rows: 24
    Output Rows: 3
-   ->  Custom Scan (TessFilter) on project_t (actual rows=24.00 loops=1)
-         Batch Filter: (a > 100)
+   ->  Custom Scan (TessFilter) on public.project_t (actual rows=24.00 loops=1)
+         Output: (a + 1), (c || '!'::text)
+         Batch Filter: (project_t.a > 100)
          Rows Removed by Batch Filter: 104
          Input Batches: 2
          Input Rows: 128
          Output Rows: 24
          Computed Datums: 6
-         ->  Custom Scan (TessHeapScan) on project_t (actual rows=128.00 loops=1)
+         ->  Custom Scan (TessHeapScan) on public.project_t (actual rows=128.00 loops=1)
+               Output: a, c
                Batch Size: 64
                Batches: 2
                Pages: 1
                Deformed Datums: 131
                Restarted Datums: 0
-(17 rows)
+(20 rows)
 
 SELECT a + 1 AS next, c || '!' AS shout FROM project_t WHERE a > 100 LIMIT 3;
  next | shout 
@@ -181,22 +184,24 @@ SELECT a * 2 AS twice, c || '!' AS shout FROM project_t LIMIT 3;
          Output: (a * 2), (c || '!'::text)
 (4 rows)
 
-EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+EXPLAIN (VERBOSE, ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT a * 2 AS twice, c || '!' AS shout FROM project_t LIMIT 3;
-                                QUERY PLAN                                
---------------------------------------------------------------------------
+                                   QUERY PLAN                                    
+---------------------------------------------------------------------------------
  Custom Scan (TessLimit) (actual rows=3.00 loops=1)
+   Output: ((a * 2)), ((c || '!'::text))
    Input Batches: 1
    Input Rows: 3
    Output Rows: 3
-   ->  Custom Scan (TessHeapScan) on project_t (actual rows=3.00 loops=1)
+   ->  Custom Scan (TessHeapScan) on public.project_t (actual rows=3.00 loops=1)
+         Output: (a * 2), (c || '!'::text)
          Batch Size: 64
          Batches: 1
          Pages: 1
          Deformed Datums: 6
          Restarted Datums: 0
          Computed Datums: 6
-(11 rows)
+(13 rows)
 
 SELECT project_same($$SELECT a * 2 AS twice, c || '!' AS shout FROM project_t LIMIT 3$$);
           project_same           
