@@ -74,6 +74,13 @@ undefined behavior where it cannot (overlap, dangling pointers).
 | `TESS_ERROR_DIVISION_BY_ZERO` | `22012` | A zero divisor. |
 | `TESS_ERROR_PANIC` | `XX000` | A Rust panic was caught; `message` holds its text. |
 | `TESS_ERROR_DATA_EXCEPTION` | the function's | Another error of a batch function, as the function it implements raises it (`22011` `negative substring length not allowed`). |
+| `TESS_ERROR_DATA_CORRUPTED` | `XX001` | Spilled bytes read back fail their checks (a block's header, a packed body, a chunk of columns): a damaged temporary file. |
+
+One function, `tessera_kernels::error::classify`, tells the errors with an
+SQLSTATE of their own (the kernels' arithmetic, calendar and text errors,
+which share the trait `SqlError`, and `tessera_spill::Damaged`) from every
+other error, which is a misuse of the call, the caller's bug, and comes
+back as `TESS_ERROR_INVALID_ARGUMENT` with `XX000`.
 
 A `NULL` or undersized status (its `struct_size` below
 `TESS_STATUS_MIN_SIZE`) is left alone; the return value still carries the

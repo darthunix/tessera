@@ -3,8 +3,8 @@
 //!
 //! The families ([`crate::int32`] and [`crate::int64`]) keep their own
 //! vector code, whose lanes differ, and share the drivers around it; what
-//! they share here is the meaning of an operation and the error the C
-//! boundary reports, which recognizes exactly one error type.
+//! they share here is the meaning of an operation and its error, one of
+//! those [`crate::error::classify`] tells from a misuse of a call.
 
 use std::fmt;
 

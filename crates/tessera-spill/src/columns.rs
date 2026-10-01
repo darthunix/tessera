@@ -22,6 +22,8 @@
 
 use anyhow::{Result, ensure};
 
+use crate::damaged::intact;
+
 /// Bytes of a chunk's header; the lanes follow.
 pub const HEADER: usize = 16;
 
@@ -239,16 +241,16 @@ pub fn pack(chunk: &[u8], out: &mut [u8]) -> Result<(usize, usize)> {
 /// Unpack the `packed` bytes of a chunk into `out`, of the length
 /// [`pack`] returned for it: a chunk of a capacity of its row count.
 pub fn unpack(packed: &[u8], out: &mut [u8]) -> Result<()> {
-    ensure!(packed.len() >= 8, "a packed chunk of columns has no counts");
+    intact!(packed.len() >= 8, "a packed chunk of columns has no counts");
     let rows = get_u32(packed, 0) as usize;
     let words = get_u32(packed, 4) as usize;
-    ensure!(
+    intact!(
         rows <= MAX_ROWS && words <= MAX_WORDS && out.len() == size(rows, words),
         "a packed chunk of {rows} rows of {words} words does not unpack into {} bytes",
         out.len()
     );
     let lanes = lanes(words);
-    ensure!(
+    intact!(
         packed.len() >= 8 + 16 * lanes,
         "a packed chunk of columns is shorter than its descriptors"
     );
@@ -268,12 +270,12 @@ pub fn unpack(packed: &[u8], out: &mut [u8]) -> Result<()> {
                 .try_into()
                 .expect("eight bytes"),
         );
-        ensure!(
+        intact!(
             matches!(width, 0 | 1 | 2 | 4 | 8),
             "a packed lane of width {width}"
         );
         let need = (width * rows).next_multiple_of(8);
-        ensure!(
+        intact!(
             packed.len() >= at + need,
             "a packed chunk of columns ends inside lane {index}"
         );
@@ -293,7 +295,7 @@ pub fn unpack(packed: &[u8], out: &mut [u8]) -> Result<()> {
         }
         at += need;
     }
-    ensure!(
+    intact!(
         at == packed.len(),
         "a packed chunk of columns has {} bytes past its lanes",
         packed.len() - at
@@ -415,11 +417,18 @@ mod tests {
         let chunk = chunk_of(4, 1, &[vec![0, 1], vec![0, 300]]);
         let (packed, len) = pack(&chunk, &mut out).unwrap();
         let mut back = vec![0_u8; len];
-        assert!(unpack(&out[..packed - 8], &mut back).is_err());
-        assert!(unpack(&out[..packed], &mut back[..len - 8]).is_err());
+        // Bytes read back that fail their checks are damaged data.
+        let damaged = |result: Result<()>| {
+            result
+                .expect_err("accepted")
+                .downcast_ref::<crate::Damaged>()
+                .is_some()
+        };
+        assert!(damaged(unpack(&out[..packed - 8], &mut back)));
+        assert!(damaged(unpack(&out[..packed], &mut back[..len - 8])));
         let mut bad = out[..packed].to_vec();
         bad[8] = 3;
-        assert!(unpack(&bad, &mut back).is_err());
+        assert!(damaged(unpack(&bad, &mut back)));
         assert!(init(&mut [0_u8; 8], 1).is_err());
         assert_eq!(init(&mut [0_u8; HEADER], 3).unwrap(), 0);
     }

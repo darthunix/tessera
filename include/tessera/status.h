@@ -19,7 +19,9 @@ typedef enum TessStatusCode
 	/* A Rust panic was caught; the library remains usable. */
 	TESS_ERROR_PANIC = 4,
 	/* Another error of the function's own, its SQLSTATE and message in the status. */
-	TESS_ERROR_DATA_EXCEPTION = 5
+	TESS_ERROR_DATA_EXCEPTION = 5,
+	/* SQLSTATE XX001: spilled bytes read back are damaged. */
+	TESS_ERROR_DATA_CORRUPTED = 6
 } TessStatusCode;
 
 #define TESS_STATUS_MESSAGE_SIZE 120

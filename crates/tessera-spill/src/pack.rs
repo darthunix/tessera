@@ -17,7 +17,10 @@
 //! after another, the whole padded to 8. Native byte order, as the
 //! header's.
 
-use anyhow::{Result, ensure};
+use anyhow::Result;
+
+use crate::Damaged;
+use crate::damaged::intact;
 
 /// Bytes of the used mark that opens a chunk.
 const USED_MARK: usize = 8;
@@ -152,14 +155,14 @@ pub fn pack(chunk: &[u8], out: &mut [u8]) -> Option<usize> {
 /// Unpack a body [`pack`] made into `chunk`, which must be exactly the
 /// chunk's length.
 pub fn unpack(packed: &[u8], chunk: &mut [u8]) -> Result<()> {
-    ensure!(
+    intact!(
         packed.len() >= 8,
         "a packed chunk of {} bytes has no counts",
         packed.len()
     );
     let count = word(packed, 0) as usize;
     let len = word(packed, 4) as usize;
-    ensure!(
+    intact!(
         len >= MIN_RECORD
             && len.is_multiple_of(8)
             && count > 0
@@ -172,7 +175,7 @@ pub fn unpack(packed: &[u8], chunk: &mut [u8]) -> Result<()> {
     );
     let lanes = len / 4;
     let codes_end = 8 + lanes.next_multiple_of(4);
-    ensure!(
+    intact!(
         packed.len() >= codes_end,
         "a packed chunk is shorter than its lane codes"
     );
@@ -188,9 +191,9 @@ pub fn unpack(packed: &[u8], chunk: &mut [u8]) -> Result<()> {
             BYTE => count,
             HALF => 2 * count,
             WORD => 4 * count,
-            other => anyhow::bail!("a packed chunk has lane code {other}"),
+            other => return Err(Damaged(format!("a packed chunk has lane code {other}")).into()),
         };
-        ensure!(
+        intact!(
             at + need <= packed.len(),
             "a packed chunk ends inside its lane {lane}"
         );
@@ -301,11 +304,21 @@ mod tests {
         let mut out = vec![0_u8; original.len()];
         let packed = pack(&original, &mut out).unwrap();
         let mut back = vec![0_u8; original.len()];
-        assert!(unpack(&out[..4], &mut back).is_err());
-        assert!(unpack(&out[..packed], &mut back[..original.len() - 8]).is_err());
+        // Bytes read back that fail their checks are damaged data.
+        let damaged = |result: Result<()>| {
+            result
+                .expect_err("accepted")
+                .downcast_ref::<crate::Damaged>()
+                .is_some()
+        };
+        assert!(damaged(unpack(&out[..4], &mut back)));
+        assert!(damaged(unpack(
+            &out[..packed],
+            &mut back[..original.len() - 8]
+        )));
         let mut bad = out[..packed].to_vec();
         bad[8] = 9;
-        assert!(unpack(&bad, &mut back).is_err());
-        assert!(unpack(&out[..12], &mut back).is_err());
+        assert!(damaged(unpack(&bad, &mut back)));
+        assert!(damaged(unpack(&out[..12], &mut back)));
     }
 }

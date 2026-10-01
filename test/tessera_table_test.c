@@ -960,15 +960,20 @@ tessera_test_spill_header(PG_FUNCTION_ARGS)
 		back.fingerprint != header.fingerprint || back.len != header.len ||
 		back.packed != 0 ||
 		tess_spill_header_read(block, sizeof(block), other_fingerprint, 1 << 20, &back,
-							   &status) != TESS_ERROR_INVALID_ARGUMENT ||
+							   &status) != TESS_ERROR_DATA_CORRUPTED ||
 		strstr(status.message, "another table") == NULL ||
+		strcmp(status.sqlstate, "XX001") != 0 ||
 		tess_spill_header_read(block, sizeof(block), fingerprint, 1024, &back,
-							   &status) != TESS_ERROR_INVALID_ARGUMENT)
+							   &status) != TESS_ERROR_DATA_CORRUPTED)
 		PG_RETURN_BOOL(false);
+	/* A damaged block is damaged data; a buffer short of a header, a misuse. */
 	block[0] ^= 1;
 	if (tess_spill_header_read(block, sizeof(block), fingerprint, 1 << 20, &back,
+							   &status) != TESS_ERROR_DATA_CORRUPTED ||
+		strstr(status.message, "no spilled block") == NULL ||
+		tess_spill_header_read(block, 8, fingerprint, 1 << 20, &back,
 							   &status) != TESS_ERROR_INVALID_ARGUMENT ||
-		strstr(status.message, "no spilled block") == NULL)
+		strcmp(status.sqlstate, "XX000") != 0)
 		PG_RETURN_BOOL(false);
 	free_table(table);
 	PG_RETURN_BOOL(true);

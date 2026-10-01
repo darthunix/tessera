@@ -17,10 +17,13 @@
 //! same machine: the header is in native byte order and carries no
 //! checksum, as PostgreSQL's own temporary files do not.
 
-use anyhow::{Result, bail, ensure};
+use anyhow::{Result, ensure};
 
 pub mod columns;
+mod damaged;
 mod pack;
+pub use damaged::Damaged;
+use damaged::intact;
 pub use pack::{pack, unpack};
 
 /// The first word of every block.
@@ -175,20 +178,21 @@ impl BlockHeader {
             "a spilled block header needs {HEADER_SIZE} bytes, got {}",
             bytes.len()
         );
-        ensure!(
+        intact!(
             get_u64(bytes, MAGIC_AT) == MAGIC,
             "the bytes hold no spilled block"
         );
         let version = get_u32(bytes, VERSION_AT);
-        ensure!(
+        intact!(
             version == VERSION,
             "spilled block version {version} is not the supported {VERSION}"
         );
         let Some(kind) = BlockKind::from_code(get_u32(bytes, KIND_AT)) else {
-            bail!(
+            return Err(Damaged(format!(
                 "a spilled block of unknown kind {}",
                 get_u32(bytes, KIND_AT)
-            );
+            ))
+            .into());
         };
         let header = Self {
             kind,
@@ -199,11 +203,13 @@ impl BlockHeader {
             len: get_u64(bytes, LEN_AT),
             packed: get_u32(bytes, PACKED_AT),
         };
-        ensure!(
+        intact!(
             header.fingerprint == fingerprint,
             "a spilled block belongs to another table"
         );
-        header.check(max_len)?;
+        header
+            .check(max_len)
+            .map_err(|error| Damaged(format!("{error:#}")))?;
         Ok(header)
     }
 }
@@ -268,13 +274,18 @@ mod tests {
             } else {
                 put_u64(&mut bytes, at, value);
             }
-            assert!(
-                BlockHeader::read(&bytes, fingerprint, 1 << 20).is_err(),
-                "{name} accepted"
-            );
+            // A damaged field is damaged data, not a misuse of the call.
+            let error = BlockHeader::read(&bytes, fingerprint, 1 << 20)
+                .expect_err(&format!("{name} accepted"));
+            assert!(error.downcast_ref::<Damaged>().is_some(), "{name}: {error}");
         }
-        assert!(BlockHeader::read(&good[..HEADER_SIZE - 1], fingerprint, 1 << 20).is_err());
-        assert!(BlockHeader::read(&good, fingerprint + 1, 1 << 20).is_err());
+        // A buffer shorter than a header is the caller's misuse.
+        let short = BlockHeader::read(&good[..HEADER_SIZE - 1], fingerprint, 1 << 20)
+            .expect_err("a short buffer accepted");
+        assert!(short.downcast_ref::<Damaged>().is_none());
+        let foreign = BlockHeader::read(&good, fingerprint + 1, 1 << 20)
+            .expect_err("another table's block accepted");
+        assert!(foreign.downcast_ref::<Damaged>().is_some());
         Ok(())
     }
 

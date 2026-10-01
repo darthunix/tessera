@@ -5,9 +5,7 @@ use std::mem::offset_of;
 use std::panic::{self, AssertUnwindSafe};
 
 use anyhow::Result;
-use tessera_kernels::calendar::CalendarError;
-use tessera_kernels::int32::ArithmeticError;
-use tessera_kernels::text::TextError;
+use tessera_kernels::error::{ErrorKind, classify};
 
 /// The outcome of an entry point, as `TessStatusCode`.
 #[repr(C)]
@@ -25,6 +23,8 @@ pub enum Code {
     Panic = 4,
     /// Another error of the data, its SQLSTATE and message in the status.
     DataException = 5,
+    /// Spilled bytes read back damaged: SQLSTATE XX001.
+    DataCorrupted = 6,
 }
 
 /// Bytes of the message buffer, terminator included
@@ -102,30 +102,19 @@ pub(super) unsafe fn guard(status: *mut Status, body: impl FnOnce() -> Result<()
     let outcome = panic::catch_unwind(AssertUnwindSafe(body));
     let (code, sqlstate, message) = match outcome {
         Ok(Ok(())) => (Code::Ok, "", String::new()),
-        Ok(Err(error)) => match error.downcast_ref::<ArithmeticError>() {
-            Some(arithmetic) => (
-                match arithmetic {
-                    ArithmeticError::IntegerOutOfRange | ArithmeticError::BigintOutOfRange => {
-                        Code::IntegerOutOfRange
-                    }
-                    ArithmeticError::DivisionByZero => Code::DivisionByZero,
+        Ok(Err(error)) => match classify(&error) {
+            Some(classified) => (
+                match classified.kind() {
+                    ErrorKind::IntegerOutOfRange => Code::IntegerOutOfRange,
+                    ErrorKind::DivisionByZero => Code::DivisionByZero,
+                    ErrorKind::Data => Code::DataException,
+                    ErrorKind::Damaged => Code::DataCorrupted,
                 },
-                arithmetic.sqlstate(),
-                arithmetic.to_string(),
+                classified.sqlstate(),
+                classified.to_string(),
             ),
-            None => {
-                if let Some(calendar) = error.downcast_ref::<CalendarError>() {
-                    (
-                        Code::DataException,
-                        calendar.sqlstate(),
-                        calendar.to_string(),
-                    )
-                } else if let Some(text) = error.downcast_ref::<TextError>() {
-                    (Code::DataException, text.sqlstate(), text.to_string())
-                } else {
-                    (Code::InvalidArgument, "XX000", format!("{error:#}"))
-                }
-            }
+            // A misuse of the call: the caller's bug, an internal error.
+            None => (Code::InvalidArgument, "XX000", format!("{error:#}")),
         },
         Err(payload) => {
             let message = payload
