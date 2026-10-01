@@ -63,6 +63,7 @@ core's own cost parameters do:
 | `tessera.setop_word_share` | 0.5 | the core's own cost of `INTERSECT` or `EXCEPT` with keys of words |
 | `tessera.setop_dictionary_share` | 0.9 | the same with a key through a dictionary |
 | `tessera.gather_tuple_share` | 0.25 | `parallel_tuple_cost` a row through TessGather |
+| `tessera.pack_value_share` | 0.4 | `cpu_operator_cost` a value TessPack copies into a batch |
 
 The model of the node's scans, by which the planner ranks its full scan
 against its index scans (TessHeapScan, Ranking the full scan), in units
@@ -650,8 +651,12 @@ no node reads the relation natively the helper calls the `wrap_rows`
 callback the pack node registers under `tessera.pack`. The pack path copies its child's planner properties: rows,
 costs, path keys, parallel safety and number of workers, and clears
 parallel awareness: over a parallel scan of the core each participant
-packs its own rows, and the node shares nothing. There is no cost model
-yet, so the path costs exactly what its child costs. The pack path exists only as a
+packs its own rows, and the node shares nothing. The path costs its
+child's cost and the copying: `tessera.pack_value_share` (0.4) of
+`cpu_operator_cost` a value and one more a row, as the builder took
+7.8 ns a row of nine columns and 1.6 ns of one where the core's
+aggregate above took 21 ns a row it costs 0.0225; a heap batch one value
+a row, its reference; forwarded batches nothing. The pack path exists only as a
 child of a batch parent; the module adds it to no path list.
 
 When the child is a sequential scan of a plain table whose targets are all
@@ -1152,7 +1157,15 @@ For each of the core's plain aggregate paths whose input can be read
 in batches (`tess_batch_input_path`: a batch path as it is, a clause-free
 sequential scan through `TessHeapScan`, anything else through `TessPack`),
 the node's path takes the core path as its template with the batch child,
-and `add_path` decides. A plain aggregate costs nine tenths of the core's.
+and `add_path` decides. A plain aggregate costs nine tenths of the core's
+(`tessera.agg_cost_factor`); over a pack, whose input is the core's rows
+that both plans read alike, the pack's cost and a share of the node's
+own work alone (`plain_cost`): the kernels' quarter of the transition
+costs when they fold every aggregate, nine tenths with a generic one. An
+argument the kernels do not compute is evaluated row by row as the core
+does, at the core's cost, in a grouping too: over a window function, an
+aggregate of seven XORs and an addition took the node 46 ms and the pack
+18 where the core's aggregate took 42 (plan 4.28).
 A grouping costs the node's own (`group_cost`): the child's cost; per
 input row a quarter of `cpu_operator_cost` a key, as the kernels hash and
 look up a batch's keys at once, a key through a dictionary 0.65 more

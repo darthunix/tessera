@@ -336,9 +336,11 @@ tessera_test_pack_paths(PG_FUNCTION_ARGS)
 	rows->total_cost = 20;
 	rows->parallel_safe = true;
 	wrapped = tess_batch_input_path(NULL, rows);
+	/* The pack costs its child and the copying of the child's rows. */
 	result = pack != NULL && wrapped != NULL && IsA(wrapped, CustomPath) &&
 		tess_path_node(wrapped) == pack && wrapped->rows == 10 &&
-		wrapped->total_cost == 20 && wrapped->parallel_safe &&
+		wrapped->startup_cost == 1 && wrapped->total_cost > 20 &&
+		wrapped->total_cost < 21 && wrapped->parallel_safe &&
 		list_length(((CustomPath *) wrapped)->custom_paths) == 1 &&
 		linitial(((CustomPath *) wrapped)->custom_paths) == rows;
 	/* A batch path is its own batch input. */

@@ -20,6 +20,7 @@ double		tess_agg_kernel_share = 0.25;
 double		tess_setop_word_share = 0.5;
 double		tess_setop_dictionary_share = 0.9;
 double		tess_gather_tuple_share = 0.25;
+double		tess_pack_value_share = 0.4;
 double		tess_scan_page_cost = 1.0;
 double		tess_scan_tuple_cost = 0.0077;
 double		tess_index_only_tuple_cost = 0.058;
@@ -160,6 +161,11 @@ _PG_init(void)
 							 "Share of parallel_tuple_cost a row costs through TessGather.",
 							 NULL,
 							 &tess_gather_tuple_share, 0.25, 0.0, 10.0,
+							 PGC_USERSET, GUC_NOT_IN_SAMPLE, NULL, NULL, NULL);
+	DefineCustomRealVariable("tessera.pack_value_share",
+							 "Share of cpu_operator_cost TessPack costs a value it copies into a batch.",
+							 NULL,
+							 &tess_pack_value_share, 0.4, 0.0, 10.0,
 							 PGC_USERSET, GUC_NOT_IN_SAMPLE, NULL, NULL, NULL);
 	/*
 	 * The model of the node's scans, by which the planner orders them

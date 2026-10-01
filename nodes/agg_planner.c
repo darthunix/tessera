@@ -536,6 +536,35 @@ aggregate_templates(const List *pathlist, AggStrategy strategy, AggSplit aggspli
  */
 #define AGG_SPILL_PARTS 32.0
 
+/*
+ * The cost a row of the aggregates' arguments that the kernels do not
+ * compute, none when the aggregates combine partial values: the node's
+ * projection evaluates them row by row, as the core's aggregate does.
+ */
+static Cost
+rowwise_argument_cost(PlannerInfo *root, List *tlist, AggSplit split)
+{
+	Cost		cost = 0;
+
+	if (DO_AGGSPLIT_COMBINE(split))
+		return 0;
+	foreach_node(TargetEntry, entry, tlist)
+	{
+		if (!IsA(entry->expr, Aggref))
+			continue;
+		foreach_node(TargetEntry, arg, ((Aggref *) entry->expr)->args)
+		{
+			QualCost	eval;
+
+			if (tess_expr_supports_value((Node *) arg->expr, 0))
+				continue;
+			cost_qual_eval_node(&eval, (Node *) arg->expr, root);
+			cost += eval.per_tuple;
+		}
+	}
+	return cost;
+}
+
 static void
 group_cost(PlannerInfo *root, const Path *child, double groups, int nkeys,
 		   List *tlist, AggSplit split, Path *result)
@@ -548,6 +577,7 @@ group_cost(PlannerInfo *root, const Path *child, double groups, int nkeys,
 	int			naggs = 0;
 	int			ncolumns = 0;
 	int			nsums = sum_states(tlist);
+	Cost		rowwise = rowwise_argument_cost(root, tlist, split);
 	Cost		startup;
 	Cost		run;
 
@@ -595,8 +625,8 @@ group_cost(PlannerInfo *root, const Path *child, double groups, int nkeys,
 		if (!tess_word_key_kind(exprType((Node *) key->expr), &kind))
 			startup += cpu_operator_cost * tess_agg_dictionary_share * rows;
 	}
-	startup += costs.transCost.startup +
-		costs.transCost.per_tuple * (nsums < 0 ? 1.0 : tess_agg_kernel_share) * rows;
+	startup += costs.transCost.startup + rowwise * rows +
+		(costs.transCost.per_tuple - rowwise) * (nsums < 0 ? 1.0 : tess_agg_kernel_share) * rows;
 	/* Groups past hash_mem: their rows to disk and back, once per level. */
 	if (groups * entry > limit && ncolumns > 0)
 	{
@@ -614,6 +644,35 @@ group_cost(PlannerInfo *root, const Path *child, double groups, int nkeys,
 	run += costs.finalCost.per_tuple * groups + cpu_tuple_cost * groups;
 	result->startup_cost = startup;
 	result->total_cost = startup + run;
+}
+
+/*
+ * The node's own cost of an aggregation without GROUP BY over a pack: the
+ * input is the core's rows, which both plans read alike, and only the
+ * node's own work takes a share of the core's cost,
+ * tessera.agg_kernel_share with its own aggregates and sum states,
+ * tessera.agg_cost_factor with a generic one; an argument the kernels do
+ * not compute costs the core's. Over a pack of nine columns under a
+ * window function, the node took 46 ms and the pack 18 where the core's
+ * aggregate took 42, its argument seven XORs and an addition, which no
+ * kernel computes (plan 4.28).
+ */
+static void
+plain_cost(PlannerInfo *root, const Path *child, List *tlist, AggSplit split,
+		   Path *result)
+{
+	AggClauseCosts costs;
+	Cost		rowwise = rowwise_argument_cost(root, tlist, split);
+	double		share = sum_states(tlist) < 0 ? tess_agg_cost_factor : tess_agg_kernel_share;
+	double		rows = child->rows;
+
+	MemSet(&costs, 0, sizeof(costs));
+	if (root->parse->hasAggs)
+		get_agg_clause_costs(root, split, &costs);
+	result->startup_cost = child->total_cost + rowwise * rows +
+		share * (costs.transCost.startup + (costs.transCost.per_tuple - rowwise) * rows +
+				 costs.finalCost.startup + costs.finalCost.per_tuple);
+	result->total_cost = result->startup_cost + cpu_tuple_cost;
 }
 
 /*
@@ -644,14 +703,20 @@ make_agg_path(PlannerInfo *root, const AggPath *agg, List *tlist, int nkeys, int
 	template = agg->path;
 	/*
 	 * Grouping costs the node's own; a plain aggregate a share of the
-	 * core's, tessera.agg_cost_factor (0.9), but a final one the core's:
-	 * its work is a row a participant, and the share would take a tenth
-	 * off the partial stack below it.
+	 * core's, tessera.agg_cost_factor (0.9), over a pack a share of its
+	 * own work alone, but a final one the core's: its work is a row a
+	 * participant, and the share would take a tenth off the partial stack
+	 * below it.
 	 */
 	if (nkeys > 0)
 		group_cost(root, child, agg->path.rows, nkeys, tlist, agg->aggsplit, &template);
 	else if ((flags & AGG_PATH_FINALIZE) == 0)
-		template.total_cost *= tess_agg_cost_factor;
+	{
+		if (tess_path_node(child) == &tess_pack_node && !tess_pack_forwards(child))
+			plain_cost(root, child, tlist, agg->aggsplit, &template);
+		else
+			template.total_cost *= tess_agg_cost_factor;
+	}
 	/* The groups come in no order, whatever order the core's had. */
 	template.pathkeys = NIL;
 	config.template_path = &template;

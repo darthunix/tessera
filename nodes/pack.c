@@ -5,6 +5,7 @@
 #include "executor/executor.h"
 #include "nodes/makefuncs.h"
 #include "optimizer/cost.h"
+#include "optimizer/optimizer.h"
 #include "optimizer/plancat.h"
 #include "optimizer/tlist.h"
 
@@ -162,7 +163,14 @@ tess_pack_forwards(const Path *path)
 	return info.node_data != NULL && intVal(info.node_data) == PACK_FORWARD;
 }
 
-/* The path costs what its child costs: there is no cost model yet. */
+/*
+ * The path costs what its child costs and the copying of its rows:
+ * tessera.pack_value_share (0.4) of cpu_operator_cost a value and one more
+ * a row, as the builder took 7.8 ns a row of nine columns and 1.6 ns of
+ * one where the core's aggregate above took 21 ns a row it costs 0.0225
+ * (plan 4.28). A heap batch keeps one reference a row; forwarded batches
+ * cost nothing.
+ */
 static CustomPath *
 pack_wrap_rows(PlannerInfo *root, Path *child)
 {
@@ -170,9 +178,13 @@ pack_wrap_rows(PlannerInfo *root, Path *child)
 	List	   *physical = physical_targets(root, child);
 	Path	   *scan = child;
 	CustomPath *path;
+	double		values = 1 + (child->pathtarget != NULL ? list_length(child->pathtarget->exprs) : 0);
 
 	if (forwardable(child))
+	{
 		config.node_data = (Node *) makeInteger(PACK_FORWARD);
+		values = 0;
+	}
 	else if (physical != NIL)
 	{
 		/* The caller's path keeps its target: the pack's own is that one. */
@@ -180,12 +192,15 @@ pack_wrap_rows(PlannerInfo *root, Path *child)
 		*scan = *child;
 		scan->pathtarget = create_pathtarget(root, physical);
 		config.node_data = (Node *) makeInteger(PACK_PHYSICAL_TARGETS);
+		values = 1;
 	}
 	config.template_path = child;
 	config.methods = &pack_path_methods;
 	config.node = &tess_pack_node;
 	config.children = list_make1(scan);
 	path = tess_path_create(&config);
+	path->path.total_cost += cpu_operator_cost * tess_pack_value_share * values *
+		path->path.rows;
 	/* Over a parallel scan, each participant packs its own rows: no shared state. */
 	path->path.parallel_aware = false;
 	return path;

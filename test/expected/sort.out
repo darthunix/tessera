@@ -81,15 +81,14 @@ SELECT sort_explain($$SELECT d, c FROM sort_t ORDER BY d$$);
 -- One key of each kind, both directions and both places of NULL; the
 -- comparison reads the node's rows in order through a subquery.
 EXPLAIN (COSTS OFF) SELECT array_agg(q::text) FROM (SELECT d FROM sort_t ORDER BY d) AS q;
-                          QUERY PLAN                          
---------------------------------------------------------------
- Custom Scan (TessAgg)
-   ->  Custom Scan (TessPack)
-         ->  Subquery Scan on q
-               ->  Custom Scan (TessSort)
-                     Sort Key: sort_t.d
-                     ->  Custom Scan (TessHeapScan) on sort_t
-(6 rows)
+                       QUERY PLAN                       
+--------------------------------------------------------
+ Aggregate
+   ->  Subquery Scan on q
+         ->  Custom Scan (TessSort)
+               Sort Key: sort_t.d
+               ->  Custom Scan (TessHeapScan) on sort_t
+(5 rows)
 
 SELECT sort_same($$SELECT d FROM sort_t ORDER BY d$$);
  sort_same 

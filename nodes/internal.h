@@ -102,6 +102,7 @@ extern double tess_agg_kernel_share;
 extern double tess_setop_word_share;
 extern double tess_setop_dictionary_share;
 extern double tess_gather_tuple_share;
+extern double tess_pack_value_share;
 /*
  * The model of the node's scans, tessera.scan_page_cost and the rest: see
  * nodes/module.c and nodes/scan_planner.c.

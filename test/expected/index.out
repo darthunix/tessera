@@ -409,13 +409,12 @@ SELECT g AS id, (g::bigint * 7919 % 20000)::int AS k, 's' || g AS t FROM generat
 CREATE INDEX index_s_k ON index_s (k);
 VACUUM ANALYZE index_s;
 EXPLAIN (COSTS OFF) SELECT count(*), max(t) FROM index_s WHERE k < 5000;
-                    QUERY PLAN                     
----------------------------------------------------
- Custom Scan (TessAgg)
-   ->  Custom Scan (TessPack)
-         ->  Index Scan using index_s_k on index_s
-               Index Cond: (k < 5000)
-(4 rows)
+                 QUERY PLAN                  
+---------------------------------------------
+ Aggregate
+   ->  Index Scan using index_s_k on index_s
+         Index Cond: (k < 5000)
+(3 rows)
 
 SET tessera.index_min_correlation = 0;
 EXPLAIN (COSTS OFF) SELECT count(*), max(t) FROM index_s WHERE k < 5000;
@@ -480,21 +479,20 @@ SET enable_mergejoin = off;
 SET enable_material = off;
 EXPLAIN (COSTS OFF)
 SELECT x, count(t), max(t) FROM generate_series(1, 3) AS x LEFT JOIN (SELECT id, t FROM index_o WHERE id < 5000 ORDER BY id LIMIT 2000) AS s ON x > 0 GROUP BY x;
-                                 QUERY PLAN                                 
-----------------------------------------------------------------------------
- Custom Scan (TessAgg)
+                              QUERY PLAN                              
+----------------------------------------------------------------------
+ HashAggregate
    Group Key: x.x
-   ->  Custom Scan (TessPack)
-         ->  Nested Loop Left Join
-               Join Filter: (x.x > 0)
-               ->  Function Scan on generate_series x
-               ->  Custom Scan (TessLimit)
-                     ->  Custom Scan (TessFilter) on index_o
-                           Batch Filter: (index_o.id < 5000)
-                           ->  Custom Scan (TessHeapScan) on index_o
-                                 ->  Index Scan using index_o_id on index_o
-                                       Index Cond: (id < 5000)
-(12 rows)
+   ->  Nested Loop Left Join
+         Join Filter: (x.x > 0)
+         ->  Function Scan on generate_series x
+         ->  Custom Scan (TessLimit)
+               ->  Custom Scan (TessFilter) on index_o
+                     Batch Filter: (index_o.id < 5000)
+                     ->  Custom Scan (TessHeapScan) on index_o
+                           ->  Index Scan using index_o_id on index_o
+                                 Index Cond: (id < 5000)
+(11 rows)
 
 SELECT index_same($$SELECT x, count(t), max(t) FROM generate_series(1, 3) AS x LEFT JOIN (SELECT id, t FROM index_o WHERE id < 5000 ORDER BY id LIMIT 2000) AS s ON x > 0 GROUP BY x$$);
  index_same 
