@@ -14,7 +14,9 @@
  * static library. Every entry point reads a column as PostgreSQL Datum
  * values with NULL flags (TessDatumColumn), reads or narrows row masks, and
  * returns a status (tessera/status.h): it never raises ERROR, so the caller
- * reports the status with ereport after the call returns. See docs/kernels.md.
+ * reports the status with ereport after the call returns. (The registry's
+ * batch functions built on these entry points, TessFunction.evaluate, may
+ * raise ERROR as the functions they implement do.) See docs/kernels.md.
  *
  * prepared names the mask the column was obtained with (every row in it is
  * initialized, a NULL row by a placeholder); NULL means the whole column is

@@ -9,6 +9,17 @@ the caller's `TessStatus`. It never raises `ERROR`: PostgreSQL's error
 mechanism jumps over stack frames, and Rust frames must unwind, so the
 caller reports the status after the call returns.
 
+That holds for these entry points, not for the batch functions of the
+registry (`TessFunction.evaluate`, `tessera/function.h`) that the
+`tessera_kernels` module builds on them in C. Those raise the errors the
+PostgreSQL function they implement raises, as `function.h` promises: the
+Rust kernels' errors come back in the status and the wrapper reports them,
+and for the rows the kernels leave (a value of a type or size they do not
+take) the wrapper calls the core's function, which raises `ERROR` itself.
+A consumer treats `evaluate` as a call that may raise. Its scratch, past
+a size on its stack that a batch of 64 rows never reaches, is allocated in
+the current memory context and goes with it.
+
 The same library exports the hash table of joins and grouping, declared
 in `include/tessera/table.h` and described in the [table
 guide](table.md): its calls take a region of memory the caller owns and

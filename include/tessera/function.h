@@ -169,7 +169,9 @@ struct TessFunction
 	uint32		flags;
 	/*
 	 * Evaluate one call; returns the code also stored in the call's status.
-	 * NULL for an EQUIVALENT.
+	 * It may also raise ERROR, as the function it implements does on the
+	 * same input: a consumer treats it as a call that may raise. NULL for an
+	 * EQUIVALENT.
 	 */
 	TessStatusCode (*evaluate) (TessFunctionCall *call);
 	/* EQUIVALENT: the function the consumer calls instead, by OID. */
