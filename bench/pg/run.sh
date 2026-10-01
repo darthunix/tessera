@@ -18,6 +18,12 @@ HERE=$ROOT/bench/pg
 PG_CONFIG=${PG_CONFIG:-pg_config}
 BIN=$("$PG_CONFIG" --bindir)
 LIB=$("$PG_CONFIG" --pkglibdir)
+# The suffix of loadable modules and a SHA-256 tool, by platform.
+case $(uname) in
+Darwin) DLSUFFIX=.dylib ;;
+*) DLSUFFIX=.so ;;
+esac
+if command -v sha256sum > /dev/null; then SHA256=sha256sum; else SHA256="shasum -a 256"; fi
 RUNS=$ROOT/target/bench-runs
 DATA=$RUNS/pgdata-bench
 export PGPORT=${PGPORT:-5433} PGHOST=/tmp PGDATABASE=postgres
@@ -62,8 +68,8 @@ measure)
         echo "shared_buffers $("$BIN/psql" -X -tAc 'SHOW shared_buffers')"
         echo "status:"; git -C "$ROOT" status --short
         echo "sha256:"
-        shasum -a 256 "$LIB/tessera.dylib" "$LIB/tessera_nodes.dylib" \
-            "$LIB/tessera_kernels.dylib" \
+        $SHA256 "$LIB/tessera$DLSUFFIX" "$LIB/tessera_nodes$DLSUFFIX" \
+            "$LIB/tessera_kernels$DLSUFFIX" \
             "$LIB/libtessera_runtime.a" "$BIN/postgres"
     } > "$OUT/source.txt"
     { pmset -g batt 2>/dev/null | head -2; date; } > "$OUT/power.txt"
