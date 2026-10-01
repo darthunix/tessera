@@ -318,9 +318,6 @@ static const TessBatchOps append_batch_ops = {
  * Append's alone). What the second call leaves besides the state: the
  * leaf partitions it kept join es_unpruned_relids, as an Append's do.
  */
-#if PG_VERSION_NUM < 180000
-#error "TessAppend prunes through ExecDoInitialPruning and the EState's pruning lists of PostgreSQL 18"
-#endif
 static PartitionPruneState *
 prune_start(TessAppendState *state, const PartitionPruneInfo *planned, Bitmapset **valid)
 {
