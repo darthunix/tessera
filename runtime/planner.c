@@ -159,8 +159,10 @@ tess_batch_input_path(PlannerInfo *root, Path *path)
 		elog(ERROR, "Tessera batch input requires a path");
 	/*
 	 * A projection the planner put above a batch node that projects itself
-	 * is the node's to compute: the node takes the target and stands in for
-	 * the projection path, which would otherwise hide it behind a Result.
+	 * is the node's to compute: a copy of the node's path takes the target
+	 * and stands in for the projection path, which would otherwise hide it
+	 * behind a Result. The path itself may stand under other parents, in
+	 * its relation's list: its target stays.
 	 */
 	if (IsA(path, ProjectionPath) && ((ProjectionPath *) path)->dummypp)
 	{
@@ -169,8 +171,11 @@ tess_batch_input_path(PlannerInfo *root, Path *path)
 
 		if (tess_path_node(subpath) != NULL)
 		{
-			subpath->pathtarget = projection->path.pathtarget;
-			path = subpath;
+			CustomPath *copy = makeNode(CustomPath);
+
+			*copy = *castNode(CustomPath, subpath);
+			copy->path.pathtarget = projection->path.pathtarget;
+			path = &copy->path;
 		}
 		else if (subpath->pathtype == T_SeqScan && subpath->param_info == NULL)
 		{

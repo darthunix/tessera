@@ -309,6 +309,24 @@ tessera_test_planner_paths(PG_FUNCTION_ARGS)
 	/* Without a pack node loaded, only a batch path is a batch input. */
 	result &= tess_batch_input_path(NULL, &path->path) == &path->path &&
 		tess_batch_input_path(NULL, template) == NULL;
+	/*
+	 * A projection above a batch path: a copy of the path takes its target,
+	 * and the path, which other parents may share, keeps its own.
+	 */
+	{
+		ProjectionPath *projection = makeNode(ProjectionPath);
+		PathTarget *own = path->path.pathtarget;
+		Path	   *input;
+
+		projection->path.pathtarget = makeNode(PathTarget);
+		projection->subpath = &path->path;
+		projection->dummypp = true;
+		input = tess_batch_input_path(NULL, &projection->path);
+		result &= input != NULL && input != &path->path &&
+			tess_path_node(input) == &test_node &&
+			input->pathtarget == projection->path.pathtarget &&
+			path->path.pathtarget == own;
+	}
 	/* A scan node reads a relation without clauses; a gated one, nothing. */
 	{
 		PlannerInfo *root = makeNode(PlannerInfo);
