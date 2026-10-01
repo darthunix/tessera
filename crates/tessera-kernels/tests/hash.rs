@@ -1,9 +1,12 @@
 #![forbid(unsafe_code)]
 
 use anyhow::{Result, ensure};
+use proptest::prelude::*;
+use proptest::sample::select;
 use tessera_core::{ColumnReader, ColumnView, RowMask, RowMaskView, WordValues};
 use tessera_kernels::int32::{NullKeys, hash_combine, murmurhash32};
 use tessera_kernels::{int32, int64};
+use tessera_testing::{Int, flags, integer, nrows, property, values, words};
 
 /// What an untouched hash slot holds.
 const SENTINEL: u32 = 0x5a5a_5a5a;
@@ -36,17 +39,6 @@ fn model_fold(value: i64) -> u32 {
     low
 }
 
-/// The packed words of a flag per row.
-fn words_for(flags: &[bool]) -> Vec<u64> {
-    let mut words = vec![0; flags.len().div_ceil(64)];
-    for (row, &flag) in flags.iter().enumerate() {
-        if flag {
-            words[row / 64] |= 1 << (row % 64);
-        }
-    }
-    words
-}
-
 /// The words of a mask still borrowed by its `RowMask`.
 fn mask_words(valid: &RowMask<'_>) -> Vec<u64> {
     let view = valid.as_view();
@@ -63,49 +55,32 @@ fn all_rows(nrows: usize) -> Vec<u64> {
     words
 }
 
-fn random(state: &mut u64) -> u64 {
-    *state ^= *state >> 12;
-    *state ^= *state << 25;
-    *state ^= *state >> 27;
-    state.wrapping_mul(0x2545_F491_4F6C_DD1D)
-}
-
-/// Values at and around every edge that matters to the fold, and random
-/// ones across the whole range.
-fn values(state: &mut u64, count: usize) -> Vec<i64> {
-    let mut values = vec![
-        0,
-        1,
-        -1,
-        i64::from(i32::MAX),
-        i64::from(i32::MIN),
-        i64::from(i32::MAX) + 1,
-        i64::from(i32::MIN) - 1,
+/// Values where the `hashint8` fold breaks: around the int4 range and the
+/// 32-bit halves, besides the edges of the type.
+fn fold_edges() -> BoxedStrategy<i64> {
+    select(vec![
         i64::from(u32::MAX),
-        i64::MAX,
-        i64::MIN,
+        1 << 32,
+        -(1 << 32),
         1 << 40,
         -(1 << 40),
-    ];
-    while values.len() < count {
-        values.push(random(state) as i64 >> (random(state) % 63));
-    }
-    values
+    ])
+    .boxed()
 }
 
 /// A key width under test: its kernels, the model of its hash and the
 /// values its tests draw. An int4 key hashes as its value read as `u32`, an
 /// int8 key as its `hashint8` fold, which agrees with the int4 on the int4
 /// range.
-trait Key: Copy + From<i32> {
+trait Key: Int + From<i32> {
     /// What the model hashes for a non-NULL key.
     fn model_key(self) -> u32;
     /// A small value as a key: the int4 as is, the int8 scaled by
     /// `2^33 + 1`, past the int4 range with both halves in play.
     fn spread(value: i32) -> Self;
-    /// `count` random keys: the int4 from the high half of a draw, the int8
-    /// from [`values`].
-    fn random_keys(state: &mut u64, count: usize) -> Vec<Self>;
+    /// The keys a property draws: values leaning to the edges, and for int8
+    /// also the edges of the fold.
+    fn keys() -> BoxedStrategy<Self>;
     /// The width's `hash`.
     fn hash<C: ColumnReader<Value = Self>>(
         column: &C,
@@ -132,8 +107,8 @@ impl Key for i32 {
         value
     }
 
-    fn random_keys(state: &mut u64, count: usize) -> Vec<Self> {
-        (0..count).map(|_| (random(state) >> 32) as i32).collect()
+    fn keys() -> BoxedStrategy<Self> {
+        integer::<i32>()
     }
 
     fn hash<C: ColumnReader<Value = Self>>(
@@ -165,10 +140,8 @@ impl Key for i64 {
         i64::from(value) * ((1 << 33) + 1)
     }
 
-    fn random_keys(state: &mut u64, count: usize) -> Vec<Self> {
-        let mut keys = values(state, count);
-        keys.truncate(count);
-        keys
+    fn keys() -> BoxedStrategy<Self> {
+        prop_oneof![3 => integer::<i64>(), 1 => fold_edges()].boxed()
     }
 
     fn hash<C: ColumnReader<Value = Self>>(
@@ -320,21 +293,28 @@ fn known_values_match_postgresql() {
 
 #[test]
 fn the_fold_is_hashint8s() {
-    let mut state = 0x1234_5678_9abc_def1;
-    for value in values(&mut state, 10_000) {
-        assert_eq!(int64::fold(value), model_fold(value), "{value}");
-    }
+    property(
+        proptest::collection::vec(i64::keys(), 0..64),
+        |values| -> Result<()> {
+            for value in values {
+                assert_eq!(int64::fold(value), model_fold(value), "{value}");
+            }
+            Ok(())
+        },
+    );
     assert_eq!(int64::fold(1 << 40), 1 << 8);
     assert_eq!(int64::fold(-(1 << 40)), 0xff);
 }
 
 #[test]
-fn an_int8_in_int4_range_hashes_like_the_int4() -> Result<()> {
-    let mut state = 0x0bad_cafe_0000_0007;
-    let mut small: Vec<i32> = vec![0, 1, -1, i32::MAX, i32::MIN, i32::MAX - 1, i32::MIN + 1];
-    while small.len() < 300 {
-        small.push(random(&mut state) as i32);
-    }
+fn an_int8_in_int4_range_hashes_like_the_int4() {
+    property(
+        nrows().prop_flat_map(|nrows| proptest::collection::vec(integer::<i32>(), nrows)),
+        |small| an_int8_in_int4_range_hashes_like_its_int4(&small),
+    );
+}
+
+fn an_int8_in_int4_range_hashes_like_its_int4(small: &[i32]) -> Result<()> {
     let wide: Vec<i64> = small.iter().map(|&value| i64::from(value)).collect();
     let nrows = small.len();
     let rows_words = all_rows(nrows);
@@ -342,7 +322,7 @@ fn an_int8_in_int4_range_hashes_like_the_int4() -> Result<()> {
     let (mut narrow, mut broad) = (vec![0; nrows], vec![0; nrows]);
     let (mut narrow_words, mut broad_words) =
         (vec![0; nrows.div_ceil(64)], vec![0; nrows.div_ceil(64)]);
-    let narrow_column = ColumnView::try_new(&small, None)?;
+    let narrow_column = ColumnView::try_new(small, None)?;
     let broad_column = ColumnView::try_new(&wide, None)?;
     {
         let mut valid = RowMask::try_new(nrows, &mut narrow_words)?;
@@ -489,8 +469,8 @@ fn a_rejected_row_is_not_read_by_later_keys<T: Key>() -> Result<()> {
     let mut second_non_null = all.clone();
     second_non_null[5] = false;
     let selected: Vec<bool> = (0..nrows).map(|row| row % 7 != 3).collect();
-    let words = words_for(&selected);
-    let rows = RowMaskView::try_new(nrows, &words)?;
+    let selection = words(&selected);
+    let rows = RowMaskView::try_new(nrows, &selection)?;
     let mut hashes = vec![SENTINEL; nrows];
     let mut valid_words = vec![0; 2];
     let mut valid = RowMask::try_new(nrows, &mut valid_words)?;
@@ -501,7 +481,7 @@ fn a_rejected_row_is_not_read_by_later_keys<T: Key>() -> Result<()> {
         &mut hashes,
         &mut valid,
     )?;
-    let second_words = words_for(&second_non_null);
+    let second_words = words(&second_non_null);
     T::hash_next(
         &ColumnView::try_new(&second, Some(RowMaskView::try_new(nrows, &second_words)?))?,
         NullKeys::Reject,
@@ -523,7 +503,7 @@ fn a_rejected_row_is_not_read_by_later_keys<T: Key>() -> Result<()> {
         &selected,
         NullKeys::Reject,
     );
-    assert_eq!(mask_words(&valid), words_for(&expected_valid));
+    assert_eq!(mask_words(&valid), words(&expected_valid));
     for row in 0..nrows {
         if let Some(expected) = expected[row] {
             assert_eq!(hashes[row], expected, "row {row}");
@@ -562,186 +542,117 @@ fn a_rejected_row_is_not_read_by_later_keys_int8() -> Result<()> {
     a_rejected_row_is_not_read_by_later_keys::<i64>()
 }
 
-fn random_keys_match_the_model_in_both_policies<T: Key>() -> Result<()> {
-    let mut state = 0x9E37_79B9_7F4A_7C15;
-    for nrows in [0, 1, 63, 64, 65, 200] {
-        let columns: Vec<(Vec<T>, Vec<bool>)> = (0..3)
-            .map(|_| {
-                let values = T::random_keys(&mut state, nrows);
-                let non_null = (0..nrows)
-                    .map(|_| !random(&mut state).is_multiple_of(5))
-                    .collect();
-                (values, non_null)
-            })
-            .collect();
-        let selected: Vec<bool> = (0..nrows)
-            .map(|_| random(&mut state).is_multiple_of(2))
-            .collect();
-        let words = words_for(&selected);
-        let rows = RowMaskView::try_new(nrows, &words)?;
+/// A chain of one to three key columns with their non-NULL flags, a
+/// selection, and what the valid mask held before the first key, which it
+/// must not matter; the rows a key reads hold keys leaning to the edges,
+/// the others edges.
+#[derive(Clone, Debug)]
+struct Chain<T> {
+    keys: Vec<(Vec<T>, Vec<bool>)>,
+    selected: Vec<bool>,
+    prior: Vec<bool>,
+}
+
+fn chains<T: Key>() -> impl Strategy<Value = Chain<T>> {
+    (nrows(), 1..=3_usize)
+        .prop_flat_map(|(nrows, nkeys)| {
+            (
+                flags(nrows),
+                flags(nrows),
+                proptest::collection::vec(flags(nrows), nkeys),
+            )
+        })
+        .prop_flat_map(|(selected, prior, non_nulls)| {
+            let keys: Vec<_> = non_nulls
+                .into_iter()
+                .map(|non_null| {
+                    let read: Vec<bool> = selected
+                        .iter()
+                        .zip(&non_null)
+                        .map(|(&s, &n)| s && n)
+                        .collect();
+                    (values(&read, &T::keys()), Just(non_null))
+                })
+                .collect();
+            (keys, Just(selected), Just(prior))
+        })
+        .prop_map(|(keys, selected, prior)| Chain {
+            keys,
+            selected,
+            prior,
+        })
+}
+
+/// Each key of a chain leaves the hashes and the valid mask of the model,
+/// under both NULL policies, on the whole-word and the row path.
+fn chains_match_the_model_and_the_row_path<T: Key>() {
+    property(chains::<T>(), |chain| -> Result<()> {
+        let nrows = chain.selected.len();
+        let selection = words(&chain.selected);
+        let rows = RowMaskView::try_new(nrows, &selection)?;
         for nulls in [NullKeys::Reject, NullKeys::Group] {
-            let mut hashes = vec![SENTINEL; nrows];
-            let mut valid_words = words_for(&vec![true; nrows]);
-            let mut valid = RowMask::try_new(nrows, &mut valid_words)?;
+            let mut whole = vec![SENTINEL; nrows];
+            let mut whole_words = words(&chain.prior);
+            let mut whole_valid = RowMask::try_new(nrows, &mut whole_words)?;
+            let mut by_rows = vec![SENTINEL; nrows];
+            let mut by_rows_words = words(&chain.prior);
+            let mut by_rows_valid = RowMask::try_new(nrows, &mut by_rows_words)?;
             let mut keys = Vec::new();
-            for (index, (values, non_null)) in columns.iter().enumerate() {
-                let non_null_words = words_for(non_null);
+            for (index, (values, non_null)) in chain.keys.iter().enumerate() {
+                let non_null_words = words(non_null);
                 let column = ColumnView::try_new(
                     values,
                     Some(RowMaskView::try_new(nrows, &non_null_words)?),
                 )?;
                 if index == 0 {
-                    T::hash(&column, &rows, nulls, &mut hashes, &mut valid)?;
+                    T::hash(&column, &rows, nulls, &mut whole, &mut whole_valid)?;
+                    T::hash(
+                        &RowsOnly(&column),
+                        &rows,
+                        nulls,
+                        &mut by_rows,
+                        &mut by_rows_valid,
+                    )?;
                 } else {
-                    T::hash_next(&column, nulls, &mut hashes, &mut valid)?;
+                    T::hash_next(&column, nulls, &mut whole, &mut whole_valid)?;
+                    T::hash_next(&RowsOnly(&column), nulls, &mut by_rows, &mut by_rows_valid)?;
                 }
                 keys.push((values.as_slice(), non_null.as_slice()));
-                let (expected, expected_valid) = model(&keys, &selected, nulls);
+                let (expected, expected_valid) = model(&keys, &chain.selected, nulls);
+                let expected_valid = words(&expected_valid);
                 assert_eq!(
-                    mask_words(&valid),
-                    words_for(&expected_valid),
-                    "{nrows} {nulls:?}"
+                    mask_words(&whole_valid),
+                    expected_valid,
+                    "{nulls:?} key {index}"
                 );
-                for row in 0..nrows {
-                    if let Some(expected) = expected[row] {
-                        assert_eq!(hashes[row], expected, "{nrows} {nulls:?} row {row}");
+                assert_eq!(
+                    mask_words(&by_rows_valid),
+                    expected_valid,
+                    "{nulls:?} key {index} rows"
+                );
+                for (row, expected) in expected.iter().enumerate() {
+                    if let Some(expected) = *expected {
+                        assert_eq!(whole[row], expected, "{nulls:?} key {index} row {row}");
+                        assert_eq!(
+                            by_rows[row], expected,
+                            "{nulls:?} key {index} rows row {row}"
+                        );
                     }
                 }
             }
         }
-    }
-    Ok(())
+        Ok(())
+    });
 }
 
 #[test]
-fn random_keys_match_the_model_in_both_policies_int4() -> Result<()> {
-    random_keys_match_the_model_in_both_policies::<i32>()
+fn chains_match_the_model_and_the_row_path_int4() {
+    chains_match_the_model_and_the_row_path::<i32>();
 }
 
 #[test]
-fn random_keys_match_the_model_in_both_policies_int8() -> Result<()> {
-    random_keys_match_the_model_in_both_policies::<i64>()
-}
-
-fn hashes_match_the_model_under_both_policies<T: Key>() -> Result<()> {
-    let mut state = 0xfeed_beef_0000_0001;
-    for nrows in [0, 1, 63, 64, 65, 200] {
-        let keys = T::random_keys(&mut state, nrows);
-        let mut non_nulls = all_rows(nrows);
-        let mut selected = all_rows(nrows);
-        for word in non_nulls.iter_mut().chain(selected.iter_mut()) {
-            *word &= random(&mut state) | random(&mut state);
-        }
-        let column = ColumnView::try_new(&keys, Some(RowMaskView::try_new(nrows, &non_nulls)?))?;
-        let rows = RowMaskView::try_new(nrows, &selected)?;
-        for (policy, group) in [(NullKeys::Reject, false), (NullKeys::Group, true)] {
-            let mut hashes = vec![SENTINEL; nrows];
-            let mut words = vec![0; nrows.div_ceil(64)];
-            let mut valid = RowMask::try_new(nrows, &mut words)?;
-            T::hash(&column, &rows, policy, &mut hashes, &mut valid)?;
-            for row in 0..nrows {
-                let chosen = selected[row / 64] >> (row % 64) & 1 == 1;
-                let present = non_nulls[row / 64] >> (row % 64) & 1 == 1;
-                let expected = chosen && (present || group);
-                assert_eq!(
-                    words[row / 64] >> (row % 64) & 1 == 1,
-                    expected,
-                    "{nrows} rows, row {row}"
-                );
-                if expected {
-                    let hash = if present {
-                        model_murmur(keys[row].model_key())
-                    } else {
-                        NULL_HASH
-                    };
-                    assert_eq!(hashes[row], hash, "{nrows} rows, row {row}");
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
-#[test]
-fn hashes_match_the_model_under_both_policies_int4() -> Result<()> {
-    hashes_match_the_model_under_both_policies::<i32>()
-}
-
-#[test]
-fn hashes_match_the_model_under_both_policies_int8() -> Result<()> {
-    hashes_match_the_model_under_both_policies::<i64>()
-}
-
-fn whole_words_agree_with_the_row_path<T: Key>() -> Result<()> {
-    let mut state = 0x2545_F491_4F6C_DD1D_u64;
-    let nrows = 4 * 64 + 11;
-    let columns: Vec<(Vec<T>, Vec<bool>)> = (0..3)
-        .map(|_| {
-            let values = T::random_keys(&mut state, nrows);
-            let non_null = (0..nrows)
-                .map(|_| !random(&mut state).is_multiple_of(4))
-                .collect();
-            (values, non_null)
-        })
-        .collect();
-    // A full first word puts the call on the whole-word path; later words
-    // range from full to sparse, single-row and empty, then the tail.
-    let selected: Vec<bool> = (0..nrows)
-        .map(|row| match row / 64 {
-            0 => true,
-            1 => random(&mut state).is_multiple_of(2),
-            2 => row % 64 == 5,
-            3 => false,
-            _ => row % 2 == 0,
-        })
-        .collect();
-    let words = words_for(&selected);
-    let rows = RowMaskView::try_new(nrows, &words)?;
-    for nulls in [NullKeys::Reject, NullKeys::Group] {
-        let mut whole = vec![SENTINEL; nrows];
-        let mut whole_words = vec![0; nrows.div_ceil(64)];
-        let mut whole_valid = RowMask::try_new(nrows, &mut whole_words)?;
-        let mut by_rows = vec![SENTINEL; nrows];
-        let mut by_rows_words = vec![0; nrows.div_ceil(64)];
-        let mut by_rows_valid = RowMask::try_new(nrows, &mut by_rows_words)?;
-        for (index, (values, non_null)) in columns.iter().enumerate() {
-            let non_null_words = words_for(non_null);
-            let column =
-                ColumnView::try_new(values, Some(RowMaskView::try_new(nrows, &non_null_words)?))?;
-            if index == 0 {
-                T::hash(&column, &rows, nulls, &mut whole, &mut whole_valid)?;
-                T::hash(
-                    &RowsOnly(&column),
-                    &rows,
-                    nulls,
-                    &mut by_rows,
-                    &mut by_rows_valid,
-                )?;
-            } else {
-                T::hash_next(&column, nulls, &mut whole, &mut whole_valid)?;
-                T::hash_next(&RowsOnly(&column), nulls, &mut by_rows, &mut by_rows_valid)?;
-            }
-            assert_eq!(
-                mask_words(&whole_valid),
-                mask_words(&by_rows_valid),
-                "{nulls:?} key {index}"
-            );
-            for row in whole_valid.as_view().selected_indices() {
-                assert_eq!(whole[row], by_rows[row], "{nulls:?} key {index} row {row}");
-            }
-        }
-    }
-    Ok(())
-}
-
-#[test]
-fn whole_words_agree_with_the_row_path_int4() -> Result<()> {
-    whole_words_agree_with_the_row_path::<i32>()
-}
-
-#[test]
-fn whole_words_agree_with_the_row_path_int8() -> Result<()> {
-    whole_words_agree_with_the_row_path::<i64>()
+fn chains_match_the_model_and_the_row_path_int8() {
+    chains_match_the_model_and_the_row_path::<i64>();
 }
 
 fn dimension_errors_come_before_any_change<T: Key>() -> Result<()> {

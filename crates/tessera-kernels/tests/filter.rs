@@ -1,12 +1,14 @@
 #![forbid(unsafe_code)]
 
 use std::cell::Cell;
-use std::fmt::{Debug, Display};
+use std::fmt::Display;
 use std::marker::PhantomData;
 
 use anyhow::{Result, ensure};
+use proptest::prelude::*;
 use tessera_core::{ColumnReader, ColumnView, RowMask, RowMaskView, WordValues};
 use tessera_kernels::{int32, int64, ops::CompareOp};
+use tessera_testing::{Int, edge, flags, integer, nrows, property, values, words};
 
 const OPS: [CompareOp; 6] = [
     CompareOp::Eq,
@@ -19,14 +21,14 @@ const OPS: [CompareOp; 6] = [
 
 /// One integer width under test: its values and its filter kernel. Every
 /// check below runs once for int4 (`i32`) and once for int8 (`i64`).
-trait Width: Copy + Ord + Debug + Display + From<i32> + 'static {
+trait Width: Int + Ord + Display + From<i32> {
     /// Column values and scalars of the model sweep.
     const VALUES: &'static [Self];
-    /// Scalars of the random test, each with its selection density.
-    const SCALARS: [(Self, u64); 10];
 
-    /// A random column value from a draw that does not pick from `VALUES`.
-    fn from_draw(draw: u64) -> Self;
+    /// Values close to each other, so that every operator both keeps and
+    /// drops rows: -3 to 3, and for int8 also the same with a high half, so
+    /// that a 32-bit comparison would call them equal.
+    fn near() -> BoxedStrategy<Self>;
 
     /// `small` for int4; `small << 33` for int8, past the int4 range in the
     /// same order.
@@ -42,21 +44,9 @@ trait Width: Copy + Ord + Debug + Display + From<i32> + 'static {
 
 impl Width for i32 {
     const VALUES: &'static [i32] = &[i32::MIN, -42, -1, 0, 1, 42, i32::MAX];
-    const SCALARS: [(i32, u64); 10] = [
-        (i32::MIN, 2),
-        (-100, 8),
-        (-99, 2),
-        (-1, 16),
-        (0, 2),
-        (1, 3),
-        (42, 2),
-        (98, 8),
-        (99, 2),
-        (i32::MAX, 5),
-    ];
 
-    fn from_draw(draw: u64) -> i32 {
-        (draw >> 8) as i32 % 100
+    fn near() -> BoxedStrategy<Self> {
+        (-3..=3).boxed()
     }
 
     fn spread(small: i32) -> i32 {
@@ -77,27 +67,9 @@ impl Width for i64 {
     /// Values on both sides of the int4 range, so that a 32-bit read would
     /// compare wrongly.
     const VALUES: &'static [i64] = &[i64::MIN, -(1 << 40), -42, -1, 0, 1, 42, 1 << 40, i64::MAX];
-    const SCALARS: [(i64, u64); 10] = [
-        (i64::MIN, 2),
-        (-100 << 32, 8),
-        (-99, 2),
-        (-1, 16),
-        (0, 2),
-        (1, 3),
-        (42, 2),
-        (98 << 32, 8),
-        (99, 2),
-        (i64::MAX, 5),
-    ];
 
-    fn from_draw(draw: u64) -> i64 {
-        // Around zero, and around the int4 boundary.
-        let small = (draw >> 8) as i64 % 100;
-        if draw & 8 == 0 {
-            small
-        } else {
-            small * (1 << 32)
-        }
+    fn near() -> BoxedStrategy<Self> {
+        prop_oneof![-3_i64..=3, (-3_i64..=3).prop_map(|value| value << 32)].boxed()
     }
 
     fn spread(small: i32) -> i64 {
@@ -125,16 +97,6 @@ fn compare<W: Width>(value: W, op: CompareOp, scalar: W) -> bool {
     }
 }
 
-fn words_for(flags: &[bool]) -> Vec<u64> {
-    let mut words = vec![0; flags.len().div_ceil(64)];
-    for (row, &flag) in flags.iter().enumerate() {
-        if flag {
-            words[row / 64] |= 1 << (row % 64);
-        }
-    }
-    words
-}
-
 /// The same values without bulk storage: every word takes the row path.
 struct RowsOnly<'a, W>(ColumnView<'a, W>);
 
@@ -155,83 +117,100 @@ impl<W: Copy> ColumnReader for RowsOnly<'_, W> {
     }
 }
 
-/// xorshift64*, fixed seed: the same data on every run.
-fn random(state: &mut u64) -> u64 {
-    *state ^= *state >> 12;
-    *state ^= *state << 25;
-    *state ^= *state >> 27;
-    state.wrapping_mul(0x2545_F491_4F6C_DD1D)
+/// A column, its non-NULL flags (none when `masked` is false: the unmasked
+/// kernels), a selection and a scalar; the rows a filter reads and the
+/// scalar hold close values, edges and any values, the other rows edges.
+#[derive(Clone, Debug)]
+struct Batch<W> {
+    values: Vec<W>,
+    non_null: Vec<bool>,
+    masked: bool,
+    selected: Vec<bool>,
+    scalar: W,
 }
 
-fn bulk_words_agree_with_the_row_path_on_random_data<W: Width>() {
-    let mut state = 0x9E37_79B9_7F4A_7C15;
-    let nrows = 4 * 64 + 17;
-    let values: Vec<W> = (0..nrows)
-        .map(|_| {
-            let draw = random(&mut state);
-            if draw.is_multiple_of(4) {
-                W::VALUES[(draw >> 8) as usize % W::VALUES.len()]
+fn comparable<W: Width>() -> BoxedStrategy<W> {
+    prop_oneof![1 => edge::<W>(), 2 => W::near(), 1 => integer::<W>()].boxed()
+}
+
+fn batches<W: Width>() -> impl Strategy<Value = Batch<W>> {
+    nrows()
+        .prop_flat_map(|nrows| (flags(nrows), flags(nrows), any::<bool>()))
+        .prop_flat_map(|(selected, non_null, masked)| {
+            let non_null = if masked {
+                non_null
             } else {
-                W::from_draw(draw)
-            }
+                vec![true; selected.len()]
+            };
+            let read: Vec<bool> = selected
+                .iter()
+                .zip(&non_null)
+                .map(|(&s, &n)| s && n)
+                .collect();
+            (
+                values(&read, &comparable::<W>()),
+                comparable::<W>(),
+                Just((non_null, masked, selected.clone())),
+            )
         })
-        .collect();
-    let non_null: Vec<bool> = (0..nrows)
-        .map(|_| !random(&mut state).is_multiple_of(4))
-        .collect();
-    let non_null_words = words_for(&non_null);
-    for masked in [false, true] {
-        let non_nulls = masked.then(|| RowMaskView::try_new(nrows, &non_null_words).unwrap());
-        let column = ColumnView::try_new(&values, non_nulls).unwrap();
-        let rows_only = RowsOnly(ColumnView::try_new(&values, non_nulls).unwrap());
+        .prop_map(|(values, scalar, (non_null, masked, selected))| Batch {
+            values,
+            non_null,
+            masked,
+            selected,
+            scalar,
+        })
+}
+
+/// Every operator keeps exactly the selected non-NULL rows where the model
+/// holds, on the whole-word and the row path.
+fn filters_match_the_model_and_the_row_path<W: Width>() {
+    property(batches::<W>(), |batch| -> Result<()> {
+        let nrows = batch.selected.len();
+        let non_null_words = words(&batch.non_null);
+        let non_nulls = batch
+            .masked
+            .then(|| RowMaskView::try_new(nrows, &non_null_words))
+            .transpose()?;
+        let column = ColumnView::try_new(&batch.values, non_nulls)?;
+        let rows_only = RowsOnly(ColumnView::try_new(&batch.values, non_nulls)?);
         for op in OPS {
-            for (scalar, density) in W::SCALARS {
-                // Dense selections take the whole-word loop, sparse ones the rows.
-                let selected: Vec<bool> = (0..nrows)
-                    .map(|_| random(&mut state).is_multiple_of(density))
-                    .collect();
-                let mut bulk = words_for(&selected);
-                let mut rows = words_for(&selected);
-                W::filter(
-                    &column,
-                    &mut RowMask::try_new(nrows, &mut bulk).unwrap(),
-                    op,
-                    scalar,
-                )
-                .unwrap();
-                W::filter(
-                    &rows_only,
-                    &mut RowMask::try_new(nrows, &mut rows).unwrap(),
-                    op,
-                    scalar,
-                )
-                .unwrap();
-                assert_eq!(bulk, rows, "{op:?} {scalar} masked={masked}");
-                let expected: Vec<_> = (0..nrows)
-                    .map(|row| {
-                        selected[row]
-                            && (!masked || non_null[row])
-                            && compare(values[row], op, scalar)
-                    })
-                    .collect();
-                assert_eq!(
-                    bulk,
-                    words_for(&expected),
-                    "{op:?} {scalar} masked={masked}"
-                );
-            }
+            let mut whole = words(&batch.selected);
+            W::filter(
+                &column,
+                &mut RowMask::try_new(nrows, &mut whole)?,
+                op,
+                batch.scalar,
+            )?;
+            let mut by_rows = words(&batch.selected);
+            W::filter(
+                &rows_only,
+                &mut RowMask::try_new(nrows, &mut by_rows)?,
+                op,
+                batch.scalar,
+            )?;
+            let expected: Vec<bool> = (0..nrows)
+                .map(|row| {
+                    batch.selected[row]
+                        && batch.non_null[row]
+                        && compare(batch.values[row], op, batch.scalar)
+                })
+                .collect();
+            assert_eq!(whole, words(&expected), "{op:?}");
+            assert_eq!(by_rows, whole, "rows {op:?}");
         }
-    }
+        Ok(())
+    });
 }
 
 #[test]
-fn bulk_words_agree_with_the_row_path_on_random_data_int4() {
-    bulk_words_agree_with_the_row_path_on_random_data::<i32>();
+fn filters_match_the_model_and_the_row_path_int4() {
+    filters_match_the_model_and_the_row_path::<i32>();
 }
 
 #[test]
-fn bulk_words_agree_with_the_row_path_on_random_data_int8() {
-    bulk_words_agree_with_the_row_path_on_random_data::<i64>();
+fn filters_match_the_model_and_the_row_path_int8() {
+    filters_match_the_model_and_the_row_path::<i64>();
 }
 
 fn comparisons_match_scalar_model<W: Width>() {
@@ -243,7 +222,7 @@ fn comparisons_match_scalar_model<W: Width>() {
             let non_null: Vec<_> = (0..nrows)
                 .map(|row| null_kind == 0 || (null_kind == 1 && row % 5 != 0))
                 .collect();
-            let non_null_words = words_for(&non_null);
+            let non_null_words = words(&non_null);
             let non_nulls =
                 (null_kind != 0).then(|| RowMaskView::try_new(nrows, &non_null_words).unwrap());
             let column = ColumnView::try_new(&values, non_nulls).unwrap();
@@ -265,13 +244,13 @@ fn comparisons_match_scalar_model<W: Width>() {
                                 selected[row] && non_null[row] && compare(values[row], op, scalar)
                             })
                             .collect();
-                        let mut words = words_for(&selected);
-                        let mut rows = RowMask::try_new(nrows, &mut words).unwrap();
+                        let mut kept = words(&selected);
+                        let mut rows = RowMask::try_new(nrows, &mut kept).unwrap();
                         W::filter(&column, &mut rows, op, scalar).unwrap();
                         // Repeating a filter must not restore rows or change padding.
                         W::filter(&column, &mut rows, op, scalar).unwrap();
-                        assert_eq!(words, words_for(&expected), "{nrows} {op:?} {scalar}");
-                        RowMaskView::try_new(nrows, &words).unwrap();
+                        assert_eq!(kept, words(&expected), "{nrows} {op:?} {scalar}");
+                        RowMaskView::try_new(nrows, &kept).unwrap();
                     }
                 }
             }
@@ -437,7 +416,7 @@ fn dimension_errors_never_read_or_mutate<W: Width>() {
     for nrows in [0, 1, 64, 66, 128] {
         for selected in [false, true] {
             for op in OPS {
-                let original = words_for(&vec![selected; nrows]);
+                let original = words(&vec![selected; nrows]);
                 let mut words = original.clone();
                 let mut rows = RowMask::try_new(nrows, &mut words).unwrap();
                 assert!(W::filter(&column, &mut rows, op, W::from(0)).is_err());

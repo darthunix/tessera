@@ -3,9 +3,11 @@
 use std::mem::MaybeUninit;
 
 use anyhow::Result;
+use proptest::prelude::*;
 use tessera_core::{ColumnReader, ColumnView, RowMask, RowMaskView};
 use tessera_kernels::cast::{int4_to_int8, int8_to_int4};
 use tessera_kernels::ops::ArithmeticError;
+use tessera_testing::{Int, flags, integer, nrows, property, values, words};
 
 /// The same values without bulk storage: every call takes the row path.
 struct RowsOnly<'a>(&'a ColumnView<'a, i32>);
@@ -28,23 +30,43 @@ impl ColumnReader for RowsOnly<'_> {
 }
 
 const SENTINEL: i64 = 0x5a5a_5a5a_5a5a_5a5a;
-const VALUES: [i32; 7] = [i32::MIN, -42, -1, 0, 1, 42, i32::MAX];
 
-fn words_for(flags: &[bool]) -> Vec<u64> {
-    let mut words = vec![0; flags.len().div_ceil(64)];
-    for (row, &flag) in flags.iter().enumerate() {
-        if flag {
-            words[row / 64] |= 1 << (row % 64);
-        }
-    }
-    words
+/// A column, its non-NULL flags (none when `masked` is false) and a
+/// selection; the rows a cast reads hold values from `live`, the others the
+/// edges of the type.
+#[derive(Clone, Debug)]
+struct Batch<T> {
+    values: Vec<T>,
+    non_null: Vec<bool>,
+    masked: bool,
+    selected: Vec<bool>,
 }
 
-fn random(state: &mut u64) -> u64 {
-    *state ^= *state >> 12;
-    *state ^= *state << 25;
-    *state ^= *state >> 27;
-    state.wrapping_mul(0x2545_F491_4F6C_DD1D)
+fn batches<T: Int>(live: BoxedStrategy<T>) -> impl Strategy<Value = Batch<T>> {
+    nrows()
+        .prop_flat_map(|nrows| (flags(nrows), flags(nrows), any::<bool>()))
+        .prop_flat_map(move |(selected, non_null, masked)| {
+            let non_null = if masked {
+                non_null
+            } else {
+                vec![true; selected.len()]
+            };
+            let read: Vec<bool> = selected
+                .iter()
+                .zip(&non_null)
+                .map(|(&s, &n)| s && n)
+                .collect();
+            (
+                values(&read, &live),
+                Just((non_null, masked, selected.clone())),
+            )
+        })
+        .prop_map(|(values, (non_null, masked, selected))| Batch {
+            values,
+            non_null,
+            masked,
+            selected,
+        })
 }
 
 #[allow(unsafe_code)]
@@ -70,63 +92,42 @@ fn run<C: ColumnReader<Value = i32>>(
     Ok((values.iter().map(written).collect(), words))
 }
 
+/// Widening keeps every selected non-NULL value and its sign, on the
+/// whole-word and the row path; the row path leaves unselected rows alone.
 #[test]
-fn widening_keeps_the_sign_and_the_nulls_on_every_shape_of_word() -> Result<()> {
-    let mut state = 0x9E37_79B9_7F4A_7C15;
-    let nrows = 4 * 64 + 11;
-    let values: Vec<i32> = (0..nrows)
-        .map(|_| {
-            let draw = random(&mut state);
-            if draw.is_multiple_of(4) {
-                VALUES[(draw >> 8) as usize % VALUES.len()]
-            } else {
-                (draw >> 8) as i32
-            }
-        })
-        .collect();
-    let non_null: Vec<bool> = (0..nrows)
-        .map(|_| !random(&mut state).is_multiple_of(5))
-        .collect();
-    let non_null_words = words_for(&non_null);
-    for masked in [false, true] {
-        let non_nulls = masked.then(|| RowMaskView::try_new(nrows, &non_null_words).unwrap());
-        let column = ColumnView::try_new(&values, non_nulls)?;
-        let rows_only = RowsOnly(&column);
-        // A full first word puts the call on the whole-word path; later
-        // words range from full to sparse, single-row and empty, then the tail.
-        let selected: Vec<bool> = (0..nrows)
-            .map(|row| match row / 64 {
-                0 => true,
-                1 => random(&mut state).is_multiple_of(2),
-                2 => row % 64 == 5,
-                3 => false,
-                _ => row % 2 == 0,
-            })
-            .collect();
-        let words = words_for(&selected);
-        let rows = RowMaskView::try_new(nrows, &words)?;
+fn widening_keeps_the_sign_and_the_nulls_on_every_shape_of_word() {
+    property(batches(integer::<i32>()), |batch| -> Result<()> {
+        let nrows = batch.selected.len();
+        let non_null_words = words(&batch.non_null);
+        let non_nulls = batch
+            .masked
+            .then(|| RowMaskView::try_new(nrows, &non_null_words))
+            .transpose()?;
+        let column = ColumnView::try_new(&batch.values, non_nulls)?;
+        let selection = words(&batch.selected);
+        let rows = RowMaskView::try_new(nrows, &selection)?;
         let (out, present) = run(&column, &rows)?;
-        let (by_rows, rows_present) = run(&rows_only, &rows)?;
+        let (by_rows, rows_present) = run(&RowsOnly(&column), &rows)?;
         let expected_present: Vec<bool> = (0..nrows)
-            .map(|row| selected[row] && (!masked || non_null[row]))
+            .map(|row| batch.selected[row] && batch.non_null[row])
             .collect();
-        assert_eq!(present, words_for(&expected_present), "masked {masked}");
-        assert_eq!(rows_present, present, "masked {masked}");
+        assert_eq!(present, words(&expected_present));
+        assert_eq!(rows_present, present);
         // Rows outside the selection are unspecified: the whole-word path
         // fills its placeholders, the row path leaves them alone.
         for row in 0..nrows {
             if expected_present[row] {
-                assert_eq!(out[row], i64::from(values[row]), "row {row}");
+                assert_eq!(out[row], i64::from(batch.values[row]), "row {row}");
                 assert_eq!(by_rows[row], out[row], "row {row}");
-            } else if !selected[row] {
+            } else if !batch.selected[row] {
                 assert_eq!(
                     by_rows[row], SENTINEL,
                     "unselected row {row} on the row path"
                 );
             }
         }
-    }
-    Ok(())
+        Ok(())
+    });
 }
 
 #[test]
@@ -159,9 +160,9 @@ fn written32(slot: &MaybeUninit<i32>) -> i32 {
 fn narrow(values: &[i64], nulls: &[bool], selected: &[bool]) -> Result<(Vec<i32>, Vec<u64>)> {
     let nrows = values.len();
     let non_null: Vec<bool> = nulls.iter().map(|null| !null).collect();
-    let non_null_words = words_for(&non_null);
+    let non_null_words = words(&non_null);
     let column = ColumnView::try_new(values, Some(RowMaskView::try_new(nrows, &non_null_words)?))?;
-    let selection = words_for(selected);
+    let selection = words(selected);
     let rows = RowMaskView::try_new(nrows, &selection)?;
     let mut out = vec![MaybeUninit::new(0x5a5a_5a5a); nrows];
     let mut words = vec![0; nrows.div_ceil(64)];
@@ -172,6 +173,46 @@ fn narrow(values: &[i64], nulls: &[bool], selected: &[bool]) -> Result<(Vec<i32>
         &mut RowMask::try_new(nrows, &mut words)?,
     )?;
     Ok((out.iter().map(written32).collect(), words))
+}
+
+/// Narrowing keeps every selected non-NULL value in the int4 range and
+/// fails exactly when one lies outside it; the rows it does not read hold
+/// int8 edges, past the int4 range, and never fail.
+#[test]
+fn narrowing_matches_the_model() {
+    let live = prop_oneof![integer::<i64>(), integer::<i32>().prop_map(i64::from),].boxed();
+    property(batches(live), |batch| -> Result<()> {
+        let nrows = batch.selected.len();
+        let nulls: Vec<bool> = batch.non_null.iter().map(|non_null| !non_null).collect();
+        let outcome = narrow(&batch.values, &nulls, &batch.selected);
+        let read = |row: usize| batch.selected[row] && batch.non_null[row];
+        let fits = (0..nrows)
+            .filter(|&row| read(row))
+            .all(|row| i32::try_from(batch.values[row]).is_ok());
+        match outcome {
+            Ok((out, present)) => {
+                assert!(fits, "a value past the int4 range was narrowed");
+                for row in 0..nrows {
+                    assert_eq!(
+                        present[row / 64] >> (row % 64) & 1 == 1,
+                        read(row),
+                        "row {row}"
+                    );
+                    if read(row) {
+                        assert_eq!(i64::from(out[row]), batch.values[row], "row {row}");
+                    }
+                }
+            }
+            Err(error) => {
+                assert!(!fits, "{error}");
+                assert_eq!(
+                    error.downcast_ref::<ArithmeticError>().copied(),
+                    Some(ArithmeticError::IntegerOutOfRange)
+                );
+            }
+        }
+        Ok(())
+    });
 }
 
 #[test]

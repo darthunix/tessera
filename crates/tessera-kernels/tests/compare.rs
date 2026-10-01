@@ -1,8 +1,10 @@
 #![forbid(unsafe_code)]
 
 use anyhow::Result;
+use proptest::prelude::*;
 use tessera_core::{ColumnReader, ColumnView, RowMask, RowMaskView};
 use tessera_kernels::{int32, int64};
+use tessera_testing::{Int, edge, flags, integer, nrows, property, values, words};
 
 const OPS: [int32::CompareOp; 6] = [
     int32::CompareOp::Eq,
@@ -13,19 +15,50 @@ const OPS: [int32::CompareOp; 6] = [
     int32::CompareOp::Ge,
 ];
 
-fn random(state: &mut u64) -> u64 {
-    *state ^= *state << 13;
-    *state ^= *state >> 7;
-    *state ^= *state << 17;
-    *state
+/// One integer width under test: its comparison of two columns and the
+/// values its columns draw.
+trait Width: Int + Ord {
+    /// Values close to each other, so that every operator both keeps and
+    /// drops rows: -3 to 3, and for int8 also the same with a high half, so
+    /// that a 32-bit comparison would call them equal.
+    fn near() -> BoxedStrategy<Self>;
+
+    fn compare_columns<L: ColumnReader<Value = Self>, R: ColumnReader<Value = Self>>(
+        left: &L,
+        right: &R,
+        rows: &mut RowMask<'_>,
+        op: int32::CompareOp,
+    ) -> Result<()>;
 }
 
-fn words_for(flags: &[bool]) -> Vec<u64> {
-    let mut words = vec![0; flags.len().div_ceil(64)];
-    for (row, _) in flags.iter().enumerate().filter(|(_, flag)| **flag) {
-        words[row / 64] |= 1 << (row % 64);
+impl Width for i32 {
+    fn near() -> BoxedStrategy<Self> {
+        (-3..=3).boxed()
     }
-    words
+
+    fn compare_columns<L: ColumnReader<Value = Self>, R: ColumnReader<Value = Self>>(
+        left: &L,
+        right: &R,
+        rows: &mut RowMask<'_>,
+        op: int32::CompareOp,
+    ) -> Result<()> {
+        int32::compare_columns(left, right, rows, op)
+    }
+}
+
+impl Width for i64 {
+    fn near() -> BoxedStrategy<Self> {
+        prop_oneof![-3_i64..=3, (-3_i64..=3).prop_map(|value| value << 32)].boxed()
+    }
+
+    fn compare_columns<L: ColumnReader<Value = Self>, R: ColumnReader<Value = Self>>(
+        left: &L,
+        right: &R,
+        rows: &mut RowMask<'_>,
+        op: int32::CompareOp,
+    ) -> Result<()> {
+        int64::compare_columns(left, right, rows, op)
+    }
 }
 
 fn model<T: Ord + Copy>(op: int32::CompareOp, a: T, b: T) -> bool {
@@ -62,117 +95,93 @@ where
     }
 }
 
-/// Two columns, their non-NULL flags and a selection, row by row.
-struct Fixture {
-    left: Vec<i64>,
-    right: Vec<i64>,
+/// Two columns, their non-NULL flags and a selection, row by row; the rows
+/// a comparison reads hold close values, edges and any values, the others
+/// edges.
+#[derive(Clone, Debug)]
+struct Batch<T> {
+    left: Vec<T>,
+    right: Vec<T>,
     left_non_null: Vec<bool>,
     right_non_null: Vec<bool>,
     selected: Vec<bool>,
 }
 
-/// Two columns of `nrows` values from a small range, so that every
-/// operator both keeps and drops rows, NULLs in each, and a selection whose
-/// first word is full, then words from dense to sparse, single and empty.
-fn fixture(state: &mut u64, nrows: usize) -> Fixture {
-    let left = (0..nrows).map(|_| (random(state) % 7) as i64 - 3).collect();
-    let right = (0..nrows).map(|_| (random(state) % 7) as i64 - 3).collect();
-    let left_non_null = (0..nrows)
-        .map(|_| !random(state).is_multiple_of(5))
-        .collect();
-    let right_non_null = (0..nrows)
-        .map(|_| !random(state).is_multiple_of(6))
-        .collect();
-    let selected = (0..nrows)
-        .map(|row| match row / 64 {
-            0 => true,
-            1 => random(state).is_multiple_of(2),
-            2 => row % 64 == 5,
-            3 => false,
-            _ => !row.is_multiple_of(3),
+fn batches<T: Width>() -> impl Strategy<Value = Batch<T>> {
+    nrows()
+        .prop_flat_map(|nrows| (flags(nrows), flags(nrows), flags(nrows)))
+        .prop_flat_map(|(selected, left_non_null, right_non_null)| {
+            let live = prop_oneof![1 => edge::<T>(), 2 => T::near(), 1 => integer::<T>()].boxed();
+            let read = |non_null: &[bool]| -> Vec<bool> {
+                selected
+                    .iter()
+                    .zip(non_null)
+                    .map(|(&s, &n)| s && n)
+                    .collect()
+            };
+            (
+                values(&read(&left_non_null), &live),
+                values(&read(&right_non_null), &live),
+                Just((selected.clone(), left_non_null, right_non_null)),
+            )
         })
-        .collect();
-    Fixture {
-        left,
-        right,
-        left_non_null,
-        right_non_null,
-        selected,
-    }
+        .prop_map(
+            |(left, right, (selected, left_non_null, right_non_null))| Batch {
+                left,
+                right,
+                left_non_null,
+                right_non_null,
+                selected,
+            },
+        )
 }
 
-#[test]
-fn comparisons_match_the_model_and_the_row_path() -> Result<()> {
-    let mut state = 0x9e37_79b9_7f4a_7c15;
-    for nrows in [0, 1, 63, 64, 65, 300] {
-        let Fixture {
-            left,
-            right,
-            left_non_null: left_nn,
-            right_non_null: right_nn,
-            selected,
-        } = fixture(&mut state, nrows);
-        let (left_words, right_words) = (words_for(&left_nn), words_for(&right_nn));
-        let left_view = Some(RowMaskView::try_new(nrows, &left_words)?);
-        let right_view = Some(RowMaskView::try_new(nrows, &right_words)?);
-        let left32: Vec<i32> = left.iter().map(|&v| v as i32).collect();
-        let right32: Vec<i32> = right.iter().map(|&v| v as i32).collect();
-        // int8 values past the int4 range, in the same order.
-        let left64: Vec<i64> = left.iter().map(|&v| v << 40).collect();
-        let right64: Vec<i64> = right.iter().map(|&v| v << 40).collect();
-        let columns32 = (
-            ColumnView::try_new(&left32, left_view)?,
-            ColumnView::try_new(&right32, right_view)?,
-        );
-        let columns64 = (
-            ColumnView::try_new(&left64, left_view)?,
-            ColumnView::try_new(&right64, right_view)?,
-        );
+/// Every operator keeps exactly the selected rows where both sides are
+/// present and the model holds, on the whole-word and the row path.
+fn comparisons_match_the_model_and_the_row_path<T: Width>() {
+    property(batches::<T>(), |batch| -> Result<()> {
+        let nrows = batch.selected.len();
+        let (left_words, right_words) = (words(&batch.left_non_null), words(&batch.right_non_null));
+        let left =
+            ColumnView::try_new(&batch.left, Some(RowMaskView::try_new(nrows, &left_words)?))?;
+        let right = ColumnView::try_new(
+            &batch.right,
+            Some(RowMaskView::try_new(nrows, &right_words)?),
+        )?;
         for op in OPS {
             let expected: Vec<bool> = (0..nrows)
                 .map(|row| {
-                    selected[row]
-                        && left_nn[row]
-                        && right_nn[row]
-                        && model(op, left[row], right[row])
+                    batch.selected[row]
+                        && batch.left_non_null[row]
+                        && batch.right_non_null[row]
+                        && model(op, batch.left[row], batch.right[row])
                 })
                 .collect();
-            let expected = words_for(&expected);
-            let mut words = words_for(&selected);
-            int32::compare_columns(
-                &columns32.0,
-                &columns32.1,
-                &mut RowMask::try_new(nrows, &mut words)?,
+            let expected = words(&expected);
+            let mut whole = words(&batch.selected);
+            T::compare_columns(&left, &right, &mut RowMask::try_new(nrows, &mut whole)?, op)?;
+            assert_eq!(whole, expected, "{op:?}");
+            let mut by_rows = words(&batch.selected);
+            T::compare_columns(
+                &RowsOnly(&left),
+                &RowsOnly(&right),
+                &mut RowMask::try_new(nrows, &mut by_rows)?,
                 op,
             )?;
-            assert_eq!(words, expected, "int4 {op:?} {nrows}");
-            let mut words = words_for(&selected);
-            int32::compare_columns(
-                &RowsOnly(&columns32.0),
-                &RowsOnly(&columns32.1),
-                &mut RowMask::try_new(nrows, &mut words)?,
-                op,
-            )?;
-            assert_eq!(words, expected, "int4 rows {op:?} {nrows}");
-            let mut words = words_for(&selected);
-            int64::compare_columns(
-                &columns64.0,
-                &columns64.1,
-                &mut RowMask::try_new(nrows, &mut words)?,
-                op,
-            )?;
-            assert_eq!(words, expected, "int8 {op:?} {nrows}");
-            let mut words = words_for(&selected);
-            int64::compare_columns(
-                &RowsOnly(&columns64.0),
-                &RowsOnly(&columns64.1),
-                &mut RowMask::try_new(nrows, &mut words)?,
-                op,
-            )?;
-            assert_eq!(words, expected, "int8 rows {op:?} {nrows}");
+            assert_eq!(by_rows, expected, "rows {op:?}");
         }
-    }
-    Ok(())
+        Ok(())
+    });
+}
+
+#[test]
+fn comparisons_match_the_model_and_the_row_path_int4() {
+    comparisons_match_the_model_and_the_row_path::<i32>();
+}
+
+#[test]
+fn comparisons_match_the_model_and_the_row_path_int8() {
+    comparisons_match_the_model_and_the_row_path::<i64>();
 }
 
 #[test]
