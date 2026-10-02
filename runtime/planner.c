@@ -457,6 +457,27 @@ tess_plan_child(const CustomPath *path, const List *child_plans, int index,
 	return true;
 }
 
+TargetEntry *
+tess_plan_child_entry(const TessPlanChild *child, Expr *expr)
+{
+	TargetEntry *entry;
+
+	if (child == NULL || child->node == NULL || expr == NULL)
+		return NULL;
+	entry = tlist_member(expr, child->plan->targetlist);
+	if (entry == NULL || tess_layout_column(&child->layout, entry->resno - 1) < 0)
+		return NULL;
+	return entry;
+}
+
+int
+tess_plan_child_column(const TessPlanChild *child, Expr *expr)
+{
+	TargetEntry *entry = tess_plan_child_entry(child, expr);
+
+	return entry == NULL ? -1 : tess_layout_column(&child->layout, entry->resno - 1);
+}
+
 Plan *
 tess_plan_create(CustomPath *path, List *targetlist, List *child_plans,
 				 const TessPlanConfig *config)

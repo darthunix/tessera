@@ -1459,15 +1459,10 @@ resolve_argument(Node *node, TessPlanChild *child)
 	if (node == NULL)
 		return NULL;
 	/* A column of the child, or an expression it computes, as a grouping one. */
-	found = IsA(node, Const) ? NULL :
-		tlist_member((Expr *) node, child->plan->targetlist);
+	found = IsA(node, Const) ? NULL : tess_plan_child_entry(child, (Expr *) node);
 	if (found != NULL)
-	{
-		if (tess_layout_column(&child->layout, found->resno - 1) < 0)
-			elog(ERROR, "TessAgg argument is missing from its child");
 		return (Node *) makeVar(INDEX_VAR, found->resno, exprType(node),
 								exprTypmod(node), exprCollation(node), 0);
-	}
 	if (IsA(node, Var))
 		elog(ERROR, "TessAgg argument is missing from its child");
 	return expression_tree_mutator(node, resolve_argument, child);
