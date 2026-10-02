@@ -1,0 +1,83 @@
+# Mutation testing of the Rust crates (plan 9.9, .cargo/mutants.toml).
+# A pull request that changes the crates gets the mutants of its changed
+# lines; a run by hand (workflow_dispatch) takes every mutant in eight
+# shards. A missed mutant fails the job: a change the tests do not notice.
+# A timeout or a mutant that does not build does not. The runners are
+# arm64 macOS, where the NEON kernels compile.
+name: Mutants
+
+on:
+  pull_request:
+    paths:
+      - "crates/**"
+      - ".cargo/mutants.toml"
+  workflow_dispatch:
+
+concurrency:
+  group: mutants-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  diff:
+    name: Mutants of the changed lines
+    if: github.event_name == 'pull_request'
+    runs-on: macos-15
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Toolchain of rust-toolchain.toml
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-mutants
+      - name: The pull request's diff of the crates
+        run: |
+          mkdir -p target
+          git diff "origin/${{ github.base_ref }}...HEAD" -- crates > target/pr.diff
+          wc -l target/pr.diff
+      - name: Mutants in the changed lines
+        run: |
+          # 2: a mutant was missed; 3: only timeouts; 0: none missed.
+          code=0
+          cargo mutants --in-diff target/pr.diff --no-shuffle --jobs 2 || code=$?
+          test "$code" -eq 0 || test "$code" -eq 3
+      - name: The mutants' outcomes
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutants-diff
+          path: mutants.out
+          if-no-files-found: ignore
+
+  all:
+    name: Mutants, shard ${{ matrix.shard }} of 8
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: macos-15
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain of rust-toolchain.toml
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-mutants
+      - name: Every mutant of the shard
+        run: |
+          code=0
+          cargo mutants --shard ${{ matrix.shard }}/8 --no-shuffle --jobs 2 || code=$?
+          test "$code" -eq 0 || test "$code" -eq 3
+      - name: The mutants' outcomes
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutants-shard-${{ matrix.shard }}
+          path: mutants.out
+          if-no-files-found: ignore

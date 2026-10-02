@@ -1,0 +1,23 @@
+# cargo-mutants (plan 9.9): which code a mutant may change and how the
+# tests judge it. `make rust-mutants` runs every mutant; CI runs those in
+# the lines a pull request changes, and every one on request, both on
+# arm64 macOS, where the NEON kernels compile (on x86-64 they are cut out
+# by cfg, and their mutants would survive unseen).
+
+# The tools, the test strategies, the benchmark programs and the loom
+# model are not the product.
+exclude_globs = [
+    "tools/**",
+    "crates/tessera-testing/**",
+    "crates/tessera-capi/benches/**",
+    "**/loom.rs",
+]
+
+# Debug output carries no logic; Display stays, it is the text of an error.
+exclude_re = ["<impl [a-z:]*Debug for "]
+
+# A mutant that makes a loop endless is stopped at three times the
+# baseline's test time.
+timeout_multiplier = 3.0
+
+additional_cargo_test_args = ["--locked"]

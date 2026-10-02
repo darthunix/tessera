@@ -3,7 +3,7 @@ PG_CONFIG ?= pg_config
 CARGO ?= cargo
 
 .PHONY: all clean install installcheck $(SUBDIRS) \
-	rust rust-release rust-check rust-loom rust-clean \
+	rust rust-release rust-check rust-mutants rust-loom rust-clean \
 	tpch tpch-check tpch-stop
 
 all: $(SUBDIRS)
@@ -42,6 +42,11 @@ rust-check:
 	$(CARGO) clippy --workspace --all-targets --locked -- -D warnings
 	$(CARGO) test --workspace --locked
 	$(CARGO) test --workspace --locked --release
+
+# Every mutant of the Rust crates (.cargo/mutants.toml): hours; CI runs
+# the mutants of a pull request's changed lines, and all of them on request.
+rust-mutants:
+	$(CARGO) mutants --workspace --jobs 4
 
 # The loom model of the hash table's concurrent protocol; a target
 # directory of its own, since --cfg loom rebuilds every crate.
