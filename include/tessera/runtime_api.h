@@ -17,6 +17,13 @@
  */
 extern const TessApi *tess_runtime_api(void);
 
+/* Whether tessera.enable is on: the first gate of every planner hook. */
+static inline bool
+tess_enabled(void)
+{
+	return *tess_runtime_api()->settings->enable;
+}
+
 /*
  * The operations of the Rust kernels (tessera/kernel_ops.h), or NULL when
  * none are installed: the tessera_kernels module is not loaded in this

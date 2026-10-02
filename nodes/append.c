@@ -170,7 +170,7 @@ append_wrap(PlannerInfo *root, Path *path)
 	CustomPath *built;
 	Cost		saved;
 
-	if (!*tess_runtime_api()->settings->enable || !IsA(path, AppendPath) ||
+	if (!tess_enabled() || !IsA(path, AppendPath) ||
 		rel == NULL || path->pathtarget == NULL ||
 		!(IS_SIMPLE_REL(rel) || setop_relation(rel, path->pathtarget)) ||
 		root->parse->commandType != CMD_SELECT ||

@@ -189,7 +189,7 @@ tess_gather_add_paths(PlannerInfo *root, RelOptInfo *rel)
 	Path	   *path;
 	double		rows;
 
-	if (!*tess_runtime_api()->settings->enable || !tess_batch_gather ||
+	if (!tess_enabled() || !tess_batch_gather ||
 		!rel->consider_parallel || rel->partial_pathlist == NIL ||
 		(rel->reloptkind != RELOPT_BASEREL && rel->reloptkind != RELOPT_JOINREL))
 		return;
@@ -217,7 +217,7 @@ tess_gather_path(PlannerInfo *root, RelOptInfo *rel, Path *subpath)
 	Path	   *path;
 	double		rows;
 
-	if (!*tess_runtime_api()->settings->enable || !tess_batch_gather)
+	if (!tess_enabled() || !tess_batch_gather)
 		return NULL;
 	rows = compute_gather_rows(subpath);
 	gather = create_gather_path(root, rel, subpath, subpath->pathtarget, NULL, &rows);
@@ -240,7 +240,7 @@ tess_gather_merge_path(PlannerInfo *root, RelOptInfo *rel, Path *sorted, PathTar
 	Path	   *path;
 	double		rows;
 
-	if (!*tess_runtime_api()->settings->enable || !tess_batch_gather)
+	if (!tess_enabled() || !tess_batch_gather)
 		return NULL;
 	rows = compute_gather_rows(sorted);
 	gather = create_gather_merge_path(root, rel, sorted, sorted->pathtarget, sorted->pathkeys,
@@ -415,7 +415,7 @@ create_upper_paths(PlannerInfo *root, UpperRelationKind stage,
 
 	if (previous_create_upper_paths_hook != NULL)
 		previous_create_upper_paths_hook(root, stage, input_rel, output_rel, extra);
-	if (!*tess_runtime_api()->settings->enable || !tess_batch_gather ||
+	if (!tess_enabled() || !tess_batch_gather ||
 		stage != UPPERREL_FINAL)
 		return;
 	foreach(lc, output_rel->pathlist)
