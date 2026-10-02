@@ -8,10 +8,12 @@ mod cluster;
 mod compare;
 mod config;
 mod load;
+mod measure;
 mod participation;
 mod queries;
 mod rundir;
 mod session;
+mod stats;
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -48,6 +50,10 @@ enum Command {
     /// against the published answer at SF 1, on against off. Times
     /// nothing, so it may run on a busy machine.
     Check(CheckArgs),
+    /// Check, then time: the queries that answered the same in both modes,
+    /// with the data in shared buffers, in pairs of one execution per mode
+    /// in ABBA order. Run it on an idle machine.
+    Run(RunArgs),
     /// Stop the cluster of the scale factor; its data stays.
     Stop(ClusterArgs),
 }
@@ -147,6 +153,22 @@ struct CheckArgs {
     /// (bench/tpch/participation-sf<N>*.txt) instead of comparing them.
     #[arg(long)]
     update_golden: bool,
+}
+
+/// What `run` adds to the check.
+#[derive(Debug, Clone, Args)]
+struct RunArgs {
+    #[command(flatten)]
+    check: CheckArgs,
+    /// Pairs of executions per query, one per mode, in ABBA order.
+    #[arg(long, default_value_t = 11, value_parser = clap::value_parser!(u32).range(1..))]
+    pairs: u32,
+    /// Untimed executions per mode before the pairs.
+    #[arg(long, default_value_t = 1)]
+    warmups: u32,
+    /// A ratio of on to off within this many percent of one is even.
+    #[arg(long, default_value_t = 3.0)]
+    threshold: f64,
 }
 
 /// The repository's root, which holds the queries and the run directories.
@@ -250,9 +272,10 @@ fn with_cluster<T>(
 fn open_run(
     command: &str,
     up: &Up,
-    cluster: &ClusterArgs,
-    queries: &QueryArgs,
+    args: &CheckArgs,
+    timing: Option<&RunArgs>,
 ) -> Result<(RunDir, Meta)> {
+    let (cluster, queries) = (&args.cluster, &args.queries);
     let dir = RunDir::create(&runs_dir(), &cluster.sf)?;
     let mut client = up.cluster.connect()?;
     let started: String = client.query_one("SELECT now()::text", &[])?.get(0);
@@ -269,6 +292,9 @@ fn open_run(
         postgres: up.cluster.pg.version.clone(),
         started,
         power: rundir::power(&root()),
+        pairs: timing.map_or(0, |timing| timing.pairs),
+        warmups: timing.map_or(0, |timing| timing.warmups),
+        threshold: timing.map_or(0.0, |timing| timing.threshold),
     };
     dir.write(
         "source.txt",
@@ -292,8 +318,22 @@ fn pg_settings(session: &mut Session<'_>) -> String {
     }
 }
 
-fn check_command(args: &CheckArgs, up: &Up) -> Result<()> {
-    let (dir, meta) = open_run("check", up, &args.cluster, &args.queries)?;
+/// A check done: its directory, its record so far, and the connections
+/// that ran it, with the statements the timing runs.
+struct Checked<'c> {
+    dir: RunDir,
+    run: rundir::Run,
+    sessions: Sessions<'c>,
+}
+
+/// The check of the answers and the plans, as `check` and `run` begin.
+fn check_phase<'c>(
+    args: &CheckArgs,
+    up: &'c Up,
+    command: &str,
+    timing: Option<&RunArgs>,
+) -> Result<Checked<'c>> {
+    let (dir, meta) = open_run(command, up, args, timing)?;
     let settings = args.queries.session(&args.cluster.sf);
     let mut sessions = Sessions {
         off: Session::open(&up.cluster, &settings, false)?,
@@ -301,7 +341,7 @@ fn check_command(args: &CheckArgs, up: &Up) -> Result<()> {
     };
     dir.write("pg_settings.txt", &pg_settings(&mut sessions.on))?;
     let heading = format!(
-        "tessera-tpch check, SF {}, schema {}, workers {}, work_mem {}, jit {}, timeout {} s",
+        "tessera-tpch {command}, SF {}, schema {}, workers {}, work_mem {}, jit {}, timeout {} s",
         meta.sf,
         meta.schema,
         meta.workers,
@@ -333,34 +373,127 @@ fn check_command(args: &CheckArgs, up: &Up) -> Result<()> {
     let participation = participation::run(&mut sessions, &checks, &dir.file("plans"))?;
     dir.write("participation.txt", &participation::table(&participation))?;
     golden(args, &meta, &participation)?;
-    let run = rundir::Run {
-        meta,
-        checks,
-        participation,
-    };
-    dir.write("run.json", &serde_json::to_string_pretty(&run)?)?;
-    println!("results: {}", dir.path.display());
+    Ok(Checked {
+        dir,
+        run: rundir::Run {
+            meta,
+            checks,
+            participation,
+            samples: Vec::new(),
+            failures: Vec::new(),
+        },
+        sessions,
+    })
+}
+
+/// Writes run.json and fails if an answer was wrong, Tessera off ran a
+/// Tessera node or a timed execution went wrong.
+fn finish(checked: &Checked<'_>) -> Result<()> {
+    let run = &checked.run;
+    checked
+        .dir
+        .write("run.json", &serde_json::to_string_pretty(run)?)?;
+    println!("results: {}", checked.dir.path.display());
+    let name = |query: u8| queries::get(query).name();
     let mut failed: Vec<String> = run
         .checks
         .iter()
         .filter(|check| check.failed())
-        .map(|check| {
-            format!(
-                "{} {}",
-                queries::get(check.query).name(),
-                check.on_off.label()
-            )
-        })
+        .map(|check| format!("{} {}", name(check.query), check.on_off.label()))
         .collect();
     failed.extend(run.participation.iter().filter_map(|query| {
         query
             .fault()
-            .map(|fault| format!("{} {fault}", queries::get(query.query).name()))
+            .map(|fault| format!("{} {fault}", name(query.query)))
     }));
+    failed.extend(run.failures.iter().map(|failure| failure.reason.clone()));
     if !failed.is_empty() {
-        bail!("wrong answers: {}", failed.join(", "));
+        bail!("failed: {}", failed.join(", "));
     }
     Ok(())
+}
+
+fn check_command(args: &CheckArgs, up: &Up) -> Result<()> {
+    let checked = check_phase(args, up, "check", None)?;
+    finish(&checked)
+}
+
+fn run_command(args: &RunArgs, up: &Up) -> Result<()> {
+    let mut checked = check_phase(&args.check, up, "run", Some(args))?;
+    let mut client = up.cluster.connect()?;
+    let (share, bytes) = measure::prewarm(&mut client)?;
+    println!(
+        "shared buffers: {share:.1} % of the {} of tables and indexes",
+        load::human_size(bytes)
+    );
+    if share < 99.0 {
+        println!("warning: the data does not fit in shared buffers; raise --shared-buffers");
+    }
+    let plan = measure::Plan {
+        warmups: args.warmups,
+        pairs: args.pairs,
+    };
+    let timed = checked
+        .run
+        .checks
+        .iter()
+        .filter(|check| measure::timeable(check))
+        .count();
+    let seconds = plan.estimate_seconds(&checked.run.checks);
+    let estimate = if seconds < 90.0 {
+        format!("{seconds:.0} s")
+    } else {
+        format!("{:.0} min", (seconds / 60.0).ceil())
+    };
+    println!(
+        "timing {timed} queries: {} warm-up and {} pairs of executions each, about {estimate}",
+        plan.warmups, plan.pairs,
+    );
+    let (samples, failures) = measure::run(
+        &mut checked.sessions,
+        &checked.run.checks,
+        plan,
+        |summary| {
+            println!(
+                "{}  off {:>9.1} ms  on {:>9.1} ms  on/off {:.3} [{:.3}, {:.3}]",
+                queries::get(summary.query).name(),
+                summary.off_median,
+                summary.on_median,
+                summary.ratio,
+                summary.low,
+                summary.high
+            );
+        },
+    )?;
+    checked.dir.write("timings.csv", &measure::csv(&samples))?;
+    checked.run.samples = samples;
+    checked.run.failures = failures;
+    let summaries = measure::summaries(&checked.run.samples, &checked.run.failures)?;
+    let participation = &checked.run.participation;
+    let with_tessera = |query: u8| {
+        participation
+            .iter()
+            .any(|p| p.query == query && p.on.as_ref().is_some_and(|on| on.tessera_nodes() > 0))
+    };
+    let totals = stats::Totals::new(&summaries, with_tessera, args.threshold);
+    let geomean = |value: Option<f64>| value.map_or("-".to_string(), |value| format!("{value:.3}"));
+    println!(
+        "geometric mean of on/off: {} over {} queries, {} over the {} with Tessera nodes",
+        geomean(totals.geomean),
+        totals.queries,
+        geomean(totals.geomean_tessera),
+        totals.tessera
+    );
+    println!(
+        "sum of the medians: off {:.2} s, on {:.2} s; within {} %: {} faster, {} slower, {} even",
+        totals.off_ms / 1e3,
+        totals.on_ms / 1e3,
+        args.threshold,
+        totals.faster,
+        totals.slower,
+        totals.even
+    );
+    finish(&checked)
 }
 
 /// Compares the plans with the golden file of their settings, or
@@ -417,6 +550,11 @@ fn main() -> Result<()> {
         Command::Check(args) => {
             with_cluster(&args.cluster, args.keep_running, |up| {
                 check_command(&args, up)
+            })?;
+        }
+        Command::Run(args) => {
+            with_cluster(&args.check.cluster, args.check.keep_running, |up| {
+                run_command(&args, up)
             })?;
         }
         Command::Stop(args) => {
@@ -479,6 +617,18 @@ mod tests {
     #[test]
     fn a_bad_scale_is_refused() {
         assert!(Cli::try_parse_from(["tessera-tpch", "setup", "--sf", "-1"]).is_err());
+    }
+
+    #[test]
+    fn run_takes_the_timing() {
+        let cli = Cli::try_parse_from(["tessera-tpch", "run", "--queries", "core", "--pairs", "3"])
+            .unwrap();
+        let Command::Run(args) = cli.command else {
+            panic!("{cli:?}");
+        };
+        assert_eq!(args.check.queries.queries.0, vec![1, 3, 6, 9, 18]);
+        assert_eq!((args.pairs, args.warmups, args.threshold), (3, 1, 3.0));
+        assert!(Cli::try_parse_from(["tessera-tpch", "run", "--pairs", "0"]).is_err());
     }
 
     #[test]

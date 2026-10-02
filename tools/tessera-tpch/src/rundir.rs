@@ -17,6 +17,7 @@ use sha2::{Digest, Sha256};
 use crate::check::QueryCheck;
 use crate::cluster::Cluster;
 use crate::config::Scale;
+use crate::measure::{Failure, Sample};
 use crate::participation::QueryParticipation;
 
 /// What a run was: enough to read its results without its directory's
@@ -39,6 +40,14 @@ pub struct Meta {
     pub started: String,
     /// The power source, as pmset reports it on macOS.
     pub power: String,
+    /// The timing of `run`: none for `check`.
+    #[serde(default)]
+    pub pairs: u32,
+    #[serde(default)]
+    pub warmups: u32,
+    /// Percent within which a ratio counts as even.
+    #[serde(default)]
+    pub threshold: f64,
 }
 
 /// What run.json holds: everything the report prints.
@@ -48,6 +57,11 @@ pub struct Run {
     pub checks: Vec<QueryCheck>,
     #[serde(default)]
     pub participation: Vec<QueryParticipation>,
+    /// The timed executions of `run`.
+    #[serde(default)]
+    pub samples: Vec<Sample>,
+    #[serde(default)]
+    pub failures: Vec<Failure>,
 }
 
 pub struct RunDir {
