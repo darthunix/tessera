@@ -49,7 +49,7 @@ where
 {
     let nrows = rows.as_view().nrows();
     let whole_words = cfg!(all(target_arch = "aarch64", not(miri))) && nrows >= 64 && {
-        let selected = rows.as_view().word(0).unwrap();
+        let selected = rows.as_view().word_at(0);
         (selected == u64::MAX
             || (!selected.is_power_of_two() && selected.count_ones() >= BULK_MIN_ROWS))
             && blocks(left, right, 0).is_some()
@@ -58,7 +58,7 @@ where
         return bulk(left, right, rows, op, &compare);
     }
     for index in 0..nrows.div_ceil(64) {
-        let selected = rows.as_view().word(index).unwrap();
+        let selected = rows.as_view().word_at(index);
         if selected != 0 {
             let passing = word(left, right, index, selected, &compare)?;
             rows.intersect_word(index, passing)?;
@@ -106,7 +106,7 @@ where
     R: ColumnReader<Value = T>,
 {
     for index in 0..rows.as_view().nrows().div_ceil(64) {
-        let selected = rows.as_view().word(index).unwrap();
+        let selected = rows.as_view().word_at(index);
         if selected == 0 {
             continue;
         }

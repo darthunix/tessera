@@ -133,7 +133,7 @@ fn append_rows<R: Region, K: KeySource + ?Sized, const N: usize, const T: usize,
     let mut word_keys = WordKeys::new(&mut buffer, access.nkeys());
     let mut appended = 0;
     for index in 0..nrows.div_ceil(64) {
-        let selected = pending.as_view().word(index).unwrap();
+        let selected = pending.as_view().word_at(index);
         if selected == 0 {
             continue;
         }
@@ -242,7 +242,7 @@ fn append_column_rows<
     let mut word_keys = WordKeys::new(&mut buffer, access.nkeys());
     let mut appended = 0;
     for index in 0..nrows.div_ceil(64) {
-        let selected = pending.as_view().word(index).unwrap();
+        let selected = pending.as_view().word_at(index);
         if selected == 0 {
             continue;
         }
@@ -389,7 +389,7 @@ fn append_partitioned_column_rows<
     let mut appended = 0;
     let mut seen = 0u64;
     for index in 0..nrows.div_ceil(64) {
-        let selected = pending.as_view().word(index).unwrap();
+        let selected = pending.as_view().word_at(index);
         if selected == 0 {
             continue;
         }
@@ -638,7 +638,7 @@ fn probe_rows<R: Region, K: KeySource + ?Sized, const N: usize, const T: usize, 
     let mut word_keys = WordKeys::new(&mut buffer, access.nkeys());
     let mut lanes = Lanes::new();
     for index in 0..nrows.div_ceil(64) {
-        let selected = rows.word(index).unwrap();
+        let selected = rows.word_at(index);
         let mut hits = 0;
         if selected.count_ones() >= VERTICAL_MIN_ROWS {
             word_keys.load(keys, index, selected)?;
@@ -802,7 +802,7 @@ pub(super) fn next_match<R: Region>(
     );
     let mut access = Access::new(region, layout);
     for index in 0..nrows.div_ceil(64) {
-        let mut bits = rows.word(index).unwrap();
+        let mut bits = rows.word_at(index);
         let mut hits = 0;
         while bits != 0 {
             let bit = bits.trailing_zeros() as usize;
@@ -848,7 +848,7 @@ pub(super) fn gather<R: Region, const PREFETCH: bool>(
     let mut access = Access::new(region, layout);
     if !PREFETCH {
         for index in 0..nrows.div_ceil(64) {
-            for bit in rows_of(rows.word(index).unwrap()) {
+            for bit in rows_of(rows.word_at(index)) {
                 let row = index * 64 + bit;
                 let payload = access.locate(offsets[row])?.payload();
                 let mut word = [0; 8];
@@ -865,7 +865,7 @@ pub(super) fn gather<R: Region, const PREFETCH: bool>(
     let word_at = RECORD_HEADER + 8 * access.nkeys() + at;
     let mut spots = [const { MaybeUninit::<R::Spot>::uninit() }; 64];
     for index in 0..nrows.div_ceil(64) {
-        let selected = rows.word(index).unwrap();
+        let selected = rows.word_at(index);
         for bit in rows_of(selected) {
             let place = access.place(offsets[index * 64 + bit])?;
             // SAFETY: `place` accepted it.
@@ -921,7 +921,7 @@ pub(super) fn gather_words<R: Region>(
     let last_at = first_at + 8 * (out.len() - 1);
     let mut spots = [const { MaybeUninit::<R::Spot>::uninit() }; 64];
     for index in 0..nrows.div_ceil(64) {
-        let selected = rows.word(index).unwrap();
+        let selected = rows.word_at(index);
         for bit in rows_of(selected) {
             let place = access.place(offsets[index * 64 + bit])?;
             // SAFETY: `place` accepted it.
@@ -968,7 +968,7 @@ pub(super) fn next_in_group<R: Region>(
     );
     let mut access = Access::new(region, layout);
     for index in 0..nrows.div_ceil(64) {
-        let mut bits = rows.word(index).unwrap();
+        let mut bits = rows.word_at(index);
         let mut hits = 0;
         while bits != 0 {
             let bit = bits.trailing_zeros() as usize;
@@ -1018,7 +1018,7 @@ pub(super) fn gather_key<R: Region>(
     );
     let mut access = Access::new(region, layout);
     for index in 0..nrows.div_ceil(64) {
-        let mut bits = rows.word(index).unwrap();
+        let mut bits = rows.word_at(index);
         while bits != 0 {
             let row = index * 64 + bits.trailing_zeros() as usize;
             bits &= bits - 1;

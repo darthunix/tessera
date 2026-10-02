@@ -15,7 +15,9 @@ enum Storage<'a> {
 fn byte_word(bytes: &[u8], bit_offset: usize, word_index: usize, nrows: usize) -> u64 {
     let window = &bytes[word_index * 8..];
     let bits = if let Some(nine) = window.get(..9) {
-        let low = u64::from_le_bytes(nine[..8].try_into().unwrap());
+        let mut low = [0; 8];
+        low.copy_from_slice(&nine[..8]);
+        let low = u64::from_le_bytes(low);
         if bit_offset == 0 {
             low
         } else {
@@ -95,22 +97,39 @@ impl<'a> RowMaskView<'a> {
     /// The last word's padding is always zero, independent of backing format.
     #[inline]
     pub fn word(&self, word_index: usize) -> Option<u64> {
-        if word_index >= word_count(self.nrows) {
-            return None;
-        }
-        Some(match self.storage {
+        (word_index < word_count(self.nrows)).then(|| self.word_at(word_index))
+    }
+
+    /// Return the logical 64-row word `word_index`, which must be below the
+    /// word count: a loop over the words of this mask. An index past them
+    /// panics as an index past a slice does.
+    ///
+    /// The last word's padding is always zero, independent of backing format.
+    #[inline]
+    pub fn word_at(&self, word_index: usize) -> u64 {
+        debug_assert!(word_index < word_count(self.nrows));
+        match self.storage {
             Storage::Words(words) => words[word_index],
             Storage::Bytes { bytes, bit_offset } => {
                 if bit_offset == 0 && self.nrows - word_index * 64 >= 64 {
                     let start = word_index * 8;
                     // A fixed-size copy permits a direct load without requiring
                     // u64 alignment or reading beyond the validated window.
-                    u64::from_le_bytes(bytes[start..start + 8].try_into().unwrap())
+                    let mut word = [0; 8];
+                    word.copy_from_slice(&bytes[start..start + 8]);
+                    u64::from_le_bytes(word)
                 } else {
                     byte_word(bytes, bit_offset, word_index, self.nrows)
                 }
             }
-        })
+        }
+    }
+
+    /// The logical 64-row words in order, the last one's padding zero.
+    #[inline]
+    pub fn words(&self) -> impl ExactSizeIterator<Item = u64> + 'a {
+        let view = *self;
+        (0..word_count(self.nrows)).map(move |index| view.word_at(index))
     }
 
     /// Return the number of physical rows, including unselected rows.
@@ -120,9 +139,7 @@ impl<'a> RowMaskView<'a> {
 
     /// Return the number of selected rows, not the physical row count.
     pub fn selected_count(&self) -> usize {
-        (0..word_count(self.nrows))
-            .map(|index| self.word(index).unwrap().count_ones() as usize)
-            .sum()
+        self.words().map(|word| word.count_ones() as usize).sum()
     }
 
     /// Check a physical row, returning an error if `row >= self.nrows()`.
@@ -143,8 +160,7 @@ impl<'a> RowMaskView<'a> {
     /// Only set bits are visited within each word. Once exhausted, the
     /// iterator keeps returning `None`.
     pub fn selected_indices(&self) -> impl Iterator<Item = usize> + '_ {
-        (0..word_count(self.nrows)).flat_map(|word| {
-            let mut remaining = self.word(word).unwrap();
+        self.words().enumerate().flat_map(|(word, mut remaining)| {
             std::iter::from_fn(move || {
                 if remaining == 0 {
                     return None;
@@ -284,8 +300,8 @@ impl<'a> RowMask<'a> {
             self.nrows,
             other.nrows
         );
-        for (index, word) in self.words.iter_mut().enumerate() {
-            *word &= other.word(index).unwrap();
+        for (word, other) in self.words.iter_mut().zip(other.words()) {
+            *word &= other;
         }
         Ok(())
     }

@@ -976,7 +976,7 @@ pub unsafe extern "C" fn tess_decimal_read(
             }?;
             // The other selected rows keep their Datums.
             for word in 0..nrows.div_ceil(64) {
-                let mut look = rows.word(word).unwrap() & !decimals.as_view().word(word).unwrap();
+                let mut look = rows.word_at(word) & !decimals.as_view().word_at(word);
                 while look != 0 {
                     let row = word * 64 + look.trailing_zeros() as usize;
                     look &= look - 1;

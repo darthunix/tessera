@@ -79,7 +79,7 @@ fn try_fold_words<B, V>(
         "column and selection row counts differ"
     );
     for index in 0..nrows.div_ceil(64) {
-        let mut remaining = rows.word(index).unwrap();
+        let mut remaining = rows.word_at(index);
         if remaining == 0 {
             continue;
         }

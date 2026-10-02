@@ -696,7 +696,7 @@ fn map_rows<L: Copy, R: Copy, T>(
 ) -> Result<()> {
     check_rows(rows.nrows(), &[values.len(), non_nulls.as_view().nrows()])?;
     for word in 0..rows.nrows().div_ceil(64) {
-        let mut look = rows.word(word).unwrap();
+        let mut look = rows.word_at(word);
         let mut present = 0;
         while look != 0 {
             let bit = look.trailing_zeros();
@@ -830,7 +830,7 @@ pub fn truncate_locals(
         &[values.len(), days.as_view().nrows(), rest.as_view().nrows()],
     )?;
     for word in 0..rows.nrows().div_ceil(64) {
-        let mut look = rows.word(word).unwrap();
+        let mut look = rows.word_at(word);
         let (mut day_bits, mut other) = (0, 0);
         while look != 0 {
             let bit = look.trailing_zeros();
@@ -947,7 +947,7 @@ fn extract_rows<T>(
     )?;
     let mut fields = DayFields::default();
     for word in 0..rows.nrows().div_ceil(64) {
-        let mut look = rows.word(word).unwrap();
+        let mut look = rows.word_at(word);
         let (mut present, mut other) = (0, 0);
         while look != 0 {
             let bit = look.trailing_zeros();

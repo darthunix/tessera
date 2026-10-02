@@ -46,7 +46,7 @@ fn filter_with<T: IntLane, C: ColumnReader<Value = T>>(
     // once keeps both loops free of per-word bookkeeping, which cost more
     // than the decision on every layout tried.
     for index in 0..nrows.div_ceil(64) {
-        let selected = rows.as_view().word(index).unwrap();
+        let selected = rows.as_view().word_at(index);
         if selected == 0 {
             continue;
         }
@@ -77,7 +77,7 @@ fn filter_rows<T: IntLane, C: ColumnReader<Value = T>>(
     compare: &impl Fn(T, T) -> bool,
 ) -> Result<()> {
     for index in first..rows.as_view().nrows().div_ceil(64) {
-        let selected = rows.as_view().word(index).unwrap();
+        let selected = rows.as_view().word_at(index);
         if selected == 0 {
             continue;
         }
@@ -113,7 +113,7 @@ fn filter_bulk<T: IntLane, C: ColumnReader<Value = T>>(
     compare: &impl Fn(T, T) -> bool,
 ) -> Result<()> {
     for index in first..rows.as_view().nrows().div_ceil(64) {
-        let selected = rows.as_view().word(index).unwrap();
+        let selected = rows.as_view().word_at(index);
         if selected == 0 {
             continue;
         }

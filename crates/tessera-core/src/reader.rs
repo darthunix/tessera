@@ -73,7 +73,7 @@ pub trait ColumnReader {
         );
         let mut acc = init;
         for index in 0..word_count(rows.nrows()) {
-            let selected = rows.word(index).unwrap();
+            let selected = rows.word_at(index);
             if selected == 0 {
                 continue;
             }

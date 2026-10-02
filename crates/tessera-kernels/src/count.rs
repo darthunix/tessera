@@ -55,7 +55,7 @@ pub fn count<C: ColumnReader>(column: &C, rows: &RowMaskView<'_>) -> Result<usiz
 fn count_bulk<C: ColumnReader>(column: &C, rows: &RowMaskView<'_>) -> Result<usize> {
     let mut count = 0;
     for index in 0..rows.nrows().div_ceil(64) {
-        let selected = rows.word(index).unwrap();
+        let selected = rows.word_at(index);
         if selected == 0 {
             continue;
         }

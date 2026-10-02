@@ -85,7 +85,7 @@ where
         let rows = output.rows;
         let mut output = output;
         for index in 0..rows.nrows().div_ceil(64) {
-            let selected = rows.word(index).unwrap();
+            let selected = rows.word_at(index);
             self.word(index, selected, &mut output, evaluate)?;
         }
         Ok(())
@@ -273,7 +273,7 @@ where
         _ => None,
     };
     for index in 0..rows.nrows().div_ceil(64) {
-        let selected = rows.word(index).unwrap();
+        let selected = rows.word_at(index);
         if selected == 0 || selected.is_power_of_two() {
             operands.word(index, selected, &mut output, evaluate)?;
             continue;

@@ -89,7 +89,7 @@ pub fn append_partitioned<C: ColumnChunks + ?Sized>(
     );
     let mut appended = 0;
     for index in 0..nrows.div_ceil(64) {
-        let selected = pending.as_view().word(index).unwrap();
+        let selected = pending.as_view().word_at(index);
         let mut left = selected;
         let mut done = 0;
         while left != 0 {
@@ -181,7 +181,7 @@ mod tests {
         assert_eq!(rows, [0, 10, 25, 25]);
         assert_eq!(appended, 60);
         let left: Vec<usize> = (0..nrows)
-            .filter(|row| pending.as_view().word(row / 64).unwrap() >> (row % 64) & 1 == 1)
+            .filter(|row| pending.as_view().word_at(row / 64) >> (row % 64) & 1 == 1)
             .collect();
         let expected: Vec<usize> = (0..nrows)
             .filter(|row| row % 4 == 0 || (row % 4 == 1 && *row >= 40))

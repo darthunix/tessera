@@ -9,9 +9,13 @@
 //! normalized: the address of an instruction, a branch's absolute target
 //! and a symbol's hash differ between two builds of the same code, so a
 //! target is kept as the symbol and offset objdump names, and other
-//! absolute addresses become `ADDR`. Registers, immediates and the order
-//! of the instructions are kept: with one codegen unit the same source
-//! gives the same code.
+//! absolute addresses become `ADDR`. Data moves too when constants are
+//! added or removed elsewhere: on AArch64 the page an `adrp` loads becomes
+//! `ADDR` and the offset within it, an immediate taken from that register
+//! until it is written again, becomes `LO12`; on x86-64 a displacement
+//! from the instruction pointer and objdump's comment on it become `ADDR`.
+//! Registers, other immediates and the order of the instructions are
+//! kept: with one codegen unit the same source gives the same code.
 
 use anyhow::{Context, Result, ensure};
 use std::{
@@ -50,6 +54,7 @@ fn tessera(name: &str) -> bool {
 pub fn parse(listing: &str) -> Functions {
     let mut functions = Functions::new();
     let mut current: Option<(String, Vec<String>)> = None;
+    let mut pages = Pages::default();
     let mut finish = |current: &mut Option<(String, Vec<String>)>| {
         if let Some((name, body)) = current.take() {
             functions.entry(name).or_default().push(body.join("\n"));
@@ -58,13 +63,14 @@ pub fn parse(listing: &str) -> Functions {
     for line in listing.lines() {
         if let Some(name) = header(line) {
             finish(&mut current);
+            pages = Pages::default();
             if tessera(&name) {
                 current = Some((name, Vec::new()));
             }
-        } else if let Some((_, body)) = current.as_mut()
+        } else if let Some((name, body)) = current.as_mut()
             && let Some(instruction) = instruction(line)
         {
-            body.push(instruction);
+            body.push(foreign_offsets(&pages.normalize(&instruction), name));
         }
     }
     finish(&mut current);
@@ -93,6 +99,135 @@ fn instruction(line: &str) -> Option<String> {
     }
     let text = rest.trim();
     (!text.is_empty()).then(|| normalize(text))
+}
+
+/// The AArch64 registers holding a page an `adrp` loaded, within one
+/// function: an immediate offset from one of them is the low bits of a
+/// data address.
+#[derive(Default)]
+struct Pages {
+    registers: BTreeSet<u32>,
+}
+
+impl Pages {
+    fn normalize(&mut self, text: &str) -> String {
+        if let Some(at) = text.find("(%rip)")
+            && let Some(comment) = text[at..].find(" #")
+        {
+            return text[..at + comment].trim_end().to_owned();
+        }
+        let (mnemonic, operands) = text
+            .split_once(|c: char| c.is_ascii_whitespace())
+            .map_or((text, ""), |(m, o)| (m, o.trim_start()));
+        let parts: Vec<&str> = operands.split(", ").collect();
+        let destination = parts.first().and_then(|first| register(first));
+        if mnemonic == "adrp" || mnemonic == "adr" {
+            if let Some(register) = destination {
+                if mnemonic == "adrp" {
+                    self.registers.insert(register);
+                } else {
+                    self.registers.remove(&register);
+                }
+            }
+            return format!("{mnemonic}\t{}, ADDR", parts[0]);
+        }
+        let mut out = Vec::with_capacity(parts.len());
+        let mut base_page = false;
+        for (index, part) in parts.iter().enumerate() {
+            let page = register(part).is_some_and(|r| self.registers.contains(&r));
+            if part.starts_with('[') && page {
+                base_page = true;
+            }
+            let literal = index == 1
+                && mnemonic.starts_with("ldr")
+                && !part.starts_with('[')
+                && !part.starts_with('#')
+                && register(part).is_none();
+            if literal {
+                out.push("ADDR".to_owned());
+            } else if part.starts_with('#')
+                && (base_page
+                    || (mnemonic == "add"
+                        && index == 2
+                        && parts
+                            .get(1)
+                            .and_then(|p| register(p))
+                            .is_some_and(|r| self.registers.contains(&r))))
+            {
+                let closing = part.find(']').map_or("", |at| &part[at..]);
+                out.push(format!("LO12{closing}"));
+            } else {
+                out.push((*part).to_owned());
+            }
+        }
+        let stores =
+            mnemonic.starts_with("st") || mnemonic.starts_with("cb") || mnemonic.starts_with("tb");
+        if !stores && let Some(register) = destination {
+            self.registers.remove(&register);
+        }
+        if operands.is_empty() {
+            mnemonic.to_owned()
+        } else {
+            format!("{mnemonic}\t{}", out.join(", "))
+        }
+    }
+}
+
+/// An offset into another symbol, `<dyld_stub_binder+0x4f3e0>` for a call
+/// through a stub or a data symbol's interior, moves when other code does:
+/// it becomes `<symbol+OFF>`. Offsets into the function itself, its branch
+/// targets, stay.
+fn foreign_offsets(text: &str, function: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(open) = rest.find('<') {
+        out.push_str(&rest[..open]);
+        let Some(close) = matching(rest.as_bytes(), open) else {
+            out.push_str(&rest[open..]);
+            return out;
+        };
+        let symbol = &rest[open + 1..close - 1];
+        match symbol.rsplit_once("+0x") {
+            Some((name, offset))
+                if name != function && offset.bytes().all(|b| b.is_ascii_hexdigit()) =>
+            {
+                out.push('<');
+                out.push_str(name);
+                out.push_str("+OFF>");
+            }
+            _ => out.push_str(&rest[open..close]),
+        }
+        rest = &rest[close..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// The end, past its `>`, of the angle brackets opening at `open`.
+fn matching(bytes: &[u8], open: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    for (offset, &byte) in bytes[open..].iter().enumerate() {
+        match byte {
+            b'<' => depth += 1,
+            b'>' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(open + offset + 1);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// The number of an AArch64 general register an operand names, `x10`,
+/// `w10` or `[x10`, or `None`.
+fn register(operand: &str) -> Option<u32> {
+    let name = operand.trim_start_matches('[');
+    let digits = name.strip_prefix('x').or_else(|| name.strip_prefix('w'))?;
+    let digits = digits.trim_end_matches([']', '!']);
+    digits.parse().ok().filter(|&n: &u32| n < 31)
 }
 
 /// Drop the hash of a legacy-mangled Rust symbol, `::h` and 16 hex digits.
@@ -297,6 +432,59 @@ Disassembly of section __TEXT,__text:
         assert_eq!(
             difference.only_after,
             BTreeSet::from(["_tess_int4_filter2".to_owned()])
+        );
+    }
+
+    #[test]
+    fn data_pages_and_their_offsets_are_addresses() {
+        let mut pages = Pages::default();
+        let lines = [
+            "adrp\tx10, <dyld_stub_binder+0x100052000>",
+            "ldr\tq2, [x10, #0x720]",
+            "add\tx1, x10, #0x18",
+            "ldr\tx8, [x8, #0x10]",
+            "mov\tx10, x0",
+            "ldr\tq2, [x10, #0x720]",
+            "ldr\tx3, 0x100004000 <sym>",
+            "str\tx10, [sp, #0x8]",
+        ];
+        let normalized: Vec<_> = lines
+            .iter()
+            .map(|line| pages.normalize(&normalize(line)))
+            .collect();
+        assert_eq!(
+            normalized,
+            [
+                "adrp\tx10, ADDR",
+                "ldr\tq2, [x10, LO12]",
+                "add\tx1, x10, LO12",
+                "ldr\tx8, [x8, #0x10]",
+                "mov\tx10, x0",
+                "ldr\tq2, [x10, #0x720]",
+                "ldr\tx3, ADDR",
+                "str\tx10, [sp, #0x8]",
+            ]
+        );
+        assert_eq!(
+            Pages::default().normalize("lea    0x2f0e(%rip),%rax        # 405000 <sym>"),
+            "lea    0x2f0e(%rip),%rax"
+        );
+    }
+
+    #[test]
+    fn offsets_into_other_symbols_move() {
+        let function = "tessera_kernels::f";
+        assert_eq!(
+            foreign_offsets("bl\t<dyld_stub_binder+0x4f3e0>", function),
+            "bl\t<dyld_stub_binder+OFF>"
+        );
+        assert_eq!(
+            foreign_offsets("b.eq\t<tessera_kernels::f+0x22c>", function),
+            "b.eq\t<tessera_kernels::f+0x22c>"
+        );
+        assert_eq!(
+            foreign_offsets("bl\t<tessera_kernels::g::<i32, x<i32>>>", function),
+            "bl\t<tessera_kernels::g::<i32, x<i32>>>"
         );
     }
 

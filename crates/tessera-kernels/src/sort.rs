@@ -293,7 +293,7 @@ fn candidates_as<K: KeySource + ?Sized, const W: usize>(
     let mut non_null = [0u64; MAX_KEYS];
     let mut kept = 0;
     for index in 0..nrows.div_ceil(64) {
-        let selected = rows.as_view().word(index).unwrap();
+        let selected = rows.as_view().word_at(index);
         if selected == 0 {
             continue;
         }
@@ -345,7 +345,7 @@ pub fn key_lanes<K: KeySource + ?Sized>(
         lanes.len()
     );
     let selected: usize = (0..rows.nrows().div_ceil(64))
-        .map(|index| rows.word(index).unwrap().count_ones() as usize)
+        .map(|index| rows.word_at(index).count_ones() as usize)
         .sum();
     ensure!(
         lanes.iter().all(|lane| lane.len() >= selected),
@@ -373,7 +373,7 @@ fn lanes_as<K: KeySource + ?Sized, const W: usize>(
     let mut non_null = [0u64; MAX_KEYS];
     let mut out = 0;
     for index in 0..rows.nrows().div_ceil(64) {
-        let selected = rows.word(index).unwrap();
+        let selected = rows.word_at(index);
         if selected == 0 {
             continue;
         }

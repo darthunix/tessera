@@ -89,7 +89,7 @@ fn widen_rows<C: ColumnReader<Value = i32>>(
     non_nulls: &mut RowMask<'_>,
 ) -> Result<()> {
     for index in 0..rows.nrows().div_ceil(64) {
-        let selected = rows.word(index).unwrap();
+        let selected = rows.word_at(index);
         non_nulls.set_word(index, word_rows(column, index, selected, values)?)?;
     }
     Ok(())
@@ -164,7 +164,7 @@ pub fn int8_to_int4<C: ColumnReader<Value = i64>>(
         "column and selection row counts differ"
     );
     for index in 0..nrows.div_ceil(64) {
-        let selected = rows.word(index).unwrap();
+        let selected = rows.word_at(index);
         let mut present = 0;
         if selected != 0 {
             for (row, value) in column.word_values(index, selected)? {
@@ -192,7 +192,7 @@ fn widen_bulk<C: ColumnReader<Value = i32>>(
     non_nulls: &mut RowMask<'_>,
 ) -> Result<()> {
     for index in 0..rows.nrows().div_ceil(64) {
-        let selected = rows.word(index).unwrap();
+        let selected = rows.word_at(index);
         let present = if selected == 0 || selected.is_power_of_two() {
             word_rows(column, index, selected, values)?
         } else if let Some(block) = column.word_block(index) {

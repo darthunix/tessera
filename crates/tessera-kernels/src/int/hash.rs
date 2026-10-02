@@ -79,7 +79,7 @@ struct Valid;
 impl Selection for Valid {
     #[inline(always)]
     fn word(&self, valid: &RowMask<'_>, index: usize) -> u64 {
-        valid.as_view().word(index).unwrap()
+        valid.as_view().word_at(index)
     }
 }
 

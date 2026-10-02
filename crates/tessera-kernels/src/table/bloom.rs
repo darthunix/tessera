@@ -321,7 +321,7 @@ pub fn add(words: &mut [u64], hashes: &[u32], rows: &RowMaskView<'_>) -> Result<
         "the hashes and the mask of the batch have different row counts"
     );
     for index in 0..nrows.div_ceil(64) {
-        let mut bits = rows.word(index).unwrap();
+        let mut bits = rows.word_at(index);
         while bits != 0 {
             let bit = bits.trailing_zeros() as usize;
             bits &= bits - 1;
@@ -362,7 +362,7 @@ pub unsafe fn add_shared(
     // alignment of a `u64`.
     let atomics = unsafe { core::slice::from_raw_parts(words.cast::<AtomicU64>(), nwords) };
     for index in 0..nrows.div_ceil(64) {
-        let mut bits = rows.word(index).unwrap();
+        let mut bits = rows.word_at(index);
         while bits != 0 {
             let bit = bits.trailing_zeros() as usize;
             bits &= bits - 1;
@@ -412,7 +412,7 @@ fn check<F: FilterRead + ?Sized>(
         "the hashes, mask and result of the batch have different row counts"
     );
     for index in 0..nrows.div_ceil(64) {
-        let mut bits = rows.word(index).unwrap();
+        let mut bits = rows.word_at(index);
         let mut hits = 0;
         while bits != 0 {
             let bit = bits.trailing_zeros();

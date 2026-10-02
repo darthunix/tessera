@@ -258,7 +258,7 @@ fn filter_rows(
     let nrows = rows.as_view().nrows();
     check_rows(nrows, &[rest.as_view().nrows()])?;
     for word in 0..nrows.div_ceil(64) {
-        let mut look = rows.as_view().word(word).unwrap();
+        let mut look = rows.as_view().word_at(word);
         let (mut keep, mut other) = (0, 0);
         while look != 0 {
             let bit = look.trailing_zeros();
@@ -376,7 +376,7 @@ pub fn lengths(
         ],
     )?;
     for word in 0..rows.nrows().div_ceil(64) {
-        let mut look = rows.word(word).unwrap();
+        let mut look = rows.word_at(word);
         let (mut present, mut other) = (0, 0);
         while look != 0 {
             let bit = look.trailing_zeros();
@@ -518,7 +518,7 @@ pub fn pieces(
         ],
     )?;
     for word in 0..rows.nrows().div_ceil(64) {
-        let mut look = rows.word(word).unwrap();
+        let mut look = rows.word_at(word);
         let (mut present, mut other) = (0, 0);
         while look != 0 {
             let bit = look.trailing_zeros();

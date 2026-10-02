@@ -93,7 +93,7 @@ fn aggregate_bulk<T: IntLane, C: ColumnReader<Value = T>, B: Copy>(
 ) -> Result<B> {
     let mut acc = init;
     for index in 0..rows.nrows().div_ceil(64) {
-        let selected = rows.word(index).unwrap();
+        let selected = rows.word_at(index);
         if selected == 0 {
             continue;
         }

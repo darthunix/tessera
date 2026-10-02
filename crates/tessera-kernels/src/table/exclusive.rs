@@ -171,7 +171,7 @@ fn resolve_rows<
     let mut resolved = 0;
     let mut full = false;
     for index in 0..nrows.div_ceil(64) {
-        let selected = pending.as_view().word(index).unwrap();
+        let selected = pending.as_view().word_at(index);
         let mut done = 0;
         let mut created = 0;
         if selected != 0 && !full {
@@ -554,7 +554,7 @@ pub(super) fn count_rows<R: Region>(
     check_accumulate(layout, offsets.len(), nrows, &[at])?;
     let mut access = Access::new(region, layout);
     for index in 0..nrows.div_ceil(64) {
-        let mut bits = rows.word(index).unwrap();
+        let mut bits = rows.word_at(index);
         while bits != 0 {
             let row = index * 64 + bits.trailing_zeros() as usize;
             bits &= bits - 1;
@@ -586,7 +586,7 @@ pub(super) fn count_values<R: Region, C: ColumnReader + ?Sized>(
     );
     let mut access = Access::new(region, layout);
     for index in 0..nrows.div_ceil(64) {
-        let selected = rows.word(index).unwrap();
+        let selected = rows.word_at(index);
         if selected == 0 {
             continue;
         }
@@ -641,7 +641,7 @@ where
     let flag = 1u64 << slot.flag_bit;
     let mut access = Access::new(region, layout);
     for index in 0..nrows.div_ceil(64) {
-        let selected = rows.word(index).unwrap();
+        let selected = rows.word_at(index);
         if selected == 0 {
             continue;
         }
@@ -793,7 +793,7 @@ pub(super) fn sum_terms<R: Region, T: Terms>(
     let mut group_rows = [0_u64; LOCAL_GROUPS];
     let mut bulk = [0_i128; LOCAL_GROUPS];
     for index in 0..nrows.div_ceil(64) {
-        let selected = rows.word(index).unwrap();
+        let selected = rows.word_at(index);
         // The word's groups, and the rows of the groups that fit.
         let mut slots = [0_u8; LOCAL_SLOTS];
         let mut ngroups = 0;
@@ -968,7 +968,7 @@ pub(super) fn sum_partials<R: Region, P: Partials>(
     let mut others = [0_u64; MAX_SUMS];
     for index in 0..nrows.div_ceil(64) {
         others[..nsums].fill(0);
-        let mut look = rows.word(index).unwrap();
+        let mut look = rows.word_at(index);
         while look != 0 {
             let bit = look.trailing_zeros() as usize;
             look &= look - 1;

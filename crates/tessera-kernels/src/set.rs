@@ -165,7 +165,7 @@ where
     );
     let whole_words = set.keys.len() <= T::WORD_KEYS;
     for word in 0..nrows.div_ceil(64) {
-        let selected = rows.word(word).unwrap();
+        let selected = rows.word_at(word);
         let whole = if whole_words
             && (selected == u64::MAX || selected.count_ones() >= BULK_MIN_ROWS)
             && let Some(block) = column.word_block(word)
