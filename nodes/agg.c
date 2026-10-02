@@ -2023,9 +2023,7 @@ agg_begin(CustomScanState *css, EState *estate, int eflags)
 	int			groups;
 	int			index = 0;
 
-	/* The planner puts Material above a batch subtree for these. */
-	if (eflags & (EXEC_FLAG_BACKWARD | EXEC_FLAG_MARK))
-		elog(ERROR, "TessAgg supports neither backward scan nor mark/restore");
+	tess_node_require_forward(eflags, "TessAgg");
 	tess_plan_get_info(cscan, &info);
 	if (info.node != &tess_agg_node || info.nchildren < 1 || info.nchildren > 2 ||
 		info.child_names[0] == NULL || cscan->custom_scan_tlist == NIL)
@@ -2258,19 +2256,16 @@ agg_begin(CustomScanState *css, EState *estate, int eflags)
 	}
 	if (computed != NIL)
 	{
-		/* The arguments are computed columns over the child's target list. */
-		TessProjectionConfig config = TESS_STRUCT_INITIALIZER(TessProjectionConfig);
-
-		config.parent_context = estate->es_query_cxt;
-		config.parent = &css->ss.ps;
-		config.econtext = css->ss.ps.ps_ExprContext;
-		config.scan_slot = ExecInitExtraTupleSlot(estate,
-												  ExecTypeFromTL(child_plan->targetlist),
-												  &TTSOpsVirtual);
-		config.scan_tuple = &state->child_layout;
-		config.base_columns = state->child_layout.ncolumns;
-		config.computed = computed;
-		state->projection = tess_projection_create(&config);
+		/*
+		 * The arguments are computed columns over the child's target list,
+		 * in a slot of its own: the node's scan tuple is the aggregates'.
+		 */
+		state->projection =
+			tess_node_projection(css,
+								 ExecInitExtraTupleSlot(estate,
+														ExecTypeFromTL(child_plan->targetlist),
+														&TTSOpsVirtual),
+								 &state->child_layout, state->child_layout.ncolumns, computed);
 		/*
 		 * The right side: the same keys, its columns by position, and its
 		 * side a constant 1 where the left side's is 0.
@@ -2288,13 +2283,13 @@ agg_begin(CustomScanState *css, EState *estate, int eflags)
 			side->expr = (Expr *) makeConst(INT4OID, -1, InvalidOid, sizeof(int32),
 											Int32GetDatum(1), false, true);
 			state->side_projections[0] = state->projection;
-			config.scan_slot = ExecInitExtraTupleSlot(estate,
-													  ExecTypeFromTL(plan->targetlist),
-													  &TTSOpsVirtual);
-			config.scan_tuple = &state->side_layouts[1];
-			config.base_columns = state->side_layouts[1].ncolumns;
-			config.computed = right;
-			state->side_projections[1] = tess_projection_create(&config);
+			state->side_projections[1] =
+				tess_node_projection(css,
+									 ExecInitExtraTupleSlot(estate,
+															ExecTypeFromTL(plan->targetlist),
+															&TTSOpsVirtual),
+									 &state->side_layouts[1], state->side_layouts[1].ncolumns,
+									 right);
 			foreach_node(TargetEntry, entry, right)
 				foreach_node(Var, var, pull_var_clause((Node *) entry->expr, 0))
 				{
@@ -4263,10 +4258,7 @@ agg_rescan(CustomScanState *css)
 		for (int side = 0; side < 2; side++)
 		{
 			tess_projection_reset(state->side_projections[side]);
-			if (css->ss.ps.chgParam != NULL)
-				UpdateChangedParamSet(state->sides[side], css->ss.ps.chgParam);
-			ExecReScan(state->sides[side]);
-			tess_input_rescan(state->side_inputs[side]);
+			tess_rescan_child(&css->ss.ps, state->sides[side], state->side_inputs[side]);
 		}
 		setop_side(state, 0);
 		state->setop_count = 0;
@@ -4277,11 +4269,7 @@ agg_rescan(CustomScanState *css)
 	{
 		if (state->projection != NULL)
 			tess_projection_reset(state->projection);
-		/* The core passes changed parameters to outer and inner plans only. */
-		if (css->ss.ps.chgParam != NULL)
-			UpdateChangedParamSet(state->child, css->ss.ps.chgParam);
-		ExecReScan(state->child);
-		tess_input_rescan(state->input);
+		tess_rescan_child(&css->ss.ps, state->child, state->input);
 	}
 	for (int index = 0; index < state->nvalues; index++)
 	{
@@ -4377,12 +4365,11 @@ agg_explain(CustomScanState *css, List *ancestors, ExplainState *es)
 	/* As the core's hashed aggregate shows its table and its spill. */
 	if (state->nkeys > 0)
 	{
-		ExplainPropertyInteger("Memory Usage", "kB",
-							   (totals[AGG_MEMORY] + 1023) / 1024, es);
+		tess_explain_kb("Memory Usage", totals[AGG_MEMORY], es);
 		if (totals[AGG_PARTITIONS] > 0)
 		{
 			ExplainPropertyInteger("Batches", NULL, totals[AGG_PARTITIONS], es);
-			ExplainPropertyInteger("Disk Usage", "kB", (totals[AGG_DISK] + 1023) / 1024, es);
+			tess_explain_kb("Disk Usage", totals[AGG_DISK], es);
 		}
 	}
 	/* The batches, the kernels and the table's work: VERBOSE only. */
@@ -4416,53 +4403,7 @@ agg_explain(CustomScanState *css, List *ancestors, ExplainState *es)
  * chunk; the child divides the work and the Finalize Aggregate above the
  * Gather combines the participants' values.
  */
-static Size
-agg_estimate_dsm(CustomScanState *css, ParallelContext *pcxt)
-{
-	return tess_shared_stats_estimate(AGG_NCOUNTERS, pcxt->nworkers);
-}
-
-static void
-agg_initialize_dsm(CustomScanState *css, ParallelContext *pcxt,
-				   void *coordinate)
-{
-	TessAggState *state = (TessAggState *) css;
-
-	state->stats = tess_shared_stats_setup(state->stats,
-										   css->ss.ps.state->es_query_cxt,
-										   coordinate, AGG_NCOUNTERS,
-										   pcxt->nworkers, pcxt->seg);
-}
-
-static void
-agg_reinitialize_dsm(CustomScanState *css, ParallelContext *pcxt,
-					 void *coordinate)
-{
-	TessAggState *state = (TessAggState *) css;
-
-	tess_shared_stats_reset(state->stats);
-}
-
-static void
-agg_initialize_worker(CustomScanState *css, shm_toc *toc, void *coordinate)
-{
-	TessAggState *state = (TessAggState *) css;
-
-	state->stats = tess_shared_stats_attach(css->ss.ps.state->es_query_cxt,
-											coordinate, ParallelWorkerNumber + 1);
-}
-
-static void
-agg_shutdown(CustomScanState *css)
-{
-	TessAggState *state = (TessAggState *) css;
-	uint64		values[AGG_NCOUNTERS];
-
-	if (state->stats == NULL)
-		return;
-	agg_counters(state, values);
-	tess_shared_stats_store(state->stats, values);
-}
+TESS_NODE_STATS_CALLBACKS(agg, TessAggState, AGG_NCOUNTERS, agg_counters)
 
 static const CustomExecMethods agg_exec_methods = {
 	.CustomName = "TessAgg",
@@ -4471,11 +4412,7 @@ static const CustomExecMethods agg_exec_methods = {
 	.EndCustomScan = agg_end,
 	.ReScanCustomScan = agg_rescan,
 	.ExplainCustomScan = agg_explain,
-	.EstimateDSMCustomScan = agg_estimate_dsm,
-	.InitializeDSMCustomScan = agg_initialize_dsm,
-	.ReInitializeDSMCustomScan = agg_reinitialize_dsm,
-	.InitializeWorkerCustomScan = agg_initialize_worker,
-	.ShutdownCustomScan = agg_shutdown,
+	TESS_NODE_STATS_METHODS(agg),
 };
 
 static Node *
