@@ -75,12 +75,15 @@ jobs:
       - name: Toolchain of rust-toolchain.toml
         run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
+      # COPT reaches the compiler through PostgreSQL's Makefile.global, in
+      # every sub-make: Tessera's own C, its test modules and the installed
+      # set's check build with warnings as errors here, not for users.
       - name: Build and install Tessera
         run: |
-          make
-          make install
+          make COPT=-Werror
+          make install COPT=-Werror
       - name: Regression suites and the installed set
-        run: make installcheck EXTRA_REGRESS_OPTS="--temp-instance=$RUNNER_TEMP/cluster"
+        run: make installcheck COPT=-Werror EXTRA_REGRESS_OPTS="--temp-instance=$RUNNER_TEMP/cluster"
       - name: Differences and the server's log
         if: failure()
         run: |
