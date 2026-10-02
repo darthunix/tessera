@@ -548,6 +548,26 @@ EXPLAIN (COSTS OFF)
 SELECT x, (SELECT sum(k) + x FROM (SELECT k FROM parallel_rescan ORDER BY k DESC OFFSET 10) AS q) FROM generate_series(1, 6) AS x;
 SELECT parallel_same($$SELECT x, (SELECT sum(k) + x FROM (SELECT k FROM parallel_rescan ORDER BY k DESC OFFSET 10) AS q) FROM generate_series(1, 6) AS x$$);
 DROP TABLE parallel_rescan, parallel_rescan_keys;
+-- A join's TessGather reads a copy of the partial path it gathers. The
+-- join hook runs once a pair of inputs; here a later pair, dim over fact
+-- for the right anti join, adds the core's partial path, which drops and
+-- frees the node's. Before, the gather still read the freed path, a
+-- projection over the gather took its memory, and planning went round
+-- the loop until the stack ran out.
+CREATE TABLE parallel_fact AS
+    SELECT g AS id, (g % 101 - 50)::int4 AS a, (g * 7919 % 200001 - 100000)::int4 AS b,
+           (g % 101 - 50)::int8 AS c, (g * 37 % 2001 - 1000)::int2 AS s,
+           date '2000-01-01' + (g * 13 % 4001 - 2000) AS d
+    FROM generate_series(1, 2000) AS g;
+CREATE TABLE parallel_dim AS
+    SELECT g AS id, CASE WHEN g % 10 = 0 THEN NULL ELSE (g % 101 - 50)::int4 END AS a
+    FROM generate_series(1, 2000) AS g;
+ANALYZE parallel_fact;
+ANALYZE parallel_dim;
+EXPLAIN (COSTS OFF)
+SELECT b FROM parallel_fact EXCEPT ALL SELECT f.b - 1 FROM parallel_fact AS f WHERE f.d IN (date '2000-01-01' - 849, date '2000-01-01' + 145, date '2000-01-01' - 1283) AND NOT EXISTS (SELECT 1 FROM parallel_dim AS m WHERE m.a = f.s);
+SELECT parallel_same($$SELECT count(*), sum(b) FROM (SELECT b FROM parallel_fact EXCEPT ALL SELECT f.b - 1 FROM parallel_fact AS f WHERE f.d IN (date '2000-01-01' - 849, date '2000-01-01' + 145, date '2000-01-01' - 1283) AND NOT EXISTS (SELECT 1 FROM parallel_dim AS m WHERE m.a = f.s)) AS q$$);
+DROP TABLE parallel_fact, parallel_dim;
 -- The switch off.
 SET tessera.enable = off;
 EXPLAIN (COSTS OFF) SELECT a, b FROM parallel_t WHERE a > 4990;
