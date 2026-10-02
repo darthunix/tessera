@@ -2,18 +2,29 @@
 //! of the tool's own, with Tessera on and off. See `bench/tpch/README.md`.
 #![forbid(unsafe_code)]
 
+mod answers;
+mod check;
 mod cluster;
+mod compare;
 mod config;
 mod load;
+mod queries;
+mod rundir;
+mod session;
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use clap::{Args, Parser, Subcommand};
 
+use check::Sessions;
 use cluster::{Cluster, Pg};
 use config::{Scale, ServerSettings};
 use load::Schema;
+use queries::Selection;
+use rundir::{Meta, RunDir};
+use session::{Outcome, Session, SessionSettings};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -32,6 +43,10 @@ enum Command {
     /// scale factor, load the data unless it holds them, and leave it
     /// running.
     Setup(ClusterArgs),
+    /// Check the answers: every query once with Tessera off and on, off
+    /// against the published answer at SF 1, on against off. Times
+    /// nothing, so it may run on a busy machine.
+    Check(CheckArgs),
     /// Stop the cluster of the scale factor; its data stays.
     Stop(ClusterArgs),
 }
@@ -79,6 +94,56 @@ impl ClusterArgs {
     }
 }
 
+/// Which queries run and under what settings.
+#[derive(Debug, Clone, Args)]
+struct QueryArgs {
+    /// Queries: numbers and ranges (1,3,6 or 1-5), core (Q1, Q3, Q6, Q9,
+    /// Q18) or all.
+    #[arg(long, default_value = "all", value_parser = Selection::parse)]
+    queries: Selection,
+    /// max_parallel_workers_per_gather in both modes.
+    #[arg(long, default_value_t = 0)]
+    workers: u32,
+    /// work_mem in both modes.
+    #[arg(long, default_value = "256MB", value_name = "SIZE")]
+    work_mem: String,
+    /// Run with jit = on (off by default).
+    #[arg(long)]
+    jit: bool,
+    /// statement_timeout of a query, in seconds [default: 30 per scale
+    /// unit, at least 30].
+    #[arg(long, value_name = "SECONDS")]
+    timeout: Option<u64>,
+}
+
+impl QueryArgs {
+    fn timeout(&self, scale: &Scale) -> u64 {
+        self.timeout
+            .unwrap_or_else(|| (30.0 * scale.factor().max(1.0)).ceil() as u64)
+    }
+
+    fn session(&self, scale: &Scale) -> SessionSettings {
+        SessionSettings {
+            workers: self.workers,
+            work_mem: self.work_mem.clone(),
+            jit: self.jit,
+            timeout: Duration::from_secs(self.timeout(scale)),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Args)]
+struct CheckArgs {
+    #[command(flatten)]
+    cluster: ClusterArgs,
+    #[command(flatten)]
+    queries: QueryArgs,
+    /// Leave the server running at the end even if this command started
+    /// it.
+    #[arg(long)]
+    keep_running: bool,
+}
+
 /// The repository's root, which holds the queries and the run directories.
 fn root() -> PathBuf {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
@@ -91,9 +156,17 @@ fn runs_dir() -> PathBuf {
     root().join("target/bench-runs")
 }
 
+/// A cluster brought up for a command.
+struct Up {
+    cluster: Cluster,
+    /// Whether its server ran before, which it then keeps doing.
+    was_running: bool,
+    sizes: Vec<(String, i64)>,
+}
+
 /// Installs Tessera unless asked not to, starts the cluster and loads
 /// the data it lacks.
-fn bring_up(args: &ClusterArgs) -> Result<Cluster> {
+fn bring_up(args: &ClusterArgs) -> Result<Up> {
     let pg = Pg::discover()?;
     pg.require_contrib()?;
     std::fs::create_dir_all(runs_dir())?;
@@ -108,7 +181,7 @@ fn bring_up(args: &ClusterArgs) -> Result<Cluster> {
         cluster::install_tessera(&root(), &pg, &log)?;
     }
     let cluster = args.cluster(pg);
-    cluster.start()?;
+    let was_running = cluster.start()?;
     println!(
         "cluster: {} on port {}, shared_buffers {}",
         cluster.data.display(),
@@ -146,7 +219,130 @@ fn bring_up(args: &ClusterArgs) -> Result<Cluster> {
             .collect::<Vec<_>>()
             .join(", ")
     );
-    Ok(cluster)
+    Ok(Up {
+        cluster,
+        was_running,
+        sizes,
+    })
+}
+
+/// Runs `work` on the cluster, then stops the server if the command
+/// started it and was not asked to keep it.
+fn with_cluster<T>(
+    args: &ClusterArgs,
+    keep_running: bool,
+    work: impl FnOnce(&Up) -> Result<T>,
+) -> Result<T> {
+    let up = bring_up(args)?;
+    let result = work(&up);
+    if !up.was_running && !keep_running {
+        up.cluster.stop()?;
+    }
+    result
+}
+
+/// The run's directory, with what it was run on.
+fn open_run(
+    command: &str,
+    up: &Up,
+    cluster: &ClusterArgs,
+    queries: &QueryArgs,
+) -> Result<(RunDir, Meta)> {
+    let dir = RunDir::create(&runs_dir(), &cluster.sf)?;
+    let mut client = up.cluster.connect()?;
+    let started: String = client.query_one("SELECT now()::text", &[])?.get(0);
+    let meta = Meta {
+        id: dir.id.clone(),
+        command: command.into(),
+        sf: cluster.sf.to_string(),
+        schema: cluster.schema.name().into(),
+        workers: queries.workers,
+        work_mem: queries.work_mem.clone(),
+        jit: queries.jit,
+        timeout_s: queries.timeout(&cluster.sf),
+        head: rundir::head(&root()),
+        postgres: up.cluster.pg.version.clone(),
+        started,
+        power: rundir::power(&root()),
+    };
+    dir.write(
+        "source.txt",
+        &rundir::source(&root(), &up.cluster, &meta, &up.sizes),
+    )?;
+    Ok((dir, meta))
+}
+
+/// The settings of the run, as the connection that runs Tessera sees
+/// them.
+fn pg_settings(session: &mut Session<'_>) -> String {
+    match session
+        .run("SELECT name || ' = ' || setting || coalesce(' ' || unit, '') FROM pg_settings ORDER BY name")
+        .outcome
+    {
+        Outcome::Rows(rows) => rows
+            .into_iter()
+            .map(|row| row.into_iter().next().flatten().unwrap_or_default() + "\n")
+            .collect(),
+        outcome => format!("{outcome:?}\n"),
+    }
+}
+
+fn check_command(args: &CheckArgs, up: &Up) -> Result<()> {
+    let (dir, meta) = open_run("check", up, &args.cluster, &args.queries)?;
+    let settings = args.queries.session(&args.cluster.sf);
+    let mut sessions = Sessions {
+        off: Session::open(&up.cluster, &settings, false)?,
+        on: Session::open(&up.cluster, &settings, true)?,
+    };
+    dir.write("pg_settings.txt", &pg_settings(&mut sessions.on))?;
+    let heading = format!(
+        "tessera-tpch check, SF {}, schema {}, workers {}, work_mem {}, jit {}, timeout {} s",
+        meta.sf,
+        meta.schema,
+        meta.workers,
+        meta.work_mem,
+        if meta.jit { "on" } else { "off" },
+        meta.timeout_s
+    );
+    println!("{heading}");
+    let checks = check::run(
+        &mut sessions,
+        &root(),
+        &args.cluster.sf,
+        &args.queries.queries.0,
+        |check| {
+            let query = queries::get(check.query);
+            println!(
+                "{} {:<34} {:>6} rows  reference {:<8} on/off {:<8} {}",
+                query.name(),
+                query.title,
+                check.rows.map_or("-".into(), |rows| rows.to_string()),
+                check.reference.as_ref().map_or("-", check::Verdict::label),
+                check.on_off.label(),
+                check.detail().unwrap_or_default()
+            );
+        },
+    )?;
+    dir.write("results.txt", &check::results(&checks, &heading))?;
+    let run = rundir::Run { meta, checks };
+    dir.write("run.json", &serde_json::to_string_pretty(&run)?)?;
+    println!("results: {}", dir.path.display());
+    let failed: Vec<String> = run
+        .checks
+        .iter()
+        .filter(|check| check.failed())
+        .map(|check| {
+            format!(
+                "{} {}",
+                queries::get(check.query).name(),
+                check.on_off.label()
+            )
+        })
+        .collect();
+    if !failed.is_empty() {
+        bail!("wrong answers: {}", failed.join(", "));
+    }
+    Ok(())
 }
 
 fn main() -> Result<()> {
@@ -159,6 +355,11 @@ fn main() -> Result<()> {
                 cluster::DATABASE,
                 args.sf
             );
+        }
+        Command::Check(args) => {
+            with_cluster(&args.cluster, args.keep_running, |up| {
+                check_command(&args, up)
+            })?;
         }
         Command::Stop(args) => {
             let cluster = args.cluster(Pg::discover()?);
@@ -220,5 +421,39 @@ mod tests {
     #[test]
     fn a_bad_scale_is_refused() {
         assert!(Cli::try_parse_from(["tessera-tpch", "setup", "--sf", "-1"]).is_err());
+    }
+
+    #[test]
+    fn check_takes_queries_and_settings() {
+        let cli = Cli::try_parse_from([
+            "tessera-tpch",
+            "check",
+            "--sf",
+            "10",
+            "--queries",
+            "core,2",
+            "--workers",
+            "2",
+            "--work-mem",
+            "4MB",
+        ])
+        .unwrap();
+        let Command::Check(args) = cli.command else {
+            panic!("{cli:?}");
+        };
+        assert_eq!(args.queries.queries.0, vec![1, 2, 3, 6, 9, 18]);
+        let settings = args.queries.session(&args.cluster.sf);
+        assert_eq!(settings.workers, 2);
+        assert_eq!(settings.work_mem, "4MB");
+        assert!(!settings.jit);
+        assert_eq!(settings.timeout, Duration::from_secs(300));
+        assert_eq!(
+            QueryArgs {
+                timeout: None,
+                ..args.queries.clone()
+            }
+            .timeout(&Scale::parse("0.01").unwrap()),
+            30
+        );
     }
 }

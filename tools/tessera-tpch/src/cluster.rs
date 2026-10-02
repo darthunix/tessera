@@ -85,6 +85,27 @@ impl Pg {
         self.bindir.join(program)
     }
 
+    /// The suffix of loadable modules on this platform.
+    pub fn dlsuffix() -> &'static str {
+        if cfg!(target_os = "macos") {
+            ".dylib"
+        } else {
+            ".so"
+        }
+    }
+
+    /// The installed files of Tessera and the server, whose hashes say
+    /// which build a run measured.
+    pub fn binaries(&self) -> Vec<PathBuf> {
+        let mut files: Vec<PathBuf> = ["tessera", "tessera_nodes", "tessera_kernels"]
+            .iter()
+            .map(|name| self.pkglibdir.join(format!("{name}{}", Pg::dlsuffix())))
+            .collect();
+        files.push(self.pkglibdir.join("libtessera_runtime.a"));
+        files.push(self.bin("postgres"));
+        files
+    }
+
     /// Fails with the commands that install the contrib modules the build
     /// lacks.
     pub fn require_contrib(&self) -> Result<()> {
@@ -201,8 +222,9 @@ impl Cluster {
     /// Creates the cluster if there is none, writes its settings and
     /// starts it, or restarts it when it runs: the postmaster holds the
     /// modules it loaded, and every backend is forked from it, so a run
-    /// measures the modules installed last only after a restart.
-    pub fn start(&self) -> Result<()> {
+    /// measures the modules installed last only after a restart. Returns
+    /// whether the server ran before.
+    pub fn start(&self) -> Result<bool> {
         if !self.exists() {
             self.initdb()?;
         }
@@ -233,7 +255,8 @@ impl Cluster {
         if !status.success() {
             bail!("pg_ctl {action} failed:\n{}", tail(&self.log, 20));
         }
-        self.create_database()
+        self.create_database()?;
+        Ok(running)
     }
 
     /// Stops the server if it runs; the data stays.
@@ -345,6 +368,14 @@ mod tests {
         assert_eq!(pg("PostgreSQL 20devel").major(), "20");
         assert_eq!(pg("PostgreSQL 19.1").major(), "19");
         assert_eq!(pg("PostgreSQL 19beta2").major(), "19");
+    }
+
+    #[test]
+    fn binaries_name_the_modules_and_the_server() {
+        let files = pg("PostgreSQL 20devel").binaries();
+        let suffix = Pg::dlsuffix();
+        assert!(files.contains(&PathBuf::from(format!("/pg/lib/tessera_nodes{suffix}"))));
+        assert!(files.contains(&PathBuf::from("/pg/bin/postgres")));
     }
 
     #[test]
