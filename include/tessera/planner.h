@@ -184,6 +184,15 @@ typedef struct TessPlanChild
 extern bool tess_plan_child(const CustomPath *path, const List *child_plans,
 							int index, TessPlanChild *result);
 
+/*
+ * The target of a batch child's plan equal to expr, as tlist_member finds
+ * it, when it has a batch column; NULL otherwise.
+ */
+extern TargetEntry *tess_plan_child_entry(const TessPlanChild *child, Expr *expr);
+
+/* The batch column of that target, or -1. */
+extern int	tess_plan_child_column(const TessPlanChild *child, Expr *expr);
+
 /* What a plan built here carries, read in BeginCustomScan. */
 typedef struct TessPlanInfo
 {

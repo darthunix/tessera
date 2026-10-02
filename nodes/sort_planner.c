@@ -332,9 +332,7 @@ sort_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 	data = (List *) info.node_data;
 	foreach_node(TargetEntry, entry, tlist)
 	{
-		TargetEntry *found = tlist_member(entry->expr, child.plan->targetlist);
-		int			column = found == NULL ? -1 :
-			tess_layout_column(&child.layout, found->resno - 1);
+		int			column = tess_plan_child_column(&child, entry->expr);
 
 		if (column < 0)
 			elog(ERROR, "TessSort target is missing from its child");

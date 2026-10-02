@@ -1119,35 +1119,33 @@ join_pathlist(PlannerInfo *root, RelOptInfo *joinrel, RelOptInfo *outerrel,
 }
 
 
-/* The target entry of a child's plan that is this column or expression, or NULL. */
-static TargetEntry *
-child_entry(const Plan *child, const Node *node)
+/*
+ * The batch column of a child that holds this column or computes this
+ * key. A column matches by its relation and attribute alone: above an
+ * outer join it carries the join's nulling relations, which the child's
+ * own target does not.
+ */
+static int
+child_column(const TessPlanChild *child, const Node *node)
 {
 	const Var  *var = (const Var *) node;
+	int			column = -1;
 
-	/* A key's expression, a target the child computes. */
 	if (!IsA(node, Var))
-		return tlist_member((Expr *) node, child->targetlist);
-	foreach_ptr(TargetEntry, entry, child->targetlist)
-	{
-		Var		   *other = (Var *) entry->expr;
+		column = tess_plan_child_column(child, (Expr *) node);
+	else
+		foreach_ptr(TargetEntry, entry, child->plan->targetlist)
+		{
+			Var		   *other = (Var *) entry->expr;
 
-		if (IsA(other, Var) && other->varno == var->varno &&
-			other->varattno == var->varattno &&
-			other->varlevelsup == var->varlevelsup)
-			return entry;
-	}
-	return NULL;
-}
-
-/* The batch column of a child that holds this column or computes this key. */
-static int
-child_column(const TessPlanChild *child, const Node *var)
-{
-	TargetEntry *entry = child_entry(child->plan, var);
-	int			column = entry == NULL ? -1 :
-		tess_layout_column(&child->layout, entry->resno - 1);
-
+			if (IsA(other, Var) && other->varno == var->varno &&
+				other->varattno == var->varattno &&
+				other->varlevelsup == var->varlevelsup)
+			{
+				column = tess_layout_column(&child->layout, entry->resno - 1);
+				break;
+			}
+		}
 	if (column < 0)
 		elog(ERROR, "TessHashJoin found a column missing from its child");
 	return column;
