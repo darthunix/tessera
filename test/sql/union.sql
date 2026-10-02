@@ -479,6 +479,15 @@ RESET parallel_tuple_cost;
 RESET parallel_setup_cost;
 RESET max_parallel_workers_per_gather;
 
+-- An empty left side of INTERSECT or EXCEPT makes no group: the core's
+-- SetOp does not read its right side, so an error the right side's rows
+-- would raise is not raised; the node does not read it either (found by
+-- tessera-crosscheck, plan 9.8).
+EXPLAIN (COSTS OFF) SELECT a FROM union_empty EXCEPT ALL SELECT a + 2147483647 FROM union_a;
+SELECT union_same($$SELECT a FROM union_empty EXCEPT ALL SELECT a + 2147483647 FROM union_a$$);
+SELECT union_same($$SELECT a FROM union_empty INTERSECT SELECT a + 2147483647 FROM union_a$$);
+SELECT union_same($$SELECT a FROM union_a WHERE a < 0 EXCEPT SELECT a + 2147483647 FROM union_b$$);
+
 DROP TABLE union_part, union_parent, union_child, union_a, union_b, union_empty;
 DROP FUNCTION union_same(text);
 DROP FUNCTION union_run(text);

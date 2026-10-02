@@ -3692,6 +3692,8 @@ group_batch(TessAggState *state, TessBatch *batch)
 static void
 setop_side(TessAggState *state, int side)
 {
+	if (side == 0)
+		state->setop_left_rows = 0;
 	state->side = side;
 	state->child = state->sides[side];
 	state->input = state->side_inputs[side];
@@ -3750,15 +3752,24 @@ group_drain(TessAggState *state)
 			return;
 		}
 		batch = tess_input_next(state->input);
-		/* INTERSECT or EXCEPT: the right side after the left. */
+		/*
+		 * INTERSECT or EXCEPT: the right side after the left. An empty left
+		 * side makes no group, and its right side is not read, as the
+		 * core's SetOp does not read its inner input: an error the right
+		 * side's rows would raise is not raised either.
+		 */
 		if (batch == NULL && state->setop >= 0 && state->side == 0)
 		{
+			if (state->setop_left_rows == 0)
+				break;
 			setop_side(state, 1);
 			continue;
 		}
 		if (batch == NULL)
 			break;
 		rows = tess_row_mask_count(&batch->rows);
+		if (state->setop >= 0 && state->side == 0)
+			state->setop_left_rows += rows;
 		state->batches++;
 		state->rows += rows;
 		if (rows > 0)
