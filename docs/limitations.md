@@ -78,6 +78,17 @@ those it checks.
   a merge join's inner side needs them.
 - **Window functions** run in the core's `WindowAgg`; there is no batch
   node for them.
+- **Errors of rows the core's plan does not evaluate.** A batch node
+  evaluates an expression for a batch of 64 rows at once, past a LIMIT
+  too, and its plans differ from the core's. It groups every row under a
+  LIMIT, where the core's sorted grouping stops early, and it may hash a
+  join on a condition the core checks only after a match. A data error
+  (an overflow, a division by zero) in a row the core's plan never
+  reaches can then stop the query with Tessera, and the other way round.
+  The core makes no promise either: a parallel plan or another join order
+  raises the same errors. A `CASE` guards an expression that may fail, as
+  [PostgreSQL's evaluation rules](https://www.postgresql.org/docs/current/sql-expressions.html#SYNTAX-EXPRESS-EVAL)
+  advise.
 
 ## Platforms
 

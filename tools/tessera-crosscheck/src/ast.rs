@@ -6,6 +6,7 @@
 //! Every operation is written with its parentheses, so the text never
 //! depends on precedence.
 
+use std::collections::BTreeSet;
 use std::fmt::{self, Display, Write};
 
 use crate::schema::{Table, Ty};
@@ -66,11 +67,14 @@ pub enum Expr {
         filter: Option<Box<Expr>>,
         negated: bool,
     },
-    /// An aggregate: `name([DISTINCT] arg)`, `count(*)` without one.
+    /// An aggregate: `name([DISTINCT] arg)`, `count(*)` without one;
+    /// `FILTER (WHERE true)` after it when filtered, which keeps the core
+    /// from planning min and max as a subquery with LIMIT 1.
     Aggregate {
         name: &'static str,
         arg: Option<Box<Expr>>,
         distinct: bool,
+        filtered: bool,
     },
 }
 
@@ -82,6 +86,120 @@ pub fn quote(text: &str) -> String {
 impl Expr {
     pub fn literal(sql: impl Into<String>) -> Expr {
         Expr::Literal(sql.into())
+    }
+
+    /// The tables the expression reads, by their place in the FROM list;
+    /// `None` with an aggregate or a subquery in it, which a probe of one
+    /// table cannot hold.
+    fn tables(&self) -> Option<BTreeSet<usize>> {
+        let mut tables = BTreeSet::new();
+        let mut parts: Vec<&Expr> = vec![self];
+        while let Some(expr) = parts.pop() {
+            match expr {
+                Expr::Column { table, .. } => {
+                    tables.insert(*table);
+                }
+                Expr::Literal(_) => {}
+                Expr::Aggregate { .. } | Expr::Exists { .. } => return None,
+                _ => parts.extend(expr.children()),
+            }
+        }
+        Some(tables)
+    }
+
+    /// The expressions directly under this one.
+    fn children(&self) -> Vec<&Expr> {
+        match self {
+            Expr::Column { .. } | Expr::Literal(_) => Vec::new(),
+            Expr::Prefix { arg, .. }
+            | Expr::IsNull { arg, .. }
+            | Expr::Cast { arg, .. }
+            | Expr::Like { arg, .. } => vec![arg],
+            Expr::Binary { left, right, .. } => vec![left, right],
+            Expr::Call { args, .. } => args.iter().collect(),
+            Expr::Case {
+                when,
+                then,
+                otherwise,
+            } => vec![when, then, otherwise],
+            Expr::Between { arg, low, high, .. } => vec![arg, low, high],
+            Expr::InList { arg, list, .. } => std::iter::once(&**arg).chain(list).collect(),
+            Expr::Exists { outer, .. } => vec![outer],
+            Expr::Aggregate { arg, .. } => arg.iter().map(|arg| &**arg).collect(),
+        }
+    }
+
+    /// The largest parts of the expression that read one table, each with
+    /// that table's place: what a probe of the table evaluates. A part of
+    /// no table is left out: it fails alike in both modes.
+    fn single_table_parts(&self, parts: &mut Vec<(usize, Expr)>) {
+        match self.tables() {
+            Some(tables) if tables.len() == 1 => {
+                parts.extend(tables.first().map(|&table| (table, self.clone())));
+            }
+            Some(tables) if tables.is_empty() => {}
+            _ => {
+                for child in self.children() {
+                    child.single_table_parts(parts);
+                }
+            }
+        }
+    }
+
+    /// The parts of a condition joined by AND at its top.
+    fn conjuncts(&self) -> Vec<&Expr> {
+        match self {
+            Expr::Binary {
+                op: "AND",
+                left,
+                right,
+            } => {
+                let mut conjuncts = left.conjuncts();
+                conjuncts.extend(right.conjuncts());
+                conjuncts
+            }
+            _ => vec![self],
+        }
+    }
+
+    /// Gives every aggregate in the expression its `FILTER (WHERE true)`.
+    fn filter_aggregates(&mut self) {
+        match self {
+            Expr::Column { .. } | Expr::Literal(_) | Expr::Like { .. } => {}
+            Expr::Prefix { arg, .. } | Expr::IsNull { arg, .. } | Expr::Cast { arg, .. } => {
+                arg.filter_aggregates();
+            }
+            Expr::Binary { left, right, .. } => {
+                left.filter_aggregates();
+                right.filter_aggregates();
+            }
+            Expr::Call { args, .. } => args.iter_mut().for_each(Expr::filter_aggregates),
+            Expr::Case {
+                when,
+                then,
+                otherwise,
+            } => {
+                when.filter_aggregates();
+                then.filter_aggregates();
+                otherwise.filter_aggregates();
+            }
+            Expr::Between { arg, low, high, .. } => {
+                arg.filter_aggregates();
+                low.filter_aggregates();
+                high.filter_aggregates();
+            }
+            Expr::InList { arg, list, .. } => {
+                arg.filter_aggregates();
+                list.iter_mut().for_each(Expr::filter_aggregates);
+            }
+            Expr::Exists { outer, filter, .. } => {
+                outer.filter_aggregates();
+                if let Some(filter) = filter {
+                    filter.filter_aggregates();
+                }
+            }
+            Expr::Aggregate { filtered, .. } => *filtered = true,
+        }
     }
 
     /// Writes the expression; `depth` is the number of FROM entries of the
@@ -211,6 +329,7 @@ impl Expr {
                 name,
                 arg,
                 distinct,
+                filtered,
             } => {
                 let _ = write!(out, "{name}(");
                 match arg {
@@ -223,6 +342,9 @@ impl Expr {
                     }
                 }
                 out.push(')');
+                if *filtered {
+                    out.push_str(" FILTER (WHERE true)");
+                }
             }
         }
     }
@@ -429,6 +551,167 @@ impl Query {
     }
 }
 
+impl Query {
+    /// The query without what lets a plan stop before the last row: no
+    /// LIMIT; no DISTINCT, which over constants the core plans as a LIMIT
+    /// 1; every aggregate filtered, so that min and max are no subquery
+    /// with LIMIT 1. Its rows are not the query's; it tells whether
+    /// evaluating every row raises an error.
+    pub fn relaxed(&self) -> Query {
+        let relax = |select: &Select| {
+            let mut select = Select {
+                distinct: false,
+                limit: None,
+                ..select.clone()
+            };
+            select.items.iter_mut().for_each(Expr::filter_aggregates);
+            if let Some(having) = select.grouping.as_mut().and_then(|g| g.having.as_mut()) {
+                having.filter_aggregates();
+            }
+            select
+        };
+        Query {
+            select: relax(&self.select),
+            set: self.set.as_ref().map(|(op, other)| (*op, relax(other))),
+            settings: self.settings,
+        }
+    }
+}
+
+impl Select {
+    /// Each table of the query with the largest parts of its expressions
+    /// that read it alone: outputs, aggregates' arguments, join keys and
+    /// conditions, the WHERE condition, grouping keys and HAVING, and the
+    /// condition of a subquery over its own table. With them, the parts of
+    /// the WHERE condition joined by AND that read the table alone: a row
+    /// that fails one reaches no output, in any plan.
+    fn probes(&self) -> Vec<Probe> {
+        let tables: Vec<Table> = std::iter::once(self.from)
+            .chain(self.joins.iter().map(|join| join.table))
+            .collect();
+        let exprs: Vec<&Expr> = self
+            .items
+            .iter()
+            .chain(
+                self.joins
+                    .iter()
+                    .flat_map(|join| join.keys.iter().map(|(_, other)| other).chain(&join.extra)),
+            )
+            .chain(&self.filter)
+            .chain(
+                self.grouping
+                    .iter()
+                    .flat_map(|g| g.keys.iter().chain(&g.having)),
+            )
+            .collect();
+        let mut parts: Vec<(Table, usize, Expr)> = Vec::new();
+        for expr in &exprs {
+            let mut found = Vec::new();
+            expr.single_table_parts(&mut found);
+            parts.extend(
+                found
+                    .into_iter()
+                    .filter_map(|(at, part)| tables.get(at).map(|table| (*table, at, part))),
+            );
+        }
+        // A subquery's condition reads its own table, at the place after
+        // the FROM list.
+        let place = tables.len();
+        let mut pending = exprs;
+        while let Some(expr) = pending.pop() {
+            if let Expr::Exists {
+                table,
+                filter: Some(filter),
+                ..
+            } = expr
+            {
+                let mut found = Vec::new();
+                filter.single_table_parts(&mut found);
+                parts.extend(
+                    found
+                        .into_iter()
+                        .filter(|(at, _)| *at == place)
+                        .map(|(at, part)| (*table, at, part)),
+                );
+            }
+            pending.extend(expr.children());
+        }
+        let mut probes: Vec<Probe> = Vec::new();
+        for (table, at, part) in parts {
+            match probes
+                .iter_mut()
+                .find(|probe| probe.table.name == table.name && probe.place == at)
+            {
+                Some(probe) if probe.parts.contains(&part) => {}
+                Some(probe) => probe.parts.push(part),
+                None => probes.push(Probe {
+                    table,
+                    place: at,
+                    parts: vec![part],
+                    filter: Vec::new(),
+                }),
+            }
+        }
+        let conjuncts = self.filter.iter().flat_map(Expr::conjuncts);
+        for conjunct in conjuncts {
+            let Some(tables) = conjunct.tables() else {
+                continue;
+            };
+            let Some(&at) = tables.first().filter(|_| tables.len() == 1) else {
+                continue;
+            };
+            if let Some(probe) = probes
+                .iter_mut()
+                .find(|probe| probe.place == at && at < place)
+            {
+                probe.filter.push(conjunct.clone());
+            }
+        }
+        probes
+    }
+}
+
+/// A probe of one table: parts of the query's expressions over the rows
+/// that pass the table's own conditions.
+struct Probe {
+    table: Table,
+    place: usize,
+    parts: Vec<Expr>,
+    filter: Vec<Expr>,
+}
+
+impl Query {
+    /// Queries that evaluate, for every row of each table that passes the
+    /// table's own conditions, the largest parts of the query's
+    /// expressions that read that table alone, as rows of text so that
+    /// nothing is left out of the plan. One raises an error when a row of
+    /// the data does, whatever rows a plan of the query would skip.
+    pub fn probes(&self) -> Vec<String> {
+        let selects = std::iter::once(&self.select).chain(self.set.iter().map(|(_, other)| other));
+        selects
+            .flat_map(Select::probes)
+            .map(|probe| {
+                let depth = probe.place + 1;
+                let mut out = String::from("SELECT array_agg(q::text) FROM (SELECT ");
+                for (index, expr) in probe.parts.iter().enumerate() {
+                    if index > 0 {
+                        out.push_str(", ");
+                    }
+                    expr.write(&mut out, depth);
+                    let _ = write!(out, " AS p{index}");
+                }
+                let _ = write!(out, " FROM {} AS t{}", probe.table.name, probe.place);
+                for (index, conjunct) in probe.filter.iter().enumerate() {
+                    out.push_str(if index == 0 { " WHERE " } else { " AND " });
+                    conjunct.write(&mut out, depth);
+                }
+                out.push_str(") AS q");
+                out
+            })
+            .collect()
+    }
+}
+
 impl Display for Query {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}\n{};", self.settings.statements(), self.sql())
@@ -493,6 +776,131 @@ mod tests {
              LEFT JOIN dim AS t1 ON t1.a = t0.a AND (t1.t IS NOT NULL) \
              WHERE (NOT EXISTS (SELECT 1 FROM dim AS t2 WHERE t2.id = t0.b \
              AND (t2.t LIKE 'a%'))) ORDER BY 1, 2 LIMIT 3"
+        );
+    }
+
+    #[test]
+    fn a_relaxed_query_has_no_limit_or_distinct() {
+        let select = Select {
+            distinct: true,
+            items: vec![column(0, "a")],
+            from: FACT,
+            joins: Vec::new(),
+            filter: None,
+            grouping: None,
+            limit: Some(3),
+        };
+        let query = Query {
+            select: select.clone(),
+            set: Some((SetOp::Intersect, select)),
+            settings: Settings {
+                workers: 0,
+                work_mem: "64kB",
+            },
+        };
+        assert_eq!(
+            query.relaxed().sql(),
+            "(SELECT t0.a AS c0 FROM fact AS t0) INTERSECT (SELECT t0.a AS c0 FROM fact AS t0)"
+        );
+        let mut aggregated = query.select.clone();
+        aggregated.items = vec![Expr::Call {
+            name: "trim_scale",
+            args: vec![Expr::Aggregate {
+                name: "max",
+                arg: Some(Box::new(column(0, "m"))),
+                distinct: false,
+                filtered: false,
+            }],
+        }];
+        let query = Query {
+            select: aggregated,
+            set: None,
+            ..query
+        };
+        assert_eq!(
+            query.relaxed().sql(),
+            "SELECT trim_scale(max(t0.m) FILTER (WHERE true)) AS c0 FROM fact AS t0"
+        );
+    }
+
+    #[test]
+    fn a_probe_reads_each_table_through_its_own_parts_of_the_expressions() {
+        let query = Query {
+            select: Select {
+                distinct: false,
+                items: vec![
+                    Expr::Binary {
+                        op: "*",
+                        left: Box::new(column(0, "a")),
+                        right: Box::new(column(1, "a")),
+                    },
+                    Expr::Aggregate {
+                        name: "sum",
+                        arg: Some(Box::new(Expr::Cast {
+                            arg: Box::new(column(1, "c")),
+                            ty: Ty::Int4,
+                        })),
+                        distinct: false,
+                        filtered: false,
+                    },
+                ],
+                from: FACT,
+                joins: vec![Join {
+                    kind: JoinKind::Inner,
+                    table: DIM,
+                    keys: vec![(
+                        "a",
+                        Expr::Binary {
+                            op: "+",
+                            left: Box::new(column(0, "a")),
+                            right: Box::new(Expr::literal("1::int4")),
+                        },
+                    )],
+                    extra: None,
+                }],
+                filter: Some(Expr::Binary {
+                    op: "AND",
+                    left: Box::new(Expr::IsNull {
+                        arg: Box::new(column(0, "b")),
+                        negated: true,
+                    }),
+                    right: Box::new(Expr::Exists {
+                        table: DIM,
+                        inner: "id",
+                        outer: Box::new(column(1, "id")),
+                        filter: Some(Box::new(Expr::IsNull {
+                            arg: Box::new(Expr::Binary {
+                                op: "/",
+                                left: Box::new(Expr::literal("1::int4")),
+                                right: Box::new(column(2, "a")),
+                            }),
+                            negated: false,
+                        })),
+                        negated: false,
+                    }),
+                }),
+                grouping: Some(Grouping {
+                    keys: vec![column(0, "a")],
+                    having: None,
+                }),
+                limit: None,
+            },
+            set: None,
+            settings: Settings {
+                workers: 0,
+                work_mem: "64kB",
+            },
+        };
+        assert_eq!(
+            query.probes(),
+            vec![
+                "SELECT array_agg(q::text) FROM (SELECT t0.a AS p0, (t0.a + 1::int4) AS p1, \
+                 (t0.b IS NOT NULL) AS p2 FROM fact AS t0 WHERE (t0.b IS NOT NULL)) AS q",
+                "SELECT array_agg(q::text) FROM (SELECT t1.a AS p0, (t1.c)::int4 AS p1, \
+                 t1.id AS p2 FROM dim AS t1) AS q",
+                "SELECT array_agg(q::text) FROM (SELECT ((1::int4 / t2.a) IS NULL) AS p0 \
+                 FROM dim AS t2) AS q",
+            ]
         );
     }
 
