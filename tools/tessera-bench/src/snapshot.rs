@@ -12,9 +12,22 @@ use std::{
 };
 
 pub fn output(command: &mut Command) -> Result<Vec<u8>> {
-    let output = command
-        .output()
-        .with_context(|| format!("cannot start {command:?}"))?;
+    // A script written a moment ago may be busy for an instant: a child
+    // another thread forked between the file's open and its close still
+    // holds it for writing until it execs (ETXTBSY, seen in the tests on
+    // Linux). Wait and try again, up to half a second.
+    let mut attempts = 0;
+    let output = loop {
+        match command.output() {
+            Err(error)
+                if error.kind() == std::io::ErrorKind::ExecutableFileBusy && attempts < 50 =>
+            {
+                attempts += 1;
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            result => break result.with_context(|| format!("cannot start {command:?}"))?,
+        }
+    };
     ensure!(
         output.status.success(),
         "{command:?}: {}",
