@@ -954,4 +954,11 @@ extern void shared_probe_start(TessHashJoinState *state, uint64 records);
 extern void shared_resident_end(TessHashJoinState *state);
 extern TessBatch *shared_resident_next(TessHashJoinState *state);
 
+/* Of hashjoin.c, hashjoin_begin.c and hashjoin_pairs.c, which call one another. */
+extern TupleTableSlot *join_exec(CustomScanState *css);
+/* The batch the node publishes reads its columns through these (hashjoin.c). */
+extern const TessBatchOps join_batch_ops;
+extern bool join_probe_batch(TessHashJoinState *state, TessBatch *batch);
+extern bool join_next_output(TessHashJoinState *state);
+
 #endif							/* TESSERA_NODES_HASHJOIN_H */
