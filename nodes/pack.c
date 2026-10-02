@@ -322,9 +322,7 @@ pack_begin(CustomScanState *css, EState *estate, int eflags)
 	CustomScan *cscan = castNode(CustomScan, css->ss.ps.plan);
 	TessPlanInfo info = TESS_STRUCT_INITIALIZER(TessPlanInfo);
 
-	/* The planner puts Material above a batch subtree for these. */
-	if (eflags & (EXEC_FLAG_BACKWARD | EXEC_FLAG_MARK))
-		elog(ERROR, "Tessera pack supports neither backward scan nor mark/restore");
+	tess_node_require_forward(eflags, "Tessera pack");
 	tess_plan_get_info(cscan, &info);
 	if (info.node != &tess_pack_node || info.nchildren != 1 ||
 		info.child_names[0] != NULL)
@@ -488,10 +486,8 @@ pack_rescan(CustomScanState *css)
 		return;
 	}
 	tess_output_clear(state->output);
-	/* The core passes changed parameters to outer and inner plans only. */
-	if (css->ss.ps.chgParam != NULL)
-		UpdateChangedParamSet(state->child, css->ss.ps.chgParam);
-	ExecReScan(state->child);
+	/* Rows of a core plan: no batch input to start anew. */
+	tess_rescan_child(&css->ss.ps, state->child, NULL);
 	state->exhausted = false;
 	/* The rows of this scan, for its bound; EXPLAIN's batches total every scan. */
 	state->produced = 0;
