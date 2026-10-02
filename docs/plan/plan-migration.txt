@@ -6737,6 +6737,13 @@
   tessera-kernels, tessera-spill, tessera-core; без benchmark.rs; PROPTEST_CASES=16 (256 под Miri — часы; если
   tessera_testing::property задаёт 256 явно — читать переменную там); бюджет 15–20 минут, лишнее — cfg_attr(miri,
   ignore) (сейчас таких пометок в crates/ нет, текст 4.36 ошибался). Смена пина — отдельный коммит.
+  Сделано 2026-10-02 (ветка gate-miri): задача miri в ci.yml на ubuntu, nightly-2026-09-11 закреплён только в
+  workflow (RUSTUP_TOOLCHAIN), PROPTEST_CASES=16, MIRIFLAGS=-Zmiri-disable-isolation (сохранение неудач proptest
+  зовёт getcwd, а изоляция Miri его запрещает). Набор сужен до кода с unsafe: tessera-kernels --lib table:: (регион
+  таблицы; simd под Miri вырезан cfg, остальной крейт запрещает unsafe) и тесты columns и table крейта tessera-capi;
+  tessera-core запрещает unsafe, в tessera-spill его нет, а полные переборы tessera-core под Miri шли больше получаса
+  и ничего бы не проверили сверх обычных тестов. Локально: table:: — 15 тестов за 6 с, columns — 9 за 2 мин, table —
+  17 за 1,3 мин; находок нет. cfg_attr(miri, ignore) не понадобился.
 
   9.7 Санитайзеры (бывший 4.36, здесь целиком). Станет: вторая сборка ядра в кэше по ревизии — build-postgres.sh с
   третьим аргументом «asan»: CFLAGS -O1 -g -fno-omit-frame-pointer -fsanitize=address,undefined

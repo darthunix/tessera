@@ -50,6 +50,35 @@ jobs:
       - name: make rust-loom
         run: make rust-loom
 
+  # Miri over the tests of the unsafe code (plan 9.6): the hash table's
+  # region in tessera-kernels (its table module; the vector code is cut
+  # out under Miri, the rest of the crate denies unsafe code) and the C
+  # entry points' borrows in tessera-capi. tessera-core forbids unsafe
+  # code and tessera-spill has none. A nightly pinned here, not in
+  # rust-toolchain.toml; few property cases, as Miri runs each slowly;
+  # isolation off, for proptest's files of failures.
+  miri:
+    name: Miri (ubuntu-24.04)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      RUSTUP_TOOLCHAIN: nightly-2026-09-11
+      PROPTEST_CASES: "16"
+      MIRIFLAGS: -Zmiri-disable-isolation
+    steps:
+      - uses: actions/checkout@v4
+      - name: The pinned nightly with Miri
+        run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --component miri,rust-src
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: miri
+      - name: Miri's standard library
+        run: cargo miri setup
+      - name: The tests of the unsafe code
+        run: |
+          cargo miri test --locked -p tessera-kernels --lib table::
+          cargo miri test --locked -p tessera-capi --test columns --test table
+
   postgres:
     name: PostgreSQL ${{ matrix.postgres }} (${{ matrix.os }}, ${{ matrix.rust_profile }} kernels)
     strategy:
