@@ -49,6 +49,77 @@ jobs:
           workspaces: ". -> target/loom"
       - name: make rust-loom
         run: make rust-loom
+  # Every suite against PostgreSQL and Tessera's C built with
+  # AddressSanitizer and UndefinedBehaviorSanitizer (plan 9.7): reads and
+  # writes past a buffer, use after free and undefined behaviour in C,
+  # which the suites' results and the core's assertions see only by
+  # chance. The kernels library is not instrumented (Miri checks the Rust
+  # side); its allocations still get the interceptor's red zones.
+  sanitizers:
+    name: Sanitizers (ubuntu-24.04, ASan and UBSan)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    # Not yet a gate: each run stops at the first report, and the fixes of
+    # the reports so far are under review (plan 9.7); their merge makes it
+    # one.
+    continue-on-error: true
+    env:
+      LANG: C.UTF-8
+      # No leak reports: memory contexts free what malloc's view calls
+      # leaked. No use after return: it breaks the core's stack-depth
+      # check. No ODR violations: the runtime library is linked into the
+      # nodes module and the test modules alike.
+      ASAN_OPTIONS: detect_leaks=0:abort_on_error=1:print_stacktrace=1:detect_stack_use_after_return=0:detect_odr_violation=0:strict_string_checks=1
+      UBSAN_OPTIONS: print_stacktrace=1:abort_on_error=1:halt_on_error=1
+    steps:
+      - uses: actions/checkout@v4
+      - name: Revision
+        id: revision
+        run: |
+          . .github/postgres.env
+          echo "revision=$POSTGRES_MASTER" >> "$GITHUB_OUTPUT"
+          echo "PG_CONFIG=$HOME/postgres/bin/pg_config" >> "$GITHUB_ENV"
+      - name: Build tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq bison flex libicu-dev libreadline-dev zlib1g-dev pkg-config
+      # The runners' kernels randomize mmap with more bits than ASan's
+      # shadow layout takes; the default of older kernels fits it.
+      - name: Address space for ASan
+        run: sudo sysctl vm.mmap_rnd_bits=28
+      - uses: actions/cache@v4
+        id: postgres
+        with:
+          path: ~/postgres
+          key: postgres-asan-${{ runner.os }}-${{ runner.arch }}-${{ steps.revision.outputs.revision }}-${{ hashFiles('.github/scripts/build-postgres.sh') }}
+      - name: Build PostgreSQL with the sanitizers
+        if: steps.postgres.outputs.cache-hit != 'true'
+        run: .github/scripts/build-postgres.sh ${{ steps.revision.outputs.revision }} "$HOME/postgres" asan
+      - name: Toolchain of rust-toolchain.toml
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - name: Build and install Tessera
+        run: |
+          make
+          make install
+      - name: Regression suites and the installed set
+        run: make installcheck EXTRA_REGRESS_OPTS="--temp-instance=$RUNNER_TEMP/cluster"
+      - name: The sanitizers' reports
+        if: failure()
+        run: |
+          # The first report and the crash it caused, before the noise of
+          # the suites that ran into the recovery after it.
+          grep -n -B2 -A60 -E 'AddressSanitizer|runtime error:|TRAP:|terminated by signal|was terminated' test/log/postmaster.log 2>/dev/null | head -300 || true
+          grep -c '' test/log/postmaster.log 2>/dev/null || true
+      - name: The suites' logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sanitizers-logs
+          path: |
+            test/log
+            test/regression.diffs
+          if-no-files-found: ignore
 
   postgres:
     name: PostgreSQL ${{ matrix.postgres }} (${{ matrix.os }}, ${{ matrix.rust_profile }} kernels)
