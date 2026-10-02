@@ -223,6 +223,12 @@ columns at the first execution, and one batch envelope whose column
 callback renumbers the column by the current child's layout and asks
 that child's batch.
 
+Whatever its shape, a node takes the parts every node repeats from
+`tessera/runtime_node.h` ([runtime.md](runtime.md#the-parts-every-node-repeats)):
+the guard against backward scans in `BeginCustomScan`, the rescan of a
+child, the projection of computed columns, memory in `EXPLAIN`, and the
+shared memory callbacks of its counters for a parallel plan.
+
 ## Testing and measuring
 
 Each node ships the regression tests listed in [node.md](node.md): a
