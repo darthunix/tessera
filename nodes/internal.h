@@ -201,6 +201,19 @@ typedef struct TessSortAbbrev
 
 extern bool tess_sort_generic_key(PathKey *pathkey, PathTarget *target, Relids relids,
 								  int *place, Oid *sortop, Oid *collation);
+
+/* Path keys as TessSort and TessGatherMerge take them: lists of int, one entry a key. */
+typedef struct TessSortKeys
+{
+	List	   *places;
+	List	   *kinds;
+	List	   *flags;
+	List	   *sortops;
+	List	   *collations;
+} TessSortKeys;
+
+extern bool tess_sort_keys(List *pathkeys, PathTarget *target, Relids relids,
+						   TessSortKeys *keys);
 extern void tess_sort_support(SortSupport ssup, Oid sortop, Oid collation, bool nulls_first);
 extern void tess_sort_abbrev_init(TessSortAbbrev *abbrev, Oid sortop, Oid collation,
 								  bool nulls_first, Oid type);
