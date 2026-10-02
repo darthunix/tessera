@@ -1,0 +1,18 @@
+[package]
+name = "tessera-crosscheck"
+description = "Random queries with Tessera on and off, compared, disagreements shrunk to small cases"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+postgres.workspace = true
+proptest.workspace = true
+tessera-pgtool.workspace = true
+
+[lints]
+workspace = true

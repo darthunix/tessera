@@ -1,0 +1,7 @@
+# Seeds that once found a disagreement, run before the new one, so that a
+# fixed finding stays fixed. One per line; # starts a comment. A seed draws
+# the same queries only from the same generator and query count (the
+# default, 200), so a change to the generator rechecks these by hand.
+7    # a decimal of 19 digits: int8 to numeric fails with XX000 (plan 9.8)
+101  # a parallel UNION takes one branch's constant column for every branch
+100  # INTERSECT ALL evaluates an input the core skips: integer out of range

@@ -1133,6 +1133,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "tessera-crosscheck"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "postgres",
+ "proptest",
+ "tessera-pgtool",
+]
+
+[[package]]
 name = "tessera-kernels"
 version = "0.1.0"
 dependencies = [
