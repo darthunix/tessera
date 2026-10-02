@@ -128,9 +128,7 @@ limit_begin(CustomScanState *css, EState *estate, int eflags)
 	TessUnaryConfig config = TESS_STRUCT_INITIALIZER(TessUnaryConfig);
 	PlanState  *child;
 
-	/* The planner puts Material above a batch subtree for these. */
-	if (eflags & (EXEC_FLAG_BACKWARD | EXEC_FLAG_MARK))
-		elog(ERROR, "TessLimit supports neither backward scan nor mark/restore");
+	tess_node_require_forward(eflags, "TessLimit");
 	tess_plan_get_info(cscan, &info);
 	if (info.nchildren != 1 || info.child_names[0] == NULL ||
 		list_length(cscan->custom_exprs) != 2)
