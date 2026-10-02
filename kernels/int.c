@@ -531,12 +531,14 @@ narrow_evaluate(TessFunctionCall *call)
 static TessStatusCode
 smallint_range(TessFunctionCall *call, TessStatusCode code)
 {
-	const int32 *values = (const int32 *) call->values;
+	const int32 *values;
 	int			nwords;
 	bool		outside = false;
 
+	/* A failed call may be no call at all: read it only after success. */
 	if (code != TESS_OK)
 		return code;
+	values = (const int32 *) call->values;
 	nwords = tess_row_mask_word_count(call->non_nulls->nrows);
 	/* A whole word without a branch a row; a partial one row by row. */
 	for (int word = 0; word < nwords && !outside; word++)
