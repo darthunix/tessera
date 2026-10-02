@@ -2667,11 +2667,11 @@ sort_explain(CustomScanState *css, List *ancestors, ExplainState *es)
 		return;
 	ExplainPropertyText("Sort Method", totals[SORT_TOPN] > 0 ? "top-N in memory" :
 						totals[SORT_EXTERNAL] > 0 ? "external merge" : "in memory", es);
-	ExplainPropertyInteger("Memory Usage", "kB", (totals[SORT_MEMORY] + 1023) / 1024, es);
+	tess_explain_kb("Memory Usage", totals[SORT_MEMORY], es);
 	if (totals[SORT_EXTERNAL] > 0)
-		ExplainPropertyInteger("Disk Usage", "kB", (totals[SORT_DISK] + 1023) / 1024, es);
+		tess_explain_kb("Disk Usage", totals[SORT_DISK], es);
 	if (totals[SORT_OVERRUN] > 0)
-		ExplainPropertyInteger("Overrun", "kB", (totals[SORT_OVERRUN] + 1023) / 1024, es);
+		tess_explain_kb("Overrun", totals[SORT_OVERRUN], es);
 	/* How the node sorted: VERBOSE only. */
 	if (!es->verbose)
 		return;
@@ -2706,50 +2706,7 @@ sort_explain(CustomScanState *css, List *ancestors, ExplainState *es)
  * parallel-aware for this alone, shares only its counters, in the rows of
  * its chunk.
  */
-static Size
-sort_estimate_dsm(CustomScanState *css, ParallelContext *pcxt)
-{
-	return tess_shared_stats_estimate(SORT_NCOUNTERS, pcxt->nworkers);
-}
-
-static void
-sort_initialize_dsm(CustomScanState *css, ParallelContext *pcxt, void *coordinate)
-{
-	TessSortState *state = (TessSortState *) css;
-
-	state->stats = tess_shared_stats_setup(state->stats, css->ss.ps.state->es_query_cxt,
-										   coordinate, SORT_NCOUNTERS, pcxt->nworkers,
-										   pcxt->seg);
-}
-
-static void
-sort_reinitialize_dsm(CustomScanState *css, ParallelContext *pcxt, void *coordinate)
-{
-	TessSortState *state = (TessSortState *) css;
-
-	tess_shared_stats_reset(state->stats);
-}
-
-static void
-sort_initialize_worker(CustomScanState *css, shm_toc *toc, void *coordinate)
-{
-	TessSortState *state = (TessSortState *) css;
-
-	state->stats = tess_shared_stats_attach(css->ss.ps.state->es_query_cxt, coordinate,
-											ParallelWorkerNumber + 1);
-}
-
-static void
-sort_shutdown(CustomScanState *css)
-{
-	TessSortState *state = (TessSortState *) css;
-	uint64		values[SORT_NCOUNTERS];
-
-	if (state->stats == NULL)
-		return;
-	sort_counters(state, values);
-	tess_shared_stats_store(state->stats, values);
-}
+TESS_NODE_STATS_CALLBACKS(sort, TessSortState, SORT_NCOUNTERS, sort_counters)
 
 static const CustomExecMethods sort_exec_methods = {
 	.CustomName = "TessSort",
@@ -2757,11 +2714,7 @@ static const CustomExecMethods sort_exec_methods = {
 	.ExecCustomScan = sort_exec,
 	.EndCustomScan = sort_end,
 	.ReScanCustomScan = sort_rescan,
-	.EstimateDSMCustomScan = sort_estimate_dsm,
-	.InitializeDSMCustomScan = sort_initialize_dsm,
-	.ReInitializeDSMCustomScan = sort_reinitialize_dsm,
-	.InitializeWorkerCustomScan = sort_initialize_worker,
-	.ShutdownCustomScan = sort_shutdown,
+	TESS_NODE_STATS_METHODS(sort),
 	.ExplainCustomScan = sort_explain,
 };
 
