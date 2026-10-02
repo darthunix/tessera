@@ -149,50 +149,18 @@ make_gather_merge_path(PlannerInfo *root, GatherMergePath *gather)
 {
 	const TessKernelOps *kernels = tess_runtime_kernels();
 	Path	   *subpath = gathered_batch_path(gather->subpath, gather->num_workers);
-	List	   *places = NIL;
-	List	   *kinds = NIL;
-	List	   *flags = NIL;
-	List	   *sortops = NIL;
-	List	   *collations = NIL;
+	TessSortKeys keys;
 	int			nkeys = list_length(gather->path.pathkeys);
 
+	/* As TessSort takes them: a key of another type by its comparison. */
 	if (subpath == NULL ||
-		nkeys == 0 || nkeys > TESS_TABLE_MAX_KEYS || kernels == NULL)
+		nkeys == 0 || nkeys > TESS_TABLE_MAX_KEYS || kernels == NULL ||
+		!tess_sort_keys(gather->path.pathkeys, subpath->pathtarget, subpath->parent->relids,
+						&keys))
 		return NULL;
-	foreach_node(PathKey, pathkey, gather->path.pathkeys)
-	{
-		TessSortKey key;
-		int			place;
-		Oid			sortop = InvalidOid;
-		Oid			collation = InvalidOid;
-
-		/* As TessSort takes them: a key of another type by its comparison. */
-		if (tess_sort_key_of(pathkey, subpath->pathtarget, subpath->parent->relids,
-							 &place, &key))
-		{
-			Oid			type = exprType(list_nth(subpath->pathtarget->exprs, place));
-
-			sortop = get_opfamily_member_for_cmptype(pathkey->pk_opfamily, type, type,
-													 pathkey->pk_cmptype);
-			collation = pathkey->pk_eclass->ec_collation;
-		}
-		else if (tess_sort_generic_key(pathkey, subpath->pathtarget,
-									   subpath->parent->relids, &place, &sortop, &collation))
-		{
-			key.kind = TESS_SORT_KIND_GENERIC;
-			key.flags = (pathkey->pk_cmptype == COMPARE_GT ? TESS_SORT_DESCENDING : 0) |
-				(pathkey->pk_nulls_first ? TESS_SORT_NULLS_FIRST : 0);
-		}
-		else
-			return NULL;
-		places = lappend_int(places, place);
-		kinds = lappend_int(kinds, (int) key.kind);
-		flags = lappend_int(flags, (int) key.flags);
-		sortops = lappend_int(sortops, (int) sortop);
-		collations = lappend_int(collations, (int) collation);
-	}
 	return make_send_and_gather(root, &gather->path, subpath, gather->num_workers,
-								list_make5(places, kinds, flags, sortops, collations),
+								list_make5(keys.places, keys.kinds, keys.flags, keys.sortops,
+										   keys.collations),
 								&gather_merge_path_methods, &tess_gather_merge_node);
 }
 

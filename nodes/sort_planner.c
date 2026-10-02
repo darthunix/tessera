@@ -95,6 +95,50 @@ tess_sort_generic_key(PathKey *pathkey, PathTarget *target, Relids relids, int *
 }
 
 /*
+ * The keys of path keys as TessSort and TessGatherMerge take them, in
+ * lists for the plan: each key's place in target, its kind and flags, the
+ * operator that orders it and its collation. A key of the sort kernels
+ * keeps its type's comparison for the rows a generic key before it leaves
+ * equal; a key of another type orders by its comparison (sort support),
+ * by its abbreviated key where it has one. False for a key neither takes.
+ */
+bool
+tess_sort_keys(List *pathkeys, PathTarget *target, Relids relids, TessSortKeys *keys)
+{
+	*keys = (TessSortKeys) {0};
+	foreach_node(PathKey, pathkey, pathkeys)
+	{
+		TessSortKey key;
+		int			place;
+		Oid			sortop = InvalidOid;
+		Oid			collation = InvalidOid;
+
+		if (tess_sort_key_of(pathkey, target, relids, &place, &key))
+		{
+			Oid			type = exprType(list_nth(target->exprs, place));
+
+			sortop = get_opfamily_member_for_cmptype(pathkey->pk_opfamily, type, type,
+													 pathkey->pk_cmptype);
+			collation = pathkey->pk_eclass->ec_collation;
+		}
+		else if (tess_sort_generic_key(pathkey, target, relids, &place, &sortop, &collation))
+		{
+			key.kind = TESS_SORT_KIND_GENERIC;
+			key.flags = (pathkey->pk_cmptype == COMPARE_GT ? TESS_SORT_DESCENDING : 0) |
+				(pathkey->pk_nulls_first ? TESS_SORT_NULLS_FIRST : 0);
+		}
+		else
+			return false;
+		keys->places = lappend_int(keys->places, place);
+		keys->kinds = lappend_int(keys->kinds, (int) key.kind);
+		keys->flags = lappend_int(keys->flags, (int) key.flags);
+		keys->sortops = lappend_int(keys->sortops, (int) sortop);
+		keys->collations = lappend_int(keys->collations, (int) collation);
+	}
+	return true;
+}
+
+/*
  * The node's path in place of the core's full sort: the same planner
  * properties over the batch child of the sort's input, with the key
  * expressions, which the sort's targets hold, and their kinds and flags. NULL when a key is not one the
@@ -108,68 +152,32 @@ make_sort_path(PlannerInfo *root, SortPath *sort)
 	Path	   *input = sort->subpath;
 	PathTarget *target = input->pathtarget;
 	List	   *exprs = NIL;
-	List	   *kinds = NIL;
-	List	   *flags = NIL;
-	List	   *sortops = NIL;
-	List	   *collations = NIL;
+	TessSortKeys keys;
 	int			nkeys = list_length(sort->path.pathkeys);
 	int			ncolumns = list_length(target->exprs);
 	Path	   *child;
 
 	if (nkeys == 0 || nkeys > TESS_TABLE_MAX_KEYS ||
-		ncolumns == 0 || ncolumns > TESS_ROWS_MAX_COLUMNS)
+		ncolumns == 0 || ncolumns > TESS_ROWS_MAX_COLUMNS ||
+		!tess_sort_keys(sort->path.pathkeys, target, input->parent->relids, &keys))
 		return NULL;
-	foreach_node(PathKey, pathkey, sort->path.pathkeys)
-	{
-		TessSortKey key;
-		int			place;
-		Oid			sortop = InvalidOid;
-		Oid			collation = InvalidOid;
 
-		/*
-		 * A key of another type orders by its type's comparison (sort
-		 * support): the kernels order by its abbreviated key where it has
-		 * one, and equal words by the comparison.
-		 */
-		if (tess_sort_key_of(pathkey, target, input->parent->relids, &place, &key))
-		{
-			/* Its comparison, for the rows a generic key before it leaves equal. */
-			Oid			type = exprType(list_nth(target->exprs, place));
-
-			sortop = get_opfamily_member_for_cmptype(pathkey->pk_opfamily, type, type,
-													 pathkey->pk_cmptype);
-			collation = pathkey->pk_eclass->ec_collation;
-		}
-		else if (tess_sort_generic_key(pathkey, target, input->parent->relids, &place,
-								  &sortop, &collation))
-		{
-			/*
-			 * A first key without an abbreviated key (float8, text under a
-			 * collation of libc): every row one group, which the node
-			 * orders by the comparison, as the core's sort does, and was
-			 * measured no slower over the same scan (a million rows: text
-			 * 2712 ms against 2640, float8 90.7 against 89.1, float8 and
-			 * an integer 125.0 against 92.6); with a key before it, groups
-			 * of that key's values. Under a limit, a type passed by value
-			 * compares cheaply, and the core's bounded heap of tuples
-			 * stays ahead of the node's (float8, LIMIT 10: 10.5 ms against
-			 * 16.5; text 132.7 against 117.0 the other way): the core's.
-			 */
-			if (foreach_current_index(pathkey) == 0 && root->limit_tuples >= 0 &&
-				get_typbyval(exprType(list_nth(target->exprs, place))))
-				return NULL;
-			key.kind = TESS_SORT_KIND_GENERIC;
-			key.flags = (pathkey->pk_cmptype == COMPARE_GT ? TESS_SORT_DESCENDING : 0) |
-				(pathkey->pk_nulls_first ? TESS_SORT_NULLS_FIRST : 0);
-		}
-		else
-			return NULL;
+	/*
+	 * A first key without an abbreviated key (float8, text under a
+	 * collation of libc): every row one group, which the node orders by
+	 * the comparison, as the core's sort does, and was measured no slower
+	 * over the same scan (a million rows: text 2712 ms against 2640,
+	 * float8 90.7 against 89.1, float8 and an integer 125.0 against 92.6);
+	 * with a key before it, groups of that key's values. Under a limit, a
+	 * type passed by value compares cheaply, and the core's bounded heap
+	 * of tuples stays ahead of the node's (float8, LIMIT 10: 10.5 ms
+	 * against 16.5; text 132.7 against 117.0 the other way): the core's.
+	 */
+	if (linitial_int(keys.kinds) == TESS_SORT_KIND_GENERIC && root->limit_tuples >= 0 &&
+		get_typbyval(exprType(list_nth(target->exprs, linitial_int(keys.places)))))
+		return NULL;
+	foreach_int(place, keys.places)
 		exprs = lappend(exprs, list_nth(target->exprs, place));
-		kinds = lappend_int(kinds, (int) key.kind);
-		flags = lappend_int(flags, (int) key.flags);
-		sortops = lappend_int(sortops, (int) sortop);
-		collations = lappend_int(collations, (int) collation);
-	}
 	/* A set operation's constant column would stand for every row's. */
 	if (tess_plan_has_setop_columns((Node *) input->pathtarget->exprs) &&
 		tess_path_setop_constant(input))
@@ -183,7 +191,8 @@ make_sort_path(PlannerInfo *root, SortPath *sort)
 	config.node = &tess_sort_node;
 	config.children = list_make1(child);
 	config.expressions = exprs;
-	config.node_data = (Node *) list_make4(kinds, flags, sortops, collations);
+	config.node_data = (Node *) list_make4(keys.kinds, keys.flags, keys.sortops,
+										   keys.collations);
 	config.flags = CUSTOMPATH_SUPPORT_BACKWARD_SCAN;
 	return tess_path_create(&config);
 }
