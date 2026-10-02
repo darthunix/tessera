@@ -1,6 +1,8 @@
 # Correctness on every push: the Rust workspace on x86_64 Linux (the scalar
 # kernels) and on arm64 macOS (the NEON kernels), and the PostgreSQL modules
-# with every regression suite against the revisions in postgres.env.
+# with every regression suite against the revisions in postgres.env, with the
+# release kernels library and, on Linux, also with the debug one, whose
+# overflow checks and debug assertions the suites then exercise.
 # Performance is measured locally (crates/tessera-capi/benches, bench/pg).
 name: CI
 
@@ -29,17 +31,21 @@ jobs:
         run: make rust-check
 
   postgres:
-    name: PostgreSQL ${{ matrix.postgres }} (${{ matrix.os }})
+    name: PostgreSQL ${{ matrix.postgres }} (${{ matrix.os }}, ${{ matrix.rust_profile }} kernels)
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { os: ubuntu-24.04, postgres: MASTER }
-          - { os: macos-15, postgres: MASTER }
+          - { os: ubuntu-24.04, postgres: MASTER, rust_profile: release }
+          - { os: macos-15, postgres: MASTER, rust_profile: release }
+          - { os: ubuntu-24.04, postgres: MASTER, rust_profile: debug }
     runs-on: ${{ matrix.os }}
     env:
       # The temporary instance's locale (test/Makefile).
       LANG: C.UTF-8
+      # The kernels library the modules link (rust.mk): make, make install
+      # and make installcheck all read it from the environment.
+      RUST_PROFILE: ${{ matrix.rust_profile }}
     steps:
       - uses: actions/checkout@v4
       - name: Revision
