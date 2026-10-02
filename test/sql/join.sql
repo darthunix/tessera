@@ -211,6 +211,15 @@ SELECT join_same($$SELECT jf.v, jf.fk FROM jf LEFT JOIN jd ON jf.fk = jd.id WHER
 -- the filter alone.
 SELECT join_same($$SELECT jf.v FROM jf LEFT JOIN jd ON jf.fk = jd.id WHERE jd.n IS NULL$$);
 SELECT join_same($$SELECT count(*) FROM jf LEFT JOIN jd ON jf.fk = jd.id WHERE jd.n IS NULL$$);
+-- An outer join whose inner key is tested for NULL above it is planned as
+-- an anti join, and its target keeps the inner columns: NULL in every
+-- row, as no row has a pair. Before, the join read them from the records
+-- of earlier rows: other rows' values, or an internal error.
+EXPLAIN (COSTS OFF) SELECT * FROM jf LEFT JOIN jd ON jf.fk = jd.id WHERE jd.id IS NULL;
+SELECT join_same($$SELECT * FROM jf LEFT JOIN jd ON jf.fk = jd.id WHERE jd.id IS NULL$$);
+SELECT join_same($$SELECT count(*), count(jd.label), count(jd.n) FROM jf LEFT JOIN jd ON jf.fk = jd.id WHERE jd.id IS NULL$$);
+SELECT join_same($$SELECT jf.v, jdup.w, jdup.t FROM jf LEFT JOIN jdup ON jf.fk = jdup.k AND jdup.w > jf.v WHERE jdup.k IS NULL$$);
+SELECT join_same($$SELECT jf.v, jd.n FROM jf LEFT JOIN jd ON jf.fk = jd.id WHERE jd.id IS NULL AND coalesce(jd.n, 0) = 0$$);
 EXPLAIN (COSTS OFF) SELECT jf.v, jd.label FROM jf LEFT JOIN jd ON jf.fk = jd.id;
 SELECT join_same($$SELECT jf.v, jd.label, jd.n FROM jf LEFT JOIN jd ON jf.fk = jd.id$$);
 SELECT join_same($$SELECT jf.v, jdup.w, jdup.t FROM jf LEFT JOIN jdup ON jf.fk = jdup.k$$);
@@ -510,6 +519,7 @@ SELECT join_same($$SELECT count(*), count(jsb.n), sum(length(jsb.t)), sum(length
 SELECT join_same($$SELECT jsp.s, jsb.t FROM jsp LEFT JOIN jsb ON jsp.k = jsb.k WHERE jsp.s LIKE '%3'$$);
 SELECT join_same($$SELECT count(*), sum(length(jsp.s)) FROM jsp WHERE EXISTS (SELECT 1 FROM jsb WHERE jsb.k = jsp.k)$$);
 SELECT join_same($$SELECT jsp.s FROM jsp WHERE NOT EXISTS (SELECT 1 FROM jsb WHERE jsb.k = jsp.k)$$);
+SELECT join_same($$SELECT count(*), count(jsb.n), count(jsb.t) FROM jsp LEFT JOIN jsb ON jsp.k = jsb.k WHERE jsb.k IS NULL$$);
 SELECT join_same($$SELECT count(*), sum(jsb.n) FROM jsp JOIN jsb ON jsp.k = jsb.k AND jsb.n > jsp.k * 2$$);
 SELECT join_explain($$SELECT count(*), sum(jskew.w) FROM jsp JOIN jskew() AS jskew ON jsp.k = jskew.k$$);
 SELECT join_same($$SELECT count(*), sum(jskew.w), sum(jsp.k) FROM jsp JOIN jskew() AS jskew ON jsp.k = jskew.k$$);
@@ -622,6 +632,7 @@ SELECT join_same($$SELECT count(*), sum(jdup.w) FROM jbig JOIN jdup ON jbig.fk =
 SELECT join_same($$SELECT count(*), count(jd.n) FROM jbig LEFT JOIN jd ON jbig.fk = jd.id$$);
 SELECT join_same($$SELECT count(*) FROM jbig WHERE EXISTS (SELECT 1 FROM jdup WHERE jdup.k = jbig.fk)$$);
 SELECT join_same($$SELECT count(*), sum(jbig.v) FROM jbig WHERE NOT EXISTS (SELECT 1 FROM jd WHERE jd.id = jbig.fk)$$);
+SELECT join_same($$SELECT count(*), count(jd.n), count(jd.label) FROM jbig LEFT JOIN jd ON jbig.fk = jd.id WHERE jd.id IS NULL$$);
 SELECT join_property($$SELECT count(*) FROM jbig JOIN jd ON jbig.fk = jd.id$$, 'Probe Rows') AS probe_rows,
        join_property($$SELECT count(*) FROM jbig JOIN jd ON jbig.fk = jd.id$$, 'Matches') AS matches;
 SET parallel_leader_participation = off;
@@ -631,6 +642,7 @@ RESET parallel_leader_participation;
 SET work_mem = '512kB';
 SELECT join_same($$SELECT count(*), sum(length(jsb.t)), sum(jsp.k) FROM jsp JOIN jsb ON jsp.k = jsb.k$$);
 SELECT join_same($$SELECT count(*), count(jsb.n) FROM jsp LEFT JOIN jsb ON jsp.k = jsb.k$$);
+SELECT join_same($$SELECT count(*), count(jsb.n), count(jsb.t) FROM jsp LEFT JOIN jsb ON jsp.k = jsb.k WHERE jsb.k IS NULL$$);
 RESET work_mem;
 -- Each participant decides on a filter of its own table by its own rows.
 SELECT join_same($$SELECT count(*), sum(jbuild.w), sum(jprobe.v) FROM jprobe JOIN jbuild ON jprobe.k = jbuild.k$$);

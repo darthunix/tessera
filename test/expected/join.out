@@ -747,6 +747,44 @@ SELECT join_same($$SELECT count(*) FROM jf LEFT JOIN jd ON jf.fk = jd.id WHERE j
  1 rows, hash f0794536f8fe68539fb83cdd8c0c7180
 (1 row)
 
+-- An outer join whose inner key is tested for NULL above it is planned as
+-- an anti join, and its target keeps the inner columns: NULL in every
+-- row, as no row has a pair. Before, the join read them from the records
+-- of earlier rows: other rows' values, or an internal error.
+EXPLAIN (COSTS OFF) SELECT * FROM jf LEFT JOIN jd ON jf.fk = jd.id WHERE jd.id IS NULL;
+               QUERY PLAN               
+----------------------------------------
+ Custom Scan (TessHashJoin)
+   Join Type: Anti
+   Hash Cond: (jf.fk = jd.id)
+   ->  Custom Scan (TessHeapScan) on jf
+   ->  Custom Scan (TessHeapScan) on jd
+(5 rows)
+
+SELECT join_same($$SELECT * FROM jf LEFT JOIN jd ON jf.fk = jd.id WHERE jd.id IS NULL$$);
+                    join_same                    
+-------------------------------------------------
+ 236 rows, hash 06f067e337f3f04fe237e35997d06959
+(1 row)
+
+SELECT join_same($$SELECT count(*), count(jd.label), count(jd.n) FROM jf LEFT JOIN jd ON jf.fk = jd.id WHERE jd.id IS NULL$$);
+                   join_same                   
+-----------------------------------------------
+ 1 rows, hash eb764ff78306bf694acc2503fd70f083
+(1 row)
+
+SELECT join_same($$SELECT jf.v, jdup.w, jdup.t FROM jf LEFT JOIN jdup ON jf.fk = jdup.k AND jdup.w > jf.v WHERE jdup.k IS NULL$$);
+                    join_same                    
+-------------------------------------------------
+ 982 rows, hash f0ee86562a64893e10309c23fa28ac7b
+(1 row)
+
+SELECT join_same($$SELECT jf.v, jd.n FROM jf LEFT JOIN jd ON jf.fk = jd.id WHERE jd.id IS NULL AND coalesce(jd.n, 0) = 0$$);
+                    join_same                    
+-------------------------------------------------
+ 236 rows, hash 1ffe87fda7961de3d36c20c116e065e8
+(1 row)
+
 EXPLAIN (COSTS OFF) SELECT jf.v, jd.label FROM jf LEFT JOIN jd ON jf.fk = jd.id;
                QUERY PLAN               
 ----------------------------------------
@@ -2214,6 +2252,12 @@ SELECT join_same($$SELECT jsp.s FROM jsp WHERE NOT EXISTS (SELECT 1 FROM jsb WHE
  31817 rows, hash 6392f4045fc17bd928976ebddedae950
 (1 row)
 
+SELECT join_same($$SELECT count(*), count(jsb.n), count(jsb.t) FROM jsp LEFT JOIN jsb ON jsp.k = jsb.k WHERE jsb.k IS NULL$$);
+                   join_same                   
+-----------------------------------------------
+ 1 rows, hash ec0b24d7908313be9d76a70abe802a1a
+(1 row)
+
 SELECT join_same($$SELECT count(*), sum(jsb.n) FROM jsp JOIN jsb ON jsp.k = jsb.k AND jsb.n > jsp.k * 2$$);
                    join_same                   
 -----------------------------------------------
@@ -2818,6 +2862,12 @@ SELECT join_same($$SELECT count(*), sum(jbig.v) FROM jbig WHERE NOT EXISTS (SELE
  1 rows, hash 7968083c1faeae6c01725a869cd0c6a7
 (1 row)
 
+SELECT join_same($$SELECT count(*), count(jd.n), count(jd.label) FROM jbig LEFT JOIN jd ON jbig.fk = jd.id WHERE jd.id IS NULL$$);
+                   join_same                   
+-----------------------------------------------
+ 1 rows, hash b31c5a5e202d938f8b114884d75a5f0f
+(1 row)
+
 SELECT join_property($$SELECT count(*) FROM jbig JOIN jd ON jbig.fk = jd.id$$, 'Probe Rows') AS probe_rows,
        join_property($$SELECT count(*) FROM jbig JOIN jd ON jbig.fk = jd.id$$, 'Matches') AS matches;
  probe_rows | matches 
@@ -2845,6 +2895,12 @@ SELECT join_same($$SELECT count(*), count(jsb.n) FROM jsp LEFT JOIN jsb ON jsp.k
                    join_same                   
 -----------------------------------------------
  1 rows, hash 47826cbde347b87d21c2745f129a35f2
+(1 row)
+
+SELECT join_same($$SELECT count(*), count(jsb.n), count(jsb.t) FROM jsp LEFT JOIN jsb ON jsp.k = jsb.k WHERE jsb.k IS NULL$$);
+                   join_same                   
+-----------------------------------------------
+ 1 rows, hash ec0b24d7908313be9d76a70abe802a1a
 (1 row)
 
 RESET work_mem;

@@ -1444,6 +1444,8 @@ next_matches(TessHashJoinState *state)
 		uint64		any = 0;
 
 		CHECK_FOR_INTERRUPTS();
+		/* The rounds below read the records' inner columns. */
+		state->null_round = false;
 		if (state->outer_batch != NULL)
 		{
 			outer_finish(state, state->outer_batch);
@@ -1503,6 +1505,13 @@ next_matches(TessHashJoinState *state)
 		}
 		if (any == 0)
 			continue;
+		/*
+		 * An anti join's rows have no pair, so an inner column is NULL in
+		 * each: the planner makes an anti join of an outer join whose
+		 * inner key is tested for NULL above it, and the outer join's
+		 * target keeps the inner columns.
+		 */
+		state->null_round = state->jointype == JOIN_ANTI;
 		state->batch.rows.nrows = nrows;
 		state->batch.rows.bits = state->probe.published_bits;
 		state->current_offsets = state->probe.offsets;
