@@ -141,11 +141,27 @@ struct Counts {
     kinds: BTreeMap<&'static str, u32>,
 }
 
-/// A finding: the seed, the shrunk query and what its modes did.
+/// A finding: the seed, the shrunk query and what its modes did on a run
+/// of its own, and the query first found with what its modes did then.
 struct Finding {
     seed: u64,
     query: Query,
     verdict: Verdict,
+    original: (Query, Verdict),
+}
+
+impl Finding {
+    /// What the finding is, and whether it stood on the run of its own: a
+    /// parallel plan can raise an error, or not, by which participant
+    /// reaches a row first.
+    fn headline(&self) -> String {
+        let class = self.original.1.class().unwrap_or("finding");
+        if self.verdict.is_finding() {
+            class.to_string()
+        } else {
+            format!("{class}, not repeated by the shrunk query on a run of its own")
+        }
+    }
 }
 
 /// Runs the queries of one seed; a finding, shrunk, if any.
@@ -172,34 +188,54 @@ fn run_seed(
         TestRng::from_seed(RngAlgorithm::ChaCha, &seed_bytes),
     );
     let counts = RefCell::new(Counts::default());
-    // Once a query fails, the calls that follow shrink it: not counted.
-    let shrinking = RefCell::new(false);
+    // Once a query fails, the calls that follow shrink it: not counted,
+    // and a failure of another class does not stand for it.
+    let original: RefCell<Option<(Query, Verdict)>> = RefCell::new(None);
     let result = runner.run(&generate::query(), |query| {
-        if deadline.is_some_and(|deadline| Instant::now() > deadline) && !*shrinking.borrow() {
+        let shrinking = original
+            .borrow()
+            .as_ref()
+            .and_then(|(_, verdict)| verdict.class());
+        if deadline.is_some_and(|deadline| Instant::now() > deadline) && shrinking.is_none() {
             return Ok(());
         }
         let mut oracle = oracle.borrow_mut();
-        let verdict = oracle
-            .check(&query)
-            .map_err(|error| TestCaseError::fail(format!("the server: {error:#}")))?;
-        if !*shrinking.borrow() {
-            let mut counts = counts.borrow_mut();
-            counts.queries += 1;
-            *counts.kinds.entry(verdict.kind()).or_default() += 1;
-            if !verdict.is_finding() && oracle.uses_tessera(&query).unwrap_or(false) {
-                counts.with_tessera += 1;
+        let verdict = match oracle.check(&query) {
+            Ok(verdict) => verdict,
+            // While shrinking, a query the server fails on stands for no
+            // finding; the last check reports a server that stays down.
+            Err(_) if shrinking.is_some() => return Ok(()),
+            Err(error) => return Err(TestCaseError::fail(format!("the server: {error:#}"))),
+        };
+        match shrinking {
+            Some(class) if verdict.class() == Some(class) => {
+                Err(TestCaseError::fail(verdict.describe()))
+            }
+            Some(_) => Ok(()),
+            None => {
+                let mut counts = counts.borrow_mut();
+                counts.queries += 1;
+                *counts.kinds.entry(verdict.kind()).or_default() += 1;
+                if verdict.is_finding() {
+                    let describe = verdict.describe();
+                    *original.borrow_mut() = Some((query, verdict));
+                    return Err(TestCaseError::fail(describe));
+                }
+                if oracle.uses_tessera(&query).unwrap_or(false) {
+                    counts.with_tessera += 1;
+                }
+                Ok(())
             }
         }
-        if verdict.is_finding() {
-            *shrinking.borrow_mut() = true;
-            return Err(TestCaseError::fail(verdict.describe()));
-        }
-        Ok(())
     });
     let counts = counts.into_inner();
     match result {
         Ok(()) => Ok((counts, None)),
-        Err(TestError::Fail(_, query)) => {
+        Err(TestError::Fail(reason, query)) => {
+            // Without a first finding the failure is the server's.
+            let Some(original) = original.into_inner() else {
+                anyhow::bail!("{reason}");
+            };
             let verdict = oracle.borrow_mut().check(&query)?;
             Ok((
                 counts,
@@ -207,6 +243,7 @@ fn run_seed(
                     seed,
                     query,
                     verdict,
+                    original,
                 }),
             ))
         }
@@ -221,13 +258,19 @@ fn write_finding(finding: &Finding, args: &RunArgs) -> Result<PathBuf> {
     fs::create_dir_all(&directory)?;
     let path = directory.join(format!("finding-{}.sql", finding.seed));
     let sql = finding.query.sql();
+    let comment = |text: String| text.replace('\n', "\n-- ");
     let text = format!(
-        "-- tessera-crosscheck finding, seed {seed}, {rows} rows\n\
-         -- {verdict}\n\n{setup}\n{settings}\n\
+        "-- tessera-crosscheck finding, seed {seed}, {rows} rows: {headline}\n\
+         -- {verdict}\n\
+         -- first found as:\n-- {original}\n-- {original_verdict}\n\n\
+         {setup}\n{settings}\n\
          SET tessera.enable = on;\n{sql};\nSET tessera.enable = off;\n{sql};\n",
         seed = finding.seed,
         rows = args.rows,
-        verdict = finding.verdict.describe().replace('\n', "\n-- "),
+        headline = finding.headline(),
+        verdict = comment(finding.verdict.describe()),
+        original = comment(finding.original.0.to_string()),
+        original_verdict = comment(finding.original.1.describe()),
         setup = schema::setup(finding.seed, args.rows),
         settings = finding.query.settings.statements(),
     );
@@ -283,9 +326,12 @@ fn run(args: RunArgs) -> Result<u8> {
             findings += 1;
             let path = write_finding(&finding, &args)?;
             println!(
-                "FINDING, shrunk:\n{}\n{}\nwritten to {}",
+                "FINDING ({}), shrunk:\n{}\n{}\nfirst found as:\n{}\n{}\nwritten to {}",
+                finding.headline(),
                 finding.query,
                 finding.verdict.describe(),
+                finding.original.0,
+                finding.original.1.describe(),
                 path.display()
             );
         }
