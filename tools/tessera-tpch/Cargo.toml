@@ -10,7 +10,9 @@ publish.workspace = true
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
+indicatif.workspace = true
 postgres.workspace = true
+tpchgen.workspace = true
 
 [lints]
 workspace = true

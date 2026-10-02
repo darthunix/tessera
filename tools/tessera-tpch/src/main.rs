@@ -4,6 +4,7 @@
 
 mod cluster;
 mod config;
+mod load;
 
 use std::path::{Path, PathBuf};
 
@@ -12,6 +13,7 @@ use clap::{Args, Parser, Subcommand};
 
 use cluster::{Cluster, Pg};
 use config::{Scale, ServerSettings};
+use load::Schema;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -27,7 +29,8 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum Command {
     /// Install the release build of Tessera, start the cluster of the
-    /// scale factor and leave it running.
+    /// scale factor, load the data unless it holds them, and leave it
+    /// running.
     Setup(ClusterArgs),
     /// Stop the cluster of the scale factor; its data stays.
     Stop(ClusterArgs),
@@ -50,6 +53,13 @@ struct ClusterArgs {
     /// building and installing the release one.
     #[arg(long)]
     no_install: bool,
+    /// Variant of the schema: primary keys only, or with indexes on
+    /// foreign keys and dates (bench/tpch/indexes.sql).
+    #[arg(long, value_enum, default_value_t = Schema::Pk)]
+    schema: Schema,
+    /// Load the data anew even if the cluster holds them.
+    #[arg(long)]
+    reload: bool,
 }
 
 impl ClusterArgs {
@@ -81,7 +91,8 @@ fn runs_dir() -> PathBuf {
     root().join("target/bench-runs")
 }
 
-/// Installs Tessera unless asked not to, and starts the cluster.
+/// Installs Tessera unless asked not to, starts the cluster and loads
+/// the data it lacks.
 fn bring_up(args: &ClusterArgs) -> Result<Cluster> {
     let pg = Pg::discover()?;
     pg.require_contrib()?;
@@ -103,6 +114,37 @@ fn bring_up(args: &ClusterArgs) -> Result<Cluster> {
         cluster.data.display(),
         cluster.settings.port,
         cluster.settings.shared_buffers
+    );
+    match load::ensure(&cluster, &root(), &args.sf, args.schema, args.reload)? {
+        Some(loaded) => {
+            println!(
+                "loaded in {:.0} s; rows as clause 4.2.5 gives them:",
+                loaded.seconds
+            );
+            for table in &loaded.tables {
+                println!(
+                    "  {:>9} {:>11} rows {:>9} pages, {} all-visible",
+                    table.table.name(),
+                    table.rows,
+                    table.pages,
+                    table.all_visible
+                );
+            }
+        }
+        None => println!("data: SF {} of {} is loaded", args.sf, load::GENERATOR),
+    }
+    let mut client = cluster.connect()?;
+    let sizes = load::sizes(&mut client)?;
+    let total: i64 = sizes.iter().map(|(_, size)| size).sum();
+    println!(
+        "schema {}, {} with indexes: {}",
+        args.schema.name(),
+        load::human_size(total),
+        sizes
+            .iter()
+            .map(|(table, size)| format!("{table} {}", load::human_size(*size)))
+            .collect::<Vec<_>>()
+            .join(", ")
     );
     Ok(cluster)
 }
@@ -150,6 +192,8 @@ mod tests {
             "--port",
             "5500",
             "--no-install",
+            "--schema",
+            "indexed",
         ])
         .unwrap();
         let Command::Setup(args) = cli.command else {
@@ -157,6 +201,7 @@ mod tests {
         };
         assert_eq!(args.sf.to_string(), "10");
         assert!(args.no_install);
+        assert_eq!(args.schema, Schema::Indexed);
         let settings = args.settings();
         assert_eq!(settings.port, 5500);
         assert_eq!(settings.shared_buffers, "16GB");

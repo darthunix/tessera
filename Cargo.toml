@@ -24,6 +24,7 @@ publish = false
 [workspace.dependencies]
 anyhow = "1.0.104"
 clap = { version = "4", features = ["derive"] }
+indicatif = "0.18"
 memchr = "2.8"
 postgres = "0.19"
 proptest = { version = "1.11", default-features = false, features = ["std"] }
@@ -31,6 +32,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 tempfile = "3"
+tpchgen = "3.0"
 tessera-core = { path = "crates/tessera-core" }
 tessera-kernels = { path = "crates/tessera-kernels" }
 tessera-spill = { path = "crates/tessera-spill" }

@@ -42,6 +42,10 @@ impl Scale {
         Ok(Scale { factor, label })
     }
 
+    pub fn factor(&self) -> f64 {
+        self.factor
+    }
+
     /// `shared_buffers` that holds every table and primary key with room
     /// to spare: 1.6 GB per scale unit, at least 2 GB (2 GB at SF 1, 16 GB
     /// at SF 10), so that a timed query reads no page from the operating
