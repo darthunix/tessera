@@ -309,11 +309,7 @@ tess_unary_rescan(TessUnary *unary)
 		tess_projection_reset(unary->projection);
 	if (unary->active_batch != NULL)
 		tess_input_finish(unary->input);
-	/* The core passes changed parameters to outer and inner plans only. */
-	if (unary->node->ss.ps.chgParam != NULL)
-		UpdateChangedParamSet(unary->rescan_child, unary->node->ss.ps.chgParam);
-	ExecReScan(unary->rescan_child);
-	tess_input_rescan(unary->input);
+	tess_rescan_child(&unary->node->ss.ps, unary->rescan_child, unary->input);
 	unary->active_batch = NULL;
 	unary->next_row = -1;
 	unary->stopped = false;

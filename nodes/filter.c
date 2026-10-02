@@ -79,14 +79,15 @@ static void filter_end(CustomScanState *css);
 static void filter_rescan(CustomScanState *css);
 static void filter_explain(CustomScanState *css, List *ancestors,
 						   ExplainState *es);
-static Size filter_estimate_dsm(CustomScanState *css, ParallelContext *pcxt);
-static void filter_initialize_dsm(CustomScanState *css, ParallelContext *pcxt,
-								  void *coordinate);
-static void filter_reinitialize_dsm(CustomScanState *css, ParallelContext *pcxt,
-									void *coordinate);
-static void filter_initialize_worker(CustomScanState *css, shm_toc *toc,
-									 void *coordinate);
-static void filter_shutdown(CustomScanState *css);
+static void filter_counters(FilterState *state, uint64 *values);
+
+/*
+ * A parallel plan: the node shares only its counters, in the rows of its
+ * chunk; the child divides the work. The leader lays the rows out, a
+ * worker attaches to its own, and each stores its counters when the
+ * executor shuts the node down after the plan's last row.
+ */
+TESS_NODE_STATS_CALLBACKS(filter, FilterState, FILTER_NCOUNTERS, filter_counters)
 
 static const CustomExecMethods filter_exec_methods = {
 	.CustomName = "TessFilter",
@@ -95,11 +96,7 @@ static const CustomExecMethods filter_exec_methods = {
 	.EndCustomScan = filter_end,
 	.ReScanCustomScan = filter_rescan,
 	.ExplainCustomScan = filter_explain,
-	.EstimateDSMCustomScan = filter_estimate_dsm,
-	.InitializeDSMCustomScan = filter_initialize_dsm,
-	.ReInitializeDSMCustomScan = filter_reinitialize_dsm,
-	.InitializeWorkerCustomScan = filter_initialize_worker,
-	.ShutdownCustomScan = filter_shutdown,
+	TESS_NODE_STATS_METHODS(filter),
 };
 
 static bool filter_set_key_filter(CustomScanState *css, const TessKeyFilter *filter);
@@ -271,9 +268,7 @@ filter_begin(CustomScanState *css, EState *estate, int eflags)
 	TessPlanReader *reader;
 	PlanState  *child;
 
-	/* The planner puts Material above a batch subtree for these. */
-	if (eflags & (EXEC_FLAG_BACKWARD | EXEC_FLAG_MARK))
-		elog(ERROR, "TessFilter supports neither backward scan nor mark/restore");
+	tess_node_require_forward(eflags, "TessFilter");
 	tess_plan_get_info(cscan, &info);
 	if (info.node != &tess_filter_node || info.nchildren != 1 ||
 		info.child_names[0] == NULL ||
@@ -296,19 +291,9 @@ filter_begin(CustomScanState *css, EState *estate, int eflags)
 	qual.scan_tuple = &state->child_layout;
 	state->qual = tess_qual_create(&qual);
 	if (info.computed != NIL)
-	{
-		TessProjectionConfig projection = TESS_STRUCT_INITIALIZER(TessProjectionConfig);
-
-		/* The scan tuple is the child's target list, as the child maps it. */
-		projection.parent_context = estate->es_query_cxt;
-		projection.parent = &css->ss.ps;
-		projection.econtext = css->ss.ps.ps_ExprContext;
-		projection.scan_slot = css->ss.ss_ScanTupleSlot;
-		projection.scan_tuple = &state->child_layout;
-		projection.base_columns = state->child_layout.ncolumns;
-		projection.computed = info.computed;
-		state->projection = tess_projection_create(&projection);
-	}
+		state->projection = tess_node_projection(css, css->ss.ss_ScanTupleSlot,
+												 &state->child_layout,
+												 state->child_layout.ncolumns, info.computed);
 	config.parent_context = estate->es_query_cxt;
 	config.node = css;
 	config.child = child;
@@ -422,56 +407,3 @@ filter_explain(CustomScanState *css, List *ancestors, ExplainState *es)
 		ExplainPropertyInteger("Computed Datums", NULL, totals[FILTER_COMPUTED], es);
 }
 
-/*
- * A parallel plan: the node shares only its counters, in the rows of its
- * chunk; the child divides the work. The leader lays the rows out, a
- * worker attaches to its own, and each stores its counters when the
- * executor shuts the node down after the plan's last row.
- */
-static Size
-filter_estimate_dsm(CustomScanState *css, ParallelContext *pcxt)
-{
-	return tess_shared_stats_estimate(FILTER_NCOUNTERS, pcxt->nworkers);
-}
-
-static void
-filter_initialize_dsm(CustomScanState *css, ParallelContext *pcxt,
-					  void *coordinate)
-{
-	FilterState *state = (FilterState *) css;
-
-	state->stats = tess_shared_stats_setup(state->stats,
-										   css->ss.ps.state->es_query_cxt,
-										   coordinate, FILTER_NCOUNTERS,
-										   pcxt->nworkers, pcxt->seg);
-}
-
-static void
-filter_reinitialize_dsm(CustomScanState *css, ParallelContext *pcxt,
-						void *coordinate)
-{
-	FilterState *state = (FilterState *) css;
-
-	tess_shared_stats_reset(state->stats);
-}
-
-static void
-filter_initialize_worker(CustomScanState *css, shm_toc *toc, void *coordinate)
-{
-	FilterState *state = (FilterState *) css;
-
-	state->stats = tess_shared_stats_attach(css->ss.ps.state->es_query_cxt,
-											coordinate, ParallelWorkerNumber + 1);
-}
-
-static void
-filter_shutdown(CustomScanState *css)
-{
-	FilterState *state = (FilterState *) css;
-	uint64		values[FILTER_NCOUNTERS];
-
-	if (state->stats == NULL)
-		return;
-	filter_counters(state, values);
-	tess_shared_stats_store(state->stats, values);
-}

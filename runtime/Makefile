@@ -6,7 +6,7 @@ PG_CPPFLAGS = -I$(srcdir)/../include
 # and a later definition never reaches it. The list is not OBJS, which PGXS
 # would take for a module's objects and, with LLVM, build bitcode for.
 RUNTIME_LIB = libtessera_runtime.a
-RUNTIME_OBJS = api.o builder.o expr.o heap_batch.o input.o output.o plan.o planner.o \
+RUNTIME_OBJS = api.o builder.o expr.o heap_batch.o input.o node.o output.o plan.o planner.o \
 	project.o qual.o rows.o shared_stats.o spill.o unary.o
 EXTRA_CLEAN = $(RUNTIME_LIB) $(RUNTIME_OBJS)
 
