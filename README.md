@@ -158,7 +158,9 @@ on a cluster of its own with one command, `cargo tpch`: it checks every
 answer against the published one and Tessera on against off, records which
 Tessera nodes each plan has, and times both modes in alternating pairs.
 [`docs/benchmarks`](docs/benchmarks/README.md) keeps the summaries of full
-runs with their commit and machine, and the plans of the cases cited here. The kernels' micro-benchmarks
+runs with their commit and machine, and the plans of the cases cited here.
+Two families, `scancost` and `joincost`, calibrate the planner's cost
+models rather than compare ([docs/costs.md](docs/costs.md)). The kernels' micro-benchmarks
 count instructions, cycles and branches on macOS
 ([`crates/tessera-capi/benches`](crates/tessera-capi/benches/README.md)).
 
@@ -182,6 +184,9 @@ It builds against PostgreSQL master only.
 - [Nodes](docs/nodes.md): Tessera's own nodes, serial and parallel;
   [table](docs/table.md) and [spill](docs/spill.md): the hash table of
   joins and grouping, and how it goes to temporary files.
+- [Planning costs](docs/costs.md): how the planner prices Tessera's
+  paths against the core's, the models of each node's time, their
+  parameters and the families that calibrate them on a machine.
 
 Run the regression suites against a running server, or in a temporary
 instance as [CONTRIBUTING.md](CONTRIBUTING.md) shows:

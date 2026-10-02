@@ -51,65 +51,9 @@ defaults. The gates and switches:
 | `tessera.index_min_rows` | 1000 | rows an index scan must give for the node to take it, a limit counted (Index and Index-only modes) |
 | `tessera.join_bloom_ratio` | 0.5 | share of probe rows with a pair below which a hash join builds a Bloom filter |
 
-The planner's calibration of the nodes' costs against the core's, each
-measured where its node's section says; the calibration is the
-project's, not a deployment's, though another machine may call for other
-values, as the core's own cost parameters do:
-
-| Parameter | Default | What it scales |
-|---|---|---|
-| `tessera.scan_cost_factor` | 0.9 | the core's cost of a sequential, bitmap, index or index-only scan, for TessHeapScan with TessFilter above |
-| `tessera.agg_key_share` | 0.25 | `cpu_operator_cost` a key of a row TessAgg groups |
-| `tessera.agg_dictionary_share` | 0.65 | more of it for a key through a dictionary (text, numeric, ...) |
-| `tessera.agg_kernel_share` | 0.25 | the core's transition cost a row of TessAgg's own aggregates |
-| `tessera.agg_generic_share` | 0.9 | the same for an aggregate the kernels do not fold, evaluated row by row |
-| `tessera.setop_word_share` | 0.5 | the core's own cost of `INTERSECT` or `EXCEPT` with keys of words |
-| `tessera.setop_dictionary_share` | 0.9 | the same with a key through a dictionary |
-| `tessera.gather_tuple_share` | 0.25 | `parallel_tuple_cost` a row through TessGather |
-| `tessera.pack_value_share` | 0.4 | `cpu_operator_cost` a value TessPack copies into a batch |
-
-The model of the node's scans, by which the planner ranks its full scan
-against its index scans (TessHeapScan, Ranking the full scan), in units
-of a page of the full scan; `bench/pg/scancost` fits them on a machine
-and prints them:
-
-| Parameter | Default | The node's time for |
-|---|---|---|
-| `tessera.scan_page_cost` | 1 | a page of a full scan, the unit |
-| `tessera.scan_tuple_cost` | 0.0077 | a row of a full scan with its filter |
-| `tessera.index_only_tuple_cost` | 0.058 | a row of an index-only scan |
-| `tessera.index_tuple_cost` | 0.112 | a row of an index scan |
-| `tessera.bitmap_page_cost` | 0.665 | a page of a bitmap |
-| `tessera.bitmap_tuple_cost` | 0.075 | a row of a bitmap |
-| `tessera.bitmap_scatter_cost` | 0.031 | what a row of a bitmap takes more, times 1 - c² for the correlation c of the index's first column |
-| `tessera.scan_parallel_setup_cost` | 7000 | the start and finish of a partial scan's workers, 1.85 ms here |
-| `tessera.scan_worker_page_cost` | 3.15 | what a worker takes more for a page of the shared buffers it reads first, 0.83 µs here; near 0 with huge pages |
-| `tessera.filter_clause_cost` | 0.0053 | a row of a batch clause past the filter's first |
-| `tessera.filter_row_clause_cost` | 0.022 | a row of a clause the filter evaluates row by row |
-| `tessera.filter_row_operator_cost` | 0.018 | a row of an operator of such a clause, by the core's cost of it |
-| `tessera.deform_varlena_cost` | 0.017 | a row of a clause's column past one of varying length, deformed |
-| `tessera.bitmap_build_cost` | 0.038 | a row of a partial bitmap's building, which one participant does |
-| `tessera.bitmap_build_scatter_cost` | 0.054 | what building takes more a row, times 1 - c² for the correlation c of the index's first column |
-| `tessera.index_worker_share` | 0.5 | the share of the leader's pace a worker of a partial index or index-only scan reads at (a share, not a time) |
-
-The model of the node's hash join (TessHashJoin, Planning), in the same
-units, added to its children's costs as they are after the division by
-`tessera.join_cost_unit`; `bench/pg/joincost` fits them on a machine and
-prints them:
-
-| Parameter | Default | The node's time for |
-|---|---|---|
-| `tessera.join_build_cost` | 0.107 | a row of the inner side built into the table |
-| `tessera.join_probe_cost` | 0.0072 | a row of the outer side probed |
-| `tessera.join_pair_cost` | 0.0046 | a pair returned |
-| `tessera.join_batch_cost` | 0.31 | a batch published, which its parent pays for whatever the share of its rows selected |
-| `tessera.join_gather_cost` | 0.0097 | an inner value gathered for a pair |
-| `tessera.join_text_value_cost` | 0.035 | a by-reference inner value copied into the table, and again gathered for a pair |
-| `tessera.join_hashed_key_cost` | 0.069 | a row of either side hashed by its type's function, for a key a word does not hold |
-| `tessera.join_compact_pair_cost` | 0.020 | what a pair of a compact batch costs more, where the inner side has several records a key |
-| `tessera.join_bloom_test_cost` | 0.0027 | a probe row tested against the Bloom filter, in place of the probe of a row it rejects |
-| `tessera.join_spill_row_cost` | 0.015 | what a row of either side costs more once the table outgrows `hash_mem` |
-| `tessera.join_cost_unit` | 17.9 | the node's time, in these units, that a unit of the core's hash join cost stands for: the node's own time is divided by it (4.9 µs of the core's time a unit of its cost here, 0.27 µs a unit of the node's) |
+The parameters of the planner's cost models, `tessera.scan_page_cost`,
+`tessera.join_build_cost`, `tessera.agg_kernel_share` and the rest, are
+described with the models and their calibration in [costs.md](costs.md).
 
 Constants that repeat the core's (half of `cpu_tuple_cost` a row an
 `Append` saves) or that shape execution rather than planning (chunk
@@ -438,8 +382,8 @@ wins from 13 % (28.9 against 8.9).
 
 So after the node's paths of a relation are added, the hook ranks the
 paths of its serial list, and then of its partial list, by a model of
-their times (the parameters above, which `bench/pg/scancost`
-fits by least squares): the full scan by the table's pages and rows; an
+their times (the parameters of [costs.md](costs.md), which
+`bench/pg/scancost` fits by least squares): the full scan by the table's pages and rows; an
 index-only scan and an index scan by the rows the index's conditions
 select (an index-only scan's rows on pages not all visible, `allvisfrac`,
 as an index scan's); a bitmap by its pages and rows, a row costing more
@@ -1683,7 +1627,7 @@ the core's hash join of the same inputs (`initial_cost_hashjoin` and
 disabled count comes along, and like the core the hook offers nothing
 when hash joins are disabled. The path's cost is its children's, as
 they are, and the node's own time (`join_cost`), in the units of the
-scan model (Parameters), from the rows the planner expects: a row built,
+scan model ([costs.md](costs.md)), from the rows the planner expects: a row built,
 a row probed, a pair and a batch published, since an outer batch with a
 pair goes out as a round whatever the share of its rows selected (one
 match in ten costs the parent a batch for 6 rows); an inner column kept

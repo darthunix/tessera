@@ -119,7 +119,8 @@ query down, and where it can, does it speed one up.
   a partial scan (the start, a worker's toll a page, the leader's head
   start) and print `tessera.scan_parallel_setup_cost` and
   `tessera.scan_worker_page_cost`. Run it on another machine to set the
-  parameters there.
+  parameters there; the model is described in
+  [docs/costs.md](../../docs/costs.md).
 - **joincost** (`joincost.sql`): not a comparison but the calibration of
   the planner's model of TessHashJoin (`tessera.join_build_cost` and the
   rest, docs/nodes.md). Every sample is a hash join of `bench_fact`, or
@@ -142,7 +143,8 @@ query down, and where it can, does it speed one up.
   The base's queries run again with Tessera off: the core's hash join's
   own time per unit of its own cost, sample by sample and over all, is
   `tessera.join_cost_unit`, the rate the planner converts the node's time
-  at. Run it on another machine to set the parameters there.
+  at. Run it on another machine to set the parameters there; the model is described in
+  [docs/costs.md](../../docs/costs.md).
 - **rowwise** (`rowwise.sql`): tables without clauses read under a parent
   of the core that takes rows one at a time: `bit_or` of a column and of
   an expression, one column of sixty, `max` of a text column, a window
