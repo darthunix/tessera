@@ -69,7 +69,7 @@ hash_key_column(TessHashJoinState *state, int key, const TessRowMask *rows,
  * equality with NULL is never true. The table's keys point at the columns.
  */
 void
-batch_keys(TessHashJoinState *state, TessBatch *batch, const int *columns,
+join_batch_keys(TessHashJoinState *state, TessBatch *batch, const int *columns,
 		   const TessTableKeyKind *kinds, TessRowMask *valid)
 {
 	/*
@@ -87,7 +87,7 @@ batch_keys(TessHashJoinState *state, TessBatch *batch, const int *columns,
 		bool		int8 = kinds[key] == TESS_TABLE_KEY_INT8;
 		const TessRowMask *rows = key == 0 ? &batch->rows : valid;
 
-		child_column(batch, columns[key], rows, TESS_COLUMN_FOR_FILTER, keys);
+		join_child_column(batch, columns[key], rows, TESS_COLUMN_FOR_FILTER, keys);
 		if (OidIsValid(state->keys.hashers[key].fn_oid))
 			hash_key_column(state, key, rows, keys);
 		if (key == 0)
@@ -110,7 +110,7 @@ batch_keys(TessHashJoinState *state, TessBatch *batch, const int *columns,
 
 /* A column of a child's batch, checked. */
 void
-child_column(TessBatch *batch, int column, const TessRowMask *rows,
+join_child_column(TessBatch *batch, int column, const TessRowMask *rows,
 			 TessColumnPurpose purpose, TessDatumColumn *result)
 {
 	*result = (TessDatumColumn) TESS_STRUCT_INITIALIZER(TessDatumColumn);
@@ -122,7 +122,7 @@ child_column(TessBatch *batch, int column, const TessRowMask *rows,
 
 /* Make the buffers hold batches of nrows rows. */
 void
-reserve_rows(TessHashJoinState *state, int nrows)
+join_reserve_rows(TessHashJoinState *state, int nrows)
 {
 	MemoryContext context = state->css.ss.ps.state->es_query_cxt;
 	int			nwords;
@@ -204,7 +204,7 @@ join_memory(TessHashJoinState *state)
 		MemoryContextMemAllocated(state->values_context, true);
 
 	if (state->spill != NULL)
-		memory += spill_memory(state->spill, NULL);
+		memory += join_spill_memory(state->spill, NULL);
 	return memory;
 }
 
@@ -219,7 +219,7 @@ join_note_memory(TessHashJoinState *state)
  * records have no mark, and its tail is still to come.
  */
 void
-forget_marks(TessHashJoinState *state)
+join_forget_marks(TessHashJoinState *state)
 {
 	if (state->marks_context != NULL)
 		MemoryContextReset(state->marks_context);
@@ -235,14 +235,14 @@ StaticAssertDecl(sizeof(pg_atomic_uint64) == sizeof(uint64),
 
 /* The words of a chunk's marks in shared memory: a bit per record of the largest chunk. */
 Size
-mark_words(TessHashJoinState *state)
+join_mark_words(TessHashJoinState *state)
 {
 	return ((TESS_TABLE_MAX_CHUNK_LEN - TESS_TABLE_CHUNK_HEADER) / state->record_size + 63) / 64;
 }
 
 /* Room for the bases and lengths of nchunks chunks in this process. */
 void
-reserve_chunks(TessHashJoinState *state, int nchunks)
+join_reserve_chunks(TessHashJoinState *state, int nchunks)
 {
 	MemoryContext context = state->css.ss.ps.state->es_query_cxt;
 	int			slots = Max(state->chunk_slots, 16);
@@ -271,7 +271,7 @@ reserve_chunks(TessHashJoinState *state, int nchunks)
  * decides on its own.
  */
 void
-take_back_bloom(TessHashJoinState *state)
+join_take_back_bloom(TessHashJoinState *state)
 {
 	if (!state->bloom.below)
 		return;
@@ -283,11 +283,11 @@ take_back_bloom(TessHashJoinState *state)
 static void
 create_table(TessHashJoinState *state)
 {
-	take_back_bloom(state);
+	join_take_back_bloom(state);
 	MemoryContextReset(state->table_context);
 	MemoryContextReset(state->values_context);
-	reset_values(state);
-	forget_marks(state);
+	join_reset_values(state);
+	join_forget_marks(state);
 	/* A new table: decide on its filter again. */
 	state->bloom.bits = NULL;
 	state->bloom.nwords = 0;
@@ -298,7 +298,7 @@ create_table(TessHashJoinState *state)
 	state->table.index_len = 0;
 	state->table.nchunks = 0;
 	state->table_bytes = 0;
-	reserve_chunks(state, 1);
+	join_reserve_chunks(state, 1);
 	join_note_memory(state);
 }
 
@@ -308,7 +308,7 @@ create_table(TessHashJoinState *state)
  * near its limit; a shared table's participant's too.
  */
 Size
-chunk_len_for(Size largest)
+join_chunk_len_for(Size largest)
 {
 	return Max(JOIN_FIRST_CHUNK,
 			   Min(largest, TYPEALIGN_DOWN(8, get_hash_memory_limit() / 8)));
@@ -319,7 +319,7 @@ static void
 add_table_chunk(TessHashJoinState *state)
 {
 	int			chunk = state->table.nchunks;
-	Size		len = chunk == 0 ? JOIN_FIRST_CHUNK : chunk_len_for(JOIN_CHUNK_LEN);
+	Size		len = chunk == 0 ? JOIN_FIRST_CHUNK : join_chunk_len_for(JOIN_CHUNK_LEN);
 	void	   *base;
 
 	if (chunk == TESS_TABLE_MAX_CHUNKS)
@@ -327,7 +327,7 @@ add_table_chunk(TessHashJoinState *state)
 				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
 				 errmsg("TessHashJoin hash table cannot hold more than %d chunks",
 						TESS_TABLE_MAX_CHUNKS)));
-	reserve_chunks(state, chunk + 1);
+	join_reserve_chunks(state, chunk + 1);
 	base = MemoryContextAlloc(state->table_context, len);
 	check(state, state->kernels->table_chunk_init(base, len, &state->status));
 	state->chunk_bases[chunk] = base;
@@ -344,7 +344,7 @@ add_table_chunk(TessHashJoinState *state)
  * no second round.
  */
 void
-index_table(TessHashJoinState *state)
+join_index_table(TessHashJoinState *state)
 {
 	Size		payload_size = sizeof(uint64) * (1 + state->npayload);
 	uint64		capacity = Max(state->build_rows, JOIN_INITIAL_ROWS);
@@ -385,37 +385,37 @@ index_table(TessHashJoinState *state)
 
 /* The head of a participant's list of its chunks, or of its value chunks. */
 dsa_pointer *
-participant_list(TessHashJoinState *state, int participant, bool values)
+join_participant_list(TessHashJoinState *state, int participant, bool values)
 {
-	dsa_pointer *heads = dsa_get_address(query_dsa(state), state->parallel.shared->lists);
+	dsa_pointer *heads = dsa_get_address(join_query_dsa(state), state->parallel.shared->lists);
 
 	Assert(participant >= 0 && participant < state->parallel.shared->participants);
 	return &heads[2 * participant + (values ? 1 : 0)];
 }
 
 dsa_pointer *
-own_list(TessHashJoinState *state, bool values)
+join_own_list(TessHashJoinState *state, bool values)
 {
-	return participant_list(state, state->parallel.spill_participant, values);
+	return join_participant_list(state, state->parallel.spill_participant, values);
 }
 
 /* The words of a shared table's spilling, mapped in this process. */
 uint64 *
-shared_words(TessHashJoinState *state)
+join_shared_words(TessHashJoinState *state)
 {
 	if (state->parallel.spill_words == NULL)
-		state->parallel.spill_words = dsa_get_address(query_dsa(state),
+		state->parallel.spill_words = dsa_get_address(join_query_dsa(state),
 											 state->parallel.shared->spill_words);
 	return state->parallel.spill_words;
 }
 
 /* The partitions of a shared table, 0 while it is whole. */
 uint32
-shared_partitions(TessHashJoinState *state)
+join_shared_partitions(TessHashJoinState *state)
 {
 	uint32		partitions;
 
-	check(state, state->kernels->table_spill_partitions(shared_words(state),
+	check(state, state->kernels->table_spill_partitions(join_shared_words(state),
 														state->parallel.shared->spill_nwords,
 														&partitions,
 														&state->status));
@@ -424,11 +424,11 @@ shared_partitions(TessHashJoinState *state)
 
 /* Count bytes of this participant's chunks while the table is whole. */
 void
-shared_count(TessHashJoinState *state, int64 delta)
+join_shared_count(TessHashJoinState *state, int64 delta)
 {
 	bool		over;
 
-	check(state, state->kernels->table_spill_add_bytes(shared_words(state),
+	check(state, state->kernels->table_spill_add_bytes(join_shared_words(state),
 													   state->parallel.shared->spill_nwords,
 													   delta, -1, &over,
 													   &state->status));
@@ -436,12 +436,12 @@ shared_count(TessHashJoinState *state, int64 delta)
 }
 
 bool
-shared_on_disk(TessHashJoinState *state, uint32 partition)
+join_shared_on_disk(TessHashJoinState *state, uint32 partition)
 {
 	bool		on_disk;
 	bool		alone;
 
-	check(state, state->kernels->table_spill_flags(shared_words(state),
+	check(state, state->kernels->table_spill_flags(join_shared_words(state),
 												   state->parallel.shared->spill_nwords,
 												   partition, &on_disk, &alone,
 												   &state->status));
@@ -450,7 +450,7 @@ shared_on_disk(TessHashJoinState *state, uint32 partition)
 
 /* Room for the bases of nchunks value chunks in this process. */
 void
-reserve_values(TessHashJoinState *state, int nchunks)
+join_reserve_values(TessHashJoinState *state, int nchunks)
 {
 	MemoryContext context = state->css.ss.ps.state->es_query_cxt;
 	int			slots = Max(state->values.slots, 16);
@@ -468,7 +468,7 @@ reserve_values(TessHashJoinState *state, int nchunks)
 
 /* Forget the value chunks, which went with the table. */
 void
-reset_values(TessHashJoinState *state)
+join_reset_values(TessHashJoinState *state)
 {
 	state->values.nchunks = 0;
 	state->values.current = -1;
@@ -491,7 +491,7 @@ new_value_chunk(TessHashJoinState *state, Size len)
 
 	if (state->parallel.shared != NULL)
 	{
-		dsa_area   *area = query_dsa(state);
+		dsa_area   *area = join_query_dsa(state);
 		dsa_pointer block = dsa_allocate_extended(area, add_size(JOIN_CHUNK_HEADER, len),
 												  DSA_ALLOC_HUGE);
 		JoinChunk  *header = dsa_get_address(area, block);
@@ -499,14 +499,14 @@ new_value_chunk(TessHashJoinState *state, Size len)
 		SpinLockAcquire(&state->parallel.shared->lock);
 		number = (int) state->parallel.shared->next_value_chunk++;
 		SpinLockRelease(&state->parallel.shared->lock);
-		header->next = *own_list(state, true);
-		*own_list(state, true) = block;
+		header->next = *join_own_list(state, true);
+		*join_own_list(state, true) = block;
 		header->number = number;
 		header->len = len;
 		header->owner = state->parallel.spill_participant;
 		base = (char *) header + JOIN_CHUNK_HEADER;
 		state->values.bytes = add_size(state->values.bytes, JOIN_CHUNK_HEADER);
-		shared_count(state, (int64) (JOIN_CHUNK_HEADER + len));
+		join_shared_count(state, (int64) (JOIN_CHUNK_HEADER + len));
 	}
 	else
 	{
@@ -517,7 +517,7 @@ new_value_chunk(TessHashJoinState *state, Size len)
 		ereport(ERROR,
 				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
 				 errmsg("TessHashJoin cannot hold more chunks of values")));
-	reserve_values(state, number + 1);
+	join_reserve_values(state, number + 1);
 	state->values.bases[number] = base;
 	state->values.nchunks = Max(state->values.nchunks, number + 1);
 	state->values.own++;
@@ -531,7 +531,7 @@ new_value_chunk(TessHashJoinState *state, Size len)
  * object flattened.
  */
 uint64
-store_value(TessHashJoinState *state, Datum value, int16 typlen)
+join_store_value(TessHashJoinState *state, Datum value, int16 typlen)
 {
 	ExpandedObjectHeader *expanded = NULL;
 	Size		size;
@@ -558,7 +558,7 @@ store_value(TessHashJoinState *state, Datum value, int16 typlen)
 			state->values.used + aligned > state->values.len)
 		{
 			Size		len = state->values.own == 0 ? JOIN_VALUE_FIRST :
-				chunk_len_for(JOIN_VALUE_CHUNK);
+				join_chunk_len_for(JOIN_VALUE_CHUNK);
 
 			state->values.len = Max(len, aligned);
 			state->values.current = new_value_chunk(state, state->values.len);
@@ -596,7 +596,7 @@ fill_payload(TessHashJoinState *state, TessBatch *batch, const TessRowMask *vali
 		bool		byval = state->typbyvals[scan_column];
 		TessDatumColumn values;
 
-		child_column(batch, state->child_columns[scan_column], valid,
+		join_child_column(batch, state->child_columns[scan_column], valid,
 					 TESS_COLUMN_FOR_PROJECTION, &values);
 		row = -1;
 		while ((row = tess_row_mask_next(valid, row)) >= 0)
@@ -612,7 +612,7 @@ fill_payload(TessHashJoinState *state, TessBatch *batch, const TessRowMask *vali
 			else if (byval)
 				record[1 + word] = values.values[row];
 			else
-				record[1 + word] = store_value(state, values.values[row], typlen);
+				record[1 + word] = join_store_value(state, values.values[row], typlen);
 		}
 	}
 }
@@ -622,7 +622,7 @@ fill_payload(TessHashJoinState *state, TessBatch *batch, const TessRowMask *vali
  * false when it had room for none of them.
  */
 bool
-append_rows(TessHashJoinState *state, const TessTableRef *table, int chunk,
+join_append_rows(TessHashJoinState *state, const TessTableRef *table, int chunk,
 			TessRowMask *pending)
 {
 	int			before = tess_row_mask_count(pending);
@@ -642,19 +642,19 @@ append_rows(TessHashJoinState *state, const TessTableRef *table, int chunk,
  * pending: their count.
  */
 int
-prepare_inner(TessHashJoinState *state, TessBatch *batch, TessRowMask *pending)
+join_prepare_inner(TessHashJoinState *state, TessBatch *batch, TessRowMask *pending)
 {
 	int			nrows = batch->rows.nrows;
 	int			nwords = tess_row_mask_word_count(nrows);
 	TessRowMask valid;
 	int			count;
 
-	reserve_rows(state, nrows);
+	join_reserve_rows(state, nrows);
 	/* A shorter batch than the last: no bits past its rows may remain. */
 	memset(state->probe.valid_bits, 0, sizeof(uint64) * nwords);
 	valid = (TessRowMask) {nrows, state->probe.valid_bits};
 	*pending = (TessRowMask) {nrows, state->probe.pending_bits};
-	batch_keys(state, batch, state->keys.inner_keys, state->keys.inner_kinds, &valid);
+	join_batch_keys(state, batch, state->keys.inner_keys, state->keys.inner_kinds, &valid);
 	count = tess_row_mask_count(&valid);
 	if (count == 0)
 		return 0;
@@ -678,14 +678,14 @@ insert_batch(TessHashJoinState *state, TessBatch *batch)
 	/* A batch adds a chunk of records and one of values at most. */
 	if (state->spill == NULL &&
 		state->table_bytes + state->values.bytes +
-		2 * chunk_len_for(JOIN_CHUNK_LEN) > get_hash_memory_limit())
-		start_spill(state);
+		2 * join_chunk_len_for(JOIN_CHUNK_LEN) > get_hash_memory_limit())
+		join_start_spill(state);
 	if (state->spill != NULL)
 	{
-		insert_spill(state, batch);
+		join_insert_spill(state, batch);
 		return;
 	}
-	count = prepare_inner(state, batch, &pending);
+	count = join_prepare_inner(state, batch, &pending);
 	if (count == 0)
 		return;
 	if (state->table.nchunks == 0)
@@ -695,7 +695,7 @@ insert_batch(TessHashJoinState *state, TessBatch *batch)
 	}
 	for (;;)
 	{
-		bool		appended = append_rows(state, &state->table,
+		bool		appended = join_append_rows(state, &state->table,
 										   state->table.nchunks - 1, &pending);
 
 		if (tess_row_mask_count(&pending) == 0)
@@ -713,7 +713,7 @@ insert_batch(TessHashJoinState *state, TessBatch *batch)
 /* Read every batch of the inner child into a new table. */
 /* This build's keys for the outer side's pruning: none seen yet. */
 void
-reset_prune_keys(TessHashJoinState *state)
+join_reset_prune_keys(TessHashJoinState *state)
 {
 	state->prune.keys.rows = 0;
 	state->prune.keys.min = PG_INT64_MAX;
@@ -728,7 +728,7 @@ reset_prune_keys(TessHashJoinState *state)
  * most JOIN_PRUNE_VALUES rows with one. A NULL key pairs with nothing.
  */
 void
-note_prune_keys(TessHashJoinState *state, TessBatch *batch)
+join_note_prune_keys(TessHashJoinState *state, TessBatch *batch)
 {
 	TessJoinKeys *keys = &state->prune.keys;
 	TessDatumColumn column;
@@ -736,7 +736,7 @@ note_prune_keys(TessHashJoinState *state, TessBatch *batch)
 
 	if (!state->prune.on)
 		return;
-	child_column(batch, state->keys.inner_keys[state->prune.key], &batch->rows,
+	join_child_column(batch, state->keys.inner_keys[state->prune.key], &batch->rows,
 				 TESS_COLUMN_FOR_FILTER, &column);
 	while ((row = tess_row_mask_next(&batch->rows, row)) >= 0)
 	{
@@ -761,7 +761,7 @@ note_prune_keys(TessHashJoinState *state, TessBatch *batch)
  * whole once the build's barrier is passed.
  */
 void
-share_prune_keys(TessHashJoinState *state)
+join_share_prune_keys(TessHashJoinState *state)
 {
 	TessJoinKeys *keys = &state->prune.keys;
 	JoinShared *shared = state->parallel.shared;
@@ -790,7 +790,7 @@ share_prune_keys(TessHashJoinState *state)
  * keys are every participant's); a table kept over a rescan keeps them.
  */
 void
-prune_outer(TessHashJoinState *state)
+join_prune_outer(TessHashJoinState *state)
 {
 	if (!state->prune.on || state->prune.sent)
 		return;
@@ -815,7 +815,7 @@ prune_outer(TessHashJoinState *state)
 static void
 build_table(TessHashJoinState *state)
 {
-	spill_free(state);
+	join_spill_free(state);
 	create_table(state);
 	/* Another table, maybe with other duplicates: decide compact mode again. */
 	state->compact_decided = false;
@@ -826,7 +826,7 @@ build_table(TessHashJoinState *state)
 	if (state->probe.inner_isnull != NULL && state->probe.capacity > 0)
 		for (int word = 0; word < state->npayload; word++)
 			memset(state->probe.inner_isnull[word], 0, sizeof(bool) * state->probe.capacity);
-	reset_prune_keys(state);
+	join_reset_prune_keys(state);
 	for (;;)
 	{
 		TessBatch  *batch = tess_input_next(state->inner_input);
@@ -835,15 +835,15 @@ build_table(TessHashJoinState *state)
 			break;
 		if (tess_row_mask_count(&batch->rows) > 0)
 		{
-			note_prune_keys(state, batch);
+			join_note_prune_keys(state, batch);
 			insert_batch(state, batch);
 		}
 		tess_input_finish(state->inner_input);
 	}
 	if (state->spill != NULL)
-		finish_spill_build(state);
+		join_finish_spill_build(state);
 	else
-		index_table(state);
+		join_index_table(state);
 	state->counters[JOIN_BUILDS]++;
 	state->built = true;
 }
@@ -1023,7 +1023,7 @@ decide_bloom(TessHashJoinState *state, uint64 rows, uint64 found)
 	{
 		bool		built;
 
-		state->bloom.bits = dsa_get_address(query_dsa(state), state->parallel.shared->filter);
+		state->bloom.bits = dsa_get_address(join_query_dsa(state), state->parallel.shared->filter);
 		state->bloom.nwords = state->parallel.shared->filter_words;
 		state->bloom.shared = true;
 		check(state, state->kernels->table_try_build_bloom(&state->table,
@@ -1066,21 +1066,21 @@ join_probe_batch(TessHashJoinState *state, TessBatch *batch)
 	int			count;
 	int			matches;
 
-	reserve_rows(state, nrows);
+	join_reserve_rows(state, nrows);
 	/* A shorter batch than the last: no bits past its rows may remain. */
 	memset(state->probe.valid_bits, 0, sizeof(uint64) * nwords);
 	memset(state->probe.round_bits, 0, sizeof(uint64) * nwords);
 	valid = (TessRowMask) {nrows, state->probe.valid_bits};
 	found = (TessRowMask) {nrows, state->probe.round_bits};
 
-	batch_keys(state, batch, state->keys.outer_keys, state->keys.outer_kinds, &valid);
+	join_batch_keys(state, batch, state->keys.outer_keys, state->keys.outer_kinds, &valid);
 	count = tess_row_mask_count(&valid);
 	if (count == 0)
 		return false;
 	/* The rows of the partitions on disk wait for their partition. */
 	if (state->spill != NULL && !state->spill->joining)
 	{
-		spill_outer(state, batch, &valid);
+		join_spill_outer(state, batch, &valid);
 		count = tess_row_mask_count(&valid);
 		if (count == 0)
 			return false;
@@ -1096,7 +1096,7 @@ join_probe_batch(TessHashJoinState *state, TessBatch *batch)
 			return false;
 		if (state->jointype == JOIN_SEMI || state->jointype == JOIN_ANTI)
 		{
-			valid.bits[0] &= ~matched_word(state->spill, nrows);
+			valid.bits[0] &= ~join_matched_word(state->spill, nrows);
 			count = tess_row_mask_count(&valid);
 			if (count == 0)
 				return false;
@@ -1326,7 +1326,7 @@ send_requests(TessHashJoinState *state)
  * batch.
  */
 void
-decide_compact(TessHashJoinState *state)
+join_decide_compact(TessHashJoinState *state)
 {
 	MemoryContext context = state->css.ss.ps.state->es_query_cxt;
 
@@ -1372,13 +1372,13 @@ join_exec(CustomScanState *css)
 	if (!state->built)
 	{
 		if (state->parallel.shared != NULL)
-			build_shared(state);
+			join_build_shared(state);
 		else
 			build_table(state);
 		if (state->done)
 			return NULL;
 	}
-	prune_outer(state);
+	join_prune_outer(state);
 	/*
 	 * Nothing to match: the outer child is never read, as in the core,
 	 * unless its rows go out without a match (LEFT, ANTI).
@@ -1390,7 +1390,7 @@ join_exec(CustomScanState *css)
 		return NULL;
 	}
 	if (!state->compact_decided)
-		decide_compact(state);
+		join_decide_compact(state);
 	return state->request->output_mode == TESS_OUTPUT_BATCH ?
 		exec_batches(state) : exec_rows(state);
 }

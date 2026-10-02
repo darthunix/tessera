@@ -133,10 +133,10 @@ next_round(TessHashJoinState *state)
 		if (state->outer_batch != NULL)
 		{
 			state->null_round = false;
-			outer_finish(state, state->outer_batch);
+			join_outer_finish(state, state->outer_batch);
 			state->outer_batch = NULL;
 		}
-		batch = outer_next(state);
+		batch = join_outer_next(state);
 		if (batch == NULL)
 			return false;
 		found = join_probe_batch(state, batch);
@@ -161,7 +161,7 @@ next_round(TessHashJoinState *state)
 		}
 		if (!found)
 		{
-			outer_finish(state, batch);
+			join_outer_finish(state, batch);
 			continue;
 		}
 		state->outer_batch = batch;
@@ -241,7 +241,7 @@ fill_compact(TessHashJoinState *state)
 				 * The round's rows only: the next rounds are among them,
 				 * and a lazy child need not read the rows without a pair.
 				 */
-				child_column(state->outer_batch, state->child_columns[column],
+				join_child_column(state->outer_batch, state->child_columns[column],
 							 &(TessRowMask) {nrows, state->probe.round_bits},
 							 TESS_COLUMN_FOR_PROJECTION,
 							 &state->compact.round_columns[index]);
@@ -333,15 +333,15 @@ next_matches(TessHashJoinState *state)
 		state->null_round = false;
 		if (state->outer_batch != NULL)
 		{
-			outer_finish(state, state->outer_batch);
+			join_outer_finish(state, state->outer_batch);
 			state->outer_batch = NULL;
 		}
-		batch = outer_next(state);
+		batch = join_outer_next(state);
 		if (batch == NULL)
 			return false;
 		nrows = batch->rows.nrows;
 		nwords = tess_row_mask_word_count(nrows);
-		reserve_rows(state, nrows);
+		join_reserve_rows(state, nrows);
 		memset(state->matched_bits, 0, sizeof(uint64) * nwords);
 		state->outer_batch = batch;
 		/* A table that spills has inner rows on disk even with none resident. */
@@ -475,7 +475,7 @@ mark_pairs(TessHashJoinState *state)
 static void
 start_tail(TessHashJoinState *state)
 {
-	reserve_rows(state, JOIN_COMPACT_ROWS);
+	join_reserve_rows(state, JOIN_COMPACT_ROWS);
 	state->tail.on = true;
 	state->tail.chunk = 0;
 	state->tail.byte = TESS_TABLE_CHUNK_HEADER;
@@ -566,7 +566,7 @@ join_next_output(TessHashJoinState *state)
 		else if (state->compact.on ? !fill_compact(state) : !next_round(state))
 		{
 			/* RIGHT and FULL: then the inner rows without a pair, unless asked for already. */
-			if (!state->tail.request && !tail_turn(state))
+			if (!state->tail.request && !join_tail_turn(state))
 				return false;
 			start_tail(state);
 			continue;

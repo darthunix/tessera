@@ -11,6 +11,13 @@
 #include "internal.h"
 #include "hashjoin.h"
 
+static void make_rounds(TessHashJoinState *state);
+static void shared_check(TessHashJoinState *state);
+static void shared_flush(TessHashJoinState *state);
+static bool shared_has_outer(JoinSpill *spill, int partition);
+static void shared_outer(TessHashJoinState *state);
+static void shared_probe_start(TessHashJoinState *state, uint64 records);
+
 static void shared_join(TessHashJoinState *state);
 
 /*
@@ -20,7 +27,7 @@ static void shared_join(TessHashJoinState *state);
  * core's parallel hash join keeps it.
  */
 dsa_area *
-query_dsa(TessHashJoinState *state)
+join_query_dsa(TessHashJoinState *state)
 {
 	dsa_area   *area = state->css.ss.ps.state->es_query_dsa;
 
@@ -40,7 +47,7 @@ share_marks(TessHashJoinState *state, dsa_pointer marks, int nchunks)
 {
 	uint64	   *words;
 
-	forget_marks(state);
+	join_forget_marks(state);
 	if (!state->preserve_inner)
 		return;
 	if (!DsaPointerIsValid(marks))
@@ -51,9 +58,9 @@ share_marks(TessHashJoinState *state, dsa_pointer marks, int nchunks)
 													 ALLOCSET_DEFAULT_SIZES);
 	state->marks = MemoryContextAlloc(state->marks_context,
 									  sizeof(uint64 *) * Max(nchunks, 1));
-	words = dsa_get_address(query_dsa(state), marks);
+	words = dsa_get_address(join_query_dsa(state), marks);
 	for (int chunk = 0; chunk < nchunks; chunk++)
-		state->marks[chunk] = words + chunk * mark_words(state);
+		state->marks[chunk] = words + chunk * join_mark_words(state);
 	state->mark_slots = nchunks;
 	state->marks_shared = true;
 }
@@ -64,8 +71,8 @@ allocate_marks(TessHashJoinState *state, int nchunks)
 {
 	if (!state->preserve_inner)
 		return InvalidDsaPointer;
-	return dsa_allocate_extended(query_dsa(state),
-								 mul_size(mul_size(Max(nchunks, 1), mark_words(state)),
+	return dsa_allocate_extended(join_query_dsa(state),
+								 mul_size(mul_size(Max(nchunks, 1), join_mark_words(state)),
 										  sizeof(uint64)),
 								 DSA_ALLOC_ZERO | DSA_ALLOC_HUGE);
 }
@@ -77,7 +84,7 @@ allocate_marks(TessHashJoinState *state, int nchunks)
 static void
 attach_shared_table(TessHashJoinState *state)
 {
-	dsa_area   *area = query_dsa(state);
+	dsa_area   *area = join_query_dsa(state);
 	int			nchunks = state->parallel.shared->nchunks;
 	dsa_pointer *bases;
 	Size	   *lens;
@@ -87,7 +94,7 @@ attach_shared_table(TessHashJoinState *state)
 	Assert(DsaPointerIsValid(state->parallel.shared->directory));
 	state->table.index = dsa_get_address(area, state->parallel.shared->index);
 	state->table.index_len = state->parallel.shared->index_len;
-	reserve_chunks(state, Max(nchunks, 1));
+	join_reserve_chunks(state, Max(nchunks, 1));
 	bases = dsa_get_address(area, state->parallel.shared->directory);
 	lens = (Size *) (bases + nchunks);
 	for (int chunk = 0; chunk < nchunks; chunk++)
@@ -97,7 +104,7 @@ attach_shared_table(TessHashJoinState *state)
 	}
 	state->table.nchunks = nchunks;
 	/* Every participant's value chunks, which a gather reads. */
-	reserve_values(state, Max(state->parallel.shared->nvalue_chunks, 1));
+	join_reserve_values(state, Max(state->parallel.shared->nvalue_chunks, 1));
 	bases = dsa_get_address(area, state->parallel.shared->value_directory);
 	for (int chunk = 0; chunk < state->parallel.shared->nvalue_chunks; chunk++)
 		state->values.bases[chunk] = dsa_get_address(area, bases[chunk]);
@@ -112,7 +119,7 @@ attach_shared_table(TessHashJoinState *state)
 static void
 allocate_shared_filter(TessHashJoinState *state, uint64 records)
 {
-	dsa_area   *area = query_dsa(state);
+	dsa_area   *area = join_query_dsa(state);
 	Size		nwords;
 
 	if (DsaPointerIsValid(state->parallel.shared->filter))
@@ -141,9 +148,9 @@ note_shared_memory(TessHashJoinState *state, Size bytes)
 static void
 add_own_chunk(TessHashJoinState *state)
 {
-	dsa_area   *area = query_dsa(state);
+	dsa_area   *area = join_query_dsa(state);
 	/* A small hash_mem takes small chunks: they count against it before the table spills. */
-	Size		len = state->parallel.nown == 0 ? JOIN_FIRST_CHUNK : chunk_len_for(JOIN_CHUNK_LEN);
+	Size		len = state->parallel.nown == 0 ? JOIN_FIRST_CHUNK : join_chunk_len_for(JOIN_CHUNK_LEN);
 	uint64		number;
 	dsa_pointer block;
 	JoinChunk  *header;
@@ -174,11 +181,11 @@ add_own_chunk(TessHashJoinState *state)
 	state->parallel.own_len = len;
 	check(state, state->kernels->table_chunk_init(state->parallel.own_base, len,
 												  &state->status));
-	header->next = *own_list(state, false);
-	*own_list(state, false) = block;
+	header->next = *join_own_list(state, false);
+	*join_own_list(state, false) = block;
 	state->parallel.own_chunks[state->parallel.nown++] = (int) number;
 	state->parallel.own_bytes += JOIN_CHUNK_HEADER + len;
-	shared_count(state, record_chunk_cost(len, state->record_size));
+	join_shared_count(state, record_chunk_cost(len, state->record_size));
 	state->counters[JOIN_CHUNKS]++;
 }
 
@@ -191,7 +198,7 @@ static void
 insert_shared_batch(TessHashJoinState *state, TessBatch *batch)
 {
 	TessRowMask pending;
-	int			count = prepare_inner(state, batch, &pending);
+	int			count = join_prepare_inner(state, batch, &pending);
 	bool		fresh = false;
 
 	if (count == 0)
@@ -204,7 +211,7 @@ insert_shared_batch(TessHashJoinState *state, TessBatch *batch)
 	for (;;)
 	{
 		TessTableRef own = {NULL, 0, &state->parallel.own_base, &state->parallel.own_len, 1};
-		bool		appended = append_rows(state, &own, 0, &pending);
+		bool		appended = join_append_rows(state, &own, 0, &pending);
 
 		if (tess_row_mask_count(&pending) == 0)
 			break;
@@ -232,16 +239,16 @@ build_shared_inner(TessHashJoinState *state)
 			break;
 		if (tess_row_mask_count(&batch->rows) > 0)
 		{
-			note_prune_keys(state, batch);
+			join_note_prune_keys(state, batch);
 			if (state->spill != NULL)
-				insert_spill(state, batch);
+				join_insert_spill(state, batch);
 			else
 				insert_shared_batch(state, batch);
 			shared_check(state);
 		}
 		tess_input_finish(state->inner_input);
 	}
-	share_prune_keys(state);
+	join_share_prune_keys(state);
 	check(state, state->kernels->build_report(state->parallel.shared->counters,
 											  state->parallel.appended,
 											  state->null_columns,
@@ -260,9 +267,9 @@ static void
 size_shared_table(TessHashJoinState *state)
 {
 	Size		payload_size = sizeof(uint64) * (1 + state->npayload);
-	dsa_area   *area = query_dsa(state);
+	dsa_area   *area = join_query_dsa(state);
 	TessTableStats stats = TESS_STRUCT_INITIALIZER(TessTableStats);
-	bool		split = shared_partitions(state) > 0;
+	bool		split = join_shared_partitions(state) > 0;
 	uint64		records;
 	uint64		nulls;
 	uint64		nchunks;
@@ -281,13 +288,13 @@ size_shared_table(TessHashJoinState *state)
 	if (split)
 	{
 		records = 0;
-		for (uint32 partition = 0; partition < shared_partitions(state); partition++)
+		for (uint32 partition = 0; partition < join_shared_partitions(state); partition++)
 		{
 			uint64		held;
 
-			if (shared_on_disk(state, partition))
+			if (join_shared_on_disk(state, partition))
 				continue;
-			check(state, state->kernels->table_spill_records(shared_words(state),
+			check(state, state->kernels->table_spill_records(join_shared_words(state),
 															 state->parallel.shared->spill_nwords,
 															 partition, 0, &held,
 															 &state->status));
@@ -295,7 +302,7 @@ size_shared_table(TessHashJoinState *state)
 		}
 		nchunks = 0;
 		for (int participant = 0; participant < state->parallel.shared->participants; participant++)
-			for (block = *participant_list(state, participant, false);
+			for (block = *join_participant_list(state, participant, false);
 				 DsaPointerIsValid(block);)
 			{
 				JoinChunk  *header = dsa_get_address(area, block);
@@ -328,7 +335,7 @@ size_shared_table(TessHashJoinState *state)
 	bases = dsa_get_address(area, state->parallel.shared->directory);
 	lens = (Size *) (bases + nchunks);
 	for (int participant = 0; participant < state->parallel.shared->participants; participant++)
-		for (block = *participant_list(state, participant, false);
+		for (block = *join_participant_list(state, participant, false);
 			 DsaPointerIsValid(block);)
 		{
 			JoinChunk  *header = dsa_get_address(area, block);
@@ -355,7 +362,7 @@ size_shared_table(TessHashJoinState *state)
 							  DSA_ALLOC_ZERO | DSA_ALLOC_HUGE);
 	bases = dsa_get_address(area, state->parallel.shared->value_directory);
 	for (int participant = 0; participant < state->parallel.shared->participants; participant++)
-		for (block = *participant_list(state, participant, true);
+		for (block = *join_participant_list(state, participant, true);
 			 DsaPointerIsValid(block);)
 		{
 			JoinChunk  *header = dsa_get_address(area, block);
@@ -395,12 +402,12 @@ link_own_chunks(TessHashJoinState *state)
 
 	attach_shared_table(state);
 	/* A table that spilled: this participant's chunks of the partitions in memory, as SIZE numbered them. */
-	if (shared_partitions(state) > 0)
+	if (join_shared_partitions(state) > 0)
 	{
 		state->parallel.nown = 0;
-		for (dsa_pointer block = *own_list(state, false); DsaPointerIsValid(block);)
+		for (dsa_pointer block = *join_own_list(state, false); DsaPointerIsValid(block);)
 		{
-			JoinChunk  *header = dsa_get_address(query_dsa(state), block);
+			JoinChunk  *header = dsa_get_address(join_query_dsa(state), block);
 
 			if (state->parallel.nown == state->parallel.own_slots)
 			{
@@ -438,58 +445,58 @@ link_own_chunks(TessHashJoinState *state)
 
 /* Free the shared table, as the last participant to leave or at a rescan. */
 void
-free_shared_table(TessHashJoinState *state)
+join_free_shared_table(TessHashJoinState *state)
 {
 	if (DsaPointerIsValid(state->parallel.shared->index))
 	{
-		dsa_free(query_dsa(state), state->parallel.shared->index);
+		dsa_free(join_query_dsa(state), state->parallel.shared->index);
 		state->parallel.shared->index = InvalidDsaPointer;
 		state->parallel.shared->index_len = 0;
 	}
 	if (DsaPointerIsValid(state->parallel.shared->directory))
 	{
-		dsa_free(query_dsa(state), state->parallel.shared->directory);
+		dsa_free(join_query_dsa(state), state->parallel.shared->directory);
 		state->parallel.shared->directory = InvalidDsaPointer;
 		state->parallel.shared->nchunks = 0;
 	}
 	for (int list = 0; list < 2 * state->parallel.shared->participants; list++)
 	{
-		dsa_pointer *head = participant_list(state, list / 2, list % 2 == 1);
+		dsa_pointer *head = join_participant_list(state, list / 2, list % 2 == 1);
 
 		while (DsaPointerIsValid(*head))
 		{
 			dsa_pointer block = *head;
 
-			*head = ((JoinChunk *) dsa_get_address(query_dsa(state), block))->next;
-			dsa_free(query_dsa(state), block);
+			*head = ((JoinChunk *) dsa_get_address(join_query_dsa(state), block))->next;
+			dsa_free(join_query_dsa(state), block);
 		}
 	}
 	if (DsaPointerIsValid(state->parallel.shared->marks))
 	{
-		dsa_free(query_dsa(state), state->parallel.shared->marks);
+		dsa_free(join_query_dsa(state), state->parallel.shared->marks);
 		state->parallel.shared->marks = InvalidDsaPointer;
 	}
 	if (DsaPointerIsValid(state->parallel.shared->spill_filter))
 	{
-		dsa_free(query_dsa(state), state->parallel.shared->spill_filter);
+		dsa_free(join_query_dsa(state), state->parallel.shared->spill_filter);
 		state->parallel.shared->spill_filter = InvalidDsaPointer;
 		state->parallel.shared->spill_filter_words = 0;
 	}
 	if (DsaPointerIsValid(state->parallel.shared->value_directory))
 	{
-		dsa_free(query_dsa(state), state->parallel.shared->value_directory);
+		dsa_free(join_query_dsa(state), state->parallel.shared->value_directory);
 		state->parallel.shared->value_directory = InvalidDsaPointer;
 	}
 	state->parallel.shared->next_value_chunk = 0;
 	state->parallel.shared->nvalue_chunks = 0;
-	reset_values(state);
+	join_reset_values(state);
 	if (DsaPointerIsValid(state->parallel.shared->filter))
 	{
-		dsa_free(query_dsa(state), state->parallel.shared->filter);
+		dsa_free(join_query_dsa(state), state->parallel.shared->filter);
 		state->parallel.shared->filter = InvalidDsaPointer;
 		state->parallel.shared->filter_words = 0;
 	}
-	take_back_bloom(state);
+	join_take_back_bloom(state);
 	state->bloom.bits = NULL;
 	state->bloom.nwords = 0;
 	state->table.index = NULL;
@@ -503,18 +510,18 @@ free_shared_table(TessHashJoinState *state)
  * waits stay here, since they may raise an error.
  */
 void
-build_shared(TessHashJoinState *state)
+join_build_shared(TessHashJoinState *state)
 {
 	uint32		reply = 0;
 
 	state->compact_decided = false;
-	reset_values(state);
+	join_reset_values(state);
 	state->build_rows = 0;
 	state->duplicates = 0;
 	state->null_columns = 0;
 	state->parallel.spill_participant = IsParallelWorker() ? ParallelWorkerNumber + 1 : 0;
 	state->parallel.round_partition = -1;
-	reset_prune_keys(state);
+	join_reset_prune_keys(state);
 	state->parallel.spill_words = NULL;
 	state->parallel.spill_seen = 0;
 	state->parallel.spill_over = false;
@@ -525,7 +532,7 @@ build_shared(TessHashJoinState *state)
 	state->parallel.appended = 0;
 	state->parallel.participating = true;
 	/* This build's filter: decided again by this participant's batches. */
-	take_back_bloom(state);
+	join_take_back_bloom(state);
 	state->bloom.bits = NULL;
 	state->bloom.nwords = 0;
 	state->bloom.decided = false;
@@ -583,7 +590,7 @@ build_shared(TessHashJoinState *state)
 					 * it comes before the attach, which reads every
 					 * participant's from the table.
 					 */
-					if (shared_partitions(state) > 0)
+					if (join_shared_partitions(state) > 0)
 						shared_join(state);
 					attach_shared_table(state);
 					share_marks(state, state->parallel.shared->marks, state->parallel.shared->nchunks);
@@ -596,7 +603,7 @@ build_shared(TessHashJoinState *state)
 															  &state->status));
 					state->build_rows = records;
 					state->parallel.chain_table = true;
-					if (shared_partitions(state) > 0)
+					if (join_shared_partitions(state) > 0)
 						shared_probe_start(state, records);
 					state->built = true;
 					return;
@@ -623,7 +630,7 @@ build_shared(TessHashJoinState *state)
  * done and the next call. True for the last one.
  */
 bool
-leave_shared(TessHashJoinState *state, bool keep)
+join_leave_shared(TessHashJoinState *state, bool keep)
 {
 	uint32		reply = 0;
 
@@ -631,7 +638,7 @@ leave_shared(TessHashJoinState *state, bool keep)
 	{
 		state->table_free_owed = false;
 		state->parallel.chain_table = false;
-		free_shared_table(state);
+		join_free_shared_table(state);
 		return false;
 	}
 	if (!state->parallel.participating)
@@ -656,7 +663,7 @@ leave_shared(TessHashJoinState *state, bool keep)
 					state->table_free_owed = true;
 					return true;
 				}
-				free_shared_table(state);
+				join_free_shared_table(state);
 				state->parallel.chain_table = false;
 				return true;
 			case TESS_BUILD_DONE:
@@ -716,9 +723,9 @@ side_share(TessHashJoinState *state, SpillSide *side, const char *prefix, bool m
 	side->shared_files = true;
 	if (!memory)
 		return;
-	side->area = query_dsa(state);
+	side->area = join_query_dsa(state);
 	side->shared = state->parallel.shared;
-	side->spill_words = shared_words(state);
+	side->spill_words = join_shared_words(state);
 	side->spill_nwords = state->parallel.shared->spill_nwords;
 	side->kernels = state->kernels;
 	side->owner = state->parallel.spill_participant;
@@ -736,7 +743,7 @@ static void
 shared_split(TessHashJoinState *state)
 {
 	JoinShared *shared = state->parallel.shared;
-	dsa_area   *area = query_dsa(state);
+	dsa_area   *area = join_query_dsa(state);
 	Size		limit = get_hash_memory_limit();
 	int			participants = Max(shared->participants, 1);
 	double		held = (double) state->parallel.own_bytes + state->values.bytes;
@@ -770,7 +777,7 @@ shared_split(TessHashJoinState *state)
 		dsa_free(area, filter);
 	else
 		state->counters[JOIN_BLOOM_FILTERS]++;
-	check(state, state->kernels->table_spill_split(shared_words(state), shared->spill_nwords,
+	check(state, state->kernels->table_spill_split(join_shared_words(state), shared->spill_nwords,
 												   npartitions, &in_force,
 												   &state->status));
 }
@@ -785,11 +792,11 @@ static void
 shared_switch(TessHashJoinState *state)
 {
 	JoinShared *shared = state->parallel.shared;
-	dsa_area   *area = query_dsa(state);
+	dsa_area   *area = join_query_dsa(state);
 	JoinSpill  *spill;
 	dsa_pointer block;
 
-	spill = spill_create(state, NULL, 0, 0, (int) shared_partitions(state));
+	spill = join_spill_create(state, NULL, 0, 0, (int) join_shared_partitions(state));
 	spill->shared = true;
 	spill->writers = shared->participants;
 	side_share(state, &spill->build, "tjb", true);
@@ -804,32 +811,32 @@ shared_switch(TessHashJoinState *state)
 		elog(ERROR, "TessHashJoin found its shared table split without a filter");
 	spill->bloom = dsa_get_address(area, block);
 	/* Only this participant takes from its lists before SIZE. */
-	for (block = *own_list(state, false); DsaPointerIsValid(block);)
+	for (block = *join_own_list(state, false); DsaPointerIsValid(block);)
 	{
 		JoinChunk  *header = dsa_get_address(area, block);
 		dsa_pointer next = header->next;
 
-		split_chunk(state, (char *) header + JOIN_CHUNK_HEADER, header->len,
+		join_split_chunk(state, (char *) header + JOIN_CHUNK_HEADER, header->len,
 					state->values.bases);
-		shared_count(state, -record_chunk_cost(header->len, state->record_size));
+		join_shared_count(state, -record_chunk_cost(header->len, state->record_size));
 		dsa_free(area, block);
 		block = next;
 	}
-	*own_list(state, false) = InvalidDsaPointer;
-	for (block = *own_list(state, true); DsaPointerIsValid(block);)
+	*join_own_list(state, false) = InvalidDsaPointer;
+	for (block = *join_own_list(state, true); DsaPointerIsValid(block);)
 	{
 		JoinChunk  *header = dsa_get_address(area, block);
 		dsa_pointer next = header->next;
 
-		shared_count(state, -(int64) (JOIN_CHUNK_HEADER + header->len));
+		join_shared_count(state, -(int64) (JOIN_CHUNK_HEADER + header->len));
 		dsa_free(area, block);
 		block = next;
 	}
-	*own_list(state, true) = InvalidDsaPointer;
+	*join_own_list(state, true) = InvalidDsaPointer;
 	/* The values of the chunks split are the partitions' now. */
 	if (state->values.bases != NULL)
 		memset(state->values.bases, 0, sizeof(char *) * state->values.slots);
-	reset_values(state);
+	join_reset_values(state);
 	state->parallel.nown = 0;
 	state->parallel.own_base = NULL;
 	state->parallel.own_len = 0;
@@ -852,38 +859,38 @@ shared_sync(TessHashJoinState *state, bool evict)
 	uint64		evictions;
 	int32		partition;
 
-	check(state, state->kernels->table_spill_evictions(shared_words(state),
+	check(state, state->kernels->table_spill_evictions(join_shared_words(state),
 													   state->parallel.shared->spill_nwords,
 													   &evictions, &state->status));
 	if (evictions != state->parallel.spill_seen)
 	{
 		state->parallel.spill_seen = evictions;
 		for (partition = 0; partition < spill->npartitions; partition++)
-			if (side->parts[partition].resident && shared_on_disk(state, partition))
-				side_demote(state, side, partition);
+			if (side->parts[partition].resident && join_shared_on_disk(state, partition))
+				join_side_demote(state, side, partition);
 	}
 	if (!evict)
 		return;
 	/* The count as of now, which the others' writes lowered. */
-	side_count(side, -1, 0);
+	join_side_count(side, -1, 0);
 	if (!side->over)
 		return;
-	check(state, state->kernels->table_spill_evict(shared_words(state),
+	check(state, state->kernels->table_spill_evict(join_shared_words(state),
 												   state->parallel.shared->spill_nwords,
 												   &partition, &state->status));
 	if (partition >= 0 && side->parts[partition].resident)
-		side_demote(state, side, partition);
+		join_side_demote(state, side, partition);
 }
 
 /* After a batch of the inner side: split, switch or send partitions to disk as needed. */
-void
+static void
 shared_check(TessHashJoinState *state)
 {
 	if (state->spill == NULL)
 	{
-		if (state->parallel.spill_over && shared_partitions(state) == 0)
+		if (state->parallel.spill_over && join_shared_partitions(state) == 0)
 			shared_split(state);
-		if (shared_partitions(state) > 0)
+		if (join_shared_partitions(state) > 0)
 			shared_switch(state);
 	}
 	if (state->spill != NULL)
@@ -904,14 +911,14 @@ shared_join(TessHashJoinState *state)
  * chunks of the partitions on disk, the tails too, and hands those of the
  * partitions in memory, with their values, to the table's lists.
  */
-void
+static void
 shared_flush(TessHashJoinState *state)
 {
-	dsa_area   *area = query_dsa(state);
+	dsa_area   *area = join_query_dsa(state);
 	JoinSpill  *spill;
 	SpillSide  *side;
 
-	if (shared_partitions(state) == 0)
+	if (join_shared_partitions(state) == 0)
 		return;
 	shared_join(state);
 	spill = state->spill;
@@ -921,16 +928,16 @@ shared_flush(TessHashJoinState *state)
 		SpillPart  *part = &side->parts[partition];
 
 		if (side->rows[partition] > 0)
-			check(state, state->kernels->table_spill_records(shared_words(state),
+			check(state, state->kernels->table_spill_records(join_shared_words(state),
 															 state->parallel.shared->spill_nwords,
 															 partition, side->rows[partition],
 															 NULL, &state->status));
 		if (!part->resident)
 		{
-			pg_atomic_uint64 *stats = part_stats(state, partition);
+			pg_atomic_uint64 *stats = join_part_stats(state, partition);
 
-			side_flush(state, side, partition);
-			side_forget(side, partition);
+			join_side_flush(state, side, partition);
+			join_side_forget(side, partition);
 			pg_atomic_fetch_add_u64(&stats[0], part->disk_bytes);
 			pg_atomic_fetch_add_u64(&stats[1], part->blocks);
 			continue;
@@ -940,8 +947,8 @@ shared_flush(TessHashJoinState *state)
 			int			index = part->chunks[chunk];
 			JoinChunk  *header = dsa_get_address(area, side->pointers[index]);
 
-			header->next = *own_list(state, false);
-			*own_list(state, false) = side->pointers[index];
+			header->next = *join_own_list(state, false);
+			*join_own_list(state, false) = side->pointers[index];
 			side->pointers[index] = InvalidDsaPointer;
 			side->bases[index] = NULL;
 		}
@@ -950,8 +957,8 @@ shared_flush(TessHashJoinState *state)
 			int			number = part->values[value];
 			JoinChunk  *header = dsa_get_address(area, side->value_pointers[number]);
 
-			header->next = *own_list(state, true);
-			*own_list(state, true) = side->value_pointers[number];
+			header->next = *join_own_list(state, true);
+			*join_own_list(state, true) = side->value_pointers[number];
 			side->value_pointers[number] = InvalidDsaPointer;
 			side->value_bases[number] = NULL;
 		}
@@ -962,7 +969,7 @@ shared_flush(TessHashJoinState *state)
 		part->value_current = -1;
 		side->current[partition] = 0;
 	}
-	side_compact(side);
+	join_side_compact(side);
 	tess_spill_finish(side->file);
 }
 
@@ -973,17 +980,17 @@ shared_flush(TessHashJoinState *state)
  * rejects or with a NULL key, which have no pair, to the rows the shared
  * table answers. Nothing goes out yet.
  */
-void
+static void
 shared_outer(TessHashJoinState *state)
 {
 	bool		answer = state->jointype == JOIN_LEFT || state->jointype == JOIN_ANTI;
 	JoinSpill  *spill;
 
-	if (shared_partitions(state) == 0)
+	if (join_shared_partitions(state) == 0)
 		return;
 	shared_join(state);
 	/* Past the build's barrier, the keys are every participant's. */
-	prune_outer(state);
+	join_prune_outer(state);
 	spill = state->spill;
 	for (;;)
 	{
@@ -1001,13 +1008,13 @@ shared_outer(TessHashJoinState *state)
 		nrows = batch->rows.nrows;
 		nwords = tess_row_mask_word_count(nrows);
 		state->counters[JOIN_PROBE_ROWS] += tess_row_mask_count(&batch->rows);
-		reserve_rows(state, nrows);
+		join_reserve_rows(state, nrows);
 		memset(state->probe.valid_bits, 0, sizeof(uint64) * nwords);
 		memset(state->probe.next_bits, 0, sizeof(uint64) * nwords);
 		valid = (TessRowMask) {nrows, state->probe.valid_bits};
 		passed = (TessRowMask) {nrows, state->probe.next_bits};
 		resident = (TessRowMask) {nrows, state->probe.pending_bits};
-		batch_keys(state, batch, state->keys.outer_keys, state->keys.outer_kinds, &valid);
+		join_batch_keys(state, batch, state->keys.outer_keys, state->keys.outer_kinds, &valid);
 		if (tess_row_mask_count(&valid) > 0)
 			check(state, state->kernels->bloom_probe(spill->bloom, spill->bloom_words,
 													 state->probe.hashes, &valid, &passed,
@@ -1036,19 +1043,19 @@ shared_outer(TessHashJoinState *state)
 			any_resident |= state->probe.pending_bits[word];
 		}
 		if (any_disk != 0)
-			side_append(state, &spill->probe, batch, &passed, spill->stored, NULL);
+			join_side_append(state, &spill->probe, batch, &passed, spill->stored, NULL);
 		if (any_resident != 0)
-			side_append(state, &spill->resident, batch, &resident, spill->stored, NULL);
+			join_side_append(state, &spill->resident, batch, &resident, spill->stored, NULL);
 		tess_input_finish(state->outer_input);
 	}
 	/* Every tail to disk: the others read them. */
 	for (int partition = 0; partition < spill->npartitions; partition++)
 	{
-		side_flush(state, &spill->probe, partition);
-		side_forget(&spill->probe, partition);
+		join_side_flush(state, &spill->probe, partition);
+		join_side_forget(&spill->probe, partition);
 	}
-	side_flush(state, &spill->resident, 0);
-	side_forget(&spill->resident, 0);
+	join_side_flush(state, &spill->resident, 0);
+	join_side_forget(&spill->resident, 0);
 	tess_spill_finish(spill->probe.file);
 	tess_spill_finish(spill->resident.file);
 }
@@ -1058,7 +1065,7 @@ shared_outer(TessHashJoinState *state)
  * sizes of the partitions on disk are the table's, not this participant's.
  * The participant joined the table's level before it attached the table.
  */
-void
+static void
 shared_probe_start(TessHashJoinState *state, uint64 records)
 {
 	JoinSpill  *spill;
@@ -1074,7 +1081,7 @@ shared_probe_start(TessHashJoinState *state, uint64 records)
 	spill->partition = -1;
 	spill->total_rows = records;
 	spill->input_rows = records;
-	check(state, state->kernels->table_spill_start(shared_words(state),
+	check(state, state->kernels->table_spill_start(join_shared_words(state),
 												   state->parallel.shared->spill_nwords,
 												   (uint32 *) &spill->start, &state->status));
 	spill->visited = 0;
@@ -1087,7 +1094,7 @@ shared_probe_start(TessHashJoinState *state, uint64 records)
 			state->counters[JOIN_RESIDENT]++;
 			continue;
 		}
-		check(state, state->kernels->table_spill_records(shared_words(state),
+		check(state, state->kernels->table_spill_records(join_shared_words(state),
 														 state->parallel.shared->spill_nwords,
 														 partition, 0, &rows,
 														 &state->status));
@@ -1103,7 +1110,7 @@ shared_probe_start(TessHashJoinState *state, uint64 records)
  * file is taken.
  */
 TessBatch *
-shared_resident_next(TessHashJoinState *state)
+join_shared_resident_next(TessHashJoinState *state)
 {
 	JoinSpill  *spill = state->spill;
 
@@ -1111,20 +1118,20 @@ shared_resident_next(TessHashJoinState *state)
 	{
 		uint32		writer;
 
-		if (spill->rows == &spill->resident && next_spilled(state, spill))
+		if (spill->rows == &spill->resident && join_next_spilled(state, spill))
 		{
-			reserve_rows(state, spill->batch.rows.nrows);
+			join_reserve_rows(state, spill->batch.rows.nrows);
 			state->active_bits[0] = spill->bits[0];
 			return &spill->batch;
 		}
-		check(state, state->kernels->table_spill_take_file(shared_words(state),
+		check(state, state->kernels->table_spill_take_file(join_shared_words(state),
 														   state->parallel.shared->spill_nwords,
 														   spill->npartitions, true,
 														   &writer, &state->status));
 		if (writer >= (uint32) spill->writers)
 			return NULL;
 		spill->rows = &spill->resident;
-		part_open(&spill->reader, spill->resident.file, 0, (int) writer + 1);
+		join_part_open(&spill->reader, spill->resident.file, 0, (int) writer + 1);
 		spill->reader.next = (int) writer;
 		spill->partition = 0;
 		spill->tail_read = true;
@@ -1138,7 +1145,7 @@ shared_resident_next(TessHashJoinState *state)
  * last one freeing it, and joins the partitions on disk it takes.
  */
 void
-shared_resident_end(TessHashJoinState *state)
+join_shared_resident_end(TessHashJoinState *state)
 {
 	JoinSpill  *spill = state->spill;
 
@@ -1153,8 +1160,8 @@ shared_resident_end(TessHashJoinState *state)
 	/* The filter goes with the table. */
 	spill->bloom = NULL;
 	spill->bloom_words = 0;
-	leave_shared(state, false);
-	forget_marks(state);
+	join_leave_shared(state, false);
+	join_forget_marks(state);
 	state->table.index = NULL;
 	state->table.nchunks = 0;
 	state->bloom.bits = NULL;
@@ -1164,7 +1171,7 @@ shared_resident_end(TessHashJoinState *state)
 }
 
 /* Whether any participant wrote outer rows of a partition. */
-bool
+static bool
 shared_has_outer(JoinSpill *spill, int partition)
 {
 	for (int writer = 0; writer < spill->writers; writer++)
@@ -1185,9 +1192,9 @@ shared_has_outer(JoinSpill *spill, int partition)
 
 /* The two counters of a partition of a shared table: bytes on disk and blocks of records. */
 pg_atomic_uint64 *
-part_stats(TessHashJoinState *state, int partition)
+join_part_stats(TessHashJoinState *state, int partition)
 {
-	return (pg_atomic_uint64 *) dsa_get_address(query_dsa(state), state->parallel.shared->part_stats) +
+	return (pg_atomic_uint64 *) dsa_get_address(join_query_dsa(state), state->parallel.shared->part_stats) +
 		2 * partition;
 }
 
@@ -1195,7 +1202,7 @@ static JoinRound *
 round_of(TessHashJoinState *state, int partition)
 {
 	Assert(partition >= 0 && partition < state->parallel.shared->nrounds);
-	return (JoinRound *) dsa_get_address(query_dsa(state), state->parallel.shared->rounds) + partition;
+	return (JoinRound *) dsa_get_address(join_query_dsa(state), state->parallel.shared->rounds) + partition;
 }
 
 /* Free what a round holds in shared memory. */
@@ -1240,13 +1247,13 @@ round_release(dsa_area *area, JoinRound *round)
  * participant together; a larger one is joined by one alone, which may
  * split it or take it in pieces.
  */
-void
+static void
 make_rounds(TessHashJoinState *state)
 {
-	dsa_area   *area = query_dsa(state);
+	dsa_area   *area = join_query_dsa(state);
 	Size		limit = get_hash_memory_limit();
 	Size		payload_size = sizeof(uint64) * (1 + state->npayload);
-	int			npartitions = (int) shared_partitions(state);
+	int			npartitions = (int) join_shared_partitions(state);
 	JoinRound  *rounds;
 
 	Assert(!DsaPointerIsValid(state->parallel.shared->rounds));
@@ -1257,7 +1264,7 @@ make_rounds(TessHashJoinState *state)
 	for (int partition = 0; partition < npartitions; partition++)
 	{
 		JoinRound  *round = &rounds[partition];
-		pg_atomic_uint64 *stats = part_stats(state, partition);
+		pg_atomic_uint64 *stats = join_part_stats(state, partition);
 		uint64		bytes = pg_atomic_read_u64(&stats[0]);
 		uint64		blocks = pg_atomic_read_u64(&stats[1]);
 		Size		size;
@@ -1267,9 +1274,9 @@ make_rounds(TessHashJoinState *state)
 		round->index = InvalidDsaPointer;
 		round->directory = InvalidDsaPointer;
 		round->values = InvalidDsaPointer;
-		if (!shared_on_disk(state, partition))
+		if (!join_shared_on_disk(state, partition))
 			continue;
-		check(state, state->kernels->table_spill_records(shared_words(state),
+		check(state, state->kernels->table_spill_records(join_shared_words(state),
 														 state->parallel.shared->spill_nwords,
 														 partition, 0, &round->records,
 														 &state->status));
@@ -1285,9 +1292,9 @@ make_rounds(TessHashJoinState *state)
 
 /* Free every round's memory and the rounds, at a rescan. */
 void
-free_rounds(TessHashJoinState *state)
+join_free_rounds(TessHashJoinState *state)
 {
-	dsa_area   *area = query_dsa(state);
+	dsa_area   *area = join_query_dsa(state);
 
 	if (!DsaPointerIsValid(state->parallel.shared->rounds))
 		return;
@@ -1302,7 +1309,7 @@ free_rounds(TessHashJoinState *state)
 static void
 round_allocate(TessHashJoinState *state, JoinRound *round)
 {
-	dsa_area   *area = query_dsa(state);
+	dsa_area   *area = join_query_dsa(state);
 	Size		payload_size = sizeof(uint64) * (1 + state->npayload);
 	uint64		capacity = Max(round->records, JOIN_INITIAL_ROWS);
 	Size		size;
@@ -1334,7 +1341,7 @@ round_allocate(TessHashJoinState *state, JoinRound *round)
 static void
 round_load(TessHashJoinState *state, JoinSpill *spill, int partition, JoinRound *round)
 {
-	dsa_area   *area = query_dsa(state);
+	dsa_area   *area = join_query_dsa(state);
 	dsa_pointer *chunks = dsa_get_address(area, round->directory);
 	Size	   *lens = (Size *) (chunks + Max(round->nchunks, 1));
 	dsa_pointer *values = dsa_get_address(area, round->values);
@@ -1363,7 +1370,7 @@ round_load(TessHashJoinState *state, JoinSpill *spill, int partition, JoinRound 
 		uint32		writer;
 
 		CHECK_FOR_INTERRUPTS();
-		check(state, state->kernels->table_spill_take_file(shared_words(state),
+		check(state, state->kernels->table_spill_take_file(join_shared_words(state),
 														   state->parallel.shared->spill_nwords,
 														   partition, false, &writer,
 														   &state->status));
@@ -1411,7 +1418,7 @@ round_load(TessHashJoinState *state, JoinSpill *spill, int partition, JoinRound 
 static void
 round_attach(TessHashJoinState *state, JoinSpill *spill, JoinRound *round)
 {
-	dsa_area   *area = query_dsa(state);
+	dsa_area   *area = join_query_dsa(state);
 	dsa_pointer *chunks = dsa_get_address(area, round->directory);
 	Size	   *lens = (Size *) (chunks + Max(round->nchunks, 1));
 	dsa_pointer *values = dsa_get_address(area, round->values);
@@ -1419,7 +1426,7 @@ round_attach(TessHashJoinState *state, JoinSpill *spill, JoinRound *round)
 	if (pg_atomic_read_u32(&round->next_chunk) != (uint32) round->nchunks)
 		elog(ERROR, "TessHashJoin loaded %u chunks of a round of %d",
 			 pg_atomic_read_u32(&round->next_chunk), round->nchunks);
-	reserve_chunks(state, Max(round->nchunks, 1));
+	join_reserve_chunks(state, Max(round->nchunks, 1));
 	for (int chunk = 0; chunk < round->nchunks; chunk++)
 	{
 		state->chunk_bases[chunk] = dsa_get_address(area, chunks[chunk]);
@@ -1503,7 +1510,7 @@ round_join(TessHashJoinState *state, int partition)
  * returns first, owing the free.
  */
 bool
-round_depart(TessHashJoinState *state)
+join_round_depart(TessHashJoinState *state)
 {
 	JoinRound  *round = round_of(state, state->parallel.round_partition);
 	uint32		reply = 0;
@@ -1535,14 +1542,14 @@ round_depart(TessHashJoinState *state)
 
 /* Leave the round probed, unless left already; the last one frees it. */
 void
-round_leave(TessHashJoinState *state)
+join_round_leave(TessHashJoinState *state)
 {
 	JoinRound  *round = round_of(state, state->parallel.round_partition);
 
 	if (!state->round_departed)
-		(void) round_depart(state);
+		(void) join_round_depart(state);
 	if (state->round_free_owed)
-		round_release(query_dsa(state), round);
+		round_release(join_query_dsa(state), round);
 	state->round_departed = false;
 	state->round_free_owed = false;
 	state->parallel.round_partition = -1;
@@ -1555,18 +1562,18 @@ round_leave(TessHashJoinState *state)
 
 /* The next outer file of the round's partition this participant takes; false when none is left. */
 bool
-round_next_outer(TessHashJoinState *state)
+join_round_next_outer(TessHashJoinState *state)
 {
 	JoinSpill  *spill = state->spill;
 	uint32		writer;
 
-	check(state, state->kernels->table_spill_take_file(shared_words(state),
+	check(state, state->kernels->table_spill_take_file(join_shared_words(state),
 													   state->parallel.shared->spill_nwords,
 													   spill->partition, true, &writer,
 													   &state->status));
 	if (writer >= (uint32) spill->writers)
 		return false;
-	part_open(&spill->reader, spill->probe.file, spill->partition, (int) writer + 1);
+	join_part_open(&spill->reader, spill->probe.file, spill->partition, (int) writer + 1);
 	spill->reader.next = (int) writer;
 	spill->tail_read = true;
 	spill->block = NULL;
@@ -1581,7 +1588,7 @@ round_next_outer(TessHashJoinState *state)
  * False when it visited every one.
  */
 bool
-shared_next_partition(TessHashJoinState *state)
+join_shared_next_partition(TessHashJoinState *state)
 {
 	JoinSpill  *spill = state->spill;
 
@@ -1600,14 +1607,14 @@ shared_next_partition(TessHashJoinState *state)
 		{
 			if (!round_join(state, partition))
 				continue;
-			/* The outer files come one at a time, as next_pass takes them. */
+			/* The outer files come one at a time, as join_next_pass takes them. */
 			spill->partition = partition;
 			spill->reader.open = false;
 			spill->tail_read = true;
 			spill->block = NULL;
 			return true;
 		}
-		check(state, state->kernels->table_spill_take_alone(shared_words(state),
+		check(state, state->kernels->table_spill_take_alone(join_shared_words(state),
 															state->parallel.shared->spill_nwords,
 															partition, &taken,
 															&state->status));
@@ -1615,7 +1622,7 @@ shared_next_partition(TessHashJoinState *state)
 			continue;
 		state->counters[JOIN_ALONE]++;
 		spill->probe.rows[partition] = 1;
-		return open_partition(state, partition);
+		return join_open_partition(state, partition);
 	}
 	spill->partition = spill->npartitions;
 	return false;

@@ -208,7 +208,7 @@ join_begin(CustomScanState *css, EState *estate, int eflags)
 	state->values_context = AllocSetContextCreate(estate->es_query_cxt,
 												  "TessHashJoin values",
 												  ALLOCSET_DEFAULT_SIZES);
-	reset_values(state);
+	join_reset_values(state);
 	/* The residual clauses: those the compiler took in batches, then by rows. */
 	state->scan_layout = (TessLayout) TESS_STRUCT_INITIALIZER(TessLayout);
 	state->scan_layout.ncolumns = state->ncolumns;
@@ -281,7 +281,7 @@ join_end(CustomScanState *css)
 	tess_output_end(state->output);
 	ExecEndNode(state->outer);
 	ExecEndNode(state->inner);
-	spill_free(state);
+	join_spill_free(state);
 	MemoryContextDelete(state->values_context);
 	MemoryContextDelete(state->table_context);
 }
@@ -313,7 +313,7 @@ join_rescan(CustomScanState *css)
 	state->tail.table_done = false;
 	/* A shared table's go with it: the build starts anew. */
 	if (state->marks_shared)
-		forget_marks(state);
+		join_forget_marks(state);
 	for (int chunk = 0; state->marks != NULL && chunk < state->mark_slots; chunk++)
 		if (state->marks[chunk] != NULL)
 			memset(state->marks[chunk], 0,
@@ -331,16 +331,16 @@ join_rescan(CustomScanState *css)
 	 * rescan's workers; the leader leaves the one it took part in.
 	 */
 	if (state->parallel.round_partition >= 0)
-		round_leave(state);
+		join_round_leave(state);
 	if (state->parallel.shared != NULL)
-		leave_shared(state, false);
+		join_leave_shared(state, false);
 	/*
 	 * A table that spilled is no longer whole: the inner child is read
 	 * again, rescanned here when no parameter of it changed.
 	 */
 	if (state->spill != NULL)
 	{
-		spill_free(state);
+		join_spill_free(state);
 		if (state->inner->chgParam == NULL)
 			ExecReScan(state->inner);
 		tess_input_rescan(state->inner_input);
@@ -523,7 +523,7 @@ shared_size(TessHashJoinState *state)
 static void
 init_shared(TessHashJoinState *state, int participants, dsm_segment *segment)
 {
-	dsa_area   *area = query_dsa(state);
+	dsa_area   *area = join_query_dsa(state);
 	Size		budget = get_hash_memory_limit();
 
 	BarrierInit(&state->parallel.shared->build, 0);
@@ -572,11 +572,11 @@ init_shared(TessHashJoinState *state, int participants, dsm_segment *segment)
 												  (uint64) budget * state->parallel.shared->participants,
 												  &state->status));
 	for (int list = 0; list < 2 * state->parallel.shared->participants; list++)
-		*participant_list(state, list / 2, list % 2 == 1) = InvalidDsaPointer;
+		*join_participant_list(state, list / 2, list % 2 == 1) = InvalidDsaPointer;
 	for (int partition = 0; partition < JOIN_SPILL_MAX_PARTITIONS; partition++)
 	{
-		pg_atomic_init_u64(&part_stats(state, partition)[0], 0);
-		pg_atomic_init_u64(&part_stats(state, partition)[1], 0);
+		pg_atomic_init_u64(&join_part_stats(state, partition)[0], 0);
+		pg_atomic_init_u64(&join_part_stats(state, partition)[1], 0);
 	}
 	state->parallel.shared->spill_filter = InvalidDsaPointer;
 	state->parallel.shared->spill_filter_words = 0;
@@ -630,12 +630,12 @@ join_reinitialize_dsm(CustomScanState *css, ParallelContext *pcxt,
 	if (state->parallel.shared != NULL)
 	{
 		if (state->parallel.round_partition >= 0)
-			round_leave(state);
-		leave_shared(state, false);
+			join_round_leave(state);
+		join_leave_shared(state, false);
 		/* Its files go with the set's. */
-		spill_free(state);
-		free_shared_table(state);
-		free_rounds(state);
+		join_spill_free(state);
+		join_free_shared_table(state);
+		join_free_rounds(state);
 		init_shared(state, state->parallel.shared->participants, NULL);
 		state->built = false;
 	}
@@ -673,9 +673,9 @@ join_shutdown(CustomScanState *css)
 	uint64		values[JOIN_NCOUNTERS];
 
 	if (state->parallel.round_partition >= 0)
-		round_leave(state);
+		join_round_leave(state);
 	if (state->parallel.shared != NULL)
-		leave_shared(state, false);
+		join_leave_shared(state, false);
 	if (state->stats == NULL)
 		return;
 	join_counters(state, values);
