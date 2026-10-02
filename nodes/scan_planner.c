@@ -477,16 +477,29 @@ full_scan_time(RelOptInfo *rel)
 }
 
 /*
+ * The core's path the node's scan reads: under the filter, the child of
+ * the heap scan; NULL for the node's full scan, a heap scan without a
+ * child; any other path, itself.
+ */
+static Path *
+core_scan(Path *path)
+{
+	if (tess_path_node(path) == &tess_filter_node)
+		path = linitial(((CustomPath *) path)->custom_paths);
+	if (tess_path_node(path) != &tess_heap_scan_node)
+		return path;
+	return ((CustomPath *) path)->custom_paths == NIL ? NULL :
+		linitial(((CustomPath *) path)->custom_paths);
+}
+
+/*
  * The node's full scan: the heap scan without a child, or the filter over
  * it.
  */
 static bool
 is_full_scan(Path *path)
 {
-	if (tess_path_node(path) == &tess_filter_node)
-		path = linitial(((CustomPath *) path)->custom_paths);
-	return tess_path_node(path) == &tess_heap_scan_node &&
-		((CustomPath *) path)->custom_paths == NIL;
+	return core_scan(path) == NULL;
 }
 
 /* The node's path, which the ranking may add again at a lower cost. */
@@ -680,22 +693,14 @@ partial_index_time(double time, int workers)
 static double
 scan_time(PlannerInfo *root, RelOptInfo *rel, Path *path)
 {
-	Path	   *scan = path;
+	Path	   *scan;
 	double		time;
 	double		pages;
 
 	if (path->param_info != NULL)
 		return -1;
-	if (tess_path_node(scan) == &tess_filter_node)
-		scan = linitial(((CustomPath *) scan)->custom_paths);
-	if (tess_path_node(scan) == &tess_heap_scan_node)
-	{
-		if (((CustomPath *) scan)->custom_paths == NIL)
-			scan = NULL;
-		else
-			scan = linitial(((CustomPath *) scan)->custom_paths);
-	}
-	else if (tess_path_node(scan) != NULL)
+	scan = core_scan(path);
+	if (scan != NULL && tess_path_node(scan) != NULL)
 		return -1;
 	if (scan == NULL || scan->pathtype == T_SeqScan)
 	{
@@ -805,17 +810,6 @@ full_scan_path(PlannerInfo *root, RelOptInfo *rel, Path *seqscan, Cost cost)
  * relation whose first clause runs in batches (filter_time counts the
  * later ones, in batches or by rows).
  */
-/* The core's path under the node's, or the path itself. */
-static Path *
-core_scan(Path *path)
-{
-	if (tess_path_node(path) == &tess_filter_node)
-		path = linitial(((CustomPath *) path)->custom_paths);
-	if (tess_path_node(path) == &tess_heap_scan_node && ((CustomPath *) path)->custom_paths != NIL)
-		path = linitial(((CustomPath *) path)->custom_paths);
-	return path;
-}
-
 /*
  * The node's bitmap of an index whose serial scan the serial list holds,
  * where the list holds no bitmap of it: the core's add_path dropped it for
@@ -841,7 +835,8 @@ missing_bitmap(PlannerInfo *root, RelOptInfo *rel, IndexPath *index, bool partia
 	{
 		Path	   *child = core_scan(path);
 
-		if (IsA(child, BitmapHeapPath) && IsA(((BitmapHeapPath *) child)->bitmapqual, IndexPath) &&
+		if (child != NULL && IsA(child, BitmapHeapPath) &&
+			IsA(((BitmapHeapPath *) child)->bitmapqual, IndexPath) &&
 			((IndexPath *) ((BitmapHeapPath *) child)->bitmapqual)->indexinfo == index->indexinfo)
 			return NULL;
 	}
@@ -944,9 +939,9 @@ rank_scans(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte, Path *seqscan
 			Path	   *child = core_scan(path);
 			Path	   *bitmap;
 
-			if (IsA(child, BitmapHeapPath))
+			if (child != NULL && IsA(child, BitmapHeapPath))
 				child = ((BitmapHeapPath *) child)->bitmapqual;
-			if (!IsA(child, IndexPath) ||
+			if (child == NULL || !IsA(child, IndexPath) ||
 				list_member_ptr(indexes, ((IndexPath *) child)->indexinfo))
 				continue;
 			indexes = lappend(indexes, ((IndexPath *) child)->indexinfo);
