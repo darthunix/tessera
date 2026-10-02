@@ -10,6 +10,7 @@
 #include "tessera/runtime_builder.h"
 #include "tessera/runtime_heap_batch.h"
 #include "tessera/runtime_input.h"
+#include "tessera/runtime_node.h"
 #include "tessera/runtime_output.h"
 #include "tessera/runtime_project.h"
 #include "tessera/runtime_qual.h"
