@@ -1,8 +1,10 @@
-//! Compare compatible source snapshots by PMU counters, several processes per side per case.
+//! Compare compatible source snapshots by PMU counters, several processes per side per case,
+//! or, with `--disasm`, by the machine code of Tessera's functions in the benchmark programs.
 //! Only generated files under target/bench-runs are written. No Git publishing.
 #![forbid(unsafe_code)]
 
 mod cases;
+mod disasm;
 mod report;
 mod snapshot;
 
@@ -41,7 +43,7 @@ const BENCHES: [&str; 13] = [
 #[derive(Parser, Debug)]
 #[command(
     about = "Compare compatible Rust revisions by PMU counters (before/after per case, repeated).",
-    after_help = "REF is a Git revision or WORKTREE. Defaults to both full benchmarks.\nFilters are substrings of operation ids; any match keeps an operation, and every\nselected case must keep its reference and a library path.\nEach case runs before/after --repeats times, interleaved; instructions come from any\nprocess, cycles from the minimum over all of them.\nBenchmark processes run through `sudo -n`: run `sudo -v` first, or allow the\nbenchmark executables without a password in sudoers (see benches/README.md).\nExit: 0 PASS, 1 regression (instructions, or cycles on long single-mode operations),\n2 UNSTABLE or invalid/incomplete run."
+    after_help = "REF is a Git revision or WORKTREE. Defaults to both full benchmarks.\nFilters are substrings of operation ids; any match keeps an operation, and every\nselected case must keep its reference and a library path.\nEach case runs before/after --repeats times, interleaved; instructions come from any\nprocess, cycles from the minimum over all of them.\nBenchmark processes run through `sudo -n`: run `sudo -v` first, or allow the\nbenchmark executables without a password in sudoers (see benches/README.md).\nExit: 0 PASS, 1 regression (instructions, or cycles on long single-mode operations),\n2 UNSTABLE or invalid/incomplete run.\n--disasm measures nothing and needs no root: it compares the machine code of Tessera's\nfunctions in the benchmark programs, both sides built with one codegen unit;\nexit 0 the same, 1 different, 2 invalid run."
 )]
 struct Options {
     #[arg(long, value_name = "REF")]
@@ -55,6 +57,11 @@ struct Options {
     /// Processes per side per case; instructions need one, cycles benefit from more.
     #[arg(long, value_name = "N", default_value = "3")]
     repeats: NonZeroUsize,
+    /// Measure nothing: compare the machine code of Tessera's functions in
+    /// the benchmark programs, both sides built with one codegen unit; needs
+    /// no root. Exit: 0 the same, 1 different.
+    #[arg(long, conflicts_with = "filter")]
+    disasm: bool,
 }
 
 struct Timing {
@@ -180,11 +187,30 @@ fn launch(executable: &Path, privileged: bool) -> Command {
     cmd
 }
 
-fn build(source: &Snapshot, bench: &str, artifacts: &Path, side: &str) -> Result<PathBuf> {
+/// Build a benchmark program of a snapshot. With `single_unit`, in a
+/// target directory of its own and with one codegen unit, for `--disasm`.
+fn build(
+    source: &Snapshot,
+    bench: &str,
+    artifacts: &Path,
+    side: &str,
+    single_unit: bool,
+) -> Result<PathBuf> {
     println!("Building {side}/{bench}");
-    let result = Command::new("cargo")
-        .current_dir(&source.directory)
-        .env("CARGO_TARGET_DIR", source.directory.join("target"))
+    let mut cargo = Command::new("cargo");
+    cargo.current_dir(&source.directory);
+    if single_unit {
+        cargo
+            .env(
+                "CARGO_TARGET_DIR",
+                source.directory.join("target-single-unit"),
+            )
+            .env("CARGO_PROFILE_RELEASE_CODEGEN_UNITS", "1")
+            .env("CARGO_PROFILE_BENCH_CODEGEN_UNITS", "1");
+    } else {
+        cargo.env("CARGO_TARGET_DIR", source.directory.join("target"));
+    }
+    let result = cargo
         .args([
             "bench",
             "-p",
@@ -326,8 +352,12 @@ fn summarize(measured: &Measured) -> Result<(report::Status, String)> {
     Ok((outcome, String::from_utf8(text)?))
 }
 
-fn compare(repo: &Path, root: &Path, options: &Options, timing: &mut Timing) -> Result<u8> {
-    check_privileges()?;
+/// The before and after snapshots and their common build environment.
+fn snapshots(
+    repo: &Path,
+    root: &Path,
+    options: &Options,
+) -> Result<(Snapshot, Snapshot, Environment)> {
     let before = Snapshot::capture(repo, &options.base, root.join("before"))?;
     // WORKTREE/WORKTREE captures one instant, even if files change while building.
     let after = if options.base == options.candidate {
@@ -341,6 +371,89 @@ fn compare(repo: &Path, root: &Path, options: &Options, timing: &mut Timing) -> 
         env == environment(&after.directory)?,
         "compiler or environment differs between snapshots"
     );
+    Ok((before, after, env))
+}
+
+/// The benchmark programs a run takes.
+fn selected(options: &Options) -> Vec<&str> {
+    options
+        .bench
+        .as_deref()
+        .map_or_else(|| BENCHES.to_vec(), |bench| vec![bench])
+}
+
+/// `--disasm`: build both sides of every selected program with one codegen
+/// unit and compare Tessera's functions; the bodies of those that differ go
+/// to `disasm/<program>/` of the run directory.
+fn disassemble(repo: &Path, root: &Path, options: &Options) -> Result<u8> {
+    let (before, after, env) = snapshots(repo, root, options)?;
+    save(
+        &root.join("sources.json"),
+        &json!({"before":before,"after":after,"environment":env,"mode":"disasm",
+            "bench":options.bench,"codegen_units":1}),
+    )?;
+    let mut report = create(&root.join("report.txt"))?;
+    writeln!(
+        report,
+        "MACHINE CODE; baseline={}, candidate={}",
+        before.revision, after.revision
+    )?;
+    let mut differ = false;
+    for bench in selected(options) {
+        let a = disasm::functions(&build(&before, bench, root, "before", true)?)?;
+        let b = disasm::functions(&build(&after, bench, root, "after", true)?)?;
+        let difference = disasm::compare(&a, &b);
+        let line = format!(
+            "{bench}: {} same, {} changed, {} only before, {} only after",
+            difference.same,
+            difference.changed.len(),
+            difference.only_before.len(),
+            difference.only_after.len()
+        );
+        println!("{line}");
+        writeln!(report, "{line}")?;
+        if difference.is_empty() {
+            continue;
+        }
+        differ = true;
+        let directory = root.join("disasm").join(bench);
+        fs::create_dir_all(&directory)?;
+        let sides = [
+            ("changed", &difference.changed),
+            ("only before", &difference.only_before),
+            ("only after", &difference.only_after),
+        ];
+        for (kind, names) in sides {
+            for name in names {
+                writeln!(report, "  {kind}: {name}")?;
+            }
+        }
+        for (index, name) in difference.changed.iter().enumerate() {
+            for (side, functions) in [("before", &a), ("after", &b)] {
+                let body = functions
+                    .get(name)
+                    .map_or(String::new(), |bodies| bodies.join("\n\n"));
+                create(&directory.join(format!("{index:03}-{side}.txt")))?
+                    .write_all(format!("{name}\n\n{body}\n").as_bytes())?;
+            }
+        }
+    }
+    let code = u8::from(differ);
+    save(
+        &root.join("result.json"),
+        &json!({"status":if differ {"DIFFERENT"} else {"SAME"},"exit_code":code}),
+    )?;
+    println!(
+        "{}; report: {}",
+        if differ { "DIFFERENT" } else { "SAME" },
+        root.join("report.txt").display()
+    );
+    Ok(code)
+}
+
+fn compare(repo: &Path, root: &Path, options: &Options, timing: &mut Timing) -> Result<u8> {
+    check_privileges()?;
+    let (before, after, env) = snapshots(repo, root, options)?;
     save(
         &root.join("sources.json"),
         &json!({"before":before,"after":after,"environment":env,
@@ -358,17 +471,14 @@ fn compare(repo: &Path, root: &Path, options: &Options, timing: &mut Timing) -> 
             "cycle_fail":report::CYCLE_FAIL,"cycle_fail_cycles":report::CYCLE_FAIL_CYCLES,
             "modes_limit":report::MODES_LIMIT}}),
     )?;
-    let benches: Vec<_> = options
-        .bench
-        .as_deref()
-        .map_or_else(|| BENCHES.to_vec(), |bench| vec![bench]);
+    let benches = selected(options);
     // Finish every build and listing before starting any measuring process.
     let mut binaries = Binaries::new();
     let mut cases = Vec::new();
     let mut identities = BTreeMap::new();
     for bench in benches {
-        let a = build(&before, bench, root, "before")?;
-        let b = build(&after, bench, root, "after")?;
+        let a = build(&before, bench, root, "before", false)?;
+        let b = build(&after, bench, root, "after", false)?;
         let listed = listing(&a, true)?;
         ensure!(listed == listing(&b, true)?, "benchmark case sets differ");
         let expected = report::listed(
@@ -431,19 +541,28 @@ fn run(options: Options) -> Result<u8> {
     let parent = repo.join("target/bench-runs");
     fs::create_dir_all(&parent)?;
     let root = tempfile::Builder::new()
-        .prefix("compare-")
+        .prefix(if options.disasm {
+            "disasm-"
+        } else {
+            "compare-"
+        })
         .tempdir_in(parent)?
         .keep();
     println!("Artifacts: {}", root.display());
-    println!(
-        "{}; no retries, no discarded measurements.",
-        if options.filter.is_empty() {
-            "FULL RUN"
-        } else {
-            "DIAGNOSTIC RUN"
-        }
-    );
-    let result = compare(&repo, &root, &options, &mut timing);
+    let result = if options.disasm {
+        println!("MACHINE CODE: one codegen unit per side, no measurements.");
+        disassemble(&repo, &root, &options)
+    } else {
+        println!(
+            "{}; no retries, no discarded measurements.",
+            if options.filter.is_empty() {
+                "FULL RUN"
+            } else {
+                "DIAGNOSTIC RUN"
+            }
+        );
+        compare(&repo, &root, &options, &mut timing)
+    };
     let finished = Instant::now();
     let preparation_seconds = timing
         .measurement_started
@@ -532,6 +651,22 @@ mod tests {
         );
         assert!(
             Options::try_parse_from(["tessera-bench", "--base", "HEAD", "--jobs", "2"]).is_err()
+        );
+        assert!(
+            Options::try_parse_from(["tessera-bench", "--base", "HEAD", "--disasm"])
+                .unwrap()
+                .disasm
+        );
+        assert!(
+            Options::try_parse_from([
+                "tessera-bench",
+                "--base",
+                "HEAD",
+                "--disasm",
+                "--filter",
+                "/dense/"
+            ])
+            .is_err()
         );
     }
 

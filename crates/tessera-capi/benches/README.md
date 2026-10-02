@@ -218,6 +218,30 @@ Several processes give several states, and the minimum over all their
 blocks is the operation's cost in the best state seen. The full set runs
 in about a hundred seconds.
 
+### Machine code instead of counters
+
+A change meant to leave the hot loops alone (a refactoring, a panic path
+removed, code moved between files) is checked first by its machine code,
+which needs no root and no quiet machine:
+
+```sh
+cargo run --release --locked -p tessera-bench -- --base REF --disasm
+cargo run --release --locked -p tessera-bench -- --base REF --disasm --bench filter_int32
+```
+
+Both revisions are built with one codegen unit, in a target directory of
+their own, so that a change in one function does not move others between
+units. objdump lists each benchmark program; every function whose name
+mentions Tessera is compared with its counterpart, after the addresses that
+differ between two builds of the same code are normalized: an instruction's
+own address, a branch's absolute target (kept as the symbol and offset
+objdump names) and a legacy symbol hash. Registers, immediates and the order
+of the instructions are compared as they are. `report.txt` counts the same,
+changed and missing functions per program; the bodies of changed functions
+go to `disasm/<program>/` of the run directory. Exit 0 means the same code,
+1 different code: a difference in a hot loop is then measured on counters
+as above. A program takes about forty seconds.
+
 ## Reading the report
 
 Each library operation gets its own status. The limits are constants at the
