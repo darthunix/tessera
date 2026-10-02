@@ -57,13 +57,26 @@ them, newest first.
   rows: types and NULLs, expressions, aggregates, joins of every kind,
   spilling, parallel plans, rescans. Each node's tests also cover early
   stops, empty input and errors.
+- **Random queries.** Every push runs 3000 generated queries, plus the
+  seeds that once found a bug, with Tessera on and off, and fails on any
+  difference ([tessera-crosscheck](tools/tessera-crosscheck/README.md)).
+  The queries mix joins of every kind, `EXISTS`, grouping, set
+  operations, limits and parallel plans over data full of NULLs and edge
+  values. The tool found five bugs before this gate went up, among them a
+  planner crash and wrong rows from an anti join; each fix carries its
+  case into the suites.
 - **Continuous integration** on every push: Linux on x86-64, where the
   scalar kernels run, and macOS on arm64, where the vector kernels do,
-  against PostgreSQL built with assertions.
-- **Rust kernels** carry property tests and a loom model of the shared
-  hash table's concurrent protocol; the table's tests also pass under
-  Miri, run by hand.
-- **Not yet**: builds with sanitizers and randomly generated queries.
+  against PostgreSQL built with assertions. The suites also run with the
+  debug build of the Rust kernels, under AddressSanitizer and
+  UndefinedBehaviorSanitizer, and Tessera's C builds with warnings as
+  errors.
+- **Rust kernels** carry property tests, a loom model of the shared hash
+  table's concurrent protocol, and Miri over the tests of their unsafe
+  code, all in CI. Outside tests, clippy refuses `unwrap`, `expect` and
+  `panic!`, and the boundary with C turns a panic into an error.
+  [cargo-mutants](https://mutants.rs) checks that the tests notice a
+  change to the lines a pull request touches in the Rust crates.
 
 ## What runs in batches
 
