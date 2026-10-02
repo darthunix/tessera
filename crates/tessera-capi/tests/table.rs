@@ -14,13 +14,13 @@ use tessera_capi::c::sort_flags::{DESCENDING, NULLABLE, NULLS_FIRST};
 use tessera_capi::c::{
     CSortKey, Code, DatumColumn, Mask, Status, TableKey, TableRecord, TableRef, TableStats,
     TableSumArg, tess_int4_hash, tess_int8_hash, tess_sort, tess_sort_item_words, tess_sort_items,
-    tess_sort_layout, tess_table_accumulate, tess_table_accumulate_sums, tess_table_append,
-    tess_table_append_columns, tess_table_append_partitioned_columns, tess_table_chunk_init,
-    tess_table_create, tess_table_find_or_insert, tess_table_format_version, tess_table_gather,
-    tess_table_gather_key, tess_table_gather_words, tess_table_layout, tess_table_link,
-    tess_table_link_grouped, tess_table_next_in_group, tess_table_next_match, tess_table_payloads,
-    tess_table_probe, tess_table_record, tess_table_regrow, tess_table_scan, tess_table_size,
-    tess_table_stats,
+    tess_sort_layout, tess_sort_merge, tess_table_accumulate, tess_table_accumulate_sums,
+    tess_table_append, tess_table_append_columns, tess_table_append_partitioned_columns,
+    tess_table_chunk_init, tess_table_create, tess_table_find_or_insert, tess_table_format_version,
+    tess_table_gather, tess_table_gather_key, tess_table_gather_words, tess_table_layout,
+    tess_table_link, tess_table_link_grouped, tess_table_next_in_group, tess_table_next_match,
+    tess_table_payloads, tess_table_probe, tess_table_record, tess_table_regrow, tess_table_scan,
+    tess_table_size, tess_table_stats,
 };
 use tessera_core::{ColumnView, RowMask, RowMaskView};
 use tessera_kernels::int32::{self, NullKeys};
@@ -1908,6 +1908,41 @@ fn grouped_insertion_steps_through_a_key_in_one_call_each() -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// A merge of items wider than a sort item can be, or of no words, is an
+/// error before its lanes are borrowed: their count, runs × words, would
+/// otherwise size a borrow and a list from an unchecked width.
+#[test]
+fn a_merge_refuses_an_impossible_item_width() {
+    let lane = [0_u64; 4];
+    let lanes = [lane.as_ptr(); 2];
+    let left = [4_u32];
+    let more = [false];
+    let mut state = [0_u32; tessera_kernels::sort::MERGE_STATE_WORDS];
+    let mut out = [0_u32; 4];
+    for words in [0, 18, i32::MAX] {
+        let (mut count, mut refill) = (-7, -7);
+        let mut status = Status::new();
+        // SAFETY: every pointer is valid for what a valid width would read.
+        let code = unsafe {
+            tess_sort_merge(
+                1,
+                words,
+                lanes.as_ptr(),
+                left.as_ptr(),
+                more.as_ptr(),
+                state.as_mut_ptr(),
+                out.as_mut_ptr(),
+                4,
+                &mut count,
+                &mut refill,
+                &mut status,
+            )
+        };
+        assert_eq!(code, Code::InvalidArgument, "{words} words");
+        assert_eq!((count, refill), (-7, -7), "{words} words");
+    }
 }
 
 #[test]

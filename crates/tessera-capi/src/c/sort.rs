@@ -297,6 +297,12 @@ pub unsafe extern "C" fn tess_sort_merge(
                 nruns <= MAX_MERGE_RUNS,
                 "a merge takes up to {MAX_MERGE_RUNS} runs, not {nruns}"
             );
+            // Before the lanes are borrowed and counted: their number and
+            // the list below come from nruns × words.
+            ensure!(
+                (1..=MAX_ITEM_WORDS).contains(&words),
+                "a sort item has 1 to {MAX_ITEM_WORDS} words, not {words}"
+            );
             let left = values(left, nruns, "rows left")?;
             let more = values(more, nruns, "more flags")?;
             let pointers = values(lanes, nruns * words, "lanes")?;
