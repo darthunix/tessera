@@ -6890,6 +6890,20 @@
   (как tess_status_check и tess_shared_stats_setup в 4.25) и скелет для узлов Greengage (§7). Проверка: 42 набора без
   изменений; семейство tax (цена границы пачки; цикл выдачи на ней) A/B REPETITIONS=11 — обязательно для коммита с
   tess_output_next_row. Документы: docs/writing-a-node.md, docs/runtime.md. После 9.7.
+  Сделано 2026-10-02 (ветка node-skeleton), по узлу на коммит: include/tessera/runtime_node.h и runtime/node.c —
+  TESS_NODE_STATS_CALLBACKS и TESS_NODE_STATS_METHODS (пять обратных вызовов счётчиков: filter, sort, agg),
+  tess_node_require_forward (восемь стражей; у sort свой — он умеет обратный проход), tess_explain_kb (восемь строк
+  памяти), tess_rescan_child (unary, agg — обе стороны set-операции, pack над ядром, append), tess_node_projection
+  (filter, agg — обе проекции со своими слотами, heapscan, hashjoin). nodes/ −214 строк (+61/−275), runtime и
+  заголовки +150. Не сделано и почему: 1) выдача строк heapscan и unary через tess_output_select — форма не та:
+  heapscan в построчном режиме нарочно не публикует пачку через связку, и select добавил бы на каждую строку
+  косвенный вызов моста и проверку маски на пути, который меряет tax; unary выдаёт строки из пачек ребёнка, а не
+  своих; поэтому замер tax A/B для 9.11 не нужен (горячих путей правки не трогают); 2) общий цикл выдачи для
+  hashjoin, qual и project — по уточнению 8) свой; 3) tess_node_plan_info — проверки чужого плана у узлов разные
+  (свой узел, число детей, пакетные или нет, особые условия), помощник принял бы ворох флагов; 4) обратные вызовы
+  heapscan, append, hashjoin, gather — с общей памятью сверх счётчиков, остаются своими; пересканы hashjoin, gather,
+  heapscan — оставляют детей исполнителю при изменённых параметрах, свои. Проверка: 42 набора и 39 установленных
+  заголовков на каждом коммите, мутация tess_rescan_child роняет набор parallel.
 
   9.12 Разрезы крупных файлов по заботам (чистые переносы). agg.c 4488 → agg.c (begin, exec, выдача, обратные вызовы,
   ≈1300), agg_fast.c (быстрый путь и состояния сумм, ≈900), agg_generic.c (обобщённый путь переходов и AggValue),
