@@ -384,9 +384,7 @@ append_begin(CustomScanState *css, EState *estate, int eflags)
 	int			first_partial;
 	int			index = 0;
 
-	/* The planner puts Material above a batch subtree for these. */
-	if (eflags & (EXEC_FLAG_BACKWARD | EXEC_FLAG_MARK))
-		elog(ERROR, "TessAppend supports neither backward scan nor mark/restore");
+	tess_node_require_forward(eflags, "TessAppend");
 	tess_plan_get_info(cscan, &info);
 	if (info.node != &tess_append_node)
 		elog(ERROR, "TessAppend received a foreign plan");
@@ -743,13 +741,7 @@ append_rescan(CustomScanState *css)
 		state->valid_known = false;
 	}
 	for (int index = 0; index < state->nchildren; index++)
-	{
-		/* The core passes changed parameters to outer and inner plans only. */
-		if (css->ss.ps.chgParam != NULL)
-			UpdateChangedParamSet(state->children[index], css->ss.ps.chgParam);
-		ExecReScan(state->children[index]);
-		tess_input_rescan(state->inputs[index]);
-	}
+		tess_rescan_child(&css->ss.ps, state->children[index], state->inputs[index]);
 	state->current = -1;
 	state->done = false;
 	/* The batches total every scan, as the core's instrumentation does. */
