@@ -156,7 +156,12 @@ pub fn install_tessera(root: &Path, pg: &Pg, log: &Path) -> Result<()> {
     let mut file = File::create(log)?;
     for target in [None, Some("install")] {
         let mut make = Command::new("make");
-        make.arg("-C")
+        // Run from `make tpch`, the outer make's flags and jobserver would
+        // reach this one and conflict with its -j.
+        make.env_remove("MAKEFLAGS")
+            .env_remove("MFLAGS")
+            .env_remove("MAKELEVEL")
+            .arg("-C")
             .arg(root)
             .arg(format!("-j{jobs}"))
             .arg(&pg_config)
@@ -181,6 +186,22 @@ pub fn tail(path: &Path, lines: usize) -> String {
     let all: Vec<&str> = text.lines().collect();
     all[all.len().saturating_sub(lines)..].join("\n")
 }
+
+/// A command that starts a server, run through `sh` closing descriptors
+/// 3 to 9 first. The postmaster outlives the tool and keeps the
+/// descriptors it inherits; run from `make tpch`, it kept make's own pipe
+/// open, and make waited for its end forever. The standard library marks
+/// its own descriptors close-on-exec, but cannot close inherited ones
+/// without unsafe code, and a POSIX shell (dash on Linux) redirects only
+/// descriptors 0 to 9, among which make's are.
+fn daemon(program: &Path) -> Command {
+    let mut command = Command::new("/bin/sh");
+    command.arg("-c").arg(CLOSE_AND_EXEC).arg(program);
+    command
+}
+
+/// Closes descriptors 3 to 9 and runs `$0` with the arguments.
+const CLOSE_AND_EXEC: &str = r#"exec 3>&- 4>&- 5>&- 6>&- 7>&- 8>&- 9>&-; exec "$0" "$@""#;
 
 /// The cluster of one scale factor.
 pub struct Cluster {
@@ -244,7 +265,7 @@ impl Cluster {
             self.check_port()?;
         }
         let action = if running { "restart" } else { "start" };
-        let status = Command::new(self.pg.bin("pg_ctl"))
+        let status = daemon(&self.pg.bin("pg_ctl"))
             .arg("-D")
             .arg(&self.data)
             .arg("-l")
@@ -360,6 +381,34 @@ mod tests {
             pkglibdir: "/pg/lib".into(),
             sharedir: "/pg/share".into(),
             version: version.into(),
+        }
+    }
+
+    #[test]
+    fn daemons_get_no_inherited_descriptors() {
+        // An outer shell opens descriptor 7 without close-on-exec, as make
+        // leaves its pipe, and runs a program that reports whether it has
+        // it: with the wrapper of daemon() it does not.
+        let report = r#"if [ -e /dev/fd/7 ]; then echo open; else echo closed; fi"#;
+        for shell in ["/bin/sh", "/bin/dash"]
+            .into_iter()
+            .filter(|shell| Path::new(shell).exists())
+        {
+            let run = |wrapped: bool| {
+                let inner = if wrapped {
+                    format!("exec {shell} -c '{CLOSE_AND_EXEC}' {shell} -c '{report}'")
+                } else {
+                    format!("exec {shell} -c '{report}'")
+                };
+                let output = Command::new(shell)
+                    .arg("-c")
+                    .arg(format!("exec 7</dev/null; {inner}"))
+                    .output()
+                    .unwrap();
+                String::from_utf8(output.stdout).unwrap().trim().to_string()
+            };
+            assert_eq!(run(false), "open", "{shell}");
+            assert_eq!(run(true), "closed", "{shell}");
         }
     }
 
