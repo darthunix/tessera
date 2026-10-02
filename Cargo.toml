@@ -6,6 +6,7 @@ members = [
     "crates/tessera-spill",
     "crates/tessera-testing",
     "tools/tessera-bench",
+    "tools/tessera-pgtool",
     "tools/tessera-pmu",
     "tools/tessera-tpch",
 ]
@@ -39,6 +40,7 @@ tessera-core = { path = "crates/tessera-core" }
 tessera-kernels = { path = "crates/tessera-kernels" }
 tessera-spill = { path = "crates/tessera-spill" }
 tessera-testing = { path = "crates/tessera-testing" }
+tessera-pgtool = { path = "tools/tessera-pgtool" }
 tessera-pmu = { path = "tools/tessera-pmu" }
 
 [workspace.lints.rust]

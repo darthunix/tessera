@@ -156,13 +156,7 @@ impl<'c> Session<'c> {
     }
 }
 
-/// An error as `SQLSTATE: message`, or the client's own description.
-pub fn message(error: &postgres::Error) -> String {
-    match error.as_db_error() {
-        Some(db) => format!("{}: {}", db.code().code(), db.message()),
-        None => error.to_string(),
-    }
-}
+pub use tessera_pgtool::message;
 
 #[cfg(test)]
 mod tests {

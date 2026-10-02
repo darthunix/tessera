@@ -1146,6 +1146,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "tessera-pgtool"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "postgres",
+]
+
+[[package]]
 name = "tessera-pmu"
 version = "0.1.0"
 dependencies = [
@@ -1181,6 +1189,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "tempfile",
+ "tessera-pgtool",
  "tpchgen",
 ]
 

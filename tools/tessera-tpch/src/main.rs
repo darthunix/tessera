@@ -215,7 +215,7 @@ struct Up {
 /// the data it lacks.
 fn bring_up(args: &ClusterArgs) -> Result<Up> {
     let pg = Pg::discover()?;
-    pg.require_contrib()?;
+    pg.require_contrib(&cluster::CONTRIB)?;
     std::fs::create_dir_all(runs_dir())?;
     if args.no_install {
         println!("Tessera: the build installed in {}", pg.pkglibdir.display());

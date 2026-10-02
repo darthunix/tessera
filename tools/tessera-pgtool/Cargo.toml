@@ -1,0 +1,15 @@
+[package]
+name = "tessera-pgtool"
+description = "A PostgreSQL build and a cluster of a tool's own, with the Tessera modules preloaded"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+postgres.workspace = true
+
+[lints]
+workspace = true

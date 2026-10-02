@@ -17,6 +17,7 @@ postgres.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+tessera-pgtool.workspace = true
 tpchgen.workspace = true
 
 [dev-dependencies]
