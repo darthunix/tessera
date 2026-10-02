@@ -1,5 +1,11 @@
 //! The batch functions of decimals against a row-by-row model: the rows
 //! each keeps, computes, leaves to the caller and reads.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    reason = "a test reports a failure by panicking"
+)]
 
 use std::mem::MaybeUninit;
 

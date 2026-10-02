@@ -1,0 +1,5 @@
+# Tests report failures by panicking; the workspace denies unwrap, expect
+# and panic everywhere else (Cargo.toml, plan 9.2).
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-panic-in-tests = true

@@ -2,6 +2,12 @@
 //! words take the vector path, words with an unprepared row the row path,
 //! and both must match the scalar model; NULL and unselected cells hold
 //! edges that some comparison would keep if they were read.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    reason = "a test reports a failure by panicking"
+)]
 
 mod support;
 

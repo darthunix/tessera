@@ -1,6 +1,12 @@
 //! The C entry points called from Rust with raw pointers, as C would call
 //! them; the C test module covers the same ground against the linked
 //! static library.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    reason = "a test reports a failure by panicking"
+)]
 
 use std::ptr;
 

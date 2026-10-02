@@ -2,6 +2,12 @@
 //!
 //! Check the unchanged input matrices, scalar models and bounded mask preparation.
 //! Counter readings are not needed: block bookkeeping is checked with a fake reader.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    reason = "a test reports a failure by panicking"
+)]
 
 #[path = "../benches/support/aggregating.rs"]
 #[allow(dead_code)]

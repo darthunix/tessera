@@ -1,6 +1,12 @@
 //! The set entry points called with raw pointers, as C calls them: int4
 //! and int8 words of the same bits, a NULL row, an unselected row, a whole
 //! word of Datums.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    reason = "a test reports a failure by panicking"
+)]
 
 use std::ptr;
 

@@ -51,6 +51,10 @@ pub extern "C" fn tess_kernels_probe(kind: c_uint) -> usize {
 ///
 /// `status` must be null or valid as for every entry point.
 #[unsafe(no_mangle)]
+#[allow(
+    clippy::panic,
+    reason = "the C test of the guard needs a panic to catch"
+)]
 pub unsafe extern "C" fn tess_kernels_test_panic(status: *mut Status) -> Code {
     // SAFETY: the caller's status contract.
     unsafe { guard(status, || panic!("injected panic")) }

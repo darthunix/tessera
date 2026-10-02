@@ -99,7 +99,7 @@ fn copy_files(source: &Path, destination: &Path, paths: &[PathBuf]) -> Result<()
             from.display()
         );
         let to = destination.join(path);
-        fs::create_dir_all(to.parent().unwrap())?;
+        fs::create_dir_all(to.parent().context("a snapshot file without a directory")?)?;
         fs::copy(&from, &to).with_context(|| format!("cannot snapshot {}", from.display()))?;
     }
     Ok(())

@@ -1,6 +1,12 @@
 //! The calendar entry points called with raw pointers, as C calls them:
 //! columns and scalars, the errors as statuses, the masks of the rows left
 //! to the caller.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    reason = "a test reports a failure by panicking"
+)]
 
 use std::ptr;
 

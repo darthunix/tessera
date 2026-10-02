@@ -45,6 +45,15 @@ tessera-pmu = { path = "tools/tessera-pmu" }
 unsafe_op_in_unsafe_fn = "deny"
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(loom)"] }
 
+# A panic in the library is caught at the C boundary and fails the query,
+# but a path to one is a bug to remove, not to rely on: production code
+# says why a value is there instead of unwrapping it (plan 9.2). Tests
+# report failures by panicking, which clippy.toml allows there.
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+
 [profile.dev]
 panic = "unwind"
 

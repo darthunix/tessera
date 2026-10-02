@@ -1,6 +1,12 @@
 //! The text entry points called with raw pointers, as C calls them:
 //! strings of both varlena headers, a compressed one left in the rest, the
 //! error of a negative substring length.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    reason = "a test reports a failure by panicking"
+)]
 
 use std::ptr;
 

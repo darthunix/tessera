@@ -186,6 +186,10 @@ pub fn words(flags: &[bool]) -> Vec<u64> {
 /// with the smallest failing case. The caller's file keeps the failing cases,
 /// in `<file>.proptest-regressions` beside it.
 #[track_caller]
+#[allow(
+    clippy::panic,
+    reason = "a failed property fails its test, as an assertion does"
+)]
 pub fn property<S: Strategy, E: Debug>(strategy: S, test: impl Fn(S::Value) -> Result<(), E>) {
     let config = ProptestConfig {
         source_file: Some(Location::caller().file()),

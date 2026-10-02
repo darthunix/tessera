@@ -298,7 +298,11 @@ impl Cluster {
     }
 
     fn initdb(&self) -> Result<()> {
-        fs::create_dir_all(self.data.parent().unwrap())?;
+        fs::create_dir_all(
+            self.data
+                .parent()
+                .context("a data directory without a parent")?,
+        )?;
         let log = self.data.with_extension("initdb.log");
         // The C locale: the answers of TPC-H sort strings by their bytes,
         // and both modes compare them under one collation.

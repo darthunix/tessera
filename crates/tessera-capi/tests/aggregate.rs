@@ -2,6 +2,12 @@
 //! representations: whole words where the batch is fully prepared, rows
 //! where it is not, and edges in NULL and unselected cells that must never
 //! reach a result. Every check runs for both widths.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    reason = "a test reports a failure by panicking"
+)]
 
 mod support;
 

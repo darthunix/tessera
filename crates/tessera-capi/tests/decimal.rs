@@ -1,6 +1,12 @@
 //! The decimal entry points called with raw pointers, as C calls them:
 //! numerics in both varlena headers, NaN, a column's decimal side, the
 //! scalar argument, and the numerics written back.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    reason = "a test reports a failure by panicking"
+)]
 
 use std::ptr;
 

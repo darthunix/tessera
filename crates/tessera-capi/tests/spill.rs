@@ -1,5 +1,11 @@
 //! The status of a spilled block read back through the C entry points:
 //! damaged bytes report SQLSTATE XX001, a misuse of the call XX000.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    reason = "a test reports a failure by panicking"
+)]
 
 use tessera_capi::c::{
     Code, SpillHeader, Status, tess_spill_header_read, tess_spill_header_size,

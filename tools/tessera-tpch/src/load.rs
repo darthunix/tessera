@@ -367,7 +367,12 @@ fn copy_all(cluster: &Cluster, sf: f64) -> Result<BTreeMap<Table, i64>> {
             .collect();
         copies
             .into_iter()
-            .map(|(table, copy)| Ok((table, copy.join().expect("a loading thread panicked")?)))
+            .map(|(table, copy)| {
+                let copied = copy
+                    .join()
+                    .map_err(|_| anyhow::anyhow!("the thread loading {table:?} panicked"))??;
+                Ok((table, copied))
+            })
             .collect()
     })
 }

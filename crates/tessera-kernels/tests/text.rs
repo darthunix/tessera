@@ -1,6 +1,12 @@
 //! The text kernels against references of another derivation: LIKE by
 //! dynamic programming over the pattern, pieces over the string's
 //! characters.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    reason = "a test reports a failure by panicking"
+)]
 
 use anyhow::Result;
 use proptest::collection::vec;

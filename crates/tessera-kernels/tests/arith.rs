@@ -1,3 +1,9 @@
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    reason = "a test reports a failure by panicking"
+)]
 #![deny(unsafe_code)]
 
 //! int4 and int8 arithmetic: every check is written once over [`Lane`] and

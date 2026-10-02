@@ -3,6 +3,12 @@
 //! NULL and unselected cells that would overflow or divide by zero if they
 //! were used. Every check runs for both widths as `<check>_int4` and
 //! `<check>_int8`.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    reason = "a test reports a failure by panicking"
+)]
 
 mod support;
 

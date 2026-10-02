@@ -1,5 +1,11 @@
 //! The table over Datum key columns, against the dense path, and through
 //! the C entry points called as C would call them.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    reason = "a test reports a failure by panicking"
+)]
 
 use std::ptr;
 
