@@ -71,10 +71,13 @@ typedef struct TessAggState
 	 * layout, which child, input, projection and child_layout name while
 	 * it is read (side); the groups count their rows and their right
 	 * side's. The group being put out, of the walk's current ones, and the
-	 * copies of it still to go (-1 before they are counted).
+	 * copies of it still to go (-1 before they are counted). The rows of
+	 * the left side read since it started: without any, the right side is
+	 * not read, as the core's SetOp does not read its inner input.
 	 */
 	int			setop;
 	int			side;
+	uint64		setop_left_rows;
 	PlanState  *sides[2];
 	TessInput  *side_inputs[2];
 	TessProjection *side_projections[2];
