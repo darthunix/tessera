@@ -59,10 +59,6 @@ jobs:
     name: Sanitizers (ubuntu-24.04, ASan and UBSan)
     runs-on: ubuntu-24.04
     timeout-minutes: 90
-    # Not yet a gate: each run stops at the first report, and the fixes of
-    # the reports so far are under review (plan 9.7); their merge makes it
-    # one.
-    continue-on-error: true
     env:
       LANG: C.UTF-8
       # No leak reports: memory contexts free what malloc's view calls

@@ -6756,7 +6756,8 @@
   артефактом). Каждый прогон останавливается на первом отчёте (halt_on_error); первый: UBSan «member access within
   null pointer» в smallint_range (kernels/int.c) — call->values читается до проверки кода, а C-тест ошибок
   передаёт call = NULL. Исправления — отдельным PR на просмотр, по коммиту на отчёт; до их слияния задача не блокирует
-  (continue-on-error). Альтернативы шуму (alignment, suppressions) пока не понадобились.
+  (continue-on-error). Альтернативы шуму (alignment, suppressions) пока не понадобились. С исправлением smallint_range
+  все 42 набора проходят под ASan и UBSan: отчёт был один, и тот же PR делает задачу воротами.
 
   9.8 Случайные запросы против ядра (бывший 4.37; решение 2026-10-02: свой инструмент). Станет: крейт
   tools/tessera-crosscheck; общий код кластера, сессии и настроек сервера из tools/tessera-tpch (cluster.rs, session.rs,
