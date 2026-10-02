@@ -553,9 +553,7 @@ heap_scan_begin(CustomScanState *css, EState *estate, int eflags)
 	TessPlanInfo info = TESS_STRUCT_INITIALIZER(TessPlanInfo);
 	Relation	rel = css->ss.ss_currentRelation;
 
-	/* The planner puts Material above a batch subtree for these. */
-	if (eflags & (EXEC_FLAG_BACKWARD | EXEC_FLAG_MARK))
-		elog(ERROR, "TessHeapScan supports neither backward scan nor mark/restore");
+	tess_node_require_forward(eflags, "TessHeapScan");
 	tess_plan_get_info(cscan, &info);
 	if (info.node != &tess_heap_scan_node || info.nchildren > 1 ||
 		rel == NULL || cscan->custom_scan_tlist != NIL ||
@@ -590,19 +588,10 @@ heap_scan_begin(CustomScanState *css, EState *estate, int eflags)
 	state->relation = (TessLayout) TESS_STRUCT_INITIALIZER(TessLayout);
 	state->relation.ncolumns = RelationGetDescr(rel)->natts;
 	state->relation.ntargets = RelationGetDescr(rel)->natts;
+	/* The computed columns follow the relation's own. */
 	if (info.computed != NIL)
-	{
-		TessProjectionConfig projection = TESS_STRUCT_INITIALIZER(TessProjectionConfig);
-
-		projection.parent_context = estate->es_query_cxt;
-		projection.parent = &css->ss.ps;
-		projection.econtext = css->ss.ps.ps_ExprContext;
-		projection.scan_slot = css->ss.ss_ScanTupleSlot;
-		projection.scan_tuple = &state->relation;
-		projection.base_columns = state->relation.ncolumns;
-		projection.computed = info.computed;
-		state->projection = tess_projection_create(&projection);
-	}
+		state->projection = tess_node_projection(css, css->ss.ss_ScanTupleSlot, &state->relation,
+												 state->relation.ncolumns, info.computed);
 	state->output = tess_output_create(estate->es_query_cxt, &css->ss.ps,
 									   css->ss.ps.ps_ResultTupleSlot,
 									   &info.layout);
