@@ -43,7 +43,7 @@ RUNTIME_TESTS = tessera_builder_test tessera_output_test tessera_input_test \
 	tessera_expr_test tessera_heap_batch_test tessera_project_test \
 	tessera_shared_stats_test \
 	tessera_kernel_ops_test tessera_spill_test tessera_rows_test
-$(RUST_TESTS:%=%$(DLSUFFIX)): $(RUST_LIB)
+$(RUST_TESTS:%=%$(DLSUFFIX)): $(RUST_LIB) $(RUST_PROFILE_STAMP)
 $(RUST_TESTS:%=%$(DLSUFFIX)): LDFLAGS_SL += $(RUST_LIB)
 $(RUNTIME_TESTS:%=%$(DLSUFFIX)): $(RUNTIME_LIB)
 $(RUNTIME_TESTS:%=%$(DLSUFFIX)): LDFLAGS_SL += $(RUNTIME_LIB)

@@ -12,4 +12,17 @@ endif
 $(RUST_LIB): FORCE
 	cd $(srcdir)/.. && $(CARGO) build -p tessera-capi --locked $(RUST_BUILD_FLAGS)
 
+# The profile the modules link: a module that links the library depends
+# on this file too, which changes only when the profile does, so switching
+# the profile links the modules again even when the other profile's library
+# is older than them.
+RUST_PROFILE_STAMP = $(srcdir)/../target/tessera-rust-profile
+$(RUST_PROFILE_STAMP): FORCE
+	@mkdir -p $(@D)
+	@echo $(RUST_PROFILE) | cmp -s - $@ 2>/dev/null || echo $(RUST_PROFILE) > $@
+
+# PostgreSQL's Makefile.global declares .SECONDARY: with no prerequisites,
+# under which a missing prerequisite without a recipe forces nothing; a
+# phony one does, so Cargo runs on every build and decides itself.
+.PHONY: FORCE
 FORCE:

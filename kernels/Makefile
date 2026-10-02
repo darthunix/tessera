@@ -9,6 +9,6 @@ include $(PGXS)
 # The module links the Rust kernels statically.
 include $(srcdir)/../rust.mk
 SHLIB_LINK += $(RUST_LIB)
-$(shlib): $(RUST_LIB)
+$(shlib): $(RUST_LIB) $(RUST_PROFILE_STAMP)
 
 $(OBJS): $(srcdir)/internal.h $(wildcard $(srcdir)/../include/tessera/*.h)
