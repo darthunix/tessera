@@ -60,7 +60,15 @@ const MAGIC_AT: usize = 12;
 const MAGIC: u32 = u32::from_le_bytes(*b"COLS");
 
 fn get_u32(bytes: &[u8], at: usize) -> u32 {
-    u32::from_ne_bytes(bytes[at..at + 4].try_into().expect("four bytes"))
+    let mut word = [0; 4];
+    word.copy_from_slice(&bytes[at..at + 4]);
+    u32::from_ne_bytes(word)
+}
+
+fn get_u64(bytes: &[u8], at: usize) -> u64 {
+    let mut word = [0; 8];
+    word.copy_from_slice(&bytes[at..at + 8]);
+    u64::from_ne_bytes(word)
 }
 
 fn put_u32(bytes: &mut [u8], at: usize, value: u32) {
@@ -268,11 +276,7 @@ pub fn unpack(packed: &[u8], out: &mut [u8]) -> Result<()> {
     for index in 0..lanes {
         let descriptor = 8 + 16 * index;
         let width = packed[descriptor] as usize;
-        let base = u64::from_ne_bytes(
-            packed[descriptor + 8..descriptor + 16]
-                .try_into()
-                .expect("eight bytes"),
-        );
+        let base = get_u64(packed, descriptor + 8);
         intact!(
             matches!(width, 0 | 1 | 2 | 4 | 8),
             "a packed lane of width {width}"

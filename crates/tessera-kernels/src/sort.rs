@@ -16,7 +16,7 @@
 //! The kernels allocate nothing: the caller hands the items' words and
 //! the output of references in.
 
-use anyhow::{Result, bail, ensure};
+use anyhow::{Context, Result, bail, ensure};
 
 use tessera_core::{RowMask, RowMaskView};
 
@@ -286,7 +286,7 @@ fn candidates_as<K: KeySource + ?Sized, const W: usize>(
     rows: &mut RowMask<'_>,
     worst: &[u64],
 ) -> Result<usize> {
-    let worst = key_bits::<W>(worst.try_into().expect("the width was checked"));
+    let worst = key_bits::<W>(worst.try_into().context("the width was checked")?);
     let nkeys = encoder.keys.len();
     let nrows = rows.as_view().nrows();
     let mut slots = [[0i64; 64]; MAX_KEYS];

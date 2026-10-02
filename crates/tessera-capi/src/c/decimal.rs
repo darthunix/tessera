@@ -552,7 +552,9 @@ fn state_partial(data: &[u8]) -> Result<Partial> {
     }
     let words: [u64; SumState::WORDS] = std::array::from_fn(|word| {
         let at = 4 + 8 * word;
-        u64::from_ne_bytes(data[at..at + 8].try_into().unwrap())
+        let mut bytes = [0; 8];
+        bytes.copy_from_slice(&data[at..at + 8]);
+        u64::from_ne_bytes(bytes)
     });
     let state = SumState::from_words(words);
     ensure!(
@@ -572,8 +574,16 @@ const INT8_OID: i32 = 20;
 /// dimension, no NULL bitmap (data offset 0), element type int8, a length
 /// of 2 and its lower bound, then the two int8.
 fn pair_partial(data: &[u8]) -> Result<Partial> {
-    let int = |at: usize| i32::from_ne_bytes(data[at..at + 4].try_into().unwrap());
-    let int8 = |at: usize| i64::from_ne_bytes(data[at..at + 8].try_into().unwrap());
+    let int = |at: usize| {
+        let mut bytes = [0; 4];
+        bytes.copy_from_slice(&data[at..at + 4]);
+        i32::from_ne_bytes(bytes)
+    };
+    let int8 = |at: usize| {
+        let mut bytes = [0; 8];
+        bytes.copy_from_slice(&data[at..at + 8]);
+        i64::from_ne_bytes(bytes)
+    };
     ensure!(
         data.len() == 36 && int(0) == 1 && int(4) == 0 && int(8) == INT8_OID && int(12) == 2,
         "a partial average of another format"

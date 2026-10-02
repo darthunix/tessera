@@ -7,7 +7,7 @@
 //! and a larger index rebuilds the buckets and every record's next field.
 //! Records never move.
 
-use anyhow::{Result, ensure};
+use anyhow::{Result, bail, ensure};
 use tessera_core::{ColumnReader, RowMask, RowMaskView};
 
 use crate::decimal::{self, Partial, Partials, SumState, Term, Terms};
@@ -872,7 +872,9 @@ pub(super) fn sum_terms<R: Region, T: Terms>(
                         taken |= 1 << bit;
                     }
                     _ => {
-                        let spot = spots[group].unwrap();
+                        let Some(spot) = spots[group] else {
+                            bail!("a group without the record it was found in");
+                        };
                         // SAFETY: the group's spot was found in this call;
                         // the slice goes before another is made.
                         let payload = unsafe { payload_of(region, layout, spot) };
@@ -887,7 +889,9 @@ pub(super) fn sum_terms<R: Region, T: Terms>(
                 if local.count == 0 {
                     continue;
                 }
-                let spot = spots[group].unwrap();
+                let Some(spot) = spots[group] else {
+                    bail!("a group without the record it was found in");
+                };
                 // SAFETY: as above.
                 let payload = unsafe { payload_of(region, layout, spot) };
                 let slots: &mut [u8; 8 * SumState::WORDS] =

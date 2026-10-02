@@ -172,9 +172,8 @@ impl<T: Copy + Debug> ColumnReader for DenseIntColumn<'_, T> {
     #[inline(always)]
     fn get(&self, row: usize) -> Result<Option<T>> {
         validate_ready(self.nrows(), self.prepared, row)?;
-        if self
-            .non_nulls
-            .is_some_and(|mask| !mask.contains(row).unwrap())
+        if let Some(mask) = self.non_nulls
+            && !mask.contains(row)?
         {
             return Ok(None);
         }

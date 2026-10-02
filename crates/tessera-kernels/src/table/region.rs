@@ -235,8 +235,10 @@ impl RawRegion {
     /// The address of `size` bytes at `offset` of the index, both checked.
     #[inline]
     fn at(&self, offset: usize, size: usize) -> *mut u8 {
-        let end = offset.checked_add(size).expect("region offset overflows");
-        assert!(end <= self.len, "region access past its end");
+        assert!(
+            offset.checked_add(size).is_some_and(|end| end <= self.len),
+            "region access past its end"
+        );
         // SAFETY: `offset` is within the `len` bytes the constructor promised.
         unsafe { self.base.add(offset) }
     }

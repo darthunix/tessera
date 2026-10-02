@@ -38,7 +38,9 @@ const HALF: u8 = 3;
 const WORD: u8 = 4;
 
 fn word(bytes: &[u8], at: usize) -> u32 {
-    u32::from_ne_bytes(bytes[at..at + 4].try_into().expect("four bytes"))
+    let mut word = [0; 4];
+    word.copy_from_slice(&bytes[at..at + 4]);
+    u32::from_ne_bytes(word)
 }
 
 /// The record length of a chunk that packing can take: a used mark that
@@ -49,7 +51,9 @@ fn record_len(chunk: &[u8]) -> Option<usize> {
     if chunk.len() < USED_MARK + MIN_RECORD || !chunk.len().is_multiple_of(8) {
         return None;
     }
-    let used = u64::from_ne_bytes(chunk[..USED_MARK].try_into().expect("eight bytes"));
+    let mut used = [0; USED_MARK];
+    used.copy_from_slice(&chunk[..USED_MARK]);
+    let used = u64::from_ne_bytes(used);
     if used != chunk.len() as u64 {
         return None;
     }
@@ -200,11 +204,10 @@ pub fn unpack(packed: &[u8], chunk: &mut [u8]) -> Result<()> {
         let place = &packed[at..at + need];
         match code {
             ZERO | CONSTANT => {
-                let value = if code == ZERO {
-                    [0_u8; 4]
-                } else {
-                    place.try_into().expect("four bytes")
-                };
+                let mut value = [0_u8; 4];
+                if code == CONSTANT {
+                    value.copy_from_slice(place);
+                }
                 for record in records.chunks_exact_mut(len) {
                     record[lane * 4..lane * 4 + 4].copy_from_slice(&value);
                 }

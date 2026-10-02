@@ -212,7 +212,9 @@ fn bucket_count(capacity: u64) -> u32 {
         .saturating_mul(2)
         .clamp(MIN_BUCKETS, MAX_BUCKETS)
         .next_power_of_two();
-    u32::try_from(wanted).expect("bucket count fits a u32")
+    // A power of two of at most MAX_BUCKETS, which a u32 holds.
+    const _: () = assert!(MAX_BUCKETS <= u32::MAX as u64);
+    wanted as u32
 }
 
 /// The shift that turns a hash into a bucket index: its high bits.

@@ -22,10 +22,9 @@ fn validate_ready(nrows: usize, prepared: Option<RowMaskView<'_>>, row: usize) -
         row < nrows,
         "physical row {row} is out of bounds for {nrows} rows"
     );
-    ensure!(
-        prepared.is_none_or(|mask| mask.contains(row).unwrap()),
-        "physical row {row} is unprepared"
-    );
+    if let Some(mask) = prepared {
+        ensure!(mask.contains(row)?, "physical row {row} is unprepared");
+    }
     Ok(())
 }
 

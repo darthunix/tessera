@@ -129,23 +129,23 @@ impl LocalTable {
         Ok(())
     }
 
-    fn chunk_set(&self) -> Chunks<'_> {
+    fn chunk_set(&self) -> Result<Chunks<'_>> {
         // SAFETY: the owned chunks are valid for their lengths while `self`
         // lives, and only tables over this owner access them.
-        unsafe { Chunks::new(&self.bases, &self.lens) }.expect("the owned chunks are valid")
+        unsafe { Chunks::new(&self.bases, &self.lens) }
     }
 
     /// The table, shared.
     pub fn table(&self) -> Result<Table<'_>> {
         // SAFETY: the index and chunks are owned and live as long as the
         // borrow.
-        unsafe { Table::attach(self.index.base(), self.index.bytes(), self.chunk_set()) }
+        unsafe { Table::attach(self.index.base(), self.index.bytes(), self.chunk_set()?) }
     }
 
     /// The table, for its one writer.
     pub fn table_mut(&mut self) -> Result<TableMut<'_>> {
         // SAFETY: as for `table`, with the owner borrowed exclusively.
-        unsafe { TableMut::attach_mut(self.index.base(), self.index.bytes(), self.chunk_set()) }
+        unsafe { TableMut::attach_mut(self.index.base(), self.index.bytes(), self.chunk_set()?) }
     }
 
     /// Add an empty chunk and return its number.

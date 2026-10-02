@@ -18,7 +18,7 @@
 
 use std::mem::MaybeUninit;
 
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use tessera_core::{ColumnReader, RowMask, RowMaskView};
 
 use crate::BULK_MIN_ROWS;
@@ -199,7 +199,7 @@ fn widen_bulk<C: ColumnReader<Value = i32>>(
             let base = index * 64;
             let out: &mut [MaybeUninit<i64>; 64] = (&mut values[base..base + 64])
                 .try_into()
-                .expect("a whole-word operand implies a full word");
+                .context("a whole-word operand implies a full word")?;
             bulk::widen(block, selected, out)
         } else {
             word_rows(column, index, selected, values)?

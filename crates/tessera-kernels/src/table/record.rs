@@ -603,8 +603,8 @@ unsafe fn fill_head<'b, const N: usize>(
     fields[LEN..LEN + 4].copy_from_slice(&((record_size / 8) as u32).to_ne_bytes());
     let (header, rest) = words.split_at_mut(RECORD_HEADER / 8);
     let (first, second) = fields.split_at(8);
-    header[0] = first.try_into().unwrap();
-    header[1] = second.try_into().unwrap();
+    header[0].copy_from_slice(first);
+    header[1].copy_from_slice(second);
     let (slots, tail) = rest.split_at_mut(nkeys);
     for (key, slot) in slots.iter_mut().enumerate() {
         // SAFETY: `key < nkeys`, the buffer's key count.

@@ -29,7 +29,7 @@
 
 use core::sync::atomic::AtomicU64;
 
-use anyhow::{Result, ensure};
+use anyhow::{Result, bail, ensure};
 use tessera_core::{RowMask, RowMaskView};
 
 use super::batch::{check_record, unlinked};
@@ -107,7 +107,9 @@ impl<'a> SharedFilter<'a> {
         // SAFETY: the caller's contract; an `AtomicU64` has the size and
         // alignment of a `u64`, and every access goes through atomics.
         let all = unsafe { core::slice::from_raw_parts(words.cast::<AtomicU64>(), nwords) };
-        let (state, words) = all.split_first().unwrap();
+        let Some((state, words)) = all.split_first() else {
+            bail!("a shared filter without its state word");
+        };
         Ok(Self { state, words })
     }
 

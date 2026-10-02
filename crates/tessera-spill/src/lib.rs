@@ -102,11 +102,15 @@ fn put_u64(out: &mut [u8], at: usize, value: u64) {
 }
 
 fn get_u32(bytes: &[u8], at: usize) -> u32 {
-    u32::from_ne_bytes(bytes[at..at + 4].try_into().expect("four bytes"))
+    let mut word = [0; 4];
+    word.copy_from_slice(&bytes[at..at + 4]);
+    u32::from_ne_bytes(word)
 }
 
 fn get_u64(bytes: &[u8], at: usize) -> u64 {
-    u64::from_ne_bytes(bytes[at..at + 8].try_into().expect("eight bytes"))
+    let mut word = [0; 8];
+    word.copy_from_slice(&bytes[at..at + 8]);
+    u64::from_ne_bytes(word)
 }
 
 impl BlockHeader {

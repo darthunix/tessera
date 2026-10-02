@@ -3,7 +3,7 @@
 //! are the width's ([`IntLane::key`]); the whole-word hashes are its vector
 //! code.
 
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use tessera_core::{ColumnReader, RowMask, RowMaskView};
 
 use super::{IntLane, Side};
@@ -69,7 +69,7 @@ trait Selection {
 impl Selection for RowMaskView<'_> {
     #[inline(always)]
     fn word(&self, _: &RowMask<'_>, index: usize) -> u64 {
-        RowMaskView::word(self, index).unwrap()
+        RowMaskView::word_at(self, index)
     }
 }
 
@@ -158,7 +158,7 @@ where
         let base = index * 64;
         let out: &mut [u32; 64] = (&mut hashes[base..base + 64])
             .try_into()
-            .expect("a whole-word block implies a full word");
+            .context("a whole-word block implies a full word")?;
         let present = if reject {
             match step {
                 Step::First => T::hash_block(keys, out),
