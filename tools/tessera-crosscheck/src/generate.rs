@@ -651,6 +651,7 @@ fn aggregate(exprs: &HashMap<Ty, BoxedStrategy<Expr>>) -> BoxedStrategy<Expr> {
                     name,
                     arg: Some(boxed(arg)),
                     distinct,
+                    filtered: false,
                 };
                 // The least or greatest of equal values is any of them.
                 if matches!(name, "min" | "max") {
@@ -678,6 +679,7 @@ fn aggregate(exprs: &HashMap<Ty, BoxedStrategy<Expr>>) -> BoxedStrategy<Expr> {
                 name: "count",
                 arg: None,
                 distinct: false,
+                filtered: false,
             })
             .boxed(),
         ),

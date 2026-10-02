@@ -60,9 +60,24 @@ q`, as the suites' `agg_same` does, so their rows compare as multisets.
   unless one is an internal error (class XX). A batch evaluates a condition
   for its 64 rows before it computes their outputs, so of two rows that
   would each raise an error, the batch can meet the other first.
-- **Disagree.** Different rows; an error in one mode only; an internal
-  error; a timeout in one mode only (5 s); a lost connection, which means
-  the backend crashed.
+- **Agree: an error of a row one plan skips.** A data exception (class 22,
+  such as an overflow or a division by zero) in one mode while the other
+  returns rows. Plans differ in which rows they evaluate. A batch of 64
+  rows or a parallel worker runs past a LIMIT, the core's sorted grouping
+  stops at the limit, and a join may hash on a condition the other plan
+  checks only after a match, or skip a side whose other side is empty. To
+  tell this from a wrong overflow, the mode that returned rows runs the
+  relaxed query: no LIMIT, no DISTINCT, every aggregate filtered (the core
+  plans min and max of a constant as a subquery with LIMIT 1), joins
+  hashed so that they read every row, and with Tessera on the core's join
+  over Tessera's scans. Then it runs a probe of each table: every row that
+  passes the table's own WHERE conditions, through each largest part of
+  the query's expressions that reads that table alone. If either raises a
+  data exception too, the error is the data's.
+- **Disagree.** Different rows. An error in one mode only that neither
+  the relaxed query nor a probe confirms. An internal error. A timeout in
+  one mode only (5 s). A lost connection, which means the backend
+  crashed.
 
 Outputs that stand for equal values take no stand on which value shows:
 a group's key, a distinct or set-operation row, min and max, and every
