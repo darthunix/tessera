@@ -31,53 +31,9 @@ validate_kernels(const TessKernelOps *ops)
 						   "got version %u and %zu bytes.",
 						   TESS_KERNEL_OPS_ABI_VERSION, TESS_KERNEL_OPS_MIN_SIZE,
 						   ops->abi_version, ops->struct_size)));
-	if (ops->int4_hash == NULL || ops->int4_hash_next == NULL ||
-		ops->int8_hash == NULL || ops->int8_hash_next == NULL ||
-		ops->table_size == NULL || ops->table_create == NULL ||
-		ops->table_stats == NULL || ops->table_chunk_init == NULL ||
-		ops->table_append == NULL || ops->table_link == NULL ||
-		ops->table_link_grouped == NULL || ops->table_probe == NULL ||
-		ops->table_next_match == NULL || ops->table_gather == NULL ||
-		ops->table_record == NULL || ops->table_find_or_insert == NULL ||
-		ops->table_payloads == NULL ||
-		ops->table_scan == NULL ||
-		ops->table_regrow == NULL || ops->table_next_in_group == NULL ||
-		ops->table_accumulate == NULL || ops->table_gather_key == NULL ||
-		ops->table_bloom_words == NULL || ops->table_bloom == NULL ||
-		ops->bloom_probe == NULL || ops->bloom_shared_words == NULL ||
-		ops->bloom_shared_init == NULL || ops->table_try_build_bloom == NULL ||
-		ops->bloom_shared_ready == NULL || ops->bloom_shared_probe == NULL ||
-		ops->build_counters_init == NULL || ops->build_report == NULL ||
-		ops->build_take_chunk == NULL || ops->build_add_duplicates == NULL ||
-		ops->build_totals == NULL ||
-		ops->build_step == NULL ||
-		ops->table_split == NULL || ops->bloom_add == NULL ||
-		ops->table_find_or_insert_partitioned == NULL ||
-		ops->table_combine == NULL || ops->table_spill_words == NULL ||
-		ops->table_spill_init == NULL || ops->table_spill_split == NULL ||
-		ops->table_spill_partitions == NULL || ops->table_spill_add_bytes == NULL ||
-		ops->table_spill_evict == NULL || ops->table_spill_flags == NULL ||
-		ops->table_spill_records == NULL || ops->table_spill_start == NULL ||
-		ops->table_spill_take_file == NULL || ops->table_spill_take_alone == NULL ||
-		ops->round_step == NULL || ops->bloom_shared_add == NULL ||
-		ops->table_spill_evictions == NULL ||
-		ops->table_fingerprint == NULL ||
-		ops->spill_header_write == NULL || ops->spill_header_read == NULL ||
-		ops->spill_pack == NULL || ops->spill_unpack == NULL ||
-		ops->sort_item_words == NULL || ops->sort_items == NULL ||
-		ops->sort == NULL || ops->table_append_columns == NULL ||
-		ops->table_gather_scattered == NULL ||
-		ops->sort_top_candidates == NULL || ops->sort_top_push == NULL ||
-		ops->table_append_partitioned_columns == NULL ||
-		ops->spill_columns_init == NULL ||
-		ops->spill_columns_append_partitioned == NULL ||
-		ops->spill_columns_pack == NULL || ops->spill_columns_unpack == NULL ||
-		ops->sort_merge == NULL || ops->sort_key_lanes == NULL ||
-		ops->decimal_read == NULL || ops->decimal_write == NULL ||
-		ops->decimal_read_datum == NULL || ops->decimal_write_datum == NULL ||
-		ops->decimal_sum == NULL || ops->int4_in_set == NULL ||
-		ops->int8_in_set == NULL || ops->table_accumulate_sums == NULL ||
-		ops->table_clear_key == NULL || ops->table_gather_words == NULL)
+#define TESS_KERNEL_OP_MISSING(name) || ops->name == NULL
+	if (false TESS_KERNEL_OPS(TESS_KERNEL_OP_MISSING))
+#undef TESS_KERNEL_OP_MISSING
 		elog(ERROR, "Tessera kernels must provide every operation");
 }
 
