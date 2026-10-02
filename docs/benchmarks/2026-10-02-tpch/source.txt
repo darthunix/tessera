@@ -1,0 +1,30 @@
+HEAD 1f6a7e7204d72a5dcde21b21ed1ae521e3b9e96d
+status:
+command run
+sf 1
+schema pk
+workers 0
+work_mem 256MB
+jit off
+timeout 30 s
+pg_config /Users/darthunix/git/postgres-review/build-release/bin/pg_config
+postgres PostgreSQL 20devel
+shared_buffers 2GB
+sha256:
+  7d88b75f0c31e60e4218be5e38c971a61a8f2de67d96955475d97f928358e47a  /Users/darthunix/git/postgres-review/build-release/lib/tessera.dylib
+  dda93b425941e68133abb4fd8548457c17e48d3ccad5f43bc37589f6bbe058b8  /Users/darthunix/git/postgres-review/build-release/lib/tessera_nodes.dylib
+  cbb5a4a58953250771331f8dc14aeefc94d15a949b37e0903411de6899946f9e  /Users/darthunix/git/postgres-review/build-release/lib/tessera_kernels.dylib
+  b6ee31b5b2f36a2bfd60c63d08ec3206d9ecb7b17b8f047134b6a73cc9bbb769  /Users/darthunix/git/postgres-review/build-release/lib/libtessera_runtime.a
+  753ce236dff3eb515f21ba16ac975f7570da4aa4b9a582b0328b8a58ce2746f4  /Users/darthunix/git/postgres-review/build-release/bin/postgres
+started 2026-10-02 10:55:33.871516+07
+power AC Power
+load average { 2.25 2.08 2.25 }
+sizes:
+  region 57344
+  nation 57344
+  part 38371328
+  supplier 2105344
+  partsupp 161906688
+  customer 32866304
+  orders 247816192
+  lineitem 1057144832
