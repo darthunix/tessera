@@ -6930,6 +6930,18 @@
   строки логики, все наборы без изменений, A/B 3–6 раундов семейства, которому служит файл (anyagg/anykey/win — agg,
   join — hashjoin, sort — sort; в 4.25 такой перенос дал 0,99–1,01). Горячие швы остаются static inline в заголовке
   (правило «сборка без LTO»). После 9.11 для agg и sort.
+  Сделано 2026-10-02 частично (ветки cut-internal-h, cut-sort, cut-hashjoin поверх node-skeleton, по PR на разрез):
+  internal.h → registry.h, costs.h, abbrev.h, prune.h (internal.h пока зонтик; nodes/Makefile берёт все заголовки
+  каталога в зависимости); sort.c 2740 → sort.c 1214, sort_topn.c 430, sort_external.c 916, общее — sort_node.h (19
+  функций через файлы получили префикс sort_; каждая идёт раз на пачку или окно из 64 строк); hashjoin.c 2646 →
+  hashjoin.c 1409, hashjoin_begin.c 717, hashjoin_pairs.c 598, затем префикс join_ у 59 внешних hashjoin.h и static
+  для шести, нужных одному hashjoin_shared.c. Чистота переносов проверена скриптом (каждая строка старого файла —
+  в одном из новых, кроме static у ставших внешними). Не сделано: 1) agg.c — разрез задевает горячий путь: на каждую
+  строку через будущие файлы шли бы generic_advance → fast_advance, fast_group_decimals → generic_advance,
+  record_payload из обоих путей и из выдачи групп, keyform_lookup в next_chunk; agg.c читает поля KeyDict напрямую,
+  так что GenericAgg, FastState, AggValue, KeyDict, KeyForm и оба экземпляра simplehash уходят в agg.h; нужен
+  замысел с static inline в agg.h и A/B до слияния — делать в сессии замеров этапа 4; 2) hashjoin_bloom.h — с 9.15;
+  3) A/B семейств sort и join по разрезам — в сессии замеров (переносы не трогают горячих циклов, но план требует).
 
   9.13 Таблица операций ядер из одного списка. Станет: include/tessera/kernel_ops_list.h с #define TESS_KERNEL_OPS(X)
   X(int4_hash, tess_int4_hash) … (86 строк); kernel_ops.h раскрывает его в поля структуры (__typeof__(fn) *name — gnu C
