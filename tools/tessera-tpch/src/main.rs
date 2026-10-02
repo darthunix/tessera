@@ -11,6 +11,7 @@ mod load;
 mod measure;
 mod participation;
 mod queries;
+mod report;
 mod rundir;
 mod session;
 mod stats;
@@ -20,6 +21,7 @@ use std::time::Duration;
 
 use anyhow::{Result, bail};
 use clap::{Args, Parser, Subcommand};
+use console::style;
 
 use check::Sessions;
 use cluster::{Cluster, Pg};
@@ -35,9 +37,13 @@ use session::{Outcome, Session, SessionSettings};
     about = "Queries derived from TPC-H on a PostgreSQL cluster of its own, with Tessera on and off",
     long_about = None,
 )]
+#[command(args_conflicts_with_subcommands = true)]
 struct Cli {
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
+    /// Without a subcommand: run, with these arguments.
+    #[command(flatten)]
+    run: RunArgs,
 }
 
 #[derive(Debug, Subcommand)]
@@ -54,6 +60,20 @@ enum Command {
     /// with the data in shared buffers, in pairs of one execution per mode
     /// in ABBA order. Run it on an idle machine.
     Run(RunArgs),
+    /// Print a run again from its directory.
+    Report {
+        /// The run's directory, target/bench-runs/tpch-sf<N>-<id>.
+        dir: PathBuf,
+    },
+    /// Compare two runs query by query: Tessera on in B against A, with
+    /// off in B against A as the control of the machine. For two builds of
+    /// Tessera: run on the base, run on the change, compare.
+    Compare {
+        /// The run of the base.
+        a: PathBuf,
+        /// The run of the change.
+        b: PathBuf,
+    },
     /// Stop the cluster of the scale factor; its data stays.
     Stop(ClusterArgs),
 }
@@ -318,6 +338,15 @@ fn pg_settings(session: &mut Session<'_>) -> String {
     }
 }
 
+/// A verdict for the console: anything but `same` in red.
+fn painted(verdict: Option<&check::Verdict>) -> String {
+    match verdict {
+        None => "-".into(),
+        Some(check::Verdict::Same) => "same".into(),
+        Some(verdict) => style(verdict.label()).red().bold().to_string(),
+    }
+}
+
 /// A check done: its directory, its record so far, and the connections
 /// that ran it, with the statements the timing runs.
 struct Checked<'c> {
@@ -362,8 +391,8 @@ fn check_phase<'c>(
                 query.name(),
                 query.title,
                 check.rows.map_or("-".into(), |rows| rows.to_string()),
-                check.reference.as_ref().map_or("-", check::Verdict::label),
-                check.on_off.label(),
+                painted(check.reference.as_ref()),
+                painted(Some(&check.on_off)),
                 check.detail().unwrap_or_default()
             );
         },
@@ -393,6 +422,9 @@ fn finish(checked: &Checked<'_>) -> Result<()> {
     checked
         .dir
         .write("run.json", &serde_json::to_string_pretty(run)?)?;
+    checked.dir.write("summary.md", &report::markdown(run)?)?;
+    println!();
+    report::print(run)?;
     println!("results: {}", checked.dir.path.display());
     let name = |query: u8| queries::get(query).name();
     let mut failed: Vec<String> = run
@@ -468,31 +500,6 @@ fn run_command(args: &RunArgs, up: &Up) -> Result<()> {
     checked.dir.write("timings.csv", &measure::csv(&samples))?;
     checked.run.samples = samples;
     checked.run.failures = failures;
-    let summaries = measure::summaries(&checked.run.samples, &checked.run.failures)?;
-    let participation = &checked.run.participation;
-    let with_tessera = |query: u8| {
-        participation
-            .iter()
-            .any(|p| p.query == query && p.on.as_ref().is_some_and(|on| on.tessera_nodes() > 0))
-    };
-    let totals = stats::Totals::new(&summaries, with_tessera, args.threshold);
-    let geomean = |value: Option<f64>| value.map_or("-".to_string(), |value| format!("{value:.3}"));
-    println!(
-        "geometric mean of on/off: {} over {} queries, {} over the {} with Tessera nodes",
-        geomean(totals.geomean),
-        totals.queries,
-        geomean(totals.geomean_tessera),
-        totals.tessera
-    );
-    println!(
-        "sum of the medians: off {:.2} s, on {:.2} s; within {} %: {} faster, {} slower, {} even",
-        totals.off_ms / 1e3,
-        totals.on_ms / 1e3,
-        args.threshold,
-        totals.faster,
-        totals.slower,
-        totals.even
-    );
     finish(&checked)
 }
 
@@ -537,7 +544,24 @@ fn golden(args: &CheckArgs, meta: &Meta, all: &[participation::QueryParticipatio
 }
 
 fn main() -> Result<()> {
-    match Cli::parse().command {
+    let cli = Cli::parse();
+    let Some(command) = cli.command else {
+        let args = cli.run;
+        return with_cluster(&args.check.cluster, args.check.keep_running, |up| {
+            run_command(&args, up)
+        });
+    };
+    match command {
+        Command::Report { dir } => {
+            let (dir, run) = report::load(&dir)?;
+            report::print(&run)?;
+            println!("results: {}", dir.display());
+        }
+        Command::Compare { a, b } => {
+            let (_, a) = report::load(&a)?;
+            let (_, b) = report::load(&b)?;
+            report::compare(&a, &b)?;
+        }
         Command::Setup(args) => {
             bring_up(&args)?;
             println!(
@@ -593,7 +617,7 @@ mod tests {
             "indexed",
         ])
         .unwrap();
-        let Command::Setup(args) = cli.command else {
+        let Some(Command::Setup(args)) = cli.command else {
             panic!("{cli:?}");
         };
         assert_eq!(args.sf.to_string(), "10");
@@ -607,7 +631,7 @@ mod tests {
     #[test]
     fn shared_buffers_can_be_set() {
         let cli = Cli::try_parse_from(["tessera-tpch", "stop", "--shared-buffers", "4GB"]).unwrap();
-        let Command::Stop(args) = cli.command else {
+        let Some(Command::Stop(args)) = cli.command else {
             panic!("{cli:?}");
         };
         assert_eq!(args.sf.to_string(), "1");
@@ -620,10 +644,22 @@ mod tests {
     }
 
     #[test]
+    fn without_a_subcommand_it_runs() {
+        let cli = Cli::try_parse_from(["tessera-tpch", "--sf", "10", "--queries", "6"]).unwrap();
+        assert!(cli.command.is_none());
+        assert_eq!(cli.run.check.cluster.sf.to_string(), "10");
+        assert_eq!(cli.run.check.queries.queries.0, vec![6]);
+        assert_eq!(cli.run.pairs, 11);
+        let cli = Cli::try_parse_from(["tessera-tpch", "compare", "a", "b"]).unwrap();
+        assert!(matches!(cli.command, Some(Command::Compare { .. })));
+        assert!(Cli::try_parse_from(["tessera-tpch", "--sf", "1", "check"]).is_err());
+    }
+
+    #[test]
     fn run_takes_the_timing() {
         let cli = Cli::try_parse_from(["tessera-tpch", "run", "--queries", "core", "--pairs", "3"])
             .unwrap();
-        let Command::Run(args) = cli.command else {
+        let Some(Command::Run(args)) = cli.command else {
             panic!("{cli:?}");
         };
         assert_eq!(args.check.queries.queries.0, vec![1, 3, 6, 9, 18]);
@@ -646,7 +682,7 @@ mod tests {
             "4MB",
         ])
         .unwrap();
-        let Command::Check(args) = cli.command else {
+        let Some(Command::Check(args)) = cli.command else {
             panic!("{cli:?}");
         };
         assert_eq!(args.queries.queries.0, vec![1, 2, 3, 6, 9, 18]);

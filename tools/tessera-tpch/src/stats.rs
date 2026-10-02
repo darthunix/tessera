@@ -95,16 +95,43 @@ fn bootstrap(pairs: &[(f64, f64)]) -> (f64, f64) {
     let mut state = SEED;
     let mut on = vec![0.0; pairs.len()];
     let mut off = vec![0.0; pairs.len()];
-    let mut ratios: Vec<f64> = (0..RESAMPLES)
-        .map(|_| {
-            for slot in 0..pairs.len() {
-                let pair = pairs[(splitmix(&mut state) % pairs.len() as u64) as usize];
-                on[slot] = pair.0;
-                off[slot] = pair.1;
-            }
-            median(&on) / median(&off)
-        })
-        .collect();
+    interval(|| {
+        for slot in 0..pairs.len() {
+            let pair = pairs[pick(&mut state, pairs.len())];
+            on[slot] = pair.0;
+            off[slot] = pair.1;
+        }
+        median(&on) / median(&off)
+    })
+}
+
+/// The same interval of median(b) / median(a) for two runs whose
+/// executions are not paired: each side is resampled on its own.
+pub fn unpaired_interval(a: &[f64], b: &[f64]) -> (f64, f64) {
+    if a.is_empty() || b.is_empty() {
+        return (f64::NAN, f64::NAN);
+    }
+    let mut state = SEED;
+    let mut ra = vec![0.0; a.len()];
+    let mut rb = vec![0.0; b.len()];
+    interval(|| {
+        for slot in ra.iter_mut() {
+            *slot = a[pick(&mut state, a.len())];
+        }
+        for slot in rb.iter_mut() {
+            *slot = b[pick(&mut state, b.len())];
+        }
+        median(&rb) / median(&ra)
+    })
+}
+
+fn pick(state: &mut u64, len: usize) -> usize {
+    (splitmix(state) % len as u64) as usize
+}
+
+/// The 2.5 and 97.5 percentiles of a statistic over the resamples.
+fn interval(mut resample: impl FnMut() -> f64) -> (f64, f64) {
+    let mut ratios: Vec<f64> = (0..RESAMPLES).map(|_| resample()).collect();
     ratios.sort_by(f64::total_cmp);
     let at = |quantile: f64| ratios[((RESAMPLES - 1) as f64 * quantile).round() as usize];
     (at(0.025), at(0.975))
@@ -222,6 +249,18 @@ mod tests {
         ];
         let summary = Summary::new(1, &pairs);
         assert!(summary.low < 0.7 && summary.high > 1.3, "{summary:?}");
+    }
+
+    #[test]
+    fn unpaired_intervals() {
+        let a = [100.0, 101.0, 99.0, 100.0, 102.0];
+        let b = [80.0, 81.0, 79.0, 80.0, 82.0];
+        let (low, high) = unpaired_interval(&a, &b);
+        assert!(
+            low <= 0.8 && 0.8 <= high && low > 0.76 && high < 0.84,
+            "{low} {high}"
+        );
+        assert!(unpaired_interval(&[], &b).0.is_nan());
     }
 
     #[test]

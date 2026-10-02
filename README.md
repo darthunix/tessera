@@ -34,7 +34,8 @@ the core's time: PostgreSQL's window node stores every row the batch sort
 serves it), planning (0.03 to 0.05 ms more per query), and `LIMIT 1` (3 µs
 against 2). With parallel workers the batch plans gain less than the
 core's: the median speedup of the filter family is 3.4× serial and 2.1×
-with two workers. TPC-H results will join these when its harness lands.
+with two workers. Results of the queries derived from TPC-H will join
+these after the first measured run of [their harness](bench/tpch/README.md).
 
 ## Why trust the results
 
@@ -152,6 +153,10 @@ it.
 families of queries, each run with Tessera on and off in one backend over
 the same data, each statement prepared once per mode, with warm-up runs,
 medians of 31 runs and the plans of both modes recorded.
+[`bench/tpch`](bench/tpch/README.md) runs the 22 queries derived from TPC-H
+on a cluster of its own with one command, `cargo tpch`: it checks every
+answer against the published one and Tessera on against off, records which
+Tessera nodes each plan has, and times both modes in alternating pairs.
 [`docs/benchmarks`](docs/benchmarks/README.md) keeps the summaries of full
 runs with their commit and machine, and the plans of the cases cited here. The kernels' micro-benchmarks
 count instructions, cycles and branches on macOS

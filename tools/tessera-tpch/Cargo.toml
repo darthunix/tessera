@@ -10,6 +10,8 @@ publish.workspace = true
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
+comfy-table.workspace = true
+console.workspace = true
 indicatif.workspace = true
 postgres.workspace = true
 serde.workspace = true

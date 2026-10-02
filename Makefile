@@ -3,7 +3,8 @@ PG_CONFIG ?= pg_config
 CARGO ?= cargo
 
 .PHONY: all clean install installcheck $(SUBDIRS) \
-	rust rust-release rust-check rust-loom rust-clean
+	rust rust-release rust-check rust-loom rust-clean \
+	tpch tpch-check tpch-stop
 
 all: $(SUBDIRS)
 
@@ -50,3 +51,18 @@ rust-loom:
 
 rust-clean:
 	$(CARGO) clean
+
+# Queries derived from TPC-H on a cluster of their own, with Tessera on and
+# off (bench/tpch/README.md). TPCH_SF is the scale factor; TPCH_FLAGS adds
+# flags, such as --queries core or --workers 2.
+TPCH_SF ?= 1
+TPCH = PG_CONFIG="$(PG_CONFIG)" $(CARGO) run --release --locked -p tessera-tpch --
+
+tpch:
+	$(TPCH) run --sf $(TPCH_SF) $(TPCH_FLAGS)
+
+tpch-check:
+	$(TPCH) check --sf $(TPCH_SF) $(TPCH_FLAGS)
+
+tpch-stop:
+	$(TPCH) stop --sf $(TPCH_SF)

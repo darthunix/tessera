@@ -24,6 +24,8 @@ publish = false
 [workspace.dependencies]
 anyhow = "1.0.104"
 clap = { version = "4", features = ["derive"] }
+comfy-table = "8"
+console = "0.16"
 indicatif = "0.18"
 memchr = "2.8"
 postgres = "0.19"
