@@ -104,6 +104,23 @@ pub fn decimal_parts(max_scale: u32) -> BoxedStrategy<(i64, u32)> {
     (prop_oneof![edge, spread], scale).boxed()
 }
 
+/// A running sum below `bound` in magnitude, `bound` a power of ten: the
+/// edges, 0, ±1, ±10^k and ±(bound − 10^k), one time in two, otherwise any
+/// value below the bound.
+pub fn bounded_sum(bound: i128) -> BoxedStrategy<i128> {
+    let digits = bound.ilog10();
+    let edge = (0..=digits, any::<bool>(), any::<bool>()).prop_map(move |(k, below, negative)| {
+        let power = 10_i128.pow(k);
+        let magnitude = if below {
+            bound - power
+        } else {
+            power.min(bound - 1)
+        };
+        if negative { -magnitude } else { magnitude }
+    });
+    prop_oneof![edge, (-(bound - 1))..bound].boxed()
+}
+
 /// A batch's row count: none or a few, around one word and around two, or
 /// anything up to three words and a tail.
 pub fn nrows() -> BoxedStrategy<usize> {

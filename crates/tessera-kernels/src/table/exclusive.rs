@@ -831,6 +831,9 @@ pub(super) fn sum_terms<R: Region, T: Terms>(
             let mut taken = 0_u64;
             // The rows handed over in bulk: their values alone, added up by
             // group as the source reads them, counted by the groups' rows.
+            // At most 64 values of an i64 each: no group's bulk sum comes
+            // near the range of an i128, so it is added unchecked; the bound
+            // of the state is checked when the sum is taken into it.
             bulk[..ngroups].fill(0);
             if let Some(word) = sum.terms.fold_decimals(index, local_rows, |bit, value| {
                 bulk[usize::from(row_groups[bit % 64]) % LOCAL_GROUPS] += i128::from(value);

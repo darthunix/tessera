@@ -9,14 +9,14 @@
 
 use std::mem::MaybeUninit;
 
-use anyhow::Result;
+use anyhow::{Result, ensure};
 use proptest::prelude::*;
 use tessera_core::{RowMask, RowMaskView};
 use tessera_kernels::decimal::{
     self, Arg, Compare, Decimal, MAX_READ_SCALE, MAX_SCALE, Op, POWERS, Results, SUM_BOUND, Scales,
-    Source, Sum,
+    Source, Sum, SumState, Term,
 };
-use tessera_testing::{decimal_parts, flags, nrows, property};
+use tessera_testing::{bounded_sum, decimal_parts, flags, nrows, property};
 
 /// A column of arguments by row.
 #[derive(Clone, Debug)]
@@ -416,4 +416,150 @@ fn sum_adds(column: &Column, selected: &[u64]) {
         )
         .is_err()
     );
+}
+
+/// A sum: a value leaning to the bound's edges at a scale the batch reads,
+/// and a count.
+fn sum() -> impl Strategy<Value = Sum> {
+    (bounded_sum(SUM_BOUND), 0..=MAX_READ_SCALE, 0..1_000_000_u64).prop_map(
+        |(value, scale, count)| Sum {
+            value,
+            scale,
+            count,
+        },
+    )
+}
+
+/// `value` at scale `from` rescaled to `to`, at least `from`, exactly, or
+/// `None` past an i128.
+fn rescaled(value: i128, from: u32, to: u32) -> Option<i128> {
+    value.checked_mul(10_i128.checked_pow(to - from)?)
+}
+
+/// What a sum takes `value` at `scale` into, by exact arithmetic: the sum
+/// rescaled to the larger scale and the result, `None` past an i128.
+fn exact(sum: &Sum, value: i128, scale: u32) -> (Option<i128>, Option<i128>, u32) {
+    let to = sum.scale.max(scale);
+    let ours = rescaled(sum.value, sum.scale, to);
+    let total = ours.and_then(|ours| rescaled(value, scale, to)?.checked_add(ours));
+    (ours, total, to)
+}
+
+/// Whether a sum must take a term: its rescaled value and the result both
+/// stay below the bound.
+fn fits(ours: Option<i128>, total: Option<i128>) -> bool {
+    ours.is_some_and(|ours| ours.abs() < SUM_BOUND)
+        && total.is_some_and(|total| total.abs() < SUM_BOUND)
+}
+
+#[test]
+fn a_sum_adds_a_decimal_exactly_or_refuses_it_unchanged() {
+    property(
+        (sum(), decimal_parts(MAX_READ_SCALE)),
+        |(sum, (value, scale))| -> Result<()> {
+            let (ours, total, to) = exact(&sum, i128::from(value), scale);
+            let mut after = sum;
+            let taken = after.add(Decimal::new(value, scale).unwrap());
+            ensure!(
+                taken == fits(ours, total),
+                "taken {taken}: {sum:?} + {value}e-{scale}"
+            );
+            if taken {
+                ensure!(
+                    after
+                        == Sum {
+                            value: total.unwrap(),
+                            scale: to,
+                            count: sum.count + 1
+                        }
+                );
+            } else {
+                ensure!(after == sum, "a refused decimal changed {sum:?}");
+            }
+            Ok(())
+        },
+    );
+}
+
+#[test]
+fn a_sum_adds_another_sum_exactly_or_refuses_it_unchanged() {
+    property((sum(), sum()), |(sum, other)| -> Result<()> {
+        let (ours, total, to) = exact(&sum, other.value, other.scale);
+        let mut after = sum;
+        let taken = after.add_many(other.value, other.scale, other.count);
+        ensure!(
+            taken == fits(ours, total),
+            "taken {taken}: {sum:?} + {other:?}"
+        );
+        if taken {
+            ensure!(
+                after
+                    == Sum {
+                        value: total.unwrap(),
+                        scale: to,
+                        count: sum.count + other.count
+                    }
+            );
+        } else {
+            ensure!(after == sum, "a refused sum changed {sum:?}");
+        }
+        Ok(())
+    });
+}
+
+/// A decimal of the state's scale is added to its words without decoding
+/// them: the words come out as the decoded state's would, taken or not.
+#[test]
+fn a_state_takes_a_decimal_in_its_words_as_decoded() {
+    property(
+        (sum(), decimal_parts(MAX_READ_SCALE), any::<[bool; 3]>()),
+        |(sum, (value, scale), [nan, positive_infinity, negative_infinity])| -> Result<()> {
+            let state = SumState {
+                sum,
+                nan,
+                positive_infinity,
+                negative_infinity,
+            };
+            // The same scale one time in two or so: the fast path.
+            for scale in [scale, sum.scale] {
+                let term = Term::Decimal(Decimal::new(value, scale).unwrap());
+                let mut words = state.to_words();
+                let mut decoded = state;
+                let taken = SumState::add_to(&mut words, term);
+                ensure!(taken == decoded.add(term), "{state:?} + {term:?}");
+                ensure!(words == decoded.to_words(), "{state:?} + {term:?}");
+            }
+            Ok(())
+        },
+    );
+}
+
+/// The bound itself is never reached, whatever the scale and the sign: a
+/// sum 10^k short of it refuses a decimal of 10^k and takes 10^k − 1 to
+/// the last value below it, at every scale, one at a time and in a sum of
+/// many.
+#[test]
+fn a_sum_stops_one_short_of_its_bound() {
+    for scale in 0..=MAX_READ_SCALE {
+        for digits in 0..=17 {
+            let power = 10_i64.pow(digits);
+            for sign in [1_i64, -1] {
+                let start = Sum {
+                    value: i128::from(sign) * (SUM_BOUND - i128::from(power)),
+                    scale,
+                    count: 1,
+                };
+                let mut sum = start;
+                assert!(!sum.add(Decimal::new(sign * power, scale).unwrap()));
+                assert_eq!(sum, start);
+                assert!(!sum.add_many(i128::from(sign * power), scale, 1));
+                assert_eq!(sum, start);
+                assert!(sum.add(Decimal::new(sign * (power - 1), scale).unwrap()));
+                assert_eq!(sum.value, i128::from(sign) * (SUM_BOUND - 1));
+                let mut many = start;
+                assert!(many.add_many(i128::from(sign * (power - 1)), scale, 3));
+                assert_eq!((many.value, many.count), (sum.value, 4));
+            }
+        }
+    }
 }

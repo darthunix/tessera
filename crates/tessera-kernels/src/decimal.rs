@@ -738,6 +738,10 @@ impl Sum {
     /// reach [`SUM_BOUND`] or the decimal's scale passes 18.
     #[inline(always)]
     pub fn add(&mut self, decimal: Decimal) -> bool {
+        // The invariant the arithmetic below rests on: below the bound, a
+        // sum rescaled by up to 10^18 and a decimal of 18 digits rescaled
+        // by as much stay far inside an i128.
+        debug_assert!(self.value.abs() < SUM_BOUND, "a sum past its bound");
         let term = i128::from(decimal.value);
         let (value, scale) = if decimal.scale == self.scale {
             (self.value + term, self.scale)
@@ -774,6 +778,7 @@ impl Sum {
     /// scale passes 18.
     #[inline(always)]
     pub fn add_many(&mut self, value: i128, scale: u32, count: u64) -> bool {
+        debug_assert!(self.value.abs() < SUM_BOUND, "a sum past its bound");
         if scale > MAX_READ_SCALE {
             return false;
         }
@@ -1028,8 +1033,9 @@ impl SumState {
         if let Term::Decimal(decimal) = term
             && u64::from(decimal.scale) == words[3] & 0xFF
         {
-            let value = (u128::from(words[1]) << 64 | u128::from(words[0])) as i128
-                + i128::from(decimal.value);
+            let stored = (u128::from(words[1]) << 64 | u128::from(words[0])) as i128;
+            debug_assert!(stored.abs() < SUM_BOUND, "a sum state past its bound");
+            let value = stored + i128::from(decimal.value);
             // Below the bound in magnitude, both signs in one comparison.
             if (value + (SUM_BOUND - 1)) as u128 > (2 * (SUM_BOUND - 1)) as u128 {
                 return false;
