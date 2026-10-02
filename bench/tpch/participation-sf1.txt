@@ -1,0 +1,23 @@
+# The plans with Tessera on that tessera-tpch check expects: per query, the
+# share of the rows read through TessHeapScan and the Tessera nodes.
+# Rewritten by check --update-golden; a difference is reported, not failed.
+Q01  share 100%  TessAgg, TessFilter, TessHeapScan, TessSort
+Q02  share  98%  TessAgg, 3 TessFilter, 6 TessHashJoin, 7 TessHeapScan, TessLimit, TessPack, TessSort
+Q03  share 100%  TessAgg, 3 TessFilter, 2 TessHashJoin, 3 TessHeapScan, TessLimit, TessSort
+Q04  share  93%  TessFilter, TessHeapScan
+Q05  share 100%  2 TessFilter, 5 TessHashJoin, 6 TessHeapScan, TessPack, TessSort
+Q06  share 100%  TessAgg, TessFilter, TessHeapScan
+Q07  share  76%  2 TessFilter, 4 TessHashJoin, 5 TessHeapScan, TessPack
+Q08  share  99%  2 TessFilter, 6 TessHashJoin, 7 TessHeapScan, TessPack
+Q09  share  96%  TessFilter, 4 TessHashJoin, 5 TessHeapScan, TessPack
+Q10  share 100%  2 TessFilter, 3 TessHashJoin, 4 TessHeapScan, TessLimit, TessPack, TessSort
+Q11  share 100%  2 TessAgg, 2 TessFilter, 4 TessHashJoin, 6 TessHeapScan, TessSort
+Q12  share 100%  TessAgg, TessFilter, TessHashJoin, 2 TessHeapScan, TessSort
+Q13  share 100%  2 TessAgg, TessFilter, TessHashJoin, 2 TessHeapScan, TessPack, TessSort
+Q14  share 100%  TessAgg, TessFilter, TessHashJoin, 2 TessHeapScan
+Q15  share 100%  TessAgg, TessFilter, TessHashJoin, 2 TessHeapScan, TessPack, TessSort
+Q16  share 100%  TessAgg, 2 TessFilter, 2 TessHashJoin, 3 TessHeapScan, TessSort
+Q18  share 100%  TessAgg, 3 TessHashJoin, 4 TessHeapScan, TessLimit, 2 TessPack, TessSort
+Q19  share 100%  TessAgg, 2 TessFilter, TessHashJoin, 2 TessHeapScan
+Q21  share  98%  3 TessFilter, 3 TessHashJoin, 4 TessHeapScan, TessLimit, TessPack, TessSort
+Q22  share 100%  TessAgg, 2 TessFilter, 3 TessHeapScan

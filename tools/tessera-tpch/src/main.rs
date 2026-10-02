@@ -8,6 +8,7 @@ mod cluster;
 mod compare;
 mod config;
 mod load;
+mod participation;
 mod queries;
 mod rundir;
 mod session;
@@ -142,6 +143,10 @@ struct CheckArgs {
     /// it.
     #[arg(long)]
     keep_running: bool,
+    /// Write the plans of this run into the golden file of participation
+    /// (bench/tpch/participation-sf<N>*.txt) instead of comparing them.
+    #[arg(long)]
+    update_golden: bool,
 }
 
 /// The repository's root, which holds the queries and the run directories.
@@ -324,10 +329,18 @@ fn check_command(args: &CheckArgs, up: &Up) -> Result<()> {
         },
     )?;
     dir.write("results.txt", &check::results(&checks, &heading))?;
-    let run = rundir::Run { meta, checks };
+    println!("plans: EXPLAIN (ANALYZE, TIMING OFF) of every query that answered");
+    let participation = participation::run(&mut sessions, &checks, &dir.file("plans"))?;
+    dir.write("participation.txt", &participation::table(&participation))?;
+    golden(args, &meta, &participation)?;
+    let run = rundir::Run {
+        meta,
+        checks,
+        participation,
+    };
     dir.write("run.json", &serde_json::to_string_pretty(&run)?)?;
     println!("results: {}", dir.path.display());
-    let failed: Vec<String> = run
+    let mut failed: Vec<String> = run
         .checks
         .iter()
         .filter(|check| check.failed())
@@ -339,8 +352,53 @@ fn check_command(args: &CheckArgs, up: &Up) -> Result<()> {
             )
         })
         .collect();
+    failed.extend(run.participation.iter().filter_map(|query| {
+        query
+            .fault()
+            .map(|fault| format!("{} {fault}", queries::get(query.query).name()))
+    }));
     if !failed.is_empty() {
         bail!("wrong answers: {}", failed.join(", "));
+    }
+    Ok(())
+}
+
+/// Compares the plans with the golden file of their settings, or
+/// rewrites it.
+fn golden(args: &CheckArgs, meta: &Meta, all: &[participation::QueryParticipation]) -> Result<()> {
+    let Some(path) = participation::golden_path(
+        &root(),
+        &meta.sf,
+        &meta.schema,
+        meta.workers,
+        &meta.work_mem,
+    ) else {
+        println!(
+            "participation: no golden file for work_mem {}",
+            meta.work_mem
+        );
+        return Ok(());
+    };
+    if args.update_golden {
+        participation::update_golden(&path, all)?;
+        println!("participation: wrote {}", path.display());
+        return Ok(());
+    }
+    if !path.exists() {
+        println!(
+            "participation: no golden file {}; check --update-golden writes it",
+            path.display()
+        );
+        return Ok(());
+    }
+    let differences = participation::compare_golden(&path, all)?;
+    if differences.is_empty() {
+        println!("participation: as in {}", path.display());
+    }
+    for (query, golden, now) in differences {
+        println!("participation of {query} differs from {}:", path.display());
+        println!("  golden: {golden}");
+        println!("  now:    {now}");
     }
     Ok(())
 }

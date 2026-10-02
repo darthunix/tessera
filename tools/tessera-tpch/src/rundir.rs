@@ -17,6 +17,7 @@ use sha2::{Digest, Sha256};
 use crate::check::QueryCheck;
 use crate::cluster::Cluster;
 use crate::config::Scale;
+use crate::participation::QueryParticipation;
 
 /// What a run was: enough to read its results without its directory's
 /// other files, and to refuse comparing runs that differ in it.
@@ -45,6 +46,8 @@ pub struct Meta {
 pub struct Run {
     pub meta: Meta,
     pub checks: Vec<QueryCheck>,
+    #[serde(default)]
+    pub participation: Vec<QueryParticipation>,
 }
 
 pub struct RunDir {
