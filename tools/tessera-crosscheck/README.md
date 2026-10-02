@@ -86,9 +86,14 @@ either way. For these, numerics go through `trim_scale` and float8 gets
 `+ 0`, because 0 and 0.0, or 0 and -0, are equal and either may show, in
 the core too.
 
-A disagreement is shrunk by proptest within a minute and written to
+A disagreement is shrunk by proptest within a minute, keeping its class: a
+crash stays a crash, different rows stay different rows. It is written to
 `target/bench-runs/crosscheck/finding-<seed>.sql`. The file holds the
-data's SQL, the settings and the query in both modes. Its seed goes into
+query first found and what its modes did, the data's SQL, the settings
+and the shrunk query in both modes. The shrunk query runs once more on its
+own, and the file's first line says when it then agrees: a parallel plan
+can raise an error, or not, by which participant reaches a row first. Its
+seed goes into
 `seeds.txt`, whose seeds run first in every run, so that a fixed finding
 stays fixed. A seed draws the same queries only from the same generator, so
 a change to the generator rechecks those seeds by hand. The lasting record
