@@ -318,6 +318,18 @@ SELECT types_same($$SELECT count(*), sum(id) FROM types_dt WHERE num <> 3 AND nu
 SELECT types_same($$SELECT count(*), sum(id) FROM types_dt WHERE num > n::numeric OR n::int2::numeric = 7 OR (id::int8 * 1000000)::numeric > 3.5e9$$);
 SELECT types_same($$SELECT n::numeric, (id * 100000)::numeric, count(*) FROM types_dt GROUP BY 1, 2$$);
 SELECT types_same($$SELECT count(*), sum(id) FROM types_dt WHERE (id % 5)::numeric < (id % 3 * 16)::numeric OR (id % 5)::numeric = (id % 2 * 16 + 4)::numeric$$);
+-- An int8 of 19 digits to numeric: past the decimals' 18, it stays a
+-- numeric in a column of decimals (found by tessera-crosscheck, plan 9.8;
+-- the cast, a comparison with a numeric and arithmetic on it failed).
+CREATE TABLE types_big AS
+SELECT v, v::numeric AS m
+FROM unnest(ARRAY[-9223372036854775808, -1000000000000000000, -999999999999999999,
+                  0, 5, 999999999999999999, 1000000000000000000,
+                  9223372036854775807, NULL]::int8[]) AS v;
+SELECT types_same($$SELECT v::numeric, count(*) FROM types_big GROUP BY 1$$);
+SELECT types_same($$SELECT count(*) FROM types_big WHERE v = m$$);
+SELECT types_same($$SELECT v::numeric + 1, v::numeric * 2 FROM types_big$$);
+DROP TABLE types_big;
 \set VERBOSITY terse
 SELECT count(*) FROM types_dt WHERE d + 2147483000 > d;
 SELECT count(*) FROM types_dt WHERE d - (-2147483648) > d;

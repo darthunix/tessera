@@ -110,6 +110,10 @@ static const NumericFunction numeric_functions[] = {
  * The small integers the cache keeps (days, months, years, and around),
  * each in a slot of the block: a numeric below 10000 takes 8 bytes.
  */
+/* 10^TESS_DECIMAL_DIGITS: the least magnitude a decimal cannot hold. */
+#define DECIMAL_LIMIT INT64CONST(1000000000000000000)
+StaticAssertDecl(TESS_DECIMAL_DIGITS == 18, "DECIMAL_LIMIT is 10^18");
+
 #define SMALL_NUMERIC_MIN (-1024)
 #define SMALL_NUMERIC_MAX 4096
 #define SMALL_NUMERIC_SLOT 16
@@ -361,7 +365,12 @@ numeric_cast_evaluate(TessFunctionCall *call)
 				continue;
 			value = wide ? DatumGetInt64(column->values[row]) :
 				DatumGetInt32(column->values[row]);
-			if (decimals != NULL)
+			/*
+			 * A decimal holds at most TESS_DECIMAL_DIGITS digits: an int8
+			 * of 19 stays a numeric, as the rows the decimals do not take.
+			 */
+			if (decimals != NULL &&
+				value > -DECIMAL_LIMIT && value < DECIMAL_LIMIT)
 			{
 				values[row] = Int64GetDatum(value);
 				decimals[word] |= UINT64CONST(1) << bit;
