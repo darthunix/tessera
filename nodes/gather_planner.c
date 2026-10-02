@@ -212,11 +212,18 @@ discount_transfer(Path *path, double rows, double factor)
  * path at its own cost after the hooks that call this, and add_path keeps
  * the cheaper. A base or join relation only, as the core's gathers; for
  * the topmost one the core applies the final target to it as to any path.
+ *
+ * The gather reads a copy of the partial path. The join hook runs once a
+ * pair of inputs, and a later pair may add a partial path that dominates
+ * this one: add_partial_path frees the one it drops, which the gather
+ * would still read, and the memory goes to a path made later, a
+ * projection over the gather itself among them.
  */
 void
 tess_gather_add_paths(PlannerInfo *root, RelOptInfo *rel)
 {
 	Path	   *subpath;
+	CustomPath *copy;
 	GatherPath *gather;
 	Path	   *path;
 	double		rows;
@@ -228,6 +235,10 @@ tess_gather_add_paths(PlannerInfo *root, RelOptInfo *rel)
 	subpath = linitial(rel->partial_pathlist);
 	if (tess_path_node(subpath) == NULL)
 		return;
+	/* A batch path is a CustomPath; its children outlive it. */
+	copy = makeNode(CustomPath);
+	*copy = *castNode(CustomPath, subpath);
+	subpath = &copy->path;
 	rows = compute_gather_rows(subpath);
 	gather = create_gather_path(root, rel, subpath, rel->reltarget, NULL, &rows);
 	path = make_gather_path(root, gather);
