@@ -2169,7 +2169,7 @@ is needed leaves the results as they are.
 
 ## TessSort
 
-`TessSort` (`nodes/sort.c`, its planner `nodes/sort_planner.c`) stands in for the core's full `Sort` under
+`TessSort` (`nodes/sort.c`, with its top-N heap in `nodes/sort_topn.c` and its external sort in `nodes/sort_external.c`; its planner `nodes/sort_planner.c`) stands in for the core's full `Sort` under
 `ORDER BY`. It reads every batch of its batch child into `TessRows`
 (records of the table format, [runtime.md](runtime.md), "Keeping rows"),
 each with the sort keys in its slots and every output column in its
