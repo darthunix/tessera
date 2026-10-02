@@ -2705,6 +2705,7 @@
      отдельная задача, только тесты, которые Miri проходит за разумное время (часть уже помечена cfg(miri)).
   3) Найденное — исправлять, как обычные ошибки; README показывает «санитайзеры в CI», когда задача зелёная.
   Решить при начале: nightly для Miri (пин отдельной версии) и время задачи.
+  Решение 2026-10-02: выполняется как 9.7 (там рецепт флагов, окружения и бюджета времени).
   37. Случайные запросы против ядра (решение пользователя 2026-10-01: внести в план). Проблема: около 1000
   проверок «вкл./выкл.» в наборах написаны руками и покрывают то, о чём подумали; сочетания (типы × выражения ×
   NULL × узлы × параллельность × сброс на диск) не перебираются.
@@ -2718,6 +2719,7 @@
      число для README.
   Решить при начале: свой генератор (инструмент в tools/, клиент PostgreSQL на Rust — внешний крейт, по правилу о
   крейтах) или sqlsmith (готов, но генерирует в основном то, что остаётся ядру); объём прогона в CI.
+  Решение 2026-10-02: выполняется как 9.8 своим инструментом tools/tessera-crosscheck (там устройство).
   38. Падение параллельного hash join над общей таблицей со сбросом на диск (найдено 2026-10-01 при CI PR #2).
   Факты:
   - CI (macOS arm64, ядро с assertions): рабочий процесс упал в наборе join на LEFT JOIN с join-фильтром
@@ -6589,6 +6591,345 @@
   Уточнение 2026-10-02: инструмент 8.1 готов (абзац «Сделано» в 8.1), шаги 0–6 порядка старта выполнены; 8.10 сделан
   (своя модель времени соединения с курсом обмена к стоимости hash join ядра, агрегат без группировки на своей доле),
   среднее геометрическое on/off на SF 1 0,663 → 0,596; дальше шаги 7–11 порядка старта 8.1.
+  Уточнение 2026-10-02 (вечер, решение пользователя): раздел 9 (проверяемость и структура кода) выполняется целиком
+  до шагов 7–11; они — после него.
+
+  ### 9. Проверяемость и структура кода
+
+  Решение пользователя 2026-10-02 (обсуждение «внутри могут быть паники и неверная логика; блоки крупные, мы отошли от
+  малых проверяемых частей»): раздел выполняется целиком, подряд, до шагов 7–11 порядка старта 8.1; случайные запросы
+  против ядра — свой инструмент на Rust; перенос в Rust — все четыре пункта (9.15–9.18).
+
+  Что получится: восемнадцать пунктов, каждый — своя ветка с PR (правило 4.34), около 25 PR и 60 коммитов. Код:
+  .github/workflows/ci.yml и .github/scripts (ворота), tools/tessera-crosscheck и tools/tessera-pgtool (новые крейты),
+  crates/* (линты, итератор слов маски, входы раскладки и numeric), runtime/node.c и include/tessera/runtime_node.h
+  (скелет узла), nodes/* (разрезы файлов и заголовков), include/tessera/kernel_ops_list.h. Документы:
+  docs/writing-a-node.md и docs/runtime.md (скелет), docs/table.md и docs/spill.md (владельцы формул), README («Why
+  trust the results»: санитайзеры, случайные запросы, мутации вместо «Not yet»), этот план (абзацы «Сделано»).
+
+  Проблема. Факты по дереву на fa4dcab (три обзора 2026-10-02).
+  (1) Где ошибки были. Из шестнадцати записанных в плане ошибок двенадцать — в C-обвязке исполнителя: гонка позднего
+  участника общего сброса (4.38), рескан под TessGather (4.32), es_query_dsa (6a7f310), потеря начального состояния
+  группы (b742ebb), chgParam (8cb7ae4), порядок условий (f576ca3), разный предел 64 агрегатов у планировщика и
+  исполнителя (477109c), префикс GUC и CHECK_FOR_INTERRUPTS (4.24), смена дескриптора (4fb481a), неинициализированная
+  маска C-теста (4.33). В Rust — четыре: арифметика по значению-заполнителю NULL-строки (генератор не клал краевые
+  значения под NULL), Bloom с хэшированными ключами (мутация руками), right(INT_MIN), Sum::add при шкале выше 18.
+  (2) Что их ловит сегодня. Около 995 сравнений «вкл./выкл.» в 42 наборах SQL, 30 C-тестовых модулей, около 380
+  тестов Rust (свойства через tessera-testing, 256 случаев), модель loom таблицы (19 тестов, make rust-loom — не в
+  CI), Miri — вручную по трём командам из crates/tessera-capi/src/lib.rs. В CI наборы SQL идут только с
+  release-библиотекой Rust (rust.mk: RUST_PROFILE ?= release) — проверки переполнения и debug_assert выключены; clippy
+  — набор по умолчанию; -Werror для нашего C нет; санитайзеров, фаззинга и мутационного инструмента нет (мутации —
+  руками, записи «N из N» в плане). Пробы раскладки (tess_table_layout и три другие) сравниваются с C только в
+  тестах; _PG_init модуля tessera_kernels (kernels/int.c) проверяет лишь версии ABI и формата таблицы.
+  (3) Паники в Rust. Все 127 входов extern "C" под guard() (catch_unwind → TessStatus, c/status.rs); Rust не зовёт
+  PostgreSQL, longjmp через кадры Rust невозможен. В рабочем коде ядер 55 unwrap (около 45 — rows.word(i).unwrap() в
+  циклах по словам, в границах по построению), 7 expect, 34 unreachable! (22 — заглушки не-NEON сборки), в capi 13
+  assert границ строк. Не перехватывается: отказ выделения памяти (Vec::with_capacity по размеру из C в c/sort.rs,
+  c/table.rs, tessera-spill pack.rs — abort процесса), суммы numeric в i128 без проверки под инвариантом SUM_BOUND
+  (decimal.rs, table/exclusive.rs).
+  (4) Размер. C — 45,2 тыс. строк (nodes 27,9 тыс.), Rust — 28,8 тыс. (без тестов в файлах около 24,7 тыс.). В Rust
+  функций длиннее 100 строк две (table/exclusive.rs: sum_terms 176, resolve_rows 132); крупные блоки — в C: agg.c 4488
+  строк (agg_begin 411, group_batch 271), sort.c 2787, hashjoin.c 2647 (с hashjoin_spill.c 2285 и hashjoin_shared.c
+  1623), runtime/expr.c 2673 (eval_cond 248, eval_choice 165), agg_planner.c 1735, gather.c 1536 (fill_message 165).
+  nodes/hashjoin.h — 957 строк и 67 внешних функций без префикса (append_rows, batch_keys, reserve_rows, create_table
+  совпадают по имени со static в sort.c и agg.c); nodes/internal.h — общий заголовок всего: имена узлов, 38 внешних
+  GUC, внешние всех узлов, через kernel_ops.h тянет table.h, sort.h, spill.h, decimal.h и kernels.h в каждый файл.
+  (5) Дубли. Каждая операция ядер объявлена пять раз: вход Rust (127), прототип в include/tessera/*.h, указатель в
+  kernel_ops.h (86), присваивание в kernels/table.c (83), проверка NULL в bridge/kernel.c (83). Обвязка узлов: пять
+  обратных вызовов DSM побайтно одинаковы в filter.c, sort.c и agg.c; create_state ×11, страж обратного сканирования
+  ×8, блок проекции ×4, цикл выдачи строки в слот ×6, свои *_get_column с таблицей TessBatchOps ×9, рескан ребёнка
+  ×11; помощник unary (runtime/unary.c) используют только filter, limit и pack. Планировщик: цикл ключей сортировки
+  скопирован из sort_planner.c в gather_planner.c, выражение → колонка ребёнка ×4, цепочка filter → heap scan → scan
+  ядра ×3, ворота enable ×16, tess_plan_setop_columns применяется дважды. Одна логика на двух языках: размер записи
+  (header.rs и 11 мест C, четыре из них в планировщиках), кодирование ссылки на запись, индекс и число партиций, выбор
+  самой большой партиции, размер Bloom и ожидаемые строки, слова элемента сортировки (sort.rs, sort.c, gather.c),
+  раскладка колоночных кусков сброса тремя формулами (tessera-spill columns.rs, inline в spill.h, GATHER_NULL_LANES в
+  gather.c — у сообщений gather свой формат, писатель и читатель согласны, не ошибка, но третий способ записать одно и
+  то же), быстрый путь numeric в agg.c (fast_powers, FAST_BOUND, fast_add, fast_decimal_cmp, fast_rescale — то же, что
+  decimal.rs), формат частичного состояния суммы, сложение хэшей нескольких ключей. Внутри Rust: пары
+  simd/{filter,hash,aggregate,arith}.rs и *64.rs — по замыслу (NEON без 64-битных mul/min/max, вердикт 35 в 4.25), но
+  pack_lanes и обвязка побайтно совпадают; c/int32.rs и c/int64.rs — девять пар входов; selection, output, slots, Input,
+  Constant и with_source! трижды в c/decimal.rs, c/calendar.rs, c/text.rs; check_rows ×3, dispatch! определён пять раз,
+  FromDatum ×2, compare_op ×2. В C: store_value ×3 (решение 2026-09-29 — объединить в C), RowWriter (agg_spill.c) ≈
+  RunWriter (sort.c), int4/int8-вычислители kernels/int.c.
+  Вывод. Rust уже состоит из малых проверяемых частей; «крупные блоки» — это C-исполнители, выросшие по возможностям
+  (сброс, общая таблица, параллельность, setop, обобщённый путь, numeric), и именно там жили ошибки. Паники Rust
+  перехвачены и становятся ошибками запроса — кроме отказа памяти. Самый большой пробел проверок — не свойства ядер, а
+  сочетания в C-обвязке, о которых никто не подумал; его закрывает только оракул «тот же запрос без Tessera» на
+  случайных запросах плюс санитайзеры для ошибок памяти. Перенос в Rust помогает там, где логика чистая и уже
+  продублирована (формулы раскладки, numeric), а не в автоматах параллельности и сброса: там останется обвязка
+  PostgreSQL, вырастет только шов.
+
+  Что предлагаю сделать.
+
+  А. Ворота проверок — ловят паники, переполнения, ошибки памяти, гонки, неверные результаты.
+
+  9.1 Наборы SQL с отладочной библиотекой Rust в CI. Было: installcheck только с release. Станет: строка матрицы
+  задачи postgres на ubuntu с env RUST_PROFILE=debug (rust.mk берёт переменную через ?=, Makefile не меняется; пять
+  модулей RUST_TESTS тоже линкуют отладочный архив). Почему: самые дешёвые ворота против молчаливого переноса и
+  нарушенных debug_assert в Rust под ≈995 сравнениями. Около 8 строк YAML, один коммит. Проверка: задача зелёная;
+  нарочно сломанный debug_assert локально её роняет. Риск: наборы с допущениями о времени (interrupts) под медленными
+  ядрами — посмотреть один раз.
+
+  9.2 Ограничительные линты clippy и безошибочный итератор слов маски. Было: [workspace.lints] только rust; ≈45
+  rows.word(i).unwrap() в горячих циклах, 7 expect в ядрах, 13 assert границ в capi. Станет: [workspace.lints.clippy]
+  unwrap_used, expect_used, panic = deny, unreachable = warn; в тестах — cfg_attr(test, allow(...)) в lib.rs крейта и
+  строка allow в каждом файле crates/*/tests; у tools/* своё allow; в RowMaskView (crates/tessera-core/src/row_mask.rs)
+  pub fn words() -> ExactSizeIterator<Item = u64> поверх приватного word_at без Option, циклы — for (i, selected) in
+  rows.words().enumerate(); expect → ensure!/?; assert границ в capi → ensure! (guard классифицирует Err без раскрутки).
+  Не включать indexing_slicing и arithmetic_side_effects — шум, переносы ловит 9.1. Около 250 строк в ≈30 файлах, два
+  коммита. Проверка: make rust-check; это горячие циклы фильтра и добавления — приёмка 4.25: нормализованный
+  дизассемблер 13 функций бенчей при codegen-units=1 без различий, иначе PMU tessera-bench (filter_*, aggregate_*).
+
+  9.3 Проверка раскладки при загрузке модуля. Станет: один static inline tess_kernels_layout_matches() в
+  include/tessera/kernels.h со списком размеров и смещений из тестов (заголовок по-прежнему компилируется сам —
+  проверка test/installed), вызов из _PG_init tessera_kernels с ereport(ERROR, "incompatible Tessera kernels library
+  layout"), оба теста зовут тот же inline — список один. Почему: защищает каждое изменение границы C↔Rust в 9.15–9.17
+  и ловит смесь старого модуля с новым архивом. Около 80 строк, один коммит. Проверка: нарочно переставленное поле
+  #[repr(C)] — модуль не загружается.
+
+  9.4 -Werror для нашего C в CI. Станет: make COPT=-Werror и make install COPT=-Werror в ci.yml (Makefile.global
+  добавляет COPT к CFLAGS и LDFLAGS; переменная командной строки доходит до $(MAKE) -C). В Makefile не класть —
+  компиляторы пользователей разные. Две строки плюс исправления всплывших предупреждений gcc 13 / clang 17, по классу
+  предупреждения на коммит; предупреждения из заголовков ядра — -Wno-… только в CI.
+
+  9.5 make rust-loom в CI. Станет: задача loom на ubuntu (модель скалярная), свой ключ кэша, timeout-minutes 30. Шаг
+  0 — time make rust-loom локально, число в абзац «Сделано». Модели общей сборки и раундов задают preemption_bound = 2–3
+  явно (table/loom.rs); если не укладывается — переменная окружения для CI (граница 2), в исходнике границы не снижать;
+  max_branches поднять, если модель раундов упрётся.
+
+  9.6 Miri в CI. Станет: задача на ubuntu x86_64 (NEON-пути вырезаны cfg), nightly закреплён только в workflow
+  (RUSTUP_TOOLCHAIN), не в rust-toolchain.toml; тесты — три команды из crates/tessera-capi/src/lib.rs плюс --lib
+  tessera-kernels, tessera-spill, tessera-core; без benchmark.rs; PROPTEST_CASES=16 (256 под Miri — часы; если
+  tessera_testing::property задаёт 256 явно — читать переменную там); бюджет 15–20 минут, лишнее — cfg_attr(miri,
+  ignore) (сейчас таких пометок в crates/ нет, текст 4.36 ошибался). Смена пина — отдельный коммит.
+
+  9.7 Санитайзеры (бывший 4.36, здесь целиком). Станет: вторая сборка ядра в кэше по ревизии — build-postgres.sh с
+  третьим аргументом «asan»: CFLAGS -O1 -g -fno-omit-frame-pointer -fsanitize=address,undefined
+  -fno-sanitize-recover=all, --enable-cassert; модули Tessera и тестовые модули берут флаги из pg_config — без правок
+  Makefile; архив Rust не инструментирован (его malloc всё равно под красными зонами перехватчика; его собственные
+  чтения не проверяются — принято, см. ниже). Окружение: ASAN_OPTIONS=detect_leaks=0 (контексты памяти ядра)
+  :abort_on_error=1:detect_stack_use_after_return=0 (ломает проверку глубины стека ядра) :detect_odr_violation=0
+  (libtessera_runtime.a линкуется в tessera_nodes и семь тестовых модулей) :strict_string_checks=1;
+  UBSAN_OPTIONS=print_stacktrace=1:abort_on_error=1. LD_PRELOAD не нужен — инструментирован сам сервер. alignment
+  сначала включён; если ядро или упакованные читатели сброса (spill.h) и дорожки gather на нём падают — это находка,
+  затем -fno-sanitize=alignment. Под этой же задачей — пять C-модулей тестов с архивом Rust (граница с
+  инструментированными буферами C). Rust под -Zsanitizer=address не делаем: nightly и build-std, тот же класс закрывают
+  Miri (9.6) и 9.1; вернуться, если ошибка границы ускользнёт от обоих. Ожидание: 10–15 минут с кэшем ядра. Один коммит
+  скрипт + YAML, находки — отдельными коммитами; известный шум ICU/readline — файл suppressions под .github/.
+
+  9.8 Случайные запросы против ядра (бывший 4.37; решение 2026-10-02: свой инструмент). Станет: крейт
+  tools/tessera-crosscheck; общий код кластера, сессии и настроек сервера из tools/tessera-tpch (cluster.rs, session.rs,
+  config.rs) — в маленький библиотечный крейт tools/tessera-pgtool первым коммитом без изменения поведения (compare.rs
+  остаётся в tpch: оракул здесь проще). Схема: пять таблиц (факт, измерение, широкая, текстовая, крошечная) с
+  int2/int4/int8, numeric трёх шкал, text под C и ICU, date и timestamp, bool, float8 (сравнивается только там, где
+  точно: count/min/max); доля NULL по колонке 0/10/50/100 %, краевые значения как в tessera-testing (INT_MIN/MAX,
+  пустая строка, numeric на 10^18, границы дат), 1–5 тыс. строк, данные по зерну. Грамматика — типизированное дерево,
+  не строки: сканы с WHERE (сравнения, арифметика с кандидатами на переполнение, LIKE, BETWEEN, IN короткие и
+  длинные, IS NULL, CASE, COALESCE, арифметика дат, округление numeric), соединения (inner/left/right/full, semi/anti
+  через EXISTS/NOT EXISTS/IN, несколько ключей, остаточные условия, ключи int4 против int8), GROUP BY/HAVING с набором
+  агрегатов узла (count, sum, avg, min, max, bool_and, count(DISTINCT)), DISTINCT, ORDER BY с добавлением уникальной
+  колонки при LIMIT/OFFSET (иначе и ядро недетерминировано), UNION/INTERSECT/EXCEPT [ALL], подзапросы в FROM;
+  настройки на запрос: max_parallel_workers_per_gather ∈ {0, 2} с обнулением цен как в test/sql/parallel.sql, work_mem
+  ∈ {64kB, 256kB, 4MB}, jit = off, statement_timeout = 5s. Нарочно порождать и за пределами поддержанного подмножества
+  (docs/limitations.md) — оракул верен, ворота планировщика проверяются даром. Оракул: SELECT array_agg(q::text ORDER
+  BY q::text) FROM (…) q с tessera.enable on и off в одном соединении — ровно agg_same (test/sql/agg.sql); вердикты:
+  equal, MISMATCH, расхождение класса ошибки (одна сторона упала или другой SQLSTATE), CRASH (соединение потеряно —
+  переподключиться и записать), TIMEOUT с одной стороны (зависание); после каждой пачки запросов SELECT 1 на обеих
+  сторонах. Уменьшение: дельта-отладка по дереву (убрать элемент списка — колонку, соединение, предикат, ключ, ветвь
+  set-операции, настройку; заменить подвыражение листом; уменьшить константы и число строк), пока вердикт держится; на
+  выходе минимальный SQL с настройками как готовый случай набора (форма agg_same) и зерно. Зёрна:
+  tools/tessera-crosscheck/seeds.txt — каждое, что когда-то нашло, проигрывается первым, затем N свежих от базового.
+  CI: шаг после installcheck в задаче ubuntu, свой кластер (initdb ≈ 3 с), --seed 1 --queries 400 --time-limit 90s,
+  бюджет ≤ 2 минут; локально make crosscheck QUERIES=…; число запросов и расхождений долгого прогона — в README.
+  Смещение генератора (всё уходит ядру) видно по участию пакетных узлов из EXPLAIN (participation.rs инструмента tpch
+  уже классифицирует планы) — считать и печатать. 9–10 коммитов, около 3 тыс. строк: pgtool; скелет (схема, данные,
+  цикл, оракул, отчёт); скалярные выражения; соединения; агрегаты и группировки; ORDER BY/LIMIT, set-операции,
+  подзапросы; измерение настроек; уменьшитель; CI, зёрна, README; затем по коммиту на находку.
+
+  9.9 cargo-mutants. Станет: .cargo/mutants.toml (исключить tools/**, tessera-testing, loom.rs, benches, fmt/Debug по
+  regex; timeout_multiplier 3; --locked), цель make rust-mutants для полного прогона на своей машине (часы, по
+  требованию), задача CI на pull_request при изменениях в crates/**: cargo mutants --in-diff по diff к базе,
+  timeout-minutes 25, инструмент ставится готовым бинарём (install-action), не сборкой; выжившие мутанты роняют задачу,
+  таймауты и несобираемые — нет. Первый полный прогон — выжившие становятся малыми тестовыми коммитами. Для C
+  мутационного инструмента нет (mull, dextool — плагины clang, с PGXS не дружат); остаётся привычка: PR с логикой в C
+  называет одну ручную мутацию в абзаце Validation; остальное закрывают 9.7 и 9.8. После 9.2, чтобы задача мутантов
+  не спорила с линтами.
+
+  9.10 Неперехваченные места. Станет: (а) Vec::with_capacity по размеру из C (c/sort.rs, c/table.rs, tessera-spill
+  pack.rs) → Vec::new() + try_reserve_exact(n)? с новым классом OutOfMemory → SQLSTATE 53200 в classify: C поднимает
+  «out of memory» вместо abort; format! внутри guard — принять (малое сообщение на пути ошибки), записать в список
+  безопасности lib.rs; C-тест с абсурдной ёмкостью tess_sort_* ждёт статус, не падение; (б) numeric: Sum::add/add_many
+  (decimal.rs) и sum_terms (table/exclusive.rs) под инвариантом SUM_BOUND — debug_assert на входе и выходе (живы в 9.1),
+  свойство на значениях у SUM_BOUND − 1 и множителях 10^18 (сейчас только единичные тесты), мутационный прогон
+  модуля; checked_* в построчном цикле — только если tessera-bench aggregate_* покажет ≤ 1 % инструкций: замерить один
+  раз и записать; (в) unreachable!: 22 заглушки не-NEON сборки убрать — cfg на месте диспетчеризации, а не
+  тело-заглушка; оставшиеся 12 → bail!("internal: …") по имеющимся путям Result (guard даёт XX000 без раскрутки). Три
+  коммита, около 150 строк. После 9.2.
+
+  Б. Реорганизация C без переноса логики — малые файлы, одно место на образец.
+
+  9.11 Скелет узла в runtime/ поверх помощника unary. Было: runtime/unary.c и runtime_unary.h уже владеют связкой
+  входа и выхода, пересылкой запроса, порядком рескана и счётчиками для узлов с одним ребёнком — пользуются трое.
+  Станет: include/tessera/runtime_node.h (в список runtime.h) и runtime/node.c: 1) макрос
+  TESS_NODE_STATS_CALLBACKS(prefix, State, stats_field, NCOUNTERS, counters_fn) — пять обратных вызовов DSM как в
+  filter.c (макрос, не функции: обратные вызовы получают только CustomScanState *, функции нужна договорённость о
+  расположении указателя — ABI не трогаем); принимают filter, sort, agg; heapscan, append, hashjoin и gather со своими
+  общими областями оставляют свои, но половину со счётчиками зовут те же tess_shared_stats_*; 2)
+  tess_output_next_row(TessOutput *, TessRowCursor *, slot) — цикл выдачи из runtime/output.c вместо пяти копий
+  (unary.c, heapscan.c, hashjoin.c, qual.c, project.c); 3) tess_projection_create_for(css, scan_tuple, base_columns,
+  computed) — блок проекции ×4; 4) tess_rescan_child(parent, child, input) — UpdateChangedParamSet + ExecReScan +
+  tess_input_rescan ×11 (tess_unary_rescan зовёт его же); 5) tess_plain_batch_ops — TessBatchOps над массивом
+  TessDatumColumn вместо девяти *_get_column (сверить форму с child_column в hashjoin.h и include/tessera/batch.h до
+  написания); 6) мелкие: tess_explain_kb (×8 округлений), tess_node_require_forward(eflags, name) (×8 стражей),
+  tess_node_plan_info (×11). Принятие по узлу на коммит: filter → limit → pack (уже unary, доказать помощников) → sort →
+  agg → heapscan → hashjoin → gather → append. Ожидание: минус 600–700 строк в nodes/; главное — одно место на образец
+  (как tess_status_check и tess_shared_stats_setup в 4.25) и скелет для узлов Greengage (§7). Проверка: 42 набора без
+  изменений; семейство tax (цена границы пачки; цикл выдачи на ней) A/B REPETITIONS=11 — обязательно для коммита с
+  tess_output_next_row. Документы: docs/writing-a-node.md, docs/runtime.md. После 9.7.
+
+  9.12 Разрезы крупных файлов по заботам (чистые переносы). agg.c 4488 → agg.c (begin, exec, выдача, обратные вызовы,
+  ≈1300), agg_fast.c (быстрый путь и состояния сумм, ≈900), agg_generic.c (обобщённый путь переходов и AggValue),
+  agg_keydict.c, agg_setop.c — типы швов уже в agg.h (4.25 п. 14). hashjoin.c 2647 → hashjoin.c (таблица, проба,
+  выдача), hashjoin_begin.c (begin, explain, обратные вызовы), hashjoin_pairs.c (пары, плотное заполнение, отметки),
+  решение о Bloom с константами — hashjoin_bloom.h (static inline, см. 9.15). sort.c 2787 → sort.c (begin, exec,
+  сравнения), sort_topn.c (куча, compact_rows, choose_topn), sort_external.c (отрезки, слияние, plan_external,
+  RunWriter — сравнить с RowWriter из agg_spill.c для позднейшего объединения). nodes/hashjoin.h: префикс join_ у 67
+  внешних (sed, коммит), затем static по файлам то, что нужно одному файлу (коммит). nodes/internal.h → nodes/costs.h
+  (38 GUC), nodes/registry.h (имена и версии данных), nodes/abbrev.h, nodes/prune.h; internal.h — зонтик на один выпуск,
+  затем каждый .c включает своё. Метод как в 4.25 п. 13–15: один разрез — один PR, просмотр git diff --color-moved, ни
+  строки логики, все наборы без изменений, A/B 3–6 раундов семейства, которому служит файл (anyagg/anykey/win — agg,
+  join — hashjoin, sort — sort; в 4.25 такой перенос дал 0,99–1,01). Горячие швы остаются static inline в заголовке
+  (правило «сборка без LTO»). После 9.11 для agg и sort.
+
+  9.13 Таблица операций ядер из одного списка. Станет: include/tessera/kernel_ops_list.h с #define TESS_KERNEL_OPS(X)
+  X(int4_hash, tess_int4_hash) … (86 строк); kernel_ops.h раскрывает его в поля структуры (__typeof__(fn) *name — gnu C
+  под PGXS, MSVC нет), kernels/table.c — в присваивания, bridge/kernel.c — в проверки NULL; три копии из пяти уходят,
+  прототипы остаются в рукописных заголовках (они несут контракт и типы PostgreSQL), TESS_KERNEL_OPS_MIN_SIZE — через
+  последний элемент списка; C-тест обходит список и проверяет, что каждый указатель не NULL. cbindgen не сейчас: он
+  породил бы ровно ту копию, которая несёт комментарии контракта, а таблицу операций не порождает; вернуться, если
+  входы начнут часто меняться (9.15–9.17 добавят около десяти). Около 150 строк в минус, один коммит; проверка —
+  наборы kernel_ops, kernels_module, bridge и test/installed (заголовок списка компилируется сам). До 9.15.
+
+  9.14 Помощники планировщика. tess_planner_sort_keys для цикла sort_planner.c и gather_planner.c; выражение → колонка
+  ребёнка из runtime/planner.c наружу через planner.h вместо копий в join_planner.c, agg_planner.c, sort_planner.c;
+  tess_scan_core_path() вместо трёх цепочек в scan_planner.c; tess_planner_enabled(root) static inline вместо 16 ворот;
+  убрать второе применение tess_plan_setop_columns в sort_planner.c и agg_planner.c, оставить в runtime/planner.c (если
+  удаление меняет план в наборах union, plan или sort — второе применение было несущим, и план должен сказать почему).
+  Около пяти коммитов, минус 200 строк; проверка — наборы planner, plan, union, sort, join, parallel и случай plan_time
+  семейства join (цена планировщика не должна сдвинуться).
+
+  В. Перенос чистой логики в Rust — одна формула, один владелец, проверка свойствами.
+
+  9.15 Формулы раскладки. Порядок: раскладка колоночных кусков сброса (три формулы), затем холодные формулы, затем
+  закрепление горячих inline. 1) Куски сброса: владелец — tessera-spill columns.rs (null_lanes = div_ceil(64).max(1),
+  lanes, pack_slack); inline в spill.h ему равны; GATHER_NULL_LANES в gather.c без минимума 1, дорожки в gather.c и
+  sort.c разбираются руками → заменить макрос и ручные разборы на inline spill.h (поведение меняется только при нуле
+  колонок — проверить, бывает ли сообщение без колонок, например count(*) под TessGather, и добавить случай в parallel
+  до правки); C-тест по words 0..=4096 сверяет tess_spill_columns_null_lanes с новым тестовым входом Rust; рабочий
+  inline остаётся в C (он построчный). 2) Размер записи: Rust header.rs record_size; C ×11 (agg_spill.c, hashjoin.c,
+  hashjoin_spill.c ×3, hashjoin_shared.c, sort.c, join_planner.c и три в agg_planner.c) — всё холодное → один вход
+  tess_table_record_size(nkeys, payload, &size) рядом с tess_table_size; планировщик зовёт его со своей оценкой нагрузки;
+  переходный C-тест: старая формула == Rust на nkeys 1..MAX × payload 0..1k, затем формулы C удаляются. 3) Партиции:
+  цикл числа партиций agg_spill.c и hashjoin_spill.c и выбор самой большой в agg_spill.c, hashjoin_spill.c,
+  hashjoin_shared.c против shared_spill.rs — сначала убедиться, что два C-цикла задуманы одинаковыми; если да —
+  tess_spill_plan(expected, limit, record, min_chunk, page, shift, &n, &chunk_len); выбор самой большой уходит вместе с
+  учётом в 9.17. 4) Bloom: размер и предел hash_mem/8 (hashjoin_spill.c, hashjoin_shared.c) → tess_bloom_plan(inner_rows,
+  build_rows, hash_mem, &words) поверх bloom.rs words_for; правило решения у планировщика (join_planner.c) и исполнителя
+  (decide_bloom) разное по замыслу (прогноз против выборки) — объединить только константы и правило в один static
+  inline join_bloom_wanted (hashjoin_bloom.h из 9.12). 5) Слова элемента сортировки: sort.rs против sort.c
+  (plan_external) и gather.c (merge_key_words) → tess_sort_layout_words(keys, nkeys, &item_words, &run_words, &key_bits)
+  рядом с tess_sort_layout. 6) Ссылки на запись и индекс партиции — построчные, остаются в C, но в одном inline каждая
+  (tess_table_ref*, tess_table_partition в table.h), закреплены пробой TESS_TABLE_LAYOUT_UNIT_BITS, которая с 9.3
+  проверяется при загрузке; если вызывающие маршрутизируют строки пачкой — пакетный вход tess_table_partition_rows.
+  Шесть коммитов, Rust +150, C −150; проверка по коммиту: переходный тест равенства, наборы spill, join, agg, sort,
+  parallel; семейство spill (CASES= один join и один group, REPETITIONS=5) для партиций. После 9.13 и 9.3.
+
+  9.16 Быстрый путь numeric в agg.c на decimal.rs. Есть входы (c/decimal.rs): filter, compute, to_int4/8, read, sum,
+  write, read_datum, write_datum; групповые суммы — tess_table_accumulate_sums; в Rust есть Sum::add и add_many,
+  SumState::{add_to, merge, from_words, to_words}, Decimal::compare. Не хватает: (а) tess_decimal_extreme(values, rows,
+  want_max, inout {value, scale, has, row}) — пакетный min/max, возвращающий выигравшую строку (C хранит Datum;
+  numeric_larger при равенстве отдаёт второй аргумент, что решает показываемую шкалу — ядро применяет то же правило
+  «равный замещает») — вместо fast_decimal_cmp, fast_extreme_batch, fast_decimal_extreme; (б)
+  tess_decimal_sum_state_add(words[4], value, scale) -> bool и tess_decimal_sum_state_merge(a, b) -> bool над форматом
+  TESS_TABLE_SUM_WORDS — вместо fast_add, fast_rescale, fast_merge, FAST_BOUND, fast_powers; (в) fast_group_decimals —
+  проверить, не тот ли это разброс по группам, что уже делает tess_table_accumulate_sums; если он кормит обобщённые
+  состояния — tess_decimal_sum_states(values, scales, rows, group_index, states), один вызов на пачку. fast_sum и
+  fast_read, вероятно, уже зовут decimal_sum и decimal_read — убедиться и оставить. Rust +250 со свойствами на краях
+  SUM_BOUND, C −350, три коммита. Проверка: numeric-случаи наборов agg и types, семейства anyagg и win (numeric sum,
+  min, max) A/B, тесты границы из 9.10; сперва случаи «вкл./выкл.» на ничьи 1.0 против 1.00. После разреза agg_fast.c
+  (9.12) — diff обозрим.
+
+  9.17 Чистые куски исполнителя (пакетный вход — один вызов на пачку, не на строку). 1) Отметки hash join: mark_pairs
+  → tess_table_mark(refs, n, record_size, marks), next_tail → tess_table_next_unmarked(table, chunk, &byte, record_size,
+  marks, refs_out, cap) -> count; буферы ссылок и отметок остаются palloc в C; next_matches (ExprContext) и
+  fill_compact (MemoryContextReset, автомат раунда) остаются в C. Проверка: RIGHT/FULL/anti набора join при work_mem
+  64kB, семейство join (full, right). 2) Локальный учёт сброса: неатомарная реализация трейта Spill, общая с
+  shared_spill.rs и моделью loom (заметка 4.25), экспорт tess_spill_local_* зеркально c/shared_spill.rs — agg_spill.c и
+  hashjoin_spill.c ведут байты по партициям, флаги «на диске», разделение и выбор самой большой через один API в обоих
+  режимах; BufFile остаётся в C. Риск средний: именно здесь жили записанные ошибки — только при работающем 9.8.
+  Зависит от 9.15 п. 3. 3) Top-N: tess_sort_topn_offer(heap, len, bound, items, refs) -> маска оставленных, один вызов
+  на пачку; C хранит значения оставленных и уплотняет как сейчас (compact_rows; половина с tess_rows_gather остаётся);
+  choose_topn и plan_external → tess_sort_plan(bound, words, nkernel, ncolumns, generic, work_mem), если sort_planner.c
+  повторяет модель памяти (тогда один владелец у планировщика и исполнителя), иначе оставить. Проверка: набор sort,
+  семейство sort (topn) A/B. 4) Сообщение TessGather в формате колоночных кусков сброса: fill_message — один вызов
+  вида tess_spill_columns_append на пачку, лидер читает дорожки читателями spill.h; merge_key_words — вход из 9.15 п. 5;
+  shm_mq и копии by-reference Datum остаются в C. Зависит от 9.15 п. 1. Проверка: набор parallel, семейство probe.
+  5) Отложено: словарь ключей keydict (Datum-ключи, память под MemoryContext — перенос означал бы выделение памяти
+  Rust под горячую структуру; вернуться, если 9.8 найдёт там ошибки); trim_batch в limit.c не переносить — 45 строк
+  по словам, без истории ошибок, а TessLimit — модуль без ядер, который собирает test/installed. Четыре коммита, Rust
+  +600, C −500.
+
+  9.18 Дубли внутри Rust. simd: только побайтно одинаковое (pack_lanes, обвязка) в simd/lanes.rs, NEON-блоки по
+  ширине остаются (вердикт 35 в 4.25), int32/lane.rs и int64/lane.rs — реализации IntLane по ширине, оставить; capi
+  c/int32.rs и c/int64.rs — macro_rules! int_entry_points!, оба набора символов из одного тела (текстовый макрос —
+  машинный код одинаков по построению); Constant, with_source!, with_sources! из c/calendar.rs, c/decimal.rs, c/text.rs
+  → один c/source.rs, обобщённый по типу значения; check_rows → один в tessera-core рядом с маской; dispatch! → один
+  макрос уровня модуля; FromDatum → один (публичный в column.rs); compare_op → TryFrom<c_uint> на каждом enum с одной
+  таблицей. Проверка — рецепт 4.25: нормализованный дизассемблер 13 функций бенчей при codegen-units=1 без различий
+  на каждом коммите; один прогон PMU (tessera-bench --base) по задетым семействам в конце серии — пользователь. Шесть
+  коммитов, минус 700 строк. Риск: замыкания по значению и инлайн в помощниках источников (урок 3.6 и 4.25).
+  Последним: корректности не прибавляет.
+
+  Что это даст (качественно; цифр скорости нет — раздел не меняет горячие пути, а каждое касание горячего пути
+  принимается A/B или дизассемблером): 9.1 — переносы и нарушенные debug_assert Rust видны под всеми наборами SQL;
+  9.2 — новый unwrap/expect/panic не проходит машинное ревью, в горячих циклах нет путей паники; 9.3 — несовпадение
+  раскладки C и Rust — отказ загрузки, а не порча памяти; 9.4 — предупреждения компилятора в нашем C; 9.5 и 9.6 —
+  гонки протокола таблицы и UB в unsafe на каждом PR, а не вручную; 9.7 — ошибки памяти и UB в C (переполнения
+  буферов, чтение после освобождения, выравнивание); 9.8 — неверные результаты и падения на сочетаниях, о которых
+  никто не подумал, число прогнанных запросов — в README; 9.9 — слабые тесты: мутант в изменённых строках PR выжил —
+  задача красная; 9.10 — отказ памяти становится ошибкой запроса, инвариант сумм numeric проверен свойством;
+  9.11–9.14 — одна правка на образец вместо 4–11, новый узел (Greengage, §7) пишется по скелету; 9.15–9.17 — одна
+  формула на раскладку, расхождение планировщика с исполнителем невозможно по построению; 9.18 — одна правка на тип
+  вместо двух.
+
+  Что не делаем и почему. Kani и другие формальные инструменты для региона таблицы: интересные свойства
+  параллельные (публикация через CAS), их моделирует loom, а раскрутка побайтных циклов по региону у Kani не
+  завершится. cbindgen сейчас (см. 9.13). Rust под ASan (см. 9.7). Мутационный инструмент для C (см. 9.9). Перенос
+  автоматов параллельной сборки, раундов, DSA и BufFile в Rust: 12 из 16 ошибок были в обращении к API PostgreSQL
+  (барьеры, рескан, es_query_dsa, chgParam), Rust его не зовёт — обвязка осталась бы, вырос бы только шов. Без
+  изменений прежние решения: heap_deform в C (2026-09-20), eval_cond и store_value в C (4.23 шаги 2–3, 2026-09-29),
+  размер пачки 64, своя поразрядная сортировка, tuplesort вместо sort.c (4.25). overflow-checks и debug-assertions в
+  release-профиле: плата на каждом горячем цикле, тот же сигнал даёт 9.1. clippy indexing_slicing и
+  arithmetic_side_effects, рост PROPTEST_CASES в CI: шум и минуты без отдачи. -Werror в Makefile по умолчанию: только
+  CI. trim_batch в Rust: TessLimit остаётся модулем без ядер.
+
+  Порядок (решение пользователя 2026-10-02): раздел целиком, подряд, до шагов 7–11 порядка старта 8.1. 1) Ворота на
+  минуты: 9.1 и 9.3 первыми (защищают всё дальнейшее при нулевом риске), затем 9.4, 9.2, 9.10, 9.5, 9.6, 9.9 — восемь
+  малых PR, независимых друг от друга (9.9 и 9.10 — после 9.2). 2) 9.7 санитайзеры — до любых чистых переносов (9.11,
+  9.12): ошибка переноса — висячий указатель, незаполненное поле — это то, чего наборы не видят, а ASan видит; задаче
+  нужна вторая сборка ядра в кэше, на неё уходит один PR. 3) 9.8 crosscheck — параллельно с 2) (код независим); должен
+  быть в CI до 9.15–9.17: каждый пункт там меняет путь исполнителя, который рукописные наборы покрывают там, где кто-то
+  подумал. 4) 9.13 и 9.14 — дёшевы, независимы; 9.13 делает каждый новый вход одной строкой списка. 5) 9.11, затем
+  9.12 — скелет раньше разрезов, чтобы переносить меньше строк; каждый разрез с A/B как в 4.25. 6) 9.15 → 9.16 → 9.17:
+  раскладка сброса первой (три формулы), затем холодные формулы, numeric, затем куски исполнителя с учётом сброса
+  последним (наибольший риск; нужны 9.8 и разрез agg и hashjoin из 9.12 для обозримого diff). 7) 9.18 последним —
+  нужны прогоны PMU пользователя. После раздела — шаги 7–11 порядка старта 8.1.
+
+  Проверка раздела: все новые задачи CI зелёные на main; README «Why trust the results» перечисляет санитайзеры,
+  случайные запросы (число запросов и расхождений долгого прогона) и мутации вместо «Not yet»; наборы SQL и семейства
+  bench без изменений результатов, A/B чистых переносов 0,99–1,01; число строк nodes/ и копий образцов до и после — в
+  абзацах «Сделано».
 
   ## Документация и проверки
 
