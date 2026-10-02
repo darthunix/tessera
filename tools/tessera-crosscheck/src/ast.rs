@@ -301,7 +301,9 @@ pub struct Select {
     pub filter: Option<Expr>,
     pub grouping: Option<Grouping>,
     /// `ORDER BY` every output column, then `LIMIT`: the rows kept are
-    /// then the same multiset in both modes, ties being equal rows.
+    /// then the same multiset in both modes, ties being equal rows. Values
+    /// equal but written differently tie too, so the generator gives such
+    /// a query its representatives of equal values as outputs.
     pub limit: Option<u32>,
 }
 

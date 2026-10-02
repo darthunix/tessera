@@ -476,7 +476,8 @@ fn any_expr(exprs: &HashMap<Ty, BoxedStrategy<Expr>>) -> BoxedStrategy<(Ty, Expr
 }
 
 /// An output that stands for equal values: a group's key, a distinct row,
-/// a set operation's row, the least or greatest value. Equal numerics may
+/// a set operation's row, the least or greatest value, a row under a limit
+/// (of rows tied in the order, either may stay). Equal numerics may
 /// differ in scale (0 and 0.0) and equal float8 in sign (0 and -0); which
 /// of them the output shows is not defined, in the core either (a hash
 /// grouping keeps the first one met, a sorted one the first after a sort),
@@ -748,26 +749,20 @@ fn select_query() -> impl Strategy<Value = Select> {
             .collect();
         let exprs = expressions(&Scope::of(&tables), DEPTH);
         let shallow = expressions(&Scope::of(&tables), 1);
+        // A plain output keeps its type: under DISTINCT or a limit it is a
+        // representative of equal values. A grouping's are already.
         let plain = (
             vec(any_expr(&exprs), 1..=4),
             proptest::option::weighted(0.15, Just(())),
         )
             .prop_map(|(items, distinct)| {
-                let distinct = distinct.is_some();
-                let items = items
-                    .into_iter()
-                    .map(|(ty, item)| {
-                        if distinct {
-                            representative(ty, item)
-                        } else {
-                            item
-                        }
-                    })
-                    .collect();
-                (items, None, distinct)
+                let items = items.into_iter().map(|(ty, item)| (Some(ty), item));
+                (items.collect::<Vec<_>>(), None, distinct.is_some())
             });
-        let aggregated =
-            grouped(&shallow).prop_map(|(items, grouping)| (items, Some(grouping), false));
+        let aggregated = grouped(&shallow).prop_map(|(items, grouping)| {
+            let items = items.into_iter().map(|item| (None, item));
+            (items.collect::<Vec<_>>(), Some(grouping), false)
+        });
         (
             joins(first, joined),
             prop_oneof![3 => plain, 2 => aggregated],
@@ -777,7 +772,13 @@ fn select_query() -> impl Strategy<Value = Select> {
             .prop_map(
                 move |(joins, (items, grouping, distinct), filter, limit)| Select {
                     distinct,
-                    items,
+                    items: items
+                        .into_iter()
+                        .map(|(ty, item)| match ty {
+                            Some(ty) if distinct || limit.is_some() => representative(ty, item),
+                            _ => item,
+                        })
+                        .collect(),
                     from: first,
                     joins,
                     filter,
