@@ -6728,6 +6728,9 @@
   0 — time make rust-loom локально, число в абзац «Сделано». Модели общей сборки и раундов задают preemption_bound = 2–3
   явно (table/loom.rs); если не укладывается — переменная окружения для CI (граница 2), в исходнике границы не снижать;
   max_branches поднять, если модель раундов упрётся.
+  Сделано 2026-10-02 (ветка gate-loom): задача loom в ci.yml (ubuntu, свой ключ кэша для target/loom, timeout 30
+  минут). Локально make rust-loom — 11,5 с (19 тестов за 8,7 с, сборка уже в кэше), так что переменная для границы
+  вытеснений и max_branches не понадобились.
 
   9.6 Miri в CI. Станет: задача на ubuntu x86_64 (NEON-пути вырезаны cfg), nightly закреплён только в workflow
   (RUSTUP_TOOLCHAIN), не в rust-toolchain.toml; тесты — три команды из crates/tessera-capi/src/lib.rs плюс --lib

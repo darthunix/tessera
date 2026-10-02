@@ -3,6 +3,7 @@
 # with every regression suite against the revisions in postgres.env, with the
 # release kernels library and, on Linux, also with the debug one, whose
 # overflow checks and debug assertions the suites then exercise.
+# The loom model of the hash table runs as a job of its own.
 # Performance is measured locally (crates/tessera-capi/benches, bench/pg).
 name: CI
 
@@ -29,6 +30,25 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Format, Clippy, debug and release tests
         run: make rust-check
+
+  # The loom model of the hash table's concurrent protocol (plan 9.5): the
+  # bucket heads, the shared Bloom filter, the build phases and the shared
+  # spill under every interleaving within the bounds the tests set. The
+  # model is scalar code, so one platform is enough.
+  loom:
+    name: Loom model (ubuntu-24.04)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain of rust-toolchain.toml
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: loom
+          workspaces: ". -> target/loom"
+      - name: make rust-loom
+        run: make rust-loom
 
   postgres:
     name: PostgreSQL ${{ matrix.postgres }} (${{ matrix.os }}, ${{ matrix.rust_profile }} kernels)
