@@ -104,6 +104,23 @@ jobs:
           make install COPT=-Werror
       - name: Regression suites and the installed set
         run: make installcheck COPT=-Werror EXTRA_REGRESS_OPTS="--temp-instance=$RUNNER_TEMP/cluster"
+      # Random queries with Tessera on and off (plan 9.8): the seeds of
+      # seeds.txt, then seed 1. Not yet a gate: it still finds the
+      # disagreements recorded in seeds.txt, which their fixes close.
+      - name: Random queries against the core
+        if: matrix.os == 'ubuntu-24.04' && matrix.rust_profile == 'release'
+        continue-on-error: true
+        # The Rust cache brings target/ back, with what a run left there.
+        run: |
+          rm -rf target/bench-runs
+          cargo run --release --locked -p tessera-crosscheck -- --seed 1 --queries 400 --time-limit 90 --no-install
+      - name: The random queries' findings
+        if: always() && matrix.os == 'ubuntu-24.04' && matrix.rust_profile == 'release'
+        uses: actions/upload-artifact@v4
+        with:
+          name: crosscheck-findings
+          path: target/bench-runs/crosscheck
+          if-no-files-found: ignore
       - name: Differences and the server's log
         if: failure()
         run: |

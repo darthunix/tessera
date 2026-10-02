@@ -4,7 +4,7 @@ CARGO ?= cargo
 
 .PHONY: all clean install installcheck $(SUBDIRS) \
 	rust rust-release rust-check rust-mutants rust-loom rust-clean \
-	tpch tpch-check tpch-stop
+	tpch tpch-check tpch-stop crosscheck
 
 all: $(SUBDIRS)
 
@@ -71,3 +71,10 @@ tpch-check:
 
 tpch-stop:
 	$(TPCH) stop --sf $(TPCH_SF)
+
+# Random queries with Tessera on and off (tools/tessera-crosscheck): a new
+# seed unless SEED is given, after the seeds of seeds.txt.
+QUERIES ?= 200
+crosscheck:
+	PG_CONFIG="$(PG_CONFIG)" $(CARGO) run --release --locked -p tessera-crosscheck -- \
+		--queries $(QUERIES) $(if $(SEED),--seed $(SEED))
