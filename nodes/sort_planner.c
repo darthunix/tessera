@@ -170,6 +170,10 @@ make_sort_path(PlannerInfo *root, SortPath *sort)
 		sortops = lappend_int(sortops, (int) sortop);
 		collations = lappend_int(collations, (int) collation);
 	}
+	/* A set operation's constant column would stand for every row's. */
+	if (tess_plan_has_setop_columns((Node *) input->pathtarget->exprs) &&
+		tess_path_setop_constant(input))
+		return NULL;
 	/* Rows past work_mem go to runs on disk and merge: no gate on the rows. */
 	child = tess_batch_input_path(root, input);
 	if (child == NULL)

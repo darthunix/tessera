@@ -1197,6 +1197,7 @@ create_setop_paths(PlannerInfo *root, RelOptInfo *output_rel)
 			branches = ((GatherPath *) branches)->subpath;
 		keys = agg->path.pathtarget->exprs;
 		if (!IsA(branches, AppendPath) || keys == NIL ||
+			tess_path_setop_constant(branches) ||
 			list_length(keys) > TESS_TABLE_MAX_KEYS ||
 			list_length(agg->groupClause) != list_length(keys))
 			continue;
@@ -1298,7 +1299,8 @@ create_nonunion_paths(PlannerInfo *root, RelOptInfo *output_rel)
 			continue;
 		setop = (SetOpPath *) candidate;
 		keys = setop->path.pathtarget->exprs;
-		if (keys == NIL || list_length(keys) > TESS_TABLE_MAX_KEYS ||
+		if (keys == NIL || tess_path_setop_constant(&setop->path) ||
+			list_length(keys) > TESS_TABLE_MAX_KEYS ||
 			list_length(setop->groupList) != list_length(keys))
 			continue;
 		data = list_make4_int(list_length(keys),

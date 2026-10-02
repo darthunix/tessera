@@ -178,6 +178,9 @@ append_wrap(PlannerInfo *root, Path *path)
 		list_length(append->subpaths) < 2 ||
 		list_length(path->pathtarget->exprs) > MaxTupleAttributeNumber)
 		return NULL;
+	/* A branch's constant column would stand for every row's. */
+	if (!IS_SIMPLE_REL(rel) && tess_path_setop_constant(path))
+		return NULL;
 	foreach_ptr(Path, subpath, append->subpaths)
 	{
 		Path	   *child = tess_batch_input_path(root, subpath);
