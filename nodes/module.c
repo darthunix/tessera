@@ -13,7 +13,6 @@ PG_MODULE_MAGIC_EXT(.name = "tessera_nodes", .version = TESS_VERSION);
 PGDLLEXPORT void _PG_init(void);
 
 double		tess_scan_cost_factor = 0.9;
-double		tess_join_cost_factor = 0.9;
 double		tess_agg_cost_factor = 0.9;
 double		tess_agg_key_share = 0.25;
 double		tess_agg_dictionary_share = 0.65;
@@ -38,6 +37,17 @@ double		tess_deform_varlena_cost = 0.017;
 double		tess_bitmap_build_cost = 0.038;
 double		tess_bitmap_build_scatter_cost = 0.054;
 double		tess_index_worker_share = 0.5;
+double		tess_join_build_cost = 0.107;
+double		tess_join_probe_cost = 0.0072;
+double		tess_join_pair_cost = 0.0046;
+double		tess_join_batch_cost = 0.31;
+double		tess_join_gather_cost = 0.0097;
+double		tess_join_text_value_cost = 0.035;
+double		tess_join_hashed_key_cost = 0.069;
+double		tess_join_compact_pair_cost = 0.020;
+double		tess_join_bloom_test_cost = 0.0027;
+double		tess_join_spill_row_cost = 0.015;
+double		tess_join_cost_unit = 17.9;
 double		tess_join_bloom_ratio = 0.5;
 double		tess_bitmap_page_rows = 2.0;
 double		tess_index_min_correlation = 0.8;
@@ -133,11 +143,6 @@ _PG_init(void)
 							 "TessHeapScan, with TessFilter above for the relation's clauses, in "
 							 "place of the core's sequential, bitmap, index or index-only scan.",
 							 &tess_scan_cost_factor, 0.9, 0.0, 10.0,
-							 PGC_USERSET, GUC_EXPLAIN, NULL, NULL, NULL);
-	DefineCustomRealVariable("tessera.join_cost_factor",
-							 "Share of the core's cost of a hash join that TessHashJoin costs.",
-							 NULL,
-							 &tess_join_cost_factor, 0.9, 0.0, 10.0,
 							 PGC_USERSET, GUC_EXPLAIN, NULL, NULL, NULL);
 	DefineCustomRealVariable("tessera.agg_cost_factor",
 							 "Share of the core's cost of an aggregation without GROUP BY that TessAgg costs.",
@@ -265,6 +270,69 @@ _PG_init(void)
 							 "The share of the leader's pace a worker of a parallel index or index-only scan reads at.",
 							 "The leader reads alone while the workers start, half of tessera.scan_parallel_setup_cost.",
 							 &tess_index_worker_share, 0.5, 0.0, 10.0,
+							 PGC_USERSET, GUC_EXPLAIN, NULL, NULL, NULL);
+	/*
+	 * The model of the hash join's own time, in the same units
+	 * (join_planner.c, join_cost); bench/pg/joincost fits them.
+	 */
+	DefineCustomRealVariable("tessera.join_build_cost",
+							 "The hash join's time for a row of the inner side built into its table.",
+							 NULL,
+							 &tess_join_build_cost, 0.107, 0.0, 1e10,
+							 PGC_USERSET, GUC_EXPLAIN, NULL, NULL, NULL);
+	DefineCustomRealVariable("tessera.join_probe_cost",
+							 "The hash join's time for a row of the outer side probed.",
+							 NULL,
+							 &tess_join_probe_cost, 0.0072, 0.0, 1e10,
+							 PGC_USERSET, GUC_EXPLAIN, NULL, NULL, NULL);
+	DefineCustomRealVariable("tessera.join_pair_cost",
+							 "The hash join's time for a pair it returns.",
+							 NULL,
+							 &tess_join_pair_cost, 0.0046, 0.0, 1e10,
+							 PGC_USERSET, GUC_EXPLAIN, NULL, NULL, NULL);
+	DefineCustomRealVariable("tessera.join_batch_cost",
+							 "The time a batch the hash join publishes costs its parent.",
+							 "An outer batch with a pair goes out as a round, whatever the share of "
+							 "its rows selected.",
+							 &tess_join_batch_cost, 0.31, 0.0, 1e10,
+							 PGC_USERSET, GUC_EXPLAIN, NULL, NULL, NULL);
+	DefineCustomRealVariable("tessera.join_gather_cost",
+							 "The hash join's time for an inner value gathered for a pair.",
+							 NULL,
+							 &tess_join_gather_cost, 0.0097, 0.0, 1e10,
+							 PGC_USERSET, GUC_EXPLAIN, NULL, NULL, NULL);
+	DefineCustomRealVariable("tessera.join_text_value_cost",
+							 "The hash join's time for a by-reference inner value copied into the table or gathered.",
+							 NULL,
+							 &tess_join_text_value_cost, 0.035, 0.0, 1e10,
+							 PGC_USERSET, GUC_EXPLAIN, NULL, NULL, NULL);
+	DefineCustomRealVariable("tessera.join_hashed_key_cost",
+							 "The hash join's time to hash a key a word does not hold, a row of either side.",
+							 NULL,
+							 &tess_join_hashed_key_cost, 0.069, 0.0, 1e10,
+							 PGC_USERSET, GUC_EXPLAIN, NULL, NULL, NULL);
+	DefineCustomRealVariable("tessera.join_compact_pair_cost",
+							 "What a pair of a compact batch costs the hash join more, where the inner side has several records a key.",
+							 NULL,
+							 &tess_join_compact_pair_cost, 0.020, 0.0, 1e10,
+							 PGC_USERSET, GUC_EXPLAIN, NULL, NULL, NULL);
+	DefineCustomRealVariable("tessera.join_bloom_test_cost",
+							 "The hash join's time to test a probe row against its Bloom filter.",
+							 "In place of the probe of each row the filter rejects, where the planner "
+							 "expects the filter (tessera.join_bloom_ratio).",
+							 &tess_join_bloom_test_cost, 0.0027, 0.0, 1e10,
+							 PGC_USERSET, GUC_EXPLAIN, NULL, NULL, NULL);
+	DefineCustomRealVariable("tessera.join_spill_row_cost",
+							 "What a row of either side costs the hash join more once its table outgrows hash_mem.",
+							 NULL,
+							 &tess_join_spill_row_cost, 0.015, 0.0, 1e10,
+							 PGC_USERSET, GUC_EXPLAIN, NULL, NULL, NULL);
+	DefineCustomRealVariable("tessera.join_cost_unit",
+							 "The node's time that a unit of the core's hash join cost stands for.",
+							 "The planner weighs the node's hash join against the core's, whose cost "
+							 "is nominal: the node's own time, in the units above, is divided by this "
+							 "(4.9 µs of the core's time a unit here, 0.27 µs a unit of the node's).",
+							 &tess_join_cost_unit, 17.9, 1e-3, 1e10,
 							 PGC_USERSET, GUC_EXPLAIN, NULL, NULL, NULL);
 	DefineCustomBoolVariable("tessera.batch_gather",
 							 "Gathers a parallel batch subtree's rows in batches.",

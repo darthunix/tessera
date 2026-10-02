@@ -139,7 +139,10 @@ query down, and where it can, does it speed one up.
   a compact batch, a Bloom test, a spilled row), prints the parameters in
   the units of the scan model, every sample against the whole model with
   its error, and the parallel samples against one participant's share.
-  Run it on another machine to set the parameters there.
+  The base's queries run again with Tessera off: the core's hash join's
+  own time per unit of its own cost, sample by sample and over all, is
+  `tessera.join_cost_unit`, the rate the planner converts the node's time
+  at. Run it on another machine to set the parameters there.
 - **rowwise** (`rowwise.sql`): tables without clauses read under a parent
   of the core that takes rows one at a time: `bit_or` of a column and of
   an expression, one column of sixty, `max` of a text column, a window

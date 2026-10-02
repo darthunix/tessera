@@ -59,6 +59,7 @@ CREATE TEMP TABLE samples
     bloom boolean,
     shared boolean,
     workers integer,
+    own_cost float8,
     join_ms float8,
     outer_ms float8,
     inner_ms float8,
@@ -111,8 +112,8 @@ BEGIN
 END
 $function$;
 
-/* The first TessHashJoin of a plan, depth first. */
-CREATE FUNCTION pg_temp.find_join(node jsonb)
+/* The first hash join of a plan, depth first: the node's, or the core's. */
+CREATE FUNCTION pg_temp.find_join(node jsonb, core boolean)
 RETURNS jsonb
 LANGUAGE plpgsql
 AS $function$
@@ -120,11 +121,12 @@ DECLARE
     child jsonb;
     found jsonb;
 BEGIN
-    IF node ->> 'Custom Plan Provider' = 'TessHashJoin' THEN
+    IF (NOT core AND node ->> 'Custom Plan Provider' = 'TessHashJoin') OR
+       (core AND node ->> 'Node Type' = 'Hash Join') THEN
         RETURN node;
     END IF;
     FOR child IN SELECT * FROM jsonb_array_elements(coalesce(node -> 'Plans', '[]'::jsonb)) LOOP
-        found := pg_temp.find_join(child);
+        found := pg_temp.find_join(child, core);
         IF found IS NOT NULL THEN
             RETURN found;
         END IF;
@@ -180,8 +182,11 @@ $function$;
 /*
  * A sample over every outer row and over the half: {half} in the queries
  * stands for the outer side's clause, nothing or "AND f1 <= 1000000" of
- * the outer alias. The query is explained once for the join's counts, and
- * timed; the children's scans are timed once each.
+ * the outer alias. The query is explained once for the join's counts and
+ * its own cost (the join's less its children's), and timed; the
+ * children's scans are timed once each. With the core kind the sample is
+ * the core's hash join with Tessera off, its inner rows the Hash node's
+ * child's.
  */
 CREATE FUNCTION pg_temp.sample(name text, kind text, query text, outer_ref text, inner_ref text,
                                half_clause text, hashed_keys integer, payload_ints integer,
@@ -190,31 +195,41 @@ RETURNS void
 LANGUAGE plpgsql
 AS $function$
 DECLARE
+    core boolean := kind = 'core';
     half boolean;
     sql text;
     outer_sql text;
     plan jsonb;
     node jsonb;
     parent jsonb;
+    outer_node jsonb;
     inner_node jsonb;
+    inner_scan jsonb;
 BEGIN
+    PERFORM set_config('tessera.enable', CASE WHEN core THEN 'off' ELSE 'on' END, false);
     FOREACH half IN ARRAY ARRAY[false, true] LOOP
         sql := replace(query, '{half}', CASE WHEN half THEN half_clause ELSE '' END);
         outer_sql := replace(outer_ref, '{half}', CASE WHEN half THEN half_clause ELSE '' END);
         EXECUTE 'EXPLAIN (ANALYZE, VERBOSE, FORMAT JSON, TIMING OFF, SUMMARY OFF, BUFFERS OFF) ' || sql
             INTO plan;
-        node := pg_temp.find_join(plan -> 0 -> 'Plan');
+        node := pg_temp.find_join(plan -> 0 -> 'Plan', core);
         IF node IS NULL THEN
-            RAISE EXCEPTION 'no TessHashJoin in the plan of %: %', name, sql;
+            RAISE EXCEPTION 'no hash join in the plan of %: %', name, sql;
         END IF;
         parent := pg_temp.find_join_parent(plan -> 0 -> 'Plan');
+        outer_node := node -> 'Plans' -> 0;
         inner_node := node -> 'Plans' -> 1;
-        WHILE inner_node ->> 'Relation Name' IS NULL AND inner_node -> 'Plans' -> 0 IS NOT NULL LOOP
-            inner_node := inner_node -> 'Plans' -> 0;
+        /* The core's inner child is the Hash node over the scan. */
+        inner_scan := CASE WHEN core THEN inner_node -> 'Plans' -> 0 ELSE inner_node END;
+        WHILE inner_scan ->> 'Relation Name' IS NULL AND inner_scan -> 'Plans' -> 0 IS NOT NULL LOOP
+            inner_scan := inner_scan -> 'Plans' -> 0;
         END LOOP;
         INSERT INTO samples
-        VALUES (name, kind, half, inner_node ->> 'Relation Name',
-                (node ->> 'Build Rows')::float8, (node ->> 'Probe Rows')::float8,
+        VALUES (name, kind, half, inner_scan ->> 'Relation Name',
+                CASE WHEN core THEN (inner_node -> 'Plans' -> 0 ->> 'Actual Rows')::float8
+                     ELSE (node ->> 'Build Rows')::float8 END,
+                CASE WHEN core THEN (outer_node ->> 'Actual Rows')::float8
+                     ELSE (node ->> 'Probe Rows')::float8 END,
                 (node ->> 'Matches')::float8,
                 (node ->> 'Actual Rows')::float8 * (node ->> 'Actual Loops')::float8,
                 (parent ->> 'Input Batches')::float8,
@@ -225,11 +240,14 @@ BEGIN
                 coalesce((node ->> 'Bloom Filters')::integer, 0) > 0,
                 coalesce((node ->> 'Shared Table')::boolean, false),
                 coalesce(pg_temp.find_key(plan -> 0 -> 'Plan', 'Workers Launched')::integer, 0),
+                (node ->> 'Total Cost')::float8 - (outer_node ->> 'Total Cost')::float8 -
+                    (CASE WHEN core THEN inner_node -> 'Plans' -> 0 ELSE inner_node END ->> 'Total Cost')::float8,
                 pg_temp.fastest(sql, repetitions),
                 pg_temp.reference(tag, outer_sql, repetitions),
                 pg_temp.reference(tag, inner_ref, repetitions),
                 0);
     END LOOP;
+    PERFORM set_config('tessera.enable', 'on', false);
 END
 $function$;
 
@@ -262,6 +280,27 @@ BEGIN
         'SELECT count(*) FROM bench_fact f JOIN bench_dim d ON f.fk_miss = d.id WHERE true {half}',
         'SELECT count(fk_miss) FROM bench_fact f WHERE true {half}',
         'SELECT count(id) FROM bench_dim', fact_half, 0, 0, 0, 'serial', repetitions);
+    -- The core's hash join of the base's queries, with Tessera off: its
+    -- time per unit of its own cost is the price the node's time is
+    -- converted at, since the planner weighs the two against each other.
+    PERFORM pg_temp.sample('dim_10k', 'core',
+        'SELECT count(*) FROM bench_fact f JOIN bench_dim d ON f.fk = d.id WHERE d.id <= 10000 {half}',
+        fact, 'SELECT count(id) FROM bench_dim WHERE id <= 10000', fact_half, 0, 0, 0, 'core', repetitions);
+    PERFORM pg_temp.sample('dim_100k', 'core',
+        'SELECT count(*) FROM bench_fact f JOIN bench_dim d ON f.fk = d.id WHERE true {half}',
+        fact, 'SELECT count(id) FROM bench_dim', fact_half, 0, 0, 0, 'core', repetitions);
+    PERFORM pg_temp.sample('sort_1200k', 'core',
+        'SELECT count(*) FROM bench_fact f JOIN bench_sort s ON f.f1 = s.k4 WHERE s.k4 < 1200000 {half}',
+        'SELECT count(f1) FROM bench_fact f WHERE true {half}',
+        'SELECT count(k4) FROM bench_sort WHERE k4 < 1200000', fact_half, 0, 0, 0, 'core', repetitions);
+    PERFORM pg_temp.sample('sort_2m', 'core',
+        'SELECT count(*) FROM bench_fact f JOIN bench_sort s ON f.f1 = s.k4 WHERE true {half}',
+        'SELECT count(f1) FROM bench_fact f WHERE true {half}',
+        'SELECT count(k4) FROM bench_sort', fact_half, 0, 0, 0, 'core', repetitions);
+    PERFORM pg_temp.sample('miss', 'core',
+        'SELECT count(*) FROM bench_fact f JOIN bench_dim d ON f.fk_miss = d.id WHERE true {half}',
+        'SELECT count(fk_miss) FROM bench_fact f WHERE true {half}',
+        'SELECT count(id) FROM bench_dim', fact_half, 0, 0, 0, 'core', repetitions);
     -- The keys: int8, an int4 against an int8, two keys, text and numeric
     -- through their types' hashes.
     PERFORM pg_temp.sample('int8', 'keys',
@@ -387,7 +426,7 @@ UPDATE samples SET own_ms = join_ms - outer_ms - inner_ms;
 \o summary.txt
 -- The samples: the join's counts, its time, the children's and its own.
 SELECT name, kind, half, inner_rel, build_rows AS build, probe_rows AS probe, matches, pairs,
-       bloom, spilled_chunks > 0 AS spilled, shared, workers,
+       bloom, spilled_chunks > 0 AS spilled, shared, workers, round(own_cost::numeric, 1) AS own_cost,
        round(join_ms::numeric, 2) AS join_ms, round(outer_ms::numeric, 2) AS outer_ms,
        round(inner_ms::numeric, 2) AS inner_ms, round(own_ms::numeric, 2) AS own_ms
 FROM samples ORDER BY kind, name, half;
@@ -631,6 +670,44 @@ SELECT round(sqrt(avg(((predicted_ms - own_ms) / own_ms) ^ 2))::numeric, 3) AS r
        round(max(abs((predicted_ms - own_ms) / own_ms))::numeric, 3) AS max_relative_error,
        count(*) AS samples
 FROM prediction;
+
+-- The core's hash join on the base's queries: its own time fitted as the
+-- node's (a row built, a row probed, a pair), its time per unit of its
+-- own cost (the join's less its children's), sample by sample and over
+-- all, and that price in the scan model's units: tessera.join_cost_unit,
+-- the time of the node that one unit of the core's hash join cost stands
+-- for, by which the planner divides the node's time.
+CREATE TEMP VIEW core_samples AS
+SELECT * FROM samples WHERE kind = 'core';
+CREATE TEMP VIEW core_fit AS
+WITH x AS (
+    SELECT ARRAY[build_rows, probe_rows, pairs] AS r, own_ms AS y FROM core_samples
+), a AS (
+    SELECT array_agg(s ORDER BY i, j) AS a
+    FROM (SELECT i, j, sum(r[i] * r[j]) AS s
+          FROM x, generate_series(1, 3) AS i, generate_series(1, 3) AS j
+          GROUP BY i, j) AS sums
+), b AS (
+    SELECT array_agg(s ORDER BY i) AS b
+    FROM (SELECT i, sum(r[i] * y) AS s FROM x, generate_series(1, 3) AS i GROUP BY i) AS sums
+), c AS (
+    SELECT pg_temp.solve(a.a, b.b, 3) AS c FROM a, b
+)
+SELECT c[1] AS build_ms, c[2] AS probe_ms, c[3] AS pair_ms FROM c;
+SELECT round((build_ms * 1e6)::numeric, 2) AS core_build_ns, round((probe_ms * 1e6)::numeric, 2) AS core_probe_ns,
+       round((pair_ms * 1e6)::numeric, 2) AS core_pair_ns
+FROM core_fit;
+SELECT s.name, s.half, s.build_rows AS build, s.probe_rows AS probe, s.pairs, round(s.own_cost::numeric) AS own_cost,
+       round(s.own_ms::numeric, 2) AS own_ms, round((s.own_ms / s.own_cost * 1000)::numeric, 3) AS us_per_cost_unit,
+       round(n.own_ms::numeric, 2) AS node_own_ms, round((s.own_ms / n.own_ms)::numeric, 2) AS core_over_node
+FROM core_samples AS s
+JOIN samples AS n ON n.name = s.name AND n.half = s.half AND n.kind = 'size'
+ORDER BY s.build_rows, s.half;
+CREATE TEMP VIEW core_rate AS
+SELECT sum(own_ms) / sum(own_cost) AS ms_per_cost_unit FROM core_samples;
+SELECT round((r.ms_per_cost_unit * 1000)::numeric, 3) AS core_us_per_cost_unit,
+       round((r.ms_per_cost_unit / u.unit_ms)::numeric, 3) AS "tessera.join_cost_unit"
+FROM core_rate AS r, model_unit AS u;
 
 -- The parameters, in the units of the scan model: a full scan's page is 1.
 SELECT round((u.unit_ms * 1000)::numeric, 4) AS unit_us,

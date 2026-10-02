@@ -456,16 +456,22 @@ BEGIN
 END $$;
 CREATE TABLE jkx AS SELECT 20001 + g % 10000 AS k, 10001 + g % 10000 AS k2 FROM generate_series(1, 50000) AS g;
 CREATE TABLE jkwide AS SELECT 1 + g % 32000 AS k FROM generate_series(1, 100000) AS g;
-ANALYZE jkx, jkwide;
+-- Keys of jp2's second level, few enough that building them costs less
+-- than reading the partitions pruned (building jkx's 50 000 rows would
+-- not: the smaller jp2 is built, and nothing pruned).
+CREATE TABLE jkx2 AS SELECT 10001 + g % 10000 AS k2 FROM generate_series(1, 5000) AS g;
+-- The same for jpr's third partition, for the parallel join below.
+CREATE TABLE jkp AS SELECT 20001 + g % 10000 AS k FROM generate_series(1, 5000) AS g;
+ANALYZE jkx, jkwide, jkx2, jkp;
 EXPLAIN (COSTS OFF) SELECT count(*) FROM jpr JOIN jkx ON jpr.k = jkx.k;
 SELECT join_outer($$SELECT count(*) FROM jpr JOIN jkwide ON jpr.k = jkwide.k$$) AS every_partition,
        join_outer($$SELECT count(*) FROM jpr JOIN jkwide ON jpr.k = jkwide.k WHERE jkwide.k > 20000$$) AS clause,
        join_outer($$SELECT count(*) FROM jpr JOIN jkwide ON jpr.k = jkwide.k WHERE 20000 < jkwide.k$$) AS commuted,
-       join_outer($$SELECT count(*) FROM jp2 JOIN jkx ON jp2.k = jkx.k2$$) AS second_level,
+       join_outer($$SELECT count(*) FROM jp2 JOIN jkx2 ON jp2.k = jkx2.k2$$) AS second_level,
        join_outer($$SELECT count(*) FROM jph JOIN jkx ON jph.k = jkx.k2$$) AS hash;
 SELECT join_pruned($$SELECT count(*) FROM jpr JOIN jkx ON jpr.k = jkx.k$$) AS statistics,
        join_pruned($$SELECT count(*) FROM jpr JOIN jkwide ON jpr.k = jkwide.k WHERE jkwide.k > 20000$$) AS clause,
-       join_pruned($$SELECT count(*) FROM jp2 JOIN jkx ON jp2.k = jkx.k2$$) AS second_level;
+       join_pruned($$SELECT count(*) FROM jp2 JOIN jkx2 ON jp2.k = jkx2.k2$$) AS second_level;
 SELECT join_same($$SELECT jpr.k, jpr.v FROM jpr JOIN jkx ON jpr.k = jkx.k$$);
 SELECT join_same($$SELECT jpr.k, jkwide.k FROM jpr JOIN jkwide ON jpr.k = jkwide.k WHERE jkwide.k > 20000$$);
 SELECT join_same($$SELECT jp2.k, jp2.v FROM jp2 JOIN jkx ON jp2.k = jkx.k2$$);
@@ -763,13 +769,9 @@ SELECT join_same($$SELECT x, n, t FROM (SELECT count(*) AS n, sum(length(jsb.t))
 RIGHT JOIN (VALUES (1), (2)) AS v(x) ON true$$);
 RESET enable_material;
 -- Semi and anti joins keep no inner column: jsp's keys, the larger side,
--- are the table. The core's right anti join, which hashes the smaller jsb,
--- costs less than the node's share of the core's anti join at these
--- partial scans' costs: a lower share keeps the node's.
-SET tessera.join_cost_factor = 0.7;
+-- are the table.
 SELECT join_property($$SELECT count(*), sum(length(jsb.t)) FROM jsb WHERE EXISTS (SELECT 1 FROM jsp WHERE jsp.k = jsb.k)$$, 'Spilled Chunks')::int > 0 AS semi_spilled,
        join_property($$SELECT jsb.t FROM jsb WHERE NOT EXISTS (SELECT 1 FROM jsp WHERE jsp.k = jsb.k)$$, 'Spilled Chunks')::int > 0 AS anti_spilled;
-RESET tessera.join_cost_factor;
 SELECT join_same($$SELECT count(*), sum(length(jsb.t)) FROM jsb WHERE EXISTS (SELECT 1 FROM jsp WHERE jsp.k = jsb.k)$$);
 SELECT join_same($$SELECT jsb.t, jsb.n FROM jsb WHERE NOT EXISTS (SELECT 1 FROM jsp WHERE jsp.k = jsb.k)$$);
 -- Rounds: at a hash_mem of 2 MB a partition on disk that fits in one
@@ -778,13 +780,17 @@ SELECT join_same($$SELECT jsb.t, jsb.n FROM jsb WHERE NOT EXISTS (SELECT 1 FROM 
 -- the key 100000 rows share, which statistics taken before them do not
 -- show, is joined by one participant alone.
 SET work_mem = '1MB';
+-- jsouter, the smaller side, is built; the heavy key's rows come after
+-- its statistics, which the planner scales by its pages. Its other rows
+-- outgrow hash_mem several times over, so that partitions go to disk
+-- whatever the participants' timing.
 CREATE TABLE jsouter (k int, s text);
-ANALYZE jsouter;
 INSERT INTO jsouter
-SELECT CASE WHEN g % 11 = 0 THEN NULL ELSE g % 50000 END, 'q' || g FROM generate_series(1, 100000) AS g;
-CREATE TABLE jsheavy AS SELECT g % 60000 AS k, g AS w FROM generate_series(1, 200000) AS g;
+SELECT CASE WHEN g % 11 = 0 THEN NULL ELSE g % 50000 END, 'q' || g FROM generate_series(1, 200000) AS g;
+ANALYZE jsouter;
+INSERT INTO jsouter SELECT 7, 'h' || g FROM generate_series(1, 100000) AS g;
+CREATE TABLE jsheavy AS SELECT g % 60000 AS k, g AS w FROM generate_series(1, 400000) AS g;
 ANALYZE jsheavy;
-INSERT INTO jsheavy SELECT 7, g FROM generate_series(1, 100000) AS g;
 SELECT join_property($$SELECT count(*), sum(jsheavy.w) FROM jsouter JOIN jsheavy ON jsouter.k = jsheavy.k$$, 'Shared Table') AS shared,
        join_property($$SELECT count(*), sum(jsheavy.w) FROM jsouter JOIN jsheavy ON jsouter.k = jsheavy.k$$, 'Partitions Joined Together')::int > 0 AS together;
 SELECT join_same($$SELECT count(*), sum(jsheavy.w), sum(length(jsouter.s)) FROM jsouter JOIN jsheavy ON jsouter.k = jsheavy.k$$, false);
@@ -857,11 +863,11 @@ BEGIN
         '$[0]."Plan".** ? (@."Custom Plan Provider" == "TessHashJoin")."Plans"[0]."Plans"[0]."Parallel Aware"')::text;
 END $$;
 SET tessera.scan_parallel_setup_cost = 150;
-EXPLAIN (COSTS OFF) SELECT count(*) FROM jpr JOIN jkx ON jpr.k = jkx.k;
-SELECT join_divided($$SELECT count(*) FROM jpr JOIN jkx ON jpr.k = jkx.k$$) AS one_left,
+EXPLAIN (COSTS OFF) SELECT count(*) FROM jpr JOIN jkp ON jpr.k = jkp.k;
+SELECT join_divided($$SELECT count(*) FROM jpr JOIN jkp ON jpr.k = jkp.k$$) AS one_left,
        join_divided($$SELECT count(*) FROM jpr JOIN jkwide ON jpr.k = jkwide.k WHERE jkwide.k % 10 = 0$$) AS every_one_left,
-       join_unread($$SELECT count(*) FROM jpr JOIN jkx ON jpr.k = jkx.k$$) AS unread;
-SELECT join_same($$SELECT jpr.k, jpr.v FROM jpr JOIN jkx ON jpr.k = jkx.k$$);
+       join_unread($$SELECT count(*) FROM jpr JOIN jkp ON jpr.k = jkp.k$$) AS unread;
+SELECT join_same($$SELECT jpr.k, jpr.v FROM jpr JOIN jkp ON jpr.k = jkp.k$$);
 SELECT join_same($$SELECT jpr.k, jkwide.k FROM jpr JOIN jkwide ON jpr.k = jkwide.k WHERE jkwide.k % 10 = 0$$);
 SET tessera.scan_parallel_setup_cost = 0;
 RESET enable_parallel_hash;
@@ -896,8 +902,33 @@ SET tessera.enable = off;
 EXPLAIN (COSTS OFF) SELECT count(*) FROM jf JOIN jd ON jf.fk = jd.id;
 RESET tessera.enable;
 
+-- The node's path costs its children's costs as they are and its own
+-- work on top: in every TessHashJoin of a plan the total is at least the
+-- children's totals together, and the start at least the inner child's
+-- total (the table is built before a row goes out) and at most the total.
+-- A discount of the whole once compounded over nested joins (plan 8.10).
+CREATE FUNCTION join_costs_carried(query text) RETURNS boolean
+LANGUAGE plpgsql AS $$
+DECLARE
+    plan jsonb;
+BEGIN
+    EXECUTE 'EXPLAIN (FORMAT JSON) ' || query INTO plan;
+    RETURN NOT EXISTS (
+        SELECT 1 FROM jsonb_path_query(plan, 'strict $.**') AS node
+        WHERE jsonb_typeof(node) = 'object' AND node ->> 'Custom Plan Provider' = 'TessHashJoin'
+          AND ((node ->> 'Total Cost')::numeric <
+                   (node -> 'Plans' -> 0 ->> 'Total Cost')::numeric + (node -> 'Plans' -> 1 ->> 'Total Cost')::numeric
+               OR (node ->> 'Startup Cost')::numeric < (node -> 'Plans' -> 1 ->> 'Total Cost')::numeric
+               OR (node ->> 'Startup Cost')::numeric > (node ->> 'Total Cost')::numeric));
+END $$;
+SELECT join_costs_carried($$SELECT count(*) FROM jf JOIN jd ON jf.fk = jd.id$$) AS one,
+       join_costs_carried($$SELECT count(*), sum(jd.n) FROM jf JOIN jd ON jf.fk = jd.id JOIN jdup ON jdup.k = jd.id$$) AS nested,
+       join_costs_carried($$SELECT count(*) FROM jf WHERE NOT EXISTS (SELECT 1 FROM jd WHERE jd.id = jf.fk)$$) AS anti,
+       join_costs_carried($$SELECT count(*) FROM jf JOIN jd ON jf.fk = jd.id AND jf.v > jd.n$$) AS residual;
+DROP FUNCTION join_costs_carried(text);
+
 DROP TABLE jd, jf, jdup, jsmall, jempty, jgrow, jbig, jpair, jbuild, jprobe, jhit, jref, jrefprobe, jrefgrow, jsb, jsp, jsskew, jsouter, jsheavy;
-DROP TABLE jpr, jpl, jph, jp2, jkf, jkm, jk8, jkn, jkl, jk2, jk19, jkw, jkx, jkwide;
+DROP TABLE jpr, jpl, jph, jp2, jkf, jkm, jk8, jkn, jkl, jk2, jk19, jkw, jkx, jkwide, jkx2, jkp;
 DROP FUNCTION jskew();
 DROP FUNCTION jwide();
 DROP FUNCTION join_property(text, text);

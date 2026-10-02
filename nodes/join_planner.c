@@ -1,5 +1,7 @@
 #include "postgres.h"
 
+#include <math.h>
+
 #include "access/stratnum.h"
 #include "catalog/pg_statistic.h"
 #include "catalog/pg_type_d.h"
@@ -753,13 +755,163 @@ with_key_targets(PlannerInfo *root, Path *child, List *keys)
 	return &copy->path;
 }
 
+/* The rows of a batch, as the sources fill them. */
+#define JOIN_COST_BATCH_ROWS 64
+
 /*
- * The path: the core's hash join of the same inputs as the template, at a
- * lower cost, over batch paths of them; the template's cost counts the
- * batches the core would write, and the node spills as the core does, a
- * shared table past every participant's hash_mem too. Where the join
- * prunes its outer TessAppend, the template reads only the partitions
- * expected to be left (leaves, expected_leaves).
+ * The path's cost: the children's as they are, and the node's own time in
+ * the units of the scan model (docs/nodes.md, Parameters), from the rows
+ * the planner expects of each side and of the join. A row built, a row
+ * probed, a pair, and a batch published (an outer batch with a pair goes
+ * out as a round, which the parent pays for however few rows it selects);
+ * an inner column kept, gathered for a pair, a text value copied into the
+ * table and gathered; a hashed key hashed on a row of either side; a pair
+ * of a compact batch where the inner side has several records a key (the
+ * inner keys' distinct values, from the statistics); the residual clauses
+ * over the records matched, at the filter's price of a batch clause; a
+ * Bloom filter's test a probe row in place of the probe of each row it
+ * rejects, where the node is expected to build one (fewer probe rows with
+ * a pair than tessera.join_bloom_ratio, a table of JOIN_BLOOM_MIN_ROWS
+ * rows at least); and a price a row of either side once the table
+ * outgrows hash_mem, every participant's with a shared table. A partial
+ * path's rows are one participant's, and its cost that participant's
+ * time. The outer child's cost is scaled by outer_scale, below 1 where
+ * the join prunes its partitions.
+ *
+ * The time goes into the cost at tessera.join_cost_unit units a unit: the
+ * core's hash join, which the planner weighs this path against, is costed
+ * by the core's nominal constants, at 4.9 µs of its time a unit of its
+ * cost over the same joins, where a unit of the scan model is 0.27 µs (the
+ * core's rate is 1 to 7.5 µs by the join's shape: it underprices its
+ * build the most). One rate keeps the node's joins ordered by their time
+ * among themselves, and the node's join below the core's wherever it is
+ * at least 1.5 times as fast, which the slowest shape measured is by 2.7.
+ * Calibrated by bench/pg/joincost.
+ */
+static void
+join_cost(PlannerInfo *root, RelOptInfo *joinrel, RelOptInfo *innerrel, JoinType jointype,
+		  bool inner_unique, const JoinKeys *keys, const Path *outer, const Path *inner,
+		  double outer_scale, bool shared, Path *path)
+{
+	double		probe_rows = outer->rows;
+	double		build_rows = inner->rows;
+	double		participants = shared ? tess_parallel_divisor(inner) : 1.0;
+	double		table_rows = build_rows * participants;
+	double		rows = path->rows;
+	double		per_key = 1.0;
+	double		matched;
+	double		pairs;
+	double		share;
+	double		out_share;
+	double		batches;
+	bool		compact;
+	bool		bloom;
+	bool		spills;
+	int			hashed = 0;
+	int			ints = 0;
+	int			texts = 0;
+	List	   *kept = NIL;
+	List	   *vars;
+	Cost		build;
+	Cost		probe;
+
+	foreach_int(hasher, keys->hashers)
+		hashed += hasher != 0;
+	/* The inner columns kept in the records: the target's and the residual clauses'. */
+	vars = list_copy(joinrel->reltarget->exprs);
+	vars = list_concat(vars, pull_var_clause((Node *) keys->residual, 0));
+	foreach_ptr(Node, node, vars)
+	{
+		Var		   *var = (Var *) node;
+		int16		len;
+		bool		byval;
+
+		if (!IsA(node, Var) || !bms_is_member(var->varno, innerrel->relids) ||
+			list_member(kept, var))
+			continue;
+		kept = lappend(kept, var);
+		get_typlenbyval(var->vartype, &len, &byval);
+		if (byval)
+			ints++;
+		else
+			texts++;
+	}
+	/* Records a key: a compact batch of the pairs when there are several. */
+	if (!inner_unique && keys->inner != NIL)
+	{
+		double		distinct = estimate_num_groups(root, keys->inner, table_rows, NULL, NULL);
+
+		if (distinct > 0)
+			per_key = Max(1.0, table_rows / distinct);
+	}
+	compact = per_key > 1.05;
+	switch (jointype)
+	{
+		case JOIN_SEMI:
+			matched = rows;
+			pairs = rows;
+			break;
+		case JOIN_ANTI:
+			/* The rows returned found no record; the others a pair each. */
+			matched = Max(probe_rows - rows, 0);
+			pairs = matched;
+			break;
+		case JOIN_LEFT:
+		case JOIN_FULL:
+			matched = Min(rows, probe_rows);
+			pairs = rows;
+			break;
+		default:
+			matched = compact ? rows / per_key : rows;
+			pairs = rows;
+			break;
+	}
+	matched = Min(matched, probe_rows);
+	share = probe_rows > 0 ? matched / probe_rows : 0;
+	if (jointype == JOIN_ANTI)
+		out_share = probe_rows > 0 ? Min(rows / probe_rows, 1.0) : 0;
+	else if (jointype == JOIN_LEFT || jointype == JOIN_FULL)
+		out_share = 1.0;
+	else
+		out_share = share;
+	batches = compact ? pairs / JOIN_COST_BATCH_ROWS :
+		probe_rows / JOIN_COST_BATCH_ROWS * (1.0 - pow(1.0 - out_share, JOIN_COST_BATCH_ROWS));
+	bloom = tess_join_bloom_ratio > 0 && table_rows >= JOIN_BLOOM_MIN_ROWS &&
+		(tess_join_bloom_ratio >= 1.0 || share < tess_join_bloom_ratio);
+	/*
+	 * A record: 16 bytes of header, 8 a key, 8 for the NULL bits of the
+	 * columns kept and 8 a column, and 8 of the index.
+	 */
+	spills = table_rows * (16 + 8 * keys->nkeys + 8 * (1 + ints + texts) + 8) >
+		(double) get_hash_memory_limit() * participants;
+
+	build = build_rows * (tess_join_build_cost + texts * tess_join_text_value_cost +
+						  hashed * tess_join_hashed_key_cost);
+	probe = probe_rows * (hashed * tess_join_hashed_key_cost +
+						  (bloom ? tess_join_bloom_test_cost : tess_join_probe_cost)) +
+		(bloom ? matched * tess_join_probe_cost : 0) +
+		pairs * (tess_join_pair_cost + ints * tess_join_gather_cost +
+				 texts * tess_join_text_value_cost +
+				 (compact ? tess_join_compact_pair_cost : 0)) +
+		batches * tess_join_batch_cost +
+		matched * list_length(keys->residual) * tess_filter_clause_cost;
+	if (spills)
+	{
+		build += build_rows * tess_join_spill_row_cost;
+		probe += probe_rows * tess_join_spill_row_cost;
+	}
+	build /= tess_join_cost_unit;
+	probe /= tess_join_cost_unit;
+	path->startup_cost = outer->startup_cost * outer_scale + inner->total_cost + build;
+	path->total_cost = outer->total_cost * outer_scale + inner->total_cost + build + probe;
+}
+
+/*
+ * The path: the core's hash join of the same inputs as the template, for
+ * its rows and properties, over batch paths of them, at the cost of
+ * join_cost. Where the join prunes its outer TessAppend, the template
+ * reads only the partitions expected to be left (leaves, expected_leaves),
+ * and the outer child's cost is scaled down by as much.
  */
 static CustomPath *
 make_join_path(PlannerInfo *root, RelOptInfo *joinrel, JoinType jointype,
@@ -802,12 +954,10 @@ make_join_path(PlannerInfo *root, RelOptInfo *joinrel, JoinType jointype,
 	template = create_hashjoin_path(root, joinrel, jointype, &workspace,
 									extra, priced, inner_path, shared,
 									extra->restrictlist, NULL, hashclauses);
-	/*
-	 * A share of the core's cost, tessera.join_cost_factor (0.9), of its
-	 * start and its total alike: the build stays within the whole.
-	 */
-	template->jpath.path.startup_cost *= tess_join_cost_factor;
-	template->jpath.path.total_cost *= tess_join_cost_factor;
+	join_cost(root, joinrel, inner_path->parent, jointype, extra->inner_unique, keys,
+			  outer, inner,
+			  outer_path->total_cost > 0 ? priced->total_cost / outer_path->total_cost : 1.0,
+			  shared, &template->jpath.path);
 	config.template_path = &template->jpath.path;
 	config.methods = &join_path_methods;
 	config.node = &tess_hash_join_node;

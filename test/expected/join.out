@@ -346,8 +346,8 @@ EXPLAIN (COSTS OFF) SELECT sum(b.w) FROM jpair a JOIN jpair b ON a.k = b.k AND a
  Custom Scan (TessAgg)
    ->  Custom Scan (TessHashJoin)
          Hash Cond: ((a.k = b.k) AND (a.j = b.j))
-         ->  Custom Scan (TessHeapScan) on jpair a
          ->  Custom Scan (TessHeapScan) on jpair b
+         ->  Custom Scan (TessHeapScan) on jpair a
 (5 rows)
 
 SELECT join_same($$SELECT count(*), sum(a.w), sum(b.w) FROM jpair a JOIN jpair b ON a.k = b.k AND a.j = b.j$$);
@@ -540,8 +540,8 @@ EXPLAIN (COSTS OFF) SELECT count(*) FROM jguard JOIN jd ON jguard.k = jd.id AND 
          Hash Cond: (jd.id = jguard.k)
          Batch Join Filter: ((1000 / (jd.id - jguard.d)) > 5)
          Join Filter: ((jd.id # jguard.d) <> 0)
-         ->  Custom Scan (TessHeapScan) on jguard
          ->  Custom Scan (TessHeapScan) on jd
+         ->  Custom Scan (TessHeapScan) on jguard
 (7 rows)
 
 SELECT join_same($$SELECT jguard.d, jd.id FROM jguard JOIN jd ON jguard.k = jd.id AND 1000 / (jd.id - jguard.d) > 5 AND (jd.id # jguard.d) <> 0$$);
@@ -648,8 +648,8 @@ SELECT count(*) FROM jf JOIN jd ON jf.fk = jd.id JOIN jdup ON jd.id = jdup.k;
          ->  Custom Scan (TessHeapScan) on jf
          ->  Custom Scan (TessHashJoin)
                Hash Cond: (jd.id = jdup.k)
-               ->  Custom Scan (TessHeapScan) on jdup
                ->  Custom Scan (TessHeapScan) on jd
+               ->  Custom Scan (TessHeapScan) on jdup
 (8 rows)
 
 SELECT join_same($$SELECT jf.v, jd.label, jdup.w FROM jf JOIN jd ON jf.fk = jd.id JOIN jdup ON jd.id = jdup.k$$);
@@ -1593,21 +1593,27 @@ SELECT join_explain($$SELECT count(*), sum(jd.n) FROM jf JOIN jd ON jf.fk = jd.i
                                       join_explain                                       
 -----------------------------------------------------------------------------------------
  Custom Scan (TessAgg) (actual rows=1.00 loops=1)
-   Input Batches: 5
+   Input Batches: 6
    Input Rows: 87
-   Kernel Calls: 10
+   Kernel Calls: 12
    Computed Datums: 87
    ->  Custom Scan (TessHashJoin) (actual rows=87.00 loops=1)
          Hash Cond: (jd.id = jf.fk)
          Buckets: 1024
          Memory Usage: within hash_mem
-         Rows Removed by Bloom Filter: 13
+         Rows Removed by Bloom Filter: 167
          Builds: 1
-         Build Rows: 300
+         Build Rows: 100
          Chunks: 1
-         Probe Rows: 112
+         Probe Rows: 300
          Matches: 87
          Bloom Filters: 1
+         ->  Custom Scan (TessHeapScan) on public.jd (actual rows=300.00 loops=1)
+               Batch Size: 64
+               Batches: 6
+               Pages: 3
+               Deformed Datums: 387
+               Restarted Datums: 0
          ->  Custom Scan (TessFilter) on public.jf (actual rows=112.00 loops=1)
                Batch Filter: ((jf.v > 0) AND (jf.note ~~ 'f1%'::text))
                Rows Removed by Batch Filter: 888
@@ -1620,12 +1626,6 @@ SELECT join_explain($$SELECT count(*), sum(jd.n) FROM jf JOIN jd ON jf.fk = jd.i
                      Pages: 9
                      Deformed Datums: 2112
                      Restarted Datums: 12
-         ->  Custom Scan (TessHeapScan) on public.jd (actual rows=300.00 loops=1)
-               Batch Size: 64
-               Batches: 6
-               Pages: 3
-               Deformed Datums: 600
-               Restarted Datums: 0
 (34 rows)
 
 SELECT join_same($$SELECT jf.v, jd.label FROM jf JOIN jd ON jf.fk = jd.id WHERE jf.v > 0 AND jf.note LIKE 'f1%'$$);
@@ -2006,7 +2006,13 @@ BEGIN
 END $$;
 CREATE TABLE jkx AS SELECT 20001 + g % 10000 AS k, 10001 + g % 10000 AS k2 FROM generate_series(1, 50000) AS g;
 CREATE TABLE jkwide AS SELECT 1 + g % 32000 AS k FROM generate_series(1, 100000) AS g;
-ANALYZE jkx, jkwide;
+-- Keys of jp2's second level, few enough that building them costs less
+-- than reading the partitions pruned (building jkx's 50 000 rows would
+-- not: the smaller jp2 is built, and nothing pruned).
+CREATE TABLE jkx2 AS SELECT 10001 + g % 10000 AS k2 FROM generate_series(1, 5000) AS g;
+-- The same for jpr's third partition, for the parallel join below.
+CREATE TABLE jkp AS SELECT 20001 + g % 10000 AS k FROM generate_series(1, 5000) AS g;
+ANALYZE jkx, jkwide, jkx2, jkp;
 EXPLAIN (COSTS OFF) SELECT count(*) FROM jpr JOIN jkx ON jpr.k = jkx.k;
                          QUERY PLAN                          
 -------------------------------------------------------------
@@ -2024,7 +2030,7 @@ EXPLAIN (COSTS OFF) SELECT count(*) FROM jpr JOIN jkx ON jpr.k = jkx.k;
 SELECT join_outer($$SELECT count(*) FROM jpr JOIN jkwide ON jpr.k = jkwide.k$$) AS every_partition,
        join_outer($$SELECT count(*) FROM jpr JOIN jkwide ON jpr.k = jkwide.k WHERE jkwide.k > 20000$$) AS clause,
        join_outer($$SELECT count(*) FROM jpr JOIN jkwide ON jpr.k = jkwide.k WHERE 20000 < jkwide.k$$) AS commuted,
-       join_outer($$SELECT count(*) FROM jp2 JOIN jkx ON jp2.k = jkx.k2$$) AS second_level,
+       join_outer($$SELECT count(*) FROM jp2 JOIN jkx2 ON jp2.k = jkx2.k2$$) AS second_level,
        join_outer($$SELECT count(*) FROM jph JOIN jkx ON jph.k = jkx.k2$$) AS hash;
  every_partition | clause | commuted | second_level | hash 
 -----------------+--------+----------+--------------+------
@@ -2033,7 +2039,7 @@ SELECT join_outer($$SELECT count(*) FROM jpr JOIN jkwide ON jpr.k = jkwide.k$$) 
 
 SELECT join_pruned($$SELECT count(*) FROM jpr JOIN jkx ON jpr.k = jkx.k$$) AS statistics,
        join_pruned($$SELECT count(*) FROM jpr JOIN jkwide ON jpr.k = jkwide.k WHERE jkwide.k > 20000$$) AS clause,
-       join_pruned($$SELECT count(*) FROM jp2 JOIN jkx ON jp2.k = jkx.k2$$) AS second_level;
+       join_pruned($$SELECT count(*) FROM jp2 JOIN jkx2 ON jp2.k = jkx2.k2$$) AS second_level;
  statistics | clause | second_level 
 ------------+--------+--------------
  3          | 2      | 2
@@ -2097,38 +2103,38 @@ SELECT join_explain($$SELECT count(*), sum(length(jsb.t)) FROM jsp JOIN jsb ON j
                                      join_explain                                     
 --------------------------------------------------------------------------------------
  Custom Scan (TessAgg) (actual rows=1.00 loops=1)
-   Input Batches: 2750
+   Input Batches: 2718
    Input Rows: 171130
-   Kernel Calls: 5500
+   Kernel Calls: 5436
    Computed Datums: 171130
    ->  Custom Scan (TessHashJoin) (actual rows=171130.00 loops=1)
          Hash Cond: (jsp.k = jsb.k)
          Buckets: 1024
          Memory Usage: within hash_mem
          Batches: 8
-         Disk Usage: 1753 kB
-         Rows Removed by Bloom Filter: 22727
+         Disk Usage: 2211 kB
+         Rows Removed by Bloom Filter: 0
          Builds: 1
-         Build Rows: 37648
-         Chunks: 81
+         Build Rows: 90910
+         Chunks: 149
          Resident Partitions: 0
-         Spilled Chunks: 511
+         Spilled Chunks: 821
          Tail Chunks Kept: 0
-         Probe Rows: 100000
+         Probe Rows: 40000
          Matches: 171130
-         Compact Batches: 1602
+         Compact Batches: 2337
          Bloom Filters: 1
-         ->  Custom Scan (TessHeapScan) on public.jsp (actual rows=100000.00 loops=1)
-               Batch Size: 64
-               Batches: 1597
-               Pages: 532
-               Deformed Datums: 100000
-               Restarted Datums: 0
          ->  Custom Scan (TessHeapScan) on public.jsb (actual rows=40000.00 loops=1)
                Batch Size: 64
                Batches: 723
                Pages: 362
                Deformed Datums: 77648
+               Restarted Datums: 0
+         ->  Custom Scan (TessHeapScan) on public.jsp (actual rows=100000.00 loops=1)
+               Batch Size: 64
+               Batches: 1597
+               Pages: 532
+               Deformed Datums: 100000
                Restarted Datums: 0
 (34 rows)
 
@@ -2148,40 +2154,40 @@ SELECT join_explain($$SELECT count(*), count(jsb.n), sum(length(jsb.t)) FROM jsp
                                      join_explain                                     
 --------------------------------------------------------------------------------------
  Custom Scan (TessAgg) (actual rows=1.00 loops=1)
-   Input Batches: 4347
+   Input Batches: 3231
    Input Rows: 202947
-   Kernel Calls: 10859
+   Kernel Calls: 9693
    Computed Datums: 405894
    ->  Custom Scan (TessHashJoin) (actual rows=202947.00 loops=1)
-         Join Type: Left
+         Join Type: Right
          Hash Cond: (jsp.k = jsb.k)
          Buckets: 1024
          Memory Usage: within hash_mem
          Batches: 8
-         Disk Usage: 1831 kB
-         Rows Removed by Bloom Filter: 22727
+         Disk Usage: 2362 kB
+         Rows Removed by Bloom Filter: 0
          Builds: 1
-         Build Rows: 37648
-         Chunks: 89
+         Build Rows: 100000
+         Chunks: 139
          Resident Partitions: 0
-         Spilled Chunks: 572
+         Spilled Chunks: 828
          Tail Chunks Kept: 0
-         Probe Rows: 100000
+         Probe Rows: 40000
          Matches: 171130
-         Compact Batches: 1602
+         Compact Batches: 2193
          Bloom Filters: 1
-         ->  Custom Scan (TessHeapScan) on public.jsp (actual rows=100000.00 loops=1)
-               Batch Size: 64
-               Batches: 1597
-               Pages: 532
-               Deformed Datums: 100000
-               Restarted Datums: 0
          ->  Custom Scan (TessHeapScan) on public.jsb (actual rows=40000.00 loops=1)
                Batch Size: 64
                Batches: 723
                Pages: 362
                Deformed Datums: 115296
                Restarted Datums: 37648
+         ->  Custom Scan (TessHeapScan) on public.jsp (actual rows=100000.00 loops=1)
+               Batch Size: 64
+               Batches: 1597
+               Pages: 532
+               Deformed Datums: 100000
+               Restarted Datums: 0
 (35 rows)
 
 SELECT join_same($$SELECT count(*), count(jsb.n), sum(length(jsb.t)), sum(length(jsp.s)) FROM jsp LEFT JOIN jsb ON jsp.k = jsb.k$$);
@@ -3151,8 +3157,8 @@ EXPLAIN (COSTS OFF) SELECT count(*), sum(jref.n), max(jref.t) FROM jrefprobe JOI
                      ->  Parallel Custom Scan (TessHashJoin)
                            Hash Cond: (jrefprobe.k = jref.k)
                            Shared Table: true
-                           ->  Parallel Custom Scan (TessHeapScan) on jrefprobe
                            ->  Parallel Custom Scan (TessHeapScan) on jref
+                           ->  Parallel Custom Scan (TessHeapScan) on jrefprobe
 (12 rows)
 
 SELECT join_same($$SELECT count(*), sum(jref.n), count(jref.t), sum(length(jref.t)), max(jref.t) FROM jrefprobe JOIN jref ON jrefprobe.k = jref.k$$);
@@ -3364,10 +3370,7 @@ RIGHT JOIN (VALUES (1), (2)) AS v(x) ON true$$);
 
 RESET enable_material;
 -- Semi and anti joins keep no inner column: jsp's keys, the larger side,
--- are the table. The core's right anti join, which hashes the smaller jsb,
--- costs less than the node's share of the core's anti join at these
--- partial scans' costs: a lower share keeps the node's.
-SET tessera.join_cost_factor = 0.7;
+-- are the table.
 SELECT join_property($$SELECT count(*), sum(length(jsb.t)) FROM jsb WHERE EXISTS (SELECT 1 FROM jsp WHERE jsp.k = jsb.k)$$, 'Spilled Chunks')::int > 0 AS semi_spilled,
        join_property($$SELECT jsb.t FROM jsb WHERE NOT EXISTS (SELECT 1 FROM jsp WHERE jsp.k = jsb.k)$$, 'Spilled Chunks')::int > 0 AS anti_spilled;
  semi_spilled | anti_spilled 
@@ -3375,7 +3378,6 @@ SELECT join_property($$SELECT count(*), sum(length(jsb.t)) FROM jsb WHERE EXISTS
  t            | t
 (1 row)
 
-RESET tessera.join_cost_factor;
 SELECT join_same($$SELECT count(*), sum(length(jsb.t)) FROM jsb WHERE EXISTS (SELECT 1 FROM jsp WHERE jsp.k = jsb.k)$$);
                    join_same                   
 -----------------------------------------------
@@ -3394,13 +3396,17 @@ SELECT join_same($$SELECT jsb.t, jsb.n FROM jsb WHERE NOT EXISTS (SELECT 1 FROM 
 -- the key 100000 rows share, which statistics taken before them do not
 -- show, is joined by one participant alone.
 SET work_mem = '1MB';
+-- jsouter, the smaller side, is built; the heavy key's rows come after
+-- its statistics, which the planner scales by its pages. Its other rows
+-- outgrow hash_mem several times over, so that partitions go to disk
+-- whatever the participants' timing.
 CREATE TABLE jsouter (k int, s text);
-ANALYZE jsouter;
 INSERT INTO jsouter
-SELECT CASE WHEN g % 11 = 0 THEN NULL ELSE g % 50000 END, 'q' || g FROM generate_series(1, 100000) AS g;
-CREATE TABLE jsheavy AS SELECT g % 60000 AS k, g AS w FROM generate_series(1, 200000) AS g;
+SELECT CASE WHEN g % 11 = 0 THEN NULL ELSE g % 50000 END, 'q' || g FROM generate_series(1, 200000) AS g;
+ANALYZE jsouter;
+INSERT INTO jsouter SELECT 7, 'h' || g FROM generate_series(1, 100000) AS g;
+CREATE TABLE jsheavy AS SELECT g % 60000 AS k, g AS w FROM generate_series(1, 400000) AS g;
 ANALYZE jsheavy;
-INSERT INTO jsheavy SELECT 7, g FROM generate_series(1, 100000) AS g;
 SELECT join_property($$SELECT count(*), sum(jsheavy.w) FROM jsouter JOIN jsheavy ON jsouter.k = jsheavy.k$$, 'Shared Table') AS shared,
        join_property($$SELECT count(*), sum(jsheavy.w) FROM jsouter JOIN jsheavy ON jsouter.k = jsheavy.k$$, 'Partitions Joined Together')::int > 0 AS together;
  shared | together 
@@ -3411,43 +3417,43 @@ SELECT join_property($$SELECT count(*), sum(jsheavy.w) FROM jsouter JOIN jsheavy
 SELECT join_same($$SELECT count(*), sum(jsheavy.w), sum(length(jsouter.s)) FROM jsouter JOIN jsheavy ON jsouter.k = jsheavy.k$$, false);
                    join_same                   
 -----------------------------------------------
- 1 rows, hash c1a85879f5b259b3ae7ea143c8bb8376
+ 1 rows, hash 1dc96fadef34ad6058d1a652e840fc12
 (1 row)
 
 SELECT join_same($$SELECT jsouter.s, jsheavy.w FROM jsouter JOIN jsheavy ON jsouter.k = jsheavy.k WHERE jsouter.s LIKE '%77'$$, false);
-                    join_same                     
---------------------------------------------------
- 3090 rows, hash 84e201b7012054d9f8e166abc3aca124
+                     join_same                     
+---------------------------------------------------
+ 19362 rows, hash 4ffc8ffb7e5986e9d9a29fa17b4b5730
 (1 row)
 
 SELECT join_same($$SELECT count(*), count(jsheavy.w), sum(jsheavy.w) FROM jsouter LEFT JOIN jsheavy ON jsouter.k = jsheavy.k$$, false);
                    join_same                   
 -----------------------------------------------
- 1 rows, hash 4fa207d7d71a64896e68e071b73b014c
+ 1 rows, hash 9b399d1ccaa150fcda91aa371222ed8b
 (1 row)
 
 SELECT join_same($$SELECT jsouter.s FROM jsouter LEFT JOIN jsheavy ON jsouter.k = jsheavy.k WHERE jsheavy.w IS NULL$$, false);
-                    join_same                     
---------------------------------------------------
- 9090 rows, hash 78168d0894edd24799766bf7e2bdedeb
+                     join_same                     
+---------------------------------------------------
+ 18181 rows, hash 9da940641b8023b8b5e2df5476791421
 (1 row)
 
 SELECT join_same($$SELECT count(*), sum(length(jsouter.s)) FROM jsouter WHERE EXISTS (SELECT 1 FROM jsheavy WHERE jsheavy.k = jsouter.k)$$, false);
                    join_same                   
 -----------------------------------------------
- 1 rows, hash fa953eff939e7c0f8c4e985685ad08f9
+ 1 rows, hash 63f062d7a7ed08074f6b64ed6d0a1408
 (1 row)
 
 SELECT join_same($$SELECT jsouter.s FROM jsouter WHERE NOT EXISTS (SELECT 1 FROM jsheavy WHERE jsheavy.k = jsouter.k)$$, false);
-                    join_same                     
---------------------------------------------------
- 9090 rows, hash 78168d0894edd24799766bf7e2bdedeb
+                     join_same                     
+---------------------------------------------------
+ 18181 rows, hash 9da940641b8023b8b5e2df5476791421
 (1 row)
 
 SELECT join_same($$SELECT count(*), sum(jsheavy.w) FROM jsouter JOIN jsheavy ON jsouter.k = jsheavy.k AND jsheavy.w % 3 = jsouter.k % 3$$, false);
                    join_same                   
 -----------------------------------------------
- 1 rows, hash fc184cd587e6f88232c5c6ff26a957d9
+ 1 rows, hash 80a95c36cdd8355f853b5d202a31ab72
 (1 row)
 
 -- RIGHT and FULL: a round's marks in shared memory, its tail by the last
@@ -3461,38 +3467,38 @@ SELECT join_property($$SELECT count(*), count(jsouter.s), sum(jsheavy.w) FROM js
 SELECT join_same($$SELECT count(*), count(jsouter.s), sum(jsheavy.w) FROM jsouter RIGHT JOIN jsheavy ON jsouter.k = jsheavy.k$$, false);
                    join_same                   
 -----------------------------------------------
- 1 rows, hash 9e75b6c756997b550390028ac19a3787
+ 1 rows, hash 90261e72200e492c05f01e56546fafc5
 (1 row)
 
 SELECT join_same($$SELECT count(*), count(jsouter.s), count(jsheavy.w), sum(jsheavy.w) FROM jsouter FULL JOIN jsheavy ON jsouter.k = jsheavy.k$$, false);
                    join_same                   
 -----------------------------------------------
- 1 rows, hash 7a4d5c73e2ba55b040a7b61b35b7493f
+ 1 rows, hash 1bd76c1fcfb633a80f4259970d5d2f36
 (1 row)
 
 SELECT join_same($$SELECT jsouter.s, jsheavy.w FROM jsouter FULL JOIN jsheavy ON jsouter.k = jsheavy.k WHERE jsheavy.w % 1000 = 11 OR jsouter.s LIKE '%77'$$, false);
-                    join_same                     
---------------------------------------------------
- 3717 rows, hash a9ac8c04dc61f3f71ee1fbc73496b433
+                     join_same                     
+---------------------------------------------------
+ 20835 rows, hash 50c3bb4cbf1f8a8fae392665bcabc674
 (1 row)
 
 SELECT join_same($$SELECT count(*), count(jsouter.s), sum(jsheavy.w) FROM jsouter RIGHT JOIN jsheavy ON jsouter.k = jsheavy.k AND jsheavy.w % 3 = jsouter.k % 3$$, false);
                    join_same                   
 -----------------------------------------------
- 1 rows, hash 8948bac4bf5333e2f7416ba0b6c3f576
+ 1 rows, hash 90261e72200e492c05f01e56546fafc5
 (1 row)
 
 SET parallel_leader_participation = off;
 SELECT join_same($$SELECT count(*), sum(jsheavy.w), sum(length(jsouter.s)) FROM jsouter JOIN jsheavy ON jsouter.k = jsheavy.k$$, false);
                    join_same                   
 -----------------------------------------------
- 1 rows, hash c1a85879f5b259b3ae7ea143c8bb8376
+ 1 rows, hash 1dc96fadef34ad6058d1a652e840fc12
 (1 row)
 
 SELECT join_same($$SELECT count(*), count(jsouter.s), count(jsheavy.w), sum(jsheavy.w) FROM jsouter FULL JOIN jsheavy ON jsouter.k = jsheavy.k$$, false);
                    join_same                   
 -----------------------------------------------
- 1 rows, hash 7a4d5c73e2ba55b040a7b61b35b7493f
+ 1 rows, hash 1bd76c1fcfb633a80f4259970d5d2f36
 (1 row)
 
 RESET parallel_leader_participation;
@@ -3501,7 +3507,7 @@ SELECT join_same($$SELECT x, n, t FROM (SELECT count(*) AS n, sum(jsheavy.w) AS 
 RIGHT JOIN (VALUES (1), (2)) AS v(x) ON true$$, false);
                    join_same                   
 -----------------------------------------------
- 2 rows, hash 22e9c0c39c606e5d158dac70955b3ce4
+ 2 rows, hash 99890d201bfbce1fee7ac0e0683caf6d
 (1 row)
 
 RESET enable_material;
@@ -3603,7 +3609,7 @@ BEGIN
         '$[0]."Plan".** ? (@."Custom Plan Provider" == "TessHashJoin")."Plans"[0]."Plans"[0]."Parallel Aware"')::text;
 END $$;
 SET tessera.scan_parallel_setup_cost = 150;
-EXPLAIN (COSTS OFF) SELECT count(*) FROM jpr JOIN jkx ON jpr.k = jkx.k;
+EXPLAIN (COSTS OFF) SELECT count(*) FROM jpr JOIN jkp ON jpr.k = jkp.k;
                                        QUERY PLAN                                       
 ----------------------------------------------------------------------------------------
  Custom Scan (TessAgg)
@@ -3614,28 +3620,27 @@ EXPLAIN (COSTS OFF) SELECT count(*) FROM jpr JOIN jkx ON jpr.k = jkx.k;
                ->  Parallel Custom Scan (TessAgg)
                      Partial Mode: Partial
                      ->  Parallel Custom Scan (TessHashJoin)
-                           Hash Cond: (jpr.k = jkx.k)
-                           Shared Table: true
+                           Hash Cond: (jpr.k = jkp.k)
                            ->  Parallel Custom Scan (TessAppend)
                                  ->  Parallel Custom Scan (TessHeapScan) on jpr_1
                                  ->  Parallel Custom Scan (TessHeapScan) on jpr_2
                                  ->  Parallel Custom Scan (TessHeapScan) on jpr_3
                                  ->  Parallel Custom Scan (TessHeapScan) on jpr_d jpr_4
-                           ->  Parallel Custom Scan (TessHeapScan) on jkx
-(16 rows)
+                           ->  Custom Scan (TessHeapScan) on jkp
+(15 rows)
 
-SELECT join_divided($$SELECT count(*) FROM jpr JOIN jkx ON jpr.k = jkx.k$$) AS one_left,
+SELECT join_divided($$SELECT count(*) FROM jpr JOIN jkp ON jpr.k = jkp.k$$) AS one_left,
        join_divided($$SELECT count(*) FROM jpr JOIN jkwide ON jpr.k = jkwide.k WHERE jkwide.k % 10 = 0$$) AS every_one_left,
-       join_unread($$SELECT count(*) FROM jpr JOIN jkx ON jpr.k = jkx.k$$) AS unread;
+       join_unread($$SELECT count(*) FROM jpr JOIN jkp ON jpr.k = jkp.k$$) AS unread;
  one_left | every_one_left | unread 
 ----------+----------------+--------
  true     | false          |      3
 (1 row)
 
-SELECT join_same($$SELECT jpr.k, jpr.v FROM jpr JOIN jkx ON jpr.k = jkx.k$$);
-                     join_same                     
----------------------------------------------------
- 50000 rows, hash b7bb240c55d5ecda2dbceab7687233aa
+SELECT join_same($$SELECT jpr.k, jpr.v FROM jpr JOIN jkp ON jpr.k = jkp.k$$);
+                    join_same                     
+--------------------------------------------------
+ 5000 rows, hash 7b099d94ea19332596b62a8a71b048f4
 (1 row)
 
 SELECT join_same($$SELECT jpr.k, jkwide.k FROM jpr JOIN jkwide ON jpr.k = jkwide.k WHERE jkwide.k % 10 = 0$$);
@@ -3676,8 +3681,8 @@ EXPLAIN (COSTS OFF) SELECT count(*) FROM jf JOIN jd ON jf.note = upper(jd.label)
    ->  Custom Scan (TessHashJoin)
          Hash Cond: (jf.note = upper(jd.label))
          Join Filter: (jf.note = upper(jd.label))
-         ->  Custom Scan (TessHeapScan) on jd
          ->  Custom Scan (TessHeapScan) on jf
+         ->  Custom Scan (TessHeapScan) on jd
 (6 rows)
 
 SELECT join_same($$SELECT jf.v, jd.id FROM jf JOIN jd ON upper(jf.note) = replace(upper(jd.label), 'D', 'F')$$);
@@ -3692,8 +3697,8 @@ EXPLAIN (COSTS OFF) SELECT count(*) FROM jf JOIN jd ON jf.fk = jd.id + 1;
  Custom Scan (TessAgg)
    ->  Custom Scan (TessHashJoin)
          Hash Cond: (jf.fk = (jd.id + 1))
-         ->  Custom Scan (TessHeapScan) on jd
          ->  Custom Scan (TessHeapScan) on jf
+         ->  Custom Scan (TessHeapScan) on jd
 (5 rows)
 
 SELECT join_same($$SELECT jf.v, jd.id FROM jf JOIN jd ON jf.fk = jd.id + 1$$);
@@ -3766,8 +3771,37 @@ EXPLAIN (COSTS OFF) SELECT count(*) FROM jf JOIN jd ON jf.fk = jd.id;
 (6 rows)
 
 RESET tessera.enable;
+-- The node's path costs its children's costs as they are and its own
+-- work on top: in every TessHashJoin of a plan the total is at least the
+-- children's totals together, and the start at least the inner child's
+-- total (the table is built before a row goes out) and at most the total.
+-- A discount of the whole once compounded over nested joins (plan 8.10).
+CREATE FUNCTION join_costs_carried(query text) RETURNS boolean
+LANGUAGE plpgsql AS $$
+DECLARE
+    plan jsonb;
+BEGIN
+    EXECUTE 'EXPLAIN (FORMAT JSON) ' || query INTO plan;
+    RETURN NOT EXISTS (
+        SELECT 1 FROM jsonb_path_query(plan, 'strict $.**') AS node
+        WHERE jsonb_typeof(node) = 'object' AND node ->> 'Custom Plan Provider' = 'TessHashJoin'
+          AND ((node ->> 'Total Cost')::numeric <
+                   (node -> 'Plans' -> 0 ->> 'Total Cost')::numeric + (node -> 'Plans' -> 1 ->> 'Total Cost')::numeric
+               OR (node ->> 'Startup Cost')::numeric < (node -> 'Plans' -> 1 ->> 'Total Cost')::numeric
+               OR (node ->> 'Startup Cost')::numeric > (node ->> 'Total Cost')::numeric));
+END $$;
+SELECT join_costs_carried($$SELECT count(*) FROM jf JOIN jd ON jf.fk = jd.id$$) AS one,
+       join_costs_carried($$SELECT count(*), sum(jd.n) FROM jf JOIN jd ON jf.fk = jd.id JOIN jdup ON jdup.k = jd.id$$) AS nested,
+       join_costs_carried($$SELECT count(*) FROM jf WHERE NOT EXISTS (SELECT 1 FROM jd WHERE jd.id = jf.fk)$$) AS anti,
+       join_costs_carried($$SELECT count(*) FROM jf JOIN jd ON jf.fk = jd.id AND jf.v > jd.n$$) AS residual;
+ one | nested | anti | residual 
+-----+--------+------+----------
+ t   | t      | t    | t
+(1 row)
+
+DROP FUNCTION join_costs_carried(text);
 DROP TABLE jd, jf, jdup, jsmall, jempty, jgrow, jbig, jpair, jbuild, jprobe, jhit, jref, jrefprobe, jrefgrow, jsb, jsp, jsskew, jsouter, jsheavy;
-DROP TABLE jpr, jpl, jph, jp2, jkf, jkm, jk8, jkn, jkl, jk2, jk19, jkw, jkx, jkwide;
+DROP TABLE jpr, jpl, jph, jp2, jkf, jkm, jk8, jkn, jkl, jk2, jk19, jkw, jkx, jkwide, jkx2, jkp;
 DROP FUNCTION jskew();
 DROP FUNCTION jwide();
 DROP FUNCTION join_property(text, text);

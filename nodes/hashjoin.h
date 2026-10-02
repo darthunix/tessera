@@ -25,12 +25,10 @@
 #define JOIN_DENSE_ROUND 32
 /*
  * The Bloom filter: after this many probed rows with a valid key, a table
- * of at least JOIN_BLOOM_MIN_ROWS rows gets one when fewer than half of
- * them found a record. A smaller table stays in the cache, where a miss
- * costs less than the check.
+ * of at least JOIN_BLOOM_MIN_ROWS rows (internal.h) gets one when fewer
+ * than half of them found a record.
  */
 #define JOIN_BLOOM_SAMPLE 4096
-#define JOIN_BLOOM_MIN_ROWS 4096
 /*
  * Pruning of the outer side's partitions: the keys are listed, each
  * pruning by itself, while the inner side has at most this many rows with

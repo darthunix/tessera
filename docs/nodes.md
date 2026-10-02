@@ -59,7 +59,6 @@ values, as the core's own cost parameters do:
 | Parameter | Default | What it scales |
 |---|---|---|
 | `tessera.scan_cost_factor` | 0.9 | the core's cost of a sequential, bitmap, index or index-only scan, for TessHeapScan with TessFilter above |
-| `tessera.join_cost_factor` | 0.9 | the core's cost of a hash join, for TessHashJoin |
 | `tessera.agg_cost_factor` | 0.9 | the core's cost of an aggregation without `GROUP BY`, for TessAgg |
 | `tessera.agg_key_share` | 0.25 | `cpu_operator_cost` a key of a row TessAgg groups |
 | `tessera.agg_dictionary_share` | 0.65 | more of it for a key through a dictionary (text, numeric, ...) |
@@ -92,6 +91,25 @@ and prints them:
 | `tessera.bitmap_build_cost` | 0.038 | a row of a partial bitmap's building, which one participant does |
 | `tessera.bitmap_build_scatter_cost` | 0.054 | what building takes more a row, times 1 - c² for the correlation c of the index's first column |
 | `tessera.index_worker_share` | 0.5 | the share of the leader's pace a worker of a partial index or index-only scan reads at (a share, not a time) |
+
+The model of the node's hash join (TessHashJoin, Planning), in the same
+units, added to its children's costs as they are after the division by
+`tessera.join_cost_unit`; `bench/pg/joincost` fits them on a machine and
+prints them:
+
+| Parameter | Default | The node's time for |
+|---|---|---|
+| `tessera.join_build_cost` | 0.107 | a row of the inner side built into the table |
+| `tessera.join_probe_cost` | 0.0072 | a row of the outer side probed |
+| `tessera.join_pair_cost` | 0.0046 | a pair returned |
+| `tessera.join_batch_cost` | 0.31 | a batch published, which its parent pays for whatever the share of its rows selected |
+| `tessera.join_gather_cost` | 0.0097 | an inner value gathered for a pair |
+| `tessera.join_text_value_cost` | 0.035 | a by-reference inner value copied into the table, and again gathered for a pair |
+| `tessera.join_hashed_key_cost` | 0.069 | a row of either side hashed by its type's function, for a key a word does not hold |
+| `tessera.join_compact_pair_cost` | 0.020 | what a pair of a compact batch costs more, where the inner side has several records a key |
+| `tessera.join_bloom_test_cost` | 0.0027 | a probe row tested against the Bloom filter, in place of the probe of a row it rejects |
+| `tessera.join_spill_row_cost` | 0.015 | what a row of either side costs more once the table outgrows `hash_mem` |
+| `tessera.join_cost_unit` | 17.9 | the node's time, in these units, that a unit of the core's hash join cost stands for: the node's own time is divided by it (4.9 µs of the core's time a unit of its cost here, 0.27 µs a unit of the node's) |
 
 Constants that repeat the core's (half of `cpu_tuple_cost` a row an
 `Append` saves) or that shape execution rather than planning (chunk
@@ -1656,25 +1674,59 @@ Bloom filter reaches it. The hook is
 called for both orders of the sides, and as in the core the inner side is
 the one built, so the cost decides which side that is. The template is
 the core's hash join of the same inputs (`initial_cost_hashjoin` and
-`create_hashjoin_path`, not added), at nine tenths of its cost; its
+`create_hashjoin_path`, not added), for its rows and properties; its
 disabled count comes along, and like the core the hook offers nothing
-when hash joins are disabled. The template counts the batches the core
-would write, and the node's table spills where the core's would (see
-Spilling below), a shared one past every participant's `hash_mem`.
+when hash joins are disabled. The path's cost is its children's, as
+they are, and the node's own time (`join_cost`), in the units of the
+scan model (Parameters), from the rows the planner expects: a row built,
+a row probed, a pair and a batch published, since an outer batch with a
+pair goes out as a round whatever the share of its rows selected (one
+match in ten costs the parent a batch for 6 rows); an inner column kept
+gathered for a pair, a by-reference value copied into the table and
+gathered; a key a word does not hold hashed on every row of either side;
+a pair of a compact batch where the inner keys' distinct values, from
+the statistics, give several records a key; the residual clauses over
+the records matched at the filter's price of a batch clause; the Bloom
+filter's test on every probe row in place of the probes of the rows it
+rejects, where the planner expects the filter (fewer probe rows with a
+pair than `tessera.join_bloom_ratio`, a table of 4096 rows at least);
+and a price on every row of either side once the table, at 16 bytes a
+record, 8 a key, 8 for the NULL bits of the columns kept and 8 a column,
+and 8 of the index, outgrows `hash_mem`, every participant's with a
+shared table (see Spilling below). The time goes into the cost divided
+by `tessera.join_cost_unit`: the planner weighs this path against the
+core's hash join of the same inputs, which the core costs by its nominal
+constants, at 4.9 µs of its time a unit of its cost over the same joins
+(1 to 7.5 µs by the join's shape: the core underprices its build the
+most), where a unit of the scan model is 0.27 µs; one rate keeps the
+node's joins ordered by their time among themselves, and the node's join
+below the core's wherever it is at least 1.5 times as fast, which the
+slowest shape measured is by 2.7. `bench/pg/joincost` measured the
+times (plan 8.10): a row built 28.6 ns, a row probed 1.9, a pair 1.2, a
+batch 83, an integer gathered 2.6, a text value 9.5, a hashed key 18.6
+a row, a compact pair 5.5 more, a Bloom test 0.7, a row of a spilling
+join 4.0; the model predicts the 52 samples within 12 % root mean
+square; the core's hash join took 159 ns a row built, 4.2 a row probed
+and 25 a pair. Before it the path cost nine tenths of the core's hash
+join, children included: nested joins compounded the discount, and the
+planner chose a join order by the count of the node's joins rather than
+by their time (Q5 of TPC-H ran 1.4 times the core's time, plan 8.10).
 
 Under a `Gather` the hook also offers a partial path: the outer side's
 cheapest partial path divides the rows, and every participant builds the
 whole inner side from the cheapest inner path a worker may run, as the
-core's hash join without a shared table does; the template is that
-join's cost. The partial path is parallel-aware for the counters the
+core's hash join without a shared table does; its cost is one
+participant's time by the same model, over the partial outer path's
+rows. The partial path is parallel-aware for the counters the
 participants share through `TessSharedStats`.
 
 Where the core may use a Parallel Hash (`enable_parallel_hash`), the hook
 offers a second partial path with a shared table: the inner side's
 partial path divides the build among the participants too, into one
 table in the query's dynamic shared memory; its template is the core's
-Parallel Hash join, and the table may take every participant's
-`hash_mem`, as the core's does. The cheaper of the two wins. A right or
+Parallel Hash join, each participant costed for its share of the build,
+and the table may take every participant's `hash_mem`, as the core's
+does. The cheaper of the two wins. A right or
 a full join takes the second only, as the core does: with a table each,
 every participant would return the records without a pair.
 
