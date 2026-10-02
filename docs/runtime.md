@@ -7,7 +7,8 @@ the path and plan helpers, and the batch expression compiler. It is a static lib
 `pkglibdir` with its headers, one a part (`tessera/runtime_api.h`,
 `runtime_builder.h`, `runtime_heap_batch.h`, `runtime_project.h`,
 `runtime_qual.h`, `runtime_output.h`, `runtime_input.h`, `runtime_unary.h`,
-`runtime_shared_stats.h`, `runtime_spill.h`, `runtime_rows.h`) and
+`runtime_shared_stats.h`, `runtime_spill.h`, `runtime_rows.h`,
+`runtime_node.h`) and
 `tessera/runtime.h`, which includes them all; a node module links it
 rather than calling through the bridge, so the bridge stays a small contract
 and the helpers can change with the nodes that use them. The headers go
@@ -408,8 +409,18 @@ tess_shared_stats_store(state->stats, values);
 handle of an earlier call first: a `Gather` that a limit above shut down
 sets the plan up anew when rescanned, calling the callback again.
 
+A node whose only shared memory is its counters writes none of these by
+hand: `TESS_NODE_STATS_CALLBACKS(prefix, State, NCOUNTERS, counters)`
+(`tessera/runtime_node.h`) defines the five as static functions over the
+state's `stats` field and a function that fills this participant's
+counters, and `TESS_NODE_STATS_METHODS(prefix)` names them in the
+node's `CustomExecMethods`. `TessFilter`, `TessSort` and `TessAgg` use
+them.
+
 A node with other shared state, such as a parallel scan descriptor, puts
 the rows after it in the same chunk and adds the estimate to its size.
+It writes its callbacks itself and calls the same functions for the
+counters' part.
 
 Every participant stores its counters into its row when its node shuts
 down, which the executor does after the last row of a plan, in the leader
@@ -424,6 +435,28 @@ then and cancels the callback. `EXPLAIN` prints
 `tess_shared_stats_totals_or(state->stats, own)`: the totals once
 collected, and the node's own counters otherwise, in a serial plan. A rescan of the `Gather` reinitializes the
 chunk and zeroes every row.
+
+## The parts every node repeats
+
+`tessera/runtime_node.h` holds what the nodes would otherwise copy:
+
+- `tess_node_require_forward(eflags, name)`, in `BeginCustomScan`: an
+  error for a backward scan or mark/restore, for which the planner puts
+  `Material` above a batch subtree;
+- `tess_rescan_child(parent, child, input)`, in `ReScanCustomScan`: the
+  node's changed parameters passed to the child, which the core passes to
+  outer and inner plans only, the child rescanned, and its batch input, if
+  any, started anew;
+- `tess_node_projection(css, scan_slot, scan_tuple, base_columns,
+  computed)`: the projection of the computed columns the planner asks the
+  node for (see [Computing columns on demand](#computing-columns-on-demand));
+- `tess_explain_kb(label, bytes, es)`: memory in `EXPLAIN`, in kB rounded
+  up, as the core's nodes show it;
+- the shared memory callbacks of the counters, above.
+
+A node whose rescan leaves its children to the executor, which rescans a
+child when its changed parameters say so, keeps that rescan its own, as
+`TessHashJoin` and `TessGather` do.
 
 ## Keeping rows
 
