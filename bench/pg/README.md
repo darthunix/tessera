@@ -120,6 +120,26 @@ query down, and where it can, does it speed one up.
   start) and print `tessera.scan_parallel_setup_cost` and
   `tessera.scan_worker_page_cost`. Run it on another machine to set the
   parameters there.
+- **joincost** (`joincost.sql`): not a comparison but the calibration of
+  the planner's model of TessHashJoin (`tessera.join_build_cost` and the
+  rest, docs/nodes.md). Every sample is a hash join of `bench_fact`, or
+  `bench_tfact` for text and numeric keys, against an inner side of
+  10 000 to 2 000 000 rows, run over every outer row and over the half
+  with `f1 <= 1000000`, so that the rows of the two sides and the pairs
+  vary apart; the node's own time is the query's less its children's,
+  the same scans timed alone with the same columns read. The samples vary
+  the inner side's size, the keys' types, the inner columns kept
+  (integers and a text), four records a key, a residual clause, semi,
+  anti and left joins, the Bloom filter (the selective joins with it and
+  without), spilling at a `work_mem` of 4 and 16 MB and a shared table
+  with two workers. The summary fits the base (a row built, a row probed,
+  a pair, a batch published) over the samples with integer keys and
+  nothing kept, then each other kind of work from its samples' excess
+  over the base (a gathered integer, a text value, a hashed key, a pair of
+  a compact batch, a Bloom test, a spilled row), prints the parameters in
+  the units of the scan model, every sample against the whole model with
+  its error, and the parallel samples against one participant's share.
+  Run it on another machine to set the parameters there.
 - **rowwise** (`rowwise.sql`): tables without clauses read under a parent
   of the core that takes rows one at a time: `bit_or` of a column and of
   an expression, one column of sixty, `max` of a text column, a window
