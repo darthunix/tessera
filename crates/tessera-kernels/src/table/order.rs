@@ -2,7 +2,7 @@
 //! the order appended, as an item of [`crate::sort`] made of its key slots,
 //! its NULL bits and its reference. The records need not be linked.
 
-use anyhow::{Result, ensure};
+use anyhow::{Result, bail, ensure};
 
 use super::header::{CHUNK_HEADER, Layout};
 use super::record::Access;
@@ -32,7 +32,7 @@ pub(super) fn items<R: Region>(
         ($($n:literal)*) => {
             match encoder.words() {
                 $($n => items_as::<R, $n>(region, layout, &encoder, items),)*
-                words => unreachable!("an item has at most 17 words, not {words}"),
+                words => bail!("an item has at most 17 words, not {words}"),
             }
         };
     }
@@ -118,7 +118,7 @@ pub(super) fn top_push<R: Region>(
         ($($n:literal)*) => {
             match words {
                 $($n => push_as::<R, $n>(region, layout, &encoder, refs, rows, heap, len),)*
-                words => unreachable!("an item has at most 17 words, not {words}"),
+                words => bail!("an item has at most 17 words, not {words}"),
             }
         };
     }

@@ -169,7 +169,7 @@ pub fn sort_items(items: &mut [u64], words: usize, out: &mut [u32]) -> Result<()
         ($($n:literal)*) => {
             match words {
                 $($n => sort_as::<$n>(items, out),)*
-                _ => unreachable!("the width was checked"),
+                words => bail!("a sort item has 1 to {MAX_ITEM_WORDS} words, not {words}"),
             }
         };
     }
@@ -273,7 +273,7 @@ pub fn top_candidates<K: KeySource + ?Sized>(
         ($($n:literal)*) => {
             match encoder.words() {
                 $($n => candidates_as::<K, $n>(&encoder, source, rows, worst),)*
-                words => unreachable!("an item has at most 17 words, not {words}"),
+                words => bail!("an item has at most 17 words, not {words}"),
             }
         };
     }
@@ -355,7 +355,7 @@ pub fn key_lanes<K: KeySource + ?Sized>(
         ($($n:literal)*) => {
             match encoder.words() {
                 $($n => lanes_as::<K, $n>(&encoder, source, rows, lanes),)*
-                words => unreachable!("an item has at most 17 words, not {words}"),
+                words => bail!("an item has at most 17 words, not {words}"),
             }
         };
     }
