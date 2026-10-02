@@ -6751,6 +6751,12 @@
   инструментированными буферами C). Rust под -Zsanitizer=address не делаем: nightly и build-std, тот же класс закрывают
   Miri (9.6) и 9.1; вернуться, если ошибка границы ускользнёт от обоих. Ожидание: 10–15 минут с кэшем ядра. Один коммит
   скрипт + YAML, находки — отдельными коммитами; известный шум ICU/readline — файл suppressions под .github/.
+  Сделано 2026-10-02 (ветка gate-sanitizers): третий аргумент build-postgres.sh (asan), задача sanitizers в ci.yml (своя
+  сборка ядра в кэше, vm.mmap_rnd_bits=28, ASAN_OPTIONS и UBSAN_OPTIONS как выше; при падении — первый отчёт и журналы
+  артефактом). Каждый прогон останавливается на первом отчёте (halt_on_error); первый: UBSan «member access within
+  null pointer» в smallint_range (kernels/int.c) — call->values читается до проверки кода, а C-тест ошибок
+  передаёт call = NULL. Исправления — отдельным PR на просмотр, по коммиту на отчёт; до их слияния задача не блокирует
+  (continue-on-error). Альтернативы шуму (alignment, suppressions) пока не понадобились.
 
   9.8 Случайные запросы против ядра (бывший 4.37; решение 2026-10-02: свой инструмент). Станет: крейт
   tools/tessera-crosscheck; общий код кластера, сессии и настроек сервера из tools/tessera-tpch (cluster.rs, session.rs,
