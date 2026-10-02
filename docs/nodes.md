@@ -59,10 +59,10 @@ values, as the core's own cost parameters do:
 | Parameter | Default | What it scales |
 |---|---|---|
 | `tessera.scan_cost_factor` | 0.9 | the core's cost of a sequential, bitmap, index or index-only scan, for TessHeapScan with TessFilter above |
-| `tessera.agg_cost_factor` | 0.9 | the core's cost of an aggregation without `GROUP BY`, for TessAgg |
 | `tessera.agg_key_share` | 0.25 | `cpu_operator_cost` a key of a row TessAgg groups |
 | `tessera.agg_dictionary_share` | 0.65 | more of it for a key through a dictionary (text, numeric, ...) |
 | `tessera.agg_kernel_share` | 0.25 | the core's transition cost a row of TessAgg's own aggregates |
+| `tessera.agg_generic_share` | 0.9 | the same for an aggregate the kernels do not fold, evaluated row by row |
 | `tessera.setop_word_share` | 0.5 | the core's own cost of `INTERSECT` or `EXCEPT` with keys of words |
 | `tessera.setop_dictionary_share` | 0.9 | the same with a key through a dictionary |
 | `tessera.gather_tuple_share` | 0.25 | `parallel_tuple_cost` a row through TessGather |
@@ -1192,15 +1192,20 @@ For each of the core's plain aggregate paths whose input can be read
 in batches (`tess_batch_input_path`: a batch path as it is, a clause-free
 sequential scan through `TessHeapScan`, anything else through `TessPack`),
 the node's path takes the core path as its template with the batch child,
-and `add_path` decides. A plain aggregate costs nine tenths of the core's
-(`tessera.agg_cost_factor`); over a pack, whose input is the core's rows
-that both plans read alike, the pack's cost and a share of the node's
-own work alone (`plain_cost`): the kernels' quarter of the transition
-costs when they fold every aggregate, nine tenths with a generic one. An
-argument the kernels do not compute is evaluated row by row as the core
-does, at the core's cost, in a grouping too: over a window function, an
-aggregate of seven XORs and an addition took the node 46 ms and the pack
-18 where the core's aggregate took 42 (plan 4.28).
+and `add_path` decides. A plain aggregate costs its child, a batch scan
+or a pack over the core's rows, as it is, and the node's own work on top
+(`plain_cost`): the kernels' quarter of the core's transition costs when
+they fold every aggregate, nine tenths of them with a generic one
+(`tessera.agg_generic_share`: over the same batch scan of 500 000 rows,
+`max` of a text took the node 10.7 ms and the core's Aggregate 13.4,
+three aggregates with it 19.1 and 21.8, `string_agg` over 10 000 rows
+3.6 and 3.2). An argument the kernels do not compute is evaluated row by
+row as the core does, at the core's cost, in a grouping too: over a
+window function, an aggregate of seven XORs and an addition took the
+node 46 ms and the pack 18 where the core's aggregate took 42 (plan
+4.28). Until plan 8.10 a plain aggregate over a batch scan cost nine
+tenths of the core's path, child included, the discount the join's cost
+once compounded.
 A grouping costs the node's own (`group_cost`): the child's cost; per
 input row a quarter of `cpu_operator_cost` a key, as the kernels hash and
 look up a batch's keys at once, a key through a dictionary 0.65 more

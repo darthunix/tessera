@@ -686,15 +686,20 @@ group_cost(PlannerInfo *root, const Path *child, double groups, int nkeys,
 }
 
 /*
- * The node's own cost of an aggregation without GROUP BY over a pack: the
- * input is the core's rows, which both plans read alike, and only the
- * node's own work takes a share of the core's cost,
+ * The node's own cost of an aggregation without GROUP BY: the child's
+ * cost as it is, a batch scan's or a pack's over the core's rows, and the
+ * node's own work as a share of the core's transition costs,
  * tessera.agg_kernel_share with its own aggregates and sum states,
- * tessera.agg_cost_factor with a generic one; an argument the kernels do
- * not compute costs the core's. Over a pack of nine columns under a
- * window function, the node took 46 ms and the pack 18 where the core's
- * aggregate took 42, its argument seven XORs and an addition, which no
- * kernel computes (plan 4.28).
+ * tessera.agg_generic_share with an aggregate the kernels do not fold
+ * (max(text) over 500 000 rows took the node 10.7 ms and the core's
+ * Aggregate over the same batch scan 13.4, three aggregates with a text
+ * max 19.1 and 21.8, string_agg over 10 000 rows 3.6 and 3.2; plan 8.10);
+ * an argument the kernels do not compute costs the core's. Over a pack of
+ * nine columns under a window function, the node took 46 ms and the pack
+ * 18 where the core's aggregate took 42, its argument seven XORs and an
+ * addition, which no kernel computes (plan 4.28). Before plan 8.10 a plain
+ * aggregate over a batch scan cost nine tenths of the core's path, child
+ * included.
  */
 static void
 plain_cost(PlannerInfo *root, const Path *child, List *tlist, AggSplit split,
@@ -702,7 +707,7 @@ plain_cost(PlannerInfo *root, const Path *child, List *tlist, AggSplit split,
 {
 	AggClauseCosts costs;
 	Cost		rowwise = rowwise_argument_cost(root, tlist, split);
-	double		share = sum_states(tlist) < 0 ? tess_agg_cost_factor : tess_agg_kernel_share;
+	double		share = sum_states(tlist) < 0 ? tess_agg_generic_share : tess_agg_kernel_share;
 	double		rows = child->rows;
 
 	MemSet(&costs, 0, sizeof(costs));
@@ -741,25 +746,13 @@ make_agg_path(PlannerInfo *root, const AggPath *agg, List *tlist, int nkeys, int
 		return NULL;
 	template = agg->path;
 	/*
-	 * Grouping costs the node's own; a plain aggregate a share of the
-	 * core's, tessera.agg_cost_factor (0.9), over a pack a share of its
-	 * own work alone, but a final one the core's: its work is a row a
-	 * participant, and the share would take a tenth off the partial stack
-	 * below it.
+	 * Grouping and a plain aggregate cost the node's own over the child's
+	 * cost; a final one the core's: its work is a row a participant.
 	 */
 	if (nkeys > 0)
 		group_cost(root, child, agg->path.rows, nkeys, tlist, agg->aggsplit, &template);
 	else if ((flags & AGG_PATH_FINALIZE) == 0)
-	{
-		if (tess_path_node(child) == &tess_pack_node && !tess_pack_forwards(child))
-			plain_cost(root, child, tlist, agg->aggsplit, &template);
-		else
-		{
-			/* Of the start and the total alike: a plain aggregate's start is nearly all of it. */
-			template.startup_cost *= tess_agg_cost_factor;
-			template.total_cost *= tess_agg_cost_factor;
-		}
-	}
+		plain_cost(root, child, tlist, agg->aggsplit, &template);
 	/* The groups come in no order, whatever order the core's had. */
 	template.pathkeys = NIL;
 	config.template_path = &template;

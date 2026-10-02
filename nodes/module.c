@@ -13,10 +13,10 @@ PG_MODULE_MAGIC_EXT(.name = "tessera_nodes", .version = TESS_VERSION);
 PGDLLEXPORT void _PG_init(void);
 
 double		tess_scan_cost_factor = 0.9;
-double		tess_agg_cost_factor = 0.9;
 double		tess_agg_key_share = 0.25;
 double		tess_agg_dictionary_share = 0.65;
 double		tess_agg_kernel_share = 0.25;
+double		tess_agg_generic_share = 0.9;
 double		tess_setop_word_share = 0.5;
 double		tess_setop_dictionary_share = 0.9;
 double		tess_gather_tuple_share = 0.25;
@@ -144,11 +144,6 @@ _PG_init(void)
 							 "place of the core's sequential, bitmap, index or index-only scan.",
 							 &tess_scan_cost_factor, 0.9, 0.0, 10.0,
 							 PGC_USERSET, GUC_EXPLAIN, NULL, NULL, NULL);
-	DefineCustomRealVariable("tessera.agg_cost_factor",
-							 "Share of the core's cost of an aggregation without GROUP BY that TessAgg costs.",
-							 NULL,
-							 &tess_agg_cost_factor, 0.9, 0.0, 10.0,
-							 PGC_USERSET, GUC_EXPLAIN, NULL, NULL, NULL);
 	DefineCustomRealVariable("tessera.agg_key_share",
 							 "Share of cpu_operator_cost TessAgg costs a key of a row it groups.",
 							 NULL,
@@ -163,6 +158,12 @@ _PG_init(void)
 							 "Share of the core's transition cost a row of TessAgg's own aggregates costs.",
 							 NULL,
 							 &tess_agg_kernel_share, 0.25, 0.0, 10.0,
+							 PGC_USERSET, GUC_EXPLAIN, NULL, NULL, NULL);
+	DefineCustomRealVariable("tessera.agg_generic_share",
+							 "Share of the core's transition cost TessAgg costs a row of an aggregate its kernels do not fold.",
+							 "Measured over the same batch scan: max of a text at 0.80 of the core's "
+							 "Aggregate, three aggregates with it at 0.87.",
+							 &tess_agg_generic_share, 0.9, 0.0, 10.0,
 							 PGC_USERSET, GUC_EXPLAIN, NULL, NULL, NULL);
 	DefineCustomRealVariable("tessera.setop_word_share",
 							 "Share of the core's own cost of INTERSECT or EXCEPT TessAgg costs with keys of words.",

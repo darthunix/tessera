@@ -87,10 +87,10 @@ extern double tess_parallel_divisor(const Path *path);
  * see nodes/module.c, and each one's measurement where it is used.
  */
 extern double tess_scan_cost_factor;
-extern double tess_agg_cost_factor;
 extern double tess_agg_key_share;
 extern double tess_agg_dictionary_share;
 extern double tess_agg_kernel_share;
+extern double tess_agg_generic_share;
 extern double tess_setop_word_share;
 extern double tess_setop_dictionary_share;
 extern double tess_gather_tuple_share;

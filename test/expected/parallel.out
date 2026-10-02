@@ -205,38 +205,34 @@ RESET parallel_leader_participation;
 SET enable_material = off;
 SELECT parallel_explain($$SELECT x, n FROM (SELECT count(*) AS n FROM parallel_t WHERE a > 4997) AS ss
 RIGHT JOIN (VALUES (1), (2)) AS v(x) ON true$$);
-                                                      parallel_explain                                                      
-----------------------------------------------------------------------------------------------------------------------------
+                                                   parallel_explain                                                   
+----------------------------------------------------------------------------------------------------------------------
  Nested Loop Left Join (actual rows=2.00 loops=1)
    ->  Values Scan on "*VALUES*" (actual rows=2.00 loops=1)
    ->  Custom Scan (TessAgg) (actual rows=1.00 loops=2)
-         Partial Mode: Finalize
-         Input Batches: 6
-         Input Rows: 6
-         Kernel Calls: 0
-         Computed Datums: 6
-         ->  Custom Scan (TessGather) (actual rows=3.00 loops=2)
-               Workers Planned: 2
-               Workers Launched: 2
-               ->  Parallel Custom Scan (TessSend) (actual rows=0.00 loops=4)
-                     ->  Parallel Custom Scan (TessAgg) (actual rows=1.00 loops=6)
-                           Partial Mode: Partial
-                           Input Batches: 2
-                           Input Rows: 4
-                           Kernel Calls: 2
-                           ->  Parallel Custom Scan (TessFilter) on public.parallel_t (actual rows=0.67 loops=6)
-                                 Batch Filter: (parallel_t.a > 4997)
-                                 Rows Removed by Batch Filter: 1666
-                                 Input Batches: 164
-                                 Input Rows: 10000
-                                 Output Rows: 4
-                                 ->  Parallel Custom Scan (TessHeapScan) on public.parallel_t (actual rows=1666.67 loops=6)
-                                       Batch Size: 64
-                                       Batches: 164
-                                       Pages: 56
-                                       Deformed Datums: 10000
-                                       Restarted Datums: 0
-(29 rows)
+         Input Batches: 2
+         Input Rows: 4
+         Kernel Calls: 2
+         ->  Custom Scan (TessPack) (actual rows=2.00 loops=2)
+               Batch Size: 64
+               Rows Kept As: copies
+               Batches: 2
+               ->  Gather (actual rows=2.00 loops=2)
+                     Workers Planned: 2
+                     Workers Launched: 2
+                     ->  Parallel Custom Scan (TessFilter) on public.parallel_t (actual rows=0.67 loops=6)
+                           Batch Filter: (parallel_t.a > 4997)
+                           Rows Removed by Batch Filter: 1666
+                           Input Batches: 164
+                           Input Rows: 10000
+                           Output Rows: 4
+                           ->  Parallel Custom Scan (TessHeapScan) on public.parallel_t (actual rows=1666.67 loops=6)
+                                 Batch Size: 64
+                                 Batches: 164
+                                 Pages: 56
+                                 Deformed Datums: 10000
+                                 Restarted Datums: 0
+(25 rows)
 
 SELECT parallel_same($$SELECT x, n FROM (SELECT count(*) AS n FROM parallel_t WHERE a > 4997) AS ss
 RIGHT JOIN (VALUES (1), (2)) AS v(x) ON true$$);
