@@ -2011,9 +2011,7 @@ join_begin(CustomScanState *css, EState *estate, int eflags)
 	TessPlanInfo info = TESS_STRUCT_INITIALIZER(TessPlanInfo);
 	int			index = 0;
 
-	/* The planner puts Material above a batch subtree for these. */
-	if (eflags & (EXEC_FLAG_BACKWARD | EXEC_FLAG_MARK))
-		elog(ERROR, "TessHashJoin supports neither backward scan nor mark/restore");
+	tess_node_require_forward(eflags, "TessHashJoin");
 	tess_plan_get_info(cscan, &info);
 	if (info.node != &tess_hash_join_node || info.nchildren != 2 ||
 		info.child_names[0] == NULL || info.child_names[1] == NULL ||
@@ -2110,17 +2108,10 @@ join_begin(CustomScanState *css, EState *estate, int eflags)
 	}
 	if (info.computed != NIL)
 	{
-		TessProjectionConfig projection = TESS_STRUCT_INITIALIZER(TessProjectionConfig);
-
 		/* Computed columns follow the scan tuple's, as for TessFilter. */
-		projection.parent_context = estate->es_query_cxt;
-		projection.parent = &css->ss.ps;
-		projection.econtext = css->ss.ps.ps_ExprContext;
-		projection.scan_slot = css->ss.ss_ScanTupleSlot;
-		projection.scan_tuple = &state->scan_layout;
-		projection.base_columns = state->ncolumns;
-		projection.computed = info.computed;
-		state->projection = tess_projection_create(&projection);
+		state->projection = tess_node_projection(css, css->ss.ss_ScanTupleSlot,
+												 &state->scan_layout, state->ncolumns,
+												 info.computed);
 		state->computed = info.computed;
 	}
 	state->status = (TessStatus) TESS_STRUCT_INITIALIZER(TessStatus);
@@ -2385,20 +2376,19 @@ join_explain(CustomScanState *css, List *ancestors, ExplainState *es)
 	ExplainPropertyInteger("Buckets", NULL,
 						   totals[JOIN_BUILDS] > 0 ?
 						   totals[JOIN_BUCKETS] / totals[JOIN_BUILDS] : 0, es);
-	ExplainPropertyInteger("Memory Usage", "kB",
-						   (totals[JOIN_MEMORY] + 1023) / 1024, es);
+	tess_explain_kb("Memory Usage", totals[JOIN_MEMORY], es);
 	if (state->parallel.shared_budget > 0)
 		overrun = totals[JOIN_MEMORY] > state->parallel.shared_budget ?
 			totals[JOIN_MEMORY] - state->parallel.shared_budget : 0;
 	else
 		overrun = totals[JOIN_OVERRUN];
 	if (overrun > 0)
-		ExplainPropertyInteger("Overrun", "kB", (overrun + 1023) / 1024, es);
+		tess_explain_kb("Overrun", overrun, es);
 	/* As the core's hash shows its batches on disk. */
 	if (totals[JOIN_BATCHES] > 0)
 	{
 		ExplainPropertyInteger("Batches", NULL, totals[JOIN_BATCHES], es);
-		ExplainPropertyInteger("Disk Usage", "kB", (totals[JOIN_DISK] + 1023) / 1024, es);
+		tess_explain_kb("Disk Usage", totals[JOIN_DISK], es);
 	}
 	if (state->qual != NULL)
 		ExplainPropertyInteger("Rows Removed by Join Filter", NULL,
