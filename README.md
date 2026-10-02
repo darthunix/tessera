@@ -12,30 +12,43 @@ PostgreSQL or copying the data anywhere.
 - **Composable.** Other extensions add their own batch nodes, sources and
   functions through Tessera's bridge, a C API.
 
-| query | PostgreSQL | Tessera | speedup |
-|---|---:|---:|---:|
-| filter and count over 2 M rows | 36.3 ms | 9.0 ms | 4.0× |
-| `GROUP BY` into 100 k groups over 2 M rows | 126.1 ms | 36.1 ms | 3.5× |
-| hash join of 2 M rows with 100 k, count | 114.4 ms | 22.6 ms | 5.1× |
-| hash join of 20 M rows with 1 M spilling to disk (`work_mem` 4 MB) | 2189 ms | 529 ms | 4.1× |
-| `GROUP BY` of 20 M rows spilling to disk (`work_mem` 4 MB) | 2599 ms | 952 ms | 2.7× |
-| `ORDER BY` of 2 M integers | 113.9 ms | 43.0 ms | 2.6× |
-| top 10 of 2 M rows | 65.2 ms | 15.6 ms | 4.2× |
-| `UNION ALL` of two filtered scans, aggregated | 92.4 ms | 23.5 ms | 3.9× |
-| a month of dates out of 2 M rows through a BRIN index, aggregated | 2.06 ms | 0.63 ms | 3.3× |
-| the same filter and count with two parallel workers | 18.5 ms | 7.8 ms | 2.4× |
+## How much faster
 
-Same PostgreSQL, same heap tables, same data, same machine (Apple M5 Pro,
-PostgreSQL master): each query runs with `tessera.enable` on and off in one
-session; the table shows medians of 31 runs (11 for the spilling ones).
-Of the 190 cases of the [full run](docs/benchmarks/2026-10-01/README.md),
-Tessera is slower in four: a sort feeding a window function (1.19 times
-the core's time: PostgreSQL's window node stores every row the batch sort
-serves it), planning (0.03 to 0.05 ms more per query), and `LIMIT 1` (3 µs
-against 2). With parallel workers the batch plans gain less than the
-core's: the median speedup of the filter family is 3.4× serial and 2.1×
-with two workers. Results of the queries derived from TPC-H will join
-these after the first measured run of [their harness](bench/tpch/README.md).
+Same PostgreSQL, same heap tables, same data, same machine: every case
+runs with `tessera.enable` on and off in one session, and the ratio of
+the two medians is the speedup. The exact numbers live with each run,
+since they change with every series; roughly, on an Apple M5 Pro with
+PostgreSQL master and the data in shared buffers:
+
+- **Filters and aggregates over large tables** (a count or a sum under a
+  condition, `GROUP BY` into a few or many groups): 1.5 to 5 times
+  faster, 3 in the middle; less over a wide row, where deforming it is
+  the work of both modes.
+- **Hash joins by integer keys**, inner, outer, semi and anti: 3 to 5
+  times; spilling to disk 2 to 8; a join that prunes the partitions of
+  its outer side by the keys it built, up to 15.
+- **Sorting, top-N and `DISTINCT`**: 2 to 4 times by integers and dates,
+  up to 7 for `DISTINCT` over many values, barely faster by text under
+  a collation, whose comparisons are the core's.
+- **Set operations** (`UNION`, `INTERSECT`, `EXCEPT`): 2 to 7 times.
+- **Reads through indexes** (bitmap, index, index-only, BRIN): 1 to 3.5
+  times, since the index does most of the work in both modes.
+- **The queries derived from TPC-H** at scale factor 1: every query
+  faster, from 1.1 to 3 times, 1.7 times on the geometric mean; two of
+  the 22 run past the time limit in both modes without indexes on the
+  foreign keys.
+- **Where Tessera is slower**: a sort feeding a window function (about
+  1.2 times the core's time: PostgreSQL's window node stores every row
+  the batch sort serves it), planning (a few hundredths of a millisecond
+  more per query), `LIMIT 1` (microseconds); with parallel workers the
+  batch plans gain less than the core's, so the speedup with two workers
+  is about two thirds of the serial one.
+
+The runs: the [full run of the benchmark families](docs/benchmarks/2026-10-01/README.md)
+(190 cases, medians of 31 runs) and the [run of the queries derived from
+TPC-H](docs/benchmarks/2026-10-02-tpch/README.md) (SF 1, 11 pairs in
+alternating order); [`docs/benchmarks`](docs/benchmarks/README.md) lists
+them, newest first.
 
 ## Why trust the results
 
@@ -71,8 +84,8 @@ with the regression case that shows it.
 
 ## How it fits in a plan
 
-The join of the table above, as `EXPLAIN ANALYZE` shows it (counters
-omitted):
+A hash join of 2 M rows with 100 k, counted, as `EXPLAIN ANALYZE` shows
+it (counters omitted):
 
 ```
 Custom Scan (TessAgg) (actual rows=1.00 loops=1)
