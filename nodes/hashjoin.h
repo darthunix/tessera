@@ -201,7 +201,7 @@ typedef struct JoinShared
 	dsa_pointer part_stats;
 	dsa_pointer rounds;
 	int			nrounds;
-	/* RIGHT and FULL: the marks of the table's records (mark_words per chunk). */
+	/* RIGHT and FULL: the marks of the table's records (join_mark_words per chunk). */
 	dsa_pointer marks;
 	/*
 	 * Pruning of the outer side's partitions: the inner rows with a key, the
@@ -882,77 +882,71 @@ spill_partition(const JoinSpill *spill, uint32 hash)
 }
 
 /* The executor (hashjoin.c): the table, its values and marks, the build and the probe. */
-extern bool append_rows(TessHashJoinState *state, const TessTableRef *table, int chunk, TessRowMask *pending);
-extern void batch_keys(TessHashJoinState *state, TessBatch *batch, const int *columns, const TessTableKeyKind *kinds, TessRowMask *valid);
-extern void child_column(TessBatch *batch, int column, const TessRowMask *rows, TessColumnPurpose purpose, TessDatumColumn *result);
-extern Size chunk_len_for(Size largest);
-extern void decide_compact(TessHashJoinState *state);
-extern void forget_marks(TessHashJoinState *state);
-extern void index_table(TessHashJoinState *state);
+extern bool join_append_rows(TessHashJoinState *state, const TessTableRef *table, int chunk, TessRowMask *pending);
+extern void join_batch_keys(TessHashJoinState *state, TessBatch *batch, const int *columns, const TessTableKeyKind *kinds, TessRowMask *valid);
+extern void join_child_column(TessBatch *batch, int column, const TessRowMask *rows, TessColumnPurpose purpose, TessDatumColumn *result);
+extern Size join_chunk_len_for(Size largest);
+extern void join_decide_compact(TessHashJoinState *state);
+extern void join_forget_marks(TessHashJoinState *state);
+extern void join_index_table(TessHashJoinState *state);
 extern Size join_memory(TessHashJoinState *state);
-extern Size mark_words(TessHashJoinState *state);
+extern Size join_mark_words(TessHashJoinState *state);
 extern void join_note_memory(TessHashJoinState *state);
-extern void note_prune_keys(TessHashJoinState *state, TessBatch *batch);
-extern dsa_pointer *own_list(TessHashJoinState *state, bool values);
-extern dsa_pointer *participant_list(TessHashJoinState *state, int participant, bool values);
-extern int prepare_inner(TessHashJoinState *state, TessBatch *batch, TessRowMask *pending);
-extern void prune_outer(TessHashJoinState *state);
-extern void reserve_chunks(TessHashJoinState *state, int nchunks);
-extern void reserve_rows(TessHashJoinState *state, int nrows);
-extern void reserve_values(TessHashJoinState *state, int nchunks);
-extern void reset_prune_keys(TessHashJoinState *state);
-extern void reset_values(TessHashJoinState *state);
-extern void share_prune_keys(TessHashJoinState *state);
-extern void shared_count(TessHashJoinState *state, int64 delta);
-extern bool shared_on_disk(TessHashJoinState *state, uint32 partition);
-extern uint32 shared_partitions(TessHashJoinState *state);
-extern uint64 *shared_words(TessHashJoinState *state);
-extern uint64 store_value(TessHashJoinState *state, Datum value, int16 typlen);
-extern void take_back_bloom(TessHashJoinState *state);
+extern void join_note_prune_keys(TessHashJoinState *state, TessBatch *batch);
+extern dsa_pointer *join_own_list(TessHashJoinState *state, bool values);
+extern dsa_pointer *join_participant_list(TessHashJoinState *state, int participant, bool values);
+extern int join_prepare_inner(TessHashJoinState *state, TessBatch *batch, TessRowMask *pending);
+extern void join_prune_outer(TessHashJoinState *state);
+extern void join_reserve_chunks(TessHashJoinState *state, int nchunks);
+extern void join_reserve_rows(TessHashJoinState *state, int nrows);
+extern void join_reserve_values(TessHashJoinState *state, int nchunks);
+extern void join_reset_prune_keys(TessHashJoinState *state);
+extern void join_reset_values(TessHashJoinState *state);
+extern void join_share_prune_keys(TessHashJoinState *state);
+extern void join_shared_count(TessHashJoinState *state, int64 delta);
+extern bool join_shared_on_disk(TessHashJoinState *state, uint32 partition);
+extern uint32 join_shared_partitions(TessHashJoinState *state);
+extern uint64 *join_shared_words(TessHashJoinState *state);
+extern uint64 join_store_value(TessHashJoinState *state, Datum value, int16 typlen);
+extern void join_take_back_bloom(TessHashJoinState *state);
 
 /* The spill (hashjoin_spill.c): the partitions of both sides past hash_mem and their rounds. */
-extern void finish_spill_build(TessHashJoinState *state);
-extern void insert_spill(TessHashJoinState *state, TessBatch *batch);
-extern uint64 matched_word(const JoinSpill *spill, int count);
-extern bool next_pass(TessHashJoinState *state);
-extern bool next_spilled(TessHashJoinState *state, JoinSpill *spill);
-extern bool open_partition(TessHashJoinState *state, int partition);
-extern void outer_finish(TessHashJoinState *state, TessBatch *batch);
-extern TessBatch *outer_next(TessHashJoinState *state);
-extern void part_open(PartReader *reader, TessSpill *file, int partition, int writers);
-extern void side_append(TessHashJoinState *state, SpillSide *side, TessBatch *batch, TessRowMask *pending, const int *children, uint64 *nulls);
-extern void side_compact(SpillSide *side);
-extern void side_count(SpillSide *side, int partition, int64 delta);
-extern void side_demote(TessHashJoinState *state, SpillSide *side, int partition);
-extern void side_flush(TessHashJoinState *state, SpillSide *side, int partition);
-extern void side_forget(SpillSide *side, int partition);
-extern JoinSpill *spill_create(TessHashJoinState *state, JoinSpill *parent, double expected, uint32 shift, int forced);
-extern void spill_free(TessHashJoinState *state);
-extern Size spill_memory(JoinSpill *spill, uint64 *resident);
-extern void spill_outer(TessHashJoinState *state, TessBatch *batch, TessRowMask *valid);
-extern void split_chunk(TessHashJoinState *state, void *base, Size len, char *const *values);
-extern void start_spill(TessHashJoinState *state);
-extern bool tail_turn(TessHashJoinState *state);
+extern void join_finish_spill_build(TessHashJoinState *state);
+extern void join_insert_spill(TessHashJoinState *state, TessBatch *batch);
+extern uint64 join_matched_word(const JoinSpill *spill, int count);
+extern bool join_next_pass(TessHashJoinState *state);
+extern bool join_next_spilled(TessHashJoinState *state, JoinSpill *spill);
+extern bool join_open_partition(TessHashJoinState *state, int partition);
+extern void join_outer_finish(TessHashJoinState *state, TessBatch *batch);
+extern TessBatch *join_outer_next(TessHashJoinState *state);
+extern void join_part_open(PartReader *reader, TessSpill *file, int partition, int writers);
+extern void join_side_append(TessHashJoinState *state, SpillSide *side, TessBatch *batch, TessRowMask *pending, const int *children, uint64 *nulls);
+extern void join_side_compact(SpillSide *side);
+extern void join_side_count(SpillSide *side, int partition, int64 delta);
+extern void join_side_demote(TessHashJoinState *state, SpillSide *side, int partition);
+extern void join_side_flush(TessHashJoinState *state, SpillSide *side, int partition);
+extern void join_side_forget(SpillSide *side, int partition);
+extern JoinSpill *join_spill_create(TessHashJoinState *state, JoinSpill *parent, double expected, uint32 shift, int forced);
+extern void join_spill_free(TessHashJoinState *state);
+extern Size join_spill_memory(JoinSpill *spill, uint64 *resident);
+extern void join_spill_outer(TessHashJoinState *state, TessBatch *batch, TessRowMask *valid);
+extern void join_split_chunk(TessHashJoinState *state, void *base, Size len, char *const *values);
+extern void join_start_spill(TessHashJoinState *state);
+extern bool join_tail_turn(TessHashJoinState *state);
 
 /* The shared build and rounds of a parallel join (hashjoin_shared.c). */
-extern void build_shared(TessHashJoinState *state);
-extern void free_rounds(TessHashJoinState *state);
-extern void free_shared_table(TessHashJoinState *state);
-extern bool leave_shared(TessHashJoinState *state, bool keep);
-extern void make_rounds(TessHashJoinState *state);
-extern pg_atomic_uint64 *part_stats(TessHashJoinState *state, int partition);
-extern dsa_area *query_dsa(TessHashJoinState *state);
-extern bool round_depart(TessHashJoinState *state);
-extern void round_leave(TessHashJoinState *state);
-extern bool round_next_outer(TessHashJoinState *state);
-extern void shared_check(TessHashJoinState *state);
-extern void shared_flush(TessHashJoinState *state);
-extern bool shared_has_outer(JoinSpill *spill, int partition);
-extern bool shared_next_partition(TessHashJoinState *state);
-extern void shared_outer(TessHashJoinState *state);
-extern void shared_probe_start(TessHashJoinState *state, uint64 records);
-extern void shared_resident_end(TessHashJoinState *state);
-extern TessBatch *shared_resident_next(TessHashJoinState *state);
+extern void join_build_shared(TessHashJoinState *state);
+extern void join_free_rounds(TessHashJoinState *state);
+extern void join_free_shared_table(TessHashJoinState *state);
+extern bool join_leave_shared(TessHashJoinState *state, bool keep);
+extern pg_atomic_uint64 *join_part_stats(TessHashJoinState *state, int partition);
+extern dsa_area *join_query_dsa(TessHashJoinState *state);
+extern bool join_round_depart(TessHashJoinState *state);
+extern void join_round_leave(TessHashJoinState *state);
+extern bool join_round_next_outer(TessHashJoinState *state);
+extern bool join_shared_next_partition(TessHashJoinState *state);
+extern void join_shared_resident_end(TessHashJoinState *state);
+extern TessBatch *join_shared_resident_next(TessHashJoinState *state);
 
 /* Of hashjoin.c, hashjoin_begin.c and hashjoin_pairs.c, which call one another. */
 extern TupleTableSlot *join_exec(CustomScanState *css);
