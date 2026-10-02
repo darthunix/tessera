@@ -59,6 +59,10 @@ jobs:
     timeout-minutes: 300
     strategy:
       fail-fast: false
+      # A shard takes two to three hours on a macOS runner, and an account
+      # gets five of them at once: three shards leave two for the CI of
+      # pull requests, which otherwise waits behind the run for hours.
+      max-parallel: 3
       matrix:
         shard: [0, 1, 2, 3, 4, 5, 6, 7]
     steps:
