@@ -65,9 +65,11 @@ q`, as the suites' `agg_same` does, so their rows compare as multisets.
   the backend crashed.
 
 Outputs that stand for equal values take no stand on which value shows:
-a group's key, a distinct or set-operation row, min and max. For these,
-numerics go through `trim_scale` and float8 gets `+ 0`, because 0 and 0.0,
-or 0 and -0, are equal and either may show, in the core too.
+a group's key, a distinct or set-operation row, min and max, and every
+output of a query with a LIMIT, where rows tied in the order may stay
+either way. For these, numerics go through `trim_scale` and float8 gets
+`+ 0`, because 0 and 0.0, or 0 and -0, are equal and either may show, in
+the core too.
 
 A disagreement is shrunk by proptest within a minute and written to
 `target/bench-runs/crosscheck/finding-<seed>.sql`. The file holds the
