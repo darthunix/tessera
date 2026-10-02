@@ -226,6 +226,16 @@ extern Node *tess_plan_setop_columns(Node *node, const Plan *child);
 /* Whether node holds a set operation's output column (a Var of varno 0). */
 extern bool tess_plan_has_setop_columns(Node *node);
 
+/*
+ * Whether a branch of the set operation path reads gives one of its
+ * columns as a Const or a Param. The core's references of a custom scan
+ * to its child's targets (set_customscan_references) leave a Const or a
+ * Param where tess_plan_setop_columns put the first branch's: every row
+ * would get that value. A batch path over such a set operation's rows is
+ * not built; the core's plan reads its child's columns by position.
+ */
+extern bool tess_path_setop_constant(const Path *path);
+
 /* The layout of a plan built here; the map is allocated for the caller. */
 extern void tess_plan_get_layout(const Plan *plan, TessLayout *result);
 

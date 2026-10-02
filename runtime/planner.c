@@ -238,10 +238,17 @@ setop_columns_mutator(Node *node, void *context)
 	{
 		Var		   *var = (Var *) node;
 
+		Node	   *target;
+
 		if (var->varattno < 1 || var->varattno > list_length(targets))
 			elog(ERROR, "Tessera found no child target for column %d of a set operation",
 				 var->varattno);
-		return (Node *) copyObject(((TargetEntry *) list_nth(targets, var->varattno - 1))->expr);
+		target = (Node *) ((TargetEntry *) list_nth(targets, var->varattno - 1))->expr;
+		/* setrefs would keep it, not read the child: see tess_path_setop_constant. */
+		if (IsA(target, Const) || IsA(target, Param))
+			elog(ERROR, "Tessera cannot read column %d of a set operation, a constant of its first branch",
+				 var->varattno);
+		return (Node *) copyObject(target);
 	}
 	return expression_tree_mutator(node, setop_columns_mutator, context);
 }
@@ -276,6 +283,79 @@ first_child(const Plan *plan)
 		return ((CustomScan *) plan)->custom_plans != NIL ?
 			linitial(((CustomScan *) plan)->custom_plans) : NULL;
 	return plan->lefttree;
+}
+
+/* Whether a target list holds a Const or a Param, which setrefs keeps. */
+static bool
+constant_targets(List *exprs)
+{
+	foreach_ptr(Node, expr, exprs)
+	{
+		if (IsA(expr, Const) || IsA(expr, Param))
+			return true;
+	}
+	return false;
+}
+
+bool
+tess_path_setop_constant(const Path *path)
+{
+	if (path == NULL)
+		return false;
+	if (path->pathtarget == NULL ||
+		!tess_plan_has_setop_columns((Node *) path->pathtarget->exprs))
+	{
+		/* A branch: its targets are the set operation's columns. */
+		if (IsA(path, SubqueryScanPath) &&
+			constant_targets(((const SubqueryScanPath *) path)->subpath->pathtarget->exprs))
+			return true;
+		return path->pathtarget != NULL && constant_targets(path->pathtarget->exprs);
+	}
+	switch (nodeTag(path))
+	{
+		case T_AppendPath:
+			foreach_ptr(Path, child, ((const AppendPath *) path)->subpaths)
+			{
+				if (tess_path_setop_constant(child))
+					return true;
+			}
+			return false;
+		case T_MergeAppendPath:
+			foreach_ptr(Path, child, ((const MergeAppendPath *) path)->subpaths)
+			{
+				if (tess_path_setop_constant(child))
+					return true;
+			}
+			return false;
+		case T_SetOpPath:
+			return tess_path_setop_constant(((const SetOpPath *) path)->leftpath) ||
+				tess_path_setop_constant(((const SetOpPath *) path)->rightpath);
+		case T_CustomPath:
+			foreach_ptr(Path, child, ((const CustomPath *) path)->custom_paths)
+			{
+				if (tess_path_setop_constant(child))
+					return true;
+			}
+			return false;
+		case T_AggPath:
+			return tess_path_setop_constant(((const AggPath *) path)->subpath);
+		case T_SortPath:
+		case T_IncrementalSortPath:
+			return tess_path_setop_constant(((const SortPath *) path)->subpath);
+		case T_UniquePath:
+			return tess_path_setop_constant(((const UniquePath *) path)->subpath);
+		case T_GatherPath:
+			return tess_path_setop_constant(((const GatherPath *) path)->subpath);
+		case T_GatherMergePath:
+			return tess_path_setop_constant(((const GatherMergePath *) path)->subpath);
+		case T_LimitPath:
+			return tess_path_setop_constant(((const LimitPath *) path)->subpath);
+		case T_ProjectionPath:
+			return tess_path_setop_constant(((const ProjectionPath *) path)->subpath);
+		default:
+			/* A path of the columns whose branches are not known here. */
+			return true;
+	}
 }
 
 Node *

@@ -455,6 +455,30 @@ SELECT a FROM union_a WHERE a > 990 UNION ALL SELECT b FROM union_b WHERE b > 69
 SELECT a FROM union_a WHERE a > 990 UNION ALL SELECT b FROM union_b WHERE b > 69000 ORDER BY 1 LIMIT 4;
 RESET max_parallel_workers_per_gather;
 
+-- A branch that gives a set operation's column as a constant: the node's
+-- plan would show the first branch's targets in its columns' place, and
+-- the core leaves a constant there rather than read the child's column,
+-- so every row got the first branch's constant (found by
+-- tessera-crosscheck, plan 9.8). Such a set operation stays the core's,
+-- serial and parallel, the constant in either branch.
+SET max_parallel_workers_per_gather = 0;
+EXPLAIN (COSTS OFF) SELECT 1 FROM union_a UNION SELECT a FROM union_b;
+SELECT union_same($$SELECT 1 FROM union_a UNION SELECT a FROM union_b$$);
+SELECT union_same($$SELECT a, t FROM union_a UNION SELECT 7, 'b7' FROM union_b$$);
+SELECT union_same($$SELECT a FROM union_a INTERSECT SELECT 3 FROM union_b$$);
+SELECT union_same($$SELECT 3 FROM union_a EXCEPT ALL SELECT a FROM union_b$$);
+SELECT union_same($$SELECT x FROM (SELECT 1 AS x FROM union_a UNION SELECT a FROM union_b) AS q ORDER BY x LIMIT 3$$);
+SET max_parallel_workers_per_gather = 2;
+SET parallel_setup_cost = 0;
+SET parallel_tuple_cost = 0;
+SET min_parallel_table_scan_size = 0;
+SELECT union_same($$SELECT a, b FROM union_a UNION SELECT a, 10 FROM union_b WHERE b > 0$$);
+SELECT union_same($$SELECT 1 FROM union_a UNION SELECT a FROM union_b$$);
+RESET min_parallel_table_scan_size;
+RESET parallel_tuple_cost;
+RESET parallel_setup_cost;
+RESET max_parallel_workers_per_gather;
+
 DROP TABLE union_part, union_parent, union_child, union_a, union_b, union_empty;
 DROP FUNCTION union_same(text);
 DROP FUNCTION union_run(text);
