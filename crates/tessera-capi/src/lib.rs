@@ -70,14 +70,16 @@
 //!
 //! # Checking uninitialized-buffer access
 //!
-//! Use a compatible nightly containing Miri without changing the project's
-//! pinned compiler. Ordinary tests also cover NULLs, unprepared rows, and
-//! borrowing rules, but timing measurements do not establish memory safety.
+//! The Miri job of CI (.github/workflows/ci.yml) runs the tests of the
+//! unsafe code under Miri on a pinned nightly, without changing the
+//! project's pinned compiler. Ordinary tests also cover NULLs, unprepared
+//! rows, and borrowing rules, but timing measurements do not establish
+//! memory safety. To run the same locally:
 //!
 //! ```sh
-//! cargo +nightly miri test -p tessera-capi --test columns --locked
-//! cargo +nightly miri test -p tessera-capi --test table --locked
-//! cargo +nightly miri test -p tessera-core --test reader --locked
+//! export PROPTEST_CASES=16 MIRIFLAGS=-Zmiri-disable-isolation
+//! cargo +nightly miri test -p tessera-kernels --lib --locked table::
+//! cargo +nightly miri test -p tessera-capi --test columns --test table --locked
 //! ```
 
 pub mod c;
