@@ -1,0 +1,16 @@
+[package]
+name = "tessera-tpch"
+description = "Queries derived from TPC-H on a PostgreSQL cluster of its own, with Tessera on and off"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+postgres.workspace = true
+
+[lints]
+workspace = true

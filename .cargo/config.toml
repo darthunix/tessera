@@ -1,0 +1,3 @@
+# `cargo tpch`: the queries derived from TPC-H, see bench/tpch/README.md.
+[alias]
+tpch = "run --release --locked -p tessera-tpch --"
