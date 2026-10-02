@@ -82,7 +82,7 @@ create_upper_paths(PlannerInfo *root, UpperRelationKind stage,
 	if (previous_create_upper_paths_hook != NULL)
 		previous_create_upper_paths_hook(root, stage, input_rel, output_rel,
 										 extra);
-	if (!*tess_runtime_api()->settings->enable || stage != UPPERREL_FINAL)
+	if (!tess_enabled() || stage != UPPERREL_FINAL)
 		return;
 	foreach(lc, output_rel->pathlist)
 	{

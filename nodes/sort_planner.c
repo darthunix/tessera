@@ -214,7 +214,7 @@ create_upper_paths(PlannerInfo *root, UpperRelationKind stage,
 	if (previous_create_upper_paths_hook != NULL)
 		previous_create_upper_paths_hook(root, stage, input_rel, output_rel,
 										 extra);
-	if (!*tess_runtime_api()->settings->enable || stage != UPPERREL_ORDERED ||
+	if (!tess_enabled() || stage != UPPERREL_ORDERED ||
 		root->parse->limitOption == LIMIT_OPTION_WITH_TIES)
 		return;
 	/* Without the kernels module there is nothing to sort with. */

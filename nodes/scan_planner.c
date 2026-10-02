@@ -225,7 +225,7 @@ tess_filter_row_path(PlannerInfo *root, RelOptInfo *rel, Path *seqscan)
 {
 	Path	   *child;
 
-	if (!*tess_runtime_api()->settings->enable || seqscan == NULL ||
+	if (!tess_enabled() || seqscan == NULL ||
 		seqscan->pathtype != T_SeqScan || seqscan->param_info != NULL ||
 		!relation_supported(root, rel, planner_rt_fetch(rel->relid, root)) ||
 		first_clause(root, rel) == NULL || clauses_supported(root, rel) ||
@@ -250,7 +250,7 @@ add_filter_paths(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte)
 	Path	   *partial;
 	Path	   *child;
 
-	if (!*tess_runtime_api()->settings->enable ||
+	if (!tess_enabled() ||
 		!relation_supported(root, rel, rte) || !clauses_supported(root, rel))
 		return;
 	/*
@@ -288,7 +288,7 @@ add_scan_paths(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte)
 	Path	   *copy;
 	Path	   *scan;
 
-	if (!*tess_runtime_api()->settings->enable ||
+	if (!tess_enabled() ||
 		!relation_supported(root, rel, rte) || rel->baserestrictinfo != NIL)
 		return;
 	/* Each where the core kept its sequential scan, as add_filter_paths. */
@@ -330,7 +330,7 @@ add_row_filter_paths(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte)
 {
 	Path	   *path;
 
-	if (!*tess_runtime_api()->settings->enable ||
+	if (!tess_enabled() ||
 		!relation_supported(root, rel, rte) || rel->baserestrictinfo == NIL)
 		return;
 	path = tess_filter_row_path(root, rel, find_seqscan(rel->pathlist));
@@ -360,7 +360,7 @@ add_bitmap_paths(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte,
 {
 	List	   *bitmaps = NIL;
 
-	if (!*tess_runtime_api()->settings->enable ||
+	if (!tess_enabled() ||
 		!relation_supported(root, rel, rte) || first_clause(root, rel) == NULL ||
 		(partial && !rel->consider_parallel))
 		return;
@@ -414,7 +414,7 @@ add_index_paths(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte,
 {
 	List	   *indexes = NIL;
 
-	if (!*tess_runtime_api()->settings->enable ||
+	if (!tess_enabled() ||
 		!relation_supported(root, rel, rte) ||
 		(rel->baserestrictinfo != NIL && first_clause(root, rel) == NULL) ||
 		(partial && !rel->consider_parallel))
@@ -892,7 +892,7 @@ rank_scans(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte, Path *seqscan
 	int			count = 0;
 	bool		have_full = false;
 
-	if (!*tess_runtime_api()->settings->enable ||
+	if (!tess_enabled() ||
 		!relation_supported(root, rel, rte) || rel->pages > (BlockNumber) effective_cache_size ||
 		(rel->baserestrictinfo != NIL && !clauses_supported(root, rel)) ||
 		(partial && !rel->consider_parallel))

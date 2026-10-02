@@ -1039,7 +1039,7 @@ add_join_paths(PlannerInfo *root, RelOptInfo *joinrel, RelOptInfo *outerrel,
 	 * FULL keep the inner side too, marking the table's records that find
 	 * a pair and returning the others after the outer side.
 	 */
-	if (!*tess_runtime_api()->settings->enable ||
+	if (!tess_enabled() ||
 		(jointype != JOIN_INNER && jointype != JOIN_SEMI &&
 		 jointype != JOIN_ANTI && jointype != JOIN_LEFT &&
 		 jointype != JOIN_RIGHT && jointype != JOIN_FULL) ||
