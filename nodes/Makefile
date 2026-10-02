@@ -13,4 +13,4 @@ $(RUNTIME_LIB):
 SHLIB_LINK += $(RUNTIME_LIB)
 $(shlib): $(RUNTIME_LIB)
 
-$(OBJS): $(srcdir)/internal.h $(srcdir)/agg.h $(srcdir)/hashjoin.h $(srcdir)/limit.h $(wildcard $(srcdir)/../include/tessera/*.h)
+$(OBJS): $(wildcard $(srcdir)/*.h) $(wildcard $(srcdir)/../include/tessera/*.h)
