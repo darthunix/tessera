@@ -6694,6 +6694,12 @@
   layout"), оба теста зовут тот же inline — список один. Почему: защищает каждое изменение границы C↔Rust в 9.15–9.17
   и ловит смесь старого модуля с новым архивом. Около 80 строк, один коммит. Проверка: нарочно переставленное поле
   #[repr(C)] — модуль не загружается.
+  Сделано 2026-10-02 (ветка gate-layout-at-load): проверка — в своём заголовке tessera/kernels_layout.h, а не в
+  kernels.h (ей нужны table.h, sort.h и spill.h; kernel_ops.h подключают все узлы, а проба нужна только модулю, который
+  линкует ядра, и его тестам); к пробам тестов добавлен размер заголовка сброшенного блока (tess_spill_header_size,
+  TESS_SPILL_HEADER_SIZE — с ним считает runtime/spill.c). _PG_init модуля tessera_kernels отказывает с «incompatible
+  Tessera kernels library layout»; тесты kernels и table зовут тот же inline. Мутация: tess_table_layout отдаёт 16
+  бит ссылки вместо 17 — набор kernels_module падает на загрузке с этой ошибкой.
 
   9.4 -Werror для нашего C в CI. Станет: make COPT=-Werror и make install COPT=-Werror в ci.yml (Makefile.global
   добавляет COPT к CFLAGS и LDFLAGS; переменная командной строки доходит до $(MAKE) -C). В Makefile не класть —

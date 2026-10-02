@@ -169,8 +169,9 @@ from calls over the same table, and reading the mark would race with the
 participants appending to a shared table, so a reference past it reads
 the chunk's unused bytes, never memory outside the chunk (plan 4.24,
 review item 12). `tess_table_format_version` and
-`tess_table_layout` let a C test compare the format and the structures
-with what the library was built with.
+`tess_table_layout` report the format and the structures the library was
+built with; the kernels module compares them with the headers when it
+loads (`tess_kernels_layout_matches`, `tessera/kernels_layout.h`).
 
 ## A batch in and out
 
@@ -656,8 +657,8 @@ over `LocalTable`, a table that owns its index and chunks, and runs
 under Miri; `crates/tessera-capi/tests/table.rs` compares Datum and
 dense key columns and calls the entry points as C would;
 `test/tessera_table_test.c` is the C test module, run by `make
-installcheck` as the `table` suite, which checks the layout probes
-against `sizeof` and `offsetof` and runs batches through appending over
+installcheck` as the `table` suite, which runs the load-time layout
+check and runs batches through appending over
 several chunks, linking, probing, grouping, a new index and the error
 statuses. The benchmark `table_int32`
 (`crates/tessera-capi/benches/README.md`) measures insertion, probes and

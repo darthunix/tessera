@@ -33,6 +33,7 @@
 #include "tessera/bridge.h"
 #include "tessera/kernel_ops.h"
 #include "tessera/kernels.h"
+#include "tessera/kernels_layout.h"
 
 #include "internal.h"
 
@@ -772,6 +773,13 @@ _PG_init(void)
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("incompatible Tessera kernels library")));
+	/* The same versions can still come from another source tree. */
+	if (!tess_kernels_layout_matches())
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("incompatible Tessera kernels library layout"),
+				 errdetail("The linked kernels library lays out a shared structure unlike the module's headers."),
+				 errhint("Build the kernels library and the modules from one source tree.")));
 	/* A bridge without a kernel registry predates the nodes that use it. */
 	if (TESS_ABI_HAS_FIELD(api, TessApi, kernels) && api->kernels != NULL)
 	{

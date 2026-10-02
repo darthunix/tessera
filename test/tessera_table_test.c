@@ -5,6 +5,7 @@
 #include "fmgr.h"
 
 #include "tessera/kernels.h"
+#include "tessera/kernels_layout.h"
 #include "tessera/sort.h"
 #include "tessera/spill.h"
 #include "tessera/table.h"
@@ -341,32 +342,8 @@ build_alone(void)
 Datum
 tessera_test_table_layout(PG_FUNCTION_ARGS)
 {
-	PG_RETURN_BOOL(build_alone() &&
-				   tess_table_format_version() == TESS_TABLE_FORMAT_VERSION &&
-				   tess_table_layout(TESS_TABLE_LAYOUT_HEADER_SIZE) == 96 &&
-				   tess_table_layout(TESS_TABLE_LAYOUT_VERSION_OFFSET) == 8 &&
-				   tess_table_layout(TESS_TABLE_LAYOUT_KEY_SIZE) ==
-				   sizeof(TessTableKey) &&
-				   tess_table_layout(TESS_TABLE_LAYOUT_KEY_PREPARED_OFFSET) ==
-				   offsetof(TessTableKey, prepared) &&
-				   tess_table_layout(TESS_TABLE_LAYOUT_STATS_SIZE) ==
-				   sizeof(TessTableStats) &&
-				   tess_table_layout(TESS_TABLE_LAYOUT_STATS_REGION_LEN_OFFSET) ==
-				   offsetof(TessTableStats, region_len) &&
-				   tess_table_layout(TESS_TABLE_LAYOUT_RECORD_SIZE) ==
-				   sizeof(TessTableRecord) &&
-				   tess_table_layout(TESS_TABLE_LAYOUT_RECORD_PAYLOAD_OFFSET) ==
-				   offsetof(TessTableRecord, payload) &&
-				   tess_table_layout(TESS_TABLE_LAYOUT_REF_SIZE) ==
-				   sizeof(TessTableRef) &&
-				   tess_table_layout(TESS_TABLE_LAYOUT_REF_NCHUNKS_OFFSET) ==
-				   offsetof(TessTableRef, nchunks) &&
-				   tess_table_layout(TESS_TABLE_LAYOUT_UNIT_BITS) == TESS_TABLE_UNIT_BITS &&
-				   tess_table_layout((TessTableLayoutKind) 99) == 0 &&
-				   tess_sort_layout(TESS_SORT_LAYOUT_KEY_SIZE) == sizeof(TessSortKey) &&
-				   tess_sort_layout(TESS_SORT_LAYOUT_KEY_FLAGS_OFFSET) ==
-				   offsetof(TessSortKey, flags) &&
-				   tess_sort_layout((TessSortLayoutKind) 99) == 0);
+	/* The layouts are the check the kernels module runs when it loads. */
+	PG_RETURN_BOOL(build_alone() && tess_kernels_layout_matches());
 }
 
 /*

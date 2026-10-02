@@ -46,7 +46,11 @@ if (tess_int4_filter(&column, NULL, &batch->rows, TESS_CMP_GT, 0,
 
 `tess_kernels_abi_version()` must equal `TESS_KERNELS_ABI_VERSION` of the
 header the caller was compiled with, and `tess_kernels_probe()` returns the
-sizes and offsets the library was built with, for a check at load time.
+sizes and offsets the library was built with. `tessera/kernels_layout.h`
+compares them, with the table, sort and spill probes, against the headers
+in `tess_kernels_layout_matches()`; the `tessera_kernels` module runs it
+when it loads and refuses a library built from another source tree with
+"incompatible Tessera kernels library layout".
 
 ## Readiness: the `prepared` mask
 
