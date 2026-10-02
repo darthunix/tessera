@@ -760,8 +760,7 @@ gather_begin(CustomScanState *css, EState *estate, int eflags)
 	Bitmapset  *columns = NULL;
 	PlanState  *send;
 
-	if (eflags & (EXEC_FLAG_BACKWARD | EXEC_FLAG_MARK))
-		elog(ERROR, "TessGather supports neither backward scan nor mark/restore");
+	tess_node_require_forward(eflags, "TessGather");
 	tess_plan_get_info(cscan, &info);
 	if ((info.node != &tess_gather_node && info.node != &tess_gather_merge_node) ||
 		info.nchildren != 1 || info.child_names[0] == NULL)
