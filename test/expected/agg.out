@@ -1964,6 +1964,41 @@ SELECT agg_same($$SELECT min(v) FROM agg_bound WHERE k = 6$$);
  {(-1.0)}
 (1 row)
 
+-- A decimal and a longer form of its value (a scale past 18, which the
+-- kernels do not read), in both orders, with and without groups: the
+-- last of equal extremes kept, whichever form it has.
+INSERT INTO agg_bound VALUES (9, 1.0), (9, 1.0000000000000000000), (9, 0.5),
+    (10, 1.0000000000000000000), (10, 1.0), (10, 2.0000000000000000000), (10, 2.00);
+SELECT agg_same($$SELECT k, min(v), max(v) FROM agg_bound WHERE k IN (9, 10) GROUP BY k$$);
+                     agg_same                      
+---------------------------------------------------
+ {"(10,1.0,2.00)","(9,0.5,1.0000000000000000000)"}
+(1 row)
+
+SELECT agg_same($$SELECT max(v) FROM agg_bound WHERE k = 9$$);
+         agg_same          
+---------------------------
+ {(1.0000000000000000000)}
+(1 row)
+
+SELECT agg_same($$SELECT max(v) FROM agg_bound WHERE k = 10 AND v < 1.5$$);
+ agg_same 
+----------
+ {(1.0)}
+(1 row)
+
+SELECT agg_same($$SELECT max(v), min(v) FROM agg_bound WHERE k = 10$$);
+    agg_same    
+----------------
+ {"(2.00,1.0)"}
+(1 row)
+
+SELECT agg_same($$SELECT min(v) FROM agg_bound WHERE k = 9 AND v > 0.75$$);
+         agg_same          
+---------------------------
+ {(1.0000000000000000000)}
+(1 row)
+
 -- A value not read in place, stored compressed: to the rest, its scale
 -- the sum's too.
 ALTER TABLE agg_bound ALTER COLUMN v SET STORAGE MAIN;
@@ -2044,6 +2079,19 @@ SELECT agg_same($$SELECT sum(n), avg(b), max(u), min(n) FROM agg_fast$$);
                     agg_same                     
 -------------------------------------------------
  {"(NaN,9223372036852275737,Infinity,-9993.21)"}
+(1 row)
+
+-- sum and avg of smallint, with and without groups.
+SELECT agg_same($$SELECT sum(s), avg(s) FROM agg_fast$$);
+               agg_same               
+--------------------------------------
+ {"(-132768962,-27499.785004142502)"}
+(1 row)
+
+SELECT agg_same($$SELECT g, sum(s), avg(s), sum(b) FROM agg_fast GROUP BY g$$);
+                                                                                                                                                 agg_same                                                                                                                                                 
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ {"(0,-26563775,-27498.731884057971,8974340991857264290211)","(1,-26566789,-27501.851966873706,8974340991857266292211)","(2,-26564803,-27499.796066252588,8974340991857263294211)","(3,-26537805,-27500.316062176166,8974340991857265291211)","(4,-26535790,-27498.227979274611,8974340991857262293211)"}
 (1 row)
 
 RESET max_parallel_workers_per_gather;

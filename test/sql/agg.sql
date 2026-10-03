@@ -593,6 +593,16 @@ SELECT agg_same($$SELECT sum(v), avg(v) FROM agg_bound WHERE k = 1$$);
 SELECT agg_same($$SELECT sum(v) FROM agg_bound WHERE k = 5$$);
 SELECT agg_same($$SELECT max(v) FROM agg_bound WHERE k = 6$$);
 SELECT agg_same($$SELECT min(v) FROM agg_bound WHERE k = 6$$);
+-- A decimal and a longer form of its value (a scale past 18, which the
+-- kernels do not read), in both orders, with and without groups: the
+-- last of equal extremes kept, whichever form it has.
+INSERT INTO agg_bound VALUES (9, 1.0), (9, 1.0000000000000000000), (9, 0.5),
+    (10, 1.0000000000000000000), (10, 1.0), (10, 2.0000000000000000000), (10, 2.00);
+SELECT agg_same($$SELECT k, min(v), max(v) FROM agg_bound WHERE k IN (9, 10) GROUP BY k$$);
+SELECT agg_same($$SELECT max(v) FROM agg_bound WHERE k = 9$$);
+SELECT agg_same($$SELECT max(v) FROM agg_bound WHERE k = 10 AND v < 1.5$$);
+SELECT agg_same($$SELECT max(v), min(v) FROM agg_bound WHERE k = 10$$);
+SELECT agg_same($$SELECT min(v) FROM agg_bound WHERE k = 9 AND v > 0.75$$);
 -- A value not read in place, stored compressed: to the rest, its scale
 -- the sum's too.
 ALTER TABLE agg_bound ALTER COLUMN v SET STORAGE MAIN;
@@ -621,6 +631,9 @@ SET parallel_tuple_cost = 0;
 SET min_parallel_table_scan_size = 0;
 EXPLAIN (COSTS OFF) SELECT sum(n), avg(b), max(u) FROM agg_fast;
 SELECT agg_same($$SELECT sum(n), avg(b), max(u), min(n) FROM agg_fast$$);
+-- sum and avg of smallint, with and without groups.
+SELECT agg_same($$SELECT sum(s), avg(s) FROM agg_fast$$);
+SELECT agg_same($$SELECT g, sum(s), avg(s), sum(b) FROM agg_fast GROUP BY g$$);
 RESET max_parallel_workers_per_gather;
 RESET parallel_setup_cost;
 RESET tessera.scan_parallel_setup_cost;
