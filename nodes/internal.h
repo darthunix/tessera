@@ -80,6 +80,9 @@ extern double tess_parallel_divisor(const Path *path);
  * The weights a grouping's and a join's spills give the one rule that
  * sends partitions to disk (docs/spill.md, "Weights"), set in module.c.
  */
+extern double tess_agg_spill_start;
+extern double tess_agg_spill_target;
+extern double tess_agg_spill_spilled_weight;
 extern double tess_join_spill_start;
 extern double tess_join_spill_target;
 extern double tess_join_spill_spilled_weight;
