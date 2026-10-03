@@ -947,6 +947,24 @@ WHERE line ~ 'Split Partitions';
       0
 (1 row)
 
+-- With no room in the weights of a split (docs/spill.md, "The weights"),
+-- a partition read back splits.
+SET tessera.agg_spill_split_room = 0;
+SELECT count(*) AS splits
+FROM agg_explain($$SELECT k, count(*), sum(v) FROM agg_spill GROUP BY k$$) AS line
+WHERE line ~ 'Split Partitions';
+ splits 
+--------
+      1
+(1 row)
+
+SELECT agg_same($$SELECT md5(string_agg(q::text, ',' ORDER BY q::text)) FROM (SELECT k, count(*), count(v), sum(v), min(v), max(v) FROM agg_spill GROUP BY k) AS q$$);
+               agg_same               
+--------------------------------------
+ {(6520d4d83a8aa8ac44e8ad9d6cd7eca0)}
+(1 row)
+
+RESET tessera.agg_spill_split_room;
 -- Two keys, int4 and int8; HAVING over the merged states.
 SELECT agg_same($$SELECT md5(string_agg(q::text, ',' ORDER BY q::text)) FROM (SELECT k, k8, count(v), sum(v), max(k8) FROM agg_spill GROUP BY k, k8) AS q$$);
                agg_same               

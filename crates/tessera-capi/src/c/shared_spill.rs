@@ -12,7 +12,7 @@ use tessera_core::RowMaskView;
 use tessera_kernels::table::bloom;
 use tessera_kernels::table::phases::Participant;
 use tessera_kernels::table::shared_spill::{
-    LocalSpill, Memory, Records, SharedSpill, Weights, words_for,
+    LocalSpill, Memory, Partition, Records, SharedSpill, SplitWeights, Weights, splits, words_for,
 };
 
 use super::mask::Mask;
@@ -260,6 +260,52 @@ pub unsafe extern "C" fn tess_table_spill_evict(
             };
             *partition.as_mut().context("a null partition")? =
                 marked.map_or(-1, |partition| partition as i32);
+            Ok(())
+        })
+    }
+}
+
+/// `tess_table_spill_splits`: whether a partition read back splits into a
+/// level below, by the weights `room` and `key` (0 for no rule of one key):
+/// its `size` as the node estimates it, against what `limit` leaves
+/// besides `used`; its `rows` of its level's `level_rows`; the hash `bits`
+/// its level's partitions take.
+///
+/// # Safety
+///
+/// `split` must be writable; `status` as for every entry point.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tess_table_spill_splits(
+    room: f64,
+    key: f64,
+    size: u64,
+    used: u64,
+    limit: u64,
+    rows: u64,
+    level_rows: u64,
+    bits: u32,
+    split: *mut bool,
+    status: *mut Status,
+) -> Code {
+    // SAFETY: the caller's contract.
+    unsafe {
+        guard(status, || {
+            anyhow::ensure!(
+                [room, key]
+                    .iter()
+                    .all(|weight| weight.is_finite() && *weight >= 0.0),
+                "split weights of {room} and {key}"
+            );
+            let partition = Partition {
+                size,
+                used,
+                limit,
+                rows,
+                level_rows,
+                bits,
+            };
+            *split.as_mut().context("a null flag")? =
+                splits(&SplitWeights { room, key }, &partition);
             Ok(())
         })
     }

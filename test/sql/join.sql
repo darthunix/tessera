@@ -257,6 +257,15 @@ AS 'SELECT generate_series(1, 20000)';
 SET work_mem = '64kB';
 SELECT join_explain($$SELECT count(*) FROM jf JOIN join_many() AS m(k) ON jf.v = m.k$$);
 SELECT join_same($$SELECT count(*), sum(m.k) FROM jf JOIN join_many() AS m(k) ON jf.v = m.k$$);
+-- With a room of ten times what hash_mem leaves in the weights of a split
+-- (docs/spill.md, "The weights"), no partition splits: each is joined in
+-- pieces.
+SET tessera.join_spill_split_room = 10;
+SELECT count(*) AS splits
+FROM join_explain($$SELECT count(*) FROM jf JOIN join_many() AS m(k) ON jf.v = m.k$$) AS line
+WHERE line ~ 'Split Partitions';
+SELECT join_same($$SELECT count(*), sum(m.k) FROM jf JOIN join_many() AS m(k) ON jf.v = m.k$$);
+RESET tessera.join_spill_split_room;
 RESET work_mem;
 
 -- Rescans: a parameter of the inner side builds the table again, one of

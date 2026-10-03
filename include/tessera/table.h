@@ -1095,6 +1095,19 @@ extern TessStatusCode tess_table_spill_evict(uint64 *words, Size nwords, bool sh
 											 uint64 total_records, uint32 evicted,
 											 int32 *partition, TessStatus *status);
 
+/*
+ * Whether a partition read back splits into a level below by the next
+ * bits of the hash: its size, as the node estimates it (a grouping's
+ * groups with their index, a join's file), passes room of what limit
+ * leaves besides used bytes, two bits are left past the bits its level's
+ * partitions take, and, with a key share above 0, it holds fewer than
+ * that share of its level's rows (more is one key, which no split parts).
+ */
+extern TessStatusCode tess_table_spill_splits(double room, double key, uint64 size,
+											  uint64 used, uint64 limit, uint64 rows,
+											  uint64 level_rows, uint32 bits,
+											  bool *split, TessStatus *status);
+
 /* The partitions sent to disk so far. */
 extern TessStatusCode tess_table_spill_evictions(uint64 *words, Size nwords,
 												 uint64 *evictions,

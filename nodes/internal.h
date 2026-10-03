@@ -83,11 +83,14 @@ extern double tess_parallel_divisor(const Path *path);
 extern double tess_agg_spill_start;
 extern double tess_agg_spill_target;
 extern double tess_agg_spill_spilled_weight;
+extern double tess_agg_spill_split_room;
 extern double tess_join_spill_start;
 extern double tess_join_spill_target;
 extern double tess_join_spill_spilled_weight;
 extern double tess_join_spill_tail_weight;
 extern double tess_join_spill_resident_share;
+extern double tess_join_spill_split_room;
+extern double tess_join_spill_split_key_share;
 extern int	tess_join_shared_spill_evictions;
 
 #endif							/* TESSERA_NODES_INTERNAL_H */
