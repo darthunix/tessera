@@ -20,7 +20,17 @@ use std::{
     process::{Command, ExitCode, Stdio},
     time::Instant,
 };
-use tessera_pgtool::snapshot::{self, Snapshot, text};
+use tessera_pgtool::{
+    Pg,
+    snapshot::{self, Snapshot, text},
+};
+
+/// The C modules `--module` names: the directory make builds, the library it makes.
+const MODULES: [(&str, &str); 3] = [
+    ("nodes", "tessera_nodes"),
+    ("kernels", "tessera_kernels"),
+    ("bridge", "tessera"),
+];
 
 /// The benchmarks of tessera-capi (its `[[bench]]` targets), in the order a full run takes them.
 const BENCHES: [&str; 13] = [
@@ -42,7 +52,7 @@ const BENCHES: [&str; 13] = [
 #[derive(Parser, Debug)]
 #[command(
     about = "Compare compatible Rust revisions by PMU counters (before/after per case, repeated).",
-    after_help = "REF is a Git revision or WORKTREE. Defaults to both full benchmarks.\nFilters are substrings of operation ids; any match keeps an operation, and every\nselected case must keep its reference and a library path.\nEach case runs before/after --repeats times, interleaved; instructions come from any\nprocess, cycles from the minimum over all of them.\nBenchmark processes run through `sudo -n`: run `sudo -v` first, or allow the\nbenchmark executables without a password in sudoers (see benches/README.md).\nExit: 0 PASS, 1 regression (instructions, or cycles on long single-mode operations),\n2 UNSTABLE or invalid/incomplete run.\n--disasm measures nothing and needs no root: it compares the machine code of Tessera's\nfunctions in the benchmark programs, both sides built with one codegen unit;\nexit 0 the same, 1 different, 2 invalid run."
+    after_help = "REF is a Git revision or WORKTREE. Defaults to both full benchmarks.\nFilters are substrings of operation ids; any match keeps an operation, and every\nselected case must keep its reference and a library path.\nEach case runs before/after --repeats times, interleaved; instructions come from any\nprocess, cycles from the minimum over all of them.\nBenchmark processes run through `sudo -n`: run `sudo -v` first, or allow the\nbenchmark executables without a password in sudoers (see benches/README.md).\nExit: 0 PASS, 1 regression (instructions, or cycles on long single-mode operations),\n2 UNSTABLE or invalid/incomplete run.\n--disasm measures nothing and needs no root: it compares the machine code of Tessera's\nfunctions in the benchmark programs, both sides built with one codegen unit, or with\n--module that of a C module; --function adds a function's place in a 64-byte line;\nexit 0 the same, 1 different, 2 invalid run."
 )]
 struct Options {
     #[arg(long, value_name = "REF")]
@@ -61,6 +71,21 @@ struct Options {
     /// no root. Exit: 0 the same, 1 different.
     #[arg(long, conflicts_with = "filter")]
     disasm: bool,
+    /// With --disasm: compare a C module of the extension, as its make
+    /// builds it against PG_CONFIG (release, the Rust part with one codegen
+    /// unit), instead of the benchmark programs.
+    #[arg(long, requires = "disasm", conflicts_with = "bench",
+          value_parser = clap::builder::PossibleValuesParser::new(MODULES.map(|(name, _)| name)))]
+    module: Option<String>,
+    /// With --disasm: functions, by a substring of their names, whose place
+    /// (the offsets of their entry and loops in a 64-byte line) the report
+    /// gives besides the changed ones', even when their code is the same.
+    #[arg(long, requires = "disasm", value_name = "SUBSTRING")]
+    function: Vec<String>,
+    /// With --module: a variable for both sides' make, such as
+    /// COPT=-falign-functions=64.
+    #[arg(long = "make-var", requires = "module", value_name = "NAME=VALUE")]
+    make_vars: Vec<String>,
 }
 
 struct Timing {
@@ -364,7 +389,11 @@ fn snapshots(
     } else {
         Snapshot::capture(repo, &options.candidate, root.join("after"))?
     };
-    before.check_compatible(&after)?;
+    // A C module's make reads no benchmark: only the benchmarks' builds
+    // must agree.
+    if options.module.is_none() {
+        before.check_compatible(&after)?;
+    }
     let env = environment(&before.directory)?;
     ensure!(
         env == environment(&after.directory)?,
@@ -389,7 +418,8 @@ fn disassemble(repo: &Path, root: &Path, options: &Options) -> Result<u8> {
     save(
         &root.join("sources.json"),
         &json!({"before":before,"after":after,"environment":env,"mode":"disasm",
-            "bench":options.bench,"codegen_units":1}),
+            "bench":options.bench,"module":options.module,"make_vars":options.make_vars,
+            "codegen_units":1}),
     )?;
     let mut report = create(&root.join("report.txt"))?;
     writeln!(
@@ -398,24 +428,64 @@ fn disassemble(repo: &Path, root: &Path, options: &Options) -> Result<u8> {
         before.revision, after.revision
     )?;
     let mut differ = false;
-    for bench in selected(options) {
-        let a = disasm::functions(&build(&before, bench, root, "before", true)?)?;
-        let b = disasm::functions(&build(&after, bench, root, "after", true)?)?;
-        let difference = disasm::compare(&a, &b);
-        let line = format!(
-            "{bench}: {} same, {} changed, {} only before, {} only after",
-            difference.same,
-            difference.changed.len(),
-            difference.only_before.len(),
-            difference.only_after.len()
-        );
-        println!("{line}");
-        writeln!(report, "{line}")?;
-        if difference.is_empty() {
-            continue;
+    if let Some(module) = &options.module {
+        let pg = Pg::discover()?;
+        let a = build_module(&before, module, &pg, root, "before", &options.make_vars)?;
+        let b = build_module(&after, module, &pg, root, "after", &options.make_vars)?;
+        differ |= compare_code(module, &a, &b, true, root, &mut report, options)?;
+    } else {
+        for bench in selected(options) {
+            let a = build(&before, bench, root, "before", true)?;
+            let b = build(&after, bench, root, "after", true)?;
+            differ |= compare_code(bench, &a, &b, false, root, &mut report, options)?;
         }
-        differ = true;
-        let directory = root.join("disasm").join(bench);
+    }
+    let code = u8::from(differ);
+    save(
+        &root.join("result.json"),
+        &json!({"status":if differ {"DIFFERENT"} else {"SAME"},"exit_code":code}),
+    )?;
+    println!(
+        "{}; report: {}",
+        if differ { "DIFFERENT" } else { "SAME" },
+        root.join("report.txt").display()
+    );
+    Ok(code)
+}
+
+/// Compare the functions of one program or library of both sides: all of
+/// them for a library of the extension, Tessera's for a benchmark program.
+/// The report counts them and names the changed ones, whose bodies go to
+/// `disasm/<name>/`, then gives the place of the changed functions and of
+/// those `--function` names. True when the code differs.
+fn compare_code(
+    name: &str,
+    before: &Path,
+    after: &Path,
+    library: bool,
+    root: &Path,
+    report: &mut File,
+    options: &Options,
+) -> Result<bool> {
+    let listings = [disasm::listing(before)?, disasm::listing(after)?];
+    let parse = if library {
+        disasm::parse_all
+    } else {
+        disasm::parse
+    };
+    let (a, b) = (parse(&listings[0]), parse(&listings[1]));
+    let difference = disasm::compare(&a, &b);
+    let line = format!(
+        "{name}: {} same, {} changed, {} only before, {} only after",
+        difference.same,
+        difference.changed.len(),
+        difference.only_before.len(),
+        difference.only_after.len()
+    );
+    println!("{line}");
+    writeln!(report, "{line}")?;
+    if !difference.is_empty() {
+        let directory = root.join("disasm").join(name);
         fs::create_dir_all(&directory)?;
         let sides = [
             ("changed", &difference.changed),
@@ -437,17 +507,93 @@ fn disassemble(repo: &Path, root: &Path, options: &Options) -> Result<u8> {
             }
         }
     }
-    let code = u8::from(differ);
-    save(
-        &root.join("result.json"),
-        &json!({"status":if differ {"DIFFERENT"} else {"SAME"},"exit_code":code}),
-    )?;
-    println!(
-        "{}; report: {}",
-        if differ { "DIFFERENT" } else { "SAME" },
-        root.join("report.txt").display()
+    let wanted = |function: &str| {
+        (difference.changed.contains(function) && !disasm::fragment(function))
+            || options
+                .function
+                .iter()
+                .any(|part| function.contains(part.as_str()))
+    };
+    let places = [
+        disasm::places(&listings[0], wanted),
+        disasm::places(&listings[1], wanted),
+    ];
+    let names: BTreeSet<&String> = places[0].keys().chain(places[1].keys()).collect();
+    if !names.is_empty() {
+        writeln!(
+            report,
+            "  place in a {}-byte line: the entry's offset, then each loop as the head's offset:instructions, innermost first",
+            disasm::LINE
+        )?;
+    }
+    for function in names {
+        writeln!(report, "  {function}")?;
+        for (side, places) in [("before", &places[0]), ("after", &places[1])] {
+            let text = places.get(function).map_or_else(
+                || "absent".to_owned(),
+                |list| {
+                    list.iter()
+                        .map(|place| {
+                            let loops: Vec<String> = place
+                                .loops
+                                .iter()
+                                .take(8)
+                                .map(|(head, length)| format!("{head}:{length}"))
+                                .collect();
+                            format!("entry {}; loops {}", place.entry, loops.join(" "))
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" | ")
+                },
+            );
+            writeln!(report, "    {side:6} {text}")?;
+        }
+    }
+    Ok(!difference.is_empty())
+}
+
+/// Build a C module of a snapshot with its make, against `pg`, the Rust
+/// part (the kernels') in release with one codegen unit as the benchmark
+/// programs are, and return the library.
+fn build_module(
+    source: &Snapshot,
+    module: &str,
+    pg: &Pg,
+    artifacts: &Path,
+    side: &str,
+    variables: &[String],
+) -> Result<PathBuf> {
+    let library = MODULES
+        .iter()
+        .find(|(name, _)| *name == module)
+        .map(|(_, library)| *library)
+        .context("unknown module")?;
+    println!("Building {side}/{module}");
+    let jobs = std::thread::available_parallelism().map_or(4, NonZeroUsize::get);
+    let directory = source.directory.join(module);
+    let result = Command::new("make")
+        .env_remove("MAKEFLAGS")
+        .env_remove("MFLAGS")
+        .env_remove("MAKELEVEL")
+        .env("CARGO_PROFILE_RELEASE_CODEGEN_UNITS", "1")
+        .arg("-C")
+        .arg(&directory)
+        .arg(format!("-j{jobs}"))
+        .arg(format!("PG_CONFIG={}", pg.pg_config.display()))
+        .arg("RUST_PROFILE=release")
+        .args(variables)
+        .output()
+        .context("cannot start make")?;
+    create(&artifacts.join(format!("{side}-{module}-build.log")))?
+        .write_all(&[result.stdout, result.stderr].concat())?;
+    ensure!(
+        result.status.success(),
+        "build failed: see {side}-{module}-build.log in {}",
+        artifacts.display()
     );
-    Ok(code)
+    let path = directory.join(format!("{library}{}", Pg::dlsuffix()));
+    ensure!(path.is_file(), "make did not produce {}", path.display());
+    Ok(path)
 }
 
 fn compare(repo: &Path, root: &Path, options: &Options, timing: &mut Timing) -> Result<u8> {
