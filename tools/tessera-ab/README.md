@@ -64,15 +64,17 @@ release build: the first time it builds it from a snapshot of the revision
 `--workers` its workers. A family of 10 to 25 cases takes 10 to 50 seconds
 a run at the default 31 repetitions.
 
-The report goes to `target/bench-runs/ab-*/report.md` and to the terminal:
+The report goes to `target/bench-runs/ab-*/report.md` and to the terminal;
+this one is the cut of `agg.c` (`--cases '^g_(sum|avg)_int8$'
+--repetitions 101 --rounds 3`):
 
 ```
 ## anyagg
 
 | case | base, ms | candidate, ms | min | median | control | |
 |---|---:|---:|---:|---:|---:|---|
-| g_sum_int8 | 5.331 | 5.604 | 1.071 | 1.051 | 1.003 | **slower** |
-| g_avg_int8 | 7.091 | 7.089 | 1.002 | 1.000 | 1.002 |  |
+| g_avg_int8 | 7.164 | 7.277 | 1.029 | 1.016 | 1.005 |  |
+| g_sum_int8 | 5.192 | 5.479 | 1.067 | 1.055 | 1.003 | **slower** |
 ```
 
 - `base` and `candidate` are the mean of the runs' medians with Tessera.

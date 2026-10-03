@@ -263,12 +263,19 @@ fn report(
         )?;
     }
     if slower {
-        writeln!(
-            text,
-            "A flagged case is measured again with more repetitions (`--cases`, \
-             `--repetitions 101`); if it stays, `--copt=-falign-functions=64` tells \
-             whether it is the code's place."
-        )?;
+        let hint = if options.copt.is_some() {
+            "Both sides were built with the same COPT: if it aligns the functions \
+             (-falign-functions=64), a flagged case is the change rather than the code's \
+             place; look at the machine code of the functions it runs."
+        } else if options.repetitions.is_some_and(|n| n.get() >= 101) {
+            "If a flagged case is not the change, it may be the code's place: measure it again \
+             with --copt=-falign-functions=64, and look where its functions lie with \
+             tessera-bench --disasm --module nodes --function NAME."
+        } else {
+            "Measure a flagged case again alone and longer (--cases, --repetitions 101); if it \
+             stays, --copt=-falign-functions=64 tells whether it is the code's place."
+        };
+        writeln!(text, "{hint}")?;
     }
     Ok(Report { text, slower })
 }
