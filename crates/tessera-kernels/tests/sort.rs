@@ -13,7 +13,7 @@ use proptest::collection::vec;
 use proptest::prelude::*;
 use proptest::sample::select;
 use tessera_core::RowMask;
-use tessera_kernels::sort::{MAX_ITEM_WORDS, SortKey, item_words, sort_items};
+use tessera_kernels::sort::{MAX_ITEM_WORDS, SortKey, item_words, run_words, sort_items};
 use tessera_kernels::table::{Batch, KeyKind, KeySource, LocalTable, TableConfig};
 use tessera_testing::{flags, integer, nrows, property, words};
 
@@ -201,6 +201,41 @@ fn one_key_every_direction_and_null_place() {
 #[test]
 fn several_keys_across_word_boundaries() {
     property(cases(2..=4), |(keys, rows)| check(&keys, &rows));
+}
+
+/// A run's words, as the external sort and the merge of a gather counted
+/// them by hand: every key nullable, the last word of the item dropped
+/// when the keys' bits leave it to the reference.
+#[test]
+fn a_run_keeps_the_words_of_its_keys() -> Result<()> {
+    use KeyKind::{Int32, Int64};
+    for count in 1..=16 {
+        for wide in 0..1u32 << count {
+            let keys: Vec<SortKey> = (0..count)
+                .map(|at| {
+                    key(
+                        if wide >> at & 1 == 1 { Int64 } else { Int32 },
+                        false,
+                        false,
+                        true,
+                    )
+                })
+                .collect();
+            let words = item_words(&keys)?;
+            let bits: usize = (0..count)
+                .map(|at| if wide >> at & 1 == 1 { 64 } else { 32 } + 1)
+                .sum();
+            let model = if bits <= 64 * (words - 1) {
+                words - 1
+            } else {
+                words
+            };
+            assert_eq!(run_words(&keys)?, model, "{count} keys, wide {wide:b}");
+        }
+    }
+    assert_eq!(run_words(&[key(Int32, false, false, false)])?, 1);
+    assert!(run_words(&[]).is_err());
+    Ok(())
 }
 
 #[test]

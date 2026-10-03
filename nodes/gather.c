@@ -237,15 +237,11 @@ merge_key_words(const TessKernelOps *kernels, int nkeys, TessSortKey *keys)
 {
 	TessStatus	status = TESS_STRUCT_INITIALIZER(TessStatus);
 	int			words;
-	int			bits = 0;
 
 	for (int key = 0; key < nkeys; key++)
-	{
 		keys[key].flags |= TESS_SORT_NULLABLE;
-		bits += (keys[key].kind == TESS_TABLE_KEY_INT8 ? 64 : 32) + 1;
-	}
-	tess_status_check(kernels->sort_item_words(nkeys, keys, &words, &status), &status);
-	return bits <= 64 * (words - 1) ? words - 1 : words;
+	tess_status_check(kernels->sort_run_words(nkeys, keys, &words, &status), &status);
+	return words;
 }
 
 static Node *

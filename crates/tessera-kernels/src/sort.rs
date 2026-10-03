@@ -85,6 +85,15 @@ pub fn item_words(keys: &[SortKey]) -> Result<usize> {
     Ok(bits.div_ceil(64) as usize)
 }
 
+/// The words of `keys` alone, without the reference: what a run of an
+/// external sort keeps of each item, and a merge compares. The last word
+/// of an item goes when it holds the reference's bits only.
+pub fn run_words(keys: &[SortKey]) -> Result<usize> {
+    item_words(keys)?;
+    let bits: u32 = keys.iter().map(SortKey::bits).sum();
+    Ok(bits.div_ceil(64) as usize)
+}
+
 /// Writes items: one row's keys from the first word's high bits down.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Encoder<'k> {
