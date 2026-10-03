@@ -422,7 +422,8 @@ sort_choose_topn(TessSortState *state)
 					  &status);
 	bytes = (double) state->bound * state->words * sizeof(uint64) +
 		(double) Max(4 * (double) state->bound, 65536.0) *
-		(16.0 + 8.0 * (state->nkernel + (state->ncolumns + 63) / 64 + state->ncolumns));
+		(16.0 + 8.0 * (state->nkernel + tess_spill_columns_null_lanes(state->ncolumns) +
+					   state->ncolumns));
 	/* A generic key's heap: a slot more, and the values of its keys. */
 	if (state->generic >= 0)
 		bytes += (double) (state->bound + 1) *

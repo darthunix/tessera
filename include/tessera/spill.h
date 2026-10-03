@@ -107,11 +107,40 @@ extern TessStatusCode tess_spill_unpack(const void *packed, Size len, void *chun
  */
 #define TESS_SPILL_COLUMNS_HEADER 16
 #define TESS_SPILL_COLUMNS_PLACE_BITS 17
-/* The lanes of NULL bits of a chunk of words stored words. */
+/*
+ * The lanes of NULL bits of a chunk of words stored words, one at least, as
+ * crates/tessera-spill (columns::null_lanes) lays them out; a constant
+ * expression, for the bound of an array. A message of TessGather lays out
+ * its NULL bits the same way, a lane per 64 columns.
+ */
+#define TESS_SPILL_COLUMNS_NULL_LANES(words) \
+	((words) <= 64 ? 1 : ((words) + 63) / 64)
+
 static inline int
 tess_spill_columns_null_lanes(uint32 words)
 {
-	return words <= 64 ? 1 : (int) ((words + 63) / 64);
+	return (int) TESS_SPILL_COLUMNS_NULL_LANES(words);
+}
+
+/* The lane of NULL bits that holds stored word word's bit. */
+static inline int
+tess_spill_columns_null_lane(int word)
+{
+	return word / 64;
+}
+
+/* Stored word word's bit in its lane of NULL bits. */
+static inline uint64
+tess_spill_columns_null_bit(int word)
+{
+	return UINT64CONST(1) << (word % 64);
+}
+
+/* Whether a word of a lane of NULL bits marks stored word word NULL. */
+static inline bool
+tess_spill_columns_is_null(uint64 bits, int word)
+{
+	return ((bits >> (word % 64)) & 1) != 0;
 }
 
 /* The most a packed chunk of words stored words takes past its own bytes. */
@@ -181,6 +210,21 @@ typedef enum TessSpillColumnsField
  * out, which the inline readers above take for granted; 0 for another code.
  */
 extern Size tess_spill_columns_layout(int what);
+
+/* What tess_spill_columns_shape gives of a chunk of a number of stored words. */
+typedef enum TessSpillColumnsShape
+{
+	/* Its lanes of NULL bits, tess_spill_columns_null_lanes. */
+	TESS_SPILL_COLUMNS_SHAPE_NULL_LANES = 0,
+	/* The most its packed form takes past its bytes, TESS_SPILL_COLUMNS_SLACK. */
+	TESS_SPILL_COLUMNS_SHAPE_SLACK = 1
+} TessSpillColumnsShape;
+
+/*
+ * A count of a chunk of words stored words as the Rust side computes it,
+ * which the inline formulas above repeat; 0 for another code.
+ */
+extern Size tess_spill_columns_shape(uint32 words, int what);
 
 /* Make the len bytes at chunk an empty chunk of words stored words. */
 extern TessStatusCode tess_spill_columns_init(void *chunk, Size len, int words,

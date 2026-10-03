@@ -2485,11 +2485,18 @@ fn the_partitioned_columns_entry_point_counts_each_partition() -> Result<()> {
 fn chunks_of_columns_round_trip_through_the_entry_points() -> Result<()> {
     use tessera_capi::c::{
         tess_spill_columns_append_partitioned, tess_spill_columns_init, tess_spill_columns_layout,
-        tess_spill_columns_pack, tess_spill_columns_unpack,
+        tess_spill_columns_pack, tess_spill_columns_shape, tess_spill_columns_unpack,
     };
     assert_eq!(tess_spill_columns_layout(0), 16);
     assert_eq!(tess_spill_columns_layout(1), 0);
     assert_eq!(tess_spill_columns_layout(2), 4);
+    // A lane of NULL bits at least, one per 64 words; the packed slack a
+    // count word and a descriptor per lane.
+    assert_eq!(tess_spill_columns_shape(0, 0), 1);
+    assert_eq!(tess_spill_columns_shape(64, 0), 1);
+    assert_eq!(tess_spill_columns_shape(65, 0), 2);
+    assert_eq!(tess_spill_columns_shape(2, 1), 8 + 16 * 3);
+    assert_eq!(tess_spill_columns_shape(2, 9), 0);
     let nrows = 50;
     let first: Vec<u64> = (0..nrows as u64)
         .map(|row| (row as i64 - 20) as u64)

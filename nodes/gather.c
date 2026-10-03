@@ -45,9 +45,8 @@
 /* Rows of a batch given out, and the most rows of a message. */
 #define GATHER_ROWS 64
 #define GATHER_MESSAGE_ROWS 1024
-/* A message's lanes of NULL bits: column c takes bit c % 64 of lane c / 64. */
-#define GATHER_NULL_LANES(ncolumns) (((ncolumns) + 63) / 64)
-#define GATHER_MAX_NULL_LANES GATHER_NULL_LANES(MaxTupleAttributeNumber)
+/* A message's lanes of NULL bits are laid out as a chunk of columns' (spill.h). */
+#define GATHER_MAX_NULL_LANES TESS_SPILL_COLUMNS_NULL_LANES(MaxTupleAttributeNumber)
 /* A queue per worker, as large as four of the core's tuple queues. */
 #define GATHER_QUEUE_SIZE (256 * 1024)
 
@@ -347,7 +346,7 @@ send_begin(CustomScanState *css, EState *estate, int eflags)
 			elog(ERROR, "TessSend needs the Tessera kernels module");
 		state->key_words = merge_key_words(state->kernels, state->nkernel, state->keys);
 	}
-	state->null_lanes = GATHER_NULL_LANES(state->ncolumns);
+	state->null_lanes = tess_spill_columns_null_lanes(state->ncolumns);
 	state->nlanes = state->null_lanes + state->ncolumns + state->key_words;
 	state->stride = (uint32) Min((Size) GATHER_MESSAGE_ROWS,
 								 Max((Size) GATHER_ROWS,
@@ -518,8 +517,8 @@ fill_message(TessSendState *send, MessageBuilder *builder, TessInput *input,
 
 				if (columns[column].isnull[row])
 				{
-					lanes[(Size) send->stride * (column / 64) + builder->rows] |=
-						UINT64CONST(1) << (column % 64);
+					lanes[(Size) send->stride * tess_spill_columns_null_lane(column) + builder->rows] |=
+						tess_spill_columns_null_bit(column);
 					lane[builder->rows] = 0;
 				}
 				else if (send->typbyvals[column])
@@ -969,14 +968,14 @@ show_message_window(TessGatherState *state)
 	{
 		const uint64 *lane = lanes + (Size) state->message_stride * (null_lanes + column) +
 			state->next_row;
-		const uint64 *nulls = lanes + (Size) state->message_stride * (column / 64) +
+		const uint64 *nulls = lanes + (Size) state->message_stride * tess_spill_columns_null_lane(column) +
 			state->next_row;
 		bool	   *isnull = state->isnull[column];
 		Datum	   *out = state->values[column];
 
-		if ((any[column / 64] >> (column % 64)) & 1)
+		if (tess_spill_columns_is_null(any[tess_spill_columns_null_lane(column)], column))
 			for (uint32 row = 0; row < n; row++)
-				isnull[row] = (nulls[row] >> (column % 64)) & 1;
+				isnull[row] = tess_spill_columns_is_null(nulls[row], column);
 		else
 			memset(isnull, 0, sizeof(bool) * n);
 		if (state->typbyvals[column])
@@ -1131,8 +1130,8 @@ merge_take(TessGatherState *state, int index, uint32 place, int out)
 	for (int column = 0; column < state->ncolumns; column++)
 	{
 		uint64		word = lanes[(Size) source->stride * (null_lanes + column) + place];
-		bool		null = (lanes[(Size) source->stride * (column / 64) + place] >>
-							(column % 64)) & 1;
+		bool		null = tess_spill_columns_is_null(lanes[(Size) source->stride * tess_spill_columns_null_lane(column) + place],
+											   column);
 
 		state->isnull[column][out] = null;
 		if (null)
@@ -1156,7 +1155,8 @@ source_value(TessGatherState *state, const MergeSource *source, int column, uint
 	const uint64 *lanes = (const uint64 *) (source->message + MAXALIGN(sizeof(GatherHeader)));
 	uint64		word = lanes[(Size) source->stride * (state->send->null_lanes + column) + place];
 
-	*isnull = (lanes[(Size) source->stride * (column / 64) + place] >> (column % 64)) & 1;
+	*isnull = tess_spill_columns_is_null(lanes[(Size) source->stride * tess_spill_columns_null_lane(column) + place],
+										 column);
 	if (*isnull)
 		return (Datum) 0;
 	if (state->typbyvals[column])

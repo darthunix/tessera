@@ -1107,7 +1107,7 @@ rows_write(TessAggState *state, RowSpill *spill, const TessRowMask *rows)
 
 			if (from->isnull[row])
 			{
-				nulls[(Size) writer->capacity * (column / 64)] |= UINT64CONST(1) << (column % 64);
+				nulls[(Size) writer->capacity * tess_spill_columns_null_lane(column)] |= tess_spill_columns_null_bit(column);
 				lane[0] = 0;
 			}
 			else if (state->computed_byvals[column])
@@ -1240,13 +1240,13 @@ reader_next(TessAggState *state)
 	for (int column = 0; column < state->ncomputed; column++)
 	{
 		const uint64 *nulls = tess_spill_columns_lane(reader->chunk, 0) +
-			capacity * (column / 64) + reader->next;
+			capacity * tess_spill_columns_null_lane(column) + reader->next;
 		const uint64 *lane = tess_spill_columns_lane(reader->chunk, 0) +
 			capacity * (null_lanes + column) + reader->next;
 
 		for (uint32 row = 0; row < take; row++)
 		{
-			bool		isnull = ((nulls[row] >> (column % 64)) & 1) != 0;
+			bool		isnull = tess_spill_columns_is_null(nulls[row], column);
 
 			reader->column_isnull[column][row] = isnull;
 			reader->column_values[column][row] = isnull ? (Datum) 0 :

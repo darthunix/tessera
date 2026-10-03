@@ -15,6 +15,7 @@ PG_FUNCTION_INFO_V1(tessera_test_spill_shared);
 PG_FUNCTION_INFO_V1(tessera_test_spill_packed);
 PG_FUNCTION_INFO_V1(tessera_test_spill_error);
 PG_FUNCTION_INFO_V1(tessera_test_spill_bytes);
+PG_FUNCTION_INFO_V1(tessera_test_spill_lanes);
 
 #define FINGERPRINT UINT64CONST(0x5445535354455354)
 #define MAX_LEN (2 * 1024 * 1024)
@@ -424,4 +425,33 @@ tessera_test_spill_bytes(PG_FUNCTION_ARGS)
 	tess_spill_free(spill);
 	pfree(body);
 	PG_RETURN_VOID();
+}
+
+/*
+ * The inline formulas of a chunk of columns (spill.h), which the nodes
+ * compute per row, against the Rust side's at every count of stored words.
+ */
+Datum
+tessera_test_spill_lanes(PG_FUNCTION_ARGS)
+{
+	for (uint32 words = 0; words <= 4096; words++)
+	{
+		Size		lanes = tess_spill_columns_shape(words, TESS_SPILL_COLUMNS_SHAPE_NULL_LANES);
+
+		if ((Size) tess_spill_columns_null_lanes(words) != lanes ||
+			(Size) TESS_SPILL_COLUMNS_NULL_LANES(words) != lanes ||
+			TESS_SPILL_COLUMNS_SLACK(words) !=
+			tess_spill_columns_shape(words, TESS_SPILL_COLUMNS_SHAPE_SLACK))
+			elog(ERROR, "the C formulas of a chunk of %u words differ from Rust's", words);
+		/* Word w's NULL bit is bit w % 64 of lane w / 64, within the lanes. */
+		for (int word = 0; word < (int) words; word += 63)
+			if (tess_spill_columns_null_lane(word) >= (int) lanes ||
+				!tess_spill_columns_is_null(tess_spill_columns_null_bit(word), word) ||
+				tess_spill_columns_is_null(~tess_spill_columns_null_bit(word), word))
+				elog(ERROR, "word %d of a chunk of %u words has no NULL bit of its own",
+					 word, words);
+	}
+	if (tess_spill_columns_shape(1, 99) != 0)
+		elog(ERROR, "an unknown shape is not 0");
+	PG_RETURN_BOOL(true);
 }
