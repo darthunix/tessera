@@ -88,7 +88,7 @@ distinct_index(TessAggState *state, DistinctSet *set, uint64 capacity, Size *siz
 
 /* An empty set: the groups' keys, then the argument. */
 void
-distinct_reset(TessAggState *state, AggValue *value)
+agg_distinct_reset(TessAggState *state, AggValue *value)
 {
 	DistinctSet *set = value->distinct;
 	uint64		capacity = AGG_INITIAL_GROUPS;
@@ -117,7 +117,7 @@ distinct_reset(TessAggState *state, AggValue *value)
 											  set->kinds, 0, capacity,
 											  &state->status));
 	if (value->distinct_dict != NULL)
-		key_dict_reset(value->distinct_dict, 256);
+		agg_key_dict_reset(value->distinct_dict, 256);
 }
 
 static void
@@ -170,7 +170,7 @@ distinct_regrow(TessAggState *state, DistinctSet *set, uint64 records)
  * without GROUP BY.
  */
 TessRowMask
-distinct_rows(TessAggState *state, AggValue *value, int nrows,
+agg_distinct_rows(TessAggState *state, AggValue *value, int nrows,
 			  const uint32 *group_hashes, const TessRowMask *valid,
 			  const TessDatumColumn *argument)
 {
@@ -195,7 +195,7 @@ distinct_rows(TessAggState *state, AggValue *value, int nrows,
 			dict->batch_numbers = MemoryContextAlloc(query, sizeof(Datum) * nrows);
 			dict->batch_hashes = MemoryContextAlloc(query, sizeof(uint32) * nrows);
 		}
-		keydict_numbers(dict, argument, valid, true, dict->batch_numbers, dict->batch_hashes);
+		agg_keydict_numbers(dict, argument, valid, true, dict->batch_numbers, dict->batch_hashes);
 		numbers = *argument;
 		numbers.values = dict->batch_numbers;
 		argument = &numbers;
@@ -271,7 +271,7 @@ distinct_rows(TessAggState *state, AggValue *value, int nrows,
 
 /* The bytes of every distinct set. */
 Size
-distinct_bytes(TessAggState *state)
+agg_distinct_bytes(TessAggState *state)
 {
 	Size		bytes = 0;
 
@@ -312,7 +312,7 @@ key_dict_images_equal(KeyDict *dict, Oid type)
 }
 
 KeyDict *
-key_dict_create(TessAggState *state, Oid eqop, Oid type, Oid collation)
+agg_key_dict_create(TessAggState *state, Oid eqop, Oid type, Oid collation)
 {
 	EState	   *estate = state->css.ss.ps.state;
 	KeyDict    *dict = MemoryContextAllocZero(estate->es_query_cxt, sizeof(KeyDict));
@@ -336,7 +336,7 @@ key_dict_create(TessAggState *state, Oid eqop, Oid type, Oid collation)
 
 /* Forget every value: the table they numbered is made anew. */
 void
-key_dict_reset(KeyDict *dict, uint64 values)
+agg_key_dict_reset(KeyDict *dict, uint64 values)
 {
 	MemoryContextReset(dict->context);
 	/*
@@ -418,7 +418,7 @@ keydict_prefetch_rows(KeyDict *dict, const TessDatumColumn *column, const TessRo
  * value's hash, 0 for NULL.
  */
 void
-keydict_numbers(KeyDict *dict, const TessDatumColumn *column, const TessRowMask *rows,
+agg_keydict_numbers(KeyDict *dict, const TessDatumColumn *column, const TessRowMask *rows,
 				bool insert, Datum *numbers, uint32 *hashes)
 {
 	int			row = -1;
@@ -493,7 +493,7 @@ keydict_same_image(KeyDict *dict, Datum a, Datum b)
  * it by its record. Once per group, so a copy per group at most.
  */
 void
-key_forms(TessAggState *state, const TessRowMask *inserted)
+agg_key_forms(TessAggState *state, const TessRowMask *inserted)
 {
 	for (int key = 0; key < state->nkeys; key++)
 	{

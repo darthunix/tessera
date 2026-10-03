@@ -111,7 +111,7 @@ typedef struct GenericAgg
 	TessTableSumInput sum_input;
 	/*
 	 * A sum state of avg of integer or smallint, whose partial value is the
-	 * core's int8[] of the count and the sum (sum_state_partial).
+	 * core's int8[] of the count and the sum (agg_sum_state_partial).
 	 */
 	bool		sum_pair;
 	/* A partial aggregate's: its value is its state (fast_partial). */
@@ -277,52 +277,53 @@ fast_decimals(const AggValue *value)
 #define AGG_FIRST_CHUNK (64 * 1024)
 
 /* The node (agg.c). */
-extern TessRowMask filtered_rows(TessAggState *state, TessBatch *batch,
-								 int filter, const TessRowMask *rows);
-extern void reset_distinct(TessAggState *state);
+extern TessRowMask agg_filtered_rows(TessAggState *state, TessBatch *batch,
+									 int filter, const TessRowMask *rows);
+extern void agg_reset_distinct(TessAggState *state);
 
 /* The table of groups and the walk over it (agg_group.c). */
-extern void read_in_order(TessAggState *state, TessBatch *batch);
-extern void setop_side(TessAggState *state, int side);
-extern void group_drain(TessAggState *state);
-extern TessBatch *next_groups(TessAggState *state);
+extern void agg_read_in_order(TessAggState *state, TessBatch *batch);
+extern void agg_setop_side(TessAggState *state, int side);
+extern void agg_group_drain(TessAggState *state);
+extern TessBatch *agg_next_groups(TessAggState *state);
 
 /* Generic aggregates and their fast path (agg_generic.c). */
-extern GenericAgg *generic_init(TessAggState *state, Aggref *agg);
-extern void generic_reset(TessAggState *state, GenericAgg *generic);
-extern void generic_combine(TessAggState *state, GenericAgg *generic,
-							Datum value, bool isnull);
-extern void generic_accumulate(TessAggState *state, GenericAgg *generic,
-							   const TessRowMask *rows);
-extern uint64 *record_payload(TessAggState *state, uint32 ref);
+extern GenericAgg *agg_generic_init(TessAggState *state, Aggref *agg);
+extern void agg_generic_reset(TessAggState *state, GenericAgg *generic);
+extern void agg_generic_combine(TessAggState *state, GenericAgg *generic,
+								Datum value, bool isnull);
+extern void agg_generic_accumulate(TessAggState *state, GenericAgg *generic,
+								   const TessRowMask *rows);
+extern uint64 *agg_record_payload(TessAggState *state, uint32 ref);
 #ifdef HAVE_INT128
-extern void fast_merge(TessAggState *state, GenericAgg *generic, Datum value,
-					   bool isnull);
-extern void sum_states_accumulate(TessAggState *state, int nsums,
-								  const int *indexes, const TessRowMask *rows);
-extern Datum sum_state_value(const GenericAgg *generic, const uint64 *words,
-							 bool *isnull);
-extern Datum sum_state_partial(const GenericAgg *generic, const uint64 *words,
-							   bool *isnull);
+extern void agg_fast_merge(TessAggState *state, GenericAgg *generic,
+						   Datum value, bool isnull);
+extern void agg_sum_states_accumulate(TessAggState *state, int nsums,
+									  const int *indexes,
+									  const TessRowMask *rows);
+extern Datum agg_sum_state_value(const GenericAgg *generic,
+								 const uint64 *words, bool *isnull);
+extern Datum agg_sum_state_partial(const GenericAgg *generic,
+								   const uint64 *words, bool *isnull);
 #endif
-extern void generic_group_accumulate(TessAggState *state, int index,
-									 const TessRowMask *rows,
-									 const TessRowMask *inserted);
-extern Datum generic_value(GenericAgg *generic, bool *isnull);
+extern void agg_generic_group_accumulate(TessAggState *state, int index,
+										 const TessRowMask *rows,
+										 const TessRowMask *inserted);
+extern Datum agg_generic_value(GenericAgg *generic, bool *isnull);
 
 /* Key dictionaries and DISTINCT sets (agg_keydict.c). */
-extern void distinct_reset(TessAggState *state, AggValue *value);
-extern TessRowMask distinct_rows(TessAggState *state, AggValue *value,
-								 int nrows, const uint32 *group_hashes,
-								 const TessRowMask *valid,
-								 const TessDatumColumn *argument);
-extern Size distinct_bytes(TessAggState *state);
-extern KeyDict *key_dict_create(TessAggState *state, Oid eqop, Oid type,
-								Oid collation);
-extern void key_dict_reset(KeyDict *dict, uint64 values);
-extern void keydict_numbers(KeyDict *dict, const TessDatumColumn *column,
-							const TessRowMask *rows, bool insert,
-							Datum *numbers, uint32 *hashes);
-extern void key_forms(TessAggState *state, const TessRowMask *inserted);
+extern void agg_distinct_reset(TessAggState *state, AggValue *value);
+extern TessRowMask agg_distinct_rows(TessAggState *state, AggValue *value,
+									 int nrows, const uint32 *group_hashes,
+									 const TessRowMask *valid,
+									 const TessDatumColumn *argument);
+extern Size agg_distinct_bytes(TessAggState *state);
+extern KeyDict *agg_key_dict_create(TessAggState *state, Oid eqop, Oid type,
+									Oid collation);
+extern void agg_key_dict_reset(KeyDict *dict, uint64 values);
+extern void agg_keydict_numbers(KeyDict *dict, const TessDatumColumn *column,
+								const TessRowMask *rows, bool insert,
+								Datum *numbers, uint32 *hashes);
+extern void agg_key_forms(TessAggState *state, const TessRowMask *inserted);
 
 #endif							/* TESSERA_NODES_AGG_NODE_H */

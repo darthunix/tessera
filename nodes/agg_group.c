@@ -24,7 +24,7 @@ note_memory(TessAggState *state)
 		agg_spill_memory(state);
 
 	if (state->has_distinct)
-		memory += distinct_bytes(state);
+		memory += agg_distinct_bytes(state);
 	state->peak_memory = Max(state->peak_memory, memory);
 }
 
@@ -177,7 +177,7 @@ groups_memory(TessAggState *state)
 
 /* The child's columns the node reads, in their order, before it computes anything. */
 void
-read_in_order(TessAggState *state, TessBatch *batch)
+agg_read_in_order(TessAggState *state, TessBatch *batch)
 {
 	if (state->nread_columns < 2)
 		return;
@@ -233,7 +233,7 @@ group_batch(TessAggState *state, TessBatch *batch)
 
 	reserve_rows(state, nrows);
 	if (!state->replaying)
-		read_in_order(state, batch);
+		agg_read_in_order(state, batch);
 	memset(state->valid_bits, 0, sizeof(uint64) * nwords);
 	memset(state->inserted_bits, 0, sizeof(uint64) * nwords);
 	valid = (TessRowMask) {nrows, state->valid_bits};
@@ -257,7 +257,7 @@ group_batch(TessAggState *state, TessBatch *batch)
 				dict->batch_numbers = MemoryContextAlloc(query, sizeof(Datum) * nrows);
 				dict->batch_hashes = MemoryContextAlloc(query, sizeof(uint32) * nrows);
 			}
-			keydict_numbers(dict, column, &batch->rows, !state->frozen && !probe,
+			agg_keydict_numbers(dict, column, &batch->rows, !state->frozen && !probe,
 							dict->batch_numbers, dict->batch_hashes);
 			state->number_columns[key] = *column;
 			state->number_columns[key].values = dict->batch_numbers;
@@ -401,7 +401,7 @@ group_batch(TessAggState *state, TessBatch *batch)
 			add_chunk(state);
 	}
 	if (state->has_forms)
-		key_forms(state, &inserted);
+		agg_key_forms(state, &inserted);
 	nsums = 0;
 	for (int index = 0; index < state->nvalues; index++)
 	{
@@ -410,7 +410,7 @@ group_batch(TessAggState *state, TessBatch *batch)
 
 		/* FILTER: the rows it keeps; the groups those rows made count still. */
 		TessRowMask rows = value->filter >= 0 ?
-			filtered_rows(state, batch, value->filter, &valid) : valid;
+			agg_filtered_rows(state, batch, value->filter, &valid) : valid;
 
 		if (value->computed >= 0)
 			computed_column(state, batch, value->computed,
@@ -429,12 +429,12 @@ group_batch(TessAggState *state, TessBatch *batch)
 				continue;
 			}
 			if (value->distinct != NULL)
-				rows = distinct_rows(state, value, nrows, state->hashes, &rows, &column);
-			generic_group_accumulate(state, index, &rows, &inserted);
+				rows = agg_distinct_rows(state, value, nrows, state->hashes, &rows, &column);
+			agg_generic_group_accumulate(state, index, &rows, &inserted);
 			continue;
 		}
 		if (value->distinct != NULL)
-			rows = distinct_rows(state, value, nrows, state->hashes, &rows,
+			rows = agg_distinct_rows(state, value, nrows, state->hashes, &rows,
 								 &column);
 		state->calls++;
 		check(state, state->kernels->table_accumulate(&state->table,
@@ -448,12 +448,12 @@ group_batch(TessAggState *state, TessBatch *batch)
 	}
 #ifdef HAVE_INT128
 	if (nsums > 0)
-		sum_states_accumulate(state, nsums, state->sum_indexes, &valid);
+		agg_sum_states_accumulate(state, nsums, state->sum_indexes, &valid);
 #endif
 	/*
 	 * Past seven eighths of hash_mem, the rest left for a batch's chunk and
 	 * index: the groups go into partitions, and the largest to disk; in
-	 * partial mode they go out instead (group_drain).
+	 * partial mode they go out instead (agg_group_drain).
 	 */
 	if (state->spill == NULL && (!state->partial || state->partial_spill) &&
 		!state->has_distinct && !state->row_spill &&
@@ -461,7 +461,7 @@ group_batch(TessAggState *state, TessBatch *batch)
 		agg_start_spill(state);
 	/*
 	 * Generic states past hash_mem: the table freezes, new groups' rows go
-	 * to disk; in partial mode the groups go out instead (group_drain).
+	 * to disk; in partial mode the groups go out instead (agg_group_drain).
 	 */
 	if (state->row_spill && !state->partial && !state->has_distinct && !state->frozen &&
 		state->rows_level < ROWS_MAX_LEVELS &&
@@ -488,7 +488,7 @@ group_batch(TessAggState *state, TessBatch *batch)
 /* Read every batch of the child into the table of groups. */
 /* Read side `side` of INTERSECT or EXCEPT from now on. */
 void
-setop_side(TessAggState *state, int side)
+agg_setop_side(TessAggState *state, int side)
 {
 	if (side == 0)
 		state->setop_left_rows = 0;
@@ -500,19 +500,19 @@ setop_side(TessAggState *state, int side)
 }
 
 void
-group_drain(TessAggState *state)
+agg_group_drain(TessAggState *state)
 {
 	agg_spill_free(state);
 	rows_spill_free(state);
 	state->rows_level = 0;
 	for (int key = 0; key < state->nkeys; key++)
 		if (state->dicts[key] != NULL)
-			key_dict_reset(state->dicts[key], state->groups_estimate);
+			agg_key_dict_reset(state->dicts[key], state->groups_estimate);
 	/* The groups of a previous table and their states go together. */
 	if (state->generic_agg != NULL)
 		ReScanExprContext(state->generic_agg->curaggcontext);
 	create_table(state);
-	reset_distinct(state);
+	agg_reset_distinct(state);
 	for (;;)
 	{
 		TessBatch  *batch;
@@ -560,7 +560,7 @@ group_drain(TessAggState *state)
 		{
 			if (state->setop_left_rows == 0)
 				break;
-			setop_side(state, 1);
+			agg_setop_side(state, 1);
 			continue;
 		}
 		if (batch == NULL)
@@ -618,19 +618,19 @@ group_value_into(TessAggState *state, int index, int group, Datum *datum, bool *
 #ifdef HAVE_INT128
 				if (value->generic->sum_state)
 				{
-					const uint64 *words = record_payload(state, state->walked[group]) +
+					const uint64 *words = agg_record_payload(state, state->walked[group]) +
 						value->slot;
 
 					*datum = state->partial ?
-						sum_state_partial(value->generic, words, isnull) :
-						sum_state_value(value->generic, words, isnull);
+						agg_sum_state_partial(value->generic, words, isnull) :
+						agg_sum_state_value(value->generic, words, isnull);
 					MemoryContextSwitchTo(old);
 					break;
 				}
 #endif
 				value->generic->state = (Datum) word;
 				value->generic->state_null = !seen;
-				*datum = generic_value(value->generic, isnull);
+				*datum = agg_generic_value(value->generic, isnull);
 				MemoryContextSwitchTo(old);
 				break;
 			}
@@ -664,7 +664,7 @@ rows_drain(TessAggState *state)
 		ReScanExprContext(state->generic_agg->curaggcontext);
 	for (int key = 0; key < state->nkeys; key++)
 		if (state->dicts[key] != NULL)
-			key_dict_reset(state->dicts[key], 256);
+			agg_key_dict_reset(state->dicts[key], 256);
 	create_table(state);
 	state->frozen = false;
 	state->replaying = true;
@@ -710,7 +710,7 @@ next_chunk(TessAggState *state)
 			/* Partial mode: the rest of the input into a table anew. */
 			if (state->spill == NULL && !state->input_done)
 			{
-				group_drain(state);
+				agg_group_drain(state);
 				continue;
 			}
 			/* The next partition of rows of groups a frozen table lacked. */
@@ -866,7 +866,7 @@ setop_groups(TessAggState *state)
  * walk is over; a batch HAVING left empty is not returned.
  */
 TessBatch *
-next_groups(TessAggState *state)
+agg_next_groups(TessAggState *state)
 {
 	ExprContext *econtext = state->css.ss.ps.ps_ExprContext;
 	TupleTableSlot *scan = state->css.ss.ss_ScanTupleSlot;
