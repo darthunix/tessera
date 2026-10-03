@@ -97,7 +97,7 @@ static uint64 agg_records(AggSpill *spill);
 static inline uint32
 agg_partition(const AggSpill *spill, uint32 hash)
 {
-	return (hash >> spill->shift) & (uint32) (spill->npartitions - 1);
+	return tess_table_partition(hash, spill->shift, (uint32) spill->npartitions);
 }
 
 static inline Size
@@ -1070,7 +1070,7 @@ rows_write(TessAggState *state, RowSpill *spill, const TessRowMask *rows)
 
 	while ((row = tess_row_mask_next(rows, row)) >= 0)
 	{
-		int			part = (int) ((hashes[row] >> shift) & (ROWS_PARTS - 1));
+		int			part = (int) tess_table_partition(hashes[row], shift, ROWS_PARTS);
 		RowWriter  *writer = &spill->writers[part];
 		Size		need = 0;
 		uint64	   *nulls;

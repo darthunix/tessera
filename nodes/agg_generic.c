@@ -1103,8 +1103,8 @@ agg_generic_accumulate(TessAggState *state, GenericAgg *generic, const TessRowMa
 uint64 *
 agg_record_payload(TessAggState *state, uint32 ref)
 {
-	char	   *record = (char *) state->chunk_bases[ref >> TESS_TABLE_UNIT_BITS] +
-		(Size) (ref & ((1u << TESS_TABLE_UNIT_BITS) - 1)) * 8;
+	char	   *record = (char *) state->chunk_bases[tess_table_ref_chunk(ref)] +
+		tess_table_ref_byte(ref);
 
 	if (!state->payload_known)
 	{

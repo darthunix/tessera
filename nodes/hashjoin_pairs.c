@@ -447,8 +447,8 @@ mark_pairs(TessHashJoinState *state)
 		{
 			uint32		ref = state->current_offsets[word * 64 +
 												   pg_rightmost_one_pos64(bits)];
-			int			chunk = (int) (ref >> TESS_TABLE_UNIT_BITS);
-			Size		byte = (Size) (ref & ((1u << TESS_TABLE_UNIT_BITS) - 1)) * 8;
+			int			chunk = (int) tess_table_ref_chunk(ref);
+			Size		byte = tess_table_ref_byte(ref);
 			Size		index = (byte - TESS_TABLE_CHUNK_HEADER) / state->record_size;
 			uint64		bit = UINT64CONST(1) << (index % 64);
 
@@ -509,8 +509,7 @@ next_tail(TessHashJoinState *state)
 		if (state->marks == NULL || chunk >= state->mark_slots ||
 			state->marks[chunk] == NULL ||
 			((state->marks[chunk][index / 64] >> (index % 64)) & 1) == 0)
-			state->tail.refs[count++] = ((uint32) chunk << TESS_TABLE_UNIT_BITS) |
-				(uint32) (state->tail.byte / 8);
+			state->tail.refs[count++] = tess_table_ref((uint32) chunk, state->tail.byte);
 		state->tail.byte += state->record_size;
 	}
 	if (count == 0)

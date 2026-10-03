@@ -885,7 +885,7 @@ typedef struct TessHashJoinState
 static inline uint32
 spill_partition(const JoinSpill *spill, uint32 hash)
 {
-	return (hash >> spill->shift) & (uint32) (spill->npartitions - 1);
+	return tess_table_partition(hash, spill->shift, (uint32) spill->npartitions);
 }
 
 /* The executor (hashjoin.c): the table, its values and marks, the build and the probe. */
