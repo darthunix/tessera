@@ -18,9 +18,10 @@ use tessera_capi::c::{
     tess_table_append, tess_table_append_columns, tess_table_append_partitioned_columns,
     tess_table_chunk_init, tess_table_create, tess_table_find_or_insert, tess_table_format_version,
     tess_table_gather, tess_table_gather_key, tess_table_gather_words, tess_table_layout,
-    tess_table_link, tess_table_link_grouped, tess_table_next_in_group, tess_table_next_match,
-    tess_table_payloads, tess_table_probe, tess_table_record, tess_table_regrow, tess_table_scan,
-    tess_table_size, tess_table_stats,
+    tess_table_link, tess_table_link_grouped, tess_table_mark, tess_table_mark_words,
+    tess_table_next_in_group, tess_table_next_match, tess_table_next_unmarked, tess_table_payloads,
+    tess_table_probe, tess_table_record, tess_table_regrow, tess_table_scan, tess_table_size,
+    tess_table_stats,
 };
 use tessera_core::{ColumnView, RowMask, RowMaskView};
 use tessera_kernels::int32::{self, NullKeys};
@@ -1473,6 +1474,136 @@ fn partial_states_merge_through_the_entry_point() -> Result<()> {
             &raw mut status,
         );
         assert_ne!(code, Code::Ok, "partial states with terms");
+    }
+    Ok(())
+}
+
+/// RIGHT and FULL joins through the entry points: the records of every
+/// third row marked, by one process or atomically, are left out of the
+/// walk, which goes on where it stopped; without marks it visits every
+/// record; a reference between records is refused.
+#[test]
+fn the_mark_entry_points_leave_marked_records_out() -> Result<()> {
+    const NROWS: usize = 200;
+    let values: Vec<u64> = (0..NROWS as u64).collect();
+    let isnull = [false; NROWS];
+    let column = DatumColumn {
+        struct_size: size_of::<DatumColumn>(),
+        values: values.as_ptr(),
+        isnull: isnull.as_ptr(),
+        nrows: NROWS as i32,
+        ..DatumColumn::EMPTY
+    };
+    let key = TableKey {
+        kind: 1,
+        column: &raw const column,
+        prepared: ptr::null(),
+    };
+    let hashes: Vec<u32> = values
+        .iter()
+        .map(|&value| int32::murmurhash32(value as u32))
+        .collect();
+    let payload: Vec<u8> = values
+        .iter()
+        .flat_map(|value| value.to_ne_bytes())
+        .collect();
+    let all = |row: usize| row < NROWS;
+    let mask_of = |keep: &dyn Fn(usize) -> bool| -> Vec<u64> {
+        let mut words = vec![0_u64; NROWS.div_ceil(64)];
+        for row in (0..NROWS).filter(|&row| keep(row)) {
+            words[row / 64] |= 1 << (row % 64);
+        }
+        words
+    };
+    let mut status = Status::new();
+    // SAFETY: local buffers of the declared sizes, aliased by nothing else,
+    // throughout this test.
+    unsafe {
+        // Chunks of 70 records of 32 bytes: two words of marks each.
+        let chunk_bytes = 8 + 70 * 32;
+        let mut table = CTable::new(1, 8, 256);
+        let mut pending_words = mask_of(&all);
+        let mut pending = Mask {
+            nrows: NROWS as i32,
+            bits: pending_words.as_mut_ptr(),
+        };
+        let mut offsets = vec![0; NROWS];
+        table.insert(
+            chunk_bytes,
+            hashes.as_ptr(),
+            &raw const key,
+            payload.as_ptr(),
+            &raw mut pending,
+            offsets.as_mut_ptr(),
+            false,
+        );
+        assert_eq!(table.chunks.len(), 3);
+        let mut words = 0;
+        let code = tess_table_mark_words(chunk_bytes, 32, &raw mut words, &raw mut status);
+        assert_eq!((code, words), (Code::Ok, 2));
+        let walk = |marks: *const *mut u64, shared: bool| -> Vec<u32> {
+            let mut status = Status::new();
+            let mut cursor = 0;
+            let mut out = [0; 7];
+            let mut found = Vec::new();
+            loop {
+                let mut count = 0;
+                let code = tess_table_next_unmarked(
+                    table.ptr(),
+                    32,
+                    marks,
+                    shared,
+                    &raw mut cursor,
+                    out.as_mut_ptr(),
+                    7,
+                    &raw mut count,
+                    &raw mut status,
+                );
+                assert_eq!(code, Code::Ok, "{}", status.message());
+                if count == 0 {
+                    return found;
+                }
+                found.extend_from_slice(&out[..count as usize]);
+            }
+        };
+        for shared in [false, true] {
+            let mut marks = vec![vec![0_u64; words]; table.chunks.len()];
+            let pointers: Vec<*mut u64> = marks.iter_mut().map(|run| run.as_mut_ptr()).collect();
+            let mut third_words = mask_of(&|row| row % 3 == 0);
+            let third = Mask {
+                nrows: NROWS as i32,
+                bits: third_words.as_mut_ptr(),
+            };
+            let code = tess_table_mark(
+                table.ptr(),
+                32,
+                offsets.as_ptr(),
+                &raw const third,
+                pointers.as_ptr(),
+                shared,
+                &raw mut status,
+            );
+            assert_eq!(code, Code::Ok, "{}", status.message());
+            let unmarked: Vec<u32> = (0..NROWS)
+                .filter(|row| row % 3 != 0)
+                .map(|row| offsets[row])
+                .collect();
+            assert_eq!(walk(pointers.as_ptr(), shared), unmarked, "shared {shared}");
+            assert_eq!(walk(ptr::null(), shared), offsets, "without marks");
+            // A reference between two records names none.
+            let mut between = offsets.clone();
+            between[0] += 1;
+            let code = tess_table_mark(
+                table.ptr(),
+                32,
+                between.as_ptr(),
+                &raw const third,
+                pointers.as_ptr(),
+                shared,
+                &raw mut status,
+            );
+            assert_eq!(code, Code::InvalidArgument);
+        }
     }
     Ok(())
 }

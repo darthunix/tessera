@@ -225,6 +225,7 @@ join_forget_marks(TessHashJoinState *state)
 		MemoryContextReset(state->marks_context);
 	state->marks = NULL;
 	state->mark_slots = 0;
+	state->mark_chunks = 0;
 	state->marks_shared = false;
 	state->tail.table_done = false;
 }
@@ -233,11 +234,22 @@ join_forget_marks(TessHashJoinState *state)
 StaticAssertDecl(sizeof(pg_atomic_uint64) == sizeof(uint64),
 				 "TessHashJoin needs 64-bit atomics for shared marks");
 
+/* The words of the marks of a chunk of chunk_len bytes: a bit per record. */
+Size
+join_marks_of(TessHashJoinState *state, Size chunk_len)
+{
+	Size		words;
+
+	check(state, state->kernels->table_mark_words(chunk_len, state->record_size, &words,
+												  &state->status));
+	return words;
+}
+
 /* The words of a chunk's marks in shared memory: a bit per record of the largest chunk. */
 Size
 join_mark_words(TessHashJoinState *state)
 {
-	return ((TESS_TABLE_MAX_CHUNK_LEN - TESS_TABLE_CHUNK_HEADER) / state->record_size + 63) / 64;
+	return join_marks_of(state, TESS_TABLE_MAX_CHUNK_LEN);
 }
 
 /* Room for the bases and lengths of nchunks chunks in this process. */

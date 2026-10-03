@@ -33,15 +33,15 @@ impl Cursor {
     }
 
     /// At byte `byte` of chunk `chunk`.
-    fn at(chunk: usize, byte: usize) -> Self {
+    pub(super) fn at(chunk: usize, byte: usize) -> Self {
         Self((chunk as u64) << 32 | byte as u64)
     }
 
-    fn chunk(self) -> usize {
+    pub(super) fn chunk(self) -> usize {
         (self.0 >> 32) as usize
     }
 
-    fn byte(self) -> usize {
+    pub(super) fn byte(self) -> usize {
         (self.0 & u64::from(u32::MAX)) as usize
     }
 
