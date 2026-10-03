@@ -956,6 +956,49 @@ extern TessStatusCode tess_table_scan(const TessTableRef *table,
 									  TessStatus *status);
 
 /*
+ * RIGHT and FULL joins: the marks of the inner table's records, a bit
+ * each, a run of words per chunk that the caller keeps: bit i of word w of
+ * chunk c stands for the chunk's record 64 * w + i. tess_table_mark_words
+ * gives the words of a chunk of chunk_len bytes, at least what each
+ * chunk's run must hold.
+ */
+extern TessStatusCode tess_table_mark_words(Size chunk_len, Size record_size,
+											Size *words, TessStatus *status);
+
+/*
+ * Set the mark of the record at refs[row] for each row of rows, which
+ * must name a record of record_size bytes of the table's chunks (its index
+ * is not read): marks[chunk] for each chunk of the table, each
+ * tess_table_mark_words of its length; with shared, every participant sets
+ * them, and they are set atomically.
+ */
+extern TessStatusCode tess_table_mark(const TessTableRef *table,
+									  Size record_size,
+									  const uint32 *refs,
+									  const TessRowMask *rows,
+									  uint64 *const *marks,
+									  bool shared,
+									  TessStatus *status);
+
+/*
+ * As tess_table_scan, the records without a mark only, every record when
+ * marks is NULL: the records of a RIGHT or FULL join without a pair, of
+ * record_size bytes, read from the chunks alone (a spilling join has freed
+ * the index by then). The cursor moves past the last record looked at.
+ * Nothing sets the marks or appends to the chunks meanwhile; shared marks
+ * are read atomically.
+ */
+extern TessStatusCode tess_table_next_unmarked(const TessTableRef *table,
+											   Size record_size,
+											   uint64 *const *marks,
+											   bool shared,
+											   uint64 *cursor,
+											   uint32 *refs,
+											   int capacity,
+											   int *count,
+											   TessStatus *status);
+
+/*
  * Move the table to a new index of len bytes at index, for capacity
  * records (tess_table_size), over the same chunks: the buckets are filled
  * anew from the records, which stay where they are, and the old index is

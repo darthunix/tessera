@@ -9,18 +9,19 @@
 use std::ffi::{c_int, c_uint};
 use std::mem::{MaybeUninit, offset_of};
 use std::slice;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context, Result, bail, ensure};
 use tessera_core::ColumnReader;
 use tessera_kernels::table::{
     Appended, Batch, Chunks, Combine, CombineStop, Cursor, ExtremeSlot, FORMAT_VERSION, Fold,
-    HEADER_SIZE, KeyKind, KeySource, MAX_KEYS, MAX_PAYLOAD_COLUMNS, MAX_SUMS, Partitions,
+    HEADER_SIZE, KeyKind, KeySource, MAX_KEYS, MAX_PAYLOAD_COLUMNS, MAX_SUMS, Marks, Partitions,
     PayloadColumns, Slot, SumSlot, Table, TableConfig, TableMut, UNIT_BITS, VERSION_OFFSET,
     append_columns_to, append_partitioned_columns_to, append_to,
     bloom::SharedFilter,
-    index_size, init_chunk, normalize_word, payload_null_words,
+    index_size, init_chunk, mark, mark_words, normalize_word, payload_null_words,
     phases::{Participant, SharedCounters},
-    record_bytes_of, split_to,
+    record_bytes_of, scan_unmarked, split_to,
 };
 
 use super::args::reader;
@@ -1340,6 +1341,172 @@ pub unsafe extern "C" fn tess_table_scan(
             let capacity = usize::try_from(capacity).context("a negative capacity")?;
             let out = slots(offsets, capacity, "offsets")?;
             let visited = table.scan(&mut cursor, out)?;
+            *raw = cursor.raw();
+            *count.as_mut().context("a null count")? = visited as c_int;
+            Ok(())
+        })
+    }
+}
+
+/// A join's marks in C memory: a pointer to each chunk's words, set by
+/// one process, or, in shared memory, by every participant.
+struct RawMarks {
+    chunks: *const *mut u64,
+    shared: bool,
+}
+
+impl RawMarks {
+    /// The word `word` of chunk `chunk`.
+    ///
+    /// # Safety
+    ///
+    /// As for [`Marks::set`], with the caller's contract of the entry
+    /// points: `chunks` holds an entry per chunk of the table, each
+    /// pointing to [`mark_words`] of the chunk's length at least.
+    unsafe fn at(&self, chunk: usize, word: usize) -> *mut u64 {
+        // SAFETY: the caller's contract.
+        unsafe { (*self.chunks.add(chunk)).add(word) }
+    }
+}
+
+// A shared word is only accessed atomically; see `RawMarks::at`.
+impl Marks for RawMarks {
+    unsafe fn set(&self, chunk: usize, word: usize, bit: u64) {
+        // SAFETY: the caller's contract.
+        unsafe {
+            let at = self.at(chunk, word);
+            if self.shared {
+                // Other participants set bits of the same words.
+                let word = AtomicU64::from_ptr(at);
+                if word.load(Ordering::Relaxed) & bit == 0 {
+                    word.fetch_or(bit, Ordering::AcqRel);
+                }
+            } else {
+                *at |= bit;
+            }
+        }
+    }
+
+    unsafe fn word(&self, chunk: usize, word: usize) -> u64 {
+        // SAFETY: the caller's contract.
+        unsafe {
+            let at = self.at(chunk, word);
+            if self.shared {
+                AtomicU64::from_ptr(at).load(Ordering::Acquire)
+            } else {
+                *at
+            }
+        }
+    }
+}
+
+/// `tess_table_mark_words`: the words of marks of a chunk of `chunk_len`
+/// bytes and records of `record_size`.
+///
+/// # Safety
+///
+/// `words` must be writable; `status` as for every entry point.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tess_table_mark_words(
+    chunk_len: usize,
+    record_size: usize,
+    words: *mut usize,
+    status: *mut Status,
+) -> Code {
+    // SAFETY: the caller's contract.
+    unsafe {
+        guard(status, || {
+            ensure!(record_size > 0, "records of no bytes");
+            *words.as_mut().context("a null count of words")? = mark_words(chunk_len, record_size);
+            Ok(())
+        })
+    }
+}
+
+/// `tess_table_mark`: set the mark of the record at `refs[row]` for each
+/// selected row, the table's chunks read without its index.
+///
+/// # Safety
+///
+/// `table` as for [`chunks_of`] during the call; `refs` must hold an
+/// initialized reference per row of `rows`, a valid mask; `marks` must
+/// hold an entry per chunk of the table, each pointing to
+/// [`mark_words`] of the chunk's length at least, written by nothing else
+/// during the call, or, when `shared`, accessed only atomically; `status`
+/// as for every entry point.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tess_table_mark(
+    table: *const TableRef,
+    record_size: usize,
+    refs: *const u32,
+    rows: *const Mask,
+    marks: *const *mut u64,
+    shared: bool,
+    status: *mut Status,
+) -> Code {
+    // SAFETY: the caller's contract.
+    unsafe {
+        guard(status, || {
+            let table = table.as_ref().context("a null table")?;
+            let nchunks = usize::try_from(table.nchunks).context("a negative chunk count")?;
+            let lens = values(table.chunk_lens, nchunks, "chunk lengths")?;
+            let rows = rows.as_ref().context("a null row mask")?.view()?;
+            let refs = values(refs, rows.nrows(), "references")?;
+            ensure!(!marks.is_null(), "null marks");
+            mark(
+                lens,
+                record_size,
+                refs,
+                &rows,
+                &RawMarks {
+                    chunks: marks,
+                    shared,
+                },
+            )
+        })
+    }
+}
+
+/// `tess_table_next_unmarked`: the next records without a mark, as
+/// [`tess_table_scan`] visits the records, the table's chunks read without
+/// its index.
+///
+/// # Safety
+///
+/// `table` as for [`chunks_of`] during the call, nothing appending to its
+/// chunks; `marks` null or as for
+/// [`tess_table_mark`], set by nothing during the call; `cursor` and
+/// `count` writable; `refs` must hold `capacity` writable slots; `status`
+/// as for every entry point.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tess_table_next_unmarked(
+    table: *const TableRef,
+    record_size: usize,
+    marks: *const *mut u64,
+    shared: bool,
+    cursor: *mut u64,
+    refs: *mut u32,
+    capacity: c_int,
+    count: *mut c_int,
+    status: *mut Status,
+) -> Code {
+    // SAFETY: the caller's contract.
+    unsafe {
+        guard(status, || {
+            let (_, chunks) = chunks_of(table)?;
+            let raw = cursor.as_mut().context("a null cursor")?;
+            let mut cursor = if *raw == 0 {
+                Cursor::start()
+            } else {
+                Cursor::from_raw(*raw)
+            };
+            let capacity = usize::try_from(capacity).context("a negative capacity")?;
+            let out = slots(refs, capacity, "references")?;
+            let marks = (!marks.is_null()).then_some(RawMarks {
+                chunks: marks,
+                shared,
+            });
+            let visited = scan_unmarked(&chunks, record_size, &mut cursor, marks.as_ref(), out)?;
             *raw = cursor.raw();
             *count.as_mut().context("a null count")? = visited as c_int;
             Ok(())

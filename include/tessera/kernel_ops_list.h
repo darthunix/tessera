@@ -104,6 +104,9 @@
 	X(table_bloom_words_within) \
 	X(sort_run_words) \
 	X(decimal_extreme) \
-	X(table_accumulate_extremes)
+	X(table_accumulate_extremes) \
+	X(table_mark_words) \
+	X(table_mark) \
+	X(table_next_unmarked)
 
 #endif							/* TESSERA_KERNEL_OPS_LIST_H */

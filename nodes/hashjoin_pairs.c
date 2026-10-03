@@ -415,103 +415,89 @@ next_matches(TessHashJoinState *state)
 }
 
 /*
+ * RIGHT and FULL: the words of marks of the chunks the table has more of
+ * than the marks, zero, in one block (join_marks_of each chunk's length).
+ */
+static void
+mark_chunks(TessHashJoinState *state)
+{
+	int			nchunks = state->table.nchunks;
+	Size		total = 0;
+	uint64	   *words;
+
+	if (state->marks_shared)
+		elog(ERROR, "TessHashJoin found a shared table of more chunks than its marks");
+	if (state->marks_context == NULL)
+		state->marks_context = AllocSetContextCreate(state->css.ss.ps.state->es_query_cxt,
+													 "TessHashJoin marks",
+													 ALLOCSET_DEFAULT_SIZES);
+	if (state->mark_slots < nchunks)
+	{
+		int			slots = Max(nchunks, 16);
+		uint64	  **marks = MemoryContextAllocZero(state->marks_context,
+												   sizeof(uint64 *) * slots);
+
+		if (state->marks != NULL)
+			memcpy(marks, state->marks, sizeof(uint64 *) * state->mark_chunks);
+		state->marks = marks;
+		state->mark_slots = slots;
+	}
+	for (int chunk = state->mark_chunks; chunk < nchunks; chunk++)
+		total += join_marks_of(state, state->table.chunk_lens[chunk]);
+	words = MemoryContextAllocZero(state->marks_context, sizeof(uint64) * Max(total, 1));
+	for (int chunk = state->mark_chunks; chunk < nchunks; chunk++)
+	{
+		state->marks[chunk] = words;
+		words += join_marks_of(state, state->table.chunk_lens[chunk]);
+	}
+	state->mark_chunks = nchunks;
+}
+
+/*
  * RIGHT and FULL: mark the records of the published pairs, which passed
- * the join clauses. A reference is a chunk's number and a place in 8-byte
- * units (tessera/table.h); a chunk's records follow its header, each of
- * record_size bytes.
+ * the join clauses (tess_table_mark; a shared table's every participant
+ * marks, atomically).
  */
 static void
 mark_pairs(TessHashJoinState *state)
 {
-	const TessRowMask *rows = &state->batch.rows;
-	int			nwords = tess_row_mask_word_count(rows->nrows);
-
-	if (state->marks == NULL || state->mark_slots < state->table.nchunks)
-	{
-		int			slots = Max(state->table.nchunks, 16);
-		uint64	  **marks;
-
-		if (state->marks_context == NULL)
-			state->marks_context = AllocSetContextCreate(state->css.ss.ps.state->es_query_cxt,
-														 "TessHashJoin marks",
-														 ALLOCSET_DEFAULT_SIZES);
-		marks = MemoryContextAllocZero(state->marks_context, sizeof(uint64 *) * slots);
-
-		if (state->marks != NULL)
-			memcpy(marks, state->marks, sizeof(uint64 *) * state->mark_slots);
-		state->marks = marks;
-		state->mark_slots = slots;
-	}
-	for (int word = 0; word < nwords; word++)
-		for (uint64 bits = rows->bits[word]; bits != 0; bits &= bits - 1)
-		{
-			uint32		ref = state->current_offsets[word * 64 +
-												   pg_rightmost_one_pos64(bits)];
-			int			chunk = (int) tess_table_ref_chunk(ref);
-			Size		byte = tess_table_ref_byte(ref);
-			Size		index = (byte - TESS_TABLE_CHUNK_HEADER) / state->record_size;
-			uint64		bit = UINT64CONST(1) << (index % 64);
-
-			/* A shared table's: other participants set bits of the same words. */
-			if (state->marks_shared)
-			{
-				pg_atomic_uint64 *word = (pg_atomic_uint64 *) &state->marks[chunk][index / 64];
-
-				if ((pg_atomic_read_u64(word) & bit) == 0)
-					(void) pg_atomic_fetch_or_u64(word, bit);
-				continue;
-			}
-			if (state->marks[chunk] == NULL)
-				state->marks[chunk] =
-					MemoryContextAllocZero(state->marks_context,
-										   sizeof(uint64) *
-										   ((state->table.chunk_lens[chunk] /
-											 state->record_size + 63) / 64));
-			state->marks[chunk][index / 64] |= bit;
-		}
+	if (state->mark_chunks < state->table.nchunks)
+		mark_chunks(state);
+	check(state, state->kernels->table_mark(&state->table, state->record_size,
+											state->current_offsets,
+											&state->batch.rows, state->marks,
+											state->marks_shared, &state->status));
 }
 
-/* Start the tail: the inner rows without a pair, from the first chunk on. */
+/* Start the tail: the inner rows without a pair, from the first record on. */
 static void
 start_tail(TessHashJoinState *state)
 {
 	join_reserve_rows(state, JOIN_COMPACT_ROWS);
 	state->tail.on = true;
-	state->tail.chunk = 0;
-	state->tail.byte = TESS_TABLE_CHUNK_HEADER;
+	state->tail.cursor = 0;
 	state->output_compact = false;
 	state->null_round = false;
 }
 
 /*
- * The next records without a pair, up to a batch of them, published with
- * NULL outer columns: a chunk's used mark is its first word. False when
- * the walk is over.
+ * The next records without a pair, up to a batch of them
+ * (tess_table_next_unmarked), published with NULL outer columns. False
+ * when the walk is over.
  */
 static bool
 next_tail(TessHashJoinState *state)
 {
 	int			count = 0;
 
-	while (count < JOIN_COMPACT_ROWS && state->tail.chunk < state->table.nchunks)
-	{
-		int			chunk = state->tail.chunk;
-		uint64		used = *(const uint64 *) state->table.chunks[chunk];
-		Size		index;
-
-		if (state->tail.byte >= used)
-		{
-			state->tail.chunk++;
-			state->tail.byte = TESS_TABLE_CHUNK_HEADER;
-			continue;
-		}
-		index = (state->tail.byte - TESS_TABLE_CHUNK_HEADER) / state->record_size;
-		if (state->marks == NULL || chunk >= state->mark_slots ||
-			state->marks[chunk] == NULL ||
-			((state->marks[chunk][index / 64] >> (index % 64)) & 1) == 0)
-			state->tail.refs[count++] = tess_table_ref((uint32) chunk, state->tail.byte);
-		state->tail.byte += state->record_size;
-	}
+	/* Every chunk has its words once any has: the kernels read them all. */
+	if (state->mark_chunks > 0 && state->mark_chunks < state->table.nchunks)
+		mark_chunks(state);
+	check(state, state->kernels->table_next_unmarked(&state->table, state->record_size,
+													 state->mark_chunks > 0 ? state->marks : NULL,
+													 state->marks_shared, &state->tail.cursor,
+													 state->tail.refs, JOIN_COMPACT_ROWS,
+													 &count, &state->status));
 	if (count == 0)
 		return false;
 	state->tail.bits[0] = count == 64 ? ~UINT64CONST(0) :

@@ -555,8 +555,8 @@ typedef struct JoinTail
 	 */
 	bool		table_done;
 	bool		request;
-	int			chunk;
-	Size		byte;
+	/* Where the walk stands: the kernels' cursor (tess_table_next_unmarked). */
+	uint64		cursor;
 	uint32		refs[JOIN_COMPACT_ROWS];
 	uint64		bits[1];
 } JoinTail;
@@ -746,9 +746,10 @@ typedef struct TessHashJoinState
 	bool		preserve_inner;
 	/*
 	 * RIGHT and FULL: per chunk of the table, a bit per record set once a
-	 * pair of it passed the join clauses; after the outer side, the records
-	 * without one go out with NULL outer columns (the tail), from the walk's
-	 * chunk and byte on.
+	 * pair of it passed the join clauses (tess_table_mark); after the
+	 * outer side, the records without one go out with NULL outer columns
+	 * (the tail, tess_table_next_unmarked). mark_slots entries, the first
+	 * mark_chunks of them with words (join_marks_of their chunk's length).
 	 */
 	uint64	  **marks;
 	int			mark_slots;
@@ -876,6 +877,7 @@ typedef struct TessHashJoinState
 
 	JoinParallel parallel;
 	JoinValues values;
+	int			mark_chunks;
 } TessHashJoinState;
 
 /* Raise the error a kernel stored, if the call failed. */
@@ -898,6 +900,7 @@ extern void join_forget_marks(TessHashJoinState *state);
 extern void join_index_table(TessHashJoinState *state);
 extern Size join_memory(TessHashJoinState *state);
 extern Size join_mark_words(TessHashJoinState *state);
+extern Size join_marks_of(TessHashJoinState *state, Size chunk_len);
 extern void join_note_memory(TessHashJoinState *state);
 extern void join_note_prune_keys(TessHashJoinState *state, TessBatch *batch);
 extern dsa_pointer *join_own_list(TessHashJoinState *state, bool values);

@@ -4,9 +4,9 @@
     clippy::panic,
     reason = "a test reports a failure by panicking"
 )]
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
 
-use anyhow::Result;
+use anyhow::{Result, ensure};
 use proptest::prelude::*;
 use tessera_core::{ColumnReader, ColumnView, RowMask, RowMaskView};
 use tessera_kernels::decimal::{
@@ -17,8 +17,8 @@ use tessera_kernels::int32::{self, NullKeys, hash_combine, murmurhash32};
 use tessera_kernels::ops::ArithmeticError;
 use tessera_kernels::table::{
     Batch, CHUNK_HEADER, Cursor, ExtremeSlot, FORMAT_VERSION, Fold, KeyKind, KeySource, LocalTable,
-    MAX_CHUNK_LEN, MAX_KEYS, Slot, SumSlot, Table, TableConfig, UNIT_BITS, bloom, index_size,
-    normalize_word, record_bytes, record_bytes_of,
+    MAX_CHUNK_LEN, MAX_KEYS, Marks, Slot, SumSlot, Table, TableConfig, UNIT_BITS, bloom,
+    index_size, mark, mark_words, normalize_word, record_bytes, record_bytes_of, scan_unmarked,
 };
 use tessera_testing::{edge, flags, integer, property, values, words};
 
@@ -998,6 +998,99 @@ fn scan_all(table: &mut LocalTable, step: usize) -> Result<Vec<u32>> {
     }
     assert_eq!(table.scan(&mut cursor, &mut out)?, 0, "the walk stays over");
     Ok(all)
+}
+
+/// Marks a test keeps: a run of words per chunk.
+struct TestMarks(Vec<Vec<std::cell::Cell<u64>>>);
+
+// The kernels call the marks only for words of the table's records.
+#[allow(unsafe_code)]
+impl Marks for TestMarks {
+    unsafe fn set(&self, chunk: usize, word: usize, bit: u64) {
+        let cell = &self.0[chunk][word];
+        cell.set(cell.get() | bit);
+    }
+
+    unsafe fn word(&self, chunk: usize, word: usize) -> u64 {
+        self.0[chunk][word].get()
+    }
+}
+
+/// RIGHT and FULL joins: the records a batch's pairs mark are left out of
+/// the walk, which goes on where it stopped whatever the room for its
+/// output; without marks it visits every record. The records cross words
+/// of marks and chunks of 100 records.
+#[test]
+fn marked_records_are_left_out_of_the_walk() {
+    let record = local(&ONE_INT4, 4).unwrap().table().unwrap().record_size();
+    let chunk_bytes = CHUNK_HEADER + 100 * record;
+    property(
+        (1..700_usize, 1..9_u64, 1..70_usize),
+        |(nkeys, every, step)| -> Result<()> {
+            let values: Vec<i32> = (0..nkeys as i32).collect();
+            let keys = [ColumnView::try_new(&values, None)?];
+            let hashes: Vec<u32> = values.iter().map(|&value| hash_i32(value)).collect();
+            let mut table = LocalTable::new(&ONE_INT4, 2048, chunk_bytes)?;
+            resolve_all(&mut table, &hashes, &keys[..])?;
+            let all = scan_all(&mut table, 64)?;
+            let nchunks = all
+                .iter()
+                .map(|&offset| offset >> UNIT_BITS)
+                .max()
+                .unwrap_or(0) as usize
+                + 1;
+            let marks = TestMarks(
+                (0..nchunks)
+                    .map(|_| vec![std::cell::Cell::new(0); mark_words(chunk_bytes, record)])
+                    .collect(),
+            );
+            // Mark one record in `every`, by a batch of all of them.
+            let marked: Vec<bool> = (0..all.len())
+                .map(|at| (at as u64 * 7 + 3).is_multiple_of(every))
+                .collect();
+            let nrows = all.len();
+            let rows = words(&marked);
+            let chunks = table.chunk_set()?;
+            mark(
+                chunks.lens(),
+                record,
+                &all,
+                &RowMaskView::try_new(nrows, &rows)?,
+                &marks,
+            )?;
+            let walk = |marks: Option<&TestMarks>| -> Result<Vec<u32>> {
+                let mut cursor = Cursor::start();
+                let mut out = vec![0; step];
+                let mut found = Vec::new();
+                // A call gives at least a record until the walk is over: a
+                // cursor that stood still fails here, not hangs.
+                for _ in 0..=all.len() {
+                    let count = scan_unmarked(&chunks, record, &mut cursor, marks, &mut out)?;
+                    if count == 0 {
+                        break;
+                    }
+                    found.extend_from_slice(&out[..count]);
+                }
+                ensure!(
+                    scan_unmarked(&chunks, record, &mut cursor, marks, &mut out)? == 0,
+                    "the walk stays over"
+                );
+                Ok(found)
+            };
+            let unmarked: Vec<u32> = all
+                .iter()
+                .zip(&marked)
+                .filter(|(_, marked)| !**marked)
+                .map(|(&offset, _)| offset)
+                .collect();
+            ensure!(
+                walk(Some(&marks))? == unmarked,
+                "the records without a mark"
+            );
+            ensure!(walk(None)? == all, "every record without marks");
+            Ok(())
+        },
+    );
 }
 
 #[test]

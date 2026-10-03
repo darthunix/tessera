@@ -314,11 +314,9 @@ join_rescan(CustomScanState *css)
 	/* A shared table's go with it: the build starts anew. */
 	if (state->marks_shared)
 		join_forget_marks(state);
-	for (int chunk = 0; state->marks != NULL && chunk < state->mark_slots; chunk++)
-		if (state->marks[chunk] != NULL)
-			memset(state->marks[chunk], 0,
-				   sizeof(uint64) * ((state->table.chunk_lens[chunk] /
-									  state->record_size + 63) / 64));
+	for (int chunk = 0; chunk < state->mark_chunks; chunk++)
+		memset(state->marks[chunk], 0,
+			   sizeof(uint64) * join_marks_of(state, state->table.chunk_lens[chunk]));
 	state->next_row = -1;
 	state->done = false;
 	if (css->ss.ps.chgParam != NULL)

@@ -46,6 +46,7 @@ static void
 share_marks(TessHashJoinState *state, dsa_pointer marks, int nchunks)
 {
 	uint64	   *words;
+	Size		per_chunk;
 
 	join_forget_marks(state);
 	if (!state->preserve_inner)
@@ -59,9 +60,11 @@ share_marks(TessHashJoinState *state, dsa_pointer marks, int nchunks)
 	state->marks = MemoryContextAlloc(state->marks_context,
 									  sizeof(uint64 *) * Max(nchunks, 1));
 	words = dsa_get_address(join_query_dsa(state), marks);
+	per_chunk = join_mark_words(state);
 	for (int chunk = 0; chunk < nchunks; chunk++)
-		state->marks[chunk] = words + chunk * join_mark_words(state);
+		state->marks[chunk] = words + chunk * per_chunk;
 	state->mark_slots = nchunks;
+	state->mark_chunks = nchunks;
 	state->marks_shared = true;
 }
 

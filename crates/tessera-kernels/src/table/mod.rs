@@ -92,6 +92,7 @@ mod lanes;
 mod local;
 #[cfg(all(test, loom))]
 mod loom;
+mod marks;
 mod order;
 pub mod phases;
 mod record;
@@ -112,6 +113,7 @@ pub use header::{
 use header::{Header, Layout, NRECORDS};
 pub use keys::{KeySource, KeyValue, normalize_word};
 pub use local::LocalTable;
+pub use marks::{Marks, mark, mark_words, scan_unmarked};
 use record::Access;
 pub use record::{MAX_PAYLOAD_COLUMNS, PayloadColumns, Record, payload_null_words};
 use region::{RawRegion, Region};
@@ -227,6 +229,11 @@ impl<'a> Chunks<'a> {
     /// The number of chunks.
     pub fn len(&self) -> usize {
         self.bases.len()
+    }
+
+    /// The chunks' lengths.
+    pub fn lens(&self) -> &'a [usize] {
+        self.lens
     }
 
     /// Whether there are none.
