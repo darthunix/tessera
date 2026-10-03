@@ -13,8 +13,17 @@ pub const CONTROL: &str = "off";
 /// `timings.csv` (`test,mode,run,milliseconds`) lists them.
 pub type Timings = BTreeMap<(String, String), Vec<f64>>;
 
+/// A run's timings, and how many readings it left out: a time not above
+/// zero, which only the wall clock the families read, stepped back during
+/// a case, gives.
+#[derive(Debug, Default)]
+pub struct Run {
+    pub timings: Timings,
+    pub dropped: usize,
+}
+
 /// Parse a run's `timings.csv`.
-pub fn parse(csv: &str) -> Result<Timings> {
+pub fn parse(csv: &str) -> Result<Run> {
     let mut lines = csv.lines();
     let header: Vec<&str> = lines
         .next()
@@ -28,7 +37,7 @@ pub fn parse(csv: &str) -> Result<Timings> {
             .with_context(|| format!("timings.csv has no column {name}"))
     };
     let (test, mode, milliseconds) = (column("test")?, column("mode")?, column("milliseconds")?);
-    let mut timings = Timings::new();
+    let mut run = Run::default();
     for line in lines.filter(|line| !line.is_empty()) {
         let fields: Vec<&str> = line.split(',').collect();
         let field = |at: usize| {
@@ -40,15 +49,19 @@ pub fn parse(csv: &str) -> Result<Timings> {
         let value: f64 = field(milliseconds)?
             .parse()
             .with_context(|| format!("not a time: {line}"))?;
-        timings
+        if value <= 0.0 {
+            run.dropped += 1;
+            continue;
+        }
+        run.timings
             .entry((field(test)?.to_owned(), field(mode)?.to_owned()))
             .or_default()
             .push(value);
     }
-    if timings.is_empty() {
+    if run.timings.is_empty() {
         bail!("timings.csv has no timings");
     }
-    Ok(timings)
+    Ok(run)
 }
 
 /// One side's time of a case and mode over its runs: the least of any run,
@@ -216,10 +229,12 @@ mod tests {
 
     #[test]
     fn timings_parse_by_their_header() -> Result<()> {
-        let timings =
-            parse("test,mode,run,milliseconds\nsum,on,1,5.5\nsum,on,2,5.25\nsum,off,1,10\n")?;
-        assert_eq!(timings[&("sum".into(), "on".into())], [5.5, 5.25]);
-        assert_eq!(timings[&("sum".into(), "off".into())], [10.]);
+        let run = parse(
+            "test,mode,run,milliseconds\nsum,on,1,5.5\nsum,on,2,5.25\nsum,off,1,10\nsum,on,3,-113\n",
+        )?;
+        assert_eq!(run.timings[&("sum".into(), "on".into())], [5.5, 5.25]);
+        assert_eq!(run.timings[&("sum".into(), "off".into())], [10.]);
+        assert_eq!(run.dropped, 1, "a reading of a clock stepped back");
         assert!(parse("test,mode,run\n").is_err());
         assert!(parse("test,mode,run,milliseconds\nsum,on,1,fast\n").is_err());
         Ok(())

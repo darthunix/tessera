@@ -290,14 +290,26 @@ fn report(
     )?;
     let mut slower = false;
     for (family, [base_runs, candidate_runs]) in measured {
-        let read = |runs: &[PathBuf]| -> Result<Vec<stats::Timings>> {
+        let read = |runs: &[PathBuf]| -> Result<Vec<stats::Run>> {
             runs.iter()
                 .map(|run| stats::parse(&fs::read_to_string(run.join("timings.csv"))?))
                 .collect()
         };
-        let rows = stats::compare(&read(base_runs)?, &read(candidate_runs)?, threshold);
+        let (base, candidate) = (read(base_runs)?, read(candidate_runs)?);
+        let timings = |runs: &[stats::Run]| -> Vec<stats::Timings> {
+            runs.iter().map(|run| run.timings.clone()).collect()
+        };
+        let rows = stats::compare(&timings(&base), &timings(&candidate), threshold);
         slower |= rows.iter().any(|row| row.verdict == Verdict::Slower);
         writeln!(text, "## {family}\n\n{}", stats::table(&rows))?;
+        let dropped: usize = base.iter().chain(&candidate).map(|run| run.dropped).sum();
+        if dropped > 0 {
+            writeln!(
+                text,
+                "{dropped} reading(s) left out, not above zero: the wall clock the family \
+                 reads stepped back during them.\n"
+            )?;
+        }
         let names = |runs: &[PathBuf]| {
             runs.iter()
                 .filter_map(|run| run.file_name()?.to_str().map(str::to_owned))
