@@ -8,9 +8,110 @@
 )]
 
 use tessera_capi::c::{
-    Code, SpillHeader, Status, tess_spill_header_read, tess_spill_header_size,
-    tess_spill_header_write, tess_spill_unpack,
+    Code, SpillHeader, SpillWeights, Status, tess_spill_header_read, tess_spill_header_size,
+    tess_spill_header_write, tess_spill_unpack, tess_table_spill_add_bytes, tess_table_spill_evict,
+    tess_table_spill_init, tess_table_spill_split, tess_table_spill_words,
 };
+
+/// A process's own words and a shared table's take the same steps through
+/// the entry points: the largest partitions in memory past the limit,
+/// then those in memory under a quarter of the records, one a check when
+/// the weights say so.
+#[test]
+fn the_spill_entry_points_choose_by_the_weights() {
+    let weights = SpillWeights {
+        start: 1.0,
+        target: 1.0,
+        spilled: 0.0,
+        reserve: 0,
+        resident: 0.25,
+        per_check: 0,
+    };
+    let records = [10_u64, 10, 70, 10];
+    for shared in [false, true] {
+        let mut status = Status::new();
+        let mut nwords = 0;
+        let mut in_force = 0;
+        let mut over = false;
+        // SAFETY: local buffers of the declared sizes throughout this test.
+        unsafe {
+            let code = tess_table_spill_words(4, &raw mut nwords, &raw mut status);
+            assert_eq!(code, Code::Ok, "{}", status.message());
+            let mut words = vec![0_u64; nwords];
+            let at = words.as_mut_ptr();
+            let code = tess_table_spill_init(at, nwords, shared, 100, &raw mut status);
+            assert_eq!(code, Code::Ok, "{}", status.message());
+            let code =
+                tess_table_spill_split(at, nwords, shared, 4, &raw mut in_force, &raw mut status);
+            assert_eq!((code, in_force), (Code::Ok, 4), "{}", status.message());
+            for (partition, bytes) in [(0, 30), (1, 50), (2, 40)] {
+                let code = tess_table_spill_add_bytes(
+                    at,
+                    nwords,
+                    shared,
+                    bytes,
+                    partition,
+                    &raw mut over,
+                    &raw mut status,
+                );
+                assert_eq!(code, Code::Ok, "{}", status.message());
+            }
+            assert!(over, "{shared}: 120 bytes past a budget of 100");
+            let evict = |weights: &SpillWeights, memory, evicted| {
+                let mut status = Status::new();
+                let mut partition = -2;
+                let code = tess_table_spill_evict(
+                    at,
+                    nwords,
+                    shared,
+                    weights,
+                    memory,
+                    100,
+                    records.as_ptr(),
+                    records.len(),
+                    100,
+                    evicted,
+                    &raw mut partition,
+                    &raw mut status,
+                );
+                assert_eq!(code, Code::Ok, "{}", status.message());
+                partition
+            };
+            let one = SpillWeights {
+                per_check: 1,
+                ..weights
+            };
+            assert_eq!(evict(&one, 120, 1), -1, "{shared}: one a check");
+            assert_eq!(evict(&weights, 120, 0), 1, "{shared}: the largest");
+            assert_eq!(evict(&weights, 120, 1), 2, "{shared}: the next");
+            // Partitions 0 and 3 keep 20 of 100 records.
+            assert_eq!(evict(&weights, 0, 0), 0, "{shared}: under a quarter");
+            assert_eq!(evict(&weights, 0, 0), 3, "{shared}: every one");
+            assert_eq!(evict(&weights, 120, 0), -1, "{shared}: none left");
+            let negative = SpillWeights {
+                start: -1.0,
+                ..weights
+            };
+            let mut partition = 0;
+            let code = tess_table_spill_evict(
+                at,
+                nwords,
+                shared,
+                &raw const negative,
+                0,
+                100,
+                std::ptr::null(),
+                0,
+                0,
+                0,
+                &raw mut partition,
+                &raw mut status,
+            );
+            assert_eq!(code, Code::InvalidArgument, "{shared}: a weight below zero");
+            drop(words);
+        }
+    }
+}
 
 #[test]
 fn damaged_blocks_report_data_corrupted() {

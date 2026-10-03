@@ -169,16 +169,17 @@ whole makes one group of all it had); without by-reference columns,
 every chunk is a group. The outer rows are read back one chunk at a
 time, with only that chunk's values in memory.
 
-**Which partitions stay.** While the build takes more than `hash_mem`,
-counted as the node reports it, the largest resident partition goes to
-disk; room stays for the outer side's tails of the partitions on disk
-only (a chunk of columns, one of values when the outer side keeps a
-by-reference column, and a file's buffer), since a resident partition
-writes no outer row. Resident partitions holding less than a quarter of
-the inner rows go to disk too, once that is so: probing them would cost
-every outer batch the whole probe for the few rows of theirs, more than
-writing them saves (1 resident partition of 32 made a join of 5 M inner
-rows 3 % slower than none, 2 of 4 made one of 1 M 7 % faster).
+**Which partitions stay.** By the rule of the weights (below): while
+the build takes more than `hash_mem`, counted as the node reports it,
+the largest resident partition goes to disk; room stays for the outer
+side's tails of the partitions on disk only (a chunk of columns, one of
+values when the outer side keeps a by-reference column, and a file's
+buffer), since a resident partition writes no outer row. Resident
+partitions holding less than a quarter of the inner rows go to disk
+too, once that is so: probing them would cost every outer batch the
+whole probe for the few rows of theirs, more than writing them saves (1
+resident partition of 32 made a join of 5 M inner rows 3 % slower than
+none, 2 of 4 made one of 1 M 7 % faster).
 
 **What never goes to disk.** The resident partitions, joined while the
 outer child is read; the outer rows without a pair, found so by the
@@ -214,9 +215,10 @@ row and splits the table into partitions, two per participant at least.
 Each participant, once it sees the split after a batch, splits its own
 chunks so far into partitions whose chunks are in shared memory too and
 appends partitioned from then on; while the chunks take more than the
-budget, the largest partition goes to disk, marked by one participant,
-and every participant writes its own chunks of it to its own files of
-the table's `SharedFileSet`. The chunk lists are each participant's
+budget, the largest partition goes to disk, marked by one participant
+(the rule of the weights, one partition a check), and every participant
+writes its own chunks of it to its own files of the table's
+`SharedFileSet`. The chunk lists are each participant's
 own, so none is unlinked from a list others add to.
 
 After the inner side (`FLUSH`), each participant writes its tails of
@@ -326,3 +328,33 @@ their rests' memory counted, and the grouping above merges them.
 **Memory.** The first index takes at most a quarter of `hash_mem`, a
 chunk an eighth; the node acts at seven eighths, the rest left for a
 batch's growth, and counts its files' buffers, a page each.
+
+## The weights
+
+Which partition goes to disk, and when, is one rule
+(`tess_table_spill_evict`, `Spill::evict` in `shared_spill.rs`), over
+the words that count each partition's bytes in memory and mark those on
+disk: a process's own words for its own spill, the shared ones for a
+shared table. A check sends partitions while the memory, with a reserve
+for each partition on disk, passes a share of the limit, `start` for
+its first and `target` for each after it: each time the partition with
+the most bytes in memory, those already on disk weighed by `spilled` (0
+leaves them out). Then, with any partition on disk and those in memory
+holding fewer than a share `resident` of the records, each of these
+goes as well. A check sends `per_check` partitions at most (0 for any).
+
+The nodes differ by the weights alone, settings of their own whose
+defaults are the rules above:
+
+| weight | hash join | shared hash join |
+|---|---|---|
+| `start` | `tessera.join_spill_start`, 1 | the same, of the budget |
+| `target` | `tessera.join_spill_target`, 1 | the same |
+| `spilled` | `tessera.join_spill_spilled_weight`, 0 | the same |
+| reserve | `tessera.join_spill_tail_weight` × a tail, 1 | none: the words count the table's chunks |
+| `resident` | `tessera.join_spill_resident_share`, 0.25 | none: the words count records once built |
+| `per_check` | any | `tessera.join_shared_spill_evictions`, 1 |
+
+A shared table's participants send one partition a check, since the
+others write their chunks of it at their next batch; a participant whose
+check found the partition marked by another one first sends none.

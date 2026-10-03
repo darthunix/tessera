@@ -2182,6 +2182,97 @@ SELECT join_same($$SELECT count(*), sum(length(jsb.t)), sum(jsp.k), sum(jsb.n) F
  1 rows, hash eccf0fec6dc065c1ff5eb57067141f83
 (1 row)
 
+-- The weights of the rule that sends partitions to disk (docs/spill.md,
+-- "Weights"): without the share of the inner rows below which those in
+-- memory all go, some stay; without the outer tails' reserve, fewer go.
+SET tessera.join_spill_resident_share = 0;
+SELECT join_explain($$SELECT count(*), sum(length(jsb.t)) FROM jsp JOIN jsb ON jsp.k = jsb.k$$);
+                                     join_explain                                     
+--------------------------------------------------------------------------------------
+ Custom Scan (TessAgg) (actual rows=1.00 loops=1)
+   Input Batches: 2717
+   Input Rows: 171130
+   Kernel Calls: 5434
+   Computed Datums: 171130
+   ->  Custom Scan (TessHashJoin) (actual rows=171130.00 loops=1)
+         Hash Cond: (jsp.k = jsb.k)
+         Buckets: 32768
+         Memory Usage: within hash_mem
+         Batches: 8
+         Disk Usage: 1933 kB
+         Rows Removed by Bloom Filter: 0
+         Builds: 1
+         Build Rows: 90910
+         Chunks: 167
+         Resident Partitions: 1
+         Spilled Chunks: 719
+         Tail Chunks Kept: 0
+         Probe Rows: 40000
+         Matches: 171130
+         Compact Batches: 2354
+         Bloom Filters: 1
+         ->  Custom Scan (TessHeapScan) on public.jsb (actual rows=40000.00 loops=1)
+               Batch Size: 64
+               Batches: 723
+               Pages: 362
+               Deformed Datums: 77648
+               Restarted Datums: 0
+         ->  Custom Scan (TessHeapScan) on public.jsp (actual rows=100000.00 loops=1)
+               Batch Size: 64
+               Batches: 1597
+               Pages: 532
+               Deformed Datums: 100000
+               Restarted Datums: 0
+(34 rows)
+
+SET tessera.join_spill_tail_weight = 0;
+SELECT join_explain($$SELECT count(*), sum(length(jsb.t)) FROM jsp JOIN jsb ON jsp.k = jsb.k$$);
+                                     join_explain                                     
+--------------------------------------------------------------------------------------
+ Custom Scan (TessAgg) (actual rows=1.00 loops=1)
+   Input Batches: 2712
+   Input Rows: 171130
+   Kernel Calls: 5424
+   Computed Datums: 171130
+   ->  Custom Scan (TessHashJoin) (actual rows=171130.00 loops=1)
+         Hash Cond: (jsp.k = jsb.k)
+         Buckets: 32768
+         Memory Usage: within hash_mem
+         Batches: 8
+         Disk Usage: 1940 kB
+         Rows Removed by Bloom Filter: 0
+         Builds: 1
+         Build Rows: 90910
+         Chunks: 182
+         Resident Partitions: 1
+         Spilled Chunks: 721
+         Tail Chunks Kept: 0
+         Probe Rows: 40000
+         Matches: 171130
+         Compact Batches: 2373
+         Bloom Filters: 1
+         ->  Custom Scan (TessHeapScan) on public.jsb (actual rows=40000.00 loops=1)
+               Batch Size: 64
+               Batches: 723
+               Pages: 362
+               Deformed Datums: 77648
+               Restarted Datums: 0
+         ->  Custom Scan (TessHeapScan) on public.jsp (actual rows=100000.00 loops=1)
+               Batch Size: 64
+               Batches: 1597
+               Pages: 532
+               Deformed Datums: 100000
+               Restarted Datums: 0
+(34 rows)
+
+SELECT join_same($$SELECT count(*), sum(length(jsb.t)), sum(jsp.k), sum(jsb.n) FROM jsp JOIN jsb ON jsp.k = jsb.k$$);
+                   join_same                   
+-----------------------------------------------
+ 1 rows, hash eccf0fec6dc065c1ff5eb57067141f83
+(1 row)
+
+RESET tessera.join_spill_tail_weight;
+RESET tessera.join_spill_resident_share;
 SELECT join_same($$SELECT jsp.s, jsb.t, jsb.n FROM jsp JOIN jsb ON jsp.k = jsb.k WHERE jsp.s LIKE '%7'$$);
                      join_same                     
 ---------------------------------------------------

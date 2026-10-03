@@ -76,4 +76,15 @@ extern double tess_parallel_divisor(const Path *path);
 #define TESS_CHUNK_CONTEXT_SIZES \
 	ALLOCSET_SMALL_INITSIZE, ALLOCSET_SMALL_INITSIZE, ALLOCSET_SMALL_MAXSIZE
 
+/*
+ * The weights a grouping's and a join's spills give the one rule that
+ * sends partitions to disk (docs/spill.md, "Weights"), set in module.c.
+ */
+extern double tess_join_spill_start;
+extern double tess_join_spill_target;
+extern double tess_join_spill_spilled_weight;
+extern double tess_join_spill_tail_weight;
+extern double tess_join_spill_resident_share;
+extern int	tess_join_shared_spill_evictions;
+
 #endif							/* TESSERA_NODES_INTERNAL_H */
