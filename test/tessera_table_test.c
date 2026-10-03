@@ -979,7 +979,7 @@ partitioned_rows(Table *table, Batch *batch, const uint32 *offsets,
 		memcpy(&row, record.payload, sizeof(row));
 		if (row >= NROWS || !has_bit(batch->valid, row) || has_bit(seen, row) ||
 			record.hash != batch->hashes[row] ||
-			((record.hash >> shift) & 3) != partitions[i])
+			tess_table_partition(record.hash, shift, 4) != partitions[i])
 			return false;
 		seen[row / 64] |= UINT64CONST(1) << (row % 64);
 	}
@@ -1004,6 +1004,8 @@ tessera_test_table_partitions(PG_FUNCTION_ARGS)
 	uint32		split_offsets[NROWS];
 	uint32		split_hashes[NROWS];
 	uint32		split_partitions[NROWS];
+	/* The partition whose records each chunk takes; 0xFF for the source. */
+	uint8	   *owner = palloc(TESS_TABLE_MAX_CHUNKS);
 	int			nvalid;
 	int			copied = 0;
 	Size		from = TESS_TABLE_CHUNK_HEADER;
@@ -1020,11 +1022,13 @@ tessera_test_table_partitions(PG_FUNCTION_ARGS)
 						  (const uint8 *) batch->payload, &pending, offsets,
 						  &status) != TESS_OK)
 		PG_RETURN_BOOL(false);
+	memset(owner, 0xFF, TESS_TABLE_MAX_CHUNKS);
 	for (int partition = 0; partition < 4; partition++)
 	{
 		if (!add_chunk(whole, TESS_TABLE_CHUNK_HEADER + 16 * 32))
 			PG_RETURN_BOOL(false);
 		chunks[partition] = whole->ref.nchunks - 1;
+		owner[chunks[partition]] = (uint8) partition;
 	}
 	for (;;)
 	{
@@ -1042,12 +1046,18 @@ tessera_test_table_partitions(PG_FUNCTION_ARGS)
 			if (!add_chunk(whole, TESS_TABLE_CHUNK_HEADER + 16 * 32))
 				PG_RETURN_BOOL(false);
 			chunks[full] = whole->ref.nchunks - 1;
+			owner[chunks[full]] = (uint8) full;
 		}
 		else if (count == 0)
 			break;
 	}
+	/*
+	 * The partition the kernels put each record in, by the chunk its
+	 * reference names, which partitioned_rows compares with the hash's
+	 * (tess_table_partition).
+	 */
 	for (int i = 0; i < copied; i++)
-		split_partitions[i] = (split_hashes[i] >> 9) & 3;
+		split_partitions[i] = owner[tess_table_ref_chunk(split_offsets[i])];
 	if (copied != nvalid ||
 		!partitioned_rows(whole, batch, split_offsets, split_partitions, copied, 9))
 		PG_RETURN_BOOL(false);
@@ -1067,6 +1077,7 @@ tessera_test_table_partitions(PG_FUNCTION_ARGS)
 		PG_RETURN_BOOL(false);
 	free_table(whole);
 	pfree(batch);
+	pfree(owner);
 	PG_RETURN_BOOL(true);
 }
 

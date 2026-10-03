@@ -60,6 +60,39 @@
 /* A reference's low bits: the record's place in its chunk in 8-byte units. */
 #define TESS_TABLE_UNIT_BITS 17
 #define TESS_TABLE_MAX_CHUNK_LEN (1024 * 1024)
+
+/* The chunk of a record's reference. */
+static inline uint32
+tess_table_ref_chunk(uint32 ref)
+{
+	return ref >> TESS_TABLE_UNIT_BITS;
+}
+
+/* The byte of its chunk where a referenced record starts. */
+static inline Size
+tess_table_ref_byte(uint32 ref)
+{
+	return (Size) (ref & ((1u << TESS_TABLE_UNIT_BITS) - 1)) * 8;
+}
+
+/* The reference of the record at byte, a multiple of 8, of chunk. */
+static inline uint32
+tess_table_ref(uint32 chunk, Size byte)
+{
+	return (chunk << TESS_TABLE_UNIT_BITS) | (uint32) (byte / 8);
+}
+
+/*
+ * The partition of a row of hash among npartitions, a power of two, at a
+ * level whose bits start at shift: as the kernels split a table's records
+ * and append rows partitioned (tess_table_split, the _partitioned entry
+ * points), which the table suite checks.
+ */
+static inline uint32
+tess_table_partition(uint32 hash, uint32 shift, uint32 npartitions)
+{
+	return (hash >> shift) & (npartitions - 1);
+}
 #define TESS_TABLE_CHUNK_HEADER 8
 
 

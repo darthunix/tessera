@@ -106,7 +106,7 @@ grow_ints(MemoryContext context, int **array, int *slots, int needed)
 static inline uint32
 side_partition(const SpillSide *side, const JoinSpill *spill, uint32 hash)
 {
-	return (hash >> spill->shift) & (uint32) (side->npartitions - 1);
+	return tess_table_partition(hash, spill->shift, (uint32) side->npartitions);
 }
 
 static inline uint64
