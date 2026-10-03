@@ -103,6 +103,7 @@
 	X(spill_chunk_len) \
 	X(table_bloom_words_within) \
 	X(sort_run_words) \
-	X(decimal_extreme)
+	X(decimal_extreme) \
+	X(table_accumulate_extremes)
 
 #endif							/* TESSERA_KERNEL_OPS_LIST_H */

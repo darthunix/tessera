@@ -104,7 +104,7 @@ use core::ops::Deref;
 use anyhow::{Result, ensure};
 use tessera_core::{ColumnReader, RowMask, RowMaskView};
 
-pub use exclusive::{Combine, CombineStop, Cursor, Fold, MAX_SUMS, Slot, SumSlot};
+pub use exclusive::{Combine, CombineStop, Cursor, ExtremeSlot, Fold, MAX_SUMS, Slot, SumSlot};
 pub use header::{
     CHUNK_HEADER, FORMAT_VERSION, HEADER_SIZE, KeyKind, MAX_CHUNK_LEN, MAX_CHUNKS, MAX_KEYS,
     TableConfig, UNIT_BITS, VERSION_OFFSET, index_size, record_bytes, record_bytes_of,
@@ -902,6 +902,19 @@ impl<'a> TableMut<'a> {
         sums: &mut [SumSlot<'_, P>],
     ) -> Result<()> {
         exclusive::sum_partials(&self.0.region, &self.0.layout, offsets, rows, sums)
+    }
+
+    /// Offer each selected row's term to the `min` or `max` of numeric
+    /// state of its record's payload ([`crate::decimal::ExtremeState`]), in
+    /// the rows' order: the rows it does not decide, and its group's later
+    /// rows of the batch, go to the slot's rest for the caller.
+    pub fn extremes<T: crate::decimal::Terms>(
+        &mut self,
+        offsets: &[u32],
+        rows: &RowMaskView<'_>,
+        slot: &mut ExtremeSlot<'_, T>,
+    ) -> Result<()> {
+        exclusive::extremes(&self.0.region, &self.0.layout, offsets, rows, slot)
     }
 
     /// Visit the records from `cursor` on, chunk by chunk in the order

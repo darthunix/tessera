@@ -17,6 +17,9 @@
 /* A generic sum state's payload words: the kernels' state, then the rest's address. */
 #define AGG_SUM_STATE_WORDS (TESS_TABLE_SUM_WORDS + 1)
 
+/* min or max of numeric with groups: the kernels' extreme state (TESS_TABLE_EXTREME_WORDS). */
+#define AGG_EXTREME_STATE_WORDS TESS_TABLE_EXTREME_WORDS
+
 /* A group's aggregate states have one flag bit each in a payload word. */
 #define AGG_MAX_GROUPED 64
 

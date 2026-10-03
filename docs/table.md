@@ -329,8 +329,26 @@ other call over it at the same time:
   or one the record's sum refuses at its bound is set in the sum's
   `rest` for the caller to merge, the record's state unchanged; a value
   of another tag, words out of range (a scale past 18, a sum at 10^36) or
-  another array fails the call, as do partial states and other sums in
-  one call;
+  another array fails the call, as do partial states and numeric or int4
+  sums in one call; an int8 column among partial states
+  (`TESS_TABLE_SUM_OF_INT8`, the core's partial value of `sum(int2)`) is
+  a state of one value each;
+- `tess_table_accumulate_extremes(&table, offsets, &rows, column,
+  value_at, max, &rest, &status)` offers each selected row's numeric to
+  the `min` or `max` state of its record, `TESS_TABLE_EXTREME_WORDS` (3)
+  words at `value_at`, as `tessera_kernels::decimal::ExtremeState` keeps
+  it: a decimal's value, a word of its scale (bits 0 to 7), the kind of
+  the extreme (bits 8 to 10: empty, decimal, NaN, +Infinity, -Infinity,
+  or a numeric of the caller's) and pending (bit 11), and the address of
+  the caller's copy of a numeric extreme, which the kernels never write;
+  all zeros is the empty state. The rows go in their order, and a value
+  equal to the extreme takes its place, as `numeric_larger` and
+  `numeric_smaller` keep theirs; decimals, NaN and the infinities compare
+  in `numeric_cmp`'s order. A row only the core can order (a numeric that
+  is not a decimal, NaN or an infinity, or a decimal against the caller's
+  numeric) is set in `rest` and makes the state pending: the
+  group's later rows of the batch go to `rest` too, and the caller takes
+  them in order and clears pending;
 - `tess_table_scan(&table, &cursor, offsets, capacity, &count, &status)`
   visits the records chunk by chunk in the order they were appended, up
   to `capacity` per call, from a cursor the caller starts at 0 and keeps

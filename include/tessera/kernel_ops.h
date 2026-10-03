@@ -55,7 +55,7 @@ typedef struct TessKernelOps
 } TessKernelOps;
 
 #define TESS_KERNEL_OPS_MIN_SIZE \
-	TESS_ABI_SIZE_INCLUDING_FIELD(TessKernelOps, decimal_extreme)
+	TESS_ABI_SIZE_INCLUDING_FIELD(TessKernelOps, table_accumulate_extremes)
 
 /* The operations' count, and the last of them is the last field. */
 #define TESS_KERNEL_OP_COUNT(name) + 1

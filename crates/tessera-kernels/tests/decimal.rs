@@ -13,8 +13,8 @@ use anyhow::{Result, ensure};
 use proptest::prelude::*;
 use tessera_core::{RowMask, RowMaskView};
 use tessera_kernels::decimal::{
-    self, Arg, Compare, Decimal, MAX_READ_SCALE, MAX_SCALE, Op, POWERS, Results, SUM_BOUND, Scales,
-    Source, Sum, SumState, Term,
+    self, Arg, Compare, Decimal, ExtremeState, ExtremeValue, MAX_READ_SCALE, MAX_SCALE, Offer, Op,
+    POWERS, Results, SUM_BOUND, Scales, Source, Special, Sum, SumState, Term,
 };
 use tessera_testing::{bounded_sum, decimal_parts, flags, nrows, property};
 
@@ -458,7 +458,11 @@ fn extreme_keeps_the_last_of_equal_decimals_and_leaves_the_rest() {
             let mut found = None;
             for (row, (&chosen, &arg)) in selected.iter().zip(&column.0).enumerate() {
                 let other = chosen && arg == Arg::Other;
-                ensure!(bit(&rest, row) == other, "row {row} left: {}", bit(&rest, row));
+                ensure!(
+                    bit(&rest, row) == other,
+                    "row {row} left: {}",
+                    bit(&rest, row)
+                );
                 if let (true, Arg::Decimal(decimal)) = (chosen, arg) {
                     let wins = best.is_none_or(|best| {
                         if max {
@@ -506,6 +510,125 @@ fn extreme_takes_the_later_of_equal_values_of_other_scales() {
     let two = Some(Decimal::new(2, 0).unwrap());
     assert_eq!(extreme_of(&column, &[0b101], true, two), (None, vec![0]));
     assert_eq!(extreme_of(&column, &[0b10], false, two), (None, vec![0]));
+}
+
+/// A special value of numeric.
+fn special() -> impl Strategy<Value = Special> {
+    prop_oneof![
+        Just(Special::NaN),
+        Just(Special::PositiveInfinity),
+        Just(Special::NegativeInfinity),
+    ]
+}
+
+/// A decimal leaning to the digit edges at a scale the batch reads.
+fn read_decimal() -> impl Strategy<Value = Decimal> {
+    decimal_parts(MAX_READ_SCALE).prop_map(|(value, scale)| Decimal::new(value, scale).unwrap())
+}
+
+/// The order `numeric_cmp` gives two values, by their place among the
+/// specials and their values at scale 18; `None` for a longer value and
+/// another finite one, which only the core orders.
+fn numeric_order(left: ExtremeValue, right: ExtremeValue) -> Option<std::cmp::Ordering> {
+    let place = |value: ExtremeValue| match value {
+        ExtremeValue::Special(Special::NegativeInfinity) => (0, None),
+        ExtremeValue::Decimal(decimal) => (
+            1,
+            Some(i128::from(decimal.value()) * 10_i128.pow(MAX_READ_SCALE - decimal.scale())),
+        ),
+        ExtremeValue::Empty | ExtremeValue::Numeric => (1, None),
+        ExtremeValue::Special(Special::PositiveInfinity) => (2, None),
+        ExtremeValue::Special(Special::NaN) => (3, None),
+    };
+    match (place(left), place(right)) {
+        ((1, Some(left)), (1, Some(right))) => Some(left.cmp(&right)),
+        ((1, _), (1, _)) => None,
+        ((left, _), (right, _)) => Some(left.cmp(&right)),
+    }
+}
+
+#[test]
+fn extreme_states_offer_rows_in_numeric_order() {
+    let value = prop_oneof![
+        Just(ExtremeValue::Empty),
+        read_decimal().prop_map(ExtremeValue::Decimal),
+        special().prop_map(ExtremeValue::Special),
+        Just(ExtremeValue::Numeric),
+    ];
+    let term = prop_oneof![
+        1 => Just(Term::Null),
+        1 => Just(Term::Other),
+        2 => special().prop_map(Term::Special),
+        6 => read_decimal().prop_map(Term::Decimal),
+    ];
+    property(
+        (value, proptest::collection::vec(term, 0..64), any::<bool>()),
+        |(first, terms, max)| -> Result<()> {
+            let mut state = ExtremeState {
+                value: first,
+                pending: false,
+            };
+            let (mut best, mut pending) = (first, false);
+            for term in terms {
+                let offer = state.offer(term, max);
+                let row = match term {
+                    Term::Null => None,
+                    Term::Decimal(decimal) => Some(ExtremeValue::Decimal(decimal)),
+                    Term::Special(special) => Some(ExtremeValue::Special(special)),
+                    Term::Other => Some(ExtremeValue::Numeric),
+                };
+                // The model: a row after one left, or one only the core
+                // orders, is left; else the later of equal values wins.
+                let expected = match row {
+                    None => Offer::Kept,
+                    Some(_) if pending => Offer::Rest,
+                    Some(ExtremeValue::Numeric) => Offer::Rest,
+                    Some(row) if best == ExtremeValue::Empty => {
+                        best = row;
+                        Offer::Taken
+                    }
+                    Some(row) => match numeric_order(row, best) {
+                        None => Offer::Rest,
+                        Some(order)
+                            if order
+                                == if max {
+                                    std::cmp::Ordering::Less
+                                } else {
+                                    std::cmp::Ordering::Greater
+                                } =>
+                        {
+                            Offer::Kept
+                        }
+                        Some(_) => {
+                            best = row;
+                            Offer::Taken
+                        }
+                    },
+                };
+                pending |= expected == Offer::Rest;
+                ensure!(
+                    offer == expected,
+                    "{term:?} to {state:?}: {offer:?}, not {expected:?}"
+                );
+                ensure!(state.value == best && state.pending == pending, "{state:?}");
+                let (value, flags) = state.to_words();
+                ensure!(
+                    ExtremeState::from_words(value, flags)? == state,
+                    "{state:?} round trip"
+                );
+            }
+            Ok(())
+        },
+    );
+}
+
+#[test]
+fn extreme_states_refuse_unknown_words() {
+    assert_eq!(ExtremeState::from_words(0, 0).unwrap(), ExtremeState::EMPTY);
+    // A kind past the six, a flag past bit 11, a decimal of 19 digits.
+    assert!(ExtremeState::from_words(0, 6 << 8).is_err());
+    assert!(ExtremeState::from_words(0, 1 << 12).is_err());
+    assert!(ExtremeState::from_words(10_u64.pow(18), 1 << 8).is_err());
 }
 
 /// A sum: a value leaning to the bound's edges at a scale the batch reads,

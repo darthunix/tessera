@@ -10,7 +10,7 @@
 use anyhow::{Result, bail, ensure};
 use tessera_core::{ColumnReader, RowMask, RowMaskView};
 
-use crate::decimal::{self, Partial, Partials, SumState, Term, Terms};
+use crate::decimal::{self, ExtremeState, Offer, Partial, Partials, SumState, Term, Terms};
 use crate::ops::ArithmeticError;
 
 use super::batch::{Lanes, VERTICAL_MIN_ROWS, check_keys, check_partitions, probe_word, shaped};
@@ -1006,6 +1006,66 @@ pub(super) fn sum_partials<R: Region, P: Partials>(
         for (sum, &other) in sums.iter_mut().zip(others.iter()) {
             sum.rest.set_word(index, other)?;
         }
+    }
+    Ok(())
+}
+
+/// A `min` or `max` of numeric of [`extremes`]: its rows' terms, its
+/// state in the payload, and the rows it leaves to the caller.
+pub struct ExtremeSlot<'a, T: ?Sized> {
+    /// The rows' terms.
+    pub terms: &'a T,
+    /// The state's first byte in the payload ([`ExtremeState`]).
+    pub at: usize,
+    /// `max`, or `min` when false.
+    pub max: bool,
+    /// The rows the state leaves to the caller; every word is written.
+    pub rest: RowMask<'a>,
+}
+
+/// Offer each selected row's term to the `min` or `max` state of its
+/// record's payload ([`ExtremeState::offer`]), in the rows' order: the
+/// rows the state does not decide go to the slot's rest, and the group's
+/// later rows of the batch after them, for the caller to take in order.
+pub(super) fn extremes<R: Region, T: Terms>(
+    region: &R,
+    layout: &Layout,
+    offsets: &[u32],
+    rows: &RowMaskView<'_>,
+    slot: &mut ExtremeSlot<'_, T>,
+) -> Result<()> {
+    let nrows = rows.nrows();
+    let words: [usize; ExtremeState::WORDS] = std::array::from_fn(|word| slot.at + 8 * word);
+    check_accumulate(layout, offsets.len(), nrows, &words)?;
+    ensure!(
+        slot.rest.as_view().nrows() == nrows,
+        "the rest and the selection of an extreme have different row counts"
+    );
+    let mut access = Access::new(region, layout);
+    for index in 0..nrows.div_ceil(64) {
+        let mut other = 0_u64;
+        let mut look = rows.word_at(index);
+        while look != 0 {
+            let bit = look.trailing_zeros() as usize;
+            look &= look - 1;
+            let row = index * 64 + bit;
+            let term = slot.terms.term(row);
+            if term == Term::Null {
+                continue;
+            }
+            let payload = payload_at(&mut access, region, layout, offsets[row])?;
+            let (value, flags) = (read_word(payload, slot.at), read_word(payload, slot.at + 8));
+            let mut state = ExtremeState::from_words(value, flags)?;
+            match state.offer(term, slot.max) {
+                Offer::Kept => continue,
+                Offer::Taken => {}
+                Offer::Rest => other |= 1 << bit,
+            }
+            let (value, flags) = state.to_words();
+            write_word(payload, slot.at, value);
+            write_word(payload, slot.at + 8, flags);
+        }
+        slot.rest.set_word(index, other)?;
     }
     Ok(())
 }
