@@ -1,7 +1,9 @@
 -- The anyagg family: aggregates without GROUP BY that TessAgg computes
 -- through the core's transition and final functions over the batches
 -- (text, numeric, int8 and float8 states, bit_or), alone, over a filter and
--- three together. A ratio below one is the win.
+-- three together; with GROUP BY, the generic states and the ones the node
+-- keeps in its records (sum states, numeric extremes). A ratio below one is
+-- the win.
 \set ON_ERROR_STOP on
 \if :{?repetitions}
 \else
@@ -71,6 +73,8 @@ SELECT pg_temp.measure_pair('g_max_text', 'SELECT max(b) FROM bench_mixed', :rep
 SELECT pg_temp.measure_pair('g_sum_int8', 'SELECT sum(c) FROM bench_mixed', :repetitions);
 SELECT pg_temp.measure_pair('g_avg_int8', 'SELECT avg(f) FROM bench_mixed', :repetitions);
 SELECT pg_temp.measure_pair('g_sum_numeric', 'SELECT sum(a::numeric) FROM bench_mixed', :repetitions);
+SELECT pg_temp.measure_pair('g_max_numeric', 'SELECT max(a::numeric) FROM bench_mixed', :repetitions);
+SELECT pg_temp.measure_pair('g_max_numeric_col', 'SELECT max(n) FROM bench_tfact', :repetitions);
 SELECT pg_temp.measure_pair('g_avg_float8', 'SELECT avg(a::float8) FROM bench_mixed', :repetitions);
 SELECT pg_temp.measure_pair('g_bit_or', 'SELECT bit_or(c1) FROM bench_narrow', :repetitions);
 SELECT pg_temp.measure_pair('g_filter', 'SELECT max(b) FROM bench_mixed WHERE a > 250000', :repetitions);
@@ -78,6 +82,11 @@ SELECT pg_temp.measure_pair('g_three', 'SELECT max(b), sum(c), avg(f) FROM bench
 -- With GROUP BY: 100 groups and 50 000 groups.
 SELECT pg_temp.measure_pair('g_group_few', 'SELECT count(*), max(m) FROM (SELECT d % 100, max(b) AS m, sum(c), avg(f) FROM bench_mixed GROUP BY 1) AS g', :repetitions);
 SELECT pg_temp.measure_pair('g_group_many', 'SELECT count(*), max(m) FROM (SELECT a % 50000, max(b) AS m, sum(c) FROM bench_mixed GROUP BY 1) AS g', :repetitions);
+-- min and max of numeric (an expression's decimals and a column's numeric
+-- values), sum of smallint, with 100 groups.
+SELECT pg_temp.measure_pair('g_group_numeric', 'SELECT count(*), max(m) FROM (SELECT d % 100, max(a::numeric) AS m, min(a::numeric) FROM bench_mixed GROUP BY 1) AS g', :repetitions);
+SELECT pg_temp.measure_pair('g_group_numeric_col', 'SELECT count(*), max(m) FROM (SELECT w, max(n) AS m, min(n) FROM bench_tfact GROUP BY 1) AS g', :repetitions);
+SELECT pg_temp.measure_pair('g_group_int2', 'SELECT count(*), max(s) FROM (SELECT d % 100, sum((a % 30000)::int2) AS s FROM bench_mixed GROUP BY 1) AS g', :repetitions);
 
 \copy timings TO 'timings.csv' CSV HEADER
 
@@ -96,9 +105,9 @@ ORDER BY test, mode DESC;
 \o plans.txt
 SET tessera.enable = on;
 SELECT format('EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE on_%s', name)
-FROM unnest(ARRAY['g_max_text', 'g_sum_int8', 'g_avg_int8', 'g_sum_numeric', 'g_avg_float8', 'g_bit_or', 'g_filter', 'g_three', 'g_group_few', 'g_group_many']) AS name \gexec
+FROM unnest(ARRAY['g_max_text', 'g_sum_int8', 'g_avg_int8', 'g_sum_numeric', 'g_max_numeric', 'g_max_numeric_col', 'g_avg_float8', 'g_bit_or', 'g_filter', 'g_three', 'g_group_few', 'g_group_many', 'g_group_numeric', 'g_group_numeric_col', 'g_group_int2']) AS name \gexec
 SET tessera.enable = off;
 SELECT format('EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE off_%s', name)
-FROM unnest(ARRAY['g_max_text', 'g_sum_int8', 'g_avg_int8', 'g_sum_numeric', 'g_avg_float8', 'g_bit_or', 'g_filter', 'g_three', 'g_group_few', 'g_group_many']) AS name \gexec
+FROM unnest(ARRAY['g_max_text', 'g_sum_int8', 'g_avg_int8', 'g_sum_numeric', 'g_max_numeric', 'g_max_numeric_col', 'g_avg_float8', 'g_bit_or', 'g_filter', 'g_three', 'g_group_few', 'g_group_many', 'g_group_numeric', 'g_group_numeric_col', 'g_group_int2']) AS name \gexec
 \o
 DEALLOCATE ALL;

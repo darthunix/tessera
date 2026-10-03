@@ -157,11 +157,15 @@ query down, and where it can, does it speed one up.
   on the date with the 1826 days of `bench_days`, `DISTINCT` of the
   timestamp and a sort by the date skipped with `OFFSET`. A ratio below
   one is the win.
-- **anyagg** (`anyagg.sql`): aggregates without `GROUP BY` that `TessAgg`
-  computes through the core's transition and final functions over the
-  batches: `max` of text, `sum` and `avg` of int8, `sum` of numeric, `avg`
-  of float8, `bit_or` over 2 M rows, `max` of text over a filter and three
-  aggregates together. A ratio below one is the win.
+- **anyagg** (`anyagg.sql`): aggregates that `TessAgg` computes through
+  the core's transition and final functions over the batches, or folds
+  itself: without `GROUP BY`, `max` of text, `sum` and `avg` of int8,
+  `sum` and `max` of numeric (`max` of an expression's decimals and of a
+  numeric column of 2 M rows), `avg` of float8, `bit_or` over 2 M rows,
+  `max` of text over a filter and three aggregates together; with it, 100
+  and 50 000 groups of text extremes and int8 sums, and 100 groups of
+  numeric extremes (both kinds) and of `sum` of smallint. A ratio below
+  one is the win.
 - **anykey** (`anykey.sql`): groupings, `DISTINCT` and `UNION` keyed by
   text and numeric over `bench_mixed`: a text expression of 99 values, a
   text column of 450 000, with aggregates, numeric of 1000 values, and
