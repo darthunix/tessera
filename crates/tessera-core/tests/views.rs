@@ -167,6 +167,10 @@ fn byte_words_preserve_bit_order_and_padding_at_every_byte_alignment() {
             }
             assert_eq!(mask.word(nrows.div_ceil(64)), None);
             assert_eq!(mask.word(usize::MAX), None);
+            // word_at, the loops' accessor, gives the same words.
+            for index in 0..nrows.div_ceil(64) {
+                assert_eq!(Some(mask.word_at(index)), mask.word(index));
+            }
         }
     }
 }

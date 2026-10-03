@@ -104,6 +104,11 @@ impl<'a> RowMaskView<'a> {
     /// word count: a loop over the words of this mask. An index past them
     /// panics as an index past a slice does.
     ///
+    /// It has no range check of its own on purpose. A loop that writes its
+    /// results through `&mut` cannot keep the row count in a register, and a
+    /// check reloads it every word: 4-9 instructions a word in the
+    /// arithmetic and hash kernels, by PMU.
+    ///
     /// The last word's padding is always zero, independent of backing format.
     #[inline]
     pub fn word_at(&self, word_index: usize) -> u64 {
