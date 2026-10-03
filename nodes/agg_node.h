@@ -96,7 +96,7 @@ typedef struct GenericAgg
 	uint8	   *decimal_scales;
 	uint64	   *decimal_bits;
 	uint64	   *decimal_pending;
-	/* The rows the kernels' sum of a batch left to the node. */
+	/* The rows the kernels' sum or extreme of a batch left to the node. */
 	uint64	   *decimal_rest;
 	int			decimal_capacity;
 	TessStatus	decimal_status;

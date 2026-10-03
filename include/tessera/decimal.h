@@ -158,6 +158,34 @@ extern TessStatusCode tess_decimal_sum(TessTableSumInput kind,
 									   TessRowMask *rest,
 									   TessStatus *status);
 
+/* The extreme of min or max of numeric so far, a decimal when valid. */
+typedef struct TessDecimalExtreme
+{
+	int64		value;
+	int			scale;
+	bool		valid;
+} TessDecimalExtreme;
+
+/*
+ * max (or min, max false) of the selected rows' decimals in a numeric
+ * column, as numeric_larger and numeric_smaller keep it: a later row of
+ * an equal value takes an earlier one's place, so the batch's extreme
+ * takes the place of *extreme, the decimal extreme of the rows before,
+ * when valid, if it equals it. *row gets the last row that holds the
+ * batch's extreme, whose decimal goes to *extreme, or -1 when no decimal
+ * beats *extreme (or none is selected). A row neither NULL nor a decimal
+ * is set in rest, whose other bits are cleared, for the caller to compare
+ * by the core's means, *row among them: such a value may equal a decimal,
+ * and then the later of the two rows wins.
+ */
+extern TessStatusCode tess_decimal_extreme(const TessDatumColumn *column,
+										   const TessRowMask *rows,
+										   bool max,
+										   TessDecimalExtreme *extreme,
+										   int *row,
+										   TessRowMask *rest,
+										   TessStatus *status);
+
 /*
  * Replace each selected row's decimal in values (an int64 at its scale in
  * scales, or at scale for every row when scales is NULL) by the pointer to

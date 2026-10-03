@@ -37,9 +37,9 @@ pub use cast::{tess_int4_to_int8, tess_int8_to_int4};
 pub use column::DatumColumn;
 pub use count::tess_count;
 pub use decimal::{
-    DecimalArg, DecimalSum, tess_decimal_compute, tess_decimal_filter, tess_decimal_read,
-    tess_decimal_read_datum, tess_decimal_sum, tess_decimal_to_int4, tess_decimal_to_int8,
-    tess_decimal_write, tess_decimal_write_datum,
+    DecimalArg, DecimalExtreme, DecimalSum, tess_decimal_compute, tess_decimal_extreme,
+    tess_decimal_filter, tess_decimal_read, tess_decimal_read_datum, tess_decimal_sum,
+    tess_decimal_to_int4, tess_decimal_to_int8, tess_decimal_write, tess_decimal_write_datum,
 };
 pub use int32::{
     tess_int4_arith_columns, tess_int4_arith_scalar, tess_int4_arith_scalar_left,

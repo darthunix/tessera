@@ -102,6 +102,7 @@
 	X(spill_partitions) \
 	X(spill_chunk_len) \
 	X(table_bloom_words_within) \
-	X(sort_run_words)
+	X(sort_run_words) \
+	X(decimal_extreme)
 
 #endif							/* TESSERA_KERNEL_OPS_LIST_H */
