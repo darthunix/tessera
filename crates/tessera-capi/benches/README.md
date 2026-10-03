@@ -258,6 +258,12 @@ PG_CONFIG=/path/to/bin/pg_config \
 cargo run --release --locked -p tessera-bench -- --base REF --disasm --module nodes
 ```
 
+A changed function whose instructions are the same but for their
+immediates is marked `(immediates only)`: a field that moved within a
+struct changes every offset after it, and the work is the same. A new
+field goes at the end of a struct, so that the others keep their offsets
+and the comparison shows what really changed.
+
 `--module` is `nodes` (`tessera_nodes`), `kernels` (`tessera_kernels`, the
 Rust kernels linked in, built with one codegen unit as above) or `bridge`
 (`tessera`). Both snapshots are built by the module's own make against the
