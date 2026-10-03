@@ -1,3 +1,4 @@
+use crate::bits::ones;
 use std::iter::FusedIterator;
 
 use anyhow::{Result, ensure};
@@ -162,11 +163,9 @@ where
 
     #[inline]
     fn next(&mut self) -> Option<Self::Item> {
-        if self.remaining == 0 {
-            return None;
-        }
-        let row = self.base + self.remaining.trailing_zeros() as usize;
-        self.remaining &= self.remaining - 1;
+        let mut walk = ones(self.remaining);
+        let row = self.base + walk.next()?;
+        self.remaining = walk.rest();
         Some((row, (self.read)(row)))
     }
 
@@ -186,6 +185,9 @@ where
         if remaining == u64::MAX {
             acc = fold_full_word(base, &mut read, acc, &mut fold);
         } else {
+            // The walk of `ones` written out: through the iterator, the outer
+            // loop of an aggregate over a dense column took 44 instructions
+            // for 29. `.cargo/mutants.toml` leaves its step out, as `ones`'.
             while remaining != 0 {
                 let row = base + remaining.trailing_zeros() as usize;
                 remaining &= remaining - 1;
