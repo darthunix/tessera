@@ -31,6 +31,7 @@
 #include "postgres.h"
 
 #include "tessera/kernels.h"
+#include "tessera/table.h"
 
 /* The most digits of a decimal. */
 #define TESS_DECIMAL_DIGITS 18
@@ -142,13 +143,16 @@ typedef struct TessDecimalSum
 } TessDecimalSum;
 
 /*
- * Add the selected rows' decimals to *sum, NULL rows skipped: a row that
- * is not a decimal, or whose addition (or the sum's rescaling to its
- * scale) would reach 10^36, is set in rest, whose other bits are cleared,
- * for the caller to add by the core's means. *sum is written on success
- * only; a sum past its bound or of a scale past 18 is an invalid argument.
+ * Add the selected rows' values to *sum as decimals, NULL rows skipped: a
+ * column of kind TESS_TABLE_SUM_OF_NUMERIC, _INT4 (int2 too) or _INT8,
+ * an integer a decimal at scale 0. A row that is not a decimal, or whose
+ * addition (or the sum's rescaling to its scale) would reach 10^36, is set
+ * in rest, whose other bits are cleared, for the caller to add by the
+ * core's means. *sum is written on success only; a sum past its bound or
+ * of a scale past 18, or another kind, is an invalid argument.
  */
-extern TessStatusCode tess_decimal_sum(const TessDatumColumn *column,
+extern TessStatusCode tess_decimal_sum(TessTableSumInput kind,
+									   const TessDatumColumn *column,
 									   const TessRowMask *rows,
 									   TessDecimalSum *sum,
 									   TessRowMask *rest,

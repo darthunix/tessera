@@ -122,17 +122,18 @@ fast_kind(const Aggref *agg, GenericAgg *generic, bool own_states)
 				agg->aggfnoid == F_AVG_NUMERIC ? FAST_AVG :
 				agg->aggfnoid == F_MIN_NUMERIC ? FAST_MIN : FAST_MAX;
 		case F_SUM_INT8:
-			generic->fast_wide = true;
-			return FAST_SUM;
 		case F_AVG_INT8:
-			generic->fast_wide = true;
-			return FAST_AVG;
 		case F_SUM_INT2:
-			generic->fast_int8_result = true;
-			return FAST_SUM;
 		case F_AVG_INT4:
 		case F_AVG_INT2:
-			return FAST_AVG;
+			/* A batch's integers are the kernels' to add: without them, the core's functions. */
+			generic->kernels = tess_runtime_kernels();
+			if (generic->kernels == NULL)
+				return FAST_NONE;
+			generic->fast_wide = agg->aggfnoid == F_SUM_INT8 || agg->aggfnoid == F_AVG_INT8;
+			generic->fast_int8_result = agg->aggfnoid == F_SUM_INT2;
+			return agg->aggfnoid == F_SUM_INT8 || agg->aggfnoid == F_SUM_INT2 ? FAST_SUM :
+				FAST_AVG;
 		default:
 			break;
 	}
@@ -448,11 +449,12 @@ fast_read(GenericAgg *generic, const TessRowMask *rows)
 }
 
 /*
- * sum and avg of a numeric argument without groups: a batch's decimals
- * added to the state by the kernels in one pass, as fast_add adds them
- * (the largest scale, below 10^36); the rows they leave (NaN, longer
- * values, a sum at its bound) are returned for the row-by-row path. The
- * state is made when the batch has a decimal.
+ * sum and avg of a number without groups: a batch's values added to the
+ * state by the kernels in one pass, numeric's decimals and integers as
+ * decimals at scale 0, as fast_add adds them (the largest scale, below
+ * 10^36); the rows they leave (NaN, longer values, a sum at its bound)
+ * are returned for the row-by-row path. The state is made when the batch
+ * has a value the kernels took.
  */
 static TessRowMask
 fast_sum(GenericAgg *generic, const TessRowMask *rows, MemoryContext states)
@@ -472,8 +474,8 @@ fast_sum(GenericAgg *generic, const TessRowMask *rows, MemoryContext states)
 		sum.scale = fast->scale;
 		sum.count = fast->count;
 	}
-	if (generic->kernels->decimal_sum(&generic->columns[0], rows, &sum, &rest,
-									  &generic->decimal_status) != TESS_OK)
+	if (generic->kernels->decimal_sum(generic->sum_input, &generic->columns[0], rows, &sum,
+									  &rest, &generic->decimal_status) != TESS_OK)
 		tess_status_report(&generic->decimal_status);
 	if (fast == NULL && sum.count > 0)
 	{
@@ -1077,14 +1079,15 @@ agg_generic_accumulate(TessAggState *state, GenericAgg *generic, const TessRowMa
 #ifdef HAVE_INT128
 	TessRowMask rest;
 
+	/* Without groups, sum and avg of a number leave the kernels a few rows at most. */
+	if ((generic->fast == FAST_SUM || generic->fast == FAST_AVG) &&
+		!OidIsValid(generic->fast_float))
+	{
+		rest = fast_sum(generic, rows, states);
+		rows = &rest;
+	}
 	if (generic->fast != FAST_NONE && generic->fast_numeric)
 	{
-		/* Without groups, sum and avg leave the kernels a few rows at most. */
-		if (generic->fast == FAST_SUM || generic->fast == FAST_AVG)
-		{
-			rest = fast_sum(generic, rows, states);
-			rows = &rest;
-		}
 		fast_read(generic, rows);
 		if ((generic->fast == FAST_MIN || generic->fast == FAST_MAX) &&
 			fast_extreme_batch(generic, rows, states))

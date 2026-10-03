@@ -1443,9 +1443,9 @@ pub unsafe extern "C" fn tess_table_accumulate(
 }
 
 /// `TessTableSumInput`: the values `tess_table_accumulate_sums` reads.
-const SUM_NUMERIC: c_uint = 0;
-const SUM_INT4: c_uint = 1;
-const SUM_INT8: c_uint = 2;
+pub(super) const SUM_NUMERIC: c_uint = 0;
+pub(super) const SUM_INT4: c_uint = 1;
+pub(super) const SUM_INT8: c_uint = 2;
 const SUM_STATE: c_uint = 3;
 const SUM_PAIR: c_uint = 4;
 
