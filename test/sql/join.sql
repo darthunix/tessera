@@ -558,6 +558,16 @@ SELECT join_same($$SELECT count(*), count(jsp.s), count(jskew.w), sum(jskew.w) F
 SELECT join_explain($$SELECT count(*), count(jsp.s), sum(length(w.t)) FROM jsp RIGHT JOIN jwide() AS w ON jsp.k = w.k$$);
 SELECT join_same($$SELECT count(*), count(jsp.s), sum(length(w.t)) FROM jsp RIGHT JOIN jwide() AS w ON jsp.k = w.k$$);
 SELECT join_same($$SELECT count(*), count(jsp.s), count(w.t), sum(length(w.t)) FROM jsp FULL JOIN jwide() AS w ON jsp.k = w.k$$);
+-- At 64kB: more partitions and levels, chunks of a few records, each with
+-- its own marks.
+SET work_mem = '64kB';
+SELECT join_explain($$SELECT count(*), count(jsp.s), sum(length(jsb.t)) FROM jsp RIGHT JOIN jsb ON jsp.k = jsb.k$$);
+SELECT join_same($$SELECT count(*), count(jsp.s), sum(length(jsb.t)), sum(jsb.n) FROM jsp RIGHT JOIN jsb ON jsp.k = jsb.k$$);
+SELECT join_same($$SELECT count(*), count(jsp.s), count(jsb.t), sum(jsb.n) FROM jsp FULL JOIN jsb ON jsp.k = jsb.k$$);
+SELECT join_same($$SELECT jsp.s, jsb.t FROM jsp FULL JOIN jsb ON jsp.k = jsb.k WHERE jsb.n % 100 = 3 OR jsp.s LIKE '%77'$$);
+SELECT join_same($$SELECT count(*), count(jsp.s), count(jskew.w), sum(jskew.w) FROM jsp FULL JOIN jskew() AS jskew ON jsp.k = jskew.k$$);
+SELECT join_same($$SELECT count(*), count(jsp.s), count(w.t), sum(length(w.t)) FROM jsp FULL JOIN jwide() AS w ON jsp.k = w.k$$);
+SELECT join_same($$SELECT jsp.s FROM jsp WHERE NOT EXISTS (SELECT 1 FROM jsb WHERE jsb.k = jsp.k)$$);
 RESET work_mem;
 
 -- RIGHT and FULL: the inner side's records that find a pair are marked,
