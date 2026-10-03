@@ -688,6 +688,63 @@ fn extreme_states_refuse_unknown_words() {
     assert!(ExtremeState::from_words(10_u64.pow(18), 1 << 8).is_err());
 }
 
+#[test]
+fn a_sum_of_terms_takes_the_same_in_bulk_and_term_by_term() {
+    // At most 99 rows: their decimals at scale 18 add up inside an i128.
+    let rows = (0..100_usize).prop_flat_map(|nrows| {
+        (
+            proptest::collection::vec(arg(), nrows).prop_map(Column),
+            flags(nrows),
+        )
+    });
+    property(rows, |(column, selected)| -> Result<()> {
+        let nrows = column.0.len();
+        let at_18 = |value: i128, scale: u32| value * 10_i128.pow(MAX_READ_SCALE - scale);
+        let all: i128 = (0..nrows)
+            .filter(|&row| selected[row])
+            .filter_map(|row| match column.0[row] {
+                Arg::Decimal(decimal) => Some(at_18(decimal.value().into(), decimal.scale())),
+                _ => None,
+            })
+            .sum();
+        for bulk in [true, false] {
+            let mut total = Sum::default();
+            let mut rest = words(nrows, |_| true);
+            let rows = selection(&selected);
+            decimal::sum_terms(
+                &ArgTerms {
+                    column: &column,
+                    bulk,
+                },
+                RowMaskView::try_new(nrows, &rows).unwrap(),
+                &mut total,
+                &mut RowMask::try_new(nrows, &mut rest).unwrap(),
+            )?;
+            // The rows left and the sum taken make up every decimal: what
+            // the kernels refuse at the bound, the caller adds.
+            let mut left = 0_i128;
+            let mut taken = 0_u64;
+            for (row, &arg) in column.0.iter().enumerate() {
+                let rested = bit(&rest, row);
+                match arg {
+                    _ if !selected[row] => ensure!(!rested, "row {row} not selected"),
+                    Arg::Null => ensure!(!rested, "a NULL row {row} left"),
+                    Arg::Other => ensure!(rested, "row {row} not a decimal taken"),
+                    Arg::Decimal(decimal) if rested => {
+                        left += at_18(decimal.value().into(), decimal.scale());
+                    }
+                    Arg::Decimal(_) => taken += 1,
+                }
+            }
+            ensure!(
+                at_18(total.value, total.scale) + left == all && total.count == taken,
+                "bulk {bulk}: {total:?} and {left} left for {all}"
+            );
+        }
+        Ok(())
+    });
+}
+
 /// A sum: a value leaning to the bound's edges at a scale the batch reads,
 /// and a count.
 fn sum() -> impl Strategy<Value = Sum> {

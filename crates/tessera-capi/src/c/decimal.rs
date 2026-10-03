@@ -1316,6 +1316,36 @@ mod tests {
     }
 
     #[test]
+    fn an_int8_partial_is_a_state_of_one_value() {
+        use tessera_kernels::decimal::{Partial, Partials, Sum, SumState};
+
+        let values = [42_i64 as u64, -7_i64 as u64, 0];
+        let isnull = [false, false, true];
+        let column = super::DatumColumn {
+            values: values.as_ptr(),
+            isnull: isnull.as_ptr(),
+            nrows: 3,
+            ..super::DatumColumn::EMPTY
+        };
+        // SAFETY: the arrays hold the column's three rows.
+        let partials =
+            unsafe { super::PartialColumn::new(super::SumInput::Int8, &column, 3) }.unwrap();
+        let state = |value| {
+            Partial::State(SumState {
+                sum: Sum {
+                    value,
+                    scale: 0,
+                    count: 1,
+                },
+                ..SumState::default()
+            })
+        };
+        assert_eq!(partials.partial(0).unwrap(), state(42));
+        assert_eq!(partials.partial(1).unwrap(), state(-7));
+        assert_eq!(partials.partial(2).unwrap(), Partial::Null);
+    }
+
+    #[test]
     fn varlena_headers_are_read_or_refused() {
         // A 1-byte header: size 3 with the header.
         let short = [0x07_u8, 0xAA, 0xBB];
