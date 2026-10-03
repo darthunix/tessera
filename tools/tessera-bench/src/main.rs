@@ -6,13 +6,11 @@
 mod cases;
 mod disasm;
 mod report;
-mod snapshot;
 
 use anyhow::{Context, Result, ensure};
 use clap::Parser;
 use serde::Serialize;
 use serde_json::{Value, json};
-use snapshot::{Snapshot, text};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs::{self, File, OpenOptions},
@@ -22,6 +20,7 @@ use std::{
     process::{Command, ExitCode, Stdio},
     time::Instant,
 };
+use tessera_pgtool::snapshot::{self, Snapshot, text};
 
 /// The benchmarks of tessera-capi (its `[[bench]]` targets), in the order a full run takes them.
 const BENCHES: [&str; 13] = [

@@ -1108,6 +1108,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "tempfile",
+ "tessera-pgtool",
 ]
 
 [[package]]
@@ -1162,6 +1163,9 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "postgres",
+ "serde",
+ "sha2 0.10.9",
+ "tempfile",
 ]
 
 [[package]]

@@ -2,7 +2,9 @@
 //! Tessera modules preloaded: what the tools that run SQL against Tessera
 //! share (tessera-tpch, tessera-crosscheck). The build is the one
 //! `PG_CONFIG` names; the cluster is a data directory under the tool's run
-//! directory, created, configured, started and stopped by the tool.
+//! directory, created, configured, started and stopped by the tool. The
+//! tools that compare two revisions (tessera-bench, tessera-ab) share the
+//! snapshots of their sources ([`snapshot`]).
 
 use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
@@ -11,6 +13,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result, bail};
+
+pub mod snapshot;
 
 /// A PostgreSQL build, as its `pg_config` describes it.
 #[derive(Debug, Clone)]
@@ -144,6 +148,13 @@ impl Pg {
 /// build of `pg`, as the README asks before any timing: a debug build left
 /// installed by a test run would be measured otherwise.
 pub fn install_tessera(root: &Path, pg: &Pg, log: &Path) -> Result<()> {
+    install_tessera_with(root, pg, log, &[])
+}
+
+/// [`install_tessera`] with variables of make for both its runs, such as
+/// `COPT=-falign-functions=64`: a comparison of two revisions builds both
+/// with the same ones.
+pub fn install_tessera_with(root: &Path, pg: &Pg, log: &Path, variables: &[String]) -> Result<()> {
     let jobs = std::thread::available_parallelism().map_or(4, |n| n.get());
     let pg_config = format!("PG_CONFIG={}", pg.pg_config.display());
     let mut file = File::create(log)?;
@@ -158,7 +169,8 @@ pub fn install_tessera(root: &Path, pg: &Pg, log: &Path) -> Result<()> {
             .arg(root)
             .arg(format!("-j{jobs}"))
             .arg(&pg_config)
-            .arg("RUST_PROFILE=release");
+            .arg("RUST_PROFILE=release")
+            .args(variables);
         make.args(target);
         writeln!(file, "$ {make:?}")?;
         let status = make
