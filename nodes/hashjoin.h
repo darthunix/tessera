@@ -363,6 +363,8 @@ typedef struct SpillSide
 	 * them: a partition's are kept once joined, and deleted with the set.
 	 */
 	bool		shared_files;
+	/* The bytes of a record of the side (tess_table_record_size). */
+	Size		record_size;
 } SpillSide;
 
 /*

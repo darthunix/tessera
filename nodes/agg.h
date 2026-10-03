@@ -269,6 +269,8 @@ typedef struct TessAggState
 	 */
 	uint64		emit_rows;
 	bool		partial_spill;
+	/* GROUP BY: the bytes of a group's record (tess_table_record_size). */
+	Size		record_size;
 } TessAggState;
 
 /* Raise the error a kernel or table call stored, if it failed. */

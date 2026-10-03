@@ -181,14 +181,25 @@ pub fn record_bytes(config: &TableConfig<'_>) -> Result<usize> {
     Ok(check_config(config)? as usize)
 }
 
+/// Bytes of one record of a table of `nkeys` keys of any kinds and a
+/// payload of `payload_size` bytes: [`record_bytes`] of every
+/// configuration of that many keys.
+pub fn record_bytes_of(nkeys: usize, payload_size: usize) -> Result<usize> {
+    Ok(checked_record_size(nkeys, payload_size)? as usize)
+}
+
 /// The record size of a configuration, after checking it.
 fn check_config(config: &TableConfig<'_>) -> Result<u32> {
-    let nkeys = config.keys.len();
+    checked_record_size(config.keys.len(), config.payload_size)
+}
+
+/// The record size of `nkeys` keys and a payload, after checking the count.
+fn checked_record_size(nkeys: usize, payload_size: usize) -> Result<u32> {
     ensure!(
         (1..=MAX_KEYS).contains(&nkeys),
         "a table has 1 to {MAX_KEYS} keys, not {nkeys}"
     );
-    record_size(nkeys, config.payload_size)
+    record_size(nkeys, payload_size)
 }
 
 /// Bytes of a record: its header, the key slots and the payload, rounded

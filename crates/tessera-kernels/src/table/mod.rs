@@ -107,7 +107,7 @@ use tessera_core::{ColumnReader, RowMask, RowMaskView};
 pub use exclusive::{Combine, CombineStop, Cursor, Fold, MAX_SUMS, Slot, SumSlot};
 pub use header::{
     CHUNK_HEADER, FORMAT_VERSION, HEADER_SIZE, KeyKind, MAX_CHUNK_LEN, MAX_CHUNKS, MAX_KEYS,
-    TableConfig, UNIT_BITS, VERSION_OFFSET, index_size, record_bytes,
+    TableConfig, UNIT_BITS, VERSION_OFFSET, index_size, record_bytes, record_bytes_of,
 };
 use header::{Header, Layout, NRECORDS};
 pub use keys::{KeySource, KeyValue, normalize_word};

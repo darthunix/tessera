@@ -106,13 +106,6 @@ agg_chunk_used(const void *base)
 	return (Size) *(const uint64 *) base;
 }
 
-/* The bytes of a record: header, key slots, flags and the states. */
-static Size
-agg_record_size(TessAggState *state)
-{
-	return 16 + 8 * state->nkeys + state->payload_size;
-}
-
 static void
 part_push(AggSpill *spill, AggPart *part, void *base)
 {
@@ -161,7 +154,7 @@ agg_write_chunk(TessAggState *state, AggSpill *spill, int partition, void *base)
 										  spill->next_number++, base, used, NULL);
 	spill->parts[partition].disk_bytes += used;
 	spill->parts[partition].disk_records +=
-		(used - TESS_TABLE_CHUNK_HEADER) / agg_record_size(state);
+		(used - TESS_TABLE_CHUNK_HEADER) / state->record_size;
 	state->spilled++;
 }
 
@@ -175,7 +168,7 @@ agg_spill_create(TessAggState *state, AggSpill *parent, double expected, uint32 
 {
 	MemoryContext context = state->css.ss.ps.state->es_query_cxt;
 	Size		limit = get_hash_memory_limit();
-	Size		record = agg_record_size(state);
+	Size		record = state->record_size;
 	TessSpillConfig config = TESS_STRUCT_INITIALIZER(TessSpillConfig);
 	TessTableRef layout = {0};
 	AggSpill   *spill = MemoryContextAllocZero(context, sizeof(AggSpill));
@@ -896,7 +889,7 @@ agg_advance(TessAggState *state)
 		 * keeps. A group written many times merges into one record, so the
 		 * groups decide, not the file.
 		 */
-		size = part_groups(part) * (agg_record_size(state) + 2 * sizeof(uint64)) +
+		size = part_groups(part) * (state->record_size + 2 * sizeof(uint64)) +
 			spill->chunk_len;
 		for (AggSpill *level = spill; level != NULL; level = level->parent)
 			for (int partition = 0; partition < level->npartitions; partition++)

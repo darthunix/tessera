@@ -1300,7 +1300,9 @@ send_requests(TessHashJoinState *state)
 		state->payload_words[column] = ++state->npayload;
 	}
 	/* A record: its header, a slot per key and the payload's words. */
-	state->record_size = 16 + sizeof(uint64) * (state->keys.nkeys + 1 + state->npayload);
+	check(state, state->kernels->table_record_size(state->keys.nkeys,
+												   sizeof(uint64) * (1 + state->npayload),
+												   &state->record_size, &state->status));
 	/* The keys before any other column, then the rows that survive them. */
 	outer_request.filter_columns = outer_key;
 	outer_request.projection_columns = outer_columns;

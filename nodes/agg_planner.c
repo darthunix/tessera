@@ -267,7 +267,7 @@ generic_fits(PlannerInfo *root, RelOptInfo *output_rel, int nkeys, List *tlist)
 			groups = Max(groups, path->rows);
 	if (groups <= 0)
 		return false;
-	bytes = 16.0 + 8.0 * nkeys + 8.0;
+	bytes = (double) tess_table_record_bytes(nkeys, sizeof(uint64));
 	foreach_node(TargetEntry, entry, tlist)
 	{
 		Aggref	   *agg = (Aggref *) entry->expr;
@@ -611,7 +611,7 @@ group_cost(PlannerInfo *root, const Path *child, double groups, int nkeys,
 	AggClauseCosts costs;
 	double		rows = child->rows;
 	double		width = 0;
-	double		entry = 16.0 + 8.0 * nkeys + 8.0;
+	double		entry = (double) tess_table_record_bytes(nkeys, sizeof(uint64));
 	double		limit = (double) get_hash_memory_limit() / 8 * 7;
 	int			naggs = 0;
 	int			ncolumns = 0;
@@ -1015,7 +1015,7 @@ distinct_fits(PlannerInfo *root, RelOptInfo *input_rel, List *keys, List *tlist)
 		pairs = estimate_num_groups(root,
 									lappend(list_copy(keys), aggregate_argument(agg)),
 									input_rel->rows, NULL, NULL);
-		bytes += pairs * (16.0 + 8.0 * (list_length(keys) + 1));
+		bytes += pairs * (double) tess_table_record_bytes(list_length(keys) + 1, 0);
 		/* A dictionary of the values a word does not hold: an entry and a copy each. */
 		{
 			Node	   *argument = aggregate_argument(agg);

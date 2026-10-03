@@ -1073,7 +1073,7 @@ shared_probe_start(TessHashJoinState *state, uint64 records)
 
 	Assert(state->spill != NULL);
 	spill = state->spill;
-	record = TYPEALIGN(8, 16 + 8 * spill->build.nkeys + spill->build.payload_size);
+	record = spill->build.record_size;
 	tess_spill_finish(spill->build.file);
 	tess_spill_finish(spill->probe.file);
 	tess_spill_finish(spill->resident.file);

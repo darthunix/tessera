@@ -435,6 +435,9 @@ agg_begin(CustomScanState *css, EState *estate, int eflags)
 		state->kernels = tess_runtime_kernels();
 		if (state->kernels == NULL)
 			elog(ERROR, "TessAgg needs the kernels module for GROUP BY");
+		check(state, state->kernels->table_record_size(state->nkeys, state->payload_size,
+													   &state->record_size,
+													   &state->status));
 		state->table_context = AllocSetContextCreate(estate->es_query_cxt,
 													 "TessAgg groups",
 													 ALLOCSET_DEFAULT_SIZES);
