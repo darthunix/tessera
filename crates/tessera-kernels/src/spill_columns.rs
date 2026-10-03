@@ -8,7 +8,7 @@
 //! table refers to a record, by the chunk's number above
 //! [`PLACE_BITS`] bits of its place in the chunk.
 
-use anyhow::{Result, ensure};
+use anyhow::{Result, bail, ensure};
 use tessera_core::{RowMask, ones};
 use tessera_spill::columns;
 
@@ -129,9 +129,339 @@ pub fn append_partitioned<C: ColumnChunks + ?Sized>(
     Ok(appended)
 }
 
+/// A row's value of a column, as a chunk of columns stores it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Value<'a> {
+    /// SQL NULL: the word 0 and the column's NULL bit.
+    Null,
+    /// A by-value Datum: the word itself.
+    Word(u64),
+    /// A by-reference value's bytes, copied into the values: the word is
+    /// their offset there.
+    Bytes(&'a [u8]),
+}
+
+/// The values of a batch's rows, by column, that [`append`] writes.
+pub trait RowValues {
+    /// The columns, the chunk's first words.
+    fn ncolumns(&self) -> usize;
+
+    /// Whether every column is by value, so that no row has bytes to copy.
+    fn by_value(&self) -> bool;
+
+    /// Row `row`'s value of column `column`.
+    ///
+    /// # Errors
+    ///
+    /// A value whose bytes cannot be told.
+    fn value(&self, column: usize, row: usize) -> Result<Value<'_>>;
+}
+
+/// What [`append`] did: the rows it appended, and the bytes of values the
+/// next row takes, 0 once every row went.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Appended {
+    pub rows: usize,
+    pub need: usize,
+}
+
+/// Append the rows of `rows`, in their order, to the chunk of columns
+/// `chunk` after its rows: column `c` of a row is the chunk's word `c`, the
+/// words past the columns the caller's (a sort's keys). A by-reference
+/// value is copied into `values` at `*used`, its offset aligned to 8, and
+/// the word is that offset. It stops when the chunk is full or the next
+/// row's values would pass the end of `values`; the rows appended leave
+/// `rows`.
+///
+/// # Errors
+///
+/// A chunk of fewer words than the columns, `*used` past `values` or not
+/// aligned to 8, or a value [`RowValues::value`] cannot tell, before any
+/// row of the word it is in is written.
+pub fn append(
+    chunk: &mut [u8],
+    source: &impl RowValues,
+    rows: &mut RowMask<'_>,
+    values: &mut [u8],
+    used: &mut usize,
+) -> Result<Appended> {
+    let shape = columns::shape(chunk)?;
+    let ncolumns = source.ncolumns();
+    ensure!(
+        ncolumns <= shape.words,
+        "a chunk of {} words takes no row of {ncolumns} columns",
+        shape.words
+    );
+    ensure!(
+        *used <= values.len() && used.is_multiple_of(8),
+        "values used to byte {} of {}",
+        *used,
+        values.len()
+    );
+    let null_lanes = columns::null_lanes(shape.words);
+    let nrows = rows.as_view().nrows();
+    let mut place = shape.rows;
+    let mut appended = 0;
+    let mut need = 0;
+    if source.by_value() {
+        // Column by column, a lane at a time: no row has bytes, so the
+        // rows that go are the first that fit.
+        let room = shape.capacity - shape.rows;
+        let mut taken = 0;
+        for index in 0..nrows.div_ceil(64) {
+            if taken == room {
+                break;
+            }
+            let selected = rows.as_view().word_at(index);
+            let mut done = 0_u64;
+            for bit in ones(selected) {
+                if taken == room {
+                    break;
+                }
+                let at = place + taken;
+                for lane in 0..null_lanes {
+                    put(chunk, shape.lane_at(lane) + 8 * at, 0);
+                }
+                taken += 1;
+                done |= 1 << bit;
+            }
+            for column in 0..ncolumns {
+                let lane = shape.lane_at(shape.word_lane(column));
+                let nulls = shape.lane_at(column / 64);
+                for (at, bit) in (place + appended..).zip(ones(done)) {
+                    let row = index * 64 + bit;
+                    let word = match source.value(column, row)? {
+                        Value::Null => {
+                            let mut null = get(chunk, nulls + 8 * at);
+                            null |= 1 << (column % 64);
+                            put(chunk, nulls + 8 * at, null);
+                            0
+                        }
+                        Value::Word(word) => word,
+                        Value::Bytes(_) => bail!("a by-value column {column} gave bytes"),
+                    };
+                    put(chunk, lane + 8 * at, word);
+                }
+            }
+            appended += done.count_ones() as usize;
+            rows.intersect_word(index, !done)?;
+        }
+        columns::set_rows(chunk, place + appended);
+        return Ok(Appended {
+            rows: appended,
+            need: 0,
+        });
+    }
+    'words: for index in 0..nrows.div_ceil(64) {
+        let selected = rows.as_view().word_at(index);
+        let mut done = 0_u64;
+        for bit in ones(selected) {
+            let row = index * 64 + bit;
+            let mut bytes = 0;
+            for column in 0..ncolumns {
+                if let Value::Bytes(value) = source.value(column, row)? {
+                    bytes += value.len().next_multiple_of(8);
+                }
+            }
+            if place == shape.capacity || *used + bytes > values.len() {
+                need = bytes;
+                rows.intersect_word(index, !done)?;
+                break 'words;
+            }
+            for lane in 0..null_lanes {
+                put(chunk, shape.lane_at(lane) + 8 * place, 0);
+            }
+            for column in 0..ncolumns {
+                let word = match source.value(column, row)? {
+                    Value::Null => {
+                        let nulls = shape.lane_at(column / 64) + 8 * place;
+                        let mut null = get(chunk, nulls);
+                        null |= 1 << (column % 64);
+                        put(chunk, nulls, null);
+                        0
+                    }
+                    Value::Word(word) => word,
+                    Value::Bytes(value) => {
+                        let at = *used;
+                        values[at..at + value.len()].copy_from_slice(value);
+                        *used = at + value.len().next_multiple_of(8);
+                        at as u64
+                    }
+                };
+                put(
+                    chunk,
+                    shape.lane_at(shape.word_lane(column)) + 8 * place,
+                    word,
+                );
+            }
+            place += 1;
+            appended += 1;
+            done |= 1 << bit;
+        }
+        rows.intersect_word(index, !done)?;
+    }
+    columns::set_rows(chunk, place);
+    Ok(Appended {
+        rows: appended,
+        need,
+    })
+}
+
+#[inline]
+fn get(chunk: &[u8], at: usize) -> u64 {
+    let mut word = [0; 8];
+    word.copy_from_slice(&chunk[at..at + 8]);
+    u64::from_ne_bytes(word)
+}
+
+#[inline]
+fn put(chunk: &mut [u8], at: usize, word: u64) {
+    chunk[at..at + 8].copy_from_slice(&word.to_ne_bytes());
+}
+
 #[cfg(test)]
 mod tests {
+    use proptest::prelude::*;
+    use tessera_testing::property;
+
     use super::*;
+
+    /// A test's column of values by row.
+    #[derive(Clone, Debug)]
+    enum Cell {
+        Null,
+        Word(u64),
+        Bytes(Vec<u8>),
+    }
+
+    #[derive(Clone, Debug)]
+    struct Batch {
+        columns: Vec<Vec<Cell>>,
+        by_value: bool,
+    }
+
+    impl RowValues for Batch {
+        fn ncolumns(&self) -> usize {
+            self.columns.len()
+        }
+
+        fn by_value(&self) -> bool {
+            self.by_value
+        }
+
+        fn value(&self, column: usize, row: usize) -> Result<Value<'_>> {
+            Ok(match &self.columns[column][row] {
+                Cell::Null => Value::Null,
+                Cell::Word(word) => Value::Word(*word),
+                Cell::Bytes(bytes) => Value::Bytes(bytes),
+            })
+        }
+    }
+
+    /// A batch of up to 150 rows and up to 70 columns (two lanes of NULL
+    /// bits), by value or with bytes, a selection, a capacity and a budget.
+    fn batches() -> impl Strategy<Value = (Batch, Vec<bool>, usize, usize, usize)> {
+        (1..150_usize, 1..70_usize, any::<bool>()).prop_flat_map(|(nrows, ncolumns, by_value)| {
+            let cell = if by_value {
+                prop_oneof![1 => Just(Cell::Null), 4 => any::<u64>().prop_map(Cell::Word)].boxed()
+            } else {
+                prop_oneof![
+                    1 => Just(Cell::Null),
+                    2 => any::<u64>().prop_map(Cell::Word),
+                    2 => proptest::collection::vec(any::<u8>(), 0..20).prop_map(Cell::Bytes),
+                ]
+                .boxed()
+            };
+            (
+                proptest::collection::vec(proptest::collection::vec(cell, nrows), ncolumns)
+                    .prop_map(move |columns| Batch { columns, by_value }),
+                proptest::collection::vec(any::<bool>(), nrows),
+                1..200_usize,
+                0..3_usize,
+                0..4000_usize,
+            )
+        })
+    }
+
+    #[test]
+    fn rows_go_in_order_until_the_chunk_or_the_values_fill() {
+        property(
+            batches(),
+            |(batch, selected, capacity, extra, budget)| -> Result<()> {
+                let nrows = selected.len();
+                let ncolumns = batch.columns.len();
+                let words = ncolumns + extra;
+                let mut chunk = vec![0_u8; columns::size(capacity, words)];
+                columns::init(&mut chunk, words)?;
+                // Half the cases append after rows already there.
+                let before = if extra % 2 == 1 { capacity / 3 } else { 0 };
+                columns::set_rows(&mut chunk, before);
+                let mut mask = tessera_testing::words(&selected);
+                let mut rows = RowMask::try_new(nrows, &mut mask)?;
+                let mut values = vec![0_u8; budget];
+                let mut used = 0;
+                let got = append(&mut chunk, &batch, &mut rows, &mut values, &mut used)?;
+                // The model: the selected rows in order while the chunk has
+                // room and their bytes fit.
+                let (mut place, mut bytes, mut need) = (before, 0, 0);
+                let mut went = vec![false; nrows];
+                for row in (0..nrows).filter(|&row| selected[row]) {
+                    let take: usize = batch
+                        .columns
+                        .iter()
+                        .map(|column| match &column[row] {
+                            Cell::Bytes(value) => value.len().next_multiple_of(8),
+                            _ => 0,
+                        })
+                        .sum();
+                    if place == capacity || bytes + take > budget {
+                        need = take;
+                        break;
+                    }
+                    for (column, cells) in batch.columns.iter().enumerate() {
+                        let word = lane_word(&chunk, columns::null_lanes(words) + column, place);
+                        let null = lane_word(&chunk, column / 64, place) >> (column % 64) & 1;
+                        match &cells[row] {
+                            Cell::Null => {
+                                ensure!((word, null) == (0, 1), "row {row} column {column}")
+                            }
+                            Cell::Word(value) => {
+                                ensure!((word, null) == (*value, 0), "row {row} column {column}")
+                            }
+                            Cell::Bytes(value) => {
+                                let at = word as usize;
+                                ensure!(
+                                    null == 0
+                                        && at.is_multiple_of(8)
+                                        && values[at..at + value.len()] == value[..],
+                                    "row {row} column {column}"
+                                );
+                            }
+                        }
+                    }
+                    bytes += take;
+                    place += 1;
+                    went[row] = true;
+                }
+                ensure!(
+                    got == Appended {
+                        rows: place - before,
+                        need
+                    },
+                    "{got:?} for {place} rows, {need}"
+                );
+                ensure!(
+                    used == bytes && columns::shape(&chunk)?.rows == place,
+                    "{used} bytes used"
+                );
+                for (row, &went) in went.iter().enumerate() {
+                    let left = rows.as_view().word_at(row / 64) >> (row % 64) & 1 == 1;
+                    ensure!(left == (selected[row] && !went), "row {row} left {left}");
+                }
+                Ok(())
+            },
+        );
+    }
 
     fn lane_word(chunk: &[u8], lane: usize, place: usize) -> u64 {
         let shape = columns::shape(chunk).unwrap();

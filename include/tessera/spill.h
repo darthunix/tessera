@@ -253,6 +253,27 @@ extern TessStatusCode tess_spill_columns_init(void *chunk, Size len, int words,
 											  Size *capacity, TessStatus *status);
 
 /*
+ * Append the rows of rows, in their order, to the chunk of columns of len
+ * bytes at chunk after its rows: column c of a row (ncolumns of columns,
+ * by value when byvals[c], else of typlens[c], -1 a varlena, -2 a C
+ * string) is the chunk's word c, the words past them the caller's. A NULL
+ * value's word is 0 with its NULL bit; a by-value one's its Datum; a
+ * by-reference one's the offset of its bytes, as datumGetSize counts
+ * them, copied into values at *values_used, which moves past them to a
+ * multiple of 8. It stops when the chunk is full or the next row's values
+ * would pass values_len: the rows appended leave rows, *appended gets
+ * their count and *need the bytes of values the next row takes (0 when
+ * every row went), for the caller to make room.
+ */
+extern TessStatusCode tess_spill_columns_append(void *chunk, Size len, int ncolumns,
+												const TessDatumColumn *columns,
+												const bool *byvals, const int16 *typlens,
+												TessRowMask *rows, char *values,
+												Size values_len, Size *values_used,
+												int *appended, Size *need,
+												TessStatus *status);
+
+/*
  * Append the rows of pending to the chunks of their partitions, as
  * tess_table_append_partitioned_columns appends records: the partition of
  * a hash is (hash >> shift) & (npartitions - 1) and appends to chunk

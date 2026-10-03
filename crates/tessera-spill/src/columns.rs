@@ -35,6 +35,7 @@ pub const MAX_ROWS: usize = (1 << 17) - 1;
 pub const MAX_WORDS: usize = 4096;
 
 /// Lanes of NULL bits in a chunk of `words` stored words.
+#[inline]
 pub fn null_lanes(words: usize) -> usize {
     words.div_ceil(64).max(1)
 }
@@ -86,11 +87,13 @@ pub struct Shape {
 impl Shape {
     /// Where lane `lane` starts: the NULL bits' lanes first, then lane
     /// [`Self::word_lane`] of each stored word.
+    #[inline]
     pub fn lane_at(&self, lane: usize) -> usize {
         HEADER + 8 * self.capacity * lane
     }
 
     /// The lane of stored word `word`.
+    #[inline]
     pub fn word_lane(&self, word: usize) -> usize {
         null_lanes(self.words) + word
     }

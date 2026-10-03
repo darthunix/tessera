@@ -2,12 +2,12 @@
 //! headers of spilled blocks ([`tessera_spill`]), which carry a table's
 //! layout fingerprint (`tess_table_fingerprint`).
 
-use std::ffi::c_int;
+use std::ffi::{CStr, c_int};
 use std::mem::MaybeUninit;
 use std::slice;
 
 use anyhow::{Context, Result, bail, ensure};
-use tessera_kernels::spill_columns::{self, ColumnChunks};
+use tessera_kernels::spill_columns::{self, ColumnChunks, RowValues, Value};
 use tessera_kernels::table::{Partitions, PayloadColumns};
 use tessera_spill::{BlockHeader, BlockKind, HEADER_SIZE, columns, plan};
 
@@ -15,6 +15,7 @@ use super::column::DatumColumn;
 use super::mask::Mask;
 use super::status::{Code, Status, guard};
 use super::table::{slots, values};
+use super::varlena::varlena_size;
 
 /// `TessSpillHeader`: what a spilled block holds.
 #[repr(C)]
@@ -446,6 +447,147 @@ pub unsafe extern "C" fn tess_spill_columns_append_partitioned(
                 rows,
             )
             .map(drop)
+        })
+    }
+}
+
+/// A batch's Datum columns as a chunk of columns stores them: a by-value
+/// column's Datum, a by-reference one's bytes as `datumGetSize` counts
+/// them.
+struct DatumRows<'a> {
+    columns: &'a [DatumColumn],
+    nrows: usize,
+    byvals: &'a [bool],
+    typlens: &'a [i16],
+    by_value: bool,
+}
+
+impl RowValues for DatumRows<'_> {
+    fn ncolumns(&self) -> usize {
+        self.columns.len()
+    }
+
+    fn by_value(&self) -> bool {
+        self.by_value
+    }
+
+    // Both passes of an append over a row take it: called, it was a fifth
+    // of a gather's leader (macOS sample of a sort's merge of text).
+    #[inline(always)]
+    fn value(&self, column: usize, row: usize) -> Result<Value<'_>> {
+        let given = &self.columns[column];
+        ensure!(row < self.nrows, "row {row} past the {} rows", self.nrows);
+        // SAFETY: the entry point checked each column's arrays non-null
+        // and of the rows' count, and its caller made them so.
+        let (null, datum) = unsafe { (*given.isnull.add(row), *given.values.add(row)) };
+        if null {
+            return Ok(Value::Null);
+        }
+        if self.byvals[column] {
+            return Ok(Value::Word(datum));
+        }
+        // SAFETY: the entry point's contract: a by-reference column's
+        // non-NULL Datum points to a whole value of its type's length.
+        Ok(Value::Bytes(unsafe {
+            datum_bytes(datum, self.typlens[column])?
+        }))
+    }
+}
+
+/// The bytes of a by-reference Datum, as `datumGetSize` counts them: a
+/// fixed length's, a varlena's whole size (an external pointer's own), a C
+/// string's with its terminator.
+///
+/// # Safety
+///
+/// `datum` must point to a whole value of a type of length `typlen`,
+/// valid for `'a`.
+#[inline]
+unsafe fn datum_bytes<'a>(datum: u64, typlen: i16) -> Result<&'a [u8]> {
+    let pointer = datum as usize as *const u8;
+    ensure!(!pointer.is_null(), "a null by-reference value");
+    // SAFETY: the caller's contract.
+    unsafe {
+        let len = match typlen {
+            len if len > 0 => len as usize,
+            -1 => varlena_size(pointer)?,
+            -2 => CStr::from_ptr(pointer.cast()).to_bytes_with_nul().len(),
+            other => bail!("a type of length {other}"),
+        };
+        Ok(slice::from_raw_parts(pointer, len))
+    }
+}
+
+/// `tess_spill_columns_append`: the selected rows of `ncolumns` Datum
+/// columns appended to the chunk of columns at `chunk`, their
+/// by-reference values copied into `values`
+/// ([`spill_columns::append`]).
+///
+/// # Safety
+///
+/// `chunk` must point to `len` writable bytes of a chunk of columns;
+/// `columns`, `byvals` and `typlens` to `ncolumns` entries each, every
+/// column of `rows`' row count, a non-NULL by-reference Datum pointing to
+/// a whole value of its type's length; `rows` to a valid mask; `values`
+/// to `values_len` writable bytes (null when 0); `values_used`,
+/// `appended` and `need` writable; none of the written memory accessed by
+/// anything else for the call; `status` as for every entry point.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tess_spill_columns_append(
+    chunk: *mut u8,
+    len: usize,
+    ncolumns: c_int,
+    columns_in: *const DatumColumn,
+    byvals: *const bool,
+    typlens: *const i16,
+    rows: *mut Mask,
+    values_out: *mut u8,
+    values_len: usize,
+    values_used: *mut usize,
+    appended: *mut c_int,
+    need: *mut usize,
+    status: *mut Status,
+) -> Code {
+    // SAFETY: the caller's contract.
+    unsafe {
+        guard(status, || {
+            ensure!(!chunk.is_null(), "a null chunk of columns");
+            let chunk = slice::from_raw_parts_mut(chunk, len);
+            let mut rows = rows.as_mut().context("a null row mask")?.mask()?;
+            let nrows = rows.as_view().nrows();
+            let ncolumns = usize::try_from(ncolumns).context("a negative column count")?;
+            let given = values(columns_in, ncolumns, "columns")?;
+            let byvals = values(byvals, ncolumns, "by-value flags")?;
+            let typlens = values(typlens, ncolumns, "type lengths")?;
+            for (index, column) in given.iter().enumerate() {
+                ensure!(
+                    usize::try_from(column.nrows).ok() == Some(nrows)
+                        && (nrows == 0 || (!column.values.is_null() && !column.isnull.is_null())),
+                    "column {index} of {} rows does not hold {nrows}",
+                    column.nrows
+                );
+            }
+            let source = DatumRows {
+                columns: given,
+                nrows,
+                byvals,
+                typlens,
+                by_value: byvals.iter().all(|&byval| byval),
+            };
+            let values_out = if values_len == 0 {
+                &mut [][..]
+            } else {
+                ensure!(!values_out.is_null(), "null values");
+                slice::from_raw_parts_mut(values_out, values_len)
+            };
+            let used = values_used
+                .as_mut()
+                .context("a null count of values used")?;
+            let done = spill_columns::append(chunk, &source, &mut rows, values_out, used)?;
+            *appended.as_mut().context("a null count appended")? =
+                c_int::try_from(done.rows).context("rows past an int")?;
+            *need.as_mut().context("a null count of bytes")? = done.need;
+            Ok(())
         })
     }
 }

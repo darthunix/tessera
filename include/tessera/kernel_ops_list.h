@@ -107,6 +107,7 @@
 	X(table_accumulate_extremes) \
 	X(table_mark_words) \
 	X(table_mark) \
-	X(table_next_unmarked)
+	X(table_next_unmarked) \
+	X(spill_columns_append)
 
 #endif							/* TESSERA_KERNEL_OPS_LIST_H */
