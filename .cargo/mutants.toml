@@ -18,11 +18,13 @@ exclude_globs = [
 # loop endless when mutated: a timeout each, never a verdict; its own
 # tests check it.
 # The same step written out where the iterator compiles to a longer loop
-# (WordValues::fold): its mutants of the step, its only &= and -.
+# (WordValues::fold; the table's resolve_rows, append_rows,
+# append_column_rows, and the keys' normalize_word and WordKeys::load,
+# which those inline): their mutants of the step, their only &= and -.
 exclude_re = [
     "<impl [a-z:]*Debug for ",
     "<impl Iterator for Ones>::next",
-    "replace (&= with [|^]=|- with [+/]) in (<impl Iterator for WordValues<F>>::fold)$",
+    "replace (&= with [|^]=|- with [+/]) in (<impl Iterator for WordValues<F>>::fold|resolve_rows|append_rows|append_column_rows|normalize_word|WordKeys<'a>::load)$",
 ]
 
 # A mutant that makes a loop endless is stopped at three times the

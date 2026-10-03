@@ -6,7 +6,7 @@
 use core::mem::MaybeUninit;
 
 use anyhow::{Result, ensure};
-use tessera_core::{RowMask, RowMaskView};
+use tessera_core::{RowMask, RowMaskView, ones};
 
 use super::header::{CHUNK_HEADER, Layout, RECORD_HEADER};
 use super::keys::{KeySource, WordKeys, slot_buffer};
@@ -143,6 +143,9 @@ fn append_rows<R: Region, K: KeySource + ?Sized, const N: usize, const T: usize,
         word_keys.load(keys, index, selected)?;
         let wanted = selected.count_ones() as usize;
         let count = wanted.min(room);
+        // The walk of `ones` written out, counted: through the iterator
+        // this loop compiled to twice its length; `.cargo/mutants.toml`
+        // leaves the step out.
         let mut bits = selected;
         let mut done = 0;
         for _ in 0..count {
@@ -252,6 +255,9 @@ fn append_column_rows<
         word_keys.load(keys, index, selected)?;
         let wanted = selected.count_ones() as usize;
         let count = wanted.min(room);
+        // The walk of `ones` written out, counted: through the iterator
+        // this loop compiled to twice its length; `.cargo/mutants.toml`
+        // leaves the step out.
         let mut bits = selected;
         let mut done = 0;
         for _ in 0..count {
@@ -394,11 +400,9 @@ fn append_partitioned_column_rows<
             continue;
         }
         word_keys.load(keys, index, selected)?;
-        let mut bits = selected;
+        let bits = selected;
         let mut done = 0;
-        while bits != 0 {
-            let bit = bits.trailing_zeros() as usize;
-            bits &= bits - 1;
+        for bit in ones(bits) {
             let row = index * 64 + bit;
             let partition = ((hashes[row] >> shift) & mask) as usize;
             // Checked: every partition's chunk exists, and has a count.
@@ -654,10 +658,8 @@ fn probe_rows<R: Region, K: KeySource + ?Sized, const N: usize, const T: usize, 
             )?;
         } else if selected != 0 {
             word_keys.load(keys, index, selected)?;
-            let mut bits = selected;
-            while bits != 0 {
-                let bit = bits.trailing_zeros() as usize;
-                bits &= bits - 1;
+            let bits = selected;
+            for bit in ones(bits) {
                 let row = index * 64 + bit;
                 let hash = hashes[row];
                 let head = access.head(hash);
@@ -704,18 +706,6 @@ impl<S: Copy> Lanes<S> {
     }
 }
 
-/// The rows of `bits`, lowest first.
-#[inline(always)]
-fn rows_of(mut bits: u64) -> impl Iterator<Item = usize> {
-    core::iter::from_fn(move || {
-        (bits != 0).then(|| {
-            let bit = bits.trailing_zeros() as usize;
-            bits &= bits - 1;
-            bit
-        })
-    })
-}
-
 /// Probe the `selected` rows of one word phase by phase: every row's bucket
 /// is hinted to the cache, then every head read; while rows remain, every
 /// candidate record is checked and hinted, then every candidate compared
@@ -736,7 +726,7 @@ pub(super) fn probe_word<R: Region, const N: usize>(
     matches: &mut [u32],
     lanes: &mut Lanes<R::Spot>,
 ) -> Result<u64> {
-    for bit in rows_of(selected) {
+    for bit in ones(selected) {
         let hash = hashes[bit];
         lanes.hash[bit].write(hash);
         access.prefetch_bucket(hash);
@@ -745,7 +735,7 @@ pub(super) fn probe_word<R: Region, const N: usize>(
     // only for rows of `selected` (`pending` is a subset of it), after the
     // loop above wrote its hash and the loop below its first offset.
     let mut pending = 0;
-    for bit in rows_of(selected) {
+    for bit in ones(selected) {
         let head = access.head(unsafe { lanes.hash[bit].assume_init() });
         lanes.current[bit].write(head);
         pending |= u64::from(head != 0) << bit;
@@ -755,7 +745,7 @@ pub(super) fn probe_word<R: Region, const N: usize>(
     while pending != 0 {
         access.check_steps(steps)?;
         steps += 1;
-        for bit in rows_of(pending) {
+        for bit in ones(pending) {
             let place = access.place(unsafe { lanes.current[bit].assume_init() })?;
             // SAFETY: `place` accepted it.
             let spot = unsafe { access.spot(place) };
@@ -763,7 +753,7 @@ pub(super) fn probe_word<R: Region, const N: usize>(
             access.prefetch_record(spot);
         }
         let mut rest = 0;
-        for bit in rows_of(pending) {
+        for bit in ones(pending) {
             let offset = unsafe { lanes.current[bit].assume_init() };
             // SAFETY: `place` accepted every offset of `pending` above,
             // and the loop above resolved its spot.
@@ -802,11 +792,9 @@ pub(super) fn next_match<R: Region>(
     );
     let mut access = Access::new(region, layout);
     for index in 0..nrows.div_ceil(64) {
-        let mut bits = rows.word_at(index);
+        let bits = rows.word_at(index);
         let mut hits = 0;
-        while bits != 0 {
-            let bit = bits.trailing_zeros() as usize;
-            bits &= bits - 1;
+        for bit in ones(bits) {
             let row = index * 64 + bit;
             let record = access.locate(offsets[row])?;
             let (hash, null_bits, keys) = (record.hash(), record.null_bits(), record.keys());
@@ -848,7 +836,7 @@ pub(super) fn gather<R: Region, const PREFETCH: bool>(
     let mut access = Access::new(region, layout);
     if !PREFETCH {
         for index in 0..nrows.div_ceil(64) {
-            for bit in rows_of(rows.word_at(index)) {
+            for bit in ones(rows.word_at(index)) {
                 let row = index * 64 + bit;
                 let payload = access.locate(offsets[row])?.payload();
                 let mut word = [0; 8];
@@ -866,7 +854,7 @@ pub(super) fn gather<R: Region, const PREFETCH: bool>(
     let mut spots = [const { MaybeUninit::<R::Spot>::uninit() }; 64];
     for index in 0..nrows.div_ceil(64) {
         let selected = rows.word_at(index);
-        for bit in rows_of(selected) {
+        for bit in ones(selected) {
             let place = access.place(offsets[index * 64 + bit])?;
             // SAFETY: `place` accepted it.
             let spot = unsafe { access.spot(place) };
@@ -874,7 +862,7 @@ pub(super) fn gather<R: Region, const PREFETCH: bool>(
             access.prefetch_record(spot);
             access.prefetch_record(R::advance(spot, word_at));
         }
-        for bit in rows_of(selected) {
+        for bit in ones(selected) {
             let row = index * 64 + bit;
             // SAFETY: the loop above resolved the spot of every row of
             // `selected` from an offset `place` accepted.
@@ -922,7 +910,7 @@ pub(super) fn gather_words<R: Region>(
     let mut spots = [const { MaybeUninit::<R::Spot>::uninit() }; 64];
     for index in 0..nrows.div_ceil(64) {
         let selected = rows.word_at(index);
-        for bit in rows_of(selected) {
+        for bit in ones(selected) {
             let place = access.place(offsets[index * 64 + bit])?;
             // SAFETY: `place` accepted it.
             let spot = unsafe { access.spot(place) };
@@ -935,7 +923,7 @@ pub(super) fn gather_words<R: Region>(
             }
             access.prefetch_record(R::advance(spot, last_at));
         }
-        for bit in rows_of(selected) {
+        for bit in ones(selected) {
             let row = index * 64 + bit;
             // SAFETY: the loop above resolved the spot of every row of
             // `selected` from an offset `place` accepted.
@@ -968,11 +956,9 @@ pub(super) fn next_in_group<R: Region>(
     );
     let mut access = Access::new(region, layout);
     for index in 0..nrows.div_ceil(64) {
-        let mut bits = rows.word_at(index);
+        let bits = rows.word_at(index);
         let mut hits = 0;
-        while bits != 0 {
-            let bit = bits.trailing_zeros() as usize;
-            bits &= bits - 1;
+        for bit in ones(bits) {
             let row = index * 64 + bit;
             let record = access.locate(offsets[row])?;
             let next = record.next();
@@ -1018,10 +1004,9 @@ pub(super) fn gather_key<R: Region>(
     );
     let mut access = Access::new(region, layout);
     for index in 0..nrows.div_ceil(64) {
-        let mut bits = rows.word_at(index);
-        while bits != 0 {
-            let row = index * 64 + bits.trailing_zeros() as usize;
-            bits &= bits - 1;
+        let bits = rows.word_at(index);
+        for bit in ones(bits) {
+            let row = index * 64 + bit;
             let record = access.locate(offsets[row])?;
             let null = (record.null_bits() >> key) & 1 == 1;
             values[row] = if null { 0 } else { record.keys()[key] as u64 };

@@ -8,7 +8,7 @@
 //! Records never move.
 
 use anyhow::{Result, bail, ensure};
-use tessera_core::{ColumnReader, RowMask, RowMaskView};
+use tessera_core::{ColumnReader, RowMask, RowMaskView, ones};
 
 use crate::decimal::{self, ExtremeState, Offer, Partial, Partials, SumState, Term, Terms};
 use crate::ops::ArithmeticError;
@@ -192,6 +192,9 @@ fn resolve_rows<
                     &mut lanes,
                 )?;
             }
+            // The walk of `ones` written out: through the iterator this
+            // loop took an instruction more; `.cargo/mutants.toml` leaves
+            // the step out.
             let mut bits = selected;
             while bits != 0 {
                 let bit = bits.trailing_zeros() as usize;
@@ -554,10 +557,9 @@ pub(super) fn count_rows<R: Region>(
     check_accumulate(layout, offsets.len(), nrows, &[at])?;
     let mut access = Access::new(region, layout);
     for index in 0..nrows.div_ceil(64) {
-        let mut bits = rows.word_at(index);
-        while bits != 0 {
-            let row = index * 64 + bits.trailing_zeros() as usize;
-            bits &= bits - 1;
+        let bits = rows.word_at(index);
+        for bit in ones(bits) {
+            let row = index * 64 + bit;
             let payload = payload_at(&mut access, region, layout, offsets[row])?;
             let count = (read_word(payload, at) as i64)
                 .checked_add(1)
@@ -798,10 +800,8 @@ pub(super) fn sum_terms<R: Region, T: Terms>(
         let mut slots = [0_u8; LOCAL_SLOTS];
         let mut ngroups = 0;
         let mut local_rows = 0_u64;
-        let mut look = selected;
-        while look != 0 {
-            let bit = look.trailing_zeros() as usize;
-            look &= look - 1;
+        let look = selected;
+        for bit in ones(look) {
             match local_group(
                 &mut slots,
                 &mut groups,
@@ -816,10 +816,8 @@ pub(super) fn sum_terms<R: Region, T: Terms>(
             }
         }
         group_rows[..ngroups].fill(0);
-        let mut look = local_rows;
-        while look != 0 {
-            let bit = look.trailing_zeros() as usize;
-            look &= look - 1;
+        let look = local_rows;
+        for bit in ones(look) {
             group_rows[usize::from(row_groups[bit]) % LOCAL_GROUPS] |= 1 << bit;
         }
         for (spot, &offset) in spots.iter_mut().zip(&groups[..ngroups]) {
@@ -856,10 +854,8 @@ pub(super) fn sum_terms<R: Region, T: Terms>(
                 taken = word.rows;
             }
             // The other rows of the word's groups, term by term.
-            let mut look = local_rows & !taken;
-            while look != 0 {
-                let bit = look.trailing_zeros() as usize;
-                look &= look - 1;
+            let look = local_rows & !taken;
+            for bit in ones(look) {
                 let group = usize::from(row_groups[bit]);
                 let term = sum.terms.term(index * 64 + bit);
                 let local = &mut locals[group];
@@ -909,10 +905,8 @@ pub(super) fn sum_terms<R: Region, T: Terms>(
                 }
                 // At the bound: the rows that made the local sum, one by one;
                 // one that is no decimal of its scale goes to the rest.
-                let mut again = taken;
-                while again != 0 {
-                    let bit = again.trailing_zeros() as usize;
-                    again &= again - 1;
+                let again = taken;
+                for bit in ones(again) {
                     if usize::from(row_groups[bit]) != group {
                         continue;
                     }
@@ -926,10 +920,8 @@ pub(super) fn sum_terms<R: Region, T: Terms>(
             }
         }
         // The rows of further groups, each to its record.
-        let mut look = selected & !local_rows;
-        while look != 0 {
-            let bit = look.trailing_zeros() as usize;
-            look &= look - 1;
+        let look = selected & !local_rows;
+        for bit in ones(look) {
             let row = index * 64 + bit;
             let payload = payload_at(&mut access, region, layout, offsets[row])?;
             for (sum, other) in sums.iter().zip(others.iter_mut()) {
@@ -975,10 +967,8 @@ pub(super) fn sum_partials<R: Region, P: Partials>(
     let mut others = [0_u64; MAX_SUMS];
     for index in 0..nrows.div_ceil(64) {
         others[..nsums].fill(0);
-        let mut look = rows.word_at(index);
-        while look != 0 {
-            let bit = look.trailing_zeros() as usize;
-            look &= look - 1;
+        let look = rows.word_at(index);
+        for bit in ones(look) {
             let row = index * 64 + bit;
             let payload = payload_at(&mut access, region, layout, offsets[row])?;
             for (sum, other) in sums.iter().zip(others.iter_mut()) {
@@ -1044,10 +1034,7 @@ pub(super) fn extremes<R: Region, T: Terms>(
     let mut access = Access::new(region, layout);
     for index in 0..nrows.div_ceil(64) {
         let mut other = 0_u64;
-        let mut look = rows.word_at(index);
-        while look != 0 {
-            let bit = look.trailing_zeros() as usize;
-            look &= look - 1;
+        for bit in ones(rows.word_at(index)) {
             let row = index * 64 + bit;
             let term = slot.terms.term(row);
             if term == Term::Null {
