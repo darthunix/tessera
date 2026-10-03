@@ -151,6 +151,9 @@ ANALYZE sort_big;
 SET work_mem = '64MB';
 SELECT sort_same($$SELECT k, v FROM sort_big ORDER BY k DESC$$);
 SELECT sort_explain($$SELECT k, v FROM sort_big ORDER BY k$$);
+-- Values of 67 to 109 kB, past the first chunk of values (64 kB) and below
+-- a quarter of the chunks after it: the first is made as large as its value.
+SELECT sort_same($$SELECT k, length(v), md5(v) FROM (SELECT k, repeat(md5(k::text), 2100 + k % 3 * 650) AS v FROM sort_big WHERE k < 6 ORDER BY k DESC OFFSET 0) AS q$$);
 -- Top-N over keys in the reverse of the rows' order: every row beats the
 -- ones kept, and the records are rebuilt from the heap's as they pile up.
 CREATE TABLE sort_seq AS SELECT i, 'r' || i AS t FROM generate_series(1, 200000) AS i;
