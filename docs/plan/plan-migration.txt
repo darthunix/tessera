@@ -7014,6 +7014,31 @@
   проверяется при загрузке; если вызывающие маршрутизируют строки пачкой — пакетный вход tess_table_partition_rows.
   Шесть коммитов, Rust +150, C −150; проверка по коммиту: переходный тест равенства, наборы spill, join, agg, sort,
   parallel; семейство spill (CASES= один join и один group, REPETITIONS=5) для партиций. После 9.13 и 9.3.
+  Сделано 2026-10-03 (ветка layout-owners, десять коммитов: шесть частей, часть 4 тремя, и три улучшения
+  инструментов). 1) NULL-дорожки: TESS_SPILL_COLUMNS_NULL_LANES (константное выражение для массива gather.c) и
+  tess_spill_columns_null_lane/_null_bit/_is_null в spill.h; gather.c, sort_external.c, agg_spill.c и оценка
+  sort_topn.c на них; tess_spill_columns_shape отдаёт счёт Rust, набор spill сверяет на 0..4096 слов. 2) Размер
+  записи: record_bytes_of и вход tess_table_record_size; исполнитель спрашивает его раз (поля в конце TessAggState и
+  SpillSide, чтобы прочие смещения остались), планировщик — inline tess_table_record_bytes, набор table сверяет на
+  1..16 ключей × 0..1024 байта; десять копий формулы ушли. 3) Партиции: tessera-spill plan::partitions и chunk_len за
+  tess_spill_partitions и tess_spill_chunk_len; три правила (агрегат, соединение, общий сброс) — одно с параметрами,
+  JOIN_SPILL_RESERVE; тест прогоняет три старых цикла моделями по сетке. 4а) Фильтр сброса в восьмой части памяти —
+  bloom::words_within за tess_table_bloom_words_within. 4б) Находка уточнения 9: у фильтра общего сброса предела не
+  было (800 МБ при 100 млн строк на участника и четырёх участниках против бюджета 4×hash_mem), в коммите b60333e
+  умысла не видно — теперь восьмая часть бюджета таблицы. 4в) join_bloom_wanted в costs.h — одно правило у
+  планировщика и decide_bloom; планировщик теперь ждёт фильтр при ratio 1 и у малой таблицы, как его строит
+  исполнитель; отдельный hashjoin_bloom.h не понадобился. 5) run_words и tess_sort_run_words вместо подсчёта битов
+  ключей в sort_plan_external и merge_key_words. 6) tess_table_ref_chunk/_byte, tess_table_ref, tess_table_partition в
+  table.h; тест partitions сравнивал формулу саму с собой — теперь берёт партицию, которую выбрало ядро, по куску
+  записи (порча маски им теперь ловится). Пакетный вход tess_table_partition_rows не нужен: вызывающие идут по строкам
+  внутри своих циклов. Пять новых операций ядер — в конце списка 9.13. Инструменты: tessera-bench --disasm помечает
+  изменения только в непосредственных значениях (сдвиг полей структуры), tessera-ab держит сборки между запусками
+  (target/bench-runs/ab-builds) и отбрасывает отрицательные замеры (часы шагнули назад). Проверка по коммиту:
+  переходный тест равенства, ручная порча, все 42 набора, --disasm --module nodes против предыдущего коммита
+  (построчные функции те же). A/B (cargo ab, база cd3ae0f, от сети): join, sort (11 повторов), anyagg, anykey, win с
+  двумя рабочими, spill (dim_4mb и group_fk_4mb, 5 повторов) — после перемера отмеченных и пограничных случаев
+  (101/31/21 повтор, три пары) всё 0,99–1,02 при контроле 0,99–1,01: g_three 1,006, g_sum_int8 0,990, mixed_text 1,024
+  (контроль 1,010), fk_* около 1,00, order_few_text 1,006, order_text_c 1,002.
 
   9.16 Быстрый путь numeric в agg.c на decimal.rs. Есть входы (c/decimal.rs): filter, compute, to_int4/8, read, sum,
   write, read_datum, write_datum; групповые суммы — tess_table_accumulate_sums; в Rust есть Sum::add и add_many,
