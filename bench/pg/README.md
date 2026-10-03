@@ -223,7 +223,9 @@ SHARED_BUFFERS=4GB bench/pg/run.sh setup 10   # ten times the rows, larger buffe
 matches (the plans are still written for every case), and `REPETITIONS`
 the runs of each case in each mode, 31 by default: a development A/B times
 the cases a change touches, fewer times, so that a run takes minutes at
-most. `PG_CONFIG` selects the PostgreSQL build; `PGPORT` the port. The cluster's
+most. [`cargo ab measure`](../../tools/tessera-ab/README.md) runs such an
+A/B of two revisions, installing each in turn and comparing every case
+with the control without Tessera. `PG_CONFIG` selects the PostgreSQL build; `PGPORT` the port. The cluster's
 `postgresql.conf` preloads `tessera, tessera_nodes, tessera_kernels`
 into the postmaster (`shared_preload_libraries`, so that
 parallel workers do not load them again in every query) and sets
