@@ -159,19 +159,14 @@ side_init(TessHashJoinState *state, SpillSide *side, int nkeys, const TessTableK
 	void	   *empty;
 	Size		empty_len;
 
-	/*
-	 * Small blocks: a chunk past a few kB gets a block of its own, of its
-	 * size, not a share of a block twice as large, and memory is what the
-	 * chunks take.
-	 */
 	if (resident)
 		side->context = AllocSetContextCreate(spill->context,
 											  "TessHashJoin inner partitions",
-											  ALLOCSET_SMALL_SIZES);
+											  TESS_CHUNK_CONTEXT_SIZES);
 	else
 		side->context = AllocSetContextCreate(spill->context,
 											  "TessHashJoin outer partitions",
-											  ALLOCSET_SMALL_SIZES);
+											  TESS_CHUNK_CONTEXT_SIZES);
 	side->columnar = !resident;
 	side->nkeys = nkeys;
 	memcpy(side->kinds, kinds, sizeof(TessTableKeyKind) * nkeys);
@@ -779,10 +774,10 @@ join_spill_create(TessHashJoinState *state, JoinSpill *parent, double expected,
 										   ALLOCSET_DEFAULT_SIZES);
 	spill->part_context = AllocSetContextCreate(spill->context,
 												"TessHashJoin partition",
-												ALLOCSET_SMALL_SIZES);
+												TESS_CHUNK_CONTEXT_SIZES);
 	spill->block_context = AllocSetContextCreate(spill->context,
 												 "TessHashJoin outer block",
-												 ALLOCSET_SMALL_SIZES);
+												 TESS_CHUNK_CONTEXT_SIZES);
 	spill->npartitions = npartitions;
 	spill->shift = shift;
 	spill->partition = -1;

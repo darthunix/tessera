@@ -63,4 +63,17 @@ tess_word_key_order(Oid type, Oid opfamily)
 extern List *tess_order_clauses(PlannerInfo *root, List *rinfos);
 extern double tess_parallel_divisor(const Path *path);
 
+/*
+ * The sizes of a context of a spill's chunks: the small sizes, so that a
+ * chunk past a few kB gets a block of its own, of its size, not a share of
+ * a block twice as large, and memory is what the chunks take. Its minimum
+ * is its first block, as the small sizes make it, not 0: a context of the
+ * small sizes themselves may be one the allocator recycles (aset.c), which
+ * keeps the largest chunk a block shares from its first life, 8 kB for a
+ * plan's, and then rounded the chunks up to powers of two: a partition of
+ * 656 kB read back took 1.3 MB.
+ */
+#define TESS_CHUNK_CONTEXT_SIZES \
+	ALLOCSET_SMALL_INITSIZE, ALLOCSET_SMALL_INITSIZE, ALLOCSET_SMALL_MAXSIZE
+
 #endif							/* TESSERA_NODES_INTERNAL_H */
