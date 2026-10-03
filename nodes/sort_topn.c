@@ -26,7 +26,7 @@ static void compact_rows(TessSortState *state);
 static uint32
 item_ref(TessSortState *state, uint64 item)
 {
-	return (uint32) state->heap[item * state->words + state->words - 1];
+	return (uint32) state->heap[item * state->item_words + state->item_words - 1];
 }
 
 /* The values of item slot's keys from the first generic one on. */
@@ -75,9 +75,9 @@ top_gather(TessSortState *state, TessRows *rows, const uint32 *refs,
 static int
 compare_slots(TessSortState *state, uint64 a, uint64 b)
 {
-	const uint64 *x = &state->heap[a * state->words];
-	const uint64 *y = &state->heap[b * state->words];
-	int			last = state->words - 1;
+	const uint64 *x = &state->heap[a * state->item_words];
+	const uint64 *y = &state->heap[b * state->item_words];
+	int			last = state->item_words - 1;
 	Datum	   *xv = top_slot_values(state, a);
 	Datum	   *yv = top_slot_values(state, b);
 	bool	   *xn = top_slot_isnull(state, a);
@@ -106,8 +106,8 @@ copy_slot(TessSortState *state, uint64 to, uint64 from)
 {
 	int			ngeneric = state->nkeys - state->generic;
 
-	memcpy(&state->heap[to * state->words], &state->heap[from * state->words],
-		   sizeof(uint64) * state->words);
+	memcpy(&state->heap[to * state->item_words], &state->heap[from * state->item_words],
+		   sizeof(uint64) * state->item_words);
 	memcpy(top_slot_values(state, to), top_slot_values(state, from), sizeof(Datum) * ngeneric);
 	memcpy(top_slot_isnull(state, to), top_slot_isnull(state, from), sizeof(bool) * ngeneric);
 }
@@ -169,7 +169,7 @@ sort_top_batch_generic(TessSortState *state, TessBatch *batch)
 	TessStatus	status = TESS_STRUCT_INITIALIZER(TessStatus);
 	int			nrows = batch->rows.nrows;
 	int			ngeneric = state->nkeys - state->generic;
-	int			words = state->words;
+	int			words = state->item_words;
 	uint64		spare = state->heap_capacity;
 	int			count;
 	int			row = -1;
@@ -202,7 +202,7 @@ sort_top_batch_generic(TessSortState *state, TessBatch *batch)
 	sort_batch_keys(state, batch);
 	for (int key = state->generic + 1; key < state->nkeys; key++)
 		sort_batch_column(state, batch, state->key_columns[key]);
-	tess_status_check(state->kernels->sort_key_lanes(state->nkernel, state->top_keys,
+	tess_status_check(state->kernels->sort_key_lanes(state->nkernel, state->ext_keys,
 													 state->table_keys, &batch->rows, words,
 													 state->top_lanes, state->top_batch_capacity,
 													 &count, &status),
@@ -282,9 +282,8 @@ sort_top_batch_generic(TessSortState *state, TessBatch *batch)
 		pfree(values);
 		pfree(isnull);
 	}
-	sort_note_memory(state, (state->heap_capacity + 1) *
-				(words * sizeof(uint64) + ngeneric * (sizeof(Datum) + sizeof(bool))));
-	if (tess_rows_count(state->rows) > Max(4 * state->heap_capacity, 65536))
+	sort_note_memory(state, (Size) sort_topn_heap_bytes(state, state->heap_capacity));
+	if (tess_rows_count(state->rows) > sort_topn_rebuild_rows(state->heap_capacity))
 		compact_rows(state);
 }
 
@@ -342,7 +341,7 @@ compact_rows(TessSortState *state)
 			/* The items stay where they are: their references and values change. */
 			for (int row = 0; row < n; row++)
 			{
-				uint64	   *last = &state->heap[(first + row) * state->words + state->words - 1];
+				uint64	   *last = &state->heap[(first + row) * state->item_words + state->item_words - 1];
 
 				*last = (*last & ~UINT64CONST(0xFFFFFFFF)) | new_refs[row];
 			}
@@ -350,7 +349,7 @@ compact_rows(TessSortState *state)
 			continue;
 		}
 		/* The items of the kept rows go in anew, by their new records. */
-		tess_rows_top_push(rows, state->top_keys, new_refs, &mask, state->heap,
+		tess_rows_top_push(rows, state->ext_keys, new_refs, &mask, state->heap,
 						   state->heap_capacity, &state->heap_len);
 	}
 	if (state->generic >= 0)
@@ -379,7 +378,7 @@ sort_top_batch(TessSortState *state, TessBatch *batch)
 		int			kept;
 
 		tess_status_check(state->kernels->sort_top_candidates(state->nkernel,
-															  state->top_keys,
+															  state->ext_keys,
 															  state->table_keys,
 															  &batch->rows,
 															  state->heap, &kept,
@@ -392,42 +391,31 @@ sort_top_batch(TessSortState *state, TessBatch *batch)
 		if (!sort_is_key_column(state, column))
 			sort_batch_column(state, batch, column);
 	sort_append_rows(state, batch);
-	tess_rows_top_push(state->rows, state->top_keys, state->batch_refs,
+	tess_rows_top_push(state->rows, state->ext_keys, state->batch_refs,
 					   &batch->rows, state->heap, state->heap_capacity,
 					   &state->heap_len);
-	sort_note_memory(state, state->heap_capacity * state->words * sizeof(uint64));
-	if (tess_rows_count(state->rows) > Max(4 * state->heap_capacity, 65536))
+	sort_note_memory(state, (Size) sort_topn_heap_bytes(state, state->heap_capacity));
+	if (tess_rows_count(state->rows) > sort_topn_rebuild_rows(state->heap_capacity))
 		compact_rows(state);
 }
 
 /*
  * Whether a bound makes a top-N sort: its heap and the rows that may be
- * appended before a rebuild fit work_mem. Every key takes its bit for NULL.
+ * appended before a rebuild fit work_mem, records of the rows' table.
+ * Every key takes its bit for NULL (sort_plan_external made the items).
  */
 bool
 sort_choose_topn(TessSortState *state)
 {
-	TessStatus	status = TESS_STRUCT_INITIALIZER(TessStatus);
-	double		bytes;
+	double		record;
 
 	if (state->bound < 0)
 		return false;
-	for (int key = 0; key < state->nkernel; key++)
-	{
-		state->top_keys[key] = state->keys[key];
-		state->top_keys[key].flags |= TESS_SORT_NULLABLE;
-	}
-	tess_status_check(state->kernels->sort_item_words(state->nkernel, state->top_keys,
-													  &state->words, &status),
-					  &status);
-	bytes = (double) state->bound * state->words * sizeof(uint64) +
-		(double) Max(4 * (double) state->bound, 65536.0) *
-		(16.0 + 8.0 * (state->nkernel + tess_spill_columns_null_lanes(state->ncolumns) +
-					   state->ncolumns));
-	/* A generic key's heap: a slot more, and the values of its keys. */
-	if (state->generic >= 0)
-		bytes += (double) (state->bound + 1) *
-			(state->words * sizeof(uint64) +
-			 (state->nkeys - state->generic) * (sizeof(Datum) + sizeof(bool)));
-	return bytes <= (double) work_mem * 1024.0;
+	record = tess_table_record_bytes(state->nkernel,
+									 sizeof(uint64) *
+									 (tess_spill_columns_null_lanes(state->ncolumns) +
+									  state->ncolumns));
+	return sort_topn_heap_bytes(state, (double) state->bound) +
+		sort_topn_rebuild_rows((double) state->bound) * record <=
+		(double) work_mem * 1024.0;
 }
