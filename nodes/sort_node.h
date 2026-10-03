@@ -72,6 +72,8 @@ typedef struct RunWriter
 	char	   *values;
 	Size		values_len;
 	Size		values_used;
+	/* The columns of the rows being added (tess_spill_columns_append). */
+	TessDatumColumn *columns;
 } RunWriter;
 
 /* A run being merged: its reader, the block pair in memory and the next row of it. */

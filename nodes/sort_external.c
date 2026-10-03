@@ -123,6 +123,10 @@ writer_start(TessSortState *state, RunWriter *writer, SortRun *run)
 	writer->chunk = MemoryContextAllocExtended(context, writer->chunk_len, MCXT_ALLOC_HUGE);
 	writer->values_len = state->block_values;
 	writer->values = MemoryContextAllocExtended(context, writer->values_len, MCXT_ALLOC_HUGE);
+	writer->columns = MemoryContextAllocZero(context,
+											 sizeof(TessDatumColumn) * Max(state->ncolumns, 1));
+	for (int column = 0; column < state->ncolumns; column++)
+		writer->columns[column].struct_size = sizeof(TessDatumColumn);
 	writer_reset_chunk(state, writer);
 }
 
@@ -171,124 +175,70 @@ writer_finish(TessSortState *state, RunWriter *writer)
 	writer_flush(state, writer);
 	pfree(writer->chunk);
 	pfree(writer->values);
+	pfree(writer->columns);
 	state->runs[state->nruns++] = writer->run;
 	state->runs_written++;
 }
 
 /*
- * Append n rows to the run: column c of row r is values[c][r] unless
- * isnull[c][r], and its item's words are at keys[r]. A by-reference value
- * is copied into the block's values; a block fills with rows or values.
+ * Append n rows (up to SORT_ROWS) to the run: column c of row r is
+ * values[c][r] unless isnull[c][r], and its item's words are at keys[r].
+ * The kernels write the columns, a by-reference value copied into the
+ * block's values (tess_spill_columns_append), and the keys' words follow;
+ * a block fills with rows or values, and a row's values larger than the
+ * block's room grow it.
  */
 static void
 writer_add(TessSortState *state, RunWriter *writer, int n, Datum *const *values,
 		   bool *const *isnull, const uint64 *const *keys)
 {
-	const int16 *typlens = state->rows_config.typlens;
-	const bool *typbyvals = state->rows_config.typbyvals;
-	Size		capacity = writer->capacity;
-	bool		byref = false;
+	TessStatus	status = TESS_STRUCT_INITIALIZER(TessStatus);
+	uint64		word = n == 64 ? ~UINT64CONST(0) : (UINT64CONST(1) << n) - 1;
+	TessRowMask rows = {n, &word};
+	int			row = 0;
 
+	Assert(n <= SORT_ROWS);
 	for (int column = 0; column < state->ncolumns; column++)
-		byref |= !typbyvals[column];
-	/*
-	 * By-value columns only: each column's words copied into its lane a
-	 * run of rows at a time, the NULL bits set where a column has NULLs;
-	 * row by row this was 7 % of an external sort.
-	 */
-	if (!byref)
 	{
-		int			row = 0;
-
-		while (row < n)
-		{
-			int			take;
-			uint64	   *nulls;
-			uint64	   *words;
-
-			if (writer->rows == writer->capacity)
-				writer_flush(state, writer);
-			take = Min(n - row, (int) (writer->capacity - writer->rows));
-			nulls = tess_spill_columns_lane(writer->chunk, 0) + writer->rows;
-			words = nulls + capacity * writer->null_lanes;
-			for (int lane = 0; lane < writer->null_lanes; lane++)
-				memset(nulls + capacity * lane, 0, sizeof(uint64) * take);
-			for (int column = 0; column < state->ncolumns; column++)
-			{
-				uint64	   *lane = words + capacity * column;
-				uint64	   *column_nulls = nulls +
-					capacity * tess_spill_columns_null_lane(column);
-				const bool *flags = &isnull[column][row];
-
-				memcpy(lane, &values[column][row], sizeof(uint64) * take);
-				if (memchr(flags, true, take) == NULL)
-					continue;
-				for (int at = 0; at < take; at++)
-					if (flags[at])
-					{
-						column_nulls[at] |= tess_spill_columns_null_bit(column);
-						lane[at] = 0;
-					}
-			}
-			for (int word = 0; word < state->ext_words; word++)
-			{
-				uint64	   *lane = words + capacity * (state->ncolumns + word);
-
-				for (int at = 0; at < take; at++)
-					lane[at] = keys[row + at][word];
-			}
-			writer->rows += take;
-			row += take;
-		}
-		return;
+		writer->columns[column].values = values[column];
+		writer->columns[column].isnull = isnull[column];
+		writer->columns[column].nrows = n;
 	}
-	for (int row = 0; row < n; row++)
+	while (row < n)
 	{
-		Size		need = 0;
-		uint32		place;
-		uint64	   *nulls;
-		uint64	   *words;
+		uint32		first = writer->rows;
+		int			appended;
+		Size		need;
 
-		for (int column = 0; column < state->ncolumns; column++)
-			if (!isnull[column][row] && !typbyvals[column])
-				need += MAXALIGN(datumGetSize(values[column][row], false, typlens[column]));
-		if (writer->rows == writer->capacity ||
-			(writer->rows > 0 && writer->values_used + need > writer->values_len))
+		tess_status_check(state->kernels->spill_columns_append(writer->chunk, writer->chunk_len,
+															   state->ncolumns, writer->columns,
+															   state->rows_config.typbyvals,
+															   state->rows_config.typlens, &rows,
+															   writer->values,
+															   writer->values_len,
+															   &writer->values_used,
+															   &appended, &need, &status),
+						  &status);
+		for (int word_at = 0; word_at < state->ext_words; word_at++)
+		{
+			uint64	   *lane = tess_spill_columns_word(writer->chunk,
+													   state->ncolumns + word_at) + first;
+
+			for (int at = 0; at < appended; at++)
+				lane[at] = keys[row + at][word_at];
+		}
+		writer->rows += appended;
+		row += appended;
+		if (row == n)
+			break;
+		/* The block is full of rows or values, or the row's values outgrow it. */
+		if (writer->rows > 0)
 			writer_flush(state, writer);
-		if (writer->values_used + need > writer->values_len)
+		else
 		{
 			writer->values_len = Max(writer->values_len * 2, writer->values_used + need);
 			writer->values = repalloc_huge(writer->values, writer->values_len);
 		}
-		place = writer->rows++;
-		nulls = tess_spill_columns_lane(writer->chunk, 0) + place;
-		words = nulls + capacity * writer->null_lanes;
-		for (int lane = 0; lane < writer->null_lanes; lane++)
-			nulls[capacity * lane] = 0;
-		for (int column = 0; column < state->ncolumns; column++)
-		{
-			uint64	   *lane = words + capacity * column;
-
-			if (isnull[column][row])
-			{
-				nulls[capacity * tess_spill_columns_null_lane(column)] |=
-					tess_spill_columns_null_bit(column);
-				lane[0] = 0;
-			}
-			else if (typbyvals[column])
-				lane[0] = (uint64) values[column][row];
-			else
-			{
-				Size		size = datumGetSize(values[column][row], false, typlens[column]);
-
-				memcpy(writer->values + writer->values_used,
-					   DatumGetPointer(values[column][row]), size);
-				lane[0] = writer->values_used;
-				writer->values_used += MAXALIGN(size);
-			}
-		}
-		for (int word = 0; word < state->ext_words; word++)
-			words[capacity * (state->ncolumns + word)] = keys[row][word];
 	}
 }
 
