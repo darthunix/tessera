@@ -95,8 +95,9 @@ extern TessStatusCode tess_spill_unpack(const void *packed, Size len, void *chun
 
 /*
  * Chunks of rows by column (crates/tessera-spill, columns): the outer rows
- * a join keeps for their partition, which are only written and read back,
- * never linked. A chunk is a header of TESS_SPILL_COLUMNS_HEADER bytes (its
+ * a join keeps for their partition, the runs of an external TessSort and
+ * the messages of TessGather, which are only written and read back, never
+ * linked. A chunk is a header of TESS_SPILL_COLUMNS_HEADER bytes (its
  * row count, then its capacity, a uint32 each, then its stored words and
  * a magic), then lanes of capacity words each: the rows' NULL bits (bit
  * w % 64 of lane w / 64 for word w, one lane at least), then one lane per
@@ -110,8 +111,8 @@ extern TessStatusCode tess_spill_unpack(const void *packed, Size len, void *chun
 /*
  * The lanes of NULL bits of a chunk of words stored words, one at least, as
  * crates/tessera-spill (columns::null_lanes) lays them out; a constant
- * expression, for the bound of an array. A message of TessGather lays out
- * its NULL bits the same way, a lane per 64 columns.
+ * expression, for the bound of an array. A message of TessGather is a
+ * chunk of columns too.
  */
 #define TESS_SPILL_COLUMNS_NULL_LANES(words) \
 	((words) <= 64 ? 1 : ((words) + 63) / 64)

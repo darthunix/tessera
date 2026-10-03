@@ -424,6 +424,13 @@ SELECT parallel_same($$SELECT md5(string_agg(q::text, ',' ORDER BY q::text)) FRO
 SET parallel_leader_participation = off;
 SELECT parallel_same($$SELECT md5(string_agg(q::text, ',' ORDER BY q::text)) FROM (SELECT k, a, t, w FROM parallel_wide WHERE k % 3 <> 0 OFFSET 0) AS q$$);
 SELECT count(*) FROM (SELECT k, t FROM parallel_wide WHERE a > 5 LIMIT 10) AS q;
+-- Values of 70 to 150 kB a row, made in the workers: a message stops at
+-- half its queue's bytes of values, and takes a row past them alone, its
+-- values grown to the row's; in order, through TessGatherMerge, as well.
+EXPLAIN (COSTS OFF) SELECT k, repeat(md5(k::text), 2200 + k % 3 * 1250) AS v FROM parallel_wide WHERE k % 997 = 0;
+SELECT parallel_same($$SELECT count(*), sum(length(v)), md5(string_agg(md5(v), ',' ORDER BY k)) FROM (SELECT k, repeat(md5(k::text), 2200 + k % 3 * 1250) AS v FROM parallel_wide WHERE k % 997 = 0 OFFSET 0) AS q$$);
+EXPLAIN (COSTS OFF) SELECT k, repeat(md5(k::text), 2200 + k % 3 * 1250) AS v FROM parallel_wide WHERE k % 997 = 0 ORDER BY k;
+SELECT parallel_same($$SELECT count(*), md5(string_agg(md5(v), ',')) FROM (SELECT k, repeat(md5(k::text), 2200 + k % 3 * 1250) AS v FROM parallel_wide WHERE k % 997 = 0 ORDER BY k OFFSET 0) AS q$$);
 RESET parallel_leader_participation;
 SET tessera.batch_gather = off;
 EXPLAIN (COSTS OFF) SELECT k, a, t FROM parallel_wide WHERE k % 3 <> 0;
