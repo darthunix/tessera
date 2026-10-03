@@ -242,6 +242,55 @@ go to `disasm/<program>/` of the run directory. Exit 0 means the same code,
 1 different code: a difference in a hot loop is then measured on counters
 as above. A program takes about forty seconds.
 
+Pieces the compiler cuts out of functions, `OUTLINED_FUNCTION_12` and
+`f.cold.3`, lose their numbers (`OUTLINED_FUNCTION_N`, `f.cold.N`), which
+move whenever other code does; the bodies under such a name are compared as
+a set. Data at the start of a page, which objdump prints without an offset,
+counts as at any other offset.
+
+#### The C modules
+
+The same comparison for a C module of the extension, the code PostgreSQL
+runs:
+
+```sh
+PG_CONFIG=/path/to/bin/pg_config \
+cargo run --release --locked -p tessera-bench -- --base REF --disasm --module nodes
+```
+
+`--module` is `nodes` (`tessera_nodes`), `kernels` (`tessera_kernels`, the
+Rust kernels linked in, built with one codegen unit as above) or `bridge`
+(`tessera`). Both snapshots are built by the module's own make against the
+build `PG_CONFIG` names, in release; every function of the library is
+compared, whatever its name. `--make-var NAME=VALUE` passes a variable to
+both makes, such as `COPT=-falign-functions=64`. A node's module takes about
+ten seconds.
+
+#### Where the code lies
+
+The same instructions at another address can take another number of
+cycles. A loop is fetched by lines of 64 bytes: a loop whose head lies in
+the last bytes of a line starts every pass with a fetch that brings one
+useful instruction. This has cost a scalar division of int64 a cycle a row
+(plan 9.2) and a sum without GROUP BY 5 % of its time (plan 9.12), both with code
+identical instruction for instruction. The report therefore gives the place
+of every changed function and of those `--function SUBSTRING` names, changed
+or not:
+
+```
+  _agg_generic_accumulate
+    before entry 24; loops 28:5 24:8 24:11 48:12
+    after  entry 8; loops 12:5 8:8 8:11 32:12
+```
+
+`entry` is the offset of the function's first instruction in its line,
+each loop the offset of its head and its instructions, from the head to the
+branch back to it, innermost first. A time that moves with the same code is
+checked by building both sides with `--make-var COPT=-falign-functions=64`
+(the C modules) and measuring again: if the difference goes, it was the
+place. Places in a benchmark program are not those in the installed
+library; for the C modules they are.
+
 ## Reading the report
 
 Each library operation gets its own status. The limits are constants at the
