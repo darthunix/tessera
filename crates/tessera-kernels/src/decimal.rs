@@ -906,6 +906,56 @@ pub fn sum_terms(
     Ok(())
 }
 
+/// `max` (or `min`, `max` false) of the selected rows' decimals, as
+/// `numeric_larger` and `numeric_smaller` keep it: a later row of an
+/// equal value takes the place of an earlier one, so the batch's extreme
+/// takes the place of `state`, the decimal extreme of the rows before the
+/// batch, when it equals it. The last row that holds the batch's extreme
+/// and its decimal are returned, `None` when no decimal beats `state`.
+/// A row neither NULL nor a decimal goes to `rest`, whose other bits are
+/// cleared, for the caller to compare by the core's means, with the row
+/// returned too: such a value (a longer one, NaN) may equal a decimal.
+///
+/// # Errors
+///
+/// Masks of different row counts fail before any mutation.
+pub fn extreme(
+    source: &impl Source,
+    rows: RowMaskView<'_>,
+    max: bool,
+    state: Option<Decimal>,
+    rest: &mut RowMask<'_>,
+) -> Result<Option<(usize, Decimal)>> {
+    check_rows(rows.nrows(), &[rest.as_view().nrows()])?;
+    let mut best = state;
+    let mut found = None;
+    for_each_word(rows, |word, look| {
+        let mut other = 0;
+        let mut each = look;
+        while each != 0 {
+            let bit = each.trailing_zeros();
+            each &= each - 1;
+            let row = word * 64 + bit as usize;
+            match source.get(row) {
+                Arg::Null => {}
+                Arg::Other => other |= 1 << bit,
+                Arg::Decimal(decimal) => {
+                    if best.is_none_or(|best| match decimal.compare(best) {
+                        Ordering::Less => !max,
+                        Ordering::Greater => max,
+                        Ordering::Equal => true,
+                    }) {
+                        best = Some(decimal);
+                        found = Some(row);
+                    }
+                }
+            }
+        }
+        rest.set_word(word, other)
+    })?;
+    Ok(found.zip(best))
+}
+
 /// A value of numeric that is not a number, told by its header word.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Special {

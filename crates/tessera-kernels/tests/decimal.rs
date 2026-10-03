@@ -418,6 +418,96 @@ fn sum_adds(column: &Column, selected: &[u64]) {
     );
 }
 
+/// [`decimal::extreme`] over a selection: the row and decimal found, and
+/// the rows left.
+fn extreme_of(
+    column: &Column,
+    rows: &[u64],
+    max: bool,
+    state: Option<Decimal>,
+) -> (Option<(usize, Decimal)>, Vec<u64>) {
+    let nrows = column.0.len();
+    let mut rest = words(nrows, |_| true);
+    let found = decimal::extreme(
+        column,
+        RowMaskView::try_new(nrows, rows).unwrap(),
+        max,
+        state,
+        &mut RowMask::try_new(nrows, &mut rest).unwrap(),
+    )
+    .unwrap();
+    (found, rest)
+}
+
+#[test]
+fn extreme_keeps_the_last_of_equal_decimals_and_leaves_the_rest() {
+    let state = prop_oneof![
+        Just(None),
+        decimal_parts(MAX_READ_SCALE).prop_map(|(value, scale)| Decimal::new(value, scale)),
+    ];
+    property(
+        (pairs(), state, any::<bool>()),
+        |((column, _, selected), state, max)| -> Result<()> {
+            let (got, rest) = extreme_of(&column, &selection(&selected), max, state);
+            // The model: values at scale 18, exactly; a decimal replaces
+            // the best unless it loses to it.
+            let at_18 = |decimal: Decimal| {
+                i128::from(decimal.value()) * 10_i128.pow(MAX_READ_SCALE - decimal.scale())
+            };
+            let mut best = state;
+            let mut found = None;
+            for (row, (&chosen, &arg)) in selected.iter().zip(&column.0).enumerate() {
+                let other = chosen && arg == Arg::Other;
+                ensure!(bit(&rest, row) == other, "row {row} left: {}", bit(&rest, row));
+                if let (true, Arg::Decimal(decimal)) = (chosen, arg) {
+                    let wins = best.is_none_or(|best| {
+                        if max {
+                            at_18(decimal) >= at_18(best)
+                        } else {
+                            at_18(decimal) <= at_18(best)
+                        }
+                    });
+                    if wins {
+                        (best, found) = (Some(decimal), Some(row));
+                    }
+                }
+            }
+            let expected = found.zip(best);
+            ensure!(got == expected, "{got:?} for {expected:?}");
+            Ok(())
+        },
+    );
+}
+
+#[test]
+fn extreme_takes_the_later_of_equal_values_of_other_scales() {
+    let one = Decimal::new(1, 0).unwrap();
+    let longer = Decimal::new(100, 2).unwrap();
+    let column = Column(vec![
+        Arg::Decimal(longer),
+        Arg::Null,
+        Arg::Decimal(one),
+        Arg::Other,
+    ]);
+    for max in [false, true] {
+        assert_eq!(
+            extreme_of(&column, &[0b101], max, None),
+            (Some((2, one)), vec![0])
+        );
+        // The state is earlier than the batch: an equal row replaces it.
+        let state = Some(Decimal::new(10, 1).unwrap());
+        assert_eq!(
+            extreme_of(&column, &[0b1101], max, state),
+            (Some((2, one)), vec![0b1000])
+        );
+    }
+    // A state that beats the batch stays; so does one where the rows are
+    // NULL.
+    let two = Some(Decimal::new(2, 0).unwrap());
+    assert_eq!(extreme_of(&column, &[0b101], true, two), (None, vec![0]));
+    assert_eq!(extreme_of(&column, &[0b10], false, two), (None, vec![0]));
+}
+
 /// A sum: a value leaning to the bound's edges at a scale the batch reads,
 /// and a count.
 fn sum() -> impl Strategy<Value = Sum> {

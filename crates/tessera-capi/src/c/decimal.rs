@@ -1083,6 +1083,74 @@ pub unsafe extern "C" fn tess_decimal_sum(
     }
 }
 
+/// `TessDecimalExtreme`: the extreme of `min` or `max` of numeric so far,
+/// a decimal when `valid`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct DecimalExtreme {
+    /// The value at its display scale.
+    pub value: i64,
+    /// The display scale.
+    pub scale: c_int,
+    /// Whether `value` and `scale` hold the extreme.
+    pub valid: bool,
+}
+
+/// `tess_decimal_extreme`: `max` (or `min`) of the selected rows of a
+/// numeric column against `*extreme` ([`decimal::extreme`]): `*row` gets
+/// the row of the batch's extreme, whose decimal goes to `*extreme`, or
+/// -1, and `rest` the rows neither NULL nor decimals.
+///
+/// # Safety
+///
+/// `column` must be a valid column (see the module documentation) of
+/// `rows`' row count, `rows` point to a valid mask, `extreme` to a valid
+/// extreme, `row` to a writable int and `rest` to a valid mask, none of
+/// these three accessed by anything else for the call; `status` as for
+/// every entry point.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tess_decimal_extreme(
+    column: *const DatumColumn,
+    rows: *const Mask,
+    max: bool,
+    extreme: *mut DecimalExtreme,
+    row: *mut c_int,
+    rest: *mut Mask,
+    status: *mut Status,
+) -> Code {
+    // SAFETY: the caller's contract.
+    unsafe {
+        guard(status, || {
+            let rows = selection(rows)?;
+            let column = Column::new(column, rows.nrows())?;
+            let extreme = extreme.as_mut().context("a null extreme")?;
+            let row = row.as_mut().context("a null row")?;
+            let mut rest = output(rest)?;
+            let state = if extreme.valid {
+                let scale = u32::try_from(extreme.scale).context("a negative scale")?;
+                Some(Decimal::new(extreme.value, scale).context("an extreme not a decimal")?)
+            } else {
+                None
+            };
+            let found = with_column!(column, |source| decimal::extreme(
+                source, rows, max, state, &mut rest
+            ))?;
+            *row = match found {
+                None => -1,
+                Some((at, decimal)) => {
+                    *extreme = DecimalExtreme {
+                        value: decimal.value(),
+                        scale: decimal.scale() as c_int,
+                        valid: true,
+                    };
+                    c_int::try_from(at).context("a row past an int")?
+                }
+            };
+            Ok(())
+        })
+    }
+}
+
 /// `tess_decimal_write`: each selected row's decimal in `values`, at its
 /// scale in `scales` or at `scale` when `scales` is null, replaced by the
 /// pointer to its numeric, written into `space` one after another at
@@ -1235,6 +1303,8 @@ mod tests {
     fn layout_matches_the_header() {
         assert_eq!(size_of::<DecimalArg>(), 16);
         assert_eq!(size_of::<super::DecimalSum>(), 32);
+        assert_eq!(size_of::<super::DecimalExtreme>(), 16);
+        assert_eq!(std::mem::offset_of!(super::DecimalExtreme, valid), 12);
         assert_eq!(std::mem::offset_of!(super::DecimalSum, count), 24);
         assert_eq!(DECIMALS_SIZE, 44);
     }
