@@ -12,7 +12,7 @@ use std::slice;
 use anyhow::{Context, Result, bail, ensure};
 use tessera_kernels::sort::{
     MAX_ITEM_WORDS, MAX_MERGE_RUNS, MERGE_STATE_WORDS, SortKey, item_words, key_lanes, merge,
-    sort_items, top_candidates,
+    run_words, sort_items, top_candidates,
 };
 use tessera_kernels::table::{KeyKind, MAX_KEYS};
 
@@ -114,6 +114,32 @@ pub unsafe extern "C" fn tess_sort_item_words(
             let nkeys = sort_keys(nkeys, keys, &mut decoded)?;
             let out = words.as_mut().context("a null result")?;
             *out = item_words(&decoded[..nkeys])? as c_int;
+            Ok(())
+        })
+    }
+}
+
+/// `tess_sort_run_words`: the words of the keys of one item, without the
+/// reference, as a run of an external sort keeps them.
+///
+/// # Safety
+///
+/// `keys` as for [`sort_keys`]; `words` must be writable; `status` as for
+/// every entry point.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tess_sort_run_words(
+    nkeys: c_int,
+    keys: *const CSortKey,
+    words: *mut c_int,
+    status: *mut Status,
+) -> Code {
+    // SAFETY: the caller's contract.
+    unsafe {
+        guard(status, || {
+            let mut decoded = [UNUSED; MAX_KEYS];
+            let nkeys = sort_keys(nkeys, keys, &mut decoded)?;
+            let out = words.as_mut().context("a null result")?;
+            *out = run_words(&decoded[..nkeys])? as c_int;
             Ok(())
         })
     }

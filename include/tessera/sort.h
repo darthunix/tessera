@@ -55,6 +55,16 @@ extern TessStatusCode tess_sort_item_words(int nkeys,
 										   TessStatus *status);
 
 /*
+ * The words of the keys of one item without the reference: what a run of
+ * an external sort keeps of each item and a merge compares, the item's
+ * words but the last when the keys leave it to the reference.
+ */
+extern TessStatusCode tess_sort_run_words(int nkeys,
+										  const TessSortKey *keys,
+										  int *words,
+										  TessStatus *status);
+
+/*
  * Write the item of every record of the table's chunks, in the order
  * appended, into items (nwords words, which must hold them all) and their
  * count into *count. keys are the table's keys, one each, of its kinds;

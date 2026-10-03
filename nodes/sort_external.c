@@ -376,14 +376,9 @@ sort_plan_external(TessSortState *state)
 	 * goes when it holds no key's bits, as an int4 key's 33 bits leave it,
 	 * and the merge compares one word, not two.
 	 */
-	{
-		int			bits = 0;
-
-		for (int key = 0; key < state->nkernel; key++)
-			bits += (state->ext_keys[key].kind == TESS_TABLE_KEY_INT8 ? 64 : 32) + 1;
-		state->ext_words = bits <= 64 * (state->item_words - 1) ?
-			state->item_words - 1 : state->item_words;
-	}
+	tess_status_check(state->kernels->sort_run_words(state->nkernel, state->ext_keys,
+													 &state->ext_words, &status),
+					  &status);
 	/*
 	 * A merge holds a block pair of each run it takes, rows and values, and
 	 * briefly the pairs a batch put out points into: blocks of a 128th of
