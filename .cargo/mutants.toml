@@ -14,7 +14,10 @@ exclude_globs = [
 ]
 
 # Debug output carries no logic; Display stays, it is the text of an error.
-exclude_re = ["<impl [a-z:]*Debug for "]
+# The step of the walk over a word's bits (tessera_core::ones) makes every
+# loop endless when mutated: a timeout each, never a verdict; its own
+# tests check it.
+exclude_re = ["<impl [a-z:]*Debug for ", "<impl Iterator for Ones>::next"]
 
 # A mutant that makes a loop endless is stopped at three times the
 # baseline's test time.
