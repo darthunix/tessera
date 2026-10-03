@@ -238,6 +238,77 @@ fn casts_to_integers_leave_out_of_range_values() {
     );
 }
 
+/// A cast and a read of 200 rows, past a mask's first word: each selected
+/// row's integer and value land at that row, its bits in its word.
+#[test]
+fn a_cast_and_a_read_answer_rows_past_the_first_word() -> Result<()> {
+    let nrows = 200;
+    let args = Column(
+        (0..nrows)
+            .map(|row| match row {
+                _ if row % 7 == 3 => Arg::Null,
+                _ if row % 11 == 5 => Arg::Other,
+                _ => Arg::Decimal(Decimal::new(row as i64 * 37 - 3000, (row % 3) as u32).unwrap()),
+            })
+            .collect(),
+    );
+    let selected = words(nrows, |row| row % 5 != 2);
+    let rows = RowMaskView::try_new(nrows, &selected)?;
+    let mut longs = vec![MaybeUninit::new(0); nrows];
+    let mut present = vec![0; selected.len()];
+    let mut rest = vec![0; selected.len()];
+    decimal::to_int8(
+        &args,
+        rows,
+        &mut longs,
+        &mut RowMask::try_new(nrows, &mut present)?,
+        &mut RowMask::try_new(nrows, &mut rest)?,
+    )?;
+    let mut values = vec![MaybeUninit::new(-1); nrows];
+    let mut scales = vec![MaybeUninit::new(9); nrows];
+    let mut decimals = vec![0; selected.len()];
+    decimal::read(
+        &args,
+        rows,
+        Scales::ByRow(&mut scales),
+        &mut values,
+        &mut RowMask::try_new(nrows, &mut decimals)?,
+    )?;
+    let bit = |words: &[u64], row: usize| words[row / 64] >> (row % 64) & 1 == 1;
+    for row in 0..nrows {
+        let chosen = bit(&selected, row);
+        let arg = args.0[row];
+        assert_eq!(
+            bit(&present, row),
+            chosen && arg != Arg::Null,
+            "present {row}"
+        );
+        assert_eq!(bit(&rest, row), chosen && arg == Arg::Other, "rest {row}");
+        let Arg::Decimal(decimal) = arg else {
+            assert!(!bit(&decimals, row), "decimal {row}");
+            continue;
+        };
+        assert_eq!(bit(&decimals, row), chosen, "decimal {row}");
+        if chosen {
+            // SAFETY: every value starts initialized.
+            let (long, value, scale) = unsafe {
+                (
+                    longs[row].assume_init(),
+                    values[row].assume_init(),
+                    scales[row].assume_init(),
+                )
+            };
+            assert_eq!(long, decimal.round(), "cast {row}");
+            assert_eq!(
+                (value, u32::from(scale)),
+                (decimal.value(), decimal.scale()),
+                "read {row}"
+            );
+        }
+    }
+    Ok(())
+}
+
 /// Values that start initialized and are only ever written.
 fn values_now(values: &[MaybeUninit<i64>; 6]) -> [i64; 6] {
     // SAFETY: every value is initialized.
