@@ -1306,7 +1306,7 @@ internal), goes into its state as the core's `Finalize Aggregate` merges
 it, deserialized first, then by the combine function, which, strict,
 skips NULL and takes the first value as the state, and the final
 function makes the value; a numeric or bigint sum's, the node's own
-format, goes into a state of the node's (`fast_merge`): the counts added,
+format, goes into a state of the node's (`agg_fast_merge`): the counts added,
 the sums at the larger scale, one that either sum would take past the
 bound at it to the rest at its own scale, the rests added. It costs the core's `Finalize Aggregate` over
 `TessGather`, not a share of it: a share would take a tenth off the

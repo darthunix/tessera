@@ -197,7 +197,7 @@ batch_aggregate(const Aggref *agg)
 
 /*
  * Whether a grouping keeps the aggregate as a sum state, words of the
- * group's record that the kernels fold (generic_init): sum and avg of
+ * group's record that the kernels fold (agg_generic_init): sum and avg of
  * numeric, with the kernels module, and of bigint, avg of integer and
  * smallint. The planner costs such an aggregate as the node's own.
  */

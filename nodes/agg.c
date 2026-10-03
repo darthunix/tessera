@@ -163,7 +163,7 @@ agg_begin(CustomScanState *css, EState *estate, int eflags)
 		if (list_nth_int(eqops, position) != 0)
 		{
 			state->kinds[position] = TESS_TABLE_KEY_INT8;
-			state->dicts[position] = key_dict_create(state, (Oid) list_nth_int(eqops, position),
+			state->dicts[position] = agg_key_dict_create(state, (Oid) list_nth_int(eqops, position),
 													exprType(key), exprCollation(key));
 			state->has_dicts = true;
 			state->has_forms |= state->dicts[position]->forms;
@@ -209,7 +209,7 @@ agg_begin(CustomScanState *css, EState *estate, int eflags)
 				elog(ERROR, "TessAgg has no implementation of %s",
 					 format_procedure(agg->aggfnoid));
 			value->kind = AGG_GENERIC;
-			value->generic = generic_init(state, agg);
+			value->generic = agg_generic_init(state, agg);
 			if (state->nkeys > 0 && state->generic_output == NULL)
 			{
 				state->has_generic = true;
@@ -288,7 +288,7 @@ agg_begin(CustomScanState *css, EState *estate, int eflags)
 				if (!tess_word_key_kind(exprType(argument), &value->argument_kind))
 				{
 					value->argument_kind = TESS_TABLE_KEY_INT8;
-					value->distinct_dict = key_dict_create(state, clause->eqop,
+					value->distinct_dict = agg_key_dict_create(state, clause->eqop,
 														   exprType(argument),
 														   exprCollation(argument));
 					/* Only the count of the values matters, not a form to put out. */
@@ -585,7 +585,7 @@ flush_gathered(TessAggState *state, AggValue *value)
  * next one asks.
  */
 TessRowMask
-filtered_rows(TessAggState *state, TessBatch *batch, int filter, const TessRowMask *rows)
+agg_filtered_rows(TessAggState *state, TessBatch *batch, int filter, const TessRowMask *rows)
 {
 	TessDatumColumn column = TESS_STRUCT_INITIALIZER(TessDatumColumn);
 	int			nwords = tess_row_mask_word_count(rows->nrows);
@@ -648,7 +648,7 @@ accumulate(TessAggState *state, AggValue *value, TessBatch *batch, int nrows)
 
 	if (value->filter >= 0)
 	{
-		rows = filtered_rows(state, batch, value->filter, &batch->rows);
+		rows = agg_filtered_rows(state, batch, value->filter, &batch->rows);
 		nrows = tess_row_mask_count(&rows);
 	}
 	if (value->computed < 0)
@@ -675,12 +675,12 @@ accumulate(TessAggState *state, AggValue *value, TessBatch *batch, int nrows)
 		{
 #ifdef HAVE_INT128
 			if (value->kind == AGG_GENERIC && value->generic->fast != FAST_NONE)
-				fast_merge(state, value->generic, computed.values[row],
+				agg_fast_merge(state, value->generic, computed.values[row],
 						   computed.isnull[row]);
 			else
 #endif
 			if (value->kind == AGG_GENERIC)
-				generic_combine(state, value->generic, computed.values[row],
+				agg_generic_combine(state, value->generic, computed.values[row],
 								computed.isnull[row]);
 			else if (!computed.isnull[row])
 				join_partial(value, computed.values[row]);
@@ -704,17 +704,17 @@ accumulate(TessAggState *state, AggValue *value, TessBatch *batch, int nrows)
 		}
 		if (value->distinct != NULL)
 		{
-			TessRowMask pairs = distinct_rows(state, value, rows.nrows, NULL, &rows, column);
+			TessRowMask pairs = agg_distinct_rows(state, value, rows.nrows, NULL, &rows, column);
 
-			generic_accumulate(state, value->generic, &pairs);
+			agg_generic_accumulate(state, value->generic, &pairs);
 		}
 		else
-			generic_accumulate(state, value->generic, &rows);
+			agg_generic_accumulate(state, value->generic, &rows);
 		return;
 	}
 	if (value->distinct != NULL)
 	{
-		TessRowMask pairs = distinct_rows(state, value, rows.nrows, NULL, &rows, column);
+		TessRowMask pairs = agg_distinct_rows(state, value, rows.nrows, NULL, &rows, column);
 
 		evaluate(state, value, column, &pairs);
 		return;
@@ -736,24 +736,24 @@ accumulate(TessAggState *state, AggValue *value, TessBatch *batch, int nrows)
 
 /* Empty every distinct set, before the input is read. */
 void
-reset_distinct(TessAggState *state)
+agg_reset_distinct(TessAggState *state)
 {
 	for (int index = 0; index < state->nvalues; index++)
 		if (state->values[index].distinct != NULL)
-			distinct_reset(state, &state->values[index]);
+			agg_distinct_reset(state, &state->values[index]);
 }
 
 /* Read every batch of the child into the running values. */
 static void
 drain(TessAggState *state)
 {
-	reset_distinct(state);
+	agg_reset_distinct(state);
 	/* The states of a previous scan go, with the callbacks they registered. */
 	if (state->generic_agg != NULL)
 		ReScanExprContext(state->generic_agg->curaggcontext);
 	for (int index = 0; index < state->nvalues; index++)
 		if (state->values[index].generic != NULL)
-			generic_reset(state, state->values[index].generic);
+			agg_generic_reset(state, state->values[index].generic);
 	for (;;)
 	{
 		TessBatch  *batch = tess_input_next(state->input);
@@ -771,7 +771,7 @@ drain(TessAggState *state)
 			ResetExprContext(state->css.ss.ps.ps_ExprContext);
 			if (state->projection != NULL)
 				input = tess_projection_wrap(state->projection, batch);
-			read_in_order(state, input);
+			agg_read_in_order(state, input);
 			for (int index = 0; index < state->nvalues; index++)
 				accumulate(state, &state->values[index], input, rows);
 			if (state->projection != NULL)
@@ -811,7 +811,7 @@ result_row(TessAggState *state)
 					Int32GetDatum((int32) value->extreme);
 				break;
 			case AGG_GENERIC:
-				scan->tts_values[index] = generic_value(value->generic,
+				scan->tts_values[index] = agg_generic_value(value->generic,
 														&scan->tts_isnull[index]);
 				break;
 		}
@@ -862,7 +862,7 @@ group_exec(TessAggState *state)
 		TESS_OUTPUT_ROWS;
 
 	if (!state->drained)
-		group_drain(state);
+		agg_group_drain(state);
 	if (rows && state->published != NULL)
 	{
 		state->next_row = tess_row_mask_next(&state->published->rows,
@@ -872,7 +872,7 @@ group_exec(TessAggState *state)
 		tess_output_finish(state->output);
 	}
 	tess_output_release(state->output);
-	state->published = next_groups(state);
+	state->published = agg_next_groups(state);
 	if (state->published == NULL)
 	{
 		state->done = true;
@@ -953,7 +953,7 @@ agg_rescan(CustomScanState *css)
 			tess_projection_reset(state->side_projections[side]);
 			tess_rescan_child(&css->ss.ps, state->sides[side], state->side_inputs[side]);
 		}
-		setop_side(state, 0);
+		agg_setop_side(state, 0);
 		state->setop_count = 0;
 		state->setop_group = 0;
 		state->setop_copies = -1;

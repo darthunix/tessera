@@ -63,7 +63,7 @@ typedef struct FastState
  * whole one, or a partial one whose state the node writes as the final
  * aggregation above reads it: the core's own transition value, for a
  * state that is not internal, or the node's own format (own_states), for
- * the node's final aggregation (fast_partial, sum_state_partial).
+ * the node's final aggregation (fast_partial, agg_sum_state_partial).
  */
 static FastKind
 fast_kind(const Aggref *agg, GenericAgg *generic, bool own_states)
@@ -783,7 +783,7 @@ fast_partial(GenericAgg *generic, bool *isnull)
  * the transition functions, one for every generic aggregate of the node.
  */
 GenericAgg *
-generic_init(TessAggState *state, Aggref *agg)
+agg_generic_init(TessAggState *state, Aggref *agg)
 {
 	EState	   *estate = state->css.ss.ps.state;
 	GenericAgg *generic = palloc0_object(GenericAgg);
@@ -925,7 +925,7 @@ generic_init(TessAggState *state, Aggref *agg)
 
 /* The initial state, in the states' context. */
 void
-generic_reset(TessAggState *state, GenericAgg *generic)
+agg_generic_reset(TessAggState *state, GenericAgg *generic)
 {
 	MemoryContext old =
 		MemoryContextSwitchTo(state->generic_agg->curaggcontext->ecxt_per_tuple_memory);
@@ -1008,7 +1008,7 @@ generic_advance(GenericAgg *generic, int row, MemoryContext states, MemoryContex
  * context and the old one freed, as generic_advance does.
  */
 void
-generic_combine(TessAggState *state, GenericAgg *generic, Datum value, bool isnull)
+agg_generic_combine(TessAggState *state, GenericAgg *generic, Datum value, bool isnull)
 {
 	MemoryContext states = state->generic_agg->curaggcontext->ecxt_per_tuple_memory;
 	MemoryContext old =
@@ -1067,7 +1067,7 @@ generic_combine(TessAggState *state, GenericAgg *generic, Datum value, bool isnu
 }
 
 void
-generic_accumulate(TessAggState *state, GenericAgg *generic, const TessRowMask *rows)
+agg_generic_accumulate(TessAggState *state, GenericAgg *generic, const TessRowMask *rows)
 {
 	MemoryContext states = state->generic_agg->curaggcontext->ecxt_per_tuple_memory;
 	MemoryContext temporary = state->css.ss.ps.ps_ExprContext->ecxt_per_tuple_memory;
@@ -1101,7 +1101,7 @@ generic_accumulate(TessAggState *state, GenericAgg *generic, const TessRowMask *
 
 /* The payload of the record at ref, in the chunk's memory, which the node writes. */
 uint64 *
-record_payload(TessAggState *state, uint32 ref)
+agg_record_payload(TessAggState *state, uint32 ref)
 {
 	char	   *record = (char *) state->chunk_bases[ref >> TESS_TABLE_UNIT_BITS] +
 		(Size) (ref & ((1u << TESS_TABLE_UNIT_BITS) - 1)) * 8;
@@ -1145,7 +1145,7 @@ fast_group_decimals(TessAggState *state, int index, const TessRowMask *rows,
 		for (uint64 look = rows->bits[word]; look != 0; look &= look - 1)
 		{
 			int			row = word * 64 + pg_rightmost_one_pos64(look);
-			uint64	   *payload = record_payload(state, state->offsets[row]);
+			uint64	   *payload = agg_record_payload(state, state->offsets[row]);
 			FastDecimal decimal;
 			FastState  *fast;
 
@@ -1218,7 +1218,7 @@ static void
 sum_state_rest(TessAggState *state, const GenericAgg *generic, int slot, int row,
 			   MemoryContext states)
 {
-	uint64	   *words = record_payload(state, state->offsets[row]) + slot;
+	uint64	   *words = agg_record_payload(state, state->offsets[row]) + slot;
 	Numeric		number = DatumGetNumeric(sum_state_term(generic, &generic->columns[0], row));
 	MemoryContext old;
 
@@ -1292,7 +1292,7 @@ static void
 sum_state_merge_rest(TessAggState *state, const GenericAgg *generic, int slot, int row,
 					 MemoryContext states)
 {
-	uint64	   *words = record_payload(state, state->offsets[row]) + slot;
+	uint64	   *words = agg_record_payload(state, state->offsets[row]) + slot;
 	Datum		value = generic->columns[0].values[row];
 	uint64		theirs[TESS_TABLE_SUM_WORDS];
 	Datum		rest = (Datum) 0;
@@ -1359,7 +1359,7 @@ fast_rescale(int128 *sum, int from, int to)
  * and its rest to the rest.
  */
 void
-fast_merge(TessAggState *state, GenericAgg *generic, Datum value, bool isnull)
+agg_fast_merge(TessAggState *state, GenericAgg *generic, Datum value, bool isnull)
 {
 	MemoryContext states = state->generic_agg->curaggcontext->ecxt_per_tuple_memory;
 	MemoryContext old;
@@ -1408,7 +1408,7 @@ fast_merge(TessAggState *state, GenericAgg *generic, Datum value, bool isnull)
  * state.
  */
 void
-sum_states_accumulate(TessAggState *state, int nsums, const int *indexes,
+agg_sum_states_accumulate(TessAggState *state, int nsums, const int *indexes,
 					  const TessRowMask *rows)
 {
 	MemoryContext states = state->generic_agg->curaggcontext->ecxt_per_tuple_memory;
@@ -1459,7 +1459,7 @@ sum_states_accumulate(TessAggState *state, int nsums, const int *indexes,
  * average that divided by the count.
  */
 Datum
-sum_state_value(const GenericAgg *generic, const uint64 *words, bool *isnull)
+agg_sum_state_value(const GenericAgg *generic, const uint64 *words, bool *isnull)
 {
 	uint64		flags = words[3];
 	int64		count = (int64) words[2];
@@ -1496,7 +1496,7 @@ sum_state_value(const GenericAgg *generic, const uint64 *words, bool *isnull)
  * transition's (no rest: an integer is always a decimal the sum takes).
  */
 Datum
-sum_state_partial(const GenericAgg *generic, const uint64 *words, bool *isnull)
+agg_sum_state_partial(const GenericAgg *generic, const uint64 *words, bool *isnull)
 {
 	const struct varlena *rest = (const struct varlena *) words[TESS_TABLE_SUM_WORDS];
 
@@ -1525,7 +1525,7 @@ sum_state_partial(const GenericAgg *generic, const uint64 *words, bool *isnull)
  * aggregate's flag bit set while it is not NULL.
  */
 void
-generic_group_accumulate(TessAggState *state, int index, const TessRowMask *rows,
+agg_generic_group_accumulate(TessAggState *state, int index, const TessRowMask *rows,
 						 const TessRowMask *inserted)
 {
 	GenericAgg *generic = state->values[index].generic;
@@ -1539,7 +1539,7 @@ generic_group_accumulate(TessAggState *state, int index, const TessRowMask *rows
 #ifdef HAVE_INT128
 	if (generic->sum_state)
 	{
-		sum_states_accumulate(state, 1, &index, rows);
+		agg_sum_states_accumulate(state, 1, &index, rows);
 		return;
 	}
 #endif
@@ -1547,7 +1547,7 @@ generic_group_accumulate(TessAggState *state, int index, const TessRowMask *rows
 
 	while ((row = tess_row_mask_next(inserted, row)) >= 0)
 	{
-		uint64	   *payload = record_payload(state, state->offsets[row]);
+		uint64	   *payload = agg_record_payload(state, state->offsets[row]);
 
 		payload[slot] = generic->init_null ? 0 :
 			(uint64) datumCopy(generic->init, generic->transbyval, generic->translen);
@@ -1566,7 +1566,7 @@ generic_group_accumulate(TessAggState *state, int index, const TessRowMask *rows
 	row = -1;
 	while ((row = tess_row_mask_next(rows, row)) >= 0)
 	{
-		uint64	   *payload = record_payload(state, state->offsets[row]);
+		uint64	   *payload = agg_record_payload(state, state->offsets[row]);
 
 		generic->state = (Datum) payload[slot];
 		generic->state_null = (payload[0] & bit) == 0;
@@ -1583,7 +1583,7 @@ generic_group_accumulate(TessAggState *state, int index, const TessRowMask *rows
  * state serialized, or the state itself.
  */
 Datum
-generic_value(GenericAgg *generic, bool *isnull)
+agg_generic_value(GenericAgg *generic, bool *isnull)
 {
 	FunctionCallInfo call;
 	Datum		result;
