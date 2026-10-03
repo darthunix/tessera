@@ -198,6 +198,18 @@ pub fn words_for(records: u64) -> Result<usize> {
     words.ok_or_else(|| anyhow::anyhow!("a filter for {records} records is too large"))
 }
 
+/// The words of a filter for a table of `records` records within an
+/// eighth of `limit` bytes: [`words_for`] them, halved while larger, one
+/// at least. A smaller filter lets more rows through; a larger one would
+/// leave a small memory no room for the rows it guards.
+pub fn words_within(records: u64, limit: usize) -> Result<usize> {
+    let mut words = words_for(records)?;
+    while words > 1 && words.saturating_mul(8) > limit / 8 {
+        words /= 2;
+    }
+    Ok(words)
+}
+
 /// The shift that takes a word index out of a spread hash, for a filter
 /// of `words` words, which must be a power of two.
 fn shift_for(nwords: usize) -> Result<u32> {

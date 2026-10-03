@@ -2292,6 +2292,25 @@ fn an_empty_table_rejects_everything_and_sizes_are_checked() -> Result<()> {
     Ok(())
 }
 
+/// A spill's filter within an eighth of its memory, as the join's spill
+/// sized it by hand: the words for its records, halved while larger.
+#[test]
+fn a_spill_filter_stays_within_an_eighth_of_its_memory() -> Result<()> {
+    for records in [0, 1, 1000, 4096, 1 << 20, 100_000_000, 1 << 40] {
+        for limit in [0, 64, 64 * 1024, 4 << 20, 64 << 20, 1 << 30, usize::MAX] {
+            let mut model = bloom::words_for(records)?;
+            while model > 1 && 8 * model > limit / 8 {
+                model /= 2;
+            }
+            let words = bloom::words_within(records, limit)?;
+            assert_eq!(words, model, "{records} records within {limit} bytes");
+            assert!(words.is_power_of_two() && words <= bloom::words_for(records)?);
+        }
+    }
+    assert!(bloom::words_within(u64::MAX, 1 << 30).is_err());
+    Ok(())
+}
+
 #[test]
 fn a_null_group_key_and_int8_keys_pass_their_filter() -> Result<()> {
     // Keys 1, NULL, 2^40 under the grouping policy: the NULL's hash is the

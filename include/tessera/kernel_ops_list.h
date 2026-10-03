@@ -100,6 +100,7 @@
 	X(table_gather_words) \
 	X(table_record_size) \
 	X(spill_partitions) \
-	X(spill_chunk_len)
+	X(spill_chunk_len) \
+	X(table_bloom_words_within)
 
 #endif							/* TESSERA_KERNEL_OPS_LIST_H */
