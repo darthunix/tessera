@@ -13,8 +13,9 @@ use anyhow::{Result, ensure};
 use proptest::prelude::*;
 use tessera_core::{RowMask, RowMaskView};
 use tessera_kernels::decimal::{
-    self, Arg, Compare, Decimal, ExtremeState, ExtremeValue, MAX_READ_SCALE, MAX_SCALE, Offer, Op,
-    POWERS, Partial, Partials, Results, SUM_BOUND, Scales, Source, Special, Sum, SumState, Term,
+    self, Arg, Compare, Decimal, DecimalWord, ExtremeState, ExtremeValue, MAX_READ_SCALE,
+    MAX_SCALE, Offer, Op, POWERS, Partial, Partials, Results, SUM_BOUND, Scales, Source, Special,
+    Sum, SumState, Term, Terms,
 };
 use tessera_testing::{bounded_sum, decimal_parts, flags, nrows, property};
 
@@ -418,8 +419,52 @@ fn sum_adds(column: &Column, selected: &[u64]) {
     );
 }
 
-/// [`decimal::extreme`] over a selection: the row and decimal found, and
-/// the rows left.
+/// A column's arguments as terms (a value not a decimal is one the
+/// caller takes), handed over in bulk or not: the decimals of a word of the
+/// scale of its first one, as a numeric column read in place hands them.
+struct ArgTerms<'a> {
+    column: &'a Column,
+    bulk: bool,
+}
+
+impl Terms for ArgTerms<'_> {
+    fn term(&self, row: usize) -> Term {
+        match self.column.0[row] {
+            Arg::Null => Term::Null,
+            Arg::Decimal(decimal) => Term::Decimal(decimal),
+            Arg::Other => Term::Other,
+        }
+    }
+
+    fn fold_decimals(
+        &self,
+        index: usize,
+        rows: u64,
+        mut add: impl FnMut(usize, i64),
+    ) -> Option<DecimalWord> {
+        if !self.bulk {
+            return None;
+        }
+        let mut scale = None;
+        let mut bulk = 0;
+        for bit in (0..64).filter(|bit| rows >> bit & 1 == 1) {
+            if let Arg::Decimal(decimal) = self.column.0[index * 64 + bit]
+                && *scale.get_or_insert(decimal.scale()) == decimal.scale()
+            {
+                add(bit, decimal.value());
+                bulk |= 1 << bit;
+            }
+        }
+        Some(DecimalWord {
+            rows: bulk,
+            scale: scale.unwrap_or(0),
+        })
+    }
+}
+
+/// [`decimal::extreme`] over a selection, with the column's decimals
+/// handed over in bulk and without: the row and decimal found, and the
+/// rows left, the same both ways.
 fn extreme_of(
     column: &Column,
     rows: &[u64],
@@ -427,16 +472,20 @@ fn extreme_of(
     state: Option<Decimal>,
 ) -> (Option<(usize, Decimal)>, Vec<u64>) {
     let nrows = column.0.len();
-    let mut rest = words(nrows, |_| true);
-    let found = decimal::extreme(
-        column,
-        RowMaskView::try_new(nrows, rows).unwrap(),
-        max,
-        state,
-        &mut RowMask::try_new(nrows, &mut rest).unwrap(),
-    )
-    .unwrap();
-    (found, rest)
+    let mut results = [true, false].map(|bulk| {
+        let mut rest = words(nrows, |_| true);
+        let found = decimal::extreme(
+            &ArgTerms { column, bulk },
+            RowMaskView::try_new(nrows, rows).unwrap(),
+            max,
+            state,
+            &mut RowMask::try_new(nrows, &mut rest).unwrap(),
+        )
+        .unwrap();
+        (found, rest)
+    });
+    assert_eq!(results[0], results[1], "in bulk and row by row");
+    std::mem::take(&mut results[0])
 }
 
 #[test]
@@ -503,6 +552,14 @@ fn extreme_takes_the_later_of_equal_values_of_other_scales() {
         assert_eq!(
             extreme_of(&column, &[0b1101], max, state),
             (Some((2, one)), vec![0b1000])
+        );
+    }
+    // Of equal values of one scale, the last row.
+    let same = Column(vec![Arg::Decimal(one), Arg::Null, Arg::Decimal(one)]);
+    for max in [false, true] {
+        assert_eq!(
+            extreme_of(&same, &[0b101], max, None),
+            (Some((2, one)), vec![0])
         );
     }
     // A state that beats the batch stays; so does one where the rows are

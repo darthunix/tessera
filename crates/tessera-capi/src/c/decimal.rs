@@ -1130,7 +1130,7 @@ pub unsafe extern "C" fn tess_decimal_extreme(
     unsafe {
         guard(status, || {
             let rows = selection(rows)?;
-            let column = Column::new(column, rows.nrows())?;
+            let terms = SumColumn::new(SumInput::Numeric, column, rows.nrows())?;
             let extreme = extreme.as_mut().context("a null extreme")?;
             let row = row.as_mut().context("a null row")?;
             let mut rest = output(rest)?;
@@ -1140,9 +1140,7 @@ pub unsafe extern "C" fn tess_decimal_extreme(
             } else {
                 None
             };
-            let found = with_column!(column, |source| decimal::extreme(
-                source, rows, max, state, &mut rest
-            ))?;
+            let found = decimal::extreme(&terms, rows, max, state, &mut rest)?;
             *row = match found {
                 None => -1,
                 Some((at, decimal)) => {
