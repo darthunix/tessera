@@ -24,9 +24,8 @@
 /* A round with at least this many rows is published as it is, not copied. */
 #define JOIN_DENSE_ROUND 32
 /*
- * The Bloom filter: after this many probed rows with a valid key, a table
- * of at least JOIN_BLOOM_MIN_ROWS rows (internal.h) gets one when fewer
- * than half of them found a record.
+ * The Bloom filter: after this many probed rows with a valid key, the
+ * table gets one when join_bloom_wanted (costs.h) says so.
  */
 #define JOIN_BLOOM_SAMPLE 4096
 /*

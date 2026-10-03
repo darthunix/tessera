@@ -876,8 +876,7 @@ join_cost(PlannerInfo *root, RelOptInfo *joinrel, RelOptInfo *innerrel, JoinType
 		out_share = share;
 	batches = compact ? pairs / JOIN_COST_BATCH_ROWS :
 		probe_rows / JOIN_COST_BATCH_ROWS * (1.0 - pow(1.0 - out_share, JOIN_COST_BATCH_ROWS));
-	bloom = tess_join_bloom_ratio > 0 && table_rows >= JOIN_BLOOM_MIN_ROWS &&
-		(tess_join_bloom_ratio >= 1.0 || share < tess_join_bloom_ratio);
+	bloom = join_bloom_wanted(tess_join_bloom_ratio, table_rows, share, 1.0);
 	/*
 	 * A record, its payload 8 bytes for the NULL bits of the columns kept
 	 * and 8 a column, and 8 of the index.

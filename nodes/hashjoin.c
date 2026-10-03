@@ -1010,10 +1010,8 @@ decide_bloom(TessHashJoinState *state, uint64 rows, uint64 found)
 	if (ratio < 1.0 && state->sample_rows < JOIN_BLOOM_SAMPLE)
 		return;
 	state->bloom.decided = true;
-	if (ratio <= 0.0 ||
-		(ratio < 1.0 &&
-		 ((double) state->sample_found >= ratio * state->sample_rows ||
-		  state->build_rows < JOIN_BLOOM_MIN_ROWS)))
+	if (!join_bloom_wanted(ratio, (double) state->build_rows, (double) state->sample_found,
+						   (double) state->sample_rows))
 		return;
 	/*
 	 * A shared table's filter: the first participant that wants it builds

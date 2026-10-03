@@ -64,6 +64,23 @@ extern double tess_join_bloom_ratio;
  * executor's rule, and the planner's expectation of the filter.
  */
 #define JOIN_BLOOM_MIN_ROWS 4096
+
+/*
+ * Whether a hash join's table gets a Bloom filter of its keys: always at
+ * a tessera.join_bloom_ratio of 1, never at 0, and between them for a
+ * table of JOIN_BLOOM_MIN_ROWS rows at least when fewer than ratio of the
+ * probed rows find a record. The executor asks it with the rows of its
+ * sample, the planner with its estimate of the share found and one row.
+ */
+static inline bool
+join_bloom_wanted(double ratio, double table_rows, double found, double probed)
+{
+	if (ratio <= 0.0)
+		return false;
+	if (ratio >= 1.0)
+		return true;
+	return table_rows >= JOIN_BLOOM_MIN_ROWS && found < ratio * probed;
+}
 /* tessera.bitmap_page_rows: see nodes/module.c. */
 extern double tess_bitmap_page_rows;
 /* tessera.index_min_correlation and tessera.index_min_rows: see nodes/module.c. */
