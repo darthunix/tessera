@@ -34,8 +34,8 @@ typedef struct FastDecimal
  * decimals' sum (numeric values of at most 18 digits, integers at scale 0)
  * at the largest scale met, below 10^36 in magnitude, the count, and the
  * numeric sum of the rest, NaN, infinities, longer values and the
- * decimals' sums past the bound. min and max: a copy of the extreme and its
- * decimal, when it has one. A float's: the count, sum and sum of squared
+ * decimals' sums past the bound. min and max: the extreme, a decimal or
+ * else a copy of the numeric (fast_extreme_numeric). A float's: the count, sum and sum of squared
  * deviations float8_accum keeps (the sum of a float4 in float4), or the
  * extreme.
  */
@@ -229,22 +229,38 @@ sum_state_term(const GenericAgg *generic, const TessDatumColumn *column, int row
 	}
 }
 
-/* A new extreme of min or max copied into the state, with its decimal when it has one. */
+/*
+ * A new extreme of min or max into the state: a decimal as it is, any
+ * other value as a copy in the states' context, the copy it had freed.
+ */
 static void
 fast_extreme_set(FastState *fast, Datum value, const FastDecimal *decimal,
 				 MemoryContext states)
 {
 	MemoryContext old;
 
-	if (fast->has_extreme)
+	if (fast->has_extreme && !fast->decimal_valid)
 		pfree(DatumGetPointer(fast->extreme));
-	old = MemoryContextSwitchTo(states);
-	fast->extreme = PointerGetDatum(pg_detoast_datum_copy((struct varlena *) DatumGetPointer(value)));
-	MemoryContextSwitchTo(old);
 	fast->has_extreme = true;
 	fast->decimal_valid = decimal != NULL;
 	if (decimal != NULL)
+	{
 		fast->decimal = *decimal;
+		fast->extreme = (Datum) 0;
+		return;
+	}
+	old = MemoryContextSwitchTo(states);
+	fast->extreme = PointerGetDatum(pg_detoast_datum_copy((struct varlena *) DatumGetPointer(value)));
+	MemoryContextSwitchTo(old);
+}
+
+/* The numeric of a state's extreme, a decimal's made in the current context. */
+static Datum
+fast_extreme_numeric(const FastState *fast)
+{
+	if (!fast->decimal_valid)
+		return fast->extreme;
+	return NumericGetDatum(int64_div_fast_to_numeric(fast->decimal.value, fast->decimal.scale));
 }
 
 /*
@@ -451,7 +467,8 @@ fast_row_numeric(const GenericAgg *generic, int row)
  * compares with it, with a state's extreme that is not a decimal, and
  * with each other. Of equal values the later row wins, the state's
  * extreme being the earliest, as numeric_larger and numeric_smaller keep
- * it; the winner of the batch is copied into the state once.
+ * it; the winner of the batch goes into the state once, a decimal without
+ * a numeric made.
  */
 static void
 fast_extreme_batch(GenericAgg *generic, const TessRowMask *rows, MemoryContext states)
@@ -480,23 +497,23 @@ fast_extreme_batch(GenericAgg *generic, const TessRowMask *rows, MemoryContext s
 	if (generic->kernels->decimal_extreme(&generic->columns[0], rows, max, &extreme, &found,
 										  &rest, &generic->decimal_status) != TESS_OK)
 		tess_status_report(&generic->decimal_status);
-	/* The best so far: a row of the batch, or -1 for the state's extreme. */
+	/*
+	 * The best so far: a row of the batch, or -1 for the state's extreme,
+	 * its numeric made only for the core's comparisons.
+	 */
 	best = found;
-	if (found >= 0)
+	if (found >= 0 && any && !fast->decimal_valid)
 	{
-		best_value = fast_row_numeric(generic, found);
-		if (any && !fast->decimal_valid)
-		{
-			int			cmp = DatumGetInt32(DirectFunctionCall2(numeric_cmp, best_value,
-																fast->extreme));
+		Datum		value = fast_row_numeric(generic, found);
+		int			cmp = DatumGetInt32(DirectFunctionCall2(numeric_cmp, value, fast->extreme));
 
-			if (max ? cmp < 0 : cmp > 0)
-				best = -1;
-		}
+		best = (max ? cmp < 0 : cmp > 0) ? -1 : found;
+		best_value = best < 0 ? fast->extreme : value;
 	}
-	if (best < 0 && any)
-		best_value = fast->extreme;
-	while ((row = tess_row_mask_next(&rest, row)) >= 0)
+	if ((row = tess_row_mask_next(&rest, row)) >= 0 && best_value == (Datum) 0)
+		best_value = best >= 0 ? fast_row_numeric(generic, best) :
+			any ? fast_extreme_numeric(fast) : (Datum) 0;
+	for (; row >= 0; row = tess_row_mask_next(&rest, row))
 	{
 		Datum		value = fast_row_numeric(generic, row);
 
@@ -595,7 +612,7 @@ fast_value(GenericAgg *generic, bool *isnull)
 			Float8GetDatum(fast->sx);
 	}
 	if (generic->fast == FAST_MIN || generic->fast == FAST_MAX)
-		return fast->extreme;
+		return fast_extreme_numeric(fast);
 	if (generic->fast_int8_result)
 		return fast_int8(fast->sum, fast->has_rest ? fast->rest : (Datum) 0);
 	sum = fast_numeric(fast->sum, fast->scale);
@@ -677,7 +694,7 @@ fast_partial(GenericAgg *generic, bool *isnull)
 		return generic->fast_float == FLOAT4OID ? Float4GetDatum(fast->sx4) :
 			Float8GetDatum(fast->sx);
 	if (generic->fast == FAST_MIN || generic->fast == FAST_MAX)
-		return fast->extreme;
+		return fast_extreme_numeric(fast);
 	if (generic->fast_int8_result)
 		return fast_int8(fast->sum, fast->has_rest ? fast->rest : (Datum) 0);
 	words[0] = (uint64) fast->sum;
