@@ -83,6 +83,20 @@ pub struct Snapshot {
     pub directory: PathBuf,
 }
 
+/// Whether a file decides how the benchmarks build, so that two sides
+/// that differ in it are not comparable: the manifests, the toolchain,
+/// Cargo's configuration (but cargo-mutants', which no build reads) and
+/// the benchmark programs.
+fn shapes_build(name: &str) -> bool {
+    name.ends_with("Cargo.toml")
+        || name.ends_with("Cargo.lock")
+        || name == "rust-toolchain"
+        || name == "rust-toolchain.toml"
+        || ((name.starts_with(".cargo/") || name.contains("/.cargo/"))
+            && !name.ends_with("/mutants.toml"))
+        || (name.starts_with("crates/tessera-capi/benches/") && name.ends_with(".rs"))
+}
+
 fn copy_files(source: &Path, destination: &Path, paths: &[PathBuf]) -> Result<()> {
     for path in paths {
         ensure!(
@@ -186,14 +200,7 @@ impl Snapshot {
             hash.update(name.as_bytes());
             hash.update([0]);
             hash.update(file_hash.as_bytes());
-            if name.ends_with("Cargo.toml")
-                || name.ends_with("Cargo.lock")
-                || name == "rust-toolchain"
-                || name == "rust-toolchain.toml"
-                || name.starts_with(".cargo/")
-                || name.contains("/.cargo/")
-                || (name.starts_with("crates/tessera-capi/benches/") && name.ends_with(".rs"))
-            {
+            if shapes_build(name) {
                 compatibility.insert(path, file_hash);
             }
         }
@@ -243,6 +250,27 @@ impl Snapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_files_that_decide_the_build_are_compared() {
+        for name in [
+            "Cargo.toml",
+            "crates/tessera-kernels/Cargo.toml",
+            "Cargo.lock",
+            "rust-toolchain.toml",
+            ".cargo/config.toml",
+            "crates/tessera-capi/benches/support/mod.rs",
+        ] {
+            assert!(shapes_build(name), "{name}");
+        }
+        for name in [
+            ".cargo/mutants.toml",
+            "crates/tessera-kernels/src/table/batch.rs",
+            "crates/tessera-capi/benches/README.md",
+        ] {
+            assert!(!shapes_build(name), "{name}");
+        }
+    }
 
     #[test]
     fn snapshots_preserve_index_dirty_files_and_untracked_sources() -> Result<()> {
