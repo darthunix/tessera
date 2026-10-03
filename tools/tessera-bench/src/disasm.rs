@@ -479,6 +479,10 @@ pub struct Difference {
     pub only_before: BTreeSet<String>,
     pub only_after: BTreeSet<String>,
     pub changed: BTreeSet<String>,
+    /// The changed functions whose instructions are the same but for
+    /// their immediates: a field that moved within a struct, a constant
+    /// that changed. The same work, at other offsets.
+    pub immediates: BTreeSet<String>,
     pub same: usize,
 }
 
@@ -486,6 +490,60 @@ impl Difference {
     pub fn is_empty(&self) -> bool {
         self.only_before.is_empty() && self.only_after.is_empty() && self.changed.is_empty()
     }
+}
+
+/// An instruction listing with its immediates masked: `#0x58`, `#-16` and
+/// `$0x10` become `#N` and `$N`, a displacement before a register,
+/// `0x10(%rsp)`, `N(%rsp)`.
+fn without_immediates(body: &str) -> String {
+    let bytes = body.as_bytes();
+    let mut out = String::with_capacity(body.len());
+    let mut at = 0;
+    while at < bytes.len() {
+        let byte = bytes[at];
+        let number = |from: usize| {
+            let mut end = from;
+            if bytes.get(end) == Some(&b'-') {
+                end += 1;
+            }
+            let digits = if bytes[end..].starts_with(b"0x") {
+                end += 2;
+                bytes[end..]
+                    .iter()
+                    .take_while(|b| b.is_ascii_hexdigit())
+                    .count()
+            } else {
+                bytes[end..]
+                    .iter()
+                    .take_while(|b| b.is_ascii_digit())
+                    .count()
+            };
+            (digits > 0).then_some(end + digits)
+        };
+        if (byte == b'#' || byte == b'$')
+            && let Some(end) = number(at + 1)
+        {
+            out.push(char::from(byte));
+            out.push('N');
+            at = end;
+            continue;
+        }
+        let starts_word =
+            at == 0 || !bytes[at - 1].is_ascii_alphanumeric() && bytes[at - 1] != b'_';
+        if starts_word
+            && (byte == b'-' || byte.is_ascii_digit())
+            && let Some(end) = number(at)
+            && bytes.get(end) == Some(&b'(')
+        {
+            out.push('N');
+            at = end;
+            continue;
+        }
+        let length = body[at..].chars().next().map_or(1, char::len_utf8);
+        out.push_str(&body[at..at + length]);
+        at += length;
+    }
+    out
 }
 
 /// Compare two programs' functions name by name.
@@ -497,8 +555,14 @@ pub fn compare(before: &Functions, after: &Functions) -> Difference {
                 difference.only_before.insert(name.clone());
             }
             Some(other) if other == bodies => difference.same += 1,
-            Some(_) => {
+            Some(other) => {
                 difference.changed.insert(name.clone());
+                let shapes = |bodies: &[String]| -> Vec<String> {
+                    bodies.iter().map(|body| without_immediates(body)).collect()
+                };
+                if shapes(other) == shapes(bodies) {
+                    difference.immediates.insert(name.clone());
+                }
             }
         }
     }
@@ -692,6 +756,27 @@ Disassembly of section __TEXT,__text:
         let mut pages = Pages::default();
         assert_eq!(pages.normalize("adrp\tx8, ADDR"), "adrp\tx8, ADDR");
         assert_eq!(pages.normalize("ldr\tq1, [x8]"), "ldr\tq1, [x8, LO12]");
+    }
+
+    #[test]
+    fn a_moved_field_changes_immediates_only() {
+        let listing = "\
+0000000000004000 <_f>:
+    4000:\tldr\tx8, [x0, #0x58]
+    4004:\tadd\tx8, x8, #16
+    4008:\tret
+";
+        let before = parse_all(listing);
+        let moved = parse_all(&listing.replace("#0x58", "#0x60").replace("#16", "#24"));
+        let difference = compare(&before, &moved);
+        assert_eq!(difference.changed.len(), 1);
+        assert_eq!(difference.immediates.len(), 1, "the same instructions");
+        let other = parse_all(&listing.replace("add\tx8, x8, #16", "sub\tx8, x8, #16"));
+        assert!(compare(&before, &other).immediates.is_empty());
+        assert_eq!(
+            without_immediates("mov    0x10(%rsp),%rax\nmov    $0x100,%eax\nldr\tx8, [x0, #-8]"),
+            "mov    N(%rsp),%rax\nmov    $N,%eax\nldr\tx8, [x0, #N]"
+        );
     }
 
     #[test]
