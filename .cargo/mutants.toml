@@ -21,10 +21,14 @@ exclude_globs = [
 # (WordValues::fold; the table's resolve_rows, append_rows,
 # append_column_rows, and the keys' normalize_word and WordKeys::load,
 # which those inline): their mutants of the step, their only &= and -.
+# A batch of Datum rows all by value takes the column-wise path of an
+# append (spill_columns::append) and writes the chunk the row-wise path
+# writes: only the time tells them apart, so `by_value` false is the same.
 exclude_re = [
     "<impl [a-z:]*Debug for ",
     "<impl Iterator for Ones>::next",
     "replace (&= with [|^]=|- with [+/]) in (<impl Iterator for WordValues<F>>::fold|resolve_rows|append_rows|append_column_rows|normalize_word|WordKeys<'a>::load)$",
+    "replace <impl RowValues for DatumRows<'_>>::by_value -> bool with false$",
 ]
 
 # A mutant that makes a loop endless is stopped at three times the

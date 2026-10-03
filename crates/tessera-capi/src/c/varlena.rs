@@ -44,3 +44,34 @@ pub(super) unsafe fn varlena_data<'a>(datum: u64) -> Option<&'a [u8]> {
         }
     }
 }
+
+/// The bytes of a varlena with its header, as `VARSIZE_ANY` counts them: a
+/// 1-byte header's, a 4-byte header's (a compressed value's too), or an
+/// external pointer's own, its 2-byte header and the pointer its tag
+/// names.
+///
+/// # Safety
+///
+/// `pointer` must point to a whole varlena, valid for the call.
+#[inline]
+pub(super) unsafe fn varlena_size(pointer: *const u8) -> anyhow::Result<usize> {
+    // SAFETY: the caller's contract; a header is read before the bytes it
+    // says follow.
+    unsafe {
+        let first = *pointer;
+        if first == 0x01 {
+            // VARTAG_INDIRECT and the expanded tags hold a pointer,
+            // VARTAG_ONDISK a varatt_external of 16 bytes.
+            let body = match *pointer.add(1) {
+                1..=3 => 8,
+                18 => 16,
+                tag => anyhow::bail!("an external varlena of tag {tag}"),
+            };
+            Ok(2 + body)
+        } else if first & 0x01 == 0x01 {
+            Ok(usize::from(first >> 1))
+        } else {
+            Ok((pointer.cast::<u32>().read_unaligned() >> 2) as usize)
+        }
+    }
+}
