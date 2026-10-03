@@ -228,6 +228,25 @@ pub extern "C" fn tess_spill_columns_layout(what: c_int) -> usize {
     }
 }
 
+/// `TessSpillColumnsShape`: a chunk's lanes of NULL bits.
+pub const COLUMNS_SHAPE_NULL_LANES: c_int = 0;
+/// The most its packed form takes past its bytes.
+pub const COLUMNS_SHAPE_SLACK: c_int = 1;
+
+/// `tess_spill_columns_shape`: a `TessSpillColumnsShape` count of a chunk
+/// of columns of `words` stored words, which the C side's inline formulas
+/// repeat (`tess_spill_columns_null_lanes`, `TESS_SPILL_COLUMNS_SLACK`) and
+/// its tests compare; 0 for another code.
+#[unsafe(no_mangle)]
+pub extern "C" fn tess_spill_columns_shape(words: u32, what: c_int) -> usize {
+    let words = words as usize;
+    match what {
+        COLUMNS_SHAPE_NULL_LANES => columns::null_lanes(words),
+        COLUMNS_SHAPE_SLACK => columns::pack_slack(words),
+        _ => 0,
+    }
+}
+
 /// `tess_spill_columns_init`: make the `len` bytes at `chunk` an empty
 /// chunk of columns of `words` stored words; its capacity into `capacity`.
 ///

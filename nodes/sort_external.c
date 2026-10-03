@@ -216,7 +216,8 @@ writer_add(TessSortState *state, RunWriter *writer, int n, Datum *const *values,
 			for (int column = 0; column < state->ncolumns; column++)
 			{
 				uint64	   *lane = words + capacity * column;
-				uint64	   *column_nulls = nulls + capacity * (column / 64);
+				uint64	   *column_nulls = nulls +
+					capacity * tess_spill_columns_null_lane(column);
 				const bool *flags = &isnull[column][row];
 
 				memcpy(lane, &values[column][row], sizeof(uint64) * take);
@@ -225,7 +226,7 @@ writer_add(TessSortState *state, RunWriter *writer, int n, Datum *const *values,
 				for (int at = 0; at < take; at++)
 					if (flags[at])
 					{
-						column_nulls[at] |= UINT64CONST(1) << (column % 64);
+						column_nulls[at] |= tess_spill_columns_null_bit(column);
 						lane[at] = 0;
 					}
 			}
@@ -270,7 +271,8 @@ writer_add(TessSortState *state, RunWriter *writer, int n, Datum *const *values,
 
 			if (isnull[column][row])
 			{
-				nulls[capacity * (column / 64)] |= UINT64CONST(1) << (column % 64);
+				nulls[capacity * tess_spill_columns_null_lane(column)] |=
+					tess_spill_columns_null_bit(column);
 				lane[0] = 0;
 			}
 			else if (typbyvals[column])
@@ -494,7 +496,7 @@ input_take(TessSortState *state, MergeInput *input, uint32 place, int out,
 	{
 		uint64		word = words[capacity * column];
 
-		isnull[column][out] = (nulls[capacity * (column / 64)] >> (column % 64)) & 1;
+		isnull[column][out] = tess_spill_columns_is_null(nulls[capacity * tess_spill_columns_null_lane(column)], column);
 		if (isnull[column][out])
 			values[column][out] = (Datum) 0;
 		else if (typbyvals[column])
@@ -512,11 +514,11 @@ static Datum
 input_value(TessSortState *state, MergeInput *input, int column, bool *isnull)
 {
 	Size		capacity = tess_spill_columns_capacity(input->chunk);
-	uint64		nulls = tess_spill_columns_lane(input->chunk, 0)[capacity * (column / 64) +
+	uint64		nulls = tess_spill_columns_lane(input->chunk, 0)[capacity * tess_spill_columns_null_lane(column) +
 																input->place];
 	uint64		word = tess_spill_columns_word(input->chunk, 0)[capacity * column + input->place];
 
-	*isnull = (nulls >> (column % 64)) & 1;
+	*isnull = tess_spill_columns_is_null(nulls, column);
 	if (*isnull)
 		return (Datum) 0;
 	if (state->rows_config.typbyvals[column])

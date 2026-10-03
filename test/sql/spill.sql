@@ -23,6 +23,10 @@ CREATE FUNCTION tessera_test_spill_bytes(bigint)
 RETURNS void
 AS :'spill_test', 'tessera_test_spill_bytes'
 LANGUAGE C STRICT;
+CREATE FUNCTION tessera_test_spill_lanes()
+RETURNS boolean
+AS :'spill_test', 'tessera_test_spill_lanes'
+LANGUAGE C STRICT;
 
 SELECT tessera_test_spill_serial() AS serial \gset
 \echo :serial
@@ -31,6 +35,9 @@ SELECT tessera_test_spill_shared() AS shared \gset
 -- A chunk of records goes packed, and reads back whole.
 SELECT tessera_test_spill_packed() AS packed \gset
 \echo :packed
+-- The C formulas of a chunk's lanes are Rust's at every count of words.
+SELECT tessera_test_spill_lanes() AS lanes \gset
+\echo :lanes
 
 -- Every misuse and damaged block is an ERROR.
 SELECT tessera_test_spill_error(1);
@@ -55,3 +62,4 @@ DROP FUNCTION tessera_test_spill_shared();
 DROP FUNCTION tessera_test_spill_packed();
 DROP FUNCTION tessera_test_spill_error(integer);
 DROP FUNCTION tessera_test_spill_bytes(bigint);
+DROP FUNCTION tessera_test_spill_lanes();
