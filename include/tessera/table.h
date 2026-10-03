@@ -652,6 +652,14 @@ extern TessStatusCode tess_table_bloom_words(uint64 records, Size *nwords,
 											 TessStatus *status);
 
 /*
+ * tess_table_bloom_words within an eighth of limit bytes: halved while
+ * larger, one word at least. A spill's filter of every inner row takes
+ * it, so that a small hash_mem keeps room for the rows.
+ */
+extern TessStatusCode tess_table_bloom_words_within(uint64 records, Size limit,
+													Size *nwords, TessStatus *status);
+
+/*
  * Clear the nwords words at words and set the bits of every record of the
  * table's chunks: no append may run at the same time, as for a walk.
  */

@@ -1615,6 +1615,30 @@ pub unsafe extern "C" fn tess_table_bloom_words(
     }
 }
 
+/// `tess_table_bloom_words_within`: the words of a Bloom filter for a
+/// table of `records` records within an eighth of `limit` bytes.
+///
+/// # Safety
+///
+/// `nwords` must point to a writable size; `status` as for every entry
+/// point.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tess_table_bloom_words_within(
+    records: u64,
+    limit: usize,
+    nwords: *mut usize,
+    status: *mut Status,
+) -> Code {
+    // SAFETY: the caller's contract.
+    unsafe {
+        guard(status, || {
+            let out = nwords.as_mut().context("a null result")?;
+            *out = tessera_kernels::table::bloom::words_within(records, limit)?;
+            Ok(())
+        })
+    }
+}
+
 /// `tess_table_bloom`: fill a Bloom filter with the table's records.
 ///
 /// # Safety

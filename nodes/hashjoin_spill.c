@@ -899,16 +899,10 @@ join_start_spill(TessHashJoinState *state)
 	/* A filter of every inner row, sized for the rows expected. */
 	state->counters[JOIN_BLOOM_FILTERS]++;
 	expected_rows = Max((uint64) state->inner_rows, state->build_rows * 2);
-	check(state, state->kernels->table_bloom_words(Max(expected_rows, 1),
-												   &spill->bloom_words,
-												   &state->status));
-	/*
-	 * An eighth of hash_mem at most: a smaller filter lets more rows
-	 * through, a larger one would leave a small hash_mem no room.
-	 */
-	while (spill->bloom_words > 1 &&
-		   sizeof(uint64) * spill->bloom_words > get_hash_memory_limit() / 8)
-		spill->bloom_words /= 2;
+	check(state, state->kernels->table_bloom_words_within(Max(expected_rows, 1),
+														  get_hash_memory_limit(),
+														  &spill->bloom_words,
+														  &state->status));
 	spill->bloom = MemoryContextAllocExtended(spill->context,
 											  mul_size(sizeof(uint64), spill->bloom_words),
 											  MCXT_ALLOC_HUGE | MCXT_ALLOC_ZERO);
