@@ -143,21 +143,6 @@ fast_kind(const Aggref *agg, GenericAgg *generic, bool own_states)
 
 #ifdef HAVE_INT128
 
-/* 10^0 through 10^18: a decimal's scale changed exactly. */
-static const int64 fast_powers[TESS_DECIMAL_DIGITS + 1] = {
-	INT64CONST(1), INT64CONST(10), INT64CONST(100), INT64CONST(1000),
-	INT64CONST(10000), INT64CONST(100000), INT64CONST(1000000),
-	INT64CONST(10000000), INT64CONST(100000000), INT64CONST(1000000000),
-	INT64CONST(10000000000), INT64CONST(100000000000),
-	INT64CONST(1000000000000), INT64CONST(10000000000000),
-	INT64CONST(100000000000000), INT64CONST(1000000000000000),
-	INT64CONST(10000000000000000), INT64CONST(100000000000000000),
-	INT64CONST(1000000000000000000)
-};
-
-/* The bound of a decimals' sum: 10^36, with room for one more term. */
-#define FAST_BOUND ((int128) INT64CONST(1000000000000000000) * INT64CONST(1000000000000000000))
-
 /*
  * The numeric of an int128 at a scale, with that display scale, as the
  * core makes one of an int128 sum: a part of 18 digits and the rest.
@@ -165,7 +150,8 @@ static const int64 fast_powers[TESS_DECIMAL_DIGITS + 1] = {
 static Datum
 fast_numeric(int128 value, int scale)
 {
-	int64		unit = fast_powers[TESS_DECIMAL_DIGITS];
+	/* 10^18 */
+	int64		unit = INT64CONST(1000000000000000000);
 
 	if (value >= PG_INT64_MIN && value <= PG_INT64_MAX)
 		return NumericGetDatum(int64_div_fast_to_numeric((int64) value, scale));
@@ -1193,65 +1179,48 @@ sum_state_merge_rest(TessAggState *state, const GenericAgg *generic, int slot, i
 }
 
 /*
- * A sum of decimals at scale `from` brought to scale `to`, not smaller: false,
- * the sum unchanged, when it would pass the bound.
- */
-static bool
-fast_rescale(int128 *sum, int from, int to)
-{
-	int128		factor = fast_powers[to - from];
-
-	if (*sum >= FAST_BOUND / factor || *sum <= -FAST_BOUND / factor)
-		return false;
-	*sum *= factor;
-	return true;
-}
-
-/*
- * A participant's partial state of the node's own format into a plain
- * final aggregation's state (fast_partial): its count added, its sum at the
- * larger of the two scales, or, when either sum would pass the bound at
- * it, to the rest at its own scale (the rest's display scale keeps it),
- * and its rest to the rest.
+ * The participants' partial states of the node's own format (fast_partial)
+ * in a batch, into a plain final aggregation's state: the kernels merge
+ * the sums and counts (fast_sum), the sums at the larger of the scales;
+ * a state they leave, one with a rest or one the sum refuses at its bound,
+ * goes to the rest here, its count added, its sum at its own scale (the
+ * rest's display scale keeps it) and its rest.
  */
 void
-agg_fast_merge(TessAggState *state, GenericAgg *generic, Datum value, bool isnull)
+agg_fast_merge(TessAggState *state, GenericAgg *generic, const TessDatumColumn *column,
+			   const TessRowMask *rows)
 {
 	MemoryContext states = state->generic_agg->curaggcontext->ecxt_per_tuple_memory;
-	MemoryContext old;
-	uint64		words[TESS_TABLE_SUM_WORDS];
-	Datum		rest;
-	FastState  *fast;
-	int128		term;
-	int			scale;
+	MemoryContext old =
+		MemoryContextSwitchTo(state->css.ss.ps.ps_ExprContext->ecxt_per_tuple_memory);
+	TessRowMask rest;
+	int			row = -1;
 
-	if (isnull)
-		return;
-	old = MemoryContextSwitchTo(state->css.ss.ps.ps_ExprContext->ecxt_per_tuple_memory);
-	sum_state_read(value, words, &rest);
-	scale = (int) (words[3] & TESS_TABLE_SUM_SCALE_MASK);
-	if ((words[3] & ~TESS_TABLE_SUM_SCALE_MASK) != 0 || scale > TESS_DECIMAL_DIGITS)
-		elog(ERROR, "TessAgg received a partial sum state of another format");
-	if (generic->state_null)
+	generic->columns[0] = *column;
+	rest = fast_sum(generic, rows, states);
+	while ((row = tess_row_mask_next(&rest, row)) >= 0)
 	{
-		generic->state = PointerGetDatum(MemoryContextAllocZero(states, sizeof(FastState)));
-		generic->state_null = false;
+		uint64		words[TESS_TABLE_SUM_WORDS];
+		Datum		numeric_rest;
+		FastState  *fast;
+		int			scale;
+
+		sum_state_read(column->values[row], words, &numeric_rest);
+		scale = (int) (words[3] & TESS_TABLE_SUM_SCALE_MASK);
+		if ((words[3] & ~TESS_TABLE_SUM_SCALE_MASK) != 0 || scale > TESS_DECIMAL_DIGITS)
+			elog(ERROR, "TessAgg received a partial sum state of another format");
+		if (generic->state_null)
+		{
+			generic->state = PointerGetDatum(MemoryContextAllocZero(states, sizeof(FastState)));
+			generic->state_null = false;
+		}
+		fast = (FastState *) DatumGetPointer(generic->state);
+		fast->count += (int64) words[2];
+		fast_rest(fast, fast_numeric((int128) (((uint128) words[1] << 64) | words[0]), scale),
+				  states);
+		if (numeric_rest != (Datum) 0)
+			fast_rest(fast, numeric_rest, states);
 	}
-	fast = (FastState *) DatumGetPointer(generic->state);
-	fast->count += (int64) words[2];
-	term = (int128) (((uint128) words[1] << 64) | words[0]);
-	if (scale > fast->scale ? fast_rescale(&fast->sum, fast->scale, scale) :
-		fast_rescale(&term, scale, fast->scale))
-	{
-		fast->scale = Max(fast->scale, scale);
-		fast->sum += term;
-		if (fast->sum >= FAST_BOUND || fast->sum <= -FAST_BOUND)
-			fast_flush(fast, states);
-	}
-	else
-		fast_rest(fast, fast_numeric(term, scale), states);
-	if (rest != (Datum) 0)
-		fast_rest(fast, rest, states);
 	MemoryContextSwitchTo(old);
 }
 

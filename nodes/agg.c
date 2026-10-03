@@ -675,14 +675,15 @@ accumulate(TessAggState *state, AggValue *value, TessBatch *batch, int nrows)
 	 */
 	if (state->finalize)
 	{
+#ifdef HAVE_INT128
+		if (value->kind == AGG_GENERIC && value->generic->fast != FAST_NONE)
+		{
+			agg_fast_merge(state, value->generic, &computed, &rows);
+			return;
+		}
+#endif
 		while ((row = tess_row_mask_next(&rows, row)) >= 0)
 		{
-#ifdef HAVE_INT128
-			if (value->kind == AGG_GENERIC && value->generic->fast != FAST_NONE)
-				agg_fast_merge(state, value->generic, computed.values[row],
-						   computed.isnull[row]);
-			else
-#endif
 			if (value->kind == AGG_GENERIC)
 				agg_generic_combine(state, value->generic, computed.values[row],
 								computed.isnull[row]);

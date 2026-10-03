@@ -631,6 +631,9 @@ SET parallel_tuple_cost = 0;
 SET min_parallel_table_scan_size = 0;
 EXPLAIN (COSTS OFF) SELECT sum(n), avg(b), max(u) FROM agg_fast;
 SELECT agg_same($$SELECT sum(n), avg(b), max(u), min(n) FROM agg_fast$$);
+-- Partial states with a rest of longer values, not NaN, which the final
+-- aggregation merges by the core's means.
+SELECT agg_same($$SELECT sum(u), avg(u) FROM agg_fast WHERE u > '-Infinity' AND u < 'Infinity'$$);
 -- sum and avg of smallint, with and without groups.
 SELECT agg_same($$SELECT sum(s), avg(s) FROM agg_fast$$);
 SELECT agg_same($$SELECT g, sum(s), avg(s), sum(b) FROM agg_fast GROUP BY g$$);
