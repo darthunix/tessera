@@ -148,8 +148,12 @@ typedef struct TessDecimalSum
  * an integer a decimal at scale 0. A row that is not a decimal, or whose
  * addition (or the sum's rescaling to its scale) would reach 10^36, is set
  * in rest, whose other bits are cleared, for the caller to add by the
- * core's means. *sum is written on success only; a sum past its bound or
- * of a scale past 18, or another kind, is an invalid argument.
+ * core's means. Of kind TESS_TABLE_SUM_OF_STATE, the node's partial sum
+ * states (tessera/table.h) merge into *sum instead, their sums added and
+ * their counts too; one with a rest or a flag, or one the sum refuses at
+ * its bound, is set in rest. *sum is written on success only; a sum past
+ * its bound or of a scale past 18, a partial state of another format, or
+ * another kind, is an invalid argument.
  */
 extern TessStatusCode tess_decimal_sum(TessTableSumInput kind,
 									   const TessDatumColumn *column,

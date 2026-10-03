@@ -14,7 +14,7 @@ use proptest::prelude::*;
 use tessera_core::{RowMask, RowMaskView};
 use tessera_kernels::decimal::{
     self, Arg, Compare, Decimal, ExtremeState, ExtremeValue, MAX_READ_SCALE, MAX_SCALE, Offer, Op,
-    POWERS, Results, SUM_BOUND, Scales, Source, Special, Sum, SumState, Term,
+    POWERS, Partial, Partials, Results, SUM_BOUND, Scales, Source, Special, Sum, SumState, Term,
 };
 use tessera_testing::{bounded_sum, decimal_parts, flags, nrows, property};
 
@@ -663,6 +663,80 @@ fn exact(sum: &Sum, value: i128, scale: u32) -> (Option<i128>, Option<i128>, u32
 fn fits(ours: Option<i128>, total: Option<i128>) -> bool {
     ours.is_some_and(|ours| ours.abs() < SUM_BOUND)
         && total.is_some_and(|total| total.abs() < SUM_BOUND)
+}
+
+/// Partial states by row, as a final aggregation's batch gives them.
+#[derive(Clone, Debug)]
+struct PartialRows(Vec<Partial>);
+
+impl Partials for PartialRows {
+    fn partial(&self, row: usize) -> Result<Partial> {
+        Ok(self.0[row])
+    }
+}
+
+#[test]
+fn merged_partial_states_add_exactly_or_go_to_the_rest() {
+    let partial = prop_oneof![
+        1 => Just(Partial::Null),
+        1 => Just(Partial::Other),
+        8 => (sum(), any::<u8>()).prop_map(|(sum, flags)| Partial::State(SumState {
+            sum,
+            nan: flags % 13 == 0,
+            positive_infinity: flags % 17 == 0,
+            negative_infinity: flags % 19 == 0,
+        })),
+    ];
+    let rows = nrows().prop_flat_map(move |nrows| {
+        (
+            proptest::collection::vec(partial.clone(), nrows).prop_map(PartialRows),
+            flags(nrows),
+            sum(),
+        )
+    });
+    property(rows, |(partials, selected, start)| -> Result<()> {
+        let nrows = partials.0.len();
+        let rows = selection(&selected);
+        let mut total = start;
+        let mut rest = words(nrows, |_| true);
+        decimal::merge_partials(
+            &partials,
+            RowMaskView::try_new(nrows, &rows).unwrap(),
+            &mut total,
+            &mut RowMask::try_new(nrows, &mut rest).unwrap(),
+        )?;
+        // The model: in row order, a state without flags whose sum the
+        // total takes below the bound, exactly; any other state left.
+        let mut model = start;
+        for (row, partial) in partials.0.iter().enumerate() {
+            let left = match partial {
+                _ if !selected[row] => false,
+                Partial::Null => false,
+                Partial::Other => true,
+                Partial::State(state) => {
+                    let (ours, sum, to) = exact(&model, state.sum.value, state.sum.scale);
+                    let plain = !state.nan && !state.positive_infinity && !state.negative_infinity;
+                    if plain && state.sum.scale <= MAX_READ_SCALE && fits(ours, sum) {
+                        model = Sum {
+                            value: sum.unwrap(),
+                            scale: to,
+                            count: model.count + state.sum.count,
+                        };
+                        false
+                    } else {
+                        true
+                    }
+                }
+            };
+            ensure!(
+                bit(&rest, row) == left,
+                "row {row}: left {}",
+                bit(&rest, row)
+            );
+        }
+        ensure!(total == model, "{total:?} for {model:?}");
+        Ok(())
+    });
 }
 
 #[test]

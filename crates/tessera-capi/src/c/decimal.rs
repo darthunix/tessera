@@ -35,7 +35,7 @@ use tessera_kernels::decimal::{
 use super::column::DatumColumn;
 use super::mask::Mask;
 use super::status::{Code, Status, guard};
-use super::table::{SUM_INT4, SUM_INT8, SUM_NUMERIC};
+use super::table::{SUM_INT4, SUM_INT8, SUM_NUMERIC, SUM_STATE};
 use super::varlena::varlena_data;
 
 /// `TessDecimalArg`: a column, or a scalar numeric when it is null.
@@ -1035,7 +1035,9 @@ pub struct DecimalSum {
 
 /// `tess_decimal_sum`: the selected rows' values, of a column of `kind`
 /// (`TessTableSumInput`: numeric, int4 or int8), added to `*sum` as
-/// decimals, the rows it does not take moved to `rest`.
+/// decimals, or its partial states (the node's own) merged into it
+/// ([`decimal::merge_partials`]), the rows it does not take moved to
+/// `rest`.
 ///
 /// # Safety
 ///
@@ -1061,9 +1063,9 @@ pub unsafe extern "C" fn tess_decimal_sum(
                 SUM_NUMERIC => SumInput::Numeric,
                 SUM_INT4 => SumInput::Int4,
                 SUM_INT8 => SumInput::Int8,
+                SUM_STATE => SumInput::State,
                 other => bail!("a sum of input {other} without groups"),
             };
-            let terms = SumColumn::new(input, column, rows.nrows())?;
             let sum = sum.as_mut().context("a null sum")?;
             let mut total = Sum {
                 value: (i128::from(sum.high) << 64) | i128::from(sum.low),
@@ -1071,7 +1073,13 @@ pub unsafe extern "C" fn tess_decimal_sum(
                 count: u64::try_from(sum.count).context("a negative count of a sum")?,
             };
             let mut rest = output(rest)?;
-            decimal::sum_terms(&terms, rows, &mut total, &mut rest)?;
+            if input == SumInput::State {
+                let partials = PartialColumn::new(input, column, rows.nrows())?;
+                decimal::merge_partials(&partials, rows, &mut total, &mut rest)?;
+            } else {
+                let terms = SumColumn::new(input, column, rows.nrows())?;
+                decimal::sum_terms(&terms, rows, &mut total, &mut rest)?;
+            }
             *sum = DecimalSum {
                 low: total.value as u64,
                 high: (total.value >> 64) as i64,

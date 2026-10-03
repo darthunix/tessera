@@ -906,6 +906,51 @@ pub fn sum_terms(
     Ok(())
 }
 
+/// Merge the selected rows' partial states into `total`, as a plain final
+/// aggregation merges its participants' sums ([`Sum::add_many`]), NULL
+/// skipped. A state with NaN or an infinity, one the caller merges
+/// ([`Partial::Other`]: it has a numeric rest), or one the sum refuses at
+/// its bound goes to `rest`, whose other bits are cleared.
+///
+/// # Errors
+///
+/// Masks of different row counts, a sum past its bound or of a scale past
+/// 18, or a partial state of another format, fail before any mutation of
+/// `total`.
+pub fn merge_partials(
+    partials: &impl Partials,
+    rows: RowMaskView<'_>,
+    total: &mut Sum,
+    rest: &mut RowMask<'_>,
+) -> Result<()> {
+    check_rows(rows.nrows(), &[rest.as_view().nrows()])?;
+    ensure!(
+        total.value.abs() < SUM_BOUND && total.scale <= MAX_READ_SCALE,
+        "a decimal sum past its bound"
+    );
+    let mut sum = *total;
+    for_each_word(rows, |word, look| {
+        let mut other = 0;
+        let mut each = look;
+        while each != 0 {
+            let bit = each.trailing_zeros();
+            each &= each - 1;
+            match partials.partial(word * 64 + bit as usize)? {
+                Partial::Null => {}
+                Partial::State(state)
+                    if !state.nan
+                        && !state.positive_infinity
+                        && !state.negative_infinity
+                        && sum.add_many(state.sum.value, state.sum.scale, state.sum.count) => {}
+                _ => other |= 1 << bit,
+            }
+        }
+        rest.set_word(word, other)
+    })?;
+    *total = sum;
+    Ok(())
+}
+
 /// `max` (or `min`, `max` false) of the selected rows' decimals, as
 /// `numeric_larger` and `numeric_smaller` keep it: a later row of an
 /// equal value takes the place of an earlier one, so the batch's extreme
