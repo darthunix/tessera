@@ -193,10 +193,11 @@ or a level below, little of a small `hash_mem`, and a semi join at a
 `hash_mem` of 256 kB split partitions 9483 times (636 ms against the
 core's 16; 20 splits and 37 ms written).
 
-**A partition too large.** Its file is compared with what `hash_mem`
-leaves once the rest of spilling, on every level, is counted. One that
-holds less than nine tenths of the inner rows its level split splits
-into a level below while bits last; a single key cannot split, and its
+**A partition too large.** Its file is compared with two thirds of what
+`hash_mem` leaves once the rest of spilling, on every level, is counted
+(the rule of a split, below). One that holds less than nine tenths of
+the inner rows its level split splits into a level below while bits
+last; a single key cannot split, and its
 partition is joined in pieces of whole groups, the outer rows read once
 per piece, a bit per outer row recording a pair for left, semi and anti
 joins, and a last pass without a table answering left and anti joins'
@@ -306,7 +307,7 @@ groups (HyperLogLog over the hashes of every record made in it, 64
 registers, as the core's hash aggregate keeps one per spilled
 partition), and only a partition whose groups, with a third more for the
 estimate's error, would not fit splits by the next bits into a level
-below first; a split does not find a group's other records, so that
+below first (the rule of a split, below); a split does not find a group's other records, so that
 level merges its chunks in memory as it merges those from disk. Grouping
 20 M rows into 1 M groups at a `work_mem` of 4 MB, the estimate took the
 files from 447 MB to 211 MB (the core writes 446 MB).
@@ -364,3 +365,16 @@ groups into memory and may go again.
 A shared table's participants send one partition a check, since the
 others write their chunks of it at their next batch; a participant whose
 check found the partition marked by another one first sends none.
+
+A partition read back from disk splits into a level below by one rule
+too (`tess_table_spill_splits`): its size, as the node estimates it,
+passes a share `room` of what `hash_mem` leaves besides the rest of the
+spill, two bits of the hash are left for the level below, and, with a
+share `key`, the partition holds fewer than that share of its level's
+rows (more is one key, which no split parts, and is joined in pieces).
+
+| weight | grouping | hash join |
+|---|---|---|
+| size | its groups by their estimate, a record and two words of index each, and a chunk | its file |
+| `room` | `tessera.agg_spill_split_room`, 1 | `tessera.join_spill_split_room`, 2/3 (the rest for the index) |
+| `key` | none | `tessera.join_spill_split_key_share`, 0.9 |

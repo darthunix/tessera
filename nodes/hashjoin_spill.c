@@ -1485,17 +1485,22 @@ add_loaded_chunk(TessHashJoinState *state, void *base, Size len)
 	state->table.nchunks++;
 }
 
+/* The rest of spilling and a chunk of outer rows with its values: what a partition's table may not take. */
+static Size
+spill_used(TessHashJoinState *state)
+{
+	return join_spill_memory(state->spill, NULL) + 2 * state->spill->probe.chunk_len;
+}
+
 /*
  * The bytes a piece of a partition's table may take: what hash_mem leaves
- * besides the rest of spilling and a chunk of outer rows with its values,
- * two thirds of it, the rest for the index.
+ * besides spill_used, two thirds of it, the rest for the index.
  */
 static Size
 spill_room(TessHashJoinState *state)
 {
-	JoinSpill  *spill = state->spill;
 	Size		limit = get_hash_memory_limit();
-	Size		used = join_spill_memory(spill, NULL) + 2 * spill->probe.chunk_len;
+	Size		used = spill_used(state);
 
 	return used >= limit ? 0 : (limit - used) / 3 * 2;
 }
@@ -1811,13 +1816,22 @@ bool
 join_open_partition(TessHashJoinState *state, int partition)
 {
 	JoinSpill  *spill = state->spill;
+	bool		split;
 
 	spill->partition = partition;
 	join_part_open(&spill->build_reader, spill->build.file, partition, spill->writers);
 	spill->pieces_done = false;
-	if (spill->build.parts[partition].disk_bytes > spill_room(state) &&
-		spill->shift + pg_leftmost_one_pos32(spill->npartitions) + 2 <= 32 &&
-		spill->build.rows[partition] < spill->input_rows / 10 * 9)
+	/* The rule of the weights (docs/spill.md, "The weights"). */
+	check(state, state->kernels->table_spill_splits(tess_join_spill_split_room,
+													 tess_join_spill_split_key_share,
+													 spill->build.parts[partition].disk_bytes,
+													 spill_used(state), get_hash_memory_limit(),
+													 spill->build.rows[partition],
+													 spill->input_rows,
+													 spill->shift +
+													 pg_leftmost_one_pos32(spill->npartitions),
+													 &split, &state->status));
+	if (split)
 	{
 		/*
 		 * Too large, and much smaller than what this level split, so not

@@ -57,11 +57,14 @@ bool		tess_batch_gather = true;
 double		tess_agg_spill_start = 0.875;
 double		tess_agg_spill_target = 0.5;
 double		tess_agg_spill_spilled_weight = 1.0;
+double		tess_agg_spill_split_room = 1.0;
 double		tess_join_spill_start = 1.0;
 double		tess_join_spill_target = 1.0;
 double		tess_join_spill_spilled_weight = 0.0;
 double		tess_join_spill_tail_weight = 1.0;
 double		tess_join_spill_resident_share = 0.25;
+double		tess_join_spill_split_room = 2.0 / 3.0;
+double		tess_join_spill_split_key_share = 0.9;
 int			tess_join_shared_spill_evictions = 1;
 
 /*
@@ -369,6 +372,11 @@ _PG_init(void)
 							 "A partition on disk takes new groups into memory, and goes again.",
 							 &tess_agg_spill_spilled_weight, 1.0, 0.0, 10.0,
 							 PGC_USERSET, GUC_EXPLAIN, NULL, NULL, NULL);
+	DefineCustomRealVariable("tessera.agg_spill_split_room",
+							 "Share of hash_mem left by the rest of a TessAgg spill that a partition's groups must pass to split.",
+							 "A partition's groups, by an estimate of them, take their records and index merged.",
+							 &tess_agg_spill_split_room, 1.0, 0.0, 10.0,
+							 PGC_USERSET, GUC_EXPLAIN, NULL, NULL, NULL);
 	DefineCustomRealVariable("tessera.join_spill_start",
 							 "Share of hash_mem past which TessHashJoin sends its first partition of a check to disk.",
 							 "The memory counts with the outer tails reserved for the partitions on disk.",
@@ -394,6 +402,16 @@ _PG_init(void)
 							 "Share of the inner rows below which TessHashJoin sends all its partitions in memory to disk.",
 							 "Probing a few rows costs every outer batch the whole probe.",
 							 &tess_join_spill_resident_share, 0.25, 0.0, 1.0,
+							 PGC_USERSET, GUC_EXPLAIN, NULL, NULL, NULL);
+	DefineCustomRealVariable("tessera.join_spill_split_room",
+							 "Share of hash_mem left by the rest of a TessHashJoin spill that a partition's file must pass to split.",
+							 "The rest of it is left for the partition's index.",
+							 &tess_join_spill_split_room, 2.0 / 3.0, 0.0, 10.0,
+							 PGC_USERSET, GUC_EXPLAIN, NULL, NULL, NULL);
+	DefineCustomRealVariable("tessera.join_spill_split_key_share",
+							 "Share of its level's inner rows a TessHashJoin partition must hold fewer of to split.",
+							 "A partition of more is one key, which no split parts: it is joined in pieces. 0 splits any.",
+							 &tess_join_spill_split_key_share, 0.9, 0.0, 1.0,
 							 PGC_USERSET, GUC_EXPLAIN, NULL, NULL, NULL);
 	DefineCustomIntVariable("tessera.join_shared_spill_evictions",
 							"Partitions a participant of a shared TessHashJoin table sends to disk at a check, 0 for any.",

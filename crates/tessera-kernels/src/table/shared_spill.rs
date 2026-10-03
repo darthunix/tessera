@@ -250,6 +250,47 @@ pub struct Records<'a> {
     pub total: u64,
 }
 
+/// The weights of the rule that splits a partition too large into a level
+/// below ([`splits`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SplitWeights {
+    /// The share of what the limit leaves besides the memory in use that
+    /// the partition's size must pass.
+    pub room: f64,
+    /// The share of its level's rows a partition must hold fewer of: more
+    /// is one key, which no split parts. 0 for no such rule.
+    pub key: f64,
+}
+
+/// A partition read back from disk, as a node sees it before it merges
+/// or joins it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Partition {
+    /// Its size once in memory, as the node estimates it: a grouping's
+    /// groups with their index, a join's file.
+    pub size: u64,
+    /// The memory in use besides it, and the limit.
+    pub used: u64,
+    pub limit: u64,
+    /// Its rows, and those of its level.
+    pub rows: u64,
+    pub level_rows: u64,
+    /// The hash bits its level's partitions take, from bit 0.
+    pub bits: u32,
+}
+
+/// Whether a partition splits into a level below by the next bits of the
+/// hash: its size passes `room` of what the limit leaves besides the
+/// memory in use, two bits are left for the level below, and, with a
+/// `key` share, it holds fewer than that share of its level's rows.
+pub fn splits(weights: &SplitWeights, partition: &Partition) -> bool {
+    let left = partition.limit.saturating_sub(partition.used) as f64;
+    partition.size as f64 > weights.room * left
+        && partition.bits + 2 <= 32
+        && (weights.key <= 0.0
+            || (partition.rows as f64) < weights.key * partition.level_rows as f64)
+}
+
 /// What a check weighs against its limit.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Memory {
@@ -783,6 +824,84 @@ mod tests {
             }
             prop_assert_eq!(shared_words, local_words);
         }
+    }
+
+    #[test]
+    fn a_partition_splits_past_its_room_with_bits_left_and_many_keys() {
+        let join = SplitWeights {
+            room: 2.0 / 3.0,
+            key: 0.9,
+        };
+        let grouping = SplitWeights {
+            room: 1.0,
+            key: 0.0,
+        };
+        let partition = Partition {
+            size: 601,
+            used: 100,
+            limit: 1000,
+            rows: 89,
+            level_rows: 100,
+            bits: 3,
+        };
+        assert!(
+            !splits(
+                &join,
+                &Partition {
+                    size: 600,
+                    ..partition
+                }
+            ),
+            "two thirds of 900"
+        );
+        assert!(splits(&join, &partition));
+        assert!(
+            !splits(
+                &join,
+                &Partition {
+                    rows: 90,
+                    ..partition
+                }
+            ),
+            "one key"
+        );
+        assert!(
+            !splits(
+                &join,
+                &Partition {
+                    bits: 31,
+                    ..partition
+                }
+            ),
+            "no bits left"
+        );
+        assert!(splits(
+            &join,
+            &Partition {
+                bits: 30,
+                ..partition
+            }
+        ));
+        assert!(!splits(&grouping, &partition), "the whole of 900");
+        assert!(splits(
+            &grouping,
+            &Partition {
+                size: 901,
+                rows: 100,
+                ..partition
+            }
+        ));
+        assert!(
+            splits(
+                &grouping,
+                &Partition {
+                    size: 1,
+                    used: 2000,
+                    ..partition
+                }
+            ),
+            "no room left"
+        );
     }
 
     #[test]

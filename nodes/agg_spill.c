@@ -929,11 +929,21 @@ agg_advance(TessAggState *state)
 			for (int partition = 0; partition < level->npartitions; partition++)
 				if (level != spill || partition != spill->partition)
 					others += level->parts[partition].bytes;
-		if (part->disk_bytes > 0 && others + size > limit &&
-			spill->shift + pg_leftmost_one_pos32(spill->npartitions) + 2 <= 32)
+		/* A partition with records on disk only, by the rule of the weights. */
+		if (part->disk_bytes > 0)
 		{
-			agg_split_level(state, spill, spill->partition);
-			continue;
+			bool		split;
+
+			check(state, state->kernels->table_spill_splits(tess_agg_spill_split_room, 0, size,
+															 others, limit, 0, 0,
+															 spill->shift +
+															 pg_leftmost_one_pos32(spill->npartitions),
+															 &split, &state->status));
+			if (split)
+			{
+				agg_split_level(state, spill, spill->partition);
+				continue;
+			}
 		}
 		agg_merge(state, spill, spill->partition);
 		spill->given = true;

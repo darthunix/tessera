@@ -108,6 +108,7 @@
 	X(table_mark_words) \
 	X(table_mark) \
 	X(table_next_unmarked) \
-	X(spill_columns_append)
+	X(spill_columns_append) \
+	X(table_spill_splits)
 
 #endif							/* TESSERA_KERNEL_OPS_LIST_H */

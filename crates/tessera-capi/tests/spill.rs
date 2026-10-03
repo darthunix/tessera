@@ -10,8 +10,57 @@
 use tessera_capi::c::{
     Code, SpillHeader, SpillWeights, Status, tess_spill_header_read, tess_spill_header_size,
     tess_spill_header_write, tess_spill_unpack, tess_table_spill_add_bytes, tess_table_spill_evict,
-    tess_table_spill_init, tess_table_spill_split, tess_table_spill_words,
+    tess_table_spill_init, tess_table_spill_split, tess_table_spill_splits, tess_table_spill_words,
 };
+
+/// The rule of a split through its entry point: past two thirds of what
+/// the limit leaves, with bits left and fewer than nine tenths of the
+/// level's rows; weights below zero refused.
+#[test]
+fn the_split_entry_point_weighs_room_bits_and_keys() {
+    let split = |room: f64, key: f64, size: u64, rows: u64, bits: u32| {
+        let mut status = Status::new();
+        let mut split = false;
+        // SAFETY: a local flag and status.
+        let code = unsafe {
+            tess_table_spill_splits(
+                room,
+                key,
+                size,
+                100,
+                1000,
+                rows,
+                100,
+                bits,
+                &raw mut split,
+                &raw mut status,
+            )
+        };
+        (code, split)
+    };
+    assert_eq!(split(2.0 / 3.0, 0.9, 601, 89, 3), (Code::Ok, true));
+    assert_eq!(
+        split(2.0 / 3.0, 0.9, 600, 89, 3),
+        (Code::Ok, false),
+        "the room"
+    );
+    assert_eq!(
+        split(2.0 / 3.0, 0.9, 601, 90, 3),
+        (Code::Ok, false),
+        "one key"
+    );
+    assert_eq!(
+        split(2.0 / 3.0, 0.0, 601, 100, 3),
+        (Code::Ok, true),
+        "no rule of one key"
+    );
+    assert_eq!(
+        split(2.0 / 3.0, 0.9, 601, 89, 31),
+        (Code::Ok, false),
+        "the bits"
+    );
+    assert_eq!(split(-1.0, 0.9, 601, 89, 3).0, Code::InvalidArgument);
+}
 
 /// A process's own words and a shared table's take the same steps through
 /// the entry points: the largest partitions in memory past the limit,

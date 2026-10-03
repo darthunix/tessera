@@ -58,8 +58,8 @@ pub use shared_spill::{
     SpillWeights, tess_bloom_shared_add, tess_round_step, tess_table_spill_add_bytes,
     tess_table_spill_evict, tess_table_spill_evictions, tess_table_spill_flags,
     tess_table_spill_init, tess_table_spill_partitions, tess_table_spill_records,
-    tess_table_spill_split, tess_table_spill_start, tess_table_spill_take_alone,
-    tess_table_spill_take_file, tess_table_spill_words,
+    tess_table_spill_split, tess_table_spill_splits, tess_table_spill_start,
+    tess_table_spill_take_alone, tess_table_spill_take_file, tess_table_spill_words,
 };
 /// The `TESS_SORT_*` flags of a sort key.
 pub mod sort_flags {
