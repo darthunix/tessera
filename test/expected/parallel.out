@@ -1321,6 +1321,45 @@ SELECT count(*) FROM (SELECT k, t FROM parallel_wide WHERE a > 5 LIMIT 10) AS q;
     10
 (1 row)
 
+-- Values of 70 to 150 kB a row, made in the workers: a message stops at
+-- half its queue's bytes of values, and takes a row past them alone, its
+-- values grown to the row's; in order, through TessGatherMerge, as well.
+EXPLAIN (COSTS OFF) SELECT k, repeat(md5(k::text), 2200 + k % 3 * 1250) AS v FROM parallel_wide WHERE k % 997 = 0;
+                               QUERY PLAN                               
+------------------------------------------------------------------------
+ Custom Scan (TessGather)
+   Workers Planned: 2
+   ->  Parallel Custom Scan (TessSend)
+         ->  Parallel Custom Scan (TessFilter) on parallel_wide
+               Batch Filter: ((k % 997) = 0)
+               ->  Parallel Custom Scan (TessHeapScan) on parallel_wide
+(6 rows)
+
+SELECT parallel_same($$SELECT count(*), sum(length(v)), md5(string_agg(md5(v), ',' ORDER BY k)) FROM (SELECT k, repeat(md5(k::text), 2200 + k % 3 * 1250) AS v FROM parallel_wide WHERE k % 997 = 0 OFFSET 0) AS q$$);
+                    parallel_same                    
+-----------------------------------------------------
+ {"(200,22120000,b759b8639c7be68601889671e44c5b75)"}
+(1 row)
+
+EXPLAIN (COSTS OFF) SELECT k, repeat(md5(k::text), 2200 + k % 3 * 1250) AS v FROM parallel_wide WHERE k % 997 = 0 ORDER BY k;
+                                  QUERY PLAN                                  
+------------------------------------------------------------------------------
+ Custom Scan (TessGatherMerge)
+   Workers Planned: 2
+   ->  Parallel Custom Scan (TessSend)
+         ->  Parallel Custom Scan (TessSort)
+               Sort Key: k
+               ->  Parallel Custom Scan (TessFilter) on parallel_wide
+                     Batch Filter: ((k % 997) = 0)
+                     ->  Parallel Custom Scan (TessHeapScan) on parallel_wide
+(8 rows)
+
+SELECT parallel_same($$SELECT count(*), md5(string_agg(md5(v), ',')) FROM (SELECT k, repeat(md5(k::text), 2200 + k % 3 * 1250) AS v FROM parallel_wide WHERE k % 997 = 0 ORDER BY k OFFSET 0) AS q$$);
+               parallel_same                
+--------------------------------------------
+ {"(200,b759b8639c7be68601889671e44c5b75)"}
+(1 row)
+
 RESET parallel_leader_participation;
 SET tessera.batch_gather = off;
 EXPLAIN (COSTS OFF) SELECT k, a, t FROM parallel_wide WHERE k % 3 <> 0;

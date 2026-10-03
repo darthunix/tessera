@@ -23,9 +23,11 @@
  * that 1.33 M rows of a filtered scan took 27 to 30 ms with two workers
  * against 12.4 ms in one process. Here a worker sends batches: TessSend
  * copies the selected rows of its child's batches into messages of up to
- * GATHER_MESSAGE_ROWS rows, a lane of their NULL bits per 64 columns, a lane of words per
- * column and the bytes of the by-reference values, each column's word its
- * value or the value's byte in the message, and sends each whole through
+ * GATHER_MESSAGE_ROWS rows, each a chunk of columns (spill.h) the kernels
+ * append the rows to, as an external TessSort's blocks: a lane of their
+ * NULL bits per 64 words, a lane of words per column, each its value or
+ * the value's byte in the message, and the bytes of the by-reference
+ * values after the chunk; it sends each whole through
  * a queue of its own in the node's chunk of the query's shared memory. The
  * leader's TessGather launches the workers as the core's Gather does, and
  * gives its parent the messages as batches of up to 64 rows whose columns
@@ -45,7 +47,7 @@
 /* Rows of a batch given out, and the most rows of a message. */
 #define GATHER_ROWS 64
 #define GATHER_MESSAGE_ROWS 1024
-/* A message's lanes of NULL bits are laid out as a chunk of columns' (spill.h). */
+/* The lanes of the columns' NULL bits of a message's chunk. */
 #define GATHER_MAX_NULL_LANES TESS_SPILL_COLUMNS_NULL_LANES(MaxTupleAttributeNumber)
 /* A queue per worker, as large as four of the core's tuple queues. */
 #define GATHER_QUEUE_SIZE (256 * 1024)
@@ -57,14 +59,14 @@
  * Gather over the same nodes.
  */
 
-/* What a message starts with; its lanes and values follow, aligned to 8. */
+/*
+ * What a message starts with: then, aligned to 8, a chunk of columns of
+ * its rows, the columns' words and then the words of their sort items,
+ * and after the chunk the bytes of the by-reference values.
+ */
 typedef struct GatherHeader
 {
-	uint32		nrows;
 	uint32		ncolumns;
-	/* The rows each lane has room for: the lanes' stride. */
-	uint32		stride;
-	/* The lanes of the rows' sort items' words, after the columns'. */
 	uint32		key_words;
 	uint64		values_len;
 } GatherHeader;
@@ -81,21 +83,23 @@ typedef struct SendShared
 #define SEND_QUEUES_OFFSET MAXALIGN(sizeof(SendShared))
 
 /*
- * A message being filled from a batch input: its lanes after the header,
- * its rows, the by-reference values' bytes; the batch being copied, the
- * last of its rows copied and how many, and its selected rows' key words.
+ * A message being filled from a batch input: its chunk after the header,
+ * the by-reference values' bytes; the batch being copied, its rows left to
+ * copy and how many of its selected rows went, and their key words.
  */
 typedef struct MessageBuilder
 {
 	char	   *message;
 	Size		message_len;
-	uint32		rows;
+	void	   *chunk;
+	Size		chunk_len;
 	char	   *values;
 	Size		values_len;
 	Size		values_used;
 	TessBatch  *batch;
 	TessDatumColumn *columns;
-	int			row;
+	TessRowMask pending;
+	int			pending_words;
 	int			selected;
 	uint64	   *key_lanes;
 	int			key_capacity;
@@ -136,7 +140,6 @@ typedef struct TessSendState
 	MemoryContext abbrev_context;
 	SortSupportData *ssup;
 	/* The lanes of a message: NULL bits, the columns, the keys' words. */
-	int			null_lanes;
 	int			nlanes;
 	/* The rows the parent above needs, -1 for all. */
 	int64		bound;
@@ -154,15 +157,23 @@ typedef struct TessSendState
 } TessSendState;
 
 /*
- * A stream TessGatherMerge merges: a worker's message in hand, or the
- * leader's own batch, its rows' places and key lanes; its rows and the next
+ * A stream TessGatherMerge merges: the chunk of a worker's message in
+ * hand, or of the leader's own, and its values; its rows and the next
  * one; done once it has no more.
  */
 typedef struct MergeSource
 {
-	char	   *message;
+	void	   *chunk;
 	const char *values;
-	uint32		stride;
+	/*
+	 * Its lanes of NULL bits and of words from the first, each the
+	 * chunk's capacity of words after the one before (spill.h): a merge
+	 * reads a row's columns by them, not a lane's place from the chunk's
+	 * header each time.
+	 */
+	const uint64 *nulls;
+	const uint64 *words;
+	Size		stride;
 	uint32		rows;
 	uint32		place;
 	bool		done;
@@ -193,10 +204,10 @@ typedef struct TessGatherState
 	TessInput  *local;
 	TessLayout	local_layout;
 	TessBatch  *local_batch;
-	/* The message being given out, its lanes' stride and the next of its rows. */
-	char	   *message;
+	/* The chunk of the message being given out, its values, its rows and the next. */
+	void	   *message;
+	const char *message_values;
 	uint32		message_rows;
-	uint32		message_stride;
 	uint32		next_row;
 	/* The batch given out: a window of the message, or the leader's own batch. */
 	TessBatch	batch;
@@ -335,15 +346,13 @@ send_begin(CustomScanState *css, EState *estate, int eflags)
 													  "TessSend abbreviated keys",
 													  ALLOCSET_DEFAULT_SIZES);
 	}
+	state->kernels = tess_runtime_kernels();
+	if (state->kernels == NULL)
+		elog(ERROR, "TessSend needs the Tessera kernels module");
 	if (state->nkeys > 0)
-	{
-		state->kernels = tess_runtime_kernels();
-		if (state->kernels == NULL)
-			elog(ERROR, "TessSend needs the Tessera kernels module");
 		state->key_words = merge_key_words(state->kernels, state->nkernel, state->keys);
-	}
-	state->null_lanes = tess_spill_columns_null_lanes(state->ncolumns);
-	state->nlanes = state->null_lanes + state->ncolumns + state->key_words;
+	state->nlanes = tess_spill_columns_null_lanes(state->ncolumns + state->key_words) +
+		state->ncolumns + state->key_words;
 	state->stride = (uint32) Min((Size) GATHER_MESSAGE_ROWS,
 								 Max((Size) GATHER_ROWS,
 									 GATHER_QUEUE_SIZE / 4 /
@@ -364,36 +373,52 @@ send_begin(CustomScanState *css, EState *estate, int eflags)
 	}
 }
 
-/* The bytes of a message of nlanes lanes of rows rows before its values. */
+/* The bytes of a chunk of columns: its header and its lanes (spill.h). */
 static Size
-message_head(int nlanes, uint32 rows)
+chunk_bytes(void *chunk)
 {
-	return MAXALIGN(sizeof(GatherHeader)) + sizeof(uint64) * (Size) rows * nlanes;
+	uint32		words = tess_spill_columns_words(chunk);
+
+	return (char *) tess_spill_columns_lane(chunk, tess_spill_columns_null_lanes(words) + words) -
+		(char *) chunk;
 }
 
 /*
  * Copy the selected rows of the input's batches into the builder's
  * message, from the rows left of the batch it stopped in: true once the
  * message is full, its rows at the stride or its values past half a queue,
- * with more rows to come; false once the input is done.
+ * with more rows to come; false once the input is done. The kernels append
+ * the rows' columns (tess_spill_columns_append), and their key words follow.
  */
 static bool
 fill_message(TessSendState *send, MessageBuilder *builder, TessInput *input,
 			 MemoryContext context)
 {
-	uint64	   *lanes;
+	void	   *chunk;
 
 	if (builder->message == NULL)
 	{
-		builder->message_len = message_head(send->nlanes, send->stride);
+		TessStatus	status = TESS_STRUCT_INITIALIZER(TessStatus);
+		Size		capacity;
+
+		builder->chunk_len = TESS_SPILL_COLUMNS_HEADER +
+			sizeof(uint64) * (Size) send->stride * send->nlanes;
+		builder->message_len = MAXALIGN(sizeof(GatherHeader)) + builder->chunk_len;
 		builder->message = MemoryContextAllocZero(context, builder->message_len);
+		builder->chunk = builder->message + MAXALIGN(sizeof(GatherHeader));
+		tess_status_check(send->kernels->spill_columns_init(builder->chunk, builder->chunk_len,
+															send->ncolumns + send->key_words,
+															&capacity, &status),
+						  &status);
+		if (capacity != send->stride)
+			elog(ERROR, "TessSend made a message of %zu rows, not %u", capacity, send->stride);
 		builder->values_len = 64 * 1024;
 		builder->values = MemoryContextAlloc(context, builder->values_len);
 		builder->columns = MemoryContextAlloc(context,
 											  sizeof(TessDatumColumn) * send->ncolumns);
 	}
-	lanes = (uint64 *) (builder->message + MAXALIGN(sizeof(GatherHeader)));
-	builder->rows = 0;
+	chunk = builder->chunk;
+	tess_spill_columns_set_rows(chunk, 0);
 	builder->values_used = 0;
 	if (builder->exhausted)
 		return false;
@@ -401,10 +426,14 @@ fill_message(TessSendState *send, MessageBuilder *builder, TessInput *input,
 	{
 		TessBatch  *batch = builder->batch;
 		TessDatumColumn *columns = builder->columns;
-		int			row;
+		/* The values a message takes, past half a queue only with its first row's. */
+		Size		limit = Max(builder->values_used,
+								Min(builder->values_len, (Size) GATHER_QUEUE_SIZE / 2));
 
 		if (batch == NULL)
 		{
+			int			words;
+
 			batch = tess_input_next(input);
 			if (batch == NULL)
 			{
@@ -485,58 +514,59 @@ fill_message(TessSendState *send, MessageBuilder *builder, TessInput *input,
 																&count, &status),
 								  &status);
 			}
+			/* The rows left to copy: the batch's selected rows, in a mask of the builder's. */
+			words = (batch->rows.nrows + 63) / 64;
+			if (words > builder->pending_words)
+			{
+				if (builder->pending.bits != NULL)
+					pfree(builder->pending.bits);
+				builder->pending_words = words;
+				builder->pending.bits = MemoryContextAlloc(context, sizeof(uint64) * words);
+			}
+			if (words > 0)
+				memcpy(builder->pending.bits, batch->rows.bits, sizeof(uint64) * words);
+			builder->pending.nrows = batch->rows.nrows;
 			builder->batch = batch;
-			builder->row = -1;
 			builder->selected = 0;
 		}
-		while ((row = tess_row_mask_next(&batch->rows, builder->row)) >= 0)
+		for (;;)
 		{
-			Size		need = 0;
+			TessStatus	status = TESS_STRUCT_INITIALIZER(TessStatus);
+			uint32		first = tess_spill_columns_rows(chunk);
+			int			appended;
+			Size		need;
 
-			for (int column = 0; column < send->ncolumns; column++)
-				if (!columns[column].isnull[row] && !send->typbyvals[column])
-					need += MAXALIGN(datumGetSize(columns[column].values[row], false,
-												  send->typlens[column]));
-			if (builder->rows == send->stride ||
-				(builder->rows > 0 && builder->values_used + need > GATHER_QUEUE_SIZE / 2))
+			tess_status_check(send->kernels->spill_columns_append(chunk, builder->chunk_len,
+																  send->ncolumns, columns,
+																  send->typbyvals, send->typlens,
+																  &builder->pending,
+																  builder->values, limit,
+																  &builder->values_used,
+																  &appended, &need, &status),
+							  &status);
+			/* The appended rows' key words: the next of the batch's selected rows'. */
+			for (int word = 0; word < send->key_words; word++)
+				memcpy(tess_spill_columns_word(chunk, send->ncolumns + word) + first,
+					   builder->key_lanes + (Size) word * builder->key_capacity + builder->selected,
+					   sizeof(uint64) * appended);
+			builder->selected += appended;
+			if (tess_spill_columns_rows(chunk) == send->stride)
+				return true;
+			if (need == 0)
+				break;
+			/* The next row's values stop it: the message is full, or the values grow. */
+			if (tess_spill_columns_rows(chunk) > 0 &&
+				builder->values_used + need > GATHER_QUEUE_SIZE / 2)
 				return true;
 			if (builder->values_used + need > builder->values_len)
 			{
 				builder->values_len = Max(builder->values_len * 2, builder->values_used + need);
 				builder->values = repalloc_huge(builder->values, builder->values_len);
 			}
-			for (int lane = 0; lane < send->null_lanes; lane++)
-				lanes[(Size) send->stride * lane + builder->rows] = 0;
-			for (int column = 0; column < send->ncolumns; column++)
-			{
-				uint64	   *lane = lanes + (Size) send->stride * (send->null_lanes + column);
-
-				if (columns[column].isnull[row])
-				{
-					lanes[(Size) send->stride * tess_spill_columns_null_lane(column) + builder->rows] |=
-						tess_spill_columns_null_bit(column);
-					lane[builder->rows] = 0;
-				}
-				else if (send->typbyvals[column])
-					lane[builder->rows] = (uint64) columns[column].values[row];
-				else
-				{
-					Size		size = datumGetSize(columns[column].values[row], false,
-													send->typlens[column]);
-
-					memcpy(builder->values + builder->values_used,
-						   DatumGetPointer(columns[column].values[row]), size);
-					lane[builder->rows] = builder->values_used;
-					builder->values_used += MAXALIGN(size);
-				}
-			}
-			for (int word = 0; word < send->key_words; word++)
-				lanes[(Size) send->stride * (send->null_lanes + send->ncolumns + word) +
-					  builder->rows] =
-					builder->key_lanes[(Size) word * builder->key_capacity + builder->selected];
-			builder->rows++;
-			builder->row = row;
-			builder->selected++;
+			/* A message's first row goes whatever its values take. */
+			limit = tess_spill_columns_rows(chunk) > 0 ?
+				Min(builder->values_len, (Size) GATHER_QUEUE_SIZE / 2) :
+				builder->values_used + need;
 		}
 		tess_input_finish(input);
 		builder->batch = NULL;
@@ -550,24 +580,23 @@ send_message(TessSendState *state)
 {
 	MessageBuilder *builder = &state->builder;
 	GatherHeader *header = (GatherHeader *) builder->message;
+	uint32		rows = tess_spill_columns_rows(builder->chunk);
 	shm_mq_iovec parts[2];
 	shm_mq_result result;
 
-	if (builder->rows == 0)
+	if (rows == 0)
 		return true;
-	header->nrows = builder->rows;
 	header->ncolumns = state->ncolumns;
-	header->stride = state->stride;
 	header->key_words = (uint32) state->key_words;
 	header->values_len = builder->values_used;
-	/* The lanes as filled, for stride rows each, then the values. */
+	/* The chunk as filled, for stride rows each lane, then the values. */
 	parts[0].data = builder->message;
 	parts[0].len = builder->message_len;
 	parts[1].data = builder->values;
 	parts[1].len = builder->values_used;
 	result = shm_mq_sendv(state->queue, parts, builder->values_used > 0 ? 2 : 1, false, true);
 	state->sent_messages++;
-	state->sent_rows += builder->rows;
+	state->sent_rows += rows;
 	return result == SHM_MQ_SUCCESS;
 }
 
@@ -863,18 +892,29 @@ gather_launch(TessGatherState *state)
 	state->initialized = true;
 }
 
-/* A message a worker sent: its header checked against the node's. */
-static void
-check_message(TessGatherState *state, void *data, Size nbytes)
+/*
+ * A message a worker sent, checked against the node's: its chunk of
+ * columns, and its values after the chunk at *values.
+ */
+static void *
+check_message(TessGatherState *state, void *data, Size nbytes, const char **values)
 {
 	GatherHeader *header = data;
+	char	   *chunk = (char *) data + MAXALIGN(sizeof(GatherHeader));
+	Size		len;
 
-	if (nbytes < sizeof(GatherHeader) ||
+	if (nbytes < MAXALIGN(sizeof(GatherHeader)) + TESS_SPILL_COLUMNS_HEADER ||
 		header->ncolumns != (uint32) state->ncolumns ||
 		header->key_words != (uint32) state->send->key_words ||
-		header->nrows > header->stride ||
-		nbytes != message_head(state->send->nlanes, header->stride) + header->values_len)
+		tess_spill_columns_words(chunk) != (uint32) (state->ncolumns + state->send->key_words) ||
+		tess_spill_columns_rows(chunk) > tess_spill_columns_capacity(chunk))
 		elog(ERROR, "TessGather received a foreign message");
+	len = chunk_bytes(chunk);
+	if (nbytes - MAXALIGN(sizeof(GatherHeader)) < len ||
+		nbytes - MAXALIGN(sizeof(GatherHeader)) - len != header->values_len)
+		elog(ERROR, "TessGather received a foreign message");
+	*values = chunk + len;
+	return chunk;
 }
 
 /* The next message of a worker: true with one in hand, false when every queue is empty or gone. */
@@ -906,10 +946,8 @@ gather_receive(TessGatherState *state, bool wait)
 			if (result == SHM_MQ_WOULD_BLOCK)
 				continue;
 			state->nextreader = (index + 1) % state->nreaders;
-			check_message(state, data, nbytes);
-			state->message = data;
-			state->message_rows = ((GatherHeader *) data)->nrows;
-			state->message_stride = ((GatherHeader *) data)->stride;
+			state->message = check_message(state, data, nbytes, &state->message_values);
+			state->message_rows = tess_spill_columns_rows(state->message);
 			state->next_row = 0;
 			state->messages++;
 			return true;
@@ -942,19 +980,20 @@ readers_left(TessGatherState *state)
 	return false;
 }
 
-/* The next rows of the message as the batch: its columns from the lanes. */
+/* The next rows of the message as the batch: its columns from the chunk's lanes. */
 static void
 show_message_window(TessGatherState *state)
 {
 	uint32		n = Min(GATHER_ROWS, state->message_rows - state->next_row);
-	const uint64 *lanes = (const uint64 *) (state->message + MAXALIGN(sizeof(GatherHeader)));
-	const char *values = state->message + message_head(state->send->nlanes, state->message_stride);
-	int			null_lanes = state->send->null_lanes;
+	void	   *chunk = state->message;
+	const char *values = state->message_values;
+	/* The lanes of the columns' NULL bits: the key words have none. */
+	int			null_lanes = tess_spill_columns_null_lanes(state->ncolumns);
 	uint64		any[GATHER_MAX_NULL_LANES];
 
 	for (int lane = 0; lane < null_lanes; lane++)
 	{
-		const uint64 *nulls = lanes + (Size) state->message_stride * lane + state->next_row;
+		const uint64 *nulls = tess_spill_columns_lane(chunk, lane) + state->next_row;
 
 		any[lane] = 0;
 		for (uint32 row = 0; row < n; row++)
@@ -962,9 +1001,8 @@ show_message_window(TessGatherState *state)
 	}
 	for (int column = 0; column < state->ncolumns; column++)
 	{
-		const uint64 *lane = lanes + (Size) state->message_stride * (null_lanes + column) +
-			state->next_row;
-		const uint64 *nulls = lanes + (Size) state->message_stride * tess_spill_columns_null_lane(column) +
+		const uint64 *lane = tess_spill_columns_word(chunk, column) + state->next_row;
+		const uint64 *nulls = tess_spill_columns_lane(chunk, tess_spill_columns_null_lane(column)) +
 			state->next_row;
 		bool	   *isnull = state->isnull[column];
 		Datum	   *out = state->values[column];
@@ -1066,6 +1104,17 @@ gather_next(TessGatherState *state)
 
 /* ------------------------------------------------------------ TessGatherMerge */
 
+/* A source's rows: those of the chunk, by its lanes. */
+static void
+source_attach(MergeSource *source, void *chunk)
+{
+	source->chunk = chunk;
+	source->rows = tess_spill_columns_rows(chunk);
+	source->nulls = tess_spill_columns_lane(chunk, 0);
+	source->words = tess_spill_columns_word(chunk, 0);
+	source->stride = tess_spill_columns_capacity(chunk);
+}
+
 /*
  * The next rows of source index: a worker's next message, waited for, or
  * the leader's own next rows, copied into a message as a worker's are;
@@ -1092,11 +1141,7 @@ merge_load(TessGatherState *state, int index)
 			source->done = true;
 			return;
 		}
-		check_message(state, data, nbytes);
-		source->message = data;
-		source->rows = ((GatherHeader *) data)->nrows;
-		source->stride = ((GatherHeader *) data)->stride;
-		source->values = source->message + message_head(send->nlanes, source->stride);
+		source_attach(source, check_message(state, data, nbytes, &source->values));
 		state->messages++;
 		return;
 	}
@@ -1104,15 +1149,10 @@ merge_load(TessGatherState *state, int index)
 	(void) fill_message(send, &state->local_builder, state->local,
 						state->css.ss.ps.state->es_query_cxt);
 	remove_query_dsa(state);
-	if (state->local_builder.rows == 0)
-	{
-		source->done = true;
-		return;
-	}
-	source->message = state->local_builder.message;
+	source_attach(source, state->local_builder.chunk);
 	source->values = state->local_builder.values;
-	source->rows = state->local_builder.rows;
-	source->stride = send->stride;
+	if (source->rows == 0)
+		source->done = true;
 }
 
 /* Row place of source index into the batch's arrays at out. */
@@ -1120,14 +1160,16 @@ static void
 merge_take(TessGatherState *state, int index, uint32 place, int out)
 {
 	MergeSource *source = &state->sources[index];
-	const uint64 *lanes = (const uint64 *) (source->message + MAXALIGN(sizeof(GatherHeader)));
-	int			null_lanes = state->send->null_lanes;
+	const uint64 *nulls = source->nulls + place;
+	const uint64 *words = source->words + place;
+	Size		stride = source->stride;
 
 	for (int column = 0; column < state->ncolumns; column++)
 	{
-		uint64		word = lanes[(Size) source->stride * (null_lanes + column) + place];
-		bool		null = tess_spill_columns_is_null(lanes[(Size) source->stride * tess_spill_columns_null_lane(column) + place],
-											   column);
+		uint64		word = words[stride * column];
+		bool		null = tess_spill_columns_is_null(nulls[stride *
+															tess_spill_columns_null_lane(column)],
+													  column);
 
 		state->isnull[column][out] = null;
 		if (null)
@@ -1148,10 +1190,11 @@ static Datum
 source_value(TessGatherState *state, const MergeSource *source, int column, uint32 place,
 			 bool *isnull)
 {
-	const uint64 *lanes = (const uint64 *) (source->message + MAXALIGN(sizeof(GatherHeader)));
-	uint64		word = lanes[(Size) source->stride * (state->send->null_lanes + column) + place];
+	uint64		word = source->words[source->stride * column + place];
 
-	*isnull = tess_spill_columns_is_null(lanes[(Size) source->stride * tess_spill_columns_null_lane(column) + place],
+	*isnull = tess_spill_columns_is_null(source->nulls[source->stride *
+													   tess_spill_columns_null_lane(column) +
+													   place],
 										 column);
 	if (*isnull)
 		return (Datum) 0;
@@ -1172,14 +1215,10 @@ compare_sources(bh_node_type a, bh_node_type b, void *arg)
 	TessSendState *send = state->send;
 	const MergeSource *left = &state->sources[DatumGetInt32(a)];
 	const MergeSource *right = &state->sources[DatumGetInt32(b)];
-	const uint64 *left_lanes = (const uint64 *) (left->message + MAXALIGN(sizeof(GatherHeader)));
-	const uint64 *right_lanes = (const uint64 *) (right->message + MAXALIGN(sizeof(GatherHeader)));
-	int			first = send->null_lanes + state->ncolumns;
-
 	for (int word = 0; word < send->key_words; word++)
 	{
-		uint64		x = left_lanes[(Size) left->stride * (first + word) + left->place];
-		uint64		y = right_lanes[(Size) right->stride * (first + word) + right->place];
+		uint64		x = left->words[left->stride * (state->ncolumns + word) + left->place];
+		uint64		y = right->words[right->stride * (state->ncolumns + word) + right->place];
 
 		if (x != y)
 			return x < y ? 1 : -1;
@@ -1294,9 +1333,7 @@ merge_next(TessGatherState *state)
 			more[index] = !source->done;
 			for (int word = 0; word < send->key_words; word++)
 				lanes[index * send->key_words + word] = left[index] == 0 ? NULL :
-					(const uint64 *) (source->message + MAXALIGN(sizeof(GatherHeader))) +
-					(Size) source->stride * (send->null_lanes + state->ncolumns + word) +
-					source->place;
+					source->words + source->stride * (state->ncolumns + word) + source->place;
 		}
 		tess_status_check(send->kernels->sort_merge(state->nsources, send->key_words, lanes, left,
 													more, state->merge_state, order,

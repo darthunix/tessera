@@ -132,8 +132,11 @@ make_gather_path(PlannerInfo *root, GatherPath *gather)
 {
 	Path	   *subpath = gathered_batch_path(gather->subpath, gather->num_workers);
 
-	/* A single copy runs in one worker without the leader: only the core's plans make it. */
-	if (gather->single_copy || subpath == NULL)
+	/*
+	 * A single copy runs in one worker without the leader: only the core's
+	 * plans make it. The kernels write the messages.
+	 */
+	if (gather->single_copy || subpath == NULL || tess_runtime_kernels() == NULL)
 		return NULL;
 	return make_send_and_gather(root, &gather->path, subpath, gather->num_workers, NIL,
 								&gather_path_methods, &tess_gather_node);
