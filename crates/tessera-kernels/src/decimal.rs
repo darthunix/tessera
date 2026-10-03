@@ -957,43 +957,108 @@ pub fn merge_partials(
 /// takes the place of `state`, the decimal extreme of the rows before the
 /// batch, when it equals it. The last row that holds the batch's extreme
 /// and its decimal are returned, `None` when no decimal beats `state`.
-/// A row neither NULL nor a decimal goes to `rest`, whose other bits are
-/// cleared, for the caller to compare by the core's means, with the row
-/// returned too: such a value (a longer one, NaN) may equal a decimal.
+/// A row that is neither NULL nor a decimal (NaN, an infinity, a longer
+/// value) goes to `rest`, whose other bits are cleared, for the caller to
+/// compare by the core's means, with the row returned too: such a value
+/// may equal a decimal.
+///
+/// The rows of a word a source hands over in bulk, decimals of one scale
+/// ([`Terms::fold_decimals`]), compare by their values alone, equal values
+/// of one scale being the same numeric. A word with any other row that is
+/// not NULL goes row by row, so that equal values of other scales keep
+/// their rows' order.
 ///
 /// # Errors
 ///
-/// Masks of different row counts fail before any mutation.
+/// Masks of different row counts, or a source that hands over rows it was
+/// not asked for, fail before any mutation.
 pub fn extreme(
-    source: &impl Source,
+    terms: &impl Terms,
     rows: RowMaskView<'_>,
     max: bool,
     state: Option<Decimal>,
     rest: &mut RowMask<'_>,
 ) -> Result<Option<(usize, Decimal)>> {
     check_rows(rows.nrows(), &[rest.as_view().nrows()])?;
+    if max {
+        extreme_of::<true>(terms, rows, state, rest)
+    } else {
+        extreme_of::<false>(terms, rows, state, rest)
+    }
+}
+
+/// [`extreme`] for `max` or `min`.
+#[inline(always)]
+fn extreme_of<const MAX: bool>(
+    terms: &impl Terms,
+    rows: RowMaskView<'_>,
+    state: Option<Decimal>,
+    rest: &mut RowMask<'_>,
+) -> Result<Option<(usize, Decimal)>> {
+    // Whether `decimal` takes the place of `best`: it beats it or equals it.
+    let takes = |decimal: Decimal, best: Option<Decimal>| {
+        best.is_none_or(|best| {
+            decimal.compare(best)
+                != if MAX {
+                    Ordering::Less
+                } else {
+                    Ordering::Greater
+                }
+        })
+    };
     let mut best = state;
     let mut found = None;
     for_each_word(rows, |word, look| {
+        let mut top = if MAX { i64::MIN } else { i64::MAX };
+        let mut top_bit = 0;
+        let folded = terms.fold_decimals(word, look, |bit, value| {
+            if if MAX { value >= top } else { value <= top } {
+                top = value;
+                top_bit = bit;
+            }
+        });
+        let (handed, scale) = folded.map_or((0, 0), |folded| (folded.rows, folded.scale));
+        ensure!(
+            handed & !look == 0,
+            "a source handed over rows it was not asked for"
+        );
+        let mut others = look & !handed;
+        let mut alone = true;
+        while others != 0 {
+            let bit = others.trailing_zeros();
+            others &= others - 1;
+            if terms.term(word * 64 + bit as usize) != Term::Null {
+                alone = false;
+                break;
+            }
+        }
+        if alone {
+            if handed != 0 {
+                let decimal = Decimal::new(top, scale).ok_or_else(|| {
+                    anyhow::anyhow!("a source handed over a value past a decimal")
+                })?;
+                if takes(decimal, best) {
+                    best = Some(decimal);
+                    found = Some(word * 64 + top_bit);
+                }
+            }
+            return rest.set_word(word, 0);
+        }
         let mut other = 0;
         let mut each = look;
         while each != 0 {
             let bit = each.trailing_zeros();
             each &= each - 1;
             let row = word * 64 + bit as usize;
-            match source.get(row) {
-                Arg::Null => {}
-                Arg::Other => other |= 1 << bit,
-                Arg::Decimal(decimal) => {
-                    if best.is_none_or(|best| match decimal.compare(best) {
-                        Ordering::Less => !max,
-                        Ordering::Greater => max,
-                        Ordering::Equal => true,
-                    }) {
+            match terms.term(row) {
+                Term::Null => {}
+                Term::Decimal(decimal) => {
+                    if takes(decimal, best) {
                         best = Some(decimal);
                         found = Some(row);
                     }
                 }
+                Term::Special(_) | Term::Other => other |= 1 << bit,
             }
         }
         rest.set_word(word, other)
