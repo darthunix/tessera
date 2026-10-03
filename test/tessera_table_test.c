@@ -21,6 +21,7 @@ PG_FUNCTION_INFO_V1(tessera_test_spill_header);
 PG_FUNCTION_INFO_V1(tessera_test_table_partitions);
 PG_FUNCTION_INFO_V1(tessera_test_table_combine);
 PG_FUNCTION_INFO_V1(tessera_test_table_shared_spill);
+PG_FUNCTION_INFO_V1(tessera_test_table_record_size);
 
 #define NROWS 200
 #define NWORDS 4
@@ -1303,5 +1304,32 @@ tessera_test_table_shared_spill(PG_FUNCTION_ARGS)
 	pfree(filter);
 	pfree(words);
 	pfree(batch);
+	PG_RETURN_BOOL(true);
+}
+
+/*
+ * The planner's estimate of a record (tess_table_record_bytes) against the
+ * kernels' size at every count of keys and every payload up to 1 kB, and
+ * the kernels' refusal of a count of keys out of range.
+ */
+Datum
+tessera_test_table_record_size(PG_FUNCTION_ARGS)
+{
+	TessStatus	status = TESS_STRUCT_INITIALIZER(TessStatus);
+	Size		size;
+
+	for (int nkeys = 1; nkeys <= TESS_TABLE_MAX_KEYS; nkeys++)
+		for (Size payload_size = 0; payload_size <= 1024; payload_size++)
+		{
+			if (tess_table_record_size(nkeys, payload_size, &size, &status) != TESS_OK)
+				elog(ERROR, "no record size for %d keys and %zu bytes of payload: %s",
+					 nkeys, payload_size, status.message);
+			if (size != tess_table_record_bytes(nkeys, payload_size))
+				elog(ERROR, "a record of %d keys and %zu bytes of payload is %zu bytes, not %zu",
+					 nkeys, payload_size, size, tess_table_record_bytes(nkeys, payload_size));
+		}
+	if (tess_table_record_size(0, 8, &size, &status) == TESS_OK ||
+		tess_table_record_size(TESS_TABLE_MAX_KEYS + 1, 8, &size, &status) == TESS_OK)
+		elog(ERROR, "a count of keys out of range has a record size");
 	PG_RETURN_BOOL(true);
 }

@@ -184,6 +184,8 @@ side_init(TessHashJoinState *state, SpillSide *side, int nkeys, const TessTableK
 		memcpy(side->byvals, byvals, sizeof(bool) * nwords);
 	}
 	side->payload_size = sizeof(uint64) * (1 + nwords);
+	check(state, state->kernels->table_record_size(nkeys, side->payload_size,
+												   &side->record_size, &state->status));
 	side->chunk_len = chunk_len;
 	check(state, state->kernels->table_size(nkeys, kinds, side->payload_size,
 											JOIN_INITIAL_ROWS,
@@ -255,7 +257,7 @@ side_block(SpillSide *side, Size len)
 static inline int64
 side_chunk_cost(SpillSide *side, Size len)
 {
-	return record_chunk_cost(len, TYPEALIGN(8, 16 + 8 * side->nkeys + side->payload_size));
+	return record_chunk_cost(len, side->record_size);
 }
 
 /* A block of len bytes: in the query's shared memory after a header, or the side's own. */
@@ -738,7 +740,7 @@ join_spill_create(TessHashJoinState *state, JoinSpill *parent, double expected,
 {
 	MemoryContext context = state->css.ss.ps.state->es_query_cxt;
 	Size		limit = get_hash_memory_limit();
-	Size		record = 16 + 8 * state->keys.nkeys + sizeof(uint64) * (1 + state->npayload);
+	Size		record = state->record_size;
 	Size		chunk_len;
 	int			npartitions = JOIN_SPILL_MIN_PARTITIONS;
 	JoinSpill  *spill;
@@ -1535,7 +1537,7 @@ load_piece(TessHashJoinState *state, int partition, bool whole)
 	SpillPart  *part = &side->parts[partition];
 	TessSpillHeader header;
 	uint64		buckets = state->counters[JOIN_BUCKETS];
-	Size		record = TYPEALIGN(8, 16 + 8 * side->nkeys + side->payload_size);
+	Size		record = side->record_size;
 	Size		loaded = 0;
 	bool		records = false;
 	uint64		rows = 0;

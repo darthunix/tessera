@@ -88,8 +88,9 @@ pub use table::{
     tess_table_fingerprint, tess_table_format_version, tess_table_gather, tess_table_gather_key,
     tess_table_gather_scattered, tess_table_gather_words, tess_table_layout, tess_table_link,
     tess_table_link_grouped, tess_table_next_in_group, tess_table_next_match, tess_table_payloads,
-    tess_table_probe, tess_table_record, tess_table_regrow, tess_table_scan, tess_table_size,
-    tess_table_split, tess_table_stats, tess_table_try_build_bloom,
+    tess_table_probe, tess_table_record, tess_table_record_size, tess_table_regrow,
+    tess_table_scan, tess_table_size, tess_table_split, tess_table_stats,
+    tess_table_try_build_bloom,
 };
 pub use text::{
     TextArg, tess_text_compare, tess_text_lengths, tess_text_like, tess_text_pieces,

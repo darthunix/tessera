@@ -20,7 +20,7 @@ use tessera_kernels::table::{
     bloom::SharedFilter,
     index_size, init_chunk, normalize_word, payload_null_words,
     phases::{Participant, SharedCounters},
-    split_to,
+    record_bytes_of, split_to,
 };
 
 use super::args::reader;
@@ -378,6 +378,30 @@ pub unsafe extern "C" fn tess_table_size(
                 payload_size,
             };
             let bytes = index_size(&config, capacity)?;
+            *size.as_mut().context("a null size")? = bytes;
+            Ok(())
+        })
+    }
+}
+
+/// `tess_table_record_size`: the bytes of one record of a table of `nkeys`
+/// keys of any kinds and a payload of `payload_size` bytes.
+///
+/// # Safety
+///
+/// `size` must be null or writable; `status` as for every entry point.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tess_table_record_size(
+    nkeys: c_int,
+    payload_size: usize,
+    size: *mut usize,
+    status: *mut Status,
+) -> Code {
+    // SAFETY: the caller's contract.
+    unsafe {
+        guard(status, || {
+            let nkeys = usize::try_from(nkeys).context("a negative key count")?;
+            let bytes = record_bytes_of(nkeys, payload_size)?;
             *size.as_mut().context("a null size")? = bytes;
             Ok(())
         })

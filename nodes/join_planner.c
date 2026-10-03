@@ -879,10 +879,12 @@ join_cost(PlannerInfo *root, RelOptInfo *joinrel, RelOptInfo *innerrel, JoinType
 	bloom = tess_join_bloom_ratio > 0 && table_rows >= JOIN_BLOOM_MIN_ROWS &&
 		(tess_join_bloom_ratio >= 1.0 || share < tess_join_bloom_ratio);
 	/*
-	 * A record: 16 bytes of header, 8 a key, 8 for the NULL bits of the
-	 * columns kept and 8 a column, and 8 of the index.
+	 * A record, its payload 8 bytes for the NULL bits of the columns kept
+	 * and 8 a column, and 8 of the index.
 	 */
-	spills = table_rows * (16 + 8 * keys->nkeys + 8 * (1 + ints + texts) + 8) >
+	spills = table_rows *
+		(double) (tess_table_record_bytes(keys->nkeys,
+										  sizeof(uint64) * (1 + ints + texts)) + 8) >
 		(double) get_hash_memory_limit() * participants;
 
 	build = build_rows * (tess_join_build_cost + texts * tess_join_text_value_cost +

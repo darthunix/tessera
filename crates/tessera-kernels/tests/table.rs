@@ -17,7 +17,7 @@ use tessera_kernels::ops::ArithmeticError;
 use tessera_kernels::table::{
     Batch, CHUNK_HEADER, Cursor, FORMAT_VERSION, Fold, KeyKind, KeySource, LocalTable,
     MAX_CHUNK_LEN, MAX_KEYS, Slot, SumSlot, Table, TableConfig, UNIT_BITS, bloom, index_size,
-    normalize_word, record_bytes,
+    normalize_word, record_bytes, record_bytes_of,
 };
 use tessera_testing::{edge, flags, integer, property, values, words};
 
@@ -122,6 +122,26 @@ fn a_created_table_is_empty_and_attaches_again() -> Result<()> {
     assert_eq!(again.stats(), stats);
     assert_eq!(again.key_kinds(), config.keys);
     assert_eq!(table.chunks(), 0, "no chunk before the first record");
+    Ok(())
+}
+
+#[test]
+fn a_record_takes_its_header_its_key_slots_and_its_payload() -> Result<()> {
+    let keys = [KeyKind::Int64; MAX_KEYS];
+    for nkeys in 1..=MAX_KEYS {
+        for payload_size in 0..=1024 {
+            let config = TableConfig {
+                keys: &keys[..nkeys],
+                payload_size,
+            };
+            let bytes = record_bytes_of(nkeys, payload_size)?;
+            assert_eq!(bytes, model_record_size(nkeys, payload_size));
+            assert_eq!(bytes, record_bytes(&config)?, "whatever the kinds");
+        }
+    }
+    assert!(record_bytes_of(0, 8).is_err());
+    assert!(record_bytes_of(MAX_KEYS + 1, 8).is_err());
+    assert!(record_bytes_of(1, usize::MAX).is_err());
     Ok(())
 }
 

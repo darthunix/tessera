@@ -38,8 +38,16 @@ CREATE FUNCTION tessera_test_spill_header()
 RETURNS boolean
 AS :'table_test', 'tessera_test_spill_header'
 LANGUAGE C STRICT;
+CREATE FUNCTION tessera_test_table_record_size()
+RETURNS boolean
+AS :'table_test', 'tessera_test_table_record_size'
+LANGUAGE C STRICT;
 SELECT tessera_test_table_layout() AS layout \gset
 \echo :layout
+t
+-- The planner's estimate of a record is the kernels' size of it.
+SELECT tessera_test_table_record_size() AS record_size \gset
+\echo :record_size
 t
 SELECT tessera_test_table_cycle() AS cycle \gset
 \echo :cycle
@@ -66,6 +74,7 @@ SELECT tessera_test_spill_header() AS spill \gset
 \echo :spill
 t
 DROP FUNCTION tessera_test_table_layout();
+DROP FUNCTION tessera_test_table_record_size();
 DROP FUNCTION tessera_test_table_cycle();
 DROP FUNCTION tessera_test_table_groups();
 DROP FUNCTION tessera_test_table_regrow();

@@ -138,6 +138,28 @@ extern uint32 tess_table_format_version(void);
 extern Size tess_table_layout(TessTableLayoutKind kind);
 
 /*
+ * The bytes of one record of a table of nkeys keys, of any kinds, and a
+ * payload of payload_size bytes: its header, a slot per key and the
+ * payload, rounded up to 8. An error for a count of keys out of range or
+ * a record too large.
+ */
+extern TessStatusCode tess_table_record_size(int nkeys,
+											 Size payload_size,
+											 Size *size,
+											 TessStatus *status);
+
+/*
+ * tess_table_record_size for the planner's estimates, which call no
+ * kernel: a header of 16 bytes, a slot of 8 per key and the payload,
+ * rounded up to 8. A test ties it to the kernels' (tessera_table_test).
+ */
+static inline Size
+tess_table_record_bytes(int nkeys, Size payload_size)
+{
+	return TYPEALIGN(8, 16 + 8 * (Size) nkeys + payload_size);
+}
+
+/*
  * The bytes the index of a table of nkeys keys of the given kinds, a
  * payload of payload_size bytes per record and capacity records needs:
  * the header and the buckets, a multiple of 8.
