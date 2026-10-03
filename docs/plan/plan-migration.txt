@@ -7054,6 +7054,23 @@
   SUM_BOUND, C −350, три коммита. Проверка: numeric-случаи наборов agg и types, семейства anyagg и win (numeric sum,
   min, max) A/B, тесты границы из 9.10; сперва случаи «вкл./выкл.» на ничьи 1.0 против 1.00. После разреза agg_fast.c
   (9.12) — diff обозрим.
+  Уточнение 2026-10-03 (решение пользователя: пакетная переделка). Замысел (б) «вход ядра вместо fast_add» — вызов
+  ядра на строку: fast_add складывает построчно sum(int8), avg(int8), avg(int4), avg(int2) и sum(int2) без групп и
+  sum(int2) с группами, сравнение десятичных — min/max numeric по группам (fast_group_decimals); вызов ядра на строку
+  против урока 4.22. Поэтому вместо него пакетные входы, шесть коммитов: 1) тесты «вкл./выкл.» (agg_same) на ничью
+  десятичного и длинного представления одного числа в обоих порядках, с группами и без, и sum(int2) с группами и
+  рабочими; 2) суммы целых без групп пачкой: tess_decimal_sum берёт вид колонки (numeric, int4, int8 — SumColumn
+  ядра), строки, которые ядро отвергает у границы, — в остаток numeric, построчный fast_add уходит из пути без групп;
+  3) sum(int2) с группами — состояние суммы (SumState) с результатом и частичным значением int8, fast_add уходит
+  совсем; 4) min/max numeric без групп: tess_decimal_extreme ищет в пачке выигравшую строку (поздняя при равенстве)
+  вместе со сравнением с десятичным состоянием; пачка с не-десятичным значением — построчно через numeric_cmp;
+  fast_decimal_cmp, fast_extreme_batch и сравнения в fast_extreme и fast_decimal_extreme уходят; 5) min/max numeric по
+  группам — состояние словами записи (флаги, значение, шкала, указатель на numeric), пачку складывает ядро
+  (tess_table_accumulate_extremes, как суммы), пачка с не-десятичным значением — построчно через numeric_cmp;
+  fast_group_decimals и FastState групп уходят; группы с обобщёнными агрегатами сбрасывают строки (row_spill),
+  указатель в записи на диск не попадает; 6) слияние частичных сумм без групп (agg_fast_merge) через SumState::merge,
+  FAST_BOUND, fast_rescale и fast_powers уходят. Проверка по коммиту: наборы agg и types, ручная порча, --disasm
+  --module nodes; в конце cargo ab: anyagg, anykey, win (numeric и целые суммы, min/max).
 
   9.17 Чистые куски исполнителя (пакетный вход — один вызов на пачку, не на строку). 1) Отметки hash join: mark_pairs
   → tess_table_mark(refs, n, record_size, marks), next_tail → tess_table_next_unmarked(table, chunk, &byte, record_size,
