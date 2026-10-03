@@ -1099,6 +1099,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "tessera-ab"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "tempfile",
+ "tessera-pgtool",
+]
+
+[[package]]
 name = "tessera-bench"
 version = "0.1.0"
 dependencies = [
