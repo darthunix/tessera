@@ -743,7 +743,8 @@ sort_rows(TessSortState *state)
 	state->used_bound = state->topn ? state->bound : -1;
 	if (state->topn)
 	{
-		Size		words = mul_size((Size) state->bound, state->words);
+		/* It fits work_mem (sort_choose_topn): the counts are exact. */
+		Size		words = (Size) sort_topn_heap_words(state, (double) state->bound);
 
 		if (state->heap != NULL)
 			pfree(state->heap);
@@ -752,10 +753,8 @@ sort_rows(TessSortState *state)
 		/* A generic key's heap has a spare slot, and the keys' values. */
 		if (state->generic >= 0)
 		{
-			Size		slots = mul_size((Size) state->bound + 1,
-										 state->nkeys - state->generic);
+			Size		slots = (Size) sort_topn_value_slots(state, (double) state->bound);
 
-			words = add_size(words, state->words);
 			if (state->top_values != NULL)
 			{
 				pfree(state->top_values);
@@ -829,17 +828,17 @@ sort_rows(TessSortState *state)
 												 MCXT_ALLOC_HUGE);
 		if (state->count > 0)
 			tess_status_check(state->kernels->sort(state->heap, (Size) state->count,
-												   state->words, state->refs, &status),
+												   state->item_words, state->refs, &status),
 							  &status);
 		/* Items of equal words by the comparisons, as a full sort orders them. */
 		if (state->count > 0 && state->generic >= 0)
 		{
 			uint64	   *items = state->heap;
 
-			sort_ties(state, &items, state->words, state->refs, state->count, false);
+			sort_ties(state, &items, state->item_words, state->refs, state->count, false);
 			free_ties(state);
 		}
-		sort_note_memory(state, state->heap_capacity * state->words * sizeof(uint64));
+		sort_note_memory(state, (Size) sort_topn_heap_bytes(state, state->heap_capacity));
 		state->sorted = true;
 		state->current = -1;
 		return;

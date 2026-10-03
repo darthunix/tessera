@@ -163,6 +163,8 @@ SET max_parallel_workers_per_gather = 0;
 SELECT sort_same($$SELECT i, t FROM sort_seq ORDER BY i DESC LIMIT 10$$);
 SELECT sort_explain($$SELECT i, t FROM sort_seq ORDER BY i DESC LIMIT 10$$);
 SELECT sort_same($$SELECT i, t FROM sort_seq ORDER BY i DESC LIMIT 50000$$);
+-- A bound of 50000: the rows are made anew past four times it, 200000.
+SELECT sort_explain($$SELECT i, t FROM sort_seq ORDER BY i DESC LIMIT 50000$$);
 RESET max_parallel_workers_per_gather;
 DROP TABLE sort_seq;
 -- Past work_mem: sorted runs on disk, merged. At 64 kB sort_big, text of

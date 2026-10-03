@@ -186,9 +186,9 @@ typedef struct TessSortState
 	/*
 	 * Top-N: the rows a parent needs (-1 for all), as it set them; the
 	 * bound the rows were read under; the heap of the best rows' items,
-	 * its capacity, length and item width; the keys it orders by, every
-	 * one with its bit for NULL, so that the width never changes; the
-	 * rebuilds of the rows from the heap's.
+	 * its capacity and length, the items an external sort's, of
+	 * item_words with every key's bit for NULL (ext_keys), so that the
+	 * width never changes; the rebuilds of the rows from the heap's.
 	 */
 	int64		bound;
 	int64		used_bound;
@@ -196,8 +196,6 @@ typedef struct TessSortState
 	uint64	   *heap;
 	Size		heap_capacity;
 	uint64		heap_len;
-	int			words;
-	TessSortKey top_keys[TESS_TABLE_MAX_KEYS];
 	uint64		compactions;
 	/*
 	 * Top-N of a generic key: the heap is the node's, in C, one slot more
@@ -245,7 +243,7 @@ typedef struct TessSortState
 	/*
 	 * External sort: the flags the node began with; whether the rows went
 	 * to runs, the runs to merge, the keys every item has a bit for NULL
-	 * in and its words, the rows of a block, the passes that merged runs
+	 * in and its words (a top-N heap's too), the rows of a block, the passes that merged runs
 	 * into longer ones and the bytes written. The last merge streams from
 	 * the inputs, or, for a scan backward, reads one run by blocks: the
 	 * block in memory. Blocks the rows put out may point into are freed
@@ -289,6 +287,35 @@ extern void sort_append_rows(TessSortState *state, TessBatch *batch);
 extern void sort_top_batch_generic(TessSortState *state, TessBatch *batch);
 extern void sort_top_batch(TessSortState *state, TessBatch *batch);
 extern bool sort_choose_topn(TessSortState *state);
+
+/* Top-N: the rows past which the rows are made anew from the heap's (compact_rows). */
+static inline double
+sort_topn_rebuild_rows(double capacity)
+{
+	return Max(4 * capacity, 65536.0);
+}
+
+/* Top-N: the words of a heap of capacity items; a generic key's has a slot more. */
+static inline double
+sort_topn_heap_words(const TessSortState *state, double capacity)
+{
+	return (capacity + (state->generic >= 0 ? 1 : 0)) * state->item_words;
+}
+
+/* Top-N: a generic key's heap's values, of the keys from the generic one on. */
+static inline double
+sort_topn_value_slots(const TessSortState *state, double capacity)
+{
+	return state->generic >= 0 ? (capacity + 1) * (state->nkeys - state->generic) : 0;
+}
+
+/* Top-N: the bytes of a heap of capacity items, with a generic key's values. */
+static inline double
+sort_topn_heap_bytes(const TessSortState *state, double capacity)
+{
+	return sort_topn_heap_words(state, capacity) * sizeof(uint64) +
+		sort_topn_value_slots(state, capacity) * (sizeof(Datum) + sizeof(bool));
+}
 extern int sort_run_words(TessSortState *state);
 extern void sort_set_finish(TessSortState *state);
 extern void sort_spill_run(TessSortState *state);

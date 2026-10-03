@@ -570,6 +570,28 @@ SELECT sort_same($$SELECT i, t FROM sort_seq ORDER BY i DESC LIMIT 50000$$);
  50000 rows
 (1 row)
 
+-- A bound of 50000: the rows are made anew past four times it, 200000.
+SELECT sort_explain($$SELECT i, t FROM sort_seq ORDER BY i DESC LIMIT 50000$$);
+                                       sort_explain                                        
+-------------------------------------------------------------------------------------------
+ Custom Scan (TessLimit) (actual rows=50000.00 loops=1)
+   Input Batches: 782
+   Input Rows: 50000
+   Output Rows: 50000
+   ->  Custom Scan (TessSort) (actual rows=50000.00 loops=1)
+         Sort Key: sort_seq.i DESC
+         Sort Method: top-N in memory
+         Memory Usage: N kB
+         Input Batches: 3244
+         Input Rows: 200000
+         ->  Custom Scan (TessHeapScan) on public.sort_seq (actual rows=200000.00 loops=1)
+               Batch Size: 64
+               Batches: 3244
+               Pages: 1081
+               Deformed Datums: 400000
+               Restarted Datums: 0
+(16 rows)
+
 RESET max_parallel_workers_per_gather;
 DROP TABLE sort_seq;
 -- Past work_mem: sorted runs on disk, merged. At 64 kB sort_big, text of
