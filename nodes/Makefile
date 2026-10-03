@@ -1,5 +1,5 @@
 MODULE_big = tessera_nodes
-OBJS = agg.o agg_planner.o agg_spill.o append.o filter.o gather.o gather_planner.o hashjoin.o hashjoin_begin.o hashjoin_pairs.o hashjoin_shared.o hashjoin_spill.o heapscan.o join_planner.o limit.o limit_planner.o module.o pack.o scan_planner.o sort.o sort_external.o sort_planner.o sort_topn.o
+OBJS = agg.o agg_generic.o agg_group.o agg_keydict.o agg_planner.o agg_spill.o append.o filter.o gather.o gather_planner.o hashjoin.o hashjoin_begin.o hashjoin_pairs.o hashjoin_shared.o hashjoin_spill.o heapscan.o join_planner.o limit.o limit_planner.o module.o pack.o scan_planner.o sort.o sort_external.o sort_planner.o sort_topn.o
 PG_CPPFLAGS = -I$(srcdir)/../include
 
 PG_CONFIG ?= pg_config
