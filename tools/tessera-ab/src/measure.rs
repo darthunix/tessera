@@ -85,17 +85,33 @@ pub fn run(repo: &Path, options: &Options) -> Result<u8> {
         .tempdir_in(&runs)?
         .keep();
     println!("Artifacts: {}", root.display());
-    let base = Snapshot::capture(repo, &options.base, root.join("base"))?;
-    let candidate = if options.base == options.candidate {
-        base.duplicate(root.join("candidate"))?
-    } else {
-        Snapshot::capture(repo, &options.candidate, root.join("candidate"))?
-    };
     let variables: Vec<String> = options
         .copt
         .iter()
         .map(|copt| format!("COPT={copt}"))
         .collect();
+    let builds = runs.join("ab-builds");
+    let base = cached(
+        Snapshot::capture(repo, &options.base, root.join("base"))?,
+        &builds,
+        &variables,
+    )?;
+    let candidate = if options.base == options.candidate {
+        base.duplicate(root.join("candidate"))?
+    } else {
+        cached(
+            Snapshot::capture(repo, &options.candidate, root.join("candidate"))?,
+            &builds,
+            &variables,
+        )?
+    };
+    for (side, snapshot) in [("base", &base), ("candidate", &candidate)] {
+        println!(
+            "{side}: {} in {}",
+            snapshot.revision,
+            snapshot.directory.display()
+        );
+    }
     let sides = [("base", &base), ("candidate", &candidate)];
     let mut measured: BTreeMap<&str, [Vec<PathBuf>; 2]> = BTreeMap::new();
     for family in &options.family {
@@ -127,6 +143,39 @@ pub fn run(repo: &Path, options: &Options) -> Result<u8> {
         root.join("report.md").display()
     );
     Ok(u8::from(report.slower))
+}
+
+/// A snapshot's build, kept between runs under `builds`, by its sources'
+/// hash and its make variables: a later run of the same sources with the
+/// same COPT takes the directory already built, and make only installs.
+/// The variables are part of the key, since make does not rebuild objects
+/// for flags that changed.
+fn cached(snapshot: Snapshot, builds: &Path, variables: &[String]) -> Result<Snapshot> {
+    let flags = digest(variables.join("\n").as_bytes());
+    let key = format!(
+        "{}-{}",
+        snapshot
+            .source_sha256
+            .get(..16)
+            .unwrap_or(&snapshot.source_sha256),
+        flags.get(..8).unwrap_or(&flags)
+    );
+    let directory = builds.join(key);
+    let archive = snapshot.directory.with_extension("tar");
+    if archive.is_file() {
+        fs::remove_file(&archive)?;
+    }
+    if directory.is_dir() {
+        fs::remove_dir_all(&snapshot.directory)?;
+    } else {
+        fs::create_dir_all(builds)?;
+        fs::rename(&snapshot.directory, &directory)
+            .with_context(|| format!("cannot keep the build in {}", directory.display()))?;
+    }
+    Ok(Snapshot {
+        directory,
+        ..snapshot
+    })
 }
 
 /// One run of a family: run.sh's results directory.
