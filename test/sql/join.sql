@@ -514,6 +514,10 @@ SET work_mem = '512kB';
 SELECT join_explain($$SELECT count(*), sum(length(jsb.t)) FROM jsp JOIN jsb ON jsp.k = jsb.k$$);
 SELECT join_same($$SELECT count(*), sum(length(jsb.t)), sum(jsp.k), sum(jsb.n) FROM jsp JOIN jsb ON jsp.k = jsb.k$$);
 SELECT join_same($$SELECT jsp.s, jsb.t, jsb.n FROM jsp JOIN jsb ON jsp.k = jsb.k WHERE jsp.s LIKE '%7'$$);
+-- A function's plans freed, the allocator recycles their contexts (aset.c)
+-- with the largest chunk a block shares, 8 kB: the RIGHT join below got
+-- one for a partition read back and took 1579 kB of a hash_mem of 1024.
+SELECT count(*) FROM join_explain($$SELECT count(*), sum(length(jsb.t)) FROM jsp JOIN jsb ON jsp.k = jsb.k$$);
 SELECT join_explain($$SELECT count(*), count(jsb.n), sum(length(jsb.t)) FROM jsp LEFT JOIN jsb ON jsp.k = jsb.k$$);
 SELECT join_same($$SELECT count(*), count(jsb.n), sum(length(jsb.t)), sum(length(jsp.s)) FROM jsp LEFT JOIN jsb ON jsp.k = jsb.k$$);
 SELECT join_same($$SELECT jsp.s, jsb.t FROM jsp LEFT JOIN jsb ON jsp.k = jsb.k WHERE jsp.s LIKE '%3'$$);

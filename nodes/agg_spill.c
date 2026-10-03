@@ -190,12 +190,11 @@ agg_spill_create(TessAggState *state, AggSpill *parent, double expected, uint32 
 	spill->shift = shift;
 	spill->npartitions = npartitions;
 	spill->partition = -1;
-	/* Small blocks: a chunk takes a block of its own size. */
 	spill->context = AllocSetContextCreate(context, "TessAgg spill",
-										   ALLOCSET_SMALL_SIZES);
+										   TESS_CHUNK_CONTEXT_SIZES);
 	spill->block_context = AllocSetContextCreate(spill->context,
 												 "TessAgg spilled block",
-												 ALLOCSET_SMALL_SIZES);
+												 TESS_CHUNK_CONTEXT_SIZES);
 	spill->parts = MemoryContextAllocZero(spill->context,
 										  sizeof(AggPart) * npartitions);
 	{
