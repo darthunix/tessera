@@ -1,6 +1,7 @@
 use anyhow::{Context, Result, ensure};
 
 use crate::bitmap::{validate_row, validate_words, word_count};
+use crate::bits::ones;
 
 #[derive(Clone, Copy, Debug)]
 enum Storage<'a> {
@@ -165,16 +166,9 @@ impl<'a> RowMaskView<'a> {
     /// Only set bits are visited within each word. Once exhausted, the
     /// iterator keeps returning `None`.
     pub fn selected_indices(&self) -> impl Iterator<Item = usize> + '_ {
-        self.words().enumerate().flat_map(|(word, mut remaining)| {
-            std::iter::from_fn(move || {
-                if remaining == 0 {
-                    return None;
-                }
-                let row = word * 64 + remaining.trailing_zeros() as usize;
-                remaining &= remaining - 1;
-                Some(row)
-            })
-        })
+        self.words()
+            .enumerate()
+            .flat_map(|(word, bits)| ones(bits).map(move |bit| word * 64 + bit))
     }
 }
 
