@@ -888,14 +888,6 @@ generic_advance(GenericAgg *generic, int row, MemoryContext states, MemoryContex
 	Datum		result;
 	bool		skip = false;
 
-#ifdef HAVE_INT128
-	if (generic->fast != FAST_NONE)
-	{
-		fast_advance(generic, row, states);
-		return;
-	}
-#endif
-
 	for (int arg = 0; arg < generic->nargs; arg++)
 	{
 		call->args[arg + 1].value = generic->columns[arg].values[row];
@@ -1033,9 +1025,16 @@ agg_generic_accumulate(TessAggState *state, GenericAgg *generic, const TessRowMa
 		MemoryContextSwitchTo(old);
 		return;
 	}
+	/* The rows one by one: the node's own state, or the core's function. */
+	if (generic->fast != FAST_NONE)
+	{
+		while ((row = tess_row_mask_next(rows, row)) >= 0)
+			fast_advance(generic, row, states);
+	}
+	else
 #endif
-	while ((row = tess_row_mask_next(rows, row)) >= 0)
-		generic_advance(generic, row, states, temporary);
+		while ((row = tess_row_mask_next(rows, row)) >= 0)
+			generic_advance(generic, row, states, temporary);
 	MemoryContextSwitchTo(old);
 }
 
@@ -1538,7 +1537,12 @@ agg_generic_group_accumulate(TessAggState *state, int index, const TessRowMask *
 
 		generic->state = (Datum) payload[slot];
 		generic->state_null = (payload[0] & bit) == 0;
-		generic_advance(generic, row, states, temporary);
+#ifdef HAVE_INT128
+		if (generic->fast != FAST_NONE)
+			fast_advance(generic, row, states);
+		else
+#endif
+			generic_advance(generic, row, states, temporary);
 		payload[slot] = generic->state_null ? 0 : (uint64) generic->state;
 		payload[0] = generic->state_null ? payload[0] & ~bit : payload[0] | bit;
 	}
