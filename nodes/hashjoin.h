@@ -350,9 +350,12 @@ typedef struct SpillSide
 	 * A shared table's inner side: its chunks and value chunks in the
 	 * query's shared memory, each after a JoinChunk header, by pointer as
 	 * well as by address; their bytes counted by partition in the words of
-	 * the table's spilling, which say whether they pass the budget; the
+	 * the table's spilling, which the rule that sends partitions to disk
+	 * weighs; the
 	 * value chunks numbered for every participant under the table's lock.
-	 * NULL area for a side in memory of its own.
+	 * NULL area for a side in memory of its own, whose inner side counts
+	 * its bytes in words of its own (spill_words, which only it reads, the
+	 * other sides having none).
 	 */
 	dsa_area   *area;
 	struct JoinShared *shared;
@@ -361,7 +364,6 @@ typedef struct SpillSide
 	const TessKernelOps *kernels;
 	dsa_pointer *pointers;
 	dsa_pointer *value_pointers;
-	bool		over;
 	int			owner;
 	/*
 	 * The files are in the table's set, where every participant reads
@@ -891,6 +893,8 @@ spill_partition(const JoinSpill *spill, uint32 hash)
 }
 
 /* The executor (hashjoin.c): the table, its values and marks, the build and the probe. */
+extern TessSpillWeights join_spill_weights(TessHashJoinState *state);
+
 extern bool join_append_rows(TessHashJoinState *state, const TessTableRef *table, int chunk, TessRowMask *pending);
 extern void join_batch_keys(TessHashJoinState *state, TessBatch *batch, const int *columns, const TessTableKeyKind *kinds, TessRowMask *valid);
 extern void join_child_column(TessBatch *batch, int column, const TessRowMask *rows, TessColumnPurpose purpose, TessDatumColumn *result);

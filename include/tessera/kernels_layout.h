@@ -66,6 +66,10 @@ tess_kernels_layout_matches(void)
 		tess_table_layout(TESS_TABLE_LAYOUT_REF_NCHUNKS_OFFSET) ==
 		offsetof(TessTableRef, nchunks) &&
 		tess_table_layout(TESS_TABLE_LAYOUT_UNIT_BITS) == TESS_TABLE_UNIT_BITS &&
+		tess_table_layout(TESS_TABLE_LAYOUT_SPILL_WEIGHTS_SIZE) ==
+		sizeof(TessSpillWeights) &&
+		tess_table_layout(TESS_TABLE_LAYOUT_SPILL_WEIGHTS_PER_CHECK_OFFSET) ==
+		offsetof(TessSpillWeights, per_check) &&
 		tess_table_layout((TessTableLayoutKind) 99) == 0 &&
 		tess_sort_layout(TESS_SORT_LAYOUT_KEY_SIZE) == sizeof(TessSortKey) &&
 		tess_sort_layout(TESS_SORT_LAYOUT_KEY_FLAGS_OFFSET) ==

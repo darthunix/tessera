@@ -481,7 +481,9 @@ fn the_layout_probes_match_the_types() {
     assert_eq!(tess_table_layout(8), size_of::<TableRef>());
     assert_eq!(tess_table_layout(9), 32);
     assert_eq!(tess_table_layout(10), 17);
-    assert_eq!(tess_table_layout(11), 0);
+    assert_eq!(tess_table_layout(11), 48);
+    assert_eq!(tess_table_layout(12), 40);
+    assert_eq!(tess_table_layout(13), 0);
 }
 
 #[test]

@@ -442,7 +442,7 @@ join_shared_count(TessHashJoinState *state, int64 delta)
 
 	check(state, state->kernels->table_spill_add_bytes(join_shared_words(state),
 													   state->parallel.shared->spill_nwords,
-													   delta, -1, &over,
+													   true, delta, -1, &over,
 													   &state->status));
 	state->parallel.spill_over = over;
 }

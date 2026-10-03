@@ -28,6 +28,7 @@ use super::args::reader;
 use super::column::DatumColumn;
 use super::decimal::{PartialColumn, SumColumn, SumInput};
 use super::mask::Mask;
+use super::shared_spill::SpillWeights;
 use super::status::{Code, Status, guard};
 use crate::{DatumInt32Column, DatumInt64Column};
 
@@ -239,6 +240,8 @@ pub extern "C" fn tess_table_layout(kind: c_uint) -> usize {
         8 => size_of::<TableRef>(),
         9 => offset_of!(TableRef, nchunks),
         10 => UNIT_BITS as usize,
+        11 => size_of::<SpillWeights>(),
+        12 => offset_of!(SpillWeights, per_check),
         _ => 0,
     }
 }

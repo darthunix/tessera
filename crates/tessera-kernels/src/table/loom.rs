@@ -32,7 +32,7 @@ use super::header::{
 use super::phases::{Action, Counters, Participant};
 use super::record::Access;
 use super::region::{Region, order};
-use super::shared_spill::{Spill, Words};
+use super::shared_spill::{Memory, Spill, Weights, Words};
 use super::{Batch, batch, index_size, init};
 
 /// The orderings of the bucket heads: the region's, or relaxed ones that
@@ -962,6 +962,16 @@ fn participants_past_the_budget_agree_on_one_split() {
     });
 }
 
+/// A shared table's weights: past its budget, one partition a check.
+const SHARED: Weights = Weights {
+    start: 1.0,
+    target: 1.0,
+    spilled: 0.0,
+    reserve: 0,
+    resident: 0.0,
+    per_check: 1,
+};
+
 #[test]
 fn a_partition_goes_to_disk_once() {
     ::loom::model(|| {
@@ -972,7 +982,7 @@ fn a_partition_goes_to_disk_once() {
         let threads: Vec<_> = (0..2)
             .map(|_| {
                 let spill = spill.clone();
-                thread::spawn(move || spill.evict_largest())
+                thread::spawn(move || spill.evict(&SHARED, Memory::Counted, None, 0).unwrap())
             })
             .collect();
         let marked: Vec<u32> = threads

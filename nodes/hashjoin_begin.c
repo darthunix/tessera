@@ -566,7 +566,7 @@ init_shared(TessHashJoinState *state, int participants, dsm_segment *segment)
 	state->parallel.shared_budget = budget * state->parallel.shared->participants;
 	check(state, state->kernels->table_spill_init(dsa_get_address(area,
 																  state->parallel.shared->spill_words),
-												  state->parallel.shared->spill_nwords,
+												  state->parallel.shared->spill_nwords, true,
 												  (uint64) budget * state->parallel.shared->participants,
 												  &state->status));
 	for (int list = 0; list < 2 * state->parallel.shared->participants; list++)

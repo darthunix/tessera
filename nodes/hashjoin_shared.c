@@ -790,7 +790,7 @@ shared_split(TessHashJoinState *state)
 	else
 		state->counters[JOIN_BLOOM_FILTERS]++;
 	check(state, state->kernels->table_spill_split(join_shared_words(state), shared->spill_nwords,
-												   npartitions, &in_force,
+												   true, npartitions, &in_force,
 												   &state->status));
 }
 
@@ -861,7 +861,8 @@ shared_switch(TessHashJoinState *state)
  * Write this participant's chunks of the partitions others sent to disk;
  * then, when evict is set and the chunks pass the budget, send the
  * largest partition to disk and write this participant's chunks of it:
- * one per call, since the others write theirs of it at their next batch.
+ * as many as tessera.join_shared_spill_evictions a call (one), since the
+ * others write theirs of it at their next batch.
  */
 static void
 shared_sync(TessHashJoinState *state, bool evict)
@@ -870,6 +871,7 @@ shared_sync(TessHashJoinState *state, bool evict)
 	SpillSide  *side = &spill->build;
 	uint64		evictions;
 	int32		partition;
+	TessSpillWeights weights = join_spill_weights(state);
 
 	check(state, state->kernels->table_spill_evictions(join_shared_words(state),
 													   state->parallel.shared->spill_nwords,
@@ -883,15 +885,18 @@ shared_sync(TessHashJoinState *state, bool evict)
 	}
 	if (!evict)
 		return;
-	/* The count as of now, which the others' writes lowered. */
-	join_side_count(side, -1, 0);
-	if (!side->over)
-		return;
-	check(state, state->kernels->table_spill_evict(join_shared_words(state),
-												   state->parallel.shared->spill_nwords,
-												   &partition, &state->status));
-	if (partition >= 0 && side->parts[partition].resident)
-		join_side_demote(state, side, partition);
+	/* The words' count as of now, which the others' writes lowered. */
+	for (uint32 evicted = 0;; evicted++)
+	{
+		check(state, state->kernels->table_spill_evict(join_shared_words(state),
+													   state->parallel.shared->spill_nwords,
+													   true, &weights, 0, 0, NULL, 0, 0, evicted,
+													   &partition, &state->status));
+		if (partition < 0)
+			break;
+		if (side->parts[partition].resident)
+			join_side_demote(state, side, partition);
+	}
 }
 
 /* After a batch of the inner side: split, switch or send partitions to disk as needed. */

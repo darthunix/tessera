@@ -225,19 +225,21 @@ side_init(TessHashJoinState *state, SpillSide *side, int nkeys, const TessTableK
 }
 
 /*
- * Count bytes of a shared side's chunks in the words of the table's
- * spilling, of a partition: whether they pass the budget is kept.
+ * Count bytes of the inner side's chunks in the words of its spilling, of
+ * a partition: a shared table's or the side's own; the rule that sends
+ * partitions to disk weighs them. The outer sides keep no words.
  */
 void
 join_side_count(SpillSide *side, int partition, int64 delta)
 {
 	TessStatus	status = TESS_STRUCT_INITIALIZER(TessStatus);
+	bool		over;
 
-	if (side->area == NULL)
+	if (side->spill_words == NULL)
 		return;
 	if (side->kernels->table_spill_add_bytes(side->spill_words, side->spill_nwords,
-											 delta, partition, &side->over,
-											 &status) != TESS_OK)
+											 side->area != NULL, delta, partition,
+											 &over, &status) != TESS_OK)
 		tess_status_report(&status);
 }
 
@@ -248,11 +250,14 @@ side_block(SpillSide *side, Size len)
 	return (int64) (side->area != NULL ? JOIN_CHUNK_HEADER + len : len);
 }
 
-/* What a chunk of records of len bytes costs a shared side's budget, its index and filter included. */
+/*
+ * What a chunk of records of len bytes counts: in a shared side's budget,
+ * its index and filter included; in a side's own, its bytes.
+ */
 static inline int64
 side_chunk_cost(SpillSide *side, Size len)
 {
-	return record_chunk_cost(len, side->record_size);
+	return side->area != NULL ? record_chunk_cost(len, side->record_size) : (int64) len;
 }
 
 /* A block of len bytes: in the query's shared memory after a header, or the side's own. */
@@ -658,68 +663,82 @@ join_spill_memory(JoinSpill *spill, uint64 *resident)
 }
 
 /*
- * Keep spilling within hash_mem while building: while it takes more, the
- * largest resident partition goes to disk. Room stays for the outer
- * side's tails of the partitions on disk, which come once the probing
- * starts: a chunk of records, one of values when the outer side keeps a
- * by-reference column, and a file's buffer each; a resident partition
- * writes no outer row. The tails stay: the chunk size bounds them, and
- * writing them sooner would write chunks of a few rows.
+ * The weights a spilling join gives the rule that sends its partitions to
+ * disk (docs/spill.md, "Weights"). Its own spill reserves room for the
+ * outer side's tails of the partitions on disk, which come once the
+ * probing starts: a chunk of records, one of values when the outer side
+ * keeps a by-reference column, and a file's buffer each; a resident
+ * partition writes no outer row. The tails stay: the chunk size bounds
+ * them, and writing them sooner would write chunks of a few rows. A shared
+ * table counts its chunks, not a participant's tails, and its records only
+ * once built; its participants send one partition a check, since the
+ * others write theirs of it at their next batch.
  */
-static void
-make_room(TessHashJoinState *state, bool building)
+TessSpillWeights
+join_spill_weights(TessHashJoinState *state)
 {
 	JoinSpill  *spill = state->spill;
-	Size		limit = get_hash_memory_limit();
-	Size		tail = spill->probe.chunk_len + BLCKSZ;
-	int			on_disk = 0;
+	TessSpillWeights weights = {
+		.start = tess_join_spill_start,
+		.target = tess_join_spill_target,
+		.spilled = tess_join_spill_spilled_weight,
+	};
 
+	if (spill->shared)
+	{
+		weights.per_check = (uint32) tess_join_shared_spill_evictions;
+		return weights;
+	}
+	weights.reserve = spill->probe.chunk_len + BLCKSZ;
 	for (int word = 0; word < spill->probe.nwords; word++)
 		if (!spill->probe.byvals[word])
 		{
-			tail += spill->probe.chunk_len;
+			weights.reserve += spill->probe.chunk_len;
 			break;
 		}
-	for (int partition = 0; partition < spill->npartitions; partition++)
-		if (!spill->build.parts[partition].resident)
-			on_disk++;
-	/* What the node reports, so that what it keeps is what it says. */
-	while (building && join_memory(state) + on_disk * tail > limit)
+	weights.reserve = (uint64) (weights.reserve * tess_join_spill_tail_weight);
+	weights.resident = tess_join_spill_resident_share;
+	return weights;
+}
+
+/*
+ * Send the inner side's partitions to disk as the rule says (the shared
+ * table's participants decide in shared_sync): against the memory the
+ * node reports, so that what it keeps is what it says, or, without a
+ * limit, by the share of the rows in memory alone.
+ */
+static void
+evict_partitions(TessHashJoinState *state, bool limited)
+{
+	JoinSpill  *spill = state->spill;
+	SpillSide  *side = &spill->build;
+	TessSpillWeights weights = join_spill_weights(state);
+
+	Assert(!spill->shared);
+	for (uint32 evicted = 0;; evicted++)
 	{
-		int			largest = -1;
-		Size		bytes = 0;
+		int32		partition;
 
-		for (int partition = 0; partition < spill->npartitions; partition++)
-		{
-			SpillPart  *part = &spill->build.parts[partition];
-
-			if (part->resident && part->bytes > bytes)
-			{
-				largest = partition;
-				bytes = part->bytes;
-			}
-		}
-		if (largest < 0)
+		check(state, state->kernels->table_spill_evict(side->spill_words, side->spill_nwords,
+													   false, &weights,
+													   limited ? join_memory(state) : 0,
+													   limited ? get_hash_memory_limit() :
+													   PG_UINT64_MAX,
+													   side->rows, (Size) spill->npartitions,
+													   spill->total_rows, evicted, &partition,
+													   &state->status));
+		if (partition < 0)
 			break;
-		join_side_demote(state, &spill->build, largest);
-		on_disk++;
+		join_side_demote(state, side, partition);
 	}
-	/*
-	 * Too little left resident to be worth probing, as join_finish_spill_build
-	 * decides: all of it goes now, not after the build.
-	 */
-	if (building && on_disk > 0)
-	{
-		uint64		resident = 0;
+}
 
-		for (int partition = 0; partition < spill->npartitions; partition++)
-			if (spill->build.parts[partition].resident)
-				resident += spill->build.rows[partition];
-		if (resident > 0 && resident * 4 < spill->total_rows)
-			for (int partition = 0; partition < spill->npartitions; partition++)
-				if (spill->build.parts[partition].resident)
-					join_side_demote(state, &spill->build, partition);
-	}
+/* Keep spilling within hash_mem while building. */
+static void
+make_room(TessHashJoinState *state, bool building)
+{
+	if (building)
+		evict_partitions(state, true);
 	join_note_memory(state);
 }
 
@@ -796,6 +815,23 @@ join_spill_create(TessHashJoinState *state, JoinSpill *parent, double expected,
 	}
 	side_init(state, &spill->build, state->keys.nkeys, state->keys.inner_kinds, state->npayload, typlens,
 			  byvals, chunk_len, true, npartitions);
+	/* A level of its own counts its partitions' bytes in words of its own. */
+	if (forced == 0)
+	{
+		SpillSide  *build = &spill->build;
+		uint32		in_force;
+
+		check(state, state->kernels->table_spill_words(npartitions, &build->spill_nwords,
+													   &state->status));
+		build->spill_words = MemoryContextAlloc(build->context,
+												sizeof(uint64) * build->spill_nwords);
+		build->kernels = state->kernels;
+		check(state, state->kernels->table_spill_init(build->spill_words, build->spill_nwords,
+													  false, 0, &state->status));
+		check(state, state->kernels->table_spill_split(build->spill_words, build->spill_nwords,
+													   false, (uint32) npartitions, &in_force,
+													   &state->status));
+	}
 
 	/*
 	 * The outer side: the columns of the outer child the node reads, the
@@ -1269,20 +1305,13 @@ join_finish_spill_build(TessHashJoinState *state)
 	SpillSide  *side = &spill->build;
 	int			nchunks = 0;
 	uint64		rows = 0;
-	uint64		resident = 0;
 
 	/*
 	 * Resident partitions holding less than a quarter of the inner rows go
 	 * to disk too: probing them would cost every outer batch the whole
 	 * probe for the few rows of theirs, more than writing them saves.
 	 */
-	for (int partition = 0; partition < spill->npartitions; partition++)
-		if (side->parts[partition].resident)
-			resident += side->rows[partition];
-	if (resident > 0 && resident * 4 < spill->total_rows)
-		for (int partition = 0; partition < spill->npartitions; partition++)
-			if (side->parts[partition].resident)
-				join_side_demote(state, side, partition);
+	evict_partitions(state, false);
 
 	for (int partition = 0; partition < spill->npartitions; partition++)
 	{

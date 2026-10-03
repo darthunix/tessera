@@ -513,6 +513,16 @@ ANALYZE jsb, jsp;
 SET work_mem = '512kB';
 SELECT join_explain($$SELECT count(*), sum(length(jsb.t)) FROM jsp JOIN jsb ON jsp.k = jsb.k$$);
 SELECT join_same($$SELECT count(*), sum(length(jsb.t)), sum(jsp.k), sum(jsb.n) FROM jsp JOIN jsb ON jsp.k = jsb.k$$);
+-- The weights of the rule that sends partitions to disk (docs/spill.md,
+-- "Weights"): without the share of the inner rows below which those in
+-- memory all go, some stay; without the outer tails' reserve, fewer go.
+SET tessera.join_spill_resident_share = 0;
+SELECT join_explain($$SELECT count(*), sum(length(jsb.t)) FROM jsp JOIN jsb ON jsp.k = jsb.k$$);
+SET tessera.join_spill_tail_weight = 0;
+SELECT join_explain($$SELECT count(*), sum(length(jsb.t)) FROM jsp JOIN jsb ON jsp.k = jsb.k$$);
+SELECT join_same($$SELECT count(*), sum(length(jsb.t)), sum(jsp.k), sum(jsb.n) FROM jsp JOIN jsb ON jsp.k = jsb.k$$);
+RESET tessera.join_spill_tail_weight;
+RESET tessera.join_spill_resident_share;
 SELECT join_same($$SELECT jsp.s, jsb.t, jsb.n FROM jsp JOIN jsb ON jsp.k = jsb.k WHERE jsp.s LIKE '%7'$$);
 -- A function's plans freed, the allocator recycles their contexts (aset.c)
 -- with the largest chunk a block shares, 8 kB: the RIGHT join below got

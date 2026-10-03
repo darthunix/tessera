@@ -1254,20 +1254,25 @@ tessera_test_table_shared_spill(PG_FUNCTION_ARGS)
 	uint32		phase = TESS_ROUND_ELECT;
 	uint32		reply = 0;
 	uint64		records;
+	TessSpillWeights weights = {.start = 1.0, .target = 1.0, .per_check = 1};
 
 	if (tess_table_spill_words(16, &nwords, &status) != TESS_OK)
 		PG_RETURN_BOOL(false);
 	words = palloc(sizeof(uint64) * nwords);
-	if (tess_table_spill_init(words, nwords, 100, &status) != TESS_OK ||
-		tess_table_spill_add_bytes(words, nwords, 120, -1, &over, &status) != TESS_OK ||
+	if (tess_table_spill_init(words, nwords, true, 100, &status) != TESS_OK ||
+		tess_table_spill_add_bytes(words, nwords, true, 120, -1, &over, &status) != TESS_OK ||
 		!over ||
-		tess_table_spill_split(words, nwords, 4, &partitions, &status) != TESS_OK ||
+		tess_table_spill_split(words, nwords, true, 4, &partitions, &status) != TESS_OK ||
 		partitions != 4 ||
-		tess_table_spill_split(words, nwords, 8, &partitions, &status) != TESS_OK ||
+		tess_table_spill_split(words, nwords, true, 8, &partitions, &status) != TESS_OK ||
 		partitions != 4 ||
-		tess_table_spill_add_bytes(words, nwords, 30, 2, &over, &status) != TESS_OK ||
-		tess_table_spill_evict(words, nwords, &evicted, &status) != TESS_OK ||
+		tess_table_spill_add_bytes(words, nwords, true, 30, 2, &over, &status) != TESS_OK ||
+		tess_table_spill_evict(words, nwords, true, &weights, 0, 0, NULL, 0, 0, 0, &evicted,
+							   &status) != TESS_OK ||
 		evicted != 2 ||
+		tess_table_spill_evict(words, nwords, true, &weights, 0, 0, NULL, 0, 0, 1, &evicted,
+							   &status) != TESS_OK ||
+		evicted != -1 ||
 		tess_table_spill_flags(words, nwords, 2, &on_disk, &alone, &status) != TESS_OK ||
 		!on_disk || alone ||
 		tess_table_spill_records(words, nwords, 2, 5, &records, &status) != TESS_OK ||

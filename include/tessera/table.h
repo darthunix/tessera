@@ -161,7 +161,9 @@ typedef enum TessTableLayoutKind
 	TESS_TABLE_LAYOUT_RECORD_PAYLOAD_OFFSET = 7,
 	TESS_TABLE_LAYOUT_REF_SIZE = 8,
 	TESS_TABLE_LAYOUT_REF_NCHUNKS_OFFSET = 9,
-	TESS_TABLE_LAYOUT_UNIT_BITS = 10
+	TESS_TABLE_LAYOUT_UNIT_BITS = 10,
+	TESS_TABLE_LAYOUT_SPILL_WEIGHTS_SIZE = 11,
+	TESS_TABLE_LAYOUT_SPILL_WEIGHTS_PER_CHECK_OFFSET = 12
 } TessTableLayoutKind;
 
 /* The table format the library writes and accepts; must equal the header's. */
@@ -1011,10 +1013,14 @@ extern TessStatusCode tess_table_regrow(const TessTableRef *table,
 										TessStatus *status);
 
 /*
- * A shared table that spills (see docs/spill.md): words in memory every
- * participant maps, which decide for all of them once which partitions
- * the table splits into and which of them go to disk, and hold the
- * counters of the rounds over the partitions afterwards. The first
+ * A table that spills (see docs/spill.md): words that hold the bytes each
+ * partition keeps in memory and which of them went to disk, and the one
+ * rule that sends the next to disk (tess_table_spill_evict), whose
+ * weights each node gives. A grouping's and a join's own spill keep the
+ * words in their memory (shared false); a shared table's lie in memory
+ * every participant maps (shared true), decide for all of them once which
+ * partitions the table splits into and which of them go to disk, and hold
+ * the counters of the rounds over the partitions afterwards. The first
  * participant whose chunks pass the budget splits the table; while they
  * still take more, the largest partition in memory goes to disk, marked
  * by the one participant whose flag set it. After the build, the rounds
@@ -1022,19 +1028,38 @@ extern TessStatusCode tess_table_regrow(const TessTableRef *table,
  * for one participant's memory goes whole to one of them.
  */
 
-/* The words of the shared state for up to capacity partitions. */
+/*
+ * The weights of the rule that sends partitions to disk: the memory, with
+ * reserve bytes for each partition on disk, past start of the limit sends
+ * the first partition of a check and past target each one after it, the
+ * one with the most bytes in memory, those on disk weighed by spilled (0
+ * leaves them out); then, with any on disk and those in memory holding
+ * fewer than resident of the records, each of these. A check sends at
+ * most per_check partitions, 0 for any.
+ */
+typedef struct TessSpillWeights
+{
+	double		start;
+	double		target;
+	double		spilled;
+	uint64		reserve;
+	double		resident;
+	uint32		per_check;
+} TessSpillWeights;
+
+/* The words of the state for up to capacity partitions. */
 extern TessStatusCode tess_table_spill_words(int capacity, Size *nwords,
 											 TessStatus *status);
 
 /* Clear the state for a budget of bytes, before any participant uses it. */
-extern TessStatusCode tess_table_spill_init(uint64 *words, Size nwords,
+extern TessStatusCode tess_table_spill_init(uint64 *words, Size nwords, bool shared,
 											uint64 budget, TessStatus *status);
 
 /*
  * Split the table into partitions, a power of two, unless another
  * participant did: *in_force receives the partitions in force.
  */
-extern TessStatusCode tess_table_spill_split(uint64 *words, Size nwords,
+extern TessStatusCode tess_table_spill_split(uint64 *words, Size nwords, bool shared,
 											 uint32 partitions, uint32 *in_force,
 											 TessStatus *status);
 
@@ -1048,17 +1073,27 @@ extern TessStatusCode tess_table_spill_partitions(uint64 *words, Size nwords,
  * of none (-1) before the split: *over is whether all of them pass the
  * budget.
  */
-extern TessStatusCode tess_table_spill_add_bytes(uint64 *words, Size nwords,
+extern TessStatusCode tess_table_spill_add_bytes(uint64 *words, Size nwords, bool shared,
 												 int64 delta, int32 partition,
 												 bool *over, TessStatus *status);
 
 /*
- * Send the partition in memory with the most bytes to disk: *partition is
- * its number for the participant that marked it, -1 for any other.
+ * The next partition to send to disk by the weights, marked so: its
+ * number into *partition, -1 for none or when another participant marked
+ * it first. A shared table weighs the bytes its words count against their
+ * budget, a process's own spill the memory bytes it measured against
+ * limit (UINT64_MAX leaves the rule of the records alone). The records of
+ * each partition are the nrecords at records, those of the level
+ * total_records (which a level split from a partition knows before its
+ * partitions hold them), or the words' when records is NULL; evicted
+ * counts the partitions the check sent so far.
  */
-extern TessStatusCode tess_table_spill_evict(uint64 *words, Size nwords,
-											 int32 *partition,
-											 TessStatus *status);
+extern TessStatusCode tess_table_spill_evict(uint64 *words, Size nwords, bool shared,
+											 const TessSpillWeights *weights,
+											 uint64 memory, uint64 limit,
+											 const uint64 *records, Size nrecords,
+											 uint64 total_records, uint32 evicted,
+											 int32 *partition, TessStatus *status);
 
 /* The partitions sent to disk so far. */
 extern TessStatusCode tess_table_spill_evictions(uint64 *words, Size nwords,
