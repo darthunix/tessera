@@ -89,6 +89,9 @@ where
     V: KeyValue,
 {
     match column.word_block(index) {
+        // The walk of `ones` written out in the loops of these keys, which
+        // the table's loops inline: through the iterator they took an
+        // instruction more; `.cargo/mutants.toml` leaves their step out.
         Some(WordBlock::Dense { values, non_nulls }) => {
             let mut bits = selected;
             while bits != 0 {

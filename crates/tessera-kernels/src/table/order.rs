@@ -7,7 +7,7 @@ use anyhow::{Result, bail, ensure};
 use super::header::{CHUNK_HEADER, Layout};
 use super::record::Access;
 use super::region::Region;
-use tessera_core::RowMaskView;
+use tessera_core::{RowMaskView, ones};
 
 use crate::sort::{Encoder, SortKey, heap_push};
 
@@ -137,10 +137,9 @@ fn push_as<R: Region, const W: usize>(
     let (heap, _) = heap.as_chunks_mut::<W>();
     let mut access = Access::new(region, layout);
     for index in 0..rows.nrows().div_ceil(64) {
-        let mut bits = rows.word_at(index);
-        while bits != 0 {
-            let row = index * 64 + bits.trailing_zeros() as usize;
-            bits &= bits - 1;
+        let bits = rows.word_at(index);
+        for bit in ones(bits) {
+            let row = index * 64 + bit;
             let reference = refs[row];
             let view = access.locate(reference)?;
             let item = encoder.encode::<W>(view.keys(), view.null_bits(), reference)?;

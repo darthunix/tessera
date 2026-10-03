@@ -30,7 +30,7 @@
 use core::sync::atomic::AtomicU64;
 
 use anyhow::{Result, bail, ensure};
-use tessera_core::{RowMask, RowMaskView};
+use tessera_core::{RowMask, RowMaskView, ones};
 
 use super::batch::{check_record, unlinked};
 use super::header::{CHUNK_HEADER, Layout};
@@ -335,10 +335,7 @@ pub fn add(words: &mut [u64], hashes: &[u32], rows: &RowMaskView<'_>) -> Result<
         "the hashes and the mask of the batch have different row counts"
     );
     for index in 0..nrows.div_ceil(64) {
-        let mut bits = rows.word_at(index);
-        while bits != 0 {
-            let bit = bits.trailing_zeros() as usize;
-            bits &= bits - 1;
+        for bit in ones(rows.word_at(index)) {
             let (word, mask) = place(hashes[index * 64 + bit], shift);
             words[word] |= mask;
         }
@@ -376,10 +373,7 @@ pub unsafe fn add_shared(
     // alignment of a `u64`.
     let atomics = unsafe { core::slice::from_raw_parts(words.cast::<AtomicU64>(), nwords) };
     for index in 0..nrows.div_ceil(64) {
-        let mut bits = rows.word_at(index);
-        while bits != 0 {
-            let bit = bits.trailing_zeros() as usize;
-            bits &= bits - 1;
+        for bit in ones(rows.word_at(index)) {
             let (word, mask) = place(hashes[index * 64 + bit], shift);
             atomics[word].fetch_or(mask, order::RELAXED);
         }
@@ -426,12 +420,9 @@ fn check<F: FilterRead + ?Sized>(
         "the hashes, mask and result of the batch have different row counts"
     );
     for index in 0..nrows.div_ceil(64) {
-        let mut bits = rows.word_at(index);
         let mut hits = 0;
-        while bits != 0 {
-            let bit = bits.trailing_zeros();
-            bits &= bits - 1;
-            let (word, mask) = place(hashes[index * 64 + bit as usize], shift);
+        for bit in ones(rows.word_at(index)) {
+            let (word, mask) = place(hashes[index * 64 + bit], shift);
             hits |= u64::from(words.load(word) & mask == mask) << bit;
         }
         found.set_word(index, hits)?;
