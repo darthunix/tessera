@@ -60,6 +60,9 @@ not. For each family the tool runs base, candidate, base, candidate
 (`--rounds 2`, the default). Before each run it installs that side's
 release build: the first time it builds it from a snapshot of the revision
 (a few minutes, the Rust kernels included), later only `make install`.
+The builds stay in `target/bench-runs/ab-builds/`, one per source and
+COPT, so that the next run of the same revisions, with other families or
+cases, builds nothing; delete the directory to take the room back.
 `--cases` and `--repetitions` pass `CASES` and `REPETITIONS` to `run.sh`,
 `--workers` its workers. A family of 10 to 25 cases takes 10 to 50 seconds
 a run at the default 31 repetitions.
@@ -159,8 +162,8 @@ alone; `git diff --color-moved` shows the same from the other side.
 
 ## What is on disk
 
-`target/bench-runs/ab-*/`: `report.md`, the snapshots `base/` and
-`candidate/` with their builds, and each side's last `install-*.log`. The
+`target/bench-runs/ab-*/`: `report.md` and each side's last
+`install-*.log`; the builds in `target/bench-runs/ab-builds/`. The
 runs of the families are `run.sh`'s own `target/bench-runs/pg-*`, each
 with a `build.txt` naming its side and revision.
 
