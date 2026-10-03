@@ -736,8 +736,9 @@ side_share(TessHashJoinState *state, SpillSide *side, const char *prefix, bool m
  * that makes the inner side it expects (twice what the participants hold,
  * or the planner's estimate if more) about half of one participant's
  * hash_mem each, since a partition on disk is joined by one, and two per
- * participant at least; a filter of every inner row, published before
- * the split, so that whoever sees the split finds it.
+ * participant at least; a filter of every inner row, within an eighth of
+ * the budget, published before the split, so that whoever sees the split
+ * finds it.
  */
 static void
 shared_split(TessHashJoinState *state)
@@ -762,7 +763,15 @@ shared_split(TessHashJoinState *state)
 												  JOIN_SPILL_MAX_PARTITIONS,
 												  2 * (uint32) participants, &npartitions,
 												  &state->status));
-	check(state, state->kernels->table_bloom_words(Max(rows, 1), &nwords, &state->status));
+	/*
+	 * The filter within an eighth of the table's budget, every
+	 * participant's hash_mem, as a serial spill's within an eighth of its
+	 * hash_mem: a smaller filter lets more rows through to the files, a
+	 * larger one would take the room of the rows themselves.
+	 */
+	check(state, state->kernels->table_bloom_words_within(Max(rows, 1),
+														  state->parallel.shared_budget,
+														  &nwords, &state->status));
 	filter = dsa_allocate_extended(area, mul_size(sizeof(uint64), nwords),
 								   DSA_ALLOC_HUGE | DSA_ALLOC_ZERO);
 	SpinLockAcquire(&shared->lock);
