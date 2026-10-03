@@ -261,9 +261,13 @@ store_value(TessRows *rows, Datum value, int16 typlen)
 		if (rows->value_current < 0 ||
 			rows->value_used + aligned > rows->value_len)
 		{
-			/* The first chunk of small values is small, for rows with few. */
+			/*
+			 * The first chunk of small values is small, for rows with few,
+			 * but holds the value it is made for: one up to a quarter of
+			 * the chunks after it passes ROWS_VALUE_FIRST.
+			 */
 			rows->value_len = rows->value_current < 0 ?
-				Min(ROWS_VALUE_FIRST, rows->value_chunk) : rows->value_chunk;
+				Max(Min(ROWS_VALUE_FIRST, rows->value_chunk), aligned) : rows->value_chunk;
 			rows->value_current = new_value_chunk(rows, rows->value_len);
 			rows->value_used = 0;
 		}
