@@ -409,7 +409,7 @@ agg_begin(CustomScanState *css, EState *estate, int eflags)
 			 (column = bms_next_member(projection, column)) >= 0;)
 			state->read_columns[state->nread_columns++] = column;
 	}
-	/* The states' places in a record: a word each, a sum state's more. */
+	/* The states' places in a record: a word each, a sum or extreme state's more. */
 	{
 		int			slot = 1;
 
@@ -418,8 +418,9 @@ agg_begin(CustomScanState *css, EState *estate, int eflags)
 			AggValue   *value = &state->values[number];
 
 			value->slot = slot;
-			slot += value->generic != NULL && value->generic->sum_state ?
-				AGG_SUM_STATE_WORDS : 1;
+			slot += value->generic == NULL ? 1 :
+				value->generic->sum_state ? AGG_SUM_STATE_WORDS :
+				value->generic->extreme_state ? AGG_EXTREME_STATE_WORDS : 1;
 		}
 		state->payload_size = sizeof(uint64) * slot;
 		state->sum_indexes = palloc_array(int, Max(state->nvalues, 1));

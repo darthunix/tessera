@@ -627,6 +627,15 @@ group_value_into(TessAggState *state, int index, int group, Datum *datum, bool *
 					MemoryContextSwitchTo(old);
 					break;
 				}
+				if (value->generic->extreme_state)
+				{
+					const uint64 *words = agg_record_payload(state, state->walked[group]) +
+						value->slot;
+
+					*datum = agg_extreme_state_value(words, isnull);
+					MemoryContextSwitchTo(old);
+					break;
+				}
 #endif
 				value->generic->state = (Datum) word;
 				value->generic->state_null = !seen;

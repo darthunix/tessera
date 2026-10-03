@@ -116,6 +116,12 @@ typedef struct GenericAgg
 	bool		sum_pair;
 	/* A partial aggregate's: its value is its state (fast_partial). */
 	bool		partial;
+	/*
+	 * GROUP BY, min and max of numeric: the group's state is an extreme
+	 * state, AGG_EXTREME_STATE_WORDS words of its record, which the kernels
+	 * offer a batch's rows to (agg_extreme_states_accumulate).
+	 */
+	bool		extreme_state;
 } GenericAgg;
 
 /*
@@ -165,7 +171,8 @@ struct AggValue
 	TessTableAccumulate accumulate;
 	/*
 	 * GROUP BY: the payload word where the state starts, after the word of
-	 * flags; a word, or a generic sum state's AGG_SUM_STATE_WORDS.
+	 * flags; a word, or a generic sum state's AGG_SUM_STATE_WORDS, or an
+	 * extreme state's AGG_EXTREME_STATE_WORDS.
 	 */
 	int			slot;
 	/*
@@ -305,6 +312,7 @@ extern Datum agg_sum_state_value(const GenericAgg *generic,
 								 const uint64 *words, bool *isnull);
 extern Datum agg_sum_state_partial(const GenericAgg *generic,
 								   const uint64 *words, bool *isnull);
+extern Datum agg_extreme_state_value(const uint64 *words, bool *isnull);
 #endif
 extern void agg_generic_group_accumulate(TessAggState *state, int index,
 										 const TessRowMask *rows,

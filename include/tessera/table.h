@@ -602,6 +602,26 @@ extern TessStatusCode tess_table_accumulate(const TessTableRef *table,
 #define TESS_TABLE_SUM_STATE_TAG 0x54534D31
 #define TESS_TABLE_SUM_STATE_BYTES (4 + 8 * TESS_TABLE_SUM_WORDS)
 
+/*
+ * min or max of numeric (an extreme state), TESS_TABLE_EXTREME_WORDS words
+ * of a payload: word 0 a decimal's value; word 1 its scale (bits 0 to 7),
+ * the kind of the extreme (bits 8 to 10) and pending (bit 11); word 2 the
+ * address of the caller's copy of a value of kind NUMERIC, a finite value
+ * that is not a decimal, which the kernels never write and read only
+ * through the kind. All zeros is the empty state. See docs/table.md.
+ */
+#define TESS_TABLE_EXTREME_WORDS 3
+#define TESS_TABLE_EXTREME_SCALE_MASK UINT64CONST(0xFF)
+#define TESS_TABLE_EXTREME_KIND_SHIFT 8
+#define TESS_TABLE_EXTREME_KIND_MASK (UINT64CONST(7) << 8)
+#define TESS_TABLE_EXTREME_EMPTY 0
+#define TESS_TABLE_EXTREME_DECIMAL 1
+#define TESS_TABLE_EXTREME_NAN 2
+#define TESS_TABLE_EXTREME_POSITIVE_INFINITY 3
+#define TESS_TABLE_EXTREME_NEGATIVE_INFINITY 4
+#define TESS_TABLE_EXTREME_NUMERIC 5
+#define TESS_TABLE_EXTREME_PENDING (UINT64CONST(1) << 11)
+
 /* The values tess_table_accumulate_sum reads. */
 typedef enum TessTableSumInput
 {
@@ -658,6 +678,28 @@ extern TessStatusCode tess_table_accumulate_sums(const TessTableRef *table,
 												 int nsums,
 												 const TessTableSumArg *sums,
 												 TessStatus *status);
+
+/*
+ * Offer each selected row's numeric of column (a numeric column, with its
+ * decimals when it has them) to the min (or max, when max) extreme state
+ * at byte value_at of its record's payload, in the rows' order, as
+ * numeric_smaller and numeric_larger keep theirs: a later value equal to
+ * the extreme takes its place. Decimals, NaN and the infinities compare in
+ * numeric_cmp's order. A row whose order with the extreme only the core
+ * can tell (a numeric that is not a decimal, NaN or an infinity, or a
+ * decimal against a NUMERIC extreme) is set in rest, whose other bits are
+ * cleared, and makes the state pending, so that its group's later rows of
+ * the batch go to rest too, for the caller to take in their order and
+ * clear pending. One writer, as for the other grouping calls.
+ */
+extern TessStatusCode tess_table_accumulate_extremes(const TessTableRef *table,
+													 const uint32 *offsets,
+													 const TessRowMask *rows,
+													 const TessDatumColumn *column,
+													 Size value_at,
+													 bool max,
+													 TessRowMask *rest,
+													 TessStatus *status);
 
 /*
  * For each row of rows, key `key` of the record at offsets[row]: its

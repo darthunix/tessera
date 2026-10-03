@@ -1201,6 +1201,167 @@ impl SumState {
     }
 }
 
+/// What a state of `min` or `max` of numeric holds ([`ExtremeState`]).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExtremeValue {
+    /// No value yet.
+    Empty,
+    /// A decimal.
+    Decimal(Decimal),
+    /// NaN or an infinity.
+    Special(Special),
+    /// A finite value the kernels do not compare, a longer one: its copy
+    /// is the caller's, at the address in the state's last word.
+    Numeric,
+}
+
+impl ExtremeValue {
+    /// The place in `numeric_cmp`'s order apart from the finite values'
+    /// own: -Infinity, finite, +Infinity, NaN (equal to NaN).
+    #[inline(always)]
+    fn rank(self) -> u8 {
+        match self {
+            Self::Special(Special::NegativeInfinity) => 0,
+            Self::Empty | Self::Decimal(_) | Self::Numeric => 1,
+            Self::Special(Special::PositiveInfinity) => 2,
+            Self::Special(Special::NaN) => 3,
+        }
+    }
+
+    /// The order of two values as `numeric_cmp` orders them, `None` when
+    /// only the core can tell: a longer value and another finite one.
+    #[inline(always)]
+    fn compare(self, other: Self) -> Option<Ordering> {
+        match (self, other) {
+            (Self::Decimal(left), Self::Decimal(right)) => Some(left.compare(right)),
+            _ => {
+                let (left, right) = (self.rank(), other.rank());
+                (left != right || left != 1).then(|| left.cmp(&right))
+            }
+        }
+    }
+}
+
+/// What [`ExtremeState::offer`] did with a row.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Offer {
+    /// NULL, or a value that loses to the state's.
+    Kept,
+    /// The row's value is the state's now.
+    Taken,
+    /// The caller compares the row by the core's means; the state is
+    /// pending until it has.
+    Rest,
+}
+
+/// The state of `min` or `max` of numeric that a record keeps in
+/// [`ExtremeState::WORDS`] words, as `numeric_smaller` and `numeric_larger`
+/// keep their extreme, a later value equal to it taking its place: a
+/// decimal's value, then the flags (the decimal's scale in bits 0 to 7, the
+/// kind in bits 8 to 10, pending at bit 11), then the address of the
+/// caller's copy of a value of kind [`ExtremeValue::Numeric`], which the
+/// kernels never write. All zeros is the empty state.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ExtremeState {
+    /// The extreme.
+    pub value: ExtremeValue,
+    /// A row of the group went to the caller in this batch: the group's
+    /// later rows follow it there, so that the rows reach the state in
+    /// their order.
+    pub pending: bool,
+}
+
+impl ExtremeState {
+    /// The words of a state.
+    pub const WORDS: usize = 3;
+
+    /// The empty state.
+    pub const EMPTY: Self = Self {
+        value: ExtremeValue::Empty,
+        pending: false,
+    };
+
+    /// The bit of a pending state in its flags word.
+    pub const PENDING: u64 = 1 << 11;
+
+    /// The state of its first two words, the value and the flags.
+    ///
+    /// # Errors
+    ///
+    /// Flags of an unknown kind, or a decimal past its digits or scale.
+    #[inline(always)]
+    pub fn from_words(value: u64, flags: u64) -> Result<Self> {
+        let decimal = || {
+            Decimal::new(value as i64, (flags & 0xFF) as u32)
+                .ok_or_else(|| anyhow::anyhow!("an extreme's decimal past its range"))
+        };
+        let value = match flags >> 8 & 7 {
+            0 => ExtremeValue::Empty,
+            1 => ExtremeValue::Decimal(decimal()?),
+            2 => ExtremeValue::Special(Special::NaN),
+            3 => ExtremeValue::Special(Special::PositiveInfinity),
+            4 => ExtremeValue::Special(Special::NegativeInfinity),
+            5 => ExtremeValue::Numeric,
+            kind => anyhow::bail!("an extreme of kind {kind}"),
+        };
+        ensure!(flags & !0xFFF == 0, "an extreme's flags past their bits");
+        Ok(Self {
+            value,
+            pending: flags & Self::PENDING != 0,
+        })
+    }
+
+    /// The state's first two words, the value and the flags.
+    #[inline(always)]
+    pub fn to_words(self) -> (u64, u64) {
+        let (value, scale, kind) = match self.value {
+            ExtremeValue::Empty => (0, 0, 0),
+            ExtremeValue::Decimal(decimal) => (decimal.value as u64, decimal.scale, 1),
+            ExtremeValue::Special(Special::NaN) => (0, 0, 2),
+            ExtremeValue::Special(Special::PositiveInfinity) => (0, 0, 3),
+            ExtremeValue::Special(Special::NegativeInfinity) => (0, 0, 4),
+            ExtremeValue::Numeric => (0, 0, 5),
+        };
+        let pending = if self.pending { Self::PENDING } else { 0 };
+        (value, u64::from(scale) | kind << 8 | pending)
+    }
+
+    /// Offer a row's term to `max` (or `min`, `max` false): taken when it
+    /// beats the state's value or equals it, sent to the caller (and the
+    /// state pending) when the state is pending, the term is a longer
+    /// value, or only the core can order the two.
+    #[inline(always)]
+    pub fn offer(&mut self, term: Term, max: bool) -> Offer {
+        let row = match term {
+            Term::Null => return Offer::Kept,
+            _ if self.pending => return Offer::Rest,
+            Term::Decimal(decimal) => ExtremeValue::Decimal(decimal),
+            Term::Special(special) => ExtremeValue::Special(special),
+            Term::Other => {
+                self.pending = true;
+                return Offer::Rest;
+            }
+        };
+        if self.value != ExtremeValue::Empty {
+            let Some(order) = row.compare(self.value) else {
+                self.pending = true;
+                return Offer::Rest;
+            };
+            if order
+                == if max {
+                    Ordering::Less
+                } else {
+                    Ordering::Greater
+                }
+            {
+                return Offer::Kept;
+            }
+        }
+        self.value = row;
+        Offer::Taken
+    }
+}
+
 /// The scales [`read`] keeps.
 pub enum Scales<'a> {
     /// One scale, the first decimal's when `None`; decimals of other scales

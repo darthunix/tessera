@@ -13,10 +13,10 @@ use std::slice;
 use anyhow::{Context, Result, bail, ensure};
 use tessera_core::ColumnReader;
 use tessera_kernels::table::{
-    Appended, Batch, Chunks, Combine, CombineStop, Cursor, FORMAT_VERSION, Fold, HEADER_SIZE,
-    KeyKind, KeySource, MAX_KEYS, MAX_PAYLOAD_COLUMNS, MAX_SUMS, Partitions, PayloadColumns, Slot,
-    SumSlot, Table, TableConfig, TableMut, UNIT_BITS, VERSION_OFFSET, append_columns_to,
-    append_partitioned_columns_to, append_to,
+    Appended, Batch, Chunks, Combine, CombineStop, Cursor, ExtremeSlot, FORMAT_VERSION, Fold,
+    HEADER_SIZE, KeyKind, KeySource, MAX_KEYS, MAX_PAYLOAD_COLUMNS, MAX_SUMS, Partitions,
+    PayloadColumns, Slot, SumSlot, Table, TableConfig, TableMut, UNIT_BITS, VERSION_OFFSET,
+    append_columns_to, append_partitioned_columns_to, append_to,
     bloom::SharedFilter,
     index_size, init_chunk, normalize_word, payload_null_words,
     phases::{Participant, SharedCounters},
@@ -1554,6 +1554,51 @@ pub unsafe extern "C" fn tess_table_accumulate_sums(
             // SAFETY: as above, and the slots own nothing to drop.
             let slots = &mut *(&raw mut slots[..nsums] as *mut [SumSlot<'_, SumColumn<'_>>]);
             table.sum_terms(offsets, &rows, slots)
+        })
+    }
+}
+
+/// `tess_table_accumulate_extremes`: offer each selected row's numeric to
+/// the `min` (or `max`) state of its record's payload at `value_at`, in
+/// the rows' order ([`ExtremeSlot`]): the rows the state does not decide,
+/// and its group's later rows of the batch, go to `rest`.
+///
+/// # Safety
+///
+/// `table` as for [`attach_mut`] during the call; `offsets` must hold an
+/// initialized offset per row of `rows`, a valid mask; `column` must be a
+/// valid numeric column of the rows' count (see the decimal module), and
+/// `rest` a valid mask that nothing else accesses; `status` as for every
+/// entry point.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tess_table_accumulate_extremes(
+    table: *const TableRef,
+    offsets: *const u32,
+    rows: *const Mask,
+    column: *const DatumColumn,
+    value_at: usize,
+    max: bool,
+    rest: *mut Mask,
+    status: *mut Status,
+) -> Code {
+    // SAFETY: the caller's contract.
+    unsafe {
+        guard(status, || {
+            let mut table = attach_mut(table)?;
+            let rows = rows.as_ref().context("a null row mask")?.view()?;
+            let nrows = rows.nrows();
+            let offsets = values(offsets, nrows, "offsets")?;
+            let terms = SumColumn::new(SumInput::Numeric, column, nrows)?;
+            table.extremes(
+                offsets,
+                &rows,
+                &mut ExtremeSlot {
+                    terms: &terms,
+                    at: value_at,
+                    max,
+                    rest: rest.as_mut().context("a null rest mask")?.mask()?,
+                },
+            )
         })
     }
 }

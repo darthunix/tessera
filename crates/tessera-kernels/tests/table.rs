@@ -10,12 +10,13 @@ use anyhow::Result;
 use proptest::prelude::*;
 use tessera_core::{ColumnReader, ColumnView, RowMask, RowMaskView};
 use tessera_kernels::decimal::{
-    self, Decimal, DecimalWord, Partial, Partials, Special, SumState, Term, Terms,
+    self, Decimal, DecimalWord, ExtremeState, ExtremeValue, Offer, Partial, Partials, Special,
+    SumState, Term, Terms,
 };
 use tessera_kernels::int32::{self, NullKeys, hash_combine, murmurhash32};
 use tessera_kernels::ops::ArithmeticError;
 use tessera_kernels::table::{
-    Batch, CHUNK_HEADER, Cursor, FORMAT_VERSION, Fold, KeyKind, KeySource, LocalTable,
+    Batch, CHUNK_HEADER, Cursor, ExtremeSlot, FORMAT_VERSION, Fold, KeyKind, KeySource, LocalTable,
     MAX_CHUNK_LEN, MAX_KEYS, Slot, SumSlot, Table, TableConfig, UNIT_BITS, bloom, index_size,
     normalize_word, record_bytes, record_bytes_of,
 };
@@ -1915,6 +1916,123 @@ fn sum_states_follow_a_row_by_row_model() -> Result<()> {
                 );
             }
         }
+    }
+    Ok(())
+}
+
+/// `min` and `max` of numeric kept in records: every group's state is the
+/// one a row-by-row model offers the rows to, in their order, and the rows
+/// a state leaves go to the rest, a pending group's later rows after them,
+/// whether a group starts with a longer value or not. The caller takes the
+/// rows left and clears pending after each batch.
+#[test]
+fn extreme_states_follow_a_row_by_row_model() -> Result<()> {
+    for (distinct, max, numeric) in [(5, true, false), (11, false, true), (200, true, true)] {
+        let config = TableConfig {
+            keys: &[KeyKind::Int32],
+            payload_size: 8 + 8 * ExtremeState::WORDS,
+        };
+        let nrows: usize = 300;
+        let keys: Vec<i32> = (0..nrows)
+            .map(|row| ((row * 7) % distinct) as i32)
+            .collect();
+        let key_column = [ColumnView::try_new(&keys, None)?];
+        let hashes: Vec<u32> = keys.iter().map(|&key| hash_i32(key)).collect();
+        let column = TermColumn {
+            terms: (0..nrows).map(|row| model_term(1, row)).collect(),
+            bulk: None,
+        };
+        let mut table = LocalTable::new(&config, 256, CHUNK_HEADER + 64 * 128)?;
+        let (offsets, _) = resolve_all(&mut table, &hashes, &key_column[..])?;
+        let at = 8;
+        let mut model: std::collections::HashMap<i32, ExtremeState> = Default::default();
+        let write = |table: &mut LocalTable, offset: u32, state: ExtremeState| -> Result<()> {
+            let (value, flags) = state.to_words();
+            let mut writer = table.table_mut()?;
+            let payload = writer.payload_mut(offset)?;
+            payload[at..at + 8].copy_from_slice(&value.to_ne_bytes());
+            payload[at + 8..at + 16].copy_from_slice(&flags.to_ne_bytes());
+            Ok(())
+        };
+        for (row, &offset) in offsets.iter().enumerate() {
+            let first = if numeric && keys[row] % 2 == 0 {
+                // A longer value the caller keeps: decimals wait for it.
+                ExtremeState {
+                    value: ExtremeValue::Numeric,
+                    pending: false,
+                }
+            } else {
+                ExtremeState::EMPTY
+            };
+            if model.insert(keys[row], first).is_none() {
+                write(&mut table, offset, first)?;
+            }
+        }
+        let mut left = 0;
+        // Two batches over the same rows, the second over odd rows only.
+        for pass in 0..2 {
+            let mut selection: Vec<u64> = vec![
+                if pass == 0 {
+                    u64::MAX
+                } else {
+                    0xAAAA_AAAA_AAAA_AAAA
+                };
+                nrows.div_ceil(64)
+            ];
+            *selection.last_mut().unwrap() &= (1 << (nrows % 64)) - 1;
+            let rows = RowMaskView::try_new(nrows, &selection)?;
+            let mut rest = vec![0_u64; nrows.div_ceil(64)];
+            table.table_mut()?.extremes(
+                &offsets,
+                &rows,
+                &mut ExtremeSlot {
+                    terms: &column,
+                    at,
+                    max,
+                    rest: RowMask::try_new(nrows, &mut rest)?,
+                },
+            )?;
+            let mut expected = vec![0_u64; nrows.div_ceil(64)];
+            for row in rows_of(&rows) {
+                let state = model.get_mut(&keys[row]).unwrap();
+                if state.offer(column.terms[row], max) == Offer::Rest {
+                    expected[row / 64] |= 1 << (row % 64);
+                    left += 1;
+                }
+            }
+            assert_eq!(rest, expected, "rest, pass {pass}, {distinct} keys");
+            // The caller clears pending once it has taken the rows.
+            for (row, &offset) in offsets.iter().enumerate() {
+                let state = model.get_mut(&keys[row]).unwrap();
+                state.pending = false;
+                write(&mut table, offset, *state)?;
+            }
+        }
+        assert!(left > 0, "rows left to the caller");
+        let groups = scan_all(&mut table, 5)?;
+        assert_eq!(groups.len(), model.len());
+        let table = table.table()?;
+        let all = all_rows(groups.len());
+        let rows = RowMaskView::try_new(groups.len(), &all)?;
+        let mut key_values = vec![0; groups.len()];
+        let mut key_nulls = vec![false; groups.len()];
+        table.gather_key(&groups, &rows, 0, &mut key_values, &mut key_nulls)?;
+        let mut fields = [(); 2].map(|_| vec![0u64; groups.len()]);
+        for (index, field) in fields.iter_mut().enumerate() {
+            table.gather(&groups, &rows, at + index * 8, field)?;
+        }
+        let mut taken = 0;
+        for group in 0..groups.len() {
+            let found = ExtremeState::from_words(fields[0][group], fields[1][group])?;
+            let key = key_values[group] as i64 as i32;
+            assert_eq!(
+                Some(&found),
+                model.get(&key),
+                "group {key}, {distinct} keys"
+            );
+            taken += usize::from(matches!(found.value, ExtremeValue::Decimal(_)));
+        }
+        assert!(taken > 0, "groups with a decimal extreme");
     }
     Ok(())
 }
