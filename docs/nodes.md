@@ -860,7 +860,11 @@ TessHeapScan).
 
 ## TessAgg
 
-`TessAgg` computes the aggregates of a query without `GROUP BY` over the
+`TessAgg` (`nodes/agg.c`, with its table of groups in `nodes/agg_group.c`,
+its generic aggregates in `nodes/agg_generic.c`, its key dictionaries and
+`DISTINCT` sets in `nodes/agg_keydict.c` and its spill in
+`nodes/agg_spill.c`; its planner `nodes/agg_planner.c`) computes the
+aggregates of a query without `GROUP BY` over the
 batches of a batch child and returns the one result row, in place of the
 core's plain `Aggregate`, which would receive the child's rows one at a
 time: `TessHeapScan → TessFilter → TessAgg → parent`. It handles
