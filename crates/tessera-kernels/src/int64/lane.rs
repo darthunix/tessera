@@ -203,7 +203,8 @@ impl IntLane for i64 {
         {
             use crate::simd;
             use anyhow::ensure;
-            let mut lanes = present;
+            use tessera_core::ones;
+            let lanes = present;
             match (op, divisor) {
                 (ArithOp::Add, _) => {
                     let overflow = simd::add64(lhs, rhs, present, out);
@@ -214,23 +215,17 @@ impl IntLane for i64 {
                     ensure!(!overflow, ArithmeticError::BigintOutOfRange);
                 }
                 (ArithOp::Div, Some(divisor)) => {
-                    while lanes != 0 {
-                        let lane = lanes.trailing_zeros() as usize;
-                        lanes &= lanes - 1;
+                    for lane in ones(lanes) {
                         out[lane].write(divisor.quotient(lhs.lane(lane)));
                     }
                 }
                 (ArithOp::Mod, Some(divisor)) => {
-                    while lanes != 0 {
-                        let lane = lanes.trailing_zeros() as usize;
-                        lanes &= lanes - 1;
+                    for lane in ones(lanes) {
                         out[lane].write(divisor.remainder(lhs.lane(lane)));
                     }
                 }
                 _ => {
-                    while lanes != 0 {
-                        let lane = lanes.trailing_zeros() as usize;
-                        lanes &= lanes - 1;
+                    for lane in ones(lanes) {
                         out[lane].write(evaluate(lhs.lane(lane), rhs.lane(lane))?);
                     }
                 }

@@ -21,7 +21,7 @@ use std::fmt;
 use std::mem::MaybeUninit;
 
 use anyhow::{Result, ensure};
-use tessera_core::{RowMask, RowMaskView};
+use tessera_core::{RowMask, RowMaskView, ones};
 
 /// How the database encoding counts characters.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -258,12 +258,10 @@ fn filter_rows(
     let nrows = rows.as_view().nrows();
     check_rows(nrows, &[rest.as_view().nrows()])?;
     for word in 0..nrows.div_ceil(64) {
-        let mut look = rows.as_view().word_at(word);
+        let look = rows.as_view().word_at(word);
         let (mut keep, mut other) = (0, 0);
-        while look != 0 {
-            let bit = look.trailing_zeros();
-            look &= look - 1;
-            match test(word * 64 + bit as usize) {
+        for bit in ones(look) {
+            match test(word * 64 + bit) {
                 None => {}
                 Some(None) => other |= 1 << bit,
                 Some(Some(true)) => keep |= 1 << bit,
@@ -376,12 +374,10 @@ pub fn lengths(
         ],
     )?;
     for word in 0..rows.nrows().div_ceil(64) {
-        let mut look = rows.word_at(word);
+        let look = rows.word_at(word);
         let (mut present, mut other) = (0, 0);
-        while look != 0 {
-            let bit = look.trailing_zeros();
-            look &= look - 1;
-            let row = word * 64 + bit as usize;
+        for bit in ones(look) {
+            let row = word * 64 + bit;
             match source.get(row) {
                 Text::Null => continue,
                 Text::Bytes(string) => {
@@ -518,12 +514,10 @@ pub fn pieces(
         ],
     )?;
     for word in 0..rows.nrows().div_ceil(64) {
-        let mut look = rows.word_at(word);
+        let look = rows.word_at(word);
         let (mut present, mut other) = (0, 0);
-        while look != 0 {
-            let bit = look.trailing_zeros();
-            look &= look - 1;
-            let row = word * 64 + bit as usize;
+        for bit in ones(look) {
+            let row = word * 64 + bit;
             match source.get(row) {
                 Text::Null => continue,
                 Text::Bytes(string) => {

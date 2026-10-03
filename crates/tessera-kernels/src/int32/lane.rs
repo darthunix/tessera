@@ -200,6 +200,7 @@ impl IntLane for i32 {
         {
             use crate::simd;
             use anyhow::ensure;
+            use tessera_core::ones;
             // A word without rows to divide divides nothing: a division is
             // too dear to spend on absent lanes, and a whole word of them is
             // a NULL column.
@@ -222,10 +223,8 @@ impl IntLane for i32 {
                 (ArithOp::Div | ArithOp::Mod, None) => {
                     // No vector division by a column, zero or ±1: the present
                     // lanes one by one from the blocks.
-                    let mut lanes = present;
-                    while lanes != 0 {
-                        let lane = lanes.trailing_zeros() as usize;
-                        lanes &= lanes - 1;
+                    let lanes = present;
+                    for lane in ones(lanes) {
                         out[lane].write(evaluate(lhs.lane(lane), rhs.lane(lane))?);
                     }
                     false

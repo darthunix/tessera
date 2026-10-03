@@ -30,7 +30,7 @@ use std::cmp::Ordering;
 use std::mem::MaybeUninit;
 
 use anyhow::{Result, ensure};
-use tessera_core::{RowMask, RowMaskView};
+use tessera_core::{RowMask, RowMaskView, ones};
 
 #[cfg(not(target_endian = "little"))]
 compile_error!("the varlena headers here are little-endian's");
@@ -508,13 +508,11 @@ pub fn filter(
     check_rows(nrows, &[rest.as_view().nrows()])?;
     let orders = op.orders();
     for word in 0..nrows.div_ceil(64) {
-        let mut look = rows.as_view().word_at(word);
+        let look = rows.as_view().word_at(word);
         let mut keep = 0;
         let mut other = 0;
-        while look != 0 {
-            let bit = look.trailing_zeros();
-            look &= look - 1;
-            let row = word * 64 + bit as usize;
+        for bit in ones(look) {
+            let row = word * 64 + bit;
             match (left.get(row), right.get(row)) {
                 (Arg::Null, _) | (_, Arg::Null) => {}
                 (Arg::Decimal(left), Arg::Decimal(right)) => {
@@ -607,12 +605,10 @@ fn compute_with(
     results: &mut Results<'_>,
     apply: impl Fn(Decimal, Decimal) -> Option<Decimal>,
 ) -> Result<()> {
-    for_each_word(rows, |word, mut look| {
+    for_each_word(rows, |word, look| {
         let (mut present, mut decimals, mut other) = (0, 0, 0);
-        while look != 0 {
-            let bit = look.trailing_zeros();
-            look &= look - 1;
-            let row = word * 64 + bit as usize;
+        for bit in ones(look) {
+            let row = word * 64 + bit;
             let result = match (left.get(row), right.get(row)) {
                 (Arg::Null, _) | (_, Arg::Null) => continue,
                 (Arg::Decimal(left), Arg::Decimal(right)) => apply(left, right),
@@ -656,12 +652,10 @@ fn to_int<T: Copy>(
             rest.as_view().nrows(),
         ],
     )?;
-    for_each_word(rows, |word, mut look| {
+    for_each_word(rows, |word, look| {
         let (mut present, mut other) = (0, 0);
-        while look != 0 {
-            let bit = look.trailing_zeros();
-            look &= look - 1;
-            let row = word * 64 + bit as usize;
+        for bit in ones(look) {
+            let row = word * 64 + bit;
             match source.get(row) {
                 Arg::Null => continue,
                 Arg::Decimal(decimal) => match narrow(decimal.round()) {
@@ -890,11 +884,8 @@ pub fn sum_terms(
             }
         }
         let mut other = 0;
-        let mut each = look & !taken;
-        while each != 0 {
-            let bit = each.trailing_zeros();
-            each &= each - 1;
-            match terms.term(word * 64 + bit as usize) {
+        for bit in ones(look & !taken) {
+            match terms.term(word * 64 + bit) {
                 Term::Null => {}
                 Term::Decimal(decimal) if sum.add(decimal) => {}
                 _ => other |= 1 << bit,
@@ -931,11 +922,8 @@ pub fn merge_partials(
     let mut sum = *total;
     for_each_word(rows, |word, look| {
         let mut other = 0;
-        let mut each = look;
-        while each != 0 {
-            let bit = each.trailing_zeros();
-            each &= each - 1;
-            match partials.partial(word * 64 + bit as usize)? {
+        for bit in ones(look) {
+            match partials.partial(word * 64 + bit)? {
                 Partial::Null => {}
                 Partial::State(state)
                     if !state.nan
@@ -1022,17 +1010,7 @@ fn extreme_of<const MAX: bool>(
             handed & !look == 0,
             "a source handed over rows it was not asked for"
         );
-        let mut others = look & !handed;
-        let mut alone = true;
-        while others != 0 {
-            let bit = others.trailing_zeros();
-            others &= others - 1;
-            if terms.term(word * 64 + bit as usize) != Term::Null {
-                alone = false;
-                break;
-            }
-        }
-        if alone {
+        if ones(look & !handed).all(|bit| terms.term(word * 64 + bit) == Term::Null) {
             if handed != 0 {
                 let decimal = Decimal::new(top, scale).ok_or_else(|| {
                     anyhow::anyhow!("a source handed over a value past a decimal")
@@ -1045,11 +1023,8 @@ fn extreme_of<const MAX: bool>(
             return rest.set_word(word, 0);
         }
         let mut other = 0;
-        let mut each = look;
-        while each != 0 {
-            let bit = each.trailing_zeros();
-            each &= each - 1;
-            let row = word * 64 + bit as usize;
+        for bit in ones(look) {
+            let row = word * 64 + bit;
             match terms.term(row) {
                 Term::Null => {}
                 Term::Decimal(decimal) => {
@@ -1537,12 +1512,10 @@ fn read_with(
     mut take: impl FnMut(usize, Decimal) -> bool,
 ) -> Result<()> {
     for_each_word(rows, |word, selected| {
-        let mut look = selected;
+        let look = selected;
         let mut found = 0;
-        while look != 0 {
-            let bit = look.trailing_zeros();
-            look &= look - 1;
-            let row = word * 64 + bit as usize;
+        for bit in ones(look) {
+            let row = word * 64 + bit;
             let Arg::Decimal(decimal) = source.get(row) else {
                 continue;
             };

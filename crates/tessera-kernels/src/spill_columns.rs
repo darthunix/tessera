@@ -9,7 +9,7 @@
 //! [`PLACE_BITS`] bits of its place in the chunk.
 
 use anyhow::{Result, ensure};
-use tessera_core::RowMask;
+use tessera_core::{RowMask, ones};
 use tessera_spill::columns;
 
 use crate::table::{MAX_PARTITIONS, Partitions, PayloadColumns};
@@ -90,11 +90,9 @@ pub fn append_partitioned<C: ColumnChunks + ?Sized>(
     let mut appended = 0;
     for index in 0..nrows.div_ceil(64) {
         let selected = pending.as_view().word_at(index);
-        let mut left = selected;
+        let left = selected;
         let mut done = 0;
-        while left != 0 {
-            let bit = left.trailing_zeros() as usize;
-            left &= left - 1;
+        for bit in ones(left) {
             let row = index * 64 + bit;
             let partition = ((hashes[row] >> shift) & mask) as usize;
             let number = partition_chunks[partition];
