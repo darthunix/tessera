@@ -6,7 +6,7 @@ pub use ints::{
 };
 
 use anyhow::{Result, ensure};
-use tessera_core::RowMaskView;
+use tessera_core::{RowMaskView, ones};
 
 fn validate_mask(nrows: usize, mask: Option<RowMaskView<'_>>) -> Result<()> {
     ensure!(
@@ -78,7 +78,7 @@ fn try_fold_words<B, V>(
         "column and selection row counts differ"
     );
     for index in 0..nrows.div_ceil(64) {
-        let mut remaining = rows.word_at(index);
+        let remaining = rows.word_at(index);
         if remaining == 0 {
             continue;
         }
@@ -91,9 +91,8 @@ fn try_fold_words<B, V>(
         if remaining == u64::MAX {
             acc = try_fold_full_word(base, bits, &mut read, acc, &mut fold)?;
         } else {
-            while remaining != 0 {
-                let row = base + remaining.trailing_zeros() as usize;
-                remaining &= remaining - 1;
+            for bit in ones(remaining) {
+                let row = base + bit;
                 acc = fold(acc, row, read(row, bits))?;
             }
         }

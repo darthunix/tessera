@@ -26,7 +26,7 @@ use std::mem::{MaybeUninit, offset_of};
 use std::slice;
 
 use anyhow::{Context, Result, bail, ensure};
-use tessera_core::{RowMask, RowMaskView};
+use tessera_core::{RowMask, RowMaskView, ones};
 use tessera_kernels::decimal::{
     self, Arg, Compare, Decimal, DecimalWord, MAX_SCALE, NUMERIC_MAX, Op, Partial, Partials,
     Results, Scales, Source, Special, Sum, SumState, Term, Terms,
@@ -283,10 +283,8 @@ impl Terms for Plain<'_> {
         let base = index * 64;
         let mut scale = None;
         let mut bulk = 0;
-        let mut look = rows;
-        while look != 0 {
-            let bit = look.trailing_zeros() as usize;
-            look &= look - 1;
+        let look = rows;
+        for bit in ones(look) {
             let row = base + bit;
             assert!(row < self.nrows, "a decimal row past its column");
             // SAFETY: as for `Plain::get`.
@@ -346,10 +344,8 @@ impl Terms for Side<'_> {
         // row count.
         unsafe {
             let mut bulk = 0;
-            let mut look = rows & *self.decimals.add(index);
-            while look != 0 {
-                let bit = look.trailing_zeros() as usize;
-                look &= look - 1;
+            let look = rows & *self.decimals.add(index);
+            for bit in ones(look) {
                 let row = base + bit;
                 assert!(row < column.nrows, "a decimal row past its column");
                 let value = *column.values.add(row) as i64;
@@ -406,10 +402,8 @@ impl<const WIDE: bool> Terms for Integers<'_, WIDE> {
         // for, each checked against the row count.
         unsafe {
             let mut bulk = 0;
-            let mut look = rows;
-            while look != 0 {
-                let bit = look.trailing_zeros() as usize;
-                look &= look - 1;
+            let look = rows;
+            for bit in ones(look) {
                 let row = base + bit;
                 assert!(row < column.nrows, "an integer row past its column");
                 let word = *column.values.add(row);
@@ -1003,10 +997,9 @@ pub unsafe extern "C" fn tess_decimal_read(
             }?;
             // The other selected rows keep their Datums.
             for word in 0..nrows.div_ceil(64) {
-                let mut look = rows.word_at(word) & !decimals.as_view().word_at(word);
-                while look != 0 {
-                    let row = word * 64 + look.trailing_zeros() as usize;
-                    look &= look - 1;
+                let look = rows.word_at(word) & !decimals.as_view().word_at(word);
+                for bit in ones(look) {
+                    let row = word * 64 + bit;
                     values[row].write(column.datum(row) as i64);
                 }
             }
