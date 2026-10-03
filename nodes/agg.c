@@ -3876,12 +3876,6 @@ static const TessBatchOps groups_batch_ops = {
 };
 
 /*
- * The next groups of the walk, up to a batch of them, as result rows:
- * the keys and the aggregates in the scan slot, HAVING over them and the
- * plan's projection, as for the one row without GROUP BY. NULL when the
- * walk is over; a batch HAVING left empty is not returned.
- */
-/*
  * The rows of the next partition into a table of their own, their groups
  * from the initial states; false when no partition is left.
  */
@@ -4094,6 +4088,12 @@ setop_groups(TessAggState *state)
 	}
 }
 
+/*
+ * The next groups of the walk, up to a batch of them, as result rows:
+ * the keys and the aggregates in the scan slot, HAVING over them and the
+ * plan's projection, as for the one row without GROUP BY. NULL when the
+ * walk is over; a batch HAVING left empty is not returned.
+ */
 static TessBatch *
 next_groups(TessAggState *state)
 {
@@ -4159,11 +4159,6 @@ next_groups(TessAggState *state)
 }
 
 /*
- * The result row, once: the aggregates in the scan slot, HAVING over
- * them, and the plan's projection when the targets are not the bare
- * aggregates, as the executor set it up for the scan tuple.
- */
-/*
  * GROUP BY: after the input, a batch of groups per call to a batch-aware
  * parent, or their rows one by one to a row-wise parent.
  */
@@ -4194,6 +4189,11 @@ group_exec(TessAggState *state)
 	return tess_output_publish(state->output, state->published);
 }
 
+/*
+ * The result row, once: the aggregates in the scan slot, HAVING over
+ * them, and the plan's projection when the targets are not the bare
+ * aggregates, as the executor set it up for the scan tuple.
+ */
 static TupleTableSlot *
 agg_exec(CustomScanState *css)
 {
