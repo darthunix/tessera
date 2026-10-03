@@ -22,13 +22,15 @@ jobs:
     name: Mutants of the changed lines, shard ${{ matrix.shard }} of 3
     if: github.event_name == 'pull_request'
     runs-on: macos-15
-    timeout-minutes: 40
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       # A mutant takes about a minute (its build and every test), a loop
       # made endless 82 s: the 136 mutants of plan 9.16 took an hour on
       # one runner. Three shards take three of the account's five macOS
-      # runners for about 25 minutes.
+      # runners, leaving two for CI: 25 minutes each for plan 9.16, 30 to
+      # 40 for the 270 mutants of plan 9.17, whose second shard ran out of
+      # 40 minutes a second after its last mutant was caught.
       matrix:
         shard: [0, 1, 2]
     steps:
