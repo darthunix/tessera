@@ -102,10 +102,10 @@ typedef struct GenericAgg
 	TessStatus	decimal_status;
 	/*
 	 * GROUP BY, sum and avg of numeric and bigint, avg of integer and
-	 * smallint: the group's state is TESS_TABLE_SUM_WORDS words of its
-	 * record, which the kernels fold a batch into, reading sum_input, and
-	 * then the address of the numeric sum of the rows they leave to the
-	 * node, 0 without any (sum_state).
+	 * smallint, sum of smallint: the group's state is TESS_TABLE_SUM_WORDS
+	 * words of its record, which the kernels fold a batch into, reading
+	 * sum_input, and then the address of the numeric sum of the rows they
+	 * leave to the node, 0 without any (sum_state).
 	 */
 	bool		sum_state;
 	TessTableSumInput sum_input;

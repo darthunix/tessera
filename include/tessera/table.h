@@ -642,13 +642,15 @@ typedef struct TessTableSumArg
  * more than 18 digits or a display scale past 18, or one the sum would
  * carry to its bound, is set in that sum's rest, whose other bits are
  * cleared, for the caller to add by the core's means. One writer, as for
- * the other grouping calls. When every sum's column holds partial states
+ * the other grouping calls. When a sum's column holds partial states
  * (TESS_TABLE_SUM_OF_STATE, TESS_TABLE_SUM_OF_PAIR), each selected row's
  * states merge into its record's instead, the sums added at the larger
  * scale and the flags kept, NULL skipped; a state with a rest, or one the
  * record's sum refuses at its bound, is set in the rest for the caller to
- * merge, the record's state unchanged. A value of another format fails
- * the call; so do partial states and other sums in one call.
+ * merge, the record's state unchanged. Among them an int8 column
+ * (TESS_TABLE_SUM_OF_INT8, sum(int2)'s partial values) is a state of one
+ * value each. A value of another format fails the call; so do partial
+ * states and numeric or int4 sums in one call.
  */
 extern TessStatusCode tess_table_accumulate_sums(const TessTableRef *table,
 												 const uint32 *offsets,
