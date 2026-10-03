@@ -817,7 +817,8 @@ impl Sum {
 /// Add the selected rows' decimals to `total`, NULL rows skipped: a row
 /// that is not a decimal, or that [`Sum::add`] refuses, goes to `rest`,
 /// whose other bits are cleared, for the caller to add by the core's
-/// means; exact sums add in any order.
+/// means; exact sums add in any order. [`sum_terms`] over the source's
+/// arguments as terms.
 ///
 /// # Errors
 ///
@@ -829,20 +830,73 @@ pub fn sum(
     total: &mut Sum,
     rest: &mut RowMask<'_>,
 ) -> Result<()> {
+    sum_terms(&SourceTerms(source), rows, total, rest)
+}
+
+/// A source's arguments as terms: a decimal one, anything else one the
+/// caller adds.
+struct SourceTerms<'s, S>(&'s S);
+
+impl<S: Source> Terms for SourceTerms<'_, S> {
+    #[inline(always)]
+    fn term(&self, row: usize) -> Term {
+        match self.0.get(row) {
+            Arg::Null => Term::Null,
+            Arg::Decimal(decimal) => Term::Decimal(decimal),
+            _ => Term::Other,
+        }
+    }
+}
+
+/// Add the selected rows' terms to `total`, as [`Sum::add`] adds them one
+/// by one, NULL rows skipped: the rows a source hands over in bulk
+/// ([`Terms::fold_decimals`]) a word at a time, the others term by term. A
+/// row whose term is not a decimal, or that the sum refuses at its bound,
+/// goes to `rest`, whose other bits are cleared, for the caller to add by
+/// the core's means; exact sums add in any order, so the rows refused may
+/// differ with the order and the total does not.
+///
+/// # Errors
+///
+/// Masks of different row counts, a sum past its bound or of a scale past
+/// 18, or a source that hands over rows it was not asked for, fail before
+/// any mutation of `total`.
+pub fn sum_terms(
+    terms: &impl Terms,
+    rows: RowMaskView<'_>,
+    total: &mut Sum,
+    rest: &mut RowMask<'_>,
+) -> Result<()> {
     check_rows(rows.nrows(), &[rest.as_view().nrows()])?;
     ensure!(
         total.value.abs() < SUM_BOUND && total.scale <= MAX_READ_SCALE,
         "a decimal sum past its bound"
     );
     let mut sum = *total;
-    for_each_word(rows, |word, mut look| {
+    for_each_word(rows, |word, look| {
+        // At most 64 values of an i64 each: the bulk sum stays far inside
+        // an i128, and the sum's bound is checked when it is taken.
+        let mut bulk = 0_i128;
+        let mut taken = 0_u64;
+        if let Some(folded) = terms.fold_decimals(word, look, |_, value| {
+            bulk += i128::from(value);
+        }) {
+            ensure!(
+                folded.rows & !look == 0 && folded.scale <= MAX_READ_SCALE,
+                "a source handed over rows it was not asked for"
+            );
+            if sum.add_many(bulk, folded.scale, u64::from(folded.rows.count_ones())) {
+                taken = folded.rows;
+            }
+        }
         let mut other = 0;
-        while look != 0 {
-            let bit = look.trailing_zeros();
-            look &= look - 1;
-            match source.get(word * 64 + bit as usize) {
-                Arg::Null => {}
-                Arg::Decimal(decimal) if sum.add(decimal) => {}
+        let mut each = look & !taken;
+        while each != 0 {
+            let bit = each.trailing_zeros();
+            each &= each - 1;
+            match terms.term(word * 64 + bit as usize) {
+                Term::Null => {}
+                Term::Decimal(decimal) if sum.add(decimal) => {}
                 _ => other |= 1 << bit,
             }
         }

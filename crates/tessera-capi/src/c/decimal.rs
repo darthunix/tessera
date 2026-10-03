@@ -20,7 +20,7 @@
 //! pointing to a whole varlena or, in the decimal side, the decimal's
 //! value. A scalar must point to a whole varlena.
 
-use std::ffi::{c_int, c_void};
+use std::ffi::{c_int, c_uint, c_void};
 use std::marker::PhantomData;
 use std::mem::{MaybeUninit, offset_of};
 use std::slice;
@@ -35,6 +35,7 @@ use tessera_kernels::decimal::{
 use super::column::DatumColumn;
 use super::mask::Mask;
 use super::status::{Code, Status, guard};
+use super::table::{SUM_INT4, SUM_INT8, SUM_NUMERIC};
 use super::varlena::varlena_data;
 
 /// `TessDecimalArg`: a column, or a scalar numeric when it is null.
@@ -1016,18 +1017,20 @@ pub struct DecimalSum {
     pub count: i64,
 }
 
-/// `tess_decimal_sum`: the selected rows' decimals added to `*sum`, the
-/// rows it does not take moved to `rest`.
+/// `tess_decimal_sum`: the selected rows' values, of a column of `kind`
+/// (`TessTableSumInput`: numeric, int4 or int8), added to `*sum` as
+/// decimals, the rows it does not take moved to `rest`.
 ///
 /// # Safety
 ///
 /// `column` must be a valid column (see the module documentation) of
-/// `rows`' row count, `rows`
+/// `rows`' row count with values of `kind`, `rows`
 /// point to a valid mask, `sum` to a valid sum, and `rest` to a valid mask
 /// that nothing else accesses for the call; `status` as for every entry
 /// point.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn tess_decimal_sum(
+    kind: c_uint,
     column: *const DatumColumn,
     rows: *const Mask,
     sum: *mut DecimalSum,
@@ -1038,7 +1041,13 @@ pub unsafe extern "C" fn tess_decimal_sum(
     unsafe {
         guard(status, || {
             let rows = selection(rows)?;
-            let column = Column::new(column, rows.nrows())?;
+            let input = match kind {
+                SUM_NUMERIC => SumInput::Numeric,
+                SUM_INT4 => SumInput::Int4,
+                SUM_INT8 => SumInput::Int8,
+                other => bail!("a sum of input {other} without groups"),
+            };
+            let terms = SumColumn::new(input, column, rows.nrows())?;
             let sum = sum.as_mut().context("a null sum")?;
             let mut total = Sum {
                 value: (i128::from(sum.high) << 64) | i128::from(sum.low),
@@ -1046,9 +1055,7 @@ pub unsafe extern "C" fn tess_decimal_sum(
                 count: u64::try_from(sum.count).context("a negative count of a sum")?,
             };
             let mut rest = output(rest)?;
-            with_column!(column, |source| decimal::sum(
-                source, rows, &mut total, &mut rest
-            ))?;
+            decimal::sum_terms(&terms, rows, &mut total, &mut rest)?;
             *sum = DecimalSum {
                 low: total.value as u64,
                 high: (total.value >> 64) as i64,
