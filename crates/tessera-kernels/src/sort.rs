@@ -18,7 +18,7 @@
 
 use anyhow::{Context, Result, bail, ensure};
 
-use tessera_core::{RowMask, RowMaskView};
+use tessera_core::{RowMask, RowMaskView, ones};
 
 use crate::table::{KeyKind, KeySource, MAX_KEYS};
 
@@ -310,10 +310,8 @@ fn candidates_as<K: KeySource + ?Sized, const W: usize>(
             non_null[key] = source.word(key, index, selected, &mut slots[key])?;
         }
         let mut keep = 0;
-        let mut bits = selected;
-        while bits != 0 {
-            let bit = bits.trailing_zeros() as usize;
-            bits &= bits - 1;
+        let bits = selected;
+        for bit in ones(bits) {
             let mut row_slots = [0i64; MAX_KEYS];
             let mut null_bits = 0u32;
             for key in 0..nkeys {
@@ -389,10 +387,8 @@ fn lanes_as<K: KeySource + ?Sized, const W: usize>(
         for key in 0..nkeys {
             non_null[key] = source.word(key, index, selected, &mut slots[key])?;
         }
-        let mut bits = selected;
-        while bits != 0 {
-            let bit = bits.trailing_zeros() as usize;
-            bits &= bits - 1;
+        let bits = selected;
+        for bit in ones(bits) {
             let mut row_slots = [0i64; MAX_KEYS];
             let mut null_bits = 0u32;
             for key in 0..nkeys {

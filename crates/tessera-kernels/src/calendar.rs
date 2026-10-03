@@ -23,7 +23,7 @@ use std::fmt;
 use std::mem::MaybeUninit;
 
 use anyhow::{Result, ensure};
-use tessera_core::{RowMask, RowMaskView};
+use tessera_core::{RowMask, RowMaskView, ones};
 
 /// The Julian day of 2000-01-01, a date's zero.
 pub const POSTGRES_EPOCH_JDATE: i32 = 2_451_545;
@@ -696,12 +696,10 @@ fn map_rows<L: Copy, R: Copy, T>(
 ) -> Result<()> {
     check_rows(rows.nrows(), &[values.len(), non_nulls.as_view().nrows()])?;
     for word in 0..rows.nrows().div_ceil(64) {
-        let mut look = rows.word_at(word);
+        let look = rows.word_at(word);
         let mut present = 0;
-        while look != 0 {
-            let bit = look.trailing_zeros();
-            look &= look - 1;
-            let row = word * 64 + bit as usize;
+        for bit in ones(look) {
+            let row = word * 64 + bit;
             let (Some(left), Some(right)) = (left.get(row), right.get(row)) else {
                 continue;
             };
@@ -830,12 +828,10 @@ pub fn truncate_locals(
         &[values.len(), days.as_view().nrows(), rest.as_view().nrows()],
     )?;
     for word in 0..rows.nrows().div_ceil(64) {
-        let mut look = rows.word_at(word);
+        let look = rows.word_at(word);
         let (mut day_bits, mut other) = (0, 0);
-        while look != 0 {
-            let bit = look.trailing_zeros();
-            look &= look - 1;
-            let row = word * 64 + bit as usize;
+        for bit in ones(look) {
+            let row = word * 64 + bit;
             let Some(local) = source.get(row) else {
                 continue;
             };
@@ -947,12 +943,10 @@ fn extract_rows<T>(
     )?;
     let mut fields = DayFields::default();
     for word in 0..rows.nrows().div_ceil(64) {
-        let mut look = rows.word_at(word);
+        let look = rows.word_at(word);
         let (mut present, mut other) = (0, 0);
-        while look != 0 {
-            let bit = look.trailing_zeros();
-            look &= look - 1;
-            let row = word * 64 + bit as usize;
+        for bit in ones(look) {
+            let row = word * 64 + bit;
             let Some(value) = source.get(row) else {
                 continue;
             };
