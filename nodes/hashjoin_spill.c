@@ -742,7 +742,8 @@ join_spill_create(TessHashJoinState *state, JoinSpill *parent, double expected,
 	Size		limit = get_hash_memory_limit();
 	Size		record = state->record_size;
 	Size		chunk_len;
-	int			npartitions = JOIN_SPILL_MIN_PARTITIONS;
+	uint32		count;
+	int			npartitions;
 	JoinSpill  *spill;
 	int16	   *typlens;
 	bool	   *byvals;
@@ -757,24 +758,18 @@ join_spill_create(TessHashJoinState *state, JoinSpill *parent, double expected,
 		limit = used < limit / 4 * 3 ? limit - used : limit / 4;
 	}
 
-	/*
-	 * Each partition keeps a tail of records and one of values and a
-	 * file's buffer of a page on each side: at the smallest chunk, half of
-	 * hash_mem bounds them all.
-	 */
-	while (npartitions < JOIN_SPILL_MAX_PARTITIONS &&
-		   (double) npartitions * (limit / 2) < expected &&
-		   (Size) npartitions * 2 * (4 * JOIN_SPILL_MIN_CHUNK + 2 * BLCKSZ) <= limit / 2 &&
-		   shift + pg_leftmost_one_pos32(npartitions) + 1 < 32)
-		npartitions *= 2;
+	/* Each partition's reserve on both sides: half of hash_mem bounds them all. */
+	check(state, state->kernels->spill_partitions(expected, limit, JOIN_SPILL_RESERVE, shift,
+												  JOIN_SPILL_MIN_PARTITIONS,
+												  JOIN_SPILL_MAX_PARTITIONS, 0, &count,
+												  &state->status));
 	/* A shared table's partitions, which every participant took. */
-	if (forced > 0)
-		npartitions = forced;
-	chunk_len = limit / (16 * npartitions);
-	chunk_len = Min(chunk_len, JOIN_CHUNK_LEN);
-	chunk_len = Max(chunk_len, JOIN_SPILL_MIN_CHUNK);
-	chunk_len = Max(chunk_len, TESS_TABLE_CHUNK_HEADER + 4 * record);
-	chunk_len = TYPEALIGN_DOWN(8, chunk_len);
+	npartitions = forced > 0 ? forced : (int) count;
+	/* A chunk a sixteenth of hash_mem among them, of four records at least. */
+	check(state, state->kernels->spill_chunk_len(limit, (uint32) npartitions, 16,
+												 Max(JOIN_SPILL_MIN_CHUNK,
+													 TESS_TABLE_CHUNK_HEADER + 4 * record),
+												 JOIN_CHUNK_LEN, &chunk_len, &state->status));
 
 	spill = MemoryContextAllocZero(context, sizeof(JoinSpill));
 	state->spill = spill;

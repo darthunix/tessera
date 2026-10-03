@@ -750,18 +750,18 @@ shared_split(TessHashJoinState *state)
 	double		expected = held * 2 * participants;
 	uint64		rows = Max((uint64) state->inner_rows * participants,
 						   state->build_rows * 2 * participants);
-	uint32		npartitions = JOIN_SPILL_MIN_PARTITIONS;
+	uint32		npartitions;
 	uint32		in_force;
 	Size		nwords;
 	dsa_pointer filter;
 
 	if (state->build_rows > 0)
 		expected = Max(expected, held / state->build_rows * state->inner_rows * participants);
-	while (npartitions < JOIN_SPILL_MAX_PARTITIONS &&
-		   (npartitions < 2 * (uint32) participants ||
-			(double) npartitions * (limit / 2) < expected) &&
-		   (Size) npartitions * 2 * (4 * JOIN_SPILL_MIN_CHUNK + 2 * BLCKSZ) <= limit / 2)
-		npartitions *= 2;
+	check(state, state->kernels->spill_partitions(expected, limit, JOIN_SPILL_RESERVE, 0,
+												  JOIN_SPILL_MIN_PARTITIONS,
+												  JOIN_SPILL_MAX_PARTITIONS,
+												  2 * (uint32) participants, &npartitions,
+												  &state->status));
 	check(state, state->kernels->table_bloom_words(Max(rows, 1), &nwords, &state->status));
 	filter = dsa_allocate_extended(area, mul_size(sizeof(uint64), nwords),
 								   DSA_ALLOC_HUGE | DSA_ALLOC_ZERO);

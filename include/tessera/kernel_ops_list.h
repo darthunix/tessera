@@ -98,6 +98,8 @@
 	X(table_accumulate_sums) \
 	X(table_clear_key) \
 	X(table_gather_words) \
-	X(table_record_size)
+	X(table_record_size) \
+	X(spill_partitions) \
+	X(spill_chunk_len)
 
 #endif							/* TESSERA_KERNEL_OPS_LIST_H */
