@@ -12,8 +12,158 @@ use anyhow::Result;
 use proptest::collection::vec;
 use proptest::prelude::*;
 use proptest::sample::select;
-use tessera_kernels::text::{Chars, Like, Piece, char_count};
+use std::mem::MaybeUninit;
+
+use tessera_core::{RowMask, RowMaskView};
+use tessera_kernels::text::{
+    self, Bounds, Chars, Length, Like, Piece, Strings, Text, char_count, lengths, like,
+};
 use tessera_testing::{edge, property};
+
+/// Rows of strings for the batch functions: a NULL in every seventh, a
+/// value not in place in every eleventh, and strings of `a` and `b`.
+struct Rows(Vec<Option<Option<String>>>);
+
+impl Rows {
+    fn new(nrows: usize) -> Self {
+        Self(
+            (0..nrows)
+                .map(|row| match row {
+                    _ if row % 7 == 3 => None,
+                    _ if row % 11 == 5 => Some(None),
+                    _ => Some(Some(
+                        (0..row % 9)
+                            .map(|at| if (row + at) % 3 == 0 { 'b' } else { 'a' })
+                            .collect(),
+                    )),
+                })
+                .collect(),
+        )
+    }
+}
+
+impl Strings for Rows {
+    fn get(&self, row: usize) -> Text<'_> {
+        match &self.0[row] {
+            None => Text::Null,
+            Some(None) => Text::Other,
+            Some(Some(string)) => Text::Bytes(string.as_bytes()),
+        }
+    }
+}
+
+/// The selected rows: all but every fifth, over several words of a mask.
+fn selected(nrows: usize) -> Vec<u64> {
+    let mut words = vec![0_u64; nrows.div_ceil(64)];
+    for row in (0..nrows).filter(|row| row % 5 != 2) {
+        words[row / 64] |= 1 << (row % 64);
+    }
+    words
+}
+
+fn bits(words: &[u64], nrows: usize) -> Vec<bool> {
+    (0..nrows)
+        .map(|row| words[row / 64] >> (row % 64) & 1 == 1)
+        .collect()
+}
+
+/// LIKE, a length and a piece of 200 rows, row by row as a model says: a
+/// NULL leaves the rows, a value not in place goes to the rest, a string
+/// is kept by its match, its length and its piece written at its row.
+#[test]
+fn the_batch_functions_answer_each_selected_row() -> Result<()> {
+    let nrows = 200;
+    let source = Rows::new(nrows);
+    let selected = selected(nrows);
+    let chosen = bits(&selected, nrows);
+    let pattern = Like::parse(b"%ab%").unwrap();
+    let mut kept = selected.clone();
+    let mut rest = vec![0_u64; kept.len()];
+    like(
+        &source,
+        &pattern,
+        false,
+        &mut RowMask::try_new(nrows, &mut kept)?,
+        &mut RowMask::try_new(nrows, &mut rest)?,
+    )?;
+    let (kept, rest) = (bits(&kept, nrows), bits(&rest, nrows));
+    for row in 0..nrows {
+        let (keep, other) = match (&source.0[row], chosen[row]) {
+            (_, false) | (None, true) => (false, false),
+            (Some(None), true) => (false, true),
+            (Some(Some(string)), true) => (string.contains("ab"), false),
+        };
+        assert_eq!((kept[row], rest[row]), (keep, other), "LIKE of row {row}");
+    }
+    let view = RowMaskView::try_new(nrows, &selected)?;
+    let mut values = vec![MaybeUninit::new(-1); nrows];
+    let mut non_nulls = vec![0_u64; selected.len()];
+    let mut rest = vec![0_u64; selected.len()];
+    lengths(
+        Length::Octets,
+        Chars::Utf8,
+        &source,
+        view,
+        &mut values,
+        &mut RowMask::try_new(nrows, &mut non_nulls)?,
+        &mut RowMask::try_new(nrows, &mut rest)?,
+    )?;
+    let piece = Piece::Substring {
+        start: 2,
+        length: Some(3),
+    };
+    let mut starts = vec![MaybeUninit::new(-1); nrows];
+    let mut taken = vec![MaybeUninit::new(-1); nrows];
+    let mut piece_non_nulls = vec![0_u64; selected.len()];
+    let mut piece_rest = vec![0_u64; selected.len()];
+    text::pieces(
+        piece,
+        Chars::Utf8,
+        &source,
+        view,
+        &mut Bounds {
+            starts: &mut starts,
+            lengths: &mut taken,
+            non_nulls: RowMask::try_new(nrows, &mut piece_non_nulls)?,
+            rest: RowMask::try_new(nrows, &mut piece_rest)?,
+        },
+    )?;
+    let (non_nulls, rest) = (bits(&non_nulls, nrows), bits(&rest, nrows));
+    let (piece_non_nulls, piece_rest) = (bits(&piece_non_nulls, nrows), bits(&piece_rest, nrows));
+    for row in 0..nrows {
+        let present = chosen[row] && source.0[row].is_some();
+        let other = chosen[row] && matches!(source.0[row], Some(None));
+        assert_eq!(
+            (non_nulls[row], rest[row]),
+            (present, other),
+            "length of row {row}"
+        );
+        assert_eq!(
+            (piece_non_nulls[row], piece_rest[row]),
+            (present, other),
+            "piece of row {row}"
+        );
+        if let (true, Some(Some(string))) = (chosen[row], &source.0[row]) {
+            // SAFETY: written for every selected row with a string in place.
+            let (length, start, take) = unsafe {
+                (
+                    values[row].assume_init(),
+                    starts[row].assume_init(),
+                    taken[row].assume_init(),
+                )
+            };
+            assert_eq!(length as usize, string.len(), "length of row {row}");
+            let from = string.len().min(1);
+            let to = string.len().min(4);
+            assert_eq!(
+                (start as usize, take as usize),
+                (from, to - from),
+                "piece of row {row}"
+            );
+        }
+    }
+    Ok(())
+}
 
 /// LIKE of literals and `%` by dynamic programming: `matched[i][j]` when
 /// the first `i` pattern bytes match the first `j` string bytes.
