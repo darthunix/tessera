@@ -76,6 +76,14 @@ typedef struct AggSpill
 	uint32	   *current;
 	TessSpill  *file;
 	uint32		next_number;
+	/*
+	 * The partitions' bytes in memory, counted in words of the level's own
+	 * for the rule that sends them to disk (docs/spill.md, "The weights"),
+	 * outside the memory the level counts, as before the words.
+	 */
+	uint64	   *words;
+	Size		nwords;
+	const TessKernelOps *kernels;
 	/* The input is read; the partition being given out, -1 before any. */
 	bool		done_input;
 	int			partition;
@@ -106,6 +114,20 @@ agg_chunk_used(const void *base)
 	return (Size) *(const uint64 *) base;
 }
 
+/* Count bytes of a partition's chunks in memory in the level's words. */
+static void
+part_count(AggSpill *spill, AggPart *part, int64 delta)
+{
+	TessStatus	status = TESS_STRUCT_INITIALIZER(TessStatus);
+	bool		over;
+
+	if (delta != 0 &&
+		spill->kernels->table_spill_add_bytes(spill->words, spill->nwords, false, delta,
+											  (int32) (part - spill->parts), &over,
+											  &status) != TESS_OK)
+		tess_status_report(&status);
+}
+
 static void
 part_push(AggSpill *spill, AggPart *part, void *base)
 {
@@ -118,6 +140,7 @@ part_push(AggSpill *spill, AggPart *part, void *base)
 	}
 	part->chunks[part->nchunks++] = base;
 	part->bytes += spill->chunk_len;
+	part_count(spill, part, (int64) spill->chunk_len);
 }
 
 static void *
@@ -137,6 +160,7 @@ part_release(AggSpill *spill, AggPart *part)
 	for (int chunk = 0; chunk < part->nchunks; chunk++)
 		pfree(part->chunks[chunk]);
 	part->nchunks = 0;
+	part_count(spill, part, -(int64) part->bytes);
 	part->bytes = 0;
 	part->records = 0;
 }
@@ -208,6 +232,15 @@ agg_spill_create(TessAggState *state, AggSpill *parent, double expected, uint32 
 									  sizeof(void *) * (npartitions + 2));
 	spill->lens = MemoryContextAlloc(spill->context, sizeof(Size) * (npartitions + 2));
 	spill->current = MemoryContextAlloc(spill->context, sizeof(uint32) * npartitions);
+	spill->kernels = state->kernels;
+	check(state, state->kernels->table_spill_words((int) npartitions, &spill->nwords,
+												   &state->status));
+	spill->words = MemoryContextAlloc(context, sizeof(uint64) * spill->nwords);
+	check(state, state->kernels->table_spill_init(spill->words, spill->nwords, false, 0,
+												  &state->status));
+	check(state, state->kernels->table_spill_split(spill->words, spill->nwords, false,
+												   npartitions, &npartitions,
+												   &state->status));
 	spill->source_empty[0] = TESS_TABLE_CHUNK_HEADER;
 	spill->empty[0] = TESS_TABLE_CHUNK_HEADER;
 	spill->bases[AGG_SOURCE] = spill->source_empty;
@@ -244,6 +277,7 @@ agg_level_free(AggSpill *spill)
 {
 	tess_spill_free(spill->file);
 	MemoryContextDelete(spill->context);
+	pfree(spill->words);
 	pfree(spill);
 }
 
@@ -435,44 +469,45 @@ agg_start_spill(TessAggState *state)
 }
 
 /*
- * Once the table, with its files' buffers, takes more than seven eighths
- * of hash_mem, the partition with the most bytes in memory goes to disk
- * whole, and the next, until the table takes half of hash_mem; the index
- * is then made anew over the rest. Evicting down to the limit only made
- * the index anew after every partition: 5 M groups of a row each at a
- * work_mem of 4 MB made it 3598 times.
+ * By the rule of the weights (docs/spill.md, "The weights"): once the
+ * table, with its files' buffers, takes more than seven eighths of
+ * hash_mem, the partition with the most bytes in memory goes to disk
+ * whole, one that went before among them, and the next, until the table
+ * takes half of hash_mem; the index is then made anew over the rest. An
+ * eighth of hash_mem is left for a batch's new chunks and index.
+ * Evicting down to the limit only made the index anew after every
+ * partition: 5 M groups of a row each at a work_mem of 4 MB made it 3598
+ * times.
  */
 static bool
 agg_evict(TessAggState *state, Size extra)
 {
 	AggSpill   *spill = state->spill;
-	/* An eighth of hash_mem is left for a batch's new chunks and index. */
-	Size		limit = get_hash_memory_limit() / 8 * 7;
-	Size		target = get_hash_memory_limit() / 2;
-	bool		evicted = false;
+	TessSpillWeights weights = {
+		.start = tess_agg_spill_start,
+		.target = tess_agg_spill_target,
+		.spilled = tess_agg_spill_spilled_weight,
+	};
+	uint32		evicted = 0;
 
-	if (agg_spill_memory(state) + extra <= limit)
-		return false;
-	while (agg_spill_memory(state) + extra > target)
+	for (;;)
 	{
-		int			largest = -1;
-		Size		bytes = 0;
+		int32		largest;
 
-		for (int partition = 0; partition < spill->npartitions; partition++)
-			if (spill->parts[partition].bytes > bytes)
-			{
-				largest = partition;
-				bytes = spill->parts[partition].bytes;
-			}
+		check(state, state->kernels->table_spill_evict(spill->words, spill->nwords, false,
+													   &weights,
+													   agg_spill_memory(state) + extra,
+													   get_hash_memory_limit(), NULL, 0, 0,
+													   evicted, &largest, &state->status));
 		if (largest < 0)
 			break;
 		for (int chunk = 0; chunk < spill->parts[largest].nchunks; chunk++)
 			agg_write_chunk(state, spill, largest, spill->parts[largest].chunks[chunk]);
 		part_release(spill, &spill->parts[largest]);
 		state->evictions++;
-		evicted = true;
+		evicted++;
 	}
-	return evicted;
+	return evicted > 0;
 }
 
 /* The records of the partitions in memory, for their index. */
@@ -707,6 +742,7 @@ agg_merge(TessAggState *state, AggSpill *spill, int partition)
 		split = palloc(sizeof(void *) * nsplit);
 		memcpy(split, part->chunks, sizeof(void *) * nsplit);
 		part->nchunks = 0;
+		part_count(spill, part, -(int64) part->bytes);
 		part->bytes = 0;
 	}
 

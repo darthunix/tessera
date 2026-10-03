@@ -53,7 +53,10 @@ double		tess_bitmap_page_rows = 2.0;
 double		tess_index_min_correlation = 0.8;
 double		tess_index_min_rows = 1000.0;
 bool		tess_batch_gather = true;
-/* The weights of the rule that sends a join's partitions to disk (docs/spill.md). */
+/* The weights of the rule that sends a spill's partitions to disk (docs/spill.md). */
+double		tess_agg_spill_start = 0.875;
+double		tess_agg_spill_target = 0.5;
+double		tess_agg_spill_spilled_weight = 1.0;
 double		tess_join_spill_start = 1.0;
 double		tess_join_spill_target = 1.0;
 double		tess_join_spill_spilled_weight = 0.0;
@@ -348,10 +351,24 @@ _PG_init(void)
 							 "send batches of rows instead of a tuple each.",
 							 &tess_batch_gather, true, PGC_USERSET, GUC_EXPLAIN, NULL, NULL, NULL);
 	/*
-	 * The weights of the one rule that sends a spilling join's partitions
-	 * to disk, as a grouping's (docs/spill.md, "Weights"): the defaults are
-	 * the node's rules.
+	 * The weights of the one rule that sends a spill's partitions to disk
+	 * (docs/spill.md, "The weights"): the defaults are each node's rules.
 	 */
+	DefineCustomRealVariable("tessera.agg_spill_start",
+							 "Share of hash_mem past which TessAgg sends its first partition of a check to disk.",
+							 "The rest is left for a batch's new chunks and index.",
+							 &tess_agg_spill_start, 0.875, 0.0, 10.0,
+							 PGC_USERSET, GUC_EXPLAIN, NULL, NULL, NULL);
+	DefineCustomRealVariable("tessera.agg_spill_target",
+							 "Share of hash_mem past which TessAgg sends each further partition of a check to disk.",
+							 "Going well below the start makes the index anew once for many partitions.",
+							 &tess_agg_spill_target, 0.5, 0.0, 10.0,
+							 PGC_USERSET, GUC_EXPLAIN, NULL, NULL, NULL);
+	DefineCustomRealVariable("tessera.agg_spill_spilled_weight",
+							 "Weight of the bytes in memory of a TessAgg partition on disk when the largest goes next.",
+							 "A partition on disk takes new groups into memory, and goes again.",
+							 &tess_agg_spill_spilled_weight, 1.0, 0.0, 10.0,
+							 PGC_USERSET, GUC_EXPLAIN, NULL, NULL, NULL);
 	DefineCustomRealVariable("tessera.join_spill_start",
 							 "Share of hash_mem past which TessHashJoin sends its first partition of a check to disk.",
 							 "The memory counts with the outer tails reserved for the partitions on disk.",

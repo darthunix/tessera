@@ -247,6 +247,32 @@ SELECT regexp_replace(line, '(Table Grows|Batches|Evictions|Spilled Chunks|Disk 
 FROM agg_explain($$SELECT k, count(*), sum(v) FROM agg_spill GROUP BY k$$) AS line
 WHERE line !~ 'Split Partitions';
 SELECT agg_same($$SELECT md5(string_agg(q::text, ',' ORDER BY q::text)) FROM (SELECT k, count(*), count(v), sum(v), min(v), max(v) FROM agg_spill GROUP BY k) AS q$$);
+-- The weights of the rule that sends partitions to disk (docs/spill.md,
+-- "The weights"): from ten times hash_mem on, no partition goes to disk
+-- and the table grows past it; a check that empties the table sends more
+-- partitions than one that stops at seven eighths (368 and 236 here);
+-- with the partitions on disk left out of the choice, others go. The
+-- groups stay the same.
+CREATE FUNCTION agg_evictions(query text) RETURNS bigint LANGUAGE sql
+AS $f$SELECT coalesce(sum(substring(line FROM 'Evictions: (\d+)')::bigint), 0) FROM agg_explain(query) AS line$f$;
+SET tessera.agg_spill_start = 10;
+SELECT agg_evictions($$SELECT k, count(*), sum(v) FROM agg_spill GROUP BY k$$) AS evictions;
+SELECT agg_same($$SELECT md5(string_agg(q::text, ',' ORDER BY q::text)) FROM (SELECT k, count(*), count(v), sum(v), min(v), max(v) FROM agg_spill GROUP BY k) AS q$$);
+RESET tessera.agg_spill_start;
+CREATE TEMP TABLE agg_targets (target float8, evictions bigint);
+SET tessera.agg_spill_target = 0;
+INSERT INTO agg_targets SELECT 0, agg_evictions($$SELECT k, count(*), sum(v) FROM agg_spill GROUP BY k$$);
+SET tessera.agg_spill_target = 0.875;
+INSERT INTO agg_targets SELECT 0.875, agg_evictions($$SELECT k, count(*), sum(v) FROM agg_spill GROUP BY k$$);
+SELECT agg_same($$SELECT md5(string_agg(q::text, ',' ORDER BY q::text)) FROM (SELECT k, count(*), count(v), sum(v), min(v), max(v) FROM agg_spill GROUP BY k) AS q$$);
+RESET tessera.agg_spill_target;
+SELECT (SELECT evictions FROM agg_targets WHERE target = 0) >
+       (SELECT evictions FROM agg_targets WHERE target = 0.875) AS emptied_sends_more;
+DROP TABLE agg_targets;
+DROP FUNCTION agg_evictions(text);
+SET tessera.agg_spill_spilled_weight = 0;
+SELECT agg_same($$SELECT md5(string_agg(q::text, ',' ORDER BY q::text)) FROM (SELECT k, count(*), count(v), sum(v), min(v), max(v) FROM agg_spill GROUP BY k) AS q$$);
+RESET tessera.agg_spill_spilled_weight;
 -- A partition's groups went to disk many times, its file larger than
 -- hash_mem, but they fit: the estimate of its groups merges it, no split.
 SELECT count(*) AS splits

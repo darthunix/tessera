@@ -283,7 +283,9 @@ input is read, a new group going to its partition's chunk
 (`tess_table_find_or_insert_partitioned`); sending a partition to disk
 frees its chunks and makes the index anew over the rest. So once the
 table passes seven eighths of `hash_mem`, the largest partitions go to
-disk until it takes half, and the index is made once for them all:
+disk until it takes half (the rule of the weights, below; a partition
+that went before is among them, its new groups' bytes weighed as any
+other's), and the index is made once for them all:
 evicting one partition at a time made it anew after each, 3598 times for
 5 M groups of a row each at a `work_mem` of 4 MB (1.38 s against the
 core's 0.94; now 0.48). An index a batch could fill counts twice its
@@ -346,14 +348,18 @@ goes as well. A check sends `per_check` partitions at most (0 for any).
 The nodes differ by the weights alone, settings of their own whose
 defaults are the rules above:
 
-| weight | hash join | shared hash join |
-|---|---|---|
-| `start` | `tessera.join_spill_start`, 1 | the same, of the budget |
-| `target` | `tessera.join_spill_target`, 1 | the same |
-| `spilled` | `tessera.join_spill_spilled_weight`, 0 | the same |
-| reserve | `tessera.join_spill_tail_weight` × a tail, 1 | none: the words count the table's chunks |
-| `resident` | `tessera.join_spill_resident_share`, 0.25 | none: the words count records once built |
-| `per_check` | any | `tessera.join_shared_spill_evictions`, 1 |
+| weight | grouping | hash join | shared hash join |
+|---|---|---|---|
+| `start` | `tessera.agg_spill_start`, 7/8 | `tessera.join_spill_start`, 1 | the same, of the budget |
+| `target` | `tessera.agg_spill_target`, 1/2 | `tessera.join_spill_target`, 1 | the same |
+| `spilled` | `tessera.agg_spill_spilled_weight`, 1 | `tessera.join_spill_spilled_weight`, 0 | the same |
+| reserve | none: its memory counts its files' buffers | `tessera.join_spill_tail_weight` × a tail, 1 | none: the words count the table's chunks |
+| `resident` | none | `tessera.join_spill_resident_share`, 0.25 | none: the words count records once built |
+| `per_check` | any | any | `tessera.join_shared_spill_evictions`, 1 |
+
+A grouping's memory is its contexts' and its index's, with the room a
+batch's index may grow by; a partition that went to disk takes new
+groups into memory and may go again.
 
 A shared table's participants send one partition a check, since the
 others write their chunks of it at their next batch; a participant whose
