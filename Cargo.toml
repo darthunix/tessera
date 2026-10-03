@@ -5,6 +5,7 @@ members = [
     "crates/tessera-kernels",
     "crates/tessera-spill",
     "crates/tessera-testing",
+    "tools/tessera-ab",
     "tools/tessera-bench",
     "tools/tessera-crosscheck",
     "tools/tessera-pgtool",
