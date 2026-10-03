@@ -1,7 +1,7 @@
 # Mutation testing of the Rust crates (plan 9.9, .cargo/mutants.toml).
 # A pull request that changes the crates gets the mutants of its changed
-# lines; a run by hand (workflow_dispatch) takes every mutant in eight
-# shards. A missed mutant fails the job: a change the tests do not notice.
+# lines in three shards; a run by hand (workflow_dispatch) takes every
+# mutant in eight. A missed mutant fails the job: a change the tests do not notice.
 # A timeout or a mutant that does not build does not. The runners are
 # arm64 macOS, where the NEON kernels compile.
 name: Mutants
@@ -19,10 +19,18 @@ concurrency:
 
 jobs:
   diff:
-    name: Mutants of the changed lines
+    name: Mutants of the changed lines, shard ${{ matrix.shard }} of 3
     if: github.event_name == 'pull_request'
     runs-on: macos-15
-    timeout-minutes: 25
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      # A mutant takes about a minute (its build and every test), a loop
+      # made endless 82 s: the 136 mutants of plan 9.16 took an hour on
+      # one runner. Three shards take three of the account's five macOS
+      # runners for about 25 minutes.
+      matrix:
+        shard: [0, 1, 2]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -42,13 +50,13 @@ jobs:
         run: |
           # 2: a mutant was missed; 3: only timeouts; 0: none missed.
           code=0
-          cargo mutants --in-diff target/pr.diff --no-shuffle --jobs 2 || code=$?
+          cargo mutants --in-diff target/pr.diff --shard ${{ matrix.shard }}/3 --no-shuffle --jobs 2 || code=$?
           test "$code" -eq 0 || test "$code" -eq 3
       - name: The mutants' outcomes
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: mutants-diff
+          name: mutants-diff-${{ matrix.shard }}
           path: mutants.out
           if-no-files-found: ignore
 
