@@ -606,6 +606,9 @@ pub(super) enum PartialColumn<'a> {
     State(Plain<'a>),
     /// The int8[] pairs of `avg(int4)` and `avg(int2)`.
     Pair(Plain<'a>),
+    /// The int8 of `sum(int2)`: a state of one value at scale 0, as a
+    /// bigint term adds.
+    Int8(Plain<'a>),
 }
 
 /// A reader of a partial state's bytes after the varlena header.
@@ -617,6 +620,18 @@ impl Partials for PartialColumn<'_> {
         let (column, read): (&Plain<'_>, ReadPartial) = match self {
             Self::State(column) => (column, state_partial),
             Self::Pair(column) => (column, pair_partial),
+            Self::Int8(column) => {
+                return Ok(column.value(row).map_or(Partial::Null, |word| {
+                    Partial::State(SumState {
+                        sum: Sum {
+                            value: i128::from(word as i64),
+                            scale: 0,
+                            count: 1,
+                        },
+                        ..SumState::default()
+                    })
+                }));
+            }
         };
         let Some(datum) = column.value(row) else {
             return Ok(Partial::Null);
@@ -647,7 +662,8 @@ impl<'a> PartialColumn<'a> {
         Ok(match (input, column) {
             (SumInput::State, Column::Plain(column)) => Self::State(column),
             (SumInput::Pair, Column::Plain(column)) => Self::Pair(column),
-            (SumInput::State | SumInput::Pair, Column::Side(_)) => {
+            (SumInput::Int8, Column::Plain(column)) => Self::Int8(column),
+            (SumInput::State | SumInput::Pair | SumInput::Int8, Column::Side(_)) => {
                 bail!("a column of partial states with decimals")
             }
             _ => bail!("terms among a call's partial states"),

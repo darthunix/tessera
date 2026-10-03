@@ -176,6 +176,20 @@ fast_numeric(int128 value, int scale)
 																		 scale)));
 }
 
+/*
+ * sum(int2)'s int8 from a sum at scale 0 and its rest, or 0: the sum
+ * wrapped as int2_sum's addition wraps, a sum with a rest (past 10^36)
+ * through numeric_int8, which refuses a value past an int8.
+ */
+static Datum
+fast_int8(int128 sum, Datum rest)
+{
+	if (rest == (Datum) 0)
+		return Int64GetDatum((int64) sum);
+	return DirectFunctionCall1(numeric_int8,
+							   DirectFunctionCall2(numeric_add, rest, fast_numeric(sum, 0)));
+}
+
 /* A numeric added to the rest's sum, in the states' context. */
 static void
 fast_rest(FastState *fast, Datum value, MemoryContext states)
@@ -208,30 +222,25 @@ fast_flush(FastState *fast, MemoryContext states)
 	fast->sum = 0;
 }
 
-/*
- * A decimal added at the larger of its scale and the sum's, as the core's
- * accumulation keeps the largest display scale; a sum a larger scale or a
- * term would take past the bound goes to the rest first.
- */
-static void
-fast_add(FastState *fast, FastDecimal decimal, MemoryContext states)
+/* A row the kernels left to a sum or a sum state (fast_sum), as a numeric. */
+static Datum
+sum_state_term(const GenericAgg *generic, const TessDatumColumn *column, int row)
 {
-	int128		term = decimal.value;
+	Datum		value = column->values[row];
+	const uint64 *side = tess_column_decimal_rows(column);
 
-	if (decimal.scale > fast->scale)
+	switch (generic->sum_input)
 	{
-		int128		factor = fast_powers[decimal.scale - fast->scale];
-
-		if (fast->sum >= FAST_BOUND / factor || fast->sum <= -FAST_BOUND / factor)
-			fast_flush(fast, states);
-		fast->sum *= factor;
-		fast->scale = decimal.scale;
+		case TESS_TABLE_SUM_OF_INT4:
+			return NumericGetDatum(int64_to_numeric(DatumGetInt32(value)));
+		case TESS_TABLE_SUM_OF_INT8:
+			return NumericGetDatum(int64_to_numeric(DatumGetInt64(value)));
+		default:
+			if (side != NULL && ((side[row / 64] >> (row % 64)) & 1) != 0)
+				return NumericGetDatum(int64_div_fast_to_numeric(DatumGetInt64(value),
+																 column->decimal_scale));
+			return value;
 	}
-	else
-		term *= fast_powers[fast->scale - decimal.scale];
-	fast->sum += term;
-	if (fast->sum >= FAST_BOUND || fast->sum <= -FAST_BOUND)
-		fast_flush(fast, states);
 }
 
 /*
@@ -619,20 +628,16 @@ fast_advance(GenericAgg *generic, int row, MemoryContext states)
 		fast_float_advance(generic, fast, false, value);
 		return;
 	}
-	if (generic->fast_numeric && decimal_rows != NULL &&
-		((decimal_rows[row / 64] >> (row % 64)) & 1) != 0)
+	if (generic->fast == FAST_MIN || generic->fast == FAST_MAX)
 	{
-		/* A decimal of the argument's chain: its numeric was never made. */
-		decimal.value = DatumGetInt64(value);
-		decimal.scale = column->decimal_scale;
-		if (generic->fast == FAST_MIN || generic->fast == FAST_MAX)
+		if (decimal_rows != NULL && ((decimal_rows[row / 64] >> (row % 64)) & 1) != 0)
 		{
+			/* A decimal of the argument's chain: its numeric was never made. */
+			decimal.value = DatumGetInt64(value);
+			decimal.scale = column->decimal_scale;
 			fast_decimal_extreme(generic, fast, &decimal, states);
 			return;
 		}
-	}
-	else if (generic->fast_numeric)
-	{
 		/* A numeric the kernels read for the batch (fast_read), or the rest. */
 		decimal_valid = ((generic->decimal_bits[row / 64] >> (row % 64)) & 1) != 0;
 		if (decimal_valid)
@@ -640,22 +645,23 @@ fast_advance(GenericAgg *generic, int row, MemoryContext states)
 			decimal.value = DatumGetInt64(generic->decimal_values[row]);
 			decimal.scale = generic->decimal_scales[row];
 		}
-	}
-	else
-	{
-		decimal.value = generic->fast_wide ? DatumGetInt64(value) : DatumGetInt32(value);
-		decimal.scale = 0;
-	}
-	if (generic->fast == FAST_MIN || generic->fast == FAST_MAX)
-	{
 		fast_extreme(generic, fast, value, decimal_valid ? &decimal : NULL, states);
 		return;
 	}
+
+	/*
+	 * A row the kernels left to the sum (fast_sum): NaN, an infinity or a
+	 * longer value, or a decimal at the sum's bound, which then moves the
+	 * sum to the rest, so that the next batches add from zero. The row's
+	 * numeric joins the rest.
+	 */
 	fast->count++;
-	if (decimal_valid)
-		fast_add(fast, decimal, states);
-	else
-		fast_rest(fast, value, states);
+	if (fast->sum != 0 &&
+		(!generic->fast_numeric ||
+		 fast_row_decimal(generic, decimal_rows != NULL ? decimal_rows[row / 64] : 0,
+						  generic->decimal_bits[row / 64], row, &decimal)))
+		fast_flush(fast, states);
+	fast_rest(fast, sum_state_term(generic, column, row), states);
 }
 
 /*
@@ -686,7 +692,7 @@ fast_value(GenericAgg *generic, bool *isnull)
 	if (generic->fast == FAST_MIN || generic->fast == FAST_MAX)
 		return fast->extreme;
 	if (generic->fast_int8_result)
-		return Int64GetDatum((int64) fast->sum);
+		return fast_int8(fast->sum, fast->has_rest ? fast->rest : (Datum) 0);
 	sum = fast_numeric(fast->sum, fast->scale);
 	if (fast->has_rest)
 		sum = DirectFunctionCall2(numeric_add, fast->rest, sum);
@@ -768,7 +774,7 @@ fast_partial(GenericAgg *generic, bool *isnull)
 	if (generic->fast == FAST_MIN || generic->fast == FAST_MAX)
 		return fast->extreme;
 	if (generic->fast_int8_result)
-		return Int64GetDatum((int64) fast->sum);
+		return fast_int8(fast->sum, fast->has_rest ? fast->rest : (Datum) 0);
 	words[0] = (uint64) fast->sum;
 	words[1] = (uint64) ((uint128) fast->sum >> 64);
 	words[2] = (uint64) fast->count;
@@ -916,9 +922,13 @@ agg_generic_init(TessAggState *state, Aggref *agg)
 		sum_state_aggregate(agg);
 	generic->sum_pair = generic->sum_state &&
 		(agg->aggfnoid == F_AVG_INT4 || agg->aggfnoid == F_AVG_INT2);
-	/* Above a gather, the participants' partial values of the state. */
+	/*
+	 * Above a gather, the participants' partial values of the state:
+	 * sum(int2)'s the core's int8, which adds as a bigint argument does.
+	 */
 	generic->sum_input = state->finalize ?
-		(generic->sum_pair ? TESS_TABLE_SUM_OF_PAIR : TESS_TABLE_SUM_OF_STATE) :
+		(generic->sum_pair ? TESS_TABLE_SUM_OF_PAIR :
+		 generic->fast_int8_result ? TESS_TABLE_SUM_OF_INT8 : TESS_TABLE_SUM_OF_STATE) :
 		generic->fast_numeric ? TESS_TABLE_SUM_OF_NUMERIC :
 		generic->fast_wide ? TESS_TABLE_SUM_OF_INT8 : TESS_TABLE_SUM_OF_INT4;
 #endif
@@ -1123,10 +1133,9 @@ agg_record_payload(TessAggState *state, uint32 ref)
 
 #ifdef HAVE_INT128
 /*
- * The rows of a batch into the groups' states of a numeric aggregate the
- * node folds itself, its decimals read (fast_read): a decimal goes straight
- * into its group's state, made at its first one, and any other row
- * through fast_advance.
+ * The rows of a batch into the groups' states of min or max of numeric,
+ * its decimals read (fast_read): a decimal goes straight into its group's
+ * state, made at its first one, and any other row through fast_advance.
  */
 static void
 fast_group_decimals(TessAggState *state, int index, const TessRowMask *rows,
@@ -1136,7 +1145,6 @@ fast_group_decimals(TessAggState *state, int index, const TessRowMask *rows,
 	int			slot = state->values[index].slot;
 	const TessDatumColumn *column = &generic->columns[0];
 	const uint64 *side = tess_column_decimal_rows(column);
-	bool		extreme = generic->fast == FAST_MIN || generic->fast == FAST_MAX;
 	uint64		bit = UINT64CONST(1) << index;
 	int			nwords = tess_row_mask_word_count(rows->nrows);
 
@@ -1167,12 +1175,7 @@ fast_group_decimals(TessAggState *state, int index, const TessRowMask *rows,
 				payload[0] |= bit;
 			}
 			fast = (FastState *) payload[slot];
-			if (!extreme)
-			{
-				fast->count++;
-				fast_add(fast, decimal, states);
-			}
-			else if (((side_bits >> (row % 64)) & 1) != 0)
+			if (((side_bits >> (row % 64)) & 1) != 0)
 				fast_decimal_extreme(generic, fast, &decimal, states);
 			else
 				fast_extreme(generic, fast, column->values[row], &decimal, states);
@@ -1188,27 +1191,6 @@ sum_state_special(const char *name)
 {
 	return DirectFunctionCall3(numeric_in, CStringGetDatum(name),
 							   ObjectIdGetDatum(InvalidOid), Int32GetDatum(-1));
-}
-
-/* A row the kernels left to a sum state, as a numeric. */
-static Datum
-sum_state_term(const GenericAgg *generic, const TessDatumColumn *column, int row)
-{
-	Datum		value = column->values[row];
-	const uint64 *side = tess_column_decimal_rows(column);
-
-	switch (generic->sum_input)
-	{
-		case TESS_TABLE_SUM_OF_INT4:
-			return NumericGetDatum(int64_to_numeric(DatumGetInt32(value)));
-		case TESS_TABLE_SUM_OF_INT8:
-			return NumericGetDatum(int64_to_numeric(DatumGetInt64(value)));
-		default:
-			if (side != NULL && ((side[row / 64] >> (row % 64)) & 1) != 0)
-				return NumericGetDatum(int64_div_fast_to_numeric(DatumGetInt64(value),
-																 column->decimal_scale));
-			return value;
-	}
 }
 
 /*
@@ -1407,7 +1389,7 @@ agg_fast_merge(TessAggState *state, GenericAgg *generic, Datum value, bool isnul
  * indexes, words of their records: the kernels fold what they can, the
  * record found once a row for all of them (tess_table_accumulate_sums),
  * and leave the rest here (sum_state_rest; a final grouping's partial
- * states, sum_state_merge_rest). A new group's words are zeros, the empty
+ * states of the node's format or avg's pairs, sum_state_merge_rest). A new group's words are zeros, the empty
  * state.
  */
 void
@@ -1445,7 +1427,8 @@ agg_sum_states_accumulate(TessAggState *state, int nsums, const int *indexes,
 
 			while ((row = tess_row_mask_next(&rests[sum], row)) >= 0)
 			{
-				if (state->finalize)
+				if (value->generic->sum_input == TESS_TABLE_SUM_OF_STATE ||
+					value->generic->sum_input == TESS_TABLE_SUM_OF_PAIR)
 					sum_state_merge_rest(state, value->generic, value->slot, row, states);
 				else
 					sum_state_rest(state, value->generic, value->slot, row, states);
@@ -1459,7 +1442,7 @@ agg_sum_states_accumulate(TessAggState *state, int nsums, const int *indexes,
  * numeric_avg, numeric_poly_sum, numeric_poly_avg and int8_avg finish
  * theirs: NULL without a value, NaN after NaN or both infinities, an
  * infinity after one, else the sum at its scale plus the rest, the
- * average that divided by the count.
+ * average that divided by the count; sum(int2)'s int8 (fast_int8).
  */
 Datum
 agg_sum_state_value(const GenericAgg *generic, const uint64 *words, bool *isnull)
@@ -1483,6 +1466,8 @@ agg_sum_state_value(const GenericAgg *generic, const uint64 *words, bool *isnull
 		*isnull = true;
 		return (Datum) 0;
 	}
+	if (generic->fast_int8_result)
+		return fast_int8(value, (Datum) words[TESS_TABLE_SUM_WORDS]);
 	sum = fast_numeric(value, (int) (flags & TESS_TABLE_SUM_SCALE_MASK));
 	if (words[TESS_TABLE_SUM_WORDS] != 0)
 		sum = DirectFunctionCall2(numeric_add, (Datum) words[TESS_TABLE_SUM_WORDS], sum);
@@ -1496,7 +1481,8 @@ agg_sum_state_value(const GenericAgg *generic, const uint64 *words, bool *isnull
  * (TessTableSumInput): the node's own bytea of the tag, the words and the
  * rest, NULL for the empty state; for avg of integer or smallint, the
  * core's int8[] of the count and the sum, whose int8 wraps as the core's
- * transition's (no rest: an integer is always a decimal the sum takes).
+ * transition's (no rest: an integer is always a decimal the sum takes);
+ * for sum(int2), the core's int8 (fast_int8), NULL without a value.
  */
 Datum
 agg_sum_state_partial(const GenericAgg *generic, const uint64 *words, bool *isnull)
@@ -1510,6 +1496,13 @@ agg_sum_state_partial(const GenericAgg *generic, const uint64 *words, bool *isnu
 
 		return PointerGetDatum(construct_array(pair, 2, INT8OID, sizeof(int64),
 											   FLOAT8PASSBYVAL, TYPALIGN_DOUBLE));
+	}
+	if (generic->fast_int8_result)
+	{
+		*isnull = words[2] == 0;
+		return *isnull ? (Datum) 0 :
+			fast_int8((int128) (((uint128) words[1] << 64) | words[0]),
+					  (Datum) words[TESS_TABLE_SUM_WORDS]);
 	}
 	if (rest == NULL && (words[0] | words[1] | words[2] | words[3]) == 0)
 	{

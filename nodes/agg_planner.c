@@ -199,7 +199,8 @@ batch_aggregate(const Aggref *agg)
  * Whether a grouping keeps the aggregate as a sum state, words of the
  * group's record that the kernels fold (agg_generic_init): sum and avg of
  * numeric, with the kernels module, and of bigint, avg of integer and
- * smallint. The planner costs such an aggregate as the node's own.
+ * smallint, sum of smallint. The planner costs such an aggregate as the
+ * node's own.
  */
 bool
 sum_state_aggregate(const Aggref *agg)
@@ -214,6 +215,7 @@ sum_state_aggregate(const Aggref *agg)
 			return tess_runtime_kernels() != NULL;
 		case F_SUM_INT8:
 		case F_AVG_INT8:
+		case F_SUM_INT2:
 		case F_AVG_INT4:
 		case F_AVG_INT2:
 			return true;
