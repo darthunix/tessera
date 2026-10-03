@@ -194,6 +194,28 @@ tess_spill_columns_word(void *chunk, int word)
 								   word);
 }
 
+/*
+ * The partitions of a level of a spill: from min_partitions, the power of
+ * two that makes each hold about half of limit of the expected bytes, or
+ * at_least of them, as long as each partition's reserve (its tails of
+ * chunks and its files' buffers) fits in half of limit, the hash bits from
+ * shift last and max_partitions is not passed. A grouping's spill, a
+ * join's and a shared join table's take it with their own parameters.
+ */
+extern TessStatusCode tess_spill_partitions(double expected, Size limit, Size reserve,
+											uint32 shift, uint32 min_partitions,
+											uint32 max_partitions, uint32 at_least,
+											uint32 *partitions, TessStatus *status);
+
+/*
+ * The length of a level's chunks: limit / (share * partitions) bytes, no
+ * more than max_chunk, no less than min_chunk (which wins over max_chunk),
+ * rounded down to a multiple of 8.
+ */
+extern TessStatusCode tess_spill_chunk_len(Size limit, uint32 partitions, Size share,
+										   Size min_chunk, Size max_chunk,
+										   Size *chunk_len, TessStatus *status);
+
 /* What tess_spill_columns_layout gives the size or offset of. */
 typedef enum TessSpillColumnsField
 {

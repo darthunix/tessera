@@ -259,6 +259,12 @@ typedef struct JoinRound
 #define JOIN_SPILL_MIN_CHUNK (8 * 1024)
 #define JOIN_SPILL_MIN_PARTITIONS 4
 #define JOIN_SPILL_MAX_PARTITIONS 1024
+/*
+ * What a partition keeps in memory at the least: a tail of records and
+ * one of values and a file's buffer of a page on each side, at the
+ * smallest chunk (tess_spill_partitions' reserve).
+ */
+#define JOIN_SPILL_RESERVE (4 * JOIN_SPILL_MIN_CHUNK + 2 * BLCKSZ)
 
 /*
  * A partition of one side: its record chunks in memory (every one of a

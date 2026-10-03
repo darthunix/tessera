@@ -172,20 +172,19 @@ agg_spill_create(TessAggState *state, AggSpill *parent, double expected, uint32 
 	TessSpillConfig config = TESS_STRUCT_INITIALIZER(TessSpillConfig);
 	TessTableRef layout = {0};
 	AggSpill   *spill = MemoryContextAllocZero(context, sizeof(AggSpill));
-	int			npartitions = AGG_SPILL_MIN_PARTITIONS;
-	Size		chunk_len;
+	uint32		npartitions;
 
 	/* Each partition keeps a chunk and its file's buffer of a page. */
-	while (npartitions < AGG_SPILL_MAX_PARTITIONS &&
-		   (double) npartitions * (limit / 2) < expected &&
-		   (Size) npartitions * 2 * (AGG_SPILL_MIN_CHUNK + BLCKSZ) <= limit / 2 &&
-		   shift + pg_leftmost_one_pos32(npartitions) + 1 < 32)
-		npartitions *= 2;
-	chunk_len = limit / (8 * npartitions);
-	chunk_len = Min(chunk_len, TESS_TABLE_MAX_CHUNK_LEN);
-	chunk_len = Max(chunk_len, AGG_SPILL_MIN_CHUNK);
-	chunk_len = Max(chunk_len, TESS_TABLE_CHUNK_HEADER + 4 * record);
-	spill->chunk_len = TYPEALIGN_DOWN(8, chunk_len);
+	check(state, state->kernels->spill_partitions(expected, limit, AGG_SPILL_MIN_CHUNK + BLCKSZ,
+												  shift, AGG_SPILL_MIN_PARTITIONS,
+												  AGG_SPILL_MAX_PARTITIONS, 0,
+												  &npartitions, &state->status));
+	/* A chunk an eighth of hash_mem among them, of four records at least. */
+	check(state, state->kernels->spill_chunk_len(limit, npartitions, 8,
+												 Max(AGG_SPILL_MIN_CHUNK,
+													 TESS_TABLE_CHUNK_HEADER + 4 * record),
+												 TESS_TABLE_MAX_CHUNK_LEN,
+												 &spill->chunk_len, &state->status));
 	spill->parent = parent;
 	spill->level = parent == NULL ? 0 : parent->level + 1;
 	spill->shift = shift;

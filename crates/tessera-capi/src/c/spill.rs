@@ -9,7 +9,7 @@ use std::slice;
 use anyhow::{Context, Result, bail, ensure};
 use tessera_kernels::spill_columns::{self, ColumnChunks};
 use tessera_kernels::table::{Partitions, PayloadColumns};
-use tessera_spill::{BlockHeader, BlockKind, HEADER_SIZE, columns};
+use tessera_spill::{BlockHeader, BlockKind, HEADER_SIZE, columns, plan};
 
 use super::column::DatumColumn;
 use super::mask::Mask;
@@ -244,6 +244,70 @@ pub extern "C" fn tess_spill_columns_shape(words: u32, what: c_int) -> usize {
         COLUMNS_SHAPE_NULL_LANES => columns::null_lanes(words),
         COLUMNS_SHAPE_SLACK => columns::pack_slack(words),
         _ => 0,
+    }
+}
+
+/// `tess_spill_partitions`: the partitions of a level of a spill
+/// (tessera-spill, `plan::partitions`), into `partitions`.
+///
+/// # Safety
+///
+/// `partitions` must be null or writable; `status` as for every entry
+/// point.
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments, reason = "the scalars of a C entry point")]
+pub unsafe extern "C" fn tess_spill_partitions(
+    expected: f64,
+    limit: usize,
+    reserve: usize,
+    shift: u32,
+    min_partitions: u32,
+    max_partitions: u32,
+    at_least: u32,
+    partitions: *mut u32,
+    status: *mut Status,
+) -> Code {
+    // SAFETY: the caller's contract.
+    unsafe {
+        guard(status, || {
+            let level = plan::Level {
+                expected,
+                limit,
+                reserve,
+                shift,
+                min_partitions,
+                max_partitions,
+                at_least,
+            };
+            *partitions.as_mut().context("a null count of partitions")? = plan::partitions(&level)?;
+            Ok(())
+        })
+    }
+}
+
+/// `tess_spill_chunk_len`: the length of a level's chunks (tessera-spill,
+/// `plan::chunk_len`), into `chunk_len`.
+///
+/// # Safety
+///
+/// `chunk_len` must be null or writable; `status` as for every entry point.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tess_spill_chunk_len(
+    limit: usize,
+    partitions: u32,
+    share: usize,
+    min_chunk: usize,
+    max_chunk: usize,
+    chunk_len: *mut usize,
+    status: *mut Status,
+) -> Code {
+    // SAFETY: the caller's contract.
+    unsafe {
+        guard(status, || {
+            *chunk_len.as_mut().context("a null chunk length")? =
+                plan::chunk_len(limit, partitions, share, min_chunk, max_chunk)?;
+            Ok(())
+        })
     }
 }
 

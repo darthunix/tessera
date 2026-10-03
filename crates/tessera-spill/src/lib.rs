@@ -22,6 +22,7 @@ use anyhow::{Result, ensure};
 pub mod columns;
 mod damaged;
 mod pack;
+pub mod plan;
 pub use damaged::Damaged;
 use damaged::intact;
 pub use pack::{pack, unpack};
