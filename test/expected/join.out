@@ -2598,6 +2598,87 @@ SELECT join_same($$SELECT count(*), count(jsp.s), count(w.t), sum(length(w.t)) F
  1 rows, hash cf13c34beb23ab707c7be63127431320
 (1 row)
 
+-- At 64kB: more partitions and levels, chunks of a few records, each with
+-- its own marks.
+SET work_mem = '64kB';
+SELECT join_explain($$SELECT count(*), count(jsp.s), sum(length(jsb.t)) FROM jsp RIGHT JOIN jsb ON jsp.k = jsb.k$$);
+                                     join_explain                                     
+--------------------------------------------------------------------------------------
+ Custom Scan (TessAgg) (actual rows=1.00 loops=1)
+   Input Batches: 3207
+   Input Rows: 173482
+   Kernel Calls: 9573
+   Computed Datums: 346964
+   ->  Custom Scan (TessHashJoin) (actual rows=173482.00 loops=1)
+         Join Type: Right
+         Hash Cond: (jsp.k = jsb.k)
+         Buckets: 1024
+         Memory Usage: over hash_mem
+         Batches: 4
+         Disk Usage: 10170 kB
+         Rows Removed by Bloom Filter: 22060
+         Builds: 1
+         Build Rows: 40000
+         Chunks: 323
+         Resident Partitions: 0
+         Spilled Chunks: 4157
+         Tail Chunks Kept: 0
+         Split Partitions: 79
+         Extra Passes: 11
+         Probe Rows: 100000
+         Matches: 171130
+         Compact Batches: 728
+         Bloom Filters: 1
+         ->  Custom Scan (TessHeapScan) on public.jsp (actual rows=100000.00 loops=1)
+               Batch Size: 64
+               Batches: 1597
+               Pages: 532
+               Deformed Datums: 168850
+               Restarted Datums: 0
+         ->  Custom Scan (TessHeapScan) on public.jsb (actual rows=40000.00 loops=1)
+               Batch Size: 64
+               Batches: 723
+               Pages: 362
+               Deformed Datums: 80000
+               Restarted Datums: 0
+(37 rows)
+
+SELECT join_same($$SELECT count(*), count(jsp.s), sum(length(jsb.t)), sum(jsb.n) FROM jsp RIGHT JOIN jsb ON jsp.k = jsb.k$$);
+                   join_same                   
+-----------------------------------------------
+ 1 rows, hash 1fde106f73a99db25df4570ffab2b254
+(1 row)
+
+SELECT join_same($$SELECT count(*), count(jsp.s), count(jsb.t), sum(jsb.n) FROM jsp FULL JOIN jsb ON jsp.k = jsb.k$$);
+                   join_same                   
+-----------------------------------------------
+ 1 rows, hash 82f73945115e17abebfa925be19ececc
+(1 row)
+
+SELECT join_same($$SELECT jsp.s, jsb.t FROM jsp FULL JOIN jsb ON jsp.k = jsb.k WHERE jsb.n % 100 = 3 OR jsp.s LIKE '%77'$$);
+                    join_same                     
+--------------------------------------------------
+ 3766 rows, hash dd643c48b8933615071d55e7657529c3
+(1 row)
+
+SELECT join_same($$SELECT count(*), count(jsp.s), count(jskew.w), sum(jskew.w) FROM jsp FULL JOIN jskew() AS jskew ON jsp.k = jskew.k$$);
+                   join_same                   
+-----------------------------------------------
+ 1 rows, hash b4e0ed78f4a3a4c8861e9f5b6d2add82
+(1 row)
+
+SELECT join_same($$SELECT count(*), count(jsp.s), count(w.t), sum(length(w.t)) FROM jsp FULL JOIN jwide() AS w ON jsp.k = w.k$$);
+                   join_same                   
+-----------------------------------------------
+ 1 rows, hash cf13c34beb23ab707c7be63127431320
+(1 row)
+
+SELECT join_same($$SELECT jsp.s FROM jsp WHERE NOT EXISTS (SELECT 1 FROM jsb WHERE jsb.k = jsp.k)$$);
+                     join_same                     
+---------------------------------------------------
+ 31817 rows, hash 6392f4045fc17bd928976ebddedae950
+(1 row)
+
 RESET work_mem;
 -- RIGHT and FULL: the inner side's records that find a pair are marked,
 -- and those without one, NULL keys among them, go out after the outer
