@@ -38,6 +38,9 @@ rules:
     - >-
       List under "Impact" the capabilities, public headers, settings and
       SQL suites the change touches.
+    - >-
+      Name the entry of openspec/roadmap.md that the change takes up, if
+      it has one.
   specs:
     - >-
       One promise in a requirement, one to three scenarios for it, at
@@ -97,6 +100,9 @@ operations:
         capability up to date with the decisions that change how it is
         built.
       - Replace every "Verified by" that still says pending.
+      - >-
+        Remove the change's entry from openspec/roadmap.md, and add an
+        entry there for what is left.
       - >-
         The maintainer approves the outcome before the change is
         archived.
