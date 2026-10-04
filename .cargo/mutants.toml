@@ -35,4 +35,16 @@ exclude_re = [
 # baseline's test time.
 timeout_multiplier = 3.0
 
+# The tests of every crate of the product judge a mutant, not only its
+# own crate's, cargo-mutants' default: a test of tessera-capi catches a
+# mutant of tessera-kernels. A mutant of the kernels then builds 24 test
+# programs for 11 and is caught sooner, the same 20 s in all (plan 9.21).
+# The tools' tests depend on none of these crates.
+test_package = [
+    "tessera-core",
+    "tessera-kernels",
+    "tessera-capi",
+    "tessera-spill",
+]
+
 additional_cargo_test_args = ["--locked"]
