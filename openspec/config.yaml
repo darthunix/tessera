@@ -1,32 +1,102 @@
 schema: spec-driven
 
-# Project context (optional)
-# This is shown to AI when creating artifacts.
-# Add your tech stack, conventions, style guides, domain knowledge, etc.
-# Example:
-#   context: |
-#     Tech stack: TypeScript, React, Node.js
-#     We use conventional commits
-#     Domain: e-commerce platform
+# Shown to an agent with the instructions of every artifact. The rules
+# of work that hold in any session are in CONTRIBUTING.md, not here:
+# this file reaches an agent only through the OpenSpec workflows.
+context: |
+  Tessera is a PostgreSQL extension that runs parts of a query plan in
+  batches: C modules (bridge, runtime, nodes, kernels) and Rust kernels
+  behind a C API. CONTRIBUTING.md at the root of the repository holds
+  the rules of work: building, checks, commits, measurements. Read it
+  first.
 
-# Per-artifact rules (optional)
-# Add custom rules for specific artifacts.
-# Example:
-#   rules:
-#     proposal:
-#       - Keep proposals under 500 words
-#       - Always include a "Non-goals" section
-#     tasks:
-#       - Break tasks into chunks of max 2 hours
+  A capability is one part of the system and one folder,
+  openspec/specs/<name>/, with two files. spec.md says what the part
+  promises. design.md says how it is built and why; OpenSpec does not
+  read it, people and agents keep it by hand. Where the two disagree,
+  spec.md is right.
 
-# Per-operation guidance (optional)
-# Add advisory guidance for how apply and archive work should be conducted.
-# This is separate from artifact rules above.
-# Example:
-#   operations:
-#     apply:
-#       guidance:
-#         - Keep test summaries concise
-#     archive:
-#       guidance:
-#         - Summarize the archive outcome before finishing
+  A spec names four surfaces only: the public C API of include/tessera;
+  behavior visible from SQL (the plan chosen, the results, EXPLAIN,
+  settings, SQLSTATE); formats on disk and in shared memory; the entry
+  points of the kernels. Internal names and steps belong in design.md.
+
+  A change is needed when behavior, the C API or a format changes, when
+  work on speed needs a measurement plan, or when the work is larger
+  than one pull request. The maintainer approves the proposal before
+  any code and the outcome before the archive.
+
+  Everything in the repository is written in English. Markdown is
+  wrapped at 72 columns and never runs past 80; what does not fit a line
+  of a table is written as a list.
+
+rules:
+  proposal:
+    - >-
+      Say what is wrong today in "Why", with the numbers or the failing
+      case that show it.
+    - >-
+      List under "Impact" the capabilities, public headers, settings and
+      SQL suites the change touches.
+  specs:
+    - >-
+      One promise in a requirement, one to three scenarios for it, at
+      most ten requirements in a change.
+    - >-
+      End every scenario with one bullet
+      "- **Verified by:** `<path>::<text>`", where the path is a file in
+      the repository and the text occurs in that file: the name of a
+      test, or a mark "-- spec: <capability>/<scenario>" added to an SQL
+      suite. Several tests are separated by "; ". The bullet may
+      continue on the next lines, indented.
+    - >-
+      Write "- **Verified by:** review only — <reason>" when no test can
+      show the scenario, and "- **Verified by:** pending" only while the
+      change is open.
+    - >-
+      Keep definitions in the spec only - formats, lists of what is and
+      is not supported, error codes.
+    - >-
+      Leave out measurements, numbers of the old plan's items and names
+      of internal functions.
+    - Name a capability in flat kebab-case; no folders inside folders.
+  design:
+    - >-
+      Write "Was" and "Will be" for each thing that changes, and "What
+      we do not do" with the reasons.
+    - >-
+      For work on speed add "Measurement plan" - what is measured, with
+      which tool and cases, and the threshold that decides
+      (docs/measuring.md).
+    - Record each decision of the maintainer with its date.
+  tasks:
+    - >-
+      A task is one commit that builds and passes the checks by itself;
+      name the command that checks it.
+    - >-
+      Keep a mechanical move or rename in a task of its own, apart from
+      changes of behavior.
+
+operations:
+  apply:
+    guidance:
+      - >-
+        Stop and ask when a task needs a new public API, another model
+        of ownership or a new architecture.
+      - >-
+        Follow docs/measuring.md before timing anything; a confirmed
+        excess over a threshold stops the work for a discussion.
+  archive:
+    guidance:
+      - >-
+        Write outcome.md in the change first - what was measured, with
+        the ids of the runs; where the work departed from the design and
+        why; findings; what is left.
+      - >-
+        Bring openspec/specs/<capability>/design.md of each touched
+        capability up to date with the decisions that change how it is
+        built.
+      - Replace every "Verified by" that still says pending.
+      - >-
+        The maintainer approves the outcome before the change is
+        archived.
