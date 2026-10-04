@@ -1548,7 +1548,9 @@ fn the_mark_entry_points_leave_marked_records_out() -> Result<()> {
             let mut cursor = 0;
             let mut out = [0; 7];
             let mut found = Vec::new();
-            loop {
+            // A call gives at least a record until the walk is over: a
+            // cursor that stood still fails here, not hangs.
+            for _ in 0..=NROWS {
                 let mut count = 0;
                 let code = tess_table_next_unmarked(
                     table.ptr(),
@@ -1567,6 +1569,7 @@ fn the_mark_entry_points_leave_marked_records_out() -> Result<()> {
                 }
                 found.extend_from_slice(&out[..count as usize]);
             }
+            panic!("the walk is not over after {NROWS} calls");
         };
         for shared in [false, true] {
             let mut marks = vec![vec![0_u64; words]; table.chunks.len()];
