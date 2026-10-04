@@ -7,7 +7,7 @@
       `openspec/specs/spill-format/design.md`, the text unchanged, under
       a head of files, tests and history. Check: every moved line is in
       the new file in its order; `.github/scripts/check-specs.sh`
-- [ ] 1.3 Take the definitions out of `design.md`, now that the spec
+- [x] 1.3 Take the definitions out of `design.md`, now that the spec
       holds them, and bring its statements in line with the spec. Check:
       `.github/scripts/check-specs.sh`
 - [ ] 1.4 Write `outcome.md` and archive the change, which makes

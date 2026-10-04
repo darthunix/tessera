@@ -2314,7 +2314,8 @@ When the rows in memory, what sorting them takes and a chunk more pass
 is freed for the next. `TessRows` then takes chunks of an eighth of
 `work_mem`, not of 1 MB, so that runs fill it evenly. Every key of an
 external sort's items has its bit for NULL, so that every run's items
-have one width. A run is a set of its own ([spill.md](spill.md), "Files")
+have one width. A run is a set of its own (the capability
+[spill-format](../openspec/specs/spill-format/design.md), "The files of a set")
 of block pairs: a block of the by-reference values of some rows, one
 after another, and a chunk of columns (`TESS_SPILL_COLUMNS`) of those
 rows: a lane of the output columns' NULL bits per 64 stored words, a lane per output column,
