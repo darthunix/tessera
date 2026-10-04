@@ -171,18 +171,18 @@ done
 
 # A line of more than 80 columns: allowed in a code block, and where
 # what follows the indent or the list marker is one word, a link or a
-# path, which cannot be broken.
+# path, which cannot be broken. Columns are characters, not bytes: a
+# dash or a letter outside ASCII is one.
 git ls-files -- AGENTS.md CONTRIBUTING.md 'openspec/*.md' |
     while read -r document; do
-    awk '
-        /^[ \t]*(```|~~~)/ { fence = !fence; next }
-        fence { next }
-        length($0) > 80 {
-            rest = $0
-            sub(/^[ \t]*([-*+]|[0-9]+\.)?[ \t]*/, "", rest)
-            if (rest ~ /[ \t]/)
-                printf "%s:%d: a line of %d columns\n", FILENAME, FNR, length($0)
-        }
+    perl -CSD -ne '
+        if (/^\s*(```|~~~)/) { $fence = !$fence; next }
+        next if $fence;
+        chomp;
+        next unless length($_) > 80;
+        (my $rest = $_) =~ s/^\s*(?:[-*+]|\d+\.)?\s*//;
+        printf "%s:%d: a line of %d columns\n", $ARGV, $., length($_)
+            if $rest =~ /\s/;
     ' "$document"
 done > "$list"
 while read -r wide; do
