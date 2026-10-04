@@ -234,6 +234,15 @@ draw new cases on every run; `PROPTEST_CASES=10000` runs more of them and
 one and is kept in `<test file>.proptest-regressions`, committed so that
 every later run replays it first.
 
+## Contributing
+
+Changes to Tessera beyond a small fix go through
+[OpenSpec](https://github.com/Fission-AI/OpenSpec): `openspec/specs/`
+says what each part promises and how it is built, and a piece of work
+starts as a change under `openspec/changes/`.
+[CONTRIBUTING.md](CONTRIBUTING.md) holds the setup and the rules of
+work, for people and coding agents alike.
+
 ## The name
 
 A tessera is one of the small tiles of an ancient mosaic: small,
