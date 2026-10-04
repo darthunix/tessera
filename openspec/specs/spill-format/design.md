@@ -53,26 +53,26 @@ A node spills chunks of its table whole, never rows one by one:
   plus one and the byte in it, not an address, so the words mean the same
   after the chunk has been on disk; a reading node sets the chunk's base
   in its array of value bases under the chunk's number;
-- a chunk of **columns**: a join's outer rows that wait for their
-  partition (`crates/tessera-spill/src/columns.rs`, `tessera/spill.h`).
-  They are never linked or probed as records, only written and read back
-  once, so they are kept as a header and then a lane per column of the
-  chunk's capacity: the rows' NULL bits, a lane per 64 stored words (bit
-  `w % 64` of lane `w / 64` for word `w`), then a word per stored column (a
-  by-value Datum, or a value's reference as above; 0 for a NULL). A batch
-  appends to its partitions' chunks straight from its columns
+- a chunk of **columns**: rows that only wait on disk — a join's outer
+  rows that wait for their partition, the rows a grouping sets aside for
+  a partition, the rows of a run of the external sort
+  (`crates/tessera-spill/src/columns.rs`, `tessera/spill.h`). They are
+  never linked or probed as records, only written and read back once, so
+  they are kept by column: lanes of NULL bits and a lane for each stored
+  word (the spec, "A chunk of columns in memory"). A batch appends to
+  its partitions' chunks straight from its columns
   (`tess_spill_columns_append_partitioned`), and a batch read back takes
   its columns straight from the lanes, a window of 64 rows at a time: a
-  by-value word where it lies, a reference turned into a pointer. On disk
-  each lane is stored for the chunk's rows only, by frame of reference:
-  the lane's least value and each value's difference from it in 1, 2, 4
-  or 8 bytes, or none when all are equal. The keys are among the stored
-  columns, and their hash is computed again when the rows are probed,
-  which costs little. Before this (plan item 5.12e) the outer rows were
-  records too, and went from columns to records, to lanes when packed,
-  back to records and back to columns: a spilled join at a `work_mem` of
-  1 MB took 45 to 55 ms instead of 67 to 83, and wrote 11.6 MB instead of
-  29.5.
+  by-value word where it lies, a reference turned into a pointer. On
+  disk a lane is stored for the chunk's rows only, as differences from
+  its least value (the spec, "A chunk of columns on disk"): the values
+  of a column are close to each other far more often than they are
+  small. The keys are among the stored columns, and their hash is
+  computed again when the rows are probed, which costs little. Before
+  this (plan item 5.12e) the outer rows were records too, and went from
+  columns to records, to lanes when packed, back to records and back to
+  columns: a spilled join at a `work_mem` of 1 MB took 45 to 55 ms
+  instead of 67 to 83, and wrote 11.6 MB instead of 29.5.
 
 Reading a chunk back gives a chunk that is ready at once: no row is
 allocated, and `tess_table_link` or `tess_table_link_grouped` puts its
@@ -87,10 +87,10 @@ column takes 40 bytes for 12 of content. A chunk of records therefore
 goes to disk packed when that makes it shorter (`tess_spill_pack`,
 `crates/tessera-spill/src/pack.rs`): its records seen as lanes of 4
 bytes, the same lane of every record together, each lane stored at the
-width its values need in this chunk: nothing when all are 0, one word
-when all are equal, or 1, 2 or 4 bytes each; the next-record lane is
-dropped. Reading unpacks it into the caller's buffer, a chunk as it was
-but for next-record references of 0, as a chunk not yet linked has them.
+width its values need in this chunk, and the next-record lane dropped
+(the spec, "A packed chunk of records", has the codes). Reading unpacks
+it into the caller's buffer, a chunk as it was but for next-record
+references of 0, as a chunk not yet linked has them.
 Nothing depends on the column types: the widths follow the values.
 Packing runs at 7 to 10 GB/s and unpacking at 12 to 14 GB/s on one
 core; at the data multiplier 10 of the bench/pg spill family they cut the
@@ -100,43 +100,37 @@ core's) and the queries' time by up to 13 %, where general compression
 
 ## The block header
 
-Each chunk goes to disk as a header of `tess_spill_header_size()` bytes
-(48) and then the chunk's bytes (`include/tessera/spill.h`,
-`crates/tessera-spill`):
+The fields of the header and what a reader checks are in the spec
+("Block header layout", "Kinds of block and their lengths", "Damaged and
+foreign blocks are refused"). The reasons behind them:
 
-```
- 0  magic "TESSSPIL"    8  version = 2    12  kind (1 records, 2 values)
-16  chunk number       20  partition     24  level (below 32)
-28  packed length (bytes on disk of a packed chunk of records, 0 for a body as it is)
-32  table fingerprint  40  body length (a multiple of 8; at least 8 for records)
-```
-
-`tess_spill_header_read` checks the magic, the version, the kind, the
-packed length (records only, a multiple of 8 below the body length), the
-body length against the most the reader accepts, and
-the fingerprint against the reading table's (`tess_table_fingerprint`: a
-hash of the table format, the key kinds and the record and payload
-sizes), so that a block of another table or a damaged file is an error
-status, never a record read the wrong way; the records themselves are
-then checked as any chunk is, when the table attaches them. The header is
-in native byte order and carries no checksum: temporary files are read by
-the query that wrote them, on the same machine, as PostgreSQL's are.
+- **The fingerprint.** `tess_table_fingerprint` is a hash of the table
+  format, the key kinds and the record and payload sizes. With it a block
+  of another table or a damaged file is an error status, never a record
+  read the wrong way. The records themselves are then checked as any
+  chunk is, when the table attaches them.
+- **No checksum, native byte order.** Temporary files are read by the
+  query that wrote them, on the same machine, as PostgreSQL's are.
+- **Two lengths.** The body length is the chunk's size in memory, which
+  a reader allocates; the packed length is what lies on disk when the
+  body is stored packed. A reader therefore knows both before it reads
+  the body.
 
 ## The files of a set
 
-The runtime library writes and reads the blocks
-(`runtime/spill.c`, declared in `tessera/runtime_spill.h`). A node makes a
-`TessSpill` per level of partitioning, with the table's fingerprint, the
-longest body it accepts, the number of partitions and the bytes of its
-write buffer (`TESS_SPILL_BUFFER_LEN`: a sixteenth of `hash_mem`, 32 to
-256 kB). A set writes one file, made on its first block: the blocks of
-every partition go into it one after another, through the write buffer,
-and the set keeps each partition's list of blocks, where each starts and
-the bytes it takes. A block larger than the buffer is written as it is.
-BufFile, a file per partition written in pieces of 8 kB, is not used:
-one file through a larger buffer took 6–9 % off a spilled join (plan
-item 5.12). A buffer larger still gains little, since a write costs with
-its bytes more than with its calls.
+The runtime library writes and reads the blocks (`runtime/spill.c`,
+declared in `tessera/runtime_spill.h`). A node makes a `TessSpill` per
+level of partitioning, with the table's fingerprint, the longest body it
+accepts, the number of partitions and the bytes of its write buffer
+(`TESS_SPILL_BUFFER_LEN`: a sixteenth of `hash_mem`, from a block of
+PostgreSQL, 8 kB, to 256 kB). A set writes one file, made on its first
+block: the blocks of every partition go into it one after another,
+through the write buffer, and the set keeps each partition's list of
+blocks, where each starts and the bytes it takes. A block larger than
+the buffer is written as it is. BufFile, a file per partition written in
+pieces of 8 kB, is not used: one file through a larger buffer took 6–9 %
+off a spilled join (plan item 5.12). A buffer larger still gains little,
+since a write costs with its bytes more than with its calls.
 
 - A **serial** set writes a PostgreSQL temporary file
   (`OpenTemporaryFile`): the query's temporary tablespaces are looked up
@@ -147,10 +141,11 @@ its bytes more than with its calls.
   in the node's chunk of the query's shared memory
   (`tess_spill_shared_init` in the leader, `tess_spill_shared_attach` in a
   worker), named `<name>.<participant>`. `tess_spill_finish` writes the
-  lists at the file's end, a count of blocks per partition, then the
-  blocks by partition, then a trailer that says where they start; every
-  participant opens any participant's file once its writer finished the
-  set, and reads its partition's list from there. The files are deleted
+  lists of the blocks and a trailer at the file's end (the spec, "A
+  shared set"), since the writer's memory, where a serial set keeps the
+  lists, is not the readers'; every participant opens any participant's
+  file once its writer finished the set, and reads its partition's list
+  from there. The files are deleted
   when the last participant detaches the segment.
 
 A set first writes: `tess_spill_write` puts a header and the body into the
