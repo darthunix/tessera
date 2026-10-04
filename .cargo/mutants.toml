@@ -47,4 +47,8 @@ test_package = [
     "tessera-spill",
 ]
 
+# Cargo.toml's profile of the tests without debug information: a mutant's
+# build takes 14 s for 22 on a CI runner.
+profile = "mutants"
+
 additional_cargo_test_args = ["--locked"]

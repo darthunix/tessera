@@ -63,3 +63,10 @@ panic = "unwind"
 
 [profile.release]
 panic = "unwind"
+
+# The builds of cargo-mutants (.cargo/mutants.toml): the tests' profile
+# without debug information, which a mutant's verdict does not read and
+# every mutant's build and link would write.
+[profile.mutants]
+inherits = "test"
+debug = "none"
