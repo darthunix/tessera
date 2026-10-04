@@ -358,10 +358,19 @@ mod tests {
         }
     }
 
-    /// A batch of up to 150 rows and up to 70 columns (two lanes of NULL
-    /// bits), by value or with bytes, a selection, a capacity and a budget.
-    fn batches() -> impl Strategy<Value = (Batch, Vec<bool>, usize, usize, usize)> {
-        (1..150_usize, 1..70_usize, any::<bool>()).prop_flat_map(|(nrows, ncolumns, by_value)| {
+    /// A batch by value or with bytes, a selection, a capacity the batch
+    /// often does not fit, and a flag and a number the test makes the budget
+    /// of. A batch is long, up to 150 rows (three words of a mask) of a few
+    /// columns, or wide, a few rows of 60 to 70 columns (the second lane of
+    /// NULL bits). Batches long and wide at once took eight times the
+    /// cells, 9 s of every mutant's run, and caught no mutant more
+    /// (plan 9.21).
+    fn batches() -> impl Strategy<Value = (Batch, Vec<bool>, usize, usize, (bool, usize))> {
+        let shapes = prop_oneof![
+            3 => (1..150_usize, 1..6_usize),
+            1 => (1..12_usize, 60..70_usize),
+        ];
+        (shapes, any::<bool>()).prop_flat_map(|((nrows, ncolumns), by_value)| {
             let cell = if by_value {
                 prop_oneof![1 => Just(Cell::Null), 4 => any::<u64>().prop_map(Cell::Word)].boxed()
             } else {
@@ -376,9 +385,9 @@ mod tests {
                 proptest::collection::vec(proptest::collection::vec(cell, nrows), ncolumns)
                     .prop_map(move |columns| Batch { columns, by_value }),
                 proptest::collection::vec(any::<bool>(), nrows),
-                1..200_usize,
+                1..nrows + nrows / 3 + 2,
                 0..3_usize,
-                0..4000_usize,
+                (any::<bool>(), 0..8 * nrows * ncolumns + 64),
             )
         })
     }
@@ -387,9 +396,28 @@ mod tests {
     fn rows_go_in_order_until_the_chunk_or_the_values_fill() {
         property(
             batches(),
-            |(batch, selected, capacity, extra, budget)| -> Result<()> {
+            |(batch, selected, capacity, extra, (exact, room))| -> Result<()> {
                 let nrows = selected.len();
                 let ncolumns = batch.columns.len();
+                let take = |row: usize| -> usize {
+                    batch
+                        .columns
+                        .iter()
+                        .map(|column| match &column[row] {
+                            Cell::Bytes(value) => value.len().next_multiple_of(8),
+                            _ => 0,
+                        })
+                        .sum()
+                };
+                // Half the cases have the budget the first of the selected
+                // rows fill to the byte.
+                let budget = if exact {
+                    let chosen: Vec<usize> = (0..nrows).filter(|&row| selected[row]).collect();
+                    let fit = &chosen[..room % (chosen.len() + 1)];
+                    fit.iter().map(|&row| take(row)).sum()
+                } else {
+                    room
+                };
                 let words = ncolumns + extra;
                 let mut chunk = vec![0_u8; columns::size(capacity, words)];
                 columns::init(&mut chunk, words)?;
@@ -406,14 +434,7 @@ mod tests {
                 let (mut place, mut bytes, mut need) = (before, 0, 0);
                 let mut went = vec![false; nrows];
                 for row in (0..nrows).filter(|&row| selected[row]) {
-                    let take: usize = batch
-                        .columns
-                        .iter()
-                        .map(|column| match &column[row] {
-                            Cell::Bytes(value) => value.len().next_multiple_of(8),
-                            _ => 0,
-                        })
-                        .sum();
+                    let take = take(row);
                     if place == capacity || bytes + take > budget {
                         need = take;
                         break;
