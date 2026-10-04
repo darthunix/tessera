@@ -1,3 +1,11 @@
+  > Frozen on 2026-10-04: no new entries. This log records how the code
+  > came to be, up to item 9.21. What each part of the system promises
+  > and how it is built is in openspec/specs/; the queue of work is
+  > openspec/roadmap.md; INDEX.md beside this file lists the items.
+  >
+  > Журнал заморожен 2026-10-04: новых записей нет. Очередь работ —
+  > openspec/roadmap.md, указатель пунктов — INDEX.md рядом с этим файлом.
+
   # Создание Tessera и поэтапный перенос из pg_batch
 
   ## Кратко
