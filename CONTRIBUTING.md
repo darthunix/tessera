@@ -46,9 +46,11 @@ Read in this order, and stop when the question is answered.
 4. `openspec/changes/`: work in progress, each change with its proposal,
    design, tasks and spec changes. `openspec/changes/archive/`: finished
    changes with their outcomes.
-5. [docs/plan/](docs/plan/README.md): the working log in Russian of how
-   the code came to be. Its open items are the queue of work until
-   `openspec/roadmap.md` takes them over.
+5. [openspec/roadmap.md](openspec/roadmap.md): the queue of work, what
+   is not built yet and in which order, and what was decided against.
+6. [docs/plan/](docs/plan/README.md): the working log in Russian of how
+   the code came to be, frozen on 2026-10-04. Its
+   [index](docs/plan/INDEX.md) lists the items by part of the system.
 
 Where a spec and another text disagree, the spec is right. Where a spec
 and the code or a test disagree, do not choose silently: see "Stop and
@@ -105,7 +107,7 @@ is required when
 Anything else is an ordinary pull request. The maintainer approves
 twice: the proposal before any code, and `outcome.md` before the change
 is archived. A discussion of what a feature would take ends in an edit
-of a change or of the queue, not in code.
+of a change or of the roadmap, not in code.
 
 Existing code gets its spec the same way, one capability in a pull
 request, at most ten requirements, with the text of its design moved to
