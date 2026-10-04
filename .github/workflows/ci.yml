@@ -3,7 +3,8 @@
 # with every regression suite against the revisions in postgres.env, with the
 # release kernels library and, on Linux, also with the debug one, whose
 # overflow checks and debug assertions the suites then exercise.
-# The loom model of the hash table runs as a job of its own.
+# The loom model of the hash table runs as a job of its own, and so does
+# the check of openspec/ against the repository.
 # Performance is measured locally (crates/tessera-capi/benches, bench/pg).
 name: CI
 
@@ -30,6 +31,24 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Format, Clippy, debug and release tests
         run: make rust-check
+
+  # openspec/ against the repository (CONTRIBUTING.md, "Specs"): the
+  # form of every spec and change, the test each scenario names, the
+  # files each design names, the outcome of each archived change.
+  specs:
+    name: Specs (ubuntu-24.04)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: The OpenSpec CLI
+        run: npm install --global @fission-ai/openspec@1.13.2
+      - name: The specs against the repository
+        env:
+          DO_NOT_TRACK: "1"
+        run: .github/scripts/check-specs.sh
 
   # The loom model of the hash table's concurrent protocol (plan 9.5): the
   # bucket heads, the shared Bloom filter, the build phases and the shared
