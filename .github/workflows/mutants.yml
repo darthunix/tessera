@@ -1,9 +1,11 @@
-# Mutation testing of the Rust crates (plan 9.9, .cargo/mutants.toml).
-# A pull request that changes the crates gets the mutants of its changed
-# lines in three shards; a run by hand (workflow_dispatch) takes every
-# mutant in eight. A missed mutant fails the job: a change the tests do not notice.
-# A timeout or a mutant that does not build does not. The runners are
-# arm64 macOS, where the NEON kernels compile.
+# Mutation testing of the Rust crates (plans 9.9 and 9.21,
+# .cargo/mutants.toml). A pull request that changes the crates gets the
+# mutants of its changed lines in six shards; a run by hand
+# (workflow_dispatch) takes every mutant in eight. A missed mutant fails
+# the job: a change the tests do not notice. A timeout or a mutant that
+# does not build does not. The runners are arm64 Linux: the NEON kernels
+# compile on any aarch64, a runner has four cores and 16 GB to macOS's
+# three and 7, and an account runs twenty of them at once to macOS's five.
 name: Mutants
 
 on:
@@ -19,20 +21,18 @@ concurrency:
 
 jobs:
   diff:
-    name: Mutants of the changed lines, shard ${{ matrix.shard }} of 3
+    name: Mutants of the changed lines, shard ${{ matrix.shard }} of 6
     if: github.event_name == 'pull_request'
-    runs-on: macos-15
-    timeout-minutes: 60
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
     strategy:
       fail-fast: false
-      # A mutant takes about a minute (its build and every test), a loop
-      # made endless 82 s: the 136 mutants of plan 9.16 took an hour on
-      # one runner. Three shards take three of the account's five macOS
-      # runners, leaving two for CI: 25 minutes each for plan 9.16, 30 to
-      # 40 for the 270 mutants of plan 9.17, whose second shard ran out of
-      # 40 minutes a second after its last mutant was caught.
+      # A mutant takes 20 s, its build and the tests that catch it, two
+      # at once: the 268 mutants of plan 9.17 took 7 to 10 minutes a
+      # shard, 30 to 40 on three macOS runners. Six shards leave fourteen
+      # of the account's twenty Linux runners to CI.
       matrix:
-        shard: [0, 1, 2]
+        shard: [0, 1, 2, 3, 4, 5]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -49,10 +49,14 @@ jobs:
           git diff "origin/${{ github.base_ref }}...HEAD" -- crates > target/pr.diff
           wc -l target/pr.diff
       - name: Mutants in the changed lines
+        # cargo-mutants copies the tree for each of its jobs and builds
+        # there: in memory, half a gigabyte of the runner's sixteen.
+        env:
+          TMPDIR: /dev/shm
         run: |
           # 2: a mutant was missed; 3: only timeouts; 0: none missed.
           code=0
-          cargo mutants --in-diff target/pr.diff --shard ${{ matrix.shard }}/3 --no-shuffle --jobs 2 || code=$?
+          cargo mutants --in-diff target/pr.diff --shard ${{ matrix.shard }}/6 --no-shuffle --jobs 2 || code=$?
           test "$code" -eq 0 || test "$code" -eq 3
       - name: The mutants' outcomes
         if: always()
@@ -65,14 +69,14 @@ jobs:
   all:
     name: Mutants, shard ${{ matrix.shard }} of 8
     if: github.event_name == 'workflow_dispatch'
-    runs-on: macos-15
+    runs-on: ubuntu-24.04-arm
     timeout-minutes: 300
     strategy:
       fail-fast: false
-      # A shard takes two to three hours on a macOS runner, and an account
-      # gets five of them at once: three shards leave two for the CI of
-      # pull requests, which otherwise waits behind the run for hours.
-      max-parallel: 3
+      # Six shards at once, as a pull request's: the CI of pull requests
+      # keeps its fourteen runners while the run goes, about an hour a
+      # shard by a mutant's 20 s.
+      max-parallel: 6
       matrix:
         shard: [0, 1, 2, 3, 4, 5, 6, 7]
     steps:
@@ -84,6 +88,8 @@ jobs:
         with:
           tool: cargo-mutants
       - name: Every mutant of the shard
+        env:
+          TMPDIR: /dev/shm
         run: |
           code=0
           cargo mutants --shard ${{ matrix.shard }}/8 --no-shuffle --jobs 2 || code=$?
