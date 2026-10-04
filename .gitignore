@@ -19,6 +19,15 @@
 regression.diffs
 regression.out
 
+# The workflow skills OpenSpec writes for a coding agent
+# (`openspec init --tools ...`, CONTRIBUTING.md): made in each clone,
+# not kept. Codex reads its skills from .agents/, Claude Code from
+# .claude/.
+/.agents/skills/.openspec-target
+/.agents/skills/openspec-*/
+/.claude/commands/opsx/
+/.claude/skills/openspec-*/
+
 # Editor and operating system files
 .DS_Store
 .idea/
