@@ -2,7 +2,7 @@
 
 - [x] 1.1 Write the proposal, the spec, the design and the tasks of this
       change. Check: `.github/scripts/check-specs.sh`
-- [ ] 1.2 Move the sections "What is written", "The block header" and
+- [x] 1.2 Move the sections "What is written", "The block header" and
       "Files" of `docs/spill.md` to
       `openspec/specs/spill-format/design.md`, the text unchanged, under
       a head of files, tests and history. Check: every moved line is in
