@@ -212,15 +212,10 @@ bytes it takes. To read a partition, a reader goes through its list.
 
 ## A block
 
-```
- ┌───────────────── header, 48 bytes ─────────────────┬──── body ──────┐
- │ magic   version   kind   number   partition  level │ the chunk, or  │
- │ packed length     fingerprint     body length      │ its packed     │
- │                                                    │ form           │
- └────────────────────────────────────────────────────┴────────────────┘
-```
-
-Each field of the header helps the reader.
+A block is a header of 48 bytes and then the body. The spec draws the
+header, with the place and the size of every field
+([spec.md](spec.md), "Block header layout"). This section says what
+each field is for.
 
 **magic and version.** They say that these bytes are a block of this
 format, and which version of the format.
@@ -277,19 +272,10 @@ A hash table keeps its records in chunks. A chunk starts with 8 bytes
 that say how many bytes of the chunk are used. Then the records follow.
 All records of a table have the same length.
 
-```
- a chunk of records
- ┌────────┬──────────┬──────────┬──────────┬─────┐
- │ used   │ record 0 │ record 1 │ record 2 │  …  │
- │ 8 bytes│          │          │          │     │
- └────────┴──────────┴──────────┴──────────┴─────┘
-
- a record
- ┌──────┬──────┬───────────┬──────┬─────────┬─────┬─────────┐
- │ hash │ next │ NULL bits │ len  │ key 0   │  …  │ payload │
- │  4   │  4   │    4      │  4   │   8     │     │         │
- └──────┴──────┴───────────┴──────┴─────────┴─────┴─────────┘
-```
+A record starts with four fields of 4 bytes each: its hash, the link
+`next`, the NULL bits of its keys, and its length `len`. Then come the
+keys, 8 bytes each, and then the payload.
+[docs/table.md](../../../docs/table.md) draws a chunk and a record.
 
 A record is made for fast search, not for storage. On disk much of it
 is waste:
@@ -391,22 +377,10 @@ It is used for the rows that only wait on disk (goal 3).
 
 In memory, a chunk of columns has a small header and then lanes. A lane
 is an array with one 8-byte word for each row. Row number `i` is word
-`i` of every lane.
-
-```
- ┌──────────────────── header, 16 bytes ─────────────────────┐
- │ rows       capacity in rows   words in a row   "COLS"     │
- ├───────────────────────────────────────────────────────────┤
- │ lanes of NULL bits                                        │
- │   one lane for every 64 words of a row, at least one      │
- │   bit w % 64 of a row's word in lane w / 64 is 1          │
- │   when word w of that row is NULL                         │
- ├───────────────────────────────────────────────────────────┤
- │ lane of word 0:   row 0 │ row 1 │ row 2 │ …  │ free       │
- │ lane of word 1:   row 0 │ row 1 │ row 2 │ …  │ free       │
- │ …                                                         │
- └───────────────────────────────────────────────────────────┘
-```
+`i` of every lane. The first lanes hold the NULL bits of the rows. After
+them there is one lane for each word of a row. The spec draws this
+layout and says which bit marks a NULL ([spec.md](spec.md), "A chunk of
+columns in memory").
 
 A word of a row is one of three things: a value that fits in 8 bytes,
 a reference to a long value, or 0 for a NULL.
@@ -470,24 +444,9 @@ its own file, named `<name>.<participant>`. When a participant has
 finished writing, any participant can read its file. But a reader
 cannot see the memory of the writer, where the lists of blocks are. So
 when a participant finishes a shared set, it writes the lists at the
-end of its file, and then a trailer that says where the lists start:
-
-```
- the file of one participant
- byte 0
- ┌───────┬───────┬─────┬────────────────┬──────────────────┬──────────┐
- │ block │ block │  …  │ for each       │ for each block:  │ trailer  │
- │       │       │     │ partition: the │ where it starts, │ 4 words  │
- │       │       │     │ number of its  │ its size         │ of 8     │
- │       │       │     │ blocks         │                  │ bytes    │
- └───────┴───────┴─────┴────────────────┴──────────────────┴──────────┘
-                        ◄── written when the participant finishes ───►
-
- the trailer
- ┌───────┬───────────────────────┬──────────────────────┬─────────────┐
- │ magic │ where the lists start │ number of partitions │ fingerprint │
- └───────┴───────────────────────┴──────────────────────┴─────────────┘
-```
+end of its file, and then a trailer that says where the lists start.
+The spec draws the end of such a file and the trailer
+([spec.md](spec.md), "A shared set").
 
 A reader of a shared file first reads the trailer at the end of the
 file. The trailer says where the lists start. The reader then reads the
