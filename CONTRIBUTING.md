@@ -44,8 +44,8 @@ Read in this order, and stop when the question is answered.
    sources) and, until they move to their capabilities, the design of
    the nodes, the hash table, the spill and the costs.
 4. `openspec/changes/`: work in progress, each change with its proposal,
-   design, tasks and spec changes. `openspec/changes/archive/`: finished
-   changes with their outcomes.
+   design, tasks and spec changes. A finished change leaves no folder
+   behind: see "Closing a change".
 5. [openspec/roadmap.md](openspec/roadmap.md): the queue of work, what
    is not built yet and in which order, and what was decided against.
 6. [docs/plan/](docs/plan/README.md): the working log in Russian of how
@@ -105,15 +105,38 @@ is required when
 - the work is larger than one pull request.
 
 Anything else is an ordinary pull request. The maintainer approves
-twice: the proposal before any code, and `outcome.md` before the change
-is archived. A discussion of what a feature would take ends in an edit
-of a change or of the roadmap, not in code.
+twice: the proposal before any code, and the outcome before the change
+is closed. A discussion of what a feature would take ends in an edit of
+a change or of the roadmap, not in code.
 
 Existing code gets its spec the same way, one capability in a pull
 request, at most ten requirements, with the text of its design moved to
 `design.md` in a commit of its own. Such a pull request ends with
 "Decisions needed": every disagreement of the documents, the code and
 the tests, and every promise without a test.
+
+## Closing a change
+
+A finished change is not kept in the tree: git has its history, and a
+second copy would only go stale. The commit that closes a change puts
+what must outlive it in its place and deletes its folder.
+
+- The requirements go to `openspec/specs/`: `openspec archive <name>`
+  writes them there. The folder it makes under
+  `openspec/changes/archive/` is deleted in the same commit.
+- What was decided about how a part is built goes to that part's
+  `design.md`, with a line under `## History` that names the change and
+  its pull request.
+- What is left undone becomes an entry of `openspec/roadmap.md`, and a
+  finding the maintainer has not decided on goes to its list "Not
+  placed"; the change's own entry leaves the roadmap.
+- A full run of a benchmark is kept as
+  [docs/measuring.md](docs/measuring.md) says.
+
+The outcome the maintainer approves is the description of the pull
+request that closes the change: what was done, what was measured, with
+the ids of the runs, where the work departed from the design and why,
+the findings, and what is left.
 
 ## Specs
 
@@ -152,8 +175,9 @@ longer. `check-specs.sh` checks this file, `AGENTS.md` and `openspec/`.
   aside, says in its message why it is not split.
 - The message says why the change is made and reads on its own; lines
   of 72 characters; a `Validation:` paragraph lists the checks run, as
-  commands, without numbers. It may cite the change that records the
-  reasons at length; older commits cite items of the
+  commands, without numbers. It may name the OpenSpec change it belongs
+  to, whose proposal and design git keeps after the change is closed;
+  older commits cite items of the
   [working plan](docs/plan/README.md). No attribution lines of tools or
   agents in messages or pull requests.
 - A commit brings with it: comments on new public types and functions

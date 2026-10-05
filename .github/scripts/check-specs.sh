@@ -10,7 +10,8 @@
 # 3. Every capability has spec.md and design.md, and each path under
 #    "## Files" of design.md is in the repository. A design.md without a
 #    spec.md needs an open change that adds the capability.
-# 4. Every archived change has outcome.md.
+# 4. No closed change is kept: nothing is tracked under
+#    openspec/changes/archive/ (CONTRIBUTING.md, "Closing a change").
 # 5. No line of AGENTS.md, of CONTRIBUTING.md or of the Markdown under
 #    openspec/ runs past 80 columns, but in a code block or where it
 #    cannot be broken.
@@ -163,11 +164,9 @@ $files
 EOF
 done
 
-for directory in openspec/changes/archive/*/; do
-    test -d "$directory" || continue
-    test -f "$directory/outcome.md" ||
-        error "$(basename "$directory") is archived without outcome.md"
-done
+if tracked openspec/changes/archive; then
+    error "openspec/changes/archive/ keeps a closed change: delete it"
+fi
 
 # A line of more than 80 columns: allowed in a code block, and where
 # what follows the indent or the list marker is one word, a link or a
