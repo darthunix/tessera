@@ -284,6 +284,7 @@ tessera_test_spill_shared(PG_FUNCTION_ARGS)
 	SharedFileSet *shared = dsm_segment_address(segment);
 	TessSpill  *one;
 	TessSpill  *two;
+	TessSpill  *none;
 	TessSpillReader *early;
 	TessSpillReader *late;
 	TessSpillHeader header;
@@ -302,6 +303,13 @@ tessera_test_spill_shared(PG_FUNCTION_ARGS)
 			elog(ERROR, "shared partition %d reads back wrong", partition);
 	if (!seek_block(two, 0, &first[2]) || !seek_block(one, 1, &second[0]))
 		elog(ERROR, "a shared block reads back wrong at its position");
+	/* A participant that wrote no block has no file: it opens as no reader. */
+	none = make_spill(shared, 2, FINGERPRINT);
+	tess_spill_finish(none);
+	for (int partition = 0; partition < 4; partition++)
+		if (tess_spill_open(one, 2, partition) != NULL)
+			elog(ERROR, "a participant without blocks has partition %d", partition);
+	tess_spill_free(none);
 	/* Two readers of one file keep their own positions. */
 	early = tess_spill_open(one, 1, 1);
 	late = tess_spill_open(two, 1, 1);
