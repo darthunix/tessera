@@ -22,6 +22,8 @@ PG_FUNCTION_INFO_V1(tessera_test_spill_error);
 PG_FUNCTION_INFO_V1(tessera_test_spill_bytes);
 PG_FUNCTION_INFO_V1(tessera_test_spill_lanes);
 PG_FUNCTION_INFO_V1(tessera_test_spill_memory);
+PG_FUNCTION_INFO_V1(tessera_test_spill_shared_bytes);
+PG_FUNCTION_INFO_V1(tessera_test_spill_tablespace);
 
 #define FINGERPRINT UINT64CONST(0x5445535354455354)
 #define MAX_LEN (2 * 1024 * 1024)
@@ -655,25 +657,27 @@ tessera_test_spill_error(PG_FUNCTION_ARGS)
 			{
 				/*
 				 * A block that the list says is longer than the longest a
-				 * set takes, though it ends among the file's blocks: three
-				 * blocks of 1 MB, and an entry of more than the set's 2 MB.
+				 * set takes, though it ends among the file's blocks: the
+				 * one block of partition 0, with 3 MB of another partition
+				 * after it, and an entry of more than the set's 2 MB.
 				 */
-				Block		long_blocks[] = {
-					{0, TESS_SPILL_VALUES, 0, 1024 * 1024},
-					{0, TESS_SPILL_VALUES, 1, 1024 * 1024},
-					{0, TESS_SPILL_VALUES, 2, 1024 * 1024},
+				Block		blocks[] = {
+					{0, TESS_SPILL_RECORDS, 0, 64},
+					{1, TESS_SPILL_VALUES, 0, 1024 * 1024},
+					{1, TESS_SPILL_VALUES, 1, 1024 * 1024},
+					{1, TESS_SPILL_VALUES, 2, 1024 * 1024},
 				};
 
 				segment = dsm_create(sizeof(SharedFileSet), 0);
 				shared = dsm_segment_address(segment);
 				tess_spill_shared_init(shared, segment);
 				other = make_spill(shared, 0, FINGERPRINT);
-				write_blocks(other, long_blocks, lengthof(long_blocks));
+				write_blocks(other, blocks, lengthof(blocks));
 				tess_spill_finish(other);
 				other = make_spill(shared, 1, FINGERPRINT);
 				tess_spill_finish(other);
 				word8 = MAX_LEN + 128 * 1024;
-				damage_shared_file(shared, 0, -(32 + 3 * 16) + 8, &word8, sizeof(word8));
+				damage_shared_file(shared, 0, -(32 + 4 * 16) + 8, &word8, sizeof(word8));
 				tess_spill_open(other, 0, 0);
 			}
 			break;
@@ -682,6 +686,49 @@ tessera_test_spill_error(PG_FUNCTION_ARGS)
 			word8 = 2;
 			damage_shared_file(shared, 0, -(32 + 16 + 4 * 8) + 3 * 8, &word8, sizeof(word8));
 			tess_spill_open(other, 0, 0);
+			break;
+		case 26:
+			{
+				/*
+				 * A block that the list says runs into the next block of
+				 * its partition: two blocks, and the first entry 8 bytes
+				 * too long.
+				 */
+				Block		pair[] = {
+					{0, TESS_SPILL_RECORDS, 0, 64},
+					{0, TESS_SPILL_RECORDS, 1, 64},
+				};
+
+				segment = dsm_create(sizeof(SharedFileSet), 0);
+				shared = dsm_segment_address(segment);
+				tess_spill_shared_init(shared, segment);
+				other = make_spill(shared, 0, FINGERPRINT);
+				write_blocks(other, pair, lengthof(pair));
+				tess_spill_finish(other);
+				other = make_spill(shared, 1, FINGERPRINT);
+				tess_spill_finish(other);
+				word8 = TESS_SPILL_HEADER_SIZE + 64 + 8;
+				damage_shared_file(shared, 0, -(32 + 2 * 16) + 8, &word8, sizeof(word8));
+				tess_spill_open(other, 0, 0);
+			}
+			break;
+		case 27:
+			{
+				/*
+				 * A file opened before its writer finished: a block longer
+				 * than the write buffer is on disk, the lists are not.
+				 */
+				Block		long_block = {0, TESS_SPILL_VALUES, 0, 1024 * 1024};
+
+				segment = dsm_create(sizeof(SharedFileSet), 0);
+				shared = dsm_segment_address(segment);
+				tess_spill_shared_init(shared, segment);
+				other = make_spill(shared, 0, FINGERPRINT);
+				write_blocks(other, &long_block, 1);
+				other = make_spill(shared, 1, FINGERPRINT);
+				tess_spill_finish(other);
+				tess_spill_open(other, 0, 0);
+			}
 			break;
 		case 20:
 			/* A partition dropped while a reader of it is open. */
@@ -726,6 +773,54 @@ tessera_test_spill_bytes(PG_FUNCTION_ARGS)
 	tess_spill_free(spill);
 	pfree(body);
 	PG_RETURN_VOID();
+}
+
+/* The same through a shared set: the limit holds for its files too. */
+Datum
+tessera_test_spill_shared_bytes(PG_FUNCTION_ARGS)
+{
+	int64		bytes = PG_GETARG_INT64(0);
+	dsm_segment *segment = dsm_create(sizeof(SharedFileSet), 0);
+	SharedFileSet *shared = dsm_segment_address(segment);
+	TessSpill  *spill;
+	char	   *body = palloc0(1024 * 1024);
+
+	tess_spill_shared_init(shared, segment);
+	spill = make_spill(shared, 0, FINGERPRINT);
+	for (uint32 number = 0; bytes > 0; number++, bytes -= 1024 * 1024)
+		tess_spill_write(spill, 0, TESS_SPILL_VALUES, number, body, 1024 * 1024,
+						 NULL);
+	tess_spill_finish(spill);
+	tess_spill_free(spill);
+	dsm_detach(segment);
+	pfree(body);
+	PG_RETURN_VOID();
+}
+
+/*
+ * The temporary files of the tablespace while a serial set holds a file
+ * there: the set's file is made in the session's temporary tablespaces.
+ */
+Datum
+tessera_test_spill_tablespace(PG_FUNCTION_ARGS)
+{
+	TessSpill  *spill = make_spill(NULL, 0, FINGERPRINT);
+	Block		block = {0, TESS_SPILL_VALUES, 0, 1024 * 1024};
+	char		path[MAXPGPATH];
+	DIR		   *dir;
+	struct dirent *entry;
+	int64		files = 0;
+
+	/* Longer than the write buffer, so that the file is there. */
+	write_blocks(spill, &block, 1);
+	TempTablespacePath(path, PG_GETARG_OID(0));
+	dir = AllocateDir(path);
+	while ((entry = ReadDir(dir, path)) != NULL)
+		if (strcmp(entry->d_name, ".") != 0 && strcmp(entry->d_name, "..") != 0)
+			files++;
+	FreeDir(dir);
+	tess_spill_free(spill);
+	PG_RETURN_INT64(files);
 }
 
 /*

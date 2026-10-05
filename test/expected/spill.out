@@ -30,6 +30,14 @@ CREATE FUNCTION tessera_test_spill_memory()
 RETURNS boolean
 AS :'spill_test', 'tessera_test_spill_memory'
 LANGUAGE C STRICT;
+CREATE FUNCTION tessera_test_spill_shared_bytes(bigint)
+RETURNS void
+AS :'spill_test', 'tessera_test_spill_shared_bytes'
+LANGUAGE C STRICT;
+CREATE FUNCTION tessera_test_spill_tablespace(oid)
+RETURNS bigint
+AS :'spill_test', 'tessera_test_spill_tablespace'
+LANGUAGE C STRICT;
 SELECT tessera_test_spill_serial() AS serial \gset
 \echo :serial
 t
@@ -183,6 +191,21 @@ SELECT tessera_test_spill_sqlstate(25);
  XX001: Tessera spill file's list of blocks is damaged
 (1 row)
 
+-- A block that the list says runs into the next block of its partition.
+SELECT tessera_test_spill_sqlstate(26);
+              tessera_test_spill_sqlstate              
+-------------------------------------------------------
+ XX001: Tessera spill file's list of blocks is damaged
+(1 row)
+
+-- A file opened before its writer finished cannot be told from a
+-- damaged one.
+SELECT tessera_test_spill_sqlstate(27);
+              tessera_test_spill_sqlstate              
+-------------------------------------------------------
+ XX001: Tessera spill file's list of blocks is damaged
+(1 row)
+
 -- Wrong calls: a seek to a position that holds no block, a partition
 -- dropped while it is read, a block of a kind that does not exist.
 SELECT tessera_test_spill_sqlstate(16);
@@ -213,13 +236,51 @@ SELECT tessera_test_spill_bytes(3 * 1024 * 1024);
 SET temp_file_limit = '2MB';
 SELECT tessera_test_spill_bytes(3 * 1024 * 1024);
 ERROR:  temporary file size exceeds "temp_file_limit" (2048kB)
+-- The limit holds for the files of a shared set too.
+SELECT tessera_test_spill_shared_bytes(3 * 1024 * 1024);
+ERROR:  temporary file size exceeds "temp_file_limit" (2048kB)
 RESET temp_file_limit;
+SELECT tessera_test_spill_shared_bytes(3 * 1024 * 1024);
+ tessera_test_spill_shared_bytes 
+---------------------------------
+ 
+(1 row)
+
+-- Nothing is left: no temporary file, and no directory of a shared set.
 SELECT count(*) AS temporary_files FROM pg_ls_tmpdir();
  temporary_files 
 -----------------
                0
 (1 row)
 
+SELECT count(*) AS temporary_entries
+FROM pg_ls_dir('base/pgsql_tmp', true, false);
+ temporary_entries 
+-------------------
+                 0
+(1 row)
+
+-- A serial set's file is made in the session's temporary tablespace.
+SET allow_in_place_tablespaces = true;
+CREATE TABLESPACE tessera_spill_space LOCATION '';
+SET temp_tablespaces = tessera_spill_space;
+SELECT tessera_test_spill_tablespace(oid) AS files_in_the_tablespace
+FROM pg_tablespace WHERE spcname = 'tessera_spill_space';
+ files_in_the_tablespace 
+-------------------------
+                       1
+(1 row)
+
+RESET temp_tablespaces;
+SELECT count(*) AS files_left_in_the_tablespace
+FROM pg_tablespace, pg_ls_tmpdir(oid) WHERE spcname = 'tessera_spill_space';
+ files_left_in_the_tablespace 
+------------------------------
+                            0
+(1 row)
+
+DROP TABLESPACE tessera_spill_space;
+RESET allow_in_place_tablespaces;
 DROP FUNCTION tessera_test_spill_serial();
 DROP FUNCTION tessera_test_spill_shared();
 DROP FUNCTION tessera_test_spill_packed();
@@ -228,3 +289,5 @@ DROP FUNCTION tessera_test_spill_error(integer);
 DROP FUNCTION tessera_test_spill_bytes(bigint);
 DROP FUNCTION tessera_test_spill_lanes();
 DROP FUNCTION tessera_test_spill_memory();
+DROP FUNCTION tessera_test_spill_shared_bytes(bigint);
+DROP FUNCTION tessera_test_spill_tablespace(oid);
