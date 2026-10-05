@@ -1062,30 +1062,20 @@ becomes an entry, joins one, or is dropped.
   - A seek to a wrong position is reported as damaged data:
     `runtime/spill.c:703-708` gives `XX001`, though the position is the
     caller's; `crates/tessera-spill/src/damaged.rs` says a misuse stays
-    an internal error.
-- **`spill-format`: promises without a test** (the same source).
-  Suggested: a test for each, one promise at a time, or the promise
-  leaves the spec.
-  - In the spec as "review only": the lengths of a header of kind 3; the
-    limits of a chunk of columns (4096 words, 131071 rows, a length that
-    is a multiple of 8); a shared file without a valid trailer; a block
-    that is not where the list says (another partition or level, lengths
-    that do not match the bytes on disk, a seek to a position without a
-    block).
-  - Left out of the spec, since nothing shows them: `tess_spill_memory`;
+    an internal error. The suite shows the code as it is now
+    (`tessera_test_spill_sqlstate(16)` of `test/sql/spill.sql`).
+- **`spill-format`: promises left out of the spec** (the same source).
+  Suggested: a test for each, one promise at a time; the promise then
+  enters the spec.
+  - Nothing shows them: `tess_spill_memory`;
     a drop of a partition while a reader is open; the lookup of the
     temporary tablespaces; a chunk larger than the write buffer packed
     through the scratch buffer; an unknown kind given to a writer; the
     stored size out of range at `tess_spill_open`; bytes past the lanes
     of a packed chunk of columns; the code `WORDS_OFFSET` of
     `tess_spill_columns_layout`.
-  - The SQLSTATE of a raised ERROR: `test/sql/spill.sql` shows the
-    message of a block of another table, not its code; `XX001` is shown
-    at the level of the status by `crates/tessera-capi/tests/spill.rs`.
-  - No test damages the bytes of a file: the comment of
-    `test/sql/spill.sql:42` says "every misuse and damaged block is an
-    ERROR"; eight of the nine cases are misuse and the ninth is another
-    table's block.
+  - No test damages the body of a block in a file; the suite damages
+    headers, lists and trailers.
 
 ## Decided against
 
