@@ -182,9 +182,11 @@ query down, and where it can, does it speed one up.
   under "C", and an ICU control whose abbreviated keys tell rows apart
   (`bench_prefix`, 1 000 000 rows, made by the family); a join at a
   work_mem of 1 MB whose outer keys are half one key (`bench_skew`, made
-  by the family) and a control without the skew; and the planning alone
-  of thirty aggregates of expressions (EXPLAIN, unprepared). A ratio below
-  one is the win.
+  by the family) and a control without the skew; at a work_mem of 4 MB,
+  a sort of `bench_sort` whose runs carry its text column, read back by
+  a parent, and `bench_mixed` grouped by a text key, whose rows wait on
+  disk for their partition; and the planning alone of thirty aggregates
+  of expressions (EXPLAIN, unprepared). A ratio below one is the win.
 - **oltp**: short prepared-statement queries, `pgbench -S`, where the
   planner hooks and the loaded modules must not slow down queries that
   never use a batch node. Arrives when more than one hook is installed.
