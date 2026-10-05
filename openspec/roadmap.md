@@ -1064,22 +1064,10 @@ becomes an entry, joins one, or is dropped.
     caller's; `crates/tessera-spill/src/damaged.rs` says a misuse stays
     an internal error. The suite shows the code as it is now
     (`tessera_test_spill_sqlstate(16)` of `test/sql/spill.sql`).
-  - The lists of a shared file are trusted. `read_trailer` of
-    `runtime/spill.c` takes a count of blocks from the file and
-    allocates by it before it knows that the list fits in the file, and
-    adds the counts of the partitions before without a check. A damaged
-    count ends as an allocation error, not as damaged data.
   - The body length of a packed block is checked by nothing until the
     block is unpacked, after the node has allocated that many bytes.
     Every node passes `MaxAllocHugeSize` as the limit, so the limit
     bounds nothing.
-  - A chunk of columns of a length that is no multiple of 8 is refused
-    only when it is made: `shape` of
-    `crates/tessera-spill/src/columns.rs`, and so packing and
-    appending, accept it.
-  - Unpacking a chunk of records accepts any code for the lane of the
-    next-record references, so a damaged body can give a reference that
-    is not 0.
   - A chunk of columns that packs into 4 GiB or more is an internal
     error at writing, since the header keeps the packed length in 32
     bits, while the limits of a chunk allow about 4.4 GiB. No test, and

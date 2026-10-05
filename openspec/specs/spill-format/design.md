@@ -137,8 +137,9 @@ numbers have not been measured there yet.
    does not fit its header.
    - *What is not checked.* There is no checksum of the body, so a
      changed byte inside a value is not noticed. The lists of blocks of
-     a shared file are trusted as they are read. A temporary file is
-     read by the same query that wrote it, on the same machine.
+     a shared file are checked only to lie inside the file. A
+     temporary file is read by the same query that wrote it, on the
+     same machine.
      PostgreSQL does not checksum its own temporary files either.
 6. **The memory for a read is known before the read starts.** The header
    of a block holds two sizes: the size of the body on disk and the size
