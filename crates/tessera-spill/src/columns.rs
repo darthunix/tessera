@@ -104,9 +104,17 @@ pub fn size(capacity: usize, words: usize) -> usize {
     HEADER + 8 * capacity * lanes(words)
 }
 
+/// The most rows of `words` stored words whose packed chunk fits the 32
+/// bits a block's header keeps for its packed length ([`pack_bound`]).
+fn packable_rows(words: usize) -> usize {
+    ((u32::MAX as usize - 8) / lanes(words)).saturating_sub(16) / 8
+}
+
 /// The rows a chunk of `len` bytes holds, with `words` stored words.
 pub fn capacity(len: usize, words: usize) -> usize {
-    (len.saturating_sub(HEADER) / (8 * lanes(words))).min(MAX_ROWS)
+    (len.saturating_sub(HEADER) / (8 * lanes(words)))
+        .min(MAX_ROWS)
+        .min(packable_rows(words))
 }
 
 /// Make the `len` bytes of `chunk` an empty chunk of `words` stored words;
@@ -485,6 +493,17 @@ mod tests {
         assert_eq!(init(&mut longest, 1)?, MAX_ROWS);
         assert_eq!(shape(&longest)?.capacity, MAX_ROWS);
         assert_eq!(capacity(size(MAX_ROWS, 1), 1), MAX_ROWS);
+        // However long the bytes, a chunk holds no more rows than pack
+        // into the 32 bits a block's header keeps for the packed length.
+        for words in [1, 64, 65, MAX_WORDS] {
+            let rows = capacity(usize::MAX / 2, words);
+            assert!(pack_bound(rows, words) <= u32::MAX as usize, "{words}");
+            assert!(
+                rows == MAX_ROWS || pack_bound(rows + 1, words) > u32::MAX as usize,
+                "{words}"
+            );
+        }
+        assert!(capacity(usize::MAX / 2, MAX_WORDS) < MAX_ROWS);
         // A chunk with a byte past a length of 8s is not packed.
         let mut chunk = chunk_of(2, 1, &[vec![0, 1]]);
         let mut out = vec![0_u8; pack_bound(2, 1)];
