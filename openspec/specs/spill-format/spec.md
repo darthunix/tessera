@@ -350,9 +350,10 @@ of its blocks. `tess_spill_write` SHALL return the bytes the block takes
 in the file, the header and the stored body. After `tess_spill_finish`
 the set only reads: a partition's blocks MUST read back in the order
 they were written, and a partition without blocks opens as no reader. A
-serial set's file is a temporary file of PostgreSQL: `temp_file_limit`
-applies to it, and it MUST be gone when the set is freed and, after an
-ERROR, when the query's resources are released.
+serial set's file is a temporary file of PostgreSQL, made in the
+session's temporary tablespaces: `temp_file_limit` applies to it, and it
+MUST be gone when the set is freed and, after an ERROR, when the query's
+resources are released.
 
 #### Scenario: Blocks of several partitions through one file
 - **WHEN** blocks of records and values, among them an empty one and one
@@ -379,11 +380,17 @@ ERROR, when the query's resources are released.
   `test/sql/spill.sql::tessera_test_spill_sqlstate(20)`;
   `test/sql/spill.sql::tessera_test_spill_sqlstate(21)`
 
-#### Scenario: The limit of temporary files stops a spill
-- **WHEN** a set writes more bytes than `temp_file_limit` allows
-- **THEN** the write raises PostgreSQL's ERROR and no temporary file is left
+#### Scenario: The limit and the tablespace of temporary files
+- **WHEN** a serial set, or a participant of a shared set, writes more
+  bytes than `temp_file_limit` allows; and a serial set writes while
+  `temp_tablespaces` names a tablespace
+- **THEN** the write raises PostgreSQL's ERROR, and no temporary file
+  and no directory of a shared set is left; the set's file is in that
+  tablespace while the set holds it
 - **Verified by:** `test/sql/spill.sql::tessera_test_spill_bytes`;
-  `test/sql/spill.sql::pg_ls_tmpdir`
+  `test/sql/spill.sql::tessera_test_spill_shared_bytes`;
+  `test/sql/spill.sql::pg_ls_dir`;
+  `test/sql/spill.sql::tessera_test_spill_tablespace`
 
 ### Requirement: A shared set
 In a shared set every participant SHALL write a file of its own in the
@@ -399,12 +406,13 @@ partition's blocks from it, each reader at a position of its own. A file
 without a valid trailer, with the fingerprint of another set than the
 reader's, or whose lists do not fill exactly the bytes between the
 blocks and the trailer, or name a block that does not lie among the
-file's blocks, is shorter than a header or is longer than the longest
-block the set takes, MUST be refused as damaged data. A participant that
-wrote no block has no file, and its partitions open as no reader. A
-participant's file is deleted when the participant frees its set, and
-the files that are left when the last participant detaches from the
-shared memory.
+file's blocks, runs into the next block of its partition, is shorter
+than a header or is longer than the longest block the set takes, MUST be
+refused as damaged data. `temp_file_limit` applies to a participant's
+file as to a serial set's. A participant that wrote no block has no
+file, and its partitions open as no reader. A participant's file is
+deleted when the participant frees its set, and the files that are left
+when the last participant detaches from the shared memory.
 
 The format has no mark of a finished file. The caller ensures that a
 participant's file is opened only after that participant finished its
@@ -439,8 +447,10 @@ set, and that the opener finished its own.
 - **WHEN** a participant's file ends without a trailer, the trailer's
   magic, counts or fingerprint do not match, a list counts more blocks
   than the lists hold, in the partition that is opened or in another, or
-  a block's entry ends past the file's blocks, is shorter than a header
-  or is longer than the longest block the set takes
+  a block's entry ends past the file's blocks, runs into the next block
+  of its partition, is shorter than a header or is longer than the
+  longest block the set takes; or the file is opened before its writer
+  finished it
 - **THEN** opening it fails as damaged data
 - **Verified by:**
   `test/sql/spill.sql::tessera_test_spill_sqlstate(7)`;
@@ -451,7 +461,9 @@ set, and that the opener finished its own.
   `test/sql/spill.sql::tessera_test_spill_sqlstate(18)`;
   `test/sql/spill.sql::tessera_test_spill_sqlstate(22)`;
   `test/sql/spill.sql::tessera_test_spill_sqlstate(24)`;
-  `test/sql/spill.sql::tessera_test_spill_sqlstate(25)`
+  `test/sql/spill.sql::tessera_test_spill_sqlstate(25)`;
+  `test/sql/spill.sql::tessera_test_spill_sqlstate(26)`;
+  `test/sql/spill.sql::tessera_test_spill_sqlstate(27)`
 
 ### Requirement: Reading a partition
 `tess_spill_open` SHALL give a reader at a partition's first block with

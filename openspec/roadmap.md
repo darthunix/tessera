@@ -1041,12 +1041,11 @@ becomes an entry, joins one, or is dropped.
     cannot tell this from a participant without blocks or from a worker
     that never started, so a mark of a finished file would not cure it:
     the guard is the nodes' barriers, and the spec states it as what the
-    caller ensures.
+    caller ensures. The suite shows what an open of a file that is on
+    disk but not finished gives: damaged data.
 - **`spill-format`: what no test shows yet** (the same source).
-  - The lookup of the temporary tablespaces for a set's file.
-  - A shared set under `temp_file_limit`, and the deletion of a shared
-    set's files at a rescan. The suite's last check lists regular files
-    only and cannot see a file set that is left.
+  - The deletion of a shared set's files at a rescan of a parallel
+    join: it is the join's, and waits for its capability.
   - The two forms of a reference to a by-reference value and the order
     of blocks in a partition (values before the blocks that refer to
     them; pairs of values and columns in a sort and in a grouping's
