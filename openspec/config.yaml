@@ -28,6 +28,15 @@ context: |
   leaves no folder: what it settled is in the specs, the designs and
   the roadmap, and git keeps the rest.
 
+  A spec and a design are written for a reader who knows nothing about
+  the part: terms are explained, and a layout of data is a drawing in a
+  code block with its offsets and sizes. A design goes from the whole
+  to the details: what the part is for and the problem it solves; the
+  engineering goals and what each choice costs; the design as a whole,
+  with a picture; then each piece, with the alternatives refused; Files
+  and Tests last. Both are self-contained: no reference to the working
+  plan, the roadmap, a change or a pull request, and no dates.
+
   Everything in the repository is written in English. Markdown is
   wrapped at 72 columns and never runs past 80; what does not fit a line
   of a table is written as a list.
@@ -59,8 +68,9 @@ rules:
       show the scenario, and "- **Verified by:** pending" only while the
       change is open.
     - >-
-      Keep definitions in the spec only - formats, lists of what is and
-      is not supported, error codes.
+      Define formats, lists of what is and is not supported and error
+      codes in the spec, and draw a layout of data in a code block, with
+      its offsets and sizes.
     - >-
       Leave out measurements, numbers of the old plan's items and names
       of internal functions.
@@ -101,8 +111,8 @@ operations:
       - >-
         Bring openspec/specs/<capability>/design.md of each touched
         capability up to date with the decisions that change how it is
-        built, and add a line under its History that names the change
-        and its pull request.
+        built and their reasons, as part of its text: a design names no
+        change, no pull request and no date.
       - Replace every "Verified by" that still says pending.
       - >-
         Remove the change's entry from openspec/roadmap.md, add an entry

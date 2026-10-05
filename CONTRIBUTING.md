@@ -36,9 +36,8 @@ Read in this order, and stop when the question is answered.
 2. `openspec/specs/<capability>/`: one folder for each part of the
    system. `spec.md` says what the part promises, and every scenario
    names the test that shows it. `design.md` says how the part is built
-   and why; it begins with the files of the code, the tests and the
-   history. The parts are being described one by one: a part without a
-   folder is still described in `docs/`.
+   and why, from the whole to the details. The parts are being described
+   one by one: a part without a folder is still described in `docs/`.
 3. [docs/](docs): guides for authors of extensions on top of Tessera
    (bridge, node contract, writing a node, functions, kernels, runtime,
    sources) and, until they move to their capabilities, the design of
@@ -124,9 +123,8 @@ what must outlive it in its place and deletes its folder.
 - The requirements go to `openspec/specs/`: `openspec archive <name>`
   writes them there. The folder it makes under
   `openspec/changes/archive/` is deleted in the same commit.
-- What was decided about how a part is built goes to that part's
-  `design.md`, with a line under `## History` that names the change and
-  its pull request.
+- What was decided about how a part is built, and why, is written into
+  that part's `design.md` as part of its text.
 - What is left undone becomes an entry of `openspec/roadmap.md`, and a
   finding the maintainer has not decided on goes to its list "Not
   placed"; the change's own entry leaves the roadmap.
@@ -144,15 +142,26 @@ the findings, and what is left.
   from SQL (the plan chosen, results, EXPLAIN, settings, SQLSTATE);
   formats on disk and in shared memory; the kernels' entry points.
   Internal names and steps go to `design.md`.
-- One promise in a requirement. Tables of formats, lists of what is
-  supported and error codes live in the spec and nowhere else.
+- One promise in a requirement. Formats, lists of what is supported and
+  error codes are defined in the spec. A design may draw a layout again
+  to explain it; where the two differ, the spec is right.
 - Every scenario ends with the test that shows it:
   ``- **Verified by:** `path::text` ``, where the text occurs in the
   file: a test's name, or a mark `-- spec: <capability>/<scenario>` in
   an SQL suite. `review only — <reason>` when no test can show it;
   `pending` only in an open change.
-- `design.md` begins with `## Files`, `## Tests` and `## History`. The
-  check fails when a file it names is gone.
+- A spec and a design are written for a reader who knows nothing about
+  the part and wants to understand it. They explain their terms, and a
+  layout of data is a drawing in a code block, with its offsets and
+  sizes.
+- `design.md` goes from the whole to the details: what the part is for
+  and the problem it solves; the engineering goals and what each choice
+  costs; the design as a whole, with a picture; then each piece, with
+  the alternatives that were refused. `## Files` and `## Tests` close
+  it; the check fails when a file it names is gone.
+- Both are self-contained. They outlive the working plan, the roadmap,
+  the changes and the pull requests, so they cite none of them and give
+  no dates: what a reader needs is written in the document itself.
 
 ## Documents
 
