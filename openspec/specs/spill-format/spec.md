@@ -131,8 +131,8 @@ data.
 
 #### Scenario: A damaged packed body of records
 - **WHEN** a packed body is too short for its counts or its lane codes,
-  does not match the chunk it is unpacked into, or has a lane code that
-  does not exist
+  does not match the chunk it is unpacked into, has a lane code that
+  does not exist, or stores the lane of the next-record references
 - **THEN** unpacking fails as damaged data
 - **Verified by:**
   `crates/tessera-spill/src/pack.rs::damaged_packed_bodies_are_refused`
@@ -170,7 +170,8 @@ A lane's code says how its values are stored. A writer gives a lane the
 first code of this list that fits its values:
 
 - 0: every value is 0, and nothing is stored; the next-record lane
-  always has this code;
+  always has this code, and a body that gives it another is refused as
+  damaged data;
 - 1: all values are equal, and one value of 4 bytes is stored;
 - 2: every value is below 256, and 1 byte is stored for a record;
 - 3: every value is below 65536, and 2 bytes are stored for a record;
@@ -254,8 +255,9 @@ kernels MUST agree on this layout.
 ### Requirement: The limits of a chunk of columns
 A chunk of columns SHALL hold at most 4096 words a row and at most
 131071 rows. A chunk MUST NOT be made in bytes that are too short for
-the header or of a length that is no multiple of 8, and bytes without
-the magic MUST be refused as a chunk of columns.
+the header or of a length that is no multiple of 8; a chunk of such a
+length MUST NOT be packed; and bytes without the magic MUST be refused
+as a chunk of columns.
 
 #### Scenario: A chunk that is not one of columns
 - **WHEN** a chunk of 8 bytes is initialized, or a chunk whose magic is
@@ -266,9 +268,10 @@ the magic MUST be refused as a chunk of columns.
 
 #### Scenario: The limits of a chunk
 - **WHEN** a chunk is initialized with more than 4096 words a row or
-  with a length that is no multiple of 8, or its length would hold more
-  than 131071 rows
-- **THEN** the first two are refused and the capacity stops at 131071
+  with a length that is no multiple of 8, its length would hold more
+  than 131071 rows, or a chunk with a byte past a length of 8s is packed
+- **THEN** the first two are refused, the capacity stops at 131071, and
+  the packing is refused
 - **Verified by:**
   `crates/tessera-spill/src/columns.rs::a_chunk_keeps_within_its_limits`
 
@@ -375,11 +378,12 @@ number 0x5445535354524149), where the lists start, the number of
 partitions and the fingerprint. Once a participant has finished its set,
 any participant MUST be able to open that participant's file and read a
 partition's blocks from it, each reader at a position of its own. A file
-without a valid trailer MUST be refused as damaged data. A participant
-that wrote no block has no file, and its partitions open as no reader. A
-participant's file is deleted when the participant frees its set, and
-the files that are left when the last participant detaches from the
-shared memory.
+without a valid trailer, or whose lists name more blocks than they hold
+or a block that does not lie among the file's blocks, MUST be refused as
+damaged data. A participant that wrote no block has no file, and its
+partitions open as no reader. A participant's file is deleted when the
+participant frees its set, and the files that are left when the last
+participant detaches from the shared memory.
 
 The format has no mark of a finished file. The caller ensures that a
 participant's file is opened only after that participant finished its
@@ -409,13 +413,16 @@ set, and that the opener finished its own.
 - **Verified by:** `test/sql/spill.sql::tessera_test_spill_shared`
 
 #### Scenario: A file without its lists
-- **WHEN** a participant's file ends without a trailer, or the trailer's
-  magic or counts do not match
+- **WHEN** a participant's file ends without a trailer, the trailer's
+  magic or counts do not match, a list counts more blocks than the lists
+  hold, or a block's entry ends past the file's blocks
 - **THEN** opening it fails as damaged data
 - **Verified by:**
   `test/sql/spill.sql::tessera_test_spill_sqlstate(10)`;
   `test/sql/spill.sql::tessera_test_spill_sqlstate(11)`;
-  `test/sql/spill.sql::tessera_test_spill_sqlstate(12)`
+  `test/sql/spill.sql::tessera_test_spill_sqlstate(12)`;
+  `test/sql/spill.sql::tessera_test_spill_sqlstate(17)`;
+  `test/sql/spill.sql::tessera_test_spill_sqlstate(18)`
 
 ### Requirement: Reading a partition
 `tess_spill_open` SHALL give a reader at a partition's first block with
