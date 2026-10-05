@@ -1021,15 +1021,21 @@ becomes an entry, joins one, or is dropped.
   core, not analysed. Suggested: report upstream, or drop.
 - **`spill-format`: the code against its own intent** (found when the
   capability was described and reviewed, pull request 46).
-  - `tess_spill_memory` counts the lists of blocks since pull request
-    46, and the serial join adds them to its memory: 256 bytes for each
-    partition that has a block, about 512 kB at 1024 partitions on two
-    sides. How that moves the moment the join sends partitions to disk
-    is not measured: the spill family of `bench/pg`, on an idle machine
-    (`docs/measuring.md`).
-  - A grouping and a sort do not ask their sets for their memory: the
-    write buffer, the readers' buffers and the lists are outside their
-    budgets. Whether to count them goes with the reserves below.
+  - The lists of blocks are memory that nobody counts: 16 bytes a block
+    in arrays that start at 16 places and double, and a copy for every
+    reader of another participant's file. `tess_spill_memory` leaves
+    them out. Counting them is not a correction of a check: only the
+    serial join asks a set for its memory, and a list of 16 places for
+    each partition that has a block is 256 bytes, about 512 kB at 1024
+    partitions on two sides, more than the whole `hash_mem` of a small
+    `work_mem`. It would change when the join sends partitions to disk,
+    so it needs a change of its own with a measurement
+    (`docs/measuring.md`). It was tried in pull request 46 and taken
+    back: with the lists counted, a join of the suite `join` that
+    spills at a small `work_mem` showed "Memory Usage: over hash_mem"
+    where it had been within it, and the counts of chunks and of bytes
+    on disk moved in five plans. The join's rule has no room for the
+    lists: counting them needs a reserve in that rule first.
   - Every node passes `MaxAllocHugeSize` as the longest body of its
     sets, so the bound on the size of a block holds nothing for them: a
     damaged entry of a shared file's list can ask a reader for a buffer
