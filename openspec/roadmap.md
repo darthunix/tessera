@@ -1047,37 +1047,9 @@ becomes an entry, joins one, or is dropped.
 - **`spill-format`: the code against its own intent** (the same source).
   Suggested: a change, since what a reader refuses is part of the
   format.
-  - The trailer's fingerprint is written and never compared:
-    `runtime/spill.c:459` writes it; `read_trailer` (`:495-505`) checks
-    the magic and the counts only.
-  - A block can be written that a reader refuses. A writer accepts a
-    body up to the limit; `tess_spill_open` requires the stored bytes
-    within the limit plus a header (`runtime/spill.c:584`), and a packed
-    chunk of columns can be longer than its body (an empty chunk packs
-    to 8 + 16 bytes a lane, more than its 16). Latent: every node passes
-    `MaxAllocHugeSize`.
-  - Trailing bytes: unpacking a chunk of records accepts bytes past its
-    last lane and does not check the lane of lengths; unpacking a chunk
-    of columns refuses bytes past its lanes.
-  - A seek to a wrong position is reported as damaged data:
-    `runtime/spill.c:703-708` gives `XX001`, though the position is the
-    caller's; `crates/tessera-spill/src/damaged.rs` says a misuse stays
-    an internal error. The suite shows the code as it is now
-    (`tessera_test_spill_sqlstate(16)` of `test/sql/spill.sql`).
-  - The body length of a packed block is checked by nothing until the
-    block is unpacked, after the node has allocated that many bytes.
-    Every node passes `MaxAllocHugeSize` as the limit, so the limit
-    bounds nothing.
-  - A chunk of columns that packs into 4 GiB or more is an internal
-    error at writing, since the header keeps the packed length in 32
-    bits, while the limits of a chunk allow about 4.4 GiB. No test, and
-    the spec does not name the limit.
   - The lists of blocks are memory that nobody counts: 16 bytes a block
     in arrays that double, and a copy for every reader of another
     participant's file. `tess_spill_memory` leaves them out.
-  - `tess_spill_free` and `tess_spill_release` close the open readers
-    of a set, and a reader the caller still holds then points at freed
-    memory.
   - A reader that opens a participant's file before the participant's
     first write to disk gets "no blocks" without an error. The format
     has no mark of a finished or of an empty file; the nodes' barriers
