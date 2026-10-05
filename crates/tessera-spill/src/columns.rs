@@ -442,4 +442,21 @@ mod tests {
         assert!(init(&mut [0_u8; 8], 1).is_err());
         assert_eq!(init(&mut [0_u8; HEADER], 3).unwrap(), 0);
     }
+
+    #[test]
+    fn a_chunk_keeps_within_its_limits() -> Result<()> {
+        // The most words a row, and one more.
+        let mut widest = vec![0_u8; size(1, MAX_WORDS)];
+        assert_eq!(init(&mut widest, MAX_WORDS)?, 1);
+        assert!(init(&mut widest, MAX_WORDS + 1).is_err());
+        // A length that is no multiple of 8.
+        assert!(init(&mut [0_u8; HEADER + 12], 1).is_err());
+        // Bytes for more rows than a chunk holds: the capacity stops at
+        // the most rows.
+        let mut longest = vec![0_u8; size(MAX_ROWS + 5, 1)];
+        assert_eq!(init(&mut longest, 1)?, MAX_ROWS);
+        assert_eq!(shape(&longest)?.capacity, MAX_ROWS);
+        assert_eq!(capacity(size(MAX_ROWS, 1), 1), MAX_ROWS);
+        Ok(())
+    }
 }
