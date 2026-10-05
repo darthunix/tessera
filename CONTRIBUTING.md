@@ -143,10 +143,11 @@ the findings, and what is left.
   formats on disk and in shared memory; the kernels' entry points.
   Internal names and steps go to `design.md`.
 - One promise in a requirement. The rules of a format (its fields,
-  codes, widths and limits), the lists of what is supported and the
-  error codes are written once, in the spec. A design explains the idea
-  with a picture or an example and points to the spec for the rule; it
-  does not state the rule again.
+  codes, widths and limits), the drawings of its layouts, the lists of
+  what is supported and the error codes are written once, in the spec.
+  A design explains the idea, with a picture of the whole or an
+  example, and points to the spec for a rule or a layout; it does not
+  repeat them.
 - Every scenario ends with the test that shows it:
   ``- **Verified by:** `path::text` ``, where the text occurs in the
   file: a test's name, or a mark `-- spec: <capability>/<scenario>` in
@@ -155,8 +156,8 @@ the findings, and what is left.
 - A spec and a design are written for a reader who knows nothing about
   the part and wants to understand it, in simple English: short
   sentences, common words, one thought in a sentence. They explain every
-  term where it first appears, and a layout of data is a drawing in a
-  code block, with its offsets and sizes.
+  term where it first appears. In a spec a layout of data is a drawing
+  in a code block, with its offsets and sizes.
 - `design.md` goes from the whole to the details: what the part is for
   and the problem it solves; the engineering goals and what each choice
   costs; the design as a whole, with a picture; then each piece, with

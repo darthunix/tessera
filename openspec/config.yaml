@@ -30,13 +30,13 @@ context: |
 
   A spec and a design are written for a reader who knows nothing about
   the part, in simple English: short sentences, common words, one
-  thought in a sentence. Every term is explained where it first appears,
-  and a layout of data is a drawing in a code block with its offsets and
-  sizes. A design goes from the whole to the details: what the part is
-  for and the problem it solves; the engineering goals and what each
-  choice costs; the design as a whole, with a picture; then each piece,
-  with the alternatives refused; Files and Tests last. Both are
-  self-contained: no reference to the working plan, the roadmap, a
+  thought in a sentence. Every term is explained where it first appears.
+  In a spec a layout of data is a drawing in a code block with its
+  offsets and sizes. A design goes from the whole to the details: what
+  the part is for and the problem it solves; the engineering goals and
+  what each choice costs; the design as a whole, with a picture; then
+  each piece, with the alternatives refused; Files and Tests last. Both
+  are self-contained: no reference to the working plan, the roadmap, a
   change or a pull request, and no dates.
 
   Everything in the repository is written in English. Markdown is
@@ -72,8 +72,8 @@ rules:
     - >-
       Define formats, lists of what is and is not supported and error
       codes in the spec, and draw a layout of data in a code block, with
-      its offsets and sizes. A rule is written once, here: a design
-      explains the idea and points to the spec for the rule.
+      its offsets and sizes. A rule or a layout is written once, here: a
+      design explains the idea and points to the spec for it.
     - >-
       Leave out measurements, numbers of the old plan's items and names
       of internal functions.
