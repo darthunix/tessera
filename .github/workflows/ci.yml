@@ -34,7 +34,7 @@ jobs:
 
   # openspec/ against the repository (CONTRIBUTING.md, "Specs"): the
   # form of every spec and change, the test each scenario names, the
-  # files each design names, the outcome of each archived change.
+  # files each design names, no closed change kept in the tree.
   specs:
     name: Specs (ubuntu-24.04)
     runs-on: ubuntu-24.04

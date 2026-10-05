@@ -24,7 +24,9 @@ context: |
   A change is needed when behavior, the C API or a format changes, when
   work on speed needs a measurement plan, or when the work is larger
   than one pull request. The maintainer approves the proposal before
-  any code and the outcome before the archive.
+  any code and the outcome before the change is closed. A closed change
+  leaves no folder: what it settled is in the specs, the designs and
+  the roadmap, and git keeps the rest.
 
   Everything in the repository is written in English. Markdown is
   wrapped at 72 columns and never runs past 80; what does not fit a line
@@ -92,17 +94,23 @@ operations:
   archive:
     guidance:
       - >-
-        Write outcome.md in the change first - what was measured, with
-        the ids of the runs; where the work departed from the design and
-        why; findings; what is left.
+        Write the outcome into the description of the pull request that
+        closes the change, not into a file - what was done; what was
+        measured, with the ids of the runs; where the work departed from
+        the design and why; findings; what is left.
       - >-
         Bring openspec/specs/<capability>/design.md of each touched
         capability up to date with the decisions that change how it is
-        built.
+        built, and add a line under its History that names the change
+        and its pull request.
       - Replace every "Verified by" that still says pending.
       - >-
-        Remove the change's entry from openspec/roadmap.md, and add an
-        entry there for what is left.
+        Remove the change's entry from openspec/roadmap.md, add an entry
+        there for what is left, and put every finding the maintainer has
+        not decided on into its list "Not placed".
       - >-
-        The maintainer approves the outcome before the change is
-        archived.
+        After openspec archive, delete the folder it made under
+        openspec/changes/archive/ in the same commit: a closed change
+        leaves no folder, and git keeps its history.
+      - >-
+        The maintainer approves the outcome before the change is closed.

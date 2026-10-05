@@ -3,7 +3,7 @@
 The queue of work: what is not built yet, in the order it is taken. An
 entry is one piece of future work. When it is taken up it becomes a
 change (`openspec new change <name>`, the entry's name), and when the
-change is archived the entry leaves this file; what the change leaves
+change is closed the entry leaves this file; what the change leaves
 undone comes back here as a new entry. A discussion of what a feature
 would take ends in an edit of this file or of a change.
 
@@ -998,7 +998,8 @@ request 44, 2026-10-04.
 ## Not placed: the maintainer decides
 
 Remarks of finished plan items that the plan neither closes nor
-schedules. Each becomes an entry, joins one, or is dropped.
+schedules, and findings of closed changes without a decision. Each
+becomes an entry, joins one, or is dropped.
 
 - **A grouping inside a subquery** (plan 5.11 and 5.13, lines 4328–4330,
   4913–4914): no partial (parallel) stack for it, and GROUP BY without
