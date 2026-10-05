@@ -6,6 +6,15 @@ to temporary files, the checks a reader applies before it trusts a
 block, and the sets of files that hold the blocks. When a node spills
 and what it keeps in memory belong to the node's own capability.
 
+A chunk is a piece of a node's memory that is written whole: records of
+a hash table, the values they refer to, or rows kept by column. A block
+is a chunk on disk: a header, then the stored body. A set is what one
+node writes at one level of partitioning; its partitions are read back
+one at a time. The requirements go from the smallest piece to the
+largest: the header of a block, the three kinds of body and their packed
+forms, the file of a set, a shared set, reading a partition.
+[design.md](design.md) explains the whole and the reasons.
+
 ## Requirements
 
 ### Requirement: Block header layout
@@ -13,16 +22,27 @@ Every spilled block SHALL begin with a header of 48 bytes in the
 machine's byte order, followed by the stored body.
 `tess_spill_header_size()` SHALL return 48.
 
-- bytes 0 to 7: the magic, the bytes `TESSSPIL`;
-- bytes 8 to 11: the format version, 2;
-- bytes 12 to 15: the kind: 1 records, 2 values, 3 columns;
-- bytes 16 to 19: the number of the chunk in its table;
-- bytes 20 to 23: the partition;
-- bytes 24 to 27: the level of partitioning, 0 for the first;
-- bytes 28 to 31: the packed length: the bytes of the stored body when
-  it is stored packed, 0 when it is stored as it is;
-- bytes 32 to 39: the fingerprint of the table's layout;
-- bytes 40 to 47: the body length: the bytes of the chunk in memory.
+```
+ byte    0           4           8           12          16
+         ┌───────────────────────┬───────────┬───────────┐
+       0 │ magic                 │ version   │ kind      │
+         ├───────────┬───────────┼───────────┼───────────┤
+      16 │ number    │ partition │ level     │ packed    │
+         ├───────────┴───────────┼───────────┴───────────┤
+      32 │ fingerprint           │ body length           │
+         └───────────────────────┴───────────────────────┘
+      48   the stored body
+```
+
+- magic: the bytes `TESSSPIL`;
+- version: the version of the format, 2;
+- kind: 1 records, 2 values, 3 columns;
+- number: the number of the chunk in its table;
+- partition, and level: the level of partitioning, 0 for the first;
+- packed: the packed length, the bytes of the stored body when it is
+  stored packed, 0 when it is stored as it is;
+- fingerprint: of the table's layout;
+- body length: the bytes of the chunk in memory.
 
 The header carries no checksum: a temporary file is read by the query
 that wrote it, on the same machine.
@@ -119,8 +139,17 @@ yet linked.
 The packed body sees the records as lanes of 4 bytes, the same lane of
 every record together: the number of records (4 bytes), the length of a
 record (4 bytes), one code byte for each lane padded to a multiple of 4,
-then the lanes' data, padded with zeros to a multiple of 8. A lane's
-code says how its values are stored:
+then the lanes' data, padded with zeros to a multiple of 8.
+
+```
+ ┌─────────┬─────────┬──────────────────┬──────────────────────────┐
+ │ records │ record  │ a code for each  │ the lanes' data, a lane  │
+ │         │ length  │ lane, 1 byte     │ after a lane             │
+ │ 4 bytes │ 4 bytes │ padded to 4      │ padded to 8              │
+ └─────────┴─────────┴──────────────────┴──────────────────────────┘
+```
+
+A lane's code says how its values are stored:
 
 - 0: nothing is stored, since every value is 0; the next-record lane
   always has this code;
@@ -162,6 +191,20 @@ set when the row's word `w` is NULL; then one lane for each stored word.
 A row's word is a by-value Datum, a reference to a by-reference value,
 or 0 for a NULL. The inline accessors of `tessera/spill.h` and the Rust
 kernels MUST agree on this layout.
+
+```
+ byte 0      4          8             12       16
+      ┌──────┬──────────┬─────────────┬────────┐
+      │ rows │ capacity │ words a row │ "COLS" │
+      ├──────┴──────────┴─────────────┴────────┤
+   16 │ lanes of NULL bits, capacity × 8 bytes │
+      │ each: one for every 64 words a row,    │
+      │ at least one                           │
+      ├────────────────────────────────────────┤
+      │ lanes of words, capacity × 8 bytes     │
+      │ each: one for each word of a row       │
+      └────────────────────────────────────────┘
+```
 
 #### Scenario: A lane of NULL bits for every 64 words
 - **WHEN** the lanes of NULL bits are counted for 0, 64, 65 and 130
@@ -222,6 +265,20 @@ it back MUST give a chunk with the same rows, words and values, whose
 capacity is its rows. A packed chunk with a width that does not exist, a
 lane cut short, a length that does not match its counts, or bytes past
 its lanes MUST be refused as damaged data.
+
+```
+ ┌─────────┬─────────────┬─────────────────────┬─────────────────────┐
+ │ rows    │ words a row │ a descriptor for    │ each lane's values  │
+ │         │             │ each lane, 16 bytes │ less its least one, │
+ │ 4 bytes │ 4 bytes     │                     │ padded to 8         │
+ └─────────┴─────────────┴─────────────────────┴─────────────────────┘
+
+ a descriptor
+ byte 0       1                    8                   16
+      ┌───────┬────────────────────┬───────────────────┐
+      │ width │ zeros              │ least value       │
+      └───────┴────────────────────┴───────────────────┘
+```
 
 #### Scenario: Lanes pack at the width of their span
 - **WHEN** a chunk with lanes of equal values and of spans that need 1,
@@ -293,6 +350,19 @@ that participant's file and read a partition's blocks from it, each
 reader at a position of its own. A file without a valid trailer MUST be
 refused as damaged data. The files are deleted when the last participant
 detaches from the shared memory.
+
+```
+ ┌────────┬─────┬─────────────────┬────────────────────┬─────────────┐
+ │ blocks │  …  │ blocks in each  │ for each block of  │ trailer     │
+ │        │     │ partition,      │ each partition:    │             │
+ │        │     │ 8 bytes each    │ start, bytes taken │ 32 bytes    │
+ └────────┴─────┴─────────────────┴────────────────────┴─────────────┘
+
+ the trailer, words of 8 bytes
+ ┌───────┬───────────────────────┬────────────┬─────────────┐
+ │ magic │ where the lists start │ partitions │ fingerprint │
+ └───────┴───────────────────────┴────────────┴─────────────┘
+```
 
 #### Scenario: A participant reads another's file
 - **WHEN** two participants write blocks to a shared set, finish, and

@@ -3,7 +3,7 @@
 TessHashJoin and TessAgg keep their state in the hash table of
 [table.md](table.md). When the table would outgrow `hash_mem`, a node
 writes parts of it to PostgreSQL's temporary files and reads them back
-later (plan item 5.6). What goes to disk and how it is checked is the
+later. What goes to disk and how it is checked is the
 capability `spill-format`: its
 [spec](../openspec/specs/spill-format/spec.md) says what a block and a
 file are, its [design](../openspec/specs/spill-format/design.md) why.
@@ -126,7 +126,7 @@ on disk like any other. Measured, it costs no loss to the core: half the
 outer rows of one key, joined with 100 000 inner rows at a work_mem of
 1 MB (8 partitions, 9 MB on disk), take 43 ms against the core's 139,
 and the same join without the skew 46 against 164 (bench family exec,
-`skew_join` and `even_join`, plan 4.27).
+`skew_join` and `even_join`).
 
 ## In the grouping
 
@@ -188,7 +188,7 @@ read, and sending them up would hand the Finalize Aggregate every row
 the node spills from then on, as a serial one, and gives its groups out
 as partials once the input is done, as the core's partial hash
 aggregate does: that grouping ran in 1.03 s instead of 2.04 (the core
-1.35–1.51). Groups of sum states (plan 4.23, item 4b) spill no state,
+1.35–1.51). Groups of sum states spill no state,
 since a merge of spilled records takes a word an aggregate, nor rows, which
 the table sent up would lose: they go up every time the table fills,
 their rests' memory counted, and the grouping above merges them.
