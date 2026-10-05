@@ -504,7 +504,9 @@ read_trailer(TessSpill *spill, File file, int partition, TessSpillReader *reader
 	uint64		lists;
 	uint64		most;
 	uint64		before = 0;
-	uint64		count = 0;
+	uint64		total = 0;
+	uint64		count;
+	uint64	   *all;
 
 	if (size < 0)
 		ereport(ERROR,
@@ -526,16 +528,28 @@ read_trailer(TessSpill *spill, File file, int partition, TessSpillReader *reader
 	lists = (uint64) size - sizeof(trailer) - trailer.offset;
 	if (lists < counts)
 		list_damaged();
-	/* The most blocks the lists have room for, over all partitions. */
+	/*
+	 * The blocks the lists have room for. The counts of all the partitions
+	 * are read at once and must fill that room exactly: a writer puts
+	 * nothing else between its blocks and its trailer.
+	 */
+	if ((lists - counts) % sizeof(SpillBlock) != 0)
+		list_damaged();
 	most = (lists - counts) / sizeof(SpillBlock);
-	for (int other = 0; other <= partition; other++)
+	all = palloc(counts);
+	read_at(file, (char *) all, counts, trailer.offset);
+	for (int other = 0; other < spill->npartitions; other++)
 	{
-		read_at(file, (char *) &count, sizeof(count), trailer.offset + sizeof(uint64) * other);
-		if (count > most - before)
+		if (all[other] > most - total)
 			list_damaged();
 		if (other < partition)
-			before += count;
+			before += all[other];
+		total += all[other];
 	}
+	count = all[partition];
+	pfree(all);
+	if (total != most)
+		list_damaged();
 	if (count == 0)
 		return false;
 	reader->blocks = MemoryContextAllocExtended(spill->context,
@@ -616,11 +630,15 @@ tess_spill_open(TessSpill *spill, int participant, int partition)
 		uint64		stored = reader->blocks[index].stored;
 
 		/*
-		 * No upper bound here: a packed chunk of columns may be longer
-		 * than its body, and a shared file's list was held to the file's
-		 * size when it was read.
+		 * A block is a header and at most the longest body, or the packed
+		 * form of a chunk of columns, which may be longer than its body by
+		 * the room of its descriptors.
 		 */
-		if (stored < TESS_SPILL_HEADER_SIZE)
+		uint64		extra = TESS_SPILL_HEADER_SIZE +
+			TESS_SPILL_COLUMNS_SLACK(TESS_SPILL_COLUMNS_MAX_WORDS);
+
+		if (stored < TESS_SPILL_HEADER_SIZE ||
+			(spill->max_len <= PG_UINT64_MAX - extra && stored > spill->max_len + extra))
 			ereport(ERROR,
 					errcode(ERRCODE_DATA_CORRUPTED),
 					errmsg("Tessera spilled block of " UINT64_FORMAT " bytes is out of range",
