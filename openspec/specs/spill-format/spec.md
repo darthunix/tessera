@@ -38,7 +38,7 @@ machine's byte order, followed by the stored body.
 
 - magic: a number of 64 bits whose bytes are `TESSSPIL` on a
   little-endian machine;
-- version: the version of the format, 2;
+- version: the version of the format, 3;
 - kind: 1 records, 2 values, 3 columns;
 - number: a number the writer gives the chunk; a join finds a chunk
   of values by it;
@@ -254,10 +254,47 @@ kernels MUST agree on this layout.
 - **WHEN** rows with NULLs, by-value words and by-reference values in up
   to 69 columns are appended to a chunk
 - **THEN** each row's words lie in their lanes at the row's place, a
-  NULL has its bit set and a word of 0, and a by-reference word is the
-  place of its bytes
+  NULL has its bit set and a word of 0, and a by-reference word is a
+  reference to the place of its bytes
 - **Verified by:**
   `crates/tessera-kernels/src/spill_columns.rs::rows_go_in_order_until_the_chunk_or_the_values_fill`
+
+### Requirement: A reference to a by-reference value
+A word of a record or of a row that refers to a by-reference value SHALL
+hold the number of the value's chunk plus one in its upper 32 bits and
+the byte of the value in that chunk in its lower 32 bits. No reference
+is 0, and a chunk of values is at most 4 GiB. A chunk of columns that is
+written with one chunk of values before it SHALL refer to that chunk as
+number 0. A reader of such a chunk of columns from a file MUST refuse,
+as damaged data, a word of a by-reference column that is no reference
+into that chunk of values.
+
+```
+ bit 63                        32 31                             0
+     ┌───────────────────────────┬───────────────────────────────┐
+     │ number of the chunk of    │ byte of the value in that     │
+     │ values, plus one          │ chunk                         │
+     └───────────────────────────┴───────────────────────────────┘
+```
+
+#### Scenario: Rows appended with their values
+- **WHEN** rows with by-reference values are appended to a chunk of
+  columns and their values to its chunk of values
+- **THEN** the word of each such value is a reference to chunk 0 at the
+  byte its bytes were copied to
+- **Verified by:**
+  `crates/tessera-kernels/src/spill_columns.rs::rows_go_in_order_until_the_chunk_or_the_values_fill`;
+  `crates/tessera-capi/tests/spill.rs::rows_of_datums_append_to_a_chunk_of_columns`
+
+#### Scenario: What is a reference into a chunk of values
+- **WHEN** a word names the first or the last byte of a chunk of
+  columns' one chunk of values; and a word is 0, a bare offset, names
+  another chunk, or names the byte past the chunk
+- **THEN** the first two give the value's place and the others are no
+  reference; the report of such a word in a row read back is damaged
+  data, SQLSTATE `XX001`
+- **Verified by:** `test/sql/spill.sql::tessera_test_spill_value`;
+  `test/sql/spill.sql::tessera_test_spill_sqlstate(28)`
 
 ### Requirement: The limits of a chunk of columns
 A chunk of columns SHALL hold at most 4096 words a row and at most
@@ -414,6 +451,10 @@ file, and its partitions open as no reader. A participant's file is
 deleted when the participant frees its set, and the files that are left
 when the last participant detaches from the shared memory.
 
+A file set that is used again, by a node that runs anew in the same
+query, MUST be reset first: `tess_spill_shared_reset` SHALL delete every
+participant's file, so that nothing of the earlier use is read.
+
 The format has no mark of a finished file. The caller ensures that a
 participant's file is opened only after that participant finished its
 set, and that the opener finished its own.
@@ -464,6 +505,14 @@ set, and that the opener finished its own.
   `test/sql/spill.sql::tessera_test_spill_sqlstate(25)`;
   `test/sql/spill.sql::tessera_test_spill_sqlstate(26)`;
   `test/sql/spill.sql::tessera_test_spill_sqlstate(27)`
+
+#### Scenario: A file set used again
+- **WHEN** two participants write to a shared set and leave their files,
+  the file set is reset, and in its second use one of them writes
+  nothing
+- **THEN** every partition of that participant opens as no reader, and
+  the other's blocks of the second use read back
+- **Verified by:** `test/sql/spill.sql::tessera_test_spill_reset`
 
 ### Requirement: Reading a partition
 `tess_spill_open` SHALL give a reader at a partition's first block with

@@ -1049,13 +1049,18 @@ becomes an entry, joins one, or is dropped.
     caller ensures. The suite shows what an open of a file that is on
     disk but not finished gives: damaged data.
 - **`spill-format`: what no test shows yet** (the same source).
-  - The deletion of a shared set's files at a rescan of a parallel
-    join: it is the join's, and waits for its capability.
-  - The two forms of a reference to a by-reference value and the order
-    of blocks in a partition (values before the blocks that refer to
-    them; pairs of values and columns in a sort and in a grouping's
-    rows) are in the design only. They are rules of the join, of the
-    grouping and of the sort, and wait for those capabilities.
+  - The one form of a reference to a value (pull request 46) adds an
+    operation for each by-reference value appended to a chunk of
+    columns, and a check for each one a sort or a grouping reads back.
+    Its cost is not measured: `tessera-bench` for the kernel, the sort
+    and spill families of `bench/pg` for the nodes
+    (`docs/measuring.md`).
+  - A join checks the chunk a reference names and not the byte in it,
+    and no node checks that a value's own length ends inside its chunk.
+  - The order of blocks in a partition (values before the blocks that
+    refer to them; pairs of values and columns in a sort and in a
+    grouping's rows) is in the design only: a rule of the join, of the
+    grouping and of the sort, for their capabilities.
   - `docs/spill.md` and the comments of the reserves in
     `nodes/hashjoin.h` and `nodes/agg_spill.c` still count a buffer of a
     page for each partition's file, though a set has one buffer. Whether
