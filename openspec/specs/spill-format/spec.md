@@ -90,8 +90,16 @@ limit the reader accepts.
 - **WHEN** a header of kind 3 has a body shorter than 16 bytes, or a
   packed length that is 0 or not a multiple of 8
 - **THEN** it is refused on writing and on reading
-- **Verified by:** review only — no test writes or reads a header of
-  kind 3 on its own; the sort and join suites pass through the rule
+- **Verified by:**
+  `crates/tessera-spill/src/lib.rs::a_columns_header_keeps_its_lengths`
+
+#### Scenario: The level and the limit for every kind
+- **WHEN** a header of records, of values or of columns has a level of
+  32, or a body longer than the limit
+- **THEN** it is refused on writing and on reading, while a header at
+  level 31 with a body of exactly the limit is accepted
+- **Verified by:**
+  `crates/tessera-spill/src/lib.rs::the_level_and_the_limit_hold_for_every_kind`
 
 ### Requirement: Damaged and foreign blocks are refused
 A reader MUST check the magic, the version, the kind, the fingerprint,
@@ -127,7 +135,9 @@ data.
   body, and when they are given a buffer shorter than a header
 - **THEN** the first report `XX001` and the second `XX000`
 - **Verified by:**
-  `crates/tessera-capi/tests/spill.rs::damaged_blocks_report_data_corrupted`
+  `crates/tessera-capi/tests/spill.rs::damaged_blocks_report_data_corrupted`;
+  `test/sql/spill.sql::tessera_test_spill_sqlstate(5)`;
+  `test/sql/spill.sql::tessera_test_spill_sqlstate(7)`
 
 ### Requirement: A packed chunk of records
 A chunk of records SHALL be stored packed only when the packed form is
@@ -251,8 +261,8 @@ columns.
   with a length that is no multiple of 8, or its length would hold more
   than 131071 rows
 - **THEN** the first two are refused and the capacity stops at 131071
-- **Verified by:** review only — no test reaches the limits; they are
-  `MAX_WORDS` and `MAX_ROWS` of `crates/tessera-spill/src/columns.rs`
+- **Verified by:**
+  `crates/tessera-spill/src/columns.rs::a_chunk_keeps_within_its_limits`
 
 ### Requirement: A chunk of columns on disk
 A chunk of columns SHALL be stored packed, for its rows only: the rows
@@ -377,8 +387,10 @@ detaches from the shared memory.
 - **WHEN** a participant's file ends without a trailer, or the trailer's
   magic or counts do not match
 - **THEN** opening it fails as damaged data
-- **Verified by:** review only — no test damages a shared file; the
-  check is `read_trailer` of `runtime/spill.c`
+- **Verified by:**
+  `test/sql/spill.sql::tessera_test_spill_sqlstate(10)`;
+  `test/sql/spill.sql::tessera_test_spill_sqlstate(11)`;
+  `test/sql/spill.sql::tessera_test_spill_sqlstate(12)`
 
 ### Requirement: Reading a partition
 `tess_spill_open` SHALL give a reader at a partition's first block with
@@ -414,6 +426,8 @@ blocks.
   reader's, its lengths do not match the bytes on disk, or a seek names
   a position that holds no block of the partition
 - **THEN** the read fails as damaged data
-- **Verified by:** review only — no test damages the bytes of a file;
-  the checks are in `tess_spill_read_header` and `tess_spill_seek` of
-  `runtime/spill.c`
+- **Verified by:**
+  `test/sql/spill.sql::tessera_test_spill_sqlstate(13)`;
+  `test/sql/spill.sql::tessera_test_spill_sqlstate(14)`;
+  `test/sql/spill.sql::tessera_test_spill_sqlstate(15)`;
+  `test/sql/spill.sql::tessera_test_spill_sqlstate(16)`
