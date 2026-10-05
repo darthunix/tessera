@@ -1031,6 +1031,11 @@ becomes an entry, joins one, or is dropped.
     `work_mem`. It would change when the join sends partitions to disk,
     so it needs a change of its own with a measurement
     (`docs/measuring.md`).
+  - Every node passes `MaxAllocHugeSize` as the longest body of its
+    sets, so the bound on the size of a block holds nothing for them: a
+    damaged entry of a shared file's list can ask a reader for a buffer
+    as large as the file's blocks. The join, the grouping and the sort
+    know their longest chunks and could say them.
   - A reader that opens a participant's file before the participant's
     first write to disk gets "no blocks" without an error. The format
     cannot tell this from a participant without blocks or from a worker

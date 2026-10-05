@@ -295,9 +295,9 @@ compared as signed numbers of 64 bits, and a difference is taken modulo
 2^64. A lane whose values are all equal has a width of 0 and takes no
 bytes beyond its descriptor; in a chunk without rows every lane has a
 width of 0 and a least value of 0. The lanes of NULL bits are stored as
-the lanes of words are. Reading
-it back MUST give a chunk with the same rows, words and values, whose
-capacity is its rows. A packed chunk with a width that does not exist, a
+the lanes of words are. Reading it back MUST give a chunk with the same
+rows, words and values, whose capacity is its rows. A packed chunk with
+more rows or words than a chunk holds, a width that does not exist, a
 lane cut short, a length that does not match its counts, or bytes past
 its lanes MUST be refused as damaged data.
 
@@ -335,22 +335,24 @@ its lanes MUST be refused as damaged data.
 
 #### Scenario: A damaged packed chunk of columns
 - **WHEN** a packed chunk of columns is cut short, has a wrong length
-  for its counts, a width of 3 or bytes past its lanes
+  for its counts, a width of 3, bytes past its lanes, or one row more
+  than a chunk of its words holds
 - **THEN** unpacking fails as damaged data
 - **Verified by:**
-  `crates/tessera-spill/src/columns.rs::a_damaged_or_foreign_chunk_is_refused`
+  `crates/tessera-spill/src/columns.rs::a_damaged_or_foreign_chunk_is_refused`;
+  `crates/tessera-spill/src/columns.rs::a_chunk_keeps_within_its_limits`
 
 ### Requirement: A set writes one temporary file
 A set of spilled blocks (`TessSpill`) SHALL write one temporary file,
-made with its first block, in which the blocks of every partition follow
-one another, and SHALL keep for each partition the list of its blocks.
-`tess_spill_write` SHALL return the bytes the block takes in the file,
-the header and the stored body. After `tess_spill_finish` the set only
-reads: a partition's blocks MUST read back in the order they were
-written, and a partition without blocks opens as no reader. A serial
-set's file is a temporary file of PostgreSQL: `temp_file_limit` applies
-to it, and it MUST be gone when the set is freed and, after an ERROR,
-when the query's resources are released.
+made when the set first writes to disk, in which the blocks of every
+partition follow one another, and SHALL keep for each partition the list
+of its blocks. `tess_spill_write` SHALL return the bytes the block takes
+in the file, the header and the stored body. After `tess_spill_finish`
+the set only reads: a partition's blocks MUST read back in the order
+they were written, and a partition without blocks opens as no reader. A
+serial set's file is a temporary file of PostgreSQL: `temp_file_limit`
+applies to it, and it MUST be gone when the set is freed and, after an
+ERROR, when the query's resources are released.
 
 #### Scenario: Blocks of several partitions through one file
 - **WHEN** blocks of records and values, among them an empty one and one
@@ -395,12 +397,14 @@ partitions and the fingerprint. Once a participant has finished its set,
 any participant MUST be able to open that participant's file and read a
 partition's blocks from it, each reader at a position of its own. A file
 without a valid trailer, with the fingerprint of another set than the
-reader's, or whose lists name more blocks than they hold or a block that
-does not lie among the file's blocks or is shorter than a header, MUST
-be refused as damaged data. A participant that wrote no block has no
-file, and its partitions open as no reader. A participant's file is
-deleted when the participant frees its set, and the files that are left
-when the last participant detaches from the shared memory.
+reader's, or whose lists do not fill exactly the bytes between the
+blocks and the trailer, or name a block that does not lie among the
+file's blocks, is shorter than a header or is longer than the longest
+block the set takes, MUST be refused as damaged data. A participant that
+wrote no block has no file, and its partitions open as no reader. A
+participant's file is deleted when the participant frees its set, and
+the files that are left when the last participant detaches from the
+shared memory.
 
 The format has no mark of a finished file. The caller ensures that a
 participant's file is opened only after that participant finished its
@@ -434,8 +438,9 @@ set, and that the opener finished its own.
 #### Scenario: A file without its lists
 - **WHEN** a participant's file ends without a trailer, the trailer's
   magic, counts or fingerprint do not match, a list counts more blocks
-  than the lists hold, or a block's entry ends past the file's blocks or
-  is shorter than a header
+  than the lists hold, in the partition that is opened or in another, or
+  a block's entry ends past the file's blocks, is shorter than a header
+  or is longer than the longest block the set takes
 - **THEN** opening it fails as damaged data
 - **Verified by:**
   `test/sql/spill.sql::tessera_test_spill_sqlstate(7)`;
@@ -444,7 +449,9 @@ set, and that the opener finished its own.
   `test/sql/spill.sql::tessera_test_spill_sqlstate(12)`;
   `test/sql/spill.sql::tessera_test_spill_sqlstate(17)`;
   `test/sql/spill.sql::tessera_test_spill_sqlstate(18)`;
-  `test/sql/spill.sql::tessera_test_spill_sqlstate(22)`
+  `test/sql/spill.sql::tessera_test_spill_sqlstate(22)`;
+  `test/sql/spill.sql::tessera_test_spill_sqlstate(24)`;
+  `test/sql/spill.sql::tessera_test_spill_sqlstate(25)`
 
 ### Requirement: Reading a partition
 `tess_spill_open` SHALL give a reader at a partition's first block with
