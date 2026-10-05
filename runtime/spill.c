@@ -558,12 +558,17 @@ read_trailer(TessSpill *spill, File file, int partition, TessSpillReader *reader
 	reader->count = count;
 	read_at(file, (char *) reader->blocks, mul_size(count, sizeof(SpillBlock)),
 			trailer.offset + counts + sizeof(SpillBlock) * before);
+	/*
+	 * A partition's blocks lie in the order they were written, each whole
+	 * before the next of them, and the last before the lists.
+	 */
 	for (uint64 index = 0; index < count; index++)
 	{
 		const SpillBlock *block = &reader->blocks[index];
+		uint64		end = index + 1 < count ? reader->blocks[index + 1].offset : trailer.offset;
 
-		if (block->offset > trailer.offset ||
-			block->stored > trailer.offset - block->offset)
+		if (end > trailer.offset || block->offset > end ||
+			block->stored > end - block->offset)
 			list_damaged();
 	}
 	return true;
