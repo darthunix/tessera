@@ -1016,7 +1016,8 @@ show_message_window(TessGatherState *state)
 			memcpy(out, lane, sizeof(Datum) * n);
 		else
 			for (uint32 row = 0; row < n; row++)
-				out[row] = isnull[row] ? (Datum) 0 : PointerGetDatum(values + lane[row]);
+				out[row] = isnull[row] ? (Datum) 0 :
+					PointerGetDatum(values + tess_spill_value_byte(lane[row]));
 	}
 	state->window_start = state->next_row;
 	state->next_row += n;
@@ -1177,7 +1178,8 @@ merge_take(TessGatherState *state, int index, uint32 place, int out)
 		else if (state->typbyvals[column])
 			state->values[column][out] = (Datum) word;
 		else
-			state->values[column][out] = PointerGetDatum(source->values + word);
+			state->values[column][out] =
+				PointerGetDatum(source->values + tess_spill_value_byte(word));
 	}
 	if (index == state->nreaders)
 		state->local_rows++;
@@ -1200,7 +1202,7 @@ source_value(TessGatherState *state, const MergeSource *source, int column, uint
 		return (Datum) 0;
 	if (state->typbyvals[column])
 		return (Datum) word;
-	return PointerGetDatum(source->values + word);
+	return PointerGetDatum(source->values + tess_spill_value_byte(word));
 }
 
 /*

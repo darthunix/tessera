@@ -38,6 +38,14 @@ CREATE FUNCTION tessera_test_spill_tablespace(oid)
 RETURNS bigint
 AS :'spill_test', 'tessera_test_spill_tablespace'
 LANGUAGE C STRICT;
+CREATE FUNCTION tessera_test_spill_value()
+RETURNS boolean
+AS :'spill_test', 'tessera_test_spill_value'
+LANGUAGE C STRICT;
+CREATE FUNCTION tessera_test_spill_reset()
+RETURNS boolean
+AS :'spill_test', 'tessera_test_spill_reset'
+LANGUAGE C STRICT;
 SELECT tessera_test_spill_serial() AS serial \gset
 \echo :serial
 t
@@ -51,6 +59,14 @@ t
 -- The C formulas of a chunk's lanes are Rust's at every count of words.
 SELECT tessera_test_spill_lanes() AS lanes \gset
 \echo :lanes
+t
+-- A reference to a by-reference value, and what is none.
+SELECT tessera_test_spill_value() AS value \gset
+\echo :value
+t
+-- A shared file set used again: nothing of its first use is read.
+SELECT tessera_test_spill_reset() AS reset \gset
+\echo :reset
 t
 -- The bytes a set holds, and a chunk longer than its write buffer.
 SELECT tessera_test_spill_memory() AS memory \gset
@@ -198,6 +214,13 @@ SELECT tessera_test_spill_sqlstate(26);
  XX001: Tessera spill file's list of blocks is damaged
 (1 row)
 
+-- A row read back that refers to a value outside its chunk of values.
+SELECT tessera_test_spill_sqlstate(28);
+                        tessera_test_spill_sqlstate                         
+----------------------------------------------------------------------------
+ XX001: Tessera row read back refers to a value outside its chunk of values
+(1 row)
+
 -- A file opened before its writer finished cannot be told from a
 -- damaged one.
 SELECT tessera_test_spill_sqlstate(27);
@@ -291,3 +314,5 @@ DROP FUNCTION tessera_test_spill_lanes();
 DROP FUNCTION tessera_test_spill_memory();
 DROP FUNCTION tessera_test_spill_shared_bytes(bigint);
 DROP FUNCTION tessera_test_spill_tablespace(oid);
+DROP FUNCTION tessera_test_spill_value();
+DROP FUNCTION tessera_test_spill_reset();

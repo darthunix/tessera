@@ -39,6 +39,14 @@ CREATE FUNCTION tessera_test_spill_tablespace(oid)
 RETURNS bigint
 AS :'spill_test', 'tessera_test_spill_tablespace'
 LANGUAGE C STRICT;
+CREATE FUNCTION tessera_test_spill_value()
+RETURNS boolean
+AS :'spill_test', 'tessera_test_spill_value'
+LANGUAGE C STRICT;
+CREATE FUNCTION tessera_test_spill_reset()
+RETURNS boolean
+AS :'spill_test', 'tessera_test_spill_reset'
+LANGUAGE C STRICT;
 
 SELECT tessera_test_spill_serial() AS serial \gset
 \echo :serial
@@ -50,6 +58,12 @@ SELECT tessera_test_spill_packed() AS packed \gset
 -- The C formulas of a chunk's lanes are Rust's at every count of words.
 SELECT tessera_test_spill_lanes() AS lanes \gset
 \echo :lanes
+-- A reference to a by-reference value, and what is none.
+SELECT tessera_test_spill_value() AS value \gset
+\echo :value
+-- A shared file set used again: nothing of its first use is read.
+SELECT tessera_test_spill_reset() AS reset \gset
+\echo :reset
 -- The bytes a set holds, and a chunk longer than its write buffer.
 SELECT tessera_test_spill_memory() AS memory \gset
 \echo :memory
@@ -108,6 +122,8 @@ SELECT tessera_test_spill_sqlstate(24);
 SELECT tessera_test_spill_sqlstate(25);
 -- A block that the list says runs into the next block of its partition.
 SELECT tessera_test_spill_sqlstate(26);
+-- A row read back that refers to a value outside its chunk of values.
+SELECT tessera_test_spill_sqlstate(28);
 -- A file opened before its writer finished cannot be told from a
 -- damaged one.
 SELECT tessera_test_spill_sqlstate(27);
@@ -152,3 +168,5 @@ DROP FUNCTION tessera_test_spill_lanes();
 DROP FUNCTION tessera_test_spill_memory();
 DROP FUNCTION tessera_test_spill_shared_bytes(bigint);
 DROP FUNCTION tessera_test_spill_tablespace(oid);
+DROP FUNCTION tessera_test_spill_value();
+DROP FUNCTION tessera_test_spill_reset();

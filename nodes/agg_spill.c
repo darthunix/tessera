@@ -1016,8 +1016,10 @@ typedef struct RowReader
 	TessSpillReader *file;
 	void	   *chunk;
 	Size		chunk_len;
+	/* The block's chunk of values: its room, and the bytes read into it. */
 	char	   *values;
 	Size		values_len;
+	Size		values_used;
 	uint32		rows;
 	uint32		next;
 	/* The batch given to group_batch: a window of the block. */
@@ -1156,7 +1158,7 @@ rows_write(TessAggState *state, RowSpill *spill, const TessRowMask *rows)
 
 				memcpy(writer->values + writer->values_used,
 					   DatumGetPointer(from->values[row]), size);
-				lane[0] = writer->values_used;
+				lane[0] = TESS_SPILL_VALUE_REF(0, writer->values_used);
 				writer->values_used += MAXALIGN(size);
 			}
 		}
@@ -1263,6 +1265,7 @@ reader_next(TessAggState *state)
 			reader->values = repalloc_huge(reader->values, reader->values_len);
 		}
 		tess_spill_read_body(reader->file, reader->values, header.len);
+		reader->values_used = header.len;
 		if (!tess_spill_read_header(reader->file, &header) ||
 			header.kind != TESS_SPILL_COLUMNS || header.len > reader->chunk_len)
 			ereport(ERROR,
@@ -1286,9 +1289,19 @@ reader_next(TessAggState *state)
 			bool		isnull = tess_spill_columns_is_null(nulls[row], column);
 
 			reader->column_isnull[column][row] = isnull;
-			reader->column_values[column][row] = isnull ? (Datum) 0 :
-				state->computed_byvals[column] ? (Datum) lane[row] :
-				PointerGetDatum(reader->values + lane[row]);
+			if (isnull)
+				reader->column_values[column][row] = (Datum) 0;
+			else if (state->computed_byvals[column])
+				reader->column_values[column][row] = (Datum) lane[row];
+			else
+			{
+				const char *value = tess_spill_value_in(reader->values, reader->values_used,
+														lane[row]);
+
+				if (value == NULL)
+					tess_spill_value_damaged();
+				reader->column_values[column][row] = PointerGetDatum(value);
+			}
 		}
 	}
 	reader->next += take;

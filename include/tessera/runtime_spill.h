@@ -88,6 +88,17 @@ extern void tess_spill_shared_init(SharedFileSet *shared,
 extern void tess_spill_shared_attach(SharedFileSet *shared,
 									 dsm_segment *segment);
 
+/*
+ * Before the file set is used again by a node that runs anew (a rescan):
+ * delete every participant's file. A set takes "no file" for "this
+ * participant wrote no block", so a file of the use before must not stay.
+ * No participant may hold a set or a reader of the file set.
+ */
+extern void tess_spill_shared_reset(SharedFileSet *shared);
+
+/* A row read back refers to a value outside its chunk of values: damaged data. */
+pg_noreturn extern void tess_spill_value_damaged(void);
+
 /* A set of no files yet. */
 extern TessSpill *tess_spill_create(const TessSpillConfig *config);
 

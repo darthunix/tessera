@@ -385,6 +385,7 @@ input_load(TessSortState *state, MergeInput *input)
 				errmsg("TessSort run lost its block of values %d", input->block));
 	input->values = MemoryContextAllocExtended(context, Max(header.len, 8), MCXT_ALLOC_HUGE);
 	tess_spill_read_body(input->reader, input->values, header.len);
+	input->values_len = header.len;
 	if (!tess_spill_read_header(input->reader, &header) || header.kind != TESS_SPILL_COLUMNS)
 		ereport(ERROR,
 				errcode(ERRCODE_DATA_CORRUPTED),
@@ -447,7 +448,13 @@ input_take(TessSortState *state, MergeInput *input, uint32 place, int out,
 		else if (typbyvals[column])
 			values[column][out] = (Datum) word;
 		else
-			values[column][out] = PointerGetDatum(input->values + word);
+		{
+			const char *value = tess_spill_value_in(input->values, input->values_len, word);
+
+			if (value == NULL)
+				tess_spill_value_damaged();
+			values[column][out] = PointerGetDatum(value);
+		}
 	}
 	if (keys != NULL)
 		for (int word = 0; word < state->ext_words; word++)
@@ -468,7 +475,14 @@ input_value(TessSortState *state, MergeInput *input, int column, bool *isnull)
 		return (Datum) 0;
 	if (state->rows_config.typbyvals[column])
 		return (Datum) word;
-	return PointerGetDatum(input->values + word);
+	else
+	{
+		const char *value = tess_spill_value_in(input->values, input->values_len, word);
+
+		if (value == NULL)
+			tess_spill_value_damaged();
+		return PointerGetDatum(value);
+	}
 }
 
 /*
@@ -813,6 +827,7 @@ sort_show_block_of(TessSortState *state, uint64 place)
 				errmsg("TessSort run lost its block of values %d", low));
 	state->shown.values = MemoryContextAllocExtended(context, Max(header.len, 8), MCXT_ALLOC_HUGE);
 	tess_spill_read_body(state->shown.reader, state->shown.values, header.len);
+	state->shown.values_len = header.len;
 	if (!tess_spill_read_header(state->shown.reader, &header) || header.kind != TESS_SPILL_COLUMNS)
 		ereport(ERROR,
 				errcode(ERRCODE_DATA_CORRUPTED),

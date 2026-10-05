@@ -34,6 +34,19 @@ pub const MAX_ROWS: usize = (1 << 17) - 1;
 /// The most stored words: a record's most columns and a sort item's words.
 pub const MAX_WORDS: usize = 4096;
 
+/// Bits of a value's byte in a reference to it; the number of its chunk,
+/// plus one, is above them.
+pub const VALUE_BYTE_BITS: u32 = 32;
+
+/// The word that refers to the by-reference value at `byte` of the chunk
+/// of values numbered `chunk`. It is never 0, which is no reference. A
+/// chunk of columns written with one chunk of values before it refers to
+/// that chunk as number 0.
+#[inline]
+pub fn value_ref(chunk: u32, byte: usize) -> u64 {
+    ((u64::from(chunk) + 1) << VALUE_BYTE_BITS) | byte as u64
+}
+
 /// Lanes of NULL bits in a chunk of `words` stored words.
 #[inline]
 pub fn null_lanes(words: usize) -> usize {

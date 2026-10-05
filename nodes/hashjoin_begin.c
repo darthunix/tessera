@@ -560,7 +560,7 @@ init_shared(TessHashJoinState *state, int participants, dsm_segment *segment)
 		tess_spill_shared_init(&state->parallel.shared->fileset, segment);
 	}
 	else
-		SharedFileSetDeleteAll(&state->parallel.shared->fileset);
+		tess_spill_shared_reset(&state->parallel.shared->fileset);
 	if (budget > SIZE_MAX / Max(state->parallel.shared->participants, 1))
 		budget = SIZE_MAX / Max(state->parallel.shared->participants, 1);
 	state->parallel.shared_budget = budget * state->parallel.shared->participants;

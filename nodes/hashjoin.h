@@ -143,7 +143,7 @@ record_chunk_cost(Size len, Size record_size)
  */
 #define JOIN_VALUE_FIRST (64 * 1024)
 #define JOIN_VALUE_CHUNK (1024 * 1024)
-#define JOIN_VALUE_REF(number, byte) ((((uint64) (number) + 1) << 32) | (uint64) (byte))
+#define JOIN_VALUE_REF(number, byte) TESS_SPILL_VALUE_REF(number, byte)
 
 /* The part of the node's DSM chunk a shared build uses, before the counters. */
 typedef struct JoinShared
