@@ -206,6 +206,10 @@ pub fn unpack(packed: &[u8], chunk: &mut [u8]) -> Result<()> {
             "a packed chunk ends inside its lane {lane}"
         );
         let place = &packed[at..at + need];
+        intact!(
+            lane != LEN_AT / 4 || (code == CONSTANT && word(place, 0) as usize == len / 8),
+            "the records of a packed chunk do not have its record length of {len} bytes"
+        );
         match code {
             ZERO | CONSTANT => {
                 let mut value = [0_u8; 4];
@@ -222,6 +226,11 @@ pub fn unpack(packed: &[u8], chunk: &mut [u8]) -> Result<()> {
         }
         at += need;
     }
+    intact!(
+        at.next_multiple_of(8) == packed.len(),
+        "a packed chunk of {} bytes does not end with its lanes, at {at}",
+        packed.len()
+    );
     Ok(())
 }
 
@@ -346,5 +355,19 @@ mod tests {
         linked.extend_from_slice(&[0_u8; 8]);
         assert!(damaged(unpack(&linked, &mut back)));
         assert_eq!(out[8 + NEXT_LANE], ZERO);
+        // Bytes past the last lane, and a body cut inside its padding.
+        let mut long = out[..packed].to_vec();
+        long.extend_from_slice(&[0_u8; 8]);
+        assert!(damaged(unpack(&long, &mut back)));
+        assert!(packed.is_multiple_of(8));
+        assert!(damaged(unpack(&out[..packed - 1], &mut back)));
+        // Records of another length than the body's: the length's lane is
+        // the fourth, after the counts, the codes and two lanes of a
+        // byte a record.
+        let length_at = 8 + 8 + 10 + 10;
+        assert_eq!(out[length_at..length_at + 4], 3_u32.to_ne_bytes());
+        let mut short = out[..packed].to_vec();
+        short[length_at] = 4;
+        assert!(damaged(unpack(&short, &mut back)));
     }
 }
