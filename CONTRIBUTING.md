@@ -161,7 +161,8 @@ the findings, and what is left.
   it; the check fails when a file it names is gone.
 - Both are self-contained. They outlive the working plan, the roadmap,
   the changes and the pull requests, so they cite none of them and give
-  no dates: what a reader needs is written in the document itself.
+  no dates: what a reader needs is written in the document itself. The
+  check fails on such a reference.
 
 ## Documents
 

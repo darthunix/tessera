@@ -12,7 +12,9 @@
 #    spec.md needs an open change that adds the capability.
 # 4. No closed change is kept: nothing is tracked under
 #    openspec/changes/archive/ (CONTRIBUTING.md, "Closing a change").
-# 5. No line of AGENTS.md, of CONTRIBUTING.md or of the Markdown under
+# 5. No spec or design cites the working plan, the roadmap or a pull
+#    request, or gives a date: they are self-contained.
+# 6. No line of AGENTS.md, of CONTRIBUTING.md or of the Markdown under
 #    openspec/ runs past 80 columns, but in a code block or where it
 #    cannot be broken.
 # Run from the root of the repository.
@@ -167,6 +169,17 @@ done
 if tracked openspec/changes/archive; then
     error "openspec/changes/archive/ keeps a closed change: delete it"
 fi
+
+# What a spec or a design must not lean on: it outlives the plan, the
+# roadmap and the pull requests.
+git ls-files -- 'openspec/specs/*.md' | while read -r document; do
+    grep -n -i -E \
+        'docs/plan|working plan|plan item|roadmap|pull request|[0-9]{4}-[0-9]{2}-[0-9]{2}' \
+        "$document" | sed "s|^|$document:|"
+done > "$list"
+while read -r line; do
+    error "$line: a spec or a design cites the plan, the roadmap, a pull request or a date"
+done < "$list"
 
 # A line of more than 80 columns: allowed in a code block, and where
 # what follows the indent or the list marker is one word, a link or a
