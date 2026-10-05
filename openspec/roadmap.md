@@ -1052,9 +1052,23 @@ becomes an entry, joins one, or is dropped.
   - The one form of a reference to a value (pull request 46) adds an
     operation for each by-reference value appended to a chunk of
     columns, and a check for each one a sort or a grouping reads back.
-    Its cost is not measured: `tessera-bench` for the kernel, the sort
-    and spill families of `bench/pg` for the nodes
-    (`docs/measuring.md`).
+    Its cost is below what the A/B tool flags, and its cause is not
+    found. The cases `runs_text` and `rows_text` of the exec family (a
+    sort whose runs carry text, a grouping by a text key, both at a
+    work_mem of 4 MB) came out 1.0 to 2.6 % slower beyond the control
+    in a run of 51 repetitions and two rounds a side. The tool flags a
+    case past 2 % by both its least time and its median; neither case
+    reached that by its median. The run was on battery power with one
+    core busy by a system service, against `docs/measuring.md`: a run
+    on mains power is owed. The disk written is the same. The machine
+    code differs by the check, about five instructions a value, and by
+    the sort's function that takes a row from a run, no longer inlined,
+    about ten instructions a row. A variant that inlined it again and
+    reported a damaged reference once a row took the same time as this
+    code (0.4 to 1.7 % beyond the control in two runs, one of them with
+    functions aligned to 64 bytes), so it was not kept. No counter
+    benchmark of `tessera-bench` runs the kernels of a spill, so their
+    instructions are not counted.
   - A join checks the chunk a reference names and not the byte in it,
     and no node checks that a value's own length ends inside its chunk.
   - The order of blocks in a partition (values before the blocks that
