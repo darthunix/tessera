@@ -40,6 +40,18 @@ Items 5.6 (spilling), 5.12 (one file a set, a join's outer rows by
 column) and 9.17 (rows appended by the kernels) of
 [the working plan](../../../docs/plan/plan-migration.txt).
 
+Described as a capability by the change `spec-spill-format`, pull
+request 46, 2026-10-05. The text came from `docs/spill.md`, and two of
+its statements were corrected on the way: the writers of chunks of
+columns (the grouping and the external sort, not only the join) and the
+floor of the write buffer (a block, not 32 kB). Left to the capabilities
+of the join and of the grouping: the partition plan
+(`tess_spill_partitions`, `tess_spill_chunk_len`) and how rows are
+appended to a chunk of columns, beyond the layout the append fills. What
+the comparison of the documents, the comments, the code and the tests
+found waits for a decision in [the roadmap](../../roadmap.md), "Not
+placed".
+
 ## What is written
 
 A node spills chunks of its table whole, never rows one by one:

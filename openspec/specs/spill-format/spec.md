@@ -1,11 +1,12 @@
-## Purpose
+# spill-format Specification
 
+## Purpose
 The format of the blocks that the hash nodes and the external sort write
 to temporary files, the checks a reader applies before it trusts a
 block, and the sets of files that hold the blocks. When a node spills
 and what it keeps in memory belong to the node's own capability.
 
-## ADDED Requirements
+## Requirements
 
 ### Requirement: Block header layout
 Every spilled block SHALL begin with a header of 48 bytes in the
