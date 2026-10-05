@@ -444,6 +444,29 @@ mod tests {
     }
 
     #[test]
+    fn a_lane_is_stored_from_its_least_signed_value() -> Result<()> {
+        // The words -1 and 0: the least is -1, and one byte holds the
+        // differences 0 and 1.
+        let chunk = chunk_of(2, 1, &[vec![0, u64::MAX], vec![0, 0]]);
+        let mut out = vec![0xff_u8; pack_bound(2, 1)];
+        let (packed, _) = pack(&chunk, &mut out)?;
+        // The counts, a descriptor for the lane of NULL bits and one for
+        // the word's lane, then the word's lane in 8 bytes.
+        assert_eq!(packed, 8 + 2 * 16 + 8);
+        assert_eq!(out[8..24], [0_u8; 16], "equal NULL bits take no bytes");
+        assert_eq!(out[24], 1, "the width");
+        assert_eq!(out[32..40], u64::MAX.to_ne_bytes(), "the least value");
+        assert_eq!(out[40..48], [0, 1, 0, 0, 0, 0, 0, 0], "the differences");
+        // A chunk without rows: no width and no least value.
+        let empty = chunk_of(2, 1, &[]);
+        let mut out = vec![0xff_u8; pack_bound(0, 1)];
+        let (packed, _) = pack(&empty, &mut out)?;
+        assert_eq!(packed, 8 + 2 * 16);
+        assert_eq!(out[8..40], [0_u8; 32]);
+        Ok(())
+    }
+
+    #[test]
     fn a_chunk_keeps_within_its_limits() -> Result<()> {
         // The most words a row, and one more.
         let mut widest = vec![0_u8; size(1, MAX_WORDS)];

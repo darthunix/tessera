@@ -284,6 +284,18 @@ mod tests {
             _ => 0,
         });
         round_trip(&original);
+        // The code of every lane: whole words, the next-record lane left
+        // out, zeros, the length once, a byte each, two bytes each, one
+        // value for all, zeros; and the bytes they take.
+        let mut out = vec![0_u8; original.len()];
+        let packed = pack(&original, &mut out).expect("packs");
+        assert_eq!(
+            out[8..16],
+            [WORD, ZERO, ZERO, CONSTANT, BYTE, HALF, CONSTANT, ZERO]
+        );
+        // The counts, the codes, then the lanes, padded to 8.
+        let lanes = 4 * 300 + 4 + 300 + 2 * 300 + 4_usize;
+        assert_eq!(packed, (8 + 8 + lanes).next_multiple_of(8));
     }
 
     #[test]
