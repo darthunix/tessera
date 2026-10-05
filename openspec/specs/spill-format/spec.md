@@ -134,9 +134,11 @@ data.
   does not match the chunk it is unpacked into, has a lane code that
   does not exist, stores the lane of the next-record references, has
   records of another length than its own, or has bytes past its lanes
-- **THEN** unpacking fails as damaged data
+- **THEN** unpacking fails as damaged data, and a query that reads such
+  a body from a file raises `XX001`
 - **Verified by:**
-  `crates/tessera-spill/src/pack.rs::damaged_packed_bodies_are_refused`
+  `crates/tessera-spill/src/pack.rs::damaged_packed_bodies_are_refused`;
+  `test/sql/spill.sql::tessera_test_spill_sqlstate(23)`
 
 #### Scenario: The status and SQLSTATE of damage and of misuse
 - **WHEN** the C entry points read a damaged header or unpack a damaged
@@ -240,8 +242,8 @@ kernels MUST agree on this layout.
 
 #### Scenario: The C formulas match the kernels'
 - **WHEN** the C macros and the kernels' entry points compute the lanes
-  of NULL bits and the size of a chunk at every count of words up to
-  4096
+  of NULL bits and the room a packed chunk may take past its lanes at
+  every count of words up to 4096
 - **THEN** they agree, word `w` has its NULL bit at bit `w % 64` of lane
   `w / 64`, and an unknown question to `tess_spill_columns_shape`
   answers 0
@@ -333,7 +335,7 @@ its lanes MUST be refused as damaged data.
 
 #### Scenario: A damaged packed chunk of columns
 - **WHEN** a packed chunk of columns is cut short, has a wrong length
-  for its counts or a width of 3
+  for its counts, a width of 3 or bytes past its lanes
 - **THEN** unpacking fails as damaged data
 - **Verified by:**
   `crates/tessera-spill/src/columns.rs::a_damaged_or_foreign_chunk_is_refused`
@@ -365,11 +367,15 @@ when the query's resources are released.
   accept; the next header is read before the body, or a body at another
   length than its header's; another participant's file of a serial set
   or a second reader of a serial partition is opened; a reader seeks to
-  a position that holds no block of its partition
-- **THEN** each call raises an ERROR, and the seek an internal error,
-  SQLSTATE `XX000`
+  a position that holds no block of its partition; a partition is
+  dropped while a reader of it is open; a block of a kind that does not
+  exist is written
+- **THEN** each call raises an ERROR; the seek, the drop and the unknown
+  kind are internal errors, SQLSTATE `XX000`
 - **Verified by:** `test/sql/spill.sql::tessera_test_spill_error`;
-  `test/sql/spill.sql::tessera_test_spill_sqlstate(16)`
+  `test/sql/spill.sql::tessera_test_spill_sqlstate(16)`;
+  `test/sql/spill.sql::tessera_test_spill_sqlstate(20)`;
+  `test/sql/spill.sql::tessera_test_spill_sqlstate(21)`
 
 #### Scenario: The limit of temporary files stops a spill
 - **WHEN** a set writes more bytes than `temp_file_limit` allows
@@ -390,11 +396,11 @@ any participant MUST be able to open that participant's file and read a
 partition's blocks from it, each reader at a position of its own. A file
 without a valid trailer, with the fingerprint of another set than the
 reader's, or whose lists name more blocks than they hold or a block that
-does not lie among the file's blocks, MUST be refused as damaged data. A
-participant that wrote no block has no file, and its partitions open as
-no reader. A participant's file is deleted when the participant frees
-its set, and the files that are left when the last participant detaches
-from the shared memory.
+does not lie among the file's blocks or is shorter than a header, MUST
+be refused as damaged data. A participant that wrote no block has no
+file, and its partitions open as no reader. A participant's file is
+deleted when the participant frees its set, and the files that are left
+when the last participant detaches from the shared memory.
 
 The format has no mark of a finished file. The caller ensures that a
 participant's file is opened only after that participant finished its
@@ -419,14 +425,17 @@ set, and that the opener finished its own.
   partitions, two readers on one partition among them
 - **THEN** every reader gets that participant's blocks in order, the
   readers do not disturb each other, a partition of the participant
-  without blocks opens as no reader, and a participant that releases
-  its set leaves its file readable by the other
+  without blocks opens as no reader, a partition its writer dropped
+  opens as no reader for the writer and is still read by the other, and
+  a participant that releases its set leaves its file readable by the
+  other
 - **Verified by:** `test/sql/spill.sql::tessera_test_spill_shared`
 
 #### Scenario: A file without its lists
 - **WHEN** a participant's file ends without a trailer, the trailer's
   magic, counts or fingerprint do not match, a list counts more blocks
-  than the lists hold, or a block's entry ends past the file's blocks
+  than the lists hold, or a block's entry ends past the file's blocks or
+  is shorter than a header
 - **THEN** opening it fails as damaged data
 - **Verified by:**
   `test/sql/spill.sql::tessera_test_spill_sqlstate(7)`;
@@ -434,7 +443,8 @@ set, and that the opener finished its own.
   `test/sql/spill.sql::tessera_test_spill_sqlstate(11)`;
   `test/sql/spill.sql::tessera_test_spill_sqlstate(12)`;
   `test/sql/spill.sql::tessera_test_spill_sqlstate(17)`;
-  `test/sql/spill.sql::tessera_test_spill_sqlstate(18)`
+  `test/sql/spill.sql::tessera_test_spill_sqlstate(18)`;
+  `test/sql/spill.sql::tessera_test_spill_sqlstate(22)`
 
 ### Requirement: Reading a partition
 `tess_spill_open` SHALL give a reader at a partition's first block with
@@ -478,3 +488,19 @@ the caller MUST NOT use afterwards.
   `test/sql/spill.sql::tessera_test_spill_sqlstate(14)`;
   `test/sql/spill.sql::tessera_test_spill_sqlstate(15)`;
   `test/sql/spill.sql::tessera_test_spill_sqlstate(19)`
+
+### Requirement: The memory of a set
+`tess_spill_memory` SHALL give the bytes of the buffers a set holds now:
+its write buffer until the set is finished, the buffer through which a
+chunk longer than the write buffer is packed, and the buffer of each
+open reader, which is as large as the largest block of its partition.
+
+#### Scenario: The buffers of a set through its life
+- **WHEN** a chunk of records longer than the write buffer is written to
+  a new set, the set is finished, and a reader of the chunk's partition
+  is opened and closed
+- **THEN** the memory grows by at least the chunk when it is written,
+  falls by the write buffer at the finish, grows by the stored block
+  while the reader is open and falls back when it is closed; the chunk
+  reads back as it was written
+- **Verified by:** `test/sql/spill.sql::tessera_test_spill_memory`
