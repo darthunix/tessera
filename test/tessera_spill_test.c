@@ -1,8 +1,13 @@
 #include "postgres.h"
 
+#include <fcntl.h>
+
 #include "fmgr.h"
 #include "storage/dsm.h"
+#include "storage/fd.h"
+#include "storage/fileset.h"
 #include "utils/memutils.h"
+#include "utils/wait_event.h"
 
 #include "tessera/kernel_ops.h"
 #include "tessera/runtime.h"
@@ -155,6 +160,57 @@ seek_block(TessSpill *spill, int participant, const Block *block)
 	tess_spill_close(reader);
 	pfree(body);
 	return ok;
+}
+
+/*
+ * Where a header keeps its partition, its level and its body length, as
+ * tess_spill_header_write lays them out.
+ */
+#define HEADER_PARTITION_AT 20
+#define HEADER_LEVEL_AT 24
+#define HEADER_LEN_AT 40
+
+/* A participant's file of the test's shared set, opened to be damaged. */
+static File
+open_shared_file(SharedFileSet *shared, int participant)
+{
+	char		name[MAXPGPATH];
+	File		file;
+
+	snprintf(name, sizeof(name), "tess_test.%d", participant);
+	file = FileSetOpen(&shared->fs, name, O_RDWR);
+	if (file <= 0)
+		elog(ERROR, "the test could not open the shared spill file %s", name);
+	return file;
+}
+
+/*
+ * Overwrite len bytes of a participant's finished file: at offset from its
+ * start, or from its end when offset is negative.
+ */
+static void
+damage_shared_file(SharedFileSet *shared, int participant, int64 offset,
+				   const void *bytes, Size len)
+{
+	File		file = open_shared_file(shared, participant);
+
+	if (offset < 0)
+		offset += FileSize(file);
+	if (FileWrite(file, bytes, len, (pgoff_t) offset,
+				  WAIT_EVENT_BUFFILE_WRITE) != (ssize_t) len)
+		elog(ERROR, "the test could not damage the shared spill file");
+	FileClose(file);
+}
+
+/* Cut a participant's finished file to len bytes. */
+static void
+cut_shared_file(SharedFileSet *shared, int participant, int64 len)
+{
+	File		file = open_shared_file(shared, participant);
+
+	if (FileTruncate(file, (pgoff_t) len, WAIT_EVENT_BUFFILE_TRUNCATE) != 0)
+		elog(ERROR, "the test could not cut the shared spill file");
+	FileClose(file);
 }
 
 /*
@@ -341,9 +397,28 @@ tessera_test_spill_error(PG_FUNCTION_ARGS)
 	TessSpill  *spill = make_spill(NULL, 0, FINGERPRINT);
 	TessSpillReader *reader;
 	TessSpillHeader header;
-	dsm_segment *segment;
-	SharedFileSet *shared;
-	TessSpill  *other;
+	dsm_segment *segment = NULL;
+	SharedFileSet *shared = NULL;
+	TessSpill  *other = NULL;
+	TessSpillPosition position;
+	uint64		word8;
+	uint32		word4;
+
+	/*
+	 * Cases 10 to 15 damage a finished file: participant 0 of a shared set
+	 * writes one block and finishes, and participant 1 reads its file.
+	 */
+	if (which >= 10 && which <= 15)
+	{
+		segment = dsm_create(sizeof(SharedFileSet), 0);
+		shared = dsm_segment_address(segment);
+		tess_spill_shared_init(shared, segment);
+		other = make_spill(shared, 0, FINGERPRINT);
+		write_blocks(other, &block, 1);
+		tess_spill_finish(other);
+		other = make_spill(shared, 1, FINGERPRINT);
+		tess_spill_finish(other);
+	}
 
 	switch (which)
 	{
@@ -406,6 +481,52 @@ tessera_test_spill_error(PG_FUNCTION_ARGS)
 			tess_spill_finish(spill);
 			tess_spill_open(spill, 0, 0);
 			tess_spill_open(spill, 0, 0);
+			break;
+		case 10:
+			/* A shared file that ends before its lists and its trailer. */
+			cut_shared_file(shared, 0, 16);
+			tess_spill_open(other, 0, 0);
+			break;
+		case 11:
+			/* A trailer without its magic. */
+			word8 = 0;
+			damage_shared_file(shared, 0, -32, &word8, sizeof(word8));
+			tess_spill_open(other, 0, 0);
+			break;
+		case 12:
+			/* A trailer of another number of partitions than the set's. */
+			word8 = 5;
+			damage_shared_file(shared, 0, -16, &word8, sizeof(word8));
+			tess_spill_open(other, 0, 0);
+			break;
+		case 13:
+			/* A block whose header names another partition than the list's. */
+			word4 = 2;
+			damage_shared_file(shared, 0, HEADER_PARTITION_AT, &word4, sizeof(word4));
+			reader = tess_spill_open(other, 0, 0);
+			tess_spill_read_header(reader, &header);
+			break;
+		case 14:
+			/* A block whose header names another level than the set's. */
+			word4 = 2;
+			damage_shared_file(shared, 0, HEADER_LEVEL_AT, &word4, sizeof(word4));
+			reader = tess_spill_open(other, 0, 0);
+			tess_spill_read_header(reader, &header);
+			break;
+		case 15:
+			/* A header whose body length is not the block's on disk. */
+			word8 = block.len + 8;
+			damage_shared_file(shared, 0, HEADER_LEN_AT, &word8, sizeof(word8));
+			reader = tess_spill_open(other, 0, 0);
+			tess_spill_read_header(reader, &header);
+			break;
+		case 16:
+			/* A seek to a position that holds no block of the partition. */
+			write_blocks(spill, &block, 1);
+			tess_spill_finish(spill);
+			reader = tess_spill_open(spill, 0, 0);
+			position.offset = 8;
+			tess_spill_seek(reader, position);
 			break;
 	}
 	PG_RETURN_VOID();
