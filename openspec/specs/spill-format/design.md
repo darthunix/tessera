@@ -7,7 +7,9 @@ reads them back later. This is called spilling.
 This page explains what Tessera writes, how the files are arranged, and
 why. The exact bytes, limits and errors are in [spec.md](spec.md). When
 a node decides to spill, and how it divides its rows, is described in
-[docs/spill.md](../../../docs/spill.md).
+[docs/spill.md](../../../docs/spill.md) for the join and the grouping,
+and in [docs/nodes.md](../../../docs/nodes.md), "External sort", for
+the sort.
 
 ## Background: rows, batches, records
 
@@ -128,27 +130,36 @@ numbers have not been measured there yet.
    to 9 % faster.
    - *The cost.* After a partition has been read, its bytes stay on disk
      until the whole file is deleted.
-5. **A wrong block is an error, never a wrong answer.** A reader checks
-   every header and every packed body before it uses them. If a check
-   fails, the query stops with the error "damaged data".
-   - *What is not checked.* There is no checksum of the body. A
-     temporary file is read by the same query that wrote it, on the same
-     machine. PostgreSQL does not checksum its own temporary files
-     either.
+5. **A block that fails a check is an error.** A reader checks every
+   header and every packed body before it uses them. If a check fails,
+   the query stops with the error "damaged data". The checks find a
+   block of another table, a block in a wrong place, and a body that
+   does not fit its header.
+   - *What is not checked.* There is no checksum of the body, so a
+     changed byte inside a value is not noticed. The lists of blocks of
+     a shared file are trusted as they are read. A temporary file is
+     read by the same query that wrote it, on the same machine.
+     PostgreSQL does not checksum its own temporary files either.
 6. **The memory for a read is known before the read starts.** The header
    of a block holds two sizes: the size of the body on disk and the size
    of the chunk in memory. For each partition the node also knows the
    size of its largest block, and the reader's buffer has exactly that
    size.
+   - *What this does not cover.* The lists of blocks take memory too:
+     16 bytes for each block, and they grow with the amount spilled. A
+     reader of another participant's file keeps its own copy of a list.
+     `tess_spill_memory` does not count the lists, and a node does not
+     count them against its memory limit.
 7. **Any process of the query can read any file.** Nothing on disk is a
-   memory address. A reference to a long value is the number of a chunk
-   and a position in that chunk. In a parallel query, the list of the
-   blocks of a file is written into the file itself, because a reader
-   cannot see the writer's memory.
-8. **Only one source file uses PostgreSQL's file functions.** All calls
-   to PostgreSQL's file layer are in `runtime/spill.c`. A database with
-   a different manager of work files, such as Greengage, replaces only
-   this file.
+   memory address. A reference to a long value is a position in a chunk
+   of values (see "Values"). In a parallel query, the list of the blocks
+   of a file is written into the file itself, because a reader cannot
+   see the writer's memory.
+8. **Almost all calls to PostgreSQL's file functions are in one source
+   file**, `runtime/spill.c`. There is one exception: when a parallel
+   join is scanned again, the join itself deletes the files of its
+   shared sets. A database with a different manager of work files, such
+   as Greengage, replaces these places.
 
 ## The whole in one picture
 
@@ -187,17 +198,20 @@ bytes it takes. To read a partition, a reader goes through its list.
   to disk whole. There are three kinds: records, long values, columns.
 - A **block** is a chunk on disk: a header of 48 bytes, then the body.
   The body is the chunk itself or its packed form.
-- A **partition** is a group of rows whose hashes have the same value
-  in some of their bits. A node reads a partition back whole, when it
-  has memory for it.
-- A **level** says how many times the rows were divided. Sometimes a
-  partition is read back and still does not fit in memory. Then it is
-  divided again, by other bits of the hash. The first division is level
-  0, the next is level 1, and so on.
+- A **partition** is a group of rows that a node writes together and
+  reads back together. In a join and in a grouping it is the rows whose
+  hashes have the same value in some of their bits. In a sort it is one
+  sorted run. A set keeps a list of blocks for each partition.
+- A **level** says how many times a join or a grouping divided its
+  rows. Sometimes a partition is read back and still does not fit in
+  memory. Then it is divided again, by other bits of the hash. The first
+  division is level 0, the next is level 1, and so on. A sort always
+  uses level 0.
 - A **set** (`TessSpill` in the code) is one group of blocks with one
-  file and one group of lists. A node makes a set for one level and for
-  one kind of rows. For example, at each level a join has two sets: one
-  for its inner rows and one for its outer rows.
+  file and one group of lists. A join and a grouping make a set for one
+  level and for one kind of rows. For example, at each level a join has
+  two sets: one for its inner rows and one for its outer rows. A sort
+  makes a set for a group of runs.
 - A **participant** is one process of a parallel query: the leader or a
   worker.
 - A **fingerprint** is a number that describes the layout of the data.
@@ -222,13 +236,13 @@ format, and which version of the format.
 
 **kind.** It says which of the three kinds of chunk the body is.
 
-**number.** A node numbers its chunks: 0, 1, 2, and so on. The header
-keeps the number of the chunk. This matters for chunks of long values.
-A reference to a long value contains the number of its chunk. So when
-a node reads a block of values, it takes the number from the header and
-stores the address of the chunk in an array, at the index equal to this
-number. After that every reference to this chunk works again (see
-"Values" below).
+**number.** The writer gives every block a number. Only a join uses it
+when it reads. A join numbers its chunks of long values 0, 1, 2, and so
+on, and its references contain these numbers. So when a join reads a
+block of values, it takes the number from the header and stores the
+address of the chunk in an array, at the index equal to this number.
+After that every reference to this chunk works again. A sort and the
+waiting rows of a grouping do not need the number (see "Values").
 
 **partition and level.** The reader knows which partition and which
 level it is reading. It finds a block through the list of blocks of
@@ -247,19 +261,26 @@ into every header, and the reader compares it with its own.
 - A join has a table layout for each of its two sides. It uses the
   fingerprint of the side's layout, also for the outer rows that it
   writes as columns.
-- A grouping and a sort write rows that have no table. They use a
-  simple number that describes a row. A grouping uses the number of
-  8-byte words in a row. A sort combines the number of its columns with
-  the number of extra words it stores for each row.
+- A grouping has two kinds of set. The set with its records uses the
+  fingerprint of its hash table. The set with its waiting rows has no
+  table, so it uses a simple number: the number of 8-byte words in a
+  row.
+- A sort has no table either. It combines the number of its columns
+  with the number of extra words it stores for each row.
+
+A number of the last two kinds says only how wide a row is. It does not
+say what the types of the columns are.
 
 A matching fingerprint is the first check. When a hash table takes a
 chunk of records in, it checks the records again, as it checks any
 chunk.
 
 **body length and packed length.** These are the two sizes from goal 6.
-The body length is the size of the chunk in memory. The packed length
-is the size of the body on disk when it is packed, and 0 when it is not
-packed.
+The body length is the size of the chunk that the reader gets. For
+records and values this is the chunk as it was written. For columns it
+is a chunk that holds only the rows, without the free space of the
+chunk that was written. The packed length is the size of the body on
+disk when it is packed, and 0 when it is not packed.
 
 The numbers in the header use the byte order of the machine. There is
 no checksum. Goal 5 explains why.
@@ -330,10 +351,40 @@ written without packing.
 A text, or any other value that does not fit in 8 bytes, does not lie
 inside a record or a column. PostgreSQL calls such values by-reference
 values. Tessera copies them into chunks of values. The record or the
-column holds a reference to the value in one word of 8 bytes:
+column holds a reference to the value in one word of 8 bytes.
+
+A reference is never a memory address. So it stays correct after the
+chunk has been on disk, and it is correct in another process.
+
+There are two forms of reference. The node that writes a block chooses
+the form, and the same kind of node reads it.
+
+**Form 1: a position in the paired chunk.** A sort and the waiting rows
+of a grouping use this form. They always write two blocks together:
+first a block of values, and right after it the block of columns that
+refers to it. This holds even when the block of values is empty. The
+word of a row is the position of its value in that chunk of values, in
+bytes.
 
 ```
- a reference: one word of 8 bytes
+ block of values                  block of columns, written next
+ ┌───────┬───────┬─────────┐      ┌──────────┬──────────┬─────────┐
+ │ Kazan │ Omsk  │ …       │ ◄─── │ word = 0 │ word = 8 │ …       │
+ └───────┴───────┴─────────┘      └──────────┴──────────┴─────────┘
+ byte 0   byte 8
+
+ address of a value = start of the chunk of values + word
+```
+
+In this form 0 is a normal position: the first value of the chunk has
+it. A NULL is known only from the NULL bit of the word.
+
+**Form 2: a chunk number and a position.** A join uses this form, for
+its records and for its outer rows. A join keeps many chunks of values
+and numbers them 0, 1, 2, and so on.
+
+```
+ a reference of a join: one word of 8 bytes
   bit 63                      32 31                           0
  ┌──────────────────────────────┬──────────────────────────────┐
  │ number of the chunk, plus 1  │ byte in the chunk            │
@@ -343,15 +394,11 @@ column holds a reference to the value in one word of 8 bytes:
 
 The upper half is the number of the chunk of values, plus one. The
 lower half is the position of the value in that chunk, in bytes. One is
-added so that a real reference is never 0.
-
-A reference is not a memory address. So it stays correct after the
-chunk has been on disk, and it is correct in another process. To find
-the value, a node keeps an array with the addresses of its chunks of
-values:
+added so that a real reference is never 0. To find the value, a join
+keeps an array with the addresses of its chunks of values:
 
 ```
- the node's array of chunks of values     chunk of values number 2
+ the join's array of chunks of values     chunk of values number 2
  ┌─────┐                                  ┌──────────────────────────┐
  │ [0] │ ──► chunk 0                      │ …        │ Kazan │ …     │
  │ [1] │ ──► chunk 1                      └──────────────────────────┘
@@ -362,10 +409,12 @@ values:
  address of the value = array[2] + 40
 ```
 
-When a node reads a block of values back, it puts the address of the
+When a join reads a block of values back, it puts the address of the
 new chunk into this array, at the index from the header's `number`. The
 address may be different from the old one. The references do not
-change, and they work again.
+change, and they work again. A join writes a chunk of values before the
+chunks that refer to it, so a reader has the values in memory when it
+meets a reference to them.
 
 A chunk of values is written as it is, without packing. Its bytes are
 the values themselves.
@@ -373,7 +422,9 @@ the values themselves.
 ### Columns
 
 A chunk of columns holds rows in the same way as a batch: as columns.
-It is used for the rows that only wait on disk (goal 3).
+It is used for the rows that only wait on disk (goal 3). The gather
+node also uses such chunks to pass rows from one process to another,
+without a file.
 
 In memory, a chunk of columns has a small header and then lanes. A lane
 is an array with one 8-byte word for each row. Row number `i` is word
@@ -411,8 +462,10 @@ and need few bytes.
 
 ## The files
 
-A set has one file. The file is created when the first block is
-written. The set also keeps the lists of blocks, one list for each
+A set has one file. The file is created when the write buffer goes to
+disk for the first time, not when the first block is given. So an error
+of creating the file can come from a later write, or from the end of
+the writing. The set also keeps the lists of blocks, one list for each
 partition. An entry of a list holds two numbers: where the block starts
 in the file, and how many bytes it takes, with its header.
 
@@ -426,10 +479,12 @@ in the file, and how many bytes it takes, with its header.
 ```
 
 A block does not go to the file at once. It first goes to the write
-buffer of the set. The buffer is one sixteenth of `hash_mem`, but not
-less than 8 kB and not more than 256 kB. A block larger than the buffer
-is written directly. A larger buffer would not help much: the time of a
-write depends mostly on its bytes, not on the number of calls.
+buffer of the set. A join and a grouping ask for a buffer of one
+sixteenth of `hash_mem`, a sort for one sixteenth of `work_mem`. The
+buffer is never less than 8 kB and never more than 256 kB. A block
+larger than the buffer is written directly. A larger buffer would not
+help much: the time of a write depends mostly on its bytes, not on the
+number of calls.
 
 There are two kinds of set.
 
@@ -450,9 +505,31 @@ The spec draws the end of such a file and the trailer
 
 A reader of a shared file first reads the trailer at the end of the
 file. The trailer says where the lists start. The reader then reads the
-list of the partition it needs, and then the blocks of that list. The
-files of a shared set are deleted when the last participant leaves the
-shared memory of the query.
+list of the partition it needs, and then the blocks of that list.
+
+`temp_file_limit` applies to the files of a shared set too. PostgreSQL
+counts it for each process separately, and the lists and the trailer
+count as well.
+
+A participant's file is deleted when the participant frees its set. A
+parallel join also deletes all files of its shared sets when it is
+scanned again. Any file that is left is deleted when the last
+participant leaves the shared memory of the query.
+
+**What the caller must do.** The format has no mark that says "this
+file is finished" or "this participant wrote nothing".
+
+- A participant that wrote no block has no file. Opening its file gives
+  no reader.
+- A file that does not exist yet gives the same answer. So a reader
+  must not open another participant's file before that participant has
+  finished its set. If it does, it gets "no blocks" and rows are lost
+  without an error. If the file exists but is not finished, it gets the
+  error "damaged data".
+- A participant must finish its own set before it opens any file.
+
+The nodes keep this order with barriers of their own. The format does
+not check it.
 
 ## Writing and reading
 
@@ -481,25 +558,30 @@ A set first only writes, and then only reads.
    is unpacked; any other body is copied.
 
 `tess_spill_seek` moves a reader to one block. The caller gives the
-position that `tess_spill_write` returned for that block. In a parallel
-query this lets each participant take different blocks of the same
-partition.
+position that `tess_spill_write` returned for that block. A sort uses
+it to go to a block inside a run.
 
 A partition of a serial set can have only one reader at a time. A
 reader of another participant's file opens the file for itself.
 
-`tess_spill_drop` removes the list of a partition after the partition
-has been read. The bytes stay in the file until the set is freed. So
-the disk space of a level is freed all at once, not partition by
-partition. For a join this does not raise the largest amount of disk
-used: all outer rows are written before the first partition is joined.
+`tess_spill_drop` removes the caller's list of a partition after the
+partition has been read. In a shared set the other participants still
+read the partition through the list in the file. The bytes stay in the
+file until the set is freed. So the disk space of a set is freed all at
+once, not partition by partition.
+
+This has a cost when a partition is divided again. The node copies the
+partition into the sets of the next level, while the whole file of the
+level above is still on disk. With one file for each partition, the
+partitions already read would be gone by then.
 
 `tess_spill_stats` returns the number of blocks, the number of bytes
 written, and the number of partitions that have blocks.
 `tess_spill_memory` returns the current size of the buffers.
 `tess_spill_free` frees the set and deletes this participant's file.
 `tess_spill_release` only closes a shared set; other participants may
-still read its file.
+still read its file. Both calls close every open reader of the set, so
+the caller must not use such a reader afterwards.
 
 ## What a reader rejects
 
@@ -545,7 +627,8 @@ format:
 - what a node keeps in memory;
 - how rows are added to a chunk of columns.
 
-[docs/spill.md](../../../docs/spill.md) describes them.
+[docs/spill.md](../../../docs/spill.md) describes them for the join and
+the grouping, [docs/nodes.md](../../../docs/nodes.md) for the sort.
 
 ## Files
 
