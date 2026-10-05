@@ -132,8 +132,10 @@ and the same join without the skew 46 against 164 (bench family exec,
 
 TessAgg spills a table of its own ([nodes.md](nodes.md), "Spilling"
 under TessAgg). A group's record holds its keys and its states, no
-by-reference value, so only chunks of records go to disk, one file per
-partition and level.
+by-reference value, so its table sends only chunks of records to disk,
+into one file for a level. The rows it sets aside for a partition that
+is on disk go as chunks of columns, each after a chunk of the values it
+refers to.
 
 **States, not rows.** The core's hash aggregate stops creating groups
 once full and writes the input rows of new groups; TessAgg writes a

@@ -1019,34 +1019,8 @@ becomes an entry, joins one, or is dropped.
 - **The first VACUUM after COPY on master** (plan 8.1, lines 6334–6337)
   freezes rows but marks no page all-visible: possibly a bug of the
   core, not analysed. Suggested: report upstream, or drop.
-- **`spill-format`: comments and documents against the code** (found
-  when the capability was described, pull request 46). Suggested: one
-  small pull request that corrects them.
-  - Two kinds of block are named where there are three:
-    `crates/tessera-spill/src/lib.rs:3-5`, `include/tessera/spill.h:4-7`
-    and `:44-47`, `crates/tessera-capi/src/c/spill.rs:24` and `:32`.
-  - The write buffer: `include/tessera/runtime_spill.h:66-67` says 32 to
-    256 kB; the macro below it has had `BLCKSZ` as its floor since
-    commit 7e307c8.
-  - `len` of a packed block: `include/tessera/spill.h:42` calls it
-    "bytes of the body after the header"; for a packed block those are
-    the packed bytes, and `len` is the size in memory.
-  - "A partition's file": `include/tessera/runtime_spill.h:94` and
-    `:109`, and the comments of `test/tessera_spill_test.c:161-164`. A
-    set has one file, and `files` of `tess_spill_stats` counts the
-    partitions that have blocks.
-  - The checks of a read: `include/tessera/spill.h:71-73` and
-    `crates/tessera-capi/src/c/spill.rs:103-105` list them without the
-    packed length and the level.
-  - `docs/spill.md`, "In the grouping", says the grouping writes only
-    chunks of records, one file per partition and level;
-    `nodes/agg_spill.c:1092-1094` also writes values and columns. For
-    the grouping's capability.
-  - `crates/tessera-capi/tests/spill.rs:219-225`: a doc comment written
-    for a test sits on the helper `at`.
-- **`spill-format`: the code against its own intent** (the same source).
-  Suggested: a change, since what a reader refuses is part of the
-  format.
+- **`spill-format`: the code against its own intent** (found when the
+  capability was described and reviewed, pull request 46).
   - The lists of blocks are memory that nobody counts: 16 bytes a block
     in arrays that double, and a copy for every reader of another
     participant's file. `tess_spill_memory` leaves them out.
@@ -1054,7 +1028,8 @@ becomes an entry, joins one, or is dropped.
     first write to disk gets "no blocks" without an error. The format
     has no mark of a finished or of an empty file; the nodes' barriers
     are the only guard.
-- **`spill-format`: promises left out of the spec** (the same source).
+- **`spill-format`: promises left out of the spec** (the same
+  source).
   Suggested: a test for each, one promise at a time; the promise then
   enters the spec.
   - Nothing shows them: `tess_spill_memory`;
@@ -1079,9 +1054,10 @@ becomes an entry, joins one, or is dropped.
   - The scenario "The C formulas match the kernels'" may say more than
     its tests compare (the size of a chunk); to be read against
     `test/tessera_spill_test.c` and `crates/tessera-capi/tests/table.rs`.
-  - `docs/spill.md` and comments of `nodes/hashjoin.h` and
-    `nodes/agg_spill.c` still speak of a buffer for each partition's
-    file, and one comment of outer rows written as records.
+  - `docs/spill.md` and the comments of the reserves in
+    `nodes/hashjoin.h` and `nodes/agg_spill.c` still count a buffer of a
+    page for each partition's file, though a set has one buffer. Whether
+    the reserves themselves are still right is to be decided.
 
 ## Decided against
 
