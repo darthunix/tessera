@@ -510,16 +510,25 @@ the caller MUST NOT use afterwards.
 
 ### Requirement: The memory of a set
 `tess_spill_memory` SHALL give the bytes of the buffers a set holds now:
-its write buffer until the set is finished, the buffer through which a
-chunk longer than the write buffer is packed, and the buffer of each
-open reader, which is as large as the largest block of its partition.
+its write buffer until the set is finished, the lists of its blocks as
+they are allocated, 16 bytes for the place of a block, the buffer
+through which a chunk longer than the write buffer is packed, and for
+each open reader its buffer, which is as large as the largest block of
+its partition, and its own copy of the list when it reads another
+participant's file.
 
 #### Scenario: The buffers of a set through its life
-- **WHEN** a chunk of records longer than the write buffer is written to
-  a new set, the set is finished, and a reader of the chunk's partition
-  is opened and closed
-- **THEN** the memory grows by at least the chunk when it is written,
-  falls by the write buffer at the finish, grows by the stored block
-  while the reader is open and falls back when it is closed; the chunk
+- **WHEN** a small block and then a chunk of records longer than the
+  write buffer are written to a new set, the set is finished, a reader of
+  the chunk's partition is opened and closed, and the small block's
+  partition is dropped; and a reader of another participant's file is
+  opened
+- **THEN** the memory grows by a list, in places of 16 bytes, with the
+  first block of a partition, and by at least the chunk when the chunk
+  is written; it falls by the write buffer at the finish, grows by the
+  stored block while the reader is open, falls back when it is closed,
+  and falls by the list when the partition is dropped; the reader of
+  another's file adds its buffer and its copy of the list; the chunk
   reads back as it was written
-- **Verified by:** `test/sql/spill.sql::tessera_test_spill_memory`
+- **Verified by:** `test/sql/spill.sql::tessera_test_spill_memory`;
+  `test/sql/spill.sql::tessera_test_spill_shared`
