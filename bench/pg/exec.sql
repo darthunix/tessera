@@ -3,8 +3,9 @@
 -- time to a parent of the core; text keys whose abbreviated keys
 -- tell nothing apart, under ICU and under "C", and a control whose do; a
 -- join whose outer keys are half one key, spilling, and a control without
--- the skew; the planning of a query of many expressions. A ratio of
--- Tessera on to off below one is the win.
+-- the skew; a sort and a grouping past work_mem whose rows carry text; the
+-- planning of a query of many expressions. A ratio of Tessera on to off
+-- below one is the win.
 \set ON_ERROR_STOP on
 \if :{?repetitions}
 \else
@@ -131,6 +132,15 @@ SELECT pg_temp.measure_pair('skew_join',
 SELECT pg_temp.measure_pair('even_join',
     'SELECT count(*), sum(d.d1) FROM bench_fact AS f JOIN bench_dim AS d ON f.fk = d.id',
     '1MB', true, :repetitions);
+-- Text past work_mem: a sort whose runs carry a text column that a parent
+-- reads back from them, and a grouping by a text key whose rows wait on
+-- disk for their partition.
+SELECT pg_temp.measure_pair('runs_text',
+    'SELECT count(t) FROM (SELECT k4, t FROM bench_sort ORDER BY k4) AS s',
+    '4MB', true, :repetitions);
+SELECT pg_temp.measure_pair('rows_text',
+    'SELECT count(*), sum(s) FROM (SELECT b, sum(d) AS s FROM bench_mixed GROUP BY b) AS g',
+    '4MB', true, :repetitions);
 -- Planning alone: EXPLAIN of thirty aggregates of expressions and a
 -- filter, planned every time.
 SELECT pg_temp.measure_pair('plan_exprs',
