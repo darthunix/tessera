@@ -8,12 +8,14 @@ and what it keeps in memory belong to the node's own capability.
 
 A chunk is a piece of a node's memory that is written whole: records of
 a hash table, the values they refer to, or rows kept by column. A block
-is a chunk on disk: a header, then the stored body. A set is what one
-node writes at one level of partitioning; its partitions are read back
-one at a time. The requirements go from the smallest piece to the
-largest: the header of a block, the three kinds of body and their packed
-forms, the file of a set, a shared set, reading a partition.
-[design.md](design.md) explains the whole and the reasons.
+is a chunk on disk: a header, then the stored body. A set is the blocks
+a node writes into one file, with a list of the blocks of each of its
+partitions. For a join and a grouping a partition is the rows of some
+bits of the hash, and a set belongs to one level of partitioning; for
+the sort a partition is one sorted run. The requirements go from the
+smallest piece to the largest: the header of a block, the three kinds of
+body and their packed forms, the file of a set, a shared set, reading a
+partition. [design.md](design.md) explains the whole and the reasons.
 
 ## Requirements
 
@@ -34,15 +36,20 @@ machine's byte order, followed by the stored body.
       48   the stored body
 ```
 
-- magic: the bytes `TESSSPIL`;
+- magic: a number of 64 bits whose bytes are `TESSSPIL` on a
+  little-endian machine;
 - version: the version of the format, 2;
 - kind: 1 records, 2 values, 3 columns;
-- number: the number of the chunk in its table;
+- number: a number the writer gives the chunk; a join finds a chunk
+  of values by it;
 - partition, and level: the level of partitioning, 0 for the first;
 - packed: the packed length, the bytes of the stored body when it is
   stored packed, 0 when it is stored as it is;
-- fingerprint: of the table's layout;
-- body length: the bytes of the chunk in memory.
+- fingerprint: the number the set was made with, which a reader
+  compares with its own: of a hash table's layout, or of the width of
+  a row;
+- body length: the bytes of the chunk a reader gets; for kind 3 this
+  is a chunk of its rows only.
 
 The header carries no checksum: a temporary file is read by the query
 that wrote it, on the same machine.
@@ -246,9 +253,9 @@ kernels MUST agree on this layout.
 
 ### Requirement: The limits of a chunk of columns
 A chunk of columns SHALL hold at most 4096 words a row and at most
-131071 rows. Bytes that are too short for the header, of a length that
-is no multiple of 8, or without the magic MUST be refused as a chunk of
-columns.
+131071 rows. A chunk MUST NOT be made in bytes that are too short for
+the header or of a length that is no multiple of 8, and bytes without
+the magic MUST be refused as a chunk of columns.
 
 #### Scenario: A chunk that is not one of columns
 - **WHEN** a chunk of 8 bytes is initialized, or a chunk whose magic is
@@ -271,9 +278,12 @@ A chunk of columns SHALL be stored packed, for its rows only: the rows
 lane (the width in its first byte, the lane's least value in its last
 8), then each lane's values as their difference from the least value in
 0, 1, 2, 4 or 8 bytes each, the fewest that hold the lane's largest
-difference, a lane padded to a multiple of 8. A lane whose values are
-all equal has a width of 0 and takes no bytes beyond its descriptor. The
-lanes of NULL bits are stored as the lanes of words are. Reading
+difference, a lane padded to a multiple of 8. The words of a lane are
+compared as signed numbers of 64 bits, and a difference is taken modulo
+2^64. A lane whose values are all equal has a width of 0 and takes no
+bytes beyond its descriptor; in a chunk without rows every lane has a
+width of 0 and a least value of 0. The lanes of NULL bits are stored as
+the lanes of words are. Reading
 it back MUST give a chunk with the same rows, words and values, whose
 capacity is its rows. A packed chunk with a width that does not exist, a
 lane cut short, a length that does not match its counts, or bytes past
@@ -295,10 +305,14 @@ its lanes MUST be refused as damaged data.
 
 #### Scenario: Lanes pack at the width of their span
 - **WHEN** a chunk with lanes of equal values and of spans that need 1,
-  2, 4 and 8 bytes is packed and unpacked
-- **THEN** the packed length is the sum of those widths and the chunk reads back
+  2, 4 and 8 bytes is packed and unpacked, and a chunk whose lane holds
+  -1 and 0 is packed
+- **THEN** the packed length is the sum of those widths and the chunk
+  reads back; the lane of -1 and 0 has a least value of -1, a width of 1
+  byte and the bytes 0 and 1
 - **Verified by:**
-  `crates/tessera-spill/src/columns.rs::lanes_pack_at_the_width_of_their_span_and_read_back`
+  `crates/tessera-spill/src/columns.rs::lanes_pack_at_the_width_of_their_span_and_read_back`;
+  `crates/tessera-spill/src/columns.rs::a_lane_is_stored_from_its_least_signed_value`
 
 #### Scenario: Empty and full chunks
 - **WHEN** a chunk with no rows and a chunk filled to its capacity are
@@ -356,13 +370,20 @@ query's shared file set, named `<name>.<participant>`.
 `tess_spill_finish` SHALL write after the blocks the lists of the
 blocks: a count of blocks for each partition (8 bytes each), then for
 each block of each partition where it starts and the bytes it takes (8
-bytes each), then a trailer of four words of 8 bytes: a magic, where the
-lists start, the number of partitions and the fingerprint. Once a
-participant has finished its set, any participant MUST be able to open
-that participant's file and read a partition's blocks from it, each
-reader at a position of its own. A file without a valid trailer MUST be
-refused as damaged data. The files are deleted when the last participant
-detaches from the shared memory.
+bytes each), then a trailer of four words of 8 bytes: a magic (the
+number 0x5445535354524149), where the lists start, the number of
+partitions and the fingerprint. Once a participant has finished its set,
+any participant MUST be able to open that participant's file and read a
+partition's blocks from it, each reader at a position of its own. A file
+without a valid trailer MUST be refused as damaged data. A participant
+that wrote no block has no file, and its partitions open as no reader. A
+participant's file is deleted when the participant frees its set, and
+the files that are left when the last participant detaches from the
+shared memory.
+
+The format has no mark of a finished file. The caller ensures that a
+participant's file is opened only after that participant finished its
+set, and that the opener finished its own.
 
 ```
  ┌────────┬─────┬─────────────────┬────────────────────┬─────────────┐
@@ -378,12 +399,13 @@ detaches from the shared memory.
 ```
 
 #### Scenario: A participant reads another's file
-- **WHEN** two participants write blocks to a shared set, finish, and
-  each opens the other's partitions, two readers on one partition among
-  them
+- **WHEN** two participants write blocks to a shared set and a third
+  writes none, they finish, and each of the two opens the other's
+  partitions, two readers on one partition among them
 - **THEN** every reader gets that participant's blocks in order, the
-  readers do not disturb each other, and releasing a set leaves the
-  other's file readable
+  readers do not disturb each other, a partition of the participant
+  without blocks opens as no reader, and a participant that releases
+  its set leaves its file readable by the other
 - **Verified by:** `test/sql/spill.sql::tessera_test_spill_shared`
 
 #### Scenario: A file without its lists
@@ -404,11 +426,11 @@ fingerprint and longest body, the partition, the level and the bytes on
 disk; it answers false at the partition's end. `tess_spill_read_body`
 SHALL then give the body, unpacked when it was stored packed.
 `tess_spill_seek` SHALL move a reader to a block by the position
-`tess_spill_write` returned for it. `tess_spill_drop` SHALL forget a
-partition's blocks, which then opens as no reader; the bytes stay in the
-file until the set goes. `tess_spill_stats` SHALL give the blocks and
-the bytes written, headers included, and the partitions that have
-blocks.
+`tess_spill_write` returned for it. `tess_spill_drop` SHALL forget the
+caller's list of a partition's blocks, which the caller then opens as no
+reader; the bytes stay in the file until the set goes.
+`tess_spill_stats` SHALL give the blocks and the bytes written, headers
+included, and the partitions that have blocks.
 
 #### Scenario: Read to the end, reopen, drop
 - **WHEN** a partition is read to its end, opened again, and then dropped
