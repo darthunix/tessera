@@ -317,4 +317,93 @@ mod tests {
                 .is_err()
         );
     }
+
+    #[test]
+    fn a_columns_header_keeps_its_lengths() -> Result<()> {
+        let columns = BlockHeader {
+            kind: BlockKind::Columns,
+            len: columns::HEADER as u64,
+            packed: 8,
+            ..header()
+        };
+        let mut good = [0_u8; HEADER_SIZE];
+        columns.write(&mut good, 1 << 20)?;
+        assert_eq!(
+            BlockHeader::read(&good, columns.fingerprint, 1 << 20)?,
+            columns
+        );
+        // A body shorter than a chunk's header, no packed length, and a
+        // packed length that is no multiple of 8.
+        let cases: [(&str, u64, u32); 3] = [
+            ("a short body", 8, 8),
+            ("no packed length", columns.len, 0),
+            ("an odd packed length", columns.len, 12),
+        ];
+        for (name, len, packed) in cases {
+            let bad = BlockHeader {
+                len,
+                packed,
+                ..columns
+            };
+            let mut bytes = [0_u8; HEADER_SIZE];
+            assert!(bad.write(&mut bytes, 1 << 20).is_err(), "{name} written");
+            let mut bytes = good;
+            put_u64(&mut bytes, LEN_AT, len);
+            put_u32(&mut bytes, PACKED_AT, packed);
+            let error = BlockHeader::read(&bytes, columns.fingerprint, 1 << 20)
+                .expect_err(&format!("{name} read"));
+            assert!(error.downcast_ref::<Damaged>().is_some(), "{name}: {error}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn the_level_and_the_limit_hold_for_every_kind() -> Result<()> {
+        let kinds = [
+            header(),
+            BlockHeader {
+                kind: BlockKind::Values,
+                ..header()
+            },
+            BlockHeader {
+                kind: BlockKind::Columns,
+                packed: 64,
+                ..header()
+            },
+        ];
+        for good in kinds {
+            let name = format!("{:?}", good.kind);
+            let mut bytes = [0_u8; HEADER_SIZE];
+            // The last level, and a body of exactly the limit.
+            let last = BlockHeader {
+                level: MAX_LEVEL - 1,
+                ..good
+            };
+            last.write(&mut bytes, good.len)?;
+            assert_eq!(BlockHeader::read(&bytes, good.fingerprint, good.len)?, last);
+            // One level more, on writing and on reading.
+            let deep = BlockHeader {
+                level: MAX_LEVEL,
+                ..good
+            };
+            assert!(
+                deep.write(&mut [0_u8; HEADER_SIZE], 1 << 20).is_err(),
+                "{name}"
+            );
+            let mut damaged = bytes;
+            put_u32(&mut damaged, LEVEL_AT, MAX_LEVEL);
+            let error = BlockHeader::read(&damaged, good.fingerprint, 1 << 20)
+                .expect_err(&format!("{name} read past the last level"));
+            assert!(error.downcast_ref::<Damaged>().is_some(), "{name}: {error}");
+            // A body longer than the reader accepts.
+            assert!(
+                good.write(&mut [0_u8; HEADER_SIZE], good.len - 8).is_err(),
+                "{name}"
+            );
+            let error = BlockHeader::read(&bytes, good.fingerprint, good.len - 8)
+                .expect_err(&format!("{name} read past the limit"));
+            assert!(error.downcast_ref::<Damaged>().is_some(), "{name}: {error}");
+        }
+        Ok(())
+    }
 }
