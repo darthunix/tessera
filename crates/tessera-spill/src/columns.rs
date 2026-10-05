@@ -452,6 +452,10 @@ mod tests {
         let mut bad = out[..packed].to_vec();
         bad[8] = 3;
         assert!(damaged(unpack(&bad, &mut back)));
+        // Bytes past the last lane.
+        let mut long = out[..packed].to_vec();
+        long.extend_from_slice(&[0_u8; 8]);
+        assert!(damaged(unpack(&long, &mut back)));
         assert!(init(&mut [0_u8; 8], 1).is_err());
         assert_eq!(init(&mut [0_u8; HEADER], 3).unwrap(), 0);
     }

@@ -2626,6 +2626,8 @@ fn chunks_of_columns_round_trip_through_the_entry_points() -> Result<()> {
     assert_eq!(tess_spill_columns_layout(0), 16);
     assert_eq!(tess_spill_columns_layout(1), 0);
     assert_eq!(tess_spill_columns_layout(2), 4);
+    assert_eq!(tess_spill_columns_layout(3), 8);
+    assert_eq!(tess_spill_columns_layout(99), 0);
     // A lane of NULL bits at least, one per 64 words; the packed slack a
     // count word and a descriptor per lane.
     assert_eq!(tess_spill_columns_shape(0, 0), 1);
