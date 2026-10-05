@@ -207,8 +207,8 @@ bytes it takes. To read a partition, a reader goes through its list.
   records form one lane, and their `len` fields form another. In a chunk
   of columns a lane is one column: one word from every row. Tessera
   writes a chunk to disk lane by lane, because the values inside one
-  lane are alike and can be written with few bytes. "Records" and
-  "Columns" below show how a lane is encoded.
+  lane are alike and can be written with few bytes. The rules of this
+  encoding are written once, in the spec.
 
 ## A block
 
@@ -325,36 +325,14 @@ The values in the picture are invented, and each piece of 4 bytes is
 shown shorter than it is. The types of the columns do not matter:
 packing looks only at the values.
 
-**How a lane of records is encoded.** The packed body starts with two
-numbers: the count of records and the length of one record. Then comes
-one code byte for each lane. The data of the lanes follow, lane after
-lane.
-
-```
- ┌─────────┬─────────┬──────────────────┬───────────────────────────┐
- │ count   │ length  │ one code byte    │ the data of lane 0, then  │
- │ of      │ of a    │ for each lane    │ of lane 1, and so on      │
- │ records │ record  │                  │                           │
- │ 4 bytes │ 4 bytes │ padded to 4      │ padded to 8               │
- └─────────┴─────────┴──────────────────┴───────────────────────────┘
-```
-
-The code of a lane says how its values are stored. Tessera looks at all
-the values of the lane and takes the first code of this list that fits:
-
-- code 0: every value is 0. Nothing is stored. The `next` lane always
-  gets this code, because the links are not kept.
-- code 1: all values are equal. One value of 4 bytes is stored.
-- code 2: every value is below 256. 1 byte is stored for each record.
-- code 3: every value is below 65536. 2 bytes are stored for each
-  record.
-- code 4: any other lane. 4 bytes are stored for each record.
+The spec defines the encoding: the layout of the packed body and the
+code that says how each lane is stored ([spec.md](spec.md), "A packed
+chunk of records").
 
 For example, 1000 records of the join above take 40 000 bytes in memory.
-The hash, the key and the value each need a lane of 4 bytes for a
-record, 12 000 bytes together. The `len` lane takes 4 bytes for the
-whole chunk, and the other lanes take nothing. With the two numbers and
-the codes, the packed body is about 12 000 bytes.
+The hash, the key and the value each need 4 bytes for a record, 12 000
+bytes together. The `len` lane takes 4 bytes for the whole chunk, and
+the other lanes take nothing. So the packed body is about 12 000 bytes.
 
 When a reader unpacks the block, it gets the chunk exactly as it was,
 with one difference: every `next` is 0. The hash table then links the
@@ -441,35 +419,17 @@ stored. It is computed again when the row is used, and that is cheap.
 On disk a chunk of columns is always packed. Only the rows that the
 chunk holds are stored, not its free space. For each lane Tessera finds
 the smallest value. Then it stores every value of the lane as the
-difference from that smallest value:
+difference from that smallest value, in as few bytes as the largest
+difference needs:
 
 ```
- ┌──────┬────────────┬───────────────────────┬───────────────────────┐
- │ rows │ words in a │ a descriptor for each │ the values of each    │
- │  4   │ row     4  │ lane, 16 bytes: the   │ lane, as value minus  │
- │      │            │ width and the         │ smallest, in 0, 1, 2, │
- │      │            │ smallest value        │ 4 or 8 bytes each     │
- └──────┴────────────┴───────────────────────┴───────────────────────┘
-
  a lane of order numbers           smallest value 1000001, 1 byte each
  1000001 1000002 1000003 …   ──►   0 1 2 …
 ```
 
-**How a lane of columns is encoded.** A lane has a descriptor of 16
-bytes with two fields: the width and the smallest value of the lane.
-The width is the number of bytes stored for one value. Tessera takes
-the difference between the largest and the smallest value of the lane
-and picks the smallest width that can hold it:
-
-- width 0: all values are equal. Nothing is stored after the
-  descriptor.
-- width 1: the difference is below 256.
-- width 2: the difference is below 65536.
-- width 4: the difference fits in 4 bytes.
-- width 8: any other lane.
-
-The lanes of NULL bits are encoded in the same way as the lanes of
-words.
+The spec defines the encoding: the layout of the packed chunk, the
+descriptor of a lane and the widths a value can have
+([spec.md](spec.md), "A chunk of columns on disk").
 
 Why differences? The values of one column are often large but close to
 each other, like order numbers or dates. Their differences are small
