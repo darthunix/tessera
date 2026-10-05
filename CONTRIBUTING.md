@@ -151,9 +151,10 @@ the findings, and what is left.
   an SQL suite. `review only — <reason>` when no test can show it;
   `pending` only in an open change.
 - A spec and a design are written for a reader who knows nothing about
-  the part and wants to understand it. They explain their terms, and a
-  layout of data is a drawing in a code block, with its offsets and
-  sizes.
+  the part and wants to understand it, in simple English: short
+  sentences, common words, one thought in a sentence. They explain every
+  term where it first appears, and a layout of data is a drawing in a
+  code block, with its offsets and sizes.
 - `design.md` goes from the whole to the details: what the part is for
   and the problem it solves; the engineering goals and what each choice
   costs; the design as a whole, with a picture; then each piece, with
