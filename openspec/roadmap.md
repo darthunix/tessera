@@ -1064,6 +1064,36 @@ becomes an entry, joins one, or is dropped.
     caller's; `crates/tessera-spill/src/damaged.rs` says a misuse stays
     an internal error. The suite shows the code as it is now
     (`tessera_test_spill_sqlstate(16)` of `test/sql/spill.sql`).
+  - The lists of a shared file are trusted. `read_trailer` of
+    `runtime/spill.c` takes a count of blocks from the file and
+    allocates by it before it knows that the list fits in the file, and
+    adds the counts of the partitions before without a check. A damaged
+    count ends as an allocation error, not as damaged data.
+  - The body length of a packed block is checked by nothing until the
+    block is unpacked, after the node has allocated that many bytes.
+    Every node passes `MaxAllocHugeSize` as the limit, so the limit
+    bounds nothing.
+  - A chunk of columns of a length that is no multiple of 8 is refused
+    only when it is made: `shape` of
+    `crates/tessera-spill/src/columns.rs`, and so packing and
+    appending, accept it.
+  - Unpacking a chunk of records accepts any code for the lane of the
+    next-record references, so a damaged body can give a reference that
+    is not 0.
+  - A chunk of columns that packs into 4 GiB or more is an internal
+    error at writing, since the header keeps the packed length in 32
+    bits, while the limits of a chunk allow about 4.4 GiB. No test, and
+    the spec does not name the limit.
+  - The lists of blocks are memory that nobody counts: 16 bytes a block
+    in arrays that double, and a copy for every reader of another
+    participant's file. `tess_spill_memory` leaves them out.
+  - `tess_spill_free` and `tess_spill_release` close the open readers
+    of a set, and a reader the caller still holds then points at freed
+    memory.
+  - A reader that opens a participant's file before the participant's
+    first write to disk gets "no blocks" without an error. The format
+    has no mark of a finished or of an empty file; the nodes' barriers
+    are the only guard.
 - **`spill-format`: promises left out of the spec** (the same source).
   Suggested: a test for each, one promise at a time; the promise then
   enters the spec.
@@ -1076,6 +1106,22 @@ becomes an entry, joins one, or is dropped.
     `tess_spill_columns_layout`.
   - No test damages the body of a block in a file; the suite damages
     headers, lists and trailers.
+  - The two forms of a reference to a by-reference value and the order
+    of blocks in a partition (values before the blocks that refer to
+    them; pairs of values and columns in a sort and in a grouping's
+    rows) are in the design only. They are rules of the join, of the
+    grouping and of the sort, and wait for those capabilities.
+  - No test shows a shared set under `temp_file_limit`, that another
+    participant still reads a partition its writer dropped, or the
+    deletion of a shared set's files at a rescan. The suite's last
+    check lists regular files only and cannot see a file set that is
+    left.
+  - The scenario "The C formulas match the kernels'" may say more than
+    its tests compare (the size of a chunk); to be read against
+    `test/tessera_spill_test.c` and `crates/tessera-capi/tests/table.rs`.
+  - `docs/spill.md` and comments of `nodes/hashjoin.h` and
+    `nodes/agg_spill.c` still speak of a buffer for each partition's
+    file, and one comment of outer rows written as records.
 
 ## Decided against
 
