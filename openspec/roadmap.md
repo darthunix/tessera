@@ -1028,32 +1028,16 @@ becomes an entry, joins one, or is dropped.
     first write to disk gets "no blocks" without an error. The format
     has no mark of a finished or of an empty file; the nodes' barriers
     are the only guard.
-- **`spill-format`: promises left out of the spec** (the same
-  source).
-  Suggested: a test for each, one promise at a time; the promise then
-  enters the spec.
-  - Nothing shows them: `tess_spill_memory`;
-    a drop of a partition while a reader is open; the lookup of the
-    temporary tablespaces; a chunk larger than the write buffer packed
-    through the scratch buffer; an unknown kind given to a writer; the
-    stored size out of range at `tess_spill_open`; bytes past the lanes
-    of a packed chunk of columns; the code `WORDS_OFFSET` of
-    `tess_spill_columns_layout`.
-  - No test damages the body of a block in a file; the suite damages
-    headers, lists and trailers.
+- **`spill-format`: what no test shows yet** (the same source).
+  - The lookup of the temporary tablespaces for a set's file.
+  - A shared set under `temp_file_limit`, and the deletion of a shared
+    set's files at a rescan. The suite's last check lists regular files
+    only and cannot see a file set that is left.
   - The two forms of a reference to a by-reference value and the order
     of blocks in a partition (values before the blocks that refer to
     them; pairs of values and columns in a sort and in a grouping's
     rows) are in the design only. They are rules of the join, of the
     grouping and of the sort, and wait for those capabilities.
-  - No test shows a shared set under `temp_file_limit`, that another
-    participant still reads a partition its writer dropped, or the
-    deletion of a shared set's files at a rescan. The suite's last
-    check lists regular files only and cannot see a file set that is
-    left.
-  - The scenario "The C formulas match the kernels'" may say more than
-    its tests compare (the size of a chunk); to be read against
-    `test/tessera_spill_test.c` and `crates/tessera-capi/tests/table.rs`.
   - `docs/spill.md` and the comments of the reserves in
     `nodes/hashjoin.h` and `nodes/agg_spill.c` still count a buffer of a
     page for each partition's file, though a set has one buffer. Whether
