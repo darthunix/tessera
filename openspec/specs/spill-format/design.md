@@ -1,173 +1,276 @@
 # spill-format: how it is built
 
-When a hash join, a grouping or a sort has more rows than its memory
-allows, Tessera writes part of them to temporary files and reads them
-back later. This is called spilling. This page explains what is written,
-how the files are arranged and why it is done this way. The exact bytes,
-limits and errors are in [spec.md](spec.md). When a node decides to
-spill, and how it divides its rows, is in
+Sometimes a hash join, a grouping or a sort has more rows than fit in
+its memory. Then Tessera writes some of the rows to temporary files and
+reads them back later. This is called spilling.
+
+This page explains what Tessera writes, how the files are arranged, and
+why. The exact bytes, limits and errors are in [spec.md](spec.md). When
+a node decides to spill, and how it divides its rows, is described in
 [docs/spill.md](../../../docs/spill.md).
+
+## Background: rows, batches, records
+
+A **row** is one row of a table or of a result inside a query.
+
+Tessera does not pass rows between nodes one at a time. A node gets a
+**batch**: up to 64 rows at once. A batch stores its rows *as columns*.
+It has one array for each column, and row number `i` is element `i` of
+every array.
+
+A hash table stores rows in the other way, *as records*. A record holds
+all the values of one row next to each other.
+
+```
+ three rows with two columns, a and b
+
+ as records: row after row          as columns: column after column
+ ┌────┬────┬────┬────┬────┬────┐    ┌────┬────┬────┬────┬────┬────┐
+ │ a0 │ b0 │ a1 │ b1 │ a2 │ b2 │    │ a0 │ a1 │ a2 │ b0 │ b1 │ b2 │
+ └────┴────┴────┴────┴────┴────┘    └────┴────┴────┴────┴────┴────┘
+   row 0     row 1     row 2          column a       column b
+```
+
+Records are good for a hash table: to compare a key or to follow a link
+to the next record, the node needs the values of one row together.
+Columns are good for a batch: a loop over one array is fast.
+
+A value that does not fit in 8 bytes, such as a text, lies in neither a
+record nor a column. It lies in separate memory, and the record or the
+column holds a reference to it.
+
+A node keeps all of this in large pieces of memory called **chunks**.
+There are three kinds of chunk: a chunk of records, a chunk of long
+values, and a chunk of columns.
 
 ## The problem
 
-PostgreSQL gives every node of a query a budget of memory: `work_mem`,
-and for a hash table `hash_mem`, which is `work_mem` multiplied by
-`hash_mem_multiplier`. A join whose inner side does not fit, a grouping
-with too many groups and a sort of too many rows must still finish. The
-usual answer is to divide the rows into partitions by their hash, keep
-in memory what fits, write the rest to disk, and come back to each
-partition when there is room for it; a sort writes sorted runs and
-merges them.
+PostgreSQL gives each node of a query a limit of memory: `work_mem`.
+For a hash table the limit is `hash_mem`, which is `work_mem` multiplied
+by `hash_mem_multiplier`. A join, a grouping or a sort must finish even
+when its rows need more memory than that.
 
-That answer leaves questions, and the format is the reply to them:
+The usual solution is this. The node divides the rows into partitions
+by their hash. It keeps in memory the partitions that fit and writes the
+others to disk. Later it reads one partition back, finishes the work on
+it, and takes the next one. A sort does a similar thing: it writes
+sorted parts, called runs, and then merges them.
 
-1. Spilling is the slow path of a query that is already large. How
-   little can writing and reading cost beyond the disk itself?
-2. Tessera's nodes do not hold rows one by one. A hash table is made of
-   large chunks of records, the texts and other long values lie in
-   chunks of their own, and rows that only wait are kept by column.
-   What exactly goes to disk?
-3. In a parallel query one process writes and another reads. What may
-   the bytes on disk refer to, if not addresses?
-4. The bytes read back are used as structures in memory, without a
-   parse of every row. How does a reader know they are what it expects?
+This solution leaves questions. The format answers them.
+
+1. A query spills when it is already large. Spilling must not make it
+   much slower. How can writing and reading be cheap?
+2. A node holds its rows in chunks of three kinds. What exactly should
+   go to disk?
+3. In a parallel query one process writes a file and another process
+   reads it. A memory address of the writer means nothing to the reader.
+   What can the bytes on disk point to instead?
+4. A node uses the bytes it reads back as its own structures in memory.
+   It does not examine every row. How can it be sure the bytes are what
+   it expects?
 5. A node spills because memory is short. How much memory does reading
-   need, and is it known before the read starts?
-6. PostgreSQL has rules for temporary files: a limit on their size,
-   tablespaces for them, removal after an error. How are they kept?
+   need? Is that known before the read starts?
+6. PostgreSQL has rules for temporary files: a limit on their total
+   size, special tablespaces, and removal after an error. How does
+   Tessera follow them?
 
 ## Goals and what they cost
 
-1. **A chunk comes back ready to use.** A node writes whole chunks of
-   its memory, never rows one by one, and reading gives the chunk back:
-   no row is allocated or parsed, and the hash table links the records
-   of a chunk into a new index in one call. PostgreSQL's own hash join
-   writes a tuple at a time and allocates each on reading. *The cost:*
-   the bytes on disk follow the layout in memory, so they mean something
-   only to the table that wrote them; every block therefore carries a
-   version and a fingerprint of that layout. One row cannot be read
-   without its chunk.
-2. **Smaller files for almost no processor time.** A chunk is packed by
-   lanes: the same field of every record is stored together, at the
-   width its values need in this chunk. On the project's reference
-   machine, an Apple M5 Pro, packing runs at 7 to 10 GB/s and unpacking
-   at 12 to 14 GB/s on one core; the files of a spilled join and of a
-   spilled grouping are 2.7 to 3.5 times smaller and the queries up to
-   13 % faster. *The cost:* less is saved than a general compressor
-   would save, and long values are not packed at all. A general
-   compressor was refused: lz4 runs at 1.3 GB/s, which costs more time
-   than the smaller files give back.
-3. **Rows that only wait are not turned into records.** The outer rows
-   of a join that wait for their partition, the rows a grouping sets
-   aside and the rows of a sort's run are never linked or probed, only
-   written and read back once. They go to disk by column, straight from
-   the columns of a batch and straight back into them. Before that the
-   outer rows were records too and went from columns to records, to
-   lanes, back to records and back to columns: a spilled join at a
-   `work_mem` of 1 MB took 67 to 83 ms and wrote 29.5 MB; by column it
-   takes 45 to 55 ms and writes 11.6 MB. *The cost:* two shapes of
-   chunk, each with its own packed form.
+All numbers on this page were measured on a developer's laptop with an
+Apple M5 Pro processor. The target platform is Linux on x86-64; the
+numbers have not been measured there yet.
+
+1. **A chunk comes back ready to use.**
+   - *What Tessera does.* A node writes a whole chunk to disk as one
+     piece. To read, it reads the whole chunk back into memory with one
+     read. The chunk is then ready: its bytes are already in the form
+     the node uses. For a chunk of records, the hash table only adds the
+     records to its index, with one call for the chunk. Nothing is done
+     for a single row: no memory is allocated for it, and it is not
+     decoded.
+   - *For comparison.* PostgreSQL's own hash join writes one row at a
+     time. When it reads, it allocates memory for each row and copies
+     the row there.
+   - *The cost.* The bytes on disk have the same layout as the bytes in
+     memory. So only a table with the same layout can use them. This is
+     why every block carries a version and a fingerprint of the layout.
+     Also, one row cannot be read without its whole chunk.
+2. **Smaller files for very little processor time.** Before a chunk is
+   written, it is packed by lanes. A lane is the same field of every
+   record. Each lane is stored with only as many bytes as its values
+   need in this chunk. Packing runs at 7 to 10 GB/s and unpacking at 12
+   to 14 GB/s on one core. The files of a join and of a grouping become
+   2.7 to 3.5 times smaller, and the queries up to 13 % faster.
+   - *The cost.* A general compressor would make the files smaller
+     still. Long values are not packed at all.
+   - *Why not a general compressor.* lz4 runs at 1.3 GB/s. It would cost
+     more time than the smaller files save.
+3. **Rows that only wait are not turned into records.** Some rows go to
+   disk only to wait. Examples: the outer rows of a join whose inner
+   partition is still on disk; the rows of a grouping that belong to a
+   partition on disk; the rows of a sorted run. Nobody searches among
+   these rows. They are written once and read back once.
+   - *What Tessera does.* A batch already holds these rows as columns.
+     So Tessera writes them as columns and reads them back as columns.
+     There is no conversion.
+   - *What it did before.* It stored these rows as records. Each row was
+     then converted four times: from columns to a record; from records
+     to lanes, for packing; back to records, on reading; and back to
+     columns, for the batch. A join that spills with a `work_mem` of
+     1 MB took 67 to 83 ms and wrote 29.5 MB. With columns it takes 45
+     to 55 ms and writes 11.6 MB.
+   - *The cost.* There are two forms of chunk for rows, records and
+     columns, and each has its own packed form.
 4. **Few files and large writes.** A node writes one file for all its
-   partitions, through a buffer of up to 256 kB, instead of a file a
-   partition in pieces of 8 kB, as PostgreSQL's `BufFile` would. That
-   took 6 to 9 % off a spilled join. *The cost:* the bytes of a
-   partition that has been read stay on disk until the whole file goes.
+   partitions. It writes through a buffer of up to 256 kB. The usual way
+   in PostgreSQL is `BufFile`: one file for each partition, written in
+   pieces of 8 kB. One file with a larger buffer made a spilling join 6
+   to 9 % faster.
+   - *The cost.* After a partition has been read, its bytes stay on disk
+     until the whole file is deleted.
 5. **A wrong block is an error, never a wrong answer.** A reader checks
-   every header and every packed body before it uses them, and reports
-   a block that fails as damaged data. *The cost that was refused:* a
-   checksum of the body. A temporary file is read by the query that
-   wrote it, on the same machine, so a flipped bit inside a value is not
-   looked for, as PostgreSQL does not look for it in its own temporary
-   files.
-6. **The memory of a read is known before it starts.** A header says
-   both how many bytes lie on disk and how many the chunk takes in
-   memory, and a reader's buffer is as large as the largest block of
-   its partition.
-7. **Any process of the query can read any file.** Nothing on disk is an
-   address: a record refers to a long value by the number of its chunk
-   and the byte in it. In a parallel query the list of a file's blocks
-   is written into the file itself, since the writer's memory is not
-   the readers'.
-8. **One place knows PostgreSQL's files.** Every call of PostgreSQL's
-   file layer for spilling is in `runtime/spill.c`. A core with another
-   manager of work files, like Greengage's, replaces that file and
-   nothing else.
+   every header and every packed body before it uses them. If a check
+   fails, the query stops with the error "damaged data".
+   - *What is not checked.* There is no checksum of the body. A
+     temporary file is read by the same query that wrote it, on the same
+     machine. PostgreSQL does not checksum its own temporary files
+     either.
+6. **The memory for a read is known before the read starts.** The header
+   of a block holds two sizes: the size of the body on disk and the size
+   of the chunk in memory. For each partition the node also knows the
+   size of its largest block, and the reader's buffer has exactly that
+   size.
+7. **Any process of the query can read any file.** Nothing on disk is a
+   memory address. A reference to a long value is the number of a chunk
+   and a position in that chunk. In a parallel query, the list of the
+   blocks of a file is written into the file itself, because a reader
+   cannot see the writer's memory.
+8. **Only one source file uses PostgreSQL's file functions.** All calls
+   to PostgreSQL's file layer are in `runtime/spill.c`. A database with
+   a different manager of work files, such as Greengage, replaces only
+   this file.
 
 ## The whole in one picture
 
 ```
- a node: join, grouping, sort                       a temporary file
- ┌───────────────────────────┐                   ┌────────────────────┐
- │ chunks in memory          │                   │ block, partition 2 │
- │  ┌─────────┐ ┌────────┐   │  write: a header  │ block, partition 0 │
- │  │ records │ │ values │   │  before a chunk   │ block, partition 2 │
- │  └─────────┘ └────────┘   │ ────────────────► │ block, partition 1 │
- │  ┌─────────┐              │                   │ block, partition 0 │
- │  │ columns │              │  read: the blocks │ …                  │
- │  └─────────┘              │  of one partition │                    │
- │                           │ ◄──────────────── │                    │
- └───────────────────────────┘                   └────────────────────┘
+ a node (join, grouping, sort)         the node's temporary file
+ ┌───────────────────────────┐         byte 0
+ │ chunks in memory          │         ┌────────┬──────────────────┐
+ │ ┌─────────┐ ┌────────┐    │  write  │ header │ body: a chunk    │ A
+ │ │ records │ │ values │    │ ──────► ├────────┼──────────────────┤
+ │ └─────────┘ └────────┘    │         │ header │ body             │ B
+ │ ┌─────────┐               │  read   ├────────┼──────────────────┤
+ │ │ columns │               │ ◄────── │ header │ body             │ C
+ │ └─────────┘               │         ├────────┴──────────────────┤
+ │                           │         │ …                         │
+ │ lists of blocks           │         └───────────────────────────┘
+ │  partition 0: B           │
+ │  partition 1: A, C        │   one entry of a list: where the block
+ └───────────────────────────┘   starts in the file, and its size
 ```
 
-The words used below:
+A node writes each chunk to the file as a **block**: a header of 48
+bytes and then the body. Blocks of different partitions follow one
+another in the order the node writes them.
 
-- A **chunk** is a piece of a node's memory that is written whole. There
-  are three kinds: records of a hash table, the long values that records
-  or rows refer to, and rows kept by column.
-- A **block** is a chunk on disk: a header of 48 bytes, then the stored
-  body, which is the chunk as it is or its packed form.
-- A **partition** is the rows whose hashes share some bits. A node reads
-  a partition back as a whole, when it has room for it.
-- A **level** counts how many times rows were divided. A partition that
-  still does not fit when it is read back is divided again, by other
-  bits of the hash, at the next level. The first level is 0.
-- A **set** (`TessSpill`) is everything one node writes at one level
-  for one kind of rows. A set has one file; in a parallel query each
-  process has its own.
-- A **participant** is a process of a parallel query: the leader or a
+The file has no header of its own. It starts with the first block at
+byte 0, and there is nothing between the blocks.
+
+The file alone does not say which blocks belong to a partition. The
+**lists of blocks** say that. For each partition the node keeps a list:
+where each block of the partition starts in the file, and how many
+bytes it takes. To read a partition, a reader goes through its list.
+
+## The words used below
+
+- A **chunk** is a large piece of a node's memory. A node writes a chunk
+  to disk whole. There are three kinds: records, long values, columns.
+- A **block** is a chunk on disk: a header of 48 bytes, then the body.
+  The body is the chunk itself or its packed form.
+- A **partition** is a group of rows whose hashes have the same value
+  in some of their bits. A node reads a partition back whole, when it
+  has memory for it.
+- A **level** says how many times the rows were divided. Sometimes a
+  partition is read back and still does not fit in memory. Then it is
+  divided again, by other bits of the hash. The first division is level
+  0, the next is level 1, and so on.
+- A **set** (`TessSpill` in the code) is one group of blocks with one
+  file and one group of lists. A node makes a set for one level and for
+  one kind of rows. For example, at each level a join has two sets: one
+  for its inner rows and one for its outer rows.
+- A **participant** is one process of a parallel query: the leader or a
   worker.
-- The **fingerprint** is a hash of a table's layout: its format, the
-  kinds of its keys, the sizes of a record and of its payload.
-- A **lane** is the same field of every record, or of every row, taken
-  together, as a column is.
+- A **fingerprint** is a number that describes the layout of the data.
+  Two tables with the same layout have the same fingerprint.
+- A **lane** is the same field taken from every record of a chunk, or
+  the same column taken from every row. A lane is an array.
 
 ## A block
 
 ```
- ┌───────────────── header, 48 bytes ─────────────────┬─ stored body ──┐
- │ magic   version   kind   number   partition  level │ the chunk as   │
- │ packed length     fingerprint     body length      │ it is, or its  │
- │                                                    │ packed form    │
+ ┌───────────────── header, 48 bytes ─────────────────┬──── body ──────┐
+ │ magic   version   kind   number   partition  level │ the chunk, or  │
+ │ packed length     fingerprint     body length      │ its packed     │
+ │                                                    │ form           │
  └────────────────────────────────────────────────────┴────────────────┘
 ```
 
-Every field is there for a reader:
+Each field of the header helps the reader.
 
-- **magic and version** say that these bytes are a block of this
-  format, and of which version of it.
-- **kind** says which of the three chunks the body is.
-- **number** is the chunk's number in its table. A record names a long
-  value by the number of the value's chunk, so a chunk must come back
-  under the number it had.
-- **partition and level** let a reader check that the block belongs to
-  what it is reading, and not to another place in the file.
-- **fingerprint** ties the block to the table that wrote it. With it, a
-  block of another table, or a damaged file, is an error status, never a
-  record read the wrong way. The records are then checked once more, as
-  any chunk is, when the table takes the chunk in.
-- **body length and packed length** are the two sizes of goal 6: the
-  bytes the chunk takes in memory, and the bytes that lie on disk when
-  the body is packed.
+**magic and version.** They say that these bytes are a block of this
+format, and which version of the format.
 
-The bytes are in the machine's own order and there is no checksum, for
-the reason given with goal 5.
+**kind.** It says which of the three kinds of chunk the body is.
+
+**number.** A node numbers its chunks: 0, 1, 2, and so on. The header
+keeps the number of the chunk. This matters for chunks of long values.
+A reference to a long value contains the number of its chunk. So when
+a node reads a block of values, it takes the number from the header and
+stores the address of the chunk in an array, at the index equal to this
+number. After that every reference to this chunk works again (see
+"Values" below).
+
+**partition and level.** The reader knows which partition and which
+level it is reading. It finds a block through the list of blocks of
+that partition. After it has read the block, it compares the partition
+and the level in the header with its own. If they differ, the list or
+the file is damaged, and the query stops with an error.
+
+**fingerprint.** It protects against reading the block into a table
+with a different layout. A set has one fingerprint. The writer puts it
+into every header, and the reader compares it with its own.
+
+- For a hash table, the fingerprint is a 64-bit FNV-1a hash of five
+  things: the version of the table format, the number of keys, the kind
+  of each key, the size of a record, and the size of the payload of a
+  record.
+- A join has a table layout for each of its two sides. It uses the
+  fingerprint of the side's layout, also for the outer rows that it
+  writes as columns.
+- A grouping and a sort write rows that have no table. They use a
+  simple number that describes a row. A grouping uses the number of
+  8-byte words in a row. A sort combines the number of its columns with
+  the number of extra words it stores for each row.
+
+A matching fingerprint is the first check. When a hash table takes a
+chunk of records in, it checks the records again, as it checks any
+chunk.
+
+**body length and packed length.** These are the two sizes from goal 6.
+The body length is the size of the chunk in memory. The packed length
+is the size of the body on disk when it is packed, and 0 when it is not
+packed.
+
+The numbers in the header use the byte order of the machine. There is
+no checksum. Goal 5 explains why.
 
 ## The three kinds of body
 
 ### Records
 
-A hash table keeps its records in chunks. A chunk begins with a mark of
-the bytes used, and records of one length follow:
+A hash table keeps its records in chunks. A chunk starts with 8 bytes
+that say how many bytes of the chunk are used. Then the records follow.
+All records of a table have the same length.
 
 ```
  a chunk of records
@@ -183,15 +286,22 @@ the bytes used, and records of one length follow:
  └──────┴──────┴───────────┴──────┴─────────┴─────┴─────────┘
 ```
 
-A record is built for linking and probing, not for storage. `next`, the
-next record of the same bucket, means nothing on disk; `len` is the same
-in every record; the NULL bits are mostly 0; and an `int4` key or value
-takes a slot of 8 bytes. A record of a join on one `int4` key with one
-`int4` column takes 40 bytes for 12 bytes of content.
+A record is made for fast search, not for storage. On disk much of it
+is waste:
 
-So a chunk of records is packed before it is written, when that makes it
-shorter. The records are seen as lanes of 4 bytes, and each lane is
-stored at the width its values need in this chunk:
+- `next` links a record to the next record with the same hash bucket.
+  On disk this link means nothing.
+- `len` is the same in every record.
+- The NULL bits are 0 in most records.
+- An `int4` key or value takes 8 bytes, but needs only 4.
+
+For example, take a join on one `int4` key with one `int4` column. A
+record takes 40 bytes, and only 12 of them carry information.
+
+So Tessera packs a chunk of records before it writes the chunk. It cuts
+every record into pieces of 4 bytes. The first piece of every record
+forms lane 0, the second piece forms lane 1, and so on. Then it stores
+each lane with as few bytes as the values of this lane need.
 
 ```
              hash   next   NULLs  len    key 0        payload
@@ -200,127 +310,167 @@ stored at the width its values need in this chunk:
  record 2  │ 77b0 │ 0009 │ 0000 │ 0005 │ 0019 0000 │ 0063 0000 … │
                │      │      │      │      │    │      │    │
                ▼      ▼      ▼      ▼      ▼    ▼      ▼    ▼
- on disk     whole  left   all    all    one   all    one   all
-             words  out    zero:  equal: byte  zero:  byte  zero:
-                           no     one    each  no     each  no
-                           bytes  word         bytes        bytes
+ on disk     4      not    all    all    1     all    1     all
+             bytes  stored zero:  equal: byte  zero:  byte  zero:
+             each          no     one    each  no     each  no
+                           bytes  value        bytes        bytes
 ```
 
-The values in the picture are made up, and a lane's 4 bytes are shown
-short. Nothing depends on the types of
-the columns: the widths follow the values. Reading unpacks the lanes
-into the caller's buffer and gives the chunk as it was, except that
-every `next` is 0, as in a chunk not yet linked; the table then links
-the records into a new index. A chunk that packing would not shorten is
-written as it is.
+The values in the picture are invented, and each piece of 4 bytes is
+shown shorter than it is. The types of the columns do not matter:
+packing looks only at the values.
+
+When a reader unpacks the block, it gets the chunk exactly as it was,
+with one difference: every `next` is 0. The hash table then links the
+records again. If packing does not make a chunk shorter, the chunk is
+written without packing.
 
 ### Values
 
-A text, or any other value that does not fit a word of 8 bytes, does not
-lie in a record or in a row. It lies in a chunk of values, and the
-record's or the row's word holds a reference to it: the number of the
-value's chunk plus one, and the byte in that chunk. PostgreSQL calls
-such values by-reference. The reference is not an address, so it means
-the same after the chunk has been on disk and in another process. A
-reading node puts the chunk's place in memory into its array of value
-chunks, under the chunk's number, and every reference to it is good
-again.
+A text, or any other value that does not fit in 8 bytes, does not lie
+inside a record or a column. PostgreSQL calls such values by-reference
+values. Tessera copies them into chunks of values. The record or the
+column holds a reference to the value in one word of 8 bytes:
 
-A chunk of values is written as it is. It is not packed: its bytes are
+```
+ a reference: one word of 8 bytes
+  bit 63                      32 31                           0
+ ┌──────────────────────────────┬──────────────────────────────┐
+ │ number of the chunk, plus 1  │ byte in the chunk            │
+ └──────────────────────────────┴──────────────────────────────┘
+ the word 0 is not a reference: it means there is no value (NULL)
+```
+
+The upper half is the number of the chunk of values, plus one. The
+lower half is the position of the value in that chunk, in bytes. One is
+added so that a real reference is never 0.
+
+A reference is not a memory address. So it stays correct after the
+chunk has been on disk, and it is correct in another process. To find
+the value, a node keeps an array with the addresses of its chunks of
+values:
+
+```
+ the node's array of chunks of values     chunk of values number 2
+ ┌─────┐                                  ┌──────────────────────────┐
+ │ [0] │ ──► chunk 0                      │ …        │ Kazan │ …     │
+ │ [1] │ ──► chunk 1                      └──────────────────────────┘
+ │ [2] │ ───────────────────────────────► ▲          ▲
+ └─────┘                                  byte 0     byte 40
+
+ reference (3, 40):  chunk 3 − 1 = 2, byte 40
+ address of the value = array[2] + 40
+```
+
+When a node reads a block of values back, it puts the address of the
+new chunk into this array, at the index from the header's `number`. The
+address may be different from the old one. The references do not
+change, and they work again.
+
+A chunk of values is written as it is, without packing. Its bytes are
 the values themselves.
 
 ### Columns
 
-Rows that only wait on disk are kept by column. In memory a chunk of
-columns is a header and lanes of 8-byte words, one word a row:
+A chunk of columns holds rows in the same way as a batch: as columns.
+It is used for the rows that only wait on disk (goal 3).
+
+In memory, a chunk of columns has a small header and then lanes. A lane
+is an array with one 8-byte word for each row. Row number `i` is word
+`i` of every lane.
 
 ```
  ┌──────────────────── header, 16 bytes ─────────────────────┐
- │ rows       capacity in rows   words a row   magic "COLS"  │
+ │ rows       capacity in rows   words in a row   "COLS"     │
  ├───────────────────────────────────────────────────────────┤
- │ lanes of NULL bits: one lane for every 64 words of a row, │
- │ at least one. Bit w % 64 of a row's word in lane w / 64   │
- │ is set when the row's word w is NULL.                     │
+ │ lanes of NULL bits                                        │
+ │   one lane for every 64 words of a row, at least one      │
+ │   bit w % 64 of a row's word in lane w / 64 is 1          │
+ │   when word w of that row is NULL                         │
  ├───────────────────────────────────────────────────────────┤
- │ lane of word 0:  row 0 │ row 1 │ row 2 │ …  │ free        │
- │ lane of word 1:  row 0 │ row 1 │ row 2 │ …  │ free        │
+ │ lane of word 0:   row 0 │ row 1 │ row 2 │ …  │ free       │
+ │ lane of word 1:   row 0 │ row 1 │ row 2 │ …  │ free       │
  │ …                                                         │
  └───────────────────────────────────────────────────────────┘
 ```
 
-A row's word is a value that fits a word, a reference to a long value,
-or 0 for a NULL. A batch appends its rows to a chunk straight from its
-columns, and a batch read back takes its columns straight from the
-lanes, 64 rows at a time. The keys are among the stored words; their
-hash is not stored and is computed again when the rows are probed,
-which costs little.
+A word of a row is one of three things: a value that fits in 8 bytes,
+a reference to a long value, or 0 for a NULL.
 
-On disk a chunk of columns is always packed, and only its rows are
-stored, not its free capacity. Each lane is stored as the differences
-from its least value:
+A batch copies its columns into the lanes directly, and a batch that is
+read back takes its columns from the lanes directly, 64 rows at a time.
+The key columns are among the stored words. The hash of a row is not
+stored. It is computed again when the row is used, and that is cheap.
+
+On disk a chunk of columns is always packed. Only the rows that the
+chunk holds are stored, not its free space. For each lane Tessera finds
+the smallest value. Then it stores every value of the lane as the
+difference from that smallest value:
 
 ```
- ┌──────┬─────────────┬───────────────────────┬───────────────────────┐
- │ rows │ words a row │ a descriptor for each │ each lane's values:   │
- │  4   │      4      │ lane, 16 bytes: the   │ value − least, in 0,  │
- │      │             │ width and the least   │ 1, 2, 4 or 8 bytes    │
- │      │             │ value                 │ each                  │
- └──────┴─────────────┴───────────────────────┴───────────────────────┘
+ ┌──────┬────────────┬───────────────────────┬───────────────────────┐
+ │ rows │ words in a │ a descriptor for each │ the values of each    │
+ │  4   │ row     4  │ lane, 16 bytes: the   │ lane, as value minus  │
+ │      │            │ width and the         │ smallest, in 0, 1, 2, │
+ │      │            │ smallest value        │ 4 or 8 bytes each     │
+ └──────┴────────────┴───────────────────────┴───────────────────────┘
 
- a lane of order keys           least value 1000001, width 1 byte
- 1000001 1000002 1000003 …  ─►  0 1 2 …
+ a lane of order numbers           smallest value 1000001, 1 byte each
+ 1000001 1000002 1000003 …   ──►   0 1 2 …
 ```
 
-The values of a column are close to each other far more often than they
-are small, which is why differences are stored and not the values
-themselves. A lane whose values are all equal takes no bytes beyond its
-descriptor.
+Why differences? The values of one column are often large but close to
+each other, like order numbers or dates. Their differences are small
+and need few bytes. If all values of a lane are equal, the lane takes
+no bytes at all after its descriptor.
 
 ## The files
 
-A set writes one file, made when its first block is written. The blocks
-of every partition go into it one after another, in the order the node
-writes them, and the set keeps a list for each partition: where each of
-its blocks starts and the bytes it takes.
+A set has one file. The file is created when the first block is
+written. The set also keeps the lists of blocks, one list for each
+partition. An entry of a list holds two numbers: where the block starts
+in the file, and how many bytes it takes, with its header.
 
 ```
- the file of a set                             the lists of the set
- ┌───────┬───────┬───────┬───────┬───────┐     partition 0: B, E
- │ A     │ B     │ C     │ D     │ E     │     partition 1: D
- │ p = 2 │ p = 0 │ p = 2 │ p = 1 │ p = 0 │     partition 2: A, C
+ the file of a set                            the lists of the set
+ byte 0                                       partition 0: B, E
+ ┌───────┬───────┬───────┬───────┬───────┐    partition 1: D
+ │ A     │ B     │ C     │ D     │ E     │    partition 2: A, C
+ │ p = 2 │ p = 0 │ p = 2 │ p = 1 │ p = 0 │
  └───────┴───────┴───────┴───────┴───────┘
 ```
 
-A block goes to the file through the set's write buffer: a sixteenth of
-`hash_mem`, at least a block of PostgreSQL, 8 kB, and at most 256 kB. A
-block larger than the buffer is written as it is. A buffer larger still
-gains little, since a write costs with its bytes more than with its
-calls.
+A block does not go to the file at once. It first goes to the write
+buffer of the set. The buffer is one sixteenth of `hash_mem`, but not
+less than 8 kB and not more than 256 kB. A block larger than the buffer
+is written directly. A larger buffer would not help much: the time of a
+write depends mostly on its bytes, not on the number of calls.
 
 There are two kinds of set.
 
-A **serial** set belongs to one process. Its file is a temporary file of
-PostgreSQL: the query's temporary tablespaces are used,
-`temp_file_limit` applies, and the file is deleted when the set is
-freed or, after an ERROR, when the query's resources are released. The
-lists stay in memory.
+A **serial** set belongs to one process. Its file is a normal temporary
+file of PostgreSQL. It lies in the temporary tablespaces of the query,
+and `temp_file_limit` applies to it. The file is deleted when the set
+is freed. After an error, PostgreSQL deletes it when it releases the
+resources of the query. The lists of blocks stay in memory.
 
-A **shared** set belongs to a parallel query. Every participant writes
-a file of its own, named `<name>.<participant>`, in the query's shared
-set of files, and any participant can read any of them once its writer
-has finished. The readers cannot see the writer's memory, so finishing
-a shared set writes the lists into the file, with a trailer that says
-where they are:
+A **shared** set belongs to a parallel query. Each participant writes
+its own file, named `<name>.<participant>`. When a participant has
+finished writing, any participant can read its file. But a reader
+cannot see the memory of the writer, where the lists of blocks are. So
+when a participant finishes a shared set, it writes the lists at the
+end of its file, and then a trailer that says where the lists start:
 
 ```
  the file of one participant
+ byte 0
  ┌───────┬───────┬─────┬────────────────┬──────────────────┬──────────┐
- │ block │ block │  …  │ the number of  │ for every block: │ trailer, │
- │       │       │     │ blocks in each │ where it starts, │ 4 words  │
- │       │       │     │ partition      │ the bytes it     │          │
- │       │       │     │                │ takes            │          │
+ │ block │ block │  …  │ for each       │ for each block:  │ trailer  │
+ │       │       │     │ partition: the │ where it starts, │ 4 words  │
+ │       │       │     │ number of its  │ its size         │ of 8     │
+ │       │       │     │ blocks         │                  │ bytes    │
  └───────┴───────┴─────┴────────────────┴──────────────────┴──────────┘
-                        ◄── written when the set is finished ────────►
+                        ◄── written when the participant finishes ───►
 
  the trailer
  ┌───────┬───────────────────────┬──────────────────────┬─────────────┐
@@ -328,82 +478,104 @@ where they are:
  └───────┴───────────────────────┴──────────────────────┴─────────────┘
 ```
 
-The files of a shared set are deleted when the last participant leaves
-the query's shared memory.
+A reader of a shared file first reads the trailer at the end of the
+file. The trailer says where the lists start. The reader then reads the
+list of the partition it needs, and then the blocks of that list. The
+files of a shared set are deleted when the last participant leaves the
+shared memory of the query.
 
 ## Writing and reading
 
-A set first writes and then reads; it never does both at once.
+A set first only writes, and then only reads.
 
-1. `tess_spill_write` puts a header and a body into the write buffer. A
-   chunk of records is packed straight into the buffer when its bytes
-   fit there. The call returns the bytes the block takes in the file,
-   and can return where the block starts.
+1. `tess_spill_write` puts a header and a body into the write buffer.
+   If a chunk of records fits in the buffer, it is packed directly into
+   the buffer. The call returns the number of bytes the block takes in
+   the file. It can also return where the block starts.
 2. `tess_spill_finish` ends the writing. A shared set writes its lists
-   and its trailer here.
-3. `tess_spill_open` gives a reader at the first block of a partition,
-   with a buffer as large as the partition's largest block. A partition
-   without blocks gives no reader.
-4. `tess_spill_read_header` reads the next block whole, header and
-   stored body, in one read, and checks it: the fields of the header,
-   the fingerprint against the set's, the partition and the level
-   against the reader's, the lengths against the bytes on disk. It
-   answers false at the end of the partition.
-5. `tess_spill_read_body` gives the body: unpacked when it was stored
-   packed, copied otherwise.
+   and its trailer at this moment.
+3. `tess_spill_open` creates a reader for one partition. The reader
+   starts at the first block of the partition. Its buffer is as large
+   as the largest block of the partition. For a partition without
+   blocks there is no reader.
+4. `tess_spill_read_header` reads the next block of the partition, the
+   header and the body together, with one read. Then it checks the
+   block:
+   - the fields of the header are valid;
+   - the fingerprint is the fingerprint of the set;
+   - the partition and the level are the reader's;
+   - the sizes in the header match the size in the list of blocks.
 
-`tess_spill_seek` moves a reader to a block by the position its write
-returned; with it the participants of a parallel query take the blocks
-of one partition each on its own. A partition of a serial set has one
-reader at a time; a reader of another participant's file opens a handle
-of its own.
+   At the end of the partition the call returns false.
+5. `tess_spill_read_body` gives the body to the caller. A packed body
+   is unpacked; any other body is copied.
 
-`tess_spill_drop` forgets a partition's blocks once they have been
-read. Their bytes stay in the file until the set goes: the disk of a
-level is freed with its set, not a partition at a time. For a join
-that costs nothing at the peak, since every outer row is written before
-any partition is joined.
+`tess_spill_seek` moves a reader to one block. The caller gives the
+position that `tess_spill_write` returned for that block. In a parallel
+query this lets each participant take different blocks of the same
+partition.
 
-`tess_spill_stats` gives the blocks and the bytes written and the
-partitions that have blocks; `tess_spill_memory` gives the bytes of the
-buffers now. `tess_spill_free` deletes this participant's file with the
-set; `tess_spill_release` only closes a shared set, whose file the
-other participants may still read.
+A partition of a serial set can have only one reader at a time. A
+reader of another participant's file opens the file for itself.
 
-## What a reader refuses
+`tess_spill_drop` removes the list of a partition after the partition
+has been read. The bytes stay in the file until the set is freed. So
+the disk space of a level is freed all at once, not partition by
+partition. For a join this does not raise the largest amount of disk
+used: all outer rows are written before the first partition is joined.
 
-A reader trusts nothing it has not checked. A header with a wrong
-magic, version, kind, fingerprint, length or level is refused, and so is
-a packed body that does not unpack into exactly the chunk its header
-promises. The body of a refused block is never interpreted. The error
-is "damaged data", SQLSTATE `XX001`. A call used wrongly, such as a
-buffer shorter than a header, is an internal error, `XX000`, and not
-damaged data: the two must not be confused, since the first blames the
-file and the second the caller.
+`tess_spill_stats` returns the number of blocks, the number of bytes
+written, and the number of partitions that have blocks.
+`tess_spill_memory` returns the current size of the buffers.
+`tess_spill_free` frees the set and deletes this participant's file.
+`tess_spill_release` only closes a shared set; other participants may
+still read its file.
 
-## What was refused
+## What a reader rejects
+
+A reader does not trust bytes that it has not checked.
+
+- It rejects a header with a wrong magic, version, kind, fingerprint,
+  length or level.
+- It rejects a packed body that does not unpack into exactly the chunk
+  that the header describes.
+- It never uses the body of a rejected block.
+
+The error for such a block is "damaged data", SQLSTATE `XX001`.
+
+A wrong call is a different error. For example, the caller gives a
+buffer that is shorter than a header. This is an internal error,
+SQLSTATE `XX000`. The two errors must not be mixed: the first says that
+the file is bad, the second says that the calling code is bad.
+
+## What we decided not to do
 
 - **A general compressor**, such as lz4. It is several times slower than
-  packing by lanes, and the time is worth more than the bytes (goal 2).
-- **A file for each partition**, written in pieces of 8 kB through
-  `BufFile`. One file through a larger buffer is faster and opens fewer
+  packing by lanes. The time is worth more than the bytes (goal 2).
+- **One file for each partition**, written in pieces of 8 kB through
+  `BufFile`. One file with a larger buffer is faster and opens fewer
   files (goal 4).
-- **Rows one at a time**, as PostgreSQL writes them. Each would be
-  parsed and allocated again on reading (goal 1).
-- **Records for rows that only wait.** They would be converted twice in
-  each direction for nothing (goal 3).
-- **A checksum of the body.** The file is the query's own and lives as
-  long as the query (goal 5).
-- **A byte order fixed by the format.** A temporary file never leaves
-  the machine that wrote it.
+- **Writing rows one at a time**, as PostgreSQL does. Every row would
+  be decoded and allocated again on reading (goal 1).
+- **Records for rows that only wait.** They would be converted four
+  times for nothing (goal 3).
+- **A checksum of the body.** The file belongs to one query and lives
+  only as long as the query (goal 5).
+- **A fixed byte order.** A temporary file never leaves the machine
+  that wrote it.
 
 ## What is not on this page
 
-When a node spills, how many partitions it makes and how large their
-chunks are (`tess_spill_partitions`, `tess_spill_chunk_len`), what it
-keeps in memory, and how rows are appended to a chunk of columns belong
-to the join, the grouping and the sort. Until those parts have pages of
-their own, [docs/spill.md](../../../docs/spill.md) describes them.
+These things belong to the join, the grouping and the sort, not to the
+format:
+
+- when a node spills;
+- how many partitions it makes and how large their chunks are
+  (`tess_spill_partitions`, `tess_spill_chunk_len`);
+- what a node keeps in memory;
+- how rows are added to a chunk of columns.
+
+[docs/spill.md](../../../docs/spill.md) describes them.
 
 ## Files
 
@@ -418,6 +590,8 @@ their own, [docs/spill.md](../../../docs/spill.md) describes them.
 - `crates/tessera-capi/src/c/spill.rs`: the C entry points
 - `crates/tessera-kernels/src/spill_columns.rs`: rows appended to chunks
   of columns
+- `crates/tessera-kernels/src/table/header.rs`: the fingerprint of a
+  hash table
 - `include/tessera/spill.h`: the C API of blocks and of chunks of
   columns
 - `include/tessera/runtime_spill.h`, `runtime/spill.c`: the sets of
