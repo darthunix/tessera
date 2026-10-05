@@ -189,6 +189,10 @@ pub fn unpack(packed: &[u8], chunk: &mut [u8]) -> Result<()> {
     let mut at = codes_end;
     for lane in 0..lanes {
         let code = packed[8 + lane];
+        intact!(
+            lane != NEXT_LANE || code == ZERO,
+            "a packed chunk stores its next-record lane, with code {code}"
+        );
         let need = match code {
             ZERO => 0,
             CONSTANT => 4,
@@ -335,5 +339,12 @@ mod tests {
         bad[8] = 9;
         assert!(damaged(unpack(&bad, &mut back)));
         assert!(damaged(unpack(&out[..12], &mut back)));
+        // The next-record lane is never stored: a body that stores it,
+        // even at a code and a length that would unpack, is damaged.
+        let mut linked = out[..packed].to_vec();
+        linked[8 + NEXT_LANE] = CONSTANT;
+        linked.extend_from_slice(&[0_u8; 8]);
+        assert!(damaged(unpack(&linked, &mut back)));
+        assert_eq!(out[8 + NEXT_LANE], ZERO);
     }
 }
