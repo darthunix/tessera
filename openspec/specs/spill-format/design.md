@@ -156,11 +156,9 @@ numbers have not been measured there yet.
    of values (see "Values"). In a parallel query, the list of the blocks
    of a file is written into the file itself, because a reader cannot
    see the writer's memory.
-8. **Almost all calls to PostgreSQL's file functions are in one source
-   file**, `runtime/spill.c`. There is one exception: when a parallel
-   join is scanned again, the join itself deletes the files of its
-   shared sets. A database with a different manager of work files, such
-   as Greengage, replaces these places.
+8. **All calls to PostgreSQL's file functions are in one source file**,
+   `runtime/spill.c`. A database with a different manager of work files,
+   such as Greengage, replaces only this file.
 
 ## The whole in one picture
 
@@ -352,51 +350,45 @@ written without packing.
 A text, or any other value that does not fit in 8 bytes, does not lie
 inside a record or a column. PostgreSQL calls such values by-reference
 values. Tessera copies them into chunks of values. The record or the
-column holds a reference to the value in one word of 8 bytes.
+column holds a reference to the value in one word of 8 bytes. The spec
+defines the reference ([spec.md](spec.md), "A reference to a
+by-reference value"): the number of the chunk of values, plus one, and
+the byte of the value in that chunk.
 
 A reference is never a memory address. So it stays correct after the
-chunk has been on disk, and it is correct in another process.
+chunk has been on disk, and it is correct in another process. One is
+added to the number of the chunk so that a real reference is never 0:
+the word 0 always means "no value".
 
-There are two forms of reference. The node that writes a block chooses
-the form, and the same kind of node reads it.
+Every node uses this one form. The nodes differ only in how many chunks
+of values they have.
 
-**Form 1: a position in the paired chunk.** A sort and the waiting rows
-of a grouping use this form. They always write two blocks together:
-first a block of values, and right after it the block of columns that
-refers to it. This holds even when the block of values is empty. The
-word of a row is the position of its value in that chunk of values, in
-bytes.
+**One chunk of values.** A sort, the waiting rows of a grouping and the
+gather node write two things together: a chunk of values, and right
+after it the chunk of columns that refers to it. This holds even when
+the chunk of values is empty. The chunk of values has the number 0, so
+the upper half of every reference is 1.
 
 ```
- block of values                  block of columns, written next
- ┌───────┬───────┬─────────┐      ┌──────────┬──────────┬─────────┐
- │ Kazan │ Omsk  │ …       │ ◄─── │ word = 0 │ word = 8 │ …       │
- └───────┴───────┴─────────┘      └──────────┴──────────┴─────────┘
+ block of values, number 0        block of columns, written next
+ ┌───────┬───────┬─────────┐      ┌──────────────┬──────────────┬───┐
+ │ Kazan │ Omsk  │ …       │ ◄─── │ ref (0, 0)   │ ref (0, 8)   │ … │
+ └───────┴───────┴─────────┘      └──────────────┴──────────────┴───┘
  byte 0   byte 8
 
- address of a value = start of the chunk of values + word
+ address of a value = start of the chunk of values + byte
 ```
 
-In this form 0 is a normal position: the first value of the chunk has
-it. A NULL is known only from the NULL bit of the word.
+A sort and a grouping read these blocks from a file. Before they use a
+reference, they check it: the upper half must be 1, and the byte must
+lie inside the chunk of values. If not, the query stops with the error
+"damaged data". Without this check a damaged word would make the node
+read memory outside the chunk. The gather node gets its chunks from
+another process's memory, not from a file, and does not check them.
 
-**Form 2: a chunk number and a position.** A join uses this form, for
-its records and for its outer rows. A join keeps many chunks of values
-and numbers them 0, 1, 2, and so on.
-
-```
- a reference of a join: one word of 8 bytes
-  bit 63                      32 31                           0
- ┌──────────────────────────────┬──────────────────────────────┐
- │ number of the chunk, plus 1  │ byte in the chunk            │
- └──────────────────────────────┴──────────────────────────────┘
- the word 0 is not a reference: it means there is no value (NULL)
-```
-
-The upper half is the number of the chunk of values, plus one. The
-lower half is the position of the value in that chunk, in bytes. One is
-added so that a real reference is never 0. To find the value, a join
-keeps an array with the addresses of its chunks of values:
+**Many chunks of values.** A join keeps many chunks of values and
+numbers them 0, 1, 2, and so on. To find a value, it keeps an array
+with the addresses of its chunks of values:
 
 ```
  the join's array of chunks of values     chunk of values number 2
@@ -406,7 +398,7 @@ keeps an array with the addresses of its chunks of values:
  │ [2] │ ───────────────────────────────► ▲          ▲
  └─────┘                                  byte 0     byte 40
 
- reference (3, 40):  chunk 3 − 1 = 2, byte 40
+ reference (2, 40):  upper half 2 + 1 = 3, lower half 40
  address of the value = array[2] + 40
 ```
 
@@ -415,7 +407,12 @@ new chunk into this array, at the index from the header's `number`. The
 address may be different from the old one. The references do not
 change, and they work again. A join writes a chunk of values before the
 chunks that refer to it, so a reader has the values in memory when it
-meets a reference to them.
+meets a reference to them. A join checks that a reference names a chunk
+it has read; it does not check the byte.
+
+Before this, a sort and a grouping stored a bare position without a
+chunk number, where 0 was a normal position. There were two forms of
+reference, and nothing in a block said which one it held.
 
 A chunk of values is written as it is, without packing. Its bytes are
 the values themselves.
@@ -512,10 +509,9 @@ list of the partition it needs, and then the blocks of that list.
 counts it for each process separately, and the lists and the trailer
 count as well.
 
-A participant's file is deleted when the participant frees its set. A
-parallel join also deletes all files of its shared sets when it is
-scanned again. Any file that is left is deleted when the last
-participant leaves the shared memory of the query.
+A participant's file is deleted when the participant frees its set. Any
+file that is left is deleted when the last participant leaves the shared
+memory of the query, or when the file set is reset (see below).
 
 **What the caller must do.** The format has no mark that says "this
 file is finished" or "this participant wrote nothing".
@@ -528,6 +524,13 @@ file is finished" or "this participant wrote nothing".
   without an error. If the file exists but is not finished, it gets the
   error "damaged data".
 - A participant must finish its own set before it opens any file.
+- A node can run again in the same query: for example, a parallel join
+  under a nested loop. Its participants keep the same file names. So
+  before the second run the node must reset the file set
+  (`tess_spill_shared_reset`), which deletes all its files. Without the
+  reset, a participant that writes nothing in the second run would leave
+  its file of the first run, and the others would read old rows as new,
+  with no error.
 
 The nodes keep this order with barriers of their own. The format does
 not check it.
