@@ -142,9 +142,11 @@ the findings, and what is left.
   from SQL (the plan chosen, results, EXPLAIN, settings, SQLSTATE);
   formats on disk and in shared memory; the kernels' entry points.
   Internal names and steps go to `design.md`.
-- One promise in a requirement. Formats, lists of what is supported and
-  error codes are defined in the spec. A design may draw a layout again
-  to explain it; where the two differ, the spec is right.
+- One promise in a requirement. The rules of a format (its fields,
+  codes, widths and limits), the lists of what is supported and the
+  error codes are written once, in the spec. A design explains the idea
+  with a picture or an example and points to the spec for the rule; it
+  does not state the rule again.
 - Every scenario ends with the test that shows it:
   ``- **Verified by:** `path::text` ``, where the text occurs in the
   file: a test's name, or a mark `-- spec: <capability>/<scenario>` in

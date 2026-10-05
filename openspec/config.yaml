@@ -72,7 +72,8 @@ rules:
     - >-
       Define formats, lists of what is and is not supported and error
       codes in the spec, and draw a layout of data in a code block, with
-      its offsets and sizes.
+      its offsets and sizes. A rule is written once, here: a design
+      explains the idea and points to the spec for the rule.
     - >-
       Leave out measurements, numbers of the old plan's items and names
       of internal functions.
