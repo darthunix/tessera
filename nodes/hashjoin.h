@@ -249,9 +249,9 @@ typedef struct JoinRound
  * hash_mem keeps its records in partitions by the hash's low bits: the
  * resident ones whole in memory, the others with only their last chunk
  * (the tail) in memory and their full chunks written to temporary files.
- * The outer rows of those partitions are written as records too, of a
- * table of the outer keys whose payload is the outer columns the node
- * needs, and each partition is joined once the outer child is done. A
+ * The outer rows of those partitions are written by column, as chunks of
+ * columns of the outer columns the node needs (tessera/spill.h), and each
+ * partition is joined once the outer child is done. A
  * partition's chunks are small, so that every partition's tail fits:
  * about hash_mem / (16 partitions), from JOIN_SPILL_MIN_CHUNK to 1 MB.
  */

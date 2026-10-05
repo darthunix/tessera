@@ -216,17 +216,17 @@ fn damaged_blocks_report_data_corrupted() {
     }
 }
 
+/// The `len` bytes of values at `offset`.
+fn at(values: &[u8], offset: u64, len: usize) -> &[u8] {
+    &values[offset as usize..offset as usize + len]
+}
+
 /// The rows of Datum columns written to a chunk of columns through the
 /// entry point: a by-value column's Datums, and by-reference values copied
 /// as datumGetSize counts them (a varlena of either header, an external
 /// pointer of its tag, a C string with its terminator, a fixed length);
 /// the call stops at the chunk's capacity and at the values' room, and
 /// refuses a varlena it cannot size.
-/// The `len` bytes of values at `offset`.
-fn at(values: &[u8], offset: u64, len: usize) -> &[u8] {
-    &values[offset as usize..offset as usize + len]
-}
-
 #[test]
 fn rows_of_datums_append_to_a_chunk_of_columns() {
     use tessera_capi::c::{DatumColumn, Mask, tess_spill_columns_append, tess_spill_columns_init};

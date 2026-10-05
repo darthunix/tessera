@@ -1,14 +1,16 @@
 /*
  * C entry points of the spilled blocks' headers (crates/tessera-spill).
  *
- * A node that spills writes chunks of its hash table whole: a chunk of
- * records or a chunk of the by-reference values its records refer to,
- * each as a header of tess_spill_header_size() bytes and then the chunk's
- * bytes. The header names the chunk's number, partition and level and the
+ * A node that spills writes chunks whole: a chunk of its hash table's
+ * records, a chunk of the by-reference values that records or rows refer
+ * to, or a chunk of rows by column, each as a header of
+ * tess_spill_header_size() bytes and then the chunk's bytes or their
+ * packed form. The header names the chunk's number, partition and level and the
  * table's layout fingerprint (tess_table_fingerprint), so that a block of
  * another table or a damaged file is an error status on reading, never a
  * record read the wrong way. The library reads and writes no file: the
- * node does, through PostgreSQL's temporary files. See docs/spill.md.
+ * node does, through PostgreSQL's temporary files. The format is the
+ * capability spill-format (openspec/specs/spill-format).
  */
 #ifndef TESSERA_SPILL_H
 #define TESSERA_SPILL_H
@@ -39,11 +41,15 @@ typedef struct TessSpillHeader
 	/* The level of partitioning, 0 for the first, below 32. */
 	uint32		level;
 	uint64		fingerprint;
-	/* Bytes of the body after the header, a multiple of 8. */
+	/*
+	 * Bytes of the chunk a reader gets, a multiple of 8: the body on disk,
+	 * or what it unpacks into when it is stored packed.
+	 */
 	uint64		len;
 	/*
-	 * A chunk of records stored packed (tess_spill_pack): the bytes on
-	 * disk, fewer than len; 0 when the body is stored as it is.
+	 * The bytes on disk of a body stored packed: a chunk of records when
+	 * that makes it shorter (tess_spill_pack), a chunk of columns always; 0
+	 * when the body is stored as it is.
 	 */
 	uint32		packed;
 } TessSpillHeader;
@@ -70,7 +76,8 @@ extern TessStatusCode tess_spill_header_write(void *out, Size len,
 
 /*
  * Read and check the header at bytes: its magic, version and kind, the
- * table's fingerprint and a body of at most max_len bytes.
+ * set's fingerprint, a body of at most max_len bytes, the packed length
+ * its kind allows and a level below 32.
  */
 extern TessStatusCode tess_spill_header_read(const void *bytes, Size len,
 											 uint64 fingerprint,

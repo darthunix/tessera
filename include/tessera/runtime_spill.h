@@ -64,7 +64,8 @@ typedef struct TessSpillConfig
 
 /*
  * A write buffer for a set of a node whose memory is limit bytes: a
- * sixteenth of it, 32 to 256 kB. Past a few blocks a larger one gains
+ * sixteenth of it, from a block of PostgreSQL, 8 kB, to 256 kB. Past a
+ * few blocks a larger one gains
  * little: what a write costs goes with its bytes.
  */
 #define TESS_SPILL_BUFFER_LEN(limit) \
@@ -91,11 +92,12 @@ extern void tess_spill_shared_attach(SharedFileSet *shared,
 extern TessSpill *tess_spill_create(const TessSpillConfig *config);
 
 /*
- * Write a block of len bytes at body to the partition's file, its header
- * naming kind and number; its start into position unless that is NULL.
- * A chunk of records is stored packed when that makes it shorter
- * (tess_spill_pack), and reads back whole. Returns the bytes on disk,
- * header included.
+ * Write a block of len bytes at body to the set's file, into the list of
+ * the partition's blocks, its header naming kind and number; its start
+ * into position unless that is NULL. A chunk of records is stored packed
+ * when that makes it shorter (tess_spill_pack), a chunk of columns
+ * always, and both read back whole. Returns the bytes on disk, header
+ * included.
  */
 extern Size tess_spill_write(TessSpill *spill, int partition,
 							 TessSpillKind kind, uint32 number,
@@ -106,9 +108,10 @@ extern Size tess_spill_write(TessSpill *spill, int partition,
 extern void tess_spill_finish(TessSpill *spill);
 
 /*
- * After tess_spill_finish: a reader of the partition's file that the
- * participant wrote, at its first block, or NULL when that participant
- * wrote no block to it. A serial set reads only its own participant's.
+ * After tess_spill_finish: a reader of the partition's blocks in the
+ * file that the participant wrote, at the first of them, or NULL when
+ * that participant wrote no block to the partition. A serial set reads
+ * only its own participant's.
  */
 extern TessSpillReader *tess_spill_open(TessSpill *spill, int participant,
 										int partition);

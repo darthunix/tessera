@@ -21,15 +21,15 @@ use super::varlena::varlena_size;
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SpillHeader {
-    /// A `TessSpillKind`: 1 records, 2 values.
+    /// A `TessSpillKind`: 1 records, 2 values, 3 columns.
     pub kind: u32,
     pub number: u32,
     pub partition: u32,
     pub level: u32,
     pub fingerprint: u64,
-    /// Bytes of the body after the header.
+    /// Bytes of the chunk a reader gets.
     pub len: u64,
-    /// Bytes of a packed chunk of records on disk, 0 for a body as it is.
+    /// Bytes on disk of a body stored packed, 0 for a body as it is.
     pub packed: u32,
 }
 
@@ -101,8 +101,8 @@ pub unsafe extern "C" fn tess_spill_header_write(
 }
 
 /// `tess_spill_header_read`: read and check the header at `bytes`: its
-/// magic, version, kind, the table's `fingerprint` and a body of at most
-/// `max_len` bytes.
+/// magic, version, kind, the set's `fingerprint`, a body of at most
+/// `max_len` bytes, the packed length its kind allows and the level.
 ///
 /// # Safety
 ///
