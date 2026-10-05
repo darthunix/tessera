@@ -117,6 +117,40 @@ extern TessStatusCode tess_spill_unpack(const void *packed, Size len, void *chun
 #define TESS_SPILL_COLUMNS_PLACE_BITS 17
 /* The most words stored for a row: tess_spill_columns_init refuses more. */
 #define TESS_SPILL_COLUMNS_MAX_WORDS 4096
+
+/*
+ * A word that refers to a by-reference value, in a record's payload and in
+ * a row of a chunk of columns alike: the number of the value's chunk plus
+ * one, above TESS_SPILL_VALUE_BYTE_BITS bits of the value's byte in that
+ * chunk. No address of a process, so the word means the same in every
+ * process and on disk; and never 0, which is no reference. A chunk of
+ * columns that is written with one chunk of values before it refers to
+ * that chunk as number 0.
+ */
+#define TESS_SPILL_VALUE_BYTE_BITS 32
+#define TESS_SPILL_VALUE_REF(number, byte) \
+	((((uint64) (number) + 1) << TESS_SPILL_VALUE_BYTE_BITS) | (uint64) (byte))
+
+/* The byte a reference names in its chunk of values. */
+static inline uint64
+tess_spill_value_byte(uint64 ref)
+{
+	return ref & ((UINT64CONST(1) << TESS_SPILL_VALUE_BYTE_BITS) - 1);
+}
+
+/*
+ * The value that ref names in the len bytes at values, when those bytes
+ * are the one chunk of values of a chunk of columns, its number 0; NULL
+ * when ref is no reference into them. Bytes read from a file are held to
+ * this: tess_spill_value_damaged reports the other case.
+ */
+static inline const char *
+tess_spill_value_in(const char *values, uint64 len, uint64 ref)
+{
+	if ((ref >> TESS_SPILL_VALUE_BYTE_BITS) != 1 || tess_spill_value_byte(ref) >= len)
+		return NULL;
+	return values + tess_spill_value_byte(ref);
+}
 /*
  * The lanes of NULL bits of a chunk of words stored words, one at least, as
  * crates/tessera-spill (columns::null_lanes) lays them out; a constant
@@ -268,9 +302,9 @@ extern TessStatusCode tess_spill_columns_init(void *chunk, Size len, int words,
  * by value when byvals[c], else of typlens[c], -1 a varlena, -2 a C
  * string) is the chunk's word c, the words past them the caller's. A NULL
  * value's word is 0 with its NULL bit; a by-value one's its Datum; a
- * by-reference one's the offset of its bytes, as datumGetSize counts
- * them, copied into values at *values_used, which moves past them to a
- * multiple of 8. It stops when the chunk is full or the next row's values
+ * by-reference one's a reference (TESS_SPILL_VALUE_REF of chunk 0) to its
+ * bytes, as datumGetSize counts them, copied into values at *values_used,
+ * which moves past them to a multiple of 8; values_len is at most 4 GiB. It stops when the chunk is full or the next row's values
  * would pass values_len: the rows appended leave rows, *appended gets
  * their count and *need the bytes of values the next row takes (0 when
  * every row went), for the caller to make room.

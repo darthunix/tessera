@@ -24,6 +24,8 @@ PG_FUNCTION_INFO_V1(tessera_test_spill_lanes);
 PG_FUNCTION_INFO_V1(tessera_test_spill_memory);
 PG_FUNCTION_INFO_V1(tessera_test_spill_shared_bytes);
 PG_FUNCTION_INFO_V1(tessera_test_spill_tablespace);
+PG_FUNCTION_INFO_V1(tessera_test_spill_value);
+PG_FUNCTION_INFO_V1(tessera_test_spill_reset);
 
 #define FINGERPRINT UINT64CONST(0x5445535354455354)
 #define MAX_LEN (2 * 1024 * 1024)
@@ -730,6 +732,10 @@ tessera_test_spill_error(PG_FUNCTION_ARGS)
 				tess_spill_open(other, 0, 0);
 			}
 			break;
+		case 28:
+			/* A row read back that refers outside its chunk of values. */
+			tess_spill_value_damaged();
+			break;
 		case 20:
 			/* A partition dropped while a reader of it is open. */
 			write_blocks(spill, &block, 1);
@@ -821,6 +827,89 @@ tessera_test_spill_tablespace(PG_FUNCTION_ARGS)
 	FreeDir(dir);
 	tess_spill_free(spill);
 	PG_RETURN_INT64(files);
+}
+
+/*
+ * A reference to a by-reference value: the number of its chunk plus one
+ * above 32 bits of its byte, and what a chunk of columns' one chunk of
+ * values takes for a reference into it.
+ */
+Datum
+tessera_test_spill_value(PG_FUNCTION_ARGS)
+{
+	char		values[64];
+	uint64		len = sizeof(values);
+
+	if (TESS_SPILL_VALUE_REF(0, 40) != ((UINT64CONST(1) << 32) | 40) ||
+		TESS_SPILL_VALUE_REF(2, 0) != (UINT64CONST(3) << 32) ||
+		tess_spill_value_byte(TESS_SPILL_VALUE_REF(7, 12345)) != 12345)
+		elog(ERROR, "a reference to a value is not its chunk plus one above its byte");
+	/* The first byte and the last of the chunk. */
+	if (tess_spill_value_in(values, len, TESS_SPILL_VALUE_REF(0, 0)) != values ||
+		tess_spill_value_in(values, len, TESS_SPILL_VALUE_REF(0, 63)) != values + 63)
+		elog(ERROR, "a reference into the chunk of values does not name its byte");
+	/*
+	 * No reference into the chunk: the word 0, a bare offset, another
+	 * chunk's number, and the byte just past the chunk.
+	 */
+	if (tess_spill_value_in(values, len, 0) != NULL ||
+		tess_spill_value_in(values, len, 40) != NULL ||
+		tess_spill_value_in(values, len, TESS_SPILL_VALUE_REF(1, 40)) != NULL ||
+		tess_spill_value_in(values, len, TESS_SPILL_VALUE_REF(0, 64)) != NULL)
+		elog(ERROR, "a word that is no reference into the chunk of values is taken for one");
+	PG_RETURN_BOOL(true);
+}
+
+/*
+ * A shared file set used twice, as a node that runs anew uses it: after
+ * the reset nothing of the first use is read. Participant 0 writes in the
+ * first use and nothing in the second; without the reset its file of the
+ * first use would stand for its blocks of the second.
+ */
+Datum
+tessera_test_spill_reset(PG_FUNCTION_ARGS)
+{
+	Block		first[] = {
+		{0, TESS_SPILL_RECORDS, 0, 64},
+		{2, TESS_SPILL_VALUES, 0, 1024 * 1024},
+	};
+	Block		second[] = {
+		{1, TESS_SPILL_RECORDS, 0, 64},
+	};
+	dsm_segment *segment = dsm_create(sizeof(SharedFileSet), 0);
+	SharedFileSet *shared = dsm_segment_address(segment);
+	TessSpill  *one;
+	TessSpill  *two;
+
+	tess_spill_shared_init(shared, segment);
+	one = make_spill(shared, 0, FINGERPRINT);
+	two = make_spill(shared, 1, FINGERPRINT);
+	write_blocks(one, first, lengthof(first));
+	write_blocks(two, second, lengthof(second));
+	tess_spill_finish(one);
+	tess_spill_finish(two);
+	if (!read_partition(two, 0, 0, first, lengthof(first)) ||
+		!read_partition(two, 0, 2, first, lengthof(first)))
+		elog(ERROR, "the first use of the file set reads back wrong");
+	/* Each participant leaves its file to the others, as a join does. */
+	tess_spill_release(one);
+	tess_spill_release(two);
+
+	tess_spill_shared_reset(shared);
+	one = make_spill(shared, 0, FINGERPRINT);
+	two = make_spill(shared, 1, FINGERPRINT);
+	write_blocks(two, second, lengthof(second));
+	tess_spill_finish(one);
+	tess_spill_finish(two);
+	for (int partition = 0; partition < 4; partition++)
+		if (tess_spill_open(two, 0, partition) != NULL)
+			elog(ERROR, "partition %d of the first use is read after the reset", partition);
+	if (!read_partition(one, 1, 1, second, lengthof(second)))
+		elog(ERROR, "the second use of the file set reads back wrong");
+	tess_spill_free(one);
+	tess_spill_free(two);
+	dsm_detach(segment);
+	PG_RETURN_BOOL(true);
 }
 
 /*

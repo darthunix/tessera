@@ -82,7 +82,9 @@ typedef struct MergeInput
 	SortRun    *run;
 	TessSpillReader *reader;
 	int			block;
+	/* The block's chunk of values and its bytes, and its chunk of rows. */
 	char	   *values;
+	Size		values_len;
 	void	   *chunk;
 	uint32		rows;
 	uint32		place;

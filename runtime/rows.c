@@ -31,7 +31,7 @@
 #define ROWS_CHUNK_LEN TESS_TABLE_MAX_CHUNK_LEN
 #define ROWS_VALUE_FIRST (64 * 1024)
 #define ROWS_VALUE_CHUNK (1024 * 1024)
-#define ROWS_VALUE_REF(number, byte) ((((uint64) (number) + 1) << 32) | (uint64) (byte))
+#define ROWS_VALUE_REF(number, byte) TESS_SPILL_VALUE_REF(number, byte)
 
 struct TessRows
 {

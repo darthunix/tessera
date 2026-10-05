@@ -32,7 +32,7 @@ pub use pack::{pack, unpack};
 pub const MAGIC: u64 = u64::from_le_bytes(*b"TESSSPIL");
 
 /// The format of the blocks this crate writes and reads.
-pub const VERSION: u32 = 2;
+pub const VERSION: u32 = 3;
 
 /// Bytes of a block header; the body follows, aligned to 8.
 pub const HEADER_SIZE: usize = 48;

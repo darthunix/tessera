@@ -216,9 +216,12 @@ fn damaged_blocks_report_data_corrupted() {
     }
 }
 
-/// The `len` bytes of values at `offset`.
-fn at(values: &[u8], offset: u64, len: usize) -> &[u8] {
-    &values[offset as usize..offset as usize + len]
+/// The `len` bytes of values that the word `reference` names: a
+/// reference to chunk 0, which is 1 above 32 bits of the byte.
+fn at(values: &[u8], reference: u64, len: usize) -> &[u8] {
+    assert_eq!(reference >> 32, 1, "{reference:#x} is no reference");
+    let offset = (reference & u64::from(u32::MAX)) as usize;
+    &values[offset..offset + len]
 }
 
 /// The rows of Datum columns written to a chunk of columns through the

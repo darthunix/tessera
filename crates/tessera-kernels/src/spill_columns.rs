@@ -169,15 +169,17 @@ pub struct Appended {
 /// `chunk` after its rows: column `c` of a row is the chunk's word `c`, the
 /// words past the columns the caller's (a sort's keys). A by-reference
 /// value is copied into `values` at `*used`, its offset aligned to 8, and
-/// the word is that offset. It stops when the chunk is full or the next
-/// row's values would pass the end of `values`; the rows appended leave
-/// `rows`.
+/// the word is a reference to it ([`columns::value_ref`] of chunk 0, the
+/// one chunk of values of this chunk of columns). It stops when the chunk
+/// is full or the next row's values would pass the end of `values`; the
+/// rows appended leave `rows`.
 ///
 /// # Errors
 ///
-/// A chunk of fewer words than the columns, `*used` past `values` or not
-/// aligned to 8, or a value [`RowValues::value`] cannot tell, before any
-/// row of the word it is in is written.
+/// A chunk of fewer words than the columns, `values` longer than a
+/// reference names a byte of, `*used` past `values` or not aligned to 8,
+/// or a value [`RowValues::value`] cannot tell, before any row of the word
+/// it is in is written.
 pub fn append(
     chunk: &mut [u8],
     source: &impl RowValues,
@@ -191,6 +193,11 @@ pub fn append(
         ncolumns <= shape.words,
         "a chunk of {} words takes no row of {ncolumns} columns",
         shape.words
+    );
+    ensure!(
+        values.len() as u64 <= 1 << columns::VALUE_BYTE_BITS,
+        "a chunk of values of {} bytes is longer than a reference names",
+        values.len()
     );
     ensure!(
         *used <= values.len() && used.is_multiple_of(8),
@@ -285,7 +292,7 @@ pub fn append(
                         let at = *used;
                         values[at..at + value.len()].copy_from_slice(value);
                         *used = at + value.len().next_multiple_of(8);
-                        at as u64
+                        columns::value_ref(0, at)
                     }
                 };
                 put(
@@ -450,9 +457,12 @@ mod tests {
                                 ensure!((word, null) == (*value, 0), "row {row} column {column}")
                             }
                             Cell::Bytes(value) => {
-                                let at = word as usize;
+                                // A reference to chunk 0: 1 above the byte.
+                                let at = (word & u64::from(u32::MAX)) as usize;
                                 ensure!(
-                                    null == 0
+                                    word == columns::value_ref(0, at)
+                                        && word >> columns::VALUE_BYTE_BITS == 1
+                                        && null == 0
                                         && at.is_multiple_of(8)
                                         && values[at..at + value.len()] == value[..],
                                     "row {row} column {column}"

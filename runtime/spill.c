@@ -150,6 +150,22 @@ tess_spill_shared_attach(SharedFileSet *shared, dsm_segment *segment)
 	SharedFileSetAttach(shared, segment);
 }
 
+void
+tess_spill_shared_reset(SharedFileSet *shared)
+{
+	if (shared == NULL)
+		elog(ERROR, "Tessera shared spill files require a file set");
+	SharedFileSetDeleteAll(shared);
+}
+
+void
+tess_spill_value_damaged(void)
+{
+	ereport(ERROR,
+			errcode(ERRCODE_DATA_CORRUPTED),
+			errmsg("Tessera row read back refers to a value outside its chunk of values"));
+}
+
 TessSpill *
 tess_spill_create(const TessSpillConfig *config)
 {
