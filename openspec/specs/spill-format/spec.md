@@ -159,14 +159,15 @@ then the lanes' data, padded with zeros to a multiple of 8.
  └─────────┴─────────┴──────────────────┴──────────────────────────┘
 ```
 
-A lane's code says how its values are stored:
+A lane's code says how its values are stored. A writer gives a lane the
+first code of this list that fits its values:
 
-- 0: nothing is stored, since every value is 0; the next-record lane
+- 0: every value is 0, and nothing is stored; the next-record lane
   always has this code;
-- 1: one value of 4 bytes, since all are equal;
-- 2: 1 byte a record;
-- 3: 2 bytes a record;
-- 4: 4 bytes a record.
+- 1: all values are equal, and one value of 4 bytes is stored;
+- 2: every value is below 256, and 1 byte is stored for a record;
+- 3: every value is below 65536, and 2 bytes are stored for a record;
+- 4: any other lane, and 4 bytes are stored for a record.
 
 #### Scenario: Lanes take the width their values need and read back
 - **WHEN** a chunk of records with lanes of zeros, equal values, and
@@ -269,8 +270,10 @@ A chunk of columns SHALL be stored packed, for its rows only: the rows
 (4 bytes), the words a row (4 bytes), a descriptor of 16 bytes for each
 lane (the width in its first byte, the lane's least value in its last
 8), then each lane's values as their difference from the least value in
-0, 1, 2, 4 or 8 bytes each, a lane padded to a multiple of 8. A lane
-whose values are all equal takes no bytes beyond its descriptor. Reading
+0, 1, 2, 4 or 8 bytes each, the fewest that hold the lane's largest
+difference, a lane padded to a multiple of 8. A lane whose values are
+all equal has a width of 0 and takes no bytes beyond its descriptor. The
+lanes of NULL bits are stored as the lanes of words are. Reading
 it back MUST give a chunk with the same rows, words and values, whose
 capacity is its rows. A packed chunk with a width that does not exist, a
 lane cut short, a length that does not match its counts, or bytes past
