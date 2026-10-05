@@ -203,6 +203,11 @@ fn get<const W: usize>(packed: &[u8], base: u64, out: &mut [u8]) {
 /// (its lanes for its rows only) are returned.
 pub fn pack(chunk: &[u8], out: &mut [u8]) -> Result<(usize, usize)> {
     let shape = shape(chunk)?;
+    ensure!(
+        chunk.len().is_multiple_of(8),
+        "a chunk of columns of {} bytes is not a length of 8s",
+        chunk.len()
+    );
     let lanes = lanes(shape.words);
     ensure!(
         out.len() >= pack_bound(shape.rows, shape.words),
@@ -480,6 +485,12 @@ mod tests {
         assert_eq!(init(&mut longest, 1)?, MAX_ROWS);
         assert_eq!(shape(&longest)?.capacity, MAX_ROWS);
         assert_eq!(capacity(size(MAX_ROWS, 1), 1), MAX_ROWS);
+        // A chunk with a byte past a length of 8s is not packed.
+        let mut chunk = chunk_of(2, 1, &[vec![0, 1]]);
+        let mut out = vec![0_u8; pack_bound(2, 1)];
+        assert!(pack(&chunk, &mut out).is_ok());
+        chunk.push(0);
+        assert!(pack(&chunk, &mut out).is_err());
         Ok(())
     }
 }
