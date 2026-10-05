@@ -26,6 +26,10 @@ CREATE FUNCTION tessera_test_spill_lanes()
 RETURNS boolean
 AS :'spill_test', 'tessera_test_spill_lanes'
 LANGUAGE C STRICT;
+CREATE FUNCTION tessera_test_spill_memory()
+RETURNS boolean
+AS :'spill_test', 'tessera_test_spill_memory'
+LANGUAGE C STRICT;
 SELECT tessera_test_spill_serial() AS serial \gset
 \echo :serial
 t
@@ -39,6 +43,10 @@ t
 -- The C formulas of a chunk's lanes are Rust's at every count of words.
 SELECT tessera_test_spill_lanes() AS lanes \gset
 \echo :lanes
+t
+-- The bytes a set holds, and a chunk longer than its write buffer.
+SELECT tessera_test_spill_memory() AS memory \gset
+\echo :memory
 t
 -- Every misuse and damaged block is an ERROR.
 SELECT tessera_test_spill_error(1);
@@ -147,11 +155,38 @@ SELECT tessera_test_spill_sqlstate(19);
  XX001: Tessera spilled block's header does not match its packed body
 (1 row)
 
--- A seek to a position that holds no block is a wrong call.
+-- A packed block whose body is damaged in the file.
+SELECT tessera_test_spill_sqlstate(23);
+      tessera_test_spill_sqlstate      
+---------------------------------------
+ XX001: a packed chunk has lane code 9
+(1 row)
+
+-- A block that the list says is shorter than a header.
+SELECT tessera_test_spill_sqlstate(22);
+               tessera_test_spill_sqlstate               
+---------------------------------------------------------
+ XX001: Tessera spilled block of 8 bytes is out of range
+(1 row)
+
+-- Wrong calls: a seek to a position that holds no block, a partition
+-- dropped while it is read, a block of a kind that does not exist.
 SELECT tessera_test_spill_sqlstate(16);
                     tessera_test_spill_sqlstate                    
 -------------------------------------------------------------------
  XX000: Tessera spill file has no block of partition 0 at offset 8
+(1 row)
+
+SELECT tessera_test_spill_sqlstate(20);
+                  tessera_test_spill_sqlstate                   
+----------------------------------------------------------------
+ XX000: Tessera spill file of partition 0 is dropped while read
+(1 row)
+
+SELECT tessera_test_spill_sqlstate(21);
+       tessera_test_spill_sqlstate        
+------------------------------------------
+ XX000: a spilled block of unknown kind 9
 (1 row)
 
 -- temp_file_limit applies; the files are gone after the ERROR.
@@ -178,3 +213,4 @@ DROP FUNCTION tessera_test_spill_sqlstate(integer);
 DROP FUNCTION tessera_test_spill_error(integer);
 DROP FUNCTION tessera_test_spill_bytes(bigint);
 DROP FUNCTION tessera_test_spill_lanes();
+DROP FUNCTION tessera_test_spill_memory();

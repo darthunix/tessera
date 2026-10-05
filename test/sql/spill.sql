@@ -27,6 +27,10 @@ CREATE FUNCTION tessera_test_spill_lanes()
 RETURNS boolean
 AS :'spill_test', 'tessera_test_spill_lanes'
 LANGUAGE C STRICT;
+CREATE FUNCTION tessera_test_spill_memory()
+RETURNS boolean
+AS :'spill_test', 'tessera_test_spill_memory'
+LANGUAGE C STRICT;
 
 SELECT tessera_test_spill_serial() AS serial \gset
 \echo :serial
@@ -38,6 +42,9 @@ SELECT tessera_test_spill_packed() AS packed \gset
 -- The C formulas of a chunk's lanes are Rust's at every count of words.
 SELECT tessera_test_spill_lanes() AS lanes \gset
 \echo :lanes
+-- The bytes a set holds, and a chunk longer than its write buffer.
+SELECT tessera_test_spill_memory() AS memory \gset
+\echo :memory
 
 -- Every misuse and damaged block is an ERROR.
 SELECT tessera_test_spill_error(1);
@@ -83,8 +90,15 @@ SELECT tessera_test_spill_sqlstate(15);
 -- A packed block whose header names another length than its body
 -- unpacks into.
 SELECT tessera_test_spill_sqlstate(19);
--- A seek to a position that holds no block is a wrong call.
+-- A packed block whose body is damaged in the file.
+SELECT tessera_test_spill_sqlstate(23);
+-- A block that the list says is shorter than a header.
+SELECT tessera_test_spill_sqlstate(22);
+-- Wrong calls: a seek to a position that holds no block, a partition
+-- dropped while it is read, a block of a kind that does not exist.
 SELECT tessera_test_spill_sqlstate(16);
+SELECT tessera_test_spill_sqlstate(20);
+SELECT tessera_test_spill_sqlstate(21);
 
 -- temp_file_limit applies; the files are gone after the ERROR.
 SELECT tessera_test_spill_bytes(3 * 1024 * 1024);
@@ -100,3 +114,4 @@ DROP FUNCTION tessera_test_spill_sqlstate(integer);
 DROP FUNCTION tessera_test_spill_error(integer);
 DROP FUNCTION tessera_test_spill_bytes(bigint);
 DROP FUNCTION tessera_test_spill_lanes();
+DROP FUNCTION tessera_test_spill_memory();
