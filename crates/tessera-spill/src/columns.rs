@@ -271,8 +271,14 @@ pub fn unpack(packed: &[u8], out: &mut [u8]) -> Result<()> {
     intact!(packed.len() >= 8, "a packed chunk of columns has no counts");
     let rows = get_u32(packed, 0) as usize;
     let words = get_u32(packed, 4) as usize;
+    // The limits a chunk is made within: a body past them would get a
+    // header of fewer places than its rows.
     intact!(
-        rows <= MAX_ROWS && words <= MAX_WORDS && out.len() == size(rows, words),
+        words <= MAX_WORDS && rows <= capacity(usize::MAX / 2, words),
+        "a packed chunk of {rows} rows of {words} words is past the limits of a chunk"
+    );
+    intact!(
+        out.len() == size(rows, words),
         "a packed chunk of {rows} rows of {words} words does not unpack into {} bytes",
         out.len()
     );
@@ -508,6 +514,23 @@ mod tests {
             );
         }
         assert!(capacity(usize::MAX / 2, MAX_WORDS) < MAX_ROWS);
+        // A packed body of one row more than a chunk of the most words
+        // holds is past the limits, whatever it is unpacked into; one of
+        // exactly the most rows only fails to fit the bytes given here.
+        let most = capacity(usize::MAX / 2, MAX_WORDS);
+        let body = |rows: usize| {
+            let mut body = vec![0_u8; 8 + 16 * lanes(MAX_WORDS)];
+            body[..4].copy_from_slice(&(rows as u32).to_ne_bytes());
+            body[4..8].copy_from_slice(&(MAX_WORDS as u32).to_ne_bytes());
+            body
+        };
+        let refused = |rows: usize| {
+            let error = unpack(&body(rows), &mut [0_u8; HEADER]).expect_err("unpacked");
+            assert!(error.downcast_ref::<crate::Damaged>().is_some());
+            format!("{error:#}")
+        };
+        assert!(refused(most + 1).contains("past the limits"));
+        assert!(refused(most).contains("does not unpack"));
         // A chunk with a byte past a length of 8s is not packed.
         let mut chunk = chunk_of(2, 1, &[vec![0, 1]]);
         let mut out = vec![0_u8; pack_bound(2, 1)];
