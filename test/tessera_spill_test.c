@@ -216,8 +216,8 @@ cut_shared_file(SharedFileSet *shared, int participant, int64 len)
 /*
  * A serial set: blocks of records and values of 8 bytes, several file
  * buffers and 1 MB, and an empty one, into two of four partitions, read
- * back in order and by position; a partition without blocks has no file;
- * the counters; a dropped file.
+ * back in order and by position; a partition without blocks has no
+ * reader; the counters; a dropped partition.
  */
 Datum
 tessera_test_spill_serial(PG_FUNCTION_ARGS)
@@ -264,9 +264,9 @@ tessera_test_spill_serial(PG_FUNCTION_ARGS)
 
 /*
  * Two participants of a shared set in one segment: each reads the other's
- * files and its own, a partition one of them left empty has no file of
- * that participant; one that releases its set leaves its files to the
- * others, and the files go with the segment.
+ * file and its own, a partition one of them left empty has no reader, and
+ * neither has a participant that wrote nothing; one that releases its set
+ * leaves its file to the others, and the files go with the segment.
  */
 Datum
 tessera_test_spill_shared(PG_FUNCTION_ARGS)
