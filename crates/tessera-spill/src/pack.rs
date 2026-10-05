@@ -348,13 +348,19 @@ mod tests {
         bad[8] = 9;
         assert!(damaged(unpack(&bad, &mut back)));
         assert!(damaged(unpack(&out[..12], &mut back)));
-        // The next-record lane is never stored: a body that stores it,
-        // even at a code and a length that would unpack, is damaged.
-        let mut linked = out[..packed].to_vec();
-        linked[8 + NEXT_LANE] = CONSTANT;
-        linked.extend_from_slice(&[0_u8; 8]);
-        assert!(damaged(unpack(&linked, &mut back)));
+        // The next-record lane is never stored. Here it is stored as one
+        // value for all, in a body that is whole in every other way: its
+        // 4 bytes stand after the first lane's 10, and take the place of
+        // the 4 bytes of padding at the end.
         assert_eq!(out[8 + NEXT_LANE], ZERO);
+        assert_eq!(packed, 64);
+        let next_at = 8 + 8 + 10;
+        let mut linked = out[..next_at].to_vec();
+        linked.extend_from_slice(&7_u32.to_ne_bytes());
+        linked.extend_from_slice(&out[next_at..packed - 4]);
+        linked[8 + NEXT_LANE] = CONSTANT;
+        assert_eq!(linked.len(), packed);
+        assert!(damaged(unpack(&linked, &mut back)));
         // Bytes past the last lane, and a body cut inside its padding.
         let mut long = out[..packed].to_vec();
         long.extend_from_slice(&[0_u8; 8]);
