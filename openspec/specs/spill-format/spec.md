@@ -132,7 +132,8 @@ data.
 #### Scenario: A damaged packed body of records
 - **WHEN** a packed body is too short for its counts or its lane codes,
   does not match the chunk it is unpacked into, has a lane code that
-  does not exist, or stores the lane of the next-record references
+  does not exist, stores the lane of the next-record references, has
+  records of another length than its own, or has bytes past its lanes
 - **THEN** unpacking fails as damaged data
 - **Verified by:**
   `crates/tessera-spill/src/pack.rs::damaged_packed_bodies_are_refused`
@@ -176,6 +177,10 @@ first code of this list that fits its values:
 - 2: every value is below 256, and 1 byte is stored for a record;
 - 3: every value is below 65536, and 2 bytes are stored for a record;
 - 4: any other lane, and 4 bytes are stored for a record.
+
+A packed body whose records do not have its record length, or that does
+not end with its last lane, padded to a multiple of 8, MUST be refused
+as damaged data.
 
 #### Scenario: Lanes take the width their values need and read back
 - **WHEN** a chunk of records with lanes of zeros, equal values, and
@@ -254,10 +259,11 @@ kernels MUST agree on this layout.
 
 ### Requirement: The limits of a chunk of columns
 A chunk of columns SHALL hold at most 4096 words a row and at most
-131071 rows. A chunk MUST NOT be made in bytes that are too short for
-the header or of a length that is no multiple of 8; a chunk of such a
-length MUST NOT be packed; and bytes without the magic MUST be refused
-as a chunk of columns.
+131071 rows, and no more rows than pack into the 4 GiB that the 32 bits
+of a header's packed length can name. A chunk MUST NOT be made in bytes
+that are too short for the header or of a length that is no multiple of
+8; a chunk of such a length MUST NOT be packed; and bytes without the
+magic MUST be refused as a chunk of columns.
 
 #### Scenario: A chunk that is not one of columns
 - **WHEN** a chunk of 8 bytes is initialized, or a chunk whose magic is
@@ -269,9 +275,10 @@ as a chunk of columns.
 #### Scenario: The limits of a chunk
 - **WHEN** a chunk is initialized with more than 4096 words a row or
   with a length that is no multiple of 8, its length would hold more
-  than 131071 rows, or a chunk with a byte past a length of 8s is packed
-- **THEN** the first two are refused, the capacity stops at 131071, and
-  the packing is refused
+  than 131071 rows or more than pack into 4 GiB, or a chunk with a byte
+  past a length of 8s is packed
+- **THEN** the first two are refused, the capacity stops at 131071 or
+  at the rows that pack into 4 GiB, and the packing is refused
 - **Verified by:**
   `crates/tessera-spill/src/columns.rs::a_chunk_keeps_within_its_limits`
 
@@ -357,9 +364,12 @@ when the query's resources are released.
   not exist, or with a body the header does not take or the set does not
   accept; the next header is read before the body, or a body at another
   length than its header's; another participant's file of a serial set
-  or a second reader of a serial partition is opened
-- **THEN** each call raises an ERROR
-- **Verified by:** `test/sql/spill.sql::tessera_test_spill_error`
+  or a second reader of a serial partition is opened; a reader seeks to
+  a position that holds no block of its partition
+- **THEN** each call raises an ERROR, and the seek an internal error,
+  SQLSTATE `XX000`
+- **Verified by:** `test/sql/spill.sql::tessera_test_spill_error`;
+  `test/sql/spill.sql::tessera_test_spill_sqlstate(16)`
 
 #### Scenario: The limit of temporary files stops a spill
 - **WHEN** a set writes more bytes than `temp_file_limit` allows
@@ -378,12 +388,13 @@ number 0x5445535354524149), where the lists start, the number of
 partitions and the fingerprint. Once a participant has finished its set,
 any participant MUST be able to open that participant's file and read a
 partition's blocks from it, each reader at a position of its own. A file
-without a valid trailer, or whose lists name more blocks than they hold
-or a block that does not lie among the file's blocks, MUST be refused as
-damaged data. A participant that wrote no block has no file, and its
-partitions open as no reader. A participant's file is deleted when the
-participant frees its set, and the files that are left when the last
-participant detaches from the shared memory.
+without a valid trailer, with the fingerprint of another set than the
+reader's, or whose lists name more blocks than they hold or a block that
+does not lie among the file's blocks, MUST be refused as damaged data. A
+participant that wrote no block has no file, and its partitions open as
+no reader. A participant's file is deleted when the participant frees
+its set, and the files that are left when the last participant detaches
+from the shared memory.
 
 The format has no mark of a finished file. The caller ensures that a
 participant's file is opened only after that participant finished its
@@ -414,10 +425,11 @@ set, and that the opener finished its own.
 
 #### Scenario: A file without its lists
 - **WHEN** a participant's file ends without a trailer, the trailer's
-  magic or counts do not match, a list counts more blocks than the lists
-  hold, or a block's entry ends past the file's blocks
+  magic, counts or fingerprint do not match, a list counts more blocks
+  than the lists hold, or a block's entry ends past the file's blocks
 - **THEN** opening it fails as damaged data
 - **Verified by:**
+  `test/sql/spill.sql::tessera_test_spill_sqlstate(7)`;
   `test/sql/spill.sql::tessera_test_spill_sqlstate(10)`;
   `test/sql/spill.sql::tessera_test_spill_sqlstate(11)`;
   `test/sql/spill.sql::tessera_test_spill_sqlstate(12)`;
@@ -429,15 +441,18 @@ set, and that the opener finished its own.
 a buffer as large as the partition's largest block, so that the memory
 of a read is known before it starts. `tess_spill_read_header` SHALL read
 the next block whole and MUST check its header against the set's
-fingerprint and longest body, the partition, the level and the bytes on
-disk; it answers false at the partition's end. `tess_spill_read_body`
-SHALL then give the body, unpacked when it was stored packed.
+fingerprint and longest body, the partition, the level, the bytes on
+disk and, for a packed body, the length that the body's own counts give;
+it answers false at the partition's end. `tess_spill_read_body` SHALL
+then give the body, unpacked when it was stored packed.
 `tess_spill_seek` SHALL move a reader to a block by the position
-`tess_spill_write` returned for it. `tess_spill_drop` SHALL forget the
-caller's list of a partition's blocks, which the caller then opens as no
-reader; the bytes stay in the file until the set goes.
-`tess_spill_stats` SHALL give the blocks and the bytes written, headers
-included, and the partitions that have blocks.
+`tess_spill_write` returned for it; any other position is a misuse of
+the call. `tess_spill_drop` SHALL forget the caller's list of a
+partition's blocks, which the caller then opens as no reader; the bytes
+stay in the file until the set goes. `tess_spill_stats` SHALL give the
+blocks and the bytes written, headers included, and the partitions that
+have blocks. Freeing or releasing a set closes its open readers, which
+the caller MUST NOT use afterwards.
 
 #### Scenario: Read to the end, reopen, drop
 - **WHEN** a partition is read to its end, opened again, and then dropped
@@ -455,11 +470,11 @@ included, and the partitions that have blocks.
 
 #### Scenario: A block that is not where the list says
 - **WHEN** a block's header names another partition or level than the
-  reader's, its lengths do not match the bytes on disk, or a seek names
-  a position that holds no block of the partition
+  reader's, its lengths do not match the bytes on disk, or its body
+  length is not what its packed body unpacks into
 - **THEN** the read fails as damaged data
 - **Verified by:**
   `test/sql/spill.sql::tessera_test_spill_sqlstate(13)`;
   `test/sql/spill.sql::tessera_test_spill_sqlstate(14)`;
   `test/sql/spill.sql::tessera_test_spill_sqlstate(15)`;
-  `test/sql/spill.sql::tessera_test_spill_sqlstate(16)`
+  `test/sql/spill.sql::tessera_test_spill_sqlstate(19)`
