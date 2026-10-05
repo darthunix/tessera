@@ -77,9 +77,8 @@ struct TessSpill
 	char	   *buffer;
 	Size		buffer_len;
 	Size		buffered;
-	/* This participant's blocks by partition, and the bytes their lists take. */
+	/* This participant's blocks by partition. */
 	SpillList  *lists;
-	uint64		list_bytes;
 	/* This participant's readers of each partition: a serial one has one at a time, as ever. */
 	int		   *reading;
 	bool		finished;
@@ -295,7 +294,6 @@ add_block(TessSpill *spill, int partition, uint64 offset, uint64 stored)
 			MemoryContextAllocExtended(spill->context, mul_size(slots, sizeof(SpillBlock)),
 									   MCXT_ALLOC_HUGE) :
 			repalloc_huge(list->blocks, mul_size(slots, sizeof(SpillBlock)));
-		spill->list_bytes += (slots - list->slots) * sizeof(SpillBlock);
 		list->slots = slots;
 	}
 	if (list->count == 0)
@@ -850,7 +848,6 @@ tess_spill_drop(TessSpill *spill, int partition)
 		pfree(list->blocks);
 	list->blocks = NULL;
 	list->count = 0;
-	spill->list_bytes -= list->slots * sizeof(SpillBlock);
 	list->slots = 0;
 	spill->nfiles--;
 }
@@ -877,14 +874,8 @@ tess_spill_memory(const TessSpill *spill)
 		return 0;
 	bytes = spill->buffer != NULL ? spill->buffer_len : 0;
 	bytes += spill->scratch_len;
-	/* The lists of blocks, and a reader's copy of another participant's. */
-	bytes += spill->list_bytes;
 	for (TessSpillReader *reader = spill->readers; reader != NULL; reader = reader->next_reader)
-	{
 		bytes += reader->buffer_len;
-		if (!reader->own)
-			bytes += reader->count * sizeof(SpillBlock);
-	}
 	return bytes;
 }
 

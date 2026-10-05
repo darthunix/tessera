@@ -311,7 +311,6 @@ tessera_test_spill_shared(PG_FUNCTION_ARGS)
 	TessSpill  *one;
 	TessSpill  *two;
 	TessSpill  *none;
-	Size		held;
 	TessSpillReader *early;
 	TessSpillReader *late;
 	TessSpillHeader header;
@@ -343,16 +342,7 @@ tessera_test_spill_shared(PG_FUNCTION_ARGS)
 		!read_partition(two, 0, 3, first, lengthof(first)))
 		elog(ERROR, "a dropped partition is not the writer's alone to forget");
 	/* Two readers of one file keep their own positions. */
-	held = tess_spill_memory(one);
 	early = tess_spill_open(one, 1, 1);
-	/*
-	 * A reader of another's file holds a buffer of the partition's one
-	 * block, 1 MB and its header, and its own copy of the list.
-	 */
-	if (tess_spill_memory(one) !=
-		held + TESS_SPILL_HEADER_SIZE + 1024 * 1024 + 2 * sizeof(uint64))
-		elog(ERROR, "a reader of another's file holds %zu bytes",
-			 tess_spill_memory(one) - held);
 	late = tess_spill_open(two, 1, 1);
 	if (!tess_spill_read_header(late, &header) || header.number != 2 ||
 		!tess_spill_read_header(early, &header) || header.number != 2)
@@ -438,9 +428,8 @@ tessera_test_spill_packed(PG_FUNCTION_ARGS)
 
 /*
  * The bytes a set says it holds: its write buffer until it is finished,
- * the lists of its blocks, the buffer a chunk larger than the write buffer
- * is packed through, and the buffer of an open reader, as large as the
- * partition's largest block.
+ * the buffer a chunk larger than the write buffer is packed through, and
+ * the buffer of an open reader, as large as the partition's largest block.
  * The chunk that took the long way reads back as it was written.
  */
 Datum
@@ -453,8 +442,6 @@ tessera_test_spill_memory(PG_FUNCTION_ARGS)
 	uint32	   *back = palloc(len);
 	TessSpillReader *reader;
 	TessSpillHeader header;
-	Block		small = {1, TESS_SPILL_VALUES, 0, 8};
-	Size		listed;
 	Size		stored;
 	Size		written;
 	Size		finished;
@@ -462,11 +449,6 @@ tessera_test_spill_memory(PG_FUNCTION_ARGS)
 	/* The chunk is longer than the write buffer, which is all a new set holds. */
 	if (empty == 0 || len <= empty)
 		elog(ERROR, "a new set holds %zu bytes", empty);
-	/* A block noted in a partition's list: the list is memory, 16 bytes a place. */
-	write_blocks(spill, &small, 1);
-	listed = tess_spill_memory(spill) - empty;
-	if (listed < 2 * sizeof(uint64) || listed % (2 * sizeof(uint64)) != 0)
-		elog(ERROR, "the list of one block takes %zu bytes", listed);
 	stored = tess_spill_write(spill, 2, TESS_SPILL_RECORDS, 0, chunk, len, NULL);
 	written = tess_spill_memory(spill);
 	if (written < empty + len)
@@ -487,10 +469,6 @@ tessera_test_spill_memory(PG_FUNCTION_ARGS)
 	tess_spill_close(reader);
 	if (tess_spill_memory(spill) != finished)
 		elog(ERROR, "a set whose reader is closed holds %zu bytes", tess_spill_memory(spill));
-	/* A dropped partition's list is given back. */
-	tess_spill_drop(spill, 1);
-	if (tess_spill_memory(spill) != finished - listed)
-		elog(ERROR, "a set with a dropped partition holds %zu bytes", tess_spill_memory(spill));
 	tess_spill_free(spill);
 	PG_RETURN_BOOL(true);
 }

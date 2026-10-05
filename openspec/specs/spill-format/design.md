@@ -146,12 +146,11 @@ numbers have not been measured there yet.
    of the chunk in memory. For each partition the node also knows the
    size of its largest block, and the reader's buffer has exactly that
    size.
-   - *What else takes memory.* The lists of blocks: 16 bytes for each
-     block, so they grow with the amount spilled. A reader of another
-     participant's file keeps its own copy of a list.
-     `tess_spill_memory` counts the buffers and the lists. Only a join
-     asks a set for this number and adds it to its own memory; a
-     grouping and a sort do not.
+   - *What this does not cover.* The lists of blocks take memory too:
+     16 bytes for each block, and they grow with the amount spilled. A
+     reader of another participant's file keeps its own copy of a list.
+     `tess_spill_memory` does not count the lists, and a node does not
+     count them against its memory limit.
 7. **Any process of the query can read any file.** Nothing on disk is a
    memory address. A reference to a long value is a position in a chunk
    of values (see "Values"). In a parallel query, the list of the blocks
