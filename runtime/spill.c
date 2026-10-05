@@ -519,6 +519,10 @@ read_trailer(TessSpill *spill, File file, int partition, TessSpillReader *reader
 		trailer.npartitions != (uint64) spill->npartitions ||
 		trailer.offset > (uint64) size - sizeof(trailer))
 		list_damaged();
+	if (trailer.fingerprint != spill->fingerprint)
+		ereport(ERROR,
+				errcode(ERRCODE_DATA_CORRUPTED),
+				errmsg("Tessera spill file belongs to another table"));
 	lists = (uint64) size - sizeof(trailer) - trailer.offset;
 	if (lists < counts)
 		list_damaged();
@@ -611,7 +615,12 @@ tess_spill_open(TessSpill *spill, int participant, int partition)
 	{
 		uint64		stored = reader->blocks[index].stored;
 
-		if (stored < TESS_SPILL_HEADER_SIZE || stored > spill->max_len + TESS_SPILL_HEADER_SIZE)
+		/*
+		 * No upper bound here: a packed chunk of columns may be longer
+		 * than its body, and a shared file's list was held to the file's
+		 * size when it was read.
+		 */
+		if (stored < TESS_SPILL_HEADER_SIZE)
 			ereport(ERROR,
 					errcode(ERRCODE_DATA_CORRUPTED),
 					errmsg("Tessera spilled block of " UINT64_FORMAT " bytes is out of range",
@@ -668,6 +677,36 @@ tess_spill_read_header(TessSpillReader *reader, TessSpillHeader *header)
 		ereport(ERROR,
 				errcode(ERRCODE_DATA_CORRUPTED),
 				errmsg("Tessera spilled block's header does not match its length on disk"));
+
+	/*
+	 * A packed body begins with the counts of what it unpacks into. The
+	 * header's body length must be the length they give, before the caller
+	 * allocates by it: records and their length, or rows and words a row.
+	 */
+	if (header->packed > 0)
+	{
+		const char *packed = reader->buffer + TESS_SPILL_HEADER_SIZE;
+		uint32		count;
+		uint32		each;
+		bool		agrees;
+
+		memcpy(&count, packed, sizeof(count));
+		memcpy(&each, packed + sizeof(count), sizeof(each));
+		if (header->kind == TESS_SPILL_COLUMNS)
+		{
+			/* A row takes 8 bytes in every lane; divided, nothing overflows. */
+			uint64		row = 8 * ((uint64) tess_spill_columns_null_lanes(each) + each);
+			uint64		lanes = header->len - TESS_SPILL_COLUMNS_HEADER;
+
+			agrees = lanes % row == 0 && lanes / row == count;
+		}
+		else
+			agrees = header->len == 8 + (uint64) count * each;
+		if (!agrees)
+			ereport(ERROR,
+					errcode(ERRCODE_DATA_CORRUPTED),
+					errmsg("Tessera spilled block's header does not match its packed body"));
+	}
 	reader->next++;
 	reader->pending = true;
 	reader->pending_kind = header->kind;
@@ -732,10 +771,8 @@ tess_spill_seek(TessSpillReader *reader, TessSpillPosition position)
 	}
 	if (low >= reader->count ||
 		reader->blocks[low].offset != (uint64) position.offset)
-		ereport(ERROR,
-				errcode(ERRCODE_DATA_CORRUPTED),
-				errmsg("Tessera spill file has no block of partition %d at offset " INT64_FORMAT,
-					   reader->partition, position.offset));
+		elog(ERROR, "Tessera spill file has no block of partition %d at offset " INT64_FORMAT,
+			 reader->partition, position.offset);
 	reader->next = low;
 	reader->pending = false;
 }

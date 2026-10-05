@@ -54,7 +54,7 @@ ERROR:  Tessera spilled block's body is read after its header, whole
 SELECT tessera_test_spill_error(6);
 ERROR:  Tessera spilled block's body was not read
 SELECT tessera_test_spill_error(7);
-ERROR:  a spilled block belongs to another table
+ERROR:  Tessera spill file belongs to another table
 SELECT tessera_test_spill_error(8);
 ERROR:  Tessera spill partition 4 is out of range 0..3
 SELECT tessera_test_spill_error(9);
@@ -80,9 +80,9 @@ SELECT tessera_test_spill_sqlstate(5);
 (1 row)
 
 SELECT tessera_test_spill_sqlstate(7);
-           tessera_test_spill_sqlstate           
--------------------------------------------------
- XX001: a spilled block belongs to another table
+            tessera_test_spill_sqlstate             
+----------------------------------------------------
+ XX001: Tessera spill file belongs to another table
 (1 row)
 
 -- A shared file without its lists: cut short, a trailer without its
@@ -120,8 +120,7 @@ SELECT tessera_test_spill_sqlstate(18);
 (1 row)
 
 -- A block that is not where the list says: another partition, another
--- level, a length that is not the block's on disk, and a seek to a
--- position that holds no block.
+-- level, a length that is not the block's on disk.
 SELECT tessera_test_spill_sqlstate(13);
                                    tessera_test_spill_sqlstate                                   
 -------------------------------------------------------------------------------------------------
@@ -140,10 +139,19 @@ SELECT tessera_test_spill_sqlstate(15);
  XX001: Tessera spilled block's header does not match its length on disk
 (1 row)
 
+-- A packed block whose header names another length than its body
+-- unpacks into.
+SELECT tessera_test_spill_sqlstate(19);
+                     tessera_test_spill_sqlstate                      
+----------------------------------------------------------------------
+ XX001: Tessera spilled block's header does not match its packed body
+(1 row)
+
+-- A seek to a position that holds no block is a wrong call.
 SELECT tessera_test_spill_sqlstate(16);
                     tessera_test_spill_sqlstate                    
 -------------------------------------------------------------------
- XX001: Tessera spill file has no block of partition 0 at offset 8
+ XX000: Tessera spill file has no block of partition 0 at offset 8
 (1 row)
 
 -- temp_file_limit applies; the files are gone after the ERROR.
