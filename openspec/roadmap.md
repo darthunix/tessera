@@ -1022,12 +1022,21 @@ becomes an entry, joins one, or is dropped.
 - **`spill-format`: the code against its own intent** (found when the
   capability was described and reviewed, pull request 46).
   - The lists of blocks are memory that nobody counts: 16 bytes a block
-    in arrays that double, and a copy for every reader of another
-    participant's file. `tess_spill_memory` leaves them out.
+    in arrays that start at 16 places and double, and a copy for every
+    reader of another participant's file. `tess_spill_memory` leaves
+    them out. Counting them is not a correction of a check: only the
+    serial join asks a set for its memory, and a list of 16 places for
+    each partition that has a block is 256 bytes, about 512 kB at 1024
+    partitions on two sides, more than the whole `hash_mem` of a small
+    `work_mem`. It would change when the join sends partitions to disk,
+    so it needs a change of its own with a measurement
+    (`docs/measuring.md`).
   - A reader that opens a participant's file before the participant's
     first write to disk gets "no blocks" without an error. The format
-    has no mark of a finished or of an empty file; the nodes' barriers
-    are the only guard.
+    cannot tell this from a participant without blocks or from a worker
+    that never started, so a mark of a finished file would not cure it:
+    the guard is the nodes' barriers, and the spec states it as what the
+    caller ensures.
 - **`spill-format`: what no test shows yet** (the same source).
   - The lookup of the temporary tablespaces for a set's file.
   - A shared set under `temp_file_limit`, and the deletion of a shared
