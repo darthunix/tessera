@@ -495,7 +495,8 @@ tessera_test_spill_error(PG_FUNCTION_ARGS)
 	 * Cases 10 to 15 damage a finished file: participant 0 of a shared set
 	 * writes one block and finishes, and participant 1 reads its file.
 	 */
-	if ((which >= 10 && which <= 15) || which == 17 || which == 18 || which == 22)
+	if ((which >= 10 && which <= 15) || which == 17 || which == 18 || which == 22 ||
+		which == 25)
 	{
 		segment = dsm_create(sizeof(SharedFileSet), 0);
 		shared = dsm_segment_address(segment);
@@ -650,6 +651,38 @@ tessera_test_spill_error(PG_FUNCTION_ARGS)
 			tess_spill_read_header(reader, &header);
 			tess_spill_read_body(reader, palloc(len), len);
 			break;
+		case 24:
+			{
+				/*
+				 * A block that the list says is longer than the longest a
+				 * set takes, though it ends among the file's blocks: three
+				 * blocks of 1 MB, and an entry of more than the set's 2 MB.
+				 */
+				Block		long_blocks[] = {
+					{0, TESS_SPILL_VALUES, 0, 1024 * 1024},
+					{0, TESS_SPILL_VALUES, 1, 1024 * 1024},
+					{0, TESS_SPILL_VALUES, 2, 1024 * 1024},
+				};
+
+				segment = dsm_create(sizeof(SharedFileSet), 0);
+				shared = dsm_segment_address(segment);
+				tess_spill_shared_init(shared, segment);
+				other = make_spill(shared, 0, FINGERPRINT);
+				write_blocks(other, long_blocks, lengthof(long_blocks));
+				tess_spill_finish(other);
+				other = make_spill(shared, 1, FINGERPRINT);
+				tess_spill_finish(other);
+				word8 = MAX_LEN + 128 * 1024;
+				damage_shared_file(shared, 0, -(32 + 3 * 16) + 8, &word8, sizeof(word8));
+				tess_spill_open(other, 0, 0);
+			}
+			break;
+		case 25:
+			/* A count of blocks in a partition the reader does not open. */
+			word8 = 2;
+			damage_shared_file(shared, 0, -(32 + 16 + 4 * 8) + 3 * 8, &word8, sizeof(word8));
+			tess_spill_open(other, 0, 0);
+			break;
 		case 20:
 			/* A partition dropped while a reader of it is open. */
 			write_blocks(spill, &block, 1);
@@ -702,7 +735,17 @@ tessera_test_spill_bytes(PG_FUNCTION_ARGS)
 Datum
 tessera_test_spill_lanes(PG_FUNCTION_ARGS)
 {
-	for (uint32 words = 0; words <= 4096; words++)
+	uint64		header[TESS_SPILL_COLUMNS_HEADER / sizeof(uint64)];
+	Size		capacity;
+	TessStatus	status = TESS_STRUCT_INITIALIZER(TessStatus);
+
+	/* The most words a row in C are the most the kernels make a chunk of. */
+	if (tess_spill_columns_init(header, sizeof(header), TESS_SPILL_COLUMNS_MAX_WORDS,
+								&capacity, &status) != TESS_OK ||
+		tess_spill_columns_init(header, sizeof(header), TESS_SPILL_COLUMNS_MAX_WORDS + 1,
+								&capacity, &status) == TESS_OK)
+		elog(ERROR, "the most words of a chunk in C are not Rust's");
+	for (uint32 words = 0; words <= TESS_SPILL_COLUMNS_MAX_WORDS; words++)
 	{
 		Size		lanes = tess_spill_columns_shape(words, TESS_SPILL_COLUMNS_SHAPE_NULL_LANES);
 

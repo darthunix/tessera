@@ -162,11 +162,25 @@ SELECT tessera_test_spill_sqlstate(23);
  XX001: a packed chunk has lane code 9
 (1 row)
 
--- A block that the list says is shorter than a header.
+-- A block that the list says is shorter than a header, or longer than
+-- the longest block a set takes; a count that does not hold in a
+-- partition the reader does not open.
 SELECT tessera_test_spill_sqlstate(22);
                tessera_test_spill_sqlstate               
 ---------------------------------------------------------
  XX001: Tessera spilled block of 8 bytes is out of range
+(1 row)
+
+SELECT tessera_test_spill_sqlstate(24);
+                  tessera_test_spill_sqlstate                  
+---------------------------------------------------------------
+ XX001: Tessera spilled block of 2228224 bytes is out of range
+(1 row)
+
+SELECT tessera_test_spill_sqlstate(25);
+              tessera_test_spill_sqlstate              
+-------------------------------------------------------
+ XX001: Tessera spill file's list of blocks is damaged
 (1 row)
 
 -- Wrong calls: a seek to a position that holds no block, a partition

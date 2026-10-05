@@ -92,8 +92,12 @@ SELECT tessera_test_spill_sqlstate(15);
 SELECT tessera_test_spill_sqlstate(19);
 -- A packed block whose body is damaged in the file.
 SELECT tessera_test_spill_sqlstate(23);
--- A block that the list says is shorter than a header.
+-- A block that the list says is shorter than a header, or longer than
+-- the longest block a set takes; a count that does not hold in a
+-- partition the reader does not open.
 SELECT tessera_test_spill_sqlstate(22);
+SELECT tessera_test_spill_sqlstate(24);
+SELECT tessera_test_spill_sqlstate(25);
 -- Wrong calls: a seek to a position that holds no block, a partition
 -- dropped while it is read, a block of a kind that does not exist.
 SELECT tessera_test_spill_sqlstate(16);

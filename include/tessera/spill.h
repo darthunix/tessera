@@ -115,6 +115,8 @@ extern TessStatusCode tess_spill_unpack(const void *packed, Size len, void *chun
  */
 #define TESS_SPILL_COLUMNS_HEADER 16
 #define TESS_SPILL_COLUMNS_PLACE_BITS 17
+/* The most words stored for a row: tess_spill_columns_init refuses more. */
+#define TESS_SPILL_COLUMNS_MAX_WORDS 4096
 /*
  * The lanes of NULL bits of a chunk of words stored words, one at least, as
  * crates/tessera-spill (columns::null_lanes) lays them out; a constant
