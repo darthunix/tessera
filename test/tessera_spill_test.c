@@ -21,6 +21,7 @@ PG_FUNCTION_INFO_V1(tessera_test_spill_packed);
 PG_FUNCTION_INFO_V1(tessera_test_spill_error);
 PG_FUNCTION_INFO_V1(tessera_test_spill_bytes);
 PG_FUNCTION_INFO_V1(tessera_test_spill_lanes);
+PG_FUNCTION_INFO_V1(tessera_test_spill_memory);
 
 #define FINGERPRINT UINT64CONST(0x5445535354455354)
 #define MAX_LEN (2 * 1024 * 1024)
@@ -214,6 +215,29 @@ cut_shared_file(SharedFileSet *shared, int participant, int64 len)
 }
 
 /*
+ * A chunk of nrecords records of 40 bytes that packs: a hash, the length
+ * and a key in each, as a join's table holds them.
+ */
+static uint32 *
+packable_chunk(int nrecords, Size *len)
+{
+	uint32	   *chunk;
+
+	*len = 8 + (Size) nrecords * 40;
+	chunk = palloc0(*len);
+	*(uint64 *) chunk = *len;
+	for (int record = 0; record < nrecords; record++)
+	{
+		uint32	   *words = chunk + 2 + record * 10;
+
+		words[0] = (uint32) record * 2654435761U;
+		words[3] = 5;
+		words[4] = 1000000 + record;
+	}
+	return chunk;
+}
+
+/*
  * A serial set: blocks of records and values of 8 bytes, several file
  * buffers and 1 MB, and an empty one, into two of four partitions, read
  * back in order and by position; a partition without blocks has no
@@ -310,6 +334,11 @@ tessera_test_spill_shared(PG_FUNCTION_ARGS)
 		if (tess_spill_open(one, 2, partition) != NULL)
 			elog(ERROR, "a participant without blocks has partition %d", partition);
 	tess_spill_free(none);
+	/* A partition its writer dropped is gone for the writer, not for the other. */
+	tess_spill_drop(one, 3);
+	if (tess_spill_open(one, 0, 3) != NULL ||
+		!read_partition(two, 0, 3, first, lengthof(first)))
+		elog(ERROR, "a dropped partition is not the writer's alone to forget");
 	/* Two readers of one file keep their own positions. */
 	early = tess_spill_open(one, 1, 1);
 	late = tess_spill_open(two, 1, 1);
@@ -395,6 +424,53 @@ tessera_test_spill_packed(PG_FUNCTION_ARGS)
 	PG_RETURN_BOOL(true);
 }
 
+/*
+ * The bytes a set says it holds: its write buffer until it is finished,
+ * the buffer a chunk larger than the write buffer is packed through, and
+ * the buffer of an open reader, as large as the partition's largest block.
+ * The chunk that took the long way reads back as it was written.
+ */
+Datum
+tessera_test_spill_memory(PG_FUNCTION_ARGS)
+{
+	TessSpill  *spill = make_spill(NULL, 0, FINGERPRINT);
+	Size		empty = tess_spill_memory(spill);
+	Size		len;
+	uint32	   *chunk = packable_chunk(3000, &len);
+	uint32	   *back = palloc(len);
+	TessSpillReader *reader;
+	TessSpillHeader header;
+	Size		stored;
+	Size		written;
+	Size		finished;
+
+	/* The chunk is longer than the write buffer, which is all a new set holds. */
+	if (empty == 0 || len <= empty)
+		elog(ERROR, "a new set holds %zu bytes", empty);
+	stored = tess_spill_write(spill, 2, TESS_SPILL_RECORDS, 0, chunk, len, NULL);
+	written = tess_spill_memory(spill);
+	if (written < empty + len)
+		elog(ERROR, "a set that packed a long chunk holds %zu bytes", written);
+	tess_spill_finish(spill);
+	finished = tess_spill_memory(spill);
+	if (finished != written - empty)
+		elog(ERROR, "a finished set holds %zu bytes of %zu", finished, written);
+	reader = tess_spill_open(spill, 0, 2);
+	if (tess_spill_memory(spill) != finished + TYPEALIGN(8, stored))
+		elog(ERROR, "a set with a reader holds %zu bytes", tess_spill_memory(spill));
+	if (!tess_spill_read_header(reader, &header) || header.len != len ||
+		header.packed == 0)
+		elog(ERROR, "a long chunk reads back with a wrong header");
+	tess_spill_read_body(reader, back, len);
+	if (memcmp(back, chunk, len) != 0)
+		elog(ERROR, "a long chunk reads back wrong");
+	tess_spill_close(reader);
+	if (tess_spill_memory(spill) != finished)
+		elog(ERROR, "a set whose reader is closed holds %zu bytes", tess_spill_memory(spill));
+	tess_spill_free(spill);
+	PG_RETURN_BOOL(true);
+}
+
 /* Each case raises the ERROR the SQL expects. */
 Datum
 tessera_test_spill_error(PG_FUNCTION_ARGS)
@@ -411,12 +487,15 @@ tessera_test_spill_error(PG_FUNCTION_ARGS)
 	TessSpillPosition position;
 	uint64		word8;
 	uint32		word4;
+	uint8		byte;
+	uint32	   *chunk;
+	Size		len;
 
 	/*
 	 * Cases 10 to 15 damage a finished file: participant 0 of a shared set
 	 * writes one block and finishes, and participant 1 reads its file.
 	 */
-	if ((which >= 10 && which <= 15) || which == 17 || which == 18)
+	if ((which >= 10 && which <= 15) || which == 17 || which == 18 || which == 22)
 	{
 		segment = dsm_create(sizeof(SharedFileSet), 0);
 		shared = dsm_segment_address(segment);
@@ -544,37 +623,49 @@ tessera_test_spill_error(PG_FUNCTION_ARGS)
 			tess_spill_open(other, 0, 0);
 			break;
 		case 19:
+		case 23:
+			/* A packed block of participant 0 that participant 1 reads. */
+			chunk = packable_chunk(100, &len);
+			segment = dsm_create(sizeof(SharedFileSet), 0);
+			shared = dsm_segment_address(segment);
+			tess_spill_shared_init(shared, segment);
+			other = make_spill(shared, 0, FINGERPRINT);
+			tess_spill_write(other, 0, TESS_SPILL_RECORDS, 0, chunk, len, NULL);
+			tess_spill_finish(other);
+			other = make_spill(shared, 1, FINGERPRINT);
+			tess_spill_finish(other);
+			if (which == 19)
 			{
-				/*
-				 * A packed block whose header names another length than
-				 * its body unpacks into.
-				 */
-				const int	nrecords = 100;
-				Size		len = 8 + nrecords * 40;
-				uint32	   *chunk = palloc0(len);
-
-				*(uint64 *) chunk = len;
-				for (int record = 0; record < nrecords; record++)
-				{
-					uint32	   *words = chunk + 2 + record * 10;
-
-					words[0] = (uint32) record * 2654435761U;
-					words[3] = 5;
-					words[4] = 1000000 + record;
-				}
-				segment = dsm_create(sizeof(SharedFileSet), 0);
-				shared = dsm_segment_address(segment);
-				tess_spill_shared_init(shared, segment);
-				other = make_spill(shared, 0, FINGERPRINT);
-				tess_spill_write(other, 0, TESS_SPILL_RECORDS, 0, chunk, len, NULL);
-				tess_spill_finish(other);
-				other = make_spill(shared, 1, FINGERPRINT);
-				tess_spill_finish(other);
+				/* Its header names another length than its body unpacks into. */
 				word8 = len + 8;
 				damage_shared_file(shared, 0, HEADER_LEN_AT, &word8, sizeof(word8));
-				reader = tess_spill_open(other, 0, 0);
-				tess_spill_read_header(reader, &header);
 			}
+			else
+			{
+				/* Its body is damaged: the code of its first lane does not exist. */
+				byte = 9;
+				damage_shared_file(shared, 0, TESS_SPILL_HEADER_SIZE + 8, &byte, sizeof(byte));
+			}
+			reader = tess_spill_open(other, 0, 0);
+			tess_spill_read_header(reader, &header);
+			tess_spill_read_body(reader, palloc(len), len);
+			break;
+		case 20:
+			/* A partition dropped while a reader of it is open. */
+			write_blocks(spill, &block, 1);
+			tess_spill_finish(spill);
+			tess_spill_open(spill, 0, 0);
+			tess_spill_drop(spill, 0);
+			break;
+		case 21:
+			/* A block of a kind that does not exist. */
+			tess_spill_write(spill, 0, (TessSpillKind) 9, 0, body, 8, NULL);
+			break;
+		case 22:
+			/* A block that the list says is shorter than a header. */
+			word8 = 8;
+			damage_shared_file(shared, 0, -(32 + 8), &word8, sizeof(word8));
+			tess_spill_open(other, 0, 0);
 			break;
 		case 16:
 			/* A seek to a position that holds no block of the partition. */
