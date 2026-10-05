@@ -105,6 +105,20 @@ SELECT tessera_test_spill_sqlstate(12);
  XX001: Tessera spill file's list of blocks is damaged
 (1 row)
 
+-- Lists that do not fit the file: a count of more blocks than the lists
+-- hold, and a block that ends past the file's blocks.
+SELECT tessera_test_spill_sqlstate(17);
+              tessera_test_spill_sqlstate              
+-------------------------------------------------------
+ XX001: Tessera spill file's list of blocks is damaged
+(1 row)
+
+SELECT tessera_test_spill_sqlstate(18);
+              tessera_test_spill_sqlstate              
+-------------------------------------------------------
+ XX001: Tessera spill file's list of blocks is damaged
+(1 row)
+
 -- A block that is not where the list says: another partition, another
 -- level, a length that is not the block's on disk, and a seek to a
 -- position that holds no block.

@@ -416,7 +416,7 @@ tessera_test_spill_error(PG_FUNCTION_ARGS)
 	 * Cases 10 to 15 damage a finished file: participant 0 of a shared set
 	 * writes one block and finishes, and participant 1 reads its file.
 	 */
-	if (which >= 10 && which <= 15)
+	if ((which >= 10 && which <= 15) || which == 17 || which == 18)
 	{
 		segment = dsm_create(sizeof(SharedFileSet), 0);
 		shared = dsm_segment_address(segment);
@@ -527,6 +527,21 @@ tessera_test_spill_error(PG_FUNCTION_ARGS)
 			damage_shared_file(shared, 0, HEADER_LEN_AT, &word8, sizeof(word8));
 			reader = tess_spill_open(other, 0, 0);
 			tess_spill_read_header(reader, &header);
+			break;
+		case 17:
+			/*
+			 * A count of more blocks than the lists hold: the lists are a
+			 * count for each of the four partitions and one block's entry.
+			 */
+			word8 = 2;
+			damage_shared_file(shared, 0, -(32 + 16 + 4 * 8), &word8, sizeof(word8));
+			tess_spill_open(other, 0, 0);
+			break;
+		case 18:
+			/* A block that the list says ends past the file's blocks. */
+			word8 = TESS_SPILL_HEADER_SIZE + block.len + 8;
+			damage_shared_file(shared, 0, -(32 + 8), &word8, sizeof(word8));
+			tess_spill_open(other, 0, 0);
 			break;
 		case 16:
 			/* A seek to a position that holds no block of the partition. */
