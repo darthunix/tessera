@@ -479,14 +479,32 @@ tess_spill_finish(TessSpill *spill)
 	spill->finished = true;
 }
 
-/* Read another participant's list of the partition's blocks from the end of its file. */
+/* The lists at the end of a shared file do not hold: damaged data. */
+pg_noreturn static void
+list_damaged(void)
+{
+	ereport(ERROR,
+			errcode(ERRCODE_DATA_CORRUPTED),
+			errmsg("Tessera spill file's list of blocks is damaged"));
+}
+
+/*
+ * Read another participant's list of the partition's blocks from the end
+ * of its file. Nothing read from the file is trusted past what the file
+ * can hold: the lists lie between the blocks and the trailer, a count for
+ * each partition and then the blocks' entries, and every block lies whole
+ * before the lists.
+ */
 static bool
 read_trailer(TessSpill *spill, File file, int partition, TessSpillReader *reader)
 {
 	SpillTrailer trailer;
 	pgoff_t		size = FileSize(file);
+	uint64		counts = sizeof(uint64) * (uint64) spill->npartitions;
+	uint64		lists;
+	uint64		most;
 	uint64		before = 0;
-	uint64		count;
+	uint64		count = 0;
 
 	if (size < 0)
 		ereport(ERROR,
@@ -500,15 +518,20 @@ read_trailer(TessSpill *spill, File file, int partition, TessSpillReader *reader
 	if (trailer.magic != SPILL_TRAILER_MAGIC ||
 		trailer.npartitions != (uint64) spill->npartitions ||
 		trailer.offset > (uint64) size - sizeof(trailer))
-		ereport(ERROR,
-				errcode(ERRCODE_DATA_CORRUPTED),
-				errmsg("Tessera spill file's list of blocks is damaged"));
-	for (int other = 0; other < partition; other++)
+		list_damaged();
+	lists = (uint64) size - sizeof(trailer) - trailer.offset;
+	if (lists < counts)
+		list_damaged();
+	/* The most blocks the lists have room for, over all partitions. */
+	most = (lists - counts) / sizeof(SpillBlock);
+	for (int other = 0; other <= partition; other++)
 	{
 		read_at(file, (char *) &count, sizeof(count), trailer.offset + sizeof(uint64) * other);
-		before += count;
+		if (count > most - before)
+			list_damaged();
+		if (other < partition)
+			before += count;
 	}
-	read_at(file, (char *) &count, sizeof(count), trailer.offset + sizeof(uint64) * partition);
 	if (count == 0)
 		return false;
 	reader->blocks = MemoryContextAllocExtended(spill->context,
@@ -516,8 +539,15 @@ read_trailer(TessSpill *spill, File file, int partition, TessSpillReader *reader
 												MCXT_ALLOC_HUGE);
 	reader->count = count;
 	read_at(file, (char *) reader->blocks, mul_size(count, sizeof(SpillBlock)),
-			trailer.offset + sizeof(uint64) * spill->npartitions +
-			sizeof(SpillBlock) * before);
+			trailer.offset + counts + sizeof(SpillBlock) * before);
+	for (uint64 index = 0; index < count; index++)
+	{
+		const SpillBlock *block = &reader->blocks[index];
+
+		if (block->offset > trailer.offset ||
+			block->stored > trailer.offset - block->offset)
+			list_damaged();
+	}
 	return true;
 }
 

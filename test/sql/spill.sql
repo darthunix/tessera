@@ -71,6 +71,10 @@ SELECT tessera_test_spill_sqlstate(7);
 SELECT tessera_test_spill_sqlstate(10);
 SELECT tessera_test_spill_sqlstate(11);
 SELECT tessera_test_spill_sqlstate(12);
+-- Lists that do not fit the file: a count of more blocks than the lists
+-- hold, and a block that ends past the file's blocks.
+SELECT tessera_test_spill_sqlstate(17);
+SELECT tessera_test_spill_sqlstate(18);
 -- A block that is not where the list says: another partition, another
 -- level, a length that is not the block's on disk, and a seek to a
 -- position that holds no block.
