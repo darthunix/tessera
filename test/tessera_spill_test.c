@@ -543,6 +543,39 @@ tessera_test_spill_error(PG_FUNCTION_ARGS)
 			damage_shared_file(shared, 0, -(32 + 8), &word8, sizeof(word8));
 			tess_spill_open(other, 0, 0);
 			break;
+		case 19:
+			{
+				/*
+				 * A packed block whose header names another length than
+				 * its body unpacks into.
+				 */
+				const int	nrecords = 100;
+				Size		len = 8 + nrecords * 40;
+				uint32	   *chunk = palloc0(len);
+
+				*(uint64 *) chunk = len;
+				for (int record = 0; record < nrecords; record++)
+				{
+					uint32	   *words = chunk + 2 + record * 10;
+
+					words[0] = (uint32) record * 2654435761U;
+					words[3] = 5;
+					words[4] = 1000000 + record;
+				}
+				segment = dsm_create(sizeof(SharedFileSet), 0);
+				shared = dsm_segment_address(segment);
+				tess_spill_shared_init(shared, segment);
+				other = make_spill(shared, 0, FINGERPRINT);
+				tess_spill_write(other, 0, TESS_SPILL_RECORDS, 0, chunk, len, NULL);
+				tess_spill_finish(other);
+				other = make_spill(shared, 1, FINGERPRINT);
+				tess_spill_finish(other);
+				word8 = len + 8;
+				damage_shared_file(shared, 0, HEADER_LEN_AT, &word8, sizeof(word8));
+				reader = tess_spill_open(other, 0, 0);
+				tess_spill_read_header(reader, &header);
+			}
+			break;
 		case 16:
 			/* A seek to a position that holds no block of the partition. */
 			write_blocks(spill, &block, 1);

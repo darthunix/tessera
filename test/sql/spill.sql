@@ -76,11 +76,14 @@ SELECT tessera_test_spill_sqlstate(12);
 SELECT tessera_test_spill_sqlstate(17);
 SELECT tessera_test_spill_sqlstate(18);
 -- A block that is not where the list says: another partition, another
--- level, a length that is not the block's on disk, and a seek to a
--- position that holds no block.
+-- level, a length that is not the block's on disk.
 SELECT tessera_test_spill_sqlstate(13);
 SELECT tessera_test_spill_sqlstate(14);
 SELECT tessera_test_spill_sqlstate(15);
+-- A packed block whose header names another length than its body
+-- unpacks into.
+SELECT tessera_test_spill_sqlstate(19);
+-- A seek to a position that holds no block is a wrong call.
 SELECT tessera_test_spill_sqlstate(16);
 
 -- temp_file_limit applies; the files are gone after the ERROR.
