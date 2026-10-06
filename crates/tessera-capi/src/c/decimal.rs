@@ -22,11 +22,11 @@
 
 use std::ffi::{c_int, c_uint, c_void};
 use std::marker::PhantomData;
-use std::mem::{MaybeUninit, offset_of};
+use std::mem::offset_of;
 use std::slice;
 
 use anyhow::{Context, Result, bail, ensure};
-use tessera_core::{RowMask, RowMaskView, ones};
+use tessera_core::ones;
 use tessera_kernels::decimal::{
     self, Arg, Compare, Decimal, DecimalWord, MAX_SCALE, NUMERIC_MAX, Op, Partial, Partials,
     Results, Scales, Source, Special, Sum, SumState, Term, Terms,
@@ -34,6 +34,7 @@ use tessera_kernels::decimal::{
 
 use super::column::DatumColumn;
 use super::mask::Mask;
+use super::source::{self, Constant, output, selection, slots, with_source, with_sources};
 use super::status::{Code, Status, guard};
 use super::table::{SUM_INT4, SUM_INT8, SUM_NUMERIC, SUM_STATE};
 use super::varlena::varlena_data;
@@ -212,10 +213,7 @@ impl<'a> Column<'a> {
 const DECIMALS_SIZE: usize = offset_of!(DatumColumn, decimal_scale) + size_of::<c_int>();
 
 /// A call's argument.
-enum Input<'a> {
-    Column(Column<'a>),
-    Scalar(Arg),
-}
+type Input<'a> = source::Input<Column<'a>, Arg>;
 
 impl Input<'_> {
     /// The argument of a call with `nrows` rows.
@@ -665,10 +663,7 @@ impl<'a> PartialColumn<'a> {
     }
 }
 
-/// A scalar argument, the same for every row.
-struct Constant(Arg);
-
-impl Source for Constant {
+impl Source for Constant<Arg> {
     #[inline(always)]
     fn get(&self, _row: usize) -> Arg {
         self.0
@@ -690,64 +685,6 @@ macro_rules! with_column {
             }
         }
     };
-}
-
-/// [`with_column!`] over an input, a scalar too.
-macro_rules! with_source {
-    ($input:expr, |$source:ident| $body:expr) => {
-        match $input {
-            Input::Column(column) => with_column!(column, |$source| $body),
-            Input::Scalar(arg) => {
-                let $source = &Constant(arg);
-                $body
-            }
-        }
-    };
-}
-
-/// [`with_source!`] over two inputs: a loop for each pair of shapes.
-macro_rules! with_sources {
-    ($left:expr, $right:expr, |$l:ident, $r:ident| $body:expr) => {
-        with_source!($left, |$l| with_source!($right, |$r| $body))
-    };
-}
-
-/// A selection to read.
-///
-/// # Safety
-///
-/// `rows` must point to a valid mask, unchanged for `'a`.
-#[inline]
-unsafe fn selection<'a>(rows: *const Mask) -> Result<RowMaskView<'a>> {
-    // SAFETY: the caller's contract.
-    unsafe { rows.as_ref().context("a null row mask")?.view() }
-}
-
-/// A mask to write.
-///
-/// # Safety
-///
-/// `mask` must point to a valid mask that nothing else accesses for `'a`.
-#[inline]
-unsafe fn output<'a>(mask: *mut Mask) -> Result<RowMask<'a>> {
-    // SAFETY: the caller's contract.
-    unsafe { mask.as_mut().context("a null result mask")?.mask() }
-}
-
-/// An array of `nrows` slots to write.
-///
-/// # Safety
-///
-/// `values` must point to `nrows` writable slots of `T`, possibly
-/// uninitialized, that nothing else accesses for `'a`.
-#[inline]
-unsafe fn slots<'a, T>(values: *mut T, nrows: usize) -> Result<&'a mut [MaybeUninit<T>]> {
-    if nrows == 0 {
-        return Ok(&mut []);
-    }
-    ensure!(!values.is_null(), "a null result buffer");
-    // SAFETY: the caller's contract.
-    Ok(unsafe { slice::from_raw_parts_mut(values.cast(), nrows) })
 }
 
 fn compare_op(op: c_int) -> Result<Compare> {
@@ -801,7 +738,7 @@ pub unsafe extern "C" fn tess_decimal_filter(
             let left = Input::new(left, nrows)?;
             let right = Input::new(right, nrows)?;
             let mut rest = output(rest)?;
-            with_sources!(left, right, |left, right| decimal::filter(
+            with_sources!(left, right, with_column!, |left, right| decimal::filter(
                 op, left, right, &mut rows, &mut rest
             ))
         })
@@ -854,15 +791,17 @@ pub unsafe extern "C" fn tess_decimal_compute(
                 rest: output(rest)?,
             };
             match right {
-                Some(right) => with_sources!(left, right, |left, right| decimal::compute(
-                    op,
-                    left,
-                    right,
-                    rows,
-                    scale,
-                    &mut results
-                )),
-                None => with_source!(left, |left| decimal::compute(
+                Some(right) => {
+                    with_sources!(left, right, with_column!, |left, right| decimal::compute(
+                        op,
+                        left,
+                        right,
+                        rows,
+                        scale,
+                        &mut results
+                    ))
+                }
+                None => with_source!(left, with_column!, |left| decimal::compute(
                     op,
                     left,
                     &Constant(Arg::Null),
@@ -901,7 +840,7 @@ pub unsafe extern "C" fn tess_decimal_to_int4(
             let arg = Input::new(arg, rows.nrows())?;
             let values = slots(values, rows.nrows())?;
             let (mut non_nulls, mut rest) = (output(non_nulls)?, output(rest)?);
-            with_source!(arg, |arg| decimal::to_int4(
+            with_source!(arg, with_column!, |arg| decimal::to_int4(
                 arg,
                 rows,
                 values,
@@ -934,7 +873,7 @@ pub unsafe extern "C" fn tess_decimal_to_int8(
             let arg = Input::new(arg, rows.nrows())?;
             let values = slots(values, rows.nrows())?;
             let (mut non_nulls, mut rest) = (output(non_nulls)?, output(rest)?);
-            with_source!(arg, |arg| decimal::to_int8(
+            with_source!(arg, with_column!, |arg| decimal::to_int8(
                 arg,
                 rows,
                 values,

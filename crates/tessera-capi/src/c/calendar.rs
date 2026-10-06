@@ -14,15 +14,13 @@
 
 use std::ffi::c_int;
 use std::marker::PhantomData;
-use std::mem::MaybeUninit;
-use std::slice;
 
 use anyhow::{Context, Result, bail, ensure};
-use tessera_core::{RowMask, RowMaskView};
 use tessera_kernels::calendar::{self, DateOp, Field, Fields, Interval, Source, Unit};
 
 use super::column::DatumColumn;
 use super::mask::Mask;
+use super::source::{self, Constant, output, selection, slots, with_source, with_sources};
 use super::status::{Code, Status, guard};
 
 /// `TessCalendarArg`: a column, or a scalar Datum when it is null.
@@ -89,9 +87,6 @@ impl<T: FromDatum> Source<T> for Values<'_, T> {
     }
 }
 
-/// A scalar, the same for every row.
-struct Constant<T>(T);
-
 impl<T: Copy> Source<T> for Constant<T> {
     #[inline(always)]
     fn get(&self, _row: usize) -> Option<T> {
@@ -100,10 +95,7 @@ impl<T: Copy> Source<T> for Constant<T> {
 }
 
 /// A call's argument: a column or a scalar, a loop for each.
-enum Input<'a, T> {
-    Column(Values<'a, T>),
-    Scalar(T),
-}
+type Input<'a, T> = source::Input<Values<'a, T>, T>;
 
 /// Borrow a column of `nrows` rows.
 ///
@@ -150,67 +142,6 @@ unsafe fn input<'a, T: FromDatum>(arg: *const CalendarArg, nrows: usize) -> Resu
             Input::Column(column(arg.column, nrows)?)
         })
     }
-}
-
-/// Run `$body` with `$source` bound to the concrete source of an input.
-macro_rules! with_source {
-    ($input:expr, |$source:ident| $body:expr) => {
-        match $input {
-            Input::Column(column) => {
-                let $source = &column;
-                $body
-            }
-            Input::Scalar(value) => {
-                let $source = &Constant(value);
-                $body
-            }
-        }
-    };
-}
-
-/// [`with_source!`] over two inputs.
-macro_rules! with_sources {
-    ($left:expr, $right:expr, |$l:ident, $r:ident| $body:expr) => {
-        with_source!($left, |$l| with_source!($right, |$r| $body))
-    };
-}
-
-/// A selection to read.
-///
-/// # Safety
-///
-/// `rows` must point to a valid mask, unchanged for `'a`.
-#[inline]
-unsafe fn selection<'a>(rows: *const Mask) -> Result<RowMaskView<'a>> {
-    // SAFETY: the caller's contract.
-    unsafe { rows.as_ref().context("a null row mask")?.view() }
-}
-
-/// A mask to write.
-///
-/// # Safety
-///
-/// `mask` must point to a valid mask that nothing else accesses for `'a`.
-#[inline]
-unsafe fn output<'a>(mask: *mut Mask) -> Result<RowMask<'a>> {
-    // SAFETY: the caller's contract.
-    unsafe { mask.as_mut().context("a null result mask")?.mask() }
-}
-
-/// An array of `nrows` slots to write.
-///
-/// # Safety
-///
-/// `values` must point to `nrows` writable slots of `T`, possibly
-/// uninitialized, that nothing else accesses for `'a`.
-#[inline]
-unsafe fn slots<'a, T>(values: *mut T, nrows: usize) -> Result<&'a mut [MaybeUninit<T>]> {
-    if nrows == 0 {
-        return Ok(&mut []);
-    }
-    ensure!(!values.is_null(), "a null result buffer");
-    // SAFETY: the caller's contract.
-    Ok(unsafe { slice::from_raw_parts_mut(values.cast(), nrows) })
 }
 
 fn unit_of(unit: c_int) -> Result<Unit> {
