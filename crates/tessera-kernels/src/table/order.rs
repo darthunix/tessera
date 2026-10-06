@@ -2,14 +2,14 @@
 //! the order appended, as an item of [`crate::sort`] made of its key slots,
 //! its NULL bits and its reference. The records need not be linked.
 
-use anyhow::{Result, bail, ensure};
+use anyhow::{Result, ensure};
 
 use super::header::{CHUNK_HEADER, Layout};
 use super::record::Access;
 use super::region::Region;
 use tessera_core::{RowMaskView, ones};
 
-use crate::sort::{Encoder, SortKey, heap_push};
+use crate::sort::{Encoder, SortKey, heap_push, with_item_words};
 
 /// Write the item of every record into `items`, one after another, and
 /// return the count; `items` must hold them all.
@@ -28,15 +28,9 @@ pub(super) fn items<R: Region>(
         "the sort keys are not the table's keys"
     );
     let encoder = Encoder::new(keys)?;
-    macro_rules! dispatch {
-        ($($n:literal)*) => {
-            match encoder.words() {
-                $($n => items_as::<R, $n>(region, layout, &encoder, items),)*
-                words => bail!("an item has at most 17 words, not {words}"),
-            }
-        };
-    }
-    dispatch!(1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17)
+    with_item_words!(encoder.words(), |W| items_as::<R, W>(
+        region, layout, &encoder, items
+    ))
 }
 
 /// [`items`] for items of `W` words: the records of each chunk are read
@@ -114,15 +108,9 @@ pub(super) fn top_push<R: Region>(
         heap.len(),
         *len
     );
-    macro_rules! dispatch {
-        ($($n:literal)*) => {
-            match words {
-                $($n => push_as::<R, $n>(region, layout, &encoder, refs, rows, heap, len),)*
-                words => bail!("an item has at most 17 words, not {words}"),
-            }
-        };
-    }
-    dispatch!(1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17)
+    with_item_words!(words, |W| push_as::<R, W>(
+        region, layout, &encoder, refs, rows, heap, len
+    ))
 }
 
 fn push_as<R: Region, const W: usize>(
