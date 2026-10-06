@@ -946,9 +946,9 @@ extern TessStatusCode tess_table_clear_key(const TessTableRef *table, int key,
 
 /*
  * Visit the records from the cursor on, chunk by chunk in the order they
- * were appended, up to capacity of them: their references fill offsets,
- * count receives how many, and the cursor moves past them. The caller
- * starts the cursor at 0; a count of 0 means the walk is over.
+ * were appended, up to capacity of them, at least 1: their references
+ * fill offsets, count receives how many, and the cursor moves past them.
+ * The caller starts the cursor at 0; a count of 0 means the walk is over.
  */
 extern TessStatusCode tess_table_scan(const TessTableRef *table,
 									  uint64 *cursor,
@@ -983,10 +983,10 @@ extern TessStatusCode tess_table_mark(const TessTableRef *table,
 									  TessStatus *status);
 
 /*
- * As tess_table_scan, the records without a mark only, every record when
- * marks is NULL: the records of a RIGHT or FULL join without a pair, of
- * record_size bytes, read from the chunks alone (a spilling join has freed
- * the index by then). The cursor moves past the last record looked at.
+ * As tess_table_scan, a capacity of at least 1, the records without a
+ * mark only, every record when marks is NULL: the records of a RIGHT or
+ * FULL join without a pair, of record_size bytes, read from the chunks
+ * alone (a spilling join has freed the index by then). The cursor moves past the last record looked at.
  * Nothing sets the marks or appends to the chunks meanwhile; shared marks
  * are read atomically.
  */

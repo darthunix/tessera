@@ -1345,6 +1345,9 @@ pub unsafe extern "C" fn tess_table_scan(
                 Cursor::from_raw(*raw)
             };
             let capacity = usize::try_from(capacity).context("a negative capacity")?;
+            // A walk of no records would end with a count of 0, which means
+            // the walk is over.
+            ensure!(capacity > 0, "a walk visits at least one record a call");
             let out = slots(offsets, capacity, "offsets")?;
             let count = count.as_mut().context("a null count")?;
             let visited = table.scan(&mut cursor, out)?;
@@ -1508,6 +1511,9 @@ pub unsafe extern "C" fn tess_table_next_unmarked(
                 Cursor::from_raw(*raw)
             };
             let capacity = usize::try_from(capacity).context("a negative capacity")?;
+            // A walk of no records would end with a count of 0, which means
+            // the walk is over.
+            ensure!(capacity > 0, "a walk visits at least one record a call");
             let out = slots(refs, capacity, "references")?;
             let marks = (!marks.is_null()).then_some(RawMarks {
                 chunks: marks,
