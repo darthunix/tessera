@@ -1876,6 +1876,94 @@ fn datum_words_normalize_like_rows_under_partial_readiness() -> Result<()> {
     Ok(())
 }
 
+#[test]
+fn int8_keys_find_the_records_of_int4_keys() -> Result<()> {
+    // Built rows: int4 values row - 32. Probe rows of int8: an even row
+    // holds row - 32 and finds its twin; an odd row holds `row << 33`, past
+    // the int4 range, which folds to the hash of 2 * row, a key of the
+    // table for the rows up to 15, and must not find it: keys are compared
+    // whole.
+    let built_datums: Vec<u64> = (0..64_i64).map(|row| (row - 32) as u64).collect();
+    let probed_datums: Vec<u64> = (0..64_i64)
+        .map(|row| if row % 2 == 0 { row - 32 } else { row << 33 } as u64)
+        .collect();
+    let isnull = [false; 64];
+    let column = |datums: &[u64]| DatumColumn {
+        struct_size: size_of::<DatumColumn>(),
+        values: datums.as_ptr(),
+        isnull: isnull.as_ptr(),
+        nrows: 64,
+        ..DatumColumn::EMPTY
+    };
+    let (built_column, probed_column) = (column(&built_datums), column(&probed_datums));
+    let mut status = Status::new();
+    // SAFETY: local buffers of the declared sizes, aliased by nothing else.
+    unsafe {
+        let mut table = CTable::new(1, 0, 64);
+        let (built_hashes, mut pending_words) = hash_column(&built_column, 1, 64);
+        let built_key = TableKey {
+            kind: 1,
+            column: &raw const built_column,
+            prepared: ptr::null(),
+        };
+        let mut pending = Mask {
+            nrows: 64,
+            bits: pending_words.as_mut_ptr(),
+        };
+        let mut offsets = vec![0; 64];
+        table.insert(
+            4096,
+            built_hashes.as_ptr(),
+            &raw const built_key,
+            ptr::null(),
+            &raw mut pending,
+            offsets.as_mut_ptr(),
+            false,
+        );
+        assert_eq!(pending_words, [0]);
+
+        let (probed_hashes, mut rows_words) = hash_column(&probed_column, 2, 64);
+        for row in 0..64 {
+            if row % 2 == 0 {
+                assert_eq!(probed_hashes[row], built_hashes[row], "row {row}");
+            } else if row <= 15 {
+                assert_eq!(probed_hashes[row], built_hashes[2 * row + 32], "row {row}");
+            }
+        }
+        let probed_key = TableKey {
+            kind: 2,
+            column: &raw const probed_column,
+            prepared: ptr::null(),
+        };
+        let rows = Mask {
+            nrows: 64,
+            bits: rows_words.as_mut_ptr(),
+        };
+        let mut found_words = [0];
+        let mut found = Mask {
+            nrows: 64,
+            bits: found_words.as_mut_ptr(),
+        };
+        let mut matches = vec![0; 64];
+        let code = tess_table_probe(
+            table.ptr(),
+            probed_hashes.as_ptr(),
+            1,
+            &raw const probed_key,
+            &raw const rows,
+            matches.as_mut_ptr(),
+            &raw mut found,
+            &raw mut status,
+        );
+        assert_eq!(code, Code::Ok, "{}", status.message());
+        assert_eq!(found_words, [0x5555_5555_5555_5555]);
+        for row in (0..64).step_by(2) {
+            assert_eq!(matches[row], offsets[row], "row {row}");
+        }
+    }
+    Ok(())
+}
+
 /// Hash a Datum column of `nrows` rows, none NULL, all selected, with the
 /// entry point of its kind: the hashes and the valid mask.
 ///
