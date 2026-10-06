@@ -800,10 +800,11 @@ pub unsafe extern "C" fn tess_table_split(
             let offsets = slots(offsets, capacity, "offsets")?;
             let hashes = slots(hashes, capacity, "hashes")?;
             let from = from.as_mut().context("a null from")?;
+            let count = count.as_mut().context("a null count")?;
+            let full = full.as_mut().context("a null full")?;
             let split = split_to(&config, chunks, &partitions, source, from, offsets, hashes)?;
-            *count.as_mut().context("a null count")? = split.count as c_int;
-            *full.as_mut().context("a null full")? =
-                split.full.map_or(-1, |partition| partition as c_int);
+            *count = split.count as c_int;
+            *full = split.full.map_or(-1, |partition| partition as c_int);
             Ok(())
         })
     }
@@ -1243,9 +1244,11 @@ pub unsafe extern "C" fn tess_table_combine(
                 };
             }
             let from = from.as_mut().context("a null from")?;
+            let merged = merged.as_mut().context("a null merged count")?;
+            let stop = stop.as_mut().context("a null stop")?;
             let (count_merged, stopped) = table.combine(source, from, chunk, &decoded[..count])?;
-            *merged.as_mut().context("a null merged count")? = count_merged as c_int;
-            *stop.as_mut().context("a null stop")? = match stopped {
+            *merged = count_merged as c_int;
+            *stop = match stopped {
                 CombineStop::Done => 0,
                 CombineStop::ChunkFull => 1,
                 CombineStop::IndexFull => 2,
@@ -1308,8 +1311,8 @@ pub unsafe extern "C" fn tess_table_clear_key(
         guard(status, || {
             let mut table = attach_mut(table)?;
             let key = usize::try_from(key).context("a negative key")?;
-            let cleared = table.clear_key(key)?;
-            *count.as_mut().context("a null count")? = cleared;
+            let count = count.as_mut().context("a null count")?;
+            *count = table.clear_key(key)?;
             Ok(())
         })
     }
@@ -1343,9 +1346,10 @@ pub unsafe extern "C" fn tess_table_scan(
             };
             let capacity = usize::try_from(capacity).context("a negative capacity")?;
             let out = slots(offsets, capacity, "offsets")?;
+            let count = count.as_mut().context("a null count")?;
             let visited = table.scan(&mut cursor, out)?;
             *raw = cursor.raw();
-            *count.as_mut().context("a null count")? = visited as c_int;
+            *count = visited as c_int;
             Ok(())
         })
     }
@@ -1509,9 +1513,10 @@ pub unsafe extern "C" fn tess_table_next_unmarked(
                 chunks: marks,
                 shared,
             });
+            let count = count.as_mut().context("a null count")?;
             let visited = scan_unmarked(&chunks, record_size, &mut cursor, marks.as_ref(), out)?;
             *raw = cursor.raw();
-            *count.as_mut().context("a null count")? = visited as c_int;
+            *count = visited as c_int;
             Ok(())
         })
     }
@@ -2132,7 +2137,8 @@ pub unsafe extern "C" fn tess_build_take_chunk(
     unsafe {
         guard(status, || {
             let counters = build_counters(counters)?;
-            *number.as_mut().context("a null result")? = counters.take_chunk();
+            let number = number.as_mut().context("a null result")?;
+            *number = counters.take_chunk();
             Ok(())
         })
     }
@@ -2213,8 +2219,8 @@ pub unsafe extern "C" fn tess_build_step(
         guard(status, || {
             let participant = participant.as_mut().context("a null participant")?;
             let counters = build_counters(counters)?;
-            let next = participant.step(&counters, reply)?;
-            *action.as_mut().context("a null action")? = next as u32;
+            let action = action.as_mut().context("a null action")?;
+            *action = participant.step(&counters, reply)? as u32;
             Ok(())
         })
     }
