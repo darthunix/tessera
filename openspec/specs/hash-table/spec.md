@@ -1,4 +1,23 @@
-## ADDED Requirements
+# hash-table Specification
+
+## Purpose
+The hash table that joins, groupings and sorts keep their rows in: its
+format in memory, local or shared between processes, and what each call
+over it promises. When a node builds a table, how large it makes its
+chunks and when it spills belong to the node's own capability.
+
+A table is an index and chunks. The index is a header and an array of
+buckets; the chunks hold the records, one after another. A record is
+one row: its hash, a link to the next record of its bucket's chain, its
+keys and a payload the table does not look into. A reference names a
+record by its chunk and its place there, so the bytes mean the same in
+every process. The requirements go from the bytes to the calls: the
+index, chunks and references, a record, the errors of a call, then
+appending, linking, looking rows up, the records of a key together, the
+calls of one writer, and the calls that may run at once.
+[design.md](design.md) explains the whole and the reasons.
+
+## Requirements
 
 ### Requirement: The index of a table
 A table SHALL have one index: a header of 96 bytes followed by the
