@@ -13,15 +13,16 @@ use anyhow::Result;
 use tessera_capi::c::sort_flags::{DESCENDING, NULLABLE, NULLS_FIRST};
 use tessera_capi::c::{
     CSortKey, Code, DatumColumn, Mask, Status, TableKey, TableRecord, TableRef, TableStats,
-    TableSumArg, tess_int4_hash, tess_int8_hash, tess_sort, tess_sort_item_words, tess_sort_items,
+    TableSumArg, tess_build_counters_init, tess_build_take_chunk, tess_build_totals,
+    tess_int4_hash, tess_int8_hash, tess_sort, tess_sort_item_words, tess_sort_items,
     tess_sort_layout, tess_sort_merge, tess_table_accumulate, tess_table_accumulate_sums,
     tess_table_append, tess_table_append_columns, tess_table_append_partitioned_columns,
-    tess_table_chunk_init, tess_table_create, tess_table_find_or_insert, tess_table_format_version,
-    tess_table_gather, tess_table_gather_key, tess_table_gather_words, tess_table_layout,
-    tess_table_link, tess_table_link_grouped, tess_table_mark, tess_table_mark_words,
-    tess_table_next_in_group, tess_table_next_match, tess_table_next_unmarked, tess_table_payloads,
-    tess_table_probe, tess_table_record, tess_table_regrow, tess_table_scan, tess_table_size,
-    tess_table_stats,
+    tess_table_chunk_init, tess_table_clear_key, tess_table_create, tess_table_find_or_insert,
+    tess_table_format_version, tess_table_gather, tess_table_gather_key, tess_table_gather_words,
+    tess_table_layout, tess_table_link, tess_table_link_grouped, tess_table_mark,
+    tess_table_mark_words, tess_table_next_in_group, tess_table_next_match,
+    tess_table_next_unmarked, tess_table_payloads, tess_table_probe, tess_table_record,
+    tess_table_regrow, tess_table_scan, tess_table_size, tess_table_stats,
 };
 use tessera_core::{ColumnView, RowMask, RowMaskView};
 use tessera_kernels::int32::{self, NullKeys};
@@ -2742,6 +2743,111 @@ fn chunks_of_columns_round_trip_through_the_entry_points() -> Result<()> {
                 assert_eq!(offsets[row], ((index as u32) << 17) | place as u32);
             }
         }
+    }
+    Ok(())
+}
+
+#[test]
+fn outputs_are_checked_before_anything_changes() -> Result<()> {
+    let values: Vec<u64> = (1..=4).collect();
+    let isnull = [false; 4];
+    let column = DatumColumn {
+        struct_size: size_of::<DatumColumn>(),
+        values: values.as_ptr(),
+        isnull: isnull.as_ptr(),
+        nrows: 4,
+        ..DatumColumn::EMPTY
+    };
+    let key = TableKey {
+        kind: 1,
+        column: &raw const column,
+        prepared: ptr::null(),
+    };
+    let hashes: Vec<u32> = values
+        .iter()
+        .map(|&value| int32::murmurhash32(value as u32))
+        .collect();
+    let mut status = Status::new();
+    // SAFETY: local buffers of the declared sizes, aliased by nothing else,
+    // throughout this test.
+    unsafe {
+        let mut table = CTable::new(1, 8, 8);
+        table.add_chunk(8 + 4 * 32);
+        let mut pending_words = [0b1111];
+        let mut pending = Mask {
+            nrows: 4,
+            bits: pending_words.as_mut_ptr(),
+        };
+        let mut inserted_words = [0];
+        let mut inserted = Mask {
+            nrows: 4,
+            bits: inserted_words.as_mut_ptr(),
+        };
+        let mut offsets = [0; 4];
+        let code = tess_table_find_or_insert(
+            table.ptr(),
+            0,
+            hashes.as_ptr(),
+            1,
+            &raw const key,
+            &raw mut pending,
+            offsets.as_mut_ptr(),
+            &raw mut inserted,
+            &raw mut status,
+        );
+        assert_eq!(code, Code::Ok, "{}", status.message());
+
+        // A key cleared without a place for the count: refused, and every
+        // record keeps its key.
+        let code = tess_table_clear_key(table.ptr(), 0, ptr::null_mut(), &raw mut status);
+        assert_eq!(code, Code::InvalidArgument);
+        for (offset, value) in offsets.iter().zip(&values) {
+            let mut record = TableRecord {
+                struct_size: size_of::<TableRecord>(),
+                hash: 0,
+                null_bits: 0,
+                keys: ptr::null(),
+                payload: ptr::null(),
+                payload_size: 0,
+            };
+            let code = tess_table_record(table.ptr(), *offset, &raw mut record, &raw mut status);
+            assert_eq!(code, Code::Ok, "{}", status.message());
+            assert_eq!(*record.keys, *value as i64, "the key is not cleared");
+        }
+
+        // A walk without a place for the count: refused, the cursor where
+        // it was.
+        let mut cursor = 0;
+        let mut walked = [0; 4];
+        let code = tess_table_scan(
+            table.ptr(),
+            &raw mut cursor,
+            walked.as_mut_ptr(),
+            4,
+            ptr::null_mut(),
+            &raw mut status,
+        );
+        assert_eq!(code, Code::InvalidArgument);
+        assert_eq!(cursor, 0, "the cursor did not move");
+
+        // A chunk number taken without a place for it: refused, and the
+        // build's counters number no chunk.
+        let mut counters = [u64::MAX; 4];
+        let code = tess_build_counters_init(counters.as_mut_ptr(), &raw mut status);
+        assert_eq!(code, Code::Ok, "{}", status.message());
+        let code = tess_build_take_chunk(counters.as_mut_ptr(), ptr::null_mut(), &raw mut status);
+        assert_eq!(code, Code::InvalidArgument);
+        let (mut records, mut nulls, mut chunks) = (0, 0, u64::MAX);
+        let code = tess_build_totals(
+            counters.as_mut_ptr(),
+            &raw mut records,
+            &raw mut nulls,
+            &raw mut chunks,
+            ptr::null_mut(),
+            &raw mut status,
+        );
+        assert_eq!(code, Code::Ok, "{}", status.message());
+        assert_eq!(chunks, 0, "no chunk was numbered");
     }
     Ok(())
 }
