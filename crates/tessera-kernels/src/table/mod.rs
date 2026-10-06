@@ -3,8 +3,8 @@
 //! A table is an index and chunks of records, blocks of memory the caller
 //! owns and hands to every call: the local memory of a serial plan, or
 //! dynamic shared memory of a parallel one, mapped by every process at an
-//! address of its own. The table keeps no address between calls and
-//! allocates nothing. The index is a header of 96 bytes (see [`header`])
+//! address of its own. The table keeps no address between calls, and its
+//! memory is all the caller's. The index is a header of 96 bytes (see [`header`])
 //! and the bucket array, a power of two of buckets, at least 1024 and at
 //! least twice the records the index was made for, each holding the
 //! reference of the first record of its chain. The records lie in chunks
@@ -34,12 +34,13 @@
 //! [`crate::int32::hash`], [`crate::int64::hash`] and their `hash_next`,
 //! which decide what NULL keys do.
 //!
-//! Every call attaches anew and checks the whole header; every reference
-//! is checked against its chunk before it is followed, and a chain is
-//! walked at most as many steps as there are records, and never more than
-//! the chunks have room for, so a corrupt table is an error, never a hang
-//! or an access past a block. Dimension errors
-//! come before any change. A full chunk or index is not an error: rows
+//! Every call checks the chunks it is given, and a call that reads the
+//! index attaches anew and checks the whole header; every reference is
+//! checked against its chunk before it is followed, and a chain is walked
+//! at most as many steps as there are records, and never more than the
+//! chunks have room for, so a corrupt table is an error, never a hang or
+//! an access past a block. Dimension and pointer errors come before any
+//! change. A full chunk or index is not an error: rows
 //! without room stay in their mask for the caller to retry after adding a
 //! chunk or building a larger index.
 //!
