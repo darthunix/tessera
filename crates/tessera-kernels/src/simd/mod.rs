@@ -27,11 +27,11 @@ mod set;
 mod table;
 
 use core::arch::aarch64::{
-    int32x4_t, uint8x8_t, uint32x4_t, uint64x2_t, vaddv_u8, vandq_u8, vceqzq_u8, vdup_n_u8,
-    vget_high_s16, vget_high_u8, vget_low_s16, vget_low_s32, vget_low_u8, vld1_u8, vld1q_s32,
-    vld1q_u8, vld1q_u64, vmovl_high_s32, vmovl_s8, vmovl_s16, vmovl_s32, vreinterpret_s8_u8,
-    vreinterpretq_s32_u32, vreinterpretq_s32_u64, vreinterpretq_u32_s32, vreinterpretq_u64_s64,
-    vtst_u8, vuzp1q_s32,
+    int32x4_t, uint8x8_t, uint32x4_t, uint64x2_t, vaddv_u8, vaddvq_u32, vandq_u8, vandq_u32,
+    vceqzq_u8, vdup_n_u8, vdupq_n_u32, vget_high_s16, vget_high_u8, vget_low_s16, vget_low_s32,
+    vget_low_u8, vld1_u8, vld1q_s32, vld1q_u8, vld1q_u32, vld1q_u64, vmovl_high_s32, vmovl_s8,
+    vmovl_s16, vmovl_s32, vorrq_u32, vreinterpret_s8_u8, vreinterpretq_s32_u32,
+    vreinterpretq_s32_u64, vreinterpretq_u32_s32, vreinterpretq_u64_s64, vtst_u8, vuzp1q_s32,
 };
 
 pub use aggregate::{
@@ -81,6 +81,26 @@ fn non_null_lanes(isnull: &[bool; 64]) -> u64 {
         let low = u64::from(vaddv_u8(vget_low_u8(present)));
         let high = u64::from(vaddv_u8(vget_high_u8(present)));
         bits |= (low | high << 8) << (quarter * 16);
+    }
+    bits
+}
+
+/// The bits of the 64 rows of a word from its 16 groups of four lane
+/// masks, `lanes(group)` for each. A passing lane is all ones. Weighting
+/// each lane by its bit and adding the four groups of a quarter gives the
+/// quarter's 16 bits without a per-row shift; four quarters make the word.
+#[inline]
+#[target_feature(enable = "neon")]
+fn pack_lanes(lanes: impl Fn(usize) -> uint32x4_t) -> u64 {
+    // SAFETY: every weight row has exactly four lanes.
+    let weights = LANE_WEIGHTS.map(|row| unsafe { vld1q_u32(row.as_ptr()) });
+    let mut bits = 0;
+    for quarter in 0..4 {
+        let mut passing = vdupq_n_u32(0);
+        for (group, weight) in weights.iter().enumerate() {
+            passing = vorrq_u32(passing, vandq_u32(lanes(quarter * 4 + group), *weight));
+        }
+        bits |= u64::from(vaddvq_u32(passing)) << (quarter * 16);
     }
     bits
 }

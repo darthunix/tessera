@@ -1,11 +1,11 @@
 //! Whole-word comparisons of int4 values with a scalar.
 
 use core::arch::aarch64::{
-    int32x4_t, uint32x4_t, vaddvq_u32, vandq_u32, vceqq_s32, vcgeq_s32, vcgtq_s32, vcleq_s32,
-    vcltq_s32, vdupq_n_s32, vdupq_n_u32, vld1q_s32, vld1q_u32, vmvnq_u32, vorrq_u32,
+    int32x4_t, uint32x4_t, vceqq_s32, vcgeq_s32, vcgtq_s32, vcleq_s32, vcltq_s32, vdupq_n_s32,
+    vld1q_s32, vmvnq_u32,
 };
 
-use super::{LANE_WEIGHTS, load_datums, non_null_lanes};
+use super::{load_datums, non_null_lanes, pack_lanes};
 use crate::int32::{CompareOp, Side};
 
 /// Rows of a dense block whose value satisfies `value op scalar`, as bits in
@@ -97,22 +97,6 @@ fn pack_pairs(
     }
 }
 
-/// The bits of the 64 lanes a group-wise comparison sets.
-#[inline]
-#[target_feature(enable = "neon")]
-fn pack_lanes(lanes: impl Fn(usize) -> uint32x4_t) -> u64 {
-    let weights = LANE_WEIGHTS.map(|row| unsafe { vld1q_u32(row.as_ptr()) });
-    let mut bits = 0;
-    for quarter in 0..4 {
-        let mut passing = vdupq_n_u32(0);
-        for (group, weight) in weights.iter().enumerate() {
-            passing = vorrq_u32(passing, vandq_u32(lanes(quarter * 4 + group), *weight));
-        }
-        bits |= u64::from(vaddvq_u32(passing)) << (quarter * 16);
-    }
-    bits
-}
-
 #[inline]
 #[target_feature(enable = "neon")]
 fn pack(op: CompareOp, scalar: i32, load: impl Fn(usize) -> int32x4_t) -> u64 {
@@ -127,9 +111,7 @@ fn pack(op: CompareOp, scalar: i32, load: impl Fn(usize) -> int32x4_t) -> u64 {
     }
 }
 
-/// A passing lane is all ones. Weighting each lane by its bit and adding the
-/// four groups of a quarter gives the quarter's 16 bits without a per-row
-/// shift; four quarters make the word.
+/// The bits of the 64 rows where `compare` holds of the loaded lanes.
 #[inline]
 #[target_feature(enable = "neon")]
 fn pack_with(load: impl Fn(usize) -> int32x4_t, compare: impl Fn(int32x4_t) -> uint32x4_t) -> u64 {
