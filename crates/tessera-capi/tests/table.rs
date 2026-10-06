@@ -1609,6 +1609,22 @@ fn the_mark_entry_points_leave_marked_records_out() -> Result<()> {
                 &raw mut status,
             );
             assert_eq!(code, Code::InvalidArgument);
+            // A walk of no records is refused: its count of 0 would read as
+            // the end of the walk.
+            let (mut cursor, mut count) = (0, -1);
+            let mut none: [u32; 0] = [];
+            let code = tess_table_next_unmarked(
+                table.ptr(),
+                32,
+                pointers.as_ptr(),
+                shared,
+                &raw mut cursor,
+                none.as_mut_ptr(),
+                0,
+                &raw mut count,
+                &raw mut status,
+            );
+            assert_eq!((code, cursor, count), (Code::InvalidArgument, 0, -1));
         }
     }
     Ok(())
@@ -1688,6 +1704,18 @@ fn the_writer_entry_points_round_trip() -> Result<()> {
         assert_eq!((code, count), (Code::Ok, 4));
         assert_eq!(walked[..4], offsets[..4]);
         assert_ne!(cursor, 0);
+        // A walk of no records is refused: its count of 0 would read as
+        // the end of the walk.
+        let before = cursor;
+        let code = tess_table_scan(
+            table.ptr(),
+            &raw mut cursor,
+            walked.as_mut_ptr(),
+            0,
+            &raw mut count,
+            &raw mut status,
+        );
+        assert_eq!((code, cursor, count), (Code::InvalidArgument, before, 4));
         let code = tess_table_scan(
             table.ptr(),
             &raw mut cursor,
