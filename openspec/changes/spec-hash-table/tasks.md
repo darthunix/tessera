@@ -2,7 +2,7 @@
 
 - [x] 1.1 Write the proposal, the spec, the design and the tasks of this
       change. Check: `.github/scripts/check-specs.sh`
-- [ ] 1.2 Move the sections of `docs/table.md` about the table itself
+- [x] 1.2 Move the sections of `docs/table.md` about the table itself
       to `openspec/specs/hash-table/design.md`, the text unchanged, and
       leave a pointer behind. Check: every moved line is in the new
       file in its order; `.github/scripts/check-specs.sh`
