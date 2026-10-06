@@ -427,7 +427,7 @@ were added on 2026-10-03.
   spill-format, hash-table. PR #42 (7389); side fixes PR #40, #41
   (7211–7215); 7135: keydict put off; 7220: rows_write of the aggregate
   spill.
-- **9.18** Duplicates inside Rust. Status: open; lines 7223–7232.
+- **9.18** Duplicates inside Rust. Status: done; lines 7223–7232.
   Explains: kernel-abi, batch-functions.
 - **9.19** Change-check tools: tessera-ab, tessera-bench --disasm
   --module. Status: done; lines 7234–7271. Explains: tools, bench.
