@@ -21,21 +21,20 @@ In this order. The maintainer placed `counters-on-x86-and-linux`,
 order of the decisions of 2026-09-30 to 2026-10-02 (plan lines
 2810–2836, 6596–6603, 7378–7390):
 
-1. `rust-duplicates`: Duplicates inside the Rust crates
-2. `counters-on-x86-and-linux`: Performance counters on x86 and on Linux
-3. `simd-primitives-avx2`: SIMD primitives layer and AVX2 for x86-64
-4. `linux-x86-support`: Linux on x86-64 checked as the target platform
-5. `oltp-guard-bench`: OLTP guard family of benchmarks
-6. `runs-left-from-section-9`: Runs left to the maintainer from section 9
-7. `tpch-short-set`: TPC-H step 7: the short query set for A/B
-8. `tpch-parallel-and-jit`: TPC-H step 8: parallel series and the
+1. `counters-on-x86-and-linux`: Performance counters on x86 and on Linux
+2. `simd-primitives-avx2`: SIMD primitives layer and AVX2 for x86-64
+3. `linux-x86-support`: Linux on x86-64 checked as the target platform
+4. `oltp-guard-bench`: OLTP guard family of benchmarks
+5. `runs-left-from-section-9`: Runs left to the maintainer from section 9
+6. `tpch-short-set`: TPC-H step 7: the short query set for A/B
+7. `tpch-parallel-and-jit`: TPC-H step 8: parallel series and the
    `jit = on` control run
-9. `tpch-indexed-schema`: TPC-H step 9: schema with indexes on foreign
+8. `tpch-indexed-schema`: TPC-H step 9: schema with indexes on foreign
    keys and dates
-10. `tpch-sf10`: TPC-H step 10: SF10
-11. `backward-scan-mark-restore`: Backward scan and mark/restore
-12. `postgresql-19`: PostgreSQL 19 support
-13. `pg-duckdb-comparison`: Comparison with pg_duckdb
+9. `tpch-sf10`: TPC-H step 10: SF10
+10. `backward-scan-mark-restore`: Backward scan and mark/restore
+11. `postgresql-19`: PostgreSQL 19 support
+12. `pg-duckdb-comparison`: Comparison with pg_duckdb
 
 ## By measurement
 
@@ -87,41 +86,6 @@ is wanted; several wait for a measured case. `greengage-port` and
 
 ## Entries
 
-### rust-duplicates
-
-Duplicates inside the Rust crates. From plan 9.18, lines 7223–7232.
-
-- **What:** Merge code that is repeated inside the Rust crates. In
-  `simd/` only the byte-identical parts (`pack_lanes` and the
-  scaffolding) move to `simd/lanes.rs`. In tessera-capi, `c/int32.rs`
-  and `c/int64.rs` become one `macro_rules! int_entry_points!`;
-  `Constant`, `with_source!` and `with_sources!` from `c/calendar.rs`,
-  `c/decimal.rs`, `c/text.rs` become one `c/source.rs` generic over the
-  value type; one `check_rows` in tessera-core beside the mask; one
-  module-level `dispatch!`; one public `FromDatum` in `column.rs`;
-  `compare_op` becomes `TryFrom<c_uint>` on each enum with one table.
-- **Why:** One edit per type instead of two (line 7364–7365). The survey
-  of section 9 counted nine pairs of entry points in `c/int32.rs` and
-  `c/int64.rs`, the source helpers three times, `check_rows` ×3,
-  `dispatch!` defined five times, `FromDatum` ×2, `compare_op` ×2 (lines
-  6657–6661). The item adds no correctness, which is why it is last
-  (line 7232).
-- **Known:** The maintainer's decision 2026-10-02: all four "move to
-  Rust" items of section 9 are done (line 6609). The NEON blocks per
-  width stay (verdict 35 of 4.25); `int32/lane.rs` and `int64/lane.rs`
-  stay. Acceptance is the recipe of 4.25: normalized disassembly of the
-  13 bench functions at codegen-units=1 without differences on every
-  commit, then one PMU run (`tessera-bench --base`) over the touched
-  families at the end, run by the maintainer. Named risk: by-value
-  closures and inlining in the source helpers (lessons of 3.6 and 4.25).
-  Checked in the code: `simd/lanes.rs`, `c/source.rs` and
-  `int_entry_points!` do not exist; `check_rows` is in `decimal.rs`,
-  `text.rs`, `calendar.rs`; `compare_op` in `c/decimal.rs` and
-  `c/args.rs`; `FromDatum` in `column/ints.rs` and `c/calendar.rs`.
-- **Depends on:** nothing; uses `tessera-bench --disasm` (9.2, 9.19).
-- **Capabilities:** kernel-abi
-- **Size:** small — one PR of six commits, about −700 lines (line 7230–7231).
-
 ### counters-on-x86-and-linux
 
 Performance counters on x86 and on Linux. From the review of pull
@@ -167,7 +131,7 @@ SIMD primitives layer and AVX2 for x86-64. From plan 3.9, lines 210–278;
   processors the scalar kernels run. AVX2 is on every Intel Mac since
   2013 and all server x86 of the last ten years (line 211–213).
 - **Known:** The maintainer's decision 2026-10-05: taken after
-  `rust-duplicates` and `counters-on-x86-and-linux`. Decision
+  `counters-on-x86-and-linux`. Decision
   2026-09-20; revised 2026-09-25 (primitives, on the maintainer's
   condition that the trait must not cost performance); clarified
   2026-09-30 (the control loops of both widths are already shared
@@ -185,10 +149,11 @@ SIMD primitives layer and AVX2 for x86-64. From plan 3.9, lines 210–278;
   kernel: filter → arith (with the divisor) → aggregate → hash → table
   prefetch. Checked in the code: no `avx2` anywhere, `simd/` is not
   split into `neon/` and `avx2/`.
-- **Depends on:** `rust-duplicates`, which touches the same files
-  (`simd/lanes.rs`), and `counters-on-x86-and-linux`, the tool to
-  measure with while the kernels are written; both go first. The plan
-  named an Intel Mac for the acceptance (line 2789).
+- **Depends on:** `counters-on-x86-and-linux`, the tool to measure with
+  while the kernels are written; it goes first. The lane helpers both
+  widths share, the packing of lane masks into row bits among them, are
+  in `simd/mod.rs`. The plan named an Intel Mac for the acceptance (line
+  2789).
 - **Capabilities:** kernel-abi, tools, ci
 - **Size:** large — a series with its own acceptance per kernel.
 
@@ -261,8 +226,9 @@ lines 6998–6999, 7285–7286, 7352–7353.
 - **Known:** Estimate for the full mutants run: about an hour per shard
   at 20 s per mutant (line 7353). `tessera-bench --base` refuses to
   compare across the commit that added the `mutants` profile, because
-  `Cargo.toml` defines the build (line 7351–7352). The PMU run of
-  `rust-duplicates` is a separate run, at the end of that series.
+  `Cargo.toml` defines the build (line 7351–7352). The duplicates inside
+  the Rust crates (plan 9.18) need no PMU run: the machine code of the
+  13 benchmark programs stayed the same on each of their commits.
 - **Depends on:** nothing.
 - **Capabilities:** tools, ci, bench
 - **Size:** small (runs, no code).
@@ -282,7 +248,7 @@ TPC-H step 7: the short query set for A/B. From plan 8.1, lines 6246,
   `--queries core` and has `compare <A> <B>`. The log does not say what
   step 7 must produce beyond that (a recorded baseline, a make target, a
   link from `cargo ab`).
-- **Depends on:** `rust-duplicates` (section 9 goes first, line 6602–6603).
+- **Depends on:** nothing; section 9 went first (line 6602–6603).
 - **Capabilities:** bench, tools
 - **Size:** small.
 
