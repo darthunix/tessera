@@ -9,7 +9,7 @@
 - [x] 1.3 Write `design.md` anew, from the whole to the details, with
       the definitions left to the spec. Check:
       `.github/scripts/check-specs.sh`
-- [ ] 1.4 Add a test for every scenario that has none, and correct what
+- [x] 1.4 Add a test for every scenario that has none, and correct what
       the comparison of the documents, the code and the tests finds,
       each in a commit of its own with its test. Check:
       `make rust-check`; `make installcheck` for the C suite;

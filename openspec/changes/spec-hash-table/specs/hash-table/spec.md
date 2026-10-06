@@ -68,7 +68,8 @@ buckets, and the index length.
 - **WHEN** an index is created at an address not aligned to 8, in a
   length that is not a multiple of 8, or in fewer bytes than its size
 - **THEN** the call fails and writes nothing
-- **Verified by:** pending
+- **Verified by:**
+  `crates/tessera-kernels/src/table/mod.rs::misaligned_or_odd_blocks_are_refused`
 
 ### Requirement: Chunks and references
 The records of a table SHALL lie in chunks, at most 32768 of them,
@@ -97,7 +98,9 @@ reference, and a reference names the same record in every process.
   is not a multiple of 8, shorter than 8 bytes or longer than 1 MiB, or
   more than 32768 chunks
 - **THEN** the call fails
-- **Verified by:** pending
+- **Verified by:**
+  `crates/tessera-kernels/src/table/mod.rs::chunks_past_the_limits_are_refused`;
+  `crates/tessera-kernels/src/table/mod.rs::misaligned_or_odd_blocks_are_refused`
 
 #### Scenario: A reference names its chunk and its place
 - **WHEN** rows fill one chunk and go on into the next
@@ -105,13 +108,14 @@ reference, and a reference names the same record in every process.
   record, and the helpers of the C API read them back
 - **Verified by:**
   `crates/tessera-kernels/tests/table.rs::inserted_rows_are_found_and_absent_keys_are_not`;
-  pending
+  `test/sql/table.sql::tessera_test_table_cycle`
 
 #### Scenario: Reference 0 names no record
 - **WHEN** a call is asked for the record at reference 0
 - **THEN** the call fails, and an empty bucket or the end of a chain
   holds 0
-- **Verified by:** pending
+- **Verified by:**
+  `crates/tessera-kernels/tests/table.rs::reference_zero_names_no_record`
 
 ### Requirement: A record
 Every record of a table SHALL have the size in the header: a header of
@@ -157,8 +161,9 @@ SHALL refuse a record that does not fit in a chunk.
 #### Scenario: A record larger than a chunk
 - **WHEN** a table is sized or created for a record that does not fit
   in a chunk of 1 MiB
-- **THEN** the call fails
-- **Verified by:** pending
+- **THEN** the call fails, and the largest record that fits is accepted
+- **Verified by:**
+  `crates/tessera-kernels/tests/table.rs::a_record_larger_than_a_chunk_is_refused`
 
 ### Requirement: Errors of a call
 A call SHALL return an error status, and never crash or loop without
@@ -194,11 +199,11 @@ anything.
 #### Scenario: Arguments are checked first
 - **WHEN** a call is given arrays of the wrong length, a missing output
   or a wrong key count
-- **THEN** it fails, and the table, the chunks and the masks are as they
-  were
+- **THEN** it fails, and the table, the chunks, the masks and the cursor
+  are as they were
 - **Verified by:**
   `crates/tessera-kernels/tests/table.rs::dimension_errors_come_before_any_change`;
-  pending
+  `crates/tessera-capi/tests/table.rs::outputs_are_checked_before_anything_changes`
 
 ### Requirement: Appending rows
 `tess_table_append` SHALL write the rows of the pending mask, in row
@@ -282,14 +287,15 @@ into a record, valid as long as its chunk.
   `crates/tessera-kernels/tests/table.rs::inserted_rows_are_found_and_absent_keys_are_not`;
   `crates/tessera-kernels/tests/table.rs::a_null_key_groups_apart_from_the_value_it_hashes_like`;
   `crates/tessera-capi/tests/table.rs::int4_keys_find_the_records_of_int8_keys`;
-  pending
+  `crates/tessera-capi/tests/table.rs::int8_keys_find_the_records_of_int4_keys`
 
 #### Scenario: Every record of a key
 - **WHEN** a key has ten records and its rows step with next_match
 - **THEN** each step finds another record of the key, and the step after
   the last finds none and leaves the reference as it was
 - **Verified by:**
-  `crates/tessera-kernels/tests/table.rs::equal_keys_chain_through_next_match`
+  `crates/tessera-kernels/tests/table.rs::equal_keys_chain_through_next_match`;
+  `crates/tessera-kernels/tests/table.rs::a_null_key_groups_apart_from_the_value_it_hashes_like`
 
 #### Scenario: Reading the found records
 - **WHEN** a payload word, several words or a key of the found rows is
@@ -367,13 +373,15 @@ change of a payload in place.
   `test/sql/table.sql::tessera_test_table_regrow`
 
 #### Scenario: A walk and a cleared key
-- **WHEN** the records are walked a few at a time, and a key is cleared
+- **WHEN** the records are walked a few at a time, a walk of no records
+  is asked for, and a key is cleared
 - **THEN** the walk visits each record once in the order appended and
-  ends with 0, and the key is 0 in every record with its NULL bit kept
+  ends with 0, the walk of no records is refused, and the key is 0 in
+  every record with its NULL bit kept
 - **Verified by:**
   `crates/tessera-kernels/tests/table.rs::a_walk_visits_every_record_once_in_appended_order`;
-  `crates/tessera-kernels/tests/table.rs::a_cleared_key_is_zero_in_every_record`;
-  pending
+  `crates/tessera-capi/tests/table.rs::the_writer_entry_points_round_trip`;
+  `crates/tessera-kernels/tests/table.rs::a_cleared_key_is_zero_in_every_record`
 
 ### Requirement: Calls at the same time
 Over shared memory several processes SHALL be able to append at once,
