@@ -13,15 +13,14 @@
 
 use std::ffi::{c_char, c_int};
 use std::marker::PhantomData;
-use std::mem::MaybeUninit;
 use std::slice;
 
 use anyhow::{Context, Result, bail, ensure};
-use tessera_core::{RowMask, RowMaskView};
 use tessera_kernels::text::{self, Bounds, Chars, Length, Like, Piece, Strings, Text};
 
 use super::column::DatumColumn;
 use super::mask::Mask;
+use super::source::{self, Constant, output, selection, slots, with_source};
 use super::status::{Code, Status, guard};
 use super::varlena::varlena_data;
 
@@ -63,21 +62,15 @@ impl Strings for Column<'_> {
     }
 }
 
-/// A scalar's bytes, the same for every row.
-struct Constant<'a>(&'a [u8]);
-
-impl Strings for Constant<'_> {
+impl Strings for Constant<&[u8]> {
     #[inline(always)]
     fn get(&self, _row: usize) -> Text<'_> {
         Text::Bytes(self.0)
     }
 }
 
-/// A call's argument: a column or a scalar, a loop for each.
-enum Input<'a> {
-    Column(Column<'a>),
-    Scalar(&'a [u8]),
-}
+/// A call's argument: a column or a scalar's bytes, a loop for each.
+type Input<'a> = source::Input<Column<'a>, &'a [u8]>;
 
 /// Borrow a column of `nrows` rows.
 ///
@@ -135,60 +128,6 @@ unsafe fn input<'a>(arg: *const TextArg, nrows: usize) -> Result<Input<'a>> {
             Input::Column(column(arg.column, nrows)?)
         })
     }
-}
-
-/// Run `$body` with `$source` bound to the concrete source of an input.
-macro_rules! with_source {
-    ($input:expr, |$source:ident| $body:expr) => {
-        match $input {
-            Input::Column(column) => {
-                let $source = &column;
-                $body
-            }
-            Input::Scalar(bytes) => {
-                let $source = &Constant(bytes);
-                $body
-            }
-        }
-    };
-}
-
-/// A selection to read.
-///
-/// # Safety
-///
-/// `rows` must point to a valid mask, unchanged for `'a`.
-#[inline]
-unsafe fn selection<'a>(rows: *const Mask) -> Result<RowMaskView<'a>> {
-    // SAFETY: the caller's contract.
-    unsafe { rows.as_ref().context("a null row mask")?.view() }
-}
-
-/// A mask to write.
-///
-/// # Safety
-///
-/// `mask` must point to a valid mask that nothing else accesses for `'a`.
-#[inline]
-unsafe fn output<'a>(mask: *mut Mask) -> Result<RowMask<'a>> {
-    // SAFETY: the caller's contract.
-    unsafe { mask.as_mut().context("a null result mask")?.mask() }
-}
-
-/// An array of `nrows` slots to write.
-///
-/// # Safety
-///
-/// `values` must point to `nrows` writable slots of `T`, possibly
-/// uninitialized, that nothing else accesses for `'a`.
-#[inline]
-unsafe fn slots<'a, T>(values: *mut T, nrows: usize) -> Result<&'a mut [MaybeUninit<T>]> {
-    if nrows == 0 {
-        return Ok(&mut []);
-    }
-    ensure!(!values.is_null(), "a null result buffer");
-    // SAFETY: the caller's contract.
-    Ok(unsafe { slice::from_raw_parts_mut(values.cast(), nrows) })
 }
 
 /// A byte string of the caller.
