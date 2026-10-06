@@ -36,8 +36,9 @@
 //!
 //! Every call attaches anew and checks the whole header; every reference
 //! is checked against its chunk before it is followed, and a chain is
-//! walked at most as many steps as there are records, so a corrupt table
-//! is an error, never a hang or an access past a block. Dimension errors
+//! walked at most as many steps as there are records, and never more than
+//! the chunks have room for, so a corrupt table is an error, never a hang
+//! or an access past a block. Dimension errors
 //! come before any change. A full chunk or index is not an error: rows
 //! without room stay in their mask for the caller to retry after adding a
 //! chunk or building a larger index.
@@ -185,6 +186,7 @@ pub struct Stats {
 pub struct Chunks<'a> {
     bases: &'a [*mut u8],
     lens: &'a [usize],
+    bytes: usize,
 }
 
 impl<'a> Chunks<'a> {
@@ -193,6 +195,7 @@ impl<'a> Chunks<'a> {
         Self {
             bases: &[],
             lens: &[],
+            bytes: 0,
         }
     }
 
@@ -213,6 +216,7 @@ impl<'a> Chunks<'a> {
             bases.len(),
             lens.len()
         );
+        let mut bytes = 0usize;
         for (chunk, (&base, &len)) in bases.iter().zip(lens).enumerate() {
             ensure!(
                 !base.is_null()
@@ -222,8 +226,9 @@ impl<'a> Chunks<'a> {
                 "table chunk {chunk} of {len} bytes is not aligned to 8 or not a multiple of 8 \
                  of {CHUNK_HEADER} to {MAX_CHUNK_LEN} bytes"
             );
+            bytes = bytes.saturating_add(len);
         }
-        Ok(Self { bases, lens })
+        Ok(Self { bases, lens, bytes })
     }
 
     /// The number of chunks.
@@ -275,6 +280,7 @@ fn chunk_region(chunks: &Chunks<'_>) -> RawRegion {
             chunks.bases.as_ptr(),
             chunks.lens.as_ptr(),
             chunks.len(),
+            chunks.bytes,
         )
     }
 }
@@ -455,6 +461,7 @@ impl<'a> Table<'a> {
                 chunks.bases.as_ptr(),
                 chunks.lens.as_ptr(),
                 chunks.len(),
+                chunks.bytes,
             )
         };
         let layout = Header::load(&region).validate(len)?;
@@ -736,6 +743,7 @@ impl<'a> TableMut<'a> {
                 chunks.bases.as_ptr(),
                 chunks.lens.as_ptr(),
                 chunks.len(),
+                chunks.bytes,
             )
         };
         // SAFETY: the caller has the index to itself.
@@ -1481,6 +1489,24 @@ mod tests {
             .combine(chunk, &mut at, chunk, &COMBINES)
             .unwrap_err();
         assert!(error.to_string().contains("into itself"), "{error}");
+    }
+
+    #[test]
+    fn a_damaged_count_is_bounded_by_the_room_of_the_chunks() {
+        let config = TableConfig {
+            keys: &[KeyKind::Int32],
+            payload_size: 8,
+        };
+        let mut table = LocalTable::new(&config, 10, 4096).unwrap();
+        table.add_chunk().unwrap();
+        table.add_chunk().unwrap();
+        // The header counts more records than the chunks could ever hold:
+        // a walk takes the room of the chunks, two of 4096 bytes in
+        // records of 32, for its bound.
+        table.index_words()[NRECORDS / 8] = u64::MAX;
+        let table = table.table().unwrap();
+        let access = Access::new(&table.region, &table.layout);
+        assert_eq!(access.records(), 2 * 4096 / 32);
     }
 
     #[test]
