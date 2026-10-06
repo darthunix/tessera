@@ -753,6 +753,21 @@ fn a_record_larger_than_a_chunk_is_refused() -> Result<()> {
         )
         .unwrap_err();
     assert!(error.to_string().contains("does not fit"), "{error}");
+
+    // A table is not even sized for a record that no chunk can hold: one
+    // key and the largest payload fill a chunk of 1 MiB after its used
+    // mark, eight bytes more do not.
+    let largest = MAX_CHUNK_LEN - CHUNK_HEADER - 16 - 8;
+    assert_eq!(record_bytes_of(1, largest)?, MAX_CHUNK_LEN - CHUNK_HEADER);
+    for payload_size in [largest + 1, MAX_CHUNK_LEN] {
+        let error = record_bytes_of(1, payload_size).unwrap_err();
+        assert!(error.to_string().contains("does not fit"), "{error}");
+        let config = TableConfig {
+            keys: &[KeyKind::Int32],
+            payload_size,
+        };
+        assert!(index_size(&config, 1).is_err());
+    }
     Ok(())
 }
 
