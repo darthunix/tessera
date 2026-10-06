@@ -28,10 +28,11 @@ use std::slice;
 use anyhow::{Context, Result, bail, ensure};
 use tessera_core::ones;
 use tessera_kernels::decimal::{
-    self, Arg, Compare, Decimal, DecimalWord, MAX_SCALE, NUMERIC_MAX, Op, Partial, Partials,
-    Results, Scales, Source, Special, Sum, SumState, Term, Terms,
+    self, Arg, Decimal, DecimalWord, MAX_SCALE, NUMERIC_MAX, Op, Partial, Partials, Results,
+    Scales, Source, Special, Sum, SumState, Term, Terms,
 };
 
+use super::args::compare_op;
 use super::column::DatumColumn;
 use super::mask::Mask;
 use super::source::{self, Constant, output, selection, slots, with_source, with_sources};
@@ -687,18 +688,6 @@ macro_rules! with_column {
     };
 }
 
-fn compare_op(op: c_int) -> Result<Compare> {
-    Ok(match op {
-        0 => Compare::Eq,
-        1 => Compare::Ne,
-        2 => Compare::Lt,
-        3 => Compare::Le,
-        4 => Compare::Gt,
-        5 => Compare::Ge,
-        _ => anyhow::bail!("an unknown decimal comparison {op}"),
-    })
-}
-
 fn compute_op(op: c_int) -> Result<Op> {
     Ok(match op {
         0 => Op::Add,
@@ -722,7 +711,7 @@ fn compute_op(op: c_int) -> Result<Op> {
 /// the call; `status` as for every entry point.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn tess_decimal_filter(
-    op: c_int,
+    op: c_uint,
     left: *const DecimalArg,
     right: *const DecimalArg,
     rows: *mut Mask,

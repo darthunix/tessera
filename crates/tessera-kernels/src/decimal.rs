@@ -413,36 +413,20 @@ pub trait Source {
     fn get(&self, row: usize) -> Arg;
 }
 
-/// A comparison of [`filter`].
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Compare {
-    /// =
-    Eq,
-    /// <>
-    Ne,
-    /// <
-    Lt,
-    /// <=
-    Le,
-    /// >
-    Gt,
-    /// >=
-    Ge,
-}
+/// The comparison of [`filter`], the one the integer kernels take.
+pub use crate::ops::CompareOp;
 
-impl Compare {
-    /// The orders that satisfy the comparison, bit `order + 1` for each of
-    /// Less, Equal and Greater.
-    #[inline]
-    fn orders(self) -> u8 {
-        match self {
-            Self::Eq => 0b010,
-            Self::Ne => 0b101,
-            Self::Lt => 0b001,
-            Self::Le => 0b011,
-            Self::Gt => 0b100,
-            Self::Ge => 0b110,
-        }
+/// The orders that satisfy a comparison, bit `order + 1` for each of Less,
+/// Equal and Greater.
+#[inline]
+fn orders(op: CompareOp) -> u8 {
+    match op {
+        CompareOp::Eq => 0b010,
+        CompareOp::Ne => 0b101,
+        CompareOp::Lt => 0b001,
+        CompareOp::Le => 0b011,
+        CompareOp::Gt => 0b100,
+        CompareOp::Ge => 0b110,
     }
 }
 
@@ -489,7 +473,7 @@ fn for_each_word(
 ///
 /// Masks of different row counts fail before any mutation.
 pub fn filter(
-    op: Compare,
+    op: CompareOp,
     left: &impl Source,
     right: &impl Source,
     rows: &mut RowMask<'_>,
@@ -497,7 +481,7 @@ pub fn filter(
 ) -> Result<()> {
     let nrows = rows.as_view().nrows();
     check_rows(nrows, &[rest.as_view().nrows()], "decimal")?;
-    let orders = op.orders();
+    let orders = orders(op);
     for word in 0..nrows.div_ceil(64) {
         let look = rows.as_view().word_at(word);
         let mut keep = 0;

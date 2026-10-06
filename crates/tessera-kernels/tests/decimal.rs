@@ -13,7 +13,7 @@ use anyhow::{Result, ensure};
 use proptest::prelude::*;
 use tessera_core::{RowMask, RowMaskView};
 use tessera_kernels::decimal::{
-    self, Arg, Compare, Decimal, DecimalWord, ExtremeState, ExtremeValue, MAX_READ_SCALE,
+    self, Arg, CompareOp, Decimal, DecimalWord, ExtremeState, ExtremeValue, MAX_READ_SCALE,
     MAX_SCALE, Offer, Op, POWERS, Partial, Partials, Results, SUM_BOUND, Scales, Source, Special,
     Sum, SumState, Term, Terms,
 };
@@ -98,12 +98,12 @@ fn filter_keeps_the_rows_that_hold_and_leaves_the_rest() {
 fn filter_keeps(left: &Column, right: &Column, selected: &[u64]) {
     let nrows = left.0.len();
     for (op, holds) in [
-        (Compare::Eq, [false, true, false]),
-        (Compare::Ne, [true, false, true]),
-        (Compare::Lt, [true, false, false]),
-        (Compare::Le, [true, true, false]),
-        (Compare::Gt, [false, false, true]),
-        (Compare::Ge, [false, true, true]),
+        (CompareOp::Eq, [false, true, false]),
+        (CompareOp::Ne, [true, false, true]),
+        (CompareOp::Lt, [true, false, false]),
+        (CompareOp::Le, [true, true, false]),
+        (CompareOp::Gt, [false, false, true]),
+        (CompareOp::Ge, [false, true, true]),
     ] {
         let mut kept = selected.to_vec();
         // Every bit of the rest is written, set ones included.
