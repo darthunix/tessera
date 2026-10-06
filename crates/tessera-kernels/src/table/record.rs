@@ -14,7 +14,7 @@
 use anyhow::{Result, ensure};
 
 use super::header::{
-    CHUNK_HEADER, KEY_SLOT, Layout, NRECORDS, RECORD_HEADER, placement, reference,
+    CHUNK_HEADER, KEY_SLOT, Layout, NRECORDS, RECORD_HEADER, UNIT_BITS, placement, reference,
 };
 use super::keys::WordKeys;
 use super::region::Region;
@@ -114,8 +114,8 @@ pub(super) struct Access<'r, R> {
     record_size: usize,
     payload_size: usize,
     nkeys: usize,
-    /// The record count, at most the records the chunks have room for: a
-    /// walk longer than this repeats a record.
+    /// The record count, at most the places a reference can name in the
+    /// chunks: a walk longer than this repeats a record.
     nrecords: u64,
 }
 
@@ -159,13 +159,15 @@ impl<'r, R: Region> Access<'r, R> {
         self.record_size
     }
 
-    /// Read the record count, bounded by the records the chunks have room
-    /// for: a count in the header past it is damaged, and must not let a
-    /// walk around a loop go on and on.
+    /// Read the record count, bounded by the places a reference can name
+    /// in the chunks, 2^UNIT_BITS a chunk: a count in the header past it is
+    /// damaged, and must not let a walk around a loop go on and on. A
+    /// shift, not the chunks' lengths summed or divided by the record
+    /// size, so that the bound costs every call next to nothing.
     #[inline]
     fn refresh(&mut self) {
-        let room = (self.region.chunk_bytes() / self.record_size) as u64;
-        self.nrecords = self.region.load_u64(NRECORDS).min(room);
+        let places = (self.region.chunks() as u64) << UNIT_BITS;
+        self.nrecords = self.region.load_u64(NRECORDS).min(places);
     }
 
     /// The record at `offset`, which must lie within a chunk past its used

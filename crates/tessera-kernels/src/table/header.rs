@@ -204,20 +204,30 @@ fn checked_record_size(nkeys: usize, payload_size: usize) -> Result<u32> {
 
 /// Bytes of a record: its header, the key slots and the payload, rounded
 /// up to 8, at most what a chunk has room for after its used mark: a
-/// larger record could never be appended.
+/// larger record could never be appended. A table is not made for one;
+/// a header that claims one is read as [`record_size_of`] reads it, and
+/// every reference of such a table is refused, since no record fits.
 fn record_size(nkeys: usize, payload_size: usize) -> Result<u32> {
-    let size = payload_size
-        .checked_add(RECORD_HEADER + KEY_SLOT * nkeys)
-        .and_then(|size| size.checked_add(7))
-        .map(|size| size & !7)
-        .filter(|&size| size <= MAX_CHUNK_LEN - CHUNK_HEADER);
+    let size = record_size_of(nkeys, payload_size)
+        .filter(|&size| size as usize <= MAX_CHUNK_LEN - CHUNK_HEADER);
     let Some(size) = size else {
         bail!(
             "a record of {nkeys} keys and a payload of {payload_size} bytes \
              does not fit in a chunk of {MAX_CHUNK_LEN} bytes"
         );
     };
-    Ok(size as u32)
+    Ok(size)
+}
+
+/// Bytes of a record as [`record_size`] computes them, without the bound
+/// of a chunk: `None` past the 32 bits a header holds.
+#[inline]
+fn record_size_of(nkeys: usize, payload_size: usize) -> Option<u32> {
+    payload_size
+        .checked_add(RECORD_HEADER + KEY_SLOT * nkeys)
+        .and_then(|size| size.checked_add(7))
+        .map(|size| size & !7)
+        .and_then(|size| u32::try_from(size).ok())
 }
 
 /// The bucket count for `capacity` records: a power of two of at least
@@ -401,7 +411,7 @@ impl Header {
         for (slot, &code) in kinds.iter_mut().zip(&self.kinds).take(nkeys) {
             *slot = KeyKind::from_code(code)?;
         }
-        let valid = self.record_size == record_size(nkeys, payload_size).ok()?
+        let valid = self.record_size == record_size_of(nkeys, payload_size)?
             && nbuckets.is_power_of_two()
             && u64::from(nbuckets) >= MIN_BUCKETS
             && self.bucket_shift == bucket_shift(nbuckets)
@@ -476,7 +486,7 @@ impl Header {
         }
         let payload_size = self.payload_size as usize;
         ensure!(
-            self.record_size == record_size(nkeys, payload_size)?,
+            Some(self.record_size) == record_size_of(nkeys, payload_size),
             "table record size {} does not match {nkeys} keys and a payload of \
              {payload_size} bytes",
             self.record_size

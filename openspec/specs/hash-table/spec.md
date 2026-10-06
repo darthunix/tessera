@@ -191,8 +191,9 @@ a rule of "The index of a table", an index length below the header's,
 a reference outside its chunk or to a byte where no record starts, a
 record whose size is not the table's, a used mark that ends no record,
 or a chain with a loop. A walk down a chain SHALL take no more steps
-than the header's count of records, and no more than the chunks have
-room for. Such an error, and a wrong argument, SHALL be status
+than the header's count of records, and no more than the places a
+reference can name in the chunks it is given, 2^17 a chunk. Such an
+error, and a wrong argument, SHALL be status
 `TESS_ERROR_INVALID_ARGUMENT` with SQLSTATE `XX000`. A call SHALL check
 its arguments, the header and the list of chunks before it changes
 anything.
@@ -209,12 +210,12 @@ anything.
 #### Scenario: A damaged reference or chain
 - **WHEN** a bucket points into a missing chunk, past its chunk or into
   a record, a record's next points to itself, or a used mark ends no
-  record, also with a count of records far past the room of the chunks
+  record, also with a count of records far past what the chunks hold
 - **THEN** the probe, the walk or the link fails
 - **Verified by:**
   `crates/tessera-kernels/tests/table.rs::a_corrupt_reference_chain_or_used_mark_is_an_error`;
   `crates/tessera-kernels/tests/table.rs::a_word_probed_at_once_detects_a_cycle`;
-  `crates/tessera-kernels/src/table/mod.rs::a_damaged_count_is_bounded_by_the_room_of_the_chunks`
+  `crates/tessera-kernels/src/table/mod.rs::a_damaged_count_is_bounded_by_the_places_of_the_chunks`
 
 #### Scenario: Arguments are checked first
 - **WHEN** a call is given arrays of the wrong length, a missing output

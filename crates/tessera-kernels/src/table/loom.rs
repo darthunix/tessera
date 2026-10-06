@@ -239,10 +239,6 @@ impl Region for LoomRegion {
         self.chunk_len
     }
 
-    fn chunk_bytes(&self) -> usize {
-        self.chunks.len() * self.chunk_len
-    }
-
     unsafe fn chunk_used(&self, chunk: usize) -> u64 {
         self.chunks[chunk].used.with(|_| ());
         // SAFETY: the used mark is the chunk's first word.
