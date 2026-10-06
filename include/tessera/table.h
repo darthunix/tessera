@@ -176,7 +176,7 @@ extern Size tess_table_layout(TessTableLayoutKind kind);
  * The bytes of one record of a table of nkeys keys, of any kinds, and a
  * payload of payload_size bytes: its header, a slot per key and the
  * payload, rounded up to 8. An error for a count of keys out of range or
- * a record too large.
+ * a record that does not fit in a chunk after its used mark.
  */
 extern TessStatusCode tess_table_record_size(int nkeys,
 											 Size payload_size,

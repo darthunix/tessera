@@ -203,17 +203,21 @@ fn checked_record_size(nkeys: usize, payload_size: usize) -> Result<u32> {
 }
 
 /// Bytes of a record: its header, the key slots and the payload, rounded
-/// up to 8.
+/// up to 8, at most what a chunk has room for after its used mark: a
+/// larger record could never be appended.
 fn record_size(nkeys: usize, payload_size: usize) -> Result<u32> {
     let size = payload_size
         .checked_add(RECORD_HEADER + KEY_SLOT * nkeys)
         .and_then(|size| size.checked_add(7))
         .map(|size| size & !7)
-        .and_then(|size| u32::try_from(size).ok());
+        .filter(|&size| size <= MAX_CHUNK_LEN - CHUNK_HEADER);
     let Some(size) = size else {
-        bail!("a payload of {payload_size} bytes exceeds the record size limit");
+        bail!(
+            "a record of {nkeys} keys and a payload of {payload_size} bytes \
+             does not fit in a chunk of {MAX_CHUNK_LEN} bytes"
+        );
     };
-    Ok(size)
+    Ok(size as u32)
 }
 
 /// The bucket count for `capacity` records: a power of two of at least
