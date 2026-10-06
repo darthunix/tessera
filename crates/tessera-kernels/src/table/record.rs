@@ -112,6 +112,8 @@ pub(super) struct Access<'r, R> {
     record_size: usize,
     payload_size: usize,
     nkeys: usize,
+    /// The record count, at most the records the chunks have room for: a
+    /// walk longer than this repeats a record.
     nrecords: u64,
 }
 
@@ -155,10 +157,13 @@ impl<'r, R: Region> Access<'r, R> {
         self.record_size
     }
 
-    /// Read the record count again.
+    /// Read the record count, bounded by the records the chunks have room
+    /// for: a count in the header past it is damaged, and must not let a
+    /// walk around a loop go on and on.
     #[inline]
     fn refresh(&mut self) {
-        self.nrecords = self.region.load_u64(NRECORDS);
+        let room = (self.region.chunk_bytes() / self.record_size) as u64;
+        self.nrecords = self.region.load_u64(NRECORDS).min(room);
     }
 
     /// The record at `offset`, which must lie within a chunk past its used
