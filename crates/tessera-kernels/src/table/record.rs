@@ -7,7 +7,9 @@
 //! up to 8. A reference is the record's chunk and its offset there (see
 //! [`super::header::reference`]); 0 is none. A record is appended to a
 //! chunk by the chunk's one writer, then published by a compare-and-swap of
-//! its bucket's head, after which it never changes and never moves.
+//! its bucket's head. A published record never moves, and while others
+//! may read it, never changes; the one writer of a table may change its
+//! next field, a key slot or its payload.
 
 use anyhow::{Result, ensure};
 
@@ -325,7 +327,7 @@ impl<'r, R: Region> Access<'r, R> {
 
     /// Walk the chain from `offset` to the first record with `hash` that
     /// `matches` and return its offset, 0 for none (a record never lies at
-    /// 0, the header does); a chain longer than the record count is
+    /// 0, chunk 0's used mark does); a chain longer than the record count is
     /// corrupt.
     #[inline(always)]
     pub(super) fn find(

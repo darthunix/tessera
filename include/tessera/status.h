@@ -10,7 +10,11 @@
 typedef enum TessStatusCode
 {
 	TESS_OK = 0,
-	/* A dimension, pointer, mask or operation argument is invalid. */
+	/*
+	 * SQLSTATE XX000: a dimension, pointer, mask or operation argument is
+	 * invalid, or the memory a call is given does not hold what it must,
+	 * such as a damaged hash table.
+	 */
 	TESS_ERROR_INVALID_ARGUMENT = 1,
 	/* SQLSTATE 22003: an int4 result does not fit. */
 	TESS_ERROR_INTEGER_OUT_OF_RANGE = 2,

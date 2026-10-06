@@ -50,11 +50,11 @@ pub struct TableKey {
 pub struct TableStats {
     /// The size the caller allocated, at least [`TableStats::MIN_SIZE`].
     pub struct_size: usize,
-    /// Records inserted.
+    /// Records linked into the buckets.
     pub records: u64,
     /// Buckets of the table.
     pub buckets: u64,
-    /// Bytes in use: the header, the records and the buckets.
+    /// Bytes of the index in use: the header and the buckets.
     pub bytes_used: u64,
     /// Bytes of the region the table was created or grown over.
     pub region_len: u64,
@@ -885,7 +885,8 @@ pub unsafe extern "C" fn tess_table_link_grouped(
     }
 }
 
-/// `tess_table_probe`: find the newest record of each row's keys.
+/// `tess_table_probe`: find the first record of its chain with each
+/// row's keys.
 ///
 /// # Safety
 ///

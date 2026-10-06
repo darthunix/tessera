@@ -16,14 +16,16 @@
  * a serial plan, dynamic shared memory in a parallel one. Every call gets
  * a TessTableRef: the index's address and length, and the addresses and
  * lengths of the chunks in this process, by number. Rust keeps nothing
- * between calls and allocates nothing: a record is addressed by its chunk
- * number and its place in the chunk, so the bytes mean the same in every
- * process whatever address a chunk has there. Every block must be aligned
- * to 8; tess_table_size says how many bytes an index for a capacity
- * needs, tess_table_create lays the index out, tess_table_chunk_init
- * makes a block an empty chunk, and every other call attaches anew,
- * checking the whole header, and checks every reference it follows, so a
- * corrupt table is a status, never a crash or a hang. See docs/table.md.
+ * between calls, and the table's memory is all the caller's: a record is
+ * addressed by its chunk number and its place in the chunk, so the bytes
+ * mean the same in every process whatever address a chunk has there.
+ * Every block must be aligned to 8; tess_table_size says how many bytes
+ * an index for a capacity needs, tess_table_create lays the index out,
+ * tess_table_chunk_init makes a block an empty chunk, and every other
+ * call checks the chunks it is given, the whole header when it reads the
+ * index, and every reference it follows, and bounds every walk down a
+ * chain, so a corrupt table is a status, never a crash or a hang. The
+ * capability hash-table (openspec/specs/hash-table/) is the contract.
  *
  * Records are addressed by 32-bit references: a chunk number and a place
  * in units of 8 bytes; 0 is none. Records never move: a chunk fills and
@@ -114,7 +116,7 @@ typedef struct TessTableRef
 typedef struct TessTableStats
 {
 	Size		struct_size;
-	/* Records inserted. */
+	/* Records linked into the buckets. */
 	uint64		records;
 	/* Buckets of the table. */
 	uint64		buckets;
@@ -253,9 +255,10 @@ extern TessStatusCode tess_table_append(const TessTableRef *table,
 
 /*
  * As tess_table_append, each row's payload taken from columns instead of
- * a payload array: a word of the row's NULL bits (bit c for column c),
- * then a word per column, the column's Datum or 0 for a NULL; the table's
- * payload must be exactly those 1 + ncolumns words, ncolumns at most 64.
+ * a payload array: words of the row's NULL bits, bit c % 64 of word c / 64
+ * for column c and one word at least, then a word per column, the
+ * column's Datum or 0 for a NULL; the table's payload must be exactly
+ * those words, ncolumns at most 2048.
  * A column is whatever words the caller keeps per row, such as the
  * references of copied by-reference values; each has the mask's rows.
  */

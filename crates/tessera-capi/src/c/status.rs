@@ -13,7 +13,9 @@ use tessera_kernels::error::{ErrorKind, classify};
 pub enum Code {
     /// The call succeeded.
     Ok = 0,
-    /// A dimension, pointer, mask or operation argument is invalid.
+    /// SQLSTATE XX000: a dimension, pointer, mask or operation argument is
+    /// invalid, or the memory a call is given does not hold what it must,
+    /// such as a damaged hash table.
     InvalidArgument = 1,
     /// SQLSTATE 22003.
     IntegerOutOfRange = 2,
