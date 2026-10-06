@@ -30,7 +30,7 @@ use std::cmp::Ordering;
 use std::mem::MaybeUninit;
 
 use anyhow::{Result, ensure};
-use tessera_core::{RowMask, RowMaskView, ones};
+use tessera_core::{RowMask, RowMaskView, check_rows, ones};
 
 #[cfg(not(target_endian = "little"))]
 compile_error!("the varlena headers here are little-endian's");
@@ -469,15 +469,6 @@ impl Op {
     }
 }
 
-#[inline]
-fn check_rows(nrows: usize, masks: &[usize]) -> Result<()> {
-    ensure!(
-        masks.iter().all(|&rows| rows == nrows),
-        "the masks of a decimal call have different row counts"
-    );
-    Ok(())
-}
-
 /// The selected rows of each word, with the rows the call reads for them.
 fn for_each_word(
     rows: RowMaskView<'_>,
@@ -505,7 +496,7 @@ pub fn filter(
     rest: &mut RowMask<'_>,
 ) -> Result<()> {
     let nrows = rows.as_view().nrows();
-    check_rows(nrows, &[rest.as_view().nrows()])?;
+    check_rows(nrows, &[rest.as_view().nrows()], "decimal")?;
     let orders = op.orders();
     for word in 0..nrows.div_ceil(64) {
         let look = rows.as_view().word_at(word);
@@ -571,6 +562,7 @@ pub fn compute(
             results.decimals.as_view().nrows(),
             results.rest.as_view().nrows(),
         ],
+        "decimal",
     )?;
     // A loop for each operation: the choice is made once a call.
     match op {
@@ -651,6 +643,7 @@ fn to_int<T: Copy>(
             non_nulls.as_view().nrows(),
             rest.as_view().nrows(),
         ],
+        "decimal",
     )?;
     for_each_word(rows, |word, look| {
         let (mut present, mut other) = (0, 0);
@@ -861,7 +854,7 @@ pub fn sum_terms(
     total: &mut Sum,
     rest: &mut RowMask<'_>,
 ) -> Result<()> {
-    check_rows(rows.nrows(), &[rest.as_view().nrows()])?;
+    check_rows(rows.nrows(), &[rest.as_view().nrows()], "decimal")?;
     ensure!(
         total.value.abs() < SUM_BOUND && total.scale <= MAX_READ_SCALE,
         "a decimal sum past its bound"
@@ -914,7 +907,7 @@ pub fn merge_partials(
     total: &mut Sum,
     rest: &mut RowMask<'_>,
 ) -> Result<()> {
-    check_rows(rows.nrows(), &[rest.as_view().nrows()])?;
+    check_rows(rows.nrows(), &[rest.as_view().nrows()], "decimal")?;
     ensure!(
         total.value.abs() < SUM_BOUND && total.scale <= MAX_READ_SCALE,
         "a decimal sum past its bound"
@@ -967,7 +960,7 @@ pub fn extreme(
     state: Option<Decimal>,
     rest: &mut RowMask<'_>,
 ) -> Result<Option<(usize, Decimal)>> {
-    check_rows(rows.nrows(), &[rest.as_view().nrows()])?;
+    check_rows(rows.nrows(), &[rest.as_view().nrows()], "decimal")?;
     if max {
         extreme_of::<true>(terms, rows, state, rest)
     } else {
@@ -1479,6 +1472,7 @@ pub fn read(
     check_rows(
         rows.nrows(),
         &[values.len(), by_row, decimals.as_view().nrows()],
+        "decimal",
     )?;
     // A loop for each way of keeping scales: the choice is made once a call.
     match &mut scales {

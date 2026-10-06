@@ -9,7 +9,7 @@
 use std::cell::Cell;
 
 use anyhow::Context;
-use tessera_core::{ColumnView, RowMask, RowMaskView};
+use tessera_core::{ColumnView, RowMask, RowMaskView, check_rows};
 
 fn sizes() -> impl Iterator<Item = usize> {
     (0..=129).chain([255, 256, 257, 1025])
@@ -547,4 +547,17 @@ fn errors_support_anyhow_results_and_context() {
         error.root_cause().to_string(),
         "expected 2 bitmap words, got 1"
     );
+}
+
+#[test]
+fn a_call_checks_that_its_masks_have_its_rows() {
+    check_rows(65, &[], "test").unwrap();
+    check_rows(65, &[65, 65], "test").unwrap();
+    for counts in [[64, 65], [65, 66], [0, 65]] {
+        let error = check_rows(65, &counts, "test").unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "the masks of a test call have different row counts"
+        );
+    }
 }
