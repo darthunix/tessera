@@ -38,6 +38,7 @@ const RECORD_SIZE: usize = 56;
 const NKEYS: usize = 64;
 const FLAGS: usize = 68;
 const KINDS: usize = 72;
+const RESERVED: usize = 88;
 
 /// Chunks of the tests: small, so that most tables span several.
 const CHUNK: usize = 4096;
@@ -233,6 +234,7 @@ fn a_corrupt_header_is_refused() -> Result<()> {
             set_u64(w, BUCKETS_OFFSET, HEADER as u64 - 4)
         }),
         ("reserved word", &|w| set_u64(w, RESERVED_USED, 8)),
+        ("last reserved word", &|w| set_u64(w, RESERVED, 1)),
         ("buckets not a power of two", &|w| {
             set_u32(w, NBUCKETS, 1000)
         }),
