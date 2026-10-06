@@ -22,6 +22,7 @@ use super::column::DatumColumn;
 use super::mask::Mask;
 use super::source::{self, Constant, output, selection, slots, with_source, with_sources};
 use super::status::{Code, Status, guard};
+use crate::FromDatum;
 
 /// `TessCalendarArg`: a column, or a scalar Datum when it is null.
 #[repr(C)]
@@ -33,29 +34,25 @@ pub struct CalendarArg {
     pub scalar: u64,
 }
 
-/// A value read from its Datum.
-trait FromDatum: Copy {
-    fn from_datum(datum: u64) -> Self;
+/// A value read from its Datum: an integer as [`FromDatum`] reads it, an
+/// interval through the pointer the Datum holds. The pointer read is safe
+/// only under the module's contract, so it stays in this trait, private,
+/// rather than in the public [`FromDatum`].
+trait ReadDatum: Copy {
+    fn read_datum(datum: u64) -> Self;
 }
 
-impl FromDatum for i32 {
+impl<T: FromDatum> ReadDatum for T {
     #[inline(always)]
-    fn from_datum(datum: u64) -> Self {
-        datum as i32
+    fn read_datum(datum: u64) -> Self {
+        T::from_datum(datum)
     }
 }
 
-impl FromDatum for i64 {
-    #[inline(always)]
-    fn from_datum(datum: u64) -> Self {
-        datum as i64
-    }
-}
-
-impl FromDatum for Interval {
+impl ReadDatum for Interval {
     /// The interval the Datum points to.
     #[inline(always)]
-    fn from_datum(datum: u64) -> Self {
+    fn read_datum(datum: u64) -> Self {
         // SAFETY: the constructor's caller guarantees a pointer to an
         // interval for every value read as one.
         unsafe { (datum as usize as *const Interval).read_unaligned() }
@@ -71,7 +68,7 @@ struct Values<'a, T> {
     borrow: PhantomData<(&'a (), T)>,
 }
 
-impl<T: FromDatum> Source<T> for Values<'_, T> {
+impl<T: ReadDatum> Source<T> for Values<'_, T> {
     #[inline(always)]
     fn get(&self, row: usize) -> Option<T> {
         assert!(row < self.nrows, "a calendar row past its column");
@@ -82,7 +79,7 @@ impl<T: FromDatum> Source<T> for Values<'_, T> {
             if *self.isnull.add(row) != 0 {
                 return None;
             }
-            Some(T::from_datum(*self.values.add(row)))
+            Some(T::read_datum(*self.values.add(row)))
         }
     }
 }
@@ -132,12 +129,12 @@ unsafe fn column<'a, T>(column: *const DatumColumn, nrows: usize) -> Result<Valu
 ///
 /// As the module documentation says of an argument.
 #[inline]
-unsafe fn input<'a, T: FromDatum>(arg: *const CalendarArg, nrows: usize) -> Result<Input<'a, T>> {
+unsafe fn input<'a, T: ReadDatum>(arg: *const CalendarArg, nrows: usize) -> Result<Input<'a, T>> {
     // SAFETY: the caller's contract.
     unsafe {
         let arg = arg.as_ref().context("a null calendar argument")?;
         Ok(if arg.column.is_null() {
-            Input::Scalar(T::from_datum(arg.scalar))
+            Input::Scalar(T::read_datum(arg.scalar))
         } else {
             Input::Column(column(arg.column, nrows)?)
         })
