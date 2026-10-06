@@ -16,8 +16,7 @@ mod cast;
 mod column;
 mod count;
 mod decimal;
-mod int32;
-mod int64;
+mod int;
 mod mask;
 mod set;
 mod shared_spill;
@@ -41,16 +40,13 @@ pub use decimal::{
     tess_decimal_filter, tess_decimal_read, tess_decimal_read_datum, tess_decimal_sum,
     tess_decimal_to_int4, tess_decimal_to_int8, tess_decimal_write, tess_decimal_write_datum,
 };
-pub use int32::{
+pub use int::{
     tess_int4_arith_columns, tess_int4_arith_scalar, tess_int4_arith_scalar_left,
     tess_int4_compare_columns, tess_int4_filter, tess_int4_hash, tess_int4_hash_next,
-    tess_int4_max, tess_int4_min, tess_int4_sum, tess_kernels_abi_version, tess_kernels_probe,
-    tess_kernels_test_panic,
-};
-pub use int64::{
-    tess_int8_arith_columns, tess_int8_arith_scalar, tess_int8_arith_scalar_left,
-    tess_int8_compare_columns, tess_int8_filter, tess_int8_hash, tess_int8_hash_next,
-    tess_int8_max, tess_int8_min,
+    tess_int4_max, tess_int4_min, tess_int4_sum, tess_int8_arith_columns, tess_int8_arith_scalar,
+    tess_int8_arith_scalar_left, tess_int8_compare_columns, tess_int8_filter, tess_int8_hash,
+    tess_int8_hash_next, tess_int8_max, tess_int8_min, tess_kernels_abi_version,
+    tess_kernels_probe, tess_kernels_test_panic,
 };
 pub use mask::Mask;
 pub use set::{tess_int4_in_set, tess_int8_in_set};
