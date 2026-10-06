@@ -28,6 +28,31 @@ pub const REFERENCE_BITS: u32 = 32;
 /// The most words an item may take: every key an int8 that may be NULL.
 pub const MAX_ITEM_WORDS: usize = (MAX_KEYS * 65 + REFERENCE_BITS as usize).div_ceil(64);
 
+/// Run `$body` with the constant `$w` set to `$words`, the words of an
+/// item, from 1 to [`MAX_ITEM_WORDS`]: each width gets an instance of the
+/// functions `$body` calls with it. Another width fails the call.
+macro_rules! with_item_words {
+    ($words:expr, |$w:ident| $body:expr) => {
+        $crate::sort::with_item_words!(@ $words, $w, $body, 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17)
+    };
+    (@ $words:expr, $w:ident, $body:expr, $($n:literal)*) => {
+        match $words {
+            $($n => {
+                const $w: usize = $n;
+                $body
+            })*
+            words => ::anyhow::bail!("an item has at most 17 words, not {words}"),
+        }
+    };
+}
+
+pub(crate) use with_item_words;
+
+const _: () = assert!(
+    MAX_ITEM_WORDS == 17,
+    "with_item_words! lists the widths 1 to 17"
+);
+
 /// How rows are ordered by one key.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SortKey {
@@ -174,15 +199,7 @@ pub fn sort_items(items: &mut [u64], words: usize, out: &mut [u32]) -> Result<()
         items.len(),
         out.len()
     );
-    macro_rules! dispatch {
-        ($($n:literal)*) => {
-            match words {
-                $($n => sort_as::<$n>(items, out),)*
-                words => bail!("a sort item has 1 to {MAX_ITEM_WORDS} words, not {words}"),
-            }
-        };
-    }
-    dispatch!(1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17);
+    with_item_words!(words, |W| sort_as::<W>(items, out));
     Ok(())
 }
 
@@ -278,15 +295,9 @@ pub fn top_candidates<K: KeySource + ?Sized>(
         worst.len(),
         encoder.words()
     );
-    macro_rules! dispatch {
-        ($($n:literal)*) => {
-            match encoder.words() {
-                $($n => candidates_as::<K, $n>(&encoder, source, rows, worst),)*
-                words => bail!("an item has at most 17 words, not {words}"),
-            }
-        };
-    }
-    dispatch!(1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17)
+    with_item_words!(encoder.words(), |W| candidates_as::<K, W>(
+        &encoder, source, rows, worst
+    ))
 }
 
 fn candidates_as<K: KeySource + ?Sized, const W: usize>(
@@ -358,15 +369,9 @@ pub fn key_lanes<K: KeySource + ?Sized>(
         lanes.iter().all(|lane| lane.len() >= selected),
         "the lanes do not hold {selected} rows"
     );
-    macro_rules! dispatch {
-        ($($n:literal)*) => {
-            match encoder.words() {
-                $($n => lanes_as::<K, $n>(&encoder, source, rows, lanes),)*
-                words => bail!("an item has at most 17 words, not {words}"),
-            }
-        };
-    }
-    dispatch!(1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17)
+    with_item_words!(encoder.words(), |W| lanes_as::<K, W>(
+        &encoder, source, rows, lanes
+    ))
 }
 
 fn lanes_as<K: KeySource + ?Sized, const W: usize>(
