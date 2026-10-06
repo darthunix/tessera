@@ -959,8 +959,8 @@ fn a_corrupt_reference_chain_or_used_mark_is_an_error() -> Result<()> {
     let absent_keys = [ColumnView::try_new(&absent, None)?];
     let error = table_probe_one(&table, &hashes, &absent_keys).unwrap_err();
     assert!(error.to_string().contains("longer"), "{error}");
-    // A count of records far past the room of the chunks does not keep the
-    // walk going around the loop: the room bounds it too.
+    // A count of records far past what the chunks hold does not keep the
+    // walk going around the loop: the places of the chunks bound it too.
     set_u64(table.index_words(), NRECORDS, u64::MAX);
     let error = table_probe_one(&table, &hashes, &absent_keys).unwrap_err();
     assert!(error.to_string().contains("longer"), "{error}");
@@ -1556,8 +1556,8 @@ fn a_word_probed_at_once_detects_a_cycle() -> Result<()> {
     let absent_keys = [ColumnView::try_new(&absent, None)?];
     let error = probe_rows(&table.table()?, &hashes, &absent_keys, &all_rows(64)).unwrap_err();
     assert!(error.to_string().contains("longer"), "{error}");
-    // As a row alone does, the word stops at the room of the chunks when
-    // the count of records is damaged too.
+    // As a row alone does, the word stops at the places of the chunks
+    // when the count of records is damaged too.
     set_u64(table.index_words(), NRECORDS, u64::MAX);
     let error = probe_rows(&table.table()?, &hashes, &absent_keys, &all_rows(64)).unwrap_err();
     assert!(error.to_string().contains("longer"), "{error}");

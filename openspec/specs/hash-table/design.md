@@ -521,11 +521,15 @@ bytes last. Every call does three kinds of check.
   chunk; reading it would race. A reference past the mark reads unused
   bytes of the chunk, never memory outside it.
 - **Every walk is bounded.** A chain takes at most as many steps as the
-  header counts records, and never more than the chunks given to the
-  call have room for. A chain that is longer has a loop in it. The
-  second bound matters when the count itself is damaged: the room of
-  the chunks comes from the caller's own list, not from the table's
-  bytes.
+  header counts records, and never more than the places a reference can
+  name in the chunks given to the call. A chain that is longer has a
+  loop in it. The second bound matters when the count itself is
+  damaged: it comes from the number of chunks in the caller's own list,
+  not from the table's bytes. It is loose, 2^17 places a chunk where a
+  chunk holds fewer records, so that a damaged table with a loop is
+  found later than it could be; in exchange it costs a shift, where a
+  sum of the chunks' lengths cost every call two instructions for each
+  chunk.
 
 A failed check makes the call return an error status. It never crashes
 the server and never loops. The calls check their arguments, the header

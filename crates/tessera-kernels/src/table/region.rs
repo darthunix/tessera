@@ -105,10 +105,6 @@ pub(super) trait Region {
     /// [`Self::chunks`].
     fn chunk_len(&self, chunk: usize) -> usize;
 
-    /// The bytes of every chunk together: the chunks hold fewer records
-    /// than this, whatever the count in the header says.
-    fn chunk_bytes(&self) -> usize;
-
     /// The used mark of a chunk: the bytes its records take, its 8-byte
     /// header included, as its one writer last stored it.
     ///
@@ -186,13 +182,11 @@ pub(super) struct RawRegion {
     chunk_bases: *const *mut u8,
     chunk_lens: *const usize,
     nchunks: usize,
-    chunk_bytes: usize,
 }
 
 impl RawRegion {
     /// Address the index of `len` bytes at `base` and the `nchunks` chunks
-    /// whose bases and lengths `chunk_bases` and `chunk_lens` hold, of
-    /// `chunk_bytes` bytes together.
+    /// whose bases and lengths `chunk_bases` and `chunk_lens` hold.
     ///
     /// # Safety
     ///
@@ -210,7 +204,6 @@ impl RawRegion {
         chunk_bases: *const *mut u8,
         chunk_lens: *const usize,
         nchunks: usize,
-        chunk_bytes: usize,
     ) -> Self {
         debug_assert!(base.addr().is_multiple_of(8));
         Self {
@@ -219,7 +212,6 @@ impl RawRegion {
             chunk_bases,
             chunk_lens,
             nchunks,
-            chunk_bytes,
         }
     }
 
@@ -237,7 +229,6 @@ impl RawRegion {
             chunk_bases: self.chunk_bases,
             chunk_lens: self.chunk_lens,
             nchunks: self.nchunks,
-            chunk_bytes: self.chunk_bytes,
         }
     }
 
@@ -376,11 +367,6 @@ impl Region for RawRegion {
         assert!(chunk < self.nchunks, "chunk {chunk} past the chunks");
         // SAFETY: the constructor's contract on the array.
         unsafe { *self.chunk_lens.add(chunk) }
-    }
-
-    #[inline(always)]
-    fn chunk_bytes(&self) -> usize {
-        self.chunk_bytes
     }
 
     #[inline(always)]
