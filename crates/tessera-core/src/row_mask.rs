@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result, anyhow, ensure};
 
 use crate::bitmap::{validate_row, validate_words, word_count};
 use crate::bits::ones;
@@ -304,4 +304,27 @@ impl<'a> RowMask<'a> {
         }
         Ok(())
     }
+}
+
+/// Check that the masks and arrays of a call all have its `nrows` rows:
+/// `counts` holds their row counts, and `call` names the kind of call in
+/// the error.
+///
+/// A count other than `nrows` returns an error, so that a call fails
+/// before it changes anything.
+#[inline]
+pub fn check_rows(nrows: usize, counts: &[usize], call: &str) -> Result<()> {
+    if counts.iter().all(|&rows| rows == nrows) {
+        Ok(())
+    } else {
+        Err(rows_differ(call))
+    }
+}
+
+/// The error of [`check_rows`], built out of line so that a call's check
+/// stays a comparison and a branch.
+#[cold]
+#[inline(never)]
+fn rows_differ(call: &str) -> anyhow::Error {
+    anyhow!("the masks of a {call} call have different row counts")
 }

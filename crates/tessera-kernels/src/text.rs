@@ -20,8 +20,8 @@
 use std::fmt;
 use std::mem::MaybeUninit;
 
-use anyhow::{Result, ensure};
-use tessera_core::{RowMask, RowMaskView, ones};
+use anyhow::Result;
+use tessera_core::{RowMask, RowMaskView, check_rows, ones};
 
 /// How the database encoding counts characters.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -237,15 +237,6 @@ pub trait Strings {
     fn get(&self, row: usize) -> Text<'_>;
 }
 
-#[inline]
-fn check_rows(nrows: usize, masks: &[usize]) -> Result<()> {
-    ensure!(
-        masks.iter().all(|&rows| rows == nrows),
-        "the masks of a text call have different row counts"
-    );
-    Ok(())
-}
-
 /// Narrow `rows` to the rows where `test` holds of the rows' strings: a row
 /// with a NULL leaves, a row with a string not in place leaves too and is
 /// set in `rest`, whose other bits are cleared.
@@ -256,7 +247,7 @@ fn filter_rows(
     mut test: impl FnMut(usize) -> Option<Option<bool>>,
 ) -> Result<()> {
     let nrows = rows.as_view().nrows();
-    check_rows(nrows, &[rest.as_view().nrows()])?;
+    check_rows(nrows, &[rest.as_view().nrows()], "text")?;
     for word in 0..nrows.div_ceil(64) {
         let look = rows.as_view().word_at(word);
         let (mut keep, mut other) = (0, 0);
@@ -372,6 +363,7 @@ pub fn lengths(
             non_nulls.as_view().nrows(),
             rest.as_view().nrows(),
         ],
+        "text",
     )?;
     for word in 0..rows.nrows().div_ceil(64) {
         let look = rows.word_at(word);
@@ -512,6 +504,7 @@ pub fn pieces(
             out.non_nulls.as_view().nrows(),
             out.rest.as_view().nrows(),
         ],
+        "text",
     )?;
     for word in 0..rows.nrows().div_ceil(64) {
         let look = rows.word_at(word);

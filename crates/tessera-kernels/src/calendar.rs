@@ -22,8 +22,8 @@
 use std::fmt;
 use std::mem::MaybeUninit;
 
-use anyhow::{Result, ensure};
-use tessera_core::{RowMask, RowMaskView, ones};
+use anyhow::Result;
+use tessera_core::{RowMask, RowMaskView, check_rows, ones};
 
 /// The Julian day of 2000-01-01, a date's zero.
 pub const POSTGRES_EPOCH_JDATE: i32 = 2_451_545;
@@ -673,15 +673,6 @@ pub trait Source<T> {
     fn get(&self, row: usize) -> Option<T>;
 }
 
-#[inline]
-fn check_rows(nrows: usize, masks: &[usize]) -> Result<()> {
-    ensure!(
-        masks.iter().all(|&rows| rows == nrows),
-        "the masks of a calendar call have different row counts"
-    );
-    Ok(())
-}
-
 /// Run `apply` over the selected rows whose arguments are not NULL, in the
 /// order of the rows, writing each result and `non_nulls`; the first error
 /// fails the call, the outputs then unspecified.
@@ -694,7 +685,11 @@ fn map_rows<L: Copy, R: Copy, T>(
     non_nulls: &mut RowMask<'_>,
     apply: impl Fn(L, R) -> Result<T, CalendarError>,
 ) -> Result<()> {
-    check_rows(rows.nrows(), &[values.len(), non_nulls.as_view().nrows()])?;
+    check_rows(
+        rows.nrows(),
+        &[values.len(), non_nulls.as_view().nrows()],
+        "calendar",
+    )?;
     for word in 0..rows.nrows().div_ceil(64) {
         let look = rows.word_at(word);
         let mut present = 0;
@@ -826,6 +821,7 @@ pub fn truncate_locals(
     check_rows(
         rows.nrows(),
         &[values.len(), days.as_view().nrows(), rest.as_view().nrows()],
+        "calendar",
     )?;
     for word in 0..rows.nrows().div_ceil(64) {
         let look = rows.word_at(word);
@@ -940,6 +936,7 @@ fn extract_rows<T>(
             out.non_nulls.as_view().nrows(),
             out.rest.as_view().nrows(),
         ],
+        "calendar",
     )?;
     let mut fields = DayFields::default();
     for word in 0..rows.nrows().div_ceil(64) {

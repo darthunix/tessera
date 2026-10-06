@@ -48,4 +48,4 @@ mod row_mask;
 pub use bits::{Ones, ones};
 pub use column::ColumnView;
 pub use reader::{ColumnReader, WordBlock, WordValues};
-pub use row_mask::{RowMask, RowMaskView};
+pub use row_mask::{RowMask, RowMaskView, check_rows};
