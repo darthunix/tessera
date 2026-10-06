@@ -213,7 +213,8 @@ anything.
 - **THEN** the probe, the walk or the link fails
 - **Verified by:**
   `crates/tessera-kernels/tests/table.rs::a_corrupt_reference_chain_or_used_mark_is_an_error`;
-  `crates/tessera-kernels/tests/table.rs::a_word_probed_at_once_detects_a_cycle`
+  `crates/tessera-kernels/tests/table.rs::a_word_probed_at_once_detects_a_cycle`;
+  `crates/tessera-kernels/src/table/mod.rs::a_damaged_count_is_bounded_by_the_room_of_the_chunks`
 
 #### Scenario: Arguments are checked first
 - **WHEN** a call is given arrays of the wrong length, a missing output
