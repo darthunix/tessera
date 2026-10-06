@@ -6,7 +6,7 @@
       to `openspec/specs/hash-table/design.md`, the text unchanged, and
       leave a pointer behind. Check: every moved line is in the new
       file in its order; `.github/scripts/check-specs.sh`
-- [ ] 1.3 Write `design.md` anew, from the whole to the details, with
+- [x] 1.3 Write `design.md` anew, from the whole to the details, with
       the definitions left to the spec. Check:
       `.github/scripts/check-specs.sh`
 - [ ] 1.4 Add a test for every scenario that has none, and correct what
