@@ -8,7 +8,7 @@
 //! (32, zero), `nrecords` (40, the records linked into the buckets),
 //! `nbuckets` (48), `bucket_shift` (52), `record_size` (56), `payload_size`
 //! (60), `nkeys` (64), `flags` (68), `kinds` (72, one byte per key) and a
-//! reserved word (88). Only `nrecords` changes after creation; it is read
+//! reserved word (88, zero). Only `nrecords` changes after creation; it is read
 //! and written atomically through the region, the rest is copied into a
 //! [`Layout`] once validated.
 //!
@@ -407,7 +407,8 @@ impl Header {
             && self.bucket_shift == bucket_shift(nbuckets)
             && buckets_offset == HEADER_SIZE
             && buckets_end <= region_len
-            && self.reserved_used == 0;
+            && self.reserved_used == 0
+            && self.reserved == 0;
         valid.then_some(Layout {
             region_len,
             buckets_offset,
@@ -500,7 +501,7 @@ impl Header {
             "table buckets at {buckets_offset} lie outside the index of {region_len} bytes"
         );
         ensure!(
-            self.reserved_used == 0,
+            self.reserved_used == 0 && self.reserved == 0,
             "table header has a reserved word set"
         );
         Ok(Layout {
