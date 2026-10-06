@@ -8,7 +8,7 @@
 
 use std::fmt;
 
-/// A comparison of a column value on the left with a non-NULL scalar on the right.
+/// A comparison of the value on the left with the one on the right.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CompareOp {
     /// Equal (`=`).
