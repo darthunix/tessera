@@ -260,7 +260,8 @@ the bridge, or `NULL` when it is not loaded in this backend. It raises
 and is not cached, because the kernels module may be loaded after the
 node; a planner hook asks before it offers a path that needs them, and
 the executor asks again. A node module thus calls the hashes and the hash
-table (`docs/table.md`) without linking Rust. `tess_status_report(status)`
+table (`openspec/specs/hash-table/`) without linking Rust.
+`tess_status_report(status)`
 raises the `ERROR` a failed kernel call stored in its `TessStatus`, with
 its SQLSTATE and message, after the call returned; a status that reports
 success or holds no five-character SQLSTATE of `[0-9A-Z]` raises `XX000`
@@ -462,8 +463,10 @@ child when its changed parameters say so, keeps that rescan its own, as
 
 A node that must hold every row of its input before it returns one, such
 as a sort, keeps them in `TessRows` (`tessera/runtime_rows.h`): records of the
-kernels' table format ([table.md](table.md)) in chunks of its memory, each
-with the row's keys in their slots and a payload of the kept columns, a
+kernels' table format
+([hash-table](../openspec/specs/hash-table/design.md)) in chunks of
+its memory, each with the row's keys in their slots and a payload of
+the kept columns, a
 word of their NULL bits per 64 of them and then a word each, up to the
 1664 columns of a tuple. A by-value column's word is
 its Datum; a by-reference value is copied into value chunks, an expanded

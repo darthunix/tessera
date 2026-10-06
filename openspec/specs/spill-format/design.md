@@ -295,7 +295,7 @@ All records of a table have the same length.
 A record starts with four fields of 4 bytes each: its hash, the link
 `next`, the NULL bits of its keys, and its length `len`. Then come the
 keys, 8 bytes each, and then the payload.
-[docs/table.md](../../../docs/table.md) draws a chunk and a record.
+[hash-table](../hash-table/design.md) draws a chunk and a record.
 
 A record is made for fast search, not for storage. On disk much of it
 is waste:

@@ -21,9 +21,9 @@ a size on its stack that a batch of 64 rows never reaches, is allocated in
 the current memory context and goes with it.
 
 The same library exports the hash table of joins and grouping, declared
-in `include/tessera/table.h` and described in the [table
-guide](table.md): its calls take a region of memory the caller owns and
-follow the same status rules.
+in `include/tessera/table.h` and described in the capability
+[hash-table](../openspec/specs/hash-table/design.md): its calls take a
+region of memory the caller owns and follow the same status rules.
 
 ## Calling an entry point
 
