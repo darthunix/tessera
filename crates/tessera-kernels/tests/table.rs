@@ -980,6 +980,38 @@ fn a_corrupt_reference_chain_or_used_mark_is_an_error() -> Result<()> {
     Ok(())
 }
 
+#[test]
+fn reference_zero_names_no_record() -> Result<()> {
+    let values = [7];
+    let keys = [ColumnView::try_new(&values, None)?];
+    let hashes = [hash_i32(7)];
+    let mut table = local(&ONE_INT4, 1)?;
+    let offsets = insert_all(&mut table, &hashes, &keys[..], None)?;
+    assert_ne!(offsets[0], 0);
+    // The one record ends its chain with 0, and only its bucket is not 0.
+    let (chunk, byte) = placement(offsets[0]);
+    let next = table.chunk_words(chunk)[byte / 8].to_ne_bytes();
+    assert_eq!(u32::from_ne_bytes(next[4..].try_into()?), 0);
+    let heads: Vec<u32> = table.index_words()[HEADER / 8..]
+        .iter()
+        .flat_map(|word| {
+            let bytes = word.to_ne_bytes();
+            [&bytes[..4], &bytes[4..]].map(|half| u32::from_ne_bytes(half.try_into().unwrap()))
+        })
+        .filter(|&head| head != 0)
+        .collect();
+    assert_eq!(heads, offsets);
+    // Reference 0 is chunk 0's used mark: no call takes it for a record.
+    let table = table.table()?;
+    assert!(table.record(0).is_err());
+    let rows = RowMaskView::try_new(1, &[1])?;
+    assert!(table.gather(&[0], &rows, 0, &mut [0]).is_err());
+    let mut found_words = [0];
+    let mut found = RowMask::try_new(1, &mut found_words)?;
+    assert!(table.next_match(&mut [0], &rows, &mut found).is_err());
+    Ok(())
+}
+
 /// Resolve every row of a batch to a record, adding chunks and building a
 /// larger index as needed: the references and the rows whose record was
 /// created.

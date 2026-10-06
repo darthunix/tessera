@@ -1527,6 +1527,9 @@ mod tests {
             assert!(Table::attach(misaligned, len, Chunks::none()).is_err());
             let odd = TableMut::create(base, len - 4, &config, 1000, Chunks::none());
             assert!(odd.unwrap_err().to_string().contains("multiple of 8"));
+            let short = index_size(&config, 1000).unwrap() - 8;
+            let short = TableMut::create(base, short, &config, 1000, Chunks::none());
+            assert!(short.unwrap_err().to_string().contains("smaller than"));
             assert!(TableMut::create(base.add(8), len, &config, 1000, Chunks::none()).is_ok());
         }
         let mut chunk = vec![0_u64; 4];
@@ -1550,5 +1553,31 @@ mod tests {
             init_chunk(chunk_base, 32).unwrap();
         }
         assert_eq!(chunk[0], CHUNK_HEADER as u64);
+    }
+
+    #[test]
+    fn chunks_past_the_limits_are_refused() {
+        // One block as long as the longest chunk and a word more, and as
+        // many chunks as a table has and one more, each the block's used
+        // mark alone.
+        let mut words = vec![0_u64; (MAX_CHUNK_LEN + 8) / 8];
+        let base = words.as_mut_ptr().cast::<u8>();
+        let bases = vec![base; MAX_CHUNKS + 1];
+        let lens = vec![CHUNK_HEADER; MAX_CHUNKS + 1];
+        // SAFETY: every base is the vector's start, valid for the lengths
+        // given; no chunk is read or written.
+        unsafe {
+            assert!(Chunks::new(&[base], &[MAX_CHUNK_LEN]).is_ok());
+            assert!(
+                Chunks::new(&[base], &[MAX_CHUNK_LEN + 8]).is_err(),
+                "a chunk longer than 1 MiB"
+            );
+            assert!(init_chunk(base, MAX_CHUNK_LEN + 8).is_err());
+            assert!(Chunks::new(&bases[..MAX_CHUNKS], &lens[..MAX_CHUNKS]).is_ok());
+            assert!(
+                Chunks::new(&bases, &lens).is_err(),
+                "more chunks than a reference can number"
+            );
+        }
     }
 }

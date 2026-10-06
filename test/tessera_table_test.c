@@ -249,6 +249,28 @@ stats_of(const Table *table, TessTableStats *stats)
 }
 
 /* The record at an offset holds the key of a row and the payload of one with that key. */
+/*
+ * Whether a reference names its record through the helpers of the C API:
+ * its chunk and byte make it again, and the record's key slots begin past
+ * the record's header of 16 bytes at that byte of that chunk.
+ */
+static bool
+reference_names(const Table *table, uint32 offset)
+{
+	TessTableRecord record;
+	TessStatus	status = TESS_STRUCT_INITIALIZER(TessStatus);
+	uint32		chunk = tess_table_ref_chunk(offset);
+	Size		byte = tess_table_ref_byte(offset);
+
+	record.struct_size = sizeof(TessTableRecord);
+	return chunk < (uint32) table->ref.nchunks &&
+		byte >= TESS_TABLE_CHUNK_HEADER &&
+		tess_table_ref(chunk, byte) == offset &&
+		tess_table_record(&table->ref, offset, &record, &status) == TESS_OK &&
+		(const char *) record.keys ==
+		(const char *) table->chunks[chunk] + byte + 16;
+}
+
 static bool
 record_matches(const Table *table, const Batch *batch, int row, uint32 offset)
 {
@@ -398,7 +420,8 @@ tessera_test_table_cycle(PG_FUNCTION_ARGS)
 		if (!has_bit(batch->valid, row))
 			continue;
 		if (!record_matches(table, batch, row, offsets[row]) ||
-			!record_matches(table, batch, row, matches[row]))
+			!record_matches(table, batch, row, matches[row]) ||
+			!reference_names(table, offsets[row]))
 			PG_RETURN_BOOL(false);
 	}
 
