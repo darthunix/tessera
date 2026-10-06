@@ -83,6 +83,7 @@ is wanted; several wait for a measured case. `greengage-port` and
 - `small-c-leftovers`: Small C leftovers of section 9
 - `projected-batch-pins`: Pins of the last projected batch
 - `documents-after-the-move`: The documents once every part has its folder
+- `hash-table-shared-parts`: The second half of the hash table's spec
 
 ## Entries
 
@@ -961,6 +962,32 @@ request 44, 2026-10-04.
 - **Capabilities:** -
 - **Size:** small.
 
+### hash-table-shared-parts
+
+The second half of the hash table's spec. Left by the change that wrote
+the capability `hash-table`, which took the table itself in ten
+requirements.
+
+- **What:** Describe in `hash-table` what other parts build on the
+  table, which `docs/table.md` still holds: the phases of a shared
+  build and of the rounds over partitions on disk (`tess_build_*`,
+  `tess_round_step`), the shared words of a spill
+  (`tess_table_spill_*`), partitions (`tess_table_split`, the
+  `_partitioned` calls, `tess_table_combine`), the Bloom filter, local
+  and shared, and the marks of RIGHT and FULL joins. The aggregate
+  states in a payload (`tess_table_accumulate*`) go to the capability
+  of the grouping, and the items of a sort (`tessera/sort.h`) to the
+  sort's.
+- **Why:** These calls are the C API of the table too, and until they
+  have a spec nothing ties their promises to tests.
+- **Known:** The loom model covers the phases, the split and the
+  rounds. `docs/table.md` keeps their text with a pointer to the
+  capability.
+- **Depends on:** nothing.
+- **Capabilities:** hash-table, aggregate, sort
+- **Size:** one pull request for the table's part, about ten
+  requirements.
+
 ## Not placed: the maintainer decides
 
 Remarks of finished plan items that the plan neither closes nor
@@ -1045,6 +1072,24 @@ becomes an entry, joins one, or is dropped.
     `nodes/hashjoin.h` and `nodes/agg_spill.c` still count a buffer of a
     page for each partition's file, though a set has one buffer. Whether
     the reserves themselves are still right is to be decided.
+
+- **`hash-table`: what the description of the table found and left**
+  (found when the capability was described).
+  - Every call checks every chunk it is given, at its start, so the
+    fixed part of a call grows with the number of chunks: about a
+    thousand checks a call for a table of 1 GiB, whatever the rows.
+    Suggested: measure a probe of a large table first.
+  - `tess_table_append` takes its record size from its own arguments
+    and never reads the index, so a wrong payload size writes records
+    that the next call refuses as damaged. A check when the index is at
+    hand would tell the caller's mistake from damage.
+  - `tess_table_gather` reads a word at any byte of the payload, while
+    `tess_table_accumulate` wants it aligned to 8.
+  - The loom model has no negative test of the order that it once found
+    wrong, the count of records added after a record is published: it
+    would need a switch of that order in the table's own code.
+  - A payload of more than 64 columns makes `tess_table_append_columns`
+    allocate a list of the columns for the call.
 
 ## Decided against
 
