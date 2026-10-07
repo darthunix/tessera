@@ -3627,6 +3627,20 @@ fn the_filter_entry_points_size_fill_and_probe() -> Result<()> {
                 tess_bloom_shared_ready(words, nwords, &raw mut ready, &raw mut status),
                 Code::InvalidArgument
             );
+            let mut found_bits = [0];
+            let mut found = Mask {
+                nrows: NROWS as i32,
+                bits: found_bits.as_mut_ptr(),
+            };
+            let code = tess_bloom_shared_probe(
+                words,
+                nwords,
+                hashes.as_ptr(),
+                &raw const rows,
+                &raw mut found,
+                &raw mut status,
+            );
+            assert_eq!(code, Code::InvalidArgument);
         }
         assert_eq!(
             tess_bloom_shared_add(
