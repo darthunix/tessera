@@ -190,9 +190,12 @@ parent may hand a batch child a key filter (`TessKeyFilter`: key columns
 of the child's batches and their kinds, and a Bloom filter of hashes)
 through the kind's optional `set_key_filter` callback, which returns
 whether the node takes it: a node that does applies it to the batches it
-returns from then on, until the parent takes it back with `NULL`, and
-the filter stays the parent's. A hash join hands its Bloom filter to a
-TessFilter below it this way.
+returns from then on, until the parent takes it back with `NULL`. The
+filter stays the parent's: the struct and its arrays for the call only,
+so that a node copies what it keeps of them, and the words until the
+parent takes them back. A hash join hands its Bloom filter to a
+TessFilter below it this way, as the capability
+[key-filter](../openspec/specs/key-filter/design.md) describes.
 
 ### Parallel execution
 
