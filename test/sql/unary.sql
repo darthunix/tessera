@@ -41,6 +41,7 @@ SELECT tessera_test_unary_errors(4);
 SELECT tessera_test_unary_errors(5);
 SELECT tessera_test_unary_errors(6);
 SELECT tessera_test_unary_errors(7);
+SELECT tessera_test_unary_errors(8);
 \set VERBOSITY default
 
 DROP FUNCTION tessera_test_unary_errors(integer);

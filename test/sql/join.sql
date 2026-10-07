@@ -338,6 +338,25 @@ SELECT join_same($$SELECT jf.v, jd.label FROM jf JOIN jd ON jf.fk = jd.id WHERE 
 SET tessera.join_bloom_ratio = 0;
 SELECT join_explain($$SELECT count(*), sum(jbuild.w) FROM jprobe JOIN jbuild ON jprobe.k = jbuild.k WHERE jprobe.v > 0 AND jprobe.v::text LIKE '%1%'$$);
 RESET tessera.join_bloom_ratio;
+-- A RIGHT join drops an outer row without a pair as an INNER join does,
+-- and hands its filter down too; the subquery keeps the clauses on its
+-- side, which a WHERE on the join would turn into an INNER join.
+SELECT join_explain($$SELECT count(*), count(p.v), sum(jbuild.w) FROM (SELECT * FROM jprobe WHERE jprobe.v > 0 AND jprobe.v::text LIKE '%1%') AS p RIGHT JOIN jbuild ON p.k = jbuild.k$$);
+SELECT join_same($$SELECT p.v, jbuild.w FROM (SELECT * FROM jprobe WHERE jprobe.v > 0 AND jprobe.v::text LIKE '%1%') AS p RIGHT JOIN jbuild ON p.k = jbuild.k$$);
+-- A TessFilter of batch clauses alone has nothing to save and refuses
+-- the filter: the join checks its rows itself.
+SELECT join_explain($$SELECT count(*), sum(jbuild.w) FROM jprobe JOIN jbuild ON jprobe.k = jbuild.k WHERE jprobe.v > 0 AND jprobe.v < 19000$$);
+-- A table that spills keeps its filter: it knows only the rows in memory.
+SET work_mem = '64kB';
+SELECT join_explain($$SELECT count(*), sum(jbuild.w) FROM jprobe JOIN jbuild ON jprobe.k = jbuild.k WHERE jprobe.v > 0 AND jprobe.v::text LIKE '%1%'$$);
+SELECT join_same($$SELECT jprobe.v, jbuild.w FROM jprobe JOIN jbuild ON jprobe.k = jbuild.k WHERE jprobe.v > 0 AND jprobe.v::text LIKE '%1%'$$);
+RESET work_mem;
+-- A key hashed from a text value: the TessFilter has the value, not the
+-- hash the filter holds, and the join keeps its filter.
+SET tessera.join_bloom_ratio = 1;
+SELECT join_explain($$SELECT count(*) FROM jf JOIN jd ON jf.note = jd.label WHERE jf.v > 0 AND jf.note ~ '^f'$$);
+SELECT join_same($$SELECT jf.v, jd.label FROM jf JOIN jd ON jf.note = jd.label WHERE jf.v > 0 AND jf.note ~ '^f'$$);
+RESET tessera.join_bloom_ratio;
 -- A partitioned outer side: TessAppend hands the filter to every partition
 -- in the partition's own columns (the second's columns in another order),
 -- and takes it only when every one does, since the join checks no more

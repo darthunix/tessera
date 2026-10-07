@@ -573,6 +573,17 @@ tessera_test_unary_errors(PG_FUNCTION_ARGS)
 			ops->set_request(ops->find(node->ss.ps.ps_ResultTupleSlot), &request);
 			tess_unary_exec(unary);
 			break;
+		case 8:
+			{
+				/* A key filter smaller than its required fields. */
+				TessKeyFilter filter = TESS_STRUCT_INITIALIZER(TessKeyFilter);
+
+				filter.struct_size = 1;
+				tess_input_set_key_filter(tess_input_create(CurrentMemoryContext,
+															&child->css.ss.ps),
+										  &filter);
+				break;
+			}
 		case 6:
 			config.process = return_wrong_count;
 			unary = tess_unary_create(&config);
