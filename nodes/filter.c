@@ -227,13 +227,17 @@ filter_set_key_filter(CustomScanState *css, const TessKeyFilter *filter)
 			(filter->kinds[key] != TESS_TABLE_KEY_INT4 &&
 			 filter->kinds[key] != TESS_TABLE_KEY_INT8))
 			return false;
-		state->key_columns[key] = filter->columns[key];
-		state->key_kinds[key] = filter->kinds[key];
 	}
 	if (state->kernels == NULL)
 		state->kernels = tess_runtime_kernels();
 	if (state->kernels == NULL)
 		return false;
+	/* Taken: only now do the keys of a filter held before give way. */
+	for (int key = 0; key < filter->nkeys; key++)
+	{
+		state->key_columns[key] = filter->columns[key];
+		state->key_kinds[key] = filter->kinds[key];
+	}
 	state->key_filter = *filter;
 	state->key_filter.columns = state->key_columns;
 	state->key_filter.kinds = state->key_kinds;
