@@ -418,11 +418,11 @@ extern TessStatusCode tess_table_next_match(const TessTableRef *table,
 											TessStatus *status);
 
 /*
- * For each row of rows, the 8 bytes at byte `at` of the payload of the
- * record at offsets[row] into values[row]: one word of a batch's matches
- * per call, such as a Datum of the build row a join keeps there, with one
- * check of the header for the batch. at + 8 must be within the payload;
- * rows outside rows keep their values.
+ * For each row of rows, the word at byte `at` of the payload of the record
+ * at offsets[row] into values[row]: one word of a batch's matches per
+ * call, such as a Datum of the build row a join keeps there, with one
+ * check of the header for the batch. at must be a multiple of 8 and
+ * at + 8 within the payload; rows outside rows keep their values.
  */
 extern TessStatusCode tess_table_gather(const TessTableRef *table,
 										const uint32 *offsets,

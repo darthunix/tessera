@@ -1609,9 +1609,16 @@ fn gather_reads_one_payload_word_of_each_selected_match() -> Result<()> {
         }
     }
 
-    // A word past the payload, short buffers and a bad reference are errors.
+    // A word past the payload or not at a multiple of 8, short buffers and
+    // a bad reference are errors.
     let mut out = vec![0; nrows];
     assert!(table.gather(&matches, &rows, 9, &mut out).is_err());
+    assert!(table.gather(&matches, &rows, 4, &mut out).is_err());
+    assert!(
+        table
+            .gather_scattered(&matches, &rows, 4, &mut out)
+            .is_err()
+    );
     assert!(table.gather(&matches, &rows, usize::MAX, &mut out).is_err());
     assert!(table.gather(&matches[1..], &rows, 0, &mut out).is_err());
     assert!(table.gather(&matches, &rows, 0, &mut out[1..]).is_err());

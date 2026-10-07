@@ -342,9 +342,10 @@ of its chain with the same hash, NULL bits and keys, and keep in its
 mask only the rows that have one. The calls that read found records
 SHALL change only the rows of their mask: `tess_table_gather`,
 `tess_table_gather_scattered` and `tess_table_gather_words` read words
-of the payload, `tess_table_gather_key` a key as a Datum and its NULL
-flag, and `tess_table_record` and `tess_table_payloads` give pointers
-into a record, valid as long as its chunk.
+of the payload, each at a multiple of 8 bytes within it,
+`tess_table_gather_key` a key as a Datum and its NULL flag, and
+`tess_table_record` and `tess_table_payloads` give pointers into a
+record, valid as long as its chunk.
 
 #### Scenario: Rows find their records
 - **WHEN** rows are probed with their keys, with absent keys, with a
@@ -371,7 +372,7 @@ into a record, valid as long as its chunk.
 - **WHEN** a payload word, several words or a key of the found rows is
   read, with rows outside the mask
 - **THEN** each found row gets its record's value, the other rows keep
-  theirs, and a word past the payload fails
+  theirs, and a word past the payload or not at a multiple of 8 fails
 - **Verified by:**
   `crates/tessera-kernels/tests/table.rs::gather_reads_one_payload_word_of_each_selected_match`;
   `crates/tessera-kernels/tests/table.rs::a_scattered_gather_reads_what_a_gather_reads`;
