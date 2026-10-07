@@ -12,9 +12,10 @@ one row: its hash, a link to the next record of its bucket's chain, its
 keys and a payload the table does not look into. A reference names a
 record by its chunk and its place there, so the bytes mean the same in
 every process. The requirements go from the bytes to the calls: the
-index, chunks and references, a record, the errors of a call, then
-appending, linking, looking rows up, the records of a key together, the
-calls of one writer, and the calls that may run at once.
+index, chunks and references, a record and the SQL types of its keys,
+the errors of a call, then appending, linking, looking rows up, the
+records of a key together, the calls of one writer, and the calls that
+may run at once.
 [design.md](design.md) explains the whole and the reasons.
 
 ## Requirements
@@ -183,6 +184,54 @@ SHALL refuse a record that does not fit in a chunk.
 - **THEN** the call fails, and the largest record that fits is accepted
 - **Verified by:**
   `crates/tessera-kernels/tests/table.rs::a_record_larger_than_a_chunk_is_refused`
+
+### Requirement: The SQL types of a key
+A join and a grouping SHALL put each column of a key into the table in
+one of two forms, by the column's type, and SHALL leave a key of any
+other type to the core:
+
+- the value itself: `int2`, `int4`, `date` and `bool` as kind 1, and
+  `int8`, `timestamp` and `timestamptz` as kind 2, since their values
+  are equal exactly when their Datums are;
+- a number of 64 bits that stands for the value, as kind 2, for any
+  other type whose equality is the type's default one and has a hash
+  function, such as `text`, `numeric`, `float8` or `time`: in a
+  grouping, the value's number in a dictionary of the node, which finds
+  equal values by the type's own hash and equality; in a join, the
+  value's hash from the type's own function, and the type's equality
+  then decides every pair the table finds.
+
+A key of a type without a hash function, such as `money`, and a join
+by the equality of two types other than the integers, such as `float4`
+with `float8`, SHALL leave the grouping or the join to the core's node.
+
+#### Scenario: Keys whose values a word holds
+- **WHEN** a join or a grouping has keys of `int2`, `date`, `bool`,
+  `timestamp` or `timestamptz`, negative and NULL among them, or joins
+  `int2` with `int4` and `int8`
+- **THEN** Tessera's node runs it, and its rows are the core's
+- **Verified by:**
+  `test/sql/types.sql::Keys the table keeps in a word besides int4 and int8`
+
+#### Scenario: Keys through a number for the value
+- **WHEN** a grouping or a join has keys of `text`, `numeric` or `time`,
+  with numeric 1.0 and 1.00, float8 -0 and 0, and text of either case
+  under a case-insensitive collation
+- **THEN** Tessera's node runs it, a join's plan shows the equality as
+  its join filter, equal values meet though their bytes differ, and the
+  rows are the core's
+- **Verified by:**
+  `test/sql/types.sql::Keys a word does not hold: text, numeric`;
+  `test/sql/types.sql::Hash joins by keys a word does not hold`;
+  `test/sql/types.sql::Equal values of other forms`;
+  `test/sql/types.sql::Keys of other types of 8 bytes`
+
+#### Scenario: Keys left to the core
+- **WHEN** a grouping or a join is by a key of `money`, or a join by
+  `float4` equal to `float8`
+- **THEN** the core's node runs it
+- **Verified by:**
+  `test/sql/types.sql::Keys of other types of 8 bytes`
 
 ### Requirement: Errors of a call
 A call SHALL return an error status, and never crash or loop without

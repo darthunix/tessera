@@ -881,6 +881,25 @@ RESET enable_sort;
 DROP TABLE types_v;
 DROP COLLATION types_ci;
 
+-- Keys of other types of 8 bytes: time, which a word could hold, goes
+-- through the stand-in as text does, its value's number in a grouping
+-- and its hash in a join; money has no hash function, so a grouping and
+-- a join by it stay the core's, and so does a join by the equality of
+-- two types, float4 with float8, other than the integers'.
+CREATE TABLE types_k AS
+SELECT i AS id, time '08:00' + (i % 50) * interval '1 minute' AS tm,
+       (i % 40)::money AS mo, (i % 30)::float4 AS f4, (i % 30)::float8 AS f8
+FROM generate_series(1, 2000) AS i;
+ANALYZE types_k;
+EXPLAIN (COSTS OFF) SELECT tm, count(*) FROM types_k GROUP BY tm;
+SELECT types_same($$SELECT tm, count(*) FROM types_k GROUP BY tm$$);
+EXPLAIN (COSTS OFF) SELECT count(*) FROM types_k AS a JOIN types_k AS b ON a.tm = b.tm;
+SELECT types_same($$SELECT count(*) FROM types_k AS a JOIN types_k AS b ON a.tm = b.tm$$);
+EXPLAIN (COSTS OFF) SELECT mo, count(*) FROM types_k GROUP BY mo;
+EXPLAIN (COSTS OFF) SELECT count(*) FROM types_k AS a JOIN types_k AS b ON a.mo = b.mo;
+EXPLAIN (COSTS OFF) SELECT count(*) FROM types_k AS a JOIN types_k AS b ON a.f4 = b.f8;
+DROP TABLE types_k;
+
 DROP FUNCTION types_order(text);
 DROP FUNCTION types_same(text);
 DROP TABLE types_f, types_d;
