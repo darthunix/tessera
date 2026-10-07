@@ -2705,6 +2705,82 @@ RESET work_mem;
 RESET enable_sort;
 DROP TABLE types_v;
 DROP COLLATION types_ci;
+-- Keys of other types of 8 bytes: time, which a word could hold, goes
+-- through the stand-in as text does, its value's number in a grouping
+-- and its hash in a join; money has no hash function, so a grouping and
+-- a join by it stay the core's, and so does a join by the equality of
+-- two types, float4 with float8, other than the integers'.
+CREATE TABLE types_k AS
+SELECT i AS id, time '08:00' + (i % 50) * interval '1 minute' AS tm,
+       (i % 40)::money AS mo, (i % 30)::float4 AS f4, (i % 30)::float8 AS f8
+FROM generate_series(1, 2000) AS i;
+ANALYZE types_k;
+EXPLAIN (COSTS OFF) SELECT tm, count(*) FROM types_k GROUP BY tm;
+                 QUERY PLAN                  
+---------------------------------------------
+ Custom Scan (TessAgg)
+   Group Key: tm
+   ->  Custom Scan (TessHeapScan) on types_k
+(3 rows)
+
+SELECT types_same($$SELECT tm, count(*) FROM types_k GROUP BY tm$$);
+ types_same 
+------------
+ same
+(1 row)
+
+EXPLAIN (COSTS OFF) SELECT count(*) FROM types_k AS a JOIN types_k AS b ON a.tm = b.tm;
+                     QUERY PLAN                      
+-----------------------------------------------------
+ Custom Scan (TessAgg)
+   ->  Custom Scan (TessHashJoin)
+         Hash Cond: (a.tm = b.tm)
+         Join Filter: (a.tm = b.tm)
+         ->  Custom Scan (TessHeapScan) on types_k a
+         ->  Custom Scan (TessHeapScan) on types_k b
+(6 rows)
+
+SELECT types_same($$SELECT count(*) FROM types_k AS a JOIN types_k AS b ON a.tm = b.tm$$);
+ types_same 
+------------
+ same
+(1 row)
+
+EXPLAIN (COSTS OFF) SELECT mo, count(*) FROM types_k GROUP BY mo;
+                    QUERY PLAN                     
+---------------------------------------------------
+ GroupAggregate
+   Group Key: mo
+   ->  Sort
+         Sort Key: mo
+         ->  Custom Scan (TessHeapScan) on types_k
+(5 rows)
+
+EXPLAIN (COSTS OFF) SELECT count(*) FROM types_k AS a JOIN types_k AS b ON a.mo = b.mo;
+                        QUERY PLAN                         
+-----------------------------------------------------------
+ Custom Scan (TessAgg)
+   ->  Custom Scan (TessPack)
+         ->  Nested Loop
+               Disabled: true
+               Join Filter: (a.mo = b.mo)
+               ->  Custom Scan (TessHeapScan) on types_k a
+               ->  Custom Scan (TessHeapScan) on types_k b
+(7 rows)
+
+EXPLAIN (COSTS OFF) SELECT count(*) FROM types_k AS a JOIN types_k AS b ON a.f4 = b.f8;
+                           QUERY PLAN                            
+-----------------------------------------------------------------
+ Custom Scan (TessAgg)
+   ->  Custom Scan (TessPack)
+         ->  Hash Join
+               Hash Cond: (a.f4 = b.f8)
+               ->  Custom Scan (TessHeapScan) on types_k a
+               ->  Hash
+                     ->  Custom Scan (TessHeapScan) on types_k b
+(7 rows)
+
+DROP TABLE types_k;
 DROP FUNCTION types_order(text);
 DROP FUNCTION types_same(text);
 DROP TABLE types_f, types_d;

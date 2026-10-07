@@ -25,20 +25,10 @@ not always.
 
 The table keeps each column of a key in a word of 8 bytes and compares
 keys bit for bit. It knows two kinds of key: `int4`, widened to 8 bytes
-with its sign, and `int8`. A node puts a key of another type in as one
-of these two kinds:
-
-- `int2`, `bool` and `date` go in as `int4`, and `timestamp` and
-  `timestamptz` as `int8`. Their values are whole numbers, and two of
-  them are equal exactly when their bits are.
-- A key of any other type whose equality has a hash function, such as
-  `text` or `numeric`, goes in as a number of 64 bits that stands for
-  the value. A grouping gives each distinct value a number of its own,
-  from a dictionary that the node keeps. A join puts in a hash of the
-  value, 64 bits made by the type's own hash function, as an `int8`.
-  Two different values may have the same hash of their type, so when
-  the table finds a match, the join still compares the values
-  themselves.
+with its sign, and `int8`. A key of another SQL type goes in as one of
+these two kinds, either as its value or as a number that stands for
+it; "Keys of each SQL type" below tells which type goes which way and
+why.
 
 A hash table keeps an array of **buckets**. A row goes to the bucket
 that its hash picks. Rows whose hashes pick the same bucket are linked
@@ -318,7 +308,8 @@ for each key, then the payload. The spec draws it byte by byte, in
 
 All records of a table have one size, so a record cannot hold a value
 whose length varies, such as a string. A key never needs to: a key of
-such a type goes in as a number of 64 bits (see "Background"). A
+such a type goes in as a number of 64 bits (see "Keys of each SQL
+type"). A
 payload keeps such a value outside the table. The node copies the
 value's bytes into blocks of its own, its **chunks of values**, and the
 payload's word for that column holds a reference to the copy: the
@@ -341,6 +332,54 @@ value](../spill-format/spec.md#requirement-a-reference-to-a-by-reference-value).
  │ other values                              │ 'Smith' │ free  │
  └───────────────────────────────────────────┴─────────┴───────┘
 ```
+
+## Keys of each SQL type
+
+The table compares keys as words, bit for bit, because that is the
+cheapest comparison there is: one instruction a key, and no call of a
+type's functions. So a node puts each column of a key into its slot in
+one of two forms. Which type takes which form is listed in
+[The SQL types of a key](spec.md#requirement-the-sql-types-of-a-key).
+
+- **The value itself.** PostgreSQL keeps a whole number, a date, a
+  boolean and a timestamp as an integer of at most 8 bytes, and two of
+  them are equal exactly when their integers are. The node puts that
+  integer into the slot.
+- **A number that stands for the value.** For other types, equal values
+  may differ in their bytes: numeric 1.0 and 1.00, float8 -0 and 0, or
+  'a' and 'A' under a case-insensitive collation. A string does not fit
+  in a slot at all. So the node makes a number of 64 bits from the
+  value with the type's own functions, which know when two values are
+  equal, and puts the number into the slot.
+
+A grouping and a join make that number in different ways.
+
+- **A grouping** keeps a dictionary of the values it has met: a hash
+  table of the node's own, in C, that hashes and compares the values
+  with the type's functions. The first of each set of equal values
+  gets the next number, and the table groups the rows by the numbers.
+  Equal values get one number, so they make one group, and different
+  values never share a number, so a comparison of the numbers is
+  exact. When a group goes out, the dictionary gives its key back as
+  the value.
+- **A join** puts in the value's hash of 64 bits, made by the type's
+  own hash function. A hash needs no dictionary shared by the two sides
+  of the join, which are read at different times and, in a parallel
+  plan, by different processes: each row's number comes from its own
+  value. The price is that two different values may have the same hash.
+  So the join keeps the type's equality as a join filter, which EXPLAIN
+  shows, and checks it for every pair the table finds; the inner row's
+  value lies in the payload for it. The join's cost model, measured on
+  the developer's machine, counts 18.6 ns a row for a hashed key, where
+  a probe by a word costs 1.9 ns a row.
+
+A type without a hash function, such as `money`, cannot take the
+second form, so a grouping or a join by it stays the core's. Nor does
+a join take the equality of two different types other than the
+integers, such as `float4` with `float8`: both sides must make their
+numbers with one function. Some types whose values would fit in a
+word, such as `time`, still take the second form: only the types the
+spec lists go in as their value.
 
 ## References
 
