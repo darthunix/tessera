@@ -1070,6 +1070,38 @@ impl Marks for TestMarks {
     }
 }
 
+/// The words of marks a chunk takes, and the one bit a record's mark is:
+/// record 70 of chunk 1, of records of 32 bytes, is bit 6 of word 1 of
+/// that chunk's run.
+#[test]
+fn a_record_s_mark_is_its_bit_of_its_chunk_s_run() -> Result<()> {
+    for (len, words) in [(8, 0), (40, 1), (2056, 1), (2088, 2)] {
+        assert_eq!(mark_words(len, 32)?, words, "a chunk of {len} bytes");
+    }
+    let len = CHUNK_HEADER + 100 * 32;
+    let marks = TestMarks(
+        (0..2)
+            .map(|_| vec![std::cell::Cell::new(0); mark_words(len, 32).unwrap()])
+            .collect(),
+    );
+    let reference = (1 << UNIT_BITS) | ((CHUNK_HEADER + 70 * 32) as u32 / 8);
+    let one = all_rows(1);
+    mark(
+        &[len, len],
+        32,
+        &[reference],
+        &RowMaskView::try_new(1, &one)?,
+        &marks,
+    )?;
+    let words: Vec<Vec<u64>> = marks
+        .0
+        .iter()
+        .map(|run| run.iter().map(std::cell::Cell::get).collect())
+        .collect();
+    assert_eq!(words, [vec![0, 0], vec![0, 1 << 6]]);
+    Ok(())
+}
+
 /// RIGHT and FULL joins: the records a batch's pairs mark are left out of
 /// the walk, which goes on where it stopped whatever the room for its
 /// output; without marks it visits every record. The records cross words
@@ -2544,6 +2576,149 @@ fn a_filter_lets_every_key_through_and_few_others() -> Result<()> {
     let absent: Vec<u32> = (0..100_000).map(|key| hash_i32(key * 3 + 1)).collect();
     let through = probe_filter(&filter, &absent)?;
     assert!(through < 3000, "{through} of 100000 absent keys passed");
+    Ok(())
+}
+
+/// The word and the four bits of a hash, as the spec writes the rule: the
+/// hash times 0x9E3779B97F4A7C15, the word from the top bits of the
+/// product, the bits from its low 24, six each.
+fn bits_of(hash: u32, nwords: usize) -> (usize, u64) {
+    let spread = u64::from(hash).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    let k = nwords.trailing_zeros();
+    let word = if k == 0 {
+        0
+    } else {
+        (spread >> (64 - k)) as usize
+    };
+    let mask = (0..4).fold(0, |mask, bit| mask | 1 << ((spread >> (6 * bit)) & 63));
+    (word, mask)
+}
+
+/// One hash in an empty filter sets exactly the bits the rule gives: the
+/// hash then passes, and a hash missing any of them does not.
+#[test]
+fn a_hash_sets_the_bits_the_rule_gives() -> Result<()> {
+    let one = all_rows(1);
+    let rows = RowMaskView::try_new(1, &one)?;
+    for nwords in [1, 2, 1024] {
+        for hash in [0, 1, 0x3C27, 0xDEAD_BEEF, u32::MAX] {
+            let mut filter = vec![0; nwords];
+            bloom::add(&mut filter, &[hash], &rows)?;
+            let (word, mask) = bits_of(hash, nwords);
+            let mut expected = vec![0; nwords];
+            expected[word] = mask;
+            assert_eq!(filter, expected, "{hash:#x} in {nwords} words");
+            assert_eq!(probe_filter(&filter, &[hash])?, 1);
+            for bit in (0..64).filter(|bit| mask >> bit & 1 == 1) {
+                let mut cleared = filter.clone();
+                cleared[word] &= !(1 << bit);
+                assert_eq!(probe_filter(&cleared, &[hash])?, 0, "bit {bit} clear");
+            }
+        }
+    }
+    Ok(())
+}
+
+/// A probe writes the whole result: the selected rows that pass, and no
+/// other row, whatever `found` held; rows added pass as a table's keys do.
+#[test]
+fn a_probe_writes_the_whole_result() -> Result<()> {
+    let hashes: Vec<u32> = (0..100).map(hash_i32).collect();
+    let mut filter = vec![0; bloom::words_for(100)?];
+    let all = all_rows(100);
+    bloom::add(&mut filter, &hashes, &RowMaskView::try_new(100, &all)?)?;
+    let even: Vec<u64> = vec![0x5555_5555_5555_5555, 0x5_5555_5555];
+    // Every row set before the probe: the rows not selected must be cleared.
+    let mut found = all_rows(100);
+    bloom::probe(
+        &filter,
+        &hashes,
+        &RowMaskView::try_new(100, &even)?,
+        &mut RowMask::try_new(100, &mut found)?,
+    )?;
+    assert_eq!(found, even, "the rows not selected are clear");
+    Ok(())
+}
+
+/// Words that are not a power of two, and hashes or results of another
+/// row count, are refused by every call before it changes anything.
+#[test]
+fn a_filter_of_the_wrong_size_is_refused() -> Result<()> {
+    let (table, _) = filtered_table(10)?;
+    let hashes: Vec<u32> = (0..4).map(hash_i32).collect();
+    let all = all_rows(4);
+    let rows = RowMaskView::try_new(4, &all)?;
+    for nwords in [0, 3] {
+        let mut filter = vec![7; nwords];
+        assert!(table.table()?.bloom(&mut filter).is_err(), "fill {nwords}");
+        assert!(
+            bloom::add(&mut filter, &hashes, &rows).is_err(),
+            "add {nwords}"
+        );
+        let mut found = [9];
+        let result = bloom::probe(
+            &filter,
+            &hashes,
+            &rows,
+            &mut RowMask::try_new(4, &mut found)?,
+        );
+        assert!(result.is_err(), "probe {nwords}");
+        assert_eq!((filter, found), (vec![7; nwords], [9]), "{nwords} words");
+    }
+    let mut filter = vec![7; 4];
+    assert!(bloom::add(&mut filter, &hashes[..3], &rows).is_err());
+    let mut found = [9];
+    let result = bloom::probe(
+        &filter,
+        &hashes,
+        &rows,
+        &mut RowMask::try_new(5, &mut found)?,
+    );
+    assert!(result.is_err(), "a result of another row count");
+    let result = bloom::probe(
+        &filter,
+        &hashes[..3],
+        &rows,
+        &mut RowMask::try_new(4, &mut found)?,
+    );
+    assert!(result.is_err(), "hashes of another row count");
+    assert_eq!((filter, found), (vec![7; 4], [9]));
+    Ok(())
+}
+
+/// The words for a count of records: 16 bits a record at least, a power
+/// of two, one at least, and halved within a limit while more than an
+/// eighth of it.
+#[test]
+fn the_words_of_a_filter_for_its_records() -> Result<()> {
+    for (records, words) in [(0, 1), (4, 1), (5, 2), (5000, 2048), (1 << 20, 1 << 18)] {
+        assert_eq!(bloom::words_for(records)?, words, "{records} records");
+    }
+    // 2048 words are 16 KiB: an eighth of 128 KiB holds them, of 64 KiB
+    // half of them, and below 64 bytes one word stays.
+    for (limit, words) in [
+        (128 << 10, 2048),
+        (64 << 10, 1024),
+        (127 << 10, 1024),
+        (0, 1),
+    ] {
+        assert_eq!(bloom::words_within(5000, limit)?, words, "within {limit}");
+    }
+    assert!(bloom::words_for(u64::MAX).is_err());
+    assert!(bloom::words_within(u64::MAX, usize::MAX).is_err());
+    Ok(())
+}
+
+/// At 16 bits a key the filter's false passes are measured, not guessed:
+/// 4096 keys fill exactly 1024 words.
+#[test]
+fn few_absent_keys_pass_a_filter_of_16_bits_a_key() -> Result<()> {
+    let (_, filter) = filtered_table(4096)?;
+    assert_eq!(filter.len(), 1024, "16 bits a key exactly");
+    let absent: Vec<u32> = (0..100_000).map(|key| hash_i32(key * 3 + 1)).collect();
+    let through = probe_filter(&filter, &absent)?;
+    eprintln!("{through} of 100000 absent keys passed");
+    assert!(through < 1000, "{through} of 100000 absent keys passed");
     Ok(())
 }
 
