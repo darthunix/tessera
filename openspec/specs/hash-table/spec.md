@@ -281,8 +281,11 @@ order, as records into the chunk it names, while a whole record fits.
 Each row written SHALL leave the mask and get the reference of its
 record; the others stay. A record SHALL take the row's hash, keys and
 payload, or a payload of zeros when none is given. Append SHALL not
-read the index, which may be absent, and SHALL not link the records:
-they are not counted or found until linked. `tess_table_append_columns`
+need the index, which may be absent; when the table has one, append
+SHALL check it as every call does, and SHALL refuse keys or a payload
+size other than the table's before it writes anything. Append SHALL
+not link the records: they are not counted or found until linked.
+`tess_table_append_columns`
 SHALL take the payload from up to 2048 columns: words of NULL bits, bit
 `c % 64` of word `c / 64` for column `c` and at least one word, then a
 word for each column, 0 for a NULL.
@@ -304,6 +307,16 @@ word for each column, 0 for a NULL.
   `crates/tessera-kernels/tests/table.rs::a_missing_payload_is_zeros`;
   `crates/tessera-kernels/tests/table.rs::payload_columns_append_the_records_a_payload_array_does`;
   `crates/tessera-capi/tests/table.rs::the_columns_entry_point_writes_each_payload_word`
+
+#### Scenario: An append checks the table's index
+- **WHEN** rows are appended to a table with an index, with another
+  payload size or another kind of key, from an array or from columns,
+  and then with the table's own; and rows are appended without an index
+- **THEN** with the index the wrong ones fail, write nothing and leave
+  every row pending, and the table's own go in; without an index the
+  records that the arguments describe go in
+- **Verified by:**
+  `crates/tessera-capi/tests/table.rs::an_append_refuses_records_that_are_not_its_table_s`
 
 ### Requirement: Linking records
 `tess_table_link` SHALL link the records of a chunk from a byte at a

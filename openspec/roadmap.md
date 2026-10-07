@@ -1128,10 +1128,6 @@ becomes an entry, joins one, or is dropped.
     fixed part of a call grows with the number of chunks: about a
     thousand checks a call for a table of 1 GiB, whatever the rows.
     Suggested: measure a probe of a large table first.
-  - `tess_table_append` takes its record size from its own arguments
-    and never reads the index, so a wrong payload size writes records
-    that the next call refuses as damaged. A check when the index is at
-    hand would tell the caller's mistake from damage.
   - The loom model has no negative test of the order that it once found
     wrong, the count of records added after a record is published: it
     would need a switch of that order in the table's own code.

@@ -104,7 +104,7 @@ pub mod shared_spill;
 use core::marker::PhantomData;
 use core::ops::Deref;
 
-use anyhow::{Result, ensure};
+use anyhow::{Result, anyhow, ensure};
 use tessera_core::{ColumnReader, RowMask, RowMaskView};
 
 pub use exclusive::{Combine, CombineStop, Cursor, ExtremeSlot, Fold, MAX_SUMS, Slot, SumSlot};
@@ -264,6 +264,19 @@ pub unsafe fn init_chunk(base: *mut u8, len: usize) -> Result<()> {
     // SAFETY: the caller's contract; the used mark is the first word.
     unsafe { base.cast::<u64>().write(CHUNK_HEADER as u64) };
     Ok(())
+}
+
+/// The error of a call whose keys or payload size are not its table's.
+#[cold]
+#[inline(never)]
+fn other_config(config: &TableConfig<'_>, layout: &Layout) -> anyhow::Error {
+    anyhow!(
+        "records of keys {:?} and a payload of {} bytes are not the table's: keys {:?} and {} bytes",
+        config.keys,
+        config.payload_size,
+        &layout.kinds[..layout.nkeys],
+        layout.payload_size
+    )
 }
 
 /// The chunks alone as a region, with an empty index, which the calls
@@ -486,6 +499,18 @@ impl<'a> Table<'a> {
     /// carry so that they are read back only into a table like it.
     pub fn fingerprint(&self) -> u64 {
         self.layout.fingerprint()
+    }
+
+    /// Refuse records of `config` unless its keys and payload size are the
+    /// table's: a call that is given the layout of the records it writes,
+    /// as an append is, checks it against the index when there is one, so
+    /// that a caller's mistake is not written and found later as damage.
+    pub fn check_config(&self, config: &TableConfig<'_>) -> Result<()> {
+        if self.key_kinds() == config.keys && self.layout.payload_size == config.payload_size {
+            Ok(())
+        } else {
+            Err(other_config(config, &self.layout))
+        }
     }
 
     /// The counts of the table as of now.
