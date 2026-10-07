@@ -417,5 +417,5 @@ sort_choose_topn(TessSortState *state)
 									  state->ncolumns));
 	return sort_topn_heap_bytes(state, (double) state->bound) +
 		sort_topn_rebuild_rows((double) state->bound) * record <=
-		(double) work_mem * 1024.0;
+		(double) tess_work_memory_limit();
 }

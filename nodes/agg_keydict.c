@@ -344,7 +344,7 @@ agg_key_dict_reset(KeyDict *dict, uint64 values)
 	 * groups is known and within a quarter of hash_mem: a dictionary grown
 	 * from 256 to half a million values took 5 % of an INTERSECT.
 	 */
-	values = Min(values, get_hash_memory_limit() / 4 /
+	values = Min(values, tess_hash_memory_limit() / 4 /
 				 (sizeof(KeyEntry) * 2 / KEYDICT_FILLFACTOR + sizeof(Datum)));
 	values = Max(values, 256);
 	dict->table = keydict_create(dict->context, values, dict);

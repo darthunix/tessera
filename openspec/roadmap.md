@@ -1128,15 +1128,6 @@ becomes an entry, joins one, or is dropped.
     fixed part of a call grows with the number of chunks: about a
     thousand checks a call for a table of 1 GiB, whatever the rows.
     Suggested: measure a probe of a large table first.
-  - A node sends rows to disk when its memory is full, never because
-    its chunks are many. With a `hash_mem` above 32 GiB, or a sort's
-    `work_mem`, a join, a grouping or a sort can need a 32769th chunk
-    first, and stops the query with SQLSTATE `54000` where the core's
-    node goes on. A parallel join counts the chunks of every
-    participant in one table. No test reaches it: it needs 32 GiB.
-    Suggested: each node spills at the smaller of its memory limit and
-    what 32768 chunks hold, with a unit test of that limit, in the
-    capability of each node.
 
 ## Decided against
 

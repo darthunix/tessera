@@ -14,6 +14,7 @@
 #include "abbrev.h"
 #include "costs.h"
 #include "prune.h"
+#include "memory_limit.h"
 #include "registry.h"
 
 /*

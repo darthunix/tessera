@@ -884,7 +884,8 @@ join_cost(PlannerInfo *root, RelOptInfo *joinrel, RelOptInfo *innerrel, JoinType
 	spills = table_rows *
 		(double) (tess_table_record_bytes(keys->nkeys,
 										  sizeof(uint64) * (1 + ints + texts)) + 8) >
-		(double) get_hash_memory_limit() * participants;
+		Min((double) tess_hash_memory_limit() * participants,
+			(double) TESS_TABLE_MEMORY_MAX);
 
 	build = build_rows * (tess_join_build_cost + texts * tess_join_text_value_cost +
 						  hashed * tess_join_hashed_key_cost);

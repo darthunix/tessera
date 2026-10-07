@@ -304,7 +304,7 @@ generic_fits(PlannerInfo *root, RelOptInfo *output_rel, int nkeys, List *tlist)
 		else
 			bytes += get_typavgwidth(agg->aggtranstype, -1);
 	}
-	return groups * bytes <= (double) get_hash_memory_limit();
+	return groups * bytes <= (double) tess_hash_memory_limit();
 }
 
 /* Whether an aggregate of the target list goes through the core's functions. */
@@ -614,7 +614,7 @@ group_cost(PlannerInfo *root, const Path *child, double groups, int nkeys,
 	double		rows = child->rows;
 	double		width = 0;
 	double		entry = (double) tess_table_record_bytes(nkeys, sizeof(uint64));
-	double		limit = (double) get_hash_memory_limit() / 8 * 7;
+	double		limit = (double) tess_hash_memory_limit() / 8 * 7;
 	int			naggs = 0;
 	int			ncolumns = 0;
 	int			nsums = sum_states(tlist);
@@ -1030,7 +1030,7 @@ distinct_fits(PlannerInfo *root, RelOptInfo *input_rel, List *keys, List *tlist)
 					 get_typavgwidth(exprType(argument), exprTypmod(argument)));
 		}
 	}
-	return bytes <= (double) get_hash_memory_limit();
+	return bytes <= (double) tess_hash_memory_limit();
 }
 
 /*

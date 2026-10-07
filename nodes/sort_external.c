@@ -58,7 +58,7 @@ run_create(TessSortState *state)
 		config.level = 0;
 		config.fingerprint = ((uint64) state->ncolumns << 32) | (uint64) state->ext_words;
 		config.max_len = (uint64) MaxAllocHugeSize;
-		config.buffer_len = TESS_SPILL_BUFFER_LEN((Size) work_mem * 1024);
+		config.buffer_len = TESS_SPILL_BUFFER_LEN(tess_work_memory_limit());
 		set->file = tess_spill_create(&config);
 		state->writing = set;
 	}
@@ -339,11 +339,11 @@ sort_plan_external(TessSortState *state)
 	 */
 	row_bytes = sizeof(uint64) *
 		(tess_spill_columns_null_lanes(sort_run_words(state)) + sort_run_words(state));
-	block_bytes = Min((Size) work_mem * 1024 / 128, (Size) 256 * 1024);
+	block_bytes = Min(tess_work_memory_limit() / 128, (Size) 256 * 1024);
 	state->block_rows = (uint32) Max(block_bytes / row_bytes, (Size) SORT_ROWS);
 	state->block_values = Max(block_bytes, (Size) 4096);
 	block_bytes = Max(block_bytes, (Size) state->block_rows * row_bytes);
-	state->fan_in = (int) ((Size) work_mem * 1024 / (2 * block_bytes));
+	state->fan_in = (int) (tess_work_memory_limit() / (2 * block_bytes));
 	state->fan_in = Max(state->fan_in, 6);
 	state->fan_in = Min(state->fan_in, TESS_SORT_MAX_MERGE_RUNS);
 }

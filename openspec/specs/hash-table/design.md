@@ -428,15 +428,19 @@ a number of 64 bits. With 32 bits a bucket and the link in every record
 take half the memory, and more of them fit in the cache. The price is
 the limit of 32 GiB of records in one table.
 
-A node meets that limit only when its own memory limit is larger. A
-join or a grouping sends rows to disk when its memory reaches
-`hash_mem`, and a sort when it reaches `work_mem`; none of them sends
-rows to disk because its chunks are many. So with such a limit above
-32 GiB a node can need a 32769th chunk first. It then stops the query
-with an error of SQLSTATE `54000`, "program limit exceeded", where
-PostgreSQL's own node would go on. A test of the kernels gives a call
-32769 chunks and sees it refused; no test reaches the error of a node,
-which would take 32 GiB of memory.
+A node keeps its tables far from that limit. A join or a grouping
+sends rows to disk when its memory reaches `hash_mem`, and a sort when
+it reaches `work_mem`; none of them counts its chunks. Each takes its
+limit through `tess_table_memory_limit`, which keeps it at most 16 GiB,
+half of what the chunks can hold, so that the node sends rows to disk
+long before its table would need a 32769th chunk, every participant's
+short first chunk included. A parallel join keeps the chunks of every
+participant in one table, so the limit bounds their sum, not each
+share. The price falls only on a server whose `hash_mem` or `work_mem`
+is above 16 GiB: there a node sends to disk a table it could have kept
+in memory. Without the limit it stopped the query with an error of
+SQLSTATE `54000`, "program limit exceeded", where PostgreSQL's own node
+went on.
 
 ## Putting rows in: append, then link
 

@@ -360,7 +360,7 @@ join_rescan(CustomScanState *css)
 static void
 join_counters(TessHashJoinState *state, uint64 *values)
 {
-	Size		limit = get_hash_memory_limit();
+	Size		limit = tess_hash_memory_limit();
 
 	memcpy(values, state->counters, sizeof(state->counters));
 	if (state->qual != NULL)
@@ -522,7 +522,7 @@ static void
 init_shared(TessHashJoinState *state, int participants, dsm_segment *segment)
 {
 	dsa_area   *area = join_query_dsa(state);
-	Size		budget = get_hash_memory_limit();
+	Size		budget = tess_hash_memory_limit();
 
 	BarrierInit(&state->parallel.shared->build, 0);
 	state->parallel.shared->index = InvalidDsaPointer;
@@ -563,11 +563,13 @@ init_shared(TessHashJoinState *state, int participants, dsm_segment *segment)
 		tess_spill_shared_reset(&state->parallel.shared->fileset);
 	if (budget > SIZE_MAX / Max(state->parallel.shared->participants, 1))
 		budget = SIZE_MAX / Max(state->parallel.shared->participants, 1);
-	state->parallel.shared_budget = budget * state->parallel.shared->participants;
+	/* One table holds every participant's chunks: its limit bounds them. */
+	state->parallel.shared_budget =
+		tess_table_memory_limit(budget * state->parallel.shared->participants);
 	check(state, state->kernels->table_spill_init(dsa_get_address(area,
 																  state->parallel.shared->spill_words),
 												  state->parallel.shared->spill_nwords, true,
-												  (uint64) budget * state->parallel.shared->participants,
+												  (uint64) state->parallel.shared_budget,
 												  &state->status));
 	for (int list = 0; list < 2 * state->parallel.shared->participants; list++)
 		*join_participant_list(state, list / 2, list % 2 == 1) = InvalidDsaPointer;
@@ -650,9 +652,10 @@ join_initialize_worker(CustomScanState *css, shm_toc *toc, void *coordinate)
 		dsm_segment *segment;
 
 		state->parallel.shared = coordinate;
-		state->parallel.shared_budget = Min(get_hash_memory_limit(),
-								   SIZE_MAX / Max(state->parallel.shared->participants, 1)) *
-			state->parallel.shared->participants;
+		state->parallel.shared_budget =
+			tess_table_memory_limit(Min(tess_hash_memory_limit(),
+										SIZE_MAX / Max(state->parallel.shared->participants, 1)) *
+									state->parallel.shared->participants);
 		/* The files, through the segment the worker already maps. */
 		segment = dsm_find_mapping(state->parallel.shared->segment);
 		if (segment == NULL)
