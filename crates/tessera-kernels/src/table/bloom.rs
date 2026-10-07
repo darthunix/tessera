@@ -58,11 +58,14 @@ impl FilterRead for [u64] {
     }
 }
 
-/// A filter several participants share, behind its state word.
-pub(super) trait FilterShared: FilterRead {
-    /// Set bits of word `word`.
+/// The words of a filter several participants add to at once.
+pub(super) trait FilterOr {
+    /// Set bits of word `word`, as one atomic step.
     fn or(&self, word: usize, mask: u64);
+}
 
+/// A filter several participants share, behind its state word.
+pub(super) trait FilterShared: FilterRead + FilterOr {
     /// Take the building of the filter: true for the one participant
     /// that moved the state from none to building.
     fn claim(&self) -> bool;
@@ -149,12 +152,14 @@ impl FilterRead for SharedFilter<'_> {
     }
 }
 
-impl FilterShared for SharedFilter<'_> {
+impl FilterOr for SharedFilter<'_> {
     #[inline]
     fn or(&self, word: usize, mask: u64) {
         self.words[word].fetch_or(mask, order::RELAXED);
     }
+}
 
+impl FilterShared for SharedFilter<'_> {
     #[inline]
     fn claim(&self) -> bool {
         self.state
@@ -175,6 +180,17 @@ impl FilterShared for SharedFilter<'_> {
 
 /// Bits of a filter per record of its table.
 pub const BITS_PER_RECORD: u64 = 16;
+
+/// The words of a filter without a state word that participants fill at
+/// once: an atomic OR a word.
+struct AtomicWords<'a>(&'a [AtomicU64]);
+
+impl FilterOr for AtomicWords<'_> {
+    #[inline(always)]
+    fn or(&self, word: usize, mask: u64) {
+        self.0[word].fetch_or(mask, order::RELAXED);
+    }
+}
 
 /// The odd multiplier that spreads a hash over 64 bits (2^64 / phi).
 const SPREAD: u64 = 0x9E37_79B9_7F4A_7C15;
@@ -211,8 +227,8 @@ pub fn words_within(records: u64, limit: usize) -> Result<usize> {
 }
 
 /// The shift that takes a word index out of a spread hash, for a filter
-/// of `words` words, which must be a power of two.
-fn shift_for(nwords: usize) -> Result<u32> {
+/// of `nwords` words, which must be a power of two.
+pub(super) fn shift_for(nwords: usize) -> Result<u32> {
     ensure!(
         nwords.is_power_of_two(),
         "a filter has a power of two of words, not {nwords}"
@@ -222,7 +238,7 @@ fn shift_for(nwords: usize) -> Result<u32> {
 
 /// The word of a hash and the mask of its four bits.
 #[inline(always)]
-fn place(hash: u32, shift: u32) -> (usize, u64) {
+pub(super) fn place(hash: u32, shift: u32) -> (usize, u64) {
     let spread = u64::from(hash).wrapping_mul(SPREAD);
     let word = spread.checked_shr(shift).unwrap_or(0) as usize;
     let mask = (1 << (spread & 63))
@@ -359,23 +375,36 @@ pub unsafe fn add_shared(
     hashes: &[u32],
     rows: &RowMaskView<'_>,
 ) -> Result<()> {
-    let nrows = rows.nrows();
     let shift = shift_for(nwords)?;
     ensure!(
         !words.is_null() && words.addr().is_multiple_of(8),
         "a shared filter must be aligned to 8 bytes"
     );
+    // SAFETY: the caller's contract; an `AtomicU64` has the size and
+    // alignment of a `u64`.
+    let atomics = unsafe { core::slice::from_raw_parts(words.cast::<AtomicU64>(), nwords) };
+    add_with(&AtomicWords(atomics), shift, hashes, rows)
+}
+
+/// Set the bits of the hash of every row of `rows` by `filter`'s OR, the
+/// shift its words take ([`shift_for`]): [`add_shared`] over any filter
+/// that participants fill at once.
+#[inline(always)]
+pub(super) fn add_with<F: FilterOr + ?Sized>(
+    filter: &F,
+    shift: u32,
+    hashes: &[u32],
+    rows: &RowMaskView<'_>,
+) -> Result<()> {
+    let nrows = rows.nrows();
     ensure!(
         hashes.len() == nrows,
         "the hashes and the mask of the batch have different row counts"
     );
-    // SAFETY: the caller's contract; an `AtomicU64` has the size and
-    // alignment of a `u64`.
-    let atomics = unsafe { core::slice::from_raw_parts(words.cast::<AtomicU64>(), nwords) };
     for index in 0..nrows.div_ceil(64) {
         for bit in ones(rows.word_at(index)) {
             let (word, mask) = place(hashes[index * 64 + bit], shift);
-            atomics[word].fetch_or(mask, order::RELAXED);
+            filter.or(word, mask);
         }
     }
     Ok(())
