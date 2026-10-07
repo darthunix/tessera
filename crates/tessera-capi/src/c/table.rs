@@ -134,6 +134,28 @@ unsafe fn chunks_of<'a>(table: *const TableRef) -> Result<(&'a TableRef, Chunks<
     Ok((table, chunks))
 }
 
+/// The table an append writes to when it has an index, checked as every
+/// call checks it and refusing keys or a payload size other than
+/// `config`'s; `None` without an index, as a shared build appends before
+/// it has one.
+///
+/// # Safety
+///
+/// The reference's index, when not null, as for [`Table::attach`].
+unsafe fn indexed<'a>(
+    table: &TableRef,
+    chunks: Chunks<'a>,
+    config: &TableConfig<'_>,
+) -> Result<Option<Table<'a>>> {
+    if table.index.is_null() {
+        return Ok(None);
+    }
+    // SAFETY: the caller's contract.
+    let table = unsafe { Table::attach(table.index, table.index_len, chunks) }?;
+    table.check_config(config)?;
+    Ok(Some(table))
+}
+
 /// Attach to a table for the length of a call.
 ///
 /// # Safety
@@ -491,8 +513,11 @@ pub unsafe extern "C" fn tess_table_chunk_init(
 }
 
 /// `tess_table_append`: append the rows of `pending` to chunk `chunk` of
-/// the table's chunks, as long as whole records fit. The table's index is
-/// not read: a shared build appends before it has one.
+/// the table's chunks, as long as whole records fit. A table without an
+/// index takes the records the arguments describe, since a shared build
+/// appends before it has one; a table with an index is checked as every
+/// call checks it, and refuses keys or a payload size that are not its
+/// own before it writes anything.
 ///
 /// # Safety
 ///
@@ -517,7 +542,7 @@ pub unsafe extern "C" fn tess_table_append(
     // SAFETY: the caller's contract.
     unsafe {
         guard(status, || {
-            let (_, chunks) = chunks_of(table)?;
+            let (table, chunks) = chunks_of(table)?;
             let chunk = usize::try_from(chunk).context("a negative chunk")?;
             let mut decoded = TableKeys::empty();
             table_keys(nkeys, keys, &mut decoded)?;
@@ -534,6 +559,7 @@ pub unsafe extern "C" fn tess_table_append(
                 keys: &kinds[..decoded.nkeys],
                 payload_size,
             };
+            let indexed = indexed(table, chunks, &config)?;
             let mut pending = pending.as_mut().context("a null pending mask")?.mask()?;
             let nrows = pending.as_view().nrows();
             let hashes = values(hashes, nrows, "hashes")?;
@@ -547,7 +573,11 @@ pub unsafe extern "C" fn tess_table_append(
                 Some(values(payload, bytes, "payload")?)
             };
             let mut batch = Batch::new(hashes, &decoded, &mut pending, offsets)?;
-            append_to(&config, chunks, chunk, payload, &mut batch).map(drop)
+            match indexed {
+                Some(table) => table.append(chunk, payload, &mut batch),
+                None => append_to(&config, chunks, chunk, payload, &mut batch),
+            }
+            .map(drop)
         })
     }
 }
@@ -576,7 +606,7 @@ pub unsafe extern "C" fn tess_table_append_columns(
     // SAFETY: the caller's contract.
     unsafe {
         guard(status, || {
-            let (_, chunks) = chunks_of(table)?;
+            let (table, chunks) = chunks_of(table)?;
             let chunk = usize::try_from(chunk).context("a negative chunk")?;
             let mut decoded = TableKeys::empty();
             table_keys(nkeys, keys, &mut decoded)?;
@@ -598,6 +628,7 @@ pub unsafe extern "C" fn tess_table_append_columns(
                 keys: &kinds[..decoded.nkeys],
                 payload_size: 8 * (payload_null_words(ncolumns) + ncolumns),
             };
+            let indexed = indexed(table, chunks, &config)?;
             let mut pending = pending.as_mut().context("a null pending mask")?.mask()?;
             let nrows = pending.as_view().nrows();
             let hashes = values(hashes, nrows, "hashes")?;
@@ -640,7 +671,11 @@ pub unsafe extern "C" fn tess_table_append_columns(
             };
             let payload = PayloadColumns::new(words, nulls, nrows)?;
             let mut batch = Batch::new(hashes, &decoded, &mut pending, offsets)?;
-            append_columns_to(&config, chunks, chunk, &payload, &mut batch).map(drop)
+            match indexed {
+                Some(table) => table.append_columns(chunk, &payload, &mut batch),
+                None => append_columns_to(&config, chunks, chunk, &payload, &mut batch),
+            }
+            .map(drop)
         })
     }
 }

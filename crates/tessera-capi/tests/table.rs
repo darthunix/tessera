@@ -2967,3 +2967,133 @@ fn outputs_are_checked_before_anything_changes() -> Result<()> {
     }
     Ok(())
 }
+
+#[test]
+fn an_append_refuses_records_that_are_not_its_table_s() -> Result<()> {
+    let values: Vec<u64> = (1..=4).collect();
+    let isnull = [false; 4];
+    let column = DatumColumn {
+        struct_size: size_of::<DatumColumn>(),
+        values: values.as_ptr(),
+        isnull: isnull.as_ptr(),
+        nrows: 4,
+        ..DatumColumn::EMPTY
+    };
+    let int4 = TableKey {
+        kind: 1,
+        column: &raw const column,
+        prepared: ptr::null(),
+    };
+    let int8 = TableKey {
+        kind: 2,
+        ..key_copy(&int4)
+    };
+    let hashes: Vec<u32> = values
+        .iter()
+        .map(|&value| int32::murmurhash32(value as u32))
+        .collect();
+    let payload = [0_u8; 4 * 16];
+    let mut status = Status::new();
+    // SAFETY: local buffers of the declared sizes, aliased by nothing else,
+    // throughout this test.
+    unsafe {
+        // A table of an int4 key and a payload of 8 bytes: records of 32.
+        let mut table = CTable::new(1, 8, 8);
+        table.add_chunk(8 + 4 * 32);
+        let mut pending_words = [0b1111];
+        let mut pending = Mask {
+            nrows: 4,
+            bits: pending_words.as_mut_ptr(),
+        };
+        let mut offsets = [0; 4];
+
+        // Another payload size or another kind of key: refused, nothing
+        // written and every row still pending.
+        for (payload_size, key) in [(16, &int4), (8, &int8)] {
+            let code = tess_table_append(
+                table.ptr(),
+                0,
+                payload_size,
+                hashes.as_ptr(),
+                1,
+                key,
+                payload.as_ptr(),
+                &raw mut pending,
+                offsets.as_mut_ptr(),
+                &raw mut status,
+            );
+            assert_eq!(code, Code::InvalidArgument, "{payload_size} bytes");
+            assert_eq!(pending_words, [0b1111]);
+            assert_eq!(table.chunks[0][0], CHUNK_HEADER as u64, "nothing written");
+        }
+        // A payload of one column takes 16 bytes: its NULL bits and a word.
+        let code = tess_table_append_columns(
+            table.ptr(),
+            0,
+            hashes.as_ptr(),
+            1,
+            &raw const int4,
+            1,
+            &raw const column,
+            &raw mut pending,
+            offsets.as_mut_ptr(),
+            &raw mut status,
+        );
+        assert_eq!(code, Code::InvalidArgument);
+        assert_eq!(table.chunks[0][0], CHUNK_HEADER as u64, "nothing written");
+
+        // The table's own records go in.
+        let code = tess_table_append(
+            table.ptr(),
+            0,
+            8,
+            hashes.as_ptr(),
+            1,
+            &raw const int4,
+            payload.as_ptr(),
+            &raw mut pending,
+            offsets.as_mut_ptr(),
+            &raw mut status,
+        );
+        assert_eq!(code, Code::Ok, "{}", status.message());
+        assert_eq!(pending_words, [0]);
+        assert_eq!(table.chunks[0][0], (CHUNK_HEADER + 4 * 32) as u64);
+
+        // Without an index, as a shared build appends, the arguments
+        // describe the records.
+        let mut bare_chunk = vec![0_u64; (8 + 4 * 40) / 8];
+        let code =
+            tess_table_chunk_init(bare_chunk.as_mut_ptr().cast(), 8 + 4 * 40, &raw mut status);
+        assert_eq!(code, Code::Ok, "{}", status.message());
+        let bases = [bare_chunk.as_mut_ptr().cast::<u8>()];
+        let lens = [8 + 4 * 40];
+        let bare = TableRef {
+            index: ptr::null_mut(),
+            index_len: 0,
+            chunks: bases.as_ptr(),
+            chunk_lens: lens.as_ptr(),
+            nchunks: 1,
+        };
+        let mut bare_words = [0b1111];
+        let mut bare_pending = Mask {
+            nrows: 4,
+            bits: bare_words.as_mut_ptr(),
+        };
+        let code = tess_table_append(
+            &raw const bare,
+            0,
+            16,
+            hashes.as_ptr(),
+            1,
+            &raw const int4,
+            payload.as_ptr(),
+            &raw mut bare_pending,
+            offsets.as_mut_ptr(),
+            &raw mut status,
+        );
+        assert_eq!(code, Code::Ok, "{}", status.message());
+        assert_eq!(bare_chunk[0], (CHUNK_HEADER + 4 * 40) as u64);
+        assert_eq!(bare_words, [0]);
+    }
+    Ok(())
+}

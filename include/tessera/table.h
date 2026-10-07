@@ -43,7 +43,7 @@
  * and int8 key columns meet in one table.
  *
  * Building has two steps: tess_table_append writes rows as records into a
- * chunk, without the index, and tess_table_link puts them into the
+ * chunk, with no need of the index, and tess_table_link puts them into the
  * buckets. Several processes may append to chunks of their own and link
  * them at once over shared memory, and several may probe, but not both at
  * a time. Every status rule of tessera/kernels.h applies: outputs are
@@ -239,9 +239,12 @@ extern TessStatusCode tess_table_chunk_init(void *base, Size len,
  * the batch); rows still pending need another chunk. hashes has one hash
  * per row; keys are the table's nkeys keys, of its kinds; payload is the
  * payload of every row one after another (payload_size bytes each, as
- * the table has), or NULL for zeros. The index is not read, so a shared
- * build appends before there is one; the records are not found until
- * linked. The caller is the chunk's one writer.
+ * the table has), or NULL for zeros. A table without an index takes the
+ * records these arguments describe, so that a shared build appends before
+ * there is one; a table with an index is checked as every call checks it,
+ * and keys or a payload size other than its own are refused before
+ * anything is written. The records are not found until linked. The
+ * caller is the chunk's one writer.
  */
 extern TessStatusCode tess_table_append(const TessTableRef *table,
 										int chunk,

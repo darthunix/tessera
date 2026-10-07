@@ -457,8 +457,11 @@ order, while whole records fit. A batch comes with three things: a hash
 for every row, the key columns, and a mask of the rows to place. Each
 row that is written leaves the mask and gets the reference of its
 record. The rows still in the mask need another chunk: the caller adds
-one and calls again. Append does not read the index at all, so it works
-before there is one.
+one and calls again. Append does not need the index, so it works
+before there is one. When the table has an index, append checks it as
+every call does and refuses keys or a payload size other than the
+table's. A node's mistake then fails where it is made, and is not
+found later as a damaged table.
 
 The payload of a record comes either from an array that the caller
 filled, or, with `tess_table_append_columns`, straight from the
