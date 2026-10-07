@@ -169,7 +169,7 @@ by one of them (`tess_table_spill_take_alone`). A round's chunks are
 linked as they are loaded, without counting duplicates: a link reads
 only its own chunk and the buckets, so a participant sees the chunks
 others load only once the round probes. A filter of every inner row is filled by all at once,
-word by word atomically (`tess_bloom_shared_add`).
+word by word atomically (`tess_bloom_add_atomic`).
 
 `make rust-loom` runs the table's own code over a model index and model
 chunks of loom cells (`crates/tessera-kernels/src/table/loom.rs`) with

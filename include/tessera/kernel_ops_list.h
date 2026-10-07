@@ -69,7 +69,7 @@
 	X(table_spill_take_file) \
 	X(table_spill_take_alone) \
 	X(round_step) \
-	X(bloom_shared_add) \
+	X(bloom_add_atomic) \
 	X(table_spill_evictions) \
 	X(spill_pack) \
 	X(spill_unpack) \

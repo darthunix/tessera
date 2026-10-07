@@ -923,7 +923,7 @@ is worth its cost, the join decides by its own rows.
 - **A table that spills.** A filter of every row of the build side is
   filled as the rows come, before some of them go to disk: by
   `tess_bloom_add` in one process, or by every participant at once by
-  `tess_bloom_shared_add`, which sets the bits of a word by an atomic
+  `tess_bloom_add_atomic`, which sets the bits of a word by an atomic
   OR. Rows of the probe side that it rejects have no pair in any
   partition, and are dropped before they are written to disk. A
   barrier orders every addition before the first check. This filter is

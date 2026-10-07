@@ -1226,7 +1226,7 @@ extern TessStatusCode tess_round_step(TessBuildParticipant *participant,
  * once a barrier ordered every participant's additions before the reads.
  * The filter has no state word: a power of two of words, aligned to 8.
  */
-extern TessStatusCode tess_bloom_shared_add(uint64 *words, Size nwords,
+extern TessStatusCode tess_bloom_add_atomic(uint64 *words, Size nwords,
 											const uint32 *hashes,
 											const TessRowMask *rows,
 											TessStatus *status);

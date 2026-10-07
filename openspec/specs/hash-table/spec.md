@@ -867,7 +867,7 @@ two, SHALL be refused.
   `crates/tessera-capi/tests/table.rs::the_filter_entry_points_size_fill_and_probe`
 
 ### Requirement: A filter filled together
-`tess_bloom_shared_add` SHALL set the bits of the hashes of the selected
+`tess_bloom_add_atomic` SHALL set the bits of the hashes of the selected
 rows in a filter without a state word, each word changed by an atomic
 OR, so that several participants may add their rows at once. The caller
 SHALL order every addition before any probe, by a barrier, and SHALL

@@ -15,7 +15,7 @@ use anyhow::Result;
 use tessera_capi::c::sort_flags::{DESCENDING, NULLABLE, NULLS_FIRST};
 use tessera_capi::c::{
     CSortKey, Code, DatumColumn, Mask, Status, TableKey, TableRecord, TableRef, TableStats,
-    TableSumArg, tess_bloom_add, tess_bloom_probe, tess_bloom_shared_add, tess_bloom_shared_init,
+    TableSumArg, tess_bloom_add, tess_bloom_add_atomic, tess_bloom_probe, tess_bloom_shared_init,
     tess_bloom_shared_probe, tess_bloom_shared_ready, tess_bloom_shared_words,
     tess_build_counters_init, tess_build_step, tess_build_stop, tess_build_stopped,
     tess_build_take_chunk, tess_build_totals, tess_int4_hash, tess_int8_hash, tess_sort,
@@ -3523,7 +3523,7 @@ fn the_filter_entry_points_size_fill_and_probe() -> Result<()> {
         assert_eq!(code, Code::Ok, "{}", status.message());
         assert_eq!(added, filled, "the same bits as the table's keys");
         let mut together = vec![0_u64; nwords];
-        let code = tess_bloom_shared_add(
+        let code = tess_bloom_add_atomic(
             together.as_mut_ptr(),
             nwords,
             hashes.as_ptr(),
@@ -3590,7 +3590,7 @@ fn the_filter_entry_points_size_fill_and_probe() -> Result<()> {
             tess_table_bloom(table.ptr(), three.as_mut_ptr(), 3, &raw mut status),
             Code::InvalidArgument
         );
-        for add in [tess_bloom_add, tess_bloom_shared_add] {
+        for add in [tess_bloom_add, tess_bloom_add_atomic] {
             let code = add(
                 three.as_mut_ptr(),
                 3,
@@ -3645,7 +3645,7 @@ fn the_filter_entry_points_size_fill_and_probe() -> Result<()> {
             assert_eq!(code, Code::InvalidArgument);
         }
         assert_eq!(
-            tess_bloom_shared_add(
+            tess_bloom_add_atomic(
                 misaligned,
                 4,
                 hashes.as_ptr(),

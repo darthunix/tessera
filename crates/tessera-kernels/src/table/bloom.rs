@@ -369,7 +369,7 @@ pub fn add(words: &mut [u64], hashes: &[u32], rows: &RowMaskView<'_>) -> Result<
 /// `words` points to `nwords` words, aligned to 8, valid for reads and
 /// writes, which every participant accesses only atomically until the
 /// barrier.
-pub unsafe fn add_shared(
+pub unsafe fn add_atomic(
     words: *mut u64,
     nwords: usize,
     hashes: &[u32],
@@ -378,7 +378,7 @@ pub unsafe fn add_shared(
     let shift = shift_for(nwords)?;
     ensure!(
         !words.is_null() && words.addr().is_multiple_of(8),
-        "a shared filter must be aligned to 8 bytes"
+        "the words of a filter filled at once must be aligned to 8 bytes"
     );
     // SAFETY: the caller's contract; an `AtomicU64` has the size and
     // alignment of a `u64`.
@@ -387,7 +387,7 @@ pub unsafe fn add_shared(
 }
 
 /// Set the bits of the hash of every row of `rows` by `filter`'s OR, the
-/// shift its words take ([`shift_for`]): [`add_shared`] over any filter
+/// shift its words take ([`shift_for`]): [`add_atomic`] over any filter
 /// that participants fill at once.
 #[inline(always)]
 pub(super) fn add_with<F: FilterOr + ?Sized>(

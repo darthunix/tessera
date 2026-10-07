@@ -1068,7 +1068,7 @@ mod tests {
                     let rows = RowMaskView::try_new(200, &stripe).unwrap();
                     // SAFETY: the words are aligned, live through the
                     // scope, and every thread changes them atomically.
-                    unsafe { bloom::add_shared(words as *mut u64, nwords, hashes, &rows) }.unwrap();
+                    unsafe { bloom::add_atomic(words as *mut u64, nwords, hashes, &rows) }.unwrap();
                 });
             }
         });
