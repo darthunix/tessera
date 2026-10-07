@@ -1557,6 +1557,46 @@ join_round_depart(TessHashJoinState *state)
 	}
 }
 
+/*
+ * RIGHT and FULL: before a participant leaves the shared table, or its
+ * round, while it probes, its share of the outer side not done (its plan
+ * wants no more rows, or the scan starts again), it marks the table's
+ * stop word: the last participant to leave then returns no record without
+ * a mark, as the pairs of the rows this one leaves were never marked
+ * (join_tail_turn). The barrier it leaves through orders the mark before
+ * the last one's read. Out of the probe tess_build_stop marks nothing.
+ */
+void
+join_stop_shared(TessHashJoinState *state)
+{
+	if (!state->preserve_inner || state->parallel.shared == NULL)
+		return;
+	if (state->parallel.round_partition >= 0 && !state->round_departed)
+		check(state, state->kernels->build_stop(&state->parallel.round_participant,
+												&round_of(state, state->parallel.round_partition)->stopped,
+												&state->status));
+	if (state->parallel.participating)
+		check(state, state->kernels->build_stop(&state->parallel.participant,
+												&state->parallel.shared->stopped,
+												&state->status));
+}
+
+/*
+ * Whether a participant left the table this one just left last, or its
+ * round, while it probed (join_stop_shared).
+ */
+bool
+join_shared_stopped(TessHashJoinState *state)
+{
+	uint64	   *word = state->parallel.round_partition >= 0 ?
+		&round_of(state, state->parallel.round_partition)->stopped :
+		&state->parallel.shared->stopped;
+	bool		any = false;
+
+	check(state, state->kernels->build_stopped(word, &any, &state->status));
+	return any;
+}
+
 /* Leave the round probed, unless left already; the last one frees it. */
 void
 join_round_leave(TessHashJoinState *state)

@@ -1029,9 +1029,8 @@ joins.
   have a spec nothing ties their promises to tests.
 - **Known:** The loom model covers the phases, the split and the
   rounds. `docs/table.md` keeps their text with a pointer to the
-  capability. The list "Not placed" holds a finding of the marks of a
-  shared table whose fix belongs to the phases: a participant that
-  stops early.
+  capability. The stop word of a RIGHT or FULL join's participant that
+  leaves while it probes is in the capability already, with the marks.
 - **Depends on:** nothing.
 - **Capabilities:** hash-table, aggregate, sort
 - **Size:** one pull request for the table's part, under ten
@@ -1121,24 +1120,6 @@ becomes an entry, joins one, or is dropped.
     `nodes/hashjoin.h` and `nodes/agg_spill.c` still count a buffer of a
     page for each partition's file, though a set has one buffer. Whether
     the reserves themselves are still right is to be decided.
-- **`hash-table`: a participant of a shared RIGHT or FULL join that
-  stops early** (found when the marks were described). A participant
-  that stops before its outer side is done leaves the shared table as
-  one that is done, and the last participant to leave then returns the
-  inner records without a mark: among them records whose pairs the one
-  that stopped never probed, as rows with NULL outer columns that the
-  join should not return. A participant stops early when the core's
-  `Gather` passes a `LIMIT` to its workers as a bound of tuples; Tessera's
-  `TessGather` keeps its workers to the end, so only
-  `tessera.batch_gather = off` reaches the case. The path is in the code
-  (`join_shutdown` leaves without a mark of its stop); 220 runs of such a
-  query under the core's `Gather`, with the matching rows placed for it,
-  gave no wrong row, so it is not reproduced. The core guards the same
-  case with a flag of its batch, `skip_unmatched`: a participant that
-  leaves while it probes sets it, and nobody returns the unmatched rows,
-  which a bound of tuples does not need. Suggested: the same flag, set
-  before the barrier and read by the last participant, with a loom test,
-  in `hash-table-participants`.
 - **`hash-table`: what the description of partitions, filters and marks
   left** (the same source).
   - TessFilter's "Rows Removed by Bloom Filter" counts the rows with a

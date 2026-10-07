@@ -31,7 +31,7 @@ use super::header::{
     reference,
 };
 use super::marks::{self, Marks};
-use super::phases::{Action, Counters, Participant};
+use super::phases::{Action, Counters, Participant, Stop};
 use super::record::Access;
 use super::region::{Region, order};
 use super::shared_spill::{Memory, Spill, Weights, Words};
@@ -962,10 +962,33 @@ impl Counters for LoomCounters {
     }
 }
 
+/// The stop word of a table over a loom atomic, relaxed as the real one.
+struct LoomStop(AtomicU64);
+
+impl Stop for LoomStop {
+    fn stop(&self) {
+        self.0.store(1, order::RELAXED);
+    }
+
+    fn stopped(&self) -> bool {
+        self.0.load(order::RELAXED) != 0
+    }
+}
+
+/// A participant that stops while it probes: its number, and whether the
+/// model marks the stop word only after it left, the mistake the model
+/// must notice.
+#[derive(Clone, Copy)]
+struct Stopper {
+    chunk: usize,
+    late: bool,
+}
+
 /// A shared build: the inner side's keys, which the participants take
 /// one at a time as a parallel scan hands out pages, a chunk per
 /// participant, the index the elected one makes, the counters, the barrier
-/// and the frees.
+/// and the frees; the stop word, whether a participant marked it, and what
+/// the last one to leave read of it.
 struct Build {
     keys: &'static [i32],
     next_key: ::loom::sync::atomic::AtomicUsize,
@@ -973,6 +996,10 @@ struct Build {
     counters: LoomCounters,
     barrier: LoomBarrier,
     frees: ::loom::sync::atomic::AtomicUsize,
+    stopper: Option<Stopper>,
+    stop: LoomStop,
+    marked: ::loom::sync::atomic::AtomicBool,
+    last_saw_stop: ::loom::sync::atomic::AtomicBool,
 }
 
 impl Build {
@@ -988,6 +1015,10 @@ impl Build {
             },
             barrier: LoomBarrier::new(skip),
             frees: ::loom::sync::atomic::AtomicUsize::new(0),
+            stopper: None,
+            stop: LoomStop(AtomicU64::new(0)),
+            marked: ::loom::sync::atomic::AtomicBool::new(false),
+            last_saw_stop: ::loom::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -1019,6 +1050,8 @@ impl Build {
     fn participate(&self, chunk: usize) {
         let mut participant = Participant::new();
         let mut reply = 0;
+        let stopper = self.stopper.filter(|stopper| stopper.chunk == chunk);
+        let mut mark_after_leaving = false;
         loop {
             let action = participant.next(&self.counters, reply).unwrap();
             reply = 0;
@@ -1037,6 +1070,15 @@ impl Build {
                     let layout = self.layout();
                     link(&self.region, &layout, chunk).unwrap();
                 }
+                // It stops before it probes: marked first, or late after it
+                // left, then it leaves as the next step says.
+                Action::Probe if stopper.is_some_and(|stopper| stopper.late) => {
+                    mark_after_leaving = true;
+                }
+                Action::Probe if stopper.is_some() => {
+                    let marked = participant.stop_in(&self.stop);
+                    self.marked.store(marked, order::RELAXED);
+                }
                 Action::Probe => {
                     let layout = self.layout();
                     let found = probe(&self.region, &layout, self.keys).unwrap();
@@ -1045,12 +1087,20 @@ impl Build {
                         check_record(&self.region, &layout, offset, *key).unwrap();
                     }
                 }
-                Action::ArriveAndDetach => reply = u32::from(self.barrier.detach(true)),
+                Action::ArriveAndDetach => {
+                    reply = u32::from(self.barrier.detach(true));
+                    if mark_after_leaving {
+                        self.stop.stop();
+                        self.marked.store(true, order::RELAXED);
+                    }
+                }
                 Action::Detach => {
                     self.barrier.detach(false);
                 }
                 Action::Free => {
                     self.frees.fetch_add(1, order::RELAXED);
+                    self.last_saw_stop
+                        .store(self.stop.stopped(), order::RELAXED);
                     return;
                 }
                 Action::Done => return,
@@ -1082,6 +1132,52 @@ fn shared_build(participants: usize, keys: &'static [i32], skip: Option<u32>, pr
             "the table is freed once"
         );
     });
+}
+
+/// `participants` build one table, and the first stops while it probes:
+/// in every order of their steps, the last one to leave the table sees
+/// its mark whenever it made one, and returns no record without a mark.
+fn a_participant_stops(participants: usize, late: bool) {
+    let mut model = ::loom::model::Builder::new();
+    model.preemption_bound = Some(2);
+    model.max_branches = 100_000;
+    model.check(move || {
+        let mut build = Build::new(&[1, 2], participants, None);
+        build.stopper = Some(Stopper { chunk: 0, late });
+        let build = Arc::new(build);
+        let threads: Vec<_> = (0..participants)
+            .map(|chunk| {
+                let build = build.clone();
+                thread::spawn(move || build.participate(chunk))
+            })
+            .collect();
+        for thread in threads {
+            thread.join().unwrap();
+        }
+        assert_eq!(
+            build.frees.load(order::RELAXED),
+            1,
+            "the table is freed once"
+        );
+        if build.marked.load(order::RELAXED) {
+            assert!(
+                build.last_saw_stop.load(order::RELAXED),
+                "the last participant missed one that stopped"
+            );
+        }
+    });
+}
+
+#[test]
+fn the_last_participant_sees_one_that_stopped_while_it_probed() {
+    a_participant_stops(2, false);
+    a_participant_stops(3, false);
+}
+
+#[test]
+#[should_panic(expected = "missed one that stopped")]
+fn a_stop_marked_after_leaving_goes_unseen() {
+    a_participant_stops(2, true);
 }
 
 #[test]

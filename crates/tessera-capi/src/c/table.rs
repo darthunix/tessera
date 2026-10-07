@@ -20,7 +20,7 @@ use tessera_kernels::table::{
     append_columns_to, append_partitioned_columns_to, append_to,
     bloom::SharedFilter,
     index_size, init_chunk, mark, mark_words, normalize_word, payload_null_words,
-    phases::{Participant, SharedCounters},
+    phases::{Participant, SharedCounters, StopWord},
     record_bytes_of, scan_unmarked, split_to,
 };
 
@@ -2324,6 +2324,55 @@ pub unsafe extern "C" fn tess_build_step(
             let counters = build_counters(counters)?;
             let action = action.as_mut().context("a null action")?;
             *action = participant.step(&counters, reply)? as u32;
+            Ok(())
+        })
+    }
+}
+
+/// `tess_build_stop`: before a participant of a build or of a round
+/// leaves while it probes, its share of the outer side not done, mark
+/// `stopped`, the word that table's participants share.
+///
+/// # Safety
+///
+/// `participant` must point to a participant this process alone uses;
+/// `stopped` to a word as for [`StopWord::attach`]; `status` as for every
+/// entry point.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tess_build_stop(
+    participant: *const Participant,
+    stopped: *mut u64,
+    status: *mut Status,
+) -> Code {
+    // SAFETY: the caller's contract.
+    unsafe {
+        guard(status, || {
+            let participant = participant.as_ref().context("a null participant")?;
+            let word = StopWord::attach(stopped)?;
+            participant.stop(&word);
+            Ok(())
+        })
+    }
+}
+
+/// `tess_build_stopped`: whether a participant of the table left while it
+/// probed, read once this one has left.
+///
+/// # Safety
+///
+/// `stopped` as for [`tess_build_stop`]; `any` must point to a writable
+/// flag; `status` as for every entry point.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tess_build_stopped(
+    stopped: *mut u64,
+    any: *mut bool,
+    status: *mut Status,
+) -> Code {
+    // SAFETY: the caller's contract.
+    unsafe {
+        guard(status, || {
+            let any = any.as_mut().context("a null result")?;
+            *any = StopWord::attach(stopped)?.stopped();
             Ok(())
         })
     }

@@ -1833,7 +1833,12 @@ Join returns its unmatched rows: a participant done with its outer rows
 leaves the table (the build barrier, or the round's) without waiting,
 and only the last one to leave returns the records without a mark, then
 frees the table, the free it owes done at its next leave; the others'
-marks are complete once they detached. The partitions on disk of a
+marks are complete once they detached. A participant that leaves while
+it probes, a worker that stops at the core's `Gather` under a `LIMIT`,
+marks the table's stop word first (`tess_build_stop`), and the last one
+then returns no record without a mark, whose pairs may lie in the rows
+left unprobed, as the core's Parallel Hash Right Join skips its
+unmatched rows then. The partitions on disk of a
 shared table that one participant joins alone are its own tables, as a
 serial join's. A rescan that keeps the table clears the marks.
 

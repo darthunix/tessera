@@ -960,6 +960,24 @@ extern TessStatusCode tess_build_step(TessBuildParticipant *participant,
 									  uint32 *action, TessStatus *status);
 
 /*
+ * RIGHT and FULL joins: a participant of a build or of a round that leaves
+ * while it probes, before its share of the outer side is done, marks
+ * stopped, a word of shared memory the table's participants share,
+ * cleared before any of them attached; then it leaves as
+ * tess_build_step or tess_round_step says. The last participant to leave
+ * reads the word with tess_build_stopped, the barrier ordering every
+ * mark before its read, and returns no record without a mark if any
+ * participant stopped: the pairs of the rows left unprobed were never
+ * marked. Out of the probe a participant marks nothing.
+ */
+extern TessStatusCode tess_build_stop(const TessBuildParticipant *participant,
+									  uint64 *stopped, TessStatus *status);
+
+/* Whether a participant of the table stopped, as tess_build_stop says. */
+extern TessStatusCode tess_build_stopped(uint64 *stopped, bool *any,
+										 TessStatus *status);
+
+/*
  * The payload of the record of each row of rows, at offsets[row], into
  * payloads[row], to change in place: payload_size bytes each, valid as long
  * as the record's chunk.

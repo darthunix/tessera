@@ -705,6 +705,16 @@ SELECT join_same($$SELECT count(*), count(jprobe.v), count(jbuild.w), sum(jbuild
 RESET parallel_leader_participation;
 -- A rescan of the Gather builds the table and its marks anew.
 SELECT join_same($$SELECT jsmall.k, (SELECT count(*) FROM jprobe RIGHT JOIN jbuild ON jprobe.k = jbuild.k AND jprobe.v > jsmall.k * 100) FROM jsmall$$);
+-- Under the core's Gather a LIMIT bounds each worker's tuples, and a
+-- worker that has its share stops while it probes: it marks the table
+-- first, and the last participant to leave then returns no inner row
+-- without a mark, since the pairs of the rows it left were never marked.
+-- Every row of jbuild has a pair in jhit: no row may come without one.
+SET tessera.batch_gather = off;
+EXPLAIN (COSTS OFF) SELECT jhit.v FROM jhit RIGHT JOIN jbuild ON jhit.k = jbuild.k LIMIT 100;
+SELECT count(*), count(*) FILTER (WHERE v IS NULL) AS without_pair
+FROM (SELECT jhit.v FROM jhit RIGHT JOIN jbuild ON jhit.k = jbuild.k LIMIT 100) AS q;
+RESET tessera.batch_gather;
 -- Duplicate keys: the next record of a key is found down its chain.
 EXPLAIN (COSTS OFF) SELECT count(*), sum(jgrow.g) FROM jbig JOIN jgrow ON jbig.fk = jgrow.k;
 SELECT join_same($$SELECT count(*), sum(jgrow.g), sum(jbig.v) FROM jbig JOIN jgrow ON jbig.fk = jgrow.k$$);

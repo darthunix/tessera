@@ -981,6 +981,20 @@ other participant before its walk. The loom model marks records of one
 word from two participants, and a negative test shows that a plain read
 and write loses marks.
 
+A participant may leave before its share of the outer side is done:
+under the core's `Gather` with a `LIMIT`, a worker stops once it has
+returned the rows the limit asks for. The pairs of the rows it never
+probed are never marked, and the last participant would return their
+inner records as rows without a pair. So such a participant marks a
+word the table's participants share before it leaves, and the last one
+returns no record without a mark when the word is marked, as
+PostgreSQL's parallel hash join skips its unmatched rows then. No row
+is lost that the plan wanted: a worker stops so only after it has given
+its consumer every row the limit asks for. The word is set before the
+barrier and read after it, so the barrier orders it, as it orders the
+marks; the loom model checks this, and that a mark set only after the
+participant left can go unseen.
+
 ## What we decided not to do
 
 - **One block that grows.** The first form of the table kept the header,

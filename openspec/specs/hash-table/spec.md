@@ -929,6 +929,16 @@ A cursor off a record's boundary or past its chunk's used mark SHALL be
 refused. The caller SHALL order every participant's marks before the
 walk, and nothing marks or appends during it.
 
+Over a shared table, the last participant to leave walks the records
+without a mark. A participant that leaves while it probes, its share of
+the outer side not done, SHALL first mark a word that the participants
+of the table, or of the round over a partition, share, with
+`tess_build_stop`, which SHALL mark it only while the participant
+probes. The last participant to leave SHALL read the word with
+`tess_build_stopped` and, when it is marked, return no record without a
+mark: the pairs of the rows left unprobed were never marked, and a
+participant stops so only when its plan wants no more rows.
+
 #### Scenario: The marks of a chunk
 - **WHEN** the words of chunks of 8, 40, 2056 and 2088 bytes are asked
   for records of 32 bytes, and the record 70 of chunk 1 is marked
@@ -967,3 +977,20 @@ walk, and nothing marks or appends during it.
 - **Verified by:**
   `crates/tessera-kernels/src/table/loom.rs::participants_mark_one_word_and_lose_no_mark`;
   `crates/tessera-kernels/src/table/loom.rs::a_plain_read_and_write_loses_marks`
+
+#### Scenario: A participant that stops while it probes
+- **WHEN** one of two or three participants of a shared table stops
+  while it probes, in every order of their steps; when the model marks
+  the word only after that participant left; when a participant asks to
+  stop before it probes or after it left; and when a worker under the
+  core's `Gather` stops at the `LIMIT` of a RIGHT join
+- **THEN** the last participant to leave sees the mark, and with the
+  late mark the model reports a last one that missed it; out of the
+  probe nothing is marked; the join returns no row without a pair where
+  every inner row has one
+- **Verified by:**
+  `crates/tessera-kernels/src/table/loom.rs::the_last_participant_sees_one_that_stopped_while_it_probed`;
+  `crates/tessera-kernels/src/table/loom.rs::a_stop_marked_after_leaving_goes_unseen`;
+  `crates/tessera-kernels/src/table/phases.rs::a_participant_stops_only_while_it_probes`;
+  `crates/tessera-capi/tests/table.rs::a_participant_marks_its_stop_only_while_it_probes`;
+  `test/sql/join.sql::worker that has its share stops while it probes`

@@ -109,6 +109,8 @@
 	X(table_mark) \
 	X(table_next_unmarked) \
 	X(spill_columns_append) \
-	X(table_spill_splits)
+	X(table_spill_splits) \
+	X(build_stop) \
+	X(build_stopped)
 
 #endif							/* TESSERA_KERNEL_OPS_LIST_H */

@@ -328,6 +328,7 @@ join_rescan(CustomScanState *css)
 	 * A shared table goes with its build, which starts anew with the
 	 * rescan's workers; the leader leaves the one it took part in.
 	 */
+	join_stop_shared(state);
 	if (state->parallel.round_partition >= 0)
 		join_round_leave(state);
 	if (state->parallel.shared != NULL)
@@ -536,6 +537,7 @@ init_shared(TessHashJoinState *state, int participants, dsm_segment *segment)
 	state->parallel.shared->next_value_chunk = 0;
 	state->parallel.shared->value_directory = InvalidDsaPointer;
 	state->parallel.shared->nvalue_chunks = 0;
+	state->parallel.shared->stopped = 0;
 	check(state, state->kernels->build_counters_init(state->parallel.shared->counters,
 													 &state->status));
 	/*
@@ -629,6 +631,7 @@ join_reinitialize_dsm(CustomScanState *css, ParallelContext *pcxt,
 
 	if (state->parallel.shared != NULL)
 	{
+		join_stop_shared(state);
 		if (state->parallel.round_partition >= 0)
 			join_round_leave(state);
 		join_leave_shared(state, false);
@@ -673,6 +676,8 @@ join_shutdown(CustomScanState *css)
 	TessHashJoinState *state = (TessHashJoinState *) css;
 	uint64		values[JOIN_NCOUNTERS];
 
+	/* A participant whose plan wants no more rows leaves while it probes. */
+	join_stop_shared(state);
 	if (state->parallel.round_partition >= 0)
 		join_round_leave(state);
 	if (state->parallel.shared != NULL)

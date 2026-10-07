@@ -34,6 +34,14 @@
 //! be nothing; in [`FLUSH`] it has nothing to write, from [`SIZE`] on no
 //! chunk to link; in [`OUTER`] it writes what is left of the outer side;
 //! after the last one left, it leaves at once.
+//!
+//! A RIGHT or FULL join marks the records its pairs match, and the last
+//! participant to leave the table returns the records without a mark. A
+//! participant that leaves while it probes, before its share of the outer
+//! side is done, as one whose plan wants no more rows does, says so in a
+//! [`StopWord`] first: the last one then returns no record without a
+//! mark, since the pairs of the rows left unprobed were never marked, as
+//! PostgreSQL's parallel hash join skips its unmatched rows then.
 
 use core::sync::atomic::AtomicU64;
 
@@ -163,6 +171,54 @@ pub struct SharedCounters<'a> {
 
 /// The words of [`SharedCounters`].
 pub const COUNTER_WORDS: usize = 4;
+
+/// Whether a participant of a table left while it probed: set before it
+/// leaves, read by the last participant to leave, after the barrier that
+/// orders every leaving before the last one's.
+pub(super) trait Stop {
+    fn stop(&self);
+    fn stopped(&self) -> bool;
+}
+
+/// [`Stop`] in a word several participants map, of a build or of a
+/// round: 0 until a participant stops.
+#[derive(Debug)]
+pub struct StopWord<'a>(&'a AtomicU64);
+
+impl<'a> StopWord<'a> {
+    /// Attach to the word at `word`, cleared before any participant
+    /// attached to the table.
+    ///
+    /// # Safety
+    ///
+    /// `word` is aligned to 8 and valid for reads and writes for `'a`, and
+    /// accessed only through stop words, here or in other processes.
+    pub unsafe fn attach(word: *mut u64) -> Result<Self> {
+        ensure!(
+            !word.is_null() && word.addr().is_multiple_of(8),
+            "a stop word must be aligned to 8 bytes"
+        );
+        // SAFETY: the caller's contract; an `AtomicU64` has the size and
+        // alignment of a `u64`.
+        Ok(Self(unsafe { &*word.cast::<AtomicU64>() }))
+    }
+
+    /// Whether a participant stopped, once this one has left the table.
+    pub fn stopped(&self) -> bool {
+        Stop::stopped(self)
+    }
+}
+
+// The barrier orders the setting before the read: relaxed is enough.
+impl Stop for StopWord<'_> {
+    fn stop(&self) {
+        self.0.store(1, order::RELAXED);
+    }
+
+    fn stopped(&self) -> bool {
+        self.0.load(order::RELAXED) != 0
+    }
+}
 
 impl<'a> SharedCounters<'a> {
     /// Attach to the [`COUNTER_WORDS`] words at `words`.
@@ -326,6 +382,23 @@ impl Participant {
         }
     }
 
+    /// Before a participant leaves the table while it probes, its share of
+    /// the outer side not done: `word` is marked, and true returned. In
+    /// any other phase nothing is marked: the participant has matched no
+    /// pair yet, or has probed every row of its share. The caller then
+    /// steps on to leave, as for the build or the round the word is of.
+    pub fn stop(&self, word: &StopWord<'_>) -> bool {
+        self.stop_in(word)
+    }
+
+    pub(super) fn stop_in<S: Stop + ?Sized>(&self, word: &S) -> bool {
+        let probing = self.state == State::Probing as u32;
+        if probing {
+            word.stop();
+        }
+        probing
+    }
+
     /// The next action of a round over a partition, as [`Self::step`] for
     /// a build.
     pub fn round_step(&mut self, reply: u32) -> Result<Action> {
@@ -448,6 +521,47 @@ mod tests {
                 ArriveAndDetach,
                 Free
             ]
+        );
+    }
+
+    /// A stop word in this process.
+    #[derive(Default)]
+    struct Word(core::cell::Cell<bool>);
+
+    impl Stop for Word {
+        fn stop(&self) {
+            self.0.set(true);
+        }
+        fn stopped(&self) -> bool {
+            self.0.get()
+        }
+    }
+
+    /// A participant marks the stop word only while it probes: before the
+    /// probe it has matched no pair, and once it left it probed its share.
+    #[test]
+    fn a_participant_stops_only_while_it_probes() {
+        let counters = Alone::default();
+        let mut participant = Participant::new();
+        let mut reply = 0;
+        let mut probed = false;
+        loop {
+            let word = Word::default();
+            let marked = participant.stop_in(&word);
+            assert_eq!((marked, word.stopped()), (probed, probed));
+            let action = participant.next(&counters, reply).unwrap();
+            probed = action == Action::Probe;
+            reply = match action {
+                Action::Attach => PROBE,
+                Action::ArriveAndDetach => 1,
+                Action::Free | Action::Done => break,
+                _ => 0,
+            };
+        }
+        let word = Word::default();
+        assert!(
+            !participant.stop_in(&word) && !word.stopped(),
+            "once it left"
         );
     }
 
