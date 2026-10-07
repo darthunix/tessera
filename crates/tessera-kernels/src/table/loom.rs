@@ -14,7 +14,7 @@
 //! `Barrier`. Run with `make rust-loom`.
 
 use std::cell::UnsafeCell as StdUnsafeCell;
-use std::sync::atomic::{AtomicU8, Ordering as Plain};
+use std::sync::atomic::{AtomicU8, AtomicU64 as PlainU64, Ordering as Plain};
 
 use ::loom::cell::UnsafeCell;
 use ::loom::sync::Arc;
@@ -35,25 +35,37 @@ use super::region::{Region, order};
 use super::shared_spill::{Memory, Spill, Weights, Words};
 use super::{Batch, batch, index_size, init};
 
-/// The orderings of the bucket heads: the region's, or relaxed ones that
-/// break publication, for the test that the model notices.
+/// How the model publishes records: the orderings of the bucket heads,
+/// the region's or relaxed ones, and whether the count of records goes up
+/// before a record is published or only after it. The relaxed orderings
+/// and the late count are the mistakes the model must notice.
 #[derive(Clone, Copy)]
 struct Heads {
     load: Ordering,
     cas: Ordering,
     cas_failed: Ordering,
+    late_count: bool,
 }
 
 const HEADS: Heads = Heads {
     load: order::LOAD,
     cas: order::CAS,
     cas_failed: order::CAS_FAILED,
+    late_count: false,
 };
 
 const RELAXED_HEADS: Heads = Heads {
     load: Ordering::Relaxed,
     cas: Ordering::Relaxed,
     cas_failed: Ordering::Relaxed,
+    late_count: false,
+};
+
+/// The region's orderings, with the count of records raised only once the
+/// record is in its bucket: the order the model once found wrong.
+const LATE_COUNT: Heads = Heads {
+    late_count: true,
+    ..HEADS
 };
 
 /// A chunk of the model: its bytes, a loom cell for its used mark and one
@@ -77,6 +89,10 @@ struct LoomRegion {
     buckets: Vec<AtomicU32>,
     chunks: Vec<LoomChunk>,
     chunk_len: usize,
+    /// Under [`LATE_COUNT`], what a link added to the count of records and
+    /// the model holds back until the link's next record is published;
+    /// one participant links.
+    held: PlainU64,
 }
 
 // SAFETY: loom runs one thread at a time, and every access to the bytes of
@@ -117,6 +133,7 @@ impl LoomRegion {
                 .collect(),
             chunks,
             chunk_len,
+            held: PlainU64::new(0),
         }
     }
 
@@ -208,6 +225,10 @@ impl Region for LoomRegion {
     }
 
     fn fetch_add_u64(&self, offset: usize, delta: u64) -> u64 {
+        if self.heads.late_count && offset == NRECORDS {
+            self.held.fetch_add(delta, Plain::Relaxed);
+            return self.header64(offset).load(order::LOAD);
+        }
         self.header64(offset).fetch_add(delta, order::ADD)
     }
 
@@ -224,8 +245,19 @@ impl Region for LoomRegion {
     }
 
     unsafe fn cas_u32_in(&self, offset: usize, current: u32, new: u32) -> Result<u32, u32> {
-        self.bucket(offset)
-            .compare_exchange(current, new, self.heads.cas, self.heads.cas_failed)
+        let swapped = self.bucket(offset).compare_exchange(
+            current,
+            new,
+            self.heads.cas,
+            self.heads.cas_failed,
+        );
+        if self.heads.late_count && swapped.is_ok() {
+            let held = self.held.swap(0, Plain::Relaxed);
+            if held > 0 {
+                self.header64(NRECORDS).fetch_add(held, order::ADD);
+            }
+        }
+        swapped
     }
 
     fn prefetch(&self, _offset: usize) {}
@@ -490,6 +522,15 @@ fn a_probe_sees_a_published_record_whole() {
 #[should_panic(expected = "Causality violation")]
 fn relaxed_heads_let_a_probe_read_an_unwritten_record() {
     published_record_is_seen_whole(RELAXED_HEADS);
+}
+
+/// The count of records raised after the record is published: a probe
+/// that finds the record before the count covers it takes its sound chain
+/// for a loop, and the model reports it.
+#[test]
+#[should_panic(expected = "table chain is longer than its record count")]
+fn a_count_raised_after_publishing_makes_a_sound_chain_a_loop() {
+    published_record_is_seen_whole(LATE_COUNT);
 }
 
 /// A shared Bloom filter of loom atomics: the state word and the words,

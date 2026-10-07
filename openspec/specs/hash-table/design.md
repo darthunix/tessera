@@ -669,8 +669,12 @@ a model of the index and the chunks, with the same memory orders as the
 real code. It checks that two or three participants that link into one
 bucket lose no record and count duplicates exactly, and that a probe
 that finds a record being published reads it whole. Negative tests
-check that the model catches mistakes: with relaxed reads of the
-buckets a probe reads a record that is not written yet.
+check that the model catches mistakes. With relaxed reads of the
+buckets a probe reads a record that is not written yet. With the count
+raised only after a record is published, the order once found wrong, a
+probe takes a sound chain for a loop. The model makes that mistake
+itself, holding the link's addition back until the record is in its
+bucket, so that the table's code keeps one order only.
 
 ## Checks and errors
 
