@@ -85,7 +85,8 @@ is wanted; several wait for a measured case. `greengage-port` and
 - `small-c-leftovers`: Small C leftovers of section 9
 - `projected-batch-pins`: Pins of the last projected batch
 - `documents-after-the-move`: The documents once every part has its folder
-- `hash-table-shared-parts`: The second half of the hash table's spec
+- `hash-table-participants`: How participants agree over a shared hash
+  table
 
 ## Entries
 
@@ -1011,30 +1012,29 @@ request 44, 2026-10-04.
 - **Capabilities:** -
 - **Size:** small.
 
-### hash-table-shared-parts
+### hash-table-participants
 
-The second half of the hash table's spec. Left by the change that wrote
-the capability `hash-table`, which took the table itself in ten
-requirements.
+How participants agree over a shared hash table. Left by the changes
+that wrote the capability `hash-table`: the first took the table itself,
+the second partitions, the Bloom filter and the marks of RIGHT and FULL
+joins.
 
-- **What:** Describe in `hash-table` what other parts build on the
-  table, which `docs/table.md` still holds: the phases of a shared
-  build and of the rounds over partitions on disk (`tess_build_*`,
-  `tess_round_step`), the shared words of a spill
-  (`tess_table_spill_*`), partitions (`tess_table_split`, the
-  `_partitioned` calls, `tess_table_combine`), the Bloom filter, local
-  and shared, and the marks of RIGHT and FULL joins. The aggregate
-  states in a payload (`tess_table_accumulate*`) go to the capability
-  of the grouping, and the items of a sort (`tessera/sort.h`) to the
-  sort's.
+- **What:** Describe in `hash-table` what `docs/table.md` still holds of
+  the table: the phases of a shared build and of the rounds over
+  partitions on disk (`tess_build_*`, `tess_round_step`) and the shared
+  words of a spill (`tess_table_spill_*`). The aggregate states in a
+  payload (`tess_table_accumulate*`) go to the capability of the
+  grouping, and the items of a sort (`tessera/sort.h`) to the sort's.
 - **Why:** These calls are the C API of the table too, and until they
   have a spec nothing ties their promises to tests.
 - **Known:** The loom model covers the phases, the split and the
   rounds. `docs/table.md` keeps their text with a pointer to the
-  capability.
+  capability. The list "Not placed" holds a finding of the marks of a
+  shared table whose fix belongs to the phases: a participant that
+  stops early.
 - **Depends on:** nothing.
 - **Capabilities:** hash-table, aggregate, sort
-- **Size:** one pull request for the table's part, about ten
+- **Size:** one pull request for the table's part, under ten
   requirements.
 
 ## Not placed: the maintainer decides
@@ -1121,6 +1121,38 @@ becomes an entry, joins one, or is dropped.
     `nodes/hashjoin.h` and `nodes/agg_spill.c` still count a buffer of a
     page for each partition's file, though a set has one buffer. Whether
     the reserves themselves are still right is to be decided.
+- **`hash-table`: a participant of a shared RIGHT or FULL join that
+  stops early** (found when the marks were described). A participant
+  that stops before its outer side is done leaves the shared table as
+  one that is done, and the last participant to leave then returns the
+  inner records without a mark: among them records whose pairs the one
+  that stopped never probed, as rows with NULL outer columns that the
+  join should not return. A participant stops early when the core's
+  `Gather` passes a `LIMIT` to its workers as a bound of tuples; Tessera's
+  `TessGather` keeps its workers to the end, so only
+  `tessera.batch_gather = off` reaches the case. The path is in the code
+  (`join_shutdown` leaves without a mark of its stop); 220 runs of such a
+  query under the core's `Gather`, with the matching rows placed for it,
+  gave no wrong row, so it is not reproduced. The core guards the same
+  case with a flag of its batch, `skip_unmatched`: a participant that
+  leaves while it probes sets it, and nobody returns the unmatched rows,
+  which a bound of tuples does not need. Suggested: the same flag, set
+  before the barrier and read by the last participant, with a loom test,
+  in `hash-table-participants`.
+- **`hash-table`: what the description of partitions, filters and marks
+  left** (the same source).
+  - TessFilter's "Rows Removed by Bloom Filter" counts the rows with a
+    NULL key, which its hashing drops; the join's counts only rows with
+    keys. `docs/nodes.md` does not say so. For the capabilities of the
+    join and of the filter.
+  - A shared table's filter is allocated and cleared at SIZE whether or
+    not a participant ever wants it: 16 bits a record of the query's
+    shared memory. A cost for the join's capability to weigh.
+  - `tess_bloom_shared_add` takes a filter without a state word. A
+    shared filter of two words, for up to four records, has the shape it
+    takes, and its state word would be read as a word of bits. No caller
+    makes the mistake; a name such as `tess_bloom_add_atomic` would say
+    what the call takes.
 
 ## Decided against
 

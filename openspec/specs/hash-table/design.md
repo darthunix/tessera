@@ -812,6 +812,8 @@ may name it, since nothing is ever written there. A row bound for a
 partition whose chunk has no room stays in the call's mask of pending
 rows, and the rows after it go on: one full partition does not stop a
 batch. The node gives each such partition a new chunk and calls again.
+The calls by partition need no index; when the table has one, they
+check it as an append does, and refuse records of another shape.
 
 A join and a grouping use partitions in different ways.
 
@@ -853,7 +855,8 @@ row-by-row grouping gives. A group read back that the table lacks is
 copied whole into a chunk the caller names. The merge stops when that
 chunk is full, or when the records reach half the buckets; the node
 gives it a chunk or a larger index, and calls again from where it
-stopped.
+stopped. While the index grows, the node hides the chunk it merges
+from, since a regrow links every record of every chunk it is given.
 
 ## The Bloom filter of the keys
 
@@ -932,6 +935,12 @@ participants race to build it and one does, and a participant that
 reads ready sees every key pass. In negative tests, a state stored
 relaxed lets a reader see a filter not yet filled, and an addition by a
 plain read and write in place of the atomic OR loses bits.
+
+The calls check the count of a filter's words and of a batch's rows.
+The words of a filter in one process are an array of the C API like any
+other, whose alignment the C type already requires; the calls over a
+shared filter, or one filled together, check that the words are aligned
+to 8, since they read them as atomic words.
 
 ## The marks of a RIGHT or FULL join
 
