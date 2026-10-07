@@ -105,6 +105,10 @@ pub(super) trait Region {
     /// [`Self::chunks`].
     fn chunk_len(&self, chunk: usize) -> usize;
 
+    /// Whether chunk `chunk`, below [`Self::chunks`], can be a chunk: not
+    /// null, aligned to 8, and a multiple of 8 of 8 bytes to 1 MiB.
+    fn chunk_fits(&self, chunk: usize) -> bool;
+
     /// The used mark of a chunk: the bytes its records take, its 8-byte
     /// header included, as its one writer last stored it.
     ///
@@ -367,6 +371,13 @@ impl Region for RawRegion {
         assert!(chunk < self.nchunks, "chunk {chunk} past the chunks");
         // SAFETY: the constructor's contract on the array.
         unsafe { *self.chunk_lens.add(chunk) }
+    }
+
+    #[inline(always)]
+    fn chunk_fits(&self, chunk: usize) -> bool {
+        assert!(chunk < self.nchunks, "chunk {chunk} past the chunks");
+        // SAFETY: the constructor's contract on the arrays.
+        unsafe { super::chunk_fits(*self.chunk_bases.add(chunk), *self.chunk_lens.add(chunk)) }
     }
 
     #[inline(always)]

@@ -356,15 +356,19 @@ impl<'r, R: Region> Access<'r, R> {
         Ok(0)
     }
 
-    /// The used mark of a chunk this operation writes, and how many more
-    /// records fit it; a mark that is not a record boundary within the
-    /// chunk is corrupt.
+    /// The used mark of a chunk this operation writes or walks, and how
+    /// many more records fit it. The chunk is checked first, as every call
+    /// checks a chunk it starts on; a mark that is not a record boundary
+    /// within the chunk is corrupt.
     #[inline]
     pub(super) fn room(&self, chunk: usize) -> Result<(usize, usize)> {
         if chunk >= self.region.chunks() {
             return Err(no_chunk(chunk));
         }
         let len = self.region.chunk_len(chunk);
+        if !self.region.chunk_fits(chunk) {
+            return Err(super::bad_chunk(chunk, len));
+        }
         // SAFETY: the chunk exists, and the caller is its one writer.
         let used = unsafe { self.region.chunk_used(chunk) };
         let used = usize::try_from(used)

@@ -97,7 +97,11 @@ numbered from 0. A chunk is a block aligned to 8 of 8 bytes to 1 MiB, a
 multiple of 8. Its first 8 bytes are its used mark, the bytes its
 records take with the mark's own 8; the records follow one after
 another from byte 8. `tess_table_chunk_init` SHALL make a block an
-empty chunk, its used mark 8.
+empty chunk, its used mark 8. A call SHALL refuse more than 32768
+chunks, and SHALL refuse a chunk it writes or walks that is not such a
+block before it reads the chunk; every other chunk the caller SHALL
+give as such a block, valid for its length. A debug build of the entry
+points SHALL check every chunk it is given.
 
 A record SHALL be named by a reference of 32 bits: the number of its
 chunk and its first byte there, in units of 8 bytes. Reference 0, the
@@ -117,13 +121,23 @@ longest length hold, and that maximum for a larger limit.
 ```
 
 #### Scenario: Chunks past the limits are refused
-- **WHEN** a call is given a chunk not aligned to 8, of a length that
-  is not a multiple of 8, shorter than 8 bytes or longer than 1 MiB, or
-  more than 32768 chunks
+- **WHEN** a call appends to or walks a chunk that is null, not aligned
+  to 8, of a length that is not a multiple of 8, shorter than 8 bytes or
+  longer than 1 MiB, whose used mark reads as an empty chunk's; or a
+  call is given more than 32768 chunks
 - **THEN** the call fails
 - **Verified by:**
   `crates/tessera-kernels/src/table/mod.rs::chunks_past_the_limits_are_refused`;
-  `crates/tessera-kernels/src/table/mod.rs::misaligned_or_odd_blocks_are_refused`
+  `crates/tessera-kernels/src/table/mod.rs::misaligned_or_odd_blocks_are_refused`;
+  `crates/tessera-kernels/src/table/marks.rs::a_walk_refuses_a_chunk_that_cannot_be_one`
+
+#### Scenario: A debug build checks every chunk
+- **WHEN** a probe that reads no chunk is given a chunk longer than
+  1 MiB
+- **THEN** in a debug build of the entry points it fails, and in a
+  release build it goes on
+- **Verified by:**
+  `crates/tessera-capi/tests/table.rs::a_debug_build_checks_every_chunk`
 
 #### Scenario: A reference names its chunk and its place
 - **WHEN** rows fill one chunk and go on into the next
@@ -254,8 +268,8 @@ than the header's count of records, and no more than the places a
 reference can name in the chunks it is given, 2^17 a chunk. Such an
 error, and a wrong argument, SHALL be status
 `TESS_ERROR_INVALID_ARGUMENT` with SQLSTATE `XX000`. A call SHALL check
-its arguments, the header and the list of chunks before it changes
-anything.
+its arguments, the header and the count of chunks before it changes
+anything, and a chunk before it reads or writes it.
 
 #### Scenario: A damaged header
 - **WHEN** one field of a valid header is changed: the magic, the

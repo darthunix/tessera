@@ -34,15 +34,17 @@
 //! [`crate::int32::hash`], [`crate::int64::hash`] and their `hash_next`,
 //! which decide what NULL keys do.
 //!
-//! Every call checks the chunks it is given, and a call that reads the
-//! index attaches anew and checks the whole header; every reference is
-//! checked against its chunk before it is followed, and a chain is walked
-//! at most as many steps as there are records, and never more than the
-//! places a reference can name in the chunks, so a corrupt table is an
-//! error, never a hang or an access past a block. Dimension and pointer errors come before any
-//! change. A full chunk or index is not an error: rows
-//! without room stay in their mask for the caller to retry after adding a
-//! chunk or building a larger index.
+//! Every call checks a chunk it writes or walks when it starts on it (the
+//! other chunks are the caller's promise, as the validity of their memory
+//! is, and a debug build of the entry points checks them all), and a call
+//! that reads the index attaches anew and checks the whole header; every
+//! reference is checked against its chunk before it is followed, and a
+//! chain is walked at most as many steps as there are records, and never
+//! more than the places a reference can name in the chunks, so a corrupt
+//! table is an error, never a hang or an access past a block. Dimension
+//! and pointer errors come before any change. A full chunk or index is not
+//! an error: rows without room stay in their mask for the caller to retry
+//! after adding a chunk or building a larger index.
 //!
 //! This is the second module of the crate allowed `unsafe`, for the index
 //! and chunks over raw pointers and atomics on them; see [`region`].
@@ -181,6 +183,27 @@ pub struct Stats {
     pub region_len: u64,
 }
 
+/// Whether a block can be a chunk: not null, aligned to 8, and a multiple
+/// of 8 of [`CHUNK_HEADER`] to [`MAX_CHUNK_LEN`] bytes. A call checks it of
+/// every chunk it writes or walks, when it starts on the chunk.
+#[inline(always)]
+pub(super) fn chunk_fits(base: *const u8, len: usize) -> bool {
+    !base.is_null()
+        && base.addr().is_multiple_of(8)
+        && len.is_multiple_of(8)
+        && (CHUNK_HEADER..=MAX_CHUNK_LEN).contains(&len)
+}
+
+/// The error of a chunk that cannot be one.
+#[cold]
+#[inline(never)]
+pub(super) fn bad_chunk(chunk: usize, len: usize) -> anyhow::Error {
+    anyhow!(
+        "table chunk {chunk} of {len} bytes is not aligned to 8 or not a multiple of 8 \
+         of {CHUNK_HEADER} to {MAX_CHUNK_LEN} bytes"
+    )
+}
+
 /// The chunks of a table as this process sees them: each one's base and
 /// length.
 #[derive(Clone, Copy, Debug)]
@@ -199,15 +222,18 @@ impl<'a> Chunks<'a> {
     }
 
     /// The chunks at `bases`, of the lengths in `lens`, after checking that
-    /// the arrays match, there are at most [`MAX_CHUNKS`], and every chunk
-    /// is aligned to 8, a multiple of 8 of [`CHUNK_HEADER`] to
-    /// [`MAX_CHUNK_LEN`] bytes.
+    /// the arrays match and there are at most [`MAX_CHUNKS`]. The chunks
+    /// themselves are not checked here: a call checks each chunk it writes
+    /// or walks when it starts on it, and the others are the caller's
+    /// promise, as the validity of their memory is. Checking every chunk at
+    /// every call cost a call a fixed part that grew with the table;
+    /// [`Self::check_all`] still does it, for debug builds.
     ///
     /// # Safety
     ///
-    /// Every base is valid for reads and writes of its length for `'a`,
-    /// and during `'a` the chunks are accessed only through tables, here or
-    /// in other processes mapping the same memory.
+    /// Every base is aligned to 8 and valid for reads and writes of its
+    /// length for `'a`, and during `'a` the chunks are accessed only
+    /// through tables, here or in other processes mapping the same memory.
     pub unsafe fn new(bases: &'a [*mut u8], lens: &'a [usize]) -> Result<Self> {
         ensure!(
             bases.len() == lens.len() && bases.len() <= MAX_CHUNKS,
@@ -215,17 +241,25 @@ impl<'a> Chunks<'a> {
             bases.len(),
             lens.len()
         );
-        for (chunk, (&base, &len)) in bases.iter().zip(lens).enumerate() {
-            ensure!(
-                !base.is_null()
-                    && base.addr().is_multiple_of(8)
-                    && len.is_multiple_of(8)
-                    && (CHUNK_HEADER..=MAX_CHUNK_LEN).contains(&len),
-                "table chunk {chunk} of {len} bytes is not aligned to 8 or not a multiple of 8 \
-                 of {CHUNK_HEADER} to {MAX_CHUNK_LEN} bytes"
-            );
-        }
         Ok(Self { bases, lens })
+    }
+
+    /// Check that every chunk can be one, as a call checks the chunks it
+    /// writes or walks: for a debug build of the entry points, which then
+    /// finds a caller's wrong chunk even where no call touches it.
+    pub fn check_all(&self) -> Result<()> {
+        for (chunk, (&base, &len)) in self.bases.iter().zip(self.lens).enumerate() {
+            if !chunk_fits(base, len) {
+                return Err(bad_chunk(chunk, len));
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether chunk `chunk`, below the count, can be one.
+    #[inline]
+    pub(super) fn fits(&self, chunk: usize) -> bool {
+        chunk_fits(self.bases[chunk], self.lens[chunk])
     }
 
     /// The number of chunks.
@@ -254,10 +288,7 @@ impl<'a> Chunks<'a> {
 /// block yet.
 pub unsafe fn init_chunk(base: *mut u8, len: usize) -> Result<()> {
     ensure!(
-        !base.is_null()
-            && base.addr().is_multiple_of(8)
-            && len.is_multiple_of(8)
-            && (CHUNK_HEADER..=MAX_CHUNK_LEN).contains(&len),
+        chunk_fits(base, len),
         "a table chunk of {len} bytes is not aligned to 8 or not a multiple of 8 of \
          {CHUNK_HEADER} to {MAX_CHUNK_LEN} bytes"
     );
@@ -282,7 +313,8 @@ fn other_config(config: &TableConfig<'_>, layout: &Layout) -> anyhow::Error {
 /// The chunks alone as a region, with an empty index, which the calls
 /// over chunks never read.
 fn chunk_region(chunks: &Chunks<'_>) -> RawRegion {
-    // SAFETY: an empty index and the chunks `Chunks::new` accepted.
+    // SAFETY: an empty index, and chunks aligned and valid by the contract
+    // of `Chunks::new`; a call checks each chunk it starts on.
     unsafe {
         RawRegion::new(
             core::ptr::NonNull::<u64>::dangling().as_ptr().cast(),
@@ -1550,27 +1582,73 @@ mod tests {
             assert!(short.unwrap_err().to_string().contains("smaller than"));
             assert!(TableMut::create(base.add(8), len, &config, 1000, Chunks::none()).is_ok());
         }
-        let mut chunk = vec![0_u64; 4];
-        let chunk_base = chunk.as_mut_ptr().cast::<u8>();
-        // SAFETY: the chunk pointers lie inside the vector; nothing is read.
+        // Blocks whose used mark reads as an empty chunk's, so that only
+        // the check of the chunk refuses them: one aligned, one 4 bytes in.
+        let mut block = vec![0_u64; 8];
+        let block_base = block.as_mut_ptr().cast::<u8>();
+        // SAFETY: every base and length lies inside the vector, which
+        // nothing else uses meanwhile.
         unsafe {
-            let misaligned = [chunk_base.add(4)];
-            assert!(Chunks::new(&misaligned, &[24]).is_err());
-            let aligned = [chunk_base];
-            assert!(Chunks::new(&aligned, &[20]).is_err(), "not a multiple of 8");
+            block_base.cast::<u64>().write(CHUNK_HEADER as u64);
+            let misaligned = block_base.add(32);
+            misaligned
+                .add(4)
+                .cast::<u64>()
+                .write_unaligned(CHUNK_HEADER as u64);
+            let misaligned = misaligned.add(4);
+            let cases = [
+                (misaligned, 24, "misaligned"),
+                (block_base, 28, "not a multiple of 8"),
+                (block_base, 0, "shorter than its used mark"),
+                (core::ptr::null_mut(), 24, "null"),
+            ];
+            for (base, len, what) in cases {
+                let bases = [base];
+                let lens = [len];
+                // The array is taken as it is; the chunk, when a call
+                // writes or walks it.
+                let chunks = Chunks::new(&bases, &lens).unwrap();
+                assert!(chunks.check_all().is_err(), "{what}");
+                let appended = append_one(chunks);
+                assert!(
+                    appended.is_err_and(|error| error.to_string().contains("not aligned to 8")),
+                    "an append to a chunk {what}"
+                );
+            }
             assert!(
-                Chunks::new(&aligned, &[0]).is_err(),
-                "shorter than its used mark"
-            );
-            assert!(
-                Chunks::new(&aligned, &[32, 32]).is_err(),
+                Chunks::new(&[block_base], &[32, 32]).is_err(),
                 "mismatched arrays"
             );
-            assert!(Chunks::new(&aligned, &[32]).is_ok());
-            assert!(init_chunk(chunk_base, 20).is_err());
-            init_chunk(chunk_base, 32).unwrap();
+            let bases = [block_base];
+            let lens = [32];
+            let chunks = Chunks::new(&bases, &lens).unwrap();
+            chunks.check_all().unwrap();
+            assert_eq!(append_one(chunks).unwrap(), 1);
+            assert!(init_chunk(block_base, 20).is_err());
+            init_chunk(block_base, 32).unwrap();
         }
-        assert_eq!(chunk[0], CHUNK_HEADER as u64);
+        assert_eq!(block[0], CHUNK_HEADER as u64);
+    }
+
+    /// Append the row of key 7 to chunk 0 of `chunks`, in a table of an
+    /// int4 key and no payload, records of 24 bytes: the rows appended.
+    fn append_one(chunks: Chunks<'_>) -> Result<usize> {
+        let keys = [7];
+        let column = [ColumnView::try_new(&keys[..], None)?];
+        let (hashes, mut words) = key_batch(&keys);
+        let mut pending = RowMask::try_new(1, &mut words)?;
+        let mut offsets = [0];
+        let config = TableConfig {
+            keys: &[KeyKind::Int32],
+            payload_size: 0,
+        };
+        append_to(
+            &config,
+            chunks,
+            0,
+            None,
+            &mut Batch::new(&hashes, &column[..], &mut pending, &mut offsets)?,
+        )
     }
 
     #[test]
@@ -1583,14 +1661,25 @@ mod tests {
         let bases = vec![base; MAX_CHUNKS + 1];
         let lens = vec![CHUNK_HEADER; MAX_CHUNKS + 1];
         // SAFETY: every base is the vector's start, valid for the lengths
-        // given; no chunk is read or written.
+        // given; only a chunk of the block alone is written.
         unsafe {
-            assert!(Chunks::new(&[base], &[MAX_CHUNK_LEN]).is_ok());
+            base.cast::<u64>().write(CHUNK_HEADER as u64);
+            // A chunk longer than 1 MiB has places that no reference can
+            // name: refused when a call starts on it.
+            let one = [base];
+            let too_long = [MAX_CHUNK_LEN + 8];
+            let longest = Chunks::new(&one, &too_long).unwrap();
+            assert!(longest.check_all().is_err());
             assert!(
-                Chunks::new(&[base], &[MAX_CHUNK_LEN + 8]).is_err(),
-                "a chunk longer than 1 MiB"
+                append_one(longest)
+                    .is_err_and(|error| error.to_string().contains("not aligned to 8")),
+                "an append to a chunk longer than 1 MiB"
             );
             assert!(init_chunk(base, MAX_CHUNK_LEN + 8).is_err());
+            let long = [MAX_CHUNK_LEN];
+            let longest = Chunks::new(&one, &long).unwrap();
+            longest.check_all().unwrap();
+            assert_eq!(append_one(longest).unwrap(), 1);
             assert!(Chunks::new(&bases[..MAX_CHUNKS], &lens[..MAX_CHUNKS]).is_ok());
             assert!(
                 Chunks::new(&bases, &lens).is_err(),

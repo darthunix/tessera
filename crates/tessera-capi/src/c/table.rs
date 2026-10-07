@@ -131,6 +131,11 @@ unsafe fn chunks_of<'a>(table: *const TableRef) -> Result<(&'a TableRef, Chunks<
             slice::from_raw_parts(table.chunk_lens, nchunks),
         )
     }?;
+    // A call checks the chunks it writes or walks; a debug build checks
+    // them all, to find a caller's wrong chunk wherever it lies.
+    if cfg!(debug_assertions) {
+        chunks.check_all()?;
+    }
     Ok((table, chunks))
 }
 

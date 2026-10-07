@@ -87,8 +87,11 @@ impl Chunks<'_> {
     /// chunk on a record's boundary.
     fn records(&self, chunk: usize, per_record: PerRecord) -> Result<usize> {
         let len = self.lens[chunk];
-        // SAFETY: `Chunks::new` checked the chunk aligned to 8 and at least
-        // its 8-byte header; nothing appends to it during the walk.
+        if !self.fits(chunk) {
+            return Err(super::bad_chunk(chunk, len));
+        }
+        // SAFETY: the chunk is aligned to 8 and holds at least its 8-byte
+        // header, just checked; nothing appends to it during the walk.
         let used = unsafe { self.bases[chunk].cast::<u64>().read() };
         usize::try_from(used)
             .ok()
@@ -234,6 +237,41 @@ mod tests {
 
         unsafe fn word(&self, _: usize, _: usize) -> u64 {
             0
+        }
+    }
+
+    /// A walk checks a chunk when it starts on it: a chunk of a length
+    /// that is not a multiple of 8, or longer than 1 MiB, is refused though
+    /// its used mark reads as an empty chunk's, and a chunk that can be one
+    /// is walked.
+    #[test]
+    fn a_walk_refuses_a_chunk_that_cannot_be_one() {
+        let mut words = vec![0_u64; (MAX_CHUNK_LEN + 8) / 8];
+        words[0] = CHUNK_HEADER as u64;
+        let bases = [words.as_mut_ptr().cast::<u8>()];
+        for (len, fits) in [
+            (CHUNK_HEADER + 4 * 24 + 4, false),
+            (MAX_CHUNK_LEN + 8, false),
+            (MAX_CHUNK_LEN, true),
+        ] {
+            let lens = [len];
+            // SAFETY: the base is the vector's start, valid for every length.
+            let chunks = unsafe { Chunks::new(&bases, &lens) }.unwrap();
+            let walked = scan_unmarked(
+                &chunks,
+                24,
+                &mut Cursor::start(),
+                None::<&Unmarked>,
+                &mut [0; 4],
+            );
+            if fits {
+                assert_eq!(walked.unwrap(), 0, "an empty chunk of {len} bytes");
+            } else {
+                assert!(
+                    walked.is_err_and(|error| error.to_string().contains("not aligned to 8")),
+                    "a chunk of {len} bytes"
+                );
+            }
         }
     }
 
