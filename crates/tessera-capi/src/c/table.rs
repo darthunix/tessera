@@ -762,7 +762,7 @@ pub unsafe extern "C" fn tess_table_append_partitioned_columns(
     // SAFETY: the caller's contract.
     unsafe {
         guard(status, || {
-            let (_, chunks) = chunks_of(table)?;
+            let (table, chunks) = chunks_of(table)?;
             let partitions = partitions(partition_chunks, npartitions, shift)?;
             let mut decoded = TableKeys::empty();
             table_keys(nkeys, keys, &mut decoded)?;
@@ -784,6 +784,8 @@ pub unsafe extern "C" fn tess_table_append_partitioned_columns(
                 keys: &kinds[..decoded.nkeys],
                 payload_size: 8 * (1 + ncolumns),
             };
+            // As an append does, a table with an index is checked against it.
+            indexed(table, chunks, &config)?;
             let mut pending = pending.as_mut().context("a null pending mask")?.mask()?;
             let nrows = pending.as_view().nrows();
             let hashes = values(hashes, nrows, "hashes")?;

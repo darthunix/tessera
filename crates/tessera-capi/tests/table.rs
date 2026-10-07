@@ -3006,6 +3006,98 @@ fn outputs_are_checked_before_anything_changes() -> Result<()> {
     Ok(())
 }
 
+/// An append by partition takes 64 columns at most, and checks the index
+/// of a table that has one, as an append does: a payload of another size
+/// or a key of another kind writes nothing and leaves every row pending.
+#[test]
+fn an_append_by_partition_checks_what_it_is_given() -> Result<()> {
+    let values: Vec<u64> = (1..=4).collect();
+    let isnull = [false; 4];
+    let column = DatumColumn {
+        struct_size: size_of::<DatumColumn>(),
+        values: values.as_ptr(),
+        isnull: isnull.as_ptr(),
+        nrows: 4,
+        ..DatumColumn::EMPTY
+    };
+    let columns: Vec<DatumColumn> = (0..65)
+        .map(|_| DatumColumn {
+            struct_size: size_of::<DatumColumn>(),
+            values: values.as_ptr(),
+            isnull: isnull.as_ptr(),
+            nrows: 4,
+            ..DatumColumn::EMPTY
+        })
+        .collect();
+    let int4 = TableKey {
+        kind: 1,
+        column: &raw const column,
+        prepared: ptr::null(),
+    };
+    let int8 = TableKey {
+        kind: 2,
+        ..key_copy(&int4)
+    };
+    let hashes: Vec<u32> = (0..4).collect();
+    let mut status = Status::new();
+    // SAFETY: local buffers of the declared sizes, aliased by nothing else,
+    // throughout this test.
+    unsafe {
+        // An int4 key and one payload column: records of 40 bytes.
+        let mut table = CTable::new(1, 16, 8);
+        table.add_chunk(CHUNK_HEADER + 4 * 40);
+        table.add_chunk(CHUNK_HEADER + 4 * 40);
+        let mut pending_words = [0b1111];
+        let mut rows = [0_u64; 2];
+        let mut append =
+            |key: &TableKey, ncolumns: i32, pending_words: &mut [u64; 1], rows: &mut [u64; 2]| {
+                let mut pending = Mask {
+                    nrows: 4,
+                    bits: pending_words.as_mut_ptr(),
+                };
+                let (mut offsets, mut nulls) = ([0; 4], 0);
+                tess_table_append_partitioned_columns(
+                    table.ptr(),
+                    [0_u32, 1].as_ptr(),
+                    2,
+                    0,
+                    hashes.as_ptr(),
+                    1,
+                    key,
+                    ncolumns,
+                    columns.as_ptr(),
+                    &raw mut pending,
+                    offsets.as_mut_ptr(),
+                    rows.as_mut_ptr(),
+                    &raw mut nulls,
+                    &raw mut status,
+                )
+            };
+        // 65 columns, two columns where the table has one, an int8 key
+        // where it has an int4 one.
+        for (key, ncolumns) in [(&int4, 65), (&int4, 2), (&int8, 1)] {
+            assert_eq!(
+                append(key, ncolumns, &mut pending_words, &mut rows),
+                Code::InvalidArgument,
+                "{ncolumns} columns"
+            );
+            assert_eq!(pending_words, [0b1111]);
+            assert_eq!(rows, [0, 0]);
+            for chunk in 0..2 {
+                assert_eq!(
+                    table.chunks[chunk][0], CHUNK_HEADER as u64,
+                    "nothing written"
+                );
+            }
+        }
+        // The table's own go in, two to each partition.
+        assert_eq!(append(&int4, 1, &mut pending_words, &mut rows), Code::Ok);
+        assert_eq!(pending_words, [0]);
+        assert_eq!(rows, [2, 2]);
+    }
+    Ok(())
+}
+
 #[test]
 fn an_append_refuses_records_that_are_not_its_table_s() -> Result<()> {
     let values: Vec<u64> = (1..=4).collect();

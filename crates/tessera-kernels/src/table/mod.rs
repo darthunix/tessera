@@ -379,7 +379,7 @@ pub struct Split {
 }
 
 /// Append the rows of `batch` as records of a table of `config`, each to
-/// the chunk of its hash's partition, before the table has an index: as
+/// the chunk of its hash's partition, over the chunks alone: as
 /// [`append_columns_to`], each row's payload taken from `columns`, except
 /// that a row whose partition's chunk is full stays pending while the rows
 /// after it go on; every row appended counts in `appended`. The caller
