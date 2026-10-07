@@ -29,8 +29,9 @@
  *
  * Records are addressed by 32-bit references: a chunk number and a place
  * in units of 8 bytes; 0 is none. Records never move: a chunk fills and
- * the caller adds another, and when the records outgrow the buckets only
- * the index is made anew over the same chunks (tess_table_regrow).
+ * the caller adds another, and when a grouping's records reach half the
+ * buckets only the index is made anew, larger, over the same chunks
+ * (tess_table_regrow).
  * A reference is checked against its chunk's length, not the chunk's used
  * mark: a caller passes only references that calls over the same table
  * returned, and reading the mark would race with participants appending to
