@@ -286,9 +286,9 @@ SHALL check it as every call does, and SHALL refuse keys or a payload
 size other than the table's before it writes anything. Append SHALL
 not link the records: they are not counted or found until linked.
 `tess_table_append_columns`
-SHALL take the payload from up to 2048 columns: words of NULL bits, bit
-`c % 64` of word `c / 64` for column `c` and at least one word, then a
-word for each column, 0 for a NULL.
+SHALL take the payload from up to 2048 columns, without allocating
+memory: words of NULL bits, bit `c % 64` of word `c / 64` for column `c`
+and at least one word, then a word for each column, 0 for a NULL.
 
 #### Scenario: A full chunk leaves rows pending
 - **WHEN** a batch of 100 rows is appended to a chunk with room for 16
@@ -300,13 +300,15 @@ word for each column, 0 for a NULL.
 
 #### Scenario: The payload of a record
 - **WHEN** rows are appended with no payload, or with their payload in
-  columns, of 3, 64 and 130 columns, some of them NULL
+  columns, of 3, 64, 65, 130 and 2048 columns, some of them NULL
 - **THEN** the payload is zeros, or the words of NULL bits and a word a
-  column, the same as an array of those words gives
+  column, the same as an array of those words gives, and the entry point
+  allocates no memory
 - **Verified by:**
   `crates/tessera-kernels/tests/table.rs::a_missing_payload_is_zeros`;
   `crates/tessera-kernels/tests/table.rs::payload_columns_append_the_records_a_payload_array_does`;
-  `crates/tessera-capi/tests/table.rs::the_columns_entry_point_writes_each_payload_word`
+  `crates/tessera-capi/tests/table.rs::the_columns_entry_point_writes_each_payload_word`;
+  `crates/tessera-capi/tests/table.rs::payload_columns_append_without_allocating`
 
 #### Scenario: An append checks the table's index
 - **WHEN** rows are appended to a table with an index, with another

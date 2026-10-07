@@ -162,11 +162,11 @@ x86-64, where they have not been measured yet.
   larger than the cache.
 - **Nothing kept, nothing raised** (question 7). Rust keeps nothing
   between calls, and the table's memory is all the caller's. A call
-  allocates only for itself: the text of an error, and the list of the
-  columns of a payload wider than 64 columns. A row that does not fit
-  stays in the call's mask of rows still to place; the caller adds a
-  chunk, or makes a larger index, and calls again. Every error is a
-  status that the call returns, and the caller raises it as a
+  allocates nothing but the text of an error; the list of the columns of
+  a payload, up to 2048 of them, is kept on the stack. A row that does
+  not fit stays in the call's mask of rows still to place; the caller
+  adds a chunk, or makes a larger index, and calls again. Every error is
+  a status that the call returns, and the caller raises it as a
   PostgreSQL error after the call.
 - **Short chains.** The table has at least twice as many buckets as the
   records it was made for, and at least 1024. A grouping stops making
