@@ -15,29 +15,26 @@ product: what Tessera does is in `openspec/specs/`.
 
 ## The queue
 
-In this order. The maintainer asked for `table-key-types` as early as
-possible on 2026-10-07, in the review of pull request 48, so it stands
-first. The maintainer placed `counters-on-x86-and-linux`,
+In this order. The maintainer placed `counters-on-x86-and-linux`,
 `simd-primitives-avx2`, `linux-x86-support` and `oltp-guard-bench` on
 2026-10-05, in the review of pull request 45; the other entries keep the
 order of the decisions of 2026-09-30 to 2026-10-02 (plan lines
 2810–2836, 6596–6603, 7378–7390):
 
-1. `table-key-types`: Keys of more types in the hash table itself
-2. `counters-on-x86-and-linux`: Performance counters on x86 and on Linux
-3. `simd-primitives-avx2`: SIMD primitives layer and AVX2 for x86-64
-4. `linux-x86-support`: Linux on x86-64 checked as the target platform
-5. `oltp-guard-bench`: OLTP guard family of benchmarks
-6. `runs-left-from-section-9`: Runs left to the maintainer from section 9
-7. `tpch-short-set`: TPC-H step 7: the short query set for A/B
-8. `tpch-parallel-and-jit`: TPC-H step 8: parallel series and the
+1. `counters-on-x86-and-linux`: Performance counters on x86 and on Linux
+2. `simd-primitives-avx2`: SIMD primitives layer and AVX2 for x86-64
+3. `linux-x86-support`: Linux on x86-64 checked as the target platform
+4. `oltp-guard-bench`: OLTP guard family of benchmarks
+5. `runs-left-from-section-9`: Runs left to the maintainer from section 9
+6. `tpch-short-set`: TPC-H step 7: the short query set for A/B
+7. `tpch-parallel-and-jit`: TPC-H step 8: parallel series and the
    `jit = on` control run
-9. `tpch-indexed-schema`: TPC-H step 9: schema with indexes on foreign
+8. `tpch-indexed-schema`: TPC-H step 9: schema with indexes on foreign
    keys and dates
-10. `tpch-sf10`: TPC-H step 10: SF10
-11. `backward-scan-mark-restore`: Backward scan and mark/restore
-12. `postgresql-19`: PostgreSQL 19 support
-13. `pg-duckdb-comparison`: Comparison with pg_duckdb
+9. `tpch-sf10`: TPC-H step 10: SF10
+10. `backward-scan-mark-restore`: Backward scan and mark/restore
+11. `postgresql-19`: PostgreSQL 19 support
+12. `pg-duckdb-comparison`: Comparison with pg_duckdb
 
 ## By measurement
 
@@ -53,6 +50,8 @@ After the queue, by decisions of 2026-09-20 to 2026-09-22 (plan lines
 210, 2788–2799), which are older than the queue and put it after AVX2:
 
 - `prosupport-batch-functions`: Extension batch functions through prosupport
+- `table-key-types`: Keys of more types in the hash table itself; the
+  maintainer moved it here from the head of the queue on 2026-10-07
 
 ## Not ordered
 
@@ -89,47 +88,6 @@ is wanted; several wait for a measured case. `greengage-port` and
 - `hash-table-shared-parts`: The second half of the hash table's spec
 
 ## Entries
-
-### table-key-types
-
-Keys of more types in the hash table itself. From the review of pull
-request 48, 2026-10-07: the maintainer asked for it as early as
-possible.
-
-- **What:** Let the table keep and compare keys of more types itself,
-  so that a join and a grouping stop paying for a stand-in. The table
-  has two kinds of key, `int4` and `int8`. `int2`, `bool` and `date` go
-  in as `int4`, and `timestamp` and `timestamptz` as `int8`. A key of
-  any other type whose equality hashes goes in as a number of 64 bits:
-  a grouping numbers its values in a dictionary of its own, in C; a
-  join puts in the value's hash from the type's function, called
-  through fmgr for every row, and then decides the match by the
-  equality as a residual clause. Candidates, each measured before it is
-  built:
-  - more word kinds: `time` and `money` as `int8`; `oid` and `"char"`,
-    left out of the word keys on purpose (`types-outside-tpch`);
-  - `float4` and `float8`, once -0 and every NaN have one form, since
-    their equality is not an equality of bits;
-  - keys of 16 bytes, such as `uuid`, in two slots;
-  - `text`, `varchar` and `bytea` under a deterministic collation,
-    where equal values are equal bytes: compared byte for byte by the
-    kernels, through a reference to the value's copy, as a payload
-    keeps such values.
-- **Why:** The join's cost model, measured on the developer's machine,
-  gives a hashed key 18.6 ns a row on top of 1.9 ns for a probe
-  (`docs/nodes.md`), and keys of text are common outside TPC-H.
-- **Known:** A record has one size and a slot of 8 bytes a key, so a
-  key of variable length stays outside the record, in the node's chunks
-  of values, or is compared through its hash and then its bytes.
-  `interval` cannot be a word key: '1 month' and '30 days' are equal
-  with different bits. A join of two different types other than
-  integers stays the core's.
-- **Depends on:** nothing. A new kind of key changes the table's
-  format and its C API, so the work is an OpenSpec change of
-  `hash-table`, and of the join and the grouping.
-- **Capabilities:** hash-table, join-hash, aggregate, type-support
-- **Size:** several pull requests: the word kinds first, then keys of
-  16 bytes, then strings.
 
 ### counters-on-x86-and-linux
 
@@ -504,6 +462,52 @@ Extension batch functions through prosupport. From plan 4.15, lines 578–582.
   old decisions.
 - **Capabilities:** batch-functions, bridge-api
 - **Size:** small.
+
+### table-key-types
+
+Keys of more types in the hash table itself. From the review of pull
+request 48, 2026-10-07: asked for as early as possible, then moved to
+"Later" the same day, once it was clear that the other types already
+reach the table through a stand-in.
+
+- **What:** Let the table keep and compare keys of more types itself,
+  so that a join and a grouping stop paying for a stand-in. The table
+  has two kinds of key, `int4` and `int8`. `int2`, `bool` and `date` go
+  in as `int4`, and `timestamp` and `timestamptz` as `int8`. A key of
+  any other type whose equality hashes goes in as a number of 64 bits:
+  a grouping numbers its values in a dictionary of its own, in C; a
+  join puts in the value's hash from the type's function, called
+  through fmgr for every row, and then decides the match by the
+  equality as a residual clause. Candidates, each measured before it is
+  built:
+  - more word kinds: `time`, `xid8` and `pg_lsn`, 8 bytes passed by
+    value and equal exactly when their bits are, as `int8` at once;
+    `money` too, which has no hash operator class, so that today its
+    keys stay with the core altogether; `macaddr8`, 8 bytes passed by
+    reference; `oid` and `"char"`, left out of the word keys on purpose
+    (`types-outside-tpch`);
+  - `float4` and `float8`, once -0 and every NaN have one form, since
+    their equality is not an equality of bits;
+  - keys of 16 bytes, such as `uuid`, in two slots;
+  - `text`, `varchar` and `bytea` under a deterministic collation,
+    where equal values are equal bytes: compared byte for byte by the
+    kernels, through a reference to the value's copy, as a payload
+    keeps such values.
+- **Why:** The join's cost model, measured on the developer's machine,
+  gives a hashed key 18.6 ns a row on top of 1.9 ns for a probe
+  (`docs/nodes.md`), and keys of text are common outside TPC-H.
+- **Known:** A record has one size and a slot of 8 bytes a key, so a
+  key of variable length stays outside the record, in the node's chunks
+  of values, or is compared through its hash and then its bytes.
+  `interval` cannot be a word key: '1 month' and '30 days' are equal
+  with different bits. A join of two different types other than
+  integers stays the core's.
+- **Depends on:** nothing. A new kind of key changes the table's
+  format and its C API, so the work is an OpenSpec change of
+  `hash-table`, and of the join and the grouping.
+- **Capabilities:** hash-table, join-hash, aggregate, type-support
+- **Size:** several pull requests: the word kinds first, then keys of
+  16 bytes, then strings.
 
 ### window-functions
 
