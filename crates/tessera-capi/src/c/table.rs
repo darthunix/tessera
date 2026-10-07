@@ -1480,6 +1480,34 @@ impl Marks for RawMarks {
     }
 }
 
+/// The chunks of `table` for its marks, whose records are of
+/// `record_size` bytes: the table's own size when it has an index.
+///
+/// # Safety
+///
+/// As for [`chunks_of`], and the index, when there is one, as for
+/// [`Table::attach`].
+unsafe fn marked_chunks<'a>(table: *const TableRef, record_size: usize) -> Result<Chunks<'a>> {
+    // SAFETY: the caller's contract.
+    unsafe {
+        let (table, chunks) = chunks_of(table)?;
+        if !table.index.is_null() {
+            let table = Table::attach(table.index, table.index_len, chunks)?;
+            if table.record_size() != record_size {
+                return Err(other_record_size(record_size, table.record_size()));
+            }
+        }
+        Ok(chunks)
+    }
+}
+
+/// A record size other than the table's, a cold path out of line.
+#[cold]
+#[inline(never)]
+fn other_record_size(given: usize, table: usize) -> anyhow::Error {
+    anyhow::anyhow!("records of {given} bytes in a table of records of {table}")
+}
+
 /// `tess_table_mark_words`: the words of marks of a chunk of `chunk_len`
 /// bytes and records of `record_size`.
 ///
@@ -1496,19 +1524,20 @@ pub unsafe extern "C" fn tess_table_mark_words(
     // SAFETY: the caller's contract.
     unsafe {
         guard(status, || {
-            ensure!(record_size > 0, "records of no bytes");
-            *words.as_mut().context("a null count of words")? = mark_words(chunk_len, record_size);
+            let words = words.as_mut().context("a null count of words")?;
+            *words = mark_words(chunk_len, record_size)?;
             Ok(())
         })
     }
 }
 
 /// `tess_table_mark`: set the mark of the record at `refs[row]` for each
-/// selected row, the table's chunks read without its index.
+/// selected row, by the lengths of the table's chunks; a table with an
+/// index must have records of `record_size` bytes.
 ///
 /// # Safety
 ///
-/// `table` as for [`chunks_of`] during the call; `refs` must hold an
+/// `table` as for [`marked_chunks`] during the call; `refs` must hold an
 /// initialized reference per row of `rows`, a valid mask; `marks` must
 /// hold an entry per chunk of the table, each pointing to
 /// [`mark_words`] of the chunk's length at least, written by nothing else
@@ -1527,14 +1556,12 @@ pub unsafe extern "C" fn tess_table_mark(
     // SAFETY: the caller's contract.
     unsafe {
         guard(status, || {
-            let table = table.as_ref().context("a null table")?;
-            let nchunks = usize::try_from(table.nchunks).context("a negative chunk count")?;
-            let lens = values(table.chunk_lens, nchunks, "chunk lengths")?;
+            let chunks = marked_chunks(table, record_size)?;
             let rows = rows.as_ref().context("a null row mask")?.view()?;
             let refs = values(refs, rows.nrows(), "references")?;
             ensure!(!marks.is_null(), "null marks");
             mark(
-                lens,
+                chunks.lens(),
                 record_size,
                 refs,
                 &rows,
@@ -1548,12 +1575,12 @@ pub unsafe extern "C" fn tess_table_mark(
 }
 
 /// `tess_table_next_unmarked`: the next records without a mark, as
-/// [`tess_table_scan`] visits the records, the table's chunks read without
-/// its index.
+/// [`tess_table_scan`] visits the records, read from the table's chunks; a
+/// table with an index must have records of `record_size` bytes.
 ///
 /// # Safety
 ///
-/// `table` as for [`chunks_of`] during the call, nothing appending to its
+/// `table` as for [`marked_chunks`] during the call, nothing appending to its
 /// chunks; `marks` null or as for
 /// [`tess_table_mark`], set by nothing during the call; `cursor` and
 /// `count` writable; `refs` must hold `capacity` writable slots; `status`
@@ -1573,7 +1600,7 @@ pub unsafe extern "C" fn tess_table_next_unmarked(
     // SAFETY: the caller's contract.
     unsafe {
         guard(status, || {
-            let (_, chunks) = chunks_of(table)?;
+            let chunks = marked_chunks(table, record_size)?;
             let raw = cursor.as_mut().context("a null cursor")?;
             let mut cursor = if *raw == 0 {
                 Cursor::start()

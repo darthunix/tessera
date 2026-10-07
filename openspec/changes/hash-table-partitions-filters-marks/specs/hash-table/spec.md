@@ -357,7 +357,8 @@ record size `s`.
 
 `tess_table_mark_words` SHALL give the words of a chunk of `len` bytes,
 `ceil(floor((len - 8) / s) / 64)`. The record size SHALL be a multiple
-of 8, at least 16, and room for a record in the largest chunk.
+of 8, at least 24, a header and one key, and room for a record in the
+largest chunk.
 `tess_table_mark` SHALL set the mark of the record each selected row's
 reference names: a record of the record size, on its boundary, within
 its chunk's length, in a chunk of the table. It SHALL not need the
