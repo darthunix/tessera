@@ -299,10 +299,11 @@ extern TessStatusCode tess_table_append_columns(const TessTableRef *table,
 /*
  * A table that spills keeps its records in partitions: the partition of a
  * hash is (hash >> shift) & (npartitions - 1), npartitions a power of two
- * up to 65536, and partition p appends to chunk partition_chunks[p]. The
- * buckets take the hash's high bits, so the first level of partitions
- * takes its low ones and each further level the bits above. See
- * docs/spill.md.
+ * up to 65536 and shift + log2(npartitions) at most 32, and partition p
+ * appends to chunk partition_chunks[p], a chunk of the table. The buckets
+ * take the hash's high bits, so the first level of partitions takes its
+ * low ones and each further level the bits above. Two partitions share a
+ * chunk only when it has no room for a record. See docs/spill.md.
  *
  * Append the rows of pending as records, each to the chunk of its hash's
  * partition, in row order, as long as whole records fit there: as
@@ -310,8 +311,9 @@ extern TessStatusCode tess_table_append_columns(const TessTableRef *table,
  * full stays pending while the rows after it go on; the caller gives
  * those partitions new chunks and calls again. The caller is the one
  * writer of every partition's chunk. Each row's payload is taken from
- * columns as tess_table_append_columns takes it (the table's payload is a
- * word of NULL bits and a word per column): every row appended adds one to
+ * columns as tess_table_append_columns takes it, at most 64 of them (the
+ * table's payload is a word of NULL bits and a word per column): every row
+ * appended adds one to
  * rows[partition], and its NULL bits are ORed into *nulls. A table with an
  * index is checked as tess_table_append checks it.
  */
@@ -523,14 +525,19 @@ extern TessStatusCode tess_table_find_or_insert_partitioned(const TessTableRef *
 /*
  * How a group's aggregate state merges into the state of the same group
  * in another record. The payload is a word of flags, bit i set once
- * aggregate i has a value, then a word per aggregate.
+ * aggregate i has a value, then a word per aggregate, at most 64. The flag
+ * of each aggregate but a count is set when the incoming record has one.
  */
 typedef enum TessTableCombine
 {
-	/* Counts add; past the int8 range 22003 "bigint out of range". */
+	/* Counts add, whatever the flags; past the int8 range 22003. */
 	TESS_TABLE_COMBINE_COUNT = 1,
-	/* Sums add when both have a value, as counts do. */
+	/*
+	 * Sums add when both have a value, past the int8 range 22003; the
+	 * incoming value is taken when only it has one.
+	 */
 	TESS_TABLE_COMBINE_SUM = 2,
+	/* The least, or the greatest, of two signed values, flags as a sum. */
 	TESS_TABLE_COMBINE_MIN = 3,
 	TESS_TABLE_COMBINE_MAX = 4
 } TessTableCombine;
@@ -750,7 +757,8 @@ extern TessStatusCode tess_table_gather_key(const TessTableRef *table,
  * has no record with its hash. The filter is a buffer of words the caller
  * owns, a power of two of them, with no address inside, like the index.
  * Each hash sets four bits of one word; at 16 bits per record about one
- * absent key in a hundred gets through. See docs/table.md.
+ * absent key in 200 gets through. The capability hash-table states the
+ * rule (openspec/specs/hash-table/).
  */
 
 /* The words of a filter for a table of records records. */
@@ -799,7 +807,7 @@ extern TessStatusCode tess_bloom_probe(const uint64 *words, Size nwords,
  * building, ready), then the words of a filter. One participant clears
  * it before the others use it; the first that wants the filter builds it
  * alone and marks it ready, and the others check batches against it only
- * once it is ready. See docs/table.md.
+ * once it is ready.
  */
 
 /* The words of a shared filter for a table of records records. */
@@ -1198,6 +1206,7 @@ extern TessStatusCode tess_round_step(TessBuildParticipant *participant,
  * Set the bits of the hashes of rows in a filter several participants
  * fill at once, word by word atomically; read it with tess_bloom_probe
  * once a barrier ordered every participant's additions before the reads.
+ * The filter has no state word: a power of two of words, aligned to 8.
  */
 extern TessStatusCode tess_bloom_shared_add(uint64 *words, Size nwords,
 											const uint32 *hashes,

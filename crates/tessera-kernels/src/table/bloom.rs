@@ -11,7 +11,7 @@
 //! the four bit positions from its low 24 bits, six each. A filter holds
 //! [`BITS_PER_RECORD`] bits per record of the table it was filled from, in
 //! a power of two of words; with four bits per key that lets through
-//! about one absent key in a hundred.
+//! about one absent key in 200, as a test measures at exactly 16 bits.
 //!
 //! Like the table's region, the filter is a borrowed buffer of words that
 //! holds no process address, so the same code serves a filter in a

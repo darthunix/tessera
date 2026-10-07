@@ -206,7 +206,8 @@ A shared build, by the phases of the barrier:
  ═══ BarrierArriveAndWait ═══  ← orders everything above
  SIZE  ─ the elected one: the totals (Relaxed) → the index for exactly N records (plain
           stores of the header, the buckets cleared) → the directory of dsa_pointers by
-          number, from the list → the Bloom filter
+          number, from the list → the Bloom filter, cleared, which one
+          participant builds later
  ═══ BarrierArriveAndWait ═══
  LINK  ─ every participant: the chunks' bases from the directory → tess_table_link of its
           own chunks (fetch_add and CAS, as above), counting duplicates →

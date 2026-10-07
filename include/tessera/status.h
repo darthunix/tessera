@@ -16,7 +16,7 @@ typedef enum TessStatusCode
 	 * such as a damaged hash table.
 	 */
 	TESS_ERROR_INVALID_ARGUMENT = 1,
-	/* SQLSTATE 22003: an int4 result does not fit. */
+	/* SQLSTATE 22003: an integer result does not fit its type. */
 	TESS_ERROR_INTEGER_OUT_OF_RANGE = 2,
 	/* SQLSTATE 22012: a zero divisor. */
 	TESS_ERROR_DIVISION_BY_ZERO = 3,

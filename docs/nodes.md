@@ -1827,9 +1827,9 @@ ones is loaded for its tail alone. Every table built or loaded starts
 without marks. A shared table's marks are in the query's shared memory,
 a bit per record of the largest chunk for each chunk, allocated with the
 directory by the participant SIZE elects (a round's by the one that
-allocates it), and set with an atomic OR after a plain read finds the
-bit clear. Its tail goes out as the core's Parallel Hash Right Join
-returns its unmatched rows: a participant done with its outer rows
+allocates it), and set with an atomic OR after a relaxed atomic read
+finds the bit clear. Its tail goes out as the core's Parallel Hash Right
+Join returns its unmatched rows: a participant done with its outer rows
 leaves the table (the build barrier, or the round's) without waiting,
 and only the last one to leave returns the records without a mark, then
 frees the table, the free it owes done at its next leave; the others'
@@ -1949,7 +1949,8 @@ probe rows of each table built and those that found a record: after the
 first 4096, if fewer than a share of them found one (the setting
 `tessera.join_bloom_ratio`, 0.5 by default) and the table holds at least
 4096 rows, it builds a Bloom filter of the table's keys once
-(`tess_table_bloom`, see [table.md](table.md)), 16 bits per row in the
+(`tess_table_bloom`, see the capability
+[hash-table](../openspec/specs/hash-table/design.md)), 16 bits per row in the
 table's memory context, and from then on checks every batch against it
 first (`tess_bloom_probe`), probing the table only with the rows it lets
 through. A row it rejects has no pair, which a left or anti join returns
