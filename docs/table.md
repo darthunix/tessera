@@ -4,10 +4,10 @@ Joins and grouping keep their state in a hash table whose memory the C
 node owns. The table itself, where its memory lives, what it holds, how
 a batch goes in and comes out, how it outgrows its index and what
 several processes may do at once, is the capability
-[hash-table](../openspec/specs/hash-table/design.md). This guide keeps
-what other parts build on it: the aggregate states of a grouping,
-partitions for spilling, a Bloom filter of the keys, sorting records,
-and the phases of a shared build.
+[hash-table](../openspec/specs/hash-table/design.md), and so are the
+partitions of a table that spills and the Bloom filter of its keys.
+This guide keeps what other parts build on it: the aggregate states of
+a grouping, sorting records, and the phases of a shared build.
 
 ## One writer
 
@@ -85,91 +85,6 @@ records, which only the one writer changes:
   numeric) is set in `rest` and makes the state pending: the
   group's later rows of the batch go to `rest` too, and the caller takes
   them in order and clears pending.
-
-## Partitions for spilling
-
-A node whose table outgrows its memory keeps the records in partitions
-and writes whole chunks of some of them to disk (see
-[spill.md](spill.md)). The partition of a hash is
-`(hash >> shift) & (npartitions - 1)`, a power of two of partitions: the
-buckets take the hash's high bits, so the first level takes its low ones
-and a partition split further takes the bits above them. Two calls work
-on chunks alone, without the index, as `tess_table_append` does:
-
-- `tess_table_append_partitioned_columns` appends a batch's rows each to
-  the current chunk of its partition, given as a chunk number per
-  partition. A row whose partition's chunk is full stays pending while the
-  rows after it go on, so the node gives every such partition a new chunk
-  and calls again. The payload is taken from columns, as
-  `tess_table_append_columns` takes it, and each appended row adds to its
-  partition's count and ORs its NULL bits into a word, so it takes 64
-  columns at most: a spilling join appends a batch
-  without a pass of its own over the rows (plan item 5.12, a fifth off a
-  spilled join).
-- `tess_table_split` copies the records of one chunk, whole and in order,
-  each to the chunk of its partition, and stops before a record whose
-  partition's chunk is full, naming that partition; it returns the new
-  references and the hashes of the records copied. A node uses it once,
-  when its table first overflows, to sort the chunks it built into
-  partitions, and again when a partition read back from disk is still too
-  large and splits by the next bits. The copies are not linked: a
-  partition gets an index when it is processed.
-
-A grouping that spills (TessAgg) keeps one index over every partition's
-chunks, since its rows must find their groups as they come, and has two
-calls of its own:
-
-- `tess_table_find_or_insert_partitioned` resolves a batch's rows to the
-  records of their keys as `tess_table_find_or_insert` does, but a new
-  group goes to the current chunk of its partition; a row whose
-  partition's chunk is full stays pending while the rows after it go on,
-  and every row stops once the records reach half the buckets.
-- `tess_table_combine` merges a chunk of groups' states read back from
-  disk into the table: the record of the same keys takes each state in
-  as the caller says per aggregate (counts and sums add, with 22003 past
-  the int8 range, a sum only where it has a value; minima and maxima keep
-  the extreme; the flags join), and a group the table lacks is copied
-  whole to a chunk the caller names and linked. It stops where a new
-  group needs another chunk or a larger index, and goes on from there.
-
-## A Bloom filter of the keys
-
-A probe that finds no record still reads a bucket, and a record too when
-the bucket holds another key; on a table past the cache these are cache
-misses. A join whose rows mostly find no pair can check them first
-against a Bloom filter of the table's keys, which rejects most of those
-rows without touching the table. The filter is a blocked one: one 64-bit
-word per key, four bits in it, both taken from the row hash (the same
-hash the table uses, with every key and the NULL policy) multiplied by
-`0x9E3779B97F4A7C15`, the word from the high bits of the product and the
-bits from its low 24, so the word does not repeat the bucket index. A
-check reads one word and compares it with a four-bit mask. The size is a
-power of two words, 16 bits per record, which lets about 1 % of absent
-keys through; a key of the table always passes.
-
-Like the table, the filter lives in a borrowed buffer of words with no
-process addresses in it, so it may sit in shared memory next to a shared
-table:
-
-- `tess_table_bloom_words(records, &nwords, &status)` gives the size for
-  a number of records;
-- `tess_table_bloom(&table, words, nwords, &status)` clears the words
-  and sets the bits of every record of the table's chunks; it walks the
-  records, so no append may run meanwhile, as for a scan;
-- `tess_bloom_probe(words, nwords, hashes, &rows, &found, &status)`
-  fills `found` whole with the rows of `rows` whose bits are all set;
-  the two masks must not share words.
-
-A shared filter (`tess_bloom_shared_words`, `tess_bloom_shared_init`)
-is a state word (none, building, ready) and then the filter's words,
-cleared by one participant before the others use it. Each participant
-decides by its own batches whether it wants the filter;
-`tess_table_try_build_bloom` lets the first that does claim it with a
-compare-and-swap of the state, fill it alone and mark it ready with
-release, and tells the others it did not, which wait for nothing:
-`tess_bloom_shared_probe` checks a batch only once the state reads
-ready with acquire (`tess_bloom_shared_ready`), and until then the
-participant probes the table without the filter.
 
 ## Sorting records
 
@@ -304,10 +219,6 @@ A shared build, by the phases of the barrier:
 The build counters need no ordering: the barrier shows the others everything a participant
 did before it (the model of the core's barrier in `loom.rs`); other participants' used
 marks are only read after the barrier.
-
-The shared Bloom filter has a state word (0 none, 1 building, 2 ready): the participant
-whose CAS 0 → 1 succeeds fills the filter and stores 2 with Release; the others check rows
-against it only after they read 2 with Acquire, and probe the table without it until then.
 
 ## Tests and measurements
 
