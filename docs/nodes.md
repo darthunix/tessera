@@ -776,9 +776,11 @@ cost, and a partial path next to the parallel one
 (`tess_filter_row_path`): the node's rows cost less than the core scan's
 under any parent, a row-wise one included (`bench/pg/rowwise.sql`:
 `bit_or` over `LIKE` 9.4 ms against 11.2), and a batch parent above reads
-its batches instead of a pack's copies. An inner or semi hash join above
-it hands it its Bloom filter, which then reaches the rows before the
-row-wise clauses (plan item 5.2). Such a node shows no `Batch Filter`.
+its batches instead of a pack's copies. An inner, semi or right hash
+join above it may hand it its Bloom filter, which then reaches the rows
+before the row-wise clauses
+([key-filter](../openspec/specs/key-filter/design.md)). Such a node
+shows no `Batch Filter`.
 
 Two things make the node possible before that scan. The planner gives
 every scan of the relation its clauses, so `PlanCustomPath` takes them

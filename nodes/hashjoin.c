@@ -979,7 +979,8 @@ const TessBatchOps join_batch_ops = {
 /*
  * Offer the filter to the outer child, which may check its rows against it
  * before its costlier work (TessFilter's row-wise clauses): only when a
- * row without a pair leaves the join's output, as INNER and SEMI drop it.
+ * row without a pair leaves the join's output, as INNER and SEMI drop it,
+ * and a RIGHT join, which runs as INNER keeping its inner side.
  * A child that takes it passes only the rows the filter lets through, and
  * the join checks no more.
  */
