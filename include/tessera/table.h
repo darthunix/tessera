@@ -334,10 +334,10 @@ extern TessStatusCode tess_table_append_partitioned_columns(const TessTableRef *
  * Copy the records of chunk `source` of a table of the key kinds and
  * payload size from byte *from on (TESS_TABLE_CHUNK_HEADER at first),
  * whole and in order, each to the chunk of its hash's partition, and move
- * *from past them: at most capacity records, their new references into
- * offsets and their hashes into hashes. It stops before a record
- * whose partition's chunk is full, *full receiving that partition, -1
- * otherwise; *count receives the records copied, 0 at the source's end.
+ * *from past them: at most capacity records, at least 1, their new
+ * references into offsets and their hashes into hashes. It stops before a
+ * record whose partition's chunk is full, *full receiving that partition,
+ * -1 otherwise; *count receives the records copied, 0 at the source's end.
  * The copies are not linked; the source must be none of the partitions'
  * chunks. For a table's first spill and a partition split further.
  */
