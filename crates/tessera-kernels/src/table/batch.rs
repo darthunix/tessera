@@ -437,7 +437,8 @@ fn append_partitioned_column_rows<
 /// caller is, and move `*from` past them: at most `offsets.len()` of them,
 /// the new references into `offsets` and their hashes into `hashes`. The
 /// copies are not linked. It stops before a record
-/// whose partition's chunk is full, which [`Split::full`] names.
+/// whose partition's chunk is full, which [`Split::full`] names. A call
+/// copies at least one record, so that a count of 0 means the end.
 pub(super) fn split<R: Region>(
     region: &R,
     layout: &Layout,
@@ -451,6 +452,11 @@ pub(super) fn split<R: Region>(
     ensure!(
         offsets.len() == hashes.len(),
         "the offsets and hashes of a split have different lengths"
+    );
+    // A count of 0 means the source is done, so a call copies one at least.
+    ensure!(
+        !offsets.is_empty(),
+        "a split copies at least one record a call"
     );
     ensure!(
         !partitions.chunks.contains(&(source as u32)),

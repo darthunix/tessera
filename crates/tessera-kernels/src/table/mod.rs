@@ -1316,6 +1316,60 @@ mod tests {
         assert!(error.to_string().contains("into itself"), "{error}");
     }
 
+    /// A split of no records would answer as the end of its chunk does;
+    /// one into a partition's chunk, or of records of another size, would
+    /// copy what it must not. Each fails, and nothing moves.
+    #[test]
+    fn a_split_that_cannot_be_done_is_refused() {
+        let (keys, hashes, payload) = partition_rows();
+        let column = [ColumnView::try_new(&keys, None).unwrap()];
+        let mut blocks = Blocks::new();
+        let source = blocks.add(CHUNK_HEADER + 200 * 32);
+        let mut words = vec![u64::MAX, u64::MAX, u64::MAX, (1 << 8) - 1];
+        let mut pending = RowMask::try_new(200, &mut words).unwrap();
+        let mut offsets = vec![0; 200];
+        append_to(
+            &PARTITION_CONFIG,
+            blocks.chunks(),
+            source as usize,
+            Some(&payload),
+            &mut Batch::new(&hashes, &column[..], &mut pending, &mut offsets).unwrap(),
+        )
+        .unwrap();
+        let targets: Vec<u32> = (0..4).map(|_| blocks.add(CHUNK_HEADER + 64 * 32)).collect();
+        let wider = TableConfig {
+            keys: &[KeyKind::Int32],
+            payload_size: 16,
+        };
+        let cases: [(&TableConfig<'_>, usize, u32, &str); 3] = [
+            (&PARTITION_CONFIG, 0, targets[0], "at least one record"),
+            (&PARTITION_CONFIG, 16, source, "into itself"),
+            (&wider, 16, targets[0], "record"),
+        ];
+        for (config, capacity, first, message) in cases {
+            let chunks = [first, targets[1], targets[2], targets[3]];
+            let mut from = CHUNK_HEADER;
+            let error = split_to(
+                config,
+                blocks.chunks(),
+                &Partitions {
+                    shift: 9,
+                    chunks: &chunks,
+                },
+                source as usize,
+                &mut from,
+                &mut vec![0; capacity],
+                &mut vec![0; capacity],
+            )
+            .unwrap_err();
+            assert!(error.to_string().contains(message), "{error}");
+            assert_eq!(from, CHUNK_HEADER, "{message}");
+            for &target in &targets {
+                assert!(blocks.records(target).is_empty(), "{message}: copied");
+            }
+        }
+    }
+
     /// Keys and their hashes as a batch's key column.
     fn key_batch(keys: &[i32]) -> (Vec<u32>, Vec<u64>) {
         let hashes = keys.iter().map(|&key| murmurhash32(key as u32)).collect();
