@@ -40,7 +40,9 @@ it has no room for a record.
   31, 1 partition at shift 32, or a chunk number past the table's
   chunks, to a split, an append by partition or a lookup by partition
 - **THEN** the call fails, and the chunks and the masks are as they were
-- **Verified by:** pending
+- **Verified by:**
+  `crates/tessera-kernels/src/table/mod.rs::partitions_past_the_hash_or_the_chunks_are_refused`;
+  `crates/tessera-capi/tests/table.rs::an_append_by_partition_refuses_partitions_past_the_limits`
 
 ### Requirement: Appending rows by partition
 `tess_table_append_partitioned_columns` SHALL append the rows of the
@@ -75,7 +77,8 @@ before it writes anything.
   with its own
 - **THEN** the wrong ones fail, write nothing and leave every row
   pending, and the table's own go in
-- **Verified by:** pending
+- **Verified by:**
+  `crates/tessera-capi/tests/table.rs::an_append_by_partition_checks_what_it_is_given`
 
 ### Requirement: Splitting a chunk by partition
 `tess_table_split` SHALL copy the records of chunk `source` from byte
@@ -103,7 +106,8 @@ partition.
 - **WHEN** a split is asked for no records, into one of its partitions'
   chunks, or with a record size other than the source's records
 - **THEN** it fails, and `*from` and the chunks are as they were
-- **Verified by:** pending
+- **Verified by:**
+  `crates/tessera-kernels/src/table/mod.rs::a_split_that_cannot_be_done_is_refused`
 
 ### Requirement: Groups by partition
 `tess_table_find_or_insert_partitioned` SHALL give each row of the
@@ -122,14 +126,17 @@ made. The caller is the one writer of the table.
 - **THEN** each row's record has its key and lies in its partition, a
   key keeps one record across the batches, and the inserted rows are
   the first row of each new key
-- **Verified by:** pending
+- **Verified by:**
+  `crates/tessera-kernels/src/table/mod.rs::groups_go_to_the_chunks_of_their_partitions`;
+  `test/sql/table.sql::tessera_test_table_combine`
 
 #### Scenario: Half the buckets stops every row
 - **WHEN** a batch brings more new keys than half the buckets can take
 - **THEN** the call stops at the first row that needs a new record past
   that count, and that row and every row after it stay pending,
   including rows of keys the table holds
-- **Verified by:** pending
+- **Verified by:**
+  `crates/tessera-kernels/src/table/mod.rs::half_the_buckets_stops_every_row_of_a_lookup_by_partition`
 
 ### Requirement: Merging groups read back
 `tess_table_combine` SHALL merge the records of chunk `source`, from
@@ -178,7 +185,8 @@ uses the table no more.
 - **THEN** the call stops with `CHUNK_FULL`, then with `INDEX_FULL`, its
   `*from` on the first group not merged, and goes on from there with a
   new chunk and a larger index to `DONE`
-- **Verified by:** pending
+- **Verified by:**
+  `crates/tessera-kernels/src/table/mod.rs::a_merge_stops_for_a_chunk_or_a_larger_index`
 
 #### Scenario: A merge that cannot be done fails
 - **WHEN** a count or a sum would pass the int8 range, or a merge has 65
@@ -187,7 +195,9 @@ uses the table no more.
 - **THEN** the first fails with status
   `TESS_ERROR_INTEGER_OUT_OF_RANGE` and SQLSTATE `22003`, the others
   with `TESS_ERROR_INVALID_ARGUMENT` before any change
-- **Verified by:** pending
+- **Verified by:**
+  `crates/tessera-kernels/src/table/mod.rs::a_merged_count_past_the_int8_range_fails`;
+  `crates/tessera-capi/tests/table.rs::a_merge_that_cannot_be_done_fails`
 
 ### Requirement: A Bloom filter of the keys
 A Bloom filter SHALL be a power of two of 64-bit words, which the caller
@@ -221,7 +231,8 @@ before any change.
 - **WHEN** one hash is added to an empty filter of 1, 2 and 1024 words
 - **THEN** exactly the word and the bits the rule gives are set; the
   hash passes, and a hash with any of those bits clear does not
-- **Verified by:** pending
+- **Verified by:**
+  `crates/tessera-kernels/tests/table.rs::a_hash_sets_the_bits_the_rule_gives`
 
 #### Scenario: Every key of the table passes
 - **WHEN** a filter is filled from a table of 5000 keys over several
@@ -229,13 +240,19 @@ before any change.
   or by adding rows, and its rows are probed with some rows not selected
 - **THEN** every key passes, and the rows not selected are clear in
   `found`
-- **Verified by:** pending
+- **Verified by:**
+  `crates/tessera-kernels/tests/table.rs::a_filter_lets_every_key_through_and_few_others`;
+  `crates/tessera-kernels/tests/table.rs::a_null_group_key_and_int8_keys_pass_their_filter`;
+  `crates/tessera-kernels/tests/table.rs::a_probe_writes_the_whole_result`;
+  `crates/tessera-capi/tests/table.rs::the_filter_entry_points_size_fill_and_probe`
 
 #### Scenario: A filter of the wrong size is refused
 - **WHEN** a filter of 0 or 3 words, or hashes of another row count than
   the mask, are given to fill, add or probe
 - **THEN** the call fails, and the words and `found` are as they were
-- **Verified by:** pending
+- **Verified by:**
+  `crates/tessera-kernels/tests/table.rs::a_filter_of_the_wrong_size_is_refused`;
+  `crates/tessera-capi/tests/table.rs::the_filter_entry_points_size_fill_and_probe`
 
 ### Requirement: The size of a Bloom filter
 `tess_table_bloom_words` SHALL give, for `r` records, the least power of
@@ -251,13 +268,16 @@ than one in 100 absent keys through.
   from 0 to a gigabyte, and for 2^64 - 1 records
 - **THEN** they have 1, 1, 2 and 2048 words, halved within a limit while
   more than an eighth of it, and the last is refused
-- **Verified by:** pending
+- **Verified by:**
+  `crates/tessera-kernels/tests/table.rs::the_words_of_a_filter_for_its_records`;
+  `crates/tessera-kernels/tests/table.rs::a_spill_filter_stays_within_an_eighth_of_its_memory`
 
 #### Scenario: Few absent keys pass
 - **WHEN** a filter of 1024 words holds 4096 keys, 16 bits a key, and
   100000 other keys are probed
 - **THEN** fewer than 1000 of them pass
-- **Verified by:** pending
+- **Verified by:**
+  `crates/tessera-kernels/tests/table.rs::few_absent_keys_pass_a_filter_of_16_bits_a_key`
 
 ### Requirement: A shared Bloom filter
 A shared filter SHALL be a state word followed by the words of a filter,
@@ -312,7 +332,8 @@ two, SHALL be refused.
 #### Scenario: A shared filter of the wrong shape is refused
 - **WHEN** a shared filter is not aligned to 8, or has 1 or 4 words
 - **THEN** every call over it fails, and its words are as they were
-- **Verified by:** pending
+- **Verified by:**
+  `crates/tessera-capi/tests/table.rs::the_filter_entry_points_size_fill_and_probe`
 
 ### Requirement: A filter filled together
 `tess_bloom_shared_add` SHALL set the bits of the hashes of the selected
@@ -328,7 +349,9 @@ a power of two.
   when the model adds by a plain read and write
 - **THEN** every key passes; with the plain read and write the model
   reports a key whose bits were lost
-- **Verified by:** pending
+- **Verified by:**
+  `crates/tessera-kernels/src/table/loom.rs::participants_add_to_one_word_and_lose_no_bit`;
+  `crates/tessera-kernels/src/table/loom.rs::a_plain_read_and_write_loses_the_bits_of_a_filter`
 
 #### Scenario: A filter filled by one participant
 - **WHEN** one participant adds the valid rows of a batch and probes
@@ -380,7 +403,9 @@ walk, and nothing marks or appends during it.
   for records of 32 bytes, and the record 70 of chunk 1 is marked
 - **THEN** they are 0, 1, 1 and 2, and bit 6 of word 1 of chunk 1's
   run is the only bit set
-- **Verified by:** pending
+- **Verified by:**
+  `crates/tessera-kernels/src/table/marks.rs::a_chunk_has_a_word_of_marks_per_64_records`;
+  `crates/tessera-kernels/tests/table.rs::a_record_s_mark_is_its_bit_of_its_chunk_s_run`
 
 #### Scenario: Marked records are left out of the walk
 - **WHEN** some records of several chunks are marked, alone or shared,
@@ -398,7 +423,9 @@ walk, and nothing marks or appends during it.
   12, larger than a chunk or not the index's; a cursor is off a record
   or past its chunk's used mark; or a walk asks for no records
 - **THEN** the call fails and the cursor and the count are as they were
-- **Verified by:** pending
+- **Verified by:**
+  `crates/tessera-capi/tests/table.rs::marks_and_walks_that_cannot_be_done_are_refused`;
+  `crates/tessera-kernels/src/table/marks.rs::a_walk_refuses_a_used_mark_or_a_cursor_off_the_records`
 
 #### Scenario: Participants mark at once
 - **WHEN** two participants mark records of one word at the same time,
@@ -406,4 +433,6 @@ walk, and nothing marks or appends during it.
   are done; and when the model marks by a plain read and write
 - **THEN** the walk gives no marked record; with the plain read and
   write the model reports a mark that was lost
-- **Verified by:** pending
+- **Verified by:**
+  `crates/tessera-kernels/src/table/loom.rs::participants_mark_one_word_and_lose_no_mark`;
+  `crates/tessera-kernels/src/table/loom.rs::a_plain_read_and_write_loses_marks`
