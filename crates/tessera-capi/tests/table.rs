@@ -7,6 +7,8 @@
     reason = "a test reports a failure by panicking"
 )]
 
+use std::alloc::{GlobalAlloc, Layout, System};
+use std::cell::Cell;
 use std::ptr;
 
 use anyhow::Result;
@@ -26,7 +28,43 @@ use tessera_capi::c::{
 };
 use tessera_core::{ColumnView, RowMask, RowMaskView};
 use tessera_kernels::int32::{self, NullKeys};
-use tessera_kernels::table::{Batch, CHUNK_HEADER, KeyKind, LocalTable, TableConfig, index_size};
+use tessera_kernels::table::{
+    Batch, CHUNK_HEADER, KeyKind, LocalTable, MAX_PAYLOAD_COLUMNS, TableConfig, index_size,
+    payload_null_words,
+};
+
+thread_local! {
+    /// The allocations this thread has made, for a test that a call makes
+    /// none; tests run on threads of their own.
+    static ALLOCATIONS: Cell<usize> = const { Cell::new(0) };
+}
+
+/// The system's allocator, counting each thread's allocations.
+struct Counting;
+
+// SAFETY: every call goes to the system allocator unchanged.
+unsafe impl GlobalAlloc for Counting {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        let _ = ALLOCATIONS.try_with(|count| count.set(count.get() + 1));
+        // SAFETY: the caller's contract.
+        unsafe { System.alloc(layout) }
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        // SAFETY: the caller's contract.
+        unsafe { System.dealloc(ptr, layout) }
+    }
+}
+
+#[global_allocator]
+static ALLOCATOR: Counting = Counting;
+
+/// The allocations `call` makes on this thread.
+fn allocations_of<R>(call: impl FnOnce() -> R) -> (R, usize) {
+    let before = ALLOCATIONS.with(Cell::get);
+    let result = call();
+    (result, ALLOCATIONS.with(Cell::get) - before)
+}
 
 /// int4 keys with every fifth row NULL and every value twice: as Datum
 /// words with flags, and as dense values with a non-NULL mask.
@@ -3094,6 +3132,100 @@ fn an_append_refuses_records_that_are_not_its_table_s() -> Result<()> {
         assert_eq!(code, Code::Ok, "{}", status.message());
         assert_eq!(bare_chunk[0], (CHUNK_HEADER + 4 * 40) as u64);
         assert_eq!(bare_words, [0]);
+    }
+    Ok(())
+}
+
+/// A payload of up to 64 columns and one wider, to the most a payload
+/// has, goes in through the entry point without an allocation, each word
+/// where the format puts it.
+#[test]
+fn payload_columns_append_without_allocating() -> Result<()> {
+    let keys = Keys::new(4);
+    let column = keys.column();
+    let key = TableKey {
+        kind: 1,
+        column: &raw const column,
+        prepared: ptr::null(),
+    };
+    let hashes = [0_u32; 4];
+    for ncolumns in [64, 65, 130, MAX_PAYLOAD_COLUMNS] {
+        let values: Vec<[u64; 4]> = (0..ncolumns as u64)
+            .map(|column| [0, 1, 2, 3].map(|row| column * 10 + row))
+            .collect();
+        let nulls: Vec<[bool; 4]> = (0..ncolumns)
+            .map(|column| [0, 1, 2, 3].map(|row| row == column % 5))
+            .collect();
+        let columns: Vec<DatumColumn> = values
+            .iter()
+            .zip(&nulls)
+            .map(|(values, nulls)| DatumColumn {
+                struct_size: size_of::<DatumColumn>(),
+                values: values.as_ptr(),
+                isnull: nulls.as_ptr(),
+                nrows: 4,
+                ..DatumColumn::EMPTY
+            })
+            .collect();
+        let null_words = payload_null_words(ncolumns);
+        let payload_size = 8 * (null_words + ncolumns);
+        let mut status = Status::new();
+        // SAFETY: local buffers of the declared sizes, aliased by nothing
+        // else, throughout this test.
+        unsafe {
+            let mut table = CTable::new(1, payload_size, 4);
+            table.add_chunk(CHUNK_HEADER + 4 * (24 + payload_size));
+            let mut pending_words = [0b1111];
+            let mut pending = Mask {
+                nrows: 4,
+                bits: pending_words.as_mut_ptr(),
+            };
+            let mut offsets = [0_u32; 4];
+            let (code, allocations) = allocations_of(|| {
+                tess_table_append_columns(
+                    table.ptr(),
+                    0,
+                    hashes.as_ptr(),
+                    1,
+                    &raw const key,
+                    ncolumns as i32,
+                    columns.as_ptr(),
+                    &raw mut pending,
+                    offsets.as_mut_ptr(),
+                    &raw mut status,
+                )
+            });
+            assert_eq!(code, Code::Ok, "{}", status.message());
+            assert_eq!(allocations, 0, "{ncolumns} columns");
+            assert_eq!(pending_words, [0]);
+            for (row, &offset) in offsets.iter().enumerate() {
+                let mut record = TableRecord {
+                    struct_size: size_of::<TableRecord>(),
+                    hash: 0,
+                    null_bits: 0,
+                    keys: ptr::null(),
+                    payload: ptr::null(),
+                    payload_size: 0,
+                };
+                let code = tess_table_record(table.ptr(), offset, &raw mut record, &raw mut status);
+                assert_eq!(code, Code::Ok, "{}", status.message());
+                let words: Vec<u64> = std::slice::from_raw_parts(record.payload, payload_size)
+                    .chunks(8)
+                    .map(|word| u64::from_ne_bytes(word.try_into().unwrap()))
+                    .collect();
+                for column in 0..ncolumns {
+                    let null = nulls[column][row];
+                    let bit = words[column / 64] >> (column % 64) & 1;
+                    assert_eq!(bit, u64::from(null), "column {column}, row {row}");
+                    let wanted = if null { 0 } else { values[column][row] };
+                    assert_eq!(
+                        words[null_words + column],
+                        wanted,
+                        "column {column}, row {row}"
+                    );
+                }
+            }
+        }
     }
     Ok(())
 }

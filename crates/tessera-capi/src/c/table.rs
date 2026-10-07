@@ -634,50 +634,77 @@ pub unsafe extern "C" fn tess_table_append_columns(
             let hashes = values(hashes, nrows, "hashes")?;
             let offsets = slots(offsets, nrows, "offsets")?;
             let columns = values(columns, ncolumns, "payload columns")?;
-            // Only the columns given are set: a batch of a few rows would
-            // otherwise pay for clearing 64 slices of each kind. Wider
-            // payloads take their slices from the heap.
-            let mut words = [const { MaybeUninit::<&[u64]>::uninit() }; 64];
-            let mut nulls = [const { MaybeUninit::<&[bool]>::uninit() }; 64];
-            let mut wide_words: Vec<&[u64]> = Vec::new();
-            let mut wide_nulls: Vec<&[bool]> = Vec::new();
-            for (index, column) in columns.iter().enumerate() {
-                ensure!(
-                    usize::try_from(column.nrows).ok() == Some(nrows),
-                    "payload column {index} has {} rows, not {nrows}",
-                    column.nrows
-                );
-                let (value_slice, null_slice) = (
-                    values(column.values, nrows, "payload values")?,
-                    values(column.isnull, nrows, "payload NULL flags")?,
-                );
-                if ncolumns <= 64 {
-                    words[index].write(value_slice);
-                    nulls[index].write(null_slice);
-                } else {
-                    wide_words.push(value_slice);
-                    wide_nulls.push(null_slice);
-                }
-            }
-            // SAFETY: for 64 columns or fewer the loop above initialized
-            // the first `ncolumns` slots of each array.
-            let (words, nulls) = if ncolumns <= 64 {
-                (
-                    &*(&raw const words[..ncolumns] as *const [&[u64]]),
-                    &*(&raw const nulls[..ncolumns] as *const [&[bool]]),
-                )
-            } else {
-                (wide_words.as_slice(), wide_nulls.as_slice())
-            };
-            let payload = PayloadColumns::new(words, nulls, nrows)?;
             let mut batch = Batch::new(hashes, &decoded, &mut pending, offsets)?;
-            match indexed {
-                Some(table) => table.append_columns(chunk, &payload, &mut batch),
-                None => append_columns_to(&config, chunks, chunk, &payload, &mut batch),
+            let append = |payload: &PayloadColumns<'_>| match &indexed {
+                Some(table) => table.append_columns(chunk, payload, &mut batch),
+                None => append_columns_to(&config, chunks, chunk, payload, &mut batch),
+            };
+            if ncolumns <= 64 {
+                with_payload::<64, _>(columns, nrows, append)
+            } else {
+                with_wide_payload(columns, nrows, append)
             }
             .map(drop)
         })
     }
+}
+
+/// `columns`, of `nrows` rows each, as the payload columns `append` takes:
+/// their slices in arrays of `N` on the stack, so that a call allocates
+/// nothing. Only the slots of the columns given are set: a batch of a few
+/// rows would otherwise pay for clearing every slot.
+///
+/// # Safety
+///
+/// There are at most `N` columns, and each one's values and NULL flags
+/// are valid for reads of its rows and unchanged during the call.
+#[inline(always)]
+unsafe fn with_payload<const N: usize, R>(
+    columns: &[DatumColumn],
+    nrows: usize,
+    append: impl FnOnce(&PayloadColumns<'_>) -> Result<R>,
+) -> Result<R> {
+    let mut words = [const { MaybeUninit::<&[u64]>::uninit() }; N];
+    let mut nulls = [const { MaybeUninit::<&[bool]>::uninit() }; N];
+    for (index, column) in columns.iter().enumerate() {
+        ensure!(
+            usize::try_from(column.nrows).ok() == Some(nrows),
+            "payload column {index} has {} rows, not {nrows}",
+            column.nrows
+        );
+        // SAFETY: the caller's contract.
+        unsafe {
+            words[index].write(values(column.values, nrows, "payload values")?);
+            nulls[index].write(values(column.isnull, nrows, "payload NULL flags")?);
+        }
+    }
+    // SAFETY: the loop above initialized the first `columns.len()` slots of
+    // each array.
+    let (words, nulls) = unsafe {
+        (
+            &*(&raw const words[..columns.len()] as *const [&[u64]]),
+            &*(&raw const nulls[..columns.len()] as *const [&[bool]]),
+        )
+    };
+    append(&PayloadColumns::new(words, nulls, nrows)?)
+}
+
+/// As [`with_payload`] for a payload wider than 64 columns, up to the most
+/// a payload has: its arrays take 64 KiB of the stack, in a frame of their
+/// own, so that a payload of 64 columns or fewer does not reserve them.
+///
+/// # Safety
+///
+/// As for [`with_payload`], with at most [`MAX_PAYLOAD_COLUMNS`] columns.
+#[cold]
+#[inline(never)]
+unsafe fn with_wide_payload<R>(
+    columns: &[DatumColumn],
+    nrows: usize,
+    append: impl FnOnce(&PayloadColumns<'_>) -> Result<R>,
+) -> Result<R> {
+    // SAFETY: the caller's contract.
+    unsafe { with_payload::<MAX_PAYLOAD_COLUMNS, R>(columns, nrows, append) }
 }
 
 /// The partitions of a spilling table: `npartitions` chunk numbers at

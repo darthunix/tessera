@@ -1131,8 +1131,6 @@ becomes an entry, joins one, or is dropped.
   - The loom model has no negative test of the order that it once found
     wrong, the count of records added after a record is published: it
     would need a switch of that order in the table's own code.
-  - A payload of more than 64 columns makes `tess_table_append_columns`
-    allocate a list of the columns for the call.
   - A node sends rows to disk when its memory is full, never because
     its chunks are many. With a `hash_mem` above 32 GiB, or a sort's
     `work_mem`, a join, a grouping or a sort can need a 32769th chunk
