@@ -3,20 +3,38 @@
 //! the records without one, which go out with NULL outer columns after the
 //! outer side. The marks are the caller's memory, a run of words per
 //! chunk ([`Marks`]): bit `i` of word `w` of chunk `c` stands for the
-//! chunk's record `64 * w + i`. Both read the chunks alone, not the index,
-//! which a spilling join frees before the walk.
+//! chunk's record `64 * w + i`. Both need only the chunks, so the size of
+//! a record comes from the caller; the entry points check it against the
+//! index when the table has one.
 
 use anyhow::{Context, Result, ensure};
 use tessera_core::{RowMaskView, ones};
 
 use super::Chunks;
 use super::exclusive::Cursor;
-use super::header::{CHUNK_HEADER, MAX_CHUNK_LEN, placement, reference};
+use super::header::{CHUNK_HEADER, KEY_SLOT, MAX_CHUNK_LEN, RECORD_HEADER, placement, reference};
 
 /// The words of marks of a chunk of `chunk_len` bytes: a bit for every
 /// record of `record_size` bytes after the chunk's header.
-pub fn mark_words(chunk_len: usize, record_size: usize) -> usize {
-    (chunk_len.saturating_sub(CHUNK_HEADER) / record_size.max(1)).div_ceil(64)
+///
+/// # Errors
+///
+/// A size that no record of a table has.
+pub fn mark_words(chunk_len: usize, record_size: usize) -> Result<usize> {
+    check_record_size(record_size)?;
+    Ok((chunk_len.saturating_sub(CHUNK_HEADER) / record_size).div_ceil(64))
+}
+
+/// A record of a table: a multiple of 8, a header and a key at least, and
+/// no more than a chunk holds after its used mark. A size between the
+/// records would name places where no record starts.
+fn check_record_size(size: usize) -> Result<()> {
+    ensure!(
+        size.is_multiple_of(8)
+            && (RECORD_HEADER + KEY_SLOT..=MAX_CHUNK_LEN - CHUNK_HEADER).contains(&size),
+        "records of {size} bytes are not the records of a table"
+    );
+    Ok(())
 }
 
 /// Division of an offset within a chunk by a record's size as a multiply
@@ -115,6 +133,7 @@ pub fn mark(
     marks: &impl Marks,
 ) -> Result<()> {
     let nrows = rows.nrows();
+    check_record_size(record_size)?;
     let per_record = PerRecord::new(record_size)?;
     ensure!(
         refs.len() == nrows,
@@ -152,9 +171,10 @@ pub fn mark(
 
 /// Visit the records without a mark from `cursor` on, chunk by chunk in
 /// the order they were appended, as many as `out` holds: their references
-/// fill `out`, the count is returned and the cursor moves past the last
-/// record looked at; 0 means the walk is over. Without marks every record
-/// is one without a pair. A word of marks covers 64 records at once.
+/// fill `out`, the count is returned and the cursor names the first record
+/// not given; 0 means the walk is over. Without marks every record is one
+/// without a pair. A word of marks covers 64 records at once. A cursor
+/// must name a record's place, in a chunk at most up to its used mark.
 pub fn scan_unmarked(
     chunks: &Chunks<'_>,
     record_size: usize,
@@ -162,6 +182,7 @@ pub fn scan_unmarked(
     marks: Option<&impl Marks>,
     out: &mut [u32],
 ) -> Result<usize> {
+    check_record_size(record_size)?;
     let per_record = PerRecord::new(record_size)?;
     let first_chunk = cursor.chunk();
     let first = cursor
@@ -170,6 +191,14 @@ pub fn scan_unmarked(
         .and_then(|offset| per_record.starting(offset))
         .filter(|_| first_chunk <= chunks.len())
         .with_context(|| format!("table cursor {:#x} lies outside the records", cursor.raw()))?;
+    // Past the used mark the walk would skip the rest of the chunk.
+    if first_chunk < chunks.len() {
+        ensure!(
+            first <= chunks.records(first_chunk, per_record)?,
+            "table cursor {:#x} lies past its chunk's records",
+            cursor.raw()
+        );
+    }
     // Every loop is bounded: by the chunks, their words and a word's bits.
     let mut count = 0;
     for chunk in first_chunk..chunks.len() {
@@ -223,10 +252,15 @@ mod tests {
 
     #[test]
     fn a_chunk_has_a_word_of_marks_per_64_records() {
-        assert_eq!(mark_words(CHUNK_HEADER, 24), 0);
-        assert_eq!(mark_words(CHUNK_HEADER + 64 * 24, 24), 1);
-        assert_eq!(mark_words(CHUNK_HEADER + 65 * 24, 24), 2);
-        assert_eq!(mark_words(CHUNK_HEADER + 65 * 24 + 23, 24), 2);
+        assert_eq!(mark_words(CHUNK_HEADER, 24).unwrap(), 0);
+        assert_eq!(mark_words(CHUNK_HEADER + 64 * 24, 24).unwrap(), 1);
+        assert_eq!(mark_words(CHUNK_HEADER + 65 * 24, 24).unwrap(), 2);
+        assert_eq!(mark_words(CHUNK_HEADER + 65 * 24 + 23, 24).unwrap(), 2);
+        // A size no record has: too small, between the records, too large.
+        for size in [0, 16, 28, MAX_CHUNK_LEN] {
+            assert!(mark_words(MAX_CHUNK_LEN, size).is_err(), "{size}");
+        }
+        assert!(mark_words(MAX_CHUNK_LEN, MAX_CHUNK_LEN - CHUNK_HEADER).is_ok());
     }
 
     /// No marks: a walk over every record.
@@ -279,7 +313,7 @@ mod tests {
     /// boundary, and a cursor only on a record's boundary below 2^21.
     #[test]
     fn a_walk_refuses_a_used_mark_or_a_cursor_off_the_records() {
-        const SIZE: usize = 8;
+        const SIZE: usize = 24;
         let len = CHUNK_HEADER + 4 * SIZE;
         let walk = |used: u64, cursor: Cursor| -> Result<usize> {
             let mut words = vec![0_u64; len / 8];
@@ -299,9 +333,17 @@ mod tests {
             "a full chunk"
         );
         assert_eq!(
-            walk(len as u64 - 8, at(CHUNK_HEADER + SIZE)).unwrap(),
+            walk((len - SIZE) as u64, at(CHUNK_HEADER + SIZE)).unwrap(),
             2,
             "from the second"
+        );
+        // A cursor past the used mark would skip the chunk's rest.
+        let used = (CHUNK_HEADER + 2 * SIZE) as u64;
+        assert_eq!(walk(used, at(CHUNK_HEADER + 2 * SIZE)).unwrap(), 0);
+        assert!(
+            walk(used, at(CHUNK_HEADER + 3 * SIZE))
+                .is_err_and(|error| error.to_string().contains("past its chunk's records")),
+            "a cursor past the used mark"
         );
         for used in [0, 4, len as u64 + 8, (CHUNK_HEADER + 4) as u64] {
             assert!(

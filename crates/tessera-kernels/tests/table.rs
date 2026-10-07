@@ -1095,7 +1095,9 @@ fn marked_records_are_left_out_of_the_walk() {
                 + 1;
             let marks = TestMarks(
                 (0..nchunks)
-                    .map(|_| vec![std::cell::Cell::new(0); mark_words(chunk_bytes, record)])
+                    .map(|_| {
+                        vec![std::cell::Cell::new(0); mark_words(chunk_bytes, record).unwrap()]
+                    })
                     .collect(),
             );
             // Mark one record in `every`, by a batch of all of them.

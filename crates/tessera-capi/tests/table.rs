@@ -1519,6 +1519,148 @@ fn partial_states_merge_through_the_entry_point() -> Result<()> {
     Ok(())
 }
 
+/// Marks and walks that cannot be done fail, with the cursor and the
+/// count as they were: references that name no record, record sizes that
+/// are not the table's, cursors off its records, walks of no records, and
+/// more chunks than a table may have.
+#[test]
+fn marks_and_walks_that_cannot_be_done_are_refused() -> Result<()> {
+    const NROWS: usize = 100;
+    let values: Vec<u64> = (0..NROWS as u64).collect();
+    let isnull = [false; NROWS];
+    let column = DatumColumn {
+        struct_size: size_of::<DatumColumn>(),
+        values: values.as_ptr(),
+        isnull: isnull.as_ptr(),
+        nrows: NROWS as i32,
+        ..DatumColumn::EMPTY
+    };
+    let key = TableKey {
+        kind: 1,
+        column: &raw const column,
+        prepared: ptr::null(),
+    };
+    let hashes: Vec<u32> = values
+        .iter()
+        .map(|&value| int32::murmurhash32(value as u32))
+        .collect();
+    let payload: Vec<u8> = values
+        .iter()
+        .flat_map(|value| value.to_ne_bytes())
+        .collect();
+    let mut status = Status::new();
+    // SAFETY: local buffers of the declared sizes, aliased by nothing else,
+    // throughout this test.
+    unsafe {
+        // Records of 32 bytes, 70 to a chunk: chunk 1 holds 30.
+        let chunk_bytes = 8 + 70 * 32;
+        let mut table = CTable::new(1, 8, 128);
+        let mut pending_words = [u64::MAX, (1 << 36) - 1];
+        let mut pending = Mask {
+            nrows: NROWS as i32,
+            bits: pending_words.as_mut_ptr(),
+        };
+        let mut offsets = vec![0; NROWS];
+        table.insert(
+            chunk_bytes,
+            hashes.as_ptr(),
+            &raw const key,
+            payload.as_ptr(),
+            &raw mut pending,
+            offsets.as_mut_ptr(),
+            false,
+        );
+        assert_eq!(table.chunks.len(), 2);
+        let mut marks = vec![vec![0_u64; 2]; 2];
+        let pointers: Vec<*mut u64> = marks.iter_mut().map(|run| run.as_mut_ptr()).collect();
+        let mut one_word = [1_u64];
+        let one = Mask {
+            nrows: 1,
+            bits: one_word.as_mut_ptr(),
+        };
+        let mut mark = |table: *const TableRef, reference: u32, size: usize| {
+            tess_table_mark(
+                table,
+                size,
+                &raw const reference,
+                &raw const one,
+                pointers.as_ptr(),
+                false,
+                &raw mut status,
+            )
+        };
+        // Before the records, between two, past the chunk, in no chunk.
+        let past = (8 + 70 * 32) / 8;
+        for reference in [0, offsets[0] + 1, past, (5 << 17) | 1] {
+            assert_eq!(
+                mark(table.ptr(), reference, 32),
+                Code::InvalidArgument,
+                "{reference:#x}"
+            );
+        }
+        // Sizes no record has, and one that is not the table's.
+        for size in [0, 12, 1 << 20, 40] {
+            assert_eq!(
+                mark(table.ptr(), offsets[0], size),
+                Code::InvalidArgument,
+                "{size}"
+            );
+            if size != 40 {
+                let mut words = 7;
+                let mut status = Status::new();
+                let code =
+                    tess_table_mark_words(chunk_bytes, size, &raw mut words, &raw mut status);
+                assert_eq!((code, words), (Code::InvalidArgument, 7), "{size}");
+            }
+        }
+        assert!(marks.iter().flatten().all(|&word| word == 0), "no mark set");
+        // More chunks than a table may have, each a chunk of 8 bytes.
+        let mut empty = [8_u64];
+        let bases = vec![empty.as_mut_ptr().cast::<u8>(); 32769];
+        let lens = vec![8_usize; 32769];
+        let many = TableRef {
+            index: ptr::null_mut(),
+            index_len: 0,
+            chunks: bases.as_ptr(),
+            chunk_lens: lens.as_ptr(),
+            nchunks: 32769,
+        };
+        assert_eq!(mark(&raw const many, offsets[0], 32), Code::InvalidArgument);
+
+        let walk = |size: usize, start: u64, capacity: i32| {
+            let (mut cursor, mut count) = (start, -1);
+            let mut out = [0_u32; 8];
+            let mut status = Status::new();
+            let code = tess_table_next_unmarked(
+                table.ptr(),
+                size,
+                pointers.as_ptr(),
+                false,
+                &raw mut cursor,
+                out.as_mut_ptr(),
+                capacity,
+                &raw mut count,
+                &raw mut status,
+            );
+            assert_eq!((cursor, count), (start, -1), "{size} {start:#x} {capacity}");
+            code
+        };
+        // Sizes, a cursor off a record and one past chunk 1's 30 records,
+        // a walk of none and of fewer than none.
+        for (size, start, capacity) in [
+            (12, 0, 8),
+            (40, 0, 8),
+            (32, 12, 8),
+            (32, (1 << 32) | (8 + 40 * 32), 8),
+            (32, 0, 0),
+            (32, 0, -1),
+        ] {
+            assert_eq!(walk(size, start, capacity), Code::InvalidArgument);
+        }
+    }
+    Ok(())
+}
+
 /// RIGHT and FULL joins through the entry points: the records of every
 /// third row marked, by one process or atomically, are left out of the
 /// walk, which goes on where it stopped; without marks it visits every

@@ -989,17 +989,20 @@ extern TessStatusCode tess_table_scan(const TessTableRef *table,
  * each, a run of words per chunk that the caller keeps: bit i of word w of
  * chunk c stands for the chunk's record 64 * w + i. tess_table_mark_words
  * gives the words of a chunk of chunk_len bytes, at least what each
- * chunk's run must hold.
+ * chunk's run must hold. record_size is the size of a record of a table:
+ * a multiple of 8, from 24 bytes to the room of the largest chunk.
  */
 extern TessStatusCode tess_table_mark_words(Size chunk_len, Size record_size,
 											Size *words, TessStatus *status);
 
 /*
  * Set the mark of the record at refs[row] for each row of rows, which
- * must name a record of record_size bytes of the table's chunks (its index
- * is not read): marks[chunk] for each chunk of the table, each
+ * must name a record of record_size bytes within the length of one of the
+ * table's chunks: marks[chunk] for each chunk of the table, each
  * tess_table_mark_words of its length; with shared, every participant sets
- * them, and they are set atomically.
+ * them, and they are set atomically. The index is not needed; a table
+ * with an index must have records of record_size bytes. After a failure
+ * the marks of the rows before it may be set.
  */
 extern TessStatusCode tess_table_mark(const TessTableRef *table,
 									  Size record_size,
@@ -1012,10 +1015,11 @@ extern TessStatusCode tess_table_mark(const TessTableRef *table,
 /*
  * As tess_table_scan, a capacity of at least 1, the records without a
  * mark only, every record when marks is NULL: the records of a RIGHT or
- * FULL join without a pair, of record_size bytes, read from the chunks
- * alone (a spilling join has freed the index by then). The cursor moves past the last record looked at.
- * Nothing sets the marks or appends to the chunks meanwhile; shared marks
- * are read atomically.
+ * FULL join without a pair, of record_size bytes as for tess_table_mark,
+ * read from the chunks. The cursor, 0 at first, then names the first
+ * record not given, and a count of 0 ends the walk; a cursor off a record
+ * or past its chunk's used mark is refused. Nothing sets the marks or
+ * appends to the chunks meanwhile; shared marks are read atomically.
  */
 extern TessStatusCode tess_table_next_unmarked(const TessTableRef *table,
 											   Size record_size,
