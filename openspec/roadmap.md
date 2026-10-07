@@ -1122,13 +1122,6 @@ becomes an entry, joins one, or is dropped.
     page for each partition's file, though a set has one buffer. Whether
     the reserves themselves are still right is to be decided.
 
-- **`hash-table`: what the description of the table found and left**
-  (found when the capability was described).
-  - Every call checks every chunk it is given, at its start, so the
-    fixed part of a call grows with the number of chunks: about a
-    thousand checks a call for a table of 1 GiB, whatever the rows.
-    Suggested: measure a probe of a large table first.
-
 ## Decided against
 
 Not future work: each was weighed and refused, or left to the core, with

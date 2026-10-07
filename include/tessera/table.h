@@ -22,10 +22,11 @@
  * Every block must be aligned to 8; tess_table_size says how many bytes
  * an index for a capacity needs, tess_table_create lays the index out,
  * tess_table_chunk_init makes a block an empty chunk, and every other
- * call checks the chunks it is given, the whole header when it reads the
- * index, and every reference it follows, and bounds every walk down a
- * chain, so a corrupt table is a status, never a crash or a hang. The
- * capability hash-table (openspec/specs/hash-table/) is the contract.
+ * call checks the chunks it writes or walks (a debug build every chunk
+ * it is given), the whole header when it reads the index, and every
+ * reference it follows, and bounds every walk down a chain, so a corrupt
+ * table is a status, never a crash or a hang. The capability hash-table
+ * (openspec/specs/hash-table/) is the contract.
  *
  * Records are addressed by 32-bit references: a chunk number and a place
  * in units of 8 bytes; 0 is none. Records never move: a chunk fills and

@@ -271,6 +271,12 @@ impl Region for LoomRegion {
         self.chunk_len
     }
 
+    /// The model's chunks are its own vectors of words.
+    fn chunk_fits(&self, chunk: usize) -> bool {
+        assert!(chunk < self.chunks.len());
+        true
+    }
+
     unsafe fn chunk_used(&self, chunk: usize) -> u64 {
         self.chunks[chunk].used.with(|_| ());
         // SAFETY: the used mark is the chunk's first word.

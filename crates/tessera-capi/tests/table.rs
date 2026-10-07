@@ -29,8 +29,8 @@ use tessera_capi::c::{
 use tessera_core::{ColumnView, RowMask, RowMaskView};
 use tessera_kernels::int32::{self, NullKeys};
 use tessera_kernels::table::{
-    Batch, CHUNK_HEADER, KeyKind, LocalTable, MAX_PAYLOAD_COLUMNS, TableConfig, index_size,
-    payload_null_words,
+    Batch, CHUNK_HEADER, KeyKind, LocalTable, MAX_CHUNK_LEN, MAX_PAYLOAD_COLUMNS, TableConfig,
+    index_size, payload_null_words,
 };
 
 thread_local! {
@@ -3225,6 +3225,71 @@ fn payload_columns_append_without_allocating() -> Result<()> {
                     );
                 }
             }
+        }
+    }
+    Ok(())
+}
+
+/// A call checks the chunks it writes or walks; a debug build of the entry
+/// points checks every chunk, so that a probe that touches none of them
+/// refuses a chunk longer than 1 MiB there, and goes on in a release build.
+#[test]
+fn a_debug_build_checks_every_chunk() -> Result<()> {
+    let values: Vec<u64> = (1..=4).collect();
+    let isnull = [false; 4];
+    let column = DatumColumn {
+        struct_size: size_of::<DatumColumn>(),
+        values: values.as_ptr(),
+        isnull: isnull.as_ptr(),
+        nrows: 4,
+        ..DatumColumn::EMPTY
+    };
+    let key = TableKey {
+        kind: 1,
+        column: &raw const column,
+        prepared: ptr::null(),
+    };
+    let hashes: Vec<u32> = values
+        .iter()
+        .map(|&value| int32::murmurhash32(value as u32))
+        .collect();
+    let mut long = vec![0_u64; (MAX_CHUNK_LEN + 8) / 8];
+    long[0] = CHUNK_HEADER as u64;
+    let mut status = Status::new();
+    // SAFETY: local buffers of the declared sizes, aliased by nothing else,
+    // throughout this test.
+    unsafe {
+        let mut table = CTable::new(1, 8, 8);
+        table.bases.push(long.as_mut_ptr().cast());
+        table.lens.push(MAX_CHUNK_LEN + 8);
+        table.refresh();
+        let rows_words = [0b1111];
+        let rows = Mask {
+            nrows: 4,
+            bits: rows_words.as_ptr().cast_mut(),
+        };
+        let mut found_words = [0];
+        let mut found = Mask {
+            nrows: 4,
+            bits: found_words.as_mut_ptr(),
+        };
+        let mut matches = [0_u32; 4];
+        let code = tess_table_probe(
+            table.ptr(),
+            hashes.as_ptr(),
+            1,
+            &raw const key,
+            &raw const rows,
+            matches.as_mut_ptr(),
+            &raw mut found,
+            &raw mut status,
+        );
+        if cfg!(debug_assertions) {
+            assert_eq!(code, Code::InvalidArgument);
+            assert!(status.message().contains("not aligned to 8"));
+        } else {
+            assert_eq!(code, Code::Ok, "{}", status.message());
+            assert_eq!(found_words, [0], "an empty table finds no key");
         }
     }
     Ok(())

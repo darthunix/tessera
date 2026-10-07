@@ -683,14 +683,22 @@ bucket, so that the table's code keeps one order only.
 ## Checks and errors
 
 The table trusts nothing it reads, because it cannot know who wrote the
-bytes last. Every call does three kinds of check.
+bytes last. Every call does four kinds of check.
 
-- **The header and the chunks, once a call.** The header's fields must
-  agree with each other and with the length of the index, as
+- **The header, once a call.** The header's fields must agree with
+  each other and with the length of the index, as
   [The index of a table](spec.md#requirement-the-index-of-a-table)
-  lists them. Each chunk the call is given must be aligned and of a
-  length a chunk may have. The calls that append to chunks before an
-  index exists check the chunks only.
+  lists them. The calls that append to chunks before an index exists
+  have no header to check.
+- **A chunk, when the call starts on it.** A call that writes or walks
+  a chunk first checks that it is aligned and of a length a chunk may
+  have; a chunk longer than 1 MiB would hold places that no reference
+  can name. The other chunks a call is given it does not read, and
+  their alignment is the caller's promise, as the validity of their
+  memory is. Checking every chunk at every call cost 13 instructions a
+  chunk, about 13 000 a call for a table of 1 GiB, whatever the rows. A
+  debug build of the entry points still does it, so that the test
+  suites find a node's wrong chunk wherever it lies.
 - **Every reference before it is followed.** Its chunk must exist, the
   whole record must lie inside the chunk, and the record must claim the
   table's record size. The check uses the chunk's length, not its used
@@ -723,9 +731,6 @@ SQLSTATE are in
 raises the error with `ereport` after the call returns, because a
 PostgreSQL error must not unwind through Rust code.
 
-The checks have a price that grows with the table: a call checks every
-chunk it is given, so a table of a thousand chunks pays a thousand
-checks a call, whatever the number of rows.
 
 ## What we decided not to do
 
