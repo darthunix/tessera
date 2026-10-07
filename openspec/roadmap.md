@@ -1126,9 +1126,6 @@ becomes an entry, joins one, or is dropped.
     NULL key, which its hashing drops; the join's counts only rows with
     keys. `docs/nodes.md` does not say so. For the capabilities of the
     join and of the filter.
-  - A shared table's filter is allocated and cleared at SIZE whether or
-    not a participant ever wants it: 16 bits a record of the query's
-    shared memory. A cost for the join's capability to weigh.
 
 ## Decided against
 

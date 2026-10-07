@@ -1027,12 +1027,16 @@ decide_bloom(TessHashJoinState *state, uint64 rows, uint64 found)
 		return;
 	/*
 	 * A shared table's filter: the first participant that wants it builds
-	 * it for all; until it is ready, the others probe without it.
+	 * it for all; until it is ready, the others probe without it. The
+	 * elected participant allocated none for a table that may not want
+	 * one, which the same rule decides.
 	 */
 	if (state->parallel.shared != NULL)
 	{
 		bool		built;
 
+		if (!DsaPointerIsValid(state->parallel.shared->filter))
+			return;
 		state->bloom.bits = dsa_get_address(join_query_dsa(state), state->parallel.shared->filter);
 		state->bloom.nwords = state->parallel.shared->filter_words;
 		state->bloom.shared = true;

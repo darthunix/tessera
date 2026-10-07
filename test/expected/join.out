@@ -3335,6 +3335,38 @@ SELECT join_property($$SELECT count(*) FROM jprobe JOIN jbuild ON jprobe.k = jbu
  1       | true
 (1 row)
 
+-- A shared table of fewer than 4096 rows never wants a filter at the
+-- default ratio, and none is allocated; at a ratio of 1 every table may
+-- want one, and its 1025 words are allocated with the table.
+EXPLAIN (COSTS OFF) SELECT count(*) FROM jprobe JOIN (SELECT * FROM jbuild WHERE w <= 4000) AS b ON jprobe.k = b.k;
+                                    QUERY PLAN                                     
+-----------------------------------------------------------------------------------
+ Custom Scan (TessAgg)
+   Partial Mode: Finalize
+   ->  Custom Scan (TessGather)
+         Workers Planned: 2
+         ->  Parallel Custom Scan (TessSend)
+               ->  Parallel Custom Scan (TessAgg)
+                     Partial Mode: Partial
+                     ->  Parallel Custom Scan (TessHashJoin)
+                           Hash Cond: (jprobe.k = jbuild.k)
+                           Shared Table: true
+                           ->  Parallel Custom Scan (TessHeapScan) on jprobe
+                           ->  Parallel Custom Scan (TessFilter) on jbuild
+                                 Batch Filter: (jbuild.w <= 4000)
+                                 ->  Parallel Custom Scan (TessHeapScan) on jbuild
+(14 rows)
+
+SET tessera.join_bloom_ratio = 1;
+SELECT join_property($$SELECT count(*) FROM jprobe JOIN (SELECT * FROM jbuild WHERE w <= 4000) AS b ON jprobe.k = b.k$$, 'Memory Usage') AS with_filter \gset
+RESET tessera.join_bloom_ratio;
+SELECT join_property($$SELECT count(*) FROM jprobe JOIN (SELECT * FROM jbuild WHERE w <= 4000) AS b ON jprobe.k = b.k$$, 'Memory Usage') AS without_filter \gset
+SELECT :with_filter - :without_filter >= 8 AS filter_only_where_wanted;
+ filter_only_where_wanted 
+--------------------------
+ t
+(1 row)
+
 SELECT join_same($$SELECT count(*), sum(jprobe.v) FROM jprobe WHERE NOT EXISTS (SELECT 1 FROM jbuild WHERE jbuild.k = jprobe.k)$$);
                    join_same                   
 -----------------------------------------------

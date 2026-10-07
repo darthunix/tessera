@@ -736,6 +736,15 @@ RESET parallel_leader_participation;
 -- it once it is ready.
 SELECT join_property($$SELECT count(*) FROM jprobe JOIN jbuild ON jprobe.k = jbuild.k$$, 'Bloom Filters') AS filters,
        join_property($$SELECT count(*) FROM jprobe JOIN jbuild ON jprobe.k = jbuild.k$$, 'Shared Table') AS shared;
+-- A shared table of fewer than 4096 rows never wants a filter at the
+-- default ratio, and none is allocated; at a ratio of 1 every table may
+-- want one, and its 1025 words are allocated with the table.
+EXPLAIN (COSTS OFF) SELECT count(*) FROM jprobe JOIN (SELECT * FROM jbuild WHERE w <= 4000) AS b ON jprobe.k = b.k;
+SET tessera.join_bloom_ratio = 1;
+SELECT join_property($$SELECT count(*) FROM jprobe JOIN (SELECT * FROM jbuild WHERE w <= 4000) AS b ON jprobe.k = b.k$$, 'Memory Usage') AS with_filter \gset
+RESET tessera.join_bloom_ratio;
+SELECT join_property($$SELECT count(*) FROM jprobe JOIN (SELECT * FROM jbuild WHERE w <= 4000) AS b ON jprobe.k = b.k$$, 'Memory Usage') AS without_filter \gset
+SELECT :with_filter - :without_filter >= 8 AS filter_only_where_wanted;
 SELECT join_same($$SELECT count(*), sum(jprobe.v) FROM jprobe WHERE NOT EXISTS (SELECT 1 FROM jbuild WHERE jbuild.k = jprobe.k)$$);
 -- The shared filter below the join: each participant's TessFilter checks
 -- its rows once the filter is ready.
