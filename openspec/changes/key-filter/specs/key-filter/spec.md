@@ -35,20 +35,23 @@ SQLSTATE `XX000`.
   handed to a child of no such kind
 - **THEN** the first is taken, the second refused with the first still
   held, `NULL` taken, and the last refused
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/unary.sql::tessera_test_unary_bound`
 
 #### Scenario: A filter from a parent's stack
 - **WHEN** an append hands each partition below it the filter with the
   columns mapped to the partition's own, from an array of its stack
 - **THEN** each partition removes the rows the filter rejects, and the
   join's rows are those of the core's plan
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/join.sql::A partitioned outer side: TessAppend hands the filter`
 
 #### Scenario: A filter too small for its fields
 - **WHEN** a filter whose `struct_size` is below
   `TESS_KEY_FILTER_MIN_SIZE` is handed down
 - **THEN** the call raises an error, SQLSTATE `XX000`
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/unary.sql::tessera_test_unary_errors(8)`
 
 ### Requirement: Who hands a filter down
 A hash join SHALL hand its Bloom filter to its outer child once it has
@@ -69,14 +72,20 @@ keeps the table SHALL keep the filter below.
 - **THEN** INNER, SEMI and RIGHT hand it down and show
   `Bloom Filter Below`, ANTI and LEFT check their rows themselves, and
   every join returns the rows of the core's plan
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/join.sql::The filter below the join: the outer side`;
+  `test/sql/join.sql::A RIGHT join drops an outer row without a pair`;
+  `test/sql/join.sql::The shared filter below the join: each participant`
 
 #### Scenario: The joins that keep their filter
 - **WHEN** a join's table spills, its key is hashed from a value, or
   its table is rebuilt for each value of a parameter
 - **THEN** the first two never hand the filter down, the last takes it
   back before each new table, and the rows are those of the core's plan
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/join.sql::A table that spills keeps its filter`;
+  `test/sql/join.sql::A key hashed from a text value`;
+  `test/sql/join.sql::Each table built for a parameter takes its filter back`
 
 ### Requirement: Who takes a filter
 TessFilter SHALL take a filter when it has a clause that runs row by row,
@@ -95,7 +104,10 @@ Tessera takes a filter.
   under TessAppend whose partitions' columns lie in another order
 - **THEN** the first and every partition take the filter, the second
   refuses it and the join checks its rows itself
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/join.sql::Only row-wise clauses: TessFilter takes them`;
+  `test/sql/join.sql::A TessFilter of batch clauses alone has nothing to save`;
+  `test/sql/join.sql::A partitioned outer side: TessAppend hands the filter`
 
 ### Requirement: What a child removes
 A TessFilter that holds a filter SHALL, for each batch, before its first
@@ -111,7 +123,9 @@ returns SHALL be those it would return without the filter below.
 - **WHEN** INNER and SEMI joins hand their filter, alone or shared, to a
   TessFilter whose rows have NULL keys and keys without a pair
 - **THEN** the joins return the rows of the core's plan
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/join.sql::The filter below the join: the outer side`;
+  `test/sql/join.sql::The shared filter below the join: each participant`
 
 ### Requirement: The rows a filter removes, as EXPLAIN shows them
 With `ANALYZE`, a hash join SHALL show `Rows Removed by Bloom Filter`:
@@ -135,4 +149,5 @@ node removed.
   with a key only, its `Rows Removed by NULL Key` the rows with a NULL
   key it read once the filter was below, and with the lines of its
   clauses they make the core's `Rows Removed by Filter`
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/join.sql::The TessFilter counts the rows with a`
