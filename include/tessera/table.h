@@ -312,7 +312,8 @@ extern TessStatusCode tess_table_append_columns(const TessTableRef *table,
  * writer of every partition's chunk. Each row's payload is taken from
  * columns as tess_table_append_columns takes it (the table's payload is a
  * word of NULL bits and a word per column): every row appended adds one to
- * rows[partition], and its NULL bits are ORed into *nulls.
+ * rows[partition], and its NULL bits are ORed into *nulls. A table with an
+ * index is checked as tess_table_append checks it.
  */
 extern TessStatusCode tess_table_append_partitioned_columns(const TessTableRef *table,
 															const uint32 *partition_chunks,
