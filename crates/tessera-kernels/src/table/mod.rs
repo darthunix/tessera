@@ -583,11 +583,11 @@ impl<'a> Table<'a> {
         batch::next_match(&self.region, &self.layout, offsets, rows, found)
     }
 
-    /// For each row of `rows`, the 8 bytes at byte `at` of the payload of
-    /// the record at `offsets[row]` into `out[row]`, native-endian: one
-    /// word of a batch's matches per call, such as a Datum of the build
-    /// row a join keeps there. `at + 8` must be within the payload; rows
-    /// outside `rows` keep their values in `out`.
+    /// For each row of `rows`, the word at byte `at` of the payload of the
+    /// record at `offsets[row]` into `out[row]`, native-endian: one word of
+    /// a batch's matches per call, such as a Datum of the build row a join
+    /// keeps there. `at` must be a multiple of 8 and `at + 8` within the
+    /// payload; rows outside `rows` keep their values in `out`.
     pub fn gather(
         &self,
         offsets: &[u32],

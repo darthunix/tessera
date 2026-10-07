@@ -1132,8 +1132,6 @@ becomes an entry, joins one, or is dropped.
     and never reads the index, so a wrong payload size writes records
     that the next call refuses as damaged. A check when the index is at
     hand would tell the caller's mistake from damage.
-  - `tess_table_gather` reads a word at any byte of the payload, while
-    `tess_table_accumulate` wants it aligned to 8.
   - The loom model has no negative test of the order that it once found
     wrong, the count of records added after a record is published: it
     would need a switch of that order in the table's own code.

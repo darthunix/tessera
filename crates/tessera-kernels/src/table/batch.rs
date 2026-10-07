@@ -811,9 +811,10 @@ pub(super) fn next_match<R: Region>(
     Ok(())
 }
 
-/// For each row of `rows`, the 8 bytes at byte `at` of the payload of the
+/// For each row of `rows`, the word at byte `at` of the payload of the
 /// record at `offsets[row]` into `out[row]`; other rows of `out` keep
-/// their values.
+/// their values. A payload is words, so `at` is a multiple of 8, as for
+/// the calls that fold rows into a payload.
 pub(super) fn gather<R: Region, const PREFETCH: bool>(
     region: &R,
     layout: &Layout,
@@ -828,9 +829,11 @@ pub(super) fn gather<R: Region, const PREFETCH: bool>(
         "the offsets, mask and output of the batch have different row counts"
     );
     ensure!(
-        at.checked_add(8)
-            .is_some_and(|end| end <= layout.payload_size),
-        "a payload word at byte {at} is past the payload of {} bytes",
+        at.is_multiple_of(8)
+            && at
+                .checked_add(8)
+                .is_some_and(|end| end <= layout.payload_size),
+        "a payload word at byte {at} is not a word of the payload of {} bytes",
         layout.payload_size
     );
     let mut access = Access::new(region, layout);
