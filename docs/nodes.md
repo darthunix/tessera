@@ -808,12 +808,9 @@ once and the clauses are applied through `TessQual`
 previous ones left: a batch clause is bound and applied to the mask, and a
 run of row-wise clauses fetches its columns with the narrowed mask, shows
 each row to `ExecQual` through the scan tuple slot, and clears the bit of
-a row it rejects. A hash join above may hand the node its Bloom filter
-(`set_key_filter`, [node.md](node.md)) when the node has a row-wise
-clause and the join's keys are columns of the child: the node then
-hashes the keys of the rows its batch clauses kept, as the join does,
-and removes the rows the filter rejects before its first row-wise
-clause, a shared filter once it reads it ready. A batch-aware parent receives the child's slot with
+a row it rejects. A hash join above may hand the node its Bloom filter,
+which the capability [key-filter](../openspec/specs/key-filter/design.md)
+describes. A batch-aware parent receives the child's slot with
 the whole batch; an ordinary parent receives rows through the helper. With
 computed targets the helper publishes the projection provider's wrapper of
 each batch instead ([runtime.md](runtime.md)), which computes a column
@@ -1966,13 +1963,9 @@ planner's estimate of the join's selectivity, and holds until the table
 is built again; a smaller table stays in the cache, where a miss costs
 less than the check. Under a `Gather` each participant decides on the
 filter of its own table by its own rows. The setting at 1 builds the
-filter at the first batch whatever the sizes, at 0 never. An inner or
-semi join, which drops a row without a pair and whose keys are all words
-(the child has a hashed key's value, not its hash), then hands the filter to
-its outer child (`tess_input_set_key_filter`): a TessFilter with row-wise
-clauses takes it and removes the rows it rejects before those clauses
-run, and the join checks no more; it takes the filter back before the
-table goes. A left or anti join returns those rows and keeps the filter.
+filter at the first batch whatever the sizes, at 0 never. The join may
+then hand the filter to its outer child, as the capability
+[key-filter](../openspec/specs/key-filter/design.md) describes.
 
 `EXPLAIN` shows the join type for a semi, anti, left, right or full join, the key
 clauses as `Hash Cond`, `Shared Table` for a shared table, the residual ones that run in batches as `Batch
@@ -2538,17 +2531,9 @@ before its first choice, their numbers the planned ones mapped to its
 own; it intersects them with those of its own pruning, over a rescan
 too, until the join's next build.
 
-A hash join above hands its Bloom filter down (`set_key_filter`, TessHashJoin),
-which a child with row-wise clauses checks before them. The node hands
-it to every child it reads, in the child's own columns (the child's
-layout maps the node's columns to its batch's), and takes it only when
-every child does: the join checks no more rows once a node below took
-it, so the children that took it give it back when one does not.
-Before, the filter stopped at the node, and a partitioned outer side
-checked its row-wise clauses on every row. `test/sql/join.sql` hands it
-to two partitions, the second with its columns in another order and the
-join key apart from the partition key; mutations fail it: the node's
-columns handed down as they are, no hand-down.
+A hash join above may hand the node its Bloom filter, which it forwards
+to every child, as the capability
+[key-filter](../openspec/specs/key-filter/design.md) describes.
 
 ### Tests
 
