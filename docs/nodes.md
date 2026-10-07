@@ -1797,7 +1797,9 @@ the next record of a key is found by `tess_table_next_match`. The links
 count the table's duplicates (`tess_table_link` with its count), unless
 the planner knows the inner side unique: a table without them has no
 second round, and one with them goes out in compact batches as a serial
-table does. The shared Bloom filter is sized with the table: each
+table does. The shared Bloom filter is sized with the table, and
+allocated only for a table that may want one (`join_bloom_possible`: at
+the default ratio, 4096 records at least): each
 participant decides on it by its own batches as before, the first that
 wants it builds it for all (`tess_table_try_build_bloom`), and every
 participant checks batches against it once it reads it ready, probing

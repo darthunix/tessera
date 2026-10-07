@@ -919,7 +919,12 @@ is worth its cost, the join decides by its own rows.
   ```
 
   The acquire read of ready makes every bit the builder set visible, as
-  the read of a bucket makes a record visible.
+  the read of a bucket makes a record visible. The participant that
+  makes the index allocates the filter's words with the table, 16 to 32
+  bits a record of the query's shared memory, but only when a
+  participant may want them: at the default rule, for a table of 4096
+  records at least, since a smaller one stays in the cache, where a miss
+  costs less than the check.
 - **A table that spills.** A filter of every row of the build side is
   filled as the rows come, before some of them go to disk: by
   `tess_bloom_add` in one process, or by every participant at once by

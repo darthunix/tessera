@@ -71,15 +71,22 @@ extern double tess_join_bloom_ratio;
  * table of JOIN_BLOOM_MIN_ROWS rows at least when fewer than ratio of the
  * probed rows find a record. The executor asks it with the rows of its
  * sample, the planner with its estimate of the share found and one row.
+ * join_bloom_possible says whether a table of table_rows rows may get
+ * one at all, whatever its probes find: a shared table's filter is
+ * allocated only then.
  */
+static inline bool
+join_bloom_possible(double ratio, double table_rows)
+{
+	return ratio >= 1.0 || (ratio > 0.0 && table_rows >= JOIN_BLOOM_MIN_ROWS);
+}
+
 static inline bool
 join_bloom_wanted(double ratio, double table_rows, double found, double probed)
 {
-	if (ratio <= 0.0)
+	if (!join_bloom_possible(ratio, table_rows))
 		return false;
-	if (ratio >= 1.0)
-		return true;
-	return table_rows >= JOIN_BLOOM_MIN_ROWS && found < ratio * probed;
+	return ratio >= 1.0 || found < ratio * probed;
 }
 /* tessera.bitmap_page_rows: see nodes/module.c. */
 extern double tess_bitmap_page_rows;
