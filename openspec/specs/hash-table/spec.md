@@ -487,11 +487,13 @@ with acquire. A process that finds a record SHALL see it whole.
   `crates/tessera-kernels/src/table/loom.rs::a_probe_sees_a_published_record_whole`
 
 #### Scenario: Weaker orders are caught
-- **WHEN** the model reads the buckets with relaxed order
-- **THEN** a probe can read a record that is not written yet, and the
-  model reports it
+- **WHEN** the model reads the buckets with relaxed order, or raises the
+  count of records only after it publishes a record
+- **THEN** a probe can read a record that is not written yet, or take a
+  sound chain for a loop, and the model reports it
 - **Verified by:**
-  `crates/tessera-kernels/src/table/loom.rs::relaxed_heads_let_a_probe_read_an_unwritten_record`
+  `crates/tessera-kernels/src/table/loom.rs::relaxed_heads_let_a_probe_read_an_unwritten_record`;
+  `crates/tessera-kernels/src/table/loom.rs::a_count_raised_after_publishing_makes_a_sound_chain_a_loop`
 
 #### Scenario: A shared build
 - **WHEN** two or three processes append, size the index, link and

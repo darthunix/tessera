@@ -1128,9 +1128,6 @@ becomes an entry, joins one, or is dropped.
     fixed part of a call grows with the number of chunks: about a
     thousand checks a call for a table of 1 GiB, whatever the rows.
     Suggested: measure a probe of a large table first.
-  - The loom model has no negative test of the order that it once found
-    wrong, the count of records added after a record is published: it
-    would need a switch of that order in the table's own code.
   - A node sends rows to disk when its memory is full, never because
     its chunks are many. With a `hash_mem` above 32 GiB, or a sort's
     `work_mem`, a join, a grouping or a sort can need a 32769th chunk
