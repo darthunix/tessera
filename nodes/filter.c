@@ -114,10 +114,11 @@ const TessNode tess_filter_node = {
 #define check(state, code) tess_status_check((code), &(state)->status)
 
 /*
- * The parent's key filter over the rows the batch clauses kept: the keys
- * hashed as the join hashes them, a NULL key never passing, and the rows
- * whose hash the filter rejects removed. A shared filter is used once it
- * is seen ready; until then every row passes.
+ * The parent's key filter, right before the first row-wise clause, over
+ * the rows the batch clauses before it kept: the keys hashed as the join
+ * hashes them, the rows with a NULL key and those whose hash the filter
+ * rejects removed, each counted apart. A shared filter is used once it is
+ * seen ready; until then every row passes.
  */
 static int
 apply_key_filter(void *private_data, TessBatch *batch, int rows)
