@@ -2119,7 +2119,9 @@ join_matched_word(const JoinSpill *spill, int count)
 /*
  * RIGHT and FULL: whether this participant returns the tail of the table
  * in memory now: a table of its own's, once; a shared table's, the last
- * participant to leave it, which the others leave here, their tail done.
+ * participant to leave it, which the others leave here, their tail done,
+ * unless a participant left while it probed (join_stop_shared): the pairs
+ * of the rows it left were never marked, and its plan wanted no more rows.
  */
 bool
 join_tail_turn(TessHashJoinState *state)
@@ -2127,7 +2129,9 @@ join_tail_turn(TessHashJoinState *state)
 	if (!state->preserve_inner || state->tail.table_done)
 		return false;
 	if (state->marks_shared &&
-		!(state->parallel.round_partition >= 0 ? join_round_depart(state) : join_leave_shared(state, true)))
+		(!(state->parallel.round_partition >= 0 ? join_round_depart(state) :
+		   join_leave_shared(state, true)) ||
+		 join_shared_stopped(state)))
 	{
 		state->tail.table_done = true;
 		return false;

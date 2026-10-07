@@ -17,9 +17,10 @@ use tessera_capi::c::{
     CSortKey, Code, DatumColumn, Mask, Status, TableKey, TableRecord, TableRef, TableStats,
     TableSumArg, tess_bloom_add, tess_bloom_probe, tess_bloom_shared_add, tess_bloom_shared_init,
     tess_bloom_shared_probe, tess_bloom_shared_ready, tess_bloom_shared_words,
-    tess_build_counters_init, tess_build_take_chunk, tess_build_totals, tess_int4_hash,
-    tess_int8_hash, tess_sort, tess_sort_item_words, tess_sort_items, tess_sort_layout,
-    tess_sort_merge, tess_table_accumulate, tess_table_accumulate_sums, tess_table_append,
+    tess_build_counters_init, tess_build_step, tess_build_stop, tess_build_stopped,
+    tess_build_take_chunk, tess_build_totals, tess_int4_hash, tess_int8_hash, tess_sort,
+    tess_sort_item_words, tess_sort_items, tess_sort_layout, tess_sort_merge,
+    tess_table_accumulate, tess_table_accumulate_sums, tess_table_append,
     tess_table_append_columns, tess_table_append_partitioned_columns, tess_table_bloom,
     tess_table_bloom_words, tess_table_bloom_words_within, tess_table_chunk_init,
     tess_table_clear_key, tess_table_combine, tess_table_create, tess_table_find_or_insert,
@@ -32,6 +33,7 @@ use tessera_capi::c::{
 };
 use tessera_core::{ColumnView, RowMask, RowMaskView};
 use tessera_kernels::int32::{self, NullKeys};
+use tessera_kernels::table::phases::{Action, PROBE, Participant};
 use tessera_kernels::table::{
     Batch, CHUNK_HEADER, KeyKind, LocalTable, MAX_CHUNK_LEN, MAX_PAYLOAD_COLUMNS, TableConfig,
     index_size, payload_null_words,
@@ -3655,6 +3657,77 @@ fn the_filter_entry_points_size_fill_and_probe() -> Result<()> {
         assert_eq!(odd, [7; 6], "nothing written");
     }
     Ok(())
+}
+
+/// A participant of a RIGHT or FULL join that leaves early: its stop word
+/// is marked only while it probes, and read back by the last one; a null
+/// participant or result and a word not aligned to 8 are refused.
+#[test]
+fn a_participant_marks_its_stop_only_while_it_probes() {
+    let mut status = Status::new();
+    let mut counters = [0_u64; 4];
+    let mut participant = Participant::new();
+    // SAFETY: local words and a participant this test alone uses.
+    unsafe {
+        assert_eq!(
+            tess_build_counters_init(counters.as_mut_ptr(), &raw mut status),
+            Code::Ok
+        );
+        let stop_and_read = |participant: &Participant| -> bool {
+            let (mut word, mut any, mut status) = (0_u64, false, Status::new());
+            let code = tess_build_stop(participant, &raw mut word, &raw mut status);
+            assert_eq!(code, Code::Ok, "{}", status.message());
+            let code = tess_build_stopped(&raw mut word, &raw mut any, &raw mut status);
+            assert_eq!(code, Code::Ok, "{}", status.message());
+            assert_eq!(word != 0, any);
+            any
+        };
+        let mut step = |participant: &mut Participant, reply: u32| -> u32 {
+            let mut action = u32::MAX;
+            let mut status = Status::new();
+            let code = tess_build_step(
+                participant,
+                counters.as_mut_ptr(),
+                reply,
+                &raw mut action,
+                &raw mut status,
+            );
+            assert_eq!(code, Code::Ok, "{}", status.message());
+            action
+        };
+        assert!(!stop_and_read(&participant), "before it attached");
+        assert_eq!(step(&mut participant, 0), Action::Attach as u32);
+        assert_eq!(step(&mut participant, PROBE), Action::Probe as u32);
+        assert!(stop_and_read(&participant), "while it probes");
+        assert_eq!(step(&mut participant, 0), Action::ArriveAndDetach as u32);
+        assert_eq!(step(&mut participant, 1), Action::Free as u32);
+        assert!(!stop_and_read(&participant), "once it left");
+
+        let mut words = [0_u64; 2];
+        let misaligned = words
+            .as_mut_ptr()
+            .cast::<u8>()
+            .wrapping_add(4)
+            .cast::<u64>();
+        let mut any = false;
+        assert_eq!(
+            tess_build_stop(ptr::null(), words.as_mut_ptr(), &raw mut status),
+            Code::InvalidArgument
+        );
+        assert_eq!(
+            tess_build_stop(&participant, misaligned, &raw mut status),
+            Code::InvalidArgument
+        );
+        assert_eq!(
+            tess_build_stopped(misaligned, &raw mut any, &raw mut status),
+            Code::InvalidArgument
+        );
+        assert_eq!(
+            tess_build_stopped(words.as_mut_ptr(), ptr::null_mut(), &raw mut status),
+            Code::InvalidArgument
+        );
+        assert_eq!(words, [0, 0]);
+    }
 }
 
 #[test]

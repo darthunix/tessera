@@ -214,6 +214,12 @@ typedef struct JoinShared
 	int64		prune_max;
 	int			prune_nvalues;
 	int64		prune_values[JOIN_PRUNE_VALUES];
+	/*
+	 * RIGHT and FULL: set by a participant that leaves the table while it
+	 * probes (tess_build_stop); the last one to leave then returns no
+	 * record without a mark.
+	 */
+	uint64		stopped;
 } JoinShared;
 
 /*
@@ -242,6 +248,8 @@ typedef struct JoinRound
 	pg_atomic_uint32 next_chunk;
 	/* RIGHT and FULL: the marks of its records, as a shared table's. */
 	dsa_pointer marks;
+	/* RIGHT and FULL: as JoinShared's, for the round's participants. */
+	uint64		stopped;
 } JoinRound;
 
 /*
@@ -956,6 +964,8 @@ extern bool join_leave_shared(TessHashJoinState *state, bool keep);
 extern pg_atomic_uint64 *join_part_stats(TessHashJoinState *state, int partition);
 extern dsa_area *join_query_dsa(TessHashJoinState *state);
 extern bool join_round_depart(TessHashJoinState *state);
+extern void join_stop_shared(TessHashJoinState *state);
+extern bool join_shared_stopped(TessHashJoinState *state);
 extern void join_round_leave(TessHashJoinState *state);
 extern bool join_round_next_outer(TessHashJoinState *state);
 extern bool join_shared_next_partition(TessHashJoinState *state);
