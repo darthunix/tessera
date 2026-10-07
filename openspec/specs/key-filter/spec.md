@@ -1,4 +1,17 @@
-## ADDED Requirements
+# key-filter Specification
+
+## Purpose
+The filter of keys a parent node hands its child while it executes: a
+hash join's Bloom filter of its table's keys, which the node below
+checks its rows against before its costlier clauses run, so that rows
+without a pair leave early. The requirements go from the call to what
+EXPLAIN shows: a key filter and its call, who hands a filter down, who
+takes it, what the child removes, and the rows a filter removes as
+EXPLAIN shows them. The filter itself, its words and the calls that
+fill and check it, is the capability `hash-table`.
+[design.md](design.md) explains the whole and the reasons.
+
+## Requirements
 
 ### Requirement: A key filter and its call
 A parent node SHALL hand a key filter to its child as a `TessKeyFilter`
