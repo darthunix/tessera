@@ -825,12 +825,14 @@ row, and the leader shows the totals.
 
 `EXPLAIN` shows the batch clauses as `Batch Filter` and the others as the
 core's `Filter`, each in the planner's order; with `ANALYZE`, the rows removed by each part, per loop,
-and `Rows Removed by Bloom Filter`, the rows a join's filter removed,
-when there are any, and with `VERBOSE` too the helper's batches and rows
-and, with computed targets, the `Computed Datums`, all summed over the
-participants of a parallel plan. The core's
-`Rows Removed by Filter` counts both parts, since the helper reports
-every row the node removes.
+and, when there are any, `Rows Removed by Bloom Filter`, the rows with a
+key that a join's filter rejected, and `Rows Removed by NULL Key`, the
+rows its check removed for a NULL key
+([key-filter](../openspec/specs/key-filter/design.md)), and with
+`VERBOSE` too the helper's batches and rows and, with computed targets,
+the `Computed Datums`, all summed over the participants of a parallel
+plan. The core's `Rows Removed by Filter` counts every row the node
+removed, by any of these, since the helper reports them all.
 
 ### Tests
 

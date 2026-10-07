@@ -1452,7 +1452,10 @@ SELECT join_same($$SELECT jsmall.k, (SELECT count(*) FROM jprobe JOIN jbuild ON 
 -- The filter below the join: the outer side's TessFilter checks its rows
 -- against it after its batch clause and before its row-wise one, for
 -- INNER and SEMI, where a row without a pair leaves; ANTI and LEFT keep
--- theirs, and check in the join.
+-- theirs, and check in the join. The TessFilter counts the rows with a
+-- key its filter rejected as the join does, and those it removed for a
+-- NULL key apart: with its clauses' they are the core's Rows Removed by
+-- Filter.
 SELECT join_explain($$SELECT count(*), sum(jbuild.w) FROM jprobe JOIN jbuild ON jprobe.k = jbuild.k WHERE jprobe.v > 0 AND jprobe.v::text LIKE '%1%'$$);
                                          join_explain                                         
 ----------------------------------------------------------------------------------------------
@@ -1477,7 +1480,8 @@ SELECT join_explain($$SELECT count(*), sum(jbuild.w) FROM jprobe JOIN jbuild ON 
                Rows Removed by Filter: 15705
                Batch Filter: (jprobe.v > 0)
                Rows Removed by Batch Filter: 0
-               Rows Removed by Bloom Filter: 9144
+               Rows Removed by Bloom Filter: 9048
+               Rows Removed by NULL Key: 96
                Rows Removed by Residual Filter: 6561
                Input Batches: 354
                Input Rows: 20000
@@ -1494,7 +1498,7 @@ SELECT join_explain($$SELECT count(*), sum(jbuild.w) FROM jprobe JOIN jbuild ON 
                Pages: 23
                Deformed Datums: 10000
                Restarted Datums: 0
-(38 rows)
+(39 rows)
 
 SELECT join_same($$SELECT jprobe.v, jbuild.w FROM jprobe JOIN jbuild ON jprobe.k = jbuild.k WHERE jprobe.v > 0 AND jprobe.v::text LIKE '%1%'$$);
                     join_same                    
@@ -1594,7 +1598,8 @@ SELECT join_explain($$SELECT count(*), sum(jbuild.w) FROM jprobe JOIN jbuild ON 
          ->  Custom Scan (TessFilter) on public.jprobe (actual rows=4295.00 loops=1)
                Filter: ((jprobe.v)::text ~~ '%1%'::text)
                Rows Removed by Filter: 15705
-               Rows Removed by Bloom Filter: 9144
+               Rows Removed by Bloom Filter: 9048
+               Rows Removed by NULL Key: 96
                Rows Removed by Residual Filter: 6561
                Input Batches: 354
                Input Rows: 20000
@@ -1611,7 +1616,7 @@ SELECT join_explain($$SELECT count(*), sum(jbuild.w) FROM jprobe JOIN jbuild ON 
                Pages: 23
                Deformed Datums: 10000
                Restarted Datums: 0
-(36 rows)
+(37 rows)
 
 SELECT join_same($$SELECT jprobe.v, jbuild.w FROM jprobe JOIN jbuild ON jprobe.k = jbuild.k WHERE jprobe.v::text LIKE '%1%'$$);
                     join_same                    
@@ -1785,7 +1790,8 @@ SELECT join_explain($$SELECT count(*), sum(jbuild.w) FROM jpprobe JOIN jbuild ON
                      Rows Removed by Filter: 9153
                      Batch Filter: (jpprobe_2.v > 0)
                      Rows Removed by Batch Filter: 0
-                     Rows Removed by Bloom Filter: 9153
+                     Rows Removed by Bloom Filter: 9057
+                     Rows Removed by NULL Key: 96
                      Rows Removed by Residual Filter: 0
                      Input Batches: 177
                      Input Rows: 10000
@@ -1802,7 +1808,7 @@ SELECT join_explain($$SELECT count(*), sum(jbuild.w) FROM jpprobe JOIN jbuild ON
                Pages: 23
                Deformed Datums: 10000
                Restarted Datums: 0
-(55 rows)
+(56 rows)
 
 SELECT join_same($$SELECT jpprobe.v, jbuild.w FROM jpprobe JOIN jbuild ON jpprobe.k = jbuild.k WHERE jpprobe.v > 0 AND jpprobe.v::text LIKE '%1%'$$);
                     join_same                    

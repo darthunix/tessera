@@ -310,7 +310,10 @@ SELECT join_same($$SELECT jsmall.k, (SELECT count(*) FROM jprobe JOIN jbuild ON 
 -- The filter below the join: the outer side's TessFilter checks its rows
 -- against it after its batch clause and before its row-wise one, for
 -- INNER and SEMI, where a row without a pair leaves; ANTI and LEFT keep
--- theirs, and check in the join.
+-- theirs, and check in the join. The TessFilter counts the rows with a
+-- key its filter rejected as the join does, and those it removed for a
+-- NULL key apart: with its clauses' they are the core's Rows Removed by
+-- Filter.
 SELECT join_explain($$SELECT count(*), sum(jbuild.w) FROM jprobe JOIN jbuild ON jprobe.k = jbuild.k WHERE jprobe.v > 0 AND jprobe.v::text LIKE '%1%'$$);
 SELECT join_same($$SELECT jprobe.v, jbuild.w FROM jprobe JOIN jbuild ON jprobe.k = jbuild.k WHERE jprobe.v > 0 AND jprobe.v::text LIKE '%1%'$$);
 SELECT join_same($$SELECT jprobe.v FROM jprobe WHERE jprobe.v > 0 AND jprobe.v::text LIKE '%1%' AND EXISTS (SELECT 1 FROM jbuild WHERE jbuild.k = jprobe.k)$$);

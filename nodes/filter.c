@@ -35,8 +35,10 @@ enum
 	FILTER_INPUT_ROWS,
 	FILTER_OUTPUT_ROWS,
 	FILTER_COMPUTED,
-	/* Rows a parent's key filter removed. */
+	/* Rows with a key that a parent's key filter rejected. */
 	FILTER_KEY_REMOVED,
+	/* Rows the key filter's check removed for a NULL key. */
+	FILTER_NULL_REMOVED,
 	FILTER_NCOUNTERS
 };
 
@@ -69,6 +71,7 @@ typedef struct FilterState
 	uint64	   *valid_bits;
 	uint64	   *passed_bits;
 	uint64		key_removed;
+	uint64		null_removed;
 	/* Written by a kernel on failure only. */
 	TessStatus	status;
 } FilterState;
@@ -127,6 +130,7 @@ apply_key_filter(void *private_data, TessBatch *batch, int rows)
 	TessRowMask valid;
 	TessRowMask passed;
 	int			kept;
+	int			keyed;
 
 	if (filter->shared && !state->key_filter_ready)
 	{
@@ -189,7 +193,10 @@ apply_key_filter(void *private_data, TessBatch *batch, int rows)
 	/* The rows passed are among the batch's: only rows are removed. */
 	memcpy(batch->rows.bits, state->passed_bits, sizeof(uint64) * nwords);
 	kept = tess_row_mask_count(&passed);
-	state->key_removed += rows - kept;
+	keyed = tess_row_mask_count(&valid);
+	/* As the join counts its filter's rows: those with a key, apart. */
+	state->null_removed += rows - keyed;
+	state->key_removed += keyed - kept;
 	return kept;
 }
 
@@ -362,6 +369,7 @@ filter_counters(FilterState *state, uint64 *values)
 		values[FILTER_COMPUTED] = computed->chain_datums + computed->row_datums;
 	}
 	values[FILTER_KEY_REMOVED] = state->key_removed;
+	values[FILTER_NULL_REMOVED] = state->null_removed;
 }
 
 /*
@@ -393,6 +401,9 @@ filter_explain(CustomScanState *css, List *ancestors, ExplainState *es)
 					 css, es);
 	if (totals[FILTER_KEY_REMOVED] > 0)
 		show_removed("Rows Removed by Bloom Filter", totals[FILTER_KEY_REMOVED],
+					 css, es);
+	if (totals[FILTER_NULL_REMOVED] > 0)
+		show_removed("Rows Removed by NULL Key", totals[FILTER_NULL_REMOVED],
 					 css, es);
 	if (cscan->scan.plan.qual != NIL)
 		show_removed("Rows Removed by Residual Filter",
