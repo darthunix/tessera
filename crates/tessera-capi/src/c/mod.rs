@@ -52,7 +52,7 @@ pub use int::{
 pub use mask::Mask;
 pub use set::{tess_int4_in_set, tess_int8_in_set};
 pub use shared_spill::{
-    SpillWeights, tess_bloom_shared_add, tess_round_step, tess_table_spill_add_bytes,
+    SpillWeights, tess_bloom_add_atomic, tess_round_step, tess_table_spill_add_bytes,
     tess_table_spill_evict, tess_table_spill_evictions, tess_table_spill_flags,
     tess_table_spill_init, tess_table_spill_partitions, tess_table_spill_records,
     tess_table_spill_split, tess_table_spill_splits, tess_table_spill_start,

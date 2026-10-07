@@ -493,15 +493,15 @@ pub unsafe extern "C" fn tess_round_step(
     }
 }
 
-/// `tess_bloom_shared_add`: set the bits of a batch's hashes in a filter
+/// `tess_bloom_add_atomic`: set the bits of a batch's hashes in a filter
 /// several participants fill at once.
 ///
 /// # Safety
 ///
-/// `words` as for [`bloom::add_shared`]; `rows` a valid mask; `hashes` a
+/// `words` as for [`bloom::add_atomic`]; `rows` a valid mask; `hashes` a
 /// hash per row; `status` as for every entry point.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn tess_bloom_shared_add(
+pub unsafe extern "C" fn tess_bloom_add_atomic(
     words: *mut u64,
     nwords: usize,
     hashes: *const u32,
@@ -517,7 +517,7 @@ pub unsafe extern "C" fn tess_bloom_shared_add(
             } else {
                 std::slice::from_raw_parts(hashes.as_ref().context("null hashes")?, rows.nrows())
             };
-            bloom::add_shared(words, nwords, hashes, &rows)
+            bloom::add_atomic(words, nwords, hashes, &rows)
         })
     }
 }

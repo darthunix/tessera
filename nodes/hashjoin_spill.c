@@ -1016,7 +1016,7 @@ join_split_chunk(TessHashJoinState *state, void *base, Size len, char *const *va
 												 &count, &full, &state->status));
 		bits = count == 64 ? ~UINT64CONST(0) : (UINT64CONST(1) << count) - 1;
 		if (count > 0 && spill->bloom != NULL)
-			check(state, (spill->shared ? state->kernels->bloom_shared_add :
+			check(state, (spill->shared ? state->kernels->bloom_add_atomic :
 						  state->kernels->bloom_add) (spill->bloom, spill->bloom_words,
 													  hashes,
 													  &(TessRowMask) {count, &bits},
@@ -1278,7 +1278,7 @@ join_insert_spill(TessHashJoinState *state, TessBatch *batch)
 	count = tess_row_mask_count(&valid);
 	if (count == 0)
 		return;
-	check(state, (spill->shared ? state->kernels->bloom_shared_add :
+	check(state, (spill->shared ? state->kernels->bloom_add_atomic :
 				  state->kernels->bloom_add) (spill->bloom, spill->bloom_words,
 											  state->probe.hashes, &valid, &state->status));
 	memcpy(state->probe.pending_bits, state->probe.valid_bits, sizeof(uint64) * nwords);

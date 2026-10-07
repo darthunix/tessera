@@ -1335,7 +1335,7 @@ tessera_test_table_shared_spill(PG_FUNCTION_ARGS)
 		tess_table_bloom_words(NROWS, &filter_words, &status) != TESS_OK)
 		PG_RETURN_BOOL(false);
 	filter = palloc0(sizeof(uint64) * filter_words);
-	if (tess_bloom_shared_add(filter, filter_words, batch->hashes, &valid,
+	if (tess_bloom_add_atomic(filter, filter_words, batch->hashes, &valid,
 							  &status) != TESS_OK ||
 		tess_bloom_probe(filter, filter_words, batch->hashes, &valid, &found,
 						 &status) != TESS_OK ||

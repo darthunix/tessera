@@ -1129,11 +1129,6 @@ becomes an entry, joins one, or is dropped.
   - A shared table's filter is allocated and cleared at SIZE whether or
     not a participant ever wants it: 16 bits a record of the query's
     shared memory. A cost for the join's capability to weigh.
-  - `tess_bloom_shared_add` takes a filter without a state word. A
-    shared filter of two words, for up to four records, has the shape it
-    takes, and its state word would be read as a word of bits. No caller
-    makes the mistake; a name such as `tess_bloom_add_atomic` would say
-    what the call takes.
 
 ## Decided against
 
