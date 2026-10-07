@@ -1449,7 +1449,7 @@ impl RawMarks {
     }
 }
 
-// A shared word is only accessed atomically; see `RawMarks::at`.
+// A shared word is only accessed atomically, by every participant at once.
 impl Marks for RawMarks {
     unsafe fn set(&self, chunk: usize, word: usize, bit: u64) {
         // SAFETY: the caller's contract.
