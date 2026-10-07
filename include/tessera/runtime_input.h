@@ -58,9 +58,11 @@ extern void tess_input_rescan(TessInput *input);
 
 /*
  * Hand the child a key filter (tessera/node.h), or take it back with
- * NULL: true when the child's node kind takes it. The child applies it to
- * the batches it returns from then on; the caller keeps the filter valid
- * until it takes it back.
+ * NULL: true when the child's node kind takes it, false for a child that
+ * is not a batch node or whose kind has no callback. The child applies it
+ * to the batches it returns from then on; the caller keeps the filter's
+ * words valid until it takes it back, the struct and its arrays for the
+ * call only. A filter smaller than TESS_KEY_FILTER_MIN_SIZE is an error.
  */
 extern bool tess_input_set_key_filter(TessInput *input,
 									  const TessKeyFilter *filter);

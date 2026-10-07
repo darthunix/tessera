@@ -22,8 +22,10 @@
  * _next forms hash a join's keys, a NULL key rejected; the words are the
  * filter, as tess_bloom_probe reads it, or, when shared, a shared filter
  * the child checks rows against only once tess_bloom_shared_ready says it
- * is. Everything is the parent's and stays valid until the parent takes
- * the filter back.
+ * is. Everything is the parent's. The struct and its arrays of columns and
+ * kinds are valid only during the call that hands them, and a child copies
+ * what it keeps of them; the words stay valid until the parent takes the
+ * filter back.
  */
 typedef struct TessKeyFilter
 {
@@ -77,8 +79,9 @@ typedef struct TessNode
 	CustomPath *(*scan_rows) (PlannerInfo *root, Path *path);
 	/*
 	 * Optional: apply the parent's key filter to this node's batches from
-	 * now on, or stop applying one when filter is NULL; false when the
-	 * node does not take it, and then nothing changes. The runtime's
+	 * now on, copying what it keeps of the struct, or stop applying one when
+	 * filter is NULL; false when the node does not take it, and then
+	 * nothing changes, a filter it held kept. The runtime's
 	 * tess_input_set_key_filter calls it for a node's child.
 	 */
 	bool		(*set_key_filter) (CustomScanState *node,
