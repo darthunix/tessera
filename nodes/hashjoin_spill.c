@@ -220,7 +220,7 @@ side_init(TessHashJoinState *state, SpillSide *side, int nkeys, const TessTableK
 	config.level = spill->level;
 	config.fingerprint = side->fingerprint;
 	config.max_len = (uint64) MaxAllocHugeSize;
-	config.buffer_len = TESS_SPILL_BUFFER_LEN(get_hash_memory_limit());
+	config.buffer_len = TESS_SPILL_BUFFER_LEN(tess_hash_memory_limit());
 	side->file = tess_spill_create(&config);
 }
 
@@ -722,7 +722,7 @@ evict_partitions(TessHashJoinState *state, bool limited)
 		check(state, state->kernels->table_spill_evict(side->spill_words, side->spill_nwords,
 													   false, &weights,
 													   limited ? join_memory(state) : 0,
-													   limited ? get_hash_memory_limit() :
+													   limited ? tess_hash_memory_limit() :
 													   PG_UINT64_MAX,
 													   side->rows, (Size) spill->npartitions,
 													   spill->total_rows, evicted, &partition,
@@ -753,7 +753,7 @@ join_spill_create(TessHashJoinState *state, JoinSpill *parent, double expected,
 			 uint32 shift, int forced)
 {
 	MemoryContext context = state->css.ss.ps.state->es_query_cxt;
-	Size		limit = get_hash_memory_limit();
+	Size		limit = tess_hash_memory_limit();
 	Size		record = state->record_size;
 	Size		chunk_len;
 	uint32		count;
@@ -931,7 +931,7 @@ join_start_spill(TessHashJoinState *state)
 	state->counters[JOIN_BLOOM_FILTERS]++;
 	expected_rows = Max((uint64) state->inner_rows, state->build_rows * 2);
 	check(state, state->kernels->table_bloom_words_within(Max(expected_rows, 1),
-														  get_hash_memory_limit(),
+														  tess_hash_memory_limit(),
 														  &spill->bloom_words,
 														  &state->status));
 	spill->bloom = MemoryContextAllocExtended(spill->context,
@@ -1499,7 +1499,7 @@ spill_used(TessHashJoinState *state)
 static Size
 spill_room(TessHashJoinState *state)
 {
-	Size		limit = get_hash_memory_limit();
+	Size		limit = tess_hash_memory_limit();
 	Size		used = spill_used(state);
 
 	return used >= limit ? 0 : (limit - used) / 3 * 2;
@@ -1825,7 +1825,7 @@ join_open_partition(TessHashJoinState *state, int partition)
 	check(state, state->kernels->table_spill_splits(tess_join_spill_split_room,
 													 tess_join_spill_split_key_share,
 													 spill->build.parts[partition].disk_bytes,
-													 spill_used(state), get_hash_memory_limit(),
+													 spill_used(state), tess_hash_memory_limit(),
 													 spill->build.rows[partition],
 													 spill->input_rows,
 													 spill->shift +

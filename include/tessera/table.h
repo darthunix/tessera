@@ -64,6 +64,24 @@
 #define TESS_TABLE_UNIT_BITS 17
 #define TESS_TABLE_MAX_CHUNK_LEN (1024 * 1024)
 
+/*
+ * The most memory a node lets one table take, whatever its own limit:
+ * half of what TESS_TABLE_MAX_CHUNKS chunks of TESS_TABLE_MAX_CHUNK_LEN
+ * bytes hold, 16 GiB. A node sends rows to disk when its memory is full,
+ * not when its chunks are many; under this limit it does so long before
+ * its table needs more chunks than a table may have, with every
+ * participant's short first chunk and the node's margins counted.
+ */
+#define TESS_TABLE_MEMORY_MAX \
+	((uint64) TESS_TABLE_MAX_CHUNKS / 2 * TESS_TABLE_MAX_CHUNK_LEN)
+
+/* A node's limit of memory, in bytes, at most TESS_TABLE_MEMORY_MAX. */
+static inline Size
+tess_table_memory_limit(Size limit)
+{
+	return (uint64) limit < TESS_TABLE_MEMORY_MAX ? limit : (Size) TESS_TABLE_MEMORY_MAX;
+}
+
 /* The chunk of a record's reference. */
 static inline uint32
 tess_table_ref_chunk(uint32 ref)

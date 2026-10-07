@@ -22,6 +22,7 @@ PG_FUNCTION_INFO_V1(tessera_test_table_partitions);
 PG_FUNCTION_INFO_V1(tessera_test_table_combine);
 PG_FUNCTION_INFO_V1(tessera_test_table_shared_spill);
 PG_FUNCTION_INFO_V1(tessera_test_table_record_size);
+PG_FUNCTION_INFO_V1(tessera_test_table_memory_limit);
 
 #define NROWS 200
 #define NWORDS 4
@@ -1370,5 +1371,33 @@ tessera_test_table_record_size(PG_FUNCTION_ARGS)
 	if (tess_table_record_size(0, 8, &size, &status) == TESS_OK ||
 		tess_table_record_size(TESS_TABLE_MAX_KEYS + 1, 8, &size, &status) == TESS_OK)
 		elog(ERROR, "a count of keys out of range has a record size");
+	PG_RETURN_BOOL(true);
+}
+
+/*
+ * The most memory a node lets one table take: a limit below 16 GiB comes
+ * back as it is, one above it as 16 GiB, and a table that fills those
+ * 16 GiB with chunks of the longest length a chunk has needs half of the
+ * chunks a table may have.
+ */
+Datum
+tessera_test_table_memory_limit(PG_FUNCTION_ARGS)
+{
+	const uint64 gib = UINT64CONST(1) << 30;
+
+	if (TESS_TABLE_MEMORY_MAX != 16 * gib)
+		elog(ERROR, "the most memory of a table is " UINT64_FORMAT " bytes, not 16 GiB",
+			 (uint64) TESS_TABLE_MEMORY_MAX);
+	if (TESS_TABLE_MEMORY_MAX / TESS_TABLE_MAX_CHUNK_LEN != TESS_TABLE_MAX_CHUNKS / 2)
+		elog(ERROR, "16 GiB of chunks is not half of the chunks a table may have");
+	if (tess_table_memory_limit(8 * 1024 * 1024) != 8 * 1024 * 1024 ||
+		tess_table_memory_limit(0) != 0 ||
+		tess_table_memory_limit(16 * gib - 1) != 16 * gib - 1)
+		elog(ERROR, "a limit below 16 GiB does not come back as it is");
+	if (tess_table_memory_limit(16 * gib) != 16 * gib ||
+		tess_table_memory_limit(16 * gib + 1) != 16 * gib ||
+		tess_table_memory_limit(64 * gib) != 16 * gib ||
+		tess_table_memory_limit(SIZE_MAX) != 16 * gib)
+		elog(ERROR, "a limit above 16 GiB does not come back as 16 GiB");
 	PG_RETURN_BOOL(true);
 }

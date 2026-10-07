@@ -323,7 +323,7 @@ Size
 join_chunk_len_for(Size largest)
 {
 	return Max(JOIN_FIRST_CHUNK,
-			   Min(largest, TYPEALIGN_DOWN(8, get_hash_memory_limit() / 8)));
+			   Min(largest, TYPEALIGN_DOWN(8, tess_hash_memory_limit() / 8)));
 }
 
 /* Another chunk for the serial table, the last one being full. */
@@ -690,7 +690,7 @@ insert_batch(TessHashJoinState *state, TessBatch *batch)
 	/* A batch adds a chunk of records and one of values at most. */
 	if (state->spill == NULL &&
 		state->table_bytes + state->values.bytes +
-		2 * join_chunk_len_for(JOIN_CHUNK_LEN) > get_hash_memory_limit())
+		2 * join_chunk_len_for(JOIN_CHUNK_LEN) > tess_hash_memory_limit())
 		join_start_spill(state);
 	if (state->spill != NULL)
 	{

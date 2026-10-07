@@ -534,7 +534,7 @@ sort_begin(CustomScanState *css, EState *estate, int eflags)
 	rows.typlens = typlens;
 	rows.typbyvals = typbyvals;
 	/* Chunks of an eighth of work_mem, so that runs fill it evenly. */
-	rows.chunk_len = Max((Size) work_mem * 1024 / 8, (Size) 8192);
+	rows.chunk_len = Max(tess_work_memory_limit() / 8, (Size) 8192);
 	state->rows_config = rows;
 	state->rows = tess_rows_create(&rows);
 	state->bound = -1;
@@ -710,7 +710,7 @@ rows_full(TessSortState *state)
 		(Size) count * (sizeof(uint32) + sizeof(uint64) * state->item_words) +
 		state->rows_config.chunk_len;
 
-	return bytes > (Size) work_mem * 1024;
+	return bytes > tess_work_memory_limit();
 }
 
 
@@ -1082,7 +1082,7 @@ sort_set_tuple_bound(CustomScanState *css, int64 tuples_needed)
 static void
 sort_counters(TessSortState *state, uint64 *values)
 {
-	Size		limit = (Size) work_mem * 1024;
+	Size		limit = tess_work_memory_limit();
 
 	memset(values, 0, sizeof(uint64) * SORT_NCOUNTERS);
 	values[SORT_BATCHES] = state->counters.batches;

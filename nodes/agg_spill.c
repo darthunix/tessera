@@ -191,7 +191,7 @@ static AggSpill *
 agg_spill_create(TessAggState *state, AggSpill *parent, double expected, uint32 shift)
 {
 	MemoryContext context = state->css.ss.ps.state->es_query_cxt;
-	Size		limit = get_hash_memory_limit();
+	Size		limit = tess_hash_memory_limit();
 	Size		record = state->record_size;
 	TessSpillConfig config = TESS_STRUCT_INITIALIZER(TessSpillConfig);
 	TessTableRef layout = {0};
@@ -265,7 +265,7 @@ agg_spill_create(TessAggState *state, AggSpill *parent, double expected, uint32 
 	config.npartitions = npartitions;
 	config.level = spill->level;
 	config.max_len = (uint64) MaxAllocHugeSize;
-	config.buffer_len = TESS_SPILL_BUFFER_LEN(get_hash_memory_limit());
+	config.buffer_len = TESS_SPILL_BUFFER_LEN(tess_hash_memory_limit());
 	spill->file = tess_spill_create(&config);
 	state->partitions = Max(state->partitions, (uint64) npartitions);
 	return spill;
@@ -497,7 +497,7 @@ agg_evict(TessAggState *state, Size extra)
 		check(state, state->kernels->table_spill_evict(spill->words, spill->nwords, false,
 													   &weights,
 													   agg_spill_memory(state) + extra,
-													   get_hash_memory_limit(), NULL, 0, 0,
+													   tess_hash_memory_limit(), NULL, 0, 0,
 													   evicted, &largest, &state->status));
 		if (largest < 0)
 			break;
@@ -884,7 +884,7 @@ agg_split_level(TessAggState *state, AggSpill *spill, int partition)
 bool
 agg_advance(TessAggState *state)
 {
-	Size		limit = get_hash_memory_limit();
+	Size		limit = tess_hash_memory_limit();
 
 	for (;;)
 	{
@@ -1064,7 +1064,7 @@ rows_spill_create(TessAggState *state, int level)
 	config.level = (uint32) level;
 	config.fingerprint = (uint64) rows_words(state);
 	config.max_len = MaxAllocHugeSize;
-	config.buffer_len = TESS_SPILL_BUFFER_LEN(get_hash_memory_limit());
+	config.buffer_len = TESS_SPILL_BUFFER_LEN(tess_hash_memory_limit());
 	spill->file = tess_spill_create(&config);
 	spill->level = level;
 	for (int part = 0; part < ROWS_PARTS; part++)

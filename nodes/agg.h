@@ -14,6 +14,8 @@
 #include "tessera/runtime.h"
 #include "tessera/table.h"
 
+#include "memory_limit.h"
+
 /* A generic sum state's payload words: the kernels' state, then the rest's address. */
 #define AGG_SUM_STATE_WORDS (TESS_TABLE_SUM_WORDS + 1)
 

@@ -36,7 +36,7 @@ note_memory(TessAggState *state)
 uint64
 first_capacity(uint64 capacity)
 {
-	uint64		most = get_hash_memory_limit() / 32;
+	uint64		most = tess_hash_memory_limit() / 32;
 
 	return Max(Min(capacity, most), AGG_INITIAL_GROUPS);
 }
@@ -88,7 +88,7 @@ add_chunk(TessAggState *state)
 	/* Past the first, an eighth of hash_mem, so that a small one spills late. */
 	Size		len = chunk == 0 ? AGG_FIRST_CHUNK :
 		Max(AGG_FIRST_CHUNK, Min(TESS_TABLE_MAX_CHUNK_LEN,
-								 TYPEALIGN_DOWN(8, get_hash_memory_limit() / 8)));
+								 TYPEALIGN_DOWN(8, tess_hash_memory_limit() / 8)));
 	void	   *base;
 
 	if (chunk == TESS_TABLE_MAX_CHUNKS)
@@ -457,7 +457,7 @@ group_batch(TessAggState *state, TessBatch *batch)
 	 */
 	if (state->spill == NULL && (!state->partial || state->partial_spill) &&
 		!state->has_distinct && !state->row_spill &&
-		state->table_bytes > get_hash_memory_limit() / 8 * 7)
+		state->table_bytes > tess_hash_memory_limit() / 8 * 7)
 		agg_start_spill(state);
 	/*
 	 * Generic states past hash_mem: the table freezes, new groups' rows go
@@ -465,7 +465,7 @@ group_batch(TessAggState *state, TessBatch *batch)
 	 */
 	if (state->row_spill && !state->partial && !state->has_distinct && !state->frozen &&
 		state->rows_level < ROWS_MAX_LEVELS &&
-		groups_memory(state) > get_hash_memory_limit() / 8 * 7)
+		groups_memory(state) > tess_hash_memory_limit() / 8 * 7)
 	{
 		TessTableStats stats = TESS_STRUCT_INITIALIZER(TessTableStats);
 
@@ -524,7 +524,7 @@ agg_group_drain(TessAggState *state)
 		 * input goes on after it.
 		 */
 		if (state->partial && !state->partial_spill &&
-			groups_memory(state) > get_hash_memory_limit() / 8 * 7)
+			groups_memory(state) > tess_hash_memory_limit() / 8 * 7)
 		{
 			TessTableStats stats = TESS_STRUCT_INITIALIZER(TessTableStats);
 

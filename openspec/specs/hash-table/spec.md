@@ -104,6 +104,9 @@ chunk and its first byte there, in units of 8 bytes. Reference 0, the
 used mark of chunk 0, names no record. `tess_table_ref`,
 `tess_table_ref_chunk` and `tess_table_ref_byte` make and split a
 reference, and a reference names the same record in every process.
+`tess_table_memory_limit` SHALL return a limit of memory as it is up to
+`TESS_TABLE_MEMORY_MAX`, 16 GiB, half of what the most chunks of the
+longest length hold, and that maximum for a larger limit.
 
 ```
   31             17 16                     0
@@ -129,6 +132,13 @@ reference, and a reference names the same record in every process.
 - **Verified by:**
   `crates/tessera-kernels/tests/table.rs::inserted_rows_are_found_and_absent_keys_are_not`;
   `test/sql/table.sql::tessera_test_table_cycle`
+
+#### Scenario: The most memory of a table
+- **WHEN** limits of 0, 8 MiB and one byte under 16 GiB are given, and
+  of 16 GiB, one byte over it, 64 GiB and the largest size
+- **THEN** the first three come back as they are and the others as
+  16 GiB, which fills half of the 32768 chunks of 1 MiB
+- **Verified by:** `test/sql/table.sql::tessera_test_table_memory_limit`
 
 #### Scenario: Reference 0 names no record
 - **WHEN** a call is asked for the record at reference 0
