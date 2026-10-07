@@ -15,16 +15,20 @@ use anyhow::Result;
 use tessera_capi::c::sort_flags::{DESCENDING, NULLABLE, NULLS_FIRST};
 use tessera_capi::c::{
     CSortKey, Code, DatumColumn, Mask, Status, TableKey, TableRecord, TableRef, TableStats,
-    TableSumArg, tess_build_counters_init, tess_build_take_chunk, tess_build_totals,
-    tess_int4_hash, tess_int8_hash, tess_sort, tess_sort_item_words, tess_sort_items,
-    tess_sort_layout, tess_sort_merge, tess_table_accumulate, tess_table_accumulate_sums,
-    tess_table_append, tess_table_append_columns, tess_table_append_partitioned_columns,
-    tess_table_chunk_init, tess_table_clear_key, tess_table_create, tess_table_find_or_insert,
+    TableSumArg, tess_bloom_add, tess_bloom_probe, tess_bloom_shared_add, tess_bloom_shared_init,
+    tess_bloom_shared_probe, tess_bloom_shared_ready, tess_bloom_shared_words,
+    tess_build_counters_init, tess_build_take_chunk, tess_build_totals, tess_int4_hash,
+    tess_int8_hash, tess_sort, tess_sort_item_words, tess_sort_items, tess_sort_layout,
+    tess_sort_merge, tess_table_accumulate, tess_table_accumulate_sums, tess_table_append,
+    tess_table_append_columns, tess_table_append_partitioned_columns, tess_table_bloom,
+    tess_table_bloom_words, tess_table_bloom_words_within, tess_table_chunk_init,
+    tess_table_clear_key, tess_table_combine, tess_table_create, tess_table_find_or_insert,
     tess_table_format_version, tess_table_gather, tess_table_gather_key, tess_table_gather_words,
     tess_table_layout, tess_table_link, tess_table_link_grouped, tess_table_mark,
     tess_table_mark_words, tess_table_next_in_group, tess_table_next_match,
     tess_table_next_unmarked, tess_table_payloads, tess_table_probe, tess_table_record,
     tess_table_regrow, tess_table_scan, tess_table_size, tess_table_stats,
+    tess_table_try_build_bloom,
 };
 use tessera_core::{ColumnView, RowMask, RowMaskView};
 use tessera_kernels::int32::{self, NullKeys};
@@ -3236,6 +3240,405 @@ fn an_append_by_partition_checks_what_it_is_given() -> Result<()> {
         assert_eq!(append(&int4, 1, &mut pending_words, &mut rows), Code::Ok);
         assert_eq!(pending_words, [0]);
         assert_eq!(rows, [2, 2]);
+    }
+    Ok(())
+}
+
+/// Partitions that a call cannot take are refused by an append by
+/// partition before it writes anything: a count that is not a power of two
+/// up to 65536, bits past the hash's 32, a chunk the table lacks.
+#[test]
+fn an_append_by_partition_refuses_partitions_past_the_limits() -> Result<()> {
+    let keys = Keys::new(4);
+    let column = keys.column();
+    let key = TableKey {
+        kind: 1,
+        column: &raw const column,
+        prepared: ptr::null(),
+    };
+    let hashes: Vec<u32> = (0..4).collect();
+    let many = vec![0_u32; 1 << 17];
+    let mut status = Status::new();
+    // SAFETY: local buffers of the declared sizes, aliased by nothing else,
+    // throughout this test.
+    unsafe {
+        let mut table = CTable::new(1, 8, 8);
+        table.add_chunk(CHUNK_HEADER + 4 * 32);
+        table.add_chunk(CHUNK_HEADER + 4 * 32);
+        let cases: [(&[u32], i32, u32); 6] = [
+            (&[], 0, 0),
+            (&[0, 1, 0], 3, 0),
+            (&many, 1 << 17, 0),
+            (&[0, 1, 0, 1], 4, 31),
+            (&[0], 1, 32),
+            (&[0, 9], 2, 0),
+        ];
+        for (chunks, npartitions, shift) in cases {
+            let mut pending_words = [0b1111];
+            let mut pending = Mask {
+                nrows: 4,
+                bits: pending_words.as_mut_ptr(),
+            };
+            let mut rows = vec![0_u64; chunks.len()];
+            let (mut offsets, mut nulls) = ([0; 4], 0);
+            let code = tess_table_append_partitioned_columns(
+                table.ptr(),
+                chunks.as_ptr(),
+                npartitions,
+                shift,
+                hashes.as_ptr(),
+                1,
+                &raw const key,
+                0,
+                ptr::null(),
+                &raw mut pending,
+                offsets.as_mut_ptr(),
+                rows.as_mut_ptr(),
+                &raw mut nulls,
+                &raw mut status,
+            );
+            assert_eq!(code, Code::InvalidArgument, "{npartitions} at {shift}");
+            assert_eq!(pending_words, [0b1111]);
+            assert!(rows.iter().all(|&count| count == 0));
+            for chunk in 0..2 {
+                assert_eq!(
+                    table.chunks[chunk][0], CHUNK_HEADER as u64,
+                    "nothing written"
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// A merge through its entry point: a count or a sum past the int8 range
+/// fails with 22003, as the row-by-row transition does; aggregates past a
+/// word of flags or a payload, an unknown kind and a merge into its own
+/// source fail before anything changes.
+#[test]
+fn a_merge_that_cannot_be_done_fails() -> Result<()> {
+    let values = [7_u64];
+    let isnull = [false];
+    let column = DatumColumn {
+        struct_size: size_of::<DatumColumn>(),
+        values: values.as_ptr(),
+        isnull: isnull.as_ptr(),
+        nrows: 1,
+        ..DatumColumn::EMPTY
+    };
+    let key = TableKey {
+        kind: 1,
+        column: &raw const column,
+        prepared: ptr::null(),
+    };
+    let hashes = [int32::murmurhash32(7)];
+    let payload_of = |flags: u64, state: i64| -> Vec<u8> {
+        [flags, state as u64]
+            .iter()
+            .flat_map(|word| word.to_ne_bytes())
+            .collect()
+    };
+    // SAFETY: local buffers of the declared sizes, aliased by nothing else,
+    // throughout this test.
+    unsafe {
+        // (the table's state, the state read back, the kind, the result)
+        let overflows = [
+            (i64::MAX, 1, 1_u32, "a count"),
+            (i64::MAX, 1, 2, "a sum"),
+            (i64::MIN, -1, 2, "a negative sum"),
+        ];
+        for (ours, theirs, kind, what) in overflows {
+            let mut table = CTable::new(1, 16, 8);
+            let mut pending_words = [1];
+            let mut pending = Mask {
+                nrows: 1,
+                bits: pending_words.as_mut_ptr(),
+            };
+            let mut offsets = [0];
+            let payload = payload_of(1, ours);
+            table.insert(
+                CHUNK_HEADER + 4 * 40,
+                hashes.as_ptr(),
+                &raw const key,
+                payload.as_ptr(),
+                &raw mut pending,
+                offsets.as_mut_ptr(),
+                false,
+            );
+            // The source: the same group, appended to a chunk of its own.
+            table.add_chunk(CHUNK_HEADER + 4 * 40);
+            let source = table.chunks.len() as i32 - 1;
+            let mut pending_words = [1];
+            let mut pending = Mask {
+                nrows: 1,
+                bits: pending_words.as_mut_ptr(),
+            };
+            let payload = payload_of(1, theirs);
+            let mut status = Status::new();
+            let code = tess_table_append(
+                table.ptr(),
+                source,
+                16,
+                hashes.as_ptr(),
+                1,
+                &raw const key,
+                payload.as_ptr(),
+                &raw mut pending,
+                offsets.as_mut_ptr(),
+                &raw mut status,
+            );
+            assert_eq!(code, Code::Ok, "{}", status.message());
+            table.add_chunk(CHUNK_HEADER + 4 * 40);
+            let into = table.chunks.len() as i32 - 1;
+            let merge = |naggregates: i32, kinds: &[u32], chunk: i32, status: &mut Status| {
+                let (mut from, mut merged, mut stop) = (CHUNK_HEADER, -1, -1);
+                let code = tess_table_combine(
+                    table.ptr(),
+                    source,
+                    &raw mut from,
+                    chunk,
+                    naggregates,
+                    kinds.as_ptr(),
+                    &raw mut merged,
+                    &raw mut stop,
+                    status,
+                );
+                (code, from, merged, stop)
+            };
+            // Wrong arguments: nothing moves.
+            let kinds = vec![kind; 65];
+            for (naggregates, kinds, chunk) in [
+                (65, &kinds[..], into),
+                (2, &kinds[..2], into),
+                (1, &[5][..], into),
+                (1, &kinds[..1], source),
+            ] {
+                let mut status = Status::new();
+                let result = merge(naggregates, kinds, chunk, &mut status);
+                assert_eq!(
+                    result,
+                    (Code::InvalidArgument, CHUNK_HEADER, -1, -1),
+                    "{naggregates} of {kinds:?} into {chunk}"
+                );
+            }
+            let mut status = Status::new();
+            let (code, ..) = merge(1, &[kind], into, &mut status);
+            assert_eq!(code, Code::IntegerOutOfRange, "{what}");
+            assert_eq!(status.sqlstate(), "22003", "{what}");
+            assert!(status.message().contains("bigint out of range"), "{what}");
+        }
+    }
+    Ok(())
+}
+
+/// The filter's entry points as C calls them: the sizes, a filter filled
+/// from a table, by adding rows and by adding them atomically, a shared
+/// filter that one call builds and a second leaves, and the shapes each
+/// call refuses with the words as they were.
+#[test]
+fn the_filter_entry_points_size_fill_and_probe() -> Result<()> {
+    const NROWS: usize = 10;
+    let keys = Keys::new(NROWS);
+    let column = keys.column();
+    let key = TableKey {
+        kind: 1,
+        column: &raw const column,
+        prepared: ptr::null(),
+    };
+    let hashes: Vec<u32> = (0..NROWS as u32).map(int32::murmurhash32).collect();
+    let mut all = [(1_u64 << NROWS) - 1];
+    let rows = Mask {
+        nrows: NROWS as i32,
+        bits: all.as_mut_ptr(),
+    };
+    let mut status = Status::new();
+    // SAFETY: local buffers of the declared sizes, aliased by nothing else,
+    // throughout this test.
+    unsafe {
+        let mut nwords = 0;
+        assert_eq!(
+            tess_table_bloom_words(NROWS as u64, &raw mut nwords, &raw mut status),
+            Code::Ok
+        );
+        assert_eq!(nwords, 4, "160 bits, rounded up to a power of two");
+        let mut within = 0;
+        let code =
+            tess_table_bloom_words_within(NROWS as u64, 64, &raw mut within, &raw mut status);
+        assert_eq!((code, within), (Code::Ok, 1), "an eighth of 64 bytes");
+        let mut shared_words = 0;
+        let code = tess_bloom_shared_words(NROWS as u64, &raw mut shared_words, &raw mut status);
+        assert_eq!((code, shared_words), (Code::Ok, 5), "a state word and four");
+
+        let mut table = CTable::new(1, 8, 16);
+        let mut pending_words = all;
+        let mut pending = Mask {
+            nrows: NROWS as i32,
+            bits: pending_words.as_mut_ptr(),
+        };
+        let mut offsets = [0; NROWS];
+        let payload = [0_u8; 8 * NROWS];
+        table.insert(
+            CHUNK_HEADER + 4 * 32,
+            hashes.as_ptr(),
+            &raw const key,
+            payload.as_ptr(),
+            &raw mut pending,
+            offsets.as_mut_ptr(),
+            false,
+        );
+        let probe = |words: &[u64]| -> Result<u64, Code> {
+            let mut status = Status::new();
+            let mut found_bits = [0];
+            let mut found = Mask {
+                nrows: NROWS as i32,
+                bits: found_bits.as_mut_ptr(),
+            };
+            match tess_bloom_probe(
+                words.as_ptr(),
+                words.len(),
+                hashes.as_ptr(),
+                &raw const rows,
+                &raw mut found,
+                &raw mut status,
+            ) {
+                Code::Ok => Ok(found_bits[0]),
+                code => Err(code),
+            }
+        };
+        // From the table, by adding rows, by adding them atomically.
+        let mut filled = vec![0_u64; nwords];
+        let code = tess_table_bloom(table.ptr(), filled.as_mut_ptr(), nwords, &raw mut status);
+        assert_eq!(code, Code::Ok, "{}", status.message());
+        assert_eq!(probe(&filled), Ok(all[0]), "every key of the table");
+        let mut added = vec![0_u64; nwords];
+        let code = tess_bloom_add(
+            added.as_mut_ptr(),
+            nwords,
+            hashes.as_ptr(),
+            &raw const rows,
+            &raw mut status,
+        );
+        assert_eq!(code, Code::Ok, "{}", status.message());
+        assert_eq!(added, filled, "the same bits as the table's keys");
+        let mut together = vec![0_u64; nwords];
+        let code = tess_bloom_shared_add(
+            together.as_mut_ptr(),
+            nwords,
+            hashes.as_ptr(),
+            &raw const rows,
+            &raw mut status,
+        );
+        assert_eq!(code, Code::Ok, "{}", status.message());
+        assert_eq!(together, filled);
+
+        // A shared filter: not ready, then built by one call only.
+        let mut shared = vec![7_u64; shared_words];
+        let code = tess_bloom_shared_init(shared.as_mut_ptr(), shared_words, &raw mut status);
+        assert_eq!(code, Code::Ok, "{}", status.message());
+        assert!(shared.iter().all(|&word| word == 0), "cleared");
+        let ready = |shared: &mut Vec<u64>| {
+            let (mut ready, mut status) = (true, Status::new());
+            let code = tess_bloom_shared_ready(
+                shared.as_mut_ptr(),
+                shared.len(),
+                &raw mut ready,
+                &raw mut status,
+            );
+            assert_eq!(code, Code::Ok, "{}", status.message());
+            ready
+        };
+        let shared_probe = |shared: &mut Vec<u64>| {
+            let mut status = Status::new();
+            let mut found_bits = [0];
+            let mut found = Mask {
+                nrows: NROWS as i32,
+                bits: found_bits.as_mut_ptr(),
+            };
+            let code = tess_bloom_shared_probe(
+                shared.as_mut_ptr(),
+                shared.len(),
+                hashes.as_ptr(),
+                &raw const rows,
+                &raw mut found,
+                &raw mut status,
+            );
+            (code, found_bits[0])
+        };
+        assert!(!ready(&mut shared));
+        assert_eq!(shared_probe(&mut shared).0, Code::InvalidArgument);
+        for expected in [true, false] {
+            let mut built = !expected;
+            let code = tess_table_try_build_bloom(
+                table.ptr(),
+                shared.as_mut_ptr(),
+                shared_words,
+                &raw mut built,
+                &raw mut status,
+            );
+            assert_eq!((code, built), (Code::Ok, expected), "{}", status.message());
+        }
+        assert!(ready(&mut shared));
+        assert_eq!(shared_probe(&mut shared), (Code::Ok, all[0]));
+        assert_eq!(shared[1..], filled[..], "the table's bits after the state");
+
+        // Shapes the calls refuse: words not a power of two, a shared
+        // filter of 1 or 4 words or not aligned to 8.
+        let mut three = vec![7_u64; 3];
+        assert_eq!(
+            tess_table_bloom(table.ptr(), three.as_mut_ptr(), 3, &raw mut status),
+            Code::InvalidArgument
+        );
+        for add in [tess_bloom_add, tess_bloom_shared_add] {
+            let code = add(
+                three.as_mut_ptr(),
+                3,
+                hashes.as_ptr(),
+                &raw const rows,
+                &raw mut status,
+            );
+            assert_eq!(code, Code::InvalidArgument);
+        }
+        assert_eq!(probe(&three), Err(Code::InvalidArgument));
+        assert_eq!(three, [7; 3]);
+        let mut odd = vec![7_u64; 6];
+        let misaligned = odd.as_mut_ptr().cast::<u8>().wrapping_add(4).cast::<u64>();
+        for (words, nwords) in [
+            (odd.as_mut_ptr(), 1),
+            (odd.as_mut_ptr(), 4),
+            (misaligned, 5),
+        ] {
+            let mut built = false;
+            assert_eq!(
+                tess_bloom_shared_init(words, nwords, &raw mut status),
+                Code::InvalidArgument
+            );
+            assert_eq!(
+                tess_table_try_build_bloom(
+                    table.ptr(),
+                    words,
+                    nwords,
+                    &raw mut built,
+                    &raw mut status
+                ),
+                Code::InvalidArgument
+            );
+            let mut ready = false;
+            assert_eq!(
+                tess_bloom_shared_ready(words, nwords, &raw mut ready, &raw mut status),
+                Code::InvalidArgument
+            );
+        }
+        assert_eq!(
+            tess_bloom_shared_add(
+                misaligned,
+                4,
+                hashes.as_ptr(),
+                &raw const rows,
+                &raw mut status
+            ),
+            Code::InvalidArgument
+        );
+        assert_eq!(odd, [7; 6], "nothing written");
     }
     Ok(())
 }

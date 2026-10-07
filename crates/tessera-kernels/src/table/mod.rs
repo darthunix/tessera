@@ -1042,6 +1042,39 @@ mod tests {
         }
     }
 
+    /// Four threads fill a filter together, each adding a stripe of the
+    /// rows of a batch of 200 that crosses every word of its mask: the
+    /// filter holds what one plain add of every row gives, word for word.
+    #[test]
+    fn four_threads_fill_a_filter_as_one_add_fills_it() {
+        let hashes: Vec<u32> = (0..200).map(murmurhash32).collect();
+        let mut all_rows = vec![u64::MAX; 4];
+        all_rows[3] = (1 << 8) - 1;
+        let nwords = bloom::words_for(200).unwrap();
+        let mut alone = vec![0; nwords];
+        let rows = RowMaskView::try_new(200, &all_rows).unwrap();
+        bloom::add(&mut alone, &hashes, &rows).unwrap();
+        let mut together = vec![0_u64; nwords];
+        // An address, which a thread may take where a pointer may not go.
+        let words = together.as_mut_ptr() as usize;
+        std::thread::scope(|scope| {
+            for thread in 0..4 {
+                let hashes = &hashes;
+                scope.spawn(move || {
+                    let mut stripe = [0_u64; 4];
+                    for row in (thread..200).step_by(4) {
+                        stripe[row / 64] |= 1 << (row % 64);
+                    }
+                    let rows = RowMaskView::try_new(200, &stripe).unwrap();
+                    // SAFETY: the words are aligned, live through the
+                    // scope, and every thread changes them atomically.
+                    unsafe { bloom::add_shared(words as *mut u64, nwords, hashes, &rows) }.unwrap();
+                });
+            }
+        });
+        assert_eq!(together, alone);
+    }
+
     #[test]
     fn one_of_four_threads_builds_a_shared_filter_every_key_passes() {
         let config = TableConfig {
@@ -1279,12 +1312,23 @@ mod tests {
         for _ in 0..5 {
             blocks.add(CHUNK_HEADER + 256 * 32);
         }
-        let cases: [(u32, &[u32], &str); 4] = [
+        let many = vec![0; 2 * MAX_PARTITIONS];
+        let cases: [(u32, &[u32], &str); 6] = [
+            (0, &[], "power of two"),
             (0, &[0, 1, 2], "power of two"),
+            (0, &many, "power of two"),
             (31, &[0, 1, 2, 3], "past the 32 bits"),
             (0, &[0, 1, 2, 9], "does not exist"),
             (32, &[0], "past the 32 bits"),
         ];
+        // A lookup by partition into a table over the same chunks.
+        let mut table = LocalTable::new(&PARTITION_CONFIG, 64, CHUNK_HEADER + 256 * 32).unwrap();
+        for _ in 0..4 {
+            table.add_chunk().unwrap();
+        }
+        let keys = [1, 2, 3];
+        let column = [ColumnView::try_new(&keys, None).unwrap()];
+        let (hashes, all) = key_batch(&keys);
         for (shift, chunks, message) in cases {
             let mut from = CHUNK_HEADER;
             let error = split_to(
@@ -1298,6 +1342,26 @@ mod tests {
             )
             .unwrap_err();
             assert!(error.to_string().contains(message), "{error}");
+            assert_eq!(from, CHUNK_HEADER);
+            let (mut pending_words, mut inserted_words) = (all.clone(), vec![0; 1]);
+            let error = table
+                .table_mut()
+                .unwrap()
+                .find_or_insert_partitioned(
+                    &Partitions { shift, chunks },
+                    &mut Batch::new(
+                        &hashes,
+                        &column[..],
+                        &mut RowMask::try_new(3, &mut pending_words).unwrap(),
+                        &mut [0; 3],
+                    )
+                    .unwrap(),
+                    &mut RowMask::try_new(3, &mut inserted_words).unwrap(),
+                )
+                .unwrap_err();
+            assert!(error.to_string().contains(message), "{error}");
+            assert_eq!(pending_words, all, "{message}: a row resolved");
+            assert_eq!(table.table().unwrap().stats().records, 0);
         }
         let mut from = CHUNK_HEADER;
         let error = split_to(
@@ -1397,6 +1461,12 @@ mod tests {
             let (hashes, all) = key_batch(&keys);
             let mut pending_words = all.clone();
             let mut offsets = vec![0; keys.len()];
+            // The first row of each key the table lacks makes its record.
+            let mut new = std::collections::HashSet::new();
+            let expected: Vec<usize> = (0..keys.len())
+                .filter(|&row| !first.contains_key(&keys[row]) && new.insert(keys[row]))
+                .collect();
+            let mut made = Vec::new();
             loop {
                 let mut inserted_words = vec![0; all.len()];
                 let mut pending = RowMask::try_new(keys.len(), &mut pending_words).unwrap();
@@ -1413,6 +1483,9 @@ mod tests {
                         &mut inserted,
                     )
                     .unwrap();
+                made.extend(
+                    (0..keys.len()).filter(|row| inserted_words[row / 64] >> (row % 64) & 1 == 1),
+                );
                 if pending_words.iter().all(|&word| word == 0) {
                     break;
                 }
@@ -1429,6 +1502,8 @@ mod tests {
                     }
                 }
             }
+            made.sort_unstable();
+            assert_eq!(made, expected, "the inserted rows of batch {batch}");
             let reader = table.table().unwrap();
             for (row, &key) in keys.iter().enumerate() {
                 let record = reader.record(offsets[row]).unwrap();
@@ -1454,6 +1529,47 @@ mod tests {
                 i64::from_ne_bytes(record.payload[8 * index..8 * index + 8].try_into().unwrap());
         }
         out
+    }
+
+    /// A lookup by partition stops every row once the records reach half
+    /// the buckets: the row that needs a record past them, and every row
+    /// after it, those of keys the table holds too.
+    #[test]
+    fn half_the_buckets_stops_every_row_of_a_lookup_by_partition() {
+        // 1024 buckets take 512 records; 600 keys, then 6 the table holds.
+        let mut table = LocalTable::new(&PARTITION_CONFIG, 16, CHUNK_HEADER + 1000 * 32).unwrap();
+        assert_eq!(table.table().unwrap().stats().buckets, 1024);
+        let chunks: Vec<u32> = (0..4).map(|_| table.add_chunk().unwrap() as u32).collect();
+        let keys: Vec<i32> = (0..600).chain(0..6).collect();
+        let column = [ColumnView::try_new(&keys, None).unwrap()];
+        let (hashes, mut pending_words) = key_batch(&keys);
+        let mut inserted_words = vec![0; pending_words.len()];
+        let mut offsets = vec![0; keys.len()];
+        let resolved = table
+            .table_mut()
+            .unwrap()
+            .find_or_insert_partitioned(
+                &Partitions {
+                    shift: 3,
+                    chunks: &chunks,
+                },
+                &mut Batch::new(
+                    &hashes,
+                    &column[..],
+                    &mut RowMask::try_new(keys.len(), &mut pending_words).unwrap(),
+                    &mut offsets,
+                )
+                .unwrap(),
+                &mut RowMask::try_new(keys.len(), &mut inserted_words).unwrap(),
+            )
+            .unwrap();
+        assert_eq!(resolved, 512);
+        let bit = |words: &[u64], row: usize| words[row / 64] >> (row % 64) & 1 == 1;
+        for row in 0..keys.len() {
+            assert_eq!(bit(&pending_words, row), row >= 512, "row {row} pending");
+            assert_eq!(bit(&inserted_words, row), row < 512, "row {row} inserted");
+        }
+        assert_eq!(table.table().unwrap().stats().records, 512);
     }
 
     /// A table of the keys, each with the states `of` gives it.
@@ -1518,6 +1634,62 @@ mod tests {
             }
         }
         Ok(())
+    }
+
+    /// A merge stops where a new group finds no room in its chunk, and
+    /// where the records reach half the buckets, with `*from` on the first
+    /// group not merged; with a chunk and a larger index it goes on to the
+    /// end.
+    #[test]
+    fn a_merge_stops_for_a_chunk_or_a_larger_index() {
+        let states = |key: i32| [0b1110, 1, i64::from(key), 0, 0];
+        let (mut into, _) = grouped(&(0..10).collect::<Vec<_>>(), states, 16);
+        let (mut from, _) = grouped(&(0..600).collect::<Vec<_>>(), states, 1024);
+        let record = into.table().unwrap().record_size();
+        let mut chunk = into.chunks() - 1;
+        let (mut stops, mut total) = (Vec::new(), 0);
+        for source_chunk in 0..from.chunks() {
+            let words = from.chunk_words(source_chunk).to_vec();
+            let source = into.add_chunk_copy(&words).unwrap();
+            let (mut at, mut here) = (CHUNK_HEADER, 0);
+            loop {
+                let (merged, stop) = into
+                    .table_mut()
+                    .unwrap()
+                    .combine(source, &mut at, chunk, &COMBINES)
+                    .unwrap();
+                here += merged;
+                assert_eq!(at, CHUNK_HEADER + here * record, "on the first not merged");
+                stops.push(stop);
+                match stop {
+                    CombineStop::Done => break,
+                    CombineStop::ChunkFull => chunk = into.add_chunk().unwrap(),
+                    CombineStop::IndexFull => {
+                        let records = into.table().unwrap().stats().records;
+                        assert_eq!(records, 512, "half of 1024 buckets");
+                        // A regrow links every record of every chunk it is
+                        // given: as the grouping does, the source is hidden.
+                        let used = into.chunk_words(source)[0];
+                        into.chunk_words(source)[0] = CHUNK_HEADER as u64;
+                        into.regrow(records * 2).unwrap();
+                        into.chunk_words(source)[0] = used;
+                    }
+                }
+            }
+            // A source merged is done with, as the grouping frees it.
+            into.chunk_words(source)[0] = CHUNK_HEADER as u64;
+            total += here;
+        }
+        assert_eq!(total, 600);
+        assert!(stops.contains(&CombineStop::ChunkFull));
+        assert_eq!(
+            stops
+                .iter()
+                .filter(|&&stop| stop == CombineStop::IndexFull)
+                .count(),
+            1
+        );
+        assert_eq!(into.table().unwrap().stats().records, 600);
     }
 
     #[test]
