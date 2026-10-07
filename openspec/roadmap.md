@@ -1120,12 +1120,14 @@ becomes an entry, joins one, or is dropped.
     `nodes/hashjoin.h` and `nodes/agg_spill.c` still count a buffer of a
     page for each partition's file, though a set has one buffer. Whether
     the reserves themselves are still right is to be decided.
-- **`hash-table`: what the description of partitions, filters and marks
-  left** (the same source).
-  - TessFilter's "Rows Removed by Bloom Filter" counts the rows with a
-    NULL key, which its hashing drops; the join's counts only rows with
-    keys. `docs/nodes.md` does not say so. For the capabilities of the
-    join and of the filter.
+- **`key-filter`: totals and means** (found when the key filter was
+  described). The join shows "Rows Removed by Bloom Filter" as a total
+  over its loops, as its other counters; the TessFilter below shows the
+  same line per loop, as the core shows the rows its conditions removed.
+  Under a parameter that rebuilds the join's table the two differ by the
+  loops. The spec states which is which. Suggested: decide one rule for
+  Tessera's lines when the capabilities of the join and of TessFilter
+  are written.
 
 ## Decided against
 
