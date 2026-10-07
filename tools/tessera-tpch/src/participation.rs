@@ -32,8 +32,9 @@ pub struct Participation {
     pub scanned: u64,
     /// Of them, rows TessHeapScan read.
     pub tessera_scanned: u64,
-    /// Rows TessFilter removed by its batch clauses, by a join's Bloom
-    /// filter and by its clauses left to the core.
+    /// Rows TessFilter removed by its batch clauses, by a join's key
+    /// filter (its Bloom filter and NULL keys) and by its clauses left to
+    /// the core.
     pub batch_removed: u64,
     pub bloom_removed: u64,
     pub residual_removed: u64,
@@ -117,7 +118,8 @@ impl Participation {
             }
             (_, Some("TessFilter")) => {
                 self.batch_removed += total("Rows Removed by Batch Filter");
-                self.bloom_removed += total("Rows Removed by Bloom Filter");
+                self.bloom_removed +=
+                    total("Rows Removed by Bloom Filter") + total("Rows Removed by NULL Key");
                 self.residual_removed += total("Rows Removed by Residual Filter");
             }
             _ => {}
@@ -244,7 +246,7 @@ pub fn table(all: &[QueryParticipation]) -> String {
     );
     let _ = writeln!(
         text,
-        "# batch, bloom, residual: rows TessFilter removed by its batch clauses, a join's Bloom filter, the clauses left to the core"
+        "# batch, bloom, residual: rows TessFilter removed by its batch clauses, a join's key filter, the clauses left to the core"
     );
     let _ = writeln!(
         text,
