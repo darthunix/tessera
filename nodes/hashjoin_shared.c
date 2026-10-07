@@ -652,6 +652,11 @@ join_leave_shared(TessHashJoinState *state, bool keep)
 	}
 	if (!state->parallel.participating)
 		return false;
+	/*
+	 * The filter's words go with the table, which the last participant to
+	 * leave frees: the child holds them no more from here.
+	 */
+	join_take_back_bloom(state);
 	for (;;)
 	{
 		uint32		action;
