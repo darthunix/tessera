@@ -919,7 +919,8 @@ SELECT join_same($$SELECT jsmall.k, (SELECT count(*) FROM jf WHERE NOT EXISTS (S
 
 -- A build side larger than the planner thinks: the records go on into
 -- more chunks, and the index is made for as many as were read.
-CREATE TABLE jgrow (k int, g int);
+-- No autovacuum: its analyze would correct the planner's estimate.
+CREATE TABLE jgrow (k int, g int) WITH (autovacuum_enabled = off);
 ANALYZE jgrow;
 INSERT INTO jgrow SELECT g % 400, g FROM generate_series(1, 20000) AS g;
 SELECT join_same($$SELECT count(*), sum(jgrow.g) FROM jsmall JOIN jgrow ON jsmall.k = jgrow.k$$);
@@ -3514,7 +3515,8 @@ SELECT join_same($$SELECT count(*), sum(length(big.t)) FROM jrefprobe JOIN (SELE
 
 -- A table larger than the planner thinks keeps its values where they
 -- are, and its index is made for every row.
-CREATE TABLE jrefgrow (k int, t text);
+-- No autovacuum: its analyze would correct the planner's estimate.
+CREATE TABLE jrefgrow (k int, t text) WITH (autovacuum_enabled = off);
 ANALYZE jrefgrow;
 INSERT INTO jrefgrow SELECT g % 400, 'g' || g FROM generate_series(1, 20000) AS g;
 SELECT join_same($$SELECT count(*), max(jrefgrow.t), sum(length(jrefgrow.t)) FROM jbig JOIN jrefgrow ON jbig.fk = jrefgrow.k$$);
@@ -3598,7 +3600,8 @@ SELECT join_same($$SELECT count(*), count(jsb.n), sum(length(jsb.t)) FROM jsp LE
 -- One key held by 60000 inner rows the planner does not expect: the
 -- table splits late, and the key's partition, larger than hash_mem, is
 -- joined in pieces by the participant that takes it.
-CREATE TABLE jsskew (k int, w int);
+-- No autovacuum: its analyze would correct the planner's estimate.
+CREATE TABLE jsskew (k int, w int) WITH (autovacuum_enabled = off);
 ANALYZE jsskew;
 INSERT INTO jsskew SELECT CASE WHEN g <= 60000 THEN 7 ELSE g END, g FROM generate_series(1, 62000) AS g;
 SELECT join_property($$SELECT count(*), sum(jsskew.w) FROM jsp JOIN jsskew ON jsp.k = jsskew.k$$, 'Shared Table') AS shared,
@@ -3716,7 +3719,8 @@ SET work_mem = '1MB';
 -- its statistics, which the planner scales by its pages. Its other rows
 -- outgrow hash_mem several times over, so that partitions go to disk
 -- whatever the participants' timing.
-CREATE TABLE jsouter (k int, s text);
+-- No autovacuum: its analyze would correct the planner's estimate.
+CREATE TABLE jsouter (k int, s text) WITH (autovacuum_enabled = off);
 INSERT INTO jsouter
 SELECT CASE WHEN g % 11 = 0 THEN NULL ELSE g % 50000 END, 'q' || g FROM generate_series(1, 200000) AS g;
 ANALYZE jsouter;
