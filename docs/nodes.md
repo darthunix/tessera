@@ -2005,74 +2005,10 @@ built.
 
 ### Pruning the outer side's partitions
 
-When the outer side is `TessAppend` over a partitioned table whose
-partition key is the outer side of a key of words, and the join keeps no
-outer row without a pair (inner, semi, and right joins, where the inner
-side is kept), the table's keys tell which partitions can pair: the others
-are not read. The core prunes at execution only by the parameters of an
-`Append` (a nested loop's inner side, which a batch node leaves to the
-core); a patch for hash joins (2023–2024) pruned for every row the build
-inserted, which cost as much as the insertion, and was returned. The
-planner (`write_join_prune` in `join_planner.c`, at the join's
-`PlanCustomPath`, the children planned, as Greengage's
-`joinpartprune.c` decides at `create_plan`) makes the core's pruning
-descriptions for `key = $p` and, where the key's btree family compares
-the two types, `key >= $lo AND key <= $hi`, over three parameters of
-execution of its own (`assign_special_exec_param`): the core's pruning
-takes no column of another relation, and the parameters stand for the
-inner side's values, so the core is left as it is (Greengage changed
-its pruning to take the inner side's columns). At the start the join
-hands them to `TessAppend` (`tess_append_join_prune_begin`), which makes
-their pruning states as its own over every planned child. The build
-notes the key of each inner row, the NULL ones apart: the lowest and
-the highest, and the keys themselves while the inner side has at most
-1024 rows with one; a shared table's participants add theirs under a
-lock before the build's barrier. Once built, before the outer side is
-read (a shared table that spills reads it in the build's phases, to the
-partitions on disk: past the barrier, there), the join hands the keys
-down (`tess_append_join_prune`): each
-distinct key of a list sets `$p` and prunes, the children added up,
-stopping once every child is needed; past the list the range prunes,
-where there is one; no key pairs with no partition. The work is a key
-an inner row at the build and a pruning a distinct key after it, as
-DuckDB passes a list of a few keys and their range. `TessAppend`
-intersects the children it reads with those left and shows `Subplans
-Removed by Join` with `ANALYZE`; the children kept are the same in every
-participant. A table kept over a rescan keeps them; a table built anew
-hands its own.
-
-The planner expects the pruning (`expected_leaves`): by the same key
-(`prune_key`, which the plan's pruning takes too), it bounds the inner
-key's values by what it knows before execution, the lowest and the
-highest of the column's statistics (the histogram's ends and the common
-values) and its relation's clauses `key op constant`, carried over to
-the outer key (the core carries no inequality across a join), and prunes
-the outer relation by them with the core's pruning at planning
-(`prune_append_rel_partitions`), level by level. The template of the
-join's cost then reads the partitions left: a copy of the core's
-`Append` path with their subpaths, costed by the core (`cost_append`);
-the join's child keeps every partition and prunes at execution. A hash
-partitioning expects nothing (the range prunes none of it), nor does a
-dimension whose clauses are on other columns (a star's `year = 2024`):
-the planner cannot tie them to the key's range, and the cost is the
-whole side's, as before. Under a `Gather`, the core's parallel `Append`
-may give a partition whole to one participant, since our partial scan's
-cost carries a worker's start (`tessera.scan_parallel_setup_cost`),
-which the `Append` adds up once a partition: with fewer partitions left
-than participants, the others have nothing to read. A join expected to
-prune its outer side takes an `Append` over the partitions' partial
-paths instead, every partition divided among the participants
-(`divided_append`); with at least as many left, the core's competes.
-Measured (medians, ms): one partition of four left, serial 5.10, whole
-partitions 5.83, divided 5.45; the same with five times the data 36.6,
-34.4 and 23.6; every partition left 16.4, 10.8 and 10.4. Over `bench_part`, four
-partitions of 500 000 rows by ranges of `k`, joined with a dimension of
-100 000 keys that reach the first (bench/pg join, `part_prune`, 11 runs,
-medians, the core's time after): 16.1 ms before, 5.3 after (78.4); with a
-thousand keys 13.7 and 3.7 (65.4); with two workers 11.1 and 6.0 (39.8),
-8.8 and 4.2 (27.9), where the planner, not counting the pruning, kept
-the parallel plan the one partition left does not need; counting it,
-the plan is serial there too, 5.4 and 4.0.
+When the outer side is `TessAppend` over a partitioned table, the join
+may prune its partitions by the keys of its table, as the capability
+[partition-pruning](../openspec/specs/partition-pruning/design.md)
+describes.
 
 ### Tests
 
@@ -2087,54 +2023,54 @@ aggregate and as rows; targets above the join in another order than the
 join's and expressions over both sides, as rows, under a sort, with
 rounds and a residual clause; a row-wise guard over both sides before a
 batch division, in either written order; an `OR` with a null test over
-both sides; a `CASE` over both sides under `sum`; residual clauses over int4 columns of both sides
-with NULLs, text, an OR over both sides, with rounds and compact
-batches, a text equality next to the key and a parameter of an outer
-query; three inner rows per key, duplicates on both sides
-and NULL keys on both; compact batches under an aggregate, with NULLs in
-an outer column, and with text outer columns under an aggregate and a
-limit; a side
-of fewer than 64 rows, an empty side on
+both sides; a `CASE` over both sides under `sum`; residual clauses over
+int4 columns of both sides with NULLs, text, an OR over both sides, with
+rounds and compact batches, a text equality next to the key and a
+parameter of an outer query; three inner rows per key, duplicates on
+both sides and NULL keys on both; compact batches under an aggregate,
+with NULLs in an outer column, and with text outer columns under an
+aggregate and a limit; a side of fewer than 64 rows, an empty side on
 either side, a join over a join; an inner side much larger than the
 planner's estimate, which takes more chunks; a top-N sort and a limit
 above the node, and a scrollable cursor through `Material`. With
-`EXPLAIN ANALYZE`, the memory shown as within `hash_mem` or over it (its bytes depend on the allocator and differ in an assert build), it shows the counters of a join, of
-one with rounds and of an inner side of 20000 rows estimated at 10, which goes
-past a small `work_mem`; correlated subqueries whose parameter is on the
-inner side, which builds the table for every outer row, and on the outer
-side, which builds it once; and a generic plan executed with two
-parameters. Under a `Gather` with two workers, the core's shared hash
-table disabled, it compares an aggregate over the node's partial path,
-rows through the `Gather`, rounds, and the leader not taking part, and
-checks that the rows probed and the matches are the totals of every
-participant. It also shows
-the core's plan without the kernels module, for a full join, a text key
-the node takes with its equality as a join filter, a key over an
-expression, hash joins disabled and the switch off; `types.sql` compares
-joins by text and numeric keys of every kind, with an integer key, NULL
-keys, numeric 1.0 against 1.00, a case-insensitive collation, spilling,
-the shared table and no Bloom filter below.
-Spilling, at a `work_mem` of 512 kB: an inner side of about 3 MB with
-duplicates, NULL keys and text, joined with the counters shown for an
-inner and a left join, and compared as rows with text of both sides, a
-left join with misses and NULL keys, semi and anti joins, a residual
-clause, one key held by 60000 inner rows the planner expects 10 of,
-joined in pieces as inner, left, semi and anti joins and with a residual
-clause, 200000 inner rows with text it expects 10 of, whose partitions
-split into a level below, under the same joins, a rescan with a parameter of the outer side, and under the `Gather` each participant spilling its own
-table. A shared table spilling at a `work_mem` of 256 kB (every
-participant's `hash_mem` together about half of the inner side): inner
-and left joins with text of both sides and a residual clause, one key of
-60000 rows the planner does not expect, semi and anti joins over the
-larger side, the workers alone, a rescan of the `Gather`, and no
-temporary file left; at 1 MB, partitions joined in rounds, with a key of
-100000 rows statistics do not show, under every join kind, a residual
-clause, the workers alone and a rescan.
-Semi, anti and left joins: `EXISTS` with and without a join clause, `IN`
-over a subquery, `NOT EXISTS` with and without one (NULL keys going
-out), a left join the planner turns into an anti join, left joins with
-misses and NULL keys, with duplicates as rows and in compact mode under
-an aggregate, with a join clause in `ON` and a filter in `WHERE`, under a
+`EXPLAIN ANALYZE`, the memory shown as within `hash_mem` or over it (its
+bytes depend on the allocator and differ in an assert build), it shows
+the counters of a join, of one with rounds and of an inner side of 20000
+rows estimated at 10, which goes past a small `work_mem`; correlated
+subqueries whose parameter is on the inner side, which builds the table
+for every outer row, and on the outer side, which builds it once; and a
+generic plan executed with two parameters. Under a `Gather` with two
+workers, the core's shared hash table disabled, it compares an aggregate
+over the node's partial path, rows through the `Gather`, rounds, and the
+leader not taking part, and checks that the rows probed and the matches
+are the totals of every participant. It also shows the core's plan
+without the kernels module, for a full join, a text key the node takes
+with its equality as a join filter, a key over an expression, hash joins
+disabled and the switch off; `types.sql` compares joins by text and
+numeric keys of every kind, with an integer key, NULL keys, numeric 1.0
+against 1.00, a case-insensitive collation, spilling, the shared table
+and no Bloom filter below. Spilling, at a `work_mem` of 512 kB: an inner
+side of about 3 MB with duplicates, NULL keys and text, joined with the
+counters shown for an inner and a left join, and compared as rows with
+text of both sides, a left join with misses and NULL keys, semi and anti
+joins, a residual clause, one key held by 60000 inner rows the planner
+expects 10 of, joined in pieces as inner, left, semi and anti joins and
+with a residual clause, 200000 inner rows with text it expects 10 of,
+whose partitions split into a level below, under the same joins, a
+rescan with a parameter of the outer side, and under the `Gather` each
+participant spilling its own table. A shared table spilling at a
+`work_mem` of 256 kB (every participant's `hash_mem` together about half
+of the inner side): inner and left joins with text of both sides and a
+residual clause, one key of 60000 rows the planner does not expect, semi
+and anti joins over the larger side, the workers alone, a rescan of the
+`Gather`, and no temporary file left; at 1 MB, partitions joined in
+rounds, with a key of 100000 rows statistics do not show, under every
+join kind, a residual clause, the workers alone and a rescan. Semi, anti
+and left joins: `EXISTS` with and without a join clause, `IN` over a
+subquery, `NOT EXISTS` with and without one (NULL keys going out), a
+left join the planner turns into an anti join, left joins with misses
+and NULL keys, with duplicates as rows and in compact mode under an
+aggregate, with a join clause in `ON` and a filter in `WHERE`, under a
 sort; an empty inner side for each kind; rescans with a parameter in the
 join clauses; and under the `Gather` a left, a semi and an anti join.
 The Bloom filter: with `EXPLAIN ANALYZE`, a build side of 5000 keys that
@@ -2143,38 +2079,18 @@ left join, one whose probe rows all find a key builds none, nor does a
 build side of 300 rows, and an inner side with a parameter builds one
 per table; the rows of inner, semi, anti and left joins through the
 filter are compared, and under the `Gather` an inner and an anti join,
-where the participants build at least one filter. With `enable_parallel_hash` on, the
-shared table: inner, semi, anti and left joins compared with the core,
-duplicate keys, an inner side past the estimate, the leader not taking
-part, a rescan of the `Gather` from a correlated subquery, the counters
-of that build (one build, every row, an index sized for them all), one
-shared Bloom filter built for all, and by-reference inner
-columns: text in the target and in a join clause, numeric and text with
-NULLs over many value blocks under inner and left joins, a table with
-text past the estimate, and a rescan that frees the blocks and fills new ones.
-Pruning the outer side's partitions: a range partitioning with a default
-partition and a NULL key, by a list of keys and by the range of 2000,
-by an int8 key, by two keys of two partitions, a list partitioning by
-keys at its two ends, a hash one by listed keys and past them (none),
-the second level of two; semi and right joins prune, left and anti ones
-do not, keys all NULL prune every partition; a table kept for the outer
-side's new parameter and one built anew for the inner side's, the
-partitions no execution read counted; the planner's expectation, a side
-larger than the partitioned one built over it when its keys reach one
-partition by their statistics, by a clause on the inner key (either
-way round), or at the second level, and not when its keys reach every
-partition or the partitioning is by hash, and under the `Gather`, with
-a worker's start in the scans' cost, the partitions divided among the
-participants where one is left and whole where every one is; a spilling
-table; under the
-`Gather` a shared table, one that spills (the partitions no execution
-read counted), and tables of every participant, the leader not taking
-part. Mutations fail it: no pruning, every join type, the last
-key's partitions alone, the range for a list, no shared keys, NULL keys
-counted, no expectation, no clause carried over, no key at the second
-level, the second level's clauses left out, the divided Append never,
-the core's never beside it or always; the stop once every child
-is needed leaves the results as they are.
+where the participants build at least one filter. With
+`enable_parallel_hash` on, the shared table: inner, semi, anti and left
+joins compared with the core, duplicate keys, an inner side past the
+estimate, the leader not taking part, a rescan of the `Gather` from a
+correlated subquery, the counters of that build (one build, every row,
+an index sized for them all), one shared Bloom filter built for all, and
+by-reference inner columns: text in the target and in a join clause,
+numeric and text with NULLs over many value blocks under inner and left
+joins, a table with text past the estimate, and a rescan that frees the
+blocks and fills new ones. The tests of pruning the outer side's
+partitions are in the capability
+[partition-pruning](../openspec/specs/partition-pruning/design.md).
 
 ## TessSort
 
@@ -2438,17 +2354,18 @@ The node has no hook. It publishes `wrap_append`, which
 `tess_batch_input_path` calls for an `Append` path under a batch parent,
 so the node never stands under a row-wise one, where the core's `Append`
 passes rows at no cost of its own, and it survives the core rebuilding a
-partitioned table's paths after the scan/join target is applied. It takes
-the `Append` of a base relation's children (a partitioned table, an
-inheritance tree, a `UNION ALL` the planner made a relation of) or of a
-set operation's branches, in a plain `SELECT` without row marks, when the
-path is not parameterized, has two children at least, each of which has
-a batch path (`tess_batch_input_path` again) and one of which at least
-does more than pack rows. The path copies the `Append`'s properties,
-parallel ones included, and costs it less the core's half of
+partitioned table's paths after the scan/join target is applied. It
+takes the `Append` of a base relation's children (a partitioned table,
+an inheritance tree, a `UNION ALL` the planner made a relation of) or of
+a set operation's branches, in a plain `SELECT` without row marks, when
+the path is not parameterized, has two children at least, each of which
+has a batch path (`tess_batch_input_path` again) and one of which at
+least does more than pack rows. The path copies the `Append`'s
+properties, parallel ones included, and costs it less the core's half of
 `cpu_tuple_cost` a row. The plan data keep the core's description of
 pruning the partitions while executing where the relation's clauses make
-one (see below).
+one
+([partition-pruning](../openspec/specs/partition-pruning/design.md)).
 
 The plan's layout is dense, a column per target; each child's plan has
 as many targets, in the same order. The relation's clauses, which the
@@ -2479,61 +2396,15 @@ someone reaches its end, while the others still reading it go on. Without
 shared memory the node reads every child in turn. `EXPLAIN (ANALYZE,
 VERBOSE)` shows the `Batches` given out, every participant's.
 
-### Pruning while executing
+### Pruning
 
-The core prunes partitions twice. While planning, by constants: the
-partitions pruned get no path, so the node's children are those left.
-While executing, only its `Append` and `MergeAppend` do, and so does the
-node: at the start by the query's parameters and stable functions (a
-generic plan's `$1`, `now()`), and at the first read by the parameters of
-execution (an initplan's value, a correlated subquery's parameter),
-again after a rescan that changed them. The planner makes the
-description as `create_append_plan` does, `make_partition_pruneinfo`
-over the relation's clauses and the children's paths (whose parents are
-the partitions), for any base relation, a `UNION ALL` of partitioned
-tables included (a hierarchy each); where it makes one, the node takes it
-off the planner's list into its plan data, since `set_plan_references`
-carries into the statement only those of `Append` and `MergeAppend`
-(`register_partpruneinfo`). The description's range table numbers are
-then the node's query's own: at the start the node shifts a copy by the
-offset `set_plan_references` added to its `custom_relids`, which the core
-fills with the relation's (a wrong shift is the core's error "trying to
-open a pruned relation"). The core makes the pruning states of the
-statement's descriptions only, before the nodes start
-(`ExecDoInitialPruning`), and gives a node its own by number
-(`ExecInitPartitionExecPruning`): the node calls both over the EState's
-lists holding its description alone, and puts the lists back. The
-children the initial pruning left are the only ones started, numbered
-anew, the first partial of them found again, as `ExecInitAppend` does;
-none may be left, and the node then gives nothing. With pruning by the
-parameters of execution, the valid children (`ExecFindMatchingSubPlans`)
-are found at the first read and again after a rescan whose changed
-parameters are the pruning's, and the node goes over them alone. In a
-parallel plan each participant finds them at its first choice, under the
-lock, and finishes the others for all, as the core's
-`mark_invalid_subplans_as_finished`; the leader finds them anew when the
-shared memory is reset for a rescan, where the core's leaves that to the
-workers, new in every scan. `EXPLAIN` shows the children the initial
-pruning removed as `Subplans Removed`, as for the core's `Append`; the
-children pruned while running are `never executed`. Before, such a
-clause kept the core's `Append`, whose rows a pack made batches again,
-and a `UNION ALL` of partitioned tables, whose parent has no partition
-key, read every partition. Half of a partitioned table of 2 000 000
-rows read through the node, serially: by a generic plan's parameter 11.6
-ms before, 5.1 after, by an initplan 12.1 and 5.1, a `UNION ALL` of the
-table with itself 14.6 and 5.1, the core's 29 (pg-setop-xT3wei,
-pg-setop-LpWP7U); with two workers 7.4, 7.3 and 9.6 before, 4.8 to 4.9
-after, the core's 13 (pg-setop-w2-xKCerq, pg-setop-w2-z1nyzp).
+The node prunes the partitions among its children while executing, by
+the query's parameters and by the keys of a hash join above, as the
+capability
+[partition-pruning](../openspec/specs/partition-pruning/design.md)
+describes.
 
-### A join's keys
-
-A hash join above may prune the node's children by the keys of its table
-(TessHashJoin, Pruning the outer side's partitions): it hands the node the
-pruning descriptions it planned, whose states the node makes as its own,
-and after its build the keys, by which the node finds the children left
-before its first choice, their numbers the planned ones mapped to its
-own; it intersects them with those of its own pruning, over a rescan
-too, until the join's next build.
+### A join's Bloom filter
 
 A hash join above may hand the node its Bloom filter, which it forwards
 to every child, as the capability
@@ -2543,41 +2414,36 @@ to every child, as the capability
 
 `test/sql/union.sql` shows the plans and compares every result with
 Tessera off: `UNION ALL` of two and of five branches (an empty table, a
-branch without rows, a constant target, a plain scan), columns in another
-order in each branch, nested `UNION ALL`, branches of int4 and int8,
-branches of core scans only (the core's `Append`, packed), rows to a
-row-wise parent (the core's `Append`), a hash join and a sort above,
-a limit whose bound reaches a top-N sort in each branch, a correlated
+branch without rows, a constant target, a plain scan), columns in
+another order in each branch, nested `UNION ALL`, branches of int4 and
+int8, branches of core scans only (the core's `Append`, packed), rows to
+a row-wise parent (the core's `Append`), a hash join and a sort above, a
+limit whose bound reaches a top-N sort in each branch, a correlated
 subquery and an initplan; an inheritance tree; partitions, one of them
 partitioned again, pruned while planning to two and to one, by a
 parameter over another column (the node); pruned while executing (the
-children read shown by `EXPLAIN ANALYZE`): by a generic plan's parameter
-(two, three and every child removed, none), with `EXPLAIN (GENERIC_PLAN)`
-removing none, by a stable function, by an initplan, anew for each value
-of a correlated subquery's parameter, a `UNION ALL` of two partitioned
-tables, within a sublink and a materialized CTE (queries whose range
-table the statement offsets); the parallel plans: the children shared out,
-a child without a partial path, three of them with a partial one, the
-workers alone, a rescan under `TessGather`, each pruned by a stable
-function and an initplan too, and a partial `Append` that is not
-parallel-aware. Mutations of the pruning fail it: no initial pruning, no
-pruning while running, the valid children kept over a rescan with new
-parameters, the invalid ones left unfinished in a parallel plan or after
-its reset, the range table numbers unshifted. `UNION` without `ALL` over the node, with NULL,
-duplicates, two columns and three branches, `EXPLAIN VERBOSE`, a sort and
-a limit above, in a subquery, spilling at a `work_mem` of 64 kB; a `UNION`
-within another set operation stays the core's. `INTERSECT` and `EXCEPT`
-with and without `ALL`: NULL keys, duplicates on both sides, an empty
-side, keys of int2, date, text and numeric, sides of other types, a group
-of 2000 copies, numeric 1.0 against 1.000 alone and with another column
-(the group's first row's form, as the core's), a sort and a limit above, one
-within another set operation (the core's inside), both kinds of spill at
-64 kB, a correlated subquery. Mutations fail it: the right side's
-constant 0, a group's copies cut at a batch, `EXCEPT ALL` the left rows
-alone, the right side only probing a table that spilled. A mutation that skips resetting the shared memory on a
-rescan gives a wrong result there; one that leaves a child that is not
-partial unfinished once a worker takes it does not show: another
-participant reads it again only while the worker is still reading it.
+capability
+[partition-pruning](../openspec/specs/partition-pruning/design.md)); the
+parallel plans: the children shared out, a child without a partial path,
+three of them with a partial one, the workers alone, a rescan under
+`TessGather`, each pruned by a stable function and an initplan too, and
+a partial `Append` that is not parallel-aware. `UNION` without `ALL`
+over the node, with NULL, duplicates, two columns and three branches,
+`EXPLAIN VERBOSE`, a sort and a limit above, in a subquery, spilling at
+a `work_mem` of 64 kB; a `UNION` within another set operation stays the
+core's. `INTERSECT` and `EXCEPT` with and without `ALL`: NULL keys,
+duplicates on both sides, an empty side, keys of int2, date, text and
+numeric, sides of other types, a group of 2000 copies, numeric 1.0
+against 1.000 alone and with another column (the group's first row's
+form, as the core's), a sort and a limit above, one within another set
+operation (the core's inside), both kinds of spill at 64 kB, a
+correlated subquery. Mutations fail it: the right side's constant 0, a
+group's copies cut at a batch, `EXCEPT ALL` the left rows alone, the
+right side only probing a table that spilled. A mutation that skips
+resetting the shared memory on a rescan gives a wrong result there; one
+that leaves a child that is not partial unfinished once a worker takes
+it does not show: another participant reads it again only while the
+worker is still reading it.
 
 ## TessGather, TessGatherMerge and TessSend
 
