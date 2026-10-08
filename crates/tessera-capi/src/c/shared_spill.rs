@@ -17,6 +17,7 @@ use tessera_kernels::table::shared_spill::{
 
 use super::mask::Mask;
 use super::status::{Code, Status, guard};
+use super::table::values;
 
 /// The shared state at `words`, of `nwords` words.
 ///
@@ -512,11 +513,7 @@ pub unsafe extern "C" fn tess_bloom_add_atomic(
     unsafe {
         guard(status, || {
             let rows: RowMaskView<'_> = rows.as_ref().context("a null row mask")?.view()?;
-            let hashes = if rows.nrows() == 0 {
-                &[][..]
-            } else {
-                std::slice::from_raw_parts(hashes.as_ref().context("null hashes")?, rows.nrows())
-            };
+            let hashes = values(hashes, rows.nrows(), "hashes")?;
             bloom::add_atomic(words, nwords, hashes, &rows)
         })
     }
