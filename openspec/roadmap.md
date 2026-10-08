@@ -1099,6 +1099,18 @@ becomes an entry, joins one, or is dropped.
   start-up once per Append, star-schema conditions, the Bloom filter's
   cost through TessAppend, hash partitioning. Suggested: an entry when a
   measured case appears.
+- **`partition-pruning`: a pruning join's own cost** (found when the
+  pruning was described). The planner scales the outer child's cost by
+  the partitions it expects to be left, but the join's own terms, its
+  probe, batches, Bloom filter and spilling, still count the rows of
+  every outer partition, so a pruning join looks dearer than it is.
+  Counting only the partitions left changes which plans win. Suggested:
+  an entry with a measurement plan, with "The costs of join pruning".
+- **`partition-pruning`: the count over rescans** (the same source).
+  `Subplans Removed by Join` shows the count of the last table built;
+  over rescans that build anew the counts may differ, and the core has
+  no line of the kind to follow. Suggested: decide with
+  `explain-rows-per-loop` whether it shows a mean per loop.
 - **The index tuple parsed through a slot** (plan 6.4а step 4, line
   5420): about 14 % of that profile. Suggested: an entry if
   `tpch-indexed-schema` shows it.
