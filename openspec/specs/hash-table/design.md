@@ -188,14 +188,16 @@ x86-64, where they have not been measured yet.
 - **Parts by the low bits of the hash** (question 8). A table that
   spills keeps its records in partitions, chosen by the low bits of the
   hash already in each record, each with chunks of its own. A part read
-  back that is still too large splits by the next bits. The price is a
+  back that is still too large is read a chunk at a time and split by
+  the next bits, so it never has to fit in memory whole. The price is a
   copy: the records built before the table spilled are copied once into
   their partitions, and once more at each split.
-- **A filter of one word a key** (question 9). A join may check its rows
-  against a Bloom filter of the table's keys first: four bits of one
-  word a key, one read a row. The price is 16 bits a record at least,
-  and the rows that pass falsely, about one in 200 at 16 bits, which
-  then probe the table as before.
+- **A filter checked with one read** (question 9). A join may check its
+  rows against a Bloom filter of the table's keys first. Each key sets
+  four bits of the filter, and all four lie in the same word of 64
+  bits, so checking a row reads one word. The price is 16 bits a record
+  at least, and the rows that pass falsely, about one in 200 at 16 bits,
+  which then probe the table as before.
 - **Marks beside the records** (question 10). A RIGHT or FULL join keeps
   a bit for each record in words of its own and sets the bits of the
   records its pairs matched, by an atomic OR in a shared table. The
@@ -794,6 +796,17 @@ records then spread over all of the buckets. Had the partitions taken
 the high bits, every record of a partition would share them, and all
 of them would fall into a few buckets.
 
+A split is not limited to two levels. Each split makes a **level**: its
+partitions take the bits just above those of the level it splits. A
+node makes 4 to 1024 partitions a level, so a level takes 2 to 10 bits.
+A partition of any level splits again when it is still too large, as
+long as two of the hash's 32 bits are left, so the levels can go on to
+the length of the hash. Each level divides a partition's records among
+its partitions, so a few levels are enough even for a table far larger
+than the memory. What no split helps is many rows of one key: they
+share the whole hash, and every level puts them in one partition.
+"A partition too large for memory" below says what the nodes do then.
+
 A partition is a list of chunks. Each call that works by partition gets
 one chunk number for each partition: the chunk that partition appends
 to now.
@@ -806,39 +819,88 @@ to now.
      3       chunk 7 (full), chunk 8             8
 ```
 
-A partition without a chunk of its own names an empty chunk of 8 bytes,
-its used mark alone, which has no room for a record. Several partitions
-may name it, since nothing is ever written there. A row bound for a
-partition whose chunk has no room stays in the call's mask of pending
-rows, and the rows after it go on: one full partition does not stop a
-batch. The node gives each such partition a new chunk and calls again.
-The calls by partition need no index; when the table has one, they
-check it as an append does, and refuse records of another shape.
+A row can be written only where its partition's chunk has room. A
+partition that has no chunk yet, partition 2 above, names the **empty
+chunk**: a chunk of 8 bytes that holds its used mark alone and has no
+room for any record. To the call it is just a full chunk, so the call
+needs no case of its own for a partition without a chunk. Nothing is
+ever written to the empty chunk, so any number of partitions may name
+the same one.
+
+When a row's chunk has no room, the call does not stop. It leaves that
+row in its mask of pending rows, the rows it did not place, and goes on
+with the next ones, so one full partition does not hold up the others.
+The node then gives each partition with a pending row a new chunk and
+calls again for the pending rows. The calls by partition need no index.
+When the table has one, as a grouping's has, they check that the
+records they write have its keys and its payload, as an append does,
+and refuse others.
 
 A join and a grouping use partitions in different ways.
 
-- **A join** builds its table as usual. When the table first passes the
-  limit, `tess_table_split` copies the records of each chunk it built
-  into the chunks of their partitions. From then on its rows go
-  straight to their partitions, by
-  `tess_table_append_partitioned_columns`, and a partition read back
-  that is still too large is split again, by `tess_table_split` with a
-  larger shift. The copies are not linked: a
-  partition gets an index when its turn comes.
-- **A grouping** must find the group of each row as it comes, so it
-  keeps one index over the chunks of every partition.
-  `tess_table_find_or_insert_partitioned` finds the record of a row's
-  keys, or makes it in the chunk of its partition. When the input is
-  done, each partition's records in memory are made a table again, and
-  the chunks of that partition read back from disk merge into it by
-  `tess_table_combine`.
+### A join
 
-A merge needs to know which states hold a value. A sum of no rows is
-NULL, not 0, and so is a minimum. So a grouping that spills keeps a
-word of flags at the start of its payload, a bit for each aggregate,
-then a word for each aggregate. A count always has a value, and its
-flag is not used. An example with a count, a sum and a maximum, whose
-flags are bits 1 and 2:
+A join builds its table as usual, one index over its chunks, until the
+table passes the limit. Then `tess_table_split` moves the table into
+partitions one chunk at a time: the records of a chunk are copied into
+the chunks of their partitions, and the chunk is freed before the next
+one is split. So the records of only one chunk are in memory twice at a
+time, never the whole table. Two things stay until the move ends: the
+old index, which no lookup uses any more, and the values that are not
+kept in the records, such as text: they are copied with their records,
+and the old copies are freed together at the end. Then the node sends
+some partitions to disk and keeps the others in memory; which ones is
+the node's rule.
+
+From then on the rows of the build side go straight into the chunks of
+their partitions, by `tess_table_append_partitioned_columns`, and a
+partition on disk writes each chunk as it fills. The partitions are not
+linked while they fill, since no lookup needs them yet.
+
+The lookup then comes in two steps.
+
+1. When the build side ends, the partitions still in memory get one
+   index over all their chunks, as one table. A row of the probe side
+   whose partition is in memory looks it up at once. A row whose
+   partition is on disk cannot be answered yet: it is written to that
+   partition's file of probe rows, unless the Bloom filter of every
+   build row shows that it has no pair anywhere.
+2. When the probe side ends, the partitions on disk are taken one by
+   one. A partition's records are read back and get an index of their
+   own, and its probe rows are read back and look them up.
+
+### A grouping, and the merge
+
+A grouping must find the group of each row as the row comes, so its
+lookup cannot wait. It keeps one index over the chunks of every
+partition in memory. `tess_table_find_or_insert_partitioned` looks each
+row's keys up in that index, as an ordinary find or insert does, and a
+group that is not there gets a new record in the chunk of its row's
+partition.
+
+When the table passes the limit, the largest partition goes to disk
+whole: its records are written and freed, and the index is made again
+over the records left. The rows of that partition that come later find
+no record in the index, since its groups are on disk, and make new
+ones. So one group may end with records in several places: some on
+disk, written at different times, and one in memory.
+
+The **merge** makes one record of them again. When the input is done,
+the grouping takes its partitions one by one. A partition's records in
+memory get an index of their own, as a table. Its records on disk are
+read back a chunk at a time and merged into that table by
+`tess_table_combine`. A group the table has takes in the states read
+back: a count adds to its count, a sum to its sum, a maximum keeps the
+larger of the two. A group the table lacks is copied into a chunk the
+caller names. Then every group of the partition is in memory once, and
+the grouping returns them.
+
+To merge, the grouping must know which states hold a value. A sum of no
+rows is NULL, not 0, and so is a minimum. So a grouping that spills
+keeps a word of flags at the start of its payload, a bit for each
+aggregate, then a word for each aggregate. A count always has a value,
+and its flag is not used. An example with a count, a sum and a maximum,
+whose flags are bits 1 and 2:
 
 ```
               table's record   read back        after the merge
@@ -851,12 +913,40 @@ flags are bits 1 and 2:
 The rules of each kind of state are in [Merging groups read
 back](spec.md#requirement-merging-groups-read-back).
 A count or a sum that passes the int8 range fails with the error a
-row-by-row grouping gives. A group read back that the table lacks is
-copied whole into a chunk the caller names. The merge stops when that
-chunk is full, or when the records reach half the buckets; the node
+row-by-row grouping gives. The merge stops when the chunk it copies
+into is full, or when the records reach half the buckets; the node
 gives it a chunk or a larger index, and calls again from where it
 stopped. While the index grows, the node hides the chunk it merges
 from, since a regrow links every record of every chunk it is given.
+
+### A partition too large for memory
+
+The node does not read a partition back to learn whether it fits: it
+decides from what it counted while it wrote the partition, a join from
+the bytes written, a grouping from an estimate of the groups. When a
+partition is too large for the memory left, it is read back a chunk at
+a time and split into a level below by the next bits of the hash, with
+`tess_table_split` at a larger shift. Each chunk read back is split and
+freed before the next one is read, and the new level's partitions go to
+disk as memory runs short, as the first level's did. The new level is
+then used as the first one was: a join joins its partitions with the
+probe rows of the partition it split, and a grouping merges its
+partitions one by one.
+
+A join does not split a partition that holds nearly all of its level's
+rows, nine in ten by default: those are the rows of one key, which every
+level would put in one partition. It cannot split one when fewer than
+two bits are left either. It joins such a partition in **pieces**: it
+reads back as many of the partition's chunks as fit, gives them an
+index, and reads all the partition's probe rows through it; then it
+frees that piece, reads the next one, and reads the probe rows again. A
+join other than INNER keeps a bit for each probe row that found a pair
+in some piece: a SEMI join then returns a row once, and a LEFT or ANTI
+join returns the rows without a pair in a last pass.
+
+A grouping needs no pieces. A group is one record however many rows it
+had, so a partition is as large as its groups, and its groups decide
+whether it splits.
 
 ## The Bloom filter of the keys
 
@@ -871,30 +961,51 @@ have none, a false pass, and then probes the table as it would anyway.
 A plain Bloom filter sets its bits anywhere in the array, so a check
 reads several places, each a possible wait. Tessera's filter is
 *blocked*: the four bits of a key lie in one word of 64 bits, so a
-check is one read and one comparison. The word and the bits come from
-the hash multiplied by an odd constant: the word from the high bits of
-the product, the four bits from its low 24 bits. The bucket of a key is
-the high bits of the hash itself; the product mixes every bit of the
-hash into its high bits, so the word does not follow the bucket. The
-drawing is in [A Bloom filter of the
-keys](spec.md#requirement-a-bloom-filter-of-the-keys).
+check is one read and one comparison. The rule is in [A Bloom filter of
+the keys](spec.md#requirement-a-bloom-filter-of-the-keys); here it is
+on an example.
+
+**The size.** A table of 1000 records wants 16 bits a record: 16 000
+bits, or 250 words. The words are rounded up to a power of two, 256
+words or 2 KiB, so the filter has about 16.4 bits a record. The power of
+two lets the word be found by a shift: 256 is 2^8, so the number of a
+word is 8 bits long.
+
+**The word and the bits.** The hash of a key, here `0x3C27`, is
+multiplied by the odd constant `0x9E3779B97F4A7C15`, and the low 64
+bits of the product are kept. The top 8 bits of the product are the
+number of the word. The low 24 bits are four numbers of six bits each,
+and six bits name one of the 64 bits of a word.
 
 ```
- hash 0x3C27 ──× 0x9E3779B97F4A7C15──► 64 bits
-                                        │
-             ┌──────────────────────────┴────────────────────┐
-             │ high bits: the word       low 24 bits: 4 bits │
-             └───────────────────────────────────────────────┘
- filter      word 0   word 1   …   word w   …
-                                   ▲
-                      the 4 bits set here, or checked here
+ hash 0x3C27 × 0x9E3779B97F4A7C15 = 0x1AFB0517D96DD333
+
+ bits of the product  63 … 56   55 … 24    23…18   17…12   11…6    5…0
+                      00011010  not used   011011  011101  001100  110011
+                      word 26              27      29      12      51
+
+ filter     word 0   word 1   …   word 26   …   word 255
+                                     ▲
+            the key sets bits 12, 27, 29 and 51 of word 26
 ```
 
-A filter has 16 bits for each record at least: the words are a power
-of two, so that the word is a shift of the product. At exactly 16 bits
-a record, 484 of 100 000 absent keys passed a filter of 4096 keys,
-about one in 200. Rounding up to a power of two adds bits, and fewer
-pass. The size and the measured bound are in [The size of a Bloom
+A row of the probe side is checked the same way: its hash gives a word
+and four bits, and the row passes when all four are set in that word. A
+row with the hash `0x3C27` reads word 26 and finds the bits this key
+set. A row of another hash passes without a pair when other keys
+happened to set all of its bits: a false pass. Two of the four numbers
+may be equal, and a key then sets three bits.
+
+**Why the product.** The bucket of a key is taken from the high bits of
+the hash itself. Had the word been taken from those bits too, the keys
+of neighbouring buckets would share a word and crowd it. The product
+mixes every bit of the hash into its high bits, so the word does not
+follow the bucket.
+
+**How many pass falsely.** At exactly 16 bits a record, 484 of 100 000
+absent keys passed a filter of 4096 keys, about one in 200. Rounding up
+to a power of two adds bits, and fewer pass. The size and the measured
+bound are in [The size of a Bloom
 filter](spec.md#requirement-the-size-of-a-bloom-filter).
 
 The join uses a filter in three ways. When it wants one, and whether it
@@ -1090,6 +1201,13 @@ How a spilled chunk of records is written to disk is in
 - `test/sql/table.sql` with `test/tessera_table_test.c`: the C API
   from a PostgreSQL backend, and the check of the layout when the
   kernels load.
+- `test/sql/join.sql` and `test/sql/agg.sql`: partitions as the nodes
+  use them. A join and a grouping that spill, with the core's results;
+  partitions read back that split into a level below, in a join
+  (`jwide`) and in a grouping (`agg_rows`); a join's partition of one
+  key joined in pieces (`jskew`), and partitions joined in pieces when
+  a setting forbids the split; groups merged from several writes to
+  disk.
 - The benchmarks `table_int32` and `table_large` of `tessera-bench`
   count the instructions and cycles of append, probe and find-or-insert;
   `table_large` also those of the Bloom filter's check.
