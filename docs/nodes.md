@@ -2426,24 +2426,23 @@ capability
 [partition-pruning](../openspec/specs/partition-pruning/design.md)); the
 parallel plans: the children shared out, a child without a partial path,
 three of them with a partial one, the workers alone, a rescan under
-`TessGather`, each pruned by a stable function and an initplan too, and
-a partial `Append` that is not parallel-aware. `UNION` without `ALL`
-over the node, with NULL, duplicates, two columns and three branches,
-`EXPLAIN VERBOSE`, a sort and a limit above, in a subquery, spilling at
-a `work_mem` of 64 kB; a `UNION` within another set operation stays the
-core's. `INTERSECT` and `EXCEPT` with and without `ALL`: NULL keys,
-duplicates on both sides, an empty side, keys of int2, date, text and
-numeric, sides of other types, a group of 2000 copies, numeric 1.0
-against 1.000 alone and with another column (the group's first row's
-form, as the core's), a sort and a limit above, one within another set
-operation (the core's inside), both kinds of spill at 64 kB, a
-correlated subquery. Mutations fail it: the right side's constant 0, a
-group's copies cut at a batch, `EXCEPT ALL` the left rows alone, the
-right side only probing a table that spilled. A mutation that skips
-resetting the shared memory on a rescan gives a wrong result there; one
-that leaves a child that is not partial unfinished once a worker takes
-it does not show: another participant reads it again only while the
-worker is still reading it.
+`TessGather`, and a partial `Append` that is not parallel-aware. `UNION`
+without `ALL` over the node, with NULL, duplicates, two columns and
+three branches, `EXPLAIN VERBOSE`, a sort and a limit above, in a
+subquery, spilling at a `work_mem` of 64 kB; a `UNION` within another
+set operation stays the core's. `INTERSECT` and `EXCEPT` with and
+without `ALL`: NULL keys, duplicates on both sides, an empty side, keys
+of int2, date, text and numeric, sides of other types, a group of 2000
+copies, numeric 1.0 against 1.000 alone and with another column (the
+group's first row's form, as the core's), a sort and a limit above, one
+within another set operation (the core's inside), both kinds of spill at
+64 kB, a correlated subquery. Mutations fail it: the right side's
+constant 0, a group's copies cut at a batch, `EXCEPT ALL` the left rows
+alone, the right side only probing a table that spilled. A mutation that
+skips resetting the shared memory on a rescan gives a wrong result
+there; one that leaves a child that is not partial unfinished once a
+worker takes it does not show: another participant reads it again only
+while the worker is still reading it.
 
 ## TessGather, TessGatherMerge and TessSend
 

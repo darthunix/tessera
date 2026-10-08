@@ -70,6 +70,11 @@ those it checks.
 - **Right semi and right anti joins**, which the core chooses when hashing
   a semi or anti join's outer side is cheaper (`join_planner.c`); the
   suite's table gives no such plan.
+- **Pruning by a join's keys** is done by inner, semi and right hash
+  joins, by a key of an integer, date, boolean or timestamp type on the
+  first column of a partition key; left, anti and full joins, and keys of
+  other types, read every partition
+  ([partition-pruning](../openspec/specs/partition-pruning/spec.md)).
 
 ## Execution
 

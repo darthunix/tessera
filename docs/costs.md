@@ -177,7 +177,9 @@ record, a left join's its rows with every outer batch published. A
 partial path's rows are one participant's share and its cost that
 participant's time; with a shared table the build divides among the
 participants. Where the join prunes its outer `TessAppend`, the outer
-child's cost is scaled down by the partitions expected to be left.
+child's cost is scaled down by the partitions expected to be left; the
+join's own terms still count the rows of every partition
+([partition-pruning](../openspec/specs/partition-pruning/design.md)).
 
 The sum goes into the cost divided by `tessera.join_cost_unit`: the
 planner weighs this path against the core's hash join of the same
