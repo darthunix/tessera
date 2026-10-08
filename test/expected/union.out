@@ -761,6 +761,20 @@ SELECT union_same($$SELECT count(*), sum(k) FROM union_part WHERE k > (SELECT 90
  same
 (1 row)
 
+-- With enable_partition_pruning off, nothing is pruned.
+SET enable_partition_pruning = off;
+SELECT union_run($$SELECT count(*), sum(k) FROM union_part WHERE k > (SELECT 2500) AND v < 10$$);
+                                      union_run                                       
+--------------------------------------------------------------------------------------
+   InitPlan expr_1
+   ->  Custom Scan (TessAppend) (loops=1)
+               ->  Custom Scan (TessHeapScan) on union_part_1 (loops=1)
+               ->  Custom Scan (TessHeapScan) on union_part_2 (loops=1)
+               ->  Custom Scan (TessHeapScan) on union_part_3a union_part_3 (loops=1)
+               ->  Custom Scan (TessHeapScan) on union_part_3b union_part_4 (loops=1)
+(6 rows)
+
+RESET enable_partition_pruning;
 -- Anew for every value of a correlated subquery's parameter, as it
 -- rescans the node: each partition read for the values that reach it.
 SELECT union_run($$SELECT g, (SELECT count(*) FROM union_part WHERE k > g * 1000 AND v < 10) FROM generate_series(0, 4) AS g$$);
@@ -775,6 +789,26 @@ SELECT union_run($$SELECT g, (SELECT count(*) FROM union_part WHERE k > g * 1000
 (6 rows)
 
 SELECT union_same($$SELECT g, (SELECT count(*) FROM union_part WHERE k > g * 1000 AND v < 10) FROM generate_series(0, 4) AS g$$);
+ union_same 
+------------
+ same
+(1 row)
+
+-- A rescan that changes another parameter keeps the children found: the
+-- partitions the initplan's value excludes stay unread in every loop.
+SELECT union_run($$SELECT g, (SELECT count(*) FROM union_part WHERE k > (SELECT 2500) AND v < g) FROM generate_series(1, 3) AS g$$);
+                                          union_run                                           
+----------------------------------------------------------------------------------------------
+   SubPlan expr_1
+           InitPlan expr_2
+           ->  Custom Scan (TessAppend) (loops=3)
+                       ->  Custom Scan (TessHeapScan) on union_part_1 (never executed)
+                       ->  Custom Scan (TessHeapScan) on union_part_2 (never executed)
+                       ->  Custom Scan (TessHeapScan) on union_part_3a union_part_3 (loops=3)
+                       ->  Custom Scan (TessHeapScan) on union_part_3b union_part_4 (loops=3)
+(7 rows)
+
+SELECT union_same($$SELECT g, (SELECT count(*) FROM union_part WHERE k > (SELECT 2500) AND v < g) FROM generate_series(1, 3) AS g$$);
  union_same 
 ------------
  same
@@ -798,6 +832,27 @@ SELECT union_run($$SELECT count(*), sum(k) FROM (SELECT k, v FROM union_part UNI
 (10 rows)
 
 SELECT union_same($$SELECT count(*), sum(k) FROM (SELECT k, v FROM union_part UNION ALL SELECT k, v FROM union_part) AS u
+                    WHERE k > (SELECT 3500) AND v < 10$$);
+ union_same 
+------------
+ same
+(1 row)
+
+-- A plain table beside the partitions is no partition: it is never pruned.
+SELECT union_run($$SELECT count(*), sum(k) FROM (SELECT k, v FROM union_part UNION ALL SELECT a, a % 100 FROM union_a) AS u
+                   WHERE k > (SELECT 3500) AND v < 10$$);
+                                          union_run                                          
+---------------------------------------------------------------------------------------------
+   InitPlan expr_1
+   ->  Custom Scan (TessAppend) (loops=1)
+               ->  Custom Scan (TessHeapScan) on union_part_1 union_part (never executed)
+               ->  Custom Scan (TessHeapScan) on union_part_2 union_part_1 (never executed)
+               ->  Custom Scan (TessHeapScan) on union_part_3a union_part_2 (never executed)
+               ->  Custom Scan (TessHeapScan) on union_part_3b union_part_3 (loops=1)
+               ->  Custom Scan (TessHeapScan) on union_a (loops=1)
+(7 rows)
+
+SELECT union_same($$SELECT count(*), sum(k) FROM (SELECT k, v FROM union_part UNION ALL SELECT a, a % 100 FROM union_a) AS u
                     WHERE k > (SELECT 3500) AND v < 10$$);
  union_same 
 ------------
@@ -942,6 +997,46 @@ SELECT union_same($$SELECT count(*), sum(k) FROM union_part WHERE k > (SELECT 25
 
 SELECT union_same($$SELECT count(*), sum(k) FROM (SELECT k, v FROM union_part UNION ALL SELECT k, v FROM union_part) AS u
                     WHERE k > (SELECT 3500) AND v < 10$$);
+ union_same 
+------------
+ same
+(1 row)
+
+-- By a generic plan's parameter, the serial plan's rows; and by an
+-- initplan that leaves no partition, no rows.
+PREPARE union_prune_parallel(int) AS SELECT count(*), sum(k) FROM union_part WHERE k > $1 AND v < 10;
+SET plan_cache_mode = force_generic_plan;
+SELECT regexp_replace(line, 'loops=[0-9]+', 'loops=n')
+FROM union_run($$EXECUTE union_prune_parallel(2500)$$) AS line;
+                                                 regexp_replace                                                  
+-----------------------------------------------------------------------------------------------------------------
+                     ->  Parallel Custom Scan (TessAppend) (loops=n)
+                           Subplans Removed: 2
+                                 ->  Parallel Custom Scan (TessHeapScan) on union_part_3a union_part_1 (loops=n)
+                                 ->  Parallel Custom Scan (TessHeapScan) on union_part_3b union_part_2 (loops=n)
+(4 rows)
+
+EXECUTE union_prune_parallel(2500);
+ count |  sum   
+-------+--------
+   150 | 482175
+(1 row)
+
+RESET plan_cache_mode;
+DEALLOCATE union_prune_parallel;
+SELECT regexp_replace(line, 'loops=[0-9]+', 'loops=n')
+FROM union_run($$SELECT count(*), sum(k) FROM union_part WHERE k > (SELECT 9000) AND v < 10$$) AS line;
+                                                     regexp_replace                                                     
+------------------------------------------------------------------------------------------------------------------------
+   InitPlan expr_1
+                     ->  Parallel Custom Scan (TessAppend) (loops=n)
+                                 ->  Parallel Custom Scan (TessHeapScan) on union_part_1 (never executed)
+                                 ->  Parallel Custom Scan (TessHeapScan) on union_part_2 (never executed)
+                                 ->  Parallel Custom Scan (TessHeapScan) on union_part_3a union_part_3 (never executed)
+                                 ->  Parallel Custom Scan (TessHeapScan) on union_part_3b union_part_4 (never executed)
+(6 rows)
+
+SELECT union_same($$SELECT count(*), sum(k) FROM union_part WHERE k > (SELECT 9000) AND v < 10$$);
  union_same 
 ------------
  same
