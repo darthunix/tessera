@@ -1,171 +1,385 @@
 # partition-pruning: how it is built
 
-## TessHashJoin: pruning the outer side's partitions
+This page explains how Tessera skips the partitions of a table that a
+query cannot need while the query runs. The rules are in
+[spec.md](spec.md); this page says why they are what they are and how
+the code keeps them.
 
-When the outer side is `TessAppend` over a partitioned table whose
-partition key is the outer side of a key of words, and the join keeps no
-outer row without a pair (inner, semi, and right joins, where the inner
-side is kept), the table's keys tell which partitions can pair: the others
-are not read. The core prunes at execution only by the parameters of an
-`Append` (a nested loop's inner side, which a batch node leaves to the
-core); a patch for hash joins (2023–2024) pruned for every row the build
-inserted, which cost as much as the insertion, and was returned. The
-planner (`write_join_prune` in `join_planner.c`, at the join's
-`PlanCustomPath`, the children planned, as Greengage's
-`joinpartprune.c` decides at `create_plan`) makes the core's pruning
-descriptions for `key = $p` and, where the key's btree family compares
-the two types, `key >= $lo AND key <= $hi`, over three parameters of
-execution of its own (`assign_special_exec_param`): the core's pruning
-takes no column of another relation, and the parameters stand for the
-inner side's values, so the core is left as it is (Greengage changed
-its pruning to take the inner side's columns). At the start the join
-hands them to `TessAppend` (`tess_append_join_prune_begin`), which makes
-their pruning states as its own over every planned child. The build
-notes the key of each inner row, the NULL ones apart: the lowest and
-the highest, and the keys themselves while the inner side has at most
-1024 rows with one; a shared table's participants add theirs under a
-lock before the build's barrier. Once built, before the outer side is
-read (a shared table that spills reads it in the build's phases, to the
-partitions on disk: past the barrier, there), the join hands the keys
-down (`tess_append_join_prune`): each
-distinct key of a list sets `$p` and prunes, the children added up,
-stopping once every child is needed; past the list the range prunes,
-where there is one; no key pairs with no partition. The work is a key
-an inner row at the build and a pruning a distinct key after it, as
-DuckDB passes a list of a few keys and their range. `TessAppend`
-intersects the children it reads with those left and shows `Subplans
-Removed by Join` with `ANALYZE`; the children kept are the same in every
-participant. A table kept over a rescan keeps them; a table built anew
-hands its own.
+## Background: partitions and pruning
 
-The planner expects the pruning (`expected_leaves`): by the same key
-(`prune_key`, which the plan's pruning takes too), it bounds the inner
-key's values by what it knows before execution, the lowest and the
-highest of the column's statistics (the histogram's ends and the common
-values) and its relation's clauses `key op constant`, carried over to
-the outer key (the core carries no inequality across a join), and prunes
-the outer relation by them with the core's pruning at planning
-(`prune_append_rel_partitions`), level by level. The template of the
-join's cost then reads the partitions left: a copy of the core's
-`Append` path with their subpaths, costed by the core (`cost_append`);
-the join's child keeps every partition and prunes at execution. A hash
-partitioning expects nothing (the range prunes none of it), nor does a
-dimension whose clauses are on other columns (a star's `year = 2024`):
-the planner cannot tie them to the key's range, and the cost is the
-whole side's, as before. Under a `Gather`, the core's parallel `Append`
-may give a partition whole to one participant, since our partial scan's
-cost carries a worker's start (`tessera.scan_parallel_setup_cost`),
-which the `Append` adds up once a partition: with fewer partitions left
-than participants, the others have nothing to read. A join expected to
-prune its outer side takes an `Append` over the partitions' partial
-paths instead, every partition divided among the participants
-(`divided_append`); with at least as many left, the core's competes.
-Measured (medians, ms): one partition of four left, serial 5.10, whole
-partitions 5.83, divided 5.45; the same with five times the data 36.6,
-34.4 and 23.6; every partition left 16.4, 10.8 and 10.4. Over `bench_part`, four
-partitions of 500 000 rows by ranges of `k`, joined with a dimension of
-100 000 keys that reach the first (bench/pg join, `part_prune`, 11 runs,
-medians, the core's time after): 16.1 ms before, 5.3 after (78.4); with a
-thousand keys 13.7 and 3.7 (65.4); with two workers 11.1 and 6.0 (39.8),
-8.8 and 4.2 (27.9), where the planner, not counting the pruning, kept
-the parallel plan the one partition left does not need; counting it,
-the plan is serial there too, 5.4 and 4.0.
+A **partitioned table** is a table split into **partitions**, each a
+table of its own, by the value of its **partition key**. A range
+partitioning gives each partition a range of the key, a list
+partitioning a list of values, and a hash partitioning a remainder of
+the key's hash. A partition may be partitioned again, by the same key
+or another: the partitioning then has **levels**.
 
-## TessAppend: pruning while executing
+To read a partitioned table, PostgreSQL plans an `Append`: one child
+for each partition, read one after another. **Pruning** leaves out the
+children whose partitions cannot hold a row the query needs. The core
+prunes at three moments:
 
-The core prunes partitions twice. While planning, by constants: the
-partitions pruned get no path, so the node's children are those left.
-While executing, only its `Append` and `MergeAppend` do, and so does the
-node: at the start by the query's parameters and stable functions (a
-generic plan's `$1`, `now()`), and at the first read by the parameters of
-execution (an initplan's value, a correlated subquery's parameter),
-again after a rescan that changed them. The planner makes the
-description as `create_append_plan` does, `make_partition_pruneinfo`
-over the relation's clauses and the children's paths (whose parents are
-the partitions), for any base relation, a `UNION ALL` of partitioned
-tables included (a hierarchy each); where it makes one, the node takes it
-off the planner's list into its plan data, since `set_plan_references`
-carries into the statement only those of `Append` and `MergeAppend`
-(`register_partpruneinfo`). The description's range table numbers are
-then the node's query's own: at the start the node shifts a copy by the
-offset `set_plan_references` added to its `custom_relids`, which the core
-fills with the relation's (a wrong shift is the core's error "trying to
-open a pruned relation"). The core makes the pruning states of the
-statement's descriptions only, before the nodes start
-(`ExecDoInitialPruning`), and gives a node its own by number
-(`ExecInitPartitionExecPruning`): the node calls both over the EState's
-lists holding its description alone, and puts the lists back. The
-children the initial pruning left are the only ones started, numbered
-anew, the first partial of them found again, as `ExecInitAppend` does;
-none may be left, and the node then gives nothing. With pruning by the
-parameters of execution, the valid children (`ExecFindMatchingSubPlans`)
-are found at the first read and again after a rescan whose changed
-parameters are the pruning's, and the node goes over them alone. In a
-parallel plan each participant finds them at its first choice, under the
-lock, and finishes the others for all, as the core's
-`mark_invalid_subplans_as_finished`; the leader finds them anew when the
-shared memory is reset for a rescan, where the core's leaves that to the
-workers, new in every scan. `EXPLAIN` shows the children the initial
-pruning removed as `Subplans Removed`, as for the core's `Append`; the
-children pruned while running are `never executed`. Before, such a
-clause kept the core's `Append`, whose rows a pack made batches again,
-and a `UNION ALL` of partitioned tables, whose parent has no partition
-key, read every partition. Half of a partitioned table of 2 000 000
-rows read through the node, serially: by a generic plan's parameter 11.6
-ms before, 5.1 after, by an initplan 12.1 and 5.1, a `UNION ALL` of the
-table with itself 14.6 and 5.1, the core's 29 (pg-setop-xT3wei,
-pg-setop-LpWP7U); with two workers 7.4, 7.3 and 9.6 before, 4.8 to 4.9
-after, the core's 13 (pg-setop-w2-xKCerq, pg-setop-w2-z1nyzp).
+- **While planning**, by constants: `WHERE k > 2500` drops the
+  partitions below 2500 from the plan. Tessera never sees them.
+- **When execution starts** (initial pruning), by the values the query
+  has from the start: a generic plan's parameter `$1`, or a stable
+  function such as `now()`. A child pruned then is not even started.
+- **While running** (pruning by the parameters of execution), by values
+  known only later: an initplan's result, or a correlated subquery's
+  parameter, which changes with each row of the outer query. A child
+  pruned then is not read, and is pruned anew when the values change.
 
-## TessAppend: a join's keys
+For the last two the planner writes a **pruning description**: the
+clauses on the key, turned into steps over the partition bounds. At
+execution the core's **pruning state** runs the steps with the current
+values and answers which children are left. Only the core's `Append`
+and `MergeAppend` do this. EXPLAIN shows the children removed when
+execution started as `Subplans Removed`, and those not read while
+running as `never executed`.
 
-A hash join above may prune the node's children by the keys of its table
-(TessHashJoin, Pruning the outer side's partitions): it hands the node the
-pruning descriptions it planned, whose states the node makes as its own,
-and after its build the keys, by which the node finds the children left
-before its first choice, their numbers the planned ones mapped to its
-own; it intersects them with those of its own pruning, over a rescan
-too, until the join's next build.
+## The problem
+
+Tessera replaces the core's `Append` under a node that reads batches
+with **TessAppend**, which hands its children's batches up as they are.
+If TessAppend did not prune, a query with `k > $1` would read every
+partition under Tessera and only some of them under the core.
+
+A hash join could skip more. It first builds a **table** of its inner
+side, then reads its outer side and looks each row up. Once the table
+is built, the join knows every key an outer row can pair with. When the
+outer side is a partitioned table, a partition that can hold none of
+those keys has no row that pairs, and an inner join need not read it.
+A star schema is the common case: a fact table partitioned by date,
+joined with a few rows of a calendar. The core does not prune by a
+hash join's keys at all.
+
+## Goals and what they cost
+
+- **TessAppend prunes as the core's `Append`.** It uses the core's own
+  pruning, so the two always agree. The price is that the node calls
+  the core in a way the core made for its own nodes: it lends the
+  core's executor a list that holds only its own description (below).
+- **A join prunes without changing the core.** The planner writes the
+  core's ordinary descriptions over parameters that stand for the
+  inner keys, and the join sets them after its build. The price is
+  small and fixed: a comparison and a store for each inner row, and
+  one run of the pruning steps for each distinct key of a short list.
+- **The planner counts on the pruning.** A plan whose outer side will
+  read one partition of four should look as cheap as it is. The price
+  is an estimate, which can be wrong: it knows the inner keys only by
+  their statistics and by constant clauses.
+- **Every participant of a parallel plan prunes the same.** The price
+  is a short list of keys in shared memory, filled under a lock.
+
+## The whole in one picture
+
+```
+ planning                              execution
+ ────────                              ─────────
+ TessHashJoin                          1. TessAppend starts: initial
+   plan data: key = $p,                   pruning by $1 and now()
+              key >= $lo AND key <= $hi   leaves the children to start
+   │                                   2. the join builds its table and
+   │ outer                                notes the inner keys
+   ▼                                   3. the join hands the keys down:
+ TessAppend                               each key sets $p and prunes,
+   plan data: its own description         or $lo, $hi prune as a range
+   ├── partition 1                     4. at its first read TessAppend
+   ├── partition 2                        prunes by the parameters of
+   ├── partition 3                        execution, and reads the
+   └── partition 4                        children both prunings left
+```
+
+The node's own pruning and the join's pruning are independent: each
+gives a set of children, and the node reads those in both.
+
+## TessAppend: pruning by the query's parameters
+
+### The description
+
+The planner makes TessAppend's description as it makes an `Append`'s,
+with the core's `make_partition_pruneinfo`, from the relation's clauses
+and the paths of its children. It does so for any partitioned table,
+and for a `UNION ALL` of partitioned tables, whose children come from
+several tables: each table is a hierarchy of its own and prunes by its
+own key. A child that is not a partition, such as a plain table in a
+`UNION ALL`, belongs to no hierarchy and is never pruned.
+
+The core collects such descriptions in a list of the planner, and
+`set_plan_references` carries only those of `Append` and `MergeAppend`
+into the statement. TessAppend is a custom scan, so it takes its
+description off that list and keeps it in its own plan data.
+
+### Initial pruning
+
+Range table numbers in a description are those of the query it was
+planned in. When that query is a subquery, `set_plan_references`
+shifts its range table into the statement's and adds the offset to the
+node's relation numbers, but not to the plan data. So at its start the
+node copies the description and adds the offset itself, the difference
+between its relation's number now and in the description. The node
+checks that the shifted numbers are its relation's, and fails with an
+internal error otherwise.
+
+The core makes the pruning states of the statement's descriptions only,
+before any node starts (`ExecDoInitialPruning`), and gives a node its
+own by number (`ExecInitPartitionExecPruning`). The node has no number
+in that list. It replaces the executor's lists with lists that hold its
+description alone, makes both calls, and puts the lists back, also on
+an error. The first call runs the initial pruning; the second gives the
+node its state and the children left. The node starts only those, and
+numbers them anew from 0, as the core's `Append` does. If none is left,
+the node returns no rows.
+
+EXPLAIN shows the children the initial pruning removed as
+`Subplans Removed`, as for the core's `Append`: in the text format
+when there are any, and in the other formats always, so that a tool
+reading JSON finds the same key on both nodes.
+
+**Refused:** a hook in the core's `set_plan_references` to register the
+node's description would need a change of the core. A pruning of the
+node's own would have to follow every rule of the core's, and would
+drift from it.
+
+### Pruning while running
+
+When the description has steps on parameters of execution, the node
+finds the valid children at its first read
+(`ExecFindMatchingSubPlans`) and reads only those. A rescan that
+changed one of those parameters forgets them, and the next read finds
+them anew; a rescan that changed only other parameters keeps them, as
+the core's `Append` does.
+
+### In a parallel plan
+
+The participants share the children out through the node's chunk of
+shared memory: a flag for each child that needs no more participants,
+under a lock. The first participant to choose a child finds the valid
+ones, under the lock, and sets the flag of every other child, so that
+no participant reads a pruned one. When the parallel plan is rescanned,
+its shared memory is reset, and the leader forgets the valid children
+too, so that it finds them anew for the new values; the core's
+`Append` leaves that to the workers, which are new in every scan.
+
+## The hash join: pruning by its keys
+
+### When a join prunes
+
+The planner decides when it builds the join's plan, after the plans of
+its children, as Greengage decides for its own partition selector. The
+conditions are in [When a hash join prunes its outer
+side](spec.md#requirement-when-a-hash-join-prunes-its-outer-side). Two
+of them need a reason:
+
+- **The join type.** An INNER, SEMI or RIGHT join returns no outer row
+  without a pair, so an outer partition without a pair can be skipped.
+  A LEFT, ANTI or FULL join returns such rows, and must read them.
+- **The key.** The key must be a word: one of the types whose values
+  the join keeps whole in a word of 8 bytes. The join hands down keys,
+  not hashes, and the core's pruning compares them with the partition
+  bounds. The outer side of the key must be the first column of the
+  partition key, at the top or at a lower level, since the core's
+  pruning matches a clause on a key column by column from the first.
+
+### Descriptions over parameters
+
+The core's pruning takes clauses of the form `key op value`, where the
+value may be a constant or a parameter, but never a column of another
+relation. So the planner makes three parameters of execution of the
+join's own and writes two descriptions over the outer relation:
+
+- `key = $p`, run once for each inner key;
+- `key >= $lo AND key <= $hi`, run once for the range of the keys,
+  where the key's btree family has the two operators. A hash
+  partitioning has no order, and gets no range.
+
+The descriptions live in the join's plan data, since the join's plan is
+made after TessAppend's. When the join starts, it hands them to
+TessAppend, which makes their pruning states as it makes its own, over
+every child it planned.
+
+**Refused:** Greengage changed the core's pruning to take a column of
+the inner side. Tessera leaves the core as it is.
+
+### The keys of a build
+
+As the join reads its inner side, it notes the key of each row; a NULL
+key pairs with nothing and is skipped. It keeps the lowest and the
+highest key, and the keys themselves while at most 1024 rows have a
+key. Past that it keeps only the two ends.
+
+```
+ inner keys     5  15005  NULL  5       rows with a key: 3
+ noted          list: 5, 15005, 5        lowest 5, highest 15005
+```
+
+In a parallel join over a shared table, each participant notes the rows
+it builds and adds them to a list in the join's shared memory, under a
+lock, before the barrier that ends the build. Past the barrier every
+participant reads the same list, so every participant prunes the same
+children. A participant that comes after the build reads the list too.
+A parallel join whose participants each build a whole table of their
+own note the same keys.
+
+### Pruning before the first outer row
+
+Once its table is built, and before it reads an outer row, the join
+hands its keys to TessAppend. A table shared by participants that
+spills to disk reads its outer side in the phases of the build, to send
+its rows to the partitions on disk; it hands the keys down past the
+build's barrier, before that.
+
+TessAppend then finds the children the keys can reach:
+
+- with a list, it sets `$p` to each distinct key, runs the steps, and
+  adds up the children each key leaves, stopping once every child is
+  needed;
+- past the list, it sets `$lo` and `$hi` to the ends and runs the
+  range's steps; without a range, every child is kept;
+- with no key at all, no child is kept.
+
+For the example above, over a range partitioning of four partitions of
+10 000 keys each, key 5 leaves the first partition and key 15005 the
+second: two children are read and two are not.
+
+The node reads only the children that both its own pruning and the
+join's left. A table kept over a rescan keeps the children it pruned; a
+table built anew hands its new keys before its first outer row.
+
+The work is fixed and small: a comparison and a store for each inner
+row while building, and one run of the steps for each distinct key, at
+most 1024, after it. DuckDB passes a short list of keys and their range
+in the same way.
+
+**Refused:** pruning as each inner row is inserted, for every row of
+the build, costs as much as the insertion itself. A patch of the core
+that did so was withdrawn for that reason.
+
+### What EXPLAIN shows
+
+With ANALYZE, TessAppend shows `Subplans Removed by Join`: how many of
+the children it started the join's keys removed. The count is the
+node's state at the end of the query, and in a parallel plan the
+leader's node may not have pruned at all: without the leader, only the
+workers do. So every participant that prunes adds the count and a 1 to
+two counters of the node, which are summed over the participants as
+its batches are, and EXPLAIN shows the first divided by the second.
+Every participant prunes the same children, so the quotient is the
+count. Over rescans that build the table anew the line shows the count
+of the last build.
+
+## The planner's expectation
+
+A join over a large outer side that prunes to one partition is cheaper
+than the same join without pruning, and the planner should know it, or
+it may build the large side and probe it with the small one. So the
+planner **expects** the pruning: it guesses the partitions the inner
+keys will reach before execution, from what it knows of them.
+
+- **Statistics.** The lowest and the highest value of the inner
+  column's statistics: the ends of its histogram and its most common
+  values. They come from a sample, so a rare value outside them is
+  missed.
+- **Clauses.** The inner relation's clauses that compare the key
+  column with a constant, either way round: `k > 20000` or
+  `20000 < k`. The core carries an equality across a join to the other
+  side, but no inequality, so the planner carries them itself.
+
+It turns these into clauses on the outer key and runs the core's
+planning-time pruning (`prune_append_rel_partitions`) over the outer
+relation with them, level by level. A hash partitioning has no order:
+the statistics say nothing of it, and only a clause that sets the key
+equal to a constant gives it an expectation, the partition of that
+value. An inner key that is an expression, not a column, gives no
+expectation, nor do clauses on other columns of the inner relation,
+such as a calendar's `year = 2024`: nothing ties them to the key.
+
+For example, with four range partitions of `k` from 1 to 30 000 and a
+default partition, and an inner side whose statistics say its keys run
+from 20 001 to 30 000, the planner expects the third partition alone.
+
+The planner then costs the core's `Append` over the partitions it
+expects to be left, with the core's own costing, and scales the cost
+of the join's outer child by the ratio of the two `Append`s. The
+join's outer child itself keeps every partition, and prunes at
+execution. The join's own terms, its probe and the rest, still count
+the rows of every outer partition.
+
+## Under a gather: dividing the partitions
+
+In a parallel plan, the core's parallel `Append` gives a child whole to
+one participant when that is cheaper than dividing it. Tessera's
+partial scan counts a worker's start in its cost, which such an
+`Append` adds up once for each partition, so it often prefers whole
+partitions. When fewer partitions are expected to be left than there
+are participants, the other participants then have nothing to read.
+
+So a parallel join that expects to prune its outer side is offered an
+outer side whose partitions every participant divides with the others:
+an `Append` over the partial paths of the partitions. The core's
+`Append` of whole partitions is offered beside it only where at least
+as many partitions are expected to be left as there are participants,
+and the cheaper one wins.
+
+Measured over four partitions of 500 000 rows by ranges of the key,
+joined with a dimension of 100 000 keys that reach the first one, in
+medians: 16.1 ms without pruning, 5.3 ms with it, and 78.4 ms for the
+core. With one partition of four left, a serial plan took 5.10 ms,
+whole partitions under a gather 5.83 ms and divided ones 5.45 ms; with
+five times the data 36.6, 34.4 and 23.6 ms.
+
+## What we decided not to do
+
+- **The join's own cost over the partitions left.** The probe, the
+  batches, the Bloom filter and the spilling of a pruning join are
+  still costed for every outer partition, so the join looks dearer than
+  it is. Changing that changes which plans win, and needs to be
+  measured first.
+- **A list bounded by distinct keys.** The list of keys is bounded by
+  the rows with a key, not by distinct keys: counting distinct keys
+  would cost a set of them at the build.
+- **Keys of other types.** A key that the join keeps by its hash, such
+  as text, does not prune: the join would have to keep its values for
+  the list, and their order for the range.
+- **The core's fixing of plan references.** The steps in the node's
+  plan data do not pass through `set_plan_references`, and the node's
+  partitions do not join the statement's prunable relations. Both
+  matter only for row marks and for statements that modify data, which
+  the node never takes.
+- **`MergeAppend`.** TessAppend stands only for `Append`, so an ordered
+  read of partitions stays the core's, with the core's pruning.
 
 ## Files
 
-- `nodes/append.c`
-- `nodes/hashjoin.c`
-- `nodes/join_planner.c`
+- `nodes/append.c`: TessAppend's description, its pruning when it
+  starts and while it runs, in a parallel plan, and by a join's keys,
+  and the lines of EXPLAIN.
+- `nodes/prune.h`: the keys a join hands down.
+- `nodes/hashjoin.c`, `nodes/hashjoin_shared.c`: the keys of a build,
+  shared by participants, and the moment they are handed down.
+- `nodes/hashjoin_begin.c`: the descriptions read from the plan and
+  handed to TessAppend at the start.
+- `nodes/join_planner.c`: when a join prunes, its descriptions over
+  parameters, the expectation, and the divided Append under a gather.
 
 ## Tests
 
-Pruning the outer side's partitions: a range partitioning with a default
-partition and a NULL key, by a list of keys and by the range of 2000,
-by an int8 key, by two keys of two partitions, a list partitioning by
-keys at its two ends, a hash one by listed keys and past them (none),
-the second level of two; semi and right joins prune, left and anti ones
-do not, keys all NULL prune every partition; a table kept for the outer
-side's new parameter and one built anew for the inner side's, the
-partitions no execution read counted; the planner's expectation, a side
-larger than the partitioned one built over it when its keys reach one
-partition by their statistics, by a clause on the inner key (either
-way round), or at the second level, and not when its keys reach every
-partition or the partitioning is by hash, and under the `Gather`, with
-a worker's start in the scans' cost, the partitions divided among the
-participants where one is left and whole where every one is; a spilling
-table; under the
-`Gather` a shared table, one that spills (the partitions no execution
-read counted), and tables of every participant, the leader not taking
-part. Mutations fail it: no pruning, every join type, the last
-key's partitions alone, the range for a list, no shared keys, NULL keys
-counted, no expectation, no clause carried over, no key at the second
-level, the second level's clauses left out, the divided Append never,
-the core's never beside it or always; the stop once every child
-is needed leaves the results as they are.
-
-`test/sql/union.sql`: partitions pruned while executing (the children
-read shown by `EXPLAIN ANALYZE`): by a generic plan's parameter (two,
-three and every child removed, none), with `EXPLAIN (GENERIC_PLAN)`
-removing none, by a stable function, by an initplan, anew for each value
-of a correlated subquery's parameter, a `UNION ALL` of two partitioned
-tables, within a sublink and a materialized CTE (queries whose range
-table the statement offsets). Mutations of the pruning fail it: no
-initial pruning, no pruning while running, the valid children kept over
-a rescan with new parameters, the invalid ones left unfinished in a
-parallel plan or after its reset, the range table numbers unshifted.
+- `test/sql/union.sql`: TessAppend's own pruning, compared with the
+  core's results. When it starts, by a generic plan's parameter, by a
+  stable function and in every format; while it runs, by an initplan
+  and a correlated subquery's parameter, with a rescan that changes
+  other parameters; a `UNION ALL` of partitioned tables and of a
+  partitioned and a plain table; a sublink; parallel plans, by every
+  kind of value, without the leader, rescanned, and with nothing left;
+  `enable_partition_pruning` off.
+- `test/sql/join.sql`: a join's pruning, compared with the core's
+  results. Range, list, hash and two-level partitionings; keys of int4
+  and int8; a list of keys at its bound and past it; join types that
+  prune and do not; a join of two keys and a key on a second column;
+  keys all NULL in an INNER and a RIGHT join; with the node's own
+  pruning; rescans that keep and rebuild the table; a table that
+  spills; a shared table, tables of each participant, and the leader
+  not taking part; `Subplans Removed by Join` without the leader; the
+  planner's expectation by statistics, by clauses either way round, at
+  a second level, for a hash partitioning; the divided `Append` under a
+  gather.
