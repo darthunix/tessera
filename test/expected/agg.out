@@ -801,7 +801,8 @@ FROM agg_t AS o WHERE o.a < 4 ORDER BY 1;
 
 -- Many groups: the planner expects few, the table grows; a sort above
 -- reads the groups row by row.
-CREATE TABLE agg_many (k int, v int);
+-- No autovacuum: its analyze would correct the planner's estimate.
+CREATE TABLE agg_many (k int, v int) WITH (autovacuum_enabled = off);
 ANALYZE agg_many;
 INSERT INTO agg_many SELECT g, g % 7 FROM generate_series(1, 200000) AS g;
 SELECT agg_explain($$SELECT k % 100000, sum(v) FROM agg_many GROUP BY k % 100000$$);
