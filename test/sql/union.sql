@@ -219,14 +219,27 @@ SELECT union_same($$SELECT count(*), sum(k) FROM union_part WHERE k > current_se
 SELECT union_run($$SELECT count(*), sum(k) FROM union_part WHERE k > (SELECT 2500) AND v < 10$$);
 SELECT union_same($$SELECT count(*), sum(k) FROM union_part WHERE k > (SELECT 2500) AND v < 10$$);
 SELECT union_same($$SELECT count(*), sum(k) FROM union_part WHERE k > (SELECT 9000) AND v < 10$$);
+-- With enable_partition_pruning off, nothing is pruned.
+SET enable_partition_pruning = off;
+SELECT union_run($$SELECT count(*), sum(k) FROM union_part WHERE k > (SELECT 2500) AND v < 10$$);
+RESET enable_partition_pruning;
 -- Anew for every value of a correlated subquery's parameter, as it
 -- rescans the node: each partition read for the values that reach it.
 SELECT union_run($$SELECT g, (SELECT count(*) FROM union_part WHERE k > g * 1000 AND v < 10) FROM generate_series(0, 4) AS g$$);
 SELECT union_same($$SELECT g, (SELECT count(*) FROM union_part WHERE k > g * 1000 AND v < 10) FROM generate_series(0, 4) AS g$$);
+-- A rescan that changes another parameter keeps the children found: the
+-- partitions the initplan's value excludes stay unread in every loop.
+SELECT union_run($$SELECT g, (SELECT count(*) FROM union_part WHERE k > (SELECT 2500) AND v < g) FROM generate_series(1, 3) AS g$$);
+SELECT union_same($$SELECT g, (SELECT count(*) FROM union_part WHERE k > (SELECT 2500) AND v < g) FROM generate_series(1, 3) AS g$$);
 -- UNION ALL of two partitioned tables, two hierarchies pruned.
 SELECT union_run($$SELECT count(*), sum(k) FROM (SELECT k, v FROM union_part UNION ALL SELECT k, v FROM union_part) AS u
                    WHERE k > (SELECT 3500) AND v < 10$$);
 SELECT union_same($$SELECT count(*), sum(k) FROM (SELECT k, v FROM union_part UNION ALL SELECT k, v FROM union_part) AS u
+                    WHERE k > (SELECT 3500) AND v < 10$$);
+-- A plain table beside the partitions is no partition: it is never pruned.
+SELECT union_run($$SELECT count(*), sum(k) FROM (SELECT k, v FROM union_part UNION ALL SELECT a, a % 100 FROM union_a) AS u
+                   WHERE k > (SELECT 3500) AND v < 10$$);
+SELECT union_same($$SELECT count(*), sum(k) FROM (SELECT k, v FROM union_part UNION ALL SELECT a, a % 100 FROM union_a) AS u
                     WHERE k > (SELECT 3500) AND v < 10$$);
 -- In a subquery of its own, whose range table the statement's offsets:
 -- a sublink's InitPlan and a materialized CTE that groups its rows (a
@@ -266,6 +279,18 @@ FROM union_run($$SELECT count(*), sum(k) FROM union_part WHERE k > (SELECT 2500)
 SELECT union_same($$SELECT count(*), sum(k) FROM union_part WHERE k > (SELECT 2500) AND v < 10$$);
 SELECT union_same($$SELECT count(*), sum(k) FROM (SELECT k, v FROM union_part UNION ALL SELECT k, v FROM union_part) AS u
                     WHERE k > (SELECT 3500) AND v < 10$$);
+-- By a generic plan's parameter, the serial plan's rows; and by an
+-- initplan that leaves no partition, no rows.
+PREPARE union_prune_parallel(int) AS SELECT count(*), sum(k) FROM union_part WHERE k > $1 AND v < 10;
+SET plan_cache_mode = force_generic_plan;
+SELECT regexp_replace(line, 'loops=[0-9]+', 'loops=n')
+FROM union_run($$EXECUTE union_prune_parallel(2500)$$) AS line;
+EXECUTE union_prune_parallel(2500);
+RESET plan_cache_mode;
+DEALLOCATE union_prune_parallel;
+SELECT regexp_replace(line, 'loops=[0-9]+', 'loops=n')
+FROM union_run($$SELECT count(*), sum(k) FROM union_part WHERE k > (SELECT 9000) AND v < 10$$) AS line;
+SELECT union_same($$SELECT count(*), sum(k) FROM union_part WHERE k > (SELECT 9000) AND v < 10$$);
 -- A child that is not partial, a table no worker may read, goes to one
 -- participant.
 ALTER TABLE union_b SET (parallel_workers = 0);
