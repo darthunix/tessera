@@ -19,25 +19,28 @@ In this order. The maintainer placed `counters-on-x86-and-linux`,
 `simd-primitives-avx2`, `linux-x86-support` and `oltp-guard-bench` on
 2026-10-05, in the review of pull request 45, and
 `explain-rows-per-loop` first on 2026-10-08, after pull requests 49 and
-50; the other entries keep the order of the decisions of 2026-09-30 to
-2026-10-02 (plan lines 2810–2836, 6596–6603, 7378–7390):
+50, and `join-pruning-cost` after it the same day; the other entries
+keep the order of the decisions of 2026-09-30 to 2026-10-02 (plan lines
+2810–2836, 6596–6603, 7378–7390):
 
 1. `explain-rows-per-loop`: The rows a node removed, per loop as the
    core shows them
-2. `counters-on-x86-and-linux`: Performance counters on x86 and on Linux
-3. `simd-primitives-avx2`: SIMD primitives layer and AVX2 for x86-64
-4. `linux-x86-support`: Linux on x86-64 checked as the target platform
-5. `oltp-guard-bench`: OLTP guard family of benchmarks
-6. `runs-left-from-section-9`: Runs left to the maintainer from section 9
-7. `tpch-short-set`: TPC-H step 7: the short query set for A/B
-8. `tpch-parallel-and-jit`: TPC-H step 8: parallel series and the
+2. `join-pruning-cost`: The cost of a pruning join over the partitions
+   left
+3. `counters-on-x86-and-linux`: Performance counters on x86 and on Linux
+4. `simd-primitives-avx2`: SIMD primitives layer and AVX2 for x86-64
+5. `linux-x86-support`: Linux on x86-64 checked as the target platform
+6. `oltp-guard-bench`: OLTP guard family of benchmarks
+7. `runs-left-from-section-9`: Runs left to the maintainer from section 9
+8. `tpch-short-set`: TPC-H step 7: the short query set for A/B
+9. `tpch-parallel-and-jit`: TPC-H step 8: parallel series and the
    `jit = on` control run
-9. `tpch-indexed-schema`: TPC-H step 9: schema with indexes on foreign
-   keys and dates
-10. `tpch-sf10`: TPC-H step 10: SF10
-11. `backward-scan-mark-restore`: Backward scan and mark/restore
-12. `postgresql-19`: PostgreSQL 19 support
-13. `pg-duckdb-comparison`: Comparison with pg_duckdb
+10. `tpch-indexed-schema`: TPC-H step 9: schema with indexes on foreign
+    keys and dates
+11. `tpch-sf10`: TPC-H step 10: SF10
+12. `backward-scan-mark-restore`: Backward scan and mark/restore
+13. `postgresql-19`: PostgreSQL 19 support
+14. `pg-duckdb-comparison`: Comparison with pg_duckdb
 
 ## By measurement
 
@@ -133,6 +136,44 @@ follow the core.
 - **Depends on:** the capability `key-filter` and the second part of
   `hash-table` in `main`.
 - **Capabilities:** key-filter
+- **Size:** small: one pull request.
+
+### join-pruning-cost
+
+The cost of a join that prunes its outer side, counted over the
+partitions left. Found when the capability `partition-pruning` was
+written; the maintainer decided on 2026-10-08 that it is to be fixed.
+
+- **What:** In the cost of a hash join that expects to prune its outer
+  side, count the probe side by the rows of the partitions expected to
+  be left, as the outer child's cost already is: the outer keys hashed,
+  the probe or the Bloom filter's test, the batches published, and the
+  spilling of the probe side. The rows matched, the pairs and the join's
+  output stay as they are: the partitions pruned hold no row with a
+  pair. With fewer probe rows the share of rows with a pair grows, and a
+  Bloom filter is expected less often. Count the pruning's own work as
+  well: a comparison and a store an inner row, and a run of the pruning
+  steps, about the logarithm of the partitions, a distinct key of the
+  list.
+- **Why:** Today the join's own terms count the rows of every outer
+  partition, so a pruning join looks dearer than it is, and the planner
+  may keep a plan that does not prune where one that does is faster.
+- **Known:** Greengage's planner adds its partition selector after the
+  plan is chosen and costs nothing. Its ORCA lowers the probe side's
+  rows by a semi-join estimate of the rows that match the build keys,
+  and costs both the scan and the hash join's probe by them; the join's
+  output stays the same. Spark, Trino, DuckDB and Oracle add their
+  run-time filters after the join order is chosen and estimate nothing;
+  PostgreSQL costs no run-time pruning, and the costing proposed with a
+  hash join's pruning there was not committed. Tessera expects whole
+  partitions, which is what pruning removes, so it does not overstate
+  the pruning as ORCA's row estimate does for coarse partitions.
+  Measurement plan: the plans of the join suite's planner cases and of
+  the join family of `bench/pg` before and after, and the time of every
+  case whose plan changes, on an idle machine; a slower case stops the
+  change.
+- **Depends on:** nothing.
+- **Capabilities:** partition-pruning
 - **Size:** small: one pull request.
 
 ### counters-on-x86-and-linux
@@ -1099,14 +1140,8 @@ becomes an entry, joins one, or is dropped.
   start-up once per Append, star-schema conditions, the Bloom filter's
   cost through TessAppend, hash partitioning. Suggested: an entry when a
   measured case appears.
-- **`partition-pruning`: a pruning join's own cost** (found when the
-  pruning was described). The planner scales the outer child's cost by
-  the partitions it expects to be left, but the join's own terms, its
-  probe, batches, Bloom filter and spilling, still count the rows of
-  every outer partition, so a pruning join looks dearer than it is.
-  Counting only the partitions left changes which plans win. Suggested:
-  an entry with a measurement plan, with "The costs of join pruning".
-- **`partition-pruning`: the count over rescans** (the same source).
+- **`partition-pruning`: the count over rescans** (found when the
+  pruning was described).
   `Subplans Removed by Join` shows the count of the last table built;
   over rescans that build anew the counts may differ, and the core has
   no line of the kind to follow. Suggested: decide with
