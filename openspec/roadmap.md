@@ -106,13 +106,21 @@ follow the core.
   rows per loop, as the core shows its own: the total over every loop
   and every participant, divided by the node's loops, which in a
   parallel plan add up over the participants. TessFilter does so
-  already. TessHashJoin shows three such lines as totals, "Rows Removed
-  by Join Filter", "Rows Removed by Filter" and "Rows Removed by Bloom
-  Filter"; they become per loop. The other counters of Tessera stay as
-  the core keeps its own of their kind: the work done (batches, rows
-  read, chunks, partitions) as totals, the memory as a peak. The spec of
-  `key-filter`, its design, `docs/nodes.md` and the expected outputs
-  follow.
+  already. TessHashJoin shows three such lines as totals, "Rows
+  Removed by Join Filter", "Rows Removed by Filter" and "Rows Removed
+  by Bloom Filter"; they become per loop. The other counters of
+  Tessera stay as the core keeps its own of their kind: the work done
+  (batches, rows read, chunks, partitions) as totals, the memory as a
+  peak. TessAppend's `Subplans Removed by Join` becomes a mean too,
+  per table built: the children the join's keys removed, summed over
+  every build and every participant, divided by the prunings, shown as
+  the core shows `rows`; the node's two counters of it add up over the
+  builds instead of taking the last one's. The maintainer chose this
+  on 2026-10-08 over Greengage's average and maximum and over the
+  core's way, which prints no count of run-time pruning and leaves it
+  to each child's loops. The specs of `key-filter` and
+  `partition-pruning`, their designs, `docs/nodes.md` and the expected
+  outputs follow.
 - **Why:** A line named as the core's must mean what the core's means.
   The core's hash join shows "Rows Removed by Join Filter" per loop, and
   TessHashJoin in its place shows a total. The join suite has a join
@@ -120,7 +128,10 @@ follow the core.
   `rows=159.50` a loop beside "Rows Removed by Bloom Filter: 154713",
   the sum of the ten loops. By the code, in a parallel plan of three
   processes the TessFilter below a join shows a third of the join's
-  line; no test shows it yet.
+  line; no test shows it yet. `Subplans Removed by Join` shows the
+  count of the last table built: a join rebuilt for two loops that
+  removes three partitions and then two shows 2, where it removed 2.5 a
+  build.
 - **Known:** The core's rules, in `commands/explain.c`: per loop the
   rows, the time and every "Rows Removed by"; totals for buffers, index
   searches, heap fetches, the heap blocks of a bitmap, the hits and
@@ -135,7 +146,7 @@ follow the core.
   and reads no line of the join.
 - **Depends on:** the capability `key-filter` and the second part of
   `hash-table` in `main`.
-- **Capabilities:** key-filter
+- **Capabilities:** key-filter, partition-pruning
 - **Size:** small: one pull request.
 
 ### join-pruning-cost
@@ -1140,12 +1151,6 @@ becomes an entry, joins one, or is dropped.
   start-up once per Append, star-schema conditions, the Bloom filter's
   cost through TessAppend, hash partitioning. Suggested: an entry when a
   measured case appears.
-- **`partition-pruning`: the count over rescans** (found when the
-  pruning was described).
-  `Subplans Removed by Join` shows the count of the last table built;
-  over rescans that build anew the counts may differ, and the core has
-  no line of the kind to follow. Suggested: decide with
-  `explain-rows-per-loop` whether it shows a mean per loop.
 - **The index tuple parsed through a slot** (plan 6.4а step 4, line
   5420): about 14 % of that profile. Suggested: an entry if
   `tpch-indexed-schema` shows it.
