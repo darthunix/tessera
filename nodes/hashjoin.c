@@ -722,7 +722,6 @@ insert_batch(TessHashJoinState *state, TessBatch *batch)
 	join_note_memory(state);
 }
 
-/* Read every batch of the inner child into a new table. */
 /* This build's keys for the outer side's pruning: none seen yet. */
 void
 join_reset_prune_keys(TessHashJoinState *state)
@@ -824,6 +823,7 @@ join_prune_outer(TessHashJoinState *state)
 	state->prune.sent = true;
 }
 
+/* Read every batch of the inner child into a new table. */
 static void
 build_table(TessHashJoinState *state)
 {

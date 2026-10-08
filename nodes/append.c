@@ -327,8 +327,9 @@ static const TessBatchOps append_batch_ops = {
  * pruning is done: valid receives the children to initialize. The core
  * exports no other way to make a pruning state, and a CustomScan's
  * description never reaches the statement's list (setrefs registers an
- * Append's alone). What the second call leaves besides the state: the
- * leaf partitions it kept join es_unpruned_relids, as an Append's do.
+ * Append's and a MergeAppend's alone). What the second call leaves
+ * besides the state: the leaf partitions it kept join es_unpruned_relids,
+ * as an Append's do.
  */
 static PartitionPruneState *
 prune_start(TessAppendState *state, const PartitionPruneInfo *planned, Bitmapset **valid)
