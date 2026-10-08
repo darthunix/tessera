@@ -19,21 +19,26 @@ none.
   none of them
 - **THEN** EXPLAIN shows `Subplans Removed` 2, 3 and 4, the results are
   the core's, and the last returns no rows
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/union.sql::At the start, by a generic plan's parameter`
 
 #### Scenario: A stable function, and a plan without the values
 - **WHEN** a clause compares the key with a stable function's value, and
   `EXPLAIN (GENERIC_PLAN)` shows a query with `$1`
 - **THEN** the first prunes as the parameter did, and the second prunes
   nothing
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/union.sql::At the start, by a stable function's value.`;
+  `test/sql/union.sql::Planned without the values, nothing is pruned.`
 
 #### Scenario: Every format, and pruning off
 - **WHEN** a query that prunes nothing is shown in JSON, and a query
   that would prune runs with `enable_partition_pruning` off
 - **THEN** the JSON has `"Subplans Removed": 0`, and the second reads
   every partition and shows no such line
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/union.sql::In a format other than text the line is shown when`;
+  `test/sql/union.sql::With enable_partition_pruning off, nothing is pruned.`
 
 ### Requirement: Pruning while a node runs
 TessAppend SHALL prune its partitions again at its first read, by the
@@ -47,7 +52,8 @@ read, and EXPLAIN ANALYZE shows it `never executed`.
 - **WHEN** a clause compares the key with an initplan's value
 - **THEN** the partitions the value excludes are `never executed`, and
   the results are the core's
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/union.sql::At the first read, by an InitPlan's value.`
 
 #### Scenario: A correlated subquery's parameter
 - **WHEN** a correlated subquery compares the key with its parameter
@@ -56,7 +62,9 @@ read, and EXPLAIN ANALYZE shows it `never executed`.
 - **THEN** in the first each partition is read only for the values that
   can reach it, and in the second the partitions the initplan's value
   excluded stay unread in every loop
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/union.sql::Anew for every value of a correlated subquery's`;
+  `test/sql/union.sql::A rescan that changes another parameter keeps the`
 
 ### Requirement: The relations a node prunes
 TessAppend SHALL prune the partitions of a partitioned table at every
@@ -71,13 +79,17 @@ main query.
   partitioned table and a plain table, are pruned by an initplan
 - **THEN** both tables of the first prune by their keys, the plain table
   of the second is read whole, and the results are the core's
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/union.sql::UNION ALL of two partitioned tables, two hierarchies`;
+  `test/sql/union.sql::A plain table beside the partitions is no partition`
 
-#### Scenario: A sublink
-- **WHEN** a sublink's query prunes by a stable function
-- **THEN** it prunes as the main query does, and the results are the
+#### Scenario: A sublink and a CTE
+- **WHEN** a sublink's query prunes by a stable function, and a
+  materialized CTE that groups its rows by an initplan
+- **THEN** both prune as the main query does, and the results are the
   core's
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/union.sql::In a subquery of its own, whose range table the`
 
 ### Requirement: Pruning in a parallel plan
 In a parallel plan every participant of a TessAppend SHALL read only
@@ -92,14 +104,19 @@ return no rows.
   leader not taking part
 - **THEN** the partitions pruned are `never executed`, and the results
   are the core's
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/union.sql::Pruned while executing: at the start by a stable`;
+  `test/sql/union.sql::By a generic plan's parameter, the serial plan's rows`;
+  `test/sql/union.sql::-- Without the leader.`
 
 #### Scenario: A rescan, and nothing left
 - **WHEN** a parallel plan is rescanned under a join, and a parallel
   plan prunes every partition
 - **THEN** each scan reads only the partitions left, and the second
   returns no rows
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/union.sql::Pruned by an InitPlan: the leader finds the valid`;
+  `test/sql/union.sql::initplan that leaves no partition, no rows.`
 
 ### Requirement: When a hash join prunes its outer side
 A hash join of Tessera SHALL prune the partitions of its outer side by
@@ -124,7 +141,8 @@ When several keys can prune, the first one in the join's order SHALL.
   partition
 - **THEN** the SEMI and the RIGHT join prune the others, the LEFT and
   the ANTI join read them all, and the results are the core's
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/join.sql::SEMI and RIGHT keep no outer row without a pair and prune`
 
 #### Scenario: The key that prunes
 - **WHEN** a join has two keys, the partition key second; a join's key
@@ -132,7 +150,8 @@ When several keys can prune, the first one in the join's order SHALL.
   `enable_partition_pruning` off
 - **THEN** the first prunes by its second key, and the others prune
   nothing
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/join.sql::The key that prunes: the first that can, here the second`
 
 ### Requirement: The keys a hash join prunes by
 A hash join that prunes SHALL, once its table is built and before it
@@ -154,20 +173,24 @@ core's.
   read once, the ranges the partitions between their ends, a hash
   partitioning past its list every partition, and the results are the
   core's
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/join.sql::By the range of 2000 keys; by an int8 key; by two keys`;
+  `test/sql/join.sql::The list's bound: 1024 rows with a key of jpr_1 or of`
 
 #### Scenario: No key
 - **WHEN** an INNER and a RIGHT join have inner sides whose keys are all
   NULL
 - **THEN** both read no partition, and the RIGHT join returns its inner
   rows, as the core does
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/join.sql::Keys that are all NULL pair with no`
 
 #### Scenario: With the node's own pruning
 - **WHEN** a join's keys reach two partitions and an initplan's value in
   a clause of the outer side leaves one of them
 - **THEN** only that one is read, and the results are the core's
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/join.sql::With the node's own pruning: the keys reach jpr_1 and`
 
 ### Requirement: Pruning over rescans and in parallel joins
 A hash join SHALL prune by the keys of each table it builds: a table
@@ -184,20 +207,25 @@ reads any outer row, in one process and when shared.
   partitions
 - **THEN** each loop reads only the partitions its table's keys reach,
   and the results are the core's
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/join.sql::A rescan: a table kept for the outer side's new parameter`
 
 #### Scenario: A parallel join
 - **WHEN** a parallel join prunes over a shared table, over a table of
   each participant, and with the leader not taking part
 - **THEN** no participant reads a partition pruned, and the results are
   the core's
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/join.sql::Pruning by the join's keys in parallel: every`;
+  `test/sql/join.sql::Without the leader only the workers prune`
 
 #### Scenario: A table that spills
 - **WHEN** a table spills to disk in one process and when shared
 - **THEN** both prune as a table in memory does, and no participant
   reads a partition pruned
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/join.sql::A table that spills keeps its range.`;
+  `test/sql/join.sql::A shared table that spills reads the outer side in the`
 
 ### Requirement: What EXPLAIN shows of a join's pruning
 With ANALYZE, a TessAppend that a hash join prunes SHALL show
@@ -210,14 +238,19 @@ line SHALL not be shown.
 #### Scenario: One process
 - **WHEN** a join's keys reach one of four partitions
 - **THEN** EXPLAIN ANALYZE shows `Subplans Removed by Join: 3` and the
-  three `never executed`, and EXPLAIN without ANALYZE shows no such line
-- **Verified by:** pending
+  three `never executed`, and EXPLAIN without ANALYZE of a pruning join
+  shows no such line
+- **Verified by:**
+  `test/sql/join.sql::the table is built, before the outer side is read`;
+  `test/sql/join.sql::The planner expects the pruning. A side larger`
 
 #### Scenario: A parallel plan
 - **WHEN** a parallel join over a shared table reaches one partition,
   with and without the leader
 - **THEN** both show `Subplans Removed by Join: 3`
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/join.sql::Pruning by the join's keys in parallel: every`;
+  `test/sql/join.sql::Without the leader only the workers prune`
 
 ### Requirement: The planner expects the pruning
 The planner SHALL count the cost of reading a pruning join's outer side
@@ -239,14 +272,16 @@ while planning.
   second level of a partitioning
 - **THEN** the planner builds the inner side and probes it with the
   outer side, which prunes to that partition
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/join.sql::The planner expects the pruning. A side larger`
 
 #### Scenario: No expectation
 - **WHEN** the inner keys reach every partition, and a hash partitioning
   is joined with an inner side whose keys reach one partition
 - **THEN** in both the outer side is costed whole, and the smaller side
   is built
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/join.sql::a hash partitioning expects none,`
 
 ### Requirement: A pruning join under a gather
 In a parallel plan, a hash join that expects to prune its outer side
@@ -262,4 +297,5 @@ partitions are expected to be left as there are participants.
 - **THEN** the first divides the partition among the participants, the
   second gives whole partitions, and no participant reads a partition
   pruned
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/join.sql::partial scans' cost, the core's Append`
