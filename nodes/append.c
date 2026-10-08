@@ -777,8 +777,11 @@ append_explain(CustomScanState *css, List *ancestors, ExplainState *es)
 	uint64		own[APPEND_NCOUNTERS];
 	const uint64 *totals;
 
-	/* As the core's Append shows the children the initial pruning removed. */
-	if (state->nchildren < state->nplanned)
+	/*
+	 * As the core's Append shows the children the initial pruning removed:
+	 * in the text format when there are any, in the others always.
+	 */
+	if (state->nchildren < state->nplanned || es->format != EXPLAIN_FORMAT_TEXT)
 		ExplainPropertyInteger("Subplans Removed", NULL,
 							   state->nplanned - state->nchildren, es);
 	if (!es->analyze)
