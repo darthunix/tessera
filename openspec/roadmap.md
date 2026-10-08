@@ -17,24 +17,27 @@ product: what Tessera does is in `openspec/specs/`.
 
 In this order. The maintainer placed `counters-on-x86-and-linux`,
 `simd-primitives-avx2`, `linux-x86-support` and `oltp-guard-bench` on
-2026-10-05, in the review of pull request 45; the other entries keep the
-order of the decisions of 2026-09-30 to 2026-10-02 (plan lines
-2810–2836, 6596–6603, 7378–7390):
+2026-10-05, in the review of pull request 45, and
+`explain-rows-per-loop` first on 2026-10-08, after pull requests 49 and
+50; the other entries keep the order of the decisions of 2026-09-30 to
+2026-10-02 (plan lines 2810–2836, 6596–6603, 7378–7390):
 
-1. `counters-on-x86-and-linux`: Performance counters on x86 and on Linux
-2. `simd-primitives-avx2`: SIMD primitives layer and AVX2 for x86-64
-3. `linux-x86-support`: Linux on x86-64 checked as the target platform
-4. `oltp-guard-bench`: OLTP guard family of benchmarks
-5. `runs-left-from-section-9`: Runs left to the maintainer from section 9
-6. `tpch-short-set`: TPC-H step 7: the short query set for A/B
-7. `tpch-parallel-and-jit`: TPC-H step 8: parallel series and the
+1. `explain-rows-per-loop`: The rows a node removed, per loop as the
+   core shows them
+2. `counters-on-x86-and-linux`: Performance counters on x86 and on Linux
+3. `simd-primitives-avx2`: SIMD primitives layer and AVX2 for x86-64
+4. `linux-x86-support`: Linux on x86-64 checked as the target platform
+5. `oltp-guard-bench`: OLTP guard family of benchmarks
+6. `runs-left-from-section-9`: Runs left to the maintainer from section 9
+7. `tpch-short-set`: TPC-H step 7: the short query set for A/B
+8. `tpch-parallel-and-jit`: TPC-H step 8: parallel series and the
    `jit = on` control run
-8. `tpch-indexed-schema`: TPC-H step 9: schema with indexes on foreign
+9. `tpch-indexed-schema`: TPC-H step 9: schema with indexes on foreign
    keys and dates
-9. `tpch-sf10`: TPC-H step 10: SF10
-10. `backward-scan-mark-restore`: Backward scan and mark/restore
-11. `postgresql-19`: PostgreSQL 19 support
-12. `pg-duckdb-comparison`: Comparison with pg_duckdb
+10. `tpch-sf10`: TPC-H step 10: SF10
+11. `backward-scan-mark-restore`: Backward scan and mark/restore
+12. `postgresql-19`: PostgreSQL 19 support
+13. `pg-duckdb-comparison`: Comparison with pg_duckdb
 
 ## By measurement
 
@@ -89,6 +92,48 @@ is wanted; several wait for a measured case. `greengage-port` and
   table
 
 ## Entries
+
+### explain-rows-per-loop
+
+The rows a node removed, per loop as the core shows them. Found when
+the key filter was described; the maintainer decided on 2026-10-08 to
+follow the core.
+
+- **What:** Every line "Rows Removed by …" of a Tessera node shows the
+  rows per loop, as the core shows its own: the total over every loop
+  and every participant, divided by the node's loops, which in a
+  parallel plan add up over the participants. TessFilter does so
+  already. TessHashJoin shows three such lines as totals, "Rows Removed
+  by Join Filter", "Rows Removed by Filter" and "Rows Removed by Bloom
+  Filter"; they become per loop. The other counters of Tessera stay as
+  the core keeps its own of their kind: the work done (batches, rows
+  read, chunks, partitions) as totals, the memory as a peak. The spec of
+  `key-filter`, its design, `docs/nodes.md` and the expected outputs
+  follow.
+- **Why:** A line named as the core's must mean what the core's means.
+  The core's hash join shows "Rows Removed by Join Filter" per loop, and
+  TessHashJoin in its place shows a total. The join suite has a join
+  under a parameter that rebuilds its table ten times: it shows
+  `rows=159.50` a loop beside "Rows Removed by Bloom Filter: 154713",
+  the sum of the ten loops. By the code, in a parallel plan of three
+  processes the TessFilter below a join shows a third of the join's
+  line; no test shows it yet.
+- **Known:** The core's rules, in `commands/explain.c`: per loop the
+  rows, the time and every "Rows Removed by"; totals for buffers, index
+  searches, heap fetches, the heap blocks of a bitmap, the hits and
+  misses of Memoize and the batches of a hash aggregate; a peak, over
+  loops and workers, for the memory of a hash and of a hash aggregate; a
+  sort shows its last run. Tessera's memory is a peak in each process,
+  summed over the participants: with a shared table the sum is the
+  table, as the core shows it; without one every participant builds the
+  whole table, and the sum counts it once a participant where the core
+  shows one. Decide in the change whether that line follows the core
+  too. `cargo tpch` already multiplies TessFilter's lines by the loops
+  and reads no line of the join.
+- **Depends on:** the capability `key-filter` and the second part of
+  `hash-table` in `main`.
+- **Capabilities:** key-filter
+- **Size:** small: one pull request.
 
 ### counters-on-x86-and-linux
 
@@ -1120,14 +1165,6 @@ becomes an entry, joins one, or is dropped.
     `nodes/hashjoin.h` and `nodes/agg_spill.c` still count a buffer of a
     page for each partition's file, though a set has one buffer. Whether
     the reserves themselves are still right is to be decided.
-- **`key-filter`: totals and means** (found when the key filter was
-  described). The join shows "Rows Removed by Bloom Filter" as a total
-  over its loops, as its other counters; the TessFilter below shows the
-  same line per loop, as the core shows the rows its conditions removed.
-  Under a parameter that rebuilds the join's table the two differ by the
-  loops. The spec states which is which. Suggested: decide one rule for
-  Tessera's lines when the capabilities of the join and of TessFilter
-  are written.
 
 ## Decided against
 
