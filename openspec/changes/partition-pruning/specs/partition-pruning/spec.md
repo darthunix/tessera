@@ -227,11 +227,11 @@ partitions that can hold an inner key within what it knows before
 execution: the lowest and the highest value of the inner column's
 statistics, and the inner relation's clauses that compare the column
 with a constant, either way round, at every level of the partitioning.
-A hash partitioning SHALL be expected to keep the partition of a key
-that a clause sets equal to a constant, either way round, and every
-partition otherwise. An inner key that is not a column, and clauses of
-the inner relation on other columns, give no expectation: the whole
-side is costed.
+A hash partitioning, an inner key that is not a column, and clauses of
+the inner relation on other columns give no expectation: the whole side
+is costed. An inner clause that sets the key equal to a constant needs
+none: PostgreSQL carries it over to the outer key and prunes by it
+while planning.
 
 #### Scenario: Statistics and clauses
 - **WHEN** an inner side larger than the outer one has keys in one
@@ -243,10 +243,9 @@ side is costed.
 
 #### Scenario: No expectation
 - **WHEN** the inner keys reach every partition, and a hash partitioning
-  is joined with and without a clause setting the inner key equal to a
-  constant, either way round
-- **THEN** the outer side is costed whole and built, but for the hash
-  partitioning with the clause, which is expected to keep one partition
+  is joined with an inner side whose keys reach one partition
+- **THEN** in both the outer side is costed whole, and the smaller side
+  is built
 - **Verified by:** pending
 
 ### Requirement: A pruning join under a gather
