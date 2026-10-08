@@ -471,11 +471,16 @@ SELECT join_same($$SELECT jpr.k, jkf.w FROM jpr LEFT JOIN jkf ON jpr.k = jkf.k$$
 SELECT join_same($$SELECT jpr.k FROM jpr WHERE NOT EXISTS (SELECT 1 FROM jkf WHERE jkf.k = jpr.k)$$);
 -- A rescan: a table kept for the outer side's new parameter prunes again
 -- by the same keys, which go down anew; a table built anew for the inner
--- side's parameter by its own (the second outer row's pairs with none).
+-- side's parameter by its own: jkr's keys of w = 4 reach jpr_1, those of
+-- w = 5 jpr_3, and each loop reads its partition alone.
+CREATE TABLE jkr AS SELECT CASE WHEN g <= 100 THEN g ELSE 20000 + g END AS k,
+                           CASE WHEN g <= 100 THEN 4 ELSE 5 END AS w
+                    FROM generate_series(1, 200) AS g;
+ANALYZE jkr;
 SELECT join_unread($$SELECT jkl.k, (SELECT count(*) FROM jpr JOIN jkf ON jpr.k = jkf.k WHERE jpr.v = jkl.k) FROM jkl$$) AS kept,
-       join_unread($$SELECT jkl.k, (SELECT count(*) FROM jpr JOIN jkm ON jpr.k = jkm.k WHERE jkm.w = jkl.k) FROM jkl$$) AS rebuilt;
+       join_unread($$SELECT jkl.k, (SELECT count(*) FROM jpr JOIN jkr ON jpr.k = jkr.k WHERE jkr.w = jkl.k) FROM jkl$$) AS rebuilt;
 SELECT join_same($$SELECT jkl.k, (SELECT count(*) FROM jpr JOIN jkf ON jpr.k = jkf.k WHERE jpr.v = jkl.k) FROM jkl$$);
-SELECT join_same($$SELECT jkl.k, (SELECT count(*) FROM jpr JOIN jkm ON jpr.k = jkm.k WHERE jkm.w = jkl.k) FROM jkl$$);
+SELECT join_same($$SELECT jkl.k, (SELECT sum(jpr.k) FROM jpr JOIN jkr ON jpr.k = jkr.k WHERE jkr.w = jkl.k) FROM jkl$$);
 -- The planner expects the pruning. A side larger than jpr whose keys
 -- reach jpr_3 alone is built, and jpr, pruned to that partition, probes
 -- it: without the expectation the smaller jpr would be built and nothing
@@ -518,8 +523,12 @@ SELECT join_same($$SELECT jpr.k, jkwide.k FROM jpr JOIN jkwide ON jpr.k = jkwide
 SELECT join_same($$SELECT jp2.k, jp2.v FROM jp2 JOIN jkx ON jp2.k = jkx.k2$$);
 -- A table that spills keeps its range.
 SET work_mem = '64kB';
-SELECT join_pruned($$SELECT count(*), sum(jpr.v) FROM jpr JOIN jkm ON jpr.k = jkm.k$$) AS spilled;
+SET hash_mem_multiplier = 1;
+SELECT join_pruned($$SELECT count(*), sum(jpr.v) FROM jpr JOIN jkm ON jpr.k = jkm.k$$) AS spilled,
+       EXISTS (SELECT FROM join_explain($$SELECT count(*), sum(jpr.v) FROM jpr JOIN jkm ON jpr.k = jkm.k$$) AS line
+               WHERE line ~ 'Spilled Chunks: [1-9]') AS on_disk;
 SELECT join_same($$SELECT jpr.k, jpr.v, jkm.w FROM jpr JOIN jkm ON jpr.k = jkm.k$$);
+RESET hash_mem_multiplier;
 RESET work_mem;
 
 -- Spilling: an inner side of about 3 MB with duplicates, NULL keys and
@@ -1021,7 +1030,7 @@ SELECT join_costs_carried($$SELECT count(*) FROM jf JOIN jd ON jf.fk = jd.id$$) 
 DROP FUNCTION join_costs_carried(text);
 
 DROP TABLE jd, jf, jdup, jsmall, jempty, jgrow, jbig, jpair, jbuild, jprobe, jhit, jref, jrefprobe, jrefgrow, jsb, jsp, jsskew, jsouter, jsheavy;
-DROP TABLE jpr, jpl, jph, jp2, jkf, jkm, jk8, jkn, jkl, jk2, jk19, jkw, jkx, jkwide, jkx2, jkp;
+DROP TABLE jpr, jpl, jph, jp2, jkf, jkm, jk8, jkn, jkl, jk2, jk19, jkw, jkx, jkwide, jkx2, jkp, jkr;
 DROP FUNCTION jskew();
 DROP FUNCTION jwide();
 DROP FUNCTION join_property(text, text);
