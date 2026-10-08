@@ -287,12 +287,14 @@ keys will reach before execution, from what it knows of them.
 
 It turns these into clauses on the outer key and runs the core's
 planning-time pruning (`prune_append_rel_partitions`) over the outer
-relation with them, level by level. A hash partitioning has no order:
-the statistics say nothing of it, and only a clause that sets the key
-equal to a constant gives it an expectation, the partition of that
-value. An inner key that is an expression, not a column, gives no
-expectation, nor do clauses on other columns of the inner relation,
-such as a calendar's `year = 2024`: nothing ties them to the key.
+relation with them, level by level. A hash partitioning has no order, so
+no range of the inner keys prunes it, and the planner expects nothing of
+it. An inner clause that sets the key equal to a constant needs no
+expectation: the core carries it over to the outer key itself, and
+prunes by it while planning. An inner key that is an expression, not a
+column, gives no expectation, nor do clauses on other columns of the
+inner relation, such as a calendar's `year = 2024`: nothing ties them to
+the key.
 
 For example, with four range partitions of `k` from 1 to 30 000 and a
 default partition, and an inner side whose statistics say its keys run
@@ -381,5 +383,5 @@ five times the data 36.6, 34.4 and 23.6 ms.
   spills; a shared table, tables of each participant, and the leader
   not taking part; `Subplans Removed by Join` without the leader; the
   planner's expectation by statistics, by clauses either way round, at
-  a second level, for a hash partitioning; the divided `Append` under a
-  gather.
+  a second level, none for a hash partitioning; the divided `Append`
+  under a gather.

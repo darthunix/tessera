@@ -644,6 +644,14 @@ expected_leaves(PlannerInfo *root, RelOptInfo *outerrel, const JoinKeys *keys,
 	key = prune_key(root, outerrel, keys->clauses, keys->outer, keys->hashers, &scheme);
 	if (key < 0)
 		return NULL;
+	/*
+	 * A hash partitioning has no order, so no range of the inner keys
+	 * prunes it. An inner clause setting the key equal to a constant the
+	 * core carries over to the outer key itself, and prunes by while
+	 * planning.
+	 */
+	if (scheme->strategy == PARTITION_STRATEGY_HASH)
+		return NULL;
 	/* The bounds of the inner side's column; an expression has none known. */
 	if (!IsA(list_nth(keys->inner, key), Var))
 		return NULL;

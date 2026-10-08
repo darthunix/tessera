@@ -58,15 +58,17 @@ keys on the node as on the core's `Append`.
 ### The expectation of a hash partitioning
 
 **Was:** the planner bounded the inner key for a hash partitioning by
-the steps of a btree one. The strategy number 1, "less than" in a btree
-family, is equality in a hash family: an inner clause `k = 5` gave the
-outer clause `k = 5`, and the planner expected one partition, while
-`5 = k`, commuted to strategy 5, gave nothing. The statistics went
-through the hash equality as a comparison and gave nothing either.
+the steps of a btree one. It read the statistics through the hash
+family's equality as if it were "less than", and gave nothing. The
+strategy number 1, "less than" in a btree family, is equality in a hash
+family, so an inner clause `k = 5` gave the outer clause `k = 5`, and
+`5 = k` gave nothing. Neither case reaches the join: PostgreSQL carries
+an equality with a constant over to the outer key itself, and prunes by
+it while planning.
 
-**Will be:** for a hash partitioning the planner reads no statistics
-and takes an inner clause that sets the key equal to a constant, either
-way round, as `outer key = constant`. Any other clause gives nothing.
+**Will be:** a hash partitioning gives no expectation, as the text
+always said, and the planner reads no statistics for it. No plan
+changes; the planning of such a join does less work.
 
 ### What we do not do
 
