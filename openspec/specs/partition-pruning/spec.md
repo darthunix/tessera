@@ -1,4 +1,19 @@
-## ADDED Requirements
+# partition-pruning Specification
+
+## Purpose
+Skipping the partitions of a table that a query cannot need while the
+query runs. TessAppend, which reads the children of an `Append` in
+batches, prunes them by the query's parameters as the core's `Append`
+does; a hash join prunes the partitions of its outer side by the keys
+of the table it built, which the core does not do. The requirements go
+from TessAppend's own pruning, when it starts, while it runs, in which
+relations and in a parallel plan, to the join's: when it prunes, by
+which keys, over rescans and in parallel, what EXPLAIN shows, how the
+planner expects it, and a pruning join under a gather. Pruning by
+constants while planning is the core's alone.
+[design.md](design.md) explains the whole and the reasons.
+
+## Requirements
 
 ### Requirement: Pruning when a node starts
 TessAppend, the node that reads the children of an `Append` in batches,
