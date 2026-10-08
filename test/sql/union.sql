@@ -168,21 +168,28 @@ $$;
 -- At the start, by a generic plan's parameter: the children it prunes are
 -- not even started, all of them for a bound past every partition, the
 -- sub-partitioned one's for a bound within it.
+-- A statement is planned when it first runs, not when it is prepared:
+-- the core's runs with Tessera off, and its generic plan is the core's.
 PREPARE union_prune(int) AS SELECT count(*), sum(k) FROM union_part WHERE k > $1 AND v < 10;
-SET tessera.enable = off;
 PREPARE union_prune_core(int) AS SELECT count(*), sum(k) FROM union_part WHERE k > $1 AND v < 10;
-SET tessera.enable = on;
 SET plan_cache_mode = force_generic_plan;
 EXPLAIN (COSTS OFF) EXECUTE union_prune(2500);
 EXECUTE union_prune(2500);
+SET tessera.enable = off;
+EXPLAIN (COSTS OFF) EXECUTE union_prune_core(2500);
 EXECUTE union_prune_core(2500);
+SET tessera.enable = on;
 EXPLAIN (COSTS OFF) EXECUTE union_prune(3500);
 EXECUTE union_prune(3500);
+SET tessera.enable = off;
 EXECUTE union_prune_core(3500);
+SET tessera.enable = on;
 EXPLAIN (COSTS OFF) EXECUTE union_prune(5000);
 EXECUTE union_prune(5000);
 EXECUTE union_prune(0);
+SET tessera.enable = off;
 EXECUTE union_prune_core(0);
+SET tessera.enable = on;
 -- Planned without the values, nothing is pruned.
 EXPLAIN (GENERIC_PLAN, COSTS OFF) SELECT count(*) FROM union_part WHERE k > $1 AND v < 10;
 RESET plan_cache_mode;

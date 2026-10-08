@@ -573,10 +573,10 @@ $$;
 -- At the start, by a generic plan's parameter: the children it prunes are
 -- not even started, all of them for a bound past every partition, the
 -- sub-partitioned one's for a bound within it.
+-- A statement is planned when it first runs, not when it is prepared:
+-- the core's runs with Tessera off, and its generic plan is the core's.
 PREPARE union_prune(int) AS SELECT count(*), sum(k) FROM union_part WHERE k > $1 AND v < 10;
-SET tessera.enable = off;
 PREPARE union_prune_core(int) AS SELECT count(*), sum(k) FROM union_part WHERE k > $1 AND v < 10;
-SET tessera.enable = on;
 SET plan_cache_mode = force_generic_plan;
 EXPLAIN (COSTS OFF) EXECUTE union_prune(2500);
                                   QUERY PLAN                                   
@@ -598,12 +598,26 @@ EXECUTE union_prune(2500);
    150 | 482175
 (1 row)
 
+SET tessera.enable = off;
+EXPLAIN (COSTS OFF) EXECUTE union_prune_core(2500);
+                     QUERY PLAN                     
+----------------------------------------------------
+ Aggregate
+   ->  Append
+         Subplans Removed: 2
+         ->  Seq Scan on union_part_3a union_part_1
+               Filter: ((k > $1) AND (v < 10))
+         ->  Seq Scan on union_part_3b union_part_2
+               Filter: ((k > $1) AND (v < 10))
+(7 rows)
+
 EXECUTE union_prune_core(2500);
  count |  sum   
 -------+--------
    150 | 482175
 (1 row)
 
+SET tessera.enable = on;
 EXPLAIN (COSTS OFF) EXECUTE union_prune(3500);
                                   QUERY PLAN                                   
 -------------------------------------------------------------------------------
@@ -621,12 +635,14 @@ EXECUTE union_prune(3500);
     50 | 185725
 (1 row)
 
+SET tessera.enable = off;
 EXECUTE union_prune_core(3500);
  count |  sum   
 -------+--------
     50 | 185725
 (1 row)
 
+SET tessera.enable = on;
 EXPLAIN (COSTS OFF) EXECUTE union_prune(5000);
            QUERY PLAN           
 --------------------------------
@@ -647,12 +663,14 @@ EXECUTE union_prune(0);
    400 | 785800
 (1 row)
 
+SET tessera.enable = off;
 EXECUTE union_prune_core(0);
  count |  sum   
 -------+--------
    400 | 785800
 (1 row)
 
+SET tessera.enable = on;
 -- Planned without the values, nothing is pruned.
 EXPLAIN (GENERIC_PLAN, COSTS OFF) SELECT count(*) FROM union_part WHERE k > $1 AND v < 10;
                                   QUERY PLAN                                   
