@@ -192,6 +192,21 @@ EXECUTE union_prune_core(0);
 SET tessera.enable = on;
 -- Planned without the values, nothing is pruned.
 EXPLAIN (GENERIC_PLAN, COSTS OFF) SELECT count(*) FROM union_part WHERE k > $1 AND v < 10;
+-- In a format other than text the line is shown when nothing is
+-- removed too, as for the core's Append.
+CREATE FUNCTION union_removed(query text) RETURNS text
+LANGUAGE plpgsql AS $$
+DECLARE
+    plan jsonb;
+BEGIN
+    EXECUTE 'EXPLAIN (FORMAT JSON, COSTS OFF) ' || query INTO plan;
+    RETURN (SELECT coalesce(node ->> 'Custom Plan Provider', node ->> 'Node Type') || ': ' ||
+                   coalesce(node ->> 'Subplans Removed', 'none')
+            FROM jsonb_path_query_first(plan,
+                '$[0]."Plan".** ? (@."Node Type" == "Append" || @."Custom Plan Provider" == "TessAppend")') AS node);
+END $$;
+SELECT union_removed($$EXECUTE union_prune(0)$$) AS tessera,
+       union_removed($$EXECUTE union_prune_core(0)$$) AS core;
 RESET plan_cache_mode;
 DEALLOCATE union_prune;
 DEALLOCATE union_prune_core;
