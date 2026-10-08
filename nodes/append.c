@@ -41,8 +41,17 @@
 /* The core's cost of a row through an Append (costsize.c), which the node saves. */
 #define APPEND_CPU_COST_MULTIPLIER 0.5
 
-/* The node's counter summed over the participants: the batches given out. */
-#define APPEND_NCOUNTERS 1
+/*
+ * The node's counters summed over the participants: the batches given
+ * out; the children a join's keys removed, and the participants that
+ * pruned by them, each adding the count and a 1. Every participant prunes
+ * the same children, so the first divided by the second is the count,
+ * whichever participants pruned: the leader may not have.
+ */
+#define APPEND_BATCHES 0
+#define APPEND_JOIN_REMOVED 1
+#define APPEND_JOIN_PRUNED 2
+#define APPEND_NCOUNTERS 3
 
 /*
  * The children shared out in a parallel plan, after the counters in the
@@ -747,15 +756,25 @@ append_rescan(CustomScanState *css)
 	/* The batches total every scan, as the core's instrumentation does. */
 }
 
+/* This participant's counters. */
+static void
+append_counters(const TessAppendState *state, uint64 *values)
+{
+	values[APPEND_BATCHES] = state->batches;
+	values[APPEND_JOIN_REMOVED] = state->join_set ? (uint64) state->join_removed : 0;
+	values[APPEND_JOIN_PRUNED] = state->join_set ? 1 : 0;
+}
+
 /*
- * The children the initial pruning removed; with ANALYZE, the batches
- * given out, every participant's in a parallel plan.
+ * The children the initial pruning removed; with ANALYZE, those a join's
+ * keys removed and, with VERBOSE, the batches given out, every
+ * participant's in a parallel plan.
  */
 static void
 append_explain(CustomScanState *css, List *ancestors, ExplainState *es)
 {
 	TessAppendState *state = (TessAppendState *) css;
-	uint64		own = state->batches;
+	uint64		own[APPEND_NCOUNTERS];
 	const uint64 *totals;
 
 	/* As the core's Append shows the children the initial pruning removed. */
@@ -764,12 +783,16 @@ append_explain(CustomScanState *css, List *ancestors, ExplainState *es)
 							   state->nplanned - state->nchildren, es);
 	if (!es->analyze)
 		return;
+	append_counters(state, own);
+	totals = tess_shared_stats_totals_or(state->stats, own);
 	if (state->join_values != NULL)
-		ExplainPropertyInteger("Subplans Removed by Join", NULL, state->join_removed, es);
+		ExplainPropertyInteger("Subplans Removed by Join", NULL,
+							   totals[APPEND_JOIN_PRUNED] > 0 ?
+							   (int64) (totals[APPEND_JOIN_REMOVED] /
+										totals[APPEND_JOIN_PRUNED]) : 0, es);
 	if (!es->verbose)
 		return;
-	totals = tess_shared_stats_totals_or(state->stats, &own);
-	ExplainPropertyInteger("Batches", NULL, totals[0], es);
+	ExplainPropertyInteger("Batches", NULL, totals[APPEND_BATCHES], es);
 }
 
 /*
@@ -852,8 +875,9 @@ static void
 append_shutdown(CustomScanState *css)
 {
 	TessAppendState *state = (TessAppendState *) css;
-	uint64		values[APPEND_NCOUNTERS] = {state->batches};
+	uint64		values[APPEND_NCOUNTERS];
 
+	append_counters(state, values);
 	if (state->stats != NULL)
 		tess_shared_stats_store(state->stats, values);
 }

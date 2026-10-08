@@ -933,6 +933,9 @@ SELECT join_pruned($$SELECT count(*), sum(jpr.v) FROM jpr JOIN jkm ON jpr.k = jk
 SELECT join_same($$SELECT jpr.k, jpr.v, jkm.w FROM jpr JOIN jkm ON jpr.k = jkm.k$$);
 SET enable_parallel_hash = on;
 SET parallel_leader_participation = off;
+-- Without the leader only the workers prune; EXPLAIN counts their pruning.
+SELECT join_pruned($$SELECT count(*), sum(jpr.v) FROM jpr JOIN jkm ON jpr.k = jkm.k$$) AS without_leader,
+       join_unread($$SELECT count(*), sum(jpr.v) FROM jpr JOIN jkm ON jpr.k = jkm.k$$) AS unread;
 SELECT join_same($$SELECT jpr.k, jpr.v, jkm.w FROM jpr JOIN jkm ON jpr.k = jkm.k$$);
 SELECT join_same($$SELECT jpr.k, jpr.v, jkf.w FROM jpr JOIN jkf ON jpr.k = jkf.k$$);
 RESET parallel_leader_participation;
