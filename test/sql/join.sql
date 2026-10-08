@@ -457,6 +457,36 @@ SELECT join_same($$SELECT jpr.k, jpr.v FROM jpr JOIN jk2 ON jpr.k = jk2.k$$);
 SELECT join_same($$SELECT jpl.k, jpl.v FROM jpl JOIN jk19 ON jpl.k = jk19.k$$);
 SELECT join_same($$SELECT jph.k, jph.v FROM jph JOIN jkl ON jph.k = jkl.k$$);
 SELECT join_same($$SELECT jp2.k, jp2.v FROM jp2 JOIN jkf ON jp2.k = jkf.k$$);
+-- The list's bound: 1024 rows with a key of jpr_1 or of jpr_3 are a list,
+-- which keeps those two partitions; at 1025 rows the range from the
+-- lowest to the highest keeps jpr_2 between them too.
+CREATE TABLE jk1024 AS SELECT CASE WHEN g % 2 = 0 THEN 5 ELSE 25005 END AS k FROM generate_series(1, 1024) AS g;
+CREATE TABLE jk1025 AS SELECT CASE WHEN g % 2 = 0 THEN 5 ELSE 25005 END AS k FROM generate_series(1, 1025) AS g;
+ANALYZE jk1024, jk1025;
+SELECT join_pruned($$SELECT count(*) FROM jpr JOIN jk1024 ON jpr.k = jk1024.k$$) AS list_1024,
+       join_pruned($$SELECT count(*) FROM jpr JOIN jk1025 ON jpr.k = jk1025.k$$) AS range_1025;
+SELECT join_same($$SELECT jpr.k, count(*) FROM jpr JOIN jk1024 ON jpr.k = jk1024.k GROUP BY jpr.k$$);
+SELECT join_same($$SELECT jpr.k, count(*) FROM jpr JOIN jk1025 ON jpr.k = jk1025.k GROUP BY jpr.k$$);
+-- The key that prunes: the first that can, here the second key; a key
+-- that is the partition key's second column cannot; nor can any with
+-- enable_partition_pruning off.
+CREATE TABLE jpk (k int, v int) PARTITION BY RANGE (v, k);
+CREATE TABLE jpk_1 PARTITION OF jpk FOR VALUES FROM (0, 1) TO (3, 1);
+CREATE TABLE jpk_2 PARTITION OF jpk FOR VALUES FROM (3, 1) TO (7, 1);
+INSERT INTO jpk SELECT g, g % 7 FROM generate_series(1, 20000) AS g;
+ANALYZE jpk;
+SELECT join_pruned($$SELECT count(*) FROM jpr JOIN jkf ON jpr.v = jkf.w AND jpr.k = jkf.k$$) AS second_key,
+       join_pruned($$SELECT count(*) FROM jpk JOIN jkf ON jpk.k = jkf.k$$) AS second_column;
+SET enable_partition_pruning = off;
+SELECT join_pruned($$SELECT count(*) FROM jpr JOIN jkf ON jpr.k = jkf.k$$) AS pruning_off;
+RESET enable_partition_pruning;
+SELECT join_same($$SELECT jpr.k, jpr.v FROM jpr JOIN jkf ON jpr.v = jkf.w AND jpr.k = jkf.k$$);
+SELECT join_same($$SELECT jpk.k, jpk.v FROM jpk JOIN jkf ON jpk.k = jkf.k$$);
+-- With the node's own pruning: the keys reach jpr_1 and jpr_2, an
+-- initplan's value leaves jpr_2 of them, and only jpr_2 is read.
+SELECT join_pruned($$SELECT count(*), sum(jpr.v) FROM jpr JOIN jk2 ON jpr.k = jk2.k WHERE jpr.k > (SELECT 12000)$$) AS by_join,
+       join_unread($$SELECT count(*), sum(jpr.v) FROM jpr JOIN jk2 ON jpr.k = jk2.k WHERE jpr.k > (SELECT 12000)$$) AS unread;
+SELECT join_same($$SELECT jpr.k, jpr.v FROM jpr JOIN jk2 ON jpr.k = jk2.k WHERE jpr.k > (SELECT 12000)$$);
 -- SEMI and RIGHT keep no outer row without a pair and prune; LEFT and ANTI
 -- keep every outer row and do not. Keys that are all NULL pair with no
 -- partition.
@@ -464,7 +494,9 @@ SELECT join_pruned($$SELECT count(*) FROM jpr WHERE EXISTS (SELECT 1 FROM jkf WH
        join_pruned($$SELECT count(*), count(jpr.v) FROM jpr RIGHT JOIN jkf ON jpr.k = jkf.k$$) AS right_join,
        join_pruned($$SELECT count(*), count(jkf.w) FROM jpr LEFT JOIN jkf ON jpr.k = jkf.k$$) AS left_join,
        join_pruned($$SELECT count(*) FROM jpr WHERE NOT EXISTS (SELECT 1 FROM jkf WHERE jkf.k = jpr.k)$$) AS anti,
-       join_pruned($$SELECT count(*), sum(jpr.v) FROM jpr JOIN jkn ON jpr.k = jkn.k$$) AS all_null;
+       join_pruned($$SELECT count(*), sum(jpr.v) FROM jpr JOIN jkn ON jpr.k = jkn.k$$) AS all_null,
+       join_pruned($$SELECT count(*), count(jpr.v) FROM jpr RIGHT JOIN jkn ON jpr.k = jkn.k$$) AS right_all_null;
+SELECT join_same($$SELECT jpr.k, jkn.k, jkn.w FROM jpr RIGHT JOIN jkn ON jpr.k = jkn.k$$);
 SELECT join_same($$SELECT jpr.k FROM jpr WHERE EXISTS (SELECT 1 FROM jkf WHERE jkf.k = jpr.k)$$);
 SELECT join_same($$SELECT jpr.k, jkf.k, jkf.w FROM jpr RIGHT JOIN jkf ON jpr.k = jkf.k$$);
 SELECT join_same($$SELECT jpr.k, jkf.w FROM jpr LEFT JOIN jkf ON jpr.k = jkf.k$$);
@@ -1030,7 +1062,7 @@ SELECT join_costs_carried($$SELECT count(*) FROM jf JOIN jd ON jf.fk = jd.id$$) 
 DROP FUNCTION join_costs_carried(text);
 
 DROP TABLE jd, jf, jdup, jsmall, jempty, jgrow, jbig, jpair, jbuild, jprobe, jhit, jref, jrefprobe, jrefgrow, jsb, jsp, jsskew, jsouter, jsheavy;
-DROP TABLE jpr, jpl, jph, jp2, jkf, jkm, jk8, jkn, jkl, jk2, jk19, jkw, jkx, jkwide, jkx2, jkp, jkr;
+DROP TABLE jpr, jpl, jph, jp2, jpk, jkf, jkm, jk8, jkn, jkl, jk2, jk19, jkw, jkx, jkwide, jkx2, jkp, jk1024, jk1025, jkr;
 DROP FUNCTION jskew();
 DROP FUNCTION jwide();
 DROP FUNCTION join_property(text, text);
