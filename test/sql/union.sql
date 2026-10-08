@@ -229,13 +229,16 @@ SELECT union_run($$SELECT count(*), sum(k) FROM (SELECT k, v FROM union_part UNI
 SELECT union_same($$SELECT count(*), sum(k) FROM (SELECT k, v FROM union_part UNION ALL SELECT k, v FROM union_part) AS u
                     WHERE k > (SELECT 3500) AND v < 10$$);
 -- In a subquery of its own, whose range table the statement's offsets:
--- a sublink's InitPlan and a materialized CTE.
+-- a sublink's InitPlan and a materialized CTE that groups its rows (a
+-- CTE that passes rows on reads the core's Append).
 SELECT union_run($$SELECT x FROM generate_series(1, 3) AS x
                    WHERE x * 10 < (SELECT count(*) FROM union_part WHERE k > current_setting('union_test.bound')::int AND v < 10)$$);
 SELECT union_same($$SELECT x FROM generate_series(1, 30) AS x
                     WHERE x * 10 < (SELECT count(*) FROM union_part WHERE k > current_setting('union_test.bound')::int AND v < 10)$$);
-SELECT union_same($$WITH c AS MATERIALIZED (SELECT k, v FROM union_part WHERE k > (SELECT 1500) AND v < 20)
-                    SELECT count(*), sum(k) FROM c JOIN union_a ON c.k = union_a.a$$);
+SELECT union_run($$WITH c AS MATERIALIZED (SELECT count(*) AS n, sum(k) AS s FROM union_part WHERE k > (SELECT 1500) AND v < 20)
+                   SELECT n, s FROM c$$);
+SELECT union_same($$WITH c AS MATERIALIZED (SELECT count(*) AS n, sum(k) AS s FROM union_part WHERE k > (SELECT 1500) AND v < 20)
+                    SELECT n, s FROM c$$);
 -- The partitions grouped: TessAgg groups over TessAppend.
 SELECT union_same($$SELECT v % 7 AS g, count(*), sum(k) FROM union_part WHERE v < 50 GROUP BY 1$$);
 
