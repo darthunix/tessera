@@ -8,10 +8,10 @@
 )]
 
 use tessera_capi::c::{
-    Code, SpillHeader, SpillWeights, Status, tess_spill_header_read, tess_spill_header_size,
-    tess_spill_header_write, tess_spill_unpack, tess_table_spill_add_bytes, tess_table_spill_evict,
-    tess_table_spill_flags, tess_table_spill_init, tess_table_spill_split, tess_table_spill_splits,
-    tess_table_spill_words,
+    Code, SpillHeader, SpillWeights, Status, tess_spill_chunk_len, tess_spill_header_read,
+    tess_spill_header_size, tess_spill_header_write, tess_spill_partitions, tess_spill_unpack,
+    tess_table_spill_add_bytes, tess_table_spill_evict, tess_table_spill_flags,
+    tess_table_spill_init, tess_table_spill_split, tess_table_spill_splits, tess_table_spill_words,
 };
 
 /// The rule of a split through its entry point: past two thirds of what
@@ -277,6 +277,63 @@ fn weights_that_are_not_finite_are_refused() {
             assert_eq!(code, Code::InvalidArgument, "{room} and {key}");
         }
     }
+}
+
+/// The plan of a level through its entry points refuses what no node
+/// gives it, SQLSTATE XX000, and writes nothing then: a shift past which
+/// the least partitions do not fit in the hash, expected bytes below zero
+/// or not a number, a least chunk not a multiple of 8, a null result.
+#[test]
+fn the_plan_of_a_level_refuses_what_no_node_gives() {
+    let partitions = |expected: f64, shift: u32, out: *mut u32| {
+        let mut status = Status::new();
+        // SAFETY: a local status; `out` is null or a local count.
+        let code = unsafe {
+            tess_spill_partitions(
+                expected,
+                4 << 20,
+                48 << 10,
+                shift,
+                4,
+                1024,
+                0,
+                out,
+                &raw mut status,
+            )
+        };
+        (code, status.sqlstate().to_owned())
+    };
+    let mut count = 7_u32;
+    assert_eq!(partitions(10e6, 30, &raw mut count).0, Code::Ok);
+    assert_eq!(count, 4, "after 30 bits");
+    count = 7;
+    for (expected, shift) in [(10e6, 31), (-1.0, 0), (f64::NAN, 0)] {
+        let (code, sqlstate) = partitions(expected, shift, &raw mut count);
+        assert_eq!((code, sqlstate.as_str()), (Code::InvalidArgument, "XX000"));
+        assert_eq!(count, 7, "nothing written");
+    }
+    assert_eq!(
+        partitions(10e6, 0, std::ptr::null_mut()).0,
+        Code::InvalidArgument
+    );
+
+    let chunk_len = |min_chunk: usize, out: *mut usize| {
+        let mut status = Status::new();
+        // SAFETY: a local status; `out` is null or a local length.
+        unsafe { tess_spill_chunk_len(4 << 20, 8, 16, min_chunk, 1 << 20, out, &raw mut status) }
+    };
+    let mut len = 7_usize;
+    assert_eq!(chunk_len(8 << 10, &raw mut len), Code::Ok);
+    assert_eq!(len, 32 << 10);
+    len = 7;
+    for min_chunk in [4, 4100] {
+        assert_eq!(chunk_len(min_chunk, &raw mut len), Code::InvalidArgument);
+        assert_eq!(len, 7, "nothing written");
+    }
+    assert_eq!(
+        chunk_len(8 << 10, std::ptr::null_mut()),
+        Code::InvalidArgument
+    );
 }
 
 #[test]

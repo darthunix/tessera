@@ -244,7 +244,10 @@ tess_spill_columns_word(void *chunk, int word)
  * at_least of them, as long as each partition's reserve (its tails of
  * chunks and its files' buffers) fits in half of limit, the hash bits from
  * shift last and max_partitions is not passed. A grouping's spill, a
- * join's and a shared join table's take it with their own parameters.
+ * join's and a shared join table's take it with their own parameters
+ * (openspec/specs/hash-table/). Expected bytes below zero or not a
+ * number, and a shift past which min_partitions do not fit in the 32 bits
+ * of the hash, are refused.
  */
 extern TessStatusCode tess_spill_partitions(double expected, Size limit, Size reserve,
 											uint32 shift, uint32 min_partitions,
@@ -254,7 +257,8 @@ extern TessStatusCode tess_spill_partitions(double expected, Size limit, Size re
 /*
  * The length of a level's chunks: limit / (share * partitions) bytes, no
  * more than max_chunk, no less than min_chunk (which wins over max_chunk),
- * rounded down to a multiple of 8.
+ * rounded down to a multiple of 8. A share or partitions of 0, and a
+ * min_chunk below 8 or not a multiple of 8, are refused.
  */
 extern TessStatusCode tess_spill_chunk_len(Size limit, uint32 partitions, Size share,
 										   Size min_chunk, Size max_chunk,
