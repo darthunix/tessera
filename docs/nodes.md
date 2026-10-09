@@ -1777,11 +1777,11 @@ With a shared table the node keeps, in its chunk of the query's DSM, the
 build's `Barrier`, the build's counters and the table's index, chunk
 directory and lists in the query's dynamic shared memory, and steps its
 participant through the phases of `tess_build_step` (see
-[table.md](table.md)): every participant appends the inner batches its
-partial scan hands it to chunks of its own in dynamic shared memory,
-each numbered by `tess_build_take_chunk` and entered in a list of its
-own, which only it adds to until the elected one reads them all, and
-reports its records; the elected one makes the
+[hash-table](../openspec/specs/hash-table/design.md)): every participant
+appends the inner batches its partial scan hands it to chunks of its own
+in dynamic shared memory, each numbered by `tess_build_take_chunk` and
+entered in a list of its own, which only it adds to until the elected
+one reads them all, and reports its records; the elected one makes the
 index for exactly the records appended and the directory of the chunks'
 `dsa_pointer`s by number, from which every participant maps their
 bases; each participant links its own chunks with `tess_table_link`.
