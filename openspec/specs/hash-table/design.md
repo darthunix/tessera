@@ -10,11 +10,13 @@ in and how it is looked up, how the table grows, and how several
 processes use one table at once. It then explains what a join and a
 grouping keep beside the table: partitions when the table spills to
 disk, a Bloom filter of its keys, and the marks of a RIGHT or FULL
-join. The exact bytes, limits and errors are
-written once, in the table's spec, [spec.md](spec.md) next to this
-page. Where this page leans on a rule of the spec, it links to the
-requirement that states it. What a join or a grouping does with the
-table is described with those nodes.
+join. Last, it explains how the processes of a parallel join build one
+table together, step by step, and agree on which of its partitions go
+to disk. The exact bytes, limits and errors are written once, in the
+table's spec, [spec.md](spec.md) next to this page. Where this page
+leans on a rule of the spec, it links to the requirement that states
+it. What a join or a grouping does with the table is described with
+those nodes.
 
 ## Background: keys, hashes, buckets, chains
 
@@ -116,6 +118,12 @@ are the ones Tessera's table answers.
 10. A RIGHT or FULL join also returns the records that no row matched.
     The records are shared and read by every process. Where does the
     join keep which records found a pair?
+11. In a parallel join every process builds a share of one table, and
+    the table may spill. Between the steps of the build all of them
+    must wait for each other, and a wait in PostgreSQL may raise an
+    error, which must not pass through Rust code. How do the processes
+    keep in step, and agree on what goes to disk, when no one of them
+    leads?
 
 ## Goals and what they cost
 
@@ -203,6 +211,15 @@ x86-64, where they have not been measured yet.
   records its pairs matched, by an atomic OR in a shared table. The
   records stay as they were written. The price is a bit a record, and
   in a shared table the words of a full chunk for every chunk.
+- **Steps that never wait** (question 11). A participant of a shared
+  build is a small state machine of the table's C API. Each call
+  returns the next action, such as build, wait, link or probe; the node
+  does it, waits included, and passes what the wait returned to the
+  next call. What the participants decide together, the split, the
+  partitions on disk and the files each one reads, lies in words every
+  one of them maps, changed by atomic operations, and the first one to
+  change a word decides for all. The price is a call for each step,
+  and a loop in the node that must follow the actions in their order.
 
 ## The whole in one picture
 
@@ -656,10 +673,10 @@ processes, the participants, use it. What they may do at the same time:
 - **Probe** at once, once the linking is over.
 - Not the calls of one writer: they assume that nothing else happens.
 
-The join keeps the phases apart with PostgreSQL's barriers: every
-participant appends, all wait, one makes the index, all wait, every
-participant links, all wait, and then all probe. How the phases go is
-part of the join; the table only has to make each phase safe.
+PostgreSQL's barrier keeps these apart: every participant appends, all
+wait, one makes the index, all wait, every participant links, all wait,
+and then all probe. Which phase comes next is the table's C API too,
+and "A shared build" below explains it.
 
 Only two places of the table are changed by several processes, and
 both are changed by atomic operations: the count of records in the
@@ -1111,114 +1128,472 @@ barrier and read after it, so the barrier orders it, as it orders the
 marks; the loom model checks this, and that a mark set only after the
 participant left can go unseen.
 
-## Several participants
+## A shared build
 
-The participants of a shared build go through phases that the core's
-`Barrier` separates, in its own numbering (`TESS_BUILD_*`):
+In a parallel join every participant reads a share of the inner side:
+a parallel scan hands out its pages one at a time, and each participant
+reads the pages it gets. All of them build one table from their shares,
+and then all of them probe it with their shares of the outer side.
 
-- `BUILD`: every participant appends its share of the inner side to
-  chunks of its own, each numbered by the build's shared counters
-  (`tess_build_take_chunk`), then reports the records it appended and
-  the payload words it saw a NULL in (`tess_build_report`);
-- `FLUSH`: when the table spilled, every participant writes its chunks
-  of the partitions that went to disk and finishes its files;
-- `SIZE`: the elected participant makes the index for exactly the
-  records appended (`tess_build_totals`) and the directory of the chunks
-  by number, from which every participant maps their bases;
-- `LINK`: every participant links its own chunks into the index,
-  counting the duplicates unless the planner knows the inner side
-  unique, and adds them to the counters (`tess_build_add_duplicates`);
-- `OUTER`: when the table spilled, every participant writes its share of
-  the outer side to the partitions' files, before any row goes out;
-- `PROBE`: every participant probes, then leaves; the last to leave
-  frees the table.
+They must keep in step. No participant may link before the index
+exists, and none may probe before every record is linked. PostgreSQL
+gives a parallel plan a **barrier** for this, its `Barrier`. A barrier
+counts the processes attached to it and has a **phase**, a number. When
+every attached process has arrived, the phase goes up by one and they
+all go on. One of them is **elected**: the barrier tells it that it
+was the one to end the wait, so that it can do work that only one may
+do. A process may attach late, and then it learns the phase the others
+are in.
 
-No phase copies records, and the table never grows: the index is made
-once, for the rows that are there. A participant is a state machine
-(`tess_build_step`, `TessBuildParticipant`) that never waits itself:
-each step returns an action, the node performs it, and what a barrier
-operation returned (the phase `BarrierAttach` gives, whether
-`BarrierArriveAndWait` elected it, whether `BarrierArriveAndDetach`
-found it the last) goes into the next step. The waits stay in the node,
-since they may raise an error that must not unwind Rust frames. A
-participant that attaches late joins the phase the others are in: while
-they build, it appends what is left of the inner side, which a parallel
-scan hands out page by page; from `SIZE` on it has nothing to link and
-waits for the probe; after the last one left, it leaves at once.
-
-A table that spills keeps what its participants decide in words every
-one maps (`tess_table_spill_*`, `shared_spill.rs`): the first whose
-chunks pass the budget splits the table into partitions, a
-compare-and-swap that the others take the number from; while the chunks
-still take more, the largest partition in memory goes to disk, marked by
-the one participant whose fetch-or set its flag, and every participant
-writes its own chunks of it. The `FLUSH` barrier orders every write
-before the partitions are read, and `OUTER` comes before `PROBE` because
-the core forbids waiting at a barrier once a participant returns rows: a
-participant that returns rows may wait on the leader, which may wait at
-the barrier. Each partition on disk is then a round of its own, with a
-barrier of its own and the phases of the core's batches (`ELECT`,
-`ALLOCATE`, `LOAD`, `PROBE`, `FREE`, `tess_round_step`): the elected one
-makes the partition's index, all load its files, taken one at a time
-from a counter, and link them, all probe and leave without waiting, the
-last frees it. A partition too large for one participant is taken whole
-by one of them (`tess_table_spill_take_alone`). A round's chunks are
-linked as they are loaded, without counting duplicates: a link reads
-only its own chunk and the buckets, so a participant sees the chunks
-others load only once the round probes. A filter of every inner row is
-filled by all at once, word by word atomically
-(`tess_bloom_add_atomic`).
-
-`make rust-loom` runs the table's own code over a model index and model
-chunks of loom cells (`crates/tessera-kernels/src/table/loom.rs`) with
-the orderings the real memory uses: two and three participants linking
-their chunks into one bucket, a probe that finds a record another
-participant is publishing and reads it whole, two participants racing to
-build the shared filter and a reader that sees it ready and then every
-bit, and a whole shared build of two participants, and of three that
-attach at any phase, over a model of the core's barrier; two
-participants past the budget agreeing on one split, two sending the
-largest partition to disk and marking it once, and rounds of two and
-three participants that attach at any phase, load every file once, probe
-every key and free the partition once. Every access to a record's bytes
-is announced to loom first, so a read not ordered after the writing is
-reported. Four negative tests check that the model catches what it
-should: a round that probes before every file is loaded misses keys;
-relaxed bucket heads let a probe read an unwritten record, a relaxed
-filter state lets a reader see an unfilled filter, and linking before
-the index is made breaks the table. The model found that counting the
-records after publishing them let such a probe call a chain corrupt;
-they are counted first.
-
-## The atomics in order
-
-A shared build, by the phases of the barrier:
+A build has seven phases, numbered as its barrier counts them. The
+[spec](spec.md#requirement-the-phases-of-a-shared-build) names them
+the same way:
 
 ```
- BUILD ─ every participant:
-          tess_build_take_chunk: counters.chunks.fetch_add(1)   Relaxed → a chunk number
-          dsa_allocate, tess_table_chunk_init
-          under the node's spinlock: the chunk into the table's list
-          tess_table_append of its rows into its own chunks (plain stores)
-          tess_build_report: counters.records, null_columns fetch_add   Relaxed
- ═══ BarrierArriveAndWait ═══  ← orders everything above
- SIZE  ─ the elected one: the totals (Relaxed) → the index for exactly N records (plain
-          stores of the header, the buckets cleared) → the directory of dsa_pointers by
-          number, from the list → the Bloom filter, cleared, which one
-          participant builds later
- ═══ BarrierArriveAndWait ═══
- LINK  ─ every participant: the chunks' bases from the directory → tess_table_link of its
-          own chunks (fetch_add and CAS, as above), counting duplicates →
-          tess_build_add_duplicates: counters.duplicates fetch_add   Relaxed
- ═══ BarrierArriveAndWait ═══
- PROBE ─ every participant: probes (Acquire loads of the heads)
- ═══ BarrierArriveAndDetach ═══ → the last one frees the index, directory, chunks and values
+ phase     every participant                  the elected one
+ ───────   ────────────────────────────────   ──────────────────────
+ 0 BUILD   appends its share of the inner
+           side to chunks of its own
+           ═══════════ all wait ═══════════
+ 1 FLUSH   when the table spilled, writes
+           its chunks of the partitions on
+           disk
+           ═══════════ all wait ═══════════
+ 2 SIZE    waits                              makes the index for
+                                              exactly the records
+                                              appended
+           ═══════════ all wait ═══════════
+ 3 LINK    links its own chunks
+           ═══════════ all wait ═══════════
+ 4 OUTER   when the table spilled, writes
+           its share of the outer side to
+           the partitions' files
+           ═══════════ all wait ═══════════
+ 5 PROBE   probes, then leaves without
+           waiting
+ 6 FREE    the last to leave frees the table
 ```
 
-The build counters need no ordering: the barrier shows the others
-everything a participant did before it (the model of the core's barrier
-in `loom.rs`); other participants' used marks are only read after the
-barrier.
+No phase copies a record, and the table never grows: the index is
+made once, at SIZE, for the records the participants counted. "Growing
+a shared table while it is built", under "What we decided not to do",
+says why.
+
+### A participant is a state machine
+
+The order of the phases is the subtle part of a shared build, and it is
+the part a model checker should check; the model checker of this page,
+loom, checks Rust code. But the waits must stay in C. A wait may raise
+a PostgreSQL error, and the error jumps out of the function with
+`longjmp`. A jump over the frames of Rust functions is undefined
+behavior in Rust.
+
+So the table's C API holds the order, and the node does the waits. A
+participant is a small state machine, `TessBuildParticipant`, that
+never waits itself. Each call of `tess_build_step` takes what the last
+action returned, the **reply**, and gives the next action; the node
+does the action and calls again:
+
+```c
+TessBuildParticipant participant = {0};
+uint32  reply = 0;
+
+for (;;)
+{
+    uint32  action;
+
+    tess_build_step(&participant, counters, reply, &action, &status);
+    reply = 0;
+    switch (action)
+    {
+        case TESS_BUILD_ATTACH:
+            reply = BarrierAttach(&build);              /* the phase */
+            break;
+        case TESS_BUILD_ARRIVE_AND_WAIT:
+            reply = BarrierArriveAndWait(&build, 0);    /* elected? */
+            break;
+        case TESS_BUILD_DO_BUILD:
+            /* append this participant's share; report it */
+            break;
+        /* ... FLUSH, SIZE, LINK and OUTER the same way ... */
+        case TESS_BUILD_DO_PROBE:
+            return;     /* probe; leave through the same steps */
+    }
+}
+```
+
+The participant is three words of 4 bytes that the node keeps: the
+phase it is in, where it stands between two steps, and whether it was
+elected. They are zeroed before the first step: the leader zeroes its
+own when it sets up the query's shared memory, which a `Gather` does
+again before it runs its plan again, and a worker starts with a node of
+its own.
+
+One machine serves every participant, the leader and the workers, early
+or late. A participant that attaches late joins the phase the others
+are in, and does what is left of it:
+
+- at BUILD it appends what is left of the inner side, which the scan
+  still hands out; that may be nothing;
+- at FLUSH and at OUTER it writes its share, which is what is left;
+- at SIZE it waits, since it was not elected;
+- at LINK it links its own chunks, of which it has none;
+- at PROBE it probes with what is left of the outer side;
+- at FREE the table is gone, and it leaves at once.
+
+An example with two participants, A from the start and B late:
+
+```
+ phase   A                                B
+ BUILD   attach: 0; append; wait
+ FLUSH   write; wait
+ SIZE    elected: make the index; wait
+ LINK    link; wait                       attach: 3; link; wait
+ OUTER   write; wait                      write; wait
+ PROBE   probe; leave: not the last       probe; leave: the last
+ FREE                                     free the table
+```
+
+A state that no step makes, or a phase past FREE after an attach,
+cannot come from a sound node, and the step refuses it. An error in
+any participant ends the parallel query, as in every parallel plan of
+PostgreSQL; the other participants are stopped with it, and no step
+needs to know.
+
+### The counters of a build
+
+Before SIZE the elected one must know how many records to make the
+index for. Before that, every chunk needs a number unique over all the
+participants, since a reference names a chunk by its number. Four words
+that every participant maps keep this. Their layout is in [The counters
+of a shared build](spec.md#requirement-the-counters-of-a-shared-build):
+
+- A new chunk takes its number by an atomic addition of 1 to the third
+  word, `tess_build_take_chunk`: the number is the value before the
+  addition, so the numbers go 0, 1, 2, and so on.
+- At the end of its share, a participant adds its records to the first
+  word and sets its bits of the payload words that hold a NULL in the
+  second, `tess_build_report`.
+- After LINK, it adds the duplicates its links found to the fourth,
+  `tess_build_add_duplicates`.
+- `tess_build_totals` reads the four after a barrier.
+
+For example, A takes chunks 0 and 2 and B chunk 1. A reports 900
+records and the bits `0b01`, B 500 records and `0b10`. The totals are
+1400 records, `0b11` and 3 chunks.
+
+The bits are an OR, not a sum: a payload word holds a NULL in the
+table's rows when it holds one in any participant's. The join reads a
+column's NULL flags only when its bit is set, so a bit lost would turn
+a NULL into a value, while a bit set in vain costs only a read.
+
+Every operation on the counters is relaxed. A chunk number is unique by
+the atomic addition alone. The totals need no order of their own,
+because they are read only after a barrier that every report came
+before: a barrier counts its arrivals under a spinlock, and the
+spinlock orders all that a process did before it arrived before all
+that another does after the wait. An addition that would pass 2^64 - 1
+is refused, and the counter keeps its value. A wrapped count of records
+would make an index too small, and a wrapped chunk number would name
+another participant's chunk.
+
+### Why FLUSH and OUTER
+
+When the table spills, which "The words of a spill" below explains,
+each participant holds chunks of the partitions that went to disk, and
+only it may write them: a chunk has one writer. FLUSH gives every
+participant the time to write its chunks of them and to finish its
+files, before SIZE counts what stays in memory.
+
+OUTER comes before PROBE because of a rule of PostgreSQL: a participant
+that has started to return rows must not wait at a barrier. A worker
+hands its rows to the leader through a queue, and when the queue is
+full the worker waits for the leader to read it. If the leader waited
+at a barrier for that worker at the same time, neither would ever go
+on. So in OUTER, while no participant returns rows, each one writes its
+share of the outer side to the files of the partitions on disk. In
+PROBE, and in the rounds after it, a participant only reads files, and
+it leaves a barrier without waiting.
+
+### The atomics in order
+
+The whole build, with the operation and the memory order of every
+atomic it does:
+
+```
+ BUILD   every participant
+           tess_build_take_chunk       add, relaxed: a chunk number
+           its chunk into its own list (plain: only it adds to the
+             list until SIZE)
+           tess_table_append           plain stores into its chunks
+           tess_table_spill_*          acquire loads, release stores,
+                                       acquire-release additions,
+                                       ORs and swaps
+           tess_build_report           add and OR, relaxed
+ ═══ wait ═══ orders all of the above before what follows
+ FLUSH   every participant writes its chunks of the partitions on disk
+ ═══ wait ═══
+ SIZE    the elected one
+           tess_build_totals           loads, relaxed
+           the index for exactly that many records (plain stores; the
+             buckets cleared), the directory of the chunks by number,
+             from every participant's list
+ ═══ wait ═══
+ LINK    every participant
+           the chunks' addresses from the directory
+           tess_table_link of its own  add to the count of records,
+             chunks                    then a swap of each bucket,
+                                       both acquire-release
+           tess_build_add_duplicates   add, relaxed
+ ═══ wait ═══
+ OUTER   every participant writes its share of the outer side
+ ═══ wait ═══
+ PROBE   every participant probes      acquire loads of the buckets
+           a RIGHT or FULL join marks  OR, acquire-release
+ ═══ arrive and leave ═══ the last frees the index, the directory,
+                          the chunks and the values
+```
+
+The orders of the link and the probe are those of [Calls at the same
+time](spec.md#requirement-calls-at-the-same-time), and "Several
+processes at once" above explains them.
+
+## The words of a spill
+
+A table that passes its node's memory splits into partitions and sends
+some of them to disk, as "Partitions: a table that spills" explains. In
+one process the node decides alone. In a shared table every participant
+appends, and all of them must agree on two things. The first is the
+number of partitions, since a record's partition is taken from its hash
+by that number. The second is which partitions are on disk, since each
+participant writes its own chunks of them.
+
+The decisions lie in the **words of a spill**: an array of 64-bit
+words, a head of five words and then five words for each partition. The
+layout is drawn in [The words of a
+spill](spec.md#requirement-the-words-of-a-spill). A shared table keeps
+them in memory every participant maps, and changes them by atomic
+operations. A join or a grouping of one process keeps the same words in
+its own memory.
+
+One code serves both. In Rust it is written once, over a trait of the
+operations on a word, `Spill<W>` of `shared_spill.rs`, which has two
+forms: atomic words, and the plain words of one process. The C calls
+take `shared` to choose. So a process's own spill decides by the same
+rule as a shared one, and the tests run the two side by side and
+compare every answer.
+
+### The split
+
+The first participant whose bytes pass the budget splits the table. It
+swaps the word of the partitions from 0 to its number, by a
+compare-and-swap. Another one that wants to split at the same time
+finds the swap failed, and takes the number the word holds. Say A wants
+4 partitions and B, at the same moment, 8. A's swap comes first; B's
+fails and reads 4; both use 4. The number is a power of two, since a
+partition is taken from the low bits of the hash, and at most the
+partitions the words were sized for.
+
+### The bytes and the budget
+
+A participant adds the bytes of every chunk it allocates to the word of
+its partition and to the total, and takes them away when it frees the
+chunk, `tess_table_spill_add_bytes`. The call answers whether the total
+passes the budget; a total equal to the budget does not. A count that
+would go below zero, or past 2^64 - 1, means that the node counted
+wrong, and the call fails.
+
+### The rule that sends partitions to disk
+
+One rule, `tess_table_spill_evict`, chooses the next partition to send
+to disk, for every node. Each call chooses one, marks it on disk and
+returns it; the node writes what it holds of it and calls again, until
+the rule returns none. The nodes differ only in the weights they give,
+`TessSpillWeights`, whose exact rule is in [Sending partitions to
+disk](spec.md#requirement-sending-partitions-to-disk). In short:
+
+1. While the memory passes a share of the limit, the partition with the
+   most bytes in memory goes. The share is `start` for the first
+   partition of a check and `target` for each after it. The memory
+   counts `reserve` bytes more for each partition on disk. A partition
+   already on disk counts its bytes times `spilled`, and 0 leaves such
+   partitions out.
+2. Then, when some partition is on disk and those still in memory hold
+   fewer than `resident` of the records, the lowest partition in memory
+   goes.
+3. A check sends at most `per_check` partitions, or any number for 0.
+
+Each node gives its own weights, from its settings:
+
+- **A grouping** starts at seven eighths of its memory and goes down to
+  half (`tessera.agg_spill_start`, `tessera.agg_spill_target`). After a
+  spill it must make its index anew, a pass over every record, so it
+  sends several partitions at once. A partition on disk still takes new
+  groups into memory, so it weighs as much as one in memory
+  (`tessera.agg_spill_spilled_weight`, 1) and may go again.
+- **A join of one process** sends partitions while its memory passes
+  the limit (`tessera.join_spill_start` and `tessera.join_spill_target`,
+  1). It reserves, for each partition on disk, the tail its outer side
+  will need. Once a quarter of the inner rows or fewer are left in
+  memory, it sends them all (`tessera.join_spill_resident_share`), since
+  probing a few rows in memory costs every outer batch a whole probe.
+  It leaves out the partitions on disk
+  (`tessera.join_spill_spilled_weight`, 0).
+- **A shared table** weighs every participant's chunks, which its words
+  count, against its budget. A participant sends one partition a check
+  (`tessera.join_shared_spill_evictions`, 1): the others write their
+  chunks of it at their next batch, and the memory goes down only then.
+
+For example, a grouping with a limit of 1000 kB holds four partitions
+of 400, 300, 200 and 150 kB. The 1050 kB pass seven eighths of the
+limit, 875 kB, so partition 0 goes, the largest. The 650 kB left still
+pass half the limit, so partition 1 goes too. The 350 kB left are below
+half, and the check ends; the grouping then makes its index anew, once,
+over partitions 2 and 3.
+
+### Marked once
+
+In a shared table two participants may choose the same partition at
+the same moment. The mark is an atomic OR of the partition's flag "on
+disk". The participant whose OR set the flag adds 1 to the count of
+partitions on disk, `tess_table_spill_evictions`, and gets the
+partition. The other one finds the flag set and gets none, since the
+partition went already. After each batch a participant compares the
+count with the one it saw last, and when the count grew, it writes its
+own chunks of the partitions now on disk.
+
+### A partition chosen again
+
+With `spilled` above 0, a partition on disk may hold the most bytes:
+its tails, which take its new rows. The rule then returns it again, and
+the node must free what it holds of it, or the next call chooses the
+same partition. A grouping writes the groups it holds of it and frees
+them. A join writes the values and the tail it holds of it to its files
+and frees them, as it does when its level starts joining; when it holds
+nothing of the partition, its check ends there, since what is left is
+held by other participants. A join once wrote its empty tail and kept
+it, freeing nothing, and asked again: with no limit a check, the loop
+never ended, and it did not even notice a cancel. Its loops now also
+check for interrupts.
+
+### Records, starts and files
+
+The words also serve the joining of the partitions on disk, after the
+build:
+
+- `tess_table_spill_records` counts the records of each partition, so
+  that the elected one of SIZE can tell whether a partition fits in one
+  participant's memory.
+- `tess_table_spill_start` gives each participant the partition to
+  start at: the next value of a counter, modulo the partitions. The
+  participants then go round the partitions from different places.
+- `tess_table_spill_take_file` hands out the files of a partition, its
+  inner ones or its outer ones, each to one participant: it adds 1 to
+  the partition's counter of such files and returns the value before.
+  The slot after the last partition counts the outer files of the
+  partitions kept in memory, which the participants read in PROBE.
+- `tess_table_spill_take_alone` gives a partition whole to one
+  participant: an atomic OR of the partition's flag "alone", which only
+  one OR sets.
+
+A count or a file number that would pass its word is refused, as a
+count of bytes is.
+
+## The rounds over a partition on disk
+
+A partition on disk that fits in one participant's memory is joined by
+all the participants together, in a **round**. A round has a barrier of
+its own and five phases, which `tess_round_step` steps as
+`tess_build_step` steps a build:
+
+```
+ phase        every participant                the elected one
+ ──────────   ──────────────────────────────   ────────────────────
+ 0 ELECT      waits
+              ═════════ all wait ═════════
+ 1 ALLOCATE   waits                            makes the partition's
+                                               index
+              ═════════ all wait ═════════
+ 2 LOAD       takes its inner files one at a
+              time, loads each block into
+              shared memory and links it
+              ═════════ all wait ═════════
+ 3 PROBE      takes its outer files one at a
+              time and probes; leaves without
+              waiting
+ 4 FREE       the last to leave frees the partition
+```
+
+A link reads only its own chunk and the buckets. So a participant links
+each block as soon as it loads it; the chunks the others load stay
+empty ones to it until PROBE. A participant that comes late loads the
+files still left at LOAD, probes with the outer files still left at
+PROBE, and at FREE leaves at once and goes on to the next partition.
+
+A partition too large for one participant's memory is not a round. One
+participant takes it whole, by `tess_table_spill_take_alone`, and joins
+it as a join of one process does: it splits the partition, or joins it
+in pieces. The others go on to other partitions. So the many rows of
+one key hold up one participant, not all of them.
+
+A participant that attaches to a build that spilled only when the build
+is over, at FREE, leaves at once and joins no round. The other
+participants join every partition, so the rows are right; only that
+participant's help is lost.
+
+### A partition read back that splits
+
+A partition read back that is still too large splits into a level
+below, as "A partition too large for memory" says. Whether it does is
+one rule, `tess_table_spill_splits`, with two weights a node gives,
+`room` and `key`; its exact form is in [A partition read back that
+splits](spec.md#requirement-a-partition-read-back-that-splits). For
+example, a join with a limit of 900 kB, 300 kB in use and a `room` of
+two thirds splits a partition of 500 kB, since 500 passes two thirds of
+the 600 left. It does so only if its level leaves two bits of the hash
+for the level below, and if the partition holds fewer than nine tenths
+of its level's rows; more is one key, which no split parts.
+
+## What the loom model shows
+
+`make rust-loom` runs the table's own Rust code many times, in every
+order of the steps of its threads that the memory model allows. Loom
+is the tool that does this. Every access to the bytes of a record is
+announced to loom first, so a read that is not ordered after its
+writing is reported. For a shared build the model adds PostgreSQL's
+barrier: the same counts, phase and election, with a mutex for its
+spinlock and a condition variable for its wait. The models of this part
+are:
+
+- two participants that append, size, link and probe one table, and
+  three that attach at any phase: every key is found, and the table is
+  freed once;
+- two participants past the budget that split at once: they agree on
+  one number;
+- two that send the largest partition to disk at once: it is marked
+  and counted once;
+- two that take the files of a partition, and the partition whole, at
+  once: each goes to one of them;
+- rounds of two and three participants that attach at any phase: every
+  file is loaded once, every key is found, and the round is freed once.
+
+A model that checks nothing would pass too. So the model has negative
+tests, each a mistake that it must report. There are eight: bucket
+heads read relaxed let a probe read a record not yet written; a count
+of records raised only after a record is published makes a sound chain
+look like a loop; a filter's state stored relaxed lets a reader see the
+filter unfilled; a plain read and write in place of an atomic OR loses
+the bits of a filter, and the marks of a RIGHT or FULL join; a stop
+marked after leaving goes unseen; linking before the index is made
+breaks the table; and a round that probes before every file is loaded
+misses keys.
+
+The model differs from the node in two places. A participant of the
+round model links its files once, after it loads them all, where the
+node links each block as it loads it; the order the model checks, every
+link before the barrier of PROBE, is the same. And the counters of a
+build are loom atomics of the model's own; a test of threads over the
+real counters checks their numbers and sums.
 
 ## What we decided not to do
 
@@ -1251,6 +1626,15 @@ barrier.
   measured in a plan of one process and was not the main cost of an
   insertion, so one code serves both.
 - **The hash as the key.** See "Looking rows up".
+- **Waits in Rust.** The step of a shared build could wait at the
+  barrier itself, through a function the node gives it. But a wait may
+  raise a PostgreSQL error, which would jump over the frames of Rust
+  functions. The waits stay in the node, and the step only says what
+  to do next.
+- **A rule of eviction in each node.** The grouping, the join and the
+  shared table each had a rule of their own in C that chose the next
+  partition to send to disk. They became one rule with weights, so that
+  a fix serves every node and the tests of the one rule cover all.
 
 ## What is not on this page
 
@@ -1287,9 +1671,17 @@ How a spilled chunk of records is written to disk is in
   FULL join and their walk
 - `crates/tessera-kernels/src/table/local.rs`: a table that owns its
   memory, for tests and benchmarks
+- `crates/tessera-kernels/src/table/phases.rs`: the participant of a
+  shared build and of a round, the counters of a build and the stop
+  word
+- `crates/tessera-kernels/src/table/shared_spill.rs`: the words of a
+  spill, the split, the rule that sends partitions to disk, the
+  counters of the rounds and the rule of a split read back
 - `crates/tessera-kernels/src/table/loom.rs`: the model of several
   participants
 - `crates/tessera-capi/src/c/table.rs`: the C entry points
+- `crates/tessera-capi/src/c/shared_spill.rs`: the C entry points of a
+  spill and of the rounds
 - `include/tessera/table.h`, `include/tessera/table_key.h`: the C API
 
 ## Tests
@@ -1302,9 +1694,17 @@ How a spilled chunk of records is written to disk is in
   filter that threads race to build.
 - The unit tests in `crates/tessera-kernels/src/table/marks.rs`: the
   words of the marks, and the records and cursors a walk refuses.
+- The unit tests in `crates/tessera-kernels/src/table/phases.rs`: the
+  actions of a participant alone, attached at every phase of a build
+  and of a round, and the counters of a build under threads.
+- The unit tests in `crates/tessera-kernels/src/table/shared_spill.rs`:
+  the split, the budget, the weights of each node, a process's own
+  words against shared ones, and the counters of the rounds.
 - `crates/tessera-kernels/src/table/loom.rs`, run by `make rust-loom`.
-- `crates/tessera-capi/tests/table.rs`: the entry points as C calls
-  them, Datum and dense key columns alike.
+- `crates/tessera-capi/tests/table.rs` and
+  `crates/tessera-capi/tests/spill.rs`: the entry points as C calls
+  them, Datum and dense key columns alike, and the arguments they
+  refuse.
 - `test/sql/table.sql` with `test/tessera_table_test.c`: the C API
   from a PostgreSQL backend, and the check of the layout when the
   kernels load.
