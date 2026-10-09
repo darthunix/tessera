@@ -113,7 +113,9 @@ memory; all load its inner files, one at a time as they take them, each
 block into a block of shared memory, a chunk of records numbered by the
 round's counter and linked at once; all probe it with its outer files,
 taken the same way, and leave without waiting, the last one freeing it.
-One that comes when the round is past loading has nothing to do there.
+One that comes while the round probes probes with the outer files still
+left, and one that comes once the round is freed goes on to the next
+partition.
 A larger partition, a skewed key's, is taken whole by one participant
 (`tess_table_spill_take_alone`) and joined from every participant's
 files as a serial table joins its partitions, splitting or in pieces;
@@ -213,8 +215,9 @@ for each partition on disk, passes a share of the limit, `start` for
 its first and `target` for each after it: each time the partition with
 the most bytes in memory, those already on disk weighed by `spilled` (0
 leaves them out). Then, with any partition on disk and those in memory
-holding fewer than a share `resident` of the records, each of these
-goes as well. A check sends `per_check` partitions at most (0 for any).
+holding fewer than a share `resident` of the records, the lowest of
+these goes, one a call, so that all of them go in turn. A check sends
+`per_check` partitions at most (0 for any).
 
 The nodes differ by the weights alone, settings of their own whose
 defaults are the rules above:
@@ -235,6 +238,12 @@ groups into memory and may go again.
 A shared table's participants send one partition a check, since the
 others write their chunks of it at their next batch; a participant whose
 check found the partition marked by another one first sends none.
+
+With `spilled` above 0 the rule may choose a partition already on disk,
+when what is left of it in memory holds the most: a grouping writes and
+frees the groups it holds of it, a join the values and the tail it
+holds. A join that holds nothing of it ends its check there, since what
+is left is another participant's.
 
 A partition read back from disk splits into a level below by one rule
 too (`tess_table_spill_splits`): its size, as the node estimates it,

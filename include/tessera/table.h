@@ -920,20 +920,24 @@ extern TessStatusCode tess_build_counters_init(uint64 *counters,
 											   TessStatus *status);
 
 /*
- * Add the records a participant's build appended and the payload words it
- * saw a NULL in, before it arrives at the barrier.
+ * Add the records a participant's build appended, and set the bits of the
+ * payload words it saw a NULL in, before it arrives at the barrier.
+ * Records that would pass 2^64 - 1 are refused, the counters unchanged.
  */
 extern TessStatusCode tess_build_report(uint64 *counters, uint64 records,
 										uint64 null_columns,
 										TessStatus *status);
 
-/* The number of a new chunk, unique among the build's participants. */
+/*
+ * The number of a new chunk, unique among the build's participants, from
+ * 0 up; refused past 2^64 - 1.
+ */
 extern TessStatusCode tess_build_take_chunk(uint64 *counters, uint64 *number,
 											TessStatus *status);
 
 /*
  * Add the duplicates a participant's links found, before it arrives at
- * the barrier after linking.
+ * the barrier after linking; refused past 2^64 - 1, the count unchanged.
  */
 extern TessStatusCode tess_build_add_duplicates(uint64 *counters,
 												uint64 duplicates,
@@ -953,7 +957,8 @@ extern TessStatusCode tess_build_totals(uint64 *counters, uint64 *records,
  * The participant's next action (a TessBuildAction) after the previous one
  * is done: reply is the phase BarrierAttach returned, or 1 if
  * BarrierArriveAndWait elected the participant or BarrierArriveAndDetach
- * found it the last, else 0.
+ * found it the last, else 0. An attach past TESS_BUILD_FREE, or a
+ * participant in a state no step makes, is refused.
  */
 extern TessStatusCode tess_build_step(TessBuildParticipant *participant,
 									  uint64 *counters, uint32 reply,
@@ -1091,8 +1096,9 @@ extern TessStatusCode tess_table_regrow(const TessTableRef *table,
  * the first partition of a check and past target each one after it, the
  * one with the most bytes in memory, those on disk weighed by spilled (0
  * leaves them out); then, with any on disk and those in memory holding
- * fewer than resident of the records, each of these. A check sends at
- * most per_check partitions, 0 for any.
+ * fewer than resident of the records, the lowest of these, one a call. A
+ * check sends at most per_check partitions, 0 for any. A weight below
+ * zero or not finite is refused.
  */
 typedef struct TessSpillWeights
 {
@@ -1104,7 +1110,10 @@ typedef struct TessSpillWeights
 	uint32		per_check;
 } TessSpillWeights;
 
-/* The words of the state for up to capacity partitions. */
+/*
+ * The words of the state for up to capacity partitions, 1 to 65536; a
+ * call refuses words of another count or not aligned to 8.
+ */
 extern TessStatusCode tess_table_spill_words(int capacity, Size *nwords,
 											 TessStatus *status);
 
@@ -1128,7 +1137,8 @@ extern TessStatusCode tess_table_spill_partitions(uint64 *words, Size nwords,
 /*
  * Add bytes of chunks in memory (negative when freed), of a partition, or
  * of none (-1) before the split: *over is whether all of them pass the
- * budget.
+ * budget, which a total equal to it does not. A count that would go below
+ * zero or past 2^64 - 1 fails.
  */
 extern TessStatusCode tess_table_spill_add_bytes(uint64 *words, Size nwords, bool shared,
 												 int64 delta, int32 partition,
@@ -1136,14 +1146,17 @@ extern TessStatusCode tess_table_spill_add_bytes(uint64 *words, Size nwords, boo
 
 /*
  * The next partition to send to disk by the weights, marked so: its
- * number into *partition, -1 for none or when another participant marked
- * it first. A shared table weighs the bytes its words count against their
- * budget, a process's own spill the memory bytes it measured against
- * limit (UINT64_MAX leaves the rule of the records alone). The records of
- * each partition are the nrecords at records, those of the level
- * total_records (which a level split from a partition knows before its
- * partitions hold them), or the words' when records is NULL; evicted
- * counts the partitions the check sent so far.
+ * number into *partition, or -1 for none, and for one another participant
+ * marked since it was chosen. A partition already on disk is returned
+ * again when it holds the most by the weights; the caller then writes and
+ * frees what it holds of it, or ends the check when it holds nothing. A
+ * shared table weighs the bytes its words count against their budget, a
+ * process's own spill the memory bytes it measured against limit
+ * (UINT64_MAX leaves the rule of the records alone). The records of each
+ * partition are the nrecords at records, those of the level total_records
+ * (which a level split from a partition knows before its partitions hold
+ * them), or the words' when records is NULL; evicted counts the
+ * partitions the check sent so far.
  */
 extern TessStatusCode tess_table_spill_evict(uint64 *words, Size nwords, bool shared,
 											 const TessSpillWeights *weights,
@@ -1159,6 +1172,7 @@ extern TessStatusCode tess_table_spill_evict(uint64 *words, Size nwords, bool sh
  * leaves besides used bytes, two bits are left past the bits its level's
  * partitions take, and, with a key share above 0, it holds fewer than
  * that share of its level's rows (more is one key, which no split parts).
+ * room and key below zero or not finite, and bits past 32, are refused.
  */
 extern TessStatusCode tess_table_spill_splits(double room, double key, uint64 size,
 											  uint64 used, uint64 limit, uint64 rows,
@@ -1175,7 +1189,10 @@ extern TessStatusCode tess_table_spill_flags(uint64 *words, Size nwords,
 											 uint32 partition, bool *on_disk,
 											 bool *alone, TessStatus *status);
 
-/* Add records to a partition; then its records into *records unless NULL. */
+/*
+ * Add records to a partition; then its records into *records unless NULL.
+ * Records that would pass 2^64 - 1 fail.
+ */
 extern TessStatusCode tess_table_spill_records(uint64 *words, Size nwords,
 											   uint32 partition, uint64 added,
 											   uint64 *records,
@@ -1189,7 +1206,7 @@ extern TessStatusCode tess_table_spill_start(uint64 *words, Size nwords,
 /*
  * The next file of a partition's inner or outer rows to read, each number
  * to one participant; the partitions' count stands for the outer rows of
- * the partitions kept in memory.
+ * the partitions kept in memory. A number past 2^32 - 1 fails.
  */
 extern TessStatusCode tess_table_spill_take_file(uint64 *words, Size nwords,
 												 uint32 partition, bool outer,
@@ -1215,7 +1232,10 @@ extern TessStatusCode tess_table_spill_take_alone(uint64 *words, Size nwords,
 #define TESS_ROUND_PROBE		3
 #define TESS_ROUND_FREE			4
 
-/* A round participant's next action, as tess_build_step for a build. */
+/*
+ * A round participant's next action, as tess_build_step for a build; an
+ * attach past TESS_ROUND_FREE is refused.
+ */
 extern TessStatusCode tess_round_step(TessBuildParticipant *participant,
 									  uint32 reply, uint32 *action,
 									  TessStatus *status);

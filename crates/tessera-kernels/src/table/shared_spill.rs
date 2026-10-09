@@ -371,10 +371,11 @@ impl<W: Words> Spill<W> {
     /// check's first and `target` after, the partition with the most bytes
     /// in memory goes, those on disk weighed by `spilled`; then, with any
     /// on disk and those in memory holding fewer than `resident` of the
-    /// records, each of these. The records are the caller's, or the
-    /// words' when `records` is `None`. A partition
-    /// another participant marked since it was chosen gives `None`, as
-    /// does a check past `per_check`.
+    /// records, the lowest of these. The records are the caller's, or the
+    /// words' when `records` is `None`. A partition another participant
+    /// marked since it was chosen gives `None`, as does a check past
+    /// `per_check`; one chosen while it was on disk already is returned
+    /// again, and the caller frees what it holds of it.
     pub fn evict(
         &self,
         weights: &Weights,
