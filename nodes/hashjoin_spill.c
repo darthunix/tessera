@@ -533,6 +533,28 @@ side_evict(TessHashJoinState *state, SpillSide *side, int partition)
 	side->current[partition] = 0;
 }
 
+/*
+ * A partition the rule chose (tess_table_spill_evict): one in memory goes
+ * to disk; one on disk already, chosen again for the bytes of its tail,
+ * writes and frees what this side holds of it. False when that freed
+ * nothing, which ends the check: what is left of the partition is
+ * another participant's, or no chunk at all.
+ */
+bool
+join_side_send(TessHashJoinState *state, SpillSide *side, int partition)
+{
+	Size		held = side->parts[partition].bytes;
+
+	if (side->parts[partition].resident)
+	{
+		join_side_demote(state, side, partition);
+		return true;
+	}
+	side_evict(state, side, partition);
+	join_side_compact(side);
+	return side->parts[partition].bytes < held;
+}
+
 /* A value chunk of len bytes for the partition; its number. */
 static int
 side_value_chunk(SpillSide *side, int partition, Size len)
@@ -719,6 +741,7 @@ evict_partitions(TessHashJoinState *state, bool limited)
 	{
 		int32		partition;
 
+		CHECK_FOR_INTERRUPTS();
 		check(state, state->kernels->table_spill_evict(side->spill_words, side->spill_nwords,
 													   false, &weights,
 													   limited ? join_memory(state) : 0,
@@ -727,9 +750,8 @@ evict_partitions(TessHashJoinState *state, bool limited)
 													   side->rows, (Size) spill->npartitions,
 													   spill->total_rows, evicted, &partition,
 													   &state->status));
-		if (partition < 0)
+		if (partition < 0 || !join_side_send(state, side, partition))
 			break;
-		join_side_demote(state, side, partition);
 	}
 }
 

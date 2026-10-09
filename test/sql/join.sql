@@ -560,6 +560,14 @@ SELECT join_pruned($$SELECT count(*), sum(jpr.v) FROM jpr JOIN jkm ON jpr.k = jk
        EXISTS (SELECT FROM join_explain($$SELECT count(*), sum(jpr.v) FROM jpr JOIN jkm ON jpr.k = jkm.k$$) AS line
                WHERE line ~ 'Spilled Chunks: [1-9]') AS on_disk;
 SELECT join_same($$SELECT jpr.k, jpr.v, jkm.w FROM jpr JOIN jkm ON jpr.k = jkm.k$$);
+-- A partition on disk chosen again: weighed ten times, its tail holds
+-- the most, and the join writes and frees it rather than asking the rule
+-- again without end. The timeout ends the query should it still loop.
+SET tessera.join_spill_spilled_weight = 10;
+SET statement_timeout = '60s';
+SELECT join_same($$SELECT jpr.k, jpr.v, jkm.w FROM jpr JOIN jkm ON jpr.k = jkm.k$$) AS chosen_again;
+RESET statement_timeout;
+RESET tessera.join_spill_spilled_weight;
 RESET hash_mem_multiplier;
 RESET work_mem;
 
@@ -967,6 +975,17 @@ SELECT join_unread($$SELECT count(*) FROM jpr JOIN jkw ON jpr.k = jkw.k$$) AS sh
        join_property($$SELECT count(*) FROM jpr JOIN jkw ON jpr.k = jkw.k$$, 'Shared Table') AS shared,
        join_property($$SELECT count(*) FROM jpr JOIN jkw ON jpr.k = jkw.k$$, 'Spilled Chunks')::int > 0 AS spilled;
 SELECT join_same($$SELECT jpr.k, jpr.v FROM jpr JOIN jkw ON jpr.k = jkw.k$$);
+-- A shared table's partition on disk chosen again, with no limit of
+-- partitions a check: each participant frees the tail it holds of it,
+-- and one that holds none ends its check.
+SET tessera.join_spill_spilled_weight = 10;
+SET tessera.join_shared_spill_evictions = 0;
+SET statement_timeout = '60s';
+SELECT join_property($$SELECT count(*) FROM jpr JOIN jkw ON jpr.k = jkw.k$$, 'Shared Table') AS shared,
+       join_same($$SELECT jpr.k, jpr.v FROM jpr JOIN jkw ON jpr.k = jkw.k$$) AS chosen_again;
+RESET statement_timeout;
+RESET tessera.join_shared_spill_evictions;
+RESET tessera.join_spill_spilled_weight;
 RESET hash_mem_multiplier;
 RESET work_mem;
 SET enable_parallel_hash = off;

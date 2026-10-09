@@ -2434,6 +2434,19 @@ SELECT join_same($$SELECT jpr.k, jpr.v, jkm.w FROM jpr JOIN jkm ON jpr.k = jkm.k
  2000 rows, hash d7bbc1dacbd4a090b4da2460ed7bf28e
 (1 row)
 
+-- A partition on disk chosen again: weighed ten times, its tail holds
+-- the most, and the join writes and frees it rather than asking the rule
+-- again without end. The timeout ends the query should it still loop.
+SET tessera.join_spill_spilled_weight = 10;
+SET statement_timeout = '60s';
+SELECT join_same($$SELECT jpr.k, jpr.v, jkm.w FROM jpr JOIN jkm ON jpr.k = jkm.k$$) AS chosen_again;
+                   chosen_again                   
+--------------------------------------------------
+ 2000 rows, hash d7bbc1dacbd4a090b4da2460ed7bf28e
+(1 row)
+
+RESET statement_timeout;
+RESET tessera.join_spill_spilled_weight;
 RESET hash_mem_multiplier;
 RESET work_mem;
 -- Spilling: an inner side of about 3 MB with duplicates, NULL keys and
@@ -4182,6 +4195,22 @@ SELECT join_same($$SELECT jpr.k, jpr.v FROM jpr JOIN jkw ON jpr.k = jkw.k$$);
  10000 rows, hash 5f30aeba664333286faaebf53a48034d
 (1 row)
 
+-- A shared table's partition on disk chosen again, with no limit of
+-- partitions a check: each participant frees the tail it holds of it,
+-- and one that holds none ends its check.
+SET tessera.join_spill_spilled_weight = 10;
+SET tessera.join_shared_spill_evictions = 0;
+SET statement_timeout = '60s';
+SELECT join_property($$SELECT count(*) FROM jpr JOIN jkw ON jpr.k = jkw.k$$, 'Shared Table') AS shared,
+       join_same($$SELECT jpr.k, jpr.v FROM jpr JOIN jkw ON jpr.k = jkw.k$$) AS chosen_again;
+ shared |                   chosen_again                    
+--------+---------------------------------------------------
+ true   | 10000 rows, hash 5f30aeba664333286faaebf53a48034d
+(1 row)
+
+RESET statement_timeout;
+RESET tessera.join_shared_spill_evictions;
+RESET tessera.join_spill_spilled_weight;
 RESET hash_mem_multiplier;
 RESET work_mem;
 SET enable_parallel_hash = off;
