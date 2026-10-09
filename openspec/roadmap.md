@@ -93,6 +93,16 @@ is wanted; several wait for a measured case. `greengage-port` and
 - `documents-after-the-move`: The documents once every part has its folder
 - `hash-table-participants`: How participants agree over a shared hash
   table
+- `core-regression-corpus`: PostgreSQL's regression suite as a corpus of
+  Tessera's checks
+- `force-mode`: A mode that plans Tessera's nodes wherever they are
+  possible
+- `explain-alternatives`: EXPLAIN shows the alternatives Tessera weighed
+- `kernel-errors-on-demand`: A kernel's error only for the rows a plan
+  needs
+- `top-n-bound-in-scan`: The bound of a top-N sort in the scan below it
+- `debug-checks`: A plan check, random column forms and a corpus of
+  types in the debug build
 
 ## Entries
 
@@ -962,6 +972,11 @@ Parallel final stage of grouping for many groups. From plan 5.11 item
   (c) the parallel final stage — "closer to the shared table of section
   5 than to 5.11". Simply not building the stack does not help: the
   core's parallel plan (480 ms) would win on the same estimate.
+  pg_vexec (compared on 2026-10-09) builds variant (c) as a node of its
+  own between the partial and the final grouping in every participant:
+  the partial groups go by the hash of the key into shared tuple
+  stores of one shared file set, and past a barrier each participant
+  claims partitions by an atomic counter and finishes their groups.
 - **Depends on:** nothing.
 - **Capabilities:** aggregate, parallel-gather, hash-table, cost-model
 - **Size:** large.
@@ -1132,6 +1147,141 @@ joins.
 - **Capabilities:** hash-table, aggregate, sort
 - **Size:** one pull request for the table's part, under ten
   requirements.
+
+### core-regression-corpus
+
+PostgreSQL's regression suite as a corpus of Tessera's checks. From the
+comparison with pg_vexec on 2026-10-09.
+
+- **What:** Two runs of PostgreSQL's own `parallel_schedule`. First,
+  the suite passes with its expected files unchanged, with Tessera
+  installed, preloaded and off (`tessera.enable = off`), and preloaded
+  and on where its plans print nothing of Tessera. Second, a
+  differential run: every query of the suite with Tessera on, and in
+  `force-mode`, against Tessera off; rows compared as multisets unless
+  the query orders them, plans masked, errors and their SQLSTATE
+  compared from the server's log. Each known difference is kept as a
+  file that must match byte for byte, with its reason beside it; the
+  run fails on any other. A CI job runs both.
+- **Why:** Tessera's suites and `tessera-crosscheck` test the queries
+  their authors thought of. The core's suite holds thousands of queries
+  over every type, NULL, collation and error the core promises, with
+  their answers. pg_vexec runs it this way and keeps 16 differences a
+  session.
+- **Known:** pg_vexec reads the SQLSTATEs from the log by
+  `log_line_prefix = '%a|%e|'`, masks volatile output by regular
+  expressions kept with the differences, and stores no reasons; Tessera
+  should. The suite needs its `regress` module built against the same
+  server.
+- **Depends on:** nothing; `force-mode` widens it.
+- **Capabilities:** ci
+- **Size:** medium: a runner, a CI job and the review of the first
+  differences.
+
+### force-mode
+
+A mode that plans Tessera's nodes wherever they are possible. From the
+comparison with pg_vexec on 2026-10-09.
+
+- **What:** A setting under which every planner hook of Tessera keeps
+  its path and drops or disables the core's alternatives, so that a
+  node of Tessera stands wherever one can; and a debug setting that
+  raises an error when a node could have stood and the plan has none.
+- **Why:** The suites, `tessera-crosscheck` and `core-regression-corpus`
+  check only the nodes the costs chose; with this, every query goes
+  through Tessera's nodes where they apply. pg_vexec's `vexec.mode =
+  force` and `vexec.debug_require_vector` do so.
+- **Known:** A path that only the core has (an index scan for a nearest
+  neighbour, say) stays. The setting changes the plans visible from SQL,
+  so it is a change with its spec.
+- **Depends on:** nothing.
+- **Capabilities:** planner-coverage
+- **Size:** medium.
+
+### explain-alternatives
+
+EXPLAIN shows the alternatives Tessera weighed. From the comparison
+with pg_vexec on 2026-10-09.
+
+- **What:** An option of EXPLAIN, `TESSERA`, that lists for each place
+  where Tessera offered a node the cost of its path beside the core's
+  it lost or won against, and for each place it could not offer one the
+  reason: a join type, a key type, a setting. The planner records them
+  through `planner_setup_hook` and `planner_shutdown_hook` into the
+  plan's extension state, and `explain_per_plan_hook` prints them only
+  with the option.
+- **Why:** Today a plan without Tessera's node says nothing of why;
+  each such case of the cost models (TPC-H Q5, a pruning join) was found
+  by reading code. pg_vexec's `EXPLAIN (VEXEC)` prints "not chosen",
+  the two costs and the reason.
+- **Known:** pg_vexec caps the records at 256 a query and keeps one a
+  join relation, cheapest first; EXPLAIN without the option prints
+  nothing, so the expected outputs of every suite stay.
+- **Depends on:** nothing.
+- **Capabilities:** planner-coverage, cost-model
+- **Size:** medium.
+
+### kernel-errors-on-demand
+
+A kernel's error only for the rows a plan needs. From the comparison
+with pg_vexec on 2026-10-09.
+
+- **What:** A kernel raises no error: it marks the rows on which the
+  function would fail, and goes on. A node raises the error of a marked
+  row only when the plan needs that row, by computing it again with the
+  core's evaluator, in the order of the rows, so that the SQLSTATE and
+  the message are the core's.
+- **Why:** `docs/limitations.md` accepts that a data error in a row the
+  core's plan never reaches, past a LIMIT or in a row an earlier clause
+  removes, can stop a query under Tessera. pg_vexec keeps the core's
+  behaviour this way.
+- **Known:** It changes the kernels' entry points (a mask of failed rows
+  beside the status) and every node that evaluates expressions: a
+  change of the C API and of the architecture, the maintainer's call.
+- **Depends on:** nothing.
+- **Capabilities:** kernel-abi, batch-expressions
+- **Size:** large.
+
+### top-n-bound-in-scan
+
+The bound of a top-N sort in the scan below it. From the comparison
+with pg_vexec on 2026-10-09.
+
+- **What:** TessSort with a bound hands the scan below it the worst key
+  it keeps, and the scan drops a row whose first key is past it before
+  it deforms the row's other columns, and before the clauses where
+  they cannot fail. For a small bound, the sort may carry only the keys
+  and the tuple's id, and fetch the other columns of the rows it
+  returns.
+- **Why:** `ORDER BY ... LIMIT` over a large table reads and filters
+  every row today, though the top-N keeps only the rows past the bound.
+  pg_vexec does both.
+- **Known:** Ties stay: only a key strictly past the bound drops.
+  Measure first, on ClickBench-like `ORDER BY ... LIMIT` queries.
+- **Depends on:** nothing.
+- **Capabilities:** sort, scan-heap
+- **Size:** medium.
+
+### debug-checks
+
+A plan check, random column forms and a corpus of types in the debug
+build. From the comparison with pg_vexec on 2026-10-09.
+
+- **What:** Three checks of the assert build. After planning: every
+  plan node's id unique, no node of Tessera when Tessera is off. A
+  setting with a seed that draws, for each column of each batch, the
+  native form or the Datum form, so that one run of the suites goes
+  through both paths. And a corpus of a table of every class of type
+  Tessera reads, with NULLs at the edges of a mask's word and of a
+  batch, over several batches.
+- **Why:** Tessera compares the native path with the Datum path only
+  where a test of a type does it by hand. pg_vexec checks its plans so
+  in its debug build and runs its differential suite with random
+  layouts as one of its sessions.
+- **Known:** The seed must be printed so that a failure repeats.
+- **Depends on:** nothing.
+- **Capabilities:** batch-format, planner-coverage
+- **Size:** small to medium.
 
 ## Not placed: the maintainer decides
 
