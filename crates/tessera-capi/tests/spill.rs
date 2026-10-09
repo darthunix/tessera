@@ -10,7 +10,8 @@
 use tessera_capi::c::{
     Code, SpillHeader, SpillWeights, Status, tess_spill_header_read, tess_spill_header_size,
     tess_spill_header_write, tess_spill_unpack, tess_table_spill_add_bytes, tess_table_spill_evict,
-    tess_table_spill_init, tess_table_spill_split, tess_table_spill_splits, tess_table_spill_words,
+    tess_table_spill_flags, tess_table_spill_init, tess_table_spill_split, tess_table_spill_splits,
+    tess_table_spill_words,
 };
 
 /// The rule of a split through its entry point: past two thirds of what
@@ -159,6 +160,37 @@ fn the_spill_entry_points_choose_by_the_weights() {
             assert_eq!(code, Code::InvalidArgument, "{shared}: a weight below zero");
             drop(words);
         }
+    }
+}
+
+/// The flags of a partition without a place for one of them: refused,
+/// and the other not written, as every call checks its outputs first.
+#[test]
+fn the_flags_check_both_outputs_first() {
+    let mut status = Status::new();
+    let mut nwords = 0;
+    let mut in_force = 0;
+    let mut on_disk = true;
+    // SAFETY: local buffers of the declared sizes throughout this test.
+    unsafe {
+        let code = tess_table_spill_words(4, &raw mut nwords, &raw mut status);
+        assert_eq!(code, Code::Ok, "{}", status.message());
+        let mut words = vec![0_u64; nwords];
+        let at = words.as_mut_ptr();
+        let code = tess_table_spill_init(at, nwords, true, 100, &raw mut status);
+        assert_eq!(code, Code::Ok, "{}", status.message());
+        let code = tess_table_spill_split(at, nwords, true, 4, &raw mut in_force, &raw mut status);
+        assert_eq!(code, Code::Ok, "{}", status.message());
+        let code = tess_table_spill_flags(
+            at,
+            nwords,
+            0,
+            &raw mut on_disk,
+            std::ptr::null_mut(),
+            &raw mut status,
+        );
+        assert_eq!(code, Code::InvalidArgument);
+        assert!(on_disk, "the flag on disk was written");
     }
 }
 

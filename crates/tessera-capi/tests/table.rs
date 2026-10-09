@@ -17,9 +17,9 @@ use tessera_capi::c::{
     CSortKey, Code, DatumColumn, Mask, Status, TableKey, TableRecord, TableRef, TableStats,
     TableSumArg, tess_bloom_add, tess_bloom_add_atomic, tess_bloom_probe, tess_bloom_shared_init,
     tess_bloom_shared_probe, tess_bloom_shared_ready, tess_bloom_shared_words,
-    tess_build_counters_init, tess_build_step, tess_build_stop, tess_build_stopped,
-    tess_build_take_chunk, tess_build_totals, tess_int4_hash, tess_int8_hash, tess_sort,
-    tess_sort_item_words, tess_sort_items, tess_sort_layout, tess_sort_merge,
+    tess_build_counters_init, tess_build_report, tess_build_step, tess_build_stop,
+    tess_build_stopped, tess_build_take_chunk, tess_build_totals, tess_int4_hash, tess_int8_hash,
+    tess_sort, tess_sort_item_words, tess_sort_items, tess_sort_layout, tess_sort_merge,
     tess_table_accumulate, tess_table_accumulate_sums, tess_table_append,
     tess_table_append_columns, tess_table_append_partitioned_columns, tess_table_bloom,
     tess_table_bloom_words, tess_table_bloom_words_within, tess_table_chunk_init,
@@ -3150,6 +3150,22 @@ fn outputs_are_checked_before_anything_changes() -> Result<()> {
         );
         assert_eq!(code, Code::Ok, "{}", status.message());
         assert_eq!(chunks, 0, "no chunk was numbered");
+
+        // Totals without a place for the chunks: refused, and neither the
+        // records nor the NULL columns written, though they had a place.
+        let code = tess_build_report(counters.as_mut_ptr(), 3, 0x5, &raw mut status);
+        assert_eq!(code, Code::Ok, "{}", status.message());
+        let (mut records, mut nulls) = (u64::MAX, u64::MAX);
+        let code = tess_build_totals(
+            counters.as_mut_ptr(),
+            &raw mut records,
+            &raw mut nulls,
+            ptr::null_mut(),
+            ptr::null_mut(),
+            &raw mut status,
+        );
+        assert_eq!(code, Code::InvalidArgument);
+        assert_eq!((records, nulls), (u64::MAX, u64::MAX), "no output written");
     }
     Ok(())
 }

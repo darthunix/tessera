@@ -2289,9 +2289,12 @@ pub unsafe extern "C" fn tess_build_totals(
     unsafe {
         guard(status, || {
             let counters = build_counters(counters)?;
-            *records.as_mut().context("a null result")? = counters.total_records();
-            *null_columns.as_mut().context("a null result")? = counters.nulls();
-            *chunks.as_mut().context("a null result")? = counters.total_chunks();
+            let records = records.as_mut().context("a null result")?;
+            let null_columns = null_columns.as_mut().context("a null result")?;
+            let chunks = chunks.as_mut().context("a null result")?;
+            *records = counters.total_records();
+            *null_columns = counters.nulls();
+            *chunks = counters.total_chunks();
             if let Some(duplicates) = duplicates.as_mut() {
                 *duplicates = counters.total_duplicates();
             }
