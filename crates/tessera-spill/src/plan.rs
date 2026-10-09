@@ -28,7 +28,9 @@ pub struct Level {
 /// The partitions of a level: the power of two that makes each hold
 /// about half of `limit` of what the level expects, or `at_least` of them,
 /// as long as each partition's reserve fits in half of `limit` and the
-/// hash bits last.
+/// hash bits last. Expected bytes below zero or not a number, and a
+/// `shift` past which the least partitions do not fit in the hash, are
+/// refused.
 pub fn partitions(level: &Level) -> Result<u32> {
     ensure!(
         level.min_partitions.is_power_of_two()
@@ -37,6 +39,17 @@ pub fn partitions(level: &Level) -> Result<u32> {
         "{} to {} partitions are not powers of two in order",
         level.min_partitions,
         level.max_partitions
+    );
+    ensure!(
+        level.expected >= 0.0,
+        "a level that expects {} bytes",
+        level.expected
+    );
+    ensure!(
+        level.shift <= 32 - level.min_partitions.trailing_zeros(),
+        "{} partitions do not fit in the hash after {} bits",
+        level.min_partitions,
+        level.shift
     );
     let half = level.limit / 2;
     let mut partitions = level.min_partitions;
@@ -56,7 +69,8 @@ pub fn partitions(level: &Level) -> Result<u32> {
 /// The length of a level's chunks: `limit / (share * partitions)` bytes,
 /// no more than `max_chunk`, no less than `min_chunk` (which wins over
 /// `max_chunk`: a chunk holds a few records however large), rounded down
-/// to a multiple of 8.
+/// to a multiple of 8. A `min_chunk` below 8, a chunk's header, or not a
+/// multiple of 8 is refused, so the rounding never goes below it.
 pub fn chunk_len(
     limit: usize,
     partitions: u32,
@@ -67,6 +81,10 @@ pub fn chunk_len(
     ensure!(
         share > 0 && partitions > 0,
         "chunks of a {share} share of {partitions} partitions"
+    );
+    ensure!(
+        min_chunk >= 8 && min_chunk.is_multiple_of(8),
+        "a least chunk of {min_chunk} bytes"
     );
     let parts = share.saturating_mul(partitions as usize);
     Ok((limit / parts).min(max_chunk).max(min_chunk) & !7)
@@ -187,7 +205,7 @@ mod tests {
         let join_reserve = 4 * MIN_CHUNK + 2 * PAGE;
         for expected in expectations() {
             for limit in LIMITS {
-                for shift in [0, 5, 10, 20, 25, 27, 28, 29, 30, 31] {
+                for shift in [0, 5, 10, 20, 25, 27, 28, 29, 30] {
                     for record in [24, 40, 4096, 70_000] {
                         let min_chunk = MIN_CHUNK.max(HEADER + 4 * record);
                         let n = partitions(&level(expected, limit, shift, MIN_CHUNK + PAGE, 0))?;
@@ -233,8 +251,26 @@ mod tests {
                 .is_err()
             );
         }
-        assert!(chunk_len(1 << 30, 4, 0, 0, 1 << 20).is_err());
-        assert!(chunk_len(1 << 30, 0, 8, 0, 1 << 20).is_err());
+        assert!(chunk_len(1 << 30, 4, 0, 8, 1 << 20).is_err());
+        assert!(chunk_len(1 << 30, 0, 8, 8, 1 << 20).is_err());
+        // A least chunk below a header, or not a multiple of 8.
+        for min_chunk in [0, 4, 4100] {
+            assert!(chunk_len(1 << 30, 4, 8, min_chunk, 1 << 20).is_err());
+        }
+        // Expected bytes below zero or not a number.
+        for expected in [-1.0, f64::NAN] {
+            assert!(partitions(&Level { expected, ..base }).is_err());
+        }
+        // Four partitions after 30 bits fit; after 31 they do not.
+        assert_eq!(partitions(&Level { shift: 30, ..base })?, 4);
+        assert!(partitions(&Level { shift: 31, ..base }).is_err());
+        assert!(
+            partitions(&Level {
+                shift: u32::MAX,
+                ..base
+            })
+            .is_err()
+        );
         // The least chunk wins over the most.
         assert_eq!(chunk_len(1 << 30, 4, 8, 4096, 1024)?, 4096);
         // A reserve too large for any partition keeps the first count.
