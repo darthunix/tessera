@@ -946,6 +946,7 @@ extern void join_side_append(TessHashJoinState *state, SpillSide *side, TessBatc
 extern void join_side_compact(SpillSide *side);
 extern void join_side_count(SpillSide *side, int partition, int64 delta);
 extern void join_side_demote(TessHashJoinState *state, SpillSide *side, int partition);
+extern bool join_side_send(TessHashJoinState *state, SpillSide *side, int partition);
 extern void join_side_flush(TessHashJoinState *state, SpillSide *side, int partition);
 extern void join_side_forget(SpillSide *side, int partition);
 extern JoinSpill *join_spill_create(TessHashJoinState *state, JoinSpill *parent, double expected, uint32 shift, int forced);

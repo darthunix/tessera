@@ -899,14 +899,13 @@ shared_sync(TessHashJoinState *state, bool evict)
 	/* The words' count as of now, which the others' writes lowered. */
 	for (uint32 evicted = 0;; evicted++)
 	{
+		CHECK_FOR_INTERRUPTS();
 		check(state, state->kernels->table_spill_evict(join_shared_words(state),
 													   state->parallel.shared->spill_nwords,
 													   true, &weights, 0, 0, NULL, 0, 0, evicted,
 													   &partition, &state->status));
-		if (partition < 0)
+		if (partition < 0 || !join_side_send(state, side, partition))
 			break;
-		if (side->parts[partition].resident)
-			join_side_demote(state, side, partition);
 	}
 }
 
