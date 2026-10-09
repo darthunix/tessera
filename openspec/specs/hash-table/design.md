@@ -786,9 +786,9 @@ A node is given a limit of memory. When its table would pass the limit,
 the node keeps the records in **partitions** and writes whole chunks of
 some partitions to disk, to read them back once its input is done. How
 a chunk is written to disk is in
-[spill-format](../spill-format/design.md); when a node spills and how
-many partitions it makes are the node's. This section is about how the
-table sorts its records into partitions.
+[spill-format](../spill-format/design.md); when a node spills is the
+node's. This section is about how the table sorts its records into
+partitions, and how many partitions a level gets.
 
 The partition of a record is taken from the low bits of its hash: with
 4 partitions, the two lowest bits. A partition read back that is still
@@ -935,6 +935,56 @@ into is full, or when the records reach half the buckets; the node
 gives it a chunk or a larger index, and calls again from where it
 stopped. While the index grows, the node hides the chunk it merges
 from, since a regrow links every record of every chunk it is given.
+
+### How a level is planned
+
+Before a node fills a level, it plans it: how many partitions the level
+gets, and how long their chunks are. One rule does it for every node,
+`tess_spill_partitions` and `tess_spill_chunk_len`, and each node gives
+it its own parameters. The exact rule is in [The partitions of a
+level](spec.md#requirement-the-partitions-of-a-level) and [The chunks
+of a level](spec.md#requirement-the-chunks-of-a-level).
+
+The number of partitions starts at the node's least, 4, and doubles
+while four things hold:
+
+- It is below the node's most, 1024.
+- The partitions would hold fewer bytes than the level expects, at half
+  the limit each. A partition read back gets an index beside its
+  records, so half the limit is about what one partition may take to
+  be joined or merged in one piece.
+- Twice as many partitions keep their **reserve** within half the
+  limit. The reserve is what each partition keeps in memory while it
+  fills: the chunk it appends to and the buffer of its file, and in a
+  join the tails of the outer side too. With many partitions and little
+  memory the reserves alone would fill it, so a small limit keeps the
+  level at its least.
+- The bits of twice as many partitions still fit in the hash. A level
+  takes the bits after those the levels above took, its **shift**. A
+  level past which not even the least partitions fit is refused; a
+  node never asks for one, since a partition splits into a level below
+  only while two bits are left.
+
+A shared table also asks for two partitions for each participant at the
+least, so that the participants spread over the rounds.
+
+For example, a join of one process with a limit of 4 MiB keeps a
+reserve of 48 KiB for each partition: four chunks of 8 KiB and two
+pages. A level that expects 10 MiB starts at 4 partitions, which would
+hold 8 MiB at 2 MiB each: fewer than 10, so it doubles to 8. Eight hold
+16 MiB, and the doubling stops; their reserves, 768 KiB for twice as
+many, fit in 2 MiB. At a limit of 256 KiB the same level keeps 4
+partitions, since the reserves of 8, 384 KiB, pass half of the limit.
+
+The chunks of a level share a part of the limit: an eighth in a
+grouping and a sixteenth in a join, divided among the partitions. A
+chunk is 1 MiB at the most, the largest a reference can name, and 8 KiB
+or four records at the least, whichever is larger. In the example above
+the chunks are 4 MiB / 16 / 8 = 32 KiB.
+
+The grouping, the join and the shared table each had a rule of their
+own in C. They became one rule with parameters, and a test compares it
+with the three on many limits, shifts and sizes.
 
 ### A partition too large for memory
 
@@ -1688,6 +1738,10 @@ How a spilled chunk of records is written to disk is in
 - `crates/tessera-capi/src/c/table.rs`: the C entry points
 - `crates/tessera-capi/src/c/shared_spill.rs`: the C entry points of a
   spill and of the rounds
+- `crates/tessera-spill/src/plan.rs`: the plan of a level, its
+  partitions and the length of its chunks
+- `crates/tessera-capi/src/c/spill.rs`: the C entry points of the plan
+  of a level, beside those of the format of a spill
 - `include/tessera/table.h`, `include/tessera/table_key.h`: the C API
 
 ## Tests
@@ -1707,6 +1761,9 @@ How a spilled chunk of records is written to disk is in
   the split, the budget, the weights of each node, a process's own
   words against shared ones, and the counters of the rounds.
 - `crates/tessera-kernels/src/table/loom.rs`, run by `make rust-loom`.
+- The unit tests in `crates/tessera-spill/src/plan.rs`: the plan of a
+  level on examples, against the nodes' former rules, and the arguments
+  it refuses.
 - `crates/tessera-capi/tests/table.rs` and
   `crates/tessera-capi/tests/spill.rs`: the entry points as C calls
   them, Datum and dense key columns alike, and the arguments they
