@@ -1596,7 +1596,13 @@ one key hold up one participant, not all of them.
 A participant that attaches to a build that spilled only when the build
 is over, at FREE, leaves at once and joins no round. The other
 participants join every partition, so the rows are right; only that
-participant's help is lost.
+participant's help is lost. It happens under a parallel append, whose
+workers take a partial child that others are still reading: a worker
+that finished another child comes to the join while its participants
+are in the rounds. That worker then goes on to the next child, so its
+help is lost only when the join is the last child left. "A late
+participant in the rounds", under "What we decided not to do", says why
+it stays so.
 
 ### A partition read back that splits
 
@@ -1691,6 +1697,21 @@ link before the barrier of PROBE, is the same.
   shared table each had a rule of their own in C that chose the next
   partition to send to disk. They became one rule with weights, so that
   a fix serves every node and the tests of the one rule cover all.
+- **A late participant in the rounds.** PostgreSQL's parallel hash join
+  keeps every participant on its build's barrier until all its batches
+  are done, so its last phase means that no work is left. Tessera's
+  participants leave the build's barrier once the part in memory is
+  probed, so that the last one frees that part before the rounds take
+  memory; a participant that comes after that finds no work, though the
+  rounds still run. Two ways would let it help. It could go round the
+  partitions on disk as the others do: a path that only a participant
+  late by just that much takes, which no test reaches without a way to
+  hold a worker back, and late paths are where a shared join once
+  crashed. Or the participants could stay on the build's barrier as the
+  core's do, with the part in memory freed through a barrier of its
+  own; that moves the return of a RIGHT or FULL join's records without
+  a pair, and the stop of a participant that leaves while it probes, to
+  the new barrier. Both cost more than the help they win.
 
 ## What is not on this page
 

@@ -1368,14 +1368,6 @@ becomes an entry, joins one, or is dropped.
     the guard is the nodes' barriers, and the spec states it as what the
     caller ensures. The suite shows what an open of a file that is on
     disk but not finished gives: damaged data.
-- **`hash-table`: the shared build** (found when its participants were
-  described, 2026-10-09).
-  - A worker that attaches to a shared build that spilled only once the
-    last participant has left it gets nothing to do and returns no row,
-    though rounds over the partitions on disk may still be running. The
-    rows are right, since the other participants join every partition;
-    only the worker's help is lost. Suggested: an entry if a measured
-    case shows the loss.
 - **`spill-format`: what no test shows yet** (the same source).
   - The one form of a reference to a value (pull request 46) adds an
     operation for each by-reference value appended to a chunk of
@@ -1444,3 +1436,9 @@ fact.
   build's automata in Rust, overflow checks in the release profile,
   `-Werror` by default (section 9, lines 7367–7376).
 - An Instruments template to count a backend's instructions (4.16, line 602).
+- A late worker of a shared build that spilled joining the rounds,
+  whether by going round the partitions on disk after the build's last
+  phase or by keeping every participant on the build's barrier as the
+  core does: a rare path no test reaches, or a move of the RIGHT and
+  FULL joins' tail, for help a worker of a parallel append mostly gives
+  to the next child anyway (pull request 52).
