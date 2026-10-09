@@ -626,13 +626,14 @@ These things belong to the join, the grouping and the sort, not to the
 format:
 
 - when a node spills;
-- how many partitions it makes and how large their chunks are
-  (`tess_spill_partitions`, `tess_spill_chunk_len`);
 - what a node keeps in memory;
 - how rows are added to a chunk of columns.
 
 [docs/spill.md](../../../docs/spill.md) describes them for the join and
-the grouping, [docs/nodes.md](../../../docs/nodes.md) for the sort.
+the grouping, [docs/nodes.md](../../../docs/nodes.md) for the sort. How
+many partitions a level gets and how long their chunks are
+(`tess_spill_partitions`, `tess_spill_chunk_len`) is a rule of the
+table that spills, in [hash-table](../hash-table/design.md).
 
 ## Files
 
