@@ -93,8 +93,8 @@ is wanted; several wait for a measured case. `greengage-port` and
 - `small-c-leftovers`: Small C leftovers of section 9
 - `projected-batch-pins`: Pins of the last projected batch
 - `documents-after-the-move`: The documents once every part has its folder
-- `hash-table-participants`: How participants agree over a shared hash
-  table
+- `aggregate-states-and-sort-items`: The aggregate states and the items
+  of a sort, out of the table's guide
 - `core-regression-corpus`: PostgreSQL's regression suite as a corpus of
   Tessera's checks
 - `force-mode`: A mode that plans Tessera's nodes wherever they are
@@ -1157,29 +1157,28 @@ request 44, 2026-10-04.
 - **Capabilities:** -
 - **Size:** small.
 
-### hash-table-participants
+### aggregate-states-and-sort-items
 
-How participants agree over a shared hash table. Left by the changes
-that wrote the capability `hash-table`: the first took the table itself,
-the second partitions, the Bloom filter and the marks of RIGHT and FULL
-joins.
+The aggregate states and the items of a sort, out of the table's guide.
+Left by the change that described the shared build in `hash-table`,
+2026-10-09.
 
-- **What:** Describe in `hash-table` what `docs/table.md` still holds of
-  the table: the phases of a shared build and of the rounds over
-  partitions on disk (`tess_build_*`, `tess_round_step`) and the shared
-  words of a spill (`tess_table_spill_*`). The aggregate states in a
-  payload (`tess_table_accumulate*`) go to the capability of the
-  grouping, and the items of a sort (`tessera/sort.h`) to the sort's.
-- **Why:** These calls are the C API of the table too, and until they
-  have a spec nothing ties their promises to tests.
-- **Known:** The loom model covers the phases, the split and the
-  rounds. `docs/table.md` keeps their text with a pointer to the
-  capability. The stop word of a RIGHT or FULL join's participant that
-  leaves while it probes is in the capability already, with the marks.
-- **Depends on:** nothing.
-- **Capabilities:** hash-table, aggregate, sort
-- **Size:** one pull request for the table's part, under ten
-  requirements.
+- **What:** Describe what `docs/table.md` still holds in the
+  capabilities it belongs to: the aggregate states a grouping keeps in a
+  payload (`tess_table_accumulate`, `tess_table_accumulate_sums`,
+  `tess_table_accumulate_extremes`) in the grouping's, and the items a
+  sort makes of records (`tessera/sort.h`) in the sort's. Then delete
+  the guide and turn its links (the README, `docs/bridge.md`,
+  `docs/node.md`, `docs/nodes.md`, `tessera/table.h`, `tessera/sort.h`)
+  to the capabilities.
+- **Why:** These calls are C API too, and nothing ties their promises
+  to tests; the guide is the last text of the table outside its
+  capability.
+- **Known:** The design of `hash-table` lists them under "What is not on
+  this page".
+- **Depends on:** the capabilities of the grouping and of the sort.
+- **Capabilities:** aggregate, sort
+- **Size:** a part of each of those capabilities' pull requests.
 
 ### core-regression-corpus
 
@@ -1369,6 +1368,23 @@ becomes an entry, joins one, or is dropped.
     the guard is the nodes' barriers, and the spec states it as what the
     caller ensures. The suite shows what an open of a file that is on
     disk but not finished gives: damaged data.
+- **`hash-table`: the shared build** (found when its participants were
+  described, 2026-10-09).
+  - A worker that attaches to a shared build that spilled only once the
+    last participant has left it gets nothing to do and returns no row,
+    though rounds over the partitions on disk may still be running. The
+    rows are right, since the other participants join every partition;
+    only the worker's help is lost. Suggested: an entry if a measured
+    case shows the loss.
+  - The loom model counts a build's records with atomics of its own,
+    not with the real counters, which only a test of threads checks.
+    Suggested: make the counters generic over the model's atomics if
+    they ever change.
+  - `tess_spill_partitions` and `tess_spill_chunk_len`, the plan of a
+    spill's partitions and of their chunks, are C API that no
+    capability describes: `spill-format` and `hash-table` both leave
+    them to the nodes. Suggested: the capabilities of the join and of
+    the grouping.
 - **`spill-format`: what no test shows yet** (the same source).
   - The one form of a reference to a value (pull request 46) adds an
     operation for each by-reference value appended to a chunk of
