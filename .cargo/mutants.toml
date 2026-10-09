@@ -25,12 +25,15 @@ exclude_globs = [
 # append (spill_columns::append) and writes the chunk the row-wise path
 # writes: only the time tells them apart, so `by_value` false is the same.
 # The ABI version is 0, so its mutant to 0 is the function itself.
+# The constructors of the build's counters and of a spill over the loom
+# model's words are compiled only for the model, which judges no mutant.
 exclude_re = [
     "<impl [a-z:]*Debug for ",
     "<impl Iterator for Ones>::next",
     "replace (&= with [|^]=|- with [+/]) in (<impl Iterator for WordValues<F>>::fold|resolve_rows|append_rows|append_column_rows|normalize_word|WordKeys<'a>::load)$",
     "replace <impl RowValues for DatumRows<'_>>::by_value -> bool with false$",
     "replace tess_kernels_abi_version -> u32 with 0$",
+    "replace (Counters|Spill)<W>::over -> Self with Default::default\\(\\)$",
 ]
 
 # A mutant that makes a loop endless is stopped at three times the
