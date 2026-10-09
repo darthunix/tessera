@@ -1308,6 +1308,7 @@ struct Round {
     barrier: LoomBarrier,
     frees: ::loom::sync::atomic::AtomicUsize,
     probes: ::loom::sync::atomic::AtomicUsize,
+    loads: ::loom::sync::atomic::AtomicUsize,
 }
 
 impl Round {
@@ -1323,6 +1324,7 @@ impl Round {
             barrier: LoomBarrier::new(skip),
             frees: ::loom::sync::atomic::AtomicUsize::new(0),
             probes: ::loom::sync::atomic::AtomicUsize::new(0),
+            loads: ::loom::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -1356,6 +1358,7 @@ impl Round {
                             break;
                         };
                         append(&self.region, &layout, chunk, keys).unwrap();
+                        self.loads.fetch_add(1, order::RELAXED);
                         loaded = true;
                     }
                     if loaded {
@@ -1416,6 +1419,41 @@ fn round(
             "the round is freed once"
         );
         assert!(round.probes.load(order::RELAXED) >= 1, "someone probed");
+        assert_eq!(
+            round.loads.load(order::RELAXED),
+            files.len(),
+            "every file loaded once"
+        );
+    });
+}
+
+/// Two participants take the files of a partition, and the partition
+/// whole, at once: each file goes to one of them, and the partition to
+/// one.
+#[test]
+fn files_and_a_whole_partition_go_to_one_participant_each() {
+    ::loom::model(|| {
+        let spill = Arc::new(loom_spill(2, 0));
+        spill.split(2).unwrap();
+        let threads: Vec<_> = (0..2)
+            .map(|_| {
+                let spill = spill.clone();
+                thread::spawn(move || {
+                    let file = spill.take_file(1, false).unwrap();
+                    (file, spill.take_alone(1).unwrap())
+                })
+            })
+            .collect();
+        let taken: Vec<(u32, bool)> = threads.into_iter().map(|t| t.join().unwrap()).collect();
+        let mut files: Vec<u32> = taken.iter().map(|&(file, _)| file).collect();
+        files.sort_unstable();
+        assert_eq!(files, [0, 1], "each file to one participant");
+        assert_eq!(
+            taken.iter().filter(|&&(_, alone)| alone).count(),
+            1,
+            "the partition to one"
+        );
+        assert!(spill.alone(1).unwrap());
     });
 }
 

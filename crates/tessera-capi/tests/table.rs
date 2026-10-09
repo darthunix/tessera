@@ -17,12 +17,12 @@ use tessera_capi::c::{
     CSortKey, Code, DatumColumn, Mask, Status, TableKey, TableRecord, TableRef, TableStats,
     TableSumArg, tess_bloom_add, tess_bloom_add_atomic, tess_bloom_probe, tess_bloom_shared_init,
     tess_bloom_shared_probe, tess_bloom_shared_ready, tess_bloom_shared_words,
-    tess_build_counters_init, tess_build_report, tess_build_step, tess_build_stop,
-    tess_build_stopped, tess_build_take_chunk, tess_build_totals, tess_int4_hash, tess_int8_hash,
-    tess_round_step, tess_sort, tess_sort_item_words, tess_sort_items, tess_sort_layout,
-    tess_sort_merge, tess_table_accumulate, tess_table_accumulate_sums, tess_table_append,
-    tess_table_append_columns, tess_table_append_partitioned_columns, tess_table_bloom,
-    tess_table_bloom_words, tess_table_bloom_words_within, tess_table_chunk_init,
+    tess_build_add_duplicates, tess_build_counters_init, tess_build_report, tess_build_step,
+    tess_build_stop, tess_build_stopped, tess_build_take_chunk, tess_build_totals, tess_int4_hash,
+    tess_int8_hash, tess_round_step, tess_sort, tess_sort_item_words, tess_sort_items,
+    tess_sort_layout, tess_sort_merge, tess_table_accumulate, tess_table_accumulate_sums,
+    tess_table_append, tess_table_append_columns, tess_table_append_partitioned_columns,
+    tess_table_bloom, tess_table_bloom_words, tess_table_bloom_words_within, tess_table_chunk_init,
     tess_table_clear_key, tess_table_combine, tess_table_create, tess_table_find_or_insert,
     tess_table_format_version, tess_table_gather, tess_table_gather_key, tess_table_gather_words,
     tess_table_layout, tess_table_link, tess_table_link_grouped, tess_table_mark,
@@ -3673,6 +3673,70 @@ fn the_filter_entry_points_size_fill_and_probe() -> Result<()> {
         assert_eq!(odd, [7; 6], "nothing written");
     }
     Ok(())
+}
+
+/// The counters of a build: cleared whole by their init, and refused,
+/// with nothing written, when they are null or not aligned to 8, by every
+/// call that takes them.
+#[test]
+fn the_build_counters_refuse_null_and_misaligned_words() {
+    let mut words = [u64::MAX; 5];
+    let mut status = Status::new();
+    let at = words.as_mut_ptr();
+    let misaligned = at.cast::<u8>().wrapping_add(4).cast::<u64>();
+    let (mut records, mut nulls, mut chunks, mut duplicates) = (7, 7, 7, 7);
+    let mut number = 7;
+    let mut action = 7;
+    let mut participant = Participant::new();
+    // SAFETY: local words, results and a participant this test alone
+    // uses; the misaligned pointer is refused before any access.
+    unsafe {
+        let code = tess_build_counters_init(at, &raw mut status);
+        assert_eq!(code, Code::Ok, "{}", status.message());
+        let code = tess_build_totals(
+            at,
+            &raw mut records,
+            &raw mut nulls,
+            &raw mut chunks,
+            &raw mut duplicates,
+            &raw mut status,
+        );
+        assert_eq!(code, Code::Ok, "{}", status.message());
+        assert_eq!(
+            (records, nulls, chunks, duplicates),
+            (0, 0, 0, 0),
+            "cleared"
+        );
+        for counters in [ptr::null_mut(), misaligned] {
+            let codes = [
+                tess_build_counters_init(counters, &raw mut status),
+                tess_build_report(counters, 1, 1, &raw mut status),
+                tess_build_take_chunk(counters, &raw mut number, &raw mut status),
+                tess_build_add_duplicates(counters, 1, &raw mut status),
+                tess_build_totals(
+                    counters,
+                    &raw mut records,
+                    &raw mut nulls,
+                    &raw mut chunks,
+                    &raw mut duplicates,
+                    &raw mut status,
+                ),
+                tess_build_step(
+                    &raw mut participant,
+                    counters,
+                    0,
+                    &raw mut action,
+                    &raw mut status,
+                ),
+            ];
+            assert_eq!(codes, [Code::InvalidArgument; 6]);
+            assert_eq!(status.sqlstate(), "XX000");
+        }
+        assert_eq!((records, nulls, chunks, duplicates), (0, 0, 0, 0));
+        assert_eq!((number, action), (7, 7), "nothing written");
+        assert_eq!(participant, Participant::new(), "the participant as it was");
+    }
+    assert_eq!(&words[4..], [u64::MAX], "nothing past the counters");
 }
 
 /// A step refuses what no sound node gives it: an attach that answers a

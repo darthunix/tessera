@@ -782,6 +782,26 @@ mod tests {
         );
     }
 
+    /// The words of a spill for 1 to 65536 partitions: a head of five and
+    /// five for each partition and for the ones kept in memory.
+    #[test]
+    fn the_words_are_sized_for_1_to_65536_partitions() {
+        assert_eq!(words_for(1).unwrap(), 15);
+        assert_eq!(words_for(4).unwrap(), 30);
+        assert_eq!(words_for(65536).unwrap(), 327_690);
+        assert!(words_for(0).is_err());
+        assert!(words_for(65537).is_err());
+    }
+
+    /// A total equal to the budget does not pass it; one byte more does.
+    #[test]
+    fn a_total_equal_to_the_budget_is_not_over() {
+        let mut words = Vec::new();
+        let spill = spill(&mut words, 4, 100);
+        assert!(!spill.add_bytes(100, None).unwrap());
+        assert!(spill.add_bytes(1, None).unwrap());
+    }
+
     #[test]
     fn words_attach_only_as_words_for_sizes_them() {
         let mut words = vec![0_u64; words_for(4).unwrap() + 1];

@@ -474,7 +474,13 @@ mod tests {
     /// The actions of a participant alone at the barrier, which elects it
     /// every time, until it is done.
     fn alone(records: u64, attach_at: u32) -> Vec<Action> {
-        let counters = Alone::default();
+        alone_after(0, records, attach_at)
+    }
+
+    /// The actions of [`alone`] for a participant that attaches once
+    /// others, gone since, appended `before` records.
+    fn alone_after(before: u64, records: u64, attach_at: u32) -> Vec<Action> {
+        let counters = Alone(core::cell::Cell::new(before));
         let mut participant = Participant::new();
         let mut actions = Vec::new();
         let mut reply = 0;
@@ -588,15 +594,100 @@ mod tests {
         );
     }
 
+    /// A participant that attaches late joins the phase the others are in:
+    /// it writes what is left at FLUSH and OUTER, waits at SIZE, where it
+    /// was not elected, links its own chunks, none, at LINK, probes at
+    /// PROBE and leaves at once at FREE.
     #[test]
-    fn a_late_participant_probes_or_leaves() {
+    fn a_late_participant_joins_the_phase_the_others_are_in() {
         use Action::*;
-        assert_eq!(alone(0, PROBE), [Attach, Probe, ArriveAndDetach, Free]);
+        assert_eq!(
+            alone_after(3, 0, FLUSH),
+            [
+                Attach,
+                Flush,
+                ArriveAndWait,
+                Size,
+                ArriveAndWait,
+                Link,
+                ArriveAndWait,
+                Outer,
+                ArriveAndWait,
+                Probe,
+                ArriveAndDetach,
+                Free
+            ]
+        );
+        assert_eq!(
+            alone_after(3, 0, SIZE),
+            [
+                Attach,
+                ArriveAndWait,
+                Link,
+                ArriveAndWait,
+                Outer,
+                ArriveAndWait,
+                Probe,
+                ArriveAndDetach,
+                Free
+            ]
+        );
+        assert_eq!(
+            alone_after(3, 0, LINK),
+            [
+                Attach,
+                Link,
+                ArriveAndWait,
+                Outer,
+                ArriveAndWait,
+                Probe,
+                ArriveAndDetach,
+                Free
+            ]
+        );
         assert_eq!(
             alone(0, OUTER),
             [Attach, Outer, ArriveAndWait, Probe, ArriveAndDetach, Free]
         );
+        assert_eq!(alone(0, PROBE), [Attach, Probe, ArriveAndDetach, Free]);
         assert_eq!(alone(0, FREE), [Attach, Detach, Done]);
+    }
+
+    /// Three participants number chunks, report and add duplicates at
+    /// once over the real counters: no number is given twice, the records
+    /// and the duplicates are their sums, and the NULL bits their OR.
+    #[test]
+    fn participants_count_a_build_at_once() {
+        let mut words = [u64::MAX; COUNTER_WORDS];
+        // SAFETY: the array is aligned to 8 and used only through these
+        // counters.
+        let counters = unsafe { SharedCounters::attach(words.as_mut_ptr()) }.unwrap();
+        counters.init();
+        let numbers: Vec<u64> = std::thread::scope(|scope| {
+            let threads: Vec<_> = (0..3_u64)
+                .map(|participant| {
+                    let counters = &counters;
+                    scope.spawn(move || {
+                        let numbers: Vec<u64> =
+                            (0..50).map(|_| counters.take_chunk().unwrap()).collect();
+                        counters.report(10 + participant, 1 << participant).unwrap();
+                        counters.add_duplicates(participant).unwrap();
+                        numbers
+                    })
+                })
+                .collect();
+            threads
+                .into_iter()
+                .flat_map(|thread| thread.join().unwrap())
+                .collect()
+        });
+        let mut numbers = numbers;
+        numbers.sort_unstable();
+        assert_eq!(numbers, (0..150).collect::<Vec<_>>(), "each number once");
+        assert_eq!(counters.total_records(), 33);
+        assert_eq!(counters.nulls(), 0b111);
+        assert_eq!(counters.total_chunks(), 150);
+        assert_eq!(counters.total_duplicates(), 3);
     }
 
     /// The actions of a participant alone in a round attached at a phase.
@@ -640,8 +731,25 @@ mod tests {
             ]
         );
         assert_eq!(
+            round_alone(ROUND_ALLOCATE),
+            [
+                Attach,
+                ArriveAndWait,
+                Load,
+                ArriveAndWait,
+                Probe,
+                ArriveAndDetach,
+                Free
+            ],
+            "not elected, it waits"
+        );
+        assert_eq!(
             round_alone(ROUND_LOAD),
             [Attach, Load, ArriveAndWait, Probe, ArriveAndDetach, Free]
+        );
+        assert_eq!(
+            round_alone(ROUND_PROBE),
+            [Attach, Probe, ArriveAndDetach, Free]
         );
         assert_eq!(round_alone(ROUND_FREE), [Attach, Detach, Done]);
     }
