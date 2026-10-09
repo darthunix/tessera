@@ -371,7 +371,8 @@ five times the data 36.6, 34.4 and 23.6 ms.
   stable function and in every format; while it runs, by an initplan
   and a correlated subquery's parameter, with a rescan that changes
   other parameters; a `UNION ALL` of partitioned tables and of a
-  partitioned and a plain table; a sublink; parallel plans, by every
+  partitioned and a plain table; a list partitioning with a default
+  partition and a hash one; a sublink; parallel plans, by every
   kind of value, without the leader, rescanned, and with nothing left;
   `enable_partition_pruning` off.
 - `test/sql/join.sql`: a join's pruning, compared with the core's

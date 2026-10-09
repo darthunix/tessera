@@ -82,12 +82,22 @@ read, and EXPLAIN ANALYZE shows it `never executed`.
   `test/sql/union.sql::A rescan that changes another parameter keeps the`
 
 ### Requirement: The relations a node prunes
-TessAppend SHALL prune the partitions of a partitioned table at every
+TessAppend SHALL prune the partitions of a partitioned table of any
+kind, range, list or hash, a default partition among them, at every
 level of its partitioning, and the partitions of each partitioned table
 of a `UNION ALL`, each by its own partition key. A child that is not a
 partition, such as a plain table in a `UNION ALL`, SHALL never be
 pruned. A node in a subquery or a sublink SHALL prune as one in the
 main query.
+
+#### Scenario: Every kind of partitioning
+- **WHEN** a list partitioning with a default partition is pruned by a
+  generic plan's `$1`, and a hash partitioning by an initplan's value
+- **THEN** the first starts only the partition of the value, the default
+  one for a value no list holds, the second reads only the partition of
+  its value, and the results are the core's
+- **Verified by:**
+  `test/sql/union.sql::Every kind of partitioning prunes, not a range`
 
 #### Scenario: A UNION ALL
 - **WHEN** a `UNION ALL` of two partitioned tables, and one of a

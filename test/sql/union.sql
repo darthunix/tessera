@@ -236,6 +236,37 @@ SELECT union_run($$SELECT count(*), sum(k) FROM (SELECT k, v FROM union_part UNI
                    WHERE k > (SELECT 3500) AND v < 10$$);
 SELECT union_same($$SELECT count(*), sum(k) FROM (SELECT k, v FROM union_part UNION ALL SELECT k, v FROM union_part) AS u
                     WHERE k > (SELECT 3500) AND v < 10$$);
+-- Every kind of partitioning prunes, not a range one alone: a list
+-- partitioning with a default partition, by a generic plan's parameter,
+-- and a hash partitioning, by an initplan's value.
+CREATE TABLE union_list (k int, v int) PARTITION BY LIST (k);
+CREATE TABLE union_list_1 PARTITION OF union_list FOR VALUES IN (1, 2, 3);
+CREATE TABLE union_list_2 PARTITION OF union_list FOR VALUES IN (4, 5, 6);
+CREATE TABLE union_list_d PARTITION OF union_list DEFAULT;
+INSERT INTO union_list SELECT i % 9 + 1, i FROM generate_series(1, 9000) AS i;
+CREATE TABLE union_hash (k int, v int) PARTITION BY HASH (k);
+CREATE TABLE union_hash_0 PARTITION OF union_hash FOR VALUES WITH (MODULUS 3, REMAINDER 0);
+CREATE TABLE union_hash_1 PARTITION OF union_hash FOR VALUES WITH (MODULUS 3, REMAINDER 1);
+CREATE TABLE union_hash_2 PARTITION OF union_hash FOR VALUES WITH (MODULUS 3, REMAINDER 2);
+INSERT INTO union_hash SELECT i % 300, i FROM generate_series(1, 9000) AS i;
+ANALYZE union_list, union_hash;
+PREPARE union_prune_list(int) AS SELECT count(*), sum(v) FROM union_list WHERE k = $1 AND v > 0;
+PREPARE union_prune_list_core(int) AS SELECT count(*), sum(v) FROM union_list WHERE k = $1 AND v > 0;
+SET plan_cache_mode = force_generic_plan;
+SELECT union_run($$EXECUTE union_prune_list(5)$$);
+EXECUTE union_prune_list(5);
+SELECT union_run($$EXECUTE union_prune_list(8)$$);
+EXECUTE union_prune_list(8);
+SET tessera.enable = off;
+EXECUTE union_prune_list_core(5);
+EXECUTE union_prune_list_core(8);
+SET tessera.enable = on;
+RESET plan_cache_mode;
+DEALLOCATE union_prune_list;
+DEALLOCATE union_prune_list_core;
+SELECT union_run($$SELECT count(*), sum(v) FROM union_hash WHERE k = (SELECT 42) AND v > 0$$);
+SELECT union_same($$SELECT count(*), sum(v) FROM union_hash WHERE k = (SELECT 42) AND v > 0$$);
+SELECT union_same($$SELECT count(*), sum(v) FROM union_list WHERE k > (SELECT 4) AND v > 0$$);
 -- A plain table beside the partitions is no partition: it is never pruned.
 SELECT union_run($$SELECT count(*), sum(k) FROM (SELECT k, v FROM union_part UNION ALL SELECT a, a % 100 FROM union_a) AS u
                    WHERE k > (SELECT 3500) AND v < 10$$);
@@ -538,7 +569,7 @@ SELECT union_same($$SELECT a FROM union_empty EXCEPT ALL SELECT a + 2147483647 F
 SELECT union_same($$SELECT a FROM union_empty INTERSECT SELECT a + 2147483647 FROM union_a$$);
 SELECT union_same($$SELECT a FROM union_a WHERE a < 0 EXCEPT SELECT a + 2147483647 FROM union_b$$);
 
-DROP TABLE union_part, union_parent, union_child, union_a, union_b, union_empty;
+DROP TABLE union_part, union_list, union_hash, union_parent, union_child, union_a, union_b, union_empty;
 DROP FUNCTION union_same(text);
 DROP FUNCTION union_run(text);
 RESET union_test.bound;
