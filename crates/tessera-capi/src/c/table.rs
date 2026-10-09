@@ -2220,7 +2220,7 @@ pub unsafe extern "C" fn tess_build_report(
     // SAFETY: the caller's contract.
     unsafe {
         guard(status, || {
-            build_counters(counters).map(|counters| counters.report(records, null_columns))
+            build_counters(counters)?.report(records, null_columns)
         })
     }
 }
@@ -2241,7 +2241,7 @@ pub unsafe extern "C" fn tess_build_take_chunk(
         guard(status, || {
             let counters = build_counters(counters)?;
             let number = number.as_mut().context("a null result")?;
-            *number = counters.take_chunk();
+            *number = counters.take_chunk()?;
             Ok(())
         })
     }
@@ -2262,8 +2262,7 @@ pub unsafe extern "C" fn tess_build_add_duplicates(
     // SAFETY: the caller's contract.
     unsafe {
         guard(status, || {
-            build_counters(counters)?.add_duplicates(duplicates);
-            Ok(())
+            build_counters(counters)?.add_duplicates(duplicates)
         })
     }
 }

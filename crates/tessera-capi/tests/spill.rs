@@ -61,6 +61,11 @@ fn the_split_entry_point_weighs_room_bits_and_keys() {
         "the bits"
     );
     assert_eq!(split(-1.0, 0.9, 601, 89, 3).0, Code::InvalidArgument);
+    assert_eq!(
+        split(2.0 / 3.0, 0.9, 601, 89, 33).0,
+        Code::InvalidArgument,
+        "bits past the hash"
+    );
 }
 
 /// A process's own words and a shared table's take the same steps through
