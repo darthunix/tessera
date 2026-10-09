@@ -23,20 +23,25 @@ bits of the hash.
   expects 10 MiB in a limit of 4 MiB, then wants 16 partitions at
   least, then has a limit of 256 KiB
 - **THEN** it gets 8 partitions, then 16, then 4
-- **Verified by:** pending
+- **Verified by:**
+  `crates/tessera-spill/src/plan.rs::a_level_doubles_by_its_bytes_participants_and_reserve`
 
 #### Scenario: By the bits of the hash
 - **WHEN** a level of 4 to 1024 partitions that expects far more than
   its limit comes after 28, 29, 30 and 31 bits
 - **THEN** it gets 8, 4 and 4 partitions, and the last is refused
-- **Verified by:** pending
+- **Verified by:**
+  `crates/tessera-spill/src/plan.rs::a_level_keeps_to_the_bits_of_the_hash`;
+  `crates/tessera-capi/tests/spill.rs::the_plan_of_a_level_refuses_what_no_node_gives`
 
 #### Scenario: Wrong bounds and bytes
 - **WHEN** the least or the most partitions are not powers of two or
   are out of order, or the expected bytes are below zero or not a
   number
 - **THEN** the call fails, SQLSTATE `XX000`
-- **Verified by:** pending
+- **Verified by:**
+  `crates/tessera-spill/src/plan.rs::a_plan_refuses_bounds_out_of_order`;
+  `crates/tessera-capi/tests/spill.rs::the_plan_of_a_level_refuses_what_no_node_gives`
 
 ### Requirement: The chunks of a level
 `tess_spill_chunk_len` SHALL give the length of a level's chunks:
@@ -51,10 +56,13 @@ SHALL be refused.
   shared among 8 partitions and among 1024, and 1 GiB among 4; and
   1000000 bytes among 8, with chunks of 8 bytes to 1 MiB
 - **THEN** the chunks are 32 KiB, 8 KiB and 1 MiB, and 7808 bytes
-- **Verified by:** pending
+- **Verified by:**
+  `crates/tessera-spill/src/plan.rs::a_chunk_is_a_share_of_the_limit_within_its_bounds`
 
 #### Scenario: Wrong shares and bounds
 - **WHEN** the share or the partitions are 0, or the least chunk is 4
   or 4100 bytes
 - **THEN** the call fails, SQLSTATE `XX000`
-- **Verified by:** pending
+- **Verified by:**
+  `crates/tessera-spill/src/plan.rs::a_plan_refuses_bounds_out_of_order`;
+  `crates/tessera-capi/tests/spill.rs::the_plan_of_a_level_refuses_what_no_node_gives`
