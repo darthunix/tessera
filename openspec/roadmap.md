@@ -58,6 +58,8 @@ After the queue, by decisions of 2026-09-20 to 2026-09-22 (plan lines
 - `prosupport-batch-functions`: Extension batch functions through prosupport
 - `table-key-types`: Keys of more types in the hash table itself; the
   maintainer moved it here from the head of the queue on 2026-10-07
+- `join-pruning-other-keys`: Pruning by a join's keys of other ordered
+  types; the maintainer placed it here on 2026-10-09
 
 ## Not ordered
 
@@ -616,6 +618,37 @@ reach the table through a stand-in.
 - **Capabilities:** hash-table, join-hash, aggregate, type-support
 - **Size:** several pull requests: the word kinds first, then keys of
   16 bytes, then strings.
+
+### join-pruning-other-keys
+
+Pruning by a join's keys of other ordered types, text first. Found when
+the capability `partition-pruning` was written; the maintainer placed
+it in "Later" on 2026-10-09, in the review of pull request 51.
+
+- **What:** A hash join whose key the table keeps only by its hash, a
+  `text`, `varchar`, `numeric` or another ordered type, notes the key's
+  values for pruning as it notes a word's: a copy of each value while
+  at most 1024 inner rows have a key, and the lowest and the highest by
+  the column's order (the collation for text) always. TessAppend then
+  prunes by them as it does by words, with parameters of the key's
+  type.
+- **Why:** Today such a join reads every partition of its outer side: a
+  fact table partitioned by a code of text or numeric and joined with a
+  few rows of a dimension is read whole. Trino, DuckDB and Spark
+  prune by keys of any ordered type: Trino and DuckDB by the values
+  while few and their ends past that, Spark by a list.
+- **Known:** The join puts only a hash of such a key into its table
+  (`table-key-types`), so the values come from the inner batches while
+  the table is built. The price is a copy of a value an inner row while
+  the list lasts, and a comparison through the type's function for the
+  ends. The core's pruning compares by the partition key's collation,
+  which must be the join's for a key of text; a key of another
+  collation does not prune. A participant of a shared table must hand
+  its values to the others through shared memory, in place of the
+  words of 8 bytes the list holds now.
+- **Depends on:** nothing.
+- **Capabilities:** partition-pruning, join-hash
+- **Size:** medium.
 
 ### window-functions
 
