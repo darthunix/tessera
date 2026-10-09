@@ -179,7 +179,9 @@ fn check_words(words: *mut u64, nwords: usize) -> Result<()> {
         "a spill's words must be aligned to 8 bytes"
     );
     ensure!(
-        nwords > HEAD_WORDS + PART_WORDS && (nwords - HEAD_WORDS).is_multiple_of(PART_WORDS),
+        nwords > HEAD_WORDS + PART_WORDS
+            && nwords <= HEAD_WORDS + PART_WORDS * (MAX_PARTITIONS + 1)
+            && (nwords - HEAD_WORDS).is_multiple_of(PART_WORDS),
         "{nwords} words are no spill's state"
     );
     Ok(())
@@ -282,13 +284,19 @@ pub struct Partition {
 /// Whether a partition splits into a level below by the next bits of the
 /// hash: its size passes `room` of what the limit leaves besides the
 /// memory in use, two bits are left for the level below, and, with a
-/// `key` share, it holds fewer than that share of its level's rows.
-pub fn splits(weights: &SplitWeights, partition: &Partition) -> bool {
+/// `key` share, it holds fewer than that share of its level's rows. A
+/// level of more bits than the hash has is refused.
+pub fn splits(weights: &SplitWeights, partition: &Partition) -> Result<bool> {
+    ensure!(
+        partition.bits <= 32,
+        "a level of {} bits is past the 32 of the hash",
+        partition.bits
+    );
     let left = partition.limit.saturating_sub(partition.used) as f64;
-    partition.size as f64 > weights.room * left
+    Ok(partition.size as f64 > weights.room * left
         && partition.bits + 2 <= 32
         && (weights.key <= 0.0
-            || (partition.rows as f64) < weights.key * partition.level_rows as f64)
+            || (partition.rows as f64) < weights.key * partition.level_rows as f64))
 }
 
 /// What a check weighs against its limit.
@@ -462,8 +470,13 @@ impl<W: Words> Spill<W> {
     /// Count records of a partition, in memory or on disk.
     pub fn add_records(&self, partition: u32, records: u64) -> Result<()> {
         self.check_partition(partition)?;
-        self.words
+        let before = self
+            .words
             .fetch_add(self.part(partition, Field::Records), records);
+        ensure!(
+            before.checked_add(records).is_some(),
+            "the records of partition {partition}, {before}, cannot take {records} more"
+        );
         Ok(())
     }
 
@@ -493,7 +506,9 @@ impl<W: Words> Spill<W> {
         } else {
             Field::NextInner
         };
-        Ok(self.words.fetch_add(self.part(partition, field), 1) as u32)
+        let file = self.words.fetch_add(self.part(partition, field), 1);
+        u32::try_from(file)
+            .map_err(|_| anyhow::anyhow!("file {file} of partition {partition} is past 2^32 - 1"))
     }
 
     /// Take a partition whole: true for the one participant that did.
@@ -518,13 +533,16 @@ impl<W: Words> Spill<W> {
     }
 
     /// Add a signed delta to a counter; the new value. Callers take away
-    /// only what they added, so a counter below zero is an error of the
-    /// accounting, reported rather than wrapped; the counter is then left
-    /// wrapped, and the query fails with it.
+    /// only what they added, so a counter below zero, or past its word, is
+    /// an error of the accounting, reported rather than wrapped; the
+    /// counter is then left wrapped, and the query fails with it.
     fn add_signed(&self, index: usize, delta: i64) -> Result<u64> {
         let amount = delta.unsigned_abs();
         if delta >= 0 {
-            return Ok(self.words.fetch_add(index, amount) + amount);
+            let before = self.words.fetch_add(index, amount);
+            return before.checked_add(amount).ok_or_else(|| {
+                anyhow::anyhow!("a spill counter passed 2^64 - 1: {before} bytes and {amount}")
+            });
         }
         let before = self.words.fetch_sub(index, amount);
         ensure!(
@@ -605,6 +623,11 @@ mod tests {
 
     fn measured(bytes: u64, limit: u64) -> Memory {
         Memory::Measured { bytes, limit }
+    }
+
+    /// The rule of a split, for a level of the hash's bits.
+    fn split(weights: &SplitWeights, partition: &Partition) -> bool {
+        splits(weights, partition).unwrap()
     }
 
     #[test]
@@ -845,7 +868,7 @@ mod tests {
             bits: 3,
         };
         assert!(
-            !splits(
+            !split(
                 &join,
                 &Partition {
                     size: 600,
@@ -854,9 +877,9 @@ mod tests {
             ),
             "two thirds of 900"
         );
-        assert!(splits(&join, &partition));
+        assert!(split(&join, &partition));
         assert!(
-            !splits(
+            !split(
                 &join,
                 &Partition {
                     rows: 90,
@@ -866,7 +889,7 @@ mod tests {
             "one key"
         );
         assert!(
-            !splits(
+            !split(
                 &join,
                 &Partition {
                     bits: 31,
@@ -875,15 +898,15 @@ mod tests {
             ),
             "no bits left"
         );
-        assert!(splits(
+        assert!(split(
             &join,
             &Partition {
                 bits: 30,
                 ..partition
             }
         ));
-        assert!(!splits(&grouping, &partition), "the whole of 900");
-        assert!(splits(
+        assert!(!split(&grouping, &partition), "the whole of 900");
+        assert!(split(
             &grouping,
             &Partition {
                 size: 901,
@@ -892,7 +915,7 @@ mod tests {
             }
         ));
         assert!(
-            splits(
+            split(
                 &grouping,
                 &Partition {
                     size: 1,
@@ -902,6 +925,55 @@ mod tests {
             ),
             "no room left"
         );
+    }
+
+    /// A level of more bits than the hash has comes from no sound node:
+    /// refused, where the bits left for a level below once wrapped.
+    #[test]
+    fn a_level_past_the_bits_of_the_hash_is_refused() {
+        let weights = SplitWeights {
+            room: 0.0,
+            key: 0.0,
+        };
+        let partition = |bits| Partition {
+            size: 1,
+            used: 0,
+            limit: 1,
+            rows: 1,
+            level_rows: 1,
+            bits,
+        };
+        assert!(split(&weights, &partition(30)));
+        assert!(!split(&weights, &partition(32)), "no bits left");
+        assert!(splits(&weights, &partition(33)).is_err());
+        assert!(splits(&weights, &partition(u32::MAX - 1)).is_err());
+    }
+
+    /// Counts past their words are refused: the bytes and the records past
+    /// 2^64 - 1, a file number past 2^32 - 1, and words for more partitions
+    /// than a table has.
+    #[test]
+    fn counts_past_their_words_are_refused() {
+        let mut words = Vec::new();
+        let spill = spill(&mut words, 4, u64::MAX);
+        spill.split(4).unwrap();
+        spill.add_bytes(i64::MAX, Some(0)).unwrap();
+        spill.add_bytes(i64::MAX, Some(1)).unwrap();
+        spill.add_bytes(1, Some(2)).unwrap();
+        assert!(spill.add_bytes(1, Some(2)).is_err(), "the total");
+        spill.add_records(0, u64::MAX).unwrap();
+        assert!(spill.add_records(0, 1).is_err());
+        spill
+            .words
+            .store(spill.part(1, Field::NextInner), u64::from(u32::MAX));
+        assert_eq!(spill.take_file(1, false).unwrap(), u32::MAX);
+        assert!(spill.take_file(1, false).is_err());
+
+        let mut many = vec![0; words_for(MAX_PARTITIONS).unwrap() + PART_WORDS];
+        // SAFETY: the vector is aligned to 8 and used only here.
+        assert!(unsafe { SharedSpill::attach(many.as_mut_ptr(), many.len()) }.is_err());
+        // SAFETY: as above.
+        assert!(unsafe { LocalSpill::attach(many.as_mut_ptr(), many.len()) }.is_err());
     }
 
     #[test]

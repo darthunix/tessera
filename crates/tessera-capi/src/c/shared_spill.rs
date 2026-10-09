@@ -305,8 +305,8 @@ pub unsafe extern "C" fn tess_table_spill_splits(
                 level_rows,
                 bits,
             };
-            *split.as_mut().context("a null flag")? =
-                splits(&SplitWeights { room, key }, &partition);
+            let split = split.as_mut().context("a null flag")?;
+            *split = splits(&SplitWeights { room, key }, &partition)?;
             Ok(())
         })
     }

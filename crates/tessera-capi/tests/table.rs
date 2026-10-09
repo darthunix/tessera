@@ -19,8 +19,8 @@ use tessera_capi::c::{
     tess_bloom_shared_probe, tess_bloom_shared_ready, tess_bloom_shared_words,
     tess_build_counters_init, tess_build_report, tess_build_step, tess_build_stop,
     tess_build_stopped, tess_build_take_chunk, tess_build_totals, tess_int4_hash, tess_int8_hash,
-    tess_sort, tess_sort_item_words, tess_sort_items, tess_sort_layout, tess_sort_merge,
-    tess_table_accumulate, tess_table_accumulate_sums, tess_table_append,
+    tess_round_step, tess_sort, tess_sort_item_words, tess_sort_items, tess_sort_layout,
+    tess_sort_merge, tess_table_accumulate, tess_table_accumulate_sums, tess_table_append,
     tess_table_append_columns, tess_table_append_partitioned_columns, tess_table_bloom,
     tess_table_bloom_words, tess_table_bloom_words_within, tess_table_chunk_init,
     tess_table_clear_key, tess_table_combine, tess_table_create, tess_table_find_or_insert,
@@ -3673,6 +3673,56 @@ fn the_filter_entry_points_size_fill_and_probe() -> Result<()> {
         assert_eq!(odd, [7; 6], "nothing written");
     }
     Ok(())
+}
+
+/// A step refuses what no sound node gives it: an attach that answers a
+/// phase past the last, of a build or of a round, and a participant in a
+/// state no step makes. Each is a misuse of the call, SQLSTATE XX000.
+#[test]
+fn a_step_refuses_a_phase_or_a_state_it_does_not_know() {
+    let mut counters = [0_u64; 4];
+    // SAFETY: local words, participants this test alone uses, and local
+    // results.
+    unsafe {
+        let mut status = Status::new();
+        assert_eq!(
+            tess_build_counters_init(counters.as_mut_ptr(), &raw mut status),
+            Code::Ok
+        );
+        let mut build = |participant: &mut Participant, reply: u32| {
+            let (mut action, mut status) = (u32::MAX, Status::new());
+            let code = tess_build_step(
+                participant,
+                counters.as_mut_ptr(),
+                reply,
+                &raw mut action,
+                &raw mut status,
+            );
+            (code, action, status.sqlstate().to_owned())
+        };
+        let mut participant = Participant::new();
+        assert_eq!(build(&mut participant, 0).1, Action::Attach as u32);
+        let (code, _, sqlstate) = build(&mut participant, 7);
+        assert_eq!((code, sqlstate.as_str()), (Code::InvalidArgument, "XX000"));
+
+        let round = |participant: *mut Participant, reply: u32| {
+            let (mut action, mut status) = (u32::MAX, Status::new());
+            let code = tess_round_step(participant, reply, &raw mut action, &raw mut status);
+            (code, action, status.sqlstate().to_owned())
+        };
+        let mut participant = Participant::new();
+        assert_eq!(round(&raw mut participant, 0).1, Action::Attach as u32);
+        let (code, _, sqlstate) = round(&raw mut participant, 5);
+        assert_eq!((code, sqlstate.as_str()), (Code::InvalidArgument, "XX000"));
+
+        // The participant's three words with a state no step makes.
+        let mut unknown = [0_u32, 99, 0];
+        let (code, action, sqlstate) = round(unknown.as_mut_ptr().cast::<Participant>(), 0);
+        assert_eq!(
+            (code, action, sqlstate.as_str()),
+            (Code::InvalidArgument, u32::MAX, "XX000")
+        );
+    }
 }
 
 /// A participant of a RIGHT or FULL join that leaves early: its stop word

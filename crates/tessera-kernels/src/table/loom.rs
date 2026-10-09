@@ -937,28 +937,21 @@ impl LoomBarrier {
     }
 }
 
-/// The build counters over loom atomics.
+/// The records of a build over a loom atomic, added relaxed as the real
+/// counters add them.
 struct LoomCounters {
     records: AtomicU64,
-    null_columns: AtomicU64,
-    chunks: AtomicU64,
 }
 
-impl Counters for LoomCounters {
+impl LoomCounters {
     fn add_records(&self, rows: u64) {
         self.records.fetch_add(rows, order::RELAXED);
     }
+}
+
+impl Counters for LoomCounters {
     fn records(&self) -> u64 {
         self.records.load(order::RELAXED)
-    }
-    fn add_null_columns(&self, bits: u64) {
-        self.null_columns.fetch_or(bits, order::RELAXED);
-    }
-    fn null_columns(&self) -> u64 {
-        self.null_columns.load(order::RELAXED)
-    }
-    fn next_chunk(&self) -> u64 {
-        self.chunks.fetch_add(1, order::RELAXED)
     }
 }
 
@@ -1010,8 +1003,6 @@ impl Build {
             region: LoomRegion::new(keys.len() as u64, participants, keys.len(), HEADS),
             counters: LoomCounters {
                 records: AtomicU64::new(0),
-                null_columns: AtomicU64::new(0),
-                chunks: AtomicU64::new(0),
             },
             barrier: LoomBarrier::new(skip),
             frees: ::loom::sync::atomic::AtomicUsize::new(0),

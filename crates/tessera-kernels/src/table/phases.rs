@@ -148,19 +148,16 @@ pub struct Participant {
     elected: u32,
 }
 
-/// The counters the participants of a build share: the records
-/// appended, the payload words that hold a NULL somewhere, and the chunks
-/// numbered so far.
+/// What a participant reads of its build's counters: the records
+/// appended, of which there may be none to link.
 pub(super) trait Counters {
-    fn add_records(&self, rows: u64);
     fn records(&self) -> u64;
-    fn add_null_columns(&self, bits: u64);
-    fn null_columns(&self) -> u64;
-    fn next_chunk(&self) -> u64;
 }
 
-/// The counters of a build in memory several participants map: those of
-/// [`Counters`], and the records linked whose keys the table held already.
+/// The counters of a build in memory several participants map: the
+/// records appended, the payload words that hold a NULL somewhere, the
+/// chunks numbered so far, and the records linked whose keys the table
+/// held already.
 #[derive(Debug)]
 pub struct SharedCounters<'a> {
     records: &'a AtomicU64,
@@ -253,10 +250,12 @@ impl<'a> SharedCounters<'a> {
     }
 
     /// Report the records this participant appended and the payload words
-    /// it saw a NULL in, before it arrives at the barrier.
-    pub fn report(&self, records: u64, null_columns: u64) {
-        self.add_records(records);
-        self.add_null_columns(null_columns);
+    /// it saw a NULL in, before it arrives at the barrier; refused, the
+    /// counters unchanged, when the records would pass their word.
+    pub fn report(&self, records: u64, null_columns: u64) -> Result<()> {
+        add_checked(self.records, records, "records")?;
+        self.null_columns.fetch_or(null_columns, order::RELAXED);
+        Ok(())
     }
 
     /// The records every participant appended, once the build is over.
@@ -266,13 +265,13 @@ impl<'a> SharedCounters<'a> {
 
     /// The payload words with a NULL, once the build is over.
     pub fn nulls(&self) -> u64 {
-        self.null_columns()
+        self.null_columns.load(order::RELAXED)
     }
 
     /// The number of a new chunk: every participant's chunks are numbered
     /// from 0 on, in the order they were taken.
-    pub fn take_chunk(&self) -> u64 {
-        self.next_chunk()
+    pub fn take_chunk(&self) -> Result<u64> {
+        add_checked(self.chunks, 1, "chunks")
     }
 
     /// The chunks numbered so far, once the build is over.
@@ -282,8 +281,8 @@ impl<'a> SharedCounters<'a> {
 
     /// Add the duplicates this participant's links found, before it
     /// arrives at the barrier after linking.
-    pub fn add_duplicates(&self, duplicates: u64) {
-        self.duplicates.fetch_add(duplicates, order::RELAXED);
+    pub fn add_duplicates(&self, duplicates: u64) -> Result<()> {
+        add_checked(self.duplicates, duplicates, "duplicates").map(|_| ())
     }
 
     /// The duplicates every participant found, once linking is over.
@@ -292,28 +291,25 @@ impl<'a> SharedCounters<'a> {
     }
 }
 
-// The barrier orders the reports before the reads: relaxed is enough; a
-// chunk number is unique by the addition alone.
+// The barrier orders the reports before the reads: relaxed is enough.
 impl Counters for SharedCounters<'_> {
-    fn add_records(&self, rows: u64) {
-        self.records.fetch_add(rows, order::RELAXED);
-    }
-
     fn records(&self) -> u64 {
         self.records.load(order::RELAXED)
     }
+}
 
-    fn add_null_columns(&self, bits: u64) {
-        self.null_columns.fetch_or(bits, order::RELAXED);
-    }
-
-    fn null_columns(&self) -> u64 {
-        self.null_columns.load(order::RELAXED)
-    }
-
-    fn next_chunk(&self) -> u64 {
-        self.chunks.fetch_add(1, order::RELAXED)
-    }
+/// Add `delta` to a counter of a build: the count before, or an error
+/// when the sum would pass the word, the counter then unchanged. A chunk
+/// number is unique by the addition alone, and the barrier orders every
+/// addition before the totals are read, so relaxed is enough.
+fn add_checked(counter: &AtomicU64, delta: u64, what: &str) -> Result<u64> {
+    counter
+        .fetch_update(order::RELAXED, order::RELAXED, |count| {
+            count.checked_add(delta)
+        })
+        .map_err(|count| {
+            anyhow::anyhow!("the {what} of a build, {count}, cannot take {delta} more")
+        })
 }
 
 impl Participant {
@@ -345,6 +341,10 @@ impl Participant {
         Ok(match state {
             State::New => self.to(State::Attaching, Action::Attach),
             State::Attaching => {
+                ensure!(
+                    reply <= FREE,
+                    "a build participant attached at phase {reply}, past the last"
+                );
                 self.phase = reply;
                 self.elected = 0;
                 self.enter(counters)
@@ -407,6 +407,10 @@ impl Participant {
         Ok(match state {
             State::New => self.to(State::Attaching, Action::Attach),
             State::Attaching => {
+                ensure!(
+                    reply <= ROUND_FREE,
+                    "a round participant attached at phase {reply}, past the last"
+                );
                 self.phase = reply;
                 self.elected = 0;
                 self.enter_round()
@@ -455,19 +459,15 @@ mod tests {
     #[derive(Default)]
     struct Alone(core::cell::Cell<u64>);
 
-    impl Counters for Alone {
+    impl Alone {
         fn add_records(&self, rows: u64) {
             self.0.set(self.0.get() + rows);
         }
+    }
+
+    impl Counters for Alone {
         fn records(&self) -> u64 {
             self.0.get()
-        }
-        fn add_null_columns(&self, _: u64) {}
-        fn null_columns(&self) -> u64 {
-            0
-        }
-        fn next_chunk(&self) -> u64 {
-            0
         }
     }
 
@@ -644,6 +644,46 @@ mod tests {
             [Attach, Load, ArriveAndWait, Probe, ArriveAndDetach, Free]
         );
         assert_eq!(round_alone(ROUND_FREE), [Attach, Detach, Done]);
+    }
+
+    /// An attach that answers a phase past the last, of a build or of a
+    /// round, comes from no barrier of a sound node: the step refuses it.
+    #[test]
+    fn an_attach_past_the_last_phase_is_an_error() {
+        let counters = Alone::default();
+        let mut build = Participant::new();
+        assert_eq!(build.next(&counters, 0).unwrap(), Action::Attach);
+        assert!(build.next(&counters, FREE + 1).is_err());
+        assert!(build.next(&counters, u32::MAX).is_err());
+        let mut round = Participant::new();
+        assert_eq!(round.round_step(0).unwrap(), Action::Attach);
+        assert!(round.round_step(ROUND_FREE + 1).is_err());
+        assert!(round.round_step(u32::MAX).is_err());
+    }
+
+    /// A count that would pass its word is refused, and the counter keeps
+    /// its value: records, chunks and duplicates alike.
+    #[test]
+    fn counts_past_their_words_are_refused() {
+        let mut words = [0_u64; COUNTER_WORDS];
+        // SAFETY: the array is aligned to 8 and used only through these
+        // counters.
+        let counters = unsafe { SharedCounters::attach(words.as_mut_ptr()) }.unwrap();
+        counters.init();
+        counters.report(u64::MAX, 0b01).unwrap();
+        assert!(counters.report(1, 0b10).is_err());
+        assert_eq!(
+            (counters.total_records(), counters.nulls()),
+            (u64::MAX, 0b01),
+            "the counters unchanged"
+        );
+        counters.add_duplicates(u64::MAX).unwrap();
+        assert!(counters.add_duplicates(1).is_err());
+        assert_eq!(counters.total_duplicates(), u64::MAX);
+        counters.chunks.store(u64::MAX - 1, order::RELAXED);
+        assert_eq!(counters.take_chunk().unwrap(), u64::MAX - 1);
+        assert!(counters.take_chunk().is_err());
+        assert_eq!(counters.total_chunks(), u64::MAX);
     }
 
     #[test]
