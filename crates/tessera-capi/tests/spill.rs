@@ -199,6 +199,86 @@ fn the_flags_check_both_outputs_first() {
     }
 }
 
+/// Weights that are not finite are refused by the rule of eviction and
+/// by the rule of a split, as weights below zero are.
+#[test]
+fn weights_that_are_not_finite_are_refused() {
+    let weights = SpillWeights {
+        start: 1.0,
+        target: 1.0,
+        spilled: 0.0,
+        reserve: 0,
+        resident: 0.0,
+        per_check: 0,
+    };
+    let mut status = Status::new();
+    let mut nwords = 0;
+    let mut in_force = 0;
+    // SAFETY: local buffers of the declared sizes throughout this test.
+    unsafe {
+        let code = tess_table_spill_words(4, &raw mut nwords, &raw mut status);
+        assert_eq!(code, Code::Ok, "{}", status.message());
+        let mut words = vec![0_u64; nwords];
+        let at = words.as_mut_ptr();
+        let code = tess_table_spill_init(at, nwords, false, 100, &raw mut status);
+        assert_eq!(code, Code::Ok, "{}", status.message());
+        let code = tess_table_spill_split(at, nwords, false, 4, &raw mut in_force, &raw mut status);
+        assert_eq!(code, Code::Ok, "{}", status.message());
+        let wrong = [
+            SpillWeights {
+                start: f64::NAN,
+                ..weights
+            },
+            SpillWeights {
+                target: f64::INFINITY,
+                ..weights
+            },
+            SpillWeights {
+                spilled: f64::NEG_INFINITY,
+                ..weights
+            },
+            SpillWeights {
+                resident: f64::NAN,
+                ..weights
+            },
+        ];
+        for wrong in &wrong {
+            let mut partition = 7;
+            let code = tess_table_spill_evict(
+                at,
+                nwords,
+                false,
+                wrong,
+                200,
+                100,
+                std::ptr::null(),
+                0,
+                0,
+                0,
+                &raw mut partition,
+                &raw mut status,
+            );
+            assert_eq!((code, partition), (Code::InvalidArgument, 7), "{wrong:?}");
+        }
+        for (room, key) in [(f64::NAN, 0.9), (2.0 / 3.0, f64::INFINITY)] {
+            let mut split = false;
+            let code = tess_table_spill_splits(
+                room,
+                key,
+                601,
+                100,
+                1000,
+                89,
+                100,
+                3,
+                &raw mut split,
+                &raw mut status,
+            );
+            assert_eq!(code, Code::InvalidArgument, "{room} and {key}");
+        }
+    }
+}
+
 #[test]
 fn damaged_blocks_report_data_corrupted() {
     let header = SpillHeader {
