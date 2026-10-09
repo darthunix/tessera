@@ -711,8 +711,10 @@ join_leave_shared(TessHashJoinState *state, bool keep)
  * disk to theirs, those of the partitions in memory and, for a left or
  * anti join, those without a pair to a file the shared table answers. At
  * PROBE each reads such files, one at a time as it takes them, and
- * probes the shared table; then it leaves the build and takes partitions
- * on disk, each joined whole by the one that took it, from every
+ * probes the shared table; then it leaves the build and goes round the
+ * partitions on disk: one that fits in a participant's hash_mem is a
+ * round that every participant who comes loads and probes together, and
+ * a larger one is joined whole by the one that took it, from every
  * participant's files, as a serial table joins its partitions.
  */
 
@@ -1482,8 +1484,7 @@ round_attach(TessHashJoinState *state, JoinSpill *spill, JoinRound *round)
 
 /*
  * Take part in the round over a partition: true once this participant
- * probes it, false when the round is past loading, its outer rows all
- * taken.
+ * probes it, false when the round was freed before it came.
  */
 static bool
 round_join(TessHashJoinState *state, int partition)

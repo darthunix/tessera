@@ -158,7 +158,10 @@ typedef struct JoinShared
 	Size		index_len;
 	dsa_pointer directory;
 	int			nchunks;
-	/* The records appended, the NULL columns and the chunks numbered. */
+	/*
+	 * The records appended, the NULL columns, the chunks numbered and the
+	 * duplicates the links found.
+	 */
 	uint64		counters[TESS_BUILD_COUNTER_WORDS];
 	/* The shared Bloom filter, sized with the table; one participant builds it. */
 	dsa_pointer filter;
