@@ -31,7 +31,7 @@ use super::header::{
     reference,
 };
 use super::marks::{self, Marks};
-use super::phases::{Action, Counters, Participant, Stop};
+use super::phases::{Action, COUNTER_WORDS, CounterWords, Counters, Participant, Stop};
 use super::record::Access;
 use super::region::{Region, order};
 use super::shared_spill::{Memory, Spill, Weights, Words};
@@ -937,21 +937,22 @@ impl LoomBarrier {
     }
 }
 
-/// The records of a build over a loom atomic, added relaxed as the real
-/// counters add them.
-struct LoomCounters {
-    records: AtomicU64,
-}
+/// The words of a build's counters as loom atomics, with the orderings
+/// of the real words, so that the model runs the real counters.
+struct LoomCounterWords([AtomicU64; COUNTER_WORDS]);
 
-impl LoomCounters {
-    fn add_records(&self, rows: u64) {
-        self.records.fetch_add(rows, order::RELAXED);
+impl CounterWords for LoomCounterWords {
+    fn load(&self, index: usize) -> u64 {
+        self.0[index].load(order::RELAXED)
     }
-}
-
-impl Counters for LoomCounters {
-    fn records(&self) -> u64 {
-        self.records.load(order::RELAXED)
+    fn store(&self, index: usize, value: u64) {
+        self.0[index].store(value, order::RELAXED);
+    }
+    fn fetch_or(&self, index: usize, bits: u64) -> u64 {
+        self.0[index].fetch_or(bits, order::RELAXED)
+    }
+    fn compare_exchange(&self, index: usize, current: u64, new: u64) -> Result<u64, u64> {
+        self.0[index].compare_exchange(current, new, order::RELAXED, order::RELAXED)
     }
 }
 
@@ -979,14 +980,16 @@ struct Stopper {
 
 /// A shared build: the inner side's keys, which the participants take
 /// one at a time as a parallel scan hands out pages, a chunk per
-/// participant, the index the elected one makes, the counters, the barrier
-/// and the frees; the stop word, whether a participant marked it, and what
-/// the last one to leave read of it.
+/// participant, the index the elected one makes, the counters and the
+/// chunk numbers they gave, the barrier and the frees; the stop word,
+/// whether a participant marked it, and what the last one to leave read of
+/// it.
 struct Build {
     keys: &'static [i32],
     next_key: ::loom::sync::atomic::AtomicUsize,
     region: LoomRegion,
-    counters: LoomCounters,
+    counters: Counters<LoomCounterWords>,
+    numbers: AtomicU64,
     barrier: LoomBarrier,
     frees: ::loom::sync::atomic::AtomicUsize,
     stopper: Option<Stopper>,
@@ -1001,9 +1004,10 @@ impl Build {
             keys,
             next_key: ::loom::sync::atomic::AtomicUsize::new(0),
             region: LoomRegion::new(keys.len() as u64, participants, keys.len(), HEADS),
-            counters: LoomCounters {
-                records: AtomicU64::new(0),
-            },
+            counters: Counters::over(LoomCounterWords(core::array::from_fn(|_| {
+                AtomicU64::new(0)
+            }))),
+            numbers: AtomicU64::new(0),
             barrier: LoomBarrier::new(skip),
             frees: ::loom::sync::atomic::AtomicUsize::new(0),
             stopper: None,
@@ -1021,9 +1025,14 @@ impl Build {
             .unwrap()
     }
 
-    /// Take keys of the inner side until none is left and append each to
-    /// this participant's chunk, then report how many.
+    /// Take a chunk number, which no other participant may get; take keys
+    /// of the inner side until none is left and append each to this
+    /// participant's chunk, then report how many.
     fn build(&self, chunk: usize) {
+        let number = self.counters.take_chunk().unwrap();
+        let bit = 1 << number;
+        let given = self.numbers.fetch_or(bit, order::RELAXED);
+        assert_eq!(given & bit, 0, "chunk number {number} was given twice");
         let layout = chunk_layout(&CONFIG).unwrap();
         let mut appended = 0;
         loop {
@@ -1033,7 +1042,7 @@ impl Build {
             };
             appended += append(&self.region, &layout, chunk, &[key]).unwrap();
         }
-        self.counters.add_records(appended as u64);
+        self.counters.report(appended as u64, 1 << chunk).unwrap();
     }
 
     /// Run participant `chunk`, which appends to the chunk of its number,
@@ -1055,7 +1064,7 @@ impl Build {
                 Action::Allocate | Action::Load => panic!("a build got {action:?}"),
                 Action::Size => {
                     // SAFETY: the elected one alone uses the index now.
-                    unsafe { init(&self.region, &CONFIG, self.counters.records()) }.unwrap();
+                    unsafe { init(&self.region, &CONFIG, self.counters.total_records()) }.unwrap();
                 }
                 Action::Link => {
                     let layout = self.layout();
@@ -1101,7 +1110,8 @@ impl Build {
 }
 
 /// `participants` build one table of `keys` and probe it; exactly one
-/// frees it.
+/// frees it, the chunks are numbered from 0 once each, and every record
+/// is counted.
 fn shared_build(participants: usize, keys: &'static [i32], skip: Option<u32>, preemptions: usize) {
     let mut model = ::loom::model::Builder::new();
     model.preemption_bound = Some(preemptions);
@@ -1122,6 +1132,12 @@ fn shared_build(participants: usize, keys: &'static [i32], skip: Option<u32>, pr
             1,
             "the table is freed once"
         );
+        assert_eq!(
+            build.numbers.load(order::RELAXED),
+            (1 << build.counters.total_chunks()) - 1,
+            "the chunks numbered from 0, once each"
+        );
+        assert_eq!(build.counters.total_records(), keys.len() as u64);
     });
 }
 

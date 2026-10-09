@@ -1287,15 +1287,22 @@ table's rows when it holds one in any participant's. The join reads a
 column's NULL flags only when its bit is set, so a bit lost would turn
 a NULL into a value, while a bit set in vain costs only a read.
 
-Every operation on the counters is relaxed. A chunk number is unique by
-the atomic addition alone. The totals need no order of their own,
-because they are read only after a barrier that every report came
+Every operation on the counters is relaxed. An addition is a
+compare-and-swap of the word from the count it read to the sum, tried
+again when another participant changed the word between; a chunk
+number is unique by the swap alone. The totals need no order of their
+own, because they are read only after a barrier that every report came
 before: a barrier counts its arrivals under a spinlock, and the
 spinlock orders all that a process did before it arrived before all
 that another does after the wait. An addition that would pass 2^64 - 1
 is refused, and the counter keeps its value. A wrapped count of records
 would make an index too small, and a wrapped chunk number would name
 another participant's chunk.
+
+The counters are written once over their words, `Counters<W>` of
+`phases.rs`, as the words of a spill are: the words of shared memory
+are one form, and the loom model's atomics another, so that the model
+runs the real counters.
 
 ### Why FLUSH and OUTER
 
@@ -1566,7 +1573,8 @@ spinlock and a condition variable for its wait. The models of this part
 are:
 
 - two participants that append, size, link and probe one table, and
-  three that attach at any phase: every key is found, and the table is
+  three that attach at any phase: every key is found, the chunks are
+  numbered from 0 once each, every record is counted, and the table is
   freed once;
 - two participants past the budget that split at once: they agree on
   one number;
@@ -1588,12 +1596,10 @@ marked after leaving goes unseen; linking before the index is made
 breaks the table; and a round that probes before every file is loaded
 misses keys.
 
-The model differs from the node in two places. A participant of the
+The model differs from the node in one place. A participant of the
 round model links its files once, after it loads them all, where the
 node links each block as it loads it; the order the model checks, every
-link before the barrier of PROBE, is the same. And the counters of a
-build are loom atomics of the model's own; a test of threads over the
-real counters checks their numbers and sums.
+link before the barrier of PROBE, is the same.
 
 ## What we decided not to do
 
