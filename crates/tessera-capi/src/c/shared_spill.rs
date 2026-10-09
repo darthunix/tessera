@@ -354,8 +354,10 @@ pub unsafe extern "C" fn tess_table_spill_flags(
     unsafe {
         guard(status, || {
             let spill = spill(words, nwords)?;
-            *on_disk.as_mut().context("a null flag")? = spill.on_disk(partition)?;
-            *alone.as_mut().context("a null flag")? = spill.alone(partition)?;
+            let on_disk = on_disk.as_mut().context("a null flag")?;
+            let alone = alone.as_mut().context("a null flag")?;
+            *on_disk = spill.on_disk(partition)?;
+            *alone = spill.alone(partition)?;
             Ok(())
         })
     }
