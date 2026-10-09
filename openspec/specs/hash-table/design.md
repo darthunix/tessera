@@ -1111,6 +1111,115 @@ barrier and read after it, so the barrier orders it, as it orders the
 marks; the loom model checks this, and that a mark set only after the
 participant left can go unseen.
 
+## Several participants
+
+The participants of a shared build go through phases that the core's
+`Barrier` separates, in its own numbering (`TESS_BUILD_*`):
+
+- `BUILD`: every participant appends its share of the inner side to
+  chunks of its own, each numbered by the build's shared counters
+  (`tess_build_take_chunk`), then reports the records it appended and
+  the payload words it saw a NULL in (`tess_build_report`);
+- `FLUSH`: when the table spilled, every participant writes its chunks
+  of the partitions that went to disk and finishes its files;
+- `SIZE`: the elected participant makes the index for exactly the
+  records appended (`tess_build_totals`) and the directory of the chunks
+  by number, from which every participant maps their bases;
+- `LINK`: every participant links its own chunks into the index,
+  counting the duplicates unless the planner knows the inner side
+  unique, and adds them to the counters (`tess_build_add_duplicates`);
+- `OUTER`: when the table spilled, every participant writes its share of
+  the outer side to the partitions' files, before any row goes out;
+- `PROBE`: every participant probes, then leaves; the last to leave
+  frees the table.
+
+No phase copies records, and the table never grows: the index is made
+once, for the rows that are there. A participant is a state machine
+(`tess_build_step`, `TessBuildParticipant`) that never waits itself:
+each step returns an action, the node performs it, and what a barrier
+operation returned (the phase `BarrierAttach` gives, whether
+`BarrierArriveAndWait` elected it, whether `BarrierArriveAndDetach`
+found it the last) goes into the next step. The waits stay in the node,
+since they may raise an error that must not unwind Rust frames. A
+participant that attaches late joins the phase the others are in: while
+they build, it appends what is left of the inner side, which a parallel
+scan hands out page by page; from `SIZE` on it has nothing to link and
+waits for the probe; after the last one left, it leaves at once.
+
+A table that spills keeps what its participants decide in words every
+one maps (`tess_table_spill_*`, `shared_spill.rs`): the first whose
+chunks pass the budget splits the table into partitions, a
+compare-and-swap that the others take the number from; while the chunks
+still take more, the largest partition in memory goes to disk, marked by
+the one participant whose fetch-or set its flag, and every participant
+writes its own chunks of it. The `FLUSH` barrier orders every write
+before the partitions are read, and `OUTER` comes before `PROBE` because
+the core forbids waiting at a barrier once a participant returns rows: a
+participant that returns rows may wait on the leader, which may wait at
+the barrier. Each partition on disk is then a round of its own, with a
+barrier of its own and the phases of the core's batches (`ELECT`,
+`ALLOCATE`, `LOAD`, `PROBE`, `FREE`, `tess_round_step`): the elected one
+makes the partition's index, all load its files, taken one at a time
+from a counter, and link them, all probe and leave without waiting, the
+last frees it. A partition too large for one participant is taken whole
+by one of them (`tess_table_spill_take_alone`). A round's chunks are
+linked as they are loaded, without counting duplicates: a link reads
+only its own chunk and the buckets, so a participant sees the chunks
+others load only once the round probes. A filter of every inner row is
+filled by all at once, word by word atomically
+(`tess_bloom_add_atomic`).
+
+`make rust-loom` runs the table's own code over a model index and model
+chunks of loom cells (`crates/tessera-kernels/src/table/loom.rs`) with
+the orderings the real memory uses: two and three participants linking
+their chunks into one bucket, a probe that finds a record another
+participant is publishing and reads it whole, two participants racing to
+build the shared filter and a reader that sees it ready and then every
+bit, and a whole shared build of two participants, and of three that
+attach at any phase, over a model of the core's barrier; two
+participants past the budget agreeing on one split, two sending the
+largest partition to disk and marking it once, and rounds of two and
+three participants that attach at any phase, load every file once, probe
+every key and free the partition once. Every access to a record's bytes
+is announced to loom first, so a read not ordered after the writing is
+reported. Four negative tests check that the model catches what it
+should: a round that probes before every file is loaded misses keys;
+relaxed bucket heads let a probe read an unwritten record, a relaxed
+filter state lets a reader see an unfilled filter, and linking before
+the index is made breaks the table. The model found that counting the
+records after publishing them let such a probe call a chain corrupt;
+they are counted first.
+
+## The atomics in order
+
+A shared build, by the phases of the barrier:
+
+```
+ BUILD ─ every participant:
+          tess_build_take_chunk: counters.chunks.fetch_add(1)   Relaxed → a chunk number
+          dsa_allocate, tess_table_chunk_init
+          under the node's spinlock: the chunk into the table's list
+          tess_table_append of its rows into its own chunks (plain stores)
+          tess_build_report: counters.records, null_columns fetch_add   Relaxed
+ ═══ BarrierArriveAndWait ═══  ← orders everything above
+ SIZE  ─ the elected one: the totals (Relaxed) → the index for exactly N records (plain
+          stores of the header, the buckets cleared) → the directory of dsa_pointers by
+          number, from the list → the Bloom filter, cleared, which one
+          participant builds later
+ ═══ BarrierArriveAndWait ═══
+ LINK  ─ every participant: the chunks' bases from the directory → tess_table_link of its
+          own chunks (fetch_add and CAS, as above), counting duplicates →
+          tess_build_add_duplicates: counters.duplicates fetch_add   Relaxed
+ ═══ BarrierArriveAndWait ═══
+ PROBE ─ every participant: probes (Acquire loads of the heads)
+ ═══ BarrierArriveAndDetach ═══ → the last one frees the index, directory, chunks and values
+```
+
+The build counters need no ordering: the barrier shows the others
+everything a participant did before it (the model of the core's barrier
+in `loom.rs`); other participants' used marks are only read after the
+barrier.
+
 ## What we decided not to do
 
 - **One block that grows.** The first form of the table kept the header,
@@ -1151,9 +1260,7 @@ they get their own pages:
 
 - the aggregate states that a grouping keeps in a payload, and the
   calls that fold rows into them;
-- the items a sort makes from records;
-- the phases of a shared build and of the rounds over partitions on
-  disk.
+- the items a sort makes from records.
 
 How a spilled chunk of records is written to disk is in
 [spill-format](../spill-format/design.md).

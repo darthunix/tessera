@@ -76,7 +76,9 @@ tables, the chunks, the values and the filter of every level.
 **A shared table.** Under a `Gather` the participants build one table in
 the query's shared memory, and its budget is every participant's
 `hash_mem`, as the core's. Their chunks' bytes are counted in words
-every participant maps ([table.md](table.md), `shared_spill.rs`); the
+every participant maps
+([hash-table](../openspec/specs/hash-table/design.md),
+`shared_spill.rs`); the
 first whose chunks pass the budget publishes a filter of every inner
 row and splits the table into partitions, two per participant at least.
 Each participant, once it sees the split after a batch, splits its own

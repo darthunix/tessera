@@ -846,7 +846,7 @@ extern TessStatusCode tess_bloom_shared_probe(uint64 *words, Size nwords,
  * a barrier operation's result goes into the next step. The barrier is
  * the core's Barrier; its waits stay in the node, since they may raise an
  * error. The phases, in the barrier's numbering, and the actions follow;
- * see docs/table.md.
+ * see openspec/specs/hash-table/.
  */
 #define TESS_BUILD_BUILD		0
 #define TESS_BUILD_FLUSH		1
