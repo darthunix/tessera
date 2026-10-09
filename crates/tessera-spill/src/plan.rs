@@ -238,6 +238,66 @@ mod tests {
         Ok(())
     }
 
+    /// A level of 4 to 1024 partitions with a reserve of 48 KiB that
+    /// expects 10 MiB: 8 partitions in a limit of 4 MiB, 16 when it wants
+    /// 16 at the least, 4 in a limit of 256 KiB, where the reserves of 8
+    /// pass half of it.
+    #[test]
+    fn a_level_doubles_by_its_bytes_participants_and_reserve() -> Result<()> {
+        let level = Level {
+            expected: f64::from(10 << 20),
+            ..level(0.0, 4 << 20, 0, 48 << 10, 0)
+        };
+        assert_eq!(partitions(&level)?, 8);
+        assert_eq!(
+            partitions(&Level {
+                at_least: 16,
+                ..level
+            })?,
+            16
+        );
+        assert_eq!(
+            partitions(&Level {
+                limit: 256 << 10,
+                ..level
+            })?,
+            4
+        );
+        Ok(())
+    }
+
+    /// A level that expects far more than its limit after 28, 29 and 30
+    /// bits gets 8, 4 and 4 partitions: the bits of twice as many stay
+    /// below 32.
+    #[test]
+    fn a_level_keeps_to_the_bits_of_the_hash() -> Result<()> {
+        let after = |shift| level(1e15, 4 << 20, shift, 0, 0);
+        assert_eq!(partitions(&after(28))?, 8);
+        assert_eq!(partitions(&after(29))?, 4);
+        assert_eq!(partitions(&after(30))?, 4);
+        assert!(partitions(&after(31)).is_err());
+        Ok(())
+    }
+
+    /// A chunk is a share of the limit among the partitions, within its
+    /// bounds, rounded down to a multiple of 8.
+    #[test]
+    fn a_chunk_is_a_share_of_the_limit_within_its_bounds() -> Result<()> {
+        assert_eq!(chunk_len(4 << 20, 8, 16, 8 << 10, 1 << 20)?, 32 << 10);
+        assert_eq!(
+            chunk_len(4 << 20, 1024, 16, 8 << 10, 1 << 20)?,
+            8 << 10,
+            "the least"
+        );
+        assert_eq!(
+            chunk_len(1 << 30, 4, 16, 8 << 10, 1 << 20)?,
+            1 << 20,
+            "the most"
+        );
+        assert_eq!(chunk_len(1_000_000, 8, 16, 8, 1 << 20)?, 7808, "rounded");
+        Ok(())
+    }
+
     #[test]
     fn a_plan_refuses_bounds_out_of_order() -> Result<()> {
         let base = level(1e9, 1 << 30, 0, 0, 0);
