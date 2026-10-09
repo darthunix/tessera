@@ -1035,7 +1035,8 @@ output before it writes any.
 - **THEN** no number is given twice, the records and the duplicates are
   their sums, and the NULL bits their OR
 - **Verified by:**
-  `crates/tessera-kernels/src/table/phases.rs::participants_count_a_build_at_once`
+  `crates/tessera-kernels/src/table/phases.rs::participants_count_a_build_at_once`;
+  `crates/tessera-kernels/src/table/loom.rs::three_participants_attach_at_any_phase`
 
 #### Scenario: Wrong counters and outputs
 - **WHEN** a call gets null or misaligned counters, a null output, or a

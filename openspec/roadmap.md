@@ -1376,10 +1376,6 @@ becomes an entry, joins one, or is dropped.
     rows are right, since the other participants join every partition;
     only the worker's help is lost. Suggested: an entry if a measured
     case shows the loss.
-  - The loom model counts a build's records with atomics of its own,
-    not with the real counters, which only a test of threads checks.
-    Suggested: make the counters generic over the model's atomics if
-    they ever change.
   - `tess_spill_partitions` and `tess_spill_chunk_len`, the plan of a
     spill's partitions and of their chunks, are C API that no
     capability describes: `spill-format` and `hash-table` both leave
