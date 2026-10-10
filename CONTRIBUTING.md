@@ -228,17 +228,25 @@ folder, `contract.md`, beside `spec.md` and `design.md`.
   eviction written in three nodes, means its owner is missing.
 - A change that breaks a rule is reworked until it keeps it. When no
   rework keeps it, the agent may propose to change the rule, in a pull
-  request that changes only the contract. The proposal says what the
-  rule costs, which ways were weighed, why the work cannot keep it,
-  and what is kept or replaced. The maintainer decides. An exception
+  request that changes only contracts and designs. The proposal says
+  what the rule costs, which ways were weighed, why the work cannot keep
+  it, and what is kept or replaced. The maintainer decides. An exception
   for a while is such a pull request too: it narrows the rule and says
   when the narrowing ends, and its reason goes into the part's
   `design.md` as a decision, with what was, what will be and why.
-- The checks of a contract read it from the base of a pull request,
-  not from its head, so a change cannot loosen the rule it is judged
-  by. `check-specs.sh` does not read contracts yet. The pull request
-  that adds the first `contract.md` also adds these checks: the
-  "Checked by" of every rule, and the reading from the base.
+- A contract opens with `# <part>: ...`; each rule is a `###` heading
+  under `## Rules`, and the forecast comes under `## Forecast`.
+- `check-specs.sh` checks contracts with `check-contracts.sh`: the
+  "Checked by" of every rule, and, in a pull request, the contracts of
+  its base, so a change cannot loosen the rule it is judged by. A rule
+  keeps its words, and its check its kind and words, or grows: pending
+  becomes a check, a probe, a review or the maintainer becomes a check
+  in CI, a check in CI keeps its items or gains items; the words around
+  the items of a check in CI are not compared. A rule or a contract that
+  is gone, or any other change of a rule, fails the check, unless the
+  pull request changes nothing but contracts and designs: that is how a
+  rule is changed, CI warns of it on the pull request, and the
+  maintainer decides it by the merge.
 - A part that a change makes keeps its contract in the change's folder,
   `openspec/changes/<change>/contract.md`, from the change's first
   steps; the checks read it there, and the close moves it beside the
