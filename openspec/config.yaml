@@ -17,17 +17,20 @@ context: |
   is right. contract.md, where a part has one, holds the rules of the
   part's build (CONTRIBUTING.md, "Architecture contracts").
 
-  A spec names four surfaces only: the public C API of include/tessera;
+  A spec names five surfaces only: the public C API of include/tessera;
   behavior visible from SQL (the plan chosen, the results, EXPLAIN,
   settings, SQLSTATE); formats on disk and in shared memory; the entry
-  points of the kernels. Internal names and steps belong in design.md.
+  points of the kernels; the public API of a crate of the workspace
+  meant for use outside Tessera, one with publish = true in its
+  Cargo.toml. Internal names and steps belong in design.md.
 
-  A change is needed when behavior, the C API or a format changes, when
-  work on speed needs a measurement plan, or when the work is larger
-  than one pull request. The maintainer approves the proposal before
-  any code and the outcome before the change is closed. A closed change
-  leaves no folder: what it settled is in the specs, the designs and
-  the roadmap, and git keeps the rest.
+  A change is needed when behavior, the C API, a format or the public
+  API of such a crate changes, when work on speed needs a measurement
+  plan, or when the work is larger than one pull request. The
+  maintainer approves the proposal before any code and the outcome
+  before the change is closed. A closed change leaves no folder: what
+  it settled is in the specs, the designs and the roadmap, and git
+  keeps the rest.
 
   A spec and a design are written for a reader who knows nothing about
   the part, in simple English: short sentences, common words, one
