@@ -22,11 +22,11 @@ commit of sections 2 and 3 is checked by `make rust-check` and by
       it. Check: `.github/scripts/check-specs.sh`
 - [x] 1.3 Make the branch `relhash` from `main`, and open this proposal
       as the first pull request into it. Check: CI on the pull request
-- [ ] 1.4 Write the crate's contract, `contract.md` in this change's
+- [x] 1.4 Write the crate's contract, `contract.md` in this change's
       folder: the rules of "The contract of the crate", each with its
       check or `pending` until its task, and the forecast. Check:
       `.github/scripts/check-specs.sh`
-- [ ] 1.5 Make `check-specs.sh` read every contract, in
+- [x] 1.5 Make `check-specs.sh` read every contract, in
       `openspec/specs/` and in open changes: each "Checked by" names a
       file that holds its text, as a "Verified by" does, `pending` only
       in an open change; in a pull request it reads the contracts of
@@ -66,8 +66,11 @@ commit of sections 2 and 3 is checked by `make rust-check` and by
 
 - [ ] 3.1 Make `crates/relhash` of `row_mask.rs`, `bits.rs` and
       `bitmap.rs` of `tessera-core`, a move only; `tessera-core`
-      exports the moved names again. Check: `make rust-check`; machine
-      code the same on every program and module
+      exports the moved names again; add the check that no crate but
+      `relhash` defines a mask of rows, and name it in the contract's
+      rule "The masks of rows are the crate's". Check:
+      `make rust-check`; machine code the same on every program and
+      module
 - [ ] 3.2 Move the format of the table into the crate: `header.rs`,
       `region.rs`, `record.rs`, `lanes.rs` and what `mod.rs` holds of
       them, a move only; `tessera-kernels` exports the moved names
@@ -81,8 +84,10 @@ commit of sections 2 and 3 is checked by `make rust-check` and by
 - [ ] 3.4 Set `publish = true` for the crate and refuse a target whose
       pointers are not 64 bits wide with `compile_error!`; add to CI a
       build for a 32-bit target that must fail, the crate's tests alone,
-      a build without `alloc`, and a dry run of `cargo publish`. Check:
-      `cargo package -p relhash`; CI
+      a build without `alloc`, a dry run of `cargo publish`, and a
+      snapshot of the crate's public API that CI compares; name these
+      checks in the contract's rules "Free of Tessera" and "A small
+      surface". Check: `cargo package -p relhash`; CI
 - [ ] 3.5 Replace the crate's text errors by errors of two kinds of at
       most 8 bytes, with a compile-time assertion of the size; the call
       site of a reference's check chooses the kind; the check of a
@@ -133,7 +138,10 @@ commit of sections 2 and 3 is checked by `make rust-check` and by
 
 - [ ] 6.1 Mark every read of the index or a chunk as a trust point, add
       the script that compares the marks with their list, and write the
-      list into the design of `relhash`. Check: the script; CI
+      list into the design of `relhash`; forbid unsafe code in every
+      other module; name these checks in the contract's rules "One way
+      to memory" and "Unsafe code where it is proven". Check: the
+      script; CI
 - [ ] 6.2 Write the Kani proofs of the checks and their arithmetic, add
       the Kani job to CI, and name the proofs in "Any bytes, a bounded
       call". Check: `cargo kani -p relhash`
@@ -147,10 +155,11 @@ commit of sections 2 and 3 is checked by `make rust-check` and by
       call"; report the downloads, reverse dependencies, last release
       and stars of `libfuzzer-sys`. Check: `cargo fuzz run <target> --
       -max_total_time=60` for each target
-- [ ] 6.5 Add the tests of an allocator that counts, of one sequence run
-      twice, of a handle sent to another thread and of two payloads open
-      at once (both must not compile), of the masks, of the cursors and
-      of the merge, and name them in their requirements. Check:
+- [ ] 6.5 Add the tests of an allocator that counts (the check of the
+      contract's rule "No memory taken"), of one sequence run twice, of
+      a handle sent to another thread and of two payloads open at once
+      (both must not compile), of the masks, of the cursors and of the
+      merge, and name them in their requirements. Check:
       `cargo test -p relhash`; `.github/scripts/check-specs.sh`
 - [ ] 6.6 Run Miri over all the tests of the crate in CI. Check: CI
 - [ ] 6.7 Run every mutant of the crate in CI on request; give each

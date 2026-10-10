@@ -39,15 +39,22 @@ jobs:
     name: Specs (ubuntu-24.04)
     runs-on: ubuntu-24.04
     steps:
+      # The whole history: the contracts are read at the base of a pull
+      # request.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
           node-version: 22
       - name: The OpenSpec CLI
         run: npm install --global @fission-ai/openspec@1.13.2
+      - name: The cases of the check of contracts
+        run: .github/scripts/test-check-contracts.sh
       - name: The specs against the repository
         env:
           DO_NOT_TRACK: "1"
+          SPECS_BASE: ${{ github.event.pull_request.base.sha }}
         run: .github/scripts/check-specs.sh
 
   # The loom model of the hash table's concurrent protocol (plan 9.5): the
