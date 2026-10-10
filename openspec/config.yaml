@@ -11,10 +11,11 @@ context: |
   first.
 
   A capability is one part of the system and one folder,
-  openspec/specs/<name>/, with two files. spec.md says what the part
-  promises. design.md says how it is built and why; OpenSpec does not
-  read it, people and agents keep it by hand. Where the two disagree,
-  spec.md is right.
+  openspec/specs/<name>/. spec.md says what the part promises.
+  design.md says how it is built and why; OpenSpec does not read it,
+  people and agents keep it by hand. Where the two disagree, spec.md
+  is right. contract.md, where a part has one, holds the rules of the
+  part's build (CONTRIBUTING.md, "Architecture contracts").
 
   A spec names four surfaces only: the public C API of include/tessera;
   behavior visible from SQL (the plan chosen, the results, EXPLAIN,
@@ -99,11 +100,10 @@ operations:
   apply:
     guidance:
       - >-
-        Stop and ask when a task needs a new public API, another model
-        of ownership or a new architecture.
+        Decide alone, search and stop and ask as "Stop and ask" of
+        CONTRIBUTING.md says.
       - >-
-        Follow docs/measuring.md before timing anything; a confirmed
-        excess over a threshold stops the work for a discussion.
+        Follow docs/measuring.md before timing anything.
   archive:
     guidance:
       - >-
