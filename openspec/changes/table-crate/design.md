@@ -366,46 +366,27 @@ The links need the repository to be public when the crate is published.
 
 The crate is a new part, so it gets an architecture contract, as
 `CONTRIBUTING.md` asks. Until this change closes the contract lives in
-its folder, `contract.md` beside the proposal, and the checks read it
+its folder, `contract.md` beside this design, and the checks read it
 there; at the close it moves to `openspec/specs/relhash/`. Its rules
-protect what the crate is for, each with its reason and its check:
-
-- **Free of Tessera.** The crate builds without any crate of Tessera
-  and without PostgreSQL, so that it can be used and checked alone.
-  Checked by CI, from the crate's dependencies.
-- **One way to memory.** Every read and write of a table's blocks goes
-  through the one layer of memory, so that the list of trust points is
-  complete and one proof covers every access. Checked by the script of
-  trust points.
-- **Unsafe code where it is proven.** Unsafe code is kept to the layer
-  of memory and the checks of a reference, which the proofs cover;
-  every other module forbids it. Checked by CI.
-- **No memory taken.** A call over the caller's blocks allocates
-  nothing, so that an engine keeps its memory in its own hands.
-  Checked by the test under a counting allocator.
-- **A small surface.** The public API grows only with a reason given in
-  the pull request, so that what callers rely on stays small. Checked
-  by a snapshot of the public API that CI compares.
-- **No cost to Tessera.** A hot loop of Tessera compiles no longer
-  through the crate's API than inside the kernels. Checked by an
-  agent's review: the machine code of every benchmark program and of
-  the kernels' module against the base, and every loop that grew.
-- **SQL stays outside.** No rule of SQL, of PostgreSQL's types or of
-  Tessera's executor lives in the crate, so that a change of those
-  never touches it. Checked by the first rule, and by an agent's
-  review of each new invariant the crate takes on.
-
-Its forecast names three likely changes and what each would touch:
-
-- a prefetch hint for x86-64 in the probe of a batch: the crate's copy
-  of the hint only;
-- keys of more kinds in the table itself: the crate's keys and record,
-  and Tessera's reading of keys from its columns, nothing else;
-- removing records by one writer: the crate's calls of one writer and
-  its chunks, and none of Tessera's nodes but the one that removes.
-
-A probe of each runs once the crate exists, on branches that are never
+keep the crate free of Tessera and of SQL, its memory behind one layer,
+its unsafe code where the proofs reach, every reference checked by the
+crate alone, the masks of rows its own, its calls free of allocation,
+its API small and its cost to Tessera nil; most are `pending` until the
+task that writes their check. Its forecast names three likely changes:
+a prefetch hint for x86-64, keys of more kinds, removing records. A
+probe of each runs once the crate exists, on branches that are never
 merged, and its count of what it touched goes into this design.
+
+The grouping node of C breaks the rule of references today: it finds
+the payload of a generic aggregate's state by an offset of its own,
+after the crate has checked one record. It takes
+the payloads from `tess_table_payloads` instead, one call for the rows
+of a batch that need them. The spills of the grouping and of the join
+read the used mark of a chunk, its first 8 bytes, by themselves. They
+read it through a new call of the C API instead,
+`tess_table_chunk_used`, which checks the mark against the chunk's
+length and the size of its records, as `tess_table_chunk_init` makes
+an empty chunk.
 
 ### Speed
 
@@ -505,7 +486,11 @@ approves them.
 
 ## Migration Plan
 
-Nothing for the C nodes: `include/tessera/table.h` stays as it is. The
+The C API gains one call, `tess_table_chunk_used`, and nothing else in
+it changes. Two C nodes change inside, as the rule of references asks:
+the grouping takes the payloads of its generic states from
+`tess_table_payloads`, and the spills of the grouping and the join read
+a chunk's used mark through the new call. The
 Rust code of the workspace keeps its imports through the exports of
 `tessera-core` and `tessera-kernels`. A revert of the merge of the
 branch undoes it.
