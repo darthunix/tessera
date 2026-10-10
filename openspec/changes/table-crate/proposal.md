@@ -84,7 +84,9 @@ none of these:
   small and its cost to Tessera nil, with a forecast of three likely
   changes; `check-specs.sh` learns to read contracts, from the base of
   a pull request.
-- Nothing changes in the C API, in what SQL sees, or in a format. A
+- The C API gains one call, `tess_table_chunk_used`, which gives a
+  chunk's used mark checked; nothing else changes in it, in what SQL
+  sees, or in a format. A
   step that only moves code leaves the machine code of every benchmark
   program as it was.
 
@@ -101,6 +103,8 @@ none of these:
   which close first; this change adds its requirements to it, and its
   errors of two kinds take the place of the part of "Errors of a call"
   that moved.
+- `hash-table`: a call of the C API that gives a chunk's used mark,
+  checked, so that no node reads it by itself.
 
 ## Impact
 
@@ -109,8 +113,12 @@ none of these:
   folds of `exclusive.rs`, which stay in the kernels; `row_mask.rs`,
   `bits.rs` and `bitmap.rs` of `tessera-core` move there, and
   `tessera-core` exports them again; `tessera-capi` takes the table
-  from the new crate.
-- C API: none; `include/tessera/table.h` does not change.
+  from the new crate. The grouping node of C takes the payloads of its
+  generic states from the C API, and the spills of the grouping and the
+  join read a chunk's used mark through it, not by offsets of their
+  own.
+- C API: `include/tessera/table.h` gains `tess_table_chunk_used`; the
+  requirement "The used mark of a chunk" of `hash-table` describes it.
 - SQL suites: none change.
 - Tests: `crates/tessera-kernels/tests/table.rs` is split between the
   crate and the kernels; new: Kani proofs, the matrix of damage, fuzz
