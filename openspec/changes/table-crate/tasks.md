@@ -14,7 +14,7 @@ commit of sections 2 and 3 is checked by `make rust-check` and by
 - [x] 1.1 Write the proposal, the spec, the design and the tasks of
       this change. Check: `openspec validate table-crate --strict`;
       `.github/scripts/check-specs.sh`
-- [ ] 1.2 Add to `CONTRIBUTING.md` and `openspec/config.yaml` the fifth
+- [x] 1.2 Add to `CONTRIBUTING.md` and `openspec/config.yaml` the fifth
       surface of a spec, the public API of a crate of the workspace
       meant for use outside Tessera, one with `publish = true`; that
       such an API changing needs a change; and that a crate's

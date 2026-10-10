@@ -101,7 +101,8 @@ Before a result is copied into `test/expected/`, read its diff: every
 A change (`/opsx:propose` in Claude Code, `$openspec-propose` in Codex)
 is required when
 
-- behavior, the C API or a format changes;
+- behavior, the C API, a format or the public API of a crate meant
+  for use outside Tessera changes;
 - work on speed needs a measurement plan;
 - the work is larger than one pull request.
 
@@ -140,16 +141,24 @@ the findings, and what is left.
 
 ## Specs
 
-- A spec names four surfaces only: the public C API; behavior visible
+- A spec names five surfaces only: the public C API; behavior visible
   from SQL (the plan chosen, results, EXPLAIN, settings, SQLSTATE);
-  formats on disk and in shared memory; the kernels' entry points.
-  Internal names and steps go to `design.md`.
+  formats on disk and in shared memory; the kernels' entry points; the
+  public API of a crate of the workspace meant for use outside Tessera,
+  one with `publish = true` in its `Cargo.toml`. Internal names and
+  steps go to `design.md`.
 - One promise in a requirement. The rules of a format (its fields,
   codes, widths and limits), the drawings of its layouts, the lists of
   what is supported and the error codes are written once, in the spec.
   A design explains the idea, with a picture of the whole or an
   example, and points to the spec for a rule or a layout; it does not
   repeat them.
+- The documentation of a crate meant for use outside Tessera is a map
+  of its API for a caller: what each item is for, what it takes and
+  gives, who owns what and for how long, its safety duties and the kind
+  of error it returns, and examples where they help. For a rule, a
+  layout or a limit it links to the requirement of the crate's spec and
+  does not repeat it.
 - Every scenario ends with the test that shows it:
   ``- **Verified by:** `path::text` ``, where the text occurs in the
   file: a test's name, or a mark `-- spec: <capability>/<scenario>` in
@@ -230,6 +239,10 @@ folder, `contract.md`, beside `spec.md` and `design.md`.
   by. `check-specs.sh` does not read contracts yet. The pull request
   that adds the first `contract.md` also adds these checks: the
   "Checked by" of every rule, and the reading from the base.
+- A part that a change makes keeps its contract in the change's folder,
+  `openspec/changes/<change>/contract.md`, from the change's first
+  steps; the checks read it there, and the close moves it beside the
+  part's spec.
 - When the maintainer has to set a part's architecture right by hand,
   the class of the fault is named, and the cheapest reusable means
   that would have caught it earlier is added: a check, a probe, a
