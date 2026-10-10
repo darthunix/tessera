@@ -17,6 +17,8 @@
 # 6. No line of AGENTS.md, of CONTRIBUTING.md or of the Markdown under
 #    openspec/ runs past 80 columns, but in a code block or where it
 #    cannot be broken.
+# 7. The architecture contracts, by check-contracts.sh: against the base
+#    of a pull request when SPECS_BASE names it.
 # Run from the root of the repository.
 set -eu
 
@@ -200,6 +202,8 @@ done > "$list"
 while read -r wide; do
     error "$wide"
 done < "$list"
+
+.github/scripts/check-contracts.sh ${SPECS_BASE:+"$SPECS_BASE"} || fail=1
 
 echo "check-specs: $total scenarios, $review review only, $pending pending"
 exit "$fail"
