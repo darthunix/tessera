@@ -36,8 +36,10 @@ Read in this order, and stop when the question is answered.
 2. `openspec/specs/<capability>/`: one folder for each part of the
    system. `spec.md` says what the part promises, and every scenario
    names the test that shows it. `design.md` says how the part is built
-   and why, from the whole to the details. The parts are being described
-   one by one: a part without a folder is still described in `docs/`.
+   and why, from the whole to the details. `contract.md`, where a part
+   has one, holds the rules of its build (see "Architecture
+   contracts"). The parts are being described one by one: a part
+   without a folder is still described in `docs/`.
 3. [docs/](docs): guides for authors of extensions on top of Tessera
    (bridge, node contract, writing a node, functions, kernels, runtime,
    sources) and, until they move to their capabilities, the design of
@@ -110,9 +112,9 @@ a change or of the roadmap, not in code.
 
 Existing code gets its spec the same way, one capability in a pull
 request, at most ten requirements, with the text of its design moved to
-`design.md` in a commit of its own. Such a pull request ends with
-"Decisions needed": every disagreement of the documents, the code and
-the tests, and every promise without a test.
+`design.md` in a commit of its own. The Decision of such a pull
+request lists every disagreement of the documents, the code and the
+tests, and every promise without a test.
 
 ## Closing a change
 
@@ -153,20 +155,86 @@ the findings, and what is left.
   file: a test's name, or a mark `-- spec: <capability>/<scenario>` in
   an SQL suite. `review only — <reason>` when no test can show it;
   `pending` only in an open change.
-- A spec and a design are written for a reader who knows nothing about
-  the part and wants to understand it, in simple English: short
-  sentences, common words, one thought in a sentence. They explain every
-  term where it first appears. In a spec a layout of data is a drawing
-  in a code block, with its offsets and sizes.
+- A spec, a design and a contract are written for a reader who knows
+  nothing about the part and wants to understand it, in simple English:
+  short sentences, common words, one thought in a sentence. They explain
+  every term where it first appears. In a spec a layout of data is a
+  drawing in a code block, with its offsets and sizes.
 - `design.md` goes from the whole to the details: what the part is for
   and the problem it solves; the engineering goals and what each choice
   costs; the design as a whole, with a picture; then each piece, with
   the alternatives that were refused. `## Files` and `## Tests` close
   it; the check fails when a file it names is gone.
-- Both are self-contained. They outlive the working plan, the roadmap,
-  the changes and the pull requests, so they cite none of them and give
-  no dates: what a reader needs is written in the document itself. The
-  check fails on such a reference.
+- All three are self-contained. They outlive the working plan, the
+  roadmap, the changes and the pull requests, so they cite none of them
+  and give no dates: what a reader needs is written in the document
+  itself. The check fails on such a reference.
+
+## Architecture contracts
+
+A spec says what a part promises from outside. A part also keeps rules
+of its own build that no test of its behavior shows: the crates it may
+depend on, the one way to its memory, what its hot calls must not do.
+Code can pass every test and break such a rule, and a series of pull
+requests, each sound on its own, can wear a boundary away. A part
+writes these rules as its architecture contract, a third file of its
+folder, `contract.md`, beside `spec.md` and `design.md`.
+
+- A rule protects a property and says why it matters, not where the
+  code lies. "The probe of a table can change without a change of the
+  join's semantics or of the PostgreSQL layer" is a rule; "the join
+  lives in `join/hash.rs`" is not. A rule forbids what would be wrong
+  and leaves the right structure to the work. One rule, one sentence
+  and its reason.
+- Each rule ends with how it is checked. Most rules are checked by CI.
+  - ``- **Checked by:** `path::text` ``: a check that runs in CI, named
+    as a "Verified by" names a test.
+  - `probe — <the change>`: the change is made on a branch that is never
+    merged, and the parts and interfaces it touched are counted. A probe
+    runs when the part's boundaries change, and before a release.
+  - `agent review — <a procedure and what it reports>`: the reviewer
+    does something whose result can be seen, such as listing every
+    module and interface a named change would touch. "Check that the
+    design is clean" is not a procedure.
+  - `maintainer — <the question>`.
+  - `pending`, only in an open change.
+- A contract also names the changes the part is likely to see, in its
+  own words, naming no entry of the roadmap. For each it names the
+  parts and interfaces the change would touch. The pull request that
+  makes such a change compares what it touched with this forecast, and
+  updates the forecast.
+- A change that touches a part or an interface its forecast did not
+  name, or that adds a dependency between parts, says why under
+  "Architecture". Each such deviation goes into an entry of the roadmap
+  for simplifying that part, which the first one creates, and names the
+  boundary it crossed. A forecast is a guess, so two deviations over
+  one boundary call for a diagnosis, not a rework: the next pull
+  request on the part first finds whether that boundary has worn away.
+  If it has, the pull request simplifies before it adds anything; if
+  not, it corrects the forecast and says on what evidence.
+- A part's responsibilities are the invariants it keeps. When a part
+  takes on a new one, the pull request says under "Architecture" why
+  the part keeps it rather than a new part or a neighbor. One invariant
+  has one owner: a rule kept in several parts, such as one rule of
+  eviction written in three nodes, means its owner is missing.
+- A change that breaks a rule is reworked until it keeps it. When no
+  rework keeps it, the agent may propose to change the rule, in a pull
+  request that changes only the contract. The proposal says what the
+  rule costs, which ways were weighed, why the work cannot keep it,
+  and what is kept or replaced. The maintainer decides. An exception
+  for a while is such a pull request too: it narrows the rule and says
+  when the narrowing ends, and its reason goes into the part's
+  `design.md` as a decision, with what was, what will be and why.
+- The checks of a contract read it from the base of a pull request,
+  not from its head, so a change cannot loosen the rule it is judged
+  by. `check-specs.sh` does not read contracts yet. The pull request
+  that adds the first `contract.md` also adds these checks: the
+  "Checked by" of every rule, and the reading from the base.
+- When the maintainer has to set a part's architecture right by hand,
+  the class of the fault is named, and the cheapest reusable means
+  that would have caught it earlier is added: a check, a probe, a
+  forecast or a sharper rule. A rule is added for a new class of
+  fault, not for each feature, so a contract stays short.
 
 ## Documents
 
@@ -194,6 +262,28 @@ longer. `check-specs.sh` checks this file, `AGENTS.md` and `openspec/`.
   older commits cite items of the
   [working plan](docs/plan/README.md). No attribution lines of tools or
   agents in messages or pull requests.
+- The description of a pull request is an index of evidence. Each item
+  of Behavior, Safety, Architecture and Performance points to something
+  a tool made: a test, a command and its log, the id of a run. The
+  sections:
+  - **Behavior**: the tests that show it, and what they compare with;
+  - **Safety**: Miri, loom, the sanitizers or a proof, for unsafe code,
+    the C boundary and concurrency;
+  - **Architecture**: what the change did to dependencies, the public
+    API, unsafe code and the rules of a contract, and what it touched
+    against the forecast;
+  - **Performance**: the machine code, the counters or the times
+    against the base, when a hot path changes, with every way tried,
+    the failed ones too;
+  - **Residual risks**: what was not checked, and why;
+  - **Decision**: why the change can be taken; each trade-off settled
+    without the maintainer, with the rule that settles it; and what the
+    maintainer must decide.
+
+  An item may point to a commit's `Validation:` paragraph instead of
+  repeating its commands. A pull request without code gives the index
+  in a line. The pull request that closes a change adds, under
+  Decision, what "Closing a change" asks.
 - A commit brings with it: comments on new public types and functions
   (ownership, lifetime, errors, concurrent access), tests, a comparison
   of the native path with the Datum path for a new type or operation,
@@ -209,9 +299,29 @@ proposed.
 
 ## Stop and ask
 
-- A fix needs a new public API, another model of ownership or a new
-  architecture.
-- A measurement confirms an excess over a threshold.
+An agent decides alone what the specs, the contracts and these rules
+settle: the structure of the code and the ownership of memory inside a
+part, the choice between ways that pass the same checks, the fix of a
+review's finding that they settle, a test to add. A finding they do not
+settle goes to "Not placed" in the roadmap.
+
+When a way fails a check, such as a loop that compiles longer without a
+reason or a confirmed excess over a threshold, the agent goes on while
+each new try improves the failing measure or rules out a cause. Each
+try is a hypothesis written down before it is tried, never a rerun of
+the same way. The search ends after two tries in a row that do
+neither, or after about an hour. A failure that a rule of a contract
+causes is not searched around: the rule is the question.
+
+The agent stops and asks, with the evidence and the ways it weighed,
+when:
+
+- A fix changes a boundary: a public API (the C API, behavior seen from
+  SQL, the public API of a crate), the ownership of memory across the C
+  boundary or between parts, or a rule of a contract.
+- Ways differ by a trade-off that no rule settles.
+- The search above ends without a way that passes.
+- A risk to query results or to data remains that no check can close.
 - A spec, a design, a document, the code and a test disagree.
 - An action cannot be undone: deleting a branch or a cluster, rewriting
   pushed history, merging.

@@ -100,8 +100,10 @@ asking for one:
   missing statistic may have left the query to the core. Profile under
   the settings of the run. An aggregate the outer query does not read is
   dropped by the planner, so refer to it outside.
-- **A confirmed excess over a threshold stops the work** for profiling
-  and a discussion. A run that was not agreed on is not a passed check.
+- **A confirmed excess over a threshold stops the work** for profiling.
+  What follows is in "Stop and ask" of
+  [CONTRIBUTING.md](../CONTRIBUTING.md). A run that was not agreed on
+  is not a passed check.
 
 ## Where runs are kept
 
