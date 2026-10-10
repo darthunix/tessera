@@ -342,6 +342,12 @@ tess_spill_write(TessSpill *spill, int partition, TessSpillKind kind,
 	TessSpillHeader header = {0};
 	uint64		bytes[TESS_SPILL_HEADER_SIZE / sizeof(uint64)];
 	bool		pack;
+	/*
+	 * The body was packed in place, into the buffer at `at`: known from
+	 * where it was packed, not from its address, since a block aside may
+	 * lie right past the end of a full buffer, where `at` then points.
+	 */
+	bool		in_buffer = false;
 	char	   *at;
 	uint64		offset;
 	Size		stored;
@@ -379,8 +385,8 @@ tess_spill_write(TessSpill *spill, int partition, TessSpillKind kind,
 			flush(spill);
 			at = spill->buffer + sizeof(bytes);
 		}
-		out = spill->buffered + sizeof(bytes) + room <= spill->buffer_len ?
-			at : scratch(spill, room);
+		in_buffer = spill->buffered + sizeof(bytes) + room <= spill->buffer_len;
+		out = in_buffer ? at : scratch(spill, room);
 
 		if (spill->kernels->spill_columns_pack == NULL)
 			elog(ERROR, "Tessera spill set requires the kernels of chunks of columns");
@@ -407,8 +413,8 @@ tess_spill_write(TessSpill *spill, int partition, TessSpillKind kind,
 	if (pack)
 	{
 		Size		packed;
-		char	   *out = spill->buffered + sizeof(bytes) + len <= spill->buffer_len ?
-			at : scratch(spill, len);
+		bool		fits = spill->buffered + sizeof(bytes) + len <= spill->buffer_len;
+		char	   *out = fits ? at : scratch(spill, len);
 
 		if (spill->kernels->spill_pack(body, len, out, len, &packed,
 									   &status) != TESS_OK)
@@ -419,24 +425,27 @@ tess_spill_write(TessSpill *spill, int partition, TessSpillKind kind,
 			if (spill->kernels->spill_header_write(bytes, sizeof(bytes), &header,
 												   spill->max_len, &status) != TESS_OK)
 				tess_status_report(&status);
+			in_buffer = fits;
 			body = out;
 			len = packed;
 		}
 	}
 	stored = sizeof(bytes) + len;
 	offset = spill->end;
-	/* A block that does not fit what the buffer has left starts a new buffer. */
+	/*
+	 * A block that does not fit what the buffer has left starts a new
+	 * buffer. One packed in place fit, so only a block aside comes here.
+	 */
 	if (spill->buffered + stored > spill->buffer_len)
 	{
-		/* Packed into the buffer, it fit: only a block aside can be here. */
-		Assert(body != at);
+		Assert(!in_buffer);
 		flush(spill);
 		at = spill->buffer + sizeof(bytes);
 	}
 	if (stored <= spill->buffer_len)
 	{
 		memcpy(spill->buffer + spill->buffered, bytes, sizeof(bytes));
-		if (len > 0 && body != at)
+		if (len > 0 && !in_buffer)
 			memcpy(at, body, len);
 		spill->buffered += stored;
 	}
