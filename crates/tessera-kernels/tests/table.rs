@@ -16,9 +16,10 @@ use tessera_kernels::decimal::{
 use tessera_kernels::int32::{self, NullKeys, hash_combine, murmurhash32};
 use tessera_kernels::ops::ArithmeticError;
 use tessera_kernels::table::{
-    Batch, CHUNK_HEADER, Cursor, ExtremeSlot, FORMAT_VERSION, Fold, KeyKind, KeySource, LocalTable,
-    MAX_CHUNK_LEN, MAX_KEYS, Marks, Slot, SumSlot, Table, TableConfig, UNIT_BITS, bloom,
-    index_size, mark, mark_words, normalize_word, record_bytes, record_bytes_of, scan_unmarked,
+    Batch, CHUNK_HEADER, Cursor, ExtremeSlot, FORMAT_VERSION, Fold, HELD, KeyKind, KeySource,
+    LocalTable, MAX_CHUNK_LEN, MAX_KEYS, Marks, Slot, SumSlot, Table, TableConfig, UNIT_BITS,
+    bloom, index_size, mark, mark_words, normalize_word, record_bytes, record_bytes_of,
+    scan_unmarked,
 };
 use tessera_testing::{edge, flags, integer, property, values, words};
 
@@ -1225,6 +1226,51 @@ fn a_payload_cursor_changes_payloads_by_reference() -> Result<()> {
     for &offset in &offsets[..2] {
         assert_eq!(table.table()?.record(offset)?.payload, 7u64.to_ne_bytes());
     }
+    Ok(())
+}
+
+#[test]
+fn a_payload_cursor_holds_checked_references_to_open_later() -> Result<()> {
+    let values: Vec<i32> = (0..40).collect();
+    let keys = [ColumnView::try_new(&values, None)?];
+    let hashes: Vec<u32> = values.iter().map(|&value| hash_i32(value)).collect();
+    let mut table = local(&ONE_INT4, 40)?;
+    let (offsets, _) = resolve_all(&mut table, &hashes, &keys[..])?;
+    {
+        let mut writer = table.table_mut()?;
+        let mut payloads = writer.payloads();
+        assert!(payloads.held(0).is_err(), "a slot that holds nothing");
+        // Check the first HELD references now, then open them in reverse.
+        for (slot, &offset) in offsets[..HELD].iter().enumerate() {
+            payloads.hold(slot, offset)?;
+        }
+        for slot in (0..HELD).rev() {
+            payloads
+                .held(slot)?
+                .copy_from_slice(&(slot as u64 + 100).to_ne_bytes());
+        }
+        assert!(payloads.hold(HELD, offsets[0]).is_err(), "past the slots");
+        assert!(payloads.held(HELD).is_err(), "past the slots");
+        assert!(payloads.hold(0, offsets[0] + 1).is_err(), "inside a record");
+        // A slot that took a new reference opens that one.
+        payloads.hold(0, offsets[HELD])?;
+        payloads.held(0)?.copy_from_slice(&7u64.to_ne_bytes());
+    }
+    for (slot, &offset) in offsets[..HELD].iter().enumerate().skip(1) {
+        let expected = slot as u64 + 100;
+        assert_eq!(
+            table.table()?.record(offset)?.payload,
+            expected.to_ne_bytes()
+        );
+    }
+    assert_eq!(
+        table.table()?.record(offsets[0])?.payload,
+        100u64.to_ne_bytes()
+    );
+    assert_eq!(
+        table.table()?.record(offsets[HELD])?.payload,
+        7u64.to_ne_bytes()
+    );
     Ok(())
 }
 
