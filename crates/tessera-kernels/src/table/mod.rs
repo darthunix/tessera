@@ -110,7 +110,7 @@ use anyhow::{Result, anyhow, ensure};
 use tessera_core::{ColumnReader, RowMask, RowMaskView};
 
 pub use exclusive::{
-    Combine, CombineStop, Cursor, ExtremeSlot, Fold, MAX_SUMS, PayloadCursor, Slot, SumSlot,
+    Combine, CombineStop, Cursor, ExtremeSlot, Fold, HELD, MAX_SUMS, PayloadCursor, Slot, SumSlot,
 };
 pub use header::{
     CHUNK_HEADER, FORMAT_VERSION, HEADER_SIZE, KeyKind, MAX_CHUNK_LEN, MAX_CHUNKS, MAX_KEYS,
@@ -1007,7 +1007,7 @@ impl<'a> TableMut<'a> {
         rows: &RowMaskView<'_>,
         sums: &mut [SumSlot<'_, T>],
     ) -> Result<()> {
-        exclusive::sum_terms(&self.0.region, &self.0.layout, offsets, rows, sums)
+        exclusive::sum_terms(self, offsets, rows, sums)
     }
 
     /// Merge each selected row's partial states into the sum or average
@@ -1020,7 +1020,7 @@ impl<'a> TableMut<'a> {
         rows: &RowMaskView<'_>,
         sums: &mut [SumSlot<'_, P>],
     ) -> Result<()> {
-        exclusive::sum_partials(&self.0.region, &self.0.layout, offsets, rows, sums)
+        exclusive::sum_partials(self, offsets, rows, sums)
     }
 
     /// Offer each selected row's term to the `min` or `max` of numeric
@@ -1033,7 +1033,7 @@ impl<'a> TableMut<'a> {
         rows: &RowMaskView<'_>,
         slot: &mut ExtremeSlot<'_, T>,
     ) -> Result<()> {
-        exclusive::extremes(&self.0.region, &self.0.layout, offsets, rows, slot)
+        exclusive::extremes(self, offsets, rows, slot)
     }
 
     /// Visit the records from `cursor` on, chunk by chunk in the order

@@ -42,7 +42,7 @@ commit of sections 2 and 3 is checked by `make rust-check` and by
       counts and the folds of int2, int4 and int8 states go through it.
       Check: the aggregate tests of
       `crates/tessera-kernels/tests/table.rs`; machine code
-- [ ] 2.3 Add to that cursor the check of a reference now and its
+- [x] 2.3 Add to that cursor the check of a reference now and its
       payload later, and make the sums and extremes of numeric states go
       through it. Check: the aggregate tests; machine code
 - [ ] 2.4 Add the merge of a chunk's records by a caller's rule, and

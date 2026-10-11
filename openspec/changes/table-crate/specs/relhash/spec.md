@@ -239,7 +239,8 @@ check, the call fails; the payloads it changed before stay changed.
 - **WHEN** a writer checks the references of a batch, then opens their
   payloads one by one
 - **THEN** each payload is the one of the record its reference names
-- **Verified by:** pending
+- **Verified by:**
+  `crates/tessera-kernels/tests/table.rs::a_payload_cursor_holds_checked_references_to_open_later`
 
 #### Scenario: Two payloads open at once
 - **WHEN** a program keeps one payload of a cursor open and opens
