@@ -767,7 +767,7 @@ impl<'a> Table<'a> {
     /// them and gives the references in order. The chunks must not change
     /// meanwhile.
     pub fn sort_items(&self, keys: &[crate::sort::SortKey], items: &mut [u64]) -> Result<usize> {
-        order::items(&self.region, &self.layout, keys, items)
+        order::items(self, keys, items)
     }
 
     /// Push the item of each record `refs[row]` of `rows` into a top-N
@@ -782,7 +782,7 @@ impl<'a> Table<'a> {
         heap: &mut [u64],
         len: &mut usize,
     ) -> Result<()> {
-        order::top_push(&self.region, &self.layout, keys, refs, rows, heap, len)
+        order::top_push(self, keys, refs, rows, heap, len)
     }
 
     /// Fill a Bloom filter of [`bloom::words_for`] this table's records
@@ -805,6 +805,41 @@ impl<'a> Table<'a> {
         Ok(Access::new(&self.region, &self.layout)
             .locate(offset)?
             .record())
+    }
+
+    /// A cursor that reads the records references name, made once a call:
+    /// it reads the table's header once, and checks each reference as a
+    /// lookup checks it.
+    #[inline(always)]
+    pub fn records(&self) -> RecordCursor<'_> {
+        RecordCursor {
+            access: Access::new(&self.region, &self.layout),
+        }
+    }
+
+    /// Visit the records from `cursor` on, chunk by chunk in the order
+    /// they were appended, as many as `out` holds: their references fill
+    /// `out`, the count is returned and the cursor moves past them; 0
+    /// means the walk is over.
+    pub fn scan(&self, cursor: &mut Cursor, out: &mut [u32]) -> Result<usize> {
+        exclusive::scan(&self.region, &self.layout, cursor, out)
+    }
+}
+
+/// A cursor that reads the records of a table by reference, made once a
+/// call by [`Table::records`]: it keeps the table's access, whose fields
+/// the loops hold in registers. The records it gives live as long as the
+/// table's borrow.
+pub struct RecordCursor<'t> {
+    access: Access<'t, RawRegion>,
+}
+
+impl<'t> RecordCursor<'t> {
+    /// The record at `offset`: an error for a reference that names no
+    /// record of the table.
+    #[inline(always)]
+    pub fn record(&mut self, offset: u32) -> Result<Record<'t>> {
+        Ok(self.access.locate(offset)?.record())
     }
 }
 
@@ -1045,14 +1080,6 @@ impl<'a> TableMut<'a> {
         slot: &mut ExtremeSlot<'_, T>,
     ) -> Result<()> {
         exclusive::extremes(self, offsets, rows, slot)
-    }
-
-    /// Visit the records from `cursor` on, chunk by chunk in the order
-    /// they were appended, as many as `out` holds: their references fill
-    /// `out`, the count is returned and the cursor moves past them; 0
-    /// means the walk is over.
-    pub fn scan(&self, cursor: &mut Cursor, out: &mut [u32]) -> Result<usize> {
-        exclusive::scan(&self.0.region, &self.0.layout, cursor, out)
     }
 
     /// Move the table to a new index of `len` bytes at `index`, for

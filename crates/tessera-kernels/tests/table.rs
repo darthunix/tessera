@@ -1275,6 +1275,29 @@ fn a_payload_cursor_holds_checked_references_to_open_later() -> Result<()> {
 }
 
 #[test]
+fn a_record_cursor_reads_records_by_reference() -> Result<()> {
+    let values: Vec<i32> = (0..100).map(|row| row % 10).collect();
+    let keys = [ColumnView::try_new(&values, None)?];
+    let hashes: Vec<u32> = values.iter().map(|&value| hash_i32(value)).collect();
+    let mut table = local(&ONE_INT4, 20)?;
+    let (offsets, _) = resolve_all(&mut table, &hashes, &keys[..])?;
+    let reader = table.table()?;
+    let mut records = reader.records();
+    for (row, &offset) in offsets.iter().enumerate() {
+        let record = records.record(offset)?;
+        assert_eq!(record.keys, &[(row % 10) as i64]);
+        assert_eq!(record.hash, hashes[row]);
+    }
+    assert!(records.record(offsets[0] + 1).is_err(), "inside a record");
+    assert!(records.record(0).is_err(), "reference 0");
+    // The records it gave outlive the next read.
+    let first = records.record(offsets[0])?;
+    let second = records.record(offsets[1])?;
+    assert_ne!(first.keys, second.keys);
+    Ok(())
+}
+
+#[test]
 fn each_payload_hands_the_selected_rows_payloads_in_turn() -> Result<()> {
     let values: Vec<i32> = (0..100).map(|row| row % 10).collect();
     let keys = [ColumnView::try_new(&values, None)?];
