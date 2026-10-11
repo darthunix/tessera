@@ -45,7 +45,7 @@ commit of sections 2 and 3 is checked by `make rust-check` and by
 - [x] 2.3 Add to that cursor the check of a reference now and its
       payload later, and make the sums and extremes of numeric states go
       through it. Check: the aggregate tests; machine code
-- [ ] 2.4 Add the merge of a chunk's records by a caller's rule, and
+- [x] 2.4 Add the merge of a chunk's records by a caller's rule, and
       make the merge of groups read back go through it, with its kinds
       of state as the rule. Check: the merge tests; machine code
 - [ ] 2.5 Add the cursor that reads a record by reference, and make the
