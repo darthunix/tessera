@@ -23,10 +23,10 @@ use tessera_capi::c::{
     tess_sort_layout, tess_sort_merge, tess_table_accumulate, tess_table_accumulate_sums,
     tess_table_append, tess_table_append_columns, tess_table_append_partitioned_columns,
     tess_table_bloom, tess_table_bloom_words, tess_table_bloom_words_within, tess_table_chunk_init,
-    tess_table_clear_key, tess_table_combine, tess_table_create, tess_table_find_or_insert,
-    tess_table_format_version, tess_table_gather, tess_table_gather_key, tess_table_gather_words,
-    tess_table_layout, tess_table_link, tess_table_link_grouped, tess_table_mark,
-    tess_table_mark_words, tess_table_next_in_group, tess_table_next_match,
+    tess_table_chunk_used, tess_table_clear_key, tess_table_combine, tess_table_create,
+    tess_table_find_or_insert, tess_table_format_version, tess_table_gather, tess_table_gather_key,
+    tess_table_gather_words, tess_table_layout, tess_table_link, tess_table_link_grouped,
+    tess_table_mark, tess_table_mark_words, tess_table_next_in_group, tess_table_next_match,
     tess_table_next_unmarked, tess_table_payloads, tess_table_probe, tess_table_record,
     tess_table_regrow, tess_table_scan, tess_table_size, tess_table_stats,
     tess_table_try_build_bloom,
@@ -4147,4 +4147,69 @@ fn a_debug_build_checks_every_chunk() -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// As for [`tess_table_chunk_used`], with the mark it gives or the value
+/// `used` held before, which a refused call keeps.
+///
+/// # Safety
+///
+/// As for [`tess_table_chunk_used`].
+unsafe fn mark_of(base: *const u8, len: usize, record_size: usize) -> (Code, usize) {
+    let (mut used, mut status) = (usize::MAX, Status::new());
+    // SAFETY: the caller's contract.
+    let code =
+        unsafe { tess_table_chunk_used(base, len, record_size, &raw mut used, &raw mut status) };
+    (code, used)
+}
+
+#[test]
+fn the_mark_of_a_chunk() {
+    let mut block = [0_u64; 16];
+    let base = block.as_mut_ptr().cast::<u8>();
+    let mut status = Status::new();
+    // SAFETY: a local block of 128 bytes, aligned to 8, this test alone uses.
+    unsafe {
+        let code = tess_table_chunk_init(base, 64, &raw mut status);
+        assert_eq!(code, Code::Ok, "{}", status.message());
+        assert_eq!(mark_of(base, 64, 32), (Code::Ok, 8), "an empty chunk");
+        // Three records of 32 bytes after the mark.
+        base.cast::<u64>().write(8 + 3 * 32);
+        assert_eq!(mark_of(base, 128, 32), (Code::Ok, 104));
+    }
+}
+
+#[test]
+fn a_mark_that_ends_no_record() {
+    let mut block = [0_u64; 9];
+    let base = block.as_mut_ptr().cast::<u8>();
+    // SAFETY: a local block of 72 bytes, aligned to 8, this test alone uses;
+    // every call reads at most its first 64.
+    unsafe {
+        for mark in [0_u64, 20, 72] {
+            base.cast::<u64>().write(mark);
+            assert_eq!(
+                mark_of(base, 64, 32),
+                (Code::InvalidArgument, usize::MAX),
+                "a mark of {mark}"
+            );
+        }
+        base.cast::<u64>().write(40);
+        assert_eq!(mark_of(base, 64, 32), (Code::Ok, 40));
+        for record_size in [0, 12] {
+            assert_eq!(
+                mark_of(base, 64, record_size),
+                (Code::InvalidArgument, usize::MAX),
+                "records of {record_size} bytes"
+            );
+        }
+        assert_eq!(
+            mark_of(base.wrapping_add(4), 64, 32),
+            (Code::InvalidArgument, usize::MAX),
+            "a block not aligned to 8"
+        );
+        let mut status = Status::new();
+        let code = tess_table_chunk_used(base, 64, 32, ptr::null_mut(), &raw mut status);
+        assert_eq!(code, Code::InvalidArgument, "no place for the mark");
+    }
 }

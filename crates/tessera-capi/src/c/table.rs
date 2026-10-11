@@ -19,7 +19,7 @@ use tessera_kernels::table::{
     PayloadColumns, Slot, SumSlot, Table, TableConfig, TableMut, UNIT_BITS, VERSION_OFFSET,
     append_columns_to, append_partitioned_columns_to, append_to,
     bloom::SharedFilter,
-    index_size, init_chunk, mark, mark_words, normalize_word, payload_null_words,
+    chunk_used, index_size, init_chunk, mark, mark_words, normalize_word, payload_null_words,
     phases::{Participant, SharedCounters, StopWord},
     record_bytes_of, scan_unmarked, split_to,
 };
@@ -515,6 +515,31 @@ pub unsafe extern "C" fn tess_table_chunk_init(
 ) -> Code {
     // SAFETY: the caller's contract.
     unsafe { guard(status, || init_chunk(base, len)) }
+}
+
+/// `tess_table_chunk_used`: the used mark of a chunk, checked.
+///
+/// # Safety
+///
+/// `base` must be valid for reads of `len` bytes when it is aligned to 8
+/// and `len` a chunk's length, its first word not written during the
+/// call; `used` must be writable; `status` as for every entry point.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tess_table_chunk_used(
+    base: *const u8,
+    len: usize,
+    record_size: usize,
+    used: *mut usize,
+    status: *mut Status,
+) -> Code {
+    // SAFETY: the caller's contract.
+    unsafe {
+        guard(status, || {
+            let used = used.as_mut().context("a null used mark")?;
+            *used = chunk_used(base, len, record_size)?;
+            Ok(())
+        })
+    }
 }
 
 /// `tess_table_append`: append the rows of `pending` to chunk `chunk` of
