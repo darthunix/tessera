@@ -301,7 +301,8 @@ extern void agg_generic_combine(TessAggState *state, GenericAgg *generic,
 								Datum value, bool isnull);
 extern void agg_generic_accumulate(TessAggState *state, GenericAgg *generic,
 								   const TessRowMask *rows);
-extern uint64 *agg_record_payload(TessAggState *state, uint32 ref);
+extern void agg_record_payloads(TessAggState *state, const uint32 *refs,
+								const TessRowMask *rows, uint8 **payloads);
 #ifdef HAVE_INT128
 extern void agg_fast_merge(TessAggState *state, GenericAgg *generic,
 						   const TessDatumColumn *column, const TessRowMask *rows);

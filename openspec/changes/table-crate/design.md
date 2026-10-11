@@ -379,14 +379,21 @@ merged, and its count of what it touched goes into this design.
 
 The grouping node of C breaks the rule of references today: it finds
 the payload of a generic aggregate's state by an offset of its own,
-after the crate has checked one record. It takes
-the payloads from `tess_table_payloads` instead, one call for the rows
-of a batch that need them. The spills of the grouping and of the join
-read the used mark of a chunk, its first 8 bytes, by themselves. They
-read it through a new call of the C API instead,
-`tess_table_chunk_used`, which checks the mark against the chunk's
-length and the size of its records, as `tess_table_chunk_init` makes
-an empty chunk.
+after the crate has checked one record. It takes the payloads from
+`tess_table_payloads` instead, one call for the rows of a batch that
+need them. The check of each reference makes the loop of such a
+grouping about 25 instructions a row longer, and a grouping by a
+generic aggregate, such as `max` of text, about 5 % slower. That cost
+is taken, as the one loop that grows against the rule of no cost to
+Tessera. The refused way: the call that finds or inserts a row's record
+hands out its payload too, which the crate has just checked. It saves
+the second check, but changes the C API for this one loop.
+
+The spills of the grouping and of the join read the used mark of a
+chunk, its first 8 bytes, by themselves. They read it through a new
+call of the C API instead, `tess_table_chunk_used`, which checks the
+mark against the chunk's length and the size of its records, as
+`tess_table_chunk_init` makes an empty chunk.
 
 ### Speed
 

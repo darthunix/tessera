@@ -151,6 +151,7 @@ reserve_rows(TessAggState *state, int nrows)
 		return;
 	state->hashes = MemoryContextAlloc(state->table_context, sizeof(uint32) * nrows);
 	state->offsets = MemoryContextAlloc(state->table_context, sizeof(uint32) * nrows);
+	state->payloads = MemoryContextAlloc(state->table_context, sizeof(uint8 *) * nrows);
 	state->valid_bits = MemoryContextAlloc(state->table_context, sizeof(uint64) * nwords);
 	state->pending_bits = MemoryContextAlloc(state->table_context, sizeof(uint64) * nwords);
 	state->inserted_bits = MemoryContextAlloc(state->table_context, sizeof(uint64) * nwords);
@@ -618,7 +619,7 @@ group_value_into(TessAggState *state, int index, int group, Datum *datum, bool *
 #ifdef HAVE_INT128
 				if (value->generic->sum_state)
 				{
-					const uint64 *words = agg_record_payload(state, state->walked[group]) +
+					const uint64 *words = (const uint64 *) state->walked_payloads[group] +
 						value->slot;
 
 					*datum = state->partial ?
@@ -629,7 +630,7 @@ group_value_into(TessAggState *state, int index, int group, Datum *datum, bool *
 				}
 				if (value->generic->extreme_state)
 				{
-					const uint64 *words = agg_record_payload(state, state->walked[group]) +
+					const uint64 *words = (const uint64 *) state->walked_payloads[group] +
 						value->slot;
 
 					*datum = agg_extreme_state_value(words, isnull);
@@ -770,6 +771,9 @@ next_chunk(TessAggState *state)
 													  sizeof(uint64) * state->values[index].slot,
 													  (Datum *) &state->state_words[index * AGG_GROUP_ROWS],
 													  &state->status));
+		/* Sum and extreme states are read from their records' payloads. */
+		if (state->has_generic)
+			agg_record_payloads(state, state->walked, &groups, state->walked_payloads);
 		return count;
 	}
 }
