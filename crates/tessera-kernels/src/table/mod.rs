@@ -109,7 +109,9 @@ use core::ops::Deref;
 use anyhow::{Result, anyhow, ensure};
 use tessera_core::{ColumnReader, RowMask, RowMaskView};
 
-pub use exclusive::{Combine, CombineStop, Cursor, ExtremeSlot, Fold, MAX_SUMS, Slot, SumSlot};
+pub use exclusive::{
+    Combine, CombineStop, Cursor, ExtremeSlot, Fold, MAX_SUMS, PayloadCursor, Slot, SumSlot,
+};
 pub use header::{
     CHUNK_HEADER, FORMAT_VERSION, HEADER_SIZE, KeyKind, MAX_CHUNK_LEN, MAX_CHUNKS, MAX_KEYS,
     TableConfig, UNIT_BITS, VERSION_OFFSET, index_size, record_bytes, record_bytes_of,
@@ -921,6 +923,14 @@ impl<'a> TableMut<'a> {
         exclusive::link_grouped(&self.0.region, &self.0.layout, chunk, from)
     }
 
+    /// A cursor over the payloads of the table's records, to change them
+    /// by reference, one at a time: made once a call, it reads the table's
+    /// header once.
+    #[inline(always)]
+    pub fn payloads(&mut self) -> PayloadCursor<'_> {
+        PayloadCursor::new(&mut self.0)
+    }
+
     /// The payload of the record at a reference, to change in place.
     pub fn payload_mut(&mut self, offset: u32) -> Result<&mut [u8]> {
         exclusive::payload_mut(&self.0.region, &self.0.layout, offset)
@@ -953,7 +963,7 @@ impl<'a> TableMut<'a> {
     /// row's record: `count(*)` of a grouped aggregate, whose rows hold
     /// the references [`TableMut::find_or_insert`] gave them.
     pub fn count_rows(&mut self, offsets: &[u32], rows: &RowMaskView<'_>, at: usize) -> Result<()> {
-        exclusive::count_rows(&self.0.region, &self.0.layout, offsets, rows, at)
+        exclusive::count_rows(self, offsets, rows, at)
     }
 
     /// Add one to the `i64` at byte `at` for each selected row whose
@@ -965,7 +975,7 @@ impl<'a> TableMut<'a> {
         column: &C,
         at: usize,
     ) -> Result<()> {
-        exclusive::count_values(&self.0.region, &self.0.layout, offsets, rows, column, at)
+        exclusive::count_values(self, offsets, rows, column, at)
     }
 
     /// Fold each selected row's non-NULL value into the aggregate state
@@ -984,15 +994,7 @@ impl<'a> TableMut<'a> {
         C: ColumnReader<Value = V> + ?Sized,
         V: Into<i64> + Copy,
     {
-        exclusive::fold(
-            &self.0.region,
-            &self.0.layout,
-            offsets,
-            rows,
-            column,
-            fold,
-            slot,
-        )
+        exclusive::fold(self, offsets, rows, column, fold, slot)
     }
 
     /// Fold each selected row's terms into the sum or average states of
