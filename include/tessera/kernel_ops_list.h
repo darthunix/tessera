@@ -111,6 +111,7 @@
 	X(spill_columns_append) \
 	X(table_spill_splits) \
 	X(build_stop) \
-	X(build_stopped)
+	X(build_stopped) \
+	X(table_chunk_used)
 
 #endif							/* TESSERA_KERNEL_OPS_LIST_H */
