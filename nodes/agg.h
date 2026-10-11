@@ -140,9 +140,8 @@ typedef struct TessAggState
 	 */
 	bool		has_generic;
 	MemoryContext generic_output;
-	/* The bytes from a record's start to its payload, once known. */
-	Size		payload_delta;
-	bool		payload_known;
+	/* Per batch: the payloads of the records of the rows it reads. */
+	uint8	  **payloads;
 	/*
 	 * Such groups past hash_mem go the core's way: the table takes no new
 	 * group (frozen), and the rows of the groups it lacks go, their keys'
@@ -276,6 +275,8 @@ typedef struct TessAggState
 	bool		partial_spill;
 	/* GROUP BY: the bytes of a group's record (tess_table_record_size). */
 	Size		record_size;
+	/* The payloads of the walk's groups, for the sum and extreme states. */
+	uint8	   *walked_payloads[AGG_GROUP_ROWS];
 } TessAggState;
 
 /* Raise the error a kernel or table call stored, if it failed. */
