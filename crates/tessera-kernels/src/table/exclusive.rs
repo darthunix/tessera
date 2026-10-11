@@ -338,6 +338,29 @@ pub(super) fn payload_mut<'r, R: Region>(
     Ok(unsafe { region.record_mut(region.spot(chunk, start), layout.payload_size) })
 }
 
+/// Hand `each` the payload of each selected row's record, row by row, to
+/// change in place: one access to the table for a batch, as the folds
+/// make. Two rows of one record get the same payload, one after the
+/// other; a reference that names no record fails the call there.
+pub(super) fn each_payload<R: Region>(
+    region: &R,
+    layout: &Layout,
+    offsets: &[u32],
+    rows: &RowMaskView<'_>,
+    mut each: impl FnMut(usize, &mut [u8]),
+) -> Result<()> {
+    let nrows = rows.nrows();
+    check_accumulate(layout, offsets.len(), nrows, &[])?;
+    let mut access = Access::new(region, layout);
+    for index in 0..nrows.div_ceil(64) {
+        for bit in ones(rows.word_at(index)) {
+            let row = index * 64 + bit;
+            each(row, payload_at(&mut access, region, layout, offsets[row])?);
+        }
+    }
+    Ok(())
+}
+
 /// Write 0 into key slot `key` of every record, its NULL bit kept, and
 /// return the count of records: the key then orders no two records that
 /// are not NULL. For records nothing finds by their keys, such as a
