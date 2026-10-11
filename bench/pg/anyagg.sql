@@ -87,6 +87,12 @@ SELECT pg_temp.measure_pair('g_group_many', 'SELECT count(*), max(m) FROM (SELEC
 SELECT pg_temp.measure_pair('g_group_numeric', 'SELECT count(*), max(m) FROM (SELECT d % 100, max(a::numeric) AS m, min(a::numeric) FROM bench_mixed GROUP BY 1) AS g', :repetitions);
 SELECT pg_temp.measure_pair('g_group_numeric_col', 'SELECT count(*), max(m) FROM (SELECT w, max(n) AS m, min(n) FROM bench_tfact GROUP BY 1) AS g', :repetitions);
 SELECT pg_temp.measure_pair('g_group_int2', 'SELECT count(*), max(s) FROM (SELECT d % 100, sum((a % 30000)::int2) AS s FROM bench_mixed GROUP BY 1) AS g', :repetitions);
+-- Sums that reach the result, with 100 groups: the outer queries above
+-- read no sum, and the planner drops the sums they do not read. sum and
+-- avg of int8 keep sum states of their integers, sum of numeric of an
+-- expression's decimals.
+SELECT pg_temp.measure_pair('g_group_sum', 'SELECT count(*), sum(s), sum(v) FROM (SELECT d % 100, sum(c) AS s, avg(f) AS v FROM bench_mixed GROUP BY 1) AS g', :repetitions);
+SELECT pg_temp.measure_pair('g_group_sum_numeric', 'SELECT count(*), sum(s) FROM (SELECT d % 100, sum(a::numeric) AS s FROM bench_mixed GROUP BY 1) AS g', :repetitions);
 
 \copy timings TO 'timings.csv' CSV HEADER
 
@@ -105,9 +111,9 @@ ORDER BY test, mode DESC;
 \o plans.txt
 SET tessera.enable = on;
 SELECT format('EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE on_%s', name)
-FROM unnest(ARRAY['g_max_text', 'g_sum_int8', 'g_avg_int8', 'g_sum_numeric', 'g_max_numeric', 'g_max_numeric_col', 'g_avg_float8', 'g_bit_or', 'g_filter', 'g_three', 'g_group_few', 'g_group_many', 'g_group_numeric', 'g_group_numeric_col', 'g_group_int2']) AS name \gexec
+FROM unnest(ARRAY['g_max_text', 'g_sum_int8', 'g_avg_int8', 'g_sum_numeric', 'g_max_numeric', 'g_max_numeric_col', 'g_avg_float8', 'g_bit_or', 'g_filter', 'g_three', 'g_group_few', 'g_group_many', 'g_group_numeric', 'g_group_numeric_col', 'g_group_int2', 'g_group_sum', 'g_group_sum_numeric']) AS name \gexec
 SET tessera.enable = off;
 SELECT format('EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE off_%s', name)
-FROM unnest(ARRAY['g_max_text', 'g_sum_int8', 'g_avg_int8', 'g_sum_numeric', 'g_max_numeric', 'g_max_numeric_col', 'g_avg_float8', 'g_bit_or', 'g_filter', 'g_three', 'g_group_few', 'g_group_many', 'g_group_numeric', 'g_group_numeric_col', 'g_group_int2']) AS name \gexec
+FROM unnest(ARRAY['g_max_text', 'g_sum_int8', 'g_avg_int8', 'g_sum_numeric', 'g_max_numeric', 'g_max_numeric_col', 'g_avg_float8', 'g_bit_or', 'g_filter', 'g_three', 'g_group_few', 'g_group_many', 'g_group_numeric', 'g_group_numeric_col', 'g_group_int2', 'g_group_sum', 'g_group_sum_numeric']) AS name \gexec
 \o
 DEALLOCATE ALL;
