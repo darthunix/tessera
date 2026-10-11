@@ -232,7 +232,8 @@ check, the call fails; the payloads it changed before stay changed.
 - **WHEN** a writer adds a value to the payload of the record of each
   row a probe found
 - **THEN** each record's payload holds the sum of the values of its rows
-- **Verified by:** pending
+- **Verified by:**
+  `crates/tessera-kernels/tests/table.rs::a_payload_cursor_changes_payloads_by_reference`
 
 #### Scenario: Checked now, opened later
 - **WHEN** a writer checks the references of a batch, then opens their

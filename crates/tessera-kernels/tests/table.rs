@@ -1182,6 +1182,53 @@ fn marked_records_are_left_out_of_the_walk() {
 }
 
 #[test]
+fn a_payload_cursor_changes_payloads_by_reference() -> Result<()> {
+    let values: Vec<i32> = (0..100).map(|row| row % 10).collect();
+    let keys = [ColumnView::try_new(&values, None)?];
+    let hashes: Vec<u32> = values.iter().map(|&value| hash_i32(value)).collect();
+    let mut table = local(&ONE_INT4, 20)?;
+    let (offsets, _) = resolve_all(&mut table, &hashes, &keys[..])?;
+    {
+        let mut writer = table.table_mut()?;
+        let mut payloads = writer.payloads();
+        for (row, &offset) in offsets.iter().enumerate() {
+            let payload = payloads.payload(offset)?;
+            let sum = u64::from_ne_bytes(payload[..8].try_into()?) + row as u64;
+            payload[..8].copy_from_slice(&sum.to_ne_bytes());
+        }
+    }
+    // Key k has the rows k, k + 10, ..., k + 90.
+    for (key, &offset) in offsets[..10].iter().enumerate() {
+        let sum = 10 * key as u64 + 450;
+        assert_eq!(table.table()?.record(offset)?.payload, sum.to_ne_bytes());
+    }
+
+    // The record of the third of five references claims another length:
+    // the cursor fails there, and the first two payloads keep what it
+    // wrote.
+    let (chunk, byte) = placement(offsets[2]);
+    set_u32(table.chunk_words(chunk), byte + 12, 99);
+    let mut opened = Vec::new();
+    {
+        let mut writer = table.table_mut()?;
+        let mut payloads = writer.payloads();
+        let failed = offsets[..5].iter().try_for_each(|&offset| -> Result<()> {
+            payloads
+                .payload(offset)?
+                .copy_from_slice(&7u64.to_ne_bytes());
+            opened.push(offset);
+            Ok(())
+        });
+        assert!(failed.is_err());
+    }
+    assert_eq!(opened, offsets[..2]);
+    for &offset in &offsets[..2] {
+        assert_eq!(table.table()?.record(offset)?.payload, 7u64.to_ne_bytes());
+    }
+    Ok(())
+}
+
+#[test]
 fn each_payload_hands_the_selected_rows_payloads_in_turn() -> Result<()> {
     let values: Vec<i32> = (0..100).map(|row| row % 10).collect();
     let keys = [ColumnView::try_new(&values, None)?];
