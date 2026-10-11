@@ -68,7 +68,7 @@ commit of sections 2 and 3 is checked by `make rust-check` and by
       "References checked by the crate" forbids. Check:
       `make installcheck`; `cargo ab measure` of the grouping cases of
       the family `anyagg` against the base, no case slower
-- [ ] 2.10 Add `tess_table_chunk_used`, which gives a chunk's used mark
+- [x] 2.10 Add `tess_table_chunk_used`, which gives a chunk's used mark
       checked, as the requirement "The used mark of a chunk" of
       `hash-table` says, with its tests named in the requirement; make
       the spills of the grouping and of the join read a chunk's mark

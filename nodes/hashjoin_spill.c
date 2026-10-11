@@ -109,18 +109,23 @@ side_partition(const SpillSide *side, const JoinSpill *spill, uint32 hash)
 	return tess_table_partition(hash, spill->shift, (uint32) side->npartitions);
 }
 
-static inline uint64
-chunk_used(const void *base)
+/* The bytes chunk index of a side of records holds, its used mark checked. */
+static Size
+side_chunk_used(TessHashJoinState *state, const SpillSide *side, int index)
 {
-	return *(const uint64 *) base;
+	Size		used = 0;
+
+	check(state, state->kernels->table_chunk_used(side->bases[index], side->lens[index],
+												  side->record_size, &used, &state->status));
+	return used;
 }
 
-/* Whether a chunk of the side holds a row. */
-static inline bool
-side_chunk_rows(const SpillSide *side, const void *base)
+/* Whether chunk index of the side holds a row. */
+static bool
+side_chunk_rows(TessHashJoinState *state, const SpillSide *side, int index)
 {
-	return side->columnar ? tess_spill_columns_rows(base) > 0 :
-		chunk_used(base) > TESS_TABLE_CHUNK_HEADER;
+	return side->columnar ? tess_spill_columns_rows(side->bases[index]) > 0 :
+		side_chunk_used(state, side, index) > TESS_TABLE_CHUNK_HEADER;
 }
 
 /* Make the len bytes at base an empty chunk of the side: of records, or of columns. */
@@ -455,7 +460,7 @@ static void
 side_write_records(TessHashJoinState *state, SpillSide *side, int partition,
 				   int index)
 {
-	if (!side_chunk_rows(side, side->bases[index]))
+	if (!side_chunk_rows(state, side, index))
 		return;
 	if (side->columnar)
 		write_block(state, side, partition, TESS_SPILL_COLUMNS,
@@ -463,7 +468,7 @@ side_write_records(TessHashJoinState *state, SpillSide *side, int partition,
 	else
 		write_block(state, side, partition, TESS_SPILL_RECORDS,
 					side->next_number++, side->bases[index],
-					chunk_used(side->bases[index]));
+					side_chunk_used(state, side, index));
 }
 
 /*
@@ -1647,7 +1652,7 @@ load_piece(TessHashJoinState *state, int partition, bool whole)
 		for (int chunk = 0; chunk < part->nchunks; chunk++)
 		{
 			int			index = part->chunks[chunk];
-			Size		used = chunk_used(side->bases[index]);
+			Size		used = side_chunk_used(state, side, index);
 
 			if (used > TESS_TABLE_CHUNK_HEADER)
 			{
@@ -1776,7 +1781,7 @@ start_level(TessHashJoinState *state, int partition)
 	{
 		int			index = part->chunks[chunk];
 
-		if (chunk_used(from->bases[index]) > TESS_TABLE_CHUNK_HEADER)
+		if (side_chunk_used(state, from, index) > TESS_TABLE_CHUNK_HEADER)
 			join_split_chunk(state, from->bases[index], from->lens[index], from->value_bases);
 	}
 	for (int index = 0; index < parent->nloaded; index++)
@@ -2026,7 +2031,7 @@ join_next_spilled(TessHashJoinState *state, JoinSpill *spill)
 			int			index = side->current[spill->partition];
 
 			spill->tail_read = true;
-			if (index != 0 && side_chunk_rows(side, side->bases[index]))
+			if (index != 0 && side_chunk_rows(state, side, index))
 			{
 				spill->block = side->bases[index];
 				state->counters[JOIN_TAILS]++;
