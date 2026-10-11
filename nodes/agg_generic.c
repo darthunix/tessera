@@ -1038,23 +1038,18 @@ agg_generic_accumulate(TessAggState *state, GenericAgg *generic, const TessRowMa
 	MemoryContextSwitchTo(old);
 }
 
-/* The payload of the record at ref, in the chunk's memory, which the node writes. */
-uint64 *
-agg_record_payload(TessAggState *state, uint32 ref)
+/*
+ * The payloads of the records refs names for the selected rows, into
+ * payloads[row], in the chunks' memory, which the node writes; the
+ * kernels check every reference, in one call.
+ */
+void
+agg_record_payloads(TessAggState *state, const uint32 *refs, const TessRowMask *rows,
+					uint8 **payloads)
 {
-	char	   *record = (char *) state->chunk_bases[tess_table_ref_chunk(ref)] +
-		tess_table_ref_byte(ref);
-
-	if (!state->payload_known)
-	{
-		TessTableRecord found = TESS_STRUCT_INITIALIZER(TessTableRecord);
-
-		check(state, state->kernels->table_record(&state->table, ref, &found,
-												  &state->status));
-		state->payload_delta = (Size) ((const char *) found.payload - record);
-		state->payload_known = true;
-	}
-	return (uint64 *) (record + state->payload_delta);
+	if (tess_row_mask_next(rows, -1) >= 0)
+		check(state, state->kernels->table_payloads(&state->table, refs, rows, payloads,
+													&state->status));
 }
 
 #ifdef HAVE_INT128
@@ -1076,7 +1071,7 @@ static void
 sum_state_rest(TessAggState *state, const GenericAgg *generic, int slot, int row,
 			   MemoryContext states)
 {
-	uint64	   *words = agg_record_payload(state, state->offsets[row]) + slot;
+	uint64	   *words = (uint64 *) state->payloads[row] + slot;
 	Numeric		number = DatumGetNumeric(sum_state_term(generic, &generic->columns[0], row));
 	MemoryContext old;
 
@@ -1150,7 +1145,7 @@ static void
 sum_state_merge_rest(TessAggState *state, const GenericAgg *generic, int slot, int row,
 					 MemoryContext states)
 {
-	uint64	   *words = agg_record_payload(state, state->offsets[row]) + slot;
+	uint64	   *words = (uint64 *) state->payloads[row] + slot;
 	Datum		value = generic->columns[0].values[row];
 	uint64		theirs[TESS_TABLE_SUM_WORDS];
 	Datum		rest = (Datum) 0;
@@ -1281,6 +1276,7 @@ agg_sum_states_accumulate(TessAggState *state, int nsums, const int *indexes,
 			AggValue   *value = &state->values[indexes[first + sum]];
 			int			row = -1;
 
+			agg_record_payloads(state, state->offsets, &rests[sum], state->payloads);
 			while ((row = tess_row_mask_next(&rests[sum], row)) >= 0)
 			{
 				if (value->generic->sum_input == TESS_TABLE_SUM_OF_STATE ||
@@ -1401,7 +1397,7 @@ static void
 extreme_state_rest(TessAggState *state, const GenericAgg *generic, int slot, int row,
 				   MemoryContext states)
 {
-	uint64	   *words = agg_record_payload(state, state->offsets[row]) + slot;
+	uint64	   *words = (uint64 *) state->payloads[row] + slot;
 	const uint64 *side = tess_column_decimal_rows(&generic->columns[0]);
 	Datum		value = fast_row_numeric(generic, row);
 	Numeric		number;
@@ -1474,6 +1470,7 @@ extreme_states_accumulate(TessAggState *state, int index, const TessRowMask *row
 															generic->fast == FAST_MAX, &rest,
 															&state->status));
 	fast_read(generic, &rest);
+	agg_record_payloads(state, state->offsets, &rest, state->payloads);
 	while ((row = tess_row_mask_next(&rest, row)) >= 0)
 		extreme_state_rest(state, generic, slot, row, states);
 	MemoryContextSwitchTo(old);
@@ -1521,9 +1518,10 @@ agg_generic_group_accumulate(TessAggState *state, int index, const TessRowMask *
 #endif
 	old = MemoryContextSwitchTo(states);
 
+	agg_record_payloads(state, state->offsets, inserted, state->payloads);
 	while ((row = tess_row_mask_next(inserted, row)) >= 0)
 	{
-		uint64	   *payload = agg_record_payload(state, state->offsets[row]);
+		uint64	   *payload = (uint64 *) state->payloads[row];
 
 		payload[slot] = generic->init_null ? 0 :
 			(uint64) datumCopy(generic->init, generic->transbyval, generic->translen);
@@ -1531,9 +1529,10 @@ agg_generic_group_accumulate(TessAggState *state, int index, const TessRowMask *
 	}
 	MemoryContextSwitchTo(temporary);
 	row = -1;
+	agg_record_payloads(state, state->offsets, rows, state->payloads);
 	while ((row = tess_row_mask_next(rows, row)) >= 0)
 	{
-		uint64	   *payload = agg_record_payload(state, state->offsets[row]);
+		uint64	   *payload = (uint64 *) state->payloads[row];
 
 		generic->state = (Datum) payload[slot];
 		generic->state_null = (payload[0] & bit) == 0;

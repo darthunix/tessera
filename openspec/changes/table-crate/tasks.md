@@ -61,7 +61,7 @@ commit of sections 2 and 3 is checked by `make rust-check` and by
       `shared_spill.rs` and their loom models out of `table/`, a move
       only. Check: `cargo ab moved`; machine code the same;
       `make rust-loom`; `make installcheck`
-- [ ] 2.9 Make the generic aggregates of the grouping node take the
+- [x] 2.9 Make the generic aggregates of the grouping node take the
       payloads of their groups from `tess_table_payloads`, one call for
       the rows of a batch that need them, and drop the node's own
       reading of a record by an offset, which the contract's rule
