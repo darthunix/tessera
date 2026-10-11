@@ -228,6 +228,14 @@ time. A writer SHALL be able to check a reference first and open its
 payload later through the same cursor. When a reference fails its
 check, the call fails; the payloads it changed before stay changed.
 
+#### Scenario: Records read by reference
+- **WHEN** a cursor reads the record of each row's reference, and of a
+  reference inside a record
+- **THEN** each record holds its row's keys and hash, and the reference
+  inside a record fails
+- **Verified by:**
+  `crates/tessera-kernels/tests/table.rs::a_record_cursor_reads_records_by_reference`
+
 #### Scenario: Payloads changed by reference
 - **WHEN** a writer adds a value to the payload of the record of each
   row a probe found

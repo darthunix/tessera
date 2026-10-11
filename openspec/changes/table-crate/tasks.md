@@ -48,7 +48,7 @@ commit of sections 2 and 3 is checked by `make rust-check` and by
 - [x] 2.4 Add the merge of a chunk's records by a caller's rule, and
       make the merge of groups read back go through it, with its kinds
       of state as the rule. Check: the merge tests; machine code
-- [ ] 2.5 Add the cursor that reads a record by reference, and make the
+- [x] 2.5 Add the cursor that reads a record by reference, and make the
       items of a sort come from the scan and that cursor. Check:
       `crates/tessera-kernels/tests/sort.rs`; machine code
 - [ ] 2.6 Give the phases and the words of a spill orderings of their
