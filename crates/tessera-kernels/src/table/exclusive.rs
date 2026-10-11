@@ -18,8 +18,8 @@ use super::batch::{check_record, unlinked};
 use super::header::{CHUNK_HEADER, Header, KEY_SLOT, Layout, RECORD_HEADER};
 use super::keys::{KeySource, WordKeys, slot_buffer};
 use super::record::{Access, same_keys};
-use super::region::Region;
-use super::{Batch, Partitions};
+use super::region::{RawRegion, Region};
+use super::{Batch, Partitions, Table, TableMut};
 
 /// Where a walk over the records stands: the chunk of the next record to
 /// visit in the high 32 bits, its byte there in the low ones.
@@ -495,18 +495,23 @@ pub struct Slot {
 
 /// Reject offsets, a mask or payload words that do not fit the table.
 fn check_accumulate(layout: &Layout, offsets: usize, nrows: usize, words: &[usize]) -> Result<()> {
+    check_words(layout.payload_size, offsets, nrows, words)
+}
+
+/// As [`check_accumulate`], from the size of a payload: a fold that takes
+/// the table passes the size, so that the table's address stays out of
+/// the call and its fields in registers across the fold's loop.
+#[inline(always)]
+fn check_words(payload_size: usize, offsets: usize, nrows: usize, words: &[usize]) -> Result<()> {
     ensure!(
         offsets == nrows,
         "the offsets and mask of the batch have different row counts"
     );
     for &at in words {
         ensure!(
-            at.is_multiple_of(8)
-                && at
-                    .checked_add(8)
-                    .is_some_and(|end| end <= layout.payload_size),
+            at.is_multiple_of(8) && at.checked_add(8).is_some_and(|end| end <= payload_size),
             "a payload word at byte {at} is past the payload of {} bytes",
-            layout.payload_size
+            payload_size
         );
     }
     Ok(())
@@ -555,6 +560,36 @@ unsafe fn payload_of<'r, R: Region>(region: &'r R, layout: &Layout, spot: R::Spo
     unsafe { region.record_mut(spot, layout.payload_size) }
 }
 
+/// The one writer's cursor over the payloads of its table, made once a
+/// call by [`TableMut::payloads`]: it gives the payload of the record a
+/// reference names, to change in place, after checking the reference as
+/// a lookup checks it. Each payload borrows the cursor, so two are never
+/// open at once, even of one record.
+pub struct PayloadCursor<'t> {
+    access: Access<'t, RawRegion>,
+}
+
+impl<'t> PayloadCursor<'t> {
+    /// A cursor over the payloads of `table`, which its writer lends it.
+    #[inline(always)]
+    pub(super) fn new(table: &'t mut Table<'_>) -> Self {
+        Self {
+            access: Access::new(&table.region, &table.layout),
+        }
+    }
+
+    /// The payload of the record at `offset`, to change in place: an
+    /// error for a reference that names no record of the table.
+    #[inline(always)]
+    pub fn payload(&mut self, offset: u32) -> Result<&mut [u8]> {
+        let spot = self.access.payload_spot(offset)?;
+        // SAFETY: the spot is this record's payload, just checked; the
+        // slice borrows the cursor, which borrows the writer's table, so
+        // no other slice of a payload is alive while it is.
+        Ok(unsafe { self.access.payload_mut(spot) })
+    }
+}
+
 #[inline(always)]
 fn read_word(payload: &[u8], at: usize) -> u64 {
     let mut word = [0; 8];
@@ -569,21 +604,20 @@ fn write_word(payload: &mut [u8], at: usize, value: u64) {
 
 /// Add one, as an `i64` at byte `at`, to the payload of each selected
 /// row's record: `count(*)`.
-pub(super) fn count_rows<R: Region>(
-    region: &R,
-    layout: &Layout,
+pub(super) fn count_rows(
+    table: &mut TableMut<'_>,
     offsets: &[u32],
     rows: &RowMaskView<'_>,
     at: usize,
 ) -> Result<()> {
     let nrows = rows.nrows();
-    check_accumulate(layout, offsets.len(), nrows, &[at])?;
-    let mut access = Access::new(region, layout);
+    check_words(table.payload_size(), offsets.len(), nrows, &[at])?;
+    let mut payloads = table.payloads();
     for index in 0..nrows.div_ceil(64) {
         let bits = rows.word_at(index);
         for bit in ones(bits) {
             let row = index * 64 + bit;
-            let payload = payload_at(&mut access, region, layout, offsets[row])?;
+            let payload = payloads.payload(offsets[row])?;
             let count = (read_word(payload, at) as i64)
                 .checked_add(1)
                 .ok_or(ArithmeticError::BigintOutOfRange)?;
@@ -595,21 +629,20 @@ pub(super) fn count_rows<R: Region>(
 
 /// Add one, as an `i64` at byte `at`, for each selected row whose value
 /// is not NULL: `count(x)`, which reads the NULL flags alone.
-pub(super) fn count_values<R: Region, C: ColumnReader + ?Sized>(
-    region: &R,
-    layout: &Layout,
+pub(super) fn count_values<C: ColumnReader + ?Sized>(
+    table: &mut TableMut<'_>,
     offsets: &[u32],
     rows: &RowMaskView<'_>,
     column: &C,
     at: usize,
 ) -> Result<()> {
     let nrows = rows.nrows();
-    check_accumulate(layout, offsets.len(), nrows, &[at])?;
+    check_words(table.payload_size(), offsets.len(), nrows, &[at])?;
     ensure!(
         column.nrows() == nrows,
         "column and selection row counts differ"
     );
-    let mut access = Access::new(region, layout);
+    let mut payloads = table.payloads();
     for index in 0..nrows.div_ceil(64) {
         let selected = rows.word_at(index);
         if selected == 0 {
@@ -619,7 +652,7 @@ pub(super) fn count_values<R: Region, C: ColumnReader + ?Sized>(
             if value.is_none() {
                 continue;
             }
-            let payload = payload_at(&mut access, region, layout, offsets[row])?;
+            let payload = payloads.payload(offsets[row])?;
             let count = (read_word(payload, at) as i64)
                 .checked_add(1)
                 .ok_or(ArithmeticError::BigintOutOfRange)?;
@@ -634,9 +667,8 @@ pub(super) fn count_values<R: Region, C: ColumnReader + ?Sized>(
 /// group without one stays NULL, as PostgreSQL's strict transitions.
 /// Rows go in row order, so an overflow fails where the row-wise sum
 /// would.
-pub(super) fn fold<R: Region, C, V>(
-    region: &R,
-    layout: &Layout,
+pub(super) fn fold<C, V>(
+    table: &mut TableMut<'_>,
     offsets: &[u32],
     rows: &RowMaskView<'_>,
     column: &C,
@@ -648,8 +680,8 @@ where
     V: Into<i64> + Copy,
 {
     let nrows = rows.nrows();
-    check_accumulate(
-        layout,
+    check_words(
+        table.payload_size(),
         offsets.len(),
         nrows,
         &[slot.value_at, slot.flags_at],
@@ -664,7 +696,7 @@ where
         "column and selection row counts differ"
     );
     let flag = 1u64 << slot.flag_bit;
-    let mut access = Access::new(region, layout);
+    let mut payloads = table.payloads();
     for index in 0..nrows.div_ceil(64) {
         let selected = rows.word_at(index);
         if selected == 0 {
@@ -673,7 +705,7 @@ where
         for (row, value) in column.word_values(index, selected)? {
             let Some(value) = value else { continue };
             let value: i64 = value.into();
-            let payload = payload_at(&mut access, region, layout, offsets[row])?;
+            let payload = payloads.payload(offsets[row])?;
             let flags = read_word(payload, slot.flags_at);
             let state = read_word(payload, slot.value_at) as i64;
             let next = if flags & flag == 0 {

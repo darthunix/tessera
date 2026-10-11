@@ -38,7 +38,7 @@ commit of sections 2 and 3 is checked by `make rust-check` and by
 
 - [x] 2.1 Give the table its own copy of the prefetch hint. Check:
       machine code the same as the base's
-- [ ] 2.2 Add the cursor that gives a payload by reference, and make the
+- [x] 2.2 Add the cursor that gives a payload by reference, and make the
       counts and the folds of int2, int4 and int8 states go through it.
       Check: the aggregate tests of
       `crates/tessera-kernels/tests/table.rs`; machine code

@@ -240,6 +240,31 @@ impl<'r, R: Region> Access<'r, R> {
         unsafe { self.region.spot(chunk, byte) }
     }
 
+    /// Where the payload of the record at `offset` starts, the record
+    /// checked as [`Self::locate`] checks it.
+    #[inline(always)]
+    pub(super) fn payload_spot(&mut self, offset: u32) -> Result<R::Spot> {
+        self.locate(offset)?;
+        let (chunk, byte) = self.place(offset)?;
+        // SAFETY: the payload lies within a record that `locate` accepted.
+        Ok(unsafe { self.spot((chunk, byte + RECORD_HEADER + self.nkeys * KEY_SLOT)) })
+    }
+
+    /// The payload at a spot [`Self::payload_spot`] gave, to change in
+    /// place.
+    ///
+    /// # Safety
+    ///
+    /// The spot comes from [`Self::payload_spot`] during this operation,
+    /// the caller has the table to itself, and no other slice of the same
+    /// payload is alive while this one is.
+    #[inline(always)]
+    #[allow(clippy::mut_from_ref)]
+    pub(super) unsafe fn payload_mut(&self, spot: R::Spot) -> &'r mut [u8] {
+        // SAFETY: the caller's contract.
+        unsafe { self.region.record_mut(spot, self.payload_size) }
+    }
+
     /// Hint that the bucket of a hash will be read soon.
     #[inline(always)]
     pub(super) fn prefetch_bucket(&self, hash: u32) {
