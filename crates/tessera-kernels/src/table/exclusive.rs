@@ -15,7 +15,7 @@ use crate::ops::ArithmeticError;
 
 use super::batch::{Lanes, VERTICAL_MIN_ROWS, check_keys, check_partitions, probe_word, shaped};
 use super::batch::{check_record, unlinked};
-use super::header::{CHUNK_HEADER, Header, KEY_SLOT, Layout, RECORD_HEADER};
+use super::header::{CHUNK_HEADER, Header, KEY_SLOT, Layout, RECORD_HEADER, placement};
 use super::keys::{KeySource, WordKeys, slot_buffer};
 use super::record::{Access, same_keys};
 use super::region::{RawRegion, Region};
@@ -1160,27 +1160,24 @@ pub enum CombineStop {
     IndexFull,
 }
 
-/// Merge the records of chunk `source` from byte `*from` on, each the
-/// states of a group, into the table: the record of the same keys takes
-/// the states in, and a group the table lacks is copied whole to chunk
-/// `chunk` and linked. `*from` moves past the records merged; the call
-/// stops where a new group finds no room in `chunk` or the index holds as
-/// many records as half its buckets. The count merged is returned. The
-/// source is none of the table's linked chunks.
-pub(super) fn combine<R: Region>(
+/// Merge the records of chunk `source` from byte `*from` on into the
+/// table by `rule`: a record whose keys the table has passes its payload
+/// to `rule` with the payload of the table's record, which the rule
+/// changes; a record of new keys is copied whole to chunk `chunk` and
+/// linked. `*from` moves past the records merged; the call stops where a
+/// record of new keys finds no room in `chunk` or the index holds as many
+/// records as half its buckets. The count merged is returned. When the
+/// rule fails, its error is returned, the records before it merged. The
+/// source is none of the table's linked chunks, and a record found in it
+/// is a damaged table: the rule's two payloads never share bytes.
+pub(super) fn merge<R: Region>(
     region: &R,
     layout: &Layout,
     source: usize,
     from: &mut usize,
     chunk: usize,
-    combines: &[Combine],
+    mut rule: impl FnMut(&[u8], &mut [u8]) -> Result<()>,
 ) -> Result<(usize, CombineStop)> {
-    ensure!(
-        combines.len() <= 64 && 8 * (1 + combines.len()) <= layout.payload_size,
-        "{} aggregates do not fit a payload of {} bytes with a word of flags",
-        combines.len(),
-        layout.payload_size
-    );
     ensure!(
         source != chunk,
         "table chunk {source} is merged into itself"
@@ -1192,7 +1189,6 @@ pub(super) fn combine<R: Region>(
     let places = unlinked(&access, source, *from)?;
     let mut merged = 0;
     let mut stop = CombineStop::Done;
-    let mut words = [0u64; 65];
     for byte in places {
         let hash = check_record(&access, (source, byte))?;
         // SAFETY: `check_record` accepted the record, which nothing writes.
@@ -1227,35 +1223,16 @@ pub(super) fn combine<R: Region>(
             used += record_size;
             room -= 1;
         } else {
-            let incoming = record.payload();
-            for (index, word) in words.iter_mut().enumerate().take(1 + combines.len()) {
-                *word = read_word(incoming, 8 * index);
-            }
+            ensure!(
+                placement(same).0 != source,
+                "table record {same} found in chunk {source}, which is merged"
+            );
             let payload = payload_at(&mut access, region, layout, same)?;
-            let mut flags = read_word(payload, 0);
-            for (index, &how) in combines.iter().enumerate() {
-                let at = 8 * (1 + index);
-                let flag = 1u64 << index;
-                let theirs = words[1 + index] as i64;
-                let ours = read_word(payload, at) as i64;
-                let next = match how {
-                    Combine::Count => ours
-                        .checked_add(theirs)
-                        .ok_or(ArithmeticError::BigintOutOfRange)?,
-                    _ if words[0] & flag == 0 => continue,
-                    _ if flags & flag == 0 => theirs,
-                    Combine::Sum => ours
-                        .checked_add(theirs)
-                        .ok_or(ArithmeticError::BigintOutOfRange)?,
-                    Combine::Min => ours.min(theirs),
-                    Combine::Max => ours.max(theirs),
-                };
-                if how != Combine::Count {
-                    flags |= flag;
-                }
-                write_word(payload, at, next as u64);
+            if let Err(error) = rule(record.payload(), payload) {
+                // SAFETY: as below.
+                unsafe { access.set_used(chunk, used) };
+                return Err(error);
             }
-            write_word(payload, 0, flags);
         }
         *from = byte + record_size;
         merged += 1;
@@ -1263,4 +1240,53 @@ pub(super) fn combine<R: Region>(
     // SAFETY: this is the chunk's writer, and `used` ends its records.
     unsafe { access.set_used(chunk, used) };
     Ok((merged, stop))
+}
+
+/// Merge the records of chunk `source` from byte `*from` on, each the
+/// states of a group after a word of flags, into the table by
+/// [`TableMut::merge`]: the record of the same keys takes the states in,
+/// each as `combines` says, and a group the table lacks is copied whole
+/// to chunk `chunk`. A count that overflows an `i64` fails, as the
+/// transition would.
+pub(super) fn combine(
+    table: &mut TableMut<'_>,
+    source: usize,
+    from: &mut usize,
+    chunk: usize,
+    combines: &[Combine],
+) -> Result<(usize, CombineStop)> {
+    ensure!(
+        combines.len() <= 64 && 8 * (1 + combines.len()) <= table.payload_size(),
+        "{} aggregates do not fit a payload of {} bytes with a word of flags",
+        combines.len(),
+        table.payload_size()
+    );
+    table.merge(source, from, chunk, |incoming, payload| {
+        let theirs_flags = read_word(incoming, 0);
+        let mut flags = read_word(payload, 0);
+        for (index, &how) in combines.iter().enumerate() {
+            let at = 8 * (1 + index);
+            let flag = 1u64 << index;
+            let theirs = read_word(incoming, at) as i64;
+            let ours = read_word(payload, at) as i64;
+            let next = match how {
+                Combine::Count => ours
+                    .checked_add(theirs)
+                    .ok_or(ArithmeticError::BigintOutOfRange)?,
+                _ if theirs_flags & flag == 0 => continue,
+                _ if flags & flag == 0 => theirs,
+                Combine::Sum => ours
+                    .checked_add(theirs)
+                    .ok_or(ArithmeticError::BigintOutOfRange)?,
+                Combine::Min => ours.min(theirs),
+                Combine::Max => ours.max(theirs),
+            };
+            if how != Combine::Count {
+                flags |= flag;
+            }
+            write_word(payload, at, next as u64);
+        }
+        write_word(payload, 0, flags);
+        Ok(())
+    })
 }
