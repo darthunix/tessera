@@ -181,6 +181,16 @@ a hypothesis written down first. When none keeps the loop as short,
 the cost in speed against the crate's boundary is a trade-off no rule
 settles, and the maintainer decides it.
 
+The items of a sort pay such a cost. Before, they walked each chunk by
+place and checked only a record's length; through the scan and the
+reading cursor, each record is checked by the scan and again by the
+cursor, which takes its reference apart and checks the chunk, about
+ten instructions more a record. A full sort is about 5 % slower; a
+top-N sort, which read records by reference before, is not. The cost
+is taken. The refused way: the scan hands out each record with its
+reference, checked once, which would make the scan a walk over records
+for its callers.
+
 ### The owning table
 
 **Was:** `LocalTable` owns its index and chunks, allocates them, adds

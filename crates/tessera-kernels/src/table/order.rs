@@ -1,101 +1,80 @@
 //! The sort items of a table's records: every record of every chunk, in
 //! the order appended, as an item of [`crate::sort`] made of its key slots,
-//! its NULL bits and its reference. The records need not be linked.
+//! its NULL bits and its reference. The records need not be linked. The
+//! items take what the table offers its callers alone: references from
+//! its scan, and keys from its cursor that reads records.
 
 use anyhow::{Result, ensure};
 
-use super::header::{CHUNK_HEADER, Layout};
-use super::record::Access;
-use super::region::Region;
+use super::{Cursor, Table};
 use tessera_core::{RowMaskView, ones};
 
 use crate::sort::{Encoder, SortKey, heap_push, with_item_words};
 
-/// Write the item of every record into `items`, one after another, and
-/// return the count; `items` must hold them all.
-pub(super) fn items<R: Region>(
-    region: &R,
-    layout: &Layout,
-    keys: &[SortKey],
-    items: &mut [u64],
-) -> Result<usize> {
+/// The references a scan gives at a time to the items.
+const SCAN: usize = 64;
+
+/// Refuse sort keys that are not the table's keys, one each, of its kinds.
+fn check_keys(table: &Table<'_>, keys: &[SortKey]) -> Result<()> {
+    let kinds = table.key_kinds();
     ensure!(
-        keys.len() == layout.nkeys
-            && keys
-                .iter()
-                .zip(&layout.kinds[..layout.nkeys])
-                .all(|(key, &kind)| key.kind == kind),
+        keys.len() == kinds.len() && keys.iter().zip(kinds).all(|(key, &kind)| key.kind == kind),
         "the sort keys are not the table's keys"
     );
-    let encoder = Encoder::new(keys)?;
-    with_item_words!(encoder.words(), |W| items_as::<R, W>(
-        region, layout, &encoder, items
-    ))
+    Ok(())
 }
 
-/// [`items`] for items of `W` words: the records of each chunk are read
-/// one after another up to its used mark, which [`Access::room`] checked
-/// to be a record boundary within the chunk.
-fn items_as<R: Region, const W: usize>(
-    region: &R,
-    layout: &Layout,
+/// Write the item of every record into `items`, one after another, and
+/// return the count; `items` must hold them all.
+pub(super) fn items(table: &Table<'_>, keys: &[SortKey], items: &mut [u64]) -> Result<usize> {
+    check_keys(table, keys)?;
+    let encoder = Encoder::new(keys)?;
+    with_item_words!(encoder.words(), |W| items_as::<W>(table, &encoder, items))
+}
+
+/// [`items`] for items of `W` words: the scan gives the records'
+/// references a few at a time, and the reading cursor their keys.
+fn items_as<const W: usize>(
+    table: &Table<'_>,
     encoder: &Encoder<'_>,
     items: &mut [u64],
 ) -> Result<usize> {
     let (items, _) = items.as_chunks_mut::<W>();
-    let access = Access::for_chunks(region, layout);
-    let record_size = layout.record_size;
+    let mut records = table.records();
+    let mut cursor = Cursor::start();
+    let mut refs = [0_u32; SCAN];
     let mut count = 0;
-    for chunk in 0..region.chunks() {
-        let (used, _) = access.room(chunk)?;
+    loop {
+        let scanned = table.scan(&mut cursor, &mut refs)?;
+        if scanned == 0 {
+            return Ok(count);
+        }
         ensure!(
-            items.len() - count >= (used - CHUNK_HEADER) / record_size,
+            items.len() - count >= scanned,
             "{} items do not hold the table's records",
             items.len()
         );
-        let mut byte = CHUNK_HEADER;
-        while byte < used {
-            // SAFETY: the place lies below the chunk's used mark, a record
-            // boundary `room` checked against the chunk's length, and the
-            // chunk's one writer wrote whole records up to it.
-            let view = unsafe { access.view_at(access.spot((chunk, byte))) };
-            ensure!(
-                view.len() == record_size,
-                "table chunk {chunk} holds no record at byte {byte}"
-            );
-            items[count] = encoder.encode::<W>(
-                view.keys(),
-                view.null_bits(),
-                access.reference((chunk, byte)),
-            )?;
+        for &reference in &refs[..scanned] {
+            let record = records.record(reference)?;
+            items[count] = encoder.encode::<W>(record.keys, record.null_bits, reference)?;
             count += 1;
-            byte += record_size;
         }
     }
-    Ok(count)
 }
 
 /// Push the item of each record `refs[row]` of `rows` into a top-N heap:
 /// `heap` holds its capacity of items one after another, the first `*len`
 /// of them the heap; a record better than the top replaces it once the heap
 /// is full (see [`crate::sort::heap_push`]).
-pub(super) fn top_push<R: Region>(
-    region: &R,
-    layout: &Layout,
+pub(super) fn top_push(
+    table: &Table<'_>,
     keys: &[SortKey],
     refs: &[u32],
     rows: &RowMaskView<'_>,
     heap: &mut [u64],
     len: &mut usize,
 ) -> Result<()> {
-    ensure!(
-        keys.len() == layout.nkeys
-            && keys
-                .iter()
-                .zip(&layout.kinds[..layout.nkeys])
-                .all(|(key, &kind)| key.kind == kind),
-        "the sort keys are not the table's keys"
-    );
+    check_keys(table, keys)?;
     ensure!(
         refs.len() == rows.nrows(),
         "the references and the mask have different row counts"
@@ -108,14 +87,13 @@ pub(super) fn top_push<R: Region>(
         heap.len(),
         *len
     );
-    with_item_words!(words, |W| push_as::<R, W>(
-        region, layout, &encoder, refs, rows, heap, len
+    with_item_words!(words, |W| push_as::<W>(
+        table, &encoder, refs, rows, heap, len
     ))
 }
 
-fn push_as<R: Region, const W: usize>(
-    region: &R,
-    layout: &Layout,
+fn push_as<const W: usize>(
+    table: &Table<'_>,
     encoder: &Encoder<'_>,
     refs: &[u32],
     rows: &RowMaskView<'_>,
@@ -123,14 +101,14 @@ fn push_as<R: Region, const W: usize>(
     len: &mut usize,
 ) -> Result<()> {
     let (heap, _) = heap.as_chunks_mut::<W>();
-    let mut access = Access::new(region, layout);
+    let mut records = table.records();
     for index in 0..rows.nrows().div_ceil(64) {
         let bits = rows.word_at(index);
         for bit in ones(bits) {
             let row = index * 64 + bit;
             let reference = refs[row];
-            let view = access.locate(reference)?;
-            let item = encoder.encode::<W>(view.keys(), view.null_bits(), reference)?;
+            let record = records.record(reference)?;
+            let item = encoder.encode::<W>(record.keys, record.null_bits, reference)?;
             heap_push(heap, len, item);
         }
     }
