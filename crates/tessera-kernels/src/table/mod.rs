@@ -890,6 +890,21 @@ impl<'a> TableMut<'a> {
         exclusive::payload_mut(&self.0.region, &self.0.layout, offset)
     }
 
+    /// Hand `each` the row and the payload of the record of each selected
+    /// row, in the order of the rows, to change in place: the payloads of
+    /// a batch, which hold the references [`TableMut::find_or_insert`]
+    /// gave them, for one check of the table. `offsets` has a reference
+    /// per row of the mask; a reference that names no record fails the
+    /// call, after the rows before it.
+    pub fn each_payload(
+        &mut self,
+        offsets: &[u32],
+        rows: &RowMaskView<'_>,
+        each: impl FnMut(usize, &mut [u8]),
+    ) -> Result<()> {
+        exclusive::each_payload(&self.0.region, &self.0.layout, offsets, rows, each)
+    }
+
     /// Write 0 into key `key` of every record, its NULL bit kept; the count
     /// of records is returned. The key then orders no two records that are
     /// not NULL, and a probe by it no longer finds them: for records nothing
