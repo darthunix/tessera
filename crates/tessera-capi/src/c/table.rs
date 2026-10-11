@@ -1354,10 +1354,9 @@ pub unsafe extern "C" fn tess_table_payloads(
             let nrows = rows.nrows();
             let offsets = values(offsets, nrows, "offsets")?;
             let payloads = slots(payloads, nrows, "payload pointers")?;
-            for row in rows.selected_indices() {
-                payloads[row] = table.payload_mut(offsets[row])?.as_mut_ptr();
-            }
-            Ok(())
+            table.each_payload(offsets, &rows, |row, payload| {
+                payloads[row] = payload.as_mut_ptr();
+            })
         })
     }
 }

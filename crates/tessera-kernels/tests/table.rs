@@ -1182,6 +1182,53 @@ fn marked_records_are_left_out_of_the_walk() {
 }
 
 #[test]
+fn each_payload_hands_the_selected_rows_payloads_in_turn() -> Result<()> {
+    let values: Vec<i32> = (0..100).map(|row| row % 10).collect();
+    let keys = [ColumnView::try_new(&values, None)?];
+    let hashes: Vec<u32> = values.iter().map(|&value| hash_i32(value)).collect();
+    let mut table = local(&ONE_INT4, 20)?;
+    let (mut offsets, _) = resolve_all(&mut table, &hashes, &keys[..])?;
+    // Rows 3 and 13 share a record, row 64 is in the second word.
+    let words = [1u64 << 3 | 1 << 13 | 1 << 40, 1 << 0 | 1 << 35];
+    let rows = RowMaskView::try_new(100, &words)?;
+    let mut seen = Vec::new();
+    table
+        .table_mut()?
+        .each_payload(&offsets, &rows, |row, payload| {
+            let count = u64::from_ne_bytes(payload[..8].try_into().unwrap());
+            payload[..8].copy_from_slice(&(count + 1).to_ne_bytes());
+            seen.push(row);
+        })?;
+    assert_eq!(seen, [3, 13, 40, 64, 99], "the selected rows, in order");
+    for (key, &offset) in offsets[..10].iter().enumerate() {
+        let payload = table.table()?.record(offset)?.payload.to_vec();
+        let expected: u64 = match key {
+            3 => 2,
+            0 | 4 | 9 => 1,
+            _ => 0,
+        };
+        assert_eq!(payload, expected.to_ne_bytes(), "key {key}");
+    }
+
+    // A reference that names no record fails, after the rows before it.
+    offsets[40] += 1;
+    seen.clear();
+    let failed = table
+        .table_mut()?
+        .each_payload(&offsets, &rows, |row, _| seen.push(row));
+    assert!(failed.is_err());
+    assert_eq!(seen, [3, 13]);
+    // Offsets for another count of rows than the mask's fail first.
+    seen.clear();
+    let short = table
+        .table_mut()?
+        .each_payload(&offsets[..99], &rows, |row, _| seen.push(row));
+    assert!(short.is_err());
+    assert!(seen.is_empty());
+    Ok(())
+}
+
+#[test]
 fn rows_find_or_create_the_record_of_their_keys() -> Result<()> {
     let values: Vec<i32> = (0..100).map(|row| row % 10).collect();
     let keys = [ColumnView::try_new(&values, None)?];
