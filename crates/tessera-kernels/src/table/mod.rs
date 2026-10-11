@@ -890,6 +890,24 @@ impl<'a> TableMut<'a> {
         )
     }
 
+    /// Merge the records of chunk `source` from byte `*from` on into the
+    /// table by `rule`, which gets the payload of a record of keys the
+    /// table has and the payload of the table's record, to change; a
+    /// record of new keys is copied whole to chunk `chunk` and linked.
+    /// `*from` moves past the records merged, and the call stops where a
+    /// record of new keys needs another chunk or a larger index; the
+    /// count merged is returned. When the rule fails, the call returns
+    /// its error, the records before it merged.
+    pub fn merge(
+        &mut self,
+        source: usize,
+        from: &mut usize,
+        chunk: usize,
+        rule: impl FnMut(&[u8], &mut [u8]) -> Result<()>,
+    ) -> Result<(usize, CombineStop)> {
+        exclusive::merge(&self.0.region, &self.0.layout, source, from, chunk, rule)
+    }
+
     /// Merge the records of chunk `source` from byte `*from` on, each a
     /// group's states as [`Combine`] says per aggregate after a word of
     /// flags, into the records of the same keys, copying a group the table
@@ -903,14 +921,7 @@ impl<'a> TableMut<'a> {
         chunk: usize,
         combines: &[Combine],
     ) -> Result<(usize, CombineStop)> {
-        exclusive::combine(
-            &self.0.region,
-            &self.0.layout,
-            source,
-            from,
-            chunk,
-            combines,
-        )
+        exclusive::combine(self, source, from, chunk, combines)
     }
 
     /// Link the records of chunk `chunk` from byte `*from` on, as
@@ -1802,6 +1813,129 @@ mod tests {
             };
             assert_eq!(states(&into, offsets[key as usize]), expected, "key {key}");
         }
+    }
+
+    /// The states of each key's record, found by its keys.
+    fn states_of(table: &mut LocalTable, keys: &[i32]) -> Vec<[i64; 5]> {
+        let column = [ColumnView::try_new(keys, None).unwrap()];
+        let (hashes, mut pending_words) = key_batch(keys);
+        let mut inserted_words = vec![0; pending_words.len()];
+        let mut offsets = vec![0; keys.len()];
+        table
+            .find_or_insert(
+                &mut Batch::new(
+                    &hashes,
+                    &column[..],
+                    &mut RowMask::try_new(keys.len(), &mut pending_words).unwrap(),
+                    &mut offsets,
+                )
+                .unwrap(),
+                &mut RowMask::try_new(keys.len(), &mut inserted_words).unwrap(),
+            )
+            .unwrap();
+        assert!(
+            inserted_words.iter().all(|&word| word == 0),
+            "a key is missing"
+        );
+        offsets
+            .iter()
+            .map(|&offset| states(table, offset))
+            .collect()
+    }
+
+    /// A rule that adds the first words of two payloads.
+    fn add_first(incoming: &[u8], ours: &mut [u8]) -> Result<()> {
+        let theirs = i64::from_ne_bytes(incoming[..8].try_into()?);
+        let sum = i64::from_ne_bytes(ours[..8].try_into()?) + theirs;
+        ours[..8].copy_from_slice(&sum.to_ne_bytes());
+        Ok(())
+    }
+
+    #[test]
+    fn a_merge_by_a_rule_changes_known_keys_and_copies_new_ones() {
+        let (mut into, _) = grouped(
+            &(0..10).collect::<Vec<_>>(),
+            |key| [key.into(), 0, 0, 0, 0],
+            64,
+        );
+        let theirs = |key: i32| [i64::from(key) * 100, 7, 7, 7, 7];
+        let (mut from, _) = grouped(&(5..15).collect::<Vec<_>>(), theirs, 64);
+        let words = from.chunk_words(0).to_vec();
+        let source = into.add_chunk_copy(&words).unwrap();
+        let chunk = into.add_chunk().unwrap();
+        let mut at = CHUNK_HEADER;
+        let (merged, stop) = into
+            .table_mut()
+            .unwrap()
+            .merge(source, &mut at, chunk, add_first)
+            .unwrap();
+        assert_eq!((merged, stop), (10, CombineStop::Done));
+        // Keys 5 to 9 add theirs to ours; keys 10 to 14 are whole copies.
+        let expected: Vec<[i64; 5]> = (0..15)
+            .map(|key| match key {
+                0..5 => [key.into(), 0, 0, 0, 0],
+                5..10 => [i64::from(key) * 101, 0, 0, 0, 0],
+                _ => theirs(key),
+            })
+            .collect();
+        assert_eq!(states_of(&mut into, &(0..15).collect::<Vec<_>>()), expected);
+        assert_eq!(into.table().unwrap().stats().records, 15);
+    }
+
+    #[test]
+    fn a_failing_rule_stops_the_merge_with_its_own_error() {
+        let (mut into, _) = grouped(&[1, 2, 3], |key| [key.into(), 0, 0, 0, 0], 64);
+        let (mut from, _) = grouped(&[1, 2, 3], |_| [10, 0, 0, 0, 0], 64);
+        let words = from.chunk_words(0).to_vec();
+        let source = into.add_chunk_copy(&words).unwrap();
+        let chunk = into.add_chunk().unwrap();
+        let mut at = CHUNK_HEADER;
+        let mut calls = 0;
+        let error = into
+            .table_mut()
+            .unwrap()
+            .merge(source, &mut at, chunk, |incoming, ours| {
+                calls += 1;
+                if calls == 2 {
+                    anyhow::bail!("the rule refuses the second record");
+                }
+                add_first(incoming, ours)
+            })
+            .unwrap_err();
+        assert!(error.to_string().contains("refuses the second"), "{error}");
+        let firsts: Vec<i64> = states_of(&mut into, &[1, 2, 3])
+            .iter()
+            .map(|states| states[0])
+            .collect();
+        assert_eq!(firsts, [11, 2, 3], "the first merged");
+        let record = into.table().unwrap().record_size();
+        assert_eq!(at, CHUNK_HEADER + record, "on the record the rule refused");
+    }
+
+    #[test]
+    fn a_merge_refuses_a_record_found_in_its_source() {
+        let (mut into, _) = grouped(&[7], |_| [1, 0, 0, 0, 0], 64);
+        let (mut from, _) = grouped(&[7], |_| [2, 0, 0, 0, 0], 64);
+        let words = from.chunk_words(0).to_vec();
+        let source = into.add_chunk_copy(&words).unwrap();
+        let chunk = into.add_chunk().unwrap();
+        // The bucket of key 7 is damaged to name the record of the source,
+        // which a merge reads: its payload would be the rule's both.
+        let (hashes, _) = key_batch(&[7]);
+        let layout = into.table().unwrap().layout;
+        let at = layout.buckets_offset + (hashes[0] >> layout.bucket_shift) as usize * 4;
+        let index = into.index_words();
+        let mut bytes = index[at / 8].to_ne_bytes();
+        bytes[at % 8..at % 8 + 4]
+            .copy_from_slice(&header::reference(source, CHUNK_HEADER).to_ne_bytes());
+        index[at / 8] = u64::from_ne_bytes(bytes);
+        let mut from_byte = CHUNK_HEADER;
+        let error = into
+            .table_mut()
+            .unwrap()
+            .merge(source, &mut from_byte, chunk, add_first)
+            .unwrap_err();
+        assert!(error.to_string().contains("which is merged"), "{error}");
     }
 
     #[test]
