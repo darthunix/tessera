@@ -114,7 +114,7 @@ pub use header::{
     CHUNK_HEADER, FORMAT_VERSION, HEADER_SIZE, KeyKind, MAX_CHUNK_LEN, MAX_CHUNKS, MAX_KEYS,
     TableConfig, UNIT_BITS, VERSION_OFFSET, index_size, record_bytes, record_bytes_of,
 };
-use header::{Header, Layout, NRECORDS};
+use header::{Header, Layout, NRECORDS, RECORD_HEADER};
 pub use keys::{KeySource, KeyValue, normalize_word};
 pub use local::LocalTable;
 pub use marks::{Marks, mark, mark_words, scan_unmarked};
@@ -295,6 +295,42 @@ pub unsafe fn init_chunk(base: *mut u8, len: usize) -> Result<()> {
     // SAFETY: the caller's contract; the used mark is the first word.
     unsafe { base.cast::<u64>().write(CHUNK_HEADER as u64) };
     Ok(())
+}
+
+/// The used mark of the chunk of `len` bytes at `base`, whose records take
+/// `record_size` bytes each: checked to lie between [`CHUNK_HEADER`] and
+/// `len` and to end a record, so that a caller outside the crate never
+/// reads the mark by itself.
+///
+/// # Safety
+///
+/// `base` is valid for reads of `len` bytes when the block can be a chunk,
+/// and nothing writes its first word during the call.
+pub unsafe fn chunk_used(base: *const u8, len: usize, record_size: usize) -> Result<usize> {
+    ensure!(
+        chunk_fits(base, len),
+        "a table chunk of {len} bytes is not aligned to 8 or not a multiple of 8 of \
+         {CHUNK_HEADER} to {MAX_CHUNK_LEN} bytes"
+    );
+    ensure!(
+        record_size >= RECORD_HEADER && record_size.is_multiple_of(8),
+        "a table record of {record_size} bytes is not a multiple of 8 of at least \
+         {RECORD_HEADER}"
+    );
+    // SAFETY: the caller's contract; the used mark is the chunk's first
+    // word, aligned as the block is.
+    let used = unsafe { base.cast::<u64>().read() };
+    usize::try_from(used)
+        .ok()
+        .filter(|&used| {
+            used >= CHUNK_HEADER && used <= len && (used - CHUNK_HEADER).is_multiple_of(record_size)
+        })
+        .ok_or_else(|| {
+            anyhow!(
+                "a table chunk of {len} bytes has a used mark of {used} bytes that ends no \
+                 record of {record_size} bytes"
+            )
+        })
 }
 
 /// The error of a call whose keys or payload size are not its table's.

@@ -108,12 +108,6 @@ agg_partition(const AggSpill *spill, uint32 hash)
 	return tess_table_partition(hash, spill->shift, (uint32) spill->npartitions);
 }
 
-static inline Size
-agg_chunk_used(const void *base)
-{
-	return (Size) *(const uint64 *) base;
-}
-
 /* Count bytes of a partition's chunks in memory in the level's words. */
 static void
 part_count(AggSpill *spill, AggPart *part, int64 delta)
@@ -169,8 +163,10 @@ part_release(AggSpill *spill, AggPart *part)
 static void
 agg_write_chunk(TessAggState *state, AggSpill *spill, int partition, void *base)
 {
-	Size		used = agg_chunk_used(base);
+	Size		used = 0;
 
+	check(state, state->kernels->table_chunk_used(base, spill->chunk_len, state->record_size,
+												  &used, &state->status));
 	if (used <= TESS_TABLE_CHUNK_HEADER)
 		return;
 	/* disk_bytes of a partition: what it takes read back; the node's, what was stored. */

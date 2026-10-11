@@ -252,6 +252,17 @@ extern TessStatusCode tess_table_chunk_init(void *base, Size len,
 											TessStatus *status);
 
 /*
+ * The used mark of the chunk of len bytes at base, whose records take
+ * record_size bytes each, into used: refused, used unchanged, for a block
+ * that cannot be a chunk, a record size that is not a multiple of 8 of at
+ * least 16, or a mark below 8, past len or ending no record. A node reads
+ * a chunk's mark through this call, never by itself.
+ */
+extern TessStatusCode tess_table_chunk_used(const void *base, Size len,
+											Size record_size, Size *used,
+											TessStatus *status);
+
+/*
  * Append the rows of pending as records to chunk `chunk` of table, in row
  * order, as long as whole records fit: each row appended leaves pending
  * and gets the reference of its record in offsets (one slot per row of
