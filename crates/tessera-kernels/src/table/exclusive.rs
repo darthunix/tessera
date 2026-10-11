@@ -564,10 +564,16 @@ unsafe fn payload_of<'r, R: Region>(region: &'r R, layout: &Layout, spot: R::Spo
 /// call by [`TableMut::payloads`]: it gives the payload of the record a
 /// reference names, to change in place, after checking the reference as
 /// a lookup checks it. Each payload borrows the cursor, so two are never
-/// open at once, even of one record.
+/// open at once, even of one record. It also holds up to [`HELD`]
+/// references it has checked, whose payloads open later without a second
+/// check ([`Self::hold`], [`Self::held`]); what it holds never leaves it.
 pub struct PayloadCursor<'t> {
     access: Access<'t, RawRegion>,
+    held: [*mut u8; HELD],
 }
+
+/// The references a [`PayloadCursor`] holds at once.
+pub const HELD: usize = 16;
 
 impl<'t> PayloadCursor<'t> {
     /// A cursor over the payloads of `table`, which its writer lends it.
@@ -575,6 +581,7 @@ impl<'t> PayloadCursor<'t> {
     pub(super) fn new(table: &'t mut Table<'_>) -> Self {
         Self {
             access: Access::new(&table.region, &table.layout),
+            held: [core::ptr::null_mut(); HELD],
         }
     }
 
@@ -586,6 +593,32 @@ impl<'t> PayloadCursor<'t> {
         // SAFETY: the spot is this record's payload, just checked; the
         // slice borrows the cursor, which borrows the writer's table, so
         // no other slice of a payload is alive while it is.
+        Ok(unsafe { self.access.payload_mut(spot) })
+    }
+
+    /// Check the reference `offset` now, as [`Self::payload`] does, and
+    /// hold its payload's place in `slot`, below [`HELD`], for
+    /// [`Self::held`] to open later; a slot holds one place at a time.
+    #[inline(always)]
+    pub fn hold(&mut self, slot: usize, offset: u32) -> Result<()> {
+        let spot = self.access.payload_spot(offset)?;
+        let Some(held) = self.held.get_mut(slot) else {
+            bail!("slot {slot} of a payload cursor's {HELD}");
+        };
+        *held = spot;
+        Ok(())
+    }
+
+    /// The payload whose reference [`Self::hold`] checked into `slot`, to
+    /// change in place: an error for a slot that holds none.
+    #[inline(always)]
+    pub fn held(&mut self, slot: usize) -> Result<&mut [u8]> {
+        let Some(&spot) = self.held.get(slot).filter(|spot| !spot.is_null()) else {
+            bail!("slot {slot} of a payload cursor holds no reference");
+        };
+        // SAFETY: the place was checked by `hold` over this cursor's table,
+        // which the cursor borrows, so the record is still there; the
+        // slice borrows the cursor, so no other slice of a payload lives.
         Ok(unsafe { self.access.payload_mut(spot) })
     }
 }
@@ -749,6 +782,8 @@ const LOCAL_GROUPS: usize = 16;
 /// ends.
 const LOCAL_SLOTS: usize = 2 * LOCAL_GROUPS;
 
+const _: () = assert!(LOCAL_GROUPS <= HELD, "a cursor holds every group of a word");
+
 /// The decimals one group's rows of a word gave one sum, added up: their
 /// sum at their scale and how many.
 #[derive(Clone, Copy, Debug, Default)]
@@ -819,9 +854,8 @@ fn fold_term(payload: &mut [u8], at: usize, term: Term) -> Result<bool> {
 /// record directly, as do the rows of further groups. Exact sums add in any
 /// order; a local sum the state refuses at its bound is taken again row by
 /// row, so that the rows it refuses go to the rest.
-pub(super) fn sum_terms<R: Region, T: Terms>(
-    region: &R,
-    layout: &Layout,
+pub(super) fn sum_terms<T: Terms>(
+    table: &mut TableMut<'_>,
     offsets: &[u32],
     rows: &RowMaskView<'_>,
     sums: &mut [SumSlot<'_, T>],
@@ -835,16 +869,15 @@ pub(super) fn sum_terms<R: Region, T: Terms>(
     );
     for sum in sums.iter() {
         let words: [usize; SumState::WORDS] = std::array::from_fn(|word| sum.at + 8 * word);
-        check_accumulate(layout, offsets.len(), nrows, &words)?;
+        check_words(table.payload_size(), offsets.len(), nrows, &words)?;
         ensure!(
             sum.rest.as_view().nrows() == nrows,
             "the rest and the selection of a sum have different row counts"
         );
     }
-    let mut access = Access::new(region, layout);
+    let mut payloads = table.payloads();
     let mut others = [0_u64; MAX_SUMS];
     let mut groups = [0_u32; LOCAL_GROUPS];
-    let mut spots: [Option<R::Spot>; LOCAL_GROUPS] = [None; LOCAL_GROUPS];
     let mut locals = [Local::default(); LOCAL_GROUPS];
     let mut row_groups = [0_u8; 64];
     let mut group_rows = [0_u64; LOCAL_GROUPS];
@@ -875,8 +908,8 @@ pub(super) fn sum_terms<R: Region, T: Terms>(
         for bit in ones(look) {
             group_rows[usize::from(row_groups[bit]) % LOCAL_GROUPS] |= 1 << bit;
         }
-        for (spot, &offset) in spots.iter_mut().zip(&groups[..ngroups]) {
-            *spot = Some(payload_spot(&mut access, region, layout, offset)?);
+        for (group, &offset) in groups[..ngroups].iter().enumerate() {
+            payloads.hold(group, offset)?;
         }
         for (sum, other) in sums.iter().zip(others.iter_mut()) {
             *other = 0;
@@ -926,12 +959,7 @@ pub(super) fn sum_terms<R: Region, T: Terms>(
                         taken |= 1 << bit;
                     }
                     _ => {
-                        let Some(spot) = spots[group] else {
-                            bail!("a group without the record it was found in");
-                        };
-                        // SAFETY: the group's spot was found in this call;
-                        // the slice goes before another is made.
-                        let payload = unsafe { payload_of(region, layout, spot) };
+                        let payload = payloads.held(group)?;
                         if !fold_term(payload, sum.at, term)? {
                             *other |= 1 << bit;
                         }
@@ -943,11 +971,7 @@ pub(super) fn sum_terms<R: Region, T: Terms>(
                 if local.count == 0 {
                     continue;
                 }
-                let Some(spot) = spots[group] else {
-                    bail!("a group without the record it was found in");
-                };
-                // SAFETY: as above.
-                let payload = unsafe { payload_of(region, layout, spot) };
+                let payload = payloads.held(group)?;
                 let slots: &mut [u8; 8 * SumState::WORDS] =
                     (&mut payload[sum.at..sum.at + 8 * SumState::WORDS]).try_into()?;
                 let mut words: [u64; SumState::WORDS] =
@@ -978,7 +1002,7 @@ pub(super) fn sum_terms<R: Region, T: Terms>(
         let look = selected & !local_rows;
         for bit in ones(look) {
             let row = index * 64 + bit;
-            let payload = payload_at(&mut access, region, layout, offsets[row])?;
+            let payload = payloads.payload(offsets[row])?;
             for (sum, other) in sums.iter().zip(others.iter_mut()) {
                 let term = sum.terms.term(row);
                 if !matches!(term, Term::Null) && !fold_term(payload, sum.at, term)? {
@@ -1000,9 +1024,8 @@ pub(super) fn sum_terms<R: Region, T: Terms>(
 /// record's state unchanged. A final grouping's rows come a group's partial
 /// state from each participant, the groups of a batch from one: its rows
 /// are not added up by group first, as [`sum_terms`] adds up terms.
-pub(super) fn sum_partials<R: Region, P: Partials>(
-    region: &R,
-    layout: &Layout,
+pub(super) fn sum_partials<P: Partials>(
+    table: &mut TableMut<'_>,
     offsets: &[u32],
     rows: &RowMaskView<'_>,
     sums: &mut [SumSlot<'_, P>],
@@ -1012,20 +1035,20 @@ pub(super) fn sum_partials<R: Region, P: Partials>(
     ensure!(nsums <= MAX_SUMS, "{nsums} sums in a call, past {MAX_SUMS}");
     for sum in sums.iter() {
         let words: [usize; SumState::WORDS] = std::array::from_fn(|word| sum.at + 8 * word);
-        check_accumulate(layout, offsets.len(), nrows, &words)?;
+        check_words(table.payload_size(), offsets.len(), nrows, &words)?;
         ensure!(
             sum.rest.as_view().nrows() == nrows,
             "the rest and the selection of a sum have different row counts"
         );
     }
-    let mut access = Access::new(region, layout);
+    let mut payloads = table.payloads();
     let mut others = [0_u64; MAX_SUMS];
     for index in 0..nrows.div_ceil(64) {
         others[..nsums].fill(0);
         let look = rows.word_at(index);
         for bit in ones(look) {
             let row = index * 64 + bit;
-            let payload = payload_at(&mut access, region, layout, offsets[row])?;
+            let payload = payloads.payload(offsets[row])?;
             for (sum, other) in sums.iter().zip(others.iter_mut()) {
                 let state = match sum.terms.partial(row)? {
                     Partial::Null => continue,
@@ -1072,21 +1095,20 @@ pub struct ExtremeSlot<'a, T: ?Sized> {
 /// record's payload ([`ExtremeState::offer`]), in the rows' order: the
 /// rows the state does not decide go to the slot's rest, and the group's
 /// later rows of the batch after them, for the caller to take in order.
-pub(super) fn extremes<R: Region, T: Terms>(
-    region: &R,
-    layout: &Layout,
+pub(super) fn extremes<T: Terms>(
+    table: &mut TableMut<'_>,
     offsets: &[u32],
     rows: &RowMaskView<'_>,
     slot: &mut ExtremeSlot<'_, T>,
 ) -> Result<()> {
     let nrows = rows.nrows();
     let words: [usize; ExtremeState::WORDS] = std::array::from_fn(|word| slot.at + 8 * word);
-    check_accumulate(layout, offsets.len(), nrows, &words)?;
+    check_words(table.payload_size(), offsets.len(), nrows, &words)?;
     ensure!(
         slot.rest.as_view().nrows() == nrows,
         "the rest and the selection of an extreme have different row counts"
     );
-    let mut access = Access::new(region, layout);
+    let mut payloads = table.payloads();
     for index in 0..nrows.div_ceil(64) {
         let mut other = 0_u64;
         for bit in ones(rows.word_at(index)) {
@@ -1095,7 +1117,7 @@ pub(super) fn extremes<R: Region, T: Terms>(
             if term == Term::Null {
                 continue;
             }
-            let payload = payload_at(&mut access, region, layout, offsets[row])?;
+            let payload = payloads.payload(offsets[row])?;
             let (value, flags) = (read_word(payload, slot.at), read_word(payload, slot.at + 8));
             let mut state = ExtremeState::from_words(value, flags)?;
             match state.offer(term, slot.max) {
