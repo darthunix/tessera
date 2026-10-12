@@ -15,8 +15,9 @@
 use anyhow::{Result, ensure};
 use tessera_core::{ColumnReader, RowMask, RowMaskView};
 use tessera_kernels::accumulate;
+use tessera_kernels::column_keys::normalize_word;
 use tessera_kernels::int32::{self, NullKeys};
-use tessera_kernels::table::{Batch, KeyKind, KeySource, LocalTable, TableConfig, normalize_word};
+use tessera_kernels::table::{Batch, KeyKind, KeySource, LocalTable, TableConfig};
 
 use crate::reading::Input;
 use crate::support::{fixture::Fixture, runner::Runner};

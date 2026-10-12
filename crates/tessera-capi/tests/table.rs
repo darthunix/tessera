@@ -32,11 +32,12 @@ use tessera_capi::c::{
     tess_table_try_build_bloom,
 };
 use tessera_core::{ColumnView, RowMask, RowMaskView};
+use tessera_kernels::column_keys::KeyColumns;
 use tessera_kernels::int32::{self, NullKeys};
 use tessera_kernels::table::phases::{Action, PROBE, Participant};
 use tessera_kernels::table::{
-    Batch, CHUNK_HEADER, KeyColumns, KeyKind, LocalTable, MAX_CHUNK_LEN, MAX_PAYLOAD_COLUMNS,
-    TableConfig, index_size, payload_null_words,
+    Batch, CHUNK_HEADER, KeyKind, LocalTable, MAX_CHUNK_LEN, MAX_PAYLOAD_COLUMNS, TableConfig,
+    index_size, payload_null_words,
 };
 
 thread_local! {
@@ -2030,7 +2031,7 @@ fn the_writer_entry_points_round_trip() -> Result<()> {
 
 #[test]
 fn datum_words_normalize_like_rows_under_partial_readiness() -> Result<()> {
-    use tessera_kernels::table::normalize_word;
+    use tessera_kernels::column_keys::normalize_word;
     for nrows in [64, 130] {
         let keys = Keys::new(nrows);
         let column = keys.column();
