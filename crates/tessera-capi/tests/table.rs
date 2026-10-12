@@ -35,8 +35,8 @@ use tessera_core::{ColumnView, RowMask, RowMaskView};
 use tessera_kernels::int32::{self, NullKeys};
 use tessera_kernels::table::phases::{Action, PROBE, Participant};
 use tessera_kernels::table::{
-    Batch, CHUNK_HEADER, KeyKind, LocalTable, MAX_CHUNK_LEN, MAX_PAYLOAD_COLUMNS, TableConfig,
-    index_size, payload_null_words,
+    Batch, CHUNK_HEADER, KeyColumns, KeyKind, LocalTable, MAX_CHUNK_LEN, MAX_PAYLOAD_COLUMNS,
+    TableConfig, index_size, payload_null_words,
 };
 
 thread_local! {
@@ -492,8 +492,8 @@ fn datum_and_dense_keys_build_the_same_table() -> Result<()> {
             // that outlive the column.
             let datum = [unsafe { column.int32(None) }?];
             let dense = [keys.dense()?];
-            let from_datum = round_trip(&datum[..], &hashes, &valid)?;
-            let from_dense = round_trip(&dense[..], &hashes, &valid)?;
+            let from_datum = round_trip(&KeyColumns(&datum), &hashes, &valid)?;
+            let from_dense = round_trip(&KeyColumns(&dense), &hashes, &valid)?;
             assert_eq!(from_datum, from_dense, "{nrows} rows under {nulls:?}");
             let (offsets, found, matches) = from_dense;
             assert_eq!(found, valid, "every valid row is found");
