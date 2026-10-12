@@ -3,10 +3,15 @@
 //! its NULL bits and its reference. The records need not be linked. The
 //! items take what the table offers its callers alone: references from
 //! its scan, and keys from its cursor that reads records.
+//!
+//! Each call is a public function over a private body, as the table's
+//! methods were over these bodies: LLVM then optimizes the body alone and
+//! again where it is inlined, and the items' loops compile as they did
+//! inside the table; a body made public itself compiles otherwise.
 
 use anyhow::{Result, ensure};
 
-use super::{Cursor, Table};
+use crate::table::{Cursor, Table};
 use tessera_core::{RowMaskView, ones};
 
 use crate::sort::{Encoder, SortKey, heap_push, with_item_words};
@@ -26,7 +31,11 @@ fn check_keys(table: &Table<'_>, keys: &[SortKey]) -> Result<()> {
 
 /// Write the item of every record into `items`, one after another, and
 /// return the count; `items` must hold them all.
-pub(super) fn items(table: &Table<'_>, keys: &[SortKey], items: &mut [u64]) -> Result<usize> {
+pub fn items(table: &Table<'_>, keys: &[SortKey], items: &mut [u64]) -> Result<usize> {
+    items_inner(table, keys, items)
+}
+
+fn items_inner(table: &Table<'_>, keys: &[SortKey], items: &mut [u64]) -> Result<usize> {
     check_keys(table, keys)?;
     let encoder = Encoder::new(keys)?;
     with_item_words!(encoder.words(), |W| items_as::<W>(table, &encoder, items))
@@ -65,8 +74,19 @@ fn items_as<const W: usize>(
 /// Push the item of each record `refs[row]` of `rows` into a top-N heap:
 /// `heap` holds its capacity of items one after another, the first `*len`
 /// of them the heap; a record better than the top replaces it once the heap
-/// is full (see [`crate::sort::heap_push`]).
-pub(super) fn top_push(
+/// is full (see `heap_push` of [`crate::sort`]).
+pub fn top_push(
+    table: &Table<'_>,
+    keys: &[SortKey],
+    refs: &[u32],
+    rows: &RowMaskView<'_>,
+    heap: &mut [u64],
+    len: &mut usize,
+) -> Result<()> {
+    top_push_inner(table, keys, refs, rows, heap, len)
+}
+
+fn top_push_inner(
     table: &Table<'_>,
     keys: &[SortKey],
     refs: &[u32],

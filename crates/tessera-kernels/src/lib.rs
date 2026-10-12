@@ -58,6 +58,7 @@
 /// against about 2.4 to 2.5 cycles per selected row on the row path.
 pub(crate) const BULK_MIN_ROWS: u32 = 12;
 
+pub mod accumulate;
 pub mod calendar;
 pub mod cast;
 pub mod count;
@@ -67,6 +68,7 @@ mod int;
 pub mod int32;
 pub mod int64;
 pub mod ops;
+pub mod order;
 pub mod set;
 mod simd;
 pub mod sort;
