@@ -10,6 +10,7 @@ use anyhow::{Result, ensure};
 use proptest::prelude::*;
 use tessera_core::{ColumnReader, ColumnView, RowMask, RowMaskView};
 use tessera_kernels::accumulate::{self, ExtremeSlot, Fold, Slot, SumSlot};
+use tessera_kernels::column_keys::{KeyColumns, normalize_word};
 use tessera_kernels::decimal::{
     self, Decimal, DecimalWord, ExtremeState, ExtremeValue, Offer, Partial, Partials, Special,
     SumState, Term, Terms,
@@ -17,9 +18,9 @@ use tessera_kernels::decimal::{
 use tessera_kernels::int32::{self, NullKeys, hash_combine, murmurhash32};
 use tessera_kernels::ops::ArithmeticError;
 use tessera_kernels::table::{
-    Batch, CHUNK_HEADER, Cursor, FORMAT_VERSION, HELD, KeyColumns, KeyKind, KeySource, LocalTable,
+    Batch, CHUNK_HEADER, Cursor, FORMAT_VERSION, HELD, KeyKind, KeySource, LocalTable,
     MAX_CHUNK_LEN, MAX_KEYS, Marks, Table, TableConfig, UNIT_BITS, bloom, index_size, mark,
-    mark_words, normalize_word, record_bytes, record_bytes_of, scan_unmarked,
+    mark_words, record_bytes, record_bytes_of, scan_unmarked,
 };
 use tessera_testing::{edge, flags, integer, property, values, words};
 
