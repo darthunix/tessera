@@ -40,7 +40,8 @@ crate: no other crate of Tessera defines a mask of its own, and the C
 API describes the same layout, turned into the crate's type at its
 edge, so that one type, with one set of checks, crosses the boundary
 of the crate.
-- **Checked by:** pending
+- **Checked by:**
+  `.github/scripts/check-masks.sh::no crate but relhash defines a mask of rows`
 
 ### No memory taken
 A call over the blocks the caller gives allocates nothing, also when it
