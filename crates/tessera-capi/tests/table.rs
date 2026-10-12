@@ -34,7 +34,7 @@ use tessera_capi::c::{
 use tessera_core::{ColumnView, RowMask, RowMaskView};
 use tessera_kernels::column_keys::KeyColumns;
 use tessera_kernels::int32::{self, NullKeys};
-use tessera_kernels::table::phases::{Action, PROBE, Participant};
+use tessera_kernels::phases::{Action, PROBE, Participant};
 use tessera_kernels::table::{
     Batch, CHUNK_HEADER, KeyKind, LocalTable, MAX_CHUNK_LEN, MAX_PAYLOAD_COLUMNS, TableConfig,
     index_size, payload_null_words,

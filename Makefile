@@ -48,11 +48,12 @@ rust-check:
 rust-mutants:
 	$(CARGO) mutants --workspace --jobs 4
 
-# The loom model of the hash table's concurrent protocol; a target
-# directory of its own, since --cfg loom rebuilds every crate.
+# The loom models of the hash table's concurrent protocol and of the
+# phases, rounds and words of a spill over it; a target directory of its
+# own, since --cfg loom rebuilds every crate.
 rust-loom:
 	RUSTFLAGS="--cfg loom" LOOM_MAX_PREEMPTIONS=3 CARGO_TARGET_DIR=target/loom \
-		$(CARGO) test -p tessera-kernels --lib --release --locked table::loom
+		$(CARGO) test -p tessera-kernels --lib --release --locked loom::
 
 rust-clean:
 	$(CARGO) clean

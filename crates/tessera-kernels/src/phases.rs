@@ -42,6 +42,7 @@
 //! [`StopWord`] first: the last one then returns no record without a
 //! mark, since the pairs of the rows left unprobed were never marked, as
 //! PostgreSQL's parallel hash join skips its unmatched rows then.
+#![allow(unsafe_code)]
 
 use core::sync::atomic::AtomicU64;
 
