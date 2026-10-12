@@ -4,7 +4,6 @@ use std::iter::FusedIterator;
 use anyhow::{Result, ensure};
 
 use crate::RowMaskView;
-use crate::bitmap::word_count;
 
 /// Statically typed reading, independent of a column's physical storage.
 ///
@@ -73,7 +72,7 @@ pub trait ColumnReader {
             "column and selection row counts differ"
         );
         let mut acc = init;
-        for index in 0..word_count(rows.nrows()) {
+        for index in 0..rows.nrows().div_ceil(64) {
             let selected = rows.word_at(index);
             if selected == 0 {
                 continue;
@@ -134,7 +133,7 @@ impl<F> WordValues<F> {
         F: FnMut(usize) -> Option<V>,
     {
         ensure!(
-            word_index < word_count(nrows),
+            word_index < nrows.div_ceil(64),
             "selection word is out of bounds"
         );
         let base = word_index * 64;
