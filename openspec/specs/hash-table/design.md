@@ -1756,6 +1756,9 @@ How a spilled chunk of records is written to disk is in
   counters of the rounds and the rule of a split read back
 - `crates/tessera-kernels/src/table/loom.rs`: the model of several
   participants
+- `crates/tessera-kernels/src/table/model.rs`: the memory of the loom
+  model, and the model table the models of the phases and the rounds
+  run over
 - `crates/tessera-capi/src/c/table.rs`: the C entry points
 - `crates/tessera-capi/src/c/shared_spill.rs`: the C entry points of a
   spill and of the rounds

@@ -16,7 +16,9 @@ tessera-spill.workspace = true
 proptest.workspace = true
 tessera-testing.workspace = true
 
-[target.'cfg(loom)'.dev-dependencies]
+# The model table of the table module, which other modules' loom models
+# run over.
+[target.'cfg(loom)'.dependencies]
 loom = "0.7"
 
 [lints]
