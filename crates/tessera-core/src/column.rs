@@ -1,6 +1,5 @@
 use anyhow::{Result, ensure};
 
-use crate::bitmap::validate_row;
 use crate::{ColumnReader, RowMaskView, WordBlock, WordValues};
 
 /// Read-only access to borrowed, initialized values and their nullness.
@@ -120,7 +119,13 @@ impl<'a, T> ColumnView<'a, T> {
         match self.non_nulls {
             Some(mask) if !mask.contains(row)? => return Ok(None),
             Some(_) => {}
-            None => validate_row(row, self.values.len())?,
+            None => {
+                let nrows = self.values.len();
+                ensure!(
+                    row < nrows,
+                    "physical row {row} is out of bounds for {nrows} rows"
+                );
+            }
         }
         Ok(Some(&self.values[row]))
     }
