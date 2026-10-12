@@ -26,7 +26,7 @@ use super::header::{
 };
 use super::record::Access;
 use super::region::{Region, order};
-use super::{Batch, batch, index_size, init};
+use super::{Batch, KeyColumns, batch, index_size, init};
 
 /// A table over loom's atomics for the models of participants that share
 /// one: chunks of their own to append to, an index one of them makes,
@@ -385,11 +385,12 @@ pub(super) fn append(
     let nrows = keys.len();
     let hashes = vec![HASH; nrows];
     let columns = [ColumnView::try_new(keys, None)?];
+    let columns = KeyColumns(&columns);
     let mut pending_bits = [(1u64 << nrows) - 1];
     let mut pending = RowMask::try_new(nrows, &mut pending_bits)?;
     let mut offsets = vec![0; nrows];
     let payload = payload(keys);
-    let mut rows = Batch::new(&hashes, &columns[..], &mut pending, &mut offsets)?;
+    let mut rows = Batch::new(&hashes, &columns, &mut pending, &mut offsets)?;
     batch::append(region, layout, chunk, Some(&payload), &mut rows)
 }
 
@@ -413,7 +414,7 @@ pub(super) fn probe(region: &LoomRegion, layout: &Layout, keys: &[i32]) -> Resul
         region,
         layout,
         &hashes,
-        &columns[..],
+        &KeyColumns(&columns),
         &rows,
         &mut matches,
         &mut found,

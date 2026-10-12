@@ -52,7 +52,7 @@
 //! and benchmarks build tables with it.
 //!
 //! ```
-//! use tessera_kernels::table::{Batch, KeyKind, LocalTable, TableConfig};
+//! use tessera_kernels::table::{Batch, KeyColumns, KeyKind, LocalTable, TableConfig};
 //!
 //! let config = TableConfig { keys: &[KeyKind::Int32], payload_size: 8 };
 //! let mut table = LocalTable::new(&config, 100, 4096)?;
@@ -61,13 +61,14 @@
 //! // Three rows with keys 7, 8 and 7, hashed by the int4 kernel's formula.
 //! use tessera_core::{ColumnView, RowMask, RowMaskView};
 //! use tessera_kernels::int32::murmurhash32;
-//! let keys = [ColumnView::try_new(&[7, 8, 7], None)?];
+//! let columns = [ColumnView::try_new(&[7, 8, 7], None)?];
+//! let keys = KeyColumns(&columns);
 //! let hashes: Vec<u32> = [7, 8, 7].map(|key: i32| murmurhash32(key as u32)).into();
 //! let payload = [1u64, 2, 3].map(u64::to_ne_bytes).concat();
 //! let mut pending = [0b111];
 //! let mut offsets = [0; 3];
 //! let mut mask = RowMask::try_new(3, &mut pending)?;
-//! let mut batch = Batch::new(&hashes, &keys[..], &mut mask, &mut offsets)?;
+//! let mut batch = Batch::new(&hashes, &keys, &mut mask, &mut offsets)?;
 //! table.insert(Some(&payload), &mut batch)?;
 //! assert_eq!(pending, [0], "every row found room");
 //!
@@ -76,7 +77,7 @@
 //! let mut hits = [0];
 //! let mut matches = [0; 3];
 //! let mut found = RowMask::try_new(3, &mut hits)?;
-//! table.probe(&hashes, &keys[..], &RowMaskView::try_new(3, &[0b011])?, &mut matches, &mut found)?;
+//! table.probe(&hashes, &keys, &RowMaskView::try_new(3, &[0b011])?, &mut matches, &mut found)?;
 //! assert_eq!(hits, [0b011]);
 //! assert_eq!(table.record(matches[0])?.payload, 3u64.to_ne_bytes());
 //! let mut more = RowMask::try_new(3, &mut hits)?;
@@ -116,7 +117,7 @@ pub use header::{
     TableConfig, UNIT_BITS, VERSION_OFFSET, index_size, record_bytes, record_bytes_of,
 };
 use header::{Header, Layout, NRECORDS, RECORD_HEADER};
-pub use keys::{KeySource, KeyValue, normalize_word};
+pub use keys::{KeyColumns, KeySource, KeyValue, normalize_word};
 pub use local::LocalTable;
 pub use marks::{Marks, mark, mark_words, scan_unmarked};
 use record::Access;
@@ -1067,7 +1068,7 @@ mod tests {
         let inserted = table
             .insert(
                 None,
-                &mut Batch::new(&hashes, &column[..], &mut pending, &mut offsets).unwrap(),
+                &mut Batch::new(&hashes, &KeyColumns(&column), &mut pending, &mut offsets).unwrap(),
             )
             .unwrap();
         assert_eq!(inserted, count as usize);
@@ -1235,7 +1236,7 @@ mod tests {
             blocks.chunks(),
             source as usize,
             Some(&payload),
-            &mut Batch::new(&hashes, &column[..], &mut pending, &mut offsets).unwrap(),
+            &mut Batch::new(&hashes, &KeyColumns(&column), &mut pending, &mut offsets).unwrap(),
         )
         .unwrap();
         let len = CHUNK_HEADER + 8 * 32;
@@ -1324,7 +1325,7 @@ mod tests {
                     &Partitions { shift, chunks },
                     &mut Batch::new(
                         &hashes,
-                        &column[..],
+                        &KeyColumns(&column),
                         &mut RowMask::try_new(3, &mut pending_words).unwrap(),
                         &mut [0; 3],
                     )
@@ -1370,7 +1371,7 @@ mod tests {
             blocks.chunks(),
             source as usize,
             Some(&payload),
-            &mut Batch::new(&hashes, &column[..], &mut pending, &mut offsets).unwrap(),
+            &mut Batch::new(&hashes, &KeyColumns(&column), &mut pending, &mut offsets).unwrap(),
         )
         .unwrap();
         let targets: Vec<u32> = (0..4).map(|_| blocks.add(CHUNK_HEADER + 64 * 32)).collect();
@@ -1452,7 +1453,8 @@ mod tests {
                             shift: 3,
                             chunks: &current,
                         },
-                        &mut Batch::new(&hashes, &column[..], &mut pending, &mut offsets).unwrap(),
+                        &mut Batch::new(&hashes, &KeyColumns(&column), &mut pending, &mut offsets)
+                            .unwrap(),
                         &mut inserted,
                     )
                     .unwrap();
@@ -1528,7 +1530,7 @@ mod tests {
                 },
                 &mut Batch::new(
                     &hashes,
-                    &column[..],
+                    &KeyColumns(&column),
                     &mut RowMask::try_new(keys.len(), &mut pending_words).unwrap(),
                     &mut offsets,
                 )
@@ -1564,7 +1566,7 @@ mod tests {
             .find_or_insert(
                 &mut Batch::new(
                     &hashes,
-                    &column[..],
+                    &KeyColumns(&column),
                     &mut RowMask::try_new(keys.len(), &mut pending_words).unwrap(),
                     &mut offsets,
                 )
@@ -1690,7 +1692,7 @@ mod tests {
         into.find_or_insert(
             &mut Batch::new(
                 &hashes,
-                &column[..],
+                &KeyColumns(&column),
                 &mut RowMask::try_new(keys.len(), &mut pending_words).unwrap(),
                 &mut offsets,
             )
@@ -1735,7 +1737,7 @@ mod tests {
             .find_or_insert(
                 &mut Batch::new(
                     &hashes,
-                    &column[..],
+                    &KeyColumns(&column),
                     &mut RowMask::try_new(keys.len(), &mut pending_words).unwrap(),
                     &mut offsets,
                 )
@@ -1973,7 +1975,7 @@ mod tests {
             chunks,
             0,
             None,
-            &mut Batch::new(&hashes, &column[..], &mut pending, &mut offsets)?,
+            &mut Batch::new(&hashes, &KeyColumns(&column), &mut pending, &mut offsets)?,
         )
     }
 
