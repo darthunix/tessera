@@ -61,6 +61,7 @@ pub(crate) const BULK_MIN_ROWS: u32 = 12;
 pub mod accumulate;
 pub mod calendar;
 pub mod cast;
+pub mod column_keys;
 pub mod count;
 pub mod decimal;
 pub mod error;

@@ -21,10 +21,9 @@
 
 use anyhow::{Result, ensure};
 use tessera_core::{ColumnView, RowMask, RowMaskView};
+use tessera_kernels::column_keys::KeyColumns;
 use tessera_kernels::int32::murmurhash32;
-use tessera_kernels::table::{
-    Batch, KeyColumns, KeyKind, LocalTable, MAX_CHUNK_LEN, TableConfig, bloom,
-};
+use tessera_kernels::table::{Batch, KeyKind, LocalTable, MAX_CHUNK_LEN, TableConfig, bloom};
 
 use crate::support::runner::Runner;
 
