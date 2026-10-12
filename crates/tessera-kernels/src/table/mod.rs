@@ -52,7 +52,8 @@
 //! and benchmarks build tables with it.
 //!
 //! ```
-//! use tessera_kernels::table::{Batch, KeyColumns, KeyKind, LocalTable, TableConfig};
+//! use tessera_kernels::column_keys::KeyColumns;
+//! use tessera_kernels::table::{Batch, KeyKind, LocalTable, TableConfig};
 //!
 //! let config = TableConfig { keys: &[KeyKind::Int32], payload_size: 8 };
 //! let mut table = LocalTable::new(&config, 100, 4096)?;
@@ -117,7 +118,7 @@ pub use header::{
     TableConfig, UNIT_BITS, VERSION_OFFSET, index_size, record_bytes, record_bytes_of,
 };
 use header::{Header, Layout, NRECORDS, RECORD_HEADER};
-pub use keys::{KeyColumns, KeySource, KeyValue, normalize_word};
+pub use keys::KeySource;
 pub use local::LocalTable;
 pub use marks::{Marks, mark, mark_words, scan_unmarked};
 use record::Access;
@@ -987,6 +988,7 @@ impl<'a> TableMut<'a> {
 mod tests {
     use super::*;
     use crate::accumulate::{Combine, combine};
+    use crate::column_keys::KeyColumns;
     use crate::int32::murmurhash32;
     use tessera_core::ColumnView;
 

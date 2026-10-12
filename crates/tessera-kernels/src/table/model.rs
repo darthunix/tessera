@@ -26,7 +26,8 @@ use super::header::{
 };
 use super::record::Access;
 use super::region::{Region, order};
-use super::{Batch, KeyColumns, batch, index_size, init};
+use super::{Batch, batch, index_size, init};
+use crate::column_keys::KeyColumns;
 
 /// A table over loom's atomics for the models of participants that share
 /// one: chunks of their own to append to, an index one of them makes,
