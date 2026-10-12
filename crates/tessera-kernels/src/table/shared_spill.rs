@@ -27,7 +27,23 @@ use core::sync::atomic::AtomicU64;
 use anyhow::{Result, ensure};
 
 use super::MAX_PARTITIONS;
-use super::region::order;
+
+/// The orderings of the words of a shared spill, by operation, which the
+/// loom model shares, so that it checks the orderings this code runs with.
+pub(super) mod order {
+    use core::sync::atomic::Ordering;
+
+    /// Reads of a word.
+    pub(in super::super) const LOAD: Ordering = Ordering::Acquire;
+    /// Writes of a word.
+    pub(in super::super) const STORE: Ordering = Ordering::Release;
+    /// Additions and subtractions.
+    pub(in super::super) const ADD: Ordering = Ordering::AcqRel;
+    /// A fetch-or or a compare-and-swap.
+    pub(in super::super) const CAS: Ordering = Ordering::AcqRel;
+    /// A compare-and-swap that failed and returns the value found.
+    pub(in super::super) const CAS_FAILED: Ordering = Ordering::Acquire;
+}
 
 pub(super) use sealed::Words;
 
