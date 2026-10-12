@@ -91,7 +91,7 @@ Tessera's executor.
   `keys.rs`, the trait of a source of keys; of `exclusive.rs`, find or
   insert, its form by partition, grouped link, scan, regrow and clearing
   a key; of `loom.rs`, the models of the table, the filter and the
-  marks.
+  marks; `model.rs`, the memory of those models and the model table.
 - Into the crate from `tessera-core`: `row_mask.rs`, `bits.rs` and
   `bitmap.rs` (see "The masks of rows").
 - Stay in the kernels: the folds, sums and extremes of `exclusive.rs`
@@ -218,7 +218,10 @@ its memory.
 **Will be:** the crate keeps the models of the table, the filter and
 the marks. The kernels keep the others. For them the crate gives, only
 when built with `--cfg loom`, a model table: append, size, link and
-probe over loom's atomics. A normal build has no such API.
+probe over loom's atomics. A normal build has no such API. The phases
+and the words of a spill keep the orderings of their atomics in modules
+of their own, which their models share; the region's orderings stay
+the crate's.
 
 Refused: modelling the phases over a stand-in table. It would lose the
 negative test where linking before the index exists breaks the table.

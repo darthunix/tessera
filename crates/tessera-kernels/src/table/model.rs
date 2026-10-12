@@ -6,6 +6,11 @@
 //! access to a record or to a chunk's used mark goes through a loom cell
 //! of it first, so that loom reports a read not ordered after its writing.
 //! The models of `loom.rs` append, link and probe over it.
+//!
+//! [`ModelTable`] is that memory with the four steps a shared table takes,
+//! for the loom models of the code that shares one, as the phases of a
+//! build and the rounds over a partition do. Only a build with
+//! `--cfg loom` has this module.
 
 use std::cell::UnsafeCell as StdUnsafeCell;
 use std::sync::atomic::{AtomicU8, AtomicU64 as PlainU64, Ordering as Plain};
@@ -17,11 +22,69 @@ use core::sync::atomic::Ordering;
 use tessera_core::{ColumnView, RowMask, RowMaskView};
 
 use super::header::{
-    CHUNK_HEADER, HEADER_SIZE, KeyKind, Layout, NRECORDS, TableConfig, chunk_layout,
+    CHUNK_HEADER, HEADER_SIZE, Header, KeyKind, Layout, NRECORDS, TableConfig, chunk_layout,
 };
 use super::record::Access;
 use super::region::{Region, order};
-use super::{Batch, batch, index_size};
+use super::{Batch, batch, index_size, init};
+
+/// A table over loom's atomics for the models of participants that share
+/// one: chunks of their own to append to, an index one of them makes,
+/// then links and probes. Its records have one int4 key, whose value is
+/// also their 8-byte payload, and every key hashes to one bucket, so that
+/// the participants race for its head.
+pub struct ModelTable(LoomRegion);
+
+impl ModelTable {
+    /// A table of `chunks` empty chunks of `records` records each, whose
+    /// index is not made yet.
+    pub fn new(records: usize, chunks: usize) -> Result<Self> {
+        LoomRegion::new(records as u64, chunks, records, HEADS).map(Self)
+    }
+
+    /// Make the index for `records` records, as the participant elected
+    /// to size a shared table does.
+    ///
+    /// # Safety
+    ///
+    /// No other thread uses the index during the call.
+    pub unsafe fn size(&self, records: u64) -> Result<()> {
+        // SAFETY: the caller's contract.
+        unsafe { init(&self.0, &CONFIG, records) }.map(drop)
+    }
+
+    /// Append `keys` to chunk `chunk`; the rows appended are returned.
+    /// The index need not exist yet.
+    pub fn append(&self, chunk: usize, keys: &[i32]) -> Result<usize> {
+        append(&self.0, &chunk_layout(&CONFIG)?, chunk, keys)
+    }
+
+    /// Link chunk `chunk`'s records into the index its header describes;
+    /// the count linked is returned. A header that holds no table yet is
+    /// an error.
+    pub fn link(&self, chunk: usize) -> Result<usize> {
+        link(&self.0, &self.layout()?, chunk)
+    }
+
+    /// Whether each of `keys` has a record; a record found is read whole
+    /// and must hold its key and payload.
+    pub fn probe(&self, keys: &[i32]) -> Result<Vec<bool>> {
+        let layout = self.layout()?;
+        let found = probe(&self.0, &layout, keys)?;
+        for (key, &offset) in keys.iter().zip(&found) {
+            if offset != 0 {
+                check_record(&self.0, &layout, offset, *key)?;
+            }
+        }
+        Ok(found.into_iter().map(|offset| offset != 0).collect())
+    }
+
+    /// The layout the header holds, as a participant that attaches reads
+    /// it.
+    fn layout(&self) -> Result<Layout> {
+        Header::load(&self.0).validate(self.0.len())
+    }
+}
 
 /// How the model publishes records: the orderings of the bucket heads,
 /// the region's or relaxed ones, and whether the count of records goes up
@@ -80,9 +143,9 @@ unsafe impl Send for LoomRegion {}
 impl LoomRegion {
     /// An index for `capacity` records of `CONFIG` and `nchunks` empty
     /// chunks of `records` records each.
-    pub(super) fn new(capacity: u64, nchunks: usize, records: usize, heads: Heads) -> Self {
-        let len = index_size(&CONFIG, capacity).unwrap();
-        let record_size = chunk_layout(&CONFIG).unwrap().record_size;
+    pub(super) fn new(capacity: u64, nchunks: usize, records: usize, heads: Heads) -> Result<Self> {
+        let len = index_size(&CONFIG, capacity)?;
+        let record_size = chunk_layout(&CONFIG)?.record_size;
         let chunk_len = CHUNK_HEADER + records * record_size;
         let chunks = (0..nchunks)
             .map(|_| {
@@ -95,7 +158,7 @@ impl LoomRegion {
                 }
             })
             .collect();
-        Self {
+        Ok(Self {
             len,
             record_size,
             heads,
@@ -108,7 +171,7 @@ impl LoomRegion {
             chunks,
             chunk_len,
             held: PlainU64::new(0),
-        }
+        })
     }
 
     /// Note that the header word at `offset` is used `width` bytes wide.

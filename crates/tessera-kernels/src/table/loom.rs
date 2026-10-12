@@ -18,9 +18,11 @@ use tessera_core::{RowMask, RowMaskView};
 
 use super::bloom::{self, FilterOr, FilterRead, FilterShared};
 use super::exclusive::{Cursor, scan};
-use super::header::{CHUNK_HEADER, Header, Layout, NRECORDS, chunk_layout, reference};
+use super::header::{CHUNK_HEADER, Layout, NRECORDS, reference};
 use super::marks::{self, Marks};
-use super::model::{CONFIG, HASH, HEADS, Heads, LoomRegion, append, check_record, link, probe};
+use super::model::{
+    CONFIG, HASH, HEADS, Heads, LoomRegion, ModelTable, append, check_record, link, probe,
+};
 use super::phases::{self, Action, COUNTER_WORDS, CounterWords, Counters, Participant, Stop};
 use super::record::Access;
 use super::region::{Region, order};
@@ -44,7 +46,7 @@ const LATE_COUNT: Heads = Heads {
 /// A table of `nchunks` chunks of `records` records over the model, its
 /// index made by this thread.
 fn table(nchunks: usize, records: usize, heads: Heads) -> Result<(Arc<LoomRegion>, Layout)> {
-    let region = LoomRegion::new(records as u64, nchunks, records, heads);
+    let region = LoomRegion::new(records as u64, nchunks, records, heads)?;
     // SAFETY: the region is new and this thread alone has it.
     let layout = unsafe { init(&region, &CONFIG, records as u64) }?;
     Ok((Arc::new(region), layout))
@@ -622,15 +624,14 @@ struct Stopper {
 }
 
 /// A shared build: the inner side's keys, which the participants take
-/// one at a time as a parallel scan hands out pages, a chunk per
-/// participant, the index the elected one makes, the counters and the
-/// chunk numbers they gave, the barrier and the frees; the stop word,
-/// whether a participant marked it, and what the last one to leave read of
-/// it.
+/// one at a time as a parallel scan hands out pages, the model table with
+/// a chunk per participant, the counters and the chunk numbers they gave,
+/// the barrier and the frees; the stop word, whether a participant marked
+/// it, and what the last one to leave read of it.
 struct Build {
     keys: &'static [i32],
     next_key: ::loom::sync::atomic::AtomicUsize,
-    region: LoomRegion,
+    table: ModelTable,
     counters: Counters<LoomCounterWords>,
     numbers: AtomicU64,
     barrier: LoomBarrier,
@@ -646,7 +647,7 @@ impl Build {
         Self {
             keys,
             next_key: ::loom::sync::atomic::AtomicUsize::new(0),
-            region: LoomRegion::new(keys.len() as u64, participants, keys.len(), HEADS),
+            table: ModelTable::new(keys.len(), participants).unwrap(),
             counters: Counters::over(LoomCounterWords(core::array::from_fn(|_| {
                 AtomicU64::new(0)
             }))),
@@ -660,14 +661,6 @@ impl Build {
         }
     }
 
-    /// The table as a participant attaches to it: the layout its header
-    /// holds, which the elected one wrote.
-    fn layout(&self) -> Layout {
-        Header::load(&self.region)
-            .validate(self.region.len())
-            .unwrap()
-    }
-
     /// Take a chunk number, which no other participant may get; take keys
     /// of the inner side until none is left and append each to this
     /// participant's chunk, then report how many.
@@ -676,14 +669,13 @@ impl Build {
         let bit = 1 << number;
         let given = self.numbers.fetch_or(bit, Ordering::Relaxed);
         assert_eq!(given & bit, 0, "chunk number {number} was given twice");
-        let layout = chunk_layout(&CONFIG).unwrap();
         let mut appended = 0;
         loop {
             let index = self.next_key.fetch_add(1, Ordering::Relaxed);
             let Some(&key) = self.keys.get(index) else {
                 break;
             };
-            appended += append(&self.region, &layout, chunk, &[key]).unwrap();
+            appended += self.table.append(chunk, &[key]).unwrap();
         }
         self.counters.report(appended as u64, 1 << chunk).unwrap();
     }
@@ -707,11 +699,10 @@ impl Build {
                 Action::Allocate | Action::Load => panic!("a build got {action:?}"),
                 Action::Size => {
                     // SAFETY: the elected one alone uses the index now.
-                    unsafe { init(&self.region, &CONFIG, self.counters.total_records()) }.unwrap();
+                    unsafe { self.table.size(self.counters.total_records()) }.unwrap();
                 }
                 Action::Link => {
-                    let layout = self.layout();
-                    link(&self.region, &layout, chunk).unwrap();
+                    self.table.link(chunk).unwrap();
                 }
                 // It stops before it probes: marked first, or late after it
                 // left, then it leaves as the next step says.
@@ -723,11 +714,9 @@ impl Build {
                     self.marked.store(marked, Ordering::Relaxed);
                 }
                 Action::Probe => {
-                    let layout = self.layout();
-                    let found = probe(&self.region, &layout, self.keys).unwrap();
-                    for (key, offset) in self.keys.iter().zip(found) {
-                        assert_ne!(offset, 0, "key {key} was lost");
-                        check_record(&self.region, &layout, offset, *key).unwrap();
+                    let found = self.table.probe(self.keys).unwrap();
+                    for (key, found) in self.keys.iter().zip(found) {
+                        assert!(found, "key {key} was lost");
                     }
                 }
                 Action::ArriveAndDetach => {
@@ -962,13 +951,13 @@ fn a_partition_goes_to_disk_once() {
 }
 
 /// A round over one partition: its inner rows in files, which the
-/// participants take one at a time and load into chunks of their own, the
-/// index the elected one makes, the barrier and the frees.
+/// participants take one at a time and load into chunks of their own of
+/// the model table, the barrier and the frees.
 struct Round {
     files: &'static [&'static [i32]],
     keys: usize,
     spill: LoomSpill,
-    region: LoomRegion,
+    table: ModelTable,
     barrier: LoomBarrier,
     frees: ::loom::sync::atomic::AtomicUsize,
     probes: ::loom::sync::atomic::AtomicUsize,
@@ -984,18 +973,12 @@ impl Round {
             files,
             keys,
             spill,
-            region: LoomRegion::new(keys as u64, participants, keys, HEADS),
+            table: ModelTable::new(keys, participants).unwrap(),
             barrier: LoomBarrier::new(skip),
             frees: ::loom::sync::atomic::AtomicUsize::new(0),
             probes: ::loom::sync::atomic::AtomicUsize::new(0),
             loads: ::loom::sync::atomic::AtomicUsize::new(0),
         }
-    }
-
-    fn layout(&self) -> Layout {
-        Header::load(&self.region)
-            .validate(self.region.len())
-            .unwrap()
     }
 
     /// Participant `chunk` of the round, loading into the chunk of its
@@ -1011,31 +994,28 @@ impl Round {
                 Action::ArriveAndWait => reply = u32::from(self.barrier.arrive_and_wait()),
                 Action::Allocate => {
                     // SAFETY: the elected one alone uses the index now.
-                    unsafe { init(&self.region, &CONFIG, self.keys as u64) }.unwrap();
+                    unsafe { self.table.size(self.keys as u64) }.unwrap();
                 }
                 Action::Load => {
-                    let layout = self.layout();
                     let mut loaded = false;
                     loop {
                         let file = self.spill.take_file(0, false).unwrap() as usize;
                         let Some(keys) = self.files.get(file) else {
                             break;
                         };
-                        append(&self.region, &layout, chunk, keys).unwrap();
+                        self.table.append(chunk, keys).unwrap();
                         self.loads.fetch_add(1, Ordering::Relaxed);
                         loaded = true;
                     }
                     if loaded {
-                        link(&self.region, &layout, chunk).unwrap();
+                        self.table.link(chunk).unwrap();
                     }
                 }
                 Action::Probe => {
-                    let layout = self.layout();
                     for file in self.files {
-                        let found = probe(&self.region, &layout, file).unwrap();
-                        for (key, offset) in file.iter().zip(found) {
-                            assert_ne!(offset, 0, "key {key} was not loaded");
-                            check_record(&self.region, &layout, offset, *key).unwrap();
+                        let found = self.table.probe(file).unwrap();
+                        for (key, found) in file.iter().zip(found) {
+                            assert!(found, "key {key} was not loaded");
                         }
                     }
                     self.probes.fetch_add(1, Ordering::Relaxed);
