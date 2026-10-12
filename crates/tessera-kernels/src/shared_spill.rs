@@ -20,13 +20,14 @@
 //! one at a time from a counter, and a partition too large for one
 //! participant's memory is taken whole by one of them. The loom model in
 //! `loom.rs` checks the races.
+#![allow(unsafe_code)]
 
 use core::cell::Cell;
 use core::sync::atomic::AtomicU64;
 
 use anyhow::{Result, ensure};
 
-use super::MAX_PARTITIONS;
+use crate::table::MAX_PARTITIONS;
 
 /// The orderings of the words of a shared spill, by operation, which the
 /// loom model shares, so that it checks the orderings this code runs with.

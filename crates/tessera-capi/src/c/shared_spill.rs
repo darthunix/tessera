@@ -1,6 +1,6 @@
 //! The entry points of a table that spills, declared in
 //! `include/tessera/table.h`: the state of its partitions and the rule
-//! that sends them to disk (`tessera_kernels::table::shared_spill`), a
+//! that sends them to disk (`tessera_kernels::shared_spill`), a
 //! process's own or the one a shared table's participants decide on, the
 //! steps of a round over a partition, and the filling of a shared Bloom
 //! filter.
@@ -9,11 +9,11 @@ use std::ffi::c_int;
 
 use anyhow::Context;
 use tessera_core::RowMaskView;
-use tessera_kernels::table::bloom;
-use tessera_kernels::table::phases::Participant;
-use tessera_kernels::table::shared_spill::{
+use tessera_kernels::phases::Participant;
+use tessera_kernels::shared_spill::{
     LocalSpill, Memory, Partition, Records, SharedSpill, SplitWeights, Weights, splits, words_for,
 };
+use tessera_kernels::table::bloom;
 
 use super::mask::Mask;
 use super::status::{Code, Status, guard};

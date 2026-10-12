@@ -57,7 +57,7 @@ commit of sections 2 and 3 is checked by `make rust-check` and by
 - [x] 2.7 Move the folds, the kinds of a merge and `order.rs` out of
       `table/`, a move only. Check: `cargo ab moved`; machine code the
       same; `make installcheck`
-- [ ] 2.8 Move the keys read from columns, `phases.rs`,
+- [x] 2.8 Move the keys read from columns, `phases.rs`,
       `shared_spill.rs` and their loom models out of `table/`, a move
       only. Check: `cargo ab moved`; machine code the same;
       `make rust-loom`; `make installcheck`

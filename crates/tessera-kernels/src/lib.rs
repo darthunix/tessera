@@ -68,9 +68,13 @@ pub mod error;
 mod int;
 pub mod int32;
 pub mod int64;
+#[cfg(all(test, loom))]
+mod loom;
 pub mod ops;
 pub mod order;
+pub mod phases;
 pub mod set;
+pub mod shared_spill;
 mod simd;
 pub mod sort;
 pub mod spill_columns;
