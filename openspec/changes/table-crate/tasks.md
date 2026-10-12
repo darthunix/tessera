@@ -51,7 +51,7 @@ commit of sections 2 and 3 is checked by `make rust-check` and by
 - [x] 2.5 Add the cursor that reads a record by reference, and make the
       items of a sort come from the scan and that cursor. Check:
       `crates/tessera-kernels/tests/sort.rs`; machine code
-- [ ] 2.6 Give the phases and the words of a spill orderings of their
+- [x] 2.6 Give the phases and the words of a spill orderings of their
       own, and give the loom models of the phases and the rounds the
       model table under `--cfg loom`. Check: `make rust-loom`
 - [ ] 2.7 Move the folds, the kinds of a merge and `order.rs` out of
@@ -93,8 +93,9 @@ commit of sections 2 and 3 is checked by `make rust-check` and by
       `make rust-loom`; `make installcheck`
 - [ ] 3.3 Move the calls into the crate: `batch.rs`, `keys.rs`'s source
       of keys, what is left of `exclusive.rs`, `bloom.rs`, `marks.rs`,
-      `local.rs` behind a feature `alloc` on by default, and the loom
-      models of the table, the filter and the marks, a move only.
+      `local.rs` behind a feature `alloc` on by default, the loom
+      models of the table, the filter and the marks, and `model.rs`
+      with loom a dependency under `--cfg loom`, a move only.
       Check: as 3.2
 - [ ] 3.4 Set `publish = true` for the crate and refuse a target whose
       pointers are not 64 bits wide with `compile_error!`; add to CI a

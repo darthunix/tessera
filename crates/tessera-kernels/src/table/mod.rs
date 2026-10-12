@@ -97,8 +97,8 @@ mod local;
 #[cfg(all(test, loom))]
 mod loom;
 mod marks;
-#[cfg(all(test, loom))]
-mod model;
+#[cfg(loom)]
+pub mod model;
 mod order;
 pub mod phases;
 mod record;
