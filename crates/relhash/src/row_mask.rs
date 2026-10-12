@@ -46,7 +46,7 @@ fn byte_word(bytes: &[u8], bit_offset: usize, word_index: usize, nrows: usize) -
 /// A view cannot outlive its storage:
 ///
 /// ```compile_fail
-/// use tessera_core::RowMaskView;
+/// use relhash::RowMaskView;
 /// let rows;
 /// {
 ///     let words = [1];
@@ -182,7 +182,7 @@ impl<'a> RowMaskView<'a> {
 /// Two mutable views cannot access the same storage simultaneously:
 ///
 /// ```compile_fail
-/// use tessera_core::RowMask;
+/// use relhash::RowMask;
 /// let mut words = [1];
 /// let mut first = RowMask::try_new(1, &mut words).unwrap();
 /// let second = RowMask::try_new(1, &mut words).unwrap();
@@ -208,7 +208,7 @@ impl<'a> RowMask<'a> {
     /// Reborrow for reading; mutation is forbidden while that view is in use.
     ///
     /// ```compile_fail
-    /// use tessera_core::RowMask;
+    /// use relhash::RowMask;
     /// let mut words = [1];
     /// let mut rows = RowMask::try_new(1, &mut words).unwrap();
     /// let view = rows.as_view();
@@ -240,7 +240,7 @@ impl<'a> RowMask<'a> {
     /// intersection preserves the zero padding validated by the constructor.
     ///
     /// ```
-    /// use tessera_core::RowMask;
+    /// use relhash::RowMask;
     /// let mut words = [0b111, 1];
     /// let mut rows = RowMask::try_new(65, &mut words)?;
     /// rows.intersect_word(0, 0b101)?;
@@ -265,7 +265,7 @@ impl<'a> RowMask<'a> {
     /// any mutation. Other words stay unchanged.
     ///
     /// ```
-    /// use tessera_core::RowMask;
+    /// use relhash::RowMask;
     /// let mut words = [0, 0];
     /// let mut rows = RowMask::try_new(65, &mut words)?;
     /// rows.set_word(0, 0b101)?;

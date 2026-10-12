@@ -111,7 +111,8 @@ of a join over PostgreSQL's barrier, with steps of a spill.
 
 **Was:** `RowMask`, `RowMaskView` and `ones` live in `tessera-core`,
 with the checks of `bitmap.rs` that its columns use too; every kernel
-uses them.
+uses them. The columns now count their words and check a row
+themselves, so the crate keeps those checks to itself.
 
 **Will be:** they move into the crate, which owns its batch types.
 `tessera-core` exports them again under the same names, so no other
