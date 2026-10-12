@@ -96,7 +96,10 @@ Tessera's executor.
   `bitmap.rs` (see "The masks of rows").
 - Stay in the kernels: the folds, sums and extremes of `exclusive.rs`
   and the kinds of state its merge knows; `order.rs`; of `keys.rs`, the
-  reading of keys from Tessera's columns; `phases.rs`;
+  reading of keys from Tessera's columns, where `KeyColumns` stands for
+  a slice of columns as a source of keys, since an implementation of
+  the crate's trait for a slice would be the kernels' for no type of
+  their own, which Rust refuses; `phases.rs`;
   `shared_spill.rs`; of `loom.rs`, the models of the phases, the rounds
   and the words of a spill.
 

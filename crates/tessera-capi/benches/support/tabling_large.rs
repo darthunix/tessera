@@ -22,7 +22,9 @@
 use anyhow::{Result, ensure};
 use tessera_core::{ColumnView, RowMask, RowMaskView};
 use tessera_kernels::int32::murmurhash32;
-use tessera_kernels::table::{Batch, KeyKind, LocalTable, MAX_CHUNK_LEN, TableConfig, bloom};
+use tessera_kernels::table::{
+    Batch, KeyColumns, KeyKind, LocalTable, MAX_CHUNK_LEN, TableConfig, bloom,
+};
 
 use crate::support::runner::Runner;
 
@@ -215,7 +217,7 @@ impl Setup {
                     None,
                     &mut Batch::new(
                         &inserted_hashes[rows],
-                        &column[..],
+                        &KeyColumns(&column),
                         &mut pending,
                         &mut offsets,
                     )?,
@@ -289,7 +291,13 @@ pub fn probe(setup: &mut Setup, batch: usize, kind: Kind) -> Result<()> {
     let table = setup.table.table()?;
     let all = RowMaskView::try_new(BATCH, &setup.all)?;
     let mut found = RowMask::try_new(BATCH, &mut setup.found)?;
-    table.probe(hashes, &column[..], &all, &mut setup.matches, &mut found)
+    table.probe(
+        hashes,
+        &KeyColumns(&column),
+        &all,
+        &mut setup.matches,
+        &mut found,
+    )
 }
 
 /// Check batch `batch` of a kind against the filter and, with `then`,
@@ -322,7 +330,13 @@ pub fn bloom_probe(setup: &mut Setup, batch: usize, kind: Kind, then: bool) -> R
     let table = setup.table.table()?;
     let passed = RowMaskView::try_new(BATCH, &setup.passed)?;
     let mut found = RowMask::try_new(BATCH, &mut setup.found)?;
-    table.probe(hashes, &column[..], &passed, &mut setup.matches, &mut found)
+    table.probe(
+        hashes,
+        &KeyColumns(&column),
+        &passed,
+        &mut setup.matches,
+        &mut found,
+    )
 }
 
 /// Resolve batch `batch` of present keys to their records.
@@ -342,7 +356,7 @@ pub fn resolve(setup: &mut Setup, batch: usize) -> Result<()> {
         chunk,
         &mut Batch::new(
             &setup.present_hashes[rows],
-            &column[..],
+            &KeyColumns(&column),
             &mut pending,
             &mut setup.matches,
         )?,
