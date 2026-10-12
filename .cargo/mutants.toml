@@ -30,6 +30,14 @@ exclude_globs = [
 # The ABI version is 0, so its mutant to 0 is the function itself.
 # The constructors of the build's counters and of a spill over the loom
 # model's words are compiled only for the model, which judges no mutant.
+# sum_terms adds a word's decimals up by group before their records, for
+# speed alone: exact sums add in any order, a NULL is skipped either way,
+# and a row the local sums do not take goes to its record directly. A
+# mutant that sends rows past them (local_group giving None or none from
+# the start, the NULL arm gone, the guard false or turned) or that gives
+# their hash of groups 18 slots for 32 leaves every sum and rest as it
+# was. Two of these read as mutants the tests catch, so their place
+# names them.
 exclude_re = [
     "<impl [a-z:]*Debug for ",
     "<impl Iterator for Ones>::next",
@@ -37,6 +45,13 @@ exclude_re = [
     "replace <impl RowValues for DatumRows<'_>>::by_value -> bool with false$",
     "replace tess_kernels_abi_version -> u32 with 0$",
     "replace (Counters|Spill)<W>::over -> Self with Default::default\\(\\)$",
+    "replace local_group -> Option<usize> with None$",
+    "accumulate\\.rs:255:25: replace == with != in local_group$",
+    "delete match arm Term::Null in sum_terms$",
+    "replace match guard decimal\\.scale\\(\\) <= .* with false in sum_terms$",
+    "replace <= with > in sum_terms$",
+    "accumulate\\.rs:399:50: replace \\|\\| with && in sum_terms$",
+    "accumulate\\.rs:[0-9]+:[0-9]+: replace \\* with \\+$",
 ]
 
 # A mutant that makes a loop endless is stopped at three times the

@@ -13,6 +13,7 @@ use proptest::collection::vec;
 use proptest::prelude::*;
 use proptest::sample::select;
 use tessera_core::RowMask;
+use tessera_kernels::order;
 use tessera_kernels::sort::{MAX_ITEM_WORDS, SortKey, item_words, run_words, sort_items};
 use tessera_kernels::table::{Batch, KeyKind, KeySource, LocalTable, TableConfig};
 use tessera_testing::{flags, integer, nrows, property, words};
@@ -153,7 +154,7 @@ fn sorted_rows(keys: &[SortKey], rows: &Rows) -> Result<(Vec<usize>, Vec<u32>)> 
     }
     let words = item_words(keys)?;
     let mut items = vec![0u64; nrows * words];
-    let count = table.table()?.sort_items(keys, &mut items)?;
+    let count = order::items(&table.table()?, keys, &mut items)?;
     assert_eq!(count, nrows, "every record makes an item");
     let mut out = vec![0u32; nrows];
     sort_items(&mut items, words, &mut out)?;
@@ -275,7 +276,7 @@ fn misuse_is_an_error() -> Result<()> {
     };
     let table = LocalTable::new(&config, 0, CHUNK)?;
     let keys = [key(Int32, false, false, false)];
-    assert_eq!(table.table()?.sort_items(&keys, &mut [])?, 0);
+    assert_eq!(order::items(&table.table()?, &keys, &mut [])?, 0);
     let mut items = [0u64; 4];
     assert!(sort_items(&mut items, 1, &mut [0u32; 3]).is_err());
     assert!(sort_items(&mut items, 3, &mut [0u32; 1]).is_err());
@@ -340,9 +341,14 @@ fn top_rows(keys: &[SortKey], rows: &Rows, n: usize) -> Result<Vec<Vec<Option<i6
             }
         }
         let view = tessera_core::RowMaskView::try_new(nrows, &candidates)?;
-        table
-            .table()?
-            .top_push(keys, &references, &view, &mut heap, &mut len)?;
+        order::top_push(
+            &table.table()?,
+            keys,
+            &references,
+            &view,
+            &mut heap,
+            &mut len,
+        )?;
     }
     let mut out = vec![0u32; len];
     sort_items(&mut heap[..len * words], words, &mut out)?;

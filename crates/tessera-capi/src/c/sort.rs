@@ -10,6 +10,7 @@ use std::mem::offset_of;
 use std::slice;
 
 use anyhow::{Context, Result, bail, ensure};
+use tessera_kernels::order;
 use tessera_kernels::sort::{
     MAX_ITEM_WORDS, MAX_MERGE_RUNS, MERGE_STATE_WORDS, SortKey, item_words, key_lanes, merge,
     run_words, sort_items, top_candidates,
@@ -171,7 +172,7 @@ pub unsafe extern "C" fn tess_sort_items(
             let nkeys = sort_keys(nkeys, keys, &mut decoded)?;
             let items = slots(items, nwords, "items")?;
             let out = count.as_mut().context("a null count")?;
-            *out = table.sort_items(&decoded[..nkeys], items)? as u64;
+            *out = order::items(&table, &decoded[..nkeys], items)? as u64;
             Ok(())
         })
     }
@@ -395,7 +396,7 @@ pub unsafe extern "C" fn tess_sort_top_push(
             let len = len.as_mut().context("a null heap length")?;
             let mut count =
                 usize::try_from(*len).context("a heap length past the address space")?;
-            table.top_push(keys, refs, &rows, heap, &mut count)?;
+            order::top_push(&table, keys, refs, &rows, heap, &mut count)?;
             *len = count as u64;
             Ok(())
         })
