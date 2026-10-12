@@ -14,6 +14,7 @@
 
 use anyhow::{Result, ensure};
 use tessera_core::{ColumnReader, RowMask, RowMaskView};
+use tessera_kernels::accumulate;
 use tessera_kernels::int32::{self, NullKeys};
 use tessera_kernels::table::{Batch, KeyKind, KeySource, LocalTable, TableConfig, normalize_word};
 
@@ -135,7 +136,7 @@ pub fn count_all(setup: &mut Setup) -> Result<()> {
     let nrows = setup.hashes.len();
     let mut table = setup.table.table_mut()?;
     let rows = RowMaskView::try_new(nrows, &setup.valid)?;
-    table.count_rows(&setup.offsets, &rows, 0)
+    accumulate::count_rows(&mut table, &setup.offsets, &rows, 0)
 }
 
 /// The same scatter with plain stores: a counter per record offset.

@@ -54,7 +54,7 @@ commit of sections 2 and 3 is checked by `make rust-check` and by
 - [x] 2.6 Give the phases and the words of a spill orderings of their
       own, and give the loom models of the phases and the rounds the
       model table under `--cfg loom`. Check: `make rust-loom`
-- [ ] 2.7 Move the folds, the kinds of a merge and `order.rs` out of
+- [x] 2.7 Move the folds, the kinds of a merge and `order.rs` out of
       `table/`, a move only. Check: `cargo ab moved`; machine code the
       same; `make installcheck`
 - [ ] 2.8 Move the keys read from columns, `phases.rs`,

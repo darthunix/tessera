@@ -9,6 +9,7 @@
 use anyhow::{Result, ensure};
 use proptest::prelude::*;
 use tessera_core::{ColumnReader, ColumnView, RowMask, RowMaskView};
+use tessera_kernels::accumulate::{self, ExtremeSlot, Fold, Slot, SumSlot};
 use tessera_kernels::decimal::{
     self, Decimal, DecimalWord, ExtremeState, ExtremeValue, Offer, Partial, Partials, Special,
     SumState, Term, Terms,
@@ -16,10 +17,9 @@ use tessera_kernels::decimal::{
 use tessera_kernels::int32::{self, NullKeys, hash_combine, murmurhash32};
 use tessera_kernels::ops::ArithmeticError;
 use tessera_kernels::table::{
-    Batch, CHUNK_HEADER, Cursor, ExtremeSlot, FORMAT_VERSION, Fold, HELD, KeyKind, KeySource,
-    LocalTable, MAX_CHUNK_LEN, MAX_KEYS, Marks, Slot, SumSlot, Table, TableConfig, UNIT_BITS,
-    bloom, index_size, mark, mark_words, normalize_word, record_bytes, record_bytes_of,
-    scan_unmarked,
+    Batch, CHUNK_HEADER, Cursor, FORMAT_VERSION, HELD, KeyKind, KeySource, LocalTable,
+    MAX_CHUNK_LEN, MAX_KEYS, Marks, Table, TableConfig, UNIT_BITS, bloom, index_size, mark,
+    mark_words, normalize_word, record_bytes, record_bytes_of, scan_unmarked,
 };
 use tessera_testing::{edge, flags, integer, property, values, words};
 
@@ -2014,16 +2014,37 @@ fn grouped_states_follow_a_row_by_row_model() -> Result<()> {
         let selection = words_of(&selected);
         let rows = RowMaskView::try_new(nrows, &selection)?;
         let mut writer = table.table_mut()?;
-        writer.count_rows(&offsets, &rows, 8)?;
-        writer.count_values(&offsets, &rows, &x_column, 16)?;
+        accumulate::count_rows(&mut writer, &offsets, &rows, 8)?;
+        accumulate::count_values(&mut writer, &offsets, &rows, &x_column, 16)?;
         let slot = |value_at, flag_bit| Slot {
             value_at,
             flags_at: FLAGS_AT,
             flag_bit,
         };
-        writer.fold(&offsets, &rows, &x_column, Fold::Sum, slot(24, 0))?;
-        writer.fold(&offsets, &rows, &x_column, Fold::Min, slot(32, 1))?;
-        writer.fold(&offsets, &rows, &y_column, Fold::Max, slot(40, 2))?;
+        accumulate::fold(
+            &mut writer,
+            &offsets,
+            &rows,
+            &x_column,
+            Fold::Sum,
+            slot(24, 0),
+        )?;
+        accumulate::fold(
+            &mut writer,
+            &offsets,
+            &rows,
+            &x_column,
+            Fold::Min,
+            slot(32, 1),
+        )?;
+        accumulate::fold(
+            &mut writer,
+            &offsets,
+            &rows,
+            &y_column,
+            Fold::Max,
+            slot(40, 2),
+        )?;
     }
     let mut model: std::collections::HashMap<Option<i32>, GroupModel> = Default::default();
     for row in 0..nrows {
@@ -2221,7 +2242,7 @@ fn sum_states_follow_a_row_by_row_model() -> Result<()> {
                         })
                     })
                     .collect::<Result<_>>()?;
-                table.table_mut()?.sum_terms(&offsets, &rows, &mut slots)?;
+                accumulate::sum_terms(&mut table.table_mut()?, &offsets, &rows, &mut slots)?;
             }
             let mut expected = vec![vec![0_u64; nrows.div_ceil(64)]; SUMS];
             for row in rows_of(&rows) {
@@ -2338,7 +2359,8 @@ fn extreme_states_follow_a_row_by_row_model() -> Result<()> {
             *selection.last_mut().unwrap() &= (1 << (nrows % 64)) - 1;
             let rows = RowMaskView::try_new(nrows, &selection)?;
             let mut rest = vec![0_u64; nrows.div_ceil(64)];
-            table.table_mut()?.extremes(
+            accumulate::extremes(
+                &mut table.table_mut()?,
                 &offsets,
                 &rows,
                 &mut ExtremeSlot {
@@ -2522,9 +2544,7 @@ fn partial_states_merge_as_the_rows_would() -> Result<()> {
                     })
                 })
                 .collect::<Result<_>>()?;
-            table
-                .table_mut()?
-                .sum_partials(&offsets, &rows, &mut slots)?;
+            accumulate::sum_partials(&mut table.table_mut()?, &offsets, &rows, &mut slots)?;
         }
         let mut expected = vec![vec![0_u64; nfinal.div_ceil(64)]; SUMS];
         let mut refused = false;
@@ -2663,9 +2683,7 @@ fn a_sum_past_the_bigint_range_fails_and_arguments_are_checked() -> Result<()> {
     };
     let big = ColumnView::try_new(&[i64::MAX, 1, 0], None)?;
     let mut writer = table.table_mut()?;
-    let error = writer
-        .fold(&offsets, &rows, &big, Fold::Sum, slot)
-        .unwrap_err();
+    let error = accumulate::fold(&mut writer, &offsets, &rows, &big, Fold::Sum, slot).unwrap_err();
     assert_eq!(
         error.downcast_ref::<ArithmeticError>().copied(),
         Some(ArithmeticError::BigintOutOfRange)
@@ -2677,19 +2695,19 @@ fn a_sum_past_the_bigint_range_fails_and_arguments_are_checked() -> Result<()> {
     assert_eq!(values, [(-5i64) as u64, (-5i64) as u64, 1 << 40]);
     assert_eq!(nulls, [false; 3]);
     // Words past the payload, a flag past a word, a key past the keys.
-    assert!(writer.count_rows(&offsets, &rows, 16).is_err());
-    assert!(writer.count_rows(&offsets, &rows, 3).is_err());
+    assert!(accumulate::count_rows(&mut writer, &offsets, &rows, 16).is_err());
+    assert!(accumulate::count_rows(&mut writer, &offsets, &rows, 3).is_err());
     let past = Slot {
         flag_bit: 64,
         ..slot
     };
-    assert!(writer.fold(&offsets, &rows, &big, Fold::Min, past).is_err());
+    assert!(accumulate::fold(&mut writer, &offsets, &rows, &big, Fold::Min, past).is_err());
     assert!(
         writer
             .gather_key(&offsets, &rows, 1, &mut values, &mut nulls)
             .is_err()
     );
-    assert!(writer.count_rows(&offsets[..2], &rows, 8).is_err());
+    assert!(accumulate::count_rows(&mut writer, &offsets[..2], &rows, 8).is_err());
     Ok(())
 }
 

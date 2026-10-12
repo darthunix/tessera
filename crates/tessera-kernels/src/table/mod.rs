@@ -30,7 +30,7 @@
 //! records are linked. [`TableMut`] is the access of one writer, which
 //! alone may give rows the record of their keys, creating it when there is
 //! none ([`TableMut::find_or_insert`], for grouping), change a payload in
-//! place, or walk the records ([`TableMut::scan`]). Hashes come from
+//! place, or walk the records ([`Table::scan`]). Hashes come from
 //! [`crate::int32::hash`], [`crate::int64::hash`] and their `hash_next`,
 //! which decide what NULL keys do.
 //!
@@ -99,7 +99,6 @@ mod loom;
 mod marks;
 #[cfg(loom)]
 pub mod model;
-mod order;
 pub mod phases;
 mod record;
 mod region;
@@ -109,11 +108,9 @@ use core::marker::PhantomData;
 use core::ops::Deref;
 
 use anyhow::{Result, anyhow, ensure};
-use tessera_core::{ColumnReader, RowMask, RowMaskView};
+use tessera_core::{RowMask, RowMaskView};
 
-pub use exclusive::{
-    Combine, CombineStop, Cursor, ExtremeSlot, Fold, HELD, MAX_SUMS, PayloadCursor, Slot, SumSlot,
-};
+pub use exclusive::{CombineStop, Cursor, HELD, PayloadCursor};
 pub use header::{
     CHUNK_HEADER, FORMAT_VERSION, HEADER_SIZE, KeyKind, MAX_CHUNK_LEN, MAX_CHUNKS, MAX_KEYS,
     TableConfig, UNIT_BITS, VERSION_OFFSET, index_size, record_bytes, record_bytes_of,
@@ -762,31 +759,6 @@ impl<'a> Table<'a> {
         )
     }
 
-    /// The sort items of every record of every chunk, linked or not, in
-    /// the order appended, one after another in `items` (see
-    /// [`crate::sort`]): `keys` order the table's keys, one each, of its
-    /// kinds. Returns the count; [`crate::sort::sort_items`] then sorts
-    /// them and gives the references in order. The chunks must not change
-    /// meanwhile.
-    pub fn sort_items(&self, keys: &[crate::sort::SortKey], items: &mut [u64]) -> Result<usize> {
-        order::items(self, keys, items)
-    }
-
-    /// Push the item of each record `refs[row]` of `rows` into a top-N
-    /// heap of `heap.len() / words` items, whose first `*len` are the heap
-    /// (see [`crate::sort::top_candidates`]); the records need not be
-    /// linked.
-    pub fn top_push(
-        &self,
-        keys: &[crate::sort::SortKey],
-        refs: &[u32],
-        rows: &RowMaskView<'_>,
-        heap: &mut [u64],
-        len: &mut usize,
-    ) -> Result<()> {
-        order::top_push(self, keys, refs, rows, heap, len)
-    }
-
     /// Fill a Bloom filter of [`bloom::words_for`] this table's records
     /// words (or any power of two) with the hash of every record of every
     /// chunk, after clearing it: a probe row it rejects has no record with
@@ -945,22 +917,6 @@ impl<'a> TableMut<'a> {
         exclusive::merge(&self.0.region, &self.0.layout, source, from, chunk, rule)
     }
 
-    /// Merge the records of chunk `source` from byte `*from` on, each a
-    /// group's states as [`Combine`] says per aggregate after a word of
-    /// flags, into the records of the same keys, copying a group the table
-    /// lacks to chunk `chunk`; `*from` moves past those merged, and the
-    /// call stops where a new group needs another chunk or a larger index.
-    /// For a grouping that spilled, reading a partition back.
-    pub fn combine(
-        &mut self,
-        source: usize,
-        from: &mut usize,
-        chunk: usize,
-        combines: &[Combine],
-    ) -> Result<(usize, CombineStop)> {
-        exclusive::combine(self, source, from, chunk, combines)
-    }
-
     /// Link the records of chunk `chunk` from byte `*from` on, as
     /// [`Table::link`] does, but each right after a record with the same
     /// keys when the table holds one, so that a key's records lie next to
@@ -1007,83 +963,6 @@ impl<'a> TableMut<'a> {
         exclusive::clear_key(&self.0.region, &self.0.layout, key)
     }
 
-    /// Add one to the `i64` at byte `at` of the payload of each selected
-    /// row's record: `count(*)` of a grouped aggregate, whose rows hold
-    /// the references [`TableMut::find_or_insert`] gave them.
-    pub fn count_rows(&mut self, offsets: &[u32], rows: &RowMaskView<'_>, at: usize) -> Result<()> {
-        exclusive::count_rows(self, offsets, rows, at)
-    }
-
-    /// Add one to the `i64` at byte `at` for each selected row whose
-    /// value in `column` is not NULL: `count(x)`.
-    pub fn count_values<C: ColumnReader + ?Sized>(
-        &mut self,
-        offsets: &[u32],
-        rows: &RowMaskView<'_>,
-        column: &C,
-        at: usize,
-    ) -> Result<()> {
-        exclusive::count_values(self, offsets, rows, column, at)
-    }
-
-    /// Fold each selected row's non-NULL value into the aggregate state
-    /// at `slot` of its record's payload, in row order; the state's flag
-    /// marks that it has a value. A sum that overflows an `i64` fails
-    /// with [`crate::ops::ArithmeticError::BigintOutOfRange`].
-    pub fn fold<C, V>(
-        &mut self,
-        offsets: &[u32],
-        rows: &RowMaskView<'_>,
-        column: &C,
-        fold: Fold,
-        slot: Slot,
-    ) -> Result<()>
-    where
-        C: ColumnReader<Value = V> + ?Sized,
-        V: Into<i64> + Copy,
-    {
-        exclusive::fold(self, offsets, rows, column, fold, slot)
-    }
-
-    /// Fold each selected row's terms into the sum or average states of
-    /// its record's payload ([`crate::decimal::SumState`]), the record
-    /// found once a row: the rows a state does not take go to its sum's
-    /// rest for the caller.
-    pub fn sum_terms<T: crate::decimal::Terms>(
-        &mut self,
-        offsets: &[u32],
-        rows: &RowMaskView<'_>,
-        sums: &mut [SumSlot<'_, T>],
-    ) -> Result<()> {
-        exclusive::sum_terms(self, offsets, rows, sums)
-    }
-
-    /// Merge each selected row's partial states into the sum or average
-    /// states of its record's payload ([`crate::decimal::SumState::merge`]),
-    /// the record found once a row: the states the table does not merge go
-    /// to their sum's rest for the caller.
-    pub fn sum_partials<P: crate::decimal::Partials>(
-        &mut self,
-        offsets: &[u32],
-        rows: &RowMaskView<'_>,
-        sums: &mut [SumSlot<'_, P>],
-    ) -> Result<()> {
-        exclusive::sum_partials(self, offsets, rows, sums)
-    }
-
-    /// Offer each selected row's term to the `min` or `max` of numeric
-    /// state of its record's payload ([`crate::decimal::ExtremeState`]), in
-    /// the rows' order: the rows it does not decide, and its group's later
-    /// rows of the batch, go to the slot's rest for the caller.
-    pub fn extremes<T: crate::decimal::Terms>(
-        &mut self,
-        offsets: &[u32],
-        rows: &RowMaskView<'_>,
-        slot: &mut ExtremeSlot<'_, T>,
-    ) -> Result<()> {
-        exclusive::extremes(self, offsets, rows, slot)
-    }
-
     /// Move the table to a new index of `len` bytes at `index`, for
     /// `capacity` records, over the same chunks: every record is linked
     /// there again, grouped chains stay grouped, and the old index is no
@@ -1106,6 +985,7 @@ impl<'a> TableMut<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::accumulate::{Combine, combine};
     use crate::int32::murmurhash32;
     use tessera_core::ColumnView;
 
@@ -1713,9 +1593,7 @@ mod tests {
             let source = into.add_chunk_copy(&words)?;
             let mut at = CHUNK_HEADER;
             loop {
-                let (_, stop) = into
-                    .table_mut()?
-                    .combine(source, &mut at, chunk, &COMBINES)?;
+                let (_, stop) = combine(&mut into.table_mut()?, source, &mut at, chunk, &COMBINES)?;
                 match stop {
                     CombineStop::Done => break,
                     CombineStop::ChunkFull => chunk = into.add_chunk()?,
@@ -1746,11 +1624,14 @@ mod tests {
             let source = into.add_chunk_copy(&words).unwrap();
             let (mut at, mut here) = (CHUNK_HEADER, 0);
             loop {
-                let (merged, stop) = into
-                    .table_mut()
-                    .unwrap()
-                    .combine(source, &mut at, chunk, &COMBINES)
-                    .unwrap();
+                let (merged, stop) = combine(
+                    &mut into.table_mut().unwrap(),
+                    source,
+                    &mut at,
+                    chunk,
+                    &COMBINES,
+                )
+                .unwrap();
                 here += merged;
                 assert_eq!(at, CHUNK_HEADER + here * record, "on the first not merged");
                 stops.push(stop);
@@ -1976,11 +1857,14 @@ mod tests {
         let (mut table, _) = grouped(&[7], |_| [0; 5], 64);
         let chunk = table.chunks() - 1;
         let mut at = CHUNK_HEADER;
-        let error = table
-            .table_mut()
-            .unwrap()
-            .combine(chunk, &mut at, chunk, &COMBINES)
-            .unwrap_err();
+        let error = combine(
+            &mut table.table_mut().unwrap(),
+            chunk,
+            &mut at,
+            chunk,
+            &COMBINES,
+        )
+        .unwrap_err();
         assert!(error.to_string().contains("into itself"), "{error}");
     }
 

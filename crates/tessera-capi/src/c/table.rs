@@ -13,11 +13,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context, Result, bail, ensure};
 use tessera_core::ColumnReader;
+use tessera_kernels::accumulate::{self, Combine, ExtremeSlot, Fold, MAX_SUMS, Slot, SumSlot};
 use tessera_kernels::table::{
-    Appended, Batch, Chunks, Combine, CombineStop, Cursor, ExtremeSlot, FORMAT_VERSION, Fold,
-    HEADER_SIZE, KeyKind, KeySource, MAX_KEYS, MAX_PAYLOAD_COLUMNS, MAX_SUMS, Marks, Partitions,
-    PayloadColumns, Slot, SumSlot, Table, TableConfig, TableMut, UNIT_BITS, VERSION_OFFSET,
-    append_columns_to, append_partitioned_columns_to, append_to,
+    Appended, Batch, Chunks, CombineStop, Cursor, FORMAT_VERSION, HEADER_SIZE, KeyKind, KeySource,
+    MAX_KEYS, MAX_PAYLOAD_COLUMNS, Marks, Partitions, PayloadColumns, Table, TableConfig, TableMut,
+    UNIT_BITS, VERSION_OFFSET, append_columns_to, append_partitioned_columns_to, append_to,
     bloom::SharedFilter,
     chunk_used, index_size, init_chunk, mark, mark_words, normalize_word, payload_null_words,
     phases::{Participant, SharedCounters, StopWord},
@@ -1341,7 +1341,8 @@ pub unsafe extern "C" fn tess_table_combine(
             let from = from.as_mut().context("a null from")?;
             let merged = merged.as_mut().context("a null merged count")?;
             let stop = stop.as_mut().context("a null stop")?;
-            let (count_merged, stopped) = table.combine(source, from, chunk, &decoded[..count])?;
+            let (count_merged, stopped) =
+                accumulate::combine(&mut table, source, from, chunk, &decoded[..count])?;
             *merged = count_merged as c_int;
             *stop = match stopped {
                 CombineStop::Done => 0,
@@ -1715,10 +1716,12 @@ pub unsafe extern "C" fn tess_table_accumulate(
                 flag_bit,
             };
             match op {
-                ACCUMULATE_COUNT_ROWS => table.count_rows(offsets, &rows, value_at),
+                ACCUMULATE_COUNT_ROWS => {
+                    accumulate::count_rows(&mut table, offsets, &rows, value_at)
+                }
                 ACCUMULATE_COUNT => {
                     let column = reader::<()>(column, prepared)?;
-                    table.count_values(offsets, &rows, &column, value_at)
+                    accumulate::count_values(&mut table, offsets, &rows, &column, value_at)
                 }
                 ACCUMULATE_SUM_INT4 | ACCUMULATE_MIN_INT4 | ACCUMULATE_MAX_INT4 => {
                     let column = reader::<i32>(column, prepared)?;
@@ -1727,7 +1730,7 @@ pub unsafe extern "C" fn tess_table_accumulate(
                         ACCUMULATE_MIN_INT4 => Fold::Min,
                         _ => Fold::Max,
                     };
-                    table.fold(offsets, &rows, &column, fold, slot)
+                    accumulate::fold(&mut table, offsets, &rows, &column, fold, slot)
                 }
                 ACCUMULATE_MIN_INT8 | ACCUMULATE_MAX_INT8 | ACCUMULATE_SUM_INT8 => {
                     let column = reader::<i64>(column, prepared)?;
@@ -1736,7 +1739,7 @@ pub unsafe extern "C" fn tess_table_accumulate(
                         ACCUMULATE_MAX_INT8 => Fold::Max,
                         _ => Fold::Sum,
                     };
-                    table.fold(offsets, &rows, &column, fold, slot)
+                    accumulate::fold(&mut table, offsets, &rows, &column, fold, slot)
                 }
                 other => bail!("unknown accumulation {other}"),
             }
@@ -1835,7 +1838,7 @@ pub unsafe extern "C" fn tess_table_accumulate_sums(
                 // SAFETY: as above, and the slots own nothing to drop.
                 let slots =
                     &mut *(&raw mut slots[..nsums] as *mut [SumSlot<'_, PartialColumn<'_>>]);
-                return table.sum_partials(offsets, &rows, slots);
+                return accumulate::sum_partials(&mut table, offsets, &rows, slots);
             }
             // Only the sums given are set, as in the partitioned appends.
             let mut columns = [const { MaybeUninit::<SumColumn<'_>>::uninit() }; MAX_SUMS];
@@ -1855,7 +1858,7 @@ pub unsafe extern "C" fn tess_table_accumulate_sums(
             }
             // SAFETY: as above, and the slots own nothing to drop.
             let slots = &mut *(&raw mut slots[..nsums] as *mut [SumSlot<'_, SumColumn<'_>>]);
-            table.sum_terms(offsets, &rows, slots)
+            accumulate::sum_terms(&mut table, offsets, &rows, slots)
         })
     }
 }
@@ -1891,7 +1894,8 @@ pub unsafe extern "C" fn tess_table_accumulate_extremes(
             let nrows = rows.nrows();
             let offsets = values(offsets, nrows, "offsets")?;
             let terms = SumColumn::new(SumInput::Numeric, column, nrows)?;
-            table.extremes(
+            accumulate::extremes(
+                &mut table,
                 offsets,
                 &rows,
                 &mut ExtremeSlot {

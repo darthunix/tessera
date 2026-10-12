@@ -1739,7 +1739,8 @@ How a spilled chunk of records is written to disk is in
 - `crates/tessera-kernels/src/table/batch.rs`: append, link, probe and
   the reads of found records; append and split by partition
 - `crates/tessera-kernels/src/table/exclusive.rs`: the calls of one
-  writer, the lookup by partition and the merge of groups
+  writer, the lookup by partition, the cursor over payloads and the
+  merge by a rule
 - `crates/tessera-kernels/src/table/keys.rs`: the keys of a batch, a
   word of rows at a time
 - `crates/tessera-kernels/src/table/bloom.rs`: the Bloom filter, alone,

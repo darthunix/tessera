@@ -224,7 +224,7 @@ fn sort_as<const W: usize>(items: &mut [u64], out: &mut [u32]) {
 /// top. Rows are offered in batches: [`top_candidates`] keeps in a batch's
 /// mask only the rows whose keys beat the worst item's once the heap is
 /// full, and the rows kept, appended as records, are pushed by their
-/// references ([`crate::table::Table::top_push`]). [`sort_items`] over the
+/// references ([`crate::order::top_push`]). [`sort_items`] over the
 /// heap's items then gives the best rows in order. A row whose keys equal
 /// the worst item's is not taken: which of equal rows a limit returns is
 /// not defined.
