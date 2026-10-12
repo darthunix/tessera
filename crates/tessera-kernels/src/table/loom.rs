@@ -31,10 +31,10 @@ use super::header::{
     reference,
 };
 use super::marks::{self, Marks};
-use super::phases::{Action, COUNTER_WORDS, CounterWords, Counters, Participant, Stop};
+use super::phases::{self, Action, COUNTER_WORDS, CounterWords, Counters, Participant, Stop};
 use super::record::Access;
 use super::region::{Region, order};
-use super::shared_spill::{Memory, Spill, Weights, Words};
+use super::shared_spill::{self, Memory, Spill, Weights, Words};
 use super::{Batch, Chunks, batch, index_size, init};
 
 /// How the model publishes records: the orderings of the bucket heads,
@@ -943,16 +943,16 @@ struct LoomCounterWords([AtomicU64; COUNTER_WORDS]);
 
 impl CounterWords for LoomCounterWords {
     fn load(&self, index: usize) -> u64 {
-        self.0[index].load(order::RELAXED)
+        self.0[index].load(phases::order::RELAXED)
     }
     fn store(&self, index: usize, value: u64) {
-        self.0[index].store(value, order::RELAXED);
+        self.0[index].store(value, phases::order::RELAXED);
     }
     fn fetch_or(&self, index: usize, bits: u64) -> u64 {
-        self.0[index].fetch_or(bits, order::RELAXED)
+        self.0[index].fetch_or(bits, phases::order::RELAXED)
     }
     fn compare_exchange(&self, index: usize, current: u64, new: u64) -> Result<u64, u64> {
-        self.0[index].compare_exchange(current, new, order::RELAXED, order::RELAXED)
+        self.0[index].compare_exchange(current, new, phases::order::RELAXED, phases::order::RELAXED)
     }
 }
 
@@ -961,11 +961,11 @@ struct LoomStop(AtomicU64);
 
 impl Stop for LoomStop {
     fn stop(&self) {
-        self.0.store(1, order::RELAXED);
+        self.0.store(1, phases::order::RELAXED);
     }
 
     fn stopped(&self) -> bool {
-        self.0.load(order::RELAXED) != 0
+        self.0.load(phases::order::RELAXED) != 0
     }
 }
 
@@ -1031,12 +1031,12 @@ impl Build {
     fn build(&self, chunk: usize) {
         let number = self.counters.take_chunk().unwrap();
         let bit = 1 << number;
-        let given = self.numbers.fetch_or(bit, order::RELAXED);
+        let given = self.numbers.fetch_or(bit, Ordering::Relaxed);
         assert_eq!(given & bit, 0, "chunk number {number} was given twice");
         let layout = chunk_layout(&CONFIG).unwrap();
         let mut appended = 0;
         loop {
-            let index = self.next_key.fetch_add(1, order::RELAXED);
+            let index = self.next_key.fetch_add(1, Ordering::Relaxed);
             let Some(&key) = self.keys.get(index) else {
                 break;
             };
@@ -1077,7 +1077,7 @@ impl Build {
                 }
                 Action::Probe if stopper.is_some() => {
                     let marked = participant.stop_in(&self.stop);
-                    self.marked.store(marked, order::RELAXED);
+                    self.marked.store(marked, Ordering::Relaxed);
                 }
                 Action::Probe => {
                     let layout = self.layout();
@@ -1091,16 +1091,16 @@ impl Build {
                     reply = u32::from(self.barrier.detach(true));
                     if mark_after_leaving {
                         self.stop.stop();
-                        self.marked.store(true, order::RELAXED);
+                        self.marked.store(true, Ordering::Relaxed);
                     }
                 }
                 Action::Detach => {
                     self.barrier.detach(false);
                 }
                 Action::Free => {
-                    self.frees.fetch_add(1, order::RELAXED);
+                    self.frees.fetch_add(1, Ordering::Relaxed);
                     self.last_saw_stop
-                        .store(self.stop.stopped(), order::RELAXED);
+                        .store(self.stop.stopped(), Ordering::Relaxed);
                     return;
                 }
                 Action::Done => return,
@@ -1128,12 +1128,12 @@ fn shared_build(participants: usize, keys: &'static [i32], skip: Option<u32>, pr
             thread.join().unwrap();
         }
         assert_eq!(
-            build.frees.load(order::RELAXED),
+            build.frees.load(Ordering::Relaxed),
             1,
             "the table is freed once"
         );
         assert_eq!(
-            build.numbers.load(order::RELAXED),
+            build.numbers.load(Ordering::Relaxed),
             (1 << build.counters.total_chunks()) - 1,
             "the chunks numbered from 0, once each"
         );
@@ -1162,13 +1162,13 @@ fn a_participant_stops(participants: usize, late: bool) {
             thread.join().unwrap();
         }
         assert_eq!(
-            build.frees.load(order::RELAXED),
+            build.frees.load(Ordering::Relaxed),
             1,
             "the table is freed once"
         );
-        if build.marked.load(order::RELAXED) {
+        if build.marked.load(Ordering::Relaxed) {
             assert!(
-                build.last_saw_stop.load(order::RELAXED),
+                build.last_saw_stop.load(Ordering::Relaxed),
                 "the last participant missed one that stopped"
             );
         }
@@ -1200,7 +1200,7 @@ fn three_participants_attach_at_any_phase() {
 #[test]
 #[should_panic(expected = "does not hold a table")]
 fn linking_before_the_index_is_made_breaks_the_table() {
-    shared_build(2, &[1, 2, 3], Some(super::phases::SIZE), 2);
+    shared_build(2, &[1, 2, 3], Some(phases::SIZE), 2);
 }
 
 /// The words of a shared spill as loom atomics, for `capacity`
@@ -1216,7 +1216,7 @@ type LoomSpill = Spill<LoomWords>;
 
 /// A cleared spill state for `capacity` partitions and a budget.
 fn loom_spill(capacity: usize, budget: u64) -> LoomSpill {
-    let words = (0..super::shared_spill::words_for(capacity).unwrap())
+    let words = (0..shared_spill::words_for(capacity).unwrap())
         .map(|_| AtomicU64::new(0))
         .collect();
     let spill = Spill::over(LoomWords { words, capacity });
@@ -1226,22 +1226,27 @@ fn loom_spill(capacity: usize, budget: u64) -> LoomSpill {
 
 impl Words for LoomWords {
     fn load(&self, index: usize) -> u64 {
-        self.words[index].load(order::LOAD)
+        self.words[index].load(shared_spill::order::LOAD)
     }
     fn store(&self, index: usize, value: u64) {
-        self.words[index].store(value, order::STORE);
+        self.words[index].store(value, shared_spill::order::STORE);
     }
     fn fetch_add(&self, index: usize, delta: u64) -> u64 {
-        self.words[index].fetch_add(delta, order::ADD)
+        self.words[index].fetch_add(delta, shared_spill::order::ADD)
     }
     fn fetch_sub(&self, index: usize, delta: u64) -> u64 {
-        self.words[index].fetch_sub(delta, order::ADD)
+        self.words[index].fetch_sub(delta, shared_spill::order::ADD)
     }
     fn fetch_or(&self, index: usize, bits: u64) -> u64 {
-        self.words[index].fetch_or(bits, order::CAS)
+        self.words[index].fetch_or(bits, shared_spill::order::CAS)
     }
     fn compare_exchange(&self, index: usize, current: u64, new: u64) -> Result<u64, u64> {
-        self.words[index].compare_exchange(current, new, order::CAS, order::CAS_FAILED)
+        self.words[index].compare_exchange(
+            current,
+            new,
+            shared_spill::order::CAS,
+            shared_spill::order::CAS_FAILED,
+        )
     }
     fn capacity(&self) -> usize {
         self.capacity
@@ -1374,7 +1379,7 @@ impl Round {
                             break;
                         };
                         append(&self.region, &layout, chunk, keys).unwrap();
-                        self.loads.fetch_add(1, order::RELAXED);
+                        self.loads.fetch_add(1, Ordering::Relaxed);
                         loaded = true;
                     }
                     if loaded {
@@ -1390,14 +1395,14 @@ impl Round {
                             check_record(&self.region, &layout, offset, *key).unwrap();
                         }
                     }
-                    self.probes.fetch_add(1, order::RELAXED);
+                    self.probes.fetch_add(1, Ordering::Relaxed);
                 }
                 Action::ArriveAndDetach => reply = u32::from(self.barrier.detach(true)),
                 Action::Detach => {
                     self.barrier.detach(false);
                 }
                 Action::Free => {
-                    self.frees.fetch_add(1, order::RELAXED);
+                    self.frees.fetch_add(1, Ordering::Relaxed);
                     return;
                 }
                 Action::Done => return,
@@ -1430,13 +1435,13 @@ fn round(
             thread.join().unwrap();
         }
         assert_eq!(
-            round.frees.load(order::RELAXED),
+            round.frees.load(Ordering::Relaxed),
             1,
             "the round is freed once"
         );
-        assert!(round.probes.load(order::RELAXED) >= 1, "someone probed");
+        assert!(round.probes.load(Ordering::Relaxed) >= 1, "someone probed");
         assert_eq!(
-            round.loads.load(order::RELAXED),
+            round.loads.load(Ordering::Relaxed),
             files.len(),
             "every file loaded once"
         );
@@ -1486,5 +1491,5 @@ fn three_participants_join_a_round_at_any_phase() {
 #[test]
 #[should_panic(expected = "was not loaded")]
 fn probing_before_every_file_is_loaded_misses_keys() {
-    round(2, &[&[1], &[2]], Some(super::phases::ROUND_LOAD), 2);
+    round(2, &[&[1], &[2]], Some(phases::ROUND_LOAD), 2);
 }
