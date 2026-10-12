@@ -4,8 +4,8 @@
 //! per 64-row word, one `i64` slot per row and key (an int4 sign-extended,
 //! a NULL as 0) and the bits of the rows that are NULL in each key. A
 //! [`KeySource`] fills the slots of one key of one word; [`normalize_word`]
-//! does it for any [`ColumnReader`] of int4 or int8 values ([`KeyValue`]), and a
-//! slice of such columns is a source of as many keys. Mixed kinds (an int4
+//! does it for any [`ColumnReader`] of int4 or int8 values ([`KeyValue`]), and
+//! [`KeyColumns`] of such columns is a source of as many keys. Mixed kinds (an int4
 //! key next to an int8 one) are a type on the caller's side, an enum of
 //! columns in a wrapper, whose `word` dispatches to `normalize_word`. The
 //! comparison loops of the table then run over `i64` alone, whatever the
@@ -132,21 +132,25 @@ where
     }
 }
 
-impl<C, V> KeySource for [C]
+/// Columns of int4 or int8 values ([`KeyValue`]) as a source of as many
+/// keys, one a column.
+pub struct KeyColumns<'a, C>(pub &'a [C]);
+
+impl<C, V> KeySource for KeyColumns<'_, C>
 where
     C: ColumnReader<Value = V>,
     V: KeyValue,
 {
     fn nkeys(&self) -> usize {
-        self.len()
+        self.0.len()
     }
 
     fn nrows(&self) -> usize {
-        self.first().map_or(0, ColumnReader::nrows)
+        self.0.first().map_or(0, ColumnReader::nrows)
     }
 
     fn word(&self, key: usize, index: usize, selected: u64, out: &mut [i64; 64]) -> Result<u64> {
-        normalize_word(&self[key], index, selected, out)
+        normalize_word(&self.0[key], index, selected, out)
     }
 }
 
