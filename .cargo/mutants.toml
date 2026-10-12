@@ -64,6 +64,7 @@ timeout_multiplier = 3.0
 # programs for 11 and is caught sooner, the same 20 s in all (plan 9.21).
 # The tools' tests depend on none of these crates.
 test_package = [
+    "relhash",
     "tessera-core",
     "tessera-kernels",
     "tessera-capi",
