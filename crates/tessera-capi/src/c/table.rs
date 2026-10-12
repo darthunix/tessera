@@ -15,13 +15,12 @@ use anyhow::{Context, Result, bail, ensure};
 use tessera_core::ColumnReader;
 use tessera_kernels::accumulate::{self, Combine, ExtremeSlot, Fold, MAX_SUMS, Slot, SumSlot};
 use tessera_kernels::column_keys::normalize_word;
+use tessera_kernels::phases::{Participant, SharedCounters, StopWord};
 use tessera_kernels::table::{
     Appended, Batch, Chunks, CombineStop, Cursor, FORMAT_VERSION, HEADER_SIZE, KeyKind, KeySource,
     MAX_KEYS, MAX_PAYLOAD_COLUMNS, Marks, Partitions, PayloadColumns, Table, TableConfig, TableMut,
     UNIT_BITS, VERSION_OFFSET, append_columns_to, append_partitioned_columns_to, append_to,
-    bloom::SharedFilter,
-    chunk_used, index_size, init_chunk, mark, mark_words, payload_null_words,
-    phases::{Participant, SharedCounters, StopWord},
+    bloom::SharedFilter, chunk_used, index_size, init_chunk, mark, mark_words, payload_null_words,
     record_bytes_of, scan_unmarked, split_to,
 };
 
@@ -2436,8 +2435,8 @@ mod tests {
 
     #[test]
     fn a_participant_is_three_words_of_four_bytes() {
-        assert_eq!(size_of::<tessera_kernels::table::phases::Participant>(), 12);
-        assert_eq!(align_of::<tessera_kernels::table::phases::Participant>(), 4);
+        assert_eq!(size_of::<tessera_kernels::phases::Participant>(), 12);
+        assert_eq!(align_of::<tessera_kernels::phases::Participant>(), 4);
     }
 
     #[test]

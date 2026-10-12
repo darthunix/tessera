@@ -1743,20 +1743,24 @@ How a spilled chunk of records is written to disk is in
   merge by a rule
 - `crates/tessera-kernels/src/table/keys.rs`: the keys of a batch, a
   word of rows at a time
+- `crates/tessera-kernels/src/column_keys.rs`: the keys read from
+  Tessera's columns
 - `crates/tessera-kernels/src/table/bloom.rs`: the Bloom filter, alone,
   shared and filled together
 - `crates/tessera-kernels/src/table/marks.rs`: the marks of a RIGHT or
   FULL join and their walk
 - `crates/tessera-kernels/src/table/local.rs`: a table that owns its
   memory, for tests and benchmarks
-- `crates/tessera-kernels/src/table/phases.rs`: the participant of a
+- `crates/tessera-kernels/src/phases.rs`: the participant of a
   shared build and of a round, the counters of a build and the stop
   word
-- `crates/tessera-kernels/src/table/shared_spill.rs`: the words of a
+- `crates/tessera-kernels/src/shared_spill.rs`: the words of a
   spill, the split, the rule that sends partitions to disk, the
   counters of the rounds and the rule of a split read back
-- `crates/tessera-kernels/src/table/loom.rs`: the model of several
-  participants
+- `crates/tessera-kernels/src/table/loom.rs`: the models of the table,
+  the filter and the marks under several participants
+- `crates/tessera-kernels/src/loom.rs`: the models of a shared build,
+  of the rounds and of the words of a spill
 - `crates/tessera-kernels/src/table/model.rs`: the memory of the loom
   model, and the model table the models of the phases and the rounds
   run over
@@ -1779,13 +1783,14 @@ How a spilled chunk of records is written to disk is in
   filter that threads race to build.
 - The unit tests in `crates/tessera-kernels/src/table/marks.rs`: the
   words of the marks, and the records and cursors a walk refuses.
-- The unit tests in `crates/tessera-kernels/src/table/phases.rs`: the
+- The unit tests in `crates/tessera-kernels/src/phases.rs`: the
   actions of a participant alone, attached at every phase of a build
   and of a round, and the counters of a build under threads.
-- The unit tests in `crates/tessera-kernels/src/table/shared_spill.rs`:
+- The unit tests in `crates/tessera-kernels/src/shared_spill.rs`:
   the split, the budget, the weights of each node, a process's own
   words against shared ones, and the counters of the rounds.
-- `crates/tessera-kernels/src/table/loom.rs`, run by `make rust-loom`.
+- `crates/tessera-kernels/src/table/loom.rs` and
+  `crates/tessera-kernels/src/loom.rs`, run by `make rust-loom`.
 - The unit tests in `crates/tessera-spill/src/plan.rs`: the plan of a
   level on examples, against the nodes' former rules, and the arguments
   it refuses.

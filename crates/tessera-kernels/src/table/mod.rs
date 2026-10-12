@@ -101,10 +101,8 @@ mod loom;
 mod marks;
 #[cfg(loom)]
 pub mod model;
-pub mod phases;
 mod record;
 mod region;
-pub mod shared_spill;
 
 use core::marker::PhantomData;
 use core::ops::Deref;
