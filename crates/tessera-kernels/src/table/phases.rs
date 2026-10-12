@@ -47,7 +47,15 @@ use core::sync::atomic::AtomicU64;
 
 use anyhow::{Result, ensure};
 
-use super::region::order;
+/// The orderings of the counters of a build and of the stop word, which
+/// the loom model shares, so that it checks the orderings this code runs
+/// with.
+pub(super) mod order {
+    use core::sync::atomic::Ordering;
+
+    /// Every access: a barrier orders what must be seen.
+    pub(in super::super) const RELAXED: Ordering = Ordering::Relaxed;
+}
 
 pub const BUILD: u32 = 0;
 pub const FLUSH: u32 = 1;
