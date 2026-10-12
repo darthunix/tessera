@@ -39,13 +39,9 @@
 
 #![forbid(unsafe_code)]
 
-mod bitmap;
-mod bits;
 mod column;
 mod reader;
-mod row_mask;
 
-pub use bits::{Ones, ones};
 pub use column::ColumnView;
 pub use reader::{ColumnReader, WordBlock, WordValues};
-pub use row_mask::{RowMask, RowMaskView, check_rows};
+pub use relhash::{Ones, RowMask, RowMaskView, check_rows, ones};

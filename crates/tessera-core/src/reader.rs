@@ -1,4 +1,4 @@
-use crate::bits::ones;
+use crate::ones;
 use std::iter::FusedIterator;
 
 use anyhow::{Result, ensure};
