@@ -79,7 +79,7 @@ commit of sections 2 and 3 is checked by `make rust-check` and by
 
 ## 3. The crate
 
-- [ ] 3.1 Make `crates/relhash` of `row_mask.rs`, `bits.rs` and
+- [x] 3.1 Make `crates/relhash` of `row_mask.rs`, `bits.rs` and
       `bitmap.rs` of `tessera-core`, a move only; `tessera-core`
       exports the moved names again; add the check that no crate but
       `relhash` defines a mask of rows, and name it in the contract's
