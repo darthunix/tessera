@@ -19,6 +19,8 @@
 #    cannot be broken.
 # 7. The architecture contracts, by check-contracts.sh: against the base
 #    of a pull request when SPECS_BASE names it.
+# 8. The checks of contracts' rules that are scripts of their own:
+#    check-masks.sh, no crate but relhash defines a mask of rows.
 # Run from the root of the repository.
 set -eu
 
@@ -204,6 +206,7 @@ while read -r wide; do
 done < "$list"
 
 .github/scripts/check-contracts.sh ${SPECS_BASE:+"$SPECS_BASE"} || fail=1
+.github/scripts/check-masks.sh || fail=1
 
 echo "check-specs: $total scenarios, $review review only, $pending pending"
 exit "$fail"
