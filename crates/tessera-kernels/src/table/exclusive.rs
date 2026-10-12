@@ -350,7 +350,10 @@ pub(super) fn each_payload<R: Region>(
     mut each: impl FnMut(usize, &mut [u8]),
 ) -> Result<()> {
     let nrows = rows.nrows();
-    check_accumulate(layout, offsets.len(), nrows, &[])?;
+    ensure!(
+        offsets.len() == nrows,
+        "the offsets and mask of the batch have different row counts"
+    );
     let mut access = Access::new(region, layout);
     for index in 0..nrows.div_ceil(64) {
         for bit in ones(rows.word_at(index)) {
@@ -493,14 +496,10 @@ pub struct Slot {
     pub flag_bit: u32,
 }
 
-/// Reject offsets, a mask or payload words that do not fit the table.
-fn check_accumulate(layout: &Layout, offsets: usize, nrows: usize, words: &[usize]) -> Result<()> {
-    check_words(layout.payload_size, offsets, nrows, words)
-}
-
-/// As [`check_accumulate`], from the size of a payload: a fold that takes
-/// the table passes the size, so that the table's address stays out of
-/// the call and its fields in registers across the fold's loop.
+/// Reject offsets, a mask or payload words that do not fit a payload of
+/// `payload_size` bytes: a fold passes the size, not the table, so that the
+/// table's address stays out of the call and its fields in registers across
+/// the fold's loop.
 #[inline(always)]
 fn check_words(payload_size: usize, offsets: usize, nrows: usize, words: &[usize]) -> Result<()> {
     ensure!(
