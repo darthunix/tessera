@@ -15,8 +15,9 @@
 //! implementation, over raw pointers; the trait is the seam for a model
 //! region under loom.
 //!
-//! The orderings live in [`order`], which the loom model in `loom.rs`
-//! shares, so that the model checks the orderings this code runs with.
+//! The orderings live in [`order`], which the loom model in `model.rs`
+//! and `loom.rs` shares, so that the model checks the orderings this code
+//! runs with.
 //!
 //! Offsets are validated by the table before any call, so a violation here
 //! is a bug: the methods assert it instead of returning an error. Every

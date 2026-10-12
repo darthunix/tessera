@@ -5,12 +5,15 @@
 # they are cut out by cfg, and their mutants would survive unseen).
 
 # The tools, the test strategies, the benchmark programs and the loom
-# model are not the product.
+# model are not the product. The model's memory and model table
+# (table/model.rs) compile only with --cfg loom, which a mutant's build
+# lacks: each of their mutants would survive unseen.
 exclude_globs = [
     "tools/**",
     "crates/tessera-testing/**",
     "crates/tessera-capi/benches/**",
     "**/loom.rs",
+    "crates/tessera-kernels/src/table/model.rs",
 ]
 
 # Debug output carries no logic; Display stays, it is the text of an error.
