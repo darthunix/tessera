@@ -1,31 +1,39 @@
-//! The set bits of a word, lowest first: the walk every batch loop takes
-//! over a word of a row mask, a word of lanes or a word of NULL flags.
+//! The ones of a word: the numbers of its bits that are 1, lowest first.
 //!
-//! The step lives here alone. A loop that takes it by hand
-//! (`x &= x - 1`) gives mutation testing three mutants of the step that
-//! make the loop endless, each costing a test timeout; through [`ones`]
+//! This is how a caller visits the rows a mask selects. Bit `bit` of word
+//! `index` of a mask stands for row `64 * index + bit`, so the ones of
+//! each word are the selected rows:
+//!
+//! ```
+//! use relhash::{RowMaskView, ones};
+//!
+//! let rows = RowMaskView::try_new(70, &[0b1010_0100, 0b10])?;
+//! let mut selected = Vec::new();
+//! for index in 0..2 {
+//!     for bit in ones(rows.word_at(index)) {
+//!         selected.push(64 * index + bit);
+//!     }
+//! }
+//! assert_eq!(selected, [2, 5, 7, 65]);
+//! # Ok::<(), anyhow::Error>(())
+//! ```
+//!
+//! Each step takes the lowest one and clears it (`word &= word - 1`). A
+//! loop that takes the step by hand gives mutation testing mutants of the
+//! step that make the loop endless, a test timeout each; through [`ones`]
 //! the step has one place, which `.cargo/mutants.toml` leaves out and the
-//! tests below check, and every loop body stays a mutant's target.
+//! tests below check.
 
 use core::iter::FusedIterator;
 
-/// The indices of the set bits of a word not visited yet, lowest first.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct Ones(u64);
-
-/// The set bits of `word`, lowest first.
+/// The ones of `word`, lowest first; `len()` tells how many are left.
 #[inline(always)]
-pub fn ones(word: u64) -> Ones {
+pub fn ones(word: u64) -> impl ExactSizeIterator<Item = usize> + FusedIterator {
     Ones(word)
 }
 
-impl Ones {
-    /// The bits not visited yet.
-    #[inline(always)]
-    pub fn rest(self) -> u64 {
-        self.0
-    }
-}
+/// The walk of [`ones`]: the bits of the word not visited yet.
+struct Ones(u64);
 
 impl Iterator for Ones {
     type Item = usize;
@@ -62,14 +70,11 @@ mod tests {
             let mut walk = ones(word);
             assert_eq!(walk.len(), expected.len());
             assert_eq!(walk.by_ref().collect::<Vec<_>>(), expected);
-            assert_eq!(
-                (walk.next(), walk.rest()),
-                (None, 0),
-                "{word:#x} stays over"
-            );
+            assert_eq!((walk.next(), walk.len()), (None, 0), "{word:#x} stays over");
         }
         let mut walk = ones(0b1010_0100);
         assert_eq!(walk.next(), Some(2));
-        assert_eq!((walk.rest(), walk.len()), (0b1010_0000, 2));
+        assert_eq!(walk.len(), 2);
+        assert_eq!(walk.collect::<Vec<_>>(), [5, 7]);
     }
 }

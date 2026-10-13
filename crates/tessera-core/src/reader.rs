@@ -1,4 +1,3 @@
-use crate::ones;
 use std::iter::FusedIterator;
 
 use anyhow::{Result, ensure};
@@ -160,11 +159,16 @@ where
 {
     type Item = (usize, Option<V>);
 
+    // The step of `ones` by hand, as in `fold`: the state between calls is
+    // the word of the rows left. `.cargo/mutants.toml` leaves the step out.
     #[inline]
     fn next(&mut self) -> Option<Self::Item> {
-        let mut walk = ones(self.remaining);
-        let row = self.base + walk.next()?;
-        self.remaining = walk.rest();
+        if self.remaining == 0 {
+            return None;
+        }
+        let bit = self.remaining.trailing_zeros() as usize;
+        self.remaining &= self.remaining - 1;
+        let row = self.base + bit;
         Some((row, (self.read)(row)))
     }
 

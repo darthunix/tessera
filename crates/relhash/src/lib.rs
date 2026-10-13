@@ -5,9 +5,8 @@
 
 #![forbid(unsafe_code)]
 
-mod bitmap;
 mod bits;
 mod row_mask;
 
-pub use bits::{Ones, ones};
+pub use bits::ones;
 pub use row_mask::{RowMask, RowMaskView, check_rows};
