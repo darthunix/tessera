@@ -44,4 +44,4 @@ mod reader;
 
 pub use column::ColumnView;
 pub use reader::{ColumnReader, WordBlock, WordValues};
-pub use relhash::{Ones, RowMask, RowMaskView, check_rows, ones};
+pub use relhash::{RowMask, RowMaskView, check_rows, ones};
