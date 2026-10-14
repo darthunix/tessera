@@ -133,7 +133,7 @@ fn append_rows<R: Region, K: KeySource + ?Sized, const N: usize, const T: usize,
     let mut word_keys = WordKeys::new(&mut buffer, access.nkeys());
     let mut appended = 0;
     for index in 0..nrows.div_ceil(64) {
-        let selected = pending.as_view().word_at(index);
+        let selected = pending.as_view().word(index);
         if selected == 0 {
             continue;
         }
@@ -245,7 +245,7 @@ fn append_column_rows<
     let mut word_keys = WordKeys::new(&mut buffer, access.nkeys());
     let mut appended = 0;
     for index in 0..nrows.div_ceil(64) {
-        let selected = pending.as_view().word_at(index);
+        let selected = pending.as_view().word(index);
         if selected == 0 {
             continue;
         }
@@ -395,7 +395,7 @@ fn append_partitioned_column_rows<
     let mut appended = 0;
     let mut seen = 0u64;
     for index in 0..nrows.div_ceil(64) {
-        let selected = pending.as_view().word_at(index);
+        let selected = pending.as_view().word(index);
         if selected == 0 {
             continue;
         }
@@ -648,7 +648,7 @@ fn probe_rows<R: Region, K: KeySource + ?Sized, const N: usize, const T: usize, 
     let mut word_keys = WordKeys::new(&mut buffer, access.nkeys());
     let mut lanes = Lanes::new();
     for index in 0..nrows.div_ceil(64) {
-        let selected = rows.word_at(index);
+        let selected = rows.word(index);
         let mut hits = 0;
         if selected.count_ones() >= VERTICAL_MIN_ROWS {
             word_keys.load(keys, index, selected)?;
@@ -798,7 +798,7 @@ pub(super) fn next_match<R: Region>(
     );
     let mut access = Access::new(region, layout);
     for index in 0..nrows.div_ceil(64) {
-        let bits = rows.word_at(index);
+        let bits = rows.word(index);
         let mut hits = 0;
         for bit in ones(bits) {
             let row = index * 64 + bit;
@@ -845,7 +845,7 @@ pub(super) fn gather<R: Region, const PREFETCH: bool>(
     let mut access = Access::new(region, layout);
     if !PREFETCH {
         for index in 0..nrows.div_ceil(64) {
-            for bit in ones(rows.word_at(index)) {
+            for bit in ones(rows.word(index)) {
                 let row = index * 64 + bit;
                 let payload = access.locate(offsets[row])?.payload();
                 let mut word = [0; 8];
@@ -862,7 +862,7 @@ pub(super) fn gather<R: Region, const PREFETCH: bool>(
     let word_at = RECORD_HEADER + 8 * access.nkeys() + at;
     let mut spots = [const { MaybeUninit::<R::Spot>::uninit() }; 64];
     for index in 0..nrows.div_ceil(64) {
-        let selected = rows.word_at(index);
+        let selected = rows.word(index);
         for bit in ones(selected) {
             let place = access.place(offsets[index * 64 + bit])?;
             // SAFETY: `place` accepted it.
@@ -918,7 +918,7 @@ pub(super) fn gather_words<R: Region>(
     let last_at = first_at + 8 * (out.len() - 1);
     let mut spots = [const { MaybeUninit::<R::Spot>::uninit() }; 64];
     for index in 0..nrows.div_ceil(64) {
-        let selected = rows.word_at(index);
+        let selected = rows.word(index);
         for bit in ones(selected) {
             let place = access.place(offsets[index * 64 + bit])?;
             // SAFETY: `place` accepted it.
@@ -965,7 +965,7 @@ pub(super) fn next_in_group<R: Region>(
     );
     let mut access = Access::new(region, layout);
     for index in 0..nrows.div_ceil(64) {
-        let bits = rows.word_at(index);
+        let bits = rows.word(index);
         let mut hits = 0;
         for bit in ones(bits) {
             let row = index * 64 + bit;
@@ -1013,7 +1013,7 @@ pub(super) fn gather_key<R: Region>(
     );
     let mut access = Access::new(region, layout);
     for index in 0..nrows.div_ceil(64) {
-        let bits = rows.word_at(index);
+        let bits = rows.word(index);
         for bit in ones(bits) {
             let row = index * 64 + bit;
             let record = access.locate(offsets[row])?;

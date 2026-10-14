@@ -10,7 +10,7 @@
 //! let rows = RowMaskView::try_new(70, &[0b1010_0100, 0b10])?;
 //! let mut selected = Vec::new();
 //! for index in 0..2 {
-//!     for bit in ones(rows.word_at(index)) {
+//!     for bit in ones(rows.word(index)) {
 //!         selected.push(64 * index + bit);
 //!     }
 //! }
@@ -24,11 +24,9 @@
 //! the step has one place, which `.cargo/mutants.toml` leaves out and the
 //! tests below check.
 
-use core::iter::FusedIterator;
-
-/// The ones of `word`, lowest first; `len()` tells how many are left.
+/// The ones of `word`, lowest first.
 #[inline(always)]
-pub fn ones(word: u64) -> impl ExactSizeIterator<Item = usize> + FusedIterator {
+pub fn ones(word: u64) -> impl Iterator<Item = usize> {
     Ones(word)
 }
 
@@ -55,26 +53,36 @@ impl Iterator for Ones {
     }
 }
 
-impl ExactSizeIterator for Ones {}
-
-impl FusedIterator for Ones {}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// Each word gives the numbers of its bits that are 1, lowest first,
+    /// and then nothing: a word with none, the lowest bit alone, a few
+    /// bits, all 64, the highest bit alone, the lowest and highest.
     #[test]
-    fn every_set_bit_comes_once_lowest_first() {
-        for word in [0, 1, 0b1011_0000, u64::MAX, 1 << 63, 0x8000_0000_0000_0001] {
-            let expected: Vec<usize> = (0..64).filter(|&bit| word >> bit & 1 == 1).collect();
+    fn ones_gives_the_numbers_of_the_bits_that_are_1_lowest_first() {
+        for (word, expected) in [
+            (0, vec![]),
+            (1, vec![0]),
+            (0b1011_0000, vec![4, 5, 7]),
+            (u64::MAX, (0..64).collect::<Vec<usize>>()),
+            (1 << 63, vec![63]),
+            (0x8000_0000_0000_0001, vec![0, 63]),
+        ] {
             let mut walk = ones(word);
-            assert_eq!(walk.len(), expected.len());
-            assert_eq!(walk.by_ref().collect::<Vec<_>>(), expected);
-            assert_eq!((walk.next(), walk.len()), (None, 0), "{word:#x} stays over");
+            assert_eq!(walk.by_ref().collect::<Vec<_>>(), expected, "{word:#x}");
+            assert_eq!(walk.next(), None, "{word:#x} gives nothing more");
         }
+    }
+
+    /// The walk's hint of how many ones are left is exact at every step.
+    #[test]
+    fn the_size_hint_counts_the_ones_left() {
         let mut walk = ones(0b1010_0100);
+        assert_eq!(walk.size_hint(), (3, Some(3)));
         assert_eq!(walk.next(), Some(2));
-        assert_eq!(walk.len(), 2);
+        assert_eq!(walk.size_hint(), (2, Some(2)));
         assert_eq!(walk.collect::<Vec<_>>(), [5, 7]);
     }
 }

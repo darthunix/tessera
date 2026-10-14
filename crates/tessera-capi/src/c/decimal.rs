@@ -925,7 +925,7 @@ pub unsafe extern "C" fn tess_decimal_read(
             }?;
             // The other selected rows keep their Datums.
             for word in 0..nrows.div_ceil(64) {
-                let look = rows.word_at(word) & !decimals.as_view().word_at(word);
+                let look = rows.word(word) & !decimals.as_view().word(word);
                 for bit in ones(look) {
                     let row = word * 64 + bit;
                     values[row].write(column.datum(row) as i64);
@@ -1129,7 +1129,7 @@ pub unsafe extern "C" fn tess_decimal_write(
             };
             let base = space.as_mut_ptr() as usize;
             let mut offset = 0;
-            for row in rows.selected_indices() {
+            for row in rows.selected_rows() {
                 let scale = match scales {
                     Some(scales) => u32::from(scales[row]),
                     None => u32::try_from(scale).context("a negative decimal scale")?,

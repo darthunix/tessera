@@ -249,7 +249,7 @@ fn filter_rows(
     let nrows = rows.as_view().nrows();
     check_rows(nrows, &[rest.as_view().nrows()], "text")?;
     for word in 0..nrows.div_ceil(64) {
-        let look = rows.as_view().word_at(word);
+        let look = rows.as_view().word(word);
         let (mut keep, mut other) = (0, 0);
         for bit in ones(look) {
             match test(word * 64 + bit) {
@@ -366,7 +366,7 @@ pub fn lengths(
         "text",
     )?;
     for word in 0..rows.nrows().div_ceil(64) {
-        let look = rows.word_at(word);
+        let look = rows.word(word);
         let (mut present, mut other) = (0, 0);
         for bit in ones(look) {
             let row = word * 64 + bit;
@@ -507,7 +507,7 @@ pub fn pieces(
         "text",
     )?;
     for word in 0..rows.nrows().div_ceil(64) {
-        let look = rows.word_at(word);
+        let look = rows.word(word);
         let (mut present, mut other) = (0, 0);
         for bit in ones(look) {
             let row = word * 64 + bit;

@@ -113,7 +113,10 @@ fn reference_matches_scalar_model_and_bitmap_views() {
             case.expected
         );
         for index in 0..rows.nrows.div_ceil(64) {
-            assert_eq!(rows.word(index), case.selected.view().word(index).unwrap());
+            assert_eq!(
+                rows.word(index),
+                case.selected.view().get_word(index).unwrap()
+            );
         }
         let dense = case.dense_column().unwrap();
         let datum = case.datum_column().unwrap();

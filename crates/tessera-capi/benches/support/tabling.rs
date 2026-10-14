@@ -64,7 +64,7 @@ impl Setup {
         let words = nrows.div_ceil(64);
         let mut hashes = vec![0; nrows];
         let mut valid: Vec<u64> = (0..words)
-            .map(|index| input.rows.word(index).unwrap())
+            .map(|index| input.rows.get_word(index).unwrap())
             .collect();
         let mut mask = RowMask::try_new(nrows, &mut valid)?;
         int32::hash(
@@ -265,7 +265,7 @@ pub fn check<K: KeySource>(
 ) -> Result<()> {
     let nrows = setup.hashes.len();
     let valid_rows: Vec<usize> = RowMaskView::try_new(nrows, &setup.valid)?
-        .selected_indices()
+        .selected_rows()
         .collect();
     insert_all(setup, keys)?;
     ensure!(

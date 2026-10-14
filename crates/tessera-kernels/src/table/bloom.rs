@@ -351,7 +351,7 @@ pub fn add(words: &mut [u64], hashes: &[u32], rows: &RowMaskView<'_>) -> Result<
         "the hashes and the mask of the batch have different row counts"
     );
     for index in 0..nrows.div_ceil(64) {
-        for bit in ones(rows.word_at(index)) {
+        for bit in ones(rows.word(index)) {
             let (word, mask) = place(hashes[index * 64 + bit], shift);
             words[word] |= mask;
         }
@@ -402,7 +402,7 @@ pub(super) fn add_with<F: FilterOr + ?Sized>(
         "the hashes and the mask of the batch have different row counts"
     );
     for index in 0..nrows.div_ceil(64) {
-        for bit in ones(rows.word_at(index)) {
+        for bit in ones(rows.word(index)) {
             let (word, mask) = place(hashes[index * 64 + bit], shift);
             filter.or(word, mask);
         }
@@ -450,7 +450,7 @@ fn check<F: FilterRead + ?Sized>(
     );
     for index in 0..nrows.div_ceil(64) {
         let mut hits = 0;
-        for bit in ones(rows.word_at(index)) {
+        for bit in ones(rows.word(index)) {
             let (word, mask) = place(hashes[index * 64 + bit], shift);
             hits |= u64::from(words.load(word) & mask == mask) << bit;
         }

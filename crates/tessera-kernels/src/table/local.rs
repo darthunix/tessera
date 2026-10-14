@@ -313,7 +313,7 @@ impl LocalTable {
                 .find_or_insert(chunk, batch, &mut created)?;
             resolved += count;
             for (index, word) in words.iter().enumerate() {
-                let merged = inserted.as_view().word_at(index) | word;
+                let merged = inserted.as_view().word(index) | word;
                 inserted.set_word(index, merged)?;
             }
             if batch.pending().selected_count() == 0 {
