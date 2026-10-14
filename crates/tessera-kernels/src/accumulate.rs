@@ -92,7 +92,7 @@ fn count_rows_inner(
     check_words(table.payload_size(), offsets.len(), nrows, &[at])?;
     let mut payloads = table.payloads();
     for index in 0..nrows.div_ceil(64) {
-        let bits = rows.word_at(index);
+        let bits = rows.word(index);
         for bit in ones(bits) {
             let row = index * 64 + bit;
             let payload = payloads.payload(offsets[row])?;
@@ -122,7 +122,7 @@ pub fn count_values<C: ColumnReader + ?Sized>(
     );
     let mut payloads = table.payloads();
     for index in 0..nrows.div_ceil(64) {
-        let selected = rows.word_at(index);
+        let selected = rows.word(index);
         if selected == 0 {
             continue;
         }
@@ -176,7 +176,7 @@ where
     let flag = 1u64 << slot.flag_bit;
     let mut payloads = table.payloads();
     for index in 0..nrows.div_ceil(64) {
-        let selected = rows.word_at(index);
+        let selected = rows.word(index);
         if selected == 0 {
             continue;
         }
@@ -328,7 +328,7 @@ pub fn sum_terms<T: Terms>(
     let mut group_rows = [0_u64; LOCAL_GROUPS];
     let mut bulk = [0_i128; LOCAL_GROUPS];
     for index in 0..nrows.div_ceil(64) {
-        let selected = rows.word_at(index);
+        let selected = rows.word(index);
         // The word's groups, and the rows of the groups that fit.
         let mut slots = [0_u8; LOCAL_SLOTS];
         let mut ngroups = 0;
@@ -490,7 +490,7 @@ pub fn sum_partials<P: Partials>(
     let mut others = [0_u64; MAX_SUMS];
     for index in 0..nrows.div_ceil(64) {
         others[..nsums].fill(0);
-        let look = rows.word_at(index);
+        let look = rows.word(index);
         for bit in ones(look) {
             let row = index * 64 + bit;
             let payload = payloads.payload(offsets[row])?;
@@ -556,7 +556,7 @@ pub fn extremes<T: Terms>(
     let mut payloads = table.payloads();
     for index in 0..nrows.div_ceil(64) {
         let mut other = 0_u64;
-        for bit in ones(rows.word_at(index)) {
+        for bit in ones(rows.word(index)) {
             let row = index * 64 + bit;
             let term = slot.terms.term(row);
             if term == Term::Null {

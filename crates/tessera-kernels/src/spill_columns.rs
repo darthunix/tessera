@@ -89,7 +89,7 @@ pub fn append_partitioned<C: ColumnChunks + ?Sized>(
     );
     let mut appended = 0;
     for index in 0..nrows.div_ceil(64) {
-        let selected = pending.as_view().word_at(index);
+        let selected = pending.as_view().word(index);
         let left = selected;
         let mut done = 0;
         for bit in ones(left) {
@@ -219,7 +219,7 @@ pub fn append(
             if taken == room {
                 break;
             }
-            let selected = rows.as_view().word_at(index);
+            let selected = rows.as_view().word(index);
             let mut done = 0_u64;
             for bit in ones(selected) {
                 if taken == room {
@@ -260,7 +260,7 @@ pub fn append(
         });
     }
     'words: for index in 0..nrows.div_ceil(64) {
-        let selected = rows.as_view().word_at(index);
+        let selected = rows.as_view().word(index);
         let mut done = 0_u64;
         for bit in ones(selected) {
             let row = index * 64 + bit;
@@ -486,7 +486,7 @@ mod tests {
                     "{used} bytes used"
                 );
                 for (row, &went) in went.iter().enumerate() {
-                    let left = rows.as_view().word_at(row / 64) >> (row % 64) & 1 == 1;
+                    let left = rows.as_view().word(row / 64) >> (row % 64) & 1 == 1;
                     ensure!(left == (selected[row] && !went), "row {row} left {left}");
                 }
                 Ok(())
@@ -540,7 +540,7 @@ mod tests {
         assert_eq!(rows, [0, 10, 25, 25]);
         assert_eq!(appended, 60);
         let left: Vec<usize> = (0..nrows)
-            .filter(|row| pending.as_view().word_at(row / 64) >> (row % 64) & 1 == 1)
+            .filter(|row| pending.as_view().word(row / 64) >> (row % 64) & 1 == 1)
             .collect();
         let expected: Vec<usize> = (0..nrows)
             .filter(|row| row % 4 == 0 || (row % 4 == 1 && *row >= 40))

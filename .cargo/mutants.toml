@@ -39,6 +39,13 @@ exclude_globs = [
 # their hash of groups 18 slots for 32 leaves every sum and rest as it
 # was. Two of these read as mutants the tests catch, so their place
 # names them.
+# The first word of a batch decides whether cast, count, the int
+# aggregates, arithmetic and comparison read whole words of a column's
+# storage or its rows one by one: both give the same results, and only the
+# time tells them apart. The mutants of that choice are named by their
+# place, since the same operators elsewhere in these functions matter.
+# LocalTable::find_or_insert adds the rows a call created to those of the
+# calls before; a row is created once, so the two share no bit and | is ^.
 exclude_re = [
     "<impl [a-z:]*Debug for ",
     "<impl Iterator for Ones>::next",
@@ -53,6 +60,12 @@ exclude_re = [
     "replace <= with > in sum_terms$",
     "accumulate\\.rs:399:50: replace \\|\\| with && in sum_terms$",
     "accumulate\\.rs:[0-9]+:[0-9]+: replace \\* with \\+$",
+    "cast\\.rs:7[12]:[0-9]+: replace (&& with \\|\\||>= with <) in int4_to_int8$",
+    "count\\.rs:37:[0-9]+: replace >= with < in count$",
+    "int/aggregate\\.rs:7[12]:[0-9]+: replace (&& with \\|\\||>= with <) in aggregate$",
+    "int/arith\\.rs:21[01]:[0-9]+: replace (&& with \\|\\||>= with <) in run$",
+    "int/compare\\.rs:51:69: replace && with \\|\\| in run$",
+    "table/local\\.rs:316:61: replace \\| with \\^ in LocalTable::find_or_insert$",
 ]
 
 # A mutant that makes a loop endless is stopped at three times the

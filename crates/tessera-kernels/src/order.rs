@@ -123,7 +123,7 @@ fn push_as<const W: usize>(
     let (heap, _) = heap.as_chunks_mut::<W>();
     let mut records = table.records();
     for index in 0..rows.nrows().div_ceil(64) {
-        let bits = rows.word_at(index);
+        let bits = rows.word(index);
         for bit in ones(bits) {
             let row = index * 64 + bit;
             let reference = refs[row];

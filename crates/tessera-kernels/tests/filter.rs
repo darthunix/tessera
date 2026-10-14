@@ -282,7 +282,7 @@ fn successive_filters_keep_only_the_intersection<W: Width>() {
     W::filter(&column, &mut rows, CompareOp::Ge, W::spread(10)).unwrap();
     W::filter(&column, &mut rows, CompareOp::Lt, W::spread(20)).unwrap();
     assert_eq!(
-        rows.as_view().selected_indices().collect::<Vec<_>>(),
+        rows.as_view().selected_rows().collect::<Vec<_>>(),
         [10, 11, 12, 13, 14, 16, 17, 18, 19]
     );
     W::filter(&column, &mut rows, CompareOp::Gt, W::spread(40)).unwrap();
@@ -399,7 +399,7 @@ fn empty_words_and_unselected_unprepared_rows_are_not_read<W: Width>() {
     assert_eq!(column.words.get(), 0);
     assert_eq!(column.gets.get(), 1);
     assert_eq!(column.reads.get(), 1);
-    rows.clear(64);
+    rows.remove(64);
     W::filter(&column, &mut rows, CompareOp::Eq, W::from(64)).unwrap();
     assert_eq!(column.words.get(), 0);
     assert_eq!(column.gets.get(), 1);

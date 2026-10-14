@@ -69,7 +69,7 @@ trait Selection {
 impl Selection for RowMaskView<'_> {
     #[inline(always)]
     fn word(&self, _: &RowMask<'_>, index: usize) -> u64 {
-        RowMaskView::word_at(self, index)
+        RowMaskView::word(self, index)
     }
 }
 
@@ -79,7 +79,7 @@ struct Valid;
 impl Selection for Valid {
     #[inline(always)]
     fn word(&self, valid: &RowMask<'_>, index: usize) -> u64 {
-        valid.as_view().word_at(index)
+        valid.as_view().word(index)
     }
 }
 

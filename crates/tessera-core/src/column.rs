@@ -64,7 +64,7 @@ impl<T: Copy> ColumnReader for ColumnView<'_, T> {
     ) -> Result<impl Iterator<Item = (usize, Option<T>)> + '_> {
         let non_nulls = self
             .non_nulls
-            .map_or(u64::MAX, |mask| mask.word(word_index).unwrap_or(0));
+            .map_or(u64::MAX, |mask| mask.get_word(word_index).unwrap_or(0));
         WordValues::try_new(
             self.nrows(),
             word_index,
@@ -85,7 +85,7 @@ impl<T: Copy> ColumnReader for ColumnView<'_, T> {
             .ok()?;
         let non_nulls = self
             .non_nulls
-            .map_or(u64::MAX, |mask| mask.word(word_index).unwrap_or(0));
+            .map_or(u64::MAX, |mask| mask.get_word(word_index).unwrap_or(0));
         Some(WordBlock::Dense { values, non_nulls })
     }
 }
