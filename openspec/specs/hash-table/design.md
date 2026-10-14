@@ -1781,6 +1781,9 @@ How a spilled chunk of records is written to disk is in
 - The unit tests in `crates/tessera-kernels/src/table/mod.rs`: blocks
   that are not chunks or an index, partitions, merges, and a shared
   filter that threads race to build.
+- The unit tests in `crates/tessera-kernels/src/accumulate.rs`: the
+  states of groups merged by their kinds, and a count past the int8
+  range.
 - The unit tests in `crates/tessera-kernels/src/table/marks.rs`: the
   words of the marks, and the records and cursors a walk refuses.
 - The unit tests in `crates/tessera-kernels/src/phases.rs`: the

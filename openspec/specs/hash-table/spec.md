@@ -710,7 +710,7 @@ out of a regrow, which links every record of every chunk it is given.
 - **THEN** each state is as the rules give, and the groups the table
   lacked are copied and found
 - **Verified by:**
-  `crates/tessera-kernels/src/table/mod.rs::states_of_a_group_merge`;
+  `crates/tessera-kernels/src/accumulate.rs::states_of_a_group_merge`;
   `test/sql/table.sql::tessera_test_table_combine`
 
 #### Scenario: A merge stops for a chunk or a larger index
@@ -730,7 +730,7 @@ out of a regrow, which links every record of every chunk it is given.
   `TESS_ERROR_INTEGER_OUT_OF_RANGE` and SQLSTATE `22003`, the others
   with `TESS_ERROR_INVALID_ARGUMENT` before any change
 - **Verified by:**
-  `crates/tessera-kernels/src/table/mod.rs::a_merged_count_past_the_int8_range_fails`;
+  `crates/tessera-kernels/src/accumulate.rs::a_merged_count_past_the_int8_range_fails`;
   `crates/tessera-capi/tests/table.rs::a_merge_that_cannot_be_done_fails`
 
 ### Requirement: A Bloom filter of the keys
