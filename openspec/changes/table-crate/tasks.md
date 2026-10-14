@@ -86,17 +86,23 @@ commit of sections 2 and 3 is checked by `make rust-check` and by
       rule "The masks of rows are the crate's". Check:
       `make rust-check`; machine code the same on every program and
       module
-- [ ] 3.2 Move the format of the table into the crate: `header.rs`,
-      `region.rs`, `record.rs`, `lanes.rs` and what `mod.rs` holds of
-      them, a move only; `tessera-kernels` exports the moved names
-      again. Check: `make rust-check`; machine code the same;
-      `make rust-loom`; `make installcheck`
-- [ ] 3.3 Move the calls into the crate: `batch.rs`, `keys.rs`'s source
-      of keys, what is left of `exclusive.rs`, `bloom.rs`, `marks.rs`,
-      `local.rs` behind a feature `alloc` on by default, the loom
-      models of the table, the filter and the marks, and `model.rs`
-      with loom a dependency under `--cfg loom`, a move only.
-      Check: as 3.2
+- [x] 3.2 Give the table's unit tests, its loom model and the example of
+      its module a source of keys and a hash of their own, and move the
+      tests of the kinds of a merge to `accumulate.rs`, so that nothing
+      in `table/` needs the kernels. Check: `cargo test -p
+      tessera-kernels --lib`; `cargo test -p tessera-kernels --doc`;
+      `make rust-loom`
+- [ ] 3.3 Move `table/` into the crate as it is, the format and the calls
+      at once: `header.rs`, `region.rs`, `record.rs`, `lanes.rs`,
+      `batch.rs`, `keys.rs`'s source of keys, what is left of
+      `exclusive.rs`, `bloom.rs`, `marks.rs`, `mod.rs`, `local.rs`
+      behind a feature `alloc` on by default, the loom models of the
+      table, the filter and the marks, and `model.rs` with loom a
+      dependency under `--cfg loom`, a move only; `tessera-kernels`
+      exports the moved names again. The format alone would have made
+      the crate's inner parts public for the calls still in the kernels.
+      Check: `make rust-check`; machine code the same; `make rust-loom`;
+      `make installcheck`
 - [ ] 3.4 Set `publish = true` for the crate and refuse a target whose
       pointers are not 64 bits wide with `compile_error!`; add to CI a
       build for a 32-bit target that must fail, the crate's tests alone,
