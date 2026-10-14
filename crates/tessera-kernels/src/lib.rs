@@ -78,5 +78,5 @@ pub mod shared_spill;
 mod simd;
 pub mod sort;
 pub mod spill_columns;
-pub mod table;
+pub use relhash::table;
 pub mod text;

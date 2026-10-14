@@ -10,9 +10,9 @@
 use core::mem::MaybeUninit;
 
 use super::record::View;
-use anyhow::Result;
 #[cfg(any(test, loom))]
-use tessera_core::ones;
+use crate::ones;
+use anyhow::Result;
 
 /// The keys of a batch, one word at a time.
 pub trait KeySource {

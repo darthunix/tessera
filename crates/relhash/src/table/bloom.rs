@@ -29,8 +29,8 @@
 
 use core::sync::atomic::AtomicU64;
 
+use crate::{RowMask, RowMaskView, ones};
 use anyhow::{Result, bail, ensure};
-use tessera_core::{RowMask, RowMaskView, ones};
 
 use super::batch::{check_record, unlinked};
 use super::header::{CHUNK_HEADER, Layout};
@@ -300,8 +300,8 @@ pub(super) fn try_build<R: Region, F: FilterShared + ?Sized>(
 /// another row count than the mask, fail before any change.
 ///
 /// ```
-/// use tessera_core::{RowMask, RowMaskView};
-/// use tessera_kernels::table::bloom;
+/// use relhash::{RowMask, RowMaskView};
+/// use relhash::table::bloom;
 ///
 /// // An empty filter lets nothing through.
 /// let words = vec![0; bloom::words_for(100)?];
@@ -330,8 +330,8 @@ pub fn probe(
 /// count than the mask, fail before any change.
 ///
 /// ```
-/// use tessera_core::{RowMask, RowMaskView};
-/// use tessera_kernels::table::bloom;
+/// use relhash::{RowMask, RowMaskView};
+/// use relhash::table::bloom;
 ///
 /// // The rows added pass; a row not added, most likely not.
 /// let mut words = vec![0; bloom::words_for(100)?];

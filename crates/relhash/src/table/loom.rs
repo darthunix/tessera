@@ -9,12 +9,12 @@
 //! and the marks of a RIGHT or FULL join get the same treatment. Run with
 //! `make rust-loom`.
 
+use crate::{RowMask, RowMaskView};
 use ::loom::sync::Arc;
 use ::loom::sync::atomic::AtomicU64;
 use ::loom::thread;
 use anyhow::Result;
 use core::sync::atomic::Ordering;
-use tessera_core::{RowMask, RowMaskView};
 
 use super::bloom::{self, FilterOr, FilterRead, FilterShared};
 use super::exclusive::{Cursor, scan};
