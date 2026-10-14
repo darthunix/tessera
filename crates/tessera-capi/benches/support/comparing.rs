@@ -22,13 +22,7 @@ use crate::support::{
 /// Masks of one call's selection, at most this many live at once.
 const BLOCK_SIZE: usize = 4096;
 
-fn case(
-    nrows: usize,
-    pattern: &str,
-    nulls: &str,
-    offset: Option<usize>,
-    partial: bool,
-) -> [Fixture; 2] {
+fn case(nrows: usize, pattern: &str, nulls: &str, partial: bool) -> [Fixture; 2] {
     let left = (0..nrows)
         .map(|row| ((row * 37) % 101) as i32 - 50)
         .collect();
@@ -36,8 +30,8 @@ fn case(
         .map(|row| ((row * 53) % 97) as i32 - 48)
         .collect();
     [
-        Fixture::from_values(left, pattern, nulls, offset, partial),
-        Fixture::from_values(right, pattern, "random", offset, partial),
+        Fixture::from_values(left, pattern, nulls, partial),
+        Fixture::from_values(right, pattern, "random", partial),
     ]
 }
 
@@ -46,15 +40,15 @@ pub fn cases() -> Vec<[Fixture; 2]> {
     for nrows in [65, 1024] {
         for pattern in ["all", "eighth", "one-per128", "empty"] {
             for nulls in ["none", "mixed"] {
-                cases.push(case(nrows, pattern, nulls, Some(0), false));
+                cases.push(case(nrows, pattern, nulls, false));
             }
         }
     }
     for nrows in [0, 1, 63, 64] {
-        cases.push(case(nrows, "all", "mixed", Some(0), false));
+        cases.push(case(nrows, "all", "mixed", false));
     }
-    cases.push(case(1024, "random", "random", None, false));
-    cases.push(case(1024, "all", "mixed", None, true));
+    cases.push(case(1024, "random", "random", false));
+    cases.push(case(1024, "all", "mixed", true));
     cases
 }
 

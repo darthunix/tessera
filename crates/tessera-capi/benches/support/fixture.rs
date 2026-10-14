@@ -11,7 +11,7 @@
 //! branches; the `random` selection and `nulls-random` flags come from a
 //! fixed-seed generator and show it.
 
-use super::reference::{Bits, Mask};
+use super::reference::Mask;
 use anyhow::Result;
 use std::mem::MaybeUninit;
 use tessera_capi::{DatumIntColumn, DenseIntColumn, FromDatum};
@@ -69,34 +69,23 @@ impl Random {
 pub struct Bitmap {
     nrows: usize,
     words: Vec<u64>,
-    bytes: Vec<u8>,
-    offset: Option<usize>,
 }
 
 impl Bitmap {
-    fn new(flags: &[bool], offset: Option<usize>) -> Self {
+    fn new(flags: &[bool]) -> Self {
         let mut words = vec![0; flags.len().div_ceil(64)];
-        let start = offset.unwrap_or(0);
-        let mut bytes = vec![u8::MAX; (start + flags.len()).div_ceil(8)];
         for (row, &flag) in flags.iter().enumerate() {
             if flag {
                 words[row / 64] |= 1 << (row % 64);
-            } else {
-                bytes[(start + row) / 8] &= !(1 << ((start + row) % 8));
             }
         }
         Self {
             nrows: flags.len(),
             words,
-            bytes,
-            offset,
         }
     }
     pub fn view(&self) -> RowMaskView<'_> {
-        match self.offset {
-            Some(offset) => RowMaskView::try_from_bytes(self.nrows, &self.bytes, offset).unwrap(),
-            None => RowMaskView::try_new(self.nrows, &self.words).unwrap(),
-        }
+        RowMaskView::try_new(self.nrows, &self.words).unwrap()
     }
     pub fn words(&self) -> &[u64] {
         &self.words
@@ -104,10 +93,7 @@ impl Bitmap {
     pub fn reference(&self) -> Mask<'_> {
         Mask {
             nrows: self.nrows,
-            bits: match self.offset {
-                Some(offset) => Bits::Bytes(&self.bytes, offset),
-                None => Bits::Words(&self.words),
-            },
+            words: &self.words,
         }
     }
 }
@@ -157,13 +143,7 @@ impl<T: FixtureValue> Fixture<T> {
         }
     }
 
-    pub fn from_values(
-        values: Vec<T>,
-        pattern: &str,
-        nulls: &str,
-        offset: Option<usize>,
-        partial: bool,
-    ) -> Self {
+    pub fn from_values(values: Vec<T>, pattern: &str, nulls: &str, partial: bool) -> Self {
         let nrows = values.len();
         let mut random = Random::seeded(nrows);
         let ready: Vec<_> = (0..nrows).map(|row| !partial || row % 3 != 2).collect();
@@ -201,14 +181,13 @@ impl<T: FixtureValue> Fixture<T> {
             .fold(0, i64::wrapping_add);
         Self {
             name: format!(
-                "{}/{nrows}/{pattern}/nulls-{nulls}/{}",
-                offset.map_or_else(|| "words".to_owned(), |offset| format!("bytes-{offset}")),
+                "words/{nrows}/{pattern}/nulls-{nulls}/{}",
                 if partial { "partial" } else { "ready" }
             ),
             non_nulls: (nulls != "none")
-                .then(|| Bitmap::new(&flags.iter().map(|&flag| !flag).collect::<Vec<_>>(), offset)),
-            prepared: partial.then(|| Bitmap::new(&ready, offset)),
-            selected: Bitmap::new(&selected, offset),
+                .then(|| Bitmap::new(&flags.iter().map(|&flag| !flag).collect::<Vec<_>>())),
+            prepared: partial.then(|| Bitmap::new(&ready)),
+            selected: Bitmap::new(&selected),
             nulls: flags,
             values,
             datums,

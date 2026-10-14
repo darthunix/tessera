@@ -99,30 +99,27 @@ pub fn datum_reference<C>(input: &Input<'_, C>) -> Result<i64> {
     )
 }
 
-fn case(nrows: usize, pattern: &str, nulls: &str, offset: Option<usize>, partial: bool) -> Fixture {
+fn case(nrows: usize, pattern: &str, nulls: &str, partial: bool) -> Fixture {
     let values = (0..nrows)
         .map(|row| (row as i32).wrapping_mul(7919).wrapping_sub(104729))
         .collect();
-    Fixture::from_values(values, pattern, nulls, offset, partial)
+    Fixture::from_values(values, pattern, nulls, partial)
 }
 
 pub fn cases() -> Vec<Fixture> {
     let mut cases = Vec::new();
     for nulls in ["none", "mixed"] {
         for pattern in ["all", "half", "sparse", "empty"] {
-            cases.push(case(1024, pattern, nulls, None, false));
+            cases.push(case(1024, pattern, nulls, false));
         }
     }
     for nrows in [0, 1, 63, 64, 65] {
-        cases.push(case(nrows, "all", "mixed", None, false));
+        cases.push(case(nrows, "all", "mixed", false));
     }
-    cases.push(case(1024, "all", "all", None, false));
-    cases.push(case(1024, "all", "random", None, false));
-    cases.push(case(1024, "random", "random", None, false));
-    cases.push(case(1024, "all", "mixed", None, true));
-    for (nrows, offset, pattern) in [(65, 3, "all"), (1024, 7, "all"), (1024, 7, "sparse")] {
-        cases.push(case(nrows, pattern, "mixed", Some(offset), true));
-    }
+    cases.push(case(1024, "all", "all", false));
+    cases.push(case(1024, "all", "random", false));
+    cases.push(case(1024, "random", "random", false));
+    cases.push(case(1024, "all", "mixed", true));
     cases
 }
 
