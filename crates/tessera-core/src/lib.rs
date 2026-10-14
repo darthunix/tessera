@@ -16,7 +16,7 @@
 //! null. Separate masks use the same [`RowMaskView`] type and physical row
 //! indices, not positions in a packed selection. Constructors, row lookup,
 //! and intersection return [`anyhow::Result`] for invalid input, not a panic.
-//! [`RowMask::clear`] silently ignores absent and out-of-bounds rows.
+//! [`RowMask::remove`] silently ignores absent and out-of-bounds rows.
 //!
 //! ```
 //! use tessera_core::{ColumnView, RowMask, RowMaskView};
@@ -27,9 +27,9 @@
 //! let non_nulls = RowMaskView::try_new(values.len(), &non_null_bits)?;
 //! let column = ColumnView::try_new(&values, Some(non_nulls))?;
 //! let mut rows = RowMask::try_new(values.len(), &mut row_bits)?;
-//! rows.clear(0);
+//! rows.remove(0);
 //!
-//! let selected: Vec<_> = rows.as_view().selected_indices().collect();
+//! let selected: Vec<_> = rows.as_view().selected_rows().collect();
 //! assert_eq!(selected, [1, 2]);
 //! assert_eq!(column.get(1)?, None);
 //! assert_eq!(column.get(2)?, Some(&30));

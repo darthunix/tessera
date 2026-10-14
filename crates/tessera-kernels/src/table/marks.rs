@@ -157,12 +157,12 @@ pub fn mark(
     // A full word's 64 references at once, which its bits index unchecked.
     let (blocks, rest) = refs.as_chunks::<64>();
     for (index, block) in blocks.iter().enumerate() {
-        for bit in ones(rows.word_at(index)) {
+        for bit in ones(rows.word(index)) {
             set(block[bit])?;
         }
     }
     if !rest.is_empty() {
-        for bit in ones(rows.word_at(blocks.len())) {
+        for bit in ones(rows.word(blocks.len())) {
             set(*rest.get(bit).context("a row mask's bit past its rows")?)?;
         }
     }

@@ -66,7 +66,7 @@ pub fn word_sum<C: ColumnReader<Value = i32>>(input: &Input<'_, C>) -> Result<i6
     );
     let mut sum = 0;
     for index in 0..input.rows.nrows().div_ceil(64) {
-        let selected = input.rows.word(index).unwrap();
+        let selected = input.rows.get_word(index).unwrap();
         if selected == 0 {
             continue;
         }

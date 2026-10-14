@@ -35,7 +35,7 @@ use super::CompareOp;
 /// let mut words = [0b0111];
 /// let mut rows = RowMask::try_new(4, &mut words)?;
 /// filter(&column, &mut rows, CompareOp::Ge, 20)?;
-/// assert_eq!(rows.as_view().selected_indices().collect::<Vec<_>>(), [2]);
+/// assert_eq!(rows.as_view().selected_rows().collect::<Vec<_>>(), [2]);
 /// # Ok::<(), anyhow::Error>(())
 /// ```
 pub fn filter<C: ColumnReader<Value = i32>>(

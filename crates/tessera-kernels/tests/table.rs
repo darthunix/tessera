@@ -290,7 +290,7 @@ fn all_rows(nrows: usize) -> Vec<u64> {
 
 /// The rows a mask holds.
 fn rows_of(view: &RowMaskView<'_>) -> Vec<usize> {
-    view.selected_indices().collect()
+    view.selected_rows().collect()
 }
 
 /// A payload of eight bytes per row: the row number times ten.

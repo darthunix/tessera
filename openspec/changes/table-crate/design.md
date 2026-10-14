@@ -119,11 +119,12 @@ themselves, so the crate keeps those checks to itself.
 changes its imports. A view of a mask is its row count and its words. It
 also read a window of bytes from a bit offset, the form of Arrow's
 bitmaps, but nothing in Tessera built one, so that form is gone; it
-comes back with a source that hands masks over in it. Reading a word
-past a mask's words still panics, as it does now: a check there costs 4
-to 9 instructions a word in the kernels' loops. It is a call over a
-mask, not over a table's blocks, so the promise over any bytes does not
-reach it.
+comes back with a source that hands masks over in it. The walk over the
+ones of a word is a function that returns a plain iterator, so the crate
+shows the walk and not the type of its state. Reading a word past a
+mask's words still panics, as it does now: a check there costs 4 to 9
+instructions a word in the kernels' loops. It is a call over a mask, not
+over a table's blocks, so the promise over any bytes does not reach it.
 
 Refused: a mask of the crate's own beside the old one, two copies of
 one type; a third crate for the masks alone, one more crate to publish

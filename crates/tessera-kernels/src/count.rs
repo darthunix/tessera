@@ -35,7 +35,7 @@ use crate::BULK_MIN_ROWS;
 pub fn count<C: ColumnReader>(column: &C, rows: &RowMaskView<'_>) -> Result<usize> {
     let bulk = cfg!(all(target_arch = "aarch64", not(miri)))
         && rows.nrows() >= 64
-        && rows.word(0).is_some_and(|selected| {
+        && rows.get_word(0).is_some_and(|selected| {
             (selected == u64::MAX
                 || (!selected.is_power_of_two() && selected.count_ones() >= BULK_MIN_ROWS))
                 && column.word_block(0).is_some()
@@ -55,7 +55,7 @@ pub fn count<C: ColumnReader>(column: &C, rows: &RowMaskView<'_>) -> Result<usiz
 fn count_bulk<C: ColumnReader>(column: &C, rows: &RowMaskView<'_>) -> Result<usize> {
     let mut count = 0;
     for index in 0..rows.nrows().div_ceil(64) {
-        let selected = rows.word_at(index);
+        let selected = rows.word(index);
         if selected == 0 {
             continue;
         }

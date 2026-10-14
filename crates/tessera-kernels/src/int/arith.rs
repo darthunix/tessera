@@ -85,7 +85,7 @@ where
         let rows = output.rows;
         let mut output = output;
         for index in 0..rows.nrows().div_ceil(64) {
-            let selected = rows.word_at(index);
+            let selected = rows.word(index);
             self.word(index, selected, &mut output, evaluate)?;
         }
         Ok(())
@@ -208,7 +208,7 @@ where
     // word as it would the rest.
     let whole_words = cfg!(all(target_arch = "aarch64", not(miri)))
         && nrows >= 64
-        && rows.word(0).is_some_and(|selected| {
+        && rows.get_word(0).is_some_and(|selected| {
             (selected == u64::MAX
                 || (!selected.is_power_of_two() && selected.count_ones() >= BULK_MIN_ROWS))
                 && operands.blocks(0).is_some()
@@ -273,7 +273,7 @@ where
         _ => None,
     };
     for index in 0..rows.nrows().div_ceil(64) {
-        let selected = rows.word_at(index);
+        let selected = rows.word(index);
         if selected == 0 || selected.is_power_of_two() {
             operands.word(index, selected, &mut output, evaluate)?;
             continue;
