@@ -36,16 +36,33 @@ fn validate_row(row: usize, nrows: usize) -> Result<()> {
     Ok(())
 }
 
-/// A read-only, borrowed bitmap of physical rows.
+/// A mask of rows, to read: which rows of a batch a call takes.
 ///
-/// Set bits can represent active rows or non-NULL values. Row selection and
-/// non-NULL tracking use separate bitmaps, even though they share this view type.
+/// A batch of `nrows` rows has one bit per row, and a bit that is 1 chooses
+/// its row. The same type also tells which values of a column are not NULL:
+/// a bit that is 1 then means the row has a value. The bits lie in 64-bit
+/// words, lowest bit first: word 0 holds rows 0 to 63, word 1 rows 64 to
+/// 127, and so on. A mask has exactly the words its rows need, and the bits
+/// of the last word past the last row are 0. The view borrows the caller's
+/// words, which the C API's `TessRowMask` holds too; it neither copies nor
+/// frees them.
 ///
-/// Bits are numbered least significant first. [`Self::try_new`] accepts strict
-/// `TessRowMask`-style words, not its C struct layout, and neither copies nor
-/// owns them.
+/// ```
+/// use relhash::RowMaskView;
 ///
-/// A view cannot outlive its storage:
+/// // Rows 0, 2 and 64 of a batch of 70 rows: two words.
+/// let words = [0b101, 0b1];
+/// let rows = RowMaskView::try_new(70, &words)?;
+/// assert_eq!(rows.selected_rows().collect::<Vec<_>>(), [0, 2, 64]);
+/// // One word is not enough for 70 rows, and row 70 is past the batch.
+/// assert!(RowMaskView::try_new(70, &[0b101]).is_err());
+/// assert!(RowMaskView::try_new(70, &[0, 1 << 6]).is_err());
+/// # Ok::<(), anyhow::Error>(())
+/// ```
+///
+/// A view cannot outlive the words it borrows. Here `words` is one word
+/// whose bit 0 chooses the one row of the batch, and it is gone before the
+/// view is read, so the compiler refuses the code:
 ///
 /// ```compile_fail
 /// use relhash::RowMaskView;
@@ -70,24 +87,22 @@ impl<'a> RowMaskView<'a> {
         Ok(Self { nrows, words })
     }
 
-    /// Return a logical 64-row word, or `None` beyond the row count.
-    ///
-    /// The last word's padding is always zero.
+    /// Word `word_index` of the mask, or `None` past its last word, as a
+    /// slice's `get`. The last word's bits past the last row are 0.
     #[inline]
     pub fn get_word(&self, word_index: usize) -> Option<u64> {
         (word_index < word_count(self.nrows)).then(|| self.word(word_index))
     }
 
-    /// Return the logical 64-row word `word_index`, which must be below the
-    /// word count: a loop over the words of this mask. An index past them
-    /// panics as an index past a slice does.
+    /// Word `word_index` of the mask, for a loop over its words: an index
+    /// past the last word panics, as an index past a slice does.
     ///
     /// It has no range check of its own on purpose. A loop that writes its
     /// results through `&mut` cannot keep the row count in a register, and a
     /// check reloads it every word: 4-9 instructions a word in the
     /// arithmetic and hash kernels, by PMU.
     ///
-    /// The last word's padding is always zero.
+    /// The last word's bits past the last row are 0.
     #[inline]
     pub fn word(&self, word_index: usize) -> u64 {
         debug_assert!(word_index < word_count(self.nrows));
@@ -117,10 +132,8 @@ impl<'a> RowMaskView<'a> {
         Ok(self.words[row / 64] & (1_u64 << (row % 64)) != 0)
     }
 
-    /// Visit selected physical indices in increasing order without allocating.
-    ///
-    /// Only set bits are visited within each word. Once exhausted, the
-    /// iterator keeps returning `None`.
+    /// The numbers of the chosen rows, from 0 to `nrows - 1`, lowest first,
+    /// without allocating.
     pub fn selected_rows(&self) -> impl Iterator<Item = usize> + '_ {
         self.words()
             .enumerate()
@@ -128,9 +141,15 @@ impl<'a> RowMaskView<'a> {
     }
 }
 
-/// An exclusively borrowed row bitmap that can only remove rows.
+/// A mask of rows that a call changes: it removes rows ([`Self::remove`],
+/// [`Self::intersect_word`]) or writes the rows of its result a word at a
+/// time ([`Self::set_word`]). The words are those of [`RowMaskView`], which
+/// [`Self::as_view`] reads. The mask, not a word alone, takes these calls:
+/// it knows its row count, so it refuses a word past its end and a bit past
+/// its last row, and its words keep the form of a mask.
 ///
-/// Construction validates the invariants of [`RowMaskView::try_new`]. Successful
+/// It borrows the caller's words exclusively, and construction checks them
+/// as [`RowMaskView::try_new`] does. Successful
 /// operations do not allocate; creating an error may allocate. No operation
 /// frees or resizes the backing storage. Dropping the mask ends the borrow;
 /// changes remain in the caller's words.
@@ -180,8 +199,8 @@ impl<'a> RowMask<'a> {
 
     /// Remove a physical row; an absent or out-of-bounds row is ignored.
     ///
-    /// Padding bits are already zero after construction, so clearing one
-    /// leaves the words unchanged. Indices beyond the words are also ignored.
+    /// The bits past the last row are already 0, so removing such a row
+    /// leaves the words unchanged; a row past the words is ignored too.
     #[inline]
     pub fn remove(&mut self, row: usize) {
         if let Some(word) = self.words.get_mut(row / 64) {
