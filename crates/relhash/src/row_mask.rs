@@ -36,45 +36,14 @@ fn validate_row(row: usize, nrows: usize) -> Result<()> {
     Ok(())
 }
 
-#[derive(Clone, Copy, Debug)]
-enum Storage<'a> {
-    Words(&'a [u64]),
-    Bytes { bytes: &'a [u8], bit_offset: usize },
-}
-
-// Keep partial and shifted byte-window decoding out of the full-word hot path.
-// A shifted word inside the buffer is two fixed-size loads; only the last
-// bytes of the buffer are copied byte by byte.
-#[inline(never)]
-fn byte_word(bytes: &[u8], bit_offset: usize, word_index: usize, nrows: usize) -> u64 {
-    let window = &bytes[word_index * 8..];
-    let bits = if let Some(nine) = window.get(..9) {
-        let mut low = [0; 8];
-        low.copy_from_slice(&nine[..8]);
-        let low = u64::from_le_bytes(low);
-        if bit_offset == 0 {
-            low
-        } else {
-            (low >> bit_offset) | (u64::from(nine[8]) << (64 - bit_offset))
-        }
-    } else {
-        let mut data = [0; 8];
-        data[..window.len()].copy_from_slice(window);
-        u64::from_le_bytes(data) >> bit_offset
-    };
-    let valid = (nrows - word_index * 64).min(64);
-    bits & (u64::MAX >> (64 - valid))
-}
-
 /// A read-only, borrowed bitmap of physical rows.
 ///
 /// Set bits can represent active rows or non-NULL values. Row selection and
 /// non-NULL tracking use separate bitmaps, even though they share this view type.
 ///
-/// Bits are numbered least significant first in both words and bytes.
-/// [`Self::try_new`] accepts strict `TessRowMask`-style words, not its C struct
-/// layout. [`Self::try_from_bytes`] borrows an arbitrary bit window, including
-/// sliced Arrow non-NULL masks. Neither constructor copies or owns storage.
+/// Bits are numbered least significant first. [`Self::try_new`] accepts strict
+/// `TessRowMask`-style words, not its C struct layout, and neither copies nor
+/// owns them.
 ///
 /// A view cannot outlive its storage:
 ///
@@ -90,7 +59,7 @@ fn byte_word(bytes: &[u8], bit_offset: usize, word_index: usize, nrows: usize) -
 #[derive(Clone, Copy, Debug)]
 pub struct RowMaskView<'a> {
     nrows: usize,
-    storage: Storage<'a>,
+    words: &'a [u64],
 }
 
 impl<'a> RowMaskView<'a> {
@@ -98,37 +67,12 @@ impl<'a> RowMaskView<'a> {
     #[inline]
     pub fn try_new(nrows: usize, words: &'a [u64]) -> Result<Self> {
         validate_words(nrows, words)?;
-        Ok(Self {
-            nrows,
-            storage: Storage::Words(words),
-        })
-    }
-
-    /// Borrow `nrows` bits starting at `bit_offset`, without alignment needs.
-    ///
-    /// Bits outside the window are ignored, including nonzero padding.
-    /// Overflow or a window beyond the buffer returns an error. An empty
-    /// window may start at any valid position, including the buffer's end.
-    pub fn try_from_bytes(nrows: usize, bytes: &'a [u8], bit_offset: usize) -> Result<Self> {
-        let end = bit_offset
-            .checked_add(nrows)
-            .context("bitmap bit range overflows")?;
-        ensure!(
-            end.div_ceil(8) <= bytes.len(),
-            "bitmap bit range exceeds its buffer"
-        );
-        Ok(Self {
-            nrows,
-            storage: Storage::Bytes {
-                bytes: &bytes[bit_offset / 8..end.div_ceil(8)],
-                bit_offset: bit_offset % 8,
-            },
-        })
+        Ok(Self { nrows, words })
     }
 
     /// Return a logical 64-row word, or `None` beyond the row count.
     ///
-    /// The last word's padding is always zero, independent of backing format.
+    /// The last word's padding is always zero.
     #[inline]
     pub fn word(&self, word_index: usize) -> Option<u64> {
         (word_index < word_count(self.nrows)).then(|| self.word_at(word_index))
@@ -143,32 +87,17 @@ impl<'a> RowMaskView<'a> {
     /// check reloads it every word: 4-9 instructions a word in the
     /// arithmetic and hash kernels, by PMU.
     ///
-    /// The last word's padding is always zero, independent of backing format.
+    /// The last word's padding is always zero.
     #[inline]
     pub fn word_at(&self, word_index: usize) -> u64 {
         debug_assert!(word_index < word_count(self.nrows));
-        match self.storage {
-            Storage::Words(words) => words[word_index],
-            Storage::Bytes { bytes, bit_offset } => {
-                if bit_offset == 0 && self.nrows - word_index * 64 >= 64 {
-                    let start = word_index * 8;
-                    // A fixed-size copy permits a direct load without requiring
-                    // u64 alignment or reading beyond the validated window.
-                    let mut word = [0; 8];
-                    word.copy_from_slice(&bytes[start..start + 8]);
-                    u64::from_le_bytes(word)
-                } else {
-                    byte_word(bytes, bit_offset, word_index, self.nrows)
-                }
-            }
-        }
+        self.words[word_index]
     }
 
     /// The logical 64-row words in order, the last one's padding zero.
     #[inline]
     pub fn words(&self) -> impl ExactSizeIterator<Item = u64> + 'a {
-        let view = *self;
-        (0..word_count(self.nrows)).map(move |index| view.word_at(index))
+        self.words.iter().copied()
     }
 
     /// Return the number of physical rows, including unselected rows.
@@ -185,13 +114,7 @@ impl<'a> RowMaskView<'a> {
     #[inline]
     pub fn contains(&self, row: usize) -> Result<bool> {
         validate_row(row, self.nrows)?;
-        Ok(match self.storage {
-            Storage::Words(words) => words[row / 64] & (1_u64 << (row % 64)) != 0,
-            Storage::Bytes { bytes, bit_offset } => {
-                let bit = row + bit_offset;
-                bytes[bit / 8] & (1_u8 << (bit % 8)) != 0
-            }
-        })
+        Ok(self.words[row / 64] & (1_u64 << (row % 64)) != 0)
     }
 
     /// Visit selected physical indices in increasing order without allocating.
@@ -251,7 +174,7 @@ impl<'a> RowMask<'a> {
     pub fn as_view(&self) -> RowMaskView<'_> {
         RowMaskView {
             nrows: self.nrows,
-            storage: Storage::Words(self.words),
+            words: self.words,
         }
     }
 
