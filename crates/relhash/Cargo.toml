@@ -6,8 +6,21 @@ rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[features]
+default = ["alloc"]
+# LocalTable, the table that owns its memory and so allocates it.
+alloc = []
+
 [dependencies]
 anyhow.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+
+# The model table of the table module, which other crates' loom models run
+# over.
+[target.'cfg(loom)'.dependencies]
+loom = "0.7"
 
 [lints]
 workspace = true

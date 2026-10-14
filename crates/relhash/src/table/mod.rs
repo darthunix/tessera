@@ -53,8 +53,8 @@
 //!
 //! ```
 //! use anyhow::Result;
-//! use tessera_core::{RowMask, RowMaskView};
-//! use tessera_kernels::table::{Batch, KeyKind, KeySource, LocalTable, TableConfig};
+//! use relhash::{RowMask, RowMaskView};
+//! use relhash::table::{Batch, KeyKind, KeySource, LocalTable, TableConfig};
 //!
 //! // The caller hands keys over a word of 64 rows at a time: here one key
 //! // of int4 values with no NULL.
@@ -108,6 +108,7 @@ mod exclusive;
 mod header;
 mod keys;
 mod lanes;
+#[cfg(feature = "alloc")]
 mod local;
 #[cfg(all(test, loom))]
 mod loom;
@@ -120,8 +121,8 @@ mod region;
 use core::marker::PhantomData;
 use core::ops::Deref;
 
+use crate::{RowMask, RowMaskView};
 use anyhow::{Result, anyhow, ensure};
-use tessera_core::{RowMask, RowMaskView};
 
 pub use exclusive::{CombineStop, Cursor, HELD, PayloadCursor};
 pub use header::{
@@ -130,6 +131,7 @@ pub use header::{
 };
 use header::{Header, Layout, NRECORDS, RECORD_HEADER};
 pub use keys::KeySource;
+#[cfg(feature = "alloc")]
 pub use local::LocalTable;
 pub use marks::{Marks, mark, mark_words, scan_unmarked};
 use record::Access;
@@ -562,7 +564,9 @@ impl<'a> Table<'a> {
         })
     }
 
-    /// The kinds of the keys, in key order.
+    /// The kinds of the keys, in key order. Inlined into the callers of
+    /// other crates, as it was when they lay in one crate.
+    #[inline]
     pub fn key_kinds(&self) -> &[KeyKind] {
         &self.layout.kinds[..self.layout.nkeys]
     }

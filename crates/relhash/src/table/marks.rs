@@ -7,8 +7,8 @@
 //! a record comes from the caller; the entry points check it against the
 //! index when the table has one.
 
+use crate::{RowMaskView, ones};
 use anyhow::{Context, Result, ensure};
-use tessera_core::{RowMaskView, ones};
 
 use super::Chunks;
 use super::exclusive::Cursor;

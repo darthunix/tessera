@@ -7,8 +7,8 @@
 //! as they fill and never move, and a larger index replaces the old one
 //! when the records outgrow it, as a node does with its memory.
 
+use crate::RowMask;
 use anyhow::{Result, ensure};
-use tessera_core::RowMask;
 
 use super::{
     Batch, CHUNK_HEADER, Chunks, KeySource, MAX_CHUNK_LEN, MAX_CHUNKS, Table, TableConfig,

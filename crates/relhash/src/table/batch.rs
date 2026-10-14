@@ -5,8 +5,8 @@
 
 use core::mem::MaybeUninit;
 
+use crate::{RowMask, RowMaskView, ones};
 use anyhow::{Result, ensure};
-use tessera_core::{RowMask, RowMaskView, ones};
 
 use super::header::{CHUNK_HEADER, Layout, RECORD_HEADER};
 use super::keys::{KeySource, WordKeys, slot_buffer};

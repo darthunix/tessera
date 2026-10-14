@@ -7,8 +7,8 @@
 //! and a larger index rebuilds the buckets and every record's next field.
 //! Records never move.
 
+use crate::{RowMask, RowMaskView, ones};
 use anyhow::{Result, bail, ensure};
-use tessera_core::{RowMask, RowMaskView, ones};
 
 use super::batch::{Lanes, VERTICAL_MIN_ROWS, check_keys, check_partitions, probe_word, shaped};
 use super::batch::{check_record, unlinked};
