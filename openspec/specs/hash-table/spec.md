@@ -92,7 +92,7 @@ buckets, and the index length.
   length that is not a multiple of 8, or in fewer bytes than its size
 - **THEN** the call fails and writes nothing
 - **Verified by:**
-  `crates/tessera-kernels/src/table/mod.rs::misaligned_or_odd_blocks_are_refused`
+  `crates/relhash/src/table/mod.rs::misaligned_or_odd_blocks_are_refused`
 
 ### Requirement: Chunks and references
 The records of a table SHALL lie in chunks, at most 32768 of them,
@@ -130,9 +130,9 @@ longest length hold, and that maximum for a larger limit.
   call is given more than 32768 chunks
 - **THEN** the call fails
 - **Verified by:**
-  `crates/tessera-kernels/src/table/mod.rs::chunks_past_the_limits_are_refused`;
-  `crates/tessera-kernels/src/table/mod.rs::misaligned_or_odd_blocks_are_refused`;
-  `crates/tessera-kernels/src/table/marks.rs::a_walk_refuses_a_chunk_that_cannot_be_one`
+  `crates/relhash/src/table/mod.rs::chunks_past_the_limits_are_refused`;
+  `crates/relhash/src/table/mod.rs::misaligned_or_odd_blocks_are_refused`;
+  `crates/relhash/src/table/marks.rs::a_walk_refuses_a_chunk_that_cannot_be_one`
 
 #### Scenario: A debug build checks every chunk
 - **WHEN** a probe that reads no chunk is given a chunk longer than
@@ -291,7 +291,7 @@ anything, and a chunk before it reads or writes it.
 - **Verified by:**
   `crates/tessera-kernels/tests/table.rs::a_corrupt_reference_chain_or_used_mark_is_an_error`;
   `crates/tessera-kernels/tests/table.rs::a_word_probed_at_once_detects_a_cycle`;
-  `crates/tessera-kernels/src/table/mod.rs::a_damaged_count_is_bounded_by_the_places_of_the_chunks`
+  `crates/relhash/src/table/mod.rs::a_damaged_count_is_bounded_by_the_places_of_the_chunks`
 
 #### Scenario: Arguments are checked first
 - **WHEN** a call is given arrays of the wrong length, a missing output
@@ -370,9 +370,9 @@ once SHALL be exact.
 - **THEN** in every order of their steps every record is linked once,
   the count is the total, and the duplicates add up exactly
 - **Verified by:**
-  `crates/tessera-kernels/src/table/loom.rs::three_participants_link_into_one_bucket`;
-  `crates/tessera-kernels/src/table/loom.rs::a_key_shared_by_two_participants_counts_once`;
-  `crates/tessera-kernels/src/table/loom.rs::three_records_of_one_key_count_twice`
+  `crates/relhash/src/table/loom.rs::three_participants_link_into_one_bucket`;
+  `crates/relhash/src/table/loom.rs::a_key_shared_by_two_participants_counts_once`;
+  `crates/relhash/src/table/loom.rs::three_records_of_one_key_count_twice`
 
 ### Requirement: Looking rows up
 `tess_table_probe` SHALL find for each row of a mask the first record
@@ -514,7 +514,7 @@ participant did before the next phase of the others.
 - **THEN** in every order of their steps the probe finds the record
   whole or not at all, and its chain is never taken for a loop
 - **Verified by:**
-  `crates/tessera-kernels/src/table/loom.rs::a_probe_sees_a_published_record_whole`
+  `crates/relhash/src/table/loom.rs::a_probe_sees_a_published_record_whole`
 
 #### Scenario: Weaker orders are caught
 - **WHEN** the model reads the buckets with relaxed order, or raises the
@@ -522,8 +522,8 @@ participant did before the next phase of the others.
 - **THEN** a probe can read a record that is not written yet, or take a
   sound chain for a loop, and the model reports it
 - **Verified by:**
-  `crates/tessera-kernels/src/table/loom.rs::relaxed_heads_let_a_probe_read_an_unwritten_record`;
-  `crates/tessera-kernels/src/table/loom.rs::a_count_raised_after_publishing_makes_a_sound_chain_a_loop`
+  `crates/relhash/src/table/loom.rs::relaxed_heads_let_a_probe_read_an_unwritten_record`;
+  `crates/relhash/src/table/loom.rs::a_count_raised_after_publishing_makes_a_sound_chain_a_loop`
 
 #### Scenario: A shared build
 - **WHEN** two or three processes append, size the index, link and
@@ -565,7 +565,7 @@ it has no room for a record.
 - **THEN** every record goes to the chunk of partition
   `(hash >> 9) & 3`, the one `tess_table_partition` gives
 - **Verified by:**
-  `crates/tessera-kernels/src/table/mod.rs::a_chunk_splits_into_the_chunks_of_its_partitions`;
+  `crates/relhash/src/table/mod.rs::a_chunk_splits_into_the_chunks_of_its_partitions`;
   `test/sql/table.sql::tessera_test_table_partitions`
 
 #### Scenario: Partitions past the limits are refused
@@ -574,7 +574,7 @@ it has no room for a record.
   chunks, to a split, an append by partition or a lookup by partition
 - **THEN** the call fails, and the chunks and the masks are as they were
 - **Verified by:**
-  `crates/tessera-kernels/src/table/mod.rs::partitions_past_the_hash_or_the_chunks_are_refused`;
+  `crates/relhash/src/table/mod.rs::partitions_past_the_hash_or_the_chunks_are_refused`;
   `crates/tessera-capi/tests/table.rs::an_append_by_partition_refuses_partitions_past_the_limits`
 
 ### Requirement: Appending rows by partition
@@ -632,7 +632,7 @@ partition.
 - **THEN** every record is copied once, whole, with a next of 0, to its
   partition, and `*from` ends at the source's used mark
 - **Verified by:**
-  `crates/tessera-kernels/src/table/mod.rs::a_chunk_splits_into_the_chunks_of_its_partitions`;
+  `crates/relhash/src/table/mod.rs::a_chunk_splits_into_the_chunks_of_its_partitions`;
   `test/sql/table.sql::tessera_test_table_partitions`
 
 #### Scenario: A split that cannot be done is refused
@@ -640,7 +640,7 @@ partition.
   chunks, or with a record size other than the source's records
 - **THEN** it fails, and `*from` and the chunks are as they were
 - **Verified by:**
-  `crates/tessera-kernels/src/table/mod.rs::a_split_that_cannot_be_done_is_refused`
+  `crates/relhash/src/table/mod.rs::a_split_that_cannot_be_done_is_refused`
 
 ### Requirement: Groups by partition
 `tess_table_find_or_insert_partitioned` SHALL give each row of the
@@ -660,7 +660,7 @@ made. The caller is the one writer of the table.
   key keeps one record across the batches, and the inserted rows are
   the first row of each new key
 - **Verified by:**
-  `crates/tessera-kernels/src/table/mod.rs::groups_go_to_the_chunks_of_their_partitions`;
+  `crates/relhash/src/table/mod.rs::groups_go_to_the_chunks_of_their_partitions`;
   `test/sql/table.sql::tessera_test_table_combine`
 
 #### Scenario: Half the buckets stops every row
@@ -669,7 +669,7 @@ made. The caller is the one writer of the table.
   that count, and that row and every row after it stay pending,
   including rows of keys the table holds
 - **Verified by:**
-  `crates/tessera-kernels/src/table/mod.rs::half_the_buckets_stops_every_row_of_a_lookup_by_partition`
+  `crates/relhash/src/table/mod.rs::half_the_buckets_stops_every_row_of_a_lookup_by_partition`
 
 ### Requirement: Merging groups read back
 `tess_table_combine` SHALL merge the records of chunk `source`, from
@@ -720,7 +720,7 @@ out of a regrow, which links every record of every chunk it is given.
   `*from` on the first group not merged, and goes on from there with a
   new chunk and a larger index to `DONE`
 - **Verified by:**
-  `crates/tessera-kernels/src/table/mod.rs::a_merge_stops_for_a_chunk_or_a_larger_index`
+  `crates/relhash/src/table/mod.rs::a_merge_stops_for_a_chunk_or_a_larger_index`
 
 #### Scenario: A merge that cannot be done fails
 - **WHEN** a count or a sum would pass the int8 range, or a merge has 65
@@ -848,8 +848,8 @@ two, SHALL be refused.
 - **THEN** exactly one builds it, a probe before it is ready fails, and
   once it is ready every key passes
 - **Verified by:**
-  `crates/tessera-kernels/src/table/loom.rs::two_participants_race_to_build_the_filter_and_one_does`;
-  `crates/tessera-kernels/src/table/mod.rs::one_of_four_threads_builds_a_shared_filter_every_key_passes`;
+  `crates/relhash/src/table/loom.rs::two_participants_race_to_build_the_filter_and_one_does`;
+  `crates/relhash/src/table/mod.rs::one_of_four_threads_builds_a_shared_filter_every_key_passes`;
   `test/sql/table.sql::tessera_test_table_groups`
 
 #### Scenario: A filter that reads ready is whole
@@ -860,8 +860,8 @@ two, SHALL be refused.
   key pass, and with a relaxed state the model reports a reader that
   sees an unfilled filter
 - **Verified by:**
-  `crates/tessera-kernels/src/table/loom.rs::a_reader_sees_the_filter_whole_once_it_is_ready`;
-  `crates/tessera-kernels/src/table/loom.rs::a_relaxed_state_lets_a_reader_see_an_unfilled_filter`
+  `crates/relhash/src/table/loom.rs::a_reader_sees_the_filter_whole_once_it_is_ready`;
+  `crates/relhash/src/table/loom.rs::a_relaxed_state_lets_a_reader_see_an_unfilled_filter`
 
 #### Scenario: A shared filter of the wrong shape is refused
 - **WHEN** a shared filter is not aligned to 8, or has 1 or 4 words
@@ -884,8 +884,8 @@ a power of two.
 - **THEN** every key passes; with the plain read and write the model
   reports a key whose bits were lost
 - **Verified by:**
-  `crates/tessera-kernels/src/table/loom.rs::participants_add_to_one_word_and_lose_no_bit`;
-  `crates/tessera-kernels/src/table/loom.rs::a_plain_read_and_write_loses_the_bits_of_a_filter`
+  `crates/relhash/src/table/loom.rs::participants_add_to_one_word_and_lose_no_bit`;
+  `crates/relhash/src/table/loom.rs::a_plain_read_and_write_loses_the_bits_of_a_filter`
 
 #### Scenario: A filter filled by one participant
 - **WHEN** one participant adds the valid rows of a batch and probes
@@ -948,7 +948,7 @@ participant stops so only when its plan wants no more rows.
 - **THEN** they are 0, 1, 1 and 2, and bit 6 of word 1 of chunk 1's
   run is the only bit set
 - **Verified by:**
-  `crates/tessera-kernels/src/table/marks.rs::a_chunk_has_a_word_of_marks_per_64_records`;
+  `crates/relhash/src/table/marks.rs::a_chunk_has_a_word_of_marks_per_64_records`;
   `crates/tessera-kernels/tests/table.rs::a_record_s_mark_is_its_bit_of_its_chunk_s_run`
 
 #### Scenario: Marked records are left out of the walk
@@ -969,7 +969,7 @@ participant stops so only when its plan wants no more rows.
 - **THEN** the call fails and the cursor and the count are as they were
 - **Verified by:**
   `crates/tessera-capi/tests/table.rs::marks_and_walks_that_cannot_be_done_are_refused`;
-  `crates/tessera-kernels/src/table/marks.rs::a_walk_refuses_a_used_mark_or_a_cursor_off_the_records`
+  `crates/relhash/src/table/marks.rs::a_walk_refuses_a_used_mark_or_a_cursor_off_the_records`
 
 #### Scenario: Participants mark at once
 - **WHEN** two participants mark records of one word at the same time,
@@ -978,8 +978,8 @@ participant stops so only when its plan wants no more rows.
 - **THEN** the walk gives no marked record; with the plain read and
   write the model reports a mark that was lost
 - **Verified by:**
-  `crates/tessera-kernels/src/table/loom.rs::participants_mark_one_word_and_lose_no_mark`;
-  `crates/tessera-kernels/src/table/loom.rs::a_plain_read_and_write_loses_marks`
+  `crates/relhash/src/table/loom.rs::participants_mark_one_word_and_lose_no_mark`;
+  `crates/relhash/src/table/loom.rs::a_plain_read_and_write_loses_marks`
 
 #### Scenario: A participant that stops while it probes
 - **WHEN** one of two or three participants of a shared table stops

@@ -92,7 +92,7 @@ commit of sections 2 and 3 is checked by `make rust-check` and by
       in `table/` needs the kernels. Check: `cargo test -p
       tessera-kernels --lib`; `cargo test -p tessera-kernels --doc`;
       `make rust-loom`
-- [ ] 3.3 Move `table/` into the crate as it is, the format and the calls
+- [x] 3.3 Move `table/` into the crate as it is, the format and the calls
       at once: `header.rs`, `region.rs`, `record.rs`, `lanes.rs`,
       `batch.rs`, `keys.rs`'s source of keys, what is left of
       `exclusive.rs`, `bloom.rs`, `marks.rs`, `mod.rs`, `local.rs`
