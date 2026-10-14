@@ -30,7 +30,7 @@ fn validate_ready(nrows: usize, prepared: Option<RowMaskView<'_>>, row: usize) -
 
 #[inline]
 fn mask_word(mask: Option<RowMaskView<'_>>, word_index: usize) -> u64 {
-    mask.map_or(u64::MAX, |mask| mask.word(word_index).unwrap_or(0))
+    mask.map_or(u64::MAX, |mask| mask.get_word(word_index).unwrap_or(0))
 }
 
 // Shared early-exit loop over prepared selection words. The caller chooses the
@@ -78,7 +78,7 @@ fn try_fold_words<B, V>(
         "column and selection row counts differ"
     );
     for index in 0..nrows.div_ceil(64) {
-        let remaining = rows.word_at(index);
+        let remaining = rows.word(index);
         if remaining == 0 {
             continue;
         }

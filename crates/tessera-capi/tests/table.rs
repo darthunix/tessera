@@ -499,7 +499,7 @@ fn datum_and_dense_keys_build_the_same_table() -> Result<()> {
             let (offsets, found, matches) = from_dense;
             assert_eq!(found, valid, "every valid row is found");
             let valid_view = RowMaskView::try_new(nrows, &valid)?;
-            for row in valid_view.selected_indices() {
+            for row in valid_view.selected_rows() {
                 let twin = offsets.iter().enumerate().any(|(other, &offset)| {
                     offset == matches[row]
                         && valid_view.contains(other).unwrap()
@@ -576,7 +576,7 @@ fn the_entry_points_round_trip() -> Result<()> {
         );
         assert_eq!(code, Code::Ok);
         let valid_rows: Vec<usize> = RowMaskView::try_new(100, &valid_words)?
-            .selected_indices()
+            .selected_rows()
             .collect();
         assert_eq!(valid_rows.len(), 80);
 
@@ -701,7 +701,7 @@ fn the_entry_points_round_trip() -> Result<()> {
         );
         assert_eq!(code, Code::Ok, "{}", status.message());
         let twins: Vec<usize> = RowMaskView::try_new(100, &found_words)?
-            .selected_indices()
+            .selected_rows()
             .collect();
         let expected: Vec<usize> = valid_rows
             .iter()

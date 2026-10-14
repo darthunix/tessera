@@ -50,18 +50,18 @@ fn assert_mask(mask: RowMaskView<'_>, expected: &[bool]) {
         .filter_map(|(row, &selected)| selected.then_some(row))
         .collect();
     assert_eq!(mask.selected_count(), indices.len());
-    assert_eq!(mask.selected_indices().collect::<Vec<_>>(), indices);
+    assert_eq!(mask.selected_rows().collect::<Vec<_>>(), indices);
     let words = words_for(expected);
     for (index, &word) in words.iter().enumerate() {
-        assert_eq!(mask.word(index), Some(word));
-        assert_eq!(mask.word_at(index), word);
+        assert_eq!(mask.get_word(index), Some(word));
+        assert_eq!(mask.word(index), word);
     }
-    assert_eq!(mask.word(words.len()), None);
-    assert_eq!(mask.word(usize::MAX), None);
+    assert_eq!(mask.get_word(words.len()), None);
+    assert_eq!(mask.get_word(usize::MAX), None);
     for (row, &selected) in expected.iter().enumerate() {
         assert_eq!(mask.contains(row).unwrap(), selected);
     }
-    let mut iter = mask.selected_indices();
+    let mut iter = mask.selected_rows();
     for row in indices {
         assert_eq!(iter.next(), Some(row));
     }
@@ -130,8 +130,8 @@ fn clear_matches_boolean_model_and_is_idempotent() {
             {
                 let mut mask = RowMask::try_new(nrows, &mut words).unwrap();
                 for row in (0..nrows).rev() {
-                    mask.clear(row);
-                    mask.clear(row);
+                    mask.remove(row);
+                    mask.remove(row);
                     expected[row] = false;
                     assert_mask(mask.as_view(), &expected);
                 }
@@ -172,37 +172,31 @@ fn intersection_matches_boolean_model_and_never_restores_rows() {
 fn masks_match_existing_c_test_cases() {
     let zero = RowMaskView::try_new(0, &[]).unwrap();
     assert_eq!(zero.selected_count(), 0);
-    assert_eq!(zero.selected_indices().next(), None);
+    assert_eq!(zero.selected_rows().next(), None);
     let empty = RowMaskView::try_new(7, &[0]).unwrap();
     assert_eq!(empty.selected_count(), 0);
-    assert_eq!(empty.selected_indices().next(), None);
+    assert_eq!(empty.selected_rows().next(), None);
 
     let mut small_words = [(1 << 0) | (1 << 2) | (1 << 5)];
     let mut small = RowMask::try_new(6, &mut small_words).unwrap();
     assert_eq!(
-        small.as_view().selected_indices().collect::<Vec<_>>(),
+        small.as_view().selected_rows().collect::<Vec<_>>(),
         [0, 2, 5]
     );
-    small.clear(2);
-    assert_eq!(
-        small.as_view().selected_indices().collect::<Vec<_>>(),
-        [0, 5]
-    );
+    small.remove(2);
+    assert_eq!(small.as_view().selected_rows().collect::<Vec<_>>(), [0, 5]);
 
     let mut wide_words = [(1 << 0) | (1 << 63), (1 << 0) | (1 << 5)];
     let mut wide = RowMask::try_new(70, &mut wide_words).unwrap();
     assert_eq!(
-        wide.as_view().selected_indices().collect::<Vec<_>>(),
+        wide.as_view().selected_rows().collect::<Vec<_>>(),
         [0, 63, 64, 69]
     );
-    wide.clear(64);
+    wide.remove(64);
     let keep_words = [(1 << 1) | (1 << 63), (1 << 0) | (1 << 5)];
     wide.intersect(RowMaskView::try_new(70, &keep_words).unwrap())
         .unwrap();
-    assert_eq!(
-        wide.as_view().selected_indices().collect::<Vec<_>>(),
-        [63, 69]
-    );
+    assert_eq!(wide.as_view().selected_rows().collect::<Vec<_>>(), [63, 69]);
     assert_eq!(wide.as_view().selected_count(), 2);
 }
 
@@ -277,8 +271,8 @@ fn clear_ignores_out_of_bounds_rows_without_changing_any_word() {
             for row in (nrows..=first_absent_word_row).chain([usize::MAX]) {
                 {
                     let mut mask = RowMask::try_new(nrows, &mut words).unwrap();
-                    mask.clear(row);
-                    mask.clear(row);
+                    mask.remove(row);
+                    mask.remove(row);
                     assert_mask(mask.as_view(), &expected);
                 }
                 assert_eq!(words, original);
@@ -318,13 +312,10 @@ fn mutable_mask_can_be_reborrowed_after_reading() {
         let mut mask = RowMask::try_new(3, &mut words).unwrap();
         {
             let view = mask.as_view();
-            assert_eq!(view.selected_indices().collect::<Vec<_>>(), [0, 1, 2]);
+            assert_eq!(view.selected_rows().collect::<Vec<_>>(), [0, 1, 2]);
         }
-        mask.clear(1);
-        assert_eq!(
-            mask.as_view().selected_indices().collect::<Vec<_>>(),
-            [0, 2]
-        );
+        mask.remove(1);
+        assert_eq!(mask.as_view().selected_rows().collect::<Vec<_>>(), [0, 2]);
     }
     assert_eq!(words, [0b101]);
 }
@@ -418,11 +409,11 @@ fn selection_does_not_change_non_nulls_or_physical_indices() {
     let column = ColumnView::try_new(&values, Some(non_nulls)).unwrap();
     let mut row_words = [0b1111];
     let mut rows = RowMask::try_new(4, &mut row_words).unwrap();
-    rows.clear(0);
-    rows.clear(3);
+    rows.remove(0);
+    rows.remove(3);
     let selected: Vec<_> = rows
         .as_view()
-        .selected_indices()
+        .selected_rows()
         .map(|row| (row, column.get(row).unwrap()))
         .collect();
     assert_eq!(selected, [(1, Some(&20)), (2, None)]);

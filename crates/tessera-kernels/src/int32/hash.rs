@@ -88,7 +88,7 @@ pub fn hash_combine(a: u32, b: u32) -> u32 {
 /// let mut words = [0];
 /// let mut valid = RowMask::try_new(3, &mut words)?;
 /// hash(&column, &rows, NullKeys::Reject, &mut hashes, &mut valid)?;
-/// assert_eq!(valid.as_view().word(0), Some(0b101));
+/// assert_eq!(valid.as_view().get_word(0), Some(0b101));
 /// assert_eq!(hashes[0], murmurhash32(10));
 /// hash_next(&column, NullKeys::Reject, &mut hashes, &mut valid)?;
 /// assert_eq!(hashes[2], hash_combine(murmurhash32(30), murmurhash32(30)));

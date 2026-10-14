@@ -691,7 +691,7 @@ fn map_rows<L: Copy, R: Copy, T>(
         "calendar",
     )?;
     for word in 0..rows.nrows().div_ceil(64) {
-        let look = rows.word_at(word);
+        let look = rows.word(word);
         let mut present = 0;
         for bit in ones(look) {
             let row = word * 64 + bit;
@@ -824,7 +824,7 @@ pub fn truncate_locals(
         "calendar",
     )?;
     for word in 0..rows.nrows().div_ceil(64) {
-        let look = rows.word_at(word);
+        let look = rows.word(word);
         let (mut day_bits, mut other) = (0, 0);
         for bit in ones(look) {
             let row = word * 64 + bit;
@@ -940,7 +940,7 @@ fn extract_rows<T>(
     )?;
     let mut fields = DayFields::default();
     for word in 0..rows.nrows().div_ceil(64) {
-        let look = rows.word_at(word);
+        let look = rows.word(word);
         let (mut present, mut other) = (0, 0);
         for bit in ones(look) {
             let row = word * 64 + bit;

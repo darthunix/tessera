@@ -459,7 +459,7 @@ fn for_each_word(
     mut visit: impl FnMut(usize, u64) -> Result<()>,
 ) -> Result<()> {
     for word in 0..rows.nrows().div_ceil(64) {
-        visit(word, rows.word_at(word))?;
+        visit(word, rows.word(word))?;
     }
     Ok(())
 }
@@ -483,7 +483,7 @@ pub fn filter(
     check_rows(nrows, &[rest.as_view().nrows()], "decimal")?;
     let orders = orders(op);
     for word in 0..nrows.div_ceil(64) {
-        let look = rows.as_view().word_at(word);
+        let look = rows.as_view().word(word);
         let mut keep = 0;
         let mut other = 0;
         for bit in ones(look) {
@@ -1502,7 +1502,7 @@ fn read_with(
                 found |= 1 << bit;
             }
         }
-        let kept = decimals.as_view().word_at(word) & !selected;
+        let kept = decimals.as_view().word(word) & !selected;
         decimals.set_word(word, kept | found)
     })
 }

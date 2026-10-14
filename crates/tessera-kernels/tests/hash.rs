@@ -49,7 +49,7 @@ fn model_fold(value: i64) -> u32 {
 fn mask_words(valid: &RowMask<'_>) -> Vec<u64> {
     let view = valid.as_view();
     (0..view.nrows().div_ceil(64))
-        .map(|index| view.word(index).unwrap())
+        .map(|index| view.get_word(index).unwrap())
         .collect()
 }
 

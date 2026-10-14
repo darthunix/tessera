@@ -168,7 +168,7 @@ fn resolve_rows<
     let mut resolved = 0;
     let mut full = false;
     for index in 0..nrows.div_ceil(64) {
-        let selected = pending.as_view().word_at(index);
+        let selected = pending.as_view().word(index);
         let mut done = 0;
         let mut created = 0;
         if selected != 0 && !full {
@@ -353,7 +353,7 @@ pub(super) fn each_payload<R: Region>(
     );
     let mut access = Access::new(region, layout);
     for index in 0..nrows.div_ceil(64) {
-        for bit in ones(rows.word_at(index)) {
+        for bit in ones(rows.word(index)) {
             let row = index * 64 + bit;
             each(row, payload_at(&mut access, region, layout, offsets[row])?);
         }

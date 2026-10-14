@@ -74,8 +74,8 @@ impl<'a> RowMaskView<'a> {
     ///
     /// The last word's padding is always zero.
     #[inline]
-    pub fn word(&self, word_index: usize) -> Option<u64> {
-        (word_index < word_count(self.nrows)).then(|| self.word_at(word_index))
+    pub fn get_word(&self, word_index: usize) -> Option<u64> {
+        (word_index < word_count(self.nrows)).then(|| self.word(word_index))
     }
 
     /// Return the logical 64-row word `word_index`, which must be below the
@@ -89,7 +89,7 @@ impl<'a> RowMaskView<'a> {
     ///
     /// The last word's padding is always zero.
     #[inline]
-    pub fn word_at(&self, word_index: usize) -> u64 {
+    pub fn word(&self, word_index: usize) -> u64 {
         debug_assert!(word_index < word_count(self.nrows));
         self.words[word_index]
     }
@@ -121,7 +121,7 @@ impl<'a> RowMaskView<'a> {
     ///
     /// Only set bits are visited within each word. Once exhausted, the
     /// iterator keeps returning `None`.
-    pub fn selected_indices(&self) -> impl Iterator<Item = usize> + '_ {
+    pub fn selected_rows(&self) -> impl Iterator<Item = usize> + '_ {
         self.words()
             .enumerate()
             .flat_map(|(word, bits)| ones(bits).map(move |bit| word * 64 + bit))
@@ -142,7 +142,7 @@ impl<'a> RowMaskView<'a> {
 /// let mut words = [1];
 /// let mut first = RowMask::try_new(1, &mut words).unwrap();
 /// let second = RowMask::try_new(1, &mut words).unwrap();
-/// first.clear(0);
+/// first.remove(0);
 /// assert_eq!(second.as_view().selected_count(), 0);
 /// ```
 #[derive(Debug)]
@@ -168,7 +168,7 @@ impl<'a> RowMask<'a> {
     /// let mut words = [1];
     /// let mut rows = RowMask::try_new(1, &mut words).unwrap();
     /// let view = rows.as_view();
-    /// rows.clear(0);
+    /// rows.remove(0);
     /// assert_eq!(view.selected_count(), 1);
     /// ```
     pub fn as_view(&self) -> RowMaskView<'_> {
@@ -183,7 +183,7 @@ impl<'a> RowMask<'a> {
     /// Padding bits are already zero after construction, so clearing one
     /// leaves the words unchanged. Indices beyond the words are also ignored.
     #[inline]
-    pub fn clear(&mut self, row: usize) {
+    pub fn remove(&mut self, row: usize) {
         if let Some(word) = self.words.get_mut(row / 64) {
             *word &= !(1_u64 << (row % 64));
         }
@@ -201,7 +201,7 @@ impl<'a> RowMask<'a> {
     /// let mut rows = RowMask::try_new(65, &mut words)?;
     /// rows.intersect_word(0, 0b101)?;
     /// rows.intersect_word(1, u64::MAX)?;
-    /// assert_eq!(rows.as_view().selected_indices().collect::<Vec<_>>(), [0, 2, 64]);
+    /// assert_eq!(rows.as_view().selected_rows().collect::<Vec<_>>(), [0, 2, 64]);
     /// # Ok::<(), anyhow::Error>(())
     /// ```
     #[inline]
@@ -227,7 +227,7 @@ impl<'a> RowMask<'a> {
     /// rows.set_word(0, 0b101)?;
     /// rows.set_word(1, 1)?;
     /// assert!(rows.set_word(1, 0b10).is_err());
-    /// assert_eq!(rows.as_view().selected_indices().collect::<Vec<_>>(), [0, 2, 64]);
+    /// assert_eq!(rows.as_view().selected_rows().collect::<Vec<_>>(), [0, 2, 64]);
     /// # Ok::<(), anyhow::Error>(())
     /// ```
     #[inline]

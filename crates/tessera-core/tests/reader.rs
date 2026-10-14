@@ -331,9 +331,9 @@ fn copied_word_allows_mutating_active_mask_during_iteration() {
     let column = ColumnView::try_new(&values, None).unwrap();
     let mut words = [7];
     let mut rows = RowMask::try_new(3, &mut words).unwrap();
-    let selected = rows.as_view().word(0).unwrap();
+    let selected = rows.as_view().get_word(0).unwrap();
     for (row, _) in column.word_values(0, selected).unwrap() {
-        rows.clear(row);
+        rows.remove(row);
     }
     assert_eq!(rows.as_view().selected_count(), 0);
 }
