@@ -88,11 +88,10 @@ fn read_masked<T: Copy>(values: &[MaybeUninit<T>], row: usize, bits: u64) -> Opt
 /// masks; [`DenseInt32Column`] and [`DenseInt64Column`] name its widths.
 ///
 /// This is a physical format, not a declaration of PostgreSQL type semantics.
-/// Sliced inputs use a sliced values buffer and correspondingly offset masks.
+/// Sliced inputs use a sliced values buffer and masks of the slice's rows.
 /// No view owns, frees, or copies its buffers, including uninitialized gaps.
 /// Arrow-style primitive buffers can use this layout without an Arrow
 /// dependency; encoded arrays such as dictionary arrays are not dense slices.
-/// Construct offset masks with [`RowMaskView::try_from_bytes`].
 ///
 /// [`ColumnReader::try_fold_selected`] chooses its NULL mode once and runs one
 /// loop per selection word; without a NULL mask every read is unconditional.
