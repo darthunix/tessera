@@ -19,15 +19,15 @@ use ::loom::cell::UnsafeCell;
 use ::loom::sync::atomic::{AtomicU32, AtomicU64};
 use anyhow::Result;
 use core::sync::atomic::Ordering;
-use tessera_core::{ColumnView, RowMask, RowMaskView};
+use tessera_core::{RowMask, RowMaskView};
 
 use super::header::{
     CHUNK_HEADER, HEADER_SIZE, Header, KeyKind, Layout, NRECORDS, TableConfig, chunk_layout,
 };
+use super::keys::IntKeys;
 use super::record::Access;
 use super::region::{Region, order};
 use super::{Batch, batch, index_size, init};
-use crate::column_keys::KeyColumns;
 
 /// A table over loom's atomics for the models of participants that share
 /// one: chunks of their own to append to, an index one of them makes,
@@ -385,8 +385,7 @@ pub(super) fn append(
 ) -> Result<usize> {
     let nrows = keys.len();
     let hashes = vec![HASH; nrows];
-    let columns = [ColumnView::try_new(keys, None)?];
-    let columns = KeyColumns(&columns);
+    let columns = IntKeys(keys);
     let mut pending_bits = [(1u64 << nrows) - 1];
     let mut pending = RowMask::try_new(nrows, &mut pending_bits)?;
     let mut offsets = vec![0; nrows];
@@ -405,7 +404,7 @@ pub(super) fn link(region: &LoomRegion, layout: &Layout, chunk: usize) -> Result
 pub(super) fn probe(region: &LoomRegion, layout: &Layout, keys: &[i32]) -> Result<Vec<u32>> {
     let nrows = keys.len();
     let hashes = vec![HASH; nrows];
-    let columns = [ColumnView::try_new(keys, None)?];
+    let columns = IntKeys(keys);
     let all = [(1u64 << nrows) - 1];
     let rows = RowMaskView::try_new(nrows, &all)?;
     let mut matches = vec![0; nrows];
@@ -415,7 +414,7 @@ pub(super) fn probe(region: &LoomRegion, layout: &Layout, keys: &[i32]) -> Resul
         region,
         layout,
         &hashes,
-        &KeyColumns(&columns),
+        &columns,
         &rows,
         &mut matches,
         &mut found,

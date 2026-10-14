@@ -30,9 +30,9 @@
 //! records are linked. [`TableMut`] is the access of one writer, which
 //! alone may give rows the record of their keys, creating it when there is
 //! none ([`TableMut::find_or_insert`], for grouping), change a payload in
-//! place, or walk the records ([`Table::scan`]). Hashes come from
-//! [`crate::int32::hash`], [`crate::int64::hash`] and their `hash_next`,
-//! which decide what NULL keys do.
+//! place, or walk the records ([`Table::scan`]). The caller hashes the
+//! keys, and its hash decides what NULL keys do: Tessera's kernels hash as
+//! PostgreSQL does.
 //!
 //! Every call checks a chunk it writes or walks when it starts on it (the
 //! other chunks are the caller's promise, as the validity of their memory
@@ -52,19 +52,32 @@
 //! and benchmarks build tables with it.
 //!
 //! ```
-//! use tessera_kernels::column_keys::KeyColumns;
-//! use tessera_kernels::table::{Batch, KeyKind, LocalTable, TableConfig};
+//! use anyhow::Result;
+//! use tessera_core::{RowMask, RowMaskView};
+//! use tessera_kernels::table::{Batch, KeyKind, KeySource, LocalTable, TableConfig};
+//!
+//! // The caller hands keys over a word of 64 rows at a time: here one key
+//! // of int4 values with no NULL.
+//! struct Keys<'a>(&'a [i32]);
+//! impl KeySource for Keys<'_> {
+//!     fn nkeys(&self) -> usize { 1 }
+//!     fn nrows(&self) -> usize { self.0.len() }
+//!     fn word(&self, _: usize, index: usize, selected: u64, out: &mut [i64; 64]) -> Result<u64> {
+//!         for bit in (0..64).filter(|bit| selected >> bit & 1 == 1) {
+//!             out[bit] = i64::from(self.0[index * 64 + bit]);
+//!         }
+//!         Ok(selected) // the bits of the rows that are not NULL
+//!     }
+//! }
 //!
 //! let config = TableConfig { keys: &[KeyKind::Int32], payload_size: 8 };
 //! let mut table = LocalTable::new(&config, 100, 4096)?;
 //! assert_eq!(table.table()?.stats().records, 0);
 //!
-//! // Three rows with keys 7, 8 and 7, hashed by the int4 kernel's formula.
-//! use tessera_core::{ColumnView, RowMask, RowMaskView};
-//! use tessera_kernels::int32::murmurhash32;
-//! let columns = [ColumnView::try_new(&[7, 8, 7], None)?];
-//! let keys = KeyColumns(&columns);
-//! let hashes: Vec<u32> = [7, 8, 7].map(|key: i32| murmurhash32(key as u32)).into();
+//! // Three rows with keys 7, 8 and 7, and their hashes: the caller's hash,
+//! // the same for the same key.
+//! let keys = Keys(&[7, 8, 7]);
+//! let hashes: Vec<u32> = [7u32, 8, 7].map(|key| key.wrapping_mul(0x9e37_79b1)).into();
 //! let payload = [1u64, 2, 3].map(u64::to_ne_bytes).concat();
 //! let mut pending = [0b111];
 //! let mut offsets = [0; 3];
@@ -984,10 +997,8 @@ impl<'a> TableMut<'a> {
 
 #[cfg(test)]
 mod tests {
+    use super::keys::IntKeys;
     use super::*;
-    use crate::column_keys::KeyColumns;
-    use crate::int32::murmurhash32;
-    use tessera_core::ColumnView;
 
     /// The blocks of a table, which the threads of a test attach to.
     struct Shared {
@@ -1058,7 +1069,7 @@ mod tests {
         let mut table = LocalTable::new(&config, count, 4096).unwrap();
         let keys: Vec<i32> = (0..count as i32).map(|key| key * 7).collect();
         let hashes: Vec<u32> = keys.iter().map(|&key| murmurhash32(key as u32)).collect();
-        let column = [ColumnView::try_new(&keys, None).unwrap()];
+        let column = IntKeys(&keys);
         let mut all_rows = vec![u64::MAX; 4];
         all_rows[3] = (1 << (count - 192)) - 1;
         let mut pending_words = all_rows.clone();
@@ -1067,7 +1078,7 @@ mod tests {
         let inserted = table
             .insert(
                 None,
-                &mut Batch::new(&hashes, &KeyColumns(&column), &mut pending, &mut offsets).unwrap(),
+                &mut Batch::new(&hashes, &column, &mut pending, &mut offsets).unwrap(),
             )
             .unwrap();
         assert_eq!(inserted, count as usize);
@@ -1224,7 +1235,7 @@ mod tests {
     #[test]
     fn a_chunk_splits_into_the_chunks_of_its_partitions() {
         let (keys, hashes, payload) = partition_rows();
-        let column = [ColumnView::try_new(&keys, None).unwrap()];
+        let column = IntKeys(&keys);
         let mut blocks = Blocks::new();
         let source = blocks.add(CHUNK_HEADER + 200 * 32);
         let mut words = vec![u64::MAX, u64::MAX, u64::MAX, (1 << 8) - 1];
@@ -1235,7 +1246,7 @@ mod tests {
             blocks.chunks(),
             source as usize,
             Some(&payload),
-            &mut Batch::new(&hashes, &KeyColumns(&column), &mut pending, &mut offsets).unwrap(),
+            &mut Batch::new(&hashes, &column, &mut pending, &mut offsets).unwrap(),
         )
         .unwrap();
         let len = CHUNK_HEADER + 8 * 32;
@@ -1300,7 +1311,7 @@ mod tests {
             table.add_chunk().unwrap();
         }
         let keys = [1, 2, 3];
-        let column = [ColumnView::try_new(&keys, None).unwrap()];
+        let column = IntKeys(&keys);
         let (hashes, all) = key_batch(&keys);
         for (shift, chunks, message) in cases {
             let mut from = CHUNK_HEADER;
@@ -1324,7 +1335,7 @@ mod tests {
                     &Partitions { shift, chunks },
                     &mut Batch::new(
                         &hashes,
-                        &KeyColumns(&column),
+                        &column,
                         &mut RowMask::try_new(3, &mut pending_words).unwrap(),
                         &mut [0; 3],
                     )
@@ -1359,7 +1370,7 @@ mod tests {
     #[test]
     fn a_split_that_cannot_be_done_is_refused() {
         let (keys, hashes, payload) = partition_rows();
-        let column = [ColumnView::try_new(&keys, None).unwrap()];
+        let column = IntKeys(&keys);
         let mut blocks = Blocks::new();
         let source = blocks.add(CHUNK_HEADER + 200 * 32);
         let mut words = vec![u64::MAX, u64::MAX, u64::MAX, (1 << 8) - 1];
@@ -1370,7 +1381,7 @@ mod tests {
             blocks.chunks(),
             source as usize,
             Some(&payload),
-            &mut Batch::new(&hashes, &KeyColumns(&column), &mut pending, &mut offsets).unwrap(),
+            &mut Batch::new(&hashes, &column, &mut pending, &mut offsets).unwrap(),
         )
         .unwrap();
         let targets: Vec<u32> = (0..4).map(|_| blocks.add(CHUNK_HEADER + 64 * 32)).collect();
@@ -1430,7 +1441,7 @@ mod tests {
         let mut first = std::collections::HashMap::new();
         for batch in 0..3 {
             let keys: Vec<i32> = (0..100).map(|row| (batch * 100 + row) % 97).collect();
-            let column = [ColumnView::try_new(&keys, None).unwrap()];
+            let column = IntKeys(&keys);
             let (hashes, all) = key_batch(&keys);
             let mut pending_words = all.clone();
             let mut offsets = vec![0; keys.len()];
@@ -1452,8 +1463,7 @@ mod tests {
                             shift: 3,
                             chunks: &current,
                         },
-                        &mut Batch::new(&hashes, &KeyColumns(&column), &mut pending, &mut offsets)
-                            .unwrap(),
+                        &mut Batch::new(&hashes, &column, &mut pending, &mut offsets).unwrap(),
                         &mut inserted,
                     )
                     .unwrap();
@@ -1515,7 +1525,7 @@ mod tests {
         assert_eq!(table.table().unwrap().stats().buckets, 1024);
         let chunks: Vec<u32> = (0..4).map(|_| table.add_chunk().unwrap() as u32).collect();
         let keys: Vec<i32> = (0..600).chain(0..6).collect();
-        let column = [ColumnView::try_new(&keys, None).unwrap()];
+        let column = IntKeys(&keys);
         let (hashes, mut pending_words) = key_batch(&keys);
         let mut inserted_words = vec![0; pending_words.len()];
         let mut offsets = vec![0; keys.len()];
@@ -1529,7 +1539,7 @@ mod tests {
                 },
                 &mut Batch::new(
                     &hashes,
-                    &KeyColumns(&column),
+                    &column,
                     &mut RowMask::try_new(keys.len(), &mut pending_words).unwrap(),
                     &mut offsets,
                 )
@@ -1557,7 +1567,7 @@ mod tests {
             payload_size: 40,
         };
         let mut table = LocalTable::new(&config, capacity, CHUNK_HEADER + 16 * 56).unwrap();
-        let column = [ColumnView::try_new(keys, None).unwrap()];
+        let column = IntKeys(keys);
         let (hashes, mut pending_words) = key_batch(keys);
         let mut inserted_words = vec![0; pending_words.len()];
         let mut offsets = vec![0; keys.len()];
@@ -1565,7 +1575,7 @@ mod tests {
             .find_or_insert(
                 &mut Batch::new(
                     &hashes,
-                    &KeyColumns(&column),
+                    &column,
                     &mut RowMask::try_new(keys.len(), &mut pending_words).unwrap(),
                     &mut offsets,
                 )
@@ -1641,7 +1651,7 @@ mod tests {
 
     /// The states of each key's record, found by its keys.
     fn states_of(table: &mut LocalTable, keys: &[i32]) -> Vec<[i64; 5]> {
-        let column = [ColumnView::try_new(keys, None).unwrap()];
+        let column = IntKeys(keys);
         let (hashes, mut pending_words) = key_batch(keys);
         let mut inserted_words = vec![0; pending_words.len()];
         let mut offsets = vec![0; keys.len()];
@@ -1649,7 +1659,7 @@ mod tests {
             .find_or_insert(
                 &mut Batch::new(
                     &hashes,
-                    &KeyColumns(&column),
+                    &column,
                     &mut RowMask::try_new(keys.len(), &mut pending_words).unwrap(),
                     &mut offsets,
                 )
@@ -1854,7 +1864,7 @@ mod tests {
     /// int4 key and no payload, records of 24 bytes: the rows appended.
     fn append_one(chunks: Chunks<'_>) -> Result<usize> {
         let keys = [7];
-        let column = [ColumnView::try_new(&keys[..], None)?];
+        let column = IntKeys(&keys[..]);
         let (hashes, mut words) = key_batch(&keys);
         let mut pending = RowMask::try_new(1, &mut words)?;
         let mut offsets = [0];
@@ -1867,7 +1877,7 @@ mod tests {
             chunks,
             0,
             None,
-            &mut Batch::new(&hashes, &KeyColumns(&column), &mut pending, &mut offsets)?,
+            &mut Batch::new(&hashes, &column, &mut pending, &mut offsets)?,
         )
     }
 
@@ -1906,5 +1916,17 @@ mod tests {
                 "more chunks than a reference can number"
             );
         }
+    }
+
+    /// PostgreSQL's `murmurhash32`, as the int4 kernel hashes a key: any
+    /// hash would do, and this one keeps the rows of the tests in the
+    /// partitions they always fell into.
+    fn murmurhash32(mut h: u32) -> u32 {
+        h ^= h >> 16;
+        h = h.wrapping_mul(0x85eb_ca6b);
+        h ^= h >> 13;
+        h = h.wrapping_mul(0xc2b2_ae35);
+        h ^= h >> 16;
+        h
     }
 }
