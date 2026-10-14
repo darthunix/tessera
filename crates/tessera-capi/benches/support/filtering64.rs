@@ -23,19 +23,13 @@ pub mod blocks;
 /// The value type of this family, for the shared block runner.
 pub type Value = i64;
 
-fn case(
-    nrows: usize,
-    pattern: &str,
-    nulls: &str,
-    offset: Option<usize>,
-    partial: bool,
-) -> Fixture<i64> {
+fn case(nrows: usize, pattern: &str, nulls: &str, partial: bool) -> Fixture<i64> {
     // The int32 values shifted past the int4 range, so that the compare
     // decides on the high half of every Datum.
     let values = (0..nrows)
         .map(|row| (((row * 37) % 101) as i64 - 50) << 33)
         .collect();
-    Fixture::from_values(values, pattern, nulls, offset, partial)
+    Fixture::from_values(values, pattern, nulls, partial)
 }
 
 pub fn cases() -> Vec<Fixture<i64>> {
@@ -43,19 +37,18 @@ pub fn cases() -> Vec<Fixture<i64>> {
     for nrows in [65, 1024] {
         for pattern in ["all", "eighth", "one-per128", "empty"] {
             for nulls in ["none", "mixed"] {
-                cases.push(case(nrows, pattern, nulls, Some(0), false));
+                cases.push(case(nrows, pattern, nulls, false));
             }
         }
     }
     for nrows in [0, 1, 63, 64] {
-        cases.push(case(nrows, "all", "mixed", Some(0), false));
+        cases.push(case(nrows, "all", "mixed", false));
     }
-    cases.push(case(1024, "all", "all", None, false));
-    cases.push(case(1024, "all", "random", None, false));
-    cases.push(case(1024, "random", "random", None, false));
-    cases.push(case(1024, "all", "mixed", None, true));
-    cases.push(case(1024, "all", "mixed", Some(7), true));
-    cases.push(case(1024, "one-per128", "mixed", Some(7), true));
+    cases.push(case(1024, "all", "all", false));
+    cases.push(case(1024, "all", "random", false));
+    cases.push(case(1024, "random", "random", false));
+    cases.push(case(1024, "all", "mixed", true));
+    cases.push(case(1024, "one-per128", "mixed", true));
     cases
 }
 
