@@ -38,19 +38,13 @@ impl<'a, C> Input<'a, C> {
     }
 }
 
-fn case(
-    nrows: usize,
-    pattern: &str,
-    nulls: &str,
-    offset: Option<usize>,
-    partial: bool,
-) -> Fixture<i64> {
+fn case(nrows: usize, pattern: &str, nulls: &str, partial: bool) -> Fixture<i64> {
     // The reading values shifted past the int4 range; no operation below
     // overflows them.
     let values = (0..nrows)
         .map(|row| ((row as i64).wrapping_mul(7919).wrapping_sub(104_729)) << 20)
         .collect();
-    Fixture::from_values(values, pattern, nulls, offset, partial)
+    Fixture::from_values(values, pattern, nulls, partial)
 }
 
 /// The reading benchmark's case matrix.
@@ -58,19 +52,16 @@ pub fn cases() -> Vec<Fixture<i64>> {
     let mut cases = Vec::new();
     for nulls in ["none", "mixed"] {
         for pattern in ["all", "half", "sparse", "empty"] {
-            cases.push(case(1024, pattern, nulls, None, false));
+            cases.push(case(1024, pattern, nulls, false));
         }
     }
     for nrows in [0, 1, 63, 64, 65] {
-        cases.push(case(nrows, "all", "mixed", None, false));
+        cases.push(case(nrows, "all", "mixed", false));
     }
-    cases.push(case(1024, "all", "all", None, false));
-    cases.push(case(1024, "all", "random", None, false));
-    cases.push(case(1024, "random", "random", None, false));
-    cases.push(case(1024, "all", "mixed", None, true));
-    for (nrows, offset, pattern) in [(65, 3, "all"), (1024, 7, "all"), (1024, 7, "sparse")] {
-        cases.push(case(nrows, pattern, "mixed", Some(offset), true));
-    }
+    cases.push(case(1024, "all", "all", false));
+    cases.push(case(1024, "all", "random", false));
+    cases.push(case(1024, "random", "random", false));
+    cases.push(case(1024, "all", "mixed", true));
     cases
 }
 

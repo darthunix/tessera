@@ -76,7 +76,6 @@ fn initialized_views_borrow_the_original_values_without_copying() {
             (0..nrows).map(|row| row - 50).collect(),
             "all",
             "mixed",
-            Some(7),
             true,
         );
         check(&case.values);
@@ -100,7 +99,7 @@ fn assert_sums<C: ColumnReader<Value = i32>>(
 #[test]
 fn reference_matches_scalar_model_and_bitmap_views() {
     let cases = reading::cases();
-    assert_eq!(cases.len() * 2, 40);
+    assert_eq!(cases.len() * 2, 34);
     for case in cases {
         let rows = case.selected.reference();
         let prepared = case.prepared.as_ref().map(fixture::Bitmap::reference);
@@ -290,9 +289,6 @@ fn reader_cases_are_fixed() {
             "words/1024/all/nulls-random/ready",
             "words/1024/random/nulls-random/ready",
             "words/1024/all/nulls-mixed/partial",
-            "bytes-3/65/all/nulls-mixed/partial",
-            "bytes-7/1024/all/nulls-mixed/partial",
-            "bytes-7/1024/sparse/nulls-mixed/partial",
         ]
     );
 }
@@ -300,37 +296,36 @@ fn reader_cases_are_fixed() {
 #[test]
 fn filter_cases_are_fixed() {
     let cases = filtering::cases();
-    assert_eq!(cases.len() * 2, 52);
+    assert_eq!(cases.len() * 2, 50);
     let names: Vec<_> = cases.iter().map(|case| case.name.as_str()).collect();
     assert_eq!(
         names,
         [
-            "bytes-0/65/all/nulls-none/ready",
-            "bytes-0/65/all/nulls-mixed/ready",
-            "bytes-0/65/eighth/nulls-none/ready",
-            "bytes-0/65/eighth/nulls-mixed/ready",
-            "bytes-0/65/one-per128/nulls-none/ready",
-            "bytes-0/65/one-per128/nulls-mixed/ready",
-            "bytes-0/65/empty/nulls-none/ready",
-            "bytes-0/65/empty/nulls-mixed/ready",
-            "bytes-0/1024/all/nulls-none/ready",
-            "bytes-0/1024/all/nulls-mixed/ready",
-            "bytes-0/1024/eighth/nulls-none/ready",
-            "bytes-0/1024/eighth/nulls-mixed/ready",
-            "bytes-0/1024/one-per128/nulls-none/ready",
-            "bytes-0/1024/one-per128/nulls-mixed/ready",
-            "bytes-0/1024/empty/nulls-none/ready",
-            "bytes-0/1024/empty/nulls-mixed/ready",
-            "bytes-0/0/all/nulls-mixed/ready",
-            "bytes-0/1/all/nulls-mixed/ready",
-            "bytes-0/63/all/nulls-mixed/ready",
-            "bytes-0/64/all/nulls-mixed/ready",
+            "words/65/all/nulls-none/ready",
+            "words/65/all/nulls-mixed/ready",
+            "words/65/eighth/nulls-none/ready",
+            "words/65/eighth/nulls-mixed/ready",
+            "words/65/one-per128/nulls-none/ready",
+            "words/65/one-per128/nulls-mixed/ready",
+            "words/65/empty/nulls-none/ready",
+            "words/65/empty/nulls-mixed/ready",
+            "words/1024/all/nulls-none/ready",
+            "words/1024/all/nulls-mixed/ready",
+            "words/1024/eighth/nulls-none/ready",
+            "words/1024/eighth/nulls-mixed/ready",
+            "words/1024/one-per128/nulls-none/ready",
+            "words/1024/one-per128/nulls-mixed/ready",
+            "words/1024/empty/nulls-none/ready",
+            "words/1024/empty/nulls-mixed/ready",
+            "words/0/all/nulls-mixed/ready",
+            "words/1/all/nulls-mixed/ready",
+            "words/63/all/nulls-mixed/ready",
+            "words/64/all/nulls-mixed/ready",
             "words/1024/all/nulls-all/ready",
             "words/1024/all/nulls-random/ready",
             "words/1024/random/nulls-random/ready",
             "words/1024/all/nulls-mixed/partial",
-            "bytes-7/1024/all/nulls-mixed/partial",
-            "bytes-7/1024/one-per128/nulls-mixed/partial",
+            "words/1024/one-per128/nulls-mixed/partial",
         ]
     );
 }
@@ -374,7 +369,6 @@ fn filter_references_match_both_readers_and_independent_model() {
             vec![i32::MIN, i32::MAX, -1, 0, 1],
             "all",
             nulls,
-            Some(7),
             false,
         ));
     }
@@ -445,7 +439,6 @@ fn filter64_references_match_both_readers_and_independent_model() {
             vec![i64::MIN, i64::MAX, -1, 0, 1, 1 << 40, -(1 << 40)],
             "all",
             nulls,
-            Some(7),
             false,
         ));
     }
@@ -483,13 +476,11 @@ fn assert_filter_readiness_error<C: ColumnReader<Value = i32>>(
 
 #[test]
 fn filter_references_match_word_local_readiness_errors() {
-    for offset in [None, Some(0), Some(7)] {
-        let case = fixture::Fixture::from_values(vec![42; 66], "all", "mixed", offset, true);
-        let dense = case.dense_column().unwrap();
-        let datum = case.datum_column().unwrap();
-        assert_filter_readiness_error(&dense, &case, filtering::dense_reference);
-        assert_filter_readiness_error(&datum, &case, filtering::datum_reference);
-    }
+    let case = fixture::Fixture::from_values(vec![42; 66], "all", "mixed", true);
+    let dense = case.dense_column().unwrap();
+    let datum = case.datum_column().unwrap();
+    assert_filter_readiness_error(&dense, &case, filtering::dense_reference);
+    assert_filter_readiness_error(&datum, &case, filtering::datum_reference);
 }
 
 #[test]
@@ -497,7 +488,7 @@ fn mask_blocks_restore_every_invocation_and_handle_empty_rows() {
     use tessera_core::RowMask;
     use tessera_kernels::int32::CompareOp;
     for nrows in [0, 1, 63, 64, 65, 1024] {
-        let case = fixture::Fixture::from_values(vec![42; nrows], "all", "none", None, false);
+        let case = fixture::Fixture::from_values(vec![42; nrows], "all", "none", false);
         let column = tessera_core::ColumnView::try_new(&case.values, None).unwrap();
         let input = filtering::Input::new(&column, &case, CompareOp::Eq, 0);
         let mut blocks = filter_blocks::Masks::new(nrows, case.selected.words()).unwrap();
@@ -522,7 +513,7 @@ fn counted_blocks_count_calls_and_restore_inputs_across_block_boundaries() {
     use tessera_kernels::int32::CompareOp;
     use tessera_pmu::Reading;
     for nrows in [0, 65] {
-        let case = fixture::Fixture::from_values(vec![42; nrows], "all", "none", None, false);
+        let case = fixture::Fixture::from_values(vec![42; nrows], "all", "none", false);
         let column = case.dense_column().unwrap();
         let input = filtering::Input::new(&column, &case, CompareOp::Eq, 0);
         let mut masks = filter_blocks::Masks::new(nrows, case.selected.words()).unwrap();

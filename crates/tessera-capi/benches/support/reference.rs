@@ -7,49 +7,23 @@
 use anyhow::{Result, ensure};
 
 #[derive(Clone, Copy)]
-pub enum Bits<'a> {
-    Words(&'a [u64]),
-    Bytes(&'a [u8], usize),
-}
-
-#[derive(Clone, Copy)]
 pub struct Mask<'a> {
     pub nrows: usize,
-    pub bits: Bits<'a>,
+    pub words: &'a [u64],
 }
 
 impl Mask<'_> {
     #[inline]
     pub fn contains(self, row: usize) -> bool {
         assert!(row < self.nrows);
-        match self.bits {
-            Bits::Words(words) => words[row / 64] & (1 << (row % 64)) != 0,
-            Bits::Bytes(bytes, offset) => {
-                bytes[(row + offset) / 8] & (1 << ((row + offset) % 8)) != 0
-            }
-        }
+        self.words[row / 64] & (1 << (row % 64)) != 0
     }
 
     #[inline]
     pub fn word(self, index: usize) -> u64 {
         assert!(index < self.nrows.div_ceil(64));
-        match self.bits {
-            Bits::Words(words) => words[index],
-            Bits::Bytes(bytes, offset) => byte_word(bytes, offset, index, self.nrows),
-        }
+        self.words[index]
     }
-}
-
-#[inline(never)]
-fn byte_word(bytes: &[u8], offset: usize, index: usize, nrows: usize) -> u64 {
-    let first_bit = offset + index * 64;
-    let first_byte = first_bit / 8;
-    let width = (nrows - index * 64).min(64);
-    let count = (width + first_bit % 8).div_ceil(8);
-    let mut buffer = [0_u8; 16];
-    buffer[..count].copy_from_slice(&bytes[first_byte..first_byte + count]);
-    let shifted = u128::from_le_bytes(buffer) >> (first_bit % 8);
-    shifted as u64 & (u64::MAX >> (64 - width))
 }
 
 // Inline the independent loop into the uniform, non-inlined timed entry point.

@@ -255,37 +255,39 @@ fn unprepared_flags_and_values_are_never_read() {
 }
 
 #[test]
-fn byte_masks_and_sliced_values_preserve_row_numbering() {
+fn sliced_values_preserve_row_numbering() {
     let offset = 5;
     let nrows = 70;
     let mut values = vec![MaybeUninit::uninit(); nrows + offset];
     let mut datums = vec![MaybeUninit::uninit(); nrows + offset];
     let mut isnull = vec![MaybeUninit::uninit(); nrows + offset];
-    let mut prepared_bytes = [0xff; 10];
-    let mut non_null_bytes = [0xff; 10];
-    let mut selected_bytes = [0xff; 10];
+    let mut prepared_flags = vec![true; nrows];
+    let mut non_null_flags = vec![true; nrows];
+    let mut selected_flags = vec![true; nrows];
     let mut expected = Vec::new();
     for row in 0..nrows {
         let physical = offset + row;
-        let bit = 1 << (physical % 8);
         if row % 3 == 0 {
-            prepared_bytes[physical / 8] &= !bit;
-            selected_bytes[physical / 8] &= !bit;
+            prepared_flags[row] = false;
+            selected_flags[row] = false;
             continue;
         }
         let is_null = row % 5 == 0;
         isnull[physical].write(is_null);
-        if is_null {
-            non_null_bytes[physical / 8] &= !bit;
-        }
+        non_null_flags[row] = !is_null;
         // Prepared rows are initialized whether NULL or not.
         values[physical].write(if is_null { i32::MIN } else { row as i32 });
         datums[physical].write(if is_null { u64::MAX } else { row as u64 });
         expected.push((row, (!is_null).then_some(row as i32)));
     }
-    let prepared = RowMaskView::try_from_bytes(nrows, &prepared_bytes, offset).unwrap();
-    let non_nulls = RowMaskView::try_from_bytes(nrows, &non_null_bytes, offset).unwrap();
-    let selected = RowMaskView::try_from_bytes(nrows, &selected_bytes, offset).unwrap();
+    let (prepared_words, non_null_words, selected_words) = (
+        words_for(&prepared_flags),
+        words_for(&non_null_flags),
+        words_for(&selected_flags),
+    );
+    let prepared = RowMaskView::try_new(nrows, &prepared_words).unwrap();
+    let non_nulls = RowMaskView::try_new(nrows, &non_null_words).unwrap();
+    let selected = RowMaskView::try_new(nrows, &selected_words).unwrap();
     // SAFETY: initialized precisely the prepared rows; gaps are unprepared.
     let dense =
         unsafe { DenseInt32Column::try_new(&values[offset..], Some(non_nulls), Some(prepared)) }
@@ -320,10 +322,6 @@ fn optional_masks_and_low_datum_bits() {
         let expected = collect(&dense, &selected);
         assert_fold_stops(&dense, &selected, &expected);
         assert_fold_stops(&datum, &selected, &expected);
-        let bytes = RowMaskView::try_from_bytes(5, &[0b1010_0101], 2).unwrap();
-        let expected = [(0, Some(i32::MIN)), (3, Some(1))];
-        assert_eq!(collect(&dense, &bytes), expected);
-        assert_fold_stops(&dense, &bytes, &expected);
         for (row, &value) in values.iter().enumerate() {
             assert_eq!(dense.get(row).unwrap(), Some(value));
             assert_eq!(datum.get(row).unwrap(), Some(value));
@@ -435,7 +433,6 @@ fn nullable_word_modes_preserve_rows_and_stop_on_consumer_error() {
     let mut datums = vec![MaybeUninit::uninit(); nrows];
     let mut nulls = vec![MaybeUninit::new(true); nrows];
     let mut expected = Vec::new();
-    let mut non_null_bytes = vec![0xff; (nrows + 7).div_ceil(8)];
     for row in 0..nrows {
         let non_null = non_null_words[row / 64] & (1 << (row % 64)) != 0;
         // Every row is prepared, so NULL rows hold placeholders.
@@ -443,22 +440,15 @@ fn nullable_word_modes_preserve_rows_and_stop_on_consumer_error() {
         datums[row].write(if non_null { row as u64 } else { 7 });
         if non_null {
             nulls[row].write(false);
-        } else {
-            let physical = row + 7;
-            non_null_bytes[physical / 8] &= !(1 << (physical % 8));
         }
         expected.push((row, non_null.then_some(row as i32)));
     }
     let rows = RowMaskView::try_new(nrows, &selected_words).unwrap();
     // SAFETY: every flag and every Datum is initialized.
     let datum = unsafe { DatumInt32Column::try_new(&datums, &nulls, None) }.unwrap();
-    for non_nulls in [
-        RowMaskView::try_new(nrows, &non_null_words).unwrap(),
-        RowMaskView::try_from_bytes(nrows, &non_null_bytes, 7).unwrap(),
-    ] {
-        // SAFETY: every row is initialized; the mask says which are NULL.
-        let dense = unsafe { DenseInt32Column::try_new(&values, Some(non_nulls), None) }.unwrap();
-        assert_fold_stops(&dense, &rows, &expected);
-        assert_fold_stops(&datum, &rows, &expected);
-    }
+    let non_nulls = RowMaskView::try_new(nrows, &non_null_words).unwrap();
+    // SAFETY: every row is initialized; the mask says which are NULL.
+    let dense = unsafe { DenseInt32Column::try_new(&values, Some(non_nulls), None) }.unwrap();
+    assert_fold_stops(&dense, &rows, &expected);
+    assert_fold_stops(&datum, &rows, &expected);
 }
