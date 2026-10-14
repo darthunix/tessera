@@ -648,7 +648,7 @@ table that spills, in [hash-table](../hash-table/design.md).
 - `crates/tessera-capi/src/c/spill.rs`: the C entry points
 - `crates/tessera-kernels/src/spill_columns.rs`: rows appended to chunks
   of columns
-- `crates/tessera-kernels/src/table/header.rs`: the fingerprint of a
+- `crates/relhash/src/table/header.rs`: the fingerprint of a
   hash table
 - `include/tessera/spill.h`: the C API of blocks and of chunks of
   columns

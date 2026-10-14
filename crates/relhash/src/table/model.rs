@@ -15,11 +15,11 @@
 use std::cell::UnsafeCell as StdUnsafeCell;
 use std::sync::atomic::{AtomicU8, AtomicU64 as PlainU64, Ordering as Plain};
 
+use crate::{RowMask, RowMaskView};
 use ::loom::cell::UnsafeCell;
 use ::loom::sync::atomic::{AtomicU32, AtomicU64};
 use anyhow::Result;
 use core::sync::atomic::Ordering;
-use tessera_core::{RowMask, RowMaskView};
 
 use super::header::{
     CHUNK_HEADER, HEADER_SIZE, Header, KeyKind, Layout, NRECORDS, TableConfig, chunk_layout,

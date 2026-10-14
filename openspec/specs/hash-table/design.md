@@ -1728,28 +1728,28 @@ How a spilled chunk of records is written to disk is in
 
 ## Files
 
-- `crates/tessera-kernels/src/table/mod.rs`: the table, its calls and
+- `crates/relhash/src/table/mod.rs`: the table, its calls and
   their rules
-- `crates/tessera-kernels/src/table/header.rs`: the header of the index,
+- `crates/relhash/src/table/header.rs`: the header of the index,
   the limits of chunks and references
-- `crates/tessera-kernels/src/table/record.rs`: a record, the walk down a
+- `crates/relhash/src/table/record.rs`: a record, the walk down a
   chain, publishing
-- `crates/tessera-kernels/src/table/region.rs`: the memory of a table and
+- `crates/relhash/src/table/region.rs`: the memory of a table and
   its atomic operations, with their memory orders
-- `crates/tessera-kernels/src/table/batch.rs`: append, link, probe and
+- `crates/relhash/src/table/batch.rs`: append, link, probe and
   the reads of found records; append and split by partition
-- `crates/tessera-kernels/src/table/exclusive.rs`: the calls of one
+- `crates/relhash/src/table/exclusive.rs`: the calls of one
   writer, the lookup by partition, the cursor over payloads and the
   merge by a rule
-- `crates/tessera-kernels/src/table/keys.rs`: the keys of a batch, a
+- `crates/relhash/src/table/keys.rs`: the keys of a batch, a
   word of rows at a time
 - `crates/tessera-kernels/src/column_keys.rs`: the keys read from
   Tessera's columns
-- `crates/tessera-kernels/src/table/bloom.rs`: the Bloom filter, alone,
+- `crates/relhash/src/table/bloom.rs`: the Bloom filter, alone,
   shared and filled together
-- `crates/tessera-kernels/src/table/marks.rs`: the marks of a RIGHT or
+- `crates/relhash/src/table/marks.rs`: the marks of a RIGHT or
   FULL join and their walk
-- `crates/tessera-kernels/src/table/local.rs`: a table that owns its
+- `crates/relhash/src/table/local.rs`: a table that owns its
   memory, for tests and benchmarks
 - `crates/tessera-kernels/src/phases.rs`: the participant of a
   shared build and of a round, the counters of a build and the stop
@@ -1757,11 +1757,11 @@ How a spilled chunk of records is written to disk is in
 - `crates/tessera-kernels/src/shared_spill.rs`: the words of a
   spill, the split, the rule that sends partitions to disk, the
   counters of the rounds and the rule of a split read back
-- `crates/tessera-kernels/src/table/loom.rs`: the models of the table,
+- `crates/relhash/src/table/loom.rs`: the models of the table,
   the filter and the marks under several participants
 - `crates/tessera-kernels/src/loom.rs`: the models of a shared build,
   of the rounds and of the words of a spill
-- `crates/tessera-kernels/src/table/model.rs`: the memory of the loom
+- `crates/relhash/src/table/model.rs`: the memory of the loom
   model, and the model table the models of the phases and the rounds
   run over
 - `crates/tessera-capi/src/c/table.rs`: the C entry points
@@ -1778,13 +1778,13 @@ How a spilled chunk of records is written to disk is in
 - `crates/tessera-kernels/tests/table.rs`: the format and every call,
   with damaged headers, chunks, references and chains; it also runs
   under Miri.
-- The unit tests in `crates/tessera-kernels/src/table/mod.rs`: blocks
+- The unit tests in `crates/relhash/src/table/mod.rs`: blocks
   that are not chunks or an index, partitions, merges, and a shared
   filter that threads race to build.
 - The unit tests in `crates/tessera-kernels/src/accumulate.rs`: the
   states of groups merged by their kinds, and a count past the int8
   range.
-- The unit tests in `crates/tessera-kernels/src/table/marks.rs`: the
+- The unit tests in `crates/relhash/src/table/marks.rs`: the
   words of the marks, and the records and cursors a walk refuses.
 - The unit tests in `crates/tessera-kernels/src/phases.rs`: the
   actions of a participant alone, attached at every phase of a build
@@ -1792,7 +1792,7 @@ How a spilled chunk of records is written to disk is in
 - The unit tests in `crates/tessera-kernels/src/shared_spill.rs`:
   the split, the budget, the weights of each node, a process's own
   words against shared ones, and the counters of the rounds.
-- `crates/tessera-kernels/src/table/loom.rs` and
+- `crates/relhash/src/table/loom.rs` and
   `crates/tessera-kernels/src/loom.rs`, run by `make rust-loom`.
 - The unit tests in `crates/tessera-spill/src/plan.rs`: the plan of a
   level on examples, against the nodes' former rules, and the arguments

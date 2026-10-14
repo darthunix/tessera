@@ -13,7 +13,7 @@ exclude_globs = [
     "crates/tessera-testing/**",
     "crates/tessera-capi/benches/**",
     "**/loom.rs",
-    "crates/tessera-kernels/src/table/model.rs",
+    "crates/relhash/src/table/model.rs",
 ]
 
 # Debug output carries no logic; Display stays, it is the text of an error.

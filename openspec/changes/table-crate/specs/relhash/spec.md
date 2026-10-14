@@ -281,7 +281,7 @@ stay merged.
 - **THEN** the records of known keys hold the sums, and the new keys
   have records equal to the ones merged
 - **Verified by:**
-  `crates/tessera-kernels/src/table/mod.rs::a_merge_by_a_rule_changes_known_keys_and_copies_new_ones`
+  `crates/relhash/src/table/mod.rs::a_merge_by_a_rule_changes_known_keys_and_copies_new_ones`
 
 #### Scenario: A full chunk
 - **WHEN** the chunk for new records has room for one, and two records
@@ -289,7 +289,7 @@ stay merged.
 - **THEN** the merge stops before the second, and gives the byte where
   it begins
 - **Verified by:**
-  `crates/tessera-kernels/src/table/mod.rs::a_merge_stops_for_a_chunk_or_a_larger_index`
+  `crates/relhash/src/table/mod.rs::a_merge_stops_for_a_chunk_or_a_larger_index`
 
 #### Scenario: Half the buckets
 - **WHEN** a record of new keys would bring the table's records to
@@ -297,11 +297,11 @@ stay merged.
 - **THEN** the merge stops before it, and gives the byte where it
   begins
 - **Verified by:**
-  `crates/tessera-kernels/src/table/mod.rs::a_merge_stops_for_a_chunk_or_a_larger_index`
+  `crates/relhash/src/table/mod.rs::a_merge_stops_for_a_chunk_or_a_larger_index`
 
 #### Scenario: The rule fails
 - **WHEN** the rule fails on the second of three records of known keys
 - **THEN** the merge returns the rule's error, and the first record is
   merged
 - **Verified by:**
-  `crates/tessera-kernels/src/table/mod.rs::a_failing_rule_stops_the_merge_with_its_own_error`
+  `crates/relhash/src/table/mod.rs::a_failing_rule_stops_the_merge_with_its_own_error`

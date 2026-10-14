@@ -912,6 +912,8 @@ name = "relhash"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "loom",
+ "proptest",
 ]
 
 [[package]]
@@ -1170,6 +1172,7 @@ dependencies = [
  "loom",
  "memchr",
  "proptest",
+ "relhash",
  "tessera-core",
  "tessera-spill",
  "tessera-testing",
