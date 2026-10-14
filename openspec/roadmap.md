@@ -105,6 +105,8 @@ is wanted; several wait for a measured case. `greengage-port` and
 - `top-n-bound-in-scan`: The bound of a top-N sort in the scan below it
 - `debug-checks`: A plan check, random column forms and a corpus of
   types in the debug build
+- `sturdy-bulk-loops`: Loops over whole words that keep their values
+  across the call of a vector kernel
 
 ## Entries
 
@@ -792,6 +794,39 @@ review of pull request 45, 2026-10-05.
 - **Capabilities:** batch-format, bridge-api
 - **Size:** the log does not say.
 
+### sturdy-bulk-loops
+
+Loops over whole words that keep their values across the call of a
+vector kernel. From the review of pull request 68 on 2026-10-14.
+
+- **What:** The loops that read a column a word of 64 rows at a time
+  call a NEON kernel for each word. Whether the compiler saves and
+  restores the loop's values around that call depends on the rest of
+  the function, so an unrelated change can make every word dearer. Give
+  these loops a form that keeps their values without such saves: a
+  kernel inlined into its loop, or fewer values alive across a call.
+  Look by itself at the path of a word whose rows are not all prepared
+  and at the division of a Datum column.
+- **Why:** The masks of `relhash` lost a form of a window of bytes that
+  nothing built; the kernels' loops then compiled otherwise. On 1024
+  rows, aggregates over whole words took up to 12 % more instructions
+  and a count over a Datum column 19 % more cycles, arithmetic up to
+  2.5 % more instructions, while batches of 65 rows and counts over
+  dense columns got faster. The maintainer kept the masks without the
+  form and took the cost.
+- **Known:** A try that marked `#[inline]` the `*_lanes` kernels of
+  `simd/aggregate.rs`, `simd/aggregate64.rs`, `simd/arith.rs` and
+  `simd/arith64.rs` took back most of it: against the masks with the
+  form, the failing cases of `aggregate_int32` fell from 43 to 9 and of
+  `arith_int32` from 31 to 22, and dense sums of columns and products
+  ran 6 to 14 % faster. Left after it: aggregates of a Datum column over
+  words not all prepared, 6 to 8.5 % more cycles; division of a Datum
+  column, 5 %; Datum batches of 63 rows, 4 % more instructions; empty
+  batches, five instructions a call.
+- **Depends on:** nothing.
+- **Capabilities:** kernel-abi
+- **Size:** small to medium.
+
 ### direct-arrow-batches
 
 Direct Arrow batches. From plan 6.7, lines 6005–6006.
@@ -804,7 +839,11 @@ Direct Arrow batches. From plan 6.7, lines 6005–6006.
   representation are independent (lines 73–85).
 - **Known:** Runtime picks a native kernel only when type, operation,
   collation and physical representation all match; otherwise the Datum
-  path is mandatory (line 80–82).
+  path is mandatory (line 80–82). The masks of rows take words alone:
+  their form over a window of bytes from a bit offset, the form of
+  Arrow's bitmaps, went when nothing built it, so a batch of Arrow
+  brings it back or copies its bitmaps into words (see
+  `sturdy-bulk-loops` for what the form's absence cost).
 - **Depends on:** `parquet-fdw`.
 - **Capabilities:** batch-format, kernel-abi, type-support
 - **Size:** the log does not say.

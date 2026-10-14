@@ -119,12 +119,23 @@ themselves, so the crate keeps those checks to itself.
 changes its imports. A view of a mask is its row count and its words. It
 also read a window of bytes from a bit offset, the form of Arrow's
 bitmaps, but nothing in Tessera built one, so that form is gone; it
-comes back with a source that hands masks over in it. The walk over the
-ones of a word is a function that returns a plain iterator, so the crate
-shows the walk and not the type of its state. Reading a word past a
-mask's words still panics, as it does now: a check there costs 4 to 9
-instructions a word in the kernels' loops. It is a call over a mask, not
-over a table's blocks, so the promise over any bytes does not reach it.
+comes back with a source that hands masks over in it. Its absence costs
+time all the same. The compiler had laid out each kernel's loop over the
+words of a mask twice, once a form, and the copy for words kept its
+values in registers across the call of the vector kernel of a word; with
+one form left it lays the loop out otherwise and saves and restores them
+around that call. By the processor's counters, aggregates over whole
+words of 1024 rows take up to 12 % more instructions and a count over a
+Datum column 19 % more cycles, arithmetic up to 2.5 % more instructions,
+while batches of 65 rows and counts over dense columns are faster. The
+maintainer kept the masks without the form and took this cost; loops
+that keep their values across the call, by their own form, are later
+work. The walk over the ones of a word is a function that returns a
+plain iterator, so the crate shows the walk and not the type of its
+state. Reading a word past a mask's words still panics, as it does now:
+a check there costs 4 to 9 instructions a word in the kernels' loops. It
+is a call over a mask, not over a table's blocks, so the promise over
+any bytes does not reach it.
 
 Refused: a mask of the crate's own beside the old one, two copies of
 one type; a third crate for the masks alone, one more crate to publish
