@@ -71,7 +71,7 @@ fn reader_supports_wide_values_and_preserves_inherent_get() {
     assert!(std::ptr::eq(column.get(0).unwrap().unwrap(), &values[0]));
     assert_eq!(ColumnReader::get(&column, 0).unwrap(), Some(i64::MIN));
     assert!(ColumnReader::get(&column, 3).is_err());
-    let selected = RowMaskView::try_from_bytes(3, &[0b1010], 1).unwrap();
+    let selected = RowMaskView::try_new(3, &[0b101]).unwrap();
     let result = column
         .try_fold_selected(&selected, Vec::new(), |mut values, row, value| {
             values.push((row, value));
