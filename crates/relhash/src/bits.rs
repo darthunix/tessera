@@ -41,7 +41,11 @@ impl Iterator for Ones {
         if self.0 == 0 {
             return None;
         }
+        // The number of the lowest one is the count of zeros below it.
         let bit = self.0.trailing_zeros() as usize;
+        // Subtracting 1 turns the lowest one into 0 and the zeros below it
+        // into ones, and the AND clears them all: 0b1010_0100 becomes
+        // 0b1010_0000.
         self.0 &= self.0 - 1;
         Some(bit)
     }
