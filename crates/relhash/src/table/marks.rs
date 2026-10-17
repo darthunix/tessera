@@ -7,7 +7,7 @@
 //! a record comes from the caller; the entry points check it against the
 //! index when the table has one.
 
-use crate::{RowMaskView, ones};
+use crate::{RowMaskView, check_rows, ones};
 use anyhow::{Context, Result, ensure};
 
 use super::Chunks;
@@ -123,10 +123,7 @@ pub fn mark(
     let nrows = rows.nrows();
     check_record_size(record_size)?;
     let per_record = PerRecord::new(record_size)?;
-    ensure!(
-        refs.len() == nrows,
-        "the references and the mask of the batch have different row counts"
-    );
+    check_rows(nrows, &[refs.len()], "marks")?;
     // The references a mark names, a record's; the mark set.
     let set = |reference: u32| -> Result<()> {
         let Place { chunk, byte } = Place::of(reference);

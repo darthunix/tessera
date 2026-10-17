@@ -29,7 +29,7 @@
 
 use core::sync::atomic::AtomicU64;
 
-use crate::{RowMask, RowMaskView, ones};
+use crate::{RowMask, RowMaskView, check_rows, ones};
 use anyhow::{Result, bail, ensure};
 
 use super::header::{CHUNK_HEADER, Layout, Place};
@@ -345,10 +345,7 @@ pub fn probe(
 pub fn add(words: &mut [u64], hashes: &[u32], rows: &RowMaskView<'_>) -> Result<()> {
     let nrows = rows.nrows();
     let shift = shift_for(words.len())?;
-    ensure!(
-        hashes.len() == nrows,
-        "the hashes and the mask of the batch have different row counts"
-    );
+    check_rows(nrows, &[hashes.len()], "Bloom filter")?;
     for index in 0..nrows.div_ceil(64) {
         for bit in ones(rows.word(index)) {
             let (word, mask) = place(hashes[index * 64 + bit], shift);
@@ -396,10 +393,7 @@ pub(super) fn add_with<F: FilterOr + ?Sized>(
     rows: &RowMaskView<'_>,
 ) -> Result<()> {
     let nrows = rows.nrows();
-    ensure!(
-        hashes.len() == nrows,
-        "the hashes and the mask of the batch have different row counts"
-    );
+    check_rows(nrows, &[hashes.len()], "Bloom filter")?;
     for index in 0..nrows.div_ceil(64) {
         for bit in ones(rows.word(index)) {
             let (word, mask) = place(hashes[index * 64 + bit], shift);
@@ -443,10 +437,11 @@ fn check<F: FilterRead + ?Sized>(
 ) -> Result<()> {
     let nrows = rows.nrows();
     let shift = shift_for(words.nwords())?;
-    ensure!(
-        hashes.len() == nrows && found.as_view().nrows() == nrows,
-        "the hashes, mask and result of the batch have different row counts"
-    );
+    check_rows(
+        nrows,
+        &[hashes.len(), found.as_view().nrows()],
+        "Bloom filter",
+    )?;
     for index in 0..nrows.div_ceil(64) {
         let mut hits = 0;
         for bit in ones(rows.word(index)) {

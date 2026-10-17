@@ -145,6 +145,14 @@ pub(super) struct Layout {
 }
 
 impl Layout {
+    /// The most records that find or insert creates in the table: half its
+    /// buckets, so that a chain stays short; more rows wait for a larger
+    /// index.
+    #[inline(always)]
+    pub(super) fn most_records(&self) -> u64 {
+        u64::from(self.nbuckets / 2)
+    }
+
     /// The 8-byte words of a record after its keys: payload and padding.
     pub(super) fn tail_words(&self) -> usize {
         self.record_size / 8 - RECORD_HEADER / 8 - self.nkeys
@@ -205,11 +213,17 @@ fn check_config(config: &TableConfig<'_>) -> Result<u32> {
 
 /// The record size of `nkeys` keys and a payload, after checking the count.
 fn checked_record_size(nkeys: usize, payload_size: usize) -> Result<u32> {
+    check_nkeys(nkeys)?;
+    record_size(nkeys, payload_size)
+}
+
+/// Refuse a count of keys a table cannot have, given or read.
+fn check_nkeys(nkeys: usize) -> Result<()> {
     ensure!(
         (1..=MAX_KEYS).contains(&nkeys),
         "a table has 1 to {MAX_KEYS} keys, not {nkeys}"
     );
-    record_size(nkeys, payload_size)
+    Ok(())
 }
 
 /// Refuse a size that no record of a table has. A record is a multiple
@@ -500,10 +514,7 @@ impl Header {
             "table index length {region_len} is not a multiple of 8 past the header"
         );
         let nkeys = self.nkeys as usize;
-        ensure!(
-            (1..=MAX_KEYS).contains(&nkeys),
-            "a table has 1 to {MAX_KEYS} keys, not {nkeys}"
-        );
+        check_nkeys(nkeys)?;
         let mut kinds = [KeyKind::Int32; MAX_KEYS];
         for (key, (slot, &code)) in kinds.iter_mut().zip(&self.kinds).enumerate() {
             if key < nkeys {
