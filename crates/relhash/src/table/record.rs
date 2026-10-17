@@ -120,6 +120,9 @@ pub(super) struct Access<'r, R> {
 impl<'r, R: Region> Access<'r, R> {
     #[inline]
     pub(super) fn new(region: &'r R, layout: &Layout) -> Self {
+        // The fields are written out, not taken from `for_chunks`: through
+        // that call the loops of the probe, of find or insert and of a
+        // sort's items compiled anew, some of them longer.
         let mut access = Self {
             region,
             buckets_offset: layout.buckets_offset,
@@ -350,6 +353,21 @@ impl<'r, R: Region> Access<'r, R> {
         // the shift leaves as many bits as the count's logarithm, and the
         // bucket array was checked to lie within the region.
         unsafe { self.region.load_u32_in(self.bucket(hash)) }
+    }
+
+    /// [`Self::find`] for the record with the NULL bits and keys of
+    /// another: the next record of the same keys.
+    #[inline(always)]
+    pub(super) fn find_same(
+        &mut self,
+        offset: u32,
+        hash: u32,
+        null_bits: u32,
+        keys: &[i64],
+    ) -> Result<u32> {
+        self.find(offset, hash, |other| {
+            other.null_bits() == null_bits && same_keys(other.keys(), keys)
+        })
     }
 
     /// Walk the chain from `offset` to the first record with `hash` that

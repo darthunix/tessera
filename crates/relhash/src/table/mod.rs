@@ -237,15 +237,7 @@ impl<'a> Table<'a> {
     pub unsafe fn attach(index: *mut u8, len: usize, chunks: Chunks<'a>) -> Result<Self> {
         check_region(index, len)?;
         // SAFETY: the caller's contract, and `Chunks::new`'s for the chunks.
-        let region = unsafe {
-            RawRegion::new(
-                index,
-                len,
-                chunks.bases.as_ptr(),
-                chunks.lens.as_ptr(),
-                chunks.len(),
-            )
-        };
+        let region = unsafe { chunks.region(index, len) };
         let layout = Header::load(&region).validate(len)?;
         Ok(Self {
             region,
@@ -542,15 +534,7 @@ impl<'a> TableMut<'a> {
     ) -> Result<Self> {
         check_region(index, len)?;
         // SAFETY: the caller's contract.
-        let region = unsafe {
-            RawRegion::new(
-                index,
-                len,
-                chunks.bases.as_ptr(),
-                chunks.lens.as_ptr(),
-                chunks.len(),
-            )
-        };
+        let region = unsafe { chunks.region(index, len) };
         // SAFETY: the caller has the index to itself.
         let layout = unsafe { init(&region, config, capacity) }?;
         Ok(Self(Table {
