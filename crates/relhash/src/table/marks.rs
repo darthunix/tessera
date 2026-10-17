@@ -11,8 +11,8 @@ use crate::{RowMaskView, ones};
 use anyhow::{Context, Result, ensure};
 
 use super::Chunks;
-use super::exclusive::Cursor;
 use super::header::{CHUNK_HEADER, KEY_SLOT, MAX_CHUNK_LEN, RECORD_HEADER, placement, reference};
+use super::writer::Cursor;
 
 /// The words of marks of a chunk of `chunk_len` bytes: a bit for every
 /// record of `record_size` bytes after the chunk's header.
@@ -106,7 +106,7 @@ impl Chunks<'_> {
     fn records(&self, chunk: usize, per_record: PerRecord) -> Result<usize> {
         let len = self.lens[chunk];
         if !self.fits(chunk) {
-            return Err(super::bad_chunk(chunk, len));
+            return Err(super::chunks::bad_chunk(chunk, len));
         }
         // SAFETY: the chunk is aligned to 8 and holds at least its 8-byte
         // header, just checked; nothing appends to it during the walk.

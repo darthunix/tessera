@@ -10,11 +10,11 @@
 use crate::{RowMask, RowMaskView, ones};
 use anyhow::{Result, bail, ensure};
 
-use super::batch::{Lanes, VERTICAL_MIN_ROWS, check_keys, check_partitions, probe_word, shaped};
-use super::batch::{check_record, unlinked};
+use super::batch::{check_keys, check_partitions, shaped};
 use super::header::{CHUNK_HEADER, Header, KEY_SLOT, Layout, RECORD_HEADER, placement};
 use super::keys::{KeySource, WordKeys, slot_buffer};
-use super::record::{Access, same_keys};
+use super::lanes::{Lanes, VERTICAL_MIN_ROWS, probe_word};
+use super::record::{Access, check_record, same_keys, unlinked};
 use super::region::{RawRegion, Region};
 use super::{Batch, Partitions, Table};
 

@@ -5,15 +5,15 @@
 # they are cut out by cfg, and their mutants would survive unseen).
 
 # The tools, the test strategies, the benchmark programs and the loom
-# model are not the product. The model's memory and model table
-# (table/model.rs) compile only with --cfg loom, which a mutant's build
-# lacks: each of their mutants would survive unseen.
+# models are not the product. The table's loom models, their memory and
+# the model table (table/loom/) compile only with --cfg loom, which a
+# mutant's build lacks: each of their mutants would survive unseen.
 exclude_globs = [
     "tools/**",
     "crates/tessera-testing/**",
     "crates/tessera-capi/benches/**",
     "**/loom.rs",
-    "crates/relhash/src/table/model.rs",
+    "crates/relhash/src/table/loom/**",
 ]
 
 # Debug output carries no logic; Display stays, it is the text of an error.
@@ -65,7 +65,7 @@ exclude_re = [
     "int/aggregate\\.rs:7[12]:[0-9]+: replace (&& with \\|\\||>= with <) in aggregate$",
     "int/arith\\.rs:21[01]:[0-9]+: replace (&& with \\|\\||>= with <) in run$",
     "int/compare\\.rs:51:69: replace && with \\|\\| in run$",
-    "table/local\\.rs:316:61: replace \\| with \\^ in LocalTable::find_or_insert$",
+    "table/owned\\.rs:316:61: replace \\| with \\^ in LocalTable::find_or_insert$",
 ]
 
 # A mutant that makes a loop endless is stopped at three times the

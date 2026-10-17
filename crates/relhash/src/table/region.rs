@@ -15,9 +15,9 @@
 //! implementation, over raw pointers; the trait is the seam for a model
 //! region under loom.
 //!
-//! The orderings live in [`order`], which the loom model in `model.rs`
-//! and `loom.rs` shares, so that the model checks the orderings this code
-//! runs with.
+//! The orderings live in [`order`], which the memory of the loom models
+//! (`loom/memory.rs`) shares, so that the models check the orderings this
+//! code runs with.
 //!
 //! Offsets are validated by the table before any call, so a violation here
 //! is a bug: the methods assert it instead of returning an error. Every
@@ -378,7 +378,9 @@ impl Region for RawRegion {
     fn chunk_fits(&self, chunk: usize) -> bool {
         assert!(chunk < self.nchunks, "chunk {chunk} past the chunks");
         // SAFETY: the constructor's contract on the arrays.
-        unsafe { super::chunk_fits(*self.chunk_bases.add(chunk), *self.chunk_lens.add(chunk)) }
+        unsafe {
+            super::chunks::chunk_fits(*self.chunk_bases.add(chunk), *self.chunk_lens.add(chunk))
+        }
     }
 
     #[inline(always)]

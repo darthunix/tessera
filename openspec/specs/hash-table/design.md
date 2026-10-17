@@ -1730,15 +1730,21 @@ How a spilled chunk of records is written to disk is in
 
 - `crates/relhash/src/table/mod.rs`: the table, its calls and
   their rules
+- `crates/relhash/src/table/chunks.rs`: the chunks, their checks,
+  and the calls over chunks alone: appending before the table has an
+  index, appending and splitting by partition
 - `crates/relhash/src/table/header.rs`: the header of the index,
   the limits of chunks and references
 - `crates/relhash/src/table/record.rs`: a record, the walk down a
-  chain, publishing
+  chain and over a chunk's records, publishing
 - `crates/relhash/src/table/region.rs`: the memory of a table and
   its atomic operations, with their memory orders
-- `crates/relhash/src/table/batch.rs`: append, link, probe and
-  the reads of found records; append and split by partition
-- `crates/relhash/src/table/exclusive.rs`: the calls of one
+- `crates/relhash/src/table/batch.rs`: a batch of rows; append,
+  link, probe and the reads of found records; append and split by
+  partition
+- `crates/relhash/src/table/lanes.rs`: the probe of a word of rows,
+  step by step for all its rows at once, and its prefetch hint
+- `crates/relhash/src/table/writer.rs`: the calls of one
   writer, the lookup by partition, the cursor over payloads and the
   merge by a rule
 - `crates/relhash/src/table/keys.rs`: the keys of a batch, a
@@ -1749,7 +1755,7 @@ How a spilled chunk of records is written to disk is in
   shared and filled together
 - `crates/relhash/src/table/marks.rs`: the marks of a RIGHT or
   FULL join and their walk
-- `crates/relhash/src/table/local.rs`: a table that owns its
+- `crates/relhash/src/table/owned.rs`: a table that owns its
   memory, for tests and benchmarks
 - `crates/tessera-kernels/src/phases.rs`: the participant of a
   shared build and of a round, the counters of a build and the stop
@@ -1757,13 +1763,14 @@ How a spilled chunk of records is written to disk is in
 - `crates/tessera-kernels/src/shared_spill.rs`: the words of a
   spill, the split, the rule that sends partitions to disk, the
   counters of the rounds and the rule of a split read back
-- `crates/relhash/src/table/loom.rs`: the models of the table,
-  the filter and the marks under several participants
+- `crates/relhash/src/table/loom/`: the memory of the loom model,
+  the model table the models of the phases and the rounds run over,
+  and the models of the table, the filter and the marks under several
+  participants
 - `crates/tessera-kernels/src/loom.rs`: the models of a shared build,
   of the rounds and of the words of a spill
-- `crates/relhash/src/table/model.rs`: the memory of the loom
-  model, and the model table the models of the phases and the rounds
-  run over
+- `crates/relhash/src/table/testing.rs`: the keys of the table's own
+  tests and loom models
 - `crates/tessera-capi/src/c/table.rs`: the C entry points
 - `crates/tessera-capi/src/c/shared_spill.rs`: the C entry points of a
   spill and of the rounds
@@ -1778,7 +1785,7 @@ How a spilled chunk of records is written to disk is in
 - `crates/tessera-kernels/tests/table.rs`: the format and every call,
   with damaged headers, chunks, references and chains; it also runs
   under Miri.
-- The unit tests in `crates/relhash/src/table/mod.rs`: blocks
+- The unit tests in `crates/relhash/src/table/tests.rs`: blocks
   that are not chunks or an index, partitions, merges, and a shared
   filter that threads race to build.
 - The unit tests in `crates/tessera-kernels/src/accumulate.rs`: the
@@ -1792,7 +1799,7 @@ How a spilled chunk of records is written to disk is in
 - The unit tests in `crates/tessera-kernels/src/shared_spill.rs`:
   the split, the budget, the weights of each node, a process's own
   words against shared ones, and the counters of the rounds.
-- `crates/relhash/src/table/loom.rs` and
+- `crates/relhash/src/table/loom/` and
   `crates/tessera-kernels/src/loom.rs`, run by `make rust-loom`.
 - The unit tests in `crates/tessera-spill/src/plan.rs`: the plan of a
   level on examples, against the nodes' former rules, and the arguments
