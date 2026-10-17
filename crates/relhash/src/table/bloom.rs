@@ -46,15 +46,15 @@
 //!
 //! // A filter for 100 records, filled with the hashes of two rows.
 //! let mut words = vec![0; bloom::words_for(100)?];
-//! bloom::add(&mut words, &[7, 8], &RowMaskView::try_new(2, &[0b11])?)?;
+//! bloom::add(&mut words, &[7, 8], &RowMaskView::try_new(2, &[1 << 0 | 1 << 1])?)?;
 //! // Probe three rows of hashes 7, 8 and 9.
 //! let mut passed = [0];
-//! let rows = RowMaskView::try_new(3, &[0b111])?;
+//! let rows = RowMaskView::try_new(3, &[1 << 0 | 1 << 1 | 1 << 2])?;
 //! bloom::probe(&words, &[7, 8, 9], &rows, &mut RowMask::try_new(3, &mut passed)?)?;
-//! // Bit `k` of a mask's word is row `k`, counted from the right: 0b011
-//! // is rows 0 and 1, hashes 7 and 8, which always pass. Row 2 is left
-//! // out: a filter lets an absent hash through now and then.
-//! assert_eq!(passed[0] & 0b011, 0b011);
+//! // Rows 0 and 1, hashes 7 and 8, always pass. Row 2 may pass too: a
+//! // filter lets an absent hash through now and then.
+//! let passed = RowMaskView::try_new(3, &passed)?;
+//! assert!(passed.contains(0)? && passed.contains(1)?);
 //! # Ok::<(), anyhow::Error>(())
 //! ```
 
@@ -335,10 +335,11 @@ pub(super) fn try_build<R: Region, F: FilterShared + ?Sized>(
 ///
 /// // An empty filter lets nothing through.
 /// let words = vec![0; bloom::words_for(100)?];
-/// let rows = RowMaskView::try_new(2, &[0b11])?;
-/// let mut found = [0b11];
+/// let rows = RowMaskView::try_new(2, &[1 << 0 | 1 << 1])?;
+/// // The probe overwrites whatever the result held.
+/// let mut found = [1 << 0 | 1 << 1];
 /// bloom::probe(&words, &[7, 8], &rows, &mut RowMask::try_new(2, &mut found)?)?;
-/// assert_eq!(found, [0]);
+/// assert_eq!(RowMaskView::try_new(2, &found)?.selected_count(), 0);
 /// # Ok::<(), anyhow::Error>(())
 /// ```
 pub fn probe(
@@ -363,14 +364,17 @@ pub fn probe(
 /// use relhash::{RowMask, RowMaskView};
 /// use relhash::table::bloom;
 ///
-/// // The rows added pass; a row not added, most likely not.
+/// // Add rows 0 and 1 of three, then probe all three: the rows added
+/// // pass; row 2, not added, most likely not.
 /// let mut words = vec![0; bloom::words_for(100)?];
-/// bloom::add(&mut words, &[7, 8, 9], &RowMaskView::try_new(3, &[0b011])?)?;
+/// bloom::add(&mut words, &[7, 8, 9], &RowMaskView::try_new(3, &[1 << 0 | 1 << 1])?)?;
 /// let mut found = [0];
-/// let all = RowMaskView::try_new(3, &[0b111])?;
+/// let all = RowMaskView::try_new(3, &[1 << 0 | 1 << 1 | 1 << 2])?;
 /// bloom::probe(&words, &[7, 8, 9], &all, &mut RowMask::try_new(3, &mut found)?)?;
-/// assert_eq!(found[0] & 0b011, 0b011);
-/// assert!(bloom::add(&mut words[..3], &[7], &RowMaskView::try_new(1, &[1])?).is_err());
+/// let found = RowMaskView::try_new(3, &found)?;
+/// assert!(found.contains(0)? && found.contains(1)?);
+/// // A filter's words are a power of two.
+/// assert!(bloom::add(&mut words[..3], &[7], &RowMaskView::try_new(1, &[1 << 0])?).is_err());
 /// # Ok::<(), anyhow::Error>(())
 /// ```
 pub fn add(words: &mut [u64], hashes: &[u32], rows: &RowMaskView<'_>) -> Result<()> {

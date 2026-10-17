@@ -50,13 +50,14 @@ fn validate_row(row: usize, nrows: usize) -> Result<()> {
 /// ```
 /// use relhash::RowMaskView;
 ///
-/// // Rows 0, 2 and 64 of a batch of 70 rows: two words.
-/// let words = [0b101, 0b1];
+/// // Rows 0, 2 and 64 of a batch of 70 rows: two words, row `r` the bit
+/// // `1 << (r % 64)` of word `r / 64`.
+/// let words = [1 << 0 | 1 << 2, 1 << (64 - 64)];
 /// let rows = RowMaskView::try_new(70, &words)?;
 /// assert_eq!(rows.selected_rows().collect::<Vec<_>>(), [0, 2, 64]);
 /// // One word is not enough for 70 rows, and row 70 is past the batch.
-/// assert!(RowMaskView::try_new(70, &[0b101]).is_err());
-/// assert!(RowMaskView::try_new(70, &[0, 1 << 6]).is_err());
+/// assert!(RowMaskView::try_new(70, &[1 << 0 | 1 << 2]).is_err());
+/// assert!(RowMaskView::try_new(70, &[0, 1 << (70 - 64)]).is_err());
 /// # Ok::<(), anyhow::Error>(())
 /// ```
 ///
@@ -216,9 +217,10 @@ impl<'a> RowMask<'a> {
     ///
     /// ```
     /// use relhash::RowMask;
-    /// let mut words = [0b111, 1];
+    /// // Rows 0, 1, 2 and 64 of 65; then rows 0 and 2 of the first word.
+    /// let mut words = [1 << 0 | 1 << 1 | 1 << 2, 1 << (64 - 64)];
     /// let mut rows = RowMask::try_new(65, &mut words)?;
-    /// rows.intersect_word(0, 0b101)?;
+    /// rows.intersect_word(0, 1 << 0 | 1 << 2)?;
     /// rows.intersect_word(1, u64::MAX)?;
     /// assert_eq!(rows.as_view().selected_rows().collect::<Vec<_>>(), [0, 2, 64]);
     /// # Ok::<(), anyhow::Error>(())
@@ -243,9 +245,10 @@ impl<'a> RowMask<'a> {
     /// use relhash::RowMask;
     /// let mut words = [0, 0];
     /// let mut rows = RowMask::try_new(65, &mut words)?;
-    /// rows.set_word(0, 0b101)?;
-    /// rows.set_word(1, 1)?;
-    /// assert!(rows.set_word(1, 0b10).is_err());
+    /// // Rows 0 and 2, then row 64; row 65 is past the batch of 65 rows.
+    /// rows.set_word(0, 1 << 0 | 1 << 2)?;
+    /// rows.set_word(1, 1 << (64 - 64))?;
+    /// assert!(rows.set_word(1, 1 << (65 - 64)).is_err());
     /// assert_eq!(rows.as_view().selected_rows().collect::<Vec<_>>(), [0, 2, 64]);
     /// # Ok::<(), anyhow::Error>(())
     /// ```

@@ -116,24 +116,27 @@
 //! let keys = Keys(&[7, 8, 7]);
 //! let hashes: Vec<u32> = [7u32, 8, 7].map(|key| key.wrapping_mul(0x9e37_79b1)).into();
 //! let payload = [1u64, 2, 3].map(u64::to_ne_bytes).concat();
-//! let mut pending = [0b111];
+//! let mut pending = [1 << 0 | 1 << 1 | 1 << 2]; // all three rows
 //! let mut offsets = [0; 3];
 //! let mut mask = RowMask::try_new(3, &mut pending)?;
 //! let mut batch = Batch::new(&hashes, &keys, &mut mask, &mut offsets)?;
 //! table.insert(Some(&payload), &mut batch)?;
 //! assert_eq!(pending, [0], "every row found room");
 //!
-//! // The first row's key has two records; the second row's has one.
+//! // Probe rows 0 and 1: the first row's key has two records, the second
+//! // row's one.
 //! let table = table.table()?;
+//! let rows = RowMaskView::try_new(3, &[1 << 0 | 1 << 1])?;
 //! let mut hits = [0];
 //! let mut matches = [0; 3];
 //! let mut found = RowMask::try_new(3, &mut hits)?;
-//! table.probe(&hashes, &keys, &RowMaskView::try_new(3, &[0b011])?, &mut matches, &mut found)?;
-//! assert_eq!(hits, [0b011]);
+//! table.probe(&hashes, &keys, &rows, &mut matches, &mut found)?;
+//! assert_eq!(found.as_view().selected_rows().collect::<Vec<_>>(), [0, 1]);
 //! assert_eq!(table.record(matches[0])?.payload, 3u64.to_ne_bytes());
+//! // Only row 0 has a record after its first.
 //! let mut more = RowMask::try_new(3, &mut hits)?;
-//! table.next_match(&mut matches, &RowMaskView::try_new(3, &[0b011])?, &mut more)?;
-//! assert_eq!(hits, [0b001]);
+//! table.next_match(&mut matches, &rows, &mut more)?;
+//! assert_eq!(more.as_view().selected_rows().collect::<Vec<_>>(), [0]);
 //! assert_eq!(table.record(matches[0])?.payload, 1u64.to_ne_bytes());
 //! # Ok::<(), anyhow::Error>(())
 //! ```
