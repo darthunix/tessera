@@ -56,8 +56,8 @@ order.
          └───────────────────────────────────────────────┘
 ```
 
-- magic: a number of 64 bits whose bytes are `TESSTABL` on a
-  little-endian machine;
+- magic: a number of 64 bits whose bytes are `RELHASH` and a zero on
+  a little-endian machine;
 - version: the version of the format, 2, which
   `tess_table_format_version()` returns;
 - header size: 96; buckets offset: 96, where the buckets start;
