@@ -57,7 +57,7 @@ impl Drop for Block {
 
 /// A table with its index and chunks in this process's memory.
 #[derive(Debug)]
-pub struct LocalTable {
+pub struct OwnedTable {
     index: Block,
     chunks: Vec<Block>,
     bases: Vec<*mut u8>,
@@ -70,7 +70,7 @@ pub struct LocalTable {
     capacity: u64,
 }
 
-impl LocalTable {
+impl OwnedTable {
     /// An empty table whose index is sized for `capacity` records and
     /// whose chunks will have `chunk_bytes` bytes each.
     pub fn new(config: &TableConfig<'_>, capacity: u64, chunk_bytes: usize) -> Result<Self> {

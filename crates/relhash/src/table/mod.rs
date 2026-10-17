@@ -48,13 +48,13 @@
 //!
 //! This is the second module of the crate allowed `unsafe`, for the index
 //! and chunks over raw pointers and atomics on them; see [`region`].
-//! [`LocalTable`] owns its index and chunks and needs no `unsafe`: tests
+//! [`OwnedTable`] owns its index and chunks and needs no `unsafe`: tests
 //! and benchmarks build tables with it.
 //!
 //! ```
 //! use anyhow::Result;
 //! use relhash::{RowMask, RowMaskView};
-//! use relhash::table::{Batch, KeyKind, KeySource, LocalTable, TableConfig};
+//! use relhash::table::{Batch, KeyKind, KeySource, OwnedTable, TableConfig};
 //!
 //! // The caller hands keys over a word of 64 rows at a time: here one key
 //! // of int4 values with no NULL.
@@ -71,7 +71,7 @@
 //! }
 //!
 //! let config = TableConfig { keys: &[KeyKind::Int32], payload_size: 8 };
-//! let mut table = LocalTable::new(&config, 100, 4096)?;
+//! let mut table = OwnedTable::new(&config, 100, 4096)?;
 //! assert_eq!(table.table()?.stats().records, 0);
 //!
 //! // Three rows with keys 7, 8 and 7, and their hashes: the caller's hash,
@@ -140,7 +140,7 @@ use header::{Header, Layout, NRECORDS};
 pub use keys::KeySource;
 pub use marks::{Marks, mark, mark_words, scan_unmarked};
 #[cfg(feature = "alloc")]
-pub use owned::LocalTable;
+pub use owned::OwnedTable;
 use record::Access;
 pub use record::{MAX_PAYLOAD_COLUMNS, PayloadColumns, Record, payload_null_words};
 use region::{RawRegion, Region};

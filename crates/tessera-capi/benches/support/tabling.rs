@@ -17,7 +17,7 @@ use tessera_core::{ColumnReader, RowMask, RowMaskView};
 use tessera_kernels::accumulate;
 use tessera_kernels::column_keys::normalize_word;
 use tessera_kernels::int32::{self, NullKeys};
-use tessera_kernels::table::{Batch, KeyKind, KeySource, LocalTable, TableConfig};
+use tessera_kernels::table::{Batch, KeyKind, KeySource, OwnedTable, TableConfig};
 
 use crate::reading::Input;
 use crate::support::{fixture::Fixture, runner::Runner};
@@ -50,7 +50,7 @@ pub struct Setup {
     pub hashes: Vec<u32>,
     pub absent: Vec<u32>,
     pub valid: Vec<u64>,
-    pub table: LocalTable,
+    pub table: OwnedTable,
     pub pending: Vec<u64>,
     pub found: Vec<u64>,
     pub inserted: Vec<u64>,
@@ -80,7 +80,7 @@ impl Setup {
             hashes,
             absent,
             valid,
-            table: LocalTable::new(&CONFIG, nrows as u64, 64 << 10)?,
+            table: OwnedTable::new(&CONFIG, nrows as u64, 64 << 10)?,
             pending: vec![0; words],
             found: vec![0; words],
             inserted: vec![0; words],
