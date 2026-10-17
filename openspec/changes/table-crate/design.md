@@ -217,8 +217,11 @@ it. The C nodes never use it; the tests of the table and of the C entry
 points and the benchmarks of counters do.
 
 **Will be:** it stays in the crate as its table that owns its memory,
-behind a feature `alloc` on by default. It is the only way to use the
-crate without unsafe code, so the README's example uses it. It is
+behind a feature `alloc` on by default, named `OwnedTable`: owning its
+memory is what sets it apart, while "local" read as a process's own
+memory, which a table over a caller's blocks may be as well. It is the
+only way to use the crate without unsafe code, so the README's example
+uses it. It is
 outside the promise of no memory: allocating is its job. A build
 without the feature leaves it out, and has nothing that allocates.
 

@@ -36,7 +36,7 @@ use tessera_kernels::column_keys::KeyColumns;
 use tessera_kernels::int32::{self, NullKeys};
 use tessera_kernels::phases::{Action, PROBE, Participant};
 use tessera_kernels::table::{
-    Batch, CHUNK_HEADER, KeyKind, LocalTable, MAX_CHUNK_LEN, MAX_PAYLOAD_COLUMNS, TableConfig,
+    Batch, CHUNK_HEADER, KeyKind, MAX_CHUNK_LEN, MAX_PAYLOAD_COLUMNS, OwnedTable, TableConfig,
     index_size, payload_null_words,
 };
 
@@ -458,7 +458,7 @@ fn round_trip<K: tessera_kernels::table::KeySource + ?Sized>(
     valid: &[u64],
 ) -> Result<(Vec<u32>, Vec<u64>, Vec<u32>)> {
     let nrows = hashes.len();
-    let mut owner = LocalTable::new(&CONFIG, nrows as u64, 4096)?;
+    let mut owner = OwnedTable::new(&CONFIG, nrows as u64, 4096)?;
     let mut pending_words = valid.to_vec();
     let mut pending = RowMask::try_new(nrows, &mut pending_words)?;
     let mut offsets = vec![0; nrows];

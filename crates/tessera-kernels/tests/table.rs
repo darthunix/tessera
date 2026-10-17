@@ -18,9 +18,9 @@ use tessera_kernels::decimal::{
 use tessera_kernels::int32::{self, NullKeys, hash_combine, murmurhash32};
 use tessera_kernels::ops::ArithmeticError;
 use tessera_kernels::table::{
-    Batch, CHUNK_HEADER, Cursor, FORMAT_VERSION, HELD, KeyKind, KeySource, LocalTable,
-    MAX_CHUNK_LEN, MAX_KEYS, Marks, Table, TableConfig, UNIT_BITS, bloom, index_size, mark,
-    mark_words, record_bytes, record_bytes_of, scan_unmarked,
+    Batch, CHUNK_HEADER, Cursor, FORMAT_VERSION, HELD, KeyKind, KeySource, MAX_CHUNK_LEN, MAX_KEYS,
+    Marks, OwnedTable, Table, TableConfig, UNIT_BITS, bloom, index_size, mark, mark_words,
+    record_bytes, record_bytes_of, scan_unmarked,
 };
 use tessera_testing::{edge, flags, integer, property, values, words};
 
@@ -55,8 +55,8 @@ type Corruption<'a> = (&'a str, &'a dyn Fn(&mut [u64]));
 
 /// An empty table for `capacity` records of `config` over chunks of
 /// [`CHUNK`] bytes.
-fn local(config: &TableConfig<'_>, capacity: u64) -> Result<LocalTable> {
-    LocalTable::new(config, capacity, CHUNK)
+fn local(config: &TableConfig<'_>, capacity: u64) -> Result<OwnedTable> {
+    OwnedTable::new(config, capacity, CHUNK)
 }
 
 /// The bytes of one field, whatever the word boundaries.
@@ -165,7 +165,7 @@ fn index_size_covers_header_and_buckets() -> Result<()> {
                 HEADER + model_buckets(capacity) as usize * 4,
                 "{payload_size} payload, {capacity} records"
             );
-            assert!(LocalTable::new(&config, capacity, CHUNK).is_ok());
+            assert!(OwnedTable::new(&config, capacity, CHUNK).is_ok());
         }
     }
     Ok(())
@@ -201,11 +201,11 @@ fn configurations_are_checked() -> Result<()> {
     assert!(index_size(&wide_payload, 1).is_err());
     for bad in [0, 4, 12, MAX_CHUNK_LEN + 8] {
         assert!(
-            LocalTable::new(&ONE_INT4, 1, bad).is_err(),
+            OwnedTable::new(&ONE_INT4, 1, bad).is_err(),
             "chunks of {bad} bytes"
         );
     }
-    assert!(LocalTable::new(&ONE_INT4, 1, MAX_CHUNK_LEN).is_ok());
+    assert!(OwnedTable::new(&ONE_INT4, 1, MAX_CHUNK_LEN).is_ok());
     Ok(())
 }
 
@@ -331,7 +331,7 @@ impl KeySource for Mixed<'_> {
 
 /// Append and link every row of a batch, expecting all of them to go in.
 fn insert_all<K: KeySource + ?Sized>(
-    table: &mut LocalTable,
+    table: &mut OwnedTable,
     hashes: &[u32],
     keys: &K,
     payload: Option<&[u8]>,
@@ -566,7 +566,7 @@ fn a_cleared_key_is_zero_in_every_record() -> Result<()> {
         Key::Int8(ColumnView::try_new(&second, Some(non_nulls))?),
     ]);
     let payload = payload_for(nrows);
-    let mut table = LocalTable::new(&config, nrows as u64, CHUNK_HEADER + 64 * 48)?;
+    let mut table = OwnedTable::new(&config, nrows as u64, CHUNK_HEADER + 64 * 48)?;
     let offsets = insert_all(&mut table, &hashes, &keys, Some(&payload))?;
     assert!(table.chunks() > 1, "the records span chunks");
     assert_eq!(table.table_mut()?.clear_key(1)?, nrows as u64);
@@ -635,7 +635,7 @@ fn a_full_chunk_leaves_the_rest_pending_until_linked_elsewhere() -> Result<()> {
     let keys = [ColumnView::try_new(&values, None)?];
     let hashes: Vec<u32> = values.iter().map(|&value| hash_i32(value)).collect();
     // A chunk of exactly sixteen records of 32 bytes after its used mark.
-    let mut table = LocalTable::new(&ONE_INT4, 100, CHUNK_HEADER + 16 * 32)?;
+    let mut table = OwnedTable::new(&ONE_INT4, 100, CHUNK_HEADER + 16 * 32)?;
     let chunk = table.add_chunk()?;
     let mut pending_words = all_rows(100);
     let mut offsets = vec![0; 100];
@@ -714,7 +714,7 @@ fn linking_counts_the_records_whose_keys_were_there_already() -> Result<()> {
     // in the first, and 30..60 in the second.
     let first: Vec<i32> = (0..40).chain(0..10).collect();
     let second: Vec<i32> = (30..60).collect();
-    let mut table = LocalTable::new(&ONE_INT4, 100, 4096)?;
+    let mut table = OwnedTable::new(&ONE_INT4, 100, 4096)?;
     let chunks = [table.add_chunk()?, table.add_chunk()?];
     let shared = table.table()?;
     for (chunk, values) in chunks.iter().zip([&first, &second]) {
@@ -747,7 +747,7 @@ fn a_record_larger_than_a_chunk_is_refused() -> Result<()> {
     };
     let values = [1];
     let keys = [ColumnView::try_new(&values, None)?];
-    let mut table = LocalTable::new(&config, 1, CHUNK_HEADER + 64)?;
+    let mut table = OwnedTable::new(&config, 1, CHUNK_HEADER + 64)?;
     let mut pending_words = [1];
     let mut pending = RowMask::try_new(1, &mut pending_words)?;
     let error = table
@@ -939,7 +939,7 @@ fn dimension_errors_come_before_any_change() -> Result<()> {
 
 /// Probe the first row of a batch through a fresh attachment.
 fn table_probe_one(
-    table: &LocalTable,
+    table: &OwnedTable,
     hashes: &[u32],
     keys: &[ColumnView<'_, i32>],
 ) -> Result<bool> {
@@ -1048,7 +1048,7 @@ fn reference_zero_names_no_record() -> Result<()> {
 /// larger index as needed: the references and the rows whose record was
 /// created.
 fn resolve_all<K: KeySource + ?Sized>(
-    table: &mut LocalTable,
+    table: &mut OwnedTable,
     hashes: &[u32],
     keys: &K,
 ) -> Result<(Vec<u32>, Vec<usize>)> {
@@ -1070,7 +1070,7 @@ fn resolve_all<K: KeySource + ?Sized>(
 
 /// Every record of a table in the order it was appended, through walks of
 /// `step`.
-fn scan_all(table: &mut LocalTable, step: usize) -> Result<Vec<u32>> {
+fn scan_all(table: &mut OwnedTable, step: usize) -> Result<Vec<u32>> {
     let table = table.table_mut()?;
     let mut cursor = Cursor::start();
     let mut out = vec![0; step];
@@ -1148,7 +1148,7 @@ fn marked_records_are_left_out_of_the_walk() {
             let values: Vec<i32> = (0..nkeys as i32).collect();
             let keys = [ColumnView::try_new(&values, None)?];
             let hashes: Vec<u32> = values.iter().map(|&value| hash_i32(value)).collect();
-            let mut table = LocalTable::new(&ONE_INT4, 2048, chunk_bytes)?;
+            let mut table = OwnedTable::new(&ONE_INT4, 2048, chunk_bytes)?;
             resolve_all(&mut table, &hashes, &KeyColumns(&keys))?;
             let all = scan_all(&mut table, 64)?;
             let nchunks = all
@@ -1434,7 +1434,7 @@ fn a_full_chunk_resolves_known_keys_only() -> Result<()> {
     let keys = [ColumnView::try_new(&values, None)?];
     let hashes: Vec<u32> = values.iter().map(|&value| hash_i32(value)).collect();
     // A chunk of four records.
-    let mut table = LocalTable::new(&ONE_INT4, 20, CHUNK_HEADER + 4 * 32)?;
+    let mut table = OwnedTable::new(&ONE_INT4, 20, CHUNK_HEADER + 4 * 32)?;
     let chunk = table.add_chunk()?;
     let mut pending_words = all_rows(20);
     let mut offsets = vec![0; 20];
@@ -1483,7 +1483,7 @@ fn an_index_takes_records_up_to_half_its_buckets_and_regrows() -> Result<()> {
     let values: Vec<i32> = (0..1500).collect();
     let keys = [ColumnView::try_new(&values, None)?];
     let hashes: Vec<u32> = values.iter().map(|&value| hash_i32(value)).collect();
-    let mut table = LocalTable::new(&ONE_INT4, 1, MAX_CHUNK_LEN)?;
+    let mut table = OwnedTable::new(&ONE_INT4, 1, MAX_CHUNK_LEN)?;
     let chunk = table.add_chunk()?;
     let mut pending_words = all_rows(1500);
     let mut offsets = vec![0; 1500];
@@ -1859,7 +1859,7 @@ fn gather_reads_one_payload_word_of_each_selected_match() -> Result<()> {
 /// Append rows and link them grouped: the count of rows whose keys the
 /// table held already.
 fn insert_grouped_rows(
-    table: &mut LocalTable,
+    table: &mut OwnedTable,
     hashes: &[u32],
     keys: &[ColumnView<'_, i32>],
     payload: &[u8],
@@ -2034,7 +2034,7 @@ fn grouped_states_follow_a_row_by_row_model() -> Result<()> {
             }
         })
         .collect();
-    let mut table = LocalTable::new(&config, 64, CHUNK_HEADER + 5 * 64)?;
+    let mut table = OwnedTable::new(&config, 64, CHUNK_HEADER + 5 * 64)?;
     let (offsets, _) = resolve_all(&mut table, &hashes, &KeyColumns(&key_column))?;
     assert!(table.chunks() > 1, "the groups span chunks");
     // Two batches over the same rows: the first and the second half.
@@ -2216,7 +2216,7 @@ fn sum_states_follow_a_row_by_row_model() -> Result<()> {
                 bulk: Some(0),
             },
         ];
-        let mut table = LocalTable::new(&config, 256, CHUNK_HEADER + 64 * 128)?;
+        let mut table = OwnedTable::new(&config, 256, CHUNK_HEADER + 64 * 128)?;
         let (offsets, _) = resolve_all(&mut table, &hashes, &KeyColumns(&key_column))?;
         let at = |sum: usize| 8 + 8 * SumState::WORDS * sum;
         let mut model: std::collections::HashMap<i32, [SumState; SUMS]> = Default::default();
@@ -2350,11 +2350,11 @@ fn extreme_states_follow_a_row_by_row_model() -> Result<()> {
             terms: (0..nrows).map(|row| model_term(1, row)).collect(),
             bulk: None,
         };
-        let mut table = LocalTable::new(&config, 256, CHUNK_HEADER + 64 * 128)?;
+        let mut table = OwnedTable::new(&config, 256, CHUNK_HEADER + 64 * 128)?;
         let (offsets, _) = resolve_all(&mut table, &hashes, &KeyColumns(&key_column))?;
         let at = 8;
         let mut model: std::collections::HashMap<i32, ExtremeState> = Default::default();
-        let write = |table: &mut LocalTable, offset: u32, state: ExtremeState| -> Result<()> {
+        let write = |table: &mut OwnedTable, offset: u32, state: ExtremeState| -> Result<()> {
             let (value, flags) = state.to_words();
             let mut writer = table.table_mut()?;
             let payload = writer.payload_mut(offset)?;
@@ -2528,7 +2528,7 @@ fn partial_states_merge_as_the_rows_would() -> Result<()> {
         let nfinal = keys.len();
         let key_column = [ColumnView::try_new(&keys, None)?];
         let hashes: Vec<u32> = keys.iter().map(|&key| hash_i32(key)).collect();
-        let mut table = LocalTable::new(&config, 512, CHUNK_HEADER + 64 * 128)?;
+        let mut table = OwnedTable::new(&config, 512, CHUNK_HEADER + 64 * 128)?;
         let (offsets, _) = resolve_all(&mut table, &hashes, &KeyColumns(&key_column))?;
         let at = |sum: usize| 8 + 8 * SumState::WORDS * sum;
         let mut model: std::collections::HashMap<i32, [SumState; SUMS]> = Default::default();
@@ -2743,7 +2743,7 @@ fn a_sum_past_the_bigint_range_fails_and_arguments_are_checked() -> Result<()> {
 }
 
 /// A table of `count` int4 keys 0, 3, 6, ... and a filter of its records.
-fn filtered_table(count: usize) -> Result<(LocalTable, Vec<u64>)> {
+fn filtered_table(count: usize) -> Result<(OwnedTable, Vec<u64>)> {
     let keys: Vec<i32> = (0..count as i32).map(|key| key * 3).collect();
     let hashes: Vec<u32> = keys.iter().map(|&key| hash_i32(key)).collect();
     let mut table = local(&ONE_INT4, count.max(1) as u64)?;
@@ -3065,7 +3065,7 @@ fn payload_columns_of(ncolumns: usize) -> Result<()> {
     let columns = PayloadColumns::new(&value_slices, &null_slices, ROWS)?;
     let mut tables = Vec::new();
     for from_columns in [false, true] {
-        let mut table = LocalTable::new(&config, 0, CHUNK)?;
+        let mut table = OwnedTable::new(&config, 0, CHUNK)?;
         let mut pending_words = selected.clone();
         let mut offsets = vec![0u32; ROWS];
         loop {
@@ -3113,7 +3113,7 @@ fn payload_columns_of(ncolumns: usize) -> Result<()> {
     let short: Vec<&[u64]> = vec![&values[0][..ROWS - 1]; ncolumns];
     assert!(PayloadColumns::new(&short, &null_slices, ROWS).is_err());
     let two = PayloadColumns::new(&value_slices[..2], &null_slices[..2], ROWS)?;
-    let mut table = LocalTable::new(&config, 0, CHUNK)?;
+    let mut table = OwnedTable::new(&config, 0, CHUNK)?;
     let chunk = table.add_chunk()?;
     let mut pending_words = selected.clone();
     let mut pending = RowMask::try_new(ROWS, &mut pending_words)?;
@@ -3147,7 +3147,7 @@ fn a_scattered_gather_reads_what_a_gather_reads() -> Result<()> {
         keys: &[KeyKind::Int32],
         payload_size: 16,
     };
-    let mut table = LocalTable::new(&config, 0, CHUNK)?;
+    let mut table = OwnedTable::new(&config, 0, CHUNK)?;
     let mut pending_words = all_rows(ROWS);
     let mut offsets = vec![0u32; ROWS];
     loop {
