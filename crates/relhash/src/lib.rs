@@ -117,9 +117,9 @@
 //! let hashes: Vec<u32> = [7u32, 8, 7].map(|key| key.wrapping_mul(0x9e37_79b1)).into();
 //! let payload = [1u64, 2, 3].map(u64::to_ne_bytes).concat();
 //! let mut pending = [1 << 0 | 1 << 1 | 1 << 2]; // all three rows
-//! let mut offsets = [0; 3];
+//! let mut refs = [0; 3];
 //! let mut mask = RowMask::try_new(3, &mut pending)?;
-//! let mut batch = Batch::new(&hashes, &keys, &mut mask, &mut offsets)?;
+//! let mut batch = Batch::new(&hashes, &keys, &mut mask, &mut refs)?;
 //! table.insert(Some(&payload), &mut batch)?;
 //! assert_eq!(pending, [0], "every row found room");
 //!

@@ -269,32 +269,32 @@ impl<'a> Table<'a> {
         )
     }
 
-    /// For each row of `rows`, replace `offsets[row]`, a record reference
+    /// For each row of `rows`, replace `refs[row]`, a record reference
     /// from a probe or an earlier call, by the reference of the next record
     /// in its chain with the same hash, null bits and keys; `found`
     /// receives the rows that have one, and the others keep theirs.
     pub fn next_match(
         &self,
-        offsets: &mut [u32],
+        refs: &mut [u32],
         rows: &RowMaskView<'_>,
         found: &mut RowMask<'_>,
     ) -> Result<()> {
-        batch::next_match(&self.region, &self.layout, offsets, rows, found)
+        batch::next_match(&self.region, &self.layout, refs, rows, found)
     }
 
     /// For each row of `rows`, the word at byte `at` of the payload of the
-    /// record at `offsets[row]` into `out[row]`, native-endian: one word of
+    /// record at `refs[row]` into `out[row]`, native-endian: one word of
     /// a batch's matches per call, such as a Datum of the build row a join
     /// keeps there. `at` must be a multiple of 8 and `at + 8` within the
     /// payload; rows outside `rows` keep their values in `out`.
     pub fn gather(
         &self,
-        offsets: &[u32],
+        refs: &[u32],
         rows: &RowMaskView<'_>,
         at: usize,
         out: &mut [u64],
     ) -> Result<()> {
-        batch::gather::<_, false>(&self.region, &self.layout, offsets, rows, at, out)
+        batch::gather::<_, false>(&self.region, &self.layout, refs, rows, at, out)
     }
 
     /// As [`Table::gather`], for records in no order, as a sort reads
@@ -303,65 +303,57 @@ impl<'a> Table<'a> {
     /// is faster.
     pub fn gather_scattered(
         &self,
-        offsets: &[u32],
+        refs: &[u32],
         rows: &RowMaskView<'_>,
         at: usize,
         out: &mut [u64],
     ) -> Result<()> {
-        batch::gather::<_, true>(&self.region, &self.layout, offsets, rows, at, out)
+        batch::gather::<_, true>(&self.region, &self.layout, refs, rows, at, out)
     }
 
     /// For each row of `rows`, payload word `first + n` (in 8-byte units)
-    /// of the record at `offsets[row]` into `out[n][row]`, native-endian,
+    /// of the record at `refs[row]` into `out[n][row]`, native-endian,
     /// for every `out[n]` of a row each, records in no order as
     /// [`Table::gather_scattered`] reads them: one call for every column a
     /// sort's batch serves, a record located once for all of them. Rows
     /// outside `rows` keep their values.
     pub fn gather_words(
         &self,
-        offsets: &[u32],
+        refs: &[u32],
         rows: &RowMaskView<'_>,
         first: usize,
         out: &mut [&mut [u64]],
     ) -> Result<()> {
-        batch::gather_words(&self.region, &self.layout, offsets, rows, first, out)
+        batch::gather_words(&self.region, &self.layout, refs, rows, first, out)
     }
 
-    /// For each row of `rows`, replace `offsets[row]` by the record right
+    /// For each row of `rows`, replace `refs[row]` by the record right
     /// after it when that one has the same hash, null bits and keys, and
     /// put the row in `found`; other rows keep theirs. In a table linked by
     /// [`TableMut::link_grouped`] this is the next record of the key,
     /// found in one step instead of a walk down the chain.
     pub fn next_in_group(
         &self,
-        offsets: &mut [u32],
+        refs: &mut [u32],
         rows: &RowMaskView<'_>,
         found: &mut RowMask<'_>,
     ) -> Result<()> {
-        batch::next_in_group(&self.region, &self.layout, offsets, rows, found)
+        batch::next_in_group(&self.region, &self.layout, refs, rows, found)
     }
 
-    /// For each row of `rows`, key `key` of the record at `offsets[row]`:
+    /// For each row of `rows`, key `key` of the record at `refs[row]`:
     /// its slot's bits into `values[row]` (an int4 sign-extended, as its
     /// Datum is, 0 for a NULL) and whether it is NULL into `nulls[row]`.
     /// Rows outside `rows` keep their values.
     pub fn gather_key(
         &self,
-        offsets: &[u32],
+        refs: &[u32],
         rows: &RowMaskView<'_>,
         key: usize,
         values: &mut [u64],
         nulls: &mut [bool],
     ) -> Result<()> {
-        batch::gather_key(
-            &self.region,
-            &self.layout,
-            offsets,
-            rows,
-            key,
-            values,
-            nulls,
-        )
+        batch::gather_key(&self.region, &self.layout, refs, rows, key, values, nulls)
     }
 
     /// Fill a Bloom filter of [`bloom::words_for`] this table's records
@@ -380,9 +372,9 @@ impl<'a> Table<'a> {
     }
 
     /// The record at a reference a call of this table returned.
-    pub fn record(&self, offset: u32) -> Result<Record<'_>> {
+    pub fn record(&self, reference: u32) -> Result<Record<'_>> {
         Ok(Access::new(&self.region, &self.layout)
-            .locate(offset)?
+            .locate(reference)?
             .record())
     }
 
@@ -414,11 +406,11 @@ pub struct RecordCursor<'t> {
 }
 
 impl<'t> RecordCursor<'t> {
-    /// The record at `offset`: an error for a reference that names no
+    /// The record at `reference`: an error for a reference that names no
     /// record of the table.
     #[inline(always)]
-    pub fn record(&mut self, offset: u32) -> Result<Record<'t>> {
-        Ok(self.access.locate(offset)?.record())
+    pub fn record(&mut self, reference: u32) -> Result<Record<'t>> {
+        Ok(self.access.locate(reference)?.record())
     }
 }
 
@@ -533,23 +525,23 @@ impl<'a> TableMut<'a> {
     }
 
     /// The payload of the record at a reference, to change in place.
-    pub fn payload_mut(&mut self, offset: u32) -> Result<&mut [u8]> {
-        writer::payload_mut(&self.0.region, &self.0.layout, offset)
+    pub fn payload_mut(&mut self, reference: u32) -> Result<&mut [u8]> {
+        writer::payload_mut(&self.0.region, &self.0.layout, reference)
     }
 
     /// Hand `each` the row and the payload of the record of each selected
     /// row, in the order of the rows, to change in place: the payloads of
     /// a batch, which hold the references [`TableMut::find_or_insert`]
-    /// gave them, for one check of the table. `offsets` has a reference
+    /// gave them, for one check of the table. `refs` has a reference
     /// per row of the mask; a reference that names no record fails the
     /// call, after the rows before it.
     pub fn each_payload(
         &mut self,
-        offsets: &[u32],
+        refs: &[u32],
         rows: &RowMaskView<'_>,
         each: impl FnMut(usize, &mut [u8]),
     ) -> Result<()> {
-        writer::each_payload(&self.0.region, &self.0.layout, offsets, rows, each)
+        writer::each_payload(&self.0.region, &self.0.layout, refs, rows, each)
     }
 
     /// Write 0 into key `key` of every record, its NULL bit kept; the count
