@@ -73,7 +73,7 @@ pub struct OwnedTable {
 impl OwnedTable {
     /// An empty table whose index is sized for `capacity` records and
     /// whose chunks will have `chunk_bytes` bytes each.
-    pub fn new(config: &TableConfig<'_>, capacity: u64, chunk_bytes: usize) -> Result<Self> {
+    pub fn new(config: &TableConfig, capacity: u64, chunk_bytes: usize) -> Result<Self> {
         ensure!(
             super::chunks::chunk_len_fits(chunk_bytes),
             "a chunk of {chunk_bytes} bytes is not a multiple of 8 of {CHUNK_HEADER} to \
@@ -105,12 +105,7 @@ impl OwnedTable {
     /// Empty the table, keeping its index and chunks, for a caller that
     /// builds it again.
     pub fn reset(&mut self) -> Result<()> {
-        let kinds = self.table()?.key_kinds().to_vec();
-        let payload_size = self.table()?.payload_size();
-        let config = TableConfig {
-            keys: &kinds,
-            payload_size,
-        };
+        let config = self.table()?.config();
         // SAFETY: the blocks are this owner's, exclusively borrowed, and
         // were created of these lengths.
         unsafe {
@@ -189,18 +184,7 @@ impl OwnedTable {
 
     /// Move the table to a new index sized for `capacity` records.
     pub fn regrow(&mut self, capacity: u64) -> Result<()> {
-        let config_len = {
-            let table = self.table()?;
-            let kinds = table.key_kinds().to_vec();
-            let payload_size = table.payload_size();
-            index_size(
-                &TableConfig {
-                    keys: &kinds,
-                    payload_size,
-                },
-                capacity,
-            )?
-        };
+        let config_len = index_size(&self.table()?.config(), capacity)?;
         let index = Block::new(config_len.div_ceil(8));
         {
             let mut table = self.table_mut()?;

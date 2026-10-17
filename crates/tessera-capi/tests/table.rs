@@ -36,8 +36,8 @@ use tessera_kernels::column_keys::KeyColumns;
 use tessera_kernels::int32::{self, NullKeys};
 use tessera_kernels::phases::{Action, PROBE, Participant};
 use tessera_kernels::table::{
-    Batch, CHUNK_HEADER, KeyKind, MAX_CHUNK_LEN, MAX_PAYLOAD_COLUMNS, OwnedTable, TableConfig,
-    index_size, payload_null_words,
+    Batch, CHUNK_HEADER, MAX_CHUNK_LEN, MAX_PAYLOAD_COLUMNS, OwnedTable, TableConfig, index_size,
+    payload_null_words,
 };
 
 thread_local! {
@@ -147,8 +147,8 @@ impl Keys {
     }
 }
 
-const CONFIG: TableConfig<'static> = TableConfig {
-    keys: &[KeyKind::Int32],
+const CONFIG: TableConfig = TableConfig {
+    nkeys: 1,
     payload_size: 8,
 };
 
@@ -165,32 +165,23 @@ struct CTable {
 }
 
 impl CTable {
-    /// An empty table of one key of `kind` for `capacity` records.
+    /// An empty table of one key for `capacity` records.
     ///
     /// # Safety
     ///
     /// None beyond the entry points' own: every buffer is local.
-    unsafe fn new(kind: u32, payload_size: usize, capacity: u64) -> Self {
-        let kinds = [kind];
+    unsafe fn new(payload_size: usize, capacity: u64) -> Self {
         let mut status = Status::new();
         let mut size = 0;
         // SAFETY: local buffers of the declared sizes.
         unsafe {
-            let code = tess_table_size(
-                1,
-                kinds.as_ptr(),
-                payload_size,
-                capacity,
-                &raw mut size,
-                &raw mut status,
-            );
+            let code = tess_table_size(1, payload_size, capacity, &raw mut size, &raw mut status);
             assert_eq!(code, Code::Ok, "{}", status.message());
             let mut index = vec![0_u64; size / 8];
             let code = tess_table_create(
                 index.as_mut_ptr().cast(),
                 size,
                 1,
-                kinds.as_ptr(),
                 payload_size,
                 capacity,
                 &raw mut status,
@@ -370,7 +361,6 @@ impl CTable {
 
     /// Move the table to an index for `capacity` records.
     fn regrow(&mut self, capacity: u64) -> Code {
-        let kinds = [1_u32];
         let mut status = Status::new();
         let mut size = 0;
         // SAFETY: local buffers of the declared sizes; the new index takes
@@ -378,7 +368,6 @@ impl CTable {
         unsafe {
             let code = tess_table_size(
                 1,
-                kinds.as_ptr(),
                 self.payload_size,
                 capacity,
                 &raw mut size,
@@ -515,7 +504,7 @@ fn datum_and_dense_keys_build_the_same_table() -> Result<()> {
 
 #[test]
 fn the_layout_probes_match_the_types() {
-    assert_eq!(tess_table_format_version(), 1);
+    assert_eq!(tess_table_format_version(), 2);
     assert_eq!(tess_table_layout(0), 96);
     assert_eq!(tess_table_layout(1), 8);
     assert_eq!(tess_table_layout(2), size_of::<TableKey>());
@@ -541,16 +530,15 @@ fn the_entry_points_round_trip() -> Result<()> {
         column: &raw const column,
         prepared: ptr::null(),
     };
-    let kinds = [1_u32];
     let mut status = Status::new();
     let mut size = 0;
     // SAFETY: local buffers of the declared sizes, aliased by nothing else,
     // throughout this test.
     unsafe {
-        let code = tess_table_size(1, kinds.as_ptr(), 8, 100, &raw mut size, &raw mut status);
+        let code = tess_table_size(1, 8, 100, &raw mut size, &raw mut status);
         assert_eq!((code, status.code), (Code::Ok, Code::Ok));
         assert_eq!(size, index_size(&CONFIG, 100)?);
-        let mut table = CTable::new(1, 8, 100);
+        let mut table = CTable::new(8, 100);
         assert_eq!(attach(table.ptr(), &raw mut status), Code::Ok);
 
         // Hashes under the reject policy: NULL rows leave the valid mask.
@@ -785,8 +773,7 @@ fn the_entry_points_round_trip() -> Result<()> {
             &raw mut status,
         );
         assert_eq!(code, invalid);
-        let bad_kinds = [3_u32];
-        let code = tess_table_size(1, bad_kinds.as_ptr(), 8, 1, &raw mut size, &raw mut status);
+        let code = tess_table_size(0, 8, 1, &raw mut size, &raw mut status);
         assert_eq!(code, invalid);
         stats.struct_size = 8;
         assert_eq!(
@@ -803,14 +790,14 @@ fn the_entry_points_round_trip() -> Result<()> {
             invalid
         );
         let version = base.add(8).cast::<u32>();
-        version.write_unaligned(2);
+        version.write_unaligned(3);
         assert_eq!(attach(table.ptr(), &raw mut status), invalid);
         assert!(
-            status.message().contains("version 2"),
+            status.message().contains("version 3"),
             "{}",
             status.message()
         );
-        version.write_unaligned(1);
+        version.write_unaligned(2);
         assert_eq!(attach(table.ptr(), &raw mut status), Code::Ok);
     }
     Ok(())
@@ -850,7 +837,7 @@ fn grouped_states_accumulate_through_the_entry_points() -> Result<()> {
     // SAFETY: local buffers of the declared sizes, aliased by nothing else,
     // throughout this test.
     unsafe {
-        let mut table = CTable::new(1, 16, 16);
+        let mut table = CTable::new(16, 16);
         table.add_chunk(4096);
         let mut pending_words = all;
         let mut pending = Mask {
@@ -1104,7 +1091,7 @@ fn sum_states_accumulate_through_the_entry_point() -> Result<()> {
     // SAFETY: local buffers of the declared sizes, aliased by nothing else,
     // throughout this test.
     unsafe {
-        let mut table = CTable::new(1, 8 + 32 * 3, 16);
+        let mut table = CTable::new(8 + 32 * 3, 16);
         table.add_chunk(8192);
         let mut pending_words = all;
         let mut pending = Mask {
@@ -1377,7 +1364,7 @@ fn partial_states_merge_through_the_entry_point() -> Result<()> {
     // SAFETY: local buffers of the declared sizes, aliased by nothing else,
     // throughout this test.
     unsafe {
-        let mut table = CTable::new(1, 8 + 32 * 2, 16);
+        let mut table = CTable::new(8 + 32 * 2, 16);
         table.add_chunk(8192);
         let mut pending_words = [(1 << nrows) - 1];
         let mut pending = Mask {
@@ -1561,7 +1548,7 @@ fn marks_and_walks_that_cannot_be_done_are_refused() -> Result<()> {
     unsafe {
         // Records of 32 bytes, 70 to a chunk: chunk 1 holds 30.
         let chunk_bytes = 8 + 70 * 32;
-        let mut table = CTable::new(1, 8, 128);
+        let mut table = CTable::new(8, 128);
         let mut pending_words = [u64::MAX, (1 << 36) - 1];
         let mut pending = Mask {
             nrows: NROWS as i32,
@@ -1711,7 +1698,7 @@ fn the_mark_entry_points_leave_marked_records_out() -> Result<()> {
     unsafe {
         // Chunks of 70 records of 32 bytes: two words of marks each.
         let chunk_bytes = 8 + 70 * 32;
-        let mut table = CTable::new(1, 8, 256);
+        let mut table = CTable::new(8, 256);
         let mut pending_words = mask_of(&all);
         let mut pending = Mask {
             nrows: NROWS as i32,
@@ -1837,7 +1824,6 @@ fn the_writer_entry_points_round_trip() -> Result<()> {
         .iter()
         .map(|&value| int32::murmurhash32(value as u32))
         .collect();
-    let kinds = [1_u32];
     let mut status = Status::new();
     let mut size = 0;
     let all = [u64::MAX, (1 << 36) - 1];
@@ -1846,7 +1832,7 @@ fn the_writer_entry_points_round_trip() -> Result<()> {
     unsafe {
         // An index for eight records, a chunk for four: the chunk fills
         // up, and a walk sees its records in order.
-        let mut table = CTable::new(1, 8, 8);
+        let mut table = CTable::new(8, 8);
         table.add_chunk(8 + 4 * 32);
         let mut pending_words = all;
         let mut pending = Mask {
@@ -1917,7 +1903,7 @@ fn the_writer_entry_points_round_trip() -> Result<()> {
         // a second chunk the rest resolve to ten records, and payloads
         // change in place.
         assert_eq!(table.regrow(100), Code::Ok);
-        let code = tess_table_size(1, kinds.as_ptr(), 8, 100, &raw mut size, &raw mut status);
+        let code = tess_table_size(1, 8, 100, &raw mut size, &raw mut status);
         assert_eq!(code, Code::Ok);
         let mut again = [0; 4];
         let mut cursor = 0;
@@ -2086,7 +2072,7 @@ fn int8_keys_find_the_records_of_int4_keys() -> Result<()> {
     let mut status = Status::new();
     // SAFETY: local buffers of the declared sizes, aliased by nothing else.
     unsafe {
-        let mut table = CTable::new(1, 0, 64);
+        let mut table = CTable::new(0, 64);
         let (built_hashes, mut pending_words) = hash_column(&built_column, 1, 64);
         let built_key = TableKey {
             kind: 1,
@@ -2215,7 +2201,7 @@ fn int4_keys_find_the_records_of_int8_keys() -> Result<()> {
     let mut status = Status::new();
     // SAFETY: local buffers of the declared sizes, aliased by nothing else.
     unsafe {
-        let mut table = CTable::new(2, 0, 64);
+        let mut table = CTable::new(0, 64);
 
         let (built_hashes, mut pending_words) = hash_column(&built_column, 2, 64);
         let built_key = TableKey {
@@ -2298,7 +2284,7 @@ fn grouped_insertion_steps_through_a_key_in_one_call_each() -> Result<()> {
     let mut status = Status::new();
     // SAFETY: local buffers of the declared sizes, aliased by nothing else.
     unsafe {
-        let mut table = CTable::new(1, 8, 64);
+        let mut table = CTable::new(8, 64);
         let (hashes, _) = hash_column(&column, 1, 64);
         let mut pending_words = [u64::MAX];
         let mut pending = Mask {
@@ -2409,7 +2395,7 @@ fn the_sort_entry_points_order_every_record() -> Result<()> {
     // SAFETY: local buffers of the declared sizes, aliased by nothing else,
     // throughout this test.
     unsafe {
-        let mut table = CTable::new(1, 8, 0);
+        let mut table = CTable::new(8, 0);
         let hashes = vec![0_u32; keys.nrows()];
         let mut pending_words = keys.all_rows();
         let mut pending = Mask {
@@ -2516,17 +2502,17 @@ fn the_sort_entry_points_order_every_record() -> Result<()> {
             tess_sort_item_words(1, &raw const bad_kind, &raw mut words, &raw mut status),
             Code::Ok
         );
-        let int8 = CSortKey {
-            kind: 2,
+        let two = [CSortKey {
+            kind: 1,
             flags: NULLABLE,
-        };
+        }; 2];
         let mut items = vec![0_u64; keys.nrows() * 2];
         let mut count = 0;
         assert_ne!(
             tess_sort_items(
                 table.ptr(),
-                1,
-                &raw const int8,
+                2,
+                two.as_ptr(),
                 items.as_mut_ptr(),
                 items.len(),
                 &raw mut count,
@@ -2595,7 +2581,7 @@ fn the_columns_entry_point_writes_each_payload_word() -> Result<()> {
     // SAFETY: local buffers of the declared sizes, aliased by nothing else,
     // throughout this test.
     unsafe {
-        let mut table = CTable::new(1, 24, 0);
+        let mut table = CTable::new(24, 0);
         table.add_chunk(CHUNK_HEADER + 80 * 48);
         let hashes = vec![0_u32; 70];
         let mut pending_words = keys.all_rows();
@@ -2708,7 +2694,7 @@ fn the_words_entry_point_gathers_every_column() -> Result<()> {
     // SAFETY: local buffers of the declared sizes, aliased by nothing else,
     // throughout this test.
     unsafe {
-        let mut table = CTable::new(1, 8 * (1 + COLUMNS), 0);
+        let mut table = CTable::new(8 * (1 + COLUMNS), 0);
         table.add_chunk(CHUNK_HEADER + 70 * 192);
         let hashes = vec![0_u32; 70];
         let mut pending_words = keys.all_rows();
@@ -2821,7 +2807,7 @@ fn the_partitioned_columns_entry_point_counts_each_partition() -> Result<()> {
     // SAFETY: local buffers of the declared sizes, aliased by nothing else,
     // throughout this test.
     unsafe {
-        let mut table = CTable::new(1, 24, 0);
+        let mut table = CTable::new(24, 0);
         for partition in 0..4 {
             let records = if partition == 3 { 5 } else { 40 };
             table.add_chunk(CHUNK_HEADER + records * 48);
@@ -3074,7 +3060,7 @@ fn outputs_are_checked_before_anything_changes() -> Result<()> {
     // SAFETY: local buffers of the declared sizes, aliased by nothing else,
     // throughout this test.
     unsafe {
-        let mut table = CTable::new(1, 8, 8);
+        let mut table = CTable::new(8, 8);
         table.add_chunk(8 + 4 * 32);
         let mut pending_words = [0b1111];
         let mut pending = Mask {
@@ -3199,50 +3185,51 @@ fn an_append_by_partition_checks_what_it_is_given() -> Result<()> {
         column: &raw const column,
         prepared: ptr::null(),
     };
-    let int8 = TableKey {
-        kind: 2,
-        ..key_copy(&int4)
-    };
+    let two = [key_copy(&int4), key_copy(&int4)];
     let hashes: Vec<u32> = (0..4).collect();
     let mut status = Status::new();
     // SAFETY: local buffers of the declared sizes, aliased by nothing else,
     // throughout this test.
     unsafe {
         // An int4 key and one payload column: records of 40 bytes.
-        let mut table = CTable::new(1, 16, 8);
+        let mut table = CTable::new(16, 8);
         table.add_chunk(CHUNK_HEADER + 4 * 40);
         table.add_chunk(CHUNK_HEADER + 4 * 40);
         let mut pending_words = [0b1111];
         let mut rows = [0_u64; 2];
-        let mut append =
-            |key: &TableKey, ncolumns: i32, pending_words: &mut [u64; 1], rows: &mut [u64; 2]| {
-                let mut pending = Mask {
-                    nrows: 4,
-                    bits: pending_words.as_mut_ptr(),
-                };
-                let (mut offsets, mut nulls) = ([0; 4], 0);
-                tess_table_append_partitioned_columns(
-                    table.ptr(),
-                    [0_u32, 1].as_ptr(),
-                    2,
-                    0,
-                    hashes.as_ptr(),
-                    1,
-                    key,
-                    ncolumns,
-                    columns.as_ptr(),
-                    &raw mut pending,
-                    offsets.as_mut_ptr(),
-                    rows.as_mut_ptr(),
-                    &raw mut nulls,
-                    &raw mut status,
-                )
+        let mut append = |nkeys: i32,
+                          keys: *const TableKey,
+                          ncolumns: i32,
+                          pending_words: &mut [u64; 1],
+                          rows: &mut [u64; 2]| {
+            let mut pending = Mask {
+                nrows: 4,
+                bits: pending_words.as_mut_ptr(),
             };
-        // 65 columns, two columns where the table has one, an int8 key
-        // where it has an int4 one.
-        for (key, ncolumns) in [(&int4, 65), (&int4, 2), (&int8, 1)] {
+            let (mut offsets, mut nulls) = ([0; 4], 0);
+            tess_table_append_partitioned_columns(
+                table.ptr(),
+                [0_u32, 1].as_ptr(),
+                2,
+                0,
+                hashes.as_ptr(),
+                nkeys,
+                keys,
+                ncolumns,
+                columns.as_ptr(),
+                &raw mut pending,
+                offsets.as_mut_ptr(),
+                rows.as_mut_ptr(),
+                &raw mut nulls,
+                &raw mut status,
+            )
+        };
+        // 65 columns, two columns where the table has one, two keys where
+        // it has one.
+        let int4: *const TableKey = &raw const int4;
+        for (nkeys, keys, ncolumns) in [(1, int4, 65), (1, int4, 2), (2, two.as_ptr(), 1)] {
             assert_eq!(
-                append(key, ncolumns, &mut pending_words, &mut rows),
+                append(nkeys, keys, ncolumns, &mut pending_words, &mut rows),
                 Code::InvalidArgument,
                 "{ncolumns} columns"
             );
@@ -3256,7 +3243,7 @@ fn an_append_by_partition_checks_what_it_is_given() -> Result<()> {
             }
         }
         // The table's own go in, two to each partition.
-        assert_eq!(append(&int4, 1, &mut pending_words, &mut rows), Code::Ok);
+        assert_eq!(append(1, int4, 1, &mut pending_words, &mut rows), Code::Ok);
         assert_eq!(pending_words, [0]);
         assert_eq!(rows, [2, 2]);
     }
@@ -3281,7 +3268,7 @@ fn an_append_by_partition_refuses_partitions_past_the_limits() -> Result<()> {
     // SAFETY: local buffers of the declared sizes, aliased by nothing else,
     // throughout this test.
     unsafe {
-        let mut table = CTable::new(1, 8, 8);
+        let mut table = CTable::new(8, 8);
         table.add_chunk(CHUNK_HEADER + 4 * 32);
         table.add_chunk(CHUNK_HEADER + 4 * 32);
         let cases: [(&[u32], i32, u32); 6] = [
@@ -3367,7 +3354,7 @@ fn a_merge_that_cannot_be_done_fails() -> Result<()> {
             (i64::MIN, -1, 2, "a negative sum"),
         ];
         for (ours, theirs, kind, what) in overflows {
-            let mut table = CTable::new(1, 16, 8);
+            let mut table = CTable::new(16, 8);
             let mut pending_words = [1];
             let mut pending = Mask {
                 nrows: 1,
@@ -3488,7 +3475,7 @@ fn the_filter_entry_points_size_fill_and_probe() -> Result<()> {
         let code = tess_bloom_shared_words(NROWS as u64, &raw mut shared_words, &raw mut status);
         assert_eq!((code, shared_words), (Code::Ok, 5), "a state word and four");
 
-        let mut table = CTable::new(1, 8, 16);
+        let mut table = CTable::new(8, 16);
         let mut pending_words = all;
         let mut pending = Mask {
             nrows: NROWS as i32,
@@ -3877,10 +3864,7 @@ fn an_append_refuses_records_that_are_not_its_table_s() -> Result<()> {
         column: &raw const column,
         prepared: ptr::null(),
     };
-    let int8 = TableKey {
-        kind: 2,
-        ..key_copy(&int4)
-    };
+    let two = [key_copy(&int4), key_copy(&int4)];
     let hashes: Vec<u32> = values
         .iter()
         .map(|&value| int32::murmurhash32(value as u32))
@@ -3891,7 +3875,7 @@ fn an_append_refuses_records_that_are_not_its_table_s() -> Result<()> {
     // throughout this test.
     unsafe {
         // A table of an int4 key and a payload of 8 bytes: records of 32.
-        let mut table = CTable::new(1, 8, 8);
+        let mut table = CTable::new(8, 8);
         table.add_chunk(8 + 4 * 32);
         let mut pending_words = [0b1111];
         let mut pending = Mask {
@@ -3900,16 +3884,16 @@ fn an_append_refuses_records_that_are_not_its_table_s() -> Result<()> {
         };
         let mut offsets = [0; 4];
 
-        // Another payload size or another kind of key: refused, nothing
+        // Another payload size or another count of keys: refused, nothing
         // written and every row still pending.
-        for (payload_size, key) in [(16, &int4), (8, &int8)] {
+        for (payload_size, nkeys, keys) in [(16, 1, &raw const int4), (8, 2, two.as_ptr())] {
             let code = tess_table_append(
                 table.ptr(),
                 0,
                 payload_size,
                 hashes.as_ptr(),
-                1,
-                key,
+                nkeys,
+                keys,
                 payload.as_ptr(),
                 &raw mut pending,
                 offsets.as_mut_ptr(),
@@ -4028,7 +4012,7 @@ fn payload_columns_append_without_allocating() -> Result<()> {
         // SAFETY: local buffers of the declared sizes, aliased by nothing
         // else, throughout this test.
         unsafe {
-            let mut table = CTable::new(1, payload_size, 4);
+            let mut table = CTable::new(payload_size, 4);
             table.add_chunk(CHUNK_HEADER + 4 * (24 + payload_size));
             let mut pending_words = [0b1111];
             let mut pending = Mask {
@@ -4114,7 +4098,7 @@ fn a_debug_build_checks_every_chunk() -> Result<()> {
     // SAFETY: local buffers of the declared sizes, aliased by nothing else,
     // throughout this test.
     unsafe {
-        let mut table = CTable::new(1, 8, 8);
+        let mut table = CTable::new(8, 8);
         table.bases.push(long.as_mut_ptr().cast());
         table.lens.push(MAX_CHUNK_LEN + 8);
         table.refresh();

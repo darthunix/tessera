@@ -18,9 +18,9 @@ use tessera_kernels::decimal::{
 use tessera_kernels::int32::{self, NullKeys, hash_combine, murmurhash32};
 use tessera_kernels::ops::ArithmeticError;
 use tessera_kernels::table::{
-    Batch, CHUNK_HEADER, Cursor, FORMAT_VERSION, HELD, KeyKind, KeySource, MAX_CHUNK_LEN, MAX_KEYS,
-    Marks, OwnedTable, Table, TableConfig, UNIT_BITS, bloom, index_size, mark, mark_words,
-    record_bytes, record_bytes_of, scan_unmarked,
+    Batch, CHUNK_HEADER, Cursor, FORMAT_VERSION, HELD, KeySource, MAX_CHUNK_LEN, MAX_KEYS, Marks,
+    OwnedTable, Table, TableConfig, UNIT_BITS, bloom, index_size, mark, mark_words, record_bytes,
+    scan_unmarked,
 };
 use tessera_testing::{edge, flags, integer, property, values, words};
 
@@ -39,14 +39,13 @@ const BUCKET_SHIFT: usize = 52;
 const RECORD_SIZE: usize = 56;
 const NKEYS: usize = 64;
 const FLAGS: usize = 68;
-const KINDS: usize = 72;
-const RESERVED: usize = 88;
+const RESERVED: usize = 72;
 
 /// Chunks of the tests: small, so that most tables span several.
 const CHUNK: usize = 4096;
 
-const ONE_INT4: TableConfig<'static> = TableConfig {
-    keys: &[KeyKind::Int32],
+const ONE_INT4: TableConfig = TableConfig {
+    nkeys: 1,
     payload_size: 8,
 };
 
@@ -55,7 +54,7 @@ type Corruption<'a> = (&'a str, &'a dyn Fn(&mut [u64]));
 
 /// An empty table for `capacity` records of `config` over chunks of
 /// [`CHUNK`] bytes.
-fn local(config: &TableConfig<'_>, capacity: u64) -> Result<OwnedTable> {
+fn local(config: &TableConfig, capacity: u64) -> Result<OwnedTable> {
     OwnedTable::new(config, capacity, CHUNK)
 }
 
@@ -106,7 +105,7 @@ fn reference(chunk: usize, byte: usize) -> u32 {
 #[test]
 fn a_created_table_is_empty_and_attaches_again() -> Result<()> {
     let config = TableConfig {
-        keys: &[KeyKind::Int32, KeyKind::Int64],
+        nkeys: 2,
         payload_size: 12,
     };
     let table = local(&config, 300)?;
@@ -117,44 +116,58 @@ fn a_created_table_is_empty_and_attaches_again() -> Result<()> {
         assert_eq!(stats.buckets, 1024);
         assert_eq!(stats.bytes_used, HEADER as u64 + 1024 * 4);
         assert_eq!(stats.region_len, HEADER as u64 + 1024 * 4);
-        assert_eq!(table.key_kinds(), config.keys);
+        assert_eq!(table.config(), config);
         assert_eq!(table.payload_size(), 12);
         assert_eq!(table.record_size(), model_record_size(2, 12));
         stats
     };
     let again = table.table()?;
     assert_eq!(again.stats(), stats);
-    assert_eq!(again.key_kinds(), config.keys);
+    assert_eq!(again.config(), config);
     assert_eq!(table.chunks(), 0, "no chunk before the first record");
     Ok(())
 }
 
 #[test]
 fn a_record_takes_its_header_its_key_slots_and_its_payload() -> Result<()> {
-    let keys = [KeyKind::Int64; MAX_KEYS];
     for nkeys in 1..=MAX_KEYS {
         for payload_size in 0..=1024 {
-            let config = TableConfig {
-                keys: &keys[..nkeys],
+            let bytes = record_bytes(&TableConfig {
+                nkeys,
                 payload_size,
-            };
-            let bytes = record_bytes_of(nkeys, payload_size)?;
+            })?;
             assert_eq!(bytes, model_record_size(nkeys, payload_size));
-            assert_eq!(bytes, record_bytes(&config)?, "whatever the kinds");
         }
     }
-    assert!(record_bytes_of(0, 8).is_err());
-    assert!(record_bytes_of(MAX_KEYS + 1, 8).is_err());
-    assert!(record_bytes_of(1, usize::MAX).is_err());
+    assert!(
+        record_bytes(&TableConfig {
+            nkeys: 0,
+            payload_size: 8
+        })
+        .is_err()
+    );
+    assert!(
+        record_bytes(&TableConfig {
+            nkeys: MAX_KEYS + 1,
+            payload_size: 8
+        })
+        .is_err()
+    );
+    assert!(
+        record_bytes(&TableConfig {
+            nkeys: 1,
+            payload_size: usize::MAX
+        })
+        .is_err()
+    );
     Ok(())
 }
 
 #[test]
 fn index_size_covers_header_and_buckets() -> Result<()> {
-    let keys = [KeyKind::Int32; 3];
     for payload_size in [0, 1, 8, 13] {
         let config = TableConfig {
-            keys: &keys,
+            nkeys: 3,
             payload_size,
         };
         assert_eq!(record_bytes(&config)?, model_record_size(3, payload_size));
@@ -174,28 +187,28 @@ fn index_size_covers_header_and_buckets() -> Result<()> {
 #[test]
 fn configurations_are_checked() -> Result<()> {
     let no_keys = TableConfig {
-        keys: &[],
+        nkeys: 0,
         payload_size: 0,
     };
     assert!(index_size(&no_keys, 1).is_err());
     assert!(local(&no_keys, 1).is_err());
     let too_many = TableConfig {
-        keys: &[KeyKind::Int64; MAX_KEYS + 1],
+        nkeys: MAX_KEYS + 1,
         payload_size: 0,
     };
     assert!(index_size(&too_many, 1).is_err());
     let most = TableConfig {
-        keys: &[KeyKind::Int64; MAX_KEYS],
+        nkeys: MAX_KEYS,
         payload_size: 0,
     };
     assert!(local(&most, 1).is_ok());
     let huge_payload = TableConfig {
-        keys: &[KeyKind::Int32],
+        nkeys: 1,
         payload_size: usize::MAX - 100,
     };
     assert!(index_size(&huge_payload, 1).is_err());
     let wide_payload = TableConfig {
-        keys: &[KeyKind::Int32],
+        nkeys: 1,
         payload_size: 1 << 33,
     };
     assert!(index_size(&wide_payload, 1).is_err());
@@ -212,7 +225,7 @@ fn configurations_are_checked() -> Result<()> {
 #[test]
 fn a_corrupt_header_is_refused() -> Result<()> {
     let config = TableConfig {
-        keys: &[KeyKind::Int32, KeyKind::Int64],
+        nkeys: 2,
         payload_size: 8,
     };
     let len = (HEADER + 1024 * 4) as u64;
@@ -236,7 +249,13 @@ fn a_corrupt_header_is_refused() -> Result<()> {
             set_u64(w, BUCKETS_OFFSET, HEADER as u64 - 4)
         }),
         ("reserved word", &|w| set_u64(w, RESERVED_USED, 8)),
-        ("last reserved word", &|w| set_u64(w, RESERVED, 1)),
+        ("first of the last reserved words", &|w| {
+            set_u64(w, RESERVED, 1)
+        }),
+        ("a byte of the last reserved words", &|w| {
+            set_bytes(w, RESERVED + 9, &[3])
+        }),
+        ("last reserved word", &|w| set_u64(w, RESERVED + 16, 1)),
         ("buckets not a power of two", &|w| {
             set_u32(w, NBUCKETS, 1000)
         }),
@@ -245,7 +264,6 @@ fn a_corrupt_header_is_refused() -> Result<()> {
         ("record size", &|w| set_u32(w, RECORD_SIZE, 48)),
         ("no keys", &|w| set_u32(w, NKEYS, 0)),
         ("too many keys", &|w| set_u32(w, NKEYS, MAX_KEYS as u32 + 1)),
-        ("unknown key kind", &|w| set_bytes(w, KINDS + 1, &[3])),
         ("flags", &|w| set_u32(w, FLAGS, 1)),
     ];
     for (what, corrupt) in corruptions {
@@ -254,11 +272,6 @@ fn a_corrupt_header_is_refused() -> Result<()> {
         assert!(table.table().is_err(), "{what} was accepted");
     }
     let mut table = local(&config, 100)?;
-    set_bytes(table.index_words(), KINDS + 2, &[3]);
-    assert!(
-        table.table().is_ok(),
-        "a kind byte past the keys is ignored"
-    );
     set_u64(table.index_words(), NRECORDS, 12);
     assert!(
         table.table().is_ok(),
@@ -550,7 +563,7 @@ fn a_null_key_groups_apart_from_the_value_it_hashes_like() -> Result<()> {
 #[test]
 fn a_cleared_key_is_zero_in_every_record() -> Result<()> {
     let config = TableConfig {
-        keys: &[KeyKind::Int32, KeyKind::Int64],
+        nkeys: 2,
         payload_size: 8,
     };
     let nrows: usize = 300;
@@ -585,7 +598,7 @@ fn a_cleared_key_is_zero_in_every_record() -> Result<()> {
 #[test]
 fn two_keys_of_different_kinds_compare_whole() -> Result<()> {
     let config = TableConfig {
-        keys: &[KeyKind::Int32, KeyKind::Int64],
+        nkeys: 2,
         payload_size: 0,
     };
     let first: Vec<i32> = (0..100).map(|row| row % 7 - 3).collect();
@@ -742,7 +755,7 @@ fn linking_counts_the_records_whose_keys_were_there_already() -> Result<()> {
 #[test]
 fn a_record_larger_than_a_chunk_is_refused() -> Result<()> {
     let config = TableConfig {
-        keys: &[KeyKind::Int32],
+        nkeys: 1,
         payload_size: 64,
     };
     let values = [1];
@@ -762,12 +775,22 @@ fn a_record_larger_than_a_chunk_is_refused() -> Result<()> {
     // key and the largest payload fill a chunk of 1 MiB after its used
     // mark, eight bytes more do not.
     let largest = MAX_CHUNK_LEN - CHUNK_HEADER - 16 - 8;
-    assert_eq!(record_bytes_of(1, largest)?, MAX_CHUNK_LEN - CHUNK_HEADER);
+    assert_eq!(
+        record_bytes(&TableConfig {
+            nkeys: 1,
+            payload_size: largest
+        })?,
+        MAX_CHUNK_LEN - CHUNK_HEADER
+    );
     for payload_size in [largest + 1, MAX_CHUNK_LEN] {
-        let error = record_bytes_of(1, payload_size).unwrap_err();
+        let error = record_bytes(&TableConfig {
+            nkeys: 1,
+            payload_size,
+        })
+        .unwrap_err();
         assert!(error.to_string().contains("does not fit"), "{error}");
         let config = TableConfig {
-            keys: &[KeyKind::Int32],
+            nkeys: 1,
             payload_size,
         };
         assert!(index_size(&config, 1).is_err());
@@ -803,7 +826,7 @@ fn a_missing_payload_is_zeros() -> Result<()> {
     let keys = [ColumnView::try_new(&values, None)?];
     let hashes = [hash_i32(42)];
     let config = TableConfig {
-        keys: &[KeyKind::Int32],
+        nkeys: 1,
         payload_size: 13,
     };
     let mut table = local(&config, 1)?;
@@ -815,7 +838,7 @@ fn a_missing_payload_is_zeros() -> Result<()> {
 #[test]
 fn dimension_errors_come_before_any_change() -> Result<()> {
     let config = TableConfig {
-        keys: &[KeyKind::Int32, KeyKind::Int32],
+        nkeys: 2,
         payload_size: 8,
     };
     let values: Vec<i32> = (0..70).collect();
@@ -1795,7 +1818,7 @@ fn a_word_probed_at_once_detects_a_cycle() -> Result<()> {
 #[test]
 fn gather_reads_one_payload_word_of_each_selected_match() -> Result<()> {
     let config = TableConfig {
-        keys: &[KeyKind::Int32],
+        nkeys: 1,
         payload_size: 16,
     };
     let nrows = 100;
@@ -2001,7 +2024,7 @@ fn grouped_states_follow_a_row_by_row_model() -> Result<()> {
     // Payload: flags, count(*), count(x), sum(x), min(x) of int4, max(y) of int8.
     const FLAGS_AT: usize = 0;
     let config = TableConfig {
-        keys: &[KeyKind::Int32],
+        nkeys: 1,
         payload_size: 48,
     };
     let nrows = 200;
@@ -2190,7 +2213,7 @@ fn sum_states_follow_a_row_by_row_model() -> Result<()> {
     const SUMS: usize = 3;
     for (distinct, near_bound) in [(5, false), (11, true), (200, false), (200, true)] {
         let config = TableConfig {
-            keys: &[KeyKind::Int32],
+            nkeys: 1,
             payload_size: 8 + 8 * SumState::WORDS * SUMS,
         };
         let nrows: usize = 300;
@@ -2337,7 +2360,7 @@ fn sum_states_follow_a_row_by_row_model() -> Result<()> {
 fn extreme_states_follow_a_row_by_row_model() -> Result<()> {
     for (distinct, max, numeric) in [(5, true, false), (11, false, true), (200, true, true)] {
         let config = TableConfig {
-            keys: &[KeyKind::Int32],
+            nkeys: 1,
             payload_size: 8 + 8 * ExtremeState::WORDS,
         };
         let nrows: usize = 300;
@@ -2467,7 +2490,7 @@ fn partial_states_merge_as_the_rows_would() -> Result<()> {
     const PARTICIPANTS: usize = 3;
     for (distinct, near_bound) in [(5, false), (11, true), (200, false)] {
         let config = TableConfig {
-            keys: &[KeyKind::Int32],
+            nkeys: 1,
             payload_size: 8 + 8 * SumState::WORDS * SUMS,
         };
         let nrows: usize = 600;
@@ -2697,7 +2720,7 @@ fn a_state_merges_another() {
 #[test]
 fn a_sum_past_the_bigint_range_fails_and_arguments_are_checked() -> Result<()> {
     let config = TableConfig {
-        keys: &[KeyKind::Int64],
+        nkeys: 1,
         payload_size: 16,
     };
     let keys = [ColumnView::try_new(&[-5i64, -5, 1 << 40], None)?];
@@ -2982,7 +3005,7 @@ fn a_null_group_key_and_int8_keys_pass_their_filter() -> Result<()> {
     // Keys 1, NULL, 2^40 under the grouping policy: the NULL's hash is the
     // policy's constant.
     let config = TableConfig {
-        keys: &[KeyKind::Int64],
+        nkeys: 1,
         payload_size: 8,
     };
     let values = [1_i64, 0, 1 << 40];
@@ -3052,7 +3075,7 @@ fn payload_columns_of(ncolumns: usize) -> Result<()> {
     }
     let payload_bytes: Vec<u8> = payload.iter().flat_map(|word| word.to_ne_bytes()).collect();
     let config = TableConfig {
-        keys: &[KeyKind::Int32],
+        nkeys: 1,
         payload_size: 8 * width,
     };
     // Every third row left out of the mask.
@@ -3144,7 +3167,7 @@ fn a_scattered_gather_reads_what_a_gather_reads() -> Result<()> {
         .flat_map(|row| [row * 11, row << 20].into_iter().flat_map(u64::to_ne_bytes))
         .collect();
     let config = TableConfig {
-        keys: &[KeyKind::Int32],
+        nkeys: 1,
         payload_size: 16,
     };
     let mut table = OwnedTable::new(&config, 0, CHUNK)?;

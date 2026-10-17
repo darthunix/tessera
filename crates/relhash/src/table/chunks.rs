@@ -224,7 +224,7 @@ fn chunk_region(chunks: &Chunks<'_>) -> RawRegion {
 /// and one of them sizes the index for the records once all are counted.
 /// The caller must be the chunk's one writer.
 pub fn append_to<K: KeySource + ?Sized>(
-    config: &TableConfig<'_>,
+    config: &TableConfig,
     chunks: Chunks<'_>,
     chunk: usize,
     payload: Option<&[u8]>,
@@ -238,7 +238,7 @@ pub fn append_to<K: KeySource + ?Sized>(
 /// of its NULL bits, then a word per column, which must be the table's
 /// whole payload.
 pub fn append_columns_to<K: KeySource + ?Sized>(
-    config: &TableConfig<'_>,
+    config: &TableConfig,
     chunks: Chunks<'_>,
     chunk: usize,
     columns: &PayloadColumns<'_>,
@@ -277,7 +277,7 @@ pub struct Split {
 /// after it go on; every row appended counts in `appended`. The caller
 /// must be the one writer of every partition's chunk.
 pub fn append_partitioned_columns_to<K: KeySource + ?Sized>(
-    config: &TableConfig<'_>,
+    config: &TableConfig,
     chunks: Chunks<'_>,
     partitions: &Partitions<'_>,
     columns: &PayloadColumns<'_>,
@@ -302,7 +302,7 @@ pub fn append_partitioned_columns_to<K: KeySource + ?Sized>(
 /// full. The copies are not linked; `*from` starts at [`CHUNK_HEADER`].
 /// The caller must be the one writer of every partition's chunk.
 pub fn split_to(
-    config: &TableConfig<'_>,
+    config: &TableConfig,
     chunks: Chunks<'_>,
     partitions: &Partitions<'_>,
     source: usize,

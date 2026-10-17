@@ -529,7 +529,6 @@ sort_begin(CustomScanState *css, EState *estate, int eflags)
 	rows.parent_context = estate->es_query_cxt;
 	rows.kernels = state->kernels;
 	rows.nkeys = state->nkernel;
-	rows.kinds = state->kinds;
 	rows.ncolumns = state->ncolumns;
 	rows.typlens = typlens;
 	rows.typbyvals = typbyvals;

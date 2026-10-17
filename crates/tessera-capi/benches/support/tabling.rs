@@ -17,13 +17,13 @@ use tessera_core::{ColumnReader, RowMask, RowMaskView};
 use tessera_kernels::accumulate;
 use tessera_kernels::column_keys::normalize_word;
 use tessera_kernels::int32::{self, NullKeys};
-use tessera_kernels::table::{Batch, KeyKind, KeySource, OwnedTable, TableConfig};
+use tessera_kernels::table::{Batch, KeySource, OwnedTable, TableConfig};
 
 use crate::reading::Input;
 use crate::support::{fixture::Fixture, runner::Runner};
 
-const CONFIG: TableConfig<'static> = TableConfig {
-    keys: &[KeyKind::Int32],
+const CONFIG: TableConfig = TableConfig {
+    nkeys: 1,
     payload_size: 8,
 };
 

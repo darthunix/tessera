@@ -145,12 +145,11 @@ Datum
 tessera_test_status_report(PG_FUNCTION_ARGS)
 {
 	TessStatus	status = TESS_STRUCT_INITIALIZER(TessStatus);
-	TessTableKeyKind kind = TESS_TABLE_KEY_INT4;
 	Size		size;
 
 	if (PG_GETARG_INT32(0) == 0)
 	{
-		if (kernels.table_size(0, &kind, 8, 10, &size, &status) == TESS_OK)
+		if (kernels.table_size(0, 8, 10, &size, &status) == TESS_OK)
 			elog(ERROR, "Tessera test sized a table without keys");
 	}
 	else if (PG_GETARG_INT32(0) == 1)

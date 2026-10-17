@@ -14,8 +14,9 @@ use proptest::prelude::*;
 use proptest::sample::select;
 use tessera_core::RowMask;
 use tessera_kernels::order;
+use tessera_kernels::sort::KeyKind;
 use tessera_kernels::sort::{MAX_ITEM_WORDS, SortKey, item_words, run_words, sort_items};
-use tessera_kernels::table::{Batch, KeyKind, KeySource, OwnedTable, TableConfig};
+use tessera_kernels::table::{Batch, KeySource, OwnedTable, TableConfig};
 use tessera_testing::{flags, integer, nrows, property, words};
 
 /// Chunks of the tests: small, so that most row sets span several.
@@ -121,7 +122,7 @@ fn compare_key(key: &SortKey, a: Option<i64>, b: Option<i64>) -> Ordering {
 fn sorted_rows(keys: &[SortKey], rows: &Rows) -> Result<(Vec<usize>, Vec<u32>)> {
     let nrows = rows.nrows();
     let config = TableConfig {
-        keys: &rows.kinds,
+        nkeys: rows.kinds.len(),
         payload_size: 8,
     };
     let mut table = OwnedTable::new(&config, 0, CHUNK)?;
@@ -263,15 +264,19 @@ fn misuse_is_an_error() -> Result<()> {
         values: vec![vec![Some(1), None]],
     };
     assert!(sorted_rows(&[key(Int32, false, false, false)], &rows).is_err());
-    // Keys that are not the table's.
+    // Keys that are not the table's: two for a table of one.
     let rows = Rows {
         kinds: vec![Int32],
         values: vec![vec![Some(1)]],
     };
-    assert!(sorted_rows(&[key(Int64, false, false, false)], &rows).is_err());
+    let two = [
+        key(Int32, false, false, false),
+        key(Int64, false, false, false),
+    ];
+    assert!(sorted_rows(&two, &rows).is_err());
     // Items that do not hold the records, and outputs of the wrong size.
     let config = TableConfig {
-        keys: &[Int32],
+        nkeys: 1,
         payload_size: 8,
     };
     let table = OwnedTable::new(&config, 0, CHUNK)?;
@@ -292,7 +297,7 @@ fn top_rows(keys: &[SortKey], rows: &Rows, n: usize) -> Result<Vec<Vec<Option<i6
     use tessera_kernels::sort::top_candidates;
     let nrows = rows.nrows();
     let config = TableConfig {
-        keys: &rows.kinds,
+        nkeys: rows.kinds.len(),
         payload_size: 8,
     };
     let mut table = OwnedTable::new(&config, 0, CHUNK)?;

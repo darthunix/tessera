@@ -54,7 +54,7 @@
 //! ```
 //! use anyhow::Result;
 //! use relhash::{RowMask, RowMaskView};
-//! use relhash::table::{Batch, KeyKind, KeySource, OwnedTable, TableConfig};
+//! use relhash::table::{Batch, KeySource, OwnedTable, TableConfig};
 //!
 //! // The caller hands keys over a word of 64 rows at a time: here one key
 //! // of int4 values with no NULL.
@@ -70,7 +70,7 @@
 //!     }
 //! }
 //!
-//! let config = TableConfig { keys: &[KeyKind::Int32], payload_size: 8 };
+//! let config = TableConfig { nkeys: 1, payload_size: 8 };
 //! let mut table = OwnedTable::new(&config, 100, 4096)?;
 //! assert_eq!(table.table()?.stats().records, 0);
 //!
@@ -133,8 +133,8 @@ pub use chunks::{
     append_partitioned_columns_to, append_to, chunk_used, init_chunk, split_to,
 };
 pub use header::{
-    CHUNK_HEADER, FORMAT_VERSION, HEADER_SIZE, KeyKind, MAX_CHUNK_LEN, MAX_CHUNKS, MAX_KEYS,
-    TableConfig, UNIT_BITS, VERSION_OFFSET, index_size, record_bytes, record_bytes_of,
+    CHUNK_HEADER, FORMAT_VERSION, HEADER_SIZE, MAX_CHUNK_LEN, MAX_CHUNKS, MAX_KEYS, TableConfig,
+    UNIT_BITS, VERSION_OFFSET, index_size, record_bytes,
 };
 use header::{Header, Layout, NRECORDS};
 pub use keys::KeySource;
@@ -162,12 +162,12 @@ pub struct Stats {
 /// The error of a call whose keys or payload size are not its table's.
 #[cold]
 #[inline(never)]
-fn other_config(config: &TableConfig<'_>, layout: &Layout) -> anyhow::Error {
+fn other_config(config: &TableConfig, layout: &Layout) -> anyhow::Error {
     anyhow!(
-        "records of keys {:?} and a payload of {} bytes are not the table's: keys {:?} and {} bytes",
-        config.keys,
+        "records of {} keys and a payload of {} bytes are not the table's: {} keys and {} bytes",
+        config.nkeys,
         config.payload_size,
-        &layout.kinds[..layout.nkeys],
+        layout.nkeys,
         layout.payload_size
     )
 }
@@ -201,7 +201,7 @@ impl<'a> Deref for TableMut<'a> {
 ///
 /// The caller has the index to itself, so nothing else reads or writes it
 /// meanwhile.
-unsafe fn init<R: Region>(region: &R, config: &TableConfig<'_>, capacity: u64) -> Result<Layout> {
+unsafe fn init<R: Region>(region: &R, config: &TableConfig, capacity: u64) -> Result<Layout> {
     let header = Header::new(config, capacity, region.len())?;
     let layout = header.validate(region.len())?;
     header.store(region);
@@ -246,11 +246,15 @@ impl<'a> Table<'a> {
         })
     }
 
-    /// The kinds of the keys, in key order. Inlined into the callers of
-    /// other crates, as it was when they lay in one crate.
+    /// What the table was created with: its count of keys and its payload
+    /// size. Inlined into the callers of other crates, as the kinds of the
+    /// keys it replaces were.
     #[inline]
-    pub fn key_kinds(&self) -> &[KeyKind] {
-        &self.layout.kinds[..self.layout.nkeys]
+    pub fn config(&self) -> TableConfig {
+        TableConfig {
+            nkeys: self.layout.nkeys,
+            payload_size: self.layout.payload_size,
+        }
     }
 
     /// Bytes of payload per record.
@@ -273,8 +277,8 @@ impl<'a> Table<'a> {
     /// table's: a call that is given the layout of the records it writes,
     /// as an append is, checks it against the index when there is one, so
     /// that a caller's mistake is not written and found later as damage.
-    pub fn check_config(&self, config: &TableConfig<'_>) -> Result<()> {
-        if self.key_kinds() == config.keys && self.layout.payload_size == config.payload_size {
+    pub fn check_config(&self, config: &TableConfig) -> Result<()> {
+        if self.config() == *config {
             Ok(())
         } else {
             Err(other_config(config, &self.layout))
@@ -528,7 +532,7 @@ impl<'a> TableMut<'a> {
     pub unsafe fn create(
         index: *mut u8,
         len: usize,
-        config: &TableConfig<'_>,
+        config: &TableConfig,
         capacity: u64,
         chunks: Chunks<'a>,
     ) -> Result<Self> {
