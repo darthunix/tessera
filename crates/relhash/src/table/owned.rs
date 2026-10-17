@@ -75,7 +75,7 @@ impl OwnedTable {
     /// whose chunks will have `chunk_bytes` bytes each.
     pub fn new(config: &TableConfig<'_>, capacity: u64, chunk_bytes: usize) -> Result<Self> {
         ensure!(
-            chunk_bytes.is_multiple_of(8) && (CHUNK_HEADER..=MAX_CHUNK_LEN).contains(&chunk_bytes),
+            super::chunks::chunk_len_fits(chunk_bytes),
             "a chunk of {chunk_bytes} bytes is not a multiple of 8 of {CHUNK_HEADER} to \
              {MAX_CHUNK_LEN}"
         );
@@ -319,9 +319,10 @@ impl OwnedTable {
             if batch.pending().selected_count() == 0 {
                 return Ok(resolved);
             }
-            let stats = self.table()?.stats();
-            if stats.records >= stats.buckets / 2 {
-                self.regrow(stats.records * 2)?;
+            let table = self.table()?;
+            let records = table.stats().records;
+            if records >= table.layout.most_records() {
+                self.regrow(records * 2)?;
             } else {
                 self.add_chunk()?;
             }

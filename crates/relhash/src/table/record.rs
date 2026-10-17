@@ -396,13 +396,7 @@ impl<'r, R: Region> Access<'r, R> {
         }
         // SAFETY: the chunk exists, and the caller is its one writer.
         let used = unsafe { self.region.chunk_used(chunk) };
-        let used = usize::try_from(used)
-            .ok()
-            .filter(|&used| {
-                used >= CHUNK_HEADER
-                    && used <= len
-                    && (used - CHUNK_HEADER).is_multiple_of(self.record_size)
-            })
+        let used = super::chunks::used_mark(used, len, self.record_size)
             .ok_or_else(|| bad_used(chunk, used))?;
         Ok((used, (len - used) / self.record_size))
     }
