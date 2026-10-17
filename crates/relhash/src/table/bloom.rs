@@ -77,9 +77,9 @@ pub(super) trait FilterShared: FilterRead + FilterOr {
 }
 
 /// The states of a shared filter.
-const NONE: u64 = 0;
-const BUILDING: u64 = 1;
-const READY: u64 = 2;
+pub(super) const NONE: u64 = 0;
+pub(super) const BUILDING: u64 = 1;
+pub(super) const READY: u64 = 2;
 
 /// A filter in memory several participants map: a state word, then a
 /// power of two of words, [`shared_words_for`] in all.

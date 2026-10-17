@@ -5,11 +5,12 @@ use crate::{RowMask, RowMaskView};
 use ::loom::sync::Arc;
 use ::loom::sync::atomic::AtomicU64;
 use ::loom::thread;
+use anyhow::Result;
 use core::sync::atomic::Ordering;
 
 use super::memory::{HEADS, LoomRegion};
 use super::model::{HASH, append, link, table};
-use crate::table::bloom::{self, FilterOr, FilterRead, FilterShared};
+use crate::table::bloom::{self, BUILDING, FilterOr, FilterRead, FilterShared, NONE, READY};
 use crate::table::header::Layout;
 use crate::table::region::order;
 
@@ -27,7 +28,7 @@ impl LoomFilter {
     fn new(records: u64, relaxed: bool) -> Self {
         let nwords = bloom::words_for(records).unwrap();
         Self {
-            state: AtomicU64::new(0),
+            state: AtomicU64::new(NONE),
             words: (0..nwords).map(|_| AtomicU64::new(0)).collect(),
             publish: if relaxed {
                 Ordering::Relaxed
@@ -62,16 +63,16 @@ impl FilterOr for LoomFilter {
 impl FilterShared for LoomFilter {
     fn claim(&self) -> bool {
         self.state
-            .compare_exchange(0, 1, order::CAS, order::CAS_FAILED)
+            .compare_exchange(NONE, BUILDING, order::CAS, order::CAS_FAILED)
             .is_ok()
     }
 
     fn publish(&self) {
-        self.state.store(2, self.publish);
+        self.state.store(READY, self.publish);
     }
 
     fn ready(&self) -> bool {
-        self.state.load(self.ready) == 2
+        self.state.load(self.ready) == READY
     }
 }
 
@@ -88,16 +89,17 @@ fn filtered_table() -> (Arc<LoomRegion>, Layout) {
     (region, layout)
 }
 
-/// Check every key of the table against a ready filter: none may be
-/// rejected.
-fn every_key_passes(filter: &LoomFilter) {
+/// Check every key of the table against the filter: an error for a filter
+/// that is not ready, and a key it rejects fails the model.
+fn probe_every_key(filter: &LoomFilter) -> Result<()> {
     let hashes = [HASH; FILTERED.len()];
     let all = [(1u64 << FILTERED.len()) - 1];
-    let rows = RowMaskView::try_new(FILTERED.len(), &all).unwrap();
+    let rows = RowMaskView::try_new(FILTERED.len(), &all)?;
     let mut found_bits = [0];
-    let mut found = RowMask::try_new(FILTERED.len(), &mut found_bits).unwrap();
-    bloom::probe_ready(filter, &hashes, &rows, &mut found).unwrap();
+    let mut found = RowMask::try_new(FILTERED.len(), &mut found_bits)?;
+    bloom::probe_ready(filter, &hashes, &rows, &mut found)?;
     assert_eq!(found_bits, all, "the filter rejected a key of the table");
+    Ok(())
 }
 
 /// Wait until the filter is ready, then check every key.
@@ -105,7 +107,7 @@ fn wait_and_check(filter: &LoomFilter) {
     while !filter.ready() {
         thread::yield_now();
     }
-    every_key_passes(filter);
+    probe_every_key(filter).unwrap();
 }
 
 #[test]
@@ -142,14 +144,8 @@ fn a_reader_sees_the_built_filter(relaxed: bool) {
             let (region, layout, filter) = (region.clone(), layout, filter.clone());
             thread::spawn(move || assert!(bloom::try_build(&*region, &layout, &*filter).unwrap()))
         };
-        let hashes = [HASH; FILTERED.len()];
-        let all = [(1u64 << FILTERED.len()) - 1];
-        let rows = RowMaskView::try_new(FILTERED.len(), &all).unwrap();
-        let mut found_bits = [0];
-        let mut found = RowMask::try_new(FILTERED.len(), &mut found_bits).unwrap();
-        if bloom::probe_ready(&*filter, &hashes, &rows, &mut found).is_ok() {
-            assert_eq!(found_bits, all, "the filter rejected a key of the table");
-        }
+        // Before the filter is ready the reader probes the table alone.
+        let _ = probe_every_key(&filter);
         wait_and_check(&filter);
         builder.join().unwrap();
     });
