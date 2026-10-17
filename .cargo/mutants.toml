@@ -46,6 +46,12 @@ exclude_globs = [
 # place, since the same operators elsewhere in these functions matter.
 # OwnedTable::find_or_insert adds the rows a call created to those of the
 # calls before; a row is created once, so the two share no bit and | is ^.
+# Place::reference puts a record's chunk above the bits of its unit, which
+# is below 2^17 and has none there: | and ^ give one reference.
+# OwnedTable::find_or_insert grows when its records reach half the
+# buckets, and asks for twice them: an index for that capacity has twice
+# the buckets, and so has one for two records more, so * 2 and + 2 make
+# one index.
 exclude_re = [
     "<impl [a-z:]*Debug for ",
     "<impl Iterator for Ones>::next",
@@ -66,6 +72,8 @@ exclude_re = [
     "int/arith\\.rs:21[01]:[0-9]+: replace (&& with \\|\\||>= with <) in run$",
     "int/compare\\.rs:51:69: replace && with \\|\\| in run$",
     "table/owned\\.rs:316:61: replace \\| with \\^ in OwnedTable::find_or_insert$",
+    "table/header\\.rs:81:44: replace \\| with \\^ in Place::reference$",
+    "table/owned\\.rs:309:37: replace \\* with \\+ in OwnedTable::find_or_insert$",
 ]
 
 # A mutant that makes a loop endless is stopped at three times the

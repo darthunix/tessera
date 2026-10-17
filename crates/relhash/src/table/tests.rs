@@ -927,3 +927,99 @@ fn murmurhash32(mut h: u32) -> u32 {
     h ^= h >> 16;
     h
 }
+
+/// The fingerprint names what a record is: tables of the same count of
+/// keys and payload size share it, and another count or size changes it.
+#[test]
+fn the_fingerprint_follows_the_layout_of_a_record() {
+    let fingerprint = |nkeys, payload_size| {
+        let config = TableConfig {
+            nkeys,
+            payload_size,
+        };
+        let table = OwnedTable::new(&config, 16, 4096).unwrap();
+        table.table().unwrap().fingerprint()
+    };
+    assert_eq!(fingerprint(1, 8), fingerprint(1, 8));
+    assert_ne!(
+        fingerprint(1, 8),
+        fingerprint(2, 8),
+        "another count of keys"
+    );
+    assert_ne!(
+        fingerprint(1, 8),
+        fingerprint(1, 16),
+        "another payload size"
+    );
+}
+
+/// A set of chunks counts its chunks: none, or the ones a table added.
+#[test]
+fn chunks_count_themselves() {
+    assert!(Chunks::none().is_empty());
+    assert_eq!(Chunks::none().len(), 0);
+    let mut table = OwnedTable::new(&KEY_ONLY, 16, 4096).unwrap();
+    table.add_chunk().unwrap();
+    let chunks = table.chunk_set().unwrap();
+    assert!(!chunks.is_empty());
+    assert_eq!(chunks.len(), 1);
+}
+
+/// Rows appended from payload columns to the chunks alone, before the
+/// table has an index, are records of their keys with a word of NULL
+/// bits and a word a column, 0 for a NULL.
+#[test]
+fn rows_go_from_payload_columns_to_chunks_alone() {
+    let config = TableConfig {
+        nkeys: 1,
+        payload_size: 16,
+    };
+    let mut table = OwnedTable::new(&config, 16, CHUNK_HEADER + 8 * 40).unwrap();
+    table.add_chunk().unwrap();
+    let keys = [3, 4, 5];
+    let column = IntKeys(&keys);
+    let (hashes, mut words) = key_batch(&keys);
+    let mut offsets = [0; 3];
+    let values: [&[u64]; 1] = [&[30, 40, 50]];
+    let nulls: [&[bool]; 1] = [&[false, true, false]];
+    let columns = PayloadColumns::new(&values, &nulls, 3).unwrap();
+    let appended = append_columns_to(
+        &config,
+        table.chunk_set().unwrap(),
+        0,
+        &columns,
+        &mut Batch::new(
+            &hashes,
+            &column,
+            &mut RowMask::try_new(3, &mut words).unwrap(),
+            &mut offsets,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(appended, 3);
+    assert_eq!(words, [0], "every row went in");
+    let table = table.table().unwrap();
+    for (row, (&offset, null)) in offsets.iter().zip([0_u64, 1, 0]).enumerate() {
+        let record = table.record(offset).unwrap();
+        assert_eq!(record.keys, [i64::from(keys[row])]);
+        let value = if null == 1 { 0 } else { values[0][row] };
+        assert_eq!(record.payload, [null, value].map(u64::to_ne_bytes).concat());
+    }
+}
+
+/// A reset empties the table and keeps its index and chunks: no record
+/// is left, and the same keys go in again, as new, at the same places.
+#[test]
+fn a_reset_table_is_empty_and_takes_its_rows_again() {
+    let mut table = OwnedTable::new(&KEY_ONLY, 16, 4096).unwrap();
+    let keys = [1, 2, 3];
+    let (offsets, _) = find_or_insert_keys(&mut table, &keys);
+    assert_eq!(table.table().unwrap().stats().records, 3);
+    table.reset().unwrap();
+    assert_eq!(table.table().unwrap().stats().records, 0);
+    assert_eq!(table.chunks(), 1, "the chunk stays");
+    let (again, inserted) = find_or_insert_keys(&mut table, &keys);
+    assert_eq!(inserted, all_rows(3), "every key is new again");
+    assert_eq!(again, offsets, "at the same places");
+}
