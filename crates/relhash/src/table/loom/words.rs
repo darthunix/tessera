@@ -8,7 +8,7 @@ use ::loom::thread;
 
 use crate::table::Chunks;
 use crate::table::bloom::{self, FilterOr, FilterRead};
-use crate::table::header::{CHUNK_HEADER, reference};
+use crate::table::header::{CHUNK_HEADER, Place};
 use crate::table::marks::{self, Marks};
 use crate::table::region::order;
 use crate::table::writer::Cursor;
@@ -137,7 +137,11 @@ fn participants_mark_one_word(plain: bool) {
                 thread::spawn(move || {
                     let one = [1];
                     let rows = RowMaskView::try_new(1, &one).unwrap();
-                    let refs = [reference(0, CHUNK_HEADER + record * SIZE)];
+                    let refs = [Place {
+                        chunk: 0,
+                        byte: CHUNK_HEADER + record * SIZE,
+                    }
+                    .reference()];
                     marks::mark(&[LEN], SIZE, &refs, &rows, &*marks).unwrap();
                 })
             })
@@ -157,7 +161,11 @@ fn participants_mark_one_word(plain: bool) {
                 .unwrap();
         assert_eq!(
             out[..count],
-            [reference(0, CHUNK_HEADER + 2 * SIZE)],
+            [Place {
+                chunk: 0,
+                byte: CHUNK_HEADER + 2 * SIZE
+            }
+            .reference()],
             "a mark was lost"
         );
     });

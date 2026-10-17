@@ -11,7 +11,7 @@ use crate::{RowMaskView, ones};
 use anyhow::{Context, Result, ensure};
 
 use super::Chunks;
-use super::header::{CHUNK_HEADER, KEY_SLOT, MAX_CHUNK_LEN, RECORD_HEADER, placement, reference};
+use super::header::{CHUNK_HEADER, KEY_SLOT, MAX_CHUNK_LEN, Place, RECORD_HEADER};
 use super::writer::Cursor;
 
 /// The words of marks of a chunk of `chunk_len` bytes: a bit for every
@@ -141,7 +141,7 @@ pub fn mark(
     );
     // The references a mark names, a record's; the mark set.
     let set = |reference: u32| -> Result<()> {
-        let (chunk, byte) = placement(reference);
+        let Place { chunk, byte } = Place::of(reference);
         let len = lens.get(chunk).copied().unwrap_or(0);
         ensure!(
             byte >= CHUNK_HEADER && byte + record_size <= len,
@@ -221,7 +221,11 @@ pub fn scan_unmarked(
                     *cursor = Cursor::at(chunk, CHUNK_HEADER + record * record_size);
                     return Ok(count);
                 }
-                out[count] = reference(chunk, CHUNK_HEADER + record * record_size);
+                out[count] = Place {
+                    chunk,
+                    byte: CHUNK_HEADER + record * record_size,
+                }
+                .reference();
                 count += 1;
             }
         }

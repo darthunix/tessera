@@ -54,19 +54,29 @@ pub const MAX_CHUNKS: usize = 1 << (32 - UNIT_BITS);
 /// Bytes of a chunk before its first record: its used mark.
 pub const CHUNK_HEADER: usize = 8;
 
-/// The reference of the record at byte `byte` of chunk `chunk`.
-#[inline(always)]
-pub(super) fn reference(chunk: usize, byte: usize) -> u32 {
-    ((chunk as u32) << UNIT_BITS) | (byte / 8) as u32
+/// Where a record lies: the number of its chunk and its first byte in
+/// the chunk. A reference is the same two numbers packed into 32 bits.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct Place {
+    pub(super) chunk: usize,
+    pub(super) byte: usize,
 }
 
-/// The chunk and the byte in it of a reference.
-#[inline(always)]
-pub(super) fn placement(reference: u32) -> (usize, usize) {
-    (
-        (reference >> UNIT_BITS) as usize,
-        (reference & ((1 << UNIT_BITS) - 1)) as usize * 8,
-    )
+impl Place {
+    /// The place a reference names.
+    #[inline(always)]
+    pub(super) fn of(reference: u32) -> Self {
+        Self {
+            chunk: (reference >> UNIT_BITS) as usize,
+            byte: (reference & ((1 << UNIT_BITS) - 1)) as usize * 8,
+        }
+    }
+
+    /// The reference of the record at this place.
+    #[inline(always)]
+    pub(super) fn reference(self) -> u32 {
+        ((self.chunk as u32) << UNIT_BITS) | (self.byte / 8) as u32
+    }
 }
 
 /// What a key column holds; the record stores every key in an 8-byte slot.

@@ -756,8 +756,14 @@ fn a_merge_refuses_a_record_found_in_its_source() {
     let at = layout.buckets_offset + (hashes[0] >> layout.bucket_shift) as usize * 4;
     let index = into.index_words();
     let mut bytes = index[at / 8].to_ne_bytes();
-    bytes[at % 8..at % 8 + 4]
-        .copy_from_slice(&header::reference(source, CHUNK_HEADER).to_ne_bytes());
+    bytes[at % 8..at % 8 + 4].copy_from_slice(
+        &header::Place {
+            chunk: source,
+            byte: CHUNK_HEADER,
+        }
+        .reference()
+        .to_ne_bytes(),
+    );
     index[at / 8] = u64::from_ne_bytes(bytes);
     let mut from_byte = CHUNK_HEADER;
     let error = into
