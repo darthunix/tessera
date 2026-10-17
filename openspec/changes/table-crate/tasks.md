@@ -101,9 +101,24 @@ commit of sections 2 and 3 is checked by `make rust-check` and by
       dependency under `--cfg loom`, a move only; `tessera-kernels`
       exports the moved names again. The format alone would have made
       the crate's inner parts public for the calls still in the kernels.
-      Check: `make rust-check`; machine code the same; `make rust-loom`;
+      After the maintainer's review of the move, in the same pull
+      request: a file for each part (the chunks, the batch, the probe of
+      a word, the walk over a chunk, the tests, the loom models in
+      `table/loom/`); the names `OwnedTable`, `writer.rs`,
+      `Header::with_capacity` and a `Place` of a chunk and a byte; one
+      rule for the size of a record, which makes `tess_table_chunk_used`
+      refuse sizes no table's records have; each check and step written
+      once; no kinds of keys in the table, its format or its C calls,
+      the format version 2; the texts of the modules for a developer,
+      with pictures. Check: `make rust-check`; machine code the same but
+      where a commit names its change; `make rust-loom`;
       `make installcheck`
-- [ ] 3.4 Set `publish = true` for the crate and refuse a target whose
+- [ ] 3.4 Review the crate's public API with the maintainer before its
+      snapshot: what each item is for and who calls it; the calls over
+      chunks alone before a table has an index, which only the C API
+      calls; the raw pointers of the blocks; references that the calls
+      name offsets; the magic `TESSTABL` of the format. Then set
+      `publish = true` for the crate and refuse a target whose
       pointers are not 64 bits wide with `compile_error!`; add to CI a
       build for a 32-bit target that must fail, the crate's tests alone,
       a build without `alloc`, a dry run of `cargo publish`, and a
