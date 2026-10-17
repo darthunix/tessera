@@ -1,15 +1,28 @@
-//! Records: how one lies in its chunk and how it is found, written and
-//! published.
+//! Records: how a record lies in its chunk, and how it is found, written
+//! and published.
 //!
-//! A record starts with 16 bytes: its hash, the reference of the next
-//! record of its bucket, the bits of its keys that are NULL and its length
-//! in 8-byte units; then one 8-byte slot per key and the payload, rounded
-//! up to 8. A reference is the record's chunk and its offset there (see
-//! [`Place`](super::header::Place)); 0 is none. A record is appended to a
-//! chunk by the chunk's one writer, then published by a compare-and-swap of
-//! its bucket's head. A published record never moves, and while others
-//! may read it, never changes; the one writer of a table may change its
-//! next field, a key slot or its payload.
+//! A record is a header of 16 bytes (its hash, the reference of the next
+//! record of its chain, the NULL bits of its keys and its length), a
+//! word per key, then the payload. The spec of `hash-table` draws it with
+//! its offsets in its requirement "A record".
+//!
+//! The one writer of a chunk writes a record whole, then publishes it:
+//! it puts the record first in its bucket's chain by a compare-and-swap
+//! of the bucket.
+//!
+//! ```text
+//!   before                       after
+//!   bucket ──► A ──► B           bucket ──► R ──► A ──► B
+//!   R written, next = A, unseen
+//! ```
+//!
+//! The compare-and-swap puts R in only while the bucket still holds A;
+//! when another participant got there first, R takes the new head as its
+//! next and tries again. A reader that reads R from the bucket sees all
+//! of R: the swap releases R's bytes, and the read acquires them. A
+//! published record never moves, and while others may read it, never
+//! changes; the one writer of a table may change its next field, a key or
+//! its payload.
 
 use anyhow::{Result, ensure};
 
