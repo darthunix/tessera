@@ -131,6 +131,27 @@ impl<'a> Chunks<'a> {
         chunk_fits(self.bases[chunk], self.lens[chunk])
     }
 
+    /// The memory of a table over these chunks and the index of `len`
+    /// bytes at `index`.
+    ///
+    /// # Safety
+    ///
+    /// The index is as [`Table::attach`](super::Table::attach) asks, or
+    /// empty for a call that never reads it.
+    pub(super) unsafe fn region(&self, index: *mut u8, len: usize) -> RawRegion {
+        // SAFETY: the caller's contract for the index, and `Self::new`'s
+        // for the chunks.
+        unsafe {
+            RawRegion::new(
+                index,
+                len,
+                self.bases.as_ptr(),
+                self.lens.as_ptr(),
+                self.len(),
+            )
+        }
+    }
+
     /// The number of chunks.
     pub fn len(&self) -> usize {
         self.bases.len()
@@ -194,15 +215,7 @@ pub unsafe fn chunk_used(base: *const u8, len: usize, record_size: usize) -> Res
 fn chunk_region(chunks: &Chunks<'_>) -> RawRegion {
     // SAFETY: an empty index, and chunks aligned and valid by the contract
     // of `Chunks::new`; a call checks each chunk it starts on.
-    unsafe {
-        RawRegion::new(
-            core::ptr::NonNull::<u64>::dangling().as_ptr().cast(),
-            0,
-            chunks.bases.as_ptr(),
-            chunks.lens.as_ptr(),
-            chunks.len(),
-        )
-    }
+    unsafe { chunks.region(core::ptr::NonNull::<u64>::dangling().as_ptr().cast(), 0) }
 }
 
 /// Append the rows of `batch` as records of a table of `config` to chunk

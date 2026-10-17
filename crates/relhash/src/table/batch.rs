@@ -245,10 +245,7 @@ pub(super) fn append_columns<R: Region, K: KeySource + ?Sized>(
         layout.payload_size,
         columns.len()
     );
-    ensure!(
-        columns.nrows() == nrows,
-        "the payload columns do not have the batch's {nrows} rows"
-    );
+    check_rows(nrows, &[columns.nrows()], "table")?;
     shaped!(
         layout.nkeys,
         layout.tail_words(),
@@ -391,10 +388,7 @@ pub(super) fn append_partitioned_columns<R: Region, K: KeySource + ?Sized>(
         layout.payload_size,
         columns.len()
     );
-    ensure!(
-        columns.nrows() == nrows,
-        "the payload columns do not have the batch's {nrows} rows"
-    );
+    check_rows(nrows, &[columns.nrows()], "table")?;
     let mask = check_partitions(region, partitions)?;
     ensure!(
         rows.len() == partitions.chunks.len(),
@@ -606,10 +600,7 @@ pub(super) fn link_counting<R: Region, const DUPLICATES: bool>(
         if DUPLICATES && rest != 0 {
             // SAFETY: the record is published and never written again.
             let record = unsafe { access.view_at(spot) };
-            let (null_bits, keys) = (record.null_bits(), record.keys());
-            let same = access.find(rest, hash, |other| {
-                other.null_bits() == null_bits && same_keys(other.keys(), keys)
-            })?;
+            let same = access.find_same(rest, hash, record.null_bits(), record.keys())?;
             duplicates += usize::from(same != 0);
         }
     }
@@ -713,10 +704,12 @@ pub(super) fn next_match<R: Region>(
         for bit in ones(bits) {
             let row = index * 64 + bit;
             let record = access.locate(offsets[row])?;
-            let (hash, null_bits, keys) = (record.hash(), record.null_bits(), record.keys());
-            let after = access.find(record.next(), hash, |other| {
-                other.null_bits() == null_bits && same_keys(other.keys(), keys)
-            })?;
+            let after = access.find_same(
+                record.next(),
+                record.hash(),
+                record.null_bits(),
+                record.keys(),
+            )?;
             if after != 0 {
                 offsets[row] = after;
                 hits |= 1 << bit;
