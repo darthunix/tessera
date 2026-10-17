@@ -31,8 +31,6 @@ PG_FUNCTION_INFO_V1(tessera_test_table_memory_limit);
 #define CHUNK_LEN (TESS_TABLE_CHUNK_HEADER + 64 * 32)
 #define MAX_TEST_CHUNKS 16
 
-static const TessTableKeyKind one_int4[1] = {TESS_TABLE_KEY_INT4};
-
 /*
  * A batch of NROWS int4 keys with every fifth row NULL and each value
  * held by several rows, with its hashes and the valid mask under a NULL
@@ -139,13 +137,13 @@ make_table(uint64 capacity)
 	TessStatus	status = TESS_STRUCT_INITIALIZER(TessStatus);
 	Table	   *table = palloc0(sizeof(Table));
 
-	if (tess_table_size(1, one_int4, 8, capacity, &table->ref.index_len,
+	if (tess_table_size(1, 8, capacity, &table->ref.index_len,
 						&status) != TESS_OK)
 		return NULL;
 	table->ref.index = palloc(table->ref.index_len);
 	table->ref.chunks = table->chunks;
 	table->ref.chunk_lens = table->lens;
-	if (tess_table_create(table->ref.index, table->ref.index_len, 1, one_int4,
+	if (tess_table_create(table->ref.index, table->ref.index_len, 1,
 						  8, capacity, &status) != TESS_OK)
 		return NULL;
 	return table;
@@ -756,7 +754,7 @@ tessera_test_table_regrow(PG_FUNCTION_ARGS)
 		PG_RETURN_BOOL(false);
 
 	/* A larger index, the same records at the same references. */
-	if (tess_table_size(1, one_int4, 8, 4096, &len, &status) != TESS_OK)
+	if (tess_table_size(1, 8, 4096, &len, &status) != TESS_OK)
 		PG_RETURN_BOOL(false);
 	index = palloc(len);
 	if (tess_table_regrow(&table->ref, index, len, 4096, &status) != TESS_OK)
@@ -895,7 +893,7 @@ tessera_test_table_errors(PG_FUNCTION_ARGS)
 		strstr(status.message, "keys") == NULL ||
 		tess_table_probe(&table->ref, batch->hashes, 1, &odd, &rows, matches,
 						 &found_mask, &status) != TESS_ERROR_INVALID_ARGUMENT ||
-		tess_table_size(1, &odd.kind, 8, 1, &size,
+		tess_table_size(0, 8, 1, &size,
 						&status) != TESS_ERROR_INVALID_ARGUMENT)
 		PG_RETURN_BOOL(false);
 
@@ -930,7 +928,6 @@ tessera_test_table_errors(PG_FUNCTION_ARGS)
 Datum
 tessera_test_spill_header(PG_FUNCTION_ARGS)
 {
-	static const TessTableKeyKind two_keys[2] = {TESS_TABLE_KEY_INT4, TESS_TABLE_KEY_INT8};
 	TessStatus	status = TESS_STRUCT_INITIALIZER(TessStatus);
 	Table	   *table = make_table(16);
 	Table	   *other = palloc0(sizeof(Table));
@@ -943,10 +940,10 @@ tessera_test_spill_header(PG_FUNCTION_ARGS)
 	if (tess_spill_header_size() != TESS_SPILL_HEADER_SIZE || table == NULL)
 		PG_RETURN_BOOL(false);
 	/* A table of two keys has another layout. */
-	if (tess_table_size(2, two_keys, 8, 16, &other->ref.index_len, &status) != TESS_OK)
+	if (tess_table_size(2, 8, 16, &other->ref.index_len, &status) != TESS_OK)
 		PG_RETURN_BOOL(false);
 	other->ref.index = palloc(other->ref.index_len);
-	if (tess_table_create(other->ref.index, other->ref.index_len, 2, two_keys, 8, 16,
+	if (tess_table_create(other->ref.index, other->ref.index_len, 2, 8, 16,
 						  &status) != TESS_OK ||
 		tess_table_fingerprint(&table->ref, &fingerprint, &status) != TESS_OK ||
 		tess_table_fingerprint(&other->ref, &other_fingerprint, &status) != TESS_OK ||
@@ -1059,7 +1056,7 @@ tessera_test_table_partitions(PG_FUNCTION_ARGS)
 		int			count;
 		int			full;
 
-		if (tess_table_split(&whole->ref, 1, one_int4, 8, chunks, 4, 9, 0, &from,
+		if (tess_table_split(&whole->ref, 1, 8, chunks, 4, 9, 0, &from,
 							 NROWS - copied, split_offsets + copied,
 							 split_hashes + copied, &count, &full,
 							 &status) != TESS_OK)
@@ -1088,13 +1085,13 @@ tessera_test_table_partitions(PG_FUNCTION_ARGS)
 
 	/* Three partitions, and the source among them, are refused. */
 	from = TESS_TABLE_CHUNK_HEADER;
-	if (tess_table_split(&whole->ref, 1, one_int4, 8, chunks, 3, 9, 0, &from, NROWS,
+	if (tess_table_split(&whole->ref, 1, 8, chunks, 3, 9, 0, &from, NROWS,
 						 split_offsets, split_hashes, &copied, &copied,
 						 &status) != TESS_ERROR_INVALID_ARGUMENT ||
 		strstr(status.message, "power of two") == NULL)
 		PG_RETURN_BOOL(false);
 	chunks[0] = 0;
-	if (tess_table_split(&whole->ref, 1, one_int4, 8, chunks, 4, 9, 0, &from, NROWS,
+	if (tess_table_split(&whole->ref, 1, 8, chunks, 4, 9, 0, &from, NROWS,
 						 split_offsets, split_hashes, &copied, &copied,
 						 &status) != TESS_ERROR_INVALID_ARGUMENT ||
 		strstr(status.message, "into itself") == NULL)
@@ -1112,12 +1109,12 @@ make_groups(void)
 	TessStatus	status = TESS_STRUCT_INITIALIZER(TessStatus);
 	Table	   *table = palloc0(sizeof(Table));
 
-	if (tess_table_size(1, one_int4, 40, 256, &table->ref.index_len, &status) != TESS_OK)
+	if (tess_table_size(1, 40, 256, &table->ref.index_len, &status) != TESS_OK)
 		return NULL;
 	table->ref.index = palloc(table->ref.index_len);
 	table->ref.chunks = table->chunks;
 	table->ref.chunk_lens = table->lens;
-	if (tess_table_create(table->ref.index, table->ref.index_len, 1, one_int4, 40,
+	if (tess_table_create(table->ref.index, table->ref.index_len, 1, 40,
 						  256, &status) != TESS_OK)
 		return NULL;
 	return table;

@@ -20,7 +20,7 @@ use anyhow::{Context, Result, bail, ensure};
 
 use tessera_core::{RowMask, RowMaskView, ones};
 
-use crate::table::{KeyKind, KeySource, MAX_KEYS};
+use crate::table::{KeySource, MAX_KEYS};
 
 /// Bits of a record reference in an item.
 pub const REFERENCE_BITS: u32 = 32;
@@ -52,6 +52,19 @@ const _: () = assert!(
     MAX_ITEM_WORDS == 17,
     "with_item_words! lists the widths 1 to 17"
 );
+
+/// What a sort key's slot holds, which decides how many bits its value
+/// takes in an item: the table keeps every key in a word of 8 bytes and
+/// gives it no type. The codes are those of `TessTableKeyKind`; with
+/// codes of 0 and 1 the loops that encode keys compiled otherwise.
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum KeyKind {
+    /// An int4, widened with its sign into its slot.
+    Int32 = 1,
+    /// An int8.
+    Int64 = 2,
+}
 
 /// How rows are ordered by one key.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

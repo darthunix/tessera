@@ -712,7 +712,6 @@ tessera_test_kernels_module_table(PG_FUNCTION_ARGS)
 {
 	const TessKernelOps *ops = kernel_ops();
 	TessStatus	status = TESS_STRUCT_INITIALIZER(TessStatus);
-	TessTableKeyKind kind = TESS_TABLE_KEY_INT8;
 	Datum		build_values[TABLE_ROWS];
 	Datum		probe_values[TABLE_ROWS];
 	Datum		group_values[TABLE_ROWS];
@@ -758,8 +757,8 @@ tessera_test_kernels_module_table(PG_FUNCTION_ARGS)
 	if (ops->int8_hash(&build_column, NULL, &all_rows, TESS_NULL_KEYS_REJECT,
 					   hashes, &valid, &status) != TESS_OK ||
 		valid_word != all ||
-		ops->table_size(1, &kind, 8, 16, &small, &status) != TESS_OK ||
-		ops->table_size(1, &kind, 8, TABLE_ROWS * 16, &size, &status) != TESS_OK ||
+		ops->table_size(1, 8, 16, &small, &status) != TESS_OK ||
+		ops->table_size(1, 8, TABLE_ROWS * 16, &size, &status) != TESS_OK ||
 		small >= size)
 		cycle_failed("build: hash and size", &status);
 
@@ -786,7 +785,7 @@ tessera_test_kernels_module_table(PG_FUNCTION_ARGS)
 	 */
 	table.index = palloc(small);
 	table.index_len = small;
-	if (ops->table_create(table.index, small, 1, &kind, 8, 16, &status) != TESS_OK)
+	if (ops->table_create(table.index, small, 1, 8, 16, &status) != TESS_OK)
 		cycle_failed("build: index", &status);
 	for (chunk = 0; chunk < TABLE_CHUNKS; chunk++)
 	{

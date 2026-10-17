@@ -17,11 +17,11 @@ use tessera_kernels::accumulate::{self, Combine, ExtremeSlot, Fold, MAX_SUMS, Sl
 use tessera_kernels::column_keys::normalize_word;
 use tessera_kernels::phases::{Participant, SharedCounters, StopWord};
 use tessera_kernels::table::{
-    Appended, Batch, Chunks, CombineStop, Cursor, FORMAT_VERSION, HEADER_SIZE, KeyKind, KeySource,
-    MAX_KEYS, MAX_PAYLOAD_COLUMNS, Marks, Partitions, PayloadColumns, Table, TableConfig, TableMut,
+    Appended, Batch, Chunks, CombineStop, Cursor, FORMAT_VERSION, HEADER_SIZE, KeySource, MAX_KEYS,
+    MAX_PAYLOAD_COLUMNS, Marks, Partitions, PayloadColumns, Table, TableConfig, TableMut,
     UNIT_BITS, VERSION_OFFSET, append_columns_to, append_partitioned_columns_to, append_to,
     bloom::SharedFilter, chunk_used, index_size, init_chunk, mark, mark_words, payload_null_words,
-    record_bytes_of, scan_unmarked, split_to,
+    record_bytes, scan_unmarked, split_to,
 };
 
 use super::args::reader;
@@ -150,7 +150,7 @@ unsafe fn chunks_of<'a>(table: *const TableRef) -> Result<(&'a TableRef, Chunks<
 unsafe fn indexed<'a>(
     table: &TableRef,
     chunks: Chunks<'a>,
-    config: &TableConfig<'_>,
+    config: &TableConfig,
 ) -> Result<Option<Table<'a>>> {
     if table.index.is_null() {
         return Ok(None);
@@ -273,31 +273,6 @@ pub extern "C" fn tess_table_layout(kind: c_uint) -> usize {
     }
 }
 
-/// The key kinds of a configuration.
-///
-/// # Safety
-///
-/// `kinds` must point to `nkeys` values when `nkeys` is positive.
-unsafe fn key_kinds(nkeys: c_int, kinds: *const c_uint) -> Result<([KeyKind; MAX_KEYS], usize)> {
-    let nkeys = usize::try_from(nkeys).unwrap_or(usize::MAX);
-    ensure!(
-        (1..=MAX_KEYS).contains(&nkeys),
-        "a table has 1 to {MAX_KEYS} keys, not {nkeys}"
-    );
-    ensure!(!kinds.is_null(), "null key kinds");
-    // SAFETY: the caller's contract.
-    let codes = unsafe { slice::from_raw_parts(kinds, nkeys) };
-    let mut result = [KeyKind::Int32; MAX_KEYS];
-    for (slot, &code) in result.iter_mut().zip(codes) {
-        *slot = match code {
-            1 => KeyKind::Int32,
-            2 => KeyKind::Int64,
-            _ => bail!("unknown key kind {code}"),
-        };
-    }
-    Ok((result, nkeys))
-}
-
 /// Decode the keys of a batch into `result`, which starts empty.
 ///
 /// # Safety
@@ -389,12 +364,10 @@ pub(super) unsafe fn slots<'a, T>(
 ///
 /// # Safety
 ///
-/// `kinds` as for [`key_kinds`]; `size` must be null or writable; `status`
-/// as for every entry point.
+/// `size` must be null or writable; `status` as for every entry point.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn tess_table_size(
     nkeys: c_int,
-    kinds: *const c_uint,
     payload_size: usize,
     capacity: u64,
     size: *mut usize,
@@ -403,9 +376,8 @@ pub unsafe extern "C" fn tess_table_size(
     // SAFETY: the caller's contract.
     unsafe {
         guard(status, || {
-            let (kinds, nkeys) = key_kinds(nkeys, kinds)?;
             let config = TableConfig {
-                keys: &kinds[..nkeys],
+                nkeys: usize::try_from(nkeys).context("a negative key count")?,
                 payload_size,
             };
             let bytes = index_size(&config, capacity)?;
@@ -416,7 +388,7 @@ pub unsafe extern "C" fn tess_table_size(
 }
 
 /// `tess_table_record_size`: the bytes of one record of a table of `nkeys`
-/// keys of any kinds and a payload of `payload_size` bytes.
+/// keys and a payload of `payload_size` bytes.
 ///
 /// # Safety
 ///
@@ -432,7 +404,10 @@ pub unsafe extern "C" fn tess_table_record_size(
     unsafe {
         guard(status, || {
             let nkeys = usize::try_from(nkeys).context("a negative key count")?;
-            let bytes = record_bytes_of(nkeys, payload_size)?;
+            let bytes = record_bytes(&TableConfig {
+                nkeys,
+                payload_size,
+            })?;
             *size.as_mut().context("a null size")? = bytes;
             Ok(())
         })
@@ -444,14 +419,13 @@ pub unsafe extern "C" fn tess_table_record_size(
 /// # Safety
 ///
 /// `region` must be aligned to 8 and valid for reads and writes of `len`
-/// bytes, accessed by nothing else during the call; `kinds` as for
-/// [`key_kinds`]; `status` as for every entry point.
+/// bytes, accessed by nothing else during the call; `status` as for
+/// every entry point.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn tess_table_create(
     region: *mut u8,
     len: usize,
     nkeys: c_int,
-    kinds: *const c_uint,
     payload_size: usize,
     capacity: u64,
     status: *mut Status,
@@ -459,9 +433,8 @@ pub unsafe extern "C" fn tess_table_create(
     // SAFETY: the caller's contract.
     unsafe {
         guard(status, || {
-            let (kinds, nkeys) = key_kinds(nkeys, kinds)?;
             let config = TableConfig {
-                keys: &kinds[..nkeys],
+                nkeys: usize::try_from(nkeys).context("a negative key count")?,
                 payload_size,
             };
             TableMut::create(region, len, &config, capacity, Chunks::none()).map(drop)
@@ -552,7 +525,7 @@ pub unsafe extern "C" fn tess_table_chunk_used(
 /// # Safety
 ///
 /// `table` as for [`chunks_of`], the caller being chunk `chunk`'s one
-/// writer; `keys` as for [`table_keys`], their kinds the table's; `pending`
+/// writer; `keys` as for [`table_keys`], as many as the table's; `pending`
 /// must point to a valid mask that nothing else accesses; `hashes` must
 /// hold a hash per row, `offsets` a writable slot per row and `payload`
 /// null or `payload_size` bytes per row; `status` as for every entry point.
@@ -576,17 +549,8 @@ pub unsafe extern "C" fn tess_table_append(
             let chunk = usize::try_from(chunk).context("a negative chunk")?;
             let mut decoded = TableKeys::empty();
             table_keys(nkeys, keys, &mut decoded)?;
-            let key_list = slice::from_raw_parts(keys, decoded.nkeys);
-            let mut kinds = [KeyKind::Int32; MAX_KEYS];
-            for (slot, key) in kinds.iter_mut().zip(key_list) {
-                *slot = if key.kind == 2 {
-                    KeyKind::Int64
-                } else {
-                    KeyKind::Int32
-                };
-            }
             let config = TableConfig {
-                keys: &kinds[..decoded.nkeys],
+                nkeys: decoded.nkeys,
                 payload_size,
             };
             let indexed = indexed(table, chunks, &config)?;
@@ -640,22 +604,13 @@ pub unsafe extern "C" fn tess_table_append_columns(
             let chunk = usize::try_from(chunk).context("a negative chunk")?;
             let mut decoded = TableKeys::empty();
             table_keys(nkeys, keys, &mut decoded)?;
-            let key_list = slice::from_raw_parts(keys, decoded.nkeys);
-            let mut kinds = [KeyKind::Int32; MAX_KEYS];
-            for (slot, key) in kinds.iter_mut().zip(key_list) {
-                *slot = if key.kind == 2 {
-                    KeyKind::Int64
-                } else {
-                    KeyKind::Int32
-                };
-            }
             let ncolumns = usize::try_from(ncolumns).context("a negative column count")?;
             ensure!(
                 ncolumns <= MAX_PAYLOAD_COLUMNS,
                 "a payload has up to {MAX_PAYLOAD_COLUMNS} columns, not {ncolumns}"
             );
             let config = TableConfig {
-                keys: &kinds[..decoded.nkeys],
+                nkeys: decoded.nkeys,
                 payload_size: 8 * (payload_null_words(ncolumns) + ncolumns),
             };
             let indexed = indexed(table, chunks, &config)?;
@@ -791,22 +746,13 @@ pub unsafe extern "C" fn tess_table_append_partitioned_columns(
             let partitions = partitions(partition_chunks, npartitions, shift)?;
             let mut decoded = TableKeys::empty();
             table_keys(nkeys, keys, &mut decoded)?;
-            let key_list = slice::from_raw_parts(keys, decoded.nkeys);
-            let mut kinds = [KeyKind::Int32; MAX_KEYS];
-            for (slot, key) in kinds.iter_mut().zip(key_list) {
-                *slot = if key.kind == 2 {
-                    KeyKind::Int64
-                } else {
-                    KeyKind::Int32
-                };
-            }
             let ncolumns = usize::try_from(ncolumns).context("a negative column count")?;
             ensure!(
                 ncolumns <= 64,
                 "a payload has up to 64 columns, not {ncolumns}"
             );
             let config = TableConfig {
-                keys: &kinds[..decoded.nkeys],
+                nkeys: decoded.nkeys,
                 payload_size: 8 * (1 + ncolumns),
             };
             // As an append does, a table with an index is checked against it.
@@ -857,15 +803,13 @@ pub unsafe extern "C" fn tess_table_append_partitioned_columns(
 /// # Safety
 ///
 /// `table` as for [`chunks_of`], the caller being the one writer of every
-/// partition's chunk; `kinds` as for [`key_kinds`]; `partition_chunks` as
-/// for [`partitions`]; `from`, `count` and `full` must be writable,
+/// partition's chunk; `partition_chunks` as for [`partitions`]; `from`, `count` and `full` must be writable,
 /// `offsets` and `hashes` hold `capacity` writable slots; `status`
 /// as for every entry point.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn tess_table_split(
     table: *const TableRef,
     nkeys: c_int,
-    kinds: *const c_uint,
     payload_size: usize,
     partition_chunks: *const u32,
     npartitions: c_int,
@@ -883,9 +827,8 @@ pub unsafe extern "C" fn tess_table_split(
     unsafe {
         guard(status, || {
             let (_, chunks) = chunks_of(table)?;
-            let (kinds, nkeys) = key_kinds(nkeys, kinds)?;
             let config = TableConfig {
-                keys: &kinds[..nkeys],
+                nkeys: usize::try_from(nkeys).context("a negative key count")?,
                 payload_size,
             };
             let partitions = partitions(partition_chunks, npartitions, shift)?;

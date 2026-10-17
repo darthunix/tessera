@@ -81,7 +81,7 @@ keydict_value_equal(KeyDict *dict, Datum a, Datum b)
 static void *
 distinct_index(TessAggState *state, DistinctSet *set, uint64 capacity, Size *size)
 {
-	check(state, state->kernels->table_size(set->nkeys, set->kinds, 0, capacity,
+	check(state, state->kernels->table_size(set->nkeys, 0, capacity,
 											size, &state->status));
 	return MemoryContextAllocExtended(set->context, *size, MCXT_ALLOC_HUGE);
 }
@@ -113,8 +113,7 @@ agg_distinct_reset(TessAggState *state, AggValue *value)
 	set->table.chunk_lens = set->lens;
 	set->table.nchunks = 0;
 	set->bytes = size;
-	check(state, state->kernels->table_create(set->table.index, size, set->nkeys,
-											  set->kinds, 0, capacity,
+	check(state, state->kernels->table_create(set->table.index, size, set->nkeys, 0, capacity,
 											  &state->status));
 	if (value->distinct_dict != NULL)
 		agg_key_dict_reset(value->distinct_dict, 256);

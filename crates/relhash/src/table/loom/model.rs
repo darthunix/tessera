@@ -5,7 +5,7 @@ use crate::{RowMask, RowMaskView};
 use anyhow::Result;
 
 use super::memory::{HEADS, LoomRegion};
-use crate::table::header::{CHUNK_HEADER, Header, KeyKind, Layout, TableConfig, chunk_layout};
+use crate::table::header::{CHUNK_HEADER, Header, Layout, TableConfig, chunk_layout};
 use crate::table::record::Access;
 use crate::table::region::Region;
 use crate::table::testing::IntKeys;
@@ -86,8 +86,8 @@ pub(super) fn table(
 /// Every row hashes to one bucket, so that the participants race for its
 /// head.
 pub(super) const HASH: u32 = 0x5a5a_5a5a;
-pub(super) const CONFIG: TableConfig<'static> = TableConfig {
-    keys: &[KeyKind::Int32],
+pub(super) const CONFIG: TableConfig = TableConfig {
+    nkeys: 1,
     payload_size: 8,
 };
 

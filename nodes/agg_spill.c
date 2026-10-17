@@ -312,7 +312,7 @@ agg_split(TessAggState *state, AggSpill *spill, void *base, Size len, bool keep)
 		int			count;
 		int			full;
 
-		check(state, state->kernels->table_split(&ref, state->nkeys, state->kinds,
+		check(state, state->kernels->table_split(&ref, state->nkeys,
 												 state->payload_size,
 												 spill->current, spill->npartitions,
 												 spill->shift, AGG_SOURCE, &from,
@@ -409,8 +409,7 @@ agg_table_from_parts(TessAggState *state, AggSpill *spill, uint64 capacity)
 	capacity = first_capacity(capacity);
 	state->table.index = new_index(state, capacity, &size);
 	state->table.index_len = size;
-	check(state, state->kernels->table_create(state->table.index, size, state->nkeys,
-											  state->kinds, payload_size,
+	check(state, state->kernels->table_create(state->table.index, size, state->nkeys, payload_size,
 											  capacity, &state->status));
 	for (int chunk = AGG_EMPTY + 1; chunk < nchunks; chunk++)
 	{
@@ -766,8 +765,7 @@ agg_merge(TessAggState *state, AggSpill *spill, int partition)
 	state->table.nchunks = nchunks;
 	state->table.index = new_index(state, capacity, &size);
 	state->table.index_len = size;
-	check(state, state->kernels->table_create(state->table.index, size, state->nkeys,
-											  state->kinds, payload_size,
+	check(state, state->kernels->table_create(state->table.index, size, state->nkeys, payload_size,
 											  capacity, &state->status));
 	for (int chunk = AGG_EMPTY + 1; chunk < nchunks; chunk++)
 	{
