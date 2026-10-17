@@ -42,7 +42,7 @@
 //!
 //! ```
 //! use relhash::{RowMask, RowMaskView};
-//! use relhash::table::bloom;
+//! use relhash::bloom;
 //!
 //! // A filter for 100 records, filled with the hashes of two rows.
 //! let mut words = vec![0; bloom::words_for(100)?];
@@ -331,7 +331,7 @@ pub(super) fn try_build<R: Region, F: FilterShared + ?Sized>(
 ///
 /// ```
 /// use relhash::{RowMask, RowMaskView};
-/// use relhash::table::bloom;
+/// use relhash::bloom;
 ///
 /// // An empty filter lets nothing through.
 /// let words = vec![0; bloom::words_for(100)?];
@@ -362,7 +362,7 @@ pub fn probe(
 ///
 /// ```
 /// use relhash::{RowMask, RowMaskView};
-/// use relhash::table::bloom;
+/// use relhash::bloom;
 ///
 /// // Add rows 0 and 1 of three, then probe all three: the rows added
 /// // pass; row 2, not added, most likely not.
