@@ -3,11 +3,13 @@
 //! the table has an index, by which the participants of a shared build
 //! append their share and a spill copies a chunk's records to partitions.
 
+use core::marker::PhantomData;
+
 use anyhow::{Result, anyhow, ensure};
 
 use super::batch::{self, Batch};
 use super::header::{
-    self, CHUNK_HEADER, MAX_CHUNK_LEN, MAX_CHUNKS, TableConfig, check_record_size,
+    self, CHUNK_HEADER, Layout, MAX_CHUNK_LEN, MAX_CHUNKS, TableConfig, check_record_size,
 };
 use super::keys::KeySource;
 use super::record::PayloadColumns;
@@ -224,36 +226,6 @@ fn chunk_region(chunks: &Chunks<'_>) -> RawRegion {
     unsafe { chunks.region(core::ptr::NonNull::<u64>::dangling().as_ptr().cast(), 0) }
 }
 
-/// Append the rows of `batch` as records of a table of `config` to chunk
-/// `chunk` of `chunks`, as [`Table::append`](super::Table::append) does, before the table has an
-/// index: the participants of a shared build append their share first,
-/// and one of them sizes the index for the records once all are counted.
-/// The caller must be the chunk's one writer.
-pub fn append_to<K: KeySource + ?Sized>(
-    config: &TableConfig,
-    chunks: Chunks<'_>,
-    chunk: usize,
-    payload: Option<&[u8]>,
-    batch: &mut Batch<'_, '_, K>,
-) -> Result<usize> {
-    let layout = header::chunk_layout(config)?;
-    batch::append(&chunk_region(&chunks), &layout, chunk, payload, batch)
-}
-
-/// As [`append_to`], with each row's payload taken from `columns`: a word
-/// of its NULL bits, then a word per column, which must be the table's
-/// whole payload.
-pub fn append_columns_to<K: KeySource + ?Sized>(
-    config: &TableConfig,
-    chunks: Chunks<'_>,
-    chunk: usize,
-    columns: &PayloadColumns<'_>,
-    batch: &mut Batch<'_, '_, K>,
-) -> Result<usize> {
-    let layout = header::chunk_layout(config)?;
-    batch::append_columns(&chunk_region(&chunks), &layout, chunk, columns, batch)
-}
-
 /// The most partitions one split makes.
 pub const MAX_PARTITIONS: usize = 1 << 16;
 
@@ -268,7 +240,7 @@ pub struct Partitions<'a> {
     pub chunks: &'a [u32],
 }
 
-/// What [`split_to`] did: the records copied, and the partition whose
+/// What [`ChunkWriter::split`] did: the records copied, and the partition whose
 /// chunk was full, if it stopped at one.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Split {
@@ -276,54 +248,95 @@ pub struct Split {
     pub full: Option<u32>,
 }
 
-/// Append the rows of `batch` as records of a table of `config`, each to
-/// the chunk of its hash's partition, over the chunks alone: as
-/// [`append_columns_to`], each row's payload taken from `columns`, except
-/// that a row whose partition's chunk is full stays pending while the rows
-/// after it go on; every row appended counts in `appended`. The caller
-/// must be the one writer of every partition's chunk.
-pub fn append_partitioned_columns_to<K: KeySource + ?Sized>(
-    config: &TableConfig,
-    chunks: Chunks<'_>,
-    partitions: &Partitions<'_>,
-    columns: &PayloadColumns<'_>,
-    batch: &mut Batch<'_, '_, K>,
-    appended: &mut Appended<'_>,
-) -> Result<usize> {
-    let layout = header::chunk_layout(config)?;
-    batch::append_partitioned_columns(
-        &chunk_region(&chunks),
-        &layout,
-        partitions,
-        columns,
-        batch,
-        appended,
-    )
+/// A table's chunks before the table has an index, and the calls that
+/// write records to them: the participants of a shared build append
+/// their share, and one of them sizes the index once all are counted; a
+/// spill copies a chunk's records to the chunks of their partitions. It
+/// checks the configuration once, when it is made. The caller must be the
+/// one writer of every chunk a call writes.
+#[derive(Debug)]
+pub struct ChunkWriter<'a> {
+    region: RawRegion,
+    layout: Layout,
+    _chunks: PhantomData<&'a ()>,
 }
 
-/// Copy the records of chunk `source` of a table of `config` from byte
-/// `*from` on, whole and in order, each to the chunk of its hash's
-/// partition, and move `*from` past them: at most `offsets.len()`, their
-/// new references into `offsets` and their hashes into `hashes`, stopping before a record whose partition's chunk is
-/// full. The copies are not linked; `*from` starts at [`CHUNK_HEADER`].
-/// The caller must be the one writer of every partition's chunk.
-pub fn split_to(
-    config: &TableConfig,
-    chunks: Chunks<'_>,
-    partitions: &Partitions<'_>,
-    source: usize,
-    from: &mut usize,
-    offsets: &mut [u32],
-    hashes: &mut [u32],
-) -> Result<Split> {
-    let layout = header::chunk_layout(config)?;
-    batch::split(
-        &chunk_region(&chunks),
-        &layout,
-        partitions,
-        source,
-        from,
-        offsets,
-        hashes,
-    )
+impl<'a> ChunkWriter<'a> {
+    /// The writer of records of a table of `config` to `chunks`.
+    pub fn new(config: &TableConfig, chunks: Chunks<'a>) -> Result<Self> {
+        Ok(Self {
+            layout: header::chunk_layout(config)?,
+            region: chunk_region(&chunks),
+            _chunks: PhantomData,
+        })
+    }
+
+    /// Append the rows of `batch` as records to chunk `chunk`, as
+    /// [`Table::append`](super::Table::append) does.
+    pub fn append<K: KeySource + ?Sized>(
+        &self,
+        chunk: usize,
+        payload: Option<&[u8]>,
+        batch: &mut Batch<'_, '_, K>,
+    ) -> Result<usize> {
+        batch::append(&self.region, &self.layout, chunk, payload, batch)
+    }
+
+    /// As [`Self::append`], with each row's payload taken from `columns`: a
+    /// word of its NULL bits, then a word per column, which must be the
+    /// table's whole payload.
+    pub fn append_columns<K: KeySource + ?Sized>(
+        &self,
+        chunk: usize,
+        columns: &PayloadColumns<'_>,
+        batch: &mut Batch<'_, '_, K>,
+    ) -> Result<usize> {
+        batch::append_columns(&self.region, &self.layout, chunk, columns, batch)
+    }
+
+    /// Append the rows of `batch` as records, each to the chunk of its
+    /// hash's partition: as [`Self::append_columns`], except that a row
+    /// whose partition's chunk is full stays pending while the rows after
+    /// it go on; every row appended counts in `appended`.
+    pub fn append_partitioned_columns<K: KeySource + ?Sized>(
+        &self,
+        partitions: &Partitions<'_>,
+        columns: &PayloadColumns<'_>,
+        batch: &mut Batch<'_, '_, K>,
+        appended: &mut Appended<'_>,
+    ) -> Result<usize> {
+        batch::append_partitioned_columns(
+            &self.region,
+            &self.layout,
+            partitions,
+            columns,
+            batch,
+            appended,
+        )
+    }
+
+    /// Copy the records of chunk `source` from byte `*from` on, whole and
+    /// in order, each to the chunk of its hash's partition, and move
+    /// `*from` past them: at most `refs.len()`, their new references into
+    /// `refs` and their hashes into `hashes`, stopping before a record
+    /// whose partition's chunk is full. The copies are not linked; `*from`
+    /// starts at [`CHUNK_HEADER`].
+    pub fn split(
+        &self,
+        partitions: &Partitions<'_>,
+        source: usize,
+        from: &mut usize,
+        refs: &mut [u32],
+        hashes: &mut [u32],
+    ) -> Result<Split> {
+        batch::split(
+            &self.region,
+            &self.layout,
+            partitions,
+            source,
+            from,
+            refs,
+            hashes,
+        )
+    }
 }

@@ -29,8 +29,7 @@ use anyhow::{Result, anyhow, ensure};
 
 pub use batch::Batch;
 pub use chunks::{
-    Appended, Chunks, MAX_PARTITIONS, Partitions, Split, append_columns_to,
-    append_partitioned_columns_to, append_to, chunk_used, init_chunk, split_to,
+    Appended, ChunkWriter, Chunks, MAX_PARTITIONS, Partitions, Split, chunk_used, init_chunk,
 };
 pub use header::{
     CHUNK_HEADER, FORMAT_VERSION, HEADER_SIZE, MAX_CHUNK_LEN, MAX_CHUNKS, MAX_KEYS, TableConfig,
