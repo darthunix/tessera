@@ -8,12 +8,14 @@ use core::mem::MaybeUninit;
 use crate::{RowMask, RowMaskView, ones};
 use anyhow::{Result, ensure};
 
-use super::header::{CHUNK_HEADER, Layout, RECORD_HEADER};
+use super::header::{Layout, RECORD_HEADER};
 use super::keys::{KeySource, WordKeys, slot_buffer};
+use super::lanes::{Lanes, VERTICAL_MIN_ROWS, probe_word};
 use super::record::no_chunk;
-use super::record::{Access, PayloadColumns, Place, same_keys};
+use super::record::{Access, PayloadColumns, same_keys};
+use super::record::{check_record, check_record_at, unlinked};
 use super::region::Region;
-use super::{Appended, Batch, MAX_PARTITIONS, Partitions, Split};
+use super::{Appended, MAX_PARTITIONS, Partitions, Split};
 
 /// Call `$f` specialized for the common shapes of a table: one or two
 /// keys, one or two words after them; 0 stands for any other count, read
@@ -33,6 +35,46 @@ macro_rules! shaped {
     };
 }
 pub(super) use shaped;
+
+/// The rows of a call that places them in a table: each row's hash and
+/// keys, the rows still to place, which leave `pending` as the call
+/// places them, and the reference of each placed row's record, at its
+/// row in `offsets`. A batch may go through several calls, each placing
+/// what it can.
+pub struct Batch<'b, 'm, K: ?Sized> {
+    pub(super) hashes: &'b [u32],
+    pub(super) keys: &'b K,
+    pub(super) pending: &'b mut RowMask<'m>,
+    pub(super) offsets: &'b mut [u32],
+}
+
+impl<'b, 'm, K: KeySource + ?Sized> Batch<'b, 'm, K> {
+    /// The rows of `pending`, whose row count the keys, the hashes and the
+    /// offsets must have.
+    pub fn new(
+        hashes: &'b [u32],
+        keys: &'b K,
+        pending: &'b mut RowMask<'m>,
+        offsets: &'b mut [u32],
+    ) -> Result<Self> {
+        let nrows = pending.as_view().nrows();
+        ensure!(
+            keys.nrows() == nrows && hashes.len() == nrows && offsets.len() == nrows,
+            "the keys, hashes, mask and offsets of the batch have different row counts"
+        );
+        Ok(Self {
+            hashes,
+            keys,
+            pending,
+            offsets,
+        })
+    }
+
+    /// The rows still to place.
+    pub fn pending(&self) -> RowMaskView<'_> {
+        self.pending.as_view()
+    }
+}
 
 /// Reject a batch whose keys or buffers do not match the table and the
 /// mask, before anything is read or changed.
@@ -519,7 +561,7 @@ pub(super) fn link<R: Region>(
 /// hash, NULL bits and keys. The CAS on a bucket orders its records, so of
 /// two records of one key exactly the one linked later finds the other,
 /// whatever participants link at once: the count is exact, as
-/// [`super::exclusive::link_grouped`]'s. Returns the count linked and the
+/// [`super::writer::link_grouped`]'s. Returns the count linked and the
 /// duplicates.
 pub(super) fn link_counting<R: Region, const DUPLICATES: bool>(
     region: &R,
@@ -554,54 +596,6 @@ pub(super) fn link_counting<R: Region, const DUPLICATES: bool>(
     }
     *from = end;
     Ok((count, duplicates))
-}
-
-/// The first bytes of a chunk's records from byte `from` to its used
-/// mark; `from` must be a record boundary.
-pub(super) fn unlinked<R: Region>(
-    access: &Access<'_, R>,
-    chunk: usize,
-    from: usize,
-) -> Result<core::iter::StepBy<core::ops::Range<usize>>> {
-    let (used, _) = access.room(chunk)?;
-    ensure!(
-        from >= CHUNK_HEADER
-            && from <= used
-            && (from - CHUNK_HEADER).is_multiple_of(access.record_size()),
-        "byte {from} of table chunk {chunk} is no record boundary below its {used} used bytes"
-    );
-    Ok((from..used).step_by(access.record_size()))
-}
-
-/// The hash of the record at a place of a chunk below its used mark,
-/// which must claim the table's record length.
-#[inline]
-pub(super) fn check_record<R: Region>(access: &Access<'_, R>, place: Place) -> Result<u32> {
-    // SAFETY: the place lies below the chunk's used mark, which `room`
-    // checked against its length; the caller wrote it or it is published.
-    unsafe { check_record_at(access, access.spot(place), place) }
-}
-
-/// As [`check_record`], for the record at a spot the caller resolved.
-///
-/// # Safety
-///
-/// `spot` is the spot of `place`, which lies below its chunk's used mark.
-#[inline(always)]
-pub(super) unsafe fn check_record_at<R: Region>(
-    access: &Access<'_, R>,
-    spot: R::Spot,
-    place: Place,
-) -> Result<u32> {
-    // SAFETY: the caller's contract; the record is written or published.
-    let view = unsafe { access.view_at(spot) };
-    ensure!(
-        view.len() == access.record_size(),
-        "table chunk {} holds no record at byte {}",
-        place.0,
-        place.1
-    );
-    Ok(view.hash())
 }
 
 /// Find the first record with the hash and keys of each row of `rows`:
@@ -683,102 +677,6 @@ fn probe_rows<R: Region, K: KeySource + ?Sized, const N: usize, const T: usize, 
         found.set_word(index, hits)?;
     }
     Ok(())
-}
-
-/// Rows of a word from which a probe goes vertically, phase by phase over
-/// the word, rather than row by row: fewer rows do not pay for phases
-/// that run over all 64.
-pub(super) const VERTICAL_MIN_ROWS: u32 = 8;
-
-/// The per-row arrays of a word's vertical probe, indexed by row within
-/// the word: the rows' hashes, the records each row is at, and their
-/// spots, resolved once per step for both the hint and the comparison. A
-/// probe writes a row's entries before it reads them, for the selected
-/// rows only, so the arrays start uninitialized and are never cleared.
-pub(super) struct Lanes<S: Copy> {
-    hash: [MaybeUninit<u32>; 64],
-    current: [MaybeUninit<u32>; 64],
-    spot: [MaybeUninit<S>; 64],
-}
-
-impl<S: Copy> Lanes<S> {
-    #[inline(always)]
-    pub(super) fn new() -> Self {
-        Self {
-            hash: [MaybeUninit::uninit(); 64],
-            current: [MaybeUninit::uninit(); 64],
-            spot: [MaybeUninit::uninit(); 64],
-        }
-    }
-}
-
-/// Probe the `selected` rows of one word phase by phase: every row's bucket
-/// is hinted to the cache, then every head read; while rows remain, every
-/// candidate record is checked and hinted, then every candidate compared
-/// with its row and the rows that did not match moved down their chains.
-/// The loads of different rows are independent and in flight together,
-/// which a row-by-row walk, with its longer path per row, allows for fewer
-/// rows at a time. A candidate is compared field by field as it is read:
-/// gathering the fields into arrays for a vector comparison made vector
-/// loads wait on the scalar stores that had just filled them. The answer is the
-/// row-by-row one: each row gets the first record of its chain with its
-/// hash, null bits and keys. Returns the rows found.
-#[inline(always)]
-pub(super) fn probe_word<R: Region, const N: usize>(
-    access: &mut Access<'_, R>,
-    word_keys: &WordKeys<'_>,
-    hashes: &[u32],
-    selected: u64,
-    matches: &mut [u32],
-    lanes: &mut Lanes<R::Spot>,
-) -> Result<u64> {
-    for bit in ones(selected) {
-        let hash = hashes[bit];
-        lanes.hash[bit].write(hash);
-        access.prefetch_bucket(hash);
-    }
-    // SAFETY (every `assume_init` below): the entries of a row are read
-    // only for rows of `selected` (`pending` is a subset of it), after the
-    // loop above wrote its hash and the loop below its first offset.
-    let mut pending = 0;
-    for bit in ones(selected) {
-        let head = access.head(unsafe { lanes.hash[bit].assume_init() });
-        lanes.current[bit].write(head);
-        pending |= u64::from(head != 0) << bit;
-    }
-    let mut hits = 0;
-    let mut steps = 0;
-    while pending != 0 {
-        access.check_steps(steps)?;
-        steps += 1;
-        for bit in ones(pending) {
-            let place = access.place(unsafe { lanes.current[bit].assume_init() })?;
-            // SAFETY: `place` accepted it.
-            let spot = unsafe { access.spot(place) };
-            lanes.spot[bit].write(spot);
-            access.prefetch_record(spot);
-        }
-        let mut rest = 0;
-        for bit in ones(pending) {
-            let offset = unsafe { lanes.current[bit].assume_init() };
-            // SAFETY: `place` accepted every offset of `pending` above,
-            // and the loop above resolved its spot.
-            let record = unsafe { access.open_at(lanes.spot[bit].assume_init(), offset) }?;
-            // SAFETY: the record is this table's, whose key count the
-            // buffer was made for and `N` is 0 or.
-            let hash = unsafe { lanes.hash[bit].assume_init() };
-            if record.hash() == hash && unsafe { word_keys.equal::<N>(bit, &record) } {
-                matches[bit] = offset;
-                hits |= 1 << bit;
-            } else {
-                let next = record.next();
-                lanes.current[bit].write(next);
-                rest |= u64::from(next != 0) << bit;
-            }
-        }
-        pending = rest;
-    }
-    Ok(hits)
 }
 
 /// For each row of `rows`, replace `offsets[row]` by the record after it

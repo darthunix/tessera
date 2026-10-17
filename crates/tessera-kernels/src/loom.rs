@@ -1,7 +1,7 @@
 //! The phases of a shared build, the rounds over a partition on disk and
 //! the words of a spill under loom. Participants run the steps of
 //! [`crate::phases`] over a model of PostgreSQL's `Barrier`, and the table
-//! they share is the model table of [`crate::table::model`], which runs the
+//! they share is the model table of [`crate::table::loom`], which runs the
 //! table's own code over loom's atomics; the words of a spill are loom
 //! atomics with the orderings of [`crate::shared_spill`]. Run with `make
 //! rust-loom`.
@@ -15,7 +15,7 @@ use core::sync::atomic::Ordering;
 
 use crate::phases::{self, Action, COUNTER_WORDS, CounterWords, Counters, Participant, Stop};
 use crate::shared_spill::{self, Memory, Spill, Weights, Words};
-use crate::table::model::ModelTable;
+use crate::table::loom::ModelTable;
 
 /// PostgreSQL's `Barrier` (`storage/ipc/barrier.c`) over loom: the same
 /// counts, phase and election, a mutex for its spinlock and a condition
