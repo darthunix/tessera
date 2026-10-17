@@ -26,13 +26,23 @@ pub struct Appended<'a> {
 /// every chunk it writes or walks, when it starts on the chunk.
 #[inline(always)]
 pub(super) fn chunk_fits(base: *const u8, len: usize) -> bool {
+    // The length's rule is `chunk_len_fits`'s, written out: through that
+    // function the alignments of the base and of the length were tested
+    // apart, two branches more on every chunk a call starts on.
     !base.is_null()
         && base.addr().is_multiple_of(8)
         && len.is_multiple_of(8)
         && (CHUNK_HEADER..=MAX_CHUNK_LEN).contains(&len)
 }
 
-/// The error of a chunk that cannot be one.
+/// Whether a chunk can have `len` bytes: a multiple of 8 of
+/// [`CHUNK_HEADER`] to [`MAX_CHUNK_LEN`].
+#[inline(always)]
+pub(super) fn chunk_len_fits(len: usize) -> bool {
+    len.is_multiple_of(8) && (CHUNK_HEADER..=MAX_CHUNK_LEN).contains(&len)
+}
+
+/// The error of a chunk of a table that cannot be one.
 #[cold]
 #[inline(never)]
 pub(super) fn bad_chunk(chunk: usize, len: usize) -> anyhow::Error {
@@ -40,6 +50,27 @@ pub(super) fn bad_chunk(chunk: usize, len: usize) -> anyhow::Error {
         "table chunk {chunk} of {len} bytes is not aligned to 8 or not a multiple of 8 \
          of {CHUNK_HEADER} to {MAX_CHUNK_LEN} bytes"
     )
+}
+
+/// The error of a block a caller gave as a chunk that cannot be one.
+#[cold]
+#[inline(never)]
+fn bad_block(len: usize) -> anyhow::Error {
+    anyhow!(
+        "a table chunk of {len} bytes is not aligned to 8 or not a multiple of 8 of \
+         {CHUNK_HEADER} to {MAX_CHUNK_LEN} bytes"
+    )
+}
+
+/// The used mark `raw` of a chunk of `len` bytes whose records take
+/// `record_size` bytes, when it can be one: at least the mark's own 8
+/// bytes, at most the chunk's length, and the end of a whole number of
+/// records.
+#[inline(always)]
+pub(super) fn used_mark(raw: u64, len: usize, record_size: usize) -> Option<usize> {
+    usize::try_from(raw).ok().filter(|&used| {
+        used >= CHUNK_HEADER && used <= len && (used - CHUNK_HEADER).is_multiple_of(record_size)
+    })
 }
 
 /// The chunks of a table as this process sees them: each one's base and
@@ -125,11 +156,9 @@ impl<'a> Chunks<'a> {
 /// of 8 of [`CHUNK_HEADER`] to [`MAX_CHUNK_LEN`], and nothing else uses the
 /// block yet.
 pub unsafe fn init_chunk(base: *mut u8, len: usize) -> Result<()> {
-    ensure!(
-        chunk_fits(base, len),
-        "a table chunk of {len} bytes is not aligned to 8 or not a multiple of 8 of \
-         {CHUNK_HEADER} to {MAX_CHUNK_LEN} bytes"
-    );
+    if !chunk_fits(base, len) {
+        return Err(bad_block(len));
+    }
     // SAFETY: the caller's contract; the used mark is the first word.
     unsafe { base.cast::<u64>().write(CHUNK_HEADER as u64) };
     Ok(())
@@ -145,26 +174,19 @@ pub unsafe fn init_chunk(base: *mut u8, len: usize) -> Result<()> {
 /// `base` is valid for reads of `len` bytes when the block can be a chunk,
 /// and nothing writes its first word during the call.
 pub unsafe fn chunk_used(base: *const u8, len: usize, record_size: usize) -> Result<usize> {
-    ensure!(
-        chunk_fits(base, len),
-        "a table chunk of {len} bytes is not aligned to 8 or not a multiple of 8 of \
-         {CHUNK_HEADER} to {MAX_CHUNK_LEN} bytes"
-    );
+    if !chunk_fits(base, len) {
+        return Err(bad_block(len));
+    }
     check_record_size(record_size)?;
     // SAFETY: the caller's contract; the used mark is the chunk's first
     // word, aligned as the block is.
     let used = unsafe { base.cast::<u64>().read() };
-    usize::try_from(used)
-        .ok()
-        .filter(|&used| {
-            used >= CHUNK_HEADER && used <= len && (used - CHUNK_HEADER).is_multiple_of(record_size)
-        })
-        .ok_or_else(|| {
-            anyhow!(
-                "a table chunk of {len} bytes has a used mark of {used} bytes that ends no \
+    used_mark(used, len, record_size).ok_or_else(|| {
+        anyhow!(
+            "a table chunk of {len} bytes has a used mark of {used} bytes that ends no \
                  record of {record_size} bytes"
-            )
-        })
+        )
+    })
 }
 
 /// The chunks alone as a region, with an empty index, which the calls

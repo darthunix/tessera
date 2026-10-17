@@ -5,7 +5,7 @@
 
 use core::mem::MaybeUninit;
 
-use crate::{RowMask, RowMaskView, ones};
+use crate::{RowMask, RowMaskView, check_rows, ones};
 use anyhow::{Result, ensure};
 
 use super::header::{Layout, Place, RECORD_HEADER};
@@ -58,10 +58,7 @@ impl<'b, 'm, K: KeySource + ?Sized> Batch<'b, 'm, K> {
         offsets: &'b mut [u32],
     ) -> Result<Self> {
         let nrows = pending.as_view().nrows();
-        ensure!(
-            keys.nrows() == nrows && hashes.len() == nrows && offsets.len() == nrows,
-            "the keys, hashes, mask and offsets of the batch have different row counts"
-        );
+        check_rows(nrows, &[keys.nrows(), hashes.len(), offsets.len()], "table")?;
         Ok(Self {
             hashes,
             keys,
@@ -86,11 +83,7 @@ pub(super) fn check<K: KeySource + ?Sized>(
     out: usize,
 ) -> Result<()> {
     check_keys(layout, keys)?;
-    ensure!(
-        keys.nrows() == nrows && hashes == nrows && out == nrows,
-        "the keys, hashes, mask and offsets of the batch have different row counts"
-    );
-    Ok(())
+    check_rows(nrows, &[keys.nrows(), hashes, out], "table")
 }
 
 /// Reject keys that are not the table's, before anything is read or
@@ -637,11 +630,7 @@ pub(super) fn probe<R: Region, K: KeySource + ?Sized>(
 ) -> Result<()> {
     let nrows = rows.nrows();
     check(layout, keys, nrows, hashes.len(), matches.len())?;
-    ensure!(
-        found.as_view().nrows() == nrows,
-        "the result mask has {} rows, the batch {nrows}",
-        found.as_view().nrows()
-    );
+    check_rows(nrows, &[found.as_view().nrows()], "table")?;
     shaped!(
         layout.nkeys,
         0,
@@ -716,10 +705,7 @@ pub(super) fn next_match<R: Region>(
     found: &mut RowMask<'_>,
 ) -> Result<()> {
     let nrows = rows.nrows();
-    ensure!(
-        offsets.len() == nrows && found.as_view().nrows() == nrows,
-        "the offsets, mask and result of the batch have different row counts"
-    );
+    check_rows(nrows, &[offsets.len(), found.as_view().nrows()], "table")?;
     let mut access = Access::new(region, layout);
     for index in 0..nrows.div_ceil(64) {
         let bits = rows.word(index);
@@ -754,10 +740,7 @@ pub(super) fn gather<R: Region, const PREFETCH: bool>(
     out: &mut [u64],
 ) -> Result<()> {
     let nrows = rows.nrows();
-    ensure!(
-        offsets.len() == nrows && out.len() == nrows,
-        "the offsets, mask and output of the batch have different row counts"
-    );
+    check_rows(nrows, &[offsets.len(), out.len()], "table")?;
     ensure!(
         at.is_multiple_of(8)
             && at
@@ -883,10 +866,7 @@ pub(super) fn next_in_group<R: Region>(
     found: &mut RowMask<'_>,
 ) -> Result<()> {
     let nrows = rows.nrows();
-    ensure!(
-        offsets.len() == nrows && found.as_view().nrows() == nrows,
-        "the offsets, mask and result of the batch have different row counts"
-    );
+    check_rows(nrows, &[offsets.len(), found.as_view().nrows()], "table")?;
     let mut access = Access::new(region, layout);
     for index in 0..nrows.div_ceil(64) {
         let bits = rows.word(index);
@@ -926,10 +906,7 @@ pub(super) fn gather_key<R: Region>(
     nulls: &mut [bool],
 ) -> Result<()> {
     let nrows = rows.nrows();
-    ensure!(
-        offsets.len() == nrows && values.len() == nrows && nulls.len() == nrows,
-        "the offsets, mask and output of the batch have different row counts"
-    );
+    check_rows(nrows, &[offsets.len(), values.len(), nulls.len()], "table")?;
     ensure!(
         key < layout.nkeys,
         "key {key} is past the table's {} keys",
