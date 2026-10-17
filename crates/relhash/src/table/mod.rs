@@ -1,59 +1,96 @@
 //! A hash table of records that never move, for joins and grouping.
 //!
-//! A table is an index and chunks of records, blocks of memory the caller
-//! owns and hands to every call: the local memory of a serial plan, or
-//! dynamic shared memory of a parallel one, mapped by every process at an
-//! address of its own. The table keeps no address between calls, and its
-//! memory is all the caller's. The index is a header of 96 bytes (see [`header`])
-//! and the bucket array, a power of two of buckets, at least 1024 and at
-//! least twice the records the index was made for, each holding the
-//! reference of the first record of its chain. The records lie in chunks
-//! of at most [`MAX_CHUNK_LEN`] bytes, each starting with a used mark, one
-//! after another: a hash, the reference of the next record of its bucket,
-//! a bit per key that is NULL and its length in 8-byte units, then one
-//! 8-byte slot per key (an int4 sign-extended) and the payload the table
-//! was created for, rounded up to 8: opaque bytes, a join's build row or
-//! grouping's aggregate states. A reference is 32 bits: the chunk's number
-//! and the record's offset there in 8-byte units ([`UNIT_BITS`] of them);
-//! 0 means none, since a chunk's used mark lies there. The caller passes
-//! the chunks as their bases and lengths in its own process ([`Chunks`]).
+//! # The parts
 //!
-//! A record is appended to a chunk by the chunk's one writer
-//! ([`Table::append`]), then linked into its bucket ([`Table::link`], by
-//! any number of participants at once, each over chunks of its own, or
-//! [`TableMut::link_grouped`], by one writer, next to the records of the
-//! same keys, whose rounds then step with [`Table::next_in_group`]). A
-//! record never moves: a larger index is built over the same chunks
-//! ([`TableMut::regrow`]). Probing ([`Table::probe`] for the first record
-//! with a row's hash and keys, [`Table::next_match`] for the ones after
-//! it, [`Table::gather`] for a payload word of each match) runs once the
-//! records are linked. [`TableMut`] is the access of one writer, which
-//! alone may give rows the record of their keys, creating it when there is
-//! none ([`TableMut::find_or_insert`], for grouping), change a payload in
-//! place, or walk the records ([`Table::scan`]). The caller hashes the
-//! keys, and its hash decides what NULL keys do: Tessera's kernels hash as
-//! PostgreSQL does.
+//! A table lives in blocks of memory that the caller owns: one index and
+//! any number of chunks. The table keeps no address between calls, and
+//! every call is given the blocks again, as bases and lengths
+//! ([`Chunks`]). So the same table works in the memory of one process
+//! and in shared memory that each process maps at an address of its own.
 //!
-//! Every call checks a chunk it writes or walks when it starts on it (the
-//! other chunks are the caller's promise, as the validity of their memory
-//! is, and a debug build of the entry points checks them all), and a call
-//! that reads the index attaches anew and checks the whole header; every
-//! reference is checked against its chunk before it is followed, and a
-//! chain is walked at most as many steps as there are records, and never
-//! more than the places a reference can name in the chunks, so a corrupt
-//! table is an error, never a hang or an access past a block. Dimension
-//! and pointer errors come before any change. A full chunk or index is not
-//! an error: rows without room stay in their mask for the caller to retry
-//! after adding a chunk or building a larger index.
+//! ```text
+//!   index                       chunks
+//!   ┌──────────┐                ┌────────────┐  chunk 0
+//!   │ header   │                │ used mark  │
+//!   ├──────────┤                ├────────────┤
+//!   │ bucket 0 │───────────────►│ record A   │──┐ next
+//!   │ bucket 1 │ 0: no record   ├────────────┤  │
+//!   │ bucket 2 │───┐            │ record B   │  │
+//!   │ …        │   │            ├────────────┤  │
+//!   └──────────┘   │            │ free       │  │
+//!                  │            └────────────┘  │
+//!                  │            ┌────────────┐  │ chunk 1
+//!                  │            │ used mark  │  │
+//!                  │            ├────────────┤  │
+//!                  └───────────►│ record C   │  │
+//!                               ├────────────┤  │
+//!                               │ record D   │◄─┘
+//!                               └────────────┘
+//! ```
 //!
-//! This is the second module of the crate allowed `unsafe`, for the index
-//! and chunks over raw pointers and atomics on them; see [`region`].
-//! [`OwnedTable`] owns its index and chunks and needs no `unsafe`: tests
-//! and benchmarks build tables with it.
+//! - The **index** is a header of fixed sizes (`header.rs`) and an array of
+//!   buckets. A row's hash picks its bucket by its high bits.
+//! - A **chunk** starts with its **used mark**, the bytes in use, and
+//!   holds records one after another.
+//! - A **record** is one row: its hash, the reference of the next record
+//!   of its chain, the NULL bits of its keys, a word of 8 bytes per key,
+//!   and a **payload**, bytes the table never reads. A join keeps the row
+//!   it returns there, a grouping the states of its aggregates.
+//! - A **reference** names a record: its chunk and its place in the
+//!   chunk, in 32 bits. A bucket holds the reference of the first record
+//!   of its **chain**, and each record that of the next one. 0 means
+//!   none, since no record starts where a chunk's used mark lies.
+//!
+//! A key is a word compared bit for bit: the table gives it no type. The
+//! caller computes the hash, so its hash decides which keys meet: the
+//! kernels of Tessera hash as PostgreSQL does.
+//!
+//! # How rows go in and come out
+//!
+//! A call takes a batch of rows: each row's hash, its keys through a
+//! [`KeySource`], and a mask of the rows it works on ([`RowMask`]).
+//!
+//! 1. **Append.** The one writer of a chunk writes records at its end and
+//!    moves its used mark ([`Table::append`]). The records are not found
+//!    yet.
+//! 2. **Link.** Each record goes first in its bucket's chain
+//!    ([`Table::link`]). Several participants may link at once, each its
+//!    own chunks.
+//! 3. **Probe.** A row finds the first record of its hash and keys
+//!    ([`Table::probe`]), the ones after it ([`Table::next_match`]) and
+//!    the words of their payloads ([`Table::gather`]).
+//!
+//! A table that one writer has to itself is a [`TableMut`]: it may find
+//! or create the record of each row's keys, for a grouping
+//! ([`TableMut::find_or_insert`]), change payloads in place, and move the
+//! table to a larger index ([`TableMut::regrow`]). Records never move: a
+//! larger index links the same records again.
+//!
+//! The arrays a call fills, such as the references of the rows found or
+//! the words gathered, are the caller's, a slot per row of the batch.
+//! The call writes only the rows of its mask and leaves the other slots
+//! as they were. So a call allocates nothing, a node can hand over the
+//! column it returns, and several calls can fill one array.
+//!
+//! # What a call checks
+//!
+//! The table trusts no byte it reads. A call checks the header, every
+//! chunk before it writes or walks it, and every reference before it
+//! follows it, and it walks a chain no further than the records the
+//! chunks can hold. Bytes that are not a table give an error, never a
+//! crash or an endless walk; the spec of `hash-table` lists the rules in
+//! its requirement "Errors of a call". Wrong arguments fail before the
+//! call changes anything. A full chunk or index is not an error: the rows
+//! without room stay in the mask, and the caller adds a chunk or a larger
+//! index and calls again.
+//!
+//! This module may use `unsafe` for its blocks of raw memory, which it
+//! reaches only through `region.rs`. [`OwnedTable`] owns its blocks and
+//! needs no `unsafe`: the tests and benchmarks build their tables with it.
 //!
 //! ```
 //! use anyhow::Result;
-//! use relhash::{RowMask, RowMaskView};
+//! use relhash::{RowMask, RowMaskView, ones};
 //! use relhash::table::{Batch, KeySource, OwnedTable, TableConfig};
 //!
 //! // The caller hands keys over a word of 64 rows at a time: here one key
@@ -63,7 +100,7 @@
 //!     fn nkeys(&self) -> usize { 1 }
 //!     fn nrows(&self) -> usize { self.0.len() }
 //!     fn word(&self, _: usize, index: usize, selected: u64, out: &mut [i64; 64]) -> Result<u64> {
-//!         for bit in (0..64).filter(|bit| selected >> bit & 1 == 1) {
+//!         for bit in ones(selected) {
 //!             out[bit] = i64::from(self.0[index * 64 + bit]);
 //!         }
 //!         Ok(selected) // the bits of the rows that are not NULL
@@ -267,8 +304,10 @@ impl<'a> Table<'a> {
         self.layout.record_size
     }
 
-    /// The fingerprint of the table's record layout, which spilled blocks
-    /// carry so that they are read back only into a table like it.
+    /// The fingerprint of the table's record layout. Blocks of records a
+    /// table writes to disk carry it, and a table reads a block back only
+    /// when its own fingerprint is the block's: records of another layout
+    /// are refused, not read.
     pub fn fingerprint(&self) -> u64 {
         self.layout.fingerprint()
     }

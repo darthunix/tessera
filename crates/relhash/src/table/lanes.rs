@@ -53,13 +53,17 @@ pub(super) fn prefetch(_address: *const u8) {}
 pub(super) const VERTICAL_MIN_ROWS: u32 = 8;
 
 /// The per-row arrays of a word's vertical probe, indexed by row within
-/// the word: the rows' hashes, the records each row is at, and their
-/// spots, resolved once per step for both the hint and the comparison. A
-/// probe writes a row's entries before it reads them, for the selected
-/// rows only, so the arrays start uninitialized and are never cleared.
+/// the word. A probe writes a row's entries before it reads them, for the
+/// selected rows only, so the arrays start uninitialized and are never
+/// cleared.
 pub(super) struct Lanes<S: Copy> {
+    /// The row's hash.
     hash: [MaybeUninit<u32>; 64],
+    /// The reference of the record the row's walk is at: first its
+    /// bucket's head, then the next of each record that did not match.
     current: [MaybeUninit<u32>; 64],
+    /// Where that record lies, found once a step for both the prefetch
+    /// hint and the comparison.
     spot: [MaybeUninit<S>; 64],
 }
 
