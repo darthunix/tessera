@@ -119,7 +119,7 @@ sort itself does not change.
 
 `crates/tessera-kernels/tests/table.rs` covers the format and every
 operation, including corrupt headers, chunks, chains and references,
-over `LocalTable`, a table that owns its index and chunks, and runs
+over `OwnedTable`, a table that owns its index and chunks, and runs
 under Miri; `crates/tessera-capi/tests/table.rs` compares Datum and
 dense key columns and calls the entry points as C would;
 `test/tessera_table_test.c` is the C test module, run by `make

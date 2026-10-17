@@ -44,7 +44,7 @@ exclude_globs = [
 # storage or its rows one by one: both give the same results, and only the
 # time tells them apart. The mutants of that choice are named by their
 # place, since the same operators elsewhere in these functions matter.
-# LocalTable::find_or_insert adds the rows a call created to those of the
+# OwnedTable::find_or_insert adds the rows a call created to those of the
 # calls before; a row is created once, so the two share no bit and | is ^.
 exclude_re = [
     "<impl [a-z:]*Debug for ",
@@ -65,7 +65,7 @@ exclude_re = [
     "int/aggregate\\.rs:7[12]:[0-9]+: replace (&& with \\|\\||>= with <) in aggregate$",
     "int/arith\\.rs:21[01]:[0-9]+: replace (&& with \\|\\||>= with <) in run$",
     "int/compare\\.rs:51:69: replace && with \\|\\| in run$",
-    "table/owned\\.rs:316:61: replace \\| with \\^ in LocalTable::find_or_insert$",
+    "table/owned\\.rs:316:61: replace \\| with \\^ in OwnedTable::find_or_insert$",
 ]
 
 # A mutant that makes a loop endless is stopped at three times the

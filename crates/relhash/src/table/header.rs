@@ -296,7 +296,7 @@ impl Header {
     /// The header of a larger index of `len` bytes for `capacity` records,
     /// with no record linked yet: the layout stays, the buckets are the
     /// ones [`index_size`] gives the capacity.
-    pub(super) fn regrown(&self, capacity: u64, len: usize) -> Result<Self> {
+    pub(super) fn with_capacity(&self, capacity: u64, len: usize) -> Result<Self> {
         let nbuckets = bucket_count(capacity);
         ensure!(
             len.is_multiple_of(8) && HEADER_SIZE + nbuckets as usize * 4 <= len,

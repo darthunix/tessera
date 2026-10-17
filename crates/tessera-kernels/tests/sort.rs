@@ -15,7 +15,7 @@ use proptest::sample::select;
 use tessera_core::RowMask;
 use tessera_kernels::order;
 use tessera_kernels::sort::{MAX_ITEM_WORDS, SortKey, item_words, run_words, sort_items};
-use tessera_kernels::table::{Batch, KeyKind, KeySource, LocalTable, TableConfig};
+use tessera_kernels::table::{Batch, KeyKind, KeySource, OwnedTable, TableConfig};
 use tessera_testing::{flags, integer, nrows, property, words};
 
 /// Chunks of the tests: small, so that most row sets span several.
@@ -124,7 +124,7 @@ fn sorted_rows(keys: &[SortKey], rows: &Rows) -> Result<(Vec<usize>, Vec<u32>)> 
         keys: &rows.kinds,
         payload_size: 8,
     };
-    let mut table = LocalTable::new(&config, 0, CHUNK)?;
+    let mut table = OwnedTable::new(&config, 0, CHUNK)?;
     let mut references = vec![0u32; nrows];
     let hashes = vec![0u32; nrows];
     let mut pending_words: Vec<u64> = vec![0; nrows.div_ceil(64)];
@@ -274,7 +274,7 @@ fn misuse_is_an_error() -> Result<()> {
         keys: &[Int32],
         payload_size: 8,
     };
-    let table = LocalTable::new(&config, 0, CHUNK)?;
+    let table = OwnedTable::new(&config, 0, CHUNK)?;
     let keys = [key(Int32, false, false, false)];
     assert_eq!(order::items(&table.table()?, &keys, &mut [])?, 0);
     let mut items = [0u64; 4];
@@ -295,7 +295,7 @@ fn top_rows(keys: &[SortKey], rows: &Rows, n: usize) -> Result<Vec<Vec<Option<i6
         keys: &rows.kinds,
         payload_size: 8,
     };
-    let mut table = LocalTable::new(&config, 0, CHUNK)?;
+    let mut table = OwnedTable::new(&config, 0, CHUNK)?;
     let words = item_words(keys)?;
     let mut heap = vec![0u64; n * words];
     let mut len = 0;
