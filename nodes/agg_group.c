@@ -47,7 +47,7 @@ new_index(TessAggState *state, uint64 capacity, Size *size)
 {
 	Size		payload_size = state->payload_size;
 
-	check(state, state->kernels->table_size(state->nkeys, state->kinds,
+	check(state, state->kernels->table_size(state->nkeys,
 											payload_size, capacity, size,
 											&state->status));
 	return MemoryContextAllocExtended(state->table_context, *size, MCXT_ALLOC_HUGE);
@@ -74,8 +74,7 @@ create_table(TessAggState *state)
 	state->table.chunk_lens = state->chunk_lens;
 	state->table.nchunks = 0;
 	state->table_bytes = size;
-	check(state, state->kernels->table_create(state->table.index, size, state->nkeys,
-											  state->kinds, payload_size,
+	check(state, state->kernels->table_create(state->table.index, size, state->nkeys, payload_size,
 											  capacity, &state->status));
 	note_memory(state);
 }

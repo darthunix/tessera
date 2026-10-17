@@ -23,12 +23,12 @@ use anyhow::{Result, ensure};
 use tessera_core::{ColumnView, RowMask, RowMaskView};
 use tessera_kernels::column_keys::KeyColumns;
 use tessera_kernels::int32::murmurhash32;
-use tessera_kernels::table::{Batch, KeyKind, MAX_CHUNK_LEN, OwnedTable, TableConfig, bloom};
+use tessera_kernels::table::{Batch, MAX_CHUNK_LEN, OwnedTable, TableConfig, bloom};
 
 use crate::support::runner::Runner;
 
-const CONFIG: TableConfig<'static> = TableConfig {
-    keys: &[KeyKind::Int32],
+const CONFIG: TableConfig = TableConfig {
+    nkeys: 1,
     payload_size: 8,
 };
 

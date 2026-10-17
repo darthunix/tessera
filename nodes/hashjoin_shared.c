@@ -327,13 +327,13 @@ size_shared_table(TessHashJoinState *state)
 	}
 	state->parallel.shared->resident_rows = records;
 	capacity = Max(records, JOIN_INITIAL_ROWS);
-	check(state, state->kernels->table_size(state->keys.nkeys, state->keys.inner_kinds,
+	check(state, state->kernels->table_size(state->keys.nkeys,
 											payload_size, capacity,
 											&size, &state->status));
 	state->parallel.shared->index = dsa_allocate_extended(area, size, DSA_ALLOC_HUGE);
 	state->parallel.shared->index_len = size;
 	check(state, state->kernels->table_create(dsa_get_address(area, state->parallel.shared->index),
-											  size, state->keys.nkeys, state->keys.inner_kinds,
+											  size, state->keys.nkeys,
 											  payload_size, capacity,
 											  &state->status));
 	/* The directory: every chunk under the number it took, none left out. */
@@ -1309,7 +1309,7 @@ make_rounds(TessHashJoinState *state)
 														 state->parallel.shared->spill_nwords,
 														 partition, 0, &round->records,
 														 &state->status));
-		check(state, state->kernels->table_size(state->keys.nkeys, state->keys.inner_kinds, payload_size,
+		check(state, state->kernels->table_size(state->keys.nkeys, payload_size,
 												Max(round->records, JOIN_INITIAL_ROWS),
 												&size, &state->status));
 		round->nchunks = (int) Min(blocks, (uint64) INT_MAX);
@@ -1343,12 +1343,12 @@ round_allocate(TessHashJoinState *state, JoinRound *round)
 	uint64		capacity = Max(round->records, JOIN_INITIAL_ROWS);
 	Size		size;
 
-	check(state, state->kernels->table_size(state->keys.nkeys, state->keys.inner_kinds, payload_size,
+	check(state, state->kernels->table_size(state->keys.nkeys, payload_size,
 											capacity, &size, &state->status));
 	round->index = dsa_allocate_extended(area, size, DSA_ALLOC_HUGE);
 	round->index_len = size;
 	check(state, state->kernels->table_create(dsa_get_address(area, round->index), size,
-											  state->keys.nkeys, state->keys.inner_kinds, payload_size,
+											  state->keys.nkeys, payload_size,
 											  capacity, &state->status));
 	round->directory = dsa_allocate_extended(area,
 											 mul_size(Max(round->nchunks, 1),

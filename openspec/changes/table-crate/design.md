@@ -107,6 +107,28 @@ Refused: the folds in the crate, since they carry PostgreSQL's numeric
 and its int8 error; the phases in the crate, since they are the steps
 of a join over PostgreSQL's barrier, with steps of a spill.
 
+### The kinds of keys
+
+**Was:** a table was created with a kind for each key, `int4` or
+`int8`, which its header kept in a byte a key and its fingerprint took
+in. The table never read it: every key is a word of 8 bytes compared
+bit for bit, and the source of keys widens an `int4` into its word.
+Only the items of a sort compared their keys' kinds with the table's.
+
+**Will be:** in the maintainer's review of the move, the table keeps no
+kinds. A configuration is a count of keys and a payload size; the bytes
+of the header that held the kinds are reserved and 0, and the format is
+version 2. The fingerprint guards what it guarded, the layout of a
+record's bytes, which the kinds never changed. The C calls that size,
+make and split a table, and the configuration of Tessera's rows, take
+no kinds; the nodes keep theirs for reading key columns and for the
+items of a sort, whose kind of key is the kernels' own. The crate then
+holds no name of a PostgreSQL type, as its contract asks.
+
+Refused: a byte a key that the caller sets and the crate keeps without
+reading it, which would keep a field of the format for one check of a
+sort.
+
 ### The masks of rows
 
 **Was:** `RowMask`, `RowMaskView` and `ones` live in `tessera-core`,

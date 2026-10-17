@@ -19,11 +19,10 @@ use crate::sort::{Encoder, SortKey, heap_push, with_item_words};
 /// The references a scan gives at a time to the items.
 const SCAN: usize = 64;
 
-/// Refuse sort keys that are not the table's keys, one each, of its kinds.
+/// Refuse sort keys that are not the table's keys, one each.
 fn check_keys(table: &Table<'_>, keys: &[SortKey]) -> Result<()> {
-    let kinds = table.key_kinds();
     ensure!(
-        keys.len() == kinds.len() && keys.iter().zip(kinds).all(|(key, &kind)| key.kind == kind),
+        keys.len() == table.config().nkeys,
         "the sort keys are not the table's keys"
     );
     Ok(())
