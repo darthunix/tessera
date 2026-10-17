@@ -7,7 +7,7 @@
 //! and a larger index rebuilds the buckets and every record's next field.
 //! Records never move.
 
-use crate::{RowMask, RowMaskView, ones};
+use crate::{RowMask, RowMaskView, check_rows, ones};
 use anyhow::{Result, bail, ensure};
 
 use super::batch::{check_keys, check_partitions, shaped};
@@ -74,11 +74,7 @@ pub(super) fn find_or_insert<R: Region, K: KeySource + ?Sized>(
     } = batch;
     let nrows = offsets.len();
     check_keys(layout, *keys)?;
-    ensure!(
-        inserted.as_view().nrows() == nrows,
-        "the inserted mask has {} rows, the batch {nrows}",
-        inserted.as_view().nrows()
-    );
+    check_rows(nrows, &[inserted.as_view().nrows()], "table")?;
     shaped!(
         layout.nkeys,
         layout.tail_words(),
@@ -107,11 +103,7 @@ pub(super) fn find_or_insert_partitioned<R: Region, K: KeySource + ?Sized>(
     } = batch;
     let nrows = offsets.len();
     check_keys(layout, *keys)?;
-    ensure!(
-        inserted.as_view().nrows() == nrows,
-        "the inserted mask has {} rows, the batch {nrows}",
-        inserted.as_view().nrows()
-    );
+    check_rows(nrows, &[inserted.as_view().nrows()], "table")?;
     let mask = check_partitions(region, partitions)?;
     shaped!(
         layout.nkeys,
@@ -160,7 +152,7 @@ fn resolve_rows<
         Some(_) => (0, 0),
     };
     // The index takes records up to half its buckets.
-    let limit = u64::from(layout.nbuckets / 2);
+    let limit = layout.most_records();
     let nrows = pending.as_view().nrows();
     let mut buffer = slot_buffer::<L>();
     let mut word_keys = WordKeys::new(&mut buffer, access.nkeys());
@@ -352,10 +344,7 @@ pub(super) fn each_payload<R: Region>(
     mut each: impl FnMut(usize, &mut [u8]),
 ) -> Result<()> {
     let nrows = rows.nrows();
-    ensure!(
-        offsets.len() == nrows,
-        "the offsets and mask of the batch have different row counts"
-    );
+    check_rows(nrows, &[offsets.len()], "table")?;
     let mut access = Access::new(region, layout);
     for index in 0..nrows.div_ceil(64) {
         for bit in ones(rows.word(index)) {
@@ -617,7 +606,7 @@ pub(super) fn merge<R: Region>(
     );
     let mut access = Access::new(region, layout);
     let record_size = access.record_size();
-    let limit = u64::from(layout.nbuckets / 2);
+    let limit = layout.most_records();
     let (mut used, mut room) = access.room(chunk)?;
     let places = unlinked(&access, source, *from)?;
     let mut merged = 0;
