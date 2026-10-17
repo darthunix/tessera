@@ -107,6 +107,43 @@ Refused: the folds in the crate, since they carry PostgreSQL's numeric
 and its int8 error; the phases in the crate, since they are the steps
 of a join over PostgreSQL's barrier, with steps of a spill.
 
+### The public API
+
+**Was:** about 145 public items, the table's under `relhash::table`
+and the masks at the root. Most mirror the C API, which alone calls
+them; Tessera's kernels take a few for the items of a sort and the
+folds, and only tests use the owning table. The calls over chunks
+before a table has an index are four free functions, each given the
+configuration again. A reference is a `u32` that parameters and texts
+call an offset. The format's magic is `TESSTABL`. The owning table
+opens hooks for tests to read and damage its blocks.
+
+**Will be:** in the maintainer's review of the API, before its
+snapshot:
+
+- The table is the crate: its items lie at the root, `relhash::Table`,
+  `relhash::OwnedTable`, `relhash::bloom`, beside the masks. Tessera's
+  kernels keep `tessera_kernels::table` as a name for the crate.
+- The calls over chunks before a table has an index are one type made
+  over a configuration and chunks, `ChunkWriter`, with `append`,
+  `append_columns`, `append_partitioned_columns` and `split`: the
+  configuration is checked once, and the name says there is no index
+  yet.
+- References are called references, in parameters and texts; they
+  stay `u32`, as C passes them.
+- The magic is `RELHASH\0`. The format stays version 2, which no table
+  with `TESSTABL` had.
+- `BITS_PER_RECORD` closes: `words_for` sizes a filter.
+- The hooks for tests leave the public API when the table's tests move
+  into the crate, before the snapshot of the API.
+- Unchanged: the raw pointers of the unsafe way in, since other
+  processes write shared memory while a call runs, which a slice would
+  forbid; `MAX_CHUNKS`, a limit callers keep; `SharedFilter::from_mut`,
+  the safe way to a filter in one process.
+
+Refused: a type of its own for a reference, which every array that
+crosses the C edge would convert; the four free functions.
+
 ### The kinds of keys
 
 **Was:** a table was created with a kind for each key, `int4` or
