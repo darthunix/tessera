@@ -482,23 +482,23 @@ impl<'t> PayloadCursor<'t> {
         }
     }
 
-    /// The payload of the record at `offset`, to change in place: an
+    /// The payload of the record at `reference`, to change in place: an
     /// error for a reference that names no record of the table.
     #[inline(always)]
-    pub fn payload(&mut self, offset: u32) -> Result<&mut [u8]> {
-        let spot = self.access.payload_spot(offset)?;
+    pub fn payload(&mut self, reference: u32) -> Result<&mut [u8]> {
+        let spot = self.access.payload_spot(reference)?;
         // SAFETY: the spot is this record's payload, just checked; the
         // slice borrows the cursor, which borrows the writer's table, so
         // no other slice of a payload is alive while it is.
         Ok(unsafe { self.access.payload_mut(spot) })
     }
 
-    /// Check the reference `offset` now, as [`Self::payload`] does, and
+    /// Check the reference `reference` now, as [`Self::payload`] does, and
     /// hold its payload's place in `slot`, below [`HELD`], for
     /// [`Self::held`] to open later; a slot holds one place at a time.
     #[inline(always)]
-    pub fn hold(&mut self, slot: usize, offset: u32) -> Result<()> {
-        let spot = self.access.payload_spot(offset)?;
+    pub fn hold(&mut self, slot: usize, reference: u32) -> Result<()> {
+        let spot = self.access.payload_spot(reference)?;
         let Some(held) = self.held.get_mut(slot) else {
             bail!("slot {slot} of a payload cursor's {HELD}");
         };
