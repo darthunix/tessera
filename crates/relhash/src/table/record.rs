@@ -5,7 +5,7 @@
 //! record of its bucket, the bits of its keys that are NULL and its length
 //! in 8-byte units; then one 8-byte slot per key and the payload, rounded
 //! up to 8. A reference is the record's chunk and its offset there (see
-//! [`super::header::reference`]); 0 is none. A record is appended to a
+//! [`Place`](super::header::Place)); 0 is none. A record is appended to a
 //! chunk by the chunk's one writer, then published by a compare-and-swap of
 //! its bucket's head. A published record never moves, and while others
 //! may read it, never changes; the one writer of a table may change its
@@ -13,9 +13,7 @@
 
 use anyhow::{Result, ensure};
 
-use super::header::{
-    CHUNK_HEADER, KEY_SLOT, Layout, NRECORDS, RECORD_HEADER, UNIT_BITS, placement, reference,
-};
+use super::header::{CHUNK_HEADER, KEY_SLOT, Layout, NRECORDS, Place, RECORD_HEADER, UNIT_BITS};
 use super::keys::WordKeys;
 use super::region::Region;
 
@@ -119,9 +117,6 @@ pub(super) struct Access<'r, R> {
     nrecords: u64,
 }
 
-/// Where a record lies: its chunk and its first byte there.
-pub(super) type Place = (usize, usize);
-
 impl<'r, R: Region> Access<'r, R> {
     #[inline]
     pub(super) fn new(region: &'r R, layout: &Layout) -> Self {
@@ -189,14 +184,14 @@ impl<'r, R: Region> Access<'r, R> {
     /// mark reads the chunk's unused bytes, never memory outside it.
     #[inline(always)]
     pub(super) fn place(&self, offset: u32) -> Result<Place> {
-        let (chunk, byte) = placement(offset);
+        let Place { chunk, byte } = Place::of(offset);
         if chunk >= self.region.chunks()
             || byte < CHUNK_HEADER
             || byte + self.record_size > self.region.chunk_len(chunk)
         {
             return Err(outside(offset));
         }
-        Ok((chunk, byte))
+        Ok(Place { chunk, byte })
     }
 
     /// The record at `offset`, which must claim the table's record length;
@@ -208,7 +203,7 @@ impl<'r, R: Region> Access<'r, R> {
     #[inline(always)]
     pub(super) unsafe fn open(&self, offset: u32) -> Result<View<'r>> {
         // SAFETY: `place` accepted the offset, the caller promises.
-        unsafe { self.open_at(self.spot(placement(offset)), offset) }
+        unsafe { self.open_at(self.spot(Place::of(offset)), offset) }
     }
 
     /// The record at `offset`, whose spot the caller resolved, as
@@ -235,7 +230,7 @@ impl<'r, R: Region> Access<'r, R> {
     /// [`Self::place`] accepted the place, or it lies below its chunk's
     /// used mark.
     #[inline(always)]
-    pub(super) unsafe fn spot(&self, (chunk, byte): Place) -> R::Spot {
+    pub(super) unsafe fn spot(&self, Place { chunk, byte }: Place) -> R::Spot {
         // SAFETY: the caller's contract.
         unsafe { self.region.spot(chunk, byte) }
     }
@@ -245,9 +240,14 @@ impl<'r, R: Region> Access<'r, R> {
     #[inline(always)]
     pub(super) fn payload_spot(&mut self, offset: u32) -> Result<R::Spot> {
         self.locate(offset)?;
-        let (chunk, byte) = self.place(offset)?;
+        let Place { chunk, byte } = self.place(offset)?;
         // SAFETY: the payload lies within a record that `locate` accepted.
-        Ok(unsafe { self.spot((chunk, byte + RECORD_HEADER + self.nkeys * KEY_SLOT)) })
+        Ok(unsafe {
+            self.spot(Place {
+                chunk,
+                byte: byte + RECORD_HEADER + self.nkeys * KEY_SLOT,
+            })
+        })
     }
 
     /// The payload at a spot [`Self::payload_spot`] gave, to change in
@@ -437,7 +437,7 @@ impl<'r, R: Region> Access<'r, R> {
     #[inline(always)]
     pub(super) unsafe fn write<const N: usize, const T: usize>(
         &self,
-        (chunk, byte): Place,
+        Place { chunk, byte }: Place,
         hash: u32,
         keys: &WordKeys,
         bit: usize,
@@ -466,7 +466,7 @@ impl<'r, R: Region> Access<'r, R> {
     #[inline(always)]
     pub(super) unsafe fn write_columns<const N: usize>(
         &self,
-        (chunk, byte): Place,
+        Place { chunk, byte }: Place,
         hash: u32,
         keys: &WordKeys,
         bit: usize,
@@ -761,8 +761,11 @@ impl<'r, R: Region> Access<'r, R> {
     /// reference is `offset`, lies within its chunk, and `after` is a
     /// record it located.
     #[inline]
-    pub(super) unsafe fn link_after(&self, after: u32, (chunk, byte): Place, offset: u32) {
-        let (after_chunk, after_byte) = placement(after);
+    pub(super) unsafe fn link_after(&self, after: u32, Place { chunk, byte }: Place, offset: u32) {
+        let Place {
+            chunk: after_chunk,
+            byte: after_byte,
+        } = Place::of(after);
         // SAFETY: both next fields lie in records within their chunks, and
         // nothing else reads or writes the table meanwhile.
         unsafe {
@@ -772,12 +775,6 @@ impl<'r, R: Region> Access<'r, R> {
                 .store_next(self.region.spot(chunk, byte + NEXT), next);
             self.region.store_next(after, offset);
         }
-    }
-
-    /// The reference of a place.
-    #[inline(always)]
-    pub(super) fn reference(&self, (chunk, byte): Place) -> u32 {
-        reference(chunk, byte)
     }
 
     /// Count records published.
@@ -948,8 +945,8 @@ pub(super) unsafe fn check_record_at<R: Region>(
     ensure!(
         view.len() == access.record_size(),
         "table chunk {} holds no record at byte {}",
-        place.0,
-        place.1
+        place.chunk,
+        place.byte
     );
     Ok(view.hash())
 }
