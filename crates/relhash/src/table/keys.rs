@@ -1,8 +1,9 @@
 //! Keys of a batch as the table compares and stores them.
 //!
 //! Whatever a key column's representation, the table works with one form:
-//! per 64-row word, one `i64` slot per row and key (an int4 sign-extended,
-//! a NULL as 0) and the bits of the rows that are NULL in each key. A
+//! per 64-row word, one `i64` slot per row and key (the value as the
+//! caller puts it in a word, a NULL as 0) and the bits of the rows that
+//! are NULL in each key. A
 //! [`KeySource`] fills the slots of one key of one word. The comparison
 //! loops of the table then run over `i64` alone, whatever the columns
 //! were.
@@ -44,10 +45,13 @@ pub(super) fn slot_buffer<const L: usize>() -> SlotBuffer<L> {
 
 /// The keys of one word in the table's form.
 ///
-/// The slots live in a [`SlotBuffer`] the caller keeps in place, and only
-/// the table's keys are initialized: a buffer owned by value was copied
-/// whole, 8 KiB, whenever it moved, and zeroing all [`MAX_KEYS`](super::MAX_KEYS) of them
-/// cost more than a short batch's rows.
+/// This is not a second buffer: the slots live in the [`SlotBuffer`] the
+/// caller keeps in place, and this type borrows the arrays of the table's
+/// keys from it, once they are written. The buffer is the memory, made
+/// uninitialized and never moved; this is the view the comparisons read.
+/// A buffer owned by value was copied whole, 8 KiB, whenever it moved,
+/// and zeroing all [`MAX_KEYS`](super::MAX_KEYS) of them cost more than a
+/// short batch's rows.
 pub(super) struct WordKeys<'a> {
     slots: &'a mut [[i64; 64]],
     null_bits: [u32; 64],
@@ -83,6 +87,9 @@ impl<'a> WordKeys<'a> {
         self.null_bits = [0; 64];
         for (key, slots) in self.slots.iter_mut().enumerate() {
             let mut nulls = selected & !keys.word(key, index, selected, slots)?;
+            // The walk of `ones` written out, as the row loops that inline
+            // this one write theirs; `.cargo/mutants.toml` leaves the step
+            // out.
             while nulls != 0 {
                 self.null_bits[nulls.trailing_zeros() as usize] |= 1 << key;
                 nulls &= nulls - 1;
