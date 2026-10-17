@@ -23,7 +23,7 @@ use anyhow::{Result, ensure};
 use tessera_core::{ColumnView, RowMask, RowMaskView};
 use tessera_kernels::column_keys::KeyColumns;
 use tessera_kernels::int32::murmurhash32;
-use tessera_kernels::table::{Batch, KeyKind, LocalTable, MAX_CHUNK_LEN, TableConfig, bloom};
+use tessera_kernels::table::{Batch, KeyKind, MAX_CHUNK_LEN, OwnedTable, TableConfig, bloom};
 
 use crate::support::runner::Runner;
 
@@ -175,7 +175,7 @@ impl Reference {
 
 /// The table, its keys with their hashes, and the output buffers.
 pub struct Setup {
-    pub table: LocalTable,
+    pub table: OwnedTable,
     pub keys: Keys,
     pub present_hashes: Vec<u32>,
     pub absent_hashes: Vec<u32>,
@@ -200,7 +200,7 @@ impl Setup {
         let inserted_hashes = hashes(&keys.inserted);
         let absent_hashes = hashes(&keys.absent);
         let occupied_hashes = hashes(&keys.occupied);
-        let mut table = LocalTable::new(&CONFIG, RECORDS as u64, MAX_CHUNK_LEN)?;
+        let mut table = OwnedTable::new(&CONFIG, RECORDS as u64, MAX_CHUNK_LEN)?;
         {
             ensure!(
                 table.table()?.stats().buckets == BUCKETS as u64,

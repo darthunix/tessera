@@ -67,7 +67,7 @@ fn one_of_four_threads_builds_a_shared_filter_every_key_passes() {
         payload_size: 0,
     };
     let count = 200;
-    let mut table = LocalTable::new(&config, count, 4096).unwrap();
+    let mut table = OwnedTable::new(&config, count, 4096).unwrap();
     let keys: Vec<i32> = (0..count as i32).map(|key| key * 7).collect();
     let hashes: Vec<u32> = keys.iter().map(|&key| murmurhash32(key as u32)).collect();
     let column = IntKeys(&keys);
@@ -307,7 +307,7 @@ fn partitions_past_the_hash_or_the_chunks_are_refused() {
         (32, &[0], "past the 32 bits"),
     ];
     // A lookup by partition into a table over the same chunks.
-    let mut table = LocalTable::new(&PARTITION_CONFIG, 64, CHUNK_HEADER + 256 * 32).unwrap();
+    let mut table = OwnedTable::new(&PARTITION_CONFIG, 64, CHUNK_HEADER + 256 * 32).unwrap();
     for _ in 0..4 {
         table.add_chunk().unwrap();
     }
@@ -436,7 +436,7 @@ fn groups_go_to_the_chunks_of_their_partitions() {
         payload_size: 8,
     };
     // Records of 32 bytes, 8 to a chunk: the partitions fill.
-    let mut table = LocalTable::new(&config, 1024, CHUNK_HEADER + 8 * 32).unwrap();
+    let mut table = OwnedTable::new(&config, 1024, CHUNK_HEADER + 8 * 32).unwrap();
     let mut current: Vec<u32> = (0..4).map(|_| table.add_chunk().unwrap() as u32).collect();
     let mut owner: Vec<u32> = (0..4).collect();
     let mut first = std::collections::HashMap::new();
@@ -505,7 +505,7 @@ fn groups_go_to_the_chunks_of_their_partitions() {
 }
 
 /// The states of a group: flags, count, sum, min, max.
-fn states(table: &LocalTable, offset: u32) -> [i64; 5] {
+fn states(table: &OwnedTable, offset: u32) -> [i64; 5] {
     let reader = table.table().unwrap();
     let record = reader.record(offset).unwrap();
     let mut out = [0; 5];
@@ -521,7 +521,7 @@ fn states(table: &LocalTable, offset: u32) -> [i64; 5] {
 #[test]
 fn half_the_buckets_stops_every_row_of_a_lookup_by_partition() {
     // 1024 buckets take 512 records; 600 keys, then 6 the table holds.
-    let mut table = LocalTable::new(&PARTITION_CONFIG, 16, CHUNK_HEADER + 1000 * 32).unwrap();
+    let mut table = OwnedTable::new(&PARTITION_CONFIG, 16, CHUNK_HEADER + 1000 * 32).unwrap();
     assert_eq!(table.table().unwrap().stats().buckets, 1024);
     let chunks: Vec<u32> = (0..4).map(|_| table.add_chunk().unwrap() as u32).collect();
     let keys: Vec<i32> = (0..600).chain(0..6).collect();
@@ -557,12 +557,12 @@ fn half_the_buckets_stops_every_row_of_a_lookup_by_partition() {
 }
 
 /// A table of the keys, each with the states `of` gives it.
-fn grouped(keys: &[i32], of: impl Fn(i32) -> [i64; 5], capacity: u64) -> (LocalTable, Vec<u32>) {
+fn grouped(keys: &[i32], of: impl Fn(i32) -> [i64; 5], capacity: u64) -> (OwnedTable, Vec<u32>) {
     let config = TableConfig {
         keys: &[KeyKind::Int32],
         payload_size: 40,
     };
-    let mut table = LocalTable::new(&config, capacity, CHUNK_HEADER + 16 * 56).unwrap();
+    let mut table = OwnedTable::new(&config, capacity, CHUNK_HEADER + 16 * 56).unwrap();
     let column = IntKeys(keys);
     let (hashes, mut pending_words) = key_batch(keys);
     let mut inserted_words = vec![0; pending_words.len()];
@@ -646,7 +646,7 @@ fn a_merge_stops_for_a_chunk_or_a_larger_index() {
 }
 
 /// The states of each key's record, found by its keys.
-fn states_of(table: &mut LocalTable, keys: &[i32]) -> Vec<[i64; 5]> {
+fn states_of(table: &mut OwnedTable, keys: &[i32]) -> Vec<[i64; 5]> {
     let column = IntKeys(keys);
     let (hashes, mut pending_words) = key_batch(keys);
     let mut inserted_words = vec![0; pending_words.len()];
@@ -774,7 +774,7 @@ fn a_damaged_count_is_bounded_by_the_places_of_the_chunks() {
         keys: &[KeyKind::Int32],
         payload_size: 8,
     };
-    let mut table = LocalTable::new(&config, 10, 4096).unwrap();
+    let mut table = OwnedTable::new(&config, 10, 4096).unwrap();
     table.add_chunk().unwrap();
     table.add_chunk().unwrap();
     // The header counts more records than the chunks could ever hold:

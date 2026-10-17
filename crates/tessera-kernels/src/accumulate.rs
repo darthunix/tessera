@@ -661,7 +661,7 @@ mod tests {
     use super::*;
     use crate::column_keys::KeyColumns;
     use crate::int32::murmurhash32;
-    use crate::table::{Batch, CHUNK_HEADER, KeyKind, LocalTable, TableConfig};
+    use crate::table::{Batch, CHUNK_HEADER, KeyKind, OwnedTable, TableConfig};
 
     /// Keys and their hashes as a batch's key column.
     fn key_batch(keys: &[i32]) -> (Vec<u32>, Vec<u64>) {
@@ -678,12 +678,12 @@ mod tests {
         keys: &[i32],
         of: impl Fn(i32) -> [i64; 5],
         capacity: u64,
-    ) -> (LocalTable, Vec<u32>) {
+    ) -> (OwnedTable, Vec<u32>) {
         let config = TableConfig {
             keys: &[KeyKind::Int32],
             payload_size: 40,
         };
-        let mut table = LocalTable::new(&config, capacity, CHUNK_HEADER + 16 * 56).unwrap();
+        let mut table = OwnedTable::new(&config, capacity, CHUNK_HEADER + 16 * 56).unwrap();
         let column = [ColumnView::try_new(keys, None).unwrap()];
         let (hashes, mut pending_words) = key_batch(keys);
         let mut inserted_words = vec![0; pending_words.len()];
@@ -711,7 +711,7 @@ mod tests {
     }
 
     /// The states of a group: flags, count, sum, min, max.
-    fn states(table: &LocalTable, offset: u32) -> [i64; 5] {
+    fn states(table: &OwnedTable, offset: u32) -> [i64; 5] {
         let reader = table.table().unwrap();
         let record = reader.record(offset).unwrap();
         let mut out = [0; 5];
@@ -726,7 +726,7 @@ mod tests {
 
     /// Merge every chunk of `from` into `into`, adding chunks and growing
     /// its index as the kernel asks.
-    fn merge(into: &mut LocalTable, from: &mut LocalTable) -> Result<()> {
+    fn merge(into: &mut OwnedTable, from: &mut OwnedTable) -> Result<()> {
         let mut chunk = into.chunks() - 1;
         for source_chunk in 0..from.chunks() {
             let words = from.chunk_words(source_chunk).to_vec();

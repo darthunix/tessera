@@ -435,7 +435,7 @@ pub(super) fn regrow<R: Region>(
     layout: &Layout,
     capacity: u64,
 ) -> Result<Layout> {
-    let header = Header::load(from).regrown(capacity, to.len())?;
+    let header = Header::load(from).with_capacity(capacity, to.len())?;
     let grown = header.validate(to.len())?;
     ensure!(
         grown.record_size == layout.record_size && grown.nkeys == layout.nkeys,
