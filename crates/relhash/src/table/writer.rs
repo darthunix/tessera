@@ -11,7 +11,7 @@ use crate::{RowMask, RowMaskView, ones};
 use anyhow::{Result, bail, ensure};
 
 use super::batch::{check_keys, check_partitions, shaped};
-use super::header::{CHUNK_HEADER, Header, KEY_SLOT, Layout, RECORD_HEADER, placement};
+use super::header::{CHUNK_HEADER, Header, KEY_SLOT, Layout, Place, RECORD_HEADER};
 use super::keys::{KeySource, WordKeys, slot_buffer};
 use super::lanes::{Lanes, VERTICAL_MIN_ROWS, probe_word};
 use super::record::{Access, check_record, same_keys, unlinked};
@@ -220,7 +220,7 @@ fn resolve_rows<
                                 full = true;
                                 break;
                             }
-                            None => (chunk, used),
+                            None => Place { chunk, byte: used },
                             Some((partitions, mask)) => {
                                 let target = partitions.chunks
                                     [((hash >> partitions.shift) & mask) as usize]
@@ -230,10 +230,13 @@ fn resolve_rows<
                                 if space == 0 {
                                     continue;
                                 }
-                                (target, at)
+                                Place {
+                                    chunk: target,
+                                    byte: at,
+                                }
                             }
                         };
-                        let offset = access.reference(place);
+                        let offset = place.reference();
                         // SAFETY: the place lies past the used mark and
                         // within the chunk, whose writer this is; the
                         // buffer and the shape are this table's.
@@ -251,7 +254,9 @@ fn resolve_rows<
                         } else {
                             // SAFETY: this is the chunk's writer, and the
                             // record just written ends at the new mark.
-                            unsafe { access.set_used(place.0, place.1 + access.record_size()) };
+                            unsafe {
+                                access.set_used(place.chunk, place.byte + access.record_size())
+                            };
                         }
                         created |= 1 << bit;
                         offset
@@ -289,7 +294,7 @@ pub(super) fn link_grouped<R: Region>(
     let count = bytes.len();
     let mut duplicates = 0;
     for byte in bytes {
-        let place = (chunk, byte);
+        let place = Place { chunk, byte };
         let hash = check_record(&access, place)?;
         // SAFETY: `check_record` accepted the record, which this writer
         // appended and nothing else writes.
@@ -299,7 +304,7 @@ pub(super) fn link_grouped<R: Region>(
         let same = access.find(head, hash, |other| {
             other.null_bits() == null_bits && same_keys(other.keys(), keys)
         })?;
-        let offset = access.reference(place);
+        let offset = place.reference();
         // Counted at once: a later record's lookup may walk this one.
         access.count(1);
         if same == 0 {
@@ -328,7 +333,7 @@ pub(super) fn payload_mut<'r, R: Region>(
 ) -> Result<&'r mut [u8]> {
     let mut access = Access::new(region, layout);
     access.locate(offset)?;
-    let (chunk, byte) = access.place(offset)?;
+    let Place { chunk, byte } = access.place(offset)?;
     let start = byte + RECORD_HEADER + layout.nkeys * KEY_SLOT;
     // SAFETY: the caller has the table to itself, and the payload lies
     // within a record that `locate` accepted.
@@ -377,7 +382,7 @@ pub(super) fn clear_key<R: Region>(region: &R, layout: &Layout, key: usize) -> R
         let (used, _) = access.room(chunk)?;
         let mut byte = CHUNK_HEADER;
         while byte < used {
-            check_record(&access, (chunk, byte))?;
+            check_record(&access, Place { chunk, byte })?;
             let slot = byte + RECORD_HEADER + key * KEY_SLOT;
             // SAFETY: the caller has the table to itself, and the slot lies
             // within a record that `check_record` accepted.
@@ -415,8 +420,8 @@ pub(super) fn scan<R: Region>(
             byte = CHUNK_HEADER;
             continue;
         }
-        check_record(&access, (chunk, byte))?;
-        out[count] = access.reference((chunk, byte));
+        check_record(&access, Place { chunk, byte })?;
+        out[count] = Place { chunk, byte }.reference();
         count += 1;
         byte += layout.record_size;
     }
@@ -447,7 +452,7 @@ pub(super) fn regrow<R: Region>(
     let mut access = Access::new(to, &grown);
     for chunk in 0..to.chunks() {
         for byte in unlinked(&access, chunk, CHUNK_HEADER)? {
-            let place = (chunk, byte);
+            let place = Place { chunk, byte };
             let hash = check_record(&access, place)?;
             // SAFETY: `check_record` accepted the record; the writer has
             // the table to itself.
@@ -457,7 +462,7 @@ pub(super) fn regrow<R: Region>(
             let same = access.find(head, hash, |other| {
                 other.null_bits() == null_bits && same_keys(other.keys(), keys)
             })?;
-            let offset = access.reference(place);
+            let offset = place.reference();
             access.count(1);
             if same == 0 {
                 // SAFETY: the writer has the table to itself.
@@ -494,7 +499,7 @@ fn payload_spot<'r, R: Region>(
     offset: u32,
 ) -> Result<R::Spot> {
     access.locate(offset)?;
-    let (chunk, byte) = access.place(offset)?;
+    let Place { chunk, byte } = access.place(offset)?;
     let start = byte + RECORD_HEADER + layout.nkeys * KEY_SLOT;
     // SAFETY: the payload lies within a record that `locate` accepted.
     Ok(unsafe { region.spot(chunk, start) })
@@ -618,9 +623,20 @@ pub(super) fn merge<R: Region>(
     let mut merged = 0;
     let mut stop = CombineStop::Done;
     for byte in places {
-        let hash = check_record(&access, (source, byte))?;
+        let hash = check_record(
+            &access,
+            Place {
+                chunk: source,
+                byte,
+            },
+        )?;
         // SAFETY: `check_record` accepted the record, which nothing writes.
-        let record = unsafe { access.view((source, byte)) };
+        let record = unsafe {
+            access.view(Place {
+                chunk: source,
+                byte,
+            })
+        };
         let (null_bits, keys) = (record.null_bits(), record.keys());
         let head = access.head(hash);
         let same = access.find(head, hash, |other| {
@@ -635,7 +651,7 @@ pub(super) fn merge<R: Region>(
                 stop = CombineStop::IndexFull;
                 break;
             }
-            let place = (chunk, used);
+            let place = Place { chunk, byte: used };
             // SAFETY: the source record lies below its chunk's used mark,
             // the copy past the destination's, within it as `room`
             // counted, and the chunks differ; this is the table's writer.
@@ -644,7 +660,7 @@ pub(super) fn merge<R: Region>(
                 let copy = region.record_mut(region.spot(chunk, used), record_size);
                 copy.copy_from_slice(bytes);
             }
-            let offset = access.reference(place);
+            let offset = place.reference();
             access.count(1);
             // SAFETY: the record was just written and is this writer's.
             unsafe { access.push(offset, place, hash) };
@@ -652,7 +668,7 @@ pub(super) fn merge<R: Region>(
             room -= 1;
         } else {
             ensure!(
-                placement(same).0 != source,
+                Place::of(same).chunk != source,
                 "table record {same} found in chunk {source}, which is merged"
             );
             let payload = payload_at(&mut access, region, layout, same)?;

@@ -32,7 +32,7 @@ use core::sync::atomic::AtomicU64;
 use crate::{RowMask, RowMaskView, ones};
 use anyhow::{Result, bail, ensure};
 
-use super::header::{CHUNK_HEADER, Layout};
+use super::header::{CHUNK_HEADER, Layout, Place};
 use super::record::{Access, check_record, unlinked};
 use super::region::{Region, order};
 
@@ -263,7 +263,7 @@ fn each_hash<R: Region>(region: &R, layout: &Layout, mut f: impl FnMut(u32)) -> 
     let access = Access::new(region, layout);
     for chunk in 0..region.chunks() {
         for byte in unlinked(&access, chunk, CHUNK_HEADER)? {
-            f(check_record(&access, (chunk, byte))?);
+            f(check_record(&access, Place { chunk, byte })?);
         }
     }
     Ok(())

@@ -8,7 +8,7 @@ use core::mem::MaybeUninit;
 use crate::{RowMask, RowMaskView, ones};
 use anyhow::{Result, ensure};
 
-use super::header::{Layout, RECORD_HEADER};
+use super::header::{Layout, Place, RECORD_HEADER};
 use super::keys::{KeySource, WordKeys, slot_buffer};
 use super::lanes::{Lanes, VERTICAL_MIN_ROWS, probe_word};
 use super::record::no_chunk;
@@ -203,9 +203,15 @@ fn append_rows<R: Region, K: KeySource + ?Sized, const N: usize, const T: usize,
             // chunk, as `room` counted; the buffer and the shape are this
             // table's.
             unsafe {
-                access.write::<N, T>((chunk, used), hashes[row], &word_keys, bit, row_payload)
+                access.write::<N, T>(
+                    Place { chunk, byte: used },
+                    hashes[row],
+                    &word_keys,
+                    bit,
+                    row_payload,
+                )
             };
-            offsets[row] = access.reference((chunk, used));
+            offsets[row] = Place { chunk, byte: used }.reference();
             used += record_size;
             done |= 1 << bit;
         }
@@ -311,9 +317,16 @@ fn append_column_rows<
             // table's; the payload is a word and one per column, and `row`
             // is below the columns' row count, `nrows`.
             unsafe {
-                access.write_columns::<N>((chunk, used), hashes[row], &word_keys, bit, columns, row)
+                access.write_columns::<N>(
+                    Place { chunk, byte: used },
+                    hashes[row],
+                    &word_keys,
+                    bit,
+                    columns,
+                    row,
+                )
             };
-            offsets[row] = access.reference((chunk, used));
+            offsets[row] = Place { chunk, byte: used }.reference();
             used += record_size;
             done |= 1 << bit;
         }
@@ -458,9 +471,16 @@ fn append_partitioned_column_rows<
             // table's; the payload is a word and one per column, and `row`
             // is below the columns' row count, `nrows`.
             seen |= unsafe {
-                access.write_columns::<N>((chunk, used), hashes[row], &word_keys, bit, columns, row)
+                access.write_columns::<N>(
+                    Place { chunk, byte: used },
+                    hashes[row],
+                    &word_keys,
+                    bit,
+                    columns,
+                    row,
+                )
             };
-            offsets[row] = access.reference((chunk, used));
+            offsets[row] = Place { chunk, byte: used }.reference();
             // SAFETY: the caller is the chunk's one writer, and the record
             // just written ends at the new mark.
             unsafe { access.set_used(chunk, used + record_size) };
@@ -513,7 +533,13 @@ pub(super) fn split<R: Region>(
         if count == offsets.len() {
             break;
         }
-        let hash = check_record(&access, (source, byte))?;
+        let hash = check_record(
+            &access,
+            Place {
+                chunk: source,
+                byte,
+            },
+        )?;
         let partition = (hash >> partitions.shift) & mask;
         let chunk = partitions.chunks[partition as usize] as usize;
         let (used, room) = access.room(chunk)?;
@@ -532,7 +558,7 @@ pub(super) fn split<R: Region>(
             copy[4..8].fill(0);
             access.set_used(chunk, used + record_size);
         }
-        offsets[count] = access.reference((chunk, used));
+        offsets[count] = Place { chunk, byte: used }.reference();
         hashes[count] = hash;
         count += 1;
         *from = byte + record_size;
@@ -581,9 +607,9 @@ pub(super) fn link_counting<R: Region, const DUPLICATES: bool>(
     for byte in bytes {
         let spot = R::advance(first, byte);
         // SAFETY: the record lies in the chunk, below its used mark.
-        let hash = unsafe { check_record_at(&access, spot, (chunk, byte)) }?;
+        let hash = unsafe { check_record_at(&access, spot, Place { chunk, byte }) }?;
         // SAFETY: as above, and the caller alone links this chunk.
-        let rest = unsafe { access.push_at(access.reference((chunk, byte)), spot, hash) };
+        let rest = unsafe { access.push_at(Place { chunk, byte }.reference(), spot, hash) };
         if DUPLICATES && rest != 0 {
             // SAFETY: the record is published and never written again.
             let record = unsafe { access.view_at(spot) };
