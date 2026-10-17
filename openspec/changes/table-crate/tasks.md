@@ -113,18 +113,13 @@ commit of sections 2 and 3 is checked by `make rust-check` and by
       with pictures. Check: `make rust-check`; machine code the same but
       where a commit names its change; `make rust-loom`;
       `make installcheck`
-- [ ] 3.4 Review the crate's public API with the maintainer before its
-      snapshot: what each item is for and who calls it; the calls over
-      chunks alone before a table has an index, which only the C API
-      calls; the raw pointers of the blocks; references that the calls
-      name offsets; the magic `TESSTABL` of the format. Then set
-      `publish = true` for the crate and refuse a target whose
-      pointers are not 64 bits wide with `compile_error!`; add to CI a
-      build for a 32-bit target that must fail, the crate's tests alone,
-      a build without `alloc`, a dry run of `cargo publish`, and a
-      snapshot of the crate's public API that CI compares; name these
-      checks in the contract's rules "Free of Tessera" and "A small
-      surface". Check: `cargo package -p relhash`; CI
+- [ ] 3.4 Make the public API what the maintainer's review of it
+      decided: the table's items at the crate's root; the calls over
+      chunks before a table has an index as one type, `ChunkWriter`;
+      references named references in the parameters and the texts;
+      the format's magic `RELHASH\0`; `BITS_PER_RECORD` closed. Check:
+      `make rust-check`; machine code the same but where a commit
+      names its change; `cargo public-api -p relhash`
 - [ ] 3.5 Replace the crate's text errors by errors of two kinds of at
       most 8 bytes, with a compile-time assertion of the size; the call
       site of a reference's check chooses the kind; the check of a
@@ -135,7 +130,17 @@ commit of sections 2 and 3 is checked by `make rust-check` and by
       counters on `table_int32`, `table_large` and the aggregate
       programs
 - [ ] 3.6 Move the table's tests into the crate, over a source of keys
-      of the crate's own. Check: `cargo test -p relhash`
+      of the crate's own, and take the hooks for tests out of the
+      public API: `OwnedTable::index_words`, `chunk_words`,
+      `add_chunk_copy`, `insert_grouped` and `chunk_set`. Check:
+      `cargo test -p relhash`; `cargo public-api -p relhash`
+- [ ] 3.7 Set `publish = true` for the crate and refuse a target whose
+      pointers are not 64 bits wide with `compile_error!`; add to CI a
+      build for a 32-bit target that must fail, the crate's tests alone,
+      a build without `alloc`, a dry run of `cargo publish`, and a
+      snapshot of the crate's public API that CI compares; name these
+      checks in the contract's rules "Free of Tessera" and "A small
+      surface". Check: `cargo package -p relhash`; CI
 
 ## 4. The spec of the crate
 
