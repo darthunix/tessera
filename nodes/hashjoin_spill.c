@@ -187,12 +187,12 @@ side_init(TessHashJoinState *state, SpillSide *side, int nkeys, const TessTableK
 	check(state, state->kernels->table_record_size(nkeys, side->payload_size,
 												   &side->record_size, &state->status));
 	side->chunk_len = chunk_len;
-	check(state, state->kernels->table_size(nkeys, kinds, side->payload_size,
+	check(state, state->kernels->table_size(nkeys, side->payload_size,
 											JOIN_INITIAL_ROWS,
 											&side->ref.index_len, &state->status));
 	side->ref.index = MemoryContextAllocZero(side->context, side->ref.index_len);
 	check(state, state->kernels->table_create(side->ref.index, side->ref.index_len,
-											  nkeys, kinds, side->payload_size,
+											  nkeys, side->payload_size,
 											  JOIN_INITIAL_ROWS, &state->status));
 	side->slots = 16;
 	side->bases = MemoryContextAlloc(side->context, sizeof(void *) * side->slots);
@@ -1035,8 +1035,7 @@ join_split_chunk(TessHashJoinState *state, void *base, Size len, char *const *va
 		int			full;
 		uint64		bits;
 
-		check(state, state->kernels->table_split(&side->ref, side->nkeys,
-												 side->kinds, side->payload_size,
+		check(state, state->kernels->table_split(&side->ref, side->nkeys, side->payload_size,
 												 side->current, spill->npartitions,
 												 spill->shift, source, &from,
 												 JOIN_COMPACT_ROWS, offsets, hashes,

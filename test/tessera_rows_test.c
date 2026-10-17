@@ -83,12 +83,10 @@ static TessRows *
 make_rows(void)
 {
 	TessRowsConfig config = TESS_STRUCT_INITIALIZER(TessRowsConfig);
-	TessTableKeyKind kind = TESS_TABLE_KEY_INT4;
 
 	config.parent_context = CurrentMemoryContext;
 	config.kernels = &kernels;
 	config.nkeys = 1;
-	config.kinds = &kind;
 	config.ncolumns = NCOLUMNS;
 	config.typlens = typlens;
 	config.typbyvals = typbyvals;

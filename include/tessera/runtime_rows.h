@@ -42,9 +42,8 @@ typedef struct TessRowsConfig
 	 * gather_scattered, gather_words.
 	 */
 	const TessKernelOps *kernels;
-	/* The keys every record holds, in their slots: one at least. */
+	/* The keys every record holds, a word each: one at least. */
 	int			nkeys;
-	const TessTableKeyKind *kinds;
 	/* The kept columns, at most TESS_ROWS_MAX_COLUMNS, and their types. */
 	int			ncolumns;
 	const int16 *typlens;

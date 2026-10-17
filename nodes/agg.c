@@ -450,14 +450,14 @@ agg_begin(CustomScanState *css, EState *estate, int eflags)
 				state->values[value].kind == AGG_SUM ? TESS_TABLE_COMBINE_SUM :
 				state->values[value].kind == AGG_MIN ? TESS_TABLE_COMBINE_MIN :
 				TESS_TABLE_COMBINE_MAX;
-		if (state->kernels->table_size(state->nkeys, state->kinds,
+		if (state->kernels->table_size(state->nkeys,
 									   state->payload_size,
 									   AGG_INITIAL_GROUPS, &state->layout_len,
 									   &state->status) != TESS_OK)
 			tess_status_report(&state->status);
 		state->layout_index = palloc0(state->layout_len);
 		if (state->kernels->table_create(state->layout_index, state->layout_len,
-										 state->nkeys, state->kinds,
+										 state->nkeys,
 										 state->payload_size,
 										 AGG_INITIAL_GROUPS, &state->status) != TESS_OK)
 			tess_status_report(&state->status);

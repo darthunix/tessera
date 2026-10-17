@@ -190,14 +190,14 @@ impl Blocks {
 }
 
 /// One key and a payload of a word.
-const ONE_WORD: TableConfig<'static> = TableConfig {
-    keys: &[KeyKind::Int32],
+const ONE_WORD: TableConfig = TableConfig {
+    nkeys: 1,
     payload_size: 8,
 };
 
 /// One key and no payload.
-const KEY_ONLY: TableConfig<'static> = TableConfig {
-    keys: &[KeyKind::Int32],
+const KEY_ONLY: TableConfig = TableConfig {
+    nkeys: 1,
     payload_size: 0,
 };
 
@@ -389,10 +389,10 @@ fn a_split_that_cannot_be_done_is_refused() {
     .unwrap();
     let targets: Vec<u32> = (0..4).map(|_| blocks.add(CHUNK_HEADER + 64 * 32)).collect();
     let wider = TableConfig {
-        keys: &[KeyKind::Int32],
+        nkeys: 1,
         payload_size: 16,
     };
-    let cases: [(&TableConfig<'_>, usize, u32, &str); 3] = [
+    let cases: [(&TableConfig, usize, u32, &str); 3] = [
         (&ONE_WORD, 0, targets[0], "at least one record"),
         (&ONE_WORD, 16, source, "into itself"),
         (&wider, 16, targets[0], "record"),
@@ -595,7 +595,7 @@ fn half_the_buckets_stops_every_row_of_a_lookup_by_partition() {
 /// A table of the keys, each with the states `of` gives it.
 fn grouped(keys: &[i32], of: impl Fn(i32) -> [i64; 5], capacity: u64) -> (OwnedTable, Vec<u32>) {
     let config = TableConfig {
-        keys: &[KeyKind::Int32],
+        nkeys: 1,
         payload_size: 40,
     };
     let mut table = OwnedTable::new(&config, capacity, CHUNK_HEADER + 16 * 56).unwrap();

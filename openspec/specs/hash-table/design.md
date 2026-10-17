@@ -29,11 +29,11 @@ have equal hashes. Different keys usually have different hashes, but
 not always.
 
 The table keeps each column of a key in a word of 8 bytes and compares
-keys bit for bit. It knows two kinds of key: `int4`, widened to 8 bytes
-with its sign, and `int8`. A key of another SQL type goes in as one of
-these two kinds, either as its value or as a number that stands for
-it; "Keys of each SQL type" below tells which type goes which way and
-why.
+keys bit for bit; it gives a word no type. Tessera's key columns fill
+the words in two forms: an `int4`, widened to 8 bytes with its sign,
+and an `int8`. A key of another SQL type goes in in one of these two
+forms, either as its value or as a number that stands for it; "Keys of
+each SQL type" below tells which type goes which way and why.
 
 A hash table keeps an array of **buckets**. A row goes to the bucket
 that its hash picks. Rows whose hashes pick the same bucket are linked

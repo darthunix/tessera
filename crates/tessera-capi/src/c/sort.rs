@@ -11,11 +11,12 @@ use std::slice;
 
 use anyhow::{Context, Result, bail, ensure};
 use tessera_kernels::order;
+use tessera_kernels::sort::KeyKind;
 use tessera_kernels::sort::{
     MAX_ITEM_WORDS, MAX_MERGE_RUNS, MERGE_STATE_WORDS, SortKey, item_words, key_lanes, merge,
     run_words, sort_items, top_candidates,
 };
-use tessera_kernels::table::{KeyKind, MAX_KEYS};
+use tessera_kernels::table::MAX_KEYS;
 
 use super::mask::Mask;
 use super::status::{Code, Status, guard};

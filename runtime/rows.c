@@ -40,7 +40,6 @@ struct TessRows
 	MemoryContext chunk_context;
 	const TessKernelOps *kernels;
 	int			nkeys;
-	TessTableKeyKind kinds[TESS_TABLE_MAX_KEYS];
 	int			ncolumns;
 	int16	   *typlens;
 	bool	   *typbyvals;
@@ -97,14 +96,12 @@ make_index(TessRows *rows)
 {
 	Size		size;
 
-	check(rows, rows->kernels->table_size(rows->nkeys, rows->kinds,
-										  rows->payload_size, 0, &size,
-										  &rows->status));
+	check(rows, rows->kernels->table_size(rows->nkeys, rows->payload_size, 0,
+										  &size, &rows->status));
 	rows->table.index = MemoryContextAlloc(rows->chunk_context, size);
 	rows->table.index_len = size;
 	check(rows, rows->kernels->table_create(rows->table.index, size,
-											rows->nkeys, rows->kinds,
-											rows->payload_size, 0,
+											rows->nkeys, rows->payload_size, 0,
 											&rows->status));
 	rows->table.nchunks = 0;
 	rows->bytes = size;
@@ -127,8 +124,7 @@ tess_rows_create(const TessRowsConfig *config)
 		config->kernels->table_gather_scattered == NULL ||
 		config->kernels->table_gather_words == NULL)
 		elog(ERROR, "Tessera rows require the kernels of the table");
-	if (config->nkeys < 1 || config->nkeys > TESS_TABLE_MAX_KEYS ||
-		config->kinds == NULL)
+	if (config->nkeys < 1 || config->nkeys > TESS_TABLE_MAX_KEYS)
 		elog(ERROR, "Tessera rows take 1..%d keys", TESS_TABLE_MAX_KEYS);
 	if (config->ncolumns < 0 || config->ncolumns > TESS_ROWS_MAX_COLUMNS ||
 		(config->ncolumns > 0 &&
@@ -143,8 +139,6 @@ tess_rows_create(const TessRowsConfig *config)
 												ALLOCSET_DEFAULT_SIZES);
 	rows->kernels = config->kernels;
 	rows->nkeys = config->nkeys;
-	for (int key = 0; key < config->nkeys; key++)
-		rows->kinds[key] = config->kinds[key];
 	rows->ncolumns = config->ncolumns;
 	rows->typlens = MemoryContextAlloc(context, sizeof(int16) * Max(config->ncolumns, 1));
 	rows->typbyvals = MemoryContextAlloc(context, sizeof(bool) * Max(config->ncolumns, 1));

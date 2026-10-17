@@ -661,7 +661,7 @@ mod tests {
     use super::*;
     use crate::column_keys::KeyColumns;
     use crate::int32::murmurhash32;
-    use crate::table::{Batch, CHUNK_HEADER, KeyKind, OwnedTable, TableConfig};
+    use crate::table::{Batch, CHUNK_HEADER, OwnedTable, TableConfig};
 
     /// Keys and their hashes as a batch's key column.
     fn key_batch(keys: &[i32]) -> (Vec<u32>, Vec<u64>) {
@@ -680,7 +680,7 @@ mod tests {
         capacity: u64,
     ) -> (OwnedTable, Vec<u32>) {
         let config = TableConfig {
-            keys: &[KeyKind::Int32],
+            nkeys: 1,
             payload_size: 40,
         };
         let mut table = OwnedTable::new(&config, capacity, CHUNK_HEADER + 16 * 56).unwrap();

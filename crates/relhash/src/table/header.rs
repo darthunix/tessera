@@ -7,8 +7,8 @@
 //! length), `buckets_offset` (24, right after the header), a reserved word
 //! (32, zero), `nrecords` (40, the records linked into the buckets),
 //! `nbuckets` (48), `bucket_shift` (52), `record_size` (56), `payload_size`
-//! (60), `nkeys` (64), `flags` (68), `kinds` (72, one byte per key) and a
-//! reserved word (88, zero). Only `nrecords` changes after creation; it is read
+//! (60), `nkeys` (64), `flags` (68) and three
+//! reserved words (72, zero). Only `nrecords` changes after creation; it is read
 //! and written atomically through the region, the rest is copied into a
 //! [`Layout`] once validated.
 //!
@@ -25,7 +25,7 @@ use anyhow::{Result, bail, ensure};
 use super::region::Region;
 
 /// The format of the table this code writes and accepts.
-pub const FORMAT_VERSION: u32 = 1;
+pub const FORMAT_VERSION: u32 = 2;
 /// The most keys a record holds.
 pub const MAX_KEYS: usize = 16;
 /// The first eight bytes of a region: `TESSTABL` in ASCII.
@@ -79,31 +79,14 @@ impl Place {
     }
 }
 
-/// What a key column holds; the record stores every key in an 8-byte slot.
-#[repr(u8)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum KeyKind {
-    /// An int4, sign-extended into its slot.
-    Int32 = 1,
-    /// An int8.
-    Int64 = 2,
-}
-
-impl KeyKind {
-    fn from_code(code: u8) -> Option<Self> {
-        match code {
-            1 => Some(Self::Int32),
-            2 => Some(Self::Int64),
-            _ => None,
-        }
-    }
-}
-
 /// What a table is created with: its keys and the payload of every record.
-#[derive(Clone, Copy, Debug)]
-pub struct TableConfig<'a> {
-    /// The kinds of the keys, in key order; one to [`MAX_KEYS`].
-    pub keys: &'a [KeyKind],
+/// A key is a word of 8 bytes, compared bit for bit: the table gives a
+/// word no type, and the caller's source of keys puts each value in its
+/// word.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TableConfig {
+    /// The keys of a record; one to [`MAX_KEYS`].
+    pub nkeys: usize,
     /// Bytes of payload per record, opaque to the table.
     pub payload_size: usize,
 }
@@ -125,8 +108,7 @@ pub(super) struct Header {
     payload_size: u32,
     nkeys: u32,
     flags: u32,
-    kinds: [u8; MAX_KEYS],
-    reserved: u64,
+    reserved: [u64; 3],
 }
 
 const _: () = assert!(size_of::<Header>() == 96);
@@ -141,7 +123,6 @@ pub(super) struct Layout {
     pub record_size: usize,
     pub payload_size: usize,
     pub nkeys: usize,
-    pub kinds: [KeyKind; MAX_KEYS],
 }
 
 impl Layout {
@@ -158,8 +139,8 @@ impl Layout {
         self.record_size / 8 - RECORD_HEADER / 8 - self.nkeys
     }
 
-    /// A fingerprint of what a record is: the format, the key kinds, the
-    /// record and payload sizes (FNV-1a). Records written with one layout
+    /// A fingerprint of what a record is: the format, the count of keys,
+    /// the record and payload sizes (FNV-1a). Records written with one layout
     /// are read back only by a table of the same fingerprint.
     pub(super) fn fingerprint(&self) -> u64 {
         let mut hash = 0xcbf2_9ce4_8422_2325_u64;
@@ -172,9 +153,6 @@ impl Layout {
             .to_le_bytes()
             .into_iter()
             .for_each(&mut feed);
-        self.kinds[..self.nkeys]
-            .iter()
-            .for_each(|kind| feed(*kind as u8));
         (self.record_size as u64)
             .to_le_bytes()
             .into_iter()
@@ -189,32 +167,20 @@ impl Layout {
 
 /// Bytes the index of a table for `capacity` records takes: the header
 /// and the buckets, a multiple of 8.
-pub fn index_size(config: &TableConfig<'_>, capacity: u64) -> Result<usize> {
+pub fn index_size(config: &TableConfig, capacity: u64) -> Result<usize> {
     check_config(config)?;
     Ok(HEADER_SIZE + bucket_count(capacity) as usize * 4)
 }
 
 /// Bytes of one record of a table of this configuration.
-pub fn record_bytes(config: &TableConfig<'_>) -> Result<usize> {
+pub fn record_bytes(config: &TableConfig) -> Result<usize> {
     Ok(check_config(config)? as usize)
 }
 
-/// Bytes of one record of a table of `nkeys` keys of any kinds and a
-/// payload of `payload_size` bytes: [`record_bytes`] of every
-/// configuration of that many keys.
-pub fn record_bytes_of(nkeys: usize, payload_size: usize) -> Result<usize> {
-    Ok(checked_record_size(nkeys, payload_size)? as usize)
-}
-
-/// The record size of a configuration, after checking it.
-fn check_config(config: &TableConfig<'_>) -> Result<u32> {
-    checked_record_size(config.keys.len(), config.payload_size)
-}
-
-/// The record size of `nkeys` keys and a payload, after checking the count.
-fn checked_record_size(nkeys: usize, payload_size: usize) -> Result<u32> {
-    check_nkeys(nkeys)?;
-    record_size(nkeys, payload_size)
+/// The record size of a configuration, after checking its count of keys.
+fn check_config(config: &TableConfig) -> Result<u32> {
+    check_nkeys(config.nkeys)?;
+    record_size(config.nkeys, config.payload_size)
 }
 
 /// Refuse a count of keys a table cannot have, given or read.
@@ -293,14 +259,14 @@ fn bucket_shift(nbuckets: u32) -> u32 {
 /// The layout of a configuration's records, for appending to chunks
 /// before the table has an index: the bucket fields are the smallest
 /// index's, which appending does not read.
-pub(super) fn chunk_layout(config: &TableConfig<'_>) -> Result<Layout> {
+pub(super) fn chunk_layout(config: &TableConfig) -> Result<Layout> {
     let len = index_size(config, 0)?;
     Header::new(config, 0, len)?.validate(len)
 }
 
 impl Header {
     /// The header of a new table's index of `len` bytes.
-    pub(super) fn new(config: &TableConfig<'_>, capacity: u64, len: usize) -> Result<Self> {
+    pub(super) fn new(config: &TableConfig, capacity: u64, len: usize) -> Result<Self> {
         let record_size = check_config(config)?;
         ensure!(
             len.is_multiple_of(8),
@@ -313,10 +279,6 @@ impl Header {
              that {capacity} records need"
         );
         let nbuckets = bucket_count(capacity);
-        let mut kinds = [0; MAX_KEYS];
-        for (slot, kind) in kinds.iter_mut().zip(config.keys) {
-            *slot = *kind as u8;
-        }
         Ok(Self {
             magic: MAGIC,
             version: FORMAT_VERSION,
@@ -329,10 +291,9 @@ impl Header {
             bucket_shift: bucket_shift(nbuckets),
             record_size,
             payload_size: config.payload_size as u32,
-            nkeys: config.keys.len() as u32,
+            nkeys: config.nkeys as u32,
             flags: 0,
-            kinds,
-            reserved: 0,
+            reserved: [0; 3],
         })
     }
 
@@ -364,10 +325,7 @@ impl Header {
     /// fields change only under one writer, before the table is shared,
     /// and are read without ordering.
     pub(super) fn load<R: Region>(region: &R) -> Self {
-        let mut kinds = [0; MAX_KEYS];
-        let base = offset_of!(Header, kinds);
-        kinds[..8].copy_from_slice(&region.load_u64_relaxed(base).to_ne_bytes());
-        kinds[8..].copy_from_slice(&region.load_u64_relaxed(base + 8).to_ne_bytes());
+        let reserved = offset_of!(Header, reserved);
         // The count before the used mark: an insertion reserves room, then
         // counts, so a count read with acquire is covered by any used mark
         // read after it, and a header read while others insert still has
@@ -387,19 +345,12 @@ impl Header {
             payload_size: region.load_u32_relaxed(offset_of!(Header, payload_size)),
             nkeys: region.load_u32_relaxed(offset_of!(Header, nkeys)),
             flags: region.load_u32_relaxed(offset_of!(Header, flags)),
-            kinds,
-            reserved: region.load_u64_relaxed(offset_of!(Header, reserved)),
+            reserved: [0, 8, 16].map(|at| region.load_u64_relaxed(reserved + at)),
         }
     }
 
     /// Write the header at the start of a region.
     pub(super) fn store<R: Region>(&self, region: &R) {
-        let base = offset_of!(Header, kinds);
-        let mut half = [0; 8];
-        half.copy_from_slice(&self.kinds[..8]);
-        region.store_u64(base, u64::from_ne_bytes(half));
-        half.copy_from_slice(&self.kinds[8..]);
-        region.store_u64(base + 8, u64::from_ne_bytes(half));
         region.store_u64(offset_of!(Header, magic), self.magic);
         region.store_u32(offset_of!(Header, version), self.version);
         region.store_u32(offset_of!(Header, header_size), self.header_size);
@@ -413,7 +364,9 @@ impl Header {
         region.store_u32(offset_of!(Header, payload_size), self.payload_size);
         region.store_u32(offset_of!(Header, nkeys), self.nkeys);
         region.store_u32(offset_of!(Header, flags), self.flags);
-        region.store_u64(offset_of!(Header, reserved), self.reserved);
+        for (word, &value) in self.reserved.iter().enumerate() {
+            region.store_u64(offset_of!(Header, reserved) + 8 * word, value);
+        }
     }
 
     /// Check every field against the format and the `len` bytes given, and
@@ -450,10 +403,6 @@ impl Header {
         if !fixed {
             return None;
         }
-        let mut kinds = [KeyKind::Int32; MAX_KEYS];
-        for (slot, &code) in kinds.iter_mut().zip(&self.kinds).take(nkeys) {
-            *slot = KeyKind::from_code(code)?;
-        }
         let valid = self.record_size == record_size_of(nkeys, payload_size)?
             && nbuckets.is_power_of_two()
             && u64::from(nbuckets) >= MIN_BUCKETS
@@ -461,7 +410,7 @@ impl Header {
             && buckets_offset == HEADER_SIZE
             && buckets_end <= region_len
             && self.reserved_used == 0
-            && self.reserved == 0;
+            && self.reserved == [0; 3];
         valid.then_some(Layout {
             region_len,
             buckets_offset,
@@ -470,7 +419,6 @@ impl Header {
             record_size: self.record_size as usize,
             payload_size,
             nkeys,
-            kinds,
         })
     }
 
@@ -515,15 +463,6 @@ impl Header {
         );
         let nkeys = self.nkeys as usize;
         check_nkeys(nkeys)?;
-        let mut kinds = [KeyKind::Int32; MAX_KEYS];
-        for (key, (slot, &code)) in kinds.iter_mut().zip(&self.kinds).enumerate() {
-            if key < nkeys {
-                let Some(kind) = KeyKind::from_code(code) else {
-                    bail!("table key {key} has unknown kind {code}");
-                };
-                *slot = kind;
-            }
-        }
         let payload_size = self.payload_size as usize;
         ensure!(
             Some(self.record_size) == record_size_of(nkeys, payload_size),
@@ -551,7 +490,7 @@ impl Header {
             "table buckets at {buckets_offset} lie outside the index of {region_len} bytes"
         );
         ensure!(
-            self.reserved_used == 0 && self.reserved == 0,
+            self.reserved_used == 0 && self.reserved == [0; 3],
             "table header has a reserved word set"
         );
         Ok(Layout {
@@ -562,7 +501,6 @@ impl Header {
             record_size: self.record_size as usize,
             payload_size,
             nkeys,
-            kinds,
         })
     }
 }

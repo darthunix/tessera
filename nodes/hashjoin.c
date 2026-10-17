@@ -365,14 +365,14 @@ join_index_table(TessHashJoinState *state)
 
 	/* One index per build, made once every chunk is appended. */
 	Assert(state->table.index == NULL);
-	check(state, state->kernels->table_size(state->keys.nkeys, state->keys.inner_kinds,
+	check(state, state->kernels->table_size(state->keys.nkeys,
 											payload_size, capacity,
 											&size, &state->status));
 	state->table.index = MemoryContextAllocExtended(state->table_context, size,
 													MCXT_ALLOC_HUGE);
 	state->table.index_len = size;
 	check(state, state->kernels->table_create(state->table.index, size,
-											  state->keys.nkeys, state->keys.inner_kinds,
+											  state->keys.nkeys,
 											  payload_size, capacity,
 											  &state->status));
 	state->table_bytes += size;

@@ -53,7 +53,7 @@
  */
 
 /* The format of the table this header describes. */
-#define TESS_TABLE_FORMAT_VERSION 1
+#define TESS_TABLE_FORMAT_VERSION 2
 
 /*
  * Chunks: at most TESS_TABLE_MAX_CHUNKS of at most TESS_TABLE_MAX_CHUNK_LEN
@@ -195,10 +195,10 @@ extern uint32 tess_table_format_version(void);
 extern Size tess_table_layout(TessTableLayoutKind kind);
 
 /*
- * The bytes of one record of a table of nkeys keys, of any kinds, and a
- * payload of payload_size bytes: its header, a slot per key and the
- * payload, rounded up to 8. An error for a count of keys out of range or
- * a record that does not fit in a chunk after its used mark.
+ * The bytes of one record of a table of nkeys keys and a payload of
+ * payload_size bytes: its header, a slot per key and the payload, rounded
+ * up to 8. An error for a count of keys out of range or a record that does
+ * not fit in a chunk after its used mark.
  */
 extern TessStatusCode tess_table_record_size(int nkeys,
 											 Size payload_size,
@@ -217,12 +217,13 @@ tess_table_record_bytes(int nkeys, Size payload_size)
 }
 
 /*
- * The bytes the index of a table of nkeys keys of the given kinds, a
- * payload of payload_size bytes per record and capacity records needs:
- * the header and the buckets, a multiple of 8.
+ * The bytes the index of a table of nkeys keys, a payload of
+ * payload_size bytes per record and capacity records needs: the header
+ * and the buckets, a multiple of 8. The table keeps every key in a word
+ * of 8 bytes and gives it no type: the key columns of each call say how
+ * a value fills its word.
  */
 extern TessStatusCode tess_table_size(int nkeys,
-									  const TessTableKeyKind *kinds,
 									  Size payload_size,
 									  uint64 capacity,
 									  Size *size,
@@ -237,7 +238,6 @@ extern TessStatusCode tess_table_size(int nkeys,
 extern TessStatusCode tess_table_create(void *index,
 										Size len,
 										int nkeys,
-										const TessTableKeyKind *kinds,
 										Size payload_size,
 										uint64 capacity,
 										TessStatus *status);
@@ -267,7 +267,7 @@ extern TessStatusCode tess_table_chunk_used(const void *base, Size len,
  * order, as long as whole records fit: each row appended leaves pending
  * and gets the reference of its record in offsets (one slot per row of
  * the batch); rows still pending need another chunk. hashes has one hash
- * per row; keys are the table's nkeys keys, of its kinds; payload is the
+ * per row; keys are the table's nkeys keys; payload is the
  * payload of every row one after another (payload_size bytes each, as
  * the table has), or NULL for zeros. A table without an index takes the
  * records these arguments describe, so that a shared build appends before
@@ -344,7 +344,7 @@ extern TessStatusCode tess_table_append_partitioned_columns(const TessTableRef *
 															TessStatus *status);
 
 /*
- * Copy the records of chunk `source` of a table of the key kinds and
+ * Copy the records of chunk `source` of a table of nkeys keys and the
  * payload size from byte *from on (TESS_TABLE_CHUNK_HEADER at first),
  * whole and in order, each to the chunk of its hash's partition, and move
  * *from past them: at most capacity records, at least 1, their new
@@ -356,7 +356,6 @@ extern TessStatusCode tess_table_append_partitioned_columns(const TessTableRef *
  */
 extern TessStatusCode tess_table_split(const TessTableRef *table,
 									   int nkeys,
-									   const TessTableKeyKind *kinds,
 									   Size payload_size,
 									   const uint32 *partition_chunks,
 									   int npartitions, uint32 shift,
