@@ -7,7 +7,9 @@
 //! ```
 //! use relhash::{RowMaskView, ones};
 //!
-//! let rows = RowMaskView::try_new(70, &[0b1010_0100, 0b10])?;
+//! // Rows 2, 5 and 7 in word 0, and row 65 in word 1, of 70 rows: row `r`
+//! // is the bit `1 << (r % 64)` of word `r / 64`.
+//! let rows = RowMaskView::try_new(70, &[1 << 2 | 1 << 5 | 1 << 7, 1 << (65 - 64)])?;
 //! let mut selected = Vec::new();
 //! for index in 0..2 {
 //!     for bit in ones(rows.word(index)) {
