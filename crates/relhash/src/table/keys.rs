@@ -10,8 +10,6 @@
 use core::mem::MaybeUninit;
 
 use super::record::View;
-#[cfg(any(test, loom))]
-use crate::ones;
 use anyhow::Result;
 
 /// The keys of a batch, one word at a time.
@@ -27,29 +25,6 @@ pub trait KeySource {
     /// bits of the selected rows that are not NULL. Other slots of `out`
     /// keep their contents.
     fn word(&self, key: usize, index: usize, selected: u64, out: &mut [i64; 64]) -> Result<u64>;
-}
-
-/// One key of int4 values with no NULL: the keys of the table's own tests
-/// and of its loom model, which read no columns.
-#[cfg(any(test, loom))]
-pub(crate) struct IntKeys<'a>(pub(crate) &'a [i32]);
-
-#[cfg(any(test, loom))]
-impl KeySource for IntKeys<'_> {
-    fn nkeys(&self) -> usize {
-        1
-    }
-
-    fn nrows(&self) -> usize {
-        self.0.len()
-    }
-
-    fn word(&self, _: usize, index: usize, selected: u64, out: &mut [i64; 64]) -> Result<u64> {
-        for bit in ones(selected) {
-            out[bit] = i64::from(self.0[index * 64 + bit]);
-        }
-        Ok(selected)
-    }
 }
 
 /// Storage for the slots of a word's keys: made uninitialized on the
