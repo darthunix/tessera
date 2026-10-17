@@ -6,7 +6,9 @@
 use anyhow::{Result, anyhow, ensure};
 
 use super::batch::{self, Batch};
-use super::header::{self, CHUNK_HEADER, MAX_CHUNK_LEN, MAX_CHUNKS, RECORD_HEADER, TableConfig};
+use super::header::{
+    self, CHUNK_HEADER, MAX_CHUNK_LEN, MAX_CHUNKS, TableConfig, check_record_size,
+};
 use super::keys::KeySource;
 use super::record::PayloadColumns;
 use super::region::RawRegion;
@@ -148,11 +150,7 @@ pub unsafe fn chunk_used(base: *const u8, len: usize, record_size: usize) -> Res
         "a table chunk of {len} bytes is not aligned to 8 or not a multiple of 8 of \
          {CHUNK_HEADER} to {MAX_CHUNK_LEN} bytes"
     );
-    ensure!(
-        record_size >= RECORD_HEADER && record_size.is_multiple_of(8),
-        "a table record of {record_size} bytes is not a multiple of 8 of at least \
-         {RECORD_HEADER}"
-    );
+    check_record_size(record_size)?;
     // SAFETY: the caller's contract; the used mark is the chunk's first
     // word, aligned as the block is.
     let used = unsafe { base.cast::<u64>().read() };

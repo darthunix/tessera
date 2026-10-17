@@ -212,14 +212,33 @@ fn checked_record_size(nkeys: usize, payload_size: usize) -> Result<u32> {
     record_size(nkeys, payload_size)
 }
 
+/// Refuse a size that no record of a table has. A record is a multiple
+/// of 8, a header and a key at least, and no more than a chunk holds
+/// after its used mark; a size between the records would name places
+/// where no record starts.
+pub(super) fn check_record_size(size: usize) -> Result<()> {
+    ensure!(
+        record_size_fits(size),
+        "records of {size} bytes are not the records of a table"
+    );
+    Ok(())
+}
+
+/// Whether `size` bytes can be the records of a table, as
+/// [`check_record_size`] says.
+#[inline(always)]
+fn record_size_fits(size: usize) -> bool {
+    size.is_multiple_of(8)
+        && (RECORD_HEADER + KEY_SLOT..=MAX_CHUNK_LEN - CHUNK_HEADER).contains(&size)
+}
+
 /// Bytes of a record: its header, the key slots and the payload, rounded
 /// up to 8, at most what a chunk has room for after its used mark: a
 /// larger record could never be appended. A table is not made for one;
 /// a header that claims one is read as [`record_size_of`] reads it, and
 /// every reference of such a table is refused, since no record fits.
 fn record_size(nkeys: usize, payload_size: usize) -> Result<u32> {
-    let size = record_size_of(nkeys, payload_size)
-        .filter(|&size| size as usize <= MAX_CHUNK_LEN - CHUNK_HEADER);
+    let size = record_size_of(nkeys, payload_size).filter(|&size| record_size_fits(size as usize));
     let Some(size) = size else {
         bail!(
             "a record of {nkeys} keys and a payload of {payload_size} bytes \
