@@ -31,8 +31,8 @@ use super::region::Region;
 pub const FORMAT_VERSION: u32 = 2;
 /// The most keys a record holds.
 pub const MAX_KEYS: usize = 16;
-/// The first eight bytes of a region: `TESSTABL` in ASCII.
-const MAGIC: u64 = u64::from_le_bytes(*b"TESSTABL");
+/// The first eight bytes of a region: `RELHASH` in ASCII and a zero.
+const MAGIC: u64 = u64::from_le_bytes(*b"RELHASH\0");
 /// The fewest buckets a table has, as pg_batch chooses them.
 const MIN_BUCKETS: u64 = 1024;
 /// The most buckets: the count stays below 2^32.
