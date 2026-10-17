@@ -33,8 +33,7 @@ impl Shared {
 #[test]
 fn four_threads_fill_a_filter_as_one_add_fills_it() {
     let hashes: Vec<u32> = (0..200).map(murmurhash32).collect();
-    let mut all_rows = vec![u64::MAX; 4];
-    all_rows[3] = (1 << 8) - 1;
+    let all_rows = all_rows(200);
     let nwords = bloom::words_for(200).unwrap();
     let mut alone = vec![0; nwords];
     let rows = RowMaskView::try_new(200, &all_rows).unwrap();
@@ -62,17 +61,13 @@ fn four_threads_fill_a_filter_as_one_add_fills_it() {
 
 #[test]
 fn one_of_four_threads_builds_a_shared_filter_every_key_passes() {
-    let config = TableConfig {
-        keys: &[KeyKind::Int32],
-        payload_size: 0,
-    };
+    let config = KEY_ONLY;
     let count = 200;
     let mut table = OwnedTable::new(&config, count, 4096).unwrap();
     let keys: Vec<i32> = (0..count as i32).map(|key| key * 7).collect();
     let hashes: Vec<u32> = keys.iter().map(|&key| murmurhash32(key as u32)).collect();
     let column = IntKeys(&keys);
-    let mut all_rows = vec![u64::MAX; 4];
-    all_rows[3] = (1 << (count - 192)) - 1;
+    let all_rows = all_rows(count as usize);
     let mut pending_words = all_rows.clone();
     let mut pending = RowMask::try_new(count as usize, &mut pending_words).unwrap();
     let mut offsets = vec![0; count as usize];
@@ -194,9 +189,16 @@ impl Blocks {
     }
 }
 
-const PARTITION_CONFIG: TableConfig<'static> = TableConfig {
+/// One key and a payload of a word.
+const ONE_WORD: TableConfig<'static> = TableConfig {
     keys: &[KeyKind::Int32],
     payload_size: 8,
+};
+
+/// One key and no payload.
+const KEY_ONLY: TableConfig<'static> = TableConfig {
+    keys: &[KeyKind::Int32],
+    payload_size: 0,
 };
 
 /// 200 rows, the key's square as payload.
@@ -239,11 +241,11 @@ fn a_chunk_splits_into_the_chunks_of_its_partitions() {
     let column = IntKeys(&keys);
     let mut blocks = Blocks::new();
     let source = blocks.add(CHUNK_HEADER + 200 * 32);
-    let mut words = vec![u64::MAX, u64::MAX, u64::MAX, (1 << 8) - 1];
+    let mut words = all_rows(200);
     let mut pending = RowMask::try_new(200, &mut words).unwrap();
     let mut offsets = vec![0; 200];
     append_to(
-        &PARTITION_CONFIG,
+        &ONE_WORD,
         blocks.chunks(),
         source as usize,
         Some(&payload),
@@ -263,7 +265,7 @@ fn a_chunk_splits_into_the_chunks_of_its_partitions() {
             chunks: &current,
         };
         let split = split_to(
-            &PARTITION_CONFIG,
+            &ONE_WORD,
             blocks.chunks(),
             &partitions,
             source as usize,
@@ -307,7 +309,7 @@ fn partitions_past_the_hash_or_the_chunks_are_refused() {
         (32, &[0], "past the 32 bits"),
     ];
     // A lookup by partition into a table over the same chunks.
-    let mut table = OwnedTable::new(&PARTITION_CONFIG, 64, CHUNK_HEADER + 256 * 32).unwrap();
+    let mut table = OwnedTable::new(&ONE_WORD, 64, CHUNK_HEADER + 256 * 32).unwrap();
     for _ in 0..4 {
         table.add_chunk().unwrap();
     }
@@ -317,7 +319,7 @@ fn partitions_past_the_hash_or_the_chunks_are_refused() {
     for (shift, chunks, message) in cases {
         let mut from = CHUNK_HEADER;
         let error = split_to(
-            &PARTITION_CONFIG,
+            &ONE_WORD,
             blocks.chunks(),
             &Partitions { shift, chunks },
             4,
@@ -350,7 +352,7 @@ fn partitions_past_the_hash_or_the_chunks_are_refused() {
     }
     let mut from = CHUNK_HEADER;
     let error = split_to(
-        &PARTITION_CONFIG,
+        &ONE_WORD,
         blocks.chunks(),
         &Partitions {
             shift: 0,
@@ -374,11 +376,11 @@ fn a_split_that_cannot_be_done_is_refused() {
     let column = IntKeys(&keys);
     let mut blocks = Blocks::new();
     let source = blocks.add(CHUNK_HEADER + 200 * 32);
-    let mut words = vec![u64::MAX, u64::MAX, u64::MAX, (1 << 8) - 1];
+    let mut words = all_rows(200);
     let mut pending = RowMask::try_new(200, &mut words).unwrap();
     let mut offsets = vec![0; 200];
     append_to(
-        &PARTITION_CONFIG,
+        &ONE_WORD,
         blocks.chunks(),
         source as usize,
         Some(&payload),
@@ -391,8 +393,8 @@ fn a_split_that_cannot_be_done_is_refused() {
         payload_size: 16,
     };
     let cases: [(&TableConfig<'_>, usize, u32, &str); 3] = [
-        (&PARTITION_CONFIG, 0, targets[0], "at least one record"),
-        (&PARTITION_CONFIG, 16, source, "into itself"),
+        (&ONE_WORD, 0, targets[0], "at least one record"),
+        (&ONE_WORD, 16, source, "into itself"),
         (&wider, 16, targets[0], "record"),
     ];
     for (config, capacity, first, message) in cases {
@@ -422,19 +424,48 @@ fn a_split_that_cannot_be_done_is_refused() {
 /// Keys and their hashes as a batch's key column.
 fn key_batch(keys: &[i32]) -> (Vec<u32>, Vec<u64>) {
     let hashes = keys.iter().map(|&key| murmurhash32(key as u32)).collect();
-    let mut words = vec![0; keys.len().div_ceil(64)];
-    for row in 0..keys.len() {
+    (hashes, all_rows(keys.len()))
+}
+
+/// The words of a mask of `nrows` rows, every row selected.
+fn all_rows(nrows: usize) -> Vec<u64> {
+    let mut words = vec![0; nrows.div_ceil(64)];
+    for row in 0..nrows {
         words[row / 64] |= 1 << (row % 64);
     }
-    (hashes, words)
+    words
+}
+
+/// Whether the words of a mask select row `row`.
+fn selected(words: &[u64], row: usize) -> bool {
+    words[row / 64] >> (row % 64) & 1 == 1
+}
+
+/// Find or insert the records of `keys`: each row's reference, and the
+/// words of the rows whose record the call created.
+fn find_or_insert_keys(table: &mut OwnedTable, keys: &[i32]) -> (Vec<u32>, Vec<u64>) {
+    let column = IntKeys(keys);
+    let (hashes, mut pending_words) = key_batch(keys);
+    let mut inserted_words = vec![0; pending_words.len()];
+    let mut offsets = vec![0; keys.len()];
+    table
+        .find_or_insert(
+            &mut Batch::new(
+                &hashes,
+                &column,
+                &mut RowMask::try_new(keys.len(), &mut pending_words).unwrap(),
+                &mut offsets,
+            )
+            .unwrap(),
+            &mut RowMask::try_new(keys.len(), &mut inserted_words).unwrap(),
+        )
+        .unwrap();
+    (offsets, inserted_words)
 }
 
 #[test]
 fn groups_go_to_the_chunks_of_their_partitions() {
-    let config = TableConfig {
-        keys: &[KeyKind::Int32],
-        payload_size: 8,
-    };
+    let config = ONE_WORD;
     // Records of 32 bytes, 8 to a chunk: the partitions fill.
     let mut table = OwnedTable::new(&config, 1024, CHUNK_HEADER + 8 * 32).unwrap();
     let mut current: Vec<u32> = (0..4).map(|_| table.add_chunk().unwrap() as u32).collect();
@@ -468,15 +499,13 @@ fn groups_go_to_the_chunks_of_their_partitions() {
                     &mut inserted,
                 )
                 .unwrap();
-            made.extend(
-                (0..keys.len()).filter(|row| inserted_words[row / 64] >> (row % 64) & 1 == 1),
-            );
+            made.extend((0..keys.len()).filter(|&row| selected(&inserted_words, row)));
             if pending_words.iter().all(|&word| word == 0) {
                 break;
             }
             let mut full = [false; 4];
             for row in 0..keys.len() {
-                if pending_words[row / 64] >> (row % 64) & 1 == 1 {
+                if selected(&pending_words, row) {
                     full[((hashes[row] >> 3) & 3) as usize] = true;
                 }
             }
@@ -521,7 +550,7 @@ fn states(table: &OwnedTable, offset: u32) -> [i64; 5] {
 #[test]
 fn half_the_buckets_stops_every_row_of_a_lookup_by_partition() {
     // 1024 buckets take 512 records; 600 keys, then 6 the table holds.
-    let mut table = OwnedTable::new(&PARTITION_CONFIG, 16, CHUNK_HEADER + 1000 * 32).unwrap();
+    let mut table = OwnedTable::new(&ONE_WORD, 16, CHUNK_HEADER + 1000 * 32).unwrap();
     assert_eq!(table.table().unwrap().stats().buckets, 1024);
     let chunks: Vec<u32> = (0..4).map(|_| table.add_chunk().unwrap() as u32).collect();
     let keys: Vec<i32> = (0..600).chain(0..6).collect();
@@ -548,10 +577,17 @@ fn half_the_buckets_stops_every_row_of_a_lookup_by_partition() {
         )
         .unwrap();
     assert_eq!(resolved, 512);
-    let bit = |words: &[u64], row: usize| words[row / 64] >> (row % 64) & 1 == 1;
     for row in 0..keys.len() {
-        assert_eq!(bit(&pending_words, row), row >= 512, "row {row} pending");
-        assert_eq!(bit(&inserted_words, row), row < 512, "row {row} inserted");
+        assert_eq!(
+            selected(&pending_words, row),
+            row >= 512,
+            "row {row} pending"
+        );
+        assert_eq!(
+            selected(&inserted_words, row),
+            row < 512,
+            "row {row} inserted"
+        );
     }
     assert_eq!(table.table().unwrap().stats().records, 512);
 }
@@ -563,22 +599,7 @@ fn grouped(keys: &[i32], of: impl Fn(i32) -> [i64; 5], capacity: u64) -> (OwnedT
         payload_size: 40,
     };
     let mut table = OwnedTable::new(&config, capacity, CHUNK_HEADER + 16 * 56).unwrap();
-    let column = IntKeys(keys);
-    let (hashes, mut pending_words) = key_batch(keys);
-    let mut inserted_words = vec![0; pending_words.len()];
-    let mut offsets = vec![0; keys.len()];
-    table
-        .find_or_insert(
-            &mut Batch::new(
-                &hashes,
-                &column,
-                &mut RowMask::try_new(keys.len(), &mut pending_words).unwrap(),
-                &mut offsets,
-            )
-            .unwrap(),
-            &mut RowMask::try_new(keys.len(), &mut inserted_words).unwrap(),
-        )
-        .unwrap();
+    let (offsets, _) = find_or_insert_keys(&mut table, keys);
     for (row, &key) in keys.iter().enumerate() {
         let mut writer = table.table_mut().unwrap();
         let payload = writer.payload_mut(offsets[row]).unwrap();
@@ -647,22 +668,7 @@ fn a_merge_stops_for_a_chunk_or_a_larger_index() {
 
 /// The states of each key's record, found by its keys.
 fn states_of(table: &mut OwnedTable, keys: &[i32]) -> Vec<[i64; 5]> {
-    let column = IntKeys(keys);
-    let (hashes, mut pending_words) = key_batch(keys);
-    let mut inserted_words = vec![0; pending_words.len()];
-    let mut offsets = vec![0; keys.len()];
-    table
-        .find_or_insert(
-            &mut Batch::new(
-                &hashes,
-                &column,
-                &mut RowMask::try_new(keys.len(), &mut pending_words).unwrap(),
-                &mut offsets,
-            )
-            .unwrap(),
-            &mut RowMask::try_new(keys.len(), &mut inserted_words).unwrap(),
-        )
-        .unwrap();
+    let (offsets, inserted_words) = find_or_insert_keys(table, keys);
     assert!(
         inserted_words.iter().all(|&word| word == 0),
         "a key is missing"
@@ -776,10 +782,7 @@ fn a_merge_refuses_a_record_found_in_its_source() {
 
 #[test]
 fn a_damaged_count_is_bounded_by_the_places_of_the_chunks() {
-    let config = TableConfig {
-        keys: &[KeyKind::Int32],
-        payload_size: 8,
-    };
+    let config = ONE_WORD;
     let mut table = OwnedTable::new(&config, 10, 4096).unwrap();
     table.add_chunk().unwrap();
     table.add_chunk().unwrap();
@@ -794,10 +797,7 @@ fn a_damaged_count_is_bounded_by_the_places_of_the_chunks() {
 
 #[test]
 fn misaligned_or_odd_blocks_are_refused() {
-    let config = TableConfig {
-        keys: &[KeyKind::Int32],
-        payload_size: 0,
-    };
+    let config = KEY_ONLY;
     let mut words = vec![0_u64; index_size(&config, 1000).unwrap().div_ceil(8) + 2];
     let len = words.len() * 8 - 16;
     let base = words.as_mut_ptr().cast::<u8>();
@@ -870,10 +870,7 @@ fn append_one(chunks: Chunks<'_>) -> Result<usize> {
     let (hashes, mut words) = key_batch(&keys);
     let mut pending = RowMask::try_new(1, &mut words)?;
     let mut offsets = [0];
-    let config = TableConfig {
-        keys: &[KeyKind::Int32],
-        payload_size: 0,
-    };
+    let config = KEY_ONLY;
     append_to(
         &config,
         chunks,
