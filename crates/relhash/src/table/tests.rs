@@ -244,14 +244,14 @@ fn a_chunk_splits_into_the_chunks_of_its_partitions() {
     let mut words = all_rows(200);
     let mut pending = RowMask::try_new(200, &mut words).unwrap();
     let mut offsets = vec![0; 200];
-    append_to(
-        &ONE_WORD,
-        blocks.chunks(),
-        source as usize,
-        Some(&payload),
-        &mut Batch::new(&hashes, &column, &mut pending, &mut offsets).unwrap(),
-    )
-    .unwrap();
+    ChunkWriter::new(&ONE_WORD, blocks.chunks())
+        .unwrap()
+        .append(
+            source as usize,
+            Some(&payload),
+            &mut Batch::new(&hashes, &column, &mut pending, &mut offsets).unwrap(),
+        )
+        .unwrap();
     let len = CHUNK_HEADER + 8 * 32;
     let mut current: Vec<u32> = (0..4).map(|_| blocks.add(len)).collect();
     let mut owner = vec![u32::MAX, 0, 1, 2, 3];
@@ -264,16 +264,16 @@ fn a_chunk_splits_into_the_chunks_of_its_partitions() {
             shift: 9,
             chunks: &current,
         };
-        let split = split_to(
-            &ONE_WORD,
-            blocks.chunks(),
-            &partitions,
-            source as usize,
-            &mut from,
-            &mut new_offsets,
-            &mut split_hashes,
-        )
-        .unwrap();
+        let split = ChunkWriter::new(&ONE_WORD, blocks.chunks())
+            .unwrap()
+            .split(
+                &partitions,
+                source as usize,
+                &mut from,
+                &mut new_offsets,
+                &mut split_hashes,
+            )
+            .unwrap();
         for (&offset, &hash) in new_offsets.iter().zip(&split_hashes).take(split.count) {
             assert_eq!(owner[(offset >> UNIT_BITS) as usize], (hash >> 9) & 3);
         }
@@ -318,16 +318,16 @@ fn partitions_past_the_hash_or_the_chunks_are_refused() {
     let (hashes, all) = key_batch(&keys);
     for (shift, chunks, message) in cases {
         let mut from = CHUNK_HEADER;
-        let error = split_to(
-            &ONE_WORD,
-            blocks.chunks(),
-            &Partitions { shift, chunks },
-            4,
-            &mut from,
-            &mut [0; 4],
-            &mut [0; 4],
-        )
-        .unwrap_err();
+        let error = ChunkWriter::new(&ONE_WORD, blocks.chunks())
+            .unwrap()
+            .split(
+                &Partitions { shift, chunks },
+                4,
+                &mut from,
+                &mut [0; 4],
+                &mut [0; 4],
+            )
+            .unwrap_err();
         assert!(error.to_string().contains(message), "{error}");
         assert_eq!(from, CHUNK_HEADER);
         let (mut pending_words, mut inserted_words) = (all.clone(), vec![0; 1]);
@@ -351,19 +351,19 @@ fn partitions_past_the_hash_or_the_chunks_are_refused() {
         assert_eq!(table.table().unwrap().stats().records, 0);
     }
     let mut from = CHUNK_HEADER;
-    let error = split_to(
-        &ONE_WORD,
-        blocks.chunks(),
-        &Partitions {
-            shift: 0,
-            chunks: &[0, 1],
-        },
-        1,
-        &mut from,
-        &mut [0; 4],
-        &mut [0; 4],
-    )
-    .unwrap_err();
+    let error = ChunkWriter::new(&ONE_WORD, blocks.chunks())
+        .unwrap()
+        .split(
+            &Partitions {
+                shift: 0,
+                chunks: &[0, 1],
+            },
+            1,
+            &mut from,
+            &mut [0; 4],
+            &mut [0; 4],
+        )
+        .unwrap_err();
     assert!(error.to_string().contains("into itself"), "{error}");
 }
 
@@ -379,14 +379,14 @@ fn a_split_that_cannot_be_done_is_refused() {
     let mut words = all_rows(200);
     let mut pending = RowMask::try_new(200, &mut words).unwrap();
     let mut offsets = vec![0; 200];
-    append_to(
-        &ONE_WORD,
-        blocks.chunks(),
-        source as usize,
-        Some(&payload),
-        &mut Batch::new(&hashes, &column, &mut pending, &mut offsets).unwrap(),
-    )
-    .unwrap();
+    ChunkWriter::new(&ONE_WORD, blocks.chunks())
+        .unwrap()
+        .append(
+            source as usize,
+            Some(&payload),
+            &mut Batch::new(&hashes, &column, &mut pending, &mut offsets).unwrap(),
+        )
+        .unwrap();
     let targets: Vec<u32> = (0..4).map(|_| blocks.add(CHUNK_HEADER + 64 * 32)).collect();
     let wider = TableConfig {
         nkeys: 1,
@@ -400,19 +400,19 @@ fn a_split_that_cannot_be_done_is_refused() {
     for (config, capacity, first, message) in cases {
         let chunks = [first, targets[1], targets[2], targets[3]];
         let mut from = CHUNK_HEADER;
-        let error = split_to(
-            config,
-            blocks.chunks(),
-            &Partitions {
-                shift: 9,
-                chunks: &chunks,
-            },
-            source as usize,
-            &mut from,
-            &mut vec![0; capacity],
-            &mut vec![0; capacity],
-        )
-        .unwrap_err();
+        let error = ChunkWriter::new(config, blocks.chunks())
+            .unwrap()
+            .split(
+                &Partitions {
+                    shift: 9,
+                    chunks: &chunks,
+                },
+                source as usize,
+                &mut from,
+                &mut vec![0; capacity],
+                &mut vec![0; capacity],
+            )
+            .unwrap_err();
         assert!(error.to_string().contains(message), "{error}");
         assert_eq!(from, CHUNK_HEADER, "{message}");
         for &target in &targets {
@@ -871,9 +871,7 @@ fn append_one(chunks: Chunks<'_>) -> Result<usize> {
     let mut pending = RowMask::try_new(1, &mut words)?;
     let mut offsets = [0];
     let config = KEY_ONLY;
-    append_to(
-        &config,
-        chunks,
+    ChunkWriter::new(&config, chunks)?.append(
         0,
         None,
         &mut Batch::new(&hashes, &column, &mut pending, &mut offsets)?,
@@ -983,20 +981,20 @@ fn rows_go_from_payload_columns_to_chunks_alone() {
     let values: [&[u64]; 1] = [&[30, 40, 50]];
     let nulls: [&[bool]; 1] = [&[false, true, false]];
     let columns = PayloadColumns::new(&values, &nulls, 3).unwrap();
-    let appended = append_columns_to(
-        &config,
-        table.chunk_set().unwrap(),
-        0,
-        &columns,
-        &mut Batch::new(
-            &hashes,
-            &column,
-            &mut RowMask::try_new(3, &mut words).unwrap(),
-            &mut offsets,
+    let appended = ChunkWriter::new(&config, table.chunk_set().unwrap())
+        .unwrap()
+        .append_columns(
+            0,
+            &columns,
+            &mut Batch::new(
+                &hashes,
+                &column,
+                &mut RowMask::try_new(3, &mut words).unwrap(),
+                &mut offsets,
+            )
+            .unwrap(),
         )
-        .unwrap(),
-    )
-    .unwrap();
+        .unwrap();
     assert_eq!(appended, 3);
     assert_eq!(words, [0], "every row went in");
     let table = table.table().unwrap();

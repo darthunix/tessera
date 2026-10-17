@@ -17,11 +17,10 @@ use tessera_kernels::accumulate::{self, Combine, ExtremeSlot, Fold, MAX_SUMS, Sl
 use tessera_kernels::column_keys::normalize_word;
 use tessera_kernels::phases::{Participant, SharedCounters, StopWord};
 use tessera_kernels::table::{
-    Appended, Batch, Chunks, CombineStop, Cursor, FORMAT_VERSION, HEADER_SIZE, KeySource, MAX_KEYS,
-    MAX_PAYLOAD_COLUMNS, Marks, Partitions, PayloadColumns, Table, TableConfig, TableMut,
-    UNIT_BITS, VERSION_OFFSET, append_columns_to, append_partitioned_columns_to, append_to,
-    bloom::SharedFilter, chunk_used, index_size, init_chunk, mark, mark_words, payload_null_words,
-    record_bytes, scan_unmarked, split_to,
+    Appended, Batch, ChunkWriter, Chunks, CombineStop, Cursor, FORMAT_VERSION, HEADER_SIZE,
+    KeySource, MAX_KEYS, MAX_PAYLOAD_COLUMNS, Marks, Partitions, PayloadColumns, Table,
+    TableConfig, TableMut, UNIT_BITS, VERSION_OFFSET, bloom::SharedFilter, chunk_used, index_size,
+    init_chunk, mark, mark_words, payload_null_words, record_bytes, scan_unmarked,
 };
 
 use super::args::reader;
@@ -569,7 +568,7 @@ pub unsafe extern "C" fn tess_table_append(
             let mut batch = Batch::new(hashes, &decoded, &mut pending, offsets)?;
             match indexed {
                 Some(table) => table.append(chunk, payload, &mut batch),
-                None => append_to(&config, chunks, chunk, payload, &mut batch),
+                None => ChunkWriter::new(&config, chunks)?.append(chunk, payload, &mut batch),
             }
             .map(drop)
         })
@@ -622,7 +621,9 @@ pub unsafe extern "C" fn tess_table_append_columns(
             let mut batch = Batch::new(hashes, &decoded, &mut pending, offsets)?;
             let append = |payload: &PayloadColumns<'_>| match &indexed {
                 Some(table) => table.append_columns(chunk, payload, &mut batch),
-                None => append_columns_to(&config, chunks, chunk, payload, &mut batch),
+                None => {
+                    ChunkWriter::new(&config, chunks)?.append_columns(chunk, payload, &mut batch)
+                }
             };
             if ncolumns <= 64 {
                 with_payload::<64, _>(columns, nrows, append)
@@ -784,15 +785,14 @@ pub unsafe extern "C" fn tess_table_append_partitioned_columns(
             );
             let payload = PayloadColumns::new(words, flags, nrows)?;
             let mut batch = Batch::new(hashes, &decoded, &mut pending, offsets)?;
-            append_partitioned_columns_to(
-                &config,
-                chunks,
-                &partitions,
-                &payload,
-                &mut batch,
-                &mut Appended { rows, nulls },
-            )
-            .map(drop)
+            ChunkWriter::new(&config, chunks)?
+                .append_partitioned_columns(
+                    &partitions,
+                    &payload,
+                    &mut batch,
+                    &mut Appended { rows, nulls },
+                )
+                .map(drop)
         })
     }
 }
@@ -839,7 +839,13 @@ pub unsafe extern "C" fn tess_table_split(
             let from = from.as_mut().context("a null from")?;
             let count = count.as_mut().context("a null count")?;
             let full = full.as_mut().context("a null full")?;
-            let split = split_to(&config, chunks, &partitions, source, from, offsets, hashes)?;
+            let split = ChunkWriter::new(&config, chunks)?.split(
+                &partitions,
+                source,
+                from,
+                offsets,
+                hashes,
+            )?;
             *count = split.count as c_int;
             *full = split.full.map_or(-1, |partition| partition as c_int);
             Ok(())

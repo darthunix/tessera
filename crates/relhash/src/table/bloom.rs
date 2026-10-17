@@ -17,10 +17,10 @@
 //!
 //! The hash is the table's own, every key folded in. The multiplication
 //! spreads it, so that the word does not repeat the high bits that pick
-//! the bucket. A filter holds [`BITS_PER_RECORD`] bits per record of the
-//! table it was filled from, in a power of two of words; with four bits
-//! per key that lets through about one absent key in 200, as a test
-//! measures at exactly 16 bits.
+//! the bucket. A filter holds 16 bits per record of the table it was
+//! filled from, in a power of two of words, as [`words_for`] sizes it;
+//! with four bits per key that lets through about one absent key in 200,
+//! as a test measures at exactly 16 bits.
 //!
 //! Like the table, the filter is a block of words the caller owns, with
 //! no address inside, so the same code serves a filter in a process's
@@ -209,7 +209,7 @@ impl FilterShared for SharedFilter<'_> {
 }
 
 /// Bits of a filter per record of its table.
-pub const BITS_PER_RECORD: u64 = 16;
+const BITS_PER_RECORD: u64 = 16;
 
 /// The words of a filter without a state word that participants fill at
 /// once: an atomic OR a word.
