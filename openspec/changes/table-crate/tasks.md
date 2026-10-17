@@ -113,7 +113,7 @@ commit of sections 2 and 3 is checked by `make rust-check` and by
       with pictures. Check: `make rust-check`; machine code the same but
       where a commit names its change; `make rust-loom`;
       `make installcheck`
-- [ ] 3.4 Make the public API what the maintainer's review of it
+- [x] 3.4 Make the public API what the maintainer's review of it
       decided: the table's items at the crate's root; the calls over
       chunks before a table has an index as one type, `ChunkWriter`;
       references named references in the parameters and the texts;
