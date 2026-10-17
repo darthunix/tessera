@@ -39,7 +39,7 @@ pub(super) use shaped;
 /// The rows of a call that places them in a table: each row's hash and
 /// keys, the rows still to place, which leave `pending` as the call
 /// places them, and the reference of each placed row's record, at its
-/// row in `offsets`. A batch may go through several calls, each placing
+/// row in `refs`. A batch may go through several calls, each placing
 /// what it can.
 pub struct Batch<'b, 'm, K: ?Sized> {
     pub(super) hashes: &'b [u32],
@@ -55,15 +55,15 @@ impl<'b, 'm, K: KeySource + ?Sized> Batch<'b, 'm, K> {
         hashes: &'b [u32],
         keys: &'b K,
         pending: &'b mut RowMask<'m>,
-        offsets: &'b mut [u32],
+        refs: &'b mut [u32],
     ) -> Result<Self> {
         let nrows = pending.as_view().nrows();
-        check_rows(nrows, &[keys.nrows(), hashes.len(), offsets.len()], "table")?;
+        check_rows(nrows, &[keys.nrows(), hashes.len(), refs.len()], "table")?;
         Ok(Self {
             hashes,
             keys,
             pending,
-            offsets,
+            offsets: refs,
         })
     }
 
