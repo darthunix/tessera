@@ -4,10 +4,12 @@
 `tess_table_chunk_used` SHALL give the used mark of a chunk the caller
 holds, from its base, its length and the size of the table's records.
 It SHALL check the mark first: the block can be a chunk, the record
-size is a multiple of 8 of at least 16 bytes, and the mark is at least
-8, at most the chunk's length, and 8 more than a whole number of
-records. A mark that fails is refused, and `used` is left as it was.
-The call reads the first 8 bytes of the chunk and nothing else.
+size is one a table's records have, a multiple of 8 of 24 bytes, a
+record's header and one key, to 8 bytes less than the longest chunk,
+and the mark is at least 8, at most the chunk's length, and 8 more
+than a whole number of records. A mark that fails is refused, and
+`used` is left as it was. The call reads the first 8 bytes of the
+chunk and nothing else.
 
 #### Scenario: The mark of a chunk
 - **WHEN** an empty chunk of 64 bytes is asked for its mark, and then
@@ -18,8 +20,10 @@ The call reads the first 8 bytes of the chunk and nothing else.
 
 #### Scenario: A mark that ends no record
 - **WHEN** a chunk of 64 bytes for records of 32 bytes holds a mark of
-  0, 20 or 72; or a record size of 0 or 12 is given; or a block that
-  is not aligned to 8
-- **THEN** the call fails, and `used` keeps its value
+  0, 20 or 72; or an empty chunk is given a record size of 0, 12, 16
+  or the longest chunk's length; or a block that is not aligned to 8
+- **THEN** the call fails, and `used` keeps its value; record sizes of
+  24 and of 8 bytes less than the longest chunk give the empty chunk's
+  mark
 - **Verified by:**
   `crates/tessera-capi/tests/table.rs::a_mark_that_ends_no_record`
