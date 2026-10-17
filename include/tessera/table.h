@@ -254,8 +254,8 @@ extern TessStatusCode tess_table_chunk_init(void *base, Size len,
 /*
  * The used mark of the chunk of len bytes at base, whose records take
  * record_size bytes each, into used: refused, used unchanged, for a block
- * that cannot be a chunk, a record size that is not a multiple of 8 of at
- * least 16, or a mark below 8, past len or ending no record. A node reads
+ * that cannot be a chunk, a record size that no table's records have (a
+ * multiple of 8 of 24 to TESS_TABLE_MAX_CHUNK_LEN - 8 bytes), or a mark below 8, past len or ending no record. A node reads
  * a chunk's mark through this call, never by itself.
  */
 extern TessStatusCode tess_table_chunk_used(const void *base, Size len,

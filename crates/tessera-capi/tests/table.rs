@@ -4197,13 +4197,24 @@ fn a_mark_that_ends_no_record() {
         }
         base.cast::<u64>().write(40);
         assert_eq!(mark_of(base, 64, 32), (Code::Ok, 40));
-        for record_size in [0, 12] {
+        // The mark of an empty chunk ends a whole number of records of any
+        // size, so only the size's own rule refuses these: records that
+        // are not a multiple of 8, a header without a key, or larger than
+        // a chunk holds after its mark.
+        base.cast::<u64>().write(8);
+        for record_size in [0, 12, 16, MAX_CHUNK_LEN] {
             assert_eq!(
                 mark_of(base, 64, record_size),
                 (Code::InvalidArgument, usize::MAX),
                 "records of {record_size} bytes"
             );
         }
+        assert_eq!(mark_of(base, 64, 24), (Code::Ok, 8), "a header and a key");
+        assert_eq!(
+            mark_of(base, 64, MAX_CHUNK_LEN - 8),
+            (Code::Ok, 8),
+            "the largest record"
+        );
         assert_eq!(
             mark_of(base.wrapping_add(4), 64, 32),
             (Code::InvalidArgument, usize::MAX),

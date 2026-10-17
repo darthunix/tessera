@@ -11,7 +11,7 @@ use crate::{RowMaskView, ones};
 use anyhow::{Context, Result, ensure};
 
 use super::Chunks;
-use super::header::{CHUNK_HEADER, KEY_SLOT, MAX_CHUNK_LEN, Place, RECORD_HEADER};
+use super::header::{CHUNK_HEADER, MAX_CHUNK_LEN, Place, check_record_size};
 use super::writer::Cursor;
 
 /// The words of marks of a chunk of `chunk_len` bytes: a bit for every
@@ -23,18 +23,6 @@ use super::writer::Cursor;
 pub fn mark_words(chunk_len: usize, record_size: usize) -> Result<usize> {
     check_record_size(record_size)?;
     Ok((chunk_len.saturating_sub(CHUNK_HEADER) / record_size).div_ceil(64))
-}
-
-/// A record of a table: a multiple of 8, a header and a key at least, and
-/// no more than a chunk holds after its used mark. A size between the
-/// records would name places where no record starts.
-fn check_record_size(size: usize) -> Result<()> {
-    ensure!(
-        size.is_multiple_of(8)
-            && (RECORD_HEADER + KEY_SLOT..=MAX_CHUNK_LEN - CHUNK_HEADER).contains(&size),
-        "records of {size} bytes are not the records of a table"
-    );
-    Ok(())
 }
 
 /// Division of an offset within a chunk by a record's size as a multiply
