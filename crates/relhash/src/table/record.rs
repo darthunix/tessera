@@ -392,7 +392,7 @@ impl<'r, R: Region> Access<'r, R> {
         }
         let len = self.region.chunk_len(chunk);
         if !self.region.chunk_fits(chunk) {
-            return Err(super::bad_chunk(chunk, len));
+            return Err(super::chunks::bad_chunk(chunk, len));
         }
         // SAFETY: the chunk exists, and the caller is its one writer.
         let used = unsafe { self.region.chunk_used(chunk) };
@@ -904,4 +904,52 @@ fn misplaced(offset: u32) -> anyhow::Error {
 #[inline(never)]
 fn cycle() -> anyhow::Error {
     anyhow::anyhow!("table chain is longer than its record count")
+}
+
+/// The first bytes of a chunk's records from byte `from` to its used
+/// mark; `from` must be a record boundary.
+pub(super) fn unlinked<R: Region>(
+    access: &Access<'_, R>,
+    chunk: usize,
+    from: usize,
+) -> Result<core::iter::StepBy<core::ops::Range<usize>>> {
+    let (used, _) = access.room(chunk)?;
+    ensure!(
+        from >= CHUNK_HEADER
+            && from <= used
+            && (from - CHUNK_HEADER).is_multiple_of(access.record_size()),
+        "byte {from} of table chunk {chunk} is no record boundary below its {used} used bytes"
+    );
+    Ok((from..used).step_by(access.record_size()))
+}
+
+/// The hash of the record at a place of a chunk below its used mark,
+/// which must claim the table's record length.
+#[inline]
+pub(super) fn check_record<R: Region>(access: &Access<'_, R>, place: Place) -> Result<u32> {
+    // SAFETY: the place lies below the chunk's used mark, which `room`
+    // checked against its length; the caller wrote it or it is published.
+    unsafe { check_record_at(access, access.spot(place), place) }
+}
+
+/// As [`check_record`], for the record at a spot the caller resolved.
+///
+/// # Safety
+///
+/// `spot` is the spot of `place`, which lies below its chunk's used mark.
+#[inline(always)]
+pub(super) unsafe fn check_record_at<R: Region>(
+    access: &Access<'_, R>,
+    spot: R::Spot,
+    place: Place,
+) -> Result<u32> {
+    // SAFETY: the caller's contract; the record is written or published.
+    let view = unsafe { access.view_at(spot) };
+    ensure!(
+        view.len() == access.record_size(),
+        "table chunk {} holds no record at byte {}",
+        place.0,
+        place.1
+    );
+    Ok(view.hash())
 }

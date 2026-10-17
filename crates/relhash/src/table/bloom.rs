@@ -25,16 +25,15 @@
 //! every participant checks a batch against it only once it reads ready
 //! with acquire, probing the table without it until then. Nobody waits,
 //! and a participant that never wants the filter leaves nothing undone.
-//! The loom model in `loom.rs` checks this protocol.
+//! The loom models in `loom/filter.rs` check this protocol.
 
 use core::sync::atomic::AtomicU64;
 
 use crate::{RowMask, RowMaskView, ones};
 use anyhow::{Result, bail, ensure};
 
-use super::batch::{check_record, unlinked};
 use super::header::{CHUNK_HEADER, Layout};
-use super::record::Access;
+use super::record::{Access, check_record, unlinked};
 use super::region::{Region, order};
 
 /// The words of a filter as a check reads them.
