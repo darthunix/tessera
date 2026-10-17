@@ -3,29 +3,60 @@
 //! the filter has no record with its hash, and leaves the batch without
 //! reading a bucket or a record.
 //!
-//! The filter is blocked in a register: each hash selects one 64-bit word
-//! and four bits in it, so a check is one load and a compare. The hash is
-//! the table's own (every key folded in, under the table's NULL policy),
-//! spread by a multiplication so that the word does not repeat the bits
-//! that choose the bucket: the word comes from the product's high bits,
-//! the four bit positions from its low 24 bits, six each. A filter holds
-//! [`BITS_PER_RECORD`] bits per record of the table it was filled from, in
-//! a power of two of words; with four bits per key that lets through
-//! about one absent key in 200, as a test measures at exactly 16 bits.
+//! The filter is words of 64 bits. Each hash picks one word and four
+//! bits in it, so a check is one load and a compare:
 //!
-//! Like the table's region, the filter is a borrowed buffer of words that
-//! holds no process address, so the same code serves a filter in a
-//! backend's memory and one in dynamic shared memory next to a shared
-//! table.
+//! ```text
+//!   hash × SPREAD ──► a product of 64 bits
+//!                     ├─ its high bits ──────► the word
+//!                     └─ its low 24 bits ────► four bit numbers, 6 bits each
 //!
-//! A shared filter ([`SharedFilter`]) starts with a state word: none,
-//! building, ready. Each participant decides by its own batches whether
-//! it wants the filter; the first that does claims it with a
-//! compare-and-swap, fills it alone and marks it ready with release, and
-//! every participant checks a batch against it only once it reads ready
-//! with acquire, probing the table without it until then. Nobody waits,
-//! and a participant that never wants the filter leaves nothing undone.
-//! The loom models in `loom/filter.rs` check this protocol.
+//!   word  …0 1 0 0 1 0 0 0 0 1 0 1 0 0…   the four bits of a hash
+//!            ▲     ▲         ▲   ▲        all 1: the row may have a record
+//! ```
+//!
+//! The hash is the table's own, every key folded in. The multiplication
+//! spreads it, so that the word does not repeat the high bits that pick
+//! the bucket. A filter holds [`BITS_PER_RECORD`] bits per record of the
+//! table it was filled from, in a power of two of words; with four bits
+//! per key that lets through about one absent key in 200, as a test
+//! measures at exactly 16 bits.
+//!
+//! Like the table, the filter is a block of words the caller owns, with
+//! no address inside, so the same code serves a filter in a process's
+//! memory and one in shared memory next to a shared table.
+//!
+//! A shared filter ([`SharedFilter`]) starts with a word of its state:
+//!
+//! ```text
+//!   NONE ──claim──► BUILDING ──fill, then publish──► READY
+//! ```
+//!
+//! Each participant decides by its own batches whether it wants the
+//! filter. The first that does claims it with a compare-and-swap, fills
+//! it alone, and publishes READY with release. Every participant checks a
+//! batch against the filter only once it reads READY with acquire, and
+//! probes the table without it until then. Nobody waits, and a
+//! participant that never wants the filter leaves nothing undone. The
+//! loom models in `loom/filter.rs` check this protocol.
+//!
+//! ```
+//! use relhash::{RowMask, RowMaskView};
+//! use relhash::table::bloom;
+//!
+//! // A filter for 100 records, filled with the hashes of two rows.
+//! let mut words = vec![0; bloom::words_for(100)?];
+//! bloom::add(&mut words, &[7, 8], &RowMaskView::try_new(2, &[0b11])?)?;
+//! // Probe three rows of hashes 7, 8 and 9.
+//! let mut passed = [0];
+//! let rows = RowMaskView::try_new(3, &[0b111])?;
+//! bloom::probe(&words, &[7, 8, 9], &rows, &mut RowMask::try_new(3, &mut passed)?)?;
+//! // Bit `k` of a mask's word is row `k`, counted from the right: 0b011
+//! // is rows 0 and 1, hashes 7 and 8, which always pass. Row 2 is left
+//! // out: a filter lets an absent hash through now and then.
+//! assert_eq!(passed[0] & 0b011, 0b011);
+//! # Ok::<(), anyhow::Error>(())
+//! ```
 
 use core::sync::atomic::AtomicU64;
 

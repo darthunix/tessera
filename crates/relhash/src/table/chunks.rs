@@ -75,6 +75,12 @@ pub(super) fn used_mark(raw: u64, len: usize, record_size: usize) -> Option<usiz
 
 /// The chunks of a table as this process sees them: each one's base and
 /// length.
+///
+/// The bases are raw pointers, not slices. In shared memory other
+/// processes write a table's chunks while a call runs, which a
+/// `&mut [u64]` of them would forbid; only the caller can promise what
+/// the memory is, so [`Self::new`] is unsafe. [`OwnedTable`](super::OwnedTable)
+/// is the way to a table without `unsafe`.
 #[derive(Clone, Copy, Debug)]
 pub struct Chunks<'a> {
     pub(super) bases: &'a [*mut u8],
@@ -219,7 +225,7 @@ fn chunk_region(chunks: &Chunks<'_>) -> RawRegion {
 }
 
 /// Append the rows of `batch` as records of a table of `config` to chunk
-/// `chunk` of `chunks`, as [`Table::append`] does, before the table has an
+/// `chunk` of `chunks`, as [`Table::append`](super::Table::append) does, before the table has an
 /// index: the participants of a shared build append their share first,
 /// and one of them sizes the index for the records once all are counted.
 /// The caller must be the chunk's one writer.

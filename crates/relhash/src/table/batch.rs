@@ -256,7 +256,10 @@ pub(super) fn append_columns<R: Region, K: KeySource + ?Sized>(
 }
 
 /// The rows of [`append_columns`], shaped as [`append_rows`]; the words
-/// after the keys are the columns', so `T` does not matter.
+/// after the keys are the columns', so `T` does not matter. The loop is
+/// [`append_rows`]'s written again: as one loop over a closure that writes
+/// a row's record, LLVM laid out `append_rows`' loops anew, and the one of
+/// any shape grew.
 #[inline(never)]
 #[allow(clippy::too_many_arguments)]
 fn append_column_rows<

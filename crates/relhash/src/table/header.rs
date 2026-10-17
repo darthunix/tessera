@@ -1,22 +1,25 @@
-//! The header at the start of a table's index and the layout it fixes,
-//! and the rules of the chunks that hold the records.
+//! The header at the start of a table's index, the sizes it fixes, and
+//! the limits of chunks and references.
 //!
-//! The header is 96 bytes of integers, so any bytes decode to a value and
-//! every check is an explicit comparison. Its fields, by offset: `magic`
-//! (0), `version` (8), `header_size` (12), `region_len` (16, the index's
-//! length), `buckets_offset` (24, right after the header), a reserved word
-//! (32, zero), `nrecords` (40, the records linked into the buckets),
-//! `nbuckets` (48), `bucket_shift` (52), `record_size` (56), `payload_size`
-//! (60), `nkeys` (64), `flags` (68) and three
-//! reserved words (72, zero). Only `nrecords` changes after creation; it is read
-//! and written atomically through the region, the rest is copied into a
-//! [`Layout`] once validated.
+//! ```text
+//!   index: header (96 bytes), then the buckets, 4 bytes each
+//!   ┌──────────────────────────┬──────────┬──────────┬─────┬──────────┐
+//!   │ header: the format, the  │ bucket 0 │ bucket 1 │  …  │ bucket n │
+//!   │ sizes, the record count  │          │          │     │          │
+//!   └──────────────────────────┴──────────┴──────────┴─────┴──────────┘
+//! ```
 //!
-//! A chunk is a block of at most [`MAX_CHUNK_LEN`] bytes, a multiple of 8:
-//! an 8-byte used mark, then records one after another. A record is
-//! addressed by a 32-bit reference, its chunk's number in the high
-//! [`32 - UNIT_BITS`](UNIT_BITS) bits and its offset in 8-byte units in the
-//! low ones; the used mark lies at unit 0, so a reference is never 0.
+//! The header is integers only, so any bytes read as some header, and a
+//! check of it is a comparison of numbers. Its fields lie in the order of
+//! [`Header`]; the spec of `hash-table` draws them with their offsets in
+//! its requirement "The index of a table". A call checks the header once
+//! and copies it into a [`Layout`], which its loops use. Only the count
+//! of records changes after the index is made; it is read and written
+//! atomically, through the region.
+//!
+//! A chunk is a block of at most [`MAX_CHUNK_LEN`] bytes: its used mark,
+//! then records one after another. A [`Place`] is where a record lies,
+//! and a reference is a place packed into 32 bits.
 
 use core::mem::{offset_of, size_of};
 
@@ -140,8 +143,12 @@ impl Layout {
     }
 
     /// A fingerprint of what a record is: the format, the count of keys,
-    /// the record and payload sizes (FNV-1a). Records written with one layout
-    /// are read back only by a table of the same fingerprint.
+    /// the record and payload sizes (FNV-1a). A table that spills writes
+    /// its records' bytes to disk, and the blocks of the file carry this
+    /// number; a table reads a block back only when the number is its own,
+    /// so that the bytes of another table or another format are refused
+    /// rather than read as records. The crate computes it, since only the
+    /// crate knows what a record's bytes are.
     pub(super) fn fingerprint(&self) -> u64 {
         let mut hash = 0xcbf2_9ce4_8422_2325_u64;
         let mut feed = |byte: u8| {
