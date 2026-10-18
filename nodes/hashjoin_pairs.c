@@ -28,16 +28,17 @@
  * The next record of each row's key: one step in a table grouped by
  * insertion, a walk down the chain in a shared table, whose participants
  * inserted without grouping, and in a round's; a partition a participant
- * joins alone is a table of its own.
+ * joins alone is a table of its own. The rows without one leave rows, in
+ * place.
  */
 static TessStatusCode
-next_record(TessHashJoinState *state, const TessRowMask *rows, TessRowMask *found)
+next_record(TessHashJoinState *state, TessRowMask *rows)
 {
 	if (state->parallel.chain_table)
 		return state->kernels->table_next_match(&state->table, state->probe.offsets,
-												rows, found, &state->status);
+												rows, rows, &state->status);
 	return state->kernels->table_next_in_group(&state->table, state->probe.offsets,
-											   rows, found, &state->status);
+											   rows, rows, &state->status);
 }
 
 /* Make the round's rows the published batch's selection. */
@@ -114,13 +115,10 @@ next_round(TessHashJoinState *state)
 			if (!state->inner_unique && state->duplicates > 0 &&
 				state->table.index != NULL)
 			{
-				TessRowMask rows = {nrows, state->probe.next_bits};
-				TessRowMask found = {nrows, state->probe.round_bits};
+				TessRowMask round = {nrows, state->probe.round_bits};
 
-				memcpy(state->probe.next_bits, state->probe.round_bits,
-					   sizeof(uint64) * tess_row_mask_word_count(nrows));
-				check(state, next_record(state, &rows, &found));
-				if (tess_row_mask_count(&found) > 0)
+				check(state, next_record(state, &round));
+				if (tess_row_mask_count(&round) > 0)
 				{
 					start_round(state);
 					return true;
@@ -355,7 +353,6 @@ next_matches(TessHashJoinState *state)
 				for (;;)
 				{
 					TessRowMask round = {nrows, state->probe.round_bits};
-					TessRowMask rest = {nrows, state->probe.next_bits};
 					uint64		left = 0;
 
 					CHECK_FOR_INTERRUPTS();
@@ -367,15 +364,15 @@ next_matches(TessHashJoinState *state)
 						state->matched_bits[word] |= state->probe.published_bits[word];
 					if (state->inner_unique || state->duplicates == 0)
 						break;
+					/* The rows without a pair yet step on in place. */
 					for (int word = 0; word < nwords; word++)
 					{
-						state->probe.next_bits[word] = state->probe.round_bits[word] &
-							~state->matched_bits[word];
-						left |= state->probe.next_bits[word];
+						state->probe.round_bits[word] &= ~state->matched_bits[word];
+						left |= state->probe.round_bits[word];
 					}
 					if (left == 0)
 						break;
-					check(state, next_record(state, &rest, &round));
+					check(state, next_record(state, &round));
 					if (tess_row_mask_count(&round) == 0)
 						break;
 				}

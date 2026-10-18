@@ -307,7 +307,6 @@ group_batch(TessAggState *state, TessBatch *batch)
 			state->value_hashes[row] = hash;
 		}
 	}
-	memcpy(state->pending_bits, state->valid_bits, sizeof(uint64) * nwords);
 	/*
 	 * A frozen table takes no new group: the rows of the groups it has go
 	 * on into them, the others, their computed values, to disk.
@@ -328,8 +327,10 @@ group_batch(TessAggState *state, TessBatch *batch)
 		missing_bits = state->missing_bits;
 		missing = (TessRowMask) {nrows, missing_bits};
 
+		/* The rows of the groups the table has, apart from the batch's. */
+		memcpy(state->pending_bits, state->valid_bits, sizeof(uint64) * nwords);
 		check(state, state->kernels->table_probe(&state->table, state->hashes, state->nkeys,
-												 state->table_keys, &valid, state->offsets,
+												 state->table_keys, &pending, state->offsets,
 												 &pending, &state->status));
 		for (int word = 0; word < nwords; word++)
 		{
@@ -352,18 +353,20 @@ group_batch(TessAggState *state, TessBatch *batch)
 		if (state->table.nchunks == 0)
 			memset(state->valid_bits, 0, sizeof(uint64) * nwords);
 		else
-		{
 			check(state, state->kernels->table_probe(&state->table, state->hashes,
 													 state->nkeys, state->table_keys,
-													 &valid, state->offsets, &pending,
+													 &valid, state->offsets, &valid,
 													 &state->status));
-			memcpy(state->valid_bits, state->pending_bits, sizeof(uint64) * nwords);
-		}
 	}
-	else if (state->spill != NULL)
-		agg_find_partitioned(state, &pending, &inserted);
-	else if (state->table.nchunks == 0)
-		add_chunk(state);
+	else
+	{
+		/* The rows still to place in a group. */
+		memcpy(state->pending_bits, state->valid_bits, sizeof(uint64) * nwords);
+		if (state->spill != NULL)
+			agg_find_partitioned(state, &pending, &inserted);
+		else if (state->table.nchunks == 0)
+			add_chunk(state);
+	}
 	for (; !probe && state->spill == NULL && !state->frozen;)
 	{
 		TessTableStats stats = TESS_STRUCT_INITIALIZER(TessTableStats);

@@ -129,7 +129,7 @@ commit of sections 2 and 3 is checked by `make rust-check` and by
       `make rust-check`; `make installcheck`; machine code, every loop
       that changes with its reason; the maintainer's run of counters on
       `table_int32` and `table_large`; `cargo ab measure` of `join`
-- [ ] 3.6 Let the C entry points of the probe, the next match, the
+- [x] 3.6 Let the C entry points of the probe, the next match, the
       next in a group and the Bloom filter's probes narrow a mask in
       place: `found` may be `rows` itself, and then nothing is copied.
       The nodes use it where they copy a mask before such a call: the
