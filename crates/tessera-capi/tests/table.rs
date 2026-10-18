@@ -36,8 +36,8 @@ use tessera_kernels::column_keys::KeyColumns;
 use tessera_kernels::int32::{self, NullKeys};
 use tessera_kernels::phases::{Action, PROBE, Participant};
 use tessera_kernels::table::{
-    Batch, CHUNK_HEADER, MAX_CHUNK_LEN, MAX_PAYLOAD_COLUMNS, OwnedTable, TableConfig, index_size,
-    payload_null_words,
+    Batch, CHUNK_HEADER, MAX_CHUNK_LEN, MAX_PAYLOAD_COLUMNS, Matches, OwnedTable, TableConfig,
+    index_size, payload_null_words,
 };
 
 thread_local! {
@@ -457,11 +457,13 @@ fn round_trip<K: tessera_kernels::table::KeySource + ?Sized>(
     )?;
     assert_eq!(pending.as_view().selected_count(), 0);
     let table = owner.table()?;
-    let rows = RowMaskView::try_new(nrows, valid)?;
-    let mut found_words = vec![0; nrows.div_ceil(64)];
-    let mut found = RowMask::try_new(nrows, &mut found_words)?;
+    let mut found_words = valid.to_vec();
     let mut matches = vec![0; nrows];
-    table.probe(hashes, keys, &rows, &mut matches, &mut found)?;
+    table.probe(
+        hashes,
+        keys,
+        &mut Matches::new(&mut found_words, &mut matches)?,
+    )?;
     Ok((offsets, found_words, matches))
 }
 
@@ -745,6 +747,7 @@ fn the_entry_points_round_trip() -> Result<()> {
             "the last record lies in the third chunk"
         );
         let two = [key_copy(&key), key_copy(&key)];
+        ptr::write_bytes(found.bits, 0, 2);
         let code = tess_table_probe(
             table.ptr(),
             hashes.as_ptr(),
@@ -757,6 +760,7 @@ fn the_entry_points_round_trip() -> Result<()> {
         );
         assert_eq!(code, invalid);
         assert!(status.message().contains("keys"), "{}", status.message());
+        assert_eq!(found_words, [0, 0], "a probe refused leaves its result");
         let odd = TableKey {
             kind: 3,
             column: &raw const column,
@@ -3508,7 +3512,10 @@ fn the_filter_entry_points_size_fill_and_probe() -> Result<()> {
                 &raw mut status,
             ) {
                 Code::Ok => Ok(found_bits[0]),
-                code => Err(code),
+                code => {
+                    assert_eq!(found_bits, [0], "a probe refused leaves its result");
+                    Err(code)
+                }
             }
         };
         // From the table, by adding rows, by adding them atomically.
@@ -3571,7 +3578,11 @@ fn the_filter_entry_points_size_fill_and_probe() -> Result<()> {
             (code, found_bits[0])
         };
         assert!(!ready(&mut shared));
-        assert_eq!(shared_probe(&mut shared).0, Code::InvalidArgument);
+        assert_eq!(
+            shared_probe(&mut shared),
+            (Code::InvalidArgument, 0),
+            "a probe refused leaves its result"
+        );
         for expected in [true, false] {
             let mut built = !expected;
             let code = tess_table_try_build_bloom(

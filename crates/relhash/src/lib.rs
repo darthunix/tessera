@@ -91,7 +91,7 @@
 //!
 //! ```
 //! use anyhow::Result;
-//! use relhash::{Batch, KeySource, OwnedTable, RowMask, RowMaskView, TableConfig, ones};
+//! use relhash::{Batch, KeySource, Matches, OwnedTable, RowMask, TableConfig, ones};
 //!
 //! // The caller hands keys over a word of 64 rows at a time: here one key
 //! // of int4 values with no NULL.
@@ -123,21 +123,18 @@
 //! table.insert(Some(&payload), &mut batch)?;
 //! assert_eq!(pending, [0], "every row found room");
 //!
-//! // Probe rows 0 and 1: the first row's key has two records, the second
-//! // row's one.
+//! // Look up rows 0 and 1 of the three.
 //! let table = table.table()?;
-//! let rows = RowMaskView::try_new(3, &[1 << 0 | 1 << 1])?;
-//! let mut hits = [0];
-//! let mut matches = [0; 3];
-//! let mut found = RowMask::try_new(3, &mut hits)?;
-//! table.probe(&hashes, &keys, &rows, &mut matches, &mut found)?;
-//! assert_eq!(found.as_view().selected_rows().collect::<Vec<_>>(), [0, 1]);
-//! assert_eq!(table.record(matches[0])?.payload, 3u64.to_ne_bytes());
-//! // Only row 0 has a record after its first.
-//! let mut more = RowMask::try_new(3, &mut hits)?;
-//! table.next_match(&mut matches, &rows, &mut more)?;
-//! assert_eq!(more.as_view().selected_rows().collect::<Vec<_>>(), [0]);
-//! assert_eq!(table.record(matches[0])?.payload, 1u64.to_ne_bytes());
+//! let mut rows = [1 << 0 | 1 << 1];
+//! let mut refs = [0; 3];
+//! let mut matches = Matches::new(&mut rows, &mut refs)?;
+//! // Both find a record: the key of row 0 has two, that of row 1 one.
+//! assert_eq!(table.probe(&hashes, &keys, &mut matches)?, 2);
+//! assert_eq!(table.record(matches.refs()[0])?.payload, 3u64.to_ne_bytes());
+//! // Only row 0 has a next record of its key.
+//! assert_eq!(table.next_match(&mut matches)?, 1);
+//! assert_eq!(matches.rows().selected_rows().collect::<Vec<_>>(), [0]);
+//! assert_eq!(table.record(matches.refs()[0])?.payload, 1u64.to_ne_bytes());
 //! # Ok::<(), anyhow::Error>(())
 //! ```
 
