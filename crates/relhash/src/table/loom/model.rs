@@ -1,7 +1,7 @@
 //! The model table, which the loom models of the kernels share, and the
 //! steps of the table's own models over the memory of [`super::memory`].
 
-use crate::{RowMask, RowMaskView};
+use crate::RowMask;
 use anyhow::Result;
 
 use super::memory::{HEADS, LoomRegion};
@@ -127,20 +127,10 @@ pub(super) fn probe(region: &LoomRegion, layout: &Layout, keys: &[i32]) -> Resul
     let nrows = keys.len();
     let hashes = vec![HASH; nrows];
     let columns = IntKeys(keys);
-    let all = [(1u64 << nrows) - 1];
-    let rows = RowMaskView::try_new(nrows, &all)?;
+    let mut found_bits = [(1u64 << nrows) - 1];
     let mut matches = vec![0; nrows];
-    let mut found_bits = [0];
     let mut found = RowMask::try_new(nrows, &mut found_bits)?;
-    batch::probe(
-        region,
-        layout,
-        &hashes,
-        &columns,
-        &rows,
-        &mut matches,
-        &mut found,
-    )?;
+    batch::probe(region, layout, &hashes, &columns, &mut found, &mut matches)?;
     Ok((0..nrows)
         .map(|row| {
             if found_bits[0] >> row & 1 == 1 {

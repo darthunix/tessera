@@ -120,7 +120,7 @@ commit of sections 2 and 3 is checked by `make rust-check` and by
       the format's magic `RELHASH\0`; `BITS_PER_RECORD` closed. Check:
       `make rust-check`; machine code the same but where a commit
       names its change; `cargo public-api -p relhash`
-- [ ] 3.5 Make a lookup one value, `Matches`: the rows still in it, a
+- [x] 3.5 Make a lookup one value, `Matches`: the rows still in it, a
       mask the calls narrow in place, and each row's reference. The
       probe, the next match, the next in a group and the Bloom filter's
       probes narrow its rows and return how many are left; the gathers
@@ -129,7 +129,14 @@ commit of sections 2 and 3 is checked by `make rust-check` and by
       `make rust-check`; `make installcheck`; machine code, every loop
       that changes with its reason; the maintainer's run of counters on
       `table_int32` and `table_large`; `cargo ab measure` of `join`
-- [ ] 3.6 Replace the crate's text errors by errors of two kinds of at
+- [ ] 3.6 Let the C entry points of the probe, the next match, the
+      next in a group and the Bloom filter's probes narrow a mask in
+      place: `found` may be `rows` itself, and then nothing is copied.
+      The nodes use it where they copy a mask before such a call: the
+      steps over a key's records, the filter before the probe. The
+      hash-table spec says so of each call. Check: `make installcheck`;
+      `cargo ab measure` of `join`, `dup` among its cases
+- [ ] 3.7 Replace the crate's text errors by errors of two kinds of at
       most 8 bytes, with a compile-time assertion of the size; the call
       site of a reference's check chooses the kind; the check of a
       header that its fast and full forms judge apart becomes a debug
@@ -138,12 +145,12 @@ commit of sections 2 and 3 is checked by `make rust-check` and by
       `make installcheck`; machine code; the maintainer's run of
       counters on `table_int32`, `table_large` and the aggregate
       programs
-- [ ] 3.7 Move the table's tests into the crate, over a source of keys
+- [ ] 3.8 Move the table's tests into the crate, over a source of keys
       of the crate's own, and take the hooks for tests out of the
       public API: `OwnedTable::index_words`, `chunk_words`,
       `add_chunk_copy`, `insert_grouped` and `chunk_set`. Check:
       `cargo test -p relhash`; `cargo public-api -p relhash`
-- [ ] 3.8 Set `publish = true` for the crate and refuse a target whose
+- [ ] 3.9 Set `publish = true` for the crate and refuse a target whose
       pointers are not 64 bits wide with `compile_error!`; add to CI a
       build for a 32-bit target that must fail, the crate's tests alone,
       a build without `alloc`, a dry run of `cargo publish`, and a

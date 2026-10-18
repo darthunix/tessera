@@ -777,7 +777,7 @@ before any change.
 - **Verified by:**
   `crates/tessera-kernels/tests/table.rs::a_filter_lets_every_key_through_and_few_others`;
   `crates/tessera-kernels/tests/table.rs::a_null_group_key_and_int8_keys_pass_their_filter`;
-  `crates/tessera-kernels/tests/table.rs::a_probe_writes_the_whole_result`;
+  `crates/tessera-kernels/tests/table.rs::a_probe_narrows_its_rows_in_place`;
   `crates/tessera-capi/tests/table.rs::the_filter_entry_points_size_fill_and_probe`
 
 #### Scenario: A filter of the wrong size is refused

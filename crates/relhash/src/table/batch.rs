@@ -73,6 +73,117 @@ impl<'b, 'm, K: KeySource + ?Sized> Batch<'b, 'm, K> {
     }
 }
 
+/// A lookup of a batch's rows in the table: which rows are still in it,
+/// and which record each of them has reached.
+///
+/// It holds two arrays of the caller's, each with a place for every row
+/// of the batch:
+///
+/// - `rows`, a mask, a bit per row: the rows still in the lookup. A call
+///   clears the bit of each row it finds nothing for, so the mask only
+///   shrinks.
+/// - `refs`: for each row in the mask, the reference of its record, which
+///   [`Table::record`](crate::Table::record) reads. A row that leaves the
+///   mask keeps the last reference it had.
+///
+/// A probe starts a lookup at each row's first record with the row's
+/// keys. A next match, or a next in a group, moves each row on to the
+/// next record with the same keys. The gathers read the payloads of the
+/// records of the rows in the mask. A walk over every record of a batch
+/// of three rows, whose keys have three records, one and two:
+///
+/// ```text
+///                 rows        refs
+///   probe         {0, 1, 2}   [a1, b1, c1]   each row's first record
+///   next match    {0, 2}      [a2, b1, c2]   row 1 had one record
+///   next match    {0}         [a3, b1, c2]   row 2 had two
+///   next match    {}          [a3, b1, c2]   no row has another
+/// ```
+///
+/// The mask and `refs` must have the same rows. That is checked once,
+/// when a lookup is made, and not again by each call.
+#[derive(Debug)]
+pub struct Matches<'b> {
+    pub(super) rows: RowMask<'b>,
+    pub(super) refs: &'b mut [u32],
+}
+
+impl<'b> Matches<'b> {
+    /// A lookup of the rows set in `rows`, a word for each 64 of the
+    /// `refs.len()` rows, each with its slot in `refs`.
+    #[inline]
+    pub fn new(rows: &'b mut [u64], refs: &'b mut [u32]) -> Result<Self> {
+        Self::from_mask(RowMask::try_new(refs.len(), rows)?, refs)
+    }
+
+    /// A lookup of the rows of `rows`, a mask of `refs.len()` rows.
+    #[inline]
+    pub fn from_mask(rows: RowMask<'b>, refs: &'b mut [u32]) -> Result<Self> {
+        check_rows(refs.len(), &[rows.as_view().nrows()], "table")?;
+        Ok(Self { rows, refs })
+    }
+
+    /// The rows still in the lookup.
+    #[inline]
+    pub fn rows(&self) -> RowMaskView<'_> {
+        self.rows.as_view()
+    }
+
+    /// The rows still in the lookup, to narrow before a call, as a
+    /// filter's probe does.
+    #[inline]
+    pub fn rows_mut(&mut self) -> &mut RowMask<'b> {
+        &mut self.rows
+    }
+
+    /// The reference of each row's record, at its row.
+    #[inline]
+    pub fn refs(&self) -> &[u32] {
+        self.refs
+    }
+}
+
+/// The rows of a lookup and their references, to read: a [`Matches`] seen
+/// by the gathers, or rows and references that come from elsewhere, such
+/// as the items of a sort.
+#[derive(Clone, Copy, Debug)]
+pub struct MatchesView<'a> {
+    pub(super) rows: RowMaskView<'a>,
+    pub(super) refs: &'a [u32],
+}
+
+impl<'a> MatchesView<'a> {
+    /// The rows of `rows`, a mask of `refs.len()` rows, each with its
+    /// record's reference at its row in `refs`.
+    #[inline]
+    pub fn new(rows: RowMaskView<'a>, refs: &'a [u32]) -> Result<Self> {
+        check_rows(refs.len(), &[rows.nrows()], "table")?;
+        Ok(Self { rows, refs })
+    }
+
+    /// The rows.
+    #[inline]
+    pub fn rows(&self) -> RowMaskView<'a> {
+        self.rows
+    }
+
+    /// The reference of each row's record, at its row.
+    #[inline]
+    pub fn refs(&self) -> &'a [u32] {
+        self.refs
+    }
+}
+
+impl<'a> From<&'a Matches<'_>> for MatchesView<'a> {
+    #[inline]
+    fn from(matches: &'a Matches<'_>) -> Self {
+        Self {
+            rows: matches.rows.as_view(),
+            refs: matches.refs,
+        }
+    }
+}
+
 /// Reject a batch whose keys or buffers do not match the table and the
 /// mask, before anything is read or changed.
 pub(super) fn check<K: KeySource + ?Sized>(
@@ -612,52 +723,57 @@ pub(super) fn link_counting<R: Region, const DUPLICATES: bool>(
 }
 
 /// Find the first record with the hash and keys of each row of `rows`:
-/// `matches[row]` gets its offset and `found` the rows that have one.
+/// `matches[row]` gets its offset, and the rows without one leave
+/// `rows`; the count of rows left is returned.
 pub(super) fn probe<R: Region, K: KeySource + ?Sized>(
     region: &R,
     layout: &Layout,
     hashes: &[u32],
     keys: &K,
-    rows: &RowMaskView<'_>,
+    rows: &mut RowMask<'_>,
     matches: &mut [u32],
-    found: &mut RowMask<'_>,
-) -> Result<()> {
-    let nrows = rows.nrows();
+) -> Result<usize> {
+    let nrows = rows.as_view().nrows();
     check(layout, keys, nrows, hashes.len(), matches.len())?;
-    check_rows(nrows, &[found.as_view().nrows()], "table")?;
     shaped!(
         layout.nkeys,
         0,
-        probe_rows(region, layout, hashes, keys, rows, matches, found)
+        probe_rows(region, layout, hashes, keys, rows, matches)
     )
 }
 
 /// The rows of [`probe`] for a table of `N` keys, 0 when it is not one of
 /// the specialized counts; `T` is unused.
+// The loop goes by index: an iterator's pointer, kept on the stack over a
+// word's calls, was read back just before the next word's load.
+#[allow(clippy::needless_range_loop)]
 #[inline(never)]
 fn probe_rows<R: Region, K: KeySource + ?Sized, const N: usize, const T: usize, const L: usize>(
     region: &R,
     layout: &Layout,
     hashes: &[u32],
     keys: &K,
-    rows: &RowMaskView<'_>,
+    rows: &mut RowMask<'_>,
     matches: &mut [u32],
-    found: &mut RowMask<'_>,
-) -> Result<()> {
+) -> Result<usize> {
     // Made here, not passed in, so that its fields stay in registers.
     let mut access = Access::new(region, layout);
-    let nrows = rows.nrows();
+    let nrows = rows.as_view().nrows();
     let mut buffer = slot_buffer::<L>();
     let mut word_keys = WordKeys::new(&mut buffer, access.nkeys());
     let mut lanes = Lanes::new();
-    for index in 0..nrows.div_ceil(64) {
-        let selected = rows.word(index);
-        let mut hits = 0;
+    let mut left = 0;
+    let words = rows.words_mut();
+    for index in 0..words.len() {
+        let selected = words[index];
+        // A word of no rows has nothing to look up and stays 0. Each
+        // branch writes its own word: one write after both kept the
+        // word's address on the stack for every word, an empty one too.
         if selected.count_ones() >= VERTICAL_MIN_ROWS {
             word_keys.load(keys, index, selected)?;
             let base = index * 64;
             let end = nrows.min(base + 64);
-            hits = probe_word::<R, N>(
+            let hits = probe_word::<R, N>(
                 &mut access,
                 &word_keys,
                 &hashes[base..end],
@@ -665,10 +781,13 @@ fn probe_rows<R: Region, K: KeySource + ?Sized, const N: usize, const T: usize, 
                 &mut matches[base..end],
                 &mut lanes,
             )?;
+            debug_assert_eq!(hits & !selected, 0, "a probe keeps only rows it looked up");
+            words[index] = hits;
+            left += hits.count_ones() as usize;
         } else if selected != 0 {
             word_keys.load(keys, index, selected)?;
-            let bits = selected;
-            for bit in ones(bits) {
+            let mut hits = 0;
+            for bit in ones(selected) {
                 let row = index * 64 + bit;
                 let hash = hashes[row];
                 let head = access.head(hash);
@@ -682,27 +801,28 @@ fn probe_rows<R: Region, K: KeySource + ?Sized, const N: usize, const T: usize, 
                     hits |= 1 << bit;
                 }
             }
+            words[index] = hits;
+            left += hits.count_ones() as usize;
         }
-        found.set_word(index, hits)?;
     }
-    Ok(())
+    Ok(left)
 }
 
 /// For each row of `rows`, replace `offsets[row]` by the record after it
-/// in its chain with the same hash and keys; `found` gets the rows that
-/// have one, and the others keep their offset.
+/// in its chain with the same hash and keys; the rows without one leave
+/// `rows` and keep their offset. The count of rows left is returned.
 pub(super) fn next_match<R: Region>(
     region: &R,
     layout: &Layout,
     offsets: &mut [u32],
-    rows: &RowMaskView<'_>,
-    found: &mut RowMask<'_>,
-) -> Result<()> {
-    let nrows = rows.nrows();
-    check_rows(nrows, &[offsets.len(), found.as_view().nrows()], "table")?;
+    rows: &mut RowMask<'_>,
+) -> Result<usize> {
+    let nrows = rows.as_view().nrows();
+    check_rows(nrows, &[offsets.len()], "table")?;
     let mut access = Access::new(region, layout);
-    for index in 0..nrows.div_ceil(64) {
-        let bits = rows.word(index);
+    let mut left = 0;
+    for (index, word) in rows.words_mut().iter_mut().enumerate() {
+        let bits = *word;
         let mut hits = 0;
         for bit in ones(bits) {
             let row = index * 64 + bit;
@@ -718,9 +838,10 @@ pub(super) fn next_match<R: Region>(
                 hits |= 1 << bit;
             }
         }
-        found.set_word(index, hits)?;
+        *word = hits;
+        left += hits.count_ones() as usize;
     }
-    Ok(())
+    Ok(left)
 }
 
 /// For each row of `rows`, the word at byte `at` of the payload of the
@@ -852,20 +973,20 @@ pub(super) fn gather_words<R: Region>(
 /// For each row of `rows`, the record right after `offsets[row]` in its
 /// chain when it has the same hash, null bits and keys: the next record of
 /// the key in a table built by grouped insertion, where they lie next to
-/// each other. `found` gets the rows that have one, and the others keep
-/// their offset.
+/// each other. The rows without one leave `rows` and keep their offset;
+/// the count of rows left is returned.
 pub(super) fn next_in_group<R: Region>(
     region: &R,
     layout: &Layout,
     offsets: &mut [u32],
-    rows: &RowMaskView<'_>,
-    found: &mut RowMask<'_>,
-) -> Result<()> {
-    let nrows = rows.nrows();
-    check_rows(nrows, &[offsets.len(), found.as_view().nrows()], "table")?;
+    rows: &mut RowMask<'_>,
+) -> Result<usize> {
+    let nrows = rows.as_view().nrows();
+    check_rows(nrows, &[offsets.len()], "table")?;
     let mut access = Access::new(region, layout);
-    for index in 0..nrows.div_ceil(64) {
-        let bits = rows.word(index);
+    let mut left = 0;
+    for (index, word) in rows.words_mut().iter_mut().enumerate() {
+        let bits = *word;
         let mut hits = 0;
         for bit in ones(bits) {
             let row = index * 64 + bit;
@@ -883,9 +1004,10 @@ pub(super) fn next_in_group<R: Region>(
                 hits |= 1 << bit;
             }
         }
-        found.set_word(index, hits)?;
+        *word = hits;
+        left += hits.count_ones() as usize;
     }
-    Ok(())
+    Ok(left)
 }
 
 /// For each row of `rows`, key `key` of the record at `offsets[row]` into

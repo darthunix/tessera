@@ -100,10 +100,9 @@ fn one_of_four_threads_builds_a_shared_filter_every_key_passes() {
     let mut words = vec![0; bloom::shared_words_for(count).unwrap()];
     let filter = bloom::SharedFilter::from_mut(&mut words).unwrap();
     filter.init();
-    let rows = RowMaskView::try_new(count as usize, &all_rows).unwrap();
-    let mut found_words = [0; 4];
+    let mut found_words = all_rows.clone();
     let mut found = RowMask::try_new(count as usize, &mut found_words).unwrap();
-    assert!(bloom::probe_shared(&filter, &hashes, &rows, &mut found).is_err());
+    assert!(bloom::probe_shared(&filter, &hashes, &mut found).is_err());
     let built: usize = std::thread::scope(|scope| {
         let threads: Vec<_> = (0..4)
             .map(|_| {
@@ -113,10 +112,11 @@ fn one_of_four_threads_builds_a_shared_filter_every_key_passes() {
                     while !filter.ready() {
                         std::thread::yield_now();
                     }
-                    let mut found_words = [0; 4];
+                    let mut found_words = all_rows.clone();
                     let mut found = RowMask::try_new(count as usize, &mut found_words).unwrap();
-                    bloom::probe_shared(&filter, &hashes, &rows, &mut found).unwrap();
-                    assert_eq!(found_words, all_rows.as_slice(), "a key was rejected");
+                    let left = bloom::probe_shared(&filter, &hashes, &mut found).unwrap();
+                    assert_eq!(left, count as usize, "a key was rejected");
+                    assert_eq!(found_words, all_rows, "a key was rejected");
                     usize::from(built)
                 })
             })
