@@ -19,8 +19,8 @@ use tessera_kernels::int32::{self, NullKeys, hash_combine, murmurhash32};
 use tessera_kernels::ops::ArithmeticError;
 use tessera_kernels::table::{
     Batch, CHUNK_HEADER, Cursor, FORMAT_VERSION, HELD, KeySource, MAX_CHUNK_LEN, MAX_KEYS, Marks,
-    OwnedTable, Table, TableConfig, UNIT_BITS, bloom, index_size, mark, mark_words, record_bytes,
-    scan_unmarked,
+    Matches, MatchesView, OwnedTable, Table, TableConfig, UNIT_BITS, bloom, index_size, mark,
+    mark_words, record_bytes, scan_unmarked,
 };
 use tessera_testing::{edge, flags, integer, property, values, words};
 
@@ -369,13 +369,13 @@ fn probe_all<K: KeySource + ?Sized>(
     keys: &K,
 ) -> Result<(Vec<usize>, Vec<u32>)> {
     let nrows = hashes.len();
-    let rows_words = all_rows(nrows);
-    let rows = RowMaskView::try_new(nrows, &rows_words)?;
-    let mut found_words = vec![0; nrows.div_ceil(64)];
-    let mut found = RowMask::try_new(nrows, &mut found_words)?;
-    let mut matches = vec![0; nrows];
-    table.probe(hashes, keys, &rows, &mut matches, &mut found)?;
-    Ok((rows_of(&found.as_view()), matches))
+    let mut rows = all_rows(nrows);
+    let mut refs = vec![0; nrows];
+    let mut matches = Matches::new(&mut rows, &mut refs)?;
+    let left = table.probe(hashes, keys, &mut matches)?;
+    let found = rows_of(&matches.rows());
+    assert_eq!(left, found.len(), "the call counts the rows it keeps");
+    Ok((found, refs))
 }
 
 #[test]
@@ -425,19 +425,17 @@ fn inserted_rows_are_found_and_absent_keys_are_not() -> Result<()> {
         .iter()
         .map(|word| word & 0x9249_2492_4924_9249)
         .collect();
-    let rows = RowMaskView::try_new(200, &every_third)?;
-    let mut found_words = all_rows(200);
-    let mut found = RowMask::try_new(200, &mut found_words)?;
-    let mut matches = vec![0; 200];
-    assert_eq!(found.as_view().selected_count(), 200);
-    table.probe(&hashes, &KeyColumns(&keys), &rows, &mut matches, &mut found)?;
+    let looked_up = rows_of(&RowMaskView::try_new(200, &every_third)?);
+    let mut rows = every_third.clone();
+    let mut refs = vec![0; 200];
+    let mut matches = Matches::new(&mut rows, &mut refs)?;
     assert_eq!(
-        rows_of(&found.as_view()),
-        rows_of(&rows),
-        "the result is rewritten whole"
+        table.probe(&hashes, &KeyColumns(&keys), &mut matches)?,
+        looked_up.len()
     );
-    for row in rows_of(&rows) {
-        assert_eq!(matches[row], offsets[row]);
+    assert_eq!(rows, every_third, "the rows not looked up stay out");
+    for row in looked_up {
+        assert_eq!(refs[row], offsets[row]);
     }
     Ok(())
 }
@@ -456,20 +454,12 @@ fn equal_keys_chain_through_next_match() -> Result<()> {
     assert_eq!(found.len(), 100);
     let mut chains: Vec<Vec<u32>> = (0..10).map(|key| vec![matches[key]]).collect();
     let mut current = matches[..10].to_vec();
-    let mut rows_words = all_rows(10);
-    loop {
-        let rows = RowMaskView::try_new(10, &rows_words)?;
-        let mut more_words = [0];
-        let mut more = RowMask::try_new(10, &mut more_words)?;
-        table.next_match(&mut current, &rows, &mut more)?;
-        let rows = rows_of(&more.as_view());
-        if rows.is_empty() {
-            break;
+    let mut rows = all_rows(10);
+    let mut more = Matches::new(&mut rows, &mut current)?;
+    while table.next_match(&mut more)? > 0 {
+        for key in more.rows().selected_rows() {
+            chains[key].push(more.refs()[key]);
         }
-        for &key in &rows {
-            chains[key].push(current[key]);
-        }
-        rows_words = vec![more_words[0]];
     }
     for (key, chain) in chains.iter().enumerate() {
         assert_eq!(chain.len(), 10, "key {key} has ten records");
@@ -525,11 +515,15 @@ fn a_null_key_groups_apart_from_the_value_it_hashes_like() -> Result<()> {
     );
     let null = table.record(matches[1])?;
     assert_eq!((null.null_bits, null.keys), (1, &[0][..]));
-    let mut more_words = [0];
-    let mut more = RowMask::try_new(2, &mut more_words)?;
+    let mut more_words = [0b11];
     let mut next = matches.clone();
-    table.next_match(&mut next, &rows, &mut more)?;
-    assert_eq!(more_words, [0], "neither has a second record");
+    let mut more = Matches::new(&mut more_words, &mut next)?;
+    assert_eq!(
+        table.next_match(&mut more)?,
+        0,
+        "neither has a second record"
+    );
+    assert_eq!(more_words, [0]);
     assert_eq!(next, matches, "references without a next record stay");
 
     let mut rejected_words = [0b11];
@@ -899,50 +893,23 @@ fn dimension_errors_come_before_any_change() -> Result<()> {
         );
         assert_eq!(pending.as_view().selected_count(), 70);
         assert_eq!(shared.stats().records, 0);
-        let mut found_words = vec![0; 2];
-        let mut found = RowMask::try_new(70, &mut found_words)?;
+        let mut found_words = rows_words.clone();
         let mut matches = vec![0; 70];
+        let mut found = Matches::new(&mut found_words, &mut matches)?;
         assert!(
             shared
-                .probe(
-                    &hashes,
-                    &KeyColumns(&one_key),
-                    &rows,
-                    &mut matches,
-                    &mut found
-                )
+                .probe(&hashes, &KeyColumns(&one_key), &mut found)
                 .is_err()
         );
         assert!(
             shared
-                .probe(
-                    &hashes,
-                    &KeyColumns(&two_keys),
-                    &rows,
-                    &mut matches[..69],
-                    &mut found
-                )
+                .probe(&hashes[..69], &KeyColumns(&two_keys), &mut found)
                 .is_err()
         );
-        let mut short_words = vec![0; 2];
-        let mut short = RowMask::try_new(69, &mut short_words)?;
-        assert!(
-            shared
-                .probe(
-                    &hashes,
-                    &KeyColumns(&two_keys),
-                    &rows,
-                    &mut matches,
-                    &mut short
-                )
-                .is_err()
-        );
-        assert!(
-            shared
-                .next_match(&mut offsets[..69], &rows, &mut found)
-                .is_err()
-        );
-        assert!(shared.next_match(&mut offsets, &rows, &mut short).is_err());
+        // A mask and references of other lengths are refused as the
+        // matches are made.
+        assert!(Matches::new(&mut found_words, &mut offsets[..69]).is_err());
+        assert!(MatchesView::new(rows, &offsets[..69]).is_err());
     }
     assert_eq!(
         table.chunk_words(chunk)[0],
@@ -966,15 +933,11 @@ fn table_probe_one(
     hashes: &[u32],
     keys: &[ColumnView<'_, i32>],
 ) -> Result<bool> {
-    let nrows = hashes.len();
     let table = table.table()?;
-    let rows_words = [1];
-    let rows = RowMaskView::try_new(nrows, &rows_words)?;
-    let mut found_words = [0];
-    let mut found = RowMask::try_new(nrows, &mut found_words)?;
-    let mut matches = vec![0; nrows];
-    table.probe(hashes, &KeyColumns(keys), &rows, &mut matches, &mut found)?;
-    Ok(found_words[0] == 1)
+    let mut rows = [1];
+    let mut refs = vec![0; hashes.len()];
+    let mut matches = Matches::new(&mut rows, &mut refs)?;
+    Ok(table.probe(hashes, &KeyColumns(keys), &mut matches)? == 1)
 }
 
 #[test]
@@ -1060,10 +1023,16 @@ fn reference_zero_names_no_record() -> Result<()> {
     let table = table.table()?;
     assert!(table.record(0).is_err());
     let rows = RowMaskView::try_new(1, &[1])?;
-    assert!(table.gather(&[0], &rows, 0, &mut [0]).is_err());
-    let mut found_words = [0];
-    let mut found = RowMask::try_new(1, &mut found_words)?;
-    assert!(table.next_match(&mut [0], &rows, &mut found).is_err());
+    assert!(
+        table
+            .gather(MatchesView::new(rows, &[0])?, 0, &mut [0])
+            .is_err()
+    );
+    assert!(
+        table
+            .next_match(&mut Matches::new(&mut [1], &mut [0])?)
+            .is_err()
+    );
     Ok(())
 }
 
@@ -1617,20 +1586,12 @@ fn regrowing_keeps_records_and_their_references() -> Result<()> {
     }
     let mut current = matches[..30].to_vec();
     let mut chain_lengths = vec![1; 30];
-    let mut rows_words = all_rows(30);
-    loop {
-        let rows = RowMaskView::try_new(30, &rows_words)?;
-        let mut more_words = [0];
-        let mut more = RowMask::try_new(30, &mut more_words)?;
-        shared.next_match(&mut current, &rows, &mut more)?;
-        let hits = rows_of(&more.as_view());
-        if hits.is_empty() {
-            break;
-        }
-        for key in hits {
+    let mut rows = all_rows(30);
+    let mut more = Matches::new(&mut rows, &mut current)?;
+    while shared.next_match(&mut more)? > 0 {
+        for key in more.rows().selected_rows() {
             chain_lengths[key] += 1;
         }
-        rows_words = vec![more_words[0]];
     }
     assert_eq!(
         chain_lengths,
@@ -1745,13 +1706,14 @@ fn probe_rows(
     keys: &[ColumnView<'_, i32>],
     rows: &[u64],
 ) -> Result<(Vec<u64>, Vec<u32>)> {
-    let nrows = hashes.len();
-    let view = RowMaskView::try_new(nrows, rows)?;
-    let mut found_words = vec![0; nrows.div_ceil(64)];
-    let mut found = RowMask::try_new(nrows, &mut found_words)?;
-    let mut matches = vec![0; nrows];
-    table.probe(hashes, &KeyColumns(keys), &view, &mut matches, &mut found)?;
-    Ok((found_words, matches))
+    let mut found = rows.to_vec();
+    let mut refs = vec![0; hashes.len()];
+    table.probe(
+        hashes,
+        &KeyColumns(keys),
+        &mut Matches::new(&mut found, &mut refs)?,
+    )?;
+    Ok((found, refs))
 }
 
 #[test]
@@ -1844,12 +1806,17 @@ fn gather_reads_one_payload_word_of_each_selected_match() -> Result<()> {
         })
         .collect();
     let rows = RowMaskView::try_new(nrows, &selected)?;
+    let view = MatchesView::new(rows, &matches)?;
+    assert_eq!(
+        (view.rows().words().collect::<Vec<_>>(), view.refs()),
+        (selected.clone(), &matches[..])
+    );
     for (at, expected) in [
         (0, &(|row: u64| row * 10) as &dyn Fn(u64) -> u64),
         (8, &|row: u64| row + 1_000_000),
     ] {
         let mut out = vec![u64::MAX; nrows];
-        table.gather(&matches, &rows, at, &mut out)?;
+        table.gather(MatchesView::new(rows, &matches)?, at, &mut out)?;
         for (row, &value) in out.iter().enumerate() {
             let wanted = if row % 3 == 0 {
                 expected(row as u64)
@@ -1863,19 +1830,39 @@ fn gather_reads_one_payload_word_of_each_selected_match() -> Result<()> {
     // A word past the payload or not at a multiple of 8, short buffers and
     // a bad reference are errors.
     let mut out = vec![0; nrows];
-    assert!(table.gather(&matches, &rows, 9, &mut out).is_err());
-    assert!(table.gather(&matches, &rows, 4, &mut out).is_err());
     assert!(
         table
-            .gather_scattered(&matches, &rows, 4, &mut out)
+            .gather(MatchesView::new(rows, &matches)?, 9, &mut out)
             .is_err()
     );
-    assert!(table.gather(&matches, &rows, usize::MAX, &mut out).is_err());
-    assert!(table.gather(&matches[1..], &rows, 0, &mut out).is_err());
-    assert!(table.gather(&matches, &rows, 0, &mut out[1..]).is_err());
+    assert!(
+        table
+            .gather(MatchesView::new(rows, &matches)?, 4, &mut out)
+            .is_err()
+    );
+    assert!(
+        table
+            .gather_scattered(MatchesView::new(rows, &matches)?, 4, &mut out)
+            .is_err()
+    );
+    assert!(
+        table
+            .gather(MatchesView::new(rows, &matches)?, usize::MAX, &mut out)
+            .is_err()
+    );
+    assert!(MatchesView::new(rows, &matches[1..]).is_err());
+    assert!(
+        table
+            .gather(MatchesView::new(rows, &matches)?, 0, &mut out[1..])
+            .is_err()
+    );
     let mut inside = matches.clone();
     inside[0] += 1;
-    assert!(table.gather(&inside, &rows, 0, &mut out).is_err());
+    assert!(
+        table
+            .gather(MatchesView::new(rows, &inside)?, 0, &mut out)
+            .is_err()
+    );
     Ok(())
 }
 
@@ -1937,11 +1924,7 @@ fn grouped_records_of_a_key_lie_together() -> Result<()> {
             assert_eq!(values[row as usize], values[key]);
             seen[values[key] as usize] += 1;
             let mut offsets = [offset];
-            let rows = [1];
-            let mut next_words = [0];
-            let mut next = RowMask::try_new(1, &mut next_words)?;
-            table.next_in_group(&mut offsets, &RowMaskView::try_new(1, &rows)?, &mut next)?;
-            if next_words[0] == 0 {
+            if table.next_in_group(&mut Matches::new(&mut [1], &mut offsets)?)? == 0 {
                 break;
             }
             offset = offsets[0];
@@ -1979,20 +1962,10 @@ fn grouped_chains_span_chunks_and_survive_a_larger_index() -> Result<()> {
         let mut by_chain = vec![first];
         let mut records = 1;
         loop {
-            let rows = [1];
-            let view = RowMaskView::try_new(1, &rows)?;
-            let mut group_words = [0];
-            let mut chain_words = [0];
-            table.next_in_group(
-                &mut by_group,
-                &view,
-                &mut RowMask::try_new(1, &mut group_words)?,
-            )?;
-            table.next_match(
-                &mut by_chain,
-                &view,
-                &mut RowMask::try_new(1, &mut chain_words)?,
-            )?;
+            let mut group_words = [1];
+            let mut chain_words = [1];
+            table.next_in_group(&mut Matches::new(&mut group_words, &mut by_group)?)?;
+            table.next_match(&mut Matches::new(&mut chain_words, &mut by_chain)?)?;
             assert_eq!(
                 (group_words, by_group[0]),
                 (chain_words, by_chain[0]),
@@ -2121,10 +2094,15 @@ fn grouped_states_follow_a_row_by_row_model() -> Result<()> {
     let rows = RowMaskView::try_new(groups.len(), &all)?;
     let mut key_values = vec![0; groups.len()];
     let mut key_nulls = vec![false; groups.len()];
-    table.gather_key(&groups, &rows, 0, &mut key_values, &mut key_nulls)?;
+    table.gather_key(
+        MatchesView::new(rows, &groups)?,
+        0,
+        &mut key_values,
+        &mut key_nulls,
+    )?;
     let mut fields = [(); 6].map(|_| vec![0u64; groups.len()]);
     for (index, field) in fields.iter_mut().enumerate() {
-        table.gather(&groups, &rows, index * 8, field)?;
+        table.gather(MatchesView::new(rows, &groups)?, index * 8, field)?;
     }
     for group in 0..groups.len() {
         let key = (!key_nulls[group]).then_some(key_values[group] as i64 as i32);
@@ -2331,11 +2309,16 @@ fn sum_states_follow_a_row_by_row_model() -> Result<()> {
         let rows = RowMaskView::try_new(groups.len(), &all)?;
         let mut key_values = vec![0; groups.len()];
         let mut key_nulls = vec![false; groups.len()];
-        table.gather_key(&groups, &rows, 0, &mut key_values, &mut key_nulls)?;
+        table.gather_key(
+            MatchesView::new(rows, &groups)?,
+            0,
+            &mut key_values,
+            &mut key_nulls,
+        )?;
         for sum in 0..SUMS {
             let mut fields = [(); SumState::WORDS].map(|_| vec![0u64; groups.len()]);
             for (index, field) in fields.iter_mut().enumerate() {
-                table.gather(&groups, &rows, at(sum) + index * 8, field)?;
+                table.gather(MatchesView::new(rows, &groups)?, at(sum) + index * 8, field)?;
             }
             for group in 0..groups.len() {
                 let found = SumState::from_words(std::array::from_fn(|word| fields[word][group]));
@@ -2448,10 +2431,15 @@ fn extreme_states_follow_a_row_by_row_model() -> Result<()> {
         let rows = RowMaskView::try_new(groups.len(), &all)?;
         let mut key_values = vec![0; groups.len()];
         let mut key_nulls = vec![false; groups.len()];
-        table.gather_key(&groups, &rows, 0, &mut key_values, &mut key_nulls)?;
+        table.gather_key(
+            MatchesView::new(rows, &groups)?,
+            0,
+            &mut key_values,
+            &mut key_nulls,
+        )?;
         let mut fields = [(); 2].map(|_| vec![0u64; groups.len()]);
         for (index, field) in fields.iter_mut().enumerate() {
-            table.gather(&groups, &rows, at + index * 8, field)?;
+            table.gather(MatchesView::new(rows, &groups)?, at + index * 8, field)?;
         }
         let mut taken = 0;
         for group in 0..groups.len() {
@@ -2633,12 +2621,17 @@ fn partial_states_merge_as_the_rows_would() -> Result<()> {
         let rows = RowMaskView::try_new(groups.len(), &all)?;
         let mut key_values = vec![0; groups.len()];
         let mut key_nulls = vec![false; groups.len()];
-        table.gather_key(&groups, &rows, 0, &mut key_values, &mut key_nulls)?;
+        table.gather_key(
+            MatchesView::new(rows, &groups)?,
+            0,
+            &mut key_values,
+            &mut key_nulls,
+        )?;
         let mut matched_whole = 0;
         for sum in 0..SUMS {
             let mut fields = [(); SumState::WORDS].map(|_| vec![0u64; groups.len()]);
             for (index, field) in fields.iter_mut().enumerate() {
-                table.gather(&groups, &rows, at(sum) + index * 8, field)?;
+                table.gather(MatchesView::new(rows, &groups)?, at(sum) + index * 8, field)?;
             }
             for group in 0..groups.len() {
                 let found = SumState::from_words(std::array::from_fn(|word| fields[word][group]));
@@ -2745,7 +2738,12 @@ fn a_sum_past_the_bigint_range_fails_and_arguments_are_checked() -> Result<()> {
     // The int8 keys come back whole, a negative one too.
     let mut values = vec![0; 3];
     let mut nulls = vec![true; 3];
-    writer.gather_key(&offsets, &rows, 0, &mut values, &mut nulls)?;
+    writer.gather_key(
+        MatchesView::new(rows, &offsets)?,
+        0,
+        &mut values,
+        &mut nulls,
+    )?;
     assert_eq!(values, [(-5i64) as u64, (-5i64) as u64, 1 << 40]);
     assert_eq!(nulls, [false; 3]);
     // Words past the payload, a flag past a word, a key past the keys.
@@ -2758,7 +2756,12 @@ fn a_sum_past_the_bigint_range_fails_and_arguments_are_checked() -> Result<()> {
     assert!(accumulate::fold(&mut writer, &offsets, &rows, &big, Fold::Min, past).is_err());
     assert!(
         writer
-            .gather_key(&offsets, &rows, 1, &mut values, &mut nulls)
+            .gather_key(
+                MatchesView::new(rows, &offsets)?,
+                1,
+                &mut values,
+                &mut nulls
+            )
             .is_err()
     );
     assert!(accumulate::count_rows(&mut writer, &offsets[..2], &rows, 8).is_err());
@@ -2780,19 +2783,15 @@ fn filtered_table(count: usize) -> Result<(OwnedTable, Vec<u64>)> {
 }
 
 fn probe_filter(filter: &[u64], hashes: &[u32]) -> Result<usize> {
-    let rows_words = all_rows(hashes.len());
-    let rows = RowMaskView::try_new(hashes.len(), &rows_words)?;
-    let mut found_words = vec![0; hashes.len().div_ceil(64)];
-    bloom::probe(
+    let mut rows = all_rows(hashes.len());
+    let left = bloom::probe(
         filter,
         hashes,
-        &rows,
-        &mut RowMask::try_new(hashes.len(), &mut found_words)?,
+        &mut RowMask::try_new(hashes.len(), &mut rows)?,
     )?;
-    Ok(found_words
-        .iter()
-        .map(|word| word.count_ones() as usize)
-        .sum())
+    let kept: u32 = rows.iter().map(|word| word.count_ones()).sum();
+    assert_eq!(left, kept as usize, "the call counts the rows it keeps");
+    Ok(left)
 }
 
 #[test]
@@ -2854,28 +2853,25 @@ fn a_hash_sets_the_bits_the_rule_gives() -> Result<()> {
     Ok(())
 }
 
-/// A probe writes the whole result: the selected rows that pass, and no
-/// other row, whatever `found` held; rows added pass as a table's keys do.
+/// A probe narrows its rows in place: the rows not selected stay out, and
+/// rows added pass as a table's keys do.
 #[test]
-fn a_probe_writes_the_whole_result() -> Result<()> {
+fn a_probe_narrows_its_rows_in_place() -> Result<()> {
     let hashes: Vec<u32> = (0..100).map(hash_i32).collect();
     let mut filter = vec![0; bloom::words_for(100)?];
     let all = all_rows(100);
     bloom::add(&mut filter, &hashes, &RowMaskView::try_new(100, &all)?)?;
     let even: Vec<u64> = vec![0x5555_5555_5555_5555, 0x5_5555_5555];
-    // Every row set before the probe: the rows not selected must be cleared.
-    let mut found = all_rows(100);
-    bloom::probe(
-        &filter,
-        &hashes,
-        &RowMaskView::try_new(100, &even)?,
-        &mut RowMask::try_new(100, &mut found)?,
-    )?;
-    assert_eq!(found, even, "the rows not selected are clear");
+    let mut rows = even.clone();
+    assert_eq!(
+        bloom::probe(&filter, &hashes, &mut RowMask::try_new(100, &mut rows)?)?,
+        50
+    );
+    assert_eq!(rows, even, "the rows not selected stay out");
     Ok(())
 }
 
-/// Words that are not a power of two, and hashes or results of another
+/// Words that are not a power of two, and hashes or a mask of another
 /// row count, are refused by every call before it changes anything.
 #[test]
 fn a_filter_of_the_wrong_size_is_refused() -> Result<()> {
@@ -2891,31 +2887,16 @@ fn a_filter_of_the_wrong_size_is_refused() -> Result<()> {
             "add {nwords}"
         );
         let mut found = [9];
-        let result = bloom::probe(
-            &filter,
-            &hashes,
-            &rows,
-            &mut RowMask::try_new(4, &mut found)?,
-        );
+        let result = bloom::probe(&filter, &hashes, &mut RowMask::try_new(4, &mut found)?);
         assert!(result.is_err(), "probe {nwords}");
         assert_eq!((filter, found), (vec![7; nwords], [9]), "{nwords} words");
     }
     let mut filter = vec![7; 4];
     assert!(bloom::add(&mut filter, &hashes[..3], &rows).is_err());
     let mut found = [9];
-    let result = bloom::probe(
-        &filter,
-        &hashes,
-        &rows,
-        &mut RowMask::try_new(5, &mut found)?,
-    );
-    assert!(result.is_err(), "a result of another row count");
-    let result = bloom::probe(
-        &filter,
-        &hashes[..3],
-        &rows,
-        &mut RowMask::try_new(4, &mut found)?,
-    );
+    let result = bloom::probe(&filter, &hashes, &mut RowMask::try_new(5, &mut found)?);
+    assert!(result.is_err(), "a mask of another row count");
+    let result = bloom::probe(&filter, &hashes[..3], &mut RowMask::try_new(4, &mut found)?);
     assert!(result.is_err(), "hashes of another row count");
     assert_eq!((filter, found), (vec![7; 4], [9]));
     Ok(())
@@ -2965,18 +2946,8 @@ fn an_empty_table_rejects_everything_and_sizes_are_checked() -> Result<()> {
     assert_eq!(probe_filter(&filter, &hashes)?, 0);
     // Not a power of two, and hashes of another row count.
     assert!(probe_filter(&[0; 3], &hashes).is_err());
-    let rows_words = all_rows(4);
-    let rows = RowMaskView::try_new(4, &rows_words)?;
-    let mut found = [0];
-    assert!(
-        bloom::probe(
-            &filter,
-            &[1, 2],
-            &rows,
-            &mut RowMask::try_new(4, &mut found)?
-        )
-        .is_err()
-    );
+    let mut rows = all_rows(4);
+    assert!(bloom::probe(&filter, &[1, 2], &mut RowMask::try_new(4, &mut rows)?).is_err());
     assert!(bloom::words_for(u64::MAX).is_err());
     Ok(())
 }
@@ -3201,8 +3172,8 @@ fn a_scattered_gather_reads_what_a_gather_reads() -> Result<()> {
     for at in [0, 8] {
         let mut plain = vec![u64::MAX; ROWS];
         let mut scattered = vec![u64::MAX; ROWS];
-        shared.gather(&shuffled, &rows, at, &mut plain)?;
-        shared.gather_scattered(&shuffled, &rows, at, &mut scattered)?;
+        shared.gather(MatchesView::new(rows, &shuffled)?, at, &mut plain)?;
+        shared.gather_scattered(MatchesView::new(rows, &shuffled)?, at, &mut scattered)?;
         assert_eq!(plain, scattered, "word at {at}");
         for (row, &got) in scattered.iter().enumerate() {
             let expected = if row % 5 == 0 {
@@ -3218,34 +3189,46 @@ fn a_scattered_gather_reads_what_a_gather_reads() -> Result<()> {
     let mut out = vec![0u64; ROWS];
     assert!(
         shared
-            .gather_scattered(&shuffled, &rows, 16, &mut out)
+            .gather_scattered(MatchesView::new(rows, &shuffled)?, 16, &mut out)
             .is_err()
     );
     // Both words in one call read what a word at a time reads.
     let mut first = vec![u64::MAX; ROWS];
     let mut second = vec![u64::MAX; ROWS];
-    shared.gather_words(&shuffled, &rows, 0, &mut [&mut first, &mut second])?;
+    shared.gather_words(
+        MatchesView::new(rows, &shuffled)?,
+        0,
+        &mut [&mut first, &mut second],
+    )?;
     for (word, got) in [first, second].iter().enumerate() {
         let mut expected = vec![u64::MAX; ROWS];
-        shared.gather(&shuffled, &rows, 8 * word, &mut expected)?;
+        shared.gather(MatchesView::new(rows, &shuffled)?, 8 * word, &mut expected)?;
         assert_eq!(got, &expected, "word {word}");
     }
     let mut second = vec![u64::MAX; ROWS];
-    shared.gather_words(&shuffled, &rows, 1, &mut [&mut second])?;
+    shared.gather_words(MatchesView::new(rows, &shuffled)?, 1, &mut [&mut second])?;
     let mut expected = vec![u64::MAX; ROWS];
-    shared.gather(&shuffled, &rows, 8, &mut expected)?;
+    shared.gather(MatchesView::new(rows, &shuffled)?, 8, &mut expected)?;
     assert_eq!(second, expected);
     // No words, words past the payload, outputs of another row count.
     let (mut a, mut b, mut short) = (vec![0; ROWS], vec![0; ROWS], vec![0; ROWS - 1]);
-    assert!(shared.gather_words(&shuffled, &rows, 0, &mut []).is_err());
     assert!(
         shared
-            .gather_words(&shuffled, &rows, 1, &mut [&mut a, &mut b])
+            .gather_words(MatchesView::new(rows, &shuffled)?, 0, &mut [])
             .is_err()
     );
     assert!(
         shared
-            .gather_words(&shuffled, &rows, 0, &mut [&mut a, &mut short])
+            .gather_words(MatchesView::new(rows, &shuffled)?, 1, &mut [&mut a, &mut b])
+            .is_err()
+    );
+    assert!(
+        shared
+            .gather_words(
+                MatchesView::new(rows, &shuffled)?,
+                0,
+                &mut [&mut a, &mut short]
+            )
             .is_err()
     );
     Ok(())

@@ -17,7 +17,7 @@ use tessera_core::{ColumnReader, RowMask, RowMaskView};
 use tessera_kernels::accumulate;
 use tessera_kernels::column_keys::normalize_word;
 use tessera_kernels::int32::{self, NullKeys};
-use tessera_kernels::table::{Batch, KeySource, OwnedTable, TableConfig};
+use tessera_kernels::table::{Batch, KeySource, Matches, OwnedTable, TableConfig};
 
 use crate::reading::Input;
 use crate::support::{fixture::Fixture, runner::Runner};
@@ -107,11 +107,10 @@ pub fn insert_all<K: KeySource>(setup: &mut Setup, keys: &K) -> Result<()> {
 /// Probe every valid row with the given hashes.
 #[inline(never)]
 pub fn probe_all<K: KeySource>(setup: &mut Setup, keys: &K, hashes: &[u32]) -> Result<()> {
-    let nrows = setup.hashes.len();
     let table = setup.table.table()?;
-    let rows = RowMaskView::try_new(nrows, &setup.valid)?;
-    let mut found = RowMask::try_new(nrows, &mut setup.found)?;
-    table.probe(hashes, keys, &rows, &mut setup.matches, &mut found)
+    setup.found.copy_from_slice(&setup.valid);
+    let mut matches = Matches::new(&mut setup.found, &mut setup.matches)?;
+    table.probe(hashes, keys, &mut matches).map(drop)
 }
 
 /// Resolve every valid row to its record.

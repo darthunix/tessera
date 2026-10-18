@@ -27,7 +27,7 @@ use core::ops::Deref;
 use crate::{RowMask, RowMaskView};
 use anyhow::{Result, anyhow, ensure};
 
-pub use batch::Batch;
+pub use batch::{Batch, Matches, MatchesView};
 pub use chunks::{
     Appended, ChunkWriter, Chunks, MAX_PARTITIONS, Partitions, Split, chunk_used, init_chunk,
 };
@@ -244,115 +244,134 @@ impl<'a> Table<'a> {
     }
 
     /// Find the first record of its chain with the hash, null bits and
-    /// keys of each row of `rows`: `matches[row]` receives its reference
-    /// and `found` the rows that have one, as a mask this call produces.
-    /// The other records with the same keys follow through
-    /// [`Table::next_match`], or [`Table::next_in_group`] in a table linked
-    /// by [`TableMut::link_grouped`].
+    /// keys of each row of `matches`, whose reference goes to the row's
+    /// slot; the rows without one leave `matches`, and the count of rows
+    /// left is returned. The other records with the same keys follow
+    /// through [`Table::next_match`], or [`Table::next_in_group`] in a
+    /// table linked by [`TableMut::link_grouped`].
     pub fn probe<K: KeySource + ?Sized>(
         &self,
         hashes: &[u32],
         keys: &K,
-        rows: &RowMaskView<'_>,
-        matches: &mut [u32],
-        found: &mut RowMask<'_>,
-    ) -> Result<()> {
-        batch::probe(
-            &self.region,
-            &self.layout,
-            hashes,
-            keys,
-            rows,
-            matches,
-            found,
-        )
+        matches: &mut Matches<'_>,
+    ) -> Result<usize> {
+        let Matches { rows, refs } = matches;
+        batch::probe(&self.region, &self.layout, hashes, keys, rows, refs)
     }
 
-    /// For each row of `rows`, replace `refs[row]`, a record reference
-    /// from a probe or an earlier call, by the reference of the next record
-    /// in its chain with the same hash, null bits and keys; `found`
-    /// receives the rows that have one, and the others keep theirs.
-    pub fn next_match(
-        &self,
-        refs: &mut [u32],
-        rows: &RowMaskView<'_>,
-        found: &mut RowMask<'_>,
-    ) -> Result<()> {
-        batch::next_match(&self.region, &self.layout, refs, rows, found)
+    /// Move each row of `matches` to the next record of its chain with
+    /// the same hash, null bits and keys; the rows without one leave
+    /// `matches` and keep their reference. The count of rows left is
+    /// returned.
+    pub fn next_match(&self, matches: &mut Matches<'_>) -> Result<usize> {
+        let Matches { rows, refs } = matches;
+        batch::next_match(&self.region, &self.layout, refs, rows)
     }
 
-    /// For each row of `rows`, the word at byte `at` of the payload of the
-    /// record at `refs[row]` into `out[row]`, native-endian: one word of
-    /// a batch's matches per call, such as a Datum of the build row a join
-    /// keeps there. `at` must be a multiple of 8 and `at + 8` within the
-    /// payload; rows outside `rows` keep their values in `out`.
-    pub fn gather(
+    /// For each row of `matches`, the word at byte `at` of its record's
+    /// payload into `out[row]`, native-endian: one word of a batch's
+    /// matches per call, such as a Datum of the build row a join keeps
+    /// there. `at` must be a multiple of 8 and `at + 8` within the
+    /// payload; the other rows keep their values in `out`.
+    pub fn gather<'m>(
         &self,
-        refs: &[u32],
-        rows: &RowMaskView<'_>,
+        matches: impl Into<MatchesView<'m>>,
         at: usize,
         out: &mut [u64],
     ) -> Result<()> {
-        batch::gather::<_, false>(&self.region, &self.layout, refs, rows, at, out)
+        self.gather_of(matches.into(), at, out)
     }
 
     /// As [`Table::gather`], for records in no order, as a sort reads
     /// them back: those of a word of rows are prefetched before any is
     /// read. Records just probed are in the cache, where [`Table::gather`]
     /// is faster.
-    pub fn gather_scattered(
+    pub fn gather_scattered<'m>(
         &self,
-        refs: &[u32],
-        rows: &RowMaskView<'_>,
+        matches: impl Into<MatchesView<'m>>,
         at: usize,
         out: &mut [u64],
     ) -> Result<()> {
-        batch::gather::<_, true>(&self.region, &self.layout, refs, rows, at, out)
+        self.gather_scattered_of(matches.into(), at, out)
     }
 
-    /// For each row of `rows`, payload word `first + n` (in 8-byte units)
-    /// of the record at `refs[row]` into `out[n][row]`, native-endian,
-    /// for every `out[n]` of a row each, records in no order as
+    /// For each row of `matches`, payload word `first + n` (in 8-byte
+    /// units) of its record into `out[n][row]`, native-endian, for every
+    /// `out[n]` of a row each, records in no order as
     /// [`Table::gather_scattered`] reads them: one call for every column a
-    /// sort's batch serves, a record located once for all of them. Rows
-    /// outside `rows` keep their values.
-    pub fn gather_words(
+    /// sort's batch serves, a record located once for all of them. The
+    /// other rows keep their values.
+    pub fn gather_words<'m>(
         &self,
-        refs: &[u32],
-        rows: &RowMaskView<'_>,
+        matches: impl Into<MatchesView<'m>>,
         first: usize,
         out: &mut [&mut [u64]],
     ) -> Result<()> {
-        batch::gather_words(&self.region, &self.layout, refs, rows, first, out)
+        self.gather_words_of(matches.into(), first, out)
     }
 
-    /// For each row of `rows`, replace `refs[row]` by the record right
-    /// after it when that one has the same hash, null bits and keys, and
-    /// put the row in `found`; other rows keep theirs. In a table linked by
-    /// [`TableMut::link_grouped`] this is the next record of the key,
-    /// found in one step instead of a walk down the chain.
-    pub fn next_in_group(
-        &self,
-        refs: &mut [u32],
-        rows: &RowMaskView<'_>,
-        found: &mut RowMask<'_>,
-    ) -> Result<()> {
-        batch::next_in_group(&self.region, &self.layout, refs, rows, found)
+    /// Move each row of `matches` to the record right after its own when
+    /// that one has the same hash, null bits and keys; the rows without
+    /// one leave `matches`, and the count of rows left is returned. In a
+    /// table linked by [`TableMut::link_grouped`] this is the next record
+    /// of the key, found in one step instead of a walk down the chain.
+    pub fn next_in_group(&self, matches: &mut Matches<'_>) -> Result<usize> {
+        let Matches { rows, refs } = matches;
+        batch::next_in_group(&self.region, &self.layout, refs, rows)
     }
 
-    /// For each row of `rows`, key `key` of the record at `refs[row]`:
-    /// its slot's bits into `values[row]` (an int4 sign-extended, as its
-    /// Datum is, 0 for a NULL) and whether it is NULL into `nulls[row]`.
-    /// Rows outside `rows` keep their values.
-    pub fn gather_key(
+    /// For each row of `matches`, key `key` of its record: its slot's bits
+    /// into `values[row]` (an int4 sign-extended, as its Datum is, 0 for a
+    /// NULL) and whether it is NULL into `nulls[row]`. The other rows keep
+    /// their values.
+    pub fn gather_key<'m>(
         &self,
-        refs: &[u32],
-        rows: &RowMaskView<'_>,
+        matches: impl Into<MatchesView<'m>>,
         key: usize,
         values: &mut [u64],
         nulls: &mut [bool],
     ) -> Result<()> {
-        batch::gather_key(&self.region, &self.layout, refs, rows, key, values, nulls)
+        self.gather_key_of(matches.into(), key, values, nulls)
+    }
+
+    // The gathers' bodies take no type parameter, so that they are
+    // compiled here once, as before the gathers took `impl Into`, and not
+    // in each caller, where they were inlined into its loops.
+
+    fn gather_of(&self, matches: MatchesView<'_>, at: usize, out: &mut [u64]) -> Result<()> {
+        let MatchesView { rows, refs } = matches;
+        batch::gather::<_, false>(&self.region, &self.layout, refs, &rows, at, out)
+    }
+
+    fn gather_scattered_of(
+        &self,
+        matches: MatchesView<'_>,
+        at: usize,
+        out: &mut [u64],
+    ) -> Result<()> {
+        let MatchesView { rows, refs } = matches;
+        batch::gather::<_, true>(&self.region, &self.layout, refs, &rows, at, out)
+    }
+
+    fn gather_words_of(
+        &self,
+        matches: MatchesView<'_>,
+        first: usize,
+        out: &mut [&mut [u64]],
+    ) -> Result<()> {
+        let MatchesView { rows, refs } = matches;
+        batch::gather_words(&self.region, &self.layout, refs, &rows, first, out)
+    }
+
+    fn gather_key_of(
+        &self,
+        matches: MatchesView<'_>,
+        key: usize,
+        values: &mut [u64],
+        nulls: &mut [bool],
+    ) -> Result<()> {
+        let MatchesView { rows, refs } = matches;
+        batch::gather_key(&self.region, &self.layout, refs, &rows, key, values, nulls)
     }
 
     /// Fill a Bloom filter of [`bloom::words_for`] this table's records

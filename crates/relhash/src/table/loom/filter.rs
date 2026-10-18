@@ -1,7 +1,7 @@
 //! The models of a shared Bloom filter: the race to build it and the
 //! readers that wait for it to be ready.
 
-use crate::{RowMask, RowMaskView};
+use crate::RowMask;
 use ::loom::sync::Arc;
 use ::loom::sync::atomic::AtomicU64;
 use ::loom::thread;
@@ -94,10 +94,9 @@ fn filtered_table() -> (Arc<LoomRegion>, Layout) {
 fn probe_every_key(filter: &LoomFilter) -> Result<()> {
     let hashes = [HASH; FILTERED.len()];
     let all = [(1u64 << FILTERED.len()) - 1];
-    let rows = RowMaskView::try_new(FILTERED.len(), &all)?;
-    let mut found_bits = [0];
+    let mut found_bits = all;
     let mut found = RowMask::try_new(FILTERED.len(), &mut found_bits)?;
-    bloom::probe_ready(filter, &hashes, &rows, &mut found)?;
+    bloom::probe_ready(filter, &hashes, &mut found)?;
     assert_eq!(found_bits, all, "the filter rejected a key of the table");
     Ok(())
 }
