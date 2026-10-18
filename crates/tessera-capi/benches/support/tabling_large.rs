@@ -20,10 +20,10 @@
 //! A debug build, which only checks the model, uses a small table.
 
 use anyhow::{Result, ensure};
-use tessera_core::{ColumnView, RowMask, RowMaskView};
+use tessera_core::{ColumnView, RowMask};
 use tessera_kernels::column_keys::KeyColumns;
 use tessera_kernels::int32::murmurhash32;
-use tessera_kernels::table::{Batch, MAX_CHUNK_LEN, OwnedTable, TableConfig, bloom};
+use tessera_kernels::table::{Batch, MAX_CHUNK_LEN, Matches, OwnedTable, TableConfig, bloom};
 
 use crate::support::runner::Runner;
 
@@ -186,9 +186,8 @@ pub struct Setup {
     pub inserted: [u64; BATCH / 64],
     pub pending: [u64; BATCH / 64],
     pub matches: Vec<u32>,
-    /// A Bloom filter of the table's records, and the rows it passed.
+    /// A Bloom filter of the table's records.
     pub filter: Vec<u64>,
-    pub passed: [u64; BATCH / 64],
 }
 
 impl Setup {
@@ -243,7 +242,6 @@ impl Setup {
             pending: [0; BATCH / 64],
             matches: vec![0; BATCH],
             filter,
-            passed: [0; BATCH / 64],
         })
     }
 }
@@ -288,15 +286,11 @@ pub fn probe(setup: &mut Setup, batch: usize, kind: Kind) -> Result<()> {
     };
     let column = [ColumnView::try_new(keys, None)?];
     let table = setup.table.table()?;
-    let all = RowMaskView::try_new(BATCH, &setup.all)?;
-    let mut found = RowMask::try_new(BATCH, &mut setup.found)?;
-    table.probe(
-        hashes,
-        &KeyColumns(&column),
-        &all,
-        &mut setup.matches,
-        &mut found,
-    )
+    setup.found = setup.all;
+    let mut matches = Matches::new(&mut setup.found, &mut setup.matches)?;
+    table
+        .probe(hashes, &KeyColumns(&column), &mut matches)
+        .map(drop)
 }
 
 /// Check batch `batch` of a kind against the filter and, with `then`,
@@ -315,27 +309,18 @@ pub fn bloom_probe(setup: &mut Setup, batch: usize, kind: Kind, then: bool) -> R
             &setup.occupied_hashes[rows],
         ),
     };
-    let all = RowMaskView::try_new(BATCH, &setup.all)?;
-    bloom::probe(
-        &setup.filter,
-        hashes,
-        &all,
-        &mut RowMask::try_new(BATCH, &mut setup.passed)?,
-    )?;
+    setup.found = setup.all;
+    let mut found = RowMask::try_new(BATCH, &mut setup.found)?;
+    bloom::probe(&setup.filter, hashes, &mut found)?;
     if !then {
         return Ok(());
     }
     let column = [ColumnView::try_new(keys, None)?];
     let table = setup.table.table()?;
-    let passed = RowMaskView::try_new(BATCH, &setup.passed)?;
-    let mut found = RowMask::try_new(BATCH, &mut setup.found)?;
-    table.probe(
-        hashes,
-        &KeyColumns(&column),
-        &passed,
-        &mut setup.matches,
-        &mut found,
-    )
+    let mut matches = Matches::from_mask(found, &mut setup.matches)?;
+    table
+        .probe(hashes, &KeyColumns(&column), &mut matches)
+        .map(drop)
 }
 
 /// Resolve batch `batch` of present keys to their records.
@@ -389,10 +374,15 @@ pub fn check(setup: &mut Setup) -> Result<()> {
             setup.pending == [0; BATCH / 64] && setup.inserted == [0; BATCH / 64],
             "batch {batch}: find_or_insert created a record"
         );
+        bloom_probe(setup, batch, Kind::Present, false)?;
+        ensure!(
+            setup.found == setup.all,
+            "batch {batch}: the filter rejected a present key"
+        );
         bloom_probe(setup, batch, Kind::Present, true)?;
         ensure!(
-            setup.passed == setup.all && setup.found == setup.all,
-            "batch {batch}: the filter rejected a present key"
+            setup.found == setup.all,
+            "batch {batch}: a present key passed the filter and missed"
         );
         probe(setup, batch, Kind::Absent)?;
         ensure!(
