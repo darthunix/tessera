@@ -104,10 +104,9 @@ fn participants_add_to_one_word(plain: bool) {
         }
         let words = [filter.load(0)];
         let both = [0b11];
-        let rows = RowMaskView::try_new(2, &both).unwrap();
-        let mut found_bits = [0];
+        let mut found_bits = both;
         let mut found = RowMask::try_new(2, &mut found_bits).unwrap();
-        bloom::probe(&words, &hashes, &rows, &mut found).unwrap();
+        bloom::probe(&words, &hashes, &mut found).unwrap();
         assert_eq!(found_bits, both, "the bits of a key were lost");
     });
 }

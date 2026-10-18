@@ -92,6 +92,43 @@ SHALL keep every bit past its last row 0.
 - **THEN** bits 6 to 63 of that word are 0
 - **Verified by:** pending
 
+### Requirement: A lookup narrows one mask
+A lookup SHALL be one value: a mask of the rows still in it and, for
+each row, the reference of its record. A mask and references of
+different row counts SHALL be refused when the lookup is made. A
+probe, a step to the next match or to the next in a group, and a Bloom
+filter's probe SHALL keep in the mask the rows that find what they
+look for, SHALL leave the reference of a row that leaves as it was,
+and SHALL return how many rows are left.
+
+#### Scenario: A walk down the matches of a key
+- **WHEN** ten rows, one for each of ten keys of ten records, step with
+  the next match until no row is left
+- **THEN** each step returns the rows left, and each key's walk reads
+  its ten records
+- **Verified by:**
+  `crates/tessera-kernels/tests/table.rs::equal_keys_chain_through_next_match`
+
+#### Scenario: A row without a next record
+- **WHEN** two rows whose keys have one record each step with the next
+  match
+- **THEN** the call returns 0, both rows leave, and their references
+  stay
+- **Verified by:**
+  `crates/tessera-kernels/tests/table.rs::a_null_key_groups_apart_from_the_value_it_hashes_like`
+
+#### Scenario: A filter narrows the rows of a lookup
+- **WHEN** a filter of the hashes of 100 rows probes every other row
+- **THEN** the same 50 rows stay, and the call returns 50
+- **Verified by:**
+  `crates/tessera-kernels/tests/table.rs::a_probe_narrows_its_rows_in_place`
+
+#### Scenario: A mask and references of other row counts
+- **WHEN** a lookup is made of a mask of 70 rows and 69 references
+- **THEN** it is refused
+- **Verified by:**
+  `crates/tessera-kernels/tests/table.rs::dimension_errors_come_before_any_change`
+
 ### Requirement: Any bytes, a bounded call
 The caller promises that every block it gives is memory of the length
 it states, aligned to 8 bytes and initialized, and that no other

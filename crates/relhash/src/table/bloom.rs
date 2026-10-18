@@ -48,14 +48,14 @@
 //! // A filter for 100 records, filled with the hashes of two rows.
 //! let mut words = vec![0; bloom::words_for(100)?];
 //! bloom::add(&mut words, &[7, 8], &RowMaskView::try_new(2, &[1 << 0 | 1 << 1])?)?;
-//! // Probe three rows of hashes 7, 8 and 9.
-//! let mut passed = [0];
-//! let rows = RowMaskView::try_new(3, &[1 << 0 | 1 << 1 | 1 << 2])?;
-//! bloom::probe(&words, &[7, 8, 9], &rows, &mut RowMask::try_new(3, &mut passed)?)?;
+//! // Probe three rows of hashes 7, 8 and 9: the filter keeps the rows
+//! // that may have a record.
+//! let mut words_of_rows = [1 << 0 | 1 << 1 | 1 << 2];
+//! let mut rows = RowMask::try_new(3, &mut words_of_rows)?;
+//! bloom::probe(&words, &[7, 8, 9], &mut rows)?;
 //! // Rows 0 and 1, hashes 7 and 8, always pass. Row 2 may pass too: a
 //! // filter lets an absent hash through now and then.
-//! let passed = RowMaskView::try_new(3, &passed)?;
-//! assert!(passed.contains(0)? && passed.contains(1)?);
+//! assert!(rows.as_view().contains(0)? && rows.as_view().contains(1)?);
 //! # Ok::<(), anyhow::Error>(())
 //! ```
 
@@ -321,35 +321,28 @@ pub(super) fn try_build<R: Region, F: FilterShared + ?Sized>(
     Ok(true)
 }
 
-/// The rows of `rows` whose hash has all its bits in the filter, into
-/// `found`, which this call fills whole: the others have no record with
-/// their hash. `hashes` holds a hash per row.
+/// Keep in `rows` the rows whose hash has all its bits in the filter: the
+/// others have no record with their hash, and leave. `hashes` holds a
+/// hash per row. The count of rows left is returned. A lookup narrows its
+/// rows so before the table's probe, through
+/// [`Matches::rows_mut`](crate::Matches::rows_mut).
 ///
 /// # Errors
 ///
-/// A filter whose length is not a power of two, and hashes or a result of
-/// another row count than the mask, fail before any change.
+/// A filter whose length is not a power of two, and hashes of another row
+/// count than the mask, fail before any change.
 ///
 /// ```
-/// use relhash::{RowMask, RowMaskView};
-/// use relhash::bloom;
+/// use relhash::{RowMask, bloom};
 ///
-/// // An empty filter lets nothing through.
+/// // An empty filter lets no row through.
 /// let words = vec![0; bloom::words_for(100)?];
-/// let rows = RowMaskView::try_new(2, &[1 << 0 | 1 << 1])?;
-/// // The probe overwrites whatever the result held.
-/// let mut found = [1 << 0 | 1 << 1];
-/// bloom::probe(&words, &[7, 8], &rows, &mut RowMask::try_new(2, &mut found)?)?;
-/// assert_eq!(RowMaskView::try_new(2, &found)?.selected_count(), 0);
+/// let mut rows = [1 << 0 | 1 << 1];
+/// assert_eq!(bloom::probe(&words, &[7, 8], &mut RowMask::try_new(2, &mut rows)?)?, 0);
 /// # Ok::<(), anyhow::Error>(())
 /// ```
-pub fn probe(
-    words: &[u64],
-    hashes: &[u32],
-    rows: &RowMaskView<'_>,
-    found: &mut RowMask<'_>,
-) -> Result<()> {
-    check(words, hashes, rows, found)
+pub fn probe(words: &[u64], hashes: &[u32], rows: &mut RowMask<'_>) -> Result<usize> {
+    check(words, hashes, rows)
 }
 
 /// Set the bits of the hash of every row of `rows` in the filter: for a
@@ -369,11 +362,10 @@ pub fn probe(
 /// // pass; row 2, not added, most likely not.
 /// let mut words = vec![0; bloom::words_for(100)?];
 /// bloom::add(&mut words, &[7, 8, 9], &RowMaskView::try_new(3, &[1 << 0 | 1 << 1])?)?;
-/// let mut found = [0];
-/// let all = RowMaskView::try_new(3, &[1 << 0 | 1 << 1 | 1 << 2])?;
-/// bloom::probe(&words, &[7, 8, 9], &all, &mut RowMask::try_new(3, &mut found)?)?;
-/// let found = RowMaskView::try_new(3, &found)?;
-/// assert!(found.contains(0)? && found.contains(1)?);
+/// let mut all = [1 << 0 | 1 << 1 | 1 << 2];
+/// let mut rows = RowMask::try_new(3, &mut all)?;
+/// bloom::probe(&words, &[7, 8, 9], &mut rows)?;
+/// assert!(rows.as_view().contains(0)? && rows.as_view().contains(1)?);
 /// // A filter's words are a power of two.
 /// assert!(bloom::add(&mut words[..3], &[7], &RowMaskView::try_new(1, &[1 << 0])?).is_err());
 /// # Ok::<(), anyhow::Error>(())
@@ -447,44 +439,39 @@ pub(super) fn add_with<F: FilterOr + ?Sized>(
 pub fn probe_shared(
     filter: &SharedFilter<'_>,
     hashes: &[u32],
-    rows: &RowMaskView<'_>,
-    found: &mut RowMask<'_>,
-) -> Result<()> {
-    probe_ready(filter, hashes, rows, found)
+    rows: &mut RowMask<'_>,
+) -> Result<usize> {
+    probe_ready(filter, hashes, rows)
 }
 
 /// [`probe_shared`] over any shared filter.
 pub(super) fn probe_ready<F: FilterShared + ?Sized>(
     filter: &F,
     hashes: &[u32],
-    rows: &RowMaskView<'_>,
-    found: &mut RowMask<'_>,
-) -> Result<()> {
+    rows: &mut RowMask<'_>,
+) -> Result<usize> {
     ensure!(filter.ready(), "the shared filter is not built yet");
-    check(filter, hashes, rows, found)
+    check(filter, hashes, rows)
 }
 
 #[inline(always)]
 fn check<F: FilterRead + ?Sized>(
     words: &F,
     hashes: &[u32],
-    rows: &RowMaskView<'_>,
-    found: &mut RowMask<'_>,
-) -> Result<()> {
-    let nrows = rows.nrows();
+    rows: &mut RowMask<'_>,
+) -> Result<usize> {
+    let nrows = rows.as_view().nrows();
     let shift = shift_for(words.nwords())?;
-    check_rows(
-        nrows,
-        &[hashes.len(), found.as_view().nrows()],
-        "Bloom filter",
-    )?;
-    for index in 0..nrows.div_ceil(64) {
+    check_rows(nrows, &[hashes.len()], "Bloom filter")?;
+    let mut left = 0;
+    for (index, selected) in rows.words_mut().iter_mut().enumerate() {
         let mut hits = 0;
-        for bit in ones(rows.word(index)) {
+        for bit in ones(*selected) {
             let (word, mask) = place(hashes[index * 64 + bit], shift);
             hits |= u64::from(words.load(word) & mask == mask) << bit;
         }
-        found.set_word(index, hits)?;
+        *selected = hits;
+        left += hits.count_ones() as usize;
     }
-    Ok(())
+    Ok(left)
 }
