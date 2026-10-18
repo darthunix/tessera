@@ -10,6 +10,7 @@
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 use std::ptr;
+use std::slice;
 
 use anyhow::Result;
 use tessera_capi::c::sort_flags::{DESCENDING, NULLABLE, NULLS_FIRST};
@@ -2336,6 +2337,223 @@ fn grouped_insertion_steps_through_a_key_in_one_call_each() -> Result<()> {
             );
             rows_words = found_words;
         }
+    }
+    Ok(())
+}
+
+/// The lookups narrow a mask in place when `found` is `rows`, or another
+/// mask of the same words, and answer as with two masks; a mask of the
+/// same words with another row count, and a call refused, change nothing.
+#[test]
+fn the_lookups_narrow_a_mask_in_place() -> Result<()> {
+    // Keys row % 16 over 64 rows, four records a key; the probed keys are
+    // 0 to 63, of which 0 to 15 have records.
+    let inserted: Vec<u64> = (0..64_u64).map(|row| row % 16).collect();
+    let probed: Vec<u64> = (0..64_u64).collect();
+    let isnull = [false; 64];
+    let column = |values: &[u64]| DatumColumn {
+        struct_size: size_of::<DatumColumn>(),
+        values: values.as_ptr(),
+        isnull: isnull.as_ptr(),
+        nrows: 64,
+        ..DatumColumn::EMPTY
+    };
+    let (inserted, probed) = (column(&inserted), column(&probed));
+    let key = |column: &DatumColumn| TableKey {
+        kind: 1,
+        column,
+        prepared: ptr::null(),
+    };
+    let (insert_key, probe_key) = (key(&inserted), key(&probed));
+    let one = slice::from_ref(&probe_key);
+    let two = [key(&probed), key(&probed)];
+    let payload: Vec<u8> = (0..64_u64).flat_map(|row| row.to_ne_bytes()).collect();
+    let mut status = Status::new();
+    // SAFETY: local buffers of the declared sizes; a mask's words are
+    // reached only through the masks the calls are given.
+    unsafe {
+        let mut table = CTable::new(8, 64);
+        let (hashes, _) = hash_column(&inserted, 1, 64);
+        let mut pending_words = [u64::MAX];
+        let mut pending = Mask {
+            nrows: 64,
+            bits: pending_words.as_mut_ptr(),
+        };
+        let mut offsets = vec![0; 64];
+        table.insert(
+            4096,
+            hashes.as_ptr(),
+            &raw const insert_key,
+            payload.as_ptr(),
+            &raw mut pending,
+            offsets.as_mut_ptr(),
+            true,
+        );
+        let (hashes, _) = hash_column(&probed, 1, 64);
+        let probe =
+            |rows: *const Mask, found: *mut Mask, matches: &mut [u32], keys: &[TableKey]| {
+                let mut status = Status::new();
+                tess_table_probe(
+                    table.ptr(),
+                    hashes.as_ptr(),
+                    keys.len() as i32,
+                    keys.as_ptr(),
+                    rows,
+                    matches.as_mut_ptr(),
+                    found,
+                    &raw mut status,
+                )
+            };
+
+        // The probe with two masks, then by the same mask, then by another
+        // mask of the same words.
+        let mut all = [u64::MAX];
+        let rows = Mask {
+            nrows: 64,
+            bits: all.as_mut_ptr(),
+        };
+        let mut found_words = [0];
+        let mut found = Mask {
+            nrows: 64,
+            bits: found_words.as_mut_ptr(),
+        };
+        let mut first = vec![0; 64];
+        assert_eq!(
+            probe(&raw const rows, &raw mut found, &mut first, one),
+            Code::Ok
+        );
+        assert_eq!(found_words, [0xffff]);
+        let mut words = [u64::MAX];
+        let mut mask = Mask {
+            nrows: 64,
+            bits: words.as_mut_ptr(),
+        };
+        let mut matches = vec![0; 64];
+        assert_eq!(
+            probe(&raw const mask, &raw mut mask, &mut matches, one),
+            Code::Ok
+        );
+        assert_eq!((words, &matches[..16]), ([0xffff], &first[..16]));
+        let mut words = [u64::MAX];
+        let bits = words.as_mut_ptr();
+        let same = Mask { nrows: 64, bits };
+        let mut other = Mask { nrows: 64, bits };
+        let mut matches = vec![0; 64];
+        assert_eq!(
+            probe(&raw const same, &raw mut other, &mut matches, one),
+            Code::Ok
+        );
+        assert_eq!((words, &matches[..16]), ([0xffff], &first[..16]));
+
+        // A call refused in place, by its keys or by a row count, leaves
+        // the words.
+        let mut words = [u64::MAX];
+        let bits = words.as_mut_ptr();
+        let mut mask = Mask { nrows: 64, bits };
+        assert_eq!(
+            probe(&raw const mask, &raw mut mask, &mut matches, &two),
+            Code::InvalidArgument
+        );
+        let mut shorter = Mask { nrows: 63, bits };
+        assert_eq!(
+            probe(&raw const mask, &raw mut shorter, &mut matches, one),
+            Code::InvalidArgument
+        );
+        assert_eq!(words, [u64::MAX]);
+
+        // From each found row three more records, one step each, by a
+        // group and by the chain.
+        for in_group in [true, false] {
+            let mut current = first.clone();
+            let mut words = [0xffff_u64];
+            let bits = words.as_mut_ptr();
+            let rows = Mask { nrows: 64, bits };
+            let mut found = Mask { nrows: 64, bits };
+            for step in 0..4 {
+                let step_of = if in_group {
+                    tess_table_next_in_group
+                } else {
+                    tess_table_next_match
+                };
+                let code = step_of(
+                    table.ptr(),
+                    current.as_mut_ptr(),
+                    &raw const rows,
+                    &raw mut found,
+                    &raw mut status,
+                );
+                assert_eq!(code, Code::Ok, "{}", status.message());
+                let left = if step < 3 { 0xffff } else { 0 };
+                assert_eq!(*bits, left, "step {step}, in a group: {in_group}");
+            }
+        }
+
+        // The filter, plain and shared, with two masks and in place.
+        let mut nwords = 0;
+        assert_eq!(
+            tess_table_bloom_words(64, &raw mut nwords, &raw mut status),
+            Code::Ok
+        );
+        let mut filter = vec![0_u64; nwords];
+        let code = tess_table_bloom(table.ptr(), filter.as_mut_ptr(), nwords, &raw mut status);
+        assert_eq!(code, Code::Ok, "{}", status.message());
+        let mut passed_words = [0];
+        let mut passed = Mask {
+            nrows: 64,
+            bits: passed_words.as_mut_ptr(),
+        };
+        let code = tess_bloom_probe(
+            filter.as_ptr(),
+            nwords,
+            hashes.as_ptr(),
+            &raw const rows,
+            &raw mut passed,
+            &raw mut status,
+        );
+        assert_eq!(code, Code::Ok, "{}", status.message());
+        assert_eq!(passed_words[0] & 0xffff, 0xffff, "every key of the table");
+        let mut words = [u64::MAX];
+        let mut mask = Mask {
+            nrows: 64,
+            bits: words.as_mut_ptr(),
+        };
+        let code = tess_bloom_probe(
+            filter.as_ptr(),
+            nwords,
+            hashes.as_ptr(),
+            &raw const mask,
+            &raw mut mask,
+            &raw mut status,
+        );
+        assert_eq!((code, words), (Code::Ok, passed_words));
+        let mut shared_words = 0;
+        let code = tess_bloom_shared_words(64, &raw mut shared_words, &raw mut status);
+        assert_eq!(code, Code::Ok, "{}", status.message());
+        let mut shared = vec![0_u64; shared_words];
+        let code = tess_bloom_shared_init(shared.as_mut_ptr(), shared_words, &raw mut status);
+        assert_eq!(code, Code::Ok, "{}", status.message());
+        let mut built = false;
+        let code = tess_table_try_build_bloom(
+            table.ptr(),
+            shared.as_mut_ptr(),
+            shared_words,
+            &raw mut built,
+            &raw mut status,
+        );
+        assert_eq!((code, built), (Code::Ok, true), "{}", status.message());
+        let mut words = [u64::MAX];
+        let bits = words.as_mut_ptr();
+        let same = Mask { nrows: 64, bits };
+        let mut other = Mask { nrows: 64, bits };
+        let code = tess_bloom_shared_probe(
+            shared.as_mut_ptr(),
+            shared_words,
+            hashes.as_ptr(),
+            &raw const same,
+            &raw mut other,
+            &raw mut status,
+        );
+        assert_eq!((code, words), (Code::Ok, passed_words));
     }
     Ok(())
 }
