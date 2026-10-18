@@ -12,15 +12,16 @@ use std::slice;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context, Result, bail, ensure};
-use tessera_core::ColumnReader;
+use tessera_core::{ColumnReader, RowMask, check_rows};
 use tessera_kernels::accumulate::{self, Combine, ExtremeSlot, Fold, MAX_SUMS, Slot, SumSlot};
 use tessera_kernels::column_keys::normalize_word;
 use tessera_kernels::phases::{Participant, SharedCounters, StopWord};
 use tessera_kernels::table::{
     Appended, Batch, ChunkWriter, Chunks, CombineStop, Cursor, FORMAT_VERSION, HEADER_SIZE,
-    KeySource, MAX_KEYS, MAX_PAYLOAD_COLUMNS, Marks, Partitions, PayloadColumns, Table,
-    TableConfig, TableMut, UNIT_BITS, VERSION_OFFSET, bloom::SharedFilter, chunk_used, index_size,
-    init_chunk, mark, mark_words, payload_null_words, record_bytes, scan_unmarked,
+    KeySource, MAX_KEYS, MAX_PAYLOAD_COLUMNS, Marks, Matches, MatchesView, Partitions,
+    PayloadColumns, Table, TableConfig, TableMut, UNIT_BITS, VERSION_OFFSET, bloom::SharedFilter,
+    chunk_used, index_size, init_chunk, mark, mark_words, payload_null_words, record_bytes,
+    scan_unmarked,
 };
 
 use super::args::reader;
@@ -928,6 +929,32 @@ pub unsafe extern "C" fn tess_table_link_grouped(
     }
 }
 
+/// The mask a lookup narrows in place: `found`, holding a copy of
+/// `rows`. The entry points keep the rows to look up apart from the rows
+/// found, as their callers do; the table's calls narrow one mask. An
+/// entry point makes it after its other checks, so that a call refused
+/// leaves `found` as it was.
+///
+/// # Safety
+///
+/// `rows` must point to a valid mask and `found` to a valid mask that
+/// nothing else accesses, with the same rows, for `'a`.
+#[inline(always)]
+unsafe fn found_from<'a>(rows: &Mask, found: *mut Mask) -> Result<RowMask<'a>> {
+    // SAFETY: the caller's contract.
+    let (rows, mut found) = unsafe {
+        (
+            rows.view()?,
+            found.as_mut().context("a null result mask")?.mask()?,
+        )
+    };
+    check_rows(rows.nrows(), &[found.as_view().nrows()], "table")?;
+    for (index, word) in rows.words().enumerate() {
+        found.set_word(index, word)?;
+    }
+    Ok(found)
+}
+
 /// `tess_table_probe`: find the first record of its chain with each
 /// row's keys.
 ///
@@ -955,12 +982,21 @@ pub unsafe extern "C" fn tess_table_probe(
             let table = attach(table)?;
             let mut decoded = TableKeys::empty();
             table_keys(nkeys, keys, &mut decoded)?;
-            let rows = rows.as_ref().context("a null row mask")?.view()?;
-            let mut found = found.as_mut().context("a null result mask")?.mask()?;
-            let nrows = rows.nrows();
+            let rows = rows.as_ref().context("a null row mask")?;
+            let nrows = rows.view()?.nrows();
             let hashes = values(hashes, nrows, "hashes")?;
             let matches = slots(matches, nrows, "matches")?;
-            table.probe(hashes, &decoded, &rows, matches, &mut found)
+            // The probe's own checks of the keys, before `found` changes.
+            let config = table.config();
+            ensure!(
+                decoded.nkeys() == config.nkeys,
+                "the table has {} keys, the batch {}",
+                config.nkeys,
+                decoded.nkeys()
+            );
+            check_rows(nrows, &[decoded.nrows()], "table")?;
+            let mut lookup = Matches::from_mask(found_from(rows, found)?, matches)?;
+            table.probe(hashes, &decoded, &mut lookup).map(drop)
         })
     }
 }
@@ -987,10 +1023,10 @@ pub unsafe extern "C" fn tess_table_next_match(
     unsafe {
         guard(status, || {
             let table = attach(table)?;
-            let rows = rows.as_ref().context("a null row mask")?.view()?;
-            let mut found = found.as_mut().context("a null result mask")?.mask()?;
-            let offsets = slots(offsets, rows.nrows(), "offsets")?;
-            table.next_match(offsets, &rows, &mut found)
+            let rows = rows.as_ref().context("a null row mask")?;
+            let offsets = slots(offsets, rows.view()?.nrows(), "offsets")?;
+            let mut lookup = Matches::from_mask(found_from(rows, found)?, offsets)?;
+            table.next_match(&mut lookup).map(drop)
         })
     }
 }
@@ -1020,7 +1056,7 @@ pub unsafe extern "C" fn tess_table_gather(
             let nrows = rows.nrows();
             let offsets = values(offsets, nrows, "offsets")?;
             let out = slots(out, nrows, "results")?;
-            table.gather(offsets, &rows, at, out)
+            table.gather(MatchesView::new(rows, offsets)?, at, out)
         })
     }
 }
@@ -1048,7 +1084,7 @@ pub unsafe extern "C" fn tess_table_gather_scattered(
             let nrows = rows.nrows();
             let offsets = values(offsets, nrows, "offsets")?;
             let out = slots(out, nrows, "results")?;
-            table.gather_scattered(offsets, &rows, at, out)
+            table.gather_scattered(MatchesView::new(rows, offsets)?, at, out)
         })
     }
 }
@@ -1091,8 +1127,7 @@ pub unsafe extern "C" fn tess_table_gather_words(
                     *slot = slots(pointer, nrows, "output words")?;
                 }
                 table.gather_words(
-                    offsets,
-                    &rows,
+                    MatchesView::new(rows, offsets)?,
                     first + group * GATHER_WORDS,
                     &mut words[..pointers.len()],
                 )?;
@@ -1120,10 +1155,10 @@ pub unsafe extern "C" fn tess_table_next_in_group(
     unsafe {
         guard(status, || {
             let table = attach(table)?;
-            let rows = rows.as_ref().context("a null row mask")?.view()?;
-            let mut found = found.as_mut().context("a null result mask")?.mask()?;
-            let offsets = slots(offsets, rows.nrows(), "offsets")?;
-            table.next_in_group(offsets, &rows, &mut found)
+            let rows = rows.as_ref().context("a null row mask")?;
+            let offsets = slots(offsets, rows.view()?.nrows(), "offsets")?;
+            let mut lookup = Matches::from_mask(found_from(rows, found)?, offsets)?;
+            table.next_in_group(&mut lookup).map(drop)
         })
     }
 }
@@ -1887,7 +1922,7 @@ pub unsafe extern "C" fn tess_table_gather_key(
             let out = slots(values_out, nrows, "results")?;
             let nulls = slots(isnull, nrows, "NULL flags")?;
             let key = usize::try_from(key).context("a negative key")?;
-            table.gather_key(offsets, &rows, key, out, nulls)
+            table.gather_key(MatchesView::new(rows, offsets)?, key, out, nulls)
         })
     }
 }
@@ -2009,11 +2044,13 @@ pub unsafe extern "C" fn tess_bloom_probe(
     // SAFETY: the caller's contract.
     unsafe {
         guard(status, || {
-            let rows = rows.as_ref().context("a null row mask")?.view()?;
-            let mut found = found.as_mut().context("a null result mask")?.mask()?;
+            let rows = rows.as_ref().context("a null row mask")?;
             let words = values(words, nwords, "filter words")?;
-            let hashes = values(hashes, rows.nrows(), "hashes")?;
-            tessera_kernels::table::bloom::probe(words, hashes, &rows, &mut found)
+            let hashes = values(hashes, rows.view()?.nrows(), "hashes")?;
+            // A probe of no rows checks the filter, before `found` changes.
+            tessera_kernels::table::bloom::probe(words, &[], &mut RowMask::try_new(0, &mut [])?)?;
+            tessera_kernels::table::bloom::probe(words, hashes, &mut found_from(rows, found)?)
+                .map(drop)
         })
     }
 }
@@ -2146,10 +2183,20 @@ pub unsafe extern "C" fn tess_bloom_shared_probe(
     unsafe {
         guard(status, || {
             let filter = shared_filter(words, nwords)?;
-            let rows = rows.as_ref().context("a null row mask")?.view()?;
-            let mut found = found.as_mut().context("a null result mask")?.mask()?;
-            let hashes = values(hashes, rows.nrows(), "hashes")?;
-            tessera_kernels::table::bloom::probe_shared(&filter, hashes, &rows, &mut found)
+            let rows = rows.as_ref().context("a null row mask")?;
+            let hashes = values(hashes, rows.view()?.nrows(), "hashes")?;
+            // A probe of no rows checks the filter, before `found` changes.
+            tessera_kernels::table::bloom::probe_shared(
+                &filter,
+                &[],
+                &mut RowMask::try_new(0, &mut [])?,
+            )?;
+            tessera_kernels::table::bloom::probe_shared(
+                &filter,
+                hashes,
+                &mut found_from(rows, found)?,
+            )
+            .map(drop)
         })
     }
 }

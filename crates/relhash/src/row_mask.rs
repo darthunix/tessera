@@ -181,6 +181,13 @@ impl<'a> RowMask<'a> {
         Ok(Self { nrows, words })
     }
 
+    /// The words, for a call that narrows them in place: a word written
+    /// holds only rows it held, so the bits past the last row stay 0.
+    #[inline]
+    pub(crate) fn words_mut(&mut self) -> &mut [u64] {
+        self.words
+    }
+
     /// Reborrow for reading; mutation is forbidden while that view is in use.
     ///
     /// ```compile_fail
