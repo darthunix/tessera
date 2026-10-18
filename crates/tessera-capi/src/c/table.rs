@@ -8,11 +8,12 @@
 
 use std::ffi::{c_int, c_uint};
 use std::mem::{MaybeUninit, offset_of};
+use std::ptr;
 use std::slice;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context, Result, bail, ensure};
-use tessera_core::{ColumnReader, RowMask, check_rows};
+use tessera_core::{ColumnReader, RowMask, RowMaskView, check_rows};
 use tessera_kernels::accumulate::{self, Combine, ExtremeSlot, Fold, MAX_SUMS, Slot, SumSlot};
 use tessera_kernels::column_keys::normalize_word;
 use tessera_kernels::phases::{Participant, SharedCounters, StopWord};
@@ -929,30 +930,69 @@ pub unsafe extern "C" fn tess_table_link_grouped(
     }
 }
 
-/// The mask a lookup narrows in place: `found`, holding a copy of
-/// `rows`. The entry points keep the rows to look up apart from the rows
-/// found, as their callers do; the table's calls narrow one mask. An
-/// entry point makes it after its other checks, so that a call refused
-/// leaves `found` as it was.
-///
-/// # Safety
-///
-/// `rows` must point to a valid mask and `found` to a valid mask that
-/// nothing else accesses, with the same rows, for `'a`.
-#[inline(always)]
-unsafe fn found_from<'a>(rows: &Mask, found: *mut Mask) -> Result<RowMask<'a>> {
-    // SAFETY: the caller's contract.
-    let (rows, mut found) = unsafe {
-        (
-            rows.view()?,
-            found.as_mut().context("a null result mask")?.mask()?,
-        )
-    };
-    check_rows(rows.nrows(), &[found.as_view().nrows()], "table")?;
-    for (index, word) in rows.words().enumerate() {
-        found.set_word(index, word)?;
+/// The masks of a lookup's entry point: `rows`, the rows to look up, and
+/// `found`, the mask the lookup narrows. `found` may be `rows` itself, or
+/// a mask of the same words, and is then narrowed in place. Otherwise the
+/// rows are copied into it, and only once the entry point's other checks
+/// have passed, so that a call refused leaves `found` as it was.
+struct LookupMasks<'a> {
+    /// The rows to copy into `found`; none when they are its words.
+    rows: Option<RowMaskView<'a>>,
+    found: RowMask<'a>,
+}
+
+impl<'a> LookupMasks<'a> {
+    /// Check both masks; nothing is written.
+    ///
+    /// # Safety
+    ///
+    /// `rows` and `found` must point to valid masks for `'a`, and nothing
+    /// else may access `found`'s words. Unless `found` is `rows` or has
+    /// its words, the two share no word.
+    #[inline(always)]
+    unsafe fn new(rows: *const Mask, found: *mut Mask) -> Result<Self> {
+        ensure!(!rows.is_null(), "a null row mask");
+        // SAFETY: the caller's contract. `rows` is read by value, with no
+        // reference to it: it may be `found`, which gets one.
+        let (rows_bits, rows_nrows) = unsafe { ((*rows).bits, (*rows).nrows) };
+        // SAFETY: as above.
+        let found = unsafe { found.as_mut() }.context("a null result mask")?;
+        if ptr::eq(rows, found) || rows_bits == found.bits {
+            ensure!(
+                rows_nrows == found.nrows,
+                "a mask narrowed in place has another row count"
+            );
+            // SAFETY: as above.
+            let found = unsafe { found.mask() }?;
+            return Ok(Self { rows: None, found });
+        }
+        // SAFETY: as above; another mask, of other words.
+        let (rows, found) = unsafe { ((*rows).view()?, found.mask()?) };
+        check_rows(rows.nrows(), &[found.as_view().nrows()], "table")?;
+        Ok(Self {
+            rows: Some(rows),
+            found,
+        })
     }
-    Ok(found)
+
+    /// The rows of the masks.
+    #[inline(always)]
+    fn nrows(&self) -> usize {
+        self.found.as_view().nrows()
+    }
+
+    /// The mask to narrow, after the entry point's checks: `found`, with
+    /// the rows copied into it unless they are its words.
+    #[inline(always)]
+    fn narrowed(self) -> Result<RowMask<'a>> {
+        let Self { rows, mut found } = self;
+        if let Some(rows) = rows {
+            for (index, word) in rows.words().enumerate() {
+                found.set_word(index, word)?;
+            }
+        }
+        Ok(found)
+    }
 }
 
 /// `tess_table_probe`: find the first record of its chain with each
@@ -961,10 +1001,9 @@ unsafe fn found_from<'a>(rows: &Mask, found: *mut Mask) -> Result<RowMask<'a>> {
 /// # Safety
 ///
 /// `table` as for [`attach`] during the call; `keys` as for
-/// [`table_keys`]; `rows` must point to a valid mask and `found` to a
-/// valid mask that nothing else accesses, both with the batch's rows;
-/// `hashes` must hold a hash per row and `matches` a writable slot per
-/// row; `status` as for every entry point.
+/// [`table_keys`]; `rows` and `found` as for [`LookupMasks::new`], with
+/// the batch's rows; `hashes` must hold a hash per row and `matches` a
+/// writable slot per row; `status` as for every entry point.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn tess_table_probe(
     table: *const TableRef,
@@ -982,8 +1021,8 @@ pub unsafe extern "C" fn tess_table_probe(
             let table = attach(table)?;
             let mut decoded = TableKeys::empty();
             table_keys(nkeys, keys, &mut decoded)?;
-            let rows = rows.as_ref().context("a null row mask")?;
-            let nrows = rows.view()?.nrows();
+            let masks = LookupMasks::new(rows, found)?;
+            let nrows = masks.nrows();
             let hashes = values(hashes, nrows, "hashes")?;
             let matches = slots(matches, nrows, "matches")?;
             // The probe's own checks of the keys, before `found` changes.
@@ -995,7 +1034,7 @@ pub unsafe extern "C" fn tess_table_probe(
                 decoded.nkeys()
             );
             check_rows(nrows, &[decoded.nrows()], "table")?;
-            let mut lookup = Matches::from_mask(found_from(rows, found)?, matches)?;
+            let mut lookup = Matches::from_mask(masks.narrowed()?, matches)?;
             table.probe(hashes, &decoded, &mut lookup).map(drop)
         })
     }
@@ -1006,11 +1045,10 @@ pub unsafe extern "C" fn tess_table_probe(
 ///
 /// # Safety
 ///
-/// `table` as for [`attach`] during the call; `rows` must point
-/// to a valid mask and `found` to a valid mask that nothing else accesses,
-/// both with the batch's rows; `offsets` must hold an initialized,
-/// writable offset per row that nothing else accesses; `status` as for
-/// every entry point.
+/// `table` as for [`attach`] during the call; `rows` and `found` as for
+/// [`LookupMasks::new`], with the batch's rows; `offsets` must hold an
+/// initialized, writable offset per row that nothing else accesses;
+/// `status` as for every entry point.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn tess_table_next_match(
     table: *const TableRef,
@@ -1023,9 +1061,9 @@ pub unsafe extern "C" fn tess_table_next_match(
     unsafe {
         guard(status, || {
             let table = attach(table)?;
-            let rows = rows.as_ref().context("a null row mask")?;
-            let offsets = slots(offsets, rows.view()?.nrows(), "offsets")?;
-            let mut lookup = Matches::from_mask(found_from(rows, found)?, offsets)?;
+            let masks = LookupMasks::new(rows, found)?;
+            let offsets = slots(offsets, masks.nrows(), "offsets")?;
+            let mut lookup = Matches::from_mask(masks.narrowed()?, offsets)?;
             table.next_match(&mut lookup).map(drop)
         })
     }
@@ -1155,9 +1193,9 @@ pub unsafe extern "C" fn tess_table_next_in_group(
     unsafe {
         guard(status, || {
             let table = attach(table)?;
-            let rows = rows.as_ref().context("a null row mask")?;
-            let offsets = slots(offsets, rows.view()?.nrows(), "offsets")?;
-            let mut lookup = Matches::from_mask(found_from(rows, found)?, offsets)?;
+            let masks = LookupMasks::new(rows, found)?;
+            let offsets = slots(offsets, masks.nrows(), "offsets")?;
+            let mut lookup = Matches::from_mask(masks.narrowed()?, offsets)?;
             table.next_in_group(&mut lookup).map(drop)
         })
     }
@@ -2030,8 +2068,8 @@ pub unsafe extern "C" fn tess_bloom_add(
 /// # Safety
 ///
 /// `words` must point to `nwords` initialized words; `rows` and `found`
-/// to valid masks of the same row count that do not overlap; `hashes` to
-/// a hash per row; `status` as for every entry point.
+/// as for [`LookupMasks::new`], of the same row count; `hashes` to a hash
+/// per row; `status` as for every entry point.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn tess_bloom_probe(
     words: *const u64,
@@ -2044,13 +2082,12 @@ pub unsafe extern "C" fn tess_bloom_probe(
     // SAFETY: the caller's contract.
     unsafe {
         guard(status, || {
-            let rows = rows.as_ref().context("a null row mask")?;
+            let masks = LookupMasks::new(rows, found)?;
             let words = values(words, nwords, "filter words")?;
-            let hashes = values(hashes, rows.view()?.nrows(), "hashes")?;
+            let hashes = values(hashes, masks.nrows(), "hashes")?;
             // A probe of no rows checks the filter, before `found` changes.
             tessera_kernels::table::bloom::probe(words, &[], &mut RowMask::try_new(0, &mut [])?)?;
-            tessera_kernels::table::bloom::probe(words, hashes, &mut found_from(rows, found)?)
-                .map(drop)
+            tessera_kernels::table::bloom::probe(words, hashes, &mut masks.narrowed()?).map(drop)
         })
     }
 }
@@ -2183,20 +2220,16 @@ pub unsafe extern "C" fn tess_bloom_shared_probe(
     unsafe {
         guard(status, || {
             let filter = shared_filter(words, nwords)?;
-            let rows = rows.as_ref().context("a null row mask")?;
-            let hashes = values(hashes, rows.view()?.nrows(), "hashes")?;
+            let masks = LookupMasks::new(rows, found)?;
+            let hashes = values(hashes, masks.nrows(), "hashes")?;
             // A probe of no rows checks the filter, before `found` changes.
             tessera_kernels::table::bloom::probe_shared(
                 &filter,
                 &[],
                 &mut RowMask::try_new(0, &mut [])?,
             )?;
-            tessera_kernels::table::bloom::probe_shared(
-                &filter,
-                hashes,
-                &mut found_from(rows, found)?,
-            )
-            .map(drop)
+            tessera_kernels::table::bloom::probe_shared(&filter, hashes, &mut masks.narrowed()?)
+                .map(drop)
         })
     }
 }
