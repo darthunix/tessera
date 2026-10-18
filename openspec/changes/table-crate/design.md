@@ -144,6 +144,45 @@ snapshot:
 Refused: a type of its own for a reference, which every array that
 crosses the C edge would convert; the four free functions.
 
+### A lookup as one value
+
+**Was:** a probe took five arguments: the hashes, the keys, a mask of
+the rows to look up, the references it found and a second mask of the
+rows found. The next match and the next in a group took the references
+and two masks again, and each gather the references and a mask. A
+caller made each mask of its words and a wrapper, and remade both for
+every step of a walk down the matches.
+
+**Will be:** in the maintainer's review of the API, after a study of
+the batch hash tables of DuckDB, Velox, ClickHouse, Arrow, DataFusion
+and Polars:
+
+- `Matches` holds a lookup's rows, a mask of the caller's words, and the
+  reference of each row's record, at its row. It checks their lengths
+  once, when it is made. Velox's `HashLookup` and DuckDB's
+  `ScanStructure` are such values, kept for a whole operator.
+- The calls narrow its one mask in place, as Arrow's `find` narrows its
+  `inout_match_bitvector` and as a batch's pending rows shrink: a probe
+  keeps the rows that find a record, a next match those that find one
+  more, and a Bloom filter's probe those it lets through, before the
+  table's.
+- Each returns how many rows are left, so that a walk is
+  `while table.next_match(&mut matches)? > 0`.
+- The gathers take the `Matches`, so that the references and the rows
+  they read can never disagree. A caller whose references come from
+  elsewhere, such as the items of a sort, makes a `Matches` of them.
+- The hashes and the keys stay arguments of the probe: a gather needs
+  neither.
+
+The C API keeps its two masks: its entry points copy the mask of rows
+into the mask of results, a word for 64 rows, and call the same.
+
+Refused: a list of (row, record) pairs with a limit and a point to go
+on from, as Velox, Arrow, DataFusion and Polars give their joins; a
+lookup moves each row one record a call, and its references are where
+it goes on. Two masks in the value, which would keep the old loops but
+move each call's result into the next call's rows.
+
 ### The kinds of keys
 
 **Was:** a table was created with a kind for each key, `int4` or
