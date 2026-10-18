@@ -402,6 +402,9 @@ extern TessStatusCode tess_table_link_grouped(const TessTableRef *table,
  * this call fills whole, the rows that have one. The other records with
  * the same keys follow through tess_table_next_match, or
  * tess_table_next_in_group in a table linked by tess_table_link_grouped.
+ * found may be rows itself, or a mask of the same bits: rows is then
+ * narrowed in place, and nothing is copied. Otherwise the two masks share
+ * no word.
  */
 extern TessStatusCode tess_table_probe(const TessTableRef *table,
 									   const uint32 *hashes,
@@ -444,7 +447,8 @@ extern TessStatusCode tess_table_gather_words(const TessTableRef *table,
  * For each row of rows, replace offsets[row], an offset from a probe or an
  * earlier call, by the offset of the next record in its chain with the
  * same hash, NULL bits and keys; found receives the rows that have one,
- * and the others keep their offset.
+ * and the others keep their offset. found may be rows, as for
+ * tess_table_probe.
  */
 extern TessStatusCode tess_table_next_match(const TessTableRef *table,
 											uint32 *offsets,
@@ -471,7 +475,8 @@ extern TessStatusCode tess_table_gather(const TessTableRef *table,
  * in its chain when that one has the same hash, NULL bits and keys, and
  * put the row in found; the others keep their offset. In a table linked
  * by tess_table_link_grouped this is the key's next record, in one step
- * instead of tess_table_next_match's walk down the chain.
+ * instead of tess_table_next_match's walk down the chain. found may be
+ * rows, as for tess_table_probe.
  */
 extern TessStatusCode tess_table_next_in_group(const TessTableRef *table,
 											   uint32 *offsets,
@@ -803,8 +808,8 @@ extern TessStatusCode tess_bloom_add(uint64 *words, Size nwords,
 
 /*
  * The rows of rows whose hash has all its bits in the filter, into found,
- * which this call fills whole; hashes has a hash per row. rows and found
- * must not share their words.
+ * which this call fills whole; hashes has a hash per row. found may be
+ * rows, as for tess_table_probe.
  */
 extern TessStatusCode tess_bloom_probe(const uint64 *words, Size nwords,
 									   const uint32 *hashes,

@@ -28,6 +28,33 @@ chunk and nothing else.
 - **Verified by:**
   `crates/tessera-capi/tests/table.rs::a_mark_that_ends_no_record`
 
+### Requirement: A lookup in place
+`tess_table_probe`, `tess_table_next_match`, `tess_table_next_in_group`,
+`tess_bloom_probe` and `tess_bloom_shared_probe` SHALL take as their
+mask of results the mask of rows itself, or another mask of the same
+words, and SHALL then narrow it in place: it keeps the rows the call
+keeps, with the references a call with two masks gives. A mask of the
+same words with another row count SHALL be refused. A call refused
+SHALL leave the words as they were. Two masks of other words SHALL
+share no word.
+
+#### Scenario: The lookups in place
+- **WHEN** a batch of 64 rows, of which 16 have keys of the table, is
+  probed, stepped through its keys' records by group and by chain, and
+  checked against a filter and a shared filter, each call given one
+  mask as its rows and results, or two masks of the same words
+- **THEN** each call keeps the rows, and gives the references, that a
+  call with two masks keeps and gives
+- **Verified by:**
+  `crates/tessera-capi/tests/table.rs::the_lookups_narrow_a_mask_in_place`
+
+#### Scenario: A lookup in place refused
+- **WHEN** a probe in place is given two keys for a table of one, or a
+  mask of 63 rows over the words of its mask of 64
+- **THEN** the call fails, and the words are as they were
+- **Verified by:**
+  `crates/tessera-capi/tests/table.rs::the_lookups_narrow_a_mask_in_place`
+
 ## MODIFIED Requirements
 
 ### Requirement: The index of a table
