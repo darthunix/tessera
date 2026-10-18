@@ -174,15 +174,16 @@ and Polars:
 - The hashes and the keys stay arguments of the probe: a gather needs
   neither.
 
-The C API keeps its two masks: its entry points copy the mask of rows
-into the mask of results, a word for 64 rows, and call the same. They
-copy after the call's checks, so that a call refused leaves its
-results as they were. The copy costs a join with four records a key
-about 2 per cent: its node calls a lookup four times a batch of 64
-rows, and each call copies, checks and counts for about 13 cycles more
-than a call that wrote its results whole. The nodes copy a mask before
-these calls themselves, so task 3.6 lets the entry points narrow in
-place instead.
+The C API takes two masks, the rows and the results, or one mask as
+both. Given two, an entry point copies the rows into the results, a
+word for 64 rows, after the call's checks, so that a call refused
+leaves its results as they were, and calls the same. The copy cost a
+join with four records a key about 2 per cent: its node calls a lookup
+four times a batch of 64 rows, and each call copied, checked and
+counted for about 13 cycles more than a call that wrote its results
+whole. Given one mask, or two masks of the same words, an entry point
+narrows it in place and copies nothing; the join and the grouping call
+so wherever they kept a copy of the rows only to give it to the call.
 
 Refused: a list of (row, record) pairs with a limit and a point to go
 on from, as Velox, Arrow, DataFusion and Polars give their joins; a

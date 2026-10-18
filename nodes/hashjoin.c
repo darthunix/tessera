@@ -1076,17 +1076,18 @@ join_probe_batch(TessHashJoinState *state, TessBatch *batch)
 	int			nrows = batch->rows.nrows;
 	int			nwords = tess_row_mask_word_count(nrows);
 	TessRowMask valid;
-	TessRowMask found;
-	TessRowMask passed;
 	int			count;
 	int			matches;
 
 	join_reserve_rows(state, nrows);
 	/* A shorter batch than the last: no bits past its rows may remain. */
-	memset(state->probe.valid_bits, 0, sizeof(uint64) * nwords);
 	memset(state->probe.round_bits, 0, sizeof(uint64) * nwords);
-	valid = (TessRowMask) {nrows, state->probe.valid_bits};
-	found = (TessRowMask) {nrows, state->probe.round_bits};
+
+	/*
+	 * The rows with a key, which the filter and the probe narrow in place
+	 * to the rows of the first round.
+	 */
+	valid = (TessRowMask) {nrows, state->probe.round_bits};
 
 	join_batch_keys(state, batch, state->keys.outer_keys, state->keys.outer_kinds, &valid);
 	count = tess_row_mask_count(&valid);
@@ -1127,30 +1128,26 @@ join_probe_batch(TessHashJoinState *state, TessBatch *batch)
 	{
 		int			through;
 
-		/* The kernel fills the mask whole, but checks it is a mask of nrows. */
-		memset(state->probe.pending_bits, 0, sizeof(uint64) * nwords);
-		passed = (TessRowMask) {nrows, state->probe.pending_bits};
 		if (state->bloom.shared)
 			check(state, state->kernels->bloom_shared_probe(state->bloom.bits,
 															state->bloom.nwords,
 															state->probe.hashes, &valid,
-															&passed, &state->status));
+															&valid, &state->status));
 		else
 			check(state, state->kernels->bloom_probe(state->bloom.bits, state->bloom.nwords,
-													 state->probe.hashes, &valid, &passed,
+													 state->probe.hashes, &valid, &valid,
 													 &state->status));
-		through = tess_row_mask_count(&passed);
+		through = tess_row_mask_count(&valid);
 		state->counters[JOIN_BLOOM_REMOVED] += count - through;
 		if (through == 0)
 			return false;
-		valid = passed;
 	}
 	check(state, state->kernels->table_probe(&state->table,
 											 state->probe.hashes, state->keys.nkeys,
 											 state->keys.table_keys, &valid,
-											 state->probe.offsets, &found,
+											 state->probe.offsets, &valid,
 											 &state->status));
-	matches = tess_row_mask_count(&found);
+	matches = tess_row_mask_count(&valid);
 	if (!state->bloom.decided)
 		decide_bloom(state, count, matches);
 	return matches > 0;
