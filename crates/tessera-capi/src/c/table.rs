@@ -171,7 +171,7 @@ pub(super) unsafe fn attach<'a>(table: *const TableRef) -> Result<Table<'a>> {
     // SAFETY: the caller's contract.
     unsafe {
         let (table, chunks) = chunks_of(table)?;
-        Table::attach(table.index, table.index_len, chunks)
+        Ok(Table::attach(table.index, table.index_len, chunks)?)
     }
 }
 
@@ -184,7 +184,7 @@ unsafe fn attach_mut<'a>(table: *const TableRef) -> Result<TableMut<'a>> {
     // SAFETY: the caller's contract.
     unsafe {
         let (table, chunks) = chunks_of(table)?;
-        TableMut::attach_mut(table.index, table.index_len, chunks)
+        Ok(TableMut::attach_mut(table.index, table.index_len, chunks)?)
     }
 }
 
@@ -236,7 +236,7 @@ impl KeySource for TableKeys<'_> {
         self.nrows
     }
 
-    fn word(&self, key: usize, index: usize, selected: u64, out: &mut [i64; 64]) -> Result<u64> {
+    fn word(&self, key: usize, index: usize, selected: u64, out: &mut [i64; 64]) -> Option<u64> {
         assert!(key < self.nkeys, "a key below nkeys");
         // SAFETY: the first `nkeys` slots are initialized.
         match unsafe { self.columns[key].assume_init_ref() } {
@@ -438,7 +438,8 @@ pub unsafe extern "C" fn tess_table_create(
                 nkeys: usize::try_from(nkeys).context("a negative key count")?,
                 payload_size,
             };
-            TableMut::create(region, len, &config, capacity, Chunks::none()).map(drop)
+            TableMut::create(region, len, &config, capacity, Chunks::none())?;
+            Ok(())
         })
     }
 }
@@ -488,7 +489,7 @@ pub unsafe extern "C" fn tess_table_chunk_init(
     status: *mut Status,
 ) -> Code {
     // SAFETY: the caller's contract.
-    unsafe { guard(status, || init_chunk(base, len)) }
+    unsafe { guard(status, || Ok(init_chunk(base, len)?)) }
 }
 
 /// `tess_table_chunk_used`: the used mark of a chunk, checked.
@@ -569,10 +570,10 @@ pub unsafe extern "C" fn tess_table_append(
             };
             let mut batch = Batch::new(hashes, &decoded, &mut pending, offsets)?;
             match indexed {
-                Some(table) => table.append(chunk, payload, &mut batch),
-                None => ChunkWriter::new(&config, chunks)?.append(chunk, payload, &mut batch),
-            }
-            .map(drop)
+                Some(table) => table.append(chunk, payload, &mut batch)?,
+                None => ChunkWriter::new(&config, chunks)?.append(chunk, payload, &mut batch)?,
+            };
+            Ok(())
         })
     }
 }
@@ -621,18 +622,19 @@ pub unsafe extern "C" fn tess_table_append_columns(
             let offsets = slots(offsets, nrows, "offsets")?;
             let columns = values(columns, ncolumns, "payload columns")?;
             let mut batch = Batch::new(hashes, &decoded, &mut pending, offsets)?;
-            let append = |payload: &PayloadColumns<'_>| match &indexed {
-                Some(table) => table.append_columns(chunk, payload, &mut batch),
-                None => {
-                    ChunkWriter::new(&config, chunks)?.append_columns(chunk, payload, &mut batch)
-                }
+            let append = |payload: &PayloadColumns<'_>| -> Result<usize> {
+                Ok(match &indexed {
+                    Some(table) => table.append_columns(chunk, payload, &mut batch)?,
+                    None => ChunkWriter::new(&config, chunks)?
+                        .append_columns(chunk, payload, &mut batch)?,
+                })
             };
             if ncolumns <= 64 {
-                with_payload::<64, _>(columns, nrows, append)
+                with_payload::<64, _>(columns, nrows, append)?;
             } else {
-                with_wide_payload(columns, nrows, append)
+                with_wide_payload(columns, nrows, append)?;
             }
-            .map(drop)
+            Ok(())
         })
     }
 }
@@ -787,14 +789,13 @@ pub unsafe extern "C" fn tess_table_append_partitioned_columns(
             );
             let payload = PayloadColumns::new(words, flags, nrows)?;
             let mut batch = Batch::new(hashes, &decoded, &mut pending, offsets)?;
-            ChunkWriter::new(&config, chunks)?
-                .append_partitioned_columns(
-                    &partitions,
-                    &payload,
-                    &mut batch,
-                    &mut Appended { rows, nulls },
-                )
-                .map(drop)
+            ChunkWriter::new(&config, chunks)?.append_partitioned_columns(
+                &partitions,
+                &payload,
+                &mut batch,
+                &mut Appended { rows, nulls },
+            )?;
+            Ok(())
         })
     }
 }
@@ -968,7 +969,7 @@ impl<'a> LookupMasks<'a> {
         }
         // SAFETY: as above; another mask, of other words.
         let (rows, found) = unsafe { ((*rows).view()?, found.mask()?) };
-        check_rows(rows.nrows(), &[found.as_view().nrows()], "table")?;
+        check_rows(rows.nrows(), &[found.as_view().nrows()])?;
         Ok(Self {
             rows: Some(rows),
             found,
@@ -1033,9 +1034,10 @@ pub unsafe extern "C" fn tess_table_probe(
                 config.nkeys,
                 decoded.nkeys()
             );
-            check_rows(nrows, &[decoded.nrows()], "table")?;
+            check_rows(nrows, &[decoded.nrows()])?;
             let mut lookup = Matches::from_mask(masks.narrowed()?, matches)?;
-            table.probe(hashes, &decoded, &mut lookup).map(drop)
+            table.probe(hashes, &decoded, &mut lookup)?;
+            Ok(())
         })
     }
 }
@@ -1064,7 +1066,8 @@ pub unsafe extern "C" fn tess_table_next_match(
             let masks = LookupMasks::new(rows, found)?;
             let offsets = slots(offsets, masks.nrows(), "offsets")?;
             let mut lookup = Matches::from_mask(masks.narrowed()?, offsets)?;
-            table.next_match(&mut lookup).map(drop)
+            table.next_match(&mut lookup)?;
+            Ok(())
         })
     }
 }
@@ -1094,7 +1097,7 @@ pub unsafe extern "C" fn tess_table_gather(
             let nrows = rows.nrows();
             let offsets = values(offsets, nrows, "offsets")?;
             let out = slots(out, nrows, "results")?;
-            table.gather(MatchesView::new(rows, offsets)?, at, out)
+            Ok(table.gather(MatchesView::new(rows, offsets)?, at, out)?)
         })
     }
 }
@@ -1122,7 +1125,7 @@ pub unsafe extern "C" fn tess_table_gather_scattered(
             let nrows = rows.nrows();
             let offsets = values(offsets, nrows, "offsets")?;
             let out = slots(out, nrows, "results")?;
-            table.gather_scattered(MatchesView::new(rows, offsets)?, at, out)
+            Ok(table.gather_scattered(MatchesView::new(rows, offsets)?, at, out)?)
         })
     }
 }
@@ -1196,7 +1199,8 @@ pub unsafe extern "C" fn tess_table_next_in_group(
             let masks = LookupMasks::new(rows, found)?;
             let offsets = slots(offsets, masks.nrows(), "offsets")?;
             let mut lookup = Matches::from_mask(masks.narrowed()?, offsets)?;
-            table.next_in_group(&mut lookup).map(drop)
+            table.next_in_group(&mut lookup)?;
+            Ok(())
         })
     }
 }
@@ -1270,9 +1274,8 @@ pub unsafe extern "C" fn tess_table_find_or_insert(
             let hashes = values(hashes, nrows, "hashes")?;
             let offsets = slots(offsets, nrows, "offsets")?;
             let mut batch = Batch::new(hashes, &decoded, &mut pending, offsets)?;
-            table
-                .find_or_insert(chunk, &mut batch, &mut inserted)
-                .map(drop)
+            table.find_or_insert(chunk, &mut batch, &mut inserted)?;
+            Ok(())
         })
     }
 }
@@ -1311,9 +1314,8 @@ pub unsafe extern "C" fn tess_table_find_or_insert_partitioned(
             let hashes = values(hashes, nrows, "hashes")?;
             let offsets = slots(offsets, nrows, "offsets")?;
             let mut batch = Batch::new(hashes, &decoded, &mut pending, offsets)?;
-            table
-                .find_or_insert_partitioned(&partitions, &mut batch, &mut inserted)
-                .map(drop)
+            table.find_or_insert_partitioned(&partitions, &mut batch, &mut inserted)?;
+            Ok(())
         })
     }
 }
@@ -1404,7 +1406,8 @@ pub unsafe extern "C" fn tess_table_payloads(
             let payloads = slots(payloads, nrows, "payload pointers")?;
             table.each_payload(offsets, &rows, |row, payload| {
                 payloads[row] = payload.as_mut_ptr();
-            })
+            })?;
+            Ok(())
         })
     }
 }
@@ -1616,7 +1619,8 @@ pub unsafe extern "C" fn tess_table_mark(
                     chunks: marks,
                     shared,
                 },
-            )
+            )?;
+            Ok(())
         })
     }
 }
@@ -1690,7 +1694,11 @@ pub unsafe extern "C" fn tess_table_regrow(
     status: *mut Status,
 ) -> Code {
     // SAFETY: the caller's contract.
-    unsafe { guard(status, || attach_mut(table)?.regrow(index, len, capacity)) }
+    unsafe {
+        guard(status, || {
+            Ok(attach_mut(table)?.regrow(index, len, capacity)?)
+        })
+    }
 }
 
 /// `TessTableAccumulate`: how `tess_table_accumulate` updates a state.
@@ -1960,7 +1968,7 @@ pub unsafe extern "C" fn tess_table_gather_key(
             let out = slots(values_out, nrows, "results")?;
             let nulls = slots(isnull, nrows, "NULL flags")?;
             let key = usize::try_from(key).context("a negative key")?;
-            table.gather_key(MatchesView::new(rows, offsets)?, key, out, nulls)
+            Ok(table.gather_key(MatchesView::new(rows, offsets)?, key, out, nulls)?)
         })
     }
 }
@@ -2031,7 +2039,7 @@ pub unsafe extern "C" fn tess_table_bloom(
         guard(status, || {
             let table = attach(table)?;
             let words = slots(words, nwords, "filter words")?;
-            table.bloom(words)
+            Ok(table.bloom(words)?)
         })
     }
 }
@@ -2057,7 +2065,7 @@ pub unsafe extern "C" fn tess_bloom_add(
             let rows = rows.as_ref().context("a null row mask")?.view()?;
             let words = slots(words, nwords, "filter words")?;
             let hashes = values(hashes, rows.nrows(), "hashes")?;
-            tessera_kernels::table::bloom::add(words, hashes, &rows)
+            Ok(tessera_kernels::table::bloom::add(words, hashes, &rows)?)
         })
     }
 }
@@ -2087,7 +2095,8 @@ pub unsafe extern "C" fn tess_bloom_probe(
             let hashes = values(hashes, masks.nrows(), "hashes")?;
             // A probe of no rows checks the filter, before `found` changes.
             tessera_kernels::table::bloom::probe(words, &[], &mut RowMask::try_new(0, &mut [])?)?;
-            tessera_kernels::table::bloom::probe(words, hashes, &mut masks.narrowed()?).map(drop)
+            tessera_kernels::table::bloom::probe(words, hashes, &mut masks.narrowed()?)?;
+            Ok(())
         })
     }
 }
@@ -2122,7 +2131,7 @@ pub unsafe extern "C" fn tess_bloom_shared_words(
 /// `words` as for [`SharedFilter::attach`] during the call.
 unsafe fn shared_filter<'a>(words: *mut u64, nwords: usize) -> Result<SharedFilter<'a>> {
     // SAFETY: the caller's contract.
-    unsafe { SharedFilter::attach(words, nwords) }
+    unsafe { Ok(SharedFilter::attach(words, nwords)?) }
 }
 
 /// `tess_bloom_shared_init`: clear a shared filter before any participant
@@ -2228,8 +2237,8 @@ pub unsafe extern "C" fn tess_bloom_shared_probe(
                 &[],
                 &mut RowMask::try_new(0, &mut [])?,
             )?;
-            tessera_kernels::table::bloom::probe_shared(&filter, hashes, &mut masks.narrowed()?)
-                .map(drop)
+            tessera_kernels::table::bloom::probe_shared(&filter, hashes, &mut masks.narrowed()?)?;
+            Ok(())
         })
     }
 }

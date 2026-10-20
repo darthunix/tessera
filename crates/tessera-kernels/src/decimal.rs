@@ -480,7 +480,7 @@ pub fn filter(
     rest: &mut RowMask<'_>,
 ) -> Result<()> {
     let nrows = rows.as_view().nrows();
-    check_rows(nrows, &[rest.as_view().nrows()], "decimal")?;
+    check_rows(nrows, &[rest.as_view().nrows()])?;
     let orders = orders(op);
     for word in 0..nrows.div_ceil(64) {
         let look = rows.as_view().word(word);
@@ -546,7 +546,6 @@ pub fn compute(
             results.decimals.as_view().nrows(),
             results.rest.as_view().nrows(),
         ],
-        "decimal",
     )?;
     // A loop for each operation: the choice is made once a call.
     match op {
@@ -604,7 +603,7 @@ fn compute_with(
         }
         results.non_nulls.set_word(word, present)?;
         results.decimals.set_word(word, decimals)?;
-        results.rest.set_word(word, other)
+        Ok(results.rest.set_word(word, other)?)
     })
 }
 
@@ -627,7 +626,6 @@ fn to_int<T: Copy>(
             non_nulls.as_view().nrows(),
             rest.as_view().nrows(),
         ],
-        "decimal",
     )?;
     for_each_word(rows, |word, look| {
         let (mut present, mut other) = (0, 0);
@@ -646,7 +644,7 @@ fn to_int<T: Copy>(
             present |= 1 << bit;
         }
         non_nulls.set_word(word, present)?;
-        rest.set_word(word, other)
+        Ok(rest.set_word(word, other)?)
     })
 }
 
@@ -838,7 +836,7 @@ pub fn sum_terms(
     total: &mut Sum,
     rest: &mut RowMask<'_>,
 ) -> Result<()> {
-    check_rows(rows.nrows(), &[rest.as_view().nrows()], "decimal")?;
+    check_rows(rows.nrows(), &[rest.as_view().nrows()])?;
     ensure!(
         total.value.abs() < SUM_BOUND && total.scale <= MAX_READ_SCALE,
         "a decimal sum past its bound"
@@ -868,7 +866,7 @@ pub fn sum_terms(
                 _ => other |= 1 << bit,
             }
         }
-        rest.set_word(word, other)
+        Ok(rest.set_word(word, other)?)
     })?;
     *total = sum;
     Ok(())
@@ -891,7 +889,7 @@ pub fn merge_partials(
     total: &mut Sum,
     rest: &mut RowMask<'_>,
 ) -> Result<()> {
-    check_rows(rows.nrows(), &[rest.as_view().nrows()], "decimal")?;
+    check_rows(rows.nrows(), &[rest.as_view().nrows()])?;
     ensure!(
         total.value.abs() < SUM_BOUND && total.scale <= MAX_READ_SCALE,
         "a decimal sum past its bound"
@@ -910,7 +908,7 @@ pub fn merge_partials(
                 _ => other |= 1 << bit,
             }
         }
-        rest.set_word(word, other)
+        Ok(rest.set_word(word, other)?)
     })?;
     *total = sum;
     Ok(())
@@ -944,7 +942,7 @@ pub fn extreme(
     state: Option<Decimal>,
     rest: &mut RowMask<'_>,
 ) -> Result<Option<(usize, Decimal)>> {
-    check_rows(rows.nrows(), &[rest.as_view().nrows()], "decimal")?;
+    check_rows(rows.nrows(), &[rest.as_view().nrows()])?;
     if max {
         extreme_of::<true>(terms, rows, state, rest)
     } else {
@@ -997,7 +995,7 @@ fn extreme_of<const MAX: bool>(
                     found = Some(word * 64 + top_bit);
                 }
             }
-            return rest.set_word(word, 0);
+            return Ok(rest.set_word(word, 0)?);
         }
         let mut other = 0;
         for bit in ones(look) {
@@ -1013,7 +1011,7 @@ fn extreme_of<const MAX: bool>(
                 Term::Special(_) | Term::Other => other |= 1 << bit,
             }
         }
-        rest.set_word(word, other)
+        Ok(rest.set_word(word, other)?)
     })?;
     Ok(found.zip(best))
 }
@@ -1456,7 +1454,6 @@ pub fn read(
     check_rows(
         rows.nrows(),
         &[values.len(), by_row, decimals.as_view().nrows()],
-        "decimal",
     )?;
     // A loop for each way of keeping scales: the choice is made once a call.
     match &mut scales {
@@ -1503,7 +1500,7 @@ fn read_with(
             }
         }
         let kept = decimals.as_view().word(word) & !selected;
-        decimals.set_word(word, kept | found)
+        Ok(decimals.set_word(word, kept | found)?)
     })
 }
 

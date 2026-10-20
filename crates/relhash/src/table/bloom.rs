@@ -56,13 +56,13 @@
 //! // Rows 0 and 1, hashes 7 and 8, always pass. Row 2 may pass too: a
 //! // filter lets an absent hash through now and then.
 //! assert!(rows.as_view().contains(0)? && rows.as_view().contains(1)?);
-//! # Ok::<(), anyhow::Error>(())
+//! # Ok::<(), relhash::Error>(())
 //! ```
 
 use core::sync::atomic::AtomicU64;
 
+use crate::error::{Error, Result, Rule, ensure};
 use crate::{RowMask, RowMaskView, check_rows, ones};
-use anyhow::{Result, bail, ensure};
 
 use super::header::{CHUNK_HEADER, Layout, Place};
 use super::record::{Access, check_record, unlinked};
@@ -132,17 +132,17 @@ impl<'a> SharedFilter<'a> {
     pub unsafe fn attach(words: *mut u64, nwords: usize) -> Result<Self> {
         ensure!(
             !words.is_null() && words.addr().is_multiple_of(8),
-            "a shared filter must be aligned to 8 bytes"
+            Error::wrong_call(Rule::FilterAlign)
         );
         ensure!(
             nwords >= 2 && (nwords - 1).is_power_of_two(),
-            "a shared filter has a state word and a power of two of words, not {nwords} words"
+            Error::wrong_call(Rule::FilterWords).with(nwords)
         );
         // SAFETY: the caller's contract; an `AtomicU64` has the size and
         // alignment of a `u64`, and every access goes through atomics.
         let all = unsafe { core::slice::from_raw_parts(words.cast::<AtomicU64>(), nwords) };
         let Some((state, words)) = all.split_first() else {
-            bail!("a shared filter without its state word");
+            return Err(Error::wrong_call(Rule::FilterState));
         };
         Ok(Self { state, words })
     }
@@ -231,7 +231,7 @@ const SPREAD: u64 = 0x9E37_79B9_7F4A_7C15;
 pub fn shared_words_for(records: u64) -> Result<usize> {
     words_for(records)?
         .checked_add(1)
-        .ok_or_else(|| anyhow::anyhow!("a filter for {records} records is too large"))
+        .ok_or(Error::wrong_call(Rule::FilterRecords).with(records))
 }
 
 /// The words of a filter for a table of `records` records: a power of
@@ -242,7 +242,7 @@ pub fn words_for(records: u64) -> Result<usize> {
         .map(|bits| bits.div_ceil(64).max(1))
         .and_then(u64::checked_next_power_of_two)
         .and_then(|words| usize::try_from(words).ok());
-    words.ok_or_else(|| anyhow::anyhow!("a filter for {records} records is too large"))
+    words.ok_or(Error::wrong_call(Rule::FilterRecords).with(records))
 }
 
 /// The words of a filter for a table of `records` records within an
@@ -262,7 +262,7 @@ pub fn words_within(records: u64, limit: usize) -> Result<usize> {
 pub(super) fn shift_for(nwords: usize) -> Result<u32> {
     ensure!(
         nwords.is_power_of_two(),
-        "a filter has a power of two of words, not {nwords}"
+        Error::wrong_call(Rule::FilterSize).with(nwords)
     );
     Ok(64 - nwords.trailing_zeros())
 }
@@ -339,7 +339,7 @@ pub(super) fn try_build<R: Region, F: FilterShared + ?Sized>(
 /// let words = vec![0; bloom::words_for(100)?];
 /// let mut rows = [1 << 0 | 1 << 1];
 /// assert_eq!(bloom::probe(&words, &[7, 8], &mut RowMask::try_new(2, &mut rows)?)?, 0);
-/// # Ok::<(), anyhow::Error>(())
+/// # Ok::<(), relhash::Error>(())
 /// ```
 pub fn probe(words: &[u64], hashes: &[u32], rows: &mut RowMask<'_>) -> Result<usize> {
     check(words, hashes, rows)
@@ -368,12 +368,12 @@ pub fn probe(words: &[u64], hashes: &[u32], rows: &mut RowMask<'_>) -> Result<us
 /// assert!(rows.as_view().contains(0)? && rows.as_view().contains(1)?);
 /// // A filter's words are a power of two.
 /// assert!(bloom::add(&mut words[..3], &[7], &RowMaskView::try_new(1, &[1 << 0])?).is_err());
-/// # Ok::<(), anyhow::Error>(())
+/// # Ok::<(), relhash::Error>(())
 /// ```
 pub fn add(words: &mut [u64], hashes: &[u32], rows: &RowMaskView<'_>) -> Result<()> {
     let nrows = rows.nrows();
     let shift = shift_for(words.len())?;
-    check_rows(nrows, &[hashes.len()], "Bloom filter")?;
+    check_rows(nrows, &[hashes.len()])?;
     for index in 0..nrows.div_ceil(64) {
         for bit in ones(rows.word(index)) {
             let (word, mask) = place(hashes[index * 64 + bit], shift);
@@ -402,7 +402,7 @@ pub unsafe fn add_atomic(
     let shift = shift_for(nwords)?;
     ensure!(
         !words.is_null() && words.addr().is_multiple_of(8),
-        "the words of a filter filled at once must be aligned to 8 bytes"
+        Error::wrong_call(Rule::FilterFillAlign)
     );
     // SAFETY: the caller's contract; an `AtomicU64` has the size and
     // alignment of a `u64`.
@@ -421,7 +421,7 @@ pub(super) fn add_with<F: FilterOr + ?Sized>(
     rows: &RowMaskView<'_>,
 ) -> Result<()> {
     let nrows = rows.nrows();
-    check_rows(nrows, &[hashes.len()], "Bloom filter")?;
+    check_rows(nrows, &[hashes.len()])?;
     for index in 0..nrows.div_ceil(64) {
         for bit in ones(rows.word(index)) {
             let (word, mask) = place(hashes[index * 64 + bit], shift);
@@ -450,7 +450,7 @@ pub(super) fn probe_ready<F: FilterShared + ?Sized>(
     hashes: &[u32],
     rows: &mut RowMask<'_>,
 ) -> Result<usize> {
-    ensure!(filter.ready(), "the shared filter is not built yet");
+    ensure!(filter.ready(), Error::wrong_call(Rule::FilterNotBuilt));
     check(filter, hashes, rows)
 }
 
@@ -462,7 +462,7 @@ fn check<F: FilterRead + ?Sized>(
 ) -> Result<usize> {
     let nrows = rows.as_view().nrows();
     let shift = shift_for(words.nwords())?;
-    check_rows(nrows, &[hashes.len()], "Bloom filter")?;
+    check_rows(nrows, &[hashes.len()])?;
     let mut left = 0;
     for (index, selected) in rows.words_mut().iter_mut().enumerate() {
         let mut hits = 0;

@@ -685,11 +685,7 @@ fn map_rows<L: Copy, R: Copy, T>(
     non_nulls: &mut RowMask<'_>,
     apply: impl Fn(L, R) -> Result<T, CalendarError>,
 ) -> Result<()> {
-    check_rows(
-        rows.nrows(),
-        &[values.len(), non_nulls.as_view().nrows()],
-        "calendar",
-    )?;
+    check_rows(rows.nrows(), &[values.len(), non_nulls.as_view().nrows()])?;
     for word in 0..rows.nrows().div_ceil(64) {
         let look = rows.word(word);
         let mut present = 0;
@@ -821,7 +817,6 @@ pub fn truncate_locals(
     check_rows(
         rows.nrows(),
         &[values.len(), days.as_view().nrows(), rest.as_view().nrows()],
-        "calendar",
     )?;
     for word in 0..rows.nrows().div_ceil(64) {
         let look = rows.word(word);
@@ -936,7 +931,6 @@ fn extract_rows<T>(
             out.non_nulls.as_view().nrows(),
             out.rest.as_view().nrows(),
         ],
-        "calendar",
     )?;
     let mut fields = DayFields::default();
     for word in 0..rows.nrows().div_ceil(64) {

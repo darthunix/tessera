@@ -516,7 +516,7 @@ pub unsafe extern "C" fn tess_bloom_add_atomic(
         guard(status, || {
             let rows: RowMaskView<'_> = rows.as_ref().context("a null row mask")?.view()?;
             let hashes = values(hashes, rows.nrows(), "hashes")?;
-            bloom::add_atomic(words, nwords, hashes, &rows)
+            Ok(bloom::add_atomic(words, nwords, hashes, &rows)?)
         })
     }
 }

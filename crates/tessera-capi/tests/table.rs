@@ -2036,8 +2036,9 @@ fn datum_words_normalize_like_rows_under_partial_readiness() -> Result<()> {
         let (whole, partial) = unsafe { (column.int32(None)?, column.int32(Some(prepared_view))?) };
         for (index, &selected) in prepared.iter().enumerate() {
             let (mut from_whole, mut from_partial) = ([7; 64], [7; 64]);
-            let whole_bits = normalize_word(&whole, index, selected, &mut from_whole)?;
-            let partial_bits = normalize_word(&partial, index, selected, &mut from_partial)?;
+            let whole_bits = normalize_word(&whole, index, selected, &mut from_whole).unwrap();
+            let partial_bits =
+                normalize_word(&partial, index, selected, &mut from_partial).unwrap();
             assert_eq!(whole_bits, partial_bits, "{nrows} rows, word {index}");
             for bit in (0..64).filter(|bit| selected >> bit & 1 != 0) {
                 assert_eq!(from_whole[bit], from_partial[bit]);

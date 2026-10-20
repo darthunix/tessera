@@ -24,13 +24,14 @@ mod writer;
 use core::marker::PhantomData;
 use core::ops::Deref;
 
+use crate::error::{Error, Kind, Result, Rule, ensure};
 use crate::{RowMask, RowMaskView};
-use anyhow::{Result, anyhow, ensure};
 
 pub use batch::{Batch, Matches, MatchesView};
 pub use chunks::{
     Appended, ChunkWriter, Chunks, MAX_PARTITIONS, Partitions, Split, chunk_used, init_chunk,
 };
+pub(crate) use header::MIN_BUCKETS;
 pub use header::{
     CHUNK_HEADER, FORMAT_VERSION, HEADER_SIZE, MAX_CHUNK_LEN, MAX_CHUNKS, MAX_KEYS, TableConfig,
     UNIT_BITS, VERSION_OFFSET, index_size, record_bytes,
@@ -61,14 +62,10 @@ pub struct Stats {
 /// The error of a call whose keys or payload size are not its table's.
 #[cold]
 #[inline(never)]
-fn other_config(config: &TableConfig, layout: &Layout) -> anyhow::Error {
-    anyhow!(
-        "records of {} keys and a payload of {} bytes are not the table's: {} keys and {} bytes",
-        config.nkeys,
-        config.payload_size,
-        layout.nkeys,
-        layout.payload_size
-    )
+fn other_config(config: &TableConfig) -> Error {
+    Error::wrong_call(Rule::Config)
+        .with(config.payload_size)
+        .and(config.nkeys)
 }
 
 /// A table over an index and chunks, as several participants may share it.
@@ -113,11 +110,11 @@ unsafe fn init<R: Region>(region: &R, config: &TableConfig, capacity: u64) -> Re
 fn check_region(region: *mut u8, len: usize) -> Result<()> {
     ensure!(
         !region.is_null() && region.addr().is_multiple_of(8),
-        "a table index must be aligned to 8 bytes"
+        Error::wrong_call(Rule::IndexAlign)
     );
     ensure!(
         len >= HEADER_SIZE,
-        "a table index of {len} bytes is shorter than the {HEADER_SIZE}-byte header"
+        Error::wrong_call(Rule::IndexShort).with(len)
     );
     Ok(())
 }
@@ -182,7 +179,7 @@ impl<'a> Table<'a> {
         if self.config() == *config {
             Ok(())
         } else {
-            Err(other_config(config, &self.layout))
+            Err(other_config(config))
         }
     }
 
@@ -392,7 +389,7 @@ impl<'a> Table<'a> {
     /// The record at a reference a call of this table returned.
     pub fn record(&self, reference: u32) -> Result<Record<'_>> {
         Ok(Access::new(&self.region, &self.layout)
-            .locate(reference)?
+            .locate(reference, Kind::WrongCall)?
             .record())
     }
 
@@ -428,7 +425,7 @@ impl<'t> RecordCursor<'t> {
     /// record of the table.
     #[inline(always)]
     pub fn record(&mut self, reference: u32) -> Result<Record<'t>> {
-        Ok(self.access.locate(reference)?.record())
+        Ok(self.access.locate(reference, Kind::WrongCall)?.record())
     }
 }
 
@@ -514,13 +511,13 @@ impl<'a> TableMut<'a> {
     /// record of new keys needs another chunk or a larger index; the
     /// count merged is returned. When the rule fails, the call returns
     /// its error, the records before it merged.
-    pub fn merge(
+    pub fn merge<E: From<Error>>(
         &mut self,
         source: usize,
         from: &mut usize,
         chunk: usize,
-        rule: impl FnMut(&[u8], &mut [u8]) -> Result<()>,
-    ) -> Result<(usize, CombineStop)> {
+        rule: impl FnMut(&[u8], &mut [u8]) -> Result<(), E>,
+    ) -> Result<(usize, CombineStop), E> {
         writer::merge(&self.0.region, &self.0.layout, source, from, chunk, rule)
     }
 
