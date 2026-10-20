@@ -32,3 +32,52 @@ impl KeySource for IntKeys<'_> {
         Some(selected)
     }
 }
+
+/// A key column of the table's own tests: each row's value as its slot
+/// holds it, and the rows that are not NULL, every row when `None`.
+#[cfg(test)]
+pub(crate) struct Column {
+    slots: Vec<i64>,
+    non_null: Option<Vec<u64>>,
+}
+
+#[cfg(test)]
+impl Column {
+    /// A column of `values`, int4 or int8 alike, NULL where `non_null`
+    /// has no bit.
+    pub(crate) fn new<T: Copy + Into<i64>>(values: &[T], non_null: Option<&[u64]>) -> Self {
+        Self {
+            slots: values.iter().map(|&value| value.into()).collect(),
+            non_null: non_null.map(<[u64]>::to_vec),
+        }
+    }
+}
+
+/// Columns of keys, one key each, of any count and with NULLs: the source
+/// of keys of the table's own tests.
+#[cfg(test)]
+pub(crate) struct Keys<'a>(pub(crate) &'a [Column]);
+
+#[cfg(test)]
+impl KeySource for Keys<'_> {
+    fn nkeys(&self) -> usize {
+        self.0.len()
+    }
+
+    fn nrows(&self) -> usize {
+        self.0.first().map_or(0, |column| column.slots.len())
+    }
+
+    fn word(&self, key: usize, index: usize, selected: u64, out: &mut [i64; 64]) -> Option<u64> {
+        let column = &self.0[key];
+        let non_null = match &column.non_null {
+            Some(words) => selected & words.get(index)?,
+            None => selected,
+        };
+        for bit in ones(selected) {
+            let slot = *column.slots.get(index * 64 + bit)?;
+            out[bit] = if non_null >> bit & 1 == 1 { slot } else { 0 };
+        }
+        Some(non_null)
+    }
+}

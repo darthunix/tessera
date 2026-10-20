@@ -1782,12 +1782,14 @@ How a spilled chunk of records is written to disk is in
 
 ## Tests
 
-- `crates/tessera-kernels/tests/table.rs`: the format and every call,
-  with damaged headers, chunks, references and chains; it also runs
-  under Miri.
+- The unit tests in `crates/relhash/src/table/tests/`: the format and
+  every call, with damaged headers, chunks, references and chains, over
+  keys of their own; they also run under Miri.
 - The unit tests in `crates/relhash/src/table/tests.rs`: blocks
   that are not chunks or an index, partitions, merges, and a shared
   filter that threads race to build.
+- `crates/tessera-kernels/tests/table.rs`: keys read from columns, and
+  the states of groups folded into records and merged.
 - The unit tests in `crates/tessera-kernels/src/accumulate.rs`: the
   states of groups merged by their kinds, and a count past the int8
   range.
