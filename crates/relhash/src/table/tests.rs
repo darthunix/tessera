@@ -1,6 +1,236 @@
+//! The table's tests, over keys of their own (`testing.rs`). This file
+//! holds those of blocks, partitions, merges and threads, and the helpers
+//! of all; the files under `tests/` hold those of the format, the
+//! lookups, the records and the filter.
+
+mod filter;
+mod format;
+mod lookup;
+mod records;
+
+use proptest::strategy::Strategy;
+use proptest::test_runner::{TestCaseError, TestRunner};
+
 use super::testing::{IntKeys, refusal};
 use super::*;
 use crate::{Error, Kind, Rule};
+
+/// Bytes of the header, as the format fixes it.
+const HEADER: usize = 96;
+
+/// Byte offsets of the header fields the tests corrupt.
+const MAGIC: usize = 0;
+const VERSION: usize = 8;
+const HEADER_SIZE: usize = 12;
+const REGION_LEN: usize = 16;
+const BUCKETS_OFFSET: usize = 24;
+const RESERVED_USED: usize = 32;
+const NRECORDS: usize = 40;
+const NBUCKETS: usize = 48;
+const BUCKET_SHIFT: usize = 52;
+const RECORD_SIZE: usize = 56;
+const NKEYS: usize = 64;
+const FLAGS: usize = 68;
+const RESERVED: usize = 72;
+
+/// The bytes of one field, whatever the word boundaries.
+fn set_bytes(words: &mut [u64], offset: usize, bytes: &[u8]) {
+    for (i, &byte) in bytes.iter().enumerate() {
+        let at = offset + i;
+        let mut word = words[at / 8].to_ne_bytes();
+        word[at % 8] = byte;
+        words[at / 8] = u64::from_ne_bytes(word);
+    }
+}
+
+fn set_u32(words: &mut [u64], offset: usize, value: u32) {
+    set_bytes(words, offset, &value.to_ne_bytes());
+}
+
+fn set_u64(words: &mut [u64], offset: usize, value: u64) {
+    set_bytes(words, offset, &value.to_ne_bytes());
+}
+
+/// The record size of the format: header, key slots and payload, rounded
+/// up to 8.
+fn model_record_size(nkeys: usize, payload_size: usize) -> usize {
+    (16 + 8 * nkeys + payload_size + 7) & !7
+}
+
+/// The bucket count of the format: a power of two, at least 1024 and at
+/// least twice the capacity.
+fn model_buckets(capacity: u64) -> u64 {
+    (capacity * 2).max(1024).next_power_of_two()
+}
+
+/// Chunks of the tests: small, so that most tables span several.
+const CHUNK: usize = 4096;
+
+const ONE_INT4: TableConfig = TableConfig {
+    nkeys: 1,
+    payload_size: 8,
+};
+
+/// An empty table for `capacity` records of `config` over chunks of
+/// [`CHUNK`] bytes.
+fn local(config: &TableConfig, capacity: u64) -> anyhow::Result<OwnedTable> {
+    Ok(OwnedTable::new(config, capacity, CHUNK)?)
+}
+
+/// The chunk and the byte in it of a record reference, as the format
+/// packs them.
+fn placement(reference: u32) -> (usize, usize) {
+    (
+        (reference >> UNIT_BITS) as usize,
+        (reference & ((1 << UNIT_BITS) - 1)) as usize * 8,
+    )
+}
+
+/// The reference of the record at `byte` of chunk `chunk`.
+fn reference(chunk: usize, byte: usize) -> u32 {
+    ((chunk as u32) << UNIT_BITS) | (byte / 8) as u32
+}
+
+/// The int4 value whose hash the tests give a NULL key, as a grouping
+/// does; any value would do, since the hash is the caller's.
+const GROUP_KEY: i32 = 0x9e37_79b9_u32 as i32;
+
+fn hash_i32(value: i32) -> u32 {
+    murmurhash32(value as u32)
+}
+
+/// Some hash of an int8; the table takes whatever the caller computes.
+fn hash_i64(value: i64) -> u32 {
+    murmurhash32((value as u64 ^ (value as u64 >> 32)) as u32)
+}
+
+/// Mask words with every one of `nrows` rows set.
+fn all_rows(nrows: usize) -> Vec<u64> {
+    let mut words = vec![u64::MAX; nrows.div_ceil(64)];
+    if !nrows.is_multiple_of(64) {
+        *words.last_mut().unwrap() = (1 << (nrows % 64)) - 1;
+    }
+    words
+}
+
+/// The rows a mask holds.
+fn rows_of(view: &RowMaskView<'_>) -> Vec<usize> {
+    view.selected_rows().collect()
+}
+
+/// A payload of eight bytes per row: the row number times ten.
+fn payload_for(nrows: usize) -> Vec<u8> {
+    (0..nrows as u64)
+        .flat_map(|row| (row * 10).to_ne_bytes())
+        .collect()
+}
+
+/// Append and link every row of a batch, expecting all of them to go in.
+fn insert_all<K: KeySource + ?Sized>(
+    table: &mut OwnedTable,
+    hashes: &[u32],
+    keys: &K,
+    payload: Option<&[u8]>,
+) -> anyhow::Result<Vec<u32>> {
+    let nrows = hashes.len();
+    let mut pending_words = all_rows(nrows);
+    let mut pending = RowMask::try_new(nrows, &mut pending_words)?;
+    let mut offsets = vec![0; nrows];
+    let inserted = table.insert(
+        payload,
+        &mut Batch::new(hashes, keys, &mut pending, &mut offsets)?,
+    )?;
+    assert_eq!(inserted, nrows);
+    assert_eq!(pending.as_view().selected_count(), 0);
+    Ok(offsets)
+}
+
+/// Probe every row of a batch: the rows found and their matches.
+fn probe_all<K: KeySource + ?Sized>(
+    table: &Table<'_>,
+    hashes: &[u32],
+    keys: &K,
+) -> anyhow::Result<(Vec<usize>, Vec<u32>)> {
+    let nrows = hashes.len();
+    let mut rows = all_rows(nrows);
+    let mut refs = vec![0; nrows];
+    let mut matches = Matches::new(&mut rows, &mut refs)?;
+    let left = table.probe(hashes, keys, &mut matches)?;
+    let found = rows_of(&matches.rows());
+    assert_eq!(left, found.len(), "the call counts the rows it keeps");
+    Ok((found, refs))
+}
+
+/// Resolve every row of a batch to a record, adding chunks and building a
+/// larger index as needed: the references and the rows whose record was
+/// created.
+fn resolve_all<K: KeySource + ?Sized>(
+    table: &mut OwnedTable,
+    hashes: &[u32],
+    keys: &K,
+) -> anyhow::Result<(Vec<u32>, Vec<usize>)> {
+    let nrows = hashes.len();
+    let mut pending_words = all_rows(nrows);
+    let mut pending = RowMask::try_new(nrows, &mut pending_words)?;
+    let mut offsets = vec![0; nrows];
+    let mut inserted_words = vec![0; nrows.div_ceil(64)];
+    let mut inserted = RowMask::try_new(nrows, &mut inserted_words)?;
+    let resolved = table.find_or_insert(
+        &mut Batch::new(hashes, keys, &mut pending, &mut offsets)?,
+        &mut inserted,
+    )?;
+    assert_eq!(resolved, nrows);
+    assert_eq!(pending.as_view().selected_count(), 0);
+    let created = rows_of(&inserted.as_view());
+    Ok((offsets, created))
+}
+
+/// Every record of a table in the order it was appended, through walks of
+/// `step`.
+fn scan_all(table: &mut OwnedTable, step: usize) -> anyhow::Result<Vec<u32>> {
+    let table = table.table_mut()?;
+    let mut cursor = Cursor::start();
+    let mut out = vec![0; step];
+    let mut all = Vec::new();
+    loop {
+        let count = table.scan(&mut cursor, &mut out)?;
+        if count == 0 {
+            break;
+        }
+        all.extend_from_slice(&out[..count]);
+    }
+    assert_eq!(table.scan(&mut cursor, &mut out)?, 0, "the walk stays over");
+    Ok(all)
+}
+
+/// The words of a mask of `flags`: row `r` at bit `r % 64` of word `r / 64`.
+fn words(flags: &[bool]) -> Vec<u64> {
+    let mut words = vec![0; flags.len().div_ceil(64)];
+    for (row, &flag) in flags.iter().enumerate() {
+        words[row / 64] |= u64::from(flag) << (row % 64);
+    }
+    words
+}
+
+/// Fold the hash `b` of a further key into `a`, as PostgreSQL's
+/// `hash_combine`.
+fn hash_combine(a: u32, b: u32) -> u32 {
+    a ^ b
+        .wrapping_add(0x9e37_79b9)
+        .wrapping_add(a << 6)
+        .wrapping_add(a >> 2)
+}
+
+/// Run `test` on the cases of `strategy`, and panic with the smallest
+/// failing case.
+fn property<S: Strategy>(strategy: S, test: impl Fn(S::Value) -> anyhow::Result<()>) {
+    let outcome = TestRunner::default().run(&strategy, |case| {
+        test(case).map_err(|error| TestCaseError::fail(format!("{error:?}")))
+    });
+    if let Err(failure) = outcome {
+        panic!("{failure}");
+    }
+}
 
 /// The blocks of a table, which the threads of a test attach to.
 struct Shared {
@@ -426,15 +656,6 @@ fn a_split_that_cannot_be_done_is_refused() {
 fn key_batch(keys: &[i32]) -> (Vec<u32>, Vec<u64>) {
     let hashes = keys.iter().map(|&key| murmurhash32(key as u32)).collect();
     (hashes, all_rows(keys.len()))
-}
-
-/// The words of a mask of `nrows` rows, every row selected.
-fn all_rows(nrows: usize) -> Vec<u64> {
-    let mut words = vec![0; nrows.div_ceil(64)];
-    for row in 0..nrows {
-        words[row / 64] |= 1 << (row % 64);
-    }
-    words
 }
 
 /// Whether the words of a mask select row `row`.
