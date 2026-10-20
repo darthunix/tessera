@@ -1,5 +1,6 @@
-use super::testing::IntKeys;
+use super::testing::{IntKeys, refusal};
 use super::*;
+use crate::{Error, Kind, Rule};
 
 /// The blocks of a table, which the threads of a test attach to.
 struct Shared {
@@ -300,13 +301,13 @@ fn partitions_past_the_hash_or_the_chunks_are_refused() {
         blocks.add(CHUNK_HEADER + 256 * 32);
     }
     let many = vec![0; 2 * MAX_PARTITIONS];
-    let cases: [(u32, &[u32], &str); 6] = [
-        (0, &[], "power of two"),
-        (0, &[0, 1, 2], "power of two"),
-        (0, &many, "power of two"),
-        (31, &[0, 1, 2, 3], "past the 32 bits"),
-        (0, &[0, 1, 2, 9], "does not exist"),
-        (32, &[0], "past the 32 bits"),
+    let cases: [(u32, &[u32], Rule); 6] = [
+        (0, &[], Rule::Partitions),
+        (0, &[0, 1, 2], Rule::Partitions),
+        (0, &many, Rule::Partitions),
+        (31, &[0, 1, 2, 3], Rule::PartitionBits),
+        (0, &[0, 1, 2, 9], Rule::NoChunk),
+        (32, &[0], Rule::PartitionBits),
     ];
     // A lookup by partition into a table over the same chunks.
     let mut table = OwnedTable::new(&ONE_WORD, 64, CHUNK_HEADER + 256 * 32).unwrap();
@@ -316,55 +317,48 @@ fn partitions_past_the_hash_or_the_chunks_are_refused() {
     let keys = [1, 2, 3];
     let column = IntKeys(&keys);
     let (hashes, all) = key_batch(&keys);
-    for (shift, chunks, message) in cases {
+    for (shift, chunks, rule) in cases {
         let mut from = CHUNK_HEADER;
-        let error = ChunkWriter::new(&ONE_WORD, blocks.chunks())
-            .unwrap()
-            .split(
-                &Partitions { shift, chunks },
-                4,
-                &mut from,
-                &mut [0; 4],
-                &mut [0; 4],
-            )
-            .unwrap_err();
-        assert!(error.to_string().contains(message), "{error}");
-        assert_eq!(from, CHUNK_HEADER);
-        let (mut pending_words, mut inserted_words) = (all.clone(), vec![0; 1]);
-        let error = table
-            .table_mut()
-            .unwrap()
-            .find_or_insert_partitioned(
-                &Partitions { shift, chunks },
-                &mut Batch::new(
-                    &hashes,
-                    &column,
-                    &mut RowMask::try_new(3, &mut pending_words).unwrap(),
-                    &mut [0; 3],
-                )
-                .unwrap(),
-                &mut RowMask::try_new(3, &mut inserted_words).unwrap(),
-            )
-            .unwrap_err();
-        assert!(error.to_string().contains(message), "{error}");
-        assert_eq!(pending_words, all, "{message}: a row resolved");
-        assert_eq!(table.table().unwrap().stats().records, 0);
-    }
-    let mut from = CHUNK_HEADER;
-    let error = ChunkWriter::new(&ONE_WORD, blocks.chunks())
-        .unwrap()
-        .split(
-            &Partitions {
-                shift: 0,
-                chunks: &[0, 1],
-            },
-            1,
+        let split = ChunkWriter::new(&ONE_WORD, blocks.chunks()).unwrap().split(
+            &Partitions { shift, chunks },
+            4,
             &mut from,
             &mut [0; 4],
             &mut [0; 4],
-        )
-        .unwrap_err();
-    assert!(error.to_string().contains("into itself"), "{error}");
+        );
+        assert_eq!(refusal(split), Some((Kind::WrongCall, rule)));
+        assert_eq!(from, CHUNK_HEADER);
+        let (mut pending_words, mut inserted_words) = (all.clone(), vec![0; 1]);
+        let found = table.table_mut().unwrap().find_or_insert_partitioned(
+            &Partitions { shift, chunks },
+            &mut Batch::new(
+                &hashes,
+                &column,
+                &mut RowMask::try_new(3, &mut pending_words).unwrap(),
+                &mut [0; 3],
+            )
+            .unwrap(),
+            &mut RowMask::try_new(3, &mut inserted_words).unwrap(),
+        );
+        assert_eq!(refusal(found), Some((Kind::WrongCall, rule)));
+        assert_eq!(pending_words, all, "{rule:?}: a row resolved");
+        assert_eq!(table.table().unwrap().stats().records, 0);
+    }
+    let mut from = CHUNK_HEADER;
+    let split = ChunkWriter::new(&ONE_WORD, blocks.chunks()).unwrap().split(
+        &Partitions {
+            shift: 0,
+            chunks: &[0, 1],
+        },
+        1,
+        &mut from,
+        &mut [0; 4],
+        &mut [0; 4],
+    );
+    assert_eq!(
+        refusal(split),
+        Some((Kind::WrongCall, Rule::SplitIntoItself))
+    );
 }
 
 /// A split of no records would answer as the end of its chunk does;
@@ -392,31 +386,38 @@ fn a_split_that_cannot_be_done_is_refused() {
         nkeys: 1,
         payload_size: 16,
     };
-    let cases: [(&TableConfig, usize, u32, &str); 3] = [
-        (&ONE_WORD, 0, targets[0], "at least one record"),
-        (&ONE_WORD, 16, source, "into itself"),
-        (&wider, 16, targets[0], "record"),
+    let cases: [(&TableConfig, usize, u32, (Kind, Rule)); 3] = [
+        (
+            &ONE_WORD,
+            0,
+            targets[0],
+            (Kind::WrongCall, Rule::EmptySplit),
+        ),
+        (
+            &ONE_WORD,
+            16,
+            source,
+            (Kind::WrongCall, Rule::SplitIntoItself),
+        ),
+        (&wider, 16, targets[0], (Kind::Damaged, Rule::NoRecord)),
     ];
-    for (config, capacity, first, message) in cases {
+    for (config, capacity, first, refused) in cases {
         let chunks = [first, targets[1], targets[2], targets[3]];
         let mut from = CHUNK_HEADER;
-        let error = ChunkWriter::new(config, blocks.chunks())
-            .unwrap()
-            .split(
-                &Partitions {
-                    shift: 9,
-                    chunks: &chunks,
-                },
-                source as usize,
-                &mut from,
-                &mut vec![0; capacity],
-                &mut vec![0; capacity],
-            )
-            .unwrap_err();
-        assert!(error.to_string().contains(message), "{error}");
-        assert_eq!(from, CHUNK_HEADER, "{message}");
+        let split = ChunkWriter::new(config, blocks.chunks()).unwrap().split(
+            &Partitions {
+                shift: 9,
+                chunks: &chunks,
+            },
+            source as usize,
+            &mut from,
+            &mut vec![0; capacity],
+            &mut vec![0; capacity],
+        );
+        assert_eq!(refusal(split), Some(refused));
+        assert_eq!(from, CHUNK_HEADER, "{refused:?}");
         for &target in &targets {
-            assert!(blocks.records(target).is_empty(), "{message}: copied");
+            assert!(blocks.records(target).is_empty(), "{refused:?}: copied");
         }
     }
 }
@@ -778,7 +779,12 @@ fn a_merge_refuses_a_record_found_in_its_source() {
         .unwrap()
         .merge(source, &mut from_byte, chunk, add_first)
         .unwrap_err();
-    assert!(error.to_string().contains("which is merged"), "{error}");
+    // The crate's error, inside the rule's own type.
+    let error = error.downcast_ref::<Error>().unwrap();
+    assert_eq!(
+        (error.kind(), error.rule()),
+        (Kind::Damaged, Rule::MergedFound)
+    );
 }
 
 #[test]
@@ -809,10 +815,10 @@ fn misaligned_or_odd_blocks_are_refused() {
         assert!(TableMut::create(misaligned, len, &config, 1000, Chunks::none()).is_err());
         assert!(Table::attach(misaligned, len, Chunks::none()).is_err());
         let odd = TableMut::create(base, len - 4, &config, 1000, Chunks::none());
-        assert!(odd.unwrap_err().to_string().contains("multiple of 8"));
+        assert_eq!(refusal(odd), Some((Kind::WrongCall, Rule::IndexLen)));
         let short = index_size(&config, 1000).unwrap() - 8;
         let short = TableMut::create(base, short, &config, 1000, Chunks::none());
-        assert!(short.unwrap_err().to_string().contains("smaller than"));
+        assert_eq!(refusal(short), Some((Kind::WrongCall, Rule::IndexSmall)));
         assert!(TableMut::create(base.add(8), len, &config, 1000, Chunks::none()).is_ok());
     }
     // Blocks whose used mark reads as an empty chunk's, so that only
@@ -844,7 +850,7 @@ fn misaligned_or_odd_blocks_are_refused() {
             assert!(chunks.check_all().is_err(), "{what}");
             let appended = append_one(chunks);
             assert!(
-                appended.is_err_and(|error| error.to_string().contains("not aligned to 8")),
+                refusal(appended) == Some((Kind::WrongCall, Rule::Chunk)),
                 "an append to a chunk {what}"
             );
         }
@@ -899,7 +905,7 @@ fn chunks_past_the_limits_are_refused() {
         let longest = Chunks::new(&one, &too_long).unwrap();
         assert!(longest.check_all().is_err());
         assert!(
-            append_one(longest).is_err_and(|error| error.to_string().contains("not aligned to 8")),
+            refusal(append_one(longest)) == Some((Kind::WrongCall, Rule::Chunk)),
             "an append to a chunk longer than 1 MiB"
         );
         assert!(init_chunk(base, MAX_CHUNK_LEN + 8).is_err());

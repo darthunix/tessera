@@ -2,7 +2,15 @@
 //! own, which read no columns.
 
 use super::keys::KeySource;
+#[cfg(test)]
+use crate::error::{Kind, Result, Rule};
 use crate::ones;
+
+/// The kind and rule of a call's error, `None` when it succeeded.
+#[cfg(test)]
+pub(crate) fn refusal<T>(result: Result<T>) -> Option<(Kind, Rule)> {
+    result.err().map(|error| (error.kind(), error.rule()))
+}
 
 /// One key of int4 values with no NULL: the keys of the table's own tests
 /// and of its loom model, which read no columns.
