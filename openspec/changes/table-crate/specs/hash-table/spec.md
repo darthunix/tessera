@@ -110,7 +110,7 @@ buckets, and the index length.
 - **THEN** it takes the header and a power of two of buckets, at least
   1024 and at least twice the capacity
 - **Verified by:**
-  `crates/tessera-kernels/tests/table.rs::index_size_covers_header_and_buckets`;
+  `crates/relhash/src/table/tests/format.rs::index_size_covers_header_and_buckets`;
   `test/sql/table.sql::tessera_test_table_regrow`
 
 #### Scenario: A new index is an empty table
@@ -118,7 +118,7 @@ buckets, and the index length.
 - **THEN** its stats show no record, the buckets of its capacity and
   its length, and its keys and payload are those it was created with
 - **Verified by:**
-  `crates/tessera-kernels/tests/table.rs::a_created_table_is_empty_and_attaches_again`;
+  `crates/relhash/src/table/tests/format.rs::a_created_table_is_empty_and_attaches_again`;
   `crates/tessera-capi/tests/table.rs::the_entry_points_round_trip`
 
 #### Scenario: An index in the wrong block is refused
@@ -160,7 +160,7 @@ SHALL refuse a record that does not fit in a chunk.
   the same in the kernels and in the C header; 0 and 17 keys are
   refused
 - **Verified by:**
-  `crates/tessera-kernels/tests/table.rs::a_record_takes_its_header_its_key_slots_and_its_payload`;
+  `crates/relhash/src/table/tests/format.rs::a_record_takes_its_header_its_key_slots_and_its_payload`;
   `test/sql/table.sql::tessera_test_table_record_size`
 
 #### Scenario: A record as the C API shows it
@@ -169,14 +169,14 @@ SHALL refuse a record that does not fit in a chunk.
   NULL key as 0 with its bit set, and the row's payload
 - **Verified by:**
   `crates/tessera-capi/tests/table.rs::the_entry_points_round_trip`;
-  `crates/tessera-kernels/tests/table.rs::a_null_key_groups_apart_from_the_value_it_hashes_like`
+  `crates/relhash/src/table/tests/lookup.rs::a_null_key_groups_apart_from_the_value_it_hashes_like`
 
 #### Scenario: A record larger than a chunk
 - **WHEN** a table is sized or created for a record that does not fit
   in a chunk of 1 MiB
 - **THEN** the call fails, and the largest record that fits is accepted
 - **Verified by:**
-  `crates/tessera-kernels/tests/table.rs::a_record_larger_than_a_chunk_is_refused`
+  `crates/relhash/src/table/tests/lookup.rs::a_record_larger_than_a_chunk_is_refused`
 
 ### Requirement: Errors of a call
 A call SHALL return an error status, and never crash or loop without
@@ -198,7 +198,7 @@ anything, and a chunk before it reads or writes it.
   size, the keys, the flags or a byte of a reserved word
 - **THEN** every call over the table fails, and the SQLSTATE is `XX000`
 - **Verified by:**
-  `crates/tessera-kernels/tests/table.rs::a_corrupt_header_is_refused`;
+  `crates/relhash/src/table/tests/format.rs::a_corrupt_header_is_refused`;
   `test/sql/table.sql::tessera_test_table_errors`
 
 #### Scenario: A damaged reference or chain
@@ -207,8 +207,8 @@ anything, and a chunk before it reads or writes it.
   record, also with a count of records far past what the chunks hold
 - **THEN** the probe, the walk or the link fails
 - **Verified by:**
-  `crates/tessera-kernels/tests/table.rs::a_corrupt_reference_chain_or_used_mark_is_an_error`;
-  `crates/tessera-kernels/tests/table.rs::a_word_probed_at_once_detects_a_cycle`;
+  `crates/relhash/src/table/tests/lookup.rs::a_corrupt_reference_chain_or_used_mark_is_an_error`;
+  `crates/relhash/src/table/tests/lookup.rs::a_word_probed_at_once_detects_a_cycle`;
   `crates/relhash/src/table/tests.rs::a_damaged_count_is_bounded_by_the_places_of_the_chunks`
 
 #### Scenario: Arguments are checked first
@@ -217,7 +217,7 @@ anything, and a chunk before it reads or writes it.
 - **THEN** it fails, and the table, the chunks, the masks and the cursor
   are as they were
 - **Verified by:**
-  `crates/tessera-kernels/tests/table.rs::dimension_errors_come_before_any_change`;
+  `crates/relhash/src/table/tests/lookup.rs::dimension_errors_come_before_any_change`;
   `crates/tessera-capi/tests/table.rs::outputs_are_checked_before_anything_changes`
 
 ### Requirement: Appending rows
@@ -241,7 +241,7 @@ and at least one word, then a word for each column, 0 for a NULL.
   stay, nothing is found before a link, and the rest go into the next
   chunk from byte 8
 - **Verified by:**
-  `crates/tessera-kernels/tests/table.rs::a_full_chunk_leaves_the_rest_pending_until_linked_elsewhere`
+  `crates/relhash/src/table/tests/lookup.rs::a_full_chunk_leaves_the_rest_pending_until_linked_elsewhere`
 
 #### Scenario: The payload of a record
 - **WHEN** rows are appended with no payload, or with their payload in
@@ -250,8 +250,8 @@ and at least one word, then a word for each column, 0 for a NULL.
   column, the same as an array of those words gives, and the entry point
   allocates no memory
 - **Verified by:**
-  `crates/tessera-kernels/tests/table.rs::a_missing_payload_is_zeros`;
-  `crates/tessera-kernels/tests/table.rs::payload_columns_append_the_records_a_payload_array_does`;
+  `crates/relhash/src/table/tests/lookup.rs::a_missing_payload_is_zeros`;
+  `crates/relhash/src/table/tests/records.rs::payload_columns_append_the_records_a_payload_array_does`;
   `crates/tessera-capi/tests/table.rs::the_columns_entry_point_writes_each_payload_word`;
   `crates/tessera-capi/tests/table.rs::payload_columns_append_without_allocating`
 
