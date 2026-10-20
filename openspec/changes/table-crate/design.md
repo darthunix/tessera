@@ -265,17 +265,43 @@ reference is checked by one function whether the caller passed it or the
 call read it from a bucket or a record, and the call site, which knows
 where it came from, chooses the kind. The one error today that names no
 rule, a header the fast check and the full one judge apart, becomes a
-debug assertion: the two checks are one rule written twice. A merge
-returns the error of the caller's rule beside the crate's own. Tests
-compare kinds and rules, not words.
+debug assertion: the two checks are one rule written twice, and in a
+build without assertions the full check decides. A merge takes the
+caller's rule with an error of the caller's own type and returns that
+type; the crate's errors convert into it, as they do into
+`anyhow::Error`. A source of keys that cannot give a row's key answers
+`None`, and the call names the rule with the word of rows and the key.
+Tests compare kinds and rules, not words.
 
 The error takes at most 8 bytes, and a compile-time assertion keeps it
 so. Then a `Result<usize, Error>` stays 16 bytes, as with
 `anyhow::Error`, a single pointer, and the hot calls keep returning it
-in two registers. A larger error would be returned through memory.
+in two registers. A larger error would be returned through memory. The
+error is one integer, not a struct: a result holds an integer and a
+count as two registers, and a struct, even of 8 bytes, through memory.
+
+```text
+  bits 56..=63   the rule's number, counted from 1, so never 0
+  bit  55        the kind
+  bits 23..=54   the first number
+  bits 0..=22    the second number
+```
+
+The first number holds a reference or a length up to 4 GiB, the second
+a byte of a chunk or a count. A number wider than its field keeps the
+field's largest value, and the message prints it with "or more". Of a
+message that had three numbers, the error keeps the two the caller
+does not know; the check of a call's row counts names the two counts
+that differ, not the call. The rules are listed once, in a macro that
+writes both the enum and the table that turns a number back into its
+rule, so that no `unsafe` is needed.
 
 Refused: keeping `anyhow` and looking for words, which allocates and
-does not tell the checks apart.
+does not tell the checks apart. The rule in a byte of its own beside
+seven bytes of the rest: the lookups returned their counts through
+memory, and the walk of a key's records spent a load a row on the
+address of the result. An error type of the source of keys, which would
+make every call with keys generic in its error.
 
 ### The calls for a caller's payloads
 

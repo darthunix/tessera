@@ -136,7 +136,7 @@ commit of sections 2 and 3 is checked by `make rust-check` and by
       steps over a key's records, the filter before the probe. The
       hash-table spec says so of each call. Check: `make installcheck`;
       `cargo ab measure` of `join`, `dup` among its cases
-- [ ] 3.7 Replace the crate's text errors by errors of two kinds of at
+- [x] 3.7 Replace the crate's text errors by errors of two kinds of at
       most 8 bytes, with a compile-time assertion of the size; the call
       site of a reference's check chooses the kind; the check of a
       header that its fast and full forms judge apart becomes a debug
