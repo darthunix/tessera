@@ -76,7 +76,7 @@ buckets, and the index length.
 - **THEN** it takes the header and a power of two of buckets, at least
   1024 and at least twice the capacity
 - **Verified by:**
-  `crates/tessera-kernels/tests/table.rs::index_size_covers_header_and_buckets`;
+  `crates/relhash/src/table/tests/format.rs::index_size_covers_header_and_buckets`;
   `test/sql/table.sql::tessera_test_table_regrow`
 
 #### Scenario: A new index is an empty table
@@ -84,7 +84,7 @@ buckets, and the index length.
 - **THEN** its stats show no record, the buckets of its capacity and
   its length, and its keys and payload are those it was created with
 - **Verified by:**
-  `crates/tessera-kernels/tests/table.rs::a_created_table_is_empty_and_attaches_again`;
+  `crates/relhash/src/table/tests/format.rs::a_created_table_is_empty_and_attaches_again`;
   `crates/tessera-capi/tests/table.rs::the_entry_points_round_trip`
 
 #### Scenario: An index in the wrong block is refused
@@ -147,7 +147,7 @@ longest length hold, and that maximum for a larger limit.
 - **THEN** each row's reference names the chunk and the byte of its
   record, and the helpers of the C API read them back
 - **Verified by:**
-  `crates/tessera-kernels/tests/table.rs::inserted_rows_are_found_and_absent_keys_are_not`;
+  `crates/relhash/src/table/tests/lookup.rs::inserted_rows_are_found_and_absent_keys_are_not`;
   `test/sql/table.sql::tessera_test_table_cycle`
 
 #### Scenario: The most memory of a table
@@ -162,7 +162,7 @@ longest length hold, and that maximum for a larger limit.
 - **THEN** the call fails, and an empty bucket or the end of a chain
   holds 0
 - **Verified by:**
-  `crates/tessera-kernels/tests/table.rs::reference_zero_names_no_record`
+  `crates/relhash/src/table/tests/lookup.rs::reference_zero_names_no_record`
 
 ### Requirement: A record
 Every record of a table SHALL have the size in the header: a header of
@@ -194,7 +194,7 @@ SHALL refuse a record that does not fit in a chunk.
   the same in the kernels and in the C header; 0 and 17 keys are
   refused
 - **Verified by:**
-  `crates/tessera-kernels/tests/table.rs::a_record_takes_its_header_its_key_slots_and_its_payload`;
+  `crates/relhash/src/table/tests/format.rs::a_record_takes_its_header_its_key_slots_and_its_payload`;
   `test/sql/table.sql::tessera_test_table_record_size`
 
 #### Scenario: A record as the C API shows it
@@ -203,14 +203,14 @@ SHALL refuse a record that does not fit in a chunk.
   NULL key as 0 with its bit set, and the row's payload
 - **Verified by:**
   `crates/tessera-capi/tests/table.rs::the_entry_points_round_trip`;
-  `crates/tessera-kernels/tests/table.rs::a_null_key_groups_apart_from_the_value_it_hashes_like`
+  `crates/relhash/src/table/tests/lookup.rs::a_null_key_groups_apart_from_the_value_it_hashes_like`
 
 #### Scenario: A record larger than a chunk
 - **WHEN** a table is sized or created for a record that does not fit
   in a chunk of 1 MiB
 - **THEN** the call fails, and the largest record that fits is accepted
 - **Verified by:**
-  `crates/tessera-kernels/tests/table.rs::a_record_larger_than_a_chunk_is_refused`
+  `crates/relhash/src/table/tests/lookup.rs::a_record_larger_than_a_chunk_is_refused`
 
 ### Requirement: The SQL types of a key
 A join and a grouping SHALL put each column of a key into the table in
@@ -280,7 +280,7 @@ anything, and a chunk before it reads or writes it.
   size, the keys or a kind, the flags or a reserved word
 - **THEN** every call over the table fails, and the SQLSTATE is `XX000`
 - **Verified by:**
-  `crates/tessera-kernels/tests/table.rs::a_corrupt_header_is_refused`;
+  `crates/relhash/src/table/tests/format.rs::a_corrupt_header_is_refused`;
   `test/sql/table.sql::tessera_test_table_errors`
 
 #### Scenario: A damaged reference or chain
@@ -289,8 +289,8 @@ anything, and a chunk before it reads or writes it.
   record, also with a count of records far past what the chunks hold
 - **THEN** the probe, the walk or the link fails
 - **Verified by:**
-  `crates/tessera-kernels/tests/table.rs::a_corrupt_reference_chain_or_used_mark_is_an_error`;
-  `crates/tessera-kernels/tests/table.rs::a_word_probed_at_once_detects_a_cycle`;
+  `crates/relhash/src/table/tests/lookup.rs::a_corrupt_reference_chain_or_used_mark_is_an_error`;
+  `crates/relhash/src/table/tests/lookup.rs::a_word_probed_at_once_detects_a_cycle`;
   `crates/relhash/src/table/tests.rs::a_damaged_count_is_bounded_by_the_places_of_the_chunks`
 
 #### Scenario: Arguments are checked first
@@ -299,7 +299,7 @@ anything, and a chunk before it reads or writes it.
 - **THEN** it fails, and the table, the chunks, the masks and the cursor
   are as they were
 - **Verified by:**
-  `crates/tessera-kernels/tests/table.rs::dimension_errors_come_before_any_change`;
+  `crates/relhash/src/table/tests/lookup.rs::dimension_errors_come_before_any_change`;
   `crates/tessera-capi/tests/table.rs::outputs_are_checked_before_anything_changes`
 
 ### Requirement: Appending rows
@@ -323,7 +323,7 @@ and at least one word, then a word for each column, 0 for a NULL.
   stay, nothing is found before a link, and the rest go into the next
   chunk from byte 8
 - **Verified by:**
-  `crates/tessera-kernels/tests/table.rs::a_full_chunk_leaves_the_rest_pending_until_linked_elsewhere`
+  `crates/relhash/src/table/tests/lookup.rs::a_full_chunk_leaves_the_rest_pending_until_linked_elsewhere`
 
 #### Scenario: The payload of a record
 - **WHEN** rows are appended with no payload, or with their payload in
@@ -332,8 +332,8 @@ and at least one word, then a word for each column, 0 for a NULL.
   column, the same as an array of those words gives, and the entry point
   allocates no memory
 - **Verified by:**
-  `crates/tessera-kernels/tests/table.rs::a_missing_payload_is_zeros`;
-  `crates/tessera-kernels/tests/table.rs::payload_columns_append_the_records_a_payload_array_does`;
+  `crates/relhash/src/table/tests/lookup.rs::a_missing_payload_is_zeros`;
+  `crates/relhash/src/table/tests/records.rs::payload_columns_append_the_records_a_payload_array_does`;
   `crates/tessera-capi/tests/table.rs::the_columns_entry_point_writes_each_payload_word`;
   `crates/tessera-capi/tests/table.rs::payload_columns_append_without_allocating`
 
@@ -362,7 +362,7 @@ once SHALL be exact.
 - **THEN** each part links its records and counts its duplicates, and
   the last call links none
 - **Verified by:**
-  `crates/tessera-kernels/tests/table.rs::linking_counts_the_records_whose_keys_were_there_already`
+  `crates/relhash/src/table/tests/lookup.rs::linking_counts_the_records_whose_keys_were_there_already`
 
 #### Scenario: Several processes link at once
 - **WHEN** two or three processes link chunks of their own into one
@@ -397,8 +397,8 @@ record, valid as long as its chunk.
   finds the NULL record and not the value it hashes like, and an
   `int4` finds the record of the same `int8`
 - **Verified by:**
-  `crates/tessera-kernels/tests/table.rs::inserted_rows_are_found_and_absent_keys_are_not`;
-  `crates/tessera-kernels/tests/table.rs::a_null_key_groups_apart_from_the_value_it_hashes_like`;
+  `crates/relhash/src/table/tests/lookup.rs::inserted_rows_are_found_and_absent_keys_are_not`;
+  `crates/relhash/src/table/tests/lookup.rs::a_null_key_groups_apart_from_the_value_it_hashes_like`;
   `crates/tessera-capi/tests/table.rs::int4_keys_find_the_records_of_int8_keys`;
   `crates/tessera-capi/tests/table.rs::int8_keys_find_the_records_of_int4_keys`
 
@@ -407,8 +407,8 @@ record, valid as long as its chunk.
 - **THEN** each step finds another record of the key, and the step after
   the last finds none and leaves the reference as it was
 - **Verified by:**
-  `crates/tessera-kernels/tests/table.rs::equal_keys_chain_through_next_match`;
-  `crates/tessera-kernels/tests/table.rs::a_null_key_groups_apart_from_the_value_it_hashes_like`
+  `crates/relhash/src/table/tests/lookup.rs::equal_keys_chain_through_next_match`;
+  `crates/relhash/src/table/tests/lookup.rs::a_null_key_groups_apart_from_the_value_it_hashes_like`
 
 #### Scenario: Reading the found records
 - **WHEN** a payload word, several words or a key of the found rows is
@@ -416,8 +416,8 @@ record, valid as long as its chunk.
 - **THEN** each found row gets its record's value, the other rows keep
   theirs, and a word past the payload or not at a multiple of 8 fails
 - **Verified by:**
-  `crates/tessera-kernels/tests/table.rs::gather_reads_one_payload_word_of_each_selected_match`;
-  `crates/tessera-kernels/tests/table.rs::a_scattered_gather_reads_what_a_gather_reads`;
+  `crates/relhash/src/table/tests/lookup.rs::gather_reads_one_payload_word_of_each_selected_match`;
+  `crates/relhash/src/table/tests/lookup.rs::a_scattered_gather_reads_what_a_gather_reads`;
   `crates/tessera-capi/tests/table.rs::the_words_entry_point_gathers_every_column`
 
 ### Requirement: The records of a key together
@@ -433,7 +433,7 @@ the same hash, NULL bits and keys.
 - **THEN** next_in_group steps through exactly the records of each key,
   and the count of duplicates is the records less the keys
 - **Verified by:**
-  `crates/tessera-kernels/tests/table.rs::grouped_records_of_a_key_lie_together`;
+  `crates/relhash/src/table/tests/records.rs::grouped_records_of_a_key_lie_together`;
   `test/sql/table.sql::tessera_test_table_cycle`
 
 #### Scenario: Grouped chains across chunks and a larger index
@@ -441,7 +441,7 @@ the same hash, NULL bits and keys.
   larger index
 - **THEN** next_in_group still takes as many steps as next_match
 - **Verified by:**
-  `crates/tessera-kernels/tests/table.rs::grouped_chains_span_chunks_and_survive_a_larger_index`
+  `crates/relhash/src/table/tests/records.rs::grouped_chains_span_chunks_and_survive_a_larger_index`
 
 ### Requirement: Calls of one writer
 These calls SHALL run only when no other call uses the table:
@@ -473,16 +473,16 @@ change of a payload in place.
   its first row, a full chunk resolves the known keys only, and half the
   buckets stops the call until a larger index
 - **Verified by:**
-  `crates/tessera-kernels/tests/table.rs::rows_find_or_create_the_record_of_their_keys`;
-  `crates/tessera-kernels/tests/table.rs::a_full_chunk_resolves_known_keys_only`;
-  `crates/tessera-kernels/tests/table.rs::an_index_takes_records_up_to_half_its_buckets_and_regrows`
+  `crates/relhash/src/table/tests/records.rs::rows_find_or_create_the_record_of_their_keys`;
+  `crates/relhash/src/table/tests/records.rs::a_full_chunk_resolves_known_keys_only`;
+  `crates/relhash/src/table/tests/records.rs::an_index_takes_records_up_to_half_its_buckets_and_regrows`
 
 #### Scenario: A larger index keeps the records
 - **WHEN** a table moves to a larger index, or to one with fewer buckets
 - **THEN** the walk, the references, the payloads and the chains are as
   before; fewer buckets are refused
 - **Verified by:**
-  `crates/tessera-kernels/tests/table.rs::regrowing_keeps_records_and_their_references`;
+  `crates/relhash/src/table/tests/records.rs::regrowing_keeps_records_and_their_references`;
   `test/sql/table.sql::tessera_test_table_regrow`
 
 #### Scenario: A walk and a cleared key
@@ -492,9 +492,9 @@ change of a payload in place.
   ends with 0, the walk of no records is refused, and the key is 0 in
   every record with its NULL bit kept
 - **Verified by:**
-  `crates/tessera-kernels/tests/table.rs::a_walk_visits_every_record_once_in_appended_order`;
+  `crates/relhash/src/table/tests/records.rs::a_walk_visits_every_record_once_in_appended_order`;
   `crates/tessera-capi/tests/table.rs::the_writer_entry_points_round_trip`;
-  `crates/tessera-kernels/tests/table.rs::a_cleared_key_is_zero_in_every_record`
+  `crates/relhash/src/table/tests/lookup.rs::a_cleared_key_is_zero_in_every_record`
 
 ### Requirement: Calls at the same time
 Over shared memory several processes SHALL be able to append at once,
@@ -766,7 +766,7 @@ before any change.
 - **THEN** exactly the word and the bits the rule gives are set; the
   hash passes, and a hash with any of those bits clear does not
 - **Verified by:**
-  `crates/tessera-kernels/tests/table.rs::a_hash_sets_the_bits_the_rule_gives`
+  `crates/relhash/src/table/tests/filter.rs::a_hash_sets_the_bits_the_rule_gives`
 
 #### Scenario: Every key of the table passes
 - **WHEN** a filter is filled from a table of 5000 keys over several
@@ -775,9 +775,9 @@ before any change.
 - **THEN** every key passes, and the rows not selected are clear in
   `found`
 - **Verified by:**
-  `crates/tessera-kernels/tests/table.rs::a_filter_lets_every_key_through_and_few_others`;
-  `crates/tessera-kernels/tests/table.rs::a_null_group_key_and_int8_keys_pass_their_filter`;
-  `crates/tessera-kernels/tests/table.rs::a_probe_narrows_its_rows_in_place`;
+  `crates/relhash/src/table/tests/filter.rs::a_filter_lets_every_key_through_and_few_others`;
+  `crates/relhash/src/table/tests/filter.rs::a_null_group_key_and_int8_keys_pass_their_filter`;
+  `crates/relhash/src/table/tests/filter.rs::a_probe_narrows_its_rows_in_place`;
   `crates/tessera-capi/tests/table.rs::the_filter_entry_points_size_fill_and_probe`
 
 #### Scenario: A filter of the wrong size is refused
@@ -785,7 +785,7 @@ before any change.
   the mask, are given to fill, add or probe
 - **THEN** the call fails, and the words and `found` are as they were
 - **Verified by:**
-  `crates/tessera-kernels/tests/table.rs::a_filter_of_the_wrong_size_is_refused`;
+  `crates/relhash/src/table/tests/filter.rs::a_filter_of_the_wrong_size_is_refused`;
   `crates/tessera-capi/tests/table.rs::the_filter_entry_points_size_fill_and_probe`
 
 ### Requirement: The size of a Bloom filter
@@ -803,15 +803,15 @@ than one in 100 absent keys through.
 - **THEN** they have 1, 1, 2 and 2048 words, halved within a limit while
   more than an eighth of it, and the last is refused
 - **Verified by:**
-  `crates/tessera-kernels/tests/table.rs::the_words_of_a_filter_for_its_records`;
-  `crates/tessera-kernels/tests/table.rs::a_spill_filter_stays_within_an_eighth_of_its_memory`
+  `crates/relhash/src/table/tests/filter.rs::the_words_of_a_filter_for_its_records`;
+  `crates/relhash/src/table/tests/filter.rs::a_spill_filter_stays_within_an_eighth_of_its_memory`
 
 #### Scenario: Few absent keys pass
 - **WHEN** a filter of 1024 words holds 4096 keys, 16 bits a key, and
   100000 other keys are probed
 - **THEN** fewer than 1000 of them pass
 - **Verified by:**
-  `crates/tessera-kernels/tests/table.rs::few_absent_keys_pass_a_filter_of_16_bits_a_key`
+  `crates/relhash/src/table/tests/filter.rs::few_absent_keys_pass_a_filter_of_16_bits_a_key`
 
 ### Requirement: A shared Bloom filter
 A shared filter SHALL be a state word followed by the words of a filter,
@@ -949,7 +949,7 @@ participant stops so only when its plan wants no more rows.
   run is the only bit set
 - **Verified by:**
   `crates/relhash/src/table/marks.rs::a_chunk_has_a_word_of_marks_per_64_records`;
-  `crates/tessera-kernels/tests/table.rs::a_record_s_mark_is_its_bit_of_its_chunk_s_run`
+  `crates/relhash/src/table/tests/records.rs::a_record_s_mark_is_its_bit_of_its_chunk_s_run`
 
 #### Scenario: Marked records are left out of the walk
 - **WHEN** some records of several chunks are marked, alone or shared,
@@ -958,7 +958,7 @@ participant stops so only when its plan wants no more rows.
 - **THEN** the walk gives exactly the records without a mark, each once
   in the order appended, or every record without marks, and ends with 0
 - **Verified by:**
-  `crates/tessera-kernels/tests/table.rs::marked_records_are_left_out_of_the_walk`;
+  `crates/relhash/src/table/tests/records.rs::marked_records_are_left_out_of_the_walk`;
   `crates/tessera-capi/tests/table.rs::the_mark_entry_points_leave_marked_records_out`
 
 #### Scenario: Marks and walks that cannot be done are refused

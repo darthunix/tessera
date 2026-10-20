@@ -107,7 +107,7 @@ and SHALL return how many rows are left.
 - **THEN** each step returns the rows left, and each key's walk reads
   its ten records
 - **Verified by:**
-  `crates/tessera-kernels/tests/table.rs::equal_keys_chain_through_next_match`
+  `crates/relhash/src/table/tests/lookup.rs::equal_keys_chain_through_next_match`
 
 #### Scenario: A row without a next record
 - **WHEN** two rows whose keys have one record each step with the next
@@ -115,19 +115,19 @@ and SHALL return how many rows are left.
 - **THEN** the call returns 0, both rows leave, and their references
   stay
 - **Verified by:**
-  `crates/tessera-kernels/tests/table.rs::a_null_key_groups_apart_from_the_value_it_hashes_like`
+  `crates/relhash/src/table/tests/lookup.rs::a_null_key_groups_apart_from_the_value_it_hashes_like`
 
 #### Scenario: A filter narrows the rows of a lookup
 - **WHEN** a filter of the hashes of 100 rows probes every other row
 - **THEN** the same 50 rows stay, and the call returns 50
 - **Verified by:**
-  `crates/tessera-kernels/tests/table.rs::a_probe_narrows_its_rows_in_place`
+  `crates/relhash/src/table/tests/filter.rs::a_probe_narrows_its_rows_in_place`
 
 #### Scenario: A mask and references of other row counts
 - **WHEN** a lookup is made of a mask of 70 rows and 69 references
 - **THEN** it is refused
 - **Verified by:**
-  `crates/tessera-kernels/tests/table.rs::dimension_errors_come_before_any_change`
+  `crates/relhash/src/table/tests/lookup.rs::dimension_errors_come_before_any_change`
 
 ### Requirement: Any bytes, a bounded call
 The caller promises that every block it gives is memory of the length
@@ -273,21 +273,21 @@ check, the call fails; the payloads it changed before stay changed.
 - **THEN** each record holds its row's keys and hash, and the reference
   inside a record fails
 - **Verified by:**
-  `crates/tessera-kernels/tests/table.rs::a_record_cursor_reads_records_by_reference`
+  `crates/relhash/src/table/tests/records.rs::a_record_cursor_reads_records_by_reference`
 
 #### Scenario: Payloads changed by reference
 - **WHEN** a writer adds a value to the payload of the record of each
   row a probe found
 - **THEN** each record's payload holds the sum of the values of its rows
 - **Verified by:**
-  `crates/tessera-kernels/tests/table.rs::a_payload_cursor_changes_payloads_by_reference`
+  `crates/relhash/src/table/tests/records.rs::a_payload_cursor_changes_payloads_by_reference`
 
 #### Scenario: Checked now, opened later
 - **WHEN** a writer checks the references of a batch, then opens their
   payloads one by one
 - **THEN** each payload is the one of the record its reference names
 - **Verified by:**
-  `crates/tessera-kernels/tests/table.rs::a_payload_cursor_holds_checked_references_to_open_later`
+  `crates/relhash/src/table/tests/records.rs::a_payload_cursor_holds_checked_references_to_open_later`
 
 #### Scenario: Two payloads open at once
 - **WHEN** a program keeps one payload of a cursor open and opens
