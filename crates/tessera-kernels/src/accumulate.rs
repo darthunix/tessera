@@ -724,13 +724,30 @@ mod tests {
 
     const COMBINES: [Combine; 4] = [Combine::Count, Combine::Sum, Combine::Min, Combine::Max];
 
-    /// Merge every chunk of `from` into `into`, adding chunks and growing
-    /// its index as the kernel asks.
-    fn merge(into: &mut OwnedTable, from: &mut OwnedTable) -> Result<()> {
+    /// Merge the groups of `keys`, with the states `of` gives them, into
+    /// `into`: their records go to chunks of their own in `into`, unlinked,
+    /// as the chunks of a table on disk come back, and the kernel merges
+    /// those chunks, adding chunks and growing the index as it asks.
+    fn merge(into: &mut OwnedTable, keys: &[i32], of: impl Fn(i32) -> [i64; 5]) -> Result<()> {
+        let column = [ColumnView::try_new(keys, None)?];
+        let columns = KeyColumns(&column);
+        let (hashes, mut pending_words) = key_batch(keys);
+        let mut pending = RowMask::try_new(keys.len(), &mut pending_words)?;
+        let mut refs = vec![0; keys.len()];
+        let payload: Vec<u8> = keys
+            .iter()
+            .flat_map(|&key| of(key))
+            .flat_map(i64::to_ne_bytes)
+            .collect();
+        let mut batch = Batch::new(&hashes, &columns, &mut pending, &mut refs)?;
         let mut chunk = into.chunks() - 1;
-        for source_chunk in 0..from.chunks() {
-            let words = from.chunk_words(source_chunk).to_vec();
-            let source = into.add_chunk_copy(&words)?;
+        let mut sources = Vec::new();
+        while batch.pending().selected_count() > 0 {
+            let source = into.add_chunk()?;
+            into.table()?.append(source, Some(&payload), &mut batch)?;
+            sources.push(source);
+        }
+        for source in sources {
             let mut at = CHUNK_HEADER;
             loop {
                 let (_, stop) = combine(&mut into.table_mut()?, source, &mut at, chunk, &COMBINES)?;
@@ -761,8 +778,7 @@ mod tests {
             [flags, 1, key, key - 100, key + 100]
         };
         let (mut into, _) = grouped(&(0..50).collect::<Vec<_>>(), ours, 64);
-        let (mut from, _) = grouped(&(25..100).collect::<Vec<_>>(), theirs, 256);
-        merge(&mut into, &mut from).unwrap();
+        merge(&mut into, &(25..100).collect::<Vec<_>>(), theirs).unwrap();
         let keys: Vec<i32> = (0..100).collect();
         let column = [ColumnView::try_new(&keys, None).unwrap()];
         let (hashes, mut pending_words) = key_batch(&keys);
@@ -809,8 +825,7 @@ mod tests {
     #[test]
     fn a_merged_count_past_the_int8_range_fails() {
         let (mut into, _) = grouped(&[7], |_| [0, i64::MAX, 0, 0, 0], 64);
-        let (mut from, _) = grouped(&[7], |_| [0, 1, 0, 0, 0], 64);
-        let error = merge(&mut into, &mut from).unwrap_err();
+        let error = merge(&mut into, &[7], |_| [0, 1, 0, 0, 0]).unwrap_err();
         assert!(error.to_string().contains("bigint out of range"), "{error}");
         let (mut table, _) = grouped(&[7], |_| [0; 5], 64);
         let chunk = table.chunks() - 1;
